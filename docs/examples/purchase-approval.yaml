@@ -1,0 +1,640 @@
+# ============================================================
+# 采购审批工作流 (v2.0 - 增强版)
+# 支持三级金额分级路由，每级独立路径，互不干扰
+# ============================================================
+#
+# 审批规则：
+#   level_1: 金额 < 1,000    → 直属主管
+#   level_2: 金额 < 10,000   → 直属主管 → 部门负责人
+#   level_3: 金额 >= 10,000  → 直属主管 → 部门负责人 → VP + 财务并行
+#
+# v2.0 增强：
+#   1. 多触发器支持（webhook + manual）
+#   2. 全链路错误处理（HTTP/DB 节点均配置 error 出口）
+#   3. 审批操作扩展：转签、加签、超时自动驳回
+#   4. 完整审计追踪：每级审批人、操作、时间、意见
+#   5. 节点模板 node_templates：减少审批节点重复定义（DSL 扩展提案）
+
+spec: "1.0"
+name: "purchase-approval"
+version: "2.0.0"
+description: "采购审批工作流 - 三级独立路径（增强版）"
+
+# ──────────────────────────────────────
+# 触发器
+# ──────────────────────────────────────
+triggers:
+  - type: webhook
+    parameters:
+      path: "/webhook/purchase-approval"
+      methods: ["POST"]
+      auth:
+        type: apiKey
+        credential: internal_api
+      response:
+        mode: async
+  - type: manual
+
+context:
+  vars:
+    approval_levels:
+      level_1_max: 1000
+      level_2_max: 10000
+    approval_timeout: 72h
+    reminder_interval: 24h
+    reminder_max_count: 2
+
+  config:
+    org_service: "https://org.internal.example.com"
+
+settings:
+  timeout: 168h
+  timezone: "Asia/Shanghai"
+
+credentials:
+  internal_api:
+    name: "internal_service_auth"
+    type: apiKey
+
+  db_conn:
+    name: "approval_db"
+    type: postgres
+
+params:
+  request_id:
+    type: string
+    required: true
+    display_name: "申请单号"
+
+  applicant_id:
+    type: string
+    required: true
+    display_name: "申请人ID"
+
+  title:
+    type: string
+    required: true
+    display_name: "采购标题"
+
+  amount:
+    type: number
+    required: true
+    display_name: "采购金额"
+    validation:
+      min: 0.01
+
+  items:
+    type: array
+    required: true
+    display_name: "采购明细"
+
+# ──────────────────────────────────────
+# 节点模板（DSL 扩展提案）
+# 节点通过 template 字段引用模板，自身 parameters 与模板深度合并（节点级优先）。
+# 合并规则：
+#   - 对象（map）：递归深度合并，节点级 key 覆盖模板同名 key
+#   - 数组（list）：整体替换，不做 append 或元素级合并
+#   - 标量（string/number/bool）：节点级覆盖模板值
+# 模板展开在编译阶段第一步完成，后续步骤处理展开后的完整节点定义。
+# ──────────────────────────────────────
+node_templates:
+  # 标准审批节点：统一 actions、timeout、reminder、on_timeout
+  standard_approval:
+    type: xflow.approval
+    parameters:
+      detail:
+        applicant: "${{ $params.applicant_id }}"
+        amount: "${{ $params.amount }}"
+        items: "${{ $params.items }}"
+      actions:
+        - key: approved
+          label: "同意"
+        - key: rejected
+          label: "驳回"
+          require_comment: true
+        - key: delegate
+          label: "转签"
+          require_assignee: true
+        - key: add_signer
+          label: "加签"
+          require_assignee: true
+          position: before          # before=前加签 after=后加签
+      timeout: "${{ $vars.approval_timeout }}"
+      on_timeout: rejected          # 超时自动驳回
+      reminder:
+        interval: "${{ $vars.reminder_interval }}"
+        max_count: "${{ $vars.reminder_max_count }}"
+
+  # 审批结果判断：统一 outputs，子节点只需覆盖首条 condition
+  approval_check:
+    type: xflow.switch
+    parameters:
+      outputs: [approved, rejected]
+      rules: []                    # 子节点需覆盖
+      default_output: rejected     # 默认驳回
+
+# ──────────────────────────────────────
+# 节点定义
+# ──────────────────────────────────────
+nodes:
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # 公共入口
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  - name: start
+    type: xflow.start
+
+  - name: create_record
+    type: xflow.database
+    parameters:
+      operation: insert
+      table: approval_records
+      credential: db_conn
+      data:
+        request_id: "${{ $params.request_id }}"
+        applicant_id: "${{ $params.applicant_id }}"
+        title: "${{ $params.title }}"
+        amount: "${{ $params.amount }}"
+        status: "pending"
+        created_at: "${{ now() }}"
+
+  - name: fetch_approvers
+    type: xflow.http
+    parameters:
+      method: GET
+      url: "{{ $config.org_service }}/api/v1/approval-chain"
+      authentication: internal_api
+      query:
+        user_id: "${{ $params.applicant_id }}"
+        amount: "${{ $params.amount }}"
+      options:
+        timeout: 10000
+        retry:
+          enabled: true
+          max_attempts: 3
+          strategy: exponential
+
+  - name: route_by_amount
+    type: xflow.switch
+    parameters:
+      outputs: [level_1, level_2, level_3]
+      rules:
+        - condition: "${{ $params.amount < $vars.approval_levels.level_1_max }}"
+          output: level_1
+        - condition: "${{ $params.amount < $vars.approval_levels.level_2_max }}"
+          output: level_2
+      default_output: level_3
+
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # Level 1：直属主管审批
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  - name: l1_manager
+    template: standard_approval
+    parameters:
+      assignee: "${{ $nodes['fetch_approvers'].manager_id }}"
+      title: "${{ sprintf('采购审批：%s（¥%.2f）', $params.title, $params.amount) }}"
+
+  - name: l1_check
+    template: approval_check
+    parameters:
+      rules:
+        - condition: "${{ $nodes['l1_manager'].action == 'approved' }}"
+          output: approved
+      default_output: rejected
+
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # Level 2：直属主管 → 部门负责人
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  - name: l2_manager
+    template: standard_approval
+    parameters:
+      assignee: "${{ $nodes['fetch_approvers'].manager_id }}"
+      title: "${{ sprintf('采购审批（一级）：%s（¥%.2f）', $params.title, $params.amount) }}"
+      detail:
+        note: "审批通过后将提交部门负责人复核"
+
+  - name: l2_manager_check
+    template: approval_check
+    parameters:
+      rules:
+        - condition: "${{ $nodes['l2_manager'].action == 'approved' }}"
+          output: approved
+      default_output: rejected
+
+  - name: l2_director
+    template: standard_approval
+    parameters:
+      assignee: "${{ $nodes['fetch_approvers'].director_id }}"
+      title: "${{ sprintf('采购审批（二级）：%s（¥%.2f）', $params.title, $params.amount) }}"
+      detail:
+        manager_comment: "${{ $nodes['l2_manager'].comment ?? '' }}"
+
+  - name: l2_director_check
+    template: approval_check
+    parameters:
+      rules:
+        - condition: "${{ $nodes['l2_director'].action == 'approved' }}"
+          output: approved
+      default_output: rejected
+
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # Level 3：直属主管 → 部门负责人 → VP + 财务并行
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  - name: l3_manager
+    template: standard_approval
+    parameters:
+      assignee: "${{ $nodes['fetch_approvers'].manager_id }}"
+      title: "${{ sprintf('采购审批（一级）：%s（¥%.2f）', $params.title, $params.amount) }}"
+      detail:
+        note: "审批通过后将依次提交部门负责人、VP 及财务审批"
+
+  - name: l3_manager_check
+    template: approval_check
+    parameters:
+      rules:
+        - condition: "${{ $nodes['l3_manager'].action == 'approved' }}"
+          output: approved
+      default_output: rejected
+
+  - name: l3_director
+    template: standard_approval
+    parameters:
+      assignee: "${{ $nodes['fetch_approvers'].director_id }}"
+      title: "${{ sprintf('采购审批（二级）：%s（¥%.2f）', $params.title, $params.amount) }}"
+      detail:
+        manager_comment: "${{ $nodes['l3_manager'].comment ?? '' }}"
+
+  - name: l3_director_check
+    template: approval_check
+    parameters:
+      rules:
+        - condition: "${{ $nodes['l3_director'].action == 'approved' }}"
+          output: approved
+      default_output: rejected
+
+  - name: l3_vp
+    template: standard_approval
+    parameters:
+      assignee: "${{ $nodes['fetch_approvers'].vp_id }}"
+      title: "${{ sprintf('采购审批（VP）：%s（¥%.2f）', $params.title, $params.amount) }}"
+
+  - name: l3_finance
+    template: standard_approval
+    parameters:
+      assignee: "${{ $nodes['fetch_approvers'].finance_id }}"
+      title: "${{ sprintf('采购审批（财务）：%s（¥%.2f）', $params.title, $params.amount) }}"
+      detail:
+        budget_remaining: "${{ $nodes['fetch_approvers'].budget_remaining }}"
+
+  - name: l3_parallel_merge
+    type: xflow.merge
+    parameters:
+      mode: wait_all
+
+  - name: l3_final_check
+    type: xflow.switch
+    parameters:
+      outputs: [approved, rejected]
+      rules:
+        - condition: "${{ $nodes['l3_parallel_merge'].vp.action == 'approved' && $nodes['l3_parallel_merge'].finance.action == 'approved' }}"
+          output: approved
+      default_output: rejected
+
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # 审批结果处理（三条路径在此汇合）
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  # 注：route_by_amount 保证同一执行中只有一条路径激活，
+  # 因此 wait_any 等价于"等待唯一到达的那条路径"，不会重复触发。
+  - name: merge_approved
+    type: xflow.merge
+    parameters:
+      mode: wait_any
+
+  # 收集通过路径的审计链（Go 函数处理多级数据聚合）
+  - name: collect_approved_trail
+    type: xflow.function
+    parameters:
+      function_name: collectApprovalTrail
+      params:
+        request_id: "${{ $params.request_id }}"
+        amount: "${{ $params.amount }}"
+        final_status: "approved"
+        approval_levels: "${{ $vars.approval_levels }}"
+        l1_manager: "${{ $nodes['l1_manager'] ?? null }}"
+        l2_manager: "${{ $nodes['l2_manager'] ?? null }}"
+        l2_director: "${{ $nodes['l2_director'] ?? null }}"
+        l3_manager: "${{ $nodes['l3_manager'] ?? null }}"
+        l3_director: "${{ $nodes['l3_director'] ?? null }}"
+        l3_vp: "${{ $nodes['l3_vp'] ?? null }}"
+        l3_finance: "${{ $nodes['l3_finance'] ?? null }}"
+      # 返回值结构：
+      # {
+      #   "chain": [
+      #     { "role": "manager", "user_id": "...", "action": "approved",
+      #       "comment": "...", "acted_at": "..." },
+      #     ...
+      #   ]
+      # }
+
+  - name: update_approved
+    type: xflow.database
+    parameters:
+      operation: update
+      table: approval_records
+      credential: db_conn
+      where:
+        request_id: "${{ $params.request_id }}"
+      data:
+        status: "approved"
+        approved_at: "${{ now() }}"
+        approval_chain: "${{ toJson($nodes['collect_approved_trail'].chain) }}"
+
+  - name: notify_approved
+    type: xflow.notification
+    parameters:
+      channel: email
+      to: "${{ $params.applicant_id }}"
+      subject: "采购申请已通过：{{ $params.title }}"
+      template: approval_passed
+      data:
+        approval_chain: "${{ $nodes['collect_approved_trail'].chain }}"
+
+  - name: merge_rejected
+    type: xflow.merge
+    parameters:
+      mode: wait_any
+
+  # 收集驳回路径的审计链
+  - name: collect_rejected_trail
+    type: xflow.function
+    parameters:
+      function_name: collectApprovalTrail
+      params:
+        request_id: "${{ $params.request_id }}"
+        amount: "${{ $params.amount }}"
+        final_status: "rejected"
+        approval_levels: "${{ $vars.approval_levels }}"
+        l1_manager: "${{ $nodes['l1_manager'] ?? null }}"
+        l2_manager: "${{ $nodes['l2_manager'] ?? null }}"
+        l2_director: "${{ $nodes['l2_director'] ?? null }}"
+        l3_manager: "${{ $nodes['l3_manager'] ?? null }}"
+        l3_director: "${{ $nodes['l3_director'] ?? null }}"
+        l3_vp: "${{ $nodes['l3_vp'] ?? null }}"
+        l3_finance: "${{ $nodes['l3_finance'] ?? null }}"
+      # 返回值额外包含 reject_reason：
+      # {
+      #   "chain": [...],
+      #   "reject_reason": "驳回人的意见"
+      # }
+
+  - name: update_rejected
+    type: xflow.database
+    parameters:
+      operation: update
+      table: approval_records
+      credential: db_conn
+      where:
+        request_id: "${{ $params.request_id }}"
+      data:
+        status: "rejected"
+        rejected_at: "${{ now() }}"
+        approval_chain: "${{ toJson($nodes['collect_rejected_trail'].chain) }}"
+        reject_reason: "${{ $nodes['collect_rejected_trail'].reject_reason }}"
+
+  - name: notify_rejected
+    type: xflow.notification
+    parameters:
+      channel: email
+      to: "${{ $params.applicant_id }}"
+      subject: "采购申请已驳回：{{ $params.title }}"
+      template: approval_rejected
+      data:
+        approval_chain: "${{ $nodes['collect_rejected_trail'].chain }}"
+        reject_reason: "${{ $nodes['collect_rejected_trail'].reject_reason }}"
+
+  - name: final_merge
+    type: xflow.merge
+    parameters:
+      mode: wait_any
+
+  - name: log_result
+    type: xflow.database
+    parameters:
+      operation: insert
+      table: approval_logs
+      credential: db_conn
+      data:
+        request_id: "${{ $params.request_id }}"
+        workflow_id: "${{ $workflow.id }}"
+        execution_id: "${{ $execution.id }}"
+        completed_at: "${{ now() }}"
+
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # 错误处理
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  - name: handle_error
+    type: xflow.function
+    parameters:
+      function_name: buildErrorContext
+      params:
+        request_id: "${{ $params.request_id }}"
+        workflow_id: "${{ $workflow.id }}"
+        execution_id: "${{ $execution.id }}"
+
+  - name: update_error
+    type: xflow.database
+    parameters:
+      operation: update
+      table: approval_records
+      credential: db_conn
+      where:
+        request_id: "${{ $params.request_id }}"
+      data:
+        status: "error"
+        error_at: "${{ now() }}"
+        error_message: "${{ $nodes['handle_error'].message }}"
+
+  - name: notify_error
+    type: xflow.notification
+    parameters:
+      channel: email
+      to: "${{ $params.applicant_id }}"
+      subject: "采购申请处理异常：{{ $params.title }}"
+      template: approval_error
+      data:
+        error: "${{ $nodes['handle_error'].message }}"
+
+# ──────────────────────────────────────
+# 连接定义
+# ──────────────────────────────────────
+connections:
+  # ── 公共入口 ──
+  start:
+    main:
+      - node: create_record
+
+  create_record:
+    main:
+      - node: fetch_approvers
+    error:
+      - node: handle_error
+
+  fetch_approvers:
+    main:
+      - node: route_by_amount
+    error:
+      - node: handle_error
+
+  # ── 金额路由 → 三条独立路径 ──
+  route_by_amount:
+    level_1:
+      - node: l1_manager
+    level_2:
+      - node: l2_manager
+    level_3:
+      - node: l3_manager
+
+  # ── Level 1 路径 ──
+  l1_manager:
+    main:
+      - node: l1_check
+
+  l1_check:
+    approved:
+      - node: merge_approved
+    rejected:
+      - node: merge_rejected
+
+  # ── Level 2 路径 ──
+  l2_manager:
+    main:
+      - node: l2_manager_check
+
+  l2_manager_check:
+    approved:
+      - node: l2_director
+    rejected:
+      - node: merge_rejected
+
+  l2_director:
+    main:
+      - node: l2_director_check
+
+  l2_director_check:
+    approved:
+      - node: merge_approved
+    rejected:
+      - node: merge_rejected
+
+  # ── Level 3 路径 ──
+  l3_manager:
+    main:
+      - node: l3_manager_check
+
+  l3_manager_check:
+    approved:
+      - node: l3_director
+    rejected:
+      - node: merge_rejected
+
+  l3_director:
+    main:
+      - node: l3_director_check
+
+  l3_director_check:
+    approved:
+      - node: l3_vp
+      - node: l3_finance
+    rejected:
+      - node: merge_rejected
+
+  l3_vp:
+    main:
+      - node: l3_parallel_merge
+        input: vp
+
+  l3_finance:
+    main:
+      - node: l3_parallel_merge
+        input: finance
+
+  l3_parallel_merge:
+    main:
+      - node: l3_final_check
+
+  l3_final_check:
+    approved:
+      - node: merge_approved
+    rejected:
+      - node: merge_rejected
+
+  # ── 通过流程（含审计链收集）──
+  merge_approved:
+    main:
+      - node: collect_approved_trail
+
+  collect_approved_trail:
+    main:
+      - node: update_approved
+      - node: notify_approved
+
+  update_approved:
+    main:
+      - node: final_merge
+    error:
+      - node: handle_error
+
+  notify_approved:
+    main:
+      - node: final_merge
+
+  # ── 驳回流程（含审计链收集）──
+  merge_rejected:
+    main:
+      - node: collect_rejected_trail
+
+  collect_rejected_trail:
+    main:
+      - node: update_rejected
+      - node: notify_rejected
+
+  update_rejected:
+    main:
+      - node: final_merge
+    error:
+      - node: handle_error
+
+  notify_rejected:
+    main:
+      - node: final_merge
+
+  # ── 错误处理 ──
+  handle_error:
+    main:
+      - node: update_error
+      - node: notify_error
+
+  update_error:
+    main:
+      - node: final_merge
+
+  notify_error:
+    main:
+      - node: final_merge
+
+  # ── 日志 ──
+  final_merge:
+    main:
+      - node: log_result
+
+# ──────────────────────────────────────
+# 输出定义
+# ──────────────────────────────────────
+outputs:
+  status:
+    value: "${{ $nodes['log_result'].status ?? 'completed' }}"
+    display_name: "审批结果"
+
+  approval_chain:
+    value: "${{ $nodes['collect_approved_trail'].chain ?? $nodes['collect_rejected_trail'].chain ?? [] }}"
+    display_name: "审批链"

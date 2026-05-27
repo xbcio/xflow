@@ -1,0 +1,192 @@
+# ============================================================
+# 订单处理工作流 — Pin Data 示例
+# 演示如何使用 pin_data 钉住节点输出数据，加速调试
+# ============================================================
+#
+# 场景：
+#   订单验证 → 库存检查 + 价格计算（并行）→ 合并 → 支付
+#
+# pin_data 效果：
+#   fetch_order 和 check_inventory 跳过真实 HTTP 调用，
+#   直接使用 mock 数据，下游节点正常运行。
+#   仅在 test/debug 模式生效（pin_data_mode: test_only）。
+
+spec: "1.0"
+name: "order-with-pindata"
+version: "1.0.0"
+description: "订单处理工作流 — Pin Data 调试示例"
+
+# ──────────────────────────────────────
+# 全局配置
+# ──────────────────────────────────────
+settings:
+  timeout: 3600s
+  timezone: "Asia/Shanghai"
+  pin_data_mode: test_only        # 仅 test/debug 模式生效
+
+triggers:
+  - type: manual
+
+context:
+  config:
+    order_service: "https://order.internal.example.com"
+    inventory_service: "https://inventory.internal.example.com"
+    payment_service: "https://payment.internal.example.com"
+
+credentials:
+  api_auth:
+    name: "internal_api_key"
+    type: apiKey
+
+params:
+  order_id:
+    type: string
+    required: true
+    display_name: "订单ID"
+
+  user_id:
+    type: string
+    required: true
+    display_name: "用户ID"
+
+# ──────────────────────────────────────
+# 节点定义
+# ──────────────────────────────────────
+nodes:
+  # 1. 获取订单详情（慢节点，适合 pin）
+  - name: fetch_order
+    type: xflow.http
+    output_schema:
+      type: object
+      properties:
+        order_id:   { type: string }
+        user_id:    { type: string }
+        amount:     { type: number }
+        status:     { type: string }
+        items:      { type: array }
+        user_email: { type: string }
+      required: [order_id, amount, items]
+    parameters:
+      method: GET
+      url: "{{ $config.order_service }}/orders/{{ $params.order_id }}"
+      authentication: api_auth
+
+  # 2. 检查库存（慢节点，适合 pin）
+  - name: check_inventory
+    type: xflow.http
+    output_schema:
+      type: object
+      properties:
+        in_stock:  { type: boolean }
+        available: { type: number }
+      required: [in_stock]
+    parameters:
+      method: POST
+      url: "{{ $config.inventory_service }}/check"
+      body:
+        items: "${{ $nodes['fetch_order'].items }}"
+
+  # 3. 计算价格（纯计算，无需 pin）
+  - name: calculate_price
+    type: xflow.function
+    parameters:
+      code: "${{ $nodes['fetch_order'].items | map(#.price * #.quantity) | sum() }}"
+
+  # 4. 合并并行结果
+  - name: merge_checks
+    type: xflow.merge
+    inputs:
+      - name: inventory
+        required: true
+      - name: price
+        required: true
+    parameters:
+      mode: wait_all
+
+  # 5. 库存判断
+  - name: check_stock_ok
+    type: xflow.if
+    parameters:
+      condition: "${{ $inputs.inventory.in_stock == true }}"
+
+  # 6. 支付处理
+  - name: process_payment
+    type: xflow.http
+    parameters:
+      method: POST
+      url: "{{ $config.payment_service }}/process"
+      body:
+        order_id: "${{ $params.order_id }}"
+        amount: "${{ $inputs.price }}"
+
+  # 7. 库存不足通知
+  - name: notify_out_of_stock
+    type: xflow.notification
+    parameters:
+      channel: email
+      to: "${{ $nodes['fetch_order'].user_email }}"
+      subject: "订单库存不足：{{ $params.order_id }}"
+
+# ──────────────────────────────────────
+# 连接定义
+# ──────────────────────────────────────
+connections:
+  fetch_order:
+    main:
+      - node: check_inventory
+      - node: calculate_price
+
+  check_inventory:
+    main:
+      - node: merge_checks
+        input: inventory
+
+  calculate_price:
+    main:
+      - node: merge_checks
+        input: price
+
+  merge_checks:
+    main:
+      - node: check_stock_ok
+
+  check_stock_ok:
+    true:
+      - node: process_payment
+    false:
+      - node: notify_out_of_stock
+
+# ──────────────────────────────────────
+# 测试数据钉住
+# ──────────────────────────────────────
+# 钉住 fetch_order 和 check_inventory，跳过真实 HTTP 调用。
+# 下游节点通过 $nodes['xxx'] 正常访问 mock 数据。
+# 仅 test/debug 模式生效（settings.pin_data_mode: test_only）。
+pin_data:
+  fetch_order:
+    order_id: "ORD-TEST-001"
+    user_id: "USR-001"
+    amount: 299.90
+    status: "pending"
+    user_email: "test@example.com"
+    items:
+      - id: "ITEM-001"
+        name: "无线鼠标"
+        price: 99.90
+        quantity: 2
+      - id: "ITEM-002"
+        name: "键盘"
+        price: 100.10
+        quantity: 1
+
+  check_inventory:
+    in_stock: true
+    available: 50
+
+# ──────────────────────────────────────
+# 输出定义
+# ──────────────────────────────────────
+outputs:
+  payment_status:
+    value: "${{ $nodes['process_payment'].status ?? 'not_processed' }}"
+    display_name: "支付状态"
