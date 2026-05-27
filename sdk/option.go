@@ -4,10 +4,28 @@ import (
 	"time"
 
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/store"
 )
 
-// Option configures an Engine created via New().
+// ClusterConfig holds cluster-adapter-specific configuration.
+// Common settings (concurrency, hooks, logger) are passed via Option.
+type ClusterConfig struct {
+	RedisAddr string            // Required.
+	Store     store.ClusterStore // Optional; nil = pure Redis mode.
+}
+
+// Option configures an Engine.
+// Common options are valid for New(), NewLocal(), and NewCluster().
 type Option func(*engineConfig)
+
+// Backend provides all components needed to run the engine.
+// Both local.Adapter and cluster.Adapter satisfy this interface.
+type Backend interface {
+	State() engine.StateBackend
+	Queue() engine.TaskQueue
+	Registry() engine.HandlerRegistry
+	Bind(eng *engine.Engine) func()
+}
 
 type engineConfig struct {
 	state       engine.StateBackend
@@ -16,16 +34,23 @@ type engineConfig struct {
 	hooks       engine.Hooks
 	logger      engine.Logger
 	waiter      Waiter
+	backend     Backend
 	concurrency int
 	stopFns     []func()
 }
 
-// WithState sets the StateBackend implementation (required).
+// WithBackend sets the Backend that provides State, Queue, Registry, and lifecycle binding.
+// For standard setups, use NewLocal or NewCluster instead.
+func WithBackend(b Backend) Option {
+	return func(c *engineConfig) { c.backend = b }
+}
+
+// WithState sets the StateBackend implementation directly.
 func WithState(s engine.StateBackend) Option {
 	return func(c *engineConfig) { c.state = s }
 }
 
-// WithQueue sets the TaskQueue implementation (required).
+// WithQueue sets the TaskQueue implementation directly.
 func WithQueue(q engine.TaskQueue) Option {
 	return func(c *engineConfig) { c.queue = q }
 }
@@ -33,6 +58,16 @@ func WithQueue(q engine.TaskQueue) Option {
 // WithRegistry sets the handler registry.
 func WithRegistry(r engine.HandlerRegistry) Option {
 	return func(c *engineConfig) { c.registry = r }
+}
+
+// WithConcurrency sets the worker pool size.
+// Default is 4 for NewLocal, 10 for NewCluster.
+func WithConcurrency(n int) Option {
+	return func(c *engineConfig) {
+		if n > 0 {
+			c.concurrency = n
+		}
+	}
 }
 
 // WithHooks sets the lifecycle hook receiver.
@@ -45,24 +80,12 @@ func WithLogger(l engine.Logger) Option {
 	return func(c *engineConfig) { c.logger = l }
 }
 
-// WithWaiter sets a Waiter for channel-based blocking (local mode).
-// If not set, Wait() falls back to polling StateBackend.
+// WithWaiter sets a Waiter for channel-based blocking.
 func WithWaiter(w Waiter) Option {
 	return func(c *engineConfig) { c.waiter = w }
 }
 
-// WithConcurrency is a hint for convenience constructors. It has no effect
-// when using New() directly — configure concurrency on your queue implementation.
-func WithConcurrency(n int) Option {
-	return func(c *engineConfig) {
-		if n > 0 {
-			c.concurrency = n
-		}
-	}
-}
-
 // WithStopFunc registers a cleanup function called by Engine.Stop().
-// Multiple calls append; functions are called in LIFO order.
 func WithStopFunc(fn func()) Option {
 	return func(c *engineConfig) { c.stopFns = append(c.stopFns, fn) }
 }

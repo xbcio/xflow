@@ -11,7 +11,6 @@ import (
 	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/sdk/internal/adapter/cluster"
 	"github.com/xbcio/xflow/sdk/internal/adapter/local"
-	engstore "github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -31,17 +30,29 @@ type Engine struct {
 }
 
 // New creates an Engine with explicitly injected backends.
-// At minimum, WithState and WithQueue must be provided.
+// Use WithBackend for standard setups, or WithState+WithQueue for custom combinations.
+//
+// Example:
+//
+//	eng, err := xflow.New(xflow.WithBackend(local.New(local.WithConcurrency(8))))
+//	defer eng.Stop()
+//
+// For common setups, use NewLocal or NewCluster instead.
 func New(opts ...Option) (*Engine, error) {
 	cfg := &engineConfig{}
 	for _, o := range opts {
 		o(cfg)
 	}
+
+	if cfg.backend != nil {
+		return newFromConfig(cfg, cfg.backend)
+	}
+
 	if cfg.state == nil {
-		return nil, errors.New("xflow.New: WithState is required")
+		return nil, errors.New("xflow.New: WithBackend or WithState is required")
 	}
 	if cfg.queue == nil {
-		return nil, errors.New("xflow.New: WithQueue is required")
+		return nil, errors.New("xflow.New: WithBackend or WithQueue is required")
 	}
 
 	var engOpts []engine.EngineOption
@@ -76,26 +87,21 @@ func NewLocal(opts ...Option) (*Engine, error) {
 		cfg.concurrency = 4
 	}
 
-	a := local.New(local.WithConcurrency(cfg.concurrency))
-
-	e, err := New(
-		WithState(a.State()),
-		WithQueue(a.Queue()),
-		WithRegistry(a.Registry()),
-		WithWaiter(a),
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	stop := a.Bind(e.eng)
-	e.stopFns = append(e.stopFns, stop)
-	return e, nil
+	backend := local.New(local.WithConcurrency(cfg.concurrency))
+	return newFromConfig(cfg, backend)
 }
 
 // NewCluster creates a distributed engine backed by Redis (Asynq) and optionally MySQL.
-// db may be nil for pure-Redis mode (no durable persistence).
-func NewCluster(redisAddr string, db engstore.ClusterStore, opts ...Option) (*Engine, error) {
+//
+// Example:
+//
+//	eng, err := xflow.NewCluster(xflow.ClusterConfig{RedisAddr: "localhost:6379"})
+//	eng, err := xflow.NewCluster(xflow.ClusterConfig{RedisAddr: addr, Store: db}, xflow.WithConcurrency(16))
+func NewCluster(clusterCfg ClusterConfig, opts ...Option) (*Engine, error) {
+	if clusterCfg.RedisAddr == "" {
+		return nil, errors.New("xflow.NewCluster: RedisAddr is required")
+	}
+
 	cfg := &engineConfig{concurrency: 10}
 	for _, o := range opts {
 		o(cfg)
@@ -104,24 +110,56 @@ func NewCluster(redisAddr string, db engstore.ClusterStore, opts ...Option) (*En
 		cfg.concurrency = 10
 	}
 
-	a, err := cluster.New(redisAddr, db,
+	a, err := cluster.New(clusterCfg.RedisAddr, clusterCfg.Store,
 		cluster.WithConcurrency(cfg.concurrency),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cluster: %w", err)
 	}
 
-	e, err := New(
-		WithState(a.State()),
-		WithQueue(a.Queue()),
-		WithRegistry(a.Registry()),
-	)
-	if err != nil {
-		return nil, err
+	return newFromConfig(cfg, a)
+}
+
+// newFromConfig assembles an Engine from a resolved engineConfig and a Backend.
+func newFromConfig(cfg *engineConfig, backend Backend) (*Engine, error) {
+	if cfg.state == nil {
+		cfg.state = backend.State()
+	}
+	if cfg.queue == nil {
+		cfg.queue = backend.Queue()
+	}
+	if cfg.registry == nil {
+		cfg.registry = backend.Registry()
+	}
+	if cfg.waiter == nil {
+		if w, ok := backend.(Waiter); ok {
+			cfg.waiter = w
+		}
 	}
 
-	stop := a.Bind(e.eng)
+	var engOpts []engine.EngineOption
+	if cfg.registry != nil {
+		engOpts = append(engOpts, engine.WithRegistry(cfg.registry))
+	}
+	if cfg.hooks != nil {
+		engOpts = append(engOpts, engine.WithHooks(cfg.hooks))
+	}
+	if cfg.logger != nil {
+		engOpts = append(engOpts, engine.WithLogger(cfg.logger))
+	}
+
+	eng := engine.NewEngine(cfg.state, cfg.queue, engOpts...)
+
+	e := &Engine{
+		eng:      eng,
+		registry: cfg.registry,
+		waiter:   cfg.waiter,
+		stopFns:  cfg.stopFns,
+	}
+
+	stop := backend.Bind(eng)
 	e.stopFns = append(e.stopFns, stop)
+
 	return e, nil
 }
 
@@ -228,13 +266,14 @@ func (e *Engine) Status(ctx context.Context, id types.ExecutionID) (types.Status
 }
 
 // RegisterHandler registers a node.TaskHandler for a given type in local mode.
-// Panics if the engine was not created with a local registry.
-func (e *Engine) RegisterHandler(nodeType string, h node.TaskHandler) {
+// Returns an error if the engine was not created with a local registry.
+func (e *Engine) RegisterHandler(nodeType string, h node.TaskHandler) error {
 	lr, ok := e.registry.(*local.LocalRegistry)
 	if !ok {
-		panic("RegisterHandler is only supported with a local registry")
+		return errors.New("xflow: RegisterHandler is only supported in local mode")
 	}
 	lr.RegisterGlobal(nodeType, h)
+	return nil
 }
 
 func isTerminalStatus(s types.Status) bool {

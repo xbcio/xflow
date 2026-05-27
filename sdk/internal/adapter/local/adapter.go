@@ -54,7 +54,7 @@ func (a *Adapter) State() engine.StateBackend { return a.state }
 func (a *Adapter) Queue() engine.TaskQueue { return a.queue }
 
 // Registry returns the handler registry.
-func (a *Adapter) Registry() *LocalRegistry { return a.registry }
+func (a *Adapter) Registry() engine.HandlerRegistry { return a.registry }
 
 // Bind wires the engine's ExecuteNode into the queue and starts workers.
 // Returns a stop function that drains the worker pool.

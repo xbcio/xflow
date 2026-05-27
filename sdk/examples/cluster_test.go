@@ -202,7 +202,7 @@ func startClusterEngine(t *testing.T) *xflow.Engine {
 	}
 	conn.Close()
 
-	engine, err := xflow.NewCluster(redisAddr, nil)
+	engine, err := xflow.NewCluster(xflow.ClusterConfig{RedisAddr: redisAddr})
 	if err != nil {
 		t.Skipf("skipping cluster test — NewCluster failed: %v", err)
 	}
