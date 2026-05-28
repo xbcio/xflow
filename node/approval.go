@@ -13,11 +13,8 @@ const ApprovalNodeType = "xflow.approval"
 type ApprovalMode string
 
 const (
-	// ApprovalAny means any single approver can approve (or-sign).
-	ApprovalAny ApprovalMode = "any"
-	// ApprovalAll means all approvers must approve (co-sign).
-	ApprovalAll ApprovalMode = "all"
-	// ApprovalSequential means approvers must approve in order.
+	ApprovalAny        ApprovalMode = "any"
+	ApprovalAll        ApprovalMode = "all"
 	ApprovalSequential ApprovalMode = "sequential"
 )
 
@@ -26,14 +23,27 @@ type ApprovalParams struct {
 	Approvers     []string      `json:"approvers"`
 	Mode          ApprovalMode  `json:"mode"`
 	Timeout       time.Duration `json:"timeout"`
-	TimeoutAction string        `json:"timeout_action"` // "reject" | "escalate" | "route"
+	TimeoutAction string        `json:"timeout_action"`
 }
 
-// ApprovalHandler implements xflow.approval — suspends execution until
+// ApprovalNode implements xflow.approval — suspends execution until
 // approvers deliver their decisions via signals.
-type ApprovalHandler struct{}
+type ApprovalNode struct {
+	BaseNode
+	Approvers     []string
+	Mode          ApprovalMode
+	TimeoutStr    string
+	TimeoutAction string
+}
 
-func (h *ApprovalHandler) Descriptor() Descriptor {
+// Approval creates an approval gate node.
+//
+//	node.Approval([]string{"manager@co.com"}, node.ApprovalAny)
+func Approval(approvers []string, mode ApprovalMode) *ApprovalNode {
+	return &ApprovalNode{Approvers: approvers, Mode: mode}
+}
+
+func (n *ApprovalNode) Descriptor() Descriptor {
 	return Descriptor{
 		Type:        ApprovalNodeType,
 		DisplayName: "Approval",
@@ -48,11 +58,31 @@ func (h *ApprovalHandler) Descriptor() Descriptor {
 	}
 }
 
-func (h *ApprovalHandler) Execute(_ context.Context, _ *Input) (*Output, error) {
-	return &Output{Data: map[string]any{"_type": ApprovalNodeType, "_stub": true}}, nil
+func (n *ApprovalNode) NodeType() string { return ApprovalNodeType }
+func (n *ApprovalNode) OnError(s OnError) Builder {
+	n.onError = s
+	return n
 }
 
-func (h *ApprovalHandler) PrepareSuspend(_ context.Context, input *Input) (*SuspendSpec, error) {
+func (n *ApprovalNode) RawParams() any {
+	params := map[string]any{
+		"approvers": n.Approvers,
+		"mode":      string(n.Mode),
+	}
+	if n.TimeoutStr != "" {
+		params["timeout"] = n.TimeoutStr
+	}
+	if n.TimeoutAction != "" {
+		params["timeout_action"] = n.TimeoutAction
+	}
+	return params
+}
+
+func (n *ApprovalNode) Execute(_ context.Context, _ *Input) (*Output, error) {
+	return &Output{Data: map[string]any{"_type": ApprovalNodeType}}, nil
+}
+
+func (n *ApprovalNode) PrepareSuspend(_ context.Context, input *Input) (*SuspendSpec, error) {
 	params, err := parseApprovalParams(input.Params)
 	if err != nil {
 		return nil, err
@@ -88,13 +118,12 @@ func (h *ApprovalHandler) PrepareSuspend(_ context.Context, input *Input) (*Susp
 	return nil, fmt.Errorf("unknown approval mode: %s", params.Mode)
 }
 
-func (h *ApprovalHandler) OnResume(_ context.Context, input *Input, signal *SignalPayload) (*Output, error) {
+func (n *ApprovalNode) OnResume(_ context.Context, input *Input, signal *SignalPayload) (*Output, error) {
 	params, err := parseApprovalParams(input.Params)
 	if err != nil {
 		return nil, err
 	}
 
-	// Handle timeout.
 	if signal.Triggered == TimeoutFired {
 		switch params.TimeoutAction {
 		case "reject":
@@ -104,7 +133,6 @@ func (h *ApprovalHandler) OnResume(_ context.Context, input *Input, signal *Sign
 		}
 	}
 
-	// Extract action from signal payload.
 	actionRaw, ok := signal.Data["action"]
 	if !ok {
 		return nil, fmt.Errorf("approval signal missing \"action\" field")
@@ -116,7 +144,7 @@ func (h *ApprovalHandler) OnResume(_ context.Context, input *Input, signal *Sign
 
 	switch action {
 	case "approve":
-		return h.handleApprove(params, input, signal)
+		return n.handleApprove(params, input, signal)
 	case "reject":
 		return &Output{
 			Data: map[string]any{"approved": false, "approver": signal.Data["approver"], "comment": signal.Data["comment"]},
@@ -129,7 +157,7 @@ func (h *ApprovalHandler) OnResume(_ context.Context, input *Input, signal *Sign
 	return nil, fmt.Errorf("unknown approval action: %s", action)
 }
 
-func (h *ApprovalHandler) handleApprove(params *ApprovalParams, input *Input, signal *SignalPayload) (*Output, error) {
+func (n *ApprovalNode) handleApprove(params *ApprovalParams, input *Input, signal *SignalPayload) (*Output, error) {
 	switch params.Mode {
 	case ApprovalAny:
 		return &Output{
@@ -145,13 +173,11 @@ func (h *ApprovalHandler) handleApprove(params *ApprovalParams, input *Input, si
 			"comment":  signal.Data["comment"],
 		})
 		if len(decisions) < len(params.Approvers) {
-			// Still waiting for more approvers — resuspend with accumulated decisions.
 			return &Output{
 				Resuspend: true,
 				Data:      map[string]any{"_decisions": decisions},
 			}, nil
 		}
-		// All approvers have approved.
 		return &Output{
 			Data: map[string]any{"approved": true, "decisions": decisions},
 			Port: "approved",
@@ -160,13 +186,11 @@ func (h *ApprovalHandler) handleApprove(params *ApprovalParams, input *Input, si
 	case ApprovalSequential:
 		idx := getApproverIndex(input.Data) + 1
 		if idx < len(params.Approvers) {
-			// More approvers remaining — resuspend with updated index.
 			return &Output{
 				Resuspend: true,
 				Data:      map[string]any{"_approver_idx": idx},
 			}, nil
 		}
-		// All approvers have approved in sequence.
 		return &Output{
 			Data: map[string]any{"approved": true},
 			Port: "approved",
@@ -176,17 +200,14 @@ func (h *ApprovalHandler) handleApprove(params *ApprovalParams, input *Input, si
 	return nil, nil
 }
 
-// approvalSignal returns the signal name for any/all mode approval.
 func approvalSignal(nodeName string) string {
 	return nodeName + "/approval"
 }
 
-// approverSignal returns the signal name for a specific approver in sequential mode.
 func approverSignal(nodeName, approver string) string {
 	return nodeName + "/approval/" + approver
 }
 
-// parseApprovalParams extracts ApprovalParams from the raw params map.
 func parseApprovalParams(params map[string]any) (*ApprovalParams, error) {
 	p := &ApprovalParams{
 		Mode:          ApprovalAny,
@@ -243,8 +264,6 @@ func parseApprovalParams(params map[string]any) (*ApprovalParams, error) {
 	return p, nil
 }
 
-// getApproverIndex reads the current approver index from node data.
-// Returns 0 if not set.
 func getApproverIndex(data map[string]any) int {
 	if data == nil {
 		return 0
@@ -262,8 +281,6 @@ func getApproverIndex(data map[string]any) int {
 	return 0
 }
 
-// getDecisions reads the accumulated approval decisions from node data.
-// Returns nil if not set.
 func getDecisions(data map[string]any) []map[string]any {
 	if data == nil {
 		return nil
@@ -287,4 +304,4 @@ func getDecisions(data map[string]any) []map[string]any {
 	return nil
 }
 
-func init() { Register(&ApprovalHandler{}) }
+func init() { Register(&ApprovalNode{}) }
