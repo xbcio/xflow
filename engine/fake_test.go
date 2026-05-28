@@ -47,6 +47,13 @@ func (f *fakeState) CreateExecution(_ context.Context, e *ExecutionSnapshot) err
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.executions[e.ID] = e
+	// Initialize in-degree counters from the graph.
+	if e.Graph != nil {
+		for i, deg := range e.Graph.InDegree {
+			key := fmt.Sprintf("%s/%d", e.ID, i)
+			f.inDegrees[key] = deg
+		}
+	}
 	return nil
 }
 
