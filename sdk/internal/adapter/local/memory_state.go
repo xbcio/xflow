@@ -24,6 +24,7 @@ type memoryState struct {
 	suspended  map[string]*node.SuspendSpec  // key: execID+"/"+nodeName
 	signals    map[string]map[string]any     // pre-delivered: key: execID+"/"+signalName
 	resumed    map[string]bool               // resume lock: key: execID+"/"+nodeName
+	subExecs   map[string][]*engine.SubExecution // key: execID+"/"+nodeName
 
 	// done channels allow Wait() callers to block until execution completes.
 	doneCh map[types.ExecutionID]chan struct{}
@@ -44,6 +45,7 @@ func newMemoryState() *memoryState {
 		suspended:  make(map[string]*node.SuspendSpec),
 		signals:    make(map[string]map[string]any),
 		resumed:    make(map[string]bool),
+		subExecs:   make(map[string][]*engine.SubExecution),
 		doneCh:     make(map[types.ExecutionID]chan struct{}),
 	}
 }
@@ -351,4 +353,48 @@ func isTerminalNode(status string) bool {
 		return true
 	}
 	return false
+}
+
+// ---------------------------------------------------------------------------
+// Sub-execution support
+// ---------------------------------------------------------------------------
+
+func (s *memoryState) CreateSubExecution(_ context.Context, sub *engine.SubExecution) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := string(sub.ParentExecID) + "/" + sub.ParentNode
+	s.subExecs[key] = append(s.subExecs[key], sub)
+	return nil
+}
+
+func (s *memoryState) CompleteSubExecution(_ context.Context, parentExecID types.ExecutionID, parentNode string, childExecID types.ExecutionID, status types.Status, result map[string]any) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := string(parentExecID) + "/" + parentNode
+	subs := s.subExecs[key]
+	allDone := true
+	for _, sub := range subs {
+		if sub.ChildExecID == childExecID {
+			sub.Status = status
+			sub.Result = result
+		}
+		if sub.Status == types.StatusRunning {
+			allDone = false
+		}
+	}
+	return allDone, nil
+}
+
+func (s *memoryState) GetSubExecutionResults(_ context.Context, parentExecID types.ExecutionID, parentNode string) ([]map[string]any, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := string(parentExecID) + "/" + parentNode
+	subs := s.subExecs[key]
+	results := make([]map[string]any, 0, len(subs))
+	for _, sub := range subs {
+		if sub.Result != nil {
+			results = append(results, sub.Result)
+		}
+	}
+	return results, nil
 }

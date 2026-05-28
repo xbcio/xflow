@@ -740,3 +740,64 @@ func mustJSON(v any) string {
 func splitPrefix(key, prefix string) string {
 	return strings.TrimPrefix(key, prefix)
 }
+
+// ---------------------------------------------------------------------------
+// Sub-execution support
+// ---------------------------------------------------------------------------
+
+func (s *redisState) CreateSubExecution(ctx context.Context, sub *engine.SubExecution) error {
+	key := fmt.Sprintf("xflow:exec:{%s}:subs:%s", sub.ParentExecID, sub.ParentNode)
+	data, _ := json.Marshal(sub)
+	return s.rdb.HSet(ctx, key, string(sub.ChildExecID), data).Err()
+}
+
+func (s *redisState) CompleteSubExecution(ctx context.Context, parentExecID types.ExecutionID, parentNode string, childExecID types.ExecutionID, status types.Status, result map[string]any) (bool, error) {
+	key := fmt.Sprintf("xflow:exec:{%s}:subs:%s", parentExecID, parentNode)
+
+	sub := &engine.SubExecution{
+		ParentExecID: parentExecID,
+		ParentNode:   parentNode,
+		ChildExecID:  childExecID,
+		Status:       status,
+		Result:       result,
+	}
+	data, _ := json.Marshal(sub)
+	if err := s.rdb.HSet(ctx, key, string(childExecID), data).Err(); err != nil {
+		return false, err
+	}
+
+	// Check if all sub-executions are done.
+	all, err := s.rdb.HGetAll(ctx, key).Result()
+	if err != nil {
+		return false, err
+	}
+	for _, v := range all {
+		var entry engine.SubExecution
+		if err := json.Unmarshal([]byte(v), &entry); err != nil {
+			continue
+		}
+		if entry.Status == types.StatusRunning {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func (s *redisState) GetSubExecutionResults(ctx context.Context, parentExecID types.ExecutionID, parentNode string) ([]map[string]any, error) {
+	key := fmt.Sprintf("xflow:exec:{%s}:subs:%s", parentExecID, parentNode)
+	all, err := s.rdb.HGetAll(ctx, key).Result()
+	if err != nil {
+		return nil, err
+	}
+	results := make([]map[string]any, 0, len(all))
+	for _, v := range all {
+		var entry engine.SubExecution
+		if err := json.Unmarshal([]byte(v), &entry); err != nil {
+			continue
+		}
+		if entry.Result != nil {
+			results = append(results, entry.Result)
+		}
+	}
+	return results, nil
+}

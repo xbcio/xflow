@@ -42,7 +42,9 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 		g.Nodes[i] = NodeMeta{
 			Name:       nd.Name,
 			Type:       nd.Type,
+			Version:    nd.Version,
 			OnError:    nd.OnError,
+			MergeMode:  extractMergeMode(nd),
 			Parameters: nd.Parameters,
 		}
 	}
@@ -88,6 +90,20 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 	}
 
 	return g, nil
+}
+
+// extractMergeMode returns the merge mode from a node's parameters if it's a merge node.
+func extractMergeMode(nd types.NodeDef) string {
+	if nd.Type != "xflow.merge" {
+		return ""
+	}
+	if nd.Parameters == nil {
+		return ""
+	}
+	if mode, ok := nd.Parameters["mode"].(string); ok {
+		return mode
+	}
+	return ""
 }
 
 // detectCycle uses Kahn's algorithm (topological sort) to detect cycles.

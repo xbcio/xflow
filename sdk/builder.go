@@ -138,20 +138,23 @@ func (w *WorkflowBuilder) Build() (*types.WorkflowDef, error) {
 
 	for _, entry := range w.nodes {
 		nodeType := ""
+		nodeVersion := 0
 		params := entry.normalizedParams
 		if params == nil {
 			params = map[string]any{}
 		}
 		if entry.builder != nil {
 			nodeType = entry.builder.NodeType()
+			if v, ok := entry.builder.(interface{ NodeVersion() int }); ok {
+				nodeVersion = v.NodeVersion()
+			}
 		} else {
-			// Direct handler: use node name as synthetic type so the registry
-			// can look it up via RegisterNodeHandler.
 			nodeType = "__direct__/" + entry.name
 		}
 		def.Nodes = append(def.Nodes, types.NodeDef{
 			Name:       entry.name,
 			Type:       nodeType,
+			Version:    nodeVersion,
 			Parameters: params,
 			OnError:    string(entry.onError),
 		})

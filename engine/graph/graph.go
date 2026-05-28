@@ -17,7 +17,9 @@ type Graph struct {
 type NodeMeta struct {
 	Name       string
 	Type       string
+	Version    int
 	OnError    string
+	MergeMode  string // "wait_all" or "wait_any"; empty means normal node
 	Parameters map[string]any
 	PortOuts   []string // distinct output port names that have outgoing edges
 }

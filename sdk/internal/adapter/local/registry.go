@@ -48,7 +48,7 @@ func (r *LocalRegistry) RegisterNodeHandler(nodeName string, h node.TaskHandler)
 
 // Get resolves a handler: closure lookup first, then global type lookup,
 // then the global node.Registry.
-func (r *LocalRegistry) Get(id types.ExecutionID, nodeName string, nodeType string) (node.TaskHandler, error) {
+func (r *LocalRegistry) Get(id types.ExecutionID, nodeName string, nodeType string, version int) (node.TaskHandler, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -60,6 +60,11 @@ func (r *LocalRegistry) Get(id types.ExecutionID, nodeName string, nodeType stri
 	}
 	if h, ok := r.globals[nodeType]; ok {
 		return h, nil
+	}
+	if version > 0 {
+		if h, ok := node.LookupVersion(nodeType, version); ok {
+			return h, nil
+		}
 	}
 	if h, ok := node.Lookup(nodeType); ok {
 		return h, nil

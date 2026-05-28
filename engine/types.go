@@ -25,10 +25,11 @@ type Task struct {
 
 // ExecutionSnapshot is the engine's view of a running execution stored in the backend.
 type ExecutionSnapshot struct {
-	ID     types.ExecutionID
-	Graph  *graph.Graph
-	Status types.Status
-	Params map[string]any
+	ID       types.ExecutionID
+	Graph    *graph.Graph
+	Status   types.Status
+	Params   map[string]any
+	ParentID types.ExecutionID // non-empty for sub-executions
 }
 
 // NodeSnapshot is the engine's view of a single node's state stored in the backend.
@@ -40,4 +41,14 @@ type NodeSnapshot struct {
 	Output      map[string]any
 	Port        string
 	Error       string
+}
+
+// SubExecution tracks a child execution spawned by a loop/split node.
+type SubExecution struct {
+	ParentExecID types.ExecutionID
+	ParentNode   string
+	ChildExecID  types.ExecutionID
+	BatchIndex   int
+	Status       types.Status
+	Result       map[string]any
 }

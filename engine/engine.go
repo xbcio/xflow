@@ -169,7 +169,7 @@ func (e *Engine) ExecuteNode(ctx context.Context, t *Task) error {
 	}
 
 	meta := g.Nodes[t.NodeIdx]
-	handler, err := e.registry.Get(t.ExecutionID, t.NodeName, meta.Type)
+	handler, err := e.registry.Get(t.ExecutionID, t.NodeName, meta.Type, meta.Version)
 	if err != nil {
 		return e.handleNodeError(ctx, t, g, fmt.Errorf("handler not found: %w", err), nil, nil)
 	}
@@ -322,6 +322,11 @@ func (e *Engine) finalizeNode(ctx context.Context, t *Task, g *graph.Graph, meta
 	data := map[string]any{}
 	if output != nil && output.Data != nil {
 		data = output.Data
+	}
+
+	// Loop/Split expansion: intercept and spawn sub-executions.
+	if isLoopSplitOutput(data) {
+		return e.expandLoopSplit(ctx, t, g, data)
 	}
 
 	port := "main"

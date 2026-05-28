@@ -26,6 +26,7 @@ type fakeState struct {
 	suspended  map[string]*node.SuspendSpec // key: execID+"/"+nodeName
 	signals    map[string]map[string]any    // pre-delivered signals: key: execID+"/"+signalName
 	resumed    map[string]bool              // resume lock: key: execID+"/"+nodeName
+	subExecs   map[string][]*SubExecution   // key: execID+"/"+nodeName
 }
 
 func newFakeState() *fakeState {
@@ -38,6 +39,7 @@ func newFakeState() *fakeState {
 		suspended:  make(map[string]*node.SuspendSpec),
 		signals:    make(map[string]map[string]any),
 		resumed:    make(map[string]bool),
+		subExecs:   make(map[string][]*SubExecution),
 	}
 }
 
@@ -283,10 +285,54 @@ type fakeRegistry struct {
 	handlers map[string]node.TaskHandler
 }
 
-func (r *fakeRegistry) Get(_ types.ExecutionID, _ string, nodeType string) (node.TaskHandler, error) {
+func (r *fakeRegistry) Get(_ types.ExecutionID, _ string, nodeType string, _ int) (node.TaskHandler, error) {
 	h, ok := r.handlers[nodeType]
 	if !ok {
 		return nil, fmt.Errorf("no handler for type: %s", nodeType)
 	}
 	return h, nil
+}
+
+// ---------------------------------------------------------------------------
+// fakeState — Sub-execution support
+// ---------------------------------------------------------------------------
+
+func (f *fakeState) CreateSubExecution(_ context.Context, sub *SubExecution) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := string(sub.ParentExecID) + "/" + sub.ParentNode
+	f.subExecs[key] = append(f.subExecs[key], sub)
+	return nil
+}
+
+func (f *fakeState) CompleteSubExecution(_ context.Context, parentExecID types.ExecutionID, parentNode string, childExecID types.ExecutionID, status types.Status, result map[string]any) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := string(parentExecID) + "/" + parentNode
+	subs := f.subExecs[key]
+	allDone := true
+	for _, sub := range subs {
+		if sub.ChildExecID == childExecID {
+			sub.Status = status
+			sub.Result = result
+		}
+		if sub.Status == types.StatusRunning {
+			allDone = false
+		}
+	}
+	return allDone, nil
+}
+
+func (f *fakeState) GetSubExecutionResults(_ context.Context, parentExecID types.ExecutionID, parentNode string) ([]map[string]any, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := string(parentExecID) + "/" + parentNode
+	subs := f.subExecs[key]
+	results := make([]map[string]any, 0, len(subs))
+	for _, sub := range subs {
+		if sub.Result != nil {
+			results = append(results, sub.Result)
+		}
+	}
+	return results, nil
 }

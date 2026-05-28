@@ -25,6 +25,23 @@ func (e *Engine) OnNodeComplete(ctx context.Context, id types.ExecutionID, g *gr
 			return err
 		}
 
+		dstMeta := g.Nodes[edge.DstIdx]
+
+		// wait_any merge: trigger as soon as the first active input arrives.
+		if dstMeta.MergeMode == "wait_any" && portActive && arrivedActive == 1 {
+			task := &Task{
+				ExecutionID: id,
+				NodeName:    dstMeta.Name,
+				NodeIdx:     edge.DstIdx,
+				Type:        TaskTypeNodeExec,
+			}
+			if err := e.queue.Enqueue(ctx, task); err != nil {
+				return err
+			}
+			anyEnqueued = true
+			continue
+		}
+
 		if remaining > 0 {
 			// Still waiting for other upstream nodes.
 			continue
@@ -35,7 +52,7 @@ func (e *Engine) OnNodeComplete(ctx context.Context, id types.ExecutionID, g *gr
 			// At least one active (non-skipped) input arrived — execute the node.
 			task := &Task{
 				ExecutionID: id,
-				NodeName:    g.Nodes[edge.DstIdx].Name,
+				NodeName:    dstMeta.Name,
 				NodeIdx:     edge.DstIdx,
 				Type:        TaskTypeNodeExec,
 			}

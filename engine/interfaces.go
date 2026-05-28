@@ -53,6 +53,11 @@ type StateBackend interface {
 	// Cancel support
 	ListSuspendedNodes(ctx context.Context, id types.ExecutionID) ([]string, error)
 
+	// Sub-execution support (loop/split)
+	CreateSubExecution(ctx context.Context, sub *SubExecution) error
+	CompleteSubExecution(ctx context.Context, parentExecID types.ExecutionID, parentNode string, childExecID types.ExecutionID, status types.Status, result map[string]any) (allDone bool, err error)
+	GetSubExecutionResults(ctx context.Context, parentExecID types.ExecutionID, parentNode string) ([]map[string]any, error)
+
 	// Output store
 	PutOutput(ctx context.Context, id types.ExecutionID, name string, data map[string]any) error
 	GetOutput(ctx context.Context, id types.ExecutionID, name string) (map[string]any, error)
@@ -66,7 +71,7 @@ type TaskQueue interface {
 
 // HandlerRegistry resolves a TaskHandler for a given execution + node.
 type HandlerRegistry interface {
-	Get(executionID types.ExecutionID, nodeName string, nodeType string) (node.TaskHandler, error)
+	Get(executionID types.ExecutionID, nodeName string, nodeType string, version int) (node.TaskHandler, error)
 }
 
 // Hooks receives lifecycle events from the engine. All methods must be non-blocking.
