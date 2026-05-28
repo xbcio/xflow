@@ -14,6 +14,7 @@ import (
 type WorkflowBuilder struct {
 	name    string
 	nodes   []*nodeEntry
+	refs    []*NodeRef
 	edges   []edge
 	direct  map[string]node.TaskHandler // direct handlers (local mode only)
 }
@@ -44,6 +45,7 @@ func NewWorkflow(name string) *WorkflowBuilder {
 // NodeRef is returned by AddNode and used to reference output/input ports in Connect.
 type NodeRef struct {
 	name string
+	body *WorkflowBuilder
 }
 
 // Out returns a reference to the named output port of this node.
@@ -54,6 +56,13 @@ func (n *NodeRef) Out(port string) node.OutputPort {
 // In returns a reference to the named input port of this node.
 func (n *NodeRef) In(port string) node.InputPort {
 	return node.InputPort{Node: n.name, Port: port}
+}
+
+// SetBody attaches a sub-workflow as the loop/split body.
+// The sub-workflow is compiled and stored in the node's parameters at build time.
+func (n *NodeRef) SetBody(body *WorkflowBuilder) *NodeRef {
+	n.body = body
+	return n
 }
 
 // AddNode adds a node to the workflow and returns a NodeRef.
@@ -74,7 +83,9 @@ func (w *WorkflowBuilder) AddNode(name string, builder any) *NodeRef {
 		panic(fmt.Sprintf("AddNode %q: builder must implement node.Builder or node.TaskHandler, got %T", name, builder))
 	}
 	w.nodes = append(w.nodes, entry)
-	return &NodeRef{name: name}
+	ref := &NodeRef{name: name}
+	w.refs = append(w.refs, ref)
+	return ref
 }
 
 // Connect establishes a directed edge from src to dst.
@@ -100,10 +111,33 @@ func (w *WorkflowBuilder) Connect(src node.OutputPort, dst any) *WorkflowBuilder
 
 // Build validates the workflow and returns a *types.WorkflowDef.
 func (w *WorkflowBuilder) Build() (*types.WorkflowDef, error) {
+	// Compile body sub-workflows and inject into node params.
+	for i, ref := range w.refs {
+		if ref.body != nil {
+			bodyDef, err := ref.body.Build()
+			if err != nil {
+				return nil, fmt.Errorf("node %q body: %w", ref.name, err)
+			}
+			entry := w.nodes[i]
+			if entry.builder != nil {
+				params, err := normalizeParams(entry.builder.RawParams())
+				if err != nil {
+					return nil, fmt.Errorf("node %q: %w", entry.name, err)
+				}
+				params["body"] = bodyDef
+				entry.normalizedParams = params
+			}
+		}
+	}
+
 	// Schema validation for Builder-based nodes.
 	for _, entry := range w.nodes {
 		if entry.builder == nil {
 			continue // direct handler — no registry entry, skip validation
+		}
+		if entry.normalizedParams != nil {
+			// Already normalized (e.g. body was injected above).
+			continue
 		}
 		h, found := node.Lookup(entry.builder.NodeType())
 		if !found {
