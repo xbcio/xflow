@@ -46,5 +46,6 @@ Read before implementing core features:
 - **[.claude/docs/implementation-guide.md](.claude/docs/implementation-guide.md)** — Engine core, node handlers, SuspendingHandler, ErrorPolicy
 - **[.claude/docs/testing.md](.claude/docs/testing.md)** — Test commands, strategies, conventions
 - **[.claude/docs/deployment-topologies.md](.claude/docs/deployment-topologies.md)** — SDK modes (local/cluster/remote) + server/runner cluster architecture; current vs planned
+- **[.claude/docs/naming-conventions.md](.claude/docs/naming-conventions.md)** — Stutter policy: which package/identifier names to fix vs. the four idiomatic patterns to leave alone
 - **[docs/CODING-STANDARDS.md](docs/CODING-STANDARDS.md)** — Naming, comments, error handling, concurrency
 - **[docs/design/DSL-SPECIFICATION.md](docs/design/DSL-SPECIFICATION.md)** — Complete DSL syntax specification

@@ -3,7 +3,7 @@
 ```
 engine/          Pure algorithm (Graph, Scheduler, ErrorPolicy)
     ↑                    ↑
-sdk/             cmd/server + cmd/worker
+sdk/             cmd/server + cmd/runner
     ↓                    ↓
 sdk/internal/    Respective IO implementations
 adapter/
