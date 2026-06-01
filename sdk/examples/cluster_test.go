@@ -191,7 +191,7 @@ func buildOrderWorkflow() *xflow.WorkflowBuilder {
 
 // ── engine helper ─────────────────────────────────────────────────────────────
 
-// startClusterEngine creates a ClusterEngine connected to Redis.
+// startClusterEngine creates a cluster-mode xflow.Engine connected to Redis.
 // Skips the test if Redis is not available at redisAddr.
 func startClusterEngine(t *testing.T) *xflow.Engine {
 	t.Helper()
