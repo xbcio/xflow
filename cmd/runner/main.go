@@ -1,13 +1,14 @@
 // cmd/runner is the xflow task runner (Execution node).
 //
 // Responsibilities:
-//   - Consume node tasks from TaskQueue (Asynq)
+//   - Connect to xflow-server or xflow-gateway via Runner Protocol
+//   - Receive runner-assigned node tasks from the server-side dispatcher
 //   - Resolve handler via HandlerRegistry (global type→handler map)
-//   - Execute node handlers (TaskHandler / SuspendingHandler)
-//   - Report results back to StateBackend
-//   - Trigger downstream scheduling via Engine.OnNodeComplete
+//   - Execute node handlers (ActionHandler / SuspendingHandler)
+//   - Report results back through Runner Protocol
 //
-// It does NOT accept external API requests — that is the server's job.
+// It does NOT accept external API requests and does NOT connect to Redis,
+// Asynq, or StateStore directly — those are server-side responsibilities.
 // Scale horizontally by running multiple runner instances.
 //
 // Node handlers must be registered before the runner starts.
