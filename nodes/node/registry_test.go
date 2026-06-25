@@ -4,12 +4,12 @@ import (
 	"context"
 	"testing"
 
-	"github.com/xbcio/xflow/node"
+	"github.com/xbcio/xflow/nodes/node"
 )
 
 // ── test helpers ──────────────────────────────────────────────────────────────
 
-// goodHandler satisfies both TaskHandler and DescriptorProvider.
+// goodHandler satisfies ActionHandler.
 type goodHandler struct{}
 
 func (h *goodHandler) Descriptor() node.Descriptor {
@@ -17,13 +17,6 @@ func (h *goodHandler) Descriptor() node.Descriptor {
 }
 func (h *goodHandler) Execute(_ context.Context, _ *node.Input) (*node.Output, error) {
 	return &node.Output{}, nil
-}
-
-// noDescriptorHandler implements TaskHandler only (no Descriptor method).
-type noDescriptorHandler struct{}
-
-func (h *noDescriptorHandler) Execute(_ context.Context, _ *node.Input) (*node.Output, error) {
-	return nil, nil
 }
 
 // emptyTypeHandler has Descriptor().Type == "".
@@ -50,17 +43,6 @@ func TestRegistry_RegisterAndLookup(t *testing.T) {
 	if h == nil {
 		t.Fatal("Lookup: returned nil handler")
 	}
-}
-
-// TestRegistry_PanicOnNoDescriptor verifies that registering a handler that
-// does not implement DescriptorProvider causes a panic.
-func TestRegistry_PanicOnNoDescriptor(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected panic when registering handler without DescriptorProvider")
-		}
-	}()
-	node.Register(&noDescriptorHandler{})
 }
 
 // TestRegistry_PanicOnEmptyType verifies that registering a handler whose

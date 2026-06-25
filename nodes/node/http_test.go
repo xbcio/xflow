@@ -1,13 +1,39 @@
 package node_test
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 
-	"github.com/xbcio/xflow/node"
+	"github.com/xbcio/xflow/nodes/node"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func withHTTPClient(t *testing.T, fn roundTripFunc) {
+	t.Helper()
+	orig := node.DefaultHTTPClient
+	node.DefaultHTTPClient = &http.Client{Transport: fn}
+	t.Cleanup(func() { node.DefaultHTTPClient = orig })
+}
+
+func jsonResponse(status int, body string, headers http.Header) *http.Response {
+	if headers == nil {
+		headers = http.Header{}
+	}
+	return &http.Response{
+		StatusCode: status,
+		Status:     http.StatusText(status),
+		Header:     headers,
+		Body:       io.NopCloser(bytes.NewBufferString(body)),
+	}
+}
 
 func TestHTTP_Factory(t *testing.T) {
 	b := node.HTTP("POST", "https://api.example.com/users").
@@ -34,20 +60,18 @@ func TestHTTP_Factory(t *testing.T) {
 }
 
 func TestHTTP_GET(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	withHTTPClient(t, func(r *http.Request) (*http.Response, error) {
 		if r.Method != http.MethodGet {
 			t.Fatalf("expected GET, got %s", r.Method)
 		}
 		if r.URL.Query().Get("page") != "1" {
 			t.Fatalf("expected query page=1, got %s", r.URL.Query().Get("page"))
 		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"ok":true}`))
-	}))
-	defer srv.Close()
+		return jsonResponse(200, `{"ok":true}`, http.Header{"Content-Type": []string{"application/json"}}), nil
+	})
 
 	h, _ := node.Lookup("xflow.http")
-	b := node.HTTP("GET", srv.URL).SetQuery(map[string]any{"page": "1"})
+	b := node.HTTP("GET", "https://example.test").SetQuery(map[string]any{"page": "1"})
 	input := &node.Input{Params: b.RawParams().(map[string]any)}
 	out, err := h.Execute(context.Background(), input)
 	if err != nil {
@@ -66,20 +90,18 @@ func TestHTTP_GET(t *testing.T) {
 }
 
 func TestHTTP_POST_WithBody(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	withHTTPClient(t, func(r *http.Request) (*http.Response, error) {
 		if r.Method != http.MethodPost {
 			t.Fatalf("expected POST, got %s", r.Method)
 		}
 		if r.Header.Get("Content-Type") != "application/json" {
 			t.Fatalf("expected json content-type, got %s", r.Header.Get("Content-Type"))
 		}
-		w.WriteHeader(201)
-		w.Write([]byte(`{"id":42}`))
-	}))
-	defer srv.Close()
+		return jsonResponse(201, `{"id":42}`, nil), nil
+	})
 
 	h, _ := node.Lookup("xflow.http")
-	b := node.HTTP("POST", srv.URL).SetBody(map[string]any{"name": "test"})
+	b := node.HTTP("POST", "https://example.test").SetBody(map[string]any{"name": "test"})
 	input := &node.Input{Params: b.RawParams().(map[string]any)}
 	out, err := h.Execute(context.Background(), input)
 	if err != nil {
@@ -91,14 +113,12 @@ func TestHTTP_POST_WithBody(t *testing.T) {
 }
 
 func TestHTTP_ErrorPort_On4xx(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(404)
-		w.Write([]byte(`{"error":"not found"}`))
-	}))
-	defer srv.Close()
+	withHTTPClient(t, func(r *http.Request) (*http.Response, error) {
+		return jsonResponse(404, `{"error":"not found"}`, nil), nil
+	})
 
 	h, _ := node.Lookup("xflow.http")
-	b := node.HTTP("GET", srv.URL)
+	b := node.HTTP("GET", "https://example.test")
 	input := &node.Input{Params: b.RawParams().(map[string]any)}
 	out, err := h.Execute(context.Background(), input)
 	if err != nil {
@@ -110,16 +130,15 @@ func TestHTTP_ErrorPort_On4xx(t *testing.T) {
 }
 
 func TestHTTP_CustomHeaders(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	withHTTPClient(t, func(r *http.Request) (*http.Response, error) {
 		if r.Header.Get("X-Custom") != "hello" {
 			t.Fatalf("expected X-Custom=hello, got %s", r.Header.Get("X-Custom"))
 		}
-		w.Write([]byte(`{}`))
-	}))
-	defer srv.Close()
+		return jsonResponse(200, `{}`, nil), nil
+	})
 
 	h, _ := node.Lookup("xflow.http")
-	b := node.HTTP("GET", srv.URL).SetHeaders(map[string]any{"X-Custom": "hello"})
+	b := node.HTTP("GET", "https://example.test").SetHeaders(map[string]any{"X-Custom": "hello"})
 	input := &node.Input{Params: b.RawParams().(map[string]any)}
 	_, err := h.Execute(context.Background(), input)
 	if err != nil {

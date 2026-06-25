@@ -28,10 +28,10 @@ func Database(operation, table, credential string) *DatabaseNode {
 	return &DatabaseNode{Operation: operation, Table: table, Credential: credential}
 }
 
-func (n *DatabaseNode) SetWhere(w map[string]any) *DatabaseNode    { n.Where = w; return n }
-func (n *DatabaseNode) SetData(d map[string]any) *DatabaseNode     { n.Data = d; return n }
-func (n *DatabaseNode) SetColumns(cols ...string) *DatabaseNode     { n.Columns = cols; return n }
-func (n *DatabaseNode) SetLimit(limit int) *DatabaseNode            { n.LimitN = limit; return n }
+func (n *DatabaseNode) SetWhere(w map[string]any) *DatabaseNode { n.Where = w; return n }
+func (n *DatabaseNode) SetData(d map[string]any) *DatabaseNode  { n.Data = d; return n }
+func (n *DatabaseNode) SetColumns(cols ...string) *DatabaseNode { n.Columns = cols; return n }
+func (n *DatabaseNode) SetLimit(limit int) *DatabaseNode        { n.LimitN = limit; return n }
 
 func (n *DatabaseNode) Descriptor() Descriptor {
 	return Descriptor{

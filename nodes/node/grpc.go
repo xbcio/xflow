@@ -18,12 +18,12 @@ import (
 // GRPCNode implements xflow.grpc — executes a gRPC unary call.
 type GRPCNode struct {
 	BaseNode
-	Service  string
-	Method   string
-	Host     string
-	Request  map[string]any
-	Meta     map[string]any
-	Options  map[string]any
+	Service string
+	Method  string
+	Host    string
+	Request map[string]any
+	Meta    map[string]any
+	Options map[string]any
 }
 
 // GRPC creates a gRPC unary call node.

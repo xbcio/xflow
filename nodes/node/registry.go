@@ -6,26 +6,21 @@ import (
 )
 
 type registry struct {
-	mu       sync.RWMutex
-	handlers map[string]TaskHandler            // type -> latest handler
-	versioned map[string]map[int]TaskHandler   // type -> version -> handler
+	mu        sync.RWMutex
+	handlers  map[string]ActionHandler         // type -> latest handler
+	versioned map[string]map[int]ActionHandler // type -> version -> handler
 }
 
 var globalRegistry = &registry{
-	handlers:  make(map[string]TaskHandler),
-	versioned: make(map[string]map[int]TaskHandler),
+	handlers:  make(map[string]ActionHandler),
+	versioned: make(map[string]map[int]ActionHandler),
 }
 
 // Register registers a handler in the global registry.
-// h must implement DescriptorProvider; panics otherwise.
 // If h embeds BaseNode, its version is used; otherwise defaults to v1.
 // The latest registered version becomes the default for Lookup.
-func Register(h TaskHandler) {
-	p, ok := h.(DescriptorProvider)
-	if !ok {
-		panic(fmt.Sprintf("node.Register: handler %T must implement DescriptorProvider", h))
-	}
-	t := p.Descriptor().Type
+func Register(h ActionHandler) {
+	t := h.Descriptor().Type
 	if t == "" {
 		panic(fmt.Sprintf("node.Register: handler %T has empty Descriptor().Type", h))
 	}
@@ -39,7 +34,7 @@ func Register(h TaskHandler) {
 	defer globalRegistry.mu.Unlock()
 
 	if globalRegistry.versioned[t] == nil {
-		globalRegistry.versioned[t] = make(map[int]TaskHandler)
+		globalRegistry.versioned[t] = make(map[int]ActionHandler)
 	}
 	globalRegistry.versioned[t][version] = h
 
@@ -56,7 +51,7 @@ func Register(h TaskHandler) {
 }
 
 // Lookup finds the latest version of a handler by node type.
-func Lookup(nodeType string) (TaskHandler, bool) {
+func Lookup(nodeType string) (ActionHandler, bool) {
 	globalRegistry.mu.RLock()
 	defer globalRegistry.mu.RUnlock()
 	h, ok := globalRegistry.handlers[nodeType]
@@ -64,7 +59,7 @@ func Lookup(nodeType string) (TaskHandler, bool) {
 }
 
 // LookupVersion finds a specific version of a handler by node type.
-func LookupVersion(nodeType string, version int) (TaskHandler, bool) {
+func LookupVersion(nodeType string, version int) (ActionHandler, bool) {
 	globalRegistry.mu.RLock()
 	defer globalRegistry.mu.RUnlock()
 	versions, ok := globalRegistry.versioned[nodeType]

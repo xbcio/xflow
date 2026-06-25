@@ -43,6 +43,13 @@ func WaitDuration(duration string) *WaitNode {
 	return &WaitNode{Mode: WaitModeTimer, Duration: duration}
 }
 
+// WithTimeout configures a maximum wait duration before routing to the timeout
+// output. It is valid for signal and timer waits.
+func (n *WaitNode) WithTimeout(duration string) *WaitNode {
+	n.TimeoutStr = duration
+	return n
+}
+
 func (n *WaitNode) Descriptor() Descriptor {
 	return Descriptor{
 		Type:        WaitNodeType,

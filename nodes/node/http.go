@@ -24,6 +24,10 @@ type HTTPNode struct {
 	Options        map[string]any
 }
 
+// DefaultHTTPClient is used by HTTPNode.Execute. Tests and embedded runtimes
+// may replace it to inject custom transports.
+var DefaultHTTPClient = &http.Client{}
+
 // HTTP creates an HTTP request node.
 //
 //	node.HTTP("POST", "https://api.example.com/users").Body(data).Auth("cred")
@@ -31,10 +35,10 @@ func HTTP(method, rawURL string) *HTTPNode {
 	return &HTTPNode{Method: method, URL: rawURL}
 }
 
-func (n *HTTPNode) SetHeaders(h map[string]any) *HTTPNode  { n.Headers = h; return n }
-func (n *HTTPNode) SetBody(body any) *HTTPNode             { n.Body = body; return n }
-func (n *HTTPNode) SetQuery(q map[string]any) *HTTPNode    { n.Query = q; return n }
-func (n *HTTPNode) Auth(credential string) *HTTPNode       { n.Authentication = credential; return n }
+func (n *HTTPNode) SetHeaders(h map[string]any) *HTTPNode { n.Headers = h; return n }
+func (n *HTTPNode) SetBody(body any) *HTTPNode            { n.Body = body; return n }
+func (n *HTTPNode) SetQuery(q map[string]any) *HTTPNode   { n.Query = q; return n }
+func (n *HTTPNode) Auth(credential string) *HTTPNode      { n.Authentication = credential; return n }
 func (n *HTTPNode) Timeout(d string) *HTTPNode {
 	if n.Options == nil {
 		n.Options = map[string]any{}
@@ -154,7 +158,8 @@ func (n *HTTPNode) Execute(ctx context.Context, input *Input) (*Output, error) {
 		timeout = input.Timeout
 	}
 
-	client := &http.Client{Timeout: timeout}
+	client := *DefaultHTTPClient
+	client.Timeout = timeout
 	resp, err := client.Do(req)
 	if err != nil {
 		return &Output{

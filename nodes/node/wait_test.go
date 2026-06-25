@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/xbcio/xflow/node"
+	"github.com/xbcio/xflow/nodes/node"
 )
 
 func TestWait_Factory_Signal(t *testing.T) {
@@ -23,6 +23,15 @@ func TestWait_Factory_Duration(t *testing.T) {
 	}
 	if params["duration"] != "5m" {
 		t.Fatalf("expected duration=5m, got %v", params["duration"])
+	}
+}
+
+func TestWait_WithTimeoutAddsTimeoutParam(t *testing.T) {
+	b := node.Wait("order_paid").WithTimeout("30m")
+	params := b.RawParams().(map[string]any)
+
+	if params["timeout"] != "30m" {
+		t.Fatalf("timeout = %v, want 30m", params["timeout"])
 	}
 }
 

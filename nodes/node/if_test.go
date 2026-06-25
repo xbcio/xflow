@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/xbcio/xflow/node"
+	"github.com/xbcio/xflow/nodes/node"
 )
 
 func TestIF_Factory(t *testing.T) {

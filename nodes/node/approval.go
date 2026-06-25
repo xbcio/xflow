@@ -43,6 +43,14 @@ func Approval(approvers []string, mode ApprovalMode) *ApprovalNode {
 	return &ApprovalNode{Approvers: approvers, Mode: mode}
 }
 
+// WithTimeout configures how long the approval node waits before routing to
+// the timeout output or rejecting automatically.
+func (n *ApprovalNode) WithTimeout(duration string, action string) *ApprovalNode {
+	n.TimeoutStr = duration
+	n.TimeoutAction = action
+	return n
+}
+
 func (n *ApprovalNode) Descriptor() Descriptor {
 	return Descriptor{
 		Type:        ApprovalNodeType,
@@ -97,9 +105,16 @@ func (n *ApprovalNode) PrepareSuspend(_ context.Context, input *Input) (*Suspend
 		}, nil
 
 	case ApprovalAll:
+		if len(getInternalDecisions(input.Data)) > 0 {
+			return &SuspendSpec{
+				Mode:    ModeSignal,
+				Signals: []string{approvalSignal(input.NodeName)},
+				Timeout: params.Timeout,
+			}, nil
+		}
 		return &SuspendSpec{
-			Mode:    ModeSignal,
-			Signals: []string{approvalSignal(input.NodeName)},
+			Mode:    ModeMultiSignal,
+			Signals: approverSignals(input.NodeName, params.Approvers),
 			Timeout: params.Timeout,
 		}, nil
 
@@ -132,6 +147,9 @@ func (n *ApprovalNode) OnResume(_ context.Context, input *Input, signal *SignalP
 			return &Output{Data: map[string]any{"reason": "timeout"}, Port: "timeout"}, nil
 		}
 	}
+	if params.Mode == ApprovalAll && len(signal.All) > 0 {
+		return n.handleAllSignals(params, input, signal.All)
+	}
 
 	actionRaw, ok := signal.Data["action"]
 	if !ok {
@@ -141,13 +159,31 @@ func (n *ApprovalNode) OnResume(_ context.Context, input *Input, signal *SignalP
 	if !ok {
 		return nil, fmt.Errorf("approval signal \"action\" field is not a string")
 	}
+	approver, err := validateApprovalApprover(params, signal.Data)
+	if err != nil {
+		return nil, err
+	}
+	if params.Mode == ApprovalSequential {
+		if err := validateCurrentSequentialApprover(params, input.Data, approver); err != nil {
+			return nil, err
+		}
+	}
 
 	switch action {
 	case "approve":
-		return n.handleApprove(params, input, signal)
+		return n.handleApprove(params, input, signal, approver)
 	case "reject":
+		if params.Mode == ApprovalAll && hasApproverDecision(getDecisions(input.Data), approver) {
+			return nil, fmt.Errorf("approval already received from approver %q", approver)
+		}
+		decisions := appendDecision(getDecisions(input.Data), approver, "reject", signal.Data["comment"])
 		return &Output{
-			Data: map[string]any{"approved": false, "approver": signal.Data["approver"], "comment": signal.Data["comment"]},
+			Data: approvalOutput(input.Data, map[string]any{
+				"approved":  false,
+				"approver":  approver,
+				"comment":   signal.Data["comment"],
+				"decisions": decisions,
+			}),
 			Port: "rejected",
 		}, nil
 	case "return":
@@ -157,42 +193,43 @@ func (n *ApprovalNode) OnResume(_ context.Context, input *Input, signal *SignalP
 	return nil, fmt.Errorf("unknown approval action: %s", action)
 }
 
-func (n *ApprovalNode) handleApprove(params *ApprovalParams, input *Input, signal *SignalPayload) (*Output, error) {
+func (n *ApprovalNode) handleApprove(params *ApprovalParams, input *Input, signal *SignalPayload, approver string) (*Output, error) {
 	switch params.Mode {
 	case ApprovalAny:
 		return &Output{
-			Data: map[string]any{"approved": true, "approver": signal.Data["approver"], "comment": signal.Data["comment"]},
+			Data: approvalOutput(input.Data, map[string]any{"approved": true, "approver": approver, "comment": signal.Data["comment"]}),
 			Port: "approved",
 		}, nil
 
 	case ApprovalAll:
 		decisions := getDecisions(input.Data)
-		decisions = append(decisions, map[string]any{
-			"approver": signal.Data["approver"],
-			"action":   "approve",
-			"comment":  signal.Data["comment"],
-		})
+		if hasApproverDecision(decisions, approver) {
+			return nil, fmt.Errorf("approval already received from approver %q", approver)
+		}
+		decisions = appendDecision(decisions, approver, "approve", signal.Data["comment"])
 		if len(decisions) < len(params.Approvers) {
 			return &Output{
 				Resuspend: true,
-				Data:      map[string]any{"_decisions": decisions},
+				Data:      approvalOutput(input.Data, map[string]any{"_decisions": decisions, "decisions": decisions}),
 			}, nil
 		}
 		return &Output{
-			Data: map[string]any{"approved": true, "decisions": decisions},
+			Data: approvalOutput(input.Data, map[string]any{"approved": true, "decisions": decisions}),
 			Port: "approved",
 		}, nil
 
 	case ApprovalSequential:
-		idx := getApproverIndex(input.Data) + 1
-		if idx < len(params.Approvers) {
+		currentIdx := getApproverIndex(input.Data)
+		decisions := appendDecision(getDecisions(input.Data), approver, "approve", signal.Data["comment"])
+		nextIdx := currentIdx + 1
+		if nextIdx < len(params.Approvers) {
 			return &Output{
 				Resuspend: true,
-				Data:      map[string]any{"_approver_idx": idx},
+				Data:      approvalOutput(input.Data, map[string]any{"_approver_idx": nextIdx, "decisions": decisions}),
 			}, nil
 		}
 		return &Output{
-			Data: map[string]any{"approved": true},
+			Data: approvalOutput(input.Data, map[string]any{"approved": true, "decisions": decisions}),
 			Port: "approved",
 		}, nil
 	}
@@ -200,8 +237,137 @@ func (n *ApprovalNode) handleApprove(params *ApprovalParams, input *Input, signa
 	return nil, nil
 }
 
+func (n *ApprovalNode) handleAllSignals(params *ApprovalParams, input *Input, all map[string]map[string]any) (*Output, error) {
+	decisions := make([]map[string]any, 0, len(params.Approvers))
+	var rejectedApprover string
+	var rejectedComment any
+
+	for _, approver := range params.Approvers {
+		signalName := approverSignal(input.NodeName, approver)
+		payload, ok := all[signalName]
+		if !ok {
+			return nil, fmt.Errorf("approval signal missing payload for %q", signalName)
+		}
+
+		payloadApprover, err := validateApprovalApprover(params, payload)
+		if err != nil {
+			return nil, err
+		}
+		if payloadApprover != approver {
+			return nil, fmt.Errorf("approval signal %q expected approver %q, got %q", signalName, approver, payloadApprover)
+		}
+
+		actionRaw, ok := payload["action"]
+		if !ok {
+			return nil, fmt.Errorf("approval signal missing \"action\" field")
+		}
+		action, ok := actionRaw.(string)
+		if !ok {
+			return nil, fmt.Errorf("approval signal \"action\" field is not a string")
+		}
+		if action != "approve" && action != "reject" {
+			return nil, fmt.Errorf("unknown approval action: %s", action)
+		}
+
+		decisions = appendDecision(decisions, approver, action, payload["comment"])
+		if action == "reject" {
+			rejectedApprover = approver
+			rejectedComment = payload["comment"]
+			break
+		}
+	}
+
+	if rejectedApprover != "" {
+		return &Output{
+			Data: approvalOutput(input.Data, map[string]any{
+				"approved":  false,
+				"approver":  rejectedApprover,
+				"comment":   rejectedComment,
+				"decisions": decisions,
+			}),
+			Port: "rejected",
+		}, nil
+	}
+
+	return &Output{
+		Data: approvalOutput(input.Data, map[string]any{
+			"approved":  true,
+			"decisions": decisions,
+		}),
+		Port: "approved",
+	}, nil
+}
+
+func approvalOutput(base map[string]any, overlay map[string]any) map[string]any {
+	out := make(map[string]any, len(base)+len(overlay))
+	for k, v := range base {
+		out[k] = v
+	}
+	for k, v := range overlay {
+		out[k] = v
+	}
+	return out
+}
+
+func validateCurrentSequentialApprover(params *ApprovalParams, data map[string]any, approver string) error {
+	currentIdx := getApproverIndex(data)
+	if currentIdx >= len(params.Approvers) {
+		return fmt.Errorf("approver index %d out of range (total %d)", currentIdx, len(params.Approvers))
+	}
+	currentApprover := params.Approvers[currentIdx]
+	if approver != currentApprover {
+		return fmt.Errorf("approval expected from approver %q, got %q", currentApprover, approver)
+	}
+	return nil
+}
+
+func validateApprovalApprover(params *ApprovalParams, data map[string]any) (string, error) {
+	if data == nil {
+		return "", fmt.Errorf("approval signal missing \"approver\" field")
+	}
+	approverRaw, ok := data["approver"]
+	if !ok {
+		return "", fmt.Errorf("approval signal missing \"approver\" field")
+	}
+	approver, ok := approverRaw.(string)
+	if !ok {
+		return "", fmt.Errorf("approval signal \"approver\" field is not a string")
+	}
+	for _, allowed := range params.Approvers {
+		if approver == allowed {
+			return approver, nil
+		}
+	}
+	return "", fmt.Errorf("approval signal approver %q is not authorized", approver)
+}
+
+func appendDecision(decisions []map[string]any, approver string, action string, comment any) []map[string]any {
+	return append(decisions, map[string]any{
+		"approver": approver,
+		"action":   action,
+		"comment":  comment,
+	})
+}
+
+func hasApproverDecision(decisions []map[string]any, approver string) bool {
+	for _, decision := range decisions {
+		if decision["approver"] == approver {
+			return true
+		}
+	}
+	return false
+}
+
 func approvalSignal(nodeName string) string {
 	return nodeName + "/approval"
+}
+
+func approverSignals(nodeName string, approvers []string) []string {
+	signals := make([]string, 0, len(approvers))
+	for _, approver := range approvers {
+		signals = append(signals, approverSignal(nodeName, approver))
+	}
+	return signals
 }
 
 func approverSignal(nodeName, approver string) string {
@@ -285,10 +451,28 @@ func getDecisions(data map[string]any) []map[string]any {
 	if data == nil {
 		return nil
 	}
+	v, ok := data["decisions"]
+	if !ok {
+		v, ok = data["_decisions"]
+	}
+	if !ok {
+		return nil
+	}
+	return parseDecisionList(v)
+}
+
+func getInternalDecisions(data map[string]any) []map[string]any {
+	if data == nil {
+		return nil
+	}
 	v, ok := data["_decisions"]
 	if !ok {
 		return nil
 	}
+	return parseDecisionList(v)
+}
+
+func parseDecisionList(v any) []map[string]any {
 	switch d := v.(type) {
 	case []map[string]any:
 		return d
