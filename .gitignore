@@ -36,6 +36,11 @@ docs/plans.worktrees
 bin/
 data/
 
+# Codex build/module cache
+.codex-gocache/
+.codex-gomodcache/
+.tmp/
+
 # Claude Code local files
 .claude/worktrees/
 .claude/plans/
