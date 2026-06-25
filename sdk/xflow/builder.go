@@ -1,28 +1,29 @@
 package xflow
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 
-	"github.com/xbcio/xflow/node"
+	"github.com/xbcio/xflow/nodes/node"
 	"github.com/xbcio/xflow/types"
 )
 
 // WorkflowBuilder is a CDK-style builder for workflow definitions.
 // It holds no runtime state — only the definition.
 type WorkflowBuilder struct {
-	name    string
-	nodes   []*nodeEntry
-	refs    []*NodeRef
-	edges   []edge
-	direct  map[string]node.TaskHandler // direct handlers (local mode only)
+	name     string
+	nodes    []*nodeEntry
+	refs     []*NodeRef
+	edges    []edge
+	direct   map[string]types.ActionHandler // direct handlers (local mode only)
+	handlers map[string]types.ActionHandler // portable typed handlers
 }
 
 type nodeEntry struct {
 	name             string
-	builder          node.Builder     // nil when using the direct TaskHandler path
-	handler          node.TaskHandler // local-only direct handler
+	builder          node.Builder        // nil when using the direct ActionHandler path
+	handler          types.ActionHandler // local-only direct handler
+	kind             types.NodeKind
 	onError          node.OnError
 	normalizedParams map[string]any
 }
@@ -34,56 +35,63 @@ type edge struct {
 	dstPort string
 }
 
-// NewWorkflow creates a new WorkflowBuilder with the given name.
-func NewWorkflow(name string) *WorkflowBuilder {
+// Workflow creates a workflow builder with a concise user-facing name.
+func Workflow(name string) *WorkflowBuilder {
 	return &WorkflowBuilder{
-		name:   name,
-		direct: make(map[string]node.TaskHandler),
+		name:     name,
+		direct:   make(map[string]types.ActionHandler),
+		handlers: make(map[string]types.ActionHandler),
 	}
 }
 
-// NodeRef is returned by AddNode and used to reference output/input ports in Connect.
+// NodeRef references a node's input and output ports in Connect.
 type NodeRef struct {
 	name string
 	body *WorkflowBuilder
 }
 
-// Out returns a reference to the named output port of this node.
-func (n *NodeRef) Out(port string) node.OutputPort {
-	return node.OutputPort{Node: n.name, Port: port}
+// Output returns a reference to the named output port of this node.
+func (n *NodeRef) Output(port string) types.OutputPort {
+	return types.OutputPort{Node: n.name, Port: port}
 }
 
-// In returns a reference to the named input port of this node.
-func (n *NodeRef) In(port string) node.InputPort {
-	return node.InputPort{Node: n.name, Port: port}
+// Input returns a reference to the named input port of this node.
+func (n *NodeRef) Input(port string) types.InputPort {
+	return types.InputPort{Node: n.name, Port: port}
 }
 
-// SetBody attaches a sub-workflow as the loop/split body.
-// The sub-workflow is compiled and stored in the node's parameters at build time.
-func (n *NodeRef) SetBody(body *WorkflowBuilder) *NodeRef {
+// Body attaches a sub-workflow as the loop/split body.
+func (n *NodeRef) Body(body *WorkflowBuilder) *NodeRef {
 	n.body = body
 	return n
 }
 
-// AddNode adds a node to the workflow and returns a NodeRef.
-//
-// builder may be:
-//   - node.Builder (recommended; works with all engine types)
-//   - node.TaskHandler (local mode only; bypasses the global registry)
-func (w *WorkflowBuilder) AddNode(name string, builder any) *NodeRef {
-	entry := &nodeEntry{name: name}
-	switch b := builder.(type) {
-	case node.Builder:
-		entry.builder = b
-		entry.onError = b.OnErrorStrategy()
-	case node.TaskHandler:
-		entry.handler = b
-		w.direct[name] = b
-	default:
-		panic(fmt.Sprintf("AddNode %q: builder must implement node.Builder or node.TaskHandler, got %T", name, builder))
+// Node adds a portable typed node to the workflow and returns its reference.
+func (w *WorkflowBuilder) Node(name string, builder node.Builder) *NodeRef {
+	entry := &nodeEntry{
+		name:    name,
+		builder: builder,
+		onError: builder.OnErrorStrategy(),
 	}
+	if hb, ok := builder.(node.HandlerCarrier); ok {
+		h := hb.Handler()
+		if h != nil {
+			w.handlers[builder.NodeType()] = h
+		}
+	}
+	return w.addNode(entry)
+}
+
+// LocalNode adds a local-only direct handler node to the workflow.
+func (w *WorkflowBuilder) LocalNode(name string, handler types.ActionHandler) *NodeRef {
+	entry := &nodeEntry{name: name, handler: handler}
+	w.direct[name] = handler
+	return w.addNode(entry)
+}
+
+func (w *WorkflowBuilder) addNode(entry *nodeEntry) *NodeRef {
 	w.nodes = append(w.nodes, entry)
-	ref := &NodeRef{name: name}
+	ref := &NodeRef{name: entry.name}
 	w.refs = append(w.refs, ref)
 	return ref
 }
@@ -92,29 +100,39 @@ func (w *WorkflowBuilder) AddNode(name string, builder any) *NodeRef {
 //
 // dst may be:
 //   - *NodeRef       — connects to the dst node's "main" input port
-//   - node.InputPort — connects to the specified input port
-func (w *WorkflowBuilder) Connect(src node.OutputPort, dst any) *WorkflowBuilder {
-	e := edge{srcNode: src.Node, srcPort: src.Port}
+//   - types.InputPort — connects to the specified input port
+func (w *WorkflowBuilder) Connect(src any, dst any) *WorkflowBuilder {
+	e := edge{}
+	switch s := src.(type) {
+	case *NodeRef:
+		e.srcNode = s.name
+		e.srcPort = "main"
+	case types.OutputPort:
+		e.srcNode = s.Node
+		e.srcPort = s.Port
+	default:
+		panic(fmt.Sprintf("Connect: src must be *NodeRef or types.OutputPort, got %T", src))
+	}
 	switch d := dst.(type) {
 	case *NodeRef:
 		e.dstNode = d.name
 		e.dstPort = "main"
-	case node.InputPort:
+	case types.InputPort:
 		e.dstNode = d.Node
 		e.dstPort = d.Port
 	default:
-		panic(fmt.Sprintf("Connect: dst must be *NodeRef or node.InputPort, got %T", dst))
+		panic(fmt.Sprintf("Connect: dst must be *NodeRef or types.InputPort, got %T", dst))
 	}
 	w.edges = append(w.edges, e)
 	return w
 }
 
-// Build validates the workflow and returns a *types.WorkflowDef.
-func (w *WorkflowBuilder) Build() (*types.WorkflowDef, error) {
+// build validates the workflow and returns a *types.WorkflowDef.
+func (w *WorkflowBuilder) build() (*types.WorkflowDef, error) {
 	// Compile body sub-workflows and inject into node params.
 	for i, ref := range w.refs {
 		if ref.body != nil {
-			bodyDef, err := ref.body.Build()
+			bodyDef, err := ref.body.build()
 			if err != nil {
 				return nil, fmt.Errorf("node %q body: %w", ref.name, err)
 			}
@@ -139,15 +157,20 @@ func (w *WorkflowBuilder) Build() (*types.WorkflowDef, error) {
 			// Already normalized (e.g. body was injected above).
 			continue
 		}
-		h, found := node.Lookup(entry.builder.NodeType())
-		if !found {
-			return nil, fmt.Errorf("node %q: handler type %q not found in registry", entry.name, entry.builder.NodeType())
-		}
-		dp, ok := h.(node.DescriptorProvider)
+		dp, ok := entry.builder.(types.DescriptorProvider)
 		if !ok {
-			continue
+			h, found := node.Lookup(entry.builder.NodeType())
+			if !found {
+				return nil, fmt.Errorf("node %q: handler type %q not found in registry", entry.name, entry.builder.NodeType())
+			}
+			dp = h
 		}
 		desc := dp.Descriptor()
+		if desc.Kind != "" {
+			entry.kind = desc.Kind
+		} else {
+			entry.kind = types.NodeKindAction
+		}
 		params, err := normalizeParams(entry.builder.RawParams())
 		if err != nil {
 			return nil, fmt.Errorf("node %q: %w", entry.name, err)
@@ -179,15 +202,20 @@ func (w *WorkflowBuilder) Build() (*types.WorkflowDef, error) {
 		}
 		if entry.builder != nil {
 			nodeType = entry.builder.NodeType()
+			if entry.kind == "" {
+				entry.kind = types.NodeKindAction
+			}
 			if v, ok := entry.builder.(interface{ NodeVersion() int }); ok {
 				nodeVersion = v.NodeVersion()
 			}
 		} else {
 			nodeType = "__direct__/" + entry.name
+			entry.kind = types.NodeKindAction
 		}
 		def.Nodes = append(def.Nodes, types.NodeDef{
 			Name:       entry.name,
 			Type:       nodeType,
+			Kind:       entry.kind,
 			Version:    nodeVersion,
 			Parameters: params,
 			OnError:    string(entry.onError),
@@ -207,32 +235,33 @@ func (w *WorkflowBuilder) Build() (*types.WorkflowDef, error) {
 	return def, nil
 }
 
-// directHandlers returns the map of node name → direct TaskHandler.
-func (w *WorkflowBuilder) directHandlers() map[string]node.TaskHandler {
+// directHandlers returns the map of node name → direct ActionHandler.
+func (w *WorkflowBuilder) directHandlers() map[string]types.ActionHandler {
 	return w.direct
 }
 
-// Run is a convenience method that executes the workflow synchronously in a
-// temporary local engine. Suitable for testing and scripting.
-func (w *WorkflowBuilder) Run(ctx context.Context, params map[string]any) (types.Result, error) {
-	eng, err := NewLocal()
-	if err != nil {
-		return types.Result{}, err
-	}
-	defer eng.Stop()
-
-	id, err := eng.Submit(ctx, w, params)
-	if err != nil {
-		return types.Result{}, err
-	}
-	return eng.Wait(ctx, id)
+// workflowHandlers returns portable typed handlers declared by this workflow.
+func (w *WorkflowBuilder) workflowHandlers() map[string]types.ActionHandler {
+	handlers := make(map[string]types.ActionHandler)
+	w.collectWorkflowHandlers(handlers)
+	return handlers
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+func (w *WorkflowBuilder) collectWorkflowHandlers(handlers map[string]types.ActionHandler) {
+	if w == nil {
+		return
+	}
+	for nodeType, h := range w.handlers {
+		handlers[nodeType] = h
+	}
+	for _, ref := range w.refs {
+		if ref.body != nil {
+			ref.body.collectWorkflowHandlers(handlers)
+		}
+	}
+}
 
-func validateParams(nodeName string, specs []node.ParamSpec, params map[string]any) error {
+func validateParams(nodeName string, specs []types.ParamSpec, params map[string]any) error {
 	for _, spec := range specs {
 		val, exists := params[spec.Name]
 		if !exists || val == nil {

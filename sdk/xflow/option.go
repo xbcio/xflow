@@ -3,7 +3,9 @@ package xflow
 import (
 	"time"
 
+	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/nodes/node"
 	"github.com/xbcio/xflow/store"
 )
 
@@ -15,55 +17,31 @@ type ClusterConfig struct {
 	// (e.g. sqlstore over GORM, or memstore for tests). Optional; nil =
 	// pure Redis mode with no durable persistence.
 	Store store.Store
+	// DisableConsumer leaves this SDK instance as an API/control client only:
+	// it can submit, inspect, cancel, and signal executions, but it will not
+	// consume Asynq tasks or run timeout monitoring in this process.
+	DisableConsumer bool
 }
 
 // Option configures an Engine.
 // Common options are valid for New(), NewLocal(), and NewCluster().
 type Option func(*engineConfig)
 
-// Backend provides all components needed to run the engine.
-// Both local.Adapter and cluster.Adapter satisfy this interface.
-type Backend interface {
-	State() engine.StateBackend
-	Queue() engine.TaskQueue
-	Registry() engine.HandlerRegistry
-	Bind(eng *engine.Engine) func()
-}
-
 type engineConfig struct {
-	state       engine.StateBackend
+	state       engine.StateStore
 	queue       engine.TaskQueue
 	registry    engine.HandlerRegistry
 	hooks       engine.Hooks
 	logger      engine.Logger
-	waiter      Waiter
-	backend     Backend
+	waiter      backend.Waiter
 	concurrency int
+	nodes       []*node.Definition
 	stopFns     []func()
+
+	allowDirectHandlers bool
 }
 
-// WithBackend sets the Backend that provides State, Queue, Registry, and lifecycle binding.
-// For standard setups, use NewLocal or NewCluster instead.
-func WithBackend(b Backend) Option {
-	return func(c *engineConfig) { c.backend = b }
-}
-
-// WithState sets the StateBackend implementation directly.
-func WithState(s engine.StateBackend) Option {
-	return func(c *engineConfig) { c.state = s }
-}
-
-// WithQueue sets the TaskQueue implementation directly.
-func WithQueue(q engine.TaskQueue) Option {
-	return func(c *engineConfig) { c.queue = q }
-}
-
-// WithRegistry sets the handler registry.
-func WithRegistry(r engine.HandlerRegistry) Option {
-	return func(c *engineConfig) { c.registry = r }
-}
-
-// WithConcurrency sets the worker pool size.
+// WithConcurrency sets the local queue consumer pool size.
 // Default is 4 for NewLocal, 10 for NewCluster.
 func WithConcurrency(n int) Option {
 	return func(c *engineConfig) {
@@ -83,14 +61,13 @@ func WithLogger(l engine.Logger) Option {
 	return func(c *engineConfig) { c.logger = l }
 }
 
-// WithWaiter sets a Waiter for channel-based blocking.
-func WithWaiter(w Waiter) Option {
-	return func(c *engineConfig) { c.waiter = w }
-}
-
-// WithStopFunc registers a cleanup function called by Engine.Stop().
-func WithStopFunc(fn func()) Option {
-	return func(c *engineConfig) { c.stopFns = append(c.stopFns, fn) }
+// WithNodes declares custom node definitions this process can execute. Use it
+// on consumer-capable cluster processes so workers can resolve node types even
+// before they submit any workflow themselves.
+func WithNodes(defs ...*node.Definition) Option {
+	return func(c *engineConfig) {
+		c.nodes = append(c.nodes, defs...)
+	}
 }
 
 // SubmitOption configures a single workflow submission.

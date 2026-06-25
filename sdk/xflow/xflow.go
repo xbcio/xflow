@@ -6,80 +6,29 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/xbcio/xflow/backend"
+	backendasynq "github.com/xbcio/xflow/backend/asynq"
+	backendmemory "github.com/xbcio/xflow/backend/memory"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
-	"github.com/xbcio/xflow/node"
-	"github.com/xbcio/xflow/sdk/internal/adapter/cluster"
-	"github.com/xbcio/xflow/sdk/internal/adapter/local"
+	"github.com/xbcio/xflow/execution"
+	"github.com/xbcio/xflow/nodes/node"
 	"github.com/xbcio/xflow/types"
 )
 
-// Waiter provides channel-based blocking for execution completion.
-// Implementations that support event-driven notification (e.g. local mode)
-// should implement this interface. If not provided, Wait() polls StateBackend.
-type Waiter interface {
-	WaitDone(ctx context.Context, id types.ExecutionID) (types.Result, error)
-}
-
 // Engine is the user-facing workflow engine.
 type Engine struct {
-	eng      *engine.Engine
-	registry engine.HandlerRegistry
-	waiter   Waiter
-	stopFns  []func()
-}
-
-// New creates an Engine with explicitly injected backends.
-// Use WithBackend for standard setups, or WithState+WithQueue for custom combinations.
-//
-// Example:
-//
-//	eng, err := xflow.New(xflow.WithBackend(local.New(local.WithConcurrency(8))))
-//	defer eng.Stop()
-//
-// For common setups, use NewLocal or NewCluster instead.
-func New(opts ...Option) (*Engine, error) {
-	cfg := &engineConfig{}
-	for _, o := range opts {
-		o(cfg)
-	}
-
-	if cfg.backend != nil {
-		return newFromConfig(cfg, cfg.backend)
-	}
-
-	if cfg.state == nil {
-		return nil, errors.New("xflow.New: WithBackend or WithState is required")
-	}
-	if cfg.queue == nil {
-		return nil, errors.New("xflow.New: WithBackend or WithQueue is required")
-	}
-
-	var engOpts []engine.Option
-	if cfg.registry != nil {
-		engOpts = append(engOpts, engine.WithRegistry(cfg.registry))
-	}
-	if cfg.hooks != nil {
-		engOpts = append(engOpts, engine.WithHooks(cfg.hooks))
-	}
-	if cfg.logger != nil {
-		engOpts = append(engOpts, engine.WithLogger(cfg.logger))
-	}
-
-	eng := engine.New(cfg.state, cfg.queue, engOpts...)
-
-	return &Engine{
-		eng:      eng,
-		registry: cfg.registry,
-		waiter:   cfg.waiter,
-		stopFns:  cfg.stopFns,
-	}, nil
+	eng                 *engine.Engine
+	registry            engine.HandlerRegistry
+	waiter              backend.Waiter
+	stopFns             []func()
+	allowDirectHandlers bool
 }
 
 // NewLocal creates an in-process engine backed by in-memory state and a goroutine pool.
 // Zero external dependencies — suitable for development, testing, and single-process use.
 func NewLocal(opts ...Option) (*Engine, error) {
-	cfg := &engineConfig{concurrency: 4}
+	cfg := &engineConfig{concurrency: 4, allowDirectHandlers: true}
 	for _, o := range opts {
 		o(cfg)
 	}
@@ -87,12 +36,14 @@ func NewLocal(opts ...Option) (*Engine, error) {
 		cfg.concurrency = 4
 	}
 
-	backend := local.New(local.WithConcurrency(cfg.concurrency))
-	return newFromConfig(cfg, backend)
+	provider := backendmemory.New(backendmemory.WithConcurrency(cfg.concurrency))
+	return newFromConfig(cfg, provider)
 }
 
 // NewCluster creates a distributed engine backed by Redis (Asynq) and an
-// optional persistent Store (any store.Store implementation).
+// optional persistent Store (any store.Store implementation). Node tasks are
+// consumed through the reusable execution Dispatcher and embedded Runner so
+// cluster mode uses the same lease/result boundary as the future server backend.
 //
 // Example:
 //
@@ -111,8 +62,9 @@ func NewCluster(clusterCfg ClusterConfig, opts ...Option) (*Engine, error) {
 		cfg.concurrency = 10
 	}
 
-	a, err := cluster.New(clusterCfg.RedisAddr, clusterCfg.Store,
-		cluster.WithConcurrency(cfg.concurrency),
+	a, err := backendasynq.New(clusterCfg.RedisAddr, clusterCfg.Store,
+		backendasynq.WithConcurrency(cfg.concurrency),
+		backendasynq.WithConsumer(!clusterCfg.DisableConsumer),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cluster: %w", err)
@@ -121,27 +73,24 @@ func NewCluster(clusterCfg ClusterConfig, opts ...Option) (*Engine, error) {
 	return newFromConfig(cfg, a)
 }
 
-// newFromConfig assembles an Engine from a resolved engineConfig and a Backend.
-func newFromConfig(cfg *engineConfig, backend Backend) (*Engine, error) {
+// newFromConfig assembles an Engine from a resolved engineConfig and a backend provider.
+func newFromConfig(cfg *engineConfig, provider backend.Provider) (*Engine, error) {
 	if cfg.state == nil {
-		cfg.state = backend.State()
+		cfg.state = provider.State()
 	}
 	if cfg.queue == nil {
-		cfg.queue = backend.Queue()
+		cfg.queue = provider.Queue()
 	}
 	if cfg.registry == nil {
-		cfg.registry = backend.Registry()
+		cfg.registry = provider.Registry()
 	}
 	if cfg.waiter == nil {
-		if w, ok := backend.(Waiter); ok {
+		if w, ok := provider.(backend.Waiter); ok {
 			cfg.waiter = w
 		}
 	}
 
 	var engOpts []engine.Option
-	if cfg.registry != nil {
-		engOpts = append(engOpts, engine.WithRegistry(cfg.registry))
-	}
 	if cfg.hooks != nil {
 		engOpts = append(engOpts, engine.WithHooks(cfg.hooks))
 	}
@@ -152,24 +101,46 @@ func newFromConfig(cfg *engineConfig, backend Backend) (*Engine, error) {
 	eng := engine.New(cfg.state, cfg.queue, engOpts...)
 
 	e := &Engine{
-		eng:      eng,
-		registry: cfg.registry,
-		waiter:   cfg.waiter,
-		stopFns:  cfg.stopFns,
+		eng:                 eng,
+		registry:            cfg.registry,
+		waiter:              cfg.waiter,
+		stopFns:             cfg.stopFns,
+		allowDirectHandlers: cfg.allowDirectHandlers,
 	}
 
-	stop := backend.Bind(eng)
+	if err := e.registerNodeDefinitions(cfg.nodes); err != nil {
+		return nil, err
+	}
+
+	stop := provider.Bind(eng)
 	e.stopFns = append(e.stopFns, stop)
 
 	return e, nil
 }
 
-// Stop shuts down background workers and releases resources.
+// Stop shuts down background services and releases resources.
 // Stop functions are called in LIFO order.
 func (e *Engine) Stop() {
 	for i := len(e.stopFns) - 1; i >= 0; i-- {
 		e.stopFns[i]()
 	}
+}
+
+func (e *Engine) registerNodeDefinitions(defs []*node.Definition) error {
+	if len(defs) == 0 {
+		return nil
+	}
+	lr, ok := e.registry.(*execution.Registry)
+	if !ok {
+		return fmt.Errorf("registry does not support node definition registration")
+	}
+	for _, def := range defs {
+		if def == nil {
+			continue
+		}
+		lr.RegisterGlobal(def.Descriptor().Type, def)
+	}
+	return nil
 }
 
 // Submit builds the workflow definition and starts an asynchronous execution.
@@ -179,20 +150,24 @@ func (e *Engine) Submit(ctx context.Context, wf *WorkflowBuilder, params map[str
 		o(cfg)
 	}
 
-	def, err := wf.Build()
+	def, err := wf.build()
 	if err != nil {
+		return "", err
+	}
+
+	if err := e.registerWorkflowHandlers(wf); err != nil {
 		return "", err
 	}
 
 	// Register direct handlers if the registry supports it.
 	if len(wf.directHandlers()) > 0 {
-		lr, ok := e.registry.(*local.LocalRegistry)
-		if !ok {
+		lr, ok := e.registry.(*execution.Registry)
+		if !cfgAllowsDirectHandlers(e) || !ok {
 			names := make([]string, 0, len(wf.directHandlers()))
 			for n := range wf.directHandlers() {
 				names = append(names, n)
 			}
-			return "", fmt.Errorf("nodes %v use direct task handlers (local mode only); with cluster, register via node.Register and use node.New instead", names)
+			return "", fmt.Errorf("nodes %v use direct action handlers (local mode only); with cluster, define custom nodes with node.Define and register consumer capabilities with xflow.WithNodes", names)
 		}
 		for nodeName, h := range wf.directHandlers() {
 			lr.RegisterNodeHandler(nodeName, h)
@@ -205,10 +180,25 @@ func (e *Engine) Submit(ctx context.Context, wf *WorkflowBuilder, params map[str
 	}
 
 	if cfg.execTTL > 0 {
-		ctx = cluster.WithExecTTLCtx(ctx, cfg.execTTL)
+		ctx = engine.WithExecutionTTL(ctx, cfg.execTTL)
 	}
+	ctx = engine.WithWorkflowDef(ctx, def)
 
 	return e.eng.Submit(ctx, g, params)
+}
+
+func (e *Engine) registerWorkflowHandlers(wf *WorkflowBuilder) error {
+	if wf == nil || len(wf.workflowHandlers()) == 0 {
+		return nil
+	}
+	lr, ok := e.registry.(*execution.Registry)
+	if !ok {
+		return fmt.Errorf("registry does not support workflow handler registration")
+	}
+	for nodeType, h := range wf.workflowHandlers() {
+		lr.RegisterGlobal(nodeType, h)
+	}
+	return nil
 }
 
 // Wait blocks until the execution reaches a terminal state or ctx is canceled.
@@ -216,7 +206,7 @@ func (e *Engine) Wait(ctx context.Context, id types.ExecutionID) (types.Result, 
 	if e.waiter != nil {
 		return e.waiter.WaitDone(ctx, id)
 	}
-	// Fallback: poll StateBackend.
+	// Fallback: poll StateStore.
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -240,47 +230,26 @@ func (e *Engine) Signal(ctx context.Context, id types.ExecutionID, name string, 
 	return e.eng.DeliverSignal(ctx, id, name, data)
 }
 
-// Cancel marks the execution as canceled.
+// RevokeSignal revokes a pre-delivered signal that has not yet been consumed.
+func (e *Engine) RevokeSignal(ctx context.Context, id types.ExecutionID, name string) error {
+	return e.eng.RevokeSignal(ctx, id, name)
+}
+
+// Cancel cancels a running execution and releases suspended nodes.
 func (e *Engine) Cancel(ctx context.Context, id types.ExecutionID) error {
 	return e.eng.Cancel(ctx, id)
 }
 
-// SubmitDef compiles a raw WorkflowDef and starts execution.
-func (e *Engine) SubmitDef(ctx context.Context, def *types.WorkflowDef, params map[string]any) (types.ExecutionID, error) {
-	g, err := graph.Compile(def)
-	if err != nil {
-		return "", err
-	}
-	return e.eng.Submit(ctx, g, params)
+// Inspect returns execution and node status details for audit and UI flows.
+func (e *Engine) Inspect(ctx context.Context, id types.ExecutionID, nodeNames ...string) (engine.ExecutionDetail, error) {
+	return e.eng.Inspect(ctx, id, nodeNames...)
 }
 
-// Status returns the current status of an execution.
-func (e *Engine) Status(ctx context.Context, id types.ExecutionID) (types.Status, error) {
-	snap, err := e.eng.State().GetExecution(ctx, id)
-	if err != nil {
-		return "", err
-	}
-	if snap == nil {
-		return "", fmt.Errorf("execution %q not found", id)
-	}
-	return snap.Status, nil
-}
+func isTerminalStatus(s types.ExecutionStatus) bool { return types.IsTerminalExecutionStatus(s) }
 
-// RegisterHandler registers a node.TaskHandler for a given type in local mode.
-// Returns an error if the engine was not created with a local registry.
-func (e *Engine) RegisterHandler(nodeType string, h node.TaskHandler) error {
-	lr, ok := e.registry.(*local.LocalRegistry)
-	if !ok {
-		return errors.New("xflow: RegisterHandler is only supported in local mode")
+func cfgAllowsDirectHandlers(e *Engine) bool {
+	if e == nil {
+		return false
 	}
-	lr.RegisterGlobal(nodeType, h)
-	return nil
-}
-
-func isTerminalStatus(s types.Status) bool {
-	switch s {
-	case types.StatusSuccess, types.StatusFailed, types.StatusCanceled, types.StatusTimeout:
-		return true
-	}
-	return false
+	return e.allowDirectHandlers
 }
