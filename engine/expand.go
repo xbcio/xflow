@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"github.com/xbcio/xflow/engine/graph"
-	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/types"
 	"github.com/google/uuid"
 )
@@ -38,7 +37,7 @@ func (e *Engine) expandLoopSplit(ctx context.Context, t *Task, g *graph.Graph, d
 		ExecutionID: t.ExecutionID,
 		Name:        t.NodeName,
 		NodeIdx:     t.NodeIdx,
-		Status:      "waiting",
+		Status:      types.NodeStatusWaiting,
 	})
 
 	for i, batch := range batches {
@@ -49,7 +48,7 @@ func (e *Engine) expandLoopSplit(ctx context.Context, t *Task, g *graph.Graph, d
 			ParentNode:   t.NodeName,
 			ChildExecID:  childID,
 			BatchIndex:   i,
-			Status:       types.StatusRunning,
+			Status:       types.ExecutionStatusRunning,
 		}
 		if err := e.state.CreateSubExecution(ctx, sub); err != nil {
 			return fmt.Errorf("create sub-execution %d: %w", i, err)
@@ -63,7 +62,7 @@ func (e *Engine) expandLoopSplit(ctx context.Context, t *Task, g *graph.Graph, d
 			NodeName:    fmt.Sprintf("%s/_batch/%d", t.NodeName, i),
 			NodeIdx:     t.NodeIdx,
 			Type:        TaskTypeNodeExec,
-			Payload: &node.SignalPayload{
+			Payload: &types.SignalPayload{
 				Data: map[string]any{
 					"_batch_exec":    true,
 					"parent_exec_id": string(t.ExecutionID),
@@ -102,7 +101,7 @@ func (e *Engine) ExecuteBatch(ctx context.Context, t *Task) error {
 		"count": len(items),
 	}
 
-	allDone, err := e.state.CompleteSubExecution(ctx, parentExecID, parentNode, childExecID, types.StatusSuccess, result)
+	allDone, err := e.state.CompleteSubExecution(ctx, parentExecID, parentNode, childExecID, types.ExecutionStatusSuccess, result)
 	if err != nil {
 		return err
 	}
@@ -149,13 +148,13 @@ func (e *Engine) completeLoopSplit(ctx context.Context, t *Task, g *graph.Graph,
 		ExecutionID: t.ExecutionID,
 		Name:        t.NodeName,
 		NodeIdx:     t.NodeIdx,
-		Status:      "success",
+		Status:      types.NodeStatusSuccess,
 		Output:      output,
 		Port:        "main",
 	})
 
 	if e.hooks != nil {
-		e.hooks.OnNodeComplete(ctx, t.ExecutionID, t.NodeName, "success")
+		e.hooks.OnNodeComplete(ctx, t.ExecutionID, t.NodeName, types.NodeStatusSuccess)
 	}
 
 	return e.OnNodeComplete(ctx, t.ExecutionID, g, t.NodeIdx, "main", output)

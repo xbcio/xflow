@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/xbcio/xflow/node"
+	"github.com/xbcio/xflow/types"
 )
 
 func TestApplyOnError_Stop(t *testing.T) {
@@ -12,7 +12,7 @@ func TestApplyOnError_Stop(t *testing.T) {
 	if !outcome.ExecFatal {
 		t.Error("stop strategy should be fatal")
 	}
-	if outcome.NodeStatus != "failed" {
+	if outcome.NodeStatus != types.NodeStatusFailed {
 		t.Errorf("expected failed, got %s", outcome.NodeStatus)
 	}
 	if outcome.ErrorMessage != "boom" {
@@ -21,15 +21,15 @@ func TestApplyOnError_Stop(t *testing.T) {
 }
 
 func TestApplyOnError_ErrorOutput(t *testing.T) {
-	bizErr := &node.Error{Message: "policy violation", StatusCode: 403}
-	outcome := ApplyOnError("error_output", nil, bizErr, &node.Output{Data: map[string]any{"x": 1}})
+	bizErr := &types.Error{Message: "policy violation", StatusCode: 403}
+	outcome := ApplyOnError("error_output", nil, bizErr, &types.Output{Data: map[string]any{"x": 1}})
 	if outcome.ExecFatal {
 		t.Error("error_output should not be fatal")
 	}
 	if outcome.RoutePort != "error" {
 		t.Errorf("expected error port, got %s", outcome.RoutePort)
 	}
-	if outcome.NodeStatus != "success" {
+	if outcome.NodeStatus != types.NodeStatusSuccess {
 		t.Errorf("expected success, got %s", outcome.NodeStatus)
 	}
 	if outcome.Output["error"] == nil {
@@ -58,7 +58,7 @@ func TestApplyOnError_MainOutput(t *testing.T) {
 	if outcome.RoutePort != "main" {
 		t.Errorf("expected main port, got %s", outcome.RoutePort)
 	}
-	if outcome.NodeStatus != "success" {
+	if outcome.NodeStatus != types.NodeStatusSuccess {
 		t.Errorf("expected success, got %s", outcome.NodeStatus)
 	}
 	if outcome.Output["error"] == nil {
@@ -68,14 +68,14 @@ func TestApplyOnError_MainOutput(t *testing.T) {
 
 func TestApplyOnError_Continue(t *testing.T) {
 	sysErr := errors.New("non-critical")
-	outcome := ApplyOnError("continue", sysErr, nil, &node.Output{Data: map[string]any{"partial": true}})
+	outcome := ApplyOnError("continue", sysErr, nil, &types.Output{Data: map[string]any{"partial": true}})
 	if outcome.ExecFatal {
 		t.Error("continue should not be fatal")
 	}
 	if outcome.RoutePort != "main" {
 		t.Errorf("expected main port, got %s", outcome.RoutePort)
 	}
-	if outcome.NodeStatus != "continued" {
+	if outcome.NodeStatus != types.NodeStatusContinued {
 		t.Errorf("expected continued, got %s", outcome.NodeStatus)
 	}
 	// original data preserved, no error key injected

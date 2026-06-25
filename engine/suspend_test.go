@@ -5,26 +5,56 @@ import (
 	"testing"
 
 	"github.com/xbcio/xflow/engine/graph"
-	"github.com/xbcio/xflow/node"
+	"github.com/xbcio/xflow/nodes/node"
 	"github.com/xbcio/xflow/types"
 )
 
 // fakeSuspendHandler implements SuspendingHandler — waits for "approval" signal.
 type fakeSuspendHandler struct{}
 
-func (h *fakeSuspendHandler) Execute(_ context.Context, _ *node.Input) (*node.Output, error) {
+func (h *fakeSuspendHandler) Descriptor() node.Descriptor {
+	return node.Descriptor{Type: "test.suspend"}
+}
+
+func (h *fakeSuspendHandler) Execute(_ context.Context, _ *types.Input) (*types.Output, error) {
 	panic("Execute should not be called on a SuspendingHandler")
 }
 
-func (h *fakeSuspendHandler) PrepareSuspend(_ context.Context, _ *node.Input) (*node.SuspendSpec, error) {
-	return &node.SuspendSpec{
+func (h *fakeSuspendHandler) PrepareSuspend(_ context.Context, _ *types.Input) (*types.SuspendSpec, error) {
+	return &types.SuspendSpec{
 		Mode:    node.ModeSignal,
 		Signals: []string{"approval"},
 	}, nil
 }
 
-func (h *fakeSuspendHandler) OnResume(_ context.Context, _ *node.Input, sig *node.SignalPayload) (*node.Output, error) {
-	return &node.Output{Data: map[string]any{"approved": true, "signal": sig.Name}}, nil
+func (h *fakeSuspendHandler) OnResume(_ context.Context, _ *types.Input, sig *types.SignalPayload) (*types.Output, error) {
+	return &types.Output{Data: map[string]any{"approved": true, "signal": sig.Name}}, nil
+}
+
+type fakeMultiSignalHandler struct{}
+
+func (h *fakeMultiSignalHandler) Descriptor() node.Descriptor {
+	return node.Descriptor{Type: "test.multi_signal"}
+}
+
+func (h *fakeMultiSignalHandler) Execute(_ context.Context, _ *types.Input) (*types.Output, error) {
+	panic("Execute should not be called on a SuspendingHandler")
+}
+
+func (h *fakeMultiSignalHandler) PrepareSuspend(_ context.Context, _ *types.Input) (*types.SuspendSpec, error) {
+	return &types.SuspendSpec{
+		Mode:    types.ModeMultiSignal,
+		Signals: []string{"sec", "app", "ops"},
+		Quorum:  2,
+	}, nil
+}
+
+func (h *fakeMultiSignalHandler) OnResume(_ context.Context, _ *types.Input, sig *types.SignalPayload) (*types.Output, error) {
+	return &types.Output{Data: map[string]any{
+		"trigger": sig.Name,
+		"count":   len(sig.All),
+		"all":     sig.All,
+	}}, nil
 }
 
 func TestSuspend_SignalAfterSuspend(t *testing.T) {
@@ -44,11 +74,11 @@ func TestSuspend_SignalAfterSuspend(t *testing.T) {
 	g, _ := graph.Compile(def)
 	state := newFakeState()
 	queue := &fakeQueue{}
-	reg := &fakeRegistry{handlers: map[string]node.TaskHandler{
+	reg := &fakeRegistry{handlers: map[string]types.ActionHandler{
 		"test.echo":    &echoHandler{},
 		"test.suspend": &fakeSuspendHandler{},
 	}}
-	eng := New(state, queue, WithRegistry(reg))
+	eng := newTestEngine(state, queue, reg)
 	ctx := context.Background()
 
 	id, _ := eng.Submit(ctx, g, nil)
@@ -56,11 +86,11 @@ func TestSuspend_SignalAfterSuspend(t *testing.T) {
 
 	// Execute start → enqueues wait.
 	tasks := queue.Drain()
-	eng.ExecuteNode(ctx, tasks[0])
+	executeTask(t, eng, tasks[0])
 
 	// Execute wait → suspends (no signal pre-delivered).
 	tasks = queue.Drain()
-	eng.ExecuteNode(ctx, tasks[0])
+	executeTask(t, eng, tasks[0])
 
 	// No new tasks — node is parked.
 	tasks = queue.Drain()
@@ -70,7 +100,7 @@ func TestSuspend_SignalAfterSuspend(t *testing.T) {
 
 	// Verify node status is suspended.
 	ns, _ := state.GetNode(ctx, id, "wait")
-	if ns == nil || ns.Status != "suspended" {
+	if ns == nil || ns.Status != types.NodeStatusSuspended {
 		t.Fatalf("wait node should be suspended, got %v", ns)
 	}
 
@@ -84,16 +114,16 @@ func TestSuspend_SignalAfterSuspend(t *testing.T) {
 	}
 
 	// Execute resume → wait completes and enqueues end.
-	eng.ExecuteNode(ctx, tasks[0])
+	executeTask(t, eng, tasks[0])
 	tasks = queue.Drain()
 	if len(tasks) != 1 || tasks[0].NodeName != "end" {
 		t.Fatalf("expected [end], got %v", taskNames(tasks))
 	}
 
 	// Execute end → execution completes.
-	eng.ExecuteNode(ctx, tasks[0])
+	executeTask(t, eng, tasks[0])
 	snap, _ := state.GetExecution(ctx, id)
-	if snap.Status != types.StatusSuccess {
+	if snap.Status != types.ExecutionStatusSuccess {
 		t.Errorf("expected success, got %s", snap.Status)
 	}
 }
@@ -113,11 +143,11 @@ func TestSuspend_SignalBeforeSuspend(t *testing.T) {
 	g, _ := graph.Compile(def)
 	state := newFakeState()
 	queue := &fakeQueue{}
-	reg := &fakeRegistry{handlers: map[string]node.TaskHandler{
+	reg := &fakeRegistry{handlers: map[string]types.ActionHandler{
 		"test.echo":    &echoHandler{},
 		"test.suspend": &fakeSuspendHandler{},
 	}}
-	eng := New(state, queue, WithRegistry(reg))
+	eng := newTestEngine(state, queue, reg)
 	ctx := context.Background()
 
 	id, _ := eng.Submit(ctx, g, nil)
@@ -128,11 +158,17 @@ func TestSuspend_SignalBeforeSuspend(t *testing.T) {
 	state.signals[string(id)+"/approval"] = map[string]any{"by": "early"}
 	state.mu.Unlock()
 
-	// Execute wait → SuspendOrConsume finds the pre-delivered signal → immediate resume.
+	// Execute wait → SuspendOrConsume finds the pre-delivered signal and enqueues a resume task.
 	tasks := queue.Drain()
-	eng.ExecuteNode(ctx, tasks[0])
+	executeTask(t, eng, tasks[0])
 
-	// end should be enqueued (wait completed without parking).
+	tasks = queue.Drain()
+	if len(tasks) != 1 || tasks[0].NodeName != "wait" || tasks[0].Type != TaskTypeNodeResume {
+		t.Fatalf("expected resume task for wait, got %v", tasks)
+	}
+
+	// Execute resume → end should be enqueued.
+	executeTask(t, eng, tasks[0])
 	tasks = queue.Drain()
 	if len(tasks) != 1 || tasks[0].NodeName != "end" {
 		t.Fatalf("expected [end], got %v", taskNames(tasks))
@@ -140,7 +176,7 @@ func TestSuspend_SignalBeforeSuspend(t *testing.T) {
 
 	// Node should not be in suspended state.
 	ns, _ := state.GetNode(ctx, id, "wait")
-	if ns != nil && ns.Status == "suspended" {
+	if ns != nil && ns.Status == types.NodeStatusSuspended {
 		t.Error("wait node should not be suspended when signal was pre-delivered")
 	}
 }
@@ -156,10 +192,10 @@ func TestSuspend_Cancel(t *testing.T) {
 	g, _ := graph.Compile(def)
 	state := newFakeState()
 	queue := &fakeQueue{}
-	reg := &fakeRegistry{handlers: map[string]node.TaskHandler{
+	reg := &fakeRegistry{handlers: map[string]types.ActionHandler{
 		"test.suspend": &fakeSuspendHandler{},
 	}}
-	eng := New(state, queue, WithRegistry(reg))
+	eng := newTestEngine(state, queue, reg)
 	ctx := context.Background()
 
 	id, _ := eng.Submit(ctx, g, nil)
@@ -167,7 +203,7 @@ func TestSuspend_Cancel(t *testing.T) {
 
 	// Execute wait → suspends.
 	tasks := queue.Drain()
-	eng.ExecuteNode(ctx, tasks[0])
+	executeTask(t, eng, tasks[0])
 
 	// Cancel the execution.
 	if err := eng.Cancel(ctx, id); err != nil {
@@ -175,7 +211,7 @@ func TestSuspend_Cancel(t *testing.T) {
 	}
 
 	snap, _ := state.GetExecution(ctx, id)
-	if snap.Status != types.StatusCanceled {
+	if snap.Status != types.ExecutionStatusCanceled {
 		t.Errorf("expected canceled, got %s", snap.Status)
 	}
 
@@ -185,5 +221,67 @@ func TestSuspend_Cancel(t *testing.T) {
 	tasks = queue.Drain()
 	if len(tasks) != 0 {
 		t.Errorf("expected no tasks after cancel, got %v", taskNames(tasks))
+	}
+}
+
+func TestSuspend_MultiSignalWaitsForQuorumAndPassesAllSignals(t *testing.T) {
+	def := &types.WorkflowDef{
+		Name: "multi-signal",
+		Nodes: []types.NodeDef{
+			{Name: "wait", Type: "test.multi_signal"},
+			{Name: "end", Type: "test.echo"},
+		},
+		Connections: types.Connections{
+			"wait": {"main": []types.Connection{{Node: "end", Input: "main"}}},
+		},
+	}
+
+	g, _ := graph.Compile(def)
+	state := newFakeState()
+	queue := &fakeQueue{}
+	reg := &fakeRegistry{handlers: map[string]types.ActionHandler{
+		"test.echo":         &echoHandler{},
+		"test.multi_signal": &fakeMultiSignalHandler{},
+	}}
+	eng := newTestEngine(state, queue, reg)
+	ctx := context.Background()
+
+	id, _ := eng.Submit(ctx, g, nil)
+	state.InitInDegrees(id, g)
+
+	tasks := queue.Drain()
+	executeTask(t, eng, tasks[0])
+
+	if err := eng.DeliverSignal(ctx, id, "sec", map[string]any{"by": "sec"}); err != nil {
+		t.Fatal(err)
+	}
+	if tasks = queue.Drain(); len(tasks) != 0 {
+		t.Fatalf("first signal should not resume before quorum, got %v", tasks)
+	}
+
+	if err := eng.DeliverSignal(ctx, id, "app", map[string]any{"by": "app"}); err != nil {
+		t.Fatal(err)
+	}
+	tasks = queue.Drain()
+	if len(tasks) != 1 || tasks[0].NodeName != "wait" || tasks[0].Payload == nil {
+		t.Fatalf("second signal should resume wait, got %v", tasks)
+	}
+	if got := len(tasks[0].Payload.All); got != 2 {
+		t.Fatalf("resume payload signal count = %d, want 2", got)
+	}
+
+	executeTask(t, eng, tasks[0])
+	tasks = queue.Drain()
+	if len(tasks) != 1 || tasks[0].NodeName != "end" {
+		t.Fatalf("expected [end], got %v", taskNames(tasks))
+	}
+
+	executeTask(t, eng, tasks[0])
+	out, err := state.GetOutput(ctx, id, "wait")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["count"] != 2 {
+		t.Fatalf("wait output count = %v, want 2", out["count"])
 	}
 }

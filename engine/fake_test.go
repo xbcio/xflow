@@ -8,12 +8,11 @@ import (
 	"time"
 
 	"github.com/xbcio/xflow/engine/graph"
-	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/types"
 )
 
 // ---------------------------------------------------------------------------
-// fakeState — in-memory StateBackend for unit tests
+// fakeState — in-memory StateStore for unit tests
 // ---------------------------------------------------------------------------
 
 type fakeState struct {
@@ -23,10 +22,12 @@ type fakeState struct {
 	inDegrees  map[string]int           // key: execID+"/"+nodeIdx
 	activeIns  map[string]int           // key: execID+"/"+nodeIdx (count of active arrivals)
 	outputs    map[string]map[string]any
-	suspended  map[string]*node.SuspendSpec // key: execID+"/"+nodeName
-	signals    map[string]map[string]any    // pre-delivered signals: key: execID+"/"+signalName
-	resumed    map[string]bool              // resume lock: key: execID+"/"+nodeName
-	subExecs   map[string][]*SubExecution   // key: execID+"/"+nodeName
+	suspended  map[string]*types.SuspendSpec // key: execID+"/"+nodeName
+	signals    map[string]map[string]any     // pre-delivered signals: key: execID+"/"+signalName
+	signalSets map[string]map[string]map[string]any
+	resumed    map[string]bool            // resume lock: key: execID+"/"+nodeName
+	subExecs   map[string][]*SubExecution // key: execID+"/"+nodeName
+	watchers   map[types.ExecutionID][]chan ExecutionEvent
 }
 
 func newFakeState() *fakeState {
@@ -36,10 +37,12 @@ func newFakeState() *fakeState {
 		inDegrees:  make(map[string]int),
 		activeIns:  make(map[string]int),
 		outputs:    make(map[string]map[string]any),
-		suspended:  make(map[string]*node.SuspendSpec),
+		suspended:  make(map[string]*types.SuspendSpec),
 		signals:    make(map[string]map[string]any),
+		signalSets: make(map[string]map[string]map[string]any),
 		resumed:    make(map[string]bool),
 		subExecs:   make(map[string][]*SubExecution),
+		watchers:   make(map[types.ExecutionID][]chan ExecutionEvent),
 	}
 }
 
@@ -57,12 +60,13 @@ func (f *fakeState) CreateExecution(_ context.Context, e *ExecutionSnapshot) err
 	return nil
 }
 
-func (f *fakeState) UpdateExecutionStatus(_ context.Context, id types.ExecutionID, status types.Status, _ string) error {
+func (f *fakeState) UpdateExecutionStatus(_ context.Context, id types.ExecutionID, status types.ExecutionStatus, _ string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if e, ok := f.executions[id]; ok {
 		e.Status = status
 	}
+	f.publishLocked(ExecutionEvent{ExecutionID: id, Status: status})
 	return nil
 }
 
@@ -85,8 +89,11 @@ func (f *fakeState) UpsertNode(_ context.Context, n *NodeSnapshot) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	key := string(n.ExecutionID) + "/" + n.Name
-	if existing, ok := f.nodes[key]; ok && isTerminal(existing.Status) {
+	if existing, ok := f.nodes[key]; ok && types.IsTerminalNodeStatus(existing.Status) {
 		return nil // CAS: don't overwrite terminal state
+	}
+	if existing, ok := f.nodes[key]; ok && existing.Status == types.NodeStatusCommitting && n.Status == types.NodeStatusRunning {
+		return nil
 	}
 	cp := *n
 	f.nodes[key] = &cp
@@ -98,6 +105,29 @@ func (f *fakeState) GetNode(_ context.Context, id types.ExecutionID, name string
 	defer f.mu.Unlock()
 	ns := f.nodes[string(id)+"/"+name]
 	return ns, nil
+}
+
+func (f *fakeState) ClaimTaskLease(_ context.Context, lease *TaskLease) (*NodeSnapshot, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	key := string(lease.Task.ExecutionID) + "/" + lease.Task.NodeName
+	ns := f.nodes[key]
+	if ns == nil {
+		return nil, false, nil
+	}
+	if types.IsTerminalNodeStatus(ns.Status) {
+		return ns, true, nil
+	}
+	if ns.LeaseToken == "" || ns.LeaseToken != lease.LeaseToken {
+		return ns, false, nil
+	}
+
+	cp := *ns
+	cp.Status = types.NodeStatusCommitting
+	cp.LeaseToken = ""
+	f.nodes[key] = &cp
+	return &cp, true, nil
 }
 
 func (f *fakeState) DecrementInDegree(_ context.Context, id types.ExecutionID, nodeIdx int, portActive bool) (int, int, error) {
@@ -121,25 +151,28 @@ func (f *fakeState) CheckCompletion(_ context.Context, id types.ExecutionID, tot
 		if !strings.HasPrefix(key, prefix) {
 			continue
 		}
-		if isTerminal(ns.Status) {
+		if types.IsTerminalNodeStatus(ns.Status) {
 			done++
 		}
-		if ns.Status == "failed" {
+		if ns.Status == types.NodeStatusFailed {
 			hasFailed = true
 		}
 	}
 	return done >= totalNodes, hasFailed, nil
 }
 
-func (f *fakeState) SuspendOrConsume(_ context.Context, id types.ExecutionID, name string, spec *node.SuspendSpec) (*node.SignalPayload, error) {
+func (f *fakeState) SuspendOrConsume(_ context.Context, id types.ExecutionID, name string, spec *types.SuspendSpec) (*types.SignalPayload, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if spec != nil && spec.Mode == types.ModeMultiSignal {
+		return f.suspendOrConsumeMultiLocked(id, name, spec), nil
+	}
 	// Check if any of the awaited signals was pre-delivered (keyed by signal name).
 	for _, sigName := range spec.Signals {
 		sigKey := string(id) + "/" + sigName
 		if sig, ok := f.signals[sigKey]; ok {
 			delete(f.signals, sigKey)
-			return &node.SignalPayload{Triggered: node.SignalReceived, Name: sigName, Data: sig}, nil
+			return &types.SignalPayload{Triggered: types.SignalReceived, Name: sigName, Data: sig}, nil
 		}
 	}
 	// No pre-delivered signal — park the node.
@@ -147,7 +180,7 @@ func (f *fakeState) SuspendOrConsume(_ context.Context, id types.ExecutionID, na
 	return nil, nil
 }
 
-func (f *fakeState) DeliverSignal(_ context.Context, id types.ExecutionID, signalName string, data map[string]any) (string, error) {
+func (f *fakeState) DeliverSignal(_ context.Context, id types.ExecutionID, signalName string, data map[string]any) (string, *types.SignalPayload, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	prefix := string(id) + "/"
@@ -158,15 +191,24 @@ func (f *fakeState) DeliverSignal(_ context.Context, id types.ExecutionID, signa
 		}
 		for _, s := range spec.Signals {
 			if s == signalName {
-				delete(f.suspended, key)
 				nodeName := strings.TrimPrefix(key, prefix)
-				return nodeName, nil
+				if spec.Mode == types.ModeMultiSignal {
+					payload := f.addMultiSignalLocked(id, nodeName, signalName, data, spec)
+					if payload == nil {
+						return "", nil, nil
+					}
+					delete(f.suspended, key)
+					delete(f.signalSets, key)
+					return nodeName, payload, nil
+				}
+				delete(f.suspended, key)
+				return nodeName, nil, nil
 			}
 		}
 	}
 	// No suspended node yet — store for later consumption.
 	f.signals[string(id)+"/"+signalName] = data
-	return "", nil
+	return "", nil, nil
 }
 
 func (f *fakeState) AcquireResumeLock(_ context.Context, id types.ExecutionID, name string) (bool, error) {
@@ -194,7 +236,7 @@ func (f *fakeState) RevokeSignal(_ context.Context, id types.ExecutionID, signal
 	return true, nil
 }
 
-func (f *fakeState) ResuspendAtomic(_ context.Context, id types.ExecutionID, nodeName string, oldSignalName string, newSignalName string, spec *node.SuspendSpec) (*node.SignalPayload, error) {
+func (f *fakeState) ResuspendAtomic(_ context.Context, id types.ExecutionID, nodeName string, oldSignalName string, newSignalName string, spec *types.SuspendSpec) (*types.SignalPayload, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -210,12 +252,72 @@ func (f *fakeState) ResuspendAtomic(_ context.Context, id types.ExecutionID, nod
 	newSigKey := execID + "/" + newSignalName
 	if sig, ok := f.signals[newSigKey]; ok {
 		delete(f.signals, newSigKey)
-		return &node.SignalPayload{Triggered: node.SignalReceived, Name: newSignalName, Data: sig}, nil
+		return &types.SignalPayload{Triggered: types.SignalReceived, Name: newSignalName, Data: sig}, nil
 	}
 
 	// 4. No signal available — register new waiter.
 	f.suspended[execID+"/"+nodeName] = spec
 	return nil, nil
+}
+
+func (f *fakeState) suspendOrConsumeMultiLocked(id types.ExecutionID, nodeName string, spec *types.SuspendSpec) *types.SignalPayload {
+	key := string(id) + "/" + nodeName
+	for _, sigName := range spec.Signals {
+		sigKey := string(id) + "/" + sigName
+		if sig, ok := f.signals[sigKey]; ok {
+			delete(f.signals, sigKey)
+			if payload := f.addMultiSignalLocked(id, nodeName, sigName, sig, spec); payload != nil {
+				delete(f.signalSets, key)
+				return payload
+			}
+		}
+	}
+	f.suspended[key] = spec
+	return nil
+}
+
+func (f *fakeState) addMultiSignalLocked(id types.ExecutionID, nodeName string, signalName string, data map[string]any, spec *types.SuspendSpec) *types.SignalPayload {
+	key := string(id) + "/" + nodeName
+	all := f.signalSets[key]
+	if all == nil {
+		all = make(map[string]map[string]any)
+		f.signalSets[key] = all
+	}
+	all[signalName] = data
+	if len(all) < signalQuorum(spec) {
+		return nil
+	}
+	return &types.SignalPayload{
+		Triggered: types.SignalReceived,
+		Name:      signalName,
+		Data:      data,
+		All:       cloneSignalSet(all),
+	}
+}
+
+func signalQuorum(spec *types.SuspendSpec) int {
+	if spec == nil {
+		return 1
+	}
+	if spec.Quorum > 0 {
+		return spec.Quorum
+	}
+	if len(spec.Signals) > 0 {
+		return len(spec.Signals)
+	}
+	return 1
+}
+
+func cloneSignalSet(in map[string]map[string]any) map[string]map[string]any {
+	out := make(map[string]map[string]any, len(in))
+	for name, payload := range in {
+		cp := make(map[string]any, len(payload))
+		for k, v := range payload {
+			cp[k] = v
+		}
+		out[name] = cp
+	}
+	return out
 }
 
 func (f *fakeState) PutOutput(_ context.Context, id types.ExecutionID, name string, data map[string]any) error {
@@ -289,10 +391,10 @@ func (q *fakeQueue) Drain() []*Task {
 // ---------------------------------------------------------------------------
 
 type fakeRegistry struct {
-	handlers map[string]node.TaskHandler
+	handlers map[string]types.ActionHandler
 }
 
-func (r *fakeRegistry) Get(_ types.ExecutionID, _ string, nodeType string, _ int) (node.TaskHandler, error) {
+func (r *fakeRegistry) Get(_ types.ExecutionID, _ string, nodeType string, _ int) (types.ActionHandler, error) {
 	h, ok := r.handlers[nodeType]
 	if !ok {
 		return nil, fmt.Errorf("no handler for type: %s", nodeType)
@@ -312,7 +414,7 @@ func (f *fakeState) CreateSubExecution(_ context.Context, sub *SubExecution) err
 	return nil
 }
 
-func (f *fakeState) CompleteSubExecution(_ context.Context, parentExecID types.ExecutionID, parentNode string, childExecID types.ExecutionID, status types.Status, result map[string]any) (bool, error) {
+func (f *fakeState) CompleteSubExecution(_ context.Context, parentExecID types.ExecutionID, parentNode string, childExecID types.ExecutionID, status types.ExecutionStatus, result map[string]any) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	key := string(parentExecID) + "/" + parentNode
@@ -323,7 +425,7 @@ func (f *fakeState) CompleteSubExecution(_ context.Context, parentExecID types.E
 			sub.Status = status
 			sub.Result = result
 		}
-		if sub.Status == types.StatusRunning {
+		if sub.Status == types.ExecutionStatusRunning {
 			allDone = false
 		}
 	}
@@ -342,4 +444,43 @@ func (f *fakeState) GetSubExecutionResults(_ context.Context, parentExecID types
 		}
 	}
 	return results, nil
+}
+
+func (f *fakeState) PublishExecutionEvent(_ context.Context, event ExecutionEvent) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.publishLocked(event)
+	return nil
+}
+
+func (f *fakeState) WatchExecution(ctx context.Context, id types.ExecutionID) (<-chan ExecutionEvent, error) {
+	ch := make(chan ExecutionEvent, 8)
+	f.mu.Lock()
+	f.watchers[id] = append(f.watchers[id], ch)
+	f.mu.Unlock()
+	if done := ctx.Done(); done != nil {
+		go func() {
+			<-done
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			watchers := f.watchers[id]
+			for i, watcher := range watchers {
+				if watcher == ch {
+					f.watchers[id] = append(watchers[:i], watchers[i+1:]...)
+					close(ch)
+					return
+				}
+			}
+		}()
+	}
+	return ch, nil
+}
+
+func (f *fakeState) publishLocked(event ExecutionEvent) {
+	for _, watcher := range f.watchers[event.ExecutionID] {
+		select {
+		case watcher <- event:
+		default:
+		}
+	}
 }

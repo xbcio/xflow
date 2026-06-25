@@ -5,9 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/xbcio/xflow/engine/graph"
-	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/types"
 	"github.com/google/uuid"
 )
@@ -16,34 +16,16 @@ import (
 // signal was already consumed by a suspended node or was never delivered.
 var ErrSignalConsumed = errors.New("signal already consumed or not found")
 
-// ErrResuspendDepthExceeded is returned when a node exceeds the maximum
-// number of consecutive resuspend cycles within a single execution task.
-var ErrResuspendDepthExceeded = errors.New("resuspend depth exceeded maximum")
+// ErrExecutionInactive is returned when a runner-facing operation targets an
+// execution that has already completed, was canceled, or has been cleaned up.
+var ErrExecutionInactive = errors.New("execution inactive")
 
-// maxResuspendDepth limits recursive resuspend cycles to prevent infinite loops.
-const maxResuspendDepth = 10
-
-// resuspendDepthKey is the context key for tracking resuspend depth.
-type resuspendDepthKey struct{}
-
-func resuspendDepthFromCtx(ctx context.Context) int {
-	if v, ok := ctx.Value(resuspendDepthKey{}).(int); ok {
-		return v
-	}
-	return 0
-}
-
-func withResuspendDepth(ctx context.Context, depth int) context.Context {
-	return context.WithValue(ctx, resuspendDepthKey{}, depth)
-}
+// ErrInvalidLeaseToken is returned when a runner commits with a stale or
+// unknown lease token.
+var ErrInvalidLeaseToken = errors.New("invalid lease token")
 
 // Option configures an Engine at construction time.
 type Option func(*Engine)
-
-// WithRegistry sets the handler registry.
-func WithRegistry(r HandlerRegistry) Option {
-	return func(e *Engine) { e.registry = r }
-}
 
 // WithHooks sets the lifecycle hook receiver.
 func WithHooks(h Hooks) Option {
@@ -58,18 +40,17 @@ func WithLogger(l Logger) Option {
 // Engine is the pure-algorithm workflow execution engine.
 // It has zero IO dependencies — all persistence and queuing are injected via interfaces.
 type Engine struct {
-	state    StateBackend
-	queue    TaskQueue
-	hooks    Hooks
-	registry HandlerRegistry
-	logger   Logger
+	state  StateStore
+	queue  TaskQueue
+	hooks  Hooks
+	logger Logger
 
 	mu     sync.RWMutex
 	graphs map[types.ExecutionID]*graph.Graph
 }
 
-// New creates an Engine wired to the given state backend and task queue.
-func New(state StateBackend, queue TaskQueue, opts ...Option) *Engine {
+// New creates an Engine wired to the given state store and task queue.
+func New(state StateStore, queue TaskQueue, opts ...Option) *Engine {
 	e := &Engine{
 		state:  state,
 		queue:  queue,
@@ -90,7 +71,7 @@ func (e *Engine) Submit(ctx context.Context, g *graph.Graph, params map[string]a
 	snap := &ExecutionSnapshot{
 		ID:     id,
 		Graph:  g,
-		Status: types.StatusRunning,
+		Status: types.ExecutionStatusRunning,
 		Params: params,
 	}
 	if err := e.state.CreateExecution(ctx, snap); err != nil {
@@ -111,7 +92,7 @@ func (e *Engine) Submit(ctx context.Context, g *graph.Graph, params map[string]a
 			}
 			if err := e.queue.Enqueue(ctx, task); err != nil {
 				// Rollback: mark execution as failed and remove from cache.
-				_ = e.state.UpdateExecutionStatus(ctx, id, types.StatusFailed, fmt.Sprintf("enqueue root node %s: %v", nd.Name, err))
+				_ = e.state.UpdateExecutionStatus(ctx, id, types.ExecutionStatusFailed, fmt.Sprintf("enqueue root node %s: %v", nd.Name, err))
 				e.mu.Lock()
 				delete(e.graphs, id)
 				e.mu.Unlock()
@@ -122,197 +103,259 @@ func (e *Engine) Submit(ctx context.Context, g *graph.Graph, params map[string]a
 	return id, nil
 }
 
-// ExecuteNode runs a single node task. It is called by the queue consumer
-// (goroutine pool in local mode, Asynq worker in cluster mode).
-func (e *Engine) ExecuteNode(ctx context.Context, t *Task) error {
-	e.mu.RLock()
-	g, ok := e.graphs[t.ExecutionID]
-	e.mu.RUnlock()
-	if !ok {
-		// Attempt to recover graph from persistent state (cluster worker restart).
-		var err error
-		g, err = e.state.LoadGraph(ctx, t.ExecutionID)
-		if err != nil {
-			return fmt.Errorf("load graph for %q: %w", t.ExecutionID, err)
-		}
-		if g == nil {
-			// Execution was already completed/canceled and cleaned up — ignore stale task.
-			return nil
-		}
-		// Verify execution is still active.
-		snap, err := e.state.GetExecution(ctx, t.ExecutionID)
-		if err != nil || snap == nil || isTerminal(string(snap.Status)) {
-			return nil
-		}
-		e.mu.Lock()
-		e.graphs[t.ExecutionID] = g
-		e.mu.Unlock()
+// BuildTaskLease assembles a runner-facing task lease from a queued task.
+// The lease includes both handler routing metadata and the concrete input, so
+// runner-side code does not need to access graph or state internals.
+func (e *Engine) BuildTaskLease(ctx context.Context, t *Task) (*TaskLease, error) {
+	g, active, err := e.loadActiveGraph(ctx, t.ExecutionID)
+	if err != nil {
+		return nil, err
+	}
+	if !active {
+		return nil, ErrExecutionInactive
 	}
 
-	// Idempotency: skip if node already reached a terminal state.
-	ns, err := e.state.GetNode(ctx, t.ExecutionID, t.NodeName)
-	if err == nil && ns != nil && isTerminal(ns.Status) {
+	leaseID := LeaseID("lease-" + uuid.New().String())
+	leaseToken := LeaseToken("token-" + uuid.New().String())
+	attempt, started, err := e.acquireNodeLease(ctx, t, leaseID, leaseToken)
+	if err != nil {
+		return nil, err
+	}
+	if started && e.hooks != nil {
+		e.hooks.OnNodeStart(ctx, t.ExecutionID, t.NodeName)
+	}
+
+	meta := g.Nodes[t.NodeIdx]
+	return &TaskLease{
+		LeaseID:     leaseID,
+		LeaseToken:  leaseToken,
+		Attempt:     attempt,
+		Task:        *t,
+		Input:       e.buildInput(ctx, t, g),
+		NodeType:    meta.Type,
+		NodeVersion: meta.Version,
+	}, nil
+}
+
+// CommitTaskResult validates a runner lease token, persists the task result,
+// and advances scheduling. Stale tokens are rejected so an older assignment
+// cannot overwrite or advance state after a newer lease has been issued.
+func (e *Engine) CommitTaskResult(ctx context.Context, lease *TaskLease, result TaskResult) error {
+	if lease == nil {
+		return ErrInvalidLeaseToken
+	}
+	t := &lease.Task
+	g, active, err := e.loadActiveGraph(ctx, t.ExecutionID)
+	if err != nil {
+		return err
+	}
+	if !active {
 		return nil
+	}
+
+	ns, valid, err := e.state.ClaimTaskLease(ctx, lease)
+	if err != nil {
+		return err
+	}
+	if !valid {
+		return ErrInvalidLeaseToken
+	}
+	if types.IsTerminalNodeStatus(ns.Status) {
+		return nil
+	}
+
+	if result.Suspend != nil {
+		return e.commitSuspendResult(ctx, t, result)
+	}
+
+	meta := g.Nodes[t.NodeIdx]
+	return e.finalizeNode(ctx, t, g, meta, result.Output, result.Error)
+}
+
+func (e *Engine) loadActiveGraph(ctx context.Context, id types.ExecutionID) (*graph.Graph, bool, error) {
+	e.mu.RLock()
+	g, ok := e.graphs[id]
+	e.mu.RUnlock()
+	if ok {
+		return g, true, nil
+	}
+
+	g, err := e.state.LoadGraph(ctx, id)
+	if err != nil {
+		return nil, false, fmt.Errorf("load graph for %q: %w", id, err)
+	}
+	if g == nil {
+		return nil, false, nil
+	}
+
+	snap, err := e.state.GetExecution(ctx, id)
+	if err != nil || snap == nil || types.IsTerminalExecutionStatus(snap.Status) {
+		return nil, false, err
+	}
+
+	e.mu.Lock()
+	e.graphs[id] = g
+	e.mu.Unlock()
+	return g, true, nil
+}
+
+func (e *Engine) acquireNodeLease(ctx context.Context, t *Task, leaseID LeaseID, leaseToken LeaseToken) (int, bool, error) {
+	ns, err := e.state.GetNode(ctx, t.ExecutionID, t.NodeName)
+	if err != nil {
+		return 0, false, err
+	}
+	if ns != nil && types.IsTerminalNodeStatus(ns.Status) {
+		return 0, false, ErrExecutionInactive
+	}
+	if ns != nil && ns.Status == types.NodeStatusCommitting {
+		return 0, false, ErrExecutionInactive
+	}
+
+	started := ns == nil || ns.Status != types.NodeStatusRunning
+	attempt := 1
+	if ns != nil {
+		attempt = ns.Attempt + 1
 	}
 
 	if err := e.state.UpsertNode(ctx, &NodeSnapshot{
 		ExecutionID: t.ExecutionID,
 		Name:        t.NodeName,
 		NodeIdx:     t.NodeIdx,
-		Status:      "running",
+		Status:      types.NodeStatusRunning,
+		LeaseID:     leaseID,
+		LeaseToken:  leaseToken,
+		Attempt:     attempt,
 	}); err != nil {
+		return 0, false, err
+	}
+	return attempt, started, nil
+}
+
+func (e *Engine) commitSuspendResult(ctx context.Context, t *Task, result TaskResult) error {
+	if result.Output != nil && result.Output.Resuspend {
+		return e.commitResuspendResult(ctx, t, result)
+	}
+
+	payload, err := e.state.SuspendOrConsume(ctx, t.ExecutionID, t.NodeName, result.Suspend)
+	if err != nil {
 		return err
 	}
-
-	if e.hooks != nil {
-		e.hooks.OnNodeStart(ctx, t.ExecutionID, t.NodeName)
-	}
-
-	meta := g.Nodes[t.NodeIdx]
-	handler, err := e.registry.Get(t.ExecutionID, t.NodeName, meta.Type, meta.Version)
-	if err != nil {
-		return e.handleNodeError(ctx, t, g, fmt.Errorf("handler not found: %w", err), nil, nil)
-	}
-
-	input := e.buildInput(ctx, t, g)
-
-	var output *node.Output
-	var sysErr error
-
-	if sh, isSuspending := handler.(node.SuspendingHandler); isSuspending {
-		output, sysErr = e.executeSuspending(ctx, t, sh, input)
-		if output == nil && sysErr == nil {
-			// Node is now parked — execution continues when signal arrives.
-			return nil
-		}
-	} else {
-		output, sysErr = handler.Execute(ctx, input)
-	}
-
-	return e.finalizeNode(ctx, t, g, meta, output, sysErr)
-}
-
-// executeSuspending handles the suspend/resume protocol for SuspendingHandler nodes.
-func (e *Engine) executeSuspending(ctx context.Context, t *Task, sh node.SuspendingHandler, input *node.Input) (*node.Output, error) {
-	// Resume path: signal was already delivered and we have the payload.
-	if t.Type == TaskTypeNodeResume {
-		output, err := sh.OnResume(ctx, input, t.Payload)
-		if err != nil {
-			return output, err
-		}
-		if output != nil && output.Resuspend {
-			return e.doResuspend(ctx, t, sh, input, output, t.Payload.Name)
-		}
-		return output, nil
-	}
-
-	// First execution: prepare the suspension spec.
-	spec, err := sh.PrepareSuspend(ctx, input)
-	if err != nil {
-		return nil, err
-	}
-
-	// Atomic check: consume a pre-delivered signal or park the node.
-	payload, err := e.state.SuspendOrConsume(ctx, t.ExecutionID, t.NodeName, spec)
-	if err != nil {
-		return nil, err
-	}
-
 	if payload != nil {
-		// Signal was already waiting — resume immediately.
-		output, err := sh.OnResume(ctx, input, payload)
-		if err != nil {
-			return output, err
-		}
-		if output != nil && output.Resuspend {
-			return e.doResuspend(ctx, t, sh, input, output, payload.Name)
-		}
-		return output, nil
+		_ = e.state.UpsertNode(ctx, &NodeSnapshot{
+			ExecutionID: t.ExecutionID,
+			Name:        t.NodeName,
+			NodeIdx:     t.NodeIdx,
+			Status:      types.NodeStatusSuspended,
+		})
+		return e.enqueueResume(ctx, t.ExecutionID, t.NodeName, t.NodeIdx, payload)
 	}
 
-	// Node is now suspended.
 	_ = e.state.UpsertNode(ctx, &NodeSnapshot{
 		ExecutionID: t.ExecutionID,
 		Name:        t.NodeName,
 		NodeIdx:     t.NodeIdx,
-		Status:      "suspended",
+		Status:      types.NodeStatusSuspended,
 	})
+	if err := e.scheduleSuspendResumes(ctx, t, result.Suspend); err != nil {
+		return err
+	}
 	if e.hooks != nil {
 		e.hooks.OnNodeSuspended(ctx, t.ExecutionID, t.NodeName)
 	}
-	return nil, nil
+	return nil
 }
 
-// doResuspend handles the resuspend cycle: persists intermediate output, prepares
-// a new suspend spec, and atomically transitions to the new signal. If the new
-// signal is already available, it recursively resumes.
-func (e *Engine) doResuspend(ctx context.Context, t *Task, sh node.SuspendingHandler, input *node.Input, resuspendOutput *node.Output, oldSignalName string) (*node.Output, error) {
-	depth := resuspendDepthFromCtx(ctx) + 1
-	if depth > maxResuspendDepth {
-		return nil, ErrResuspendDepthExceeded
+func (e *Engine) commitResuspendResult(ctx context.Context, t *Task, result TaskResult) error {
+	if result.Output != nil && result.Output.Data != nil {
+		_ = e.state.PutOutput(ctx, t.ExecutionID, t.NodeName, result.Output.Data)
 	}
-	ctx = withResuspendDepth(ctx, depth)
-
-	// Persist intermediate state and update input.Data so PrepareSuspend sees it.
-	if resuspendOutput != nil && resuspendOutput.Data != nil {
-		_ = e.state.PutOutput(ctx, t.ExecutionID, t.NodeName, resuspendOutput.Data)
-		input = &node.Input{
-			Params:      input.Params,
-			Vars:        input.Vars,
-			Config:      input.Config,
-			ExecutionID: input.ExecutionID,
-			NodeName:    input.NodeName,
-			Data:        resuspendOutput.Data,
-			Inputs:      input.Inputs,
-		}
+	if t.Payload == nil {
+		return fmt.Errorf("resuspend result for %s without resume payload", t.NodeName)
+	}
+	if len(result.Suspend.Signals) == 0 {
+		return fmt.Errorf("resuspend: empty signals")
 	}
 
-	// Re-prepare the suspend spec for the new signal.
-	spec, err := sh.PrepareSuspend(ctx, input)
+	payload, err := e.state.ResuspendAtomic(ctx, t.ExecutionID, t.NodeName, t.Payload.Name, result.Suspend.Signals[0], result.Suspend)
 	if err != nil {
-		return nil, err
+		return err
 	}
-
-	if len(spec.Signals) == 0 {
-		return nil, fmt.Errorf("resuspend: PrepareSuspend returned empty signals")
-	}
-	newSignalName := spec.Signals[0]
-
-	// Atomically transition: release old lock, remove old waiter, check new signal.
-	payload, err := e.state.ResuspendAtomic(ctx, t.ExecutionID, t.NodeName, oldSignalName, newSignalName, spec)
-	if err != nil {
-		return nil, err
-	}
-
 	if payload != nil {
-		// New signal was already waiting — resume immediately.
-		output, err := sh.OnResume(ctx, input, payload)
-		if err != nil {
-			return output, err
-		}
-		if output != nil && output.Resuspend {
-			return e.doResuspend(ctx, t, sh, input, output, payload.Name)
-		}
-		return output, nil
+		_ = e.state.UpsertNode(ctx, &NodeSnapshot{
+			ExecutionID: t.ExecutionID,
+			Name:        t.NodeName,
+			NodeIdx:     t.NodeIdx,
+			Status:      types.NodeStatusSuspended,
+		})
+		return e.enqueueResume(ctx, t.ExecutionID, t.NodeName, t.NodeIdx, payload)
 	}
 
-	// Node is now suspended on the new signal.
 	_ = e.state.UpsertNode(ctx, &NodeSnapshot{
 		ExecutionID: t.ExecutionID,
 		Name:        t.NodeName,
 		NodeIdx:     t.NodeIdx,
-		Status:      "suspended",
+		Status:      types.NodeStatusSuspended,
 	})
+	if err := e.scheduleSuspendResumes(ctx, t, result.Suspend); err != nil {
+		return err
+	}
 	if e.hooks != nil {
 		e.hooks.OnNodeSuspended(ctx, t.ExecutionID, t.NodeName)
 	}
-	return nil, nil
+	return nil
+}
+
+func (e *Engine) scheduleSuspendResumes(ctx context.Context, t *Task, spec *types.SuspendSpec) error {
+	if spec == nil {
+		return nil
+	}
+	if spec.Mode == types.ModeTimer {
+		if err := e.enqueueResumeAfter(ctx, t, spec.Timer, &types.SignalPayload{
+			Triggered: types.TimerFired,
+			Name:      "_timer",
+		}); err != nil {
+			return err
+		}
+	}
+	if spec.Timeout > 0 {
+		if err := e.enqueueResumeAfter(ctx, t, spec.Timeout, &types.SignalPayload{
+			Triggered: types.TimeoutFired,
+			Name:      "_timeout",
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (e *Engine) enqueueResumeAfter(ctx context.Context, t *Task, delay time.Duration, payload *types.SignalPayload) error {
+	task := &Task{
+		ExecutionID: t.ExecutionID,
+		NodeName:    t.NodeName,
+		NodeIdx:     t.NodeIdx,
+		Type:        TaskTypeNodeResume,
+		Payload:     payload,
+	}
+	if delay <= 0 {
+		return e.queue.Enqueue(ctx, task)
+	}
+	return e.queue.EnqueueDelayed(ctx, task, delay)
+}
+
+func (e *Engine) enqueueResume(ctx context.Context, id types.ExecutionID, nodeName string, nodeIdx int, payload *types.SignalPayload) error {
+	return e.queue.Enqueue(ctx, &Task{
+		ExecutionID: id,
+		NodeName:    nodeName,
+		NodeIdx:     nodeIdx,
+		Type:        TaskTypeNodeResume,
+		Payload:     payload,
+	})
 }
 
 // finalizeNode persists the success result and triggers downstream scheduling.
-func (e *Engine) finalizeNode(ctx context.Context, t *Task, g *graph.Graph, meta graph.NodeMeta, output *node.Output, sysErr error) error {
+func (e *Engine) finalizeNode(ctx context.Context, t *Task, g *graph.Graph, meta graph.NodeMeta, output *types.Output, sysErr error) error {
 	if sysErr != nil || (output != nil && output.Error != nil) {
-		var bizErr *node.Error
+		var bizErr *types.Error
 		if output != nil {
 			bizErr = output.Error
 		}
@@ -335,17 +378,21 @@ func (e *Engine) finalizeNode(ctx context.Context, t *Task, g *graph.Graph, meta
 	}
 
 	_ = e.state.PutOutput(ctx, t.ExecutionID, t.NodeName, data)
+	leaseID, leaseToken, attempt := e.currentLease(ctx, t.ExecutionID, t.NodeName)
 	_ = e.state.UpsertNode(ctx, &NodeSnapshot{
 		ExecutionID: t.ExecutionID,
 		Name:        t.NodeName,
 		NodeIdx:     t.NodeIdx,
-		Status:      "success",
+		Status:      types.NodeStatusSuccess,
+		LeaseID:     leaseID,
+		LeaseToken:  leaseToken,
+		Attempt:     attempt,
 		Output:      data,
 		Port:        port,
 	})
 
 	if e.hooks != nil {
-		e.hooks.OnNodeComplete(ctx, t.ExecutionID, t.NodeName, "success")
+		e.hooks.OnNodeComplete(ctx, t.ExecutionID, t.NodeName, types.NodeStatusSuccess)
 	}
 
 	return e.OnNodeComplete(ctx, t.ExecutionID, g, t.NodeIdx, port, data)
@@ -353,16 +400,20 @@ func (e *Engine) finalizeNode(ctx context.Context, t *Task, g *graph.Graph, meta
 
 // handleNodeError applies the node's OnError strategy and either aborts the
 // execution or routes to the appropriate output port.
-func (e *Engine) handleNodeError(ctx context.Context, t *Task, g *graph.Graph, sysErr error, output *node.Output, bizErr *node.Error) error {
+func (e *Engine) handleNodeError(ctx context.Context, t *Task, g *graph.Graph, sysErr error, output *types.Output, bizErr *types.Error) error {
 	meta := g.Nodes[t.NodeIdx]
 	outcome := ApplyOnError(meta.OnError, sysErr, bizErr, output)
 
 	_ = e.state.PutOutput(ctx, t.ExecutionID, t.NodeName, outcome.Output)
+	leaseID, leaseToken, attempt := e.currentLease(ctx, t.ExecutionID, t.NodeName)
 	_ = e.state.UpsertNode(ctx, &NodeSnapshot{
 		ExecutionID: t.ExecutionID,
 		Name:        t.NodeName,
 		NodeIdx:     t.NodeIdx,
 		Status:      outcome.NodeStatus,
+		LeaseID:     leaseID,
+		LeaseToken:  leaseToken,
+		Attempt:     attempt,
 		Output:      outcome.Output,
 		Port:        outcome.RoutePort,
 		Error:       outcome.ErrorMessage,
@@ -373,9 +424,9 @@ func (e *Engine) handleNodeError(ctx context.Context, t *Task, g *graph.Graph, s
 	}
 
 	if outcome.ExecFatal {
-		_ = e.state.UpdateExecutionStatus(ctx, t.ExecutionID, types.StatusFailed, outcome.ErrorMessage)
+		_ = e.state.UpdateExecutionStatus(ctx, t.ExecutionID, types.ExecutionStatusFailed, outcome.ErrorMessage)
 		if e.hooks != nil {
-			e.hooks.OnExecutionComplete(ctx, t.ExecutionID, types.StatusFailed)
+			e.hooks.OnExecutionComplete(ctx, t.ExecutionID, types.ExecutionStatusFailed)
 		}
 		e.mu.Lock()
 		delete(e.graphs, t.ExecutionID)
@@ -386,14 +437,30 @@ func (e *Engine) handleNodeError(ctx context.Context, t *Task, g *graph.Graph, s
 	return e.OnNodeComplete(ctx, t.ExecutionID, g, t.NodeIdx, outcome.RoutePort, outcome.Output)
 }
 
-// buildInput assembles the node.Input from graph metadata and upstream outputs.
-func (e *Engine) buildInput(ctx context.Context, t *Task, g *graph.Graph) *node.Input {
-	input := &node.Input{
+func (e *Engine) currentLease(ctx context.Context, id types.ExecutionID, nodeName string) (LeaseID, LeaseToken, int) {
+	ns, err := e.state.GetNode(ctx, id, nodeName)
+	if err != nil || ns == nil {
+		return "", "", 0
+	}
+	return ns.LeaseID, ns.LeaseToken, ns.Attempt
+}
+
+// buildInput assembles the types.Input from graph metadata and upstream outputs.
+func (e *Engine) buildInput(ctx context.Context, t *Task, g *graph.Graph) *types.Input {
+	input := &types.Input{
 		Params:      g.Nodes[t.NodeIdx].Parameters,
 		Vars:        g.Vars,
 		Config:      g.Config,
 		ExecutionID: string(t.ExecutionID),
 		NodeName:    t.NodeName,
+	}
+
+	if t.Type == TaskTypeNodeResume {
+		data, _ := e.state.GetOutput(ctx, t.ExecutionID, t.NodeName)
+		if data != nil {
+			input.Data = data
+			return input
+		}
 	}
 
 	inEdges := g.InEdges[t.NodeIdx]
@@ -422,7 +489,7 @@ func (e *Engine) buildInput(ctx context.Context, t *Task, g *graph.Graph) *node.
 // DeliverSignal routes an external signal to the appropriate suspended node
 // and enqueues a resume task if the node is ready.
 func (e *Engine) DeliverSignal(ctx context.Context, id types.ExecutionID, name string, data map[string]any) error {
-	resumeNode, err := e.state.DeliverSignal(ctx, id, name, data)
+	resumeNode, payload, err := e.state.DeliverSignal(ctx, id, name, data)
 	if err != nil {
 		return err
 	}
@@ -451,7 +518,7 @@ func (e *Engine) DeliverSignal(ctx context.Context, id types.ExecutionID, name s
 		}
 		// Verify execution is still active before caching and proceeding.
 		snap, err := e.state.GetExecution(ctx, id)
-		if err != nil || snap == nil || isTerminal(string(snap.Status)) {
+		if err != nil || snap == nil || types.IsTerminalExecutionStatus(snap.Status) {
 			return err
 		}
 		e.mu.Lock()
@@ -465,16 +532,19 @@ func (e *Engine) DeliverSignal(ctx context.Context, id types.ExecutionID, name s
 	}
 
 	nodeIdx := g.Index[resumeNode]
+	if payload == nil {
+		payload = &types.SignalPayload{
+			Triggered: types.SignalReceived,
+			Name:      name,
+			Data:      data,
+		}
+	}
 	return e.queue.Enqueue(ctx, &Task{
 		ExecutionID: id,
 		NodeName:    resumeNode,
 		NodeIdx:     nodeIdx,
 		Type:        TaskTypeNodeResume,
-		Payload: &node.SignalPayload{
-			Triggered: node.SignalReceived,
-			Name:      name,
-			Data:      data,
-		},
+		Payload:     payload,
 	})
 }
 
@@ -494,7 +564,7 @@ func (e *Engine) TimeoutNode(ctx context.Context, id types.ExecutionID, nodeName
 		}
 		// Verify execution is still active before caching and proceeding.
 		snap, err := e.state.GetExecution(ctx, id)
-		if err != nil || snap == nil || isTerminal(string(snap.Status)) {
+		if err != nil || snap == nil || types.IsTerminalExecutionStatus(snap.Status) {
 			return err
 		}
 		e.mu.Lock()
@@ -513,8 +583,8 @@ func (e *Engine) TimeoutNode(ctx context.Context, id types.ExecutionID, nodeName
 		NodeName:    nodeName,
 		NodeIdx:     nodeIdx,
 		Type:        TaskTypeNodeResume,
-		Payload: &node.SignalPayload{
-			Triggered: node.TimeoutFired,
+		Payload: &types.SignalPayload{
+			Triggered: types.TimeoutFired,
 			Name:      "_timeout",
 		},
 	})
@@ -527,7 +597,7 @@ func (e *Engine) Cancel(ctx context.Context, id types.ExecutionID) error {
 	g := e.graphs[id]
 	e.mu.RUnlock()
 
-	if err := e.state.UpdateExecutionStatus(ctx, id, types.StatusCanceling, ""); err != nil {
+	if err := e.state.UpdateExecutionStatus(ctx, id, types.ExecutionStatusCanceling, ""); err != nil {
 		return err
 	}
 
@@ -538,15 +608,15 @@ func (e *Engine) Cancel(ctx context.Context, id types.ExecutionID) error {
 				ExecutionID: id,
 				Name:        nodeName,
 				NodeIdx:     g.Index[nodeName],
-				Status:      "canceled",
+				Status:      types.NodeStatusCanceled,
 			})
 		}
 	}
 
-	_ = e.state.UpdateExecutionStatus(ctx, id, types.StatusCanceled, "")
+	_ = e.state.UpdateExecutionStatus(ctx, id, types.ExecutionStatusCanceled, "")
 	if e.hooks != nil {
 		safeHook(ctx, e.logger, func(ctx context.Context) {
-			e.hooks.OnExecutionComplete(ctx, id, types.StatusCanceled)
+			e.hooks.OnExecutionComplete(ctx, id, types.ExecutionStatusCanceled)
 		})
 	}
 
@@ -575,13 +645,6 @@ func (e *Engine) RevokeSignal(ctx context.Context, id types.ExecutionID, signalN
 	return nil
 }
 
-// State returns the StateBackend used by this engine.
+// State returns the StateStore used by this engine.
 // Useful for callers that need to poll execution status (e.g. cluster Wait).
-func (e *Engine) State() StateBackend { return e.state }
-func isTerminal(status string) bool {
-	switch status {
-	case "success", "failed", "skipped", "canceled", "continued":
-		return true
-	}
-	return false
-}
+func (e *Engine) State() StateStore { return e.state }

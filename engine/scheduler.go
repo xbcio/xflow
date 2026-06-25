@@ -80,11 +80,11 @@ func (e *Engine) skipCascade(ctx context.Context, id types.ExecutionID, g *graph
 		ExecutionID: id,
 		Name:        g.Nodes[nodeIdx].Name,
 		NodeIdx:     nodeIdx,
-		Status:      "skipped",
+		Status:      types.NodeStatusSkipped,
 	})
 
 	if e.hooks != nil {
-		e.hooks.OnNodeComplete(ctx, id, g.Nodes[nodeIdx].Name, "skipped")
+		e.hooks.OnNodeComplete(ctx, id, g.Nodes[nodeIdx].Name, types.NodeStatusSkipped)
 	}
 
 	for _, edge := range g.OutEdges[nodeIdx] {
@@ -125,10 +125,10 @@ func (e *Engine) tryComplete(ctx context.Context, id types.ExecutionID, g *graph
 		return nil
 	}
 
-	status := types.StatusSuccess
+	status := types.ExecutionStatusSuccess
 	errMsg := ""
 	if hasFailed {
-		status = types.StatusFailed
+		status = types.ExecutionStatusFailed
 		errMsg = "one or more nodes failed"
 	}
 

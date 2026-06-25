@@ -42,6 +42,7 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 		g.Nodes[i] = NodeMeta{
 			Name:       nd.Name,
 			Type:       nd.Type,
+			Kind:       nd.Kind,
 			Version:    nd.Version,
 			OnError:    nd.OnError,
 			MergeMode:  extractMergeMode(nd),

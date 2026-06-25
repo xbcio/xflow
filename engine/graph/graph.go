@@ -1,5 +1,7 @@
 package graph
 
+import "github.com/xbcio/xflow/types"
+
 // Graph is the immutable compiled representation of a workflow definition.
 // It is built once via Compile and shared across concurrent executions.
 type Graph struct {
@@ -17,6 +19,7 @@ type Graph struct {
 type NodeMeta struct {
 	Name       string
 	Type       string
+	Kind       types.NodeKind
 	Version    int
 	OnError    string
 	MergeMode  string // "wait_all" or "wait_any"; empty means normal node

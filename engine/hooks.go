@@ -11,15 +11,16 @@ import (
 // Embed it in your hook struct to only override methods you care about.
 type BaseHooks struct{}
 
-func (BaseHooks) OnNodeStart(_ context.Context, _ types.ExecutionID, _ string)              {}
-func (BaseHooks) OnNodeComplete(_ context.Context, _ types.ExecutionID, _ string, _ string) {}
-func (BaseHooks) OnNodeSuspended(_ context.Context, _ types.ExecutionID, _ string)          {}
-func (BaseHooks) OnExecutionComplete(_ context.Context, _ types.ExecutionID, _ types.Status) {
+func (BaseHooks) OnNodeStart(_ context.Context, _ types.ExecutionID, _ string) {}
+func (BaseHooks) OnNodeComplete(_ context.Context, _ types.ExecutionID, _ string, _ types.NodeStatus) {
+}
+func (BaseHooks) OnNodeSuspended(_ context.Context, _ types.ExecutionID, _ string) {}
+func (BaseHooks) OnExecutionComplete(_ context.Context, _ types.ExecutionID, _ types.ExecutionStatus) {
 }
 func (BaseHooks) OnSignalDelivered(_ context.Context, _ types.ExecutionID, _ string, _ map[string]any) {
 }
-func (BaseHooks) OnSignalRevoked(_ context.Context, _ types.ExecutionID, _ string)  {}
-func (BaseHooks) OnNodeTimeout(_ context.Context, _ types.ExecutionID, _ string)    {}
+func (BaseHooks) OnSignalRevoked(_ context.Context, _ types.ExecutionID, _ string) {}
+func (BaseHooks) OnNodeTimeout(_ context.Context, _ types.ExecutionID, _ string)   {}
 
 // SafeHook wraps a hook call with panic recovery and a 5s timeout.
 // Exported for use by adapter packages (e.g. timeout monitor).

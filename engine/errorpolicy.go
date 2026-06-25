@@ -1,6 +1,8 @@
 package engine
 
-import "github.com/xbcio/xflow/node"
+import (
+	"github.com/xbcio/xflow/types"
+)
 
 // OnErrorOutcome is the result of applying an error-handling strategy to a
 // node failure. The engine uses it to decide routing, status, and whether the
@@ -8,7 +10,7 @@ import "github.com/xbcio/xflow/node"
 type OnErrorOutcome struct {
 	Output       map[string]any
 	RoutePort    string
-	NodeStatus   string
+	NodeStatus   types.NodeStatus
 	ExecFatal    bool
 	ErrorMessage string
 }
@@ -20,7 +22,7 @@ type OnErrorOutcome struct {
 //   - "error_output" — non-fatal; routes to the "error" port with error info merged into output.
 //   - "main_output"  — non-fatal; routes to the "main" port with error info merged into output.
 //   - "continue"     — non-fatal; routes to the "main" port, node status is "continued".
-func ApplyOnError(strategy string, sysErr error, bizErr *node.Error, output *node.Output) OnErrorOutcome {
+func ApplyOnError(strategy string, sysErr error, bizErr *types.Error, output *types.Output) OnErrorOutcome {
 	errMsg := ""
 	if sysErr != nil {
 		errMsg = sysErr.Error()
@@ -37,7 +39,7 @@ func ApplyOnError(strategy string, sysErr error, bizErr *node.Error, output *nod
 		return OnErrorOutcome{
 			Output:       out,
 			RoutePort:    "error",
-			NodeStatus:   "success",
+			NodeStatus:   types.NodeStatusSuccess,
 			ExecFatal:    false,
 			ErrorMessage: errMsg,
 		}
@@ -50,7 +52,7 @@ func ApplyOnError(strategy string, sysErr error, bizErr *node.Error, output *nod
 		return OnErrorOutcome{
 			Output:       out,
 			RoutePort:    "main",
-			NodeStatus:   "success",
+			NodeStatus:   types.NodeStatusSuccess,
 			ExecFatal:    false,
 			ErrorMessage: errMsg,
 		}
@@ -60,7 +62,7 @@ func ApplyOnError(strategy string, sysErr error, bizErr *node.Error, output *nod
 		return OnErrorOutcome{
 			Output:       out,
 			RoutePort:    "main",
-			NodeStatus:   "continued",
+			NodeStatus:   types.NodeStatusContinued,
 			ExecFatal:    false,
 			ErrorMessage: errMsg,
 		}
@@ -69,7 +71,7 @@ func ApplyOnError(strategy string, sysErr error, bizErr *node.Error, output *nod
 		return OnErrorOutcome{
 			Output:       nil,
 			RoutePort:    "",
-			NodeStatus:   "failed",
+			NodeStatus:   types.NodeStatusFailed,
 			ExecFatal:    true,
 			ErrorMessage: errMsg,
 		}
@@ -77,7 +79,7 @@ func ApplyOnError(strategy string, sysErr error, bizErr *node.Error, output *nod
 }
 
 // copyOutputData returns a shallow copy of output.Data, or an empty map if nil.
-func copyOutputData(output *node.Output) map[string]any {
+func copyOutputData(output *types.Output) map[string]any {
 	out := make(map[string]any)
 	if output != nil && output.Data != nil {
 		for k, v := range output.Data {
@@ -88,7 +90,7 @@ func copyOutputData(output *node.Output) map[string]any {
 }
 
 // buildErrData constructs the error metadata map placed under the "error" key.
-func buildErrData(msg string, bizErr *node.Error) map[string]any {
+func buildErrData(msg string, bizErr *types.Error) map[string]any {
 	d := map[string]any{"message": msg}
 	if bizErr != nil {
 		if bizErr.StatusCode != 0 {

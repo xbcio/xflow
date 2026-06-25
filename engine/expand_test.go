@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/xbcio/xflow/engine/graph"
-	"github.com/xbcio/xflow/node"
+	"github.com/xbcio/xflow/nodes/node"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -15,8 +15,12 @@ type portHandler struct {
 	data map[string]any
 }
 
-func (h *portHandler) Execute(_ context.Context, _ *node.Input) (*node.Output, error) {
-	return &node.Output{Data: h.data, Port: h.port}, nil
+func (h *portHandler) Descriptor() node.Descriptor {
+	return node.Descriptor{Type: "test.port"}
+}
+
+func (h *portHandler) Execute(_ context.Context, _ *types.Input) (*types.Output, error) {
+	return &types.Output{Data: h.data, Port: h.port}, nil
 }
 
 func TestScheduler_MergeWaitAny_TriggersOnFirstActive(t *testing.T) {
@@ -50,11 +54,11 @@ func TestScheduler_MergeWaitAny_TriggersOnFirstActive(t *testing.T) {
 
 	state := newFakeState()
 	queue := &fakeQueue{}
-	reg := &fakeRegistry{handlers: map[string]node.TaskHandler{
-		"test.echo":  &echoHandler{},
+	reg := &fakeRegistry{handlers: map[string]types.ActionHandler{
+		"test.echo":   &echoHandler{},
 		"xflow.merge": &echoHandler{},
 	}}
-	eng := New(state, queue, WithRegistry(reg))
+	eng := newTestEngine(state, queue, reg)
 	ctx := context.Background()
 
 	id, err := eng.Submit(ctx, g, nil)
@@ -71,9 +75,7 @@ func TestScheduler_MergeWaitAny_TriggersOnFirstActive(t *testing.T) {
 	// Execute only A.
 	for _, task := range tasks {
 		if task.NodeName == "A" {
-			if err := eng.ExecuteNode(ctx, task); err != nil {
-				t.Fatalf("ExecuteNode(A): %v", err)
-			}
+			executeTask(t, eng, task)
 			break
 		}
 	}
@@ -116,11 +118,11 @@ func TestScheduler_MergeWaitAll_WaitsForAll(t *testing.T) {
 
 	state := newFakeState()
 	queue := &fakeQueue{}
-	reg := &fakeRegistry{handlers: map[string]node.TaskHandler{
-		"test.echo":  &echoHandler{},
+	reg := &fakeRegistry{handlers: map[string]types.ActionHandler{
+		"test.echo":   &echoHandler{},
 		"xflow.merge": &echoHandler{},
 	}}
-	eng := New(state, queue, WithRegistry(reg))
+	eng := newTestEngine(state, queue, reg)
 	ctx := context.Background()
 
 	_, err = eng.Submit(ctx, g, nil)
@@ -132,9 +134,7 @@ func TestScheduler_MergeWaitAll_WaitsForAll(t *testing.T) {
 	tasks := queue.Drain()
 	for _, task := range tasks {
 		if task.NodeName == "A" {
-			if err := eng.ExecuteNode(ctx, task); err != nil {
-				t.Fatalf("ExecuteNode(A): %v", err)
-			}
+			executeTask(t, eng, task)
 			break
 		}
 	}
@@ -150,9 +150,7 @@ func TestScheduler_MergeWaitAll_WaitsForAll(t *testing.T) {
 	// Execute B.
 	for _, task := range tasks {
 		if task.NodeName == "B" {
-			if err := eng.ExecuteNode(ctx, task); err != nil {
-				t.Fatalf("ExecuteNode(B): %v", err)
-			}
+			executeTask(t, eng, task)
 			break
 		}
 	}
@@ -173,8 +171,12 @@ func TestScheduler_MergeWaitAll_WaitsForAll(t *testing.T) {
 // loopHandler simulates a loop node output.
 type loopHandler struct{}
 
-func (h *loopHandler) Execute(_ context.Context, input *node.Input) (*node.Output, error) {
-	return &node.Output{
+func (h *loopHandler) Descriptor() node.Descriptor {
+	return node.Descriptor{Type: "xflow.loop"}
+}
+
+func (h *loopHandler) Execute(_ context.Context, input *types.Input) (*types.Output, error) {
+	return &types.Output{
 		Data: map[string]any{
 			"_loop":       true,
 			"items":       []any{"a", "b", "c"},
@@ -205,11 +207,11 @@ func TestScheduler_LoopExpansion_CreatesSubExecutions(t *testing.T) {
 
 	state := newFakeState()
 	queue := &fakeQueue{}
-	reg := &fakeRegistry{handlers: map[string]node.TaskHandler{
+	reg := &fakeRegistry{handlers: map[string]types.ActionHandler{
 		"xflow.loop": &loopHandler{},
 		"test.echo":  &echoHandler{},
 	}}
-	eng := New(state, queue, WithRegistry(reg))
+	eng := newTestEngine(state, queue, reg)
 	ctx := context.Background()
 
 	id, err := eng.Submit(ctx, g, nil)
@@ -222,9 +224,7 @@ func TestScheduler_LoopExpansion_CreatesSubExecutions(t *testing.T) {
 	if len(tasks) != 1 || tasks[0].NodeName != "loop" {
 		t.Fatalf("expected 1 root task 'loop', got %v", taskNames(tasks))
 	}
-	if err := eng.ExecuteNode(ctx, tasks[0]); err != nil {
-		t.Fatalf("ExecuteNode(loop): %v", err)
-	}
+	executeTask(t, eng, tasks[0])
 
 	// Loop should have created 3 batch tasks.
 	batchTasks := queue.Drain()
