@@ -22,7 +22,7 @@ func (r *executionRepo) CreateExecution(ctx context.Context, rec *store.Executio
 	return r.db.WithContext(ctx).Create(rec).Error
 }
 
-func (r *executionRepo) UpdateExecutionStatus(ctx context.Context, id types.ExecutionID, status types.Status, errMsg string) error {
+func (r *executionRepo) UpdateExecutionStatus(ctx context.Context, id types.ExecutionID, status types.ExecutionStatus, errMsg string) error {
 	result := r.db.WithContext(ctx).
 		Model(&store.ExecutionRecord{}).
 		Where("execution_id = ?", string(id)).

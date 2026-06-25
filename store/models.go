@@ -8,15 +8,15 @@ import (
 
 // ExecutionRecord holds the persistent state of a workflow execution.
 type ExecutionRecord struct {
-	ID           uint64            `gorm:"column:id;primaryKey;autoIncrement"`
-	ExecutionID  types.ExecutionID `gorm:"column:execution_id;type:varchar(64);uniqueIndex:uk_execution_id"`
-	WorkflowName string            `gorm:"column:workflow_name;type:varchar(255)"`
-	WorkflowDef  []byte            `gorm:"column:workflow_def;type:json"`
-	Params       []byte            `gorm:"column:params;type:json"`
-	Status       types.Status      `gorm:"column:status;type:varchar(20)"`
-	Error        string            `gorm:"column:error_msg;type:text"`
-	CreatedAt    time.Time         `gorm:"column:created_at;autoCreateTime:milli"`
-	UpdatedAt    time.Time         `gorm:"column:updated_at;autoUpdateTime:milli"`
+	ID           uint64                `gorm:"column:id;primaryKey;autoIncrement"`
+	ExecutionID  types.ExecutionID     `gorm:"column:execution_id;type:varchar(64);uniqueIndex:uk_execution_id"`
+	WorkflowName string                `gorm:"column:workflow_name;type:varchar(255)"`
+	WorkflowDef  []byte                `gorm:"column:workflow_def;type:json"`
+	Params       []byte                `gorm:"column:params;type:json"`
+	Status       types.ExecutionStatus `gorm:"column:status;type:varchar(20)"`
+	Error        string                `gorm:"column:error_msg;type:text"`
+	CreatedAt    time.Time             `gorm:"column:created_at;autoCreateTime:milli"`
+	UpdatedAt    time.Time             `gorm:"column:updated_at;autoUpdateTime:milli"`
 }
 
 func (ExecutionRecord) TableName() string { return "xflow_executions" }
@@ -27,7 +27,10 @@ type NodeRecord struct {
 	ExecutionID  types.ExecutionID `gorm:"column:execution_id;type:varchar(64);uniqueIndex:uk_exec_node"`
 	NodeName     string            `gorm:"column:node_name;type:varchar(255);uniqueIndex:uk_exec_node"`
 	NodeType     string            `gorm:"column:node_type;type:varchar(255)"`
-	Status       string            `gorm:"column:status;type:varchar(20)"`
+	Status       types.NodeStatus  `gorm:"column:status;type:varchar(20)"`
+	LeaseID      string            `gorm:"column:lease_id;type:varchar(96)"`
+	LeaseToken   string            `gorm:"column:lease_token;type:varchar(96)"`
+	Attempt      int               `gorm:"column:attempt"`
 	Output       []byte            `gorm:"column:output;type:json"`
 	Port         string            `gorm:"column:port;type:varchar(50)"`
 	SignalName   string            `gorm:"column:signal_name;type:varchar(255)"`

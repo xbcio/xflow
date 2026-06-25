@@ -117,7 +117,7 @@ func (s *Store) CreateExecution(_ context.Context, rec *store.ExecutionRecord) e
 	return nil
 }
 
-func (s *Store) UpdateExecutionStatus(_ context.Context, id types.ExecutionID, status types.Status, errMsg string) error {
+func (s *Store) UpdateExecutionStatus(_ context.Context, id types.ExecutionID, status types.ExecutionStatus, errMsg string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rec, ok := s.executions[id]
@@ -199,7 +199,7 @@ func (s *Store) ListSuspendedBySignal(_ context.Context, id types.ExecutionID, s
 	defer s.mu.Unlock()
 	var result []*store.NodeRecord
 	for _, rec := range s.nodes {
-		if rec.ExecutionID == id && rec.Status == "suspended" && rec.SignalName == signal {
+		if rec.ExecutionID == id && rec.Status == types.NodeStatusSuspended && rec.SignalName == signal {
 			cp := *rec
 			result = append(result, &cp)
 		}
@@ -212,7 +212,7 @@ func (s *Store) ListExpiredSuspensions(_ context.Context, now time.Time, opts st
 	defer s.mu.Unlock()
 	var all []*store.NodeRecord
 	for _, rec := range s.nodes {
-		if rec.Status == "suspended" && rec.Timeout != nil && !rec.Timeout.After(now) {
+		if rec.Status == types.NodeStatusSuspended && rec.Timeout != nil && !rec.Timeout.After(now) {
 			cp := *rec
 			all = append(all, &cp)
 		}

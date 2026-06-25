@@ -10,7 +10,7 @@ import (
 // Executions persists workflow execution lifecycle state.
 type Executions interface {
 	CreateExecution(ctx context.Context, rec *ExecutionRecord) error
-	UpdateExecutionStatus(ctx context.Context, id types.ExecutionID, status types.Status, errMsg string) error
+	UpdateExecutionStatus(ctx context.Context, id types.ExecutionID, status types.ExecutionStatus, errMsg string) error
 	GetExecution(ctx context.Context, id types.ExecutionID) (*ExecutionRecord, error)
 }
 
