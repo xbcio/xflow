@@ -2,21 +2,20 @@ package types
 
 // WorkflowDef is the top-level DSL data structure representing a workflow definition.
 type WorkflowDef struct {
-	ID            string                 `json:"id,omitempty"`
-	Name          string                 `json:"name,omitempty"`
-	Version       string                 `json:"version,omitempty"`
-	Description   string                 `json:"description,omitempty"`
-	Spec          string                 `json:"spec,omitempty"`
-	Triggers      []TriggerDef           `json:"triggers,omitempty"`
-	Context       *WorkflowContext       `json:"context,omitempty"`
-	Settings      *WorkflowSettings      `json:"settings,omitempty"`
-	Credentials   map[string]CredentialDef `json:"credentials,omitempty"`
-	Params        map[string]ParamDef    `json:"params,omitempty"`
-	NodeTemplates map[string]NodeTemplate `json:"node_templates,omitempty"`
-	Nodes         []NodeDef              `json:"nodes,omitempty"`
-	Connections   Connections            `json:"connections,omitempty"`
+	ID            string                    `json:"id,omitempty"`
+	Name          string                    `json:"name,omitempty"`
+	Version       string                    `json:"version,omitempty"`
+	Description   string                    `json:"description,omitempty"`
+	Spec          string                    `json:"spec,omitempty"`
+	Context       *WorkflowContext          `json:"context,omitempty"`
+	Settings      *WorkflowSettings         `json:"settings,omitempty"`
+	Credentials   map[string]CredentialDef  `json:"credentials,omitempty"`
+	Params        map[string]ParamDef       `json:"params,omitempty"`
+	NodeTemplates map[string]NodeTemplate   `json:"node_templates,omitempty"`
+	Nodes         []NodeDef                 `json:"nodes,omitempty"`
+	Connections   Connections               `json:"connections,omitempty"`
 	Outputs       map[string]WorkflowOutput `json:"outputs,omitempty"`
-	PinData       map[string]any         `json:"pin_data,omitempty"`
+	PinData       map[string]any            `json:"pin_data,omitempty"`
 }
 
 // NodeDef describes a single node in the workflow graph.
@@ -24,6 +23,7 @@ type NodeDef struct {
 	ID           string         `json:"id,omitempty"`
 	Name         string         `json:"name,omitempty"`
 	Type         string         `json:"type,omitempty"`
+	Kind         NodeKind       `json:"kind,omitempty"`
 	Version      int            `json:"version,omitempty"`
 	Template     string         `json:"template,omitempty"`
 	Position     *Position      `json:"position,omitempty"`
@@ -35,6 +35,13 @@ type NodeDef struct {
 	Parameters   map[string]any `json:"parameters,omitempty"`
 	UI           map[string]any `json:"ui,omitempty"`
 }
+
+// NodeKind describes a node's runtime role.
+type NodeKind string
+
+const (
+	NodeKindAction NodeKind = "action"
+)
 
 // Position holds the visual coordinates of a node in the workflow editor.
 type Position struct {
