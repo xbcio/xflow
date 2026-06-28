@@ -26,6 +26,14 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 		OutEdges: make([][]Edge, n),
 		InEdges:  make([][]Edge, n),
 		InDegree: make([]int, n),
+		StartIdx: -1,
+	}
+	if def.Options != nil {
+		g.AllowCycles = def.Options.AllowCycles
+		g.MaxAutoDepth = def.Options.MaxAutoDepth
+	}
+	if g.AllowCycles && g.MaxAutoDepth <= 0 {
+		g.MaxAutoDepth = DefaultMaxAutoDepth
 	}
 
 	if def.Context != nil {
@@ -34,6 +42,7 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 	}
 
 	// First pass: register all nodes.
+	startCount := 0
 	for i, nd := range def.Nodes {
 		if _, dup := g.Index[nd.Name]; dup {
 			return nil, fmt.Errorf("duplicate node name: %s", nd.Name)
@@ -47,6 +56,18 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 			OnError:    nd.OnError,
 			MergeMode:  extractMergeMode(nd),
 			Parameters: nd.Parameters,
+		}
+		if g.AllowCycles {
+			if nd.Type == "xflow.start" {
+				startCount++
+				g.StartIdx = i
+			}
+			if nd.Type == "xflow.trigger" {
+				return nil, errors.New("xflow.trigger is not supported in cyclic workflows yet")
+			}
+			if nd.Type == "xflow.merge" && extractMergeMode(nd) == "wait_all" {
+				return nil, errors.New("xflow.merge wait_all is not supported in cyclic workflows")
+			}
 		}
 	}
 
@@ -86,8 +107,14 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 		g.Nodes[srcIdx].PortOuts = portOuts
 	}
 
-	if err := detectCycle(g); err != nil {
-		return nil, err
+	if g.AllowCycles {
+		if startCount != 1 {
+			return nil, fmt.Errorf("cyclic workflow requires exactly one xflow.start node, got %d", startCount)
+		}
+	} else {
+		if err := detectCycle(g); err != nil {
+			return nil, err
+		}
 	}
 
 	return g, nil

@@ -11,6 +11,10 @@ import (
 // It decrements in-degrees for all downstream nodes and either enqueues ready nodes,
 // cascades skips for nodes that received no active input, or checks for execution completion.
 func (e *Engine) OnNodeComplete(ctx context.Context, id types.ExecutionID, g *graph.Graph, completedIdx int, activePort string, output map[string]any) error {
+	if g.AllowCycles {
+		return e.onCyclicNodeComplete(ctx, id, g, completedIdx, activePort)
+	}
+
 	outEdges := g.OutEdges[completedIdx]
 	if len(outEdges) == 0 {
 		// Leaf node — check if the whole execution is done.
@@ -74,6 +78,55 @@ func (e *Engine) OnNodeComplete(ctx context.Context, id types.ExecutionID, g *gr
 	return nil
 }
 
+func (e *Engine) onCyclicNodeComplete(ctx context.Context, id types.ExecutionID, g *graph.Graph, completedIdx int, activePort string) error {
+	outEdges := g.OutEdges[completedIdx]
+	if len(outEdges) == 0 {
+		return e.completeExecution(ctx, id, types.ExecutionStatusSuccess, "")
+	}
+
+	completed := g.Nodes[completedIdx]
+	ns, err := e.state.GetNode(ctx, id, completed.Name)
+	if err != nil {
+		return err
+	}
+	activationID := 0
+	autoDepth := 0
+	if ns != nil {
+		activationID = ns.ActivationID
+		autoDepth = ns.AutoDepth
+	}
+	nextActivationID := activationID + 1
+
+	anyEnqueued := false
+	for _, edge := range outEdges {
+		if edge.SrcPort != activePort {
+			continue
+		}
+		nextDepth := autoDepth + 1
+		if nextDepth > g.MaxAutoDepth {
+			return e.completeExecution(ctx, id, types.ExecutionStatusFailed, "max auto execution depth exceeded")
+		}
+		dstMeta := g.Nodes[edge.DstIdx]
+		task := &Task{
+			ExecutionID:  id,
+			NodeName:     dstMeta.Name,
+			NodeIdx:      edge.DstIdx,
+			Type:         TaskTypeNodeExec,
+			AutoDepth:    nextDepth,
+			ActivationID: nextActivationID,
+		}
+		if err := e.queue.Enqueue(ctx, task); err != nil {
+			return err
+		}
+		anyEnqueued = true
+	}
+
+	if !anyEnqueued {
+		return e.completeExecution(ctx, id, types.ExecutionStatusSuccess, "")
+	}
+	return nil
+}
+
 // skipCascade marks a node as skipped and propagates the skip to its descendants.
 func (e *Engine) skipCascade(ctx context.Context, id types.ExecutionID, g *graph.Graph, nodeIdx int) error {
 	_ = e.state.UpsertNode(ctx, &NodeSnapshot{
@@ -132,6 +185,10 @@ func (e *Engine) tryComplete(ctx context.Context, id types.ExecutionID, g *graph
 		errMsg = "one or more nodes failed"
 	}
 
+	return e.completeExecution(ctx, id, status, errMsg)
+}
+
+func (e *Engine) completeExecution(ctx context.Context, id types.ExecutionID, status types.ExecutionStatus, errMsg string) error {
 	_ = e.state.UpdateExecutionStatus(ctx, id, status, errMsg)
 	if e.hooks != nil {
 		e.hooks.OnExecutionComplete(ctx, id, status)

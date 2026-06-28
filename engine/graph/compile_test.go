@@ -58,6 +58,120 @@ func TestCompile_CycleDetection(t *testing.T) {
 	}
 }
 
+func TestCompile_AllowCyclesAllowsCycleWithStart(t *testing.T) {
+	def := &types.WorkflowDef{
+		Name:    "cycle",
+		Options: &types.WorkflowOptions{AllowCycles: true, MaxAutoDepth: 7},
+		Nodes: []types.NodeDef{
+			{Name: "start", Type: "xflow.start"},
+			{Name: "review", Type: "test.review"},
+		},
+		Connections: types.Connections{
+			"start":  {"main": []types.Connection{{Node: "review", Input: "main"}}},
+			"review": {"reject": []types.Connection{{Node: "start", Input: "main"}}},
+		},
+	}
+
+	g, err := Compile(def)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !g.AllowCycles {
+		t.Fatal("expected cyclic graph")
+	}
+	if g.StartIdx != g.Index["start"] {
+		t.Fatalf("StartIdx = %d, want %d", g.StartIdx, g.Index["start"])
+	}
+	if g.MaxAutoDepth != 7 {
+		t.Fatalf("MaxAutoDepth = %d, want 7", g.MaxAutoDepth)
+	}
+}
+
+func TestCompile_AllowCyclesDefaultsMaxAutoDepth(t *testing.T) {
+	def := &types.WorkflowDef{
+		Name:    "cycle",
+		Options: &types.WorkflowOptions{AllowCycles: true},
+		Nodes: []types.NodeDef{
+			{Name: "start", Type: "xflow.start"},
+		},
+	}
+
+	g, err := Compile(def)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.MaxAutoDepth != DefaultMaxAutoDepth {
+		t.Fatalf("MaxAutoDepth = %d, want %d", g.MaxAutoDepth, DefaultMaxAutoDepth)
+	}
+}
+
+func TestCompile_AllowCyclesRequiresExactlyOneStart(t *testing.T) {
+	tests := []struct {
+		name  string
+		nodes []types.NodeDef
+	}{
+		{
+			name:  "missing",
+			nodes: []types.NodeDef{{Name: "review", Type: "test.review"}},
+		},
+		{
+			name: "multiple",
+			nodes: []types.NodeDef{
+				{Name: "start1", Type: "xflow.start"},
+				{Name: "start2", Type: "xflow.start"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			def := &types.WorkflowDef{
+				Name:    tt.name,
+				Options: &types.WorkflowOptions{AllowCycles: true},
+				Nodes:   tt.nodes,
+			}
+
+			if _, err := Compile(def); err == nil {
+				t.Fatal("expected start validation error")
+			}
+		})
+	}
+}
+
+func TestCompile_AllowCyclesRejectsTriggerUntilImplemented(t *testing.T) {
+	def := &types.WorkflowDef{
+		Name:    "trigger",
+		Options: &types.WorkflowOptions{AllowCycles: true},
+		Nodes: []types.NodeDef{
+			{Name: "start", Type: "xflow.start"},
+			{Name: "trigger", Type: "xflow.trigger"},
+		},
+	}
+
+	if _, err := Compile(def); err == nil {
+		t.Fatal("expected trigger validation error")
+	}
+}
+
+func TestCompile_AllowCyclesRejectsWaitAllMerge(t *testing.T) {
+	def := &types.WorkflowDef{
+		Name:    "merge",
+		Options: &types.WorkflowOptions{AllowCycles: true},
+		Nodes: []types.NodeDef{
+			{Name: "start", Type: "xflow.start"},
+			{Name: "join", Type: "xflow.merge", Parameters: map[string]any{"mode": "wait_all"}},
+		},
+		Connections: types.Connections{
+			"start": {"main": []types.Connection{{Node: "join", Input: "main"}}},
+			"join":  {"main": []types.Connection{{Node: "start", Input: "main"}}},
+		},
+	}
+
+	if _, err := Compile(def); err == nil {
+		t.Fatal("expected wait_all merge validation error")
+	}
+}
+
 func TestCompile_FanOutFanIn(t *testing.T) {
 	def := &types.WorkflowDef{
 		Name: "diamond",

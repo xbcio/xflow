@@ -44,6 +44,38 @@ func TestWorkflowBuilderNodeConnectInputOutput(t *testing.T) {
 	}
 }
 
+func TestWorkflowBuilderRejectsCycleByDefault(t *testing.T) {
+	wf := Workflow("cycle-default")
+	start := wf.Node("start", node.Start())
+	review := wf.Node("review", node.Function("input"))
+	wf.Connect(start, review)
+	wf.Connect(review.Output("reject"), start)
+
+	_, err := wf.build()
+	if err == nil {
+		t.Fatal("expected cycle error")
+	}
+}
+
+func TestWorkflowBuilderAllowCyclesEmitsOptionsAndSkipsBuilderCycleDetection(t *testing.T) {
+	wf := Workflow("cycle").AllowCycles(9)
+	start := wf.Node("start", node.Start())
+	review := wf.Node("review", node.Function("input"))
+	wf.Connect(start, review)
+	wf.Connect(review.Output("reject"), start)
+
+	def, err := wf.build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if def.Options == nil || !def.Options.AllowCycles {
+		t.Fatalf("Options = %+v, want allow_cycles", def.Options)
+	}
+	if def.Options.MaxAutoDepth != 9 {
+		t.Fatalf("MaxAutoDepth = %d, want 9", def.Options.MaxAutoDepth)
+	}
+}
+
 func TestEngineSubmitRejectsDirectHandlersWhenBackendDoesNotAllowThem(t *testing.T) {
 	provider := memory.New()
 	eng, err := newFromConfig(&engineConfig{allowDirectHandlers: false}, provider)

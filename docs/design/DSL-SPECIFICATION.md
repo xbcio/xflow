@@ -118,6 +118,11 @@ settings:
     max_attempts: int
     strategy: string      # fixed/exponential
 
+# 高级执行选项
+options:
+  allow_cycles: bool      # 是否允许有环图（默认 false；false 时仍按 DAG 校验）
+  max_auto_depth: int     # 有环图单次自动推进最大深度（默认 100；信号/人工恢复后重新计数）
+
 # 凭证引用
 # 所有敏感信息（API Key、密码、Token、DB 连接等）统一在 credentials 中定义
 # 在节点参数中通过名称引用：credential: db_conn 或 authentication: api_auth
@@ -1074,6 +1079,7 @@ XFlow 的 connections 仅描述拓扑关系（谁连到谁），条件逻辑由 
 | 节点类型 | 标识符 | 说明 | 输入端口 | 输出端口 | 动态端口 | output_schema |
 |---------|--------|------|---------|---------|---------|--------------|
 | HTTP请求 | xflow.http | HTTP/HTTPS 请求 | main | main, error | ❌ | 可选 |
+| 开始 | xflow.start | 显式工作流入口；有环图 v1 必须且只能有一个 | _(无)_ | main | ❌ | 不适用 |
 | gRPC调用 | xflow.grpc | gRPC 服务调用 | main | main, error | ❌ | 可选 |
 | 函数执行 | xflow.function | 执行 Go 函数或内联代码 | main | main, error | ❌ | 可选 |
 | 数据库操作 | xflow.database | 数据库 CRUD 操作 | main | main, error | ❌ | 可选 |
@@ -1086,6 +1092,29 @@ XFlow 的 connections 仅描述拓扑关系（谁连到谁），条件逻辑由 
 > **并行执行**：XFlow 不提供 `xflow.parallel` 节点。并行通过 connections 天然实现——一个输出端口连接多个目标节点即为并行分支，用 `xflow.merge` 汇合。
 >
 > **实验能力**：`xflow.loop` 和 `xflow.split` 暂不作为生产审批流程能力承诺。
+
+#### 有环图模式
+
+默认情况下，XFlow 仍按 DAG 编译，任何环都会被拒绝。需要审批驳回、复测失败打回、验收不通过回退等 UI 流程时，可以显式开启：
+
+```yaml
+options:
+  allow_cycles: true
+  max_auto_depth: 100
+
+nodes:
+  - name: start
+    type: xflow.start
+```
+
+开启 `allow_cycles` 后：
+- 必须声明且只能声明一个 `xflow.start` 节点。
+- 初始提交只从 `xflow.start` 开始，即使该节点存在回退入边。
+- 调度沿当前节点的 active output port 直接推进，不再等待目标节点 in-degree 归零。
+- 同一节点可重复执行，运行时节点状态和 `$nodes['name']` 输出表示最新一次成功输出。
+- core 不保存 `$nodes['name'].history` 或 attempts 历史；自定义节点的业务历史、幂等和外部副作用一致性由接入方处理；未来 server/runner 层可以记录内置节点的通用事件审计。
+- `max_auto_depth` 限制一次自动推进链路，避免无人值守的无限循环；人工信号/恢复后重新计数。
+- v1 不支持 `xflow.trigger`，也不支持有环图中的 `xflow.merge` `wait_all` 语义。
 
 ### 6.2 节点配置
 

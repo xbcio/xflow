@@ -9,6 +9,7 @@ type WorkflowDef struct {
 	Spec          string                    `json:"spec,omitempty"`
 	Context       *WorkflowContext          `json:"context,omitempty"`
 	Settings      *WorkflowSettings         `json:"settings,omitempty"`
+	Options       *WorkflowOptions          `json:"options,omitempty"`
 	Credentials   map[string]CredentialDef  `json:"credentials,omitempty"`
 	Params        map[string]ParamDef       `json:"params,omitempty"`
 	NodeTemplates map[string]NodeTemplate   `json:"node_templates,omitempty"`
@@ -16,6 +17,27 @@ type WorkflowDef struct {
 	Connections   Connections               `json:"connections,omitempty"`
 	Outputs       map[string]WorkflowOutput `json:"outputs,omitempty"`
 	PinData       map[string]any            `json:"pin_data,omitempty"`
+}
+
+// WorkflowOptions controls advanced workflow-level runtime behavior.
+type WorkflowOptions struct {
+	// AllowCycles opts the workflow into cyclic execution mode.
+	//
+	// Default false keeps the original DAG semantics and rejects any cycle at
+	// compile/build time. When true, the workflow must contain exactly one
+	// xflow.start node, scheduling follows the active output port directly, and
+	// a node may run more than once. The engine still stores only the latest
+	// state/output for each node; business history and custom-node side effects
+	// remain the caller's responsibility.
+	AllowCycles bool `json:"allow_cycles,omitempty"`
+
+	// MaxAutoDepth caps one uninterrupted automatic scheduling chain in cyclic
+	// mode. It prevents unattended loops from running forever. Manual resume
+	// points such as signals and timeouts reset the automatic depth counter, so
+	// human-driven approval loops are not limited by the total number of rounds.
+	//
+	// Values <= 0 use the engine default.
+	MaxAutoDepth int `json:"max_auto_depth,omitempty"`
 }
 
 // NodeDef describes a single node in the workflow graph.

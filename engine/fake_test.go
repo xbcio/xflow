@@ -89,7 +89,7 @@ func (f *fakeState) UpsertNode(_ context.Context, n *NodeSnapshot) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	key := string(n.ExecutionID) + "/" + n.Name
-	if existing, ok := f.nodes[key]; ok && types.IsTerminalNodeStatus(existing.Status) {
+	if existing, ok := f.nodes[key]; ok && types.IsTerminalNodeStatus(existing.Status) && n.ActivationID <= existing.ActivationID {
 		return nil // CAS: don't overwrite terminal state
 	}
 	if existing, ok := f.nodes[key]; ok && existing.Status == types.NodeStatusCommitting && n.Status == types.NodeStatusRunning {
@@ -117,7 +117,13 @@ func (f *fakeState) ClaimTaskLease(_ context.Context, lease *TaskLease) (*NodeSn
 		return nil, false, nil
 	}
 	if types.IsTerminalNodeStatus(ns.Status) {
+		if lease.Task.ActivationID > 0 && ns.ActivationID != lease.Task.ActivationID {
+			return ns, false, nil
+		}
 		return ns, true, nil
+	}
+	if lease.Task.ActivationID > 0 && ns.ActivationID != lease.Task.ActivationID {
+		return ns, false, nil
 	}
 	if ns.LeaseToken == "" || ns.LeaseToken != lease.LeaseToken {
 		return ns, false, nil

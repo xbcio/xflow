@@ -6,6 +6,7 @@ These examples are executable Go tests for the embedded SDK surface.
 
 - `basic_test.go` shows local-mode DAG basics: direct handlers, port routing, and error-output branching.
 - `vulnerability_approval_test.go` shows the production-oriented approval shape for distributed services: typed node handlers, built-in approval gates, external signals, inspection, and rejected/approved branches.
+- `cyclic_vulnerability_approval_test.go` shows an opt-in cyclic approval workflow: explicit `xflow.start`, rejected security review returning to remediation, validation looping back into review, and final change approval/deployment/closure.
 
 ## Local vs cluster handlers
 

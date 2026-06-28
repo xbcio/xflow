@@ -309,6 +309,216 @@ func TestScheduler_ErrorFatal(t *testing.T) {
 	}
 }
 
+func TestScheduler_CyclicSubmitStartsAtStartNodeWithIncomingEdge(t *testing.T) {
+	def := &types.WorkflowDef{
+		Name:    "cyclic-start",
+		Options: &types.WorkflowOptions{AllowCycles: true},
+		Nodes: []types.NodeDef{
+			{Name: "start", Type: "xflow.start"},
+			{Name: "review", Type: "test.echo"},
+		},
+		Connections: types.Connections{
+			"start":  {"main": []types.Connection{{Node: "review", Input: "main"}}},
+			"review": {"reject": []types.Connection{{Node: "start", Input: "main"}}},
+		},
+	}
+	g, err := graph.Compile(def)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := newFakeState()
+	queue := &fakeQueue{}
+	eng := New(state, queue)
+
+	if _, err := eng.Submit(context.Background(), g, map[string]any{"ticket": "v-1"}); err != nil {
+		t.Fatal(err)
+	}
+
+	tasks := queue.Drain()
+	if len(tasks) != 1 || tasks[0].NodeName != "start" {
+		t.Fatalf("expected cyclic start task, got %v", taskNames(tasks))
+	}
+	if tasks[0].ActivationID != 1 || tasks[0].AutoDepth != 0 {
+		t.Fatalf("task activation/depth = %d/%d, want 1/0", tasks[0].ActivationID, tasks[0].AutoDepth)
+	}
+}
+
+func TestScheduler_CyclicReturnReentersTerminalNodeAndOverwritesLatestOutput(t *testing.T) {
+	def := &types.WorkflowDef{
+		Name:    "cyclic-return",
+		Options: &types.WorkflowOptions{AllowCycles: true, MaxAutoDepth: 10},
+		Nodes: []types.NodeDef{
+			{Name: "start", Type: "xflow.start"},
+			{Name: "review", Type: "test.review"},
+		},
+		Connections: types.Connections{
+			"start":  {"main": []types.Connection{{Node: "review", Input: "main"}}},
+			"review": {"reject": []types.Connection{{Node: "start", Input: "main"}}},
+		},
+	}
+	g, err := graph.Compile(def)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := newFakeState()
+	queue := &fakeQueue{}
+	eng := New(state, queue)
+	ctx := context.Background()
+
+	id, err := eng.Submit(ctx, g, map[string]any{"round": 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	startTask := queue.Drain()[0]
+	startLease, err := eng.BuildTaskLease(ctx, startTask)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.CommitTaskResult(ctx, startLease, TaskResult{Output: &types.Output{Data: map[string]any{"round": 1}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	reviewTask := queue.Drain()[0]
+	reviewLease, err := eng.BuildTaskLease(ctx, reviewTask)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.CommitTaskResult(ctx, reviewLease, TaskResult{Output: &types.Output{Data: map[string]any{"round": 2}, Port: "reject"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	reenteredStart := queue.Drain()[0]
+	if reenteredStart.NodeName != "start" || reenteredStart.ActivationID <= startTask.ActivationID {
+		t.Fatalf("reentered task = %+v, original activation %d", reenteredStart, startTask.ActivationID)
+	}
+	reenteredLease, err := eng.BuildTaskLease(ctx, reenteredStart)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reenteredLease.Input.Data["round"] != 2 {
+		t.Fatalf("reentered input = %v, want latest review output", reenteredLease.Input.Data)
+	}
+	if err := eng.CommitTaskResult(ctx, reenteredLease, TaskResult{Output: &types.Output{Data: map[string]any{"round": 3}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := state.GetOutput(ctx, id, "start")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["round"] != 3 {
+		t.Fatalf("start output = %v, want latest reentry output", out)
+	}
+}
+
+func TestScheduler_CyclicAutomaticDepthLimitFailsExecution(t *testing.T) {
+	def := &types.WorkflowDef{
+		Name:    "depth",
+		Options: &types.WorkflowOptions{AllowCycles: true, MaxAutoDepth: 1},
+		Nodes: []types.NodeDef{
+			{Name: "start", Type: "xflow.start"},
+			{Name: "loop", Type: "test.loop"},
+		},
+		Connections: types.Connections{
+			"start": {"main": []types.Connection{{Node: "loop", Input: "main"}}},
+			"loop":  {"main": []types.Connection{{Node: "loop", Input: "main"}}},
+		},
+	}
+	g, err := graph.Compile(def)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := newFakeState()
+	queue := &fakeQueue{}
+	eng := New(state, queue)
+	ctx := context.Background()
+
+	id, err := eng.Submit(ctx, g, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	startLease, err := eng.BuildTaskLease(ctx, queue.Drain()[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.CommitTaskResult(ctx, startLease, TaskResult{Output: &types.Output{Data: map[string]any{"step": "start"}}}); err != nil {
+		t.Fatal(err)
+	}
+	loopLease, err := eng.BuildTaskLease(ctx, queue.Drain()[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.CommitTaskResult(ctx, loopLease, TaskResult{Output: &types.Output{Data: map[string]any{"step": "loop"}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	snap, err := state.GetExecution(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Status != types.ExecutionStatusFailed {
+		t.Fatalf("execution status = %s, want failed", snap.Status)
+	}
+	if tasks := queue.Drain(); len(tasks) != 0 {
+		t.Fatalf("expected no task after depth failure, got %v", taskNames(tasks))
+	}
+}
+
+func TestScheduler_CyclicStaleActivationTaskCannotReacquireNode(t *testing.T) {
+	def := &types.WorkflowDef{
+		Name:    "stale-activation",
+		Options: &types.WorkflowOptions{AllowCycles: true, MaxAutoDepth: 10},
+		Nodes: []types.NodeDef{
+			{Name: "start", Type: "xflow.start"},
+			{Name: "step", Type: "test.step"},
+		},
+		Connections: types.Connections{
+			"start": {"main": []types.Connection{{Node: "step", Input: "main"}}},
+			"step":  {"main": []types.Connection{{Node: "step", Input: "main"}}},
+		},
+	}
+	g, err := graph.Compile(def)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := newFakeState()
+	queue := &fakeQueue{}
+	eng := New(state, queue)
+	ctx := context.Background()
+
+	if _, err := eng.Submit(ctx, g, nil); err != nil {
+		t.Fatal(err)
+	}
+	startLease, err := eng.BuildTaskLease(ctx, queue.Drain()[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.CommitTaskResult(ctx, startLease, TaskResult{Output: &types.Output{Data: map[string]any{"step": 0}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	staleTask := queue.Drain()[0]
+	firstLease, err := eng.BuildTaskLease(ctx, staleTask)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.CommitTaskResult(ctx, firstLease, TaskResult{Output: &types.Output{Data: map[string]any{"step": 1}}}); err != nil {
+		t.Fatal(err)
+	}
+	newerTask := queue.Drain()[0]
+	newerLease, err := eng.BuildTaskLease(ctx, newerTask)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.CommitTaskResult(ctx, newerLease, TaskResult{Output: &types.Output{Data: map[string]any{"step": 2}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := eng.BuildTaskLease(ctx, staleTask); err == nil {
+		t.Fatal("expected stale activation task to be rejected")
+	}
+}
+
 // failHandler always returns an error.
 type failHandler struct{}
 

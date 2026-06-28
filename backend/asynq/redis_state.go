@@ -89,7 +89,8 @@ return {newVal, ai}
 `)
 
 // suspendOrConsumeLua atomically checks for an existing signal or parks the node.
-// KEYS[1] = signal key, KEYS[2] = node status key, KEYS[3] = waiter key, KEYS[4] = suspended_nodes SET
+// KEYS[1] = signal key, KEYS[2] = node status key, KEYS[3] = waiter key,
+// KEYS[4] = suspended_nodes SET, KEYS[5] = resume_lock key
 // ARGV[1] = node name, ARGV[2] = ttl seconds
 // Returns signal payload JSON (consumed) or nil (suspended).
 var suspendOrConsumeLua = redis.NewScript(`
@@ -98,6 +99,7 @@ if signal then
     redis.call('DEL', KEYS[1])
     return signal
 end
+redis.call('DEL', KEYS[5])
 redis.call('SET', KEYS[2], 'suspended', 'EX', ARGV[2])
 redis.call('SET', KEYS[3], ARGV[1], 'EX', ARGV[2])
 redis.call('SADD', KEYS[4], ARGV[1])
@@ -120,13 +122,17 @@ return nil
 `)
 
 // upsertNodeLua atomically checks if the node is in a terminal state before writing.
-// KEYS[1] = node status key, KEYS[2] = output key (optional, may be empty string)
-// ARGV[1] = new status, ARGV[2] = output JSON (or ""), ARGV[3] = ttl seconds
+// KEYS[1] = node status key, KEYS[2] = output key (optional, may be empty string), KEYS[3] = node meta hash
+// ARGV[1] = new status, ARGV[2] = output JSON (or ""), ARGV[3] = ttl seconds, ARGV[4] = activation id
 // Returns 1 (written) or 0 (skipped, already terminal).
 var upsertNodeLua = redis.NewScript(`
 local existing = redis.call('GET', KEYS[1])
 if existing == 'success' or existing == 'failed' or existing == 'skipped' or existing == 'canceled' or existing == 'continued' then
-    return 0
+    local oldActivation = tonumber(redis.call('HGET', KEYS[3], 'activation_id') or '0')
+    local newActivation = tonumber(ARGV[4] or '0')
+    if newActivation <= oldActivation then
+        return 0
+    end
 end
 if existing == 'committing' and ARGV[1] == 'running' then
     return 0
@@ -142,12 +148,19 @@ return 1
 // current node lease token and moving the node into the transient committing
 // state. New leases cannot overwrite a committing node.
 // KEYS[1] = node status key, KEYS[2] = node meta hash
-// ARGV[1] = expected lease token, ARGV[2] = ttl seconds
+// ARGV[1] = expected lease token, ARGV[2] = ttl seconds, ARGV[3] = expected activation id
 // Returns {valid, status}.
 var claimTaskLeaseLua = redis.NewScript(`
 local status = redis.call('GET', KEYS[1])
 if not status then
     return {0, ''}
+end
+local expectedActivation = tonumber(ARGV[3] or '0')
+if expectedActivation > 0 then
+    local currentActivation = tonumber(redis.call('HGET', KEYS[2], 'activation_id') or '0')
+    if currentActivation ~= expectedActivation then
+        return {0, status}
+    end
 end
 if status == 'success' or status == 'failed' or status == 'skipped' or status == 'canceled' or status == 'continued' then
     return {1, status}
@@ -458,17 +471,19 @@ func (s *redisState) UpsertNode(ctx context.Context, n *engine.NodeSnapshot) err
 
 	ttl := s.getExecTTL(n.ExecutionID)
 	_, err := upsertNodeLua.Run(ctx, s.rdb,
-		[]string{key, outKey},
-		n.Status, outputJSON, int(ttl.Seconds()),
+		[]string{key, outKey, metaKey},
+		n.Status, outputJSON, int(ttl.Seconds()), n.ActivationID,
 	).Int64()
 	if err != nil && err != redis.Nil {
 		return fmt.Errorf("upsert node %q/%q: %w", n.ExecutionID, n.Name, err)
 	}
-	if n.LeaseID != "" || n.LeaseToken != "" || n.Attempt != 0 {
+	if n.LeaseID != "" || n.LeaseToken != "" || n.Attempt != 0 || n.ActivationID != 0 || n.AutoDepth != 0 {
 		if err := s.rdb.HSet(ctx, metaKey, map[string]any{
-			"lease_id":    string(n.LeaseID),
-			"lease_token": string(n.LeaseToken),
-			"attempt":     n.Attempt,
+			"lease_id":      string(n.LeaseID),
+			"lease_token":   string(n.LeaseToken),
+			"attempt":       n.Attempt,
+			"activation_id": n.ActivationID,
+			"auto_depth":    n.AutoDepth,
 		}).Err(); err != nil {
 			return fmt.Errorf("upsert node lease %q/%q: %w", n.ExecutionID, n.Name, err)
 		}
@@ -517,6 +532,18 @@ func (s *redisState) GetNode(ctx context.Context, id types.ExecutionID, name str
 			ns.Attempt = parsed
 		}
 	}
+	if activationID := meta["activation_id"]; activationID != "" {
+		var parsed int
+		if _, scanErr := fmt.Sscanf(activationID, "%d", &parsed); scanErr == nil {
+			ns.ActivationID = parsed
+		}
+	}
+	if autoDepth := meta["auto_depth"]; autoDepth != "" {
+		var parsed int
+		if _, scanErr := fmt.Sscanf(autoDepth, "%d", &parsed); scanErr == nil {
+			ns.AutoDepth = parsed
+		}
+	}
 	return ns, nil
 }
 
@@ -524,7 +551,7 @@ func (s *redisState) ClaimTaskLease(ctx context.Context, lease *engine.TaskLease
 	ttl := s.getExecTTL(lease.Task.ExecutionID)
 	result, err := claimTaskLeaseLua.Run(ctx, s.rdb,
 		[]string{nodeStatusKey(lease.Task.ExecutionID, lease.Task.NodeName), nodeMetaKey(lease.Task.ExecutionID, lease.Task.NodeName)},
-		string(lease.LeaseToken), int(ttl.Seconds()),
+		string(lease.LeaseToken), int(ttl.Seconds()), lease.Task.ActivationID,
 	).Slice()
 	if err != nil {
 		return nil, false, fmt.Errorf("claim task lease %q/%q: %w", lease.Task.ExecutionID, lease.Task.NodeName, err)
@@ -536,10 +563,12 @@ func (s *redisState) ClaimTaskLease(ctx context.Context, lease *engine.TaskLease
 	valid, _ := result[0].(int64)
 	status, _ := result[1].(string)
 	ns := &engine.NodeSnapshot{
-		ExecutionID: lease.Task.ExecutionID,
-		Name:        lease.Task.NodeName,
-		NodeIdx:     lease.Task.NodeIdx,
-		Status:      types.NodeStatus(status),
+		ExecutionID:  lease.Task.ExecutionID,
+		Name:         lease.Task.NodeName,
+		NodeIdx:      lease.Task.NodeIdx,
+		Status:       types.NodeStatus(status),
+		ActivationID: lease.Task.ActivationID,
+		AutoDepth:    lease.Task.AutoDepth,
 	}
 	if valid != 1 {
 		return ns, false, nil
@@ -616,6 +645,7 @@ func (s *redisState) SuspendOrConsume(ctx context.Context, id types.ExecutionID,
 				nodeStatusKey(id, name),
 				waiterKey(id, sigName),
 				suspendedNodesKey(id),
+				resumeLockKey(id, name),
 			},
 			name, s.ttlSec(),
 		).Result()
@@ -686,6 +716,7 @@ func (s *redisState) suspendOrConsumeMulti(ctx context.Context, id types.Executi
 		return nil, fmt.Errorf("marshal multi-signal spec: %w", err)
 	}
 	pipe := s.rdb.Pipeline()
+	pipe.Del(ctx, resumeLockKey(id, name))
 	pipe.Set(ctx, nodeStatusKey(id, name), string(types.NodeStatusSuspended), ttl)
 	pipe.Set(ctx, waiterSpecKey(id, name), string(specJSON), ttl)
 	pipe.Expire(ctx, batchKey, ttl)

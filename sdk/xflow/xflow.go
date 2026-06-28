@@ -25,8 +25,14 @@ type Engine struct {
 	allowDirectHandlers bool
 }
 
-// NewLocal creates an in-process engine backed by in-memory state and a goroutine pool.
-// Zero external dependencies — suitable for development, testing, and single-process use.
+// NewLocal creates an in-process engine backed by in-memory state and a
+// goroutine worker pool.
+//
+// Use NewLocal for unit tests, examples, local development, and single-process
+// embedded usage. It supports LocalNode and typed nodes, but all state is
+// process memory: stopping the process loses executions, signals, outputs, and
+// queued work. For distributed workers, durable Redis state, or API-only pods,
+// use NewCluster instead.
 func NewLocal(opts ...Option) (*Engine, error) {
 	cfg := &engineConfig{concurrency: 4, allowDirectHandlers: true}
 	for _, o := range opts {
@@ -40,10 +46,19 @@ func NewLocal(opts ...Option) (*Engine, error) {
 	return newFromConfig(cfg, provider)
 }
 
-// NewCluster creates a distributed engine backed by Redis (Asynq) and an
-// optional persistent Store (any store.Store implementation). Node tasks are
-// consumed through the reusable execution Dispatcher and embedded Runner so
-// cluster mode uses the same lease/result boundary as the future server backend.
+// NewCluster creates a distributed engine backed by Redis/Asynq and an optional
+// persistent Store.
+//
+// Use NewCluster when executions may outlive a process, multiple instances need
+// to share the queue/state, or API pods and worker pods are separated. Cluster
+// workflows must use portable typed nodes (node.Define, built-ins); LocalNode
+// submissions are rejected because Go function values cannot be serialized or
+// executed by another process.
+//
+// Consumer-capable worker processes should pass xflow.WithNodes for every
+// custom node type they may execute. API-only processes can set
+// ClusterConfig.DisableConsumer=true to submit, signal, cancel, and inspect
+// without consuming tasks.
 //
 // Example:
 //
@@ -144,6 +159,12 @@ func (e *Engine) registerNodeDefinitions(defs []*node.Definition) error {
 }
 
 // Submit builds the workflow definition and starts an asynchronous execution.
+//
+// params become the input.Data for DAG root nodes. In cyclic workflows they
+// first flow through the required xflow.start node. Submit registers typed
+// handlers declared by the builder in the current process before compiling, so
+// local examples can run immediately; separate cluster consumers still need
+// WithNodes.
 func (e *Engine) Submit(ctx context.Context, wf *WorkflowBuilder, params map[string]any, opts ...SubmitOption) (types.ExecutionID, error) {
 	cfg := &submitConfig{}
 	for _, o := range opts {
@@ -202,6 +223,10 @@ func (e *Engine) registerWorkflowHandlers(wf *WorkflowBuilder) error {
 }
 
 // Wait blocks until the execution reaches a terminal state or ctx is canceled.
+//
+// Backends that implement event watching wake promptly; otherwise Wait polls.
+// The returned Result contains the final execution status and latest node
+// outputs. In cyclic mode, repeated nodes expose only their latest output.
 func (e *Engine) Wait(ctx context.Context, id types.ExecutionID) (types.Result, error) {
 	if e.waiter != nil {
 		return e.waiter.WaitDone(ctx, id)
@@ -226,21 +251,38 @@ func (e *Engine) Wait(ctx context.Context, id types.ExecutionID) (types.Result, 
 }
 
 // Signal delivers a named signal to a suspended node within the execution.
+//
+// Signal names are defined by suspending nodes. For built-in approval nodes the
+// per-approver form is "NodeName/approval/approver". If a signal arrives before
+// the node suspends, the backend stores it and consumes it when the node reaches
+// the matching wait point.
 func (e *Engine) Signal(ctx context.Context, id types.ExecutionID, name string, data map[string]any) error {
 	return e.eng.DeliverSignal(ctx, id, name, data)
 }
 
 // RevokeSignal revokes a pre-delivered signal that has not yet been consumed.
+//
+// It cannot revoke a signal that already resumed a node. Use it for UI flows
+// where a user retracts an early signal before the workflow reaches the wait
+// point.
 func (e *Engine) RevokeSignal(ctx context.Context, id types.ExecutionID, name string) error {
 	return e.eng.RevokeSignal(ctx, id, name)
 }
 
 // Cancel cancels a running execution and releases suspended nodes.
+//
+// Cancel is best-effort for work already leased to a runner: the execution is
+// marked canceled and suspended waits are released, while stale task commits are
+// fenced by the engine/state store.
 func (e *Engine) Cancel(ctx context.Context, id types.ExecutionID) error {
 	return e.eng.Cancel(ctx, id)
 }
 
 // Inspect returns execution and node status details for audit and UI flows.
+//
+// When nodeNames are omitted, Inspect loads the stored graph and returns every
+// node's current status and latest output. In cyclic mode this is still a
+// latest-state view, not a per-activation history.
 func (e *Engine) Inspect(ctx context.Context, id types.ExecutionID, nodeNames ...string) (engine.ExecutionDetail, error) {
 	return e.eng.Inspect(ctx, id, nodeNames...)
 }

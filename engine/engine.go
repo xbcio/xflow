@@ -82,6 +82,25 @@ func (e *Engine) Submit(ctx context.Context, g *graph.Graph, params map[string]a
 	e.graphs[id] = g
 	e.mu.Unlock()
 
+	if g.AllowCycles {
+		nd := g.Nodes[g.StartIdx]
+		task := &Task{
+			ExecutionID:  id,
+			NodeName:     nd.Name,
+			NodeIdx:      g.StartIdx,
+			Type:         TaskTypeNodeExec,
+			ActivationID: 1,
+		}
+		if err := e.queue.Enqueue(ctx, task); err != nil {
+			_ = e.state.UpdateExecutionStatus(ctx, id, types.ExecutionStatusFailed, fmt.Sprintf("enqueue start node %s: %v", nd.Name, err))
+			e.mu.Lock()
+			delete(e.graphs, id)
+			e.mu.Unlock()
+			return "", fmt.Errorf("enqueue start node %s: %w", nd.Name, err)
+		}
+		return id, nil
+	}
+
 	for i, nd := range g.Nodes {
 		if g.InDegree[i] == 0 {
 			task := &Task{
@@ -117,7 +136,7 @@ func (e *Engine) BuildTaskLease(ctx context.Context, t *Task) (*TaskLease, error
 
 	leaseID := LeaseID("lease-" + uuid.New().String())
 	leaseToken := LeaseToken("token-" + uuid.New().String())
-	attempt, started, err := e.acquireNodeLease(ctx, t, leaseID, leaseToken)
+	attempt, started, err := e.acquireNodeLease(ctx, g, t, leaseID, leaseToken)
 	if err != nil {
 		return nil, err
 	}
@@ -199,12 +218,18 @@ func (e *Engine) loadActiveGraph(ctx context.Context, id types.ExecutionID) (*gr
 	return g, true, nil
 }
 
-func (e *Engine) acquireNodeLease(ctx context.Context, t *Task, leaseID LeaseID, leaseToken LeaseToken) (int, bool, error) {
+func (e *Engine) acquireNodeLease(ctx context.Context, g *graph.Graph, t *Task, leaseID LeaseID, leaseToken LeaseToken) (int, bool, error) {
 	ns, err := e.state.GetNode(ctx, t.ExecutionID, t.NodeName)
 	if err != nil {
 		return 0, false, err
 	}
-	if ns != nil && types.IsTerminalNodeStatus(ns.Status) {
+	if g.AllowCycles && t.ActivationID <= 0 {
+		return 0, false, ErrExecutionInactive
+	}
+	if ns != nil && g.AllowCycles && ns.ActivationID > t.ActivationID {
+		return 0, false, ErrExecutionInactive
+	}
+	if ns != nil && types.IsTerminalNodeStatus(ns.Status) && (!g.AllowCycles || ns.ActivationID >= t.ActivationID) {
 		return 0, false, ErrExecutionInactive
 	}
 	if ns != nil && ns.Status == types.NodeStatusCommitting {
@@ -218,13 +243,15 @@ func (e *Engine) acquireNodeLease(ctx context.Context, t *Task, leaseID LeaseID,
 	}
 
 	if err := e.state.UpsertNode(ctx, &NodeSnapshot{
-		ExecutionID: t.ExecutionID,
-		Name:        t.NodeName,
-		NodeIdx:     t.NodeIdx,
-		Status:      types.NodeStatusRunning,
-		LeaseID:     leaseID,
-		LeaseToken:  leaseToken,
-		Attempt:     attempt,
+		ExecutionID:  t.ExecutionID,
+		Name:         t.NodeName,
+		NodeIdx:      t.NodeIdx,
+		Status:       types.NodeStatusRunning,
+		LeaseID:      leaseID,
+		LeaseToken:   leaseToken,
+		Attempt:      attempt,
+		ActivationID: t.ActivationID,
+		AutoDepth:    t.AutoDepth,
 	}); err != nil {
 		return 0, false, err
 	}
@@ -242,19 +269,23 @@ func (e *Engine) commitSuspendResult(ctx context.Context, t *Task, result TaskRe
 	}
 	if payload != nil {
 		_ = e.state.UpsertNode(ctx, &NodeSnapshot{
-			ExecutionID: t.ExecutionID,
-			Name:        t.NodeName,
-			NodeIdx:     t.NodeIdx,
-			Status:      types.NodeStatusSuspended,
+			ExecutionID:  t.ExecutionID,
+			Name:         t.NodeName,
+			NodeIdx:      t.NodeIdx,
+			Status:       types.NodeStatusSuspended,
+			ActivationID: t.ActivationID,
+			AutoDepth:    t.AutoDepth,
 		})
 		return e.enqueueResume(ctx, t.ExecutionID, t.NodeName, t.NodeIdx, payload)
 	}
 
 	_ = e.state.UpsertNode(ctx, &NodeSnapshot{
-		ExecutionID: t.ExecutionID,
-		Name:        t.NodeName,
-		NodeIdx:     t.NodeIdx,
-		Status:      types.NodeStatusSuspended,
+		ExecutionID:  t.ExecutionID,
+		Name:         t.NodeName,
+		NodeIdx:      t.NodeIdx,
+		Status:       types.NodeStatusSuspended,
+		ActivationID: t.ActivationID,
+		AutoDepth:    t.AutoDepth,
 	})
 	if err := e.scheduleSuspendResumes(ctx, t, result.Suspend); err != nil {
 		return err
@@ -282,19 +313,23 @@ func (e *Engine) commitResuspendResult(ctx context.Context, t *Task, result Task
 	}
 	if payload != nil {
 		_ = e.state.UpsertNode(ctx, &NodeSnapshot{
-			ExecutionID: t.ExecutionID,
-			Name:        t.NodeName,
-			NodeIdx:     t.NodeIdx,
-			Status:      types.NodeStatusSuspended,
+			ExecutionID:  t.ExecutionID,
+			Name:         t.NodeName,
+			NodeIdx:      t.NodeIdx,
+			Status:       types.NodeStatusSuspended,
+			ActivationID: t.ActivationID,
+			AutoDepth:    t.AutoDepth,
 		})
 		return e.enqueueResume(ctx, t.ExecutionID, t.NodeName, t.NodeIdx, payload)
 	}
 
 	_ = e.state.UpsertNode(ctx, &NodeSnapshot{
-		ExecutionID: t.ExecutionID,
-		Name:        t.NodeName,
-		NodeIdx:     t.NodeIdx,
-		Status:      types.NodeStatusSuspended,
+		ExecutionID:  t.ExecutionID,
+		Name:         t.NodeName,
+		NodeIdx:      t.NodeIdx,
+		Status:       types.NodeStatusSuspended,
+		ActivationID: t.ActivationID,
+		AutoDepth:    t.AutoDepth,
 	})
 	if err := e.scheduleSuspendResumes(ctx, t, result.Suspend); err != nil {
 		return err
@@ -330,11 +365,13 @@ func (e *Engine) scheduleSuspendResumes(ctx context.Context, t *Task, spec *type
 
 func (e *Engine) enqueueResumeAfter(ctx context.Context, t *Task, delay time.Duration, payload *types.SignalPayload) error {
 	task := &Task{
-		ExecutionID: t.ExecutionID,
-		NodeName:    t.NodeName,
-		NodeIdx:     t.NodeIdx,
-		Type:        TaskTypeNodeResume,
-		Payload:     payload,
+		ExecutionID:  t.ExecutionID,
+		NodeName:     t.NodeName,
+		NodeIdx:      t.NodeIdx,
+		Type:         TaskTypeNodeResume,
+		Payload:      payload,
+		ActivationID: t.ActivationID,
+		AutoDepth:    0,
 	}
 	if delay <= 0 {
 		return e.queue.Enqueue(ctx, task)
@@ -344,11 +381,13 @@ func (e *Engine) enqueueResumeAfter(ctx context.Context, t *Task, delay time.Dur
 
 func (e *Engine) enqueueResume(ctx context.Context, id types.ExecutionID, nodeName string, nodeIdx int, payload *types.SignalPayload) error {
 	return e.queue.Enqueue(ctx, &Task{
-		ExecutionID: id,
-		NodeName:    nodeName,
-		NodeIdx:     nodeIdx,
-		Type:        TaskTypeNodeResume,
-		Payload:     payload,
+		ExecutionID:  id,
+		NodeName:     nodeName,
+		NodeIdx:      nodeIdx,
+		Type:         TaskTypeNodeResume,
+		Payload:      payload,
+		ActivationID: currentActivationID(ctx, e.state, id, nodeName),
+		AutoDepth:    0,
 	})
 }
 
@@ -380,15 +419,17 @@ func (e *Engine) finalizeNode(ctx context.Context, t *Task, g *graph.Graph, meta
 	_ = e.state.PutOutput(ctx, t.ExecutionID, t.NodeName, data)
 	leaseID, leaseToken, attempt := e.currentLease(ctx, t.ExecutionID, t.NodeName)
 	_ = e.state.UpsertNode(ctx, &NodeSnapshot{
-		ExecutionID: t.ExecutionID,
-		Name:        t.NodeName,
-		NodeIdx:     t.NodeIdx,
-		Status:      types.NodeStatusSuccess,
-		LeaseID:     leaseID,
-		LeaseToken:  leaseToken,
-		Attempt:     attempt,
-		Output:      data,
-		Port:        port,
+		ExecutionID:  t.ExecutionID,
+		Name:         t.NodeName,
+		NodeIdx:      t.NodeIdx,
+		Status:       types.NodeStatusSuccess,
+		LeaseID:      leaseID,
+		LeaseToken:   leaseToken,
+		Attempt:      attempt,
+		ActivationID: t.ActivationID,
+		AutoDepth:    t.AutoDepth,
+		Output:       data,
+		Port:         port,
 	})
 
 	if e.hooks != nil {
@@ -407,16 +448,18 @@ func (e *Engine) handleNodeError(ctx context.Context, t *Task, g *graph.Graph, s
 	_ = e.state.PutOutput(ctx, t.ExecutionID, t.NodeName, outcome.Output)
 	leaseID, leaseToken, attempt := e.currentLease(ctx, t.ExecutionID, t.NodeName)
 	_ = e.state.UpsertNode(ctx, &NodeSnapshot{
-		ExecutionID: t.ExecutionID,
-		Name:        t.NodeName,
-		NodeIdx:     t.NodeIdx,
-		Status:      outcome.NodeStatus,
-		LeaseID:     leaseID,
-		LeaseToken:  leaseToken,
-		Attempt:     attempt,
-		Output:      outcome.Output,
-		Port:        outcome.RoutePort,
-		Error:       outcome.ErrorMessage,
+		ExecutionID:  t.ExecutionID,
+		Name:         t.NodeName,
+		NodeIdx:      t.NodeIdx,
+		Status:       outcome.NodeStatus,
+		LeaseID:      leaseID,
+		LeaseToken:   leaseToken,
+		Attempt:      attempt,
+		ActivationID: t.ActivationID,
+		AutoDepth:    t.AutoDepth,
+		Output:       outcome.Output,
+		Port:         outcome.RoutePort,
+		Error:        outcome.ErrorMessage,
 	})
 
 	if e.hooks != nil {
@@ -445,6 +488,14 @@ func (e *Engine) currentLease(ctx context.Context, id types.ExecutionID, nodeNam
 	return ns.LeaseID, ns.LeaseToken, ns.Attempt
 }
 
+func currentActivationID(ctx context.Context, state StateStore, id types.ExecutionID, nodeName string) int {
+	ns, err := state.GetNode(ctx, id, nodeName)
+	if err != nil || ns == nil {
+		return 0
+	}
+	return ns.ActivationID
+}
+
 // buildInput assembles the types.Input from graph metadata and upstream outputs.
 func (e *Engine) buildInput(ctx context.Context, t *Task, g *graph.Graph) *types.Input {
 	input := &types.Input{
@@ -464,6 +515,12 @@ func (e *Engine) buildInput(ctx context.Context, t *Task, g *graph.Graph) *types
 	}
 
 	inEdges := g.InEdges[t.NodeIdx]
+	if g.AllowCycles && t.NodeIdx == g.StartIdx && t.ActivationID == 1 {
+		if snap, _ := e.state.GetExecution(ctx, t.ExecutionID); snap != nil {
+			input.Data = snap.Params
+		}
+		return input
+	}
 	switch len(inEdges) {
 	case 0:
 		// Root node — inject workflow-level submission params as input.Data so
@@ -540,11 +597,13 @@ func (e *Engine) DeliverSignal(ctx context.Context, id types.ExecutionID, name s
 		}
 	}
 	return e.queue.Enqueue(ctx, &Task{
-		ExecutionID: id,
-		NodeName:    resumeNode,
-		NodeIdx:     nodeIdx,
-		Type:        TaskTypeNodeResume,
-		Payload:     payload,
+		ExecutionID:  id,
+		NodeName:     resumeNode,
+		NodeIdx:      nodeIdx,
+		Type:         TaskTypeNodeResume,
+		Payload:      payload,
+		ActivationID: currentActivationID(ctx, e.state, id, resumeNode),
+		AutoDepth:    0,
 	})
 }
 
@@ -587,6 +646,8 @@ func (e *Engine) TimeoutNode(ctx context.Context, id types.ExecutionID, nodeName
 			Triggered: types.TimeoutFired,
 			Name:      "_timeout",
 		},
+		ActivationID: currentActivationID(ctx, e.state, id, nodeName),
+		AutoDepth:    0,
 	})
 }
 

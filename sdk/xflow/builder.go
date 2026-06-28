@@ -17,6 +17,7 @@ type WorkflowBuilder struct {
 	edges    []edge
 	direct   map[string]types.ActionHandler // direct handlers (local mode only)
 	handlers map[string]types.ActionHandler // portable typed handlers
+	options  *types.WorkflowOptions
 }
 
 type nodeEntry struct {
@@ -36,12 +37,39 @@ type edge struct {
 }
 
 // Workflow creates a workflow builder with a concise user-facing name.
+//
+// The builder is definition-only: it does not start execution, own runtime
+// state, or talk to a backend until passed to Engine.Submit. Use Node for
+// portable typed nodes and LocalNode only for single-process local examples.
 func Workflow(name string) *WorkflowBuilder {
 	return &WorkflowBuilder{
 		name:     name,
 		direct:   make(map[string]types.ActionHandler),
 		handlers: make(map[string]types.ActionHandler),
 	}
+}
+
+// AllowCycles opts this workflow into cyclic execution mode.
+//
+// Cyclic mode is an explicit escape hatch for approval/rework flows such as
+// "reject -> revise -> review again". It disables builder-side cycle rejection
+// and asks the engine to schedule along the active output edge instead of using
+// DAG in-degree counters.
+//
+// Requirements and behavior:
+//   - the workflow must contain exactly one node.Start() / xflow.start node;
+//   - repeated node execution overwrites the node's latest state/output;
+//   - external systems own business history, custom-node idempotency, and
+//     side-effect consistency;
+//   - maxAutoDepth limits one automatic chain to prevent infinite unattended
+//     loops; values <= 0 use the engine default; signal/timeout resumes reset
+//     the counter.
+func (w *WorkflowBuilder) AllowCycles(maxAutoDepth int) *WorkflowBuilder {
+	w.options = &types.WorkflowOptions{
+		AllowCycles:  true,
+		MaxAutoDepth: maxAutoDepth,
+	}
+	return w
 }
 
 // NodeRef references a node's input and output ports in Connect.
@@ -67,6 +95,12 @@ func (n *NodeRef) Body(body *WorkflowBuilder) *NodeRef {
 }
 
 // Node adds a portable typed node to the workflow and returns its reference.
+//
+// This is the production path for both local and cluster execution. A typed
+// node stores only its type/version/params in the workflow definition. Its
+// handler is registered in the current process for local execution; cluster
+// consumers that may execute workflows submitted by other processes should
+// also declare the same definitions with xflow.WithNodes.
 func (w *WorkflowBuilder) Node(name string, builder node.Builder) *NodeRef {
 	entry := &nodeEntry{
 		name:    name,
@@ -83,6 +117,11 @@ func (w *WorkflowBuilder) Node(name string, builder node.Builder) *NodeRef {
 }
 
 // LocalNode adds a local-only direct handler node to the workflow.
+//
+// LocalNode embeds a Go handler instance in the in-process registry by node
+// name. It is convenient for tests and examples, but it is not portable and is
+// rejected by NewCluster submissions. Use Node with node.Define for production
+// or distributed execution.
 func (w *WorkflowBuilder) LocalNode(name string, handler types.ActionHandler) *NodeRef {
 	entry := &nodeEntry{name: name, handler: handler}
 	w.direct[name] = handler
@@ -181,15 +220,17 @@ func (w *WorkflowBuilder) build() (*types.WorkflowDef, error) {
 		entry.normalizedParams = params
 	}
 
-	// Cycle detection.
-	if err := detectCycle(w.name, w.nodes, w.edges); err != nil {
-		return nil, err
+	if w.options == nil || !w.options.AllowCycles {
+		if err := detectCycle(w.name, w.nodes, w.edges); err != nil {
+			return nil, err
+		}
 	}
 
 	// Assemble WorkflowDef.
 	def := &types.WorkflowDef{
 		Name:        w.name,
 		Spec:        "1.0",
+		Options:     w.options,
 		Connections: make(types.Connections),
 	}
 

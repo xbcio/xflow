@@ -2,7 +2,6 @@ package asynq
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"time"
@@ -121,11 +120,11 @@ func (b *Backend) Bind(eng *engine.Engine) func() {
 	)
 	mux := asynqlib.NewServeMux()
 	mux.HandleFunc(asynqTaskType, func(ctx context.Context, t *asynqlib.Task) error {
-		var task engine.Task
-		if err := json.Unmarshal(t.Payload(), &task); err != nil {
+		task, err := unmarshalQueuedTask(t.Payload())
+		if err != nil {
 			return err
 		}
-		return dispatcher.HandleTask(ctx, &task)
+		return dispatcher.HandleTask(ctx, task)
 	})
 
 	tm := NewTimeoutMonitor(b.rdb, eng, nil, nil, 5*time.Second)

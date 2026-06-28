@@ -119,7 +119,7 @@ func (s *memoryState) UpsertNode(_ context.Context, n *engine.NodeSnapshot) erro
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	key := string(n.ExecutionID) + "/" + n.Name
-	if existing, ok := s.nodes[key]; ok && isTerminalNode(existing.Status) {
+	if existing, ok := s.nodes[key]; ok && isTerminalNode(existing.Status) && n.ActivationID <= existing.ActivationID {
 		return nil // CAS: don't overwrite terminal state
 	}
 	if existing, ok := s.nodes[key]; ok && existing.Status == types.NodeStatusCommitting && n.Status == types.NodeStatusRunning {
@@ -147,7 +147,13 @@ func (s *memoryState) ClaimTaskLease(_ context.Context, lease *engine.TaskLease)
 		return nil, false, nil
 	}
 	if isTerminalNode(ns.Status) {
+		if lease.Task.ActivationID > 0 && ns.ActivationID != lease.Task.ActivationID {
+			return ns, false, nil
+		}
 		return ns, true, nil
+	}
+	if lease.Task.ActivationID > 0 && ns.ActivationID != lease.Task.ActivationID {
+		return ns, false, nil
 	}
 	if ns.LeaseToken == "" || ns.LeaseToken != lease.LeaseToken {
 		return ns, false, nil
@@ -214,7 +220,9 @@ func (s *memoryState) SuspendOrConsume(_ context.Context, id types.ExecutionID, 
 		}
 	}
 	// Park the node.
-	s.suspended[string(id)+"/"+name] = spec
+	key := string(id) + "/" + name
+	delete(s.resumed, key)
+	s.suspended[key] = spec
 	return nil, nil
 }
 
@@ -324,6 +332,7 @@ func (s *memoryState) suspendOrConsumeMultiLocked(id types.ExecutionID, nodeName
 			}
 		}
 	}
+	delete(s.resumed, key)
 	s.suspended[key] = spec
 	return nil
 }

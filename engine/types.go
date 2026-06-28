@@ -15,11 +15,23 @@ const (
 
 // Task is the unit of work dispatched to the queue.
 type Task struct {
-	ExecutionID types.ExecutionID    `json:"execution_id"`
-	NodeName    string               `json:"node_name"`
-	NodeIdx     int                  `json:"node_idx"`
-	Type        TaskType             `json:"type"`
-	Payload     *types.SignalPayload `json:"payload,omitempty"` // non-nil only for TaskTypeNodeResume
+	ExecutionID types.ExecutionID `json:"execution_id"`
+	NodeName    string            `json:"node_name"`
+	NodeIdx     int               `json:"node_idx"`
+	Type        TaskType          `json:"type"`
+
+	// Payload is non-nil only for TaskTypeNodeResume tasks.
+	Payload *types.SignalPayload `json:"payload,omitempty"`
+
+	// AutoDepth is internal cyclic scheduling metadata. Backend implementations
+	// may persist it out-of-band, but it is not part of the public runner JSON
+	// contract.
+	AutoDepth int `json:"-"`
+
+	// ActivationID is internal cyclic scheduling metadata. It lets a node
+	// re-enter after a terminal state while fencing stale queued or leased
+	// tasks, but it is not exposed in the public runner JSON contract.
+	ActivationID int `json:"-"`
 }
 
 // LeaseID uniquely identifies one assignment of a queued task to a runner.
@@ -72,7 +84,8 @@ type ExecutionSnapshot struct {
 	ParentID types.ExecutionID // non-empty for sub-executions
 }
 
-// NodeSnapshot is the engine's view of a single node's state stored in the backend.
+// NodeSnapshot is the engine's view of a single node's latest state stored in
+// the backend.
 type NodeSnapshot struct {
 	ExecutionID types.ExecutionID
 	Name        string
@@ -81,9 +94,14 @@ type NodeSnapshot struct {
 	LeaseID     LeaseID
 	LeaseToken  LeaseToken
 	Attempt     int
-	Output      map[string]any
-	Port        string
-	Error       string
+	// ActivationID is the latest cyclic activation version for this node.
+	ActivationID int
+	// AutoDepth is the automatic scheduling depth associated with the latest
+	// activation. It is runtime metadata, not business history.
+	AutoDepth int
+	Output    map[string]any
+	Port      string
+	Error     string
 }
 
 // SubExecution tracks a child execution spawned by a loop/split node.
