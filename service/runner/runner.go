@@ -115,6 +115,9 @@ func (r *Runner) Run(ctx context.Context) error {
 		})
 		inFlight = 0
 		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return nil
+			}
 			return err
 		}
 		if !reportResp.Accepted {

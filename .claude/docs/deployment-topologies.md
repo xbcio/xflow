@@ -13,9 +13,9 @@ xflow 是一个通用、可嵌入的工作流引擎 SDK：用户用 DAG 编排�
 | **local** | 本进程 | 本进程（goroutine 池） | 进程内存 | 无 | 开发、测试、单进程嵌入 | 已实现 |
 | **cluster** | 每个对等进程 | 每个对等进程（自带 Asynq server） | Redis（+ 可选持久化 Store） | Redis | 多副本对等部署、需要持久化与挂起/信号 | 已实现 |
 | **remote** | SDK 瘦客户端 | 远端 runner 集群 | 远端（server 管理） | 网络可达的 server | 轻量嵌入、客户端不愿引入 Redis/执行负载 | 规划 |
-| **server**（Control Plane） | 接受外部提交 | 不执行 handler | 通过 StateStore | Redis / 持久化 Store / Asynq | 集群控制面、调度权威 | 规划 |
-| **runner protocol**（执行协议） | 不提交 | 不执行 handler | server 持有最终状态 | TCP / gRPC stream / WebSocket / HTTP long poll | server 与 runner 的统一执行协议 | 规划 |
-| **runner**（执行面） | 不提交 | 通过 Runner Protocol 执行 handler | 通过 Runner Protocol 回报 server | 网络可达的 server 或 Relay Gateway | 集群执行面，横向扩缩容 / 网络隔离执行 | 规划 |
+| **server**（Control Plane） | 接受外部提交 | 不执行 handler | 通过 StateStore | Redis / 持久化 Store / Asynq | 集群控制面、调度权威 | MVP 已实现 |
+| **runner protocol**（执行协议） | 不提交 | 不执行 handler | server 持有最终状态 | HTTP+JSON long poll | server 与 runner 的统一执行协议 | MVP 已实现 |
+| **runner**（执行面） | 不提交 | 通过 Runner Protocol 执行 handler | 通过 Runner Protocol 回报 server | 网络可达的 server 或 Relay Gateway | 集群执行面，横向扩缩容 / 网络隔离执行 | MVP 已实现 |
 | **Relay Gateway**（可选中继） | 不提交 | 不执行 handler | 本地只缓存 pending/inflight；最终状态在 server | 网络可达的 server + 本地 runner 可达的 Relay Gateway | runner 无法直连 server 时延伸执行通道，不暴露 Redis | 规划 |
 
 「现状 vs 规划」的完整说明见 [§7](#7-现状-vs-规划)。
@@ -91,9 +91,9 @@ SDK 作为**瘦客户端**：自己不执行节点、不需要 Redis，通过网
 
 ---
 
-## 3. server + runner 集群架构（规划）
+## 3. server + runner 集群架构（MVP 已实现）
 
-未来面向「用户通过 UI 定义工作流」的集群服务，由两个角色构成。SDK 的 remote 模式是这套集群的客户端，SDK 只是其中一种轻量级嵌入方案。
+面向「用户通过 UI 定义工作流」的集群服务，由两个角色构成。当前已落地第一版 MVP：`cmd/server` 提供 HTTP 控制面，`cmd/runner` 通过 HTTP+JSON long polling Runner Protocol 领取 lease、执行 handler、回传 result。SDK 的 remote 模式仍是后续计划。
 
 ### 3.1 角色职责
 
@@ -106,6 +106,14 @@ SDK 作为**瘦客户端**：自己不执行节点、不需要 Redis，通过网
 | **Relay Gateway**（可选） | 当 runner 无法直连 server 时中继 Runner Protocol，提供网络域延伸、本地连接聚合、短暂缓冲 | 不成为状态权威，不直接访问 server Redis / DB |
 
 runner 可横向扩缩容：跑多个 runner 实例即可线性扩展执行吞吐。
+
+**MVP 限制**：
+- Runner Protocol 当前是 HTTP+JSON long polling，尚未实现 gRPC / streaming。
+- 没有 Relay Gateway；runner 必须能直接访问 server。
+- 没有 remote SDK；提交、查询、信号 API 先由 server HTTP handler 暴露。
+- 没有认证、鉴权、mTLS、租户隔离或生产级审计。
+- runner matching 仅按 `node_type` 精确匹配，尚无 tags / env / region / 权重 / 容量感知调度。
+- Dispatcher pending / inflight 状态仍是内存 MVP，不具备 server 重启后的 durable recovery。
 
 ### 3.2 与 engine 两接口的对应
 
@@ -299,14 +307,14 @@ Relay Gateway 用于 runner 无法直连 server、不能互相直连或需要本
 |---|---|---|
 | local 模式 | **已实现** | `backend/memory/` 完整：内存 state/queue + reusable `execution.Registry` + Waiter |
 | cluster 模式 | **已实现** | `backend/asynq/` 完整：Redis state + Asynq queue + reusable `execution.Dispatcher` / `execution.Runner` / `execution.Registry` + TimeoutMonitor |
-| remote 模式 | **规划** | 无 remote client/backend，无 remote 工厂 |
-| server 管理面 | **规划** | `cmd/server/main.go` 仅有职责说明注释 + `// TODO`，`main` 为空 |
-| runner 执行面 | **规划** | `cmd/runner/main.go` 仅有职责说明注释 + `// TODO`，`main` 为空 |
-| Task Dispatcher | **部分实现** | `execution.Dispatcher` 已作为可复用核心；独立 server 的 runner matching / protocol executor 待实现 |
-| Runner Protocol | **规划** | 控制面-执行面统一协议已定义，尚无实现 |
+| remote 模式 | **规划** | 无 remote SDK client/backend，无 remote 工厂 |
+| server 管理面 | **MVP 已实现** | `cmd/server` 可启动 HTTP 控制面，支持 workflow submit、inspect、signal、cancel、runner register/heartbeat/poll/result |
+| runner 执行面 | **MVP 已实现** | `cmd/runner` 可连接 server，注册 capability，通过 Runner Protocol 执行 lease 并上报 result |
+| Task Dispatcher | **MVP 已实现** | `service/control.Dispatcher` 把 queued task 转为 `TaskLease` 并分配给匹配 runner；durable pending/inflight 待后续计划 |
+| Runner Protocol | **MVP 已实现** | `service/protocol` 提供 HTTP+JSON DTO、路由常量和 client；当前使用 long polling |
 | Relay Gateway | **规划** | 网络隔离中继拓扑已定义，尚无独立进程实现 |
 
-一句话：**local / cluster 已可用；remote / server / runner 是方向，尚未落地。**
+一句话：**local / cluster 已可用；server / runner MVP 已落地；remote SDK / Relay Gateway / durable dispatcher 仍在规划。**
 
 ---
 
@@ -319,8 +327,8 @@ Relay Gateway 用于 runner 无法直连 server、不能互相直连或需要本
 | 需要内联直挂 handler（闭包/匿名函数） | **local**（仅此模式支持） |
 | 需要持久化、挂起/信号、多副本对等部署 | **cluster** |
 | 嵌入方不想引入 Redis、不想承担执行负载 | **remote**（待落地；当前只能退回 cluster 或 local） |
-| 面向 UI 定义工作流、控制面与执行面分离扩缩容 | **server + Task Dispatcher + Runner Protocol + runner**（规划） |
-| runner 能访问 server，但不应直连 Redis | **server + Runner Protocol + runner**（规划，推荐主路径） |
+| 面向 UI 定义工作流、控制面与执行面分离扩缩容 | **server + Task Dispatcher + Runner Protocol + runner**（MVP 已实现） |
+| runner 能访问 server，但不应直连 Redis | **server + Runner Protocol + runner**（MVP 已实现，推荐主路径） |
 | runner 无法直连 server，且不应直连 Redis | **server + Relay Gateway + runner**（规划） |
 
 决策树：
@@ -331,8 +339,8 @@ Relay Gateway 用于 runner 无法直连 server、不能互相直连或需要本
 └─ 是
    ├─ 客户端能接受引入 Redis 且参与执行？
    │   ├─ 是 ─────────────────────► cluster
-   │   └─ 否 ─────────────────────► remote（规划，暂不可用）
-   └─ 需要控制面 / 执行面独立扩缩容？ ─► server + runner（规划）
+   │   └─ 否 ─────────────────────► remote（规划，暂不可用）或 server HTTP API
+   └─ 需要控制面 / 执行面独立扩缩容？ ─► server + runner（MVP）
 ```
 
 > 提醒：从 local 切到 cluster / remote 时，凡是用 direct TaskHandler（内联闭包）的节点都必须改写为 `node.Register` 注册的类型化 handler —— 内联函数实例无法序列化跨进程。

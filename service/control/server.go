@@ -9,11 +9,15 @@ import (
 	"time"
 
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/types"
 )
 
+const SubmitWorkflowPath = "/v1/workflows"
+
 type EngineFacade interface {
+	Submit(ctx context.Context, g *graph.Graph, params map[string]any, runtime ...*types.Runtime) (types.ExecutionID, error)
 	Inspect(ctx context.Context, id types.ExecutionID, nodeNames ...string) (engine.ExecutionDetail, error)
 	DeliverSignal(ctx context.Context, id types.ExecutionID, name string, data map[string]any) error
 	Cancel(ctx context.Context, id types.ExecutionID) error
@@ -29,6 +33,15 @@ type Server struct {
 type signalRequest struct {
 	Name string         `json:"name"`
 	Data map[string]any `json:"data,omitempty"`
+}
+
+type submitWorkflowRequest struct {
+	Workflow *types.WorkflowDef `json:"workflow"`
+	Params   map[string]any     `json:"params,omitempty"`
+}
+
+type submitWorkflowResponse struct {
+	ExecutionID types.ExecutionID `json:"execution_id"`
 }
 
 type errorResponse struct {
@@ -49,8 +62,38 @@ func NewServer(engine EngineFacade, runners *RunnerPool) *Server {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	protocol.RegisterRunnerRoutes(mux, s)
+	mux.HandleFunc(SubmitWorkflowPath, s.handleSubmitWorkflow)
 	mux.HandleFunc("/v1/executions/", s.handleExecution)
 	return mux
+}
+
+func (s *Server) handleSubmitWorkflow(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+	var req submitWorkflowRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.Workflow == nil {
+		writeError(w, http.StatusBadRequest, "workflow is required")
+		return
+	}
+	if s.engine == nil {
+		writeError(w, http.StatusInternalServerError, "engine not configured")
+		return
+	}
+	g, err := graph.Compile(req.Workflow)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	id, err := s.engine.Submit(r.Context(), g, req.Params)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, submitWorkflowResponse{ExecutionID: id})
 }
 
 func (s *Server) HandleRegisterRunner(w http.ResponseWriter, r *http.Request) {

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/types"
 )
@@ -146,6 +147,10 @@ type fakeControlEngine struct {
 	signalName      string
 	signalData      map[string]any
 	canceledID      types.ExecutionID
+}
+
+func (f *fakeControlEngine) Submit(context.Context, *graph.Graph, map[string]any, ...*types.Runtime) (types.ExecutionID, error) {
+	return types.ExecutionID("exec-1"), nil
 }
 
 func (f *fakeControlEngine) Inspect(context.Context, types.ExecutionID, ...string) (engine.ExecutionDetail, error) {
