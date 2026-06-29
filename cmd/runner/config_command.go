@@ -31,6 +31,7 @@ func newConfigCommand(opts commandOptions, cfg *runnerConfig) *cobra.Command {
 	sample := &cobra.Command{
 		Use:   "sample",
 		Short: "Print a sample runner configuration",
+		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			_, err := fmt.Fprint(opts.out, sampleRunnerConfigYAML())
 			return err

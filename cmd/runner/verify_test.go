@@ -100,6 +100,7 @@ func TestManagementCommandsRejectUnexpectedPositionalArgs(t *testing.T) {
 	}{
 		{name: "verify", args: []string{"verify", "extra"}},
 		{name: "config validate", args: []string{"config", "validate", "extra"}},
+		{name: "config sample", args: []string{"config", "sample", "extra"}},
 	}
 
 	for _, tt := range tests {
