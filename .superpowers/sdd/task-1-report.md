@@ -160,3 +160,30 @@ ok  	github.com/xbcio/xflow/cmd/runner	0.558s
   - `newRootCommand` with explicit `run` and legacy `-server`, `-id`, `-concurrency`, `-cap`
   - `newRootCommand` root-default execution with legacy `-id`
   - `executeRoot` explicit `run` and root-default legacy single-dash compatibility
+
+## Fix After Final Review: Exact `newRootCommand` Contract
+
+Addressed the remaining review finding by removing the custom `rootCommand` wrapper entirely. `newRootCommand` now matches the task contract exactly:
+
+```go
+func newRootCommand(opts commandOptions) *cobra.Command
+```
+
+To preserve the legacy single-dash normalization for both direct `newRootCommand(...).SetArgs(...)` callers and `executeRoot(...)`, the root and `run` commands now normalize their raw argv immediately before Cobra flag parsing. The root also uses Cobra traversal so `-id runner-root` no longer gets misclassified as a subcommand during command lookup.
+
+### Changed Files
+
+- `cmd/runner/command.go`
+- `cmd/runner/main_test.go`
+
+### Verification
+
+```text
+$ go test -count=1 ./cmd/runner
+ok  	github.com/xbcio/xflow/cmd/runner	0.576s
+```
+
+### Result
+
+- Test command: `go test -count=1 ./cmd/runner`
+- Result: pass

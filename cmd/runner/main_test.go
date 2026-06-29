@@ -3,7 +3,11 @@ package main
 import (
 	"bytes"
 	"testing"
+
+	"github.com/spf13/cobra"
 )
+
+var _ func(commandOptions) *cobra.Command = newRootCommand
 
 func TestNewRootCommandRunCommandParsesExistingFlags(t *testing.T) {
 	var ran runnerConfig
