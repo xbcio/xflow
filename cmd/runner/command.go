@@ -14,6 +14,11 @@ type commandOptions struct {
 	err     io.Writer
 }
 
+type rootCommand struct {
+	cmd  *cobra.Command
+	args []string
+}
+
 var legacyRunnerLongFlags = map[string]struct{}{
 	"cap":                {},
 	"concurrency":        {},
@@ -26,7 +31,7 @@ var legacyRunnerLongFlags = map[string]struct{}{
 	"server":             {},
 }
 
-func newRootCommand(opts commandOptions) *cobra.Command {
+func newRootCommand(opts commandOptions) *rootCommand {
 	if opts.runFunc == nil {
 		opts.runFunc = runWithSignals
 	}
@@ -58,7 +63,16 @@ func newRootCommand(opts commandOptions) *cobra.Command {
 	root.PersistentFlags().StringVarP(&cfg.configPath, "config", "c", cfg.configPath, "Runner config file")
 	bindRunnerFlags(root, &cfg)
 	root.AddCommand(newRunCommand(opts, &cfg))
-	return root
+	return &rootCommand{cmd: root}
+}
+
+func (r *rootCommand) SetArgs(args []string) {
+	r.args = args
+}
+
+func (r *rootCommand) Execute() error {
+	r.cmd.SetArgs(normalizeLegacyRunnerArgs(r.args))
+	return r.cmd.Execute()
 }
 
 func executeRoot(args ...string) error {
@@ -67,7 +81,7 @@ func executeRoot(args ...string) error {
 
 func executeRootWithOptions(opts commandOptions, args ...string) error {
 	cmd := newRootCommand(opts)
-	cmd.SetArgs(normalizeLegacyRunnerArgs(args))
+	cmd.SetArgs(args)
 	return cmd.Execute()
 }
 

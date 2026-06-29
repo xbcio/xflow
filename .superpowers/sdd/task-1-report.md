@@ -119,3 +119,44 @@ Addressed the Cobra regression where legacy single-dash long-form flags such as 
 $ GOCACHE=$PWD/.tmp/gocache GOMODCACHE=$PWD/.tmp/gomodcache go test ./cmd/runner -run 'TestExecuteRootRunCommandParsesLegacySingleDashFlags|TestExecuteRootDefaultsToRunCommandWithLegacySingleDashFlag'
 ok  	github.com/xbcio/xflow/cmd/runner	0.583s
 ```
+
+## Fix After Re-Review: newRootCommand Legacy Args Coverage
+
+Addressed the remaining gap from re-review: `newRootCommand(...).SetArgs(...)` now gets the same legacy single-dash normalization as `executeRoot*`, and the acceptance tests once again cover both direct `newRootCommand` execution and `executeRoot` compatibility paths.
+
+### Changed Files
+
+- `cmd/runner/command.go`
+- `cmd/runner/main_test.go`
+
+### TDD Evidence
+
+RED with restored and extended `newRootCommand` coverage:
+
+```text
+$ GOCACHE=$PWD/.tmp/gocache GOMODCACHE=$PWD/.tmp/gomodcache go test -count=1 ./cmd/runner
+--- FAIL: TestNewRootCommandRunCommandParsesLegacySingleDashFlags (0.00s)
+    main_test.go:54: unknown shorthand flag: 's' in -server
+--- FAIL: TestNewRootCommandDefaultsToRunCommandWithLegacySingleDashFlag (0.00s)
+    main_test.go:76: unknown command "runner-root" for "xflow-runner"
+FAIL
+FAIL	github.com/xbcio/xflow/cmd/runner	0.556s
+FAIL
+```
+
+GREEN after moving normalization into the `newRootCommand` execution path:
+
+```text
+$ GOCACHE=$PWD/.tmp/gocache GOMODCACHE=$PWD/.tmp/gomodcache go test -count=1 ./cmd/runner
+ok  	github.com/xbcio/xflow/cmd/runner	0.558s
+```
+
+### Output Summary
+
+- Exact test command: `GOCACHE=$PWD/.tmp/gocache GOMODCACHE=$PWD/.tmp/gomodcache go test -count=1 ./cmd/runner`
+- Result: pass
+- Coverage restored/extended for:
+  - `newRootCommand` with explicit `run` and `--server`
+  - `newRootCommand` with explicit `run` and legacy `-server`, `-id`, `-concurrency`, `-cap`
+  - `newRootCommand` root-default execution with legacy `-id`
+  - `executeRoot` explicit `run` and root-default legacy single-dash compatibility
