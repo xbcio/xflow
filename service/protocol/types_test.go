@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -89,5 +90,34 @@ func TestReportResultRequestRoundTripsSuccessfulTaskResultJSON(t *testing.T) {
 	}
 	if got.Result.Output.Data["ok"] != true || got.Result.Output.Port != "main" {
 		t.Fatalf("result output = %+v, want ok=true on main", got.Result.Output)
+	}
+}
+
+func TestReportResultRequestRoundTripsTaskResultErrorJSON(t *testing.T) {
+	want := ReportResultRequest{
+		RunnerID: "runner-1",
+		Lease: &engine.TaskLease{
+			LeaseID:  engine.LeaseID("lease-1"),
+			Task:     engine.Task{ExecutionID: types.ExecutionID("exec-1"), NodeName: "start"},
+			NodeType: "xflow.function",
+		},
+		Result: engine.TaskResult{Error: errors.New("handler failed")},
+	}
+
+	data, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var got ReportResultRequest
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+
+	if got.Result.Error == nil {
+		t.Fatalf("result error was not preserved in %s", data)
+	}
+	if got.Result.Error.Error() != "handler failed" {
+		t.Fatalf("result error = %q, want handler failed", got.Result.Error.Error())
 	}
 }

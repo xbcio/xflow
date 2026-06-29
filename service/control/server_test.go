@@ -83,6 +83,25 @@ func TestHTTPReportResultRejectsStaleLeaseToken(t *testing.T) {
 	}
 }
 
+func TestHTTPReportResultPreservesRunnerError(t *testing.T) {
+	fake := &fakeControlEngine{}
+	server := httptest.NewServer(NewServer(fake, NewRunnerPool()).Handler())
+	defer server.Close()
+
+	var resultResp protocol.ReportResultResponse
+	postJSON(t, server.URL+protocol.ReportResultPath, protocol.ReportResultRequest{
+		RunnerID: "runner-1",
+		Lease:    &engine.TaskLease{LeaseID: engine.LeaseID("lease-1")},
+		Result:   engine.TaskResult{Error: errors.New("handler failed")},
+	}, http.StatusOK, &resultResp)
+	if !resultResp.Accepted {
+		t.Fatalf("result accepted = false, response %+v", resultResp)
+	}
+	if fake.committedResult.Error == nil || fake.committedResult.Error.Error() != "handler failed" {
+		t.Fatalf("committed error = %v, want handler failed", fake.committedResult.Error)
+	}
+}
+
 func TestHTTPInspectSignalAndCancel(t *testing.T) {
 	fake := &fakeControlEngine{
 		inspectDetail: engine.ExecutionDetail{

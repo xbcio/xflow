@@ -1,9 +1,12 @@
 package protocol
 
 import (
+	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/types"
 )
 
 type Capability struct {
@@ -47,6 +50,50 @@ type ReportResultRequest struct {
 	RunnerID string            `json:"runner_id"`
 	Lease    *engine.TaskLease `json:"lease"`
 	Result   engine.TaskResult `json:"result"`
+}
+
+type reportResultRequestJSON struct {
+	RunnerID string            `json:"runner_id"`
+	Lease    *engine.TaskLease `json:"lease"`
+	Result   taskResultJSON    `json:"result"`
+}
+
+type taskResultJSON struct {
+	Output  *types.Output      `json:"output,omitempty"`
+	Suspend *types.SuspendSpec `json:"suspend,omitempty"`
+	Error   string             `json:"error,omitempty"`
+}
+
+func (r ReportResultRequest) MarshalJSON() ([]byte, error) {
+	out := reportResultRequestJSON{
+		RunnerID: r.RunnerID,
+		Lease:    r.Lease,
+		Result: taskResultJSON{
+			Output:  r.Result.Output,
+			Suspend: r.Result.Suspend,
+		},
+	}
+	if r.Result.Error != nil {
+		out.Result.Error = r.Result.Error.Error()
+	}
+	return json.Marshal(out)
+}
+
+func (r *ReportResultRequest) UnmarshalJSON(data []byte) error {
+	var in reportResultRequestJSON
+	if err := json.Unmarshal(data, &in); err != nil {
+		return err
+	}
+	r.RunnerID = in.RunnerID
+	r.Lease = in.Lease
+	r.Result = engine.TaskResult{
+		Output:  in.Result.Output,
+		Suspend: in.Result.Suspend,
+	}
+	if in.Result.Error != "" {
+		r.Result.Error = errors.New(in.Result.Error)
+	}
+	return nil
 }
 
 type ReportResultResponse struct {
