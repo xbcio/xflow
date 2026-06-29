@@ -114,6 +114,20 @@ func (b *Backend) Bind(eng *engine.Engine) func() {
 	}
 
 	dispatcher := execution.NewEmbeddedDispatcher(eng, b.registry)
+	return b.BindHandler(eng, dispatcher.HandleTask)
+}
+
+// BindHandler wires a custom task handler into the Asynq server and starts the
+// timeout monitor. It is used by the control-plane server to dispatch tasks to
+// remote runners instead of executing handlers in-process.
+func (b *Backend) BindHandler(eng *engine.Engine, handler func(context.Context, *engine.Task) error) func() {
+	if !b.consumer {
+		return func() {
+			_ = b.queue.Close()
+			_ = b.rdb.Close()
+		}
+	}
+
 	srv := asynqlib.NewServer(
 		asynqlib.RedisClientOpt{Addr: b.redisAddr},
 		asynqlib.Config{Concurrency: b.concurrency},
@@ -124,7 +138,7 @@ func (b *Backend) Bind(eng *engine.Engine) func() {
 		if err != nil {
 			return err
 		}
-		return dispatcher.HandleTask(ctx, task)
+		return handler(ctx, task)
 	})
 
 	tm := NewTimeoutMonitor(b.rdb, eng, nil, nil, 5*time.Second)

@@ -61,7 +61,12 @@ func (b *Backend) Registry() engine.HandlerRegistry { return b.registry }
 // Returns a stop function that drains the consumer pool.
 func (b *Backend) Bind(eng *engine.Engine) func() {
 	dispatcher := execution.NewEmbeddedDispatcher(eng, b.registry)
-	b.queue.SetHandler(dispatcher.HandleTask)
+	return b.BindHandler(dispatcher.HandleTask)
+}
+
+// BindHandler wires a custom queue handler and starts queue consumers.
+func (b *Backend) BindHandler(handler func(context.Context, *engine.Task) error) func() {
+	b.queue.SetHandler(handler)
 	b.queue.Start()
 	return func() { b.queue.Stop() }
 }
