@@ -41,3 +41,4 @@ data/
 .claude/plans/
 .claude/superpowers/
 .claude/settings.local.json
+.claude/specs/

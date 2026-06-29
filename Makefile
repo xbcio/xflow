@@ -1,4 +1,4 @@
-.PHONY: all build test lint fmt tidy clean run-server run-worker
+.PHONY: all build test lint fmt tidy clean run-server run-runner
 
 # ── Build ──────────────────────────────────────────────────────────────────────
 
@@ -6,13 +6,13 @@ all: build
 
 build:
 	go build -o bin/server ./cmd/server
-	go build -o bin/worker ./cmd/worker
+	go build -o bin/runner ./cmd/runner
 
 build-server:
 	go build -o bin/server ./cmd/server
 
-build-worker:
-	go build -o bin/worker ./cmd/worker
+build-runner:
+	go build -o bin/runner ./cmd/runner
 
 # ── Test ───────────────────────────────────────────────────────────────────────
 
@@ -49,9 +49,9 @@ run-server:
 	XFLOW_HTTP_ADDR=$(or $(HTTP_ADDR),:8080) \
 	go run ./cmd/server
 
-run-worker:
+run-runner:
 	XFLOW_REDIS_ADDR=$(or $(REDIS_ADDR),localhost:6379) \
-	go run ./cmd/worker
+	go run ./cmd/runner
 
 # ── Database ───────────────────────────────────────────────────────────────────
 
