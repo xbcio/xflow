@@ -48,7 +48,7 @@ func TestSuspend_SignalAfterSuspend(t *testing.T) {
 		"test.echo":    &echoHandler{},
 		"test.suspend": &fakeSuspendHandler{},
 	}}
-	eng := NewEngine(state, queue, WithRegistry(reg))
+	eng := New(state, queue, WithRegistry(reg))
 	ctx := context.Background()
 
 	id, _ := eng.Submit(ctx, g, nil)
@@ -117,7 +117,7 @@ func TestSuspend_SignalBeforeSuspend(t *testing.T) {
 		"test.echo":    &echoHandler{},
 		"test.suspend": &fakeSuspendHandler{},
 	}}
-	eng := NewEngine(state, queue, WithRegistry(reg))
+	eng := New(state, queue, WithRegistry(reg))
 	ctx := context.Background()
 
 	id, _ := eng.Submit(ctx, g, nil)
@@ -159,7 +159,7 @@ func TestSuspend_Cancel(t *testing.T) {
 	reg := &fakeRegistry{handlers: map[string]node.TaskHandler{
 		"test.suspend": &fakeSuspendHandler{},
 	}}
-	eng := NewEngine(state, queue, WithRegistry(reg))
+	eng := New(state, queue, WithRegistry(reg))
 	ctx := context.Background()
 
 	id, _ := eng.Submit(ctx, g, nil)

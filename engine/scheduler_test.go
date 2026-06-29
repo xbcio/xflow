@@ -61,7 +61,7 @@ func TestScheduler_LinearChain(t *testing.T) {
 	state := newFakeState()
 	queue := &fakeQueue{}
 	reg := &fakeRegistry{handlers: map[string]node.TaskHandler{"test.echo": &echoHandler{}}}
-	eng := NewEngine(state, queue, WithRegistry(reg))
+	eng := New(state, queue, WithRegistry(reg))
 	ctx := context.Background()
 
 	id, err := eng.Submit(ctx, g, nil)
@@ -121,7 +121,7 @@ func TestScheduler_FanOutFanIn(t *testing.T) {
 	state := newFakeState()
 	queue := &fakeQueue{}
 	reg := &fakeRegistry{handlers: map[string]node.TaskHandler{"test.echo": &echoHandler{}}}
-	eng := NewEngine(state, queue, WithRegistry(reg))
+	eng := New(state, queue, WithRegistry(reg))
 	ctx := context.Background()
 
 	id, _ := eng.Submit(ctx, g, nil)
@@ -180,7 +180,7 @@ func TestScheduler_SkipCascade(t *testing.T) {
 	reg := &fakeRegistry{handlers: map[string]node.TaskHandler{
 		"test.echo": &echoHandler{},
 	}}
-	eng := NewEngine(state, queue, WithRegistry(reg))
+	eng := New(state, queue, WithRegistry(reg))
 	ctx := context.Background()
 
 	id, _ := eng.Submit(ctx, g, nil)
@@ -223,7 +223,7 @@ func TestScheduler_ErrorFatal(t *testing.T) {
 	reg := &fakeRegistry{handlers: map[string]node.TaskHandler{
 		"test.fail": &failHandler{},
 	}}
-	eng := NewEngine(state, queue, WithRegistry(reg))
+	eng := New(state, queue, WithRegistry(reg))
 	ctx := context.Background()
 
 	id, _ := eng.Submit(ctx, g, nil)

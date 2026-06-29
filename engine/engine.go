@@ -37,21 +37,21 @@ func withResuspendDepth(ctx context.Context, depth int) context.Context {
 	return context.WithValue(ctx, resuspendDepthKey{}, depth)
 }
 
-// EngineOption configures an Engine at construction time.
-type EngineOption func(*Engine)
+// Option configures an Engine at construction time.
+type Option func(*Engine)
 
 // WithRegistry sets the handler registry.
-func WithRegistry(r HandlerRegistry) EngineOption {
+func WithRegistry(r HandlerRegistry) Option {
 	return func(e *Engine) { e.registry = r }
 }
 
 // WithHooks sets the lifecycle hook receiver.
-func WithHooks(h Hooks) EngineOption {
+func WithHooks(h Hooks) Option {
 	return func(e *Engine) { e.hooks = h }
 }
 
 // WithLogger sets the logger.
-func WithLogger(l Logger) EngineOption {
+func WithLogger(l Logger) Option {
 	return func(e *Engine) { e.logger = l }
 }
 
@@ -68,8 +68,8 @@ type Engine struct {
 	graphs map[types.ExecutionID]*graph.Graph
 }
 
-// NewEngine creates an Engine wired to the given state backend and task queue.
-func NewEngine(state StateBackend, queue TaskQueue, opts ...EngineOption) *Engine {
+// New creates an Engine wired to the given state backend and task queue.
+func New(state StateBackend, queue TaskQueue, opts ...Option) *Engine {
 	e := &Engine{
 		state:  state,
 		queue:  queue,
