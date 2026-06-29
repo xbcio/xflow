@@ -10,7 +10,25 @@ make build               # Build
 make test                # Test
 go fmt ./...             # Format
 golangci-lint run        # Lint
+make install-hooks       # Install git hooks (run once after cloning)
 ```
+
+## Git Commit Convention
+
+All commits must follow [Conventional Commits](https://www.conventionalcommits.org/):
+
+```
+<type>(<scope>): <description>
+```
+
+Allowed types: `feat` `fix` `docs` `style` `refactor` `perf` `test` `chore` `ci` `build` `revert`
+
+Examples:
+- `feat(engine): add retry policy for failed tasks`
+- `fix(store): correct transaction rollback on timeout`
+- `docs: update architecture overview`
+
+The `commit-msg` hook in `scripts/hooks/` enforces this automatically. Run `make install-hooks` to activate it. When generating commit messages, always follow this format.
 
 ## Project Structure
 

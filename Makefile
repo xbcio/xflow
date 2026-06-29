@@ -1,4 +1,4 @@
-.PHONY: all build test lint fmt tidy clean run-server run-runner
+.PHONY: all build test lint fmt tidy clean run-server run-runner install-hooks
 
 # ── Build ──────────────────────────────────────────────────────────────────────
 
@@ -57,6 +57,13 @@ run-runner:
 db-migrate:
 	@if [ -z "$(DSN)" ]; then echo "Usage: make db-migrate DSN=<mysql-dsn>"; exit 1; fi
 	mysql "$(DSN)" < db/xflow_schema.sql
+
+# ── Git hooks ──────────────────────────────────────────────────────────────────
+
+install-hooks:
+	cp scripts/hooks/commit-msg .git/hooks/commit-msg
+	chmod +x .git/hooks/commit-msg
+	@echo "git hooks installed"
 
 # ── Clean ──────────────────────────────────────────────────────────────────────
 
