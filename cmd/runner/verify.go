@@ -14,6 +14,7 @@ func newVerifyCommand(opts commandOptions, cfg *runnerConfig) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "verify",
 		Short: "Verify runner configuration and server reachability",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			recordChangedFlags(cmd, cfg)
 			resolved, err := resolveRunnerConfig(*cfg)
@@ -27,7 +28,6 @@ func newVerifyCommand(opts commandOptions, cfg *runnerConfig) *cobra.Command {
 			return err
 		},
 	}
-	cmd.Flags().StringVarP(&cfg.configPath, "config", "c", cfg.configPath, "Runner config file")
 	bindRunnerFlags(cmd, cfg)
 	return cmd
 }

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
 	_ "github.com/xbcio/xflow/nodes/node"
 	"github.com/xbcio/xflow/service/protocol"
@@ -28,14 +29,13 @@ type runnerConfig struct {
 	capabilities      []protocol.Capability
 	heartbeatInterval string
 	pollWait          string
-	logLevel          string
-	logFormat         string
 }
 
 func newRunCommand(opts commandOptions, cfg *runnerConfig) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "run",
 		Short: "Run the xflow task runner",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			recordChangedFlags(cmd, cfg)
 			resolved, err := resolveRunnerConfig(*cfg)
@@ -56,8 +56,6 @@ func bindRunnerFlags(cmd *cobra.Command, cfg *runnerConfig) {
 	cmd.Flags().StringVar(&cfg.capRaw, "cap", cfg.capRaw, "Comma-separated node type capabilities")
 	cmd.Flags().StringVar(&cfg.heartbeatInterval, "heartbeat-interval", cfg.heartbeatInterval, "Heartbeat interval")
 	cmd.Flags().StringVar(&cfg.pollWait, "poll-wait", cfg.pollWait, "Poll wait duration when no task is available")
-	cmd.Flags().StringVar(&cfg.logLevel, "log-level", cfg.logLevel, "Log level: debug, info, warn, error")
-	cmd.Flags().StringVar(&cfg.logFormat, "log-format", cfg.logFormat, "Log format: text, json")
 }
 
 func recordChangedFlags(cmd *cobra.Command, cfg *runnerConfig) {
@@ -82,15 +80,41 @@ func parseCapabilities(raw string) []protocol.Capability {
 	return capabilities
 }
 
+type runnerService interface {
+	Run(context.Context) error
+}
+
+var newRunnerService = func(client runnersvc.ProtocolClient, registry engine.HandlerRegistry, cfg runnersvc.Config) runnerService {
+	return runnersvc.New(client, registry, cfg)
+}
+
 func runRunner(ctx context.Context, cfg runnerConfig) error {
+	serviceCfg, err := runnerServiceConfig(cfg)
+	if err != nil {
+		return err
+	}
 	client := protocol.NewClient(cfg.serverURL, http.DefaultClient)
 	registry := execution.NewRegistry()
-	runner := runnersvc.New(client, registry, runnersvc.Config{
-		RunnerID:     cfg.runnerID,
-		Concurrency:  cfg.concurrency,
-		Capabilities: cfg.capabilities,
-	})
+	runner := newRunnerService(client, registry, serviceCfg)
 	return runner.Run(ctx)
+}
+
+func runnerServiceConfig(cfg runnerConfig) (runnersvc.Config, error) {
+	heartbeatInterval, err := parsePositiveDuration("heartbeat interval", cfg.heartbeatInterval)
+	if err != nil {
+		return runnersvc.Config{}, err
+	}
+	pollWait, err := parsePositiveDuration("poll wait", cfg.pollWait)
+	if err != nil {
+		return runnersvc.Config{}, err
+	}
+	return runnersvc.Config{
+		RunnerID:          cfg.runnerID,
+		Concurrency:       cfg.concurrency,
+		Capabilities:      cfg.capabilities,
+		HeartbeatInterval: heartbeatInterval,
+		PollWait:          pollWait,
+	}, nil
 }
 
 func runWithSignals(cfg runnerConfig) error {

@@ -22,9 +22,6 @@ poll:
   wait: 2s
 heartbeat:
   interval: 7s
-logging:
-  level: debug
-  format: json
 `)
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
@@ -39,7 +36,7 @@ logging:
 	if cfg.capRaw != "xflow.http" {
 		t.Fatalf("capRaw = %q", cfg.capRaw)
 	}
-	if cfg.pollWait != "2s" || cfg.heartbeatInterval != "7s" || cfg.logLevel != "debug" || cfg.logFormat != "json" {
+	if cfg.pollWait != "2s" || cfg.heartbeatInterval != "7s" {
 		t.Fatalf("config = %+v", cfg)
 	}
 }
@@ -80,6 +77,50 @@ server:
 	}
 }
 
+func TestConfigValidateUsesGlobalConfigFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "runner.yaml")
+	data := []byte(`
+runner:
+  id: file-runner
+server:
+  url: http://file-server:8080
+`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	err := executeRootWithOptions(commandOptions{
+		out: &out,
+		err: &bytes.Buffer{},
+	}, "--config", path, "config", "validate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "runner config valid: file-runner") {
+		t.Fatalf("output = %q", out.String())
+	}
+}
+
+func TestConfigValidateRejectsInvalidGlobalConfigFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "runner.yaml")
+	data := []byte(`
+server:
+  url: localhost:8080
+`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := executeRootWithOptions(commandOptions{
+		out: &bytes.Buffer{},
+		err: &bytes.Buffer{},
+	}, "--config", path, "config", "validate")
+	if err == nil || !strings.Contains(err.Error(), "server URL") {
+		t.Fatalf("error = %v, want server URL validation", err)
+	}
+}
+
 func TestEnvOverridesFileConfig(t *testing.T) {
 	cfg := runnerConfig{
 		serverURL:         "http://file-server:8080",
@@ -88,8 +129,6 @@ func TestEnvOverridesFileConfig(t *testing.T) {
 		capRaw:            "xflow.http",
 		heartbeatInterval: "5s",
 		pollWait:          "1s",
-		logLevel:          "info",
-		logFormat:         "text",
 	}
 	env := map[string]string{
 		"XFLOW_RUNNER_SERVER":             "http://env-server:8080",
@@ -98,17 +137,12 @@ func TestEnvOverridesFileConfig(t *testing.T) {
 		"XFLOW_RUNNER_CAP":                "xflow.function,xflow.http",
 		"XFLOW_RUNNER_HEARTBEAT_INTERVAL": "9s",
 		"XFLOW_RUNNER_POLL_WAIT":          "3s",
-		"XFLOW_RUNNER_LOG_LEVEL":          "warn",
-		"XFLOW_RUNNER_LOG_FORMAT":         "json",
 	}
 	got := applyEnvOverrides(cfg, func(key string) string { return env[key] })
 	if got.serverURL != "http://env-server:8080" || got.runnerID != "env-runner" || got.concurrency != 4 {
 		t.Fatalf("config = %+v", got)
 	}
 	if got.capRaw != "xflow.function,xflow.http" || got.heartbeatInterval != "9s" || got.pollWait != "3s" {
-		t.Fatalf("config = %+v", got)
-	}
-	if got.logLevel != "warn" || got.logFormat != "json" {
 		t.Fatalf("config = %+v", got)
 	}
 }
@@ -127,9 +161,6 @@ poll:
   wait: 2s
 heartbeat:
   interval: 7s
-logging:
-  level: debug
-  format: json
 `)
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
@@ -152,8 +183,6 @@ logging:
 	base.capRaw = "xflow.function"
 	base.heartbeatInterval = "11s"
 	base.pollWait = "4s"
-	base.logLevel = "error"
-	base.logFormat = "json"
 	base.changed = map[string]bool{
 		"server":             true,
 		"id":                 true,
@@ -161,8 +190,6 @@ logging:
 		"cap":                true,
 		"heartbeat-interval": true,
 		"poll-wait":          true,
-		"log-level":          true,
-		"log-format":         true,
 	}
 
 	got, err := resolveRunnerConfig(base)
@@ -173,9 +200,6 @@ logging:
 		t.Fatalf("config = %+v", got)
 	}
 	if got.capRaw != "xflow.function" || got.heartbeatInterval != "11s" || got.pollWait != "4s" {
-		t.Fatalf("config = %+v", got)
-	}
-	if got.logLevel != "error" || got.logFormat != "json" {
 		t.Fatalf("config = %+v", got)
 	}
 	if len(got.capabilities) != 1 || got.capabilities[0].NodeType != "xflow.function" {
@@ -237,9 +261,6 @@ poll:
   wait: 2s
 heartbeat:
   interval: 7s
-logging:
-  level: debug
-  format: json
 `)
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
@@ -254,7 +275,6 @@ logging:
 		{name: "runner id", envKey: "XFLOW_RUNNER_ID", want: "runner id"},
 		{name: "capabilities", envKey: "XFLOW_RUNNER_CAP", want: "capabilities"},
 		{name: "poll wait", envKey: "XFLOW_RUNNER_POLL_WAIT", want: "poll wait"},
-		{name: "log level", envKey: "XFLOW_RUNNER_LOG_LEVEL", want: "log level"},
 	}
 
 	for _, tt := range tests {
@@ -373,21 +393,6 @@ func TestResolveRunnerConfigUsesCLIFlagWhenEnvOverrideIsEmptyOrInvalid(t *testin
 				}
 			},
 		},
-		{
-			name:   "log level",
-			envKey: "XFLOW_RUNNER_LOG_LEVEL",
-			envVal: "",
-			apply: func(cfg *runnerConfig) {
-				cfg.logLevel = "error"
-				cfg.changed = map[string]bool{"log-level": true}
-			},
-			check: func(t *testing.T, got runnerConfig) {
-				t.Helper()
-				if got.logLevel != "error" {
-					t.Fatalf("logLevel = %q, want %q", got.logLevel, "error")
-				}
-			},
-		},
 	}
 
 	for _, tt := range tests {
@@ -435,14 +440,6 @@ poll:
   wait: ""
 `,
 			want: "poll wait",
-		},
-		{
-			name: "log level",
-			data: `
-logging:
-  level: ""
-`,
-			want: "log level",
 		},
 	}
 
@@ -502,8 +499,6 @@ func TestValidateRunnerConfigRejectsInvalidValues(t *testing.T) {
 		{name: "capabilities", mut: func(c *runnerConfig) { c.capRaw = "," }, want: "capabilities"},
 		{name: "heartbeat", mut: func(c *runnerConfig) { c.heartbeatInterval = "-1s" }, want: "heartbeat interval"},
 		{name: "poll", mut: func(c *runnerConfig) { c.pollWait = "bad" }, want: "poll wait"},
-		{name: "level", mut: func(c *runnerConfig) { c.logLevel = "trace" }, want: "log level"},
-		{name: "format", mut: func(c *runnerConfig) { c.logFormat = "pretty" }, want: "log format"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

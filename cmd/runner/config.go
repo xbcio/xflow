@@ -27,10 +27,6 @@ type runnerConfigFile struct {
 	Heartbeat struct {
 		Interval *string `yaml:"interval"`
 	} `yaml:"heartbeat"`
-	Logging struct {
-		Level  *string `yaml:"level"`
-		Format *string `yaml:"format"`
-	} `yaml:"logging"`
 }
 
 func defaultRunnerConfig() runnerConfig {
@@ -42,8 +38,6 @@ func defaultRunnerConfig() runnerConfig {
 		capabilities:      parseCapabilities("xflow.function"),
 		heartbeatInterval: "5s",
 		pollWait:          "1s",
-		logLevel:          "info",
-		logFormat:         "text",
 	}
 }
 
@@ -91,12 +85,6 @@ func loadRunnerConfigFromBytes(data []byte) (runnerConfig, error) {
 	if file.Heartbeat.Interval != nil {
 		cfg.heartbeatInterval = *file.Heartbeat.Interval
 	}
-	if file.Logging.Level != nil {
-		cfg.logLevel = *file.Logging.Level
-	}
-	if file.Logging.Format != nil {
-		cfg.logFormat = *file.Logging.Format
-	}
 
 	cfg.capabilities = parseCapabilities(cfg.capRaw)
 	return cfg, nil
@@ -109,8 +97,6 @@ var runnerConfigIssueOrder = []string{
 	"cap",
 	"heartbeat-interval",
 	"poll-wait",
-	"log-level",
-	"log-format",
 }
 
 func applyEnvOverrides(cfg runnerConfig, getenv func(string) string) runnerConfig {
@@ -145,12 +131,6 @@ func applyLookupEnvOverrides(cfg runnerConfig, lookupEnv func(string) (string, b
 	if v, ok := lookupEnv("XFLOW_RUNNER_POLL_WAIT"); ok {
 		cfg.pollWait = v
 	}
-	if v, ok := lookupEnv("XFLOW_RUNNER_LOG_LEVEL"); ok {
-		cfg.logLevel = v
-	}
-	if v, ok := lookupEnv("XFLOW_RUNNER_LOG_FORMAT"); ok {
-		cfg.logFormat = v
-	}
 
 	cfg.capabilities = parseCapabilities(cfg.capRaw)
 	return cfg
@@ -179,30 +159,23 @@ func validateRunnerConfig(cfg runnerConfig) error {
 		return err
 	}
 
-	switch cfg.logLevel {
-	case "debug", "info", "warn", "error":
-	default:
-		return fmt.Errorf("log level must be debug, info, warn, or error: %q", cfg.logLevel)
-	}
-
-	switch cfg.logFormat {
-	case "text", "json":
-	default:
-		return fmt.Errorf("log format must be text or json: %q", cfg.logFormat)
-	}
-
 	return nil
 }
 
 func validatePositiveDuration(name, raw string) error {
+	_, err := parsePositiveDuration(name, raw)
+	return err
+}
+
+func parsePositiveDuration(name, raw string) (time.Duration, error) {
 	d, err := time.ParseDuration(raw)
 	if err != nil {
-		return fmt.Errorf("%s must be a valid duration: %w", name, err)
+		return 0, fmt.Errorf("%s must be a valid duration: %w", name, err)
 	}
 	if d <= 0 {
-		return fmt.Errorf("%s must be positive: %s", name, raw)
+		return 0, fmt.Errorf("%s must be positive: %s", name, raw)
 	}
-	return nil
+	return d, nil
 }
 
 func resolveRunnerConfig(base runnerConfig) (runnerConfig, error) {
@@ -238,14 +211,6 @@ func resolveRunnerConfig(base runnerConfig) (runnerConfig, error) {
 	if base.changed["poll-wait"] {
 		clearRunnerConfigIssue(&cfg, "poll-wait")
 		cfg.pollWait = base.pollWait
-	}
-	if base.changed["log-level"] {
-		clearRunnerConfigIssue(&cfg, "log-level")
-		cfg.logLevel = base.logLevel
-	}
-	if base.changed["log-format"] {
-		clearRunnerConfigIssue(&cfg, "log-format")
-		cfg.logFormat = base.logFormat
 	}
 
 	cfg.capabilities = parseCapabilities(cfg.capRaw)
@@ -305,9 +270,5 @@ poll:
 
 heartbeat:
   interval: "5s"
-
-logging:
-  level: "info"
-  format: "text"
 `
 }

@@ -15,6 +15,7 @@ func newConfigCommand(opts commandOptions, cfg *runnerConfig) *cobra.Command {
 	validate := &cobra.Command{
 		Use:   "validate",
 		Short: "Validate runner configuration",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			recordChangedFlags(cmd, cfg)
 			resolved, err := resolveRunnerConfig(*cfg)
@@ -25,7 +26,6 @@ func newConfigCommand(opts commandOptions, cfg *runnerConfig) *cobra.Command {
 			return err
 		},
 	}
-	validate.Flags().StringVarP(&cfg.configPath, "config", "c", cfg.configPath, "Runner config file")
 	bindRunnerFlags(validate, cfg)
 
 	sample := &cobra.Command{

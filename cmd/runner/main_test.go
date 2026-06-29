@@ -12,22 +12,21 @@ var _ func(commandOptions) *cobra.Command = newRootCommand
 
 func TestNewRootCommandRunCommandParsesExistingFlags(t *testing.T) {
 	var ran runnerConfig
-	cmd := newRootCommand(commandOptions{
+	err := executeRootWithOptions(commandOptions{
 		runFunc: func(cfg runnerConfig) error {
 			ran = cfg
 			return nil
 		},
 		out: &bytes.Buffer{},
 		err: &bytes.Buffer{},
-	})
-	cmd.SetArgs([]string{
+	},
 		"run",
 		"--server", "http://localhost:8080",
 		"--id", "runner-1",
 		"--concurrency", "2",
 		"--cap", "xflow.function,xflow.http",
-	})
-	if err := cmd.Execute(); err != nil {
+	)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if ran.serverURL != "http://localhost:8080" || ran.runnerID != "runner-1" || ran.concurrency != 2 {
@@ -40,22 +39,21 @@ func TestNewRootCommandRunCommandParsesExistingFlags(t *testing.T) {
 
 func TestNewRootCommandRunCommandParsesLegacySingleDashFlags(t *testing.T) {
 	var ran runnerConfig
-	cmd := newRootCommand(commandOptions{
+	err := executeRootWithOptions(commandOptions{
 		runFunc: func(cfg runnerConfig) error {
 			ran = cfg
 			return nil
 		},
 		out: &bytes.Buffer{},
 		err: &bytes.Buffer{},
-	})
-	cmd.SetArgs([]string{
+	},
 		"run",
 		"-server", "http://localhost:8080",
 		"-id", "runner-1",
 		"-concurrency", "2",
 		"-cap", "xflow.function,xflow.http",
-	})
-	if err := cmd.Execute(); err != nil {
+	)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if ran.serverURL != "http://localhost:8080" || ran.runnerID != "runner-1" || ran.concurrency != 2 {
@@ -68,16 +66,15 @@ func TestNewRootCommandRunCommandParsesLegacySingleDashFlags(t *testing.T) {
 
 func TestNewRootCommandDefaultsToRunCommandWithLegacySingleDashFlag(t *testing.T) {
 	var ran runnerConfig
-	cmd := newRootCommand(commandOptions{
+	err := executeRootWithOptions(commandOptions{
 		runFunc: func(cfg runnerConfig) error {
 			ran = cfg
 			return nil
 		},
 		out: &bytes.Buffer{},
 		err: &bytes.Buffer{},
-	})
-	cmd.SetArgs([]string{"-id", "runner-root"})
-	if err := cmd.Execute(); err != nil {
+	}, "-id", "runner-root")
+	if err != nil {
 		t.Fatal(err)
 	}
 	if ran.runnerID != "runner-root" {
@@ -137,22 +134,21 @@ func TestCLIFlagsOverrideEnvironment(t *testing.T) {
 	t.Setenv("XFLOW_RUNNER_CAP", "xflow.http")
 
 	var ran runnerConfig
-	cmd := newRootCommand(commandOptions{
+	err := executeRootWithOptions(commandOptions{
 		runFunc: func(cfg runnerConfig) error {
 			ran = cfg
 			return nil
 		},
 		out: &bytes.Buffer{},
 		err: &bytes.Buffer{},
-	})
-	cmd.SetArgs([]string{
+	},
 		"run",
 		"--server", "http://flag-server:8080",
 		"--id", "flag-runner",
 		"--concurrency", "2",
 		"--cap", "xflow.function",
-	})
-	if err := cmd.Execute(); err != nil {
+	)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if ran.serverURL != "http://flag-server:8080" || ran.runnerID != "flag-runner" || ran.concurrency != 2 {
@@ -184,5 +180,51 @@ func TestConfigValidateRejectsInvalidFlagConfig(t *testing.T) {
 	err := cmd.Execute()
 	if err == nil || !strings.Contains(err.Error(), "server URL") {
 		t.Fatalf("error = %v, want server URL validation", err)
+	}
+}
+
+func TestRootHelpDoesNotRunRunner(t *testing.T) {
+	var out bytes.Buffer
+	runCalls := 0
+
+	err := executeRootWithOptions(commandOptions{
+		runFunc: func(cfg runnerConfig) error {
+			runCalls++
+			return nil
+		},
+		out: &out,
+		err: &bytes.Buffer{},
+	}, "--help")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runCalls != 0 {
+		t.Fatalf("runFunc calls = %d, want 0", runCalls)
+	}
+	if !strings.Contains(out.String(), "Usage:") || !strings.Contains(out.String(), "xflow-runner") {
+		t.Fatalf("help output = %q", out.String())
+	}
+}
+
+func TestRunHelpDoesNotRunRunner(t *testing.T) {
+	var out bytes.Buffer
+	runCalls := 0
+
+	err := executeRootWithOptions(commandOptions{
+		runFunc: func(cfg runnerConfig) error {
+			runCalls++
+			return nil
+		},
+		out: &out,
+		err: &bytes.Buffer{},
+	}, "run", "--help")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runCalls != 0 {
+		t.Fatalf("runFunc calls = %d, want 0", runCalls)
+	}
+	if !strings.Contains(out.String(), "Run the xflow task runner") || !strings.Contains(out.String(), "Usage:") {
+		t.Fatalf("help output = %q", out.String())
 	}
 }

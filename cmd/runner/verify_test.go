@@ -92,3 +92,25 @@ func TestVerifyCommandRegistersAndHeartbeats(t *testing.T) {
 		t.Fatalf("output = %q", out.String())
 	}
 }
+
+func TestManagementCommandsRejectUnexpectedPositionalArgs(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "verify", args: []string{"verify", "extra"}},
+		{name: "config validate", args: []string{"config", "validate", "extra"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := executeRootWithOptions(commandOptions{
+				out: &bytes.Buffer{},
+				err: &bytes.Buffer{},
+			}, tt.args...)
+			if err == nil || !strings.Contains(err.Error(), "unknown command") && !strings.Contains(err.Error(), "accepts 0 arg(s), received 1") {
+				t.Fatalf("error = %v, want unexpected positional args rejection", err)
+			}
+		})
+	}
+}
