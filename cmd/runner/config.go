@@ -93,7 +93,7 @@ func loadRunnerConfig(path string) (runnerConfig, error) {
 	return cfg, nil
 }
 
-func applyEnvOverrides(cfg runnerConfig, getenv func(string) string) runnerConfig {
+func applyEnvOverrides(cfg runnerConfig, getenv func(string) string) (runnerConfig, error) {
 	if v := getenv("XFLOW_RUNNER_SERVER"); v != "" {
 		cfg.serverURL = v
 	}
@@ -101,9 +101,11 @@ func applyEnvOverrides(cfg runnerConfig, getenv func(string) string) runnerConfi
 		cfg.runnerID = v
 	}
 	if v := getenv("XFLOW_RUNNER_CONCURRENCY"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			cfg.concurrency = n
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return runnerConfig{}, fmt.Errorf("parse env concurrency from XFLOW_RUNNER_CONCURRENCY: %w", err)
 		}
+		cfg.concurrency = n
 	}
 	if v := getenv("XFLOW_RUNNER_CAP"); v != "" {
 		cfg.capRaw = v
@@ -122,7 +124,7 @@ func applyEnvOverrides(cfg runnerConfig, getenv func(string) string) runnerConfi
 	}
 
 	cfg.capabilities = parseCapabilities(cfg.capRaw)
-	return cfg
+	return cfg, nil
 }
 
 func validateRunnerConfig(cfg runnerConfig) error {
@@ -180,7 +182,20 @@ func resolveRunnerConfig(base runnerConfig) (runnerConfig, error) {
 		return runnerConfig{}, err
 	}
 
-	cfg = applyEnvOverrides(cfg, os.Getenv)
+	getenv := os.Getenv
+	if base.changed["concurrency"] {
+		getenv = func(key string) string {
+			if key == "XFLOW_RUNNER_CONCURRENCY" {
+				return ""
+			}
+			return os.Getenv(key)
+		}
+	}
+
+	cfg, err = applyEnvOverrides(cfg, getenv)
+	if err != nil {
+		return runnerConfig{}, err
+	}
 	cfg.configPath = base.configPath
 	cfg.changed = base.changed
 

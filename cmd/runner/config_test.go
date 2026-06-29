@@ -101,7 +101,10 @@ func TestEnvOverridesFileConfig(t *testing.T) {
 		"XFLOW_RUNNER_LOG_LEVEL":          "warn",
 		"XFLOW_RUNNER_LOG_FORMAT":         "json",
 	}
-	got := applyEnvOverrides(cfg, func(key string) string { return env[key] })
+	got, err := applyEnvOverrides(cfg, func(key string) string { return env[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got.serverURL != "http://env-server:8080" || got.runnerID != "env-runner" || got.concurrency != 4 {
 		t.Fatalf("config = %+v", got)
 	}
@@ -199,6 +202,45 @@ runner:
 	_, err := resolveRunnerConfig(base)
 	if err == nil || !strings.Contains(err.Error(), "concurrency") {
 		t.Fatalf("error = %v, want containing %q", err, "concurrency")
+	}
+}
+
+func TestResolveRunnerConfigRejectsInvalidEnvConcurrencyOverFileConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "runner.yaml")
+	data := []byte(`
+runner:
+  concurrency: 3
+`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("XFLOW_RUNNER_CONCURRENCY", "bad")
+
+	base := defaultRunnerConfig()
+	base.configPath = path
+
+	_, err := resolveRunnerConfig(base)
+	if err == nil || !strings.Contains(err.Error(), "concurrency") {
+		t.Fatalf("error = %v, want containing %q", err, "concurrency")
+	}
+}
+
+func TestResolveRunnerConfigUsesCLIConcurrencyWhenEnvConcurrencyIsInvalid(t *testing.T) {
+	t.Setenv("XFLOW_RUNNER_CONCURRENCY", "bad")
+
+	base := defaultRunnerConfig()
+	base.concurrency = 2
+	base.changed = map[string]bool{
+		"concurrency": true,
+	}
+
+	got, err := resolveRunnerConfig(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.concurrency != 2 {
+		t.Fatalf("concurrency = %d, want 2", got.concurrency)
 	}
 }
 
