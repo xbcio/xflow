@@ -121,6 +121,56 @@ func TestEngineSubmitRegistersWorkflowDeclaredHandlers(t *testing.T) {
 	}
 }
 
+func TestEngineSubmitPassesRuntimeVarsToEveryExecution(t *testing.T) {
+	eng, err := NewLocal()
+	if err != nil {
+		t.Fatalf("NewLocal() error = %v", err)
+	}
+	defer eng.Stop()
+
+	wf := Workflow("runtime-vars")
+	wf.Node("capture", testRuntimeCaptureNode.New(nil))
+
+	firstID, err := eng.Submit(context.Background(), wf,
+		map[string]any{"ticket": "VULN-1"},
+		WithRuntimeVars(map[string]any{"tenant_id": "tenant-a"}),
+	)
+	if err != nil {
+		t.Fatalf("first Submit() error = %v", err)
+	}
+	secondID, err := eng.Submit(context.Background(), wf,
+		map[string]any{"ticket": "VULN-2"},
+		WithRuntimeVars(map[string]any{"tenant_id": "tenant-b"}),
+	)
+	if err != nil {
+		t.Fatalf("second Submit() error = %v", err)
+	}
+
+	first, err := eng.Wait(context.Background(), firstID)
+	if err != nil {
+		t.Fatalf("Wait(first) error = %v", err)
+	}
+	second, err := eng.Wait(context.Background(), secondID)
+	if err != nil {
+		t.Fatalf("Wait(second) error = %v", err)
+	}
+
+	firstOut := first.Output["capture"].(map[string]any)
+	secondOut := second.Output["capture"].(map[string]any)
+	if got := firstOut["runtime_tenant_id"]; got != "tenant-a" {
+		t.Fatalf("first runtime_tenant_id = %v, want tenant-a", got)
+	}
+	if got := secondOut["runtime_tenant_id"]; got != "tenant-b" {
+		t.Fatalf("second runtime_tenant_id = %v, want tenant-b", got)
+	}
+	if got := firstOut["vars_tenant_id"]; got != "tenant-a" {
+		t.Fatalf("first vars_tenant_id = %v, want tenant-a", got)
+	}
+	if got := secondOut["vars_tenant_id"]; got != "tenant-b" {
+		t.Fatalf("second vars_tenant_id = %v, want tenant-b", got)
+	}
+}
+
 func TestWithNodesRegistersConsumerCapabilities(t *testing.T) {
 	provider := memory.New()
 	eng, err := newFromConfig(&engineConfig{
@@ -169,4 +219,18 @@ func (h *testBuilderEchoHandler) Execute(_ context.Context, input *node.Input) (
 
 var testWorkflowDeclaredNode = node.Define("test.workflow_declared", func(_ context.Context, input *node.Input) (*node.Output, error) {
 	return &node.Output{Data: input.Data}, nil
+})
+
+var testRuntimeCaptureNode = node.Define("test.runtime_capture", func(_ context.Context, input *node.Input) (*node.Output, error) {
+	out := map[string]any{
+		"runtime_tenant_id": nil,
+		"vars_tenant_id":    nil,
+	}
+	if input.Vars != nil {
+		out["vars_tenant_id"] = input.Vars["tenant_id"]
+	}
+	if input.Runtime != nil && input.Runtime.Vars != nil {
+		out["runtime_tenant_id"] = input.Runtime.Vars["tenant_id"]
+	}
+	return &node.Output{Data: out}, nil
 })

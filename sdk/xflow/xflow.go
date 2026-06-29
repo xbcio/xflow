@@ -205,7 +205,7 @@ func (e *Engine) Submit(ctx context.Context, wf *WorkflowBuilder, params map[str
 	}
 	ctx = engine.WithWorkflowDef(ctx, def)
 
-	return e.eng.Submit(ctx, g, params)
+	return e.eng.Submit(ctx, g, params, cfg.runtime)
 }
 
 func (e *Engine) registerWorkflowHandlers(wf *WorkflowBuilder) error {

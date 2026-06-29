@@ -30,6 +30,7 @@ type Input struct {
 	Inputs      map[string]any // multi-port inputs keyed by port name ($inputs)
 	Vars        map[string]any // workflow-level variables ($vars)
 	Config      map[string]any // workflow-level config ($config)
+	Runtime     *Runtime       // per-execution runtime context ($runtime)
 	ExecutionID string
 	NodeName    string
 	TraceID     string        // empty string in embedded mode

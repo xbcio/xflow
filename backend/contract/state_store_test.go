@@ -24,12 +24,20 @@ func runStateStoreContract(t *testing.T, state engine.StateStore) {
 	g := contractGraph()
 
 	if err := state.CreateExecution(ctx, &engine.ExecutionSnapshot{
-		ID:     id,
-		Graph:  g,
-		Status: types.ExecutionStatusRunning,
-		Params: map[string]any{"claim_id": "c-1"},
+		ID:      id,
+		Graph:   g,
+		Status:  types.ExecutionStatusRunning,
+		Params:  map[string]any{"claim_id": "c-1"},
+		Runtime: &types.Runtime{Vars: map[string]any{"tenant_id": "tenant-a"}},
 	}); err != nil {
 		t.Fatalf("CreateExecution() error = %v", err)
+	}
+	snap, err := state.GetExecution(ctx, id)
+	if err != nil {
+		t.Fatalf("GetExecution() error = %v", err)
+	}
+	if snap.Runtime == nil || snap.Runtime.Vars["tenant_id"] != "tenant-a" {
+		t.Fatalf("Runtime = %#v, want tenant_id tenant-a", snap.Runtime)
 	}
 
 	loaded, err := state.LoadGraph(ctx, id)

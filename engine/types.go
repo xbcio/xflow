@@ -81,6 +81,7 @@ type ExecutionSnapshot struct {
 	Graph    *graph.Graph
 	Status   types.ExecutionStatus
 	Params   map[string]any
+	Runtime  *types.Runtime
 	ParentID types.ExecutionID // non-empty for sub-executions
 }
 

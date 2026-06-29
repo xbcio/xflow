@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/xbcio/xflow/nodes/node"
+	"github.com/xbcio/xflow/types"
 )
 
 func TestFunction_Factory(t *testing.T) {
@@ -58,6 +59,22 @@ func TestFunction_InlineExpr_ReturnsMap(t *testing.T) {
 	}
 	if out.Data["product"] != 6.0 {
 		t.Fatalf("expected product=6, got %v", out.Data["product"])
+	}
+}
+
+func TestFunction_InlineExprCanReadRuntimeVars(t *testing.T) {
+	h, _ := node.Lookup("xflow.function")
+	b := node.Expr(`{"tenant": $runtime.vars.tenant_id}`)
+	input := &node.Input{
+		Params:  b.RawParams().(map[string]any),
+		Runtime: &types.Runtime{Vars: map[string]any{"tenant_id": "tenant-a"}},
+	}
+	out, err := h.Execute(context.Background(), input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Data["tenant"] != "tenant-a" {
+		t.Fatalf("tenant = %v, want tenant-a", out.Data["tenant"])
 	}
 }
 

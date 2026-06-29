@@ -163,6 +163,38 @@ func TestWait_OnResume_Signal(t *testing.T) {
 	}
 }
 
+func TestWait_OnResume_SignalIncludesInputs(t *testing.T) {
+	h, _ := node.Lookup("xflow.wait")
+	sh := h.(node.SuspendingHandler)
+
+	input := &node.Input{
+		Data: map[string]any{"existing": "data"},
+		Inputs: map[string]any{
+			"branch_a": map[string]any{"value": "a"},
+			"branch_b": map[string]any{"value": "b"},
+		},
+		NodeName: "wait_1",
+	}
+	signal := &node.SignalPayload{
+		Triggered: node.SignalReceived,
+		Name:      "order_paid",
+		Data:      map[string]any{"order_id": "123"},
+	}
+	out, err := sh.OnResume(context.Background(), input, signal)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Data["branch_a"] == nil {
+		t.Fatalf("expected input branch_a preserved, got %v", out.Data)
+	}
+	if out.Data["branch_b"] == nil {
+		t.Fatalf("expected input branch_b preserved, got %v", out.Data)
+	}
+	if out.Data["existing"] != "data" {
+		t.Fatalf("expected existing data preserved, got %v", out.Data)
+	}
+}
+
 func TestWait_OnResume_Timeout(t *testing.T) {
 	h, _ := node.Lookup("xflow.wait")
 	sh := h.(node.SuspendingHandler)

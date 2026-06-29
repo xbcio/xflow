@@ -315,6 +315,20 @@ func (s *redisState) CreateExecution(ctx context.Context, e *engine.ExecutionSna
 	pipe := s.rdb.Pipeline()
 	pipe.Set(ctx, execKey(e.ID, "status"), string(e.Status), ttl)
 	pipe.Set(ctx, execKey(e.ID, "graph"), string(graphJSON), ttl)
+	if e.Params != nil {
+		paramsJSON, err := json.Marshal(e.Params)
+		if err != nil {
+			return fmt.Errorf("marshal execution params for %q: %w", e.ID, err)
+		}
+		pipe.Set(ctx, execKey(e.ID, "params"), string(paramsJSON), ttl)
+	}
+	if e.Runtime != nil {
+		runtimeJSON, err := json.Marshal(e.Runtime)
+		if err != nil {
+			return fmt.Errorf("marshal execution runtime for %q: %w", e.ID, err)
+		}
+		pipe.Set(ctx, execKey(e.ID, "runtime"), string(runtimeJSON), ttl)
+	}
 	// Seed in-degree counters.
 	for i, d := range e.Graph.InDegree {
 		if d > 0 {
@@ -347,7 +361,7 @@ func (s *redisState) cleanupCreatedExecution(ctx context.Context, e *engine.Exec
 	s.ttlMu.Unlock()
 
 	pipe := s.rdb.Pipeline()
-	pipe.Del(ctx, execKey(e.ID, "status"), execKey(e.ID, "graph"), execKey(e.ID, "error"))
+	pipe.Del(ctx, execKey(e.ID, "status"), execKey(e.ID, "graph"), execKey(e.ID, "error"), execKey(e.ID, "params"), execKey(e.ID, "runtime"))
 	if e.Graph != nil {
 		for i := range e.Graph.InDegree {
 			pipe.Del(ctx, inDegreeKey(e.ID, i), activeInputsKey(e.ID, i))
@@ -377,6 +391,13 @@ func buildExecutionRecord(ctx context.Context, e *engine.ExecutionSnapshot, now 
 			return nil, fmt.Errorf("marshal execution params for %q: %w", e.ID, err)
 		}
 		rec.Params = paramsJSON
+	}
+	if e.Runtime != nil {
+		runtimeJSON, err := json.Marshal(e.Runtime)
+		if err != nil {
+			return nil, fmt.Errorf("marshal execution runtime for %q: %w", e.ID, err)
+		}
+		rec.Runtime = runtimeJSON
 	}
 	return rec, nil
 }
@@ -416,10 +437,28 @@ func (s *redisState) GetExecution(ctx context.Context, id types.ExecutionID) (*e
 	s.mu.RLock()
 	g := s.graphs[id]
 	s.mu.RUnlock()
+	var params map[string]any
+	if raw, err := s.rdb.Get(ctx, execKey(id, "params")).Bytes(); err == nil {
+		_ = json.Unmarshal(raw, &params)
+	} else if err != redis.Nil {
+		return nil, fmt.Errorf("get execution params %q: %w", id, err)
+	}
+	var runtime *types.Runtime
+	if raw, err := s.rdb.Get(ctx, execKey(id, "runtime")).Bytes(); err == nil {
+		var decoded types.Runtime
+		if err := json.Unmarshal(raw, &decoded); err != nil {
+			return nil, fmt.Errorf("unmarshal execution runtime %q: %w", id, err)
+		}
+		runtime = &decoded
+	} else if err != redis.Nil {
+		return nil, fmt.Errorf("get execution runtime %q: %w", id, err)
+	}
 	return &engine.ExecutionSnapshot{
-		ID:     id,
-		Graph:  g,
-		Status: types.ExecutionStatus(val),
+		ID:      id,
+		Graph:   g,
+		Status:  types.ExecutionStatus(val),
+		Params:  params,
+		Runtime: runtime,
 	}, nil
 }
 
@@ -987,6 +1026,7 @@ func (s *redisState) extendExecTTL(ctx context.Context, id types.ExecutionID, no
 	prefix := fmt.Sprintf("xflow:exec:{%s}", id)
 	pipe.Expire(ctx, prefix+":status", ttl)
 	pipe.Expire(ctx, prefix+":params", ttl)
+	pipe.Expire(ctx, prefix+":runtime", ttl)
 	pipe.Expire(ctx, prefix+":graph", ttl)
 	pipe.Expire(ctx, prefix+":node:"+nodeName+":status", ttl)
 	pipe.Expire(ctx, prefix+":output:"+nodeName, ttl)

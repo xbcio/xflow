@@ -28,10 +28,11 @@ func TestBuildExecutionRecordPersistsWorkflowAuditContext(t *testing.T) {
 	ctx := engine.WithWorkflowDef(context.Background(), def)
 
 	rec, err := buildExecutionRecord(ctx, &engine.ExecutionSnapshot{
-		ID:     "exec-1",
-		Graph:  g,
-		Status: types.ExecutionStatusRunning,
-		Params: params,
+		ID:      "exec-1",
+		Graph:   g,
+		Status:  types.ExecutionStatusRunning,
+		Params:  params,
+		Runtime: &types.Runtime{Vars: map[string]any{"tenant_id": "tenant-a"}},
 	}, time.Unix(100, 0))
 	if err != nil {
 		t.Fatalf("buildExecutionRecord() error = %v", err)
@@ -54,6 +55,14 @@ func TestBuildExecutionRecordPersistsWorkflowAuditContext(t *testing.T) {
 	}
 	if gotParams["vuln_id"] != "VULN-2026-001" || gotParams["severity"] != "critical" {
 		t.Fatalf("Params = %#v, want submitted params", gotParams)
+	}
+
+	var gotRuntime types.Runtime
+	if err := json.Unmarshal(rec.Runtime, &gotRuntime); err != nil {
+		t.Fatalf("Runtime unmarshal error = %v", err)
+	}
+	if gotRuntime.Vars["tenant_id"] != "tenant-a" {
+		t.Fatalf("Runtime.Vars = %#v, want tenant_id tenant-a", gotRuntime.Vars)
 	}
 }
 

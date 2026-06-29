@@ -169,6 +169,63 @@ func TestScheduler_LinearChain(t *testing.T) {
 	}
 }
 
+func TestEngineBuildTaskLeaseKeepsStaticVarsAndRuntimeVarsSeparate(t *testing.T) {
+	def := &types.WorkflowDef{
+		Name: "runtime-context",
+		Context: &types.WorkflowContext{
+			Vars: map[string]any{
+				"region":    "static-region",
+				"tenant_id": "static-tenant",
+			},
+		},
+		Nodes: []types.NodeDef{
+			{Name: "start", Type: "test.echo"},
+		},
+	}
+
+	g, err := graph.Compile(def)
+	if err != nil {
+		t.Fatalf("Compile() error = %v", err)
+	}
+	state := newFakeState()
+	queue := &fakeQueue{}
+	reg := &fakeRegistry{handlers: map[string]types.ActionHandler{"test.echo": &echoHandler{}}}
+	eng := newTestEngine(state, queue, reg)
+	ctx := context.Background()
+
+	_, err = eng.Submit(ctx, g, map[string]any{"ticket": "VULN-1"}, &types.Runtime{
+		Vars: map[string]any{"tenant_id": "runtime-tenant"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tasks := queue.Drain()
+	if len(tasks) != 1 {
+		t.Fatalf("task count = %d, want 1", len(tasks))
+	}
+	lease, err := eng.BuildTaskLease(ctx, tasks[0])
+	if err != nil {
+		t.Fatalf("BuildTaskLease() error = %v", err)
+	}
+
+	if got := lease.Input.Vars["region"]; got != "static-region" {
+		t.Fatalf("Input.Vars[region] = %v, want static-region", got)
+	}
+	if got := lease.Input.Vars["tenant_id"]; got != "runtime-tenant" {
+		t.Fatalf("Input.Vars[tenant_id] = %v, want runtime-tenant", got)
+	}
+	if lease.Input.Runtime == nil {
+		t.Fatal("Input.Runtime = nil, want runtime context")
+	}
+	if got := lease.Input.Runtime.Vars["tenant_id"]; got != "runtime-tenant" {
+		t.Fatalf("Input.Runtime.Vars[tenant_id] = %v, want runtime-tenant", got)
+	}
+	if got := lease.Input.Data["ticket"]; got != "VULN-1" {
+		t.Fatalf("Input.Data[ticket] = %v, want VULN-1", got)
+	}
+}
+
 func TestScheduler_FanOutFanIn(t *testing.T) {
 	def := &types.WorkflowDef{
 		Name: "diamond",

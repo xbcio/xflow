@@ -178,6 +178,11 @@ func (n *WaitNode) OnResume(_ context.Context, input *Input, signal *SignalPaylo
 		return &Output{Data: input.Data, Port: "main"}, nil
 	case SignalReceived:
 		data := make(map[string]any)
+		if input.Inputs != nil {
+			for k, v := range input.Inputs {
+				data[k] = v
+			}
+		}
 		if input.Data != nil {
 			for k, v := range input.Data {
 				data[k] = v

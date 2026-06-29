@@ -7,6 +7,7 @@ import (
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/nodes/node"
 	"github.com/xbcio/xflow/store"
+	"github.com/xbcio/xflow/types"
 )
 
 // ClusterConfig holds Redis/Asynq adapter configuration for NewCluster.
@@ -96,6 +97,7 @@ type SubmitOption func(*submitConfig)
 
 type submitConfig struct {
 	execTTL time.Duration
+	runtime *types.Runtime
 }
 
 // WithExecutionTTL overrides the backend execution TTL for this submission.
@@ -109,4 +111,41 @@ func WithExecutionTTL(d time.Duration) SubmitOption {
 			c.execTTL = d
 		}
 	}
+}
+
+// WithRuntime sets per-execution runtime context for this submission.
+//
+// Runtime is distinct from static workflow context: WorkflowContext.Vars belongs
+// to the workflow definition, while Runtime.Vars can differ for every Submit.
+func WithRuntime(runtime *types.Runtime) SubmitOption {
+	return func(c *submitConfig) {
+		c.runtime = cloneRuntime(runtime)
+	}
+}
+
+// WithRuntimeVars is a convenience wrapper for setting Runtime.Vars.
+func WithRuntimeVars(vars map[string]any) SubmitOption {
+	return WithRuntime(&types.Runtime{Vars: vars})
+}
+
+func cloneRuntime(runtime *types.Runtime) *types.Runtime {
+	if runtime == nil {
+		return nil
+	}
+	cp := &types.Runtime{}
+	if runtime.Vars != nil {
+		cp.Vars = cloneMap(runtime.Vars)
+	}
+	return cp
+}
+
+func cloneMap(src map[string]any) map[string]any {
+	if src == nil {
+		return nil
+	}
+	dst := make(map[string]any, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
 }

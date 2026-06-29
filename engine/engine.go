@@ -65,7 +65,7 @@ func New(state StateStore, queue TaskQueue, opts ...Option) *Engine {
 // Submit starts a new execution of the given graph with the provided params.
 // It persists the execution snapshot, caches the graph, and enqueues all
 // root nodes (in-degree == 0).
-func (e *Engine) Submit(ctx context.Context, g *graph.Graph, params map[string]any) (types.ExecutionID, error) {
+func (e *Engine) Submit(ctx context.Context, g *graph.Graph, params map[string]any, runtime ...*types.Runtime) (types.ExecutionID, error) {
 	id := types.ExecutionID("exec-" + uuid.New().String())
 
 	snap := &ExecutionSnapshot{
@@ -73,6 +73,9 @@ func (e *Engine) Submit(ctx context.Context, g *graph.Graph, params map[string]a
 		Graph:  g,
 		Status: types.ExecutionStatusRunning,
 		Params: params,
+	}
+	if len(runtime) > 0 {
+		snap.Runtime = cloneRuntime(runtime[0])
 	}
 	if err := e.state.CreateExecution(ctx, snap); err != nil {
 		return "", fmt.Errorf("create execution: %w", err)
@@ -498,10 +501,15 @@ func currentActivationID(ctx context.Context, state StateStore, id types.Executi
 
 // buildInput assembles the types.Input from graph metadata and upstream outputs.
 func (e *Engine) buildInput(ctx context.Context, t *Task, g *graph.Graph) *types.Input {
+	var runtime *types.Runtime
+	if snap, _ := e.state.GetExecution(ctx, t.ExecutionID); snap != nil && snap.Runtime != nil {
+		runtime = snap.Runtime
+	}
 	input := &types.Input{
 		Params:      g.Nodes[t.NodeIdx].Parameters,
-		Vars:        g.Vars,
+		Vars:        mergeVars(g.Vars, runtimeVars(runtime)),
 		Config:      g.Config,
+		Runtime:     cloneRuntime(runtime),
 		ExecutionID: string(t.ExecutionID),
 		NodeName:    t.NodeName,
 	}
@@ -541,6 +549,49 @@ func (e *Engine) buildInput(ctx context.Context, t *Task, g *graph.Graph) *types
 		input.Inputs = inputs
 	}
 	return input
+}
+
+func cloneRuntime(runtime *types.Runtime) *types.Runtime {
+	if runtime == nil {
+		return nil
+	}
+	cp := &types.Runtime{}
+	if runtime.Vars != nil {
+		cp.Vars = cloneMap(runtime.Vars)
+	}
+	return cp
+}
+
+func runtimeVars(runtime *types.Runtime) map[string]any {
+	if runtime == nil {
+		return nil
+	}
+	return runtime.Vars
+}
+
+func mergeVars(staticVars map[string]any, runtimeVars map[string]any) map[string]any {
+	if staticVars == nil && runtimeVars == nil {
+		return nil
+	}
+	merged := cloneMap(staticVars)
+	if merged == nil {
+		merged = make(map[string]any, len(runtimeVars))
+	}
+	for k, v := range runtimeVars {
+		merged[k] = v
+	}
+	return merged
+}
+
+func cloneMap(src map[string]any) map[string]any {
+	if src == nil {
+		return nil
+	}
+	dst := make(map[string]any, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
 }
 
 // DeliverSignal routes an external signal to the appropriate suspended node
