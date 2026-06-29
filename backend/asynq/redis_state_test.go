@@ -6,9 +6,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/types"
+	"github.com/redis/go-redis/v9"
 )
 
 func TestBuildExecutionRecordPersistsWorkflowAuditContext(t *testing.T) {
@@ -101,5 +103,34 @@ func TestQueuedTaskPayloadKeepsSchedulerMetadataPrivate(t *testing.T) {
 	}
 	if got.AutoDepth != task.AutoDepth || got.ActivationID != task.ActivationID {
 		t.Fatalf("scheduler metadata = %d/%d, want %d/%d", got.AutoDepth, got.ActivationID, task.AutoDepth, task.ActivationID)
+	}
+}
+
+func TestUpsertNodeStoresStatusString(t *testing.T) {
+	redisServer, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer redisServer.Close()
+
+	rdb := redis.NewClient(&redis.Options{Addr: redisServer.Addr()})
+	defer rdb.Close()
+
+	state := newRedisState(rdb, nil, time.Minute)
+	snapshot := &engine.NodeSnapshot{
+		ExecutionID: "exec-1",
+		Name:        "start",
+		Status:      types.NodeStatusSuccess,
+	}
+	if err := state.UpsertNode(context.Background(), snapshot); err != nil {
+		t.Fatalf("UpsertNode() error = %v", err)
+	}
+
+	got, err := rdb.Get(context.Background(), nodeStatusKey(snapshot.ExecutionID, snapshot.Name)).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != string(types.NodeStatusSuccess) {
+		t.Fatalf("node status = %q, want %q", got, types.NodeStatusSuccess)
 	}
 }

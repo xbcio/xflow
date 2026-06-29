@@ -130,6 +130,39 @@ func TestExecuteRootDefaultsToRunCommandWithLegacySingleDashFlag(t *testing.T) {
 	}
 }
 
+func TestCLIFlagsOverrideEnvironment(t *testing.T) {
+	t.Setenv("XFLOW_RUNNER_SERVER", "http://env-server:8080")
+	t.Setenv("XFLOW_RUNNER_ID", "env-runner")
+	t.Setenv("XFLOW_RUNNER_CONCURRENCY", "5")
+	t.Setenv("XFLOW_RUNNER_CAP", "xflow.http")
+
+	var ran runnerConfig
+	cmd := newRootCommand(commandOptions{
+		runFunc: func(cfg runnerConfig) error {
+			ran = cfg
+			return nil
+		},
+		out: &bytes.Buffer{},
+		err: &bytes.Buffer{},
+	})
+	cmd.SetArgs([]string{
+		"run",
+		"--server", "http://flag-server:8080",
+		"--id", "flag-runner",
+		"--concurrency", "2",
+		"--cap", "xflow.function",
+	})
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if ran.serverURL != "http://flag-server:8080" || ran.runnerID != "flag-runner" || ran.concurrency != 2 {
+		t.Fatalf("config = %+v", ran)
+	}
+	if len(ran.capabilities) != 1 || ran.capabilities[0].NodeType != "xflow.function" {
+		t.Fatalf("capabilities = %+v", ran.capabilities)
+	}
+}
+
 func TestConfigSamplePrintsYAML(t *testing.T) {
 	var out bytes.Buffer
 	cmd := newRootCommand(commandOptions{out: &out, err: &bytes.Buffer{}})

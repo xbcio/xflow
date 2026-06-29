@@ -511,7 +511,7 @@ func (s *redisState) UpsertNode(ctx context.Context, n *engine.NodeSnapshot) err
 	ttl := s.getExecTTL(n.ExecutionID)
 	_, err := upsertNodeLua.Run(ctx, s.rdb,
 		[]string{key, outKey, metaKey},
-		n.Status, outputJSON, int(ttl.Seconds()), n.ActivationID,
+		string(n.Status), outputJSON, int(ttl.Seconds()), n.ActivationID,
 	).Int64()
 	if err != nil && err != redis.Nil {
 		return fmt.Errorf("upsert node %q/%q: %w", n.ExecutionID, n.Name, err)
