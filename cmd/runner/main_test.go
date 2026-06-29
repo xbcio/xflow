@@ -5,24 +5,23 @@ import (
 	"testing"
 )
 
-func TestRunCommandParsesExistingFlags(t *testing.T) {
+func TestExecuteRootRunCommandParsesLegacySingleDashFlags(t *testing.T) {
 	var ran runnerConfig
-	cmd := newRootCommand(commandOptions{
+	err := executeRootWithOptions(commandOptions{
 		runFunc: func(cfg runnerConfig) error {
 			ran = cfg
 			return nil
 		},
 		out: &bytes.Buffer{},
 		err: &bytes.Buffer{},
-	})
-	cmd.SetArgs([]string{
+	},
 		"run",
-		"--server", "http://localhost:8080",
-		"--id", "runner-1",
-		"--concurrency", "2",
-		"--cap", "xflow.function,xflow.http",
-	})
-	if err := cmd.Execute(); err != nil {
+		"-server", "http://localhost:8080",
+		"-id", "runner-1",
+		"-concurrency", "2",
+		"-cap", "xflow.function,xflow.http",
+	)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if ran.serverURL != "http://localhost:8080" || ran.runnerID != "runner-1" || ran.concurrency != 2 {
@@ -33,18 +32,17 @@ func TestRunCommandParsesExistingFlags(t *testing.T) {
 	}
 }
 
-func TestRootDefaultsToRunCommand(t *testing.T) {
+func TestExecuteRootDefaultsToRunCommandWithLegacySingleDashFlag(t *testing.T) {
 	var ran runnerConfig
-	cmd := newRootCommand(commandOptions{
+	err := executeRootWithOptions(commandOptions{
 		runFunc: func(cfg runnerConfig) error {
 			ran = cfg
 			return nil
 		},
 		out: &bytes.Buffer{},
 		err: &bytes.Buffer{},
-	})
-	cmd.SetArgs([]string{"--id", "runner-root"})
-	if err := cmd.Execute(); err != nil {
+	}, "-id", "runner-root")
+	if err != nil {
 		t.Fatal(err)
 	}
 	if ran.runnerID != "runner-root" {

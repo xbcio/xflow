@@ -3,6 +3,7 @@ package main
 import (
 	"io"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -11,6 +12,18 @@ type commandOptions struct {
 	runFunc func(runnerConfig) error
 	out     io.Writer
 	err     io.Writer
+}
+
+var legacyRunnerLongFlags = map[string]struct{}{
+	"cap":                {},
+	"concurrency":        {},
+	"config":             {},
+	"heartbeat-interval": {},
+	"id":                 {},
+	"log-format":         {},
+	"log-level":          {},
+	"poll-wait":          {},
+	"server":             {},
 }
 
 func newRootCommand(opts commandOptions) *cobra.Command {
@@ -49,7 +62,44 @@ func newRootCommand(opts commandOptions) *cobra.Command {
 }
 
 func executeRoot(args ...string) error {
-	cmd := newRootCommand(commandOptions{})
-	cmd.SetArgs(args)
+	return executeRootWithOptions(commandOptions{}, args...)
+}
+
+func executeRootWithOptions(opts commandOptions, args ...string) error {
+	cmd := newRootCommand(opts)
+	cmd.SetArgs(normalizeLegacyRunnerArgs(args))
 	return cmd.Execute()
+}
+
+func normalizeLegacyRunnerArgs(args []string) []string {
+	normalized := make([]string, 0, len(args))
+	passThrough := false
+	for _, arg := range args {
+		if passThrough {
+			normalized = append(normalized, arg)
+			continue
+		}
+		if arg == "--" {
+			passThrough = true
+			normalized = append(normalized, arg)
+			continue
+		}
+		normalized = append(normalized, normalizeLegacyRunnerArg(arg))
+	}
+	return normalized
+}
+
+func normalizeLegacyRunnerArg(arg string) string {
+	if !strings.HasPrefix(arg, "-") || strings.HasPrefix(arg, "--") || len(arg) <= 2 {
+		return arg
+	}
+
+	name, value, hasValue := strings.Cut(arg[1:], "=")
+	if _, ok := legacyRunnerLongFlags[name]; !ok {
+		return arg
+	}
+	if hasValue {
+		return "--" + name + "=" + value
+	}
+	return "--" + name
 }
