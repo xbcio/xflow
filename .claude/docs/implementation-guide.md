@@ -3,7 +3,7 @@
 ## Engine Core (engine/)
 
 - Graph IR is immutable after compile, shared lock-free at runtime
-- Scheduling advances via `StateBackend.DecrementInDegree` atomic operation
+- Scheduling advances via `StateStore.DecrementInDegree` atomic operation
 - OnError four strategies consolidated in a single `ApplyOnError` function
 - Suspend via `SuspendingHandler` optional interface, no string hardcoding
 
@@ -48,7 +48,8 @@ Consolidated in a single `ApplyOnError` function; both Adapters consume the same
 
 ## HandlerRegistry
 
-- Engine Core resolves handlers via `registry.Get(execID, nodeName, nodeType)`, agnostic to source
-- LocalAdapter: checks per-execution closure map first, falls back to global type→handler map
-- ClusterAdapter: only checks global type→handler map (closures are not serializable)
+- Engine Core resolves handlers via `registry.Get(execID, nodeName, nodeType, version)`, agnostic to source.
+- `execution.Registry` is the reusable embedded implementation.
+- Local mode uses `execution.Registry` direct node handlers for inline `TaskHandler` values, then falls back to type/version lookup.
+- Cluster mode uses the same `execution.Registry` but does not register direct handlers, because closures are not serializable across process boundaries.
 - No `if local then ...` branches inside Core

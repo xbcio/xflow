@@ -9,31 +9,15 @@
 #   level_3: 金额 >= 10,000  → 直属主管 → 部门负责人 → VP + 财务并行
 #
 # v2.0 增强：
-#   1. 多触发器支持（webhook + manual）
-#   2. 全链路错误处理（HTTP/DB 节点均配置 error 出口）
-#   3. 审批操作扩展：转签、加签、超时自动驳回
-#   4. 完整审计追踪：每级审批人、操作、时间、意见
-#   5. 节点模板 node_templates：减少审批节点重复定义（DSL 扩展提案）
+#   1. 全链路错误处理（HTTP/DB 节点均配置 error 出口）
+#   2. 审批操作扩展：转签、加签、超时自动驳回
+#   3. 完整审计追踪：每级审批人、操作、时间、意见
+#   4. 节点模板 node_templates：减少审批节点重复定义（DSL 扩展提案）
 
 spec: "1.0"
 name: "purchase-approval"
 version: "2.0.0"
 description: "采购审批工作流 - 三级独立路径（增强版）"
-
-# ──────────────────────────────────────
-# 触发器
-# ──────────────────────────────────────
-triggers:
-  - type: webhook
-    parameters:
-      path: "/webhook/purchase-approval"
-      methods: ["POST"]
-      auth:
-        type: apiKey
-        credential: internal_api
-      response:
-        mode: async
-  - type: manual
 
 context:
   vars:

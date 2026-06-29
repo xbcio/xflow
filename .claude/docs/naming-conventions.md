@@ -43,8 +43,8 @@ Drop the package-name suffix from exported identifiers.
 ## Trap: section-divider comments
 
 A divider comment like `// ExecutionStore` may textually match a renamed type
-but actually label methods of a *different* interface — e.g. in the cluster /
-local adapters it labels `engine.StateBackend` methods operating on
+but actually label methods of a *different* interface — e.g. in backend state
+implementations it labels engine state methods operating on
 `engine.ExecutionSnapshot`, not `store` methods. **Judge by the code below the
 comment, not the text.** Renaming such a label would wrongly imply the type
 implements the store interface.

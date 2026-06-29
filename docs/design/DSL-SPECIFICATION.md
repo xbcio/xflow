@@ -10,9 +10,8 @@
 4. [表达式引擎](#4-表达式引擎)
 5. [Connections 机制](#5-connections-机制)
 6. [节点类型](#6-节点类型)
-7. [触发器](#7-触发器)
-8. [Pin Data（测试数据钉住）](#8-pin-data测试数据钉住)
-9. [完整示例](#9-完整示例)
+7. [Pin Data（测试数据钉住）](#7-pin-data测试数据钉住)
+8. [完整示例](#8-完整示例)
 
 ---
 
@@ -49,18 +48,7 @@ connections:
 - ✅ 支持条件路由和分支合并
 - ✅ 可视化编辑器友好
 
-### 2.3 Triggers（触发器）
-
-工作流支持多个触发器并存（如同时支持定时触发和手动触发）：
-- **Manual** - 手动触发
-- **Webhook** - HTTP Webhook
-- **Cron** - 定时触发
-- **Event** - 事件触发
-- **Queue** - 队列触发
-
-多个触发器任一激活即可启动工作流。每个触发器可通过 `enabled` 字段独立开关，无需删除配置。
-
-### 2.4 Context（上下文）
+### 2.3 Context（上下文）
 
 Context 用于管理工作流的全局信息，包括：
 
@@ -93,7 +81,7 @@ Context 用于管理工作流的全局信息，包括：
 - ✅ 支持环境隔离和动态配置
 - ✅ 简化节点参数配置
 
-### 2.5 表达式引擎
+### 2.4 表达式引擎
 
 使用 **Expr** (expr-lang/expr) 作为表达式引擎：
 - 类型安全
@@ -112,12 +100,6 @@ id: string                # 工作流 ID（可选，UUID v4；UI 创建时必带
 name: string              # 工作流名称（必填）
 version: string           # 工作流业务版本号（必填，语义化版本）
 description: string       # 描述（可选）
-
-# 触发器（支持多个，任一激活即启动工作流）
-triggers:
-  - type: string          # manual/webhook/cron/event/queue
-    parameters: object    # 触发器参数
-    enabled: bool         # 是否启用（可选，默认 true）
 
 # 上下文（全局变量、配置）
 context:
@@ -224,17 +206,6 @@ spec: "1.0"
 name: "order-processing"
 version: "1.0.0"
 description: "订单处理工作流"
-
-# 触发器（多触发器：webhook + 手动均可启动）
-triggers:
-  - type: webhook
-    parameters:
-      path: "/webhook/order"
-      methods: ["POST"]
-      auth:
-        type: apiKey
-        credential: webhook_auth
-  - type: manual
 
 # 上下文
 context:
@@ -410,7 +381,7 @@ nodes:
 
   # 8. 发送成功通知
   - name: send_success_email
-    type: xflow.notification
+    type: xflow.http
     position: [1450, 150]
 
     parameters:
@@ -439,7 +410,7 @@ nodes:
 
   # 10. 发送失败通知
   - name: send_failure_email
-    type: xflow.notification
+    type: xflow.http
     position: [1450, 350]
 
     parameters:
@@ -449,7 +420,7 @@ nodes:
 
   # 11. 无效订单通知
   - name: invalid_notification
-    type: xflow.notification
+    type: xflow.http
     position: [650, 450]
 
     parameters:
@@ -1006,7 +977,7 @@ connections:
 
 ### 5.4 错误处理机制
 
-节点执行失败（Worker 回调 `ReportFailed`，且重试耗尽）时，引擎根据 `on_error` 策略决定行为。
+节点执行失败（Runner 回调 `ReportFailed`，且重试耗尽）时，引擎根据 `on_error` 策略决定行为。
 
 **策略**：
 
@@ -1077,7 +1048,7 @@ nodes:
 - ✅ 不允许循环依赖
 - ✅ 每个节点至少有一个输入或是起始节点
 - ✅ 至少有一个终止节点
-- ✅ cron 触发器：`params` 中 `required: true` 且无 `default` 的字段，必须在该触发器的 `parameters.static_input` 中提供（否则编译 **error**）
+- ✅ 起始节点通过 SDK `Submit` 的参数获得输入；外部触发器能力已移除，后续单独设计
 
 ### 5.6 设计决策：连线不承载条件逻辑
 
@@ -1106,15 +1077,15 @@ XFlow 的 connections 仅描述拓扑关系（谁连到谁），条件逻辑由 
 | gRPC调用 | xflow.grpc | gRPC 服务调用 | main | main, error | ❌ | 可选 |
 | 函数执行 | xflow.function | 执行 Go 函数或内联代码 | main | main, error | ❌ | 可选 |
 | 数据库操作 | xflow.database | 数据库 CRUD 操作 | main | main, error | ❌ | 可选 |
-| 通知 | xflow.notification | 发送通知（邮件/短信/Slack等） | main | main, error | ❌ | 可选 |
 | 条件判断 | xflow.if | 二元条件分支（true/false） | main | true, false | ❌ | 不适用 |
 | 多路分支 | xflow.switch | 根据条件多路分支 | main | _(无静态)_ | ✅ `parameters.outputs` | 不适用 |
-| 循环 | xflow.loop | 循环处理数据 | main | main, error | ❌ | 可选 |
 | 等待 | xflow.wait | 等待事件或时间 | main | main, timeout, error | ❌ | 可选 |
+| 审批 | xflow.approval | 人工审批网关 | main | approved, rejected, timeout | ❌ | 可选 |
 | 合并 | xflow.merge | 合并多个分支 | 动态（`input: xxx`） | main | ❌ | 可选 |
-| 分割 | xflow.split | 数组扇出为并行路径 | main | main | ❌ | 可选 |
 
-> **并行执行**：XFlow 不提供 `xflow.parallel` 节点。并行通过 connections 天然实现——一个输出端口连接多个目标节点即为并行分支，用 `xflow.merge` 汇合。如需控制并行度，使用 `xflow.loop`（`batch_size` + `max_concurrency`）。
+> **并行执行**：XFlow 不提供 `xflow.parallel` 节点。并行通过 connections 天然实现——一个输出端口连接多个目标节点即为并行分支，用 `xflow.merge` 汇合。
+>
+> **实验能力**：`xflow.loop` 和 `xflow.split` 暂不作为生产审批流程能力承诺。
 
 ### 6.2 节点配置
 
@@ -1159,7 +1130,7 @@ XFlow 的 connections 仅描述拓扑关系（谁连到谁），条件逻辑由 
 - name: process
   type: xflow.function
   parameters:
-    function_name: string    # Worker 中注册的 Go 函数名
+    function_name: string    # Runner 中注册的 Go 函数名
     params: object           # 传给函数的参数，支持表达式
 
 # 模式二：内联 Expr 表达式（仅适合单一返回值的简单计算）
@@ -1550,7 +1521,7 @@ nodes:
       condition: "${{ $nodes['fetch_user'].vip_level > 3 }}"
 
   - name: send_notify
-    type: xflow.notification
+    type: xflow.http
     parameters:
       # 编译器校验 email 是否在 fetch_user 的 output_schema.properties 中 → 报错
       to: "${{ $nodes['fetch_user'].email }}"
@@ -1577,115 +1548,7 @@ nodes:
 > 子工作流作为独立 Execution 运行，拥有独立的状态和生命周期。父工作流通过 `$nodes['payment_flow']` 访问子工作流的 `outputs`。
 > 此特性为计划扩展，当前版本未实现。
 
-## 7. 触发器
-
-### 7.1 手动触发
-
-```yaml
-triggers:
-  - type: manual
-```
-
-### 7.2 Webhook 触发
-
-```yaml
-triggers:
-  - type: webhook
-    parameters:
-      path: string             # Webhook 路径
-      methods: [string, ...]   # HTTP 方法
-      auth:
-        type: basic|apiKey|bearer
-        credential: string
-      validation:
-        headers: object
-        body: object
-      response:
-        mode: sync|async
-        timeout: duration
-```
-
-### 7.3 定时触发
-
-```yaml
-triggers:
-  - type: cron
-    parameters:
-      schedule: string         # Cron 表达式
-      timezone: string
-    enabled: bool              # 可选，默认 true
-```
-
-### 7.4 事件触发
-
-```yaml
-triggers:
-  - type: event
-    parameters:
-      source: redis|kafka|rabbitmq
-      event: string
-      filter: expression       # 过滤条件
-```
-
-### 7.5 队列触发
-
-```yaml
-triggers:
-  - type: queue
-    parameters:
-      queue: string
-      prefetch: int
-```
-
-### 7.6 多触发器组合
-
-一个工作流可同时配置多个触发器，任一激活即启动工作流：
-
-```yaml
-triggers:
-  - type: webhook
-    parameters:
-      path: "/webhook/order"
-      methods: [POST]
-  - type: manual
-  - type: cron
-    parameters:
-      schedule: "0 2 * * *"   # 每天凌晨 2 点
-    enabled: false             # 暂时关闭定时，但保留配置
-```
-
-每个触发器的 `enabled` 字段（可选，默认 `true`）可独立控制是否启用，无需删除配置即可暂停某个触发方式。
-
-### 7.7 触发器与 `$params` 映射规则
-
-不同触发器类型以不同方式填充 `$params`。所有触发器填充的 `$params` 必须满足顶层 `params` 中 `required: true` 字段的约束，否则执行拒绝启动。
-
-| 触发器类型 | `$params` 来源 | 说明 |
-|-----------|---------------|------|
-| `manual` | 用户提交的输入参数（匹配 `params` 定义） | 通过 API 或 UI 提交 |
-| `webhook` | HTTP request body（经 `validation` 校验后） | Content-Type 为 JSON |
-| `cron` | `{ trigger_time: <time.Time> }` | 包含本次触发的计划时间 |
-| `event` | 事件 payload（经 `filter` 过滤后） | 如 Kafka message value |
-| `queue` | 消息体 | 队列 message body |
-
-> **注意**：`cron` 触发器的 `$params.trigger_time` 是本次计划触发时间（非实际执行时间），类型为 `time.Time`，
-> 可用于日期计算，如 `${{ dateFormat($params.trigger_time, '2006-01-02') }}`。
-> 如果 cron 触发的工作流需要额外输入参数，可在触发器 `parameters` 中配置 `static_input` 合并到 `$params`：
->
-> ```yaml
-> triggers:
->   - type: cron
->     parameters:
->       schedule: "0 2 * * *"
->       static_input:            # 合并到 $params（trigger_time 自动注入，无需手动声明）
->         report_type: "daily"
-> ```
->
-> **编译期校验**：`cron` 触发器仅注入 `trigger_time`。若工作流顶层 `params` 中存在 `required: true` 且无 `default` 值的字段，
-> 且该 cron 触发器未通过 `static_input` 提供该字段，编译器报 **error**：
-> `cron 触发器无法满足 params.{field} 的 required 约束，请在 parameters.static_input 中提供`。
-
-## 8. Pin Data（测试数据钉住）
+## 7. Pin Data（测试数据钉住）
 
 ### 8.1 概述
 
@@ -1742,7 +1605,7 @@ Executor 调度节点前检查：
   │    ├─ pin_data_mode == test_only && execution.mode != test → 正常执行
   │    └─ 生效 → 状态置 pinned，输出 = pin_data[node_name]，推进下游
   │
-  └─ 正常执行 → 入队 Asynq → Worker 执行
+  └─ 正常执行 → 入队 Asynq → Runner 执行
 ```
 
 **`pinned` 状态语义**：
@@ -1768,9 +1631,6 @@ version: "1.0.0"
 settings:
   timeout: 3600s
   pin_data_mode: test_only
-
-triggers:
-  - type: manual
 
 params:
   order_id:
@@ -1822,7 +1682,7 @@ pin_data:
 
 ---
 
-## 9. 完整示例
+## 8. 完整示例
 
 ### 9.1 ETL 数据处理
 
@@ -1830,13 +1690,6 @@ pin_data:
 spec: "1.0"
 name: "etl-pipeline"
 version: "1.0.0"
-
-triggers:
-  - type: cron
-    parameters:
-      schedule: "0 2 * * *"
-      timezone: "Asia/Shanghai"
-  - type: manual
 
 nodes:
   # Extract
@@ -1934,12 +1787,6 @@ spec: "1.0"
 name: "async-task-processor"
 version: "1.0.0"
 
-triggers:
-  - type: queue
-    parameters:
-      queue: high_priority
-      prefetch: 10
-
 nodes:
   - name: parse_message
     type: xflow.function
@@ -1965,7 +1812,7 @@ nodes:
       default_output: webhook
 
   - name: send_email
-    type: xflow.notification
+    type: xflow.http
     parameters:
       channel: email
       to: "${{ $nodes['parse_message'].recipient }}"
@@ -1973,7 +1820,7 @@ nodes:
       body: "${{ $nodes['parse_message'].body }}"
 
   - name: send_sms
-    type: xflow.notification
+    type: xflow.http
     parameters:
       channel: sms
       to: "${{ $nodes['parse_message'].phone }}"

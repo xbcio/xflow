@@ -1,6 +1,6 @@
-# XFlow Master 组件设计
+# XFlow Server Control Plane 组件设计
 
-> Master 负责工作流的调度与编排，采用 Raft Leader-Follower 高可用架构，内嵌 Gateway 服务用于 Edge Worker 接入。
+> Server Control Plane 负责工作流的调度与编排，采用 Raft Leader-Follower 高可用架构。Asynq / Redis 是 server 内部任务调度队列；Task Dispatcher 将 Asynq task 转换成 Runner Protocol lease，runner 不直连 Redis / Asynq。Relay Gateway 仅在 runner 无法直连 server 时作为可选中继。当前代码中的通用调度语义位于 `engine/`，通用执行边界位于 `execution/`；server 层只应新增协议、lease state、runner matching 等服务能力。
 
 ## 目录
 
@@ -24,22 +24,21 @@
 
 ### 1.1 整体架构
 
-Master 集群采用 **Raft Leader-Follower** 模型，组件分三层：共享基础设施（所有节点）、Leader-only（全局唯一）、Follower-only（实际调度）。单 Master 部署时自选举为 Leader，三层全部启动。
+Server Control Plane 集群采用 **Raft Leader-Follower** 模型，组件分三层：共享基础设施（所有节点）、Leader-only（全局唯一）、Follower-only（实际调度）。单 server 部署时自选举为 Leader，三层全部启动。
 
 ```
                 ┌──────────────────────────────────────────────┐
-                │            Master Cluster (Raft)             │
+                │            Server Control Plane (Raft)             │
                 │                                              │
                 │  ┌──────────────────────────────────────┐    │
                 │  │  共享基础设施（所有节点持有）           │    │
                 │  │  WorkflowEngine · Scheduler (Asynq)  │    │
+                │  │  TaskDispatcher · RunnerProtocol   │    │
                 │  │  StateManager · Monitor · VersionCtrl │    │
                 │  └──────────────────────────────────────┘    │
                 │                                              │
                 │  ┌──────────────────────────────────────┐    │
                 │  │  Leader-only (1 台，Raft 选举)        │    │
-                │  │  CronManager (gocron)                │    │
-                │  │  TriggerRegistry (webhook/event/…)   │    │
                 │  │  GlobalReconciler · TimeoutMonitor   │    │
                 │  │  Archiver · DeadLetterProcessor      │    │
                 │  └──────────────────────────────────────┘    │
@@ -47,7 +46,7 @@ Master 集群采用 **Raft Leader-Follower** 模型，组件分三层：共享�
                 │  ┌──────────────┐    ┌──────────────┐        │
                 │  │ Follower-1   │    │ Follower-N   │        │
                 │  │ API Server   │    │ API Server   │        │
-                │  │ Gateway      │    │ Gateway      │        │
+                │  │ RelayGateway │    │ RelayGateway │        │
                 │  │ Executor     │    │ Executor     │        │
                 │  │ LocalRecon   │    │ LocalRecon   │        │
                 │  └──────────────┘    └──────────────┘        │
@@ -59,10 +58,10 @@ Master 集群采用 **Raft Leader-Follower** 模型，组件分三层：共享�
                              └─────────┬─────────┘
                                        │
                 ┌──────────────────────┼──────────────────────────┐
-                │                Worker Pool                       │
+                │                Runner Pool                       │
                 │  ┌──────────────┐   ┌──────────────────────┐   │
-                │  │Internal      │   │Edge Worker           │   │
-                │  │Worker-1..N   │   │(via Gateway)         │   │
+                │  │Direct Runner │   │Relay Runner          │   │
+                │  │Server conn   │   │(via Relay Gateway)   │   │
                 │  └──────────────┘   └──────────────────────┘   │
                 └─────────────────────────────────────────────────┘
 ```
@@ -87,19 +86,19 @@ Master 集群采用 **Raft Leader-Follower** 模型，组件分三层：共享�
 |----|------|------|
 | **共享基础设施** | WorkflowEngine | DSL 解析、编译、Build、`Start()` 创建 Execution + Enqueue 起始节点 |
 | | Scheduler (asynq.Client) | 幂等任务入队 |
+| | Task Dispatcher (`TaskDispatcher`) | 作为 Asynq worker 消费内部任务，创建 runner lease，匹配 runner，处理 result / timeout / cancel |
+| | Runner Protocol (`RunnerProtocol`) | 控制面-执行面协议，维护 runner 注册、心跳、容量、lease、result |
 | | StateManager | Redis + DB 状态读写、分布式锁 |
 | | Monitor | 指标采集、健康检查 |
 | | VersionController | 工作流版本管理 |
-| **Leader-only** | CronManager (gocron) | 定时触发工作流 |
-| | TriggerRegistry | webhook/event/queue 触发器监听 |
-| | GlobalReconciler | 扫描孤儿 Execution，补发调度 |
+| **Leader-only** | GlobalReconciler | 扫描孤儿 Execution，补发调度 |
 | | TimeoutMonitor | 扫描超时 Execution，标记 `timeout` |
 | | Archiver | 终态 Execution 从 Redis 归档到 DB |
 | | DeadLetterProcessor | Asynq 死信队列处理，触发错误策略 |
 | **Follower-only** | API Server (HTTP + gRPC) | 对外服务，手动触发调用 `engine.Start()` |
-| | Gateway | Edge Worker 接入层（详见 GATEWAY-COMPONENTS.md） |
-| | Executor | `OnTaskCompleted()` — 接收 Worker 回调，推进 DAG |
-| | EventBus | 进程内事件路由（Worker 回调 → Executor） |
+| | RelayGateway | 可选的 Runner Protocol 中继层（详见 GATEWAY-COMPONENTS.md） |
+| | Executor | `OnTaskCompleted()` — 接收 runner result，推进 DAG |
+| | EventBus | 进程内事件路由（runner result → Executor） |
 | | LocalReconciler | 扫描本 Follower 持锁的 Execution，补发漏调度 |
 
 ---
@@ -108,7 +107,7 @@ Master 集群采用 **Raft Leader-Follower** 模型，组件分三层：共享�
 
 **职责**：DSL 解析、工作流编译与 Build、工作流启动、上下文管理、已加载工作流缓存。
 
-> WorkflowEngine 是**共享基础设施**，Leader（CronManager 触发）和 Follower（API 手动触发）都通过它启动工作流。
+> WorkflowEngine 是**共享基础设施**，当前通过 API/SDK 提交启动工作流；外部触发器后续重新设计。
 
 ```go
 type WorkflowEngine struct {
@@ -183,40 +182,6 @@ func (s *Scheduler) Enqueue(ctx context.Context, exec *Execution, node *Node) er
 }
 ```
 
-### 3.1 CronManager（Leader-only）
-
-**职责**：定时触发工作流（基于 gocron），定期从 DB 同步 cron 触发器变更。
-
-> Leader 和 Follower 不直接通信，完全通过 DB 间接协作：Follower API 创建/更新工作流只写 DB，CronManager 通过 sync loop 定期（默认 30s）从 DB 扫描变更。
-
-```go
-type CronManager struct {
-    scheduler    *gocron.Scheduler
-    engine       Engine
-    store        VersionStore
-    entries      map[string]*CronEntry
-    mu           sync.RWMutex
-    syncInterval time.Duration // 默认 30s
-}
-
-type CronEntry struct {
-    WorkflowID string
-    Job        *gocron.Job
-    CronExpr   string
-}
-
-func (cm *CronManager) Start(ctx context.Context) error
-func (cm *CronManager) Stop()
-
-// syncFromDB 从 DB 加载当前所有 cron 触发器，与内存 entries diff：
-//   DB 有 & 内存无 → addJob
-//   DB 有 & 内存有但 cronExpr 变了 → removeJob + addJob
-//   DB 无 & 内存有 → removeJob
-func (cm *CronManager) syncFromDB(ctx context.Context)
-```
-
----
-
 ## 4. State Manager
 
 **职责**：工作流状态追踪、任务状态持久化、状态变更通知、断点续传支持。
@@ -228,8 +193,8 @@ type StateManager struct {
     eventBus EventBus
 }
 
-// EventBus Master 内部进程间事件总线（进程内 channel，非跨进程消息队列）
-// Worker 通过 HTTP 回调 Follower，Follower 的 EventBus 在进程内将事件路由给 Executor
+// EventBus server 内部进程间事件总线（进程内 channel，非跨进程消息队列）
+// Runner 通过 Runner Protocol 回报 Follower，Follower 的 EventBus 在进程内将事件路由给 Executor
 // 执行级分布式锁保证同一 Execution 在同一时刻只有一个 Follower 驱动调度
 type EventBus interface {
     Publish(event ExecutionEvent) error
@@ -312,11 +277,11 @@ service WorkflowService {
 }
 ```
 
-**Worker 回调接口**（内部接口，通过 token 鉴权）：
+**Runner result 接口**（内部接口，通过 token / mTLS 鉴权）：
 
 ```
-POST /internal/tasks/:task_id/complete   Worker 任务完成回调
-POST /internal/tasks/:task_id/fail       Worker 任务失败回调
+POST /internal/tasks/:task_id/complete   Runner 任务完成回报
+POST /internal/tasks/:task_id/fail       Runner 任务失败回报
 
 Request body:
 {
@@ -330,22 +295,22 @@ Request body:
 
 ## 6. 执行循环（Execution Loop）
 
-**Master ↔ Worker 通信方式**：
+**Server ↔ Runner 通信方式**：
 
 | 方向 | 协议 | 说明 |
 |------|------|------|
-| Master → Internal Worker | Asynq（Redis 队列） | 任务分发，Worker 主动拉取 |
-| Master → Edge Worker | Gateway HTTP Long Poll | 任务推送，Edge Worker 主动拉取 |
-| Internal Worker → Master | HTTP | 任务完成/失败回调 |
-| Edge Worker → Master | Gateway → Master HTTP | Gateway 代理转发 |
+| server 内部 | Asynq（Redis 队列） | Scheduler 入队，Task Dispatcher 作为 Asynq worker 消费 |
+| Server → Direct Runner | Runner Protocol | TCP / gRPC stream / WebSocket / HTTP long poll，下发 lease |
+| Server → Relay Runner | Runner Protocol via RelayGateway | Gateway 只中继，不访问 Redis / Asynq |
+| Runner → Server | Runner Protocol result | 任务完成/失败回报，携带 `task_id + attempt + lease_id + fencing_token` |
 
 **推进流程**：
 
 ```
-Worker 执行完毕
+Runner 执行完毕
     │
     ├─ ① 写任务结果到 Redis（StateStore.UpdateTaskStatus）
-    └─ ② HTTP POST /internal/tasks/{task_id}/complete → Master API Server
+    └─ ② Runner Protocol result → Server API / TaskDispatcher
               │
           EventBus.Publish(task.completed)
               │
@@ -359,7 +324,7 @@ Worker 执行完毕
              - Merge(wait_any)：任一输入端口到达（原子标记，防止重复触发）
           ④ 满足条件的节点加入 Asynq 队列（幂等入队）
 
-    失败（回调重试耗尽）→ Reconciler 兜底
+    失败（result 重试耗尽或 lease 超时）→ TaskDispatcher / Reconciler 兜底
 ```
 
 ```go
@@ -482,7 +447,7 @@ type HealthCheck interface {
 
 ### 9.1 Leader-Follower 架构
 
-Master 集群基于 **Raft 共识协议**（hashicorp/raft）进行 Leader 选举。Raft 日志和稳定存储使用 MySQL（复用业务数据库），通过 `raft-mdb`（MySQL-backed Raft store）实现。
+Server Control Plane 集群基于 **Raft 共识协议**（hashicorp/raft）进行 Leader 选举。Raft 日志和稳定存储使用 MySQL（复用业务数据库），通过 `raft-mdb`（MySQL-backed Raft store）实现。
 
 节点发现支持**静态配置**和 **Consul** 两种模式。
 
@@ -508,10 +473,10 @@ func (rm *RaftManager) IsLeader() bool {
 }
 ```
 
-### 9.2 Master 启动流程
+### 9.2 Server 启动流程
 
 ```go
-type Master struct {
+type Server struct {
     // ── 共享基础设施（所有节点持有） ──
     raftMgr     *RaftManager
     engine      Engine
@@ -521,8 +486,6 @@ type Master struct {
     versionCtrl *VersionController
 
     // ── Leader-only（动态启停） ──
-    cronMgr             *CronManager
-    triggerRegistry     *TriggerRegistry
     globalReconciler    *GlobalReconciler
     timeoutMonitor      *TimeoutMonitor
     archiver            *Archiver
@@ -531,50 +494,50 @@ type Master struct {
     // ── Follower-only（常驻运行） ──
     apiServer       *HTTPServer
     grpcServer      *GRPCServer
-    gateway         *Gateway         // Edge Worker 接入层
+    taskDispatcher *TaskDispatcher // Asynq → Runner Protocol 适配层
+    runnerProtocol  *RunnerProtocol  // 控制面-执行面协议
+    relayGateway     *RelayGateway     // 可选中继层
     executor        *Executor
     localReconciler *LocalReconciler
 }
 
-func (m *Master) Run(ctx context.Context) error {
-    m.stateMgr.Connect()
-    m.engine.Init()
-    m.raftMgr.Start(ctx)
+func (s *Server) Run(ctx context.Context) error {
+    s.stateMgr.Connect()
+    s.engine.Init()
+    s.raftMgr.Start(ctx)
 
     // Follower 组件（所有节点常驻）
-    m.apiServer.Start()
-    m.grpcServer.Start()
-    m.executor.Start()
-    m.localReconciler.Start(ctx)
+    s.apiServer.Start()
+    s.grpcServer.Start()
+    s.runnerProtocol.Start(ctx)
+    s.taskDispatcher.Start(ctx)
+    s.executor.Start()
+    s.localReconciler.Start(ctx)
 
-    // Gateway 随 Master 启动（共享 Redis、DB 连接）
-    if m.cfg.Gateway.Enabled {
-        go m.gateway.Start(ctx)
+    // RelayGateway 可选启动（复用 RunnerProtocol，不直连 Redis/Asynq）
+    if s.cfg.Gateway.Enabled {
+        go s.relayGateway.Start(ctx)
     }
 
     // 监听 Leader 状态变更，动态启停 Leader-only 组件
-    go m.watchLeadership(ctx)
+    go s.watchLeadership(ctx)
 
     <-ctx.Done()
-    return m.shutdown()
+    return s.shutdown()
 }
 
-func (m *Master) onBecomeLeader(ctx context.Context) {
-    m.cronMgr.Start(ctx)
-    m.triggerRegistry.StartAll(ctx)
-    m.globalReconciler.Start(ctx)
-    m.timeoutMonitor.Start(ctx)
-    m.archiver.Start(ctx)
-    m.deadLetterProcessor.Start(ctx)
+func (s *Server) onBecomeLeader(ctx context.Context) {
+    s.globalReconciler.Start(ctx)
+    s.timeoutMonitor.Start(ctx)
+    s.archiver.Start(ctx)
+    s.deadLetterProcessor.Start(ctx)
 }
 
-func (m *Master) onBecomeFollower() {
-    m.deadLetterProcessor.Stop()
-    m.archiver.Stop()
-    m.timeoutMonitor.Stop()
-    m.globalReconciler.Stop()
-    m.triggerRegistry.StopAll()
-    m.cronMgr.Stop()
+func (s *Server) onBecomeFollower() {
+    s.deadLetterProcessor.Stop()
+    s.archiver.Stop()
+    s.timeoutMonitor.Stop()
+    s.globalReconciler.Stop()
 }
 ```
 
@@ -681,7 +644,6 @@ type WorkflowDef struct {
     Name        string                     `json:"name"`
     Version     string                     `json:"version"`
     Description string                     `json:"description"`
-    Triggers    []*Trigger                 `json:"triggers"`
     Context     *Context                   `json:"context"`
     Settings    *Settings                  `json:"settings"`
     Credentials map[string]*Credential     `json:"credentials"`
@@ -859,40 +821,10 @@ type StateManager interface {
 
 **表达式求值约定**：
 
-> **Master 注入数据，Worker 求值表达式**——Master 在调度时仅将运行时原始数据（`$nodes`、`$input`、`$vars`、`$config`、`$inputs`）序列化到 `TaskPayload.Context`，不对 `Parameters` 中的任何表达式求值。Worker 收到 TaskPayload 后，用 Context 构建 Expr 环境，统一对 Parameters 中的 `${{ expr }}` / `{{ expr }}` 进行求值。
+> **Server 注入数据，Runner 求值表达式**——server 在调度时仅将运行时原始数据（`$nodes`、`$input`、`$vars`、`$config`、`$inputs`）序列化到 `TaskPayload.Context`，不对 `Parameters` 中的任何表达式求值。Runner 收到 TaskPayload 后，用 Context 构建 Expr 环境，统一对 Parameters 中的 `${{ expr }}` / `{{ expr }}` 进行求值。
 
-> **IF/Switch 路由**：Worker 求值条件表达式后，通过 output port 名称（`"true_branch"` / `"false_branch"` / `"case_x"`）回报给 Master，Master 根据 port 名在 DAG 中查找对应下游节点入队，无需理解表达式语义。
+> **IF/Switch 路由**：Runner 求值条件表达式后，通过 output port 名称（`"true_branch"` / `"false_branch"` / `"case_x"`）回报给 server，server 根据 port 名在 DAG 中查找对应下游节点入队，无需理解表达式语义。
 ```
-
-### 11.3 TriggerHandler 接口
-
-```go
-type TriggerEmitFunc func(input map[string]interface{}) error
-
-type TriggerDescriptor struct {
-    Type         TriggerType            `json:"type"`
-    DisplayName  string                 `json:"display_name"`
-    Description  string                 `json:"description"`
-    ConfigSchema map[string]interface{} `json:"config_schema"`
-}
-
-type TriggerHandler interface {
-    Type() TriggerType
-    Descriptor() TriggerDescriptor
-    Start(ctx context.Context, config map[string]interface{}, emit TriggerEmitFunc) error
-    Stop(ctx context.Context) error
-    ValidateConfig(config map[string]interface{}) error
-}
-
-type TriggerRegistry struct {
-    handlers map[TriggerType]TriggerHandler
-}
-
-func (r *TriggerRegistry) StartAll(ctx context.Context) error
-func (r *TriggerRegistry) StopAll()
-```
-
----
 
 ## 12. 类型定义
 
@@ -905,7 +837,6 @@ const (
     NodeTypeGRPC         NodeType = "xflow.grpc"
     NodeTypeFunction     NodeType = "xflow.function"
     NodeTypeDatabase     NodeType = "xflow.database"
-    NodeTypeNotification NodeType = "xflow.notification"
     NodeTypeIF           NodeType = "xflow.if"
     NodeTypeSwitch       NodeType = "xflow.switch"
     NodeTypeLoop         NodeType = "xflow.loop"
@@ -938,16 +869,6 @@ const (
     TaskStatusSkipped  TaskStatus = "skipped"
     TaskStatusPinned   TaskStatus = "pinned"   // pin_data 替代执行，视为 success
     TaskStatusRetrying TaskStatus = "retrying"
-)
-
-type TriggerType string
-
-const (
-    TriggerTypeManual  TriggerType = "manual"
-    TriggerTypeWebhook TriggerType = "webhook"
-    TriggerTypeCron    TriggerType = "cron"
-    TriggerTypeEvent   TriggerType = "event"
-    TriggerTypeQueue   TriggerType = "queue"
 )
 
 type ErrorStrategy string
@@ -1026,11 +947,28 @@ scheduler:
     default: 5
     low: 1
 
+runner_dispatcher:
+  enabled: true
+  concurrency: 100
+  lease_ttl: 60s
+  pending_limit: 10000
+  backpressure:
+    enabled: true
+    min_available_runner_capacity: 1
+
+runner_transport:
+  protocol: "grpc_stream"          # grpc_stream | websocket | http_long_poll | tcp
+  bind_addr: "0.0.0.0:9091"
+  heartbeat_timeout: 60s
+  auth:
+    token_expiry: 0
+    mtls_enabled: true
+
 cron:
   timezone: "Asia/Shanghai"
   sync_interval: 30s
 
-gateway:                         # Edge Worker 接入层（详见 GATEWAY-COMPONENTS.md）
+gateway:                         # 可选 Runner Protocol 中继层（详见 GATEWAY-COMPONENTS.md）
   enabled: true
   port: 8081
   auth:

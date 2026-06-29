@@ -14,18 +14,18 @@ The repo contains four Go modules. Each has its own `go.mod`:
 |---|---|---|
 | `github.com/xbcio/xflow` | `/` | Root — types, cmd |
 | `github.com/xbcio/xflow/types` | `types/` | Shared data types (no deps) |
-| `github.com/xbcio/xflow/node` | `node/` | Node contracts layer |
+| `github.com/xbcio/xflow/nodes/node` | `nodes/node/` | Builtin task node constructors and implementations |
 | `github.com/xbcio/xflow/sdk` | `sdk/` | Embedded engine SDK |
 
 **Rules:**
 - Use `go.work` at the repo root for local development across all modules. `go.work` is gitignored — create it locally:
   ```bash
   go work init
-  go work use . ./node ./types ./sdk
+  go work use . ./types ./sdk
   ```
 - `types/` must have zero imports from sibling modules (it is the leaf dependency).
-- `node/` may import `types/` only.
-- `sdk/` may import `node/` and `types/` only; never import `pkg/` or `internal/`.
+- `nodes/node/` may import `types/` only.
+- `sdk/` may import `nodes/node/` and `types/` only; never import `pkg/` or `internal/`.
 - `cmd/` entry points must be thin: import from `internal/` and `pkg/`, do nothing else.
 
 ### Directory conventions (per golang-standards)
@@ -37,7 +37,7 @@ The repo contains four Go modules. Each has its own `go.mod`:
 | `pkg/` | Shared library code safe for external use | `workflow/`, `scheduler/`, `state/`, `task/`, `expression/`, `monitor/`, `api/` |
 | `api/` | OpenAPI specs, gRPC `.proto` files | One source of truth for service contracts |
 | `configs/` | Config templates, default YAML | No secrets, no environment-specific values |
-| `node/` | Node contracts (separate module) | Interfaces + descriptors only; zero runtime logic |
+| `nodes/node/` | Builtin task nodes | Constructors + implementations for normal workflow nodes |
 | `types/` | Shared data types (separate module) | Plain structs + constants; zero business logic |
 | `sdk/` | Embedded engine (separate module) | Self-contained; carries its own runners |
 | `docs/` | Design docs and specs | Keep in sync with code |
@@ -55,17 +55,16 @@ All exported identifiers (types, functions, methods, constants, variables) **mus
 ```go
 // ✅ Exported — English, starts with symbol name
 // Register registers a handler in the global registry.
-// h must implement DescriptorProvider; panics otherwise.
 // Safe for concurrent use from multiple init() functions.
-func Register(h TaskHandler) { ... }
+func Register(h ActionHandler) { ... }
 
 // ✅ Unexported — Chinese acceptable
-// nodeRef 是 node.New() 返回的内部 Builder 实现。
+// nodeRef 是 Definition.New() 返回的内部 Builder 实现。
 type nodeRef struct { ... }
 
 // ❌ Exported but Chinese
 // Register 注册 handler，通常在 init() 中调用。
-func Register(h TaskHandler) { ... }
+func Register(h ActionHandler) { ... }
 ```
 
 ### Doc comment format
@@ -77,13 +76,13 @@ func Register(h TaskHandler) { ... }
 
 ```go
 // ✅
-// TaskHandler is the core execution interface for workflow nodes.
+// ActionHandler is the runtime interface for action nodes.
 // Implementations must be stateless and safe for concurrent use.
-type TaskHandler interface { ... }
+type ActionHandler interface { ... }
 
 // ❌
-// TaskHandler 核心执行接口
-type TaskHandler interface { ... }
+// ActionHandler 核心执行接口
+type ActionHandler interface { ... }
 ```
 
 ---
@@ -161,7 +160,7 @@ fmt.Errorf("节点入队失败: %w", err)
 - Define interfaces at the consumer, not the provider.
 - Keep interfaces minimal; prefer single-method or two-method interfaces.
 - `EngineRunner` is the internal runner contract — do not expose it outside `internal/runner/`.
-- `TaskHandler` is the only interface node authors implement; keep it stable.
+- `types.ActionHandler` is the primary interface action node authors implement; keep it stable.
 
 ---
 
@@ -207,7 +206,7 @@ Include inputs in the failure message:
 
 ```go
 // ✅
-t.Errorf("Wait(%q) status = %q, want %q", id, got.Status, types.StatusSuccess)
+t.Errorf("Wait(%q) status = %q, want %q", id, got.Status, types.ExecutionStatusSuccess)
 
 // ❌
 t.Errorf("wrong status")
@@ -262,6 +261,6 @@ Handler types used only in tests must use a `test.` prefix (e.g., `test.engine.e
 | Chinese in exported doc comments | English, starts with symbol name |
 | `util`, `helper`, `common` packages | Focused, domain-named packages |
 | `_ = r.someFunc()` without comment | Add `// always returns nil to suppress Asynq retries` |
-| Direct `taskHandler` in AsynqRunner | Register via `node.Register`, use `node.New` |
+| Direct action handler in AsynqRunner | Define with `node.Define`, register workers with `xflow.WithNodes` |
 | `t.Fatal` at top-level without `t.Run` | Wrap in `t.Run` subtests |
 | Stray generated/output files at root | Add to `.gitignore` (e.g., `test_output.txt`) |

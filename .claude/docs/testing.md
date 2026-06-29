@@ -9,24 +9,24 @@ go test ./... -race -count=1
 # Engine core only (pure unit tests, no IO)
 go test ./engine/... -race -count=1
 
-# SDK + adapter integration
-go test ./sdk/... -race -count=1
+# SDK + backend integration
+go test ./backend/... ./sdk/... -race -count=1
 ```
 
 ## Engine Core Unit Tests (zero IO deps)
 
-Uses fake StateBackend + fake TaskQueue:
+Uses fake StateStore + fake TaskQueue:
 - `scheduler_test.go`: linear chain / fan-out / fan-in / port routing / skip cascade / multiple nodes ready simultaneously
 - `errorpolicy_test.go`: four strategies
 - `suspend_test.go`: signal early/late arrival, timer, timeout, multi-signal quorum
 - `graph_test.go`: Compile validation, cycle detection
 
-Fake StateBackend uses mutex (~100 lines) to simulate concurrent contention.
+Fake StateStore uses mutex (~100 lines) to simulate concurrent contention.
 
-## Adapter Integration Tests
+## Backend / IO Binding Integration Tests
 
-- `adapter/local/` — real memoryState + memoryQueue, end-to-end
-- `adapter/cluster/` — testcontainers with Redis + MySQL, full scenario coverage
+- `backend/memory/` — real memoryState + memoryQueue, end-to-end
+- `backend/asynq/` — Redis state + Asynq queue, full scenario coverage
 - Shared `compat_test.go` test cases (same workflows run on both local/cluster)
 
 ## Testing Conventions

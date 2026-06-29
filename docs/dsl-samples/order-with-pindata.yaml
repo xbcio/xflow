@@ -24,9 +24,6 @@ settings:
   timezone: "Asia/Shanghai"
   pin_data_mode: test_only        # 仅 test/debug 模式生效
 
-triggers:
-  - type: manual
-
 context:
   config:
     order_service: "https://order.internal.example.com"

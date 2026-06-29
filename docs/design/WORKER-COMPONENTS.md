@@ -1,184 +1,167 @@
-# XFlow Worker 组件设计
+# XFlow Runner 组件设计
 
-> Worker 负责实际执行工作流节点任务。XFlow 支持两种 Worker 类型：Internal Worker（直连 Redis）和 Edge Worker（通过 Gateway 接入）。两者共享相同的 TaskHandler 接口，执行逻辑完全一致，差异仅在接入方式。
+> Runner 负责实际执行工作流节点任务。XFlow 支持两种接入方式：Direct Runner 直接连接 server 的 Runner Protocol；Relay Runner 通过 Relay Gateway 中继连接。两者共享相同的 ActionHandler 接口，执行逻辑完全一致，差异仅在网络接入方式。Runner 永远不直连 server 内部 Redis / Asynq。当前代码中的 embedded `execution.Runner` 是本地实现，未来独立 `xflow-runner` 应复用同一执行语义，仅替换连接方式。
 
 ## 目录
 
-1. [Worker 类型概览](#1-worker-类型概览)
-2. [Internal Worker](#2-internal-worker)
-3. [Edge Worker](#3-edge-worker)
-4. [TaskHandler 接口](#4-taskhandler-接口)
+1. [Runner 类型概览](#1-runner-类型概览)
+2. [Direct Runner](#2-direct-runner)
+3. [Relay Runner](#3-relay-runner)
+4. [ActionHandler 接口](#4-actionhandler-接口)
 5. [Plugin Manager](#5-plugin-manager)
 6. [Retry Engine](#6-retry-engine)
 7. [配置规范](#7-配置规范)
 
 ---
 
-## 1. Worker 类型概览
+## 1. Runner 类型概览
 
 ```
                        ┌─────────────────────────────┐
                        │         Task 执行层          │
                        │                             │
                        │  ┌──────────────────────┐   │
-                       │  │  TaskHandler 接口     │   │
-                       │  │  （两种 Worker 共用）  │   │
+                       │  │  ActionHandler 接口     │   │
+                       │  │  （两种 Runner 共用）  │   │
                        │  └──────────┬───────────┘   │
                        └────────────┼────────────────┘
                                     │
                ┌────────────────────┴───────────────────┐
                │                                        │
   ┌────────────▼─────────────┐          ┌───────────────▼──────────┐
-  │     Internal Worker      │          │       Edge Worker         │
+  │      Direct Runner       │          │       Relay Runner        │
   │                          │          │                           │
-  │  • Asynq Worker          │          │  • HTTP Long Poll         │
-  │  • 直连 Redis             │          │  • 通过 Gateway 接入      │
-  │  • 平台内网部署           │          │  • 浏览器/桌面/跨 DC      │
-  │  • 结果 HTTP 回调 Master  │          │  • 结果 POST Gateway      │
+  │  • Runner Protocol      │          │  • Relay Gateway        │
+  │  • 直连 server            │          │  • 中继 Runner Protocol  │
+  │  • 不直连 Redis/Asynq     │          │  • 不直连 Redis/Asynq     │
+  │  • 结果回报 server        │          │  • 结果经 relay 回 server │
   └──────────────────────────┘          └───────────────────────────┘
 ```
 
-| | Internal Worker | Edge Worker |
+| | Direct Runner | Relay Runner |
 |--|-----------------|-------------|
-| **接入方式** | Asynq（直连 Redis） | HTTP Long Poll via Gateway |
-| **部署场景** | 平台内网、同 VPC | 浏览器 WASM、用户本机、跨 DC |
-| **连接发起方** | Worker 拉取 Redis 任务 | Worker 主动连接 Gateway |
-| **结果上报** | HTTP 回调 Master | POST Gateway（Gateway 代理转发） |
+| **接入方式** | Runner Protocol（TCP / gRPC stream / WebSocket / HTTP long poll） | Runner Protocol via Relay Gateway |
+| **部署场景** | runner 能访问 server | 浏览器 WASM、用户本机、跨 DC、跨云测试环境、受限内网环境 |
+| **连接发起方** | Runner 主动连接 server | Runner 主动连接 Gateway，Gateway 再连 server |
+| **结果上报** | Runner Protocol result | Gateway 中继 result |
 | **作用域** | 系统级（所有用户） | 系统级或用户级 |
-| **NAT 穿透** | 需要能访问 Redis | 只需能访问 Gateway HTTP 端口 |
+| **NAT 穿透** | 只需能访问 server Runner Protocol 端口 | 只需能访问 Relay Gateway 端口 |
 
 ---
 
-## 2. Internal Worker
+## 2. Direct Runner
 
 ### 2.1 Task Executor（任务执行器）
 
 **职责**：
-- 作为 Asynq Worker 订阅 Redis 任务队列
+- 连接 server 的 Runner Protocol，注册 runner 能力、标签、并发容量
+- 接收 Task Dispatcher 下发的 task lease
 - 反序列化 TaskPayload，构建表达式上下文
-- 调用对应 TaskHandler 执行任务
-- 执行完成后 HTTP 回调 Master
+- 调用对应 ActionHandler 执行任务
+- 执行完成后通过 Runner Protocol 回报 result
 
-**表达式求值**：节点参数中的表达式（如 `${{ $input.xxx }}`）在 Worker 侧求值。Master 调度任务时将所需上下文（`$input`、`$vars`、`$config`、`$nodes` 等）序列化到 Asynq task payload，Worker 反序列化后构建 Expr 环境并求值。
+**表达式求值**：节点参数中的表达式（如 `${{ $input.xxx }}`）在 Runner 侧求值。Server 调度任务时将所需上下文（`$input`、`$vars`、`$config`、`$nodes` 等）序列化到 TaskPayload，Runner 反序列化后构建 Expr 环境并求值。
 
 ```go
 type TaskExecutor struct {
-    server       *asynq.Server
-    handlers     map[string]TaskHandler
+    transport    RunnerProtocolClient
+    handlers     map[string]ActionHandler
     exprEngine   *expression.Engine
     limiter      *ResourceLimiter
-    masterClient *MasterClient
     hookRegistry *HookRegistry
 }
 
-// MasterClient Worker → Master HTTP 回调客户端
-// 回调失败时自动重试（指数退避），重试耗尽后依赖 Master 侧 Reconciler 兜底
-type MasterClient struct {
-    baseURL     string        // Follower LB 地址，不经过 Leader
-    httpClient  *http.Client
-    token       string        // 内部调用鉴权 token（从配置注入，不硬编码）
-    retryPolicy *RetryPolicy  // 默认 3 次，指数退避
+// RunnerProtocolClient Runner → Server 执行协议客户端
+// 底层可实现为 gRPC stream、TCP framed protocol、WebSocket 或 HTTP long poll。
+type RunnerProtocolClient interface {
+    Register(ctx context.Context, req RegisterRunnerRequest) error
+    Receive(ctx context.Context) (*TaskLease, error)
+    Ack(ctx context.Context, leaseID string) error
+    ReportResult(ctx context.Context, result *TaskResult) error
+    Heartbeat(ctx context.Context, status RunnerStatus) error
 }
-
-func (c *MasterClient) ReportCompleted(ctx context.Context, result *TaskResult) error
-func (c *MasterClient) ReportFailed(ctx context.Context, result *TaskResult) error
 ```
 
-### 2.2 Internal Worker 启动流程
+### 2.2 Direct Runner 启动流程
 
 ```go
-func (w *InternalWorker) Run(ctx context.Context) error {
-    // 1. 连接 Redis（Asynq）
-    srv := asynq.NewServer(asynq.RedisClientOpt{Addr: w.cfg.Redis.Addr}, asynq.Config{
-        Concurrency: w.cfg.Concurrency,
-        Queues: map[string]int{
-            "high":    10,
-            "default": 5,
-            "low":     1,
-        },
-        RetryDelayFunc: w.retryEngine.NextRetry,
-    })
-
-    // 2. 注册各类型 TaskHandler
-    mux := asynq.NewServeMux()
-    for nodeType, handler := range w.handlers {
-        mux.Handle(string(nodeType), w.wrapHandler(handler))
+func (r *Runner) Run(ctx context.Context) error {
+    if err := r.transport.Register(ctx, r.registration()); err != nil {
+        return err
     }
+    go r.heartbeatLoop(ctx)
 
-    return srv.Run(mux)
+    for i := 0; i < r.concurrency; i++ {
+        go r.receiveLoop(ctx)
+    }
+    <-ctx.Done()
+    return ctx.Err()
 }
 
-// wrapHandler 包装 TaskHandler，注入公共逻辑（hook、超时、结果上报）
-func (w *InternalWorker) wrapHandler(handler TaskHandler) asynq.HandlerFunc {
-    return func(ctx context.Context, t *asynq.Task) error {
-        var payload TaskPayload
-        json.Unmarshal(t.Payload(), &payload)
-
-        // 构建 Task 上下文
-        task := buildTask(ctx, &payload, w.exprEngine)
-
-        // BeforeTask hook
-        if err := w.hookRegistry.RunBeforeTask(ctx, task); err != nil {
-            return err
-        }
-
-        // 执行
-        output, err := handler.Execute(ctx, task, task.Input)
-
-        // AfterTask hook
-        w.hookRegistry.RunAfterTask(ctx, task, output, err)
-
-        // 上报结果给 Master
+func (r *Runner) receiveLoop(ctx context.Context) {
+    for {
+        lease, err := r.transport.Receive(ctx)
         if err != nil {
-            return w.masterClient.ReportFailed(ctx, &TaskResult{
-                TaskID:      payload.TaskID,
-                ExecutionID: payload.ExecutionID,
-                Error:       toTaskError(err),
-            })
+            r.backoff.Wait(ctx)
+            continue
         }
-        return w.masterClient.ReportCompleted(ctx, &TaskResult{
-            TaskID:      payload.TaskID,
-            ExecutionID: payload.ExecutionID,
-            Output:      output,
-        })
+        go r.executeLease(ctx, lease)
     }
 }
 ```
 
 ---
 
-## 3. Edge Worker
+## 3. Relay Runner
 
 ### 3.1 概述
 
-Edge Worker 通过 Gateway HTTP API 接入，内部实现 Long Poll 循环，与 Internal Worker 共享相同的 TaskHandler 注册机制。
+Relay Runner 通过 Relay Gateway 接入，内部仍使用与 Direct Runner 相同的 Runner Protocol 语义，与 Direct Runner 共享相同的 ActionHandler 注册机制。Gateway 可以是 embedded 模式（随 server 部署）或 remote 模式（独立部署在 runner 所在网络域 / 中转网络域）。
+
+当 runner 无法直连 server 或需要本地网络域聚合时，runner 仍不直连 server 的 Redis / DB / Asynq。推荐拓扑是 server 部署在控制面网络域，remote Gateway 部署在 runner 所在网络域或中转网络域，runner 只访问本地 Gateway：
+
+```
+阿里云 xflow-server
+    │  Runner Protocol relay（mTLS / token / lease）
+    ▼
+腾讯云 xflow-gateway（remote mode）
+    │  HTTP Long Poll
+    ▼
+腾讯云测试环境 xflow-runner
+```
+
+这种模式下：
+- `xflow-server` 仍是 Execution / Task 的最终状态权威。
+- `xflow-gateway` 只做 Runner Protocol 中继和短暂传输缓冲，不直接访问 server 内部 Redis / Asynq。
+- `xflow-runner` 使用与 Direct Runner 相同的 `lease / ack / result / heartbeat` 语义。
+- 任务必须带有 placement 信息，例如 `cloud=tencent`、`env=test`、`gateway_id=gw-tencent-test`、`capabilities=[xflow.http]`。
 
 ```go
-type EdgeWorker struct {
-    gatewayURL   string
-    workerToken  string
+type RelayRunner struct {
+    transportURL string
+    runnerToken  string
     concurrency  int
-    handlers     map[string]TaskHandler
+    handlers     map[string]ActionHandler
     exprEngine   *expression.Engine
     hookRegistry *HookRegistry
     sem          chan struct{} // 并发信号量
 }
 ```
 
-### 3.2 Poll 循环
+### 3.2 Relay Poll 循环
 
 ```go
-func (w *EdgeWorker) Run(ctx context.Context) error {
+func (r *RelayRunner) Run(ctx context.Context) error {
     // 启动心跳 goroutine
-    go w.heartbeatLoop(ctx)
+    go r.heartbeatLoop(ctx)
 
     // 并发执行 N 个 poll goroutine（每个 goroutine 负责一个并发槽）
     var wg sync.WaitGroup
-    for i := 0; i < w.concurrency; i++ {
+    for i := 0; i < r.concurrency; i++ {
         wg.Add(1)
         go func() {
             defer wg.Done()
-            w.pollLoop(ctx)
+            r.pollLoop(ctx)
         }()
     }
 
@@ -186,7 +169,7 @@ func (w *EdgeWorker) Run(ctx context.Context) error {
     return nil
 }
 
-func (w *EdgeWorker) pollLoop(ctx context.Context) {
+func (r *RelayRunner) pollLoop(ctx context.Context) {
     for {
         select {
         case <-ctx.Done():
@@ -194,7 +177,7 @@ func (w *EdgeWorker) pollLoop(ctx context.Context) {
         default:
         }
 
-        task, err := w.poll(ctx)
+        task, err := r.poll(ctx)
         if err != nil {
             time.Sleep(5 * time.Second) // 网络错误，短暂等待后重试
             continue
@@ -203,14 +186,14 @@ func (w *EdgeWorker) pollLoop(ctx context.Context) {
             continue // 204，立即重新 poll
         }
 
-        w.execute(ctx, task)
+        r.execute(ctx, task)
     }
 }
 
-func (w *EdgeWorker) poll(ctx context.Context) (*TaskPayload, error) {
+func (r *RelayRunner) poll(ctx context.Context) (*TaskPayload, error) {
     req, _ := http.NewRequestWithContext(ctx, "GET",
-        w.gatewayURL+"/gateway/tasks/poll?timeout=30s", nil)
-    req.Header.Set("Authorization", "Bearer "+w.workerToken)
+        r.transportURL+"/gateway/tasks/poll?timeout=30s", nil)
+    req.Header.Set("Authorization", "Bearer "+r.runnerToken)
 
     resp, err := http.DefaultClient.Do(req)
     if err != nil {
@@ -227,34 +210,34 @@ func (w *EdgeWorker) poll(ctx context.Context) (*TaskPayload, error) {
     return &task, nil
 }
 
-func (w *EdgeWorker) execute(ctx context.Context, payload *TaskPayload) {
-    handler, ok := w.handlers[payload.NodeType]
+func (r *RelayRunner) execute(ctx context.Context, payload *TaskPayload) {
+    handler, ok := r.handlers[payload.NodeType]
     if !ok {
-        w.reportFail(ctx, payload, &TaskError{
+        r.reportFail(ctx, payload, &TaskError{
             Code:    "HANDLER_NOT_FOUND",
             Message: fmt.Sprintf("no handler for node type: %s", payload.NodeType),
         })
         return
     }
 
-    task := buildTask(ctx, payload, w.exprEngine)
+    task := buildTask(ctx, payload, r.exprEngine)
 
-    w.hookRegistry.RunBeforeTask(ctx, task)
+    r.hookRegistry.RunBeforeTask(ctx, task)
     output, err := handler.Execute(ctx, task, task.Input)
-    w.hookRegistry.RunAfterTask(ctx, task, output, err)
+    r.hookRegistry.RunAfterTask(ctx, task, output, err)
 
     if err != nil {
-        w.reportFail(ctx, payload, toTaskError(err))
+        r.reportFail(ctx, payload, toTaskError(err))
         return
     }
-    w.reportComplete(ctx, payload, output)
+    r.reportComplete(ctx, payload, output)
 }
 ```
 
 ### 3.3 心跳
 
 ```go
-func (w *EdgeWorker) heartbeatLoop(ctx context.Context) {
+func (r *RelayRunner) heartbeatLoop(ctx context.Context) {
     ticker := time.NewTicker(30 * time.Second)
     defer ticker.Stop()
     for {
@@ -270,13 +253,13 @@ func (w *EdgeWorker) heartbeatLoop(ctx context.Context) {
 
 ---
 
-## 4. TaskHandler 接口
+## 4. ActionHandler 接口
 
-所有节点类型通过实现 `TaskHandler` 接口注册，Internal Worker 和 Edge Worker 共用同一套接口定义。
+所有节点类型通过实现 `ActionHandler` 接口注册，Direct Runner 和 Relay Runner 共用同一套接口定义。
 
 ```go
-// TaskHandler 任务处理器接口
-type TaskHandler interface {
+// ActionHandler 任务处理器接口
+type ActionHandler interface {
     // 节点描述符（声明端口、元信息，用于编辑器渲染和编译期校验）
     Descriptor() NodeDescriptor
 
@@ -293,7 +276,7 @@ type TaskHandler interface {
 // DynamicOutputHandler 动态输出端口处理器
 // 用于 switch 等节点类型，输出端口由用户配置的 parameters 决定
 type DynamicOutputHandler interface {
-    TaskHandler
+    ActionHandler
     GetOutputPorts(parameters map[string]interface{}) []PortSpec
 }
 
@@ -313,7 +296,7 @@ type PortSpec struct {
     DisplayName string `json:"display_name"`
 }
 
-// Task 运行时任务上下文（Worker 执行时使用）
+// Task 运行时任务上下文（Runner 执行时使用）
 type Task struct {
     ID          string
     ExecutionID string
@@ -324,9 +307,20 @@ type Task struct {
     Context     *ExprContext
     TraceID     string
     Timeout     time.Duration
+    Placement   *TaskPlacement
 }
 
-// ExprContext 表达式求值上下文（Master 序列化后注入 payload）
+// TaskPlacement 描述任务应被路由到哪个执行域。
+type TaskPlacement struct {
+    Cloud        string
+    Region       string
+    Env          string
+    GatewayID    string
+    Capabilities []string
+    Tags         []string
+}
+
+// ExprContext 表达式求值上下文（Server 序列化后注入 payload）
 type ExprContext struct {
     Params  map[string]interface{}            `json:"$params"`
     Input   interface{}                        `json:"$input"`
@@ -344,10 +338,10 @@ type ExprContext struct {
 ## 5. Plugin Manager
 
 ```go
-// PluginManager 插件管理器（Internal Worker 和 Edge Worker 均使用）
+// PluginManager 插件管理器（Direct Runner 和 Relay Runner 均使用）
 type PluginManager struct {
     plugins  map[string]Plugin
-    handlers map[string]TaskHandler
+    handlers map[string]ActionHandler
 }
 
 // Plugin 节点任务插件接口
@@ -355,15 +349,7 @@ type Plugin interface {
     Name() string
     Type() TaskType
     Init() error
-    CreateHandler() TaskHandler
-    Shutdown() error
-}
-
-// TriggerPlugin 触发器插件接口（仅 Master 侧使用）
-type TriggerPlugin interface {
-    Name() string
-    Init() error
-    CreateTriggerHandler() TriggerHandler
+    CreateHandler() ActionHandler
     Shutdown() error
 }
 
@@ -389,10 +375,10 @@ func (r *HookRegistry) RunAfterTask(ctx context.Context, task *Task, output inte
 
 ## 6. Retry Engine
 
-Internal Worker 的重试由 Asynq 框架驱动（基于 `asynq.Config.RetryDelayFunc`），Edge Worker 的重试由 Gateway 将任务重新入 pending 队列实现。
+Runner 执行重试由 server state + Task Dispatcher 统一管理。Asynq 只负责 server 内部 dispatch 阶段的重试，不直接代表 handler 执行重试；Relay Runner 的网络失败由 Relay Gateway 将任务重新放回 pending，并最终由 server lease 超时兜底。
 
 ```go
-// RetryEngine 重试引擎（Internal Worker 使用）
+// RetryEngine 重试引擎（Runner 执行失败策略）
 type RetryEngine struct {
     strategy RetryStrategy
 }
@@ -434,29 +420,21 @@ func (e *ExponentialBackoff) ShouldRetry(err error, attempt int) bool {
 
 ## 7. 配置规范
 
-### 7.1 Internal Worker 配置
+### 7.1 Direct Runner 配置
 
 ```yaml
-# config/worker.yaml
+# config/runner.yaml
 
-worker:
-  id: "worker-1"
+runner:
+  id: "runner-1"
   concurrency: 50
-  queues:
-    - "high"
-    - "default"
-    - "low"
 
-redis:                              # Asynq 任务队列（必须直连 Redis）
-  addr: "localhost:6379"
-  password: ""
-  db: 0
-
-master:
-  url: "http://follower-lb:8080"   # Follower LB 地址（不经过 Leader）
-  token: "${MASTER_INTERNAL_TOKEN}" # 内部调用鉴权 token，从环境变量注入
+transport:
+  url: "https://xflow-server.example.com:9090"
+  protocol: "grpc_stream"          # grpc_stream | websocket | http_long_poll | tcp
+  token: "${RUNNER_TOKEN}"         # Runner Token，从环境变量注入
   timeout: 10s
-  callback_retry:                   # 回调重试策略（失败后依赖 Reconciler 兜底）
+  reconnect:
     max_attempts: 3
     initial_interval: 1s
     max_interval: 10s
@@ -481,29 +459,36 @@ logging:
   format: "json"
 ```
 
-### 7.2 Edge Worker 本地配置
+### 7.2 Relay Runner 本地配置
 
 ```toml
-# ~/.xflow/worker.toml  （xflow-worker register 后自动生成）
+# ~/.xflow/runner.toml  （xflow-runner register 后自动生成）
 
-[gateway]
-url   = "https://master.example.com:8081"
+[transport]
+url   = "https://gateway.tencent-test.example.com:8081"
+protocol = "http_long_poll"
 token = "WKR-yyyyyy"
 
-[worker]
-name         = "my-macbook"
-scope        = "user"          # 服务端下发，只读
-user_id      = "usr-abc"       # 服务端下发，只读
-concurrency  = 2               # 同时执行任务数
+[runner]
+name         = "tencent-test-runner-01"
+scope        = "system"        # 服务端下发，只读
+user_id      = ""              # system runner 为空
+concurrency  = 8               # 同时执行任务数
 capabilities = ["xflow.function", "xflow.http"]
-tags         = []
+tags         = ["test-env"]
+
+[placement]
+cloud      = "tencent"
+region     = "ap-guangzhou"
+env        = "test"
+gateway_id = "gw-tencent-test"
 
 [poll]
 timeout = "30s"                # Long Poll 等待时间
 
 [logging]
 level  = "info"
-format = "text"                # Edge Worker 日志输出到本地终端
+format = "text"                # Runner 日志输出到本地终端
 ```
 
 ### 7.3 默认值
@@ -513,21 +498,21 @@ const (
     // 默认超时
     DefaultTaskTimeout     = 5 * time.Minute
 
-    // 默认重试（Internal Worker）
+    // 默认重试（Runner 执行）
     DefaultMaxRetries      = 3
     DefaultRetryInterval   = 5 * time.Second
     DefaultRetryMultiplier = 2.0
 
     // 默认并发
-    DefaultInternalWorkerConcurrency = 50
-    DefaultEdgeWorkerConcurrency     = 2
+    DefaultDirectRunnerConcurrency = 50
+    DefaultRelayRunnerConcurrency  = 2
 
     // 队列名称
     DefaultQueue      = "default"
     HighPriorityQueue = "high"
     LowPriorityQueue  = "low"
 
-    // Edge Worker poll
+    // Relay Runner poll
     DefaultPollTimeout    = 30 * time.Second
     DefaultHeartbeatInterval = 30 * time.Second
 )
