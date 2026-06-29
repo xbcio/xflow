@@ -112,6 +112,12 @@ type RetrySettings struct {
 	Multiplier      float64 `json:"multiplier,omitempty"`
 }
 
+// CredentialDef references a named credential stored in a secrets manager.
+type CredentialDef struct {
+	Name string `json:"name,omitempty"`
+	Type string `json:"type,omitempty"`
+}
+
 // ParamDef declares a workflow-level input parameter.
 type ParamDef struct {
 	Type        string         `json:"type,omitempty"`
