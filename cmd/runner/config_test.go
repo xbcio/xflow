@@ -183,6 +183,51 @@ logging:
 	}
 }
 
+func TestResolveRunnerConfigRejectsExplicitZeroConcurrencyFromFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "runner.yaml")
+	data := []byte(`
+runner:
+  concurrency: 0
+`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	base := defaultRunnerConfig()
+	base.configPath = path
+
+	_, err := resolveRunnerConfig(base)
+	if err == nil || !strings.Contains(err.Error(), "concurrency") {
+		t.Fatalf("error = %v, want containing %q", err, "concurrency")
+	}
+}
+
+func TestRunCommandRejectsExplicitEmptyCapabilitiesFromFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "runner.yaml")
+	data := []byte(`
+runner:
+  capabilities: []
+`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := newRootCommand(commandOptions{
+		runFunc: func(cfg runnerConfig) error {
+			t.Fatalf("run should not execute, got %+v", cfg)
+			return nil
+		},
+		out: &bytes.Buffer{},
+		err: &bytes.Buffer{},
+	})
+	cmd.SetArgs([]string{"run", "--config", path})
+
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "capabilities") {
+		t.Fatalf("error = %v, want containing %q", err, "capabilities")
+	}
+}
+
 func TestValidateRunnerConfigRejectsInvalidValues(t *testing.T) {
 	tests := []struct {
 		name string

@@ -14,9 +14,9 @@ import (
 
 type runnerConfigFile struct {
 	Runner struct {
-		ID           string   `yaml:"id"`
-		Concurrency  int      `yaml:"concurrency"`
-		Capabilities []string `yaml:"capabilities"`
+		ID           string    `yaml:"id"`
+		Concurrency  *int      `yaml:"concurrency"`
+		Capabilities *[]string `yaml:"capabilities"`
 	} `yaml:"runner"`
 	Server struct {
 		URL string `yaml:"url"`
@@ -69,11 +69,11 @@ func loadRunnerConfig(path string) (runnerConfig, error) {
 	if file.Runner.ID != "" {
 		cfg.runnerID = file.Runner.ID
 	}
-	if file.Runner.Concurrency != 0 {
-		cfg.concurrency = file.Runner.Concurrency
+	if file.Runner.Concurrency != nil {
+		cfg.concurrency = *file.Runner.Concurrency
 	}
-	if len(file.Runner.Capabilities) > 0 {
-		cfg.capRaw = strings.Join(file.Runner.Capabilities, ",")
+	if file.Runner.Capabilities != nil {
+		cfg.capRaw = strings.Join(*file.Runner.Capabilities, ",")
 	}
 	if file.Poll.Wait != "" {
 		cfg.pollWait = file.Poll.Wait
