@@ -202,6 +202,64 @@ runner:
 	}
 }
 
+func TestResolveRunnerConfigRejectsExplicitEmptyStringsFromFile(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+		want string
+	}{
+		{
+			name: "runner id",
+			data: `
+runner:
+  id: ""
+`,
+			want: "runner id",
+		},
+		{
+			name: "server url",
+			data: `
+server:
+  url: ""
+`,
+			want: "server URL",
+		},
+		{
+			name: "poll wait",
+			data: `
+poll:
+  wait: ""
+`,
+			want: "poll wait",
+		},
+		{
+			name: "log level",
+			data: `
+logging:
+  level: ""
+`,
+			want: "log level",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "runner.yaml")
+			if err := os.WriteFile(path, []byte(tt.data), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			base := defaultRunnerConfig()
+			base.configPath = path
+
+			_, err := resolveRunnerConfig(base)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %v, want containing %q", err, tt.want)
+			}
+		})
+	}
+}
+
 func TestRunCommandRejectsExplicitEmptyCapabilitiesFromFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "runner.yaml")
 	data := []byte(`

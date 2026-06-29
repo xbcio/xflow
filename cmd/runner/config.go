@@ -14,22 +14,22 @@ import (
 
 type runnerConfigFile struct {
 	Runner struct {
-		ID           string    `yaml:"id"`
+		ID           *string   `yaml:"id"`
 		Concurrency  *int      `yaml:"concurrency"`
 		Capabilities *[]string `yaml:"capabilities"`
 	} `yaml:"runner"`
 	Server struct {
-		URL string `yaml:"url"`
+		URL *string `yaml:"url"`
 	} `yaml:"server"`
 	Poll struct {
-		Wait string `yaml:"wait"`
+		Wait *string `yaml:"wait"`
 	} `yaml:"poll"`
 	Heartbeat struct {
-		Interval string `yaml:"interval"`
+		Interval *string `yaml:"interval"`
 	} `yaml:"heartbeat"`
 	Logging struct {
-		Level  string `yaml:"level"`
-		Format string `yaml:"format"`
+		Level  *string `yaml:"level"`
+		Format *string `yaml:"format"`
 	} `yaml:"logging"`
 }
 
@@ -63,11 +63,11 @@ func loadRunnerConfig(path string) (runnerConfig, error) {
 		return runnerConfig{}, err
 	}
 
-	if file.Server.URL != "" {
-		cfg.serverURL = file.Server.URL
+	if file.Server.URL != nil {
+		cfg.serverURL = *file.Server.URL
 	}
-	if file.Runner.ID != "" {
-		cfg.runnerID = file.Runner.ID
+	if file.Runner.ID != nil {
+		cfg.runnerID = *file.Runner.ID
 	}
 	if file.Runner.Concurrency != nil {
 		cfg.concurrency = *file.Runner.Concurrency
@@ -75,17 +75,17 @@ func loadRunnerConfig(path string) (runnerConfig, error) {
 	if file.Runner.Capabilities != nil {
 		cfg.capRaw = strings.Join(*file.Runner.Capabilities, ",")
 	}
-	if file.Poll.Wait != "" {
-		cfg.pollWait = file.Poll.Wait
+	if file.Poll.Wait != nil {
+		cfg.pollWait = *file.Poll.Wait
 	}
-	if file.Heartbeat.Interval != "" {
-		cfg.heartbeatInterval = file.Heartbeat.Interval
+	if file.Heartbeat.Interval != nil {
+		cfg.heartbeatInterval = *file.Heartbeat.Interval
 	}
-	if file.Logging.Level != "" {
-		cfg.logLevel = file.Logging.Level
+	if file.Logging.Level != nil {
+		cfg.logLevel = *file.Logging.Level
 	}
-	if file.Logging.Format != "" {
-		cfg.logFormat = file.Logging.Format
+	if file.Logging.Format != nil {
+		cfg.logFormat = *file.Logging.Format
 	}
 
 	cfg.capabilities = parseCapabilities(cfg.capRaw)
