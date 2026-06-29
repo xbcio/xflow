@@ -212,7 +212,7 @@ return anyFailed and -1 or 1
 
 type redisState struct {
 	rdb     *redis.Client
-	db      store.ClusterStore // may be nil
+	db      store.Store // may be nil
 	execTTL time.Duration
 
 	// in-memory graph cache for CheckCompletion (avoids Redis round-trips per node)
@@ -224,7 +224,7 @@ type redisState struct {
 	execTTLs map[types.ExecutionID]time.Duration
 }
 
-func newRedisState(rdb *redis.Client, db store.ClusterStore, execTTL time.Duration) *redisState {
+func newRedisState(rdb *redis.Client, db store.Store, execTTL time.Duration) *redisState {
 	return &redisState{
 		rdb:      rdb,
 		db:       db,

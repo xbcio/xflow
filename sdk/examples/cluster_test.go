@@ -27,7 +27,7 @@ import (
 	"time"
 
 	"github.com/xbcio/xflow/node"
-	xflow "github.com/xbcio/xflow/sdk"
+	"github.com/xbcio/xflow/sdk/xflow"
 	"github.com/xbcio/xflow/types"
 )
 

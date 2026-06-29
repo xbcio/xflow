@@ -65,7 +65,7 @@ func (a *Adapter) Registry() engine.HandlerRegistry { return a.registry }
 // New creates a cluster adapter connected to the given Redis address.
 // db may be nil for pure-Redis mode (no MySQL persistence).
 // Call Bind(eng) after creating the engine to start workers.
-func New(redisAddr string, db store.ClusterStore, opts ...Option) (*Adapter, error) {
+func New(redisAddr string, db store.Store, opts ...Option) (*Adapter, error) {
 	cfg := &config{concurrency: 10, execTTL: defaultExecTTL}
 	for _, o := range opts {
 		o(cfg)

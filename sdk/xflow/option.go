@@ -10,8 +10,11 @@ import (
 // ClusterConfig holds cluster-adapter-specific configuration.
 // Common settings (concurrency, hooks, logger) are passed via Option.
 type ClusterConfig struct {
-	RedisAddr string            // Required.
-	Store     store.ClusterStore // Optional; nil = pure Redis mode.
+	RedisAddr string // Required.
+	// Store is any persistence implementation of store.Store
+	// (e.g. sqlstore over GORM, or memstore for tests). Optional; nil =
+	// pure Redis mode with no durable persistence.
+	Store store.Store
 }
 
 // Option configures an Engine.

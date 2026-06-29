@@ -55,7 +55,7 @@ func New(opts ...Option) (*Engine, error) {
 		return nil, errors.New("xflow.New: WithBackend or WithQueue is required")
 	}
 
-	var engOpts []engine.EngineOption
+	var engOpts []engine.Option
 	if cfg.registry != nil {
 		engOpts = append(engOpts, engine.WithRegistry(cfg.registry))
 	}
@@ -66,7 +66,7 @@ func New(opts ...Option) (*Engine, error) {
 		engOpts = append(engOpts, engine.WithLogger(cfg.logger))
 	}
 
-	eng := engine.NewEngine(cfg.state, cfg.queue, engOpts...)
+	eng := engine.New(cfg.state, cfg.queue, engOpts...)
 
 	return &Engine{
 		eng:      eng,
@@ -91,12 +91,13 @@ func NewLocal(opts ...Option) (*Engine, error) {
 	return newFromConfig(cfg, backend)
 }
 
-// NewCluster creates a distributed engine backed by Redis (Asynq) and optionally MySQL.
+// NewCluster creates a distributed engine backed by Redis (Asynq) and an
+// optional persistent Store (any store.Store implementation).
 //
 // Example:
 //
 //	eng, err := xflow.NewCluster(xflow.ClusterConfig{RedisAddr: "localhost:6379"})
-//	eng, err := xflow.NewCluster(xflow.ClusterConfig{RedisAddr: addr, Store: db}, xflow.WithConcurrency(16))
+//	eng, err := xflow.NewCluster(xflow.ClusterConfig{RedisAddr: addr, Store: sqlstore.New(db)}, xflow.WithConcurrency(16))
 func NewCluster(clusterCfg ClusterConfig, opts ...Option) (*Engine, error) {
 	if clusterCfg.RedisAddr == "" {
 		return nil, errors.New("xflow.NewCluster: RedisAddr is required")
@@ -137,7 +138,7 @@ func newFromConfig(cfg *engineConfig, backend Backend) (*Engine, error) {
 		}
 	}
 
-	var engOpts []engine.EngineOption
+	var engOpts []engine.Option
 	if cfg.registry != nil {
 		engOpts = append(engOpts, engine.WithRegistry(cfg.registry))
 	}
@@ -148,7 +149,7 @@ func newFromConfig(cfg *engineConfig, backend Backend) (*Engine, error) {
 		engOpts = append(engOpts, engine.WithLogger(cfg.logger))
 	}
 
-	eng := engine.NewEngine(cfg.state, cfg.queue, engOpts...)
+	eng := engine.New(cfg.state, cfg.queue, engOpts...)
 
 	e := &Engine{
 		eng:      eng,
