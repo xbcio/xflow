@@ -101,10 +101,7 @@ func TestEnvOverridesFileConfig(t *testing.T) {
 		"XFLOW_RUNNER_LOG_LEVEL":          "warn",
 		"XFLOW_RUNNER_LOG_FORMAT":         "json",
 	}
-	got, err := applyEnvOverrides(cfg, func(key string) string { return env[key] })
-	if err != nil {
-		t.Fatal(err)
-	}
+	got := applyEnvOverrides(cfg, func(key string) string { return env[key] })
 	if got.serverURL != "http://env-server:8080" || got.runnerID != "env-runner" || got.concurrency != 4 {
 		t.Fatalf("config = %+v", got)
 	}
@@ -226,21 +223,186 @@ runner:
 	}
 }
 
-func TestResolveRunnerConfigUsesCLIConcurrencyWhenEnvConcurrencyIsInvalid(t *testing.T) {
-	t.Setenv("XFLOW_RUNNER_CONCURRENCY", "bad")
-
-	base := defaultRunnerConfig()
-	base.concurrency = 2
-	base.changed = map[string]bool{
-		"concurrency": true,
-	}
-
-	got, err := resolveRunnerConfig(base)
-	if err != nil {
+func TestResolveRunnerConfigRejectsExplicitEmptyEnvValuesOverValidFileConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "runner.yaml")
+	data := []byte(`
+runner:
+  id: file-runner
+  concurrency: 3
+  capabilities:
+    - xflow.http
+server:
+  url: http://file-server:8080
+poll:
+  wait: 2s
+heartbeat:
+  interval: 7s
+logging:
+  level: debug
+  format: json
+`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got.concurrency != 2 {
-		t.Fatalf("concurrency = %d, want 2", got.concurrency)
+
+	tests := []struct {
+		name   string
+		envKey string
+		want   string
+	}{
+		{name: "server", envKey: "XFLOW_RUNNER_SERVER", want: "server URL"},
+		{name: "runner id", envKey: "XFLOW_RUNNER_ID", want: "runner id"},
+		{name: "capabilities", envKey: "XFLOW_RUNNER_CAP", want: "capabilities"},
+		{name: "poll wait", envKey: "XFLOW_RUNNER_POLL_WAIT", want: "poll wait"},
+		{name: "log level", envKey: "XFLOW_RUNNER_LOG_LEVEL", want: "log level"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(tt.envKey, "")
+
+			base := defaultRunnerConfig()
+			base.configPath = path
+
+			_, err := resolveRunnerConfig(base)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %v, want containing %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveRunnerConfigUsesCLIFlagWhenEnvOverrideIsEmptyOrInvalid(t *testing.T) {
+	tests := []struct {
+		name   string
+		envKey string
+		envVal string
+		apply  func(*runnerConfig)
+		check  func(t *testing.T, got runnerConfig)
+	}{
+		{
+			name:   "server",
+			envKey: "XFLOW_RUNNER_SERVER",
+			envVal: "",
+			apply: func(cfg *runnerConfig) {
+				cfg.serverURL = "http://cli-server:8080"
+				cfg.changed = map[string]bool{"server": true}
+			},
+			check: func(t *testing.T, got runnerConfig) {
+				t.Helper()
+				if got.serverURL != "http://cli-server:8080" {
+					t.Fatalf("serverURL = %q, want %q", got.serverURL, "http://cli-server:8080")
+				}
+			},
+		},
+		{
+			name:   "runner id",
+			envKey: "XFLOW_RUNNER_ID",
+			envVal: "",
+			apply: func(cfg *runnerConfig) {
+				cfg.runnerID = "cli-runner"
+				cfg.changed = map[string]bool{"id": true}
+			},
+			check: func(t *testing.T, got runnerConfig) {
+				t.Helper()
+				if got.runnerID != "cli-runner" {
+					t.Fatalf("runnerID = %q, want %q", got.runnerID, "cli-runner")
+				}
+			},
+		},
+		{
+			name:   "concurrency",
+			envKey: "XFLOW_RUNNER_CONCURRENCY",
+			envVal: "",
+			apply: func(cfg *runnerConfig) {
+				cfg.concurrency = 2
+				cfg.changed = map[string]bool{"concurrency": true}
+			},
+			check: func(t *testing.T, got runnerConfig) {
+				t.Helper()
+				if got.concurrency != 2 {
+					t.Fatalf("concurrency = %d, want %d", got.concurrency, 2)
+				}
+			},
+		},
+		{
+			name:   "concurrency invalid",
+			envKey: "XFLOW_RUNNER_CONCURRENCY",
+			envVal: "bad",
+			apply: func(cfg *runnerConfig) {
+				cfg.concurrency = 2
+				cfg.changed = map[string]bool{"concurrency": true}
+			},
+			check: func(t *testing.T, got runnerConfig) {
+				t.Helper()
+				if got.concurrency != 2 {
+					t.Fatalf("concurrency = %d, want %d", got.concurrency, 2)
+				}
+			},
+		},
+		{
+			name:   "capabilities",
+			envKey: "XFLOW_RUNNER_CAP",
+			envVal: "",
+			apply: func(cfg *runnerConfig) {
+				cfg.capRaw = "xflow.http"
+				cfg.changed = map[string]bool{"cap": true}
+			},
+			check: func(t *testing.T, got runnerConfig) {
+				t.Helper()
+				if got.capRaw != "xflow.http" {
+					t.Fatalf("capRaw = %q, want %q", got.capRaw, "xflow.http")
+				}
+				if len(got.capabilities) != 1 || got.capabilities[0].NodeType != "xflow.http" {
+					t.Fatalf("capabilities = %+v", got.capabilities)
+				}
+			},
+		},
+		{
+			name:   "poll wait",
+			envKey: "XFLOW_RUNNER_POLL_WAIT",
+			envVal: "",
+			apply: func(cfg *runnerConfig) {
+				cfg.pollWait = "4s"
+				cfg.changed = map[string]bool{"poll-wait": true}
+			},
+			check: func(t *testing.T, got runnerConfig) {
+				t.Helper()
+				if got.pollWait != "4s" {
+					t.Fatalf("pollWait = %q, want %q", got.pollWait, "4s")
+				}
+			},
+		},
+		{
+			name:   "log level",
+			envKey: "XFLOW_RUNNER_LOG_LEVEL",
+			envVal: "",
+			apply: func(cfg *runnerConfig) {
+				cfg.logLevel = "error"
+				cfg.changed = map[string]bool{"log-level": true}
+			},
+			check: func(t *testing.T, got runnerConfig) {
+				t.Helper()
+				if got.logLevel != "error" {
+					t.Fatalf("logLevel = %q, want %q", got.logLevel, "error")
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(tt.envKey, tt.envVal)
+
+			base := defaultRunnerConfig()
+			tt.apply(&base)
+
+			got, err := resolveRunnerConfig(base)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tt.check(t, got)
+		})
 	}
 }
 

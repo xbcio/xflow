@@ -23,6 +23,7 @@ type runnerConfig struct {
 	runnerID          string
 	concurrency       int
 	changed           map[string]bool
+	resolutionIssues  map[string]error
 	capRaw            string
 	capabilities      []protocol.Capability
 	heartbeatInterval string

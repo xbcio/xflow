@@ -93,38 +93,58 @@ func loadRunnerConfig(path string) (runnerConfig, error) {
 	return cfg, nil
 }
 
-func applyEnvOverrides(cfg runnerConfig, getenv func(string) string) (runnerConfig, error) {
-	if v := getenv("XFLOW_RUNNER_SERVER"); v != "" {
+var runnerConfigIssueOrder = []string{
+	"server",
+	"id",
+	"concurrency",
+	"cap",
+	"heartbeat-interval",
+	"poll-wait",
+	"log-level",
+	"log-format",
+}
+
+func applyEnvOverrides(cfg runnerConfig, getenv func(string) string) runnerConfig {
+	return applyLookupEnvOverrides(cfg, func(key string) (string, bool) {
+		v := getenv(key)
+		return v, v != ""
+	})
+}
+
+func applyLookupEnvOverrides(cfg runnerConfig, lookupEnv func(string) (string, bool)) runnerConfig {
+	if v, ok := lookupEnv("XFLOW_RUNNER_SERVER"); ok {
 		cfg.serverURL = v
 	}
-	if v := getenv("XFLOW_RUNNER_ID"); v != "" {
+	if v, ok := lookupEnv("XFLOW_RUNNER_ID"); ok {
 		cfg.runnerID = v
 	}
-	if v := getenv("XFLOW_RUNNER_CONCURRENCY"); v != "" {
+	if v, ok := lookupEnv("XFLOW_RUNNER_CONCURRENCY"); ok {
 		n, err := strconv.Atoi(v)
 		if err != nil {
-			return runnerConfig{}, fmt.Errorf("parse env concurrency from XFLOW_RUNNER_CONCURRENCY: %w", err)
+			setRunnerConfigIssue(&cfg, "concurrency", fmt.Errorf("concurrency from XFLOW_RUNNER_CONCURRENCY must be a valid integer: %w", err))
+		} else {
+			clearRunnerConfigIssue(&cfg, "concurrency")
+			cfg.concurrency = n
 		}
-		cfg.concurrency = n
 	}
-	if v := getenv("XFLOW_RUNNER_CAP"); v != "" {
+	if v, ok := lookupEnv("XFLOW_RUNNER_CAP"); ok {
 		cfg.capRaw = v
 	}
-	if v := getenv("XFLOW_RUNNER_HEARTBEAT_INTERVAL"); v != "" {
+	if v, ok := lookupEnv("XFLOW_RUNNER_HEARTBEAT_INTERVAL"); ok {
 		cfg.heartbeatInterval = v
 	}
-	if v := getenv("XFLOW_RUNNER_POLL_WAIT"); v != "" {
+	if v, ok := lookupEnv("XFLOW_RUNNER_POLL_WAIT"); ok {
 		cfg.pollWait = v
 	}
-	if v := getenv("XFLOW_RUNNER_LOG_LEVEL"); v != "" {
+	if v, ok := lookupEnv("XFLOW_RUNNER_LOG_LEVEL"); ok {
 		cfg.logLevel = v
 	}
-	if v := getenv("XFLOW_RUNNER_LOG_FORMAT"); v != "" {
+	if v, ok := lookupEnv("XFLOW_RUNNER_LOG_FORMAT"); ok {
 		cfg.logFormat = v
 	}
 
 	cfg.capabilities = parseCapabilities(cfg.capRaw)
-	return cfg, nil
+	return cfg
 }
 
 func validateRunnerConfig(cfg runnerConfig) error {
@@ -182,53 +202,83 @@ func resolveRunnerConfig(base runnerConfig) (runnerConfig, error) {
 		return runnerConfig{}, err
 	}
 
-	getenv := os.Getenv
-	if base.changed["concurrency"] {
-		getenv = func(key string) string {
-			if key == "XFLOW_RUNNER_CONCURRENCY" {
-				return ""
-			}
-			return os.Getenv(key)
-		}
-	}
-
-	cfg, err = applyEnvOverrides(cfg, getenv)
-	if err != nil {
-		return runnerConfig{}, err
-	}
+	cfg = applyLookupEnvOverrides(cfg, os.LookupEnv)
 	cfg.configPath = base.configPath
 	cfg.changed = base.changed
 
 	if base.changed["server"] {
+		clearRunnerConfigIssue(&cfg, "server")
 		cfg.serverURL = base.serverURL
 	}
 	if base.changed["id"] {
+		clearRunnerConfigIssue(&cfg, "id")
 		cfg.runnerID = base.runnerID
 	}
 	if base.changed["concurrency"] {
+		clearRunnerConfigIssue(&cfg, "concurrency")
 		cfg.concurrency = base.concurrency
 	}
 	if base.changed["cap"] {
+		clearRunnerConfigIssue(&cfg, "cap")
 		cfg.capRaw = base.capRaw
 	}
 	if base.changed["heartbeat-interval"] {
+		clearRunnerConfigIssue(&cfg, "heartbeat-interval")
 		cfg.heartbeatInterval = base.heartbeatInterval
 	}
 	if base.changed["poll-wait"] {
+		clearRunnerConfigIssue(&cfg, "poll-wait")
 		cfg.pollWait = base.pollWait
 	}
 	if base.changed["log-level"] {
+		clearRunnerConfigIssue(&cfg, "log-level")
 		cfg.logLevel = base.logLevel
 	}
 	if base.changed["log-format"] {
+		clearRunnerConfigIssue(&cfg, "log-format")
 		cfg.logFormat = base.logFormat
 	}
 
 	cfg.capabilities = parseCapabilities(cfg.capRaw)
+	if err := firstRunnerConfigIssue(cfg); err != nil {
+		return runnerConfig{}, err
+	}
 	if err := validateRunnerConfig(cfg); err != nil {
 		return runnerConfig{}, err
 	}
 	return cfg, nil
+}
+
+func setRunnerConfigIssue(cfg *runnerConfig, key string, err error) {
+	if cfg.resolutionIssues == nil {
+		cfg.resolutionIssues = make(map[string]error)
+	}
+	cfg.resolutionIssues[key] = err
+}
+
+func clearRunnerConfigIssue(cfg *runnerConfig, key string) {
+	if cfg.resolutionIssues == nil {
+		return
+	}
+	delete(cfg.resolutionIssues, key)
+	if len(cfg.resolutionIssues) == 0 {
+		cfg.resolutionIssues = nil
+	}
+}
+
+func firstRunnerConfigIssue(cfg runnerConfig) error {
+	if len(cfg.resolutionIssues) == 0 {
+		return nil
+	}
+	for _, key := range runnerConfigIssueOrder {
+		if err := cfg.resolutionIssues[key]; err != nil {
+			return err
+		}
+	}
+	for _, err := range cfg.resolutionIssues {
+		return err
+	}
+	return nil
 }
 
 func sampleRunnerConfigYAML() string {
