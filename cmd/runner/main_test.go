@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -126,5 +127,29 @@ func TestExecuteRootDefaultsToRunCommandWithLegacySingleDashFlag(t *testing.T) {
 	}
 	if ran.runnerID != "runner-root" {
 		t.Fatalf("runner id = %q, want runner-root", ran.runnerID)
+	}
+}
+
+func TestConfigSamplePrintsYAML(t *testing.T) {
+	var out bytes.Buffer
+	cmd := newRootCommand(commandOptions{out: &out, err: &bytes.Buffer{}})
+	cmd.SetArgs([]string{"config", "sample"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "runner:") || !strings.Contains(out.String(), "server:") {
+		t.Fatalf("sample output = %q", out.String())
+	}
+	if _, err := loadRunnerConfigFromBytes([]byte(out.String())); err != nil {
+		t.Fatalf("sample is not parseable: %v", err)
+	}
+}
+
+func TestConfigValidateRejectsInvalidFlagConfig(t *testing.T) {
+	cmd := newRootCommand(commandOptions{out: &bytes.Buffer{}, err: &bytes.Buffer{}})
+	cmd.SetArgs([]string{"config", "validate", "--server", "localhost:8080"})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "server URL") {
+		t.Fatalf("error = %v, want server URL validation", err)
 	}
 }

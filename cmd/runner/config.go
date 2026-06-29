@@ -48,15 +48,25 @@ func defaultRunnerConfig() runnerConfig {
 }
 
 func loadRunnerConfig(path string) (runnerConfig, error) {
-	cfg := defaultRunnerConfig()
 	if path == "" {
-		return cfg, nil
+		return defaultRunnerConfig(), nil
 	}
 
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return runnerConfig{}, err
 	}
+
+	cfg, err := loadRunnerConfigFromBytes(data)
+	if err != nil {
+		return runnerConfig{}, err
+	}
+	cfg.configPath = path
+	return cfg, nil
+}
+
+func loadRunnerConfigFromBytes(data []byte) (runnerConfig, error) {
+	cfg := defaultRunnerConfig()
 
 	var file runnerConfigFile
 	if err := yaml.Unmarshal(data, &file); err != nil {
@@ -89,7 +99,6 @@ func loadRunnerConfig(path string) (runnerConfig, error) {
 	}
 
 	cfg.capabilities = parseCapabilities(cfg.capRaw)
-	cfg.configPath = path
 	return cfg, nil
 }
 

@@ -66,6 +66,8 @@ func newRootCommand(opts commandOptions) *cobra.Command {
 	run.Flags().StringVarP(&cfg.configPath, "config", "c", cfg.configPath, "Runner config file")
 	run.RunE = wrapLegacyRunnerCommand(run.RunE)
 	root.AddCommand(run)
+	root.AddCommand(newVerifyCommand(opts, &cfg))
+	root.AddCommand(newConfigCommand(opts, &cfg))
 	return root
 }
 
