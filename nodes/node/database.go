@@ -104,11 +104,11 @@ func (n *DatabaseNode) Execute(ctx context.Context, input *Input) (*Output, erro
 		driver = "mysql"
 	}
 
-	db, err := sql.Open(driver, dsn)
+	db, release, err := acquireSQL(ctx, driver, dsn)
 	if err != nil {
 		return nil, fmt.Errorf("xflow.database: open connection: %w", err)
 	}
-	defer db.Close()
+	defer release()
 
 	operation := cast.ToString(input.Params["operation"])
 	table := cast.ToString(input.Params["table"])
@@ -364,6 +364,27 @@ func toInt(v any) (int, bool) {
 		return 0, false
 	}
 	return n, true
+}
+
+// acquireSQL fetches a *sql.DB from the request-scoped ResourcePool when one
+// is attached to ctx (the execution runner installs it). When no pool is
+// available — bare unit tests, hand-rolled engines without WithResourcePool —
+// it falls back to a fresh sql.Open and the returned release closes the
+// connection. Production deployments always run with a pool, so the closing
+// release is unreachable there.
+func acquireSQL(ctx context.Context, driver, dsn string) (*sql.DB, func(), error) {
+	if pool := ResourcePoolFromContext(ctx); pool != nil {
+		db, err := pool.SQL(ctx, driver, dsn)
+		if err != nil {
+			return nil, func() {}, err
+		}
+		return db, func() {}, nil
+	}
+	db, err := sql.Open(driver, dsn)
+	if err != nil {
+		return nil, func() {}, err
+	}
+	return db, func() { _ = db.Close() }, nil
 }
 
 func init() { Register(&DatabaseNode{}) }

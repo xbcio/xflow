@@ -4,17 +4,33 @@ import (
 	"context"
 
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/nodes/node"
 	"github.com/xbcio/xflow/types"
 )
 
 // Runner executes task leases using a handler registry.
 type Runner struct {
 	registry engine.HandlerRegistry
+	pool     node.ResourcePool
+}
+
+// RunnerOption customizes a Runner.
+type RunnerOption func(*Runner)
+
+// WithResourcePool installs a node.ResourcePool. The Runner attaches it to the
+// per-call context so resource-aware nodes (DatabaseNode, GRPCNode) can pool
+// their connections. nil pool is a valid no-op.
+func WithResourcePool(p node.ResourcePool) RunnerOption {
+	return func(r *Runner) { r.pool = p }
 }
 
 // NewRunner creates an in-process task runner.
-func NewRunner(registry engine.HandlerRegistry) *Runner {
-	return &Runner{registry: registry}
+func NewRunner(registry engine.HandlerRegistry, opts ...RunnerOption) *Runner {
+	r := &Runner{registry: registry}
+	for _, o := range opts {
+		o(r)
+	}
+	return r
 }
 
 // Execute runs a task lease. The returned handled flag is false when the task
@@ -28,6 +44,9 @@ func (r *Runner) Execute(ctx context.Context, lease *engine.TaskLease) (engine.T
 	)
 	if err != nil {
 		return engine.TaskResult{}, err
+	}
+	if r.pool != nil {
+		ctx = node.WithResourcePool(ctx, r.pool)
 	}
 	if sh, ok := handler.(types.SuspendingHandler); ok {
 		return r.executeSuspending(ctx, lease, sh)

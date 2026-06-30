@@ -12,6 +12,7 @@ import (
 	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
+	"github.com/xbcio/xflow/nodes/node"
 	"github.com/xbcio/xflow/store"
 )
 
@@ -19,9 +20,10 @@ import (
 type Option func(*config)
 
 type config struct {
-	concurrency int
-	execTTL     time.Duration
-	consumer    bool
+	concurrency  int
+	execTTL      time.Duration
+	consumer     bool
+	resourcePool node.ResourcePool
 }
 
 // WithConcurrency sets the number of Asynq queue consumer goroutines. Default is 10.
@@ -51,6 +53,13 @@ func WithConsumer(enabled bool) Option {
 	}
 }
 
+// WithResourcePool installs a process-scope ResourcePool. Worker pods that
+// run DatabaseNode / GRPCNode benefit from a pool; API-only pods (consumer
+// disabled) can leave it nil. See .claude/docs/specs/resource-pool.md.
+func WithResourcePool(p node.ResourcePool) Option {
+	return func(c *config) { c.resourcePool = p }
+}
+
 // Backend wires the Engine Core to Redis state and an Asynq task queue.
 // Call Bind() after creating the engine to wire the Asynq server.
 type Backend struct {
@@ -64,6 +73,7 @@ type Backend struct {
 	redisAddr      string
 	concurrency    int
 	consumer       bool
+	resourcePool   node.ResourcePool
 }
 
 // State returns the StateStore implementation.
@@ -111,6 +121,7 @@ func New(redisAddr string, db store.Store, opts ...Option) (*Backend, error) {
 		redisAddr:      redisAddr,
 		concurrency:    cfg.concurrency,
 		consumer:       cfg.consumer,
+		resourcePool:   cfg.resourcePool,
 	}, nil
 }
 
@@ -124,7 +135,11 @@ func (b *Backend) Bind(eng *engine.Engine) func() {
 		}
 	}
 
-	dispatcher := execution.NewEmbeddedDispatcher(eng, b.registry)
+	var opts []execution.RunnerOption
+	if b.resourcePool != nil {
+		opts = append(opts, execution.WithResourcePool(b.resourcePool))
+	}
+	dispatcher := execution.NewEmbeddedDispatcher(eng, b.registry, opts...)
 	return b.BindHandler(eng, dispatcher.HandleTask)
 }
 
@@ -167,5 +182,8 @@ func (b *Backend) BindHandler(eng *engine.Engine, handler func(context.Context, 
 		srv.Shutdown()
 		_ = b.queue.Close()
 		_ = b.rdb.Close()
+		if b.resourcePool != nil {
+			_ = b.resourcePool.Close()
+		}
 	}
 }

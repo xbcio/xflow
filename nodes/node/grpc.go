@@ -129,11 +129,11 @@ func (n *GRPCNode) Execute(ctx context.Context, input *Input) (*Output, error) {
 		dialOpts = append(dialOpts, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	}
 
-	conn, err := grpc.NewClient(host, dialOpts...)
+	conn, release, err := acquireGRPC(ctx, host, useTLS, dialOpts...)
 	if err != nil {
 		return &Output{Data: map[string]any{"error": fmt.Sprintf("dial: %v", err)}, Port: "error"}, nil
 	}
-	defer conn.Close()
+	defer release()
 
 	if md, ok := input.Params["metadata"].(map[string]any); ok {
 		pairs := make([]string, 0, len(md)*2)
@@ -180,6 +180,24 @@ func structFromJSON(data []byte) (proto.Message, error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+// acquireGRPC fetches a pooled *grpc.ClientConn keyed by (host, tls). Falls
+// back to per-call grpc.NewClient when no pool is attached so callers without
+// a backend-injected pool still work.
+func acquireGRPC(ctx context.Context, host string, secure bool, opts ...grpc.DialOption) (*grpc.ClientConn, func(), error) {
+	if pool := ResourcePoolFromContext(ctx); pool != nil {
+		conn, err := pool.GRPC(ctx, host, secure, opts...)
+		if err != nil {
+			return nil, func() {}, err
+		}
+		return conn, func() {}, nil
+	}
+	conn, err := grpc.NewClient(host, opts...)
+	if err != nil {
+		return nil, func() {}, err
+	}
+	return conn, func() { _ = conn.Close() }, nil
 }
 
 func init() { Register(&GRPCNode{}) }

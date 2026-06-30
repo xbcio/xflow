@@ -52,6 +52,10 @@ type engineConfig struct {
 
 	versionPolicy    execution.VersionPolicy
 	versionPolicySet bool
+
+	resourcePool       node.ResourcePool
+	resourcePoolSet    bool
+	resourcePoolConfig *node.ResourcePoolConfig
 }
 
 // WithConcurrency sets the task consumer concurrency.
@@ -93,6 +97,27 @@ func WithLogger(l engine.Logger) Option {
 func WithNodes(defs ...node.Handler) Option {
 	return func(c *engineConfig) {
 		c.nodes = append(c.nodes, defs...)
+	}
+}
+
+// WithResourcePool installs a custom node.ResourcePool. By default the SDK
+// creates a default pool (node.NewDefaultResourcePool) so DatabaseNode and
+// GRPCNode reuse connections automatically. Pass nil to disable pooling
+// entirely; nodes will then fall back to per-call construction.
+//
+// See .claude/docs/specs/resource-pool.md.
+func WithResourcePool(p node.ResourcePool) Option {
+	return func(c *engineConfig) {
+		c.resourcePool = p
+		c.resourcePoolSet = true
+	}
+}
+
+// WithResourcePoolConfig customizes the default pool's SQL / gRPC tunables.
+// Ignored when WithResourcePool is also supplied.
+func WithResourcePoolConfig(cfg node.ResourcePoolConfig) Option {
+	return func(c *engineConfig) {
+		c.resourcePoolConfig = &cfg
 	}
 }
 

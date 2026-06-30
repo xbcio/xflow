@@ -42,8 +42,12 @@ func NewLocal(opts ...Option) (*Engine, error) {
 	if cfg.concurrency <= 0 {
 		cfg.concurrency = 4
 	}
-
-	provider := backendmemory.New(backendmemory.WithConcurrency(cfg.concurrency))
+	pool := resolveResourcePool(cfg)
+	memOpts := []backendmemory.Option{backendmemory.WithConcurrency(cfg.concurrency)}
+	if pool != nil {
+		memOpts = append(memOpts, backendmemory.WithResourcePool(pool))
+	}
+	provider := backendmemory.New(memOpts...)
 	return newFromConfig(cfg, provider)
 }
 
@@ -78,15 +82,34 @@ func NewCluster(clusterCfg ClusterConfig, opts ...Option) (*Engine, error) {
 		cfg.concurrency = 10
 	}
 
-	a, err := backendasynq.New(clusterCfg.RedisAddr, clusterCfg.Store,
+	asynqOpts := []backendasynq.Option{
 		backendasynq.WithConcurrency(cfg.concurrency),
 		backendasynq.WithConsumer(!clusterCfg.DisableConsumer),
-	)
+	}
+	if pool := resolveResourcePool(cfg); pool != nil && !clusterCfg.DisableConsumer {
+		// Only worker pods need a pool; API-only pods don't dispatch handlers.
+		asynqOpts = append(asynqOpts, backendasynq.WithResourcePool(pool))
+	}
+	a, err := backendasynq.New(clusterCfg.RedisAddr, clusterCfg.Store, asynqOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("cluster: %w", err)
 	}
 
 	return newFromConfig(cfg, a)
+}
+
+// resolveResourcePool returns the configured pool, the default pool built from
+// resourcePoolConfig, or nil when the caller explicitly opted out via
+// WithResourcePool(nil).
+func resolveResourcePool(cfg *engineConfig) node.ResourcePool {
+	if cfg.resourcePoolSet {
+		return cfg.resourcePool // may be nil — explicit opt-out
+	}
+	poolCfg := node.DefaultResourcePoolConfig()
+	if cfg.resourcePoolConfig != nil {
+		poolCfg = *cfg.resourcePoolConfig
+	}
+	return node.NewDefaultResourcePool(poolCfg)
 }
 
 // newFromConfig assembles an Engine from a resolved engineConfig and a backend provider.

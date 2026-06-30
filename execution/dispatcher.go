@@ -34,8 +34,9 @@ func NewDispatcher(eng Engine, executor Executor) *Dispatcher {
 }
 
 // NewEmbeddedDispatcher creates a dispatcher backed by an in-process runner.
-func NewEmbeddedDispatcher(eng Engine, registry engine.HandlerRegistry) *Dispatcher {
-	return NewDispatcher(eng, NewRunner(registry))
+// RunnerOptions forward to the embedded Runner (e.g. WithResourcePool).
+func NewEmbeddedDispatcher(eng Engine, registry engine.HandlerRegistry, opts ...RunnerOption) *Dispatcher {
+	return NewDispatcher(eng, NewRunner(registry, opts...))
 }
 
 // HandleTask converts a queued engine task into a runner lease and commits the

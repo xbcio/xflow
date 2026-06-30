@@ -7,6 +7,7 @@ import (
 	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
+	"github.com/xbcio/xflow/nodes/node"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -14,7 +15,8 @@ import (
 type Option func(*config)
 
 type config struct {
-	concurrency int
+	concurrency  int
+	resourcePool node.ResourcePool
 }
 
 // WithConcurrency sets the number of in-memory queue consumer goroutines. Default is 4.
@@ -26,6 +28,14 @@ func WithConcurrency(n int) Option {
 	}
 }
 
+// WithResourcePool installs a process-scope ResourcePool used by
+// DatabaseNode / GRPCNode to reuse *sql.DB / *grpc.ClientConn across
+// invocations. Default is nil: nodes fall back to per-call construction.
+// See .claude/docs/specs/resource-pool.md.
+func WithResourcePool(p node.ResourcePool) Option {
+	return func(c *config) { c.resourcePool = p }
+}
+
 // Backend bundles in-memory state, queue, registry, and lifecycle binding.
 // Call Bind() after creating the engine to wire the queue handler.
 type Backend struct {
@@ -34,6 +44,7 @@ type Backend struct {
 	registry         *execution.Registry
 	workflowRegistry *workflowRegistry
 	triggerRuntime   *triggerPrimitives
+	resourcePool     node.ResourcePool
 }
 
 // New creates a memory backend with its components but does NOT start the queue.
@@ -50,6 +61,7 @@ func New(opts ...Option) *Backend {
 		registry:         execution.NewRegistry(),
 		workflowRegistry: newWorkflowRegistry(),
 		triggerRuntime:   newTriggerPrimitives(),
+		resourcePool:     cfg.resourcePool,
 	}
 }
 
@@ -69,10 +81,22 @@ func (b *Backend) WorkflowRegistry() backend.WorkflowRegistry { return b.workflo
 func (b *Backend) TriggerPrimitives() backend.TriggerPrimitives { return b.triggerRuntime }
 
 // Bind wires the embedded execution dispatcher into the queue and starts queue consumers.
-// Returns a stop function that drains the consumer pool.
+// Returns a stop function that drains the consumer pool. The stop function
+// also closes the resource pool when one was provided.
 func (b *Backend) Bind(eng *engine.Engine) func() {
-	dispatcher := execution.NewEmbeddedDispatcher(eng, b.registry)
-	return b.BindHandler(dispatcher.HandleTask)
+	var opts []execution.RunnerOption
+	if b.resourcePool != nil {
+		opts = append(opts, execution.WithResourcePool(b.resourcePool))
+	}
+	dispatcher := execution.NewEmbeddedDispatcher(eng, b.registry, opts...)
+	stop := b.BindHandler(dispatcher.HandleTask)
+	if b.resourcePool != nil {
+		return func() {
+			stop()
+			_ = b.resourcePool.Close()
+		}
+	}
+	return stop
 }
 
 // BindHandler wires a custom queue handler and starts queue consumers.
