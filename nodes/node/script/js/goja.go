@@ -13,18 +13,18 @@ func init() {
 	script.Register("js", "goja", func() script.Engine { return sharedGoja })
 }
 
-// sharedGoja is process-wide: it holds a sync.Pool of runtimes and a program
-// cache, both safe for concurrent use.
+// sharedGoja is process-wide: it holds a sync.Pool of runtimes and an LRU
+// program cache, both safe for concurrent use.
 var sharedGoja = &gojaEngine{
-	programs: map[string]*goja.Program{},
+	programs: newProgramCache(script.DefaultProgramCacheSize),
 }
 
 type gojaEngine struct {
-	pool   sync.Pool // of *pooledVM
-	progMu sync.RWMutex
-	// programs caches compiled scripts by source; assumes a bounded set of
-	// distinct scripts per deployment (no eviction).
-	programs map[string]*goja.Program
+	pool sync.Pool // of *pooledVM
+	// programs caches compiled scripts by source code (LRU bounded). The
+	// LRU evicts the least-recently-used entry once capacity is reached, so
+	// a deployment with high script churn stays memory-bounded.
+	programs *programCache
 }
 
 type pooledVM struct {
@@ -35,19 +35,14 @@ type pooledVM struct {
 func (e *gojaEngine) Name() string { return "js/goja" }
 
 func (e *gojaEngine) compile(code string) (*goja.Program, error) {
-	e.progMu.RLock()
-	p, ok := e.programs[code]
-	e.progMu.RUnlock()
-	if ok {
+	if p, ok := e.programs.get(code); ok {
 		return p, nil
 	}
 	p, err := goja.Compile("script.js", code, false)
 	if err != nil {
 		return nil, err
 	}
-	e.progMu.Lock()
-	e.programs[code] = p
-	e.progMu.Unlock()
+	e.programs.add(code, p)
 	return p, nil
 }
 
@@ -56,6 +51,9 @@ func (e *gojaEngine) get() *pooledVM {
 		return v
 	}
 	vm := goja.New()
+	// Resource limit: bound recursion depth so a runaway script raises a
+	// runtime error instead of overflowing the host goroutine stack.
+	vm.SetMaxCallStackSize(script.DefaultGojaStackSize)
 	base := map[string]struct{}{}
 	for _, k := range vm.GlobalObject().Keys() {
 		base[k] = struct{}{}
@@ -75,6 +73,13 @@ func (p *pooledVM) cleanup() {
 }
 
 func (e *gojaEngine) Execute(ctx context.Context, code string, globals map[string]any, h script.Helpers) (any, error) {
+	// TODO(metrics): emit before/after counters and timers when the project
+	// metrics middleware lands:
+	//   - script_goja_compile_total{result=hit|miss} (e.programs LRU)
+	//   - script_goja_compile_duration_seconds       (goja.Compile only)
+	//   - script_goja_pool_get_total{result=hit|miss} (warm vs cold VM)
+	//   - script_goja_execute_duration_seconds       (RunProgram window)
+	//   - script_goja_interrupt_total                (ctx-cancelled path)
 	prog, err := e.compile(code)
 	if err != nil {
 		return nil, fmt.Errorf("js/goja: compile: %w", err)
@@ -97,6 +102,13 @@ func (e *gojaEngine) Execute(ctx context.Context, code string, globals map[strin
 	// unconditional so its exit is observable via `exited`; ctx is always
 	// non-nil per the Engine contract (context.Background().Done() is a nil
 	// channel that blocks forever, so the watcher simply parks on <-done).
+	//
+	// LIMITATION: goja's Interrupt is checked only at function-call boundaries
+	// in the interpreter, NOT inside tight pure-computation loops. A script
+	// like `while(true){}` or `for(let i=0;;i++){}` cannot be interrupted by
+	// this watcher — the ctx will expire but RunProgram never returns. CPU-
+	// heavy or potentially-unbounded scripts MUST run on js/qjs or
+	// wasm/wazero, which support true mid-execution termination.
 	done := make(chan struct{})
 	exited := make(chan struct{})
 	go func() {

@@ -2,10 +2,12 @@ package js
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/dop251/goja"
 	"github.com/xbcio/xflow/nodes/node/script"
 )
 
@@ -121,5 +123,44 @@ func TestGoja_TimeoutThenReuse(t *testing.T) {
 		if out.(map[string]any)["ok"] != int64(2) && out.(map[string]any)["ok"] != 2.0 {
 			t.Fatalf("iteration %d: ok = %v", i, out.(map[string]any)["ok"])
 		}
+	}
+}
+
+// TestGoja_StackOverflow verifies SetMaxCallStackSize(DefaultGojaStackSize)
+// surfaces unbounded recursion as a runtime error instead of crashing the
+// host. goja returns *goja.StackOverflowError unwrapped under our %w wrap.
+func TestGoja_StackOverflow(t *testing.T) {
+	_, err := newGoja().Execute(context.Background(),
+		`(function f(){ return f(); })()`,
+		nil, script.DefaultHelpers())
+	if err == nil {
+		t.Fatal("expected stack overflow error")
+	}
+	var soe *goja.StackOverflowError
+	if !errors.As(err, &soe) {
+		t.Fatalf("expected *goja.StackOverflowError, got %T: %v", err, err)
+	}
+}
+
+// TestGoja_ProgramCacheEvict drives a small isolated cache (capacity 2) past
+// its limit and asserts the eldest entry is evicted. Uses a fresh engine
+// instance to avoid polluting sharedGoja.
+func TestGoja_ProgramCacheEvict(t *testing.T) {
+	e := &gojaEngine{programs: newProgramCache(2)}
+	scripts := []string{
+		`({a: 1})`,
+		`({b: 2})`,
+		`({c: 3})`,
+	}
+	for i, code := range scripts {
+		if _, err := e.compile(code); err != nil {
+			t.Fatalf("compile %d: %v", i, err)
+		}
+	}
+	if e.programs.contains(scripts[0]) {
+		t.Fatal("expected scripts[0] to be evicted after capacity overflow")
+	}
+	if !e.programs.contains(scripts[1]) || !e.programs.contains(scripts[2]) {
+		t.Fatal("expected scripts[1] and scripts[2] to remain")
 	}
 }

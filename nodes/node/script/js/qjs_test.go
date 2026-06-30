@@ -119,3 +119,22 @@ func TestQJS_Timeout(t *testing.T) {
 		t.Fatal("expected timeout error")
 	}
 }
+
+// TestQJS_Warmup verifies the warmup hook runs to completion (the QuickJS
+// wasm build cache is process-wide, so a strict cold-vs-hot timing assertion
+// is flaky — this test guards the contract: Warmup returns nil and does not
+// break subsequent Execute calls.
+func TestQJS_Warmup(t *testing.T) {
+	if err := Warmup(context.Background()); err != nil {
+		t.Fatalf("Warmup: %v", err)
+	}
+	// After warmup, normal execution must still succeed.
+	out, err := newQJS(t).Execute(context.Background(),
+		`({ok: 1+1})`, nil, script.DefaultHelpers())
+	if err != nil {
+		t.Fatalf("post-warmup execute: %v", err)
+	}
+	if out.(map[string]any)["ok"] != float64(2) {
+		t.Fatalf("ok = %v", out.(map[string]any)["ok"])
+	}
+}

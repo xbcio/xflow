@@ -11,6 +11,8 @@ import (
 
 func init() {
 	script.Register("js", "qjs", func() script.Engine { return qjsEngine{} })
+	// QuickJS-on-wasm has a ~330ms first-load cost; let the host warm it up.
+	script.RegisterWarmer(Warmup)
 }
 
 // qjsEngine runs scripts on QuickJS-via-wazero (pure Go). The QuickJS wasm
@@ -42,6 +44,11 @@ const stripGlobals = `(function(){
 func (qjsEngine) Name() string { return "js/qjs" }
 
 func (qjsEngine) Execute(ctx context.Context, code string, globals map[string]any, h script.Helpers) (result any, err error) {
+	// TODO(metrics): emit before/after counters and timers when the project
+	// metrics middleware lands:
+	//   - script_qjs_runtime_new_duration_seconds (qjs.New cost; cold-start indicator)
+	//   - script_qjs_execute_duration_seconds    (rt.Eval window)
+	//   - script_qjs_abort_total{cause=ctx|panic} (recover path)
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -62,6 +69,11 @@ func (qjsEngine) Execute(ctx context.Context, code string, globals map[string]an
 	rt, nerr := qjs.New(qjs.Option{
 		Context:            ctx,
 		CloseOnContextDone: true,
+		// Resource limits: cap the QuickJS heap and C-stack so a runaway
+		// script raises an out-of-memory exception instead of consuming
+		// unbounded host memory.
+		MemoryLimit:  script.DefaultQJSMemoryLimit,
+		MaxStackSize: script.DefaultQJSMaxStackSize,
 	})
 	if nerr != nil {
 		return nil, fmt.Errorf("js/qjs: new runtime: %w", nerr)
@@ -150,4 +162,25 @@ func (qjsEngine) Execute(ctx context.Context, code string, globals map[string]an
 func safeCloseQJS(rt *qjs.Runtime) {
 	defer func() { _ = recover() }()
 	rt.Close()
+}
+
+// Warmup pre-instantiates a qjs runtime to populate fastschema/qjs's internal
+// QuickJS-wasm build cache process-wide. The first qjs.New takes ~330ms while
+// the wasm is compiled; subsequent calls drop to ~3ms once the cache is hot.
+// Call once at server/runner startup to absorb the cold-start latency before
+// real traffic.
+func Warmup(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	rt, err := qjs.New(qjs.Option{
+		Context:      ctx,
+		MemoryLimit:  script.DefaultQJSMemoryLimit,
+		MaxStackSize: script.DefaultQJSMaxStackSize,
+	})
+	if err != nil {
+		return fmt.Errorf("js/qjs: warmup: %w", err)
+	}
+	safeCloseQJS(rt)
+	return nil
 }

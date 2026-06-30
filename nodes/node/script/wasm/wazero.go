@@ -15,6 +15,25 @@ import (
 	"github.com/tetratelabs/wazero/sys"
 )
 
+// TODO(wasm host imports): currently guests communicate via stdin/stdout JSON
+// only — they cannot call $helpers (base64, hmac, jsonPath...) mid-execution.
+// Future work: register a host module (e.g. "xflow") that exports helpers via
+// a WASI-like ABI:
+//
+//	(import "xflow" "base64_encode" (func (param i32 i32) (result i32 i32)))
+//
+// Requirements when this is implemented:
+//  1. ABI version negotiation — guests declare which xflow ABI they target;
+//     host refuses incompatible modules to avoid silent breakage on upgrade.
+//  2. Per-call host fn dispatch must stay sandbox-safe (no FS/clock/random
+//     slipping in via host imports; deterministic, IO-free helpers only).
+//  3. Memory ownership convention — agree on host-allocates vs guest-allocates
+//     for variable-size return values, document it once on the host module.
+//  4. Parity test: the same logical helper invocation produces identical
+//     bytes from goja, qjs, AND a wasm guest using the host import.
+//
+// Until then, guests must bundle equivalent functionality themselves (e.g.
+// Go guests import encoding/base64).
 func init() {
 	script.Register("wasm", "wazero", func() script.Engine { return sharedWazero })
 }
@@ -36,7 +55,13 @@ func (e *wazeroEngine) runtime(ctx context.Context) wazero.Runtime {
 		// when ctx expires — even a tight CPU-bound loop with no host calls is
 		// interrupted (spec §7.3). The up-front ctx.Err() guard in Execute still
 		// short-circuits an already-expired ctx without starting execution.
-		e.rt = wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().WithCloseOnContextDone(true))
+		// WithMemoryLimitPages caps each module's linear memory at the
+		// configured budget (each page is 64 KiB). Guests that exceed this
+		// via memory.grow trap at the wazero boundary instead of consuming
+		// unbounded host memory.
+		e.rt = wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().
+			WithCloseOnContextDone(true).
+			WithMemoryLimitPages(script.DefaultWasmMemoryPages))
 		wasi_snapshot_preview1.MustInstantiate(ctx, e.rt)
 	})
 	return e.rt
@@ -64,6 +89,12 @@ func (e *wazeroEngine) compile(ctx context.Context, wasmBytes []byte) (wazero.Co
 }
 
 func (e *wazeroEngine) Execute(ctx context.Context, code string, globals map[string]any, _ script.Helpers) (any, error) {
+	// TODO(metrics): emit before/after counters and timers when the project
+	// metrics middleware lands:
+	//   - script_wasm_compile_total{result=hit|miss} (sha256 LRU)
+	//   - script_wasm_compile_duration_seconds       (CompileModule only)
+	//   - script_wasm_execute_duration_seconds       (InstantiateModule window)
+	//   - script_wasm_exit_total{code=...}           (guest exit codes)
 	if ctx == nil {
 		ctx = context.Background()
 	}

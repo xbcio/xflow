@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/xbcio/xflow/nodes/node/script"
@@ -18,12 +19,24 @@ type ScriptNode struct {
 	Creds       []string
 }
 
-// Script creates a script node. Defaults: language=js, runtime=goja.
+// Script creates a script node. The caller MUST explicitly choose a language
+// and runtime — there are no implicit defaults, so the choice (and its
+// security/perf tradeoff) is always made consciously.
 //
-//	node.Script(`({result: $input.x * 2})`)
-//	node.Script(code).Runtime("qjs")
-//	node.Script(b64wasm).Language("wasm")
-//	node.Script(code).Credentials("aes_key", "api_token")
+//	node.Script(code).Language("js").Runtime("goja")
+//	node.Script(code).Language("js").Runtime("qjs")
+//	node.Script(b64wasm).Language("wasm").Runtime("wazero")
+//	node.Script(code).Language("js").Runtime("goja").Credentials("aes_key", "api_token")
+//
+// Runtime selection guide:
+//   - js/goja: fastest cold start, pooled VMs, lowest per-call overhead.
+//     CANNOT interrupt tight pure-computation loops (e.g. `while(true){}`).
+//     Pick for short, well-bounded scripts.
+//   - js/qjs: QuickJS via wasm. ~330ms first-load (cached process-wide),
+//     ~3ms per call after. Genuine mid-execution termination. Pick when
+//     scripts may be long-running or CPU-bound.
+//   - wasm/wazero: any language compiled to wasip1. Strictest sandbox,
+//     true ctx cancellation. Pick for untrusted code or non-JS guests.
 func Script(code string) *ScriptNode {
 	return &ScriptNode{Code: code}
 }
@@ -40,8 +53,8 @@ func (n *ScriptNode) Descriptor() Descriptor {
 		Type:        "xflow.script",
 		DisplayName: "Script",
 		Params: []ParamSpec{
-			{Name: "language", DisplayName: "Language", Type: ParamString, Required: false, Default: "js", Description: "Language family: js | wasm"},
-			{Name: "runtime", DisplayName: "Runtime", Type: ParamString, Required: false, Default: "goja", Description: "Engine: js->goja|qjs, wasm->wazero"},
+			{Name: "language", DisplayName: "Language", Type: ParamString, Required: true, Description: "Language family: js | wasm (no default — choose explicitly)"},
+			{Name: "runtime", DisplayName: "Runtime", Type: ParamString, Required: true, Description: "Engine: js->goja|qjs, wasm->wazero (no default — choose explicitly)"},
 			{Name: "code", DisplayName: "Code", Type: ParamString, Required: true, Description: "JS source (js) or base64 wasm module (wasm)"},
 			{Name: "credentials", DisplayName: "Credentials", Type: ParamArray, Required: false, Description: "Declared credential names injected as $credentials"},
 		},
@@ -57,12 +70,13 @@ func (n *ScriptNode) OnError(s OnError) Builder {
 }
 
 func (n *ScriptNode) RawParams() any {
-	params := map[string]any{"code": n.Code}
-	if n.Lang != "" && n.Lang != "js" {
-		params["language"] = n.Lang
-	}
-	if n.RuntimeName != "" && n.RuntimeName != "goja" {
-		params["runtime"] = n.RuntimeName
+	// Always emit language and runtime — there are no defaults. Empty values
+	// flow through to Execute which surfaces them as config errors, so the
+	// DSL output stays a faithful mirror of what was set on the builder.
+	params := map[string]any{
+		"code":     n.Code,
+		"language": n.Lang,
+		"runtime":  n.RuntimeName,
 	}
 	if len(n.Creds) > 0 {
 		params["credentials"] = n.Creds
@@ -71,6 +85,11 @@ func (n *ScriptNode) RawParams() any {
 }
 
 func (n *ScriptNode) Execute(ctx context.Context, input *Input) (*Output, error) {
+	// TODO(metrics): emit end-to-end counters and timers when the project
+	// metrics middleware lands:
+	//   - xflow_script_execute_total{language,runtime,outcome=main|error|config}
+	//   - xflow_script_execute_duration_seconds{language,runtime}
+	//   - xflow_script_output_bytes (histogram of result size before the cap)
 	code, _ := input.Params["code"].(string)
 	if code == "" {
 		return nil, fmt.Errorf("xflow.script: code parameter is required")
@@ -78,15 +97,11 @@ func (n *ScriptNode) Execute(ctx context.Context, input *Input) (*Output, error)
 
 	language, _ := input.Params["language"].(string)
 	if language == "" {
-		language = "js"
+		return nil, fmt.Errorf("xflow.script: language parameter is required (choose: js | wasm)")
 	}
 	runtime, _ := input.Params["runtime"].(string)
 	if runtime == "" {
-		if language == "wasm" {
-			runtime = "wazero"
-		} else {
-			runtime = "goja"
-		}
+		return nil, fmt.Errorf("xflow.script: runtime parameter is required (js -> goja|qjs, wasm -> wazero)")
 	}
 
 	engine, ok := script.Lookup(language, runtime)
@@ -110,7 +125,25 @@ func (n *ScriptNode) Execute(ctx context.Context, input *Input) (*Output, error)
 	if err != nil {
 		return &Output{Data: map[string]any{"error": err.Error()}, Port: "error"}, nil
 	}
-	return &Output{Data: script.MapResult(result), Port: "main"}, nil
+	data := script.MapResult(result)
+	if sizeErr := checkResultSize(data); sizeErr != nil {
+		return &Output{Data: map[string]any{"error": sizeErr.Error()}, Port: "error"}, nil
+	}
+	return &Output{Data: data, Port: "main"}, nil
+}
+
+// checkResultSize enforces DefaultMaxOutputBytes on the JSON-encoded result.
+// Done at the node layer so every engine inherits the same cap without
+// having to thread limits through each runtime.
+func checkResultSize(data map[string]any) error {
+	b, err := json.Marshal(data)
+	if err != nil {
+		return fmt.Errorf("xflow.script: encode result: %w", err)
+	}
+	if len(b) > script.DefaultMaxOutputBytes {
+		return &script.OutputSizeError{Size: len(b), Limit: script.DefaultMaxOutputBytes}
+	}
+	return nil
 }
 
 // readCredNames accepts both []string (Go DSL) and []any (decoded YAML/JSON).
