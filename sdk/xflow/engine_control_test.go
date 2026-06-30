@@ -148,6 +148,50 @@ func TestEngineControlAPIApprovalTimeoutRoutes(t *testing.T) {
 	}
 }
 
+func TestAddWorkflowReturnsStableUUIDForSameDefinition(t *testing.T) {
+	eng, err := NewLocal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eng.Stop()
+
+	wf := Workflow("wf")
+	wf.Node("start", node.Start())
+	first, err := eng.AddWorkflow(context.Background(), wf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := eng.AddWorkflow(context.Background(), wf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == "" || first != second {
+		t.Fatalf("ids = %q/%q, want same non-empty UUID", first, second)
+	}
+}
+
+func TestInvokeStartCreatesExecution(t *testing.T) {
+	eng, err := NewLocal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eng.Stop()
+
+	wf := Workflow("wf")
+	wf.Node("start", node.Start())
+	workflowID, err := eng.AddWorkflow(context.Background(), wf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	execID, err := eng.Invoke(context.Background(), workflowID, Start(), map[string]any{"k": "v"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if execID == "" {
+		t.Fatal("empty execution id")
+	}
+}
+
 type blockingHandler struct {
 	release chan struct{}
 	once    sync.Once

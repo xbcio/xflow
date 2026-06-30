@@ -20,6 +20,7 @@ import (
 type Engine struct {
 	eng                 *engine.Engine
 	registry            engine.HandlerRegistry
+	workflowRegistry    backend.WorkflowRegistry
 	waiter              backend.Waiter
 	stopFns             []func()
 	allowDirectHandlers bool
@@ -118,6 +119,7 @@ func newFromConfig(cfg *engineConfig, provider backend.Provider) (*Engine, error
 	e := &Engine{
 		eng:                 eng,
 		registry:            cfg.registry,
+		workflowRegistry:    provider.WorkflowRegistry(),
 		waiter:              cfg.waiter,
 		stopFns:             cfg.stopFns,
 		allowDirectHandlers: cfg.allowDirectHandlers,
@@ -180,19 +182,8 @@ func (e *Engine) Submit(ctx context.Context, wf *WorkflowBuilder, params map[str
 		return "", err
 	}
 
-	// Register direct handlers if the registry supports it.
-	if len(wf.directHandlers()) > 0 {
-		lr, ok := e.registry.(*execution.Registry)
-		if !cfgAllowsDirectHandlers(e) || !ok {
-			names := make([]string, 0, len(wf.directHandlers()))
-			for n := range wf.directHandlers() {
-				names = append(names, n)
-			}
-			return "", fmt.Errorf("nodes %v use direct action handlers (local mode only); with cluster, define custom nodes with node.Define and register consumer capabilities with xflow.WithNodes", names)
-		}
-		for nodeName, h := range wf.directHandlers() {
-			lr.RegisterNodeHandler(nodeName, h)
-		}
+	if err := e.registerDirectHandlers(wf); err != nil {
+		return "", err
 	}
 
 	g, err := graph.Compile(def)
@@ -206,6 +197,24 @@ func (e *Engine) Submit(ctx context.Context, wf *WorkflowBuilder, params map[str
 	ctx = engine.WithWorkflowDef(ctx, def)
 
 	return e.eng.Submit(ctx, g, params, cfg.runtime)
+}
+
+func (e *Engine) registerDirectHandlers(wf *WorkflowBuilder) error {
+	if len(wf.directHandlers()) == 0 {
+		return nil
+	}
+	lr, ok := e.registry.(*execution.Registry)
+	if !cfgAllowsDirectHandlers(e) || !ok {
+		names := make([]string, 0, len(wf.directHandlers()))
+		for n := range wf.directHandlers() {
+			names = append(names, n)
+		}
+		return fmt.Errorf("nodes %v use direct action handlers (local mode only); with cluster, define custom nodes with node.Define and register consumer capabilities with xflow.WithNodes", names)
+	}
+	for nodeName, h := range wf.directHandlers() {
+		lr.RegisterNodeHandler(nodeName, h)
+	}
+	return nil
 }
 
 func (e *Engine) registerWorkflowHandlers(wf *WorkflowBuilder) error {
