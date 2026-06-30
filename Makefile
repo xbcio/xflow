@@ -1,4 +1,4 @@
-.PHONY: all build test lint fmt tidy clean run-server run-runner install-hooks
+.PHONY: all build test test-concurrency lint fmt tidy clean run-server run-runner install-hooks proto proto-tools
 
 # ── Build ──────────────────────────────────────────────────────────────────────
 
@@ -24,6 +24,11 @@ test-verbose:
 
 test-examples:
 	go test ./sdk/examples/ -race -count=1 -v -timeout 30s
+
+# Concurrency stress suite. Gated behind the `concurrency` build tag so the
+# default `make test` stays fast. Spec: .claude/docs/specs/lua-concurrency-tests.md
+test-concurrency:
+	go test -tags=concurrency ./backend/memory/ ./backend/asynq/ -race -count=3 -timeout 5m
 
 # ── Code quality ───────────────────────────────────────────────────────────────
 
@@ -57,6 +62,20 @@ run-runner:
 db-migrate:
 	@if [ -z "$(DSN)" ]; then echo "Usage: make db-migrate DSN=<mysql-dsn>"; exit 1; fi
 	mysql "$(DSN)" < db/xflow_schema.sql
+
+# ── Protobuf / gRPC ──────────────────────────────────────────────────────────
+
+# Install the protoc Go plugins (run once). Requires protoc on PATH.
+proto-tools:
+	go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+	go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+
+# Regenerate gRPC stubs from .proto sources. Requires protoc + plugins on PATH.
+proto:
+	protoc \
+		--go_out=. --go_opt=module=github.com/xbcio/xflow \
+		--go-grpc_out=. --go-grpc_opt=module=github.com/xbcio/xflow \
+		service/protocol/runnerpb/runner.proto
 
 # ── Git hooks ──────────────────────────────────────────────────────────────────
 
