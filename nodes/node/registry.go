@@ -39,24 +39,10 @@ func Register(h ActionHandler) {
 	globalRegistry.mu.Lock()
 	defer globalRegistry.mu.Unlock()
 
-	if globalRegistry.versioned[t] == nil {
-		globalRegistry.versioned[t] = make(map[int]ActionHandler)
-	}
-	globalRegistry.versioned[t][version] = h
+	registerActionLocked(t, version, h)
 	if th, ok := h.(types.TriggerHandler); ok {
 		registerTriggerLocked(t, version, th)
 	}
-
-	// latest version wins as default
-	if cur, exists := globalRegistry.handlers[t]; exists {
-		if cv, ok := cur.(interface{ NodeVersion() int }); ok {
-			if version >= cv.NodeVersion() {
-				globalRegistry.handlers[t] = h
-			}
-			return
-		}
-	}
-	globalRegistry.handlers[t] = h
 }
 
 func RegisterTrigger(h types.TriggerHandler) {
@@ -71,6 +57,27 @@ func RegisterTrigger(h types.TriggerHandler) {
 	globalRegistry.mu.Lock()
 	defer globalRegistry.mu.Unlock()
 	registerTriggerLocked(t, version, h)
+	if ah, ok := h.(ActionHandler); ok {
+		registerActionLocked(t, version, ah)
+	}
+}
+
+func registerActionLocked(nodeType string, version int, h ActionHandler) {
+	if globalRegistry.versioned[nodeType] == nil {
+		globalRegistry.versioned[nodeType] = make(map[int]ActionHandler)
+	}
+	globalRegistry.versioned[nodeType][version] = h
+
+	// latest version wins as default
+	if cur, exists := globalRegistry.handlers[nodeType]; exists {
+		if cv, ok := cur.(interface{ NodeVersion() int }); ok {
+			if version >= cv.NodeVersion() {
+				globalRegistry.handlers[nodeType] = h
+			}
+			return
+		}
+	}
+	globalRegistry.handlers[nodeType] = h
 }
 
 func registerTriggerLocked(nodeType string, version int, h types.TriggerHandler) {

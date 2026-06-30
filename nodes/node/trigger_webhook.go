@@ -82,6 +82,9 @@ func (n *WebhookTriggerNode) OnError(s OnError) Builder {
 	return n
 }
 func (n *WebhookTriggerNode) TriggerHandler() TriggerHandler { return n }
+func (n *WebhookTriggerNode) Execute(_ context.Context, input *Input) (*Output, error) {
+	return executeTriggerEntry(input)
+}
 
 func (n *WebhookTriggerNode) Activate(ctx context.Context, in *types.TriggerActivateInput) (types.TriggerSubscription, error) {
 	method := strings.ToUpper(in.GetString("method"))

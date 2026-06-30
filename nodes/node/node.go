@@ -212,6 +212,19 @@ type TriggerDefinition struct {
 	activate   TriggerActivateFunc
 }
 
+func executeTriggerEntry(input *Input) (*Output, error) {
+	data := map[string]any{}
+	if input != nil && input.Data != nil {
+		for k, v := range input.Data {
+			data[k] = v
+		}
+	}
+	if _, ok := data["trigger"]; !ok {
+		data["trigger"] = &types.TriggerEvent{}
+	}
+	return &Output{Data: data, Port: "main"}, nil
+}
+
 func DefineTrigger(nodeType string, activate TriggerActivateFunc) *TriggerDefinition {
 	if nodeType == "" {
 		panic("node.DefineTrigger: nodeType must not be empty")
@@ -231,6 +244,9 @@ func DefineTrigger(nodeType string, activate TriggerActivateFunc) *TriggerDefini
 
 func (d *TriggerDefinition) New(params any) Builder { return newTriggerBuilder(d, params) }
 func (d *TriggerDefinition) Descriptor() Descriptor { return d.descriptor }
+func (d *TriggerDefinition) Execute(_ context.Context, input *Input) (*Output, error) {
+	return executeTriggerEntry(input)
+}
 func (d *TriggerDefinition) Activate(ctx context.Context, input *types.TriggerActivateInput) (types.TriggerSubscription, error) {
 	return d.activate(ctx, input)
 }

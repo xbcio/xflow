@@ -45,6 +45,9 @@ func (n *TimerTriggerNode) OnError(s OnError) Builder {
 	return n
 }
 func (n *TimerTriggerNode) TriggerHandler() TriggerHandler { return n }
+func (n *TimerTriggerNode) Execute(_ context.Context, input *Input) (*Output, error) {
+	return executeTriggerEntry(input)
+}
 
 func (n *TimerTriggerNode) Activate(ctx context.Context, in *types.TriggerActivateInput) (types.TriggerSubscription, error) {
 	interval, err := triggerDurationParam(in.Params["interval"])

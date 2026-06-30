@@ -40,6 +40,25 @@ func (h *triggerHandler) Activate(_ context.Context, _ *types.TriggerActivateInp
 	return types.CloseFunc(func(context.Context) error { return nil }), nil
 }
 
+type versionedTriggerHandler struct {
+	nodeType string
+	version  int
+}
+
+func (h *versionedTriggerHandler) Descriptor() node.Descriptor {
+	return node.Descriptor{Type: h.nodeType, Kind: types.NodeKindTrigger}
+}
+
+func (h *versionedTriggerHandler) Execute(_ context.Context, _ *node.Input) (*node.Output, error) {
+	return &node.Output{Data: map[string]any{"version": h.version}}, nil
+}
+
+func (h *versionedTriggerHandler) Activate(_ context.Context, _ *types.TriggerActivateInput) (types.TriggerSubscription, error) {
+	return types.CloseFunc(func(context.Context) error { return nil }), nil
+}
+
+func (h *versionedTriggerHandler) NodeVersion() int { return h.version }
+
 func init() {
 	node.Register(&goodHandler{})
 	node.Register(&triggerHandler{})
@@ -96,6 +115,40 @@ func TestRegistry_LookupTrigger(t *testing.T) {
 	}
 	if h == nil {
 		t.Fatal("LookupTrigger: returned nil handler")
+	}
+}
+
+func TestRegisterTriggerPreservesLatestActionDefault(t *testing.T) {
+	const nodeType = "test.registry.trigger.versioned"
+
+	newer := &versionedTriggerHandler{nodeType: nodeType, version: 2}
+	older := &versionedTriggerHandler{nodeType: nodeType, version: 1}
+
+	node.RegisterTrigger(newer)
+	node.RegisterTrigger(older)
+
+	h, found := node.Lookup(nodeType)
+	if !found {
+		t.Fatal("Lookup: expected action handler to be found after RegisterTrigger")
+	}
+	got, ok := h.(*versionedTriggerHandler)
+	if !ok {
+		t.Fatalf("Lookup: handler type = %T, want *versionedTriggerHandler", h)
+	}
+	if got.NodeVersion() != 2 {
+		t.Fatalf("Lookup: default version = %d, want 2", got.NodeVersion())
+	}
+
+	v1, found := node.LookupVersion(nodeType, 1)
+	if !found {
+		t.Fatal("LookupVersion: expected v1 handler to be registered")
+	}
+	gotV1, ok := v1.(*versionedTriggerHandler)
+	if !ok {
+		t.Fatalf("LookupVersion: handler type = %T, want *versionedTriggerHandler", v1)
+	}
+	if gotV1.NodeVersion() != 1 {
+		t.Fatalf("LookupVersion: version = %d, want 1", gotV1.NodeVersion())
 	}
 }
 

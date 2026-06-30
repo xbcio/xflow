@@ -53,6 +53,9 @@ func (n *CronTriggerNode) OnError(s OnError) Builder {
 	return n
 }
 func (n *CronTriggerNode) TriggerHandler() TriggerHandler { return n }
+func (n *CronTriggerNode) Execute(_ context.Context, input *Input) (*Output, error) {
+	return executeTriggerEntry(input)
+}
 
 func (n *CronTriggerNode) Activate(ctx context.Context, in *types.TriggerActivateInput) (types.TriggerSubscription, error) {
 	expr := cast.ToString(in.Params["expression"])

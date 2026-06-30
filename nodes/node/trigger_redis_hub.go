@@ -114,6 +114,9 @@ func (n *RedisHubTriggerNode) OnError(s OnError) Builder {
 	return n
 }
 func (n *RedisHubTriggerNode) TriggerHandler() TriggerHandler { return n }
+func (n *RedisHubTriggerNode) Execute(_ context.Context, input *Input) (*Output, error) {
+	return executeTriggerEntry(input)
+}
 
 func (n *RedisHubTriggerNode) Activate(ctx context.Context, in *types.TriggerActivateInput) (types.TriggerSubscription, error) {
 	cfg, err := redisHubConfigFromParams(in.Params)

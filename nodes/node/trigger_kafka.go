@@ -117,6 +117,9 @@ func (n *KafkaTriggerNode) OnError(s OnError) Builder {
 	return n
 }
 func (n *KafkaTriggerNode) TriggerHandler() TriggerHandler { return n }
+func (n *KafkaTriggerNode) Execute(_ context.Context, input *Input) (*Output, error) {
+	return executeTriggerEntry(input)
+}
 
 func (n *KafkaTriggerNode) Activate(ctx context.Context, in *types.TriggerActivateInput) (types.TriggerSubscription, error) {
 	cfg, err := kafkaConfigFromParams(in.Params)
