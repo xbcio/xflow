@@ -147,3 +147,42 @@ func TestWasm_ModuleCacheHit(t *testing.T) {
 		}
 	}
 }
+
+func TestWasm_CredentialParityWithJS(t *testing.T) {
+	globals := map[string]any{
+		"$credentials": map[string]any{"aes_key": map[string]any{"key": "shared-kk"}},
+		"$credential":  map[string]any{"token": "shared-tt"},
+	}
+
+	// wasm path: echo guest extracts credKey and firstToken
+	wOut, err := newWasm(t).Execute(context.Background(), b64(echoWasm), globals, script.DefaultHelpers())
+	if err != nil {
+		t.Fatalf("wasm exec: %v", err)
+	}
+	wm := wOut.(map[string]any)
+	wasmKey := wm["credKey"]
+	wasmTok := wm["firstToken"]
+
+	// js (goja) path: read the same fields
+	jsEngine, ok := script.Lookup("js", "goja")
+	if !ok {
+		t.Fatal("goja engine not registered")
+	}
+	jOut, err := jsEngine.Execute(context.Background(),
+		`({credKey: $credentials.aes_key.key, firstToken: $credential.token})`,
+		globals, script.DefaultHelpers())
+	if err != nil {
+		t.Fatalf("js exec: %v", err)
+	}
+	jm := jOut.(map[string]any)
+	jsKey := jm["credKey"]
+	jsTok := jm["firstToken"]
+
+	if wasmKey != jsKey || wasmTok != jsTok {
+		t.Fatalf("family mismatch: wasm(key=%v,tok=%v) js(key=%v,tok=%v)", wasmKey, wasmTok, jsKey, jsTok)
+	}
+	// And confirm the actual expected values came through (not both nil).
+	if wasmKey != "shared-kk" || wasmTok != "shared-tt" {
+		t.Fatalf("credential values wrong: key=%v tok=%v", wasmKey, wasmTok)
+	}
+}
