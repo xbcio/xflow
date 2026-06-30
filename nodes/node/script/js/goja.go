@@ -20,8 +20,8 @@ var sharedGoja = &gojaEngine{
 }
 
 type gojaEngine struct {
-	pool     sync.Pool // of *pooledVM
-	progMu   sync.RWMutex
+	pool   sync.Pool // of *pooledVM
+	progMu sync.RWMutex
 	// programs caches compiled scripts by source; assumes a bounded set of
 	// distinct scripts per deployment (no eviction).
 	programs map[string]*goja.Program
