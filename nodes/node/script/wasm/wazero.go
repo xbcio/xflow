@@ -32,7 +32,11 @@ func (e *wazeroEngine) Name() string { return "wasm/wazero" }
 
 func (e *wazeroEngine) runtime(ctx context.Context) wazero.Runtime {
 	e.rtOnce.Do(func() {
-		e.rt = wazero.NewRuntime(ctx)
+		// WithCloseOnContextDone lets wazero abort in-flight guest execution
+		// when ctx expires — even a tight CPU-bound loop with no host calls is
+		// interrupted (spec §7.3). The up-front ctx.Err() guard in Execute still
+		// short-circuits an already-expired ctx without starting execution.
+		e.rt = wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().WithCloseOnContextDone(true))
 		wasi_snapshot_preview1.MustInstantiate(ctx, e.rt)
 	})
 	return e.rt

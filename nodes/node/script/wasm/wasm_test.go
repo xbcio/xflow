@@ -12,7 +12,10 @@ import (
 	_ "github.com/xbcio/xflow/nodes/node/script/js" // registers goja for the parity test
 )
 
-var echoWasm []byte
+var (
+	echoWasm []byte
+	spinWasm []byte
+)
 
 func TestMain(m *testing.M) {
 	dir, err := os.MkdirTemp("", "wasmtest")
@@ -20,17 +23,25 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	defer os.RemoveAll(dir)
-	out := filepath.Join(dir, "echo.wasm")
-	cmd := exec.Command("go", "build", "-o", out, "./testdata/echo/main.go")
+	echoWasm = buildGuest(dir, "echo")
+	spinWasm = buildGuest(dir, "spin")
+	os.Exit(m.Run())
+}
+
+// buildGuest compiles testdata/<name>/main.go to a WASI module and returns its
+// bytes.
+func buildGuest(dir, name string) []byte {
+	out := filepath.Join(dir, name+".wasm")
+	cmd := exec.Command("go", "build", "-o", out, "./testdata/"+name+"/main.go")
 	cmd.Env = append(os.Environ(), "GOOS=wasip1", "GOARCH=wasm")
 	if b, err := cmd.CombinedOutput(); err != nil {
-		panic("build echo guest: " + string(b))
+		panic("build " + name + " guest: " + string(b))
 	}
-	echoWasm, err = os.ReadFile(out)
+	b, err := os.ReadFile(out)
 	if err != nil {
 		panic(err)
 	}
-	os.Exit(m.Run())
+	return b
 }
 
 func newWasm(t *testing.T) script.Engine {
@@ -99,6 +110,31 @@ func TestWasm_Timeout(t *testing.T) {
 	_, err := newWasm(t).Execute(ctx, b64(echoWasm), nil, script.DefaultHelpers())
 	if err == nil {
 		t.Fatal("expected error from cancelled context")
+	}
+}
+
+func TestWasm_InFlightTimeout(t *testing.T) {
+	// Deadline fires DURING execution; the guest loops forever, so only
+	// wazero's close-on-context-done can terminate it.
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := newWasm(t).Execute(ctx, b64(spinWasm), nil, script.DefaultHelpers())
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected timeout error from in-flight cancellation")
+		}
+	case <-time.After(30 * time.Second):
+		// Generous guard: wazero's context-done checkpoint polling on a tight
+		// CPU loop is much slower under -race (seconds, vs sub-second normally),
+		// so a 5s guard flakes. With the fix the guest is still interrupted well
+		// within 30s; without it (default-config runtime) the guest loops
+		// forever and this guard fires.
+		t.Fatal("Execute hung: in-flight ctx cancellation not wired (guest not interrupted)")
 	}
 }
 
