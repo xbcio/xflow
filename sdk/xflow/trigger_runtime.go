@@ -19,23 +19,32 @@ type triggerRuntime struct {
 	subs       map[string]types.TriggerSubscription
 }
 
+type activatedSub struct {
+	key string
+	sub types.TriggerSubscription
+}
+
 func newTriggerRuntime(e *Engine, p backend.TriggerPrimitives) *triggerRuntime {
 	return &triggerRuntime{eng: e, primitives: p, webhooks: newWebhookRuntime(), subs: make(map[string]types.TriggerSubscription)}
 }
 
 func (r *triggerRuntime) ReconcileWorkflow(ctx context.Context, rec backend.WorkflowRecord) error {
+	var activated []activatedSub
+
+	r.mu.Lock()
 	for _, nd := range rec.Definition.Nodes {
 		if nd.Kind != types.NodeKindTrigger {
 			continue
 		}
 		h, ok := node.LookupTrigger(nd.Type)
 		if !ok {
+			rollback := detachActivatedSubscriptions(r.subs, activated)
+			r.mu.Unlock()
+			_ = closeSubscriptions(ctx, rollback)
 			return fmt.Errorf("trigger handler %q not registered", nd.Type)
 		}
 		key := string(rec.ID) + "/" + nd.Name
-		r.mu.Lock()
 		_, exists := r.subs[key]
-		r.mu.Unlock()
 		if exists {
 			continue
 		}
@@ -46,43 +55,42 @@ func (r *triggerRuntime) ReconcileWorkflow(ctx context.Context, rec backend.Work
 			Runtime:    r,
 		})
 		if err != nil {
+			rollback := detachActivatedSubscriptions(r.subs, activated)
+			r.mu.Unlock()
+			_ = closeSubscriptions(ctx, rollback)
 			return err
 		}
-		r.mu.Lock()
 		r.subs[key] = sub
-		r.mu.Unlock()
+		activated = append(activated, activatedSub{key: key, sub: sub})
 	}
+	r.mu.Unlock()
 	return nil
 }
 
 func (r *triggerRuntime) RemoveWorkflow(ctx context.Context, workflowID types.WorkflowID) error {
 	prefix := string(workflowID) + "/"
-	var closeErr error
+	subs := make([]types.TriggerSubscription, 0)
 	r.mu.Lock()
 	for key, sub := range r.subs {
 		if len(key) < len(prefix) || key[:len(prefix)] != prefix {
 			continue
 		}
-		if err := sub.Close(ctx); err != nil && closeErr == nil {
-			closeErr = err
-		}
+		subs = append(subs, sub)
 		delete(r.subs, key)
 	}
 	r.mu.Unlock()
-	return closeErr
+	return closeSubscriptions(ctx, subs)
 }
 
 func (r *triggerRuntime) Close(ctx context.Context) error {
-	var closeErr error
+	subs := make([]types.TriggerSubscription, 0, len(r.subs))
 	r.mu.Lock()
 	for key, sub := range r.subs {
-		if err := sub.Close(ctx); err != nil && closeErr == nil {
-			closeErr = err
-		}
+		subs = append(subs, sub)
 		delete(r.subs, key)
 	}
 	r.mu.Unlock()
-	return closeErr
+	return closeSubscriptions(ctx, subs)
 }
 
 func (r *triggerRuntime) Emit(ctx context.Context, workflowID types.WorkflowID, nodeName string, event *types.TriggerEvent) (types.ExecutionID, error) {
@@ -108,3 +116,25 @@ func (r *triggerRuntime) State(ctx context.Context, scope string) types.TriggerS
 }
 
 func (r *triggerRuntime) Webhooks() types.WebhookRuntime { return r.webhooks }
+
+func closeSubscriptions(ctx context.Context, subs []types.TriggerSubscription) error {
+	var closeErr error
+	for _, sub := range subs {
+		if err := sub.Close(ctx); err != nil && closeErr == nil {
+			closeErr = err
+		}
+	}
+	return closeErr
+}
+
+func detachActivatedSubscriptions(subs map[string]types.TriggerSubscription, activated []activatedSub) []types.TriggerSubscription {
+	if len(activated) == 0 {
+		return nil
+	}
+	detached := make([]types.TriggerSubscription, 0, len(activated))
+	for i := len(activated) - 1; i >= 0; i-- {
+		delete(subs, activated[i].key)
+		detached = append(detached, activated[i].sub)
+	}
+	return detached
+}
