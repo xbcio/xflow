@@ -2,6 +2,7 @@ package types
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
 
@@ -42,6 +43,18 @@ func (i *TriggerActivateInput) Emit(ctx context.Context, event *TriggerEvent) (E
 func (i *TriggerActivateInput) GetString(name string) string {
 	v, _ := i.Params[name].(string)
 	return v
+}
+
+func (i *TriggerActivateInput) Webhooks() (WebhookRuntime, error) {
+	provider, ok := i.Runtime.(interface{ Webhooks() WebhookRuntime })
+	if !ok {
+		return nil, fmt.Errorf("webhook runtime is not available")
+	}
+	rt := provider.Webhooks()
+	if rt == nil {
+		return nil, fmt.Errorf("webhook runtime is not available")
+	}
+	return rt, nil
 }
 
 type TriggerRuntime interface {

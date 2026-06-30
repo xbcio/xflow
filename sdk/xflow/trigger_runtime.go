@@ -14,12 +14,13 @@ import (
 type triggerRuntime struct {
 	eng        *Engine
 	primitives backend.TriggerPrimitives
+	webhooks   *webhookRuntime
 	mu         sync.Mutex
 	subs       map[string]types.TriggerSubscription
 }
 
 func newTriggerRuntime(e *Engine, p backend.TriggerPrimitives) *triggerRuntime {
-	return &triggerRuntime{eng: e, primitives: p, subs: make(map[string]types.TriggerSubscription)}
+	return &triggerRuntime{eng: e, primitives: p, webhooks: newWebhookRuntime(), subs: make(map[string]types.TriggerSubscription)}
 }
 
 func (r *triggerRuntime) ReconcileWorkflow(ctx context.Context, rec backend.WorkflowRecord) error {
@@ -105,3 +106,5 @@ func (r *triggerRuntime) TryLock(ctx context.Context, key string, ttl time.Durat
 func (r *triggerRuntime) State(ctx context.Context, scope string) types.TriggerState {
 	return r.primitives.State(ctx, scope)
 }
+
+func (r *triggerRuntime) Webhooks() types.WebhookRuntime { return r.webhooks }
