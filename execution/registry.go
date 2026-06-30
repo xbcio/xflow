@@ -8,18 +8,60 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
+// VersionPolicy controls what Registry.Get does when the workflow pins a
+// specific handler version but that version is not registered. See
+// .claude/docs/specs/handler-version.md.
+type VersionPolicy int
+
+const (
+	// VersionWarnFallback returns the latest registered handler and emits a
+	// warning via the optional Logger. Default policy: avoids breaking
+	// rolling-deployment scenarios while still surfacing the drift.
+	VersionWarnFallback VersionPolicy = iota
+	// VersionStrict returns ErrHandlerVersionMismatch when the pinned version
+	// is missing.
+	VersionStrict
+	// VersionSilentFallback returns the latest registered handler with no
+	// logging. Preserves legacy behavior for callers that explicitly opt in.
+	VersionSilentFallback
+)
+
+// ErrHandlerVersionMismatch is returned by Registry.Get under VersionStrict
+// when a workflow pins a handler version that is not registered.
+type ErrHandlerVersionMismatch struct {
+	NodeType         string
+	RequestedVersion int
+	LatestAvailable  int // -1 if no handler is registered at all
+}
+
+func (e *ErrHandlerVersionMismatch) Error() string {
+	if e.LatestAvailable < 0 {
+		return fmt.Sprintf("no handler registered for node type %q (requested version %d)", e.NodeType, e.RequestedVersion)
+	}
+	return fmt.Sprintf("handler %q version %d not registered (latest available: %d)", e.NodeType, e.RequestedVersion, e.LatestAvailable)
+}
+
+// VersionLogger is implemented by callers that want to observe WarnFallback
+// resolutions. Optional.
+type VersionLogger interface {
+	Warn(msg string, args ...any)
+}
+
 // Registry resolves handlers for embedded execution.
 //
 // Resolution order is:
 //  1. execution-scoped direct handler
 //  2. node-name direct handler
 //  3. explicitly registered node-type handler
-//  4. global node registry, versioned first
+//  4. global node registry — exact version first, then policy-controlled
+//     fallback to the latest registered version
 type Registry struct {
 	mu                sync.RWMutex
 	executionHandlers map[string]types.ActionHandler
 	nodeHandlers      map[string]types.ActionHandler
 	globalHandlers    map[string]types.ActionHandler
+	policy            VersionPolicy
+	logger            VersionLogger
 }
 
 // NewRegistry creates a handler registry suitable for embedded runners.
@@ -28,7 +70,23 @@ func NewRegistry() *Registry {
 		executionHandlers: make(map[string]types.ActionHandler),
 		nodeHandlers:      make(map[string]types.ActionHandler),
 		globalHandlers:    make(map[string]types.ActionHandler),
+		policy:            VersionWarnFallback,
 	}
+}
+
+// SetVersionPolicy updates the registry's miss-handling policy.
+func (r *Registry) SetVersionPolicy(p VersionPolicy) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.policy = p
+}
+
+// SetLogger installs a logger for WarnFallback messages. nil is allowed and
+// disables the warning surface.
+func (r *Registry) SetLogger(l VersionLogger) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.logger = l
 }
 
 // RegisterExecutionHandler binds a handler to one execution and node name.
@@ -52,28 +110,87 @@ func (r *Registry) RegisterGlobal(nodeType string, h types.ActionHandler) {
 	r.globalHandlers[nodeType] = h
 }
 
-// Get resolves a handler for the given execution node.
+// Get resolves a handler for the given execution node. Workflow-scoped
+// registrations win before consulting the global node registry. When falling
+// back to the global registry, the requested version is matched exactly first;
+// on miss, behavior follows the registry's VersionPolicy.
 func (r *Registry) Get(id types.ExecutionID, nodeName string, nodeType string, version int) (types.ActionHandler, error) {
 	r.mu.RLock()
-	defer r.mu.RUnlock()
-
+	policy := r.policy
+	logger := r.logger
 	if h, ok := r.executionHandlers[string(id)+"/"+nodeName]; ok {
+		r.mu.RUnlock()
 		return h, nil
 	}
 	if h, ok := r.nodeHandlers[nodeName]; ok {
+		r.mu.RUnlock()
 		return h, nil
 	}
 	if h, ok := r.globalHandlers[nodeType]; ok {
+		r.mu.RUnlock()
 		return h, nil
 	}
+	r.mu.RUnlock()
+
+	// Exact version match wins.
 	if version > 0 {
 		if h, ok := node.LookupVersion(nodeType, version); ok {
 			return h, nil
 		}
 	}
+
+	// Pinned version missing — apply the policy.
+	if version > 0 {
+		switch policy {
+		case VersionStrict:
+			latest := latestRegisteredVersion(nodeType)
+			return nil, &ErrHandlerVersionMismatch{
+				NodeType:         nodeType,
+				RequestedVersion: version,
+				LatestAvailable:  latest,
+			}
+		case VersionWarnFallback:
+			if h, ok := node.Lookup(nodeType); ok {
+				if logger != nil {
+					logger.Warn("handler version fallback",
+						"node_type", nodeType,
+						"node_name", nodeName,
+						"requested_version", version,
+					)
+				}
+				return h, nil
+			}
+			return nil, &ErrHandlerVersionMismatch{
+				NodeType:         nodeType,
+				RequestedVersion: version,
+				LatestAvailable:  -1,
+			}
+		case VersionSilentFallback:
+			if h, ok := node.Lookup(nodeType); ok {
+				return h, nil
+			}
+		}
+	}
+
 	if h, ok := node.Lookup(nodeType); ok {
 		return h, nil
 	}
 
 	return nil, fmt.Errorf("no handler registered for node type %q", nodeType)
+}
+
+// latestRegisteredVersion returns the highest registered version for a node
+// type, or -1 if none. Used only to enrich the strict-policy error message.
+func latestRegisteredVersion(nodeType string) int {
+	versions := node.Versions(nodeType)
+	if len(versions) == 0 {
+		return -1
+	}
+	latest := versions[0]
+	for _, v := range versions[1:] {
+		if v > latest {
+			latest = v
+		}
+	}
+	return latest
 }

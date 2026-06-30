@@ -116,6 +116,15 @@ func newFromConfig(cfg *engineConfig, provider backend.Provider) (*Engine, error
 
 	eng := engine.New(cfg.state, cfg.queue, engOpts...)
 
+	if lr, ok := cfg.registry.(*execution.Registry); ok {
+		if cfg.versionPolicySet {
+			lr.SetVersionPolicy(cfg.versionPolicy)
+		}
+		if cfg.logger != nil {
+			lr.SetLogger(versionLoggerAdapter{cfg.logger})
+		}
+	}
+
 	e := &Engine{
 		eng:                 eng,
 		registry:            cfg.registry,
@@ -229,9 +238,31 @@ func (e *Engine) Wait(ctx context.Context, id types.ExecutionID) (types.Result, 
 				continue
 			}
 			if isTerminalStatus(snap.Status) {
-				return types.Result{ExecutionID: id, Status: snap.Status}, nil
+				detail, err := e.eng.Inspect(ctx, id)
+				if err != nil {
+					return types.Result{}, err
+				}
+				return resultFromDetail(detail), nil
 			}
 		}
+	}
+}
+
+func resultFromDetail(detail engine.ExecutionDetail) types.Result {
+	out := make(map[string]any, len(detail.Nodes))
+	for _, n := range detail.Nodes {
+		if n.Output != nil {
+			out[n.Name] = n.Output
+		}
+	}
+	if len(out) == 0 {
+		out = nil
+	}
+	return types.Result{
+		ExecutionID: detail.ExecutionID,
+		Status:      detail.Status,
+		Output:      out,
+		Error:       detail.Error,
 	}
 }
 
@@ -279,4 +310,20 @@ func cfgAllowsDirectHandlers(e *Engine) bool {
 		return false
 	}
 	return e.allowDirectHandlers
+}
+
+// versionLoggerAdapter forwards execution.VersionLogger.Warn calls onto an
+// engine.Logger so registry fallback warnings reach the same logging surface
+// as the rest of the engine.
+type versionLoggerAdapter struct {
+	l engine.Logger
+}
+
+func (v versionLoggerAdapter) Warn(msg string, args ...any) {
+	if v.l == nil {
+		return
+	}
+	// engine.Logger has Info / Error but no Warn — surface as Info with a tag
+	// so it is visible without escalating to error noise.
+	v.l.Info("WARN "+msg, args...)
 }

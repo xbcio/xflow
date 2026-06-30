@@ -36,7 +36,7 @@ func (r *triggerRuntime) ReconcileWorkflow(ctx context.Context, rec backend.Work
 		if nd.Kind != types.NodeKindTrigger {
 			continue
 		}
-		h, ok := node.LookupTrigger(nd.Type)
+		h, ok := lookupTriggerForNode(nd)
 		if !ok {
 			rollback := detachActivatedSubscriptions(r.subs, activated)
 			r.mu.Unlock()
@@ -116,6 +116,19 @@ func (r *triggerRuntime) State(ctx context.Context, scope string) types.TriggerS
 }
 
 func (r *triggerRuntime) Webhooks() types.WebhookRuntime { return r.webhooks }
+
+// lookupTriggerForNode resolves the trigger handler honoring NodeDef.Version
+// when set. Falls back to the latest registered handler when no version is
+// pinned. Returns false if no handler is registered at all so the caller can
+// report a registration error.
+func lookupTriggerForNode(nd types.NodeDef) (types.TriggerHandler, bool) {
+	if nd.Version > 0 {
+		if h, ok := node.LookupTriggerVersion(nd.Type, nd.Version); ok {
+			return h, true
+		}
+	}
+	return node.LookupTrigger(nd.Type)
+}
 
 func closeSubscriptions(ctx context.Context, subs []types.TriggerSubscription) error {
 	var closeErr error

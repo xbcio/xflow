@@ -123,6 +123,36 @@ func LookupVersion(nodeType string, version int) (ActionHandler, bool) {
 	return h, ok
 }
 
+// LookupTriggerVersion finds a specific version of a trigger handler by node
+// type. Used by the SDK's trigger runtime when resolving versioned
+// trigger node definitions; returns false on miss so the caller can apply a
+// policy decision (strict / warn fallback / silent fallback).
+func LookupTriggerVersion(nodeType string, version int) (types.TriggerHandler, bool) {
+	globalRegistry.mu.RLock()
+	defer globalRegistry.mu.RUnlock()
+	versions, ok := globalRegistry.triggerVer[nodeType]
+	if !ok {
+		return nil, false
+	}
+	h, ok := versions[version]
+	return h, ok
+}
+
+// TriggerVersions returns all registered trigger versions for a node type.
+func TriggerVersions(nodeType string) []int {
+	globalRegistry.mu.RLock()
+	defer globalRegistry.mu.RUnlock()
+	versions, ok := globalRegistry.triggerVer[nodeType]
+	if !ok {
+		return nil
+	}
+	result := make([]int, 0, len(versions))
+	for v := range versions {
+		result = append(result, v)
+	}
+	return result
+}
+
 // Versions returns all registered versions for a node type.
 func Versions(nodeType string) []int {
 	globalRegistry.mu.RLock()
