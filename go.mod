@@ -6,6 +6,7 @@ require (
 	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/dop251/goja v0.0.0-20260627200808-0b76000cabdb
 	github.com/expr-lang/expr v1.17.8
+	github.com/fastschema/qjs v0.0.6
 	github.com/go-sql-driver/mysql v1.10.0
 	github.com/google/uuid v1.6.0
 	github.com/hibiken/asynq v0.26.0
@@ -30,7 +31,7 @@ require (
 	github.com/jinzhu/now v1.1.5 // indirect
 	github.com/robfig/cron/v3 v3.0.1 // indirect
 	github.com/spf13/cast v1.10.0 // indirect
-	github.com/stretchr/testify v1.11.1 // indirect
+	github.com/tetratelabs/wazero v1.9.0 // indirect
 	github.com/yuin/gopher-lua v1.1.1 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
 	golang.org/x/net v0.56.0 // indirect
