@@ -12,6 +12,7 @@ type Provider interface {
 	State() engine.StateStore
 	Queue() engine.TaskQueue
 	Registry() engine.HandlerRegistry
+	WorkflowRegistry() WorkflowRegistry
 	Bind(eng *engine.Engine) func()
 }
 

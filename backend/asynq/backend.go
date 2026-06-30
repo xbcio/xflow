@@ -9,6 +9,7 @@ import (
 	asynqlib "github.com/hibiken/asynq"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
 	"github.com/xbcio/xflow/store"
@@ -56,6 +57,7 @@ type Backend struct {
 	state          *redisState
 	queue          *asynqQueue
 	registry       *execution.Registry
+	workflowReg    *workflowRegistry
 	rdb            *redis.Client
 	timeoutMonitor *TimeoutMonitor
 	redisAddr      string
@@ -71,6 +73,9 @@ func (b *Backend) Queue() engine.TaskQueue { return b.queue }
 
 // Registry returns the HandlerRegistry implementation.
 func (b *Backend) Registry() engine.HandlerRegistry { return b.registry }
+
+// WorkflowRegistry returns the workflow metadata registry.
+func (b *Backend) WorkflowRegistry() backend.WorkflowRegistry { return b.workflowReg }
 
 // New creates an Asynq backend connected to the given Redis address.
 // db may be nil for pure-Redis mode (no MySQL persistence).
@@ -96,6 +101,7 @@ func New(redisAddr string, db store.Store, opts ...Option) (*Backend, error) {
 		state:       state,
 		queue:       queue,
 		registry:    registry,
+		workflowReg: newWorkflowRegistry(),
 		rdb:         rdb,
 		redisAddr:   redisAddr,
 		concurrency: cfg.concurrency,

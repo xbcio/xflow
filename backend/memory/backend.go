@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
 	"github.com/xbcio/xflow/types"
@@ -28,9 +29,10 @@ func WithConcurrency(n int) Option {
 // Backend bundles in-memory state, queue, registry, and lifecycle binding.
 // Call Bind() after creating the engine to wire the queue handler.
 type Backend struct {
-	state    *memoryState
-	queue    *memoryQueue
-	registry *execution.Registry
+	state            *memoryState
+	queue            *memoryQueue
+	registry         *execution.Registry
+	workflowRegistry *workflowRegistry
 }
 
 // New creates a memory backend with its components but does NOT start the queue.
@@ -42,9 +44,10 @@ func New(opts ...Option) *Backend {
 	}
 
 	return &Backend{
-		state:    newMemoryState(),
-		queue:    newMemoryQueue(cfg.concurrency),
-		registry: execution.NewRegistry(),
+		state:            newMemoryState(),
+		queue:            newMemoryQueue(cfg.concurrency),
+		registry:         execution.NewRegistry(),
+		workflowRegistry: newWorkflowRegistry(),
 	}
 }
 
@@ -56,6 +59,9 @@ func (b *Backend) Queue() engine.TaskQueue { return b.queue }
 
 // Registry returns the handler registry.
 func (b *Backend) Registry() engine.HandlerRegistry { return b.registry }
+
+// WorkflowRegistry returns the workflow metadata registry.
+func (b *Backend) WorkflowRegistry() backend.WorkflowRegistry { return b.workflowRegistry }
 
 // Bind wires the embedded execution dispatcher into the queue and starts queue consumers.
 // Returns a stop function that drains the consumer pool.
