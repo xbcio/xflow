@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/xbcio/xflow/nodes/node"
+	"github.com/xbcio/xflow/types"
 )
 
 // ── test helpers ──────────────────────────────────────────────────────────────
@@ -27,8 +28,21 @@ func (h *emptyTypeHandler) Execute(_ context.Context, _ *node.Input) (*node.Outp
 	return nil, nil
 }
 
+type triggerHandler struct{}
+
+func (h *triggerHandler) Descriptor() node.Descriptor {
+	return node.Descriptor{Type: "test.registry.trigger", Kind: types.NodeKindTrigger}
+}
+func (h *triggerHandler) Execute(_ context.Context, _ *node.Input) (*node.Output, error) {
+	return &node.Output{}, nil
+}
+func (h *triggerHandler) Activate(_ context.Context, _ *types.TriggerActivateInput) (types.TriggerSubscription, error) {
+	return types.CloseFunc(func(context.Context) error { return nil }), nil
+}
+
 func init() {
 	node.Register(&goodHandler{})
+	node.Register(&triggerHandler{})
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -72,6 +86,16 @@ func TestRegistry_LookupVersion_NotFound(t *testing.T) {
 	_, found := node.LookupVersion("test.registry.good", 99)
 	if found {
 		t.Fatal("LookupVersion: expected v99 to not be found")
+	}
+}
+
+func TestRegistry_LookupTrigger(t *testing.T) {
+	h, found := node.LookupTrigger("test.registry.trigger")
+	if !found {
+		t.Fatal("LookupTrigger: expected trigger handler to be found")
+	}
+	if h == nil {
+		t.Fatal("LookupTrigger: returned nil handler")
 	}
 }
 

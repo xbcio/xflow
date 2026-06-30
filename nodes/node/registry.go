@@ -3,6 +3,8 @@ package node
 import (
 	"fmt"
 	"sync"
+
+	"github.com/xbcio/xflow/types"
 )
 
 type registry struct {
@@ -56,6 +58,15 @@ func Lookup(nodeType string) (ActionHandler, bool) {
 	defer globalRegistry.mu.RUnlock()
 	h, ok := globalRegistry.handlers[nodeType]
 	return h, ok
+}
+
+func LookupTrigger(nodeType string) (types.TriggerHandler, bool) {
+	h, ok := Lookup(nodeType)
+	if !ok {
+		return nil, false
+	}
+	th, ok := h.(types.TriggerHandler)
+	return th, ok
 }
 
 // LookupVersion finds a specific version of a handler by node type.
