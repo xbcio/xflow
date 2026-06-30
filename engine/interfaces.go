@@ -35,6 +35,19 @@ type Nodes interface {
 	// Errors should be returned only for backend failures, not for
 	// "nothing-to-reset" conditions.
 	ResetNodeForRetry(ctx context.Context, id types.ExecutionID, name string) error
+	// ListExpiredLeases returns every Running node whose lease deadline has
+	// passed (LeaseIssuedAt+LeaseTTL <= before). Used by the sweeper to detect
+	// runners that died mid-execute. Implementations may return at most a
+	// reasonable per-call batch to avoid OOM on large backlogs; the sweeper
+	// will re-poll until the list drains.
+	ListExpiredLeases(ctx context.Context, before time.Time) ([]ExpiredLease, error)
+	// RevokeLease atomically clears the lease on a node whose deadline has
+	// expired and rolls it back to Pending so the task can be re-enqueued.
+	// Implementations MUST verify the supplied LeaseToken still matches before
+	// mutating state — a non-matching token means the runner already committed
+	// (or another sweeper beat us to it). Returns (revoked=true) only when the
+	// caller is responsible for re-enqueuing the task.
+	RevokeLease(ctx context.Context, id types.ExecutionID, name string, token LeaseToken) (bool, error)
 }
 
 // Scheduling stores DAG scheduling counters and completion state.

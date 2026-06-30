@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
@@ -152,8 +153,63 @@ func (s *memoryState) ResetNodeForRetry(_ context.Context, id types.ExecutionID,
 	cp.Status = types.NodeStatusPending
 	cp.LeaseID = ""
 	cp.LeaseToken = ""
+	cp.LeaseIssuedAt = time.Time{}
+	cp.LeaseTTL = 0
 	s.nodes[key] = &cp
 	return nil
+}
+
+func (s *memoryState) ListExpiredLeases(_ context.Context, before time.Time) ([]engine.ExpiredLease, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []engine.ExpiredLease
+	for _, ns := range s.nodes {
+		if ns.Status != types.NodeStatusRunning {
+			continue
+		}
+		if ns.LeaseIssuedAt.IsZero() || ns.LeaseTTL <= 0 {
+			continue
+		}
+		if ns.LeaseIssuedAt.Add(ns.LeaseTTL).After(before) {
+			continue
+		}
+		out = append(out, engine.ExpiredLease{
+			ExecutionID:  ns.ExecutionID,
+			NodeName:     ns.Name,
+			NodeIdx:      ns.NodeIdx,
+			LeaseID:      ns.LeaseID,
+			LeaseToken:   ns.LeaseToken,
+			IssuedAt:     ns.LeaseIssuedAt,
+			TTL:          ns.LeaseTTL,
+			ActivationID: ns.ActivationID,
+			AutoDepth:    ns.AutoDepth,
+		})
+	}
+	return out, nil
+}
+
+func (s *memoryState) RevokeLease(_ context.Context, id types.ExecutionID, name string, token engine.LeaseToken) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := string(id) + "/" + name
+	ns := s.nodes[key]
+	if ns == nil {
+		return false, nil
+	}
+	if ns.Status != types.NodeStatusRunning {
+		return false, nil
+	}
+	if token == "" || ns.LeaseToken != token {
+		return false, nil
+	}
+	cp := *ns
+	cp.Status = types.NodeStatusPending
+	cp.LeaseID = ""
+	cp.LeaseToken = ""
+	cp.LeaseIssuedAt = time.Time{}
+	cp.LeaseTTL = 0
+	s.nodes[key] = &cp
+	return true, nil
 }
 
 func (s *memoryState) ClaimTaskLease(_ context.Context, lease *engine.TaskLease) (*engine.NodeSnapshot, bool, error) {

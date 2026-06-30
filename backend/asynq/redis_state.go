@@ -616,6 +616,21 @@ func (s *redisState) ResetNodeForRetry(ctx context.Context, id types.ExecutionID
 	return nil
 }
 
+// ListExpiredLeases is a stub in the Redis backend until lease deadlines are
+// indexed in a sorted set keyed by expiry timestamp. Until then, the cluster
+// sweeper relies on per-runner heartbeat checks rather than node-side lease
+// scanning. Returns no expired leases so the sweeper becomes a no-op on this
+// backend (memory backend remains fully functional).
+func (s *redisState) ListExpiredLeases(_ context.Context, _ time.Time) ([]engine.ExpiredLease, error) {
+	return nil, nil
+}
+
+// RevokeLease is a stub in the Redis backend; see ListExpiredLeases. Returns
+// (false, nil) so the sweeper logs "no work" and moves on.
+func (s *redisState) RevokeLease(_ context.Context, _ types.ExecutionID, _ string, _ engine.LeaseToken) (bool, error) {
+	return false, nil
+}
+
 func (s *redisState) ClaimTaskLease(ctx context.Context, lease *engine.TaskLease) (*engine.NodeSnapshot, bool, error) {
 	ttl := s.getExecTTL(lease.Task.ExecutionID)
 	result, err := claimTaskLeaseLua.Run(ctx, s.rdb,

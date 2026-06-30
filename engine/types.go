@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"time"
+
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/types"
 )
@@ -52,13 +54,24 @@ type TaskResult = NodeResult
 
 // TaskLease is the server-side assignment sent to a runner through Runner Protocol.
 type TaskLease struct {
-	LeaseID     LeaseID      `json:"lease_id,omitempty"`
-	LeaseToken  LeaseToken   `json:"lease_token,omitempty"`
-	Attempt     int          `json:"attempt,omitempty"`
-	Task        Task         `json:"task"`
-	Input       *types.Input `json:"input,omitempty"`
-	NodeType    string       `json:"node_type"`
-	NodeVersion int          `json:"node_version,omitempty"`
+	LeaseID     LeaseID       `json:"lease_id,omitempty"`
+	LeaseToken  LeaseToken    `json:"lease_token,omitempty"`
+	Attempt     int           `json:"attempt,omitempty"`
+	Task        Task          `json:"task"`
+	Input       *types.Input  `json:"input,omitempty"`
+	NodeType    string        `json:"node_type"`
+	NodeVersion int           `json:"node_version,omitempty"`
+	IssuedAt    time.Time     `json:"issued_at"`
+	TTL         time.Duration `json:"ttl,omitempty"`
+}
+
+// Deadline returns the wall-clock instant after which the lease is considered
+// expired. Returns the zero time if either IssuedAt or TTL is unset.
+func (l TaskLease) Deadline() time.Time {
+	if l.IssuedAt.IsZero() || l.TTL <= 0 {
+		return time.Time{}
+	}
+	return l.IssuedAt.Add(l.TTL)
 }
 
 // RunnerCapability describes a node type/version a runner can execute.
@@ -100,9 +113,29 @@ type NodeSnapshot struct {
 	// AutoDepth is the automatic scheduling depth associated with the latest
 	// activation. It is runtime metadata, not business history.
 	AutoDepth int
-	Output    map[string]any
-	Port      string
-	Error     string
+	// LeaseIssuedAt / LeaseTTL track when the current lease was handed out and
+	// for how long it is valid. The sweeper uses these to reclaim leases whose
+	// runner crashed mid-execute. Both are zero for nodes without an active
+	// lease.
+	LeaseIssuedAt time.Time
+	LeaseTTL      time.Duration
+	Output        map[string]any
+	Port          string
+	Error         string
+}
+
+// ExpiredLease describes a node whose lease has passed its deadline and is
+// eligible for reclamation by the sweeper.
+type ExpiredLease struct {
+	ExecutionID  types.ExecutionID
+	NodeName     string
+	NodeIdx      int
+	LeaseID      LeaseID
+	LeaseToken   LeaseToken
+	IssuedAt     time.Time
+	TTL          time.Duration
+	ActivationID int
+	AutoDepth    int
 }
 
 // SubExecution tracks a child execution spawned by a loop/split node.

@@ -37,13 +37,28 @@ func WithLogger(l Logger) Option {
 	return func(e *Engine) { e.logger = l }
 }
 
+// WithDefaultLeaseTTL overrides the default deadline applied to every issued
+// task lease. Runners must finish (and call CommitTaskResult or
+// ReportResult) before IssuedAt+TTL or the lease sweeper will reclaim the
+// task. A non-positive value disables the feature (no deadline, no sweep).
+func WithDefaultLeaseTTL(ttl time.Duration) Option {
+	return func(e *Engine) { e.defaultLeaseTTL = ttl }
+}
+
+// DefaultLeaseTTL is the lease deadline applied when an Engine is constructed
+// without an explicit override. It is intentionally short enough that crashed
+// runners are reclaimed within a minute while leaving slow handlers (e.g.
+// HTTP timeouts) headroom.
+const DefaultLeaseTTL = 60 * time.Second
+
 // Engine is the pure-algorithm workflow execution engine.
 // It has zero IO dependencies — all persistence and queuing are injected via interfaces.
 type Engine struct {
-	state  StateStore
-	queue  TaskQueue
-	hooks  Hooks
-	logger Logger
+	state           StateStore
+	queue           TaskQueue
+	hooks           Hooks
+	logger          Logger
+	defaultLeaseTTL time.Duration
 
 	mu     sync.RWMutex
 	graphs map[types.ExecutionID]*graph.Graph
@@ -52,15 +67,20 @@ type Engine struct {
 // New creates an Engine wired to the given state store and task queue.
 func New(state StateStore, queue TaskQueue, opts ...Option) *Engine {
 	e := &Engine{
-		state:  state,
-		queue:  queue,
-		graphs: make(map[types.ExecutionID]*graph.Graph),
+		state:           state,
+		queue:           queue,
+		graphs:          make(map[types.ExecutionID]*graph.Graph),
+		defaultLeaseTTL: DefaultLeaseTTL,
 	}
 	for _, opt := range opts {
 		opt(e)
 	}
 	return e
 }
+
+// LeaseTTL returns the deadline applied to leases issued by this engine.
+// Exposed so sweepers running on the same process can pick the same value.
+func (e *Engine) LeaseTTL() time.Duration { return e.defaultLeaseTTL }
 
 // Submit starts a new execution of the given graph with the provided params.
 // It persists the execution snapshot, caches the graph, and enqueues all
@@ -182,7 +202,9 @@ func (e *Engine) BuildTaskLease(ctx context.Context, t *Task) (*TaskLease, error
 
 	leaseID := LeaseID("lease-" + uuid.New().String())
 	leaseToken := LeaseToken("token-" + uuid.New().String())
-	attempt, started, err := e.acquireNodeLease(ctx, g, t, leaseID, leaseToken)
+	issuedAt := time.Now().UTC()
+	ttl := e.defaultLeaseTTL
+	attempt, started, err := e.acquireNodeLease(ctx, g, t, leaseID, leaseToken, issuedAt, ttl)
 	if err != nil {
 		return nil, err
 	}
@@ -199,6 +221,8 @@ func (e *Engine) BuildTaskLease(ctx context.Context, t *Task) (*TaskLease, error
 		Input:       e.buildInput(ctx, t, g),
 		NodeType:    meta.Type,
 		NodeVersion: meta.Version,
+		IssuedAt:    issuedAt,
+		TTL:         ttl,
 	}, nil
 }
 
@@ -264,7 +288,7 @@ func (e *Engine) loadActiveGraph(ctx context.Context, id types.ExecutionID) (*gr
 	return g, true, nil
 }
 
-func (e *Engine) acquireNodeLease(ctx context.Context, g *graph.Graph, t *Task, leaseID LeaseID, leaseToken LeaseToken) (int, bool, error) {
+func (e *Engine) acquireNodeLease(ctx context.Context, g *graph.Graph, t *Task, leaseID LeaseID, leaseToken LeaseToken, issuedAt time.Time, ttl time.Duration) (int, bool, error) {
 	ns, err := e.state.GetNode(ctx, t.ExecutionID, t.NodeName)
 	if err != nil {
 		return 0, false, err
@@ -289,15 +313,17 @@ func (e *Engine) acquireNodeLease(ctx context.Context, g *graph.Graph, t *Task, 
 	}
 
 	if err := e.state.UpsertNode(ctx, &NodeSnapshot{
-		ExecutionID:  t.ExecutionID,
-		Name:         t.NodeName,
-		NodeIdx:      t.NodeIdx,
-		Status:       types.NodeStatusRunning,
-		LeaseID:      leaseID,
-		LeaseToken:   leaseToken,
-		Attempt:      attempt,
-		ActivationID: t.ActivationID,
-		AutoDepth:    t.AutoDepth,
+		ExecutionID:   t.ExecutionID,
+		Name:          t.NodeName,
+		NodeIdx:       t.NodeIdx,
+		Status:        types.NodeStatusRunning,
+		LeaseID:       leaseID,
+		LeaseToken:    leaseToken,
+		Attempt:       attempt,
+		ActivationID:  t.ActivationID,
+		AutoDepth:     t.AutoDepth,
+		LeaseIssuedAt: issuedAt,
+		LeaseTTL:      ttl,
 	}); err != nil {
 		return 0, false, err
 	}
@@ -854,3 +880,42 @@ func (e *Engine) RevokeSignal(ctx context.Context, id types.ExecutionID, signalN
 // State returns the StateStore used by this engine.
 // Useful for callers that need to poll execution status (e.g. cluster Wait).
 func (e *Engine) State() StateStore { return e.state }
+
+// ReclaimLease revokes an expired task lease and re-enqueues the task so a
+// healthy runner can pick it up. Safe to call concurrently with a runner
+// commit on the same node — RevokeLease verifies the token still matches
+// before mutating state. Returns true when the caller's sweep claimed the
+// lease (and the task was re-enqueued), false when the lease was already
+// committed or claimed by another sweep.
+func (e *Engine) ReclaimLease(ctx context.Context, lease ExpiredLease) (bool, error) {
+	if lease.LeaseToken == "" {
+		return false, nil
+	}
+	revoked, err := e.state.RevokeLease(ctx, lease.ExecutionID, lease.NodeName, lease.LeaseToken)
+	if err != nil {
+		return false, fmt.Errorf("revoke lease %q/%q: %w", lease.ExecutionID, lease.NodeName, err)
+	}
+	if !revoked {
+		return false, nil
+	}
+	task := &Task{
+		ExecutionID:  lease.ExecutionID,
+		NodeName:     lease.NodeName,
+		NodeIdx:      lease.NodeIdx,
+		Type:         TaskTypeNodeExec,
+		ActivationID: lease.ActivationID,
+		AutoDepth:    lease.AutoDepth,
+	}
+	if err := e.queue.Enqueue(ctx, task); err != nil {
+		return true, fmt.Errorf("re-enqueue reclaimed task %q/%q: %w", lease.ExecutionID, lease.NodeName, err)
+	}
+	if e.logger != nil {
+		e.logger.Info("reclaimed expired lease",
+			"exec", string(lease.ExecutionID),
+			"node", lease.NodeName,
+			"issued_at", lease.IssuedAt,
+			"ttl", lease.TTL.String(),
+		)
+	}
+	return true, nil
+}

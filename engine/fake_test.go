@@ -122,8 +122,63 @@ func (f *fakeState) ResetNodeForRetry(_ context.Context, id types.ExecutionID, n
 	cp.Status = types.NodeStatusPending
 	cp.LeaseID = ""
 	cp.LeaseToken = ""
+	cp.LeaseIssuedAt = time.Time{}
+	cp.LeaseTTL = 0
 	f.nodes[key] = &cp
 	return nil
+}
+
+func (f *fakeState) ListExpiredLeases(_ context.Context, before time.Time) ([]ExpiredLease, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []ExpiredLease
+	for _, ns := range f.nodes {
+		if ns.Status != types.NodeStatusRunning {
+			continue
+		}
+		if ns.LeaseIssuedAt.IsZero() || ns.LeaseTTL <= 0 {
+			continue
+		}
+		if ns.LeaseIssuedAt.Add(ns.LeaseTTL).After(before) {
+			continue
+		}
+		out = append(out, ExpiredLease{
+			ExecutionID:  ns.ExecutionID,
+			NodeName:     ns.Name,
+			NodeIdx:      ns.NodeIdx,
+			LeaseID:      ns.LeaseID,
+			LeaseToken:   ns.LeaseToken,
+			IssuedAt:     ns.LeaseIssuedAt,
+			TTL:          ns.LeaseTTL,
+			ActivationID: ns.ActivationID,
+			AutoDepth:    ns.AutoDepth,
+		})
+	}
+	return out, nil
+}
+
+func (f *fakeState) RevokeLease(_ context.Context, id types.ExecutionID, name string, token LeaseToken) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := string(id) + "/" + name
+	ns := f.nodes[key]
+	if ns == nil {
+		return false, nil
+	}
+	if ns.Status != types.NodeStatusRunning {
+		return false, nil
+	}
+	if ns.LeaseToken != token || token == "" {
+		return false, nil
+	}
+	cp := *ns
+	cp.Status = types.NodeStatusPending
+	cp.LeaseID = ""
+	cp.LeaseToken = ""
+	cp.LeaseIssuedAt = time.Time{}
+	cp.LeaseTTL = 0
+	f.nodes[key] = &cp
+	return true, nil
 }
 
 func (f *fakeState) ClaimTaskLease(_ context.Context, lease *TaskLease) (*NodeSnapshot, bool, error) {
