@@ -70,6 +70,7 @@ func (n *CronTriggerNode) Activate(ctx context.Context, in *types.TriggerActivat
 	if err != nil {
 		return nil, err
 	}
+	runCtx, cancel := context.WithCancel(ctx)
 	c := cronlib.New(cronlib.WithLocation(loc))
 	if _, err := c.AddFunc(expr, func() {
 		t := time.Now().In(loc)
@@ -81,14 +82,16 @@ func (n *CronTriggerNode) Activate(ctx context.Context, in *types.TriggerActivat
 			Time:   t,
 			Data:   map[string]any{"scheduled_time": scheduled.Format(time.RFC3339)},
 		}
-		if ok, _ := in.Runtime.Dedup(context.Background(), "trigger:"+string(in.WorkflowID)+":"+in.NodeName+":"+event.ID, 2*time.Minute); ok {
-			_, _ = in.Emit(context.Background(), event)
+		if ok, err := in.Runtime.Dedup(runCtx, "trigger:"+string(in.WorkflowID)+":"+in.NodeName+":"+event.ID, 2*time.Minute); err == nil && ok {
+			_, _ = in.Emit(runCtx, event)
 		}
 	}); err != nil {
+		cancel()
 		return nil, err
 	}
 	c.Start()
 	return types.CloseFunc(func(context.Context) error {
+		cancel()
 		stopCtx := c.Stop()
 		select {
 		case <-stopCtx.Done():

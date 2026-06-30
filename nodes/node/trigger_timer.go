@@ -68,7 +68,7 @@ func (n *TimerTriggerNode) Activate(ctx context.Context, in *types.TriggerActiva
 					Time:   t,
 					Data:   map[string]any{"scheduled_time": t.Format(time.RFC3339Nano)},
 				}
-				if ok, _ := in.Runtime.Dedup(runCtx, "trigger:"+string(in.WorkflowID)+":"+in.NodeName+":"+event.ID, interval*2); ok {
+				if ok, err := in.Runtime.Dedup(runCtx, "trigger:"+string(in.WorkflowID)+":"+in.NodeName+":"+event.ID, interval*2); err == nil && ok {
 					_, _ = in.Emit(runCtx, event)
 				}
 			case <-runCtx.Done():

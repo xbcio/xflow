@@ -202,7 +202,7 @@ func emitRedisHubMessage(ctx context.Context, in *types.TriggerActivateInput, mo
 	if event.Time.IsZero() {
 		event.Time = time.Now()
 	}
-	if ok, _ := in.Runtime.Dedup(ctx, "trigger:"+string(in.WorkflowID)+":"+in.NodeName+":"+eventID, 24*time.Hour); ok {
+	if ok, err := in.Runtime.Dedup(ctx, "trigger:"+string(in.WorkflowID)+":"+in.NodeName+":"+eventID, 24*time.Hour); err == nil && ok {
 		_, _ = in.Emit(ctx, event)
 	}
 }
