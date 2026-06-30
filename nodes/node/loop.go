@@ -35,8 +35,9 @@ func (n *LoopNode) Descriptor() Descriptor {
 			{Name: "continue_on_error", DisplayName: "Continue On Error", Type: ParamBool, Required: false, Default: false, Description: "Continue iteration when a sub-graph execution fails"},
 			{Name: "body", DisplayName: "Body", Type: ParamObject, Required: true, Description: "Sub-graph definition executed for each item"},
 		},
-		Inputs:  []PortSpec{{Name: "main", DisplayName: "Main"}},
-		Outputs: []PortSpec{{Name: "main", DisplayName: "Main"}, {Name: "error", DisplayName: "Error"}},
+		Inputs:       []PortSpec{{Name: "main", DisplayName: "Main"}},
+		Outputs:      []PortSpec{{Name: "main", DisplayName: "Main"}, {Name: "error", DisplayName: "Error"}},
+		Capabilities: []string{CapBodySubgraphRequired},
 	}
 }
 

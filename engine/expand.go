@@ -54,9 +54,10 @@ func (e *Engine) expandLoopSplit(ctx context.Context, t *Task, g *graph.Graph, d
 			return fmt.Errorf("create sub-execution %d: %w", i, err)
 		}
 
-		// Enqueue a task that executes the batch items inline.
-		// For now, each batch result is the batch itself (pass-through).
-		// A full implementation would compile and run a body sub-graph.
+		// EXPERIMENTAL: pass-through stub. Real body sub-graph execution is not
+		// implemented; xflow.loop / xflow.split are blocked at compile time
+		// unless WorkflowOptions.ExperimentalExpand is set. See
+		// .claude/docs/specs/expand-gate.md.
 		batchTask := &Task{
 			ExecutionID: t.ExecutionID,
 			NodeName:    fmt.Sprintf("%s/_batch/%d", t.NodeName, i),
@@ -94,8 +95,9 @@ func (e *Engine) ExecuteBatch(ctx context.Context, t *Task) error {
 	childExecID := types.ExecutionID(data["child_exec_id"].(string))
 	items, _ := data["items"].([]any)
 
-	// Execute: for now, pass-through the batch items as result.
-	// TODO: when body sub-graph is supported, compile and run it here.
+	// EXPERIMENTAL: pass-through stub. When body sub-graph execution lands,
+	// compile and run the body graph here. See
+	// .claude/docs/specs/expand-gate.md.
 	result := map[string]any{
 		"items": items,
 		"count": len(items),

@@ -82,7 +82,22 @@ type Descriptor struct {
 	Params      []ParamSpec // parameter schema for this node
 	Inputs      []PortSpec
 	Outputs     []PortSpec
+	// Capabilities is an open-set list of capability tags. The compiler may use
+	// these to gate experimental or implementation-incomplete features. See
+	// CapBodySubgraphRequired for the canonical example.
+	Capabilities []string
 }
+
+// Node capability tags. Open-set strings carried on Descriptor.Capabilities.
+// The compiler inspects these to refuse workflows that depend on
+// incomplete subsystems unless the workflow explicitly opts in.
+const (
+	// CapBodySubgraphRequired marks node types that need a compiled body
+	// sub-graph at runtime. Currently xflow.loop and xflow.split. The
+	// compiler rejects workflows referencing such nodes unless
+	// WorkflowOptions.ExperimentalExpand is true.
+	CapBodySubgraphRequired = "body_subgraph_required"
+)
 
 // ParamSpec defines the schema for a single node parameter.
 type ParamSpec struct {

@@ -25,6 +25,8 @@ const (
 	ParamBool   = types.ParamBool
 	ParamArray  = types.ParamArray
 	ParamObject = types.ParamObject
+
+	CapBodySubgraphRequired = types.CapBodySubgraphRequired
 )
 
 // Builder is returned by built-in node factory functions and Definition.New.
