@@ -44,6 +44,34 @@ func TestWorkflowBuilderNodeConnectInputOutput(t *testing.T) {
 	}
 }
 
+func TestWorkflowBuilderDefaultsNamespaceAndVersion(t *testing.T) {
+	wf := Workflow("security_approval")
+	def, err := wf.build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if def.Namespace != "default" {
+		t.Fatalf("Namespace = %q, want default", def.Namespace)
+	}
+	if def.Version != "v1" {
+		t.Fatalf("Version = %q, want v1", def.Version)
+	}
+}
+
+func TestWorkflowBuilderSetsNamespaceAndVersion(t *testing.T) {
+	wf := Workflow("security_approval").Namespace("risk").Version("v3")
+	def, err := wf.build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if def.Namespace != "risk" {
+		t.Fatalf("Namespace = %q, want risk", def.Namespace)
+	}
+	if def.Version != "v3" {
+		t.Fatalf("Version = %q, want v3", def.Version)
+	}
+}
+
 func TestWorkflowBuilderRejectsCycleByDefault(t *testing.T) {
 	wf := Workflow("cycle-default")
 	start := wf.Node("start", node.Start())

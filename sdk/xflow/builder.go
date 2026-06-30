@@ -11,13 +11,15 @@ import (
 // WorkflowBuilder is a CDK-style builder for workflow definitions.
 // It holds no runtime state — only the definition.
 type WorkflowBuilder struct {
-	name     string
-	nodes    []*nodeEntry
-	refs     []*NodeRef
-	edges    []edge
-	direct   map[string]types.ActionHandler // direct handlers (local mode only)
-	handlers map[string]types.ActionHandler // portable typed handlers
-	options  *types.WorkflowOptions
+	namespace string
+	name      string
+	version   string
+	nodes     []*nodeEntry
+	refs      []*NodeRef
+	edges     []edge
+	direct    map[string]types.ActionHandler // direct handlers (local mode only)
+	handlers  map[string]types.ActionHandler // portable typed handlers
+	options   *types.WorkflowOptions
 }
 
 type nodeEntry struct {
@@ -69,6 +71,16 @@ func (w *WorkflowBuilder) AllowCycles(maxAutoDepth int) *WorkflowBuilder {
 		AllowCycles:  true,
 		MaxAutoDepth: maxAutoDepth,
 	}
+	return w
+}
+
+func (w *WorkflowBuilder) Namespace(namespace string) *WorkflowBuilder {
+	w.namespace = namespace
+	return w
+}
+
+func (w *WorkflowBuilder) Version(version string) *WorkflowBuilder {
+	w.version = version
 	return w
 }
 
@@ -226,9 +238,20 @@ func (w *WorkflowBuilder) build() (*types.WorkflowDef, error) {
 		}
 	}
 
+	namespace := w.namespace
+	if namespace == "" {
+		namespace = "default"
+	}
+	version := w.version
+	if version == "" {
+		version = "v1"
+	}
+
 	// Assemble WorkflowDef.
 	def := &types.WorkflowDef{
+		Namespace:   namespace,
 		Name:        w.name,
+		Version:     version,
 		Spec:        "1.0",
 		Options:     w.options,
 		Connections: make(types.Connections),

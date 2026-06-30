@@ -1,8 +1,11 @@
 package types
 
+type WorkflowID string
+
 // WorkflowDef is the top-level DSL data structure representing a workflow definition.
 type WorkflowDef struct {
 	ID            string                    `json:"id,omitempty"`
+	Namespace     string                    `json:"namespace,omitempty"`
 	Name          string                    `json:"name,omitempty"`
 	Version       string                    `json:"version,omitempty"`
 	Description   string                    `json:"description,omitempty"`
