@@ -21,7 +21,9 @@ Use `sdk/xflow` as the public entry point:
 
 - `xflow.NewLocal()` starts an in-process engine for tests and embedded use.
 - `xflow.NewCluster(...)` uses Redis/Asynq for distributed execution.
-- `Engine.Submit` starts a workflow.
+- `Engine.AddWorkflow` registers a workflow and returns a stable workflow ID.
+- `Engine.Invoke` starts an execution from an explicit entry such as
+  `xflow.Start()` or `xflow.Trigger(name)`.
 - `Engine.Wait` waits for completion.
 - `Engine.Signal` resumes suspended approval or wait nodes.
 - `Engine.RevokeSignal` revokes a pre-delivered signal before it is consumed.
@@ -43,7 +45,8 @@ scheduler/runtime, not as the business approval system of record:
 - In cluster mode, do not use `WorkflowBuilder.LocalNode`; every worker process
   must declare the same custom node capabilities through `xflow.WithNodes(...)`.
 - API-only service instances can use `ClusterConfig{DisableConsumer: true}` so
-  they submit, inspect, signal, and cancel without consuming workflow tasks.
+  they register/invoke workflows, inspect, signal, and cancel without consuming
+  workflow tasks.
 - Worker instances should use the same Redis backend with consumers enabled and
   the full custom node definition set loaded.
 - Complex approval nodes should pass an approval event ID in the signal payload

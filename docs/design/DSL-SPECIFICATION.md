@@ -1051,9 +1051,9 @@ nodes:
 - ✅ 源节点和目标节点必须存在
 - ✅ 输出端口必须是节点支持的
 - ✅ 不允许循环依赖
-- ✅ 每个节点至少有一个输入或是起始节点
+- ✅ 每个节点至少有一个输入，或是显式入口节点（`xflow.start` / trigger）
 - ✅ 至少有一个终止节点
-- ✅ 起始节点通过 SDK `Submit` 的参数获得输入；外部触发器能力已移除，后续单独设计
+- ✅ `Invoke` 从一个显式入口启动：`xflow.start` 或某个 trigger 节点
 
 ### 5.6 设计决策：连线不承载条件逻辑
 
@@ -1080,6 +1080,11 @@ XFlow 的 connections 仅描述拓扑关系（谁连到谁），条件逻辑由 
 |---------|--------|------|---------|---------|---------|--------------|
 | HTTP请求 | xflow.http | HTTP/HTTPS 请求 | main | main, error | ❌ | 可选 |
 | 开始 | xflow.start | 显式工作流入口；有环图 v1 必须且只能有一个 | _(无)_ | main | ❌ | 不适用 |
+| 定时触发 | xflow.trigger.timer | 固定间隔触发执行 | _(无)_ | main | ❌ | 不适用 |
+| Cron 触发 | xflow.trigger.cron | Cron 表达式触发执行 | _(无)_ | main | ❌ | 不适用 |
+| Webhook 触发 | xflow.trigger.webhook | HTTP route 触发执行 | _(无)_ | main | ❌ | 不适用 |
+| Kafka 触发 | xflow.trigger.kafka | Kafka consumer group 触发执行 | _(无)_ | main | ❌ | 不适用 |
+| Redis Hub 触发 | xflow.trigger.redis_hub | Redis stream/pubsub 触发执行 | _(无)_ | main | ❌ | 不适用 |
 | gRPC调用 | xflow.grpc | gRPC 服务调用 | main | main, error | ❌ | 可选 |
 | 函数执行 | xflow.function | 执行 Go 函数或内联代码 | main | main, error | ❌ | 可选 |
 | 数据库操作 | xflow.database | 数据库 CRUD 操作 | main | main, error | ❌ | 可选 |
@@ -1114,7 +1119,47 @@ nodes:
 - 同一节点可重复执行，运行时节点状态和 `$nodes['name']` 输出表示最新一次成功输出。
 - core 不保存 `$nodes['name'].history` 或 attempts 历史；自定义节点的业务历史、幂等和外部副作用一致性由接入方处理；未来 server/runner 层可以记录内置节点的通用事件审计。
 - `max_auto_depth` 限制一次自动推进链路，避免无人值守的无限循环；人工信号/恢复后重新计数。
-- v1 不支持 `xflow.trigger`，也不支持有环图中的 `xflow.merge` `wait_all` 语义。
+- trigger 节点也是显式入口节点；是否在有环图中使用取决于接入方的幂等和业务历史设计。
+- v1 不支持有环图中的 `xflow.merge` `wait_all` 语义。
+
+#### Trigger 节点入口
+
+Trigger 节点没有输入端口，只有一个 `main` 输出端口。一个 workflow 可以同时声明多个 trigger，它们都属于显式 entry；一次执行只从 `Invoke` 选择的那个 entry 开始，未选择的 trigger root 不应阻塞所选入口的下游执行。
+
+```yaml
+nodes:
+  - name: order_created
+    type: xflow.trigger.kafka
+    kind: trigger
+    parameters:
+      brokers: ["localhost:9092"]
+      topic: order.created
+      group: order-created
+
+  - name: normalize
+    type: xflow.function
+
+connections:
+  order_created:
+    main:
+      - node: normalize
+```
+
+SDK API：
+
+```go
+workflowID, err := eng.AddWorkflow(ctx, wf)
+execID, err := eng.Invoke(ctx, workflowID, xflow.Start(), params)
+execID, err := eng.Invoke(ctx, workflowID, xflow.Trigger("order_created"), event)
+```
+
+`Submit` 已从 public SDK 移除；生产路径是先 `AddWorkflow` 注册定义，再 `Invoke` 从显式入口创建 execution。
+
+Trigger 高可用规则：
+- Kafka 和 Redis stream 依赖 consumer group 做多实例分摊。
+- Cron、timer 和 Redis pub/sub 使用 trigger runtime 的 lock 与 dedup 避免重复触发。
+- Webhook route 收敛入口请求，并基于 event ID dedup；生产环境应配置稳定事件 ID header。
+- 所有 trigger handler 必须可取消、非阻塞、幂等，并在 emit 前执行 dedup。
 
 ### 6.2 节点配置
 

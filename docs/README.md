@@ -23,13 +23,14 @@ XFlow 是一个 Go 工作流引擎。当前生产版重点是通过 SDK 嵌入�
 - `xflow.NewLocal()`：内存状态 + 本地 goroutine 队列，适合测试、示例、本地开发和单进程嵌入；进程退出后执行状态、队列和信号都会丢失。
 - `xflow.NewCluster(...)`：Redis/Asynq 后端，适合分布式执行、API/Worker 分离和长时间运行流程；集群模式必须使用 `node.Define` 或内置节点，不能提交 `LocalNode`。
 - `xflow.WithNodes(...)`：声明当前 worker 进程可执行的自定义 typed node；API-only 进程可用 `DisableConsumer=true` 只提交、Signal、Cancel、Inspect。
-- `Engine.Submit` / `Engine.Wait`：提交和等待工作流。
+- `Engine.AddWorkflow`：注册 workflow，返回稳定 workflow ID。
+- `Engine.Invoke` / `Engine.Wait`：从 `xflow.Start()` 或 `xflow.Trigger(name)` 显式入口创建 execution 并等待完成。
 - `Engine.Signal` / `Engine.RevokeSignal`：审批/等待节点的外部信号控制。
 - `Engine.Cancel` / `Engine.Inspect`：取消执行和查询执行详情。
 
 审批节点可使用 `node.Approval(...).WithTimeout("48h", "reject")` 配置超时；
 等待节点可使用 `node.Wait("signal").WithTimeout("30m")`。
-需要审批驳回、复测失败打回等有环流程时，使用 `xflow.Workflow(...).AllowCycles(maxAutoDepth)` 并添加且只添加一个 `node.Start()`；core 仍只保留节点最新状态/输出，业务历史由接入方或未来 server/runner 事件层记录。
+需要审批驳回、复测失败打回等有环流程时，使用 `xflow.Workflow(...).AllowCycles(maxAutoDepth)` 并添加且只添加一个 `node.Start()`；core 仍只保留节点最新状态/输出，业务历史由接入方或未来 server/runner 事件层记录。需要事件驱动时，使用 trigger 节点（timer、cron、webhook、Kafka、Redis Hub）作为显式入口，trigger handler 必须可取消、幂等，并依赖 runtime dedup/lock 支持多实例部署。
 
 ## DSL 快速示例
 

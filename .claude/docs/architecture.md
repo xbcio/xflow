@@ -19,7 +19,7 @@ sdk/             cmd/server + cmd/runner
 
 - `engine/` must NOT import redis/asynq/mysql/sql — only stdlib + types + node
 - `execution/` must NOT import redis/asynq/mysql/sql or network transports; it only adapts engine leases to an in-process or protocol-backed executor
-- `backend/` owns the reusable `Provider` interface: `StateStore + TaskQueue + HandlerRegistry + lifecycle binding`
+- `backend/` owns the reusable `Provider` interface: `StateStore + TaskQueue + HandlerRegistry + WorkflowRegistry + TriggerPrimitives + lifecycle binding`
 - `backend/memory/` is a reusable in-memory provider for embedded and test deployments; it must remain free of Redis/Asynq/MySQL/network dependencies
 - `backend/asynq/` is a reusable Redis + Asynq provider for SDK cluster mode and future server-side control-plane reuse
 - SDK assembles reusable packages and must not become the owner of reusable backend behavior
@@ -65,6 +65,9 @@ semantics.
 
 - `backend/` defines `Provider`, the common assembly contract implemented by
   concrete backends, plus optional backend capabilities such as `Waiter`.
+  Workflow registration and trigger coordination live here so SDK local,
+  cluster, and future server modes share the same identity, dedup, and locking
+  contracts.
 - `backend/memory/` contains the in-memory `StateStore`, in-memory
   `TaskQueue`, embedded `execution.Registry`, and embedded lifecycle binding.
   It is used by `xflow.NewLocal` and by tests.
@@ -80,6 +83,9 @@ semantics.
 - Engine Core never imports IO packages
 - Engine-owned execution metadata, such as submission TTL hints, lives in
   `engine/` instead of a concrete Redis/cluster package.
+- Trigger listener lifecycle stays outside Engine Core. The graph only marks
+  explicit entries (`xflow.start` and trigger nodes); SDK/backend/service layers
+  activate listeners, perform dedup/locks/state, and call `Invoke`.
 - SDK only assembles core packages and provides public API conveniences
 - Concrete backend packages map Engine Core's 2 interfaces to concrete IO implementations
 - Reusable packages should be named by capability, not by the generic term `adapter`

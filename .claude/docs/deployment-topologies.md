@@ -39,7 +39,9 @@ xflow 是一个通用、可嵌入的工作流引擎 SDK：用户用 DAG 编排�
 
 **执行模型**：`NewLocal` 内部 `backend/memory.New()` 组装内存组件，`Bind(eng)` 把 `execution.NewEmbeddedDispatcher` 挂到内存队列并启动 queue consumer pool。提交与执行在同一进程、同一组 goroutine 内闭环，但执行边界仍经过 `TaskLease -> Runner -> TaskResult`，与 cluster / Control Plane + Execution Plane 模型保持一致。`memory.Backend` 实现了 `backend.Provider` 和 `backend.Waiter`，因此 `Wait()` 是事件驱动而非轮询。
 
-**direct TaskHandler 支持**：local 模式是唯一支持「内联直挂 handler」的模式。当使用 `wf.LocalNode(name, h)` 时，该 handler 被存入 builder 的 direct map，并在 `Submit` 时按节点名注册进 `execution.Registry`。生产/分布式自定义节点统一使用 `node.Define(...).New(params)`，consumer 进程通过 `xflow.WithNodes(...)` 声明可执行能力。
+**direct TaskHandler 支持**：local 模式是唯一支持「内联直挂 handler」的模式。当使用 `wf.LocalNode(name, h)` 时，该 handler 被存入 builder 的 direct map，并在 `AddWorkflow` 时按节点名注册进 `execution.Registry`。生产/分布式自定义节点统一使用 `node.Define(...).New(params)`，consumer 进程通过 `xflow.WithNodes(...)` 声明可执行能力。
+
+**Trigger 入口**：`AddWorkflow` 注册 workflow 定义并激活 trigger 节点；`Invoke` 从一个显式 entry 创建 execution。Timer/cron/pubsub 使用 backend trigger primitives 做 lock/dedup，webhook 使用 route fan-in + event ID dedup。
 
 **何时用**：单元测试、本地开发调试、把工作流能力嵌入单进程应用且不需要跨进程分发。
 
@@ -83,7 +85,7 @@ SDK 作为**瘦客户端**：自己不执行节点、不需要 Redis，通过网
 | Registry | 客户端无需 handler；handler 由 runner 侧持有 |
 | 外部依赖 | 网络可达的 server（不依赖 Redis、不承担执行负载） |
 
-**执行模型（规划）**：客户端 `Submit` 把 `WorkflowDef` 通过网络发给 server；server 编译、派发；runner 执行；客户端通过 `Status` / `Wait` 查询、通过 `Signal` 投递信号。SDK 的 remote 模式即 server / runner 集群的客户端。
+**执行模型（规划）**：客户端 `AddWorkflow` 把 `WorkflowDef` 注册到 server，`Invoke` 指定 `xflow.start` 或 trigger entry 创建 execution；server 编译、派发；runner 执行；客户端通过 `Status` / `Wait` 查询、通过 `Signal` 投递信号。SDK 的 remote 模式即 server / runner 集群的客户端。
 
 **何时用**：嵌入方不愿引入 Redis 依赖、不愿承担节点执行负载，只想把工作流「托管」给集群运行。
 
