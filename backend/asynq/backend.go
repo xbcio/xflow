@@ -105,7 +105,7 @@ func New(redisAddr string, db store.Store, opts ...Option) (*Backend, error) {
 		state:          state,
 		queue:          queue,
 		registry:       registry,
-		workflowReg:    newWorkflowRegistry(),
+		workflowReg:    newWorkflowRegistry(rdb),
 		triggerRuntime: newTriggerPrimitives(rdb),
 		rdb:            rdb,
 		redisAddr:      redisAddr,
