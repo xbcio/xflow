@@ -141,7 +141,7 @@ func TestWasm_InFlightTimeout(t *testing.T) {
 func TestWasm_ModuleCacheHit(t *testing.T) {
 	e := newWasm(t)
 	code := b64(echoWasm)
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if _, err := e.Execute(context.Background(), code, map[string]any{"$input": map[string]any{"n": float64(i)}}, script.DefaultHelpers()); err != nil {
 			t.Fatalf("iteration %d: %v", i, err)
 		}
