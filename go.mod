@@ -13,7 +13,7 @@ require (
 	github.com/redis/go-redis/v9 v9.21.0
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.9
-	github.com/tetratelabs/wazero v1.9.0
+	github.com/tetratelabs/wazero v1.9.0 // pinned: fastschema/qjs@v0.0.6 needs v1.9.x; bumping breaks the qjs engine (host API signature mismatch)
 	google.golang.org/grpc v1.81.1
 	google.golang.org/protobuf v1.36.11
 	gopkg.in/yaml.v3 v3.0.1
