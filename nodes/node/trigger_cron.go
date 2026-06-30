@@ -6,6 +6,7 @@ import (
 	"time"
 
 	cronlib "github.com/robfig/cron/v3"
+	"github.com/spf13/cast"
 
 	"github.com/xbcio/xflow/types"
 )
@@ -54,11 +55,11 @@ func (n *CronTriggerNode) OnError(s OnError) Builder {
 func (n *CronTriggerNode) TriggerHandler() TriggerHandler { return n }
 
 func (n *CronTriggerNode) Activate(ctx context.Context, in *types.TriggerActivateInput) (types.TriggerSubscription, error) {
-	expr, _ := in.Params["expression"].(string)
+	expr := cast.ToString(in.Params["expression"])
 	if expr == "" {
 		return nil, fmt.Errorf("cron expression is required")
 	}
-	tz, _ := in.Params["timezone"].(string)
+	tz := cast.ToString(in.Params["timezone"])
 	if tz == "" {
 		tz = "UTC"
 	}

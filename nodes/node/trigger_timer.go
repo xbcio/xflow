@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/spf13/cast"
+
 	"github.com/xbcio/xflow/types"
 )
 
@@ -78,39 +80,17 @@ func (n *TimerTriggerNode) Activate(ctx context.Context, in *types.TriggerActiva
 }
 
 func triggerDurationParam(v any) (time.Duration, error) {
-	switch d := v.(type) {
-	case string:
-		parsed, err := time.ParseDuration(d)
-		if err != nil {
-			return 0, err
-		}
-		if parsed <= 0 {
-			return 0, fmt.Errorf("duration must be positive")
-		}
-		return parsed, nil
-	case time.Duration:
-		if d <= 0 {
-			return 0, fmt.Errorf("duration must be positive")
-		}
-		return d, nil
-	case int:
-		if d <= 0 {
-			return 0, fmt.Errorf("duration must be positive")
-		}
-		return time.Duration(d), nil
-	case int64:
-		if d <= 0 {
-			return 0, fmt.Errorf("duration must be positive")
-		}
-		return time.Duration(d), nil
-	case float64:
-		if d <= 0 {
-			return 0, fmt.Errorf("duration must be positive")
-		}
-		return time.Duration(d), nil
-	default:
+	if v == nil || cast.ToString(v) == "" {
 		return 0, fmt.Errorf("duration is required")
 	}
+	d, err := cast.ToDurationE(v)
+	if err != nil {
+		return 0, fmt.Errorf("duration is required")
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("duration must be positive")
+	}
+	return d, nil
 }
 
 func init() { RegisterTrigger(&TimerTriggerNode{}) }

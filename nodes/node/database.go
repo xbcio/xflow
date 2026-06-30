@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/spf13/cast"
 )
 
 // DatabaseNode implements xflow.database — runs a database operation via a named credential.
@@ -84,7 +85,7 @@ func (n *DatabaseNode) RawParams() any {
 }
 
 func (n *DatabaseNode) Execute(ctx context.Context, input *Input) (*Output, error) {
-	credName, _ := input.Params["credential"].(string)
+	credName := cast.ToString(input.Params["credential"])
 	if credName == "" {
 		return nil, fmt.Errorf("xflow.database: credential parameter is required")
 	}
@@ -93,12 +94,12 @@ func (n *DatabaseNode) Execute(ctx context.Context, input *Input) (*Output, erro
 		return nil, fmt.Errorf("xflow.database: credential %q not found", credName)
 	}
 
-	dsn, _ := cred["dsn"].(string)
+	dsn := cast.ToString(cred["dsn"])
 	if dsn == "" {
 		return nil, fmt.Errorf("xflow.database: credential %q missing dsn", credName)
 	}
 
-	driver, _ := cred["driver"].(string)
+	driver := cast.ToString(cred["driver"])
 	if driver == "" {
 		driver = "mysql"
 	}
@@ -109,8 +110,8 @@ func (n *DatabaseNode) Execute(ctx context.Context, input *Input) (*Output, erro
 	}
 	defer db.Close()
 
-	operation, _ := input.Params["operation"].(string)
-	table, _ := input.Params["table"].(string)
+	operation := cast.ToString(input.Params["operation"])
+	table := cast.ToString(input.Params["table"])
 	if table == "" {
 		return nil, fmt.Errorf("xflow.database: table parameter is required")
 	}
@@ -140,7 +141,7 @@ func (n *DatabaseNode) execSelect(ctx context.Context, db *sql.DB, table string,
 	if columns, ok := input.Params["columns"].([]any); ok && len(columns) > 0 {
 		colNames := make([]string, 0, len(columns))
 		for _, c := range columns {
-			s, _ := c.(string)
+			s := cast.ToString(c)
 			if s != "" && isValidIdentifier(s) {
 				colNames = append(colNames, s)
 			}
@@ -358,15 +359,11 @@ func isValidIdentifier(s string) bool {
 }
 
 func toInt(v any) (int, bool) {
-	switch n := v.(type) {
-	case int:
-		return n, true
-	case int64:
-		return int(n), true
-	case float64:
-		return int(n), true
+	n, err := cast.ToIntE(v)
+	if err != nil {
+		return 0, false
 	}
-	return 0, false
+	return n, true
 }
 
 func init() { Register(&DatabaseNode{}) }

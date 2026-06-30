@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/spf13/cast"
+
 	"github.com/xbcio/xflow/types"
 )
 
@@ -204,11 +206,11 @@ func emitRedisHubMessage(ctx context.Context, in *types.TriggerActivateInput, mo
 
 func redisHubConfigFromParams(params map[string]any) (RedisHubConsumerConfig, error) {
 	cfg := RedisHubConsumerConfig{
-		Mode:        stringParam(params["mode"]),
-		Stream:      stringParam(params["stream"]),
-		Group:       stringParam(params["group"]),
-		Channel:     stringParam(params["channel"]),
-		MaxInflight: intParam(params["max_inflight"], defaultTriggerMaxInflight),
+		Mode:        cast.ToString(params["mode"]),
+		Stream:      cast.ToString(params["stream"]),
+		Group:       cast.ToString(params["group"]),
+		Channel:     cast.ToString(params["channel"]),
+		MaxInflight: positiveIntParam(params["max_inflight"], defaultTriggerMaxInflight),
 	}
 	if cfg.Mode == "" {
 		cfg.Mode = "stream"
@@ -228,42 +230,24 @@ func redisHubConfigFromParams(params map[string]any) (RedisHubConsumerConfig, er
 	return cfg, nil
 }
 
-func stringParam(v any) string {
-	s, _ := v.(string)
-	return s
-}
-
 func stringSliceParam(v any) []string {
-	switch items := v.(type) {
-	case []string:
-		return items
-	case []any:
-		out := make([]string, 0, len(items))
-		for _, item := range items {
-			if s, ok := item.(string); ok && s != "" {
-				out = append(out, s)
-			}
-		}
-		return out
-	default:
+	values, err := cast.ToStringSliceE(v)
+	if err != nil {
 		return nil
 	}
+	out := values[:0]
+	for _, value := range values {
+		if value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
-func intParam(v any, fallback int) int {
-	switch n := v.(type) {
-	case int:
-		if n > 0 {
-			return n
-		}
-	case int64:
-		if n > 0 {
-			return int(n)
-		}
-	case float64:
-		if n > 0 {
-			return int(n)
-		}
+func positiveIntParam(v any, fallback int) int {
+	n, err := cast.ToIntE(v)
+	if err == nil && n > 0 {
+		return n
 	}
 	return fallback
 }

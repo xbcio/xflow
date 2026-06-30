@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/spf13/cast"
 )
 
 // WaitNodeType is the canonical type identifier for the wait node.
@@ -103,7 +105,7 @@ func (n *WaitNode) Execute(_ context.Context, _ *Input) (*Output, error) {
 
 func (n *WaitNode) PrepareSuspend(_ context.Context, input *Input) (*SuspendSpec, error) {
 	mode := WaitModeSignal
-	if m, ok := input.Params["mode"].(string); ok && m != "" {
+	if m := cast.ToString(input.Params["mode"]); m != "" {
 		mode = WaitMode(m)
 	}
 
@@ -124,7 +126,7 @@ func (n *WaitNode) prepareTimer(input *Input, timeout time.Duration) (*SuspendSp
 
 	if d, ok := parseDurationParam(input.Params["duration"]); ok {
 		timer = d
-	} else if untilStr, ok := input.Params["until"].(string); ok && untilStr != "" {
+	} else if untilStr := cast.ToString(input.Params["until"]); untilStr != "" {
 		t, err := time.Parse(time.RFC3339, untilStr)
 		if err != nil {
 			return nil, fmt.Errorf("xflow.wait: invalid until time: %w", err)
@@ -158,7 +160,7 @@ func (n *WaitNode) prepareSignal(input *Input, timeout time.Duration) (*SuspendS
 		}, nil
 	}
 
-	signalName, _ := input.Params["signal_name"].(string)
+	signalName := cast.ToString(input.Params["signal_name"])
 	if signalName == "" {
 		signalName = input.NodeName + "/signal"
 	}
@@ -200,38 +202,19 @@ func (n *WaitNode) OnResume(_ context.Context, input *Input, signal *SignalPaylo
 }
 
 func parseDurationParam(v any) (time.Duration, bool) {
-	switch d := v.(type) {
-	case string:
-		if d == "" {
-			return 0, false
-		}
-		parsed, err := time.ParseDuration(d)
-		if err != nil {
-			return 0, false
-		}
-		return parsed, true
-	case float64:
-		return time.Duration(d), true
-	case time.Duration:
-		return d, true
+	if v == nil || cast.ToString(v) == "" {
+		return 0, false
 	}
-	return 0, false
+	d, err := cast.ToDurationE(v)
+	return d, err == nil
 }
 
 func parseStringSlice(v any) []string {
-	switch s := v.(type) {
-	case []string:
-		return s
-	case []any:
-		result := make([]string, 0, len(s))
-		for _, item := range s {
-			if str, ok := item.(string); ok {
-				result = append(result, str)
-			}
-		}
-		return result
+	values, err := cast.ToStringSliceE(v)
+	if err != nil {
+		return nil
 	}
-	return nil
+	return values
 }
 
 func init() { Register(&WaitNode{}) }

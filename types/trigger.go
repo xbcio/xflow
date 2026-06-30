@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/spf13/cast"
 )
 
 type TriggerEvent struct {
@@ -41,8 +43,7 @@ func (i *TriggerActivateInput) Emit(ctx context.Context, event *TriggerEvent) (E
 }
 
 func (i *TriggerActivateInput) GetString(name string) string {
-	v, _ := i.Params[name].(string)
-	return v
+	return cast.ToString(i.Params[name])
 }
 
 func (i *TriggerActivateInput) Webhooks() (WebhookRuntime, error) {
