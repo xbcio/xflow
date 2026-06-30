@@ -95,6 +95,8 @@ func (n *ScriptNode) Execute(ctx context.Context, input *Input) (*Output, error)
 	}
 
 	declared := readCredNames(input.Params["credentials"])
+	// Input.Credential has no error return; a nil value means "not found", which
+	// ResolveCredentials turns into a config error for a declared-but-absent name.
 	creds, first, err := script.ResolveCredentials(declared, func(name string) (map[string]any, error) {
 		return input.Credential(name), nil
 	})
