@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/nodes/node"
@@ -27,6 +28,8 @@ func (h *recordingHooks) OnSignalDelivered(context.Context, types.ExecutionID, s
 }
 func (h *recordingHooks) OnSignalRevoked(context.Context, types.ExecutionID, string) {}
 func (h *recordingHooks) OnNodeTimeout(context.Context, types.ExecutionID, string)   {}
+func (h *recordingHooks) OnNodeRetry(context.Context, types.ExecutionID, string, int, time.Duration) {
+}
 
 func TestEngine_BuildTaskLeaseAndCommitTaskResult_RunnerStyleFlow(t *testing.T) {
 	def := &types.WorkflowDef{

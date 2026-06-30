@@ -25,6 +25,16 @@ type Nodes interface {
 	UpsertNode(ctx context.Context, n *NodeSnapshot) error
 	GetNode(ctx context.Context, id types.ExecutionID, name string) (*NodeSnapshot, error)
 	ClaimTaskLease(ctx context.Context, lease *TaskLease) (*NodeSnapshot, bool, error)
+	// ResetNodeForRetry rolls a Running node back to Pending so it can be
+	// re-leased after a backoff delay. Implementations must:
+	//   - validate that the current snapshot is in Running with a matching
+	//     activation (silently no-op otherwise to keep the call idempotent),
+	//   - clear LeaseID / LeaseToken,
+	//   - preserve Attempt (incremented when the next lease is acquired) and
+	//     ActivationID / AutoDepth.
+	// Errors should be returned only for backend failures, not for
+	// "nothing-to-reset" conditions.
+	ResetNodeForRetry(ctx context.Context, id types.ExecutionID, name string) error
 }
 
 // Scheduling stores DAG scheduling counters and completion state.
@@ -95,6 +105,10 @@ type Hooks interface {
 	OnSignalDelivered(ctx context.Context, id types.ExecutionID, signalName string, data map[string]any)
 	OnSignalRevoked(ctx context.Context, id types.ExecutionID, signalName string)
 	OnNodeTimeout(ctx context.Context, id types.ExecutionID, nodeName string)
+	// OnNodeRetry fires when the engine schedules a retry for a transient
+	// handler failure (RetrySettings.MaxAttempts not yet exhausted). delay is
+	// the backoff before the requeued task will run.
+	OnNodeRetry(ctx context.Context, id types.ExecutionID, name string, attempt int, delay time.Duration)
 }
 
 // Logger is a minimal structured logger interface.

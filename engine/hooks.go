@@ -21,6 +21,8 @@ func (BaseHooks) OnSignalDelivered(_ context.Context, _ types.ExecutionID, _ str
 }
 func (BaseHooks) OnSignalRevoked(_ context.Context, _ types.ExecutionID, _ string) {}
 func (BaseHooks) OnNodeTimeout(_ context.Context, _ types.ExecutionID, _ string)   {}
+func (BaseHooks) OnNodeRetry(_ context.Context, _ types.ExecutionID, _ string, _ int, _ time.Duration) {
+}
 
 // SafeHook wraps a hook call with panic recovery and a 5s timeout.
 // Exported for use by adapter packages (e.g. timeout monitor).

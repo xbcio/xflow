@@ -105,6 +105,7 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 			OnError:    nd.OnError,
 			MergeMode:  extractMergeMode(nd),
 			Parameters: nd.Parameters,
+			Retry:      resolveRetry(nd.Retry, def.Settings),
 		}
 		if nd.Type == "xflow.start" || nd.Kind == types.NodeKindTrigger {
 			g.EntryIndexes[nd.Name] = i
@@ -167,6 +168,21 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 	}
 
 	return g, nil
+}
+
+// resolveRetry chooses the effective retry settings for a node: per-node
+// overrides win; otherwise the workflow-level WorkflowSettings.Retry applies;
+// otherwise no retry. Returns nil when retries are disabled.
+func resolveRetry(node *types.RetrySettings, settings *types.WorkflowSettings) *types.RetrySettings {
+	if node != nil && node.MaxAttempts > 0 {
+		cp := *node
+		return &cp
+	}
+	if settings != nil && settings.Retry != nil && settings.Retry.MaxAttempts > 0 {
+		cp := *settings.Retry
+		return &cp
+	}
+	return nil
 }
 
 // extractMergeMode returns the merge mode from a node's parameters if it's a merge node.

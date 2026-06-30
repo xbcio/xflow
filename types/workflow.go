@@ -66,6 +66,9 @@ type NodeDef struct {
 	OutputSchema map[string]any `json:"output_schema,omitempty"`
 	Parameters   map[string]any `json:"parameters,omitempty"`
 	UI           map[string]any `json:"ui,omitempty"`
+	// Retry overrides WorkflowSettings.Retry for this node. Nil means inherit
+	// the workflow default; the workflow default of nil means no retries.
+	Retry *RetrySettings `json:"retry,omitempty"`
 }
 
 // NodeKind describes a node's runtime role.

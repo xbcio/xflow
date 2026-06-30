@@ -486,9 +486,19 @@ func (e *Engine) finalizeNode(ctx context.Context, t *Task, g *graph.Graph, meta
 }
 
 // handleNodeError applies the node's OnError strategy and either aborts the
-// execution or routes to the appropriate output port.
+// execution or routes to the appropriate output port. Retryable failures are
+// re-enqueued via tryRetry first; only once the retry budget is exhausted
+// (or the error is marked permanent) does control fall through to OnError.
 func (e *Engine) handleNodeError(ctx context.Context, t *Task, g *graph.Graph, sysErr error, output *types.Output, bizErr *types.Error) error {
 	meta := g.Nodes[t.NodeIdx]
+	if retried, err := e.tryRetry(ctx, t, meta, sysErr); err != nil {
+		if e.logger != nil {
+			e.logger.Error("retry enqueue failed", "err", err, "exec", string(t.ExecutionID), "node", t.NodeName)
+		}
+		// fall through to OnError so the workflow doesn't hang.
+	} else if retried {
+		return nil
+	}
 	outcome := ApplyOnError(meta.OnError, sysErr, bizErr, output)
 
 	_ = e.state.PutOutput(ctx, t.ExecutionID, t.NodeName, outcome.Output)
@@ -524,6 +534,47 @@ func (e *Engine) handleNodeError(ctx context.Context, t *Task, g *graph.Graph, s
 	}
 
 	return e.OnNodeComplete(ctx, t.ExecutionID, g, t.NodeIdx, outcome.RoutePort, outcome.Output)
+}
+
+// tryRetry decides whether the failed task should be re-enqueued after a
+// backoff delay. Returns (retried=true, nil) when the task was re-enqueued;
+// (false, nil) means the caller should proceed with the OnError strategy.
+func (e *Engine) tryRetry(ctx context.Context, t *Task, meta graph.NodeMeta, sysErr error) (bool, error) {
+	if sysErr == nil {
+		return false, nil // business errors are routed via OnError, never retried here
+	}
+	settings := retryFor(meta)
+	if settings == nil {
+		return false, nil
+	}
+	if types.IsPermanent(sysErr) {
+		return false, nil
+	}
+	_, _, currentAttempt := e.currentLease(ctx, t.ExecutionID, t.NodeName)
+	if currentAttempt >= settings.MaxAttempts {
+		return false, nil
+	}
+	if err := e.state.ResetNodeForRetry(ctx, t.ExecutionID, t.NodeName); err != nil {
+		return false, err
+	}
+	delay := retryBackoff(currentAttempt, settings, t.ExecutionID, t.NodeName)
+	retryTask := &Task{
+		ExecutionID:  t.ExecutionID,
+		NodeName:     t.NodeName,
+		NodeIdx:      t.NodeIdx,
+		Type:         TaskTypeNodeExec,
+		ActivationID: t.ActivationID,
+		AutoDepth:    t.AutoDepth,
+	}
+	if err := e.queue.EnqueueDelayed(ctx, retryTask, delay); err != nil {
+		return false, err
+	}
+	if e.hooks != nil {
+		safeHook(ctx, e.logger, func(c context.Context) {
+			e.hooks.OnNodeRetry(c, t.ExecutionID, t.NodeName, currentAttempt, delay)
+		})
+	}
+	return true, nil
 }
 
 func (e *Engine) currentLease(ctx context.Context, id types.ExecutionID, nodeName string) (LeaseID, LeaseToken, int) {

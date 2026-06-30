@@ -39,6 +39,10 @@ type NodeMeta struct {
 	MergeMode  string // "wait_all" or "wait_any"; empty means normal node
 	Parameters map[string]any
 	PortOuts   []string // distinct output port names that have outgoing edges
+	// Retry, when non-nil and MaxAttempts>0, instructs the engine to
+	// re-enqueue this node with an exponential backoff after a transient
+	// handler failure. Nil means no retries.
+	Retry *types.RetrySettings
 }
 
 // Edge represents a directed connection between two nodes.

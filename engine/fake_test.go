@@ -107,6 +107,25 @@ func (f *fakeState) GetNode(_ context.Context, id types.ExecutionID, name string
 	return ns, nil
 }
 
+func (f *fakeState) ResetNodeForRetry(_ context.Context, id types.ExecutionID, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := string(id) + "/" + name
+	ns := f.nodes[key]
+	if ns == nil {
+		return nil
+	}
+	if ns.Status != types.NodeStatusRunning && ns.Status != types.NodeStatusCommitting {
+		return nil
+	}
+	cp := *ns
+	cp.Status = types.NodeStatusPending
+	cp.LeaseID = ""
+	cp.LeaseToken = ""
+	f.nodes[key] = &cp
+	return nil
+}
+
 func (f *fakeState) ClaimTaskLease(_ context.Context, lease *TaskLease) (*NodeSnapshot, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

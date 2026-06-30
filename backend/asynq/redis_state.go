@@ -182,6 +182,24 @@ if not locked then return 0 end
 return 1
 `)
 
+// resetNodeForRetryLua rolls a Running node back to Pending and clears its
+// lease token so the engine can re-enqueue the task after a backoff. No-op if
+// the node is not in 'running' state — keeps the operation idempotent against
+// concurrent claim/timeouts/cancels.
+// KEYS[1] = node status key, KEYS[2] = node meta hash
+// ARGV[1] = ttl seconds
+// Returns 1 (reset) or 0 (no-op).
+var resetNodeForRetryLua = redis.NewScript(`
+local status = redis.call('GET', KEYS[1])
+if status ~= 'running' and status ~= 'committing' then
+    return 0
+end
+redis.call('SET', KEYS[1], 'pending', 'EX', tonumber(ARGV[1]))
+redis.call('HSET', KEYS[2], 'lease_token', '', 'lease_id', '')
+redis.call('EXPIRE', KEYS[2], tonumber(ARGV[1]))
+return 1
+`)
+
 // revokeSignalLua atomically removes a signal that has not yet been consumed.
 // KEYS[1] = signal key, KEYS[2] = waiter key (stores node name waiting for this signal)
 // ARGV[1] = resume lock key prefix (xflow:exec:{id}:node:)
@@ -584,6 +602,18 @@ func (s *redisState) GetNode(ctx context.Context, id types.ExecutionID, name str
 		}
 	}
 	return ns, nil
+}
+
+func (s *redisState) ResetNodeForRetry(ctx context.Context, id types.ExecutionID, name string) error {
+	ttl := s.getExecTTL(id)
+	_, err := resetNodeForRetryLua.Run(ctx, s.rdb,
+		[]string{nodeStatusKey(id, name), nodeMetaKey(id, name)},
+		int(ttl.Seconds()),
+	).Int64()
+	if err != nil && err != redis.Nil {
+		return fmt.Errorf("reset node for retry %q/%q: %w", id, name, err)
+	}
+	return nil
 }
 
 func (s *redisState) ClaimTaskLease(ctx context.Context, lease *engine.TaskLease) (*engine.NodeSnapshot, bool, error) {

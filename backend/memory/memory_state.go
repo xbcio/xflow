@@ -137,6 +137,25 @@ func (s *memoryState) GetNode(_ context.Context, id types.ExecutionID, name stri
 	return ns, nil
 }
 
+func (s *memoryState) ResetNodeForRetry(_ context.Context, id types.ExecutionID, name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := string(id) + "/" + name
+	ns := s.nodes[key]
+	if ns == nil {
+		return nil
+	}
+	if ns.Status != types.NodeStatusRunning && ns.Status != types.NodeStatusCommitting {
+		return nil
+	}
+	cp := *ns
+	cp.Status = types.NodeStatusPending
+	cp.LeaseID = ""
+	cp.LeaseToken = ""
+	s.nodes[key] = &cp
+	return nil
+}
+
 func (s *memoryState) ClaimTaskLease(_ context.Context, lease *engine.TaskLease) (*engine.NodeSnapshot, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
