@@ -23,11 +23,12 @@ var NormalizeVulnerability = node.Define("demo.vuln.normalize",
 )
 
 wf := xflow.Workflow("vulnerability-approval")
+start := wf.Node("start", node.Start())
 normalize := wf.Node("NormalizeVulnerability", NormalizeVulnerability.New(nil))
 approval := wf.Node("SecurityApproval",
 	node.Approval([]string{"sec-owner", "app-owner"}, node.ApprovalSequential),
 )
-wf.Connect(normalize, approval)
+wf.Connect(start, normalize).Connect(normalize, approval)
 ```
 
 `node.Define` is the single custom-node API. `Definition.New(params)`
@@ -54,8 +55,9 @@ api, err := xflow.NewCluster(xflow.ClusterConfig{
 })
 ```
 
-In cluster mode, do not submit workflows containing `LocalNode`; use typed nodes
-(`node.Define`, built-in nodes). `Submit` auto-registers workflow-declared
-handlers in the current process before enqueueing work, and `xflow.WithNodes`
-declares consumer capabilities for processes that may execute tasks submitted
-by other service instances.
+In cluster mode, do not register workflows containing `LocalNode`; use typed
+nodes (`node.Define`, built-in nodes). `AddWorkflow` registers workflow
+metadata and workflow-declared handlers in the current process, `Invoke` starts
+an execution from an explicit entry such as `xflow.Start()`, and
+`xflow.WithNodes` declares consumer capabilities for processes that may execute
+tasks registered by other service instances.

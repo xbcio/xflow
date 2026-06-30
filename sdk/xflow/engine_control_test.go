@@ -22,12 +22,17 @@ func TestEngineControlAPIInspectAndCancel(t *testing.T) {
 	defer eng.Stop()
 
 	wf := Workflow("control-api")
+	start := wf.Node("start", node.Start())
 	wait := wf.Node("ApprovalWait", node.Wait("approval"))
-	_ = wait
+	wf.Connect(start, wait)
 
-	id, err := eng.Submit(ctx, wf, map[string]any{"ticket": "VULN-1"})
+	workflowID, err := eng.AddWorkflow(ctx, wf)
 	if err != nil {
-		t.Fatalf("Submit() error: %v", err)
+		t.Fatalf("AddWorkflow() error: %v", err)
+	}
+	id, err := eng.Invoke(ctx, workflowID, Start(), map[string]any{"ticket": "VULN-1"})
+	if err != nil {
+		t.Fatalf("Invoke() error: %v", err)
 	}
 
 	detail := waitForNodeStatus(t, ctx, eng, id, "ApprovalWait", types.NodeStatusSuspended)
@@ -62,15 +67,21 @@ func TestEngineControlAPIRevokePredeliveredSignal(t *testing.T) {
 	defer eng.Stop()
 
 	wf := Workflow("revoke-api")
+	start := wf.Node("start", node.Start())
 	blocker := &blockingHandler{release: make(chan struct{})}
 	t.Cleanup(blocker.releaseNow)
 	gate := wf.LocalNode("Gate", blocker)
 	wait := wf.Node("ApprovalWait", node.Wait("approval"))
+	wf.Connect(start, gate)
 	wf.Connect(gate, wait)
 
-	id, err := eng.Submit(ctx, wf, nil)
+	workflowID, err := eng.AddWorkflow(ctx, wf)
 	if err != nil {
-		t.Fatalf("Submit() error: %v", err)
+		t.Fatalf("AddWorkflow() error: %v", err)
+	}
+	id, err := eng.Invoke(ctx, workflowID, Start(), nil)
+	if err != nil {
+		t.Fatalf("Invoke() error: %v", err)
 	}
 
 	if err := eng.Signal(ctx, id, "approval", map[string]any{"approver": "alice"}); err != nil {
@@ -95,13 +106,19 @@ func TestEngineControlAPIWaitDurationResumes(t *testing.T) {
 	defer eng.Stop()
 
 	wf := Workflow("timer-api")
+	start := wf.Node("start", node.Start())
 	wait := wf.Node("Timer", node.WaitDuration("10ms"))
 	done := wf.LocalNode("Done", &echoControlHandler{})
+	wf.Connect(start, wait)
 	wf.Connect(wait, done)
 
-	id, err := eng.Submit(ctx, wf, map[string]any{"ticket": "VULN-2"})
+	workflowID, err := eng.AddWorkflow(ctx, wf)
 	if err != nil {
-		t.Fatalf("Submit() error: %v", err)
+		t.Fatalf("AddWorkflow() error: %v", err)
+	}
+	id, err := eng.Invoke(ctx, workflowID, Start(), map[string]any{"ticket": "VULN-2"})
+	if err != nil {
+		t.Fatalf("Invoke() error: %v", err)
 	}
 
 	result, err := eng.Wait(ctx, id)
@@ -124,15 +141,21 @@ func TestEngineControlAPIApprovalTimeoutRoutes(t *testing.T) {
 	defer eng.Stop()
 
 	wf := Workflow("approval-timeout-api")
+	start := wf.Node("start", node.Start())
 	approval := wf.Node("SecurityApproval",
 		node.Approval([]string{"sec-owner"}, node.ApprovalAny).WithTimeout("10ms", "reject"),
 	)
 	rejected := wf.LocalNode("Rejected", &echoControlHandler{})
+	wf.Connect(start, approval)
 	wf.Connect(approval.Output("rejected"), rejected)
 
-	id, err := eng.Submit(ctx, wf, map[string]any{"ticket": "VULN-3"})
+	workflowID, err := eng.AddWorkflow(ctx, wf)
 	if err != nil {
-		t.Fatalf("Submit() error: %v", err)
+		t.Fatalf("AddWorkflow() error: %v", err)
+	}
+	id, err := eng.Invoke(ctx, workflowID, Start(), map[string]any{"ticket": "VULN-3"})
+	if err != nil {
+		t.Fatalf("Invoke() error: %v", err)
 	}
 
 	result, err := eng.Wait(ctx, id)

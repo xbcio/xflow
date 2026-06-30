@@ -194,10 +194,12 @@ func (h *requestReviewHandler) Execute(_ context.Context, input *node.Input) (*n
 //	ParseClaim ──→ EnrichClaim ──→ PolicyCheck ──main──→ AutoApprove
 //	                                    ╚──error──→ RequestReview
 //
-// The workflow-level params passed to Run/Submit are injected by the engine
-// into ParseClaim (the sole source node) as input.Data.
+// The workflow-level params passed to Invoke are injected by the engine into
+// the explicit start node and then forwarded to ParseClaim.
 func buildExpenseWorkflow() *xflow.WorkflowBuilder {
 	wf := xflow.Workflow("expense-claim")
+
+	start := wf.Node("start", node.Start())
 
 	// ParseClaim: direct handler — validates the raw claim params.
 	// Reads from input.Data (injected from workflow-level submission params).
@@ -215,7 +217,8 @@ func buildExpenseWorkflow() *xflow.WorkflowBuilder {
 	approve := wf.LocalNode("AutoApprove", &autoApproveHandler{})
 	review := wf.LocalNode("RequestReview", &requestReviewHandler{})
 
-	wf.Connect(parse.Output("main"), enrich).
+	wf.Connect(start, parse).
+		Connect(parse.Output("main"), enrich).
 		Connect(enrich.Output("main"), check).
 		Connect(check.Output("main"), approve). // within-policy branch
 		Connect(check.Output("error"), review)  // over-policy branch
@@ -301,9 +304,14 @@ func runExpenseWorkflow(t *testing.T, ctx context.Context, params map[string]any
 	}
 	defer eng.Stop()
 
-	id, err := eng.Submit(ctx, buildExpenseWorkflow(), params)
+	wf := buildExpenseWorkflow()
+	workflowID, err := eng.AddWorkflow(ctx, wf)
 	if err != nil {
-		t.Fatalf("Submit() error: %v", err)
+		t.Fatalf("AddWorkflow() error: %v", err)
+	}
+	id, err := eng.Invoke(ctx, workflowID, xflow.Start(), params)
+	if err != nil {
+		t.Fatalf("Invoke() error: %v", err)
 	}
 	result, err := eng.Wait(ctx, id)
 	if err != nil {

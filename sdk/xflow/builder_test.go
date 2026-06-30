@@ -104,7 +104,7 @@ func TestWorkflowBuilderAllowCyclesEmitsOptionsAndSkipsBuilderCycleDetection(t *
 	}
 }
 
-func TestEngineSubmitRejectsDirectHandlersWhenBackendDoesNotAllowThem(t *testing.T) {
+func TestEngineAddWorkflowRejectsDirectHandlersWhenBackendDoesNotAllowThem(t *testing.T) {
 	provider := memory.New()
 	eng, err := newFromConfig(&engineConfig{allowDirectHandlers: false}, provider)
 	if err != nil {
@@ -115,16 +115,16 @@ func TestEngineSubmitRejectsDirectHandlersWhenBackendDoesNotAllowThem(t *testing
 	wf := Workflow("cluster-direct-handler")
 	wf.LocalNode("local-only", &testBuilderEchoHandler{})
 
-	_, err = eng.Submit(context.Background(), wf, nil)
+	_, err = eng.AddWorkflow(context.Background(), wf)
 	if err == nil {
-		t.Fatal("Submit() error = nil, want direct-handler rejection")
+		t.Fatal("AddWorkflow() error = nil, want direct-handler rejection")
 	}
 	if !strings.Contains(err.Error(), "node.Define") {
-		t.Fatalf("Submit() error = %v, want node.Define guidance", err)
+		t.Fatalf("AddWorkflow() error = %v, want node.Define guidance", err)
 	}
 }
 
-func TestEngineSubmitRegistersWorkflowDeclaredHandlers(t *testing.T) {
+func TestEngineInvokeRegistersWorkflowDeclaredHandlers(t *testing.T) {
 	provider := memory.New()
 	eng, err := newFromConfig(&engineConfig{allowDirectHandlers: false}, provider)
 	if err != nil {
@@ -133,11 +133,17 @@ func TestEngineSubmitRegistersWorkflowDeclaredHandlers(t *testing.T) {
 	defer eng.Stop()
 
 	wf := Workflow("portable-handler")
-	wf.Node("portable", testWorkflowDeclaredNode.New(map[string]any{"source": "workflow"}))
+	start := wf.Node("start", node.Start())
+	portable := wf.Node("portable", testWorkflowDeclaredNode.New(map[string]any{"source": "workflow"}))
+	wf.Connect(start, portable)
 
-	id, err := eng.Submit(context.Background(), wf, map[string]any{"ticket": "VULN-1"})
+	workflowID, err := eng.AddWorkflow(context.Background(), wf)
 	if err != nil {
-		t.Fatalf("Submit() error = %v", err)
+		t.Fatalf("AddWorkflow() error = %v", err)
+	}
+	id, err := eng.Invoke(context.Background(), workflowID, Start(), map[string]any{"ticket": "VULN-1"})
+	if err != nil {
+		t.Fatalf("Invoke() error = %v", err)
 	}
 
 	result, err := eng.Wait(context.Background(), id)
@@ -149,7 +155,7 @@ func TestEngineSubmitRegistersWorkflowDeclaredHandlers(t *testing.T) {
 	}
 }
 
-func TestEngineSubmitPassesRuntimeVarsToEveryExecution(t *testing.T) {
+func TestEngineInvokePassesRuntimeVarsToEveryExecution(t *testing.T) {
 	eng, err := NewLocal()
 	if err != nil {
 		t.Fatalf("NewLocal() error = %v", err)
@@ -157,21 +163,27 @@ func TestEngineSubmitPassesRuntimeVarsToEveryExecution(t *testing.T) {
 	defer eng.Stop()
 
 	wf := Workflow("runtime-vars")
-	wf.Node("capture", testRuntimeCaptureNode.New(nil))
+	start := wf.Node("start", node.Start())
+	capture := wf.Node("capture", testRuntimeCaptureNode.New(nil))
+	wf.Connect(start, capture)
 
-	firstID, err := eng.Submit(context.Background(), wf,
+	workflowID, err := eng.AddWorkflow(context.Background(), wf)
+	if err != nil {
+		t.Fatalf("AddWorkflow() error = %v", err)
+	}
+	firstID, err := eng.Invoke(context.Background(), workflowID, Start(),
 		map[string]any{"ticket": "VULN-1"},
 		WithRuntimeVars(map[string]any{"tenant_id": "tenant-a"}),
 	)
 	if err != nil {
-		t.Fatalf("first Submit() error = %v", err)
+		t.Fatalf("first Invoke() error = %v", err)
 	}
-	secondID, err := eng.Submit(context.Background(), wf,
+	secondID, err := eng.Invoke(context.Background(), workflowID, Start(),
 		map[string]any{"ticket": "VULN-2"},
 		WithRuntimeVars(map[string]any{"tenant_id": "tenant-b"}),
 	)
 	if err != nil {
-		t.Fatalf("second Submit() error = %v", err)
+		t.Fatalf("second Invoke() error = %v", err)
 	}
 
 	first, err := eng.Wait(context.Background(), firstID)
@@ -219,11 +231,17 @@ func TestWithNodesRegistersConsumerCapabilities(t *testing.T) {
 	}
 
 	wf := Workflow("portable-handler")
-	wf.Node("portable", testWorkflowDeclaredNode.New(nil))
+	start := wf.Node("start", node.Start())
+	portable := wf.Node("portable", testWorkflowDeclaredNode.New(nil))
+	wf.Connect(start, portable)
 
-	id, err := eng.Submit(context.Background(), wf, map[string]any{"ticket": "VULN-2"})
+	workflowID, err := eng.AddWorkflow(context.Background(), wf)
 	if err != nil {
-		t.Fatalf("Submit() error = %v", err)
+		t.Fatalf("AddWorkflow() error = %v", err)
+	}
+	id, err := eng.Invoke(context.Background(), workflowID, Start(), map[string]any{"ticket": "VULN-2"})
+	if err != nil {
+		t.Fatalf("Invoke() error = %v", err)
 	}
 
 	result, err := eng.Wait(context.Background(), id)

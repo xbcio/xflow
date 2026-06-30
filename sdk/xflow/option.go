@@ -82,9 +82,9 @@ func WithLogger(l engine.Logger) Option {
 
 // WithNodes declares custom node definitions this process can execute.
 //
-// Submit automatically registers typed handlers that appear in the submitted
+// AddWorkflow automatically registers typed handlers that appear in the
 // workflow in the current process. WithNodes is still required for cluster
-// worker processes that may execute workflows submitted elsewhere, because
+// worker processes that may execute workflows registered elsewhere, because
 // workers need to resolve node types before seeing the workflow builder.
 func WithNodes(defs ...node.Handler) Option {
 	return func(c *engineConfig) {
@@ -92,39 +92,39 @@ func WithNodes(defs ...node.Handler) Option {
 	}
 }
 
-// SubmitOption configures a single workflow submission.
-type SubmitOption func(*submitConfig)
+// InvokeOption configures a single workflow invocation.
+type InvokeOption func(*invokeConfig)
 
-type submitConfig struct {
+type invokeConfig struct {
 	execTTL time.Duration
 	runtime *types.Runtime
 }
 
-// WithExecutionTTL overrides the backend execution TTL for this submission.
+// WithExecutionTTL overrides the backend execution TTL for this invocation.
 //
 // It is mostly relevant for Redis-backed cluster mode. The TTL is extended
 // while nodes are suspended, but it should still be set longer than the
 // expected workflow lifetime for long-running approval processes.
-func WithExecutionTTL(d time.Duration) SubmitOption {
-	return func(c *submitConfig) {
+func WithExecutionTTL(d time.Duration) InvokeOption {
+	return func(c *invokeConfig) {
 		if d > 0 {
 			c.execTTL = d
 		}
 	}
 }
 
-// WithRuntime sets per-execution runtime context for this submission.
+// WithRuntime sets per-execution runtime context for this invocation.
 //
 // Runtime is distinct from static workflow context: WorkflowContext.Vars belongs
-// to the workflow definition, while Runtime.Vars can differ for every Submit.
-func WithRuntime(runtime *types.Runtime) SubmitOption {
-	return func(c *submitConfig) {
+// to the workflow definition, while Runtime.Vars can differ for every Invoke.
+func WithRuntime(runtime *types.Runtime) InvokeOption {
+	return func(c *invokeConfig) {
 		c.runtime = cloneRuntime(runtime)
 	}
 }
 
 // WithRuntimeVars is a convenience wrapper for setting Runtime.Vars.
-func WithRuntimeVars(vars map[string]any) SubmitOption {
+func WithRuntimeVars(vars map[string]any) InvokeOption {
 	return WithRuntime(&types.Runtime{Vars: vars})
 }
 

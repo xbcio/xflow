@@ -14,9 +14,11 @@ type Entry struct {
 
 func Start() Entry { return Entry{nodeName: "start"} }
 
+func EntryNode(name string) Entry { return Entry{nodeName: name} }
+
 func Trigger(name string) Entry { return Entry{nodeName: name} }
 
-func (e *Engine) Invoke(ctx context.Context, workflowID types.WorkflowID, entry Entry, input map[string]any, opts ...SubmitOption) (types.ExecutionID, error) {
+func (e *Engine) Invoke(ctx context.Context, workflowID types.WorkflowID, entry Entry, input map[string]any, opts ...InvokeOption) (types.ExecutionID, error) {
 	if entry.nodeName == "" {
 		return "", fmt.Errorf("entry node name is required")
 	}
@@ -24,7 +26,7 @@ func (e *Engine) Invoke(ctx context.Context, workflowID types.WorkflowID, entry 
 	if err != nil {
 		return "", err
 	}
-	cfg := &submitConfig{}
+	cfg := &invokeConfig{}
 	for _, o := range opts {
 		o(cfg)
 	}

@@ -42,7 +42,7 @@ type edge struct {
 // Workflow creates a workflow builder with a concise user-facing name.
 //
 // The builder is definition-only: it does not start execution, own runtime
-// state, or talk to a backend until passed to Engine.Submit. Use Node for
+// state, or talk to a backend until passed to Engine.AddWorkflow. Use Node for
 // portable typed nodes and LocalNode only for single-process local examples.
 func Workflow(name string) *WorkflowBuilder {
 	return &WorkflowBuilder{
