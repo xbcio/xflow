@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/spf13/cast"
@@ -36,6 +37,8 @@ type RedisHubConsumerConfig struct {
 var newRedisHubConsumer = func(RedisHubConsumerConfig) (RedisHubConsumer, error) {
 	return nil, errors.New("redis hub consumer factory is not configured")
 }
+
+var redisHubPubSubLockTTL = time.Minute
 
 type RedisHubTriggerNode struct {
 	BaseNode
@@ -123,13 +126,22 @@ func (n *RedisHubTriggerNode) Activate(ctx context.Context, in *types.TriggerAct
 	if err != nil {
 		return nil, err
 	}
-	var lock types.TriggerLock
+	var (
+		lock      types.TriggerLock
+		renewable types.RenewableTriggerLock
+	)
 	if cfg.Mode == "pubsub" {
-		l, ok, err := in.Runtime.TryLock(ctx, "trigger:"+string(in.WorkflowID)+":"+in.NodeName+":pubsub", time.Minute)
+		l, ok, err := in.Runtime.TryLock(ctx, "trigger:"+string(in.WorkflowID)+":"+in.NodeName+":pubsub", redisHubPubSubLockTTL)
 		if err != nil || !ok {
 			return nil, err
 		}
+		r, ok := l.(types.RenewableTriggerLock)
+		if !ok {
+			_ = l.Release(ctx)
+			return nil, errors.New("redis hub pubsub trigger requires renewable lock")
+		}
 		lock = l
+		renewable = r
 	}
 	consumer, err := newRedisHubConsumer(cfg)
 	if err != nil {
@@ -141,6 +153,24 @@ func (n *RedisHubTriggerNode) Activate(ctx context.Context, in *types.TriggerAct
 	runCtx, cancel := context.WithCancel(ctx)
 	sem := make(chan struct{}, cfg.MaxInflight)
 	done := make(chan struct{})
+	var (
+		closeOnce sync.Once
+		closeErr  error
+	)
+	stop := func(releaseCtx context.Context) error {
+		closeOnce.Do(func() {
+			cancel()
+			if err := consumer.Close(); err != nil {
+				closeErr = err
+			}
+			if lock != nil {
+				if err := lock.Release(releaseCtx); err != nil && closeErr == nil {
+					closeErr = err
+				}
+			}
+		})
+		return closeErr
+	}
 	go func() {
 		defer close(done)
 		for {
@@ -163,12 +193,30 @@ func (n *RedisHubTriggerNode) Activate(ctx context.Context, in *types.TriggerAct
 			}
 		}
 	}()
-	return types.CloseFunc(func(context.Context) error {
-		cancel()
-		err := consumer.Close()
-		if lock != nil {
-			_ = lock.Release(context.Background())
+	if renewable != nil {
+		renewEvery := redisHubPubSubLockTTL / 2
+		if renewEvery <= 0 {
+			renewEvery = time.Millisecond
 		}
+		ticker := time.NewTicker(renewEvery)
+		go func() {
+			defer ticker.Stop()
+			for {
+				select {
+				case <-runCtx.Done():
+					return
+				case <-ticker.C:
+					renewed, err := renewable.Renew(runCtx, redisHubPubSubLockTTL)
+					if err != nil || !renewed {
+						_ = stop(context.Background())
+						return
+					}
+				}
+			}
+		}()
+	}
+	return types.CloseFunc(func(context.Context) error {
+		err := stop(context.Background())
 		select {
 		case <-done:
 		case <-time.After(time.Second):

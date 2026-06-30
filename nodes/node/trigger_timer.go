@@ -61,13 +61,7 @@ func (n *TimerTriggerNode) Activate(ctx context.Context, in *types.TriggerActiva
 		for {
 			select {
 			case t := <-ticker.C:
-				event := &types.TriggerEvent{
-					ID:     fmt.Sprintf("%s/%s/%d", in.WorkflowID, in.NodeName, t.UnixNano()),
-					Kind:   "timer",
-					Source: in.NodeName,
-					Time:   t,
-					Data:   map[string]any{"scheduled_time": t.Format(time.RFC3339Nano)},
-				}
+				event := newTimerTriggerEvent(in.WorkflowID, in.NodeName, interval, t)
 				if ok, err := in.Runtime.Dedup(runCtx, "trigger:"+string(in.WorkflowID)+":"+in.NodeName+":"+event.ID, interval*2); err == nil && ok {
 					_, _ = in.Emit(runCtx, event)
 				}
@@ -80,6 +74,20 @@ func (n *TimerTriggerNode) Activate(ctx context.Context, in *types.TriggerActiva
 		cancel()
 		return nil
 	}), nil
+}
+
+func newTimerTriggerEvent(workflowID types.WorkflowID, nodeName string, interval time.Duration, tick time.Time) *types.TriggerEvent {
+	scheduled := tick.UTC()
+	if interval > 0 {
+		scheduled = scheduled.Truncate(interval)
+	}
+	return &types.TriggerEvent{
+		ID:     fmt.Sprintf("%s/%s/%d", workflowID, nodeName, scheduled.UnixNano()),
+		Kind:   "timer",
+		Source: nodeName,
+		Time:   tick,
+		Data:   map[string]any{"scheduled_time": scheduled.Format(time.RFC3339Nano)},
+	}
 }
 
 func triggerDurationParam(v any) (time.Duration, error) {

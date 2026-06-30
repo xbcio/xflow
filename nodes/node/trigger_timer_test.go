@@ -80,6 +80,35 @@ func TestTimerTriggerContinuesAfterEmitError(t *testing.T) {
 	}
 }
 
+func TestTimerTriggerEventUsesDeterministicIntervalBucket(t *testing.T) {
+	interval := 10 * time.Second
+	firstTick := time.Unix(1_700_000_000, 100_000_000).UTC()
+	secondTick := firstTick.Add(700 * time.Millisecond)
+	thirdTick := firstTick.Add(interval)
+
+	firstEvent := newTimerTriggerEvent("wf-1", "timer", interval, firstTick)
+	secondEvent := newTimerTriggerEvent("wf-1", "timer", interval, secondTick)
+	thirdEvent := newTimerTriggerEvent("wf-1", "timer", interval, thirdTick)
+
+	if firstEvent.ID != secondEvent.ID {
+		t.Fatalf("same bucket IDs = %q/%q, want equal", firstEvent.ID, secondEvent.ID)
+	}
+	if firstEvent.ID == thirdEvent.ID {
+		t.Fatalf("different bucket IDs = %q/%q, want different", firstEvent.ID, thirdEvent.ID)
+	}
+
+	wantScheduled := firstTick.Truncate(interval).Format(time.RFC3339Nano)
+	if got := firstEvent.Data["scheduled_time"]; got != wantScheduled {
+		t.Fatalf("scheduled_time = %#v, want %q", got, wantScheduled)
+	}
+	if !firstEvent.Time.Equal(firstTick) {
+		t.Fatalf("first event time = %s, want %s", firstEvent.Time, firstTick)
+	}
+	if !secondEvent.Time.Equal(secondTick) {
+		t.Fatalf("second event time = %s, want %s", secondEvent.Time, secondTick)
+	}
+}
+
 type fakeTriggerRuntime struct {
 	mu          sync.Mutex
 	emits       []*types.TriggerEvent

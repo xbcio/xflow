@@ -63,6 +63,34 @@ end
 return 0
 `)
 
+var renewTriggerLockScript = redis.NewScript(`
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+	return redis.call("PEXPIRE", KEYS[1], ARGV[2])
+end
+return 0
+`)
+
+func (l *triggerLock) Renew(ctx context.Context, ttl time.Duration) (bool, error) {
+	if ttl <= 0 {
+		ttl = time.Minute
+	}
+	ttlMillis := ttl.Milliseconds()
+	if ttl > 0 && ttlMillis == 0 {
+		ttlMillis = 1
+	}
+	renewed, err := renewTriggerLockScript.Run(
+		ctx,
+		l.rdb,
+		[]string{l.key},
+		l.token,
+		ttlMillis,
+	).Int64()
+	if err != nil {
+		return false, err
+	}
+	return renewed == 1, nil
+}
+
 func (l *triggerLock) Release(ctx context.Context) error {
 	return releaseTriggerLockScript.Run(ctx, l.rdb, []string{l.key}, l.token).Err()
 }

@@ -69,6 +69,11 @@ type TriggerLock interface {
 	Release(ctx context.Context) error
 }
 
+type RenewableTriggerLock interface {
+	TriggerLock
+	Renew(ctx context.Context, ttl time.Duration) (bool, error)
+}
+
 type TriggerState interface {
 	Get(ctx context.Context, key string) ([]byte, error)
 	Set(ctx context.Context, key string, value []byte, ttl time.Duration) error
