@@ -10,6 +10,7 @@ import (
 type Handler = types.Handler
 type DescriptorProvider = types.DescriptorProvider
 type ActionHandler = types.ActionHandler
+type TriggerHandler = types.TriggerHandler
 type Input = types.Input
 type Output = types.Output
 type Error = types.Error
@@ -39,6 +40,12 @@ type Builder interface {
 // handler instance for embedded SDK execution.
 type HandlerCarrier interface {
 	Handler() ActionHandler
+}
+
+// TriggerHandlerCarrier is implemented by trigger builders that can expose a
+// process-local trigger handler instance for embedded SDK activation.
+type TriggerHandlerCarrier interface {
+	TriggerHandler() TriggerHandler
 }
 
 // OnError is the error handling strategy for a workflow node.
@@ -97,6 +104,34 @@ func newBuilder(h ActionHandler, params any) Builder {
 		panic(fmt.Sprintf("node.Definition.New: handler %T has empty Descriptor().Type", h))
 	}
 	return &nodeRef{nodeType: t, params: params, handler: h}
+}
+
+type triggerRef struct {
+	nodeType string
+	params   any
+	onError  OnError
+	handler  TriggerHandler
+}
+
+func (r *triggerRef) NodeType() string         { return r.nodeType }
+func (r *triggerRef) RawParams() any           { return r.params }
+func (r *triggerRef) OnErrorStrategy() OnError { return r.onError }
+func (r *triggerRef) OnError(s OnError) Builder {
+	r.onError = s
+	return r
+}
+func (r *triggerRef) TriggerHandler() TriggerHandler { return r.handler }
+func (r *triggerRef) Descriptor() Descriptor         { return r.handler.Descriptor() }
+
+func newTriggerBuilder(h TriggerHandler, params any) Builder {
+	if h == nil {
+		panic("node.TriggerDefinition.New: handler must not be nil")
+	}
+	t := h.Descriptor().Type
+	if t == "" {
+		panic(fmt.Sprintf("node.TriggerDefinition.New: handler %T has empty Descriptor().Type", h))
+	}
+	return &triggerRef{nodeType: t, params: params, handler: h}
 }
 
 // ExecuteFunc is the function signature used by Define for custom action nodes.
@@ -168,4 +203,34 @@ func (d *Definition) Output(name string) *Definition {
 func (d *Definition) Credential(name string) *Definition {
 	d.descriptor.Credentials = append(d.descriptor.Credentials, name)
 	return d
+}
+
+type TriggerActivateFunc func(ctx context.Context, input *types.TriggerActivateInput) (types.TriggerSubscription, error)
+
+type TriggerDefinition struct {
+	descriptor Descriptor
+	activate   TriggerActivateFunc
+}
+
+func DefineTrigger(nodeType string, activate TriggerActivateFunc) *TriggerDefinition {
+	if nodeType == "" {
+		panic("node.DefineTrigger: nodeType must not be empty")
+	}
+	if activate == nil {
+		panic("node.DefineTrigger: activate must not be nil")
+	}
+	return &TriggerDefinition{
+		descriptor: Descriptor{
+			Type:    nodeType,
+			Kind:    types.NodeKindTrigger,
+			Outputs: []PortSpec{{Name: "main", DisplayName: "Main"}},
+		},
+		activate: activate,
+	}
+}
+
+func (d *TriggerDefinition) New(params any) Builder { return newTriggerBuilder(d, params) }
+func (d *TriggerDefinition) Descriptor() Descriptor { return d.descriptor }
+func (d *TriggerDefinition) Activate(ctx context.Context, input *types.TriggerActivateInput) (types.TriggerSubscription, error) {
+	return d.activate(ctx, input)
 }

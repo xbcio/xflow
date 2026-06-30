@@ -203,7 +203,7 @@ func TestWithNodesRegistersConsumerCapabilities(t *testing.T) {
 	provider := memory.New()
 	eng, err := newFromConfig(&engineConfig{
 		allowDirectHandlers: false,
-		nodes:               []*node.Definition{testWorkflowDeclaredNode},
+		nodes:               []node.Handler{testWorkflowDeclaredNode},
 	}, provider)
 	if err != nil {
 		t.Fatalf("newFromConfig() error = %v", err)

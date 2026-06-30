@@ -58,6 +58,7 @@ type Backend struct {
 	queue          *asynqQueue
 	registry       *execution.Registry
 	workflowReg    *workflowRegistry
+	triggerRuntime *triggerPrimitives
 	rdb            *redis.Client
 	timeoutMonitor *TimeoutMonitor
 	redisAddr      string
@@ -76,6 +77,9 @@ func (b *Backend) Registry() engine.HandlerRegistry { return b.registry }
 
 // WorkflowRegistry returns the workflow metadata registry.
 func (b *Backend) WorkflowRegistry() backend.WorkflowRegistry { return b.workflowReg }
+
+// TriggerPrimitives returns trigger coordination primitives.
+func (b *Backend) TriggerPrimitives() backend.TriggerPrimitives { return b.triggerRuntime }
 
 // New creates an Asynq backend connected to the given Redis address.
 // db may be nil for pure-Redis mode (no MySQL persistence).
@@ -98,14 +102,15 @@ func New(redisAddr string, db store.Store, opts ...Option) (*Backend, error) {
 	registry := execution.NewRegistry()
 
 	return &Backend{
-		state:       state,
-		queue:       queue,
-		registry:    registry,
-		workflowReg: newWorkflowRegistry(),
-		rdb:         rdb,
-		redisAddr:   redisAddr,
-		concurrency: cfg.concurrency,
-		consumer:    cfg.consumer,
+		state:          state,
+		queue:          queue,
+		registry:       registry,
+		workflowReg:    newWorkflowRegistry(),
+		triggerRuntime: newTriggerPrimitives(),
+		rdb:            rdb,
+		redisAddr:      redisAddr,
+		concurrency:    cfg.concurrency,
+		consumer:       cfg.consumer,
 	}, nil
 }
 

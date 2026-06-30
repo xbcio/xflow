@@ -33,6 +33,7 @@ type Backend struct {
 	queue            *memoryQueue
 	registry         *execution.Registry
 	workflowRegistry *workflowRegistry
+	triggerRuntime   *triggerPrimitives
 }
 
 // New creates a memory backend with its components but does NOT start the queue.
@@ -48,6 +49,7 @@ func New(opts ...Option) *Backend {
 		queue:            newMemoryQueue(cfg.concurrency),
 		registry:         execution.NewRegistry(),
 		workflowRegistry: newWorkflowRegistry(),
+		triggerRuntime:   newTriggerPrimitives(),
 	}
 }
 
@@ -62,6 +64,9 @@ func (b *Backend) Registry() engine.HandlerRegistry { return b.registry }
 
 // WorkflowRegistry returns the workflow metadata registry.
 func (b *Backend) WorkflowRegistry() backend.WorkflowRegistry { return b.workflowRegistry }
+
+// TriggerPrimitives returns local trigger coordination primitives.
+func (b *Backend) TriggerPrimitives() backend.TriggerPrimitives { return b.triggerRuntime }
 
 // Bind wires the embedded execution dispatcher into the queue and starts queue consumers.
 // Returns a stop function that drains the consumer pool.

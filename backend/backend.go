@@ -13,6 +13,7 @@ type Provider interface {
 	Queue() engine.TaskQueue
 	Registry() engine.HandlerRegistry
 	WorkflowRegistry() WorkflowRegistry
+	TriggerPrimitives() TriggerPrimitives
 	Bind(eng *engine.Engine) func()
 }
 

@@ -39,9 +39,19 @@ func (e *Engine) AddWorkflow(ctx context.Context, wf *WorkflowBuilder) (types.Wo
 	if err != nil {
 		return "", err
 	}
+	if e.triggerRuntime != nil {
+		if err := e.triggerRuntime.ReconcileWorkflow(ctx, rec); err != nil {
+			return "", err
+		}
+	}
 	return rec.ID, nil
 }
 
 func (e *Engine) RemoveWorkflow(ctx context.Context, workflowID types.WorkflowID) error {
+	if e.triggerRuntime != nil {
+		if err := e.triggerRuntime.RemoveWorkflow(ctx, workflowID); err != nil {
+			return err
+		}
+	}
 	return e.workflowRegistry.RemoveWorkflow(ctx, workflowID)
 }

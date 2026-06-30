@@ -21,6 +21,7 @@ type Engine struct {
 	eng                 *engine.Engine
 	registry            engine.HandlerRegistry
 	workflowRegistry    backend.WorkflowRegistry
+	triggerRuntime      *triggerRuntime
 	waiter              backend.Waiter
 	stopFns             []func()
 	allowDirectHandlers bool
@@ -124,6 +125,7 @@ func newFromConfig(cfg *engineConfig, provider backend.Provider) (*Engine, error
 		stopFns:             cfg.stopFns,
 		allowDirectHandlers: cfg.allowDirectHandlers,
 	}
+	e.triggerRuntime = newTriggerRuntime(e, provider.TriggerPrimitives())
 
 	if err := e.registerNodeDefinitions(cfg.nodes); err != nil {
 		return nil, err
@@ -131,6 +133,7 @@ func newFromConfig(cfg *engineConfig, provider backend.Provider) (*Engine, error
 
 	stop := provider.Bind(eng)
 	e.stopFns = append(e.stopFns, stop)
+	e.stopFns = append(e.stopFns, func() { _ = e.triggerRuntime.Close(context.Background()) })
 
 	return e, nil
 }
@@ -143,19 +146,26 @@ func (e *Engine) Stop() {
 	}
 }
 
-func (e *Engine) registerNodeDefinitions(defs []*node.Definition) error {
+func (e *Engine) registerNodeDefinitions(defs []node.Handler) error {
 	if len(defs) == 0 {
 		return nil
 	}
 	lr, ok := e.registry.(*execution.Registry)
-	if !ok {
-		return fmt.Errorf("registry does not support node definition registration")
-	}
 	for _, def := range defs {
 		if def == nil {
 			continue
 		}
-		lr.RegisterGlobal(def.Descriptor().Type, def)
+		switch h := def.(type) {
+		case types.ActionHandler:
+			if !ok {
+				return fmt.Errorf("registry does not support node definition registration")
+			}
+			lr.RegisterGlobal(h.Descriptor().Type, h)
+		case types.TriggerHandler:
+			node.RegisterTrigger(h)
+		default:
+			return fmt.Errorf("node definition %q is not an action or trigger handler", def.Descriptor().Type)
+		}
 	}
 	return nil
 }
@@ -227,6 +237,9 @@ func (e *Engine) registerWorkflowHandlers(wf *WorkflowBuilder) error {
 	}
 	for nodeType, h := range wf.workflowHandlers() {
 		lr.RegisterGlobal(nodeType, h)
+	}
+	for _, h := range wf.workflowTriggerHandlers() {
+		node.RegisterTrigger(h)
 	}
 	return nil
 }

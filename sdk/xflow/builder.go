@@ -17,8 +17,9 @@ type WorkflowBuilder struct {
 	nodes     []*nodeEntry
 	refs      []*NodeRef
 	edges     []edge
-	direct    map[string]types.ActionHandler // direct handlers (local mode only)
-	handlers  map[string]types.ActionHandler // portable typed handlers
+	direct    map[string]types.ActionHandler  // direct handlers (local mode only)
+	handlers  map[string]types.ActionHandler  // portable typed action handlers
+	triggers  map[string]types.TriggerHandler // portable typed trigger handlers
 	options   *types.WorkflowOptions
 }
 
@@ -48,6 +49,7 @@ func Workflow(name string) *WorkflowBuilder {
 		name:     name,
 		direct:   make(map[string]types.ActionHandler),
 		handlers: make(map[string]types.ActionHandler),
+		triggers: make(map[string]types.TriggerHandler),
 	}
 }
 
@@ -123,6 +125,12 @@ func (w *WorkflowBuilder) Node(name string, builder node.Builder) *NodeRef {
 		h := hb.Handler()
 		if h != nil {
 			w.handlers[builder.NodeType()] = h
+		}
+	}
+	if hb, ok := builder.(node.TriggerHandlerCarrier); ok {
+		h := hb.TriggerHandler()
+		if h != nil {
+			w.triggers[builder.NodeType()] = h
 		}
 	}
 	return w.addNode(entry)
@@ -311,6 +319,12 @@ func (w *WorkflowBuilder) workflowHandlers() map[string]types.ActionHandler {
 	return handlers
 }
 
+func (w *WorkflowBuilder) workflowTriggerHandlers() map[string]types.TriggerHandler {
+	handlers := make(map[string]types.TriggerHandler)
+	w.collectWorkflowTriggerHandlers(handlers)
+	return handlers
+}
+
 func (w *WorkflowBuilder) collectWorkflowHandlers(handlers map[string]types.ActionHandler) {
 	if w == nil {
 		return
@@ -321,6 +335,20 @@ func (w *WorkflowBuilder) collectWorkflowHandlers(handlers map[string]types.Acti
 	for _, ref := range w.refs {
 		if ref.body != nil {
 			ref.body.collectWorkflowHandlers(handlers)
+		}
+	}
+}
+
+func (w *WorkflowBuilder) collectWorkflowTriggerHandlers(handlers map[string]types.TriggerHandler) {
+	if w == nil {
+		return
+	}
+	for nodeType, h := range w.triggers {
+		handlers[nodeType] = h
+	}
+	for _, ref := range w.refs {
+		if ref.body != nil {
+			ref.body.collectWorkflowTriggerHandlers(handlers)
 		}
 	}
 }

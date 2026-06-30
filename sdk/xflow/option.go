@@ -44,7 +44,7 @@ type engineConfig struct {
 	logger      engine.Logger
 	waiter      backend.Waiter
 	concurrency int
-	nodes       []*node.Definition
+	nodes       []node.Handler
 	stopFns     []func()
 
 	allowDirectHandlers bool
@@ -86,7 +86,7 @@ func WithLogger(l engine.Logger) Option {
 // workflow in the current process. WithNodes is still required for cluster
 // worker processes that may execute workflows submitted elsewhere, because
 // workers need to resolve node types before seeing the workflow builder.
-func WithNodes(defs ...*node.Definition) Option {
+func WithNodes(defs ...node.Handler) Option {
 	return func(c *engineConfig) {
 		c.nodes = append(c.nodes, defs...)
 	}
