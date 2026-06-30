@@ -61,16 +61,53 @@ func TestQJS_HelpersBase64(t *testing.T) {
 
 func TestQJS_SandboxNoIO(t *testing.T) {
 	out, err := newQJS(t).Execute(context.Background(),
-		`({hasRequire: typeof require, hasFetch: typeof fetch, hasProcess: typeof process})`,
+		`({hasRequire: typeof require, hasFetch: typeof fetch, hasProcess: typeof process,
+		   hasStd: typeof std, hasOs: typeof os, hasPrint: typeof print, hasScriptArgs: typeof scriptArgs,
+		   hasConsole: typeof console, hasBjson: typeof bjson, hasPerformance: typeof performance,
+		   hasNavigator: typeof navigator, hasGc: typeof gc, hasQueueMicrotask: typeof queueMicrotask,
+		   hasSetTimeout: typeof setTimeout, hasSetInterval: typeof setInterval,
+		   hasClearTimeout: typeof clearTimeout, hasClearInterval: typeof clearInterval})`,
 		nil, script.DefaultHelpers())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	m := out.(map[string]any)
-	for _, k := range []string{"hasRequire", "hasFetch", "hasProcess"} {
+	for _, k := range []string{
+		"hasRequire", "hasFetch", "hasProcess",
+		"hasStd", "hasOs", "hasPrint", "hasScriptArgs",
+		"hasConsole", "hasBjson", "hasPerformance", "hasNavigator", "hasGc",
+		"hasQueueMicrotask", "hasSetTimeout", "hasSetInterval",
+		"hasClearTimeout", "hasClearInterval",
+	} {
 		if m[k] != "undefined" {
-			t.Fatalf("sandbox leak: %s = %v", k, m[k])
+			t.Fatalf("sandbox leak: %s = %v, want undefined", k, m[k])
 		}
+	}
+}
+
+// TestQJS_SandboxFileIOUnreachable proves the host filesystem capability is
+// actually gone, not merely shadowed: os must be undefined so os.readdir cannot
+// be reached at all from a user script.
+func TestQJS_SandboxFileIOUnreachable(t *testing.T) {
+	out, err := newQJS(t).Execute(context.Background(),
+		`({osType: typeof os, readdir: (typeof os !== 'undefined' && typeof os.readdir),
+		   stdType: typeof std, open: (typeof std !== 'undefined' && typeof std.open)})`,
+		nil, script.DefaultHelpers())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	m := out.(map[string]any)
+	if m["osType"] != "undefined" {
+		t.Fatalf("os still present: %v", m["osType"])
+	}
+	if m["stdType"] != "undefined" {
+		t.Fatalf("std still present: %v", m["stdType"])
+	}
+	if m["readdir"] != false {
+		t.Fatalf("os.readdir reachable: %v", m["readdir"])
+	}
+	if m["open"] != false {
+		t.Fatalf("std.open reachable: %v", m["open"])
 	}
 }
 

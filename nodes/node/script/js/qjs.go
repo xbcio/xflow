@@ -15,6 +15,22 @@ func init() {
 
 type qjsEngine struct{}
 
+// stripGlobals removes the non-standard QuickJS host globals exposed by
+// fastschema/qjs from a fresh runtime. The list was enumerated empirically via
+// Object.getOwnPropertyNames(globalThis) against a clean qjs.Runtime; it covers
+// every name beyond the standard ECMAScript surface that grants host I/O or
+// ambient capabilities (filesystem via std/os, output via print/console, timers,
+// gc, and environment introspection). Standard constructors (Array, JSON, Map,
+// the TypedArrays, etc.) are intentionally left in place.
+const stripGlobals = `(function(){
+  var remove = ['std','os','print','scriptArgs','bjson','console','performance',
+    'navigator','gc','queueMicrotask',
+    'setTimeout','setInterval','clearTimeout','clearInterval'];
+  for (var i = 0; i < remove.length; i++) {
+    try { delete globalThis[remove[i]]; } catch (e) {}
+  }
+})();`
+
 func (qjsEngine) Name() string { return "js/qjs" }
 
 func (qjsEngine) Execute(ctx context.Context, code string, globals map[string]any, h script.Helpers) (result any, err error) {
@@ -46,6 +62,17 @@ func (qjsEngine) Execute(ctx context.Context, code string, globals map[string]an
 
 	c := rt.Context()
 	g := c.Global()
+
+	// fastschema/qjs is not bare QuickJS: a fresh runtime exposes QuickJS host
+	// globals (std, os, print, scriptArgs, console, timers, gc, ...) that perform
+	// real host I/O — os.readdir/std.open reach the actual filesystem. The script
+	// node runs untrusted user code, so strip every non-standard host global
+	// before any user-visible state is injected. This restores parity with goja's
+	// genuinely bare goja.New(). The qjs-library internals (QJS_PROXY_VALUE) and
+	// our own $helpers are injected later and are deliberately not in this list.
+	if _, serr := rt.Eval("sandbox.js", qjs.Code(stripGlobals)); serr != nil {
+		return nil, fmt.Errorf("js/qjs: sandbox setup: %w", serr)
+	}
 
 	// Inject globals via JSON round-trip for value parity with goja.
 	for k, v := range BuildGlobals(globals) {
