@@ -1124,7 +1124,7 @@ nodes:
 
 #### Trigger 节点入口
 
-Trigger 节点没有输入端口，只有一个 `main` 输出端口。一个 workflow 可以同时声明多个 trigger，它们都属于显式 entry；一次执行只从 `Invoke` 选择的那个 entry 开始，未选择的 trigger root 不应阻塞所选入口的下游执行。
+内置 trigger 节点描述符当前都只暴露一个 `main` 输出端口，不声明输入端口。DSL 作者也应当把 trigger 节点写成显式 entry，不依赖或消费其他节点输入；这是当前的建模约定和作者指南，不是额外的编译期强校验规则。一个 workflow 可以同时声明多个 trigger，它们都属于显式 entry；一次 execution 只从 `Invoke` 或 trigger runtime 选择的那个 entry 开始，未选择的 trigger root 不应阻塞所选入口的下游执行。
 
 ```yaml
 nodes:
@@ -1155,11 +1155,40 @@ execID, err := eng.Invoke(ctx, workflowID, xflow.Trigger("order_created"), event
 
 `Submit` 已从 public SDK 移除；生产路径是先 `AddWorkflow` 注册定义，再 `Invoke` 从显式入口创建 execution。
 
-Trigger 高可用规则：
-- Kafka 和 Redis stream 依赖 consumer group 做多实例分摊。
-- Cron、timer 和 Redis pub/sub 使用 trigger runtime 的 lock 与 dedup 避免重复触发。
-- Webhook route 收敛入口请求，并基于 event ID dedup；生产环境应配置稳定事件 ID header。
-- 所有 trigger handler 必须可取消、非阻塞、幂等，并在 emit 前执行 dedup。
+触发入口的实际运行语义如下：
+
+- Trigger 节点是显式入口；`Emit` 会创建一个新的 execution，并从对应 trigger 节点开始调度。
+- Trigger event 会以 `trigger` 字段注入 execution input；trigger 节点本身会把它原样透传到 `main` 输出，因此 trigger 节点和其下游节点都可以通过 `$input.trigger` 读取同一个事件对象。
+- 当前推荐的 trigger authoring 方式是不消费其他输入；它们只负责把触发事件转成一次从 `main` 端口开始的执行。该约定目前主要由内置 trigger descriptor 和运行时用法体现，而不是独立的 DSL 校验条款。
+
+#### Trigger 交付语义与当前限制
+
+当前实现提供的是"按后端能力协调 + 节点级最佳努力去重"；不要把它理解成统一的 exactly-once 或完整 HA 保证。
+
+- **Local backend (`backend/memory`)**
+  - workflow registry、trigger subscription、dedup、lock、trigger state 都在当前进程内存中。
+  - 这意味着 local 只提供进程内触发协调；进程重启后 subscription 和 dedup/lock/state 都会丢失，也没有跨实例协同能力。
+
+- **Asynq backend (`backend/asynq`)**
+  - workflow registry 存在 Redis 中；trigger dedup、lock、state 也都基于 Redis key 实现。
+  - trigger subscription / listener 本身仍然是进程内激活的：只有当前进程执行 `AddWorkflow` 并触发 `ReconcileWorkflow` 时，才会在该进程里调用各 trigger handler 的 `Activate`。
+  - Redis 会持久化 workflow registry 和 trigger primitive，但当前没有启动期 bootstrap 逻辑去扫描 registry record 并在重启后重新激活 listener；从未调用过 `AddWorkflow` 的进程也不会仅凭 Redis 中已有 registry 自动挂起订阅。
+  - 这给多实例提供了共享注册表和共享 trigger primitive，但不等于所有 trigger source 都自动具备完整高可用；端到端交付仍依赖具体 consumer / webhook 接入实现。
+
+- **定时 / Cron / Webhook**
+  - 当前实现应理解为 **best-effort emit + pre-emit dedup**，而不是统一的 at-least-once 保证。
+  - timer / cron 在调用 `Emit` 前做 dedup；如果 `Emit` 返回错误，当前 handler 不会在节点内部重试这次触发。
+  - webhook 会先生成或提取 event ID，再做 dedup；如果 `Emit` 或 dedup 返回错误，错误会直接返回给调用方，后续是否重试取决于上游 HTTP caller / 网关，而不是由 XFlow webhook trigger 统一补偿。
+  - 因此重复投递和遗漏都仍然可能发生；业务侧必须保持幂等，并按上游 source 的重试策略设计补偿。
+
+- **Kafka / Redis Hub**
+  - XFlow 会把收到的消息归一化为 `TriggerEvent`，并在 `Emit` 前按 event ID 做 dedup。
+  - 但 Kafka offset commit / ack、Redis stream ack、重投递窗口、消费位点恢复等语义目前取决于接入的 consumer 实现；在提供原生 adapter 前，XFlow 不单独承诺 exactly-once、固定重试策略或统一的 offset 持久化行为。
+  - Redis pub/sub 模式本身不是 durable queue；当前实现只用 trigger lock 限制同一 workflow/node 在一个时刻由一个订阅者处理，消息丢失与重放能力仍取决于底层 pub/sub 行为。
+
+- **节点作者约束**
+  - 所有 trigger handler 必须可取消、非阻塞、幂等，并在 `Emit` 前执行 dedup / lock / state 协调。
+  - 如需 stronger delivery guarantee，必须由具体 trigger adapter 和业务幂等键一起定义，而不是默认由 DSL 或 engine core 提供。
 
 ### 6.2 节点配置
 

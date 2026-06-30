@@ -3,6 +3,8 @@ package node
 import (
 	"context"
 	"fmt"
+
+	"github.com/spf13/cast"
 )
 
 // MergeNode implements xflow.merge — fan-in synchronisation node.
@@ -42,7 +44,7 @@ func (n *MergeNode) RawParams() any {
 }
 
 func (n *MergeNode) Execute(ctx context.Context, input *Input) (*Output, error) {
-	mode, _ := input.Params["mode"].(string)
+	mode := cast.ToString(input.Params["mode"])
 	if mode == "" {
 		mode = "wait_all"
 	}
@@ -76,7 +78,7 @@ func (n *MergeNode) mergeAll(input *Input) (*Output, error) {
 }
 
 func (n *MergeNode) mergeAny(input *Input) (*Output, error) {
-	onOthers, _ := input.Params["on_others"].(string)
+	onOthers := cast.ToString(input.Params["on_others"])
 	if onOthers == "" {
 		onOthers = "cancel"
 	}

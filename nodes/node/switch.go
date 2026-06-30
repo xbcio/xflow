@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/expr-lang/expr"
+	"github.com/spf13/cast"
 )
 
 // SwitchRule defines a single routing rule for SwitchNode.
@@ -78,7 +79,7 @@ func (n *SwitchNode) RawParams() any {
 }
 
 func (n *SwitchNode) Execute(ctx context.Context, input *Input) (*Output, error) {
-	mode, _ := input.Params["mode"].(string)
+	mode := cast.ToString(input.Params["mode"])
 	if mode == "" {
 		mode = "rules"
 	}
@@ -102,11 +103,11 @@ func (n *SwitchNode) executeRules(input *Input) (*Output, error) {
 		if !ok {
 			continue
 		}
-		condStr, _ := rule["condition"].(string)
+		condStr := cast.ToString(rule["condition"])
 		if condStr == "" {
 			continue
 		}
-		output, _ := rule["output"].(string)
+		output := cast.ToString(rule["output"])
 		if output == "" {
 			continue
 		}
@@ -119,12 +120,12 @@ func (n *SwitchNode) executeRules(input *Input) (*Output, error) {
 		if err != nil {
 			return nil, fmt.Errorf("xflow.switch: evaluate rule condition %q: %w", condStr, err)
 		}
-		if matched, _ := result.(bool); matched {
+		if matched := cast.ToBool(result); matched {
 			return &Output{Data: input.Data, Port: output}, nil
 		}
 	}
 
-	defaultOutput, _ := input.Params["default_output"].(string)
+	defaultOutput := cast.ToString(input.Params["default_output"])
 	if defaultOutput == "" {
 		defaultOutput = "default"
 	}
@@ -132,7 +133,7 @@ func (n *SwitchNode) executeRules(input *Input) (*Output, error) {
 }
 
 func (n *SwitchNode) executeExpression(input *Input) (*Output, error) {
-	exprStr, _ := input.Params["expression"].(string)
+	exprStr := cast.ToString(input.Params["expression"])
 	if exprStr == "" {
 		return nil, fmt.Errorf("xflow.switch: expression parameter is required in expression mode")
 	}
@@ -147,9 +148,9 @@ func (n *SwitchNode) executeExpression(input *Input) (*Output, error) {
 		return nil, fmt.Errorf("xflow.switch: evaluate expression: %w", err)
 	}
 
-	port := fmt.Sprintf("%v", result)
+	port := cast.ToString(result)
 	if port == "" {
-		defaultOutput, _ := input.Params["default_output"].(string)
+		defaultOutput := cast.ToString(input.Params["default_output"])
 		if defaultOutput == "" {
 			defaultOutput = "default"
 		}

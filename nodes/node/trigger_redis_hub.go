@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
+
+	"github.com/spf13/cast"
 
 	"github.com/xbcio/xflow/types"
 )
@@ -34,6 +37,8 @@ type RedisHubConsumerConfig struct {
 var newRedisHubConsumer = func(RedisHubConsumerConfig) (RedisHubConsumer, error) {
 	return nil, errors.New("redis hub consumer factory is not configured")
 }
+
+var redisHubPubSubLockTTL = time.Minute
 
 type RedisHubTriggerNode struct {
 	BaseNode
@@ -112,19 +117,31 @@ func (n *RedisHubTriggerNode) OnError(s OnError) Builder {
 	return n
 }
 func (n *RedisHubTriggerNode) TriggerHandler() TriggerHandler { return n }
+func (n *RedisHubTriggerNode) Execute(_ context.Context, input *Input) (*Output, error) {
+	return executeTriggerEntry(input)
+}
 
 func (n *RedisHubTriggerNode) Activate(ctx context.Context, in *types.TriggerActivateInput) (types.TriggerSubscription, error) {
 	cfg, err := redisHubConfigFromParams(in.Params)
 	if err != nil {
 		return nil, err
 	}
-	var lock types.TriggerLock
+	var (
+		lock      types.TriggerLock
+		renewable types.RenewableTriggerLock
+	)
 	if cfg.Mode == "pubsub" {
-		l, ok, err := in.Runtime.TryLock(ctx, "trigger:"+string(in.WorkflowID)+":"+in.NodeName+":pubsub", time.Minute)
+		l, ok, err := in.Runtime.TryLock(ctx, "trigger:"+string(in.WorkflowID)+":"+in.NodeName+":pubsub", redisHubPubSubLockTTL)
 		if err != nil || !ok {
 			return nil, err
 		}
+		r, ok := l.(types.RenewableTriggerLock)
+		if !ok {
+			_ = l.Release(ctx)
+			return nil, errors.New("redis hub pubsub trigger requires renewable lock")
+		}
 		lock = l
+		renewable = r
 	}
 	consumer, err := newRedisHubConsumer(cfg)
 	if err != nil {
@@ -136,6 +153,24 @@ func (n *RedisHubTriggerNode) Activate(ctx context.Context, in *types.TriggerAct
 	runCtx, cancel := context.WithCancel(ctx)
 	sem := make(chan struct{}, cfg.MaxInflight)
 	done := make(chan struct{})
+	var (
+		closeOnce sync.Once
+		closeErr  error
+	)
+	stop := func(releaseCtx context.Context) error {
+		closeOnce.Do(func() {
+			cancel()
+			if err := consumer.Close(); err != nil {
+				closeErr = err
+			}
+			if lock != nil {
+				if err := lock.Release(releaseCtx); err != nil && closeErr == nil {
+					closeErr = err
+				}
+			}
+		})
+		return closeErr
+	}
 	go func() {
 		defer close(done)
 		for {
@@ -158,12 +193,30 @@ func (n *RedisHubTriggerNode) Activate(ctx context.Context, in *types.TriggerAct
 			}
 		}
 	}()
-	return types.CloseFunc(func(context.Context) error {
-		cancel()
-		err := consumer.Close()
-		if lock != nil {
-			_ = lock.Release(context.Background())
+	if renewable != nil {
+		renewEvery := redisHubPubSubLockTTL / 2
+		if renewEvery <= 0 {
+			renewEvery = time.Millisecond
 		}
+		ticker := time.NewTicker(renewEvery)
+		go func() {
+			defer ticker.Stop()
+			for {
+				select {
+				case <-runCtx.Done():
+					return
+				case <-ticker.C:
+					renewed, err := renewable.Renew(runCtx, redisHubPubSubLockTTL)
+					if err != nil || !renewed {
+						_ = stop(context.Background())
+						return
+					}
+				}
+			}
+		}()
+	}
+	return types.CloseFunc(func(context.Context) error {
+		err := stop(context.Background())
 		select {
 		case <-done:
 		case <-time.After(time.Second):
@@ -197,18 +250,18 @@ func emitRedisHubMessage(ctx context.Context, in *types.TriggerActivateInput, mo
 	if event.Time.IsZero() {
 		event.Time = time.Now()
 	}
-	if ok, _ := in.Runtime.Dedup(ctx, "trigger:"+string(in.WorkflowID)+":"+in.NodeName+":"+eventID, 24*time.Hour); ok {
+	if ok, err := in.Runtime.Dedup(ctx, "trigger:"+string(in.WorkflowID)+":"+in.NodeName+":"+eventID, 24*time.Hour); err == nil && ok {
 		_, _ = in.Emit(ctx, event)
 	}
 }
 
 func redisHubConfigFromParams(params map[string]any) (RedisHubConsumerConfig, error) {
 	cfg := RedisHubConsumerConfig{
-		Mode:        stringParam(params["mode"]),
-		Stream:      stringParam(params["stream"]),
-		Group:       stringParam(params["group"]),
-		Channel:     stringParam(params["channel"]),
-		MaxInflight: intParam(params["max_inflight"], defaultTriggerMaxInflight),
+		Mode:        cast.ToString(params["mode"]),
+		Stream:      cast.ToString(params["stream"]),
+		Group:       cast.ToString(params["group"]),
+		Channel:     cast.ToString(params["channel"]),
+		MaxInflight: positiveIntParam(params["max_inflight"], defaultTriggerMaxInflight),
 	}
 	if cfg.Mode == "" {
 		cfg.Mode = "stream"
@@ -228,42 +281,24 @@ func redisHubConfigFromParams(params map[string]any) (RedisHubConsumerConfig, er
 	return cfg, nil
 }
 
-func stringParam(v any) string {
-	s, _ := v.(string)
-	return s
-}
-
 func stringSliceParam(v any) []string {
-	switch items := v.(type) {
-	case []string:
-		return items
-	case []any:
-		out := make([]string, 0, len(items))
-		for _, item := range items {
-			if s, ok := item.(string); ok && s != "" {
-				out = append(out, s)
-			}
-		}
-		return out
-	default:
+	values, err := cast.ToStringSliceE(v)
+	if err != nil {
 		return nil
 	}
+	out := values[:0]
+	for _, value := range values {
+		if value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
-func intParam(v any, fallback int) int {
-	switch n := v.(type) {
-	case int:
-		if n > 0 {
-			return n
-		}
-	case int64:
-		if n > 0 {
-			return int(n)
-		}
-	case float64:
-		if n > 0 {
-			return int(n)
-		}
+func positiveIntParam(v any, fallback int) int {
+	n, err := cast.ToIntE(v)
+	if err == nil && n > 0 {
+		return n
 	}
 	return fallback
 }

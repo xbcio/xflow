@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"strconv"
 	"sync"
 	"time"
 
@@ -9,16 +10,22 @@ import (
 )
 
 type triggerPrimitives struct {
-	mu    sync.Mutex
-	dedup map[string]time.Time
-	locks map[string]time.Time
-	state map[string]map[string][]byte
+	mu       sync.Mutex
+	dedup    map[string]time.Time
+	locks    map[string]memoryTriggerLockRecord
+	state    map[string]map[string][]byte
+	lockSeed uint64
+}
+
+type memoryTriggerLockRecord struct {
+	token   string
+	expires time.Time
 }
 
 func newTriggerPrimitives() *triggerPrimitives {
 	return &triggerPrimitives{
 		dedup: make(map[string]time.Time),
-		locks: make(map[string]time.Time),
+		locks: make(map[string]memoryTriggerLockRecord),
 		state: make(map[string]map[string][]byte),
 	}
 }
@@ -39,12 +46,20 @@ func (p *triggerPrimitives) TryLock(_ context.Context, key string, ttl time.Dura
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	if ttl <= 0 {
+		ttl = time.Minute
+	}
 	now := time.Now()
-	if expires, ok := p.locks[key]; ok && now.Before(expires) {
+	if existing, ok := p.locks[key]; ok && now.Before(existing.expires) {
 		return nil, false, nil
 	}
-	p.locks[key] = now.Add(ttl)
-	return &triggerLock{p: p, key: key}, true, nil
+	p.lockSeed++
+	token := strconv.FormatUint(p.lockSeed, 10)
+	p.locks[key] = memoryTriggerLockRecord{
+		token:   token,
+		expires: now.Add(ttl),
+	}
+	return &triggerLock{p: p, key: key, token: token}, true, nil
 }
 
 func (p *triggerPrimitives) State(_ context.Context, scope string) types.TriggerState {
@@ -52,14 +67,35 @@ func (p *triggerPrimitives) State(_ context.Context, scope string) types.Trigger
 }
 
 type triggerLock struct {
-	p   *triggerPrimitives
-	key string
+	p     *triggerPrimitives
+	key   string
+	token string
+}
+
+func (l *triggerLock) Renew(_ context.Context, ttl time.Duration) (bool, error) {
+	l.p.mu.Lock()
+	defer l.p.mu.Unlock()
+
+	if ttl <= 0 {
+		ttl = time.Minute
+	}
+	record, ok := l.p.locks[l.key]
+	now := time.Now()
+	if !ok || record.token != l.token || !now.Before(record.expires) {
+		return false, nil
+	}
+	record.expires = now.Add(ttl)
+	l.p.locks[l.key] = record
+	return true, nil
 }
 
 func (l *triggerLock) Release(_ context.Context) error {
 	l.p.mu.Lock()
 	defer l.p.mu.Unlock()
-	delete(l.p.locks, l.key)
+	record, ok := l.p.locks[l.key]
+	if ok && record.token == l.token {
+		delete(l.p.locks, l.key)
+	}
 	return nil
 }
 

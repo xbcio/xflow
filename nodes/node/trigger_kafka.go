@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/spf13/cast"
+
 	"github.com/xbcio/xflow/types"
 )
 
@@ -115,6 +117,9 @@ func (n *KafkaTriggerNode) OnError(s OnError) Builder {
 	return n
 }
 func (n *KafkaTriggerNode) TriggerHandler() TriggerHandler { return n }
+func (n *KafkaTriggerNode) Execute(_ context.Context, input *Input) (*Output, error) {
+	return executeTriggerEntry(input)
+}
 
 func (n *KafkaTriggerNode) Activate(ctx context.Context, in *types.TriggerActivateInput) (types.TriggerSubscription, error) {
 	cfg, err := kafkaConfigFromParams(in.Params)
@@ -181,7 +186,7 @@ func emitKafkaMessage(ctx context.Context, in *types.TriggerActivateInput, msg K
 	if event.Time.IsZero() {
 		event.Time = time.Now()
 	}
-	if ok, _ := in.Runtime.Dedup(ctx, "trigger:"+string(in.WorkflowID)+":"+in.NodeName+":"+eventID, 24*time.Hour); ok {
+	if ok, err := in.Runtime.Dedup(ctx, "trigger:"+string(in.WorkflowID)+":"+in.NodeName+":"+eventID, 24*time.Hour); err == nil && ok {
 		_, _ = in.Emit(ctx, event)
 	}
 }
@@ -189,10 +194,10 @@ func emitKafkaMessage(ctx context.Context, in *types.TriggerActivateInput, msg K
 func kafkaConfigFromParams(params map[string]any) (KafkaConsumerConfig, error) {
 	cfg := KafkaConsumerConfig{
 		Brokers:     stringSliceParam(params["brokers"]),
-		Topic:       stringParam(params["topic"]),
-		Group:       stringParam(params["group"]),
-		StartOffset: stringParam(params["start_offset"]),
-		MaxInflight: intParam(params["max_inflight"], defaultTriggerMaxInflight),
+		Topic:       cast.ToString(params["topic"]),
+		Group:       cast.ToString(params["group"]),
+		StartOffset: cast.ToString(params["start_offset"]),
+		MaxInflight: positiveIntParam(params["max_inflight"], defaultTriggerMaxInflight),
 	}
 	if cfg.StartOffset == "" {
 		cfg.StartOffset = "latest"

@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/spf13/cast"
+
 	"github.com/xbcio/xflow/types"
 )
 
@@ -80,6 +82,9 @@ func (n *WebhookTriggerNode) OnError(s OnError) Builder {
 	return n
 }
 func (n *WebhookTriggerNode) TriggerHandler() TriggerHandler { return n }
+func (n *WebhookTriggerNode) Execute(_ context.Context, input *Input) (*Output, error) {
+	return executeTriggerEntry(input)
+}
 
 func (n *WebhookTriggerNode) Activate(ctx context.Context, in *types.TriggerActivateInput) (types.TriggerSubscription, error) {
 	method := strings.ToUpper(in.GetString("method"))
@@ -135,19 +140,9 @@ func (n *WebhookTriggerNode) Activate(ctx context.Context, in *types.TriggerActi
 }
 
 func webhookMaxBodyBytes(v any) int64 {
-	switch n := v.(type) {
-	case int:
-		if n > 0 {
-			return int64(n)
-		}
-	case int64:
-		if n > 0 {
-			return n
-		}
-	case float64:
-		if n > 0 {
-			return int64(n)
-		}
+	n, err := cast.ToInt64E(v)
+	if err == nil && n > 0 {
+		return n
 	}
 	return defaultWebhookMaxBodyBytes
 }

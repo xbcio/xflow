@@ -2,99 +2,119 @@ package asynq
 
 import (
 	"context"
-	"sync"
+	"errors"
 	"time"
+
+	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/xbcio/xflow/types"
 )
 
 type triggerPrimitives struct {
-	mu    sync.Mutex
-	dedup map[string]time.Time
-	locks map[string]time.Time
-	state map[string]map[string][]byte
+	rdb *redis.Client
 }
 
-func newTriggerPrimitives() *triggerPrimitives {
-	return &triggerPrimitives{
-		dedup: make(map[string]time.Time),
-		locks: make(map[string]time.Time),
-		state: make(map[string]map[string][]byte),
-	}
+func newTriggerPrimitives(rdb *redis.Client) *triggerPrimitives {
+	return &triggerPrimitives{rdb: rdb}
 }
 
-func (p *triggerPrimitives) Dedup(_ context.Context, key string, ttl time.Duration) (bool, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	now := time.Now()
-	if expires, ok := p.dedup[key]; ok && now.Before(expires) {
-		return false, nil
-	}
-	p.dedup[key] = now.Add(ttl)
-	return true, nil
+func triggerDedupKey(key string) string { return "xflow:trigger:dedup:" + key }
+
+func triggerLockKey(key string) string { return "xflow:trigger:lock:" + key }
+
+func triggerStateKey(scope, key string) string {
+	return "xflow:trigger:state:" + scope + ":" + key
 }
 
-func (p *triggerPrimitives) TryLock(_ context.Context, key string, ttl time.Duration) (types.TriggerLock, bool, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	now := time.Now()
-	if expires, ok := p.locks[key]; ok && now.Before(expires) {
-		return nil, false, nil
+func (p *triggerPrimitives) Dedup(ctx context.Context, key string, ttl time.Duration) (bool, error) {
+	if ttl <= 0 {
+		ttl = 24 * time.Hour
 	}
-	p.locks[key] = now.Add(ttl)
-	return &triggerLock{p: p, key: key}, true, nil
+	return p.rdb.SetNX(ctx, triggerDedupKey(key), "1", ttl).Result()
+}
+
+func (p *triggerPrimitives) TryLock(ctx context.Context, key string, ttl time.Duration) (types.TriggerLock, bool, error) {
+	if ttl <= 0 {
+		ttl = time.Minute
+	}
+	token := uuid.NewString()
+	ok, err := p.rdb.SetNX(ctx, triggerLockKey(key), token, ttl).Result()
+	if err != nil || !ok {
+		return nil, ok, err
+	}
+	return &triggerLock{rdb: p.rdb, key: triggerLockKey(key), token: token}, true, nil
 }
 
 func (p *triggerPrimitives) State(_ context.Context, scope string) types.TriggerState {
-	return &triggerState{p: p, scope: scope}
+	return &triggerState{rdb: p.rdb, scope: scope}
 }
 
 type triggerLock struct {
-	p   *triggerPrimitives
-	key string
+	rdb   *redis.Client
+	key   string
+	token string
 }
 
-func (l *triggerLock) Release(_ context.Context) error {
-	l.p.mu.Lock()
-	defer l.p.mu.Unlock()
-	delete(l.p.locks, l.key)
-	return nil
+var releaseTriggerLockScript = redis.NewScript(`
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+	return redis.call("DEL", KEYS[1])
+end
+return 0
+`)
+
+var renewTriggerLockScript = redis.NewScript(`
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+	return redis.call("PEXPIRE", KEYS[1], ARGV[2])
+end
+return 0
+`)
+
+func (l *triggerLock) Renew(ctx context.Context, ttl time.Duration) (bool, error) {
+	if ttl <= 0 {
+		ttl = time.Minute
+	}
+	ttlMillis := ttl.Milliseconds()
+	if ttl > 0 && ttlMillis == 0 {
+		ttlMillis = 1
+	}
+	renewed, err := renewTriggerLockScript.Run(
+		ctx,
+		l.rdb,
+		[]string{l.key},
+		l.token,
+		ttlMillis,
+	).Int64()
+	if err != nil {
+		return false, err
+	}
+	return renewed == 1, nil
+}
+
+func (l *triggerLock) Release(ctx context.Context) error {
+	return releaseTriggerLockScript.Run(ctx, l.rdb, []string{l.key}, l.token).Err()
 }
 
 type triggerState struct {
-	p     *triggerPrimitives
+	rdb   *redis.Client
 	scope string
 }
 
-func (s *triggerState) Get(_ context.Context, key string) ([]byte, error) {
-	s.p.mu.Lock()
-	defer s.p.mu.Unlock()
-	values := s.p.state[s.scope]
-	if values == nil {
+func (s *triggerState) Get(ctx context.Context, key string) ([]byte, error) {
+	b, err := s.rdb.Get(ctx, triggerStateKey(s.scope, key)).Bytes()
+	if errors.Is(err, redis.Nil) {
 		return nil, nil
 	}
-	value := values[key]
-	if value == nil {
-		return nil, nil
-	}
-	return append([]byte(nil), value...), nil
+	return b, err
 }
 
-func (s *triggerState) Set(_ context.Context, key string, value []byte, _ time.Duration) error {
-	s.p.mu.Lock()
-	defer s.p.mu.Unlock()
-	if s.p.state[s.scope] == nil {
-		s.p.state[s.scope] = make(map[string][]byte)
+func (s *triggerState) Set(ctx context.Context, key string, value []byte, ttl time.Duration) error {
+	if ttl > 0 {
+		return s.rdb.Set(ctx, triggerStateKey(s.scope, key), value, ttl).Err()
 	}
-	s.p.state[s.scope][key] = append([]byte(nil), value...)
-	return nil
+	return s.rdb.Set(ctx, triggerStateKey(s.scope, key), value, 0).Err()
 }
 
-func (s *triggerState) Delete(_ context.Context, key string) error {
-	s.p.mu.Lock()
-	defer s.p.mu.Unlock()
-	if s.p.state[s.scope] != nil {
-		delete(s.p.state[s.scope], key)
-	}
-	return nil
+func (s *triggerState) Delete(ctx context.Context, key string) error {
+	return s.rdb.Del(ctx, triggerStateKey(s.scope, key)).Err()
 }

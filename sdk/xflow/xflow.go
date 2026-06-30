@@ -160,6 +160,9 @@ func (e *Engine) registerNodeDefinitions(defs []node.Handler) error {
 				return fmt.Errorf("registry does not support node definition registration")
 			}
 			lr.RegisterGlobal(h.Descriptor().Type, h)
+			if th, isTrigger := def.(types.TriggerHandler); isTrigger {
+				node.RegisterTrigger(th)
+			}
 		case types.TriggerHandler:
 			node.RegisterTrigger(h)
 		default:

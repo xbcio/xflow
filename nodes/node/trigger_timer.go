@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/spf13/cast"
+
 	"github.com/xbcio/xflow/types"
 )
 
@@ -43,6 +45,9 @@ func (n *TimerTriggerNode) OnError(s OnError) Builder {
 	return n
 }
 func (n *TimerTriggerNode) TriggerHandler() TriggerHandler { return n }
+func (n *TimerTriggerNode) Execute(_ context.Context, input *Input) (*Output, error) {
+	return executeTriggerEntry(input)
+}
 
 func (n *TimerTriggerNode) Activate(ctx context.Context, in *types.TriggerActivateInput) (types.TriggerSubscription, error) {
 	interval, err := triggerDurationParam(in.Params["interval"])
@@ -56,14 +61,8 @@ func (n *TimerTriggerNode) Activate(ctx context.Context, in *types.TriggerActiva
 		for {
 			select {
 			case t := <-ticker.C:
-				event := &types.TriggerEvent{
-					ID:     fmt.Sprintf("%s/%s/%d", in.WorkflowID, in.NodeName, t.UnixNano()),
-					Kind:   "timer",
-					Source: in.NodeName,
-					Time:   t,
-					Data:   map[string]any{"scheduled_time": t.Format(time.RFC3339Nano)},
-				}
-				if ok, _ := in.Runtime.Dedup(runCtx, "trigger:"+string(in.WorkflowID)+":"+in.NodeName+":"+event.ID, interval*2); ok {
+				event := newTimerTriggerEvent(in.WorkflowID, in.NodeName, interval, t)
+				if ok, err := in.Runtime.Dedup(runCtx, "trigger:"+string(in.WorkflowID)+":"+in.NodeName+":"+event.ID, interval*2); err == nil && ok {
 					_, _ = in.Emit(runCtx, event)
 				}
 			case <-runCtx.Done():
@@ -77,40 +76,32 @@ func (n *TimerTriggerNode) Activate(ctx context.Context, in *types.TriggerActiva
 	}), nil
 }
 
+func newTimerTriggerEvent(workflowID types.WorkflowID, nodeName string, interval time.Duration, tick time.Time) *types.TriggerEvent {
+	scheduled := tick.UTC()
+	if interval > 0 {
+		scheduled = scheduled.Truncate(interval)
+	}
+	return &types.TriggerEvent{
+		ID:     fmt.Sprintf("%s/%s/%d", workflowID, nodeName, scheduled.UnixNano()),
+		Kind:   "timer",
+		Source: nodeName,
+		Time:   tick,
+		Data:   map[string]any{"scheduled_time": scheduled.Format(time.RFC3339Nano)},
+	}
+}
+
 func triggerDurationParam(v any) (time.Duration, error) {
-	switch d := v.(type) {
-	case string:
-		parsed, err := time.ParseDuration(d)
-		if err != nil {
-			return 0, err
-		}
-		if parsed <= 0 {
-			return 0, fmt.Errorf("duration must be positive")
-		}
-		return parsed, nil
-	case time.Duration:
-		if d <= 0 {
-			return 0, fmt.Errorf("duration must be positive")
-		}
-		return d, nil
-	case int:
-		if d <= 0 {
-			return 0, fmt.Errorf("duration must be positive")
-		}
-		return time.Duration(d), nil
-	case int64:
-		if d <= 0 {
-			return 0, fmt.Errorf("duration must be positive")
-		}
-		return time.Duration(d), nil
-	case float64:
-		if d <= 0 {
-			return 0, fmt.Errorf("duration must be positive")
-		}
-		return time.Duration(d), nil
-	default:
+	if v == nil || cast.ToString(v) == "" {
 		return 0, fmt.Errorf("duration is required")
 	}
+	d, err := cast.ToDurationE(v)
+	if err != nil {
+		return 0, fmt.Errorf("duration is required")
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("duration must be positive")
+	}
+	return d, nil
 }
 
 func init() { RegisterTrigger(&TimerTriggerNode{}) }

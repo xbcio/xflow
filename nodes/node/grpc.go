@@ -13,6 +13,8 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/dynamicpb"
 	"google.golang.org/protobuf/types/known/structpb"
+
+	"github.com/spf13/cast"
 )
 
 // GRPCNode implements xflow.grpc — executes a gRPC unary call.
@@ -92,15 +94,15 @@ func (n *GRPCNode) RawParams() any {
 }
 
 func (n *GRPCNode) Execute(ctx context.Context, input *Input) (*Output, error) {
-	host, _ := input.Params["host"].(string)
+	host := cast.ToString(input.Params["host"])
 	if host == "" {
 		return nil, fmt.Errorf("xflow.grpc: host parameter is required")
 	}
-	service, _ := input.Params["service"].(string)
+	service := cast.ToString(input.Params["service"])
 	if service == "" {
 		return nil, fmt.Errorf("xflow.grpc: service parameter is required")
 	}
-	method, _ := input.Params["method"].(string)
+	method := cast.ToString(input.Params["method"])
 	if method == "" {
 		return nil, fmt.Errorf("xflow.grpc: method parameter is required")
 	}
@@ -108,14 +110,12 @@ func (n *GRPCNode) Execute(ctx context.Context, input *Input) (*Output, error) {
 	timeout := 30 * time.Second
 	useTLS := false
 	if options, ok := input.Params["options"].(map[string]any); ok {
-		if t, ok := options["timeout"].(string); ok {
+		if t := cast.ToString(options["timeout"]); t != "" {
 			if d, err := time.ParseDuration(t); err == nil {
 				timeout = d
 			}
 		}
-		if tls, ok := options["tls"].(bool); ok {
-			useTLS = tls
-		}
+		useTLS = cast.ToBool(options["tls"])
 	}
 	if input.Timeout > 0 {
 		timeout = input.Timeout
@@ -138,7 +138,7 @@ func (n *GRPCNode) Execute(ctx context.Context, input *Input) (*Output, error) {
 	if md, ok := input.Params["metadata"].(map[string]any); ok {
 		pairs := make([]string, 0, len(md)*2)
 		for k, v := range md {
-			pairs = append(pairs, k, fmt.Sprintf("%v", v))
+			pairs = append(pairs, k, cast.ToString(v))
 		}
 		dialCtx = metadata.AppendToOutgoingContext(dialCtx, pairs...)
 	}

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	cronlib "github.com/robfig/cron/v3"
+	"github.com/spf13/cast"
 
 	"github.com/xbcio/xflow/types"
 )
@@ -52,13 +53,16 @@ func (n *CronTriggerNode) OnError(s OnError) Builder {
 	return n
 }
 func (n *CronTriggerNode) TriggerHandler() TriggerHandler { return n }
+func (n *CronTriggerNode) Execute(_ context.Context, input *Input) (*Output, error) {
+	return executeTriggerEntry(input)
+}
 
 func (n *CronTriggerNode) Activate(ctx context.Context, in *types.TriggerActivateInput) (types.TriggerSubscription, error) {
-	expr, _ := in.Params["expression"].(string)
+	expr := cast.ToString(in.Params["expression"])
 	if expr == "" {
 		return nil, fmt.Errorf("cron expression is required")
 	}
-	tz, _ := in.Params["timezone"].(string)
+	tz := cast.ToString(in.Params["timezone"])
 	if tz == "" {
 		tz = "UTC"
 	}
@@ -66,6 +70,7 @@ func (n *CronTriggerNode) Activate(ctx context.Context, in *types.TriggerActivat
 	if err != nil {
 		return nil, err
 	}
+	runCtx, cancel := context.WithCancel(ctx)
 	c := cronlib.New(cronlib.WithLocation(loc))
 	if _, err := c.AddFunc(expr, func() {
 		t := time.Now().In(loc)
@@ -77,14 +82,16 @@ func (n *CronTriggerNode) Activate(ctx context.Context, in *types.TriggerActivat
 			Time:   t,
 			Data:   map[string]any{"scheduled_time": scheduled.Format(time.RFC3339)},
 		}
-		if ok, _ := in.Runtime.Dedup(context.Background(), "trigger:"+string(in.WorkflowID)+":"+in.NodeName+":"+event.ID, 2*time.Minute); ok {
-			_, _ = in.Emit(context.Background(), event)
+		if ok, err := in.Runtime.Dedup(runCtx, "trigger:"+string(in.WorkflowID)+":"+in.NodeName+":"+event.ID, 2*time.Minute); err == nil && ok {
+			_, _ = in.Emit(runCtx, event)
 		}
 	}); err != nil {
+		cancel()
 		return nil, err
 	}
 	c.Start()
 	return types.CloseFunc(func(context.Context) error {
+		cancel()
 		stopCtx := c.Stop()
 		select {
 		case <-stopCtx.Done():

@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/spf13/cast"
 )
 
 // HTTPNode implements xflow.http — executes an HTTP request.
@@ -93,13 +95,13 @@ func (n *HTTPNode) RawParams() any {
 }
 
 func (n *HTTPNode) Execute(ctx context.Context, input *Input) (*Output, error) {
-	method, _ := input.Params["method"].(string)
+	method := cast.ToString(input.Params["method"])
 	if method == "" {
 		method = "GET"
 	}
 	method = strings.ToUpper(method)
 
-	rawURL, _ := input.Params["url"].(string)
+	rawURL := cast.ToString(input.Params["url"])
 	if rawURL == "" {
 		return nil, fmt.Errorf("xflow.http: url parameter is required")
 	}
@@ -112,7 +114,7 @@ func (n *HTTPNode) Execute(ctx context.Context, input *Input) (*Output, error) {
 	if query, ok := input.Params["query"].(map[string]any); ok {
 		q := parsedURL.Query()
 		for k, v := range query {
-			q.Set(k, fmt.Sprintf("%v", v))
+			q.Set(k, cast.ToString(v))
 		}
 		parsedURL.RawQuery = q.Encode()
 	}
@@ -137,18 +139,18 @@ func (n *HTTPNode) Execute(ctx context.Context, input *Input) (*Output, error) {
 
 	if headers, ok := input.Params["headers"].(map[string]any); ok {
 		for k, v := range headers {
-			req.Header.Set(k, fmt.Sprintf("%v", v))
+			req.Header.Set(k, cast.ToString(v))
 		}
 	}
 
-	if authName, _ := input.Params["authentication"].(string); authName != "" {
+	if authName := cast.ToString(input.Params["authentication"]); authName != "" {
 		cred := input.Credential(authName)
 		applyHTTPAuth(req, cred)
 	}
 
 	timeout := 30 * time.Second
 	if options, ok := input.Params["options"].(map[string]any); ok {
-		if t, ok := options["timeout"].(string); ok {
+		if t := cast.ToString(options["timeout"]); t != "" {
 			if d, err := time.ParseDuration(t); err == nil {
 				timeout = d
 			}
@@ -202,16 +204,16 @@ func applyHTTPAuth(req *http.Request, cred map[string]any) {
 	}
 	switch cred["type"] {
 	case "bearer":
-		if token, ok := cred["token"].(string); ok {
+		if token := cast.ToString(cred["token"]); token != "" {
 			req.Header.Set("Authorization", "Bearer "+token)
 		}
 	case "basic":
-		user, _ := cred["username"].(string)
-		pass, _ := cred["password"].(string)
+		user := cast.ToString(cred["username"])
+		pass := cast.ToString(cred["password"])
 		req.SetBasicAuth(user, pass)
 	case "api_key":
-		header, _ := cred["header"].(string)
-		value, _ := cred["value"].(string)
+		header := cast.ToString(cred["header"])
+		value := cast.ToString(cred["value"])
 		if header == "" {
 			header = "X-API-Key"
 		}
