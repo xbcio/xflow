@@ -13,6 +13,10 @@ func init() {
 	script.Register("js", "qjs", func() script.Engine { return qjsEngine{} })
 }
 
+// qjsEngine runs scripts on QuickJS-via-wazero (pure Go). The QuickJS wasm
+// compiles once process-wide (~330ms, build-cached); each Execute then
+// instantiates a fresh module (~3ms) for isolation. Unlike js/goja, there is
+// no warm runtime pool — a fresh instance per call is the isolation boundary.
 type qjsEngine struct{}
 
 // stripGlobals removes the non-standard QuickJS host globals exposed by
@@ -22,6 +26,10 @@ type qjsEngine struct{}
 // ambient capabilities (filesystem via std/os, output via print/console, timers,
 // gc, and environment introspection). Standard constructors (Array, JSON, Map,
 // the TypedArrays, etc.) are intentionally left in place.
+//
+// KNOWN LIMITATION: this is a denylist (fails open) — a future qjs version that
+// adds a new host-capability global would slip through, so re-audit the global
+// surface when upgrading the qjs dependency (currently pinned at v0.0.6).
 const stripGlobals = `(function(){
   var remove = ['std','os','print','scriptArgs','bjson','console','performance',
     'navigator','gc','queueMicrotask',
