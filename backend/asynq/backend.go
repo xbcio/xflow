@@ -20,10 +20,12 @@ import (
 type Option func(*config)
 
 type config struct {
-	concurrency  int
-	execTTL      time.Duration
-	consumer     bool
-	resourcePool node.ResourcePool
+	concurrency   int
+	execTTL       time.Duration
+	consumer      bool
+	resourcePool  node.ResourcePool
+	auditObserver AuditObserver
+	logger        engine.Logger
 }
 
 // WithConcurrency sets the number of Asynq queue consumer goroutines. Default is 10.
@@ -60,6 +62,30 @@ func WithResourcePool(p node.ResourcePool) Option {
 	return func(c *config) { c.resourcePool = p }
 }
 
+// WithAuditObserver installs an external observer for audit-store dual-write
+// outcomes. Per .claude/docs/specs/dual-write-contract.md, Redis is the system
+// of record and the sqlstore audit trail is best-effort; this observer is the
+// hook for ops/metrics to count and reconcile audit failures. Composes with
+// the built-in atomic counters reachable via (*Backend).AuditStats().
+func WithAuditObserver(obs AuditObserver) Option {
+	return func(c *config) {
+		if obs != nil {
+			c.auditObserver = obs
+		}
+	}
+}
+
+// WithStateLogger installs a logger used by the audit wrapper for failed
+// dual-writes. Optional; without one, audit failures are still counted via
+// the observer/counters but not logged.
+func WithStateLogger(l engine.Logger) Option {
+	return func(c *config) {
+		if l != nil {
+			c.logger = l
+		}
+	}
+}
+
 // Backend wires the Engine Core to Redis state and an Asynq task queue.
 // Call Bind() after creating the engine to wire the Asynq server.
 type Backend struct {
@@ -91,6 +117,11 @@ func (b *Backend) WorkflowRegistry() backend.WorkflowRegistry { return b.workflo
 // TriggerPrimitives returns trigger coordination primitives.
 func (b *Backend) TriggerPrimitives() backend.TriggerPrimitives { return b.triggerRuntime }
 
+// AuditStats returns a point-in-time snapshot of audit-store dual-write
+// outcomes (ok and failed counts keyed by op). See
+// .claude/docs/specs/dual-write-contract.md.
+func (b *Backend) AuditStats() AuditStats { return b.state.auditCounters.snapshot() }
+
 // New creates an Asynq backend connected to the given Redis address.
 // db may be nil for pure-Redis mode (no MySQL persistence).
 // Call Bind(eng) after creating the engine to start queue consumers.
@@ -108,6 +139,10 @@ func New(redisAddr string, db store.Store, opts ...Option) (*Backend, error) {
 	}
 
 	state := newRedisState(rdb, db, cfg.execTTL)
+	if cfg.auditObserver != nil {
+		state.audit = cfg.auditObserver
+	}
+	state.logger = cfg.logger
 	queue := newAsynqQueue(redisAddr)
 	registry := execution.NewRegistry()
 

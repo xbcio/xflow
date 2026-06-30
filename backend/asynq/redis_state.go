@@ -274,15 +274,24 @@ type redisState struct {
 	// per-execution TTL overrides (set via SubmitOption)
 	ttlMu    sync.RWMutex
 	execTTLs map[types.ExecutionID]time.Duration
+
+	// Audit-trail observability — Redis is system-of-record; the store/sqlstore
+	// audit trail is best-effort. auditWrite routes failures through these
+	// instead of silently dropping them.
+	audit         AuditObserver
+	auditCounters *auditCounters
+	logger        engine.Logger
 }
 
 func newRedisState(rdb *redis.Client, db store.Store, execTTL time.Duration) *redisState {
 	return &redisState{
-		rdb:      rdb,
-		db:       db,
-		execTTL:  execTTL,
-		graphs:   make(map[types.ExecutionID]*graph.Graph),
-		execTTLs: make(map[types.ExecutionID]time.Duration),
+		rdb:           rdb,
+		db:            db,
+		execTTL:       execTTL,
+		graphs:        make(map[types.ExecutionID]*graph.Graph),
+		execTTLs:      make(map[types.ExecutionID]time.Duration),
+		audit:         noopAuditObserver{},
+		auditCounters: &auditCounters{},
 	}
 }
 
@@ -434,12 +443,9 @@ func (s *redisState) UpdateExecutionStatus(ctx context.Context, id types.Executi
 	if status == types.ExecutionStatusCanceled {
 		s.cleanupOnCancel(ctx, id)
 	}
-	if s.db != nil {
-		if err := s.db.UpdateExecutionStatus(ctx, id, status, errMsg); err != nil {
-			// Non-fatal: log but don't fail the execution.
-			_ = err
-		}
-	}
+	s.auditWrite(ctx, "update_execution_status", func(ctx context.Context) error {
+		return s.db.UpdateExecutionStatus(ctx, id, status, errMsg)
+	})
 	_ = s.PublishExecutionEvent(ctx, engine.ExecutionEvent{ExecutionID: id, Status: status, Error: errMsg})
 	return nil
 }
@@ -563,7 +569,9 @@ func (s *redisState) UpsertNode(ctx context.Context, n *engine.NodeSnapshot) err
 			Port:        n.Port,
 			UpdatedAt:   time.Now(),
 		}
-		_ = s.db.UpsertNode(ctx, rec)
+		s.auditWrite(ctx, "upsert_node", func(ctx context.Context) error {
+			return s.db.UpsertNode(ctx, rec)
+		})
 	}
 	return nil
 }
@@ -934,13 +942,15 @@ func (s *redisState) DeliverSignal(ctx context.Context, id types.ExecutionID, si
 		}
 	}
 
-	// Dual-write signal to store.
 	if s.db != nil {
-		_ = s.db.SaveSignal(ctx, &store.SignalRecord{
+		rec := &store.SignalRecord{
 			ExecutionID: id,
 			SignalName:  signalName,
 			Payload:     dataJSON,
 			CreatedAt:   time.Now(),
+		}
+		s.auditWrite(ctx, "save_signal", func(ctx context.Context) error {
+			return s.db.SaveSignal(ctx, rec)
 		})
 	}
 	return "", nil, nil
@@ -972,8 +982,10 @@ func (s *redisState) RevokeSignal(ctx context.Context, id types.ExecutionID, sig
 		return false, fmt.Errorf("revoke signal lua: %w", err)
 	}
 	if result == 1 && s.db != nil {
-		// Best-effort dual-write: mark signal as revoked in persistent store.
-		_, _ = s.db.RevokeSignal(ctx, id, signalName)
+		s.auditWrite(ctx, "revoke_signal", func(ctx context.Context) error {
+			_, err := s.db.RevokeSignal(ctx, id, signalName)
+			return err
+		})
 	}
 	return result == 1, nil
 }
