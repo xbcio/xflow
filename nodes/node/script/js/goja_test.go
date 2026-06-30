@@ -102,3 +102,24 @@ func TestGoja_RuntimeError(t *testing.T) {
 		t.Fatalf("expected boom error, got %v", err)
 	}
 }
+
+func TestGoja_TimeoutThenReuse(t *testing.T) {
+	e := newGoja()
+	// First exec times out under a tight deadline.
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, err := e.Execute(ctx, `while(true){}`, nil, script.DefaultHelpers()); err == nil {
+		t.Fatal("expected timeout error")
+	}
+	// A subsequent clean exec on the same engine must succeed (no stale interrupt,
+	// no poisoned pooled VM).
+	for i := 0; i < 20; i++ {
+		out, err := e.Execute(context.Background(), `({ok: 1 + 1})`, nil, script.DefaultHelpers())
+		if err != nil {
+			t.Fatalf("iteration %d: clean exec failed after a timeout: %v", i, err)
+		}
+		if out.(map[string]any)["ok"] != int64(2) && out.(map[string]any)["ok"] != 2.0 {
+			t.Fatalf("iteration %d: ok = %v", i, out.(map[string]any)["ok"])
+		}
+	}
+}

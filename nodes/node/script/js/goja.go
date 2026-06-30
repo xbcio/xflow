@@ -22,6 +22,8 @@ var sharedGoja = &gojaEngine{
 type gojaEngine struct {
 	pool     sync.Pool // of *pooledVM
 	progMu   sync.RWMutex
+	// programs caches compiled scripts by source; assumes a bounded set of
+	// distinct scripts per deployment (no eviction).
 	programs map[string]*goja.Program
 }
 
@@ -84,31 +86,35 @@ func (e *gojaEngine) Execute(ctx context.Context, code string, globals map[strin
 	// Inject helpers as $helpers (non-security utilities only).
 	_ = vm.Set("$helpers", map[string]any{
 		"base64Encode": h.Base64Encode,
-		"base64Decode": func(s string) (string, error) { return h.Base64Decode(s) },
+		"base64Decode": h.Base64Decode,
 	})
 	// Inject globals ($input, $credentials, $credential, ...).
 	for k, v := range BuildGlobals(globals) {
 		_ = vm.Set(k, v)
 	}
 
-	// Timeout: watcher interrupts the loop on ctx cancellation.
+	// Timeout: watcher interrupts the loop on ctx cancellation. The watcher is
+	// unconditional so its exit is observable via `exited`; ctx is always
+	// non-nil per the Engine contract (context.Background().Done() is a nil
+	// channel that blocks forever, so the watcher simply parks on <-done).
 	done := make(chan struct{})
-	if ctx != nil {
-		go func() {
-			select {
-			case <-ctx.Done():
-				vm.Interrupt("timeout")
-			case <-done:
-			}
-		}()
-	}
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		select {
+		case <-ctx.Done():
+			vm.Interrupt("timeout")
+		case <-done:
+		}
+	}()
 
 	val, runErr := vm.RunProgram(prog)
 	close(done)
+	<-exited            // watcher can no longer touch vm after this
+	vm.ClearInterrupt() // clear any interrupt that landed post-completion, before reuse
 
 	if runErr != nil {
-		// Interrupted runtime is in an unknown state — discard, don't return to pool.
-		vm.ClearInterrupt()
+		// Interrupted/errored runtime is in an unknown state — discard, don't return to pool.
 		return nil, fmt.Errorf("js/goja: %w", runErr)
 	}
 
