@@ -226,6 +226,40 @@ func TestEngineBuildTaskLeaseKeepsStaticVarsAndRuntimeVarsSeparate(t *testing.T)
 	}
 }
 
+func TestInvokeStartsOnlyNamedEntryAndDoesNotBlockSharedDownstream(t *testing.T) {
+	def := &types.WorkflowDef{
+		Name: "multi-trigger",
+		Nodes: []types.NodeDef{
+			{Name: "kafka", Type: "xflow.trigger.kafka", Kind: types.NodeKindTrigger},
+			{Name: "webhook", Type: "xflow.trigger.webhook", Kind: types.NodeKindTrigger},
+			{Name: "normalize", Type: "test.echo"},
+		},
+		Connections: types.Connections{
+			"kafka":   {"main": []types.Connection{{Node: "normalize", Input: "main"}}},
+			"webhook": {"main": []types.Connection{{Node: "normalize", Input: "main"}}},
+		},
+	}
+	g, err := graph.Compile(def)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := newFakeState()
+	queue := &fakeQueue{}
+	reg := &fakeRegistry{handlers: map[string]types.ActionHandler{"test.echo": &echoHandler{}}}
+	eng := newTestEngine(state, queue, reg)
+
+	id, err := eng.Invoke(context.Background(), g, "kafka", map[string]any{"id": "e1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(queue.tasks) != 1 || queue.tasks[0].NodeName != "kafka" {
+		t.Fatalf("queued = %+v, want kafka only", queue.tasks)
+	}
+	if id == "" {
+		t.Fatal("empty execution id")
+	}
+}
+
 func TestScheduler_FanOutFanIn(t *testing.T) {
 	def := &types.WorkflowDef{
 		Name: "diamond",

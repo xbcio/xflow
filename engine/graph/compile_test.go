@@ -87,6 +87,31 @@ func TestCompile_AllowCyclesAllowsCycleWithStart(t *testing.T) {
 	}
 }
 
+func TestCompileCollectsStartAndTriggerEntries(t *testing.T) {
+	def := &types.WorkflowDef{
+		Name: "entries",
+		Nodes: []types.NodeDef{
+			{Name: "start", Type: "xflow.start"},
+			{Name: "cron", Type: "xflow.trigger.cron", Kind: types.NodeKindTrigger},
+			{Name: "work", Type: "test.work"},
+		},
+		Connections: types.Connections{
+			"start": {"main": []types.Connection{{Node: "work", Input: "main"}}},
+			"cron":  {"main": []types.Connection{{Node: "work", Input: "main"}}},
+		},
+	}
+	g, err := Compile(def)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(g.EntryIndexes) != 2 {
+		t.Fatalf("EntryIndexes len = %d, want 2", len(g.EntryIndexes))
+	}
+	if g.EntryIndexes["start"] != 0 || g.EntryIndexes["cron"] != 1 {
+		t.Fatalf("EntryIndexes = %+v", g.EntryIndexes)
+	}
+}
+
 func TestCompile_AllowCyclesDefaultsMaxAutoDepth(t *testing.T) {
 	def := &types.WorkflowDef{
 		Name:    "cycle",
@@ -138,18 +163,22 @@ func TestCompile_AllowCyclesRequiresExactlyOneStart(t *testing.T) {
 	}
 }
 
-func TestCompile_AllowCyclesRejectsTriggerUntilImplemented(t *testing.T) {
+func TestCompile_AllowCyclesDoesNotRejectTriggerEntry(t *testing.T) {
 	def := &types.WorkflowDef{
 		Name:    "trigger",
 		Options: &types.WorkflowOptions{AllowCycles: true},
 		Nodes: []types.NodeDef{
 			{Name: "start", Type: "xflow.start"},
-			{Name: "trigger", Type: "xflow.trigger"},
+			{Name: "trigger", Type: "xflow.trigger", Kind: types.NodeKindTrigger},
 		},
 	}
 
-	if _, err := Compile(def); err == nil {
-		t.Fatal("expected trigger validation error")
+	g, err := Compile(def)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.EntryIndexes["trigger"] != 1 {
+		t.Fatalf("trigger entry index = %d, want 1", g.EntryIndexes["trigger"])
 	}
 }
 

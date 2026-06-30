@@ -125,6 +125,49 @@ func (e *Engine) Submit(ctx context.Context, g *graph.Graph, params map[string]a
 	return id, nil
 }
 
+// Invoke starts a new execution from one explicit entry node.
+func (e *Engine) Invoke(ctx context.Context, g *graph.Graph, entryName string, params map[string]any, runtime ...*types.Runtime) (types.ExecutionID, error) {
+	entryIdx, ok := g.EntryIndexes[entryName]
+	if !ok {
+		return "", fmt.Errorf("entry node %q not found", entryName)
+	}
+
+	id := types.ExecutionID("exec-" + uuid.New().String())
+	snap := &ExecutionSnapshot{
+		ID:     id,
+		Graph:  g,
+		Status: types.ExecutionStatusRunning,
+		Params: params,
+	}
+	if len(runtime) > 0 {
+		snap.Runtime = cloneRuntime(runtime[0])
+	}
+	if err := e.state.CreateExecution(ctx, snap); err != nil {
+		return "", fmt.Errorf("create execution: %w", err)
+	}
+
+	e.mu.Lock()
+	e.graphs[id] = g
+	e.mu.Unlock()
+
+	nd := g.Nodes[entryIdx]
+	task := &Task{
+		ExecutionID:  id,
+		NodeName:     nd.Name,
+		NodeIdx:      entryIdx,
+		Type:         TaskTypeNodeExec,
+		ActivationID: 1,
+	}
+	if err := e.queue.Enqueue(ctx, task); err != nil {
+		_ = e.state.UpdateExecutionStatus(ctx, id, types.ExecutionStatusFailed, fmt.Sprintf("enqueue entry node %s: %v", nd.Name, err))
+		e.mu.Lock()
+		delete(e.graphs, id)
+		e.mu.Unlock()
+		return "", fmt.Errorf("enqueue entry node %s: %w", nd.Name, err)
+	}
+	return id, nil
+}
+
 // BuildTaskLease assembles a runner-facing task lease from a queued task.
 // The lease includes both handler routing metadata and the concrete input, so
 // runner-side code does not need to access graph or state internals.

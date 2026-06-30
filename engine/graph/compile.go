@@ -20,13 +20,14 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 	}
 
 	g := &Graph{
-		Name:     def.Name,
-		Nodes:    make([]NodeMeta, n),
-		Index:    make(map[string]int, n),
-		OutEdges: make([][]Edge, n),
-		InEdges:  make([][]Edge, n),
-		InDegree: make([]int, n),
-		StartIdx: -1,
+		Name:         def.Name,
+		Nodes:        make([]NodeMeta, n),
+		Index:        make(map[string]int, n),
+		EntryIndexes: make(map[string]int),
+		OutEdges:     make([][]Edge, n),
+		InEdges:      make([][]Edge, n),
+		InDegree:     make([]int, n),
+		StartIdx:     -1,
 	}
 	if def.Options != nil {
 		g.AllowCycles = def.Options.AllowCycles
@@ -57,13 +58,13 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 			MergeMode:  extractMergeMode(nd),
 			Parameters: nd.Parameters,
 		}
+		if nd.Type == "xflow.start" || nd.Kind == types.NodeKindTrigger {
+			g.EntryIndexes[nd.Name] = i
+		}
 		if g.AllowCycles {
 			if nd.Type == "xflow.start" {
 				startCount++
 				g.StartIdx = i
-			}
-			if nd.Type == "xflow.trigger" {
-				return nil, errors.New("xflow.trigger is not supported in cyclic workflows yet")
 			}
 			if nd.Type == "xflow.merge" && extractMergeMode(nd) == "wait_all" {
 				return nil, errors.New("xflow.merge wait_all is not supported in cyclic workflows")

@@ -9,14 +9,17 @@ const DefaultMaxAutoDepth = 100
 // Graph is the immutable compiled representation of a workflow definition.
 // It is built once via Compile and shared across concurrent executions.
 type Graph struct {
-	Name     string
-	Nodes    []NodeMeta
-	Index    map[string]int // node name → slice index
-	OutEdges [][]Edge
-	InEdges  [][]Edge
-	InDegree []int
-	Vars     map[string]any
-	Config   map[string]any
+	Name  string
+	Nodes []NodeMeta
+	Index map[string]int // node name → slice index
+	// EntryIndexes contains explicit execution entry nodes such as xflow.start
+	// and trigger nodes.
+	EntryIndexes map[string]int
+	OutEdges     [][]Edge
+	InEdges      [][]Edge
+	InDegree     []int
+	Vars         map[string]any
+	Config       map[string]any
 	// AllowCycles switches the compiled graph from DAG scheduling to cyclic
 	// active-port scheduling. False preserves DAG in-degree behavior.
 	AllowCycles bool

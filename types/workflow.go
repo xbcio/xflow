@@ -65,7 +65,8 @@ type NodeDef struct {
 type NodeKind string
 
 const (
-	NodeKindAction NodeKind = "action"
+	NodeKindAction  NodeKind = "action"
+	NodeKindTrigger NodeKind = "trigger"
 )
 
 // Position holds the visual coordinates of a node in the workflow editor.
