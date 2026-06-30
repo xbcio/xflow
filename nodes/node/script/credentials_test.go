@@ -62,3 +62,17 @@ func TestResolveCredentials_ResolverError_NoLeak(t *testing.T) {
 		t.Fatalf("error %q should name the credential", err.Error())
 	}
 }
+
+func TestResolveCredentials_NilValue_NotFound(t *testing.T) {
+	resolver := func(string) (map[string]any, error) { return nil, nil }
+	_, _, err := ResolveCredentials([]string{"missing_cred"}, resolver)
+	if err == nil {
+		t.Fatal("expected not-found error when resolver returns nil value")
+	}
+	if !strings.Contains(err.Error(), "missing_cred") {
+		t.Fatalf("error %q should name the credential", err.Error())
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("error %q should indicate not found", err.Error())
+	}
+}
