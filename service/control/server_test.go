@@ -39,8 +39,8 @@ func TestHTTPRunnerRegisterPollAndResult(t *testing.T) {
 		NodeType:    "xflow.function",
 		NodeVersion: 1,
 	}
-	if !pool.Assign(lease) {
-		t.Fatal("assign lease")
+	if err := pool.Assign(lease); err != nil {
+		t.Fatalf("Assign() = %v, want nil", err)
 	}
 
 	var pollResp protocol.PollTaskResponse

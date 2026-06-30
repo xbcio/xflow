@@ -58,18 +58,54 @@ func (p *RunnerPool) Heartbeat(runnerID string, capacity, inFlight int, at time.
 	return true
 }
 
-func (p *RunnerPool) Assign(lease engine.TaskLease) bool {
+// Assign finds the runner with the most free headroom that advertises the
+// lease's capability and reserves a slot. Returns ErrNoMatchingRunner if no
+// runner registered the type, ErrNoCapacity if every capable runner is at its
+// concurrency ceiling. Reserving a slot via queue length is what gives the
+// queue layer backpressure semantics: when every runner is saturated the
+// dispatcher returns a transient error and the task is requeued with backoff
+// instead of being silently dropped.
+func (p *RunnerPool) Assign(lease engine.TaskLease) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	var best *runnerState
+	bestHeadroom := 0
+	foundCapable := false
 	for _, state := range p.runners {
 		if !canRun(state.snapshot.Capabilities, lease) {
 			continue
 		}
-		state.queue = append(state.queue, lease)
-		return true
+		foundCapable = true
+		h := state.headroom()
+		if h <= 0 {
+			continue
+		}
+		if best == nil || h > bestHeadroom {
+			best = state
+			bestHeadroom = h
+		}
 	}
-	return false
+	if best == nil {
+		if foundCapable {
+			return ErrNoCapacity
+		}
+		return ErrNoMatchingRunner
+	}
+	best.queue = append(best.queue, lease)
+	return nil
+}
+
+// headroom returns how many more leases this runner can absorb beyond the
+// in-flight count. Counting queued-but-not-yet-polled leases against the
+// budget keeps the dispatcher from piling up work on a single runner that
+// happens to heartbeat fast.
+func (s *runnerState) headroom() int {
+	cap := s.snapshot.Capacity - s.snapshot.InFlight - len(s.queue)
+	if cap < 0 {
+		return 0
+	}
+	return cap
 }
 
 func (p *RunnerPool) Poll(runnerID string, capacity int, capabilities []protocol.Capability) (engine.TaskLease, bool) {

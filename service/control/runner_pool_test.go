@@ -24,11 +24,11 @@ func TestRunnerPoolAssignsMatchingLeaseAndPollReturnsFIFO(t *testing.T) {
 		NodeType: "xflow.function",
 	}
 
-	if !pool.Assign(first) {
-		t.Fatal("expected first assignment to matching runner")
+	if err := pool.Assign(first); err != nil {
+		t.Fatalf("first Assign() = %v, want nil", err)
 	}
-	if !pool.Assign(second) {
-		t.Fatal("expected second assignment to matching runner")
+	if err := pool.Assign(second); err != nil {
+		t.Fatalf("second Assign() = %v, want nil", err)
 	}
 
 	got, ok := pool.Poll("runner-1", 1, []protocol.Capability{{NodeType: "xflow.function"}})
@@ -48,6 +48,41 @@ func TestRunnerPoolAssignsMatchingLeaseAndPollReturnsFIFO(t *testing.T) {
 	}
 }
 
+func TestRunnerPoolAssignReturnsNoCapacityWhenAllRunnersSaturated(t *testing.T) {
+	pool := NewRunnerPool()
+	pool.Register("runner-1", 1, []protocol.Capability{{NodeType: "xflow.function"}})
+
+	lease := engine.TaskLease{
+		Task:     engine.Task{ExecutionID: types.ExecutionID("exec-1"), NodeName: "first"},
+		NodeType: "xflow.function",
+	}
+	if err := pool.Assign(lease); err != nil {
+		t.Fatalf("first Assign() = %v, want nil", err)
+	}
+	if err := pool.Assign(lease); err != ErrNoCapacity {
+		t.Fatalf("second Assign() = %v, want ErrNoCapacity", err)
+	}
+}
+
+func TestRunnerPoolAssignPicksRunnerWithMostHeadroom(t *testing.T) {
+	pool := NewRunnerPool()
+	pool.Register("runner-busy", 1, []protocol.Capability{{NodeType: "xflow.function"}})
+	pool.Register("runner-free", 4, []protocol.Capability{{NodeType: "xflow.function"}})
+
+	lease := engine.TaskLease{
+		Task:     engine.Task{ExecutionID: types.ExecutionID("exec-1"), NodeName: "n"},
+		NodeType: "xflow.function",
+	}
+	if err := pool.Assign(lease); err != nil {
+		t.Fatalf("Assign() = %v, want nil", err)
+	}
+
+	got, ok := pool.Poll("runner-free", 4, nil)
+	if !ok || got.Task.NodeName != "n" {
+		t.Fatalf("expected runner-free to receive lease, got ok=%v lease=%+v", ok, got)
+	}
+}
+
 func TestRunnerPoolRejectsNonMatchingCapability(t *testing.T) {
 	pool := NewRunnerPool()
 	pool.Register("runner-1", 1, []protocol.Capability{{NodeType: "xflow.http"}})
@@ -57,7 +92,7 @@ func TestRunnerPoolRejectsNonMatchingCapability(t *testing.T) {
 		Task:     engine.Task{ExecutionID: types.ExecutionID("exec-1"), NodeName: "start"},
 		NodeType: "xflow.function",
 	}
-	if pool.Assign(lease) {
+	if err := pool.Assign(lease); err == nil {
 		t.Fatal("expected assignment to fail without matching runner")
 	}
 

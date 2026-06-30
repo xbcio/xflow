@@ -53,8 +53,36 @@ func TestDispatcherReturnsErrorWhenNoRunnerCanExecuteLease(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error without matching runner")
 	}
+	if !IsTransient(err) {
+		t.Fatalf("err = %v, want transient (so the queue can requeue)", err)
+	}
 	if leaseEngine.committed {
 		t.Fatal("control dispatcher committed a result despite no runner")
+	}
+}
+
+func TestDispatcherReturnsTransientErrorWhenAllRunnersSaturated(t *testing.T) {
+	task := &engine.Task{ExecutionID: types.ExecutionID("exec-1"), NodeName: "start", NodeIdx: 0}
+	lease := &engine.TaskLease{
+		LeaseID:  engine.LeaseID("lease-1"),
+		Task:     *task,
+		NodeType: "xflow.function",
+	}
+	leaseEngine := &fakeDispatchEngine{lease: lease}
+	pool := NewRunnerPool()
+	pool.Register("runner-1", 1, []protocol.Capability{{NodeType: "xflow.function"}})
+
+	d := NewDispatcher(leaseEngine, pool)
+	if err := d.HandleTask(context.Background(), task); err != nil {
+		t.Fatalf("first HandleTask() = %v, want nil", err)
+	}
+	// Second dispatch fills the only runner's headroom.
+	err := d.HandleTask(context.Background(), task)
+	if err == nil {
+		t.Fatal("expected ErrNoCapacity after pool saturates")
+	}
+	if !IsTransient(err) {
+		t.Fatalf("err = %v, want transient", err)
 	}
 }
 
