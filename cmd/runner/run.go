@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"net/http"
 	"os"
@@ -10,6 +12,7 @@ import (
 	"syscall"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/xbcio/xflow/engine"
@@ -43,6 +46,11 @@ type runnerConfig struct {
 	// runners.yaml policy). Empty means "no auth", which the server accepts
 	// only when running with --auth-mode disabled or dry-run.
 	token string
+	// TLS: serverCA verifies the server's certificate; clientCert/clientKey
+	// present a client cert for mTLS. All three empty means plaintext.
+	tlsServerCA   string
+	tlsClientCert string
+	tlsClientKey  string
 }
 
 func newRunCommand(opts commandOptions, cfg *runnerConfig) *cobra.Command {
@@ -73,6 +81,9 @@ func bindRunnerFlags(cmd *cobra.Command, cfg *runnerConfig) {
 	cmd.Flags().StringVar(&cfg.heartbeatInterval, "heartbeat-interval", cfg.heartbeatInterval, "Heartbeat interval")
 	cmd.Flags().StringVar(&cfg.pollWait, "poll-wait", cfg.pollWait, "Poll wait duration when no task is available")
 	cmd.Flags().StringVar(&cfg.token, "token", cfg.token, "Runner bearer token (prefer XFLOW_RUNNER_TOKEN env)")
+	cmd.Flags().StringVar(&cfg.tlsServerCA, "tls-server-ca", cfg.tlsServerCA, "Path to server CA bundle (enables TLS)")
+	cmd.Flags().StringVar(&cfg.tlsClientCert, "tls-client-cert", cfg.tlsClientCert, "Path to client TLS certificate (enables mTLS)")
+	cmd.Flags().StringVar(&cfg.tlsClientKey, "tls-client-key", cfg.tlsClientKey, "Path to client TLS private key")
 }
 
 func recordChangedFlags(cmd *cobra.Command, cfg *runnerConfig) {
@@ -124,9 +135,19 @@ func runRunner(ctx context.Context, cfg runnerConfig) error {
 // transport. The returned cleanup releases any transport-owned resources (e.g.
 // the gRPC connection); it is a no-op for HTTP.
 func newProtocolClient(cfg runnerConfig) (runnersvc.ProtocolClient, func(), error) {
+	tlsCfg, err := buildRunnerTLSConfig(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
 	switch cfg.transport {
 	case transportGRPC:
-		conn, err := grpc.NewClient(cfg.grpcTarget, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		var creds credentials.TransportCredentials
+		if tlsCfg != nil {
+			creds = credentials.NewTLS(tlsCfg)
+		} else {
+			creds = insecure.NewCredentials()
+		}
+		conn, err := grpc.NewClient(cfg.grpcTarget, grpc.WithTransportCredentials(creds))
 		if err != nil {
 			return nil, nil, fmt.Errorf("dial gRPC server %q: %w", cfg.grpcTarget, err)
 		}
@@ -136,12 +157,49 @@ func newProtocolClient(cfg runnerConfig) (runnersvc.ProtocolClient, func(), erro
 		}
 		return client, func() { _ = conn.Close() }, nil
 	default:
-		client := protocol.NewClient(cfg.serverURL, http.DefaultClient)
+		httpClient := http.DefaultClient
+		if tlsCfg != nil {
+			httpClient = &http.Client{Transport: &http.Transport{TLSClientConfig: tlsCfg}}
+		}
+		client := protocol.NewClient(cfg.serverURL, httpClient)
 		if cfg.token != "" {
 			return client.WithToken(cfg.token), func() {}, nil
 		}
 		return client, func() {}, nil
 	}
+}
+
+// buildRunnerTLSConfig resolves the runner-side TLS config from CLI flags.
+// Returns nil when no CA or cert was configured (plaintext, dev default).
+func buildRunnerTLSConfig(cfg runnerConfig) (*tls.Config, error) {
+	if cfg.tlsServerCA == "" && cfg.tlsClientCert == "" && cfg.tlsClientKey == "" {
+		return nil, nil
+	}
+	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
+	if cfg.tlsServerCA != "" {
+		caPEM, err := os.ReadFile(cfg.tlsServerCA)
+		if err != nil {
+			return nil, fmt.Errorf("read server CA: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caPEM) {
+			return nil, fmt.Errorf("server CA %q contains no valid certs", cfg.tlsServerCA)
+		}
+		tlsCfg.RootCAs = pool
+	}
+	switch {
+	case cfg.tlsClientCert == "" && cfg.tlsClientKey == "":
+		// TLS only, no client auth.
+	case cfg.tlsClientCert != "" && cfg.tlsClientKey != "":
+		cert, err := tls.LoadX509KeyPair(cfg.tlsClientCert, cfg.tlsClientKey)
+		if err != nil {
+			return nil, fmt.Errorf("load client keypair: %w", err)
+		}
+		tlsCfg.Certificates = []tls.Certificate{cert}
+	default:
+		return nil, fmt.Errorf("--tls-client-cert and --tls-client-key must be provided together")
+	}
+	return tlsCfg, nil
 }
 
 func runnerServiceConfig(cfg runnerConfig) (runnersvc.Config, error) {

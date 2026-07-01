@@ -152,6 +152,15 @@ func applyLookupEnvOverrides(cfg runnerConfig, lookupEnv func(string) (string, b
 	if v, ok := lookupEnv("XFLOW_RUNNER_TOKEN"); ok {
 		cfg.token = v
 	}
+	if v, ok := lookupEnv("XFLOW_RUNNER_TLS_SERVER_CA"); ok {
+		cfg.tlsServerCA = v
+	}
+	if v, ok := lookupEnv("XFLOW_RUNNER_TLS_CLIENT_CERT"); ok {
+		cfg.tlsClientCert = v
+	}
+	if v, ok := lookupEnv("XFLOW_RUNNER_TLS_CLIENT_KEY"); ok {
+		cfg.tlsClientKey = v
+	}
 
 	cfg.capabilities = parseCapabilities(cfg.capRaw)
 	return cfg
