@@ -70,6 +70,30 @@ func suspendedNodesKey(id types.ExecutionID) string {
 	return fmt.Sprintf("xflow:exec:{%s}:suspended_nodes", id)
 }
 
+// leaseExpiryZSetKey is the global lease-deadline index used by the sweeper.
+// score = (IssuedAt + TTL).UnixMilli, member = leaseExpiryMember(execID, name).
+// The {expiry} hash tag pins every member to the same cluster slot so
+// ZRANGEBYSCORE / ZREM never cross slots.
+const leaseExpiryZSetKey = "xflow:leases:{expiry}"
+
+// leaseExpiryMember packs execID and node name into a ZSET member. Uses a
+// vertical bar separator because execID / node name are UTF-8 identifiers and
+// never contain '|' in practice.
+func leaseExpiryMember(id types.ExecutionID, name string) string {
+	return string(id) + "|" + name
+}
+
+// splitLeaseMember reverses leaseExpiryMember. Returns ok=false when the
+// member is malformed (should never happen in prod but guards against dirty
+// data).
+func splitLeaseMember(member string) (types.ExecutionID, string, bool) {
+	idx := strings.IndexByte(member, '|')
+	if idx <= 0 {
+		return "", "", false
+	}
+	return types.ExecutionID(member[:idx]), member[idx+1:], true
+}
+
 // ---------------------------------------------------------------------------
 // Lua scripts
 // ---------------------------------------------------------------------------
@@ -195,8 +219,32 @@ if status ~= 'running' and status ~= 'committing' then
     return 0
 end
 redis.call('SET', KEYS[1], 'pending', 'EX', tonumber(ARGV[1]))
-redis.call('HSET', KEYS[2], 'lease_token', '', 'lease_id', '')
+redis.call('HSET', KEYS[2], 'lease_token', '', 'lease_id', '', 'lease_issued_at_ms', '0', 'lease_ttl_ms', '0')
 redis.call('EXPIRE', KEYS[2], tonumber(ARGV[1]))
+return 1
+`)
+
+// revokeLeaseLua is the atomic sweeper-side reclaim. It verifies the caller
+// still owns the lease (token match) and the node is still Running before
+// rolling the node back to Pending. A concurrent runner commit that already
+// moved the node to Committing / terminal will have cleared the token, so
+// the sweeper sees a mismatch and returns 0 — the lease-token fencing IS
+// the race protection.
+// KEYS[1] = node status key, KEYS[2] = node meta hash
+// ARGV[1] = expected lease token, ARGV[2] = ttl seconds
+// Returns 1 (revoked) or 0 (race lost — commit already ran or token stale).
+var revokeLeaseLua = redis.NewScript(`
+local status = redis.call('GET', KEYS[1])
+if status ~= 'running' then
+    return 0
+end
+local token = redis.call('HGET', KEYS[2], 'lease_token')
+if not token or token == '' or token ~= ARGV[1] then
+    return 0
+end
+redis.call('SET', KEYS[1], 'pending', 'EX', tonumber(ARGV[2]))
+redis.call('HSET', KEYS[2], 'lease_token', '', 'lease_id', '', 'lease_issued_at_ms', '0', 'lease_ttl_ms', '0')
+redis.call('EXPIRE', KEYS[2], tonumber(ARGV[2]))
 return 1
 `)
 
@@ -540,17 +588,37 @@ func (s *redisState) UpsertNode(ctx context.Context, n *engine.NodeSnapshot) err
 	if err != nil && err != redis.Nil {
 		return fmt.Errorf("upsert node %q/%q: %w", n.ExecutionID, n.Name, err)
 	}
-	if n.LeaseID != "" || n.LeaseToken != "" || n.Attempt != 0 || n.ActivationID != 0 || n.AutoDepth != 0 {
-		if err := s.rdb.HSet(ctx, metaKey, map[string]any{
+	if n.LeaseID != "" || n.LeaseToken != "" || n.Attempt != 0 || n.ActivationID != 0 || n.AutoDepth != 0 || !n.LeaseIssuedAt.IsZero() {
+		meta := map[string]any{
 			"lease_id":      string(n.LeaseID),
 			"lease_token":   string(n.LeaseToken),
 			"attempt":       n.Attempt,
 			"activation_id": n.ActivationID,
 			"auto_depth":    n.AutoDepth,
-		}).Err(); err != nil {
+		}
+		if !n.LeaseIssuedAt.IsZero() {
+			meta["lease_issued_at_ms"] = n.LeaseIssuedAt.UnixMilli()
+		}
+		if n.LeaseTTL > 0 {
+			meta["lease_ttl_ms"] = n.LeaseTTL.Milliseconds()
+		}
+		if err := s.rdb.HSet(ctx, metaKey, meta).Err(); err != nil {
 			return fmt.Errorf("upsert node lease %q/%q: %w", n.ExecutionID, n.Name, err)
 		}
 		_ = s.rdb.Expire(ctx, metaKey, ttl).Err()
+	}
+	// Lease-expiry index: leases with a deadline live in a global ZSET so the
+	// sweeper can find them without scanning every node key.
+	member := leaseExpiryMember(n.ExecutionID, n.Name)
+	if n.Status == types.NodeStatusRunning && n.LeaseToken != "" && !n.LeaseIssuedAt.IsZero() && n.LeaseTTL > 0 {
+		expiryMs := float64(n.LeaseIssuedAt.Add(n.LeaseTTL).UnixMilli())
+		if err := s.rdb.ZAdd(ctx, leaseExpiryZSetKey, redis.Z{Score: expiryMs, Member: member}).Err(); err != nil {
+			return fmt.Errorf("index lease expiry %q/%q: %w", n.ExecutionID, n.Name, err)
+		}
+	} else if n.Status != types.NodeStatusRunning {
+		// Any non-Running status means the lease no longer needs sweeping —
+		// terminal, committing, suspended, or pending after retry.
+		_ = s.rdb.ZRem(ctx, leaseExpiryZSetKey, member).Err()
 	}
 
 	if s.db != nil {
@@ -609,6 +677,18 @@ func (s *redisState) GetNode(ctx context.Context, id types.ExecutionID, name str
 			ns.AutoDepth = parsed
 		}
 	}
+	if issued := meta["lease_issued_at_ms"]; issued != "" {
+		var ms int64
+		if _, scanErr := fmt.Sscanf(issued, "%d", &ms); scanErr == nil && ms > 0 {
+			ns.LeaseIssuedAt = time.UnixMilli(ms).UTC()
+		}
+	}
+	if ttlMs := meta["lease_ttl_ms"]; ttlMs != "" {
+		var ms int64
+		if _, scanErr := fmt.Sscanf(ttlMs, "%d", &ms); scanErr == nil && ms > 0 {
+			ns.LeaseTTL = time.Duration(ms) * time.Millisecond
+		}
+	}
 	return ns, nil
 }
 
@@ -621,22 +701,104 @@ func (s *redisState) ResetNodeForRetry(ctx context.Context, id types.ExecutionID
 	if err != nil && err != redis.Nil {
 		return fmt.Errorf("reset node for retry %q/%q: %w", id, name, err)
 	}
+	// Drop from the lease-expiry index regardless of whether the Lua reset
+	// took effect: either it succeeded (we cleared state) or a concurrent
+	// commit already handled it (index will be pruned on the next ZADD).
+	_ = s.rdb.ZRem(ctx, leaseExpiryZSetKey, leaseExpiryMember(id, name)).Err()
 	return nil
 }
 
-// ListExpiredLeases is a stub in the Redis backend until lease deadlines are
-// indexed in a sorted set keyed by expiry timestamp. Until then, the cluster
-// sweeper relies on per-runner heartbeat checks rather than node-side lease
-// scanning. Returns no expired leases so the sweeper becomes a no-op on this
-// backend (memory backend remains fully functional).
-func (s *redisState) ListExpiredLeases(_ context.Context, _ time.Time) ([]engine.ExpiredLease, error) {
-	return nil, nil
+// leaseIndexBatchLimit caps a single ListExpiredLeases scan. Small enough that
+// the sweeper stays quick under heavy backlog; the sweeper re-polls until the
+// list drains, so this is not a coverage cap, only a per-call bound.
+const leaseIndexBatchLimit = 256
+
+func (s *redisState) ListExpiredLeases(ctx context.Context, before time.Time) ([]engine.ExpiredLease, error) {
+	max := fmt.Sprintf("%d", before.UnixMilli())
+	members, err := s.rdb.ZRangeByScore(ctx, leaseExpiryZSetKey, &redis.ZRangeBy{
+		Min:    "-inf",
+		Max:    max,
+		Offset: 0,
+		Count:  leaseIndexBatchLimit,
+	}).Result()
+	if err != nil {
+		return nil, fmt.Errorf("list expired leases: %w", err)
+	}
+	if len(members) == 0 {
+		return nil, nil
+	}
+	out := make([]engine.ExpiredLease, 0, len(members))
+	for _, member := range members {
+		execID, nodeName, ok := splitLeaseMember(member)
+		if !ok {
+			_ = s.rdb.ZRem(ctx, leaseExpiryZSetKey, member).Err()
+			continue
+		}
+		status, err := s.rdb.Get(ctx, nodeStatusKey(execID, nodeName)).Result()
+		if err == redis.Nil || err == nil && status != string(types.NodeStatusRunning) {
+			// Node is no longer Running — someone already committed / reset.
+			// Clean up the stale index entry and skip.
+			_ = s.rdb.ZRem(ctx, leaseExpiryZSetKey, member).Err()
+			continue
+		}
+		if err != nil {
+			return out, fmt.Errorf("read node status %q/%q: %w", execID, nodeName, err)
+		}
+		meta, err := s.rdb.HGetAll(ctx, nodeMetaKey(execID, nodeName)).Result()
+		if err != nil {
+			return out, fmt.Errorf("read node meta %q/%q: %w", execID, nodeName, err)
+		}
+		if meta["lease_token"] == "" {
+			_ = s.rdb.ZRem(ctx, leaseExpiryZSetKey, member).Err()
+			continue
+		}
+		lease := engine.ExpiredLease{
+			ExecutionID: execID,
+			NodeName:    nodeName,
+			LeaseID:     engine.LeaseID(meta["lease_id"]),
+			LeaseToken:  engine.LeaseToken(meta["lease_token"]),
+		}
+		parseInt64(meta["lease_issued_at_ms"], func(ms int64) {
+			lease.IssuedAt = time.UnixMilli(ms).UTC()
+		})
+		parseInt64(meta["lease_ttl_ms"], func(ms int64) {
+			lease.TTL = time.Duration(ms) * time.Millisecond
+		})
+		parseInt64(meta["activation_id"], func(v int64) { lease.ActivationID = int(v) })
+		parseInt64(meta["auto_depth"], func(v int64) { lease.AutoDepth = int(v) })
+		out = append(out, lease)
+	}
+	return out, nil
 }
 
-// RevokeLease is a stub in the Redis backend; see ListExpiredLeases. Returns
-// (false, nil) so the sweeper logs "no work" and moves on.
-func (s *redisState) RevokeLease(_ context.Context, _ types.ExecutionID, _ string, _ engine.LeaseToken) (bool, error) {
-	return false, nil
+func (s *redisState) RevokeLease(ctx context.Context, id types.ExecutionID, name string, token engine.LeaseToken) (bool, error) {
+	if token == "" {
+		return false, nil
+	}
+	ttl := s.getExecTTL(id)
+	result, err := revokeLeaseLua.Run(ctx, s.rdb,
+		[]string{nodeStatusKey(id, name), nodeMetaKey(id, name)},
+		string(token), int(ttl.Seconds()),
+	).Int64()
+	if err != nil && err != redis.Nil {
+		return false, fmt.Errorf("revoke lease %q/%q: %w", id, name, err)
+	}
+	// Drop from the expiry index whether or not the Lua path won the race —
+	// the index entry is now stale either way.
+	_ = s.rdb.ZRem(ctx, leaseExpiryZSetKey, leaseExpiryMember(id, name)).Err()
+	return result == 1, nil
+}
+
+// parseInt64 pulls an int64 out of a redis-hash string field. Silent on parse
+// failures — missing / malformed fields simply leave the callback unset.
+func parseInt64(s string, cb func(int64)) {
+	if s == "" {
+		return
+	}
+	var v int64
+	if _, err := fmt.Sscanf(s, "%d", &v); err == nil {
+		cb(v)
+	}
 }
 
 func (s *redisState) ClaimTaskLease(ctx context.Context, lease *engine.TaskLease) (*engine.NodeSnapshot, bool, error) {
@@ -665,6 +827,9 @@ func (s *redisState) ClaimTaskLease(ctx context.Context, lease *engine.TaskLease
 	if valid != 1 {
 		return ns, false, nil
 	}
+	// Successful claim moved the node to Committing (or it was already
+	// terminal). Either way the lease no longer needs sweeping.
+	_ = s.rdb.ZRem(ctx, leaseExpiryZSetKey, leaseExpiryMember(lease.Task.ExecutionID, lease.Task.NodeName)).Err()
 	return ns, true, nil
 }
 
