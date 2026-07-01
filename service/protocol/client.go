@@ -13,6 +13,7 @@ import (
 type Client struct {
 	baseURL string
 	http    *http.Client
+	token   string
 }
 
 func NewClient(baseURL string, httpClient *http.Client) *Client {
@@ -23,6 +24,16 @@ func NewClient(baseURL string, httpClient *http.Client) *Client {
 		baseURL: strings.TrimRight(baseURL, "/"),
 		http:    httpClient,
 	}
+}
+
+// WithToken returns a client that adds Authorization: Bearer <token> to every
+// request. Empty token disables the header (same behavior as calling NewClient
+// alone). Kept as a copy-returning setter so callers can build per-runner
+// clients from a shared base without mutating shared state.
+func (c *Client) WithToken(token string) *Client {
+	cp := *c
+	cp.token = token
+	return &cp
 }
 
 func (c *Client) Register(ctx context.Context, req RegisterRunnerRequest) (RegisterRunnerResponse, error) {
@@ -59,6 +70,9 @@ func (c *Client) post(ctx context.Context, path string, body any, out any) error
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
 
 	resp, err := c.http.Do(req)
 	if err != nil {

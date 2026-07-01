@@ -19,7 +19,9 @@ type runnerConfigFile struct {
 		Capabilities *[]string `yaml:"capabilities"`
 	} `yaml:"runner"`
 	Server struct {
-		URL *string `yaml:"url"`
+		URL        *string `yaml:"url"`
+		Transport  *string `yaml:"transport"`
+		GRPCTarget *string `yaml:"grpc_target"`
 	} `yaml:"server"`
 	Poll struct {
 		Wait *string `yaml:"wait"`
@@ -32,6 +34,8 @@ type runnerConfigFile struct {
 func defaultRunnerConfig() runnerConfig {
 	return runnerConfig{
 		serverURL:         "http://localhost:8080",
+		transport:         transportHTTP,
+		grpcTarget:        "localhost:9090",
 		runnerID:          fmt.Sprintf("runner-%d", os.Getpid()),
 		concurrency:       1,
 		capRaw:            "xflow.function",
@@ -70,6 +74,12 @@ func loadRunnerConfigFromBytes(data []byte) (runnerConfig, error) {
 	if file.Server.URL != nil {
 		cfg.serverURL = *file.Server.URL
 	}
+	if file.Server.Transport != nil {
+		cfg.transport = *file.Server.Transport
+	}
+	if file.Server.GRPCTarget != nil {
+		cfg.grpcTarget = *file.Server.GRPCTarget
+	}
 	if file.Runner.ID != nil {
 		cfg.runnerID = *file.Runner.ID
 	}
@@ -92,6 +102,8 @@ func loadRunnerConfigFromBytes(data []byte) (runnerConfig, error) {
 
 var runnerConfigIssueOrder = []string{
 	"server",
+	"transport",
+	"grpc-target",
 	"id",
 	"concurrency",
 	"cap",
@@ -109,6 +121,12 @@ func applyEnvOverrides(cfg runnerConfig, getenv func(string) string) runnerConfi
 func applyLookupEnvOverrides(cfg runnerConfig, lookupEnv func(string) (string, bool)) runnerConfig {
 	if v, ok := lookupEnv("XFLOW_RUNNER_SERVER"); ok {
 		cfg.serverURL = v
+	}
+	if v, ok := lookupEnv("XFLOW_RUNNER_TRANSPORT"); ok {
+		cfg.transport = v
+	}
+	if v, ok := lookupEnv("XFLOW_RUNNER_GRPC_TARGET"); ok {
+		cfg.grpcTarget = v
 	}
 	if v, ok := lookupEnv("XFLOW_RUNNER_ID"); ok {
 		cfg.runnerID = v
@@ -131,15 +149,27 @@ func applyLookupEnvOverrides(cfg runnerConfig, lookupEnv func(string) (string, b
 	if v, ok := lookupEnv("XFLOW_RUNNER_POLL_WAIT"); ok {
 		cfg.pollWait = v
 	}
+	if v, ok := lookupEnv("XFLOW_RUNNER_TOKEN"); ok {
+		cfg.token = v
+	}
 
 	cfg.capabilities = parseCapabilities(cfg.capRaw)
 	return cfg
 }
 
 func validateRunnerConfig(cfg runnerConfig) error {
-	u, err := url.Parse(cfg.serverURL)
-	if err != nil || u.Scheme == "" || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
-		return fmt.Errorf("server URL must be an absolute http or https URL: %q", cfg.serverURL)
+	switch cfg.transport {
+	case transportHTTP:
+		u, err := url.Parse(cfg.serverURL)
+		if err != nil || u.Scheme == "" || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			return fmt.Errorf("server URL must be an absolute http or https URL: %q", cfg.serverURL)
+		}
+	case transportGRPC:
+		if strings.TrimSpace(cfg.grpcTarget) == "" {
+			return errors.New("grpc target is required for grpc transport")
+		}
+	default:
+		return fmt.Errorf("transport must be %q or %q: %q", transportHTTP, transportGRPC, cfg.transport)
 	}
 	if strings.TrimSpace(cfg.runnerID) == "" {
 		return errors.New("runner id is required")
@@ -191,6 +221,14 @@ func resolveRunnerConfig(base runnerConfig) (runnerConfig, error) {
 	if base.changed["server"] {
 		clearRunnerConfigIssue(&cfg, "server")
 		cfg.serverURL = base.serverURL
+	}
+	if base.changed["transport"] {
+		clearRunnerConfigIssue(&cfg, "transport")
+		cfg.transport = base.transport
+	}
+	if base.changed["grpc-target"] {
+		clearRunnerConfigIssue(&cfg, "grpc-target")
+		cfg.grpcTarget = base.grpcTarget
 	}
 	if base.changed["id"] {
 		clearRunnerConfigIssue(&cfg, "id")
@@ -263,7 +301,10 @@ func sampleRunnerConfigYAML() string {
     - "xflow.function"
 
 server:
+  # transport: "http" (default) or "grpc"
+  transport: "http"
   url: "http://localhost:8080"
+  grpc_target: "localhost:9090"
 
 poll:
   wait: "1s"

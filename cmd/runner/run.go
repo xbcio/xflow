@@ -9,6 +9,9 @@ import (
 	"strings"
 	"syscall"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
 	_ "github.com/xbcio/xflow/nodes/node"
@@ -18,9 +21,16 @@ import (
 	"github.com/spf13/pflag"
 )
 
+const (
+	transportHTTP = "http"
+	transportGRPC = "grpc"
+)
+
 type runnerConfig struct {
 	configPath        string
 	serverURL         string
+	transport         string
+	grpcTarget        string
 	runnerID          string
 	concurrency       int
 	changed           map[string]bool
@@ -29,6 +39,10 @@ type runnerConfig struct {
 	capabilities      []protocol.Capability
 	heartbeatInterval string
 	pollWait          string
+	// token is the runner's bearer token (matched against the server's
+	// runners.yaml policy). Empty means "no auth", which the server accepts
+	// only when running with --auth-mode disabled or dry-run.
+	token string
 }
 
 func newRunCommand(opts commandOptions, cfg *runnerConfig) *cobra.Command {
@@ -50,12 +64,15 @@ func newRunCommand(opts commandOptions, cfg *runnerConfig) *cobra.Command {
 }
 
 func bindRunnerFlags(cmd *cobra.Command, cfg *runnerConfig) {
-	cmd.Flags().StringVar(&cfg.serverURL, "server", cfg.serverURL, "xflow-server base URL")
+	cmd.Flags().StringVar(&cfg.serverURL, "server", cfg.serverURL, "xflow-server base URL (http transport)")
+	cmd.Flags().StringVar(&cfg.transport, "transport", cfg.transport, "Runner Protocol transport: http or grpc")
+	cmd.Flags().StringVar(&cfg.grpcTarget, "grpc-target", cfg.grpcTarget, "xflow-server gRPC target host:port (grpc transport)")
 	cmd.Flags().StringVar(&cfg.runnerID, "id", cfg.runnerID, "Runner ID")
 	cmd.Flags().IntVar(&cfg.concurrency, "concurrency", cfg.concurrency, "Runner concurrency")
 	cmd.Flags().StringVar(&cfg.capRaw, "cap", cfg.capRaw, "Comma-separated node type capabilities")
 	cmd.Flags().StringVar(&cfg.heartbeatInterval, "heartbeat-interval", cfg.heartbeatInterval, "Heartbeat interval")
 	cmd.Flags().StringVar(&cfg.pollWait, "poll-wait", cfg.pollWait, "Poll wait duration when no task is available")
+	cmd.Flags().StringVar(&cfg.token, "token", cfg.token, "Runner bearer token (prefer XFLOW_RUNNER_TOKEN env)")
 }
 
 func recordChangedFlags(cmd *cobra.Command, cfg *runnerConfig) {
@@ -93,10 +110,38 @@ func runRunner(ctx context.Context, cfg runnerConfig) error {
 	if err != nil {
 		return err
 	}
-	client := protocol.NewClient(cfg.serverURL, http.DefaultClient)
+	client, cleanup, err := newProtocolClient(cfg)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
 	registry := execution.NewRegistry()
 	runner := newRunnerService(client, registry, serviceCfg)
 	return runner.Run(ctx)
+}
+
+// newProtocolClient builds the Runner Protocol client for the configured
+// transport. The returned cleanup releases any transport-owned resources (e.g.
+// the gRPC connection); it is a no-op for HTTP.
+func newProtocolClient(cfg runnerConfig) (runnersvc.ProtocolClient, func(), error) {
+	switch cfg.transport {
+	case transportGRPC:
+		conn, err := grpc.NewClient(cfg.grpcTarget, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			return nil, nil, fmt.Errorf("dial gRPC server %q: %w", cfg.grpcTarget, err)
+		}
+		client := protocol.NewGRPCClient(conn)
+		if cfg.token != "" {
+			return client.WithToken(cfg.token), func() { _ = conn.Close() }, nil
+		}
+		return client, func() { _ = conn.Close() }, nil
+	default:
+		client := protocol.NewClient(cfg.serverURL, http.DefaultClient)
+		if cfg.token != "" {
+			return client.WithToken(cfg.token), func() {}, nil
+		}
+		return client, func() {}, nil
+	}
 }
 
 func runnerServiceConfig(cfg runnerConfig) (runnersvc.Config, error) {
