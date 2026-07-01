@@ -24,6 +24,11 @@ type RunnerSnapshot struct {
 type runnerState struct {
 	snapshot RunnerSnapshot
 	queue    []engine.TaskLease
+	// policy is the authorization envelope the authenticator bound to this
+	// runner at register time. Dispatcher checks lease.NodeType against it
+	// before assigning work — a token/mTLS-authenticated runner that lists
+	// xflow.function does not receive xflow.database leases.
+	policy RunnerPolicy
 }
 
 func NewRunnerPool() *RunnerPool {
@@ -31,6 +36,13 @@ func NewRunnerPool() *RunnerPool {
 }
 
 func (p *RunnerPool) Register(runnerID string, capacity int, capabilities []protocol.Capability) {
+	p.RegisterWithPolicy(runnerID, capacity, capabilities, RunnerPolicy{AllowedNodeTypes: []string{"*"}})
+}
+
+// RegisterWithPolicy is the auth-aware Register. The permissive default binds
+// to Register callers who never enabled auth so existing tests / dev deploys
+// stay unchanged.
+func (p *RunnerPool) RegisterWithPolicy(runnerID string, capacity int, capabilities []protocol.Capability, policy RunnerPolicy) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -42,6 +54,7 @@ func (p *RunnerPool) Register(runnerID string, capacity int, capabilities []prot
 	state.snapshot.RunnerID = runnerID
 	state.snapshot.Capacity = capacity
 	state.snapshot.Capabilities = cloneCapabilities(capabilities)
+	state.policy = policy
 }
 
 func (p *RunnerPool) Heartbeat(runnerID string, capacity, inFlight int, at time.Time) bool {
@@ -74,6 +87,15 @@ func (p *RunnerPool) Assign(lease engine.TaskLease) error {
 	foundCapable := false
 	for _, state := range p.runners {
 		if !canRun(state.snapshot.Capabilities, lease) {
+			continue
+		}
+		// Policy check: skip runners whose authorization envelope forbids
+		// this node type. A capable-but-forbidden runner is treated the
+		// same as no runner for placement purposes; it does not count
+		// toward foundCapable so the dispatcher returns
+		// ErrNoMatchingRunner rather than ErrNoCapacity when every
+		// capable runner is unauthorized.
+		if !state.policy.Allows(lease.NodeType) {
 			continue
 		}
 		foundCapable = true

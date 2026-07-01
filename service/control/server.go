@@ -25,9 +25,7 @@ type EngineFacade interface {
 }
 
 type Server struct {
-	engine   EngineFacade
-	runners  *RunnerPool
-	pollWait time.Duration
+	core *Core
 }
 
 type signalRequest struct {
@@ -48,15 +46,41 @@ type errorResponse struct {
 	Error string `json:"error"`
 }
 
-func NewServer(engine EngineFacade, runners *RunnerPool) *Server {
+// ServerOption configures a control-plane Server.
+type ServerOption func(*Server)
+
+// WithAuthenticator installs a runner-protocol authenticator. Default is the
+// permissive DisabledAuthenticator so today's zero-config behavior stays
+// unchanged.
+func WithAuthenticator(a Authenticator) ServerOption {
+	return func(s *Server) {
+		if a != nil {
+			s.core.auth = a
+		}
+	}
+}
+
+// WithControlLogger sets the logger used for auth decisions and other
+// runner-protocol diagnostics. Optional.
+func WithControlLogger(l engine.Logger) ServerOption {
+	return func(s *Server) { s.core.logger = l }
+}
+
+func NewServer(engine EngineFacade, runners *RunnerPool, opts ...ServerOption) *Server {
 	if runners == nil {
 		runners = NewRunnerPool()
 	}
-	return &Server{
-		engine:   engine,
-		runners:  runners,
-		pollWait: time.Second,
+	srv := &Server{
+		core: &Core{
+			engine:   engine,
+			runners:  runners,
+			pollWait: time.Second,
+		},
 	}
+	for _, o := range opts {
+		o(srv)
+	}
+	return srv
 }
 
 func (s *Server) Handler() http.Handler {
@@ -79,7 +103,7 @@ func (s *Server) handleSubmitWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "workflow is required")
 		return
 	}
-	if s.engine == nil {
+	if s.core.engine == nil {
 		writeError(w, http.StatusInternalServerError, "engine not configured")
 		return
 	}
@@ -88,7 +112,7 @@ func (s *Server) handleSubmitWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	id, err := s.engine.Submit(r.Context(), g, req.Params)
+	id, err := s.core.engine.Submit(r.Context(), g, req.Params)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -104,12 +128,13 @@ func (s *Server) HandleRegisterRunner(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if req.RunnerID == "" || req.Concurrency <= 0 {
-		writeError(w, http.StatusBadRequest, "runner_id and concurrency are required")
+	overrideTokenFromHeader(r, &req.AuthToken)
+	resp, err := s.core.register(req, httpTransportInfo(r))
+	if err != nil {
+		writeRunnerError(w, err)
 		return
 	}
-	s.runners.Register(req.RunnerID, req.Concurrency, req.Capabilities)
-	writeJSON(w, http.StatusOK, protocol.RegisterRunnerResponse{RunnerID: req.RunnerID})
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) HandleHeartbeat(w http.ResponseWriter, r *http.Request) {
@@ -120,19 +145,13 @@ func (s *Server) HandleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if req.RunnerID == "" {
-		writeError(w, http.StatusBadRequest, "runner_id is required")
+	overrideTokenFromHeader(r, &req.AuthToken)
+	resp, err := s.core.heartbeat(req, httpTransportInfo(r))
+	if err != nil {
+		writeRunnerError(w, err)
 		return
 	}
-	at := time.Unix(req.Timestamp, 0)
-	if req.Timestamp == 0 {
-		at = time.Now()
-	}
-	if !s.runners.Heartbeat(req.RunnerID, req.Capacity, req.InFlight, at) {
-		writeError(w, http.StatusNotFound, "runner not found")
-		return
-	}
-	writeJSON(w, http.StatusOK, protocol.HeartbeatResponse{ServerTime: time.Now().Unix()})
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) HandlePollTask(w http.ResponseWriter, r *http.Request) {
@@ -143,16 +162,13 @@ func (s *Server) HandlePollTask(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if req.RunnerID == "" {
-		writeError(w, http.StatusBadRequest, "runner_id is required")
+	overrideTokenFromHeader(r, &req.AuthToken)
+	resp, err := s.core.pollTask(req, httpTransportInfo(r))
+	if err != nil {
+		writeRunnerError(w, err)
 		return
 	}
-	lease, ok := s.runners.Poll(req.RunnerID, req.Capacity, req.Capabilities)
-	if !ok {
-		writeJSON(w, http.StatusOK, protocol.PollTaskResponse{Wait: s.pollWait})
-		return
-	}
-	writeJSON(w, http.StatusOK, protocol.PollTaskResponse{Lease: &lease})
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) HandleReportResult(w http.ResponseWriter, r *http.Request) {
@@ -163,23 +179,39 @@ func (s *Server) HandleReportResult(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if req.RunnerID == "" || req.Lease == nil {
-		writeError(w, http.StatusBadRequest, "runner_id and lease are required")
-		return
-	}
-	if s.engine == nil {
-		writeError(w, http.StatusInternalServerError, "engine not configured")
-		return
-	}
-	if err := s.engine.CommitTaskResult(r.Context(), req.Lease, req.Result); err != nil {
+	overrideTokenFromHeader(r, &req.AuthToken)
+	resp, err := s.core.reportResult(r.Context(), req, httpTransportInfo(r))
+	if err != nil {
 		if errors.Is(err, engine.ErrInvalidLeaseToken) {
-			writeJSON(w, http.StatusConflict, protocol.ReportResultResponse{Accepted: false, Error: err.Error()})
+			writeJSON(w, http.StatusConflict, resp)
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeRunnerError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, protocol.ReportResultResponse{Accepted: true})
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// overrideTokenFromHeader gives Authorization: Bearer priority over the body
+// AuthToken field. Header transport is preferred per the spec.
+func overrideTokenFromHeader(r *http.Request, dst *string) {
+	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
+		*dst = strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))
+	}
+}
+
+// httpTransportInfo extracts TLS peer identity from the request when the
+// connection is a verified client mTLS session. Returns an empty struct on
+// plaintext HTTP so the authenticator's mTLS branch will reject.
+func httpTransportInfo(r *http.Request) TransportInfo {
+	info := TransportInfo{}
+	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+		return info
+	}
+	cert := r.TLS.PeerCertificates[0]
+	info.TLSPeerCN = cert.Subject.String()
+	info.TLSPeerSAN = append(info.TLSPeerSAN, cert.DNSNames...)
+	return info
 }
 
 func (s *Server) handleExecution(w http.ResponseWriter, r *http.Request) {
@@ -206,11 +238,11 @@ func (s *Server) handleExecution(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleInspect(w http.ResponseWriter, r *http.Request, id types.ExecutionID) {
-	if s.engine == nil {
+	if s.core.engine == nil {
 		writeError(w, http.StatusInternalServerError, "engine not configured")
 		return
 	}
-	detail, err := s.engine.Inspect(r.Context(), id)
+	detail, err := s.core.engine.Inspect(r.Context(), id)
 	if err != nil {
 		writeEngineError(w, err)
 		return
@@ -230,11 +262,11 @@ func (s *Server) handleSignal(w http.ResponseWriter, r *http.Request, id types.E
 		writeError(w, http.StatusBadRequest, "name is required")
 		return
 	}
-	if s.engine == nil {
+	if s.core.engine == nil {
 		writeError(w, http.StatusInternalServerError, "engine not configured")
 		return
 	}
-	if err := s.engine.DeliverSignal(r.Context(), id, req.Name, req.Data); err != nil {
+	if err := s.core.engine.DeliverSignal(r.Context(), id, req.Name, req.Data); err != nil {
 		writeEngineError(w, err)
 		return
 	}
@@ -245,11 +277,11 @@ func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request, id types.E
 	if !requireMethod(w, r, http.MethodPost) {
 		return
 	}
-	if s.engine == nil {
+	if s.core.engine == nil {
 		writeError(w, http.StatusInternalServerError, "engine not configured")
 		return
 	}
-	if err := s.engine.Cancel(r.Context(), id); err != nil {
+	if err := s.core.engine.Cancel(r.Context(), id); err != nil {
 		writeEngineError(w, err)
 		return
 	}
@@ -279,6 +311,21 @@ func writeEngineError(w http.ResponseWriter, err error) {
 		return
 	}
 	writeError(w, http.StatusInternalServerError, err.Error())
+}
+
+// writeRunnerError maps transport-agnostic Core sentinel errors to HTTP status
+// codes.
+func writeRunnerError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, ErrRunnerIDRequired), errors.Is(err, ErrConcurrencyRequired), errors.Is(err, ErrLeaseRequired):
+		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, ErrRunnerNotFound):
+		writeError(w, http.StatusNotFound, err.Error())
+	case errors.Is(err, ErrUnauthenticated):
+		writeError(w, http.StatusUnauthorized, err.Error())
+	default:
+		writeError(w, http.StatusInternalServerError, err.Error())
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

@@ -18,6 +18,10 @@ type RegisterRunnerRequest struct {
 	RunnerID     string       `json:"runner_id"`
 	Concurrency  int          `json:"concurrency"`
 	Capabilities []Capability `json:"capabilities"`
+	// AuthToken is the runner's bearer token. Preferred: Authorization
+	// header. This body field is a fallback for transports that can't set
+	// headers.
+	AuthToken string `json:"auth_token,omitempty"`
 }
 
 type RegisterRunnerResponse struct {
@@ -29,6 +33,7 @@ type HeartbeatRequest struct {
 	Capacity  int    `json:"capacity"`
 	InFlight  int    `json:"in_flight"`
 	Timestamp int64  `json:"timestamp"`
+	AuthToken string `json:"auth_token,omitempty"`
 }
 
 type HeartbeatResponse struct {
@@ -39,6 +44,7 @@ type PollTaskRequest struct {
 	RunnerID     string       `json:"runner_id"`
 	Capacity     int          `json:"capacity"`
 	Capabilities []Capability `json:"capabilities"`
+	AuthToken    string       `json:"auth_token,omitempty"`
 }
 
 type PollTaskResponse struct {
@@ -47,15 +53,17 @@ type PollTaskResponse struct {
 }
 
 type ReportResultRequest struct {
-	RunnerID string            `json:"runner_id"`
-	Lease    *engine.TaskLease `json:"lease"`
-	Result   engine.TaskResult `json:"result"`
+	RunnerID  string            `json:"runner_id"`
+	Lease     *engine.TaskLease `json:"lease"`
+	Result    engine.TaskResult `json:"result"`
+	AuthToken string            `json:"auth_token,omitempty"`
 }
 
 type reportResultRequestJSON struct {
-	RunnerID string            `json:"runner_id"`
-	Lease    *engine.TaskLease `json:"lease"`
-	Result   taskResultJSON    `json:"result"`
+	RunnerID  string            `json:"runner_id"`
+	Lease     *engine.TaskLease `json:"lease"`
+	Result    json.RawMessage   `json:"result"`
+	AuthToken string            `json:"auth_token,omitempty"`
 }
 
 type taskResultJSON struct {
@@ -65,18 +73,16 @@ type taskResultJSON struct {
 }
 
 func (r ReportResultRequest) MarshalJSON() ([]byte, error) {
-	out := reportResultRequestJSON{
-		RunnerID: r.RunnerID,
-		Lease:    r.Lease,
-		Result: taskResultJSON{
-			Output:  r.Result.Output,
-			Suspend: r.Result.Suspend,
-		},
+	resultJSON, err := MarshalTaskResult(r.Result)
+	if err != nil {
+		return nil, err
 	}
-	if r.Result.Error != nil {
-		out.Result.Error = r.Result.Error.Error()
-	}
-	return json.Marshal(out)
+	return json.Marshal(reportResultRequestJSON{
+		RunnerID:  r.RunnerID,
+		Lease:     r.Lease,
+		Result:    resultJSON,
+		AuthToken: r.AuthToken,
+	})
 }
 
 func (r *ReportResultRequest) UnmarshalJSON(data []byte) error {
@@ -86,17 +92,46 @@ func (r *ReportResultRequest) UnmarshalJSON(data []byte) error {
 	}
 	r.RunnerID = in.RunnerID
 	r.Lease = in.Lease
-	r.Result = engine.TaskResult{
-		Output:  in.Result.Output,
-		Suspend: in.Result.Suspend,
+	r.AuthToken = in.AuthToken
+	result, err := UnmarshalTaskResult(in.Result)
+	if err != nil {
+		return err
 	}
-	if in.Result.Error != "" {
-		r.Result.Error = errors.New(in.Result.Error)
-	}
+	r.Result = result
 	return nil
 }
 
 type ReportResultResponse struct {
 	Accepted bool   `json:"accepted"`
 	Error    string `json:"error,omitempty"`
+}
+
+// MarshalTaskResult encodes a task result to JSON using the protocol's
+// error-as-string convention. It is the single source of truth for result
+// serialization shared by the HTTP and gRPC transports.
+func MarshalTaskResult(result engine.TaskResult) ([]byte, error) {
+	out := taskResultJSON{
+		Output:  result.Output,
+		Suspend: result.Suspend,
+	}
+	if result.Error != nil {
+		out.Error = result.Error.Error()
+	}
+	return json.Marshal(out)
+}
+
+// UnmarshalTaskResult decodes a task result produced by MarshalTaskResult.
+func UnmarshalTaskResult(data []byte) (engine.TaskResult, error) {
+	var in taskResultJSON
+	if err := json.Unmarshal(data, &in); err != nil {
+		return engine.TaskResult{}, err
+	}
+	result := engine.TaskResult{
+		Output:  in.Output,
+		Suspend: in.Suspend,
+	}
+	if in.Error != "" {
+		result.Error = errors.New(in.Error)
+	}
+	return result, nil
 }
