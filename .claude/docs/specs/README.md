@@ -14,7 +14,7 @@
 | 6 | _TODO 可观测性_ | 全栈 | high | 单独讨论 |
 | 7 | [retry-policy.md](retry-policy.md) | Engine | high | 待实现 |
 | 8 | [lua-concurrency-tests.md](lua-concurrency-tests.md) | Backend 测试 | high | 待实现 |
-| 9 | [mtls-auth.md](mtls-auth.md) | Server/Runner 安全 | high | 待实现 |
+| 9 | [mtls-auth.md](mtls-auth.md) | Server/Runner 安全 | high | shipped @ 3fe7234 |
 
 每份 spec 的固定结构：`Problem → Goals → Non-goals → Design → Testing → Acceptance`。Design 段落都给出了具体文件路径与函数名，方便分配实现任务。
 

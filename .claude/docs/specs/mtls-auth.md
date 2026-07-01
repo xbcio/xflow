@@ -1,6 +1,6 @@
 # Spec: Cluster Auth — Bearer Token + mTLS + Per-Runner Allowlist
 
-**Status**: draft
+**Status**: shipped @ 3fe7234
 **Tracks**: review concern #9 — no auth, no TLS, no authorization in runner protocol
 **Severity**: high (verifier-confirmed; critical in untrusted networks)
 
