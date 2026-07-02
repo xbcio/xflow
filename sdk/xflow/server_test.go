@@ -98,11 +98,6 @@ func TestServerIsLeader(t *testing.T) {
 // confirm the execution actually reaches a terminal state — which is only
 // possible if the Task Dispatcher is actively consuming the Asynq queue.
 func TestNewServerRedisBackendDispatchesTaskToRunner(t *testing.T) {
-	// e72da13 intermediate state: dispatcher enqueues into RunnerDirectory
-	// while Server/GRPCServer still poll from RunnerPool, so the dispatch
-	// link is intentionally severed until 4e42760 migrates poll onto the
-	// RunnerDirectory. Re-enabled when that commit lands.
-	t.Skip("dispatch link severed in e72da13 intermediate state; restored in 4e42760")
 	mr, err := miniredis.Run()
 	if err != nil {
 		t.Fatal(err)

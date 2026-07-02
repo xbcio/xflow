@@ -45,7 +45,7 @@ type Config struct {
 type ControlPlane struct {
 	backend    backend.Provider
 	eng        *engine.Engine
-	runners    *RunnerPool
+	runners    RunnerDirectory
 	dispatcher *Dispatcher
 	httpServer *Server
 	grpcServer *GRPCServer
@@ -77,8 +77,8 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 	}
 	eng := engine.New(cfg.Backend.State(), cfg.Backend.Queue(), engOpts...)
 
-	runners := NewRunnerPool()
-	dispatchRunners := NewMemoryRunnerDirectory()
+	runners := NewMemoryRunnerDirectory()
+	dispatchRunners := runners
 	dispatcher := NewDispatcher(eng, dispatchRunners)
 
 	var serverOpts []ServerOption

@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
@@ -19,7 +18,7 @@ import (
 )
 
 // GRPCServer adapts the generated RunnerProtocolServer onto the transport-agnostic
-// Core. It shares the same RunnerPool and EngineFacade as the HTTP Server, so a
+// Core. It shares the same RunnerDirectory and EngineFacade as the HTTP Server, so a
 // single control plane can serve both transports concurrently.
 type GRPCServer struct {
 	runnerpb.UnimplementedRunnerProtocolServer
@@ -60,11 +59,11 @@ func WithGRPCPollWait(d time.Duration) GRPCServerOption {
 }
 
 // NewGRPCServer builds a gRPC Runner Protocol server backed by the given engine
-// and runner pool. Pass the same RunnerPool used by the HTTP Server and
+// and runner directory. Pass the same RunnerDirectory used by the HTTP Server and
 // Dispatcher to share runner state across transports.
-func NewGRPCServer(engine EngineFacade, runners *RunnerPool, opts ...GRPCServerOption) *GRPCServer {
+func NewGRPCServer(engine EngineFacade, runners RunnerDirectory, opts ...GRPCServerOption) *GRPCServer {
 	if runners == nil {
-		runners = NewRunnerPool()
+		runners = NewMemoryRunnerDirectory()
 	}
 	srv := &GRPCServer{
 		core: &Core{
@@ -131,40 +130,6 @@ func (s *GRPCServer) ReportResult(ctx context.Context, req *runnerpb.ReportResul
 	return &runnerpb.ReportResultResponse{Accepted: resp.Accepted, Error: resp.Error}, nil
 }
 
-// Connect adapts the generated bidi stream onto Core.Connect. Auth token and
-// TLS transport info are extracted from the stream context up front, matching
-// the pattern every unary RPC handler above uses — the HELLO frame's payload
-// carries no auth token, so without this the Connect path would bypass
-// bearer-token/mTLS auth entirely.
-func (s *GRPCServer) Connect(stream grpc.BidiStreamingServer[runnerpb.RunnerFrame, runnerpb.ServerFrame]) error {
-	ctx := stream.Context()
-	var token string
-	overrideTokenFromMetadata(ctx, &token)
-	err := s.core.Connect(&grpcConnectStream{stream: stream}, token, grpcTransportInfo(ctx))
-	return connectStatus(err)
-}
-
-type grpcConnectStream struct {
-	stream grpc.BidiStreamingServer[runnerpb.RunnerFrame, runnerpb.ServerFrame]
-}
-
-func (g *grpcConnectStream) Recv() (protocol.RunnerFrame, error) {
-	pb, err := g.stream.Recv()
-	if err != nil {
-		return protocol.RunnerFrame{}, err
-	}
-	return protocol.RunnerFrameFromProto(pb)
-}
-
-func (g *grpcConnectStream) Send(fr protocol.ServerFrame) error {
-	pb, err := protocol.ServerFrameToProto(fr)
-	if err != nil {
-		return err
-	}
-	return g.stream.Send(pb)
-}
-
-func (g *grpcConnectStream) Context() context.Context { return g.stream.Context() }
 
 // overrideTokenFromMetadata pulls the Authorization: Bearer <token> value out
 // of gRPC metadata and, if present, overrides whatever the request payload
@@ -203,25 +168,6 @@ func grpcTransportInfo(ctx context.Context) TransportInfo {
 	return info
 }
 
-// connectStatus maps Core.Connect's transport-agnostic sentinel errors (bad
-// HELLO, failed auth) to gRPC status codes, matching the unary RPCs' contract
-// so callers see e.g. Unauthenticated instead of Unknown. Unlike runnerStatus,
-// it leaves any error it doesn't recognize untouched: Connect can also return
-// genuine stream/transport errors (from stream.Recv/Send, or ctx.Err()) that
-// already carry their own gRPC status (or are plain io.EOF-style transport
-// errors) and must not be forced into codes.Internal.
-func connectStatus(err error) error {
-	switch {
-	case err == nil:
-		return nil
-	case errors.Is(err, ErrRunnerIDRequired), errors.Is(err, ErrConcurrencyRequired):
-		return status.Error(codes.InvalidArgument, err.Error())
-	case errors.Is(err, ErrUnauthenticated):
-		return status.Error(codes.Unauthenticated, err.Error())
-	default:
-		return err
-	}
-}
 
 // runnerStatus maps transport-agnostic Core sentinel errors to gRPC status codes.
 func runnerStatus(err error) error {

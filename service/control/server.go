@@ -23,6 +23,8 @@ type EngineFacade interface {
 	Inspect(ctx context.Context, id types.ExecutionID, nodeNames ...string) (engine.ExecutionDetail, error)
 	DeliverSignal(ctx context.Context, id types.ExecutionID, name string, data map[string]any) error
 	Cancel(ctx context.Context, id types.ExecutionID) error
+	BuildTaskLease(ctx context.Context, task *engine.Task) (*engine.TaskLease, error)
+	CommitTaskResultWithOutcome(ctx context.Context, lease *engine.TaskLease, result engine.TaskResult) (engine.CommitOutcome, error)
 }
 
 type Server struct {
@@ -82,9 +84,9 @@ func WithHTTPPollWait(d time.Duration) ServerOption {
 	}
 }
 
-func NewServer(engine EngineFacade, runners *RunnerPool, opts ...ServerOption) *Server {
+func NewServer(engine EngineFacade, runners RunnerDirectory, opts ...ServerOption) *Server {
 	if runners == nil {
-		runners = NewRunnerPool()
+		runners = NewMemoryRunnerDirectory()
 	}
 	srv := &Server{
 		core: &Core{

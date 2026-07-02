@@ -9,143 +9,6 @@ import (
 	"github.com/xbcio/xflow/service/protocol"
 )
 
-// ConnectStream is the transport-agnostic bidirectional stream Core uses. The
-// gRPC adapter wraps runnerpb.RunnerProtocol_ConnectServer onto it.
-type ConnectStream interface {
-	Recv() (protocol.RunnerFrame, error)
-	Send(protocol.ServerFrame) error
-	Context() context.Context
-}
-
-// Connect drives a runner's full lifecycle: HELLO → register+bind session →
-// send/recv loops → BYE/disconnect. Returns on clean BYE, ctx cancel, or
-// stream error. Single sender to stream: the send loop is the only goroutine
-// calling stream.Send; ACKs and TASKs are both funneled through sess.send.
-func (c *Core) Connect(stream ConnectStream, token string, info TransportInfo) error {
-	ctx := stream.Context()
-
-	first, err := stream.Recv()
-	if err != nil {
-		return err
-	}
-	if first.Hello == nil {
-		return ErrRunnerIDRequired
-	}
-	hello := first.Hello
-	if hello.RunnerID == "" || hello.Concurrency <= 0 {
-		return ErrConcurrencyRequired
-	}
-	if _, authErr := c.authn().AuthenticateRegister(hello.RunnerID, token, info); authErr != nil {
-		if err := c.authDeny(hello.RunnerID, token, "register", info, authErr); err != nil {
-			return err
-		}
-	}
-	c.runners.RegisterWithLabelsAndPolicy(hello.RunnerID, hello.Concurrency, hello.Capabilities, hello.Labels, RunnerPolicy{AllowedNodeTypes: []string{"*"}})
-
-	sendCh := make(chan protocol.ServerFrame, hello.Concurrency*2+2)
-	done := make(chan struct{})
-	sess := newStreamSession(hello.RunnerID, sendCh, done, hello.Concurrency)
-	c.runners.bindSession(hello.RunnerID, sess)
-
-	if err := c.sendFrame(ctx, sendCh, protocol.ServerFrame{Welcome: &protocol.WelcomeFrame{RunnerID: hello.RunnerID, ServerTime: time.Now().Unix()}}); err != nil {
-		c.runners.clearSession(hello.RunnerID)
-		close(done)
-		return err
-	}
-
-	recvErr := make(chan error, 1)
-	go func() { recvErr <- c.connectRecvLoop(ctx, stream, hello.RunnerID, sess) }()
-	sendErr := make(chan error, 1)
-	go func() { sendErr <- c.connectSendLoop(ctx, stream, sendCh, sess, done) }()
-
-	var firstErr error
-	select {
-	case err := <-recvErr:
-		firstErr = err
-		close(done)
-		<-sendErr
-	case err := <-sendErr:
-		firstErr = err
-		close(done)
-		<-recvErr
-	case <-ctx.Done():
-		firstErr = ctx.Err()
-		close(done)
-		<-recvErr
-		<-sendErr
-	}
-	c.runners.clearSession(hello.RunnerID)
-	if errors.Is(firstErr, context.Canceled) {
-		return nil
-	}
-	return firstErr
-}
-
-func (c *Core) connectRecvLoop(ctx context.Context, stream ConnectStream, runnerID string, sess *streamSession) error {
-	for {
-		fr, err := stream.Recv()
-		if err != nil {
-			return err
-		}
-		switch {
-		case fr.Bye != nil:
-			return nil
-		case fr.Result != nil:
-			if err := c.handleResultFrame(ctx, runnerID, fr.Result, sess); err != nil {
-				return err
-			}
-		}
-	}
-}
-
-func (c *Core) handleResultFrame(ctx context.Context, runnerID string, r *protocol.ResultFrame, sess *streamSession) error {
-	if c.engine == nil {
-		return ErrEngineNotConfigured
-	}
-	var ack protocol.ServerFrame
-	if err := c.engine.CommitTaskResult(ctx, r.Lease, r.Result); err != nil {
-		// Any commit error — stale lease or a transient backend failure —
-		// degrades to a rejection ACK for this one result, mirroring the
-		// unary ReportResult contract. It must never propagate out of
-		// connectRecvLoop: doing so would kill the whole multiplexed
-		// stream over a single result's failure, disrupting every other
-		// in-flight task on this connection.
-		ack = protocol.ServerFrame{Ack: &protocol.AckFrame{LeaseID: r.LeaseID, Accepted: false, Error: err.Error()}}
-	} else {
-		ack = protocol.ServerFrame{Ack: &protocol.AckFrame{LeaseID: r.LeaseID, Accepted: true}}
-	}
-	c.runners.consumeResult(runnerID, r.LeaseID)
-	return c.sendFrame(ctx, sess.send, ack)
-}
-
-func (c *Core) connectSendLoop(ctx context.Context, stream ConnectStream, sessSend <-chan protocol.ServerFrame, sess *streamSession, done <-chan struct{}) error {
-	c.runners.drainInto(sess)
-	notify := c.runners.notifyChan(sess.runnerID)
-	for {
-		select {
-		case <-done:
-			return nil
-		case <-ctx.Done():
-			return ctx.Err()
-		case fr := <-sessSend:
-			if err := stream.Send(fr); err != nil {
-				return err
-			}
-			c.runners.drainInto(sess)
-		case <-notify:
-			c.runners.drainInto(sess)
-		}
-	}
-}
-
-func (c *Core) sendFrame(ctx context.Context, send chan<- protocol.ServerFrame, fr protocol.ServerFrame) error {
-	select {
-	case send <- fr:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
 
 // Transport-agnostic outcome errors. Each transport (HTTP, gRPC) maps these to
 // its own status representation so the core handling logic stays free of
@@ -164,7 +27,7 @@ var (
 // outcomes through the sentinel errors above plus engine.ErrInvalidLeaseToken.
 type Core struct {
 	engine   EngineFacade
-	runners  *RunnerPool
+	runners  RunnerDirectory
 	pollWait time.Duration
 	// auth resolves credentials to a RunnerPolicy on every call. Nil == the
 	// disabled authenticator, matching legacy behavior.
@@ -238,8 +101,17 @@ func (c *Core) register(req protocol.RegisterRunnerRequest, info TransportInfo) 
 	if err := c.authDeny(req.RunnerID, req.AuthToken, "register", info, authErr); err != nil {
 		return protocol.RegisterRunnerResponse{}, err
 	}
-	c.runners.RegisterWithLabelsAndPolicy(req.RunnerID, req.Concurrency, req.Capabilities, req.Labels, policy)
-	return protocol.RegisterRunnerResponse{RunnerID: req.RunnerID}, nil
+	session, err := c.runners.Register(context.Background(), RegisterRunnerRequest{
+		RunnerID:     req.RunnerID,
+		Capacity:     req.Concurrency,
+		Capabilities: req.Capabilities,
+		Policy:       policy,
+		Now:          time.Now(),
+	})
+	if err != nil {
+		return protocol.RegisterRunnerResponse{}, normalizeRunnerError(err)
+	}
+	return protocol.RegisterRunnerResponse{RunnerID: req.RunnerID, SessionID: session.SessionID}, nil
 }
 
 func (c *Core) heartbeat(req protocol.HeartbeatRequest, info TransportInfo) (protocol.HeartbeatResponse, error) {
@@ -254,8 +126,14 @@ func (c *Core) heartbeat(req protocol.HeartbeatRequest, info TransportInfo) (pro
 	if req.Timestamp == 0 {
 		at = time.Now()
 	}
-	if !c.runners.Heartbeat(req.RunnerID, req.Capacity, req.InFlight, at) {
-		return protocol.HeartbeatResponse{}, ErrRunnerNotFound
+	if err := c.runners.Heartbeat(context.Background(), HeartbeatRequest{
+		RunnerID:  req.RunnerID,
+		SessionID: req.SessionID,
+		Capacity:  req.Capacity,
+		InFlight:  req.InFlight,
+		Now:       at,
+	}); err != nil {
+		return protocol.HeartbeatResponse{}, normalizeRunnerError(err)
 	}
 	return protocol.HeartbeatResponse{ServerTime: time.Now().Unix()}, nil
 }
@@ -268,11 +146,41 @@ func (c *Core) pollTask(req protocol.PollTaskRequest, info TransportInfo) (proto
 	if err := c.authDeny(req.RunnerID, req.AuthToken, "poll", info, authErr); err != nil {
 		return protocol.PollTaskResponse{}, err
 	}
-	lease, ok := c.runners.PollWithLabels(req.RunnerID, req.Capacity, req.Capabilities, req.Labels)
-	if !ok {
-		return protocol.PollTaskResponse{Wait: c.pollWait}, nil
+	for {
+		claim, ok, err := c.runners.ClaimForRunner(context.Background(), ClaimRequest{
+			RunnerID:     req.RunnerID,
+			SessionID:    req.SessionID,
+			Capacity:     req.Capacity,
+			Capabilities: req.Capabilities,
+			Now:          time.Now(),
+		})
+		if err != nil {
+			return protocol.PollTaskResponse{}, normalizeRunnerError(err)
+		}
+		if !ok {
+			return protocol.PollTaskResponse{Wait: c.pollWait}, nil
+		}
+		if c.engine == nil {
+			_ = c.runners.ReleaseClaim(context.Background(), claim.ClaimID, ReleaseClaimRequeue)
+			return protocol.PollTaskResponse{}, ErrEngineNotConfigured
+		}
+		lease, err := c.engine.BuildTaskLease(context.Background(), &claim.Assignment.Task)
+		switch {
+		case err == nil:
+			if err := c.runners.FinalizeClaim(context.Background(), claim.ClaimID, lease); err != nil {
+				_ = c.runners.ReleaseClaim(context.Background(), claim.ClaimID, ReleaseClaimRequeue)
+				return protocol.PollTaskResponse{}, normalizeRunnerError(err)
+			}
+			return protocol.PollTaskResponse{Lease: lease}, nil
+		case errors.Is(err, engine.ErrExecutionInactive):
+			_ = c.runners.ReleaseClaim(context.Background(), claim.ClaimID, ReleaseClaimDrop)
+		case errors.Is(err, engine.ErrLeaseAlreadyActive):
+			_ = c.runners.ReleaseClaim(context.Background(), claim.ClaimID, ReleaseClaimKeepSeen)
+		default:
+			_ = c.runners.ReleaseClaim(context.Background(), claim.ClaimID, ReleaseClaimRequeue)
+			return protocol.PollTaskResponse{}, err
+		}
 	}
-	return protocol.PollTaskResponse{Lease: &lease}, nil
 }
 
 func (c *Core) reportResult(ctx context.Context, req protocol.ReportResultRequest, info TransportInfo) (protocol.ReportResultResponse, error) {
@@ -286,11 +194,30 @@ func (c *Core) reportResult(ctx context.Context, req protocol.ReportResultReques
 	if c.engine == nil {
 		return protocol.ReportResultResponse{}, ErrEngineNotConfigured
 	}
-	if err := c.engine.CommitTaskResult(ctx, req.Lease, req.Result); err != nil {
+	outcome, err := c.engine.CommitTaskResultWithOutcome(ctx, req.Lease, req.Result)
+	if err != nil {
 		if errors.Is(err, engine.ErrInvalidLeaseToken) {
 			return protocol.ReportResultResponse{Accepted: false, Error: err.Error()}, err
 		}
 		return protocol.ReportResultResponse{}, err
 	}
+	switch outcome {
+	case engine.CommitOutcomeAccepted, engine.CommitOutcomeDuplicateTerminal, engine.CommitOutcomeExecutionInactive:
+		if err := c.runners.ReleaseLeased(ctx, ReleaseLeasedRequest{
+			RunnerID:     req.RunnerID,
+			SessionID:    req.SessionID,
+			AssignmentID: BuildAssignmentID(&req.Lease.Task),
+			RemoveSeen:   true,
+		}); err != nil {
+			return protocol.ReportResultResponse{}, normalizeRunnerError(err)
+		}
+	}
 	return protocol.ReportResultResponse{Accepted: true}, nil
+}
+
+func normalizeRunnerError(err error) error {
+	if errors.Is(err, ErrRunnerSessionStale) {
+		return ErrRunnerNotFound
+	}
+	return err
 }

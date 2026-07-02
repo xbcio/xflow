@@ -221,7 +221,7 @@ func TestCoreAuthObserverRecordsAllowAndDeny(t *testing.T) {
 	}
 	observer := &recordingAuthObserver{}
 	core := &Core{
-		runners:      NewRunnerPool(),
+		runners:      NewMemoryRunnerDirectory(),
 		auth:         store,
 		authObserver: observer,
 	}

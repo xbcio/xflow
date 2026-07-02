@@ -2,8 +2,6 @@ package runner
 
 import (
 	"context"
-	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -13,386 +11,84 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
-// ---------------------------------------------------------------------------
-// fakeStream — in-memory FrameStream for testing
-// ---------------------------------------------------------------------------
-
-type fakeStream struct {
-	recvCh chan protocol.ServerFrame
-	sendCh chan protocol.RunnerFrame
-	closed atomic.Bool
-}
-
-func newFakeStream(buf int) *fakeStream {
-	return &fakeStream{
-		recvCh: make(chan protocol.ServerFrame, buf),
-		sendCh: make(chan protocol.RunnerFrame, buf),
-	}
-}
-
-func (f *fakeStream) Send(fr protocol.RunnerFrame) error { f.sendCh <- fr; return nil }
-func (f *fakeStream) Recv() (protocol.ServerFrame, error) {
-	fr, ok := <-f.recvCh
-	if !ok {
-		return protocol.ServerFrame{}, context.Canceled
-	}
-	return fr, nil
-}
-func (f *fakeStream) Close() error {
-	if f.closed.CompareAndSwap(false, true) {
-		close(f.recvCh)
-	}
-	return nil
-}
-
-// ---------------------------------------------------------------------------
-// fakeClient — implements the new ProtocolClient (Connect only)
-// ---------------------------------------------------------------------------
-
-type fakeClient struct{ stream *fakeStream }
-
-func (c *fakeClient) Connect(ctx context.Context) (protocol.FrameStream, error) {
-	return c.stream, nil
-}
-
-// ---------------------------------------------------------------------------
-// funcHandler — adapter that wraps a plain func into types.ActionHandler
-// ---------------------------------------------------------------------------
-
-// funcActionHandler wraps a func(ctx, *types.Input) -> (*types.Output, error)
-// as a types.ActionHandler so it can be registered with execution.Registry.
-type funcActionHandler struct {
-	nodeType string
-	fn       func(ctx context.Context, input *types.Input) (*types.Output, error)
-}
-
-func (h funcActionHandler) Descriptor() node_Descriptor { return node_Descriptor{Type: h.nodeType} }
-func (h funcActionHandler) Execute(ctx context.Context, input *types.Input) (*types.Output, error) {
-	return h.fn(ctx, input)
-}
-
-// node_Descriptor is an alias to avoid importing node in tests.
-// types.Descriptor is the actual type; use it directly.
-type node_Descriptor = types.Descriptor
-
-// registerTestHandler registers a handler that sleeps and counts active
-// workers. handlerFn receives ctx and the task input; its return maps to
-// types.ActionHandler.Execute. Registered under nodeType via RegisterGlobal.
-func registerTestHandler(
-	t *testing.T,
-	registry *execution.Registry,
-	nodeType string,
-	handlerFn func(ctx context.Context, input *types.Input) (*types.Output, error),
-) {
-	t.Helper()
-	registry.RegisterGlobal(nodeType, funcActionHandler{nodeType: nodeType, fn: handlerFn})
-}
-
-// ---------------------------------------------------------------------------
-// TestRunnerConcurrencyParallel — proves worker pool size = Concurrency
-// ---------------------------------------------------------------------------
-
-func TestRunnerConcurrencyParallel(t *testing.T) {
-	stream := newFakeStream(16)
-	// Pre-load WELCOME so recvLoop unblocks immediately.
-	stream.recvCh <- protocol.ServerFrame{Welcome: &protocol.WelcomeFrame{RunnerID: "r1"}}
-
-	var active, maxActive atomic.Int32
-	var wg sync.WaitGroup
-	wg.Add(3)
-
-	registry := execution.NewRegistry()
-	registerTestHandler(t, registry, "xflow.function", func(ctx context.Context, input *types.Input) (*types.Output, error) {
-		cur := active.Add(1)
-		// CAS loop to track the high-water mark.
-		for {
-			m := maxActive.Load()
-			if cur <= m || maxActive.CompareAndSwap(m, cur) {
-				break
-			}
-		}
-		time.Sleep(80 * time.Millisecond)
-		active.Add(-1)
-		wg.Done()
-		return &types.Output{Data: map[string]any{"ok": true}}, nil
-	})
-
-	r := New(
-		&fakeClient{stream},
-		registry,
-		Config{
-			RunnerID:     "r1",
-			Concurrency:  3,
-			Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
-		},
-	)
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	go func() { _ = r.Run(ctx) }()
-
-	// Send 3 TASK frames with unique LeaseIDs.
-	for _, id := range []string{"L1", "L2", "L3"} {
-		stream.recvCh <- protocol.ServerFrame{Task: &protocol.TaskFrame{
-			Lease: &engine.TaskLease{
-				LeaseID:  engine.LeaseID(id),
-				NodeType: "xflow.function",
-			},
-		}}
-	}
-
-	// Collect 3 RESULT frames.
-	results := 0
-	for results < 3 {
-		select {
-		case fr := <-stream.sendCh:
-			if fr.Result != nil {
-				results++
-			}
-		case <-time.After(2 * time.Second):
-			t.Fatalf("timeout waiting for results; got %d/3", results)
-		}
-	}
-	wg.Wait()
-
-	if maxActive.Load() < 3 {
-		t.Fatalf("max concurrent = %d, want >= 3 (concurrency bug not fixed)", maxActive.Load())
-	}
-	cancel()
-}
-
-// ---------------------------------------------------------------------------
-// TestRunnerGracefulDrain — proves cross-task integration between T7's
-// recv-loop/worker-pool rewrite (in-flight work drains via wg.Wait before
-// Run exits) and T9's exit-code normalization (ctx.Canceled -> nil). A single
-// slow handler is mid-flight when ctx is cancelled; Run must not abandon it —
-// it waits for the RESULT to be sent before tearing down, and returns nil
-// rather than a cancellation error.
-// ---------------------------------------------------------------------------
-
-func TestRunnerGracefulDrain(t *testing.T) {
-	stream := newFakeStream(16)
-	stream.recvCh <- protocol.ServerFrame{Welcome: &protocol.WelcomeFrame{RunnerID: "r1"}}
-
-	const handlerDelay = 100 * time.Millisecond
-	handlerStarted := make(chan struct{}, 1)
-	handlerDone := make(chan struct{}, 1)
-
-	registry := execution.NewRegistry()
-	registerTestHandler(t, registry, "xflow.function", func(ctx context.Context, input *types.Input) (*types.Output, error) {
-		handlerStarted <- struct{}{}
-		time.Sleep(handlerDelay)
-		handlerDone <- struct{}{}
-		return &types.Output{Data: map[string]any{"ok": true}}, nil
-	})
-
-	r := New(
-		&fakeClient{stream},
-		registry,
-		Config{
-			RunnerID:     "r1",
-			Concurrency:  1,
-			Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
-		},
-	)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	runErr := make(chan error, 1)
-	go func() { runErr <- r.Run(ctx) }()
-
-	// Send exactly 1 TASK frame, then wait until the worker has actually
-	// started executing it before cancelling. This proves the specific
-	// invariant the brief calls out — cancel lands mid-execution, not before
-	// pickup — without racing the ambiguous "did the runner even see the
-	// task yet" window that a bare cancel() right after Send would leave
-	// open (recvCh is buffered, so sending never synchronizes with recvLoop
-	// actually consuming it).
-	stream.recvCh <- protocol.ServerFrame{Task: &protocol.TaskFrame{
-		Lease: &engine.TaskLease{LeaseID: engine.LeaseID("L1"), NodeType: "xflow.function"},
-	}}
-	select {
-	case <-handlerStarted:
-	case <-time.After(2 * time.Second):
-		t.Fatal("handler never started")
-	}
-	cancel()
-
-	// (a) Exactly 1 RESULT frame for L1 must be sent — the worker completed
-	// its in-flight task despite the ctx cancellation racing its start.
-	// sendCh also carries the initial HELLO frame and (on drain) a trailing
-	// BYE frame; skip past those and look specifically for RESULT.
-	var resultFr protocol.RunnerFrame
-	found := false
-	for !found {
-		select {
-		case fr := <-stream.sendCh:
-			if fr.Result != nil {
-				resultFr = fr
-				found = true
-			}
-		case <-time.After(2 * time.Second):
-			t.Fatal("timeout waiting for RESULT frame; worker was not drained gracefully")
-		}
-	}
-	if resultFr.Result.LeaseID != "L1" {
-		t.Fatalf("expected RESULT for L1, got %+v", resultFr)
-	}
-
-	// Confirm the handler itself actually ran to completion (not skipped).
-	select {
-	case <-handlerDone:
-	case <-time.After(2 * time.Second):
-		t.Fatal("handler never completed")
-	}
-
-	// (b) Run must return nil — ctx.Canceled normalizes to nil per T9.
-	select {
-	case err := <-runErr:
-		if err != nil {
-			t.Fatalf("Run() error = %v, want nil (ctx.Canceled should normalize to nil)", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timeout waiting for Run() to return")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// TestRunnerSerializesConcurrentSends — proves the sendCh/send-loop
-// restructuring correctly serializes RESULT frames from multiple concurrently
-// completing workers without dropping or corrupting any of them. Run with
-// -race: fakeStream.Send is already safe for concurrent use (it's a channel
-// push), so this test cannot reproduce the original gRPC-level single-writer
-// violation — that would require a real/mock gRPC stream enforcing the
-// SendMsg contract, which is out of scope here. This test instead guards
-// against regressions in the new send-loop plumbing itself (e.g. dropped
-// frames, deadlock between workers and the send-loop, or BYE racing a
-// worker's RESULT).
-// ---------------------------------------------------------------------------
-
-func TestRunnerSerializesConcurrentSends(t *testing.T) {
-	stream := newFakeStream(16)
-	stream.recvCh <- protocol.ServerFrame{Welcome: &protocol.WelcomeFrame{RunnerID: "r1"}}
-
-	registry := execution.NewRegistry()
-	registerTestHandler(t, registry, "xflow.function", func(ctx context.Context, input *types.Input) (*types.Output, error) {
-		// No artificial delay — all 4 workers race to complete and send
-		// their RESULT frame at roughly the same time, maximizing
-		// contention on sendCh under -race.
-		return &types.Output{Data: map[string]any{"ok": true}}, nil
-	})
-
-	r := New(
-		&fakeClient{stream},
-		registry,
-		Config{
-			RunnerID:     "r1",
-			Concurrency:  4,
-			Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
-		},
-	)
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	runErr := make(chan error, 1)
-	go func() { runErr <- r.Run(ctx) }()
-
-	leaseIDs := []string{"L1", "L2", "L3", "L4"}
-	for _, id := range leaseIDs {
-		stream.recvCh <- protocol.ServerFrame{Task: &protocol.TaskFrame{
-			Lease: &engine.TaskLease{LeaseID: engine.LeaseID(id), NodeType: "xflow.function"},
-		}}
-	}
-
-	// Collect exactly 4 RESULT frames and verify each expected LeaseID
-	// appears exactly once — proves the send-loop neither drops nor
-	// duplicates frames written concurrently by the 4 workers.
-	seen := make(map[string]int)
-	for len(seen) < len(leaseIDs) || sumCounts(seen) < len(leaseIDs) {
-		select {
-		case fr := <-stream.sendCh:
-			if fr.Result != nil {
-				seen[fr.Result.LeaseID]++
-			}
-		case <-time.After(2 * time.Second):
-			t.Fatalf("timeout waiting for RESULT frames; got %v", seen)
-		}
-		if sumCounts(seen) >= len(leaseIDs) {
-			break
-		}
-	}
-
-	if sumCounts(seen) != len(leaseIDs) {
-		t.Fatalf("expected exactly %d RESULT frames, got %d (%v)", len(leaseIDs), sumCounts(seen), seen)
-	}
-	for _, id := range leaseIDs {
-		if seen[id] != 1 {
-			t.Fatalf("expected exactly 1 RESULT for %s, got %d (%v)", id, seen[id], seen)
-		}
-	}
-
-	cancel()
-	select {
-	case <-runErr:
-	case <-time.After(2 * time.Second):
-		t.Fatal("timeout waiting for Run() to return")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// TestRunnerHelloPropagatesLabels — proves the runner advertises its
-// configured Labels (and RunnerID/Concurrency/Capabilities) in the HELLO
-// frame, replacing the old poll-loop test that asserted labels reached
-// Register/Poll. Under the streaming architecture, labels travel in HELLO.
-// ---------------------------------------------------------------------------
-
-func TestRunnerHelloPropagatesLabels(t *testing.T) {
-	stream := newFakeStream(16)
-
-	registry := execution.NewRegistry()
-	r := New(
-		&fakeClient{stream},
-		registry,
-		Config{
-			RunnerID:     "r1",
-			Concurrency:  2,
-			Labels:       map[string]string{"mode": "remote", "env": "prod"},
-			Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
-		},
-	)
+func TestRunnerRegistersPollsExecutesAndReportsResult(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go func() { _ = r.Run(ctx) }()
 
-	// Run's first action is Send(HELLO); read it before it blocks on Recv
-	// (WELCOME). cancel() in a defer unblocks the pending Recv via
-	// fakeStream.Close so Run exits cleanly.
-	select {
-	case fr := <-stream.sendCh:
-		if fr.Hello == nil {
-			t.Fatalf("expected HELLO frame, got %+v", fr)
-		}
-		if fr.Hello.RunnerID != "r1" {
-			t.Fatalf("hello runner_id = %q, want r1", fr.Hello.RunnerID)
-		}
-		if fr.Hello.Concurrency != 2 {
-			t.Fatalf("hello concurrency = %d, want 2", fr.Hello.Concurrency)
-		}
-		if got := fr.Hello.Labels["mode"]; got != "remote" {
-			t.Fatalf("hello label mode = %q, want remote", got)
-		}
-		if got := fr.Hello.Labels["env"]; got != "prod" {
-			t.Fatalf("hello label env = %q, want prod", got)
-		}
-		if len(fr.Hello.Capabilities) != 1 || fr.Hello.Capabilities[0].NodeType != "xflow.function" {
-			t.Fatalf("hello capabilities = %+v, want [xflow.function]", fr.Hello.Capabilities)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timeout waiting for HELLO frame")
+	lease := &engine.TaskLease{
+		LeaseID:  engine.LeaseID("lease-1"),
+		Task:     engine.Task{ExecutionID: types.ExecutionID("exec-1"), NodeName: "start"},
+		Input:    &types.Input{Data: map[string]any{"claim_id": "c-1"}},
+		NodeType: "test.function",
+	}
+	client := &fakeProtocolClient{lease: lease, cancel: cancel}
+	registry := execution.NewRegistry()
+	registry.RegisterGlobal("test.function", functionHandler{})
+
+	r := New(client, registry, Config{
+		RunnerID:          "runner-1",
+		Concurrency:       1,
+		Capabilities:      []protocol.Capability{{NodeType: "test.function"}},
+		HeartbeatInterval: time.Hour,
+		PollWait:          time.Millisecond,
+	})
+
+	if err := r.Run(ctx); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if !client.registered {
+		t.Fatal("runner did not register")
+	}
+	if client.polls == 0 {
+		t.Fatal("runner did not poll")
+	}
+	if client.reported.Lease == nil || client.reported.Lease.LeaseID != lease.LeaseID {
+		t.Fatalf("reported lease = %+v, want %+v", client.reported.Lease, lease)
+	}
+	if client.reported.Result.Output == nil || client.reported.Result.Output.Data["claim_id"] != "c-1" {
+		t.Fatalf("reported result = %+v, want claim_id output", client.reported.Result)
 	}
 }
 
-func sumCounts(m map[string]int) int {
-	total := 0
-	for _, v := range m {
-		total += v
+type fakeProtocolClient struct {
+	lease      *engine.TaskLease
+	cancel     context.CancelFunc
+	registered bool
+	polls      int
+	reported   protocol.ReportResultRequest
+}
+
+func (c *fakeProtocolClient) Register(context.Context, protocol.RegisterRunnerRequest) (protocol.RegisterRunnerResponse, error) {
+	c.registered = true
+	return protocol.RegisterRunnerResponse{RunnerID: "runner-1"}, nil
+}
+
+func (c *fakeProtocolClient) Heartbeat(context.Context, protocol.HeartbeatRequest) (protocol.HeartbeatResponse, error) {
+	return protocol.HeartbeatResponse{}, nil
+}
+
+func (c *fakeProtocolClient) Poll(context.Context, protocol.PollTaskRequest) (protocol.PollTaskResponse, error) {
+	c.polls++
+	if c.lease == nil {
+		return protocol.PollTaskResponse{Wait: time.Millisecond}, nil
 	}
-	return total
+	lease := c.lease
+	c.lease = nil
+	return protocol.PollTaskResponse{Lease: lease}, nil
+}
+
+func (c *fakeProtocolClient) ReportResult(_ context.Context, req protocol.ReportResultRequest) (protocol.ReportResultResponse, error) {
+	c.reported = req
+	c.cancel()
+	return protocol.ReportResultResponse{Accepted: true}, nil
+}
+
+type functionHandler struct{}
+
+func (functionHandler) Descriptor() types.Descriptor {
+	return types.Descriptor{Type: "test.function"}
+}
+
+func (functionHandler) Execute(_ context.Context, input *types.Input) (*types.Output, error) {
+	return &types.Output{Data: input.Data}, nil
 }

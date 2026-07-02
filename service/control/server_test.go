@@ -17,8 +17,8 @@ import (
 
 func TestHTTPRunnerRegisterPollAndResult(t *testing.T) {
 	fake := &fakeControlEngine{}
-	pool := NewRunnerPool()
-	server := httptest.NewServer(NewServer(fake, pool).Handler())
+	dir := NewMemoryRunnerDirectory()
+	server := httptest.NewServer(NewServer(fake, dir).Handler())
 	defer server.Close()
 
 	register := protocol.RegisterRunnerRequest{
@@ -31,6 +31,9 @@ func TestHTTPRunnerRegisterPollAndResult(t *testing.T) {
 	if registerResp.RunnerID != "runner-1" {
 		t.Fatalf("runner id = %q, want runner-1", registerResp.RunnerID)
 	}
+	if registerResp.SessionID == "" {
+		t.Fatal("session id is empty")
+	}
 
 	lease := engine.TaskLease{
 		LeaseID:     engine.LeaseID("lease-1"),
@@ -39,13 +42,23 @@ func TestHTTPRunnerRegisterPollAndResult(t *testing.T) {
 		NodeType:    "xflow.function",
 		NodeVersion: 1,
 	}
-	if err := pool.Assign(lease); err != nil {
-		t.Fatalf("Assign() = %v, want nil", err)
+	fake.buildLease = &lease
+	enqueued, err := dir.EnqueueAssignment(context.Background(), Assignment{
+		AssignmentID: BuildAssignmentID(&lease.Task),
+		Task:         lease.Task,
+		Routing:      engine.TaskRouting{NodeType: lease.NodeType, NodeVersion: lease.NodeVersion},
+	})
+	if err != nil {
+		t.Fatalf("EnqueueAssignment() error = %v", err)
+	}
+	if !enqueued {
+		t.Fatal("EnqueueAssignment() enqueued=false, want true")
 	}
 
 	var pollResp protocol.PollTaskResponse
 	postJSON(t, server.URL+protocol.PollTaskPath, protocol.PollTaskRequest{
 		RunnerID:     "runner-1",
+		SessionID:    registerResp.SessionID,
 		Capacity:     1,
 		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
 	}, http.StatusOK, &pollResp)
@@ -55,9 +68,10 @@ func TestHTTPRunnerRegisterPollAndResult(t *testing.T) {
 
 	var resultResp protocol.ReportResultResponse
 	postJSON(t, server.URL+protocol.ReportResultPath, protocol.ReportResultRequest{
-		RunnerID: "runner-1",
-		Lease:    pollResp.Lease,
-		Result:   engine.TaskResult{Output: &types.Output{Data: map[string]any{"ok": true}}},
+		RunnerID:  "runner-1",
+		SessionID: registerResp.SessionID,
+		Lease:     pollResp.Lease,
+		Result:    engine.TaskResult{Output: &types.Output{Data: map[string]any{"ok": true}}},
 	}, http.StatusOK, &resultResp)
 	if !resultResp.Accepted {
 		t.Fatalf("result accepted = false, response %+v", resultResp)
@@ -65,11 +79,22 @@ func TestHTTPRunnerRegisterPollAndResult(t *testing.T) {
 	if fake.committedLease == nil || fake.committedLease.LeaseID != lease.LeaseID {
 		t.Fatalf("committed lease = %+v, want %+v", fake.committedLease, lease)
 	}
+	enqueued, err = dir.EnqueueAssignment(context.Background(), Assignment{
+		AssignmentID: BuildAssignmentID(&lease.Task),
+		Task:         lease.Task,
+		Routing:      engine.TaskRouting{NodeType: lease.NodeType, NodeVersion: lease.NodeVersion},
+	})
+	if err != nil {
+		t.Fatalf("requeue after report EnqueueAssignment() error = %v", err)
+	}
+	if !enqueued {
+		t.Fatal("requeue after report EnqueueAssignment() enqueued=false, want true")
+	}
 }
 
 func TestHTTPReportResultRejectsStaleLeaseToken(t *testing.T) {
 	fake := &fakeControlEngine{commitErr: engine.ErrInvalidLeaseToken}
-	server := httptest.NewServer(NewServer(fake, NewRunnerPool()).Handler())
+	server := httptest.NewServer(NewServer(fake, NewMemoryRunnerDirectory()).Handler())
 	defer server.Close()
 
 	var resultResp protocol.ReportResultResponse
@@ -85,14 +110,18 @@ func TestHTTPReportResultRejectsStaleLeaseToken(t *testing.T) {
 
 func TestHTTPReportResultPreservesRunnerError(t *testing.T) {
 	fake := &fakeControlEngine{}
-	server := httptest.NewServer(NewServer(fake, NewRunnerPool()).Handler())
+	dir := NewMemoryRunnerDirectory()
+	server := httptest.NewServer(NewServer(fake, dir).Handler())
 	defer server.Close()
+
+	session := mustRegisterHTTPRunner(t, dir)
 
 	var resultResp protocol.ReportResultResponse
 	postJSON(t, server.URL+protocol.ReportResultPath, protocol.ReportResultRequest{
-		RunnerID: "runner-1",
-		Lease:    &engine.TaskLease{LeaseID: engine.LeaseID("lease-1")},
-		Result:   engine.TaskResult{Error: errors.New("handler failed")},
+		RunnerID:  "runner-1",
+		SessionID: session.SessionID,
+		Lease:     &engine.TaskLease{LeaseID: engine.LeaseID("lease-1"), Task: engine.Task{ExecutionID: "exec-1", NodeName: "start"}, NodeType: "xflow.function"},
+		Result:    engine.TaskResult{Error: errors.New("handler failed")},
 	}, http.StatusOK, &resultResp)
 	if !resultResp.Accepted {
 		t.Fatalf("result accepted = false, response %+v", resultResp)
@@ -109,7 +138,7 @@ func TestHTTPInspectSignalAndCancel(t *testing.T) {
 			Status:      types.ExecutionStatusRunning,
 		},
 	}
-	server := httptest.NewServer(NewServer(fake, NewRunnerPool()).Handler())
+	server := httptest.NewServer(NewServer(fake, NewMemoryRunnerDirectory()).Handler())
 	defer server.Close()
 
 	resp, err := http.Get(server.URL + "/v1/executions/exec-1")
@@ -144,7 +173,7 @@ func TestHTTPInspectSignalAndCancel(t *testing.T) {
 
 func TestHTTPInspectUnknownExecutionReturnsNotFound(t *testing.T) {
 	fake := &fakeControlEngine{inspectErr: errExecutionNotFound}
-	server := httptest.NewServer(NewServer(fake, NewRunnerPool()).Handler())
+	server := httptest.NewServer(NewServer(fake, NewMemoryRunnerDirectory()).Handler())
 	defer server.Close()
 
 	resp, err := http.Get(server.URL + "/v1/executions/missing")
@@ -160,6 +189,9 @@ func TestHTTPInspectUnknownExecutionReturnsNotFound(t *testing.T) {
 type fakeControlEngine struct {
 	inspectDetail   engine.ExecutionDetail
 	inspectErr      error
+	buildLease      *engine.TaskLease
+	buildErr        error
+	commitOutcome   engine.CommitOutcome
 	commitErr       error
 	committedLease  *engine.TaskLease
 	committedResult engine.TaskResult
@@ -190,17 +222,49 @@ func (f *fakeControlEngine) Cancel(_ context.Context, id types.ExecutionID) erro
 	return nil
 }
 
-func (f *fakeControlEngine) CommitTaskResult(_ context.Context, lease *engine.TaskLease, result engine.TaskResult) error {
+func (f *fakeControlEngine) BuildTaskLease(_ context.Context, task *engine.Task) (*engine.TaskLease, error) {
+	if f.buildErr != nil {
+		return nil, f.buildErr
+	}
+	if f.buildLease != nil {
+		lease := *f.buildLease
+		return &lease, nil
+	}
+	return &engine.TaskLease{Task: *task, NodeType: "xflow.function"}, nil
+}
+
+func (f *fakeControlEngine) CommitTaskResultWithOutcome(_ context.Context, lease *engine.TaskLease, result engine.TaskResult) (engine.CommitOutcome, error) {
 	if f.commitErr != nil {
-		return f.commitErr
+		if errors.Is(f.commitErr, engine.ErrInvalidLeaseToken) {
+			return engine.CommitOutcomeStaleToken, f.commitErr
+		}
+		return engine.CommitOutcomeTransientError, f.commitErr
 	}
 	f.committedLease = lease
 	f.committedResult = result
-	return nil
+	if f.commitOutcome != "" {
+		return f.commitOutcome, nil
+	}
+	return engine.CommitOutcomeAccepted, nil
 }
 
-func (f *fakeControlEngine) BuildTaskLease(context.Context, *engine.Task) (*engine.TaskLease, error) {
-	return nil, nil
+func (f *fakeControlEngine) CommitTaskResult(ctx context.Context, lease *engine.TaskLease, result engine.TaskResult) error {
+	_, err := f.CommitTaskResultWithOutcome(ctx, lease, result)
+	return err
+}
+
+func mustRegisterHTTPRunner(t *testing.T, dir *MemoryRunnerDirectory) RunnerSession {
+	t.Helper()
+	session, err := dir.Register(context.Background(), RegisterRunnerRequest{
+		RunnerID:     "runner-1",
+		Capacity:     1,
+		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
+		Policy:       RunnerPolicy{AllowedNodeTypes: []string{"*"}},
+	})
+	if err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	return session
 }
 
 func (f *fakeControlEngine) TaskRouting(context.Context, *engine.Task) (engine.TaskRouting, error) {

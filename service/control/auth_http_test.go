@@ -2,6 +2,7 @@ package control
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -10,7 +11,7 @@ import (
 	"github.com/xbcio/xflow/service/protocol"
 )
 
-func newAuthedServer(t *testing.T) (*httptest.Server, *RunnerPool) {
+func newAuthedServer(t *testing.T) (*httptest.Server, *MemoryRunnerDirectory) {
 	t.Helper()
 	store, err := NewFilePolicyStoreFromConfig(PolicyConfig{
 		Version: 1,
@@ -25,10 +26,10 @@ func newAuthedServer(t *testing.T) (*httptest.Server, *RunnerPool) {
 		t.Fatal(err)
 	}
 	fake := &fakeControlEngine{}
-	pool := NewRunnerPool()
-	srv := httptest.NewServer(NewServer(fake, pool, WithAuthenticator(store)).Handler())
+	dir := NewMemoryRunnerDirectory()
+	srv := httptest.NewServer(NewServer(fake, dir, WithAuthenticator(store)).Handler())
 	t.Cleanup(srv.Close)
-	return srv, pool
+	return srv, dir
 }
 
 func postAuthed(t *testing.T, url, token string, body any) *http.Response {
@@ -76,7 +77,7 @@ func TestHTTPRegisterAcceptedWithValidBearerToken(t *testing.T) {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 	// Runner registered with the policy so its allowed types are enforced.
-	snap, ok := pool.Runner("order-runner-1")
+	snap, ok := pool.Runner(context.Background(), "order-runner-1")
 	if !ok || snap.RunnerID != "order-runner-1" {
 		t.Fatalf("runner not registered: %+v", snap)
 	}
