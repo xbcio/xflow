@@ -113,3 +113,268 @@ func TestMemoryRunnerDirectorySessionFencesStaleRequests(t *testing.T) {
 		t.Fatalf("stale Heartbeat() error = %v, want ErrRunnerSessionStale", err)
 	}
 }
+
+func TestMemoryRunnerDirectoryClaimHeadroomCountsInflightActiveClaimsAndFinalizedLeases(t *testing.T) {
+	ctx := context.Background()
+	dir := NewMemoryRunnerDirectory()
+	session := mustRegisterMemoryRunner(t, ctx, dir, "runner-1", 3)
+
+	if err := dir.Heartbeat(ctx, HeartbeatRequest{
+		RunnerID:  "runner-1",
+		SessionID: session.SessionID,
+		Capacity:  3,
+		InFlight:  1,
+	}); err != nil {
+		t.Fatalf("Heartbeat() error = %v", err)
+	}
+
+	first := testAssignment("exec-1/node-a/activation-1")
+	second := testAssignment("exec-1/node-b/activation-1")
+	third := testAssignment("exec-1/node-c/activation-1")
+	mustEnqueueAssignment(t, ctx, dir, first)
+	mustEnqueueAssignment(t, ctx, dir, second)
+	mustEnqueueAssignment(t, ctx, dir, third)
+
+	firstClaim := mustClaimAssignment(t, ctx, dir, session)
+	if firstClaim.Assignment.AssignmentID != first.AssignmentID {
+		t.Fatalf("first claim assignment = %q, want %q", firstClaim.Assignment.AssignmentID, first.AssignmentID)
+	}
+	if err := dir.FinalizeClaim(ctx, firstClaim.ClaimID, &engine.TaskLease{LeaseID: "lease-1"}); err != nil {
+		t.Fatalf("FinalizeClaim() error = %v", err)
+	}
+
+	secondClaim := mustClaimAssignment(t, ctx, dir, session)
+	if secondClaim.Assignment.AssignmentID != second.AssignmentID {
+		t.Fatalf("second claim assignment = %q, want %q", secondClaim.Assignment.AssignmentID, second.AssignmentID)
+	}
+
+	if _, ok, err := dir.ClaimForRunner(ctx, testClaimRequest(session, 3)); err != nil {
+		t.Fatalf("ClaimForRunner() error = %v", err)
+	} else if ok {
+		t.Fatal("ClaimForRunner() ok=true, want no claim when inflight, finalized, and active claims exhaust headroom")
+	}
+
+	if err := dir.ReleaseClaim(ctx, secondClaim.ClaimID, ReleaseClaimDrop); err != nil {
+		t.Fatalf("ReleaseClaim() error = %v", err)
+	}
+
+	thirdClaim := mustClaimAssignment(t, ctx, dir, session)
+	if thirdClaim.Assignment.AssignmentID != third.AssignmentID {
+		t.Fatalf("third claim assignment = %q, want %q", thirdClaim.Assignment.AssignmentID, third.AssignmentID)
+	}
+}
+
+func TestMemoryRunnerDirectoryReleaseClaimSemantics(t *testing.T) {
+	tests := []struct {
+		name              string
+		reason            ReleaseClaimReason
+		wantNext          AssignmentID
+		wantReenqueueAOne bool
+	}{
+		{
+			name:              "requeue keeps seen and returns assignment to front",
+			reason:            ReleaseClaimRequeue,
+			wantNext:          AssignmentID("exec-1/node-a/activation-1"),
+			wantReenqueueAOne: false,
+		},
+		{
+			name:              "drop clears seen and discards assignment",
+			reason:            ReleaseClaimDrop,
+			wantNext:          AssignmentID("exec-1/node-b/activation-1"),
+			wantReenqueueAOne: true,
+		},
+		{
+			name:              "keep seen frees accounting without requeue",
+			reason:            ReleaseClaimKeepSeen,
+			wantNext:          AssignmentID("exec-1/node-b/activation-1"),
+			wantReenqueueAOne: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			dir := NewMemoryRunnerDirectory()
+			session := mustRegisterMemoryRunner(t, ctx, dir, "runner-1", 1)
+
+			first := testAssignment("exec-1/node-a/activation-1")
+			second := testAssignment("exec-1/node-b/activation-1")
+			mustEnqueueAssignment(t, ctx, dir, first)
+			mustEnqueueAssignment(t, ctx, dir, second)
+
+			claim := mustClaimAssignment(t, ctx, dir, session)
+			if claim.Assignment.AssignmentID != first.AssignmentID {
+				t.Fatalf("claim assignment = %q, want %q", claim.Assignment.AssignmentID, first.AssignmentID)
+			}
+
+			if err := dir.ReleaseClaim(ctx, claim.ClaimID, tt.reason); err != nil {
+				t.Fatalf("ReleaseClaim() error = %v", err)
+			}
+
+			nextClaim := mustClaimAssignment(t, ctx, dir, session)
+			if nextClaim.Assignment.AssignmentID != tt.wantNext {
+				t.Fatalf("next claim assignment = %q, want %q", nextClaim.Assignment.AssignmentID, tt.wantNext)
+			}
+
+			enqueued, err := dir.EnqueueAssignment(ctx, first)
+			if err != nil {
+				t.Fatalf("EnqueueAssignment() error = %v", err)
+			}
+			if enqueued != tt.wantReenqueueAOne {
+				t.Fatalf("EnqueueAssignment() after %s = %v, want %v", tt.reason, enqueued, tt.wantReenqueueAOne)
+			}
+		})
+	}
+}
+
+func TestMemoryRunnerDirectoryReleaseLeasedControlsSeenRemoval(t *testing.T) {
+	ctx := context.Background()
+	dir := NewMemoryRunnerDirectory()
+	session := mustRegisterMemoryRunner(t, ctx, dir, "runner-1", 2)
+
+	first := testAssignment("exec-1/node-a/activation-1")
+	second := testAssignment("exec-1/node-b/activation-1")
+	mustEnqueueAssignment(t, ctx, dir, first)
+	mustEnqueueAssignment(t, ctx, dir, second)
+
+	firstClaim := mustClaimAssignment(t, ctx, dir, session)
+	secondClaim := mustClaimAssignment(t, ctx, dir, session)
+	if err := dir.FinalizeClaim(ctx, firstClaim.ClaimID, &engine.TaskLease{LeaseID: "lease-1"}); err != nil {
+		t.Fatalf("FinalizeClaim(first) error = %v", err)
+	}
+	if err := dir.FinalizeClaim(ctx, secondClaim.ClaimID, &engine.TaskLease{LeaseID: "lease-2"}); err != nil {
+		t.Fatalf("FinalizeClaim(second) error = %v", err)
+	}
+
+	if err := dir.ReleaseLeased(ctx, ReleaseLeasedRequest{
+		RunnerID:     "runner-1",
+		SessionID:    session.SessionID,
+		AssignmentID: first.AssignmentID,
+		RemoveSeen:   false,
+	}); err != nil {
+		t.Fatalf("ReleaseLeased(first) error = %v", err)
+	}
+	if err := dir.ReleaseLeased(ctx, ReleaseLeasedRequest{
+		RunnerID:     "runner-1",
+		SessionID:    session.SessionID,
+		AssignmentID: second.AssignmentID,
+		RemoveSeen:   true,
+	}); err != nil {
+		t.Fatalf("ReleaseLeased(second) error = %v", err)
+	}
+
+	if enqueued, err := dir.EnqueueAssignment(ctx, first); err != nil {
+		t.Fatalf("EnqueueAssignment(first) error = %v", err)
+	} else if enqueued {
+		t.Fatal("EnqueueAssignment(first) enqueued=true, want false when seen marker remains")
+	}
+	if enqueued, err := dir.EnqueueAssignment(ctx, second); err != nil {
+		t.Fatalf("EnqueueAssignment(second) error = %v", err)
+	} else if !enqueued {
+		t.Fatal("EnqueueAssignment(second) enqueued=false, want true after RemoveSeen")
+	}
+}
+
+func TestMemoryRunnerDirectoryReregisterPreservesFinalizedLeasesAndRequeuesActiveClaims(t *testing.T) {
+	ctx := context.Background()
+	dir := NewMemoryRunnerDirectory()
+	firstSession := mustRegisterMemoryRunner(t, ctx, dir, "runner-1", 2)
+
+	first := testAssignment("exec-1/node-a/activation-1")
+	second := testAssignment("exec-1/node-b/activation-1")
+	third := testAssignment("exec-1/node-c/activation-1")
+	mustEnqueueAssignment(t, ctx, dir, first)
+	mustEnqueueAssignment(t, ctx, dir, second)
+	mustEnqueueAssignment(t, ctx, dir, third)
+
+	firstClaim := mustClaimAssignment(t, ctx, dir, firstSession)
+	if err := dir.FinalizeClaim(ctx, firstClaim.ClaimID, &engine.TaskLease{LeaseID: "lease-1"}); err != nil {
+		t.Fatalf("FinalizeClaim() error = %v", err)
+	}
+
+	secondClaim := mustClaimAssignment(t, ctx, dir, firstSession)
+	if secondClaim.Assignment.AssignmentID != second.AssignmentID {
+		t.Fatalf("second claim assignment = %q, want %q", secondClaim.Assignment.AssignmentID, second.AssignmentID)
+	}
+
+	secondSession := mustRegisterMemoryRunner(t, ctx, dir, "runner-1", 2)
+	if firstSession.SessionID == secondSession.SessionID {
+		t.Fatalf("sessions should differ, both %q", firstSession.SessionID)
+	}
+
+	reclaimed := mustClaimAssignment(t, ctx, dir, secondSession)
+	if reclaimed.Assignment.AssignmentID != second.AssignmentID {
+		t.Fatalf("reclaimed assignment = %q, want %q", reclaimed.Assignment.AssignmentID, second.AssignmentID)
+	}
+
+	if _, ok, err := dir.ClaimForRunner(ctx, testClaimRequest(secondSession, 2)); err != nil {
+		t.Fatalf("ClaimForRunner() error = %v", err)
+	} else if ok {
+		t.Fatal("ClaimForRunner() ok=true, want no second claim while finalized lease still consumes headroom after re-registration")
+	}
+}
+
+func mustRegisterMemoryRunner(t *testing.T, ctx context.Context, dir *MemoryRunnerDirectory, runnerID string, capacity int) RunnerSession {
+	t.Helper()
+
+	session, err := dir.Register(ctx, RegisterRunnerRequest{
+		RunnerID:     runnerID,
+		Capacity:     capacity,
+		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
+		Policy:       RunnerPolicy{AllowedNodeTypes: []string{"xflow.function"}},
+		Now:          time.Unix(10, 0),
+	})
+	if err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	return session
+}
+
+func mustEnqueueAssignment(t *testing.T, ctx context.Context, dir *MemoryRunnerDirectory, assignment Assignment) {
+	t.Helper()
+
+	enqueued, err := dir.EnqueueAssignment(ctx, assignment)
+	if err != nil {
+		t.Fatalf("EnqueueAssignment() error = %v", err)
+	}
+	if !enqueued {
+		t.Fatalf("EnqueueAssignment() enqueued=false for %q", assignment.AssignmentID)
+	}
+}
+
+func mustClaimAssignment(t *testing.T, ctx context.Context, dir *MemoryRunnerDirectory, session RunnerSession) Claim {
+	t.Helper()
+
+	claim, ok, err := dir.ClaimForRunner(ctx, testClaimRequest(session, 4))
+	if err != nil {
+		t.Fatalf("ClaimForRunner() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("ClaimForRunner() ok=false, want claim")
+	}
+	return claim
+}
+
+func testClaimRequest(session RunnerSession, capacity int) ClaimRequest {
+	return ClaimRequest{
+		RunnerID:     session.RunnerID,
+		SessionID:    session.SessionID,
+		Capacity:     capacity,
+		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
+		Now:          time.Unix(11, 0),
+	}
+}
+
+func testAssignment(id AssignmentID) Assignment {
+	return Assignment{
+		AssignmentID: id,
+		Task: engine.Task{
+			ExecutionID:  "exec-1",
+			NodeName:     string(id),
+			NodeIdx:      0,
+			Type:         engine.TaskTypeNodeExec,
+			ActivationID: 1,
+		},
+		Routing: engine.TaskRouting{NodeType: "xflow.function"},
+	}
+}

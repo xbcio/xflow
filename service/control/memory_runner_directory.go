@@ -58,10 +58,10 @@ func (d *MemoryRunnerDirectory) Register(_ context.Context, req RegisterRunnerRe
 		return RunnerSession{}, ErrConcurrencyRequired
 	}
 
+	finalizedLease := make(map[AssignmentID]engine.TaskLease)
 	if existing := d.runners[req.RunnerID]; existing != nil {
 		d.requeueActiveClaimsLocked(existing)
-		existing.activeClaims = make(map[ClaimID]AssignmentID)
-		existing.finalizedLease = make(map[AssignmentID]engine.TaskLease)
+		finalizedLease = cloneFinalizedLeases(existing.finalizedLease)
 	}
 
 	now := req.Now
@@ -83,7 +83,7 @@ func (d *MemoryRunnerDirectory) Register(_ context.Context, req RegisterRunnerRe
 		sessionID:      session.SessionID,
 		activeClaims:   make(map[ClaimID]AssignmentID),
 		activeOrder:    nil,
-		finalizedLease: make(map[AssignmentID]engine.TaskLease),
+		finalizedLease: finalizedLease,
 	}
 	d.runners[req.RunnerID] = state
 	return session, nil
@@ -334,6 +334,18 @@ func removeClaimID(claims []ClaimID, claimID ClaimID) []ClaimID {
 		return append(claims[:i], claims[i+1:]...)
 	}
 	return claims
+}
+
+func cloneFinalizedLeases(src map[AssignmentID]engine.TaskLease) map[AssignmentID]engine.TaskLease {
+	if len(src) == 0 {
+		return make(map[AssignmentID]engine.TaskLease)
+	}
+
+	cloned := make(map[AssignmentID]engine.TaskLease, len(src))
+	for assignmentID, lease := range src {
+		cloned[assignmentID] = lease
+	}
+	return cloned
 }
 
 func canRunRouting(capabilities []protocol.Capability, routing engine.TaskRouting) bool {
