@@ -90,7 +90,7 @@ func TestRedisHubTriggerContinuesAfterEmitError(t *testing.T) {
 		}
 		return "exec-2", nil
 	}
-	tr := RedisHubTrigger().Mode("stream").Stream("orders").Group("workers")
+	tr := RedisHubTrigger().Mode("stream").Stream("orders").Group("workers").MaxInflight(1)
 	sub, err := tr.Activate(context.Background(), &types.TriggerActivateInput{
 		WorkflowID: "wf-1",
 		NodeName:   "redis",
@@ -143,6 +143,9 @@ func TestRedisHubTriggerPubSubStopsWhenLockRenewalFails(t *testing.T) {
 	}
 	if !consumer.waitClosed(time.Second) {
 		t.Fatal("consumer was not closed after renewal failure")
+	}
+	if !lock.waitRelease(time.Second) {
+		t.Fatal("lock was not released after renewal failure")
 	}
 	if got := lock.releaseCount(); got != 1 {
 		t.Fatalf("release count = %d, want 1", got)
@@ -308,6 +311,17 @@ func (l *scriptedRenewableTriggerLock) waitRenew(timeout time.Duration) bool {
 	defer timer.Stop()
 	select {
 	case <-l.renewSignal:
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
+func (l *scriptedRenewableTriggerLock) waitRelease(timeout time.Duration) bool {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-l.releaseSignal:
 		return true
 	case <-timer.C:
 		return false

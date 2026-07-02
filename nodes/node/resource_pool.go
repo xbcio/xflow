@@ -19,7 +19,7 @@ import (
 // Implementations must be safe for concurrent use. Close releases all
 // resources and is idempotent.
 //
-// Spec: .claude/docs/specs/resource-pool.md
+// Spec: .claude/specs/resource-pool.md
 type ResourcePool interface {
 	SQL(ctx context.Context, driver, dsn string) (*sql.DB, error)
 	GRPC(ctx context.Context, host string, secure bool, opts ...grpc.DialOption) (*grpc.ClientConn, error)

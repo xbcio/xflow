@@ -84,7 +84,7 @@ func TestKafkaTriggerContinuesAfterEmitError(t *testing.T) {
 		}
 		return "exec-2", nil
 	}
-	tr := KafkaTrigger().Brokers("localhost:9092").Topic("orders").Group("workers")
+	tr := KafkaTrigger().Brokers("localhost:9092").Topic("orders").Group("workers").MaxInflight(1)
 	sub, err := tr.Activate(context.Background(), &types.TriggerActivateInput{
 		WorkflowID: "wf-1",
 		NodeName:   "kafka",

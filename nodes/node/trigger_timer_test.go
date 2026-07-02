@@ -111,6 +111,7 @@ func TestTimerTriggerEventUsesDeterministicIntervalBucket(t *testing.T) {
 
 type fakeTriggerRuntime struct {
 	mu          sync.Mutex
+	callbackMu  sync.Mutex
 	emits       []*types.TriggerEvent
 	emitSignal  chan struct{}
 	dedupSignal chan struct{}
@@ -128,6 +129,8 @@ func newFakeTriggerRuntime() *fakeTriggerRuntime {
 func (r *fakeTriggerRuntime) Emit(ctx context.Context, workflowID types.WorkflowID, nodeName string, event *types.TriggerEvent) (types.ExecutionID, error) {
 	r.recordEmit(event)
 	if r.emitFunc != nil {
+		r.callbackMu.Lock()
+		defer r.callbackMu.Unlock()
 		return r.emitFunc(ctx, workflowID, nodeName, event)
 	}
 	return "exec-1", nil
@@ -139,6 +142,8 @@ func (r *fakeTriggerRuntime) Dedup(ctx context.Context, key string, ttl time.Dur
 	default:
 	}
 	if r.dedupFunc != nil {
+		r.callbackMu.Lock()
+		defer r.callbackMu.Unlock()
 		return r.dedupFunc(ctx, key, ttl)
 	}
 	return true, nil
