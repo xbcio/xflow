@@ -50,6 +50,11 @@ type coordinatedLeaseState struct {
 	blockOnce   sync.Once
 }
 
+type claimTaskLeaseErrorState struct {
+	*fakeState
+	err error
+}
+
 func newCoordinatedLeaseState() *coordinatedLeaseState {
 	return &coordinatedLeaseState{
 		fakeState:   newFakeState(),
@@ -84,6 +89,10 @@ func (s *coordinatedLeaseState) release() {
 	s.releaseOnce.Do(func() {
 		close(s.releaseLock)
 	})
+}
+
+func (s *claimTaskLeaseErrorState) ClaimTaskLease(_ context.Context, _ *TaskLease) (*NodeSnapshot, bool, error) {
+	return nil, false, s.err
 }
 
 func (h *recordingHooks) OnNodeStart(_ context.Context, _ types.ExecutionID, name string) {
@@ -516,6 +525,88 @@ func TestEngine_CommitTaskResultWithOutcomeClassifiesAcceptedDuplicateAndStale(t
 			t.Fatalf("fresh outcome = %s, want %s", outcome, CommitOutcomeAccepted)
 		}
 	})
+}
+
+func TestEngine_CommitTaskResultWithOutcomeClassifiesExecutionInactive(t *testing.T) {
+	ctx := context.Background()
+	eng, queue := newRunnerCommitEngine(t)
+	submitRunnerCommitWorkflow(t, ctx, eng)
+	task := queue.Drain()[0]
+
+	lease, err := eng.BuildTaskLease(ctx, task)
+	if err != nil {
+		t.Fatalf("BuildTaskLease() error = %v", err)
+	}
+
+	outcome, err := eng.CommitTaskResultWithOutcome(ctx, lease, TaskResult{
+		Output: &types.Output{Data: map[string]any{"ok": true}},
+	})
+	if err != nil {
+		t.Fatalf("first CommitTaskResultWithOutcome() error = %v", err)
+	}
+	if outcome != CommitOutcomeAccepted {
+		t.Fatalf("first outcome = %s, want %s", outcome, CommitOutcomeAccepted)
+	}
+
+	outcome, err = eng.CommitTaskResultWithOutcome(ctx, lease, TaskResult{
+		Output: &types.Output{Data: map[string]any{"late": true}},
+	})
+	if err != nil {
+		t.Fatalf("inactive CommitTaskResultWithOutcome() error = %v, want nil", err)
+	}
+	if outcome != CommitOutcomeExecutionInactive {
+		t.Fatalf("inactive outcome = %s, want %s", outcome, CommitOutcomeExecutionInactive)
+	}
+}
+
+func TestEngine_CommitTaskResultWithOutcomeClassifiesTransientError(t *testing.T) {
+	ctx := context.Background()
+	state := &claimTaskLeaseErrorState{
+		fakeState: newFakeState(),
+		err:       errors.New("claim task lease failed"),
+	}
+	queue := &fakeQueue{}
+	eng := New(state, queue)
+	submitRunnerCommitWorkflow(t, ctx, eng)
+	task := queue.Drain()[0]
+
+	lease, err := eng.BuildTaskLease(ctx, task)
+	if err != nil {
+		t.Fatalf("BuildTaskLease() error = %v", err)
+	}
+
+	outcome, err := eng.CommitTaskResultWithOutcome(ctx, lease, TaskResult{
+		Output: &types.Output{Data: map[string]any{"ok": true}},
+	})
+	if !errors.Is(err, state.err) {
+		t.Fatalf("CommitTaskResultWithOutcome() error = %v, want %v", err, state.err)
+	}
+	if outcome != CommitOutcomeTransientError {
+		t.Fatalf("outcome = %s, want %s", outcome, CommitOutcomeTransientError)
+	}
+}
+
+func TestCommitOutcome_ReleasesLeasedCapacity(t *testing.T) {
+	tests := []struct {
+		name    string
+		outcome CommitOutcome
+		want    bool
+	}{
+		{name: "accepted", outcome: CommitOutcomeAccepted, want: true},
+		{name: "duplicate terminal", outcome: CommitOutcomeDuplicateTerminal, want: true},
+		{name: "stale token", outcome: CommitOutcomeStaleToken, want: true},
+		{name: "execution inactive", outcome: CommitOutcomeExecutionInactive, want: true},
+		{name: "transient error", outcome: CommitOutcomeTransientError, want: false},
+		{name: "unknown outcome", outcome: CommitOutcome("unknown"), want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.outcome.ReleasesLeasedCapacity(); got != tt.want {
+				t.Fatalf("ReleasesLeasedCapacity(%q) = %v, want %v", tt.outcome, got, tt.want)
+			}
+		})
+	}
 }
 
 func TestEngine_BuildTaskLeaseRejectsActiveUnexpiredLeaseButRoutingIsIdempotent(t *testing.T) {
