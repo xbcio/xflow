@@ -44,90 +44,21 @@ func IsTransient(err error) bool {
 	return errors.Is(err, ErrNoMatchingRunner) || errors.Is(err, ErrNoCapacity)
 }
 
-// LeaseBuilder builds a runner-facing task lease. The legacy *RunnerPool path
-// uses it; RunnerDirectory dispatch defers lease construction to runner poll.
-type LeaseBuilder interface {
-	BuildTaskLease(ctx context.Context, t *engine.Task) (*engine.TaskLease, error)
-}
-
 // Router returns side-effect-free routing metadata for a queued task.
 type Router interface {
 	TaskRouting(ctx context.Context, t *engine.Task) (engine.TaskRouting, error)
 }
 
 type Dispatcher struct {
-	engine     Router
-	runners    RunnerDirectory
-	legacyPool *RunnerPool
-	observer   DispatcherObserver
+	engine  Router
+	runners RunnerDirectory
 }
 
-// DispatcherObserver receives retryable dispatch placement failures.
-type DispatcherObserver interface {
-	OnDispatchTransient(reason string)
-}
-
-// DispatcherOption configures a Dispatcher.
-type DispatcherOption func(*Dispatcher)
-
-// WithDispatcherObserver installs a non-blocking observer for placement
-// failures that should be retried by the queue layer.
-func WithDispatcherObserver(observer DispatcherObserver) DispatcherOption {
-	return func(d *Dispatcher) {
-		d.observer = observer
-	}
-}
-
-func NewDispatcher(engine Router, runners any, opts ...DispatcherOption) *Dispatcher {
-	d := &Dispatcher{engine: engine}
-	switch r := runners.(type) {
-	case RunnerDirectory:
-		d.runners = r
-	case *RunnerPool:
-		d.legacyPool = r
-	case nil:
-	default:
-		panic("unsupported dispatcher runner target")
-	}
-	for _, opt := range opts {
-		opt(d)
-	}
-	return d
-}
-
-func (d *Dispatcher) observeTransient(err error) {
-	if d.observer == nil {
-		return
-	}
-	switch {
-	case errors.Is(err, ErrNoCapacity):
-		d.observer.OnDispatchTransient("no_capacity")
-	case errors.Is(err, ErrNoMatchingRunner):
-		d.observer.OnDispatchTransient("no_matching_runner")
-	}
+func NewDispatcher(engine Router, runners RunnerDirectory) *Dispatcher {
+	return &Dispatcher{engine: engine, runners: runners}
 }
 
 func (d *Dispatcher) HandleTask(ctx context.Context, task *engine.Task) error {
-	if d.runners != nil {
-		routing, err := d.engine.TaskRouting(ctx, task)
-		if err != nil {
-			if errors.Is(err, engine.ErrExecutionInactive) {
-				return nil
-			}
-			return err
-		}
-		_, err = d.runners.EnqueueAssignment(ctx, Assignment{
-			AssignmentID: BuildAssignmentID(task),
-			Task:         *task,
-			Routing:      routing,
-		})
-		if err != nil {
-			d.observeTransient(err)
-			return &Transient{Err: err}
-		}
-		return nil
-	}
-
 	routing, err := d.engine.TaskRouting(ctx, task)
 	if err != nil {
 		if errors.Is(err, engine.ErrExecutionInactive) {
@@ -135,23 +66,16 @@ func (d *Dispatcher) HandleTask(ctx context.Context, task *engine.Task) error {
 		}
 		return err
 	}
-	if d.legacyPool == nil {
-		err := ErrNoMatchingRunner
-		d.observeTransient(err)
+	if d.runners == nil {
+		return &Transient{Err: ErrNoMatchingRunner}
+	}
+	_, err = d.runners.EnqueueAssignment(ctx, Assignment{
+		AssignmentID: BuildAssignmentID(task),
+		Task:         *task,
+		Routing:      routing,
+	})
+	if err != nil {
 		return &Transient{Err: err}
-	}
-	builder, ok := d.engine.(LeaseBuilder)
-	if !ok {
-		return errors.New("dispatcher engine does not build task leases for legacy runner pool")
-	}
-	if err := d.legacyPool.AssignRouted(routing, func() (*engine.TaskLease, error) {
-		return builder.BuildTaskLease(ctx, task)
-	}); err != nil {
-		if err == engine.ErrExecutionInactive || err == engine.ErrLeaseAlreadyActive {
-			return nil
-		}
-		d.observeTransient(err)
-		return err
 	}
 	return nil
 }

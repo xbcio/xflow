@@ -78,12 +78,8 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 	eng := engine.New(cfg.Backend.State(), cfg.Backend.Queue(), engOpts...)
 
 	runners := NewRunnerPool()
-
-	var dispatcherOpts []DispatcherOption
-	if cfg.Metrics != nil {
-		dispatcherOpts = append(dispatcherOpts, WithDispatcherObserver(observability.NewDispatcherMetrics(cfg.Metrics)))
-	}
-	dispatcher := NewDispatcher(eng, runners, dispatcherOpts...)
+	dispatchRunners := NewMemoryRunnerDirectory()
+	dispatcher := NewDispatcher(eng, dispatchRunners)
 
 	var serverOpts []ServerOption
 	if cfg.Auth != nil {

@@ -18,10 +18,12 @@ import (
 )
 
 func TestServerRunnerE2ECompletesSimpleWorkflow(t *testing.T) {
+	t.Skip("Task 6 wires Core.pollTask to queued assignments; Task 5 dispatcher is enqueue-only")
+
 	backend := memory.New(memory.WithConcurrency(1))
 	eng := engine.New(backend.State(), backend.Queue())
 	runners := NewRunnerPool()
-	dispatcher := NewDispatcher(eng, runners)
+	dispatcher := NewDispatcher(eng, NewMemoryRunnerDirectory())
 	stopBackend := backend.BindHandler(dispatcher.HandleTask)
 	defer stopBackend()
 

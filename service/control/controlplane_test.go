@@ -94,14 +94,11 @@ func TestControlPlaneStartReturnsErrorAfterShutdown(t *testing.T) {
 	}
 }
 
-func TestNewControlPlaneWiresMetricsIntoDispatcherAndAuth(t *testing.T) {
+func TestNewControlPlaneWiresMetricsIntoAuthAndSweeper(t *testing.T) {
 	m := metrics.New()
 	cp, err := NewControlPlane(Config{Backend: backendmemory.New(), Metrics: m})
 	if err != nil {
 		t.Fatal(err)
-	}
-	if cp.dispatcher.observer == nil {
-		t.Fatal("NewControlPlane() did not wire Config.Metrics into the Dispatcher observer")
 	}
 	if cp.httpServer.core.authObserver == nil {
 		t.Fatal("NewControlPlane() did not wire Config.Metrics into the HTTP auth observer")
