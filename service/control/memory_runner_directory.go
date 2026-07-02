@@ -29,6 +29,8 @@ type memoryRunnerState struct {
 	activeClaims   map[ClaimID]AssignmentID
 	activeOrder    []ClaimID
 	finalizedLease map[AssignmentID]engine.TaskLease
+	leaseByID      map[engine.LeaseID]AssignmentID
+	leaseByToken   map[engine.LeaseToken]AssignmentID
 }
 
 type memoryClaim struct {
@@ -87,9 +89,21 @@ func (d *MemoryRunnerDirectory) Register(_ context.Context, req RegisterRunnerRe
 		activeClaims:   make(map[ClaimID]AssignmentID),
 		activeOrder:    nil,
 		finalizedLease: finalizedLease,
+		leaseByID:      indexLeaseIDs(finalizedLease),
+		leaseByToken:   indexLeaseTokens(finalizedLease),
 	}
 	d.runners[req.RunnerID] = state
 	return session, nil
+}
+
+// ValidateSession confirms the runner ID still points to the provided live
+// session.
+func (d *MemoryRunnerDirectory) ValidateSession(_ context.Context, runnerID, sessionID string) error {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	_, err := d.runnerForSessionLocked(runnerID, sessionID)
+	return err
 }
 
 // Heartbeat updates runner liveness and advertised capacity for the current
@@ -188,8 +202,12 @@ func (d *MemoryRunnerDirectory) FinalizeClaim(_ context.Context, claimID ClaimID
 	delete(d.claims, claimID)
 	delete(state.activeClaims, claimID)
 	state.activeOrder = removeClaimID(state.activeOrder, claimID)
+	if existing, ok := state.finalizedLease[claim.assignment.AssignmentID]; ok {
+		state.removeLeaseIndexes(claim.assignment.AssignmentID, existing)
+	}
 	if lease != nil {
 		state.finalizedLease[claim.assignment.AssignmentID] = *lease
+		state.addLeaseIndexes(claim.assignment.AssignmentID, *lease)
 	} else {
 		state.finalizedLease[claim.assignment.AssignmentID] = engine.TaskLease{}
 	}
@@ -233,9 +251,18 @@ func (d *MemoryRunnerDirectory) ReleaseLeased(_ context.Context, req ReleaseLeas
 		return err
 	}
 
-	delete(state.finalizedLease, req.AssignmentID)
+	assignmentID, ok := state.resolveAssignmentID(req)
+	if !ok {
+		return nil
+	}
+	current, ok := state.finalizedLease[assignmentID]
+	if !ok || !matchesReleasedLease(current, req) {
+		return nil
+	}
+	delete(state.finalizedLease, assignmentID)
+	state.removeLeaseIndexes(assignmentID, current)
 	if req.RemoveSeen {
-		delete(d.seen, req.AssignmentID)
+		delete(d.seen, assignmentID)
 	}
 	return nil
 }
@@ -259,7 +286,10 @@ func (d *MemoryRunnerDirectory) ClearAssignment(_ context.Context, assignmentID 
 		}
 	}
 	for _, state := range d.runners {
-		delete(state.finalizedLease, assignmentID)
+		if lease, ok := state.finalizedLease[assignmentID]; ok {
+			delete(state.finalizedLease, assignmentID)
+			state.removeLeaseIndexes(assignmentID, lease)
+		}
 	}
 	return nil
 }
@@ -337,6 +367,77 @@ func removeClaimID(claims []ClaimID, claimID ClaimID) []ClaimID {
 		return append(claims[:i], claims[i+1:]...)
 	}
 	return claims
+}
+
+func matchesReleasedLease(current engine.TaskLease, req ReleaseLeasedRequest) bool {
+	if req.LeaseToken != "" {
+		return current.LeaseToken == req.LeaseToken
+	}
+	if req.LeaseID != "" {
+		return current.LeaseID == req.LeaseID
+	}
+	return true
+}
+
+func (s *memoryRunnerState) resolveAssignmentID(req ReleaseLeasedRequest) (AssignmentID, bool) {
+	if req.LeaseToken != "" {
+		if assignmentID, ok := s.leaseByToken[req.LeaseToken]; ok {
+			return assignmentID, true
+		}
+	}
+	if req.LeaseID != "" {
+		if assignmentID, ok := s.leaseByID[req.LeaseID]; ok {
+			return assignmentID, true
+		}
+	}
+	if req.AssignmentID == "" {
+		return "", false
+	}
+	return req.AssignmentID, true
+}
+
+func (s *memoryRunnerState) addLeaseIndexes(assignmentID AssignmentID, lease engine.TaskLease) {
+	if lease.LeaseID != "" {
+		s.leaseByID[lease.LeaseID] = assignmentID
+	}
+	if lease.LeaseToken != "" {
+		s.leaseByToken[lease.LeaseToken] = assignmentID
+	}
+}
+
+func (s *memoryRunnerState) removeLeaseIndexes(assignmentID AssignmentID, lease engine.TaskLease) {
+	if lease.LeaseID != "" {
+		if current, ok := s.leaseByID[lease.LeaseID]; ok && current == assignmentID {
+			delete(s.leaseByID, lease.LeaseID)
+		}
+	}
+	if lease.LeaseToken != "" {
+		if current, ok := s.leaseByToken[lease.LeaseToken]; ok && current == assignmentID {
+			delete(s.leaseByToken, lease.LeaseToken)
+		}
+	}
+}
+
+func indexLeaseIDs(finalized map[AssignmentID]engine.TaskLease) map[engine.LeaseID]AssignmentID {
+	index := make(map[engine.LeaseID]AssignmentID, len(finalized))
+	for assignmentID, lease := range finalized {
+		if lease.LeaseID == "" {
+			continue
+		}
+		index[lease.LeaseID] = assignmentID
+	}
+	return index
+}
+
+func indexLeaseTokens(finalized map[AssignmentID]engine.TaskLease) map[engine.LeaseToken]AssignmentID {
+	index := make(map[engine.LeaseToken]AssignmentID, len(finalized))
+	for assignmentID, lease := range finalized {
+		if lease.LeaseToken == "" {
+			continue
+		}
+		index[lease.LeaseToken] = assignmentID
+	}
+	return index
 }
 
 func cloneFinalizedLeases(src map[AssignmentID]engine.TaskLease) map[AssignmentID]engine.TaskLease {

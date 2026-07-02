@@ -101,6 +101,8 @@ type ReleaseLeasedRequest struct {
 	RunnerID     string
 	SessionID    string
 	AssignmentID AssignmentID
+	LeaseID      engine.LeaseID
+	LeaseToken   engine.LeaseToken
 	RemoveSeen   bool
 }
 
@@ -108,6 +110,7 @@ type ReleaseLeasedRequest struct {
 // fencing independently from any specific transport or persistence backend.
 type RunnerDirectory interface {
 	Register(ctx context.Context, req RegisterRunnerRequest) (RunnerSession, error)
+	ValidateSession(ctx context.Context, runnerID, sessionID string) error
 	Heartbeat(ctx context.Context, req HeartbeatRequest) error
 	EnqueueAssignment(ctx context.Context, assignment Assignment) (bool, error)
 	ClaimForRunner(ctx context.Context, req ClaimRequest) (Claim, bool, error)

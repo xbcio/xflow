@@ -174,6 +174,8 @@ func runnerStatus(err error) error {
 	switch {
 	case errors.Is(err, ErrRunnerIDRequired), errors.Is(err, ErrConcurrencyRequired), errors.Is(err, ErrLeaseRequired):
 		return status.Error(codes.InvalidArgument, err.Error())
+	case errors.Is(err, ErrRunnerSessionStale):
+		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, ErrRunnerNotFound):
 		return status.Error(codes.NotFound, err.Error())
 	case errors.Is(err, ErrUnauthenticated):

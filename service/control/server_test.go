@@ -92,16 +92,52 @@ func TestHTTPRunnerRegisterPollAndResult(t *testing.T) {
 	}
 }
 
+func TestHTTPPollRejectsStaleSession(t *testing.T) {
+	fake := &fakeControlEngine{}
+	dir := NewMemoryRunnerDirectory()
+	server := httptest.NewServer(NewServer(fake, dir).Handler())
+	defer server.Close()
+
+	register := protocol.RegisterRunnerRequest{
+		RunnerID:     "runner-1",
+		Concurrency:  1,
+		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
+	}
+	var first protocol.RegisterRunnerResponse
+	postJSON(t, server.URL+protocol.RegisterRunnerPath, register, http.StatusOK, &first)
+	var second protocol.RegisterRunnerResponse
+	postJSON(t, server.URL+protocol.RegisterRunnerPath, register, http.StatusOK, &second)
+
+	resp := postJSONRaw(t, server.URL+protocol.PollTaskPath, protocol.PollTaskRequest{
+		RunnerID:     "runner-1",
+		SessionID:    first.SessionID,
+		Capacity:     1,
+		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
+	})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("stale poll status = %d, want %d", resp.StatusCode, http.StatusConflict)
+	}
+}
+
 func TestHTTPReportResultRejectsStaleLeaseToken(t *testing.T) {
 	fake := &fakeControlEngine{commitErr: engine.ErrInvalidLeaseToken}
-	server := httptest.NewServer(NewServer(fake, NewMemoryRunnerDirectory()).Handler())
+	dir := NewMemoryRunnerDirectory()
+	server := httptest.NewServer(NewServer(fake, dir).Handler())
 	defer server.Close()
+	session := mustRegisterHTTPRunner(t, dir)
 
 	var resultResp protocol.ReportResultResponse
 	postJSON(t, server.URL+protocol.ReportResultPath, protocol.ReportResultRequest{
-		RunnerID: "runner-1",
-		Lease:    &engine.TaskLease{LeaseID: engine.LeaseID("lease-1")},
-		Result:   engine.TaskResult{Output: &types.Output{Data: map[string]any{"ok": true}}},
+		RunnerID:  session.RunnerID,
+		SessionID: session.SessionID,
+		Lease: &engine.TaskLease{
+			LeaseID:    engine.LeaseID("lease-1"),
+			LeaseToken: engine.LeaseToken("stale"),
+			Task:       engine.Task{ExecutionID: "exec-1", NodeName: "start"},
+			NodeType:   "xflow.function",
+		},
+		Result: engine.TaskResult{Output: &types.Output{Data: map[string]any{"ok": true}}},
 	}, http.StatusConflict, &resultResp)
 	if resultResp.Accepted {
 		t.Fatal("stale lease result should not be accepted")
@@ -128,6 +164,183 @@ func TestHTTPReportResultPreservesRunnerError(t *testing.T) {
 	}
 	if fake.committedResult.Error == nil || fake.committedResult.Error.Error() != "handler failed" {
 		t.Fatalf("committed error = %v, want handler failed", fake.committedResult.Error)
+	}
+}
+
+func TestHTTPReportResultStaleTokenReleasesMatchingLeaseCapacity(t *testing.T) {
+	fake := &fakeControlEngine{commitErr: engine.ErrInvalidLeaseToken}
+	dir := NewMemoryRunnerDirectory()
+	server := httptest.NewServer(NewServer(fake, dir).Handler())
+	defer server.Close()
+
+	ctx := context.Background()
+	session := mustRegisterHTTPRunner(t, dir)
+
+	first := stableTestAssignment("node-a")
+	second := stableTestAssignment("node-b")
+	mustEnqueueAssignment(t, ctx, dir, first)
+	mustEnqueueAssignment(t, ctx, dir, second)
+
+	firstClaim := mustClaimAssignment(t, ctx, dir, session)
+	staleLease := &engine.TaskLease{
+		LeaseID:    "lease-stale",
+		LeaseToken: "token-stale",
+		Task:       firstClaim.Assignment.Task,
+		NodeType:   firstClaim.Assignment.Routing.NodeType,
+	}
+	if err := dir.FinalizeClaim(ctx, firstClaim.ClaimID, staleLease); err != nil {
+		t.Fatalf("FinalizeClaim() error = %v", err)
+	}
+
+	if _, ok, err := dir.ClaimForRunner(ctx, testClaimRequest(session, 1)); err != nil {
+		t.Fatalf("ClaimForRunner() error = %v", err)
+	} else if ok {
+		t.Fatal("ClaimForRunner() ok=true, want stale finalized lease to consume capacity before cleanup")
+	}
+
+	var resultResp protocol.ReportResultResponse
+	postJSON(t, server.URL+protocol.ReportResultPath, protocol.ReportResultRequest{
+		RunnerID:  session.RunnerID,
+		SessionID: session.SessionID,
+		Lease:     staleLease,
+		Result:    engine.TaskResult{Output: &types.Output{Data: map[string]any{"ok": true}}},
+	}, http.StatusConflict, &resultResp)
+	if resultResp.Accepted {
+		t.Fatal("stale lease result should not be accepted")
+	}
+
+	claim, ok, err := dir.ClaimForRunner(ctx, testClaimRequest(session, 1))
+	if err != nil {
+		t.Fatalf("ClaimForRunner() after stale cleanup error = %v", err)
+	}
+	if !ok {
+		t.Fatal("ClaimForRunner() ok=false after stale cleanup, want released capacity")
+	}
+	if claim.Assignment.AssignmentID != second.AssignmentID {
+		t.Fatalf("claimed assignment = %q, want %q", claim.Assignment.AssignmentID, second.AssignmentID)
+	}
+
+	if enqueued, err := dir.EnqueueAssignment(ctx, first); err != nil {
+		t.Fatalf("EnqueueAssignment(first) error = %v", err)
+	} else if enqueued {
+		t.Fatal("EnqueueAssignment(first) enqueued=true, want seen marker retained after stale cleanup")
+	}
+}
+
+func TestHTTPReportResultStaleTokenReleasesCapacityForInternalTaskIdentity(t *testing.T) {
+	fake := &fakeControlEngine{commitErr: engine.ErrInvalidLeaseToken}
+	dir := NewMemoryRunnerDirectory()
+	server := httptest.NewServer(NewServer(fake, dir).Handler())
+	defer server.Close()
+
+	ctx := context.Background()
+	session := mustRegisterHTTPRunner(t, dir)
+
+	first := hiddenIdentityAssignment("node-a", 7, 3)
+	second := stableTestAssignment("node-b")
+	mustEnqueueAssignment(t, ctx, dir, first)
+	mustEnqueueAssignment(t, ctx, dir, second)
+
+	firstClaim := mustClaimAssignment(t, ctx, dir, session)
+	staleLease := &engine.TaskLease{
+		LeaseID:    "lease-hidden",
+		LeaseToken: "token-hidden",
+		Task:       firstClaim.Assignment.Task,
+		NodeType:   firstClaim.Assignment.Routing.NodeType,
+	}
+	if err := dir.FinalizeClaim(ctx, firstClaim.ClaimID, staleLease); err != nil {
+		t.Fatalf("FinalizeClaim() error = %v", err)
+	}
+
+	var resultResp protocol.ReportResultResponse
+	postJSON(t, server.URL+protocol.ReportResultPath, protocol.ReportResultRequest{
+		RunnerID:  session.RunnerID,
+		SessionID: session.SessionID,
+		Lease:     staleLease,
+		Result:    engine.TaskResult{Output: &types.Output{Data: map[string]any{"ok": true}}},
+	}, http.StatusConflict, &resultResp)
+	if resultResp.Accepted {
+		t.Fatal("stale lease result should not be accepted")
+	}
+
+	claim, ok, err := dir.ClaimForRunner(ctx, testClaimRequest(session, 1))
+	if err != nil {
+		t.Fatalf("ClaimForRunner() after stale cleanup error = %v", err)
+	}
+	if !ok {
+		t.Fatal("ClaimForRunner() ok=false after hidden-identity stale cleanup, want released capacity")
+	}
+	if claim.Assignment.AssignmentID != second.AssignmentID {
+		t.Fatalf("claimed assignment = %q, want %q", claim.Assignment.AssignmentID, second.AssignmentID)
+	}
+}
+
+func TestHTTPReportResultStaleTokenKeepsReplacementLeaseAndSeen(t *testing.T) {
+	fake := &fakeControlEngine{commitErr: engine.ErrInvalidLeaseToken}
+	dir := NewMemoryRunnerDirectory()
+	server := httptest.NewServer(NewServer(fake, dir).Handler())
+	defer server.Close()
+
+	ctx := context.Background()
+	session := mustRegisterHTTPRunner(t, dir)
+
+	first := stableTestAssignment("node-a")
+	second := stableTestAssignment("node-b")
+	mustEnqueueAssignment(t, ctx, dir, first)
+	mustEnqueueAssignment(t, ctx, dir, second)
+
+	firstClaim := mustClaimAssignment(t, ctx, dir, session)
+	staleLease := &engine.TaskLease{
+		LeaseID:    "lease-old",
+		LeaseToken: "token-old",
+		Task:       firstClaim.Assignment.Task,
+		NodeType:   firstClaim.Assignment.Routing.NodeType,
+	}
+	if err := dir.FinalizeClaim(ctx, firstClaim.ClaimID, staleLease); err != nil {
+		t.Fatalf("FinalizeClaim() error = %v", err)
+	}
+
+	replacement := engine.TaskLease{
+		LeaseID:    "lease-new",
+		LeaseToken: "token-new",
+		Task:       firstClaim.Assignment.Task,
+		NodeType:   firstClaim.Assignment.Routing.NodeType,
+	}
+	dir.mu.Lock()
+	dir.runners[session.RunnerID].finalizedLease[first.AssignmentID] = replacement
+	dir.mu.Unlock()
+
+	var resultResp protocol.ReportResultResponse
+	postJSON(t, server.URL+protocol.ReportResultPath, protocol.ReportResultRequest{
+		RunnerID:  session.RunnerID,
+		SessionID: session.SessionID,
+		Lease:     staleLease,
+		Result:    engine.TaskResult{Output: &types.Output{Data: map[string]any{"ok": true}}},
+	}, http.StatusConflict, &resultResp)
+	if resultResp.Accepted {
+		t.Fatal("stale lease result should not be accepted")
+	}
+
+	if _, ok, err := dir.ClaimForRunner(ctx, testClaimRequest(session, 1)); err != nil {
+		t.Fatalf("ClaimForRunner() error = %v", err)
+	} else if ok {
+		t.Fatal("ClaimForRunner() ok=true, want replacement lease to keep capacity reserved")
+	}
+
+	dir.mu.RLock()
+	current, ok := dir.runners[session.RunnerID].finalizedLease[first.AssignmentID]
+	dir.mu.RUnlock()
+	if !ok {
+		t.Fatal("replacement lease missing after stale cleanup")
+	}
+	if current.LeaseToken != replacement.LeaseToken {
+		t.Fatalf("replacement lease token = %q, want %q", current.LeaseToken, replacement.LeaseToken)
+	}
+
+	if enqueued, err := dir.EnqueueAssignment(ctx, first); err != nil {
+		t.Fatalf("EnqueueAssignment(first) error = %v", err)
+	} else if enqueued {
+		t.Fatal("EnqueueAssignment(first) enqueued=true, want seen marker retained while replacement lease is active")
 	}
 }
 
@@ -275,16 +488,39 @@ func (f *fakeControlEngine) ReclaimLease(context.Context, engine.ExpiredLease) (
 	return false, nil
 }
 
+func stableTestAssignment(nodeName string) Assignment {
+	task := engine.Task{
+		ExecutionID: "exec-1",
+		NodeName:    nodeName,
+		NodeIdx:     0,
+		Type:        engine.TaskTypeNodeExec,
+	}
+	return Assignment{
+		AssignmentID: BuildAssignmentID(&task),
+		Task:         task,
+		Routing:      engine.TaskRouting{NodeType: "xflow.function"},
+	}
+}
+
+func hiddenIdentityAssignment(nodeName string, activationID, autoDepth int) Assignment {
+	task := engine.Task{
+		ExecutionID:  "exec-1",
+		NodeName:     nodeName,
+		NodeIdx:      0,
+		Type:         engine.TaskTypeNodeExec,
+		ActivationID: activationID,
+		AutoDepth:    autoDepth,
+	}
+	return Assignment{
+		AssignmentID: BuildAssignmentID(&task),
+		Task:         task,
+		Routing:      engine.TaskRouting{NodeType: "xflow.function"},
+	}
+}
+
 func postJSON(t *testing.T, url string, body any, wantStatus int, out any) {
 	t.Helper()
-	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(body); err != nil {
-		t.Fatal(err)
-	}
-	resp, err := http.Post(url, "application/json", &buf)
-	if err != nil {
-		t.Fatal(err)
-	}
+	resp := postJSONRaw(t, url, body)
 	defer resp.Body.Close()
 	if resp.StatusCode != wantStatus {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, wantStatus)
@@ -294,6 +530,19 @@ func postJSON(t *testing.T, url string, body any, wantStatus int, out any) {
 			t.Fatal(err)
 		}
 	}
+}
+
+func postJSONRaw(t *testing.T, url string, body any) *http.Response {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(body); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Post(url, "application/json", &buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
 }
 
 var errExecutionNotFound = errors.New("execution not found")

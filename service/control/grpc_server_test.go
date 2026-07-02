@@ -159,11 +159,25 @@ func TestGRPCReportResultRejectsStaleLeaseToken(t *testing.T) {
 	eng := &fakeControlEngine{commitErr: engine.ErrInvalidLeaseToken}
 	runners := NewMemoryRunnerDirectory()
 	client := startGRPCTestServer(t, eng, runners)
+	registerResp, err := client.Register(context.Background(), protocol.RegisterRunnerRequest{
+		RunnerID:     "runner-1",
+		Concurrency:  1,
+		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
+	})
+	if err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
 
 	resp, err := client.ReportResult(context.Background(), protocol.ReportResultRequest{
-		RunnerID: "runner-1",
-		Lease:    &engine.TaskLease{LeaseID: engine.LeaseID("lease-1"), LeaseToken: engine.LeaseToken("stale")},
-		Result:   engine.TaskResult{},
+		RunnerID:  "runner-1",
+		SessionID: registerResp.SessionID,
+		Lease: &engine.TaskLease{
+			LeaseID:    engine.LeaseID("lease-1"),
+			LeaseToken: engine.LeaseToken("stale"),
+			Task:       engine.Task{ExecutionID: "exec-1", NodeName: "start"},
+			NodeType:   "xflow.function",
+		},
+		Result: engine.TaskResult{},
 	})
 	if err != nil {
 		t.Fatalf("ReportResult() transport error = %v", err)
@@ -173,6 +187,46 @@ func TestGRPCReportResultRejectsStaleLeaseToken(t *testing.T) {
 	}
 	if resp.Error == "" {
 		t.Fatal("expected rejection reason, got empty")
+	}
+}
+
+func TestGRPCReportResultRejectsStaleSession(t *testing.T) {
+	eng := &fakeControlEngine{}
+	runners := NewMemoryRunnerDirectory()
+	client := startGRPCTestServer(t, eng, runners)
+	ctx := context.Background()
+
+	register := protocol.RegisterRunnerRequest{
+		RunnerID:     "runner-1",
+		Concurrency:  1,
+		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
+	}
+	first, err := client.Register(ctx, register)
+	if err != nil {
+		t.Fatalf("first Register() error = %v", err)
+	}
+	if _, err := client.Register(ctx, register); err != nil {
+		t.Fatalf("second Register() error = %v", err)
+	}
+
+	_, err = client.ReportResult(ctx, protocol.ReportResultRequest{
+		RunnerID:  "runner-1",
+		SessionID: first.SessionID,
+		Lease: &engine.TaskLease{
+			LeaseID:  "lease-1",
+			Task:     engine.Task{ExecutionID: "exec-1", NodeName: "start"},
+			NodeType: "xflow.function",
+		},
+		Result: engine.TaskResult{Output: &types.Output{Data: map[string]any{"ok": true}}},
+	})
+	if err == nil {
+		t.Fatal("expected stale session error")
+	}
+	if got := status.Code(err); got != codes.FailedPrecondition {
+		t.Fatalf("status code = %v, want FailedPrecondition", got)
+	}
+	if eng.committedLease != nil {
+		t.Fatalf("CommitTaskResultWithOutcome() called with %+v, want stale session rejected before commit", eng.committedLease)
 	}
 }
 

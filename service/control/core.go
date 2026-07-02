@@ -194,30 +194,32 @@ func (c *Core) reportResult(ctx context.Context, req protocol.ReportResultReques
 	if c.engine == nil {
 		return protocol.ReportResultResponse{}, ErrEngineNotConfigured
 	}
+	if err := c.runners.ValidateSession(ctx, req.RunnerID, req.SessionID); err != nil {
+		return protocol.ReportResultResponse{}, normalizeRunnerError(err)
+	}
 	outcome, err := c.engine.CommitTaskResultWithOutcome(ctx, req.Lease, req.Result)
+	if outcome.ReleasesLeasedCapacity() {
+		removeSeen := outcome == engine.CommitOutcomeAccepted || outcome == engine.CommitOutcomeDuplicateTerminal || outcome == engine.CommitOutcomeExecutionInactive
+		if err := c.runners.ReleaseLeased(ctx, ReleaseLeasedRequest{
+			RunnerID:     req.RunnerID,
+			SessionID:    req.SessionID,
+			AssignmentID: BuildAssignmentID(&req.Lease.Task),
+			LeaseID:      req.Lease.LeaseID,
+			LeaseToken:   req.Lease.LeaseToken,
+			RemoveSeen:   removeSeen,
+		}); err != nil {
+			return protocol.ReportResultResponse{}, normalizeRunnerError(err)
+		}
+	}
 	if err != nil {
 		if errors.Is(err, engine.ErrInvalidLeaseToken) {
 			return protocol.ReportResultResponse{Accepted: false, Error: err.Error()}, err
 		}
 		return protocol.ReportResultResponse{}, err
 	}
-	switch outcome {
-	case engine.CommitOutcomeAccepted, engine.CommitOutcomeDuplicateTerminal, engine.CommitOutcomeExecutionInactive:
-		if err := c.runners.ReleaseLeased(ctx, ReleaseLeasedRequest{
-			RunnerID:     req.RunnerID,
-			SessionID:    req.SessionID,
-			AssignmentID: BuildAssignmentID(&req.Lease.Task),
-			RemoveSeen:   true,
-		}); err != nil {
-			return protocol.ReportResultResponse{}, normalizeRunnerError(err)
-		}
-	}
 	return protocol.ReportResultResponse{Accepted: true}, nil
 }
 
 func normalizeRunnerError(err error) error {
-	if errors.Is(err, ErrRunnerSessionStale) {
-		return ErrRunnerNotFound
-	}
 	return err
 }
