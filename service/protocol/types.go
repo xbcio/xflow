@@ -26,11 +26,13 @@ type RegisterRunnerRequest struct {
 }
 
 type RegisterRunnerResponse struct {
-	RunnerID string `json:"runner_id"`
+	RunnerID  string `json:"runner_id"`
+	SessionID string `json:"session_id"`
 }
 
 type HeartbeatRequest struct {
 	RunnerID  string `json:"runner_id"`
+	SessionID string `json:"session_id"`
 	Capacity  int    `json:"capacity"`
 	InFlight  int    `json:"in_flight"`
 	Timestamp int64  `json:"timestamp"`
@@ -43,6 +45,7 @@ type HeartbeatResponse struct {
 
 type PollTaskRequest struct {
 	RunnerID     string            `json:"runner_id"`
+	SessionID    string            `json:"session_id"`
 	Capacity     int               `json:"capacity"`
 	Labels       map[string]string `json:"labels,omitempty"`
 	Capabilities []Capability      `json:"capabilities"`
@@ -56,6 +59,7 @@ type PollTaskResponse struct {
 
 type ReportResultRequest struct {
 	RunnerID  string            `json:"runner_id"`
+	SessionID string            `json:"session_id"`
 	Lease     *engine.TaskLease `json:"lease"`
 	Result    engine.TaskResult `json:"result"`
 	AuthToken string            `json:"auth_token,omitempty"`
@@ -63,6 +67,7 @@ type ReportResultRequest struct {
 
 type reportResultRequestJSON struct {
 	RunnerID  string            `json:"runner_id"`
+	SessionID string            `json:"session_id"`
 	Lease     *engine.TaskLease `json:"lease"`
 	Result    json.RawMessage   `json:"result"`
 	AuthToken string            `json:"auth_token,omitempty"`
@@ -81,6 +86,7 @@ func (r ReportResultRequest) MarshalJSON() ([]byte, error) {
 	}
 	return json.Marshal(reportResultRequestJSON{
 		RunnerID:  r.RunnerID,
+		SessionID: r.SessionID,
 		Lease:     r.Lease,
 		Result:    resultJSON,
 		AuthToken: r.AuthToken,
@@ -93,6 +99,7 @@ func (r *ReportResultRequest) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	r.RunnerID = in.RunnerID
+	r.SessionID = in.SessionID
 	r.Lease = in.Lease
 	r.AuthToken = in.AuthToken
 	result, err := UnmarshalTaskResult(in.Result)

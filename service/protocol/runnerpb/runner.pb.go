@@ -144,6 +144,7 @@ func (x *RegisterRequest) GetLabels() map[string]string {
 type RegisterResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	RunnerId      string                 `protobuf:"bytes,1,opt,name=runner_id,json=runnerId,proto3" json:"runner_id,omitempty"`
+	SessionId     string                 `protobuf:"bytes,2,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -185,12 +186,20 @@ func (x *RegisterResponse) GetRunnerId() string {
 	return ""
 }
 
+func (x *RegisterResponse) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
 type HeartbeatRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	RunnerId      string                 `protobuf:"bytes,1,opt,name=runner_id,json=runnerId,proto3" json:"runner_id,omitempty"`
 	Capacity      int32                  `protobuf:"varint,2,opt,name=capacity,proto3" json:"capacity,omitempty"`
 	InFlight      int32                  `protobuf:"varint,3,opt,name=in_flight,json=inFlight,proto3" json:"in_flight,omitempty"`
 	Timestamp     int64                  `protobuf:"varint,4,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
+	SessionId     string                 `protobuf:"bytes,5,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -253,6 +262,13 @@ func (x *HeartbeatRequest) GetTimestamp() int64 {
 	return 0
 }
 
+func (x *HeartbeatRequest) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
 type HeartbeatResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	ServerTime    int64                  `protobuf:"varint,1,opt,name=server_time,json=serverTime,proto3" json:"server_time,omitempty"`
@@ -303,6 +319,7 @@ type PollTaskRequest struct {
 	Capacity      int32                  `protobuf:"varint,2,opt,name=capacity,proto3" json:"capacity,omitempty"`
 	Capabilities  []*Capability          `protobuf:"bytes,3,rep,name=capabilities,proto3" json:"capabilities,omitempty"`
 	Labels        map[string]string      `protobuf:"bytes,4,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	SessionId     string                 `protobuf:"bytes,5,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -363,6 +380,13 @@ func (x *PollTaskRequest) GetLabels() map[string]string {
 		return x.Labels
 	}
 	return nil
+}
+
+func (x *PollTaskRequest) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
 }
 
 type PollTaskResponse struct {
@@ -428,6 +452,7 @@ type ReportResultRequest struct {
 	LeaseJson []byte `protobuf:"bytes,2,opt,name=lease_json,json=leaseJson,proto3" json:"lease_json,omitempty"`
 	// result_json is the JSON-encoded protocol task result.
 	ResultJson    []byte `protobuf:"bytes,3,opt,name=result_json,json=resultJson,proto3" json:"result_json,omitempty"`
+	SessionId     string `protobuf:"bytes,4,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -481,6 +506,13 @@ func (x *ReportResultRequest) GetResultJson() []byte {
 		return x.ResultJson
 	}
 	return nil
+}
+
+func (x *ReportResultRequest) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
 }
 
 type ReportResultResponse struct {
@@ -1179,22 +1211,28 @@ const file_service_protocol_runnerpb_runner_proto_rawDesc = "" +
 	"\x06labels\x18\x04 \x03(\v2,.xflow.runner.v1.RegisterRequest.LabelsEntryR\x06labels\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"/\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"N\n" +
 	"\x10RegisterResponse\x12\x1b\n" +
-	"\trunner_id\x18\x01 \x01(\tR\brunnerId\"\x86\x01\n" +
+	"\trunner_id\x18\x01 \x01(\tR\brunnerId\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x02 \x01(\tR\tsessionId\"\xa5\x01\n" +
 	"\x10HeartbeatRequest\x12\x1b\n" +
 	"\trunner_id\x18\x01 \x01(\tR\brunnerId\x12\x1a\n" +
 	"\bcapacity\x18\x02 \x01(\x05R\bcapacity\x12\x1b\n" +
 	"\tin_flight\x18\x03 \x01(\x05R\binFlight\x12\x1c\n" +
-	"\ttimestamp\x18\x04 \x01(\x03R\ttimestamp\"4\n" +
+	"\ttimestamp\x18\x04 \x01(\x03R\ttimestamp\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x05 \x01(\tR\tsessionId\"4\n" +
 	"\x11HeartbeatResponse\x12\x1f\n" +
 	"\vserver_time\x18\x01 \x01(\x03R\n" +
-	"serverTime\"\x8c\x02\n" +
+	"serverTime\"\xab\x02\n" +
 	"\x0fPollTaskRequest\x12\x1b\n" +
 	"\trunner_id\x18\x01 \x01(\tR\brunnerId\x12\x1a\n" +
 	"\bcapacity\x18\x02 \x01(\x05R\bcapacity\x12?\n" +
 	"\fcapabilities\x18\x03 \x03(\v2\x1b.xflow.runner.v1.CapabilityR\fcapabilities\x12D\n" +
-	"\x06labels\x18\x04 \x03(\v2,.xflow.runner.v1.PollTaskRequest.LabelsEntryR\x06labels\x1a9\n" +
+	"\x06labels\x18\x04 \x03(\v2,.xflow.runner.v1.PollTaskRequest.LabelsEntryR\x06labels\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x05 \x01(\tR\tsessionId\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"P\n" +
@@ -1202,13 +1240,15 @@ const file_service_protocol_runnerpb_runner_proto_rawDesc = "" +
 	"\n" +
 	"lease_json\x18\x01 \x01(\fR\tleaseJson\x12\x1d\n" +
 	"\n" +
-	"wait_nanos\x18\x02 \x01(\x03R\twaitNanos\"r\n" +
+	"wait_nanos\x18\x02 \x01(\x03R\twaitNanos\"\x91\x01\n" +
 	"\x13ReportResultRequest\x12\x1b\n" +
 	"\trunner_id\x18\x01 \x01(\tR\brunnerId\x12\x1d\n" +
 	"\n" +
 	"lease_json\x18\x02 \x01(\fR\tleaseJson\x12\x1f\n" +
 	"\vresult_json\x18\x03 \x01(\fR\n" +
-	"resultJson\"H\n" +
+	"resultJson\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x04 \x01(\tR\tsessionId\"H\n" +
 	"\x14ReportResultResponse\x12\x1a\n" +
 	"\baccepted\x18\x01 \x01(\bR\baccepted\x12\x14\n" +
 	"\x05error\x18\x02 \x01(\tR\x05error\"\xb2\x01\n" +

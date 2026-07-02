@@ -82,18 +82,34 @@ func RegisterRequestFromProto(req *runnerpb.RegisterRequest) RegisterRunnerReque
 	}
 }
 
+func RegisterResponseToProto(resp RegisterRunnerResponse) *runnerpb.RegisterResponse {
+	return &runnerpb.RegisterResponse{
+		RunnerId:  resp.RunnerID,
+		SessionId: resp.SessionID,
+	}
+}
+
+func RegisterResponseFromProto(resp *runnerpb.RegisterResponse) RegisterRunnerResponse {
+	return RegisterRunnerResponse{
+		RunnerID:  resp.GetRunnerId(),
+		SessionID: resp.GetSessionId(),
+	}
+}
+
 func HeartbeatRequestToProto(req HeartbeatRequest) *runnerpb.HeartbeatRequest {
 	return &runnerpb.HeartbeatRequest{
 		RunnerId:  req.RunnerID,
 		Capacity:  int32(req.Capacity),
 		InFlight:  int32(req.InFlight),
 		Timestamp: req.Timestamp,
+		SessionId: req.SessionID,
 	}
 }
 
 func HeartbeatRequestFromProto(req *runnerpb.HeartbeatRequest) HeartbeatRequest {
 	return HeartbeatRequest{
 		RunnerID:  req.GetRunnerId(),
+		SessionID: req.GetSessionId(),
 		Capacity:  int(req.GetCapacity()),
 		InFlight:  int(req.GetInFlight()),
 		Timestamp: req.GetTimestamp(),
@@ -103,6 +119,7 @@ func HeartbeatRequestFromProto(req *runnerpb.HeartbeatRequest) HeartbeatRequest 
 func PollTaskRequestToProto(req PollTaskRequest) *runnerpb.PollTaskRequest {
 	return &runnerpb.PollTaskRequest{
 		RunnerId:     req.RunnerID,
+		SessionId:    req.SessionID,
 		Capacity:     int32(req.Capacity),
 		Capabilities: CapabilitiesToProto(req.Capabilities),
 		Labels:       cloneLabels(req.Labels),
@@ -112,6 +129,7 @@ func PollTaskRequestToProto(req PollTaskRequest) *runnerpb.PollTaskRequest {
 func PollTaskRequestFromProto(req *runnerpb.PollTaskRequest) PollTaskRequest {
 	return PollTaskRequest{
 		RunnerID:     req.GetRunnerId(),
+		SessionID:    req.GetSessionId(),
 		Capacity:     int(req.GetCapacity()),
 		Capabilities: CapabilitiesFromProto(req.GetCapabilities()),
 		Labels:       cloneLabels(req.GetLabels()),
@@ -153,6 +171,7 @@ func ReportResultRequestToProto(req ReportResultRequest) (*runnerpb.ReportResult
 		RunnerId:   req.RunnerID,
 		LeaseJson:  leaseJSON,
 		ResultJson: resultJSON,
+		SessionId:  req.SessionID,
 	}, nil
 }
 
@@ -166,9 +185,10 @@ func ReportResultRequestFromProto(req *runnerpb.ReportResultRequest) (ReportResu
 		return ReportResultRequest{}, err
 	}
 	return ReportResultRequest{
-		RunnerID: req.GetRunnerId(),
-		Lease:    lease,
-		Result:   result,
+		RunnerID:  req.GetRunnerId(),
+		SessionID: req.GetSessionId(),
+		Lease:     lease,
+		Result:    result,
 	}, nil
 }
 

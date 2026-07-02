@@ -3,12 +3,48 @@ package protocol
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/types"
 )
+
+func TestRunnerProtocolSessionIDRoundTripsJSON(t *testing.T) {
+	register := RegisterRunnerResponse{RunnerID: "runner-1", SessionID: "session-1"}
+	registerJSON, err := json.Marshal(register)
+	if err != nil {
+		t.Fatalf("marshal register response: %v", err)
+	}
+	if !strings.Contains(string(registerJSON), `"session_id":"session-1"`) {
+		t.Fatalf("register response JSON = %s, want session_id", registerJSON)
+	}
+
+	var heartbeat HeartbeatRequest
+	if err := json.Unmarshal([]byte(`{"runner_id":"runner-1","session_id":"session-1","capacity":2,"in_flight":1}`), &heartbeat); err != nil {
+		t.Fatalf("unmarshal heartbeat: %v", err)
+	}
+	if heartbeat.SessionID != "session-1" {
+		t.Fatalf("heartbeat SessionID = %q, want session-1", heartbeat.SessionID)
+	}
+
+	var poll PollTaskRequest
+	if err := json.Unmarshal([]byte(`{"runner_id":"runner-1","session_id":"session-1","capacity":2}`), &poll); err != nil {
+		t.Fatalf("unmarshal poll: %v", err)
+	}
+	if poll.SessionID != "session-1" {
+		t.Fatalf("poll SessionID = %q, want session-1", poll.SessionID)
+	}
+
+	var report ReportResultRequest
+	if err := json.Unmarshal([]byte(`{"runner_id":"runner-1","session_id":"session-1","lease":{"task":{"execution_id":"e1","node_name":"n1","node_idx":0,"type":0},"node_type":"xflow.function","issued_at":"2026-07-02T00:00:00Z"},"result":{}}`), &report); err != nil {
+		t.Fatalf("unmarshal report: %v", err)
+	}
+	if report.SessionID != "session-1" {
+		t.Fatalf("report SessionID = %q, want session-1", report.SessionID)
+	}
+}
 
 func TestPollTaskResponseRoundTripsLeaseJSON(t *testing.T) {
 	want := PollTaskResponse{

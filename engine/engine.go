@@ -332,7 +332,10 @@ func (e *Engine) CommitTaskResultWithOutcome(ctx context.Context, lease *TaskLea
 	}
 
 	if result.Suspend != nil && e.suspendDisabled {
-		return e.CommitTaskFailure(ctx, lease, e.suspendDisabledErr)
+		if err := e.CommitTaskFailure(ctx, lease, e.suspendDisabledErr); err != nil {
+			return CommitOutcomeTransientError, err
+		}
+		return CommitOutcomeAccepted, nil
 	}
 
 	ns, valid, err := e.state.ClaimTaskLease(ctx, lease)

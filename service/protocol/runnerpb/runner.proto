@@ -47,6 +47,7 @@ message RegisterRequest {
 
 message RegisterResponse {
   string runner_id = 1;
+  string session_id = 2;
 }
 
 message HeartbeatRequest {
@@ -54,6 +55,7 @@ message HeartbeatRequest {
   int32 capacity = 2;
   int32 in_flight = 3;
   int64 timestamp = 4;
+  string session_id = 5;
 }
 
 message HeartbeatResponse {
@@ -65,6 +67,7 @@ message PollTaskRequest {
   int32 capacity = 2;
   repeated Capability capabilities = 3;
   map<string, string> labels = 4;
+  string session_id = 5;
 }
 
 message PollTaskResponse {
@@ -82,6 +85,7 @@ message ReportResultRequest {
   bytes lease_json = 2;
   // result_json is the JSON-encoded protocol task result.
   bytes result_json = 3;
+  string session_id = 4;
 }
 
 message ReportResultResponse {
