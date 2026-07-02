@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -12,21 +13,9 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
-type transientErr struct{ msg string }
-
-func (t *transientErr) Error() string   { return t.msg }
-func (t *transientErr) Transient() bool { return true }
-
 type queueLogRecorder struct {
-	mu    sync.Mutex
-	infos []string
-	errs  []string
-}
-
-func (r *queueLogRecorder) Info(msg string, _ ...any) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.infos = append(r.infos, msg)
+	mu   sync.Mutex
+	errs []string
 }
 
 func (r *queueLogRecorder) Error(msg string, _ ...any) {
@@ -34,6 +23,21 @@ func (r *queueLogRecorder) Error(msg string, _ ...any) {
 	defer r.mu.Unlock()
 	r.errs = append(r.errs, msg)
 }
+
+func (r *queueLogRecorder) Errorf(format string, args ...any) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.errs = append(r.errs, fmt.Sprintf(format, args...))
+}
+
+func (r *queueLogRecorder) Debug(string, ...any)              {}
+func (r *queueLogRecorder) Debugf(string, ...any)             {}
+func (r *queueLogRecorder) Info(string, ...any)               {}
+func (r *queueLogRecorder) Infof(string, ...any)              {}
+func (r *queueLogRecorder) Warn(string, ...any)               {}
+func (r *queueLogRecorder) Warnf(string, ...any)              {}
+func (r *queueLogRecorder) Panic(msg string, _ ...any)        { panic(msg) }
+func (r *queueLogRecorder) Panicf(format string, args ...any) { panic(fmt.Sprintf(format, args...)) }
 
 func (r *queueLogRecorder) errorCount() int {
 	r.mu.Lock()
@@ -50,7 +54,7 @@ func TestMemoryQueueRequeuesTransientFailureUntilHandlerSucceeds(t *testing.T) {
 	q.SetHandler(func(_ context.Context, task *engine.Task) error {
 		n := calls.Add(1)
 		if n < 3 {
-			return &transientErr{msg: "no capacity"}
+			return errors.New("no capacity")
 		}
 		if task.NodeName != "n" {
 			t.Errorf("unexpected node: %q", task.NodeName)
@@ -77,14 +81,14 @@ func TestMemoryQueueRequeuesTransientFailureUntilHandlerSucceeds(t *testing.T) {
 	}
 }
 
-func TestMemoryQueueDropsNonTransientFailureWithoutRequeue(t *testing.T) {
+func TestMemoryQueueDropsPermanentFailureWithoutRequeue(t *testing.T) {
 	q := newMemoryQueue(1)
 	logs := &queueLogRecorder{}
 	q.SetLogger(logs)
 	var calls atomic.Int32
 	q.SetHandler(func(_ context.Context, _ *engine.Task) error {
 		calls.Add(1)
-		return errors.New("hard error")
+		return errors.Join(types.ErrPermanent, errors.New("hard error"))
 	})
 	q.Start()
 	defer q.Stop()
@@ -97,7 +101,7 @@ func TestMemoryQueueDropsNonTransientFailureWithoutRequeue(t *testing.T) {
 	// Allow worker to dispatch once.
 	time.Sleep(50 * time.Millisecond)
 	if got := calls.Load(); got != 1 {
-		t.Fatalf("handler calls = %d, want 1 (no requeue for non-transient)", got)
+		t.Fatalf("handler calls = %d, want 1 (no requeue for permanent error)", got)
 	}
 	if logs.errorCount() == 0 {
 		t.Fatal("expected an Error log for the dropped task")

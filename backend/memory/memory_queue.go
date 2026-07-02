@@ -7,12 +7,8 @@ import (
 	"time"
 
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/types"
 )
-
-// transientError is the contract memory_queue uses to recognize dispatch
-// backpressure: anything implementing this method should be requeued, never
-// dead-lettered. service/control.Transient implements it.
-type transientError interface{ Transient() bool }
 
 // transientRequeueInitial / transientRequeueCap bound the backoff between
 // retries of a transient dispatch failure. Picked so a steady stream of "no
@@ -91,11 +87,11 @@ func (q *memoryQueue) dispatch(env queueEnvelope) {
 	if err == nil {
 		return
 	}
-	if !isTransient(err) {
-		// Non-transient handler failure: nothing useful the queue can do.
-		// Surface for ops without losing the rest of the workflow.
+	if errors.Is(err, types.ErrPermanent) {
+		// Permanent handler failure: nothing useful the queue can do. Surface
+		// for ops without losing the rest of the workflow.
 		if q.logger != nil {
-			q.logger.Error("dropping task after non-transient handler error",
+			q.logger.Error("dropping task after permanent handler error",
 				"exec", string(env.task.ExecutionID),
 				"node", env.task.NodeName,
 				"err", err,
@@ -117,13 +113,8 @@ func (q *memoryQueue) dispatch(env queueEnvelope) {
 	delay := transientBackoff(env.transientTries)
 	env.transientTries++
 	if q.logger != nil {
-		q.logger.Info("requeueing task after transient dispatch failure",
-			"exec", string(env.task.ExecutionID),
-			"node", env.task.NodeName,
-			"attempt", env.transientTries,
-			"delay", delay.String(),
-			"err", err,
-		)
+		q.logger.Errorf("requeueing task after transient dispatch failure: exec=%s node=%s attempt=%d delay=%s err=%v",
+			env.task.ExecutionID, env.task.NodeName, env.transientTries, delay, err)
 	}
 	go func(env queueEnvelope, delay time.Duration) {
 		timer := time.NewTimer(delay)
@@ -138,11 +129,6 @@ func (q *memoryQueue) dispatch(env queueEnvelope) {
 		case <-q.stopCh:
 		}
 	}(env, delay)
-}
-
-func isTransient(err error) bool {
-	var t transientError
-	return errors.As(err, &t)
 }
 
 // transientBackoff doubles each attempt up to transientRequeueCap. No jitter:

@@ -2,6 +2,7 @@ package asynq
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/xbcio/xflow/execution"
 	"github.com/xbcio/xflow/nodes/node"
 	"github.com/xbcio/xflow/store"
+	"github.com/xbcio/xflow/types"
 )
 
 // Option configures the Asynq backend.
@@ -57,13 +59,13 @@ func WithConsumer(enabled bool) Option {
 
 // WithResourcePool installs a process-scope ResourcePool. Worker pods that
 // run DatabaseNode / GRPCNode benefit from a pool; API-only pods (consumer
-// disabled) can leave it nil. See .claude/docs/specs/resource-pool.md.
+// disabled) can leave it nil. See .claude/specs/resource-pool.md.
 func WithResourcePool(p node.ResourcePool) Option {
 	return func(c *config) { c.resourcePool = p }
 }
 
 // WithAuditObserver installs an external observer for audit-store dual-write
-// outcomes. Per .claude/docs/specs/dual-write-contract.md, Redis is the system
+// outcomes. Per .claude/specs/dual-write-contract.md, Redis is the system
 // of record and the sqlstore audit trail is best-effort; this observer is the
 // hook for ops/metrics to count and reconcile audit failures. Composes with
 // the built-in atomic counters reachable via (*Backend).AuditStats().
@@ -119,7 +121,7 @@ func (b *Backend) TriggerPrimitives() backend.TriggerPrimitives { return b.trigg
 
 // AuditStats returns a point-in-time snapshot of audit-store dual-write
 // outcomes (ok and failed counts keyed by op). See
-// .claude/docs/specs/dual-write-contract.md.
+// .claude/specs/dual-write-contract.md.
 func (b *Backend) AuditStats() AuditStats { return b.state.auditCounters.snapshot() }
 
 // New creates an Asynq backend connected to the given Redis address.
@@ -199,7 +201,7 @@ func (b *Backend) BindHandler(eng *engine.Engine, handler func(context.Context, 
 		if err != nil {
 			return err
 		}
-		return handler(ctx, task)
+		return asynqHandlerError(handler(ctx, task))
 	})
 
 	tm := NewTimeoutMonitor(b.rdb, eng, nil, nil, 5*time.Second)
@@ -221,4 +223,14 @@ func (b *Backend) BindHandler(eng *engine.Engine, handler func(context.Context, 
 			_ = b.resourcePool.Close()
 		}
 	}
+}
+
+func asynqHandlerError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, types.ErrPermanent) {
+		return fmt.Errorf("%w: %w", asynqlib.SkipRetry, err)
+	}
+	return err
 }
