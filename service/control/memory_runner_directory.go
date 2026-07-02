@@ -59,9 +59,11 @@ func (d *MemoryRunnerDirectory) Register(_ context.Context, req RegisterRunnerRe
 	}
 
 	finalizedLease := make(map[AssignmentID]engine.TaskLease)
+	inFlight := 0
 	if existing := d.runners[req.RunnerID]; existing != nil {
 		d.requeueActiveClaimsLocked(existing)
 		finalizedLease = cloneFinalizedLeases(existing.finalizedLease)
+		inFlight = existing.snapshot.InFlight
 	}
 
 	now := req.Now
@@ -77,6 +79,7 @@ func (d *MemoryRunnerDirectory) Register(_ context.Context, req RegisterRunnerRe
 			RunnerID:      req.RunnerID,
 			Capacity:      req.Capacity,
 			Capabilities:  cloneCapabilities(req.Capabilities),
+			InFlight:      inFlight,
 			LastHeartbeat: now,
 		},
 		policy:         req.Policy,

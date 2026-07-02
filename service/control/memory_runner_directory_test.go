@@ -314,6 +314,43 @@ func TestMemoryRunnerDirectoryReregisterPreservesFinalizedLeasesAndRequeuesActiv
 	}
 }
 
+func TestMemoryRunnerDirectoryReregisterPreservesInflightUntilHeartbeat(t *testing.T) {
+	ctx := context.Background()
+	dir := NewMemoryRunnerDirectory()
+	firstSession := mustRegisterMemoryRunner(t, ctx, dir, "runner-1", 2)
+
+	if err := dir.Heartbeat(ctx, HeartbeatRequest{
+		RunnerID:  "runner-1",
+		SessionID: firstSession.SessionID,
+		Capacity:  2,
+		InFlight:  1,
+		Now:       time.Unix(12, 0),
+	}); err != nil {
+		t.Fatalf("Heartbeat() error = %v", err)
+	}
+
+	first := testAssignment("exec-1/node-a/activation-1")
+	second := testAssignment("exec-1/node-b/activation-1")
+	mustEnqueueAssignment(t, ctx, dir, first)
+	mustEnqueueAssignment(t, ctx, dir, second)
+
+	secondSession := mustRegisterMemoryRunner(t, ctx, dir, "runner-1", 2)
+	if firstSession.SessionID == secondSession.SessionID {
+		t.Fatalf("sessions should differ, both %q", firstSession.SessionID)
+	}
+
+	claim := mustClaimAssignment(t, ctx, dir, secondSession)
+	if claim.Assignment.AssignmentID != first.AssignmentID {
+		t.Fatalf("first claim assignment = %q, want %q", claim.Assignment.AssignmentID, first.AssignmentID)
+	}
+
+	if _, ok, err := dir.ClaimForRunner(ctx, testClaimRequest(secondSession, 2)); err != nil {
+		t.Fatalf("ClaimForRunner() error = %v", err)
+	} else if ok {
+		t.Fatal("ClaimForRunner() ok=true, want no second claim before the replacement session heartbeats updated inflight")
+	}
+}
+
 func mustRegisterMemoryRunner(t *testing.T, ctx context.Context, dir *MemoryRunnerDirectory, runnerID string, capacity int) RunnerSession {
 	t.Helper()
 

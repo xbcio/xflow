@@ -91,3 +91,28 @@ Results:
   - `15 passed`
   - `go test ./service/control -count=1`
   - `49 passed`
+
+## Re-review Fix Follow-Up
+
+### Finding Addressed
+
+- Preserved the last known `RunnerSnapshot.InFlight` across `MemoryRunnerDirectory.Register` re-registration so `headroom()` cannot over-assign capacity before the replacement session sends its first heartbeat.
+
+### TDD / Verification
+
+- RED:
+  - `go test ./service/control -run 'TestMemoryRunnerDirectoryReregisterPreservesInflightUntilHeartbeat' -count=1`
+  - failed on the new regression test, confirming re-registration reset `InFlight` and allowed an extra claim
+- GREEN:
+  - `go test ./service/control -run 'TestMemoryRunnerDirectoryReregisterPreservesInflightUntilHeartbeat' -count=1`
+  - `1 passed`
+- Required verification:
+  - `go test ./service/control -run 'TestMemoryRunnerDirectory|TestRunnerPool' -count=1`
+  - `16 passed`
+  - `go test ./service/control -count=1`
+  - `50 passed`
+
+### Files Updated
+
+- `service/control/memory_runner_directory.go`
+- `service/control/memory_runner_directory_test.go`
