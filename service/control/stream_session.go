@@ -58,7 +58,7 @@ func (p *RunnerPool) drainInto(s *streamSession) int {
 		}
 		idx := -1
 		for i, l := range state.queue {
-			if canRun(state.snapshot.Capabilities, engine.TaskRouting{NodeType: l.NodeType, NodeVersion: l.NodeVersion}) {
+			if canRunRouting(state.snapshot.Capabilities, engine.TaskRouting{NodeType: l.NodeType, NodeVersion: l.NodeVersion}) {
 				idx = i
 				break
 			}

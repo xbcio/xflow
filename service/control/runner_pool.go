@@ -109,7 +109,7 @@ func (p *RunnerPool) AssignRouted(routing engine.TaskRouting, build func() (*eng
 	bestHeadroom := 0
 	foundCapable := false
 	for _, state := range p.runners {
-		if !canRun(state.snapshot.Capabilities, routing) {
+		if !canRunRouting(state.snapshot.Capabilities, routing) {
 			continue
 		}
 		if !matchesRunnerSelector(state.snapshot.Labels, routing.RunnerSelector) {
@@ -192,7 +192,7 @@ func (p *RunnerPool) PollWithLabels(runnerID string, capacity int, capabilities 
 	// selector (and by capability/policy) before choosing this runner and
 	// queuing the lease, so anything in state.queue already matches.
 	for i, lease := range state.queue {
-		if !canRun(state.snapshot.Capabilities, engine.TaskRouting{NodeType: lease.NodeType, NodeVersion: lease.NodeVersion}) {
+		if !canRunRouting(state.snapshot.Capabilities, engine.TaskRouting{NodeType: lease.NodeType, NodeVersion: lease.NodeVersion}) {
 			continue
 		}
 		state.queue = append(state.queue[:i], state.queue[i+1:]...)
@@ -213,18 +213,6 @@ func (p *RunnerPool) Runner(runnerID string) (RunnerSnapshot, bool) {
 	snapshot.Capabilities = cloneCapabilities(snapshot.Capabilities)
 	snapshot.Labels = cloneLabels(snapshot.Labels)
 	return snapshot, true
-}
-
-func canRun(capabilities []protocol.Capability, routing engine.TaskRouting) bool {
-	for _, capability := range capabilities {
-		if capability.NodeType != routing.NodeType {
-			continue
-		}
-		if capability.NodeVersion == 0 || routing.NodeVersion == 0 || capability.NodeVersion == routing.NodeVersion {
-			return true
-		}
-	}
-	return false
 }
 
 func matchesRunnerSelector(labels map[string]string, selector *types.RunnerSelector) bool {

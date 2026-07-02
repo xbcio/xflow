@@ -185,6 +185,29 @@ func TestRunnerPoolRejectsMismatchedCapabilityVersion(t *testing.T) {
 	}
 }
 
+func TestRunnerPoolAssignMatchesVersionedLeaseWhenRunnerCapabilityOmitsVersion(t *testing.T) {
+	pool := NewRunnerPool()
+	pool.Register("runner-1", 1, []protocol.Capability{{NodeType: "xflow.function"}})
+
+	lease := engine.TaskLease{
+		LeaseID:     engine.LeaseID("lease-1"),
+		Task:        engine.Task{ExecutionID: types.ExecutionID("exec-1"), NodeName: "start"},
+		NodeType:    "xflow.function",
+		NodeVersion: 2,
+	}
+	if err := pool.Assign(lease); err != nil {
+		t.Fatalf("Assign() = %v, want nil", err)
+	}
+
+	got, ok := pool.Poll("runner-1", 1, []protocol.Capability{{NodeType: "xflow.function"}})
+	if !ok {
+		t.Fatal("expected assigned lease")
+	}
+	if got.LeaseID != lease.LeaseID {
+		t.Fatalf("poll lease = %q, want %q", got.LeaseID, lease.LeaseID)
+	}
+}
+
 func TestRunnerPoolHeartbeatUpdatesCapacityInFlightAndTimestamp(t *testing.T) {
 	pool := NewRunnerPool()
 	pool.Register("runner-1", 1, []protocol.Capability{{NodeType: "xflow.function"}})
