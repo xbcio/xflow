@@ -14,6 +14,33 @@ type recordingHooks struct {
 	started []string
 }
 
+func newRunnerCommitEngine(t *testing.T, opts ...Option) (*Engine, *fakeQueue) {
+	t.Helper()
+	state := newFakeState()
+	queue := &fakeQueue{}
+	eng := New(state, queue, opts...)
+	return eng, queue
+}
+
+func submitRunnerCommitWorkflow(t *testing.T, ctx context.Context, eng *Engine) types.ExecutionID {
+	t.Helper()
+	def := &types.WorkflowDef{
+		Name: "runner-commit-helper",
+		Nodes: []types.NodeDef{
+			{Name: "start", Type: "test.echo"},
+		},
+	}
+	g, err := graph.Compile(def)
+	if err != nil {
+		t.Fatal(err)
+	}
+	execID, err := eng.Submit(ctx, g, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return execID
+}
+
 func (h *recordingHooks) OnNodeStart(_ context.Context, _ types.ExecutionID, name string) {
 	h.started = append(h.started, name)
 }
@@ -312,7 +339,21 @@ func TestEngine_CommitTaskResultRejectsStaleLeaseToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := eng.BuildTaskLease(ctx, task)
+
+	expired, err := eng.State().ListExpiredLeases(ctx, time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("ListExpiredLeases() error = %v", err)
+	}
+	if len(expired) != 1 {
+		t.Fatalf("expired leases = %d, want 1", len(expired))
+	}
+	ok, err := eng.ReclaimLease(ctx, expired[0])
+	if err != nil || !ok {
+		t.Fatalf("ReclaimLease() ok=%v err=%v, want ok", ok, err)
+	}
+	requeued := queue.Drain()[0]
+
+	second, err := eng.BuildTaskLease(ctx, requeued)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -339,6 +380,61 @@ func TestEngine_CommitTaskResultRejectsStaleLeaseToken(t *testing.T) {
 	if out["ok"] != true || out["stale"] == true {
 		t.Fatalf("output = %v, want fresh result only", out)
 	}
+}
+
+func TestEngine_BuildTaskLeaseRejectsActiveUnexpiredLeaseButRoutingIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	eng, queue := newRunnerCommitEngine(t, WithDefaultLeaseTTL(time.Minute))
+	execID := submitRunnerCommitWorkflow(t, ctx, eng)
+	task := queue.Drain()[0]
+
+	first, err := eng.BuildTaskLease(ctx, task)
+	if err != nil {
+		t.Fatalf("first BuildTaskLease() error = %v", err)
+	}
+	if first.LeaseToken == "" {
+		t.Fatalf("first lease token is empty")
+	}
+
+	routing, err := eng.TaskRouting(ctx, task)
+	if err != nil {
+		t.Fatalf("TaskRouting() error = %v", err)
+	}
+	if routing.NodeType != first.NodeType || routing.NodeVersion != first.NodeVersion {
+		t.Fatalf("routing = %+v, want node type/version from first lease %+v", routing, first)
+	}
+
+	second, err := eng.BuildTaskLease(ctx, task)
+	if !errors.Is(err, ErrLeaseAlreadyActive) {
+		t.Fatalf("second BuildTaskLease() error = %v, want ErrLeaseAlreadyActive", err)
+	}
+	if second != nil {
+		t.Fatalf("second BuildTaskLease() lease = %+v, want nil", second)
+	}
+
+	expired, err := eng.State().ListExpiredLeases(ctx, time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("ListExpiredLeases() error = %v", err)
+	}
+	if len(expired) != 1 {
+		t.Fatalf("expired leases = %d, want 1", len(expired))
+	}
+
+	ok, err := eng.ReclaimLease(ctx, expired[0])
+	if err != nil || !ok {
+		t.Fatalf("ReclaimLease() ok=%v err=%v, want ok", ok, err)
+	}
+
+	reclaimedTask := queue.Drain()[0]
+	reissued, err := eng.BuildTaskLease(ctx, reclaimedTask)
+	if err != nil {
+		t.Fatalf("BuildTaskLease() after reclaim error = %v", err)
+	}
+	if reissued.LeaseToken == first.LeaseToken {
+		t.Fatalf("reissued lease token = %q, want a fresh token", reissued.LeaseToken)
+	}
+
+	_ = execID
 }
 
 func TestEngine_CommitTaskResultParksSuspendRequestWithoutHandlerExecution(t *testing.T) {

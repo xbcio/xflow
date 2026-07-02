@@ -27,6 +27,10 @@ var ErrInvalidLeaseToken = errors.New("invalid lease token")
 // ErrSuspendUnsupported is returned when a runtime mode disables suspend nodes.
 var ErrSuspendUnsupported = errors.New("xflow: suspend nodes are unsupported in transient execution mode")
 
+// ErrLeaseAlreadyActive is returned when a task already has an unexpired
+// running lease. Callers should retry after the lease is committed or reclaimed.
+var ErrLeaseAlreadyActive = errors.New("lease already active")
+
 // Option configures an Engine at construction time.
 type Option func(*Engine)
 
@@ -264,7 +268,7 @@ func (e *Engine) TaskRouting(ctx context.Context, t *Task) (TaskRouting, error) 
 	if !active {
 		return TaskRouting{}, ErrExecutionInactive
 	}
-	if _, err := e.checkTaskCanLease(ctx, g, t); err != nil {
+	if _, err := e.checkTaskRouteActive(ctx, g, t); err != nil {
 		return TaskRouting{}, err
 	}
 	meta := g.Nodes[t.NodeIdx]
@@ -413,7 +417,7 @@ func (e *Engine) loadActiveGraph(ctx context.Context, id types.ExecutionID) (*gr
 }
 
 func (e *Engine) acquireNodeLease(ctx context.Context, g *graph.Graph, t *Task, leaseID LeaseID, leaseToken LeaseToken, issuedAt time.Time, ttl time.Duration) (int, bool, error) {
-	ns, err := e.checkTaskCanLease(ctx, g, t)
+	ns, err := e.checkTaskCanLease(ctx, g, t, issuedAt)
 	if err != nil {
 		return 0, false, err
 	}
@@ -441,7 +445,21 @@ func (e *Engine) acquireNodeLease(ctx context.Context, g *graph.Graph, t *Task, 
 	return attempt, started, nil
 }
 
-func (e *Engine) checkTaskCanLease(ctx context.Context, g *graph.Graph, t *Task) (*NodeSnapshot, error) {
+func (e *Engine) checkTaskCanLease(ctx context.Context, g *graph.Graph, t *Task, now time.Time) (*NodeSnapshot, error) {
+	ns, err := e.checkTaskRouteActive(ctx, g, t)
+	if err != nil {
+		return nil, err
+	}
+	if ns != nil && ns.Status == types.NodeStatusRunning && ns.LeaseToken != "" {
+		deadline := ns.LeaseIssuedAt.Add(ns.LeaseTTL)
+		if ns.LeaseIssuedAt.IsZero() || ns.LeaseTTL <= 0 || now.Before(deadline) {
+			return nil, ErrLeaseAlreadyActive
+		}
+	}
+	return ns, nil
+}
+
+func (e *Engine) checkTaskRouteActive(ctx context.Context, g *graph.Graph, t *Task) (*NodeSnapshot, error) {
 	ns, err := e.state.GetNode(ctx, t.ExecutionID, t.NodeName)
 	if err != nil {
 		return nil, err
