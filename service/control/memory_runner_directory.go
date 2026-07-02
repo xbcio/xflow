@@ -242,13 +242,16 @@ func (d *MemoryRunnerDirectory) ReleaseClaim(_ context.Context, claimID ClaimID,
 }
 
 // ReleaseLeased removes leased-capacity accounting for a finalized assignment.
+// It resolves the live finalized lease by lease identity, so cleanup remains
+// safe if the runner re-registers after report validation but before commit
+// cleanup runs.
 func (d *MemoryRunnerDirectory) ReleaseLeased(_ context.Context, req ReleaseLeasedRequest) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	state, err := d.runnerForSessionLocked(req.RunnerID, req.SessionID)
-	if err != nil {
-		return err
+	state := d.runners[req.RunnerID]
+	if state == nil {
+		return ErrRunnerNotFound
 	}
 
 	assignmentID, ok := state.resolveAssignmentID(req)

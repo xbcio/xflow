@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
@@ -117,6 +118,123 @@ func TestHTTPPollRejectsStaleSession(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("stale poll status = %d, want %d", resp.StatusCode, http.StatusConflict)
+	}
+}
+
+func TestHTTPRunnerSessionRequired(t *testing.T) {
+	fake := &fakeControlEngine{}
+	dir := NewMemoryRunnerDirectory()
+	server := httptest.NewServer(NewServer(fake, dir).Handler())
+	defer server.Close()
+
+	register := protocol.RegisterRunnerRequest{
+		RunnerID:     "runner-1",
+		Concurrency:  1,
+		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
+	}
+	var session protocol.RegisterRunnerResponse
+	postJSON(t, server.URL+protocol.RegisterRunnerPath, register, http.StatusOK, &session)
+
+	tests := []struct {
+		name string
+		url  string
+		body any
+	}{
+		{
+			name: "heartbeat",
+			url:  protocol.HeartbeatPath,
+			body: protocol.HeartbeatRequest{RunnerID: session.RunnerID, Capacity: 1, InFlight: 0},
+		},
+		{
+			name: "poll",
+			url:  protocol.PollTaskPath,
+			body: protocol.PollTaskRequest{RunnerID: session.RunnerID, Capacity: 1},
+		},
+		{
+			name: "report",
+			url:  protocol.ReportResultPath,
+			body: protocol.ReportResultRequest{
+				RunnerID: session.RunnerID,
+				Lease: &engine.TaskLease{
+					LeaseID:  "lease-1",
+					Task:     engine.Task{ExecutionID: "exec-1", NodeName: "start"},
+					NodeType: "xflow.function",
+				},
+				Result: engine.TaskResult{Output: &types.Output{Data: map[string]any{"ok": true}}},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := postJSONRaw(t, server.URL+tt.url, tt.body)
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("%s status = %d, want %d", tt.name, resp.StatusCode, http.StatusBadRequest)
+			}
+		})
+	}
+}
+
+func TestCoreReportResultCleanupSurvivesReregistration(t *testing.T) {
+	ctx := context.Background()
+	dir := NewMemoryRunnerDirectory()
+	session := mustRegisterHTTPRunner(t, dir)
+	assignment := stableTestAssignment("node-a")
+	mustEnqueueAssignment(t, ctx, dir, assignment)
+	claim := mustClaimAssignment(t, ctx, dir, session)
+	lease := &engine.TaskLease{
+		LeaseID:    "lease-1",
+		LeaseToken: "token-1",
+		Task:       claim.Assignment.Task,
+		NodeType:   claim.Assignment.Routing.NodeType,
+	}
+	if err := dir.FinalizeClaim(ctx, claim.ClaimID, lease); err != nil {
+		t.Fatalf("FinalizeClaim() error = %v", err)
+	}
+
+	var replacement RunnerSession
+	fake := &fakeControlEngine{
+		commitHook: func() {
+			var err error
+			replacement, err = dir.Register(ctx, RegisterRunnerRequest{
+				RunnerID:     session.RunnerID,
+				Capacity:     1,
+				Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
+				Policy:       RunnerPolicy{AllowedNodeTypes: []string{"*"}},
+			})
+			if err != nil {
+				t.Fatalf("Register() during commit error = %v", err)
+			}
+		},
+	}
+	core := &Core{engine: fake, runners: dir, pollWait: time.Second}
+
+	resp, err := core.reportResult(ctx, protocol.ReportResultRequest{
+		RunnerID:  session.RunnerID,
+		SessionID: session.SessionID,
+		Lease:     lease,
+		Result:    engine.TaskResult{Output: &types.Output{Data: map[string]any{"ok": true}}},
+	}, TransportInfo{})
+	if err != nil {
+		t.Fatalf("reportResult() error = %v", err)
+	}
+	if !resp.Accepted {
+		t.Fatalf("reportResult() accepted = false, response %+v", resp)
+	}
+	if replacement.SessionID == "" {
+		t.Fatal("replacement session id is empty")
+	}
+	if fake.committedLease == nil || fake.committedLease.LeaseToken != lease.LeaseToken {
+		t.Fatalf("committed lease = %+v, want token %q", fake.committedLease, lease.LeaseToken)
+	}
+
+	enqueued, err := dir.EnqueueAssignment(ctx, assignment)
+	if err != nil {
+		t.Fatalf("EnqueueAssignment() after report error = %v", err)
+	}
+	if !enqueued {
+		t.Fatal("EnqueueAssignment() after report enqueued=false, want released seen state after commit-time re-registration")
 	}
 }
 
@@ -404,6 +522,7 @@ type fakeControlEngine struct {
 	inspectErr      error
 	buildLease      *engine.TaskLease
 	buildErr        error
+	commitHook      func()
 	commitOutcome   engine.CommitOutcome
 	commitErr       error
 	committedLease  *engine.TaskLease
@@ -447,6 +566,9 @@ func (f *fakeControlEngine) BuildTaskLease(_ context.Context, task *engine.Task)
 }
 
 func (f *fakeControlEngine) CommitTaskResultWithOutcome(_ context.Context, lease *engine.TaskLease, result engine.TaskResult) (engine.CommitOutcome, error) {
+	if f.commitHook != nil {
+		f.commitHook()
+	}
 	if f.commitErr != nil {
 		if errors.Is(f.commitErr, engine.ErrInvalidLeaseToken) {
 			return engine.CommitOutcomeStaleToken, f.commitErr

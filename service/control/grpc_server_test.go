@@ -230,6 +230,75 @@ func TestGRPCReportResultRejectsStaleSession(t *testing.T) {
 	}
 }
 
+func TestGRPCRunnerSessionRequired(t *testing.T) {
+	eng := &fakeControlEngine{}
+	runners := NewMemoryRunnerDirectory()
+	client := startGRPCTestServer(t, eng, runners)
+	ctx := context.Background()
+
+	session, err := client.Register(ctx, protocol.RegisterRunnerRequest{
+		RunnerID:     "runner-1",
+		Concurrency:  1,
+		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
+	})
+	if err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	tests := []struct {
+		name string
+		call func() error
+	}{
+		{
+			name: "heartbeat",
+			call: func() error {
+				_, err := client.Heartbeat(ctx, protocol.HeartbeatRequest{
+					RunnerID: session.RunnerID,
+					Capacity: 1,
+				})
+				return err
+			},
+		},
+		{
+			name: "poll",
+			call: func() error {
+				_, err := client.Poll(ctx, protocol.PollTaskRequest{
+					RunnerID: session.RunnerID,
+					Capacity: 1,
+				})
+				return err
+			},
+		},
+		{
+			name: "report",
+			call: func() error {
+				_, err := client.ReportResult(ctx, protocol.ReportResultRequest{
+					RunnerID: session.RunnerID,
+					Lease: &engine.TaskLease{
+						LeaseID:  "lease-1",
+						Task:     engine.Task{ExecutionID: "exec-1", NodeName: "start"},
+						NodeType: "xflow.function",
+					},
+					Result: engine.TaskResult{Output: &types.Output{Data: map[string]any{"ok": true}}},
+				})
+				return err
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.call()
+			if err == nil {
+				t.Fatalf("%s expected error", tt.name)
+			}
+			if got := status.Code(err); got != codes.InvalidArgument {
+				t.Fatalf("%s status code = %v, want InvalidArgument", tt.name, got)
+			}
+		})
+	}
+}
+
 func TestGRPCHeartbeatUnknownRunnerReturnsNotFound(t *testing.T) {
 	eng := &fakeControlEngine{}
 	runners := NewMemoryRunnerDirectory()
@@ -237,6 +306,7 @@ func TestGRPCHeartbeatUnknownRunnerReturnsNotFound(t *testing.T) {
 
 	_, err := client.Heartbeat(context.Background(), protocol.HeartbeatRequest{
 		RunnerID:  "ghost",
+		SessionID: "session-1",
 		Timestamp: time.Now().Unix(),
 	})
 	if err == nil {

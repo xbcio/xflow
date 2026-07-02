@@ -14,12 +14,13 @@ import (
 // its own status representation so the core handling logic stays free of
 // net/http and grpc/codes.
 var (
-	ErrRunnerIDRequired    = errors.New("runner_id is required")
-	ErrConcurrencyRequired = errors.New("runner_id and concurrency are required")
-	ErrRunnerNotFound      = errors.New("runner not found")
-	ErrLeaseRequired       = errors.New("runner_id and lease are required")
-	ErrEngineNotConfigured = errors.New("engine not configured")
-	ErrUnauthenticated     = errors.New("unauthenticated")
+	ErrRunnerIDRequired      = errors.New("runner_id is required")
+	ErrRunnerSessionRequired = errors.New("runner_id and session_id are required")
+	ErrConcurrencyRequired   = errors.New("runner_id and concurrency are required")
+	ErrRunnerNotFound        = errors.New("runner not found")
+	ErrLeaseRequired         = errors.New("runner_id, session_id and lease are required")
+	ErrEngineNotConfigured   = errors.New("engine not configured")
+	ErrUnauthenticated       = errors.New("unauthenticated")
 )
 
 // Core holds the transport-independent Runner Protocol logic shared by the HTTP
@@ -115,8 +116,8 @@ func (c *Core) register(req protocol.RegisterRunnerRequest, info TransportInfo) 
 }
 
 func (c *Core) heartbeat(req protocol.HeartbeatRequest, info TransportInfo) (protocol.HeartbeatResponse, error) {
-	if req.RunnerID == "" {
-		return protocol.HeartbeatResponse{}, ErrRunnerIDRequired
+	if req.RunnerID == "" || req.SessionID == "" {
+		return protocol.HeartbeatResponse{}, ErrRunnerSessionRequired
 	}
 	_, authErr := c.authn().AuthenticateOngoing(req.RunnerID, req.AuthToken, info)
 	if err := c.authDeny(req.RunnerID, req.AuthToken, "heartbeat", info, authErr); err != nil {
@@ -139,8 +140,8 @@ func (c *Core) heartbeat(req protocol.HeartbeatRequest, info TransportInfo) (pro
 }
 
 func (c *Core) pollTask(req protocol.PollTaskRequest, info TransportInfo) (protocol.PollTaskResponse, error) {
-	if req.RunnerID == "" {
-		return protocol.PollTaskResponse{}, ErrRunnerIDRequired
+	if req.RunnerID == "" || req.SessionID == "" {
+		return protocol.PollTaskResponse{}, ErrRunnerSessionRequired
 	}
 	_, authErr := c.authn().AuthenticateOngoing(req.RunnerID, req.AuthToken, info)
 	if err := c.authDeny(req.RunnerID, req.AuthToken, "poll", info, authErr); err != nil {
@@ -184,7 +185,7 @@ func (c *Core) pollTask(req protocol.PollTaskRequest, info TransportInfo) (proto
 }
 
 func (c *Core) reportResult(ctx context.Context, req protocol.ReportResultRequest, info TransportInfo) (protocol.ReportResultResponse, error) {
-	if req.RunnerID == "" || req.Lease == nil {
+	if req.RunnerID == "" || req.SessionID == "" || req.Lease == nil {
 		return protocol.ReportResultResponse{}, ErrLeaseRequired
 	}
 	_, authErr := c.authn().AuthenticateOngoing(req.RunnerID, req.AuthToken, info)

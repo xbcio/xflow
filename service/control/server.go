@@ -335,7 +335,7 @@ func writeEngineError(w http.ResponseWriter, err error) {
 // codes.
 func writeRunnerError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, ErrRunnerIDRequired), errors.Is(err, ErrConcurrencyRequired), errors.Is(err, ErrLeaseRequired):
+	case errors.Is(err, ErrRunnerIDRequired), errors.Is(err, ErrRunnerSessionRequired), errors.Is(err, ErrConcurrencyRequired), errors.Is(err, ErrLeaseRequired):
 		writeError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, ErrRunnerSessionStale):
 		writeError(w, http.StatusConflict, err.Error())

@@ -14,3 +14,18 @@ Tests run:
 
 Concerns:
 - None.
+
+---
+
+Follow-up fix after review:
+
+- Tightened runner request validation so empty `session_id` on heartbeat, poll, and report-result is rejected as request validation (`400` HTTP / `InvalidArgument` gRPC) before any stale-session check runs.
+- Fixed the `reportResult` re-registration race by making `ReleaseLeased` resolve and release finalized capacity by lease identity from the live runner state instead of requiring the original session to still be current during post-commit cleanup.
+- Added deterministic regressions:
+  - `TestCoreReportResultCleanupSurvivesReregistration`
+  - `TestHTTPRunnerSessionRequired`
+  - `TestGRPCRunnerSessionRequired`
+
+Follow-up tests run:
+- `go test ./service/control -run 'TestHTTPRunnerSessionRequired|TestCoreReportResultCleanupSurvivesReregistration|TestGRPCRunnerSessionRequired' -count=1`
+- `go test ./service/control ./cmd/server -count=1`

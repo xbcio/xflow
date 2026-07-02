@@ -226,15 +226,17 @@ func TestCoreAuthObserverRecordsAllowAndDeny(t *testing.T) {
 		authObserver: observer,
 	}
 
-	if _, err := core.register(protocol.RegisterRunnerRequest{
+	regResp, err := core.register(protocol.RegisterRunnerRequest{
 		RunnerID:    "runner-1",
 		Concurrency: 1,
 		AuthToken:   "secret",
-	}, TransportInfo{}); err != nil {
+	}, TransportInfo{})
+	if err != nil {
 		t.Fatalf("register allow error = %v", err)
 	}
 	if _, err := core.heartbeat(protocol.HeartbeatRequest{
 		RunnerID:  "runner-1",
+		SessionID: regResp.SessionID,
 		Capacity:  1,
 		AuthToken: "wrong",
 	}, TransportInfo{}); !errors.Is(err, ErrUnauthenticated) {
