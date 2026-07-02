@@ -427,6 +427,97 @@ func TestEngine_CommitTaskResultRejectsStaleLeaseToken(t *testing.T) {
 	}
 }
 
+func TestEngine_CommitTaskResultWithOutcomeClassifiesAcceptedDuplicateAndStale(t *testing.T) {
+	ctx := context.Background()
+	t.Run("accepted and duplicate terminal", func(t *testing.T) {
+		def := &types.WorkflowDef{
+			Name: "commit-outcome-duplicate",
+			Nodes: []types.NodeDef{
+				{Name: "start", Type: "test.echo"},
+				{Name: "next", Type: "test.echo"},
+			},
+			Connections: types.Connections{
+				"start": {"main": []types.Connection{{Node: "next", Input: "main"}}},
+			},
+		}
+
+		g, err := graph.Compile(def)
+		if err != nil {
+			t.Fatal(err)
+		}
+		eng, queue := newRunnerCommitEngine(t)
+		if _, err := eng.Submit(ctx, g, nil); err != nil {
+			t.Fatal(err)
+		}
+		task := queue.Drain()[0]
+		lease, err := eng.BuildTaskLease(ctx, task)
+		if err != nil {
+			t.Fatalf("BuildTaskLease() error = %v", err)
+		}
+
+		outcome, err := eng.CommitTaskResultWithOutcome(ctx, lease, TaskResult{Output: &types.Output{Data: map[string]any{"ok": true}}})
+		if err != nil {
+			t.Fatalf("CommitTaskResultWithOutcome() error = %v", err)
+		}
+		if outcome != CommitOutcomeAccepted {
+			t.Fatalf("outcome = %s, want %s", outcome, CommitOutcomeAccepted)
+		}
+
+		outcome, err = eng.CommitTaskResultWithOutcome(ctx, lease, TaskResult{Output: &types.Output{Data: map[string]any{"ok": true}}})
+		if err != nil {
+			t.Fatalf("duplicate CommitTaskResultWithOutcome() error = %v", err)
+		}
+		if outcome != CommitOutcomeDuplicateTerminal {
+			t.Fatalf("duplicate outcome = %s, want %s", outcome, CommitOutcomeDuplicateTerminal)
+		}
+	})
+
+	t.Run("stale token", func(t *testing.T) {
+		eng, queue := newRunnerCommitEngine(t)
+		submitRunnerCommitWorkflow(t, ctx, eng)
+		task := queue.Drain()[0]
+
+		first, err := eng.BuildTaskLease(ctx, task)
+		if err != nil {
+			t.Fatalf("BuildTaskLease() error = %v", err)
+		}
+
+		expired, err := eng.State().ListExpiredLeases(ctx, time.Now().Add(time.Hour))
+		if err != nil {
+			t.Fatalf("ListExpiredLeases() error = %v", err)
+		}
+		if len(expired) != 1 {
+			t.Fatalf("expired leases = %d, want 1", len(expired))
+		}
+		ok, err := eng.ReclaimLease(ctx, expired[0])
+		if err != nil || !ok {
+			t.Fatalf("ReclaimLease() ok=%v err=%v, want ok", ok, err)
+		}
+
+		requeued := queue.Drain()[0]
+		second, err := eng.BuildTaskLease(ctx, requeued)
+		if err != nil {
+			t.Fatalf("second BuildTaskLease() error = %v", err)
+		}
+
+		outcome, err := eng.CommitTaskResultWithOutcome(ctx, first, TaskResult{Output: &types.Output{Data: map[string]any{"stale": true}}})
+		if !errors.Is(err, ErrInvalidLeaseToken) {
+			t.Fatalf("stale error = %v, want ErrInvalidLeaseToken", err)
+		}
+		if outcome != CommitOutcomeStaleToken {
+			t.Fatalf("stale outcome = %s, want %s", outcome, CommitOutcomeStaleToken)
+		}
+
+		outcome, err = eng.CommitTaskResultWithOutcome(ctx, second, TaskResult{Output: &types.Output{Data: map[string]any{"ok": true}}})
+		if err != nil {
+			t.Fatalf("fresh CommitTaskResultWithOutcome() error = %v", err)
+		}
+		if outcome != CommitOutcomeAccepted {
+			t.Fatalf("fresh outcome = %s, want %s", outcome, CommitOutcomeAccepted)
+		}
+	})
+}
+
 func TestEngine_BuildTaskLeaseRejectsActiveUnexpiredLeaseButRoutingIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	eng, queue := newRunnerCommitEngine(t, WithDefaultLeaseTTL(time.Minute))

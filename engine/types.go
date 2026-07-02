@@ -52,6 +52,27 @@ type NodeResult struct {
 // TaskResult is the protocol-facing task execution result.
 type TaskResult = NodeResult
 
+// CommitOutcome classifies runner result commits so control-plane directories
+// can clean up assignment and capacity state without parsing errors.
+type CommitOutcome string
+
+const (
+	CommitOutcomeAccepted          CommitOutcome = "accepted"
+	CommitOutcomeDuplicateTerminal CommitOutcome = "duplicate_terminal"
+	CommitOutcomeStaleToken        CommitOutcome = "stale_token"
+	CommitOutcomeExecutionInactive CommitOutcome = "execution_inactive"
+	CommitOutcomeTransientError    CommitOutcome = "transient_error"
+)
+
+func (o CommitOutcome) ReleasesLeasedCapacity() bool {
+	switch o {
+	case CommitOutcomeAccepted, CommitOutcomeDuplicateTerminal, CommitOutcomeStaleToken, CommitOutcomeExecutionInactive:
+		return true
+	default:
+		return false
+	}
+}
+
 // TaskLease is the server-side assignment sent to a runner through Runner Protocol.
 type TaskLease struct {
 	LeaseID     LeaseID       `json:"lease_id,omitempty"`

@@ -311,16 +311,21 @@ func cloneRunnerSelector(selector *types.RunnerSelector) *types.RunnerSelector {
 // and advances scheduling. Stale tokens are rejected so an older assignment
 // cannot overwrite or advance state after a newer lease has been issued.
 func (e *Engine) CommitTaskResult(ctx context.Context, lease *TaskLease, result TaskResult) error {
+	_, err := e.CommitTaskResultWithOutcome(ctx, lease, result)
+	return err
+}
+
+func (e *Engine) CommitTaskResultWithOutcome(ctx context.Context, lease *TaskLease, result TaskResult) (CommitOutcome, error) {
 	if lease == nil {
-		return ErrInvalidLeaseToken
+		return CommitOutcomeStaleToken, ErrInvalidLeaseToken
 	}
 	t := &lease.Task
 	g, active, err := e.loadActiveGraph(ctx, t.ExecutionID)
 	if err != nil {
-		return err
+		return CommitOutcomeTransientError, err
 	}
 	if !active {
-		return nil
+		return CommitOutcomeExecutionInactive, nil
 	}
 
 	if result.Suspend != nil && e.suspendDisabled {
@@ -329,21 +334,27 @@ func (e *Engine) CommitTaskResult(ctx context.Context, lease *TaskLease, result 
 
 	ns, valid, err := e.state.ClaimTaskLease(ctx, lease)
 	if err != nil {
-		return err
+		return CommitOutcomeTransientError, err
 	}
 	if !valid {
-		return ErrInvalidLeaseToken
+		return CommitOutcomeStaleToken, ErrInvalidLeaseToken
 	}
 	if types.IsTerminalNodeStatus(ns.Status) {
-		return nil
+		return CommitOutcomeDuplicateTerminal, nil
 	}
 
 	if result.Suspend != nil {
-		return e.commitSuspendResult(ctx, t, result)
+		if err := e.commitSuspendResult(ctx, t, result); err != nil {
+			return CommitOutcomeTransientError, err
+		}
+		return CommitOutcomeAccepted, nil
 	}
 
 	meta := g.Nodes[t.NodeIdx]
-	return e.finalizeNode(ctx, t, g, meta, result.Output, result.Error)
+	if err := e.finalizeNode(ctx, t, g, meta, result.Output, result.Error); err != nil {
+		return CommitOutcomeTransientError, err
+	}
+	return CommitOutcomeAccepted, nil
 }
 
 // CommitTaskFailure forces a leased task to fail the whole execution without
