@@ -11,6 +11,8 @@ CREATE TABLE IF NOT EXISTS xflow_executions (
     workflow_def JSON         NOT NULL              COMMENT '完整 WorkflowDef JSON',
     params       JSON                               COMMENT '提交时的输入参数 JSON',
     runtime      JSON                               COMMENT '提交时的运行时上下文 JSON',
+    trace_id     VARCHAR(64)  NOT NULL DEFAULT ''   COMMENT '提交时指定的 Trace ID',
+    span_id      VARCHAR(32)  NOT NULL DEFAULT ''   COMMENT '提交时指定的 Span ID',
     status       VARCHAR(20)  NOT NULL DEFAULT 'pending' COMMENT '生命周期状态',
     error_msg    TEXT                               COMMENT '失败时的错误信息',
     created_at   DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),

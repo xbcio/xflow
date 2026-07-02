@@ -7,7 +7,7 @@
 // discipline. Default `go test ./...` skips these cases; run them with
 // `make test-concurrency` (build tag `concurrency`, -race, -count=3).
 //
-// Spec: .claude/docs/specs/lua-concurrency-tests.md
+// Spec: .claude/specs/lua-concurrency-tests.md
 package contract
 
 import (

@@ -3,6 +3,7 @@ package execution
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -28,16 +29,16 @@ func (h versionedHandler) Execute(context.Context, *types.Input) (*types.Output,
 	return &types.Output{Data: map[string]any{"v": h.version, "t": h.typ}}, nil
 }
 
-// recordingLogger captures the warn messages emitted by VersionWarnFallback.
+// recordingLogger captures the messages emitted by VersionWarnFallback.
 type recordingLogger struct {
 	mu   sync.Mutex
 	msgs []string
 }
 
-func (l *recordingLogger) Warn(msg string, _ ...any) {
+func (l *recordingLogger) Warnf(format string, args ...any) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.msgs = append(l.msgs, msg)
+	l.msgs = append(l.msgs, fmt.Sprintf(format, args...))
 }
 
 func (l *recordingLogger) messages() []string {

@@ -15,6 +15,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"flag"
@@ -23,6 +24,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -30,8 +32,12 @@ import (
 	"github.com/xbcio/xflow/backend/asynq"
 	"github.com/xbcio/xflow/backend/memory"
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/observability"
+	obslogger "github.com/xbcio/xflow/observability/logger"
+	"github.com/xbcio/xflow/observability/metrics"
 	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/service/protocol/runnerpb"
+	"go.uber.org/zap"
 )
 
 type serverConfig struct {
@@ -51,6 +57,10 @@ type serverConfig struct {
 	tlsCert     string
 	tlsKey      string
 	tlsClientCA string
+	logFormat   string
+	metricsAddr string
+	metricsPath string
+	traceMode   string
 }
 
 func main() {
@@ -76,11 +86,18 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	fs.StringVar(&cfg.tlsCert, "tls-cert", "", "Path to server TLS certificate (enables TLS)")
 	fs.StringVar(&cfg.tlsKey, "tls-key", "", "Path to server TLS private key (required with --tls-cert)")
 	fs.StringVar(&cfg.tlsClientCA, "tls-client-ca", "", "Path to CA bundle to verify runner certs (enables mTLS)")
+	fs.StringVar(&cfg.logFormat, "log-format", "text", "Log format: text or json")
+	fs.StringVar(&cfg.metricsAddr, "metrics-addr", "", "Prometheus metrics listen address (empty disables metrics)")
+	fs.StringVar(&cfg.metricsPath, "metrics-path", "/metrics", "Prometheus metrics path")
+	fs.StringVar(&cfg.traceMode, "trace", "disabled", "Tracing mode: disabled")
 	if args == nil {
 		args = os.Args[1:]
 	}
 	if err := fs.Parse(args); err != nil {
 		return serverConfig{}, err
+	}
+	if cfg.traceMode != "disabled" {
+		return serverConfig{}, fmt.Errorf("--trace currently supports only disabled")
 	}
 	if cfg.redis == "" {
 		cfg.memory = true
@@ -90,6 +107,19 @@ func parseServerConfig(args []string) (serverConfig, error) {
 
 func runServer(cfg serverConfig) error {
 	runners := control.NewRunnerPool()
+	logger, err := buildLogger(cfg)
+	if err != nil {
+		return err
+	}
+	metricsCollector := (*metrics.Metrics)(nil)
+	if cfg.metricsAddr != "" {
+		metricsCollector = metrics.New()
+		metricsStop, err := serveMetrics(cfg.metricsAddr, cfg.metricsPath, metricsCollector)
+		if err != nil {
+			return err
+		}
+		defer metricsStop()
+	}
 
 	auth, err := buildAuthenticator(cfg)
 	if err != nil {
@@ -103,37 +133,123 @@ func runServer(cfg serverConfig) error {
 
 	var eng *engine.Engine
 	var stop func()
+	sweeperStop := func() {}
+	engineOpts := engineOptions(logger, metricsCollector)
+	dispatcherOpts := dispatcherOptions(metricsCollector)
+	sweeperCfg := control.LeaseSweeperConfig{Logger: logger}
+	if metricsCollector != nil {
+		sweeperCfg.Observer = observability.NewSweepMetrics(metricsCollector)
+	}
 	if cfg.memory {
 		backend := memory.New(memory.WithConcurrency(cfg.concurrency))
-		eng = engine.New(backend.State(), backend.Queue())
-		dispatcher := control.NewDispatcher(eng, runners)
+		eng = engine.New(backend.State(), backend.Queue(), engineOpts...)
+		dispatcher := control.NewDispatcher(eng, runners, dispatcherOpts...)
 		stop = backend.BindHandler(dispatcher.HandleTask)
+		sweeperStop = startLeaseSweeper(backend.State(), eng, sweeperCfg)
 	} else {
-		backend, err := asynq.New(cfg.redis, nil, asynq.WithConcurrency(cfg.concurrency))
+		asynqOpts := []asynq.Option{asynq.WithConcurrency(cfg.concurrency), asynq.WithStateLogger(logger)}
+		if metricsCollector != nil {
+			asynqOpts = append(asynqOpts, asynq.WithAuditObserver(observability.NewAuditMetrics(metricsCollector)))
+		}
+		backend, err := asynq.New(cfg.redis, nil, asynqOpts...)
 		if err != nil {
 			return err
 		}
-		eng = engine.New(backend.State(), backend.Queue())
-		dispatcher := control.NewDispatcher(eng, runners)
+		eng = engine.New(backend.State(), backend.Queue(), engineOpts...)
+		dispatcher := control.NewDispatcher(eng, runners, dispatcherOpts...)
 		stop = backend.BindHandler(eng, dispatcher.HandleTask)
+		sweeperStop = startLeaseSweeper(backend.State(), eng, sweeperCfg)
 	}
 	defer stop()
+	defer sweeperStop()
 
 	if cfg.grpcAddr != "" {
-		grpcStop, err := serveGRPC(cfg.grpcAddr, eng, runners, auth, tlsCfg)
+		grpcStop, err := serveGRPC(cfg.grpcAddr, eng, runners, auth, tlsCfg, logger, metricsCollector)
 		if err != nil {
 			return err
 		}
 		defer grpcStop()
 	}
 
-	handler := control.NewServer(eng, runners, control.WithAuthenticator(auth)).Handler()
+	serverOpts := []control.ServerOption{
+		control.WithAuthenticator(auth),
+		control.WithControlLogger(logger),
+	}
+	if metricsCollector != nil {
+		serverOpts = append(serverOpts, control.WithAuthObserver(observability.NewAuthMetrics(metricsCollector)))
+	}
+	handler := control.NewServer(eng, runners, serverOpts...).Handler()
 	if tlsCfg == nil {
 		return http.ListenAndServe(cfg.addr, handler)
 	}
 	srv := &http.Server{Addr: cfg.addr, Handler: handler, TLSConfig: tlsCfg}
 	log.Printf("xflow-server: HTTPS listening on %s (mTLS=%v)", cfg.addr, tlsCfg.ClientAuth == tls.RequireAndVerifyClientCert)
 	return srv.ListenAndServeTLS("", "")
+}
+
+func buildLogger(cfg serverConfig) (engine.Logger, error) {
+	var zapCfg zap.Config
+	switch cfg.logFormat {
+	case "", "text":
+		zapCfg = zap.NewDevelopmentConfig()
+		zapCfg.Encoding = "console"
+	case "json":
+		zapCfg = zap.NewProductionConfig()
+	default:
+		return nil, fmt.Errorf("--log-format must be text or json")
+	}
+	zapCfg.OutputPaths = []string{"stderr"}
+	zapCfg.ErrorOutputPaths = []string{"stderr"}
+	log, err := zapCfg.Build()
+	if err != nil {
+		return nil, err
+	}
+	return obslogger.NewZapLogger(log), nil
+}
+
+func engineOptions(logger engine.Logger, metrics *metrics.Metrics) []engine.Option {
+	opts := []engine.Option{engine.WithLogger(logger)}
+	if metrics != nil {
+		opts = append(opts, engine.WithHooks(observability.NewMetricsHooks(metrics)))
+	}
+	return opts
+}
+
+func dispatcherOptions(metrics *metrics.Metrics) []control.DispatcherOption {
+	if metrics == nil {
+		return nil
+	}
+	return []control.DispatcherOption{control.WithDispatcherObserver(observability.NewDispatcherMetrics(metrics))}
+}
+
+func serveMetrics(addr string, path string, metrics *metrics.Metrics) (func(), error) {
+	if path == "" {
+		path = "/metrics"
+	}
+	mux := http.NewServeMux()
+	mux.Handle(path, metrics.Handler())
+	srv := &http.Server{Addr: addr, Handler: mux}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	go func() {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+			log.Printf("metrics server stopped: %v", err)
+		}
+	}()
+	return func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+	}, nil
+}
+
+func startLeaseSweeper(state control.LeaseLister, reclaimer control.LeaseReclaimer, cfg control.LeaseSweeperConfig) func() {
+	ctx, cancel := context.WithCancel(context.Background())
+	sw := control.NewLeaseSweeper(state, reclaimer, cfg)
+	go sw.Run(ctx)
+	return cancel
 }
 
 // buildTLSConfig resolves the server TLS config from CLI flags. Returns nil
@@ -192,7 +308,7 @@ func buildAuthenticator(cfg serverConfig) (control.Authenticator, error) {
 // serveGRPC starts the gRPC Runner Protocol server on its own listener, sharing
 // the engine and runner pool with the HTTP server. It returns a stop function
 // that gracefully drains the gRPC server.
-func serveGRPC(addr string, eng *engine.Engine, runners *control.RunnerPool, auth control.Authenticator, tlsCfg *tls.Config) (func(), error) {
+func serveGRPC(addr string, eng *engine.Engine, runners *control.RunnerPool, auth control.Authenticator, tlsCfg *tls.Config, logger engine.Logger, metrics *metrics.Metrics) (func(), error) {
 	lis, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, err
@@ -203,7 +319,14 @@ func serveGRPC(addr string, eng *engine.Engine, runners *control.RunnerPool, aut
 		log.Printf("xflow-server: gRPC listening on %s (mTLS=%v)", addr, tlsCfg.ClientAuth == tls.RequireAndVerifyClientCert)
 	}
 	grpcServer := grpc.NewServer(opts...)
-	runnerpb.RegisterRunnerProtocolServer(grpcServer, control.NewGRPCServer(eng, runners, control.WithGRPCAuthenticator(auth)))
+	grpcOpts := []control.GRPCServerOption{
+		control.WithGRPCAuthenticator(auth),
+		control.WithGRPCLogger(logger),
+	}
+	if metrics != nil {
+		grpcOpts = append(grpcOpts, control.WithGRPCAuthObserver(observability.NewAuthMetrics(metrics)))
+	}
+	runnerpb.RegisterRunnerProtocolServer(grpcServer, control.NewGRPCServer(eng, runners, grpcOpts...))
 	go func() {
 		if serveErr := grpcServer.Serve(lis); serveErr != nil {
 			log.Printf("gRPC server stopped: %v", serveErr)

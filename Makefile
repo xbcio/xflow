@@ -26,7 +26,7 @@ test-examples:
 	go test ./sdk/examples/ -race -count=1 -v -timeout 30s
 
 # Concurrency stress suite. Gated behind the `concurrency` build tag so the
-# default `make test` stays fast. Spec: .claude/docs/specs/lua-concurrency-tests.md
+# default `make test` stays fast. Spec: .claude/specs/lua-concurrency-tests.md
 test-concurrency:
 	go test -tags=concurrency ./backend/memory/ ./backend/asynq/ -race -count=3 -timeout 5m
 

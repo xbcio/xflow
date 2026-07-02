@@ -18,12 +18,12 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
-func startGRPCTestServer(t *testing.T, eng EngineFacade, runners *RunnerPool) *protocol.GRPCClient {
+func startGRPCTestServer(t *testing.T, eng EngineFacade, runners *RunnerPool, opts ...GRPCServerOption) *protocol.GRPCClient {
 	t.Helper()
 
 	lis := bufconn.Listen(1024 * 1024)
 	srv := grpc.NewServer()
-	runnerpb.RegisterRunnerProtocolServer(srv, NewGRPCServer(eng, runners))
+	runnerpb.RegisterRunnerProtocolServer(srv, NewGRPCServer(eng, runners, opts...))
 	go func() {
 		_ = srv.Serve(lis)
 	}()
@@ -177,5 +177,33 @@ func TestGRPCRegisterRejectsMissingFields(t *testing.T) {
 	}
 	if got := status.Code(err); got != codes.InvalidArgument {
 		t.Fatalf("status code = %v, want InvalidArgument", got)
+	}
+}
+
+func TestGRPCRegisterRejectedWithoutTokenReturnsUnauthenticated(t *testing.T) {
+	store, err := NewFilePolicyStoreFromConfig(PolicyConfig{
+		Version: 1,
+		Runners: []PolicyEntry{{
+			Name:             "functions",
+			IDPrefix:         "runner-",
+			Token:            "secret",
+			AllowedNodeTypes: []string{"xflow.function"},
+		}},
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := startGRPCTestServer(t, &fakeControlEngine{}, NewRunnerPool(), WithGRPCAuthenticator(store))
+
+	_, err = client.Register(context.Background(), protocol.RegisterRunnerRequest{
+		RunnerID:     "runner-1",
+		Concurrency:  1,
+		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
+	})
+	if err == nil {
+		t.Fatal("expected unauthenticated error")
+	}
+	if got := status.Code(err); got != codes.Unauthenticated {
+		t.Fatalf("status code = %v, want Unauthenticated", got)
 	}
 }

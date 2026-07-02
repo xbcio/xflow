@@ -215,6 +215,60 @@ func TestInvokeStartCreatesExecution(t *testing.T) {
 	}
 }
 
+func TestInvokeOptionsPassTraceMetadataToHandlerInput(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	recorder := &traceInputRecorder{seen: make(chan *node.Input, 1)}
+	eng, err := NewLocal(WithNodes(recorder))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eng.Stop()
+
+	wf := Workflow("trace-input")
+	start := wf.Node("start", node.Start())
+	action := wf.LocalNode("record", recorder)
+	wf.Connect(start, action)
+	workflowID, err := eng.AddWorkflow(ctx, wf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	execID, err := eng.Invoke(ctx, workflowID, Start(), nil, WithTraceID("trace-123"), WithSpanID("span-456"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := eng.Wait(ctx, execID); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case input := <-recorder.seen:
+		if input.TraceID != "trace-123" {
+			t.Fatalf("Input.TraceID = %q, want trace-123", input.TraceID)
+		}
+		if input.SpanID != "span-456" {
+			t.Fatalf("Input.SpanID = %q, want span-456", input.SpanID)
+		}
+	case <-ctx.Done():
+		t.Fatalf("timed out waiting for handler input: %v", ctx.Err())
+	}
+}
+
+type traceInputRecorder struct {
+	seen chan *node.Input
+}
+
+func (h *traceInputRecorder) Descriptor() node.Descriptor {
+	return node.Descriptor{Type: "test.trace_input"}
+}
+
+func (h *traceInputRecorder) Execute(_ context.Context, input *node.Input) (*node.Output, error) {
+	cp := *input
+	h.seen <- &cp
+	return &node.Output{Data: input.Data}, nil
+}
+
 type blockingHandler struct {
 	release chan struct{}
 	once    sync.Once

@@ -325,3 +325,10 @@ func IsDryRunDenial(err error) bool {
 	return errors.As(err, &d)
 }
 
+// IsDryRun reports whether this authenticator suppresses denials for rollout.
+func (s *FilePolicyStore) IsDryRun() bool {
+	if s == nil {
+		return false
+	}
+	return s.dryRun
+}

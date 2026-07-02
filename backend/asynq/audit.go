@@ -12,7 +12,7 @@ import (
 // state store falls back to atomic counters exposed via AuditStats().
 //
 // AuditObserver is the contract documented in
-// .claude/docs/storage-contract.md: Redis is the system of record; the
+// docs/design/STORAGE-CONTRACT.md: Redis is the system of record; the
 // store/sqlstore audit trail is best-effort and may fail without affecting
 // scheduling correctness, so every site that previously swallowed errors now
 // surfaces them here for ops to count and reconcile.
@@ -48,7 +48,7 @@ func (c *auditCounters) inc(m *sync.Map, op string) {
 	v.(*atomic.Uint64).Add(1)
 }
 
-func (c *auditCounters) OnAuditOK(op string)            { c.inc(&c.ok, op) }
+func (c *auditCounters) OnAuditOK(op string)              { c.inc(&c.ok, op) }
 func (c *auditCounters) OnAuditFailed(op string, _ error) { c.inc(&c.failed, op) }
 
 func (c *auditCounters) snapshot() AuditStats {

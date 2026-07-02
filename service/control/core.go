@@ -30,8 +30,14 @@ type Core struct {
 	pollWait time.Duration
 	// auth resolves credentials to a RunnerPolicy on every call. Nil == the
 	// disabled authenticator, matching legacy behavior.
-	auth   Authenticator
-	logger engine.Logger
+	auth         Authenticator
+	logger       engine.Logger
+	authObserver AuthObserver
+}
+
+// AuthObserver receives auth allow/deny/dry-run decisions.
+type AuthObserver interface {
+	OnAuthDecision(op, result, authMode string)
 }
 
 func (c *Core) authn() Authenticator {
@@ -46,20 +52,44 @@ func (c *Core) authn() Authenticator {
 // return nil so the request proceeds.
 func (c *Core) authDeny(runnerID, token, op string, info TransportInfo, err error) error {
 	if err == nil {
+		c.observeAuth(op, "allow")
 		return nil
 	}
 	if IsDryRunDenial(err) {
+		c.observeAuth(op, "dry_run_allow")
 		if c.logger != nil {
-			c.logger.Info("auth_dry_run_violation",
+			c.logger.Error("auth_dry_run_violation",
 				"op", op, "runner", runnerID, "token", TokenFingerprint(token), "cn", info.TLSPeerCN, "err", err)
 		}
 		return nil
 	}
+	c.observeAuth(op, "deny")
 	if c.logger != nil {
 		c.logger.Error("auth_denied",
 			"op", op, "runner", runnerID, "token", TokenFingerprint(token), "cn", info.TLSPeerCN, "err", err)
 	}
 	return ErrUnauthenticated
+}
+
+func (c *Core) observeAuth(op, result string) {
+	if c.authObserver == nil {
+		return
+	}
+	c.authObserver.OnAuthDecision(op, result, authMode(c.authn()))
+}
+
+func authMode(auth Authenticator) string {
+	switch a := auth.(type) {
+	case DisabledAuthenticator:
+		return "disabled"
+	case *FilePolicyStore:
+		if a.IsDryRun() {
+			return "dry_run"
+		}
+		return "enforcing"
+	default:
+		return "custom"
+	}
 }
 
 func (c *Core) register(req protocol.RegisterRunnerRequest, info TransportInfo) (protocol.RegisterRunnerResponse, error) {
@@ -78,10 +108,9 @@ func (c *Core) heartbeat(req protocol.HeartbeatRequest, info TransportInfo) (pro
 	if req.RunnerID == "" {
 		return protocol.HeartbeatResponse{}, ErrRunnerIDRequired
 	}
-	if _, authErr := c.authn().AuthenticateOngoing(req.RunnerID, req.AuthToken, info); authErr != nil {
-		if err := c.authDeny(req.RunnerID, req.AuthToken, "heartbeat", info, authErr); err != nil {
-			return protocol.HeartbeatResponse{}, err
-		}
+	_, authErr := c.authn().AuthenticateOngoing(req.RunnerID, req.AuthToken, info)
+	if err := c.authDeny(req.RunnerID, req.AuthToken, "heartbeat", info, authErr); err != nil {
+		return protocol.HeartbeatResponse{}, err
 	}
 	at := time.Unix(req.Timestamp, 0)
 	if req.Timestamp == 0 {
@@ -97,10 +126,9 @@ func (c *Core) pollTask(req protocol.PollTaskRequest, info TransportInfo) (proto
 	if req.RunnerID == "" {
 		return protocol.PollTaskResponse{}, ErrRunnerIDRequired
 	}
-	if _, authErr := c.authn().AuthenticateOngoing(req.RunnerID, req.AuthToken, info); authErr != nil {
-		if err := c.authDeny(req.RunnerID, req.AuthToken, "poll", info, authErr); err != nil {
-			return protocol.PollTaskResponse{}, err
-		}
+	_, authErr := c.authn().AuthenticateOngoing(req.RunnerID, req.AuthToken, info)
+	if err := c.authDeny(req.RunnerID, req.AuthToken, "poll", info, authErr); err != nil {
+		return protocol.PollTaskResponse{}, err
 	}
 	lease, ok := c.runners.Poll(req.RunnerID, req.Capacity, req.Capabilities)
 	if !ok {
@@ -113,10 +141,9 @@ func (c *Core) reportResult(ctx context.Context, req protocol.ReportResultReques
 	if req.RunnerID == "" || req.Lease == nil {
 		return protocol.ReportResultResponse{}, ErrLeaseRequired
 	}
-	if _, authErr := c.authn().AuthenticateOngoing(req.RunnerID, req.AuthToken, info); authErr != nil {
-		if err := c.authDeny(req.RunnerID, req.AuthToken, "report_result", info, authErr); err != nil {
-			return protocol.ReportResultResponse{}, err
-		}
+	_, authErr := c.authn().AuthenticateOngoing(req.RunnerID, req.AuthToken, info)
+	if err := c.authDeny(req.RunnerID, req.AuthToken, "report_result", info, authErr); err != nil {
+		return protocol.ReportResultResponse{}, err
 	}
 	if c.engine == nil {
 		return protocol.ReportResultResponse{}, ErrEngineNotConfigured

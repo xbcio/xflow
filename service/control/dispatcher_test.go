@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/xbcio/xflow/engine"
@@ -40,6 +41,7 @@ func TestDispatcherBuildsLeaseAndAssignsToRunnerPool(t *testing.T) {
 func TestDispatcherReturnsErrorWhenNoRunnerCanExecuteLease(t *testing.T) {
 	task := &engine.Task{ExecutionID: types.ExecutionID("exec-1"), NodeName: "start", NodeIdx: 0}
 	leaseEngine := &fakeDispatchEngine{
+		routing: engine.TaskRouting{NodeType: "xflow.function"},
 		lease: &engine.TaskLease{
 			LeaseID:  engine.LeaseID("lease-1"),
 			Task:     *task,
@@ -53,15 +55,44 @@ func TestDispatcherReturnsErrorWhenNoRunnerCanExecuteLease(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error without matching runner")
 	}
-	if !IsTransient(err) {
-		t.Fatalf("err = %v, want transient (so the queue can requeue)", err)
+	if !errors.Is(err, ErrNoMatchingRunner) {
+		t.Fatalf("err = %v, want ErrNoMatchingRunner", err)
+	}
+	var transient interface{ Transient() bool }
+	if errors.As(err, &transient) {
+		t.Fatalf("err = %T, dispatcher should not return queue-layer transient wrappers", err)
 	}
 	if leaseEngine.committed {
 		t.Fatal("control dispatcher committed a result despite no runner")
 	}
 }
 
-func TestDispatcherReturnsTransientErrorWhenAllRunnersSaturated(t *testing.T) {
+func TestDispatcherDoesNotBuildLeaseWhenNoRunnerCanAcceptRouting(t *testing.T) {
+	task := &engine.Task{ExecutionID: types.ExecutionID("exec-1"), NodeName: "start", NodeIdx: 0}
+	leaseEngine := &fakeDispatchEngine{
+		routing: engine.TaskRouting{NodeType: "xflow.function"},
+		lease: &engine.TaskLease{
+			LeaseID:  engine.LeaseID("lease-1"),
+			Task:     *task,
+			NodeType: "xflow.function",
+		},
+	}
+	pool := NewRunnerPool()
+	pool.Register("runner-1", 1, []protocol.Capability{{NodeType: "xflow.http"}})
+
+	err := NewDispatcher(leaseEngine, pool).HandleTask(context.Background(), task)
+	if err == nil {
+		t.Fatal("expected error without matching runner")
+	}
+	if !errors.Is(err, ErrNoMatchingRunner) {
+		t.Fatalf("err = %v, want ErrNoMatchingRunner", err)
+	}
+	if leaseEngine.buildCalls != 0 {
+		t.Fatalf("BuildTaskLease calls = %d, want 0 before a runner is available", leaseEngine.buildCalls)
+	}
+}
+
+func TestDispatcherReturnsCapacityErrorWhenAllRunnersSaturated(t *testing.T) {
 	task := &engine.Task{ExecutionID: types.ExecutionID("exec-1"), NodeName: "start", NodeIdx: 0}
 	lease := &engine.TaskLease{
 		LeaseID:  engine.LeaseID("lease-1"),
@@ -81,17 +112,72 @@ func TestDispatcherReturnsTransientErrorWhenAllRunnersSaturated(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected ErrNoCapacity after pool saturates")
 	}
-	if !IsTransient(err) {
-		t.Fatalf("err = %v, want transient", err)
+	if !errors.Is(err, ErrNoCapacity) {
+		t.Fatalf("err = %v, want ErrNoCapacity", err)
+	}
+}
+
+func TestDispatcherObserverRecordsTransientPlacementFailures(t *testing.T) {
+	task := &engine.Task{ExecutionID: types.ExecutionID("exec-1"), NodeName: "start", NodeIdx: 0}
+	leaseEngine := &fakeDispatchEngine{routing: engine.TaskRouting{NodeType: "xflow.function"}}
+	observer := &recordingDispatcherObserver{}
+
+	err := NewDispatcher(leaseEngine, nil, WithDispatcherObserver(observer)).HandleTask(context.Background(), task)
+	if !errors.Is(err, ErrNoMatchingRunner) {
+		t.Fatalf("err = %v, want ErrNoMatchingRunner", err)
+	}
+	if got := observer.reasons; len(got) != 1 || got[0] != "no_matching_runner" {
+		t.Fatalf("observer reasons = %v, want [no_matching_runner]", got)
+	}
+}
+
+func TestDispatcherReturnsBuildLeaseErrorUnchanged(t *testing.T) {
+	task := &engine.Task{ExecutionID: types.ExecutionID("exec-1"), NodeName: "start", NodeIdx: 0}
+	buildErr := errors.New("state unavailable")
+	leaseEngine := &fakeDispatchEngine{
+		routing:  engine.TaskRouting{NodeType: "xflow.function"},
+		buildErr: buildErr,
+	}
+	pool := NewRunnerPool()
+	pool.Register("runner-1", 1, []protocol.Capability{{NodeType: "xflow.function"}})
+
+	err := NewDispatcher(leaseEngine, pool).HandleTask(context.Background(), task)
+	if !errors.Is(err, buildErr) {
+		t.Fatalf("HandleTask() err = %v, want %v", err, buildErr)
 	}
 }
 
 type fakeDispatchEngine struct {
-	lease     *engine.TaskLease
-	committed bool
+	lease      *engine.TaskLease
+	routing    engine.TaskRouting
+	buildCalls int
+	buildErr   error
+	committed  bool
+}
+
+type recordingDispatcherObserver struct {
+	reasons []string
+}
+
+func (o *recordingDispatcherObserver) OnDispatchTransient(reason string) {
+	o.reasons = append(o.reasons, reason)
+}
+
+func (e *fakeDispatchEngine) TaskRouting(context.Context, *engine.Task) (engine.TaskRouting, error) {
+	if e.routing.NodeType != "" {
+		return e.routing, nil
+	}
+	if e.lease != nil {
+		return engine.TaskRouting{NodeType: e.lease.NodeType, NodeVersion: e.lease.NodeVersion}, nil
+	}
+	return engine.TaskRouting{}, nil
 }
 
 func (e *fakeDispatchEngine) BuildTaskLease(context.Context, *engine.Task) (*engine.TaskLease, error) {
+	e.buildCalls++
+	if e.buildErr != nil {
+		return nil, e.buildErr
+	}
 	return e.lease, nil
 }
 

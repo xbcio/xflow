@@ -65,6 +65,14 @@ type TaskLease struct {
 	TTL         time.Duration `json:"ttl,omitempty"`
 }
 
+// TaskRouting is the side-effect-free routing metadata for a queued task. It is
+// used by control-plane dispatchers to pick a capable runner before issuing a
+// lease, so queue backpressure does not consume handler attempts.
+type TaskRouting struct {
+	NodeType    string
+	NodeVersion int
+}
+
 // Deadline returns the wall-clock instant after which the lease is considered
 // expired. Returns the zero time if either IssuedAt or TTL is unset.
 func (l TaskLease) Deadline() time.Time {
@@ -95,6 +103,8 @@ type ExecutionSnapshot struct {
 	Status   types.ExecutionStatus
 	Params   map[string]any
 	Runtime  *types.Runtime
+	TraceID  string
+	SpanID   string
 	ParentID types.ExecutionID // non-empty for sub-executions
 }
 

@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/xbcio/xflow/service/protocol"
 )
 
 func mustWriteFile(t *testing.T, path string, contents string, mode os.FileMode) {
@@ -203,4 +205,63 @@ func TestDisabledAuthenticatorAlwaysPermissive(t *testing.T) {
 	if !p.Allows("xflow.custom") {
 		t.Fatal("disabled auth should always allow")
 	}
+}
+
+func TestCoreAuthObserverRecordsAllowAndDeny(t *testing.T) {
+	store, err := NewFilePolicyStoreFromConfig(PolicyConfig{
+		Version: 1,
+		Runners: []PolicyEntry{{
+			IDPrefix:         "runner-",
+			Token:            "secret",
+			AllowedNodeTypes: []string{"*"},
+		}},
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observer := &recordingAuthObserver{}
+	core := &Core{
+		runners:      NewRunnerPool(),
+		auth:         store,
+		authObserver: observer,
+	}
+
+	if _, err := core.register(protocol.RegisterRunnerRequest{
+		RunnerID:    "runner-1",
+		Concurrency: 1,
+		AuthToken:   "secret",
+	}, TransportInfo{}); err != nil {
+		t.Fatalf("register allow error = %v", err)
+	}
+	if _, err := core.heartbeat(protocol.HeartbeatRequest{
+		RunnerID:  "runner-1",
+		Capacity:  1,
+		AuthToken: "wrong",
+	}, TransportInfo{}); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("heartbeat error = %v, want ErrUnauthenticated", err)
+	}
+
+	if got, want := observer.events, []string{"register:allow:enforcing", "heartbeat:deny:enforcing"}; !equalStrings(got, want) {
+		t.Fatalf("auth observer events = %v, want %v", got, want)
+	}
+}
+
+type recordingAuthObserver struct {
+	events []string
+}
+
+func (o *recordingAuthObserver) OnAuthDecision(op, result, authMode string) {
+	o.events = append(o.events, op+":"+result+":"+authMode)
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

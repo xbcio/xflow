@@ -94,6 +94,7 @@ func (e *Engine) Submit(ctx context.Context, g *graph.Graph, params map[string]a
 		Status: types.ExecutionStatusRunning,
 		Params: params,
 	}
+	attachTraceMetadata(ctx, snap)
 	if len(runtime) > 0 {
 		snap.Runtime = cloneRuntime(runtime[0])
 	}
@@ -159,6 +160,7 @@ func (e *Engine) Invoke(ctx context.Context, g *graph.Graph, entryName string, p
 		Status: types.ExecutionStatusRunning,
 		Params: params,
 	}
+	attachTraceMetadata(ctx, snap)
 	if len(runtime) > 0 {
 		snap.Runtime = cloneRuntime(runtime[0])
 	}
@@ -226,6 +228,23 @@ func (e *Engine) BuildTaskLease(ctx context.Context, t *Task) (*TaskLease, error
 	}, nil
 }
 
+// TaskRouting returns runner placement metadata for a queued task without
+// issuing a lease or mutating node attempt state.
+func (e *Engine) TaskRouting(ctx context.Context, t *Task) (TaskRouting, error) {
+	g, active, err := e.loadActiveGraph(ctx, t.ExecutionID)
+	if err != nil {
+		return TaskRouting{}, err
+	}
+	if !active {
+		return TaskRouting{}, ErrExecutionInactive
+	}
+	if _, err := e.checkTaskCanLease(ctx, g, t); err != nil {
+		return TaskRouting{}, err
+	}
+	meta := g.Nodes[t.NodeIdx]
+	return TaskRouting{NodeType: meta.Type, NodeVersion: meta.Version}, nil
+}
+
 // CommitTaskResult validates a runner lease token, persists the task result,
 // and advances scheduling. Stale tokens are rejected so an older assignment
 // cannot overwrite or advance state after a newer lease has been issued.
@@ -289,23 +308,10 @@ func (e *Engine) loadActiveGraph(ctx context.Context, id types.ExecutionID) (*gr
 }
 
 func (e *Engine) acquireNodeLease(ctx context.Context, g *graph.Graph, t *Task, leaseID LeaseID, leaseToken LeaseToken, issuedAt time.Time, ttl time.Duration) (int, bool, error) {
-	ns, err := e.state.GetNode(ctx, t.ExecutionID, t.NodeName)
+	ns, err := e.checkTaskCanLease(ctx, g, t)
 	if err != nil {
 		return 0, false, err
 	}
-	if g.AllowCycles && t.ActivationID <= 0 {
-		return 0, false, ErrExecutionInactive
-	}
-	if ns != nil && g.AllowCycles && ns.ActivationID > t.ActivationID {
-		return 0, false, ErrExecutionInactive
-	}
-	if ns != nil && types.IsTerminalNodeStatus(ns.Status) && (!g.AllowCycles || ns.ActivationID >= t.ActivationID) {
-		return 0, false, ErrExecutionInactive
-	}
-	if ns != nil && ns.Status == types.NodeStatusCommitting {
-		return 0, false, ErrExecutionInactive
-	}
-
 	started := ns == nil || ns.Status != types.NodeStatusRunning
 	attempt := 1
 	if ns != nil {
@@ -328,6 +334,26 @@ func (e *Engine) acquireNodeLease(ctx context.Context, g *graph.Graph, t *Task, 
 		return 0, false, err
 	}
 	return attempt, started, nil
+}
+
+func (e *Engine) checkTaskCanLease(ctx context.Context, g *graph.Graph, t *Task) (*NodeSnapshot, error) {
+	ns, err := e.state.GetNode(ctx, t.ExecutionID, t.NodeName)
+	if err != nil {
+		return nil, err
+	}
+	if g.AllowCycles && t.ActivationID <= 0 {
+		return nil, ErrExecutionInactive
+	}
+	if ns != nil && g.AllowCycles && ns.ActivationID > t.ActivationID {
+		return nil, ErrExecutionInactive
+	}
+	if ns != nil && types.IsTerminalNodeStatus(ns.Status) && (!g.AllowCycles || ns.ActivationID >= t.ActivationID) {
+		return nil, ErrExecutionInactive
+	}
+	if ns != nil && ns.Status == types.NodeStatusCommitting {
+		return nil, ErrExecutionInactive
+	}
+	return ns, nil
 }
 
 func (e *Engine) commitSuspendResult(ctx context.Context, t *Task, result TaskResult) error {
@@ -472,6 +498,15 @@ func (e *Engine) finalizeNode(ctx context.Context, t *Task, g *graph.Graph, meta
 		}
 		return e.handleNodeError(ctx, t, g, sysErr, output, bizErr)
 	}
+	if errForRetry := outputPortRetryError(output); errForRetry != nil {
+		if retried, err := e.tryRetry(ctx, t, meta, errForRetry); err != nil {
+			if e.logger != nil {
+				e.logger.Error("retry enqueue failed", "err", err, "exec", string(t.ExecutionID), "node", t.NodeName)
+			}
+		} else if retried {
+			return nil
+		}
+	}
 
 	data := map[string]any{}
 	if output != nil && output.Data != nil {
@@ -509,6 +544,18 @@ func (e *Engine) finalizeNode(ctx context.Context, t *Task, g *graph.Graph, meta
 	}
 
 	return e.OnNodeComplete(ctx, t.ExecutionID, g, t.NodeIdx, port, data)
+}
+
+func outputPortRetryError(output *types.Output) error {
+	if output == nil || output.Port != "error" || output.Error != nil {
+		return nil
+	}
+	if output.Data != nil {
+		if msg, ok := output.Data["error"].(string); ok && msg != "" {
+			return errors.New(msg)
+		}
+	}
+	return errors.New("node returned error port")
 }
 
 // handleNodeError applies the node's OnError strategy and either aborts the
@@ -621,8 +668,10 @@ func currentActivationID(ctx context.Context, state StateStore, id types.Executi
 
 // buildInput assembles the types.Input from graph metadata and upstream outputs.
 func (e *Engine) buildInput(ctx context.Context, t *Task, g *graph.Graph) *types.Input {
+	var snap *ExecutionSnapshot
 	var runtime *types.Runtime
-	if snap, _ := e.state.GetExecution(ctx, t.ExecutionID); snap != nil && snap.Runtime != nil {
+	if current, _ := e.state.GetExecution(ctx, t.ExecutionID); current != nil {
+		snap = current
 		runtime = snap.Runtime
 	}
 	input := &types.Input{
@@ -632,6 +681,10 @@ func (e *Engine) buildInput(ctx context.Context, t *Task, g *graph.Graph) *types
 		Runtime:     cloneRuntime(runtime),
 		ExecutionID: string(t.ExecutionID),
 		NodeName:    t.NodeName,
+	}
+	if snap != nil {
+		input.TraceID = snap.TraceID
+		input.SpanID = snap.SpanID
 	}
 
 	if t.Type == TaskTypeNodeResume {
@@ -644,7 +697,7 @@ func (e *Engine) buildInput(ctx context.Context, t *Task, g *graph.Graph) *types
 
 	inEdges := g.InEdges[t.NodeIdx]
 	if g.AllowCycles && t.NodeIdx == g.StartIdx && t.ActivationID == 1 {
-		if snap, _ := e.state.GetExecution(ctx, t.ExecutionID); snap != nil {
+		if snap != nil {
 			input.Data = snap.Params
 		}
 		return input
@@ -653,7 +706,7 @@ func (e *Engine) buildInput(ctx context.Context, t *Task, g *graph.Graph) *types
 	case 0:
 		// Root node — inject workflow-level submission params as input.Data so
 		// that source handlers can read them (mirrors ClusterRunner behaviour).
-		if snap, _ := e.state.GetExecution(ctx, t.ExecutionID); snap != nil {
+		if snap != nil {
 			input.Data = snap.Params
 		}
 	case 1:
@@ -669,6 +722,15 @@ func (e *Engine) buildInput(ctx context.Context, t *Task, g *graph.Graph) *types
 		input.Inputs = inputs
 	}
 	return input
+}
+
+func attachTraceMetadata(ctx context.Context, snap *ExecutionSnapshot) {
+	if traceID, ok := TraceIDFromContext(ctx); ok {
+		snap.TraceID = traceID
+	}
+	if spanID, ok := SpanIDFromContext(ctx); ok {
+		snap.SpanID = spanID
+	}
 }
 
 func cloneRuntime(runtime *types.Runtime) *types.Runtime {
@@ -908,14 +970,6 @@ func (e *Engine) ReclaimLease(ctx context.Context, lease ExpiredLease) (bool, er
 	}
 	if err := e.queue.Enqueue(ctx, task); err != nil {
 		return true, fmt.Errorf("re-enqueue reclaimed task %q/%q: %w", lease.ExecutionID, lease.NodeName, err)
-	}
-	if e.logger != nil {
-		e.logger.Info("reclaimed expired lease",
-			"exec", string(lease.ExecutionID),
-			"node", lease.NodeName,
-			"issued_at", lease.IssuedAt,
-			"ttl", lease.TTL.String(),
-		)
 	}
 	return true, nil
 }

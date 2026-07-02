@@ -88,7 +88,7 @@ func newRecordingObserver() *recordingObserver {
 	return &recordingObserver{ok: map[string]int{}, failed: map[string]int{}}
 }
 
-func (r *recordingObserver) OnAuditOK(op string)            { r.ok[op]++ }
+func (r *recordingObserver) OnAuditOK(op string)              { r.ok[op]++ }
 func (r *recordingObserver) OnAuditFailed(op string, _ error) { r.failed[op]++ }
 
 func TestAuditWriteRecordsFailureButDoesNotPropagate(t *testing.T) {

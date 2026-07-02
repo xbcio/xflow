@@ -66,6 +66,68 @@ func TestBuildExecutionRecordPersistsWorkflowAuditContext(t *testing.T) {
 	if gotRuntime.Vars["tenant_id"] != "tenant-a" {
 		t.Fatalf("Runtime.Vars = %#v, want tenant_id tenant-a", gotRuntime.Vars)
 	}
+	if rec.TraceID != "" || rec.SpanID != "" {
+		t.Fatalf("trace metadata = %q/%q, want empty by default", rec.TraceID, rec.SpanID)
+	}
+
+	rec, err = buildExecutionRecord(ctx, &engine.ExecutionSnapshot{
+		ID:      "exec-2",
+		Graph:   g,
+		Status:  types.ExecutionStatusRunning,
+		TraceID: "trace-123",
+		SpanID:  "span-456",
+	}, time.Unix(100, 0))
+	if err != nil {
+		t.Fatalf("buildExecutionRecord() with trace metadata error = %v", err)
+	}
+	if rec.TraceID != "trace-123" {
+		t.Fatalf("TraceID = %q, want trace-123", rec.TraceID)
+	}
+	if rec.SpanID != "span-456" {
+		t.Fatalf("SpanID = %q, want span-456", rec.SpanID)
+	}
+}
+
+func TestRedisStatePersistsTraceMetadata(t *testing.T) {
+	redisServer, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer redisServer.Close()
+
+	rdb := redis.NewClient(&redis.Options{Addr: redisServer.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+
+	def := &types.WorkflowDef{
+		Name:  "trace-context",
+		Nodes: []types.NodeDef{{Name: "start", Type: "test.echo"}},
+	}
+	g, err := graph.Compile(def)
+	if err != nil {
+		t.Fatalf("Compile() error = %v", err)
+	}
+	state := newRedisState(rdb, nil, time.Hour)
+	ctx := context.Background()
+	if err := state.CreateExecution(ctx, &engine.ExecutionSnapshot{
+		ID:      "exec-trace",
+		Graph:   g,
+		Status:  types.ExecutionStatusRunning,
+		TraceID: "trace-123",
+		SpanID:  "span-456",
+	}); err != nil {
+		t.Fatalf("CreateExecution() error = %v", err)
+	}
+
+	snap, err := state.GetExecution(ctx, "exec-trace")
+	if err != nil {
+		t.Fatalf("GetExecution() error = %v", err)
+	}
+	if snap.TraceID != "trace-123" {
+		t.Fatalf("TraceID = %q, want trace-123", snap.TraceID)
+	}
+	if snap.SpanID != "span-456" {
+		t.Fatalf("SpanID = %q, want span-456", snap.SpanID)
+	}
 }
 
 func TestQueuedTaskPayloadKeepsSchedulerMetadataPrivate(t *testing.T) {

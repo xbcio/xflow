@@ -41,3 +41,36 @@ func TestWorkflowDefContextRoundTrip(t *testing.T) {
 		t.Fatalf("WorkflowDefFromContext() = %p, want %p", got, def)
 	}
 }
+
+func TestTraceContextRoundTrip(t *testing.T) {
+	ctx := WithTraceID(context.Background(), "trace-123")
+	ctx = WithSpanID(ctx, "span-456")
+
+	traceID, ok := TraceIDFromContext(ctx)
+	if !ok {
+		t.Fatal("expected trace ID metadata")
+	}
+	if traceID != "trace-123" {
+		t.Fatalf("TraceIDFromContext() = %q, want trace-123", traceID)
+	}
+
+	spanID, ok := SpanIDFromContext(ctx)
+	if !ok {
+		t.Fatal("expected span ID metadata")
+	}
+	if spanID != "span-456" {
+		t.Fatalf("SpanIDFromContext() = %q, want span-456", spanID)
+	}
+}
+
+func TestTraceContextIgnoresEmptyValues(t *testing.T) {
+	ctx := WithTraceID(context.Background(), "")
+	ctx = WithSpanID(ctx, "")
+
+	if traceID, ok := TraceIDFromContext(ctx); ok {
+		t.Fatalf("unexpected trace ID metadata: %q", traceID)
+	}
+	if spanID, ok := SpanIDFromContext(ctx); ok {
+		t.Fatalf("unexpected span ID metadata: %q", spanID)
+	}
+}

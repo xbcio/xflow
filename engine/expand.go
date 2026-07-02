@@ -57,7 +57,7 @@ func (e *Engine) expandLoopSplit(ctx context.Context, t *Task, g *graph.Graph, d
 		// EXPERIMENTAL: pass-through stub. Real body sub-graph execution is not
 		// implemented; xflow.loop / xflow.split are blocked at compile time
 		// unless WorkflowOptions.ExperimentalExpand is set. See
-		// .claude/docs/specs/expand-gate.md.
+		// .claude/specs/expand-gate.md.
 		batchTask := &Task{
 			ExecutionID: t.ExecutionID,
 			NodeName:    fmt.Sprintf("%s/_batch/%d", t.NodeName, i),
@@ -97,7 +97,7 @@ func (e *Engine) ExecuteBatch(ctx context.Context, t *Task) error {
 
 	// EXPERIMENTAL: pass-through stub. When body sub-graph execution lands,
 	// compile and run the body graph here. See
-	// .claude/docs/specs/expand-gate.md.
+	// .claude/specs/expand-gate.md.
 	result := map[string]any{
 		"items": items,
 		"count": len(items),

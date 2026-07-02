@@ -226,6 +226,44 @@ func TestEngineBuildTaskLeaseKeepsStaticVarsAndRuntimeVarsSeparate(t *testing.T)
 	}
 }
 
+func TestEngineBuildTaskLeaseIncludesSubmittedTraceMetadata(t *testing.T) {
+	def := &types.WorkflowDef{
+		Name: "trace-context",
+		Nodes: []types.NodeDef{
+			{Name: "start", Type: "test.echo"},
+		},
+	}
+	g, err := graph.Compile(def)
+	if err != nil {
+		t.Fatalf("Compile() error = %v", err)
+	}
+	state := newFakeState()
+	queue := &fakeQueue{}
+	reg := &fakeRegistry{handlers: map[string]types.ActionHandler{"test.echo": &echoHandler{}}}
+	eng := newTestEngine(state, queue, reg)
+	ctx := WithSpanID(WithTraceID(context.Background(), "trace-123"), "span-456")
+
+	_, err = eng.Submit(ctx, g, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tasks := queue.Drain()
+	if len(tasks) != 1 {
+		t.Fatalf("task count = %d, want 1", len(tasks))
+	}
+	lease, err := eng.BuildTaskLease(context.Background(), tasks[0])
+	if err != nil {
+		t.Fatalf("BuildTaskLease() error = %v", err)
+	}
+	if lease.Input.TraceID != "trace-123" {
+		t.Fatalf("Input.TraceID = %q, want trace-123", lease.Input.TraceID)
+	}
+	if lease.Input.SpanID != "span-456" {
+		t.Fatalf("Input.SpanID = %q, want span-456", lease.Input.SpanID)
+	}
+}
+
 func TestInvokeStartsOnlyNamedEntryAndDoesNotBlockSharedDownstream(t *testing.T) {
 	def := &types.WorkflowDef{
 		Name: "multi-trigger",

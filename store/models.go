@@ -14,6 +14,8 @@ type ExecutionRecord struct {
 	WorkflowDef  []byte                `gorm:"column:workflow_def;type:json"`
 	Params       []byte                `gorm:"column:params;type:json"`
 	Runtime      []byte                `gorm:"column:runtime;type:json"`
+	TraceID      string                `gorm:"column:trace_id;type:varchar(64)"`
+	SpanID       string                `gorm:"column:span_id;type:varchar(32)"`
 	Status       types.ExecutionStatus `gorm:"column:status;type:varchar(20)"`
 	Error        string                `gorm:"column:error_msg;type:text"`
 	CreatedAt    time.Time             `gorm:"column:created_at;autoCreateTime:milli"`

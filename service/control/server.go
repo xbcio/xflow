@@ -66,6 +66,11 @@ func WithControlLogger(l engine.Logger) ServerOption {
 	return func(s *Server) { s.core.logger = l }
 }
 
+// WithAuthObserver installs a non-blocking observer for runner auth decisions.
+func WithAuthObserver(observer AuthObserver) ServerOption {
+	return func(s *Server) { s.core.authObserver = observer }
+}
+
 func NewServer(engine EngineFacade, runners *RunnerPool, opts ...ServerOption) *Server {
 	if runners == nil {
 		runners = NewRunnerPool()

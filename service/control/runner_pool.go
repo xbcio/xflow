@@ -76,9 +76,17 @@ func (p *RunnerPool) Heartbeat(runnerID string, capacity, inFlight int, at time.
 // runner registered the type, ErrNoCapacity if every capable runner is at its
 // concurrency ceiling. Reserving a slot via queue length is what gives the
 // queue layer backpressure semantics: when every runner is saturated the
-// dispatcher returns a transient error and the task is requeued with backoff
-// instead of being silently dropped.
+// dispatcher returns a retryable error and the queue layer requeues with
+// backoff instead of silently dropping the task.
 func (p *RunnerPool) Assign(lease engine.TaskLease) error {
+	return p.AssignRouted(engine.TaskRouting{NodeType: lease.NodeType, NodeVersion: lease.NodeVersion}, func() (*engine.TaskLease, error) {
+		return &lease, nil
+	})
+}
+
+// AssignRouted reserves capacity for routing metadata, then builds and queues
+// the concrete lease only after a runner is known to be available.
+func (p *RunnerPool) AssignRouted(routing engine.TaskRouting, build func() (*engine.TaskLease, error)) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -86,7 +94,7 @@ func (p *RunnerPool) Assign(lease engine.TaskLease) error {
 	bestHeadroom := 0
 	foundCapable := false
 	for _, state := range p.runners {
-		if !canRun(state.snapshot.Capabilities, lease) {
+		if !canRun(state.snapshot.Capabilities, routing) {
 			continue
 		}
 		// Policy check: skip runners whose authorization envelope forbids
@@ -95,7 +103,7 @@ func (p *RunnerPool) Assign(lease engine.TaskLease) error {
 		// toward foundCapable so the dispatcher returns
 		// ErrNoMatchingRunner rather than ErrNoCapacity when every
 		// capable runner is unauthorized.
-		if !state.policy.Allows(lease.NodeType) {
+		if !state.policy.Allows(routing.NodeType) {
 			continue
 		}
 		foundCapable = true
@@ -114,7 +122,14 @@ func (p *RunnerPool) Assign(lease engine.TaskLease) error {
 		}
 		return ErrNoMatchingRunner
 	}
-	best.queue = append(best.queue, lease)
+	lease, err := build()
+	if err != nil {
+		return err
+	}
+	if lease == nil {
+		return ErrNoMatchingRunner
+	}
+	best.queue = append(best.queue, *lease)
 	return nil
 }
 
@@ -143,7 +158,7 @@ func (p *RunnerPool) Poll(runnerID string, capacity int, capabilities []protocol
 		state.snapshot.Capabilities = cloneCapabilities(capabilities)
 	}
 	for i, lease := range state.queue {
-		if !canRun(state.snapshot.Capabilities, lease) {
+		if !canRun(state.snapshot.Capabilities, engine.TaskRouting{NodeType: lease.NodeType, NodeVersion: lease.NodeVersion}) {
 			continue
 		}
 		state.queue = append(state.queue[:i], state.queue[i+1:]...)
@@ -165,9 +180,12 @@ func (p *RunnerPool) Runner(runnerID string) (RunnerSnapshot, bool) {
 	return snapshot, true
 }
 
-func canRun(capabilities []protocol.Capability, lease engine.TaskLease) bool {
+func canRun(capabilities []protocol.Capability, routing engine.TaskRouting) bool {
 	for _, capability := range capabilities {
-		if capability.NodeType == lease.NodeType {
+		if capability.NodeType != routing.NodeType {
+			continue
+		}
+		if capability.NodeVersion == 0 || routing.NodeVersion == 0 || capability.NodeVersion == routing.NodeVersion {
 			return true
 		}
 	}

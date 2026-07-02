@@ -23,7 +23,7 @@ type HandlerLocator struct {
 // references node types/versions that no handler currently satisfies. The
 // pre-check is always strict regardless of WithVersionPolicy: at registration
 // time all handlers should be known. See
-// .claude/docs/specs/handler-version.md.
+// .claude/specs/handler-version.md.
 type ErrMissingHandlerVersions struct {
 	Missing []HandlerLocator
 }

@@ -10,7 +10,7 @@ import (
 
 // VersionPolicy controls what Registry.Get does when the workflow pins a
 // specific handler version but that version is not registered. See
-// .claude/docs/specs/handler-version.md.
+// .claude/specs/handler-version.md.
 type VersionPolicy int
 
 const (
@@ -44,7 +44,7 @@ func (e *ErrHandlerVersionMismatch) Error() string {
 // VersionLogger is implemented by callers that want to observe WarnFallback
 // resolutions. Optional.
 type VersionLogger interface {
-	Warn(msg string, args ...any)
+	Warnf(format string, args ...any)
 }
 
 // Registry resolves handlers for embedded execution.
@@ -152,11 +152,7 @@ func (r *Registry) Get(id types.ExecutionID, nodeName string, nodeType string, v
 		case VersionWarnFallback:
 			if h, ok := node.Lookup(nodeType); ok {
 				if logger != nil {
-					logger.Warn("handler version fallback",
-						"node_type", nodeType,
-						"node_name", nodeName,
-						"requested_version", version,
-					)
+					logger.Warnf("handler version fallback: node_type=%s node_name=%s requested_version=%d", nodeType, nodeName, version)
 				}
 				return h, nil
 			}

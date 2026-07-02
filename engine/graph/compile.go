@@ -11,7 +11,7 @@ import (
 
 // experimentalExpandTypes lists node types that depend on body sub-graph
 // execution, which is not yet implemented (see engine/expand.go and
-// .claude/docs/specs/expand-gate.md). The compiler rejects workflows that
+// .claude/specs/expand-gate.md). The compiler rejects workflows that
 // reference any of these types unless WorkflowOptions.ExperimentalExpand is
 // true. Capability tags on individual node Descriptors (carrying
 // types.CapBodySubgraphRequired) describe the same requirement but cannot be
@@ -71,7 +71,7 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 
 	// Compile-time gate: block xflow.loop / xflow.split unless the workflow
 	// opts into the unfinished body sub-graph implementation. See
-	// .claude/docs/specs/expand-gate.md.
+	// .claude/specs/expand-gate.md.
 	if !experimentalExpand {
 		var blocked []string
 		for _, nd := range def.Nodes {

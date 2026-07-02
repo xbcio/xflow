@@ -33,7 +33,8 @@ type Input struct {
 	Runtime     *Runtime       // per-execution runtime context ($runtime)
 	ExecutionID string
 	NodeName    string
-	TraceID     string        // empty string in embedded mode
+	TraceID     string
+	SpanID      string
 	Timeout     time.Duration // zero means no limit
 
 	// credential resolver injected by the engine; accessed via Credential().

@@ -33,6 +33,12 @@ func (e *Engine) Invoke(ctx context.Context, workflowID types.WorkflowID, entry 
 	if cfg.execTTL > 0 {
 		ctx = enginecore.WithExecutionTTL(ctx, cfg.execTTL)
 	}
+	if cfg.traceID != "" {
+		ctx = enginecore.WithTraceID(ctx, cfg.traceID)
+	}
+	if cfg.spanID != "" {
+		ctx = enginecore.WithSpanID(ctx, cfg.spanID)
+	}
 	ctx = enginecore.WithWorkflowDef(ctx, rec.Definition)
 	return e.eng.Invoke(ctx, rec.Graph, entry.nodeName, input, cfg.runtime)
 }

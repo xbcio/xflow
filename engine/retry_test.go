@@ -46,6 +46,23 @@ func (h *alwaysFailHandler) Execute(_ context.Context, _ *types.Input) (*types.O
 	return nil, h.err
 }
 
+type errorPortFlakyHandler struct {
+	failuresBefore int
+	calls          int
+}
+
+func (h *errorPortFlakyHandler) Descriptor() node.Descriptor {
+	return node.Descriptor{Type: "test.error_port_flaky"}
+}
+
+func (h *errorPortFlakyHandler) Execute(_ context.Context, _ *types.Input) (*types.Output, error) {
+	h.calls++
+	if h.calls <= h.failuresBefore {
+		return &types.Output{Data: map[string]any{"error": "temporary upstream failure"}, Port: "error"}, nil
+	}
+	return &types.Output{Data: map[string]any{"ok": true}, Port: "main"}, nil
+}
+
 func TestRetry_TransientErrorEventuallySucceeds(t *testing.T) {
 	def := &types.WorkflowDef{
 		Name: "retry-success",
@@ -94,6 +111,44 @@ func TestRetry_TransientErrorEventuallySucceeds(t *testing.T) {
 	// fakeState keys by exec/name; we don't know the id here so just inspect raw map.
 	if ns != nil {
 		t.Fatalf("unexpected snapshot via empty id: %+v", ns)
+	}
+}
+
+func TestRetry_ErrorPortOutputCanRetryBeforeRoutingErrorPort(t *testing.T) {
+	def := &types.WorkflowDef{
+		Name: "retry-error-port",
+		Settings: &types.WorkflowSettings{
+			Retry: &types.RetrySettings{MaxAttempts: 3, InitialInterval: 1},
+		},
+		Nodes: []types.NodeDef{
+			{Name: "flaky", Type: "test.error_port_flaky"},
+		},
+	}
+	g, err := graph.Compile(def)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := newFakeState()
+	queue := &fakeQueue{}
+	handler := &errorPortFlakyHandler{failuresBefore: 1}
+	reg := &fakeRegistry{handlers: map[string]types.ActionHandler{"test.error_port_flaky": handler}}
+	eng := newTestEngine(state, queue, reg)
+	ctx := context.Background()
+
+	if _, err := eng.Submit(ctx, g, nil); err != nil {
+		t.Fatalf("Submit() error = %v", err)
+	}
+	for step := 0; step < 5; step++ {
+		tasks := queue.Drain()
+		if len(tasks) == 0 {
+			break
+		}
+		for _, task := range tasks {
+			executeTask(t, eng, task)
+		}
+	}
+	if handler.calls != 2 {
+		t.Fatalf("handler calls = %d, want 2 (error port retry + success)", handler.calls)
 	}
 }
 

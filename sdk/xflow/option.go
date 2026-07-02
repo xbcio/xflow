@@ -105,7 +105,7 @@ func WithNodes(defs ...node.Handler) Option {
 // GRPCNode reuse connections automatically. Pass nil to disable pooling
 // entirely; nodes will then fall back to per-call construction.
 //
-// See .claude/docs/specs/resource-pool.md.
+// See .claude/specs/resource-pool.md.
 func WithResourcePool(p node.ResourcePool) Option {
 	return func(c *engineConfig) {
 		c.resourcePool = p
@@ -146,6 +146,8 @@ type InvokeOption func(*invokeConfig)
 type invokeConfig struct {
 	execTTL time.Duration
 	runtime *types.Runtime
+	traceID string
+	spanID  string
 }
 
 // WithExecutionTTL overrides the backend execution TTL for this invocation.
@@ -174,6 +176,22 @@ func WithRuntime(runtime *types.Runtime) InvokeOption {
 // WithRuntimeVars is a convenience wrapper for setting Runtime.Vars.
 func WithRuntimeVars(vars map[string]any) InvokeOption {
 	return WithRuntime(&types.Runtime{Vars: vars})
+}
+
+// WithTraceID attaches a trace ID to this invocation. Node handlers receive it
+// through types.Input.TraceID.
+func WithTraceID(traceID string) InvokeOption {
+	return func(c *invokeConfig) {
+		c.traceID = traceID
+	}
+}
+
+// WithSpanID attaches a span ID to this invocation. Node handlers receive it
+// through types.Input.SpanID.
+func WithSpanID(spanID string) InvokeOption {
+	return func(c *invokeConfig) {
+		c.spanID = spanID
+	}
 }
 
 func cloneRuntime(runtime *types.Runtime) *types.Runtime {

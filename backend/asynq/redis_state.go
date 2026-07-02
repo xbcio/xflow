@@ -404,6 +404,12 @@ func (s *redisState) CreateExecution(ctx context.Context, e *engine.ExecutionSna
 		}
 		pipe.Set(ctx, execKey(e.ID, "runtime"), string(runtimeJSON), ttl)
 	}
+	if e.TraceID != "" {
+		pipe.Set(ctx, execKey(e.ID, "trace_id"), e.TraceID, ttl)
+	}
+	if e.SpanID != "" {
+		pipe.Set(ctx, execKey(e.ID, "span_id"), e.SpanID, ttl)
+	}
 	// Seed in-degree counters.
 	for i, d := range e.Graph.InDegree {
 		if d > 0 {
@@ -436,7 +442,7 @@ func (s *redisState) cleanupCreatedExecution(ctx context.Context, e *engine.Exec
 	s.ttlMu.Unlock()
 
 	pipe := s.rdb.Pipeline()
-	pipe.Del(ctx, execKey(e.ID, "status"), execKey(e.ID, "graph"), execKey(e.ID, "error"), execKey(e.ID, "params"), execKey(e.ID, "runtime"))
+	pipe.Del(ctx, execKey(e.ID, "status"), execKey(e.ID, "graph"), execKey(e.ID, "error"), execKey(e.ID, "params"), execKey(e.ID, "runtime"), execKey(e.ID, "trace_id"), execKey(e.ID, "span_id"))
 	if e.Graph != nil {
 		for i := range e.Graph.InDegree {
 			pipe.Del(ctx, inDegreeKey(e.ID, i), activeInputsKey(e.ID, i))
@@ -474,6 +480,8 @@ func buildExecutionRecord(ctx context.Context, e *engine.ExecutionSnapshot, now 
 		}
 		rec.Runtime = runtimeJSON
 	}
+	rec.TraceID = e.TraceID
+	rec.SpanID = e.SpanID
 	return rec, nil
 }
 
@@ -525,12 +533,26 @@ func (s *redisState) GetExecution(ctx context.Context, id types.ExecutionID) (*e
 	} else if err != redis.Nil {
 		return nil, fmt.Errorf("get execution runtime %q: %w", id, err)
 	}
+	var traceID string
+	if raw, err := s.rdb.Get(ctx, execKey(id, "trace_id")).Result(); err == nil {
+		traceID = raw
+	} else if err != redis.Nil {
+		return nil, fmt.Errorf("get execution trace ID %q: %w", id, err)
+	}
+	var spanID string
+	if raw, err := s.rdb.Get(ctx, execKey(id, "span_id")).Result(); err == nil {
+		spanID = raw
+	} else if err != redis.Nil {
+		return nil, fmt.Errorf("get execution span ID %q: %w", id, err)
+	}
 	return &engine.ExecutionSnapshot{
 		ID:      id,
 		Graph:   g,
 		Status:  types.ExecutionStatus(val),
 		Params:  params,
 		Runtime: runtime,
+		TraceID: traceID,
+		SpanID:  spanID,
 	}, nil
 }
 
@@ -1249,6 +1271,8 @@ func (s *redisState) extendExecTTL(ctx context.Context, id types.ExecutionID, no
 	pipe.Expire(ctx, prefix+":status", ttl)
 	pipe.Expire(ctx, prefix+":params", ttl)
 	pipe.Expire(ctx, prefix+":runtime", ttl)
+	pipe.Expire(ctx, prefix+":trace_id", ttl)
+	pipe.Expire(ctx, prefix+":span_id", ttl)
 	pipe.Expire(ctx, prefix+":graph", ttl)
 	pipe.Expire(ctx, prefix+":node:"+nodeName+":status", ttl)
 	pipe.Expire(ctx, prefix+":output:"+nodeName, ttl)

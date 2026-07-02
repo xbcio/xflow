@@ -144,7 +144,7 @@ func newFromConfig(cfg *engineConfig, provider backend.Provider) (*Engine, error
 			lr.SetVersionPolicy(cfg.versionPolicy)
 		}
 		if cfg.logger != nil {
-			lr.SetLogger(versionLoggerAdapter{cfg.logger})
+			lr.SetLogger(cfg.logger)
 		}
 	}
 
@@ -333,20 +333,4 @@ func cfgAllowsDirectHandlers(e *Engine) bool {
 		return false
 	}
 	return e.allowDirectHandlers
-}
-
-// versionLoggerAdapter forwards execution.VersionLogger.Warn calls onto an
-// engine.Logger so registry fallback warnings reach the same logging surface
-// as the rest of the engine.
-type versionLoggerAdapter struct {
-	l engine.Logger
-}
-
-func (v versionLoggerAdapter) Warn(msg string, args ...any) {
-	if v.l == nil {
-		return
-	}
-	// engine.Logger has Info / Error but no Warn — surface as Info with a tag
-	// so it is visible without escalating to error noise.
-	v.l.Info("WARN "+msg, args...)
 }

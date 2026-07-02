@@ -43,6 +43,11 @@ func WithGRPCLogger(l engine.Logger) GRPCServerOption {
 	return func(s *GRPCServer) { s.core.logger = l }
 }
 
+// WithGRPCAuthObserver installs a non-blocking observer for runner auth decisions.
+func WithGRPCAuthObserver(observer AuthObserver) GRPCServerOption {
+	return func(s *GRPCServer) { s.core.authObserver = observer }
+}
+
 // NewGRPCServer builds a gRPC Runner Protocol server backed by the given engine
 // and runner pool. Pass the same RunnerPool used by the HTTP Server and
 // Dispatcher to share runner state across transports.
@@ -159,6 +164,8 @@ func runnerStatus(err error) error {
 		return status.Error(codes.InvalidArgument, err.Error())
 	case errors.Is(err, ErrRunnerNotFound):
 		return status.Error(codes.NotFound, err.Error())
+	case errors.Is(err, ErrUnauthenticated):
+		return status.Error(codes.Unauthenticated, err.Error())
 	default:
 		return status.Error(codes.Internal, err.Error())
 	}
