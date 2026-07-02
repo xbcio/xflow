@@ -70,7 +70,7 @@ func (d *Dispatcher) observeTransient(err error) {
 func (d *Dispatcher) HandleTask(ctx context.Context, task *engine.Task) error {
 	routing, err := d.engine.TaskRouting(ctx, task)
 	if err != nil {
-		if err == engine.ErrExecutionInactive {
+		if err == engine.ErrExecutionInactive || err == engine.ErrLeaseAlreadyActive {
 			return nil
 		}
 		return err
@@ -83,7 +83,7 @@ func (d *Dispatcher) HandleTask(ctx context.Context, task *engine.Task) error {
 	if err := d.runners.AssignRouted(routing, func() (*engine.TaskLease, error) {
 		return d.engine.BuildTaskLease(ctx, task)
 	}); err != nil {
-		if err == engine.ErrExecutionInactive {
+		if err == engine.ErrExecutionInactive || err == engine.ErrLeaseAlreadyActive {
 			return nil
 		}
 		d.observeTransient(err)

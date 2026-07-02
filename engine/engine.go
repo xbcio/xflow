@@ -231,31 +231,43 @@ func (e *Engine) BuildTaskLease(ctx context.Context, t *Task) (*TaskLease, error
 	if !active {
 		return nil, ErrExecutionInactive
 	}
+	if _, err := e.checkTaskRouteActive(ctx, g, t); err != nil {
+		return nil, err
+	}
 
 	leaseID := LeaseID("lease-" + uuid.New().String())
 	leaseToken := LeaseToken("token-" + uuid.New().String())
 	issuedAt := time.Now().UTC()
 	ttl := e.defaultLeaseTTL
-	attempt, started, err := e.acquireNodeLease(ctx, g, t, leaseID, leaseToken, issuedAt, ttl)
+	lease := &TaskLease{
+		LeaseID:    leaseID,
+		LeaseToken: leaseToken,
+		Task:       *t,
+		IssuedAt:   issuedAt,
+		TTL:        ttl,
+	}
+	prev, acquired, err := e.state.AcquireTaskLease(ctx, lease)
 	if err != nil {
 		return nil, err
+	}
+	if !acquired {
+		return nil, e.classifyLeaseAcquireFailure(g, t, prev, issuedAt)
+	}
+
+	started := prev == nil || prev.Status != types.NodeStatusRunning
+	lease.Attempt = 1
+	if prev != nil {
+		lease.Attempt = prev.Attempt + 1
 	}
 	if started && e.hooks != nil {
 		e.hooks.OnNodeStart(ctx, t.ExecutionID, t.NodeName)
 	}
 
 	meta := g.Nodes[t.NodeIdx]
-	return &TaskLease{
-		LeaseID:     leaseID,
-		LeaseToken:  leaseToken,
-		Attempt:     attempt,
-		Task:        *t,
-		Input:       e.buildInput(ctx, t, g),
-		NodeType:    meta.Type,
-		NodeVersion: meta.Version,
-		IssuedAt:    issuedAt,
-		TTL:         ttl,
-	}, nil
+	lease.Input = e.buildInput(ctx, t, g)
+	lease.NodeType = meta.Type
+	lease.NodeVersion = meta.Version
+	return lease, nil
 }
 
 // TaskRouting returns runner placement metadata for a queued task without
@@ -416,49 +428,6 @@ func (e *Engine) loadActiveGraph(ctx context.Context, id types.ExecutionID) (*gr
 	return g, true, nil
 }
 
-func (e *Engine) acquireNodeLease(ctx context.Context, g *graph.Graph, t *Task, leaseID LeaseID, leaseToken LeaseToken, issuedAt time.Time, ttl time.Duration) (int, bool, error) {
-	ns, err := e.checkTaskCanLease(ctx, g, t, issuedAt)
-	if err != nil {
-		return 0, false, err
-	}
-	started := ns == nil || ns.Status != types.NodeStatusRunning
-	attempt := 1
-	if ns != nil {
-		attempt = ns.Attempt + 1
-	}
-
-	if err := e.state.UpsertNode(ctx, &NodeSnapshot{
-		ExecutionID:   t.ExecutionID,
-		Name:          t.NodeName,
-		NodeIdx:       t.NodeIdx,
-		Status:        types.NodeStatusRunning,
-		LeaseID:       leaseID,
-		LeaseToken:    leaseToken,
-		Attempt:       attempt,
-		ActivationID:  t.ActivationID,
-		AutoDepth:     t.AutoDepth,
-		LeaseIssuedAt: issuedAt,
-		LeaseTTL:      ttl,
-	}); err != nil {
-		return 0, false, err
-	}
-	return attempt, started, nil
-}
-
-func (e *Engine) checkTaskCanLease(ctx context.Context, g *graph.Graph, t *Task, now time.Time) (*NodeSnapshot, error) {
-	ns, err := e.checkTaskRouteActive(ctx, g, t)
-	if err != nil {
-		return nil, err
-	}
-	if ns != nil && ns.Status == types.NodeStatusRunning && ns.LeaseToken != "" {
-		deadline := ns.LeaseIssuedAt.Add(ns.LeaseTTL)
-		if ns.LeaseIssuedAt.IsZero() || ns.LeaseTTL <= 0 || now.Before(deadline) {
-			return nil, ErrLeaseAlreadyActive
-		}
-	}
-	return ns, nil
-}
-
 func (e *Engine) checkTaskRouteActive(ctx context.Context, g *graph.Graph, t *Task) (*NodeSnapshot, error) {
 	ns, err := e.state.GetNode(ctx, t.ExecutionID, t.NodeName)
 	if err != nil {
@@ -477,6 +446,28 @@ func (e *Engine) checkTaskRouteActive(ctx context.Context, g *graph.Graph, t *Ta
 		return nil, ErrExecutionInactive
 	}
 	return ns, nil
+}
+
+func (e *Engine) classifyLeaseAcquireFailure(g *graph.Graph, t *Task, ns *NodeSnapshot, now time.Time) error {
+	if g.AllowCycles && t.ActivationID <= 0 {
+		return ErrExecutionInactive
+	}
+	if ns != nil && g.AllowCycles && ns.ActivationID > t.ActivationID {
+		return ErrExecutionInactive
+	}
+	if ns != nil && types.IsTerminalNodeStatus(ns.Status) && (!g.AllowCycles || ns.ActivationID >= t.ActivationID) {
+		return ErrExecutionInactive
+	}
+	if ns != nil && ns.Status == types.NodeStatusCommitting {
+		return ErrExecutionInactive
+	}
+	if ns != nil && ns.Status == types.NodeStatusRunning && ns.LeaseToken != "" {
+		deadline := ns.LeaseIssuedAt.Add(ns.LeaseTTL)
+		if ns.LeaseIssuedAt.IsZero() || ns.LeaseTTL <= 0 || now.Before(deadline) {
+			return ErrLeaseAlreadyActive
+		}
+	}
+	return ErrExecutionInactive
 }
 
 func (e *Engine) commitSuspendResult(ctx context.Context, t *Task, result TaskResult) error {

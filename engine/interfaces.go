@@ -24,6 +24,11 @@ type Graphs interface {
 type Nodes interface {
 	UpsertNode(ctx context.Context, n *NodeSnapshot) error
 	GetNode(ctx context.Context, id types.ExecutionID, name string) (*NodeSnapshot, error)
+	// AcquireTaskLease atomically transitions a node into Running for the
+	// supplied lease. On success it returns the previous snapshot (or nil when
+	// no snapshot existed) and acquired=true. On failure it returns the current
+	// conflicting snapshot and acquired=false without mutating state.
+	AcquireTaskLease(ctx context.Context, lease *TaskLease) (*NodeSnapshot, bool, error)
 	ClaimTaskLease(ctx context.Context, lease *TaskLease) (*NodeSnapshot, bool, error)
 	// ResetNodeForRetry rolls a Running node back to Pending so it can be
 	// re-leased after a backoff delay. Implementations must:

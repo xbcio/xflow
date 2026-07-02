@@ -107,6 +107,58 @@ func (f *fakeState) GetNode(_ context.Context, id types.ExecutionID, name string
 	return ns, nil
 }
 
+func cloneNodeSnapshot(ns *NodeSnapshot) *NodeSnapshot {
+	if ns == nil {
+		return nil
+	}
+	cp := *ns
+	return &cp
+}
+
+func (f *fakeState) AcquireTaskLease(_ context.Context, lease *TaskLease) (*NodeSnapshot, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	key := string(lease.Task.ExecutionID) + "/" + lease.Task.NodeName
+	current := f.nodes[key]
+	if current != nil {
+		if lease.Task.ActivationID > 0 && current.ActivationID > lease.Task.ActivationID {
+			return cloneNodeSnapshot(current), false, nil
+		}
+		if types.IsTerminalNodeStatus(current.Status) && (lease.Task.ActivationID <= 0 || current.ActivationID >= lease.Task.ActivationID) {
+			return cloneNodeSnapshot(current), false, nil
+		}
+		if current.Status == types.NodeStatusCommitting {
+			return cloneNodeSnapshot(current), false, nil
+		}
+		if current.Status == types.NodeStatusRunning && current.LeaseToken != "" {
+			deadline := current.LeaseIssuedAt.Add(current.LeaseTTL)
+			if current.LeaseIssuedAt.IsZero() || current.LeaseTTL <= 0 || lease.IssuedAt.Before(deadline) {
+				return cloneNodeSnapshot(current), false, nil
+			}
+		}
+	}
+
+	attempt := 1
+	if current != nil {
+		attempt = current.Attempt + 1
+	}
+	f.nodes[key] = &NodeSnapshot{
+		ExecutionID:   lease.Task.ExecutionID,
+		Name:          lease.Task.NodeName,
+		NodeIdx:       lease.Task.NodeIdx,
+		Status:        types.NodeStatusRunning,
+		LeaseID:       lease.LeaseID,
+		LeaseToken:    lease.LeaseToken,
+		Attempt:       attempt,
+		ActivationID:  lease.Task.ActivationID,
+		AutoDepth:     lease.Task.AutoDepth,
+		LeaseIssuedAt: lease.IssuedAt,
+		LeaseTTL:      lease.TTL,
+	}
+	return cloneNodeSnapshot(current), true, nil
+}
+
 func (f *fakeState) ResetNodeForRetry(_ context.Context, id types.ExecutionID, name string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

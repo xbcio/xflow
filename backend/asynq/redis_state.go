@@ -199,6 +199,66 @@ redis.call('EXPIRE', KEYS[2], tonumber(ARGV[2]))
 return {1, 'committing'}
 `)
 
+// acquireTaskLeaseLua atomically validates whether a queued task may become a
+// running lease and, when allowed, writes the new lease snapshot in one step.
+// KEYS[1] = node status key, KEYS[2] = node meta hash
+// ARGV[1] = new lease id
+// ARGV[2] = new lease token
+// ARGV[3] = issued-at unix millis
+// ARGV[4] = exec ttl seconds
+// ARGV[5] = task activation id
+// ARGV[6] = task auto depth
+// ARGV[7] = lease ttl millis
+// Returns {acquired, prev_status, prev_attempt, prev_activation_id,
+// prev_auto_depth, prev_lease_token, prev_issued_at_ms, prev_lease_ttl_ms}.
+var acquireTaskLeaseLua = redis.NewScript(`
+local status = redis.call('GET', KEYS[1])
+local prevAttempt = tonumber(redis.call('HGET', KEYS[2], 'attempt') or '0')
+local prevActivation = tonumber(redis.call('HGET', KEYS[2], 'activation_id') or '0')
+local prevAutoDepth = tonumber(redis.call('HGET', KEYS[2], 'auto_depth') or '0')
+local prevLeaseToken = redis.call('HGET', KEYS[2], 'lease_token') or ''
+local prevIssuedAtMs = tonumber(redis.call('HGET', KEYS[2], 'lease_issued_at_ms') or '0')
+local prevLeaseTTLms = tonumber(redis.call('HGET', KEYS[2], 'lease_ttl_ms') or '0')
+local taskActivation = tonumber(ARGV[5] or '0')
+local nowMs = tonumber(ARGV[3] or '0')
+
+if taskActivation > 0 and prevActivation > taskActivation then
+	return {0, status or '', prevAttempt, prevActivation, prevAutoDepth, prevLeaseToken, prevIssuedAtMs, prevLeaseTTLms}
+end
+
+if status == 'success' or status == 'failed' or status == 'skipped' or status == 'canceled' or status == 'continued' then
+	if taskActivation <= 0 or prevActivation >= taskActivation then
+		return {0, status, prevAttempt, prevActivation, prevAutoDepth, prevLeaseToken, prevIssuedAtMs, prevLeaseTTLms}
+	end
+end
+
+if status == 'committing' then
+	return {0, status, prevAttempt, prevActivation, prevAutoDepth, prevLeaseToken, prevIssuedAtMs, prevLeaseTTLms}
+end
+
+if status == 'running' and prevLeaseToken ~= '' then
+	if prevIssuedAtMs == 0 or prevLeaseTTLms <= 0 or nowMs < (prevIssuedAtMs + prevLeaseTTLms) then
+		return {0, status, prevAttempt, prevActivation, prevAutoDepth, prevLeaseToken, prevIssuedAtMs, prevLeaseTTLms}
+	end
+end
+
+local nextAttempt = prevAttempt + 1
+if nextAttempt <= 0 then
+	nextAttempt = 1
+end
+redis.call('SET', KEYS[1], 'running', 'EX', tonumber(ARGV[4]))
+redis.call('HSET', KEYS[2],
+	'lease_id', ARGV[1],
+	'lease_token', ARGV[2],
+	'attempt', nextAttempt,
+	'activation_id', taskActivation,
+	'auto_depth', tonumber(ARGV[6] or '0'),
+	'lease_issued_at_ms', nowMs,
+	'lease_ttl_ms', tonumber(ARGV[7] or '0'))
+redis.call('EXPIRE', KEYS[2], tonumber(ARGV[4]))
+return {1, status or '', prevAttempt, prevActivation, prevAutoDepth, prevLeaseToken, prevIssuedAtMs, prevLeaseTTLms}
+`)
+
 // Returns 1 (acquired) or 0 (already locked).
 var resumeNodeLua = redis.NewScript(`
 local locked = redis.call('SET', KEYS[1], '1', 'NX', 'EX', tonumber(ARGV[1]))
@@ -804,6 +864,95 @@ func (s *redisState) GetNode(ctx context.Context, id types.ExecutionID, name str
 		}
 	}
 	return ns, nil
+}
+
+func (s *redisState) AcquireTaskLease(ctx context.Context, lease *engine.TaskLease) (*engine.NodeSnapshot, bool, error) {
+	ttl := s.getExecTTL(lease.Task.ExecutionID)
+	result, err := acquireTaskLeaseLua.Run(ctx, s.rdb,
+		[]string{nodeStatusKey(lease.Task.ExecutionID, lease.Task.NodeName), nodeMetaKey(lease.Task.ExecutionID, lease.Task.NodeName)},
+		string(lease.LeaseID), string(lease.LeaseToken), lease.IssuedAt.UnixMilli(), int(ttl.Seconds()), lease.Task.ActivationID, lease.Task.AutoDepth, lease.TTL.Milliseconds(),
+	).Slice()
+	if err != nil {
+		return nil, false, fmt.Errorf("acquire task lease %q/%q: %w", lease.Task.ExecutionID, lease.Task.NodeName, err)
+	}
+	if len(result) != 8 {
+		return nil, false, fmt.Errorf("acquire task lease %q/%q: unexpected result %v", lease.Task.ExecutionID, lease.Task.NodeName, result)
+	}
+
+	asInt64 := func(v any) int64 {
+		switch n := v.(type) {
+		case int64:
+			return n
+		case string:
+			var parsed int64
+			if _, err := fmt.Sscanf(n, "%d", &parsed); err == nil {
+				return parsed
+			}
+		}
+		return 0
+	}
+	asString := func(v any) string {
+		if s, ok := v.(string); ok {
+			return s
+		}
+		return ""
+	}
+
+	acquired := asInt64(result[0]) == 1
+	prevStatus := asString(result[1])
+	var prev *engine.NodeSnapshot
+	if prevStatus != "" {
+		prev = &engine.NodeSnapshot{
+			ExecutionID:  lease.Task.ExecutionID,
+			Name:         lease.Task.NodeName,
+			NodeIdx:      lease.Task.NodeIdx,
+			Status:       types.NodeStatus(prevStatus),
+			Attempt:      int(asInt64(result[2])),
+			ActivationID: int(asInt64(result[3])),
+			AutoDepth:    int(asInt64(result[4])),
+			LeaseToken:   engine.LeaseToken(asString(result[5])),
+		}
+		if ms := asInt64(result[6]); ms > 0 {
+			prev.LeaseIssuedAt = time.UnixMilli(ms).UTC()
+		}
+		if ms := asInt64(result[7]); ms > 0 {
+			prev.LeaseTTL = time.Duration(ms) * time.Millisecond
+		}
+	}
+	if !acquired {
+		return prev, false, nil
+	}
+
+	member := leaseExpiryMember(lease.Task.ExecutionID, lease.Task.NodeName)
+	if lease.TTL > 0 && !lease.IssuedAt.IsZero() && lease.LeaseToken != "" {
+		expiryMs := float64(lease.IssuedAt.Add(lease.TTL).UnixMilli())
+		if err := s.rdb.ZAdd(ctx, leaseExpiryZSetKey, redis.Z{Score: expiryMs, Member: member}).Err(); err != nil {
+			return nil, false, fmt.Errorf("index lease expiry %q/%q: %w", lease.Task.ExecutionID, lease.Task.NodeName, err)
+		}
+	} else {
+		_ = s.rdb.ZRem(ctx, leaseExpiryZSetKey, member).Err()
+	}
+
+	if s.db != nil {
+		attempt := 1
+		if prev != nil {
+			attempt = prev.Attempt + 1
+		}
+		rec := &store.NodeRecord{
+			ExecutionID: lease.Task.ExecutionID,
+			NodeName:    lease.Task.NodeName,
+			Status:      types.NodeStatusRunning,
+			LeaseID:     string(lease.LeaseID),
+			LeaseToken:  string(lease.LeaseToken),
+			Attempt:     attempt,
+			UpdatedAt:   time.Now(),
+		}
+		s.auditWrite(ctx, "acquire_task_lease", func(ctx context.Context) error {
+			return s.db.UpsertNode(ctx, rec)
+		})
+	}
+
+	return prev, true, nil
 }
 
 func (s *redisState) ResetNodeForRetry(ctx context.Context, id types.ExecutionID, name string) error {

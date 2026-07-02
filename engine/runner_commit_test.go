@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -39,6 +40,50 @@ func submitRunnerCommitWorkflow(t *testing.T, ctx context.Context, eng *Engine) 
 		t.Fatal(err)
 	}
 	return execID
+}
+
+type coordinatedLeaseState struct {
+	*fakeState
+	started     chan struct{}
+	releaseLock chan struct{}
+	releaseOnce sync.Once
+	blockOnce   sync.Once
+}
+
+func newCoordinatedLeaseState() *coordinatedLeaseState {
+	return &coordinatedLeaseState{
+		fakeState:   newFakeState(),
+		started:     make(chan struct{}, 2),
+		releaseLock: make(chan struct{}),
+	}
+}
+
+func (s *coordinatedLeaseState) GetNode(ctx context.Context, id types.ExecutionID, name string) (*NodeSnapshot, error) {
+	ns, err := s.fakeState.GetNode(ctx, id, name)
+	if err == nil && ns == nil {
+		s.started <- struct{}{}
+	}
+	return ns, err
+}
+
+func (s *coordinatedLeaseState) AcquireTaskLease(ctx context.Context, lease *TaskLease) (*NodeSnapshot, bool, error) {
+	s.started <- struct{}{}
+	return s.fakeState.AcquireTaskLease(ctx, lease)
+}
+
+func (s *coordinatedLeaseState) UpsertNode(ctx context.Context, n *NodeSnapshot) error {
+	if n != nil && n.Status == types.NodeStatusRunning {
+		s.blockOnce.Do(func() {
+			<-s.releaseLock
+		})
+	}
+	return s.fakeState.UpsertNode(ctx, n)
+}
+
+func (s *coordinatedLeaseState) release() {
+	s.releaseOnce.Do(func() {
+		close(s.releaseLock)
+	})
 }
 
 func (h *recordingHooks) OnNodeStart(_ context.Context, _ types.ExecutionID, name string) {
@@ -435,6 +480,84 @@ func TestEngine_BuildTaskLeaseRejectsActiveUnexpiredLeaseButRoutingIsIdempotent(
 	}
 
 	_ = execID
+}
+
+func TestEngine_BuildTaskLeaseConcurrentAcquireReturnsSingleLease(t *testing.T) {
+	ctx := context.Background()
+	state := newCoordinatedLeaseState()
+	queue := &fakeQueue{}
+	eng := New(state, queue, WithDefaultLeaseTTL(time.Minute))
+	submitRunnerCommitWorkflow(t, ctx, eng)
+	task := queue.Drain()[0]
+
+	type result struct {
+		lease *TaskLease
+		err   error
+	}
+
+	results := make(chan result, 2)
+	start := make(chan struct{})
+	for i := 0; i < 2; i++ {
+		go func() {
+			<-start
+			lease, err := eng.BuildTaskLease(ctx, task)
+			results <- result{lease: lease, err: err}
+		}()
+	}
+	close(start)
+
+	seen := 0
+	timeout := time.After(time.Second)
+	for seen < 2 {
+		select {
+		case <-state.started:
+			seen++
+		case <-timeout:
+			state.release()
+			goto collect
+		}
+	}
+	state.release()
+
+collect:
+	first := <-results
+	second := <-results
+
+	var issued *TaskLease
+	duplicateErrs := 0
+	for _, got := range []result{first, second} {
+		switch {
+		case got.err == nil:
+			if issued != nil {
+				t.Fatalf("issued multiple leases: first=%+v second=%+v", issued, got.lease)
+			}
+			issued = got.lease
+		case errors.Is(got.err, ErrLeaseAlreadyActive):
+			duplicateErrs++
+		default:
+			t.Fatalf("BuildTaskLease() error = %v, want nil or ErrLeaseAlreadyActive", got.err)
+		}
+	}
+	if issued == nil {
+		t.Fatal("no lease issued")
+	}
+	if duplicateErrs != 1 {
+		t.Fatalf("duplicate errors = %d, want 1", duplicateErrs)
+	}
+
+	ns, err := state.GetNode(ctx, task.ExecutionID, task.NodeName)
+	if err != nil {
+		t.Fatalf("GetNode() error = %v", err)
+	}
+	if ns == nil {
+		t.Fatal("node snapshot missing after concurrent acquire")
+	}
+	if ns.LeaseToken != issued.LeaseToken {
+		t.Fatalf("stored lease token = %q, want %q", ns.LeaseToken, issued.LeaseToken)
+	}
+	if ns.Attempt != 1 {
+		t.Fatalf("node attempt = %d, want 1", ns.Attempt)
+	}
 }
 
 func TestEngine_CommitTaskResultParksSuspendRequestWithoutHandlerExecution(t *testing.T) {

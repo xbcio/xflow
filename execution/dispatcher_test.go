@@ -11,12 +11,13 @@ import (
 
 type fakeLeaseEngine struct {
 	lease     *engine.TaskLease
+	buildErr  error
 	committed bool
 	result    engine.TaskResult
 }
 
 func (e *fakeLeaseEngine) BuildTaskLease(context.Context, *engine.Task) (*engine.TaskLease, error) {
-	return e.lease, nil
+	return e.lease, e.buildErr
 }
 
 func (e *fakeLeaseEngine) CommitTaskResult(_ context.Context, lease *engine.TaskLease, result engine.TaskResult) error {
@@ -118,6 +119,32 @@ func TestDispatcherReturnsExecutorErrorWithoutEngineFallback(t *testing.T) {
 	}
 	if eng.committed {
 		t.Fatal("dispatcher committed a failed executor result")
+	}
+}
+
+type recordingExecutor struct {
+	called bool
+}
+
+func (e *recordingExecutor) Execute(context.Context, *engine.TaskLease) (engine.TaskResult, error) {
+	e.called = true
+	return engine.TaskResult{}, nil
+}
+
+func TestDispatcherTreatsLeaseAlreadyActiveAsNoOp(t *testing.T) {
+	task := &engine.Task{ExecutionID: types.ExecutionID("exec-runtime"), NodeName: "action"}
+	eng := &fakeLeaseEngine{buildErr: engine.ErrLeaseAlreadyActive}
+	executor := &recordingExecutor{}
+	dispatcher := NewDispatcher(eng, executor)
+
+	if err := dispatcher.HandleTask(context.Background(), task); err != nil {
+		t.Fatalf("HandleTask() error = %v, want nil", err)
+	}
+	if executor.called {
+		t.Fatal("dispatcher executed a duplicate active lease")
+	}
+	if eng.committed {
+		t.Fatal("dispatcher committed a duplicate active lease")
 	}
 }
 

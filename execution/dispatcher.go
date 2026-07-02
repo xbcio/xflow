@@ -46,7 +46,7 @@ func NewEmbeddedDispatcher(eng Engine, registry engine.HandlerRegistry, opts ...
 func (d *Dispatcher) HandleTask(ctx context.Context, t *engine.Task) error {
 	lease, err := d.engine.BuildTaskLease(ctx, t)
 	if err != nil {
-		if err == engine.ErrExecutionInactive {
+		if err == engine.ErrExecutionInactive || err == engine.ErrLeaseAlreadyActive {
 			return nil
 		}
 		return err

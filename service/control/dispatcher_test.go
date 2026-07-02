@@ -189,3 +189,24 @@ func (e *fakeDispatchEngine) CommitTaskResult(context.Context, *engine.TaskLease
 func (e *fakeDispatchEngine) ReclaimLease(context.Context, engine.ExpiredLease) (bool, error) {
 	return false, nil
 }
+
+func TestDispatcherTreatsLeaseAlreadyActiveAsNoOp(t *testing.T) {
+	task := &engine.Task{ExecutionID: types.ExecutionID("exec-1"), NodeName: "start", NodeIdx: 0}
+	leaseEngine := &fakeDispatchEngine{
+		routing:  engine.TaskRouting{NodeType: "xflow.function"},
+		buildErr: engine.ErrLeaseAlreadyActive,
+	}
+	pool := NewRunnerPool()
+	pool.Register("runner-1", 1, []protocol.Capability{{NodeType: "xflow.function"}})
+
+	if err := NewDispatcher(leaseEngine, pool).HandleTask(context.Background(), task); err != nil {
+		t.Fatalf("HandleTask() error = %v, want nil", err)
+	}
+
+	if _, ok := pool.Poll("runner-1", 1, []protocol.Capability{{NodeType: "xflow.function"}}); ok {
+		t.Fatal("runner received a lease for a duplicate active dispatch")
+	}
+	if leaseEngine.committed {
+		t.Fatal("control dispatcher committed a duplicate active lease")
+	}
+}
