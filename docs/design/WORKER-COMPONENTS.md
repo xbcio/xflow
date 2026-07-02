@@ -1,5 +1,7 @@
 # XFlow Runner 组件设计
 
+> **Status: 混合。** Direct Runner（`cmd/runner` 经 Runner Protocol 直连 server）已是 MVP 实现；Relay Runner 依赖尚未实现的 Relay Gateway，属于目标设计。当前实现细节见 [DEPLOYMENT-TOPOLOGIES.md](./DEPLOYMENT-TOPOLOGIES.md) §3、§7。
+
 > Runner 负责实际执行工作流节点任务。XFlow 支持两种接入方式：Direct Runner 直接连接 server 的 Runner Protocol；Relay Runner 通过 Relay Gateway 中继连接。两者共享相同的 ActionHandler 接口，执行逻辑完全一致，差异仅在网络接入方式。Runner 永远不直连 server 内部 Redis / Asynq。当前代码中的 embedded `execution.Runner` 是本地实现，未来独立 `xflow-runner` 应复用同一执行语义，仅替换连接方式。
 
 ## 目录

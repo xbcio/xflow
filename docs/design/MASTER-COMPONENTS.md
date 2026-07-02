@@ -1,5 +1,7 @@
 # XFlow Server Control Plane 组件设计
 
+> **Status: 目标设计（非当前实现）。** 本文描述的 Raft Leader-Follower HA 架构尚未落地。当前 server 是单实例 Control Plane MVP，见 [DEPLOYMENT-TOPOLOGIES.md](./DEPLOYMENT-TOPOLOGIES.md) §3、§7。
+
 > Server Control Plane 负责工作流的调度与编排，采用 Raft Leader-Follower 高可用架构。Asynq / Redis 是 server 内部任务调度队列；Task Dispatcher 将 Asynq task 转换成 Runner Protocol lease，runner 不直连 Redis / Asynq。Relay Gateway 仅在 runner 无法直连 server 时作为可选中继。当前代码中的通用调度语义位于 `engine/`，通用执行边界位于 `execution/`；server 层只应新增协议、lease state、runner matching 等服务能力。
 
 ## 目录

@@ -48,3 +48,6 @@ data/
 .claude/superpowers/
 .claude/settings.local.json
 .claude/specs/
+
+# Editor local settings
+.vscode/

@@ -1,7 +1,9 @@
 # Storage Contract — Redis is the System of Record
 
+> Status: **implemented**.
+
 This is the rule that resolves the dual-write asymmetry called out in
-[`specs/dual-write-contract.md`](specs/dual-write-contract.md).
+[`.claude/specs/dual-write-contract.md`](../../.claude/specs/dual-write-contract.md).
 
 ## Roles
 

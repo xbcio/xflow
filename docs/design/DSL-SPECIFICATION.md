@@ -113,15 +113,19 @@ settings:
   timezone: string        # 时区
   on_error: string        # 全局默认错误策略（可选，stop|error_output|main_output，默认 stop）
   pin_data_mode: string   # pin_data 生效策略（可选，test_only|always|disabled，默认 test_only）
-  retry:                  # 重试策略
+  retry:                  # 全局默认重试策略（可选；节点级 retry 可覆盖）
     enabled: bool
-    max_attempts: int
-    strategy: string      # fixed/exponential
+    max_attempts: int     # 最大尝试次数，包含首次执行；<=0 或 enabled=false 表示关闭
+    strategy: string      # fixed/exponential（默认 exponential）
+    initial_interval: int # 初始退避间隔，毫秒；<=0 使用引擎默认值
+    max_interval: int     # 单次退避上限，毫秒；<=0 使用引擎默认值
+    multiplier: number    # 指数退避倍率；<=0 使用默认 2.0
 
 # 高级执行选项
 options:
   allow_cycles: bool      # 是否允许有环图（默认 false；false 时仍按 DAG 校验）
   max_auto_depth: int     # 有环图单次自动推进最大深度（默认 100；信号/人工恢复后重新计数）
+  experimental_expand: bool # 是否允许 xflow.loop / xflow.split 实验能力（默认 false；生产不建议开启）
 
 # 凭证引用
 # 所有敏感信息（API Key、密码、Token、DB 连接等）统一在 credentials 中定义
@@ -159,6 +163,8 @@ nodes:
   - id: string            # 节点 ID（可选，UUID v4；UI 创建时必带，YAML 手写时可省略由系统生成）
     name: string          # 节点名称
     type: string          # 节点类型（xflow.http/xflow.grpc/xflow.if等）
+    kind: string          # 节点角色（可选，action|trigger；普通节点默认 action）
+    version: int          # Handler 主版本（可选；review 中的 handler_version 即此字段）
     template: string      # 引用 node_templates 中的模板名（可选，与 type 互斥：template 提供 type）
     position: [x, y]      # UI 位置坐标（可选）
     disabled: bool        # 是否禁用（可选，见下方「禁用行为」）
@@ -173,6 +179,13 @@ nodes:
                           #   color: string         - 节点颜色
                           #   group: string         - 分组标签
                           #   width: int            - 节点宽度
+    retry:                # 节点级重试策略（可选；覆盖 settings.retry）
+      enabled: bool
+      max_attempts: int
+      strategy: string
+      initial_interval: int
+      max_interval: int
+      multiplier: number
     parameters: object    # 节点参数
 
 # 节点禁用行为
@@ -182,6 +195,19 @@ nodes:
 #   - 下游节点通过 $nodes['disabled_node'] 访问时返回 nil（与未执行节点一致）
 #   - 连线保留（不重连）：disabled 节点的出边目标仍然生效，入边来源仍然计入上游
 # 典型用途：调试时临时跳过某节点，不破坏工作流拓扑
+
+# Handler 版本解析
+# 节点级 version 是 handler 主版本号，不是 workflow 顶层 version。
+# version > 0 时，AddWorkflow 会严格预检查对应 type/version 是否已注册；
+# dispatch 时优先精确匹配，缺失时按 SDK VersionPolicy 处理。
+# version 省略或为 0 时使用该 type 当前注册的最新 handler。
+
+# 重试语义
+# settings.retry 是 workflow 默认值；nodes[].retry 存在时完全覆盖默认值。
+# MaxAttempts 包含首次执行，例如 max_attempts: 3 表示最多执行 3 次。
+# handler 返回 errors.Is(err, types.ErrPermanent) 为 true 的错误时不重试；
+# 未标记错误按 transient 处理，重试耗尽后再进入 on_error 路径。
+# 引擎提供 at-least-once 执行语义，带外副作用必须由 handler / 业务侧保证幂等。
 
 # 连接定义
 connections:
@@ -252,6 +278,10 @@ settings:
     max_interval: 60s
     multiplier: 2.0
 
+options:
+  allow_cycles: false
+  experimental_expand: false
+
 # 凭证（加密存储，表达式中通过 getCredential('name') 获取）
 credentials:
   api_auth:
@@ -288,8 +318,16 @@ nodes:
   # 1. 验证订单
   - name: validate_order
     type: xflow.http
+    version: 1
     position: [250, 300]
     notes: "验证订单信息"
+    retry:
+      enabled: true
+      max_attempts: 3
+      strategy: exponential
+      initial_interval: 1000
+      max_interval: 60000
+      multiplier: 2.0
 
     parameters:
       method: POST
@@ -308,9 +346,6 @@ nodes:
 
       options:
         timeout: "${{ $vars.default_timeout * 1000 }}"
-        retry:
-          enabled: true
-          max_attempts: "${{ $vars.max_retry_count }}"
 
   # 2. 验证结果分支（使用 xflow.if 二元判断）
   - name: check_validation
@@ -1096,7 +1131,7 @@ XFlow 的 connections 仅描述拓扑关系（谁连到谁），条件逻辑由 
 
 > **并行执行**：XFlow 不提供 `xflow.parallel` 节点。并行通过 connections 天然实现——一个输出端口连接多个目标节点即为并行分支，用 `xflow.merge` 汇合。
 >
-> **实验能力**：`xflow.loop` 和 `xflow.split` 暂不作为生产审批流程能力承诺。
+> **实验能力**：`xflow.loop` 和 `xflow.split` 默认会被编译期拒绝；只有显式设置 `options.experimental_expand: true` 才允许提交。当前实现仍是实验骨架，暂不作为生产审批流程能力承诺。
 
 #### 有环图模式
 
@@ -1106,6 +1141,7 @@ XFlow 的 connections 仅描述拓扑关系（谁连到谁），条件逻辑由 
 options:
   allow_cycles: true
   max_auto_depth: 100
+  experimental_expand: false
 
 nodes:
   - name: start
@@ -1153,7 +1189,7 @@ execID, err := eng.Invoke(ctx, workflowID, xflow.Start(), params)
 execID, err := eng.Invoke(ctx, workflowID, xflow.Trigger("order_created"), event)
 ```
 
-`Submit` 已从 public SDK 移除；生产路径是先 `AddWorkflow` 注册定义，再 `Invoke` 从显式入口创建 execution。
+生产路径是先 `AddWorkflow` 注册定义，再 `Invoke` 从显式入口创建 execution。
 
 触发入口的实际运行语义如下：
 
@@ -1334,6 +1370,15 @@ connections:
 
 #### Loop 节点
 
+`xflow.loop` 是实验能力。workflow 必须显式开启：
+
+```yaml
+options:
+  experimental_expand: true
+```
+
+未开启时，编译器会返回错误，提示 `xflow.loop` / `xflow.split` 需要 `options.experimental_expand=true`。
+
 循环体通过内嵌 `body` 子图定义，拥有独立的节点命名空间，语法与顶层 `nodes` + `connections` 完全一致，支持条件分支和错误路径：
 
 ```yaml
@@ -1452,6 +1497,8 @@ result: "${{ $nodes['final_merge'].status }}"
 ```
 
 #### Split 节点
+
+`xflow.split` 与 `xflow.loop` 使用同一个实验开关：未设置 `options.experimental_expand: true` 时会被编译期拒绝。
 
 将数组拆分为独立数据项，每项沿下游 connections 路径独立执行。与 `xflow.loop` 的区别：loop 通过内嵌 `body` 子图定义迭代体，split 通过下游 connections 定义扇出路径，用 `xflow.merge` 汇合结果。
 

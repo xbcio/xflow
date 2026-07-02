@@ -213,8 +213,8 @@ func (c *Client) Close() error {
     return c.client.Close()
 }
 
-// SubmitWorkflowExecution 提交工作流执行任务
-func (c *Client) SubmitWorkflowExecution(
+// EnqueueWorkflowExecution 入队工作流执行任务
+func (c *Client) EnqueueWorkflowExecution(
     ctx context.Context,
     payload WorkflowExecutePayload,
     opts ...asynq.Option,
@@ -244,8 +244,8 @@ func (c *Client) SubmitWorkflowExecution(
     return info.ID, nil
 }
 
-// SubmitWorkflowStep 提交工作流步骤任务
-func (c *Client) SubmitWorkflowStep(
+// EnqueueWorkflowStep 入队工作流步骤任务
+func (c *Client) EnqueueWorkflowStep(
     ctx context.Context,
     payload WorkflowStepPayload,
     opts ...asynq.Option,
@@ -274,8 +274,8 @@ func (c *Client) SubmitWorkflowStep(
     return info.ID, nil
 }
 
-// SubmitHTTPRequest 提交 HTTP 请求任务
-func (c *Client) SubmitHTTPRequest(
+// EnqueueHTTPRequest 入队 HTTP 请求任务
+func (c *Client) EnqueueHTTPRequest(
     ctx context.Context,
     payload HTTPRequestPayload,
     opts ...asynq.Option,
@@ -581,7 +581,7 @@ func (h *WorkflowHandler) ExecuteWorkflow(c *gin.Context) {
         return
     }
 
-    // 提交异步任务
+    // 入队异步任务
     payload := task.WorkflowExecutePayload{
         ExecutionID: execution.ID,
         WorkflowID:  workflowID,
@@ -589,7 +589,7 @@ func (h *WorkflowHandler) ExecuteWorkflow(c *gin.Context) {
         InputData:   req.InputData,
     }
 
-    taskID, err := h.taskClient.SubmitWorkflowExecution(c.Request.Context(), payload)
+    taskID, err := h.taskClient.EnqueueWorkflowExecution(c.Request.Context(), payload)
     if err != nil {
         c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
         return

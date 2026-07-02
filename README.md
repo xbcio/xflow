@@ -115,7 +115,8 @@ used for production vulnerability approval flows yet.
 
 See `docs/` for detailed design documentation:
 
-- [docs/README.md](docs/README.md) — Complete overview
-- [docs/00-design-summary.md](docs/00-design-summary.md) — 5-minute architecture overview
-- [docs/DSL-SPECIFICATION.md](docs/DSL-SPECIFICATION.md) — Complete DSL syntax specification
-- [docs/CORE-COMPONENTS.md](docs/CORE-COMPONENTS.md) — Complete component architecture
+- [docs/design/DSL-SPECIFICATION.md](docs/design/DSL-SPECIFICATION.md) — Complete DSL syntax specification
+- [docs/design/ARCHITECTURE.md](docs/design/ARCHITECTURE.md) — Current implemented architecture (engine/execution/backend layering)
+- [docs/design/DEPLOYMENT-TOPOLOGIES.md](docs/design/DEPLOYMENT-TOPOLOGIES.md) — SDK modes, server/runner cluster, current vs planned
+- [docs/design/CORE-COMPONENTS.md](docs/design/CORE-COMPONENTS.md) — Target design for server clustering
+- [docs/dsl-samples/](docs/dsl-samples/) — Runnable DSL examples (e.g. `purchase-approval.yaml`)

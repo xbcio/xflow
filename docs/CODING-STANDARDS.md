@@ -6,43 +6,50 @@ Derived from [Go style guide](<sas-repo-root>/docs/claude/development/go-style-g
 
 ## Module & Directory Layout
 
-### Multi-module structure
+### Single-module structure
 
-The repo contains four Go modules. Each has its own `go.mod`:
+The repo is a single Go module (`go.mod` at the repo root, module path
+`github.com/xbcio/xflow`). There is no `go.work`, no `pkg/`, no `internal/`,
+and no per-directory sub-modules — every package below is imported directly
+by its full path under the root module.
 
-| Module path | Directory | Role |
-|---|---|---|
-| `github.com/xbcio/xflow` | `/` | Root — types, cmd |
-| `github.com/xbcio/xflow/types` | `types/` | Shared data types (no deps) |
-| `github.com/xbcio/xflow/nodes/node` | `nodes/node/` | Builtin task node constructors and implementations |
-| `github.com/xbcio/xflow/sdk` | `sdk/` | Embedded engine SDK |
+| Directory | Role |
+|---|---|
+| `engine/` | Pure scheduling algorithm (zero IO deps): Graph IR, Scheduler, ErrorPolicy, Suspend |
+| `types/` | Public DSL/runtime contracts: `WorkflowDef`, handler interfaces, descriptors, statuses, `Result` — zero impl deps |
+| `nodes/node/` | Builtin task node constructors and implementations (`node.HTTP`, `node.Function`, etc.) |
+| `execution/` | Reusable embedded task execution boundary: Dispatcher, Runner, Registry |
+| `backend/` | Reusable backend providers: `backend.go` (`Provider` + optional capabilities), `memory/` (in-memory StateStore + goroutine pool TaskQueue), `asynq/` (Redis StateStore + Asynq TaskQueue) |
+| `store/` | Public persistence interfaces + domain models; `memstore/` (in-memory), `sqlstore/` (dialect-agnostic GORM; `sqlstore/mysqlstore/` for MySQL) |
+| `service/` | Server/runner control-plane and execution-plane code: `service/control` (dispatcher, lease sweeper, HTTP/gRPC server), `service/protocol` (Runner Protocol DTOs/client), `service/runner` (runner-side execution) |
+| `sdk/` | Public SDK grouping: `sdk/xflow` (`package xflow`, `NewLocal`/`NewCluster` factories, WorkflowBuilder), `sdk/examples` (runnable `.go` usage examples) |
+| `cmd/server/` | Management server binary (Control Plane) |
+| `cmd/runner/` | Task runner binary (Execution Plane) |
+| `observability/` | slog/Prometheus/OTLP adapters shared across engine, dispatcher, and runner |
+| `db/` | SQL schema |
+| `docs/` | Design docs (`design/`), DSL samples (`dsl-samples/`), reference research (`references/`) |
 
 **Rules:**
-- Use `go.work` at the repo root for local development across all modules. `go.work` is gitignored — create it locally:
-  ```bash
-  go work init
-  go work use . ./types ./sdk
-  ```
-- `types/` must have zero imports from sibling modules (it is the leaf dependency).
-- `nodes/node/` may import `types/` only.
-- `sdk/` may import `nodes/node/` and `types/` only; never import `pkg/` or `internal/`.
-- `cmd/` entry points must be thin: import from `internal/` and `pkg/`, do nothing else.
+- `engine/` must NOT import redis/asynq/mysql/sql — only stdlib + `types/` + `nodes/node/`.
+- `execution/` and `backend/memory/` must remain free of Redis/Asynq/MySQL/network dependencies.
+- `sdk/` may import `engine/`, `execution/`, `backend/*`, `nodes/node/`, and `types/`; it assembles reusable packages and must not own reusable backend behavior.
+- `service/` and `cmd/` may depend on `engine/`, `execution/`, `backend/*`, `store/`, `types/`, `nodes/node/`; core packages (`engine`, `nodes`, `types`, `store`, `sdk`) must NEVER import `service/` or `cmd/` — dependencies flow one way only.
+- `cmd/<name>/` entry points must be thin: assemble from `service/` and `sdk/`, no business logic of their own.
 
-### Directory conventions (per golang-standards)
+Full dependency graph and layering rationale: [design/ARCHITECTURE.md](./design/ARCHITECTURE.md).
+
+### Directory conventions
 
 | Directory | Purpose | Rule |
 |---|---|---|
 | `cmd/<name>/` | Binary entry points | Must be minimal `main()`; no business logic |
-| `internal/` | Private app code | `config/`, `storage/`, `middleware/` go here; not importable outside root module |
-| `pkg/` | Shared library code safe for external use | `workflow/`, `scheduler/`, `state/`, `task/`, `expression/`, `monitor/`, `api/` |
-| `api/` | OpenAPI specs, gRPC `.proto` files | One source of truth for service contracts |
-| `configs/` | Config templates, default YAML | No secrets, no environment-specific values |
+| `service/` | Server/runner control-plane and execution-plane code | Never imported by `engine/nodes/types/store/sdk` |
 | `nodes/node/` | Builtin task nodes | Constructors + implementations for normal workflow nodes |
-| `types/` | Shared data types (separate module) | Plain structs + constants; zero business logic |
-| `sdk/` | Embedded engine (separate module) | Self-contained; carries its own runners |
+| `types/` | Shared data types | Plain structs + constants; zero business logic |
+| `sdk/` | Embedded engine SDK | Assembles `engine/execution/backend`; public API surface |
 | `docs/` | Design docs and specs | Keep in sync with code |
 
-**Do not create:** `utils/`, `helpers/`, `common/`, `lib/`, `src/`.
+**Do not create:** `utils/`, `helpers/`, `common/`, `lib/`, `src/`, `pkg/`, `internal/`.
 
 ---
 

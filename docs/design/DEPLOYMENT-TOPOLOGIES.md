@@ -1,8 +1,10 @@
 # 部署拓扑指导
 
+> Status: 现状与规划混合标注，见文中「已实现 / MVP 已实现 / 规划」标签与 [§7](#7-现状-vs-规划)。
+
 xflow 是一个通用、可嵌入的工作流引擎 SDK：用户用 DAG 编排节点（内置或自定义），SDK 本身即分布式载体。本文梳理 SDK 的三种运行模式与未来的 server + runner 集群架构，帮助使用者和开发者理解每种拓扑的定位、依赖、执行者、适用场景与限制。
 
-> 阅读前提：引擎核心 `engine/` 只依赖两个接口 —— `StateStore`（状态存储）与 `TaskQueue`（任务入队）。通用执行边界在 `execution/`：`Dispatcher` 构建 `TaskLease`，`Executor` 执行或转发，`Runner` 是进程内执行器。`backend.Provider` 抽象出可复用后端装配契约，SDK 负责组装核心能力：`NewLocal` 使用 `backend/memory`，`NewCluster` 使用 `backend/asynq`。底层包按实现能力命名，SDK 工厂按用户部署模式命名。详见 [architecture.md](architecture.md)。
+> 阅读前提：引擎核心 `engine/` 只依赖两个接口 —— `StateStore`（状态存储）与 `TaskQueue`（任务入队）。通用执行边界在 `execution/`：`Dispatcher` 构建 `TaskLease`，`Executor` 执行或转发，`Runner` 是进程内执行器。`backend.Provider` 抽象出可复用后端装配契约，SDK 负责组装核心能力：`NewLocal` 使用 `backend/memory`，`NewCluster` 使用 `backend/asynq`。底层包按实现能力命名，SDK 工厂按用户部署模式命名。详见 [ARCHITECTURE.md](./ARCHITECTURE.md)。
 
 ---
 
@@ -14,7 +16,7 @@ xflow 是一个通用、可嵌入的工作流引擎 SDK：用户用 DAG 编排�
 | **cluster** | 每个对等进程 | 每个对等进程（自带 Asynq server） | Redis（+ 可选持久化 Store） | Redis | 多副本对等部署、需要持久化与挂起/信号 | 已实现 |
 | **remote** | SDK 瘦客户端 | 远端 runner 集群 | 远端（server 管理） | 网络可达的 server | 轻量嵌入、客户端不愿引入 Redis/执行负载 | 规划 |
 | **server**（Control Plane） | 接受外部提交 | 不执行 handler | 通过 StateStore | Redis / 持久化 Store / Asynq | 集群控制面、调度权威 | MVP 已实现 |
-| **runner protocol**（执行协议） | 不提交 | 不执行 handler | server 持有最终状态 | HTTP+JSON long poll | server 与 runner 的统一执行协议 | MVP 已实现 |
+| **runner protocol**（执行协议） | 不提交 | 不执行 handler | server 持有最终状态 | HTTP+JSON long poll / gRPC | server 与 runner 的统一执行协议 | MVP 已实现 |
 | **runner**（执行面） | 不提交 | 通过 Runner Protocol 执行 handler | 通过 Runner Protocol 回报 server | 网络可达的 server 或 Relay Gateway | 集群执行面，横向扩缩容 / 网络隔离执行 | MVP 已实现 |
 | **Relay Gateway**（可选中继） | 不提交 | 不执行 handler | 本地只缓存 pending/inflight；最终状态在 server | 网络可达的 server + 本地 runner 可达的 Relay Gateway | runner 无法直连 server 时延伸执行通道，不暴露 Redis | 规划 |
 
@@ -95,7 +97,7 @@ SDK 作为**瘦客户端**：自己不执行节点、不需要 Redis，通过网
 
 ## 3. server + runner 集群架构（MVP 已实现）
 
-面向「用户通过 UI 定义工作流」的集群服务，由两个角色构成。当前已落地第一版 MVP：`cmd/server` 提供 HTTP 控制面，`cmd/runner` 通过 HTTP+JSON long polling Runner Protocol 领取 lease、执行 handler、回传 result。SDK 的 remote 模式仍是后续计划。
+面向「用户通过 UI 定义工作流」的集群服务，由两个角色构成。当前已落地第一版 MVP：`cmd/server` 提供 HTTP 控制面，`cmd/runner` 通过 Runner Protocol（HTTP+JSON long polling，另有 gRPC 通道，见 `service/protocol/grpc_client.go`）领取 lease、执行 handler、回传 result。SDK 的 remote 模式仍是后续计划。
 
 ### 3.1 角色职责
 
@@ -110,12 +112,13 @@ SDK 作为**瘦客户端**：自己不执行节点、不需要 Redis，通过网
 runner 可横向扩缩容：跑多个 runner 实例即可线性扩展执行吞吐。
 
 **MVP 限制**：
-- Runner Protocol 当前是 HTTP+JSON long polling，尚未实现 gRPC / streaming。
+- Runner Protocol 已提供 HTTP+JSON long polling 与 gRPC 两条通道；streaming 语义仍在演进。
 - 没有 Relay Gateway；runner 必须能直接访问 server。
 - 没有 remote SDK；提交、查询、信号 API 先由 server HTTP handler 暴露。
-- 没有认证、鉴权、mTLS、租户隔离或生产级审计。
-- runner matching 仅按 `node_type` 精确匹配，尚无 tags / env / region / 权重 / 容量感知调度。
-- Dispatcher pending / inflight 状态仍是内存 MVP，不具备 server 重启后的 durable recovery。
+- **已实现** runner bearer token、mTLS、runner policy allowlist 与 dry-run rollout；workflow-level authorization、租户隔离和生产级审计仍需单独设计。
+- **已实现** runner matching 的 `node_type` / `node_version` 精确匹配、runner policy 过滤与容量 gating；tags / env / region / 权重调度仍在规划。
+- **已实现** lease TTL + sweeper 回收与 re-enqueue；durable pending/inflight recovery 仍是后续计划。
+- **已实现** Redis 作为权威状态、store/sqlstore 作为 best-effort audit trail 的 dual-write contract；审计 reconciliation CLI 仍在规划。
 
 ### 3.2 与 engine 两接口的对应
 
@@ -155,9 +158,9 @@ remote 客户端不碰 Redis、不执行节点，所有「提交 + 查询状态 
 
 ---
 
-## 4. Asynq 与 Task Dispatcher（规划）
+## 4. Asynq 与 Task Dispatcher
 
-Asynq 是 server 内部的任务调度和可靠队列核心。runner 不直接连接 Redis / Asynq；Task Dispatcher 是 Asynq 和 Runner Protocol 之间的适配层。
+Asynq 是 server 内部的任务调度和可靠队列核心。runner 不直接连接 Redis / Asynq；Task Dispatcher 是 Asynq 和 Runner Protocol 之间的适配层，MVP 已实现（`service/control.Dispatcher`）。
 
 ```
 Scheduler / Engine
@@ -169,7 +172,7 @@ Asynq / Redis（server 内部）
 Task Dispatcher（server 内部）
     │ match runner + create lease
     ▼
-Runner Protocol（TCP / gRPC stream / WebSocket / HTTP long poll）
+Runner Protocol（gRPC / HTTP long poll）
     │ assign / heartbeat / result / cancel
     ▼
 xflow-runner
@@ -217,7 +220,7 @@ Task Dispatcher 消费 Asynq task 后，不应长时间阻塞等待 runner 执�
 
 Relay Gateway 用于 runner 无法直连 server、不能互相直连或需要本地聚合的场景。跨云、跨 VPC、跨数据中心、用户内网、本地开发机、受限测试环境都只是这种网络隔离模型的具体实例。Relay Gateway 不是状态权威，也不直连 server 内部 Redis / DB，而是中继 Runner Protocol，把执行通道延伸到 runner 所在网络域。
 
-典型场景之一：阿里云部署完整 `xflow-server`，腾讯云部署 `xflow-gateway`，腾讯云测试环境部署 `xflow-runner`。本质不是“跨云”，而是 runner 无法直接连接 server：runner 只访问腾讯云本地 Relay Gateway，Relay Gateway 再与阿里云 server 建立受控连接。
+典型场景之一：阿里云部署完整 `xflow-server`，腾讯云部署 `xflow-gateway`，腾讯云测试环境部署 `xflow-runner`。本质不是"跨云"，而是 runner 无法直接连接 server：runner 只访问腾讯云本地 Relay Gateway，Relay Gateway 再与阿里云 server 建立受控连接。
 
 ```
 阿里云
@@ -310,10 +313,10 @@ Relay Gateway 用于 runner 无法直连 server、不能互相直连或需要本
 | local 模式 | **已实现** | `backend/memory/` 完整：内存 state/queue + reusable `execution.Registry` + Waiter |
 | cluster 模式 | **已实现** | `backend/asynq/` 完整：Redis state + Asynq queue + reusable `execution.Dispatcher` / `execution.Runner` / `execution.Registry` + TimeoutMonitor |
 | remote 模式 | **规划** | 无 remote SDK client/backend，无 remote 工厂 |
-| server 管理面 | **MVP 已实现** | `cmd/server` 可启动 HTTP 控制面，支持 workflow submit、inspect、signal、cancel、runner register/heartbeat/poll/result |
+| server 管理面 | **MVP 已实现** | `cmd/server` 可启动 HTTP 控制面，支持 workflow invoke、inspect、signal、cancel、runner register/heartbeat/poll/result |
 | runner 执行面 | **MVP 已实现** | `cmd/runner` 可连接 server，注册 capability，通过 Runner Protocol 执行 lease 并上报 result |
 | Task Dispatcher | **MVP 已实现** | `service/control.Dispatcher` 把 queued task 转为 `TaskLease` 并分配给匹配 runner；durable pending/inflight 待后续计划 |
-| Runner Protocol | **MVP 已实现** | `service/protocol` 提供 HTTP+JSON DTO、路由常量和 client；当前使用 long polling |
+| Runner Protocol | **MVP 已实现** | `service/protocol` 提供 HTTP+JSON DTO、路由常量和 client，另有 gRPC 通道（`grpc_client.go`、`runnerpb/`） |
 | Relay Gateway | **规划** | 网络隔离中继拓扑已定义，尚无独立进程实现 |
 
 一句话：**local / cluster 已可用；server / runner MVP 已落地；remote SDK / Relay Gateway / durable dispatcher 仍在规划。**

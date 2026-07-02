@@ -25,7 +25,7 @@ golangci-lint run        # Lint
   - `asynq/` — Redis StateStore + Asynq TaskQueue
 - **execution/** — Reusable embedded task execution boundary: Dispatcher, Runner, Registry
 - **sdk/** — Public SDK grouping
-  - `xflow/` — `package xflow`: `NewLocal` / `NewCluster` factories, WorkflowBuilder, and production control APIs (`Submit`, `Wait`, `Signal`, `RevokeSignal`, `Cancel`, `Inspect`)
+  - `xflow/` — `package xflow`: `NewLocal` / `NewCluster` factories, WorkflowBuilder, and production control APIs (`AddWorkflow`, `Invoke`, `Wait`, `Signal`, `RevokeSignal`, `Cancel`, `Inspect`)
   - `examples/` — runnable `.go` usage examples
 - **cmd/server/** — Management server (Master node)
 - **cmd/runner/** — Task runner (Execution node)
@@ -43,10 +43,11 @@ golangci-lint run        # Lint
 
 Read before implementing core features:
 
-- **[.claude/docs/architecture.md](.claude/docs/architecture.md)** — Layered architecture, dependency rules, interface design
-- **[.claude/docs/implementation-guide.md](.claude/docs/implementation-guide.md)** — Engine core, node handlers, SuspendingHandler, ErrorPolicy
-- **[.claude/docs/testing.md](.claude/docs/testing.md)** — Test commands, strategies, conventions
-- **[.claude/docs/deployment-topologies.md](.claude/docs/deployment-topologies.md)** — SDK modes (local/cluster/remote) + server/runner cluster architecture; current vs planned
-- **[.claude/docs/naming-conventions.md](.claude/docs/naming-conventions.md)** — Stutter policy: which package/identifier names to fix vs. the four idiomatic patterns to leave alone
+- **[docs/design/ARCHITECTURE.md](docs/design/ARCHITECTURE.md)** — Layered architecture, dependency rules, interface design
+- **[docs/design/DEPLOYMENT-TOPOLOGIES.md](docs/design/DEPLOYMENT-TOPOLOGIES.md)** — SDK modes (local/cluster/remote) + server/runner cluster architecture; current vs planned
+- **[docs/design/STORAGE-CONTRACT.md](docs/design/STORAGE-CONTRACT.md)** — Redis-as-system-of-record dual-write contract
+- **[docs/design/CORE-COMPONENTS.md](docs/design/CORE-COMPONENTS.md)** — Target design for server clustering (Raft HA, Relay Gateway) — not yet implemented
+- **[docs/TESTING.md](docs/TESTING.md)** — Test commands, strategies, conventions
+- **[docs/NAMING-CONVENTIONS.md](docs/NAMING-CONVENTIONS.md)** — Stutter policy: which package/identifier names to fix vs. the four idiomatic patterns to leave alone
 - **[docs/CODING-STANDARDS.md](docs/CODING-STANDARDS.md)** — Naming, comments, error handling, concurrency
 - **[docs/design/DSL-SPECIFICATION.md](docs/design/DSL-SPECIFICATION.md)** — Complete DSL syntax specification

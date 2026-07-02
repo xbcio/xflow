@@ -1,5 +1,7 @@
 # XFlow Relay Gateway 组件设计
 
+> **Status: 目标设计（非当前实现）。** Relay Gateway 作为独立进程尚未实现；当前 runner 必须直连 server，见 [DEPLOYMENT-TOPOLOGIES.md](./DEPLOYMENT-TOPOLOGIES.md) §5、§7。
+
 > Relay Gateway 是 Runner Protocol 的可选中继层。默认路径是 runner 直接连接 server 暴露的 Runner Protocol；当 runner 无法直连 server、需要网络域延伸或本地连接聚合时，才部署 Relay Gateway。Gateway 不执行 handler，不直连 server 内部 Redis / DB / Asynq，也不成为 Execution / Task 的最终状态源。
 
 ## 目录

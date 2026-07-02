@@ -38,7 +38,7 @@ portable; the Go function value is never serialized.
 
 ## Embedded cluster topology
 
-Worker-capable pods create a cluster engine and submit workflows with typed handlers:
+Worker-capable pods create a cluster engine and run workflows with typed handlers:
 
 ```go
 eng, err := xflow.NewCluster(xflow.ClusterConfig{
@@ -46,7 +46,7 @@ eng, err := xflow.NewCluster(xflow.ClusterConfig{
 }, xflow.WithNodes(NormalizeVulnerability))
 ```
 
-API-only pods can submit, inspect, cancel, and signal without consuming tasks:
+API-only pods can register workflows, invoke executions, inspect, cancel, and signal without consuming tasks:
 
 ```go
 api, err := xflow.NewCluster(xflow.ClusterConfig{

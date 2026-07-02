@@ -142,9 +142,9 @@ func main() {
     client := asynq.NewClient(redisOpt)
     defer client.Close()
 
-    log.Println("Master started, submitting tasks...")
+    log.Println("Master started, enqueueing tasks...")
 
-    // 提交任务
+    // 入队任务
     for i := 1; i <= 5; i++ {
         task, err := tasks.NewEmailTask(
             100+i,
@@ -155,7 +155,7 @@ func main() {
             continue
         }
 
-        // 提交任务
+        // 入队任务
         info, err := client.Enqueue(task)
         if err != nil {
             log.Printf("Failed to enqueue task: %v", err)
@@ -168,7 +168,7 @@ func main() {
         time.Sleep(1 * time.Second)
     }
 
-    log.Println("All tasks submitted")
+    log.Println("All tasks enqueued")
 }
 ```
 
@@ -255,12 +255,12 @@ go run cmd/master/main.go
 
 **Master 输出**:
 ```
-2026/01/11 10:00:00 Master started, submitting tasks...
+2026/01/11 10:00:00 Master started, enqueueing tasks...
 2026/01/11 10:00:00 ✓ Enqueued task: id=abc123, queue=default
 2026/01/11 10:00:01 ✓ Enqueued task: id=def456, queue=default
 2026/01/11 10:00:02 ✓ Enqueued task: id=ghi789, queue=default
 ...
-2026/01/11 10:00:05 All tasks submitted
+2026/01/11 10:00:05 All tasks enqueued
 ```
 
 #### 6. 生产环境部署

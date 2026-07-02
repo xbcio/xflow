@@ -1,5 +1,7 @@
 # XFlow 核心组件设计
 
+> **Status: 目标设计（非当前实现）。** 本文档及其三个子文档描述 server 集群化的目标架构（Raft HA、Relay Gateway 等），用于指导后续演进方向。当前已实现的架构见 [ARCHITECTURE.md](./ARCHITECTURE.md)（engine/execution/backend 分层）；当前 server/runner MVP 的现状与规划边界见 [DEPLOYMENT-TOPOLOGIES.md](./DEPLOYMENT-TOPOLOGIES.md) §7。
+
 > 本文档已拆分为三个子文档，请按角色查阅对应文档。
 
 ## 文档索引
