@@ -86,7 +86,7 @@ func (s *GRPCServer) Register(ctx context.Context, req *runnerpb.RegisterRequest
 	if err != nil {
 		return nil, runnerStatus(err)
 	}
-	return &runnerpb.RegisterResponse{RunnerId: resp.RunnerID}, nil
+	return protocol.RegisterResponseToProto(resp), nil
 }
 
 func (s *GRPCServer) Heartbeat(ctx context.Context, req *runnerpb.HeartbeatRequest) (*runnerpb.HeartbeatResponse, error) {

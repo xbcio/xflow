@@ -143,3 +143,16 @@ func serverFrameEqual(a, b ServerFrame) bool {
 	}
 	return true
 }
+
+func TestRegisterResponseProtoRoundTripPreservesSessionID(t *testing.T) {
+	want := RegisterRunnerResponse{
+		RunnerID:  "runner-1",
+		SessionID: "session-1",
+	}
+
+	got := RegisterResponseFromProto(RegisterResponseToProto(want))
+
+	if got != want {
+		t.Fatalf("register response round trip = %+v, want %+v", got, want)
+	}
+}

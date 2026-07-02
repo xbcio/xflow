@@ -46,7 +46,7 @@ func (c *GRPCClient) Register(ctx context.Context, req RegisterRunnerRequest) (R
 	if err != nil {
 		return RegisterRunnerResponse{}, err
 	}
-	return RegisterRunnerResponse{RunnerID: resp.GetRunnerId()}, nil
+	return RegisterResponseFromProto(resp), nil
 }
 
 func (c *GRPCClient) Heartbeat(ctx context.Context, req HeartbeatRequest) (HeartbeatResponse, error) {
