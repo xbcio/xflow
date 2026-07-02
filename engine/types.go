@@ -57,13 +57,19 @@ type TaskResult = NodeResult
 type CommitOutcome string
 
 const (
-	CommitOutcomeAccepted          CommitOutcome = "accepted"
+	// CommitOutcomeAccepted means the result advanced node state or parked a suspend.
+	CommitOutcomeAccepted CommitOutcome = "accepted"
+	// CommitOutcomeDuplicateTerminal means the result repeated an already-terminal commit.
 	CommitOutcomeDuplicateTerminal CommitOutcome = "duplicate_terminal"
-	CommitOutcomeStaleToken        CommitOutcome = "stale_token"
+	// CommitOutcomeStaleToken means the lease token no longer fences the node.
+	CommitOutcomeStaleToken CommitOutcome = "stale_token"
+	// CommitOutcomeExecutionInactive means the execution is no longer running.
 	CommitOutcomeExecutionInactive CommitOutcome = "execution_inactive"
-	CommitOutcomeTransientError    CommitOutcome = "transient_error"
+	// CommitOutcomeTransientError means storage or scheduling failed before classification completed.
+	CommitOutcomeTransientError CommitOutcome = "transient_error"
 )
 
+// ReleasesLeasedCapacity reports whether this outcome should release runner capacity.
 func (o CommitOutcome) ReleasesLeasedCapacity() bool {
 	switch o {
 	case CommitOutcomeAccepted, CommitOutcomeDuplicateTerminal, CommitOutcomeStaleToken, CommitOutcomeExecutionInactive:

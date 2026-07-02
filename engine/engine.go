@@ -315,6 +315,9 @@ func (e *Engine) CommitTaskResult(ctx context.Context, lease *TaskLease, result 
 	return err
 }
 
+// CommitTaskResultWithOutcome validates a runner lease token, persists the
+// task result, advances scheduling, and returns a structured outcome for
+// control-plane cleanup.
 func (e *Engine) CommitTaskResultWithOutcome(ctx context.Context, lease *TaskLease, result TaskResult) (CommitOutcome, error) {
 	if lease == nil {
 		return CommitOutcomeStaleToken, ErrInvalidLeaseToken
