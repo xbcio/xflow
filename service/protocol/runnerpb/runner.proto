@@ -1,0 +1,83 @@
+syntax = "proto3";
+
+package xflow.runner.v1;
+
+option go_package = "github.com/xbcio/xflow/service/protocol/runnerpb";
+
+// RunnerProtocol is the control-plane <-> execution-plane contract. It mirrors
+// the HTTP+JSON Runner Protocol one RPC per endpoint so a runner can switch
+// transports without changing its execution loop.
+//
+// Rich domain payloads (TaskLease, TaskResult) are carried as JSON bytes rather
+// than mirrored field-by-field: they embed map[string]any / any structures that
+// round-trip cleanly through the engine's existing, tested JSON codecs but map
+// poorly onto protobuf. Scalar control fields stay typed for cross-language and
+// validation friendliness.
+service RunnerProtocol {
+  // Register announces a runner and its capabilities to the server.
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+
+  // Heartbeat reports runner capacity and liveness.
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+
+  // PollTask long-polls for one assigned task lease. The response carries an
+  // empty lease and a wait hint when nothing is available.
+  rpc PollTask(PollTaskRequest) returns (PollTaskResponse);
+
+  // ReportResult commits a finished task result back to the server.
+  rpc ReportResult(ReportResultRequest) returns (ReportResultResponse);
+}
+
+message Capability {
+  string node_type = 1;
+  int32 node_version = 2;
+}
+
+message RegisterRequest {
+  string runner_id = 1;
+  int32 concurrency = 2;
+  repeated Capability capabilities = 3;
+}
+
+message RegisterResponse {
+  string runner_id = 1;
+}
+
+message HeartbeatRequest {
+  string runner_id = 1;
+  int32 capacity = 2;
+  int32 in_flight = 3;
+  int64 timestamp = 4;
+}
+
+message HeartbeatResponse {
+  int64 server_time = 1;
+}
+
+message PollTaskRequest {
+  string runner_id = 1;
+  int32 capacity = 2;
+  repeated Capability capabilities = 3;
+}
+
+message PollTaskResponse {
+  // lease_json is the JSON-encoded engine.TaskLease, empty when no task is
+  // available.
+  bytes lease_json = 1;
+  // wait_nanos is how long the runner should wait before polling again when no
+  // lease is returned.
+  int64 wait_nanos = 2;
+}
+
+message ReportResultRequest {
+  string runner_id = 1;
+  // lease_json is the JSON-encoded engine.TaskLease the result belongs to.
+  bytes lease_json = 2;
+  // result_json is the JSON-encoded protocol task result.
+  bytes result_json = 3;
+}
+
+message ReportResultResponse {
+  bool accepted = 1;
+  string error = 2;
+}
