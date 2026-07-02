@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/xbcio/xflow/engine"
@@ -26,6 +27,16 @@ type Assignment struct {
 	AssignmentID AssignmentID
 	Task         engine.Task
 	Routing      engine.TaskRouting
+}
+
+// BuildAssignmentID derives the stable control-plane identity for a queued
+// assignment from immutable task fields.
+func BuildAssignmentID(task *engine.Task) AssignmentID {
+	payload := ""
+	if task.Payload != nil {
+		payload = fmt.Sprintf("%s:%d", task.Payload.Name, task.Payload.Triggered)
+	}
+	return AssignmentID(fmt.Sprintf("%s/%s/%d/%d/%d/%s", task.ExecutionID, task.NodeName, task.NodeIdx, task.ActivationID, task.AutoDepth, payload))
 }
 
 // RegisterRunnerRequest captures the data needed to register or replace a
