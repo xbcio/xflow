@@ -7,6 +7,8 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
+
+	"github.com/xbcio/xflow/backend"
 )
 
 func newTestRedisLeaderElector(t *testing.T, addr, key string, ttl time.Duration) *RedisLeaderElector {
@@ -183,5 +185,29 @@ func TestRedisLeaderElectorNotifyEmitsOnAcquire(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("Notify() did not emit within 1s")
+	}
+}
+
+func TestBackendImplementsLeaderElector(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mr.Close()
+
+	b, err := New(mr.Addr(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = b.rdb.Close() }()
+
+	var _ backend.LeaderElector = b.LeaderElector()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := b.LeaderElector().Campaign(ctx); err != nil {
+		t.Fatalf("LeaderElector().Campaign() error = %v", err)
+	}
+	if !b.LeaderElector().IsLeader() {
+		t.Fatal("LeaderElector().IsLeader() = false after Campaign, want true")
 	}
 }

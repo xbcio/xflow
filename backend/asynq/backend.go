@@ -18,6 +18,11 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
+// defaultLeaderLeaseTTL is the Redis lease TTL backing LeaderElector. Renewal
+// runs at ttl/3, so a crashed leader is detected and replaced within roughly
+// one TTL window.
+const defaultLeaderLeaseTTL = 15 * time.Second
+
 // Option configures the Asynq backend.
 type Option func(*config)
 
@@ -102,6 +107,7 @@ type Backend struct {
 	concurrency    int
 	consumer       bool
 	resourcePool   node.ResourcePool
+	leaderElector  backend.LeaderElector
 }
 
 // State returns the StateStore implementation.
@@ -123,6 +129,12 @@ func (b *Backend) TriggerPrimitives() backend.TriggerPrimitives { return b.trigg
 // outcomes (ok and failed counts keyed by op). See
 // .claude/specs/dual-write-contract.md.
 func (b *Backend) AuditStats() AuditStats { return b.state.auditCounters.snapshot() }
+
+// LeaderElector returns the Redis-backed leader election coordinator shared
+// by all ControlPlane replicas pointed at the same Redis instance. Used to
+// gate leader-only background work (e.g. LeaseSweeper) so only one replica
+// runs it at a time.
+func (b *Backend) LeaderElector() backend.LeaderElector { return b.leaderElector }
 
 // New creates an Asynq backend connected to the given Redis address.
 // db may be nil for pure-Redis mode (no MySQL persistence).
@@ -148,6 +160,9 @@ func New(redisAddr string, db store.Store, opts ...Option) (*Backend, error) {
 	queue := newAsynqQueue(redisAddr)
 	registry := execution.NewRegistry()
 
+	leaderKey := "xflow:leader:control-plane"
+	leaderElector := NewRedisLeaderElector(rdb, leaderKey, defaultLeaderLeaseTTL)
+
 	return &Backend{
 		state:          state,
 		queue:          queue,
@@ -159,6 +174,7 @@ func New(redisAddr string, db store.Store, opts ...Option) (*Backend, error) {
 		concurrency:    cfg.concurrency,
 		consumer:       cfg.consumer,
 		resourcePool:   cfg.resourcePool,
+		leaderElector:  leaderElector,
 	}, nil
 }
 
