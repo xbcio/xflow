@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/engine"
 )
 
@@ -37,6 +38,7 @@ type LeaseSweeper struct {
 	grace     time.Duration
 	log       engine.Logger
 	observer  SweepObserver
+	elector   backend.LeaderElector
 	clock     func() time.Time
 	sleepFunc func(context.Context, time.Duration) error
 }
@@ -60,6 +62,10 @@ type LeaseSweeperConfig struct {
 	Logger engine.Logger
 	// Observer receives sweep outcomes. Optional.
 	Observer SweepObserver
+	// Elector gates leader-only execution: when set and IsLeader() is false,
+	// SweepOnce is a no-op. Nil means "always run" (backward-compatible
+	// single-replica default).
+	Elector backend.LeaderElector
 }
 
 // NewLeaseSweeper builds a sweeper bound to the given state store and engine.
@@ -77,6 +83,7 @@ func NewLeaseSweeper(state LeaseLister, eng LeaseReclaimer, cfg LeaseSweeperConf
 		grace:     cfg.Grace,
 		log:       cfg.Logger,
 		observer:  cfg.Observer,
+		elector:   cfg.Elector,
 		clock:     func() time.Time { return time.Now().UTC() },
 		sleepFunc: sleepWithContext,
 	}
@@ -97,6 +104,9 @@ func (s *LeaseSweeper) Run(ctx context.Context) {
 // sweeper successfully reclaimed. Exported so tests and admin tooling can
 // trigger a sweep without waiting for the next tick.
 func (s *LeaseSweeper) SweepOnce(ctx context.Context) int {
+	if s.elector != nil && !s.elector.IsLeader() {
+		return 0
+	}
 	before := s.clock().Add(-s.grace)
 	expired, err := s.state.ListExpiredLeases(ctx, before)
 	if err != nil {

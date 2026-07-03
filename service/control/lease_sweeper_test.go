@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -51,6 +52,15 @@ func (r *fakeReclaimer) ReclaimLease(_ context.Context, lease engine.ExpiredLeas
 	}
 	return true, nil
 }
+
+type fakeElector struct {
+	leader atomic.Bool
+}
+
+func (f *fakeElector) Campaign(context.Context) error { return nil }
+func (f *fakeElector) IsLeader() bool                 { return f.leader.Load() }
+func (f *fakeElector) Resign(context.Context) error   { return nil }
+func (f *fakeElector) Notify() <-chan bool            { ch := make(chan bool, 1); return ch }
 
 type fakeObserver struct {
 	mu       sync.Mutex
@@ -172,5 +182,68 @@ func TestLeaseSweeperRunStopsOnContextCancel(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("Run did not return after context cancel")
+	}
+}
+
+func TestSweepOnceSkipsWhenNotLeader(t *testing.T) {
+	state := &fakeLeaseLister{
+		expired: []engine.ExpiredLease{{
+			ExecutionID: "exec-1",
+			NodeName:    "n",
+			IssuedAt:    time.Now().Add(-time.Minute),
+			TTL:         time.Second,
+			LeaseToken:  "token-1",
+		}},
+	}
+	reclaimer := &fakeReclaimer{}
+	elector := &fakeElector{} // leader=false by default
+	sw := NewLeaseSweeper(state, reclaimer, LeaseSweeperConfig{Elector: elector})
+
+	n := sw.SweepOnce(context.Background())
+	if n != 0 {
+		t.Fatalf("SweepOnce() = %d, want 0 when not leader", n)
+	}
+	if len(reclaimer.reclaimed) != 0 {
+		t.Fatalf("ReclaimLease called %d times, want 0 when not leader", len(reclaimer.reclaimed))
+	}
+}
+
+func TestSweepOnceRunsWhenLeader(t *testing.T) {
+	state := &fakeLeaseLister{
+		expired: []engine.ExpiredLease{{
+			ExecutionID: "exec-1",
+			NodeName:    "n",
+			IssuedAt:    time.Now().Add(-time.Minute),
+			TTL:         time.Second,
+			LeaseToken:  "token-1",
+		}},
+	}
+	reclaimer := &fakeReclaimer{}
+	elector := &fakeElector{}
+	elector.leader.Store(true)
+	sw := NewLeaseSweeper(state, reclaimer, LeaseSweeperConfig{Elector: elector})
+
+	n := sw.SweepOnce(context.Background())
+	if n != 1 {
+		t.Fatalf("SweepOnce() = %d, want 1 when leader", n)
+	}
+}
+
+func TestSweepOnceRunsWhenElectorNil(t *testing.T) {
+	state := &fakeLeaseLister{
+		expired: []engine.ExpiredLease{{
+			ExecutionID: "exec-1",
+			NodeName:    "n",
+			IssuedAt:    time.Now().Add(-time.Minute),
+			TTL:         time.Second,
+			LeaseToken:  "token-1",
+		}},
+	}
+	reclaimer := &fakeReclaimer{}
+	sw := NewLeaseSweeper(state, reclaimer, LeaseSweeperConfig{}) // Elector unset
+
+	n := sw.SweepOnce(context.Background())
+	if n != 1 {
+		t.Fatalf("SweepOnce() = %d, want 1 when Elector is nil (backward-compat default)", n)
 	}
 }
