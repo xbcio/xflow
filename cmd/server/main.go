@@ -105,47 +105,35 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	return cfg, nil
 }
 
-func runServer(cfg serverConfig) error {
-	runners := control.NewRunnerPool()
+// buildControlPlane assembles a *control.ControlPlane from CLI config. The
+// returned cleanup function releases backend resources (Redis connections,
+// etc.) that NewControlPlane itself does not own — call it after
+// ControlPlane.Shutdown.
+func buildControlPlane(cfg serverConfig) (*control.ControlPlane, func(), error) {
 	logger, err := buildLogger(cfg)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	metricsCollector := (*metrics.Metrics)(nil)
+	metricsCleanup := func() {}
 	if cfg.metricsAddr != "" {
 		metricsCollector = metrics.New()
-		metricsStop, err := serveMetrics(cfg.metricsAddr, cfg.metricsPath, metricsCollector)
+		stop, err := serveMetrics(cfg.metricsAddr, cfg.metricsPath, metricsCollector)
 		if err != nil {
-			return err
+			return nil, nil, err
 		}
-		defer metricsStop()
+		metricsCleanup = stop
 	}
 
 	auth, err := buildAuthenticator(cfg)
 	if err != nil {
-		return err
+		metricsCleanup()
+		return nil, nil, err
 	}
 
-	tlsCfg, err := buildTLSConfig(cfg)
-	if err != nil {
-		return err
-	}
-
-	var eng *engine.Engine
-	var stop func()
-	sweeperStop := func() {}
-	engineOpts := engineOptions(logger, metricsCollector)
-	dispatcherOpts := dispatcherOptions(metricsCollector)
-	sweeperCfg := control.LeaseSweeperConfig{Logger: logger}
-	if metricsCollector != nil {
-		sweeperCfg.Observer = observability.NewSweepMetrics(metricsCollector)
-	}
+	ccfg := control.Config{Auth: auth, Logger: logger, Metrics: metricsCollector}
 	if cfg.memory {
-		backend := memory.New(memory.WithConcurrency(cfg.concurrency))
-		eng = engine.New(backend.State(), backend.Queue(), engineOpts...)
-		dispatcher := control.NewDispatcher(eng, runners, dispatcherOpts...)
-		stop = backend.BindHandler(dispatcher.HandleTask)
-		sweeperStop = startLeaseSweeper(backend.State(), eng, sweeperCfg)
+		ccfg.Backend = memory.New(memory.WithConcurrency(cfg.concurrency))
 	} else {
 		asynqOpts := []asynq.Option{asynq.WithConcurrency(cfg.concurrency), asynq.WithStateLogger(logger)}
 		if metricsCollector != nil {
@@ -153,32 +141,48 @@ func runServer(cfg serverConfig) error {
 		}
 		backend, err := asynq.New(cfg.redis, nil, asynqOpts...)
 		if err != nil {
-			return err
+			metricsCleanup()
+			return nil, nil, err
 		}
-		eng = engine.New(backend.State(), backend.Queue(), engineOpts...)
-		dispatcher := control.NewDispatcher(eng, runners, dispatcherOpts...)
-		stop = backend.BindHandler(eng, dispatcher.HandleTask)
-		sweeperStop = startLeaseSweeper(backend.State(), eng, sweeperCfg)
+		ccfg.Backend = backend
 	}
-	defer stop()
-	defer sweeperStop()
+
+	cp, err := control.NewControlPlane(ccfg)
+	if err != nil {
+		metricsCleanup()
+		return nil, nil, err
+	}
+	return cp, metricsCleanup, nil
+}
+
+func runServer(cfg serverConfig) error {
+	cp, cleanup, err := buildControlPlane(cfg)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := cp.Start(ctx); err != nil {
+		return err
+	}
+	defer func() { _ = cp.Shutdown(context.Background()) }()
+
+	tlsCfg, err := buildTLSConfig(cfg)
+	if err != nil {
+		return err
+	}
 
 	if cfg.grpcAddr != "" {
-		grpcStop, err := serveGRPC(cfg.grpcAddr, eng, runners, auth, tlsCfg, logger, metricsCollector)
+		grpcStop, err := serveGRPCServer(cfg.grpcAddr, cp.GRPCServer(), tlsCfg)
 		if err != nil {
 			return err
 		}
 		defer grpcStop()
 	}
 
-	serverOpts := []control.ServerOption{
-		control.WithAuthenticator(auth),
-		control.WithControlLogger(logger),
-	}
-	if metricsCollector != nil {
-		serverOpts = append(serverOpts, control.WithAuthObserver(observability.NewAuthMetrics(metricsCollector)))
-	}
-	handler := control.NewServer(eng, runners, serverOpts...).Handler()
+	handler := cp.Handler()
 	if tlsCfg == nil {
 		return http.ListenAndServe(cfg.addr, handler)
 	}
@@ -207,21 +211,6 @@ func buildLogger(cfg serverConfig) (engine.Logger, error) {
 	return obslogger.NewZapLogger(log), nil
 }
 
-func engineOptions(logger engine.Logger, metrics *metrics.Metrics) []engine.Option {
-	opts := []engine.Option{engine.WithLogger(logger)}
-	if metrics != nil {
-		opts = append(opts, engine.WithHooks(observability.NewMetricsHooks(metrics)))
-	}
-	return opts
-}
-
-func dispatcherOptions(metrics *metrics.Metrics) []control.DispatcherOption {
-	if metrics == nil {
-		return nil
-	}
-	return []control.DispatcherOption{control.WithDispatcherObserver(observability.NewDispatcherMetrics(metrics))}
-}
-
 func serveMetrics(addr string, path string, metrics *metrics.Metrics) (func(), error) {
 	if path == "" {
 		path = "/metrics"
@@ -243,13 +232,6 @@ func serveMetrics(addr string, path string, metrics *metrics.Metrics) (func(), e
 		defer cancel()
 		_ = srv.Shutdown(ctx)
 	}, nil
-}
-
-func startLeaseSweeper(state control.LeaseLister, reclaimer control.LeaseReclaimer, cfg control.LeaseSweeperConfig) func() {
-	ctx, cancel := context.WithCancel(context.Background())
-	sw := control.NewLeaseSweeper(state, reclaimer, cfg)
-	go sw.Run(ctx)
-	return cancel
 }
 
 // buildTLSConfig resolves the server TLS config from CLI flags. Returns nil
@@ -305,10 +287,10 @@ func buildAuthenticator(cfg serverConfig) (control.Authenticator, error) {
 	return store, nil
 }
 
-// serveGRPC starts the gRPC Runner Protocol server on its own listener, sharing
-// the engine and runner pool with the HTTP server. It returns a stop function
-// that gracefully drains the gRPC server.
-func serveGRPC(addr string, eng *engine.Engine, runners *control.RunnerPool, auth control.Authenticator, tlsCfg *tls.Config, logger engine.Logger, metrics *metrics.Metrics) (func(), error) {
+// serveGRPCServer starts the gRPC Runner Protocol server on its own listener,
+// serving the RunnerProtocolServer implementation the ControlPlane already
+// assembled (so HTTP and gRPC transports share the same engine/runner state).
+func serveGRPCServer(addr string, impl runnerpb.RunnerProtocolServer, tlsCfg *tls.Config) (func(), error) {
 	lis, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, err
@@ -319,14 +301,7 @@ func serveGRPC(addr string, eng *engine.Engine, runners *control.RunnerPool, aut
 		log.Printf("xflow-server: gRPC listening on %s (mTLS=%v)", addr, tlsCfg.ClientAuth == tls.RequireAndVerifyClientCert)
 	}
 	grpcServer := grpc.NewServer(opts...)
-	grpcOpts := []control.GRPCServerOption{
-		control.WithGRPCAuthenticator(auth),
-		control.WithGRPCLogger(logger),
-	}
-	if metrics != nil {
-		grpcOpts = append(grpcOpts, control.WithGRPCAuthObserver(observability.NewAuthMetrics(metrics)))
-	}
-	runnerpb.RegisterRunnerProtocolServer(grpcServer, control.NewGRPCServer(eng, runners, grpcOpts...))
+	runnerpb.RegisterRunnerProtocolServer(grpcServer, impl)
 	go func() {
 		if serveErr := grpcServer.Serve(lis); serveErr != nil {
 			log.Printf("gRPC server stopped: %v", serveErr)
