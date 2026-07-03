@@ -49,6 +49,7 @@ type RedisLeaderElector struct {
 	mu        sync.Mutex
 	notifyCh  chan bool
 	stopRenew context.CancelFunc
+	renewGen  uint64
 }
 
 // NewRedisLeaderElector builds an elector bound to key with the given lease
@@ -75,8 +76,7 @@ func randomToken() string {
 // IsLeader flips to false and Notify emits false; the caller is expected to
 // observe that and call Campaign again to re-enter the competition).
 func (e *RedisLeaderElector) Campaign(ctx context.Context) error {
-	const retryInterval = 50 * time.Millisecond
-	ticker := time.NewTicker(retryInterval)
+	ticker := time.NewTicker(acquireRetryInterval(e.ttl))
 	defer ticker.Stop()
 	for {
 		ok, err := e.tryAcquire(ctx)
@@ -95,6 +95,17 @@ func (e *RedisLeaderElector) Campaign(ctx context.Context) error {
 	}
 }
 
+// acquireRetryInterval scales the SETNX retry cadence with the lease TTL (as
+// specced: ttl/3) with a floor so a very small TTL doesn't cause a busy loop.
+func acquireRetryInterval(ttl time.Duration) time.Duration {
+	const minInterval = 10 * time.Millisecond
+	interval := ttl / 3
+	if interval < minInterval {
+		return minInterval
+	}
+	return interval
+}
+
 func (e *RedisLeaderElector) tryAcquire(ctx context.Context) (bool, error) {
 	ok, err := e.rdb.SetNX(ctx, e.key, e.token, e.ttl).Result()
 	if err != nil {
@@ -109,10 +120,19 @@ func (e *RedisLeaderElector) tryAcquire(ctx context.Context) (bool, error) {
 // startRenewal launches the background goroutine that keeps the lease alive
 // while this instance holds leadership. Any previous renewal goroutine is
 // stopped first so repeated Campaign calls never leak goroutines.
+//
+// Each call is tagged with a monotonically increasing generation. The
+// goroutine's own failure-cleanup path only clears e.stopRenew if the
+// generation is still its own; otherwise a newer Campaign/startRenewal call
+// has already installed a fresh cancel func (and possibly a fresh
+// goroutine), and clobbering it here would leak that newer goroutine forever
+// since nothing else would ever be able to cancel it.
 func (e *RedisLeaderElector) startRenewal() {
 	renewCtx, cancel := context.WithCancel(context.Background())
 
 	e.mu.Lock()
+	e.renewGen++
+	myGen := e.renewGen
 	prevStop := e.stopRenew
 	e.stopRenew = cancel
 	e.mu.Unlock()
@@ -143,7 +163,7 @@ func (e *RedisLeaderElector) startRenewal() {
 					failures++
 					if failures >= 3 {
 						e.mu.Lock()
-						if e.stopRenew != nil {
+						if e.renewGen == myGen {
 							e.stopRenew = nil
 						}
 						e.mu.Unlock()
