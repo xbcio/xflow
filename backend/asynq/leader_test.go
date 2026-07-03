@@ -89,95 +89,13 @@ func TestRedisLeaderElectorResignAllowsImmediateTakeover(t *testing.T) {
 	}
 }
 
-// TestRedisLeaderElectorStopRenewSurvivesStaleCleanup pins down the exact
-// race the generation guard exists to prevent: a renewal goroutine (G1) that
-// is about to give up after 3 failures must not clobber e.stopRenew if, by
-// the time it acquires e.mu, a newer startRenewal() call (G2, from a
-// re-Campaign that already observed the lost-leadership Notify) has already
-// installed its own cancel func. If G1 won the clobber, G2's renewal
-// goroutine would become uncancelable: neither Resign() nor a future
-// startRenewal()'s prevStop mechanism could ever stop it again.
-//
-// This drives the exact code path in leader.go's startRenewal failure-branch
-// directly (same package, white-box) rather than relying on real timing to
-// hit the race window, since a wall-clock reproduction would be flaky.
-func TestRedisLeaderElectorStopRenewSurvivesStaleCleanup(t *testing.T) {
-	mr, err := miniredis.Run()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer mr.Close()
-
-	l := newTestRedisLeaderElector(t, mr.Addr(), "test:leader:stale-cleanup", time.Second)
-
-	// G1 acquires leadership and starts renewing (generation 1).
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	if err := l.Campaign(ctx); err != nil {
-		t.Fatalf("Campaign() error = %v", err)
-	}
-
-	l.mu.Lock()
-	gen1 := l.renewGen
-	l.mu.Unlock()
-	if gen1 != 1 {
-		t.Fatalf("renewGen after first Campaign = %d, want 1", gen1)
-	}
-
-	// Simulate: G1's renewal goroutine has just decided (failures >= 3) to
-	// give up, but hasn't yet acquired e.mu to null out stopRenew. Before it
-	// gets there, the caller observes Notify()==false and re-Campaigns,
-	// which races G1 and wins, installing G2 (generation 2) first.
-	l.setLeader(false)
-	l.startRenewal() // stands in for the re-Campaign's successful re-acquire.
-
-	l.mu.Lock()
-	gen2 := l.renewGen
-	liveStopAfterG2 := l.stopRenew
-	l.mu.Unlock()
-	if gen2 != 2 {
-		t.Fatalf("renewGen after second startRenewal = %d, want 2", gen2)
-	}
-	if liveStopAfterG2 == nil {
-		t.Fatal("stopRenew is nil after G2's startRenewal, want a live cancel func")
-	}
-
-	// Now G1's cleanup finally runs, using the generation (1) it captured
-	// before G2 ever started. It must see that renewGen has moved on and
-	// leave e.stopRenew alone.
-	l.mu.Lock()
-	if l.renewGen == gen1 {
-		l.stopRenew = nil
-	}
-	stopAfterStaleCleanup := l.stopRenew
-	l.mu.Unlock()
-
-	if stopAfterStaleCleanup == nil {
-		t.Fatal("G1's stale cleanup cleared stopRenew, want G2's cancel func to survive")
-	}
-
-	// Confirm G2 is still the one governing cancellation: Resign() must be
-	// able to stop it (i.e. stopRenew is still callable/non-nil going into
-	// Resign, and Resign clears it cleanly).
-	if err := l.Resign(context.Background()); err != nil {
-		t.Fatalf("Resign() error = %v", err)
-	}
-	l.mu.Lock()
-	stopAfterResign := l.stopRenew
-	l.mu.Unlock()
-	if stopAfterResign != nil {
-		t.Fatal("stopRenew is still set after Resign(), want nil")
-	}
-}
-
 // TestRedisLeaderElectorRecampaignsAfterRenewalFailureWithoutLeak forces real
 // renewal failures (by deleting the underlying Redis key out from under the
 // elector) and confirms that once the elector loses leadership, calling
-// Campaign again successfully re-acquires it. This exercises the same
-// generation-guarded startRenewal path as
-// TestRedisLeaderElectorStopRenewSurvivesStaleCleanup but end-to-end through
-// real Redis/timing, run under -race to catch any data races in the actual
-// goroutine interleaving rather than the simulated one above.
+// Campaign again successfully re-acquires it. This exercises the real
+// startRenewal failure-cleanup branch (leader.go) and its renewGen guard
+// through actual goroutine interleaving under real Redis/timing rather than
+// a simulated one, run under -race to catch data races in that interleaving.
 func TestRedisLeaderElectorRecampaignsAfterRenewalFailureWithoutLeak(t *testing.T) {
 	mr, err := miniredis.Run()
 	if err != nil {
