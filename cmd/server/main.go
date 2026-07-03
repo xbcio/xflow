@@ -162,17 +162,17 @@ func runServer(cfg serverConfig) error {
 	}
 	defer cleanup()
 
+	tlsCfg, err := buildTLSConfig(cfg)
+	if err != nil {
+		return err
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if err := cp.Start(ctx); err != nil {
 		return err
 	}
 	defer func() { _ = cp.Shutdown(context.Background()) }()
-
-	tlsCfg, err := buildTLSConfig(cfg)
-	if err != nil {
-		return err
-	}
 
 	if cfg.grpcAddr != "" {
 		grpcStop, err := serveGRPCServer(cfg.grpcAddr, cp.GRPCServer(), tlsCfg)
