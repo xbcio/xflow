@@ -48,6 +48,16 @@ func WithGRPCAuthObserver(observer AuthObserver) GRPCServerOption {
 	return func(s *GRPCServer) { s.core.authObserver = observer }
 }
 
+// WithGRPCPollWait sets the long-poll wait duration returned to runners when
+// no task is available. Default is one second.
+func WithGRPCPollWait(d time.Duration) GRPCServerOption {
+	return func(s *GRPCServer) {
+		if d > 0 {
+			s.core.pollWait = d
+		}
+	}
+}
+
 // NewGRPCServer builds a gRPC Runner Protocol server backed by the given engine
 // and runner pool. Pass the same RunnerPool used by the HTTP Server and
 // Dispatcher to share runner state across transports.

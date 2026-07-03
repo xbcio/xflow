@@ -71,6 +71,16 @@ func WithAuthObserver(observer AuthObserver) ServerOption {
 	return func(s *Server) { s.core.authObserver = observer }
 }
 
+// WithHTTPPollWait sets the long-poll wait duration returned to runners when
+// no task is available. Default is one second.
+func WithHTTPPollWait(d time.Duration) ServerOption {
+	return func(s *Server) {
+		if d > 0 {
+			s.core.pollWait = d
+		}
+	}
+}
+
 func NewServer(engine EngineFacade, runners *RunnerPool, opts ...ServerOption) *Server {
 	if runners == nil {
 		runners = NewRunnerPool()
