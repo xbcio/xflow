@@ -65,6 +65,9 @@ func resultFromDetail(detail engine.ExecutionDetail) types.Result {
 // the node suspends, the backend stores it and consumes it when the node reaches
 // the matching wait point.
 func (e *Engine) Signal(ctx context.Context, id types.ExecutionID, name string, data map[string]any) error {
+	if e.executionMode == ExecutionModeTransient {
+		return ErrTransientSignalsUnsupported
+	}
 	return e.eng.DeliverSignal(ctx, id, name, data)
 }
 
@@ -74,6 +77,9 @@ func (e *Engine) Signal(ctx context.Context, id types.ExecutionID, name string, 
 // where a user retracts an early signal before the workflow reaches the wait
 // point.
 func (e *Engine) RevokeSignal(ctx context.Context, id types.ExecutionID, name string) error {
+	if e.executionMode == ExecutionModeTransient {
+		return ErrTransientSignalsUnsupported
+	}
 	return e.eng.RevokeSignal(ctx, id, name)
 }
 
@@ -92,6 +98,9 @@ func (e *Engine) Cancel(ctx context.Context, id types.ExecutionID) error {
 // node's current status and latest output. In cyclic mode this is still a
 // latest-state view, not a per-activation history.
 func (e *Engine) Inspect(ctx context.Context, id types.ExecutionID, nodeNames ...string) (engine.ExecutionDetail, error) {
+	if e.executionMode == ExecutionModeTransient {
+		return engine.ExecutionDetail{}, ErrTransientInspectionUnavailable
+	}
 	return e.eng.Inspect(ctx, id, nodeNames...)
 }
 

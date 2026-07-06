@@ -2,6 +2,7 @@ package xflow
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -10,6 +11,26 @@ import (
 	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/types"
 )
+
+func TestTransientModeControlAPIsReturnClearErrors(t *testing.T) {
+	eng, err := NewLocal(WithExecutionMode(ExecutionModeTransient))
+	if err != nil {
+		t.Fatalf("NewLocal() error = %v", err)
+	}
+	defer eng.Stop()
+
+	ctx := context.Background()
+	id := types.ExecutionID("exec-transient")
+	if _, err := eng.Inspect(ctx, id); !errors.Is(err, ErrTransientInspectionUnavailable) {
+		t.Fatalf("Inspect() error = %v, want ErrTransientInspectionUnavailable", err)
+	}
+	if err := eng.Signal(ctx, id, "approval", nil); !errors.Is(err, ErrTransientSignalsUnsupported) {
+		t.Fatalf("Signal() error = %v, want ErrTransientSignalsUnsupported", err)
+	}
+	if err := eng.RevokeSignal(ctx, id, "approval"); !errors.Is(err, ErrTransientSignalsUnsupported) {
+		t.Fatalf("RevokeSignal() error = %v, want ErrTransientSignalsUnsupported", err)
+	}
+}
 
 func TestEngineControlAPIInspectAndCancel(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)

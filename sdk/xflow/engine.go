@@ -24,6 +24,7 @@ type Engine struct {
 	waiter              backend.Waiter
 	stopFns             []func()
 	allowDirectHandlers bool
+	executionMode       ExecutionMode
 }
 
 // newFromConfig assembles an Engine from a resolved engineConfig and a backend provider.
@@ -69,6 +70,7 @@ func newFromConfig(cfg *engineConfig, provider backend.Provider) (*Engine, error
 		waiter:              cfg.waiter,
 		stopFns:             cfg.stopFns,
 		allowDirectHandlers: cfg.allowDirectHandlers,
+		executionMode:       cfg.executionMode,
 	}
 	e.triggerRuntime = newTriggerRuntime(e, provider.TriggerPrimitives())
 
