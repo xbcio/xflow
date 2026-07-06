@@ -57,6 +57,9 @@ func NewCluster(clusterCfg ClusterConfig, opts ...Option) (*Engine, error) {
 	for _, o := range opts {
 		o(cfg)
 	}
+	if err := validateExecutionModeConfig(cfg); err != nil {
+		return nil, err
+	}
 	if cfg.concurrency <= 0 {
 		cfg.concurrency = 10
 	}

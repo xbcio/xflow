@@ -36,6 +36,13 @@ type engineConfig struct {
 	resourcePoolSet    bool
 	resourcePoolConfig *types.ResourcePoolConfig
 
+	executionMode             ExecutionMode
+	executionModeSet          bool
+	transientTTL              time.Duration
+	transientTTLSet           bool
+	transientCompletionTTL    time.Duration
+	transientCompletionTTLSet bool
+
 	// local-only: NewCluster always leaves this false; direct handlers are
 	// rejected regardless (see node_registration.go registerDirectHandlers).
 	allowDirectHandlers bool

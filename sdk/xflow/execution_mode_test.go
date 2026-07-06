@@ -1,0 +1,45 @@
+package xflow
+
+import (
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestExecutionModeDefaultsToDefault(t *testing.T) {
+	cfg := &engineConfig{}
+	if err := validateExecutionModeConfig(cfg); err != nil {
+		t.Fatalf("validateExecutionModeConfig() error = %v", err)
+	}
+	if cfg.executionMode != ExecutionModeDefault {
+		t.Fatalf("executionMode = %q, want %q", cfg.executionMode, ExecutionModeDefault)
+	}
+}
+
+func TestExecutionModeRejectsUnknownMode(t *testing.T) {
+	cfg := &engineConfig{}
+	WithExecutionMode(ExecutionMode("fast"))(cfg)
+	err := validateExecutionModeConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), "unknown execution mode") {
+		t.Fatalf("error = %v, want unknown execution mode", err)
+	}
+}
+
+func TestTransientTTLOptionsRequireTransientMode(t *testing.T) {
+	cfg := &engineConfig{}
+	WithTransientTTL(time.Minute)(cfg)
+	err := validateExecutionModeConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), "WithTransientTTL requires ExecutionModeTransient") {
+		t.Fatalf("error = %v, want transient TTL mode error", err)
+	}
+}
+
+func TestTransientModeRejectsNonPositiveTTL(t *testing.T) {
+	cfg := &engineConfig{}
+	WithExecutionMode(ExecutionModeTransient)(cfg)
+	WithTransientTTL(0)(cfg)
+	err := validateExecutionModeConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), "transient TTL must be positive") {
+		t.Fatalf("error = %v, want positive TTL error", err)
+	}
+}
