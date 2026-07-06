@@ -6,10 +6,13 @@ import (
 	"time"
 )
 
+// ExecutionMode selects how the SDK retains execution state.
 type ExecutionMode string
 
 const (
-	ExecutionModeDefault   ExecutionMode = "default"
+	// ExecutionModeDefault keeps the standard durable execution behavior.
+	ExecutionModeDefault ExecutionMode = "default"
+	// ExecutionModeTransient keeps execution state only for a bounded TTL window.
 	ExecutionModeTransient ExecutionMode = "transient"
 )
 
@@ -19,10 +22,13 @@ const (
 )
 
 var (
+	// ErrTransientInspectionUnavailable reports that Inspect is unavailable in transient mode.
 	ErrTransientInspectionUnavailable = errors.New("xflow: inspect is unavailable in transient execution mode")
-	ErrTransientSignalsUnsupported    = errors.New("xflow: signals are unsupported in transient execution mode")
+	// ErrTransientSignalsUnsupported reports that signals are unavailable in transient mode.
+	ErrTransientSignalsUnsupported = errors.New("xflow: signals are unsupported in transient execution mode")
 )
 
+// WithExecutionMode configures the engine execution retention mode.
 func WithExecutionMode(mode ExecutionMode) Option {
 	return func(c *engineConfig) {
 		c.executionMode = mode
@@ -30,6 +36,7 @@ func WithExecutionMode(mode ExecutionMode) Option {
 	}
 }
 
+// WithTransientTTL sets how long transient execution state is kept before expiry.
 func WithTransientTTL(ttl time.Duration) Option {
 	return func(c *engineConfig) {
 		c.transientTTL = ttl
@@ -37,6 +44,7 @@ func WithTransientTTL(ttl time.Duration) Option {
 	}
 }
 
+// WithTransientCompletionTTL sets how long completed transient executions remain readable.
 func WithTransientCompletionTTL(ttl time.Duration) Option {
 	return func(c *engineConfig) {
 		c.transientCompletionTTL = ttl

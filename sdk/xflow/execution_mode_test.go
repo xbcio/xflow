@@ -43,3 +43,31 @@ func TestTransientModeRejectsNonPositiveTTL(t *testing.T) {
 		t.Fatalf("error = %v, want positive TTL error", err)
 	}
 }
+
+func TestNewLocalRejectsTransientTTLOptionInDefaultMode(t *testing.T) {
+	_, err := NewLocal(WithTransientTTL(time.Minute))
+	if err == nil || !strings.Contains(err.Error(), "WithTransientTTL requires ExecutionModeTransient") {
+		t.Fatalf("error = %v, want transient TTL mode error", err)
+	}
+}
+
+func TestNewLocalRejectsUnknownExecutionMode(t *testing.T) {
+	_, err := NewLocal(WithExecutionMode(ExecutionMode("fast")))
+	if err == nil || !strings.Contains(err.Error(), "unknown execution mode") {
+		t.Fatalf("error = %v, want unknown execution mode", err)
+	}
+}
+
+func TestNewClusterRejectsTransientTTLOptionInDefaultModeBeforeRedisValidation(t *testing.T) {
+	_, err := NewCluster(ClusterConfig{}, WithTransientTTL(time.Minute))
+	if err == nil || !strings.Contains(err.Error(), "WithTransientTTL requires ExecutionModeTransient") {
+		t.Fatalf("error = %v, want transient TTL mode error before Redis validation", err)
+	}
+}
+
+func TestNewClusterRejectsUnknownExecutionModeBeforeRedisValidation(t *testing.T) {
+	_, err := NewCluster(ClusterConfig{}, WithExecutionMode(ExecutionMode("fast")))
+	if err == nil || !strings.Contains(err.Error(), "unknown execution mode") {
+		t.Fatalf("error = %v, want unknown execution mode before Redis validation", err)
+	}
+}

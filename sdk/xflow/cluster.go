@@ -49,16 +49,15 @@ type ClusterConfig struct {
 //	eng, err := xflow.NewCluster(xflow.ClusterConfig{RedisAddr: "localhost:6379"})
 //	eng, err := xflow.NewCluster(xflow.ClusterConfig{RedisAddr: addr, Store: sqlstore.New(db)}, xflow.WithConcurrency(16))
 func NewCluster(clusterCfg ClusterConfig, opts ...Option) (*Engine, error) {
-	if clusterCfg.RedisAddr == "" {
-		return nil, errors.New("xflow.NewCluster: RedisAddr is required")
-	}
-
 	cfg := &engineConfig{concurrency: 10}
 	for _, o := range opts {
 		o(cfg)
 	}
 	if err := validateExecutionModeConfig(cfg); err != nil {
 		return nil, err
+	}
+	if clusterCfg.RedisAddr == "" {
+		return nil, errors.New("xflow.NewCluster: RedisAddr is required")
 	}
 	if cfg.concurrency <= 0 {
 		cfg.concurrency = 10
