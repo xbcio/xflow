@@ -136,6 +136,18 @@ func (b *Backend) AuditStats() AuditStats { return b.state.auditCounters.snapsho
 // runs it at a time.
 func (b *Backend) LeaderElector() backend.LeaderElector { return b.leaderElector }
 
+// Campaign, IsLeader, Resign, and Notify forward to the backend's
+// RedisLeaderElector, so *Backend itself satisfies backend.LeaderElector —
+// required for ControlPlane's type assertion (cfg.Backend.(backend.LeaderElector))
+// to actually detect Redis-backed leader election instead of silently
+// falling back to AlwaysLeader.
+func (b *Backend) Campaign(ctx context.Context) error { return b.leaderElector.Campaign(ctx) }
+func (b *Backend) IsLeader() bool                     { return b.leaderElector.IsLeader() }
+func (b *Backend) Resign(ctx context.Context) error   { return b.leaderElector.Resign(ctx) }
+func (b *Backend) Notify() <-chan bool                { return b.leaderElector.Notify() }
+
+var _ backend.LeaderElector = (*Backend)(nil)
+
 // New creates an Asynq backend connected to the given Redis address.
 // db may be nil for pure-Redis mode (no MySQL persistence).
 // Call Bind(eng) after creating the engine to start queue consumers.
