@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"sync"
 	"time"
 
 	backendasynq "github.com/xbcio/xflow/backend/asynq"
@@ -14,6 +15,11 @@ import (
 	"github.com/xbcio/xflow/observability"
 	"github.com/xbcio/xflow/observability/metrics"
 	"github.com/xbcio/xflow/service/protocol/runnerpb"
+)
+
+var (
+	ErrControlPlaneStarted = errors.New("control: ControlPlane already started")
+	ErrControlPlaneStopped = errors.New("control: ControlPlane already stopped")
 )
 
 // Config configures a ControlPlane.
@@ -45,7 +51,12 @@ type ControlPlane struct {
 	grpcServer *GRPCServer
 	sweeper    *LeaseSweeper
 	elector    backend.LeaderElector
+	logger     engine.Logger
 
+	lifecycleMu   sync.Mutex
+	started       bool
+	stopped       bool
+	leaderCancel  context.CancelFunc
 	sweeperCancel context.CancelFunc
 	unbind        func()
 }
@@ -123,6 +134,7 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 		grpcServer: grpcServer,
 		sweeper:    sweeper,
 		elector:    elector,
+		logger:     cfg.Logger,
 	}, nil
 }
 
@@ -138,9 +150,23 @@ func (cp *ControlPlane) GRPCServer() runnerpb.RunnerProtocolServer { return cp.g
 // election (if the backend supports it), and starts the LeaseSweeper loop.
 // It does not block.
 func (cp *ControlPlane) Start(ctx context.Context) error {
+	cp.lifecycleMu.Lock()
+	if cp.started {
+		cp.lifecycleMu.Unlock()
+		return ErrControlPlaneStarted
+	}
+	if cp.stopped {
+		cp.lifecycleMu.Unlock()
+		return ErrControlPlaneStopped
+	}
+	cp.started = true
+	cp.lifecycleMu.Unlock()
+
 	cp.unbind = cp.bindDispatcher()
 
-	go func() { _ = cp.elector.Campaign(ctx) }()
+	leaderCtx, leaderCancel := context.WithCancel(ctx)
+	cp.leaderCancel = leaderCancel
+	go cp.runLeaderCampaign(leaderCtx)
 
 	sweepCtx, cancel := context.WithCancel(context.Background())
 	cp.sweeperCancel = cancel
@@ -149,13 +175,62 @@ func (cp *ControlPlane) Start(ctx context.Context) error {
 	return nil
 }
 
+// IsLeader reports whether this ControlPlane replica currently holds
+// leadership. Backends without real leader election (e.g. memory) always
+// report true via backend.AlwaysLeader. Useful for health checks and
+// observability in multi-replica deployments.
+func (cp *ControlPlane) IsLeader() bool { return cp.elector.IsLeader() }
+
+func (cp *ControlPlane) runLeaderCampaign(ctx context.Context) {
+	const retryDelay = time.Second
+	notify := cp.elector.Notify()
+	for {
+		if err := cp.elector.Campaign(ctx); err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
+				if cp.logger != nil {
+					cp.logger.Info("leader campaign stopped", "err", err)
+				}
+				return
+			}
+			if cp.logger != nil {
+				cp.logger.Error("leader campaign failed", "err", err)
+			}
+			if err := sleepWithContext(ctx, retryDelay); err != nil {
+				return
+			}
+			continue
+		}
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case isLeader := <-notify:
+				if !isLeader {
+					goto recampaign
+				}
+			}
+		}
+
+	recampaign:
+	}
+}
+
 // Shutdown stops the sweeper, resigns leadership (if held), and unwinds the
 // backend queue binding. It attempts every step even if an earlier one
 // fails, aggregating all errors encountered.
 func (cp *ControlPlane) Shutdown(ctx context.Context) error {
 	var errs []error
+	cp.lifecycleMu.Lock()
+	cp.started = false
+	cp.stopped = true
+	cp.lifecycleMu.Unlock()
+
 	if cp.sweeperCancel != nil {
 		cp.sweeperCancel()
+	}
+	if cp.leaderCancel != nil {
+		cp.leaderCancel()
 	}
 	if err := cp.elector.Resign(ctx); err != nil {
 		errs = append(errs, err)
