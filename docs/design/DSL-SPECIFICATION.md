@@ -1171,6 +1171,12 @@ nodes:
       brokers: ["localhost:9092"]
       topic: order.created
       group: order-created
+      aggregate:
+        enabled: true
+        by: partition
+        max_size: 100
+        flush_interval: 100ms
+        dedup: message
 
   - name: normalize
     type: xflow.function
@@ -1180,6 +1186,36 @@ connections:
     main:
       - node: normalize
 ```
+
+Kafka trigger 默认仍是"一条消息触发一个 execution"。配置 `parameters.aggregate.enabled: true` 后，Kafka trigger 会按 `topic + partition` 聚合消息；达到 `max_size`、到达 `flush_interval`，或 subscription 关闭时 flush 当前 partition 的 batch，并用一个 batch event 触发一个 execution。当前只支持 `by: partition` 和 `dedup: message`：每条消息仍按 `topic/partition/offset` 去重，去重通过后才进入 batch。
+
+单条和批量 Kafka event 都提供 `data.messages`，便于下游 handler 用同一套循环处理代码。单条模式保留历史快捷字段 `data.topic`、`data.partition`、`data.offset`、`data.key`、`data.value`；批量模式额外提供 `data.start_offset`、`data.end_offset`、`data.count`。
+
+```json
+{
+  "kind": "kafka.batch",
+  "data": {
+    "topic": "order.created",
+    "partition": 3,
+    "start_offset": 1200,
+    "end_offset": 1299,
+    "count": 100,
+    "messages": [
+      {
+        "topic": "order.created",
+        "partition": 3,
+        "offset": 1200,
+        "key": "order-1",
+        "value": "{\"id\":\"order-1\"}",
+        "headers": {},
+        "time": "2026-07-06T08:00:00Z"
+      }
+    ]
+  }
+}
+```
+
+Kafka 聚合只保证同一 partition 内按消费顺序进入 batch 并按 batch 顺序发起 emit；不保证跨 partition 顺序，也不保证后续 workflow execution 的完成顺序。需要端到端严格顺序时，应在调度层引入 partition 维度的串行执行能力，而不是只依赖 trigger 聚合。
 
 SDK API：
 
@@ -1219,6 +1255,7 @@ execID, err := eng.Invoke(ctx, workflowID, xflow.Trigger("order_created"), event
 
 - **Kafka / Redis Hub**
   - XFlow 会把收到的消息归一化为 `TriggerEvent`，并在 `Emit` 前按 event ID 做 dedup。
+  - Kafka trigger 开启 `aggregate.enabled` 时，去重仍按单条消息执行；batch 只是降低 execution 创建频率的触发粒度，不改变 offset commit / ack 语义。
   - 但 Kafka offset commit / ack、Redis stream ack、重投递窗口、消费位点恢复等语义目前取决于接入的 consumer 实现；在提供原生 adapter 前，XFlow 不单独承诺 exactly-once、固定重试策略或统一的 offset 持久化行为。
   - Redis pub/sub 模式本身不是 durable queue；当前实现只用 trigger lock 限制同一 workflow/node 在一个时刻由一个订阅者处理，消息丢失与重放能力仍取决于底层 pub/sub 行为。
 
