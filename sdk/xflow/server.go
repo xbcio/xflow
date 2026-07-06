@@ -91,7 +91,7 @@ func NewServer(cfg ServerConfig, opts ...ServerOption) (*Server, error) {
 	if cfg.RedisAddr == "" {
 		ccfg.Backend = backendmemory.New()
 	} else {
-		b, err := backendasynq.New(cfg.RedisAddr, cfg.Store, backendasynq.WithConsumer(false))
+		b, err := backendasynq.New(cfg.RedisAddr, cfg.Store, backendasynq.WithConsumer(true))
 		if err != nil {
 			return nil, err
 		}
@@ -114,3 +114,8 @@ func (s *Server) Start(ctx context.Context) error { return s.cp.Start(ctx) }
 
 // Shutdown stops background maintenance and releases backend resources.
 func (s *Server) Shutdown(ctx context.Context) error { return s.cp.Shutdown(ctx) }
+
+// IsLeader reports whether this Server replica currently holds leadership.
+// Single-replica in-memory deployments always report true. Useful for health
+// checks and observability in multi-replica Redis-backed deployments.
+func (s *Server) IsLeader() bool { return s.cp.IsLeader() }

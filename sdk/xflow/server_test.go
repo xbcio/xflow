@@ -1,13 +1,23 @@
 package xflow
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
+
+	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/execution"
+	"github.com/xbcio/xflow/nodes/node"
 	"github.com/xbcio/xflow/service/control"
+	"github.com/xbcio/xflow/service/protocol"
+	runnersvc "github.com/xbcio/xflow/service/runner"
+	"github.com/xbcio/xflow/types"
 )
 
 func TestNewServerMemoryBackendServesHandler(t *testing.T) {
@@ -65,5 +75,147 @@ func TestNewServerMountableOnHostMux(t *testing.T) {
 
 	if rec.Code == http.StatusNotFound {
 		t.Fatal("host mux did not route through mounted xflow handler")
+	}
+}
+
+func TestServerIsLeader(t *testing.T) {
+	srv, err := NewServer(ServerConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !srv.IsLeader() {
+		t.Fatal("IsLeader() = false for memory backend, want true (AlwaysLeader)")
+	}
+}
+
+// TestNewServerRedisBackendDispatchesTaskToRunner guards against a regression
+// where NewServer's Redis branch passed backendasynq.WithConsumer(false),
+// which disables the Asynq subscription entirely (no mux registration, no
+// timeout monitor, no consumer goroutine — see (*asynq.Backend).BindHandler).
+// That left submitted workflows enqueued forever with nothing ever consuming
+// the queue and dispatching to a registered runner. This test exercises the
+// full path against real (miniredis) Redis: submit a workflow through the
+// HTTP handler, run a real runner against it over the Runner Protocol, and
+// confirm the execution actually reaches a terminal state — which is only
+// possible if the Task Dispatcher is actively consuming the Asynq queue.
+func TestNewServerRedisBackendDispatchesTaskToRunner(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mr.Close()
+
+	srv, err := NewServer(ServerConfig{RedisAddr: mr.Addr()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := srv.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Shutdown(context.Background()) }()
+
+	httpSrv := httptest.NewServer(srv.Handler())
+	defer httpSrv.Close()
+
+	registry := execution.NewRegistry()
+	registry.RegisterGlobal("test.sdk-e2e", sdkE2EHandler{})
+
+	runnerCtx, runnerCancel := context.WithCancel(context.Background())
+	defer runnerCancel()
+	runner := runnersvc.New(protocol.NewClient(httpSrv.URL, httpSrv.Client()), registry, runnersvc.Config{
+		RunnerID:     "sdk-runner-1",
+		Concurrency:  1,
+		Capabilities: []protocol.Capability{{NodeType: "test.sdk-e2e"}},
+		PollWait:     5 * time.Millisecond,
+	})
+	errCh := make(chan error, 1)
+	go func() { errCh <- runner.Run(runnerCtx) }()
+
+	execID := submitSDKWorkflow(t, httpSrv.URL, &types.WorkflowDef{
+		Name: "sdk-redis-dispatch-e2e",
+		Nodes: []types.NodeDef{
+			{Name: "start", Type: "test.sdk-e2e"},
+		},
+	}, map[string]any{"claim_id": "sdk-c-1"})
+
+	status := waitForExecutionStatus(t, httpSrv.URL, execID, 5*time.Second)
+	if status != types.ExecutionStatusSuccess {
+		t.Fatalf("execution status = %s, want success", status)
+	}
+
+	runnerCancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("runner error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("runner did not stop")
+	}
+}
+
+type sdkE2EHandler struct{}
+
+func (sdkE2EHandler) Descriptor() node.Descriptor {
+	return node.Descriptor{Type: "test.sdk-e2e"}
+}
+
+func (sdkE2EHandler) Execute(_ context.Context, input *types.Input) (*types.Output, error) {
+	return &types.Output{Data: map[string]any{
+		"handled_by": "runner",
+		"claim_id":   input.Data["claim_id"],
+	}}, nil
+}
+
+func submitSDKWorkflow(t *testing.T, baseURL string, wf *types.WorkflowDef, params map[string]any) types.ExecutionID {
+	t.Helper()
+	body := struct {
+		Workflow *types.WorkflowDef `json:"workflow"`
+		Params   map[string]any     `json:"params,omitempty"`
+	}{Workflow: wf, Params: params}
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(body); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Post(baseURL+control.SubmitWorkflowPath, "application/json", &buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("submit status = %d, want 200", resp.StatusCode)
+	}
+	var out struct {
+		ExecutionID types.ExecutionID `json:"execution_id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out.ExecutionID == "" {
+		t.Fatal("empty execution_id")
+	}
+	return out.ExecutionID
+}
+
+func waitForExecutionStatus(t *testing.T, baseURL string, execID types.ExecutionID, timeout time.Duration) types.ExecutionStatus {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		resp, err := http.Get(baseURL + "/v1/executions/" + string(execID))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var detail engine.ExecutionDetail
+		decodeErr := json.NewDecoder(resp.Body).Decode(&detail)
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusOK && decodeErr == nil && types.IsTerminalExecutionStatus(detail.Status) {
+			return detail.Status
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timeout waiting for execution %q to reach terminal status, last status %q", execID, detail.Status)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
