@@ -1,0 +1,48 @@
+package xflow
+
+import (
+	backendmemory "github.com/xbcio/xflow/backend/memory"
+	"github.com/xbcio/xflow/nodes/node"
+)
+
+// NewLocal creates an in-process engine backed by in-memory state and a
+// goroutine worker pool.
+//
+// Use NewLocal for unit tests, examples, local development, and single-process
+// embedded usage. It supports LocalNode and typed nodes, but all state is
+// process memory: stopping the process loses executions, signals, outputs, and
+// queued work. For distributed workers, durable Redis state, or API-only pods,
+// use NewCluster instead.
+func NewLocal(opts ...Option) (*Engine, error) {
+	cfg := &engineConfig{concurrency: 4, allowDirectHandlers: true}
+	for _, o := range opts {
+		o(cfg)
+	}
+	if cfg.concurrency <= 0 {
+		cfg.concurrency = 4
+	}
+	pool := resolveResourcePool(cfg)
+	memOpts := []backendmemory.Option{backendmemory.WithConcurrency(cfg.concurrency)}
+	if pool != nil {
+		memOpts = append(memOpts, backendmemory.WithResourcePool(pool))
+	}
+	provider := backendmemory.New(memOpts...)
+	return newFromConfig(cfg, provider)
+}
+
+// resolveResourcePool returns the configured pool, the default pool built from
+// resourcePoolConfig, or nil when the caller explicitly opted out via
+// WithResourcePool(nil).
+//
+// Shared by NewLocal and NewCluster: both modes default to a connection pool
+// for DatabaseNode/GRPCNode unless the caller overrides it.
+func resolveResourcePool(cfg *engineConfig) node.ResourcePool {
+	if cfg.resourcePoolSet {
+		return cfg.resourcePool // may be nil — explicit opt-out
+	}
+	poolCfg := node.DefaultResourcePoolConfig()
+	if cfg.resourcePoolConfig != nil {
+		poolCfg = *cfg.resourcePoolConfig
+	}
+	return node.NewDefaultResourcePool(poolCfg)
+}

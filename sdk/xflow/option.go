@@ -7,37 +7,19 @@ import (
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
 	"github.com/xbcio/xflow/nodes/node"
-	"github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/types"
 )
-
-// ClusterConfig holds Redis/Asynq adapter configuration for NewCluster.
-//
-// Common runtime settings such as concurrency, hooks, logger, and supported
-// node definitions are passed with Option values.
-type ClusterConfig struct {
-	// RedisAddr is the Redis server address used by the Asynq queue and Redis
-	// state store. It is required, for example "localhost:6379".
-	RedisAddr string
-
-	// Store is an optional durable metadata store, such as sqlstore over GORM
-	// or memstore for tests. Nil means Redis-only runtime state with no SQL
-	// persistence mirror.
-	Store store.Store
-
-	// DisableConsumer leaves this SDK instance as an API/control client only:
-	// it can submit, inspect, cancel, and signal executions, but this process
-	// will not consume Asynq tasks or run timeout monitoring. Use this for
-	// API-only pods; worker pods should leave it false and register executable
-	// node definitions with WithNodes.
-	DisableConsumer bool
-}
 
 // Option configures an Engine.
 // Common options are valid for NewLocal and NewCluster.
 type Option func(*engineConfig)
 
+// engineConfig backs Option. Fields fall into three groups, marked below:
+//   - shared: read by both NewLocal and NewCluster (see engine.go)
+//   - local-only: only meaningful for NewLocal (see local.go)
+//   - cluster-only: only meaningful for NewCluster (see cluster.go)
 type engineConfig struct {
+	// shared
 	state       engine.StateStore
 	queue       engine.TaskQueue
 	registry    engine.HandlerRegistry
@@ -48,14 +30,16 @@ type engineConfig struct {
 	nodes       []node.Handler
 	stopFns     []func()
 
-	allowDirectHandlers bool
-
 	versionPolicy    execution.VersionPolicy
 	versionPolicySet bool
 
 	resourcePool       node.ResourcePool
 	resourcePoolSet    bool
 	resourcePoolConfig *node.ResourcePoolConfig
+
+	// local-only: NewCluster always leaves this false; direct handlers are
+	// rejected regardless (see node_registration.go registerDirectHandlers).
+	allowDirectHandlers bool
 }
 
 // WithConcurrency sets the task consumer concurrency.
