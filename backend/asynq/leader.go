@@ -39,15 +39,16 @@ return 0
 // RedisLeaderElector coordinates leadership across replicas sharing the same
 // Redis instance using a SETNX-based lease with periodic renewal.
 type RedisLeaderElector struct {
-	rdb   *redis.Client
-	key   string
-	ttl   time.Duration
-	token string
+	rdb *redis.Client
+	key string
+	ttl time.Duration
 
-	isLeader atomic.Bool
+	isLeader              atomic.Bool
+	leaseDeadlineUnixNano atomic.Int64
 
 	mu        sync.Mutex
-	notifyCh  chan bool
+	token     string
+	subs      map[chan bool]struct{}
 	stopRenew context.CancelFunc
 	renewGen  uint64
 }
@@ -56,12 +57,21 @@ type RedisLeaderElector struct {
 // TTL. Renewal runs at ttl/3 while leadership is held.
 func NewRedisLeaderElector(rdb *redis.Client, key string, ttl time.Duration) *RedisLeaderElector {
 	return &RedisLeaderElector{
-		rdb:      rdb,
-		key:      key,
-		ttl:      ttl,
-		token:    randomToken(),
-		notifyCh: make(chan bool, 1),
+		rdb:  rdb,
+		key:  key,
+		ttl:  normalizeLeaderTTL(ttl),
+		subs: make(map[chan bool]struct{}),
 	}
+}
+
+func normalizeLeaderTTL(ttl time.Duration) time.Duration {
+	if ttl <= 0 {
+		return defaultLeaderLeaseTTL
+	}
+	if ttl < time.Millisecond {
+		return time.Millisecond
+	}
+	return ttl
 }
 
 func randomToken() string {
@@ -107,11 +117,16 @@ func acquireRetryInterval(ttl time.Duration) time.Duration {
 }
 
 func (e *RedisLeaderElector) tryAcquire(ctx context.Context) (bool, error) {
-	ok, err := e.rdb.SetNX(ctx, e.key, e.token, e.ttl).Result()
+	token := randomToken()
+	ok, err := e.rdb.SetNX(ctx, e.key, token, e.ttl).Result()
 	if err != nil {
 		return false, err
 	}
 	if ok {
+		e.mu.Lock()
+		e.token = token
+		e.mu.Unlock()
+		e.extendLocalDeadline()
 		e.setLeader(true)
 	}
 	return ok, nil
@@ -133,6 +148,7 @@ func (e *RedisLeaderElector) startRenewal() {
 	e.mu.Lock()
 	e.renewGen++
 	myGen := e.renewGen
+	myToken := e.token
 	prevStop := e.stopRenew
 	e.stopRenew = cancel
 	e.mu.Unlock()
@@ -149,41 +165,68 @@ func (e *RedisLeaderElector) startRenewal() {
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
-		failures := 0
 		for {
 			select {
 			case <-renewCtx.Done():
 				return
 			case <-ticker.C:
-				renewed, err := leaderRenewScript.Run(renewCtx, e.rdb, []string{e.key}, e.token, ttlMillis).Result()
+				renewed, err := leaderRenewScript.Run(renewCtx, e.rdb, []string{e.key}, myToken, ttlMillis).Result()
 				if renewCtx.Err() != nil {
 					return
 				}
 				if err != nil || renewed == int64(0) {
-					failures++
-					if failures >= 3 {
-						e.mu.Lock()
-						if e.renewGen == myGen {
-							e.stopRenew = nil
-						}
-						e.mu.Unlock()
-						e.setLeader(false)
-						return
+					lost := false
+					e.mu.Lock()
+					if e.renewGen == myGen {
+						e.stopRenew = nil
+						lost = true
 					}
-					continue
+					e.mu.Unlock()
+					if lost {
+						e.clearLocalDeadline()
+						e.setLeader(false)
+					}
+					return
 				}
-				failures = 0
+				e.extendLocalDeadline()
 			}
 		}
 	}()
 }
 
 // IsLeader reports current leadership without a network round-trip.
-func (e *RedisLeaderElector) IsLeader() bool { return e.isLeader.Load() }
+func (e *RedisLeaderElector) IsLeader() bool {
+	if !e.isLeader.Load() {
+		return false
+	}
+	deadline := e.leaseDeadlineUnixNano.Load()
+	if deadline <= 0 || time.Now().After(time.Unix(0, deadline)) {
+		e.stopRenewal()
+		e.clearLocalDeadline()
+		e.setLeader(false)
+		return false
+	}
+	return true
+}
 
 // Resign voluntarily releases leadership so another instance can take over
 // without waiting for the lease TTL to expire.
 func (e *RedisLeaderElector) Resign(ctx context.Context) error {
+	e.stopRenewal()
+
+	if !e.isLeader.Load() {
+		e.clearLocalDeadline()
+		return nil
+	}
+
+	token := e.currentToken()
+	_, err := leaderReleaseScript.Run(ctx, e.rdb, []string{e.key}, token).Result()
+	e.clearLocalDeadline()
+	e.setLeader(false)
+	return err
+}
+
+func (e *RedisLeaderElector) stopRenewal() {
 	e.mu.Lock()
 	stop := e.stopRenew
 	e.stopRenew = nil
@@ -191,33 +234,58 @@ func (e *RedisLeaderElector) Resign(ctx context.Context) error {
 	if stop != nil {
 		stop()
 	}
-
-	if !e.isLeader.Load() {
-		return nil
-	}
-
-	_, err := leaderReleaseScript.Run(ctx, e.rdb, []string{e.key}, e.token).Result()
-	e.setLeader(false)
-	return err
 }
 
-// Notify returns a buffered-size-1 channel that emits on every leadership
-// change: true when acquired, false when lost or resigned. Sends are
+// Notify returns a buffered-size-1 subscription channel that emits the current
+// leadership state and then every subsequent leadership change. Sends are
 // non-blocking; a slow consumer only ever sees the latest state rather than
 // stalling the producer.
-func (e *RedisLeaderElector) Notify() <-chan bool { return e.notifyCh }
+func (e *RedisLeaderElector) Notify() <-chan bool {
+	ch := make(chan bool, 1)
+	e.mu.Lock()
+	e.subs[ch] = struct{}{}
+	sendLatestLeaderState(ch, e.isLeader.Load())
+	e.mu.Unlock()
+	return ch
+}
 
 func (e *RedisLeaderElector) setLeader(v bool) {
-	e.isLeader.Store(v)
-	for {
-		select {
-		case e.notifyCh <- v:
-			return
-		default:
-		}
-		select {
-		case <-e.notifyCh:
-		default:
-		}
+	if old := e.isLeader.Swap(v); old == v {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for ch := range e.subs {
+		sendLatestLeaderState(ch, v)
+	}
+}
+
+func (e *RedisLeaderElector) currentToken() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.token
+}
+
+func (e *RedisLeaderElector) extendLocalDeadline() {
+	e.leaseDeadlineUnixNano.Store(time.Now().Add(e.ttl).UnixNano())
+}
+
+func (e *RedisLeaderElector) clearLocalDeadline() {
+	e.leaseDeadlineUnixNano.Store(0)
+}
+
+func sendLatestLeaderState(ch chan bool, v bool) {
+	select {
+	case ch <- v:
+		return
+	default:
+	}
+	select {
+	case <-ch:
+	default:
+	}
+	select {
+	case ch <- v:
+	default:
 	}
 }

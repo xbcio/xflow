@@ -91,6 +91,93 @@ func TestRedisLeaderElectorResignAllowsImmediateTakeover(t *testing.T) {
 	}
 }
 
+func TestRedisLeaderElectorIsLeaderExpiresWhenRenewalStops(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mr.Close()
+
+	ttl := 40 * time.Millisecond
+	l := newTestRedisLeaderElector(t, mr.Addr(), "test:leader:local-expiry", ttl)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := l.Campaign(ctx); err != nil {
+		t.Fatalf("Campaign() error = %v", err)
+	}
+	if !l.IsLeader() {
+		t.Fatal("IsLeader() = false after Campaign, want true")
+	}
+
+	l.mu.Lock()
+	stop := l.stopRenew
+	l.stopRenew = nil
+	l.mu.Unlock()
+	if stop == nil {
+		t.Fatal("stopRenew is nil after Campaign")
+	}
+	stop()
+
+	time.Sleep(2 * ttl)
+	if l.IsLeader() {
+		t.Fatal("IsLeader() = true after local lease deadline passed without renewal, want false")
+	}
+}
+
+func TestRedisLeaderElectorInvalidTTLStillSetsExpiringLease(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mr.Close()
+
+	key := "test:leader:invalid-ttl"
+	l := newTestRedisLeaderElector(t, mr.Addr(), key, 0)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := l.Campaign(ctx); err != nil {
+		t.Fatalf("Campaign() error = %v", err)
+	}
+
+	ttl := mr.TTL(key)
+	if ttl <= 0 {
+		t.Fatalf("Redis key TTL = %v, want positive expiration for invalid configured TTL", ttl)
+	}
+}
+
+func TestRedisLeaderElectorUsesFreshTokenPerCampaign(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mr.Close()
+
+	l := newTestRedisLeaderElector(t, mr.Addr(), "test:leader:fresh-token", time.Second)
+	ctx := context.Background()
+	if err := l.Campaign(ctx); err != nil {
+		t.Fatalf("first Campaign() error = %v", err)
+	}
+	firstToken := l.token
+	if firstToken == "" {
+		t.Fatal("first campaign token is empty")
+	}
+	if err := l.Resign(ctx); err != nil {
+		t.Fatalf("Resign() error = %v", err)
+	}
+	if err := l.Campaign(ctx); err != nil {
+		t.Fatalf("second Campaign() error = %v", err)
+	}
+	secondToken := l.token
+	if secondToken == "" {
+		t.Fatal("second campaign token is empty")
+	}
+	if secondToken == firstToken {
+		t.Fatalf("campaign token was reused: %q", secondToken)
+	}
+}
+
 // TestRedisLeaderElectorRecampaignsAfterRenewalFailureWithoutLeak forces real
 // renewal failures (by deleting the underlying Redis key out from under the
 // elector) and confirms that once the elector loses leadership, calling
@@ -107,6 +194,7 @@ func TestRedisLeaderElectorRecampaignsAfterRenewalFailureWithoutLeak(t *testing.
 
 	ttl := 60 * time.Millisecond
 	l := newTestRedisLeaderElector(t, mr.Addr(), "test:leader:recampaign", ttl)
+	notify := l.Notify()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -117,7 +205,7 @@ func TestRedisLeaderElectorRecampaignsAfterRenewalFailureWithoutLeak(t *testing.
 	// Drain the initial acquire notification so the assertion below observes
 	// the *next* transition (the forced renewal failure), not this one.
 	select {
-	case <-l.Notify():
+	case <-notify:
 	case <-time.After(time.Second):
 		t.Fatal("Notify() did not emit after initial Campaign")
 	}
@@ -127,7 +215,7 @@ func TestRedisLeaderElectorRecampaignsAfterRenewalFailureWithoutLeak(t *testing.
 	mr.Del("test:leader:recampaign")
 
 	select {
-	case v, ok := <-l.Notify():
+	case v, ok := <-notify:
 		if !ok {
 			t.Fatal("Notify() channel closed")
 		}
@@ -185,6 +273,85 @@ func TestRedisLeaderElectorNotifyEmitsOnAcquire(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("Notify() did not emit within 1s")
+	}
+}
+
+func TestRedisLeaderElectorNotifyBroadcastsToSubscribers(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mr.Close()
+
+	ttl := 120 * time.Millisecond
+	key := "test:leader:broadcast"
+	l := newTestRedisLeaderElector(t, mr.Addr(), key, ttl)
+	notifyA := l.Notify()
+	notifyB := l.Notify()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := l.Campaign(ctx); err != nil {
+		t.Fatalf("Campaign() error = %v", err)
+	}
+	expectLeaderNotify(t, notifyA, true)
+	expectLeaderNotify(t, notifyB, true)
+
+	mr.Set(key, "different-owner")
+	mr.SetTTL(key, ttl)
+
+	expectLeaderNotify(t, notifyA, false)
+	expectLeaderNotify(t, notifyB, false)
+}
+
+func TestRedisLeaderElectorDropsLeadershipImmediatelyOnTokenMismatch(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mr.Close()
+
+	ttl := 120 * time.Millisecond
+	key := "test:leader:token-mismatch"
+	l := newTestRedisLeaderElector(t, mr.Addr(), key, ttl)
+	notify := l.Notify()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := l.Campaign(ctx); err != nil {
+		t.Fatalf("Campaign() error = %v", err)
+	}
+	select {
+	case <-notify:
+	case <-time.After(time.Second):
+		t.Fatal("Notify() did not emit after initial Campaign")
+	}
+
+	mr.Set(key, "different-owner")
+	mr.SetTTL(key, ttl)
+
+	select {
+	case v := <-notify:
+		if v {
+			t.Fatal("Notify() emitted true, want false after token mismatch")
+		}
+	case <-time.After(70 * time.Millisecond):
+		t.Fatal("Notify() did not emit false after first renewal token mismatch")
+	}
+	if l.IsLeader() {
+		t.Fatal("IsLeader() = true after token mismatch, want false")
+	}
+}
+
+func expectLeaderNotify(t *testing.T, ch <-chan bool, want bool) {
+	t.Helper()
+	select {
+	case got := <-ch:
+		if got != want {
+			t.Fatalf("Notify() emitted %v, want %v", got, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("Notify() did not emit %v within 1s", want)
 	}
 }
 
