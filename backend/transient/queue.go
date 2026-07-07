@@ -79,19 +79,6 @@ func (q *queue) dispatch(env queueEnvelope) {
 	if err == nil {
 		return
 	}
-	if errors.Is(err, errTransientSuspendUnsupported) {
-		if q.logger != nil {
-			q.logger.Error("failing transient execution because suspend is unsupported",
-				"exec", string(env.task.ExecutionID),
-				"node", env.task.NodeName,
-				"err", err,
-			)
-		}
-		if q.state != nil {
-			q.state.failExecution(env.task.ExecutionID, env.task, err)
-		}
-		return
-	}
 	if errors.Is(err, types.ErrPermanent) {
 		if q.logger != nil {
 			q.logger.Error("dropping task after permanent handler error",

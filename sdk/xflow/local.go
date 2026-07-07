@@ -30,6 +30,7 @@ func NewLocal(opts ...Option) (*Engine, error) {
 	if cfg.executionMode == ExecutionModeTransient {
 		transientOpts := []backendtransient.Option{
 			backendtransient.WithConcurrency(cfg.concurrency),
+			backendtransient.WithActiveTTL(cfg.transientTTL),
 			backendtransient.WithCompletionTTL(cfg.transientCompletionTTL),
 		}
 		if pool != nil {

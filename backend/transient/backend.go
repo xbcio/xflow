@@ -2,6 +2,7 @@ package transient
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/xbcio/xflow/backend"
@@ -15,6 +16,7 @@ type Option func(*config)
 
 type config struct {
 	concurrency   int
+	activeTTL     time.Duration
 	completionTTL time.Duration
 	resourcePool  types.ResourcePool
 }
@@ -37,6 +39,15 @@ func WithCompletionTTL(ttl time.Duration) Option {
 	}
 }
 
+// WithActiveTTL sets how long non-terminal executions remain readable without activity.
+func WithActiveTTL(ttl time.Duration) Option {
+	return func(c *config) {
+		if ttl > 0 {
+			c.activeTTL = ttl
+		}
+	}
+}
+
 // WithResourcePool installs a shared types.ResourcePool for embedded execution.
 func WithResourcePool(p types.ResourcePool) Option {
 	return func(c *config) { c.resourcePool = p }
@@ -54,11 +65,15 @@ type Backend struct {
 
 // New creates a local transient backend.
 func New(opts ...Option) *Backend {
-	cfg := &config{concurrency: 4, completionTTL: 30 * time.Second}
+	cfg := &config{
+		concurrency:   4,
+		activeTTL:     10 * time.Minute,
+		completionTTL: 30 * time.Second,
+	}
 	for _, o := range opts {
 		o(cfg)
 	}
-	st := newState(cfg.completionTTL)
+	st := newState(cfg.activeTTL, cfg.completionTTL)
 
 	return &Backend{
 		state:            st,
@@ -85,8 +100,26 @@ func (b *Backend) Bind(eng *engine.Engine) func() {
 	if b.resourcePool != nil {
 		opts = append(opts, execution.WithResourcePool(b.resourcePool))
 	}
-	dispatcher := execution.NewEmbeddedDispatcher(eng, b.registry, opts...)
-	b.queue.SetHandler(dispatcher.HandleTask)
+	runner := execution.NewRunner(b.registry, opts...)
+	b.queue.SetHandler(func(ctx context.Context, t *engine.Task) error {
+		lease, err := eng.BuildTaskLease(ctx, t)
+		if err != nil {
+			if err == engine.ErrExecutionInactive {
+				return nil
+			}
+			return err
+		}
+
+		result, err := runner.Execute(ctx, lease)
+		if err != nil {
+			return err
+		}
+		if result.Suspend != nil {
+			result.Suspend = nil
+			result.Error = errors.Join(types.ErrPermanent, errTransientSuspendUnsupported)
+		}
+		return eng.CommitTaskResult(ctx, lease, result)
+	})
 	b.queue.Start()
 	return func() {
 		b.queue.Stop()

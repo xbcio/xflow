@@ -2,15 +2,21 @@ package xflow
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/types"
 )
 
 func TestNewLocalTransientFailsSuspendWorkflow(t *testing.T) {
-	eng, err := NewLocal(WithExecutionMode(ExecutionModeTransient))
+	hooks := &transientHookRecorder{}
+	eng, err := NewLocal(
+		WithExecutionMode(ExecutionModeTransient),
+		WithHooks(hooks),
+	)
 	if err != nil {
 		t.Fatalf("NewLocal() error = %v", err)
 	}
@@ -40,6 +46,53 @@ func TestNewLocalTransientFailsSuspendWorkflow(t *testing.T) {
 	if result.Status != types.ExecutionStatusFailed {
 		t.Fatalf("status = %s, want failed", result.Status)
 	}
+	if hooks.nodeCompleteStatus("wait") != types.NodeStatusFailed {
+		t.Fatalf("wait hook status = %s, want failed", hooks.nodeCompleteStatus("wait"))
+	}
+	if hooks.executionCompleteStatus(id) != types.ExecutionStatusFailed {
+		t.Fatalf("execution hook status = %s, want failed", hooks.executionCompleteStatus(id))
+	}
+	if hooks.nodeSuspendedCount("wait") != 0 {
+		t.Fatalf("OnNodeSuspended(wait) count = %d, want 0", hooks.nodeSuspendedCount("wait"))
+	}
+}
+
+func TestNewLocalTransientExpiresActiveExecutionState(t *testing.T) {
+	action := node.Define("test.transient.local.slow", func(_ context.Context, input *types.Input) (*types.Output, error) {
+		time.Sleep(150 * time.Millisecond)
+		return &types.Output{Data: map[string]any{"seen": input.Data["value"]}}, nil
+	})
+	eng, err := NewLocal(
+		WithExecutionMode(ExecutionModeTransient),
+		WithTransientTTL(40*time.Millisecond),
+		WithTransientCompletionTTL(time.Second),
+		WithNodes(action),
+	)
+	if err != nil {
+		t.Fatalf("NewLocal() error = %v", err)
+	}
+	defer eng.Stop()
+
+	wf := Workflow("transient_local_active_expiry")
+	start := wf.Node("start", node.Start())
+	run := wf.Node("run", action.New(nil))
+	wf.Connect(start, run)
+	workflowID, err := eng.AddWorkflow(context.Background(), wf)
+	if err != nil {
+		t.Fatalf("AddWorkflow() error = %v", err)
+	}
+	id, err := eng.Invoke(context.Background(), workflowID, Start(), map[string]any{"value": "ok"})
+	if err != nil {
+		t.Fatalf("Invoke() error = %v", err)
+	}
+
+	waitForTransientCondition(t, time.Second, func() bool {
+		snap, err := eng.eng.State().GetExecution(context.Background(), id)
+		if err != nil {
+			t.Fatalf("GetExecution() error = %v", err)
+		}
+		return snap == nil
+	})
 }
 
 func TestNewLocalTransientExpiresCompletedExecutionState(t *testing.T) {
@@ -106,4 +159,58 @@ func waitForTransientCondition(t *testing.T, timeout time.Duration, condition fu
 			t.Fatal("condition was not met before timeout")
 		}
 	}
+}
+
+type transientHookRecorder struct {
+	engine.BaseHooks
+
+	mu                  sync.Mutex
+	nodeComplete        map[string]types.NodeStatus
+	executionComplete   map[types.ExecutionID]types.ExecutionStatus
+	nodeSuspendedCounts map[string]int
+}
+
+func (h *transientHookRecorder) OnNodeComplete(_ context.Context, _ types.ExecutionID, name string, status types.NodeStatus) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.nodeComplete == nil {
+		h.nodeComplete = make(map[string]types.NodeStatus)
+	}
+	h.nodeComplete[name] = status
+}
+
+func (h *transientHookRecorder) OnExecutionComplete(_ context.Context, id types.ExecutionID, status types.ExecutionStatus) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.executionComplete == nil {
+		h.executionComplete = make(map[types.ExecutionID]types.ExecutionStatus)
+	}
+	h.executionComplete[id] = status
+}
+
+func (h *transientHookRecorder) OnNodeSuspended(_ context.Context, _ types.ExecutionID, name string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.nodeSuspendedCounts == nil {
+		h.nodeSuspendedCounts = make(map[string]int)
+	}
+	h.nodeSuspendedCounts[name]++
+}
+
+func (h *transientHookRecorder) nodeCompleteStatus(name string) types.NodeStatus {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.nodeComplete[name]
+}
+
+func (h *transientHookRecorder) executionCompleteStatus(id types.ExecutionID) types.ExecutionStatus {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.executionComplete[id]
+}
+
+func (h *transientHookRecorder) nodeSuspendedCount(name string) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.nodeSuspendedCounts[name]
 }

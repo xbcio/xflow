@@ -17,6 +17,7 @@ var errTransientSuspendUnsupported = errors.New("suspend nodes are unsupported i
 
 type state struct {
 	mu            sync.Mutex
+	activeTTL     time.Duration
 	completionTTL time.Duration
 	executions    map[types.ExecutionID]*execEntry
 	nodes         map[string]*engine.NodeSnapshot
@@ -26,6 +27,7 @@ type state struct {
 	subExecs      map[string][]*engine.SubExecution
 	doneCh        map[types.ExecutionID]chan struct{}
 	eventWatchers map[types.ExecutionID][]chan engine.ExecutionEvent
+	activeTimers  map[types.ExecutionID]*time.Timer
 	cleanupTimers map[types.ExecutionID]*time.Timer
 }
 
@@ -34,8 +36,9 @@ type execEntry struct {
 	closed bool
 }
 
-func newState(completionTTL time.Duration) *state {
+func newState(activeTTL, completionTTL time.Duration) *state {
 	return &state{
+		activeTTL:     activeTTL,
 		completionTTL: completionTTL,
 		executions:    make(map[types.ExecutionID]*execEntry),
 		nodes:         make(map[string]*engine.NodeSnapshot),
@@ -45,6 +48,7 @@ func newState(completionTTL time.Duration) *state {
 		subExecs:      make(map[string][]*engine.SubExecution),
 		doneCh:        make(map[types.ExecutionID]chan struct{}),
 		eventWatchers: make(map[types.ExecutionID][]chan engine.ExecutionEvent),
+		activeTimers:  make(map[types.ExecutionID]*time.Timer),
 		cleanupTimers: make(map[types.ExecutionID]*time.Timer),
 	}
 }
@@ -65,6 +69,7 @@ func (s *state) CreateExecution(_ context.Context, e *engine.ExecutionSnapshot) 
 		key := fmt.Sprintf("%s/%d", e.ID, i)
 		s.inDegrees[key] = d
 	}
+	s.touchActiveLocked(e.ID)
 	return nil
 }
 
@@ -77,12 +82,17 @@ func (s *state) UpdateExecutionStatus(_ context.Context, id types.ExecutionID, s
 		return nil
 	}
 	entry.snap.Status = status
-	if isTerminalStatus(status) && !entry.closed {
-		entry.closed = true
-		if ch, ok := s.doneCh[id]; ok {
-			close(ch)
+	if isTerminalStatus(status) {
+		s.stopActiveTimerLocked(id)
+		if !entry.closed {
+			entry.closed = true
+			if ch, ok := s.doneCh[id]; ok {
+				close(ch)
+			}
 		}
 		s.scheduleCleanupLocked(id)
+	} else {
+		s.touchActiveLocked(id)
 	}
 	s.publishLocked(engine.ExecutionEvent{ExecutionID: id, Status: status})
 	return nil
@@ -124,6 +134,7 @@ func (s *state) UpsertNode(_ context.Context, n *engine.NodeSnapshot) error {
 	}
 	cp := *n
 	s.nodes[key] = &cp
+	s.touchActiveLocked(n.ExecutionID)
 	return nil
 }
 
@@ -152,6 +163,7 @@ func (s *state) ResetNodeForRetry(_ context.Context, id types.ExecutionID, name 
 	cp.LeaseIssuedAt = time.Time{}
 	cp.LeaseTTL = 0
 	s.nodes[key] = &cp
+	s.touchActiveLocked(id)
 	return nil
 }
 
@@ -207,6 +219,7 @@ func (s *state) RevokeLease(_ context.Context, id types.ExecutionID, name string
 	cp.LeaseIssuedAt = time.Time{}
 	cp.LeaseTTL = 0
 	s.nodes[key] = &cp
+	s.touchActiveLocked(id)
 	return true, nil
 }
 
@@ -236,6 +249,7 @@ func (s *state) ClaimTaskLease(_ context.Context, lease *engine.TaskLease) (*eng
 	cp.Status = types.NodeStatusCommitting
 	cp.LeaseToken = ""
 	s.nodes[key] = &cp
+	s.touchActiveLocked(lease.Task.ExecutionID)
 	return &cp, true, nil
 }
 
@@ -248,6 +262,7 @@ func (s *state) DecrementInDegree(_ context.Context, id types.ExecutionID, nodeI
 	if portActive {
 		s.activeIns[key]++
 	}
+	s.touchActiveLocked(id)
 	return s.inDegrees[key], s.activeIns[key], nil
 }
 
@@ -300,6 +315,7 @@ func (s *state) PutOutput(_ context.Context, id types.ExecutionID, name string, 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.outputs[string(id)+"/"+name] = data
+	s.touchActiveLocked(id)
 	return nil
 }
 
@@ -346,6 +362,7 @@ func (s *state) CreateSubExecution(_ context.Context, sub *engine.SubExecution) 
 	defer s.mu.Unlock()
 	key := string(sub.ParentExecID) + "/" + sub.ParentNode
 	s.subExecs[key] = append(s.subExecs[key], sub)
+	s.touchActiveLocked(sub.ParentExecID)
 	return nil
 }
 
@@ -365,6 +382,7 @@ func (s *state) CompleteSubExecution(_ context.Context, parentExecID types.Execu
 			allDone = false
 		}
 	}
+	s.touchActiveLocked(parentExecID)
 	return allDone, nil
 }
 
@@ -412,53 +430,6 @@ func (s *state) executionTerminal(id types.ExecutionID) bool {
 
 	entry, ok := s.executions[id]
 	return ok && isTerminalStatus(entry.snap.Status)
-}
-
-func (s *state) failExecution(id types.ExecutionID, task *engine.Task, err error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	entry, ok := s.executions[id]
-	if !ok {
-		return
-	}
-
-	entry.snap.Status = types.ExecutionStatusFailed
-	if task != nil {
-		key := string(id) + "/" + task.NodeName
-		node := s.nodes[key]
-		if node == nil {
-			node = &engine.NodeSnapshot{
-				ExecutionID:  id,
-				Name:         task.NodeName,
-				NodeIdx:      task.NodeIdx,
-				ActivationID: task.ActivationID,
-				AutoDepth:    task.AutoDepth,
-			}
-		} else {
-			cp := *node
-			node = &cp
-		}
-		node.Status = types.NodeStatusFailed
-		node.LeaseID = ""
-		node.LeaseToken = ""
-		node.LeaseIssuedAt = time.Time{}
-		node.LeaseTTL = 0
-		node.Error = err.Error()
-		s.nodes[key] = node
-	}
-	if !entry.closed {
-		entry.closed = true
-		if ch, ok := s.doneCh[id]; ok {
-			close(ch)
-		}
-		s.scheduleCleanupLocked(id)
-	}
-	s.publishLocked(engine.ExecutionEvent{
-		ExecutionID: id,
-		Status:      types.ExecutionStatusFailed,
-		Error:       err.Error(),
-	})
 }
 
 func (s *state) doneChannel(id types.ExecutionID) <-chan struct{} {
@@ -511,7 +482,62 @@ func (s *state) cleanupExecution(id types.ExecutionID) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	s.cleanupExecutionLocked(id)
+}
+
+func (s *state) touchActiveLocked(id types.ExecutionID) {
+	if s.activeTTL <= 0 {
+		return
+	}
+	entry, ok := s.executions[id]
+	if !ok {
+		return
+	}
+	if isTerminalStatus(entry.snap.Status) {
+		s.stopActiveTimerLocked(id)
+		return
+	}
+	if timer := s.activeTimers[id]; timer != nil {
+		timer.Stop()
+	}
+	s.activeTimers[id] = time.AfterFunc(s.activeTTL, func() {
+		s.expireActiveExecution(id)
+	})
+}
+
+func (s *state) stopActiveTimerLocked(id types.ExecutionID) {
+	if timer := s.activeTimers[id]; timer != nil {
+		timer.Stop()
+		delete(s.activeTimers, id)
+	}
+}
+
+func (s *state) expireActiveExecution(id types.ExecutionID) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	delete(s.activeTimers, id)
+	entry, ok := s.executions[id]
+	if !ok {
+		return
+	}
+	if isTerminalStatus(entry.snap.Status) {
+		return
+	}
+	if !entry.closed {
+		entry.closed = true
+		if ch, ok := s.doneCh[id]; ok {
+			close(ch)
+		}
+	}
+	s.cleanupExecutionLocked(id)
+}
+
+func (s *state) cleanupExecutionLocked(id types.ExecutionID) {
+	s.stopActiveTimerLocked(id)
+
 	if timer := s.cleanupTimers[id]; timer != nil {
+		timer.Stop()
 		delete(s.cleanupTimers, id)
 	}
 

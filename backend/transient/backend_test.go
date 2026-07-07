@@ -11,7 +11,7 @@ import (
 )
 
 func TestNewLocalTransientBackendWaitDoneReturnsOutputsAndExpiresState(t *testing.T) {
-	backend := New(WithCompletionTTL(25 * time.Millisecond))
+	backend := New(WithActiveTTL(time.Second), WithCompletionTTL(25*time.Millisecond))
 	state := backend.State()
 	ctx := context.Background()
 	id := types.ExecutionID("exec-transient-backend")
@@ -43,6 +43,46 @@ func TestNewLocalTransientBackendWaitDoneReturnsOutputsAndExpiresState(t *testin
 	}
 
 	waitForTransientCondition(t, time.Second, func() bool {
+		snap, err := state.GetExecution(ctx, id)
+		if err != nil {
+			t.Fatalf("GetExecution() error = %v", err)
+		}
+		return snap == nil
+	})
+}
+
+func TestTransientStateRefreshesActiveTTLOnMutation(t *testing.T) {
+	backend := New(
+		WithActiveTTL(120*time.Millisecond),
+		WithCompletionTTL(time.Second),
+	)
+	state := backend.State()
+	ctx := context.Background()
+	id := types.ExecutionID("exec-transient-refresh")
+
+	if err := state.CreateExecution(ctx, &engine.ExecutionSnapshot{
+		ID:     id,
+		Graph:  testTransientGraph(t),
+		Status: types.ExecutionStatusRunning,
+	}); err != nil {
+		t.Fatalf("CreateExecution() error = %v", err)
+	}
+
+	time.Sleep(70 * time.Millisecond)
+	if err := state.PutOutput(ctx, id, "start", map[string]any{"seen": "touch"}); err != nil {
+		t.Fatalf("PutOutput() error = %v", err)
+	}
+
+	time.Sleep(70 * time.Millisecond)
+	snap, err := state.GetExecution(ctx, id)
+	if err != nil {
+		t.Fatalf("GetExecution() error = %v", err)
+	}
+	if snap == nil {
+		t.Fatal("execution expired before refreshed TTL elapsed")
+	}
+
+	waitForTransientCondition(t, 400*time.Millisecond, func() bool {
 		snap, err := state.GetExecution(ctx, id)
 		if err != nil {
 			t.Fatalf("GetExecution() error = %v", err)
