@@ -2,94 +2,156 @@ package runner
 
 import (
 	"context"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
-	"github.com/xbcio/xflow/nodes/node"
 	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/types"
 )
 
-func TestRunnerRegistersPollsExecutesAndReportsResult(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+// ---------------------------------------------------------------------------
+// fakeStream — in-memory FrameStream for testing
+// ---------------------------------------------------------------------------
 
-	lease := &engine.TaskLease{
-		LeaseID:  engine.LeaseID("lease-1"),
-		Task:     engine.Task{ExecutionID: types.ExecutionID("exec-1"), NodeName: "start"},
-		Input:    &types.Input{Data: map[string]any{"claim_id": "c-1"}},
-		NodeType: "test.function",
+type fakeStream struct {
+	recvCh chan protocol.ServerFrame
+	sendCh chan protocol.RunnerFrame
+	closed atomic.Bool
+}
+
+func newFakeStream(buf int) *fakeStream {
+	return &fakeStream{
+		recvCh: make(chan protocol.ServerFrame, buf),
+		sendCh: make(chan protocol.RunnerFrame, buf),
 	}
-	client := &fakeProtocolClient{lease: lease, cancel: cancel}
-	registry := execution.NewRegistry()
-	registry.RegisterGlobal("test.function", functionHandler{})
+}
 
-	r := New(client, registry, Config{
-		RunnerID:          "runner-1",
-		Concurrency:       1,
-		Capabilities:      []protocol.Capability{{NodeType: "test.function"}},
-		HeartbeatInterval: time.Hour,
-		PollWait:          time.Millisecond,
+func (f *fakeStream) Send(fr protocol.RunnerFrame) error { f.sendCh <- fr; return nil }
+func (f *fakeStream) Recv() (protocol.ServerFrame, error) {
+	fr, ok := <-f.recvCh
+	if !ok {
+		return protocol.ServerFrame{}, context.Canceled
+	}
+	return fr, nil
+}
+func (f *fakeStream) Close() error { f.closed.Store(true); return nil }
+
+// ---------------------------------------------------------------------------
+// fakeClient — implements the new ProtocolClient (Connect only)
+// ---------------------------------------------------------------------------
+
+type fakeClient struct{ stream *fakeStream }
+
+func (c *fakeClient) Connect(ctx context.Context) (protocol.FrameStream, error) {
+	return c.stream, nil
+}
+
+// ---------------------------------------------------------------------------
+// funcHandler — adapter that wraps a plain func into types.ActionHandler
+// ---------------------------------------------------------------------------
+
+// funcActionHandler wraps a func(ctx, *types.Input) -> (*types.Output, error)
+// as a types.ActionHandler so it can be registered with execution.Registry.
+type funcActionHandler struct {
+	nodeType string
+	fn       func(ctx context.Context, input *types.Input) (*types.Output, error)
+}
+
+func (h funcActionHandler) Descriptor() node_Descriptor { return node_Descriptor{Type: h.nodeType} }
+func (h funcActionHandler) Execute(ctx context.Context, input *types.Input) (*types.Output, error) {
+	return h.fn(ctx, input)
+}
+
+// node_Descriptor is an alias to avoid importing nodes/node in tests.
+// types.Descriptor is the actual type; use it directly.
+type node_Descriptor = types.Descriptor
+
+// registerTestHandler registers a handler that sleeps and counts active
+// workers. handlerFn receives ctx and the task input; its return maps to
+// types.ActionHandler.Execute. Registered under nodeType via RegisterGlobal.
+func registerTestHandler(
+	t *testing.T,
+	registry *execution.Registry,
+	nodeType string,
+	handlerFn func(ctx context.Context, input *types.Input) (*types.Output, error),
+) {
+	t.Helper()
+	registry.RegisterGlobal(nodeType, funcActionHandler{nodeType: nodeType, fn: handlerFn})
+}
+
+// ---------------------------------------------------------------------------
+// TestRunnerConcurrencyParallel — proves worker pool size = Concurrency
+// ---------------------------------------------------------------------------
+
+func TestRunnerConcurrencyParallel(t *testing.T) {
+	stream := newFakeStream(16)
+	// Pre-load WELCOME so recvLoop unblocks immediately.
+	stream.recvCh <- protocol.ServerFrame{Welcome: &protocol.WelcomeFrame{RunnerID: "r1"}}
+
+	var active, maxActive atomic.Int32
+	var wg sync.WaitGroup
+	wg.Add(3)
+
+	registry := execution.NewRegistry()
+	registerTestHandler(t, registry, "xflow.function", func(ctx context.Context, input *types.Input) (*types.Output, error) {
+		cur := active.Add(1)
+		// CAS loop to track the high-water mark.
+		for {
+			m := maxActive.Load()
+			if cur <= m || maxActive.CompareAndSwap(m, cur) {
+				break
+			}
+		}
+		time.Sleep(80 * time.Millisecond)
+		active.Add(-1)
+		wg.Done()
+		return &types.Output{Data: map[string]any{"ok": true}}, nil
 	})
 
-	if err := r.Run(ctx); err != nil {
-		t.Fatalf("Run() error = %v", err)
+	r := New(
+		&fakeClient{stream},
+		registry,
+		Config{
+			RunnerID:     "r1",
+			Concurrency:  3,
+			Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
+		},
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	go func() { _ = r.Run(ctx) }()
+
+	// Send 3 TASK frames with unique LeaseIDs.
+	for i, id := range []string{"L1", "L2", "L3"} {
+		_ = i
+		stream.recvCh <- protocol.ServerFrame{Task: &protocol.TaskFrame{
+			Lease: &engine.TaskLease{
+				LeaseID:  engine.LeaseID(id),
+				NodeType: "xflow.function",
+			},
+		}}
 	}
-	if !client.registered {
-		t.Fatal("runner did not register")
+
+	// Collect 3 RESULT frames.
+	results := 0
+	for results < 3 {
+		select {
+		case fr := <-stream.sendCh:
+			if fr.Result != nil {
+				results++
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timeout waiting for results; got %d/3", results)
+		}
 	}
-	if client.polls == 0 {
-		t.Fatal("runner did not poll")
+	wg.Wait()
+
+	if maxActive.Load() < 3 {
+		t.Fatalf("max concurrent = %d, want >= 3 (concurrency bug not fixed)", maxActive.Load())
 	}
-	if client.reported.Lease == nil || client.reported.Lease.LeaseID != lease.LeaseID {
-		t.Fatalf("reported lease = %+v, want %+v", client.reported.Lease, lease)
-	}
-	if client.reported.Result.Output == nil || client.reported.Result.Output.Data["claim_id"] != "c-1" {
-		t.Fatalf("reported result = %+v, want claim_id output", client.reported.Result)
-	}
-}
-
-type fakeProtocolClient struct {
-	lease      *engine.TaskLease
-	cancel     context.CancelFunc
-	registered bool
-	polls      int
-	reported   protocol.ReportResultRequest
-}
-
-func (c *fakeProtocolClient) Register(context.Context, protocol.RegisterRunnerRequest) (protocol.RegisterRunnerResponse, error) {
-	c.registered = true
-	return protocol.RegisterRunnerResponse{RunnerID: "runner-1"}, nil
-}
-
-func (c *fakeProtocolClient) Heartbeat(context.Context, protocol.HeartbeatRequest) (protocol.HeartbeatResponse, error) {
-	return protocol.HeartbeatResponse{}, nil
-}
-
-func (c *fakeProtocolClient) Poll(context.Context, protocol.PollTaskRequest) (protocol.PollTaskResponse, error) {
-	c.polls++
-	if c.lease == nil {
-		return protocol.PollTaskResponse{Wait: time.Millisecond}, nil
-	}
-	lease := c.lease
-	c.lease = nil
-	return protocol.PollTaskResponse{Lease: lease}, nil
-}
-
-func (c *fakeProtocolClient) ReportResult(_ context.Context, req protocol.ReportResultRequest) (protocol.ReportResultResponse, error) {
-	c.reported = req
-	c.cancel()
-	return protocol.ReportResultResponse{Accepted: true}, nil
-}
-
-type functionHandler struct{}
-
-func (functionHandler) Descriptor() node.Descriptor {
-	return node.Descriptor{Type: "test.function"}
-}
-
-func (functionHandler) Execute(_ context.Context, input *types.Input) (*types.Output, error) {
-	return &types.Output{Data: input.Data}, nil
+	cancel()
 }

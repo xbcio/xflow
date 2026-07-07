@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/xbcio/xflow/engine"
@@ -11,20 +12,18 @@ import (
 	"github.com/xbcio/xflow/service/protocol"
 )
 
+// ProtocolClient opens a frame stream to the control plane. gRPC and HTTP
+// transports both implement it (HTTP simulates the stream with long-poll).
 type ProtocolClient interface {
-	Register(ctx context.Context, req protocol.RegisterRunnerRequest) (protocol.RegisterRunnerResponse, error)
-	Heartbeat(ctx context.Context, req protocol.HeartbeatRequest) (protocol.HeartbeatResponse, error)
-	Poll(ctx context.Context, req protocol.PollTaskRequest) (protocol.PollTaskResponse, error)
-	ReportResult(ctx context.Context, req protocol.ReportResultRequest) (protocol.ReportResultResponse, error)
+	Connect(ctx context.Context) (protocol.FrameStream, error)
 }
 
 type Config struct {
-	RunnerID          string
-	Concurrency       int
-	Labels            map[string]string
-	Capabilities      []protocol.Capability
-	HeartbeatInterval time.Duration
-	PollWait          time.Duration
+	RunnerID     string
+	Concurrency  int
+	Labels       map[string]string
+	Capabilities []protocol.Capability
+	PollWait     time.Duration // retained for HTTP fallback simulation
 }
 
 type Runner struct {
@@ -37,12 +36,6 @@ func New(client ProtocolClient, registry engine.HandlerRegistry, config Config) 
 	if config.Concurrency <= 0 {
 		config.Concurrency = 1
 	}
-	if config.HeartbeatInterval <= 0 {
-		config.HeartbeatInterval = 5 * time.Second
-	}
-	if config.PollWait <= 0 {
-		config.PollWait = time.Second
-	}
 	return &Runner{
 		client:   client,
 		executor: execution.NewRunner(registry),
@@ -50,93 +43,127 @@ func New(client ProtocolClient, registry engine.HandlerRegistry, config Config) 
 	}
 }
 
+// Run opens a bidi stream, sends HELLO, waits for WELCOME, then runs a recv
+// loop handing TASK frames to a worker pool of size Concurrency. Returns on
+// BYE, ctx cancel, or stream error. The caller reconnects with backoff after
+// non-nil return.
 func (r *Runner) Run(ctx context.Context) error {
-	if _, err := r.client.Register(ctx, protocol.RegisterRunnerRequest{
+	stream, err := r.client.Connect(ctx)
+	if err != nil {
+		return fmt.Errorf("connect: %w", err)
+	}
+	defer stream.Close()
+
+	if err := stream.Send(protocol.RunnerFrame{Hello: &protocol.HelloFrame{
 		RunnerID:     r.config.RunnerID,
 		Concurrency:  r.config.Concurrency,
-		Labels:       cloneLabels(r.config.Labels),
 		Capabilities: r.config.Capabilities,
-	}); err != nil {
-		return err
+		Labels:       cloneLabels(r.config.Labels),
+	}}); err != nil {
+		return fmt.Errorf("send hello: %w", err)
 	}
 
-	inFlight := 0
-	if err := r.heartbeat(ctx, inFlight); err != nil {
-		return err
+	welcome, err := stream.Recv()
+	if err != nil {
+		return fmt.Errorf("recv welcome: %w", err)
+	}
+	if welcome.Welcome == nil {
+		return fmt.Errorf("expected WELCOME, got %+v", welcome)
 	}
 
-	ticker := time.NewTicker(r.config.HeartbeatInterval)
-	defer ticker.Stop()
+	// taskCh buffers up to Concurrency leases so recvLoop is never blocked by
+	// a full worker pool when the pool is at capacity.
+	taskCh := make(chan engine.TaskLease, r.config.Concurrency)
 
+	var wg sync.WaitGroup
+	for i := 0; i < r.config.Concurrency; i++ {
+		wg.Add(1)
+		go r.worker(ctx, taskCh, stream, &wg)
+	}
+
+	recvErr := make(chan error, 1)
+	go func() { recvErr <- r.recvLoop(ctx, stream, taskCh) }()
+
+	var firstErr error
+	select {
+	case err := <-recvErr:
+		firstErr = err
+	case <-ctx.Done():
+		firstErr = ctx.Err()
+	}
+
+	close(taskCh)
+
+	// Wait for in-flight workers to drain (30 s hard timeout).
+	waitDone := make(chan struct{})
+	go func() { wg.Wait(); close(waitDone) }()
+	select {
+	case <-waitDone:
+	case <-time.After(30 * time.Second):
+	}
+
+	_ = stream.Send(protocol.RunnerFrame{Bye: &protocol.ByeFrame{}})
+
+	// Drain the recvLoop goroutine (it may still be blocked on Recv).
+	// recvErr already has at most one value; a second send is harmless after
+	// the channel is buffered size-1 — but recvLoop may still be running if we
+	// got here via ctx.Done, so drain it.
+	select {
+	case <-recvErr:
+	default:
+	}
+
+	if errors.Is(firstErr, context.Canceled) {
+		return nil
+	}
+	return firstErr
+}
+
+// recvLoop reads frames from the stream and dispatches TASK leases to taskCh.
+// It returns on stream error, ctx cancellation, or when taskCh is closed.
+func (r *Runner) recvLoop(ctx context.Context, stream protocol.FrameStream, taskCh chan<- engine.TaskLease) error {
 	for {
-		select {
-		case <-ctx.Done():
-			if errors.Is(ctx.Err(), context.Canceled) {
-				return nil
-			}
-			return ctx.Err()
-		case <-ticker.C:
-			if err := r.heartbeat(ctx, inFlight); err != nil {
-				return err
-			}
-			continue
-		default:
-		}
-
-		resp, err := r.client.Poll(ctx, protocol.PollTaskRequest{
-			RunnerID:     r.config.RunnerID,
-			Capacity:     r.config.Concurrency - inFlight,
-			Labels:       cloneLabels(r.config.Labels),
-			Capabilities: r.config.Capabilities,
-		})
+		fr, err := stream.Recv()
 		if err != nil {
 			return err
 		}
-		if resp.Lease == nil {
-			wait := resp.Wait
-			if wait <= 0 {
-				wait = r.config.PollWait
+		switch {
+		case fr.Task != nil:
+			if fr.Task.Lease == nil {
+				continue
 			}
-			if err := sleepContext(ctx, wait); err != nil {
-				if errors.Is(err, context.Canceled) {
-					return nil
-				}
-				return err
+			select {
+			case taskCh <- *fr.Task.Lease:
+			case <-ctx.Done():
+				return ctx.Err()
 			}
-			continue
-		}
-
-		inFlight = 1
-		result, execErr := r.executor.Execute(ctx, resp.Lease)
-		if execErr != nil {
-			result = engine.TaskResult{Error: execErr}
-		}
-		reportResp, err := r.client.ReportResult(ctx, protocol.ReportResultRequest{
-			RunnerID: r.config.RunnerID,
-			Lease:    resp.Lease,
-			Result:   result,
-		})
-		inFlight = 0
-		if err != nil {
-			if errors.Is(err, context.Canceled) {
-				return nil
+		case fr.Ack != nil, fr.Keepalive != nil:
+			// informational — no action needed
+		case fr.Backoff != nil:
+			select {
+			case <-time.After(fr.Backoff.Wait):
+			case <-ctx.Done():
+				return ctx.Err()
 			}
-			return err
-		}
-		if !reportResp.Accepted {
-			return fmt.Errorf("task result rejected: %s", reportResp.Error)
 		}
 	}
 }
 
-func (r *Runner) heartbeat(ctx context.Context, inFlight int) error {
-	_, err := r.client.Heartbeat(ctx, protocol.HeartbeatRequest{
-		RunnerID:  r.config.RunnerID,
-		Capacity:  r.config.Concurrency,
-		InFlight:  inFlight,
-		Timestamp: time.Now().Unix(),
-	})
-	return err
+// worker drains taskCh, executes each lease, and sends the result back.
+func (r *Runner) worker(ctx context.Context, taskCh <-chan engine.TaskLease, stream protocol.FrameStream, wg *sync.WaitGroup) {
+	defer wg.Done()
+	for lease := range taskCh {
+		leaseCopy := lease // capture loop variable
+		result, execErr := r.executor.Execute(ctx, &leaseCopy)
+		if execErr != nil {
+			result = engine.TaskResult{Error: execErr}
+		}
+		_ = stream.Send(protocol.RunnerFrame{Result: &protocol.ResultFrame{
+			LeaseID: string(leaseCopy.LeaseID),
+			Lease:   &leaseCopy,
+			Result:  result,
+		}})
+	}
 }
 
 func cloneLabels(labels map[string]string) map[string]string {
@@ -144,19 +171,8 @@ func cloneLabels(labels map[string]string) map[string]string {
 		return nil
 	}
 	out := make(map[string]string, len(labels))
-	for key, value := range labels {
-		out[key] = value
+	for k, v := range labels {
+		out[k] = v
 	}
 	return out
-}
-
-func sleepContext(ctx context.Context, delay time.Duration) error {
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
 }
