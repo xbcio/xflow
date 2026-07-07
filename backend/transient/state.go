@@ -27,7 +27,7 @@ type state struct {
 	subExecs      map[string][]*engine.SubExecution
 	doneCh        map[types.ExecutionID]chan struct{}
 	eventWatchers map[types.ExecutionID][]chan engine.ExecutionEvent
-	activeTimers  map[types.ExecutionID]*time.Timer
+	activeTimers  map[types.ExecutionID]*activeTimer
 	cleanupTimers map[types.ExecutionID]*time.Timer
 	onCleanup     func(types.ExecutionID)
 }
@@ -35,6 +35,11 @@ type state struct {
 type execEntry struct {
 	snap   engine.ExecutionSnapshot
 	closed bool
+}
+
+type activeTimer struct {
+	timer      *time.Timer
+	generation uint64
 }
 
 func newState(activeTTL, completionTTL time.Duration) *state {
@@ -49,7 +54,7 @@ func newState(activeTTL, completionTTL time.Duration) *state {
 		subExecs:      make(map[string][]*engine.SubExecution),
 		doneCh:        make(map[types.ExecutionID]chan struct{}),
 		eventWatchers: make(map[types.ExecutionID][]chan engine.ExecutionEvent),
-		activeTimers:  make(map[types.ExecutionID]*time.Timer),
+		activeTimers:  make(map[types.ExecutionID]*activeTimer),
 		cleanupTimers: make(map[types.ExecutionID]*time.Timer),
 	}
 }
@@ -532,24 +537,55 @@ func (s *state) touchActiveLocked(id types.ExecutionID) {
 		s.stopActiveTimerLocked(id)
 		return
 	}
-	if timer := s.activeTimers[id]; timer != nil {
-		timer.Stop()
+	var generation uint64 = 1
+	if active := s.activeTimers[id]; active != nil {
+		active.timer.Stop()
+		generation = active.generation + 1
 	}
-	s.activeTimers[id] = time.AfterFunc(s.activeTTL, func() {
-		s.expireActiveExecution(id)
-	})
+	s.activeTimers[id] = &activeTimer{
+		generation: generation,
+		timer: time.AfterFunc(s.activeTTL, func() {
+			s.expireActiveExecution(id, generation)
+		}),
+	}
+}
+
+func (s *state) activeGeneration(id types.ExecutionID) uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if active := s.activeTimers[id]; active != nil {
+		return active.generation
+	}
+	return 0
+}
+
+func (s *state) refreshActiveGenerationForTest(id types.ExecutionID, generation uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if active := s.activeTimers[id]; active != nil && active.generation == generation {
+		s.touchActiveLocked(id)
+	}
+}
+
+func (s *state) expireActiveGenerationForTest(id types.ExecutionID, generation uint64) {
+	s.expireActiveExecution(id, generation)
 }
 
 func (s *state) stopActiveTimerLocked(id types.ExecutionID) {
-	if timer := s.activeTimers[id]; timer != nil {
-		timer.Stop()
+	if active := s.activeTimers[id]; active != nil {
+		active.timer.Stop()
 		delete(s.activeTimers, id)
 	}
 }
 
-func (s *state) expireActiveExecution(id types.ExecutionID) {
+func (s *state) expireActiveExecution(id types.ExecutionID, generation uint64) {
 	s.mu.Lock()
 
+	active := s.activeTimers[id]
+	if active == nil || active.generation != generation {
+		s.mu.Unlock()
+		return
+	}
 	delete(s.activeTimers, id)
 	entry, ok := s.executions[id]
 	if !ok {
@@ -618,7 +654,6 @@ func (s *state) cleanupExecutionLocked(id types.ExecutionID) (bool, func(types.E
 	delete(s.eventWatchers, id)
 	return hadExecution || hadDone || hadWatchers, s.onCleanup
 }
-
 func isTerminalStatus(status types.ExecutionStatus) bool {
 	return types.IsTerminalExecutionStatus(status)
 }

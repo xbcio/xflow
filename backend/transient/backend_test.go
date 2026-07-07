@@ -118,6 +118,32 @@ func TestTransientStateRejectsNodeMutationAfterCleanup(t *testing.T) {
 	}
 }
 
+func TestTransientStateIgnoresStaleActiveTimerGeneration(t *testing.T) {
+	backend := New(WithActiveTTL(time.Second), WithCompletionTTL(time.Second))
+	state := backend.State()
+	ctx := context.Background()
+	id := types.ExecutionID("exec-transient-stale-timer")
+
+	if err := state.CreateExecution(ctx, &engine.ExecutionSnapshot{
+		ID:     id,
+		Graph:  testTransientGraph(t),
+		Status: types.ExecutionStatusRunning,
+	}); err != nil {
+		t.Fatalf("CreateExecution() error = %v", err)
+	}
+	oldGeneration := backend.state.activeGeneration(id)
+	backend.state.refreshActiveGenerationForTest(id, oldGeneration)
+	backend.state.expireActiveGenerationForTest(id, oldGeneration)
+
+	snap, err := state.GetExecution(ctx, id)
+	if err != nil {
+		t.Fatalf("GetExecution() error = %v", err)
+	}
+	if snap == nil {
+		t.Fatal("stale active timer generation expired refreshed execution")
+	}
+}
+
 func testTransientGraph(t *testing.T) *graph.Graph {
 	t.Helper()
 
