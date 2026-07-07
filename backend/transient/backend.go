@@ -96,6 +96,7 @@ func (b *Backend) WorkflowRegistry() backend.WorkflowRegistry { return b.workflo
 func (b *Backend) TriggerPrimitives() backend.TriggerPrimitives { return b.triggerRuntime }
 
 func (b *Backend) Bind(eng *engine.Engine) func() {
+	b.state.SetCleanupHook(eng.EvictExecution)
 	var opts []execution.RunnerOption
 	if b.resourcePool != nil {
 		opts = append(opts, execution.WithResourcePool(b.resourcePool))

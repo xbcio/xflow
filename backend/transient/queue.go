@@ -75,8 +75,14 @@ func (q *queue) dispatch(env queueEnvelope) {
 	if q.state != nil && q.state.executionTerminal(env.task.ExecutionID) {
 		return
 	}
+	if q.state != nil && !q.state.executionExists(env.task.ExecutionID) {
+		return
+	}
 	err := q.handler(context.Background(), env.task)
 	if err == nil {
+		return
+	}
+	if q.state != nil && !q.state.executionExists(env.task.ExecutionID) {
 		return
 	}
 	if errors.Is(err, types.ErrPermanent) {

@@ -82,6 +82,15 @@ func New(state StateStore, queue TaskQueue, opts ...Option) *Engine {
 // Exposed so sweepers running on the same process can pick the same value.
 func (e *Engine) LeaseTTL() time.Duration { return e.defaultLeaseTTL }
 
+// EvictExecution removes an execution's in-process graph cache. Backends that
+// expire runtime state independently can call this so late runner callbacks
+// observe the execution as inactive instead of using stale cached graph data.
+func (e *Engine) EvictExecution(id types.ExecutionID) {
+	e.mu.Lock()
+	delete(e.graphs, id)
+	e.mu.Unlock()
+}
+
 // Submit starts a new execution of the given graph with the provided params.
 // It persists the execution snapshot, caches the graph, and enqueues all
 // root nodes (in-degree == 0).

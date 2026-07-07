@@ -29,6 +29,7 @@ type state struct {
 	eventWatchers map[types.ExecutionID][]chan engine.ExecutionEvent
 	activeTimers  map[types.ExecutionID]*time.Timer
 	cleanupTimers map[types.ExecutionID]*time.Timer
+	onCleanup     func(types.ExecutionID)
 }
 
 type execEntry struct {
@@ -51,6 +52,12 @@ func newState(activeTTL, completionTTL time.Duration) *state {
 		activeTimers:  make(map[types.ExecutionID]*time.Timer),
 		cleanupTimers: make(map[types.ExecutionID]*time.Timer),
 	}
+}
+
+func (s *state) SetCleanupHook(fn func(types.ExecutionID)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onCleanup = fn
 }
 
 func (s *state) CreateExecution(_ context.Context, e *engine.ExecutionSnapshot) error {
@@ -432,6 +439,13 @@ func (s *state) executionTerminal(id types.ExecutionID) bool {
 	return ok && isTerminalStatus(entry.snap.Status)
 }
 
+func (s *state) executionExists(id types.ExecutionID) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.executions[id]
+	return ok
+}
+
 func (s *state) doneChannel(id types.ExecutionID) <-chan struct{} {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -480,9 +494,11 @@ func (s *state) scheduleCleanupLocked(id types.ExecutionID) {
 
 func (s *state) cleanupExecution(id types.ExecutionID) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.cleanupExecutionLocked(id)
+	cleaned, hook := s.cleanupExecutionLocked(id)
+	s.mu.Unlock()
+	if cleaned && hook != nil {
+		hook(id)
+	}
 }
 
 func (s *state) touchActiveLocked(id types.ExecutionID) {
@@ -514,14 +530,15 @@ func (s *state) stopActiveTimerLocked(id types.ExecutionID) {
 
 func (s *state) expireActiveExecution(id types.ExecutionID) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	delete(s.activeTimers, id)
 	entry, ok := s.executions[id]
 	if !ok {
+		s.mu.Unlock()
 		return
 	}
 	if isTerminalStatus(entry.snap.Status) {
+		s.mu.Unlock()
 		return
 	}
 	if !entry.closed {
@@ -530,10 +547,14 @@ func (s *state) expireActiveExecution(id types.ExecutionID) {
 			close(ch)
 		}
 	}
-	s.cleanupExecutionLocked(id)
+	cleaned, hook := s.cleanupExecutionLocked(id)
+	s.mu.Unlock()
+	if cleaned && hook != nil {
+		hook(id)
+	}
 }
 
-func (s *state) cleanupExecutionLocked(id types.ExecutionID) {
+func (s *state) cleanupExecutionLocked(id types.ExecutionID) (bool, func(types.ExecutionID)) {
 	s.stopActiveTimerLocked(id)
 
 	if timer := s.cleanupTimers[id]; timer != nil {
@@ -542,6 +563,9 @@ func (s *state) cleanupExecutionLocked(id types.ExecutionID) {
 	}
 
 	prefix := string(id) + "/"
+	_, hadExecution := s.executions[id]
+	_, hadDone := s.doneCh[id]
+	_, hadWatchers := s.eventWatchers[id]
 	delete(s.executions, id)
 	delete(s.doneCh, id)
 	for key := range s.nodes {
@@ -573,6 +597,7 @@ func (s *state) cleanupExecutionLocked(id types.ExecutionID) {
 		close(watcher)
 	}
 	delete(s.eventWatchers, id)
+	return hadExecution || hadDone || hadWatchers, s.onCleanup
 }
 
 func isTerminalStatus(status types.ExecutionStatus) bool {

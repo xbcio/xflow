@@ -3,6 +3,7 @@ package xflow
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -58,7 +59,9 @@ func TestNewLocalTransientFailsSuspendWorkflow(t *testing.T) {
 }
 
 func TestNewLocalTransientExpiresActiveExecutionState(t *testing.T) {
+	var calls int32
 	action := node.Define("test.transient.local.slow", func(_ context.Context, input *types.Input) (*types.Output, error) {
+		atomic.AddInt32(&calls, 1)
 		time.Sleep(150 * time.Millisecond)
 		return &types.Output{Data: map[string]any{"seen": input.Data["value"]}}, nil
 	})
@@ -93,6 +96,11 @@ func TestNewLocalTransientExpiresActiveExecutionState(t *testing.T) {
 		}
 		return snap == nil
 	})
+
+	time.Sleep(250 * time.Millisecond)
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("slow handler calls = %d, want 1; expired execution should not be retried", got)
+	}
 }
 
 func TestNewLocalTransientExpiresCompletedExecutionState(t *testing.T) {
