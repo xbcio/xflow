@@ -4,22 +4,23 @@ type WorkflowID string
 
 // WorkflowDef is the top-level DSL data structure representing a workflow definition.
 type WorkflowDef struct {
-	ID            string                    `json:"id,omitempty"`
-	Namespace     string                    `json:"namespace,omitempty"`
-	Name          string                    `json:"name,omitempty"`
-	Version       string                    `json:"version,omitempty"`
-	Description   string                    `json:"description,omitempty"`
-	Spec          string                    `json:"spec,omitempty"`
-	Context       *WorkflowContext          `json:"context,omitempty"`
-	Settings      *WorkflowSettings         `json:"settings,omitempty"`
-	Options       *WorkflowOptions          `json:"options,omitempty"`
-	Credentials   map[string]CredentialDef  `json:"credentials,omitempty"`
-	Params        map[string]ParamDef       `json:"params,omitempty"`
-	NodeTemplates map[string]NodeTemplate   `json:"node_templates,omitempty"`
-	Nodes         []NodeDef                 `json:"nodes,omitempty"`
-	Connections   Connections               `json:"connections,omitempty"`
-	Outputs       map[string]WorkflowOutput `json:"outputs,omitempty"`
-	PinData       map[string]any            `json:"pin_data,omitempty"`
+	ID             string                    `json:"id,omitempty"`
+	Namespace      string                    `json:"namespace,omitempty"`
+	Name           string                    `json:"name,omitempty"`
+	Version        string                    `json:"version,omitempty"`
+	Description    string                    `json:"description,omitempty"`
+	Spec           string                    `json:"spec,omitempty"`
+	RunnerSelector *RunnerSelector           `json:"runnerSelector,omitempty"`
+	Context        *WorkflowContext          `json:"context,omitempty"`
+	Settings       *WorkflowSettings         `json:"settings,omitempty"`
+	Options        *WorkflowOptions          `json:"options,omitempty"`
+	Credentials    map[string]CredentialDef  `json:"credentials,omitempty"`
+	Params         map[string]ParamDef       `json:"params,omitempty"`
+	NodeTemplates  map[string]NodeTemplate   `json:"node_templates,omitempty"`
+	Nodes          []NodeDef                 `json:"nodes,omitempty"`
+	Connections    Connections               `json:"connections,omitempty"`
+	Outputs        map[string]WorkflowOutput `json:"outputs,omitempty"`
+	PinData        map[string]any            `json:"pin_data,omitempty"`
 }
 
 // WorkflowOptions controls advanced workflow-level runtime behavior.
@@ -52,23 +53,36 @@ type WorkflowOptions struct {
 
 // NodeDef describes a single node in the workflow graph.
 type NodeDef struct {
-	ID           string         `json:"id,omitempty"`
-	Name         string         `json:"name,omitempty"`
-	Type         string         `json:"type,omitempty"`
-	Kind         NodeKind       `json:"kind,omitempty"`
-	Version      int            `json:"version,omitempty"`
-	Template     string         `json:"template,omitempty"`
-	Position     *Position      `json:"position,omitempty"`
-	Disabled     bool           `json:"disabled,omitempty"`
-	OnError      string         `json:"on_error,omitempty"`
-	Notes        string         `json:"notes,omitempty"`
-	Inputs       []PortDecl     `json:"inputs,omitempty"`
-	OutputSchema map[string]any `json:"output_schema,omitempty"`
-	Parameters   map[string]any `json:"parameters,omitempty"`
-	UI           map[string]any `json:"ui,omitempty"`
+	ID             string          `json:"id,omitempty"`
+	Name           string          `json:"name,omitempty"`
+	Type           string          `json:"type,omitempty"`
+	Kind           NodeKind        `json:"kind,omitempty"`
+	Version        int             `json:"version,omitempty"`
+	Template       string          `json:"template,omitempty"`
+	Position       *Position       `json:"position,omitempty"`
+	Disabled       bool            `json:"disabled,omitempty"`
+	OnError        string          `json:"on_error,omitempty"`
+	RunnerSelector *RunnerSelector `json:"runnerSelector,omitempty"`
+	Notes          string          `json:"notes,omitempty"`
+	Inputs         []PortDecl      `json:"inputs,omitempty"`
+	OutputSchema   map[string]any  `json:"output_schema,omitempty"`
+	Parameters     map[string]any  `json:"parameters,omitempty"`
+	UI             map[string]any  `json:"ui,omitempty"`
 	// Retry overrides WorkflowSettings.Retry for this node. Nil means inherit
 	// the workflow default; the workflow default of nil means no retries.
 	Retry *RetrySettings `json:"retry,omitempty"`
+}
+
+type RunnerSelectorMode string
+
+const (
+	RunnerSelectorModeDefault  RunnerSelectorMode = "default"
+	RunnerSelectorModeRequired RunnerSelectorMode = "required"
+)
+
+type RunnerSelector struct {
+	Mode        RunnerSelectorMode `json:"mode,omitempty"`
+	MatchLabels map[string]string  `json:"matchLabels,omitempty"`
 }
 
 // NodeKind describes a node's runtime role.
