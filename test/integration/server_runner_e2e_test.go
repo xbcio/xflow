@@ -19,6 +19,7 @@ import (
 	"github.com/xbcio/xflow/service/protocol"
 	runnersvc "github.com/xbcio/xflow/service/runner"
 	"github.com/xbcio/xflow/types"
+	redis "github.com/redis/go-redis/v9"
 )
 
 type e2eSubmitReq struct {
@@ -30,14 +31,15 @@ type e2eSubmitResp struct {
 	ExecutionID types.ExecutionID `json:"execution_id"`
 }
 
-func submitWorkflowHTTP(t *testing.T, baseURL string, wf *types.WorkflowDef, params map[string]any) types.ExecutionID {
+// Finding 1: accept *http.Client so server.Close() cleans up idle connections.
+func submitWorkflowHTTP(t *testing.T, baseURL string, client *http.Client, wf *types.WorkflowDef, params map[string]any) types.ExecutionID {
 	t.Helper()
 	body := e2eSubmitReq{Workflow: wf, Params: params}
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(body); err != nil {
 		t.Fatalf("encode: %v", err)
 	}
-	resp, err := http.Post(baseURL+control.SubmitWorkflowPath, "application/json", &buf)
+	resp, err := client.Post(baseURL+control.SubmitWorkflowPath, "application/json", &buf)
 	if err != nil {
 		t.Fatalf("submit: %v", err)
 	}
@@ -65,16 +67,22 @@ func (e2eRealHandler) Execute(_ context.Context, input *types.Input) (*types.Out
 	}}, nil
 }
 
+// Finding 2: ticker + select instead of bare time.Sleep.
 func waitForE2ERunner(t *testing.T, pool *control.RunnerPool, id string) {
 	t.Helper()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
 	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
+	for {
 		if _, ok := pool.Runner(id); ok {
 			return
 		}
-		time.Sleep(10 * time.Millisecond)
+		select {
+		case <-ticker.C:
+		case <-time.After(time.Until(deadline)):
+			t.Fatalf("timeout waiting for runner %q to register", id)
+		}
 	}
-	t.Fatalf("timeout waiting for runner %q to register", id)
 }
 
 func TestServerRunnerE2ERealRedis(t *testing.T) {
@@ -84,6 +92,13 @@ func TestServerRunnerE2ERealRedis(t *testing.T) {
 	if err != nil {
 		t.Fatalf("asynq.New: %v", err)
 	}
+
+	// Finding 3: flush stale asynq tasks from previous (crashed) runs.
+	rdb := redis.NewClient(&redis.Options{Addr: addr})
+	if err := rdb.FlushDB(context.Background()).Err(); err != nil {
+		t.Fatalf("flushdb: %v", err)
+	}
+	_ = rdb.Close()
 
 	eng := engine.New(b.State(), b.Queue())
 	runners := control.NewRunnerPool()
@@ -113,7 +128,8 @@ func TestServerRunnerE2ERealRedis(t *testing.T) {
 	go func() { errCh <- runner.Run(ctx) }()
 	waitForE2ERunner(t, runners, "runner-real-1")
 
-	execID := submitWorkflowHTTP(t, server.URL, &types.WorkflowDef{
+	// Finding 1: pass server.Client() so idle connections are cleaned up on server.Close.
+	execID := submitWorkflowHTTP(t, server.URL, server.Client(), &types.WorkflowDef{
 		Name: "server-runner-e2e-real",
 		Nodes: []types.NodeDef{
 			{Name: "start", Type: "test.e2e.real"},
@@ -140,7 +156,8 @@ func TestServerRunnerE2ERealRedis(t *testing.T) {
 		if err != nil {
 			t.Fatalf("runner error = %v", err)
 		}
-	case <-time.After(time.Second):
-		t.Log("runner did not stop in time (acceptable for integration test)")
+	// Finding 4: extend timeout to 3s and use t.Fatal instead of t.Log.
+	case <-time.After(3 * time.Second):
+		t.Fatal("runner did not stop in time")
 	}
 }
