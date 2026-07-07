@@ -13,6 +13,31 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+func newRedisStateTestClient(t *testing.T) *redis.Client {
+	t.Helper()
+
+	redisServer, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(redisServer.Close)
+
+	rdb := redis.NewClient(&redis.Options{Addr: redisServer.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+	return rdb
+}
+
+func testGraphOneNode() *graph.Graph {
+	g, err := graph.Compile(&types.WorkflowDef{
+		Name:  "test-one-node",
+		Nodes: []types.NodeDef{{Name: "start", Type: "test.echo"}},
+	})
+	if err != nil {
+		panic(err)
+	}
+	return g
+}
+
 func TestBuildExecutionRecordPersistsWorkflowAuditContext(t *testing.T) {
 	def := &types.WorkflowDef{
 		Name: "vulnerability-approval",
@@ -194,5 +219,100 @@ func TestUpsertNodeStoresStatusString(t *testing.T) {
 	}
 	if got != string(types.NodeStatusSuccess) {
 		t.Fatalf("node status = %q, want %q", got, types.NodeStatusSuccess)
+	}
+}
+
+func TestTransientModeRefreshesTTLOnNodeMutation(t *testing.T) {
+	redisServer, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer redisServer.Close()
+
+	rdb := redis.NewClient(&redis.Options{Addr: redisServer.Addr()})
+	defer rdb.Close()
+
+	state := newRedisState(rdb, nil, time.Hour)
+	state.transient = true
+	state.transientTTL = time.Minute
+	state.transientCompletionTTL = 30 * time.Second
+
+	ctx := context.Background()
+	id := types.ExecutionID("exec-transient-ttl")
+
+	if err := state.CreateExecution(ctx, &engine.ExecutionSnapshot{
+		ID:     id,
+		Status: types.ExecutionStatusRunning,
+		Graph:  testGraphOneNode(),
+	}); err != nil {
+		t.Fatalf("CreateExecution() error = %v", err)
+	}
+
+	rdb.Set(ctx, nodeStatusKey(id, "start"), string(types.NodeStatusPending), 20*time.Second)
+	before := rdb.TTL(ctx, execKey(id, "status")).Val()
+	if before <= 0 {
+		t.Fatalf("initial TTL = %s, want positive", before)
+	}
+	redisServer.FastForward(20 * time.Second)
+	before = rdb.TTL(ctx, execKey(id, "status")).Val()
+	if before > 45*time.Second {
+		t.Fatalf("aged TTL = %s, want below refresh target", before)
+	}
+
+	if err := state.UpsertNode(ctx, &engine.NodeSnapshot{
+		ExecutionID: id,
+		Name:        "start",
+		NodeIdx:     0,
+		Status:      types.NodeStatusRunning,
+	}); err != nil {
+		t.Fatalf("UpsertNode() error = %v", err)
+	}
+
+	after := rdb.TTL(ctx, execKey(id, "status")).Val()
+	if after <= before {
+		t.Fatalf("TTL after mutation = %s, before = %s; want refreshed", after, before)
+	}
+
+	nodeTTL := rdb.TTL(ctx, nodeStatusKey(id, "start")).Val()
+	if nodeTTL < 55*time.Second {
+		t.Fatalf("node TTL after mutation = %s, want close to %s", nodeTTL, state.transientTTL)
+	}
+}
+
+func TestTransientModeShortensTTLOnTerminalExecutionStatus(t *testing.T) {
+	rdb := newRedisStateTestClient(t)
+	state := newRedisState(rdb, nil, time.Hour)
+	state.transient = true
+	state.transientTTL = time.Minute
+	state.transientCompletionTTL = 15 * time.Second
+
+	ctx := context.Background()
+	id := types.ExecutionID("exec-transient-complete")
+
+	if err := state.CreateExecution(ctx, &engine.ExecutionSnapshot{
+		ID:     id,
+		Status: types.ExecutionStatusRunning,
+		Graph:  testGraphOneNode(),
+	}); err != nil {
+		t.Fatalf("CreateExecution() error = %v", err)
+	}
+	if err := state.UpsertNode(ctx, &engine.NodeSnapshot{
+		ExecutionID: id,
+		Name:        "start",
+		NodeIdx:     0,
+		Status:      types.NodeStatusSuccess,
+	}); err != nil {
+		t.Fatalf("UpsertNode() error = %v", err)
+	}
+
+	if err := state.UpdateExecutionStatus(ctx, id, types.ExecutionStatusSuccess, ""); err != nil {
+		t.Fatalf("UpdateExecutionStatus() error = %v", err)
+	}
+
+	for _, key := range []string{execKey(id, "status"), execKey(id, "graph"), nodeStatusKey(id, "start")} {
+		got := rdb.TTL(ctx, key).Val()
+		if got < 10*time.Second || got > 15*time.Second {
+			t.Fatalf("TTL for %q = %s, want close to %s", key, got, state.transientCompletionTTL)
+		}
 	}
 }

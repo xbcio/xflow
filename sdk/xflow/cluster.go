@@ -67,6 +67,9 @@ func NewCluster(clusterCfg ClusterConfig, opts ...Option) (*Engine, error) {
 		backendasynq.WithConcurrency(cfg.concurrency),
 		backendasynq.WithConsumer(!clusterCfg.DisableConsumer),
 	}
+	if cfg.executionMode == ExecutionModeTransient {
+		asynqOpts = append(asynqOpts, backendasynq.WithTransientMode(cfg.transientTTL, cfg.transientCompletionTTL))
+	}
 	if pool := resolveResourcePool(cfg); pool != nil && !clusterCfg.DisableConsumer {
 		// Only worker pods need a pool; API-only pods don't dispatch handlers.
 		asynqOpts = append(asynqOpts, backendasynq.WithResourcePool(pool))

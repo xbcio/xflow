@@ -311,9 +311,12 @@ return anyFailed and -1 or 1
 // ---------------------------------------------------------------------------
 
 type redisState struct {
-	rdb     *redis.Client
-	db      store.Store // may be nil
-	execTTL time.Duration
+	rdb                    *redis.Client
+	db                     store.Store // may be nil
+	execTTL                time.Duration
+	transient              bool
+	transientTTL           time.Duration
+	transientCompletionTTL time.Duration
 
 	// in-memory graph cache for CheckCompletion (avoids Redis round-trips per node)
 	mu     sync.RWMutex
@@ -343,7 +346,12 @@ func newRedisState(rdb *redis.Client, db store.Store, execTTL time.Duration) *re
 	}
 }
 
-func (s *redisState) ttlSec() int { return int(s.execTTL.Seconds()) }
+func (s *redisState) ttlSec() int {
+	if s.transient && s.transientTTL > 0 {
+		return int(s.transientTTL.Seconds())
+	}
+	return int(s.execTTL.Seconds())
+}
 
 // getExecTTL returns the per-execution TTL override if set, otherwise the adapter default.
 func (s *redisState) getExecTTL(id types.ExecutionID) time.Duration {
@@ -353,7 +361,58 @@ func (s *redisState) getExecTTL(id types.ExecutionID) time.Duration {
 	if ttl > 0 {
 		return ttl
 	}
+	if s.transient && s.transientTTL > 0 {
+		return s.transientTTL
+	}
 	return s.execTTL
+}
+
+func (s *redisState) executionKeys(ctx context.Context, id types.ExecutionID) ([]string, error) {
+	pattern := fmt.Sprintf("xflow:exec:{%s}:*", id)
+	iter := s.rdb.Scan(ctx, 0, pattern, 0).Iterator()
+	keys := make([]string, 0, 16)
+	for iter.Next(ctx) {
+		keys = append(keys, iter.Val())
+	}
+	if err := iter.Err(); err != nil {
+		return nil, fmt.Errorf("scan execution keys %q: %w", id, err)
+	}
+	return keys, nil
+}
+
+func (s *redisState) expireExecutionKeys(ctx context.Context, id types.ExecutionID, ttl time.Duration) error {
+	if ttl <= 0 {
+		return nil
+	}
+	keys, err := s.executionKeys(ctx, id)
+	if err != nil {
+		return err
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	pipe := s.rdb.Pipeline()
+	for _, key := range keys {
+		pipe.Expire(ctx, key, ttl)
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("expire execution keys %q: %w", id, err)
+	}
+	return nil
+}
+
+func (s *redisState) refreshTransientTTL(ctx context.Context, id types.ExecutionID) error {
+	if !s.transient {
+		return nil
+	}
+	return s.expireExecutionKeys(ctx, id, s.transientTTL)
+}
+
+func (s *redisState) shortenTransientCompletionTTL(ctx context.Context, id types.ExecutionID) error {
+	if !s.transient {
+		return nil
+	}
+	return s.expireExecutionKeys(ctx, id, s.transientCompletionTTL)
 }
 
 // ---------------------------------------------------------------------------
@@ -378,7 +437,7 @@ func (s *redisState) CreateExecution(ctx context.Context, e *engine.ExecutionSna
 	}
 
 	var rec *store.ExecutionRecord
-	if s.db != nil {
+	if s.db != nil && !s.transient {
 		now := time.Now()
 		var recErr error
 		rec, recErr = buildExecutionRecord(ctx, e, now)
@@ -418,6 +477,9 @@ func (s *redisState) CreateExecution(ctx context.Context, e *engine.ExecutionSna
 	}
 	if _, err := pipe.Exec(ctx); err != nil {
 		return fmt.Errorf("create execution %q: %w", e.ID, err)
+	}
+	if err := s.refreshTransientTTL(ctx, e.ID); err != nil {
+		return err
 	}
 
 	// Dual-write to store.
@@ -499,9 +561,18 @@ func (s *redisState) UpdateExecutionStatus(ctx context.Context, id types.Executi
 	if status == types.ExecutionStatusCanceled {
 		s.cleanupOnCancel(ctx, id)
 	}
-	s.auditWrite(ctx, "update_execution_status", func(ctx context.Context) error {
-		return s.db.UpdateExecutionStatus(ctx, id, status, errMsg)
-	})
+	if types.IsTerminalExecutionStatus(status) {
+		if err := s.shortenTransientCompletionTTL(ctx, id); err != nil {
+			return err
+		}
+	} else if err := s.refreshTransientTTL(ctx, id); err != nil {
+		return err
+	}
+	if s.db != nil && !s.transient {
+		s.auditWrite(ctx, "update_execution_status", func(ctx context.Context) error {
+			return s.db.UpdateExecutionStatus(ctx, id, status, errMsg)
+		})
+	}
 	_ = s.PublishExecutionEvent(ctx, engine.ExecutionEvent{ExecutionID: id, Status: status, Error: errMsg})
 	return nil
 }
@@ -642,8 +713,11 @@ func (s *redisState) UpsertNode(ctx context.Context, n *engine.NodeSnapshot) err
 		// terminal, committing, suspended, or pending after retry.
 		_ = s.rdb.ZRem(ctx, leaseExpiryZSetKey, member).Err()
 	}
+	if err := s.refreshTransientTTL(ctx, n.ExecutionID); err != nil {
+		return err
+	}
 
-	if s.db != nil {
+	if s.db != nil && !s.transient {
 		var outBytes []byte
 		if n.Output != nil {
 			outBytes, _ = json.Marshal(n.Output)
@@ -727,6 +801,9 @@ func (s *redisState) ResetNodeForRetry(ctx context.Context, id types.ExecutionID
 	// took effect: either it succeeded (we cleared state) or a concurrent
 	// commit already handled it (index will be pruned on the next ZADD).
 	_ = s.rdb.ZRem(ctx, leaseExpiryZSetKey, leaseExpiryMember(id, name)).Err()
+	if err := s.refreshTransientTTL(ctx, id); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -808,6 +885,11 @@ func (s *redisState) RevokeLease(ctx context.Context, id types.ExecutionID, name
 	// Drop from the expiry index whether or not the Lua path won the race —
 	// the index entry is now stale either way.
 	_ = s.rdb.ZRem(ctx, leaseExpiryZSetKey, leaseExpiryMember(id, name)).Err()
+	if result == 1 {
+		if err := s.refreshTransientTTL(ctx, id); err != nil {
+			return false, err
+		}
+	}
 	return result == 1, nil
 }
 
@@ -852,6 +934,9 @@ func (s *redisState) ClaimTaskLease(ctx context.Context, lease *engine.TaskLease
 	// Successful claim moved the node to Committing (or it was already
 	// terminal). Either way the lease no longer needs sweeping.
 	_ = s.rdb.ZRem(ctx, leaseExpiryZSetKey, leaseExpiryMember(lease.Task.ExecutionID, lease.Task.NodeName)).Err()
+	if err := s.refreshTransientTTL(ctx, lease.Task.ExecutionID); err != nil {
+		return nil, false, err
+	}
 	return ns, true, nil
 }
 
@@ -871,6 +956,9 @@ func (s *redisState) DecrementInDegree(ctx context.Context, id types.ExecutionID
 	).Int64Slice()
 	if err != nil {
 		return 0, 0, fmt.Errorf("propagate lua: %w", err)
+	}
+	if err := s.refreshTransientTTL(ctx, id); err != nil {
+		return 0, 0, err
 	}
 	return int(vals[0]), int(vals[1]), nil
 }
@@ -1129,7 +1217,7 @@ func (s *redisState) DeliverSignal(ctx context.Context, id types.ExecutionID, si
 		}
 	}
 
-	if s.db != nil {
+	if s.db != nil && !s.transient {
 		rec := &store.SignalRecord{
 			ExecutionID: id,
 			SignalName:  signalName,
@@ -1168,7 +1256,7 @@ func (s *redisState) RevokeSignal(ctx context.Context, id types.ExecutionID, sig
 	if err != nil {
 		return false, fmt.Errorf("revoke signal lua: %w", err)
 	}
-	if result == 1 && s.db != nil {
+	if result == 1 && s.db != nil && !s.transient {
 		s.auditWrite(ctx, "revoke_signal", func(ctx context.Context) error {
 			_, err := s.db.RevokeSignal(ctx, id, signalName)
 			return err
@@ -1242,7 +1330,10 @@ func (s *redisState) cleanupOnCancel(ctx context.Context, id types.ExecutionID) 
 
 func (s *redisState) PutOutput(ctx context.Context, id types.ExecutionID, name string, data map[string]any) error {
 	b, _ := json.Marshal(data)
-	return s.rdb.Set(ctx, outputKey(id, name), string(b), s.getExecTTL(id)).Err()
+	if err := s.rdb.Set(ctx, outputKey(id, name), string(b), s.getExecTTL(id)).Err(); err != nil {
+		return err
+	}
+	return s.refreshTransientTTL(ctx, id)
 }
 
 func (s *redisState) GetOutput(ctx context.Context, id types.ExecutionID, name string) (map[string]any, error) {
@@ -1374,7 +1465,10 @@ func splitPrefix(key, prefix string) string {
 func (s *redisState) CreateSubExecution(ctx context.Context, sub *engine.SubExecution) error {
 	key := fmt.Sprintf("xflow:exec:{%s}:subs:%s", sub.ParentExecID, sub.ParentNode)
 	data, _ := json.Marshal(sub)
-	return s.rdb.HSet(ctx, key, string(sub.ChildExecID), data).Err()
+	if err := s.rdb.HSet(ctx, key, string(sub.ChildExecID), data).Err(); err != nil {
+		return err
+	}
+	return s.refreshTransientTTL(ctx, sub.ParentExecID)
 }
 
 func (s *redisState) CompleteSubExecution(ctx context.Context, parentExecID types.ExecutionID, parentNode string, childExecID types.ExecutionID, status types.ExecutionStatus, result map[string]any) (bool, error) {
@@ -1389,6 +1483,9 @@ func (s *redisState) CompleteSubExecution(ctx context.Context, parentExecID type
 	}
 	data, _ := json.Marshal(sub)
 	if err := s.rdb.HSet(ctx, key, string(childExecID), data).Err(); err != nil {
+		return false, err
+	}
+	if err := s.refreshTransientTTL(ctx, parentExecID); err != nil {
 		return false, err
 	}
 

@@ -26,12 +26,15 @@ const defaultLeaderLeaseTTL = 15 * time.Second
 type Option func(*config)
 
 type config struct {
-	concurrency   int
-	execTTL       time.Duration
-	consumer      bool
-	resourcePool  types.ResourcePool
-	auditObserver AuditObserver
-	logger        engine.Logger
+	concurrency            int
+	execTTL                time.Duration
+	consumer               bool
+	resourcePool           types.ResourcePool
+	auditObserver          AuditObserver
+	logger                 engine.Logger
+	transient              bool
+	transientTTL           time.Duration
+	transientCompletionTTL time.Duration
 }
 
 // WithConcurrency sets the number of Asynq queue consumer goroutines. Default is 10.
@@ -50,6 +53,16 @@ func WithExecTTL(d time.Duration) Option {
 		if d > 0 {
 			c.execTTL = d
 		}
+	}
+}
+
+// WithTransientMode enables transient Redis retention with a sliding active TTL
+// and a shorter completion TTL.
+func WithTransientMode(activeTTL, completionTTL time.Duration) Option {
+	return func(c *config) {
+		c.transient = true
+		c.transientTTL = activeTTL
+		c.transientCompletionTTL = completionTTL
 	}
 }
 
@@ -171,6 +184,9 @@ func New(redisAddr string, db store.Store, opts ...Option) (*Backend, error) {
 		state.audit = cfg.auditObserver
 	}
 	state.logger = cfg.logger
+	state.transient = cfg.transient
+	state.transientTTL = cfg.transientTTL
+	state.transientCompletionTTL = cfg.transientCompletionTTL
 	queue := newAsynqQueue(redisAddr)
 	registry := execution.NewRegistry()
 

@@ -18,6 +18,14 @@ type failingStore struct {
 	calls     map[string]int
 }
 
+type countingStore struct {
+	createExecutionCalls int
+	updateStatusCalls    int
+	upsertNodeCalls      int
+	saveSignalCalls      int
+	revokeSignalCalls    int
+}
+
 func newFailingStore(upsertErr error) *failingStore {
 	return &failingStore{upsertErr: upsertErr, calls: map[string]int{}}
 }
@@ -76,6 +84,63 @@ func (f *failingStore) CountSignalsByNames(context.Context, types.ExecutionID, [
 }
 
 func (f *failingStore) ListSignalsByNames(context.Context, types.ExecutionID, []string, store.ListOptions) ([]*store.SignalRecord, error) {
+	return nil, nil
+}
+
+func (c *countingStore) CreateExecution(context.Context, *store.ExecutionRecord) error {
+	c.createExecutionCalls++
+	return nil
+}
+
+func (c *countingStore) UpdateExecutionStatus(context.Context, types.ExecutionID, types.ExecutionStatus, string) error {
+	c.updateStatusCalls++
+	return nil
+}
+
+func (c *countingStore) GetExecution(context.Context, types.ExecutionID) (*store.ExecutionRecord, error) {
+	return nil, nil
+}
+
+func (c *countingStore) UpsertNode(context.Context, *store.NodeRecord) error {
+	c.upsertNodeCalls++
+	return nil
+}
+
+func (c *countingStore) GetNode(context.Context, types.ExecutionID, string) (*store.NodeRecord, error) {
+	return nil, nil
+}
+
+func (c *countingStore) ListNodes(context.Context, types.ExecutionID, store.ListOptions) ([]*store.NodeRecord, error) {
+	return nil, nil
+}
+
+func (c *countingStore) ListSuspendedBySignal(context.Context, types.ExecutionID, string) ([]*store.NodeRecord, error) {
+	return nil, nil
+}
+
+func (c *countingStore) ListExpiredSuspensions(context.Context, time.Time, store.ListOptions) ([]*store.NodeRecord, error) {
+	return nil, nil
+}
+
+func (c *countingStore) SaveSignal(context.Context, *store.SignalRecord) error {
+	c.saveSignalCalls++
+	return nil
+}
+
+func (c *countingStore) ConsumeSignal(context.Context, types.ExecutionID, string) (*store.SignalRecord, error) {
+	return nil, nil
+}
+
+func (c *countingStore) RevokeSignal(context.Context, types.ExecutionID, string) (bool, error) {
+	c.revokeSignalCalls++
+	return true, nil
+}
+
+func (c *countingStore) CountSignalsByNames(context.Context, types.ExecutionID, []string) (int, error) {
+	return 0, nil
+}
+
+func (c *countingStore) ListSignalsByNames(context.Context, types.ExecutionID, []string, store.ListOptions) ([]*store.SignalRecord, error) {
 	return nil, nil
 }
 
@@ -169,5 +234,36 @@ func TestAuditWriteNoopWhenStoreNil(t *testing.T) {
 	stats := state.auditCounters.snapshot()
 	if len(stats.OK) != 0 || len(stats.Failed) != 0 {
 		t.Fatalf("counters non-empty without audit store: %+v", stats)
+	}
+}
+
+func TestTransientModeSkipsAuditWrites(t *testing.T) {
+	rdb := newRedisStateTestClient(t)
+	store := &countingStore{}
+	state := newRedisState(rdb, store, time.Hour)
+	state.transient = true
+	state.transientTTL = time.Minute
+	state.transientCompletionTTL = 30 * time.Second
+
+	err := state.CreateExecution(context.Background(), &engine.ExecutionSnapshot{
+		ID:     "exec-transient-audit",
+		Status: types.ExecutionStatusRunning,
+		Graph:  testGraphOneNode(),
+	})
+	if err != nil {
+		t.Fatalf("CreateExecution() error = %v", err)
+	}
+	if store.createExecutionCalls != 0 {
+		t.Fatalf("audit create calls = %d, want 0", store.createExecutionCalls)
+	}
+	if err := state.UpsertNode(context.Background(), &engine.NodeSnapshot{
+		ExecutionID: "exec-transient-audit",
+		Name:        "start",
+		Status:      types.NodeStatusSuccess,
+	}); err != nil {
+		t.Fatalf("UpsertNode() error = %v", err)
+	}
+	if store.upsertNodeCalls != 0 {
+		t.Fatalf("audit node upsert calls = %d, want 0", store.upsertNodeCalls)
 	}
 }
