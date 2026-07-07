@@ -46,6 +46,12 @@ func BenchmarkKafkaTriggerAggregate4000Messages(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
+		closed := false
+		defer func() {
+			if !closed {
+				_ = sub.Close(context.Background())
+			}
+		}()
 
 		if !rt.waitForEmitCount(40, time.Second) {
 			b.Fatalf("emit count = %d, want 40", rt.emitCount())
@@ -53,6 +59,7 @@ func BenchmarkKafkaTriggerAggregate4000Messages(b *testing.B) {
 		if err := sub.Close(context.Background()); err != nil {
 			b.Fatal(err)
 		}
+		closed = true
 		if got := rt.emitCount(); got != 40 {
 			b.Fatalf("emit count = %d, want 40", got)
 		}

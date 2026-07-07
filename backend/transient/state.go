@@ -13,7 +13,7 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
-var ErrTransientSuspendUnsupported = errors.New("suspend nodes are unsupported in transient execution mode")
+var ErrTransientSuspendUnsupported = errors.New("xflow: suspend nodes are unsupported in transient execution mode")
 
 type state struct {
 	mu            sync.Mutex
