@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
@@ -129,6 +130,33 @@ func (s *GRPCServer) ReportResult(ctx context.Context, req *runnerpb.ReportResul
 	}
 	return &runnerpb.ReportResultResponse{Accepted: resp.Accepted, Error: resp.Error}, nil
 }
+
+// Connect adapts the generated bidi stream onto Core.Connect.
+func (s *GRPCServer) Connect(stream grpc.BidiStreamingServer[runnerpb.RunnerFrame, runnerpb.ServerFrame]) error {
+	return s.core.Connect(&grpcConnectStream{stream: stream})
+}
+
+type grpcConnectStream struct {
+	stream grpc.BidiStreamingServer[runnerpb.RunnerFrame, runnerpb.ServerFrame]
+}
+
+func (g *grpcConnectStream) Recv() (protocol.RunnerFrame, error) {
+	pb, err := g.stream.Recv()
+	if err != nil {
+		return protocol.RunnerFrame{}, err
+	}
+	return protocol.RunnerFrameFromProto(pb)
+}
+
+func (g *grpcConnectStream) Send(fr protocol.ServerFrame) error {
+	pb, err := protocol.ServerFrameToProto(fr)
+	if err != nil {
+		return err
+	}
+	return g.stream.Send(pb)
+}
+
+func (g *grpcConnectStream) Context() context.Context { return g.stream.Context() }
 
 // overrideTokenFromMetadata pulls the Authorization: Bearer <token> value out
 // of gRPC metadata and, if present, overrides whatever the request payload

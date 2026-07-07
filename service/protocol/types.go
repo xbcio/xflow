@@ -189,3 +189,12 @@ type BackoffFrame struct {
 }
 
 type KeepaliveFrame struct{}
+
+// FrameStream is the runner-facing bidirectional stream abstraction. gRPC
+// wraps the generated bidi stream; HTTP simulates it with long-poll. runner.Run
+// speaks only this interface.
+type FrameStream interface {
+	Send(RunnerFrame) error
+	Recv() (ServerFrame, error)
+	Close() error
+}

@@ -180,6 +180,64 @@ func TestGRPCRegisterRejectsMissingFields(t *testing.T) {
 	}
 }
 
+func TestGRPCConnectStreamRoundTrip(t *testing.T) {
+	eng := &fakeControlEngine{}
+	runners := NewRunnerPool()
+
+	// Build the server manually so we retain the runners handle — the
+	// startGRPCTestServer helper only returns a *protocol.GRPCClient.
+	lis := bufconn.Listen(1024 * 1024)
+	grpcSrv := grpc.NewServer()
+	runnerpb.RegisterRunnerProtocolServer(grpcSrv, NewGRPCServer(eng, runners))
+	go func() { _ = grpcSrv.Serve(lis) }()
+	conn, err := grpc.NewClient("passthrough:///bufnet",
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+			return lis.DialContext(ctx)
+		}),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close(); grpcSrv.Stop() })
+
+	client := protocol.NewGRPCClient(conn)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	stream, err := client.Connect(ctx)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer stream.Close()
+
+	if err := stream.Send(protocol.RunnerFrame{Hello: &protocol.HelloFrame{
+		RunnerID: "r1", Concurrency: 2,
+		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
+	}}); err != nil {
+		t.Fatalf("send hello: %v", err)
+	}
+	if fr, err := stream.Recv(); err != nil || fr.Welcome == nil || fr.Welcome.RunnerID != "r1" {
+		t.Fatalf("expected WELCOME, got fr=%+v err=%v", fr, err)
+	}
+
+	lease := engine.TaskLease{LeaseID: "L1", LeaseToken: "T1", NodeType: "xflow.function"}
+	if err := runners.Assign(lease); err != nil {
+		t.Fatalf("assign: %v", err)
+	}
+	if fr, err := stream.Recv(); err != nil || fr.Task == nil || fr.Task.Lease == nil || fr.Task.Lease.LeaseID != "L1" {
+		t.Fatalf("expected TASK L1, got fr=%+v err=%v", fr, err)
+	}
+	if err := stream.Send(protocol.RunnerFrame{Result: &protocol.ResultFrame{
+		LeaseID: "L1", Lease: &lease,
+	}}); err != nil {
+		t.Fatalf("send result: %v", err)
+	}
+	if fr, err := stream.Recv(); err != nil || fr.Ack == nil || !fr.Ack.Accepted {
+		t.Fatalf("expected ACK accepted, got fr=%+v err=%v", fr, err)
+	}
+}
+
 func TestGRPCRegisterRejectedWithoutTokenReturnsUnauthenticated(t *testing.T) {
 	store, err := NewFilePolicyStoreFromConfig(PolicyConfig{
 		Version: 1,

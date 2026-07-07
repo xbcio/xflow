@@ -76,3 +76,35 @@ func (c *GRPCClient) ReportResult(ctx context.Context, req ReportResultRequest) 
 	}
 	return ReportResultResponse{Accepted: resp.GetAccepted(), Error: resp.GetError()}, nil
 }
+
+// Connect opens the bidi Runner Protocol stream. Token (if set) is attached
+// via metadata on the stream context.
+func (c *GRPCClient) Connect(ctx context.Context) (FrameStream, error) {
+	stream, err := c.grpc.Connect(c.withAuth(ctx))
+	if err != nil {
+		return nil, err
+	}
+	return &grpcFrameStream{stream: stream}, nil
+}
+
+type grpcFrameStream struct {
+	stream grpc.BidiStreamingClient[runnerpb.RunnerFrame, runnerpb.ServerFrame]
+}
+
+func (g *grpcFrameStream) Send(fr RunnerFrame) error {
+	pb, err := RunnerFrameToProto(fr)
+	if err != nil {
+		return err
+	}
+	return g.stream.Send(pb)
+}
+
+func (g *grpcFrameStream) Recv() (ServerFrame, error) {
+	pb, err := g.stream.Recv()
+	if err != nil {
+		return ServerFrame{}, err
+	}
+	return ServerFrameFromProto(pb)
+}
+
+func (g *grpcFrameStream) Close() error { return g.stream.CloseSend() }
