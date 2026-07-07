@@ -48,12 +48,25 @@ func writeKafkaMessages(t *testing.T, brokers []string, topic string, msgs []kaf
 		Topic:        topic,
 		Balancer:     &kafka.Hash{},
 		RequiredAcks: kafka.RequireAll,
+		MaxAttempts:  10,
 	}
 	defer w.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := w.WriteMessages(ctx, msgs...); err != nil {
-		t.Fatalf("write kafka: %v", err)
+	// Retry until topic metadata has propagated (new topics may not be visible
+	// to the leader immediately after CreateTopics returns).
+	var lastErr error
+	for {
+		if err := w.WriteMessages(ctx, msgs...); err == nil {
+			return
+		} else {
+			lastErr = err
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("write kafka: %v", lastErr)
+		case <-time.After(200 * time.Millisecond):
+		}
 	}
 }
 
