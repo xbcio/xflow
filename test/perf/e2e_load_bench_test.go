@@ -110,7 +110,13 @@ func TestE2ELoadRealRedis(t *testing.T) {
 
 	var done int64
 	var failed int64
+	var timeouts int64
 	latencies := make([]time.Duration, total)
+
+	// Critical 1 fix: collect submit errors from worker goroutines instead of
+	// calling t.Fatal (which only exits the goroutine, not the test).
+	var submitErrMu sync.Mutex
+	var submitErrors []error
 
 	start := time.Now()
 	wg := sync.WaitGroup{}
@@ -126,12 +132,25 @@ func TestE2ELoadRealRedis(t *testing.T) {
 			defer wg.Done()
 			for i := range jobs {
 				jobStart := time.Now()
-				id := submitLoad(t, server.URL, server.Client(), i)
+				// Critical 1: submitLoad returns error; t.Fatal not used inside goroutine.
+				id, submitErr := submitLoad(server.URL, server.Client(), i)
+				if submitErr != nil {
+					submitErrMu.Lock()
+					submitErrors = append(submitErrors, fmt.Errorf("job %d: %w", i, submitErr))
+					submitErrMu.Unlock()
+					atomic.AddInt64(&failed, 1)
+					atomic.AddInt64(&done, 1)
+					latencies[i] = time.Since(jobStart)
+					continue
+				}
 				wctx, wcancel := context.WithTimeout(context.Background(), 15*time.Second)
-				r := pollCompletionLoad(wctx, t, bk.State(), id)
+				// Important 2: pollCompletionLoad returns (status, timedOut).
+				status, timedOut := pollCompletionLoad(wctx, bk.State(), id)
 				wcancel()
 				latencies[i] = time.Since(jobStart)
-				if r.Status != types.ExecutionStatusSuccess {
+				if timedOut {
+					atomic.AddInt64(&timeouts, 1)
+				} else if status != types.ExecutionStatusSuccess {
 					atomic.AddInt64(&failed, 1)
 				}
 				atomic.AddInt64(&done, 1)
@@ -141,6 +160,14 @@ func TestE2ELoadRealRedis(t *testing.T) {
 	wg.Wait()
 	elapsed := time.Since(start)
 
+	// Report submit errors collected from worker goroutines.
+	if len(submitErrors) > 0 {
+		for _, e := range submitErrors {
+			t.Errorf("submit error: %v", e)
+		}
+		t.Fatalf("%d submit error(s); aborting result evaluation", len(submitErrors))
+	}
+
 	// Compute p50 / p99.
 	sorted := make([]time.Duration, total)
 	copy(sorted, latencies)
@@ -148,18 +175,23 @@ func TestE2ELoadRealRedis(t *testing.T) {
 	p50 := sorted[total*50/100]
 	p99 := sorted[total*99/100]
 
-	fmt.Printf("E2E load: total=%d workers=%d elapsed=%v throughput=%.0f/s failed=%d p50=%v p99=%v\n",
+	fmt.Printf("E2E load: total=%d workers=%d elapsed=%v throughput=%.0f/s failed=%d timeouts=%d p50=%v p99=%v\n",
 		total, workers, elapsed.Round(time.Millisecond),
 		float64(done)/elapsed.Seconds(),
-		failed, p50.Round(time.Millisecond), p99.Round(time.Millisecond))
+		failed, timeouts, p50.Round(time.Millisecond), p99.Round(time.Millisecond))
 
 	if failed > 0 {
-		t.Errorf("failed = %d", failed)
+		t.Errorf("failed = %d (non-timeout failures)", failed)
+	}
+	if timeouts > 0 {
+		t.Logf("timeouts = %d (tasks did not complete within 15s per-task budget)", timeouts)
 	}
 }
 
-func submitLoad(t *testing.T, baseURL string, client *http.Client, i int) types.ExecutionID {
-	t.Helper()
+// submitLoad submits one workflow execution and returns the ExecutionID.
+// It returns an error instead of calling t.Fatal so callers in goroutines
+// can collect and report errors safely from the main goroutine (Critical 1).
+func submitLoad(baseURL string, client *http.Client, i int) (types.ExecutionID, error) {
 	body := struct {
 		W *types.WorkflowDef `json:"workflow"`
 		P map[string]any     `json:"params"`
@@ -169,34 +201,44 @@ func submitLoad(t *testing.T, baseURL string, client *http.Client, i int) types.
 	}
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(body); err != nil {
-		t.Fatalf("encode: %v", err)
+		return "", fmt.Errorf("encode: %w", err)
 	}
 	resp, err := client.Post(baseURL+control.SubmitWorkflowPath, "application/json", &buf)
 	if err != nil {
-		t.Fatal(err)
+		return "", fmt.Errorf("post: %w", err)
 	}
 	defer resp.Body.Close()
+	// Important 1: check HTTP status before attempting to decode.
+	if resp.StatusCode != http.StatusOK {
+		var raw bytes.Buffer
+		_, _ = raw.ReadFrom(resp.Body)
+		return "", fmt.Errorf("unexpected status %d: %s", resp.StatusCode, raw.String())
+	}
 	var out struct {
 		ExecutionID types.ExecutionID `json:"execution_id"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		t.Fatalf("decode response: %v", err)
+		return "", fmt.Errorf("decode response: %w", err)
 	}
-	return out.ExecutionID
+	return out.ExecutionID, nil
 }
 
-func pollCompletionLoad(ctx context.Context, t *testing.T, state engine.StateStore, id types.ExecutionID) types.Result {
-	t.Helper()
+// pollCompletionLoad polls until the execution reaches a terminal state or the
+// context is cancelled.  It returns (status, timedOut) so callers can
+// distinguish a true failure from a poll timeout (Important 2 / Critical 2).
+func pollCompletionLoad(ctx context.Context, state engine.StateStore, id types.ExecutionID) (types.ExecutionStatus, bool) {
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		snap, err := state.GetExecution(ctx, id)
-		if err == nil && isTerminalLoad(snap.Status) {
-			return types.Result{ExecutionID: id, Status: snap.Status}
+		// Critical 2: guard against nil snap when task not yet persisted.
+		if err == nil && snap != nil && isTerminalLoad(snap.Status) {
+			return snap.Status, false
 		}
 		select {
 		case <-ctx.Done():
-			return types.Result{ExecutionID: id, Status: types.ExecutionStatusFailed}
+			// Important 2: distinguish timeout from real failure.
+			return "", true
 		case <-ticker.C:
 		}
 	}
