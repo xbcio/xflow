@@ -182,11 +182,14 @@ func TestKafkaTriggerRealAggregateByPartition(t *testing.T) {
 	}
 	defer sub.Close(context.Background())
 
-	// Wait until we've received at least one batch event (kind=kafka.batch).
+	// Wait until we've received a batch event with >= 2 aggregated messages
+	// (demonstrates that AggregateByPartition actually batched, not just one message per event).
 	deadline := time.NewTimer(25 * time.Second)
 	defer deadline.Stop()
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
+
+	var maxBatchSize int
 
 	for {
 		rt.mu.Lock()
@@ -196,10 +199,36 @@ func TestKafkaTriggerRealAggregateByPartition(t *testing.T) {
 		for _, ev := range emits {
 			if ev.Kind == "kafka.batch" {
 				// Verify the batch has messages array.
-				if _, ok := ev.Data["messages"]; !ok {
+				messagesRaw, ok := ev.Data["messages"]
+				if !ok {
 					t.Fatalf("kafka.batch event missing messages field: %+v", ev.Data)
 				}
-				return // success
+
+				// Extract messages list (type is []map[string]any from kafkaMessageDataList).
+				messagesList, ok := messagesRaw.([]map[string]any)
+				if !ok {
+					// Try []any as a fallback in case of unexpected serialization.
+					if anyList, ok := messagesRaw.([]any); ok {
+						messagesList = make([]map[string]any, len(anyList))
+						for i, m := range anyList {
+							if mm, ok := m.(map[string]any); ok {
+								messagesList[i] = mm
+							}
+						}
+					} else {
+						t.Fatalf("kafka.batch messages field has unexpected type: %T", messagesRaw)
+					}
+				}
+
+				batchSize := len(messagesList)
+				if batchSize > maxBatchSize {
+					maxBatchSize = batchSize
+				}
+
+				if batchSize >= 2 {
+					// Success: found a batch with >= 2 messages (real aggregation).
+					return
+				}
 			}
 		}
 
@@ -209,7 +238,7 @@ func TestKafkaTriggerRealAggregateByPartition(t *testing.T) {
 			rt.mu.Lock()
 			count := len(rt.emits)
 			rt.mu.Unlock()
-			t.Fatalf("timed out waiting for kafka.batch event; got %d emit(s)", count)
+			t.Fatalf("timed out waiting for kafka.batch with >= 2 messages; got %d emit(s), max batch size was %d", count, maxBatchSize)
 		}
 	}
 }
