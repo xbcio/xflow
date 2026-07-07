@@ -100,7 +100,9 @@ func isTerminal(s types.ExecutionStatus) bool {
 }
 
 // waitForCompletion polls GetExecution until terminal or ctx deadline.
-func waitForCompletion(ctx context.Context, t *testing.T, state engine.StateStore, id types.ExecutionID) types.Result {
+// outputNodes lists the node names whose outputs should be collected into
+// types.Result.Output; if none are supplied the Output map is empty.
+func waitForCompletion(ctx context.Context, t *testing.T, state engine.StateStore, id types.ExecutionID, outputNodes ...string) types.Result {
 	t.Helper()
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
@@ -108,7 +110,7 @@ func waitForCompletion(ctx context.Context, t *testing.T, state engine.StateStor
 		snap, err := state.GetExecution(ctx, id)
 		if err == nil && isTerminal(snap.Status) {
 			out := map[string]any{}
-			for _, n := range []string{"start"} {
+			for _, n := range outputNodes {
 				if v, e := state.GetOutput(ctx, id, n); e == nil && v != nil {
 					out[n] = v
 				}

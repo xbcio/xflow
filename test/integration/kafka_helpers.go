@@ -24,8 +24,9 @@ func newKafkaTopic(t *testing.T, brokers []string, topic string, partitions int)
 	// creating via DialLeader implicitly creates the topic on first write;
 	// ensure partitions exist
 	if err := conn.CreateTopics(kafka.TopicConfig{Topic: topic, NumPartitions: partitions, ReplicationFactor: 1}); err != nil {
-		// ignore "already exists"
-		_ = err
+		if err != kafka.TopicAlreadyExists {
+			t.Fatalf("create kafka topic %q: %v", topic, err)
+		}
 	}
 }
 
