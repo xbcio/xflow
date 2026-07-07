@@ -108,7 +108,9 @@ env-migrate:
 
 # ── Integration / perf tests (gated by build tags) ───────────────────────────
 test-integration:
+	@set -a; [ -f test/env/.env ] && . ./test/env/.env; set +a; \
 	go test -tags=integration -race -count=1 -timeout 600s ./test/integration/...
 
 test-perf:
+	@set -a; [ -f test/env/.env ] && . ./test/env/.env; set +a; \
 	go test -tags=perf -bench=. -benchtime=2s -timeout 30m ./test/perf/...
