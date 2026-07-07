@@ -4,6 +4,7 @@ package integration
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -13,7 +14,7 @@ import (
 
 func TestRedisLeaderElectionRealRedis(t *testing.T) {
 	addr := requireRedis(t)
-	key := "xflow:test:leader:" + t.Name()
+	key := fmt.Sprintf("xflow:test:leader:%s:%d", t.Name(), time.Now().UnixNano())
 	ttl := 2 * time.Second
 
 	t.Run("single instance becomes leader", func(t *testing.T) {
