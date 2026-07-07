@@ -75,10 +75,26 @@ func (r *Runner) Run(ctx context.Context) error {
 	// a full worker pool when the pool is at capacity.
 	taskCh := make(chan engine.TaskLease, r.config.Concurrency)
 
+	// sendCh serializes every frame send (RESULT from workers, BYE from Run)
+	// through a single send-loop goroutine below. grpc-go's ClientStream.Send
+	// is not safe to call from multiple goroutines concurrently, and
+	// CloseSend is explicitly not safe to call concurrently with Send — so
+	// with Concurrency > 1, workers must never call stream.Send directly.
+	// HELLO above is exempt: it happens before any worker or the send-loop
+	// exists, so nothing can race it.
+	sendCh := make(chan protocol.RunnerFrame, r.config.Concurrency*2)
+	sendDone := make(chan struct{})
+	go func() {
+		defer close(sendDone)
+		for fr := range sendCh {
+			_ = stream.Send(fr)
+		}
+	}()
+
 	var wg sync.WaitGroup
 	for i := 0; i < r.config.Concurrency; i++ {
 		wg.Add(1)
-		go r.worker(ctx, taskCh, stream, &wg)
+		go r.worker(ctx, taskCh, sendCh, &wg)
 	}
 
 	recvErr := make(chan error, 1)
@@ -117,16 +133,25 @@ func (r *Runner) Run(ctx context.Context) error {
 	case <-time.After(30 * time.Second):
 	}
 
-	// Step 3: send BYE before closing (best-effort; ignore error if ctx cancelled).
-	_ = stream.Send(protocol.RunnerFrame{Bye: &protocol.ByeFrame{}})
+	// Step 3: send BYE (best-effort; ignore error if ctx cancelled), then
+	// close sendCh and join the send-loop goroutine. wg.Wait() above
+	// guarantees no worker is still writing to sendCh, so BYE is always the
+	// last frame written and closing sendCh right after is safe. Joining
+	// sendDone guarantees the send-loop has made its last stream.Send call
+	// (BYE, or whatever was in flight) before we close the stream below —
+	// preserving the single-writer contract right up to Close.
+	sendCh <- protocol.RunnerFrame{Bye: &protocol.ByeFrame{}}
+	close(sendCh)
+	<-sendDone
 
 	// Step 4: close the stream explicitly. recvLoop has already returned by
 	// this point (drained above via recvErr, either directly or after
-	// ctx.Done()), so this call no longer needs to unblock it — it just
-	// releases the transport promptly instead of waiting for the deferred
-	// stream.Close() at the top of Run. fakeStream.Close is idempotent (CAS
-	// on closed flag); gRPC CloseSend is also idempotent, so the defer is a
-	// safe no-op on second call.
+	// ctx.Done()), and the send-loop has already exited (joined above), so
+	// this call no longer needs to unblock anything — it just releases the
+	// transport promptly instead of waiting for the deferred stream.Close()
+	// at the top of Run. fakeStream.Close is idempotent (CAS on closed
+	// flag); gRPC CloseSend is also idempotent, so the defer is a safe no-op
+	// on second call.
 	_ = stream.Close()
 
 	if errors.Is(firstErr, context.Canceled) {
@@ -165,8 +190,12 @@ func (r *Runner) recvLoop(ctx context.Context, stream protocol.FrameStream, task
 	}
 }
 
-// worker drains taskCh, executes each lease, and sends the result back.
-func (r *Runner) worker(ctx context.Context, taskCh <-chan engine.TaskLease, stream protocol.FrameStream, wg *sync.WaitGroup) {
+// worker drains taskCh, executes each lease, and writes the RESULT frame to
+// sendCh — never directly to the stream. All frame sends are serialized
+// through the single send-loop goroutine started in Run, since
+// protocol.FrameStream.Send (backed by grpc-go's ClientStream.SendMsg) is not
+// safe to call from multiple goroutines concurrently.
+func (r *Runner) worker(ctx context.Context, taskCh <-chan engine.TaskLease, sendCh chan<- protocol.RunnerFrame, wg *sync.WaitGroup) {
 	defer wg.Done()
 	for lease := range taskCh {
 		leaseCopy := lease // capture loop variable
@@ -174,11 +203,11 @@ func (r *Runner) worker(ctx context.Context, taskCh <-chan engine.TaskLease, str
 		if execErr != nil {
 			result = engine.TaskResult{Error: execErr}
 		}
-		_ = stream.Send(protocol.RunnerFrame{Result: &protocol.ResultFrame{
+		sendCh <- protocol.RunnerFrame{Result: &protocol.ResultFrame{
 			LeaseID: string(leaseCopy.LeaseID),
 			Lease:   &leaseCopy,
 			Result:  result,
-		}})
+		}}
 	}
 }
 

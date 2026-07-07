@@ -255,3 +255,92 @@ func TestRunnerGracefulDrain(t *testing.T) {
 		t.Fatal("timeout waiting for Run() to return")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// TestRunnerSerializesConcurrentSends — proves the sendCh/send-loop
+// restructuring correctly serializes RESULT frames from multiple concurrently
+// completing workers without dropping or corrupting any of them. Run with
+// -race: fakeStream.Send is already safe for concurrent use (it's a channel
+// push), so this test cannot reproduce the original gRPC-level single-writer
+// violation — that would require a real/mock gRPC stream enforcing the
+// SendMsg contract, which is out of scope here. This test instead guards
+// against regressions in the new send-loop plumbing itself (e.g. dropped
+// frames, deadlock between workers and the send-loop, or BYE racing a
+// worker's RESULT).
+// ---------------------------------------------------------------------------
+
+func TestRunnerSerializesConcurrentSends(t *testing.T) {
+	stream := newFakeStream(16)
+	stream.recvCh <- protocol.ServerFrame{Welcome: &protocol.WelcomeFrame{RunnerID: "r1"}}
+
+	registry := execution.NewRegistry()
+	registerTestHandler(t, registry, "xflow.function", func(ctx context.Context, input *types.Input) (*types.Output, error) {
+		// No artificial delay — all 4 workers race to complete and send
+		// their RESULT frame at roughly the same time, maximizing
+		// contention on sendCh under -race.
+		return &types.Output{Data: map[string]any{"ok": true}}, nil
+	})
+
+	r := New(
+		&fakeClient{stream},
+		registry,
+		Config{
+			RunnerID:     "r1",
+			Concurrency:  4,
+			Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
+		},
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	runErr := make(chan error, 1)
+	go func() { runErr <- r.Run(ctx) }()
+
+	leaseIDs := []string{"L1", "L2", "L3", "L4"}
+	for _, id := range leaseIDs {
+		stream.recvCh <- protocol.ServerFrame{Task: &protocol.TaskFrame{
+			Lease: &engine.TaskLease{LeaseID: engine.LeaseID(id), NodeType: "xflow.function"},
+		}}
+	}
+
+	// Collect exactly 4 RESULT frames and verify each expected LeaseID
+	// appears exactly once — proves the send-loop neither drops nor
+	// duplicates frames written concurrently by the 4 workers.
+	seen := make(map[string]int)
+	for len(seen) < len(leaseIDs) || sumCounts(seen) < len(leaseIDs) {
+		select {
+		case fr := <-stream.sendCh:
+			if fr.Result != nil {
+				seen[fr.Result.LeaseID]++
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timeout waiting for RESULT frames; got %v", seen)
+		}
+		if sumCounts(seen) >= len(leaseIDs) {
+			break
+		}
+	}
+
+	if sumCounts(seen) != len(leaseIDs) {
+		t.Fatalf("expected exactly %d RESULT frames, got %d (%v)", len(leaseIDs), sumCounts(seen), seen)
+	}
+	for _, id := range leaseIDs {
+		if seen[id] != 1 {
+			t.Fatalf("expected exactly 1 RESULT for %s, got %d (%v)", id, seen[id], seen)
+		}
+	}
+
+	cancel()
+	select {
+	case <-runErr:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for Run() to return")
+	}
+}
+
+func sumCounts(m map[string]int) int {
+	total := 0
+	for _, v := range m {
+		total += v
+	}
+	return total
+}
