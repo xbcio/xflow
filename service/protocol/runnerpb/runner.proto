@@ -14,6 +14,11 @@ option go_package = "github.com/xbcio/xflow/service/protocol/runnerpb";
 // poorly onto protobuf. Scalar control fields stay typed for cross-language and
 // validation friendliness.
 service RunnerProtocol {
+  // Connect opens a long-lived bidirectional stream carrying the full runner
+  // lifecycle (register, task dispatch, result report, drain). Production path;
+  // the unary RPCs below remain for HTTP fallback.
+  rpc Connect(stream RunnerFrame) returns (stream ServerFrame);
+
   // Register announces a runner and its capabilities to the server.
   rpc Register(RegisterRequest) returns (RegisterResponse);
 
@@ -83,3 +88,57 @@ message ReportResultResponse {
   bool accepted = 1;
   string error = 2;
 }
+
+message RunnerFrame {
+  oneof frame {
+    HelloFrame hello = 1;
+    ResultFrame result = 2;
+    ByeFrame bye = 3;
+  }
+}
+
+message HelloFrame {
+  string runner_id = 1;
+  int32 concurrency = 2;
+  repeated Capability capabilities = 3;
+  map<string, string> labels = 4;
+}
+
+message ResultFrame {
+  string lease_id = 1;
+  bytes lease_json = 2;
+  bytes result_json = 3;
+}
+
+message ByeFrame {}
+
+message ServerFrame {
+  oneof frame {
+    WelcomeFrame welcome = 1;
+    TaskFrame task = 2;
+    AckFrame ack = 3;
+    BackoffFrame backoff = 4;
+    KeepaliveFrame keepalive = 5;
+  }
+}
+
+message WelcomeFrame {
+  string runner_id = 1;
+  int64 server_time = 2;
+}
+
+message TaskFrame {
+  bytes lease_json = 1;
+}
+
+message AckFrame {
+  string lease_id = 1;
+  bool accepted = 2;
+  string error = 3;
+}
+
+message BackoffFrame {
+  int64 wait_nanos = 1;
+}
+
+message KeepaliveFrame {}

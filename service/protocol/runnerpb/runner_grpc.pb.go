@@ -19,6 +19,7 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
+	RunnerProtocol_Connect_FullMethodName      = "/xflow.runner.v1.RunnerProtocol/Connect"
 	RunnerProtocol_Register_FullMethodName     = "/xflow.runner.v1.RunnerProtocol/Register"
 	RunnerProtocol_Heartbeat_FullMethodName    = "/xflow.runner.v1.RunnerProtocol/Heartbeat"
 	RunnerProtocol_PollTask_FullMethodName     = "/xflow.runner.v1.RunnerProtocol/PollTask"
@@ -39,6 +40,10 @@ const (
 // poorly onto protobuf. Scalar control fields stay typed for cross-language and
 // validation friendliness.
 type RunnerProtocolClient interface {
+	// Connect opens a long-lived bidirectional stream carrying the full runner
+	// lifecycle (register, task dispatch, result report, drain). Production path;
+	// the unary RPCs below remain for HTTP fallback.
+	Connect(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[RunnerFrame, ServerFrame], error)
 	// Register announces a runner and its capabilities to the server.
 	Register(ctx context.Context, in *RegisterRequest, opts ...grpc.CallOption) (*RegisterResponse, error)
 	// Heartbeat reports runner capacity and liveness.
@@ -57,6 +62,19 @@ type runnerProtocolClient struct {
 func NewRunnerProtocolClient(cc grpc.ClientConnInterface) RunnerProtocolClient {
 	return &runnerProtocolClient{cc}
 }
+
+func (c *runnerProtocolClient) Connect(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[RunnerFrame, ServerFrame], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &RunnerProtocol_ServiceDesc.Streams[0], RunnerProtocol_Connect_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[RunnerFrame, ServerFrame]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type RunnerProtocol_ConnectClient = grpc.BidiStreamingClient[RunnerFrame, ServerFrame]
 
 func (c *runnerProtocolClient) Register(ctx context.Context, in *RegisterRequest, opts ...grpc.CallOption) (*RegisterResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
@@ -112,6 +130,10 @@ func (c *runnerProtocolClient) ReportResult(ctx context.Context, in *ReportResul
 // poorly onto protobuf. Scalar control fields stay typed for cross-language and
 // validation friendliness.
 type RunnerProtocolServer interface {
+	// Connect opens a long-lived bidirectional stream carrying the full runner
+	// lifecycle (register, task dispatch, result report, drain). Production path;
+	// the unary RPCs below remain for HTTP fallback.
+	Connect(grpc.BidiStreamingServer[RunnerFrame, ServerFrame]) error
 	// Register announces a runner and its capabilities to the server.
 	Register(context.Context, *RegisterRequest) (*RegisterResponse, error)
 	// Heartbeat reports runner capacity and liveness.
@@ -131,6 +153,9 @@ type RunnerProtocolServer interface {
 // pointer dereference when methods are called.
 type UnimplementedRunnerProtocolServer struct{}
 
+func (UnimplementedRunnerProtocolServer) Connect(grpc.BidiStreamingServer[RunnerFrame, ServerFrame]) error {
+	return status.Error(codes.Unimplemented, "method Connect not implemented")
+}
 func (UnimplementedRunnerProtocolServer) Register(context.Context, *RegisterRequest) (*RegisterResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Register not implemented")
 }
@@ -163,6 +188,13 @@ func RegisterRunnerProtocolServer(s grpc.ServiceRegistrar, srv RunnerProtocolSer
 	}
 	s.RegisterService(&RunnerProtocol_ServiceDesc, srv)
 }
+
+func _RunnerProtocol_Connect_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(RunnerProtocolServer).Connect(&grpc.GenericServerStream[RunnerFrame, ServerFrame]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type RunnerProtocol_ConnectServer = grpc.BidiStreamingServer[RunnerFrame, ServerFrame]
 
 func _RunnerProtocol_Register_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(RegisterRequest)
@@ -260,6 +292,13 @@ var RunnerProtocol_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _RunnerProtocol_ReportResult_Handler,
 		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "Connect",
+			Handler:       _RunnerProtocol_Connect_Handler,
+			ServerStreams: true,
+			ClientStreams: true,
+		},
+	},
 	Metadata: "service/protocol/runnerpb/runner.proto",
 }
