@@ -21,8 +21,9 @@ import (
 // "kafka.batch" (aggregated) event kinds so that the counter tracks raw message
 // throughput regardless of the MaxSize setting.
 type perfTriggerRuntime struct {
-	msgCount int64
-	signal   chan struct{}
+	msgCount  int64
+	batchCount int64
+	signal    chan struct{}
 }
 
 func newPerfTriggerRuntime() *perfTriggerRuntime {
@@ -41,6 +42,7 @@ func (r *perfTriggerRuntime) Emit(_ context.Context, _ types.WorkflowID, _ strin
 		}
 	}
 	atomic.AddInt64(&r.msgCount, n)
+	atomic.AddInt64(&r.batchCount, 1)
 	select {
 	case r.signal <- struct{}{}:
 	default:
@@ -62,10 +64,37 @@ type perfTriggerLock struct{}
 
 func (perfTriggerLock) Release(context.Context) error { return nil }
 
+// waitMsgCount blocks until rt.msgCount >= target, using rt.signal + ticker.
+// Returns false if ctx is cancelled first.
+func waitMsgCount(ctx context.Context, rt *perfTriggerRuntime, target int64) bool {
+	if atomic.LoadInt64(&rt.msgCount) >= target {
+		return true
+	}
+	ticker := time.NewTicker(2 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-rt.signal:
+			if atomic.LoadInt64(&rt.msgCount) >= target {
+				return true
+			}
+		case <-ticker.C:
+			if atomic.LoadInt64(&rt.msgCount) >= target {
+				return true
+			}
+		case <-ctx.Done():
+			return false
+		}
+	}
+}
+
 // BenchmarkKafkaTriggerAggregateReal benchmarks KafkaTrigger with
 // AggregateByPartition at three batch sizes (MaxSize=1/10/100).
-// It writes b.N messages to Kafka and measures the time until the last
-// message is delivered via the runtime Emit callback.
+//
+// Design: consumer join happens once during warmup (probe message), then
+// b.N iterations each write one full batch of `size` messages and wait for
+// them to be delivered.  This measures steady-state aggregation latency,
+// not consumer-group rebalance overhead.
 func BenchmarkKafkaTriggerAggregateReal(b *testing.B) {
 	brokers := realKafkaBrokers(b)
 	baseTopic := fmt.Sprintf("xflow-perf-kafka-%d", time.Now().UnixNano())
@@ -75,9 +104,10 @@ func BenchmarkKafkaTriggerAggregateReal(b *testing.B) {
 		b.Run(fmt.Sprintf("MaxSize=%d", size), func(b *testing.B) {
 			// Each sub-bench gets its own topic and consumer group to avoid
 			// cross-contamination between MaxSize runs.
+			// Use 1 partition so all messages land in the same aggregator window.
 			topic := fmt.Sprintf("%s-s%d", baseTopic, size)
 			group := topic + "-g"
-			createTopic(b, brokers[0], topic, 4)
+			createTopic(b, brokers[0], topic, 1)
 
 			tr := node.KafkaTrigger().
 				Brokers(brokers...).
@@ -86,11 +116,12 @@ func BenchmarkKafkaTriggerAggregateReal(b *testing.B) {
 				StartOffset("earliest").
 				AggregateByPartition(size, 50*time.Millisecond)
 
-			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 			defer cancel()
 
 			rt := newPerfTriggerRuntime()
 
+			// Step 1: Activate the trigger (consumer group created here).
 			sub, err := tr.Activate(ctx, &types.TriggerActivateInput{
 				WorkflowID: types.WorkflowID(fmt.Sprintf("wf-perf-kafka-%d", size)),
 				NodeName:   "kafka-perf",
@@ -102,55 +133,82 @@ func BenchmarkKafkaTriggerAggregateReal(b *testing.B) {
 			}
 			defer sub.Close(ctx)
 
-			// Write b.N messages before timing starts.
-			msgs := make([]kafka.Message, b.N)
-			for i := range msgs {
-				msgs[i] = kafka.Message{Value: []byte(strconv.Itoa(i))}
-			}
-
+			// Step 2: Warmup — write 1 probe message and wait until it is received.
+			// This ensures the consumer has joined before timing starts.
 			w := &kafka.Writer{
 				Addr:        kafka.TCP(brokers...),
 				Topic:       topic,
 				MaxAttempts: 10,
 			}
-			writeCtx, writeCancel := context.WithTimeout(ctx, 30*time.Second)
-			defer writeCancel()
-			// Retry until topic metadata propagates.
+			defer w.Close()
+
+			probeCtx, probeCancel := context.WithTimeout(ctx, 30*time.Second)
+			defer probeCancel()
+			probe := kafka.Message{Value: []byte("probe")}
+			// Retry until topic metadata propagates — use ticker, no time.After.
+			retryTicker := time.NewTicker(50 * time.Millisecond)
+		probeWrite:
 			for {
-				if err := w.WriteMessages(writeCtx, msgs...); err == nil {
-					break
+				if err := w.WriteMessages(probeCtx, probe); err == nil {
+					retryTicker.Stop()
+					break probeWrite
 				}
 				select {
-				case <-writeCtx.Done():
-					b.Fatalf("write kafka messages: %v", writeCtx.Err())
-				case <-time.After(200 * time.Millisecond):
+				case <-probeCtx.Done():
+					retryTicker.Stop()
+					b.Fatalf("write probe message: %v", probeCtx.Err())
+				case <-retryTicker.C:
 				}
 			}
-			w.Close()
+			// Wait for the probe to be consumed (confirms consumer group joined).
+			if !waitMsgCount(probeCtx, rt, 1) {
+				b.Fatalf("probe message not received within 30s: %v", probeCtx.Err())
+			}
+
+			// Step 3: Reset counters and timer — warmup is done.
+			atomic.StoreInt64(&rt.msgCount, 0)
+			atomic.StoreInt64(&rt.batchCount, 0)
+			// Drain any leftover signals from probe.
+			for {
+				select {
+				case <-rt.signal:
+				default:
+					goto drained
+				}
+			}
+		drained:
 
 			b.ReportAllocs()
 			b.ResetTimer()
 
-			// Poll until all b.N messages are consumed.
-			// Use ticker+select — no time.Sleep.
-			target := int64(b.N)
-			ticker := time.NewTicker(2 * time.Millisecond)
-			defer ticker.Stop()
-		poll:
-			for {
-				select {
-				case <-rt.signal:
-					if atomic.LoadInt64(&rt.msgCount) >= target {
-						break poll
-					}
-				case <-ticker.C:
-					if atomic.LoadInt64(&rt.msgCount) >= target {
-						break poll
-					}
-				case <-ctx.Done():
-					b.Fatalf("got %d/%d messages: %v", atomic.LoadInt64(&rt.msgCount), target, ctx.Err())
+			// Step 4: b.N iterations — each iteration writes one complete batch.
+			for i := 0; i < b.N; i++ {
+				// Snapshot count before writing so we can wait for exactly `size` new messages.
+				baseline := atomic.LoadInt64(&rt.msgCount)
+				target := baseline + int64(size)
+
+				msgs := make([]kafka.Message, size)
+				for j := range msgs {
+					msgs[j] = kafka.Message{Value: []byte(strconv.Itoa(i*size + j))}
+				}
+
+				writeCtx, writeCancel := context.WithTimeout(ctx, 30*time.Second)
+				if err := w.WriteMessages(writeCtx, msgs...); err != nil {
+					writeCancel()
+					b.Fatalf("iter %d: write messages: %v", i, err)
+				}
+				writeCancel()
+
+				// Wait until at least `size` new messages have been emitted.
+				if !waitMsgCount(ctx, rt, target) {
+					b.Fatalf("iter %d: got %d messages, want %d: %v",
+						i, atomic.LoadInt64(&rt.msgCount), target, ctx.Err())
 				}
 			}
+
+			b.StopTimer()
+			// Step 5: Close subscription.
+			sub.Close(ctx) //nolint:errcheck
 		})
 	}
 }
