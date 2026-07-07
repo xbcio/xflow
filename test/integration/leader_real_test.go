@@ -26,13 +26,13 @@ func TestRedisLeaderElectionRealRedis(t *testing.T) {
 			t.Fatalf("campaign: %v", err)
 		}
 		if !el.IsLeader() {
-			t.Fatal("expected IsLeader=true after campaign")
+			t.Fatalf("IsLeader() after campaign = %v, want true", el.IsLeader())
 		}
 		if err := el.Resign(context.Background()); err != nil {
 			t.Fatalf("resign: %v", err)
 		}
 		if el.IsLeader() {
-			t.Fatal("expected IsLeader=false after resign")
+			t.Fatalf("IsLeader() after resign = %v, want false", el.IsLeader())
 		}
 	})
 
@@ -58,10 +58,10 @@ func TestRedisLeaderElectionRealRedis(t *testing.T) {
 			t.Fatal("b unexpectedly became leader while a holds lease")
 		}
 		if !a.IsLeader() {
-			t.Fatal("a should still be leader")
+			t.Fatalf("a.IsLeader() = %v, want true", a.IsLeader())
 		}
 		if b.IsLeader() {
-			t.Fatal("b should not be leader")
+			t.Fatalf("b.IsLeader() = %v, want false", b.IsLeader())
 		}
 	})
 
@@ -88,7 +88,7 @@ func TestRedisLeaderElectionRealRedis(t *testing.T) {
 			t.Fatalf("b campaign after resign: %v", err)
 		}
 		if !b.IsLeader() {
-			t.Fatal("b should be leader after a resign")
+			t.Fatalf("b.IsLeader() = %v, want true", b.IsLeader())
 		}
 	})
 
@@ -127,6 +127,7 @@ func TestRedisLeaderElectionRealRedis(t *testing.T) {
 					if !b.IsLeader() {
 						t.Fatal("notify fired true but b not leader")
 					}
+					bcancel()
 					return
 				}
 				// received false (initial state) — keep waiting
