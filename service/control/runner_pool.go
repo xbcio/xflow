@@ -23,10 +23,6 @@ type RunnerSnapshot struct {
 	LastHeartbeat time.Time
 }
 
-// streamSession is the server-side handle to an active Connect stream. Fully
-// populated in a later task; placeholder here so runnerState can reference it.
-type streamSession struct{}
-
 type runnerState struct {
 	snapshot RunnerSnapshot
 	queue    []engine.TaskLease

@@ -142,7 +142,7 @@ func TestAssignRoutedNotifiesStreamSession(t *testing.T) {
 	p.RegisterWithLabelsAndPolicy("r1", 2,
 		[]protocol.Capability{{NodeType: "xflow.function"}}, nil,
 		RunnerPolicy{AllowedNodeTypes: []string{"*"}})
-	p.bindSession("r1", &streamSession{})
+	p.bindSession("r1", newStreamSession("r1", make(chan protocol.ServerFrame, 1), make(chan struct{}), 0))
 	// drain any pending signal
 	select {
 	case <-p.runners["r1"].notify:
