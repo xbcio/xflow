@@ -58,10 +58,11 @@ func New(opts ...Option) *Backend {
 	for _, o := range opts {
 		o(cfg)
 	}
+	st := newState(cfg.completionTTL)
 
 	return &Backend{
-		state:            newState(cfg.completionTTL),
-		queue:            newQueue(cfg.concurrency),
+		state:            st,
+		queue:            newQueue(cfg.concurrency, st),
 		registry:         execution.NewRegistry(),
 		workflowRegistry: newWorkflowRegistry(),
 		triggerRuntime:   newTriggerPrimitives(),

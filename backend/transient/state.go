@@ -406,6 +406,61 @@ func (s *state) waitDone(ctx context.Context, id types.ExecutionID) (types.Resul
 	return result, nil
 }
 
+func (s *state) executionTerminal(id types.ExecutionID) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	entry, ok := s.executions[id]
+	return ok && isTerminalStatus(entry.snap.Status)
+}
+
+func (s *state) failExecution(id types.ExecutionID, task *engine.Task, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	entry, ok := s.executions[id]
+	if !ok {
+		return
+	}
+
+	entry.snap.Status = types.ExecutionStatusFailed
+	if task != nil {
+		key := string(id) + "/" + task.NodeName
+		node := s.nodes[key]
+		if node == nil {
+			node = &engine.NodeSnapshot{
+				ExecutionID:  id,
+				Name:         task.NodeName,
+				NodeIdx:      task.NodeIdx,
+				ActivationID: task.ActivationID,
+				AutoDepth:    task.AutoDepth,
+			}
+		} else {
+			cp := *node
+			node = &cp
+		}
+		node.Status = types.NodeStatusFailed
+		node.LeaseID = ""
+		node.LeaseToken = ""
+		node.LeaseIssuedAt = time.Time{}
+		node.LeaseTTL = 0
+		node.Error = err.Error()
+		s.nodes[key] = node
+	}
+	if !entry.closed {
+		entry.closed = true
+		if ch, ok := s.doneCh[id]; ok {
+			close(ch)
+		}
+		s.scheduleCleanupLocked(id)
+	}
+	s.publishLocked(engine.ExecutionEvent{
+		ExecutionID: id,
+		Status:      types.ExecutionStatusFailed,
+		Error:       err.Error(),
+	})
+}
+
 func (s *state) doneChannel(id types.ExecutionID) <-chan struct{} {
 	s.mu.Lock()
 	defer s.mu.Unlock()

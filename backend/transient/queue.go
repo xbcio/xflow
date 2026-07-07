@@ -24,15 +24,17 @@ type queueEnvelope struct {
 type queue struct {
 	ch          chan queueEnvelope
 	handler     func(ctx context.Context, t *engine.Task) error
+	state       *state
 	logger      engine.Logger
 	concurrency int
 	wg          sync.WaitGroup
 	stopCh      chan struct{}
 }
 
-func newQueue(concurrency int) *queue {
+func newQueue(concurrency int, state *state) *queue {
 	return &queue{
 		ch:          make(chan queueEnvelope, 1024),
+		state:       state,
 		concurrency: concurrency,
 		stopCh:      make(chan struct{}),
 	}
@@ -70,8 +72,24 @@ func (q *queue) dispatch(env queueEnvelope) {
 	if q.handler == nil {
 		return
 	}
+	if q.state != nil && q.state.executionTerminal(env.task.ExecutionID) {
+		return
+	}
 	err := q.handler(context.Background(), env.task)
 	if err == nil {
+		return
+	}
+	if errors.Is(err, errTransientSuspendUnsupported) {
+		if q.logger != nil {
+			q.logger.Error("failing transient execution because suspend is unsupported",
+				"exec", string(env.task.ExecutionID),
+				"node", env.task.NodeName,
+				"err", err,
+			)
+		}
+		if q.state != nil {
+			q.state.failExecution(env.task.ExecutionID, env.task, err)
+		}
 		return
 	}
 	if errors.Is(err, types.ErrPermanent) {
