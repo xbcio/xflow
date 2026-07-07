@@ -24,6 +24,9 @@ var ErrExecutionInactive = errors.New("execution inactive")
 // unknown lease token.
 var ErrInvalidLeaseToken = errors.New("invalid lease token")
 
+// ErrSuspendUnsupported is returned when a runtime mode disables suspend nodes.
+var ErrSuspendUnsupported = errors.New("xflow: suspend nodes are unsupported in transient execution mode")
+
 // Option configures an Engine at construction time.
 type Option func(*Engine)
 
@@ -45,6 +48,18 @@ func WithDefaultLeaseTTL(ttl time.Duration) Option {
 	return func(e *Engine) { e.defaultLeaseTTL = ttl }
 }
 
+// WithSuspendDisabled makes runtime suspend requests fail the leased task
+// instead of parking it. If err is nil, ErrSuspendUnsupported is used.
+func WithSuspendDisabled(err error) Option {
+	return func(e *Engine) {
+		e.suspendDisabled = true
+		if err == nil {
+			err = ErrSuspendUnsupported
+		}
+		e.suspendDisabledErr = err
+	}
+}
+
 // DefaultLeaseTTL is the lease deadline applied when an Engine is constructed
 // without an explicit override. It is intentionally short enough that crashed
 // runners are reclaimed within a minute while leaving slow handlers (e.g.
@@ -54,11 +69,13 @@ const DefaultLeaseTTL = 60 * time.Second
 // Engine is the pure-algorithm workflow execution engine.
 // It has zero IO dependencies — all persistence and queuing are injected via interfaces.
 type Engine struct {
-	state           StateStore
-	queue           TaskQueue
-	hooks           Hooks
-	logger          Logger
-	defaultLeaseTTL time.Duration
+	state              StateStore
+	queue              TaskQueue
+	hooks              Hooks
+	logger             Logger
+	defaultLeaseTTL    time.Duration
+	suspendDisabled    bool
+	suspendDisabledErr error
 
 	mu     sync.RWMutex
 	graphs map[types.ExecutionID]*graph.Graph
@@ -288,6 +305,10 @@ func (e *Engine) CommitTaskResult(ctx context.Context, lease *TaskLease, result 
 	}
 	if !active {
 		return nil
+	}
+
+	if result.Suspend != nil && e.suspendDisabled {
+		return e.CommitTaskFailure(ctx, lease, e.suspendDisabledErr)
 	}
 
 	ns, valid, err := e.state.ClaimTaskLease(ctx, lease)

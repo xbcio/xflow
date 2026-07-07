@@ -924,6 +924,24 @@ func parseInt64(s string, cb func(int64)) {
 }
 
 func (s *redisState) ClaimTaskLease(ctx context.Context, lease *engine.TaskLease) (*engine.NodeSnapshot, bool, error) {
+	if s.transient {
+		execStatus, err := s.rdb.Get(ctx, execKey(lease.Task.ExecutionID, "status")).Result()
+		if err != nil && err != redis.Nil {
+			return nil, false, fmt.Errorf("claim task lease %q/%q: get execution status: %w", lease.Task.ExecutionID, lease.Task.NodeName, err)
+		}
+		if types.IsTerminalExecutionStatus(types.ExecutionStatus(execStatus)) {
+			_ = s.rdb.ZRem(ctx, leaseExpiryZSetKey, leaseExpiryMember(lease.Task.ExecutionID, lease.Task.NodeName)).Err()
+			return &engine.NodeSnapshot{
+				ExecutionID:  lease.Task.ExecutionID,
+				Name:         lease.Task.NodeName,
+				NodeIdx:      lease.Task.NodeIdx,
+				Status:       types.NodeStatusCanceled,
+				ActivationID: lease.Task.ActivationID,
+				AutoDepth:    lease.Task.AutoDepth,
+			}, true, nil
+		}
+	}
+
 	ttl := s.getExecTTL(lease.Task.ExecutionID)
 	result, err := claimTaskLeaseLua.Run(ctx, s.rdb,
 		[]string{nodeStatusKey(lease.Task.ExecutionID, lease.Task.NodeName), nodeMetaKey(lease.Task.ExecutionID, lease.Task.NodeName)},

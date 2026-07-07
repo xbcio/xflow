@@ -387,3 +387,56 @@ func TestEngine_CommitTaskResultParksSuspendRequestWithoutHandlerExecution(t *te
 		t.Fatalf("expected no queued tasks after parking, got %v", taskNames(tasks))
 	}
 }
+
+func TestEngine_CommitTaskResultFailsSuspendWhenDisabled(t *testing.T) {
+	def := &types.WorkflowDef{
+		Name: "runtime-suspend-disabled",
+		Nodes: []types.NodeDef{
+			{Name: "wait", Type: "test.suspend"},
+		},
+	}
+
+	g, err := graph.Compile(def)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := newFakeState()
+	queue := &fakeQueue{}
+	eng := New(state, queue, WithSuspendDisabled(ErrSuspendUnsupported))
+	ctx := context.Background()
+
+	id, err := eng.Submit(ctx, g, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := queue.Drain()[0]
+	lease, err := eng.BuildTaskLease(ctx, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = eng.CommitTaskResult(ctx, lease, TaskResult{
+		Suspend: &types.SuspendSpec{Mode: node.ModeSignal, Signals: []string{"approval"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ns, err := state.GetNode(ctx, id, "wait")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ns == nil || ns.Status != types.NodeStatusFailed {
+		t.Fatalf("node state = %+v, want failed", ns)
+	}
+	if ns.Error != ErrSuspendUnsupported.Error() {
+		t.Fatalf("node error = %q, want %q", ns.Error, ErrSuspendUnsupported.Error())
+	}
+	snap, err := state.GetExecution(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Status != types.ExecutionStatusFailed {
+		t.Fatalf("execution status = %q, want failed", snap.Status)
+	}
+}

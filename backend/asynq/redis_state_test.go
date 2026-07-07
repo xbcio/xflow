@@ -38,6 +38,20 @@ func testGraphOneNode() *graph.Graph {
 	return g
 }
 
+type redisStateTestQueue struct {
+	tasks []*engine.Task
+}
+
+func (q *redisStateTestQueue) Enqueue(_ context.Context, task *engine.Task) error {
+	q.tasks = append(q.tasks, task)
+	return nil
+}
+
+func (q *redisStateTestQueue) EnqueueDelayed(_ context.Context, task *engine.Task, _ time.Duration) error {
+	q.tasks = append(q.tasks, task)
+	return nil
+}
+
 func TestBuildExecutionRecordPersistsWorkflowAuditContext(t *testing.T) {
 	def := &types.WorkflowDef{
 		Name: "vulnerability-approval",
@@ -314,5 +328,63 @@ func TestTransientModeShortensTTLOnTerminalExecutionStatus(t *testing.T) {
 		if got < 10*time.Second || got > 15*time.Second {
 			t.Fatalf("TTL for %q = %s, want close to %s", key, got, state.transientCompletionTTL)
 		}
+	}
+}
+
+func TestTransientClaimTaskLeaseFencesCanceledExecutionWithStaleGraphCache(t *testing.T) {
+	rdb := newRedisStateTestClient(t)
+	state := newRedisState(rdb, nil, time.Hour)
+	state.transient = true
+	state.transientTTL = time.Minute
+	state.transientCompletionTTL = 15 * time.Second
+
+	ctx := context.Background()
+	controlQueue := &redisStateTestQueue{}
+	control := engine.New(state, controlQueue)
+	worker := engine.New(state, &redisStateTestQueue{})
+
+	id, err := control.Submit(ctx, testGraphOneNode(), map[string]any{"msg": "hello"})
+	if err != nil {
+		t.Fatalf("Submit() error = %v", err)
+	}
+	if len(controlQueue.tasks) != 1 {
+		t.Fatalf("queued tasks = %d, want 1", len(controlQueue.tasks))
+	}
+	task := controlQueue.tasks[0]
+
+	lease, err := worker.BuildTaskLease(ctx, task)
+	if err != nil {
+		t.Fatalf("BuildTaskLease() error = %v", err)
+	}
+	if err := control.Cancel(ctx, id); err != nil {
+		t.Fatalf("Cancel() error = %v", err)
+	}
+
+	if err := worker.CommitTaskResult(ctx, lease, engine.TaskResult{
+		Output: &types.Output{Data: map[string]any{"stale": true}},
+	}); err != nil {
+		t.Fatalf("CommitTaskResult() after cancel error = %v", err)
+	}
+
+	out, err := state.GetOutput(ctx, id, "start")
+	if err != nil {
+		t.Fatalf("GetOutput() error = %v", err)
+	}
+	if out != nil {
+		t.Fatalf("output = %#v, want nil after canceled execution", out)
+	}
+	snap, err := state.GetExecution(ctx, id)
+	if err != nil {
+		t.Fatalf("GetExecution() error = %v", err)
+	}
+	if snap.Status != types.ExecutionStatusCanceled {
+		t.Fatalf("execution status = %q, want canceled", snap.Status)
+	}
+	node, err := state.GetNode(ctx, id, "start")
+	if err != nil {
+		t.Fatalf("GetNode() error = %v", err)
+	}
+	if node == nil || node.Status != types.NodeStatusRunning {
+		t.Fatalf("node status = %+v, want original running state not overwritten by stale commit", node)
 	}
 }

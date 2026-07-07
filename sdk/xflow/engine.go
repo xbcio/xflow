@@ -51,6 +51,9 @@ func newFromConfig(cfg *engineConfig, provider backend.Provider) (*Engine, error
 	if cfg.logger != nil {
 		engOpts = append(engOpts, engine.WithLogger(cfg.logger))
 	}
+	if cfg.executionMode == ExecutionModeTransient {
+		engOpts = append(engOpts, engine.WithSuspendDisabled(ErrTransientSuspendUnsupported))
+	}
 
 	eng := engine.New(cfg.state, cfg.queue, engOpts...)
 
