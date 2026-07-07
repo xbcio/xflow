@@ -115,7 +115,7 @@ func (b *Backend) Bind(eng *engine.Engine) func() {
 			return err
 		}
 		if result.Suspend != nil {
-			return eng.CommitTaskFailure(ctx, lease, errTransientSuspendUnsupported)
+			return eng.CommitTaskFailure(ctx, lease, ErrTransientSuspendUnsupported)
 		}
 		return eng.CommitTaskResult(ctx, lease, result)
 	})

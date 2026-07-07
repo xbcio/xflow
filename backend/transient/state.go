@@ -13,7 +13,7 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
-var errTransientSuspendUnsupported = errors.New("suspend nodes are unsupported in transient execution mode")
+var ErrTransientSuspendUnsupported = errors.New("suspend nodes are unsupported in transient execution mode")
 
 type state struct {
 	mu            sync.Mutex
@@ -34,6 +34,7 @@ type state struct {
 
 type execEntry struct {
 	snap   engine.ExecutionSnapshot
+	err    string
 	closed bool
 }
 
@@ -85,7 +86,7 @@ func (s *state) CreateExecution(_ context.Context, e *engine.ExecutionSnapshot) 
 	return nil
 }
 
-func (s *state) UpdateExecutionStatus(_ context.Context, id types.ExecutionID, status types.ExecutionStatus, _ string) error {
+func (s *state) UpdateExecutionStatus(_ context.Context, id types.ExecutionID, status types.ExecutionStatus, errMsg string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -94,6 +95,7 @@ func (s *state) UpdateExecutionStatus(_ context.Context, id types.ExecutionID, s
 		return nil
 	}
 	entry.snap.Status = status
+	entry.err = errMsg
 	if isTerminalStatus(status) {
 		s.stopActiveTimerLocked(id)
 		if !entry.closed {
@@ -306,23 +308,23 @@ func (s *state) CheckCompletion(_ context.Context, id types.ExecutionID, totalNo
 }
 
 func (s *state) SuspendOrConsume(_ context.Context, _ types.ExecutionID, _ string, _ *types.SuspendSpec) (*types.SignalPayload, error) {
-	return nil, errTransientSuspendUnsupported
+	return nil, ErrTransientSuspendUnsupported
 }
 
 func (s *state) DeliverSignal(_ context.Context, _ types.ExecutionID, _ string, _ map[string]any) (string, *types.SignalPayload, error) {
-	return "", nil, errTransientSuspendUnsupported
+	return "", nil, ErrTransientSuspendUnsupported
 }
 
 func (s *state) ResuspendAtomic(_ context.Context, _ types.ExecutionID, _ string, _ string, _ string, _ *types.SuspendSpec) (*types.SignalPayload, error) {
-	return nil, errTransientSuspendUnsupported
+	return nil, ErrTransientSuspendUnsupported
 }
 
 func (s *state) RevokeSignal(_ context.Context, _ types.ExecutionID, _ string) (bool, error) {
-	return false, errTransientSuspendUnsupported
+	return false, ErrTransientSuspendUnsupported
 }
 
 func (s *state) AcquireResumeLock(_ context.Context, _ types.ExecutionID, _ string) (bool, error) {
-	return false, errTransientSuspendUnsupported
+	return false, ErrTransientSuspendUnsupported
 }
 
 func (s *state) ListSuspendedNodes(_ context.Context, _ types.ExecutionID) ([]string, error) {
@@ -448,7 +450,19 @@ func (s *state) waitDone(ctx context.Context, id types.ExecutionID) (types.Resul
 	if snap.Status == types.ExecutionStatusSuccess {
 		result.Output = s.getAllOutputs(id)
 	}
+	result.Error = s.executionError(id)
 	return result, nil
+}
+
+func (s *state) executionError(id types.ExecutionID) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	entry, ok := s.executions[id]
+	if !ok {
+		return ""
+	}
+	return entry.err
 }
 
 func (s *state) executionTerminal(id types.ExecutionID) bool {

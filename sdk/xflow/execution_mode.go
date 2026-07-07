@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	backendtransient "github.com/xbcio/xflow/backend/transient"
 )
 
 // ExecutionMode selects how the SDK retains execution state.
@@ -26,6 +28,8 @@ var (
 	ErrTransientInspectionUnavailable = errors.New("xflow: inspect is unavailable in transient execution mode")
 	// ErrTransientSignalsUnsupported reports that signals are unavailable in transient mode.
 	ErrTransientSignalsUnsupported = errors.New("xflow: signals are unsupported in transient execution mode")
+	// ErrTransientSuspendUnsupported reports that suspend nodes are unsupported in transient mode.
+	ErrTransientSuspendUnsupported = backendtransient.ErrTransientSuspendUnsupported
 )
 
 // WithExecutionMode configures the engine execution retention mode.
