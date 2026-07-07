@@ -11,7 +11,7 @@ tools: Bash, Read, Write, Edit, Grep, Glob
 - 测试目录：`test/integration/`（build tag `integration`）、`test/perf/`（build tag `perf`）。
 - 环境编排：`test/env/docker-compose.yml`，主 Makefile 目标 `env-up/env-down/env-reset/env-logs/env-migrate`。
 - 测试约定见 `docs/TESTING.md`：`t.Run` 子用例、table-driven、**禁止 `time.Sleep`**（用轮询 + `context.WithTimeout`）、helper 调 `t.Helper()`、失败消息含输入值。
-- 服务地址经环境变量发现：`XFLOW_TEST_REDIS_ADDR`（测试 Redis 在 localhost:6380）、`XFLOW_TEST_MYSQL_DSN`、`XFLOW_TEST_KAFKA_BROKERS`；缺省 localhost；不可达 `t.Skip`。
+- 服务地址经环境变量发现：`XFLOW_TEST_REDIS_ADDR`（也可只设 `REDIS_PORT`，harness 会拼 `localhost:$REDIS_PORT`）、`XFLOW_TEST_MYSQL_DSN`（或 `MYSQL_PORT`/`MYSQL_ROOT_PASSWORD`/`MYSQL_DATABASE`）、`XFLOW_TEST_KAFKA_BROKERS`（或 `KAFKA_PORT`）；缺省 `test/env/.env.sample` 里的默认端口（Redis 6379、MySQL 3306、Kafka 9092）；不可达 `t.Skip`。
 - 复用 `test/integration/harness.go` 的 helper（`requireRedis/requireMySQL/requireKafka/waitForCompletion/uniqueTopic` 等），不要重写。
 - 生成的测试用例必须是**通用可复用**模式：参数化、不绑死某条数据、用唯一 topic/execID 避免污染、helper 复用。
 - **禁止修改被测业务代码**（`engine/`、`backend/`、`service/`、`nodes/`、`store/`、`sdk/` 下的非测试文件）。只写 `test/` 下的测试文件。测试失败只报告 + 排查建议。
@@ -23,7 +23,7 @@ tools: Bash, Read, Write, Edit, Grep, Glob
 - 检查 podman：`podman --version`。不可用则报错退出，提示安装。
 - `make env-up`（幂等）。轮询 `podman ps` 等待三容器 healthy（最长 90s，**不要 time.Sleep，用循环 + 短轮询**）。
 - `make env-migrate`（幂等，`CREATE TABLE IF NOT EXISTS`）。
-- **重要：设置 `export XFLOW_TEST_REDIS_ADDR=localhost:6380`**（test/env/.env 中 REDIS_PORT=6380）。
+- 若本机默认端口（6379/3306/9092）已被占用，改 `test/env/.env`（从 `.env.sample` 复制）里的 `REDIS_PORT`/`MYSQL_PORT`/`KAFKA_PORT`，`make env-up` 会用新端口起容器；然后设对应的 `XFLOW_TEST_REDIS_ADDR`/`REDIS_PORT` 等环境变量再跑测试（Makefile 的 `test-integration`/`test-perf` 会自动 source `test/env/.env`，但只有 `REDIS_PORT` 会被 harness 读取到，MySQL/Kafka 同理经端口变量读取，不需要另设 DSN/BROKERS）。
 
 ### 2. 功能测试
 
