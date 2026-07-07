@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/xbcio/xflow/engine"
@@ -180,4 +181,114 @@ func cloneLabels(labels map[string]string) map[string]string {
 		out[key] = value
 	}
 	return out
+}
+
+func RunnerFrameToProto(f RunnerFrame) (*runnerpb.RunnerFrame, error) {
+	switch {
+	case f.Hello != nil:
+		return &runnerpb.RunnerFrame{Frame: &runnerpb.RunnerFrame_Hello{
+			Hello: &runnerpb.HelloFrame{
+				RunnerId:     f.Hello.RunnerID,
+				Concurrency:  int32(f.Hello.Concurrency),
+				Capabilities: CapabilitiesToProto(f.Hello.Capabilities),
+				Labels:       cloneLabels(f.Hello.Labels),
+			},
+		}}, nil
+	case f.Result != nil:
+		leaseJSON, err := marshalLease(f.Result.Lease)
+		if err != nil {
+			return nil, err
+		}
+		resultJSON, err := MarshalTaskResult(f.Result.Result)
+		if err != nil {
+			return nil, err
+		}
+		return &runnerpb.RunnerFrame{Frame: &runnerpb.RunnerFrame_Result{
+			Result: &runnerpb.ResultFrame{
+				LeaseId:    f.Result.LeaseID,
+				LeaseJson:  leaseJSON,
+				ResultJson: resultJSON,
+			},
+		}}, nil
+	case f.Bye != nil:
+		return &runnerpb.RunnerFrame{Frame: &runnerpb.RunnerFrame_Bye{Bye: &runnerpb.ByeFrame{}}}, nil
+	}
+	return nil, errors.New("runner frame: no sub-frame set")
+}
+
+func RunnerFrameFromProto(pb *runnerpb.RunnerFrame) (RunnerFrame, error) {
+	switch f := pb.GetFrame().(type) {
+	case *runnerpb.RunnerFrame_Hello:
+		return RunnerFrame{Hello: &HelloFrame{
+			RunnerID:     f.Hello.GetRunnerId(),
+			Concurrency:  int(f.Hello.GetConcurrency()),
+			Capabilities: CapabilitiesFromProto(f.Hello.GetCapabilities()),
+			Labels:       cloneLabels(f.Hello.GetLabels()),
+		}}, nil
+	case *runnerpb.RunnerFrame_Result:
+		lease, err := unmarshalLease(f.Result.GetLeaseJson())
+		if err != nil {
+			return RunnerFrame{}, err
+		}
+		result, err := UnmarshalTaskResult(f.Result.GetResultJson())
+		if err != nil {
+			return RunnerFrame{}, err
+		}
+		return RunnerFrame{Result: &ResultFrame{
+			LeaseID: f.Result.GetLeaseId(),
+			Lease:   lease,
+			Result:  result,
+		}}, nil
+	case *runnerpb.RunnerFrame_Bye:
+		return RunnerFrame{Bye: &ByeFrame{}}, nil
+	}
+	return RunnerFrame{}, errors.New("runner frame: empty oneof")
+}
+
+func ServerFrameToProto(f ServerFrame) (*runnerpb.ServerFrame, error) {
+	switch {
+	case f.Welcome != nil:
+		return &runnerpb.ServerFrame{Frame: &runnerpb.ServerFrame_Welcome{
+			Welcome: &runnerpb.WelcomeFrame{RunnerId: f.Welcome.RunnerID, ServerTime: f.Welcome.ServerTime},
+		}}, nil
+	case f.Task != nil:
+		leaseJSON, err := marshalLease(f.Task.Lease)
+		if err != nil {
+			return nil, err
+		}
+		return &runnerpb.ServerFrame{Frame: &runnerpb.ServerFrame_Task{
+			Task: &runnerpb.TaskFrame{LeaseJson: leaseJSON},
+		}}, nil
+	case f.Ack != nil:
+		return &runnerpb.ServerFrame{Frame: &runnerpb.ServerFrame_Ack{
+			Ack: &runnerpb.AckFrame{LeaseId: f.Ack.LeaseID, Accepted: f.Ack.Accepted, Error: f.Ack.Error},
+		}}, nil
+	case f.Backoff != nil:
+		return &runnerpb.ServerFrame{Frame: &runnerpb.ServerFrame_Backoff{
+			Backoff: &runnerpb.BackoffFrame{WaitNanos: int64(f.Backoff.Wait)},
+		}}, nil
+	case f.Keepalive != nil:
+		return &runnerpb.ServerFrame{Frame: &runnerpb.ServerFrame_Keepalive{Keepalive: &runnerpb.KeepaliveFrame{}}}, nil
+	}
+	return nil, errors.New("server frame: no sub-frame set")
+}
+
+func ServerFrameFromProto(pb *runnerpb.ServerFrame) (ServerFrame, error) {
+	switch f := pb.GetFrame().(type) {
+	case *runnerpb.ServerFrame_Welcome:
+		return ServerFrame{Welcome: &WelcomeFrame{RunnerID: f.Welcome.GetRunnerId(), ServerTime: f.Welcome.GetServerTime()}}, nil
+	case *runnerpb.ServerFrame_Task:
+		lease, err := unmarshalLease(f.Task.GetLeaseJson())
+		if err != nil {
+			return ServerFrame{}, err
+		}
+		return ServerFrame{Task: &TaskFrame{Lease: lease}}, nil
+	case *runnerpb.ServerFrame_Ack:
+		return ServerFrame{Ack: &AckFrame{LeaseID: f.Ack.GetLeaseId(), Accepted: f.Ack.GetAccepted(), Error: f.Ack.GetError()}}, nil
+	case *runnerpb.ServerFrame_Backoff:
+		return ServerFrame{Backoff: &BackoffFrame{Wait: time.Duration(f.Backoff.GetWaitNanos())}}, nil
+	case *runnerpb.ServerFrame_Keepalive:
+		return ServerFrame{Keepalive: &KeepaliveFrame{}}, nil
+	}
+	return ServerFrame{}, errors.New("server frame: empty oneof")
 }

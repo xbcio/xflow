@@ -137,3 +137,55 @@ func UnmarshalTaskResult(data []byte) (engine.TaskResult, error) {
 	}
 	return result, nil
 }
+
+// RunnerFrame is the transport-agnostic runner→server frame (mirrors runnerpb.RunnerFrame.oneof).
+type RunnerFrame struct {
+	Hello  *HelloFrame
+	Result *ResultFrame
+	Bye    *ByeFrame
+}
+
+type HelloFrame struct {
+	RunnerID     string
+	Concurrency  int
+	Capabilities []Capability
+	Labels       map[string]string
+}
+
+type ResultFrame struct {
+	LeaseID string
+	Lease   *engine.TaskLease
+	Result  engine.TaskResult
+}
+
+type ByeFrame struct{}
+
+// ServerFrame is the transport-agnostic server→runner frame.
+type ServerFrame struct {
+	Welcome   *WelcomeFrame
+	Task      *TaskFrame
+	Ack       *AckFrame
+	Backoff   *BackoffFrame
+	Keepalive *KeepaliveFrame
+}
+
+type WelcomeFrame struct {
+	RunnerID   string
+	ServerTime int64
+}
+
+type TaskFrame struct {
+	Lease *engine.TaskLease
+}
+
+type AckFrame struct {
+	LeaseID  string
+	Accepted bool
+	Error    string
+}
+
+type BackoffFrame struct {
+	Wait time.Duration
+}
+
+type KeepaliveFrame struct{}
