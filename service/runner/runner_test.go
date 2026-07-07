@@ -160,3 +160,98 @@ func TestRunnerConcurrencyParallel(t *testing.T) {
 	}
 	cancel()
 }
+
+// ---------------------------------------------------------------------------
+// TestRunnerGracefulDrain — proves cross-task integration between T7's
+// recv-loop/worker-pool rewrite (in-flight work drains via wg.Wait before
+// Run exits) and T9's exit-code normalization (ctx.Canceled -> nil). A single
+// slow handler is mid-flight when ctx is cancelled; Run must not abandon it —
+// it waits for the RESULT to be sent before tearing down, and returns nil
+// rather than a cancellation error.
+// ---------------------------------------------------------------------------
+
+func TestRunnerGracefulDrain(t *testing.T) {
+	stream := newFakeStream(16)
+	stream.recvCh <- protocol.ServerFrame{Welcome: &protocol.WelcomeFrame{RunnerID: "r1"}}
+
+	const handlerDelay = 100 * time.Millisecond
+	handlerStarted := make(chan struct{}, 1)
+	handlerDone := make(chan struct{}, 1)
+
+	registry := execution.NewRegistry()
+	registerTestHandler(t, registry, "xflow.function", func(ctx context.Context, input *types.Input) (*types.Output, error) {
+		handlerStarted <- struct{}{}
+		time.Sleep(handlerDelay)
+		handlerDone <- struct{}{}
+		return &types.Output{Data: map[string]any{"ok": true}}, nil
+	})
+
+	r := New(
+		&fakeClient{stream},
+		registry,
+		Config{
+			RunnerID:     "r1",
+			Concurrency:  1,
+			Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
+		},
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runErr := make(chan error, 1)
+	go func() { runErr <- r.Run(ctx) }()
+
+	// Send exactly 1 TASK frame, then wait until the worker has actually
+	// started executing it before cancelling. This proves the specific
+	// invariant the brief calls out — cancel lands mid-execution, not before
+	// pickup — without racing the ambiguous "did the runner even see the
+	// task yet" window that a bare cancel() right after Send would leave
+	// open (recvCh is buffered, so sending never synchronizes with recvLoop
+	// actually consuming it).
+	stream.recvCh <- protocol.ServerFrame{Task: &protocol.TaskFrame{
+		Lease: &engine.TaskLease{LeaseID: engine.LeaseID("L1"), NodeType: "xflow.function"},
+	}}
+	select {
+	case <-handlerStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler never started")
+	}
+	cancel()
+
+	// (a) Exactly 1 RESULT frame for L1 must be sent — the worker completed
+	// its in-flight task despite the ctx cancellation racing its start.
+	// sendCh also carries the initial HELLO frame and (on drain) a trailing
+	// BYE frame; skip past those and look specifically for RESULT.
+	var resultFr protocol.RunnerFrame
+	found := false
+	for !found {
+		select {
+		case fr := <-stream.sendCh:
+			if fr.Result != nil {
+				resultFr = fr
+				found = true
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timeout waiting for RESULT frame; worker was not drained gracefully")
+		}
+	}
+	if resultFr.Result.LeaseID != "L1" {
+		t.Fatalf("expected RESULT for L1, got %+v", resultFr)
+	}
+
+	// Confirm the handler itself actually ran to completion (not skipped).
+	select {
+	case <-handlerDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler never completed")
+	}
+
+	// (b) Run must return nil — ctx.Canceled normalizes to nil per T9.
+	select {
+	case err := <-runErr:
+		if err != nil {
+			t.Fatalf("Run() error = %v, want nil (ctx.Canceled should normalize to nil)", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for Run() to return")
+	}
+}

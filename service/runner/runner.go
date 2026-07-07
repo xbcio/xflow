@@ -85,16 +85,28 @@ func (r *Runner) Run(ctx context.Context) error {
 	go func() { recvErr <- r.recvLoop(ctx, stream, taskCh) }()
 
 	var firstErr error
-	recvExited := false
 	select {
 	case err := <-recvErr:
 		firstErr = err
-		recvExited = true
 	case <-ctx.Done():
 		firstErr = ctx.Err()
+		// recvLoop may be blocked in stream.Recv() (not itself ctx-aware —
+		// e.g. fakeStream.Recv only unblocks via Close, and even gRPC's Recv
+		// can outlast ctx by a beat) or about to race taskCh<- against the
+		// very ctx.Done() we just observed. Close the stream first: that
+		// unblocks a pending Recv() (returns an error) and, together with
+		// ctx.Done() already firing, guarantees recvLoop's inner select
+		// takes the ctx.Done() branch on any subsequent iteration. Only
+		// after recvLoop is confirmed to have returned (drained from
+		// recvErr) is it safe to close(taskCh) below without racing its
+		// send — closing taskCh while recvLoop might still pick the
+		// taskCh<- branch would panic with "send on closed channel".
+		_ = stream.Close()
+		<-recvErr
 	}
 
-	// Step 1: stop dispatching new tasks to workers.
+	// Step 1: stop dispatching new tasks to workers. Safe now — recvLoop has
+	// definitely returned (drained above), so nothing can still be sending.
 	close(taskCh)
 
 	// Step 2: wait for in-flight workers to drain (30 s hard timeout).
@@ -108,22 +120,14 @@ func (r *Runner) Run(ctx context.Context) error {
 	// Step 3: send BYE before closing (best-effort; ignore error if ctx cancelled).
 	_ = stream.Send(protocol.RunnerFrame{Bye: &protocol.ByeFrame{}})
 
-	// Step 4: close the stream explicitly — this unblocks recvLoop's stream.Recv()
-	// (returns context.Canceled or EOF), causing recvLoop to return and write to recvErr.
-	// The defer stream.Close() at the top of Run handles the early-return path
-	// (HELLO/WELCOME failure). fakeStream.Close is idempotent (CAS on closed flag);
-	// gRPC CloseSend is also idempotent, so the defer is a safe no-op on second call.
+	// Step 4: close the stream explicitly. recvLoop has already returned by
+	// this point (drained above via recvErr, either directly or after
+	// ctx.Done()), so this call no longer needs to unblock it — it just
+	// releases the transport promptly instead of waiting for the deferred
+	// stream.Close() at the top of Run. fakeStream.Close is idempotent (CAS
+	// on closed flag); gRPC CloseSend is also idempotent, so the defer is a
+	// safe no-op on second call.
 	_ = stream.Close()
-
-	// Step 5: blocking join — safe because step 4 guarantees recvLoop will exit.
-	// Skip if we already consumed recvErr in the select above (recvLoop already returned).
-	if !recvExited {
-		select {
-		case <-recvErr:
-		case <-time.After(5 * time.Second):
-			// stream.Close() should have unblocked recvLoop; 5 s is a safety valve.
-		}
-	}
 
 	if errors.Is(firstErr, context.Canceled) {
 		return nil
