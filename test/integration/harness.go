@@ -4,6 +4,7 @@ package integration
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -36,12 +37,19 @@ func redisAddr(t *testing.T) string {
 
 func mysqlDSN(t *testing.T) string {
 	t.Helper()
-	return envOr("XFLOW_TEST_MYSQL_DSN", "root:xflow@tcp(localhost:3306)/xflow?parseTime=true&multiStatements=true")
+	if v := os.Getenv("XFLOW_TEST_MYSQL_DSN"); v != "" {
+		return v
+	}
+	port := envOr("MYSQL_PORT", "3306")
+	pw := envOr("MYSQL_ROOT_PASSWORD", "xflow")
+	db := envOr("MYSQL_DATABASE", "xflow")
+	return fmt.Sprintf("root:%s@tcp(localhost:%s)/%s?parseTime=true&multiStatements=true", pw, port, db)
 }
 
 func kafkaBrokers(t *testing.T) []string {
 	t.Helper()
-	raw := envOr("XFLOW_TEST_KAFKA_BROKERS", "localhost:9092")
+	def := "localhost:" + envOr("KAFKA_PORT", "9092")
+	raw := envOr("XFLOW_TEST_KAFKA_BROKERS", def)
 	parts := strings.Split(raw, ",")
 	out := make([]string, 0, len(parts))
 	for _, p := range parts {
@@ -88,18 +96,6 @@ func requireKafka(t *testing.T) []string {
 
 // --- completion polling (no time.Sleep) ---
 
-func isTerminal(s types.ExecutionStatus) bool {
-	switch s {
-	case types.ExecutionStatusSuccess,
-		types.ExecutionStatusFailed,
-		types.ExecutionStatusCanceled,
-		types.ExecutionStatusTimeout:
-		return true
-	}
-	return false
-}
-
-// waitForCompletion polls GetExecution until terminal or ctx deadline.
 // outputNodes lists the node names whose outputs should be collected into
 // types.Result.Output; if none are supplied the Output map is empty.
 func waitForCompletion(ctx context.Context, t *testing.T, state engine.StateStore, id types.ExecutionID, outputNodes ...string) types.Result {
@@ -108,7 +104,7 @@ func waitForCompletion(ctx context.Context, t *testing.T, state engine.StateStor
 	defer ticker.Stop()
 	for {
 		snap, err := state.GetExecution(ctx, id)
-		if err == nil && isTerminal(snap.Status) {
+		if err == nil && types.IsTerminalExecutionStatus(snap.Status) {
 			out := map[string]any{}
 			for _, n := range outputNodes {
 				if v, e := state.GetOutput(ctx, id, n); e == nil && v != nil {
