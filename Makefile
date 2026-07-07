@@ -1,4 +1,5 @@
-.PHONY: all build test test-concurrency lint fmt tidy clean run-server run-runner install-hooks proto proto-tools
+.PHONY: all build test test-concurrency lint fmt tidy clean run-server run-runner install-hooks proto proto-tools \
+        env-up env-down env-reset env-logs env-migrate test-integration test-perf
 
 # ── Build ──────────────────────────────────────────────────────────────────────
 
@@ -88,3 +89,26 @@ install-hooks:
 
 clean:
 	rm -rf bin/
+
+# ── Test environment (podman) ────────────────────────────────────────────────
+ENV_FILE := $(wildcard test/env/.env)
+ENV_FLAG := $(if $(ENV_FILE),--env-file $(ENV_FILE),)
+COMPOSE  := podman compose -f test/env/docker-compose.yml $(ENV_FLAG)
+
+env-up:
+	@$(COMPOSE) up -d
+env-down:
+	@$(COMPOSE) down
+env-reset:
+	@$(COMPOSE) down -v
+env-logs:
+	@$(COMPOSE) logs -f
+env-migrate:
+	@bash test/env/migrate.sh
+
+# ── Integration / perf tests (gated by build tags) ───────────────────────────
+test-integration:
+	go test -tags=integration -race -count=1 -timeout 600s ./test/integration/...
+
+test-perf:
+	go test -tags=perf -bench=. -benchtime=2s -timeout 30m ./test/perf/...

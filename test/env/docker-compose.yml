@@ -34,7 +34,7 @@ services:
     networks: [xflow-test]
 
   kafka:
-    image: docker.io/apache/kafka:3.7
+    image: docker.io/apache/kafka:3.9.1
     container_name: xflow-test-kafka
     environment:
       KAFKA_NODE_ID: 1
