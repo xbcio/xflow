@@ -4,6 +4,7 @@ package integration
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"testing"
@@ -24,7 +25,8 @@ func newKafkaTopic(t *testing.T, brokers []string, topic string, partitions int)
 	// creating via DialLeader implicitly creates the topic on first write;
 	// ensure partitions exist
 	if err := conn.CreateTopics(kafka.TopicConfig{Topic: topic, NumPartitions: partitions, ReplicationFactor: 1}); err != nil {
-		if err != kafka.TopicAlreadyExists {
+		// Check if error is TopicAlreadyExists; use errors.As to handle wrapped errors
+		if !errors.Is(err, kafka.TopicAlreadyExists) {
 			t.Fatalf("create kafka topic %q: %v", topic, err)
 		}
 	}
