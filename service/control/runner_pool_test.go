@@ -136,3 +136,43 @@ func TestRunnerPoolHeartbeatUpdatesCapacityInFlightAndTimestamp(t *testing.T) {
 		t.Fatalf("last heartbeat = %s, want %s", snapshot.LastHeartbeat, now)
 	}
 }
+
+func TestAssignRoutedNotifiesStreamSession(t *testing.T) {
+	p := NewRunnerPool()
+	p.RegisterWithLabelsAndPolicy("r1", 2,
+		[]protocol.Capability{{NodeType: "xflow.function"}}, nil,
+		RunnerPolicy{AllowedNodeTypes: []string{"*"}})
+	p.bindSession("r1", &streamSession{})
+	// drain any pending signal
+	select {
+	case <-p.runners["r1"].notify:
+	default:
+	}
+
+	if err := p.Assign(engine.TaskLease{LeaseID: "L1", NodeType: "xflow.function"}); err != nil {
+		t.Fatalf("assign: %v", err)
+	}
+	select {
+	case <-p.runners["r1"].notify:
+	default:
+		t.Fatal("AssignRouted did not signal notify after enqueue")
+	}
+	if len(p.runners["r1"].queue) != 1 {
+		t.Fatalf("queue len = %d, want 1", len(p.runners["r1"].queue))
+	}
+}
+
+func TestAssignRoutedNoNotifyWithoutSession(t *testing.T) {
+	p := NewRunnerPool()
+	p.RegisterWithLabelsAndPolicy("r2", 2,
+		[]protocol.Capability{{NodeType: "xflow.function"}}, nil,
+		RunnerPolicy{AllowedNodeTypes: []string{"*"}})
+	if err := p.Assign(engine.TaskLease{LeaseID: "L2", NodeType: "xflow.function"}); err != nil {
+		t.Fatalf("assign: %v", err)
+	}
+	select {
+	case <-p.runners["r2"].notify:
+		t.Fatal("notify fired without session bound")
+	default:
+	}
+}

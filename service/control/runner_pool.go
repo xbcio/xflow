@@ -23,6 +23,10 @@ type RunnerSnapshot struct {
 	LastHeartbeat time.Time
 }
 
+// streamSession is the server-side handle to an active Connect stream. Fully
+// populated in a later task; placeholder here so runnerState can reference it.
+type streamSession struct{}
+
 type runnerState struct {
 	snapshot RunnerSnapshot
 	queue    []engine.TaskLease
@@ -31,6 +35,10 @@ type runnerState struct {
 	// before assigning work — a token/mTLS-authenticated runner that lists
 	// xflow.function does not receive xflow.database leases.
 	policy RunnerPolicy
+	// notify is a 1-capacity signal channel. AssignRouted sends non-blocking
+	// after enqueue; the stream handler drains the queue on receive.
+	notify  chan struct{}
+	session *streamSession
 }
 
 func NewRunnerPool() *RunnerPool {
@@ -58,7 +66,7 @@ func (p *RunnerPool) RegisterWithLabelsAndPolicy(runnerID string, capacity int, 
 
 	state := p.runners[runnerID]
 	if state == nil {
-		state = &runnerState{}
+		state = &runnerState{notify: make(chan struct{}, 1)}
 		p.runners[runnerID] = state
 	}
 	state.snapshot.RunnerID = runnerID
@@ -144,6 +152,12 @@ func (p *RunnerPool) AssignRouted(routing engine.TaskRouting, build func() (*eng
 		return ErrNoMatchingRunner
 	}
 	best.queue = append(best.queue, *lease)
+	if best.session != nil {
+		select {
+		case best.notify <- struct{}{}:
+		default:
+		}
+	}
 	return nil
 }
 
@@ -244,4 +258,20 @@ func cloneLabels(labels map[string]string) map[string]string {
 		clone[key] = value
 	}
 	return clone
+}
+
+func (p *RunnerPool) bindSession(runnerID string, s *streamSession) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if state, ok := p.runners[runnerID]; ok {
+		state.session = s
+	}
+}
+
+func (p *RunnerPool) clearSession(runnerID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if state, ok := p.runners[runnerID]; ok {
+		state.session = nil
+	}
 }
