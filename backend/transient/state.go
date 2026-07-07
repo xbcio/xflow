@@ -132,6 +132,9 @@ func (s *state) UpsertNode(_ context.Context, n *engine.NodeSnapshot) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if !s.executionExistsLocked(n.ExecutionID) {
+		return engine.ErrExecutionInactive
+	}
 	key := string(n.ExecutionID) + "/" + n.Name
 	if existing, ok := s.nodes[key]; ok && isTerminalNode(existing.Status) && n.ActivationID <= existing.ActivationID {
 		return nil
@@ -264,6 +267,9 @@ func (s *state) DecrementInDegree(_ context.Context, id types.ExecutionID, nodeI
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if !s.executionExistsLocked(id) {
+		return 0, 0, engine.ErrExecutionInactive
+	}
 	key := fmt.Sprintf("%s/%d", id, nodeIdx)
 	s.inDegrees[key]--
 	if portActive {
@@ -321,6 +327,9 @@ func (s *state) ListSuspendedNodes(_ context.Context, _ types.ExecutionID) ([]st
 func (s *state) PutOutput(_ context.Context, id types.ExecutionID, name string, data map[string]any) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !s.executionExistsLocked(id) {
+		return engine.ErrExecutionInactive
+	}
 	s.outputs[string(id)+"/"+name] = data
 	s.touchActiveLocked(id)
 	return nil
@@ -367,6 +376,9 @@ func (s *state) WatchExecution(ctx context.Context, id types.ExecutionID) (<-cha
 func (s *state) CreateSubExecution(_ context.Context, sub *engine.SubExecution) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !s.executionExistsLocked(sub.ParentExecID) {
+		return engine.ErrExecutionInactive
+	}
 	key := string(sub.ParentExecID) + "/" + sub.ParentNode
 	s.subExecs[key] = append(s.subExecs[key], sub)
 	s.touchActiveLocked(sub.ParentExecID)
@@ -377,6 +389,9 @@ func (s *state) CompleteSubExecution(_ context.Context, parentExecID types.Execu
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if !s.executionExistsLocked(parentExecID) {
+		return false, engine.ErrExecutionInactive
+	}
 	key := string(parentExecID) + "/" + parentNode
 	subs := s.subExecs[key]
 	allDone := true
@@ -442,6 +457,10 @@ func (s *state) executionTerminal(id types.ExecutionID) bool {
 func (s *state) executionExists(id types.ExecutionID) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.executionExistsLocked(id)
+}
+
+func (s *state) executionExistsLocked(id types.ExecutionID) bool {
 	_, ok := s.executions[id]
 	return ok
 }

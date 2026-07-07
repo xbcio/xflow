@@ -2,6 +2,7 @@ package transient
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -89,6 +90,32 @@ func TestTransientStateRefreshesActiveTTLOnMutation(t *testing.T) {
 		}
 		return snap == nil
 	})
+}
+
+func TestTransientStateRejectsNodeMutationAfterCleanup(t *testing.T) {
+	backend := New(WithActiveTTL(time.Second), WithCompletionTTL(time.Second))
+	state := backend.State()
+	ctx := context.Background()
+	id := types.ExecutionID("exec-transient-expired")
+
+	if err := state.CreateExecution(ctx, &engine.ExecutionSnapshot{
+		ID:     id,
+		Graph:  testTransientGraph(t),
+		Status: types.ExecutionStatusRunning,
+	}); err != nil {
+		t.Fatalf("CreateExecution() error = %v", err)
+	}
+	backend.state.cleanupExecution(id)
+
+	err := state.UpsertNode(ctx, &engine.NodeSnapshot{
+		ExecutionID: id,
+		Name:        "start",
+		NodeIdx:     0,
+		Status:      types.NodeStatusRunning,
+	})
+	if !errors.Is(err, engine.ErrExecutionInactive) {
+		t.Fatalf("UpsertNode() error = %v, want ErrExecutionInactive", err)
+	}
 }
 
 func testTransientGraph(t *testing.T) *graph.Graph {
