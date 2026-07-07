@@ -14,9 +14,10 @@ import (
 
 type runnerConfigFile struct {
 	Runner struct {
-		ID           *string   `yaml:"id"`
-		Concurrency  *int      `yaml:"concurrency"`
-		Capabilities *[]string `yaml:"capabilities"`
+		ID           *string           `yaml:"id"`
+		Concurrency  *int              `yaml:"concurrency"`
+		Capabilities *[]string         `yaml:"capabilities"`
+		Labels       map[string]string `yaml:"labels"`
 	} `yaml:"runner"`
 	Server struct {
 		URL        *string `yaml:"url"`
@@ -89,6 +90,10 @@ func loadRunnerConfigFromBytes(data []byte) (runnerConfig, error) {
 	if file.Runner.Capabilities != nil {
 		cfg.capRaw = strings.Join(*file.Runner.Capabilities, ",")
 	}
+	if file.Runner.Labels != nil {
+		cfg.labels = cloneStringMap(file.Runner.Labels)
+		cfg.labelRaw = labelsToRaw(cfg.labels)
+	}
 	if file.Poll.Wait != nil {
 		cfg.pollWait = *file.Poll.Wait
 	}
@@ -97,6 +102,7 @@ func loadRunnerConfigFromBytes(data []byte) (runnerConfig, error) {
 	}
 
 	cfg.capabilities = parseCapabilities(cfg.capRaw)
+	cfg.labels = parseLabels(cfg.labelRaw)
 	return cfg, nil
 }
 
@@ -107,6 +113,7 @@ var runnerConfigIssueOrder = []string{
 	"id",
 	"concurrency",
 	"cap",
+	"label",
 	"heartbeat-interval",
 	"poll-wait",
 }
@@ -143,6 +150,9 @@ func applyLookupEnvOverrides(cfg runnerConfig, lookupEnv func(string) (string, b
 	if v, ok := lookupEnv("XFLOW_RUNNER_CAP"); ok {
 		cfg.capRaw = v
 	}
+	if v, ok := lookupEnv("XFLOW_RUNNER_LABELS"); ok {
+		cfg.labelRaw = splitCSV(v)
+	}
 	if v, ok := lookupEnv("XFLOW_RUNNER_HEARTBEAT_INTERVAL"); ok {
 		cfg.heartbeatInterval = v
 	}
@@ -163,7 +173,60 @@ func applyLookupEnvOverrides(cfg runnerConfig, lookupEnv func(string) (string, b
 	}
 
 	cfg.capabilities = parseCapabilities(cfg.capRaw)
+	cfg.labels = parseLabels(cfg.labelRaw)
 	return cfg
+}
+
+func parseLabels(raw []string) map[string]string {
+	if len(raw) == 0 {
+		return nil
+	}
+	labels := make(map[string]string, len(raw))
+	for _, item := range raw {
+		key, value, ok := strings.Cut(item, "=")
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if !ok {
+			labels[key] = ""
+			continue
+		}
+		labels[key] = value
+	}
+	return labels
+}
+
+func splitCSV(raw string) []string {
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+func labelsToRaw(labels map[string]string) []string {
+	if len(labels) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(labels))
+	for key, value := range labels {
+		out = append(out, key+"="+value)
+	}
+	return out
+}
+
+func cloneStringMap(src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make(map[string]string, len(src))
+	for key, value := range src {
+		dst[key] = value
+	}
+	return dst
 }
 
 func validateRunnerConfig(cfg runnerConfig) error {
@@ -190,6 +253,14 @@ func validateRunnerConfig(cfg runnerConfig) error {
 	cfg.capabilities = parseCapabilities(cfg.capRaw)
 	if len(cfg.capabilities) == 0 {
 		return errors.New("capabilities must contain at least one node type")
+	}
+	for key, value := range cfg.labels {
+		if strings.TrimSpace(key) == "" {
+			return errors.New("labels must not contain an empty key")
+		}
+		if value == "" {
+			return fmt.Errorf("label %q must not have an empty value", key)
+		}
 	}
 	if err := validatePositiveDuration("heartbeat interval", cfg.heartbeatInterval); err != nil {
 		return err
@@ -251,6 +322,10 @@ func resolveRunnerConfig(base runnerConfig) (runnerConfig, error) {
 		clearRunnerConfigIssue(&cfg, "cap")
 		cfg.capRaw = base.capRaw
 	}
+	if base.changed["label"] {
+		clearRunnerConfigIssue(&cfg, "label")
+		cfg.labelRaw = append([]string(nil), base.labelRaw...)
+	}
 	if base.changed["heartbeat-interval"] {
 		clearRunnerConfigIssue(&cfg, "heartbeat-interval")
 		cfg.heartbeatInterval = base.heartbeatInterval
@@ -261,6 +336,7 @@ func resolveRunnerConfig(base runnerConfig) (runnerConfig, error) {
 	}
 
 	cfg.capabilities = parseCapabilities(cfg.capRaw)
+	cfg.labels = parseLabels(cfg.labelRaw)
 	if err := firstRunnerConfigIssue(cfg); err != nil {
 		return runnerConfig{}, err
 	}
@@ -306,6 +382,8 @@ func sampleRunnerConfigYAML() string {
 	return `runner:
   id: "runner-1"
   concurrency: 2
+  labels:
+    mode: "remote"
   capabilities:
     - "xflow.function"
 

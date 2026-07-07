@@ -37,6 +37,7 @@ func verifyRunner(ctx context.Context, cfg runnerConfig) error {
 	if _, err := client.Register(ctx, protocol.RegisterRunnerRequest{
 		RunnerID:     cfg.runnerID,
 		Concurrency:  cfg.concurrency,
+		Labels:       cloneStringMap(cfg.labels),
 		Capabilities: cfg.capabilities,
 	}); err != nil {
 		return err

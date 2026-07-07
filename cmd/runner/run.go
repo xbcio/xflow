@@ -40,6 +40,8 @@ type runnerConfig struct {
 	resolutionIssues  map[string]error
 	capRaw            string
 	capabilities      []protocol.Capability
+	labelRaw          []string
+	labels            map[string]string
 	heartbeatInterval string
 	pollWait          string
 	// token is the runner's bearer token (matched against the server's
@@ -78,6 +80,7 @@ func bindRunnerFlags(cmd *cobra.Command, cfg *runnerConfig) {
 	cmd.Flags().StringVar(&cfg.runnerID, "id", cfg.runnerID, "Runner ID")
 	cmd.Flags().IntVar(&cfg.concurrency, "concurrency", cfg.concurrency, "Runner concurrency")
 	cmd.Flags().StringVar(&cfg.capRaw, "cap", cfg.capRaw, "Comma-separated node type capabilities")
+	cmd.Flags().StringArrayVar(&cfg.labelRaw, "label", cfg.labelRaw, "Runner label as key=value; repeatable")
 	cmd.Flags().StringVar(&cfg.heartbeatInterval, "heartbeat-interval", cfg.heartbeatInterval, "Heartbeat interval")
 	cmd.Flags().StringVar(&cfg.pollWait, "poll-wait", cfg.pollWait, "Poll wait duration when no task is available")
 	cmd.Flags().StringVar(&cfg.token, "token", cfg.token, "Runner bearer token (prefer XFLOW_RUNNER_TOKEN env)")
@@ -214,6 +217,7 @@ func runnerServiceConfig(cfg runnerConfig) (runnersvc.Config, error) {
 	return runnersvc.Config{
 		RunnerID:          cfg.runnerID,
 		Concurrency:       cfg.concurrency,
+		Labels:            cloneStringMap(cfg.labels),
 		Capabilities:      cfg.capabilities,
 		HeartbeatInterval: heartbeatInterval,
 		PollWait:          pollWait,

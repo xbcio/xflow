@@ -21,6 +21,7 @@ type ProtocolClient interface {
 type Config struct {
 	RunnerID          string
 	Concurrency       int
+	Labels            map[string]string
 	Capabilities      []protocol.Capability
 	HeartbeatInterval time.Duration
 	PollWait          time.Duration
@@ -53,6 +54,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	if _, err := r.client.Register(ctx, protocol.RegisterRunnerRequest{
 		RunnerID:     r.config.RunnerID,
 		Concurrency:  r.config.Concurrency,
+		Labels:       cloneLabels(r.config.Labels),
 		Capabilities: r.config.Capabilities,
 	}); err != nil {
 		return err
@@ -84,6 +86,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		resp, err := r.client.Poll(ctx, protocol.PollTaskRequest{
 			RunnerID:     r.config.RunnerID,
 			Capacity:     r.config.Concurrency - inFlight,
+			Labels:       cloneLabels(r.config.Labels),
 			Capabilities: r.config.Capabilities,
 		})
 		if err != nil {
@@ -134,6 +137,17 @@ func (r *Runner) heartbeat(ctx context.Context, inFlight int) error {
 		Timestamp: time.Now().Unix(),
 	})
 	return err
+}
+
+func cloneLabels(labels map[string]string) map[string]string {
+	if len(labels) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(labels))
+	for key, value := range labels {
+		out[key] = value
+	}
+	return out
 }
 
 func sleepContext(ctx context.Context, delay time.Duration) error {
