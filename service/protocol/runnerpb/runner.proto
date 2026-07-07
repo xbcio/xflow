@@ -37,6 +37,7 @@ message RegisterRequest {
   string runner_id = 1;
   int32 concurrency = 2;
   repeated Capability capabilities = 3;
+  map<string, string> labels = 4;
 }
 
 message RegisterResponse {
@@ -58,6 +59,7 @@ message PollTaskRequest {
   string runner_id = 1;
   int32 capacity = 2;
   repeated Capability capabilities = 3;
+  map<string, string> labels = 4;
 }
 
 message PollTaskResponse {

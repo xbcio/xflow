@@ -68,6 +68,7 @@ func RegisterRequestToProto(req RegisterRunnerRequest) *runnerpb.RegisterRequest
 		RunnerId:     req.RunnerID,
 		Concurrency:  int32(req.Concurrency),
 		Capabilities: CapabilitiesToProto(req.Capabilities),
+		Labels:       cloneLabels(req.Labels),
 	}
 }
 
@@ -76,6 +77,7 @@ func RegisterRequestFromProto(req *runnerpb.RegisterRequest) RegisterRunnerReque
 		RunnerID:     req.GetRunnerId(),
 		Concurrency:  int(req.GetConcurrency()),
 		Capabilities: CapabilitiesFromProto(req.GetCapabilities()),
+		Labels:       cloneLabels(req.GetLabels()),
 	}
 }
 
@@ -102,6 +104,7 @@ func PollTaskRequestToProto(req PollTaskRequest) *runnerpb.PollTaskRequest {
 		RunnerId:     req.RunnerID,
 		Capacity:     int32(req.Capacity),
 		Capabilities: CapabilitiesToProto(req.Capabilities),
+		Labels:       cloneLabels(req.Labels),
 	}
 }
 
@@ -110,6 +113,7 @@ func PollTaskRequestFromProto(req *runnerpb.PollTaskRequest) PollTaskRequest {
 		RunnerID:     req.GetRunnerId(),
 		Capacity:     int(req.GetCapacity()),
 		Capabilities: CapabilitiesFromProto(req.GetCapabilities()),
+		Labels:       cloneLabels(req.GetLabels()),
 	}
 }
 
@@ -165,4 +169,15 @@ func ReportResultRequestFromProto(req *runnerpb.ReportResultRequest) (ReportResu
 		Lease:    lease,
 		Result:   result,
 	}, nil
+}
+
+func cloneLabels(labels map[string]string) map[string]string {
+	if len(labels) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(labels))
+	for key, value := range labels {
+		out[key] = value
+	}
+	return out
 }

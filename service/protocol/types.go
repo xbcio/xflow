@@ -15,9 +15,10 @@ type Capability struct {
 }
 
 type RegisterRunnerRequest struct {
-	RunnerID     string       `json:"runner_id"`
-	Concurrency  int          `json:"concurrency"`
-	Capabilities []Capability `json:"capabilities"`
+	RunnerID     string            `json:"runner_id"`
+	Concurrency  int               `json:"concurrency"`
+	Labels       map[string]string `json:"labels,omitempty"`
+	Capabilities []Capability      `json:"capabilities"`
 	// AuthToken is the runner's bearer token. Preferred: Authorization
 	// header. This body field is a fallback for transports that can't set
 	// headers.
@@ -41,10 +42,11 @@ type HeartbeatResponse struct {
 }
 
 type PollTaskRequest struct {
-	RunnerID     string       `json:"runner_id"`
-	Capacity     int          `json:"capacity"`
-	Capabilities []Capability `json:"capabilities"`
-	AuthToken    string       `json:"auth_token,omitempty"`
+	RunnerID     string            `json:"runner_id"`
+	Capacity     int               `json:"capacity"`
+	Labels       map[string]string `json:"labels,omitempty"`
+	Capabilities []Capability      `json:"capabilities"`
+	AuthToken    string            `json:"auth_token,omitempty"`
 }
 
 type PollTaskResponse struct {
