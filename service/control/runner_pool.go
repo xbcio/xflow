@@ -188,6 +188,9 @@ func (p *RunnerPool) PollWithLabels(runnerID string, capacity int, capabilities 
 	if labels != nil {
 		state.snapshot.Labels = cloneLabels(labels)
 	}
+	// No RunnerSelector re-check here: AssignRouted already filtered by
+	// selector (and by capability/policy) before choosing this runner and
+	// queuing the lease, so anything in state.queue already matches.
 	for i, lease := range state.queue {
 		if !canRun(state.snapshot.Capabilities, engine.TaskRouting{NodeType: lease.NodeType, NodeVersion: lease.NodeVersion}) {
 			continue
