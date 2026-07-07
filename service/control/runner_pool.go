@@ -6,6 +6,7 @@ import (
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/service/protocol"
+	"github.com/xbcio/xflow/types"
 )
 
 type RunnerPool struct {
@@ -17,6 +18,7 @@ type RunnerSnapshot struct {
 	RunnerID      string
 	Capacity      int
 	InFlight      int
+	Labels        map[string]string
 	Capabilities  []protocol.Capability
 	LastHeartbeat time.Time
 }
@@ -39,10 +41,18 @@ func (p *RunnerPool) Register(runnerID string, capacity int, capabilities []prot
 	p.RegisterWithPolicy(runnerID, capacity, capabilities, RunnerPolicy{AllowedNodeTypes: []string{"*"}})
 }
 
+func (p *RunnerPool) RegisterWithLabels(runnerID string, capacity int, capabilities []protocol.Capability, labels map[string]string) {
+	p.RegisterWithLabelsAndPolicy(runnerID, capacity, capabilities, labels, RunnerPolicy{AllowedNodeTypes: []string{"*"}})
+}
+
 // RegisterWithPolicy is the auth-aware Register. The permissive default binds
 // to Register callers who never enabled auth so existing tests / dev deploys
 // stay unchanged.
 func (p *RunnerPool) RegisterWithPolicy(runnerID string, capacity int, capabilities []protocol.Capability, policy RunnerPolicy) {
+	p.RegisterWithLabelsAndPolicy(runnerID, capacity, capabilities, nil, policy)
+}
+
+func (p *RunnerPool) RegisterWithLabelsAndPolicy(runnerID string, capacity int, capabilities []protocol.Capability, labels map[string]string, policy RunnerPolicy) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -53,6 +63,7 @@ func (p *RunnerPool) RegisterWithPolicy(runnerID string, capacity int, capabilit
 	}
 	state.snapshot.RunnerID = runnerID
 	state.snapshot.Capacity = capacity
+	state.snapshot.Labels = cloneLabels(labels)
 	state.snapshot.Capabilities = cloneCapabilities(capabilities)
 	state.policy = policy
 }
@@ -95,6 +106,9 @@ func (p *RunnerPool) AssignRouted(routing engine.TaskRouting, build func() (*eng
 	foundCapable := false
 	for _, state := range p.runners {
 		if !canRun(state.snapshot.Capabilities, routing) {
+			continue
+		}
+		if !matchesRunnerSelector(state.snapshot.Labels, routing.RunnerSelector) {
 			continue
 		}
 		// Policy check: skip runners whose authorization envelope forbids
@@ -146,6 +160,10 @@ func (s *runnerState) headroom() int {
 }
 
 func (p *RunnerPool) Poll(runnerID string, capacity int, capabilities []protocol.Capability) (engine.TaskLease, bool) {
+	return p.PollWithLabels(runnerID, capacity, capabilities, nil)
+}
+
+func (p *RunnerPool) PollWithLabels(runnerID string, capacity int, capabilities []protocol.Capability, labels map[string]string) (engine.TaskLease, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -156,6 +174,9 @@ func (p *RunnerPool) Poll(runnerID string, capacity int, capabilities []protocol
 	state.snapshot.Capacity = capacity
 	if capabilities != nil {
 		state.snapshot.Capabilities = cloneCapabilities(capabilities)
+	}
+	if labels != nil {
+		state.snapshot.Labels = cloneLabels(labels)
 	}
 	for i, lease := range state.queue {
 		if !canRun(state.snapshot.Capabilities, engine.TaskRouting{NodeType: lease.NodeType, NodeVersion: lease.NodeVersion}) {
@@ -177,6 +198,7 @@ func (p *RunnerPool) Runner(runnerID string) (RunnerSnapshot, bool) {
 	}
 	snapshot := state.snapshot
 	snapshot.Capabilities = cloneCapabilities(snapshot.Capabilities)
+	snapshot.Labels = cloneLabels(snapshot.Labels)
 	return snapshot, true
 }
 
@@ -192,11 +214,34 @@ func canRun(capabilities []protocol.Capability, routing engine.TaskRouting) bool
 	return false
 }
 
+func matchesRunnerSelector(labels map[string]string, selector *types.RunnerSelector) bool {
+	if selector == nil || len(selector.MatchLabels) == 0 {
+		return true
+	}
+	for key, want := range selector.MatchLabels {
+		if labels[key] != want {
+			return false
+		}
+	}
+	return true
+}
+
 func cloneCapabilities(capabilities []protocol.Capability) []protocol.Capability {
 	if len(capabilities) == 0 {
 		return nil
 	}
 	clone := make([]protocol.Capability, len(capabilities))
 	copy(clone, capabilities)
+	return clone
+}
+
+func cloneLabels(labels map[string]string) map[string]string {
+	if len(labels) == 0 {
+		return nil
+	}
+	clone := make(map[string]string, len(labels))
+	for key, value := range labels {
+		clone[key] = value
+	}
 	return clone
 }

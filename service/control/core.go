@@ -100,7 +100,7 @@ func (c *Core) register(req protocol.RegisterRunnerRequest, info TransportInfo) 
 	if err := c.authDeny(req.RunnerID, req.AuthToken, "register", info, authErr); err != nil {
 		return protocol.RegisterRunnerResponse{}, err
 	}
-	c.runners.RegisterWithPolicy(req.RunnerID, req.Concurrency, req.Capabilities, policy)
+	c.runners.RegisterWithLabelsAndPolicy(req.RunnerID, req.Concurrency, req.Capabilities, req.Labels, policy)
 	return protocol.RegisterRunnerResponse{RunnerID: req.RunnerID}, nil
 }
 
@@ -130,7 +130,7 @@ func (c *Core) pollTask(req protocol.PollTaskRequest, info TransportInfo) (proto
 	if err := c.authDeny(req.RunnerID, req.AuthToken, "poll", info, authErr); err != nil {
 		return protocol.PollTaskResponse{}, err
 	}
-	lease, ok := c.runners.Poll(req.RunnerID, req.Capacity, req.Capabilities)
+	lease, ok := c.runners.PollWithLabels(req.RunnerID, req.Capacity, req.Capabilities, req.Labels)
 	if !ok {
 		return protocol.PollTaskResponse{Wait: c.pollWait}, nil
 	}
