@@ -106,6 +106,7 @@ func TestConfigValidateRejectsInvalidGlobalConfigFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "runner.yaml")
 	data := []byte(`
 server:
+  transport: "http"
   url: localhost:8080
 `)
 	if err := os.WriteFile(path, data, 0o600); err != nil {
@@ -256,6 +257,7 @@ runner:
   capabilities:
     - xflow.http
 server:
+  transport: "http"
   url: http://file-server:8080
 poll:
   wait: 2s
@@ -429,6 +431,7 @@ runner:
 			name: "server url",
 			data: `
 server:
+  transport: "http"
   url: ""
 `,
 			want: "server URL",
@@ -493,7 +496,7 @@ func TestValidateRunnerConfigRejectsInvalidValues(t *testing.T) {
 		mut  func(*runnerConfig)
 		want string
 	}{
-		{name: "server", mut: func(c *runnerConfig) { c.serverURL = "localhost:8080" }, want: "server URL"},
+		{name: "server", mut: func(c *runnerConfig) { c.transport = transportHTTP; c.serverURL = "localhost:8080" }, want: "server URL"},
 		{name: "id", mut: func(c *runnerConfig) { c.runnerID = "" }, want: "runner id"},
 		{name: "concurrency", mut: func(c *runnerConfig) { c.concurrency = 0 }, want: "concurrency"},
 		{name: "capabilities", mut: func(c *runnerConfig) { c.capRaw = "," }, want: "capabilities"},

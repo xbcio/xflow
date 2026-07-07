@@ -2,8 +2,12 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -176,7 +180,8 @@ func TestConfigSamplePrintsYAML(t *testing.T) {
 
 func TestConfigValidateRejectsInvalidFlagConfig(t *testing.T) {
 	cmd := newRootCommand(commandOptions{out: &bytes.Buffer{}, err: &bytes.Buffer{}})
-	cmd.SetArgs([]string{"config", "validate", "--server", "localhost:8080"})
+	// --transport http with an invalid server URL should fail URL validation
+	cmd.SetArgs([]string{"config", "validate", "--transport", "http", "--server", "localhost:8080"})
 	err := cmd.Execute()
 	if err == nil || !strings.Contains(err.Error(), "server URL") {
 		t.Fatalf("error = %v, want server URL validation", err)
@@ -226,5 +231,27 @@ func TestRunHelpDoesNotRunRunner(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "Run the xflow task runner") || !strings.Contains(out.String(), "Usage:") {
 		t.Fatalf("help output = %q", out.String())
+	}
+}
+
+func TestRunnerReconnectsAfterStreamEnds(t *testing.T) {
+	var calls atomic.Int32
+	var fn runFunc = func(ctx context.Context) error {
+		n := calls.Add(1)
+		if n >= 3 {
+			return errStop
+		}
+		return errors.New("stream ended")
+	}
+	oldMin, oldMax := reconnectMinBackoff, reconnectMaxBackoff
+	reconnectMinBackoff = 5 * time.Millisecond
+	reconnectMaxBackoff = 20 * time.Millisecond
+	defer func() { reconnectMinBackoff, reconnectMaxBackoff = oldMin, oldMax }()
+	err := runWithReconnect(context.Background(), fn)
+	if !errors.Is(err, errStop) {
+		t.Fatalf("want errStop, got %v", err)
+	}
+	if calls.Load() < 3 {
+		t.Fatalf("expected >=3 attempts, got %d", calls.Load())
 	}
 }

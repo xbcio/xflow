@@ -4,12 +4,15 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
+	"math/rand"
 	"net/http"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -28,6 +31,15 @@ const (
 	transportHTTP = "http"
 	transportGRPC = "grpc"
 )
+
+var (
+	reconnectMinBackoff = 2 * time.Second
+	reconnectMaxBackoff = 30 * time.Second
+)
+
+type runFunc func(ctx context.Context) error
+
+var errStop = errors.New("stop reconnect loop")
 
 type runnerConfig struct {
 	configPath        string
@@ -206,7 +218,7 @@ func buildRunnerTLSConfig(cfg runnerConfig) (*tls.Config, error) {
 }
 
 func runnerServiceConfig(cfg runnerConfig) (runnersvc.Config, error) {
-	heartbeatInterval, err := parsePositiveDuration("heartbeat interval", cfg.heartbeatInterval)
+	_, err := parsePositiveDuration("heartbeat interval", cfg.heartbeatInterval)
 	if err != nil {
 		return runnersvc.Config{}, err
 	}
@@ -215,12 +227,11 @@ func runnerServiceConfig(cfg runnerConfig) (runnersvc.Config, error) {
 		return runnersvc.Config{}, err
 	}
 	return runnersvc.Config{
-		RunnerID:          cfg.runnerID,
-		Concurrency:       cfg.concurrency,
-		Labels:            cloneStringMap(cfg.labels),
-		Capabilities:      cfg.capabilities,
-		HeartbeatInterval: heartbeatInterval,
-		PollWait:          pollWait,
+		RunnerID:     cfg.runnerID,
+		Concurrency:  cfg.concurrency,
+		Labels:       cloneStringMap(cfg.labels),
+		Capabilities: cfg.capabilities,
+		PollWait:     pollWait,
 	}, nil
 }
 
@@ -230,5 +241,33 @@ func runWithSignals(cfg runnerConfig) error {
 	if cfg.runnerID == "" {
 		cfg.runnerID = fmt.Sprintf("runner-%d", os.Getpid())
 	}
-	return runRunner(ctx, cfg)
+	return runWithReconnect(ctx, func(ctx context.Context) error {
+		return runRunner(ctx, cfg)
+	})
+}
+
+func runWithReconnect(ctx context.Context, fn runFunc) error {
+	backoff := reconnectMinBackoff
+	for {
+		err := fn(ctx)
+		if err == nil {
+			return nil
+		}
+		if errors.Is(err, errStop) {
+			return err
+		}
+		if errors.Is(err, context.Canceled) {
+			return nil
+		}
+		wait := backoff + time.Duration(rand.Int63n(int64(backoff/2+1)))
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(wait):
+		}
+		backoff *= 2
+		if backoff > reconnectMaxBackoff {
+			backoff = reconnectMaxBackoff
+		}
+	}
 }

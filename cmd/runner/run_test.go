@@ -30,9 +30,6 @@ poll:
 	t.Setenv("XFLOW_RUNNER_POLL_WAIT", "3s")
 
 	restore := stubRunnerServiceFactory(func(cfg runnersvc.Config) error {
-		if cfg.HeartbeatInterval != 11*time.Second {
-			t.Fatalf("HeartbeatInterval = %s, want 11s", cfg.HeartbeatInterval)
-		}
 		if cfg.PollWait != 4*time.Second {
 			t.Fatalf("PollWait = %s, want 4s", cfg.PollWait)
 		}

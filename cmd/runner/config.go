@@ -35,7 +35,7 @@ type runnerConfigFile struct {
 func defaultRunnerConfig() runnerConfig {
 	return runnerConfig{
 		serverURL:         "http://localhost:8080",
-		transport:         transportHTTP,
+		transport:         transportGRPC,
 		grpcTarget:        "localhost:9090",
 		runnerID:          fmt.Sprintf("runner-%d", os.Getpid()),
 		concurrency:       1,
