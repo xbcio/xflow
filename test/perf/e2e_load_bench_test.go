@@ -51,6 +51,30 @@ func requireRedisLoad(t *testing.T) string {
 	return addr
 }
 
+// flushAsynqKeysLoad deletes only asynq's own key namespace ("asynq:*")
+// rather than the whole Redis DB, so it does not disturb keys other tests
+// may be using concurrently in the same DB. Mirrors
+// test/integration/harness.go:flushAsynqKeys (separate package, same tag).
+func flushAsynqKeysLoad(ctx context.Context, t *testing.T, rdb *redis.Client) {
+	t.Helper()
+	var cursor uint64
+	for {
+		keys, next, err := rdb.Scan(ctx, cursor, "asynq:*", 500).Result()
+		if err != nil {
+			t.Fatalf("scan asynq keys: %v", err)
+		}
+		if len(keys) > 0 {
+			if err := rdb.Del(ctx, keys...).Err(); err != nil {
+				t.Fatalf("del asynq keys: %v", err)
+			}
+		}
+		cursor = next
+		if cursor == 0 {
+			return
+		}
+	}
+}
+
 func TestE2ELoadRealRedis(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skip load test in short mode")
@@ -58,11 +82,11 @@ func TestE2ELoadRealRedis(t *testing.T) {
 
 	addr := requireRedisLoad(t)
 
-	// FlushDB to clear stale asynq tasks from prior runs (T8 lesson).
+	// Clear stale asynq tasks from prior runs (T8 lesson). Scoped to the
+	// "asynq:*" namespace (not FlushDB) so it does not clear keys other
+	// perf/integration tests may hold in the same Redis DB.
 	rdb := redis.NewClient(&redis.Options{Addr: addr})
-	if err := rdb.FlushDB(context.Background()).Err(); err != nil {
-		t.Fatalf("flushdb: %v", err)
-	}
+	flushAsynqKeysLoad(context.Background(), t, rdb)
 	_ = rdb.Close()
 
 	bk, err := asynq.New(addr, nil, asynq.WithConcurrency(8), asynq.WithConsumer(true))
@@ -232,7 +256,7 @@ func pollCompletionLoad(ctx context.Context, state engine.StateStore, id types.E
 	for {
 		snap, err := state.GetExecution(ctx, id)
 		// Critical 2: guard against nil snap when task not yet persisted.
-		if err == nil && snap != nil && isTerminalLoad(snap.Status) {
+		if err == nil && snap != nil && types.IsTerminalExecutionStatus(snap.Status) {
 			return snap.Status, false
 		}
 		select {
@@ -242,15 +266,6 @@ func pollCompletionLoad(ctx context.Context, state engine.StateStore, id types.E
 		case <-ticker.C:
 		}
 	}
-}
-
-func isTerminalLoad(s types.ExecutionStatus) bool {
-	switch s {
-	case types.ExecutionStatusSuccess, types.ExecutionStatusFailed,
-		types.ExecutionStatusCanceled, types.ExecutionStatusTimeout:
-		return true
-	}
-	return false
 }
 
 func waitForRunnerLoad(t *testing.T, pool *control.RunnerPool, id string) {

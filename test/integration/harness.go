@@ -94,6 +94,29 @@ func requireKafka(t *testing.T) []string {
 	return brokers
 }
 
+// flushAsynqKeys deletes only asynq's own key namespace ("asynq:*") rather
+// than the whole Redis DB, so it does not disturb keys other integration
+// tests (e.g. leader election) may be using concurrently in the same DB.
+func flushAsynqKeys(ctx context.Context, t *testing.T, rdb *redis.Client) {
+	t.Helper()
+	var cursor uint64
+	for {
+		keys, next, err := rdb.Scan(ctx, cursor, "asynq:*", 500).Result()
+		if err != nil {
+			t.Fatalf("scan asynq keys: %v", err)
+		}
+		if len(keys) > 0 {
+			if err := rdb.Del(ctx, keys...).Err(); err != nil {
+				t.Fatalf("del asynq keys: %v", err)
+			}
+		}
+		cursor = next
+		if cursor == 0 {
+			return
+		}
+	}
+}
+
 // --- completion polling (no time.Sleep) ---
 
 // outputNodes lists the node names whose outputs should be collected into

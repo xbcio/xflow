@@ -94,10 +94,11 @@ func TestServerRunnerE2ERealRedis(t *testing.T) {
 	}
 
 	// Finding 3: flush stale asynq tasks from previous (crashed) runs.
+	// Scoped to the "asynq:*" namespace (not FlushDB) so it does not clear
+	// keys other integration tests (e.g. leader election) may hold in the
+	// same Redis DB.
 	rdb := redis.NewClient(&redis.Options{Addr: addr})
-	if err := rdb.FlushDB(context.Background()).Err(); err != nil {
-		t.Fatalf("flushdb: %v", err)
-	}
+	flushAsynqKeys(context.Background(), t, rdb)
 	_ = rdb.Close()
 
 	eng := engine.New(b.State(), b.Queue())
