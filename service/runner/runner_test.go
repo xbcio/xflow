@@ -38,7 +38,12 @@ func (f *fakeStream) Recv() (protocol.ServerFrame, error) {
 	}
 	return fr, nil
 }
-func (f *fakeStream) Close() error { f.closed.Store(true); return nil }
+func (f *fakeStream) Close() error {
+	if f.closed.CompareAndSwap(false, true) {
+		close(f.recvCh)
+	}
+	return nil
+}
 
 // ---------------------------------------------------------------------------
 // fakeClient — implements the new ProtocolClient (Connect only)

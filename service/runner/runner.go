@@ -57,7 +57,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	if err := stream.Send(protocol.RunnerFrame{Hello: &protocol.HelloFrame{
 		RunnerID:     r.config.RunnerID,
 		Concurrency:  r.config.Concurrency,
-		Capabilities: r.config.Capabilities,
+		Capabilities: cloneCapabilities(r.config.Capabilities),
 		Labels:       cloneLabels(r.config.Labels),
 	}}); err != nil {
 		return fmt.Errorf("send hello: %w", err)
@@ -85,16 +85,19 @@ func (r *Runner) Run(ctx context.Context) error {
 	go func() { recvErr <- r.recvLoop(ctx, stream, taskCh) }()
 
 	var firstErr error
+	recvExited := false
 	select {
 	case err := <-recvErr:
 		firstErr = err
+		recvExited = true
 	case <-ctx.Done():
 		firstErr = ctx.Err()
 	}
 
+	// Step 1: stop dispatching new tasks to workers.
 	close(taskCh)
 
-	// Wait for in-flight workers to drain (30 s hard timeout).
+	// Step 2: wait for in-flight workers to drain (30 s hard timeout).
 	waitDone := make(chan struct{})
 	go func() { wg.Wait(); close(waitDone) }()
 	select {
@@ -102,15 +105,24 @@ func (r *Runner) Run(ctx context.Context) error {
 	case <-time.After(30 * time.Second):
 	}
 
+	// Step 3: send BYE before closing (best-effort; ignore error if ctx cancelled).
 	_ = stream.Send(protocol.RunnerFrame{Bye: &protocol.ByeFrame{}})
 
-	// Drain the recvLoop goroutine (it may still be blocked on Recv).
-	// recvErr already has at most one value; a second send is harmless after
-	// the channel is buffered size-1 — but recvLoop may still be running if we
-	// got here via ctx.Done, so drain it.
-	select {
-	case <-recvErr:
-	default:
+	// Step 4: close the stream explicitly — this unblocks recvLoop's stream.Recv()
+	// (returns context.Canceled or EOF), causing recvLoop to return and write to recvErr.
+	// The defer stream.Close() at the top of Run handles the early-return path
+	// (HELLO/WELCOME failure). fakeStream.Close is idempotent (CAS on closed flag);
+	// gRPC CloseSend is also idempotent, so the defer is a safe no-op on second call.
+	_ = stream.Close()
+
+	// Step 5: blocking join — safe because step 4 guarantees recvLoop will exit.
+	// Skip if we already consumed recvErr in the select above (recvLoop already returned).
+	if !recvExited {
+		select {
+		case <-recvErr:
+		case <-time.After(5 * time.Second):
+			// stream.Close() should have unblocked recvLoop; 5 s is a safety valve.
+		}
 	}
 
 	if errors.Is(firstErr, context.Canceled) {
@@ -174,5 +186,14 @@ func cloneLabels(labels map[string]string) map[string]string {
 	for k, v := range labels {
 		out[k] = v
 	}
+	return out
+}
+
+func cloneCapabilities(caps []protocol.Capability) []protocol.Capability {
+	if len(caps) == 0 {
+		return nil
+	}
+	out := make([]protocol.Capability, len(caps))
+	copy(out, caps)
 	return out
 }
