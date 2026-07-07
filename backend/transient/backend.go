@@ -2,7 +2,6 @@ package transient
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"github.com/xbcio/xflow/backend"
@@ -116,8 +115,7 @@ func (b *Backend) Bind(eng *engine.Engine) func() {
 			return err
 		}
 		if result.Suspend != nil {
-			result.Suspend = nil
-			result.Error = errors.Join(types.ErrPermanent, errTransientSuspendUnsupported)
+			return eng.CommitTaskFailure(ctx, lease, errTransientSuspendUnsupported)
 		}
 		return eng.CommitTaskResult(ctx, lease, result)
 	})

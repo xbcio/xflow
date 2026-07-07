@@ -309,6 +309,61 @@ func (e *Engine) CommitTaskResult(ctx context.Context, lease *TaskLease, result 
 	return e.finalizeNode(ctx, t, g, meta, result.Output, result.Error)
 }
 
+// CommitTaskFailure forces a leased task to fail the whole execution without
+// applying the node's OnError strategy. Backend adapters use this for runtime
+// failures that make the execution mode itself incompatible with the task.
+func (e *Engine) CommitTaskFailure(ctx context.Context, lease *TaskLease, failure error) error {
+	if lease == nil {
+		return ErrInvalidLeaseToken
+	}
+	if failure == nil {
+		failure = errors.New("task failed")
+	}
+	t := &lease.Task
+	_, active, err := e.loadActiveGraph(ctx, t.ExecutionID)
+	if err != nil {
+		return err
+	}
+	if !active {
+		return nil
+	}
+
+	ns, valid, err := e.state.ClaimTaskLease(ctx, lease)
+	if err != nil {
+		return err
+	}
+	if !valid {
+		return ErrInvalidLeaseToken
+	}
+	if types.IsTerminalNodeStatus(ns.Status) {
+		return nil
+	}
+
+	msg := failure.Error()
+	_ = e.state.UpsertNode(ctx, &NodeSnapshot{
+		ExecutionID:  t.ExecutionID,
+		Name:         t.NodeName,
+		NodeIdx:      t.NodeIdx,
+		Status:       types.NodeStatusFailed,
+		LeaseID:      lease.LeaseID,
+		LeaseToken:   lease.LeaseToken,
+		Attempt:      lease.Attempt,
+		ActivationID: t.ActivationID,
+		AutoDepth:    t.AutoDepth,
+		Error:        msg,
+	})
+	if e.hooks != nil {
+		e.hooks.OnNodeComplete(ctx, t.ExecutionID, t.NodeName, types.NodeStatusFailed)
+	}
+
+	_ = e.state.UpdateExecutionStatus(ctx, t.ExecutionID, types.ExecutionStatusFailed, msg)
+	if e.hooks != nil {
+		e.hooks.OnExecutionComplete(ctx, t.ExecutionID, types.ExecutionStatusFailed)
+	}
+	e.EvictExecution(t.ExecutionID)
+	return nil
+}
+
 func (e *Engine) loadActiveGraph(ctx context.Context, id types.ExecutionID) (*graph.Graph, bool, error) {
 	e.mu.RLock()
 	g, ok := e.graphs[id]
