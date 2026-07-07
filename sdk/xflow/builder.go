@@ -11,16 +11,17 @@ import (
 // WorkflowBuilder is a CDK-style builder for workflow definitions.
 // It holds no runtime state — only the definition.
 type WorkflowBuilder struct {
-	namespace string
-	name      string
-	version   string
-	nodes     []*nodeEntry
-	refs      []*NodeRef
-	edges     []edge
-	direct    map[string]types.ActionHandler  // direct handlers (local mode only)
-	handlers  map[string]types.ActionHandler  // portable typed action handlers
-	triggers  map[string]types.TriggerHandler // portable typed trigger handlers
-	options   *types.WorkflowOptions
+	namespace      string
+	name           string
+	version        string
+	nodes          []*nodeEntry
+	refs           []*NodeRef
+	edges          []edge
+	direct         map[string]types.ActionHandler  // direct handlers (local mode only)
+	handlers       map[string]types.ActionHandler  // portable typed action handlers
+	triggers       map[string]types.TriggerHandler // portable typed trigger handlers
+	options        *types.WorkflowOptions
+	runnerSelector *types.RunnerSelector
 }
 
 type nodeEntry struct {
@@ -30,6 +31,7 @@ type nodeEntry struct {
 	kind             types.NodeKind
 	onError          node.OnError
 	normalizedParams map[string]any
+	runnerSelector   *types.RunnerSelector
 }
 
 type edge struct {
@@ -86,10 +88,34 @@ func (w *WorkflowBuilder) Version(version string) *WorkflowBuilder {
 	return w
 }
 
+func (w *WorkflowBuilder) RunnerSelector(selector types.RunnerSelector) *WorkflowBuilder {
+	w.runnerSelector = cloneRunnerSelector(&selector)
+	return w
+}
+
+func RunnerSelector(matchLabels map[string]string) types.RunnerSelector {
+	return types.RunnerSelector{MatchLabels: cloneStringMap(matchLabels)}
+}
+
+func DefaultRunnerSelector(matchLabels map[string]string) types.RunnerSelector {
+	return types.RunnerSelector{
+		Mode:        types.RunnerSelectorModeDefault,
+		MatchLabels: cloneStringMap(matchLabels),
+	}
+}
+
+func RequiredRunnerSelector(matchLabels map[string]string) types.RunnerSelector {
+	return types.RunnerSelector{
+		Mode:        types.RunnerSelectorModeRequired,
+		MatchLabels: cloneStringMap(matchLabels),
+	}
+}
+
 // NodeRef references a node's input and output ports in Connect.
 type NodeRef struct {
-	name string
-	body *WorkflowBuilder
+	name  string
+	entry *nodeEntry
+	body  *WorkflowBuilder
 }
 
 // Output returns a reference to the named output port of this node.
@@ -105,6 +131,13 @@ func (n *NodeRef) Input(port string) types.InputPort {
 // Body attaches a sub-workflow as the loop/split body.
 func (n *NodeRef) Body(body *WorkflowBuilder) *NodeRef {
 	n.body = body
+	return n
+}
+
+func (n *NodeRef) RunnerSelector(selector types.RunnerSelector) *NodeRef {
+	if n.entry != nil {
+		n.entry.runnerSelector = cloneRunnerSelector(&selector)
+	}
 	return n
 }
 
@@ -150,7 +183,7 @@ func (w *WorkflowBuilder) LocalNode(name string, handler types.ActionHandler) *N
 
 func (w *WorkflowBuilder) addNode(entry *nodeEntry) *NodeRef {
 	w.nodes = append(w.nodes, entry)
-	ref := &NodeRef{name: entry.name}
+	ref := &NodeRef{name: entry.name, entry: entry}
 	w.refs = append(w.refs, ref)
 	return ref
 }
@@ -257,12 +290,13 @@ func (w *WorkflowBuilder) build() (*types.WorkflowDef, error) {
 
 	// Assemble WorkflowDef.
 	def := &types.WorkflowDef{
-		Namespace:   namespace,
-		Name:        w.name,
-		Version:     version,
-		Spec:        "1.0",
-		Options:     w.options,
-		Connections: make(types.Connections),
+		Namespace:      namespace,
+		Name:           w.name,
+		Version:        version,
+		Spec:           "1.0",
+		RunnerSelector: cloneRunnerSelector(w.runnerSelector),
+		Options:        w.options,
+		Connections:    make(types.Connections),
 	}
 
 	for _, entry := range w.nodes {
@@ -285,12 +319,13 @@ func (w *WorkflowBuilder) build() (*types.WorkflowDef, error) {
 			entry.kind = types.NodeKindAction
 		}
 		def.Nodes = append(def.Nodes, types.NodeDef{
-			Name:       entry.name,
-			Type:       nodeType,
-			Kind:       entry.kind,
-			Version:    nodeVersion,
-			Parameters: params,
-			OnError:    string(entry.onError),
+			Name:           entry.name,
+			Type:           nodeType,
+			Kind:           entry.kind,
+			Version:        nodeVersion,
+			Parameters:     params,
+			OnError:        string(entry.onError),
+			RunnerSelector: cloneRunnerSelector(entry.runnerSelector),
 		})
 	}
 
@@ -384,6 +419,31 @@ func normalizeParams(raw any) (map[string]any, error) {
 		return nil, fmt.Errorf("unmarshal params: %w", err)
 	}
 	return result, nil
+}
+
+func cloneRunnerSelector(selector *types.RunnerSelector) *types.RunnerSelector {
+	if selector == nil {
+		return nil
+	}
+	out := &types.RunnerSelector{
+		Mode:        selector.Mode,
+		MatchLabels: cloneStringMap(selector.MatchLabels),
+	}
+	if out.Mode == "" && len(out.MatchLabels) == 0 {
+		return nil
+	}
+	return out
+}
+
+func cloneStringMap(src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make(map[string]string, len(src))
+	for key, value := range src {
+		dst[key] = value
+	}
+	return dst
 }
 
 func detectCycle(wfName string, nodes []*nodeEntry, edges []edge) error {

@@ -7,6 +7,7 @@ These examples are executable Go tests for the embedded SDK surface.
 - `basic_test.go` shows local-mode DAG basics: direct handlers, port routing, and error-output branching.
 - `vulnerability_approval_test.go` shows the production-oriented approval shape for distributed services: typed node handlers, built-in approval gates, external signals, inspection, and rejected/approved branches.
 - `cyclic_vulnerability_approval_test.go` shows an opt-in cyclic approval workflow: explicit `xflow.start`, rejected security review returning to remediation, validation looping back into review, and final change approval/deployment/closure.
+- `runner_selector_test.go` shows workflow-level default runner placement with a node-level local approval override.
 
 ## Local vs cluster handlers
 
@@ -61,3 +62,30 @@ metadata and workflow-declared handlers in the current process, `Invoke` starts
 an execution from an explicit entry such as `xflow.Start()`, and
 `xflow.WithNodes` declares consumer capabilities for processes that may execute
 tasks registered by other service instances.
+
+## Runner selectors
+
+Runner selectors are workflow and node definition metadata. Do not pass runner
+placement through `InvokeOption`.
+
+```go
+wf := xflow.Workflow("risk-review").
+	RunnerSelector(xflow.DefaultRunnerSelector(map[string]string{
+		"mode":   "remote",
+		"env":    "prod",
+		"tenant": "tenant-a",
+	}))
+
+approval := wf.Node("SecurityApproval",
+	node.Approval([]string{"sec-owner"}, node.ApprovalAny),
+).RunnerSelector(xflow.RunnerSelector(map[string]string{
+	"mode": "local",
+	"env":  "prod",
+}))
+```
+
+`xflow.NewLocal` and the current embedded `xflow.NewCluster` path preserve and
+validate selectors, but they do not enforce runner placement. Server plus
+runner protocol is the placement enforcement path: runner labels declared by
+`cmd/runner --label key=value` are matched against the effective selector after
+capability matching.
