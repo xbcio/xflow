@@ -228,21 +228,24 @@ func (r *Runner) worker(ctx context.Context, taskCh <-chan engine.TaskLease, sen
 		if execErr != nil {
 			result = engine.TaskResult{Error: execErr}
 		}
-		// ctx-aware send: if sendCh is full/stalled and ctx is cancelled, bail
-		// out via ctx.Done() instead of blocking forever. This lets the
-		// worker (and therefore wg.Wait() in Run) return promptly on
-		// cancellation rather than being stuck writing to a channel nobody
-		// drains anymore, which in turn makes it far less likely that Run's
-		// 30s wg.Wait timeout is ever hit.
-		select {
-		case sendCh <- protocol.RunnerFrame{Result: &protocol.ResultFrame{
+		// Unconditional send: a worker that has already finished executing
+		// must always report its result, even if ctx has since been
+		// cancelled. sendCh is only ever closed on the waitDone path in Run,
+		// strictly after wg.Wait() proves every worker (including this one)
+		// has returned — so a running worker can never be blocked forever on
+		// a send to a channel that gets closed out from under it. A ctx-aware
+		// select here previously raced ctx.Done() against this send: when
+		// both were ready, Go picks pseudo-randomly, so an already-computed
+		// result could be silently dropped on ordinary cancellation instead
+		// of being sent, breaking the graceful-drain guarantee. The
+		// truly-stuck-forever scenario (a hung send-loop backing up sendCh)
+		// is already covered by Run's outer 30s wg.Wait() timeout, which
+		// does not close(sendCh) on that path — so blocking here is safe.
+		sendCh <- protocol.RunnerFrame{Result: &protocol.ResultFrame{
 			LeaseID: string(leaseCopy.LeaseID),
 			Lease:   &leaseCopy,
 			Result:  result,
-		}}:
-		case <-ctx.Done():
-			return
-		}
+		}}
 	}
 }
 
