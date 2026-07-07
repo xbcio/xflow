@@ -130,28 +130,53 @@ func (r *Runner) Run(ctx context.Context) error {
 	go func() { wg.Wait(); close(waitDone) }()
 	select {
 	case <-waitDone:
-	case <-time.After(30 * time.Second):
-	}
+		// Normal case: wg.Wait() completed, so every worker has returned and
+		// none can still be writing to sendCh. It is now provably safe to
+		// send the final BYE and close(sendCh) — no writer can race the
+		// close. Join the send-loop (sendDone) so the BYE (and anything
+		// still in flight) is actually flushed via stream.Send before we
+		// close the stream below, preserving the single-writer contract.
+		sendCh <- protocol.RunnerFrame{Bye: &protocol.ByeFrame{}}
+		close(sendCh)
+		<-sendDone
 
-	// Step 3: send BYE (best-effort; ignore error if ctx cancelled), then
-	// close sendCh and join the send-loop goroutine. wg.Wait() above
-	// guarantees no worker is still writing to sendCh, so BYE is always the
-	// last frame written and closing sendCh right after is safe. Joining
-	// sendDone guarantees the send-loop has made its last stream.Send call
-	// (BYE, or whatever was in flight) before we close the stream below —
-	// preserving the single-writer contract right up to Close.
-	sendCh <- protocol.RunnerFrame{Bye: &protocol.ByeFrame{}}
-	close(sendCh)
-	<-sendDone
+	case <-time.After(30 * time.Second):
+		// Abnormal case: a worker is still stuck/running past the timeout.
+		// We do NOT know that sendCh has no more writers, so we must NOT
+		// close(sendCh) here — if the stuck worker later finishes and
+		// executes its ctx-aware `sendCh <- RunnerFrame{Result: ...}`, that
+		// send would panic with "send on closed channel" if we'd closed it.
+		// This mirrors the existing, already-accepted tolerance for the
+		// taskCh/recvLoop timeout path above (see the T10 fix comment on
+		// close(taskCh)): on a forced timeout we accept that an abandoned
+		// goroutine may leak rather than risk a send-on-closed-channel
+		// panic. It is not a new gap — it's the same trade-off already made
+		// for taskCh, applied consistently to sendCh.
+		//
+		// Best-effort BYE: attempt a non-blocking send so a healthy send-loop
+		// still gets a chance to relay BYE, but never block waiting for it
+		// and never join sendDone here — the send-loop may itself be stuck
+		// forwarding frames from the stuck worker, and blocking on it could
+		// hang Run indefinitely.
+		select {
+		case sendCh <- protocol.RunnerFrame{Bye: &protocol.ByeFrame{}}:
+		default:
+		}
+	}
 
 	// Step 4: close the stream explicitly. recvLoop has already returned by
 	// this point (drained above via recvErr, either directly or after
-	// ctx.Done()), and the send-loop has already exited (joined above), so
-	// this call no longer needs to unblock anything — it just releases the
-	// transport promptly instead of waiting for the deferred stream.Close()
-	// at the top of Run. fakeStream.Close is idempotent (CAS on closed
-	// flag); gRPC CloseSend is also idempotent, so the defer is a safe no-op
-	// on second call.
+	// ctx.Done()). On the waitDone path the send-loop has also already
+	// exited (joined above via sendDone), so this call no longer needs to
+	// unblock anything there — it just releases the transport promptly
+	// instead of waiting for the deferred stream.Close() at the top of Run.
+	// On the timeout path the send-loop may still be running (possibly
+	// stuck relaying a stuck worker's eventual frame); closing the stream
+	// here causes its next stream.Send to error out so it can exit on its
+	// own — or it leaks, which is the same accepted tolerance as above.
+	// fakeStream.Close is idempotent (CAS on closed flag); gRPC CloseSend is
+	// also idempotent, so the defer at the top of Run is a safe no-op on
+	// second call.
 	_ = stream.Close()
 
 	if errors.Is(firstErr, context.Canceled) {
@@ -203,11 +228,21 @@ func (r *Runner) worker(ctx context.Context, taskCh <-chan engine.TaskLease, sen
 		if execErr != nil {
 			result = engine.TaskResult{Error: execErr}
 		}
-		sendCh <- protocol.RunnerFrame{Result: &protocol.ResultFrame{
+		// ctx-aware send: if sendCh is full/stalled and ctx is cancelled, bail
+		// out via ctx.Done() instead of blocking forever. This lets the
+		// worker (and therefore wg.Wait() in Run) return promptly on
+		// cancellation rather than being stuck writing to a channel nobody
+		// drains anymore, which in turn makes it far less likely that Run's
+		// 30s wg.Wait timeout is ever hit.
+		select {
+		case sendCh <- protocol.RunnerFrame{Result: &protocol.ResultFrame{
 			LeaseID: string(leaseCopy.LeaseID),
 			Lease:   &leaseCopy,
 			Result:  result,
-		}}
+		}}:
+		case <-ctx.Done():
+			return
+		}
 	}
 }
 
