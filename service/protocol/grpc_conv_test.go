@@ -34,8 +34,73 @@ func TestRunnerFrameRoundTrip(t *testing.T) {
 	}
 }
 
+func TestRunnerFrameRoundTripAllArms(t *testing.T) {
+	cases := []struct {
+		name  string
+		frame RunnerFrame
+		check func(t *testing.T, got RunnerFrame)
+	}{
+		{
+			name: "Hello",
+			frame: RunnerFrame{Hello: &HelloFrame{
+				RunnerID:    "runner-42",
+				Concurrency: 4,
+				Capabilities: []Capability{
+					{NodeType: "xflow.function", NodeVersion: 1},
+				},
+				Labels: map[string]string{"region": "us-east"},
+			}},
+			check: func(t *testing.T, got RunnerFrame) {
+				t.Helper()
+				if got.Hello == nil {
+					t.Fatal("Hello arm is nil after round-trip")
+				}
+				if got.Hello.RunnerID != "runner-42" {
+					t.Errorf("RunnerID: want runner-42, got %q", got.Hello.RunnerID)
+				}
+				if got.Hello.Concurrency != 4 {
+					t.Errorf("Concurrency: want 4, got %d", got.Hello.Concurrency)
+				}
+				if len(got.Hello.Capabilities) != 1 || got.Hello.Capabilities[0].NodeType != "xflow.function" {
+					t.Errorf("Capabilities mismatch: %+v", got.Hello.Capabilities)
+				}
+				if got.Hello.Labels["region"] != "us-east" {
+					t.Errorf("Labels mismatch: %+v", got.Hello.Labels)
+				}
+			},
+		},
+		{
+			name:  "Bye",
+			frame: RunnerFrame{Bye: &ByeFrame{}},
+			check: func(t *testing.T, got RunnerFrame) {
+				t.Helper()
+				if got.Bye == nil {
+					t.Fatal("Bye arm is nil after round-trip")
+				}
+				if got.Hello != nil || got.Result != nil {
+					t.Errorf("unexpected non-nil arms in Bye frame: %+v", got)
+				}
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pb, err := RunnerFrameToProto(tc.frame)
+			if err != nil {
+				t.Fatalf("to proto: %v", err)
+			}
+			got, err := RunnerFrameFromProto(pb)
+			if err != nil {
+				t.Fatalf("from proto: %v", err)
+			}
+			tc.check(t, got)
+		})
+	}
+}
+
 func TestServerFrameRoundTrip(t *testing.T) {
-	lease := &engine.TaskLease{LeaseID: "lease-2", NodeType: "xflow.function"}
+	lease := &engine.TaskLease{LeaseID: "lease-2", LeaseToken: "tok-srv", NodeType: "xflow.function"}
 	cases := []ServerFrame{
 		{Welcome: &WelcomeFrame{RunnerID: "r1", ServerTime: time.Unix(42, 0).Unix()}},
 		{Task: &TaskFrame{Lease: lease}},
@@ -68,7 +133,9 @@ func serverFrameEqual(a, b ServerFrame) bool {
 	case a.Welcome != nil:
 		return a.Welcome.RunnerID == b.Welcome.RunnerID && a.Welcome.ServerTime == b.Welcome.ServerTime
 	case a.Task != nil:
-		return a.Task.Lease.LeaseID == b.Task.Lease.LeaseID
+		return a.Task.Lease.LeaseID == b.Task.Lease.LeaseID &&
+			a.Task.Lease.NodeType == b.Task.Lease.NodeType &&
+			a.Task.Lease.LeaseToken == b.Task.Lease.LeaseToken
 	case a.Ack != nil:
 		return a.Ack.LeaseID == b.Ack.LeaseID && a.Ack.Accepted == b.Ack.Accepted && a.Ack.Error == b.Ack.Error
 	case a.Backoff != nil:
