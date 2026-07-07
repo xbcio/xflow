@@ -31,14 +31,15 @@ type Graph struct {
 
 // NodeMeta holds the static metadata for a single node extracted from NodeDef.
 type NodeMeta struct {
-	Name       string
-	Type       string
-	Kind       types.NodeKind
-	Version    int
-	OnError    string
-	MergeMode  string // "wait_all" or "wait_any"; empty means normal node
-	Parameters map[string]any
-	PortOuts   []string // distinct output port names that have outgoing edges
+	Name           string
+	Type           string
+	Kind           types.NodeKind
+	Version        int
+	OnError        string
+	RunnerSelector *types.RunnerSelector
+	MergeMode      string // "wait_all" or "wait_any"; empty means normal node
+	Parameters     map[string]any
+	PortOuts       []string // distinct output port names that have outgoing edges
 	// Retry, when non-nil and MaxAttempts>0, instructs the engine to
 	// re-enqueue this node with an exponential backoff after a transient
 	// handler failure. Nil means no retries.

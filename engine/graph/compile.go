@@ -48,6 +48,9 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 	if n == 0 {
 		return nil, errors.New("workflow has no nodes")
 	}
+	if err := validateWorkflowRunnerSelector(def.RunnerSelector); err != nil {
+		return nil, err
+	}
 
 	g := &Graph{
 		Name:         def.Name,
@@ -96,16 +99,21 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 		if _, dup := g.Index[nd.Name]; dup {
 			return nil, fmt.Errorf("duplicate node name: %s", nd.Name)
 		}
+		runnerSelector, err := resolveRunnerSelector(def.RunnerSelector, nd.RunnerSelector)
+		if err != nil {
+			return nil, fmt.Errorf("node %q: %w", nd.Name, err)
+		}
 		g.Index[nd.Name] = i
 		g.Nodes[i] = NodeMeta{
-			Name:       nd.Name,
-			Type:       nd.Type,
-			Kind:       nd.Kind,
-			Version:    nd.Version,
-			OnError:    nd.OnError,
-			MergeMode:  extractMergeMode(nd),
-			Parameters: nd.Parameters,
-			Retry:      resolveRetry(nd.Retry, def.Settings),
+			Name:           nd.Name,
+			Type:           nd.Type,
+			Kind:           nd.Kind,
+			Version:        nd.Version,
+			OnError:        nd.OnError,
+			RunnerSelector: runnerSelector,
+			MergeMode:      extractMergeMode(nd),
+			Parameters:     nd.Parameters,
+			Retry:          resolveRetry(nd.Retry, def.Settings),
 		}
 		if nd.Type == "xflow.start" || nd.Kind == types.NodeKindTrigger {
 			g.EntryIndexes[nd.Name] = i
@@ -183,6 +191,111 @@ func resolveRetry(node *types.RetrySettings, settings *types.WorkflowSettings) *
 		return &cp
 	}
 	return nil
+}
+
+func validateWorkflowRunnerSelector(selector *types.RunnerSelector) error {
+	if selector == nil {
+		return nil
+	}
+	switch selector.Mode {
+	case "", types.RunnerSelectorModeDefault, types.RunnerSelectorModeRequired:
+	default:
+		return fmt.Errorf("workflow runnerSelector.mode must be %q or %q", types.RunnerSelectorModeDefault, types.RunnerSelectorModeRequired)
+	}
+	if err := validateRunnerSelectorLabels(selector); err != nil {
+		return fmt.Errorf("workflow runnerSelector: %w", err)
+	}
+	return nil
+}
+
+func validateNodeRunnerSelector(selector *types.RunnerSelector) error {
+	if selector == nil {
+		return nil
+	}
+	if selector.Mode != "" {
+		return errors.New("runnerSelector.mode is only valid at workflow level")
+	}
+	if err := validateRunnerSelectorLabels(selector); err != nil {
+		return fmt.Errorf("runnerSelector: %w", err)
+	}
+	return nil
+}
+
+func validateRunnerSelectorLabels(selector *types.RunnerSelector) error {
+	for key, value := range selector.MatchLabels {
+		if key == "" {
+			return errors.New("matchLabels contains an empty key")
+		}
+		if value == "" {
+			return fmt.Errorf("matchLabels[%q] is empty", key)
+		}
+	}
+	return nil
+}
+
+func resolveRunnerSelector(workflowSelector, nodeSelector *types.RunnerSelector) (*types.RunnerSelector, error) {
+	if err := validateNodeRunnerSelector(nodeSelector); err != nil {
+		return nil, err
+	}
+	mode := types.RunnerSelectorModeDefault
+	if workflowSelector != nil && workflowSelector.Mode != "" {
+		mode = workflowSelector.Mode
+	}
+	switch mode {
+	case types.RunnerSelectorModeRequired:
+		return andRunnerSelectors(workflowSelector, nodeSelector)
+	default:
+		if nodeSelector != nil {
+			return cloneRunnerSelector(nodeSelector), nil
+		}
+		return cloneRunnerSelector(workflowSelector), nil
+	}
+}
+
+func andRunnerSelectors(workflowSelector, nodeSelector *types.RunnerSelector) (*types.RunnerSelector, error) {
+	out := &types.RunnerSelector{}
+	if workflowSelector != nil {
+		out.MatchLabels = cloneStringMap(workflowSelector.MatchLabels)
+	}
+	if nodeSelector != nil {
+		if out.MatchLabels == nil && len(nodeSelector.MatchLabels) > 0 {
+			out.MatchLabels = make(map[string]string, len(nodeSelector.MatchLabels))
+		}
+		for key, value := range nodeSelector.MatchLabels {
+			if existing, ok := out.MatchLabels[key]; ok && existing != value {
+				return nil, fmt.Errorf("runnerSelector matchLabels[%q] conflicts with required workflow selector", key)
+			}
+			out.MatchLabels[key] = value
+		}
+	}
+	if len(out.MatchLabels) == 0 {
+		return nil, nil
+	}
+	return out, nil
+}
+
+func cloneRunnerSelector(selector *types.RunnerSelector) *types.RunnerSelector {
+	if selector == nil {
+		return nil
+	}
+	out := &types.RunnerSelector{
+		MatchLabels: cloneStringMap(selector.MatchLabels),
+	}
+	if len(out.MatchLabels) == 0 {
+		return nil
+	}
+	return out
+}
+
+func cloneStringMap(src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make(map[string]string, len(src))
+	for key, value := range src {
+		dst[key] = value
+	}
+	return dst
 }
 
 // extractMergeMode returns the merge mode from a node's parameters if it's a merge node.

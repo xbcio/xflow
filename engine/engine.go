@@ -242,7 +242,28 @@ func (e *Engine) TaskRouting(ctx context.Context, t *Task) (TaskRouting, error) 
 		return TaskRouting{}, err
 	}
 	meta := g.Nodes[t.NodeIdx]
-	return TaskRouting{NodeType: meta.Type, NodeVersion: meta.Version}, nil
+	return TaskRouting{
+		NodeType:       meta.Type,
+		NodeVersion:    meta.Version,
+		RunnerSelector: cloneRunnerSelector(meta.RunnerSelector),
+	}, nil
+}
+
+func cloneRunnerSelector(selector *types.RunnerSelector) *types.RunnerSelector {
+	if selector == nil {
+		return nil
+	}
+	out := &types.RunnerSelector{}
+	if len(selector.MatchLabels) > 0 {
+		out.MatchLabels = make(map[string]string, len(selector.MatchLabels))
+		for key, value := range selector.MatchLabels {
+			out.MatchLabels[key] = value
+		}
+	}
+	if len(out.MatchLabels) == 0 {
+		return nil
+	}
+	return out
 }
 
 // CommitTaskResult validates a runner lease token, persists the task result,
