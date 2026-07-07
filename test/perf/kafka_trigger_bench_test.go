@@ -21,9 +21,9 @@ import (
 // "kafka.batch" (aggregated) event kinds so that the counter tracks raw message
 // throughput regardless of the MaxSize setting.
 type perfTriggerRuntime struct {
-	msgCount  int64
+	msgCount   int64
 	batchCount int64
-	signal    chan struct{}
+	signal     chan struct{}
 }
 
 func newPerfTriggerRuntime() *perfTriggerRuntime {
