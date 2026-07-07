@@ -89,3 +89,28 @@ validate selectors, but they do not enforce runner placement. Server plus
 runner protocol is the placement enforcement path: runner labels declared by
 `cmd/runner --label key=value` are matched against the effective selector after
 capability matching.
+
+### Kafka high-throughput transient mode
+
+For Kafka ingestion workloads that can acknowledge messages once xflow accepts
+a batch, use transient mode with Kafka partition aggregation:
+
+```go
+eng, err := xflow.NewCluster(cfg,
+	xflow.WithExecutionMode(xflow.ExecutionModeTransient),
+	xflow.WithConcurrency(128),
+	xflow.WithTransientTTL(10*time.Minute),
+	xflow.WithTransientCompletionTTL(30*time.Second),
+)
+
+kafka := node.KafkaTrigger().
+	Brokers("broker-1:9092", "broker-2:9092").
+	Topic("orders").
+	Group("xflow-orders").
+	MaxInflight(256).
+	AggregateByPartition(100, 50*time.Millisecond)
+```
+
+The Kafka trigger commits offsets after `Emit` accepts the batch. Workloads
+that need offset commit only after workflow success need a separate ack
+strategy.

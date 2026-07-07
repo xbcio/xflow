@@ -8,13 +8,13 @@ import (
 	backendtransient "github.com/xbcio/xflow/backend/transient"
 )
 
-// ExecutionMode selects how the SDK retains execution state.
+// ExecutionMode controls the runtime state-retention contract used by NewLocal and NewCluster.
 type ExecutionMode string
 
 const (
-	// ExecutionModeDefault keeps the standard durable execution behavior.
+	// ExecutionModeDefault preserves the current full-state behavior.
 	ExecutionModeDefault ExecutionMode = "default"
-	// ExecutionModeTransient keeps execution state only for a bounded TTL window.
+	// ExecutionModeTransient keeps only temporary runtime state and disables long-lived signal/suspend workflows.
 	ExecutionModeTransient ExecutionMode = "transient"
 )
 
@@ -32,7 +32,7 @@ var (
 	ErrTransientSuspendUnsupported = backendtransient.ErrTransientSuspendUnsupported
 )
 
-// WithExecutionMode configures the engine execution retention mode.
+// WithExecutionMode selects the runtime state-retention contract.
 func WithExecutionMode(mode ExecutionMode) Option {
 	return func(c *engineConfig) {
 		c.executionMode = mode
@@ -40,7 +40,7 @@ func WithExecutionMode(mode ExecutionMode) Option {
 	}
 }
 
-// WithTransientTTL sets how long transient execution state is kept before expiry.
+// WithTransientTTL sets the active transient runtime-state TTL.
 func WithTransientTTL(ttl time.Duration) Option {
 	return func(c *engineConfig) {
 		c.transientTTL = ttl
@@ -48,7 +48,7 @@ func WithTransientTTL(ttl time.Duration) Option {
 	}
 }
 
-// WithTransientCompletionTTL sets how long completed transient executions remain readable.
+// WithTransientCompletionTTL sets the final-result TTL after transient execution completion.
 func WithTransientCompletionTTL(ttl time.Duration) Option {
 	return func(c *engineConfig) {
 		c.transientCompletionTTL = ttl
