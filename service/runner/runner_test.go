@@ -131,8 +131,7 @@ func TestRunnerConcurrencyParallel(t *testing.T) {
 	go func() { _ = r.Run(ctx) }()
 
 	// Send 3 TASK frames with unique LeaseIDs.
-	for i, id := range []string{"L1", "L2", "L3"} {
-		_ = i
+	for _, id := range []string{"L1", "L2", "L3"} {
 		stream.recvCh <- protocol.ServerFrame{Task: &protocol.TaskFrame{
 			Lease: &engine.TaskLease{
 				LeaseID:  engine.LeaseID(id),
@@ -334,6 +333,59 @@ func TestRunnerSerializesConcurrentSends(t *testing.T) {
 	case <-runErr:
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for Run() to return")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestRunnerHelloPropagatesLabels — proves the runner advertises its
+// configured Labels (and RunnerID/Concurrency/Capabilities) in the HELLO
+// frame, replacing the old poll-loop test that asserted labels reached
+// Register/Poll. Under the streaming architecture, labels travel in HELLO.
+// ---------------------------------------------------------------------------
+
+func TestRunnerHelloPropagatesLabels(t *testing.T) {
+	stream := newFakeStream(16)
+
+	registry := execution.NewRegistry()
+	r := New(
+		&fakeClient{stream},
+		registry,
+		Config{
+			RunnerID:     "r1",
+			Concurrency:  2,
+			Labels:       map[string]string{"mode": "remote", "env": "prod"},
+			Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
+		},
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = r.Run(ctx) }()
+
+	// Run's first action is Send(HELLO); read it before it blocks on Recv
+	// (WELCOME). cancel() in a defer unblocks the pending Recv via
+	// fakeStream.Close so Run exits cleanly.
+	select {
+	case fr := <-stream.sendCh:
+		if fr.Hello == nil {
+			t.Fatalf("expected HELLO frame, got %+v", fr)
+		}
+		if fr.Hello.RunnerID != "r1" {
+			t.Fatalf("hello runner_id = %q, want r1", fr.Hello.RunnerID)
+		}
+		if fr.Hello.Concurrency != 2 {
+			t.Fatalf("hello concurrency = %d, want 2", fr.Hello.Concurrency)
+		}
+		if got := fr.Hello.Labels["mode"]; got != "remote" {
+			t.Fatalf("hello label mode = %q, want remote", got)
+		}
+		if got := fr.Hello.Labels["env"]; got != "prod" {
+			t.Fatalf("hello label env = %q, want prod", got)
+		}
+		if len(fr.Hello.Capabilities) != 1 || fr.Hello.Capabilities[0].NodeType != "xflow.function" {
+			t.Fatalf("hello capabilities = %+v, want [xflow.function]", fr.Hello.Capabilities)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for HELLO frame")
 	}
 }
 

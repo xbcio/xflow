@@ -72,6 +72,41 @@ func TestWorkflowBuilderSetsNamespaceAndVersion(t *testing.T) {
 	}
 }
 
+func TestWorkflowBuilderEmitsRunnerSelectors(t *testing.T) {
+	wf := Workflow("placement").
+		RunnerSelector(RequiredRunnerSelector(map[string]string{"tenant": "tenant-a", "env": "prod"}))
+	start := wf.Node("start", node.Start())
+	approve := wf.Node("approve", node.Function("return input")).
+		RunnerSelector(RunnerSelector(map[string]string{"mode": "local"}))
+	wf.Connect(start, approve)
+
+	def, err := wf.build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if def.RunnerSelector == nil {
+		t.Fatal("workflow RunnerSelector is nil")
+	}
+	if def.RunnerSelector.Mode != types.RunnerSelectorModeRequired {
+		t.Fatalf("workflow selector mode = %q, want required", def.RunnerSelector.Mode)
+	}
+	if got := def.RunnerSelector.MatchLabels["tenant"]; got != "tenant-a" {
+		t.Fatalf("workflow selector tenant = %q, want tenant-a", got)
+	}
+	var approveDef *types.NodeDef
+	for i := range def.Nodes {
+		if def.Nodes[i].Name == "approve" {
+			approveDef = &def.Nodes[i]
+		}
+	}
+	if approveDef == nil || approveDef.RunnerSelector == nil {
+		t.Fatalf("approve node selector = %+v, want selector", approveDef)
+	}
+	if got := approveDef.RunnerSelector.MatchLabels["mode"]; got != "local" {
+		t.Fatalf("approve selector mode = %q, want local", got)
+	}
+}
+
 func TestWorkflowBuilderRejectsCycleByDefault(t *testing.T) {
 	wf := Workflow("cycle-default")
 	start := wf.Node("start", node.Start())

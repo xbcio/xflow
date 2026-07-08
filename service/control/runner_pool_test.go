@@ -83,6 +83,75 @@ func TestRunnerPoolAssignPicksRunnerWithMostHeadroom(t *testing.T) {
 	}
 }
 
+func TestRunnerPoolAssignFiltersByRunnerSelector(t *testing.T) {
+	pool := NewRunnerPool()
+	pool.RegisterWithLabels("runner-local", 1, []protocol.Capability{{NodeType: "xflow.function"}}, map[string]string{"mode": "local"})
+	pool.RegisterWithLabels("runner-remote", 1, []protocol.Capability{{NodeType: "xflow.function"}}, map[string]string{"mode": "remote"})
+
+	lease := engine.TaskLease{
+		Task:     engine.Task{ExecutionID: types.ExecutionID("exec-1"), NodeName: "n"},
+		NodeType: "xflow.function",
+	}
+	err := pool.AssignRouted(engine.TaskRouting{
+		NodeType: "xflow.function",
+		RunnerSelector: &types.RunnerSelector{
+			MatchLabels: map[string]string{"mode": "remote"},
+		},
+	}, func() (*engine.TaskLease, error) {
+		return &lease, nil
+	})
+	if err != nil {
+		t.Fatalf("AssignRouted() = %v, want nil", err)
+	}
+
+	if got, ok := pool.Poll("runner-local", 1, nil); ok {
+		t.Fatalf("local runner received selected remote lease: %+v", got)
+	}
+	got, ok := pool.Poll("runner-remote", 1, nil)
+	if !ok || got.Task.NodeName != "n" {
+		t.Fatalf("remote runner lease ok=%v lease=%+v, want assigned lease", ok, got)
+	}
+}
+
+func TestRunnerPoolAssignReturnsNoMatchingRunnerForSelectorMismatch(t *testing.T) {
+	pool := NewRunnerPool()
+	pool.RegisterWithLabels("runner-local", 1, []protocol.Capability{{NodeType: "xflow.function"}}, map[string]string{"mode": "local"})
+
+	err := pool.AssignRouted(engine.TaskRouting{
+		NodeType: "xflow.function",
+		RunnerSelector: &types.RunnerSelector{
+			MatchLabels: map[string]string{"mode": "remote"},
+		},
+	}, func() (*engine.TaskLease, error) {
+		return &engine.TaskLease{
+			Task:     engine.Task{ExecutionID: types.ExecutionID("exec-1"), NodeName: "n"},
+			NodeType: "xflow.function",
+		}, nil
+	})
+	if err != ErrNoMatchingRunner {
+		t.Fatalf("AssignRouted() = %v, want ErrNoMatchingRunner", err)
+	}
+	if got, ok := pool.Poll("runner-local", 1, nil); ok {
+		t.Fatalf("poll returned unexpected lease: %+v", got)
+	}
+}
+
+func TestRunnerPoolPollRefreshesLabels(t *testing.T) {
+	pool := NewRunnerPool()
+	pool.RegisterWithLabels("runner-1", 1, []protocol.Capability{{NodeType: "xflow.function"}}, map[string]string{"mode": "local"})
+
+	if _, ok := pool.PollWithLabels("runner-1", 1, nil, map[string]string{"mode": "remote"}); ok {
+		t.Fatal("poll returned unexpected lease")
+	}
+	snapshot, ok := pool.Runner("runner-1")
+	if !ok {
+		t.Fatal("runner not found")
+	}
+	if got := snapshot.Labels["mode"]; got != "remote" {
+		t.Fatalf("snapshot mode = %q, want remote", got)
+	}
+}
+
 func TestRunnerPoolRejectsNonMatchingCapability(t *testing.T) {
 	pool := NewRunnerPool()
 	pool.Register("runner-1", 1, []protocol.Capability{{NodeType: "xflow.http"}})

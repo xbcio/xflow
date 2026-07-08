@@ -121,3 +121,27 @@ func TestReportResultRequestRoundTripsTaskResultErrorJSON(t *testing.T) {
 		t.Fatalf("result error = %q, want handler failed", got.Result.Error.Error())
 	}
 }
+
+func TestRunnerLabelRequestsRoundTripGRPCConversion(t *testing.T) {
+	register := RegisterRunnerRequest{
+		RunnerID:     "runner-1",
+		Concurrency:  2,
+		Labels:       map[string]string{"mode": "remote", "env": "prod"},
+		Capabilities: []Capability{{NodeType: "xflow.function"}},
+	}
+	gotRegister := RegisterRequestFromProto(RegisterRequestToProto(register))
+	if gotRegister.Labels["mode"] != "remote" || gotRegister.Labels["env"] != "prod" {
+		t.Fatalf("register labels = %+v, want mode/env", gotRegister.Labels)
+	}
+
+	poll := PollTaskRequest{
+		RunnerID:     "runner-1",
+		Capacity:     1,
+		Labels:       map[string]string{"mode": "local"},
+		Capabilities: []Capability{{NodeType: "xflow.function"}},
+	}
+	gotPoll := PollTaskRequestFromProto(PollTaskRequestToProto(poll))
+	if got := gotPoll.Labels["mode"]; got != "local" {
+		t.Fatalf("poll label mode = %q, want local", got)
+	}
+}

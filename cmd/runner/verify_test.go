@@ -55,6 +55,7 @@ func TestVerifyCommandRegistersAndHeartbeats(t *testing.T) {
 		"--id", "runner-verify",
 		"--concurrency", "2",
 		"--cap", "xflow.function,xflow.http",
+		"--label", "mode=remote",
 	})
 	if err := cmd.Execute(); err != nil {
 		t.Fatal(err)
@@ -77,6 +78,9 @@ func TestVerifyCommandRegistersAndHeartbeats(t *testing.T) {
 	}
 	if len(registered.Capabilities) != 2 {
 		t.Fatalf("registered capabilities = %+v", registered.Capabilities)
+	}
+	if got := registered.Labels["mode"]; got != "remote" {
+		t.Fatalf("registered label mode = %q, want remote", got)
 	}
 
 	var heartbeat protocol.HeartbeatRequest

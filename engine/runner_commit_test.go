@@ -132,6 +132,75 @@ func TestEngine_BuildTaskLeaseIncludesRunnerRoutingMetadata(t *testing.T) {
 	}
 }
 
+func TestEngine_TaskRoutingIncludesEffectiveRunnerSelector(t *testing.T) {
+	def := &types.WorkflowDef{
+		Name: "runner-selector-routing",
+		RunnerSelector: &types.RunnerSelector{
+			Mode:        types.RunnerSelectorModeDefault,
+			MatchLabels: map[string]string{"mode": "remote", "env": "prod"},
+		},
+		Nodes: []types.NodeDef{
+			{Name: "start", Type: "xflow.start"},
+			{
+				Name: "approve",
+				Type: "xflow.function",
+				RunnerSelector: &types.RunnerSelector{
+					MatchLabels: map[string]string{"mode": "local"},
+				},
+			},
+		},
+		Connections: types.Connections{
+			"start": {"main": []types.Connection{{Node: "approve", Input: "main"}}},
+		},
+	}
+
+	g, err := graph.Compile(def)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := newFakeState()
+	queue := &fakeQueue{}
+	eng := New(state, queue)
+	ctx := context.Background()
+
+	if _, err := eng.Submit(ctx, g, nil); err != nil {
+		t.Fatal(err)
+	}
+	tasks := queue.Drain()
+	if len(tasks) != 1 {
+		t.Fatalf("queued tasks = %d, want 1", len(tasks))
+	}
+	routing, err := eng.TaskRouting(ctx, tasks[0])
+	if err != nil {
+		t.Fatalf("TaskRouting(start) error = %v", err)
+	}
+	if got := routing.RunnerSelector.MatchLabels["mode"]; got != "remote" {
+		t.Fatalf("start selector mode = %q, want remote", got)
+	}
+
+	startLease, err := eng.BuildTaskLease(ctx, tasks[0])
+	if err != nil {
+		t.Fatalf("BuildTaskLease(start) error = %v", err)
+	}
+	if err := eng.CommitTaskResult(ctx, startLease, TaskResult{Output: &types.Output{Data: map[string]any{}}}); err != nil {
+		t.Fatalf("CommitTaskResult(start) error = %v", err)
+	}
+	tasks = queue.Drain()
+	if len(tasks) != 1 {
+		t.Fatalf("queued tasks after start = %d, want 1", len(tasks))
+	}
+	routing, err = eng.TaskRouting(ctx, tasks[0])
+	if err != nil {
+		t.Fatalf("TaskRouting(approve) error = %v", err)
+	}
+	if got := routing.RunnerSelector.MatchLabels["mode"]; got != "local" {
+		t.Fatalf("approve selector mode = %q, want local override", got)
+	}
+	if _, ok := routing.RunnerSelector.MatchLabels["env"]; ok {
+		t.Fatalf("approve selector inherited env in default mode: %+v", routing.RunnerSelector.MatchLabels)
+	}
+}
+
 func TestEngine_BuildTaskLeaseMarksNodeRunningAndFiresStartHook(t *testing.T) {
 	def := &types.WorkflowDef{
 		Name: "runner-start",

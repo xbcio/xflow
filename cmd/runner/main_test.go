@@ -41,6 +41,30 @@ func TestNewRootCommandRunCommandParsesExistingFlags(t *testing.T) {
 	}
 }
 
+func TestNewRootCommandRunCommandParsesLabels(t *testing.T) {
+	var ran runnerConfig
+	err := executeRootWithOptions(commandOptions{
+		runFunc: func(cfg runnerConfig) error {
+			ran = cfg
+			return nil
+		},
+		out: &bytes.Buffer{},
+		err: &bytes.Buffer{},
+	},
+		"run",
+		"--server", "http://localhost:8080",
+		"--id", "runner-1",
+		"--label", "mode=remote",
+		"--label", "env=prod",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ran.labels["mode"] != "remote" || ran.labels["env"] != "prod" {
+		t.Fatalf("labels = %+v, want mode/env", ran.labels)
+	}
+}
+
 func TestNewRootCommandRunCommandParsesLegacySingleDashFlags(t *testing.T) {
 	var ran runnerConfig
 	err := executeRootWithOptions(commandOptions{
