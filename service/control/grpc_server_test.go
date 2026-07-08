@@ -512,3 +512,48 @@ func TestGRPCRegisterRejectedWithoutTokenReturnsUnauthenticated(t *testing.T) {
 		t.Fatalf("status code = %v, want Unauthenticated", got)
 	}
 }
+
+// TestGRPCConnectRejectedWithoutToken proves the streaming Connect RPC goes
+// through the same bearer-token authentication as the unary RPCs (Finding 1
+// of the final review: Connect used to call AuthenticateRegister with a
+// hardcoded empty token, bypassing auth entirely). With an enforcing
+// FilePolicyStore and no Authorization metadata, HELLO must be rejected
+// instead of receiving WELCOME.
+func TestGRPCConnectRejectedWithoutToken(t *testing.T) {
+	store, err := NewFilePolicyStoreFromConfig(PolicyConfig{
+		Version: 1,
+		Runners: []PolicyEntry{{
+			Name:             "functions",
+			IDPrefix:         "runner-",
+			Token:            "secret",
+			AllowedNodeTypes: []string{"xflow.function"},
+		}},
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := startGRPCTestServer(t, &fakeControlEngine{}, NewRunnerPool(), WithGRPCAuthenticator(store))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	stream, err := client.Connect(ctx)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer stream.Close()
+
+	if err := stream.Send(protocol.RunnerFrame{Hello: &protocol.HelloFrame{
+		RunnerID: "runner-1", Concurrency: 1,
+		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
+	}}); err != nil {
+		t.Fatalf("send hello: %v", err)
+	}
+
+	fr, err := stream.Recv()
+	if err == nil {
+		t.Fatalf("expected stream error rejecting unauthenticated HELLO, got frame %+v", fr)
+	}
+	if got := status.Code(err); got != codes.Unauthenticated {
+		t.Fatalf("status code = %v, want Unauthenticated (err=%v)", got, err)
+	}
+}

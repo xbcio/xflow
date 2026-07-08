@@ -21,7 +21,7 @@ type ConnectStream interface {
 // send/recv loops → BYE/disconnect. Returns on clean BYE, ctx cancel, or
 // stream error. Single sender to stream: the send loop is the only goroutine
 // calling stream.Send; ACKs and TASKs are both funneled through sess.send.
-func (c *Core) Connect(stream ConnectStream) error {
+func (c *Core) Connect(stream ConnectStream, token string, info TransportInfo) error {
 	ctx := stream.Context()
 
 	first, err := stream.Recv()
@@ -35,9 +35,8 @@ func (c *Core) Connect(stream ConnectStream) error {
 	if hello.RunnerID == "" || hello.Concurrency <= 0 {
 		return ErrConcurrencyRequired
 	}
-	info := TransportInfo{}
-	if _, authErr := c.authn().AuthenticateRegister(hello.RunnerID, "", info); authErr != nil {
-		if err := c.authDeny(hello.RunnerID, "", "register", info, authErr); err != nil {
+	if _, authErr := c.authn().AuthenticateRegister(hello.RunnerID, token, info); authErr != nil {
+		if err := c.authDeny(hello.RunnerID, token, "register", info, authErr); err != nil {
 			return err
 		}
 	}

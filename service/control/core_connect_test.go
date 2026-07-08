@@ -76,7 +76,7 @@ func TestCoreConnectRoundTrip(t *testing.T) {
 	core := newCoreForConnectTest()
 	stream := newFakeStream(ctx, 8)
 	done := make(chan error, 1)
-	go func() { done <- core.Connect(stream) }()
+	go func() { done <- core.Connect(stream, "", TransportInfo{}) }()
 
 	stream.push(protocol.RunnerFrame{Hello: &protocol.HelloFrame{
 		RunnerID: "r1", Concurrency: 2,

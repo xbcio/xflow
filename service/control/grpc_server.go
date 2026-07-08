@@ -131,9 +131,17 @@ func (s *GRPCServer) ReportResult(ctx context.Context, req *runnerpb.ReportResul
 	return &runnerpb.ReportResultResponse{Accepted: resp.Accepted, Error: resp.Error}, nil
 }
 
-// Connect adapts the generated bidi stream onto Core.Connect.
+// Connect adapts the generated bidi stream onto Core.Connect. Auth token and
+// TLS transport info are extracted from the stream context up front, matching
+// the pattern every unary RPC handler above uses — the HELLO frame's payload
+// carries no auth token, so without this the Connect path would bypass
+// bearer-token/mTLS auth entirely.
 func (s *GRPCServer) Connect(stream grpc.BidiStreamingServer[runnerpb.RunnerFrame, runnerpb.ServerFrame]) error {
-	return s.core.Connect(&grpcConnectStream{stream: stream})
+	ctx := stream.Context()
+	var token string
+	overrideTokenFromMetadata(ctx, &token)
+	err := s.core.Connect(&grpcConnectStream{stream: stream}, token, grpcTransportInfo(ctx))
+	return connectStatus(err)
 }
 
 type grpcConnectStream struct {
@@ -193,6 +201,26 @@ func grpcTransportInfo(ctx context.Context) TransportInfo {
 	info.TLSPeerCN = cert.Subject.String()
 	info.TLSPeerSAN = append(info.TLSPeerSAN, cert.DNSNames...)
 	return info
+}
+
+// connectStatus maps Core.Connect's transport-agnostic sentinel errors (bad
+// HELLO, failed auth) to gRPC status codes, matching the unary RPCs' contract
+// so callers see e.g. Unauthenticated instead of Unknown. Unlike runnerStatus,
+// it leaves any error it doesn't recognize untouched: Connect can also return
+// genuine stream/transport errors (from stream.Recv/Send, or ctx.Err()) that
+// already carry their own gRPC status (or are plain io.EOF-style transport
+// errors) and must not be forced into codes.Internal.
+func connectStatus(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, ErrRunnerIDRequired), errors.Is(err, ErrConcurrencyRequired):
+		return status.Error(codes.InvalidArgument, err.Error())
+	case errors.Is(err, ErrUnauthenticated):
+		return status.Error(codes.Unauthenticated, err.Error())
+	default:
+		return err
+	}
 }
 
 // runnerStatus maps transport-agnostic Core sentinel errors to gRPC status codes.
