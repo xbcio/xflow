@@ -253,15 +253,14 @@ func cloneRunnerSelector(selector *types.RunnerSelector) *types.RunnerSelector {
 	if selector == nil {
 		return nil
 	}
-	out := &types.RunnerSelector{}
+	out := &types.RunnerSelector{
+		Mode: selector.Mode,
+	}
 	if len(selector.MatchLabels) > 0 {
 		out.MatchLabels = make(map[string]string, len(selector.MatchLabels))
 		for key, value := range selector.MatchLabels {
 			out.MatchLabels[key] = value
 		}
-	}
-	if len(out.MatchLabels) == 0 {
-		return nil
 	}
 	return out
 }

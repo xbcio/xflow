@@ -245,7 +245,7 @@ func resolveRunnerSelector(workflowSelector, nodeSelector *types.RunnerSelector)
 	case types.RunnerSelectorModeRequired:
 		return andRunnerSelectors(workflowSelector, nodeSelector)
 	default:
-		if nodeSelector != nil {
+		if nodeSelector != nil && (len(nodeSelector.MatchLabels) > 0 || nodeSelector.Mode != "") {
 			return cloneRunnerSelector(nodeSelector), nil
 		}
 		return cloneRunnerSelector(workflowSelector), nil
@@ -255,6 +255,7 @@ func resolveRunnerSelector(workflowSelector, nodeSelector *types.RunnerSelector)
 func andRunnerSelectors(workflowSelector, nodeSelector *types.RunnerSelector) (*types.RunnerSelector, error) {
 	out := &types.RunnerSelector{}
 	if workflowSelector != nil {
+		out.Mode = workflowSelector.Mode
 		out.MatchLabels = cloneStringMap(workflowSelector.MatchLabels)
 	}
 	if nodeSelector != nil {
@@ -268,7 +269,7 @@ func andRunnerSelectors(workflowSelector, nodeSelector *types.RunnerSelector) (*
 			out.MatchLabels[key] = value
 		}
 	}
-	if len(out.MatchLabels) == 0 {
+	if len(out.MatchLabels) == 0 && out.Mode == "" {
 		return nil, nil
 	}
 	return out, nil
@@ -278,13 +279,10 @@ func cloneRunnerSelector(selector *types.RunnerSelector) *types.RunnerSelector {
 	if selector == nil {
 		return nil
 	}
-	out := &types.RunnerSelector{
+	return &types.RunnerSelector{
+		Mode:        selector.Mode,
 		MatchLabels: cloneStringMap(selector.MatchLabels),
 	}
-	if len(out.MatchLabels) == 0 {
-		return nil
-	}
-	return out
 }
 
 func cloneStringMap(src map[string]string) map[string]string {

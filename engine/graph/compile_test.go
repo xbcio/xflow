@@ -113,6 +113,86 @@ func TestCompileCollectsStartAndTriggerEntries(t *testing.T) {
 	}
 }
 
+func TestCompileResolvesRunnerSelectors(t *testing.T) {
+	def := &types.WorkflowDef{
+		Name: "placement",
+		RunnerSelector: &types.RunnerSelector{
+			Mode:        types.RunnerSelectorModeRequired,
+			MatchLabels: map[string]string{"tenant": "tenant-a", "env": "prod"},
+		},
+		Nodes: []types.NodeDef{
+			{Name: "start", Type: "xflow.start"},
+			{
+				Name: "scan",
+				Type: "xflow.function",
+				RunnerSelector: &types.RunnerSelector{
+					MatchLabels: map[string]string{"mode": "remote"},
+				},
+			},
+		},
+		Connections: types.Connections{
+			"start": {"main": {{Node: "scan", Input: "main"}}},
+		},
+	}
+
+	g, err := Compile(def)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selector := g.Nodes[g.Index["scan"]].RunnerSelector
+	if selector == nil {
+		t.Fatal("scan RunnerSelector is nil")
+	}
+	want := map[string]string{"tenant": "tenant-a", "env": "prod", "mode": "remote"}
+	for key, value := range want {
+		if got := selector.MatchLabels[key]; got != value {
+			t.Fatalf("selector[%s] = %q, want %q", key, got, value)
+		}
+	}
+}
+
+func TestCompileRejectsNodeRunnerSelectorMode(t *testing.T) {
+	def := &types.WorkflowDef{
+		Name: "invalid-node-mode",
+		Nodes: []types.NodeDef{
+			{
+				Name: "start",
+				Type: "xflow.start",
+				RunnerSelector: &types.RunnerSelector{
+					Mode: types.RunnerSelectorModeRequired,
+				},
+			},
+		},
+	}
+
+	if _, err := Compile(def); err == nil {
+		t.Fatal("Compile() error = nil, want node runner selector mode rejection")
+	}
+}
+
+func TestCompileRejectsConflictingRequiredRunnerSelectors(t *testing.T) {
+	def := &types.WorkflowDef{
+		Name: "conflicting-placement",
+		RunnerSelector: &types.RunnerSelector{
+			Mode:        types.RunnerSelectorModeRequired,
+			MatchLabels: map[string]string{"env": "prod"},
+		},
+		Nodes: []types.NodeDef{
+			{
+				Name: "start",
+				Type: "xflow.start",
+				RunnerSelector: &types.RunnerSelector{
+					MatchLabels: map[string]string{"env": "dev"},
+				},
+			},
+		},
+	}
+
+	if _, err := Compile(def); err == nil {
+		t.Fatal("Compile() error = nil, want conflicting selector rejection")
+	}
+}
+
 func TestCompile_AllowCyclesDefaultsMaxAutoDepth(t *testing.T) {
 	def := &types.WorkflowDef{
 		Name:    "cycle",
