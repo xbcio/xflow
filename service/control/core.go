@@ -104,11 +104,13 @@ func (c *Core) handleResultFrame(ctx context.Context, runnerID string, r *protoc
 	}
 	var ack protocol.ServerFrame
 	if err := c.engine.CommitTaskResult(ctx, r.Lease, r.Result); err != nil {
-		if errors.Is(err, engine.ErrInvalidLeaseToken) {
-			ack = protocol.ServerFrame{Ack: &protocol.AckFrame{LeaseID: r.LeaseID, Accepted: false, Error: err.Error()}}
-		} else {
-			return err
-		}
+		// Any commit error — stale lease or a transient backend failure —
+		// degrades to a rejection ACK for this one result, mirroring the
+		// unary ReportResult contract. It must never propagate out of
+		// connectRecvLoop: doing so would kill the whole multiplexed
+		// stream over a single result's failure, disrupting every other
+		// in-flight task on this connection.
+		ack = protocol.ServerFrame{Ack: &protocol.AckFrame{LeaseID: r.LeaseID, Accepted: false, Error: err.Error()}}
 	} else {
 		ack = protocol.ServerFrame{Ack: &protocol.AckFrame{LeaseID: r.LeaseID, Accepted: true}}
 	}

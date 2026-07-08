@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"errors"
 	"net"
 	"testing"
 	"time"
@@ -556,4 +557,145 @@ func TestGRPCConnectRejectedWithoutToken(t *testing.T) {
 	if got := status.Code(err); got != codes.Unauthenticated {
 		t.Fatalf("status code = %v, want Unauthenticated (err=%v)", got, err)
 	}
+}
+
+// TestGRPCConnectHandleResultStaleLease proves handleResultFrame's
+// stale-lease branch works end-to-end over the real gRPC transport: a RESULT
+// frame whose commit fails with engine.ErrInvalidLeaseToken must produce a
+// rejection ACK (Accepted=false, non-empty Error), not a torn-down stream.
+// This is Finding 3's required gRPC-transport-level coverage (core_connect_test.go
+// only exercises this over the fake in-process stream).
+func TestGRPCConnectHandleResultStaleLease(t *testing.T) {
+	eng := &fakeControlEngine{commitErr: engine.ErrInvalidLeaseToken}
+	runners := NewRunnerPool()
+	client := startGRPCTestServer(t, eng, runners)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	stream, err := client.Connect(ctx)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer stream.Close()
+
+	if err := stream.Send(protocol.RunnerFrame{Hello: &protocol.HelloFrame{
+		RunnerID: "stale-r1", Concurrency: 1,
+		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
+	}}); err != nil {
+		t.Fatalf("send hello: %v", err)
+	}
+	if fr, err := stream.Recv(); err != nil || fr.Welcome == nil {
+		t.Fatalf("expected WELCOME, got fr=%+v err=%v", fr, err)
+	}
+
+	lease := engine.TaskLease{LeaseID: "L1", LeaseToken: "stale-token", NodeType: "xflow.function"}
+	if err := stream.Send(protocol.RunnerFrame{Result: &protocol.ResultFrame{
+		LeaseID: "L1", Lease: &lease,
+		Result: engine.TaskResult{Output: &types.Output{Data: map[string]any{"ok": true}}},
+	}}); err != nil {
+		t.Fatalf("send result: %v", err)
+	}
+
+	fr, err := stream.Recv()
+	if err != nil {
+		t.Fatalf("expected ACK frame, got stream error: %v", err)
+	}
+	if fr.Ack == nil {
+		t.Fatalf("expected ACK frame, got %+v", fr)
+	}
+	if fr.Ack.Accepted {
+		t.Fatalf("expected rejection ACK for stale lease, got accepted: %+v", fr.Ack)
+	}
+	if fr.Ack.Error == "" {
+		t.Fatal("expected non-empty rejection reason")
+	}
+
+	// The stream must still be alive after a commit error — send BYE and
+	// confirm the server ends the RPC cleanly rather than having already
+	// torn the stream down.
+	if err := stream.Send(protocol.RunnerFrame{Bye: &protocol.ByeFrame{}}); err != nil {
+		t.Fatalf("send bye: %v", err)
+	}
+}
+
+// TestGRPCConnectTransientCommitErrorSurvivesStream proves Finding 2's fix:
+// a transient (non-ErrInvalidLeaseToken) CommitTaskResult failure degrades to
+// a rejection ACK instead of killing the whole Connect stream. A second
+// RESULT frame sent afterward on the SAME stream must still be processed
+// (and, once the fake engine's transient error is cleared, accepted),
+// proving the stream survived the first failure.
+func TestGRPCConnectTransientCommitErrorSurvivesStream(t *testing.T) {
+	eng := &transientThenOKEngine{failCount: 1, failErr: errors.New("transient backend hiccup")}
+	runners := NewRunnerPool()
+	client := startGRPCTestServer(t, eng, runners)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	stream, err := client.Connect(ctx)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer stream.Close()
+
+	if err := stream.Send(protocol.RunnerFrame{Hello: &protocol.HelloFrame{
+		RunnerID: "transient-r1", Concurrency: 2,
+		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
+	}}); err != nil {
+		t.Fatalf("send hello: %v", err)
+	}
+	if fr, err := stream.Recv(); err != nil || fr.Welcome == nil {
+		t.Fatalf("expected WELCOME, got fr=%+v err=%v", fr, err)
+	}
+
+	lease1 := engine.TaskLease{LeaseID: "L1", LeaseToken: "t1", NodeType: "xflow.function"}
+	if err := stream.Send(protocol.RunnerFrame{Result: &protocol.ResultFrame{
+		LeaseID: "L1", Lease: &lease1,
+		Result: engine.TaskResult{Output: &types.Output{Data: map[string]any{"ok": true}}},
+	}}); err != nil {
+		t.Fatalf("send result L1: %v", err)
+	}
+
+	fr, err := stream.Recv()
+	if err != nil {
+		t.Fatalf("expected ACK for L1 despite transient error, got stream error: %v", err)
+	}
+	if fr.Ack == nil || fr.Ack.Accepted || fr.Ack.Error == "" {
+		t.Fatalf("expected rejection ACK for L1's transient error, got %+v", fr.Ack)
+	}
+
+	// Stream must have survived: a second RESULT is still processable and,
+	// with the transient failure now cleared, gets accepted.
+	lease2 := engine.TaskLease{LeaseID: "L2", LeaseToken: "t2", NodeType: "xflow.function"}
+	if err := stream.Send(protocol.RunnerFrame{Result: &protocol.ResultFrame{
+		LeaseID: "L2", Lease: &lease2,
+		Result: engine.TaskResult{Output: &types.Output{Data: map[string]any{"ok": true}}},
+	}}); err != nil {
+		t.Fatalf("send result L2: %v", err)
+	}
+	fr2, err := stream.Recv()
+	if err != nil {
+		t.Fatalf("expected ACK for L2 on surviving stream, got stream error: %v", err)
+	}
+	if fr2.Ack == nil || !fr2.Ack.Accepted || fr2.Ack.LeaseID != "L2" {
+		t.Fatalf("expected accepted ACK L2 proving stream survived, got %+v", fr2.Ack)
+	}
+}
+
+// transientThenOKEngine fails CommitTaskResult with failErr for the first
+// failCount calls, then succeeds. Used to prove a transient error does not
+// tear down the Connect stream (fakeControlEngine's commitErr is static and
+// can't model recovery).
+type transientThenOKEngine struct {
+	fakeControlEngine
+	failCount int
+	failErr   error
+	calls     int
+}
+
+func (f *transientThenOKEngine) CommitTaskResult(ctx context.Context, lease *engine.TaskLease, result engine.TaskResult) error {
+	f.calls++
+	if f.calls <= f.failCount {
+		return f.failErr
+	}
+	return f.fakeControlEngine.CommitTaskResult(ctx, lease, result)
 }
