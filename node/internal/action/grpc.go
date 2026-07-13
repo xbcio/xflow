@@ -189,7 +189,7 @@ func structFromJSON(data []byte) (proto.Message, error) {
 // an error when no pool is attached to ctx — production deployments always
 // inject a pool via the backend's WithResourcePool option.
 func acquireGRPC(ctx context.Context, host string, secure bool, opts ...grpc.DialOption) (*grpc.ClientConn, func(), error) {
-	pool := ResourcePoolFromContext(ctx)
+	pool := types.ResourcePoolFromContext(ctx)
 	if pool == nil {
 		return nil, nil, fmt.Errorf("xflow.grpc: no resource pool configured")
 	}

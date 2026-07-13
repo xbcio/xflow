@@ -128,6 +128,11 @@ func (n *NodeRef) Input(port string) types.InputPort {
 	return types.InputPort{Node: n.name, Port: port}
 }
 
+// NodePort returns the node name and "main" port — the default endpoint
+// when a NodeRef is used directly in Connect. For multi-port nodes, use
+// NodeRef.Output("portName") to target a specific port.
+func (n *NodeRef) NodePort() (string, string) { return n.name, "main" }
+
 // Body attaches a sub-workflow as the loop/split body.
 func (n *NodeRef) Body(body *WorkflowBuilder) *NodeRef {
 	n.body = body
@@ -188,34 +193,13 @@ func (w *WorkflowBuilder) addNode(entry *nodeEntry) *NodeRef {
 	return ref
 }
 
-// Connect establishes a directed edge from src to dst.
-//
-// dst may be:
-//   - *NodeRef       — connects to the dst node's "main" input port
-//   - types.InputPort — connects to the specified input port
-func (w *WorkflowBuilder) Connect(src any, dst any) *WorkflowBuilder {
-	e := edge{}
-	switch s := src.(type) {
-	case *NodeRef:
-		e.srcNode = s.name
-		e.srcPort = "main"
-	case types.OutputPort:
-		e.srcNode = s.Node
-		e.srcPort = s.Port
-	default:
-		panic(fmt.Sprintf("Connect: src must be *NodeRef or types.OutputPort, got %T", src))
-	}
-	switch d := dst.(type) {
-	case *NodeRef:
-		e.dstNode = d.name
-		e.dstPort = "main"
-	case types.InputPort:
-		e.dstNode = d.Node
-		e.dstPort = d.Port
-	default:
-		panic(fmt.Sprintf("Connect: dst must be *NodeRef or types.InputPort, got %T", dst))
-	}
-	w.edges = append(w.edges, e)
+// Connect establishes a directed edge from src to dst. Both endpoints must
+// satisfy types.EdgeEndpoint — typically *NodeRef (defaults to "main" port)
+// or OutputPort/InputPort from NodeRef.Output/Input.
+func (w *WorkflowBuilder) Connect(src, dst types.EdgeEndpoint) *WorkflowBuilder {
+	sn, sp := src.NodePort()
+	dn, dp := dst.NodePort()
+	w.edges = append(w.edges, edge{srcNode: sn, srcPort: sp, dstNode: dn, dstPort: dp})
 	return w
 }
 

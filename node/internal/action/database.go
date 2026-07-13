@@ -365,7 +365,7 @@ func isValidIdentifier(s string) bool {
 // an error when no pool is attached — production deployments always inject a
 // pool via the backend's WithResourcePool option.
 func acquireSQL(ctx context.Context, driver, dsn string) (*sql.DB, func(), error) {
-	pool := ResourcePoolFromContext(ctx)
+	pool := types.ResourcePoolFromContext(ctx)
 	if pool == nil {
 		return nil, nil, fmt.Errorf("xflow.database: no resource pool configured")
 	}
