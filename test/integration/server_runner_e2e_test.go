@@ -16,7 +16,6 @@ import (
 	"github.com/xbcio/xflow/backend/asynq"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
-	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/service/protocol/runnerpb"

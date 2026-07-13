@@ -2,7 +2,7 @@ name: xflow-test
 
 services:
   redis:
-    image: docker.io/library/redis:7-alpine
+    image: docker.io/library/redis:latest
     container_name: xflow-test-redis
     command: ["redis-server", "--save", "60", "1"]
     ports:
@@ -17,7 +17,7 @@ services:
     networks: [xflow-test]
 
   mysql:
-    image: docker.io/library/mysql:8.0
+    image: docker.io/library/mysql:latest
     container_name: xflow-test-mysql
     environment:
       MYSQL_ROOT_PASSWORD: "${MYSQL_ROOT_PASSWORD:-xflow}"
@@ -34,7 +34,7 @@ services:
     networks: [xflow-test]
 
   kafka:
-    image: docker.io/apache/kafka:3.9.1
+    image: docker.io/apache/kafka:latest
     container_name: xflow-test-kafka
     environment:
       KAFKA_NODE_ID: 1
