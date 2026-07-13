@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/xbcio/xflow/types"
@@ -25,7 +26,7 @@ type defaultResourcePool struct {
 	grpcMu sync.Mutex
 	conns  map[string]*grpc.ClientConn
 
-	closed bool
+	closed atomic.Bool
 }
 
 // NewDefaultResourcePool builds a process-scope pool. Pass to a backend via
@@ -62,7 +63,7 @@ func (p *defaultResourcePool) SQL(_ context.Context, driver, dsn string) (*sql.D
 	key := driver + "|" + dsn
 	p.sqlMu.Lock()
 	defer p.sqlMu.Unlock()
-	if p.closed {
+	if p.closed.Load() {
 		return nil, errPoolClosed
 	}
 	if db, ok := p.dbs[key]; ok {
@@ -83,7 +84,7 @@ func (p *defaultResourcePool) GRPC(_ context.Context, host string, secure bool, 
 	key := host + "|" + boolFlag(secure)
 	p.grpcMu.Lock()
 	defer p.grpcMu.Unlock()
-	if p.closed {
+	if p.closed.Load() {
 		return nil, errPoolClosed
 	}
 	if conn, ok := p.conns[key]; ok {
@@ -110,9 +111,12 @@ func (p *defaultResourcePool) Close(ctx context.Context) error {
 	p.sqlMu.Lock()
 	dbs := p.dbs
 	p.dbs = nil
-	p.closed = true
+	p.closed.Store(true)
 	p.sqlMu.Unlock()
 
+	// Note: ctx timeout is only checked after acquiring grpcMu below. In
+	// practice grpc.NewClient is non-blocking, so GRPC holds grpcMu briefly;
+	// this is a theoretical constraint, not a practical one.
 	p.grpcMu.Lock()
 	conns := p.conns
 	p.conns = nil

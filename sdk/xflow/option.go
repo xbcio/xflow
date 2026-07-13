@@ -32,6 +32,10 @@ type engineConfig struct {
 	versionPolicy    execution.VersionPolicy
 	versionPolicySet bool
 
+	resourcePool       types.ResourcePool
+	resourcePoolSet    bool
+	resourcePoolConfig *types.ResourcePoolConfig
+
 	// local-only: NewCluster always leaves this false; direct handlers are
 	// rejected regardless (see node_registration.go registerDirectHandlers).
 	allowDirectHandlers bool
@@ -76,6 +80,24 @@ func WithLogger(l engine.Logger) Option {
 func WithNodes(defs ...types.Handler) Option {
 	return func(c *engineConfig) {
 		c.nodes = append(c.nodes, defs...)
+	}
+}
+
+// WithResourcePool installs a custom ResourcePool. Pass nil to explicitly
+// opt out of pooling — resource-aware nodes (DatabaseNode/GRPCNode) will
+// error at runtime when invoked without a pool.
+func WithResourcePool(p types.ResourcePool) Option {
+	return func(c *engineConfig) {
+		c.resourcePool = p
+		c.resourcePoolSet = true
+	}
+}
+
+// WithResourcePoolConfig tunes the SDK-managed default pool. Ignored if
+// WithResourcePool is also set.
+func WithResourcePoolConfig(cfg types.ResourcePoolConfig) Option {
+	return func(c *engineConfig) {
+		c.resourcePoolConfig = &cfg
 	}
 }
 

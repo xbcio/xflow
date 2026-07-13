@@ -18,7 +18,8 @@ type RunnerOption func(*Runner)
 
 // WithResourcePool installs a ResourcePool. The Runner attaches it to the
 // per-call context so resource-aware nodes (DatabaseNode, GRPCNode) can pool
-// their connections. nil pool is a valid no-op.
+// their connections. nil pool = no injection; resource-aware nodes will
+// error at runtime.
 func WithResourcePool(p types.ResourcePool) RunnerOption {
 	return func(r *Runner) { r.pool = p }
 }

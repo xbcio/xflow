@@ -29,7 +29,9 @@ func WithConcurrency(n int) Option {
 
 // WithResourcePool installs a process-scope ResourcePool used by
 // DatabaseNode / GRPCNode to reuse *sql.DB / *grpc.ClientConn across
-// invocations. Default is nil: nodes fall back to per-call construction.
+// invocations. Default is nil: resource-aware nodes (DatabaseNode/GRPCNode)
+// error at runtime when invoked without a pool — production deployments
+// should always inject a pool.
 // See .claude/specs/resource-pool.md.
 func WithResourcePool(p types.ResourcePool) Option {
 	return func(c *config) { c.resourcePool = p }

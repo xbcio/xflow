@@ -63,7 +63,10 @@ func WithConsumer(enabled bool) Option {
 
 // WithResourcePool installs a process-scope ResourcePool. Worker pods that
 // run DatabaseNode / GRPCNode benefit from a pool; API-only pods (consumer
-// disabled) can leave it nil. See .claude/specs/resource-pool.md.
+// disabled) can leave it nil. Default is nil: resource-aware nodes
+// (DatabaseNode/GRPCNode) error at runtime when invoked without a pool —
+// production deployments should always inject a pool.
+// See .claude/specs/resource-pool.md.
 func WithResourcePool(p types.ResourcePool) Option {
 	return func(c *config) { c.resourcePool = p }
 }

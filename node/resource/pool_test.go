@@ -136,6 +136,61 @@ func TestResourcePool_GRPCAfterCloseFails(t *testing.T) {
 	}
 }
 
+// TestResourcePool_ConcurrentGRPCAndClose exercises the race between GRPC
+// callers and Close. Must pass under `go test -race`.
+func TestResourcePool_ConcurrentGRPCAndClose(t *testing.T) {
+	srv := startNoopGRPC(t)
+	p := NewDefaultResourcePool(types.DefaultResourcePoolConfig())
+
+	opts := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
+
+	const racers = 32
+	var wg sync.WaitGroup
+	wg.Add(racers + 1)
+
+	go func() {
+		defer wg.Done()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = p.Close(ctx)
+	}()
+
+	for i := 0; i < racers; i++ {
+		go func() {
+			defer wg.Done()
+			_, _ = p.GRPC(context.Background(), srv.addr, false, opts...)
+		}()
+	}
+
+	wg.Wait()
+}
+
+// TestResourcePool_ConcurrentSQLAndClose exercises the race between SQL
+// callers and Close. Must pass under `go test -race`.
+func TestResourcePool_ConcurrentSQLAndClose(t *testing.T) {
+	p := NewDefaultResourcePool(types.DefaultResourcePoolConfig())
+
+	const racers = 32
+	var wg sync.WaitGroup
+	wg.Add(racers + 1)
+
+	go func() {
+		defer wg.Done()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = p.Close(ctx)
+	}()
+
+	for i := 0; i < racers; i++ {
+		go func() {
+			defer wg.Done()
+			_, _ = p.SQL(context.Background(), poolDriverName, poolDSN)
+		}()
+	}
+
+	wg.Wait()
+}
+
 // ---------------------------------------------------------------------------
 // gRPC test fixture
 // ---------------------------------------------------------------------------

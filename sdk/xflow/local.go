@@ -31,7 +31,19 @@ func NewLocal(opts ...Option) (*Engine, error) {
 	return newFromConfig(cfg, provider)
 }
 
-// resolveResourcePool returns the SDK-managed default pool.
-func resolveResourcePool(_ *engineConfig) types.ResourcePool {
-	return resource.NewDefaultResourcePool(types.DefaultResourcePoolConfig())
+// resolveResourcePool returns the configured pool, the default pool built from
+// resourcePoolConfig, or nil when the caller explicitly opted out via
+// WithResourcePool(nil).
+//
+// Shared by NewLocal and NewCluster: both modes default to a connection pool
+// for DatabaseNode/GRPCNode unless the caller overrides it.
+func resolveResourcePool(cfg *engineConfig) types.ResourcePool {
+	if cfg.resourcePoolSet {
+		return cfg.resourcePool // may be nil — explicit opt-out
+	}
+	poolCfg := types.DefaultResourcePoolConfig()
+	if cfg.resourcePoolConfig != nil {
+		poolCfg = *cfg.resourcePoolConfig
+	}
+	return resource.NewDefaultResourcePool(poolCfg)
 }

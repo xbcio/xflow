@@ -56,6 +56,7 @@ type poolCtxKey struct{}
 
 // WithResourcePool returns a context carrying the given pool. Used by the
 // execution runner; callers shouldn't need it directly.
+// nil pool = no injection; resource-aware nodes will error at runtime.
 func WithResourcePool(ctx context.Context, pool ResourcePool) context.Context {
 	if pool == nil {
 		return ctx
