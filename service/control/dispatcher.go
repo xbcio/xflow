@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/execution"
 )
 
 // ErrNoMatchingRunner indicates no registered runner advertises the lease's
@@ -21,13 +22,8 @@ var ErrNoCapacity = errors.New("no runner has capacity for task lease")
 // HTTP/gRPC error mapping. New code should branch on the specific sentinels.
 var ErrNoRunnerAvailable = ErrNoMatchingRunner
 
-type LeaseBuilder interface {
-	TaskRouting(ctx context.Context, t *engine.Task) (engine.TaskRouting, error)
-	BuildTaskLease(ctx context.Context, t *engine.Task) (*engine.TaskLease, error)
-}
-
 type Dispatcher struct {
-	engine   LeaseBuilder
+	engine   execution.Engine
 	runners  *RunnerPool
 	observer DispatcherObserver
 }
@@ -48,7 +44,7 @@ func WithDispatcherObserver(observer DispatcherObserver) DispatcherOption {
 	}
 }
 
-func NewDispatcher(engine LeaseBuilder, runners *RunnerPool, opts ...DispatcherOption) *Dispatcher {
+func NewDispatcher(engine execution.Engine, runners *RunnerPool, opts ...DispatcherOption) *Dispatcher {
 	d := &Dispatcher{
 		engine:  engine,
 		runners: runners,

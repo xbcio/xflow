@@ -44,6 +44,18 @@ func (f *fakeStream) push(fr protocol.RunnerFrame) { f.recvCh <- fr }
 
 type fakeEngine struct{ committed int }
 
+func (f *fakeEngine) BuildTaskLease(context.Context, *engine.Task) (*engine.TaskLease, error) {
+	return nil, nil
+}
+
+func (f *fakeEngine) TaskRouting(context.Context, *engine.Task) (engine.TaskRouting, error) {
+	return engine.TaskRouting{}, nil
+}
+
+func (f *fakeEngine) ReclaimLease(context.Context, engine.ExpiredLease) (bool, error) {
+	return false, nil
+}
+
 func (f *fakeEngine) CommitTaskResult(ctx context.Context, lease *engine.TaskLease, result engine.TaskResult) error {
 	f.committed++
 	return nil

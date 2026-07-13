@@ -53,6 +53,18 @@ func (r *fakeReclaimer) ReclaimLease(_ context.Context, lease engine.ExpiredLeas
 	return true, nil
 }
 
+func (r *fakeReclaimer) BuildTaskLease(context.Context, *engine.Task) (*engine.TaskLease, error) {
+	return nil, nil
+}
+
+func (r *fakeReclaimer) CommitTaskResult(context.Context, *engine.TaskLease, engine.TaskResult) error {
+	return nil
+}
+
+func (r *fakeReclaimer) TaskRouting(context.Context, *engine.Task) (engine.TaskRouting, error) {
+	return engine.TaskRouting{}, nil
+}
+
 type fakeElector struct {
 	leader atomic.Bool
 }

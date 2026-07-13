@@ -6,18 +6,12 @@ import (
 
 	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/execution"
 )
 
 // DefaultSweepPeriod is how often the sweeper scans for expired leases when
 // LeaseSweeperConfig.Period is unset.
 const DefaultSweepPeriod = 10 * time.Second
-
-// LeaseReclaimer is the subset of *engine.Engine that the sweeper needs.
-// Extracted as an interface so tests can fake it without spinning up a real
-// engine + state store.
-type LeaseReclaimer interface {
-	ReclaimLease(ctx context.Context, lease engine.ExpiredLease) (bool, error)
-}
 
 // LeaseLister is the subset of engine.StateStore used by the sweeper to find
 // candidates for reclamation. The full StateStore interface satisfies this
@@ -33,7 +27,7 @@ type LeaseLister interface {
 // healthy runner can pick it up.
 type LeaseSweeper struct {
 	state     LeaseLister
-	engine    LeaseReclaimer
+	engine    execution.Engine
 	period    time.Duration
 	grace     time.Duration
 	log       engine.Logger
@@ -72,7 +66,7 @@ type LeaseSweeperConfig struct {
 // Both arguments are required; clock/sleep are wired to time.Now / context-
 // aware sleeps and can be overridden in tests via the unexported helpers in
 // this package.
-func NewLeaseSweeper(state LeaseLister, eng LeaseReclaimer, cfg LeaseSweeperConfig) *LeaseSweeper {
+func NewLeaseSweeper(state LeaseLister, eng execution.Engine, cfg LeaseSweeperConfig) *LeaseSweeper {
 	if cfg.Period <= 0 {
 		cfg.Period = DefaultSweepPeriod
 	}

@@ -185,3 +185,7 @@ func (e *fakeDispatchEngine) CommitTaskResult(context.Context, *engine.TaskLease
 	e.committed = true
 	return nil
 }
+
+func (e *fakeDispatchEngine) ReclaimLease(context.Context, engine.ExpiredLease) (bool, error) {
+	return false, nil
+}

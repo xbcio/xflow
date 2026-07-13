@@ -10,6 +10,8 @@ import (
 type Engine interface {
 	BuildTaskLease(ctx context.Context, t *engine.Task) (*engine.TaskLease, error)
 	CommitTaskResult(ctx context.Context, lease *engine.TaskLease, result engine.TaskResult) error
+	TaskRouting(ctx context.Context, t *engine.Task) (engine.TaskRouting, error)
+	ReclaimLease(ctx context.Context, lease engine.ExpiredLease) (bool, error)
 }
 
 // Executor runs a leased task. Implementations may execute in-process or send

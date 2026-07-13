@@ -199,6 +199,18 @@ func (f *fakeControlEngine) CommitTaskResult(_ context.Context, lease *engine.Ta
 	return nil
 }
 
+func (f *fakeControlEngine) BuildTaskLease(context.Context, *engine.Task) (*engine.TaskLease, error) {
+	return nil, nil
+}
+
+func (f *fakeControlEngine) TaskRouting(context.Context, *engine.Task) (engine.TaskRouting, error) {
+	return engine.TaskRouting{}, nil
+}
+
+func (f *fakeControlEngine) ReclaimLease(context.Context, engine.ExpiredLease) (bool, error) {
+	return false, nil
+}
+
 func postJSON(t *testing.T, url string, body any, wantStatus int, out any) {
 	t.Helper()
 	var buf bytes.Buffer

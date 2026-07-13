@@ -25,6 +25,14 @@ func (e *fakeLeaseEngine) CommitTaskResult(_ context.Context, lease *engine.Task
 	return nil
 }
 
+func (e *fakeLeaseEngine) TaskRouting(context.Context, *engine.Task) (engine.TaskRouting, error) {
+	return engine.TaskRouting{}, nil
+}
+
+func (e *fakeLeaseEngine) ReclaimLease(context.Context, engine.ExpiredLease) (bool, error) {
+	return false, nil
+}
+
 type fakeActionHandler struct{}
 
 func (fakeActionHandler) Descriptor() types.Descriptor {
