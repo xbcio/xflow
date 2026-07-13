@@ -20,7 +20,6 @@ import (
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
-	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/types"
 )
 
