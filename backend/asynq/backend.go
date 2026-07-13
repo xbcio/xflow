@@ -29,7 +29,7 @@ type config struct {
 	concurrency   int
 	execTTL       time.Duration
 	consumer      bool
-	resourcePool  execution.ResourcePool
+	resourcePool  types.ResourcePool
 	auditObserver AuditObserver
 	logger        engine.Logger
 }
@@ -64,7 +64,7 @@ func WithConsumer(enabled bool) Option {
 // WithResourcePool installs a process-scope ResourcePool. Worker pods that
 // run DatabaseNode / GRPCNode benefit from a pool; API-only pods (consumer
 // disabled) can leave it nil. See .claude/specs/resource-pool.md.
-func WithResourcePool(p execution.ResourcePool) Option {
+func WithResourcePool(p types.ResourcePool) Option {
 	return func(c *config) { c.resourcePool = p }
 }
 
@@ -105,7 +105,7 @@ type Backend struct {
 	redisAddr      string
 	concurrency    int
 	consumer       bool
-	resourcePool   execution.ResourcePool
+	resourcePool   types.ResourcePool
 	leaderElector  backend.LeaderElector
 }
 
@@ -247,7 +247,9 @@ func (b *Backend) BindHandler(eng *engine.Engine, handler func(context.Context, 
 		_ = b.queue.Close()
 		_ = b.rdb.Close()
 		if b.resourcePool != nil {
-			_ = b.resourcePool.Close()
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			_ = b.resourcePool.Close(ctx)
 		}
 	}
 }
