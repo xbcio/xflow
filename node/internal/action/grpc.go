@@ -185,22 +185,19 @@ func structFromJSON(data []byte) (proto.Message, error) {
 	return s, nil
 }
 
-// acquireGRPC fetches a pooled *grpc.ClientConn keyed by (host, tls). Falls
-// back to per-call grpc.NewClient when no pool is attached so callers without
-// a backend-injected pool still work.
+// acquireGRPC fetches a pooled *grpc.ClientConn keyed by (host, tls). Returns
+// an error when no pool is attached to ctx — production deployments always
+// inject a pool via the backend's WithResourcePool option.
 func acquireGRPC(ctx context.Context, host string, secure bool, opts ...grpc.DialOption) (*grpc.ClientConn, func(), error) {
-	if pool := ResourcePoolFromContext(ctx); pool != nil {
-		conn, err := pool.GRPC(ctx, host, secure, opts...)
-		if err != nil {
-			return nil, func() {}, err
-		}
-		return conn, func() {}, nil
+	pool := ResourcePoolFromContext(ctx)
+	if pool == nil {
+		return nil, nil, fmt.Errorf("xflow.grpc: no resource pool configured")
 	}
-	conn, err := grpc.NewClient(host, opts...)
+	conn, err := pool.GRPC(ctx, host, secure, opts...)
 	if err != nil {
 		return nil, func() {}, err
 	}
-	return conn, func() { _ = conn.Close() }, nil
+	return conn, func() {}, nil
 }
 
 func init() { Register(&GRPCNode{}) }

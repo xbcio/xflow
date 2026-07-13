@@ -361,25 +361,19 @@ func isValidIdentifier(s string) bool {
 	return true
 }
 
-// acquireSQL fetches a *sql.DB from the request-scoped ResourcePool when one
-// is attached to ctx (the execution runner installs it). When no pool is
-// available — bare unit tests, hand-rolled engines without WithResourcePool —
-// it falls back to a fresh sql.Open and the returned release closes the
-// connection. Production deployments always run with a pool, so the closing
-// release is unreachable there.
+// acquireSQL fetches a *sql.DB from the request-scoped ResourcePool. Returns
+// an error when no pool is attached — production deployments always inject a
+// pool via the backend's WithResourcePool option.
 func acquireSQL(ctx context.Context, driver, dsn string) (*sql.DB, func(), error) {
-	if pool := ResourcePoolFromContext(ctx); pool != nil {
-		db, err := pool.SQL(ctx, driver, dsn)
-		if err != nil {
-			return nil, func() {}, err
-		}
-		return db, func() {}, nil
+	pool := ResourcePoolFromContext(ctx)
+	if pool == nil {
+		return nil, nil, fmt.Errorf("xflow.database: no resource pool configured")
 	}
-	db, err := sql.Open(driver, dsn)
+	db, err := pool.SQL(ctx, driver, dsn)
 	if err != nil {
 		return nil, func() {}, err
 	}
-	return db, func() { _ = db.Close() }, nil
+	return db, func() {}, nil
 }
 
 func init() { Register(&DatabaseNode{}) }
