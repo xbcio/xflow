@@ -81,9 +81,10 @@ func TestGRPC_MissingMethod(t *testing.T) {
 // failure point is the pool lookup at acquireGRPC.
 func TestGRPC_NoPoolErrors(t *testing.T) {
 	h, _ := noderuntime.Lookup("xflow.grpc")
+	// No pool is attached, so acquireGRPC fails before any timeout is used;
+	// the Timeout call is intentionally omitted as it is irrelevant here.
 	b := node.GRPC("test.Service", "Call", "localhost:1").
-		SetRequest(map[string]any{"key": "value"}).
-		Timeout("100ms")
+		SetRequest(map[string]any{"key": "value"})
 	input := &types.Input{Params: b.RawParams().(map[string]any)}
 
 	out, err := h.Execute(context.Background(), input)
@@ -140,5 +141,18 @@ func TestGRPC_ConnectionError(t *testing.T) {
 	if strings.Contains(errMsg, "no resource pool configured") {
 		t.Fatalf("error = %q, want a real connection/dial failure (NOT the no-pool path); "+
 			"this means the injected pool did not reach acquireGRPC", errMsg)
+	}
+	// Positive assertion: the error must describe a real dial/connection
+	// failure (e.g. "dial", "connection", "code = Unavailable", or
+	// "context deadline"), so that a non-connection failure routed to the
+	// error port (e.g. a future marshal error) would NOT pass this test.
+	// Observed message shape from grpc: `rpc error: code = Unavailable
+	// desc = connection error: desc = "transport: Error while dialing:
+	// dial tcp [::1]:1: connect: connection refused"`.
+	if !strings.Contains(errMsg, "dial") &&
+		!strings.Contains(errMsg, "connection") &&
+		!strings.Contains(errMsg, "context deadline") &&
+		!strings.Contains(errMsg, "code = Unavailable") {
+		t.Fatalf("expected a dial/connection failure error, got: %q", errMsg)
 	}
 }
