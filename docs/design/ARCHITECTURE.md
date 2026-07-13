@@ -12,7 +12,7 @@
 
 ```
 types/           Public contracts: DSL, execution IDs, handler interfaces, descriptors, handler IO
-node/            Builtin action node constructors and implementations
+node/            Public node DSL and builtin node implementations
       ↑
 engine/          Pure scheduling algorithm (Graph, Scheduler, ErrorPolicy)
       ↑
@@ -109,10 +109,13 @@ semantics.
 - Regular nodes implement `TaskHandler` interface
 - Suspendable nodes additionally implement `SuspendingHandler` interface
 - Registered globally via `node.Register()`
+- Public constructors and builtin handler implementations live under `node/`;
+  internal helpers live under `node/internal/`.
 
 ## Adding New Node Types
 
-1. Create file under `node/`, implement `TaskHandler` (+ optional `SuspendingHandler`)
+1. Add the implementation under `node/`, grouped by filename and node kind
+   (`action`, `code`, `transform`, `flow`, `group`, or `trigger`)
 2. Implement `DescriptorProvider` to provide type metadata
 3. Call `node.Register()` in `init()`
 4. Add unit tests

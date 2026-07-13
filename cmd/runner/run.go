@@ -20,7 +20,7 @@ import (
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
-	_ "github.com/xbcio/xflow/nodes/node"
+	_ "github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/service/protocol"
 	runnersvc "github.com/xbcio/xflow/service/runner"
 	"github.com/spf13/cobra"

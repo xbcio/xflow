@@ -30,7 +30,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/xbcio/xflow/nodes/node"
+	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/sdk/xflow"
 	"github.com/xbcio/xflow/types"
 )
@@ -57,11 +57,11 @@ var policyLimits = map[string]float64{
 // input error; the workflow cannot continue without valid claim data.
 type parseClaimHandler struct{}
 
-func (h *parseClaimHandler) Descriptor() node.Descriptor {
-	return node.Descriptor{Type: "demo.expense.parse", DisplayName: "Parse Claim"}
+func (h *parseClaimHandler) Descriptor() types.Descriptor {
+	return types.Descriptor{Type: "demo.expense.parse", DisplayName: "Parse Claim"}
 }
 
-func (h *parseClaimHandler) Execute(_ context.Context, input *node.Input) (*node.Output, error) {
+func (h *parseClaimHandler) Execute(_ context.Context, input *types.Input) (*types.Output, error) {
 	amount, ok := input.Data["amount"].(float64)
 	if !ok || amount <= 0 {
 		return nil, fmt.Errorf("parse claim: amount must be a positive number, got %v", input.Data["amount"])
@@ -74,7 +74,7 @@ func (h *parseClaimHandler) Execute(_ context.Context, input *node.Input) (*node
 	if submitter == "" {
 		submitter = "anonymous"
 	}
-	return &node.Output{Data: map[string]any{
+	return &types.Output{Data: map[string]any{
 		"amount":    amount,
 		"category":  category,
 		"submitter": submitter,
@@ -87,11 +87,11 @@ func (h *parseClaimHandler) Execute(_ context.Context, input *node.Input) (*node
 // policy service or database).
 type enrichClaimHandler struct{}
 
-func (h *enrichClaimHandler) Descriptor() node.Descriptor {
-	return node.Descriptor{Type: "demo.expense.enrich", DisplayName: "Enrich Claim"}
+func (h *enrichClaimHandler) Descriptor() types.Descriptor {
+	return types.Descriptor{Type: "demo.expense.enrich", DisplayName: "Enrich Claim"}
 }
 
-func (h *enrichClaimHandler) Execute(_ context.Context, input *node.Input) (*node.Output, error) {
+func (h *enrichClaimHandler) Execute(_ context.Context, input *types.Input) (*types.Output, error) {
 	category, _ := input.Data["category"].(string)
 	limit, found := policyLimits[category]
 	if !found {
@@ -104,7 +104,7 @@ func (h *enrichClaimHandler) Execute(_ context.Context, input *node.Input) (*nod
 	}
 	out["policy_limit"] = limit
 	out["department"] = "engineering"
-	return &node.Output{Data: out}, nil
+	return &types.Output{Data: out}, nil
 }
 
 // policyCheckNode is a reusable typed node definition (demo.expense.policy).
@@ -112,25 +112,25 @@ func (h *enrichClaimHandler) Execute(_ context.Context, input *node.Input) (*nod
 //
 //   - Within limit  → success {approved:true, ...}  exits via "main" port.
 //   - Over limit    → business error {approved:false, ...} exits via "error"
-//     port (when the node is configured with OnError(node.OnErrorOutput)).
+//     port (when the node is configured with OnError(types.OnErrorOutput)).
 //
 // Both cases populate Output.Data with the routing flag "approved" so that
 // downstream handlers can determine which branch is active without relying on
 // port topology alone.
-var policyCheckNode = node.Define("demo.expense.policy", func(_ context.Context, input *node.Input) (*node.Output, error) {
+var policyCheckNode = node.Define("demo.expense.policy", func(_ context.Context, input *types.Input) (*types.Output, error) {
 	amount, _ := input.Data["amount"].(float64)
 	limit, _ := input.Data["policy_limit"].(float64)
 
 	if amount > limit {
 		// Business error: amount exceeds policy limit → route to "error" port.
-		return &node.Output{
+		return &types.Output{
 			Data: map[string]any{
 				"approved": false,
 				"amount":   amount,
 				"limit":    limit,
 				"reason":   fmt.Sprintf("%.2f CNY exceeds policy limit of %.2f", amount, limit),
 			},
-			Error: &node.Error{
+			Error: &types.Error{
 				Message:    fmt.Sprintf("claim exceeds policy limit: %.2f > %.2f", amount, limit),
 				StatusCode: 422,
 			},
@@ -138,7 +138,7 @@ var policyCheckNode = node.Define("demo.expense.policy", func(_ context.Context,
 	}
 
 	// Within limit → route to "main" port.
-	return &node.Output{Data: map[string]any{
+	return &types.Output{Data: map[string]any{
 		"approved": true,
 		"amount":   amount,
 		"limit":    limit,
@@ -152,13 +152,13 @@ var policyCheckNode = node.Define("demo.expense.policy", func(_ context.Context,
 // Only executed when PolicyCheck routes to "main" (within-limit claims).
 type autoApproveHandler struct{}
 
-func (h *autoApproveHandler) Descriptor() node.Descriptor {
-	return node.Descriptor{Type: "demo.expense.auto_approve", DisplayName: "Auto Approve"}
+func (h *autoApproveHandler) Descriptor() types.Descriptor {
+	return types.Descriptor{Type: "demo.expense.auto_approve", DisplayName: "Auto Approve"}
 }
 
-func (h *autoApproveHandler) Execute(_ context.Context, input *node.Input) (*node.Output, error) {
+func (h *autoApproveHandler) Execute(_ context.Context, input *types.Input) (*types.Output, error) {
 	amount, _ := input.Data["amount"].(float64)
-	return &node.Output{Data: map[string]any{
+	return &types.Output{Data: map[string]any{
 		"status":  "auto_approved",
 		"amount":  amount,
 		"message": fmt.Sprintf("%.2f CNY approved automatically — within policy", amount),
@@ -170,14 +170,14 @@ func (h *autoApproveHandler) Execute(_ context.Context, input *node.Input) (*nod
 // Only executed when PolicyCheck routes to "error" (over-limit claims).
 type requestReviewHandler struct{}
 
-func (h *requestReviewHandler) Descriptor() node.Descriptor {
-	return node.Descriptor{Type: "demo.expense.request_review", DisplayName: "Request Review"}
+func (h *requestReviewHandler) Descriptor() types.Descriptor {
+	return types.Descriptor{Type: "demo.expense.request_review", DisplayName: "Request Review"}
 }
 
-func (h *requestReviewHandler) Execute(_ context.Context, input *node.Input) (*node.Output, error) {
+func (h *requestReviewHandler) Execute(_ context.Context, input *types.Input) (*types.Output, error) {
 	amount, _ := input.Data["amount"].(float64)
 	reason, _ := input.Data["reason"].(string)
-	return &node.Output{Data: map[string]any{
+	return &types.Output{Data: map[string]any{
 		"status":  "review_requested",
 		"amount":  amount,
 		"reason":  reason,
@@ -211,7 +211,7 @@ func buildExpenseWorkflow() *xflow.WorkflowBuilder {
 	// PolicyCheck: registered handler with OnErrorOutput routing.
 	// Within-limit claims exit via "main"; over-limit claims exit via "error".
 	check := wf.Node("PolicyCheck",
-		policyCheckNode.New(nil).OnError(node.OnErrorOutput),
+		policyCheckNode.New(nil).OnError(types.OnErrorOutput),
 	)
 
 	approve := wf.LocalNode("AutoApprove", &autoApproveHandler{})

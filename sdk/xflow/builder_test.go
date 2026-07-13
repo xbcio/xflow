@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/xbcio/xflow/backend/memory"
-	"github.com/xbcio/xflow/nodes/node"
+	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -250,7 +250,7 @@ func TestWithNodesRegistersConsumerCapabilities(t *testing.T) {
 	provider := memory.New()
 	eng, err := newFromConfig(&engineConfig{
 		allowDirectHandlers: false,
-		nodes:               []node.Handler{testWorkflowDeclaredNode},
+		nodes:               []types.Handler{testWorkflowDeclaredNode},
 	}, provider)
 	if err != nil {
 		t.Fatalf("newFromConfig() error = %v", err)
@@ -290,19 +290,19 @@ func TestWithNodesRegistersConsumerCapabilities(t *testing.T) {
 
 type testBuilderEchoHandler struct{}
 
-func (h *testBuilderEchoHandler) Descriptor() node.Descriptor {
-	return node.Descriptor{Type: "test.builder.echo"}
+func (h *testBuilderEchoHandler) Descriptor() types.Descriptor {
+	return types.Descriptor{Type: "test.builder.echo"}
 }
 
-func (h *testBuilderEchoHandler) Execute(_ context.Context, input *node.Input) (*node.Output, error) {
-	return &node.Output{Data: input.Data}, nil
+func (h *testBuilderEchoHandler) Execute(_ context.Context, input *types.Input) (*types.Output, error) {
+	return &types.Output{Data: input.Data}, nil
 }
 
-var testWorkflowDeclaredNode = node.Define("test.workflow_declared", func(_ context.Context, input *node.Input) (*node.Output, error) {
-	return &node.Output{Data: input.Data}, nil
+var testWorkflowDeclaredNode = node.Define("test.workflow_declared", func(_ context.Context, input *types.Input) (*types.Output, error) {
+	return &types.Output{Data: input.Data}, nil
 })
 
-var testRuntimeCaptureNode = node.Define("test.runtime_capture", func(_ context.Context, input *node.Input) (*node.Output, error) {
+var testRuntimeCaptureNode = node.Define("test.runtime_capture", func(_ context.Context, input *types.Input) (*types.Output, error) {
 	out := map[string]any{
 		"runtime_tenant_id": nil,
 		"vars_tenant_id":    nil,
@@ -313,5 +313,5 @@ var testRuntimeCaptureNode = node.Define("test.runtime_capture", func(_ context.
 	if input.Runtime != nil && input.Runtime.Vars != nil {
 		out["runtime_tenant_id"] = input.Runtime.Vars["tenant_id"]
 	}
-	return &node.Output{Data: out}, nil
+	return &types.Output{Data: out}, nil
 })

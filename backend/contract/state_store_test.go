@@ -8,7 +8,6 @@ import (
 	"github.com/xbcio/xflow/backend/memory"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
-	"github.com/xbcio/xflow/nodes/node"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -135,7 +134,7 @@ func runStateStoreContract(t *testing.T, state engine.StateStore) {
 	if resume != "" || payload != nil {
 		t.Fatalf("pre-delivered signal = (%q, %+v), want stored", resume, payload)
 	}
-	payload, err = state.SuspendOrConsume(ctx, id, "approve", &node.SuspendSpec{Signals: []string{"approval"}})
+	payload, err = state.SuspendOrConsume(ctx, id, "approve", &types.SuspendSpec{Signals: []string{"approval"}})
 	if err != nil {
 		t.Fatalf("SuspendOrConsume() error = %v", err)
 	}

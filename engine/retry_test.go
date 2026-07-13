@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/xbcio/xflow/engine/graph"
-	"github.com/xbcio/xflow/nodes/node"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -18,8 +17,8 @@ type flakyHandler struct {
 	calls          int
 }
 
-func (h *flakyHandler) Descriptor() node.Descriptor {
-	return node.Descriptor{Type: "test.flaky"}
+func (h *flakyHandler) Descriptor() types.Descriptor {
+	return types.Descriptor{Type: "test.flaky"}
 }
 
 func (h *flakyHandler) Execute(_ context.Context, _ *types.Input) (*types.Output, error) {
@@ -37,8 +36,8 @@ type alwaysFailHandler struct {
 	calls int
 }
 
-func (h *alwaysFailHandler) Descriptor() node.Descriptor {
-	return node.Descriptor{Type: "test.always_fail"}
+func (h *alwaysFailHandler) Descriptor() types.Descriptor {
+	return types.Descriptor{Type: "test.always_fail"}
 }
 
 func (h *alwaysFailHandler) Execute(_ context.Context, _ *types.Input) (*types.Output, error) {
@@ -51,8 +50,8 @@ type errorPortFlakyHandler struct {
 	calls          int
 }
 
-func (h *errorPortFlakyHandler) Descriptor() node.Descriptor {
-	return node.Descriptor{Type: "test.error_port_flaky"}
+func (h *errorPortFlakyHandler) Descriptor() types.Descriptor {
+	return types.Descriptor{Type: "test.error_port_flaky"}
 }
 
 func (h *errorPortFlakyHandler) Execute(_ context.Context, _ *types.Input) (*types.Output, error) {

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/xbcio/xflow/nodes/node"
+	"github.com/xbcio/xflow/internal/noderuntime"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -134,7 +134,7 @@ func (r *Registry) Get(id types.ExecutionID, nodeName string, nodeType string, v
 
 	// Exact version match wins.
 	if version > 0 {
-		if h, ok := node.LookupVersion(nodeType, version); ok {
+		if h, ok := noderuntime.LookupVersion(nodeType, version); ok {
 			return h, nil
 		}
 	}
@@ -150,7 +150,7 @@ func (r *Registry) Get(id types.ExecutionID, nodeName string, nodeType string, v
 				LatestAvailable:  latest,
 			}
 		case VersionWarnFallback:
-			if h, ok := node.Lookup(nodeType); ok {
+			if h, ok := noderuntime.Lookup(nodeType); ok {
 				if logger != nil {
 					logger.Warnf("handler version fallback: node_type=%s node_name=%s requested_version=%d", nodeType, nodeName, version)
 				}
@@ -162,13 +162,13 @@ func (r *Registry) Get(id types.ExecutionID, nodeName string, nodeType string, v
 				LatestAvailable:  -1,
 			}
 		case VersionSilentFallback:
-			if h, ok := node.Lookup(nodeType); ok {
+			if h, ok := noderuntime.Lookup(nodeType); ok {
 				return h, nil
 			}
 		}
 	}
 
-	if h, ok := node.Lookup(nodeType); ok {
+	if h, ok := noderuntime.Lookup(nodeType); ok {
 		return h, nil
 	}
 
@@ -178,7 +178,7 @@ func (r *Registry) Get(id types.ExecutionID, nodeName string, nodeType string, v
 // latestRegisteredVersion returns the highest registered version for a node
 // type, or -1 if none. Used only to enrich the strict-policy error message.
 func latestRegisteredVersion(nodeType string) int {
-	versions := node.Versions(nodeType)
+	versions := noderuntime.Versions(nodeType)
 	if len(versions) == 0 {
 		return -1
 	}

@@ -3,12 +3,13 @@ package xflow
 import (
 	"context"
 	"errors"
+	"github.com/xbcio/xflow/internal/noderuntime"
 	"strings"
 	"testing"
 
 	"github.com/xbcio/xflow/backend/memory"
 	"github.com/xbcio/xflow/execution"
-	"github.com/xbcio/xflow/nodes/node"
+	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -19,8 +20,8 @@ type sdkVersionedHandler struct {
 	version int
 }
 
-func (h sdkVersionedHandler) Descriptor() node.Descriptor {
-	return node.Descriptor{Type: h.typ}
+func (h sdkVersionedHandler) Descriptor() types.Descriptor {
+	return types.Descriptor{Type: h.typ}
 }
 
 func (h sdkVersionedHandler) NodeVersion() int { return h.version }
@@ -89,7 +90,7 @@ func TestAddWorkflow_AcceptsWorkflowBundledHandlers(t *testing.T) {
 
 func TestRegistry_VersionPolicy_WithVersionPolicyOption(t *testing.T) {
 	const typ = "test.versioned/sdk-option"
-	node.Register(sdkVersionedHandler{typ: typ, version: 1})
+	noderuntime.Register(sdkVersionedHandler{typ: typ, version: 1})
 
 	provider := memory.New()
 	eng, err := newFromConfig(&engineConfig{

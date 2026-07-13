@@ -17,7 +17,7 @@ func newKafkaTopic(t *testing.T, brokers []string, topic string, partitions int)
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	// Mirror nodes/node/trigger_kafka_test.go:createKafkaIntegrationTopic: dial
+	// Mirror node/trigger_kafka_test.go:createKafkaIntegrationTopic: dial
 	// any broker, resolve the controller, then CreateTopics on the controller
 	// connection. CreateTopics is idempotent in kafka-go (TopicAlreadyExists is
 	// suppressed internally), so any error here is a real failure.

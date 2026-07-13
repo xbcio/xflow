@@ -7,15 +7,14 @@ import (
 	"testing"
 
 	"github.com/xbcio/xflow/engine/graph"
-	"github.com/xbcio/xflow/nodes/node"
 	"github.com/xbcio/xflow/types"
 )
 
 // echoHandler returns its input data unchanged.
 type echoHandler struct{}
 
-func (h *echoHandler) Descriptor() node.Descriptor {
-	return node.Descriptor{Type: "test.echo"}
+func (h *echoHandler) Descriptor() types.Descriptor {
+	return types.Descriptor{Type: "test.echo"}
 }
 
 func (h *echoHandler) Execute(_ context.Context, input *types.Input) (*types.Output, error) {
@@ -651,8 +650,8 @@ func TestScheduler_CyclicStaleActivationTaskCannotReacquireNode(t *testing.T) {
 // failHandler always returns an error.
 type failHandler struct{}
 
-func (h *failHandler) Descriptor() node.Descriptor {
-	return node.Descriptor{Type: "test.fail"}
+func (h *failHandler) Descriptor() types.Descriptor {
+	return types.Descriptor{Type: "test.fail"}
 }
 
 func (h *failHandler) Execute(_ context.Context, _ *types.Input) (*types.Output, error) {

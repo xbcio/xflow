@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/xbcio/xflow/engine/graph"
-	"github.com/xbcio/xflow/nodes/node"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -15,8 +14,8 @@ type portHandler struct {
 	data map[string]any
 }
 
-func (h *portHandler) Descriptor() node.Descriptor {
-	return node.Descriptor{Type: "test.port"}
+func (h *portHandler) Descriptor() types.Descriptor {
+	return types.Descriptor{Type: "test.port"}
 }
 
 func (h *portHandler) Execute(_ context.Context, _ *types.Input) (*types.Output, error) {
@@ -171,8 +170,8 @@ func TestScheduler_MergeWaitAll_WaitsForAll(t *testing.T) {
 // loopHandler simulates a loop node output.
 type loopHandler struct{}
 
-func (h *loopHandler) Descriptor() node.Descriptor {
-	return node.Descriptor{Type: "xflow.loop"}
+func (h *loopHandler) Descriptor() types.Descriptor {
+	return types.Descriptor{Type: "xflow.loop"}
 }
 
 func (h *loopHandler) Execute(_ context.Context, input *types.Input) (*types.Output, error) {

@@ -71,7 +71,7 @@ func (h funcActionHandler) Execute(ctx context.Context, input *types.Input) (*ty
 	return h.fn(ctx, input)
 }
 
-// node_Descriptor is an alias to avoid importing nodes/node in tests.
+// node_Descriptor is an alias to avoid importing node in tests.
 // types.Descriptor is the actual type; use it directly.
 type node_Descriptor = types.Descriptor
 

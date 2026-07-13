@@ -13,7 +13,6 @@ import (
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
-	"github.com/xbcio/xflow/nodes/node"
 	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/service/protocol"
 	runnersvc "github.com/xbcio/xflow/service/runner"
@@ -158,8 +157,8 @@ func TestNewServerRedisBackendDispatchesTaskToRunner(t *testing.T) {
 
 type sdkE2EHandler struct{}
 
-func (sdkE2EHandler) Descriptor() node.Descriptor {
-	return node.Descriptor{Type: "test.sdk-e2e"}
+func (sdkE2EHandler) Descriptor() types.Descriptor {
+	return types.Descriptor{Type: "test.sdk-e2e"}
 }
 
 func (sdkE2EHandler) Execute(_ context.Context, input *types.Input) (*types.Output, error) {

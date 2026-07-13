@@ -5,15 +5,14 @@ import (
 	"testing"
 
 	"github.com/xbcio/xflow/engine/graph"
-	"github.com/xbcio/xflow/nodes/node"
 	"github.com/xbcio/xflow/types"
 )
 
 // fakeSuspendHandler implements SuspendingHandler — waits for "approval" signal.
 type fakeSuspendHandler struct{}
 
-func (h *fakeSuspendHandler) Descriptor() node.Descriptor {
-	return node.Descriptor{Type: "test.suspend"}
+func (h *fakeSuspendHandler) Descriptor() types.Descriptor {
+	return types.Descriptor{Type: "test.suspend"}
 }
 
 func (h *fakeSuspendHandler) Execute(_ context.Context, _ *types.Input) (*types.Output, error) {
@@ -22,7 +21,7 @@ func (h *fakeSuspendHandler) Execute(_ context.Context, _ *types.Input) (*types.
 
 func (h *fakeSuspendHandler) PrepareSuspend(_ context.Context, _ *types.Input) (*types.SuspendSpec, error) {
 	return &types.SuspendSpec{
-		Mode:    node.ModeSignal,
+		Mode:    types.ModeSignal,
 		Signals: []string{"approval"},
 	}, nil
 }
@@ -33,8 +32,8 @@ func (h *fakeSuspendHandler) OnResume(_ context.Context, _ *types.Input, sig *ty
 
 type fakeMultiSignalHandler struct{}
 
-func (h *fakeMultiSignalHandler) Descriptor() node.Descriptor {
-	return node.Descriptor{Type: "test.multi_signal"}
+func (h *fakeMultiSignalHandler) Descriptor() types.Descriptor {
+	return types.Descriptor{Type: "test.multi_signal"}
 }
 
 func (h *fakeMultiSignalHandler) Execute(_ context.Context, _ *types.Input) (*types.Output, error) {

@@ -9,15 +9,15 @@ Derived from [Go style guide](<sas-repo-root>/docs/claude/development/go-style-g
 ### Single-module structure
 
 The repo is a single Go module (`go.mod` at the repo root, module path
-`github.com/xbcio/xflow`). There is no `go.work`, no `pkg/`, no `internal/`,
-and no per-directory sub-modules — every package below is imported directly
-by its full path under the root module.
+`github.com/xbcio/xflow`). There is no `go.work`, no `pkg/`, and no
+per-directory sub-modules — every package below is imported directly by its
+full path under the root module.
 
 | Directory | Role |
 |---|---|
 | `engine/` | Pure scheduling algorithm (zero IO deps): Graph IR, Scheduler, ErrorPolicy, Suspend |
 | `types/` | Public DSL/runtime contracts: `WorkflowDef`, handler interfaces, descriptors, statuses, `Result` — zero impl deps |
-| `nodes/node/` | Builtin task node constructors and implementations (`node.HTTP`, `node.Function`, etc.) |
+| `node/` | Public node DSL and builtin implementations (`node.HTTP`, `node.Function`, `node.KafkaTrigger`, etc.) |
 | `execution/` | Reusable embedded task execution boundary: Dispatcher, Runner, Registry |
 | `backend/` | Reusable backend providers: `backend.go` (`Provider` + optional capabilities), `memory/` (in-memory StateStore + goroutine pool TaskQueue), `asynq/` (Redis StateStore + Asynq TaskQueue) |
 | `store/` | Public persistence interfaces + domain models; `memstore/` (in-memory), `sqlstore/` (dialect-agnostic GORM; `sqlstore/mysqlstore/` for MySQL) |
@@ -30,10 +30,10 @@ by its full path under the root module.
 | `docs/` | Design docs (`design/`), DSL samples (`dsl-samples/`), reference research (`references/`) |
 
 **Rules:**
-- `engine/` must NOT import redis/asynq/mysql/sql — only stdlib + `types/` + `nodes/node/`.
+- `engine/` must NOT import redis/asynq/mysql/sql — only stdlib + `types/` + `node/`.
 - `execution/` and `backend/memory/` must remain free of Redis/Asynq/MySQL/network dependencies.
-- `sdk/` may import `engine/`, `execution/`, `backend/*`, `nodes/node/`, and `types/`; it assembles reusable packages and must not own reusable backend behavior.
-- `service/` and `cmd/` may depend on `engine/`, `execution/`, `backend/*`, `store/`, `types/`, `nodes/node/`; core packages (`engine`, `nodes`, `types`, `store`, `sdk`) must NEVER import `service/` or `cmd/` — dependencies flow one way only.
+- `sdk/` may import `engine/`, `execution/`, `backend/*`, `node/`, and `types/`; it assembles reusable packages and must not own reusable backend behavior.
+- `service/` and `cmd/` may depend on `engine/`, `execution/`, `backend/*`, `store/`, `types/`, `node/`; core packages (`engine`, `node`, `types`, `store`, `sdk`) must NEVER import `service/` or `cmd/` — dependencies flow one way only.
 - `cmd/<name>/` entry points must be thin: assemble from `service/` and `sdk/`, no business logic of their own.
 
 Full dependency graph and layering rationale: [design/ARCHITECTURE.md](./design/ARCHITECTURE.md).
@@ -43,13 +43,13 @@ Full dependency graph and layering rationale: [design/ARCHITECTURE.md](./design/
 | Directory | Purpose | Rule |
 |---|---|---|
 | `cmd/<name>/` | Binary entry points | Must be minimal `main()`; no business logic |
-| `service/` | Server/runner control-plane and execution-plane code | Never imported by `engine/nodes/types/store/sdk` |
-| `nodes/node/` | Builtin task nodes | Constructors + implementations for normal workflow nodes |
+| `service/` | Server/runner control-plane and execution-plane code | Never imported by `engine/node/types/store/sdk` |
+| `node/` | Public node DSL and builtin implementations | Constructors and handlers for action, code, transform, flow, group, trigger, and custom nodes |
 | `types/` | Shared data types | Plain structs + constants; zero business logic |
 | `sdk/` | Embedded engine SDK | Assembles `engine/execution/backend`; public API surface |
 | `docs/` | Design docs and specs | Keep in sync with code |
 
-**Do not create:** `utils/`, `helpers/`, `common/`, `lib/`, `src/`, `pkg/`, `internal/`.
+**Do not create:** `utils/`, `helpers/`, `common/`, `lib/`, `src/`, `pkg/`.
 
 ---
 

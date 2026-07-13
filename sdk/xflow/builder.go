@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/xbcio/xflow/nodes/node"
+	"github.com/xbcio/xflow/internal/noderuntime"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -26,10 +26,10 @@ type WorkflowBuilder struct {
 
 type nodeEntry struct {
 	name             string
-	builder          node.Builder        // nil when using the direct ActionHandler path
+	builder          types.Builder       // nil when using the direct ActionHandler path
 	handler          types.ActionHandler // local-only direct handler
 	kind             types.NodeKind
-	onError          node.OnError
+	onError          types.OnError
 	normalizedParams map[string]any
 	runnerSelector   *types.RunnerSelector
 }
@@ -148,19 +148,19 @@ func (n *NodeRef) RunnerSelector(selector types.RunnerSelector) *NodeRef {
 // handler is registered in the current process for local execution; cluster
 // consumers that may execute workflows submitted by other processes should
 // also declare the same definitions with xflow.WithNodes.
-func (w *WorkflowBuilder) Node(name string, builder node.Builder) *NodeRef {
+func (w *WorkflowBuilder) Node(name string, builder types.Builder) *NodeRef {
 	entry := &nodeEntry{
 		name:    name,
 		builder: builder,
 		onError: builder.OnErrorStrategy(),
 	}
-	if hb, ok := builder.(node.HandlerCarrier); ok {
+	if hb, ok := builder.(interface{ Handler() types.ActionHandler }); ok {
 		h := hb.Handler()
 		if h != nil {
 			w.handlers[builder.NodeType()] = h
 		}
 	}
-	if hb, ok := builder.(node.TriggerHandlerCarrier); ok {
+	if hb, ok := builder.(interface{ TriggerHandler() types.TriggerHandler }); ok {
 		h := hb.TriggerHandler()
 		if h != nil {
 			w.triggers[builder.NodeType()] = h
@@ -251,7 +251,7 @@ func (w *WorkflowBuilder) build() (*types.WorkflowDef, error) {
 		}
 		dp, ok := entry.builder.(types.DescriptorProvider)
 		if !ok {
-			h, found := node.Lookup(entry.builder.NodeType())
+			h, found := noderuntime.Lookup(entry.builder.NodeType())
 			if !found {
 				return nil, fmt.Errorf("node %q: handler type %q not found in registry", entry.name, entry.builder.NodeType())
 			}

@@ -2,25 +2,35 @@ package execution
 
 import (
 	"context"
+	"database/sql"
 
 	"github.com/xbcio/xflow/engine"
-	"github.com/xbcio/xflow/nodes/node"
+	"github.com/xbcio/xflow/internal/noderuntime"
 	"github.com/xbcio/xflow/types"
+	"google.golang.org/grpc"
 )
+
+// ResourcePool is the per-process pool of network resources shared across
+// node handler invocations.
+type ResourcePool interface {
+	SQL(ctx context.Context, driver, dsn string) (*sql.DB, error)
+	GRPC(ctx context.Context, host string, secure bool, opts ...grpc.DialOption) (*grpc.ClientConn, error)
+	Close() error
+}
 
 // Runner executes task leases using a handler registry.
 type Runner struct {
 	registry engine.HandlerRegistry
-	pool     node.ResourcePool
+	pool     ResourcePool
 }
 
 // RunnerOption customizes a Runner.
 type RunnerOption func(*Runner)
 
-// WithResourcePool installs a node.ResourcePool. The Runner attaches it to the
+// WithResourcePool installs a ResourcePool. The Runner attaches it to the
 // per-call context so resource-aware nodes (DatabaseNode, GRPCNode) can pool
 // their connections. nil pool is a valid no-op.
-func WithResourcePool(p node.ResourcePool) RunnerOption {
+func WithResourcePool(p ResourcePool) RunnerOption {
 	return func(r *Runner) { r.pool = p }
 }
 
@@ -46,7 +56,7 @@ func (r *Runner) Execute(ctx context.Context, lease *engine.TaskLease) (engine.T
 		return engine.TaskResult{}, err
 	}
 	if r.pool != nil {
-		ctx = node.WithResourcePool(ctx, r.pool)
+		ctx = noderuntime.WithResourcePool(ctx, r.pool)
 	}
 	if sh, ok := handler.(types.SuspendingHandler); ok {
 		return r.executeSuspending(ctx, lease, sh)

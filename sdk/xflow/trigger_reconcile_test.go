@@ -3,6 +3,7 @@ package xflow
 import (
 	"context"
 	"errors"
+	"github.com/xbcio/xflow/internal/noderuntime"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -11,7 +12,7 @@ import (
 
 	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/backend/memory"
-	"github.com/xbcio/xflow/nodes/node"
+	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -28,7 +29,7 @@ func TestTriggerReconcileWorkflow(t *testing.T) {
 				return nil
 			}), nil
 		})
-		node.RegisterTrigger(first)
+		noderuntime.RegisterTrigger(first)
 		runtime := newTriggerRuntime(nil, memory.New().TriggerPrimitives())
 		rec := backend.WorkflowRecord{
 			ID: "wf-rollback-unregistered",
@@ -74,8 +75,8 @@ func TestTriggerReconcileWorkflow(t *testing.T) {
 			activateCount++
 			return nil, wantErr
 		})
-		node.RegisterTrigger(first)
-		node.RegisterTrigger(second)
+		noderuntime.RegisterTrigger(first)
+		noderuntime.RegisterTrigger(second)
 		runtime := newTriggerRuntime(nil, memory.New().TriggerPrimitives())
 		rec := backend.WorkflowRecord{
 			ID: "wf-rollback",
@@ -111,7 +112,7 @@ func TestTriggerReconcileWorkflow(t *testing.T) {
 			activateCount++
 			return types.CloseFunc(func(context.Context) error { return nil }), nil
 		})
-		node.RegisterTrigger(trigger)
+		noderuntime.RegisterTrigger(trigger)
 		runtime := newTriggerRuntime(nil, memory.New().TriggerPrimitives())
 		rec := backend.WorkflowRecord{
 			ID: "wf-idempotent",
@@ -149,7 +150,7 @@ func TestTriggerReconcileWorkflow(t *testing.T) {
 			}
 			return types.CloseFunc(func(context.Context) error { return nil }), nil
 		})
-		node.RegisterTrigger(trigger)
+		noderuntime.RegisterTrigger(trigger)
 		runtime := newTriggerRuntime(nil, memory.New().TriggerPrimitives())
 		rec := backend.WorkflowRecord{
 			ID: "wf-concurrent-idempotent",

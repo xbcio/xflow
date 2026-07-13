@@ -4,7 +4,7 @@ import (
 	"fmt"
 
 	"github.com/xbcio/xflow/execution"
-	"github.com/xbcio/xflow/nodes/node"
+	"github.com/xbcio/xflow/internal/noderuntime"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -12,7 +12,7 @@ import (
 // WithNodes. Used by both local and cluster: local needs it so LocalNode-free
 // typed nodes resolve in-process; cluster workers need it to resolve types
 // for workflows submitted by other processes.
-func (e *Engine) registerNodeDefinitions(defs []node.Handler) error {
+func (e *Engine) registerNodeDefinitions(defs []types.Handler) error {
 	if len(defs) == 0 {
 		return nil
 	}
@@ -28,10 +28,10 @@ func (e *Engine) registerNodeDefinitions(defs []node.Handler) error {
 			}
 			lr.RegisterGlobal(h.Descriptor().Type, h)
 			if th, isTrigger := def.(types.TriggerHandler); isTrigger {
-				node.RegisterTrigger(th)
+				noderuntime.RegisterTrigger(th)
 			}
 		case types.TriggerHandler:
-			node.RegisterTrigger(h)
+			noderuntime.RegisterTrigger(h)
 		default:
 			return fmt.Errorf("node definition %q is not an action or trigger handler", def.Descriptor().Type)
 		}
@@ -74,7 +74,7 @@ func (e *Engine) registerWorkflowHandlers(wf *WorkflowBuilder) error {
 		lr.RegisterGlobal(nodeType, h)
 	}
 	for _, h := range wf.workflowTriggerHandlers() {
-		node.RegisterTrigger(h)
+		noderuntime.RegisterTrigger(h)
 	}
 	return nil
 }

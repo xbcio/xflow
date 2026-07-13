@@ -1115,6 +1115,7 @@ XFlow 的 connections 仅描述拓扑关系（谁连到谁），条件逻辑由 
 |---------|--------|------|---------|---------|---------|--------------|
 | HTTP请求 | xflow.http | HTTP/HTTPS 请求 | main | main, error | ❌ | 可选 |
 | 开始 | xflow.start | 显式工作流入口；有环图 v1 必须且只能有一个 | _(无)_ | main | ❌ | 不适用 |
+| 结束 | xflow.end | 显式工作流终点；执行到该节点后当前路径结束 | main | _(无)_ | ❌ | 不适用 |
 | 定时触发 | xflow.trigger.timer | 固定间隔触发执行 | _(无)_ | main | ❌ | 不适用 |
 | Cron 触发 | xflow.trigger.cron | Cron 表达式触发执行 | _(无)_ | main | ❌ | 不适用 |
 | Webhook 触发 | xflow.trigger.webhook | HTTP route 触发执行 | _(无)_ | main | ❌ | 不适用 |

@@ -2,7 +2,7 @@ package xflow
 
 import (
 	backendmemory "github.com/xbcio/xflow/backend/memory"
-	"github.com/xbcio/xflow/nodes/node"
+	"github.com/xbcio/xflow/internal/noderuntime"
 )
 
 // NewLocal creates an in-process engine backed by in-memory state and a
@@ -30,19 +30,7 @@ func NewLocal(opts ...Option) (*Engine, error) {
 	return newFromConfig(cfg, provider)
 }
 
-// resolveResourcePool returns the configured pool, the default pool built from
-// resourcePoolConfig, or nil when the caller explicitly opted out via
-// WithResourcePool(nil).
-//
-// Shared by NewLocal and NewCluster: both modes default to a connection pool
-// for DatabaseNode/GRPCNode unless the caller overrides it.
-func resolveResourcePool(cfg *engineConfig) node.ResourcePool {
-	if cfg.resourcePoolSet {
-		return cfg.resourcePool // may be nil — explicit opt-out
-	}
-	poolCfg := node.DefaultResourcePoolConfig()
-	if cfg.resourcePoolConfig != nil {
-		poolCfg = *cfg.resourcePoolConfig
-	}
-	return node.NewDefaultResourcePool(poolCfg)
+// resolveResourcePool returns the SDK-managed default pool.
+func resolveResourcePool(_ *engineConfig) noderuntime.ResourcePool {
+	return noderuntime.NewDefaultResourcePool(noderuntime.DefaultResourcePoolConfig())
 }

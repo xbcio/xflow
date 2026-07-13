@@ -16,6 +16,25 @@ type Handler interface {
 	DescriptorProvider
 }
 
+// Builder is implemented by typed node builders returned from node factory
+// functions and custom node definitions.
+type Builder interface {
+	NodeType() string
+	RawParams() any
+	OnError(strategy OnError) Builder
+	OnErrorStrategy() OnError
+}
+
+// OnError is the error handling strategy for a workflow node.
+type OnError string
+
+const (
+	OnErrorStop       OnError = "stop"
+	OnErrorOutput     OnError = "error_output"
+	OnErrorMainOutput OnError = "main_output"
+	OnErrorContinue   OnError = "continue"
+)
+
 // ActionHandler is the runtime interface for action nodes.
 // Implementations must be stateless and safe for concurrent use.
 type ActionHandler interface {

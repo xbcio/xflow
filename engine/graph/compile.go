@@ -15,7 +15,7 @@ import (
 // reference any of these types unless WorkflowOptions.ExperimentalExpand is
 // true. Capability tags on individual node Descriptors (carrying
 // types.CapBodySubgraphRequired) describe the same requirement but cannot be
-// inspected here without breaking the engine/graph ← nodes/node import rule.
+// inspected here without adding a graph → node runtime dependency.
 var experimentalExpandTypes = map[string]struct{}{
 	"xflow.loop":  {},
 	"xflow.split": {},

@@ -1,0 +1,99 @@
+package flow
+
+import "github.com/xbcio/xflow/types"
+
+import (
+	"context"
+	"fmt"
+	. "github.com/xbcio/xflow/node/internal"
+	"slices"
+
+	"github.com/xbcio/xflow/node/internal/utils/conv"
+	"github.com/xbcio/xflow/node/internal/utils/exprx"
+	"github.com/spf13/cast"
+)
+
+// LoopNode implements xflow.loop — iterates over a collection with an embedded sub-graph.
+type LoopNode struct {
+	BaseNode
+	Items     string
+	BatchSize int
+}
+
+// Loop creates a loop node that iterates over a collection.
+//
+//	node.Loop("items", 5)
+func Loop(itemsExpr string, batchSize int) *LoopNode {
+	if batchSize <= 0 {
+		batchSize = 1
+	}
+	return &LoopNode{Items: itemsExpr, BatchSize: batchSize}
+}
+
+func (n *LoopNode) Descriptor() types.Descriptor {
+	return types.Descriptor{
+		Type:        "xflow.loop",
+		DisplayName: "Loop",
+		Params: []types.ParamSpec{
+			{Name: "items", DisplayName: "Items", Type: types.ParamString, Required: true, Description: "Expression that evaluates to the array to iterate"},
+			{Name: "batch_size", DisplayName: "Batch Size", Type: types.ParamNumber, Required: false, Default: 1, Description: "Number of items processed per batch"},
+			{Name: "max_concurrency", DisplayName: "Max Concurrency", Type: types.ParamNumber, Required: false, Default: 1, Description: "Maximum concurrent executions of the sub-graph"},
+			{Name: "continue_on_error", DisplayName: "Continue On Error", Type: types.ParamBool, Required: false, Default: false, Description: "Continue iteration when a sub-graph execution fails"},
+			{Name: "body", DisplayName: "Body", Type: types.ParamObject, Required: true, Description: "Sub-graph definition executed for each item"},
+		},
+		Inputs:       []types.PortSpec{{Name: "main", DisplayName: "Main"}},
+		Outputs:      []types.PortSpec{{Name: "main", DisplayName: "Main"}, {Name: "error", DisplayName: "Error"}},
+		Capabilities: []string{types.CapBodySubgraphRequired},
+	}
+}
+
+func (n *LoopNode) NodeType() string { return "xflow.loop" }
+func (n *LoopNode) OnError(s types.OnError) types.Builder {
+	n.SetOnError(s)
+	return n
+}
+
+func (n *LoopNode) RawParams() any {
+	return map[string]any{
+		"items":      n.Items,
+		"batch_size": n.BatchSize,
+	}
+}
+
+func (n *LoopNode) Execute(ctx context.Context, input *types.Input) (*types.Output, error) {
+	itemsExpr, _ := input.Params["items"].(string)
+	if itemsExpr == "" {
+		return nil, fmt.Errorf("xflow.loop: items parameter is required")
+	}
+
+	env := exprx.BuildExprEnv(input, nil)
+	result, err := exprx.EvalExpr(itemsExpr, env, false)
+	if err != nil {
+		return nil, fmt.Errorf("xflow.loop: %w", err)
+	}
+
+	items, err := conv.ToSlice(result)
+	if err != nil {
+		return nil, fmt.Errorf("xflow.loop: items must evaluate to an array: %w", err)
+	}
+
+	batchSize := 1
+	if bs, err := cast.ToIntE(input.Params["batch_size"]); err == nil && bs > 0 {
+		batchSize = bs
+	}
+
+	batches := slices.Collect(slices.Chunk(items, batchSize))
+
+	return &types.Output{
+		Data: map[string]any{
+			"_loop":       true,
+			"items":       items,
+			"batches":     batches,
+			"batch_size":  batchSize,
+			"total":       len(items),
+			"batch_count": len(batches),
+		},
+	}, nil
+}
+
+func init() { Register(&LoopNode{}) }

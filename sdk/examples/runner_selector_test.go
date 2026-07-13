@@ -5,14 +5,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xbcio/xflow/nodes/node"
+	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/sdk/xflow"
 	"github.com/xbcio/xflow/types"
 )
 
 var collectRiskSignalNode = node.Define("demo.runner_selector.collect_risk_signal",
-	func(_ context.Context, input *node.Input) (*node.Output, error) {
-		return &node.Output{Data: map[string]any{
+	func(_ context.Context, input *types.Input) (*types.Output, error) {
+		return &types.Output{Data: map[string]any{
 			"ticket":   input.Data["ticket"],
 			"severity": input.Data["severity"],
 			"source":   "remote-sensor",
@@ -21,8 +21,8 @@ var collectRiskSignalNode = node.Define("demo.runner_selector.collect_risk_signa
 ).DisplayName("Collect Risk Signal")
 
 var recordRunnerSelectorDecisionNode = node.Define("demo.runner_selector.record_decision",
-	func(_ context.Context, input *node.Input) (*node.Output, error) {
-		return &node.Output{Data: map[string]any{
+	func(_ context.Context, input *types.Input) (*types.Output, error) {
+		return &types.Output{Data: map[string]any{
 			"ticket":   input.Data["ticket"],
 			"severity": input.Data["severity"],
 			"source":   input.Data["source"],

@@ -16,7 +16,7 @@ import (
 	"github.com/xbcio/xflow/backend/asynq"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
-	"github.com/xbcio/xflow/nodes/node"
+	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/service/protocol/runnerpb"
@@ -64,7 +64,7 @@ func submitWorkflowHTTP(t *testing.T, baseURL string, client *http.Client, wf *t
 
 type e2eRealHandler struct{}
 
-func (e2eRealHandler) Descriptor() node.Descriptor { return node.Descriptor{Type: "test.e2e.real"} }
+func (e2eRealHandler) Descriptor() types.Descriptor { return types.Descriptor{Type: "test.e2e.real"} }
 func (e2eRealHandler) Execute(_ context.Context, input *types.Input) (*types.Output, error) {
 	return &types.Output{Data: map[string]any{
 		"handled_by": "runner",
@@ -174,12 +174,12 @@ func TestServerRunnerE2ERealRedis(t *testing.T) {
 // server push >1 TASK over the Connect stream; the worker pool must execute
 // them concurrently).
 type e2eCountingHandler struct {
-	nodeType   string
-	active     atomic.Int32
-	maxActive  atomic.Int32
+	nodeType  string
+	active    atomic.Int32
+	maxActive atomic.Int32
 }
 
-func (h *e2eCountingHandler) Descriptor() node.Descriptor { return node.Descriptor{Type: h.nodeType} }
+func (h *e2eCountingHandler) Descriptor() types.Descriptor { return types.Descriptor{Type: h.nodeType} }
 func (h *e2eCountingHandler) Execute(_ context.Context, input *types.Input) (*types.Output, error) {
 	cur := h.active.Add(1)
 	for {

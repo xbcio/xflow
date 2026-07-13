@@ -15,7 +15,7 @@ golangci-lint run        # Lint
 ## Project Structure
 
 - **engine/** — Pure scheduling algorithm (zero IO deps): Graph IR, Scheduler, ErrorPolicy, Suspend
-- **nodes/node/** — Builtin task node constructors and implementations (`node.HTTP`, `node.Function`, etc.)
+- **node/** — Public node DSL and builtin implementations (`node.HTTP`, `node.Function`, `node.KafkaTrigger`, etc.)
 - **types/** — Public DSL/runtime contracts: `WorkflowDef`, handler interfaces (`ActionHandler`, `SuspendingHandler`), handler IO, descriptors, statuses, `Result` (json-tagged, zero impl deps)
 - **store/** — Public persistence interfaces + domain models
   - `memstore/` — in-memory implementation (test / local)
@@ -34,10 +34,10 @@ golangci-lint run        # Lint
 
 ## Key Constraints
 
-- `engine/` must NOT import redis/asynq/mysql/sql — only stdlib + types + nodes/node
+- `engine/` must NOT import redis/asynq/mysql/sql — only stdlib + types + node
 - Graph IR is immutable after compile, shared lock-free at runtime
 - Engine Core depends on exactly 2 interfaces: `StateStore` + `TaskQueue`
-- Future server/runner code goes under `service/` (a future module boundary); core packages (engine/nodes/types/store/sdk) must NEVER import `service/` or `cmd/` — dependencies flow one way only, so a later module split stays mechanical
+- Future server/runner code goes under `service/` (a future module boundary); core packages (engine/node/types/store/sdk) must NEVER import `service/` or `cmd/` — dependencies flow one way only, so a later module split stays mechanical
 
 ## AI-Generated Documentation Placement
 

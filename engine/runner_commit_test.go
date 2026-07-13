@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/xbcio/xflow/engine/graph"
-	"github.com/xbcio/xflow/nodes/node"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -371,7 +370,7 @@ func TestEngine_CommitTaskResultParksSuspendRequestWithoutHandlerExecution(t *te
 	}
 
 	err = eng.CommitTaskResult(ctx, lease, TaskResult{
-		Suspend: &types.SuspendSpec{Mode: node.ModeSignal, Signals: []string{"approval"}},
+		Suspend: &types.SuspendSpec{Mode: types.ModeSignal, Signals: []string{"approval"}},
 	})
 	if err != nil {
 		t.Fatal(err)

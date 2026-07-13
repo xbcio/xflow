@@ -39,7 +39,7 @@ func (f *fakeStream) Send(fr protocol.ServerFrame) error {
 		return f.ctx.Err()
 	}
 }
-func (f *fakeStream) Context() context.Context { return f.ctx }
+func (f *fakeStream) Context() context.Context     { return f.ctx }
 func (f *fakeStream) push(fr protocol.RunnerFrame) { f.recvCh <- fr }
 
 type fakeEngine struct{ committed int }

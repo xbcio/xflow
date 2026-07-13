@@ -7,7 +7,7 @@ import (
 	"time"
 
 	enginecore "github.com/xbcio/xflow/engine"
-	"github.com/xbcio/xflow/nodes/node"
+	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -219,7 +219,7 @@ func TestInvokeOptionsPassTraceMetadataToHandlerInput(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	recorder := &traceInputRecorder{seen: make(chan *node.Input, 1)}
+	recorder := &traceInputRecorder{seen: make(chan *types.Input, 1)}
 	eng, err := NewLocal(WithNodes(recorder))
 	if err != nil {
 		t.Fatal(err)
@@ -256,17 +256,17 @@ func TestInvokeOptionsPassTraceMetadataToHandlerInput(t *testing.T) {
 }
 
 type traceInputRecorder struct {
-	seen chan *node.Input
+	seen chan *types.Input
 }
 
-func (h *traceInputRecorder) Descriptor() node.Descriptor {
-	return node.Descriptor{Type: "test.trace_input"}
+func (h *traceInputRecorder) Descriptor() types.Descriptor {
+	return types.Descriptor{Type: "test.trace_input"}
 }
 
-func (h *traceInputRecorder) Execute(_ context.Context, input *node.Input) (*node.Output, error) {
+func (h *traceInputRecorder) Execute(_ context.Context, input *types.Input) (*types.Output, error) {
 	cp := *input
 	h.seen <- &cp
-	return &node.Output{Data: input.Data}, nil
+	return &types.Output{Data: input.Data}, nil
 }
 
 type blockingHandler struct {
@@ -274,16 +274,16 @@ type blockingHandler struct {
 	once    sync.Once
 }
 
-func (h *blockingHandler) Descriptor() node.Descriptor {
-	return node.Descriptor{Type: "test.blocking"}
+func (h *blockingHandler) Descriptor() types.Descriptor {
+	return types.Descriptor{Type: "test.blocking"}
 }
 
-func (h *blockingHandler) Execute(ctx context.Context, input *node.Input) (*node.Output, error) {
+func (h *blockingHandler) Execute(ctx context.Context, input *types.Input) (*types.Output, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case <-h.release:
-		return &node.Output{Data: input.Data}, nil
+		return &types.Output{Data: input.Data}, nil
 	}
 }
 
@@ -293,12 +293,12 @@ func (h *blockingHandler) releaseNow() {
 
 type echoControlHandler struct{}
 
-func (h *echoControlHandler) Descriptor() node.Descriptor {
-	return node.Descriptor{Type: "test.echo_control"}
+func (h *echoControlHandler) Descriptor() types.Descriptor {
+	return types.Descriptor{Type: "test.echo_control"}
 }
 
-func (h *echoControlHandler) Execute(_ context.Context, input *node.Input) (*node.Output, error) {
-	return &node.Output{Data: input.Data}, nil
+func (h *echoControlHandler) Execute(_ context.Context, input *types.Input) (*types.Output, error) {
+	return &types.Output{Data: input.Data}, nil
 }
 
 func waitForNodeStatus(t *testing.T, ctx context.Context, eng *Engine, id types.ExecutionID, nodeName string, status types.NodeStatus) enginecore.ExecutionDetail {

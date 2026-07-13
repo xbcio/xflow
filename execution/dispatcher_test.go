@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/xbcio/xflow/engine"
-	"github.com/xbcio/xflow/nodes/node"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -28,8 +27,8 @@ func (e *fakeLeaseEngine) CommitTaskResult(_ context.Context, lease *engine.Task
 
 type fakeActionHandler struct{}
 
-func (fakeActionHandler) Descriptor() node.Descriptor {
-	return node.Descriptor{Type: "test.action"}
+func (fakeActionHandler) Descriptor() types.Descriptor {
+	return types.Descriptor{Type: "test.action"}
 }
 
 func (fakeActionHandler) Execute(context.Context, *types.Input) (*types.Output, error) {
@@ -38,8 +37,8 @@ func (fakeActionHandler) Execute(context.Context, *types.Input) (*types.Output, 
 
 type runtimeSuspendHandler struct{}
 
-func (runtimeSuspendHandler) Descriptor() node.Descriptor {
-	return node.Descriptor{Type: "test.wait"}
+func (runtimeSuspendHandler) Descriptor() types.Descriptor {
+	return types.Descriptor{Type: "test.wait"}
 }
 
 func (runtimeSuspendHandler) Execute(context.Context, *types.Input) (*types.Output, error) {
@@ -47,7 +46,7 @@ func (runtimeSuspendHandler) Execute(context.Context, *types.Input) (*types.Outp
 }
 
 func (runtimeSuspendHandler) PrepareSuspend(context.Context, *types.Input) (*types.SuspendSpec, error) {
-	return &types.SuspendSpec{Mode: node.ModeSignal, Signals: []string{"approval"}}, nil
+	return &types.SuspendSpec{Mode: types.ModeSignal, Signals: []string{"approval"}}, nil
 }
 
 func (runtimeSuspendHandler) OnResume(context.Context, *types.Input, *types.SignalPayload) (*types.Output, error) {
