@@ -59,7 +59,7 @@ topologies:
   values, calls an `Executor`, and commits `engine.TaskResult` through lease
   token fencing.
 - **Runner** is the embedded in-process executor that resolves
-  `node.TaskHandler` through `engine.HandlerRegistry`; action execution and
+  `types.ActionHandler` through `engine.HandlerRegistry`; action execution and
   suspending node prepare/resume both return runtime results.
 - **Executor** is the extension point for future remote Runner Protocol
   transports.
@@ -106,7 +106,7 @@ semantics.
 
 ## Node Handlers (node/)
 
-- Regular nodes implement `TaskHandler` interface
+- Regular nodes implement `ActionHandler` interface
 - Suspendable nodes additionally implement `SuspendingHandler` interface
 - Registered globally via `node.Register()`
 - Public constructors and builtin handler implementations live under `node/`;
@@ -125,7 +125,7 @@ semantics.
 
 ```go
 // Regular synchronous node
-type TaskHandler interface {
+type ActionHandler interface {
     Execute(ctx context.Context, input *Input) (*Output, error)
 }
 
@@ -150,6 +150,6 @@ Consolidated in a single `ApplyOnError` function; both Adapters consume the same
 
 - Engine Core resolves handlers via `registry.Get(execID, nodeName, nodeType, version)`, agnostic to source.
 - `execution.Registry` is the reusable embedded implementation.
-- Local mode uses `execution.Registry` direct node handlers for inline `TaskHandler` values, then falls back to type/version lookup.
+- Local mode uses `execution.Registry` direct node handlers for inline `ActionHandler` values, then falls back to type/version lookup.
 - Cluster mode uses the same `execution.Registry` but does not register direct handlers, because closures are not serializable across process boundaries.
 - No `if local then ...` branches inside Core

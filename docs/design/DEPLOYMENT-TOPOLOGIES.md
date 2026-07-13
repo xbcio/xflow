@@ -41,7 +41,7 @@ xflow 是一个通用、可嵌入的工作流引擎 SDK：用户用 DAG 编排�
 
 **执行模型**：`NewLocal` 内部 `backend/memory.New()` 组装内存组件，`Bind(eng)` 把 `execution.NewEmbeddedDispatcher` 挂到内存队列并启动 queue consumer pool。提交与执行在同一进程、同一组 goroutine 内闭环，但执行边界仍经过 `TaskLease -> Runner -> TaskResult`，与 cluster / Control Plane + Execution Plane 模型保持一致。`memory.Backend` 实现了 `backend.Provider` 和 `backend.Waiter`，因此 `Wait()` 是事件驱动而非轮询。
 
-**direct TaskHandler 支持**：local 模式是唯一支持「内联直挂 handler」的模式。当使用 `wf.LocalNode(name, h)` 时，该 handler 被存入 builder 的 direct map，并在 `AddWorkflow` 时按节点名注册进 `execution.Registry`。生产/分布式自定义节点统一使用 `node.Define(...).New(params)`，consumer 进程通过 `xflow.WithNodes(...)` 声明可执行能力。
+**direct ActionHandler 支持**：local 模式是唯一支持「内联直挂 handler」的模式。当使用 `wf.LocalNode(name, h)` 时，该 handler 被存入 builder 的 direct map，并在 `AddWorkflow` 时按节点名注册进 `execution.Registry`。生产/分布式自定义节点统一使用 `node.Define(...).New(params)`，consumer 进程通过 `xflow.WithNodes(...)` 声明可执行能力。
 
 **Trigger 入口**：`AddWorkflow` 注册 workflow 定义并激活 trigger 节点；`Invoke` 从一个显式 entry 创建 execution。Timer/cron/pubsub 使用 backend trigger primitives 做 lock/dedup，webhook 使用 route fan-in + event ID dedup。
 
@@ -71,7 +71,7 @@ xflow 是一个通用、可嵌入的工作流引擎 SDK：用户用 DAG 编排�
 **何时用**：需要多副本对等部署、需要 Redis 持久化与挂起/信号（审批流程）、且能接受「每个副本都参与执行」的部署形态。
 
 **限制**：
-- 不支持 direct TaskHandler。所有 handler 必须通过 `node.Register` 注册类型，由 `execution.Registry` 按类型解析（handler 需可在各进程独立构造）。
+- 不支持 direct ActionHandler。所有 handler 必须通过 `node.Register` 注册类型，由 `execution.Registry` 按类型解析（handler 需可在各进程独立构造）。
 - 无 `Waiter` 实现，`Wait()` 退化为按 500ms 轮询 `StateStore`。
 - 角色无法分离（见上），控制面与执行面耦合在同一进程。
 
@@ -181,28 +181,22 @@ xflow-runner
 ### 4.1 Task Dispatcher 职责
 
 - 作为 Asynq worker 消费 server 内部任务。
-- 在 ack Asynq 前，先把任务持久化为 `dispatching` / `runner_pending` 等 server state，避免 Dispatcher 崩溃导致任务丢失。
-- 根据 `node_type`、`capabilities`、`env`、`tags`、`user_scope`、runner 当前负载选择 runner。
-- 生成 `lease_id`、`attempt`、`fencing_token`，通过 Runner Protocol 下发任务。
-- 接收 runner result，校验 `task_id + attempt + lease_id + fencing_token`，幂等推进 Engine。
-- 管理背压：runner 容量不足时，不应无限把 Asynq 任务搬到 server pending 池。
+- 当前 dispatch 是瞬时操作：`HandleTask` 调用 `engine.TaskRouting` 获取路由元数据（无副作用），匹配 runner 后调用 `engine.BuildTaskLease` 签发 lease 并通过 Runner Protocol 下发。**当前未在 ack Asynq 前持久化 `dispatching` / `runner_pending` 等中间状态**——durable pending/inflight recovery 是规划，未实现（见 §7）。
+- 根据 `node_type` 精确匹配、`node_version`（0=任意）、`RunnerSelector` label 匹配、runner policy 授权、runner 当前容量（headroom）选择 runner。
+- lease token（`engine.BuildTaskLease` 生成的 uuid）作为 fencing token，`engine.CommitTaskResult` 通过 `StateStore.ClaimTaskLease` 原子校验，过期 lease 由 `LeaseSweeper` 回收。
+- runner 容量不足返回 `ErrNoCapacity`、无匹配 runner 返回 `ErrNoMatchingRunner`，两者由队列层重试（不无限搬到 server pending 池）。
 
 ### 4.2 状态边界
 
-Asynq 负责 server 内部的可靠调度，不直接代表 runner 执行生命周期。推荐状态拆分：
+Asynq 负责 server 内部的可靠调度，不直接代表 runner 执行生命周期。当前实现没有为任务单独定义 dispatching / runner_pending / runner_leased / runner_running 等细分中间状态——dispatch 是瞬时操作，任务状态直接由节点的 `NodeStatus`（`types/execution.go`）表达：
 
 ```
-scheduled
-  -> asynq_enqueued
-  -> dispatching
-  -> runner_pending
-  -> runner_leased
-  -> runner_running
-  -> result_reported
-  -> completed / failed
+pending -> running -> committing -> success / failed / skipped / suspended / continued / canceled / waiting
 ```
 
-其中 `asynq_enqueued -> dispatching` 由 Asynq 和 Task Dispatcher 负责；`runner_pending -> result_reported` 由 server state 和 Runner Protocol 负责；`completed / failed` 由 Engine / Executor 推进。
+Task Dispatcher 调用 `engine.TaskRouting` 获取路由元数据（无副作用），匹配 runner 后调用 `engine.BuildTaskLease` 签发 lease（节点进入 `running`，写入 lease token），通过 Runner Protocol 下发给 runner。runner 执行完毕回报 result，server 调用 `engine.CommitTaskResult` 校验 lease token 并推进到终态。
+
+职责分层：Asynq 入队 / 内部重试由 Asynq 负责；lease 签发 → result 回报由 server state + Runner Protocol 负责；终态推进由 Engine 负责；lease 过期回收由 `LeaseSweeper` 负责。
 
 ### 4.3 重试语义
 
@@ -348,4 +342,4 @@ Relay Gateway 用于 runner 无法直连 server、不能互相直连或需要本
    └─ 需要控制面 / 执行面独立扩缩容？ ─► server + runner（MVP）
 ```
 
-> 提醒：从 local 切到 cluster / remote 时，凡是用 direct TaskHandler（内联闭包）的节点都必须改写为 `node.Register` 注册的类型化 handler —— 内联函数实例无法序列化跨进程。
+> 提醒：从 local 切到 cluster / remote 时，凡是用 direct ActionHandler（内联闭包）的节点都必须改写为 `node.Register` 注册的类型化 handler —— 内联函数实例无法序列化跨进程。

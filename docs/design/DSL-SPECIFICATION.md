@@ -111,7 +111,7 @@ settings:
   timeout: duration       # 超时时间
   concurrency: int        # 最大并发数
   timezone: string        # 时区
-  on_error: string        # 全局默认错误策略（可选，stop|error_output|main_output，默认 stop）
+  on_error: string        # 全局默认错误策略（可选，stop|error_output|main_output|continue，默认 stop）
   pin_data_mode: string   # pin_data 生效策略（可选，test_only|always|disabled，默认 test_only）
   retry:                  # 全局默认重试策略（可选；节点级 retry 可覆盖）
     enabled: bool
@@ -168,7 +168,7 @@ nodes:
     template: string      # 引用 node_templates 中的模板名（可选，与 type 互斥：template 提供 type）
     position: [x, y]      # UI 位置坐标（可选）
     disabled: bool        # 是否禁用（可选，见下方「禁用行为」）
-    on_error: string      # 错误处理策略（可选，stop|error_output|main_output，覆盖全局 settings.on_error）
+    on_error: string      # 错误处理策略（可选，stop|error_output|main_output|continue，覆盖全局 settings.on_error）
     notes: string         # 节点备注（可选）
     inputs:               # 声明式输入端口（可选）
       - name: string      #   端口名称
@@ -1023,9 +1023,10 @@ connections:
 
 | 值 | 行为 |
 |---|------|
-| `stop` (默认) | 工作流终止，状态置为 `failed` |
-| `error_output` | 走 `error` 端口（未连线则 `stop`），工作流继续 |
-| `main_output` | 走 `main` 端口，下游通过 `$input._error` 获取错误信息，工作流继续 |
+| `stop` (默认) | 工作流终止，节点状态置为 `failed` |
+| `error_output` | 走 `error` 端口（未连线则 `stop`），节点状态置为 `success`，工作流继续 |
+| `main_output` | 走 `main` 端口，节点状态置为 `success`，下游通过 `$input.error` 获取错误信息，工作流继续 |
+| `continue` | 走 `main` 端口，节点状态置为 `continued`，不注入 `error` 字段，工作流继续 |
 
 **策略推导优先级**：
 
@@ -1036,25 +1037,24 @@ connections:
 **`error_output` 下游数据**（通过 `$input` 接收）：
 
 ```yaml
-# $input 结构
-failed_node: string       # 失败节点名
+# $input = 节点原输出数据（copyOutputData）+ 引擎注入的 error 字段
+# error 字段结构（由 ApplyOnError 构造，见 engine/errorpolicy.go buildErrData）：
 error:
-  code: string            # 错误码
-  message: string         # 错误信息
-  retryable: bool         # 是否可重试
-execution_id: string
-timestamp: time
+  message: string         # 错误信息（来自 sysErr.Error() 或 bizErr.Message）
+  status_code: int        # HTTP 状态码（仅 bizErr 携带 StatusCode 时存在）
+  node: string            # 失败节点名（仅 bizErr 携带 NodeName 时存在）
+# 其余字段为节点 handler 自身的 output 数据（若失败前已部分写入）
 ```
 
-**`main_output` 下游数据**（错误附加在 `$input._error`）：
+**`main_output` 下游数据**（错误附加在 `$input.error`）：
 
 ```yaml
-# 节点成功时：$input._error 不存在
-# 节点失败时：$input._error 包含错误详情，其余输出字段为零值
-_error:
-  code: string
-  message: string
-  retryable: bool
+# 节点成功时：$input.error 不存在
+# 节点失败时：$input.error 包含错误详情（结构与 error_output 相同，但 buildErrData 传 nil bizErr，
+# 故只有 message 字段，不附带 status_code / node）
+error:
+  message: string         # 错误信息
+# 其余字段为节点 handler 自身的 output 数据
 ```
 
 **示例**：
@@ -1129,6 +1129,16 @@ XFlow 的 connections 仅描述拓扑关系（谁连到谁），条件逻辑由 
 | 等待 | xflow.wait | 等待事件或时间 | main | main, timeout, error | ❌ | 可选 |
 | 审批 | xflow.approval | 人工审批网关 | main | approved, rejected, timeout | ❌ | 可选 |
 | 合并 | xflow.merge | 合并多个分支 | 动态（`input: xxx`） | main | ❌ | 可选 |
+| 脚本 | xflow.script | 沙箱化动态脚本（JS via goja/qjs，或 wasm via wazero） | main | main, error | ❌ | 可选 |
+| 通知 | xflow.notification | 记录标准化通知请求，交由下游发送 | main | main, error | ❌ | 可选 |
+| 设置字段 | xflow.transform.set | 设置字面量字段与表达式计算字段（fields + expressions） | main | main | ❌ | 可选 |
+| 选取字段 | xflow.transform.pick | 按字段名选取子集（fields） | main | main | ❌ | 可选 |
+| 重命名 | xflow.transform.rename | 按 mapping 重命名字段 | main | main | ❌ | 可选 |
+| 过滤 | xflow.transform.filter | 按条件过滤数组（items + condition） | main | main | ❌ | 可选 |
+| 排序 | xflow.transform.sort | 按字段排序数组（items + fields） | main | main | ❌ | 可选 |
+| 截取 | xflow.transform.limit | 截取数组前 N 项（items + max） | main | main | ❌ | 可选 |
+| 去重 | xflow.transform.remove_duplicates | 数组去重（items + fields?） | main | main | ❌ | 可选 |
+| 聚合 | xflow.transform.aggregate | 数组聚合（items + operations） | main | main | ❌ | 可选 |
 
 > **并行执行**：XFlow 不提供 `xflow.parallel` 节点。并行通过 connections 天然实现——一个输出端口连接多个目标节点即为并行分支，用 `xflow.merge` 汇合。
 >
@@ -1481,11 +1491,12 @@ nodes:
 > - `body` 内节点可通过 `$nodes['外层节点名']` 读取外层节点输出；外层节点不能反向引用 `body` 内节点
 > - `body.nodes` 中的节点名仅在循环体内有效，与顶层节点命名空间完全隔离（允许同名）
 > - `$nodes['batch_processor'].result` 返回所有迭代结果的数组，每项对应一次迭代中最后执行节点的输出
-> - **`continue_on_error: true` 时的结果结构**：
+> - **`continue_on_error: true` 时的结果结构**（规划语义，当前 body 子图执行未实现）：
 >   - 成功项：返回该迭代最后执行节点的正常输出
->   - 失败项：返回 `{ "_error": { "code": string, "message": string, "retryable": bool }, "_index": number }`，其余字段为零值
+>   - 失败项：返回包含 `_error`（错误详情）与 `_index`（迭代下标）的对象
 >   - 下游可通过表达式过滤成功项：`${{ $nodes['batch_processor'].result | filter(!has(#, '_error')) }}`
 >
+> **当前实现状态**：`xflow.loop` / `xflow.split` 的 body 子图执行是 pass-through stub（`engine/expand.go` 明确标注 EXPERIMENTAL）——`expandLoopSplit` 为每个 batch 创建 sub-execution，但 `ExecuteBatch` 不运行 body 子图，`completeLoopSplit` 只产 `{results, count}`，不产生 `_error` 失败项结构。编译期未开启 `experimental_expand` 时直接拒绝。以上 body 语法与 `continue_on_error` 结构为规划设计，待 body 子图执行落地后生效。
 > **跨域引用编译规则**：
 > - `body` 内 `$nodes['x']` 中 `x` 不在 `body.nodes` 中时，编译器视为**跨域引用**
 > - 跨域引用仅允许读取 loop 节点的上游祖先节点（DAG 拓扑序中确定在 loop 之前完成的节点）
@@ -1632,6 +1643,99 @@ connections:
 > `{"name": "manager_approved", "payload": {"approved_by": "alice"}}`
 >
 > `signal.Payload` 作为 wait 节点的输出，下游可通过 `$input.approved_by` 访问。
+
+#### Script 节点
+
+内联脚本节点，支持 JS（goja / quickjs）与 wasm（wazero）两类运行时。language / runtime / code 均必填且无默认值，强制用户显式选择。
+
+```yaml
+- name: transform_payload
+  type: xflow.script
+  parameters:
+    language: js|wasm              # 脚本语言族（必填，无默认值）
+    runtime: js->goja|js->qjs|wasm->wazero  # 运行时引擎（必填，无默认值）
+    code: string                   # JS 源码（js）或 base64 编码的 wasm 模块（wasm）
+    credentials: []                # 声明的凭据名，注入为 $credentials（可选）
+```
+
+输出端口：`main`、`error`
+
+#### Notification 节点
+
+通用通知节点，channel / to 必填，其余可选。channel 为通道标识（email / sms / slack / webhook 等），具体投递实现由 runner 侧 handler 决定。
+
+```yaml
+- name: notify_owner
+  type: xflow.notification
+  parameters:
+    channel: string                # 通知通道：email|sms|slack|webhook（必填）
+    to: string                     # 接收方地址或标识（必填）
+    subject: string                 # 通知标题（可选）
+    message: string                # 通知正文（可选）
+    data: object                   # 附加结构化通知数据（可选）
+```
+
+输出端口：`main`、`error`
+
+#### Transform 节点
+
+数据变换节点族，均只有 `main` 输入 / `main` 输出（无 error 端口）。`items` 字段为返回数组的表达式。
+
+```yaml
+# xflow.transform.aggregate — 数组聚合
+- name: aggregate_orders
+  type: xflow.transform.aggregate
+  parameters:
+    items: expression              # 返回待聚合数组的表达式（必填）
+    operations: []                 # 聚合操作列表（必填）
+
+# xflow.transform.filter — 数组过滤
+- name: filter_active
+  type: xflow.transform.filter
+  parameters:
+    items: expression              # 返回待过滤数组的表达式（必填）
+    condition: expression          # 每个元素求值的布尔表达式（必填）
+
+# xflow.transform.limit — 数组截断
+- name: limit_top10
+  type: xflow.transform.limit
+  parameters:
+    items: expression              # 返回待截断数组的表达式（必填）
+    max: number                    # 保留的最大元素数（必填）
+
+# xflow.transform.pick — 字段选取
+- name: pick_fields
+  type: xflow.transform.pick
+  parameters:
+    fields: []                     # 保留的字段名列表，其余字段移除（必填）
+
+# xflow.transform.remove_duplicates — 数组去重
+- name: dedupe_orders
+  type: xflow.transform.remove_duplicates
+  parameters:
+    items: expression              # 返回待去重数组的表达式（必填）
+    fields: []                     # 作为唯一键的字段；省略时以整个元素去重（可选）
+
+# xflow.transform.rename — 字段重命名
+- name: rename_fields
+  type: xflow.transform.rename
+  parameters:
+    mapping: object                # 旧字段名 → 新字段名 的映射（必填）
+
+# xflow.transform.set — 字段赋值
+- name: set_status
+  type: xflow.transform.set
+  parameters:
+    fields: object                 # 字面量赋值的字段（可选）
+    expressions: object            # 由表达式计算的字段（可选）
+
+# xflow.transform.sort — 数组排序
+- name: sort_by_time
+  type: xflow.transform.sort
+  parameters:
+    items: expression              # 返回待排序数组的表达式（必填）
+    fields: []                    # 排序字段，按优先级顺序（必填）
+```
 
 ### 6.3 节点 Output Schema
 

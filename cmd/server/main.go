@@ -8,7 +8,7 @@
 //   - Track execution lifecycle (status, completion, cancellation)
 //   - Deliver signals to suspended nodes
 //   - Serve query APIs (execution status, pending approvals)
-//   - Run TimeoutSweep for suspended node expiration
+//   - Reclaim expired runner leases via LeaseSweeper
 //
 // It does NOT execute node handlers — that is the runner's job. Redis, Asynq,
 // and StateStore access stay on this side of the boundary.
