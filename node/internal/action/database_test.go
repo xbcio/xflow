@@ -4,6 +4,7 @@ import (
 	"context"
 	"github.com/xbcio/xflow/internal/noderuntime"
 	"github.com/xbcio/xflow/types"
+	"strings"
 	"testing"
 
 	"github.com/xbcio/xflow/node"
@@ -112,5 +113,30 @@ func TestDatabase_DeleteRequiresWhere(t *testing.T) {
 	_, err := h.Execute(context.Background(), input)
 	if err == nil {
 		t.Fatal("expected error for delete without where")
+	}
+}
+
+// TestDatabase_NoPoolErrors pins the Task 2 contract: when no ResourcePool is
+// attached to the context, DatabaseNode.Execute must fail at acquireSQL with
+// "no resource pool configured" — NOT fall back to a per-call *sql.DB.
+//
+// The input below is constructed to pass every upstream validation gate
+// (credential present + found, dsn non-empty, valid table name, known
+// operation) so the only remaining failure point is the pool lookup. This
+// guards against a regression that re-introduces a fallback dial path.
+func TestDatabase_NoPoolErrors(t *testing.T) {
+	h, _ := noderuntime.Lookup("xflow.database")
+	b := node.Database("select", "users", "db")
+	input := &types.Input{Params: b.RawParams().(map[string]any)}
+	input.SetCredentialResolver(func(name string) map[string]any {
+		return map[string]any{"dsn": "user:pass@tcp(localhost)/test", "driver": "mysql"}
+	})
+
+	_, err := h.Execute(context.Background(), input)
+	if err == nil {
+		t.Fatal("expected error when no resource pool is configured")
+	}
+	if !strings.Contains(err.Error(), "no resource pool configured") {
+		t.Fatalf("error = %q, want substring %q", err.Error(), "no resource pool configured")
 	}
 }

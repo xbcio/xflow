@@ -3,8 +3,11 @@ package action_test
 import (
 	"context"
 	"github.com/xbcio/xflow/internal/noderuntime"
+	"github.com/xbcio/xflow/node/resource"
 	"github.com/xbcio/xflow/types"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/xbcio/xflow/node"
 )
@@ -71,20 +74,71 @@ func TestGRPC_MissingMethod(t *testing.T) {
 	}
 }
 
+// TestGRPC_NoPoolErrors pins the Task 2 contract: when no ResourcePool is
+// attached to the context, GRPCNode.Execute must route to the error port with
+// "no resource pool configured" in the error data — NOT fall back to a
+// per-call dial. The input passes host/service/method validation so the only
+// failure point is the pool lookup at acquireGRPC.
+func TestGRPC_NoPoolErrors(t *testing.T) {
+	h, _ := noderuntime.Lookup("xflow.grpc")
+	b := node.GRPC("test.Service", "Call", "localhost:1").
+		SetRequest(map[string]any{"key": "value"}).
+		Timeout("100ms")
+	input := &types.Input{Params: b.RawParams().(map[string]any)}
+
+	out, err := h.Execute(context.Background(), input)
+	if err != nil {
+		t.Fatalf("Execute returned err = %v, want nil err + error-port output", err)
+	}
+	if out == nil || out.Port != "error" {
+		t.Fatalf("output = %+v, want error port", out)
+	}
+	errMsg, _ := out.Data["error"].(string)
+	if !strings.Contains(errMsg, "no resource pool configured") {
+		t.Fatalf("error data = %q, want substring %q", errMsg, "no resource pool configured")
+	}
+}
+
+// TestGRPC_ConnectionError pins the contract that a real dial failure (not the
+// no-pool path) routes to the error port. Pre-Task-2 this test dialed
+// localhost:1 directly via a now-removed fallback; after Task 2 the fallback
+// was gone and the test silently became a tautology that passed for the wrong
+// reason (it hit the no-pool path and only asserted Port == "error").
+//
+// This version injects a real default ResourcePool so the call reaches
+// acquireGRPC -> grpc.NewClient -> conn.Invoke, then fails on the dead host
+// localhost:1. The assertion checks the error port AND that the error message
+// describes a connection/dial failure, explicitly NOT the no-pool message.
 func TestGRPC_ConnectionError(t *testing.T) {
 	h, _ := noderuntime.Lookup("xflow.grpc")
-	ctx, cancel := context.WithTimeout(context.Background(), 0)
-	defer cancel()
+	pool := resource.NewDefaultResourcePool(types.DefaultResourcePoolConfig())
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = pool.Close(ctx)
+	}()
+	ctx := types.WithResourcePool(context.Background(), pool)
 
 	b := node.GRPC("test.Service", "Call", "localhost:1").
 		SetRequest(map[string]any{"key": "value"}).
 		Timeout("100ms")
 	input := &types.Input{Params: b.RawParams().(map[string]any)}
+
 	out, err := h.Execute(ctx, input)
 	if err != nil {
-		return
+		// Execute returns nil err and routes failures to the error port; a
+		// non-nil err here indicates a regression in the handler's structure.
+		t.Fatalf("Execute returned err = %v, want nil err + error-port output", err)
 	}
-	if out.Port != "error" {
-		t.Fatalf("expected error port for connection failure, got %q", out.Port)
+	if out == nil || out.Port != "error" {
+		t.Fatalf("output = %+v, want error port for connection failure", out)
+	}
+	errMsg, _ := out.Data["error"].(string)
+	if errMsg == "" {
+		t.Fatalf("output error data is empty, want a connection failure message")
+	}
+	if strings.Contains(errMsg, "no resource pool configured") {
+		t.Fatalf("error = %q, want a real connection/dial failure (NOT the no-pool path); "+
+			"this means the injected pool did not reach acquireGRPC", errMsg)
 	}
 }
