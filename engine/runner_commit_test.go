@@ -416,7 +416,7 @@ func TestEngine_CommitTaskResultFailsSuspendWhenDisabled(t *testing.T) {
 	}
 
 	err = eng.CommitTaskResult(ctx, lease, TaskResult{
-		Suspend: &types.SuspendSpec{Mode: node.ModeSignal, Signals: []string{"approval"}},
+		Suspend: &types.SuspendSpec{Mode: types.ModeSignal, Signals: []string{"approval"}},
 	})
 	if err != nil {
 		t.Fatal(err)

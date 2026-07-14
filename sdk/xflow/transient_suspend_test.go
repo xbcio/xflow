@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xbcio/xflow/nodes/node"
+	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -18,7 +18,7 @@ func TestTransientSuspendWaitReportsPublicError(t *testing.T) {
 
 	wf := Workflow("transient_suspend_wait_error")
 	start := wf.Node("start", node.Start())
-	wait := wf.Node("wait", node.Wait("approval").OnError(node.OnErrorContinue))
+	wait := wf.Node("wait", node.Wait("approval").OnError(types.OnErrorContinue))
 	wf.Connect(start, wait)
 
 	workflowID, err := eng.AddWorkflow(context.Background(), wf)

@@ -25,7 +25,7 @@ func TestNewLocalTransientFailsSuspendWorkflow(t *testing.T) {
 
 	wf := Workflow("transient_local_suspend")
 	start := wf.Node("start", node.Start())
-	wait := wf.Node("wait", node.Wait("approval").OnError(node.OnErrorContinue))
+	wait := wf.Node("wait", node.Wait("approval").OnError(types.OnErrorContinue))
 	wf.Connect(start, wait)
 
 	workflowID, err := eng.AddWorkflow(context.Background(), wf)
