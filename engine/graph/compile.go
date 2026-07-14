@@ -93,15 +93,39 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 		g.Config = def.Context.Config
 	}
 
-	// First pass: register all nodes.
+	startCount, err := registerNodes(def, g)
+	if err != nil {
+		return nil, err
+	}
+	if err := buildEdges(def, g); err != nil {
+		return nil, err
+	}
+
+	if g.AllowCycles {
+		if startCount != 1 {
+			return nil, fmt.Errorf("cyclic workflow requires exactly one xflow.start node, got %d", startCount)
+		}
+	} else {
+		if err := detectCycle(g); err != nil {
+			return nil, err
+		}
+	}
+
+	return g, nil
+}
+
+// registerNodes performs the first compile pass: it populates g.Index/g.Nodes,
+// records entry/start nodes, and returns the count of xflow.start nodes for
+// cyclic-workflow validation.
+func registerNodes(def *types.WorkflowDef, g *Graph) (int, error) {
 	startCount := 0
 	for i, nd := range def.Nodes {
 		if _, dup := g.Index[nd.Name]; dup {
-			return nil, fmt.Errorf("duplicate node name: %s", nd.Name)
+			return 0, fmt.Errorf("duplicate node name: %s", nd.Name)
 		}
 		runnerSelector, err := resolveRunnerSelector(def.RunnerSelector, nd.RunnerSelector)
 		if err != nil {
-			return nil, fmt.Errorf("node %q: %w", nd.Name, err)
+			return 0, fmt.Errorf("node %q: %w", nd.Name, err)
 		}
 		g.Index[nd.Name] = i
 		g.Nodes[i] = NodeMeta{
@@ -124,22 +148,27 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 				g.StartIdx = i
 			}
 			if nd.Type == "xflow.merge" && extractMergeMode(nd) == "wait_all" {
-				return nil, errors.New("xflow.merge wait_all is not supported in cyclic workflows")
+				return 0, errors.New("xflow.merge wait_all is not supported in cyclic workflows")
 			}
 		}
 	}
+	return startCount, nil
+}
 
-	// Second pass: build edges from Connections.
+// buildEdges performs the second compile pass: it materializes Connections into
+// g.OutEdges/g.InEdges/g.InDegree and records the distinct output port names
+// per source node on g.Nodes[i].PortOuts.
+func buildEdges(def *types.WorkflowDef, g *Graph) error {
 	for srcName, ports := range def.Connections {
 		srcIdx, ok := g.Index[srcName]
 		if !ok {
-			return nil, fmt.Errorf("connection references unknown source node: %s", srcName)
+			return fmt.Errorf("connection references unknown source node: %s", srcName)
 		}
 		for port, conns := range ports {
 			for _, c := range conns {
 				dstIdx, ok := g.Index[c.Node]
 				if !ok {
-					return nil, fmt.Errorf("connection references unknown destination node: %s", c.Node)
+					return fmt.Errorf("connection references unknown destination node: %s", c.Node)
 				}
 				edge := Edge{
 					SrcIdx:  srcIdx,
@@ -164,18 +193,7 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 		}
 		g.Nodes[srcIdx].PortOuts = portOuts
 	}
-
-	if g.AllowCycles {
-		if startCount != 1 {
-			return nil, fmt.Errorf("cyclic workflow requires exactly one xflow.start node, got %d", startCount)
-		}
-	} else {
-		if err := detectCycle(g); err != nil {
-			return nil, err
-		}
-	}
-
-	return g, nil
+	return nil
 }
 
 // resolveRetry chooses the effective retry settings for a node: per-node
