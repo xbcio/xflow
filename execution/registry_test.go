@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/xbcio/xflow/internal/noderuntime"
+	nodereg "github.com/xbcio/xflow/node/registry"
 	"sync"
 	"testing"
 
@@ -51,8 +51,8 @@ func (l *recordingLogger) messages() []string {
 
 func TestRegistry_VersionExactMatchHitsRequestedHandler(t *testing.T) {
 	const typ = "test.versioned/exact"
-	noderuntime.Register(versionedHandler{typ: typ, version: 1})
-	noderuntime.Register(versionedHandler{typ: typ, version: 2})
+	nodereg.Register(versionedHandler{typ: typ, version: 1})
+	nodereg.Register(versionedHandler{typ: typ, version: 2})
 
 	r := NewRegistry()
 	got, err := r.Get("exec-1", "node-a", typ, 1)
@@ -66,7 +66,7 @@ func TestRegistry_VersionExactMatchHitsRequestedHandler(t *testing.T) {
 
 func TestRegistry_VersionStrictRejectsMiss(t *testing.T) {
 	const typ = "test.versioned/strict"
-	noderuntime.Register(versionedHandler{typ: typ, version: 1})
+	nodereg.Register(versionedHandler{typ: typ, version: 1})
 
 	r := NewRegistry()
 	r.SetVersionPolicy(VersionStrict)
@@ -82,8 +82,8 @@ func TestRegistry_VersionStrictRejectsMiss(t *testing.T) {
 
 func TestRegistry_VersionWarnFallbackReturnsLatestAndLogs(t *testing.T) {
 	const typ = "test.versioned/warn"
-	noderuntime.Register(versionedHandler{typ: typ, version: 1})
-	noderuntime.Register(versionedHandler{typ: typ, version: 3})
+	nodereg.Register(versionedHandler{typ: typ, version: 1})
+	nodereg.Register(versionedHandler{typ: typ, version: 3})
 
 	logger := &recordingLogger{}
 	r := NewRegistry()
@@ -105,8 +105,8 @@ func TestRegistry_VersionWarnFallbackReturnsLatestAndLogs(t *testing.T) {
 
 func TestRegistry_VersionSilentFallbackReturnsLatestQuietly(t *testing.T) {
 	const typ = "test.versioned/silent"
-	noderuntime.Register(versionedHandler{typ: typ, version: 2})
-	noderuntime.Register(versionedHandler{typ: typ, version: 4})
+	nodereg.Register(versionedHandler{typ: typ, version: 2})
+	nodereg.Register(versionedHandler{typ: typ, version: 4})
 
 	logger := &recordingLogger{}
 	r := NewRegistry()
@@ -141,8 +141,8 @@ func TestRegistry_StrictWithNoRegisteredHandlerReturnsLatestNegOne(t *testing.T)
 
 func TestRegistry_NoVersionRequestedFallsThroughToLatest(t *testing.T) {
 	const typ = "test.versioned/no-pin"
-	noderuntime.Register(versionedHandler{typ: typ, version: 1})
-	noderuntime.Register(versionedHandler{typ: typ, version: 2})
+	nodereg.Register(versionedHandler{typ: typ, version: 1})
+	nodereg.Register(versionedHandler{typ: typ, version: 2})
 
 	r := NewRegistry()
 	r.SetVersionPolicy(VersionStrict) // still strict — but version=0 skips the gate

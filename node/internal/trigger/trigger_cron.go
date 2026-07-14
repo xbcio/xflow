@@ -3,8 +3,10 @@ package trigger
 import (
 	"context"
 	"fmt"
-	. "github.com/xbcio/xflow/node/internal"
 	"time"
+
+	. "github.com/xbcio/xflow/node/internal"
+	"github.com/xbcio/xflow/node/registry"
 
 	"github.com/xbcio/xflow/types"
 	cronlib "github.com/robfig/cron/v3"
@@ -101,4 +103,4 @@ func (n *CronTriggerNode) Activate(ctx context.Context, in *types.TriggerActivat
 	}), nil
 }
 
-func init() { RegisterTrigger(&CronTriggerNode{}) }
+func init() { registry.RegisterTrigger(&CronTriggerNode{}) }

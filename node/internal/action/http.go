@@ -1,19 +1,21 @@
 package action
 
-import "github.com/xbcio/xflow/types"
-
 import (
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	. "github.com/xbcio/xflow/node/internal"
+
+	"github.com/xbcio/xflow/types"
+
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
+	. "github.com/xbcio/xflow/node/internal"
+	"github.com/xbcio/xflow/node/registry"
 	"github.com/spf13/cast"
 )
 
@@ -236,4 +238,4 @@ func flattenHeaders(h http.Header) map[string]any {
 	return result
 }
 
-func init() { Register(&HTTPNode{}) }
+func init() { registry.Register(&HTTPNode{}) }

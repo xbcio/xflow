@@ -1,10 +1,13 @@
 package flow
 
-import "github.com/xbcio/xflow/types"
+import (
+	"github.com/xbcio/xflow/types"
 
-import . "github.com/xbcio/xflow/node/internal"
+	"context"
 
-import "context"
+	. "github.com/xbcio/xflow/node/internal"
+	"github.com/xbcio/xflow/node/registry"
+)
 
 // EndNode implements xflow.end, an explicit workflow terminal node.
 //
@@ -43,4 +46,4 @@ func (n *EndNode) Execute(_ context.Context, input *types.Input) (*types.Output,
 	return &types.Output{Data: input.Data}, nil
 }
 
-func init() { Register(&EndNode{}) }
+func init() { registry.Register(&EndNode{}) }

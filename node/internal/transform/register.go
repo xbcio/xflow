@@ -1,14 +1,16 @@
 package transform
 
-import . "github.com/xbcio/xflow/node/internal"
+import (
+	"github.com/xbcio/xflow/node/registry"
+)
 
 func init() {
-	Register(&SetNode{})
-	Register(&PickNode{})
-	Register(&RenameNode{})
-	Register(&FilterNode{})
-	Register(&SortNode{})
-	Register(&LimitNode{})
-	Register(&RemoveDuplicatesNode{})
-	Register(&AggregateNode{})
+	registry.Register(&SetNode{})
+	registry.Register(&PickNode{})
+	registry.Register(&RenameNode{})
+	registry.Register(&FilterNode{})
+	registry.Register(&SortNode{})
+	registry.Register(&LimitNode{})
+	registry.Register(&RemoveDuplicatesNode{})
+	registry.Register(&AggregateNode{})
 }

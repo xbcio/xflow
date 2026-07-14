@@ -1,13 +1,16 @@
 package action
 
-import "github.com/xbcio/xflow/types"
-
 import (
 	"context"
 	"database/sql"
 	"fmt"
-	. "github.com/xbcio/xflow/node/internal"
+
+	"github.com/xbcio/xflow/types"
+
 	"strings"
+
+	. "github.com/xbcio/xflow/node/internal"
+	"github.com/xbcio/xflow/node/registry"
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/spf13/cast"
@@ -376,4 +379,4 @@ func acquireSQL(ctx context.Context, driver, dsn string) (*sql.DB, func(), error
 	return db, func() {}, nil
 }
 
-func init() { Register(&DatabaseNode{}) }
+func init() { registry.Register(&DatabaseNode{}) }

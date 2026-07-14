@@ -3,7 +3,7 @@ package xflow
 import (
 	"context"
 	"errors"
-	"github.com/xbcio/xflow/internal/noderuntime"
+	"github.com/xbcio/xflow/node/registry"
 	"strings"
 	"testing"
 
@@ -90,7 +90,7 @@ func TestAddWorkflow_AcceptsWorkflowBundledHandlers(t *testing.T) {
 
 func TestRegistry_VersionPolicy_WithVersionPolicyOption(t *testing.T) {
 	const typ = "test.versioned/sdk-option"
-	noderuntime.Register(sdkVersionedHandler{typ: typ, version: 1})
+	registry.Register(sdkVersionedHandler{typ: typ, version: 1})
 
 	provider := memory.New()
 	eng, err := newFromConfig(&engineConfig{

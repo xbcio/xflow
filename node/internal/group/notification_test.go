@@ -2,7 +2,7 @@ package group_test
 
 import (
 	"context"
-	"github.com/xbcio/xflow/internal/noderuntime"
+	"github.com/xbcio/xflow/node/registry"
 	"github.com/xbcio/xflow/types"
 	"testing"
 
@@ -35,7 +35,7 @@ func TestNotification_Factory(t *testing.T) {
 }
 
 func TestNotification_ExecuteReturnsDeterministicPayload(t *testing.T) {
-	h, found := noderuntime.Lookup("xflow.notification")
+	h, found := registry.Lookup("xflow.notification")
 	if !found {
 		t.Fatal("expected xflow.notification to be registered")
 	}
@@ -77,7 +77,7 @@ func TestNotification_ExecuteReturnsDeterministicPayload(t *testing.T) {
 }
 
 func TestNotification_RequiresChannelAndRecipient(t *testing.T) {
-	h, found := noderuntime.Lookup("xflow.notification")
+	h, found := registry.Lookup("xflow.notification")
 	if !found {
 		t.Fatal("expected xflow.notification to be registered")
 	}

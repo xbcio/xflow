@@ -4,6 +4,7 @@ import (
 	core "github.com/xbcio/xflow/node/internal"
 	"github.com/xbcio/xflow/node/internal/action"
 	codepkg "github.com/xbcio/xflow/node/internal/code"
+	scriptpkg "github.com/xbcio/xflow/node/internal/code/script"
 	"github.com/xbcio/xflow/node/internal/flow"
 	"github.com/xbcio/xflow/node/internal/group"
 	"github.com/xbcio/xflow/node/internal/transform"
@@ -22,7 +23,7 @@ type GRPCNode = action.GRPCNode
 
 type FunctionNode = codepkg.FunctionNode
 type UserFunc = codepkg.UserFunc
-type ScriptNode = codepkg.ScriptNode
+type ScriptNode = scriptpkg.ScriptNode
 type SetNode = transform.SetNode
 type PickNode = transform.PickNode
 type RenameNode = transform.RenameNode
@@ -99,7 +100,7 @@ func RegisterFunc(name string, fn UserFunc) {
 func LookupFunc(name string) (UserFunc, bool) {
 	return codepkg.LookupFunc(name)
 }
-func Script(code string) *ScriptNode { return codepkg.Script(code) }
+func Script(code string) *ScriptNode { return scriptpkg.Script(code) }
 func Set(fields map[string]any) *SetNode {
 	return transform.Set(fields)
 }

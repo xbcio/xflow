@@ -24,11 +24,15 @@ golangci-lint run        # Lint
   - `memory/` — In-memory StateStore + goroutine pool TaskQueue
   - `asynq/` — Redis StateStore + Asynq TaskQueue
 - **execution/** — Reusable embedded task execution boundary: Dispatcher, Runner, Registry
-- **sdk/** — Public SDK grouping
+- **sdk/**
   - `xflow/` — `package xflow`: `NewLocal` / `NewCluster` factories, WorkflowBuilder, and production control APIs (`AddWorkflow`, `Invoke`, `Wait`, `Signal`, `RevokeSignal`, `Cancel`, `Inspect`)
   - `examples/` — runnable `.go` usage examples
-- **cmd/server/** — Management server (Master node)
-- **cmd/runner/** — Task runner (Execution node)
+- **service/** — Server/runner process-level implementation boundary (cluster topology)
+  - `runner/` — cluster task runner process (holds `ProtocolClient` + embedded `execution.Runner`)
+  - `control/` — control plane: controlplane, dispatcher, auth, core connect
+  - `protocol/` — wire protocol + `protocol/runnerpb/` generated gRPC
+- **cmd/server/** — Management server (Master node) entrypoint
+- **cmd/runner/** — Task runner (Execution node) entrypoint
 - **db/** — SQL schema
 - **docs/** — `design/` specs, `dsl-samples/` (`.yaml` DSL samples), `references/`
 
@@ -37,7 +41,7 @@ golangci-lint run        # Lint
 - `engine/` must NOT import redis/asynq/mysql/sql — only stdlib + types + node
 - Graph IR is immutable after compile, shared lock-free at runtime
 - Engine Core depends on exactly 2 interfaces: `StateStore` + `TaskQueue`
-- Future server/runner code goes under `service/` (a future module boundary); core packages (engine/node/types/store/sdk) must NEVER import `service/` or `cmd/` — dependencies flow one way only, so a later module split stays mechanical
+- `service/` is the server/runner process-level implementation boundary (`runner/` / `control/` / `protocol/`); core packages (engine/node/types/store/sdk) must NEVER import `service/` or `cmd/` — dependencies flow one way only, so a later module split stays mechanical
 
 ## AI-Generated Documentation Placement
 

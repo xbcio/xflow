@@ -31,7 +31,7 @@ sdk/             cmd/server + cmd/runner
 - `execution/` must NOT import redis/asynq/mysql/sql or network transports; it only adapts engine leases to an in-process or protocol-backed executor
 - `backend/` owns the reusable `Provider` interface: `StateStore + TaskQueue + HandlerRegistry + WorkflowRegistry + TriggerPrimitives + lifecycle binding`
 - `backend/memory/` is a reusable in-memory provider for embedded and test deployments; it must remain free of Redis/Asynq/MySQL/network dependencies
-- `backend/asynq/` is a reusable Redis + Asynq provider for SDK cluster mode and future server-side control-plane reuse
+- `backend/asynq/` is a reusable Redis + Asynq provider for SDK cluster mode and server-side control-plane reuse (`service/control`)
 - SDK assembles reusable packages and must not become the owner of reusable backend behavior
 - cmd/server and cmd/runner use `engine/`, `execution/`, and reusable backend packages directly to build cluster infrastructure
 
@@ -61,32 +61,31 @@ topologies:
 - **Runner** is the embedded in-process executor that resolves
   `types.ActionHandler` through `engine.HandlerRegistry`; action execution and
   suspending node prepare/resume both return runtime results.
-- **Executor** is the extension point for future remote Runner Protocol
-  transports.
+- **Executor** is the extension point for remote Runner Protocol transports
+  (see `service/protocol`).
 - **Registry** is the reusable embedded handler registry. It supports direct
   node handlers for local execution and type/version lookup through
-  `node.Register` for cluster and future runner processes.
+  `registry.Register` for cluster and runner processes (`service/runner`).
 
 This package is intentionally not under `sdk/internal/`: SDK local/cluster,
-future `cmd/server`, and future `cmd/runner` all need the same lease/result
-semantics.
+`cmd/server`, and `cmd/runner` all need the same lease/result semantics.
 
 ## Reusable Backend Packages
 
 - `backend/` defines `Provider`, the common assembly contract implemented by
   concrete backends, plus optional backend capabilities such as `Waiter`.
   Workflow registration and trigger coordination live here so SDK local,
-  cluster, and future server modes share the same identity, dedup, and locking
-  contracts.
+  cluster, and server modes (`service/control`) share the same identity, dedup,
+  and locking contracts.
 - `backend/memory/` contains the in-memory `StateStore`, in-memory
   `TaskQueue`, embedded `execution.Registry`, and embedded lifecycle binding.
   It is used by `xflow.NewLocal` and by tests.
 - `backend/asynq/` contains the Redis-backed `StateStore`, Asynq-backed
   `TaskQueue`, timeout monitor, embedded `execution.Registry`, and embedded
-  lifecycle binding. It is used by `xflow.NewCluster` today. Future server
-  deployments may reuse the storage and queue semantics here, but remote
-  runner processes must still communicate through Runner Protocol rather than
-  connecting to Redis or Asynq directly.
+  lifecycle binding. It is used by `xflow.NewCluster` today. Server
+  deployments (`service/control`) reuse the storage and queue semantics here,
+  but remote runner processes must still communicate through Runner Protocol
+  rather than connecting to Redis or Asynq directly.
 
 ## Key Boundaries
 

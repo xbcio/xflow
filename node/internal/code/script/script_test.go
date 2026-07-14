@@ -1,8 +1,8 @@
-package code_test
+package script_test
 
 import (
 	"context"
-	"github.com/xbcio/xflow/internal/noderuntime"
+	"github.com/xbcio/xflow/node/registry"
 	"github.com/xbcio/xflow/types"
 	"testing"
 
@@ -41,7 +41,7 @@ func TestScript_NoImplicitDefaults(t *testing.T) {
 }
 
 func TestScript_ExecExplicitJSGoja(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.script")
+	h, _ := registry.Lookup("xflow.script")
 	b := node.Script(`({doubled: $input.x * 2})`).Language("js").Runtime("goja")
 	input := &types.Input{
 		Params: b.RawParams().(map[string]any),
@@ -75,7 +75,7 @@ func asFloat(v any) float64 {
 }
 
 func TestScript_RuntimeError_ErrorPort(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.script")
+	h, _ := registry.Lookup("xflow.script")
 	b := node.Script(`throw new Error('boom')`).Language("js").Runtime("goja")
 	input := &types.Input{Params: b.RawParams().(map[string]any)}
 	out, err := h.Execute(context.Background(), input)
@@ -91,7 +91,7 @@ func TestScript_RuntimeError_ErrorPort(t *testing.T) {
 }
 
 func TestScript_MissingCode_ConfigError(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.script")
+	h, _ := registry.Lookup("xflow.script")
 	input := &types.Input{Params: map[string]any{}}
 	if _, err := h.Execute(context.Background(), input); err == nil {
 		t.Fatal("expected Go config error for missing code")
@@ -99,7 +99,7 @@ func TestScript_MissingCode_ConfigError(t *testing.T) {
 }
 
 func TestScript_UnknownRuntime_ConfigError(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.script")
+	h, _ := registry.Lookup("xflow.script")
 	input := &types.Input{Params: map[string]any{"code": `({})`, "language": "js", "runtime": "v8"}}
 	if _, err := h.Execute(context.Background(), input); err == nil {
 		t.Fatal("expected Go config error for unknown runtime")
@@ -110,7 +110,7 @@ func TestScript_UnknownRuntime_ConfigError(t *testing.T) {
 // contract on the runtime path: an Input that supplies code but no language
 // must surface a config error rather than silently picking js.
 func TestScript_MissingLanguage_ConfigError(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.script")
+	h, _ := registry.Lookup("xflow.script")
 	input := &types.Input{Params: map[string]any{"code": `({})`, "runtime": "goja"}}
 	if _, err := h.Execute(context.Background(), input); err == nil {
 		t.Fatal("expected Go config error for missing language")
@@ -121,7 +121,7 @@ func TestScript_MissingLanguage_ConfigError(t *testing.T) {
 // supplied but runtime omitted must also be a config error, not "guess goja
 // because language is js".
 func TestScript_MissingRuntime_ConfigError(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.script")
+	h, _ := registry.Lookup("xflow.script")
 	input := &types.Input{Params: map[string]any{"code": `({})`, "language": "js"}}
 	if _, err := h.Execute(context.Background(), input); err == nil {
 		t.Fatal("expected Go config error for missing runtime")
@@ -129,7 +129,7 @@ func TestScript_MissingRuntime_ConfigError(t *testing.T) {
 }
 
 func TestScript_CredentialInjected(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.script")
+	h, _ := registry.Lookup("xflow.script")
 	b := node.Script(`({token: $credential.token})`).Language("js").Runtime("goja").Credentials("api_token")
 	input := &types.Input{Params: b.RawParams().(map[string]any)}
 	input.SetCredentialResolver(func(name string) map[string]any {
@@ -148,7 +148,7 @@ func TestScript_CredentialInjected(t *testing.T) {
 }
 
 func TestScript_UndeclaredCredentialInvisible(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.script")
+	h, _ := registry.Lookup("xflow.script")
 	b := node.Script(`({seen: typeof $credentials.api_token})`).Language("js").Runtime("goja")
 	input := &types.Input{Params: b.RawParams().(map[string]any)}
 	input.SetCredentialResolver(func(string) map[string]any {
@@ -167,7 +167,7 @@ func TestScript_UndeclaredCredentialInvisible(t *testing.T) {
 // results to the error port instead of returning them to downstream nodes.
 // A 1.5 MiB string blows past the 1 MiB default.
 func TestScript_OutputSizeLimit(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.script")
+	h, _ := registry.Lookup("xflow.script")
 	// 'A'.repeat(1572864) produces a ~1.5 MiB result; the JSON encoding adds
 	// quoting overhead but the raw payload alone already exceeds 1 MiB.
 	b := node.Script(`({blob: 'A'.repeat(1572864)})`).Language("js").Runtime("goja")

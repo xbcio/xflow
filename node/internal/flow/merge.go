@@ -1,12 +1,13 @@
 package flow
 
-import "github.com/xbcio/xflow/types"
-
 import (
 	"context"
 	"fmt"
-	. "github.com/xbcio/xflow/node/internal"
 
+	"github.com/xbcio/xflow/types"
+
+	. "github.com/xbcio/xflow/node/internal"
+	"github.com/xbcio/xflow/node/registry"
 	"github.com/spf13/cast"
 )
 
@@ -105,4 +106,4 @@ func (n *MergeNode) mergeAny(input *types.Input) (*types.Output, error) {
 	return &types.Output{Data: result}, nil
 }
 
-func init() { Register(&MergeNode{}) }
+func init() { registry.Register(&MergeNode{}) }

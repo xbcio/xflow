@@ -1,7 +1,7 @@
-// Package script defines the language-agnostic engine abstraction and
+// Package engine defines the language-agnostic engine abstraction and
 // (language, runtime) registry for the xflow.script node. Concrete engines
 // live in subpackages (js, wasm) and self-register via init().
-package script
+package engine
 
 import (
 	"context"

@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/xbcio/xflow/backend"
-	"github.com/xbcio/xflow/internal/noderuntime"
+	"github.com/xbcio/xflow/node/registry"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -123,11 +123,11 @@ func (r *triggerRuntime) Webhooks() types.WebhookRuntime { return r.webhooks }
 // report a registration error.
 func lookupTriggerForNode(nd types.NodeDef) (types.TriggerHandler, bool) {
 	if nd.Version > 0 {
-		if h, ok := noderuntime.LookupTriggerVersion(nd.Type, nd.Version); ok {
+		if h, ok := registry.LookupTriggerVersion(nd.Type, nd.Version); ok {
 			return h, true
 		}
 	}
-	return noderuntime.LookupTrigger(nd.Type)
+	return registry.LookupTrigger(nd.Type)
 }
 
 func closeSubscriptions(ctx context.Context, subs []types.TriggerSubscription) error {

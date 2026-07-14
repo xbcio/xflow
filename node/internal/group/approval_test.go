@@ -2,7 +2,7 @@ package group_test
 
 import (
 	"context"
-	"github.com/xbcio/xflow/internal/noderuntime"
+	"github.com/xbcio/xflow/node/registry"
 	"github.com/xbcio/xflow/types"
 	"reflect"
 	"testing"
@@ -320,7 +320,7 @@ func TestApproval_WithTimeoutAddsTimeoutParams(t *testing.T) {
 
 func approvalHandler(t *testing.T) types.SuspendingHandler {
 	t.Helper()
-	h, ok := noderuntime.Lookup(node.ApprovalNodeType)
+	h, ok := registry.Lookup(node.ApprovalNodeType)
 	if !ok {
 		t.Fatal("approval node is not registered")
 	}

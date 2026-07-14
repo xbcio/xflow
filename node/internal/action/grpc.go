@@ -1,14 +1,17 @@
 package action
 
-import "github.com/xbcio/xflow/types"
-
 import (
 	"context"
 	"encoding/json"
 	"fmt"
-	. "github.com/xbcio/xflow/node/internal"
+
+	"github.com/xbcio/xflow/types"
+
 	"time"
 
+	. "github.com/xbcio/xflow/node/internal"
+	"github.com/xbcio/xflow/node/registry"
+	"github.com/spf13/cast"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
@@ -16,8 +19,6 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/dynamicpb"
 	"google.golang.org/protobuf/types/known/structpb"
-
-	"github.com/spf13/cast"
 )
 
 // GRPCNode implements xflow.grpc — executes a gRPC unary call.
@@ -200,4 +201,4 @@ func acquireGRPC(ctx context.Context, host string, secure bool, opts ...grpc.Dia
 	return conn, func() {}, nil
 }
 
-func init() { Register(&GRPCNode{}) }
+func init() { registry.Register(&GRPCNode{}) }

@@ -3,7 +3,7 @@ package action_test
 import (
 	"bytes"
 	"context"
-	"github.com/xbcio/xflow/internal/noderuntime"
+	"github.com/xbcio/xflow/node/registry"
 	"github.com/xbcio/xflow/types"
 	"io"
 	"net/http"
@@ -73,7 +73,7 @@ func TestHTTP_GET(t *testing.T) {
 		return jsonResponse(200, `{"ok":true}`, http.Header{"Content-Type": []string{"application/json"}}), nil
 	})
 
-	h, _ := noderuntime.Lookup("xflow.http")
+	h, _ := registry.Lookup("xflow.http")
 	b := node.HTTP("GET", "https://example.test").SetQuery(map[string]any{"page": "1"})
 	input := &types.Input{Params: b.RawParams().(map[string]any)}
 	out, err := h.Execute(context.Background(), input)
@@ -103,7 +103,7 @@ func TestHTTP_POST_WithBody(t *testing.T) {
 		return jsonResponse(201, `{"id":42}`, nil), nil
 	})
 
-	h, _ := noderuntime.Lookup("xflow.http")
+	h, _ := registry.Lookup("xflow.http")
 	b := node.HTTP("POST", "https://example.test").SetBody(map[string]any{"name": "test"})
 	input := &types.Input{Params: b.RawParams().(map[string]any)}
 	out, err := h.Execute(context.Background(), input)
@@ -120,7 +120,7 @@ func TestHTTP_ErrorPort_On4xx(t *testing.T) {
 		return jsonResponse(404, `{"error":"not found"}`, nil), nil
 	})
 
-	h, _ := noderuntime.Lookup("xflow.http")
+	h, _ := registry.Lookup("xflow.http")
 	b := node.HTTP("GET", "https://example.test")
 	input := &types.Input{Params: b.RawParams().(map[string]any)}
 	out, err := h.Execute(context.Background(), input)
@@ -140,7 +140,7 @@ func TestHTTP_CustomHeaders(t *testing.T) {
 		return jsonResponse(200, `{}`, nil), nil
 	})
 
-	h, _ := noderuntime.Lookup("xflow.http")
+	h, _ := registry.Lookup("xflow.http")
 	b := node.HTTP("GET", "https://example.test").SetHeaders(map[string]any{"X-Custom": "hello"})
 	input := &types.Input{Params: b.RawParams().(map[string]any)}
 	_, err := h.Execute(context.Background(), input)
@@ -150,7 +150,7 @@ func TestHTTP_CustomHeaders(t *testing.T) {
 }
 
 func TestHTTP_MissingURL(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.http")
+	h, _ := registry.Lookup("xflow.http")
 	input := &types.Input{
 		Params: map[string]any{"method": "GET"},
 	}

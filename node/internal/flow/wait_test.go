@@ -2,7 +2,7 @@ package flow_test
 
 import (
 	"context"
-	"github.com/xbcio/xflow/internal/noderuntime"
+	"github.com/xbcio/xflow/node/registry"
 	"github.com/xbcio/xflow/types"
 	"testing"
 
@@ -38,7 +38,7 @@ func TestWait_WithTimeoutAddsTimeoutParam(t *testing.T) {
 }
 
 func TestWait_PrepareSuspend_Signal(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.wait")
+	h, _ := registry.Lookup("xflow.wait")
 	sh := h.(types.SuspendingHandler)
 
 	b := node.Wait("order_paid")
@@ -59,7 +59,7 @@ func TestWait_PrepareSuspend_Signal(t *testing.T) {
 }
 
 func TestWait_PrepareSuspend_SignalDefault(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.wait")
+	h, _ := registry.Lookup("xflow.wait")
 	sh := h.(types.SuspendingHandler)
 
 	input := &types.Input{
@@ -76,7 +76,7 @@ func TestWait_PrepareSuspend_SignalDefault(t *testing.T) {
 }
 
 func TestWait_PrepareSuspend_MultiSignal(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.wait")
+	h, _ := registry.Lookup("xflow.wait")
 	sh := h.(types.SuspendingHandler)
 
 	input := &types.Input{
@@ -103,7 +103,7 @@ func TestWait_PrepareSuspend_MultiSignal(t *testing.T) {
 }
 
 func TestWait_PrepareSuspend_Timer(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.wait")
+	h, _ := registry.Lookup("xflow.wait")
 	sh := h.(types.SuspendingHandler)
 
 	b := node.WaitDuration("5m")
@@ -124,7 +124,7 @@ func TestWait_PrepareSuspend_Timer(t *testing.T) {
 }
 
 func TestWait_PrepareSuspend_TimerMissingDuration(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.wait")
+	h, _ := registry.Lookup("xflow.wait")
 	sh := h.(types.SuspendingHandler)
 
 	input := &types.Input{
@@ -138,7 +138,7 @@ func TestWait_PrepareSuspend_TimerMissingDuration(t *testing.T) {
 }
 
 func TestWait_OnResume_Signal(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.wait")
+	h, _ := registry.Lookup("xflow.wait")
 	sh := h.(types.SuspendingHandler)
 
 	input := &types.Input{
@@ -166,7 +166,7 @@ func TestWait_OnResume_Signal(t *testing.T) {
 }
 
 func TestWait_OnResume_SignalIncludesInputs(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.wait")
+	h, _ := registry.Lookup("xflow.wait")
 	sh := h.(types.SuspendingHandler)
 
 	input := &types.Input{
@@ -198,7 +198,7 @@ func TestWait_OnResume_SignalIncludesInputs(t *testing.T) {
 }
 
 func TestWait_OnResume_Timeout(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.wait")
+	h, _ := registry.Lookup("xflow.wait")
 	sh := h.(types.SuspendingHandler)
 
 	input := &types.Input{NodeName: "wait_1"}
@@ -213,7 +213,7 @@ func TestWait_OnResume_Timeout(t *testing.T) {
 }
 
 func TestWait_OnResume_Timer(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.wait")
+	h, _ := registry.Lookup("xflow.wait")
 	sh := h.(types.SuspendingHandler)
 
 	input := &types.Input{

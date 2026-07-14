@@ -1,14 +1,16 @@
 package code
 
-import "github.com/xbcio/xflow/types"
-
 import (
 	"context"
 	"fmt"
-	. "github.com/xbcio/xflow/node/internal"
+
+	"github.com/xbcio/xflow/types"
+
 	"sync"
 
+	. "github.com/xbcio/xflow/node/internal"
 	"github.com/xbcio/xflow/node/internal/utils/exprx"
+	"github.com/xbcio/xflow/node/registry"
 )
 
 // FunctionNode implements xflow.function — executes a named Go function or an inline Expr expression.
@@ -143,4 +145,4 @@ func LookupFunc(name string) (UserFunc, bool) {
 	return fn, ok
 }
 
-func init() { Register(&FunctionNode{}) }
+func init() { registry.Register(&FunctionNode{}) }

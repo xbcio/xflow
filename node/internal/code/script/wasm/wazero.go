@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/xbcio/xflow/node/script"
+	"github.com/xbcio/xflow/node/internal/code/script/engine"
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
 	"github.com/tetratelabs/wazero/sys"
@@ -35,7 +35,7 @@ import (
 // Until then, guests must bundle equivalent functionality themselves (e.g.
 // Go guests import encoding/base64).
 func init() {
-	script.Register("wasm", "wazero", func() script.Engine { return sharedWazero })
+	engine.Register("wasm", "wazero", func() engine.Engine { return sharedWazero })
 }
 
 var sharedWazero = &wazeroEngine{compiled: map[string]wazero.CompiledModule{}}
@@ -61,7 +61,7 @@ func (e *wazeroEngine) runtime(ctx context.Context) wazero.Runtime {
 		// unbounded host memory.
 		e.rt = wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().
 			WithCloseOnContextDone(true).
-			WithMemoryLimitPages(script.DefaultWasmMemoryPages))
+			WithMemoryLimitPages(engine.DefaultWasmMemoryPages))
 		wasi_snapshot_preview1.MustInstantiate(ctx, e.rt)
 	})
 	return e.rt
@@ -88,7 +88,7 @@ func (e *wazeroEngine) compile(ctx context.Context, wasmBytes []byte) (wazero.Co
 	return cm, nil
 }
 
-func (e *wazeroEngine) Execute(ctx context.Context, code string, globals map[string]any, _ script.Helpers) (any, error) {
+func (e *wazeroEngine) Execute(ctx context.Context, code string, globals map[string]any, _ engine.Helpers) (any, error) {
 	// TODO(metrics): emit before/after counters and timers when the project
 	// metrics middleware lands:
 	//   - script_wasm_compile_total{result=hit|miss} (sha256 LRU)

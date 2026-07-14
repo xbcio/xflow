@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/xbcio/xflow/internal/noderuntime"
+	"github.com/xbcio/xflow/node/registry"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -205,56 +205,11 @@ func (w *WorkflowBuilder) Connect(src, dst types.EdgeEndpoint) *WorkflowBuilder 
 
 // build validates the workflow and returns a *types.WorkflowDef.
 func (w *WorkflowBuilder) build() (*types.WorkflowDef, error) {
-	// Compile body sub-workflows and inject into node params.
-	for i, ref := range w.refs {
-		if ref.body != nil {
-			bodyDef, err := ref.body.build()
-			if err != nil {
-				return nil, fmt.Errorf("node %q body: %w", ref.name, err)
-			}
-			entry := w.nodes[i]
-			if entry.builder != nil {
-				params, err := normalizeParams(entry.builder.RawParams())
-				if err != nil {
-					return nil, fmt.Errorf("node %q: %w", entry.name, err)
-				}
-				params["body"] = bodyDef
-				entry.normalizedParams = params
-			}
-		}
+	if err := w.compileBodies(); err != nil {
+		return nil, err
 	}
-
-	// Schema validation for Builder-based nodes.
-	for _, entry := range w.nodes {
-		if entry.builder == nil {
-			continue // direct handler — no registry entry, skip validation
-		}
-		if entry.normalizedParams != nil {
-			// Already normalized (e.g. body was injected above).
-			continue
-		}
-		dp, ok := entry.builder.(types.DescriptorProvider)
-		if !ok {
-			h, found := noderuntime.Lookup(entry.builder.NodeType())
-			if !found {
-				return nil, fmt.Errorf("node %q: handler type %q not found in registry", entry.name, entry.builder.NodeType())
-			}
-			dp = h
-		}
-		desc := dp.Descriptor()
-		if desc.Kind != "" {
-			entry.kind = desc.Kind
-		} else {
-			entry.kind = types.NodeKindAction
-		}
-		params, err := normalizeParams(entry.builder.RawParams())
-		if err != nil {
-			return nil, fmt.Errorf("node %q: %w", entry.name, err)
-		}
-		if err := validateParams(entry.name, desc.Params, params); err != nil {
-			return nil, err
-		}
-		entry.normalizedParams = params
+	if err := w.validateAndNormalizeParams(); err != nil {
+		return nil, err
 	}
 
 	if w.options == nil || !w.options.AllowCycles {
@@ -272,7 +227,6 @@ func (w *WorkflowBuilder) build() (*types.WorkflowDef, error) {
 		version = "v1"
 	}
 
-	// Assemble WorkflowDef.
 	def := &types.WorkflowDef{
 		Namespace:      namespace,
 		Name:           w.name,
@@ -282,7 +236,74 @@ func (w *WorkflowBuilder) build() (*types.WorkflowDef, error) {
 		Options:        w.options,
 		Connections:    make(types.Connections),
 	}
+	w.assembleNodes(def)
+	w.assembleConnections(def)
 
+	return def, nil
+}
+
+// compileBodies recursively compiles body sub-workflows attached to node refs
+// and injects the resulting *WorkflowDef into the node's normalized params.
+func (w *WorkflowBuilder) compileBodies() error {
+	for i, ref := range w.refs {
+		if ref.body == nil {
+			continue
+		}
+		bodyDef, err := ref.body.build()
+		if err != nil {
+			return fmt.Errorf("node %q body: %w", ref.name, err)
+		}
+		entry := w.nodes[i]
+		if entry.builder == nil {
+			continue
+		}
+		params, err := normalizeParams(entry.builder.RawParams())
+		if err != nil {
+			return fmt.Errorf("node %q: %w", entry.name, err)
+		}
+		params["body"] = bodyDef
+		entry.normalizedParams = params
+	}
+	return nil
+}
+
+// validateAndNormalizeParams resolves each Builder-based node's descriptor,
+// sets its kind, and validates/normalizes its params. Direct-handler nodes and
+// nodes already normalized by compileBodies are skipped.
+func (w *WorkflowBuilder) validateAndNormalizeParams() error {
+	for _, entry := range w.nodes {
+		if entry.builder == nil || entry.normalizedParams != nil {
+			continue
+		}
+		dp, ok := entry.builder.(types.DescriptorProvider)
+		if !ok {
+			h, found := registry.Lookup(entry.builder.NodeType())
+			if !found {
+				return fmt.Errorf("node %q: handler type %q not found in registry", entry.name, entry.builder.NodeType())
+			}
+			dp = h
+		}
+		desc := dp.Descriptor()
+		if desc.Kind != "" {
+			entry.kind = desc.Kind
+		} else {
+			entry.kind = types.NodeKindAction
+		}
+		params, err := normalizeParams(entry.builder.RawParams())
+		if err != nil {
+			return fmt.Errorf("node %q: %w", entry.name, err)
+		}
+		if err := validateParams(entry.name, desc.Params, params); err != nil {
+			return err
+		}
+		entry.normalizedParams = params
+	}
+	return nil
+}
+
+// assembleNodes fills def.Nodes from w.nodes, finalizing type/kind/version/params
+// for both builder-based and direct-handler nodes.
+func (w *WorkflowBuilder) assembleNodes(def *types.WorkflowDef) {
 	for _, entry := range w.nodes {
 		nodeType := ""
 		nodeVersion := 0
@@ -312,7 +333,10 @@ func (w *WorkflowBuilder) build() (*types.WorkflowDef, error) {
 			RunnerSelector: cloneRunnerSelector(entry.runnerSelector),
 		})
 	}
+}
 
+// assembleConnections fills def.Connections from w.edges.
+func (w *WorkflowBuilder) assembleConnections(def *types.WorkflowDef) {
 	for _, e := range w.edges {
 		if def.Connections[e.srcNode] == nil {
 			def.Connections[e.srcNode] = make(map[string][]types.Connection)
@@ -322,8 +346,6 @@ func (w *WorkflowBuilder) build() (*types.WorkflowDef, error) {
 			types.Connection{Node: e.dstNode, Input: e.dstPort},
 		)
 	}
-
-	return def, nil
 }
 
 // directHandlers returns the map of node name → direct ActionHandler.

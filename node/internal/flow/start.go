@@ -1,10 +1,13 @@
 package flow
 
-import "github.com/xbcio/xflow/types"
+import (
+	"github.com/xbcio/xflow/types"
 
-import . "github.com/xbcio/xflow/node/internal"
+	"context"
 
-import "context"
+	. "github.com/xbcio/xflow/node/internal"
+	"github.com/xbcio/xflow/node/registry"
+)
 
 // StartNode implements xflow.start, the explicit entry point for cyclic or
 // UI-authored workflows.
@@ -53,4 +56,4 @@ func (n *StartNode) Execute(_ context.Context, input *types.Input) (*types.Outpu
 	return &types.Output{Data: input.Data}, nil
 }
 
-func init() { Register(&StartNode{}) }
+func init() { registry.Register(&StartNode{}) }

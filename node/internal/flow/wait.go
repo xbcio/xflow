@@ -1,13 +1,15 @@
 package flow
 
-import "github.com/xbcio/xflow/types"
-
 import (
 	"context"
 	"fmt"
-	. "github.com/xbcio/xflow/node/internal"
+
+	"github.com/xbcio/xflow/types"
+
 	"time"
 
+	. "github.com/xbcio/xflow/node/internal"
+	"github.com/xbcio/xflow/node/registry"
 	"github.com/spf13/cast"
 )
 
@@ -217,4 +219,4 @@ func (n *WaitNode) OnResume(_ context.Context, input *types.Input, signal *types
 	}
 }
 
-func init() { Register(&WaitNode{}) }
+func init() { registry.Register(&WaitNode{}) }

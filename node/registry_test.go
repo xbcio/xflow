@@ -2,7 +2,7 @@ package node_test
 
 import (
 	"context"
-	"github.com/xbcio/xflow/internal/noderuntime"
+	"github.com/xbcio/xflow/node/registry"
 	"testing"
 
 	"github.com/xbcio/xflow/types"
@@ -60,8 +60,8 @@ func (h *versionedTriggerHandler) Activate(_ context.Context, _ *types.TriggerAc
 func (h *versionedTriggerHandler) NodeVersion() int { return h.version }
 
 func init() {
-	noderuntime.Register(&goodHandler{})
-	noderuntime.Register(&triggerHandler{})
+	registry.Register(&goodHandler{})
+	registry.Register(&triggerHandler{})
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -69,7 +69,7 @@ func init() {
 // TestRegistry_RegisterAndLookup verifies the happy-path contract:
 // a handler registered via Register is retrievable via Lookup.
 func TestRegistry_RegisterAndLookup(t *testing.T) {
-	h, found := noderuntime.Lookup("test.registry.good")
+	h, found := registry.Lookup("test.registry.good")
 	if !found {
 		t.Fatal("Lookup: expected handler to be found after Register")
 	}
@@ -86,12 +86,12 @@ func TestRegistry_PanicOnEmptyType(t *testing.T) {
 			t.Fatal("expected panic when registering handler with empty Type")
 		}
 	}()
-	noderuntime.Register(&emptyTypeHandler{})
+	registry.Register(&emptyTypeHandler{})
 }
 
 // TestRegistry_LookupVersion verifies version-based lookup.
 func TestRegistry_LookupVersion(t *testing.T) {
-	h, found := noderuntime.LookupVersion("test.registry.good", 1)
+	h, found := registry.LookupVersion("test.registry.good", 1)
 	if !found {
 		t.Fatal("LookupVersion: expected v1 handler to be found")
 	}
@@ -102,14 +102,14 @@ func TestRegistry_LookupVersion(t *testing.T) {
 
 // TestRegistry_LookupVersion_NotFound verifies missing version returns false.
 func TestRegistry_LookupVersion_NotFound(t *testing.T) {
-	_, found := noderuntime.LookupVersion("test.registry.good", 99)
+	_, found := registry.LookupVersion("test.registry.good", 99)
 	if found {
 		t.Fatal("LookupVersion: expected v99 to not be found")
 	}
 }
 
 func TestRegistry_LookupTrigger(t *testing.T) {
-	h, found := noderuntime.LookupTrigger("test.registry.trigger")
+	h, found := registry.LookupTrigger("test.registry.trigger")
 	if !found {
 		t.Fatal("LookupTrigger: expected trigger handler to be found")
 	}
@@ -124,10 +124,10 @@ func TestRegisterTriggerPreservesLatestActionDefault(t *testing.T) {
 	newer := &versionedTriggerHandler{nodeType: nodeType, version: 2}
 	older := &versionedTriggerHandler{nodeType: nodeType, version: 1}
 
-	noderuntime.RegisterTrigger(newer)
-	noderuntime.RegisterTrigger(older)
+	registry.RegisterTrigger(newer)
+	registry.RegisterTrigger(older)
 
-	h, found := noderuntime.Lookup(nodeType)
+	h, found := registry.Lookup(nodeType)
 	if !found {
 		t.Fatal("Lookup: expected action handler to be found after RegisterTrigger")
 	}
@@ -139,7 +139,7 @@ func TestRegisterTriggerPreservesLatestActionDefault(t *testing.T) {
 		t.Fatalf("Lookup: default version = %d, want 2", got.NodeVersion())
 	}
 
-	v1, found := noderuntime.LookupVersion(nodeType, 1)
+	v1, found := registry.LookupVersion(nodeType, 1)
 	if !found {
 		t.Fatal("LookupVersion: expected v1 handler to be registered")
 	}
@@ -154,7 +154,7 @@ func TestRegisterTriggerPreservesLatestActionDefault(t *testing.T) {
 
 // TestRegistry_Versions verifies listing all versions for a type.
 func TestRegistry_Versions(t *testing.T) {
-	versions := noderuntime.Versions("test.registry.good")
+	versions := registry.Versions("test.registry.good")
 	if len(versions) == 0 {
 		t.Fatal("Versions: expected at least one version")
 	}
@@ -173,7 +173,7 @@ func TestRegistry_Versions(t *testing.T) {
 func TestRegistry_BuiltinNodesHaveVersion(t *testing.T) {
 	types := []string{"xflow.if", "xflow.switch", "xflow.http", "xflow.loop", "xflow.split", "xflow.merge", "xflow.function", "xflow.grpc", "xflow.database", "xflow.wait", "xflow.approval"}
 	for _, typ := range types {
-		h, ok := noderuntime.LookupVersion(typ, 1)
+		h, ok := registry.LookupVersion(typ, 1)
 		if !ok {
 			t.Errorf("LookupVersion(%q, 1): not found", typ)
 			continue

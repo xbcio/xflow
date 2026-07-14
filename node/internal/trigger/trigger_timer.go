@@ -3,8 +3,10 @@ package trigger
 import (
 	"context"
 	"fmt"
-	. "github.com/xbcio/xflow/node/internal"
 	"time"
+
+	. "github.com/xbcio/xflow/node/internal"
+	"github.com/xbcio/xflow/node/registry"
 
 	"github.com/xbcio/xflow/node/internal/utils/conv"
 	"github.com/xbcio/xflow/types"
@@ -90,4 +92,4 @@ func newTimerTriggerEvent(workflowID types.WorkflowID, nodeName string, interval
 	}
 }
 
-func init() { RegisterTrigger(&TimerTriggerNode{}) }
+func init() { registry.RegisterTrigger(&TimerTriggerNode{}) }

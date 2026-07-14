@@ -2,7 +2,7 @@ package code_test
 
 import (
 	"context"
-	"github.com/xbcio/xflow/internal/noderuntime"
+	"github.com/xbcio/xflow/node/registry"
 	"testing"
 
 	"github.com/xbcio/xflow/node"
@@ -29,7 +29,7 @@ func TestExpr_Factory(t *testing.T) {
 }
 
 func TestFunction_InlineExpr(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.function")
+	h, _ := registry.Lookup("xflow.function")
 	b := node.Expr("a + b")
 	input := &types.Input{
 		Params: b.RawParams().(map[string]any),
@@ -45,7 +45,7 @@ func TestFunction_InlineExpr(t *testing.T) {
 }
 
 func TestFunction_InlineExpr_ReturnsMap(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.function")
+	h, _ := registry.Lookup("xflow.function")
 	b := node.Expr(`{"sum": a + b, "product": a * b}`)
 	input := &types.Input{
 		Params: b.RawParams().(map[string]any),
@@ -64,7 +64,7 @@ func TestFunction_InlineExpr_ReturnsMap(t *testing.T) {
 }
 
 func TestFunction_InlineExprCanReadRuntimeVars(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.function")
+	h, _ := registry.Lookup("xflow.function")
 	b := node.Expr(`{"tenant": $runtime.vars.tenant_id}`)
 	input := &types.Input{
 		Params:  b.RawParams().(map[string]any),
@@ -85,7 +85,7 @@ func TestFunction_NamedFunction(t *testing.T) {
 		return &types.Output{Data: map[string]any{"result": val * 2}}, nil
 	})
 
-	h, _ := noderuntime.Lookup("xflow.function")
+	h, _ := registry.Lookup("xflow.function")
 	b := node.Function("test_double")
 	input := &types.Input{
 		Params: b.RawParams().(map[string]any),
@@ -101,7 +101,7 @@ func TestFunction_NamedFunction(t *testing.T) {
 }
 
 func TestFunction_UnregisteredFunction(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.function")
+	h, _ := registry.Lookup("xflow.function")
 	b := node.Function("nonexistent_fn")
 	input := &types.Input{
 		Params: b.RawParams().(map[string]any),
@@ -114,7 +114,7 @@ func TestFunction_UnregisteredFunction(t *testing.T) {
 }
 
 func TestFunction_NeitherCodeNorName(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.function")
+	h, _ := registry.Lookup("xflow.function")
 	input := &types.Input{
 		Params: map[string]any{},
 		Data:   map[string]any{},
@@ -126,7 +126,7 @@ func TestFunction_NeitherCodeNorName(t *testing.T) {
 }
 
 func TestFunction_ExtraParams(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.function")
+	h, _ := registry.Lookup("xflow.function")
 	input := &types.Input{
 		Params: map[string]any{
 			"code":   "x + multiplier",

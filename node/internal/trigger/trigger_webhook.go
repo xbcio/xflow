@@ -5,11 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	. "github.com/xbcio/xflow/node/internal"
 	"io"
 	"net/http"
 	"strings"
 	"time"
+
+	. "github.com/xbcio/xflow/node/internal"
+	"github.com/xbcio/xflow/node/registry"
 
 	"github.com/xbcio/xflow/types"
 	"github.com/spf13/cast"
@@ -162,4 +164,4 @@ func readWebhookBody(r io.Reader, max int64) ([]byte, error) {
 	return body, nil
 }
 
-func init() { RegisterTrigger(&WebhookTriggerNode{}) }
+func init() { registry.RegisterTrigger(&WebhookTriggerNode{}) }

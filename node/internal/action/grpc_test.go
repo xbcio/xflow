@@ -2,7 +2,7 @@ package action_test
 
 import (
 	"context"
-	"github.com/xbcio/xflow/internal/noderuntime"
+	"github.com/xbcio/xflow/node/registry"
 	"github.com/xbcio/xflow/node/resource"
 	"github.com/xbcio/xflow/types"
 	"strings"
@@ -33,7 +33,7 @@ func TestGRPC_Factory(t *testing.T) {
 }
 
 func TestGRPC_MissingHost(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.grpc")
+	h, _ := registry.Lookup("xflow.grpc")
 	input := &types.Input{
 		Params: map[string]any{
 			"service": "test.Service",
@@ -47,7 +47,7 @@ func TestGRPC_MissingHost(t *testing.T) {
 }
 
 func TestGRPC_MissingService(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.grpc")
+	h, _ := registry.Lookup("xflow.grpc")
 	input := &types.Input{
 		Params: map[string]any{
 			"host":   "localhost:50051",
@@ -61,7 +61,7 @@ func TestGRPC_MissingService(t *testing.T) {
 }
 
 func TestGRPC_MissingMethod(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.grpc")
+	h, _ := registry.Lookup("xflow.grpc")
 	input := &types.Input{
 		Params: map[string]any{
 			"host":    "localhost:50051",
@@ -80,7 +80,7 @@ func TestGRPC_MissingMethod(t *testing.T) {
 // per-call dial. The input passes host/service/method validation so the only
 // failure point is the pool lookup at acquireGRPC.
 func TestGRPC_NoPoolErrors(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.grpc")
+	h, _ := registry.Lookup("xflow.grpc")
 	// No pool is attached, so acquireGRPC fails before any timeout is used;
 	// the Timeout call is intentionally omitted as it is irrelevant here.
 	b := node.GRPC("test.Service", "Call", "localhost:1").
@@ -111,7 +111,7 @@ func TestGRPC_NoPoolErrors(t *testing.T) {
 // localhost:1. The assertion checks the error port AND that the error message
 // describes a connection/dial failure, explicitly NOT the no-pool message.
 func TestGRPC_ConnectionError(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.grpc")
+	h, _ := registry.Lookup("xflow.grpc")
 	pool := resource.NewDefaultResourcePool(types.DefaultResourcePoolConfig())
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

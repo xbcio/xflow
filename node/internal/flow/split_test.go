@@ -2,7 +2,7 @@ package flow_test
 
 import (
 	"context"
-	"github.com/xbcio/xflow/internal/noderuntime"
+	"github.com/xbcio/xflow/node/registry"
 	"github.com/xbcio/xflow/types"
 	"testing"
 
@@ -17,7 +17,7 @@ func TestSplit_Factory(t *testing.T) {
 }
 
 func TestSplit_BasicSplit(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.split")
+	h, _ := registry.Lookup("xflow.split")
 	b := node.Split("items")
 	input := &types.Input{
 		Params: b.RawParams().(map[string]any),
@@ -36,7 +36,7 @@ func TestSplit_BasicSplit(t *testing.T) {
 }
 
 func TestSplit_WithBatchSize(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.split")
+	h, _ := registry.Lookup("xflow.split")
 	input := &types.Input{
 		Params: map[string]any{"items": "items", "batch_size": 2},
 		Data:   map[string]any{"items": []any{1, 2, 3, 4}},
@@ -51,7 +51,7 @@ func TestSplit_WithBatchSize(t *testing.T) {
 }
 
 func TestSplit_MissingItems(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.split")
+	h, _ := registry.Lookup("xflow.split")
 	input := &types.Input{
 		Params: map[string]any{},
 		Data:   map[string]any{},

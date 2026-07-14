@@ -6,17 +6,17 @@ import (
 	"sync"
 
 	"github.com/dop251/goja"
-	"github.com/xbcio/xflow/node/script"
+	"github.com/xbcio/xflow/node/internal/code/script/engine"
 )
 
 func init() {
-	script.Register("js", "goja", func() script.Engine { return sharedGoja })
+	engine.Register("js", "goja", func() engine.Engine { return sharedGoja })
 }
 
 // sharedGoja is process-wide: it holds a sync.Pool of runtimes and an LRU
 // program cache, both safe for concurrent use.
 var sharedGoja = &gojaEngine{
-	programs: newProgramCache(script.DefaultProgramCacheSize),
+	programs: newProgramCache(engine.DefaultProgramCacheSize),
 }
 
 type gojaEngine struct {
@@ -53,7 +53,7 @@ func (e *gojaEngine) get() *pooledVM {
 	vm := goja.New()
 	// Resource limit: bound recursion depth so a runaway script raises a
 	// runtime error instead of overflowing the host goroutine stack.
-	vm.SetMaxCallStackSize(script.DefaultGojaStackSize)
+	vm.SetMaxCallStackSize(engine.DefaultGojaStackSize)
 	base := map[string]struct{}{}
 	for _, k := range vm.GlobalObject().Keys() {
 		base[k] = struct{}{}
@@ -72,7 +72,7 @@ func (p *pooledVM) cleanup() {
 	}
 }
 
-func (e *gojaEngine) Execute(ctx context.Context, code string, globals map[string]any, h script.Helpers) (any, error) {
+func (e *gojaEngine) Execute(ctx context.Context, code string, globals map[string]any, h engine.Helpers) (any, error) {
 	// TODO(metrics): emit before/after counters and timers when the project
 	// metrics middleware lands:
 	//   - script_goja_compile_total{result=hit|miss} (e.programs LRU)

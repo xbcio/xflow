@@ -1,15 +1,17 @@
 package flow
 
-import "github.com/xbcio/xflow/types"
-
 import (
 	"context"
 	"fmt"
-	. "github.com/xbcio/xflow/node/internal"
+
+	"github.com/xbcio/xflow/types"
+
 	"slices"
 
+	. "github.com/xbcio/xflow/node/internal"
 	"github.com/xbcio/xflow/node/internal/utils/conv"
 	"github.com/xbcio/xflow/node/internal/utils/exprx"
+	"github.com/xbcio/xflow/node/registry"
 	"github.com/spf13/cast"
 )
 
@@ -96,4 +98,4 @@ func (n *LoopNode) Execute(ctx context.Context, input *types.Input) (*types.Outp
 	}, nil
 }
 
-func init() { Register(&LoopNode{}) }
+func init() { registry.Register(&LoopNode{}) }

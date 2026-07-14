@@ -2,7 +2,7 @@ package flow_test
 
 import (
 	"context"
-	"github.com/xbcio/xflow/internal/noderuntime"
+	"github.com/xbcio/xflow/node/registry"
 	"github.com/xbcio/xflow/types"
 	"testing"
 
@@ -35,7 +35,7 @@ func TestSwitch_Factory_Expr(t *testing.T) {
 }
 
 func TestSwitch_RulesMode(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.switch")
+	h, _ := registry.Lookup("xflow.switch")
 	b := node.Switch([]node.SwitchRule{
 		{Condition: "status == \"active\"", Output: "active"},
 		{Condition: "status == \"inactive\"", Output: "inactive"},
@@ -54,7 +54,7 @@ func TestSwitch_RulesMode(t *testing.T) {
 }
 
 func TestSwitch_RulesMode_Default(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.switch")
+	h, _ := registry.Lookup("xflow.switch")
 	b := node.Switch([]node.SwitchRule{
 		{Condition: "status == \"active\"", Output: "active"},
 	}, "fallback")
@@ -72,7 +72,7 @@ func TestSwitch_RulesMode_Default(t *testing.T) {
 }
 
 func TestSwitch_ExpressionMode(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.switch")
+	h, _ := registry.Lookup("xflow.switch")
 	b := node.SwitchExpr("category", "other")
 	input := &types.Input{
 		Params: b.RawParams().(map[string]any),
@@ -88,7 +88,7 @@ func TestSwitch_ExpressionMode(t *testing.T) {
 }
 
 func TestSwitch_ExpressionMode_MissingExpr(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.switch")
+	h, _ := registry.Lookup("xflow.switch")
 	input := &types.Input{
 		Params: map[string]any{"mode": "expression"},
 		Data:   map[string]any{},
@@ -100,7 +100,7 @@ func TestSwitch_ExpressionMode_MissingExpr(t *testing.T) {
 }
 
 func TestSwitch_UnknownMode(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.switch")
+	h, _ := registry.Lookup("xflow.switch")
 	input := &types.Input{
 		Params: map[string]any{"mode": "invalid"},
 		Data:   map[string]any{},

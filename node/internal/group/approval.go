@@ -1,13 +1,14 @@
 package group
 
-import "github.com/xbcio/xflow/types"
-
 import (
 	"context"
 	"fmt"
 	"time"
 
+	"github.com/xbcio/xflow/types"
+
 	. "github.com/xbcio/xflow/node/internal"
+	"github.com/xbcio/xflow/node/registry"
 )
 
 // ApprovalNodeType is the canonical type identifier for the approval node.
@@ -492,4 +493,4 @@ func parseDecisionList(v any) []map[string]any {
 	return nil
 }
 
-func init() { Register(&ApprovalNode{}) }
+func init() { registry.Register(&ApprovalNode{}) }

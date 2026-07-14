@@ -1,13 +1,14 @@
 package flow
 
-import "github.com/xbcio/xflow/types"
-
 import (
 	"context"
 	"fmt"
-	. "github.com/xbcio/xflow/node/internal"
 
+	"github.com/xbcio/xflow/types"
+
+	. "github.com/xbcio/xflow/node/internal"
 	"github.com/xbcio/xflow/node/internal/utils/exprx"
+	"github.com/xbcio/xflow/node/registry"
 	"github.com/spf13/cast"
 )
 
@@ -154,4 +155,4 @@ func (n *SwitchNode) executeExpression(input *types.Input) (*types.Output, error
 	return &types.Output{Data: input.Data, Port: port}, nil
 }
 
-func init() { Register(&SwitchNode{}) }
+func init() { registry.Register(&SwitchNode{}) }

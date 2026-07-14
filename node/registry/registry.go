@@ -1,4 +1,4 @@
-package noderuntime
+package registry
 
 import (
 	"fmt"

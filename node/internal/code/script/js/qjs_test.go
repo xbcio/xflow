@@ -5,12 +5,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xbcio/xflow/node/script"
+	"github.com/xbcio/xflow/node/internal/code/script/engine"
 )
 
-func newQJS(t *testing.T) script.Engine {
+func newQJS(t *testing.T) engine.Engine {
 	t.Helper()
-	e, ok := script.Lookup("js", "qjs")
+	e, ok := engine.Lookup("js", "qjs")
 	if !ok {
 		t.Fatal("qjs engine not registered")
 	}
@@ -21,7 +21,7 @@ func TestQJS_ObjectCompletion(t *testing.T) {
 	out, err := newQJS(t).Execute(context.Background(),
 		`({status: 'ok', len: $input.name.length})`,
 		map[string]any{"$input": map[string]any{"name": "abcd"}},
-		script.DefaultHelpers())
+		engine.DefaultHelpers())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -37,7 +37,7 @@ func TestQJS_ReadsCredential(t *testing.T) {
 			"$credential":  map[string]any{"token": "t-1"},
 			"$credentials": map[string]any{"aes_key": map[string]any{"key": "kk"}},
 		},
-		script.DefaultHelpers())
+		engine.DefaultHelpers())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -50,7 +50,7 @@ func TestQJS_ReadsCredential(t *testing.T) {
 func TestQJS_HelpersBase64(t *testing.T) {
 	out, err := newQJS(t).Execute(context.Background(),
 		`({enc: $helpers.base64Encode('hi')})`,
-		nil, script.DefaultHelpers())
+		nil, engine.DefaultHelpers())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestQJS_SandboxNoIO(t *testing.T) {
 		   hasNavigator: typeof navigator, hasGc: typeof gc, hasQueueMicrotask: typeof queueMicrotask,
 		   hasSetTimeout: typeof setTimeout, hasSetInterval: typeof setInterval,
 		   hasClearTimeout: typeof clearTimeout, hasClearInterval: typeof clearInterval})`,
-		nil, script.DefaultHelpers())
+		nil, engine.DefaultHelpers())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestQJS_SandboxFileIOUnreachable(t *testing.T) {
 	out, err := newQJS(t).Execute(context.Background(),
 		`({osType: typeof os, readdir: (typeof os !== 'undefined' && typeof os.readdir),
 		   stdType: typeof std, open: (typeof std !== 'undefined' && typeof std.open)})`,
-		nil, script.DefaultHelpers())
+		nil, engine.DefaultHelpers())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestQJS_SandboxFileIOUnreachable(t *testing.T) {
 func TestQJS_Timeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	_, err := newQJS(t).Execute(ctx, `while(true){}`, nil, script.DefaultHelpers())
+	_, err := newQJS(t).Execute(ctx, `while(true){}`, nil, engine.DefaultHelpers())
 	if err == nil {
 		t.Fatal("expected timeout error")
 	}
@@ -130,7 +130,7 @@ func TestQJS_Warmup(t *testing.T) {
 	}
 	// After warmup, normal execution must still succeed.
 	out, err := newQJS(t).Execute(context.Background(),
-		`({ok: 1+1})`, nil, script.DefaultHelpers())
+		`({ok: 1+1})`, nil, engine.DefaultHelpers())
 	if err != nil {
 		t.Fatalf("post-warmup execute: %v", err)
 	}

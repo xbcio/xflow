@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/xbcio/xflow/node/script"
+	"github.com/xbcio/xflow/node/internal/code/script/engine"
 )
 
 func TestBuildGlobals_Keys(t *testing.T) {
@@ -25,11 +25,11 @@ func TestJSFamily_HelpersConsistent(t *testing.T) {
 	code := `({enc: $helpers.base64Encode('xyz'), dec: $helpers.base64Decode('eHl6')})`
 	results := map[string]map[string]any{}
 	for _, rt := range []string{"goja", "qjs"} {
-		e, ok := script.Lookup("js", rt)
+		e, ok := engine.Lookup("js", rt)
 		if !ok {
 			t.Fatalf("%s not registered", rt)
 		}
-		out, err := e.Execute(context.Background(), code, nil, script.DefaultHelpers())
+		out, err := e.Execute(context.Background(), code, nil, engine.DefaultHelpers())
 		if err != nil {
 			t.Fatalf("%s exec error: %v", rt, err)
 		}

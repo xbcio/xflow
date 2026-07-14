@@ -3,9 +3,11 @@ package trigger
 import (
 	"context"
 	"fmt"
-	. "github.com/xbcio/xflow/node/internal"
 	"sync"
 	"time"
+
+	. "github.com/xbcio/xflow/node/internal"
+	"github.com/xbcio/xflow/node/registry"
 
 	"github.com/xbcio/xflow/node/internal/utils/conv"
 	"github.com/spf13/cast"
@@ -603,4 +605,4 @@ func normalizeKafkaAggregateConfig(cfg KafkaAggregateConfig) KafkaAggregateConfi
 	return cfg
 }
 
-func init() { RegisterTrigger(&KafkaTriggerNode{}) }
+func init() { registry.RegisterTrigger(&KafkaTriggerNode{}) }

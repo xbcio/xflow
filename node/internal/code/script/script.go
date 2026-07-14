@@ -1,17 +1,20 @@
-package code
-
-import "github.com/xbcio/xflow/types"
+package script
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
-	. "github.com/xbcio/xflow/node/internal"
 
+	"github.com/xbcio/xflow/types"
+
+	. "github.com/xbcio/xflow/node/internal"
+	"github.com/xbcio/xflow/node/internal/code/script/engine"
 	"github.com/xbcio/xflow/node/internal/utils/exprx"
-	"github.com/xbcio/xflow/node/script"
-	_ "github.com/xbcio/xflow/node/script/js"
-	_ "github.com/xbcio/xflow/node/script/wasm"
+	"github.com/xbcio/xflow/node/registry"
+
+	_ "github.com/xbcio/xflow/node/internal/code/script/js"
+
+	_ "github.com/xbcio/xflow/node/internal/code/script/wasm"
 )
 
 // ScriptNode implements xflow.script — runs a sandboxed dynamic script.
@@ -108,7 +111,7 @@ func (n *ScriptNode) Execute(ctx context.Context, input *types.Input) (*types.Ou
 		return nil, fmt.Errorf("xflow.script: runtime parameter is required (js -> goja|qjs, wasm -> wazero)")
 	}
 
-	engine, ok := script.Lookup(language, runtime)
+	eng, ok := engine.Lookup(language, runtime)
 	if !ok {
 		return nil, fmt.Errorf("xflow.script: unknown engine (language=%q, runtime=%q)", language, runtime)
 	}
@@ -116,7 +119,7 @@ func (n *ScriptNode) Execute(ctx context.Context, input *types.Input) (*types.Ou
 	declared := readCredNames(input.Params["credentials"])
 	// Input.Credential has no error return; a nil value means "not found", which
 	// ResolveCredentials turns into a config error for a declared-but-absent name.
-	creds, first, err := script.ResolveCredentials(declared, func(name string) (map[string]any, error) {
+	creds, first, err := engine.ResolveCredentials(declared, func(name string) (map[string]any, error) {
 		return input.Credential(name), nil
 	})
 	if err != nil {
@@ -125,11 +128,11 @@ func (n *ScriptNode) Execute(ctx context.Context, input *types.Input) (*types.Ou
 
 	globals := buildScriptGlobals(input, creds, first)
 
-	result, err := engine.Execute(ctx, code, globals, script.DefaultHelpers())
+	result, err := eng.Execute(ctx, code, globals, engine.DefaultHelpers())
 	if err != nil {
 		return &types.Output{Data: map[string]any{"error": err.Error()}, Port: "error"}, nil
 	}
-	data := script.MapResult(result)
+	data := engine.MapResult(result)
 	if sizeErr := checkResultSize(data); sizeErr != nil {
 		return &types.Output{Data: map[string]any{"error": sizeErr.Error()}, Port: "error"}, nil
 	}
@@ -144,8 +147,8 @@ func checkResultSize(data map[string]any) error {
 	if err != nil {
 		return fmt.Errorf("xflow.script: encode result: %w", err)
 	}
-	if len(b) > script.DefaultMaxOutputBytes {
-		return &script.OutputSizeError{Size: len(b), Limit: script.DefaultMaxOutputBytes}
+	if len(b) > engine.DefaultMaxOutputBytes {
+		return &engine.OutputSizeError{Size: len(b), Limit: engine.DefaultMaxOutputBytes}
 	}
 	return nil
 }
@@ -175,4 +178,4 @@ func buildScriptGlobals(input *types.Input, creds map[string]any, first any) map
 	})
 }
 
-func init() { Register(&ScriptNode{}) }
+func init() { registry.Register(&ScriptNode{}) }

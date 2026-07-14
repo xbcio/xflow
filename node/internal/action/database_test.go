@@ -2,7 +2,7 @@ package action_test
 
 import (
 	"context"
-	"github.com/xbcio/xflow/internal/noderuntime"
+	"github.com/xbcio/xflow/node/registry"
 	"github.com/xbcio/xflow/types"
 	"strings"
 	"testing"
@@ -29,7 +29,7 @@ func TestDatabase_Factory(t *testing.T) {
 }
 
 func TestDatabase_MissingCredential(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.database")
+	h, _ := registry.Lookup("xflow.database")
 	input := &types.Input{
 		Params: map[string]any{
 			"operation": "select",
@@ -43,7 +43,7 @@ func TestDatabase_MissingCredential(t *testing.T) {
 }
 
 func TestDatabase_CredentialNotFound(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.database")
+	h, _ := registry.Lookup("xflow.database")
 	b := node.Database("select", "users", "my_db")
 	input := &types.Input{
 		Params: b.RawParams().(map[string]any),
@@ -55,7 +55,7 @@ func TestDatabase_CredentialNotFound(t *testing.T) {
 }
 
 func TestDatabase_InvalidTable(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.database")
+	h, _ := registry.Lookup("xflow.database")
 	input := &types.Input{
 		Params: map[string]any{
 			"operation":  "select",
@@ -73,7 +73,7 @@ func TestDatabase_InvalidTable(t *testing.T) {
 }
 
 func TestDatabase_UnknownOperation(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.database")
+	h, _ := registry.Lookup("xflow.database")
 	input := &types.Input{
 		Params: map[string]any{
 			"operation":  "truncate",
@@ -91,7 +91,7 @@ func TestDatabase_UnknownOperation(t *testing.T) {
 }
 
 func TestDatabase_UpdateRequiresWhere(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.database")
+	h, _ := registry.Lookup("xflow.database")
 	b := node.Database("update", "users", "db").SetData(map[string]any{"name": "test"})
 	input := &types.Input{Params: b.RawParams().(map[string]any)}
 	input.SetCredentialResolver(func(name string) map[string]any {
@@ -104,7 +104,7 @@ func TestDatabase_UpdateRequiresWhere(t *testing.T) {
 }
 
 func TestDatabase_DeleteRequiresWhere(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.database")
+	h, _ := registry.Lookup("xflow.database")
 	b := node.Database("delete", "users", "db")
 	input := &types.Input{Params: b.RawParams().(map[string]any)}
 	input.SetCredentialResolver(func(name string) map[string]any {
@@ -125,7 +125,7 @@ func TestDatabase_DeleteRequiresWhere(t *testing.T) {
 // operation) so the only remaining failure point is the pool lookup. This
 // guards against a regression that re-introduces a fallback dial path.
 func TestDatabase_NoPoolErrors(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.database")
+	h, _ := registry.Lookup("xflow.database")
 	b := node.Database("select", "users", "db")
 	input := &types.Input{Params: b.RawParams().(map[string]any)}
 	input.SetCredentialResolver(func(name string) map[string]any {

@@ -2,7 +2,7 @@ package flow_test
 
 import (
 	"context"
-	"github.com/xbcio/xflow/internal/noderuntime"
+	"github.com/xbcio/xflow/node/registry"
 	"github.com/xbcio/xflow/types"
 	"testing"
 
@@ -28,7 +28,7 @@ func TestIF_OnError(t *testing.T) {
 }
 
 func TestIF_TrueCondition(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.if")
+	h, _ := registry.Lookup("xflow.if")
 	b := node.IF("age > 18")
 	input := &types.Input{
 		Params: b.RawParams().(map[string]any),
@@ -44,7 +44,7 @@ func TestIF_TrueCondition(t *testing.T) {
 }
 
 func TestIF_FalseCondition(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.if")
+	h, _ := registry.Lookup("xflow.if")
 	b := node.IF("age > 18")
 	input := &types.Input{
 		Params: b.RawParams().(map[string]any),
@@ -60,7 +60,7 @@ func TestIF_FalseCondition(t *testing.T) {
 }
 
 func TestIF_EmptyCondition(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.if")
+	h, _ := registry.Lookup("xflow.if")
 	input := &types.Input{
 		Params: map[string]any{},
 		Data:   map[string]any{},
@@ -72,7 +72,7 @@ func TestIF_EmptyCondition(t *testing.T) {
 }
 
 func TestIF_InvalidExpression(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.if")
+	h, _ := registry.Lookup("xflow.if")
 	input := &types.Input{
 		Params: map[string]any{"condition": "??? invalid"},
 		Data:   map[string]any{},
@@ -84,7 +84,7 @@ func TestIF_InvalidExpression(t *testing.T) {
 }
 
 func TestIF_PassesDataThrough(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.if")
+	h, _ := registry.Lookup("xflow.if")
 	b := node.IF("true")
 	input := &types.Input{
 		Params: b.RawParams().(map[string]any),

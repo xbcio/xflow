@@ -2,7 +2,7 @@ package flow_test
 
 import (
 	"context"
-	"github.com/xbcio/xflow/internal/noderuntime"
+	"github.com/xbcio/xflow/node/registry"
 	"github.com/xbcio/xflow/types"
 	"testing"
 
@@ -17,7 +17,7 @@ func TestMerge_Factory(t *testing.T) {
 }
 
 func TestMerge_WaitAll(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.merge")
+	h, _ := registry.Lookup("xflow.merge")
 	b := node.Merge(node.MergeWaitAll)
 	input := &types.Input{
 		Params: b.RawParams().(map[string]any),
@@ -40,7 +40,7 @@ func TestMerge_WaitAll(t *testing.T) {
 }
 
 func TestMerge_WaitAny(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.merge")
+	h, _ := registry.Lookup("xflow.merge")
 	b := node.Merge(node.MergeWaitAny)
 	input := &types.Input{
 		Params: b.RawParams().(map[string]any),
@@ -56,7 +56,7 @@ func TestMerge_WaitAny(t *testing.T) {
 }
 
 func TestMerge_UnknownMode(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.merge")
+	h, _ := registry.Lookup("xflow.merge")
 	input := &types.Input{
 		Params: map[string]any{"mode": "invalid"},
 		Data:   map[string]any{},

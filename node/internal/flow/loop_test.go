@@ -2,7 +2,7 @@ package flow_test
 
 import (
 	"context"
-	"github.com/xbcio/xflow/internal/noderuntime"
+	"github.com/xbcio/xflow/node/registry"
 	"github.com/xbcio/xflow/types"
 	"testing"
 
@@ -21,7 +21,7 @@ func TestLoop_Factory(t *testing.T) {
 }
 
 func TestLoop_BasicIteration(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.loop")
+	h, _ := registry.Lookup("xflow.loop")
 	b := node.Loop("items", 2)
 	input := &types.Input{
 		Params: b.RawParams().(map[string]any),
@@ -40,7 +40,7 @@ func TestLoop_BasicIteration(t *testing.T) {
 }
 
 func TestLoop_SingleBatch(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.loop")
+	h, _ := registry.Lookup("xflow.loop")
 	b := node.Loop("items", 1)
 	input := &types.Input{
 		Params: b.RawParams().(map[string]any),
@@ -56,7 +56,7 @@ func TestLoop_SingleBatch(t *testing.T) {
 }
 
 func TestLoop_MissingItems(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.loop")
+	h, _ := registry.Lookup("xflow.loop")
 	input := &types.Input{
 		Params: map[string]any{"batch_size": 1},
 		Data:   map[string]any{},
@@ -68,7 +68,7 @@ func TestLoop_MissingItems(t *testing.T) {
 }
 
 func TestLoop_ItemsNotArray(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.loop")
+	h, _ := registry.Lookup("xflow.loop")
 	b := node.Loop("items", 1)
 	input := &types.Input{
 		Params: b.RawParams().(map[string]any),
@@ -81,7 +81,7 @@ func TestLoop_ItemsNotArray(t *testing.T) {
 }
 
 func TestLoop_EmptyArray(t *testing.T) {
-	h, _ := noderuntime.Lookup("xflow.loop")
+	h, _ := registry.Lookup("xflow.loop")
 	b := node.Loop("items", 1)
 	input := &types.Input{
 		Params: b.RawParams().(map[string]any),

@@ -1,4 +1,4 @@
-package script
+package engine
 
 // MapResult normalizes an engine completion value into Output.Data per §5.3:
 // object -> passthrough; scalar -> {"result": v}; nil -> {}.

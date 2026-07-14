@@ -6,13 +6,13 @@ import (
 	"fmt"
 
 	"github.com/fastschema/qjs"
-	"github.com/xbcio/xflow/node/script"
+	"github.com/xbcio/xflow/node/internal/code/script/engine"
 )
 
 func init() {
-	script.Register("js", "qjs", func() script.Engine { return qjsEngine{} })
+	engine.Register("js", "qjs", func() engine.Engine { return qjsEngine{} })
 	// QuickJS-on-wasm has a ~330ms first-load cost; let the host warm it up.
-	script.RegisterWarmer(Warmup)
+	engine.RegisterWarmer(Warmup)
 }
 
 // qjsEngine runs scripts on QuickJS-via-wazero (pure Go). The QuickJS wasm
@@ -43,7 +43,7 @@ const stripGlobals = `(function(){
 
 func (qjsEngine) Name() string { return "js/qjs" }
 
-func (qjsEngine) Execute(ctx context.Context, code string, globals map[string]any, h script.Helpers) (result any, err error) {
+func (qjsEngine) Execute(ctx context.Context, code string, globals map[string]any, h engine.Helpers) (result any, err error) {
 	// TODO(metrics): emit before/after counters and timers when the project
 	// metrics middleware lands:
 	//   - script_qjs_runtime_new_duration_seconds (qjs.New cost; cold-start indicator)
@@ -72,8 +72,8 @@ func (qjsEngine) Execute(ctx context.Context, code string, globals map[string]an
 		// Resource limits: cap the QuickJS heap and C-stack so a runaway
 		// script raises an out-of-memory exception instead of consuming
 		// unbounded host memory.
-		MemoryLimit:  script.DefaultQJSMemoryLimit,
-		MaxStackSize: script.DefaultQJSMaxStackSize,
+		MemoryLimit:  engine.DefaultQJSMemoryLimit,
+		MaxStackSize: engine.DefaultQJSMaxStackSize,
 	})
 	if nerr != nil {
 		return nil, fmt.Errorf("js/qjs: new runtime: %w", nerr)
@@ -175,8 +175,8 @@ func Warmup(ctx context.Context) error {
 	}
 	rt, err := qjs.New(qjs.Option{
 		Context:      ctx,
-		MemoryLimit:  script.DefaultQJSMemoryLimit,
-		MaxStackSize: script.DefaultQJSMaxStackSize,
+		MemoryLimit:  engine.DefaultQJSMemoryLimit,
+		MaxStackSize: engine.DefaultQJSMaxStackSize,
 	})
 	if err != nil {
 		return fmt.Errorf("js/qjs: warmup: %w", err)
