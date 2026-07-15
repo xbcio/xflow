@@ -445,3 +445,184 @@ func TestCompile_ExperimentalExpandReportsAllOffendingNodes(t *testing.T) {
 		t.Fatalf("expected 2 blocked nodes, got %d: %v", len(gateErr.Nodes), gateErr.Nodes)
 	}
 }
+
+func TestCompileSnapshotsMutableDefinition(t *testing.T) {
+	def := &types.WorkflowDef{
+		Name:    "snapshot",
+		Version: "v7",
+		RunnerSelector: &types.RunnerSelector{
+			Mode:        types.RunnerSelectorModeRequired,
+			MatchLabels: map[string]string{"workflow": "original"},
+		},
+		Context: &types.WorkflowContext{
+			Vars: map[string]any{
+				"nested": map[string]any{"value": "vars-original"},
+				"list": []any{
+					map[string]any{"value": "vars-list-original"},
+					[]string{"one", "two"},
+				},
+			},
+			Config: map[string]any{
+				"nested": map[string][]string{"labels": []string{"prod", "critical"}},
+			},
+		},
+		Settings: &types.WorkflowSettings{
+			Retry: &types.RetrySettings{Enabled: true, MaxAttempts: 2, Strategy: "exponential"},
+		},
+		Nodes: []types.NodeDef{
+			{Name: "start", Type: "xflow.start"},
+			{
+				Name: "worker",
+				Type: "test.worker",
+				RunnerSelector: &types.RunnerSelector{
+					MatchLabels: map[string]string{"node": "original"},
+				},
+				Parameters: map[string]any{
+					"nested": map[string]any{"value": "params-original"},
+					"list": []any{
+						map[string]any{"value": "params-list-original"},
+						[]string{"one", "two"},
+					},
+				},
+				Retry: &types.RetrySettings{Enabled: true, MaxAttempts: 4, Strategy: "linear"},
+			},
+		},
+		Connections: types.Connections{
+			"start": {"main": []types.Connection{{Node: "worker", Input: "main"}}},
+		},
+	}
+
+	g, err := Compile(def)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalHash := g.GraphHash
+
+	def.Context.Vars["new"] = "changed"
+	def.Context.Vars["nested"].(map[string]any)["value"] = "changed"
+	def.Context.Vars["list"].([]any)[0].(map[string]any)["value"] = "changed"
+	def.Context.Vars["list"].([]any)[1].([]string)[0] = "changed"
+	def.Context.Config["new"] = "changed"
+	def.Context.Config["nested"].(map[string][]string)["labels"][0] = "changed"
+	def.RunnerSelector.MatchLabels["workflow"] = "changed"
+	def.Settings.Retry.MaxAttempts = 99
+	def.Nodes[1].RunnerSelector.MatchLabels["node"] = "changed"
+	def.Nodes[1].Parameters["nested"].(map[string]any)["value"] = "changed"
+	def.Nodes[1].Parameters["list"].([]any)[0].(map[string]any)["value"] = "changed"
+	def.Nodes[1].Parameters["list"].([]any)[1].([]string)[0] = "changed"
+	def.Nodes[1].Retry.MaxAttempts = 99
+
+	t.Run("context maps and nested values", func(t *testing.T) {
+		if _, ok := g.Vars["new"]; ok {
+			t.Fatal("Vars contains mutation made after Compile")
+		}
+		if got := g.Vars["nested"].(map[string]any)["value"]; got != "vars-original" {
+			t.Fatalf("Vars nested value = %q, want %q", got, "vars-original")
+		}
+		if got := g.Vars["list"].([]any)[0].(map[string]any)["value"]; got != "vars-list-original" {
+			t.Fatalf("Vars nested list map value = %q, want %q", got, "vars-list-original")
+		}
+		if got := g.Vars["list"].([]any)[1].([]string)[0]; got != "one" {
+			t.Fatalf("Vars nested list slice value = %q, want %q", got, "one")
+		}
+		if _, ok := g.Config["new"]; ok {
+			t.Fatal("Config contains mutation made after Compile")
+		}
+		if got := g.Config["nested"].(map[string][]string)["labels"][0]; got != "prod" {
+			t.Fatalf("Config nested slice value = %q, want %q", got, "prod")
+		}
+	})
+
+	t.Run("node metadata", func(t *testing.T) {
+		start := g.Nodes[g.Index["start"]]
+		worker := g.Nodes[g.Index["worker"]]
+		if got := start.RunnerSelector.MatchLabels["workflow"]; got != "original" {
+			t.Fatalf("start workflow selector = %q, want %q", got, "original")
+		}
+		if got := worker.RunnerSelector.MatchLabels["workflow"]; got != "original" {
+			t.Fatalf("worker workflow selector = %q, want %q", got, "original")
+		}
+		if got := worker.RunnerSelector.MatchLabels["node"]; got != "original" {
+			t.Fatalf("worker node selector = %q, want %q", got, "original")
+		}
+		if got := start.Retry.MaxAttempts; got != 2 {
+			t.Fatalf("inherited retry MaxAttempts = %d, want %d", got, 2)
+		}
+		if got := worker.Retry.MaxAttempts; got != 4 {
+			t.Fatalf("node retry MaxAttempts = %d, want %d", got, 4)
+		}
+		if got := worker.Parameters["nested"].(map[string]any)["value"]; got != "params-original" {
+			t.Fatalf("Parameters nested value = %q, want %q", got, "params-original")
+		}
+		if got := worker.Parameters["list"].([]any)[0].(map[string]any)["value"]; got != "params-list-original" {
+			t.Fatalf("Parameters nested list map value = %q, want %q", got, "params-list-original")
+		}
+		if got := worker.Parameters["list"].([]any)[1].([]string)[0]; got != "one" {
+			t.Fatalf("Parameters nested list slice value = %q, want %q", got, "one")
+		}
+	})
+
+	t.Run("hash remains a snapshot", func(t *testing.T) {
+		if g.GraphHash == "" {
+			t.Fatal("GraphHash is empty")
+		}
+		if g.GraphHash != originalHash {
+			t.Fatalf("GraphHash = %q, want original %q", g.GraphHash, originalHash)
+		}
+		updated, err := Compile(def)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if updated.GraphHash == g.GraphHash {
+			t.Fatalf("GraphHash = %q after source mutation, want a new compiled graph hash", updated.GraphHash)
+		}
+	})
+}
+
+func TestCompileGraphMetadataIsStable(t *testing.T) {
+	def := &types.WorkflowDef{
+		Name:    "metadata",
+		Version: "v2",
+		Context: &types.WorkflowContext{
+			Vars: map[string]any{"second": "value", "first": "value"},
+		},
+		Nodes: []types.NodeDef{
+			{Name: "start", Type: "xflow.start"},
+			{Name: "left", Type: "test.left"},
+			{Name: "right", Type: "test.right"},
+			{Name: "join", Type: "test.join"},
+		},
+		Connections: types.Connections{
+			"start": {
+				"second": []types.Connection{{Node: "right", Input: "main"}},
+				"first":  []types.Connection{{Node: "left", Input: "main"}},
+			},
+			"left":  {"main": []types.Connection{{Node: "join", Input: "main"}}},
+			"right": {"main": []types.Connection{{Node: "join", Input: "main"}}},
+		},
+	}
+
+	var graphHash string
+	for i := 0; i < 10; i++ {
+		g, err := Compile(def)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if g.WorkflowVersion != def.Version {
+			t.Fatalf("WorkflowVersion = %q, want %q", g.WorkflowVersion, def.Version)
+		}
+		if g.CompilerVersion != compilerVersion {
+			t.Fatalf("CompilerVersion = %q, want %q", g.CompilerVersion, compilerVersion)
+		}
+		if g.GraphHash == "" {
+			t.Fatal("GraphHash is empty")
+		}
+		if i == 0 {
+			graphHash = g.GraphHash
+			continue
+		}
+		if g.GraphHash != graphHash {
+			t.Fatalf("GraphHash = %q, want stable value %q", g.GraphHash, graphHash)
+		}
+	}
+}

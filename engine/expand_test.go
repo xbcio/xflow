@@ -8,20 +8,6 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
-// portHandler returns output on a specific port.
-type portHandler struct {
-	port string
-	data map[string]any
-}
-
-func (h *portHandler) Descriptor() types.Descriptor {
-	return types.Descriptor{Type: "test.port"}
-}
-
-func (h *portHandler) Execute(_ context.Context, _ *types.Input) (*types.Output, error) {
-	return &types.Output{Data: h.data, Port: h.port}, nil
-}
-
 func TestScheduler_MergeWaitAny_TriggersOnFirstActive(t *testing.T) {
 	// Graph: A --main--> merge <--main-- B
 	// merge is wait_any, so it should trigger when A completes (before B).

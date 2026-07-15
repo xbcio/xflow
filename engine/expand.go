@@ -6,7 +6,6 @@ import (
 
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/types"
-	"github.com/google/uuid"
 )
 
 // isLoopSplitOutput detects if a node output signals loop/split expansion.
@@ -23,146 +22,248 @@ func isLoopSplitOutput(data map[string]any) bool {
 	return false
 }
 
-// expandLoopSplit handles the sub-execution expansion for loop/split nodes.
-// It creates a child execution per batch and suspends the parent node until all complete.
-func (e *Engine) expandLoopSplit(ctx context.Context, t *Task, g *graph.Graph, data map[string]any) error {
-	batches, ok := data["batches"].([][]any)
-	if !ok || len(batches) == 0 {
-		// No items to iterate — complete immediately with empty results.
-		return e.completeLoopSplit(ctx, t, g, []map[string]any{})
+// expandLoopSplit starts one lease-fenced child generation. The parent stays
+// waiting with its original lease metadata, so the normal sweeper can reclaim
+// a crash between child creation, batch delivery, and parent finalization.
+func (e *Engine) expandLoopSplit(ctx context.Context, lease *TaskLease, g *graph.Graph, data map[string]any) error {
+	if lease == nil {
+		return ErrInvalidLeaseToken
+	}
+	batches, err := loopSplitBatches(data)
+	if err != nil {
+		return fmt.Errorf("decode loop/split batches for %q/%q: %w", lease.Task.ExecutionID, lease.Task.NodeName, err)
+	}
+	if len(batches) == 0 {
+		return e.completeLoopSplit(ctx, lease, g, []map[string]any{})
 	}
 
-	// Mark parent node as "waiting" (sub-executions in progress).
-	_ = e.state.UpsertNode(ctx, &NodeSnapshot{
-		ExecutionID: t.ExecutionID,
-		Name:        t.NodeName,
-		NodeIdx:     t.NodeIdx,
-		Status:      types.NodeStatusWaiting,
-	})
-
+	expander, ok := e.state.(DurableLeaseExpander)
+	if !ok {
+		return ErrAtomicCommitUnsupported
+	}
+	children := make([]SubExecution, 0, len(batches))
+	entries := make([]OutboxEntry, 0, len(batches))
 	for i, batch := range batches {
-		childID := types.ExecutionID(fmt.Sprintf("%s/sub/%s/%d", t.ExecutionID, t.NodeName, i))
-
-		sub := &SubExecution{
-			ParentExecID: t.ExecutionID,
-			ParentNode:   t.NodeName,
+		childID := expansionChildID(lease, i)
+		children = append(children, SubExecution{
+			ParentExecID: lease.Task.ExecutionID,
+			ParentNode:   lease.Task.NodeName,
 			ChildExecID:  childID,
 			BatchIndex:   i,
 			Status:       types.ExecutionStatusRunning,
-		}
-		if err := e.state.CreateSubExecution(ctx, sub); err != nil {
-			return fmt.Errorf("create sub-execution %d: %w", i, err)
-		}
-
-		// EXPERIMENTAL: pass-through stub. Real body sub-graph execution is not
-		// implemented; xflow.loop / xflow.split are blocked at compile time
-		// unless WorkflowOptions.ExperimentalExpand is set. See
-		// .claude/specs/expand-gate.md.
-		batchTask := &Task{
-			ExecutionID: t.ExecutionID,
-			NodeName:    fmt.Sprintf("%s/_batch/%d", t.NodeName, i),
-			NodeIdx:     t.NodeIdx,
-			Type:        TaskTypeNodeExec,
-			Payload: &types.SignalPayload{
-				Data: map[string]any{
-					"_batch_exec":    true,
-					"parent_exec_id": string(t.ExecutionID),
-					"parent_node":    t.NodeName,
-					"child_exec_id":  string(childID),
-					"batch_index":    i,
-					"items":          batch,
-				},
-			},
-		}
-		if err := e.queue.Enqueue(ctx, batchTask); err != nil {
-			return fmt.Errorf("enqueue batch %d: %w", i, err)
-		}
+		})
+		entries = append(entries, OutboxEntry{
+			ID:   expansionOutboxID(lease, i),
+			Task: expansionBatchTask(lease, childID, i, batch),
+		})
 	}
-
+	started, err := expander.BeginTaskExpansionWithOutbox(ctx, lease, children, entries)
+	if err != nil {
+		return fmt.Errorf("begin durable loop/split expansion %q/%q: %w", lease.Task.ExecutionID, lease.Task.NodeName, err)
+	}
+	if !started {
+		return ErrInvalidLeaseToken
+	}
+	if err := e.FlushOutbox(ctx, lease.Task.ExecutionID); err != nil {
+		return fmt.Errorf("deliver loop/split batches for %q/%q: %w", lease.Task.ExecutionID, lease.Task.NodeName, err)
+	}
 	return nil
 }
 
-// ExecuteBatch processes a single batch of a loop/split expansion.
-// Called by the queue consumer when it receives a batch task.
+// loopSplitBatches accepts both native Go batches and the []any representation
+// produced when a runner result is decoded from JSON.
+func loopSplitBatches(data map[string]any) ([][]any, error) {
+	raw, exists := data["batches"]
+	if !exists || raw == nil {
+		return nil, nil
+	}
+	if batches, ok := raw.([][]any); ok {
+		return batches, nil
+	}
+	rows, ok := raw.([]any)
+	if !ok {
+		return nil, fmt.Errorf("batches has type %T, want array", raw)
+	}
+	batches := make([][]any, 0, len(rows))
+	for index, row := range rows {
+		if row == nil {
+			batches = append(batches, nil)
+			continue
+		}
+		items, ok := row.([]any)
+		if !ok {
+			return nil, fmt.Errorf("batch %d has type %T, want array", index, row)
+		}
+		batches = append(batches, items)
+	}
+	return batches, nil
+}
+
+func expansionBatchTask(lease *TaskLease, childID types.ExecutionID, batchIndex int, items []any) Task {
+	return Task{
+		ExecutionID: lease.Task.ExecutionID,
+		NodeName:    fmt.Sprintf("%s/_batch/%d", lease.Task.NodeName, batchIndex),
+		NodeIdx:     lease.Task.NodeIdx,
+		Type:        TaskTypeNodeBatch,
+		Payload: &types.SignalPayload{Data: map[string]any{
+			"_batch_exec":          true,
+			"parent_exec_id":       string(lease.Task.ExecutionID),
+			"parent_node":          lease.Task.NodeName,
+			"parent_node_idx":      lease.Task.NodeIdx,
+			"parent_lease_id":      string(lease.LeaseID),
+			"parent_lease_token":   string(lease.LeaseToken),
+			"parent_attempt":       lease.Attempt,
+			"parent_activation_id": lease.Task.ActivationID,
+			"parent_auto_depth":    lease.Task.AutoDepth,
+			"child_exec_id":        string(childID),
+			"batch_index":          batchIndex,
+			"items":                items,
+		}},
+	}
+}
+
+func expansionOutboxID(lease *TaskLease, batchIndex int) string {
+	return fmt.Sprintf("expand/%s/%s/%s/%d", lease.Task.ExecutionID, lease.Task.NodeName, lease.LeaseID, batchIndex)
+}
+
+func expansionChildID(lease *TaskLease, batchIndex int) types.ExecutionID {
+	return types.ExecutionID(fmt.Sprintf("%s/sub/%s/%s/%d", lease.Task.ExecutionID, lease.Task.NodeName, lease.LeaseID, batchIndex))
+}
+
+// ExecuteBatch processes a single batch of an experimental loop/split
+// expansion. Its parent lease fence makes delayed or duplicate old batches
+// harmless after recovery has issued a newer parent lease.
 func (e *Engine) ExecuteBatch(ctx context.Context, t *Task) error {
-	if t.Payload == nil || t.Payload.Data == nil {
-		return fmt.Errorf("batch task missing payload")
+	lease, childExecID, items, err := expansionBatchLease(t)
+	if err != nil {
+		return err
 	}
 
-	data := t.Payload.Data
-	parentExecID := types.ExecutionID(data["parent_exec_id"].(string))
-	parentNode := data["parent_node"].(string)
-	childExecID := types.ExecutionID(data["child_exec_id"].(string))
-	items, _ := data["items"].([]any)
-
 	// EXPERIMENTAL: pass-through stub. When body sub-graph execution lands,
-	// compile and run the body graph here. See
-	// .claude/specs/expand-gate.md.
+	// compile and run the body graph here. See .claude/specs/expand-gate.md.
 	result := map[string]any{
 		"items": items,
 		"count": len(items),
 	}
 
-	allDone, err := e.state.CompleteSubExecution(ctx, parentExecID, parentNode, childExecID, types.ExecutionStatusSuccess, result)
+	expander, ok := e.state.(LeaseExpander)
+	if !ok {
+		return ErrAtomicCommitUnsupported
+	}
+	allDone, accepted, results, err := expander.CompleteExpandedSubExecution(ctx, lease, childExecID, types.ExecutionStatusSuccess, result)
 	if err != nil {
 		return err
 	}
-
-	if allDone {
-		// All batches complete — finalize the parent loop/split node.
-		e.mu.RLock()
-		g := e.graphs[parentExecID]
-		e.mu.RUnlock()
-		if g == nil {
-			g, _ = e.state.LoadGraph(ctx, parentExecID)
-		}
-		if g == nil {
-			return nil
-		}
-
-		nodeIdx := g.Index[parentNode]
-		parentTask := &Task{
-			ExecutionID: parentExecID,
-			NodeName:    parentNode,
-			NodeIdx:     nodeIdx,
-		}
-
-		results, err := e.state.GetSubExecutionResults(ctx, parentExecID, parentNode)
-		if err != nil {
-			return err
-		}
-
-		return e.completeLoopSplit(ctx, parentTask, g, results)
+	if !accepted || !allDone {
+		return nil
 	}
 
-	return nil
+	e.mu.RLock()
+	g := e.graphs[lease.Task.ExecutionID]
+	e.mu.RUnlock()
+	if g == nil {
+		g, err = e.state.LoadGraph(ctx, lease.Task.ExecutionID)
+		if err != nil {
+			return fmt.Errorf("load graph for loop/split parent %q: %w", lease.Task.ExecutionID, err)
+		}
+	}
+	if g == nil {
+		return ErrExecutionInactive
+	}
+	return e.completeLoopSplit(ctx, lease, g, results)
 }
 
-// completeLoopSplit finalizes a loop/split node after all sub-executions complete.
-func (e *Engine) completeLoopSplit(ctx context.Context, t *Task, g *graph.Graph, results []map[string]any) error {
+func expansionBatchLease(t *Task) (*TaskLease, types.ExecutionID, []any, error) {
+	if t == nil || t.Payload == nil || t.Payload.Data == nil {
+		return nil, "", nil, fmt.Errorf("batch task missing payload")
+	}
+	data := t.Payload.Data
+	stringField := func(name string) (string, error) {
+		value, ok := data[name].(string)
+		if !ok || value == "" {
+			return "", fmt.Errorf("batch task has invalid %s", name)
+		}
+		return value, nil
+	}
+	intField := func(name string) (int, error) {
+		switch value := data[name].(type) {
+		case int:
+			return value, nil
+		case int64:
+			return int(value), nil
+		case float64:
+			return int(value), nil
+		default:
+			return 0, fmt.Errorf("batch task has invalid %s", name)
+		}
+	}
+
+	parentExecID, err := stringField("parent_exec_id")
+	if err != nil {
+		return nil, "", nil, err
+	}
+	parentNode, err := stringField("parent_node")
+	if err != nil {
+		return nil, "", nil, err
+	}
+	childID, err := stringField("child_exec_id")
+	if err != nil {
+		return nil, "", nil, err
+	}
+	leaseID, err := stringField("parent_lease_id")
+	if err != nil {
+		return nil, "", nil, err
+	}
+	leaseToken, err := stringField("parent_lease_token")
+	if err != nil {
+		return nil, "", nil, err
+	}
+	nodeIdx, err := intField("parent_node_idx")
+	if err != nil {
+		return nil, "", nil, err
+	}
+	attempt, err := intField("parent_attempt")
+	if err != nil {
+		return nil, "", nil, err
+	}
+	activationID, err := intField("parent_activation_id")
+	if err != nil {
+		return nil, "", nil, err
+	}
+	autoDepth, err := intField("parent_auto_depth")
+	if err != nil {
+		return nil, "", nil, err
+	}
+	items, _ := data["items"].([]any)
+	return &TaskLease{
+		LeaseID:    LeaseID(leaseID),
+		LeaseToken: LeaseToken(leaseToken),
+		Attempt:    attempt,
+		Task: Task{
+			ExecutionID:  types.ExecutionID(parentExecID),
+			NodeName:     parentNode,
+			NodeIdx:      nodeIdx,
+			Type:         TaskTypeNodeBatch,
+			ActivationID: activationID,
+			AutoDepth:    autoDepth,
+		},
+	}, types.ExecutionID(childID), items, nil
+}
+
+// completeLoopSplit terminalizes a fully completed child generation through
+// the same token-fenced commit path as other node results. In an acyclic graph
+// that also writes the durable downstream advance intent.
+func (e *Engine) completeLoopSplit(ctx context.Context, lease *TaskLease, g *graph.Graph, results []map[string]any) error {
 	output := map[string]any{
 		"results": results,
 		"count":   len(results),
 	}
-
-	_ = e.state.PutOutput(ctx, t.ExecutionID, t.NodeName, output)
-	_ = e.state.UpsertNode(ctx, &NodeSnapshot{
-		ExecutionID: t.ExecutionID,
-		Name:        t.NodeName,
-		NodeIdx:     t.NodeIdx,
-		Status:      types.NodeStatusSuccess,
-		Output:      output,
-		Port:        "main",
-	})
-
-	if e.hooks != nil {
-		e.hooks.OnNodeComplete(ctx, t.ExecutionID, t.NodeName, types.NodeStatusSuccess)
+	outcome, err := e.commitLegacyNode(ctx, lease, types.NodeStatusSuccess, output, "main", "", false)
+	if outcome == CommitOutcomeStaleToken || outcome == CommitOutcomeDuplicateTerminal || outcome == CommitOutcomeExecutionInactive {
+		return nil
 	}
-
-	return e.OnNodeComplete(ctx, t.ExecutionID, g, t.NodeIdx, "main", output)
-}
-
-// newSubExecutionID generates a unique sub-execution ID.
-func newSubExecutionID() types.ExecutionID {
-	return types.ExecutionID("sub-" + uuid.New().String())
+	if err != nil {
+		return fmt.Errorf("finalize loop/split node %q/%q: %w", lease.Task.ExecutionID, lease.Task.NodeName, err)
+	}
+	return nil
 }

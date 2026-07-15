@@ -53,14 +53,16 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 	}
 
 	g := &Graph{
-		Name:         def.Name,
-		Nodes:        make([]NodeMeta, n),
-		Index:        make(map[string]int, n),
-		EntryIndexes: make(map[string]int),
-		OutEdges:     make([][]Edge, n),
-		InEdges:      make([][]Edge, n),
-		InDegree:     make([]int, n),
-		StartIdx:     -1,
+		Name:            def.Name,
+		WorkflowVersion: def.Version,
+		CompilerVersion: compilerVersion,
+		Nodes:           make([]NodeMeta, n),
+		Index:           make(map[string]int, n),
+		EntryIndexes:    make(map[string]int),
+		OutEdges:        make([][]Edge, n),
+		InEdges:         make([][]Edge, n),
+		InDegree:        make([]int, n),
+		StartIdx:        -1,
 	}
 	var experimentalExpand bool
 	if def.Options != nil {
@@ -89,8 +91,8 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 	}
 
 	if def.Context != nil {
-		g.Vars = def.Context.Vars
-		g.Config = def.Context.Config
+		g.Vars = cloneStringAnyMap(def.Context.Vars)
+		g.Config = cloneStringAnyMap(def.Context.Config)
 	}
 
 	startCount, err := registerNodes(def, g)
@@ -109,6 +111,9 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 		if err := detectCycle(g); err != nil {
 			return nil, err
 		}
+	}
+	if err := assignGraphHash(g); err != nil {
+		return nil, fmt.Errorf("hash graph: %w", err)
 	}
 
 	return g, nil
@@ -136,7 +141,7 @@ func registerNodes(def *types.WorkflowDef, g *Graph) (int, error) {
 			OnError:        nd.OnError,
 			RunnerSelector: runnerSelector,
 			MergeMode:      extractMergeMode(nd),
-			Parameters:     nd.Parameters,
+			Parameters:     cloneStringAnyMap(nd.Parameters),
 			Retry:          resolveRetry(nd.Retry, def.Settings),
 		}
 		if nd.Type == "xflow.start" || nd.Kind == types.NodeKindTrigger {
@@ -159,12 +164,27 @@ func registerNodes(def *types.WorkflowDef, g *Graph) (int, error) {
 // g.OutEdges/g.InEdges/g.InDegree and records the distinct output port names
 // per source node on g.Nodes[i].PortOuts.
 func buildEdges(def *types.WorkflowDef, g *Graph) error {
-	for srcName, ports := range def.Connections {
+	sources := make([]string, 0, len(def.Connections))
+	for srcName := range def.Connections {
+		sources = append(sources, srcName)
+	}
+	sort.Strings(sources)
+
+	for _, srcName := range sources {
+		ports := def.Connections[srcName]
 		srcIdx, ok := g.Index[srcName]
 		if !ok {
 			return fmt.Errorf("connection references unknown source node: %s", srcName)
 		}
-		for port, conns := range ports {
+		portNames := make([]string, 0, len(ports))
+		for port := range ports {
+			portNames = append(portNames, port)
+		}
+		sort.Strings(portNames)
+
+		portOuts := make([]string, 0, len(portNames))
+		for _, port := range portNames {
+			conns := ports[port]
 			for _, c := range conns {
 				dstIdx, ok := g.Index[c.Node]
 				if !ok {
@@ -180,16 +200,9 @@ func buildEdges(def *types.WorkflowDef, g *Graph) error {
 				g.InEdges[dstIdx] = append(g.InEdges[dstIdx], edge)
 				g.InDegree[dstIdx]++
 			}
-		}
-
-		// Collect distinct output port names for this source node.
-		portSet := make(map[string]struct{})
-		for _, e := range g.OutEdges[srcIdx] {
-			portSet[e.SrcPort] = struct{}{}
-		}
-		portOuts := make([]string, 0, len(portSet))
-		for p := range portSet {
-			portOuts = append(portOuts, p)
+			if len(conns) > 0 {
+				portOuts = append(portOuts, port)
+			}
 		}
 		g.Nodes[srcIdx].PortOuts = portOuts
 	}
