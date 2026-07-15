@@ -196,7 +196,8 @@ func claimTaskLeaseSingleWinnerCase(t *testing.T, state engine.StateStore) {
 		t.Fatalf("CreateExecution() error = %v", err)
 	}
 	// Seed the node as running with a known lease token. ClaimTaskLease should
-	// only let one of the racers succeed; subsequent claims see committing/no-token.
+	// only let one racer transition it to committing; the winning token remains
+	// stored so a crash in that state can be fenced and reclaimed.
 	token := engine.LeaseToken("lease-tok-1")
 	if err := state.UpsertNode(ctx, &engine.NodeSnapshot{
 		ExecutionID: id, Name: "n1", NodeIdx: 1,

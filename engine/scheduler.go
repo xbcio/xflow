@@ -129,16 +129,15 @@ func (e *Engine) onCyclicNodeComplete(ctx context.Context, id types.ExecutionID,
 
 // skipCascade marks a node as skipped and propagates the skip to its descendants.
 func (e *Engine) skipCascade(ctx context.Context, id types.ExecutionID, g *graph.Graph, nodeIdx int) error {
-	_ = e.state.UpsertNode(ctx, &NodeSnapshot{
+	if err := e.state.UpsertNode(ctx, &NodeSnapshot{
 		ExecutionID: id,
 		Name:        g.Nodes[nodeIdx].Name,
 		NodeIdx:     nodeIdx,
 		Status:      types.NodeStatusSkipped,
-	})
-
-	if e.hooks != nil {
-		e.hooks.OnNodeComplete(ctx, id, g.Nodes[nodeIdx].Name, types.NodeStatusSkipped)
+	}); err != nil {
+		return err
 	}
+	e.notifyNodeComplete(ctx, id, g.Nodes[nodeIdx].Name, types.NodeStatusSkipped)
 
 	for _, edge := range g.OutEdges[nodeIdx] {
 		remaining, arrivedActive, err := e.state.DecrementInDegree(ctx, id, edge.DstIdx, false)
@@ -189,12 +188,10 @@ func (e *Engine) tryComplete(ctx context.Context, id types.ExecutionID, g *graph
 }
 
 func (e *Engine) completeExecution(ctx context.Context, id types.ExecutionID, status types.ExecutionStatus, errMsg string) error {
-	_ = e.state.UpdateExecutionStatus(ctx, id, status, errMsg)
-	if e.hooks != nil {
-		e.hooks.OnExecutionComplete(ctx, id, status)
+	if err := e.state.UpdateExecutionStatus(ctx, id, status, errMsg); err != nil {
+		return err
 	}
-	e.mu.Lock()
-	delete(e.graphs, id)
-	e.mu.Unlock()
+	e.notifyExecutionComplete(ctx, id, status)
+	e.EvictExecution(id)
 	return nil
 }

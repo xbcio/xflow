@@ -216,7 +216,9 @@ func TestSuspend_Cancel(t *testing.T) {
 
 	// Delivering a signal after cancel should not enqueue anything
 	// (graph is removed from cache).
-	eng.DeliverSignal(ctx, id, "approval", nil)
+	if err := eng.DeliverSignal(ctx, id, "approval", nil); err != nil {
+		t.Fatal(err)
+	}
 	tasks = queue.Drain()
 	if len(tasks) != 0 {
 		t.Errorf("expected no tasks after cancel, got %v", taskNames(tasks))
@@ -282,5 +284,83 @@ func TestSuspend_MultiSignalWaitsForQuorumAndPassesAllSignals(t *testing.T) {
 	}
 	if out["count"] != 2 {
 		t.Fatalf("wait output count = %v, want 2", out["count"])
+	}
+}
+
+type resumeBaseSuspendHandler struct{}
+
+func (h *resumeBaseSuspendHandler) Descriptor() types.Descriptor {
+	return types.Descriptor{Type: "test.resume_base"}
+}
+
+func (h *resumeBaseSuspendHandler) Execute(context.Context, *types.Input) (*types.Output, error) {
+	panic("Execute should not be called on a SuspendingHandler")
+}
+
+func (h *resumeBaseSuspendHandler) PrepareSuspend(context.Context, *types.Input) (*types.SuspendSpec, error) {
+	return &types.SuspendSpec{Mode: types.ModeSignal, Signals: []string{"approval"}}, nil
+}
+
+func (h *resumeBaseSuspendHandler) OnResume(_ context.Context, input *types.Input, _ *types.SignalPayload) (*types.Output, error) {
+	data := cloneMap(input.Data)
+	data["approved"] = true
+	return &types.Output{Data: data}, nil
+}
+
+func TestSuspendPersistsInitialInputAsResumeBase(t *testing.T) {
+	def := &types.WorkflowDef{
+		Name:  "suspend-resume-base",
+		Nodes: []types.NodeDef{{Name: "wait", Type: "test.resume_base"}},
+	}
+	g, err := graph.Compile(def)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := newFakeState()
+	queue := &fakeQueue{}
+	reg := &fakeRegistry{handlers: map[string]types.ActionHandler{
+		"test.resume_base": &resumeBaseSuspendHandler{},
+	}}
+	eng := newTestEngine(state, queue, reg)
+	ctx := context.Background()
+
+	id, err := eng.Submit(ctx, g, map[string]any{
+		"vuln_id":  "VULN-2026-001",
+		"severity": "critical",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.InitInDegrees(id, g)
+
+	tasks := queue.Drain()
+	if len(tasks) != 1 {
+		t.Fatalf("initial task count = %d, want 1", len(tasks))
+	}
+	executeTask(t, eng, tasks[0])
+
+	base, err := state.GetOutput(ctx, id, "wait")
+	if err != nil {
+		t.Fatalf("GetOutput() after initial suspend error = %v", err)
+	}
+	if base["vuln_id"] != "VULN-2026-001" || base["severity"] != "critical" {
+		t.Fatalf("persisted resume base = %v, want original workflow input", base)
+	}
+
+	if err := eng.DeliverSignal(ctx, id, "approval", map[string]any{"action": "approve"}); err != nil {
+		t.Fatal(err)
+	}
+	tasks = queue.Drain()
+	if len(tasks) != 1 || tasks[0].Type != TaskTypeNodeResume {
+		t.Fatalf("resume tasks = %v, want one resume task", tasks)
+	}
+	executeTask(t, eng, tasks[0])
+
+	out, err := state.GetOutput(ctx, id, "wait")
+	if err != nil {
+		t.Fatalf("GetOutput() after resume error = %v", err)
+	}
+	if out["vuln_id"] != "VULN-2026-001" || out["severity"] != "critical" || out["approved"] != true {
+		t.Fatalf("resume output = %v, want preserved original input plus decision", out)
 	}
 }

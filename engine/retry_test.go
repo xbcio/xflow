@@ -87,21 +87,14 @@ func TestRetry_TransientErrorEventuallySucceeds(t *testing.T) {
 	eng := newTestEngine(state, queue, reg)
 	ctx := context.Background()
 
-	if _, err := eng.Submit(ctx, g, nil); err != nil {
+	id, err := eng.Submit(ctx, g, nil)
+	if err != nil {
 		t.Fatalf("Submit() error = %v", err)
 	}
 
-	// Drain + execute up to a generous bound. Each call re-enqueues until the
-	// handler stops returning errors.
-	for step := 0; step < 10; step++ {
-		tasks := queue.Drain()
-		if len(tasks) == 0 {
-			break
-		}
-		for _, task := range tasks {
-			executeTask(t, eng, task)
-		}
-	}
+	// Advance the fake durable clock between handler invocations so delayed
+	// retry intents follow the same outbox path as production backends.
+	runFakeTasksWithOutbox(t, eng, queue, state, id, 10)
 
 	if handler.calls != 3 {
 		t.Fatalf("handler calls = %d, want 3 (2 retries + 1 success)", handler.calls)
@@ -134,18 +127,11 @@ func TestRetry_ErrorPortOutputCanRetryBeforeRoutingErrorPort(t *testing.T) {
 	eng := newTestEngine(state, queue, reg)
 	ctx := context.Background()
 
-	if _, err := eng.Submit(ctx, g, nil); err != nil {
+	id, err := eng.Submit(ctx, g, nil)
+	if err != nil {
 		t.Fatalf("Submit() error = %v", err)
 	}
-	for step := 0; step < 5; step++ {
-		tasks := queue.Drain()
-		if len(tasks) == 0 {
-			break
-		}
-		for _, task := range tasks {
-			executeTask(t, eng, task)
-		}
-	}
+	runFakeTasksWithOutbox(t, eng, queue, state, id, 5)
 	if handler.calls != 2 {
 		t.Fatalf("handler calls = %d, want 2 (error port retry + success)", handler.calls)
 	}
@@ -211,18 +197,11 @@ func TestRetry_ExhaustionFallsThroughToOnError(t *testing.T) {
 	eng := newTestEngine(state, queue, reg)
 	ctx := context.Background()
 
-	if _, err := eng.Submit(ctx, g, nil); err != nil {
+	id, err := eng.Submit(ctx, g, nil)
+	if err != nil {
 		t.Fatalf("Submit() error = %v", err)
 	}
-	for step := 0; step < 10; step++ {
-		tasks := queue.Drain()
-		if len(tasks) == 0 {
-			break
-		}
-		for _, task := range tasks {
-			executeTask(t, eng, task)
-		}
-	}
+	runFakeTasksWithOutbox(t, eng, queue, state, id, 10)
 	if handler.calls != 3 {
 		t.Fatalf("handler calls = %d, want 3 (MaxAttempts)", handler.calls)
 	}
@@ -290,18 +269,11 @@ func TestRetry_PerNodeOverridesWorkflowDefault(t *testing.T) {
 	reg := &fakeRegistry{handlers: map[string]types.ActionHandler{"test.always_fail": handler}}
 	eng := newTestEngine(state, queue, reg)
 	ctx := context.Background()
-	if _, err := eng.Submit(ctx, g, nil); err != nil {
+	id, err := eng.Submit(ctx, g, nil)
+	if err != nil {
 		t.Fatalf("Submit() error = %v", err)
 	}
-	for step := 0; step < 10; step++ {
-		tasks := queue.Drain()
-		if len(tasks) == 0 {
-			break
-		}
-		for _, task := range tasks {
-			executeTask(t, eng, task)
-		}
-	}
+	runFakeTasksWithOutbox(t, eng, queue, state, id, 10)
 	if handler.calls != 5 {
 		t.Fatalf("handler calls = %d, want 5 (per-node override)", handler.calls)
 	}

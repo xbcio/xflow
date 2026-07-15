@@ -16,39 +16,50 @@ import (
 // ---------------------------------------------------------------------------
 
 type fakeState struct {
-	mu         sync.Mutex
-	executions map[types.ExecutionID]*ExecutionSnapshot
-	nodes      map[string]*NodeSnapshot // key: execID+"/"+name
-	inDegrees  map[string]int           // key: execID+"/"+nodeIdx
-	activeIns  map[string]int           // key: execID+"/"+nodeIdx (count of active arrivals)
-	outputs    map[string]map[string]any
-	suspended  map[string]*types.SuspendSpec // key: execID+"/"+nodeName
-	signals    map[string]map[string]any     // pre-delivered signals: key: execID+"/"+signalName
-	signalSets map[string]map[string]map[string]any
-	resumed    map[string]bool            // resume lock: key: execID+"/"+nodeName
-	subExecs   map[string][]*SubExecution // key: execID+"/"+nodeName
-	watchers   map[types.ExecutionID][]chan ExecutionEvent
+	mu             sync.Mutex
+	executions     map[types.ExecutionID]*ExecutionSnapshot
+	nodes          map[string]*NodeSnapshot // key: execID+"/"+name
+	inDegrees      map[string]int           // key: execID+"/"+nodeIdx
+	activeIns      map[string]int           // key: execID+"/"+nodeIdx (count of active arrivals)
+	outputs        map[string]map[string]any
+	suspended      map[string]*types.SuspendSpec // key: execID+"/"+nodeName
+	signals        map[string]map[string]any     // pre-delivered signals: key: execID+"/"+signalName
+	signalSets     map[string]map[string]map[string]any
+	resumed        map[string]bool            // resume lock: key: execID+"/"+nodeName
+	subExecs       map[string][]*SubExecution // key: execID+"/"+nodeName
+	watchers       map[types.ExecutionID][]chan ExecutionEvent
+	atomicOutbox   map[types.ExecutionID]map[string]OutboxEntry
+	atomicAdvanced map[string]bool
+	atomicSchedule map[string]string
 }
 
 func newFakeState() *fakeState {
 	return &fakeState{
-		executions: make(map[types.ExecutionID]*ExecutionSnapshot),
-		nodes:      make(map[string]*NodeSnapshot),
-		inDegrees:  make(map[string]int),
-		activeIns:  make(map[string]int),
-		outputs:    make(map[string]map[string]any),
-		suspended:  make(map[string]*types.SuspendSpec),
-		signals:    make(map[string]map[string]any),
-		signalSets: make(map[string]map[string]map[string]any),
-		resumed:    make(map[string]bool),
-		subExecs:   make(map[string][]*SubExecution),
-		watchers:   make(map[types.ExecutionID][]chan ExecutionEvent),
+		executions:     make(map[types.ExecutionID]*ExecutionSnapshot),
+		nodes:          make(map[string]*NodeSnapshot),
+		inDegrees:      make(map[string]int),
+		activeIns:      make(map[string]int),
+		outputs:        make(map[string]map[string]any),
+		suspended:      make(map[string]*types.SuspendSpec),
+		signals:        make(map[string]map[string]any),
+		signalSets:     make(map[string]map[string]map[string]any),
+		resumed:        make(map[string]bool),
+		subExecs:       make(map[string][]*SubExecution),
+		watchers:       make(map[types.ExecutionID][]chan ExecutionEvent),
+		atomicOutbox:   make(map[types.ExecutionID]map[string]OutboxEntry),
+		atomicAdvanced: make(map[string]bool),
+		atomicSchedule: make(map[string]string),
 	}
 }
 
 func (f *fakeState) CreateExecution(_ context.Context, e *ExecutionSnapshot) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.createExecutionLocked(e)
+	return nil
+}
+
+func (f *fakeState) createExecutionLocked(e *ExecutionSnapshot) {
 	f.executions[e.ID] = e
 	// Initialize in-degree counters from the graph.
 	if e.Graph != nil {
@@ -57,7 +68,6 @@ func (f *fakeState) CreateExecution(_ context.Context, e *ExecutionSnapshot) err
 			f.inDegrees[key] = deg
 		}
 	}
-	return nil
 }
 
 func (f *fakeState) UpdateExecutionStatus(_ context.Context, id types.ExecutionID, status types.ExecutionStatus, _ string) error {
@@ -92,7 +102,7 @@ func (f *fakeState) UpsertNode(_ context.Context, n *NodeSnapshot) error {
 	if existing, ok := f.nodes[key]; ok && types.IsTerminalNodeStatus(existing.Status) && n.ActivationID <= existing.ActivationID {
 		return nil // CAS: don't overwrite terminal state
 	}
-	if existing, ok := f.nodes[key]; ok && existing.Status == types.NodeStatusCommitting && n.Status == types.NodeStatusRunning {
+	if existing, ok := f.nodes[key]; ok && (existing.Status == types.NodeStatusCommitting || existing.Status == types.NodeStatusWaiting) && n.Status == types.NodeStatusRunning {
 		return nil
 	}
 	cp := *n
@@ -112,6 +122,20 @@ func cloneNodeSnapshot(ns *NodeSnapshot) *NodeSnapshot {
 		return nil
 	}
 	cp := *ns
+	cp.Output = cloneMap(ns.Output)
+	cp.LeasePayload = cloneFakeLeasePayload(ns.LeasePayload)
+	return &cp
+}
+
+func cloneFakeLeasePayload(payload *types.SignalPayload) *types.SignalPayload {
+	if payload == nil {
+		return nil
+	}
+	cp := *payload
+	cp.Data = cloneMap(payload.Data)
+	if payload.All != nil {
+		cp.All = cloneSignalSet(payload.All)
+	}
 	return &cp
 }
 
@@ -128,7 +152,7 @@ func (f *fakeState) AcquireTaskLease(_ context.Context, lease *TaskLease) (*Node
 		if types.IsTerminalNodeStatus(current.Status) && (lease.Task.ActivationID <= 0 || current.ActivationID >= lease.Task.ActivationID) {
 			return cloneNodeSnapshot(current), false, nil
 		}
-		if current.Status == types.NodeStatusCommitting {
+		if current.Status == types.NodeStatusCommitting || current.Status == types.NodeStatusWaiting {
 			return cloneNodeSnapshot(current), false, nil
 		}
 		if current.Status == types.NodeStatusRunning && current.LeaseToken != "" {
@@ -155,6 +179,8 @@ func (f *fakeState) AcquireTaskLease(_ context.Context, lease *TaskLease) (*Node
 		AutoDepth:     lease.Task.AutoDepth,
 		LeaseIssuedAt: lease.IssuedAt,
 		LeaseTTL:      lease.TTL,
+		LeaseTaskType: lease.Task.Type,
+		LeasePayload:  cloneFakeLeasePayload(lease.Task.Payload),
 	}
 	return cloneNodeSnapshot(current), true, nil
 }
@@ -167,7 +193,7 @@ func (f *fakeState) ResetNodeForRetry(_ context.Context, id types.ExecutionID, n
 	if ns == nil {
 		return nil
 	}
-	if ns.Status != types.NodeStatusRunning && ns.Status != types.NodeStatusCommitting {
+	if ns.Status != types.NodeStatusRunning && ns.Status != types.NodeStatusCommitting && ns.Status != types.NodeStatusWaiting {
 		return nil
 	}
 	cp := *ns
@@ -176,6 +202,8 @@ func (f *fakeState) ResetNodeForRetry(_ context.Context, id types.ExecutionID, n
 	cp.LeaseToken = ""
 	cp.LeaseIssuedAt = time.Time{}
 	cp.LeaseTTL = 0
+	cp.LeaseTaskType = TaskTypeNodeExec
+	cp.LeasePayload = nil
 	f.nodes[key] = &cp
 	return nil
 }
@@ -185,7 +213,7 @@ func (f *fakeState) ListExpiredLeases(_ context.Context, before time.Time) ([]Ex
 	defer f.mu.Unlock()
 	var out []ExpiredLease
 	for _, ns := range f.nodes {
-		if ns.Status != types.NodeStatusRunning {
+		if ns.Status != types.NodeStatusRunning && ns.Status != types.NodeStatusCommitting && ns.Status != types.NodeStatusWaiting {
 			continue
 		}
 		if ns.LeaseIssuedAt.IsZero() || ns.LeaseTTL <= 0 {
@@ -204,6 +232,8 @@ func (f *fakeState) ListExpiredLeases(_ context.Context, before time.Time) ([]Ex
 			TTL:          ns.LeaseTTL,
 			ActivationID: ns.ActivationID,
 			AutoDepth:    ns.AutoDepth,
+			TaskType:     ns.LeaseTaskType,
+			Payload:      cloneFakeLeasePayload(ns.LeasePayload),
 		})
 	}
 	return out, nil
@@ -217,7 +247,7 @@ func (f *fakeState) RevokeLease(_ context.Context, id types.ExecutionID, name st
 	if ns == nil {
 		return false, nil
 	}
-	if ns.Status != types.NodeStatusRunning {
+	if ns.Status != types.NodeStatusRunning && ns.Status != types.NodeStatusCommitting && ns.Status != types.NodeStatusWaiting {
 		return false, nil
 	}
 	if ns.LeaseToken != token || token == "" {
@@ -229,6 +259,8 @@ func (f *fakeState) RevokeLease(_ context.Context, id types.ExecutionID, name st
 	cp.LeaseToken = ""
 	cp.LeaseIssuedAt = time.Time{}
 	cp.LeaseTTL = 0
+	cp.LeaseTaskType = TaskTypeNodeExec
+	cp.LeasePayload = nil
 	f.nodes[key] = &cp
 	return true, nil
 }
@@ -251,15 +283,20 @@ func (f *fakeState) ClaimTaskLease(_ context.Context, lease *TaskLease) (*NodeSn
 	if lease.Task.ActivationID > 0 && ns.ActivationID != lease.Task.ActivationID {
 		return ns, false, nil
 	}
-	if ns.LeaseToken == "" || ns.LeaseToken != lease.LeaseToken {
+	if ns.Status != types.NodeStatusRunning || ns.LeaseToken == "" || ns.LeaseToken != lease.LeaseToken {
+		return ns, false, nil
+	}
+	if lease.LeaseID != "" && ns.LeaseID != lease.LeaseID {
+		return ns, false, nil
+	}
+	if lease.Attempt != 0 && ns.Attempt != lease.Attempt {
 		return ns, false, nil
 	}
 
 	cp := *ns
 	cp.Status = types.NodeStatusCommitting
-	cp.LeaseToken = ""
 	f.nodes[key] = &cp
-	return &cp, true, nil
+	return cloneNodeSnapshot(&cp), true, nil
 }
 
 func (f *fakeState) DecrementInDegree(_ context.Context, id types.ExecutionID, nodeIdx int, portActive bool) (int, int, error) {

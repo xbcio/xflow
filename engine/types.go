@@ -13,6 +13,16 @@ type TaskType int
 const (
 	TaskTypeNodeExec   TaskType = iota // normal first-time execution
 	TaskTypeNodeResume                 // resume after signal/timer
+	// TaskTypeNodeAdvance is an engine-internal durable scheduling task. It
+	// never reaches a handler or remote runner.
+	TaskTypeNodeAdvance
+	// TaskTypeNodeSkip is an engine-internal durable skip-cascade task. It
+	// terminalizes a node only after all of its inbound routes were skipped.
+	TaskTypeNodeSkip
+	// TaskTypeNodeBatch is an engine-internal Loop/Split batch continuation.
+	// It must be consumed by Engine.ExecuteBatch rather than routed to a node
+	// handler or remote runner.
+	TaskTypeNodeBatch
 )
 
 // Task is the unit of work dispatched to the queue.
@@ -96,8 +106,8 @@ type TaskLease struct {
 // used by control-plane dispatchers to pick a capable runner before issuing a
 // lease, so queue backpressure does not consume handler attempts.
 type TaskRouting struct {
-	NodeType       string             `json:"node_type"`
-	NodeVersion    int                `json:"node_version,omitempty"`
+	NodeType       string `json:"node_type"`
+	NodeVersion    int    `json:"node_version,omitempty"`
 	RunnerSelector *types.RunnerSelector
 }
 
@@ -157,9 +167,20 @@ type NodeSnapshot struct {
 	// lease.
 	LeaseIssuedAt time.Time
 	LeaseTTL      time.Duration
-	Output        map[string]any
-	Port          string
-	Error         string
+	// LeaseTaskType and LeasePayload preserve the exact queued task while a
+	// lease is active or committing. They let crash recovery replay a resume
+	// task without silently dropping its signal payload.
+	LeaseTaskType TaskType
+	LeasePayload  *types.SignalPayload
+	// CommittedLeaseToken identifies the lease that produced the current
+	// terminal state. It lets a retry after a lost commit response receive a
+	// stable duplicate outcome without allowing a stale lease to advance the
+	// graph.
+	CommittedLeaseToken LeaseToken
+	CommittedAttempt    int
+	Output              map[string]any
+	Port                string
+	Error               string
 }
 
 // ExpiredLease describes a node whose lease has passed its deadline and is
@@ -174,6 +195,10 @@ type ExpiredLease struct {
 	TTL          time.Duration
 	ActivationID int
 	AutoDepth    int
+	// TaskType and Payload reproduce the original queued task exactly when a
+	// running or committing lease is reclaimed after a process crash.
+	TaskType TaskType
+	Payload  *types.SignalPayload
 }
 
 // SubExecution tracks a child execution spawned by a loop/split node.

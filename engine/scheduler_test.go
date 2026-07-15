@@ -38,20 +38,6 @@ func newTestEngine(state StateStore, queue TaskQueue, reg HandlerRegistry) *Engi
 	return eng
 }
 
-// runAll drains the queue and executes every task synchronously.
-func runAll(t *testing.T, eng *Engine, queue *fakeQueue, state *fakeState, id types.ExecutionID, g *graph.Graph) {
-	t.Helper()
-	for {
-		tasks := queue.Drain()
-		if len(tasks) == 0 {
-			break
-		}
-		for _, task := range tasks {
-			executeTask(t, eng, task)
-		}
-	}
-}
-
 func executeTask(t *testing.T, eng *Engine, task *Task) {
 	t.Helper()
 	ctx := context.Background()

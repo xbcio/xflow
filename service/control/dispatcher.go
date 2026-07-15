@@ -49,6 +49,13 @@ type Router interface {
 	TaskRouting(ctx context.Context, t *engine.Task) (engine.TaskRouting, error)
 }
 
+// systemTaskHandler is intentionally optional so existing routing fakes and
+// custom routers remain source-compatible. The concrete Engine consumes these
+// durable scheduling tasks locally before any remote runner assignment.
+type systemTaskHandler interface {
+	HandleSystemTask(ctx context.Context, task *engine.Task) (bool, error)
+}
+
 type Dispatcher struct {
 	engine  Router
 	runners RunnerDirectory
@@ -59,6 +66,16 @@ func NewDispatcher(engine Router, runners RunnerDirectory) *Dispatcher {
 }
 
 func (d *Dispatcher) HandleTask(ctx context.Context, task *engine.Task) error {
+	if handler, ok := d.engine.(systemTaskHandler); ok {
+		handled, err := handler.HandleSystemTask(ctx, task)
+		if err != nil {
+			return err
+		}
+		if handled {
+			return nil
+		}
+	}
+
 	routing, err := d.engine.TaskRouting(ctx, task)
 	if err != nil {
 		if errors.Is(err, engine.ErrExecutionInactive) {

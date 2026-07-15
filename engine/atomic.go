@@ -1,0 +1,451 @@
+package engine
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sort"
+	"time"
+
+	"github.com/xbcio/xflow/engine/graph"
+	"github.com/xbcio/xflow/types"
+)
+
+// ErrAtomicCommitUnsupported reports a StateStore that has not implemented
+// the atomic scheduling contract required by Engine result commits.
+var ErrAtomicCommitUnsupported = errors.New("state store does not support atomic node commits")
+
+// ErrSystemTaskHandled signals that an internal scheduler task completed
+// without producing a runner-facing lease.
+var ErrSystemTaskHandled = errors.New("system task handled")
+
+// OutboxEntry is a durable task-delivery intent created together with a
+// scheduling state transition. Delivery is at-least-once: callers may observe
+// the same task again when enqueue succeeds but acknowledgment is lost.
+type OutboxEntry struct {
+	ID          string
+	Task        Task
+	AvailableAt time.Time
+	CreatedAt   time.Time
+	Attempts    int
+}
+
+// CommitNodeRequest describes one fenced terminal node transition. A normal
+// request must match the active lease; system requests are used only by the
+// internal skip cascade after its scheduling marker was persisted.
+type CommitNodeRequest struct {
+	ExecutionID  types.ExecutionID
+	NodeName     string
+	NodeIdx      int
+	ActivationID int
+	AutoDepth    int
+	LeaseID      LeaseID
+	LeaseToken   LeaseToken
+	Attempt      int
+	Status       types.NodeStatus
+	Output       map[string]any
+	StoreOutput  bool
+	Port         string
+	Error        string
+	System       bool
+	Fatal        bool
+	AdvanceTask  *Task
+}
+
+// CommitNodeResult is the stable result of an atomic node commit.
+type CommitNodeResult struct {
+	Outcome         CommitOutcome
+	Applied         bool
+	ExecutionDone   bool
+	ExecutionStatus types.ExecutionStatus
+	OutboxIDs       []string
+}
+
+// DownstreamArrival aggregates all edges from one source completion to a
+// destination. ArrivalCount and ActiveCount preserve fan-in semantics while
+// allowing the backend to update each destination once atomically.
+type DownstreamArrival struct {
+	NodeName     string
+	NodeIdx      int
+	ArrivalCount int
+	ActiveCount  int
+	MergeMode    string
+}
+
+// AdvanceNodeRequest progresses the already-committed source node through its
+// downstream scheduling counters. It is invoked from a durable internal task,
+// not from the result commit call stack.
+type AdvanceNodeRequest struct {
+	ExecutionID  types.ExecutionID
+	NodeName     string
+	NodeIdx      int
+	ActivationID int
+	AutoDepth    int
+	Arrivals     []DownstreamArrival
+}
+
+// AdvanceNodeResult reports whether an internal advance task made a new
+// scheduling transition. A duplicate task returns Applied=false.
+type AdvanceNodeResult struct {
+	Applied   bool
+	OutboxIDs []string
+}
+
+// AtomicStateStore is the durable scheduling extension of StateStore. It is
+// intentionally a StateStore-owned capability so Engine continues to depend
+// only on StateStore and TaskQueue while each backend owns its transaction
+// implementation.
+type AtomicStateStore interface {
+	// CreateExecutionWithOutbox atomically persists a new execution and its
+	// initial delivery intents. A successful call guarantees that every root
+	// task remains discoverable by the outbox dispatcher even if the caller
+	// crashes before synchronous queue delivery.
+	CreateExecutionWithOutbox(ctx context.Context, execution *ExecutionSnapshot, entries []OutboxEntry) error
+	// ResetNodeForRetryWithOutbox atomically rolls the matching active lease
+	// back to pending and records its delayed retry delivery intent. scheduled
+	// is false when recovery or a newer lease already won the token fence.
+	ResetNodeForRetryWithOutbox(ctx context.Context, id types.ExecutionID, nodeName string, token LeaseToken, entry OutboxEntry) (scheduled bool, err error)
+	// RevokeLeaseWithOutbox token-fences lease revocation and records the exact
+	// task that must be redelivered in the same state transition. revoked is
+	// false when the lease was already committed or replaced.
+	RevokeLeaseWithOutbox(ctx context.Context, id types.ExecutionID, nodeName string, token LeaseToken, entry OutboxEntry) (revoked bool, err error)
+	CommitNode(ctx context.Context, req CommitNodeRequest) (CommitNodeResult, error)
+	AdvanceNode(ctx context.Context, req AdvanceNodeRequest) (AdvanceNodeResult, error)
+	ListOutbox(ctx context.Context, id types.ExecutionID, before time.Time, limit int) ([]OutboxEntry, error)
+	AckOutbox(ctx context.Context, id types.ExecutionID, entryID string) error
+	ListOutboxExecutions(ctx context.Context, limit int) ([]types.ExecutionID, error)
+}
+
+func initialOutboxID(id types.ExecutionID, nodeName string, activationID int) string {
+	return fmt.Sprintf("root/%s/%s/%d", id, nodeName, activationID)
+}
+
+func retryOutboxID(id types.ExecutionID, nodeName string, activationID, attempt int) string {
+	return fmt.Sprintf("retry/%s/%s/%d/%d", id, nodeName, activationID, attempt)
+}
+
+func requeueOutboxID(id types.ExecutionID, nodeName string, activationID int, leaseID LeaseID) string {
+	return fmt.Sprintf("requeue/%s/%s/%d/%s", id, nodeName, activationID, leaseID)
+}
+
+// SuspendResumeOutboxEntry builds one deterministic resume delivery intent.
+// kind distinguishes a consumed signal from timer and timeout wakeups for the
+// same suspended lease generation.
+func SuspendResumeOutboxEntry(lease *TaskLease, kind string, payload *types.SignalPayload, availableAt time.Time) OutboxEntry {
+	return OutboxEntry{
+		ID: fmt.Sprintf("resume/%s/%s/%d/%s/%s", lease.Task.ExecutionID, lease.Task.NodeName, lease.Task.ActivationID, lease.LeaseID, kind),
+		Task: Task{
+			ExecutionID:  lease.Task.ExecutionID,
+			NodeName:     lease.Task.NodeName,
+			NodeIdx:      lease.Task.NodeIdx,
+			Type:         TaskTypeNodeResume,
+			Payload:      cloneSignalPayload(payload),
+			ActivationID: lease.Task.ActivationID,
+		},
+		AvailableAt: availableAt,
+	}
+}
+
+// SuspendOutboxEntries creates deterministic resume delivery intents for one
+// fenced suspend transition. Backends persist these entries while they still
+// hold the same state transaction that clears the lease and consumes signals.
+func SuspendOutboxEntries(lease *TaskLease, spec *types.SuspendSpec, payload *types.SignalPayload, now time.Time) []OutboxEntry {
+	if lease == nil || spec == nil {
+		return nil
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	if payload != nil {
+		return []OutboxEntry{SuspendResumeOutboxEntry(lease, "signal", payload, now)}
+	}
+	entries := make([]OutboxEntry, 0, 2)
+	if spec.Mode == types.ModeTimer {
+		entries = append(entries, SuspendResumeOutboxEntry(lease, "timer", &types.SignalPayload{Triggered: types.TimerFired, Name: "_timer"}, now.Add(spec.Timer)))
+	}
+	if spec.Timeout > 0 {
+		entries = append(entries, SuspendResumeOutboxEntry(lease, "timeout", &types.SignalPayload{Triggered: types.TimeoutFired, Name: "_timeout"}, now.Add(spec.Timeout)))
+	}
+	return entries
+}
+
+func (e *Engine) atomicState() (AtomicStateStore, error) {
+	state, ok := e.state.(AtomicStateStore)
+	if !ok {
+		return nil, ErrAtomicCommitUnsupported
+	}
+	return state, nil
+}
+
+func (e *Engine) commitNode(ctx context.Context, req CommitNodeRequest) (CommitNodeResult, error) {
+	state, err := e.atomicState()
+	if err != nil {
+		return CommitNodeResult{Outcome: CommitOutcomeTransientError}, err
+	}
+	return state.CommitNode(ctx, req)
+}
+
+// FlushOutbox delivers ready task intents for one execution. An enqueue that
+// succeeds before AckOutbox fails is deliberately retried later; lease fencing
+// makes that duplicate delivery safe.
+func (e *Engine) FlushOutbox(ctx context.Context, id types.ExecutionID) error {
+	state, err := e.atomicState()
+	if err != nil {
+		return err
+	}
+
+	const batchSize = 256
+	for {
+		entries, err := state.ListOutbox(ctx, id, time.Now().UTC(), batchSize)
+		if err != nil {
+			e.notifyOutboxError(ctx, "list", err)
+			return fmt.Errorf("list outbox for %q: %w", id, err)
+		}
+		if len(entries) == 0 {
+			return nil
+		}
+		for _, entry := range entries {
+			if entry.Task.Type == TaskTypeNodeAdvance || entry.Task.Type == TaskTypeNodeSkip {
+				handled, err := e.handleSystemTask(ctx, &entry.Task, false)
+				if err != nil {
+					e.recordOutboxDeliveryFailure(ctx, state, id, entry, err)
+					return fmt.Errorf("handle outbox system task %q for %q: %w", entry.ID, id, err)
+				}
+				if !handled {
+					err := fmt.Errorf("outbox task %q for %q was not handled", entry.ID, id)
+					e.recordOutboxDeliveryFailure(ctx, state, id, entry, err)
+					return err
+				}
+			} else {
+				var enqueueErr error
+				if entry.AvailableAt.After(time.Now()) {
+					enqueueErr = e.queue.EnqueueDelayed(ctx, &entry.Task, time.Until(entry.AvailableAt))
+				} else {
+					enqueueErr = e.queue.Enqueue(ctx, &entry.Task)
+				}
+				if enqueueErr != nil {
+					e.recordOutboxDeliveryFailure(ctx, state, id, entry, enqueueErr)
+					return fmt.Errorf("enqueue outbox %q for %q: %w", entry.ID, id, enqueueErr)
+				}
+			}
+			if err := state.AckOutbox(ctx, id, entry.ID); err != nil {
+				e.notifyOutboxError(ctx, "ack", err)
+				return fmt.Errorf("ack outbox %q for %q: %w", entry.ID, id, err)
+			}
+		}
+		// Continue even after a short batch: handling an internal advance/skip
+		// intent can have appended the next durable intent during this batch.
+	}
+}
+
+func (e *Engine) afterAtomicCommit(ctx context.Context, req CommitNodeRequest, result CommitNodeResult) error {
+	return e.afterAtomicCommitWithFlush(ctx, req, result, true)
+}
+
+func (e *Engine) afterAtomicCommitWithFlush(ctx context.Context, req CommitNodeRequest, result CommitNodeResult, flush bool) error {
+	if result.Applied && e.hooks != nil {
+		safeHook(ctx, e.logger, func(hookCtx context.Context) {
+			e.hooks.OnNodeComplete(hookCtx, req.ExecutionID, req.NodeName, req.Status)
+		})
+	}
+	if result.ExecutionDone {
+		if e.hooks != nil {
+			safeHook(ctx, e.logger, func(hookCtx context.Context) {
+				e.hooks.OnExecutionComplete(hookCtx, req.ExecutionID, result.ExecutionStatus)
+			})
+		}
+		e.EvictExecution(req.ExecutionID)
+	}
+	if flush && (result.Outcome == CommitOutcomeAccepted || result.Outcome == CommitOutcomeDuplicateTerminal) {
+		if err := e.FlushOutbox(ctx, req.ExecutionID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// HandleSystemTask consumes internal advance and skip tasks locally. It never
+// creates a runner lease, so control-plane and embedded dispatchers must call
+// it before routing a task to a handler.
+func (e *Engine) HandleSystemTask(ctx context.Context, task *Task) (bool, error) {
+	return e.handleSystemTask(ctx, task, true)
+}
+
+// handleSystemTask applies one internal task. flush is false when FlushOutbox
+// is already draining the same execution; the outer loop will observe and
+// deliver newly created intents without recursive skip propagation.
+func (e *Engine) handleSystemTask(ctx context.Context, task *Task, flush bool) (bool, error) {
+	if task == nil {
+		return false, nil
+	}
+	switch task.Type {
+	case TaskTypeNodeAdvance:
+		g, active, err := e.loadActiveGraph(ctx, task.ExecutionID)
+		if err != nil {
+			return true, err
+		}
+		if !active {
+			return true, nil
+		}
+		node, err := e.state.GetNode(ctx, task.ExecutionID, task.NodeName)
+		if err != nil {
+			return true, fmt.Errorf("read advance source %q/%q: %w", task.ExecutionID, task.NodeName, err)
+		}
+		if node == nil || !types.IsTerminalNodeStatus(node.Status) {
+			return true, nil
+		}
+		arrivals := downstreamArrivals(g, task.NodeIdx, node.Port)
+		state, err := e.atomicState()
+		if err != nil {
+			return true, err
+		}
+		if _, err := state.AdvanceNode(ctx, AdvanceNodeRequest{
+			ExecutionID:  task.ExecutionID,
+			NodeName:     task.NodeName,
+			NodeIdx:      task.NodeIdx,
+			ActivationID: task.ActivationID,
+			AutoDepth:    task.AutoDepth,
+			Arrivals:     arrivals,
+		}); err != nil {
+			return true, fmt.Errorf("advance node %q/%q: %w", task.ExecutionID, task.NodeName, err)
+		}
+		if !flush {
+			return true, nil
+		}
+		return true, e.FlushOutbox(ctx, task.ExecutionID)
+
+	case TaskTypeNodeBatch:
+		return true, e.ExecuteBatch(ctx, task)
+
+	case TaskTypeNodeSkip:
+		g, active, err := e.loadActiveGraph(ctx, task.ExecutionID)
+		if err != nil {
+			return true, err
+		}
+		if !active {
+			return true, nil
+		}
+		if task.NodeIdx < 0 || task.NodeIdx >= len(g.Nodes) {
+			return true, fmt.Errorf("skip node index %d is out of range", task.NodeIdx)
+		}
+		advance := &Task{
+			ExecutionID:  task.ExecutionID,
+			NodeName:     task.NodeName,
+			NodeIdx:      task.NodeIdx,
+			Type:         TaskTypeNodeAdvance,
+			ActivationID: task.ActivationID,
+			AutoDepth:    task.AutoDepth,
+		}
+		result, err := e.commitNode(ctx, CommitNodeRequest{
+			ExecutionID:  task.ExecutionID,
+			NodeName:     task.NodeName,
+			NodeIdx:      task.NodeIdx,
+			ActivationID: task.ActivationID,
+			AutoDepth:    task.AutoDepth,
+			Status:       types.NodeStatusSkipped,
+			System:       true,
+			AdvanceTask:  advance,
+		})
+		if err != nil {
+			return true, fmt.Errorf("commit skipped node %q/%q: %w", task.ExecutionID, task.NodeName, err)
+		}
+		return true, e.afterAtomicCommitWithFlush(ctx, CommitNodeRequest{
+			ExecutionID:  task.ExecutionID,
+			NodeName:     task.NodeName,
+			NodeIdx:      task.NodeIdx,
+			ActivationID: task.ActivationID,
+			AutoDepth:    task.AutoDepth,
+			Status:       types.NodeStatusSkipped,
+		}, result, flush)
+	default:
+		return false, nil
+	}
+}
+
+func downstreamArrivals(g *graph.Graph, sourceIdx int, activePort string) []DownstreamArrival {
+	if g == nil || sourceIdx < 0 || sourceIdx >= len(g.OutEdges) {
+		return nil
+	}
+	byDestination := make(map[int]DownstreamArrival)
+	for _, edge := range g.OutEdges[sourceIdx] {
+		arrival := byDestination[edge.DstIdx]
+		if arrival.ArrivalCount == 0 {
+			meta := g.Nodes[edge.DstIdx]
+			arrival = DownstreamArrival{
+				NodeName:  meta.Name,
+				NodeIdx:   edge.DstIdx,
+				MergeMode: meta.MergeMode,
+			}
+		}
+		arrival.ArrivalCount++
+		if edge.SrcPort == activePort {
+			arrival.ActiveCount++
+		}
+		byDestination[edge.DstIdx] = arrival
+	}
+	indexes := make([]int, 0, len(byDestination))
+	for index := range byDestination {
+		indexes = append(indexes, index)
+	}
+	sort.Ints(indexes)
+	arrivals := make([]DownstreamArrival, 0, len(indexes))
+	for _, index := range indexes {
+		arrivals = append(arrivals, byDestination[index])
+	}
+	return arrivals
+}
+
+// OutboxDispatcher periodically retries durable delivery intents left behind
+// by queue outages, response loss, or process crashes.
+type OutboxDispatcher struct {
+	engine   *Engine
+	interval time.Duration
+}
+
+// NewOutboxDispatcher creates a retry loop for durable scheduling intents.
+func NewOutboxDispatcher(eng *Engine, interval time.Duration) *OutboxDispatcher {
+	if interval <= 0 {
+		interval = time.Second
+	}
+	return &OutboxDispatcher{engine: eng, interval: interval}
+}
+
+// Run drains ready outboxes until ctx is canceled.
+func (d *OutboxDispatcher) Run(ctx context.Context) {
+	if d == nil || d.engine == nil {
+		return
+	}
+	ticker := time.NewTicker(d.interval)
+	defer ticker.Stop()
+	for {
+		d.drain(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (d *OutboxDispatcher) drain(ctx context.Context) {
+	state, err := d.engine.atomicState()
+	if err != nil {
+		d.engine.notifyOutboxError(ctx, "state", err)
+		return
+	}
+	ids, err := state.ListOutboxExecutions(ctx, 256)
+	if err != nil {
+		d.engine.notifyOutboxError(ctx, "list_executions", err)
+		if d.engine.logger != nil {
+			d.engine.logger.Error("list outbox executions failed", "err", err)
+		}
+		return
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	for _, id := range ids {
+		if err := d.engine.FlushOutbox(ctx, id); err != nil && d.engine.logger != nil {
+			d.engine.logger.Error("flush durable outbox failed", "execution_id", string(id), "err", err)
+		}
+	}
+	d.engine.observeOutboxMetrics(ctx, state)
+}

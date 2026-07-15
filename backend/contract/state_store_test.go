@@ -12,7 +12,7 @@ import (
 )
 
 func TestMemoryStateStoreContract(t *testing.T) {
-	var state engine.StateStore = memory.New().State()
+	state := memory.New().State()
 	runStateStoreContract(t, state)
 }
 
@@ -102,6 +102,9 @@ func runStateStoreContract(t *testing.T, state engine.StateStore) {
 	}
 	if claimed.Status != types.NodeStatusCommitting {
 		t.Fatalf("claimed status = %q, want committing", claimed.Status)
+	}
+	if claimed.LeaseToken != lease.LeaseToken {
+		t.Fatalf("claimed lease token = %q, want retained token %q for recovery fencing", claimed.LeaseToken, lease.LeaseToken)
 	}
 	_, valid, err = state.ClaimTaskLease(ctx, lease)
 	if err != nil || valid {

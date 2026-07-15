@@ -40,18 +40,21 @@ type Nodes interface {
 	// Errors should be returned only for backend failures, not for
 	// "nothing-to-reset" conditions.
 	ResetNodeForRetry(ctx context.Context, id types.ExecutionID, name string) error
-	// ListExpiredLeases returns every Running node whose lease deadline has
-	// passed (LeaseIssuedAt+LeaseTTL <= before). Used by the sweeper to detect
-	// runners that died mid-execute. Implementations may return at most a
-	// reasonable per-call batch to avoid OOM on large backlogs; the sweeper
-	// will re-poll until the list drains.
+	// ListExpiredLeases returns every Running, Committing, or expansion-Waiting
+	// node whose lease deadline has passed (LeaseIssuedAt+LeaseTTL <= before).
+	// Committing and Waiting claims retain the same token/deadline so a crash
+	// before finalization is swept by the normal recovery path. Implementations may return at most a reasonable
+	// per-call batch to avoid OOM on large backlogs; the sweeper will re-poll
+	// until the list drains.
 	ListExpiredLeases(ctx context.Context, before time.Time) ([]ExpiredLease, error)
-	// RevokeLease atomically clears the lease on a node whose deadline has
-	// expired and rolls it back to Pending so the task can be re-enqueued.
-	// Implementations MUST verify the supplied LeaseToken still matches before
-	// mutating state — a non-matching token means the runner already committed
-	// (or another sweeper beat us to it). Returns (revoked=true) only when the
-	// caller is responsible for re-enqueuing the task.
+	// RevokeLease atomically clears an active lease and rolls the node back to
+	// Pending so the task can be re-enqueued. It is used both by the expired
+	// lease sweeper and by an execution boundary that can prove dispatch failed
+	// before a handler started. Implementations MUST verify the supplied
+	// LeaseToken still matches before mutating state — a non-matching token
+	// means the runner already committed or a newer owner was issued. Returns
+	// (revoked=true) only when the caller is responsible for re-enqueuing the
+	// task.
 	RevokeLease(ctx context.Context, id types.ExecutionID, name string, token LeaseToken) (bool, error)
 }
 
@@ -106,6 +109,48 @@ type StateStore interface {
 type TaskQueue interface {
 	Enqueue(ctx context.Context, t *Task) error
 	EnqueueDelayed(ctx context.Context, t *Task, delay time.Duration) error
+}
+
+// LegacyNodeCommitter is the fenced terminal-transition capability used by
+// cyclic and experimental loop/split paths. It deliberately does not apply
+// static-DAG completion counters or schedule downstream work: those paths
+// retain their own scheduling protocol.
+type LegacyNodeCommitter interface {
+	CommitLeasedNode(ctx context.Context, req CommitNodeRequest) (CommitNodeResult, error)
+}
+
+// LeaseSuspender atomically converts a previously claimed lease into a
+// suspended node. It validates the original lease token, persists optional
+// resume-base output, consumes or registers signals, and clears lease expiry
+// discovery in one state transition. committed=false means recovery or a new
+// lease won the fence before the suspend was applied.
+type LeaseSuspender interface {
+	SuspendTaskLease(ctx context.Context, lease *TaskLease, output map[string]any, storeOutput bool, spec *types.SuspendSpec, oldSignalName string) (payload *types.SignalPayload, committed bool, err error)
+}
+
+// DurableLeaseSuspender atomically converts a claimed lease to Suspended and
+// records any immediate resume, timer, or timeout delivery intents in the same
+// backend transition. A successful result is therefore recoverable even if the
+// caller crashes before it can reach TaskQueue.
+type DurableLeaseSuspender interface {
+	SuspendTaskLeaseWithOutbox(ctx context.Context, lease *TaskLease, output map[string]any, storeOutput bool, spec *types.SuspendSpec, oldSignalName string) (committed bool, err error)
+}
+
+// LeaseExpander coordinates the experimental Loop/Split parent state with its
+// child batches. Every operation validates the original parent lease so a
+// batch from a reclaimed expansion cannot update or finalize a newer attempt.
+type LeaseExpander interface {
+	BeginTaskExpansion(ctx context.Context, lease *TaskLease) (started bool, err error)
+	CreateExpandedSubExecution(ctx context.Context, lease *TaskLease, sub *SubExecution) (accepted bool, err error)
+	CompleteExpandedSubExecution(ctx context.Context, lease *TaskLease, childExecID types.ExecutionID, status types.ExecutionStatus, result map[string]any) (allDone bool, accepted bool, results []map[string]any, err error)
+}
+
+// DurableLeaseExpander atomically changes a claimed parent to Waiting, stores
+// its generation-scoped child records, and records every batch delivery intent.
+// This prevents a crash or queue outage from stranding a recoverable parent
+// after the children have been created.
+type DurableLeaseExpander interface {
+	BeginTaskExpansionWithOutbox(ctx context.Context, lease *TaskLease, children []SubExecution, entries []OutboxEntry) (started bool, err error)
 }
 
 // HandlerRegistry resolves an ActionHandler for a given execution + node.

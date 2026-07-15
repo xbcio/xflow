@@ -95,6 +95,10 @@ func (s *claimTaskLeaseErrorState) ClaimTaskLease(_ context.Context, _ *TaskLeas
 	return nil, false, s.err
 }
 
+func (s *claimTaskLeaseErrorState) CommitNode(_ context.Context, _ CommitNodeRequest) (CommitNodeResult, error) {
+	return CommitNodeResult{}, s.err
+}
+
 func (h *recordingHooks) OnNodeStart(_ context.Context, _ types.ExecutionID, name string) {
 	h.started = append(h.started, name)
 }
@@ -839,5 +843,162 @@ func TestEngine_CommitTaskResultFailsSuspendWhenDisabled(t *testing.T) {
 	}
 	if snap.Status != types.ExecutionStatusFailed {
 		t.Fatalf("execution status = %q, want failed", snap.Status)
+	}
+}
+
+func TestEngineReleaseTaskLeaseRequeuesExactTaskAndFencesStaleLease(t *testing.T) {
+	ctx := context.Background()
+	eng, queue := newRunnerCommitEngine(t, WithDefaultLeaseTTL(time.Minute))
+	submitRunnerCommitWorkflow(t, ctx, eng)
+	task := queue.Drain()[0]
+	task.Type = TaskTypeNodeResume
+	task.Payload = &types.SignalPayload{
+		Triggered: types.SignalReceived,
+		Name:      "approval",
+		Data:      map[string]any{"approved": true},
+	}
+	task.ActivationID = 7
+	task.AutoDepth = 3
+
+	first, err := eng.BuildTaskLease(ctx, task)
+	if err != nil {
+		t.Fatalf("BuildTaskLease() error = %v", err)
+	}
+	released, err := eng.ReleaseTaskLease(ctx, first)
+	if err != nil || !released {
+		t.Fatalf("ReleaseTaskLease() released=%v err=%v, want true/nil", released, err)
+	}
+
+	requeued := queue.Drain()
+	if len(requeued) != 1 {
+		t.Fatalf("requeued task count = %d, want 1", len(requeued))
+	}
+	got := requeued[0]
+	if got.Type != TaskTypeNodeResume || got.ActivationID != 7 || got.AutoDepth != 3 || got.Payload == nil || got.Payload.Name != "approval" || got.Payload.Data["approved"] != true {
+		t.Fatalf("requeued task = %+v, want original resume task metadata and payload", got)
+	}
+
+	second, err := eng.BuildTaskLease(ctx, got)
+	if err != nil {
+		t.Fatalf("second BuildTaskLease() error = %v", err)
+	}
+	if second.LeaseToken == first.LeaseToken {
+		t.Fatalf("second lease token = %q, want a fresh token", second.LeaseToken)
+	}
+
+	released, err = eng.ReleaseTaskLease(ctx, first)
+	if err != nil || released {
+		t.Fatalf("stale ReleaseTaskLease() released=%v err=%v, want false/nil", released, err)
+	}
+	if lingering := queue.Drain(); len(lingering) != 0 {
+		t.Fatalf("stale release requeued %d task(s), want none", len(lingering))
+	}
+
+	node, err := eng.State().GetNode(ctx, first.Task.ExecutionID, first.Task.NodeName)
+	if err != nil {
+		t.Fatalf("GetNode() error = %v", err)
+	}
+	if node == nil || node.LeaseToken != second.LeaseToken || node.Status != types.NodeStatusRunning {
+		t.Fatalf("node after stale release = %+v, want active second lease", node)
+	}
+}
+
+func TestEngineReclaimsClaimedResumeLeaseWithFence(t *testing.T) {
+	ctx := context.Background()
+	def := &types.WorkflowDef{
+		Name:    "claimed-resume-recovery",
+		Options: &types.WorkflowOptions{AllowCycles: true},
+		Nodes:   []types.NodeDef{{Name: "start", Type: "xflow.start"}},
+	}
+	g, err := graph.Compile(def)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := newFakeState()
+	queue := &fakeQueue{}
+	eng := New(state, queue, WithDefaultLeaseTTL(time.Minute))
+	if _, err := eng.Submit(ctx, g, nil); err != nil {
+		t.Fatal(err)
+	}
+	task := queue.Drain()[0]
+	task.Type = TaskTypeNodeResume
+	task.Payload = &types.SignalPayload{
+		Triggered: types.SignalReceived,
+		Name:      "approval",
+		Data:      map[string]any{"approved": true},
+	}
+	task.ActivationID = 1
+	task.AutoDepth = 4
+
+	first, err := eng.BuildTaskLease(ctx, task)
+	if err != nil {
+		t.Fatalf("BuildTaskLease(first) error = %v", err)
+	}
+	claimed, valid, err := state.ClaimTaskLease(ctx, first)
+	if err != nil || !valid || claimed.Status != types.NodeStatusCommitting {
+		t.Fatalf("ClaimTaskLease() = (%+v, %v, %v), want committing claim", claimed, valid, err)
+	}
+	if claimed.LeaseToken != first.LeaseToken || claimed.LeaseTaskType != TaskTypeNodeResume || claimed.LeasePayload == nil || claimed.LeasePayload.Name != "approval" {
+		t.Fatalf("claimed lease metadata = %+v, want original recoverable resume task", claimed)
+	}
+
+	expired, err := state.ListExpiredLeases(ctx, time.Now().Add(time.Hour))
+	if err != nil || len(expired) != 1 {
+		t.Fatalf("ListExpiredLeases() = %+v, %v; want claimed lease", expired, err)
+	}
+	if expired[0].TaskType != TaskTypeNodeResume || expired[0].Payload == nil || expired[0].Payload.Name != "approval" || expired[0].Payload.Data["approved"] != true || expired[0].ActivationID != 1 || expired[0].AutoDepth != 4 {
+		t.Fatalf("expired lease = %+v, want exact resume task metadata", expired[0])
+	}
+
+	results := make(chan bool, 2)
+	errs := make(chan error, 2)
+	for range 2 {
+		go func() {
+			ok, reclaimErr := eng.ReclaimLease(ctx, expired[0])
+			results <- ok
+			errs <- reclaimErr
+		}()
+	}
+	wins := 0
+	for range 2 {
+		if reclaimErr := <-errs; reclaimErr != nil {
+			t.Fatalf("ReclaimLease() error = %v", reclaimErr)
+		}
+		if <-results {
+			wins++
+		}
+	}
+	if wins != 1 {
+		t.Fatalf("reclaim winners = %d, want exactly one", wins)
+	}
+
+	requeued := queue.Drain()
+	if len(requeued) != 1 {
+		t.Fatalf("requeued tasks = %+v, want one", requeued)
+	}
+	if got := requeued[0]; got.Type != TaskTypeNodeResume || got.Payload == nil || got.Payload.Name != "approval" || got.Payload.Data["approved"] != true || got.ActivationID != 1 || got.AutoDepth != 4 {
+		t.Fatalf("requeued task = %+v, want exact resume metadata", got)
+	}
+
+	second, err := eng.BuildTaskLease(ctx, requeued[0])
+	if err != nil {
+		t.Fatalf("BuildTaskLease(second) error = %v", err)
+	}
+	if second.LeaseToken == first.LeaseToken {
+		t.Fatalf("recovered lease token = %q, want fresh token", second.LeaseToken)
+	}
+	outcome, err := eng.CommitTaskResultWithOutcome(ctx, first, TaskResult{Output: &types.Output{Data: map[string]any{"stale": true}}})
+	if !errors.Is(err, ErrInvalidLeaseToken) || outcome != CommitOutcomeStaleToken {
+		t.Fatalf("stale claimed result = (%s, %v), want stale token", outcome, err)
+	}
+	if err := eng.CommitTaskResult(ctx, second, TaskResult{Output: &types.Output{Data: map[string]any{"fresh": true}}}); err != nil {
+		t.Fatalf("CommitTaskResult(second) error = %v", err)
+	}
+	output, err := state.GetOutput(ctx, second.Task.ExecutionID, second.Task.NodeName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output["fresh"] != true || output["stale"] == true {
+		t.Fatalf("output = %v, want only fresh result", output)
 	}
 }
