@@ -22,6 +22,12 @@ type state struct {
 	nodes         map[string]*engine.NodeSnapshot
 	inDegrees     map[string]int
 	activeIns     map[string]int
+	remaining     map[types.ExecutionID]int
+	failed        map[types.ExecutionID]int
+	advanced      map[string]bool
+	scheduled     map[string]string
+	outbox        map[types.ExecutionID]map[string]transientOutboxEntry
+	deadOutbox    map[types.ExecutionID]map[string]transientOutboxEntry
 	outputs       map[string]map[string]any
 	subExecs      map[string][]*engine.SubExecution
 	doneCh        map[types.ExecutionID]chan struct{}
@@ -50,6 +56,12 @@ func newState(activeTTL, completionTTL time.Duration) *state {
 		nodes:         make(map[string]*engine.NodeSnapshot),
 		inDegrees:     make(map[string]int),
 		activeIns:     make(map[string]int),
+		remaining:     make(map[types.ExecutionID]int),
+		failed:        make(map[types.ExecutionID]int),
+		advanced:      make(map[string]bool),
+		scheduled:     make(map[string]string),
+		outbox:        make(map[types.ExecutionID]map[string]transientOutboxEntry),
+		deadOutbox:    make(map[types.ExecutionID]map[string]transientOutboxEntry),
 		outputs:       make(map[string]map[string]any),
 		subExecs:      make(map[string][]*engine.SubExecution),
 		doneCh:        make(map[types.ExecutionID]chan struct{}),
@@ -68,20 +80,7 @@ func (s *state) SetCleanupHook(fn func(types.ExecutionID)) {
 func (s *state) CreateExecution(_ context.Context, e *engine.ExecutionSnapshot) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	if timer := s.cleanupTimers[e.ID]; timer != nil {
-		timer.Stop()
-		delete(s.cleanupTimers, e.ID)
-	}
-
-	cp := *e
-	s.executions[e.ID] = &execEntry{snap: cp}
-	s.doneCh[e.ID] = make(chan struct{})
-	for i, d := range e.Graph.InDegree {
-		key := fmt.Sprintf("%s/%d", e.ID, i)
-		s.inDegrees[key] = d
-	}
-	s.touchActiveLocked(e.ID)
+	s.createExecutionLocked(e)
 	return nil
 }
 
@@ -145,7 +144,7 @@ func (s *state) UpsertNode(_ context.Context, n *engine.NodeSnapshot) error {
 	if existing, ok := s.nodes[key]; ok && isTerminalNode(existing.Status) && n.ActivationID <= existing.ActivationID {
 		return nil
 	}
-	if existing, ok := s.nodes[key]; ok && existing.Status == types.NodeStatusCommitting && n.Status == types.NodeStatusRunning {
+	if existing, ok := s.nodes[key]; ok && (existing.Status == types.NodeStatusCommitting || existing.Status == types.NodeStatusWaiting) && n.Status == types.NodeStatusRunning {
 		return nil
 	}
 	cp := *n
@@ -169,7 +168,7 @@ func (s *state) ResetNodeForRetry(_ context.Context, id types.ExecutionID, name 
 	if ns == nil {
 		return nil
 	}
-	if ns.Status != types.NodeStatusRunning && ns.Status != types.NodeStatusCommitting {
+	if ns.Status != types.NodeStatusRunning && ns.Status != types.NodeStatusCommitting && ns.Status != types.NodeStatusWaiting {
 		return nil
 	}
 	cp := *ns
@@ -178,6 +177,8 @@ func (s *state) ResetNodeForRetry(_ context.Context, id types.ExecutionID, name 
 	cp.LeaseToken = ""
 	cp.LeaseIssuedAt = time.Time{}
 	cp.LeaseTTL = 0
+	cp.LeaseTaskType = engine.TaskTypeNodeExec
+	cp.LeasePayload = nil
 	s.nodes[key] = &cp
 	s.touchActiveLocked(id)
 	return nil
@@ -189,7 +190,7 @@ func (s *state) ListExpiredLeases(_ context.Context, before time.Time) ([]engine
 
 	var out []engine.ExpiredLease
 	for _, ns := range s.nodes {
-		if ns.Status != types.NodeStatusRunning {
+		if ns.Status != types.NodeStatusRunning && ns.Status != types.NodeStatusCommitting && ns.Status != types.NodeStatusWaiting {
 			continue
 		}
 		if ns.LeaseIssuedAt.IsZero() || ns.LeaseTTL <= 0 {
@@ -208,6 +209,8 @@ func (s *state) ListExpiredLeases(_ context.Context, before time.Time) ([]engine
 			TTL:          ns.LeaseTTL,
 			ActivationID: ns.ActivationID,
 			AutoDepth:    ns.AutoDepth,
+			TaskType:     ns.LeaseTaskType,
+			Payload:      cloneLeasePayload(ns.LeasePayload),
 		})
 	}
 	return out, nil
@@ -222,7 +225,7 @@ func (s *state) RevokeLease(_ context.Context, id types.ExecutionID, name string
 	if ns == nil {
 		return false, nil
 	}
-	if ns.Status != types.NodeStatusRunning {
+	if ns.Status != types.NodeStatusRunning && ns.Status != types.NodeStatusCommitting && ns.Status != types.NodeStatusWaiting {
 		return false, nil
 	}
 	if token == "" || ns.LeaseToken != token {
@@ -234,9 +237,22 @@ func (s *state) RevokeLease(_ context.Context, id types.ExecutionID, name string
 	cp.LeaseToken = ""
 	cp.LeaseIssuedAt = time.Time{}
 	cp.LeaseTTL = 0
+	cp.LeaseTaskType = engine.TaskTypeNodeExec
+	cp.LeasePayload = nil
 	s.nodes[key] = &cp
 	s.touchActiveLocked(id)
 	return true, nil
+}
+
+func cloneMap(in map[string]any) map[string]any {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]any, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
 }
 
 func cloneNodeSnapshot(ns *engine.NodeSnapshot) *engine.NodeSnapshot {
@@ -244,6 +260,23 @@ func cloneNodeSnapshot(ns *engine.NodeSnapshot) *engine.NodeSnapshot {
 		return nil
 	}
 	cp := *ns
+	cp.Output = cloneMap(ns.Output)
+	cp.LeasePayload = cloneLeasePayload(ns.LeasePayload)
+	return &cp
+}
+
+func cloneLeasePayload(payload *types.SignalPayload) *types.SignalPayload {
+	if payload == nil {
+		return nil
+	}
+	cp := *payload
+	cp.Data = cloneMap(payload.Data)
+	if payload.All != nil {
+		cp.All = make(map[string]map[string]any, len(payload.All))
+		for name, data := range payload.All {
+			cp.All[name] = cloneMap(data)
+		}
+	}
 	return &cp
 }
 
@@ -263,7 +296,7 @@ func (s *state) AcquireTaskLease(_ context.Context, lease *engine.TaskLease) (*e
 		if isTerminalNode(current.Status) && (lease.Task.ActivationID <= 0 || current.ActivationID >= lease.Task.ActivationID) {
 			return cloneNodeSnapshot(current), false, nil
 		}
-		if current.Status == types.NodeStatusCommitting {
+		if current.Status == types.NodeStatusCommitting || current.Status == types.NodeStatusWaiting {
 			return cloneNodeSnapshot(current), false, nil
 		}
 		if current.Status == types.NodeStatusRunning && current.LeaseToken != "" {
@@ -290,6 +323,8 @@ func (s *state) AcquireTaskLease(_ context.Context, lease *engine.TaskLease) (*e
 		AutoDepth:     lease.Task.AutoDepth,
 		LeaseIssuedAt: lease.IssuedAt,
 		LeaseTTL:      lease.TTL,
+		LeaseTaskType: lease.Task.Type,
+		LeasePayload:  cloneLeasePayload(lease.Task.Payload),
 	}
 	s.touchActiveLocked(lease.Task.ExecutionID)
 	return cloneNodeSnapshot(current), true, nil
@@ -313,17 +348,29 @@ func (s *state) ClaimTaskLease(_ context.Context, lease *engine.TaskLease) (*eng
 	if lease.Task.ActivationID > 0 && ns.ActivationID != lease.Task.ActivationID {
 		return ns, false, nil
 	}
-	if ns.LeaseToken == "" || ns.LeaseToken != lease.LeaseToken {
+	if ns.Status != types.NodeStatusRunning || ns.LeaseToken == "" || ns.LeaseToken != lease.LeaseToken {
+		return ns, false, nil
+	}
+	if lease.LeaseID != "" && ns.LeaseID != lease.LeaseID {
+		return ns, false, nil
+	}
+	if lease.Attempt != 0 && ns.Attempt != lease.Attempt {
 		return ns, false, nil
 	}
 
 	cp := *ns
 	cp.Status = types.NodeStatusCommitting
-	cp.LeaseToken = ""
 	s.nodes[key] = &cp
 	s.touchActiveLocked(lease.Task.ExecutionID)
-	return &cp, true, nil
+	return cloneNodeSnapshot(&cp), true, nil
 }
+
+func (s *state) SuspendTaskLease(_ context.Context, _ *engine.TaskLease, _ map[string]any, _ bool, _ *types.SuspendSpec, _ string) (*types.SignalPayload, bool, error) {
+	return nil, false, ErrTransientSuspendUnsupported
+}
+
+// ---------------------------------------------------------------------------
+// Scheduling counters
 
 func (s *state) DecrementInDegree(_ context.Context, id types.ExecutionID, nodeIdx int, portActive bool) (int, int, error) {
 	s.mu.Lock()
@@ -692,6 +739,20 @@ func (s *state) cleanupExecutionLocked(id types.ExecutionID) (bool, func(types.E
 	_, hadWatchers := s.eventWatchers[id]
 	delete(s.executions, id)
 	delete(s.doneCh, id)
+	delete(s.remaining, id)
+	delete(s.failed, id)
+	delete(s.outbox, id)
+	delete(s.deadOutbox, id)
+	for key := range s.advanced {
+		if strings.HasPrefix(key, prefix) {
+			delete(s.advanced, key)
+		}
+	}
+	for key := range s.scheduled {
+		if strings.HasPrefix(key, prefix) {
+			delete(s.scheduled, key)
+		}
+	}
 	for key := range s.nodes {
 		if strings.HasPrefix(key, prefix) {
 			delete(s.nodes, key)
