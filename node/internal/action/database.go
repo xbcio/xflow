@@ -9,7 +9,7 @@ import (
 
 	"strings"
 
-	. "github.com/xbcio/xflow/node/internal"
+	nodeinternal "github.com/xbcio/xflow/node/internal"
 	"github.com/xbcio/xflow/node/registry"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -18,7 +18,7 @@ import (
 
 // DatabaseNode implements xflow.database — runs a database operation via a named credential.
 type DatabaseNode struct {
-	BaseNode
+	nodeinternal.BaseNode
 	Operation  string
 	Table      string
 	Credential string
@@ -174,7 +174,7 @@ func (n *DatabaseNode) execSelect(ctx context.Context, db *sql.DB, table string,
 	if err != nil {
 		return &types.Output{Data: map[string]any{"error": err.Error()}, Port: "error"}, nil
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	columns, err := rows.Columns()
 	if err != nil {

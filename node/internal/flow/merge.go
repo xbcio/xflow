@@ -6,21 +6,21 @@ import (
 
 	"github.com/xbcio/xflow/types"
 
-	. "github.com/xbcio/xflow/node/internal"
+	nodeinternal "github.com/xbcio/xflow/node/internal"
 	"github.com/xbcio/xflow/node/registry"
 	"github.com/spf13/cast"
 )
 
 // MergeNode implements xflow.merge — fan-in synchronisation node.
 type MergeNode struct {
-	BaseNode
-	Mode MergeMode
+	nodeinternal.BaseNode
+	Mode nodeinternal.MergeMode
 }
 
 // Merge creates a fan-in synchronisation node.
 //
-//	node.Merge(node.MergeWaitAll)
-func Merge(mode MergeMode) *MergeNode {
+//	node.Merge(node.nodeinternal.MergeWaitAll)
+func Merge(mode nodeinternal.MergeMode) *MergeNode {
 	return &MergeNode{Mode: mode}
 }
 
@@ -53,10 +53,10 @@ func (n *MergeNode) Execute(ctx context.Context, input *types.Input) (*types.Out
 		mode = "wait_all"
 	}
 
-	switch MergeMode(mode) {
-	case MergeWaitAll:
+	switch nodeinternal.MergeMode(mode) {
+	case nodeinternal.MergeWaitAll:
 		return n.mergeAll(input)
-	case MergeWaitAny:
+	case nodeinternal.MergeWaitAny:
 		return n.mergeAny(input)
 	default:
 		return nil, fmt.Errorf("xflow.merge: unknown mode %q", mode)

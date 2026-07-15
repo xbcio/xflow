@@ -8,7 +8,7 @@ import (
 
 	"time"
 
-	. "github.com/xbcio/xflow/node/internal"
+	nodeinternal "github.com/xbcio/xflow/node/internal"
 	"github.com/xbcio/xflow/node/registry"
 	"github.com/spf13/cast"
 )
@@ -26,7 +26,7 @@ const (
 
 // WaitNode implements xflow.wait — suspends execution until a signal or timer fires.
 type WaitNode struct {
-	BaseNode
+	nodeinternal.BaseNode
 	Mode       WaitMode
 	SignalName string
 	Signals    []string

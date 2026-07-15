@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	. "github.com/xbcio/xflow/node/internal"
+	nodeinternal "github.com/xbcio/xflow/node/internal"
 	"github.com/xbcio/xflow/types"
 	"github.com/spf13/cast"
 )
@@ -13,7 +13,7 @@ import (
 // RemoveDuplicatesNode implements xflow.transform.remove_duplicates — keeps
 // the first item for each unique key.
 type RemoveDuplicatesNode struct {
-	BaseNode
+	nodeinternal.BaseNode
 	Items  string
 	Fields []string
 }
@@ -70,7 +70,7 @@ func (n *RemoveDuplicatesNode) Execute(_ context.Context, input *types.Input) (*
 }
 
 func dedupKey(item any, fields []string) (string, error) {
-	var value any = item
+	value := item
 	if len(fields) > 0 {
 		key := make(map[string]any, len(fields))
 		for _, field := range fields {

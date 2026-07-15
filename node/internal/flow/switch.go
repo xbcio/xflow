@@ -6,7 +6,7 @@ import (
 
 	"github.com/xbcio/xflow/types"
 
-	. "github.com/xbcio/xflow/node/internal"
+	nodeinternal "github.com/xbcio/xflow/node/internal"
 	"github.com/xbcio/xflow/node/internal/utils/exprx"
 	"github.com/xbcio/xflow/node/registry"
 	"github.com/spf13/cast"
@@ -20,7 +20,7 @@ type SwitchRule struct {
 
 // SwitchNode implements xflow.switch — multi-branch routing node.
 type SwitchNode struct {
-	BaseNode
+	nodeinternal.BaseNode
 	Mode          string // "rules" or "expression"
 	Rules         []SwitchRule
 	Expression    string

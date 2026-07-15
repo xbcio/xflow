@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	. "github.com/xbcio/xflow/node/internal"
+	nodeinternal "github.com/xbcio/xflow/node/internal"
 	"github.com/xbcio/xflow/node/registry"
 
 	"github.com/xbcio/xflow/node/internal/utils/conv"
@@ -60,7 +60,7 @@ type KafkaAggregateConfig struct {
 var newKafkaConsumer = newKafkaGoConsumer
 
 type KafkaTriggerNode struct {
-	BaseNode
+	nodeinternal.BaseNode
 	BrokersValue     []string
 	TopicValue       string
 	GroupValue       string
@@ -166,7 +166,7 @@ func (n *KafkaTriggerNode) OnError(s types.OnError) types.Builder {
 }
 func (n *KafkaTriggerNode) TriggerHandler() types.TriggerHandler { return n }
 func (n *KafkaTriggerNode) Execute(_ context.Context, input *types.Input) (*types.Output, error) {
-	return ExecuteTriggerEntry(input)
+	return nodeinternal.ExecuteTriggerEntry(input)
 }
 
 func (n *KafkaTriggerNode) Activate(ctx context.Context, in *types.TriggerActivateInput) (types.TriggerSubscription, error) {

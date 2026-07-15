@@ -4,14 +4,14 @@ import (
 	"context"
 	"fmt"
 
-	. "github.com/xbcio/xflow/node/internal"
+	nodeinternal "github.com/xbcio/xflow/node/internal"
 	"github.com/xbcio/xflow/types"
 )
 
 // RenameNode implements xflow.transform.rename — renames fields according to
 // an old-name to new-name mapping.
 type RenameNode struct {
-	BaseNode
+	nodeinternal.BaseNode
 	Mapping map[string]string
 }
 

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	. "github.com/xbcio/xflow/node/internal"
+	nodeinternal "github.com/xbcio/xflow/node/internal"
 	"github.com/xbcio/xflow/node/registry"
 
 	"github.com/xbcio/xflow/types"
@@ -20,7 +20,7 @@ import (
 const defaultWebhookMaxBodyBytes = int64(1 << 20)
 
 type WebhookTriggerNode struct {
-	BaseNode
+	nodeinternal.BaseNode
 	MethodValue        string
 	PathValue          string
 	EventIDHeaderValue string
@@ -85,7 +85,7 @@ func (n *WebhookTriggerNode) OnError(s types.OnError) types.Builder {
 }
 func (n *WebhookTriggerNode) TriggerHandler() types.TriggerHandler { return n }
 func (n *WebhookTriggerNode) Execute(_ context.Context, input *types.Input) (*types.Output, error) {
-	return ExecuteTriggerEntry(input)
+	return nodeinternal.ExecuteTriggerEntry(input)
 }
 
 func (n *WebhookTriggerNode) Activate(ctx context.Context, in *types.TriggerActivateInput) (types.TriggerSubscription, error) {

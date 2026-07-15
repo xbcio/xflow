@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"sort"
 
-	. "github.com/xbcio/xflow/node/internal"
+	nodeinternal "github.com/xbcio/xflow/node/internal"
 	"github.com/xbcio/xflow/types"
 	"github.com/spf13/cast"
 )
@@ -21,7 +21,7 @@ func SortDesc(field string) SortField { return SortField{Field: field, Desc: tru
 
 // SortNode implements xflow.transform.sort — sorts items by one or more fields.
 type SortNode struct {
-	BaseNode
+	nodeinternal.BaseNode
 	Items  string
 	Fields []SortField
 }

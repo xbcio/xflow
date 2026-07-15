@@ -14,14 +14,14 @@ import (
 	"strings"
 	"time"
 
-	. "github.com/xbcio/xflow/node/internal"
+	nodeinternal "github.com/xbcio/xflow/node/internal"
 	"github.com/xbcio/xflow/node/registry"
 	"github.com/spf13/cast"
 )
 
 // HTTPNode implements xflow.http — executes an HTTP request.
 type HTTPNode struct {
-	BaseNode
+	nodeinternal.BaseNode
 	Method         string
 	URL            string
 	Headers        map[string]any
@@ -174,7 +174,7 @@ func (n *HTTPNode) Execute(ctx context.Context, input *types.Input) (*types.Outp
 			Port: "error",
 		}, nil
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {

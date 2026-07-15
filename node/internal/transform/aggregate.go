@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	. "github.com/xbcio/xflow/node/internal"
+	nodeinternal "github.com/xbcio/xflow/node/internal"
 	"github.com/xbcio/xflow/types"
 	"github.com/spf13/cast"
 )
@@ -17,7 +17,7 @@ type AggregateOperation struct {
 
 // AggregateNode implements xflow.transform.aggregate — summarizes item arrays.
 type AggregateNode struct {
-	BaseNode
+	nodeinternal.BaseNode
 	Items      string
 	Operations []AggregateOperation
 }

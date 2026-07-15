@@ -107,7 +107,7 @@ func TestKafkaTriggerSkipsEmitWhenDedupErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sub.Close(context.Background())
+	defer func() { _ = sub.Close(context.Background()) }()
 
 	if !rt.waitDedup(time.Second) {
 		t.Fatal("kafka trigger did not attempt dedup")
@@ -145,7 +145,7 @@ func TestKafkaTriggerContinuesAfterEmitError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sub.Close(context.Background())
+	defer func() { _ = sub.Close(context.Background()) }()
 
 	if !rt.waitForEmitCount(2, time.Second) {
 		t.Fatalf("emit count = %d, want at least 2", rt.emitCount())
@@ -171,7 +171,7 @@ func TestKafkaTriggerCommitsMessageAfterEmit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sub.Close(context.Background())
+	defer func() { _ = sub.Close(context.Background()) }()
 
 	if !consumer.waitForCommitCount(1, time.Second) {
 		t.Fatalf("commit count = %d, want 1", consumer.commitCount())
@@ -203,7 +203,7 @@ func TestKafkaTriggerDoesNotCommitMessageWhenEmitErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sub.Close(context.Background())
+	defer func() { _ = sub.Close(context.Background()) }()
 
 	if !rt.waitForEmitCount(1, time.Second) {
 		t.Fatalf("emit count = %d, want 1", rt.emitCount())
@@ -238,7 +238,7 @@ func TestKafkaTriggerCommitsBatchAfterEmit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sub.Close(context.Background())
+	defer func() { _ = sub.Close(context.Background()) }()
 
 	if !consumer.waitForCommitCount(2, time.Second) {
 		t.Fatalf("commit count = %d, want 2", consumer.commitCount())
@@ -275,7 +275,7 @@ func TestKafkaTriggerDoesNotCommitBatchWhenEmitErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sub.Close(context.Background())
+	defer func() { _ = sub.Close(context.Background()) }()
 
 	if !rt.waitForEmitCount(1, time.Second) {
 		t.Fatalf("emit count = %d, want 1", rt.emitCount())
@@ -307,7 +307,7 @@ func TestKafkaTriggerConsumesRealKafka(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sub.Close(context.Background())
+	defer func() { _ = sub.Close(context.Background()) }()
 
 	if !rt.waitForEmitCount(2, 10*time.Second) {
 		t.Fatalf("emit count = %d, want 2", rt.emitCount())
@@ -347,7 +347,7 @@ func TestKafkaTriggerSingleEventIncludesMessagesArray(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sub.Close(context.Background())
+	defer func() { _ = sub.Close(context.Background()) }()
 
 	if !rt.waitForEmitCount(1, time.Second) {
 		t.Fatalf("emit count = %d, want 1", rt.emitCount())
@@ -391,7 +391,7 @@ func TestKafkaTriggerAggregatesMessagesByPartition(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sub.Close(context.Background())
+	defer func() { _ = sub.Close(context.Background()) }()
 
 	if !rt.waitForEmitCount(2, time.Second) {
 		t.Fatalf("emit count = %d, want 2", rt.emitCount())
@@ -485,7 +485,7 @@ func TestKafkaTriggerAggregateFlushesByInterval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sub.Close(context.Background())
+	defer func() { _ = sub.Close(context.Background()) }()
 
 	if !rt.waitForEmitCount(1, time.Second) {
 		t.Fatalf("emit count = %d, want 1", rt.emitCount())
@@ -542,7 +542,7 @@ func createKafkaIntegrationTopic(t *testing.T, broker, topic string, partitions 
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	controller, err := conn.Controller()
 	if err != nil {
 		t.Fatal(err)
@@ -551,7 +551,7 @@ func createKafkaIntegrationTopic(t *testing.T, broker, topic string, partitions 
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer controllerConn.Close()
+	defer func() { _ = controllerConn.Close() }()
 	if err := controllerConn.CreateTopics(kafka.TopicConfig{
 		Topic:             topic,
 		NumPartitions:     partitions,
@@ -570,7 +570,7 @@ func writeKafkaIntegrationMessages(t *testing.T, brokers []string, topic string,
 		AllowAutoTopicCreation: false,
 		RequiredAcks:           kafka.RequireAll,
 	}
-	defer writer.Close()
+	defer func() { _ = writer.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := writer.WriteMessages(ctx, messages...); err != nil {

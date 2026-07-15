@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql"
 	"github.com/xbcio/xflow/types"
+	_ "github.com/go-sql-driver/mysql"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -19,7 +19,7 @@ import (
 // validates only the DSN syntax (not the connection).
 const (
 	poolDriverName = "mysql"
-	poolDSN       = "user:pass@tcp(127.0.0.1:1)/db?timeout=1s"
+	poolDSN        = "user:pass@tcp(127.0.0.1:1)/db?timeout=1s"
 )
 
 func TestResourcePool_SQLReusesHandle(t *testing.T) {

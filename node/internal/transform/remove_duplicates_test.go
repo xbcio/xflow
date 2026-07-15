@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/xbcio/xflow/node/registry"
 	"github.com/xbcio/xflow/node"
+	"github.com/xbcio/xflow/node/registry"
 	"github.com/xbcio/xflow/types"
 )
 

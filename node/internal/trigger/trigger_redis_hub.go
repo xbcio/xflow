@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	. "github.com/xbcio/xflow/node/internal"
+	nodeinternal "github.com/xbcio/xflow/node/internal"
 	"github.com/xbcio/xflow/node/registry"
 
 	"github.com/xbcio/xflow/node/internal/utils/conv"
@@ -45,7 +45,7 @@ var newRedisHubConsumer = func(RedisHubConsumerConfig) (RedisHubConsumer, error)
 var redisHubPubSubLockTTL = time.Minute
 
 type RedisHubTriggerNode struct {
-	BaseNode
+	nodeinternal.BaseNode
 	ModeValue        string
 	StreamValue      string
 	GroupValue       string
@@ -122,7 +122,7 @@ func (n *RedisHubTriggerNode) OnError(s types.OnError) types.Builder {
 }
 func (n *RedisHubTriggerNode) TriggerHandler() types.TriggerHandler { return n }
 func (n *RedisHubTriggerNode) Execute(_ context.Context, input *types.Input) (*types.Output, error) {
-	return ExecuteTriggerEntry(input)
+	return nodeinternal.ExecuteTriggerEntry(input)
 }
 
 func (n *RedisHubTriggerNode) Activate(ctx context.Context, in *types.TriggerActivateInput) (types.TriggerSubscription, error) {

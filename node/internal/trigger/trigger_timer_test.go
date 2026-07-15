@@ -23,7 +23,7 @@ func TestTimerTriggerEmitsAtInterval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sub.Close(context.Background())
+	defer func() { _ = sub.Close(context.Background()) }()
 	if !rt.waitEmit(time.Second) {
 		t.Fatal("timer did not emit")
 	}
@@ -44,7 +44,7 @@ func TestTimerTriggerSkipsEmitWhenDedupErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sub.Close(context.Background())
+	defer func() { _ = sub.Close(context.Background()) }()
 
 	if !rt.waitDedup(time.Second) {
 		t.Fatal("timer did not attempt dedup")
@@ -73,7 +73,7 @@ func TestTimerTriggerContinuesAfterEmitError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sub.Close(context.Background())
+	defer func() { _ = sub.Close(context.Background()) }()
 
 	if !rt.waitForEmitCount(2, time.Second) {
 		t.Fatalf("emit count = %d, want at least 2", rt.emitCount())

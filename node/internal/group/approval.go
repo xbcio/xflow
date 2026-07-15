@@ -7,7 +7,7 @@ import (
 
 	"github.com/xbcio/xflow/types"
 
-	. "github.com/xbcio/xflow/node/internal"
+	nodeinternal "github.com/xbcio/xflow/node/internal"
 	"github.com/xbcio/xflow/node/registry"
 )
 
@@ -34,7 +34,7 @@ type ApprovalParams struct {
 // ApprovalNode implements xflow.approval — suspends execution until
 // approvers deliver their decisions via signals.
 type ApprovalNode struct {
-	BaseNode
+	nodeinternal.BaseNode
 	Approvers     []string
 	Mode          ApprovalMode
 	TimeoutStr    string

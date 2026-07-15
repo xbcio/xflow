@@ -5,7 +5,7 @@ import (
 
 	"context"
 
-	. "github.com/xbcio/xflow/node/internal"
+	nodeinternal "github.com/xbcio/xflow/node/internal"
 	"github.com/xbcio/xflow/node/registry"
 )
 
@@ -14,7 +14,7 @@ import (
 // The engine still treats any leaf node as a completion checkpoint; xflow.end
 // exists to make workflow terminals explicit in DSLs and UI-authored graphs.
 type EndNode struct {
-	BaseNode
+	nodeinternal.BaseNode
 }
 
 // End returns the built-in xflow.end node builder.

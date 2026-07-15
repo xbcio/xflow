@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	. "github.com/xbcio/xflow/node/internal"
+	nodeinternal "github.com/xbcio/xflow/node/internal"
 	"github.com/xbcio/xflow/node/registry"
 
 	"github.com/xbcio/xflow/node/internal/utils/conv"
@@ -13,7 +13,7 @@ import (
 )
 
 type TimerTriggerNode struct {
-	BaseNode
+	nodeinternal.BaseNode
 	Interval time.Duration
 }
 
@@ -48,7 +48,7 @@ func (n *TimerTriggerNode) OnError(s types.OnError) types.Builder {
 }
 func (n *TimerTriggerNode) TriggerHandler() types.TriggerHandler { return n }
 func (n *TimerTriggerNode) Execute(_ context.Context, input *types.Input) (*types.Output, error) {
-	return ExecuteTriggerEntry(input)
+	return nodeinternal.ExecuteTriggerEntry(input)
 }
 
 func (n *TimerTriggerNode) Activate(ctx context.Context, in *types.TriggerActivateInput) (types.TriggerSubscription, error) {

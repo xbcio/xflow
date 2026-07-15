@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	. "github.com/xbcio/xflow/node/internal"
+	nodeinternal "github.com/xbcio/xflow/node/internal"
 	"github.com/xbcio/xflow/node/internal/utils/exprx"
 	"github.com/xbcio/xflow/types"
 	"github.com/spf13/cast"
@@ -13,7 +13,7 @@ import (
 // FilterNode implements xflow.transform.filter — keeps items matching an
 // expression. The expression can reference item, index, and item map fields.
 type FilterNode struct {
-	BaseNode
+	nodeinternal.BaseNode
 	Items     string
 	Condition string
 }

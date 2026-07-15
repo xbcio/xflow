@@ -7,7 +7,7 @@ import (
 
 	"github.com/xbcio/xflow/types"
 
-	. "github.com/xbcio/xflow/node/internal"
+	nodeinternal "github.com/xbcio/xflow/node/internal"
 	"github.com/xbcio/xflow/node/internal/code/script/engine"
 	"github.com/xbcio/xflow/node/internal/utils/exprx"
 	"github.com/xbcio/xflow/node/registry"
@@ -19,7 +19,7 @@ import (
 
 // ScriptNode implements xflow.script — runs a sandboxed dynamic script.
 type ScriptNode struct {
-	BaseNode
+	nodeinternal.BaseNode
 	Code        string
 	Lang        string
 	RuntimeName string

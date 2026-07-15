@@ -22,10 +22,13 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		panic(err)
 	}
-	defer os.RemoveAll(dir)
 	echoWasm = buildGuest(dir, "echo")
 	spinWasm = buildGuest(dir, "spin")
-	os.Exit(m.Run())
+	exitCode := m.Run()
+	if err := os.RemoveAll(dir); err != nil {
+		panic(err)
+	}
+	os.Exit(exitCode)
 }
 
 // buildGuest compiles testdata/<name>/main.go to a WASI module and returns its

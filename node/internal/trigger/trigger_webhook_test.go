@@ -43,7 +43,7 @@ func TestWebhookTriggerRequestEmitsEventAndDedupsByHeader(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sub.Close(context.Background())
+	defer func() { _ = sub.Close(context.Background()) }()
 
 	for i := 0; i < 2; i++ {
 		req := httptest.NewRequest(http.MethodPost, "/hooks/orders", bytes.NewBufferString(`{"id":1}`))

@@ -62,7 +62,7 @@ func TestRedisHubTriggerSkipsEmitWhenDedupErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sub.Close(context.Background())
+	defer func() { _ = sub.Close(context.Background()) }()
 
 	if !rt.waitDedup(time.Second) {
 		t.Fatal("redis hub trigger did not attempt dedup")
@@ -100,7 +100,7 @@ func TestRedisHubTriggerContinuesAfterEmitError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sub.Close(context.Background())
+	defer func() { _ = sub.Close(context.Background()) }()
 
 	if !rt.waitForEmitCount(2, time.Second) {
 		t.Fatalf("emit count = %d, want at least 2", rt.emitCount())
