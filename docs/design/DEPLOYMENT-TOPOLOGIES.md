@@ -16,7 +16,7 @@ xflow 是一个通用、可嵌入的工作流引擎 SDK：用户用 DAG 编排�
 | **cluster** | 每个对等进程 | 每个对等进程（自带 Asynq server） | Redis（+ 可选持久化 Store） | Redis | 多副本对等部署、需要持久化与挂起/信号 | 已实现 |
 | **remote** | SDK 瘦客户端 | 远端 runner 集群 | 远端（server 管理） | 网络可达的 server | 轻量嵌入、客户端不愿引入 Redis/执行负载 | 规划 |
 | **server**（Control Plane） | 接受外部提交 | 不执行 handler | 通过 StateStore | Redis / 持久化 Store / Asynq | 集群控制面、调度权威 | MVP 已实现 |
-| **runner protocol**（执行协议） | 不提交 | 不执行 handler | server 持有最终状态 | HTTP+JSON long poll / gRPC | server 与 runner 的统一执行协议 | MVP 已实现 |
+| **runner protocol**（执行协议） | 不提交 | 不执行 handler | server 持有最终状态 | HTTP+JSON long poll / gRPC | server 与 runner 的统一执行协议 | MVP 已实现（HTTP/gRPC）；streaming / credit-flow 为实验性 |
 | **runner**（执行面） | 不提交 | 通过 Runner Protocol 执行 handler | 通过 Runner Protocol 回报 server | 网络可达的 server 或 Relay Gateway | 集群执行面，横向扩缩容 / 网络隔离执行 | MVP 已实现 |
 | **Relay Gateway**（可选中继） | 不提交 | 不执行 handler | 本地只缓存 pending/inflight；最终状态在 server | 网络可达的 server + 本地 runner 可达的 Relay Gateway | runner 无法直连 server 时延伸执行通道，不暴露 Redis | 规划 |
 
@@ -104,20 +104,22 @@ SDK 作为**瘦客户端**：自己不执行节点、不需要 Redis，通过网
 | 角色 | 职责 | 不做什么 |
 |---|---|---|
 | **server**（Control Plane） | 接受工作流提交（HTTP/gRPC）、把 `WorkflowDef` 编译成 Graph IR、把节点任务派发到 Asynq、跟踪执行生命周期、提供查询 API、投递信号、超时清扫（TimeoutSweep） | **不执行节点 handler**，不暴露 Redis 给 runner |
-| **Task Dispatcher**（server 内部组件） | 作为 Asynq worker 消费 server 内部任务，把 Asynq task 转成 task lease，匹配 runner 能力，管理下发、超时、取消、结果回收 | 不执行 handler，不把 Redis / Asynq 细节泄漏给 runner |
+| **Task Dispatcher**（server 内部组件） | 作为 Asynq worker 消费 server 内部任务，持久化为 runner assignment；由 Core 在 runner claim 后签发/恢复 lease，并管理结果回收 | 不执行 handler，不把 Redis / Asynq 细节泄漏给 runner |
 | **Runner Protocol**（控制面-执行面协议） | 定义 runner 注册、心跳、容量、lease、result、cancel 的网络协议 | 不保存最终状态，不决定 DAG 调度 |
 | **runner**（执行面） | 连接 server 的 Runner Protocol，通过 registry 解析 handler、执行、回报结果 | 不接受外部 API 请求，不连接 Redis / Asynq |
 | **Relay Gateway**（可选） | 当 runner 无法直连 server 时中继 Runner Protocol，提供网络域延伸、本地连接聚合、短暂缓冲 | 不成为状态权威，不直接访问 server Redis / DB |
 
 runner 可横向扩缩容：跑多个 runner 实例即可线性扩展执行吞吐。
 
-**MVP 限制**：
-- Runner Protocol 已提供 HTTP+JSON long polling 与 gRPC 两条通道；streaming 语义仍在演进。
+**MVP 现有边界**：
+- Runner Protocol 已提供 HTTP+JSON long polling 与 gRPC 通道；**streaming / credit-flow control 仍是实验性传输优化**，不应视为生产级可靠性承诺。
 - 没有 Relay Gateway；runner 必须能直接访问 server。
 - 没有 remote SDK；提交、查询、信号 API 先由 server HTTP handler 暴露。
 - **已实现** runner bearer token、mTLS、runner policy allowlist 与 dry-run rollout；workflow-level authorization、租户隔离和生产级审计仍需单独设计。
 - **已实现** runner matching 的 `node_type` / `node_version` 精确匹配、runner policy 过滤与容量 gating；tags / env / region / 权重调度仍在规划。
-- **已实现** lease TTL + sweeper 回收与 re-enqueue；durable pending/inflight recovery 仍是后续计划。
+- **已实现** Redis-backed durable assignment / claim / leased handoff、claim expiry 回收、重连 lease replay，以及 lease TTL + sweeper 回收与 re-enqueue。handler 与协议响应仍是 at-least-once，必须使用业务幂等键。
+- 当前 leader election 只协调 leader-only maintenance；它不是完整 control-plane HA 或 failover SLO 的替代品。生产就绪仍依赖 Redis 高可用部署和 kill/restart/failover 验证。
+- Loop/Split 仍是实验性扩展路径，未纳入静态 DAG completion 或 server/runner production-ready 保证。
 - **已实现** Redis 作为权威状态、store/sqlstore 作为 best-effort audit trail 的 dual-write contract；审计 reconciliation CLI 仍在规划。
 
 ### 3.2 与 engine 两接口的对应
@@ -180,33 +182,74 @@ xflow-runner
 
 ### 4.1 Task Dispatcher 职责
 
-- 作为 Asynq worker 消费 server 内部任务。
-- 当前 dispatch 是瞬时操作：`HandleTask` 调用 `engine.TaskRouting` 获取路由元数据（无副作用），匹配 runner 后调用 `engine.BuildTaskLease` 签发 lease 并通过 Runner Protocol 下发。**当前未在 ack Asynq 前持久化 `dispatching` / `runner_pending` 等中间状态**——durable pending/inflight recovery 是规划，未实现（见 §7）。
-- 根据 `node_type` 精确匹配、`node_version`（0=任意）、`RunnerSelector` label 匹配、runner policy 授权、runner 当前容量（headroom）选择 runner。
-- lease token（`engine.BuildTaskLease` 生成的 uuid）作为 fencing token，`engine.CommitTaskResult` 通过 `StateStore.ClaimTaskLease` 原子校验，过期 lease 由 `LeaseSweeper` 回收。
-- runner 容量不足返回 `ErrNoCapacity`、无匹配 runner 返回 `ErrNoMatchingRunner`，两者由队列层重试（不无限搬到 server pending 池）。
+- 作为 Asynq worker 消费 server 内部任务，并通过无副作用的
+  `engine.TaskRouting` 取得路由元数据。
+- 在确认该任务仍可路由后，把确定性 `Assignment` 写入
+  `RunnerDirectory`；Redis-backed server 使用 `RedisRunnerDirectory`。此
+  durable enqueue 是 Asynq ack 前的交接点，而不是把已经构建的 lease
+  留在某个 server 进程内存中。
+- runner 以当前 session、capacity、capability、selector 和 policy 主动
+  `ClaimForRunner`。目录把 assignment 从 `queued` 原子变为有 TTL 的
+  `claimed`，并记录该 runner/session 的容量占用。
+- server 只在 claim 成功后调用 `engine.BuildTaskLease`。成功时
+  `FinalizeClaim` 将完整 lease（含 ID、token、attempt、input 和 deadline）
+  持久化为 `leased`，再通过 Runner Protocol 返回给 runner。
+- `engine.CommitTaskResult` 以 lease token 作为 fencing token；结果处理
+  完成后，`ReleaseLeased` 再以 assignment、lease ID 和 token 身份释放
+  容量并清除可重投递标记。
 
-### 4.2 状态边界
+### 4.2 状态边界与恢复
 
-Asynq 负责 server 内部的可靠调度，不直接代表 runner 执行生命周期。当前实现没有为任务单独定义 dispatching / runner_pending / runner_leased / runner_running 等细分中间状态——dispatch 是瞬时操作，任务状态直接由节点的 `NodeStatus`（`types/execution.go`）表达：
+Asynq 仍是 server 内部的可靠队列，但 runner handoff 另有独立的 durable
+状态机；它不取代 Engine 的权威 node/execution 状态：
 
+```text
+Asynq task
+  -> RunnerDirectory assignment: queued -> claimed -> leased -> released
+  -> Engine node: pending -> running -> terminal/suspended/waiting
 ```
-pending -> running -> committing -> success / failed / skipped / suspended / continued / canceled / waiting
-```
 
-Task Dispatcher 调用 `engine.TaskRouting` 获取路由元数据（无副作用），匹配 runner 后调用 `engine.BuildTaskLease` 签发 lease（节点进入 `running`，写入 lease token），通过 Runner Protocol 下发给 runner。runner 执行完毕回报 result，server 调用 `engine.CommitTaskResult` 校验 lease token 并推进到终态。
+`claimed` 有 TTL。server 在 claim 后、`BuildTaskLease` 前崩溃时，过期
+claim 会回到 durable assignment queue。若 `BuildTaskLease` 已经写入
+running lease、但 server 在 `FinalizeClaim` 前崩溃，重试会恢复该精确的
+fenced lease 并完成 finalization，而不是签发第二个 owner。若 finalization
+已完成但响应尚未到 runner，runner reconnect 或同 runner ID 的重新注册会
+replay 同一完整 lease；因此 runner 必须把 handler 执行视为 at-least-once。
 
-职责分层：Asynq 入队 / 内部重试由 Asynq 负责；lease 签发 → result 回报由 server state + Runner Protocol 负责；终态推进由 Engine 负责；lease 过期回收由 `LeaseSweeper` 负责。
+节点 terminal commit、下游计数和后续调度 intent 由 Engine 的 atomic
+`CommitNode` 与 durable outbox 处理。TaskQueue 暂时不可用时，outbox 保留
+ready intent；恢复后 dispatcher 重新 handoff。lease expiry discovery 和
+repair、runner claim expiry recovery，以及 outbox replay 都是独立的恢复
+循环，且均以 Redis 中的权威状态为准。
 
-### 4.3 重试语义
+### 4.3 重试与责任分层
 
-| 阶段 | 负责方 | 重试含义 |
+| 阶段 | 负责方 | 重试/恢复含义 |
 |---|---|---|
-| enqueue / dispatch | Asynq | server 内部调度失败、Dispatcher 未能安全接管 |
-| assign / lease | Task Dispatcher | runner 不可用、下发失败、lease 超时 |
-| execute | Runner + server state | handler 执行失败后的业务重试 |
+| engine scheduling handoff | durable outbox dispatcher | enqueue 失败保留 intent；达到阈值后转 dead-letter 并告警 |
+| Asynq → RunnerDirectory | Task Dispatcher | assignment 已持久化后可安全 ack Asynq；暂时性目录错误由队列重试 |
+| claim / finalize / response loss | RedisRunnerDirectory + Core | claim TTL 回队；已构建 lease 可恢复 finalization；已 final 的 lease 可 replay |
+| expired execution lease | LeaseSweeper | token-fenced revoke/requeue，竞争中的 result commit 优先 |
+| handler business failure | Runner + Engine | 按 workflow retry/on-error policy 产生新的 fenced attempt |
 
-Task Dispatcher 消费 Asynq task 后，不应长时间阻塞等待 runner 执行完成。它应在持久化 runner 执行状态后返回，让远程执行生命周期由 server state + Runner Protocol 管理。
+Task Dispatcher 不会等待 runner 执行完成；它只完成 durable handoff。最终
+node/execution 状态仍由 server 的 `CommitTaskResult` 推进，runner 不直接
+访问 Redis 或 Asynq。
+
+### 4.4 当前 HA 与传输边界
+
+Redis 的 durable state 允许任一 control-plane 进程在恢复后继续 claim、
+replay 或 sweep 既有工作；这不等同于完整的 control-plane HA。当前 leader
+election 只用于 leader-only maintenance（例如 lease/index repair 和 claim
+reclaim）的互斥，尚未提供 Raft 元数据复制、跨副本 API ownership 或经过
+完整 kill/restart/failover soak 验证的 production-ready 承诺。Redis 可用性
+与其自身高可用部署仍是前提。
+
+HTTP long poll 与 gRPC Runner Protocol 均可用。**streaming 与 credit-flow
+control 仍为实验性传输优化**：它们不得绕过 durable assignment、lease 或
+outbox 语义，也不构成 release gate 已满足的证据。Loop/Split 也仍是实验性
+扩展路径，未纳入静态 DAG completion 与 server/runner production-ready
+保证。
 
 ---
 
@@ -309,11 +352,12 @@ Relay Gateway 用于 runner 无法直连 server、不能互相直连或需要本
 | remote 模式 | **规划** | 无 remote SDK client/backend，无 remote 工厂 |
 | server 管理面 | **MVP 已实现** | `cmd/server` 可启动 HTTP 控制面，支持 workflow invoke、inspect、signal、cancel、runner register/heartbeat/poll/result |
 | runner 执行面 | **MVP 已实现** | `cmd/runner` 可连接 server，注册 capability，通过 Runner Protocol 执行 lease 并上报 result |
-| Task Dispatcher | **MVP 已实现** | `service/control.Dispatcher` 把 queued task 转为 `TaskLease` 并分配给匹配 runner；durable pending/inflight 待后续计划 |
-| Runner Protocol | **MVP 已实现** | `service/protocol` 提供 HTTP+JSON DTO、路由常量和 client，另有 gRPC 通道（`grpc_client.go`、`runnerpb/`） |
+| Task Dispatcher + durable handoff | **MVP 已实现** | `service/control.Dispatcher` 将 queued task 持久化为 `RedisRunnerDirectory` assignment；claim TTL、finalize、reconnect replay 与 fenced release 支持跨 server 进程恢复 |
+| Runner Protocol | **MVP 已实现（传输）** | `service/protocol` 提供 HTTP+JSON DTO、路由常量和 client，另有 gRPC 通道（`grpc_client.go`、`runnerpb/`）；streaming / credit-flow control 仍为实验性 |
+| Loop/Split | **实验性** | 扩展/子执行路径未进入静态 DAG completion 与 server/runner production-ready 保证 |
 | Relay Gateway | **规划** | 网络隔离中继拓扑已定义，尚无独立进程实现 |
 
-一句话：**local / cluster 已可用；server / runner MVP 已落地；remote SDK / Relay Gateway / durable dispatcher 仍在规划。**
+一句话：**local / cluster 已可用；server / runner 的 durable handoff MVP 已落地；remote SDK、Relay Gateway、Loop/Split 正式版与 streaming / credit-flow control 仍在规划或实验阶段。完整 control-plane HA 仍需独立验证与设计。**
 
 ---
 
