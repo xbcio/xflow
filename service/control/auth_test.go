@@ -1,6 +1,7 @@
 package control
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -226,7 +227,8 @@ func TestCoreAuthObserverRecordsAllowAndDeny(t *testing.T) {
 		authObserver: observer,
 	}
 
-	regResp, err := core.register(protocol.RegisterRunnerRequest{
+	ctx := context.Background()
+	regResp, err := core.register(ctx, protocol.RegisterRunnerRequest{
 		RunnerID:    "runner-1",
 		Concurrency: 1,
 		AuthToken:   "secret",
@@ -234,7 +236,7 @@ func TestCoreAuthObserverRecordsAllowAndDeny(t *testing.T) {
 	if err != nil {
 		t.Fatalf("register allow error = %v", err)
 	}
-	if _, err := core.heartbeat(protocol.HeartbeatRequest{
+	if _, err := core.heartbeat(ctx, protocol.HeartbeatRequest{
 		RunnerID:  "runner-1",
 		SessionID: regResp.SessionID,
 		Capacity:  1,

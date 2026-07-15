@@ -115,7 +115,7 @@ func TestHTTPPollRejectsStaleSession(t *testing.T) {
 		Capacity:     1,
 		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
 	})
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("stale poll status = %d, want %d", resp.StatusCode, http.StatusConflict)
 	}
@@ -168,7 +168,7 @@ func TestHTTPRunnerSessionRequired(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			resp := postJSONRaw(t, server.URL+tt.url, tt.body)
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			if resp.StatusCode != http.StatusBadRequest {
 				t.Fatalf("%s status = %d, want %d", tt.name, resp.StatusCode, http.StatusBadRequest)
 			}
@@ -476,7 +476,7 @@ func TestHTTPInspectSignalAndCancel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("inspect status = %d, want 200", resp.StatusCode)
 	}
@@ -511,7 +511,7 @@ func TestHTTPInspectUnknownExecutionReturnsNotFound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", resp.StatusCode)
 	}
@@ -522,6 +522,8 @@ type fakeControlEngine struct {
 	inspectErr      error
 	buildLease      *engine.TaskLease
 	buildErr        error
+	recoverLease    *engine.TaskLease
+	recoverErr      error
 	commitHook      func()
 	commitOutcome   engine.CommitOutcome
 	commitErr       error
@@ -563,6 +565,17 @@ func (f *fakeControlEngine) BuildTaskLease(_ context.Context, task *engine.Task)
 		return &lease, nil
 	}
 	return &engine.TaskLease{Task: *task, NodeType: "xflow.function"}, nil
+}
+
+func (f *fakeControlEngine) RecoverTaskLease(_ context.Context, task *engine.Task) (*engine.TaskLease, error) {
+	if f.recoverErr != nil {
+		return nil, f.recoverErr
+	}
+	if f.recoverLease != nil {
+		lease := *f.recoverLease
+		return &lease, nil
+	}
+	return nil, engine.ErrLeaseNotRecoverable
 }
 
 func (f *fakeControlEngine) CommitTaskResultWithOutcome(_ context.Context, lease *engine.TaskLease, result engine.TaskResult) (engine.CommitOutcome, error) {
@@ -643,7 +656,7 @@ func hiddenIdentityAssignment(nodeName string, activationID, autoDepth int) Assi
 func postJSON(t *testing.T, url string, body any, wantStatus int, out any) {
 	t.Helper()
 	resp := postJSONRaw(t, url, body)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != wantStatus {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, wantStatus)
 	}
@@ -668,3 +681,58 @@ func postJSONRaw(t *testing.T, url string, body any) *http.Response {
 }
 
 var errExecutionNotFound = errors.New("execution not found")
+
+func TestCorePollRecoversLeaseAfterFinalizeCrashWindow(t *testing.T) {
+	ctx := context.Background()
+	underlying := NewMemoryRunnerDirectory()
+	session := mustRegisterHTTPRunner(t, underlying)
+	assignment := stableTestAssignment("recover-handoff")
+	mustEnqueueAssignment(t, ctx, underlying, assignment)
+	lease := &engine.TaskLease{
+		LeaseID:    "lease-handoff",
+		LeaseToken: "token-handoff",
+		Task:       assignment.Task,
+		Input:      &types.Input{Data: map[string]any{"request": "original"}},
+		NodeType:   assignment.Routing.NodeType,
+	}
+	fake := &fakeControlEngine{buildLease: lease}
+	directory := &failingFinalizeRunnerDirectory{RunnerDirectory: underlying, failures: 1}
+	core := &Core{engine: fake, runners: directory, pollWait: time.Second}
+	req := protocol.PollTaskRequest{
+		RunnerID: session.RunnerID, SessionID: session.SessionID, Capacity: 1,
+		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
+	}
+
+	if _, err := core.pollTask(ctx, req, TransportInfo{}); err == nil {
+		t.Fatal("first poll error = nil, want simulated finalize response loss")
+	}
+
+	// The first BuildTaskLease already made the engine lease durable. A retry
+	// must attach that exact lease to a fresh directory claim rather than leave
+	// the assignment seen-but-unreachable until the lease TTL expires.
+	fake.buildErr = engine.ErrLeaseAlreadyActive
+	fake.recoverLease = lease
+	response, err := core.pollTask(ctx, req, TransportInfo{})
+	if err != nil {
+		t.Fatalf("recovery pollTask() error = %v", err)
+	}
+	if response.Lease == nil || response.Lease.LeaseToken != lease.LeaseToken {
+		t.Fatalf("recovered response lease = %+v, want token %q", response.Lease, lease.LeaseToken)
+	}
+	if directory.failures != 0 {
+		t.Fatalf("FinalizeClaim failures remaining = %d, want 0", directory.failures)
+	}
+}
+
+type failingFinalizeRunnerDirectory struct {
+	RunnerDirectory
+	failures int
+}
+
+func (d *failingFinalizeRunnerDirectory) FinalizeClaim(ctx context.Context, claimID ClaimID, lease *engine.TaskLease) error {
+	if d.failures > 0 {
+		d.failures--
+		return errors.New("simulated finalize response loss")
+	}
+	return d.RunnerDirectory.FinalizeClaim(ctx, claimID, lease)
+}

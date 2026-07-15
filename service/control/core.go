@@ -9,7 +9,6 @@ import (
 	"github.com/xbcio/xflow/service/protocol"
 )
 
-
 // Transport-agnostic outcome errors. Each transport (HTTP, gRPC) maps these to
 // its own status representation so the core handling logic stays free of
 // net/http and grpc/codes.
@@ -35,6 +34,13 @@ type Core struct {
 	auth         Authenticator
 	logger       engine.Logger
 	authObserver AuthObserver
+}
+
+// leaseRecoveryEngine is deliberately optional so custom EngineFacade test
+// doubles and integrations remain source compatible. The concrete engine uses
+// it to replay a lease that was committed before a control-plane crash.
+type leaseRecoveryEngine interface {
+	RecoverTaskLease(ctx context.Context, task *engine.Task) (*engine.TaskLease, error)
 }
 
 // AuthObserver receives auth allow/deny/dry-run decisions.
@@ -94,7 +100,7 @@ func authMode(auth Authenticator) string {
 	}
 }
 
-func (c *Core) register(req protocol.RegisterRunnerRequest, info TransportInfo) (protocol.RegisterRunnerResponse, error) {
+func (c *Core) register(ctx context.Context, req protocol.RegisterRunnerRequest, info TransportInfo) (protocol.RegisterRunnerResponse, error) {
 	if req.RunnerID == "" || req.Concurrency <= 0 {
 		return protocol.RegisterRunnerResponse{}, ErrConcurrencyRequired
 	}
@@ -102,7 +108,7 @@ func (c *Core) register(req protocol.RegisterRunnerRequest, info TransportInfo) 
 	if err := c.authDeny(req.RunnerID, req.AuthToken, "register", info, authErr); err != nil {
 		return protocol.RegisterRunnerResponse{}, err
 	}
-	session, err := c.runners.Register(context.Background(), RegisterRunnerRequest{
+	session, err := c.runners.Register(ctx, RegisterRunnerRequest{
 		RunnerID:     req.RunnerID,
 		Capacity:     req.Concurrency,
 		Capabilities: req.Capabilities,
@@ -115,7 +121,7 @@ func (c *Core) register(req protocol.RegisterRunnerRequest, info TransportInfo) 
 	return protocol.RegisterRunnerResponse{RunnerID: req.RunnerID, SessionID: session.SessionID}, nil
 }
 
-func (c *Core) heartbeat(req protocol.HeartbeatRequest, info TransportInfo) (protocol.HeartbeatResponse, error) {
+func (c *Core) heartbeat(ctx context.Context, req protocol.HeartbeatRequest, info TransportInfo) (protocol.HeartbeatResponse, error) {
 	if req.RunnerID == "" || req.SessionID == "" {
 		return protocol.HeartbeatResponse{}, ErrRunnerSessionRequired
 	}
@@ -127,7 +133,7 @@ func (c *Core) heartbeat(req protocol.HeartbeatRequest, info TransportInfo) (pro
 	if req.Timestamp == 0 {
 		at = time.Now()
 	}
-	if err := c.runners.Heartbeat(context.Background(), HeartbeatRequest{
+	if err := c.runners.Heartbeat(ctx, HeartbeatRequest{
 		RunnerID:  req.RunnerID,
 		SessionID: req.SessionID,
 		Capacity:  req.Capacity,
@@ -139,7 +145,7 @@ func (c *Core) heartbeat(req protocol.HeartbeatRequest, info TransportInfo) (pro
 	return protocol.HeartbeatResponse{ServerTime: time.Now().Unix()}, nil
 }
 
-func (c *Core) pollTask(req protocol.PollTaskRequest, info TransportInfo) (protocol.PollTaskResponse, error) {
+func (c *Core) pollTask(ctx context.Context, req protocol.PollTaskRequest, info TransportInfo) (protocol.PollTaskResponse, error) {
 	if req.RunnerID == "" || req.SessionID == "" {
 		return protocol.PollTaskResponse{}, ErrRunnerSessionRequired
 	}
@@ -148,7 +154,7 @@ func (c *Core) pollTask(req protocol.PollTaskRequest, info TransportInfo) (proto
 		return protocol.PollTaskResponse{}, err
 	}
 	for {
-		claim, ok, err := c.runners.ClaimForRunner(context.Background(), ClaimRequest{
+		claim, ok, err := c.runners.ClaimForRunner(ctx, ClaimRequest{
 			RunnerID:     req.RunnerID,
 			SessionID:    req.SessionID,
 			Capacity:     req.Capacity,
@@ -161,27 +167,67 @@ func (c *Core) pollTask(req protocol.PollTaskRequest, info TransportInfo) (proto
 		if !ok {
 			return protocol.PollTaskResponse{Wait: c.pollWait}, nil
 		}
+
+		// A leased claim is a durable replay after a response-loss or process
+		// restart. It must not call BuildTaskLease again: doing so would either
+		// create a new lease or strand the existing fenced ownership.
+		if claim.Lease != nil {
+			lease := claim.Lease
+			if lease.Input == nil {
+				var recoverErr error
+				lease, recoverErr = c.recoverTaskLease(ctx, &claim.Assignment.Task)
+				if recoverErr != nil {
+					return protocol.PollTaskResponse{}, recoverErr
+				}
+			}
+			return protocol.PollTaskResponse{Lease: lease}, nil
+		}
+
 		if c.engine == nil {
-			_ = c.runners.ReleaseClaim(context.Background(), claim.ClaimID, ReleaseClaimRequeue)
+			_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimRequeue)
 			return protocol.PollTaskResponse{}, ErrEngineNotConfigured
 		}
-		lease, err := c.engine.BuildTaskLease(context.Background(), &claim.Assignment.Task)
+		lease, err := c.engine.BuildTaskLease(ctx, &claim.Assignment.Task)
 		switch {
 		case err == nil:
-			if err := c.runners.FinalizeClaim(context.Background(), claim.ClaimID, lease); err != nil {
-				_ = c.runners.ReleaseClaim(context.Background(), claim.ClaimID, ReleaseClaimRequeue)
+			if err := c.runners.FinalizeClaim(ctx, claim.ClaimID, lease); err != nil {
+				_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimRequeue)
 				return protocol.PollTaskResponse{}, normalizeRunnerError(err)
 			}
 			return protocol.PollTaskResponse{Lease: lease}, nil
-		case errors.Is(err, engine.ErrExecutionInactive):
-			_ = c.runners.ReleaseClaim(context.Background(), claim.ClaimID, ReleaseClaimDrop)
 		case errors.Is(err, engine.ErrLeaseAlreadyActive):
-			_ = c.runners.ReleaseClaim(context.Background(), claim.ClaimID, ReleaseClaimKeepSeen)
+			// BuildTaskLease may already have committed a running lease when a
+			// prior control-plane process died before FinalizeClaim. Recover and
+			// finalize that exact fenced lease instead of waiting for its TTL.
+			recovered, recoverErr := c.recoverTaskLease(ctx, &claim.Assignment.Task)
+			if recoverErr == nil {
+				if finalizeErr := c.runners.FinalizeClaim(ctx, claim.ClaimID, recovered); finalizeErr != nil {
+					_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimRequeue)
+					return protocol.PollTaskResponse{}, normalizeRunnerError(finalizeErr)
+				}
+				return protocol.PollTaskResponse{Lease: recovered}, nil
+			}
+			if errors.Is(recoverErr, engine.ErrExecutionInactive) {
+				_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimDrop)
+				continue
+			}
+			_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimRequeue)
+			return protocol.PollTaskResponse{}, recoverErr
+		case errors.Is(err, engine.ErrExecutionInactive):
+			_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimDrop)
 		default:
-			_ = c.runners.ReleaseClaim(context.Background(), claim.ClaimID, ReleaseClaimRequeue)
+			_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimRequeue)
 			return protocol.PollTaskResponse{}, err
 		}
 	}
+}
+
+func (c *Core) recoverTaskLease(ctx context.Context, task *engine.Task) (*engine.TaskLease, error) {
+	recoverer, ok := c.engine.(leaseRecoveryEngine)
+	if !ok || recoverer == nil {
+		return nil, engine.ErrLeaseNotRecoverable
+	}
+	return recoverer.RecoverTaskLease(ctx, task)
 }
 
 func (c *Core) reportResult(ctx context.Context, req protocol.ReportResultRequest, info TransportInfo) (protocol.ReportResultResponse, error) {

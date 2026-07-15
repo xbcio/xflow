@@ -75,10 +75,13 @@ type ClaimRequest struct {
 	Now          time.Time
 }
 
-// Claim is the directory's temporary reservation for an assignment.
+// Claim is either a temporary reservation for an assignment or a durable
+// replay of a previously finalized lease. A non-nil Lease is already fenced
+// and must be returned to the runner without issuing another engine lease.
 type Claim struct {
 	ClaimID    ClaimID
 	Assignment Assignment
+	Lease      *engine.TaskLease
 }
 
 // ReleaseClaimReason controls how an abandoned claim affects queue and seen
@@ -119,4 +122,11 @@ type RunnerDirectory interface {
 	ReleaseLeased(ctx context.Context, req ReleaseLeasedRequest) error
 	ClearAssignment(ctx context.Context, assignmentID AssignmentID) error
 	Runner(ctx context.Context, runnerID string) (RunnerSnapshot, bool)
+}
+
+// ClaimReclaimer is an optional durable-directory capability used by the
+// control-plane lifecycle to recover expired claims even when no runner sends
+// another request. Its operation must be idempotent and safe across replicas.
+type ClaimReclaimer interface {
+	ReclaimExpiredClaims(ctx context.Context) error
 }

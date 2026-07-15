@@ -259,3 +259,104 @@ func TestSweepOnceRunsWhenElectorNil(t *testing.T) {
 		t.Fatalf("SweepOnce() = %d, want 1 when Elector is nil (backward-compat default)", n)
 	}
 }
+
+type repairableLeaseLister struct {
+	*fakeLeaseLister
+	repairs   int
+	lastLimit int
+	result    int
+	err       error
+}
+
+func (f *repairableLeaseLister) RepairLeaseIndex(_ context.Context, limit int) (int, error) {
+	f.repairs++
+	f.lastLimit = limit
+	return f.result, f.err
+}
+
+func TestLeaseSweeperRepairsLeaseIndexAtBoundedLeaderGatedCadence(t *testing.T) {
+	state := &repairableLeaseLister{
+		fakeLeaseLister: &fakeLeaseLister{},
+		result:          3,
+	}
+	elector := &fakeElector{}
+	elector.leader.Store(true)
+	sw := NewLeaseSweeper(state, &fakeReclaimer{}, LeaseSweeperConfig{
+		Elector:           elector,
+		LeaseRepairPeriod: time.Minute,
+		LeaseRepairBatch:  17,
+	})
+	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+	sw.clock = func() time.Time { return now }
+
+	if got := sw.RepairOnce(context.Background()); got != 3 {
+		t.Fatalf("first RepairOnce() = %d, want 3", got)
+	}
+	if state.repairs != 1 || state.lastLimit != 17 {
+		t.Fatalf("repair calls=%d limit=%d, want 1/17", state.repairs, state.lastLimit)
+	}
+
+	now = now.Add(30 * time.Second)
+	if got := sw.RepairOnce(context.Background()); got != 0 || state.repairs != 1 {
+		t.Fatalf("early RepairOnce()=%d calls=%d, want 0/1", got, state.repairs)
+	}
+
+	now = now.Add(30 * time.Second)
+	if got := sw.RepairOnce(context.Background()); got != 3 || state.repairs != 2 {
+		t.Fatalf("scheduled RepairOnce()=%d calls=%d, want 3/2", got, state.repairs)
+	}
+
+	elector.leader.Store(false)
+	now = now.Add(time.Minute)
+	if got := sw.RepairOnce(context.Background()); got != 0 || state.repairs != 2 {
+		t.Fatalf("non-leader RepairOnce()=%d calls=%d, want 0/2", got, state.repairs)
+	}
+}
+
+type timingSweepObserver struct {
+	fakeObserver
+	listCandidates []int
+	reclaimResults []string
+	repairs        []int
+}
+
+func (o *timingSweepObserver) OnSweepListExpired(candidates int, _ time.Duration, _ error) {
+	o.listCandidates = append(o.listCandidates, candidates)
+}
+
+func (o *timingSweepObserver) OnSweepReclaimResult(result string, _ time.Duration) {
+	o.reclaimResults = append(o.reclaimResults, result)
+}
+
+func (o *timingSweepObserver) OnSweepRepair(reconciled int, _ time.Duration, _ error) {
+	o.repairs = append(o.repairs, reconciled)
+}
+
+func TestLeaseSweeperReportsTimingObserverEvents(t *testing.T) {
+	state := &repairableLeaseLister{
+		fakeLeaseLister: &fakeLeaseLister{expired: []engine.ExpiredLease{{
+			ExecutionID: "exec-timing",
+			NodeName:    "node",
+			LeaseToken:  "token",
+		}}},
+		result: 2,
+	}
+	observer := &timingSweepObserver{}
+	sweeper := NewLeaseSweeper(state, &fakeReclaimer{}, LeaseSweeperConfig{
+		Observer:          observer,
+		LeaseRepairPeriod: time.Hour,
+	})
+
+	if got := sweeper.SweepOnce(context.Background()); got != 1 {
+		t.Fatalf("SweepOnce() = %d, want 1", got)
+	}
+	if got := observer.listCandidates; len(got) != 1 || got[0] != 1 {
+		t.Fatalf("expiry scan candidates = %v, want [1]", got)
+	}
+	if got := observer.reclaimResults; len(got) != 1 || got[0] != "reclaimed" {
+		t.Fatalf("reclaim timing results = %v, want [reclaimed]", got)
+	}
+	if got := observer.repairs; len(got) != 1 || got[0] != 2 {
+		t.Fatalf("repair timing observations = %v, want [2]", got)
+	}
+}

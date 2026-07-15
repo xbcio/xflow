@@ -236,3 +236,55 @@ func waitForCampaigns(t *testing.T, elector *countingElector, want int64) {
 	}
 	t.Fatalf("Campaign called %d times, want at least %d", elector.campaigns.Load(), want)
 }
+
+type blockingClaimReclaimerDirectory struct {
+	*MemoryRunnerDirectory
+	started chan struct{}
+	stopped chan struct{}
+}
+
+func (d *blockingClaimReclaimerDirectory) ReclaimExpiredClaims(ctx context.Context) error {
+	select {
+	case d.started <- struct{}{}:
+	default:
+	}
+	<-ctx.Done()
+	select {
+	case d.stopped <- struct{}{}:
+	default:
+	}
+	return ctx.Err()
+}
+
+func TestControlPlaneStartsAndStopsClaimRecoveryLoop(t *testing.T) {
+	directory := &blockingClaimReclaimerDirectory{
+		MemoryRunnerDirectory: NewMemoryRunnerDirectory(),
+		started:               make(chan struct{}, 1),
+		stopped:               make(chan struct{}, 1),
+	}
+	cp, err := NewControlPlane(Config{
+		Backend:         backendmemory.New(),
+		RunnerDirectory: directory,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cp.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-directory.started:
+	case <-time.After(time.Second):
+		t.Fatal("claim recovery did not run immediately after Start")
+	}
+
+	if err := cp.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-directory.stopped:
+	case <-time.After(time.Second):
+		t.Fatal("claim recovery context was not canceled during Shutdown")
+	}
+}

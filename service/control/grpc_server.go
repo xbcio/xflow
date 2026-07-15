@@ -81,7 +81,7 @@ func NewGRPCServer(engine EngineFacade, runners RunnerDirectory, opts ...GRPCSer
 func (s *GRPCServer) Register(ctx context.Context, req *runnerpb.RegisterRequest) (*runnerpb.RegisterResponse, error) {
 	in := protocol.RegisterRequestFromProto(req)
 	overrideTokenFromMetadata(ctx, &in.AuthToken)
-	resp, err := s.core.register(in, grpcTransportInfo(ctx))
+	resp, err := s.core.register(ctx, in, grpcTransportInfo(ctx))
 	if err != nil {
 		return nil, runnerStatus(err)
 	}
@@ -91,7 +91,7 @@ func (s *GRPCServer) Register(ctx context.Context, req *runnerpb.RegisterRequest
 func (s *GRPCServer) Heartbeat(ctx context.Context, req *runnerpb.HeartbeatRequest) (*runnerpb.HeartbeatResponse, error) {
 	in := protocol.HeartbeatRequestFromProto(req)
 	overrideTokenFromMetadata(ctx, &in.AuthToken)
-	resp, err := s.core.heartbeat(in, grpcTransportInfo(ctx))
+	resp, err := s.core.heartbeat(ctx, in, grpcTransportInfo(ctx))
 	if err != nil {
 		return nil, runnerStatus(err)
 	}
@@ -101,7 +101,7 @@ func (s *GRPCServer) Heartbeat(ctx context.Context, req *runnerpb.HeartbeatReque
 func (s *GRPCServer) PollTask(ctx context.Context, req *runnerpb.PollTaskRequest) (*runnerpb.PollTaskResponse, error) {
 	in := protocol.PollTaskRequestFromProto(req)
 	overrideTokenFromMetadata(ctx, &in.AuthToken)
-	resp, err := s.core.pollTask(in, grpcTransportInfo(ctx))
+	resp, err := s.core.pollTask(ctx, in, grpcTransportInfo(ctx))
 	if err != nil {
 		return nil, runnerStatus(err)
 	}
@@ -129,7 +129,6 @@ func (s *GRPCServer) ReportResult(ctx context.Context, req *runnerpb.ReportResul
 	}
 	return &runnerpb.ReportResultResponse{Accepted: resp.Accepted, Error: resp.Error}, nil
 }
-
 
 // overrideTokenFromMetadata pulls the Authorization: Bearer <token> value out
 // of gRPC metadata and, if present, overrides whatever the request payload
@@ -167,7 +166,6 @@ func grpcTransportInfo(ctx context.Context) TransportInfo {
 	info.TLSPeerSAN = append(info.TLSPeerSAN, cert.DNSNames...)
 	return info
 }
-
 
 // runnerStatus maps transport-agnostic Core sentinel errors to gRPC status codes.
 func runnerStatus(err error) error {

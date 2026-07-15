@@ -9,6 +9,7 @@ import (
 
 	backendasynq "github.com/xbcio/xflow/backend/asynq"
 	backendmemory "github.com/xbcio/xflow/backend/memory"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/engine"
@@ -26,6 +27,10 @@ var (
 type Config struct {
 	// Backend supplies StateStore, TaskQueue, and queue binding. Required.
 	Backend backend.Provider
+	// RunnerDirectory overrides automatic directory selection. When nil,
+	// NewControlPlane uses the backend Redis capability when available and
+	// otherwise falls back to MemoryRunnerDirectory.
+	RunnerDirectory RunnerDirectory
 	// Auth is the runner-protocol authenticator. Nil means DisabledAuthenticator.
 	Auth Authenticator
 	// Logger receives engine, dispatcher, and sweeper diagnostics. Optional.
@@ -36,6 +41,22 @@ type Config struct {
 	// PollWait overrides the long-poll wait duration returned to runners when
 	// no task is available. Zero means the Server/GRPCServer default (1s).
 	PollWait time.Duration
+}
+
+type redisClientProvider interface {
+	RedisClient() redis.Cmdable
+}
+
+func selectRunnerDirectory(cfg Config) RunnerDirectory {
+	if cfg.RunnerDirectory != nil {
+		return cfg.RunnerDirectory
+	}
+	if provider, ok := cfg.Backend.(redisClientProvider); ok {
+		if client := provider.RedisClient(); client != nil {
+			return NewRedisRunnerDirectory(client)
+		}
+	}
+	return NewMemoryRunnerDirectory()
 }
 
 // ControlPlane bundles the engine, Task Dispatcher, Runner Protocol servers,
@@ -53,12 +74,13 @@ type ControlPlane struct {
 	elector    backend.LeaderElector
 	logger     engine.Logger
 
-	lifecycleMu   sync.Mutex
-	started       bool
-	stopped       bool
-	leaderCancel  context.CancelFunc
-	sweeperCancel context.CancelFunc
-	unbind        func()
+	lifecycleMu         sync.Mutex
+	started             bool
+	stopped             bool
+	leaderCancel        context.CancelFunc
+	sweeperCancel       context.CancelFunc
+	claimRecoveryCancel context.CancelFunc
+	unbind              func()
 }
 
 // NewControlPlane assembles a ControlPlane from cfg. It does not start any
@@ -77,9 +99,8 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 	}
 	eng := engine.New(cfg.Backend.State(), cfg.Backend.Queue(), engOpts...)
 
-	runners := NewMemoryRunnerDirectory()
-	dispatchRunners := runners
-	dispatcher := NewDispatcher(eng, dispatchRunners)
+	runners := selectRunnerDirectory(cfg)
+	dispatcher := NewDispatcher(eng, runners)
 
 	var serverOpts []ServerOption
 	if cfg.Auth != nil {
@@ -168,7 +189,33 @@ func (cp *ControlPlane) Start(ctx context.Context) error {
 	cp.sweeperCancel = cancel
 	go cp.sweeper.Run(sweepCtx)
 
+	if reclaimer, ok := cp.runners.(ClaimReclaimer); ok {
+		claimCtx, claimCancel := context.WithCancel(context.Background())
+		cp.claimRecoveryCancel = claimCancel
+		go cp.runClaimRecovery(claimCtx, reclaimer)
+	}
+
 	return nil
+}
+
+func (cp *ControlPlane) runClaimRecovery(ctx context.Context, reclaimer ClaimReclaimer) {
+	const interval = time.Second
+	recover := func() {
+		if err := reclaimer.ReclaimExpiredClaims(ctx); err != nil && ctx.Err() == nil && cp.logger != nil {
+			cp.logger.Error("recover expired runner claims failed", "err", err)
+		}
+	}
+	recover()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			recover()
+		}
+	}
 }
 
 // IsLeader reports whether this ControlPlane replica currently holds
@@ -225,6 +272,9 @@ func (cp *ControlPlane) Shutdown(ctx context.Context) error {
 	if cp.sweeperCancel != nil {
 		cp.sweeperCancel()
 	}
+	if cp.claimRecoveryCancel != nil {
+		cp.claimRecoveryCancel()
+	}
 	if cp.leaderCancel != nil {
 		cp.leaderCancel()
 	}
@@ -240,7 +290,7 @@ func (cp *ControlPlane) Shutdown(ctx context.Context) error {
 func (cp *ControlPlane) bindDispatcher() func() {
 	switch b := cp.backend.(type) {
 	case *backendmemory.Backend:
-		return b.BindHandler(cp.dispatcher.HandleTask)
+		return b.BindHandlerWithEngine(cp.eng, cp.dispatcher.HandleTask)
 	case *backendasynq.Backend:
 		return b.BindHandler(cp.eng, cp.dispatcher.HandleTask)
 	default:

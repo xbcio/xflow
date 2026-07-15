@@ -94,7 +94,7 @@ func TestE2ELoadRealRedis(t *testing.T) {
 	}
 
 	eng := engine.New(bk.State(), bk.Queue())
-	runners := control.NewRunnerPool()
+	runners := control.NewRedisRunnerDirectory(bk.RedisClient())
 	dispatcher := control.NewDispatcher(eng, runners)
 	stop := bk.BindHandler(eng, dispatcher.HandleTask)
 	defer stop()
@@ -267,13 +267,13 @@ func pollCompletionLoad(ctx context.Context, state engine.StateStore, id types.E
 	}
 }
 
-func waitForRunnerLoad(t *testing.T, pool *control.RunnerPool, id string) {
+func waitForRunnerLoad(t *testing.T, runners control.RunnerDirectory, id string) {
 	t.Helper()
 	dl := time.Now().Add(5 * time.Second)
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		if _, ok := pool.Runner(id); ok {
+		if _, ok := runners.Runner(context.Background(), id); ok {
 			return
 		}
 		select {

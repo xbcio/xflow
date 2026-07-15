@@ -147,7 +147,7 @@ func (s *Server) HandleRegisterRunner(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	overrideTokenFromHeader(r, &req.AuthToken)
-	resp, err := s.core.register(req, httpTransportInfo(r))
+	resp, err := s.core.register(r.Context(), req, httpTransportInfo(r))
 	if err != nil {
 		writeRunnerError(w, err)
 		return
@@ -164,7 +164,7 @@ func (s *Server) HandleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	overrideTokenFromHeader(r, &req.AuthToken)
-	resp, err := s.core.heartbeat(req, httpTransportInfo(r))
+	resp, err := s.core.heartbeat(r.Context(), req, httpTransportInfo(r))
 	if err != nil {
 		writeRunnerError(w, err)
 		return
@@ -181,7 +181,7 @@ func (s *Server) HandlePollTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	overrideTokenFromHeader(r, &req.AuthToken)
-	resp, err := s.core.pollTask(req, httpTransportInfo(r))
+	resp, err := s.core.pollTask(r.Context(), req, httpTransportInfo(r))
 	if err != nil {
 		writeRunnerError(w, err)
 		return
@@ -307,7 +307,7 @@ func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request, id types.E
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
-	defer r.Body.Close()
+	defer func() { _ = r.Body.Close() }()
 	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return false
