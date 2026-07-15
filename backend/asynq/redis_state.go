@@ -70,15 +70,16 @@ func suspendedNodesKey(id types.ExecutionID) string {
 	return fmt.Sprintf("xflow:exec:{%s}:suspended_nodes", id)
 }
 
-// leaseExpiryZSetKey is the global lease-deadline index used by the sweeper.
-// score = (IssuedAt + TTL).UnixMilli, member = leaseExpiryMember(execID, name).
-// The {expiry} hash tag pins every member to the same cluster slot so
-// ZRANGEBYSCORE / ZREM never cross slots.
-const leaseExpiryZSetKey = "xflow:leases:{expiry}"
+// leaseExpiryZSetKey is the execution-scoped lease-deadline index used by
+// the sweeper. It shares the execution hash tag, so lease state, metadata,
+// and expiry discovery can be updated in one Redis Cluster-safe Lua script.
+func leaseExpiryZSetKey(id types.ExecutionID) string {
+	return execKey(id, "leases")
+}
 
-// leaseExpiryMember packs execID and node name into a ZSET member. Uses a
-// vertical bar separator because execID / node name are UTF-8 identifiers and
-// never contain '|' in practice.
+// leaseExpiryMember packs execID and node name into a ZSET member. Retaining
+// the execution ID makes index reconciliation robust against malformed keys
+// and legacy members during rolling upgrades.
 func leaseExpiryMember(id types.ExecutionID, name string) string {
 	return string(id) + "|" + name
 }
@@ -158,8 +159,10 @@ if existing == 'success' or existing == 'failed' or existing == 'skipped' or exi
         return 0
     end
 end
-if existing == 'committing' and ARGV[1] == 'running' then
-    return 0
+if existing == 'committing' or existing == 'waiting' then
+    if ARGV[1] == 'running' then
+        return 0
+    end
 end
 redis.call('SET', KEYS[1], ARGV[1], 'EX', tonumber(ARGV[3]))
 if ARGV[2] ~= '' then
@@ -168,11 +171,12 @@ end
 return 1
 `)
 
-// claimTaskLeaseLua fences task result commits by atomically checking the
-// current node lease token and moving the node into the transient committing
-// state. New leases cannot overwrite a committing node.
-// KEYS[1] = node status key, KEYS[2] = node meta hash
-// ARGV[1] = expected lease token, ARGV[2] = ttl seconds, ARGV[3] = expected activation id
+// claimTaskLeaseLua remains only for suspend and experimental expansion paths.
+// A committed claim retains the original token, deadline, task metadata, and
+// expiry-index member so a crash between claim and finalization is reclaimable.
+// KEYS[1] = node status key, KEYS[2] = node meta hash, KEYS[3] = lease expiry ZSET
+// ARGV[1] = expected lease token, ARGV[2] = ttl seconds, ARGV[3] = expected activation id,
+// ARGV[4] = lease expiry ZSET member
 // Returns {valid, status}.
 var claimTaskLeaseLua = redis.NewScript(`
 local status = redis.call('GET', KEYS[1])
@@ -187,21 +191,114 @@ if expectedActivation > 0 then
     end
 end
 if status == 'success' or status == 'failed' or status == 'skipped' or status == 'canceled' or status == 'continued' then
+    redis.call('ZREM', KEYS[3], ARGV[4])
     return {1, status}
+end
+if status ~= 'running' then
+    return {0, status}
 end
 local token = redis.call('HGET', KEYS[2], 'lease_token')
 if not token or token == '' or token ~= ARGV[1] then
     return {0, status}
 end
 redis.call('SET', KEYS[1], 'committing', 'EX', tonumber(ARGV[2]))
-redis.call('HSET', KEYS[2], 'lease_token', '')
 redis.call('EXPIRE', KEYS[2], tonumber(ARGV[2]))
 return {1, 'committing'}
 `)
 
+// suspendTaskLeaseLua finishes a claimed lease with a token-fenced suspended
+// state. Every key is execution-scoped, keeping the script Redis Cluster-safe.
+// KEYS: status, meta, output, lease index, suspended set, resume lock,
+// old waiter, waiter spec, signal batch, then signal/waiter key pairs.
+// ARGV: lease id, token, attempt, activation, ttl, lease member, store output,
+// output JSON, node name, multi flag, quorum, signal count, spec JSON, names.
+// Returns {committed, signal name, signal payload JSON, multi-payload JSON}.
+var suspendTaskLeaseLua = redis.NewScript(`
+local terminal = function(value)
+    return value == 'success' or value == 'failed' or value == 'skipped' or value == 'canceled' or value == 'continued'
+end
+if redis.call('GET', KEYS[1]) ~= 'committing' then
+    return {0, '', '', ''}
+end
+local leaseID = redis.call('HGET', KEYS[2], 'lease_id') or ''
+local token = redis.call('HGET', KEYS[2], 'lease_token') or ''
+local attempt = tonumber(redis.call('HGET', KEYS[2], 'attempt') or '0')
+local activation = tonumber(redis.call('HGET', KEYS[2], 'activation_id') or '0')
+if leaseID ~= ARGV[1] or token ~= ARGV[2] or attempt ~= tonumber(ARGV[3]) or activation ~= tonumber(ARGV[4]) then
+    return {0, '', '', ''}
+end
+local ttl = tonumber(ARGV[5])
+if tonumber(ARGV[7]) == 1 then
+    redis.call('SET', KEYS[3], ARGV[8], 'EX', ttl)
+end
+redis.call('SET', KEYS[1], 'suspended', 'EX', ttl)
+redis.call('HSET', KEYS[2], 'lease_id', '', 'lease_token', '', 'lease_issued_at_ms', '0', 'lease_ttl_ms', '0', 'lease_deadline_ms', '0', 'lease_task_type', '0', 'lease_payload', '')
+redis.call('EXPIRE', KEYS[2], ttl)
+redis.call('ZREM', KEYS[4], ARGV[6])
+redis.call('DEL', KEYS[6], KEYS[7], KEYS[8], KEYS[9])
+
+local multi = tonumber(ARGV[10]) == 1
+local quorum = tonumber(ARGV[11])
+local count = tonumber(ARGV[12])
+local selectedName = ''
+local selectedPayload = ''
+for i = 1, count do
+    local signalKey = KEYS[9 + i]
+    local waiterKey = KEYS[9 + count + i]
+    local signalName = ARGV[13 + i]
+    local payload = redis.call('GET', signalKey)
+    if payload then
+        redis.call('DEL', signalKey)
+        if multi then
+            redis.call('HSET', KEYS[9], signalName, payload)
+            if selectedName == '' then
+                selectedName = signalName
+                selectedPayload = payload
+            end
+        elseif selectedName == '' then
+            selectedName = signalName
+            selectedPayload = payload
+        end
+    end
+end
+
+local clearWaiters = function()
+    for i = 1, count do
+        redis.call('DEL', KEYS[9 + count + i])
+    end
+    redis.call('SREM', KEYS[5], ARGV[9])
+end
+if multi then
+    local values = redis.call('HGETALL', KEYS[9])
+    if #values / 2 >= quorum then
+        local all = {}
+        for i = 1, #values, 2 do
+            all[values[i]] = values[i + 1]
+        end
+        clearWaiters()
+        redis.call('DEL', KEYS[8], KEYS[9])
+        return {1, selectedName, selectedPayload, cjson.encode(all)}
+    end
+    redis.call('SET', KEYS[8], ARGV[13], 'EX', ttl)
+    redis.call('EXPIRE', KEYS[9], ttl)
+else
+    if selectedName ~= '' then
+        clearWaiters()
+        return {1, selectedName, selectedPayload, ''}
+    end
+end
+for i = 1, count do
+    redis.call('SET', KEYS[9 + count + i], ARGV[9], 'EX', ttl)
+end
+redis.call('SADD', KEYS[5], ARGV[9])
+redis.call('EXPIRE', KEYS[5], ttl)
+return {1, '', '', ''}
+`)
+
 // acquireTaskLeaseLua atomically validates whether a queued task may become a
-// running lease and, when allowed, writes the new lease snapshot in one step.
-// KEYS[1] = node status key, KEYS[2] = node meta hash
+// running lease and, when allowed, writes the status, metadata, and its
+// execution-scoped expiry-index member in one Redis Cluster-safe command.
+// KEYS[1] = node status key, KEYS[2] = node meta hash, KEYS[3] = lease expiry ZSET
 // ARGV[1] = new lease id
 // ARGV[2] = new lease token
 // ARGV[3] = issued-at unix millis
@@ -209,6 +306,10 @@ return {1, 'committing'}
 // ARGV[5] = task activation id
 // ARGV[6] = task auto depth
 // ARGV[7] = lease ttl millis
+// ARGV[8] = lease expiry ZSET member
+// ARGV[9] = queued task type
+// ARGV[10] = queued resume payload JSON (or empty)
+// ARGV[11] = queued task node index
 // Returns {acquired, prev_status, prev_attempt, prev_activation_id,
 // prev_auto_depth, prev_lease_token, prev_issued_at_ms, prev_lease_ttl_ms}.
 var acquireTaskLeaseLua = redis.NewScript(`
@@ -232,7 +333,7 @@ if status == 'success' or status == 'failed' or status == 'skipped' or status ==
 	end
 end
 
-if status == 'committing' then
+if status == 'committing' or status == 'waiting' then
 	return {0, status, prevAttempt, prevActivation, prevAutoDepth, prevLeaseToken, prevIssuedAtMs, prevLeaseTTLms}
 end
 
@@ -254,8 +355,19 @@ redis.call('HSET', KEYS[2],
 	'activation_id', taskActivation,
 	'auto_depth', tonumber(ARGV[6] or '0'),
 	'lease_issued_at_ms', nowMs,
-	'lease_ttl_ms', tonumber(ARGV[7] or '0'))
+	'lease_ttl_ms', tonumber(ARGV[7] or '0'),
+	'lease_deadline_ms', nowMs + tonumber(ARGV[7] or '0'),
+	'lease_task_type', tonumber(ARGV[9] or '0'),
+	'lease_payload', ARGV[10] or '',
+	'node_idx', tonumber(ARGV[11] or '0'))
 redis.call('EXPIRE', KEYS[2], tonumber(ARGV[4]))
+local leaseTTLms = tonumber(ARGV[7] or '0')
+if leaseTTLms > 0 and ARGV[2] ~= '' then
+    redis.call('ZADD', KEYS[3], nowMs + leaseTTLms, ARGV[8])
+    redis.call('EXPIRE', KEYS[3], tonumber(ARGV[4]))
+else
+    redis.call('ZREM', KEYS[3], ARGV[8])
+end
 return {1, status or '', prevAttempt, prevActivation, prevAutoDepth, prevLeaseToken, prevIssuedAtMs, prevLeaseTTLms}
 `)
 
@@ -266,36 +378,31 @@ if not locked then return 0 end
 return 1
 `)
 
-// resetNodeForRetryLua rolls a Running node back to Pending and clears its
-// lease token so the engine can re-enqueue the task after a backoff. No-op if
-// the node is not in 'running' state — keeps the operation idempotent against
-// concurrent claim/timeouts/cancels.
-// KEYS[1] = node status key, KEYS[2] = node meta hash
-// ARGV[1] = ttl seconds
+// resetNodeForRetryLua rolls a Running node back to Pending and clears the
+// lease index as part of that same idempotent transition.
+// KEYS[1] = node status key, KEYS[2] = node meta hash, KEYS[3] = lease expiry ZSET
+// ARGV[1] = ttl seconds, ARGV[2] = lease expiry ZSET member
 // Returns 1 (reset) or 0 (no-op).
 var resetNodeForRetryLua = redis.NewScript(`
 local status = redis.call('GET', KEYS[1])
-if status ~= 'running' and status ~= 'committing' then
+if status ~= 'running' and status ~= 'committing' and status ~= 'waiting' then
     return 0
 end
 redis.call('SET', KEYS[1], 'pending', 'EX', tonumber(ARGV[1]))
-redis.call('HSET', KEYS[2], 'lease_token', '', 'lease_id', '', 'lease_issued_at_ms', '0', 'lease_ttl_ms', '0')
+redis.call('HSET', KEYS[2], 'lease_token', '', 'lease_id', '', 'lease_issued_at_ms', '0', 'lease_ttl_ms', '0', 'lease_deadline_ms', '0', 'lease_task_type', '0', 'lease_payload', '')
 redis.call('EXPIRE', KEYS[2], tonumber(ARGV[1]))
+redis.call('ZREM', KEYS[3], ARGV[2])
 return 1
 `)
 
-// revokeLeaseLua is the atomic sweeper-side reclaim. It verifies the caller
-// still owns the lease (token match) and the node is still Running before
-// rolling the node back to Pending. A concurrent runner commit that already
-// moved the node to Committing / terminal will have cleared the token, so
-// the sweeper sees a mismatch and returns 0 — the lease-token fencing IS
-// the race protection.
-// KEYS[1] = node status key, KEYS[2] = node meta hash
-// ARGV[1] = expected lease token, ARGV[2] = ttl seconds
+// revokeLeaseLua atomically verifies and clears a still-current Running or
+// Committing lease, including its expiry-index member.
+// KEYS[1] = node status key, KEYS[2] = node meta hash, KEYS[3] = lease expiry ZSET
+// ARGV[1] = expected lease token, ARGV[2] = ttl seconds, ARGV[3] = lease expiry ZSET member
 // Returns 1 (revoked) or 0 (race lost — commit already ran or token stale).
 var revokeLeaseLua = redis.NewScript(`
 local status = redis.call('GET', KEYS[1])
-if status ~= 'running' then
+if status ~= 'running' and status ~= 'committing' and status ~= 'waiting' then
     return 0
 end
 local token = redis.call('HGET', KEYS[2], 'lease_token')
@@ -303,8 +410,9 @@ if not token or token == '' or token ~= ARGV[1] then
     return 0
 end
 redis.call('SET', KEYS[1], 'pending', 'EX', tonumber(ARGV[2]))
-redis.call('HSET', KEYS[2], 'lease_token', '', 'lease_id', '', 'lease_issued_at_ms', '0', 'lease_ttl_ms', '0')
+redis.call('HSET', KEYS[2], 'lease_token', '', 'lease_id', '', 'lease_issued_at_ms', '0', 'lease_ttl_ms', '0', 'lease_deadline_ms', '0', 'lease_task_type', '0', 'lease_payload', '')
 redis.call('EXPIRE', KEYS[2], tonumber(ARGV[2]))
+redis.call('ZREM', KEYS[3], ARGV[3])
 return 1
 `)
 
@@ -386,11 +494,18 @@ type redisState struct {
 	ttlMu    sync.RWMutex
 	execTTLs map[types.ExecutionID]time.Duration
 
+	// leaseRepairCursor advances a bounded reconciliation scan across node
+	// status keys. The mutex prevents concurrent control-plane maintenance
+	// loops from repeatedly scanning the same Redis page.
+	leaseRepairMu     sync.Mutex
+	leaseRepairCursor uint64
+
 	// Audit-trail observability — Redis is system-of-record; the store/sqlstore
 	// audit trail is best-effort. auditWrite routes failures through these
 	// instead of silently dropping them.
 	audit         AuditObserver
 	auditCounters *auditCounters
+	leaseObserver LeaseObserver
 	logger        engine.Logger
 }
 
@@ -485,6 +600,17 @@ func (s *redisState) shortenTransientCompletionTTL(ctx context.Context, id types
 // ---------------------------------------------------------------------------
 
 func (s *redisState) CreateExecution(ctx context.Context, e *engine.ExecutionSnapshot) error {
+	return s.createExecution(ctx, e, nil)
+}
+
+// CreateExecutionWithOutbox commits execution metadata and its initial durable
+// delivery intents in one Redis transaction. The SQL audit projection remains
+// a best-effort follow-up and is not part of scheduling correctness.
+func (s *redisState) CreateExecutionWithOutbox(ctx context.Context, e *engine.ExecutionSnapshot, entries []engine.OutboxEntry) error {
+	return s.createExecution(ctx, e, entries)
+}
+
+func (s *redisState) createExecution(ctx context.Context, e *engine.ExecutionSnapshot, entries []engine.OutboxEntry) error {
 	ttl := s.execTTL
 
 	// Check for per-execution TTL override from context.
@@ -511,7 +637,7 @@ func (s *redisState) CreateExecution(ctx context.Context, e *engine.ExecutionSna
 		}
 	}
 
-	pipe := s.rdb.Pipeline()
+	pipe := s.rdb.TxPipeline()
 	keys := []string{execKey(e.ID, "status"), execKey(e.ID, "graph")}
 	pipe.Set(ctx, execKey(e.ID, "status"), string(e.Status), ttl)
 	pipe.Set(ctx, execKey(e.ID, "graph"), string(graphJSON), ttl)
@@ -539,12 +665,44 @@ func (s *redisState) CreateExecution(ctx context.Context, e *engine.ExecutionSna
 		pipe.Set(ctx, execKey(e.ID, "span_id"), e.SpanID, ttl)
 		keys = append(keys, execKey(e.ID, "span_id"))
 	}
+	// Acyclic executions use these counters as the O(1) completion source of
+	// truth. Cyclic graphs retain their activation-based completion protocol.
+	if e.Graph != nil && !e.Graph.AllowCycles {
+		pipe.Set(ctx, remainingNodesKey(e.ID), len(e.Graph.Nodes), ttl)
+		pipe.Set(ctx, failedNodesKey(e.ID), 0, ttl)
+		keys = append(keys, remainingNodesKey(e.ID), failedNodesKey(e.ID))
+	}
 	// Seed in-degree counters.
-	for i, d := range e.Graph.InDegree {
-		if d > 0 {
-			pipe.Set(ctx, inDegreeKey(e.ID, i), d, ttl)
-			keys = append(keys, inDegreeKey(e.ID, i))
+	if e.Graph != nil {
+		for i, d := range e.Graph.InDegree {
+			if d > 0 {
+				pipe.Set(ctx, inDegreeKey(e.ID, i), d, ttl)
+				keys = append(keys, inDegreeKey(e.ID, i))
+			}
 		}
+	}
+	if len(entries) > 0 {
+		readyKey := outboxReadyKey(e.ID)
+		bodyKey := outboxBodyKey(e.ID)
+		availableNow := time.Now().UTC().UnixMilli()
+		for _, entry := range entries {
+			if entry.ID == "" {
+				return fmt.Errorf("create execution %q: empty outbox entry ID", e.ID)
+			}
+			encoded, err := marshalRedisOutboxEntry(entry.ID, entry.Task, entry.AvailableAt)
+			if err != nil {
+				return fmt.Errorf("create execution %q outbox %q: %w", e.ID, entry.ID, err)
+			}
+			availableAt := availableNow
+			if !entry.AvailableAt.IsZero() {
+				availableAt = entry.AvailableAt.UTC().UnixMilli()
+			}
+			pipe.HSet(ctx, bodyKey, entry.ID, encoded)
+			pipe.ZAdd(ctx, readyKey, redis.Z{Score: float64(availableAt), Member: entry.ID})
+		}
+		pipe.Expire(ctx, readyKey, ttl)
+		pipe.Expire(ctx, bodyKey, ttl)
+		keys = append(keys, readyKey, bodyKey)
 	}
 	if _, err := pipe.Exec(ctx); err != nil {
 		return fmt.Errorf("create execution %q: %w", e.ID, err)
@@ -575,13 +733,40 @@ func (s *redisState) cleanupCreatedExecution(ctx context.Context, e *engine.Exec
 	s.ttlMu.Unlock()
 
 	pipe := s.rdb.Pipeline()
-	pipe.Del(ctx, execKey(e.ID, "status"), execKey(e.ID, "graph"), execKey(e.ID, "error"), execKey(e.ID, "params"), execKey(e.ID, "runtime"), execKey(e.ID, "trace_id"), execKey(e.ID, "span_id"), executionKeySetKey(e.ID))
+	pipe.Del(ctx,
+		execKey(e.ID, "status"),
+		execKey(e.ID, "graph"),
+		execKey(e.ID, "error"),
+		execKey(e.ID, "params"),
+		execKey(e.ID, "runtime"),
+		execKey(e.ID, "trace_id"),
+		execKey(e.ID, "span_id"),
+		remainingNodesKey(e.ID),
+		failedNodesKey(e.ID),
+		leaseExpiryZSetKey(e.ID),
+		outboxReadyKey(e.ID),
+		outboxBodyKey(e.ID),
+		outboxAttemptsKey(e.ID),
+		outboxDeadKey(e.ID),
+		outboxDeadBodyKey(e.ID),
+		executionKeySetKey(e.ID),
+	)
 	if e.Graph != nil {
-		for i := range e.Graph.InDegree {
-			pipe.Del(ctx, inDegreeKey(e.ID, i), activeInputsKey(e.ID, i))
+		for i, node := range e.Graph.Nodes {
+			pipe.Del(ctx,
+				inDegreeKey(e.ID, i),
+				activeInputsKey(e.ID, i),
+				scheduleKey(e.ID, i),
+				nodeStatusKey(e.ID, node.Name),
+				nodeMetaKey(e.ID, node.Name),
+				outputKey(e.ID, node.Name),
+			)
 		}
 	}
 	_, _ = pipe.Exec(ctx)
+	s.mu.Lock()
+	delete(s.graphs, e.ID)
+	s.mu.Unlock()
 }
 
 func buildExecutionRecord(ctx context.Context, e *engine.ExecutionSnapshot, now time.Time) (*store.ExecutionRecord, error) {
@@ -638,6 +823,9 @@ func (s *redisState) UpdateExecutionStatus(ctx context.Context, id types.Executi
 		if err := s.shortenTransientCompletionTTL(ctx, id, keys...); err != nil {
 			return err
 		}
+		// Redis persists the graph for later inspection/reload; the in-process
+		// cache and per-execution TTL override must not survive a terminal state.
+		s.evictExecutionCaches(id)
 	} else if err := s.refreshTransientTTL(ctx, id, keys...); err != nil {
 		return err
 	}
@@ -745,6 +933,14 @@ func (s *redisState) UpsertNode(ctx context.Context, n *engine.NodeSnapshot) err
 		b, _ := json.Marshal(n.Output)
 		outputJSON = string(b)
 	}
+	var leasePayloadJSON string
+	if n.LeasePayload != nil {
+		encoded, err := json.Marshal(n.LeasePayload)
+		if err != nil {
+			return fmt.Errorf("marshal node lease payload %q/%q: %w", n.ExecutionID, n.Name, err)
+		}
+		leasePayloadJSON = string(encoded)
+	}
 
 	ttl := s.getExecTTL(n.ExecutionID)
 	_, err := upsertNodeLua.Run(ctx, s.rdb,
@@ -758,38 +954,60 @@ func (s *redisState) UpsertNode(ctx context.Context, n *engine.NodeSnapshot) err
 	if outputJSON != "" {
 		keys = append(keys, outKey)
 	}
-	if n.LeaseID != "" || n.LeaseToken != "" || n.Attempt != 0 || n.ActivationID != 0 || n.AutoDepth != 0 || !n.LeaseIssuedAt.IsZero() {
+	if n.LeaseID != "" || n.LeaseToken != "" || n.Attempt != 0 || n.ActivationID != 0 || n.AutoDepth != 0 || !n.LeaseIssuedAt.IsZero() || n.Port != "" || n.Error != "" || n.CommittedLeaseToken != "" || n.CommittedAttempt != 0 {
 		meta := map[string]any{
-			"lease_id":      string(n.LeaseID),
-			"lease_token":   string(n.LeaseToken),
-			"attempt":       n.Attempt,
-			"activation_id": n.ActivationID,
-			"auto_depth":    n.AutoDepth,
+			"lease_id":        string(n.LeaseID),
+			"lease_token":     string(n.LeaseToken),
+			"attempt":         n.Attempt,
+			"activation_id":   n.ActivationID,
+			"auto_depth":      n.AutoDepth,
+			"node_idx":        n.NodeIdx,
+			"lease_task_type": int(n.LeaseTaskType),
+			"lease_payload":   leasePayloadJSON,
 		}
 		if !n.LeaseIssuedAt.IsZero() {
 			meta["lease_issued_at_ms"] = n.LeaseIssuedAt.UnixMilli()
 		}
 		if n.LeaseTTL > 0 {
 			meta["lease_ttl_ms"] = n.LeaseTTL.Milliseconds()
+			if !n.LeaseIssuedAt.IsZero() {
+				meta["lease_deadline_ms"] = n.LeaseIssuedAt.Add(n.LeaseTTL).UnixMilli()
+			}
+		}
+		if n.Port != "" {
+			meta["port"] = n.Port
+		}
+		if n.Error != "" {
+			meta["error"] = n.Error
+		}
+		if n.CommittedLeaseToken != "" {
+			meta["committed_lease_token"] = string(n.CommittedLeaseToken)
+			meta["committed_attempt"] = n.CommittedAttempt
 		}
 		if err := s.rdb.HSet(ctx, metaKey, meta).Err(); err != nil {
 			return fmt.Errorf("upsert node lease %q/%q: %w", n.ExecutionID, n.Name, err)
 		}
-		_ = s.rdb.Expire(ctx, metaKey, ttl).Err()
+		if err := s.rdb.Expire(ctx, metaKey, ttl).Err(); err != nil {
+			return fmt.Errorf("expire node lease %q/%q: %w", n.ExecutionID, n.Name, err)
+		}
 		keys = append(keys, metaKey)
 	}
-	// Lease-expiry index: leases with a deadline live in a global ZSET so the
-	// sweeper can find them without scanning every node key.
+	// Lease-expiry discovery is per execution so it shares the hash tag with
+	// the node status and metadata. AcquireTaskLease updates all three in one
+	// Lua command; this path keeps generic snapshot upserts recoverable too.
+	leaseIndexKey := leaseExpiryZSetKey(n.ExecutionID)
 	member := leaseExpiryMember(n.ExecutionID, n.Name)
-	if n.Status == types.NodeStatusRunning && n.LeaseToken != "" && !n.LeaseIssuedAt.IsZero() && n.LeaseTTL > 0 {
+	keys = append(keys, leaseIndexKey)
+	if (n.Status == types.NodeStatusRunning || n.Status == types.NodeStatusCommitting || n.Status == types.NodeStatusWaiting) && n.LeaseToken != "" && !n.LeaseIssuedAt.IsZero() && n.LeaseTTL > 0 {
 		expiryMs := float64(n.LeaseIssuedAt.Add(n.LeaseTTL).UnixMilli())
-		if err := s.rdb.ZAdd(ctx, leaseExpiryZSetKey, redis.Z{Score: expiryMs, Member: member}).Err(); err != nil {
+		if err := s.rdb.ZAdd(ctx, leaseIndexKey, redis.Z{Score: expiryMs, Member: member}).Err(); err != nil {
 			return fmt.Errorf("index lease expiry %q/%q: %w", n.ExecutionID, n.Name, err)
 		}
-	} else if n.Status != types.NodeStatusRunning {
-		// Any non-Running status means the lease no longer needs sweeping —
-		// terminal, committing, suspended, or pending after retry.
-		_ = s.rdb.ZRem(ctx, leaseExpiryZSetKey, member).Err()
+	} else if n.Status != types.NodeStatusRunning && n.Status != types.NodeStatusCommitting && n.Status != types.NodeStatusWaiting {
+		// Terminal, suspended, and pending nodes have no recoverable lease.
+		if err := s.rdb.ZRem(ctx, leaseIndexKey, member).Err(); err != nil {
+			return fmt.Errorf("remove lease expiry %q/%q: %w", n.ExecutionID, n.Name, err)
+		}
 	}
 	if err := s.refreshTransientTTL(ctx, n.ExecutionID, keys...); err != nil {
 		return err
@@ -833,6 +1051,12 @@ func (s *redisState) GetNode(ctx context.Context, id types.ExecutionID, name str
 	}
 	ns.LeaseID = engine.LeaseID(meta["lease_id"])
 	ns.LeaseToken = engine.LeaseToken(meta["lease_token"])
+	if nodeIdx := meta["node_idx"]; nodeIdx != "" {
+		var parsed int
+		if _, scanErr := fmt.Sscanf(nodeIdx, "%d", &parsed); scanErr == nil {
+			ns.NodeIdx = parsed
+		}
+	}
 	if attempt := meta["attempt"]; attempt != "" {
 		var parsed int
 		if _, scanErr := fmt.Sscanf(attempt, "%d", &parsed); scanErr == nil {
@@ -863,14 +1087,59 @@ func (s *redisState) GetNode(ctx context.Context, id types.ExecutionID, name str
 			ns.LeaseTTL = time.Duration(ms) * time.Millisecond
 		}
 	}
+	if taskType := meta["lease_task_type"]; taskType != "" {
+		var parsed int
+		if _, scanErr := fmt.Sscanf(taskType, "%d", &parsed); scanErr == nil {
+			ns.LeaseTaskType = engine.TaskType(parsed)
+		}
+	}
+	if rawPayload := meta["lease_payload"]; rawPayload != "" {
+		var payload types.SignalPayload
+		if err := json.Unmarshal([]byte(rawPayload), &payload); err != nil {
+			return nil, fmt.Errorf("decode node lease payload %q/%q: %w", id, name, err)
+		}
+		ns.LeasePayload = &payload
+	}
+	ns.Port = meta["port"]
+	ns.Error = meta["error"]
+	ns.CommittedLeaseToken = engine.LeaseToken(meta["committed_lease_token"])
+	if committedAttempt := meta["committed_attempt"]; committedAttempt != "" {
+		var parsed int
+		if _, scanErr := fmt.Sscanf(committedAttempt, "%d", &parsed); scanErr == nil {
+			ns.CommittedAttempt = parsed
+		}
+	}
 	return ns, nil
 }
 
-func (s *redisState) AcquireTaskLease(ctx context.Context, lease *engine.TaskLease) (*engine.NodeSnapshot, bool, error) {
+func (s *redisState) AcquireTaskLease(ctx context.Context, lease *engine.TaskLease) (previous *engine.NodeSnapshot, acquired bool, err error) {
+	started := time.Now()
+	defer func() {
+		result := "acquired"
+		if err != nil {
+			result = "error"
+		} else if !acquired {
+			result = "rejected"
+		}
+		s.observeLeaseAcquire(result, time.Since(started))
+	}()
+
 	ttl := s.getExecTTL(lease.Task.ExecutionID)
+	payloadJSON := ""
+	if lease.Task.Payload != nil {
+		encoded, err := json.Marshal(lease.Task.Payload)
+		if err != nil {
+			return nil, false, fmt.Errorf("marshal lease payload %q/%q: %w", lease.Task.ExecutionID, lease.Task.NodeName, err)
+		}
+		payloadJSON = string(encoded)
+	}
 	result, err := acquireTaskLeaseLua.Run(ctx, s.rdb,
-		[]string{nodeStatusKey(lease.Task.ExecutionID, lease.Task.NodeName), nodeMetaKey(lease.Task.ExecutionID, lease.Task.NodeName)},
-		string(lease.LeaseID), string(lease.LeaseToken), lease.IssuedAt.UnixMilli(), int(ttl.Seconds()), lease.Task.ActivationID, lease.Task.AutoDepth, lease.TTL.Milliseconds(),
+		[]string{
+			nodeStatusKey(lease.Task.ExecutionID, lease.Task.NodeName),
+			nodeMetaKey(lease.Task.ExecutionID, lease.Task.NodeName),
+			leaseExpiryZSetKey(lease.Task.ExecutionID),
+		},
+		string(lease.LeaseID), string(lease.LeaseToken), lease.IssuedAt.UnixMilli(), int(ttl.Seconds()), lease.Task.ActivationID, lease.Task.AutoDepth, lease.TTL.Milliseconds(), leaseExpiryMember(lease.Task.ExecutionID, lease.Task.NodeName), int(lease.Task.Type), payloadJSON, lease.Task.NodeIdx,
 	).Slice()
 	if err != nil {
 		return nil, false, fmt.Errorf("acquire task lease %q/%q: %w", lease.Task.ExecutionID, lease.Task.NodeName, err)
@@ -898,7 +1167,7 @@ func (s *redisState) AcquireTaskLease(ctx context.Context, lease *engine.TaskLea
 		return ""
 	}
 
-	acquired := asInt64(result[0]) == 1
+	acquired = asInt64(result[0]) == 1
 	prevStatus := asString(result[1])
 	var prev *engine.NodeSnapshot
 	if prevStatus != "" {
@@ -923,14 +1192,12 @@ func (s *redisState) AcquireTaskLease(ctx context.Context, lease *engine.TaskLea
 		return prev, false, nil
 	}
 
-	member := leaseExpiryMember(lease.Task.ExecutionID, lease.Task.NodeName)
-	if lease.TTL > 0 && !lease.IssuedAt.IsZero() && lease.LeaseToken != "" {
-		expiryMs := float64(lease.IssuedAt.Add(lease.TTL).UnixMilli())
-		if err := s.rdb.ZAdd(ctx, leaseExpiryZSetKey, redis.Z{Score: expiryMs, Member: member}).Err(); err != nil {
-			return nil, false, fmt.Errorf("index lease expiry %q/%q: %w", lease.Task.ExecutionID, lease.Task.NodeName, err)
-		}
-	} else {
-		_ = s.rdb.ZRem(ctx, leaseExpiryZSetKey, member).Err()
+	if err := s.refreshTransientTTL(ctx, lease.Task.ExecutionID,
+		nodeStatusKey(lease.Task.ExecutionID, lease.Task.NodeName),
+		nodeMetaKey(lease.Task.ExecutionID, lease.Task.NodeName),
+		leaseExpiryZSetKey(lease.Task.ExecutionID),
+	); err != nil {
+		return nil, false, err
 	}
 
 	if s.db != nil {
@@ -958,17 +1225,13 @@ func (s *redisState) AcquireTaskLease(ctx context.Context, lease *engine.TaskLea
 func (s *redisState) ResetNodeForRetry(ctx context.Context, id types.ExecutionID, name string) error {
 	ttl := s.getExecTTL(id)
 	_, err := resetNodeForRetryLua.Run(ctx, s.rdb,
-		[]string{nodeStatusKey(id, name), nodeMetaKey(id, name)},
-		int(ttl.Seconds()),
+		[]string{nodeStatusKey(id, name), nodeMetaKey(id, name), leaseExpiryZSetKey(id)},
+		int(ttl.Seconds()), leaseExpiryMember(id, name),
 	).Int64()
 	if err != nil && err != redis.Nil {
 		return fmt.Errorf("reset node for retry %q/%q: %w", id, name, err)
 	}
-	// Drop from the lease-expiry index regardless of whether the Lua reset
-	// took effect: either it succeeded (we cleared state) or a concurrent
-	// commit already handled it (index will be pruned on the next ZADD).
-	_ = s.rdb.ZRem(ctx, leaseExpiryZSetKey, leaseExpiryMember(id, name)).Err()
-	if err := s.refreshTransientTTL(ctx, id, nodeStatusKey(id, name), nodeMetaKey(id, name)); err != nil {
+	if err := s.refreshTransientTTL(ctx, id, nodeStatusKey(id, name), nodeMetaKey(id, name), leaseExpiryZSetKey(id)); err != nil {
 		return err
 	}
 	return nil
@@ -979,60 +1242,128 @@ func (s *redisState) ResetNodeForRetry(ctx context.Context, id types.ExecutionID
 // list drains, so this is not a coverage cap, only a per-call bound.
 const leaseIndexBatchLimit = 256
 
-func (s *redisState) ListExpiredLeases(ctx context.Context, before time.Time) ([]engine.ExpiredLease, error) {
+func (s *redisState) ListExpiredLeases(ctx context.Context, before time.Time) (expired []engine.ExpiredLease, err error) {
+	started := time.Now()
+	defer func() {
+		s.observeLeaseExpiryScan(len(expired), time.Since(started), err)
+	}()
+
+	const scanCount = int64(128)
+
 	max := fmt.Sprintf("%d", before.UnixMilli())
-	members, err := s.rdb.ZRangeByScore(ctx, leaseExpiryZSetKey, &redis.ZRangeBy{
-		Min:    "-inf",
-		Max:    max,
-		Offset: 0,
-		Count:  leaseIndexBatchLimit,
-	}).Result()
-	if err != nil {
-		return nil, fmt.Errorf("list expired leases: %w", err)
+	out := make([]engine.ExpiredLease, 0, leaseIndexBatchLimit)
+	seenIndexes := make(map[string]struct{})
+	var cursor uint64
+
+	for len(out) < leaseIndexBatchLimit {
+		indexKeys, next, err := s.rdb.Scan(ctx, cursor, "xflow:exec:{*}:leases", scanCount).Result()
+		if err != nil {
+			return out, fmt.Errorf("scan lease indexes: %w", err)
+		}
+		for _, indexKey := range indexKeys {
+			if _, seen := seenIndexes[indexKey]; seen {
+				continue
+			}
+			seenIndexes[indexKey] = struct{}{}
+			indexExecID, validIndex := executionIDFromKey(indexKey)
+			if !validIndex {
+				continue
+			}
+
+			remaining := leaseIndexBatchLimit - len(out)
+			members, err := s.rdb.ZRangeArgs(ctx, redis.ZRangeArgs{
+				Key: indexKey, Start: "-inf", Stop: max, ByScore: true, Offset: 0, Count: int64(remaining),
+			}).Result()
+			if err != nil {
+				return out, fmt.Errorf("list expired leases for %q: %w", indexExecID, err)
+			}
+			for _, member := range members {
+				execID, nodeName, ok := splitLeaseMember(member)
+				if !ok || execID != indexExecID {
+					if err := s.rdb.ZRem(ctx, indexKey, member).Err(); err != nil {
+						return out, fmt.Errorf("prune malformed lease index member %q: %w", member, err)
+					}
+					continue
+				}
+
+				status, err := s.rdb.Get(ctx, nodeStatusKey(execID, nodeName)).Result()
+				if err == redis.Nil || (err == nil && status != string(types.NodeStatusRunning) && status != string(types.NodeStatusCommitting) && status != string(types.NodeStatusWaiting)) {
+					if removeErr := s.rdb.ZRem(ctx, indexKey, member).Err(); removeErr != nil {
+						return out, fmt.Errorf("prune stale lease %q/%q: %w", execID, nodeName, removeErr)
+					}
+					continue
+				}
+				if err != nil {
+					return out, fmt.Errorf("read node status %q/%q: %w", execID, nodeName, err)
+				}
+
+				meta, err := s.rdb.HGetAll(ctx, nodeMetaKey(execID, nodeName)).Result()
+				if err != nil {
+					return out, fmt.Errorf("read node meta %q/%q: %w", execID, nodeName, err)
+				}
+				if meta["lease_token"] == "" {
+					if removeErr := s.rdb.ZRem(ctx, indexKey, member).Err(); removeErr != nil {
+						return out, fmt.Errorf("prune tokenless lease %q/%q: %w", execID, nodeName, removeErr)
+					}
+					continue
+				}
+
+				var deadlineMs, issuedAtMs, leaseTTLms int64
+				parseInt64(meta["lease_deadline_ms"], func(value int64) { deadlineMs = value })
+				parseInt64(meta["lease_issued_at_ms"], func(value int64) { issuedAtMs = value })
+				parseInt64(meta["lease_ttl_ms"], func(value int64) { leaseTTLms = value })
+				if deadlineMs <= 0 && issuedAtMs > 0 && leaseTTLms > 0 {
+					// Compatibility with leases written before lease_deadline_ms was
+					// introduced. The repaired index is then based on the same
+					// durable metadata, not its prior ZSET score.
+					deadlineMs = issuedAtMs + leaseTTLms
+				}
+				if deadlineMs > before.UnixMilli() {
+					if err := s.rdb.ZAdd(ctx, indexKey, redis.Z{Score: float64(deadlineMs), Member: member}).Err(); err != nil {
+						return out, fmt.Errorf("repair lease index %q/%q: %w", execID, nodeName, err)
+					}
+					continue
+				}
+
+				lease := engine.ExpiredLease{
+					ExecutionID: execID,
+					NodeName:    nodeName,
+					LeaseID:     engine.LeaseID(meta["lease_id"]),
+					LeaseToken:  engine.LeaseToken(meta["lease_token"]),
+				}
+				if issuedAtMs > 0 {
+					lease.IssuedAt = time.UnixMilli(issuedAtMs).UTC()
+				}
+				if leaseTTLms > 0 {
+					lease.TTL = time.Duration(leaseTTLms) * time.Millisecond
+				}
+				parseInt64(meta["node_idx"], func(value int64) { lease.NodeIdx = int(value) })
+				parseInt64(meta["activation_id"], func(value int64) { lease.ActivationID = int(value) })
+				parseInt64(meta["auto_depth"], func(value int64) { lease.AutoDepth = int(value) })
+				parseInt64(meta["lease_task_type"], func(value int64) { lease.TaskType = engine.TaskType(value) })
+				if rawPayload := meta["lease_payload"]; rawPayload != "" {
+					var payload types.SignalPayload
+					if err := json.Unmarshal([]byte(rawPayload), &payload); err != nil {
+						return out, fmt.Errorf("decode expired lease payload %q/%q: %w", execID, nodeName, err)
+					}
+					lease.Payload = &payload
+				}
+				out = append(out, lease)
+				if len(out) == leaseIndexBatchLimit {
+					break
+				}
+			}
+			if len(out) == leaseIndexBatchLimit {
+				break
+			}
+		}
+		cursor = next
+		if cursor == 0 {
+			break
+		}
 	}
-	if len(members) == 0 {
+	if len(out) == 0 {
 		return nil, nil
-	}
-	out := make([]engine.ExpiredLease, 0, len(members))
-	for _, member := range members {
-		execID, nodeName, ok := splitLeaseMember(member)
-		if !ok {
-			_ = s.rdb.ZRem(ctx, leaseExpiryZSetKey, member).Err()
-			continue
-		}
-		status, err := s.rdb.Get(ctx, nodeStatusKey(execID, nodeName)).Result()
-		if err == redis.Nil || err == nil && status != string(types.NodeStatusRunning) {
-			// Node is no longer Running — someone already committed / reset.
-			// Clean up the stale index entry and skip.
-			_ = s.rdb.ZRem(ctx, leaseExpiryZSetKey, member).Err()
-			continue
-		}
-		if err != nil {
-			return out, fmt.Errorf("read node status %q/%q: %w", execID, nodeName, err)
-		}
-		meta, err := s.rdb.HGetAll(ctx, nodeMetaKey(execID, nodeName)).Result()
-		if err != nil {
-			return out, fmt.Errorf("read node meta %q/%q: %w", execID, nodeName, err)
-		}
-		if meta["lease_token"] == "" {
-			_ = s.rdb.ZRem(ctx, leaseExpiryZSetKey, member).Err()
-			continue
-		}
-		lease := engine.ExpiredLease{
-			ExecutionID: execID,
-			NodeName:    nodeName,
-			LeaseID:     engine.LeaseID(meta["lease_id"]),
-			LeaseToken:  engine.LeaseToken(meta["lease_token"]),
-		}
-		parseInt64(meta["lease_issued_at_ms"], func(ms int64) {
-			lease.IssuedAt = time.UnixMilli(ms).UTC()
-		})
-		parseInt64(meta["lease_ttl_ms"], func(ms int64) {
-			lease.TTL = time.Duration(ms) * time.Millisecond
-		})
-		parseInt64(meta["activation_id"], func(v int64) { lease.ActivationID = int(v) })
-		parseInt64(meta["auto_depth"], func(v int64) { lease.AutoDepth = int(v) })
-		out = append(out, lease)
 	}
 	return out, nil
 }
@@ -1043,17 +1374,14 @@ func (s *redisState) RevokeLease(ctx context.Context, id types.ExecutionID, name
 	}
 	ttl := s.getExecTTL(id)
 	result, err := revokeLeaseLua.Run(ctx, s.rdb,
-		[]string{nodeStatusKey(id, name), nodeMetaKey(id, name)},
-		string(token), int(ttl.Seconds()),
+		[]string{nodeStatusKey(id, name), nodeMetaKey(id, name), leaseExpiryZSetKey(id)},
+		string(token), int(ttl.Seconds()), leaseExpiryMember(id, name),
 	).Int64()
 	if err != nil && err != redis.Nil {
 		return false, fmt.Errorf("revoke lease %q/%q: %w", id, name, err)
 	}
-	// Drop from the expiry index whether or not the Lua path won the race —
-	// the index entry is now stale either way.
-	_ = s.rdb.ZRem(ctx, leaseExpiryZSetKey, leaseExpiryMember(id, name)).Err()
 	if result == 1 {
-		if err := s.refreshTransientTTL(ctx, id, nodeStatusKey(id, name), nodeMetaKey(id, name)); err != nil {
+		if err := s.refreshTransientTTL(ctx, id, nodeStatusKey(id, name), nodeMetaKey(id, name), leaseExpiryZSetKey(id)); err != nil {
 			return false, err
 		}
 	}
@@ -1079,7 +1407,6 @@ func (s *redisState) ClaimTaskLease(ctx context.Context, lease *engine.TaskLease
 			return nil, false, fmt.Errorf("claim task lease %q/%q: get execution status: %w", lease.Task.ExecutionID, lease.Task.NodeName, err)
 		}
 		if types.IsTerminalExecutionStatus(types.ExecutionStatus(execStatus)) {
-			_ = s.rdb.ZRem(ctx, leaseExpiryZSetKey, leaseExpiryMember(lease.Task.ExecutionID, lease.Task.NodeName)).Err()
 			return &engine.NodeSnapshot{
 				ExecutionID:  lease.Task.ExecutionID,
 				Name:         lease.Task.NodeName,
@@ -1093,8 +1420,12 @@ func (s *redisState) ClaimTaskLease(ctx context.Context, lease *engine.TaskLease
 
 	ttl := s.getExecTTL(lease.Task.ExecutionID)
 	result, err := claimTaskLeaseLua.Run(ctx, s.rdb,
-		[]string{nodeStatusKey(lease.Task.ExecutionID, lease.Task.NodeName), nodeMetaKey(lease.Task.ExecutionID, lease.Task.NodeName)},
-		string(lease.LeaseToken), int(ttl.Seconds()), lease.Task.ActivationID,
+		[]string{
+			nodeStatusKey(lease.Task.ExecutionID, lease.Task.NodeName),
+			nodeMetaKey(lease.Task.ExecutionID, lease.Task.NodeName),
+			leaseExpiryZSetKey(lease.Task.ExecutionID),
+		},
+		string(lease.LeaseToken), int(ttl.Seconds()), lease.Task.ActivationID, leaseExpiryMember(lease.Task.ExecutionID, lease.Task.NodeName),
 	).Slice()
 	if err != nil {
 		return nil, false, fmt.Errorf("claim task lease %q/%q: %w", lease.Task.ExecutionID, lease.Task.NodeName, err)
@@ -1116,13 +1447,112 @@ func (s *redisState) ClaimTaskLease(ctx context.Context, lease *engine.TaskLease
 	if valid != 1 {
 		return ns, false, nil
 	}
-	// Successful claim moved the node to Committing (or it was already
-	// terminal). Either way the lease no longer needs sweeping.
-	_ = s.rdb.ZRem(ctx, leaseExpiryZSetKey, leaseExpiryMember(lease.Task.ExecutionID, lease.Task.NodeName)).Err()
-	if err := s.refreshTransientTTL(ctx, lease.Task.ExecutionID, nodeStatusKey(lease.Task.ExecutionID, lease.Task.NodeName), nodeMetaKey(lease.Task.ExecutionID, lease.Task.NodeName)); err != nil {
+	if err := s.refreshTransientTTL(ctx, lease.Task.ExecutionID,
+		nodeStatusKey(lease.Task.ExecutionID, lease.Task.NodeName),
+		nodeMetaKey(lease.Task.ExecutionID, lease.Task.NodeName),
+		leaseExpiryZSetKey(lease.Task.ExecutionID),
+	); err != nil {
 		return nil, false, err
 	}
 	return ns, true, nil
+}
+
+// SuspendTaskLease atomically converts one committing lease into a suspended
+// node while preserving the signal rendezvous semantics for ordinary and
+// multi-signal waits. A stale claimant returns committed=false and cannot
+// consume signals or overwrite a recovered lease.
+func (s *redisState) SuspendTaskLease(ctx context.Context, lease *engine.TaskLease, output map[string]any, storeOutput bool, spec *types.SuspendSpec, oldSignalName string) (*types.SignalPayload, bool, error) {
+	if lease == nil || spec == nil {
+		return nil, false, engine.ErrInvalidLeaseToken
+	}
+	outputJSON := ""
+	if storeOutput {
+		encoded, err := json.Marshal(output)
+		if err != nil {
+			return nil, false, fmt.Errorf("marshal suspend output %q/%q: %w", lease.Task.ExecutionID, lease.Task.NodeName, err)
+		}
+		outputJSON = string(encoded)
+	}
+	specJSON, err := json.Marshal(spec)
+	if err != nil {
+		return nil, false, fmt.Errorf("marshal suspend spec %q/%q: %w", lease.Task.ExecutionID, lease.Task.NodeName, err)
+	}
+	multi := 0
+	if spec.Mode == types.ModeMultiSignal {
+		multi = 1
+	}
+	oldWaiter := oldSignalName
+	if oldWaiter == "" {
+		oldWaiter = "__none__"
+	}
+	keys := []string{
+		nodeStatusKey(lease.Task.ExecutionID, lease.Task.NodeName),
+		nodeMetaKey(lease.Task.ExecutionID, lease.Task.NodeName),
+		outputKey(lease.Task.ExecutionID, lease.Task.NodeName),
+		leaseExpiryZSetKey(lease.Task.ExecutionID),
+		suspendedNodesKey(lease.Task.ExecutionID),
+		resumeLockKey(lease.Task.ExecutionID, lease.Task.NodeName),
+		waiterKey(lease.Task.ExecutionID, oldWaiter),
+		waiterSpecKey(lease.Task.ExecutionID, lease.Task.NodeName),
+		signalBatchKey(lease.Task.ExecutionID, lease.Task.NodeName),
+	}
+	for _, signalName := range spec.Signals {
+		keys = append(keys, signalKey(lease.Task.ExecutionID, signalName))
+	}
+	for _, signalName := range spec.Signals {
+		keys = append(keys, waiterKey(lease.Task.ExecutionID, signalName))
+	}
+	store := 0
+	if storeOutput {
+		store = 1
+	}
+	args := []any{
+		string(lease.LeaseID), string(lease.LeaseToken), lease.Attempt, lease.Task.ActivationID,
+		int(s.getExecTTL(lease.Task.ExecutionID).Seconds()), leaseExpiryMember(lease.Task.ExecutionID, lease.Task.NodeName),
+		store, outputJSON, lease.Task.NodeName, multi, signalQuorum(spec), len(spec.Signals), string(specJSON),
+	}
+	for _, signalName := range spec.Signals {
+		args = append(args, signalName)
+	}
+	result, err := suspendTaskLeaseLua.Run(ctx, s.rdb, keys, args...).Slice()
+	if err != nil {
+		return nil, false, fmt.Errorf("suspend task lease %q/%q: %w", lease.Task.ExecutionID, lease.Task.NodeName, err)
+	}
+	if len(result) != 4 {
+		return nil, false, fmt.Errorf("suspend task lease %q/%q: unexpected result %v", lease.Task.ExecutionID, lease.Task.NodeName, result)
+	}
+	if redisResultInt(result[0]) != 1 {
+		return nil, false, nil
+	}
+	if err := s.refreshTransientTTL(ctx, lease.Task.ExecutionID, keys...); err != nil {
+		return nil, false, err
+	}
+	s.extendExecTTL(ctx, lease.Task.ExecutionID, lease.Task.NodeName, s.suspendTTL(lease.Task.ExecutionID, spec))
+	name := redisResultString(result[1])
+	raw := redisResultString(result[2])
+	if name == "" || raw == "" {
+		return nil, true, nil
+	}
+	var data map[string]any
+	if err := json.Unmarshal([]byte(raw), &data); err != nil {
+		return nil, false, fmt.Errorf("decode suspend payload %q/%q: %w", lease.Task.ExecutionID, lease.Task.NodeName, err)
+	}
+	payload := &types.SignalPayload{Triggered: types.SignalReceived, Name: name, Data: data}
+	if allJSON := redisResultString(result[3]); allJSON != "" {
+		var encodedAll map[string]string
+		if err := json.Unmarshal([]byte(allJSON), &encodedAll); err != nil {
+			return nil, false, fmt.Errorf("decode suspend payload set %q/%q: %w", lease.Task.ExecutionID, lease.Task.NodeName, err)
+		}
+		payload.All = make(map[string]map[string]any, len(encodedAll))
+		for signalName, signalJSON := range encodedAll {
+			var signalData map[string]any
+			if err := json.Unmarshal([]byte(signalJSON), &signalData); err != nil {
+				return nil, false, fmt.Errorf("decode suspend signal %q/%q/%q: %w", lease.Task.ExecutionID, lease.Task.NodeName, signalName, err)
+			}
+			payload.All[signalName] = signalData
+		}
+	}
+	return payload, true, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -1498,14 +1928,23 @@ func (s *redisState) ListSuspendedNodes(ctx context.Context, id types.ExecutionI
 // canceled execution and deletes the suspended_nodes SET itself.
 func (s *redisState) cleanupOnCancel(ctx context.Context, id types.ExecutionID) {
 	nodes, err := s.rdb.SMembers(ctx, suspendedNodesKey(id)).Result()
-	if err != nil || len(nodes) == 0 {
-		return
-	}
 	pipe := s.rdb.Pipeline()
-	for _, name := range nodes {
-		pipe.ZRem(ctx, timeoutZSetKey, timeoutMember(id, name))
+	if err == nil {
+		for _, name := range nodes {
+			pipe.ZRem(ctx, timeoutZSetKey, timeoutMember(id, name))
+		}
 	}
-	pipe.Del(ctx, suspendedNodesKey(id))
+	// These indexes are execution-scoped. Once cancellation is authoritative,
+	// no worker may recover work from them; removing them prevents stale leases
+	// or undelivered outbox tasks from reviving a canceled execution.
+	pipe.Del(ctx,
+		suspendedNodesKey(id),
+		leaseExpiryZSetKey(id),
+		outboxReadyKey(id),
+		outboxBodyKey(id),
+		remainingNodesKey(id),
+		failedNodesKey(id),
+	)
 	_, _ = pipe.Exec(ctx)
 }
 
@@ -1580,8 +2019,6 @@ func (s *redisState) suspendTTL(id types.ExecutionID, spec *types.SuspendSpec) t
 // Helpers
 // ---------------------------------------------------------------------------
 
-func isTerminalNode(status types.NodeStatus) bool { return types.IsTerminalNodeStatus(status) }
-
 // doneChannel returns the Pub/Sub channel name for execution completion events.
 func doneChannel(id types.ExecutionID) string {
 	return fmt.Sprintf("xflow:exec:{%s}:done", id)
@@ -1604,7 +2041,7 @@ func (s *redisState) WatchExecution(ctx context.Context, id types.ExecutionID) (
 	out := make(chan engine.ExecutionEvent, 8)
 	go func() {
 		defer close(out)
-		defer pubsub.Close()
+		defer func() { _ = pubsub.Close() }()
 		ch := pubsub.Channel()
 		for {
 			select {
@@ -1627,20 +2064,6 @@ func (s *redisState) WatchExecution(ctx context.Context, id types.ExecutionID) (
 		}
 	}()
 	return out, nil
-}
-
-// mustJSON marshals v to a JSON string, returning "{}" on error.
-func mustJSON(v any) string {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return "{}"
-	}
-	return string(b)
-}
-
-// splitPrefix splits "execID/rest" into (execID, rest).
-func splitPrefix(key, prefix string) string {
-	return strings.TrimPrefix(key, prefix)
 }
 
 // ---------------------------------------------------------------------------

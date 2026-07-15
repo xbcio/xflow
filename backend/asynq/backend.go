@@ -31,6 +31,7 @@ type config struct {
 	consumer               bool
 	resourcePool           types.ResourcePool
 	auditObserver          AuditObserver
+	leaseObserver          LeaseObserver
 	logger                 engine.Logger
 	transient              bool
 	transientTTL           time.Duration
@@ -97,6 +98,17 @@ func WithAuditObserver(obs AuditObserver) Option {
 	}
 }
 
+// WithLeaseObserver installs an external observer for Redis lease acquisition,
+// expiry-index scans, and index repairs. It is optional and must not block the
+// state-store hot path.
+func WithLeaseObserver(obs LeaseObserver) Option {
+	return func(c *config) {
+		if obs != nil {
+			c.leaseObserver = obs
+		}
+	}
+}
+
 // WithStateLogger installs a logger used by the audit wrapper for failed
 // dual-writes. Optional; without one, audit failures are still counted via
 // the observer/counters but not logged.
@@ -145,6 +157,11 @@ func (b *Backend) TriggerPrimitives() backend.TriggerPrimitives { return b.trigg
 // .claude/specs/dual-write-contract.md.
 func (b *Backend) AuditStats() AuditStats { return b.state.auditCounters.snapshot() }
 
+// RedisClient exposes the Redis command capability required by optional
+// server-side coordination components. It does not add a dependency from the
+// reusable backend package to service packages.
+func (b *Backend) RedisClient() redis.Cmdable { return b.rdb }
+
 // LeaderElector returns the Redis-backed leader election coordinator shared
 // by all ControlPlane replicas pointed at the same Redis instance. Used to
 // gate leader-only background work (e.g. LeaseSweeper) so only one replica
@@ -182,6 +199,9 @@ func New(redisAddr string, db store.Store, opts ...Option) (*Backend, error) {
 	state := newRedisState(rdb, db, cfg.execTTL)
 	if cfg.auditObserver != nil {
 		state.audit = cfg.auditObserver
+	}
+	if cfg.leaseObserver != nil {
+		state.leaseObserver = cfg.leaseObserver
 	}
 	state.logger = cfg.logger
 	state.transient = cfg.transient
@@ -252,8 +272,11 @@ func (b *Backend) BindHandler(eng *engine.Engine, handler func(context.Context, 
 
 	tm := NewTimeoutMonitor(b.rdb, eng, nil, nil, 5*time.Second)
 	b.timeoutMonitor = tm
+	outboxCtx, cancelOutbox := context.WithCancel(context.Background())
+	outboxDispatcher := engine.NewOutboxDispatcher(eng, time.Second)
 
 	go tm.Run()
+	go outboxDispatcher.Run(outboxCtx)
 	go func() {
 		if err := srv.Run(mux); err != nil {
 			log.Printf("xflow: asynq server error: %v", err)
@@ -261,6 +284,7 @@ func (b *Backend) BindHandler(eng *engine.Engine, handler func(context.Context, 
 	}()
 
 	return func() {
+		cancelOutbox()
 		tm.Stop()
 		srv.Shutdown()
 		_ = b.queue.Close()
