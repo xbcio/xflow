@@ -182,7 +182,7 @@ func submitSDKWorkflow(t *testing.T, baseURL string, wf *types.WorkflowDef, para
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("submit status = %d, want 200", resp.StatusCode)
 	}
@@ -208,7 +208,9 @@ func waitForExecutionStatus(t *testing.T, baseURL string, execID types.Execution
 		}
 		var detail engine.ExecutionDetail
 		decodeErr := json.NewDecoder(resp.Body).Decode(&detail)
-		resp.Body.Close()
+		if err := resp.Body.Close(); err != nil {
+			t.Fatal(err)
+		}
 		if resp.StatusCode == http.StatusOK && decodeErr == nil && types.IsTerminalExecutionStatus(detail.Status) {
 			return detail.Status
 		}

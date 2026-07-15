@@ -163,7 +163,7 @@ func TestAuditWriteRecordsFailureButDoesNotPropagate(t *testing.T) {
 	}
 	defer mr.Close()
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	defer rdb.Close()
+	defer func() { _ = rdb.Close() }()
 
 	dbErr := errors.New("connection refused")
 	db := newFailingStore(dbErr)
@@ -199,7 +199,7 @@ func TestAuditWriteSuccessIncrementsOK(t *testing.T) {
 	}
 	defer mr.Close()
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	defer rdb.Close()
+	defer func() { _ = rdb.Close() }()
 
 	db := newFailingStore(nil) // no error → success
 	state := newRedisState(rdb, db, time.Minute)
@@ -223,7 +223,7 @@ func TestAuditWriteNoopWhenStoreNil(t *testing.T) {
 	}
 	defer mr.Close()
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	defer rdb.Close()
+	defer func() { _ = rdb.Close() }()
 
 	state := newRedisState(rdb, nil, time.Minute)
 	if err := state.UpsertNode(context.Background(), &engine.NodeSnapshot{

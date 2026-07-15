@@ -43,7 +43,7 @@ func TestHTTPStreamSimulatesConnect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	defer stream.Close()
+	defer func() { _ = stream.Close() }()
 
 	if err := stream.Send(RunnerFrame{Hello: &HelloFrame{RunnerID: "r1", Concurrency: 1, Capabilities: []Capability{{NodeType: "xflow.function"}}}}); err != nil {
 		t.Fatalf("send hello: %v", err)

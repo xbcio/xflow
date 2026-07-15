@@ -215,7 +215,7 @@ func TestUpsertNodeStoresStatusString(t *testing.T) {
 	defer redisServer.Close()
 
 	rdb := redis.NewClient(&redis.Options{Addr: redisServer.Addr()})
-	defer rdb.Close()
+	defer func() { _ = rdb.Close() }()
 
 	state := newRedisState(rdb, nil, time.Minute)
 	snapshot := &engine.NodeSnapshot{
@@ -244,7 +244,7 @@ func TestTransientModeRefreshesTTLOnNodeMutation(t *testing.T) {
 	defer redisServer.Close()
 
 	rdb := redis.NewClient(&redis.Options{Addr: redisServer.Addr()})
-	defer rdb.Close()
+	defer func() { _ = rdb.Close() }()
 
 	state := newRedisState(rdb, nil, time.Hour)
 	state.transient = true

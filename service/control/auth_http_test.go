@@ -59,7 +59,7 @@ func TestHTTPRegisterRejectedWithoutToken(t *testing.T) {
 		RunnerID:    "order-runner-1",
 		Concurrency: 1,
 	})
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", resp.StatusCode)
 	}
@@ -72,7 +72,7 @@ func TestHTTPRegisterAcceptedWithValidBearerToken(t *testing.T) {
 		Concurrency:  1,
 		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
 	})
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -89,7 +89,7 @@ func TestHTTPRegisterRejectsForgedRunnerID(t *testing.T) {
 		RunnerID:    "hacker-runner",
 		Concurrency: 1,
 	})
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == http.StatusOK {
 		t.Fatal("wrong id prefix should be rejected even with a valid token")
 	}
@@ -102,7 +102,7 @@ func TestHTTPBodyTokenAcceptedWhenNoHeader(t *testing.T) {
 		Concurrency: 1,
 		AuthToken:   "secret-token",
 	})
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body token fallback)", resp.StatusCode)
 	}
