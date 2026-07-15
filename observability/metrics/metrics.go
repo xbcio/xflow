@@ -21,12 +21,18 @@ type DurationSink interface {
 	Observe(name string, labels map[string]string, value time.Duration)
 }
 
+// GaugeSink records the latest numeric value for concrete exporters.
+type GaugeSink interface {
+	Set(name string, labels map[string]string, value float64)
+}
+
 // Metrics records xflow observations in a Prometheus registry.
 type Metrics struct {
 	mu         sync.Mutex
 	registry   *prometheus.Registry
 	counters   map[metricVecKey]*prometheus.CounterVec
 	histograms map[metricVecKey]*prometheus.HistogramVec
+	gauges     map[metricVecKey]*prometheus.GaugeVec
 }
 
 type metricVecKey struct {
@@ -49,6 +55,7 @@ func NewWithRegistry(registry *prometheus.Registry) *Metrics {
 		registry:   registry,
 		counters:   make(map[metricVecKey]*prometheus.CounterVec),
 		histograms: make(map[metricVecKey]*prometheus.HistogramVec),
+		gauges:     make(map[metricVecKey]*prometheus.GaugeVec),
 	}
 }
 
@@ -90,6 +97,22 @@ func (m *Metrics) Observe(name string, labels map[string]string, value time.Dura
 		return
 	}
 	metric.Observe(value.Seconds())
+}
+
+// Set records a gauge value.
+func (m *Metrics) Set(name string, labels map[string]string, value float64) {
+	if m == nil || name == "" {
+		return
+	}
+	gauge := m.gauge(name, labelNames(labels))
+	if gauge == nil {
+		return
+	}
+	metric, err := gauge.GetMetricWith(prometheus.Labels(labels))
+	if err != nil {
+		return
+	}
+	metric.Set(value)
 }
 
 // Handler serves metrics using Prometheus' text exposition format.
@@ -134,6 +157,24 @@ func (m *Metrics) histogram(name string, labels []string) *prometheus.HistogramV
 	}
 	m.histograms[key] = histogram
 	return histogram
+}
+
+func (m *Metrics) gauge(name string, labels []string) *prometheus.GaugeVec {
+	key := newMetricVecKey(name, labels)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if gauge := m.gauges[key]; gauge != nil {
+		return gauge
+	}
+	gauge := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: name,
+		Help: helpText(name),
+	}, labels)
+	if err := m.registry.Register(gauge); err != nil {
+		return nil
+	}
+	m.gauges[key] = gauge
+	return gauge
 }
 
 func newMetricVecKey(name string, labels []string) metricVecKey {

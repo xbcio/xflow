@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/observability/metrics"
@@ -48,8 +49,17 @@ func TestObserverAdaptersIncrementExpectedMetrics(t *testing.T) {
 
 	NewAuditMetrics(metrics).OnAuditFailed("save_signal", assertErr{})
 	NewSweepMetrics(metrics).OnSweepReclaim("exec-1", "node-1", 1500)
+	NewSweepMetrics(metrics).OnSweepReclaimResult("reclaimed", time.Millisecond)
 	NewDispatcherMetrics(metrics).OnDispatchTransient("no_capacity")
 	NewAuthMetrics(metrics).OnAuthDecision("register", "deny", "enforcing")
+	NewCommitMetrics(metrics).OnCommitOutcome(context.Background(), engine.CommitOutcomeAccepted)
+	outbox := NewOutboxMetrics(metrics)
+	outbox.OnOutboxRetry(context.Background(), 1)
+	outbox.OnOutboxDeadLetter(context.Background())
+	outbox.OnOutboxPending(context.Background(), 2, 1, time.Second)
+	NewLeaseMetrics(metrics).OnLeaseAcquire("acquired", time.Millisecond)
+	NewRunnerClaimMetrics(metrics).OnRunnerClaimReclaimed(2)
+	NewRunnerClaimMetrics(metrics).OnRunnerLeaseReplayed()
 
 	req := httptest.NewRequest("GET", "/metrics", nil)
 	rec := httptest.NewRecorder()
@@ -62,6 +72,14 @@ func TestObserverAdaptersIncrementExpectedMetrics(t *testing.T) {
 		`xflow_dispatch_transient_total{reason="no_capacity"} 1`,
 		`xflow_runner_auth_decisions_total{auth_mode="enforcing",result="deny"} 1`,
 		`xflow_lease_age_seconds_count{result="reclaimed"} 1`,
+		`xflow_commit_outcomes_total{outcome="accepted"} 1`,
+		`xflow_outbox_retries_total 1`,
+		`xflow_outbox_dead_letters_total 1`,
+		`xflow_outbox_pending 2`,
+		`xflow_outbox_dead_letters 1`,
+		`xflow_lease_acquire_total{result="acquired"} 1`,
+		`xflow_runner_claim_reclaimed_total 2`,
+		`xflow_runner_lease_replayed_total 1`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("metrics body missing %q:\n%s", want, body)
