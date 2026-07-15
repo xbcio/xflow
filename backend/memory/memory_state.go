@@ -20,9 +20,15 @@ type memoryState struct {
 	nodes      map[string]*engine.NodeSnapshot // key: execID+"/"+name
 	inDegrees  map[string]int                  // key: execID+"/"+nodeIdx
 	activeIns  map[string]int                  // key: execID+"/"+nodeIdx
-	outputs    map[string]map[string]any       // key: execID+"/"+name
-	suspended  map[string]*types.SuspendSpec   // key: execID+"/"+nodeName
-	signals    map[string]map[string]any       // pre-delivered: key: execID+"/"+signalName
+	remaining  map[types.ExecutionID]int
+	failed     map[types.ExecutionID]int
+	advanced   map[string]bool
+	scheduled  map[string]string
+	outbox     map[types.ExecutionID]map[string]memoryOutboxEntry
+	deadOutbox map[types.ExecutionID]map[string]memoryOutboxEntry
+	outputs    map[string]map[string]any     // key: execID+"/"+name
+	suspended  map[string]*types.SuspendSpec // key: execID+"/"+nodeName
+	signals    map[string]map[string]any     // pre-delivered: key: execID+"/"+signalName
 	signalSets map[string]map[string]map[string]any
 	resumed    map[string]bool                   // resume lock: key: execID+"/"+nodeName
 	subExecs   map[string][]*engine.SubExecution // key: execID+"/"+nodeName
@@ -43,6 +49,12 @@ func newMemoryState() *memoryState {
 		nodes:         make(map[string]*engine.NodeSnapshot),
 		inDegrees:     make(map[string]int),
 		activeIns:     make(map[string]int),
+		remaining:     make(map[types.ExecutionID]int),
+		failed:        make(map[types.ExecutionID]int),
+		advanced:      make(map[string]bool),
+		scheduled:     make(map[string]string),
+		outbox:        make(map[types.ExecutionID]map[string]memoryOutboxEntry),
+		deadOutbox:    make(map[types.ExecutionID]map[string]memoryOutboxEntry),
 		outputs:       make(map[string]map[string]any),
 		suspended:     make(map[string]*types.SuspendSpec),
 		signals:       make(map[string]map[string]any),
@@ -61,15 +73,37 @@ func newMemoryState() *memoryState {
 func (s *memoryState) CreateExecution(_ context.Context, e *engine.ExecutionSnapshot) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.createExecutionLocked(e)
+	return nil
+}
+
+// CreateExecutionWithOutbox atomically records an execution and its initial
+// durable task intents under the memory reference model's single mutex.
+func (s *memoryState) CreateExecutionWithOutbox(_ context.Context, e *engine.ExecutionSnapshot, entries []engine.OutboxEntry) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.createExecutionLocked(e)
+	for _, entry := range entries {
+		s.putOutboxEntryLocked(e.ID, entry)
+	}
+	return nil
+}
+
+func (s *memoryState) createExecutionLocked(e *engine.ExecutionSnapshot) {
 	cp := *e
 	s.executions[e.ID] = &execEntry{snap: cp}
 	s.doneCh[e.ID] = make(chan struct{})
-	// Seed in-degree counters from the compiled graph.
-	for i, d := range e.Graph.InDegree {
-		key := fmt.Sprintf("%s/%d", e.ID, i)
-		s.inDegrees[key] = d
+	// Seed in-degree counters and O(1) completion counters from the compiled graph.
+	if e.Graph != nil {
+		for i, d := range e.Graph.InDegree {
+			key := fmt.Sprintf("%s/%d", e.ID, i)
+			s.inDegrees[key] = d
+		}
+		if !e.Graph.AllowCycles {
+			s.remaining[e.ID] = len(e.Graph.Nodes)
+			s.failed[e.ID] = 0
+		}
 	}
-	return nil
 }
 
 func (s *memoryState) UpdateExecutionStatus(_ context.Context, id types.ExecutionID, status types.ExecutionStatus, _ string) error {
@@ -123,7 +157,7 @@ func (s *memoryState) UpsertNode(_ context.Context, n *engine.NodeSnapshot) erro
 	if existing, ok := s.nodes[key]; ok && isTerminalNode(existing.Status) && n.ActivationID <= existing.ActivationID {
 		return nil // CAS: don't overwrite terminal state
 	}
-	if existing, ok := s.nodes[key]; ok && existing.Status == types.NodeStatusCommitting && n.Status == types.NodeStatusRunning {
+	if existing, ok := s.nodes[key]; ok && (existing.Status == types.NodeStatusCommitting || existing.Status == types.NodeStatusWaiting) && n.Status == types.NodeStatusRunning {
 		return nil
 	}
 	cp := *n
@@ -143,6 +177,23 @@ func cloneNodeSnapshot(ns *engine.NodeSnapshot) *engine.NodeSnapshot {
 		return nil
 	}
 	cp := *ns
+	cp.Output = cloneData(ns.Output)
+	cp.LeasePayload = cloneLeasePayload(ns.LeasePayload)
+	return &cp
+}
+
+func cloneLeasePayload(payload *types.SignalPayload) *types.SignalPayload {
+	if payload == nil {
+		return nil
+	}
+	cp := *payload
+	cp.Data = cloneData(payload.Data)
+	if payload.All != nil {
+		cp.All = make(map[string]map[string]any, len(payload.All))
+		for name, data := range payload.All {
+			cp.All[name] = cloneData(data)
+		}
+	}
 	return &cp
 }
 
@@ -159,7 +210,7 @@ func (s *memoryState) AcquireTaskLease(_ context.Context, lease *engine.TaskLeas
 		if isTerminalNode(current.Status) && (lease.Task.ActivationID <= 0 || current.ActivationID >= lease.Task.ActivationID) {
 			return cloneNodeSnapshot(current), false, nil
 		}
-		if current.Status == types.NodeStatusCommitting {
+		if current.Status == types.NodeStatusCommitting || current.Status == types.NodeStatusWaiting {
 			return cloneNodeSnapshot(current), false, nil
 		}
 		if current.Status == types.NodeStatusRunning && current.LeaseToken != "" {
@@ -186,6 +237,8 @@ func (s *memoryState) AcquireTaskLease(_ context.Context, lease *engine.TaskLeas
 		AutoDepth:     lease.Task.AutoDepth,
 		LeaseIssuedAt: lease.IssuedAt,
 		LeaseTTL:      lease.TTL,
+		LeaseTaskType: lease.Task.Type,
+		LeasePayload:  cloneLeasePayload(lease.Task.Payload),
 	}
 	return cloneNodeSnapshot(current), true, nil
 }
@@ -193,13 +246,33 @@ func (s *memoryState) AcquireTaskLease(_ context.Context, lease *engine.TaskLeas
 func (s *memoryState) ResetNodeForRetry(_ context.Context, id types.ExecutionID, name string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.resetNodeForRetryLocked(id, name)
+	return nil
+}
+
+// ResetNodeForRetryWithOutbox atomically creates the retry delivery intent
+// when the current node is eligible to move back to pending.
+func (s *memoryState) ResetNodeForRetryWithOutbox(_ context.Context, id types.ExecutionID, name string, token engine.LeaseToken, entry engine.OutboxEntry) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.resetNodeForRetryLocked(id, name, token) {
+		return false, nil
+	}
+	s.putOutboxLocked(id, entry.ID, entry.Task, entry.AvailableAt)
+	return true, nil
+}
+
+func (s *memoryState) resetNodeForRetryLocked(id types.ExecutionID, name string, token ...engine.LeaseToken) bool {
 	key := string(id) + "/" + name
 	ns := s.nodes[key]
 	if ns == nil {
-		return nil
+		return false
 	}
-	if ns.Status != types.NodeStatusRunning && ns.Status != types.NodeStatusCommitting {
-		return nil
+	if ns.Status != types.NodeStatusRunning && ns.Status != types.NodeStatusCommitting && ns.Status != types.NodeStatusWaiting {
+		return false
+	}
+	if len(token) > 0 && (token[0] == "" || ns.LeaseToken != token[0]) {
+		return false
 	}
 	cp := *ns
 	cp.Status = types.NodeStatusPending
@@ -207,8 +280,10 @@ func (s *memoryState) ResetNodeForRetry(_ context.Context, id types.ExecutionID,
 	cp.LeaseToken = ""
 	cp.LeaseIssuedAt = time.Time{}
 	cp.LeaseTTL = 0
+	cp.LeaseTaskType = engine.TaskTypeNodeExec
+	cp.LeasePayload = nil
 	s.nodes[key] = &cp
-	return nil
+	return true
 }
 
 func (s *memoryState) ListExpiredLeases(_ context.Context, before time.Time) ([]engine.ExpiredLease, error) {
@@ -216,7 +291,7 @@ func (s *memoryState) ListExpiredLeases(_ context.Context, before time.Time) ([]
 	defer s.mu.Unlock()
 	var out []engine.ExpiredLease
 	for _, ns := range s.nodes {
-		if ns.Status != types.NodeStatusRunning {
+		if ns.Status != types.NodeStatusRunning && ns.Status != types.NodeStatusCommitting && ns.Status != types.NodeStatusWaiting {
 			continue
 		}
 		if ns.LeaseIssuedAt.IsZero() || ns.LeaseTTL <= 0 {
@@ -235,6 +310,8 @@ func (s *memoryState) ListExpiredLeases(_ context.Context, before time.Time) ([]
 			TTL:          ns.LeaseTTL,
 			ActivationID: ns.ActivationID,
 			AutoDepth:    ns.AutoDepth,
+			TaskType:     ns.LeaseTaskType,
+			Payload:      cloneLeasePayload(ns.LeasePayload),
 		})
 	}
 	return out, nil
@@ -243,16 +320,32 @@ func (s *memoryState) ListExpiredLeases(_ context.Context, before time.Time) ([]
 func (s *memoryState) RevokeLease(_ context.Context, id types.ExecutionID, name string, token engine.LeaseToken) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.revokeLeaseLocked(id, name, token), nil
+}
+
+// RevokeLeaseWithOutbox atomically fences lease revocation with the durable
+// task intent needed to retry the exact task.
+func (s *memoryState) RevokeLeaseWithOutbox(_ context.Context, id types.ExecutionID, name string, token engine.LeaseToken, entry engine.OutboxEntry) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.revokeLeaseLocked(id, name, token) {
+		return false, nil
+	}
+	s.putOutboxLocked(id, entry.ID, entry.Task, entry.AvailableAt)
+	return true, nil
+}
+
+func (s *memoryState) revokeLeaseLocked(id types.ExecutionID, name string, token engine.LeaseToken) bool {
 	key := string(id) + "/" + name
 	ns := s.nodes[key]
 	if ns == nil {
-		return false, nil
+		return false
 	}
-	if ns.Status != types.NodeStatusRunning {
-		return false, nil
+	if ns.Status != types.NodeStatusRunning && ns.Status != types.NodeStatusCommitting && ns.Status != types.NodeStatusWaiting {
+		return false
 	}
 	if token == "" || ns.LeaseToken != token {
-		return false, nil
+		return false
 	}
 	cp := *ns
 	cp.Status = types.NodeStatusPending
@@ -260,8 +353,10 @@ func (s *memoryState) RevokeLease(_ context.Context, id types.ExecutionID, name 
 	cp.LeaseToken = ""
 	cp.LeaseIssuedAt = time.Time{}
 	cp.LeaseTTL = 0
+	cp.LeaseTaskType = engine.TaskTypeNodeExec
+	cp.LeasePayload = nil
 	s.nodes[key] = &cp
-	return true, nil
+	return true
 }
 
 func (s *memoryState) ClaimTaskLease(_ context.Context, lease *engine.TaskLease) (*engine.NodeSnapshot, bool, error) {
@@ -282,15 +377,99 @@ func (s *memoryState) ClaimTaskLease(_ context.Context, lease *engine.TaskLease)
 	if lease.Task.ActivationID > 0 && ns.ActivationID != lease.Task.ActivationID {
 		return ns, false, nil
 	}
-	if ns.LeaseToken == "" || ns.LeaseToken != lease.LeaseToken {
+	if ns.Status != types.NodeStatusRunning || ns.LeaseToken == "" || ns.LeaseToken != lease.LeaseToken {
+		return ns, false, nil
+	}
+	if lease.LeaseID != "" && ns.LeaseID != lease.LeaseID {
+		return ns, false, nil
+	}
+	if lease.Attempt != 0 && ns.Attempt != lease.Attempt {
 		return ns, false, nil
 	}
 
 	cp := *ns
 	cp.Status = types.NodeStatusCommitting
-	cp.LeaseToken = ""
 	s.nodes[key] = &cp
-	return &cp, true, nil
+	return cloneNodeSnapshot(&cp), true, nil
+}
+
+// SuspendTaskLease atomically parks a claimed lease after verifying the same
+// lease that entered committing still owns the node. A sweeper that reset the
+// lease, or a newer runner, therefore cannot be overwritten by a stale
+// suspend result.
+func (s *memoryState) SuspendTaskLease(_ context.Context, lease *engine.TaskLease, output map[string]any, storeOutput bool, spec *types.SuspendSpec, oldSignalName string) (*types.SignalPayload, bool, error) {
+	if lease == nil || spec == nil {
+		return nil, false, engine.ErrInvalidLeaseToken
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	key := string(lease.Task.ExecutionID) + "/" + lease.Task.NodeName
+	node := s.nodes[key]
+	if node == nil || node.Status != types.NodeStatusCommitting || node.LeaseID != lease.LeaseID || node.LeaseToken != lease.LeaseToken || node.Attempt != lease.Attempt || node.ActivationID != lease.Task.ActivationID {
+		return nil, false, nil
+	}
+	if storeOutput {
+		s.outputs[key] = cloneData(output)
+	}
+
+	delete(s.resumed, key)
+	if oldSignalName != "" {
+		delete(s.suspended, key)
+	}
+
+	var payload *types.SignalPayload
+	if spec.Mode == types.ModeMultiSignal {
+		for _, signalName := range spec.Signals {
+			signalKey := string(lease.Task.ExecutionID) + "/" + signalName
+			data, found := s.signals[signalKey]
+			if !found {
+				continue
+			}
+			delete(s.signals, signalKey)
+			if ready := s.addMultiSignalLocked(lease.Task.ExecutionID, lease.Task.NodeName, signalName, data, spec); ready != nil {
+				payload = ready
+				delete(s.signalSets, key)
+				break
+			}
+		}
+	} else {
+		for _, signalName := range spec.Signals {
+			signalKey := string(lease.Task.ExecutionID) + "/" + signalName
+			if data, found := s.signals[signalKey]; found {
+				delete(s.signals, signalKey)
+				payload = &types.SignalPayload{Triggered: types.SignalReceived, Name: signalName, Data: cloneData(data)}
+				break
+			}
+		}
+	}
+	if payload == nil {
+		s.suspended[key] = spec
+	} else {
+		delete(s.suspended, key)
+	}
+
+	cp := *node
+	cp.Status = types.NodeStatusSuspended
+	cp.LeaseID = ""
+	cp.LeaseToken = ""
+	cp.LeaseIssuedAt = time.Time{}
+	cp.LeaseTTL = 0
+	cp.LeaseTaskType = engine.TaskTypeNodeExec
+	cp.LeasePayload = nil
+	s.nodes[key] = &cp
+	for _, entry := range engine.SuspendOutboxEntries(lease, spec, payload, time.Now().UTC()) {
+		s.putOutboxLocked(lease.Task.ExecutionID, entry.ID, entry.Task, entry.AvailableAt)
+	}
+	return cloneLeasePayload(payload), true, nil
+}
+
+// SuspendTaskLeaseWithOutbox shares the fenced suspend transition above. The
+// transition writes continuation intents while the memory-state mutex is held,
+// so callers never observe a consumed pre-signal without a recoverable task.
+func (s *memoryState) SuspendTaskLeaseWithOutbox(ctx context.Context, lease *engine.TaskLease, output map[string]any, storeOutput bool, spec *types.SuspendSpec, oldSignalName string) (bool, error) {
+	_, committed, err := s.SuspendTaskLease(ctx, lease, output, storeOutput, spec, oldSignalName)
+	return committed, err
 }
 
 // ---------------------------------------------------------------------------

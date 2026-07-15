@@ -90,7 +90,10 @@ func (b *Backend) Bind(eng *engine.Engine) func() {
 		opts = append(opts, execution.WithResourcePool(b.resourcePool))
 	}
 	dispatcher := execution.NewEmbeddedDispatcher(eng, b.registry, opts...)
-	stop := b.BindHandler(dispatcher.HandleTask)
+	queueStop := b.BindHandlerWithEngine(eng, dispatcher.HandleTask)
+	stop := func() {
+		queueStop()
+	}
 	if b.resourcePool != nil {
 		return func() {
 			stop()
@@ -103,10 +106,41 @@ func (b *Backend) Bind(eng *engine.Engine) func() {
 }
 
 // BindHandler wires a custom queue handler and starts queue consumers.
+// Without an Engine, it cannot start the durable scheduling outbox dispatcher;
+// callers that have an Engine should use BindHandlerWithEngine instead.
 func (b *Backend) BindHandler(handler func(context.Context, *engine.Task) error) func() {
 	b.queue.SetHandler(handler)
 	b.queue.Start()
 	return func() { b.queue.Stop() }
+}
+
+// BindHandlerWithEngine wires a custom queue handler and starts both queue
+// consumers and the Engine's durable scheduling outbox dispatcher. It is used
+// by process-level dispatchers that route tasks somewhere other than the
+// embedded handler registry.
+func (b *Backend) BindHandlerWithEngine(eng *engine.Engine, handler func(context.Context, *engine.Task) error) func() {
+	if eng == nil {
+		return b.BindHandler(handler)
+	}
+	return b.bindHandlerWithOutbox(eng, handler, time.Second)
+}
+
+func (b *Backend) bindHandlerWithOutbox(eng *engine.Engine, handler func(context.Context, *engine.Task) error, interval time.Duration) func() {
+	b.queue.SetHandler(handler)
+	b.queue.Start()
+
+	outboxCtx, cancelOutbox := context.WithCancel(context.Background())
+	outboxDone := make(chan struct{})
+	go func() {
+		defer close(outboxDone)
+		engine.NewOutboxDispatcher(eng, interval).Run(outboxCtx)
+	}()
+
+	return func() {
+		cancelOutbox()
+		<-outboxDone
+		b.queue.Stop()
+	}
 }
 
 // WaitDone blocks until the execution reaches a terminal state or ctx is canceled.
