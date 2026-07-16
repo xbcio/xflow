@@ -28,11 +28,12 @@ type GaugeSink interface {
 
 // Metrics records xflow observations in a Prometheus registry.
 type Metrics struct {
-	mu         sync.Mutex
-	registry   *prometheus.Registry
-	counters   map[metricVecKey]*prometheus.CounterVec
-	histograms map[metricVecKey]*prometheus.HistogramVec
-	gauges     map[metricVecKey]*prometheus.GaugeVec
+	mu              sync.Mutex
+	registry        *prometheus.Registry
+	counters        map[metricVecKey]*prometheus.CounterVec
+	histograms      map[metricVecKey]*prometheus.HistogramVec
+	bytesHistograms map[metricVecKey]*prometheus.HistogramVec
+	gauges          map[metricVecKey]*prometheus.GaugeVec
 }
 
 type metricVecKey struct {
@@ -52,10 +53,11 @@ func NewWithRegistry(registry *prometheus.Registry) *Metrics {
 		registry = prometheus.NewRegistry()
 	}
 	return &Metrics{
-		registry:   registry,
-		counters:   make(map[metricVecKey]*prometheus.CounterVec),
-		histograms: make(map[metricVecKey]*prometheus.HistogramVec),
-		gauges:     make(map[metricVecKey]*prometheus.GaugeVec),
+		registry:        registry,
+		counters:        make(map[metricVecKey]*prometheus.CounterVec),
+		histograms:      make(map[metricVecKey]*prometheus.HistogramVec),
+		bytesHistograms: make(map[metricVecKey]*prometheus.HistogramVec),
+		gauges:          make(map[metricVecKey]*prometheus.GaugeVec),
 	}
 }
 
@@ -97,6 +99,23 @@ func (m *Metrics) Observe(name string, labels map[string]string, value time.Dura
 		return
 	}
 	metric.Observe(value.Seconds())
+}
+
+// ObserveBytes records a byte-size observation in a Prometheus histogram using
+// buckets tailored to script output sizes.
+func (m *Metrics) ObserveBytes(name string, labels map[string]string, size int) {
+	if m == nil || name == "" || size < 0 {
+		return
+	}
+	histogram := m.bytesHistogram(name, labelNames(labels))
+	if histogram == nil {
+		return
+	}
+	metric, err := histogram.GetMetricWith(prometheus.Labels(labels))
+	if err != nil {
+		return
+	}
+	metric.Observe(float64(size))
 }
 
 // Set records a gauge value.
@@ -156,6 +175,28 @@ func (m *Metrics) histogram(name string, labels []string) *prometheus.HistogramV
 		return nil
 	}
 	m.histograms[key] = histogram
+	return histogram
+}
+
+// byteBuckets spans 1 KiB to 2 MiB, comfortably covering the 1 MiB result cap.
+var byteBuckets = []float64{1024, 4096, 16384, 65536, 262144, 524288, 1048576, 2097152}
+
+func (m *Metrics) bytesHistogram(name string, labels []string) *prometheus.HistogramVec {
+	key := newMetricVecKey(name, labels)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if histogram := m.bytesHistograms[key]; histogram != nil {
+		return histogram
+	}
+	histogram := prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    name,
+		Help:    helpText(name),
+		Buckets: byteBuckets,
+	}, labels)
+	if err := m.registry.Register(histogram); err != nil {
+		return nil
+	}
+	m.bytesHistograms[key] = histogram
 	return histogram
 }
 
