@@ -13,7 +13,7 @@ import (
 
 	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/engine"
-	"github.com/xbcio/xflow/observability"
+	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/observability/metrics"
 	"github.com/xbcio/xflow/service/protocol/runnerpb"
 )
@@ -47,13 +47,13 @@ type redisClientProvider interface {
 	RedisClient() redis.Cmdable
 }
 
-func selectRunnerDirectory(cfg Config) RunnerDirectory {
+func selectRunnerDirectory(cfg Config, observer RunnerClaimObserver) RunnerDirectory {
 	if cfg.RunnerDirectory != nil {
 		return cfg.RunnerDirectory
 	}
 	if provider, ok := cfg.Backend.(redisClientProvider); ok {
 		if client := provider.RedisClient(); client != nil {
-			return NewRedisRunnerDirectory(client)
+			return NewRedisRunnerDirectory(client, WithRedisRunnerDirectoryObserver(observer))
 		}
 	}
 	return NewMemoryRunnerDirectory()
@@ -95,12 +95,29 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 		engOpts = append(engOpts, engine.WithLogger(cfg.Logger))
 	}
 	if cfg.Metrics != nil {
-		engOpts = append(engOpts, engine.WithHooks(observability.NewMetricsHooks(cfg.Metrics)))
+		engOpts = append(engOpts,
+			engine.WithHooks(metrics.NewMetricsHooks(cfg.Metrics)),
+			engine.WithCommitObserver(metrics.NewCommitMetrics(cfg.Metrics)),
+			engine.WithOutboxObserver(metrics.NewOutboxMetrics(cfg.Metrics)),
+		)
 	}
 	eng := engine.New(cfg.Backend.State(), cfg.Backend.Queue(), engOpts...)
 
-	runners := selectRunnerDirectory(cfg)
-	dispatcher := NewDispatcher(eng, runners)
+	var runnerClaimObserver RunnerClaimObserver
+	if cfg.Metrics != nil {
+		runnerClaimObserver = metrics.NewRunnerClaimMetrics(cfg.Metrics)
+	}
+	runners := selectRunnerDirectory(cfg, runnerClaimObserver)
+
+	var dispatcherOpts []DispatcherOption
+	if cfg.Metrics != nil {
+		dispatcherOpts = append(dispatcherOpts, WithDispatcherObserver(metrics.NewDispatcherMetrics(cfg.Metrics)))
+	}
+	dispatcher := NewDispatcher(eng, runners, dispatcherOpts...)
+
+	if cfg.Metrics != nil {
+		node.SetScriptObserver(metrics.NewScriptMetrics(cfg.Metrics))
+	}
 
 	var serverOpts []ServerOption
 	if cfg.Auth != nil {
@@ -110,7 +127,7 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 		serverOpts = append(serverOpts, WithControlLogger(cfg.Logger))
 	}
 	if cfg.Metrics != nil {
-		serverOpts = append(serverOpts, WithAuthObserver(observability.NewAuthMetrics(cfg.Metrics)))
+		serverOpts = append(serverOpts, WithAuthObserver(metrics.NewAuthMetrics(cfg.Metrics)))
 	}
 	if cfg.PollWait > 0 {
 		serverOpts = append(serverOpts, WithHTTPPollWait(cfg.PollWait))
@@ -125,7 +142,7 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 		grpcOpts = append(grpcOpts, WithGRPCLogger(cfg.Logger))
 	}
 	if cfg.Metrics != nil {
-		grpcOpts = append(grpcOpts, WithGRPCAuthObserver(observability.NewAuthMetrics(cfg.Metrics)))
+		grpcOpts = append(grpcOpts, WithGRPCAuthObserver(metrics.NewAuthMetrics(cfg.Metrics)))
 	}
 	if cfg.PollWait > 0 {
 		grpcOpts = append(grpcOpts, WithGRPCPollWait(cfg.PollWait))
@@ -138,7 +155,7 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 	}
 	sweeperCfg := LeaseSweeperConfig{Elector: elector, Logger: cfg.Logger}
 	if cfg.Metrics != nil {
-		sweeperCfg.Observer = observability.NewSweepMetrics(cfg.Metrics)
+		sweeperCfg.Observer = metrics.NewSweepMetrics(cfg.Metrics)
 	}
 	sweeper := NewLeaseSweeper(cfg.Backend.State(), eng, sweeperCfg)
 

@@ -9,7 +9,7 @@ import (
 	"github.com/xbcio/xflow/service/protocol"
 )
 
-var _ func(Router, RunnerDirectory) *Dispatcher = NewDispatcher
+var _ func(Router, RunnerDirectory, ...DispatcherOption) *Dispatcher = NewDispatcher
 
 func TestDispatcherEnqueuesRoutedAssignmentWithoutBuildingLease(t *testing.T) {
 	ctx := context.Background()

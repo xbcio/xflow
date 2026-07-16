@@ -55,6 +55,27 @@ type RunnerSession struct {
 	SessionID string
 }
 
+// RunnerSnapshot is the read-only registration and liveness view returned by
+// a RunnerDirectory. Labels are retained for compatibility with the public
+// runner contract; durable directory implementations may leave them empty.
+type RunnerSnapshot struct {
+	RunnerID      string
+	Capacity      int
+	InFlight      int
+	Labels        map[string]string
+	Capabilities  []protocol.Capability
+	LastHeartbeat time.Time
+}
+
+func cloneCapabilities(capabilities []protocol.Capability) []protocol.Capability {
+	if len(capabilities) == 0 {
+		return nil
+	}
+	clone := make([]protocol.Capability, len(capabilities))
+	copy(clone, capabilities)
+	return clone
+}
+
 // HeartbeatRequest updates observed runner capacity and liveness for an
 // existing session.
 type HeartbeatRequest struct {

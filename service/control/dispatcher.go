@@ -56,13 +56,40 @@ type systemTaskHandler interface {
 	HandleSystemTask(ctx context.Context, task *engine.Task) (bool, error)
 }
 
-type Dispatcher struct {
-	engine  Router
-	runners RunnerDirectory
+// DispatcherObserver receives transient dispatch failures. Implementations
+// must be non-blocking and must avoid high-cardinality labels.
+type DispatcherObserver interface {
+	OnDispatchTransient(reason string)
 }
 
-func NewDispatcher(engine Router, runners RunnerDirectory) *Dispatcher {
-	return &Dispatcher{engine: engine, runners: runners}
+type noopDispatcherObserver struct{}
+
+func (noopDispatcherObserver) OnDispatchTransient(string) {}
+
+// DispatcherOption configures a Dispatcher.
+type DispatcherOption func(*Dispatcher)
+
+// WithDispatcherObserver installs an observer for transient dispatch failures.
+func WithDispatcherObserver(obs DispatcherObserver) DispatcherOption {
+	return func(d *Dispatcher) {
+		if obs != nil {
+			d.observer = obs
+		}
+	}
+}
+
+type Dispatcher struct {
+	engine   Router
+	runners  RunnerDirectory
+	observer DispatcherObserver
+}
+
+func NewDispatcher(engine Router, runners RunnerDirectory, opts ...DispatcherOption) *Dispatcher {
+	d := &Dispatcher{engine: engine, runners: runners, observer: noopDispatcherObserver{}}
+	for _, opt := range opts {
+		opt(d)
+	}
+	return d
 }
 
 func (d *Dispatcher) HandleTask(ctx context.Context, task *engine.Task) error {
@@ -84,6 +111,7 @@ func (d *Dispatcher) HandleTask(ctx context.Context, task *engine.Task) error {
 		return err
 	}
 	if d.runners == nil {
+		d.observeTransient("no_runner_directory")
 		return &Transient{Err: ErrNoMatchingRunner}
 	}
 	_, err = d.runners.EnqueueAssignment(ctx, Assignment{
@@ -92,7 +120,24 @@ func (d *Dispatcher) HandleTask(ctx context.Context, task *engine.Task) error {
 		Routing:      routing,
 	})
 	if err != nil {
+		d.observeTransient(dispatchTransientReason(err))
 		return &Transient{Err: err}
 	}
 	return nil
+}
+
+func dispatchTransientReason(err error) string {
+	switch {
+	case errors.Is(err, ErrNoMatchingRunner):
+		return "no_matching_runner"
+	case errors.Is(err, ErrNoCapacity):
+		return "no_capacity"
+	default:
+		return "enqueue_failed"
+	}
+}
+
+func (d *Dispatcher) observeTransient(reason string) {
+	defer func() { _ = recover() }()
+	d.observer.OnDispatchTransient(reason)
 }
