@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/spf13/cast"
+
 	"github.com/xbcio/xflow/types"
 
 	nodeinternal "github.com/xbcio/xflow/node/internal"
@@ -55,10 +57,11 @@ func (n *IfNode) Execute(ctx context.Context, input *types.Input) (*types.Output
 		return nil, fmt.Errorf("xflow.if: %w", err)
 	}
 
-	boolResult, ok := result.(bool)
-	if !ok {
-		return nil, fmt.Errorf("xflow.if: condition did not return bool, got %T", result)
-	}
+	// Use cast.ToBool for parity with xflow.switch rules mode. AsBool=true at
+	// compile time already forces expr to return a bool, so this is a robustness
+	// measure: if the expression engine ever yields a truthy non-bool (e.g. an
+	// integer 1), both flow nodes coerce consistently instead of one erroring.
+	boolResult := cast.ToBool(result)
 
 	if boolResult {
 		return &types.Output{Data: input.Data, Port: "true"}, nil

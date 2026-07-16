@@ -75,13 +75,16 @@ func evalItemCondition(code string, baseEnv map[string]any, item any, index int)
 	for key, value := range baseEnv {
 		env[key] = value
 	}
-	env["item"] = item
-	env["index"] = index
+	// Expand item fields first, then reserve the loop control keys so an item
+	// that happens to contain a field named "item" or "index" cannot shadow
+	// them and corrupt the condition's iteration variables.
 	if itemMap, ok := item.(map[string]any); ok {
 		for key, value := range itemMap {
 			env[key] = value
 		}
 	}
+	env["item"] = item
+	env["index"] = index
 	result, err := exprx.EvalExpr(code, env, true)
 	if err != nil {
 		return false, err

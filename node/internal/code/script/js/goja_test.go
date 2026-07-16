@@ -142,6 +142,23 @@ func TestGoja_StackOverflow(t *testing.T) {
 	}
 }
 
+// TestGoja_PrototypePollutionDiscarded verifies that a script which mutates
+// Object.prototype does not leak the mutation to subsequent executions: the
+// tainted VM is discarded instead of returned to the pool.
+func TestGoja_PrototypePollutionDiscarded(t *testing.T) {
+	e := &gojaEngine{programs: newProgramCache(engine.DefaultProgramCacheSize)}
+	if _, err := e.Execute(context.Background(), `Object.prototype.__xflow_poll = 42; ({})`, nil, engine.DefaultHelpers()); err != nil {
+		t.Fatalf("polluting exec error: %v", err)
+	}
+	out, err := e.Execute(context.Background(), `({seen: typeof ({}).__xflow_poll})`, nil, engine.DefaultHelpers())
+	if err != nil {
+		t.Fatalf("post-pollution exec error: %v", err)
+	}
+	if got := out.(map[string]any)["seen"]; got != "undefined" {
+		t.Fatalf("prototype pollution leaked across executions: %v", got)
+	}
+}
+
 // TestGoja_ProgramCacheEvict drives a small isolated cache (capacity 2) past
 // its limit and asserts the eldest entry is evicted. Uses a fresh engine
 // instance to avoid polluting sharedGoja.

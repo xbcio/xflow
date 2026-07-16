@@ -186,10 +186,17 @@ func (n *KafkaTriggerNode) Activate(ctx context.Context, in *types.TriggerActiva
 
 func activateKafkaPerMessage(ctx context.Context, in *types.TriggerActivateInput, cfg KafkaConsumerConfig, consumer KafkaConsumer) types.TriggerSubscription {
 	runCtx, cancel := context.WithCancel(ctx)
-	sem := make(chan struct{}, cfg.MaxInflight)
+	rt := &kafkaPerMessageRuntime{
+		runCtx:   runCtx,
+		in:       in,
+		consumer: consumer,
+		buffer:   cfg.MaxInflight,
+		workers:  make(map[kafkaPartitionKey]*kafkaPartitionWorker),
+	}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		defer rt.close(context.Background())
 		for {
 			select {
 			case <-runCtx.Done():
@@ -198,29 +205,151 @@ func activateKafkaPerMessage(ctx context.Context, in *types.TriggerActivateInput
 				if !ok {
 					return
 				}
-				select {
-				case sem <- struct{}{}:
-				case <-runCtx.Done():
+				if !rt.submit(runCtx, msg) {
 					return
 				}
-				go func(msg KafkaMessage) {
-					defer func() { <-sem }()
-					if emitKafkaMessage(runCtx, in, msg) {
-						_ = commitKafkaMessages(context.Background(), consumer, msg)
-					}
-				}(msg)
 			}
 		}
 	}()
-	return types.CloseFunc(func(context.Context) error {
+	return types.CloseFunc(func(closeCtx context.Context) error {
+		// Cancel first so any submit blocked on a full worker/aggregator channel
+		// wakes immediately rather than waiting for consumer.Close to drain it.
 		cancel()
 		err := consumer.Close()
 		select {
 		case <-done:
 		case <-time.After(time.Second):
 		}
+		rt.close(closeCtx)
 		return err
 	})
+}
+
+// kafkaPerMessageRuntime routes each message to a per-partition worker that
+// processes messages serially: emit then commit, in offset order. This replaces
+// the previous fan-out where every message ran in its own goroutine and
+// committed its own offset independently — under that scheme a higher offset
+// committing before a lower one caused the lower message to be skipped on
+// rebalance. Per-partition serial commit preserves at-least-once ordering.
+type kafkaPerMessageRuntime struct {
+	runCtx    context.Context
+	in        *types.TriggerActivateInput
+	consumer  KafkaConsumer
+	buffer    int
+	mu        sync.Mutex
+	closeOnce sync.Once
+	workers   map[kafkaPartitionKey]*kafkaPartitionWorker
+}
+
+type kafkaPartitionWorker struct {
+	key         kafkaPartitionKey
+	rt          *kafkaPerMessageRuntime
+	ch          chan KafkaMessage
+	done        chan struct{}
+	idleTimeout time.Duration
+}
+
+func (r *kafkaPerMessageRuntime) submit(ctx context.Context, msg KafkaMessage) bool {
+	key := kafkaPartitionKey{topic: msg.Topic, partition: msg.Partition}
+	w := r.worker(key)
+	select {
+	case w.ch <- msg:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (r *kafkaPerMessageRuntime) worker(key kafkaPartitionKey) *kafkaPartitionWorker {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if w, ok := r.workers[key]; ok {
+		return w
+	}
+	buf := r.buffer
+	if buf <= 0 {
+		buf = defaultTriggerMaxInflight
+	}
+	w := &kafkaPartitionWorker{
+		key:         key,
+		rt:          r,
+		ch:          make(chan KafkaMessage, buf),
+		done:        make(chan struct{}),
+		idleTimeout: kafkaWorkerIdleTimeout,
+	}
+	r.workers[key] = w
+	go w.run()
+	return w
+}
+
+// kafkaWorkerIdleTimeout bounds how long a per-message worker idles before
+// assuming its partition was revoked by rebalance and self-terminating. Without
+// it, a revoked partition's worker goroutine and map entry would leak for the
+// process lifetime (kafka-go exposes no revocation callback).
+const kafkaWorkerIdleTimeout = 5 * time.Minute
+
+func (r *kafkaPerMessageRuntime) close(ctx context.Context) {
+	r.closeOnce.Do(func() {
+		r.mu.Lock()
+		workers := make([]*kafkaPartitionWorker, 0, len(r.workers))
+		for _, w := range r.workers {
+			workers = append(workers, w)
+		}
+		r.mu.Unlock()
+		for _, w := range workers {
+			close(w.ch)
+		}
+		for _, w := range workers {
+			select {
+			case <-w.done:
+			case <-ctx.Done():
+				return
+			}
+		}
+	})
+}
+
+// evictWorker removes an idle worker that self-terminated so a later message
+// for that partition lazily spawns a fresh one.
+func (r *kafkaPerMessageRuntime) evictWorker(key kafkaPartitionKey, w *kafkaPartitionWorker) {
+	r.mu.Lock()
+	if existing, ok := r.workers[key]; ok && existing == w {
+		delete(r.workers, key)
+	}
+	r.mu.Unlock()
+}
+
+func (w *kafkaPartitionWorker) run() {
+	defer close(w.done)
+	defer w.rt.evictWorker(w.key, w)
+	idleTimer := time.NewTimer(w.idleTimeout)
+	defer idleTimer.Stop()
+	for {
+		select {
+		case msg, ok := <-w.ch:
+			if !ok {
+				return
+			}
+			// Partition still assigned — reset the idle reap window.
+			if !idleTimer.Stop() {
+				select {
+				case <-idleTimer.C:
+				default:
+				}
+			}
+			idleTimer.Reset(w.idleTimeout)
+			// Serial per-partition processing: emit then commit in offset order so
+			// a rebalance can never skip a lower offset whose higher peer committed
+			// first. Emit failure skips commit, leaving the message redelivered.
+			if emitKafkaMessage(w.rt.runCtx, w.rt.in, msg) {
+				_ = commitKafkaMessages(context.Background(), w.rt.consumer, msg)
+			}
+		case <-idleTimer.C:
+			// No message for the idle window: assume the partition was revoked
+			// and self-terminate to reclaim the goroutine and map entry.
+			return
+		}
+	}
 }
 
 type kafkaPartitionKey struct {
@@ -239,10 +368,11 @@ type kafkaAggregateRuntime struct {
 }
 
 type kafkaPartitionAggregator struct {
-	key  kafkaPartitionKey
-	rt   *kafkaAggregateRuntime
-	ch   chan KafkaMessage
-	done chan struct{}
+	key         kafkaPartitionKey
+	rt          *kafkaAggregateRuntime
+	ch          chan KafkaMessage
+	done        chan struct{}
+	idleTimeout time.Duration
 }
 
 func activateKafkaAggregate(ctx context.Context, in *types.TriggerActivateInput, cfg KafkaConsumerConfig, consumer KafkaConsumer) types.TriggerSubscription {
@@ -273,15 +403,13 @@ func activateKafkaAggregate(ctx context.Context, in *types.TriggerActivateInput,
 		}
 	}()
 	return types.CloseFunc(func(closeCtx context.Context) error {
+		// Cancel first so any submit blocked on a full worker/aggregator channel
+		// wakes immediately rather than waiting for consumer.Close to drain it.
+		cancel()
 		err := consumer.Close()
 		select {
 		case <-done:
 		case <-time.After(time.Second):
-			cancel()
-			select {
-			case <-done:
-			case <-time.After(time.Second):
-			}
 		}
 		rt.close(closeCtx)
 		return err
@@ -307,14 +435,41 @@ func (r *kafkaAggregateRuntime) aggregator(key kafkaPartitionKey) *kafkaPartitio
 		return agg
 	}
 	agg = &kafkaPartitionAggregator{
-		key:  key,
-		rt:   r,
-		ch:   make(chan KafkaMessage, r.cfg.MaxSize),
-		done: make(chan struct{}),
+		key:         key,
+		rt:          r,
+		ch:          make(chan KafkaMessage, r.cfg.MaxSize),
+		done:        make(chan struct{}),
+		idleTimeout: kafkaAggregatorIdleTimeout(r.cfg.FlushInterval),
 	}
 	r.aggregators[key] = agg
 	go agg.run()
 	return agg
+}
+
+// evictAggregator removes an idle aggregator that self-terminated. kafka-go does
+// not expose partition-revocation callbacks, so an aggregator whose partition
+// was revoked by a rebalance would otherwise block on an empty channel forever
+// (leaking the goroutine and map entry for the process lifetime). The
+// aggregator instead exits after an idle window; this call reclaims its entry
+// so a later message for that partition lazily spawns a fresh aggregator.
+func (r *kafkaAggregateRuntime) evictAggregator(key kafkaPartitionKey, agg *kafkaPartitionAggregator) {
+	r.mu.Lock()
+	if existing, ok := r.aggregators[key]; ok && existing == agg {
+		delete(r.aggregators, key)
+	}
+	r.mu.Unlock()
+}
+
+// kafkaAggregatorIdleTimeout bounds how long an aggregator waits for a new
+// message before assuming its partition was revoked and self-terminating. Set
+// well above FlushInterval so a low-traffic but still-assigned partition is not
+// prematurely reaped; the next message simply spawns a new aggregator.
+func kafkaAggregatorIdleTimeout(flushInterval time.Duration) time.Duration {
+	idle := flushInterval * 10
+	if idle < 5*time.Second {
+		idle = 5 * time.Second
+	}
+	return idle
 }
 
 func (r *kafkaAggregateRuntime) close(ctx context.Context) {
@@ -340,11 +495,16 @@ func (r *kafkaAggregateRuntime) close(ctx context.Context) {
 
 func (a *kafkaPartitionAggregator) run() {
 	defer close(a.done)
+	defer a.rt.evictAggregator(a.key, a)
 	var buffer []KafkaMessage
 	timer := time.NewTimer(time.Hour)
 	timer.Stop()
 	timerActive := false
 	defer timer.Stop()
+	// idleTimer reaps the aggregator after a quiet window so a partition
+	// revoked by rebalance does not leak the goroutine and map entry.
+	idleTimer := time.NewTimer(a.idleTimeout)
+	defer idleTimer.Stop()
 	for {
 		select {
 		case msg, ok := <-a.ch:
@@ -352,6 +512,15 @@ func (a *kafkaPartitionAggregator) run() {
 				a.flush(context.Background(), buffer)
 				return
 			}
+			// A new message arrived: this partition is still assigned — reset
+			// the idle reap window.
+			if !idleTimer.Stop() {
+				select {
+				case <-idleTimer.C:
+				default:
+				}
+			}
+			idleTimer.Reset(a.idleTimeout)
 			ok, err := dedupKafkaMessage(context.Background(), a.rt.in, msg)
 			if err != nil {
 				continue
@@ -377,6 +546,14 @@ func (a *kafkaPartitionAggregator) run() {
 			} else if len(buffer) > 0 {
 				resetKafkaAggregateTimer(timer, &timerActive, a.rt.cfg.FlushInterval)
 			}
+		case <-idleTimer.C:
+			// No message for the idle window: assume the partition was revoked
+			// by a rebalance. Flush any pending buffer, then self-terminate so
+			// the goroutine and map entry are reclaimed.
+			if len(buffer) > 0 {
+				a.flush(context.Background(), buffer)
+			}
+			return
 		}
 	}
 }

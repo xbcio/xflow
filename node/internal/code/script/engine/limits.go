@@ -1,6 +1,9 @@
 package engine
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // Process-wide resource limits for the script node. Kept as package constants
 // (not DSL params) — the operational profile is well-defined and DSL surface
@@ -31,6 +34,14 @@ const (
 
 	// DefaultQJSMaxStackSize caps QuickJS's internal C-stack budget (bytes).
 	DefaultQJSMaxStackSize = 256 << 10 // 256 KiB
+
+	// DefaultScriptTimeout bounds how long a single script execution may run
+	// when the workflow does not specify a per-node timeout. It is enforced at
+	// the node layer via context.WithTimeout so runtimes that honour ctx
+	// cancellation (js/qjs, wasm/wazero) terminate a runaway script at the
+	// deadline. js/goja cannot interrupt tight pure-computation loops even with
+	// a deadline (see goja.go), so unbounded CPU scripts must run on qjs/wasm.
+	DefaultScriptTimeout = 30 * time.Second
 )
 
 // OutputSizeError is returned by the node layer when the encoded script

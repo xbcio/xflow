@@ -10,10 +10,16 @@ import (
 	"sync"
 
 	"github.com/xbcio/xflow/node/internal/code/script/engine"
+	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
 	"github.com/tetratelabs/wazero/sys"
 )
+
+// DefaultWasmModuleCacheSize bounds the compiled-wasm-module LRU cache. wasm
+// modules are static content keyed by sha256, so the working set is normally
+// tiny; the bound protects high-cardinality deployments from unbounded growth.
+const DefaultWasmModuleCacheSize = 256
 
 // TODO(wasm host imports): currently guests communicate via stdin/stdout JSON
 // only — they cannot call $helpers (base64, hmac, jsonPath...) mid-execution.
@@ -38,13 +44,28 @@ func init() {
 	engine.Register("wasm", "wazero", func() engine.Engine { return sharedWazero })
 }
 
-var sharedWazero = &wazeroEngine{compiled: map[string]wazero.CompiledModule{}}
+var sharedWazero = &wazeroEngine{compiled: newWasmModuleCache(DefaultWasmModuleCacheSize)}
 
 type wazeroEngine struct {
-	mu       sync.RWMutex
 	rt       wazero.Runtime
 	rtOnce   sync.Once
-	compiled map[string]wazero.CompiledModule
+	compiled *wasmModuleCache
+}
+
+type wasmModuleCache struct {
+	c *lru.Cache[string, wazero.CompiledModule]
+}
+
+func newWasmModuleCache(size int) *wasmModuleCache {
+	c, err := lru.NewWithEvict[string, wazero.CompiledModule](size, func(_ string, cm wazero.CompiledModule) {
+		// Release the compiled module when evicted so wazero reclaims its
+		// compiled code memory rather than leaking it for the process lifetime.
+		_ = cm.Close(context.Background())
+	})
+	if err != nil {
+		panic(err)
+	}
+	return &wasmModuleCache{c: c}
 }
 
 func (e *wazeroEngine) Name() string { return "wasm/wazero" }
@@ -71,10 +92,7 @@ func (e *wazeroEngine) compile(ctx context.Context, wasmBytes []byte) (wazero.Co
 	sum := sha256.Sum256(wasmBytes)
 	key := hex.EncodeToString(sum[:])
 
-	e.mu.RLock()
-	cm, ok := e.compiled[key]
-	e.mu.RUnlock()
-	if ok {
+	if cm, ok := e.compiled.c.Get(key); ok {
 		return cm, nil
 	}
 
@@ -82,9 +100,9 @@ func (e *wazeroEngine) compile(ctx context.Context, wasmBytes []byte) (wazero.Co
 	if err != nil {
 		return nil, fmt.Errorf("wasm/wazero: compile module: %w", err)
 	}
-	e.mu.Lock()
-	e.compiled[key] = cm
-	e.mu.Unlock()
+	// LRU.Add is thread-safe; concurrent compilers of the same module may both
+	// compile but only one entry is retained (the other is closed on eviction).
+	e.compiled.c.Add(key, cm)
 	return cm, nil
 }
 

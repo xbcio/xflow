@@ -2,11 +2,12 @@ package script_test
 
 import (
 	"context"
-	"github.com/xbcio/xflow/node/registry"
-	"github.com/xbcio/xflow/types"
 	"testing"
+	"time"
 
 	"github.com/xbcio/xflow/node"
+	"github.com/xbcio/xflow/node/registry"
+	"github.com/xbcio/xflow/types"
 )
 
 func TestScript_Factory(t *testing.T) {
@@ -192,4 +193,91 @@ func contains(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+func TestScript_ExecuteNotifiesObserver(t *testing.T) {
+	h, _ := registry.Lookup("xflow.script")
+	rec := &recordingScriptObserver{}
+	node.SetScriptObserver(rec)
+	defer node.SetScriptObserver(nil)
+
+	b := node.Script(`({doubled: $input.x * 2})`).Language("js").Runtime("goja")
+	input := &types.Input{
+		Params: b.RawParams().(map[string]any),
+		Data:   map[string]any{"x": 21.0},
+	}
+	if _, err := h.Execute(context.Background(), input); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if rec.executes != 1 {
+		t.Fatalf("execute notifications = %d, want 1", rec.executes)
+	}
+	if rec.lastOutcome != "main" {
+		t.Fatalf("outcome = %q, want main", rec.lastOutcome)
+	}
+	if rec.lastLanguage != "js" || rec.lastRuntime != "goja" {
+		t.Fatalf("language/runtime = %q/%q, want js/goja", rec.lastLanguage, rec.lastRuntime)
+	}
+	if rec.outputBytes <= 0 {
+		t.Fatalf("output bytes = %d, want > 0", rec.outputBytes)
+	}
+}
+
+func TestScript_ConfigErrorNotifiesObserver(t *testing.T) {
+	h, _ := registry.Lookup("xflow.script")
+	rec := &recordingScriptObserver{}
+	node.SetScriptObserver(rec)
+	defer node.SetScriptObserver(nil)
+
+	input := &types.Input{Params: map[string]any{}}
+	if _, err := h.Execute(context.Background(), input); err == nil {
+		t.Fatal("expected Go config error")
+	}
+
+	if rec.executes != 1 || rec.lastOutcome != "config" {
+		t.Fatalf("execute notifications = %d, outcome = %q; want 1/config", rec.executes, rec.lastOutcome)
+	}
+	if rec.outputBytes != 0 {
+		t.Fatalf("output bytes = %d, want 0 for config error", rec.outputBytes)
+	}
+}
+
+func TestScript_RuntimeErrorNotifiesObserver(t *testing.T) {
+	h, _ := registry.Lookup("xflow.script")
+	rec := &recordingScriptObserver{}
+	node.SetScriptObserver(rec)
+	defer node.SetScriptObserver(nil)
+
+	b := node.Script(`throw new Error('boom')`).Language("js").Runtime("goja")
+	input := &types.Input{Params: b.RawParams().(map[string]any)}
+	if _, err := h.Execute(context.Background(), input); err != nil {
+		t.Fatalf("runtime error should route to port: %v", err)
+	}
+
+	if rec.executes != 1 || rec.lastOutcome != "error" {
+		t.Fatalf("execute notifications = %d, outcome = %q; want 1/error", rec.executes, rec.lastOutcome)
+	}
+	if rec.outputBytes != 0 {
+		t.Fatalf("output bytes = %d, want 0 for runtime error", rec.outputBytes)
+	}
+}
+
+type recordingScriptObserver struct {
+	executes     int
+	lastOutcome  string
+	lastLanguage string
+	lastRuntime  string
+	outputBytes  int
+}
+
+func (r *recordingScriptObserver) OnScriptExecute(language, runtime, outcome string, duration time.Duration) {
+	r.executes++
+	r.lastOutcome = outcome
+	r.lastLanguage = language
+	r.lastRuntime = runtime
+}
+
+func (r *recordingScriptObserver) OnScriptOutputBytes(language, runtime string, size int) {
+	r.outputBytes = size
 }

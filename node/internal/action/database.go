@@ -161,7 +161,10 @@ func (n *DatabaseNode) execSelect(ctx context.Context, db *sql.DB, table string,
 	args := []any{}
 
 	if where, ok := input.Params["where"].(map[string]any); ok && len(where) > 0 {
-		clauses, whereArgs := buildWhere(where)
+		clauses, whereArgs, err := buildWhere(where)
+		if err != nil {
+			return &types.Output{Data: map[string]any{"error": err.Error()}, Port: "error"}, nil
+		}
 		query += " WHERE " + clauses
 		args = append(args, whereArgs...)
 	}
@@ -304,7 +307,10 @@ func (n *DatabaseNode) execUpdate(ctx context.Context, db *sql.DB, table string,
 	if !ok || len(where) == 0 {
 		return nil, fmt.Errorf("xflow.database: where parameter is required for update (safety)")
 	}
-	clauses, whereArgs := buildWhere(where)
+	clauses, whereArgs, err := buildWhere(where)
+	if err != nil {
+		return nil, err
+	}
 	query += " WHERE " + clauses
 	args = append(args, whereArgs...)
 
@@ -323,7 +329,10 @@ func (n *DatabaseNode) execDelete(ctx context.Context, db *sql.DB, table string,
 		return nil, fmt.Errorf("xflow.database: where parameter is required for delete (safety)")
 	}
 
-	clauses, args := buildWhere(where)
+	clauses, args, err := buildWhere(where)
+	if err != nil {
+		return nil, err
+	}
 	query := fmt.Sprintf("DELETE FROM %s WHERE %s", table, clauses)
 
 	result, err := db.ExecContext(ctx, query, args...)
@@ -335,17 +344,21 @@ func (n *DatabaseNode) execDelete(ctx context.Context, db *sql.DB, table string,
 	return &types.Output{Data: map[string]any{"rows_affected": affected}}, nil
 }
 
-func buildWhere(where map[string]any) (string, []any) {
+func buildWhere(where map[string]any) (string, []any, error) {
 	clauses := make([]string, 0, len(where))
 	args := make([]any, 0, len(where))
 	for k, v := range where {
 		if !isValidIdentifier(k) {
-			continue
+			// Reject rather than silently drop: a dropped WHERE clause would make
+			// the query broader than intended, which on UPDATE/DELETE means
+			// over-scoped modifications. Surface the bad column name so the
+			// workflow author fixes the input instead of hitting more rows.
+			return "", nil, fmt.Errorf("xflow.database: invalid WHERE column name %q", k)
 		}
 		clauses = append(clauses, k+" = ?")
 		args = append(args, v)
 	}
-	return strings.Join(clauses, " AND "), args
+	return strings.Join(clauses, " AND "), args, nil
 }
 
 func isValidIdentifier(s string) bool {

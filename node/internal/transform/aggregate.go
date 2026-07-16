@@ -77,7 +77,10 @@ func (n *AggregateNode) Execute(_ context.Context, input *types.Input) (*types.O
 	if err != nil || len(ops) == 0 {
 		return nil, fmt.Errorf("xflow.transform.aggregate: operations parameter is required")
 	}
-	data := map[string]any{}
+	// Preserve upstream input (cloneData) and layer the aggregate results on top,
+	// matching the behaviour of other transform nodes. Previously a fresh empty
+	// map discarded all upstream context including the items array itself.
+	data := cloneData(input)
 	for _, op := range ops {
 		if op.As == "" {
 			return nil, fmt.Errorf("xflow.transform.aggregate: output name is required")

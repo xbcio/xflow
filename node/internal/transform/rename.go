@@ -46,17 +46,30 @@ func (n *RenameNode) Execute(_ context.Context, input *types.Input) (*types.Outp
 	if err != nil || len(mapping) == 0 {
 		return nil, fmt.Errorf("xflow.transform.rename: mapping parameter is required")
 	}
-	data := cloneData(input)
 	for oldName, newName := range mapping {
 		if oldName == "" || newName == "" {
 			return nil, fmt.Errorf("xflow.transform.rename: mapping names must not be empty")
 		}
-		value, ok := data[oldName]
-		if !ok {
+	}
+	// Build the output by reading each original field once and writing it to
+	// its final name. In-place delete+set over a map made chained renames
+	// (e.g. {"a":"b","b":"c"}) order-dependent: if a→b ran first it clobbered
+	// the original b before b→c could read it. A separate destination map
+	// decouples read from write, so every source field is captured before any
+	// rename target is written.
+	src := cloneData(input)
+	dst := make(map[string]any, len(src))
+	// Fields not referenced as a source name pass through unchanged.
+	for k, v := range src {
+		if _, isSource := mapping[k]; isSource {
 			continue
 		}
-		delete(data, oldName)
-		data[newName] = value
+		dst[k] = v
 	}
-	return &types.Output{Data: data}, nil
+	for oldName, newName := range mapping {
+		if value, ok := src[oldName]; ok {
+			dst[newName] = value
+		}
+	}
+	return &types.Output{Data: dst}, nil
 }

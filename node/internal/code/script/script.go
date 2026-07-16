@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/xbcio/xflow/types"
 
@@ -92,27 +93,27 @@ func (n *ScriptNode) RawParams() any {
 }
 
 func (n *ScriptNode) Execute(ctx context.Context, input *types.Input) (*types.Output, error) {
-	// TODO(metrics): emit end-to-end counters and timers when the project
-	// metrics middleware lands:
-	//   - xflow_script_execute_total{language,runtime,outcome=main|error|config}
-	//   - xflow_script_execute_duration_seconds{language,runtime}
-	//   - xflow_script_output_bytes (histogram of result size before the cap)
+	start := time.Now()
+	language, _ := input.Params["language"].(string)
+	runtime, _ := input.Params["runtime"].(string)
+
 	code, _ := input.Params["code"].(string)
 	if code == "" {
+		observeExecute(language, runtime, "config", time.Since(start))
 		return nil, fmt.Errorf("xflow.script: code parameter is required")
 	}
-
-	language, _ := input.Params["language"].(string)
 	if language == "" {
+		observeExecute(language, runtime, "config", time.Since(start))
 		return nil, fmt.Errorf("xflow.script: language parameter is required (choose: js | wasm)")
 	}
-	runtime, _ := input.Params["runtime"].(string)
 	if runtime == "" {
+		observeExecute(language, runtime, "config", time.Since(start))
 		return nil, fmt.Errorf("xflow.script: runtime parameter is required (js -> goja|qjs, wasm -> wazero)")
 	}
 
 	eng, ok := engine.Lookup(language, runtime)
 	if !ok {
+		observeExecute(language, runtime, "config", time.Since(start))
 		return nil, fmt.Errorf("xflow.script: unknown engine (language=%q, runtime=%q)", language, runtime)
 	}
 
@@ -123,19 +124,37 @@ func (n *ScriptNode) Execute(ctx context.Context, input *types.Input) (*types.Ou
 		return input.Credential(name), nil
 	})
 	if err != nil {
+		observeExecute(language, runtime, "config", time.Since(start))
 		return nil, fmt.Errorf("xflow.script: %w", err)
 	}
 
 	globals := buildScriptGlobals(input, creds, first)
 
+	// Enforce a per-execution timeout so runtimes that honour ctx cancellation
+	// (js/qjs, wasm/wazero) terminate a runaway script at the deadline. Without
+	// this, memory-backend dispatch (context.Background()) leaves the script
+	// with no deadline, so `while(true){}` blocks the worker forever.
+	timeout := readScriptTimeout(input.Params)
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+
 	result, err := eng.Execute(ctx, code, globals, engine.DefaultHelpers())
 	if err != nil {
+		observeExecute(language, runtime, "error", time.Since(start))
 		return &types.Output{Data: map[string]any{"error": err.Error()}, Port: "error"}, nil
 	}
 	data := engine.MapResult(result)
 	if sizeErr := checkResultSize(data); sizeErr != nil {
+		observeExecute(language, runtime, "error", time.Since(start))
 		return &types.Output{Data: map[string]any{"error": sizeErr.Error()}, Port: "error"}, nil
 	}
+
+	b, _ := json.Marshal(data)
+	observeOutputBytes(language, runtime, len(b))
+	observeExecute(language, runtime, "main", time.Since(start))
 	return &types.Output{Data: data, Port: "main"}, nil
 }
 
@@ -169,6 +188,32 @@ func readCredNames(v any) []string {
 	default:
 		return nil
 	}
+}
+
+// readScriptTimeout resolves the per-execution timeout from node parameters.
+// Accepts a numeric value (seconds) or a duration string ("5s", "90s"). Falls
+// back to engine.DefaultScriptTimeout when absent or invalid so a script never
+// runs without a deadline.
+func readScriptTimeout(params map[string]any) time.Duration {
+	switch v := params["timeout"].(type) {
+	case float64:
+		if v > 0 {
+			return time.Duration(v) * time.Second
+		}
+	case int:
+		if v > 0 {
+			return time.Duration(v) * time.Second
+		}
+	case int64:
+		if v > 0 {
+			return time.Duration(v) * time.Second
+		}
+	case string:
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return engine.DefaultScriptTimeout
 }
 
 func buildScriptGlobals(input *types.Input, creds map[string]any, first any) map[string]any {

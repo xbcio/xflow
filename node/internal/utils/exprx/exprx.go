@@ -5,31 +5,50 @@ package exprx
 
 import (
 	"fmt"
-	"sync"
 
 	"github.com/expr-lang/expr"
 	"github.com/expr-lang/expr/vm"
 	"github.com/xbcio/xflow/types"
+	lru "github.com/hashicorp/golang-lru/v2"
 )
+
+// DefaultExprCacheSize bounds the compiled-expression LRU cache. Expressions
+// are static configuration content, so the working set is normally small; the
+// bound protects high-cardinality deployments from unbounded growth.
+const DefaultExprCacheSize = 256
 
 // exprCache holds compiled expr programs keyed by source code (plus the
 // compile-mode flag). expr.Env is only used for type inference at compile
 // time — the resulting *vm.Program is safe for concurrent reuse across
 // different env values, so caching by code avoids recompiling the same
 // expression on every node execution (e.g. once per xflow.loop iteration).
-var exprCache sync.Map // map[exprCacheKey]*vm.Program
+// Bounded by an LRU so a deployment with high expression churn stays
+// memory-bounded instead of growing without limit.
+var exprCache = newExprCache(DefaultExprCacheSize)
 
 type exprCacheKey struct {
 	code   string
 	asBool bool
 }
 
+type exprCacheStore struct {
+	c *lru.Cache[exprCacheKey, *vm.Program]
+}
+
+func newExprCache(size int) *exprCacheStore {
+	c, err := lru.New[exprCacheKey, *vm.Program](size)
+	if err != nil {
+		panic(err)
+	}
+	return &exprCacheStore{c: c}
+}
+
 // CompileExpr compiles code into a *vm.Program, reusing a cached program for
 // identical (code, asBool) pairs instead of recompiling on every call.
 func CompileExpr(code string, env map[string]any, asBool bool) (*vm.Program, error) {
 	key := exprCacheKey{code: code, asBool: asBool}
-	if cached, ok := exprCache.Load(key); ok {
-		return cached.(*vm.Program), nil
+	if cached, ok := exprCache.c.Get(key); ok {
+		return cached, nil
 	}
 
 	opts := []expr.Option{expr.Env(env)}
@@ -41,10 +60,10 @@ func CompileExpr(code string, env map[string]any, asBool bool) (*vm.Program, err
 		return nil, err
 	}
 
-	// Races may compile the same key twice; LoadOrStore keeps a single
-	// winner without needing a lock around compile+store.
-	actual, _ := exprCache.LoadOrStore(key, program)
-	return actual.(*vm.Program), nil
+	// LRU.Add is atomic and thread-safe; concurrent compilers of the same key
+	// may both compile but only one entry is retained.
+	exprCache.c.Add(key, program)
+	return program, nil
 }
 
 // EvalExpr compiles (with caching) and runs code against env, returning the

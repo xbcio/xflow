@@ -101,6 +101,11 @@ func LookupFunc(name string) (UserFunc, bool) {
 	return codepkg.LookupFunc(name)
 }
 func Script(code string) *ScriptNode { return scriptpkg.Script(code) }
+
+// SetScriptObserver installs the global observer for xflow.script executions.
+func SetScriptObserver(o scriptpkg.Observer) {
+	scriptpkg.SetObserver(o)
+}
 func Set(fields map[string]any) *SetNode {
 	return transform.Set(fields)
 }

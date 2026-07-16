@@ -28,8 +28,39 @@ type gojaEngine struct {
 }
 
 type pooledVM struct {
-	vm       *goja.Runtime
-	baseline map[string]struct{} // top-level global keys at creation
+	vm              *goja.Runtime
+	baselineGlobals map[string]struct{} // top-level global keys at creation
+	// baselineProtoKeys snapshots Object.prototype's own property keys at
+	// creation. cleanup() compares against it to detect prototype pollution —
+	// a script that writes Object.prototype.x taints the pooled VM, so it is
+	// discarded rather than reused across executions.
+	baselineProtoKeys map[string]struct{}
+}
+
+// prototypeKeys returns the own property key set of <ctor>.prototype (e.g.
+// "Object"). Returns nil if the prototype cannot be resolved.
+func prototypeKeys(vm *goja.Runtime, ctor string) map[string]struct{} {
+	val := vm.Get(ctor)
+	if val == nil {
+		return nil
+	}
+	obj := val.ToObject(vm)
+	if obj == nil {
+		return nil
+	}
+	proto := obj.Get("prototype")
+	if proto == nil {
+		return nil
+	}
+	po := proto.ToObject(vm)
+	if po == nil {
+		return nil
+	}
+	out := make(map[string]struct{}, 16)
+	for _, k := range po.Keys() {
+		out[k] = struct{}{}
+	}
+	return out
 }
 
 func (e *gojaEngine) Name() string { return "js/goja" }
@@ -58,18 +89,39 @@ func (e *gojaEngine) get() *pooledVM {
 	for _, k := range vm.GlobalObject().Keys() {
 		base[k] = struct{}{}
 	}
-	return &pooledVM{vm: vm, baseline: base}
+	return &pooledVM{
+		vm:                vm,
+		baselineGlobals:   base,
+		baselineProtoKeys: prototypeKeys(vm, "Object"),
+	}
 }
 
 // cleanup removes any top-level globals introduced during execution so the
-// runtime can be safely reused.
-func (p *pooledVM) cleanup() {
+// runtime can be reused. It returns false when the VM is tainted (prototype
+// pollution detected) and must not be returned to the pool.
+func (p *pooledVM) cleanup() bool {
 	g := p.vm.GlobalObject()
 	for _, k := range g.Keys() {
-		if _, ok := p.baseline[k]; !ok {
+		if _, ok := p.baselineGlobals[k]; !ok {
 			_ = g.Delete(k)
 		}
 	}
+	// Detect prototype pollution: if Object.prototype gained or lost own
+	// properties since baseline, a script mutated shared prototypes. Reusing
+	// such a VM would leak that mutation to subsequent executions.
+	current := prototypeKeys(p.vm, "Object")
+	if p.baselineProtoKeys == nil || current == nil {
+		return false
+	}
+	if len(current) != len(p.baselineProtoKeys) {
+		return false
+	}
+	for k := range current {
+		if _, ok := p.baselineProtoKeys[k]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func (e *gojaEngine) Execute(ctx context.Context, code string, globals map[string]any, h engine.Helpers) (any, error) {
@@ -130,8 +182,9 @@ func (e *gojaEngine) Execute(ctx context.Context, code string, globals map[strin
 		return nil, fmt.Errorf("js/goja: %w", runErr)
 	}
 
-	pv.cleanup()
-	e.pool.Put(pv)
+	if pv.cleanup() {
+		e.pool.Put(pv)
+	}
 
 	if val == nil || goja.IsUndefined(val) || goja.IsNull(val) {
 		return nil, nil
