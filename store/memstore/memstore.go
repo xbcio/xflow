@@ -153,6 +153,13 @@ func (s *Store) UpsertNode(_ context.Context, rec *store.NodeRecord) error {
 	if ok {
 		existing.NodeType = rec.NodeType
 		existing.Status = rec.Status
+		// Match sqlstore's ON CONFLICT update list: lease and attempt fields
+		// must be refreshed so the memstore reflects the same lifecycle as the
+		// SQL projection. Previously these were skipped, masking lease/attempt
+		// bugs in tests that run against the memstore.
+		existing.LeaseID = rec.LeaseID
+		existing.LeaseToken = rec.LeaseToken
+		existing.Attempt = rec.Attempt
 		existing.Output = rec.Output
 		existing.Port = rec.Port
 		existing.SignalName = rec.SignalName
