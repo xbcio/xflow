@@ -159,31 +159,6 @@ func (s *state) GetNode(_ context.Context, id types.ExecutionID, name string) (*
 	return s.nodes[string(id)+"/"+name], nil
 }
 
-func (s *state) ResetNodeForRetry(_ context.Context, id types.ExecutionID, name string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	key := string(id) + "/" + name
-	ns := s.nodes[key]
-	if ns == nil {
-		return nil
-	}
-	if ns.Status != types.NodeStatusRunning && ns.Status != types.NodeStatusCommitting && ns.Status != types.NodeStatusWaiting {
-		return nil
-	}
-	cp := *ns
-	cp.Status = types.NodeStatusPending
-	cp.LeaseID = ""
-	cp.LeaseToken = ""
-	cp.LeaseIssuedAt = time.Time{}
-	cp.LeaseTTL = 0
-	cp.LeaseTaskType = engine.TaskTypeNodeExec
-	cp.LeasePayload = nil
-	s.nodes[key] = &cp
-	s.touchActiveLocked(id)
-	return nil
-}
-
 func (s *state) ListExpiredLeases(_ context.Context, before time.Time) ([]engine.ExpiredLease, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

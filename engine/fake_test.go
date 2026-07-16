@@ -185,29 +185,6 @@ func (f *fakeState) AcquireTaskLease(_ context.Context, lease *TaskLease) (*Node
 	return cloneNodeSnapshot(current), true, nil
 }
 
-func (f *fakeState) ResetNodeForRetry(_ context.Context, id types.ExecutionID, name string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	key := string(id) + "/" + name
-	ns := f.nodes[key]
-	if ns == nil {
-		return nil
-	}
-	if ns.Status != types.NodeStatusRunning && ns.Status != types.NodeStatusCommitting && ns.Status != types.NodeStatusWaiting {
-		return nil
-	}
-	cp := *ns
-	cp.Status = types.NodeStatusPending
-	cp.LeaseID = ""
-	cp.LeaseToken = ""
-	cp.LeaseIssuedAt = time.Time{}
-	cp.LeaseTTL = 0
-	cp.LeaseTaskType = TaskTypeNodeExec
-	cp.LeasePayload = nil
-	f.nodes[key] = &cp
-	return nil
-}
-
 func (f *fakeState) ListExpiredLeases(_ context.Context, before time.Time) ([]ExpiredLease, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

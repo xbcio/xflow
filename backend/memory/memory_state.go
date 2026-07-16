@@ -243,13 +243,6 @@ func (s *memoryState) AcquireTaskLease(_ context.Context, lease *engine.TaskLeas
 	return cloneNodeSnapshot(current), true, nil
 }
 
-func (s *memoryState) ResetNodeForRetry(_ context.Context, id types.ExecutionID, name string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.resetNodeForRetryLocked(id, name)
-	return nil
-}
-
 // ResetNodeForRetryWithOutbox atomically creates the retry delivery intent
 // when the current node is eligible to move back to pending.
 func (s *memoryState) ResetNodeForRetryWithOutbox(_ context.Context, id types.ExecutionID, name string, token engine.LeaseToken, entry engine.OutboxEntry) (bool, error) {
@@ -561,6 +554,79 @@ func (s *memoryState) DeliverSignal(_ context.Context, id types.ExecutionID, sig
 	// No suspended node yet — store for later consumption.
 	s.signals[string(id)+"/"+signalName] = data
 	return "", nil, nil
+}
+
+var _ engine.DurableSignalDeliverer = (*memoryState)(nil)
+
+// PeekResumeTarget returns the node name suspended and waiting for signalName,
+// or "" when no waiter exists. Does not consume.
+func (s *memoryState) PeekResumeTarget(_ context.Context, id types.ExecutionID, signalName string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	prefix := string(id) + "/"
+	for key, spec := range s.suspended {
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		for _, sig := range spec.Signals {
+			if sig == signalName {
+				return strings.TrimPrefix(key, prefix), nil
+			}
+		}
+	}
+	return "", nil
+}
+
+// DeliverSignalWithOutbox consumes a signal and records the resume delivery
+// intent in the outbox within the same locked transition, mirroring the asynq
+// durable path. A crash after this call still leaves the resume recoverable.
+func (s *memoryState) DeliverSignalWithOutbox(_ context.Context, id types.ExecutionID, signalName string, data map[string]any, intent engine.ResumeIntent) (string, *types.SignalPayload, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	prefix := string(id) + "/"
+	for key, spec := range s.suspended {
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		for _, sig := range spec.Signals {
+			if sig != signalName {
+				continue
+			}
+			nodeName := strings.TrimPrefix(key, prefix)
+			if spec.Mode == types.ModeMultiSignal {
+				payload := s.addMultiSignalLocked(id, nodeName, signalName, data, spec)
+				if payload == nil {
+					return "", nil, false, nil
+				}
+				delete(s.suspended, key)
+				delete(s.signalSets, key)
+				s.scheduleResumeOutbox(id, nodeName, intent, payload)
+				return nodeName, payload, true, nil
+			}
+			delete(s.suspended, key)
+			payload := &types.SignalPayload{Triggered: types.SignalReceived, Name: signalName, Data: cloneData(data)}
+			s.scheduleResumeOutbox(id, nodeName, intent, payload)
+			return nodeName, payload, true, nil
+		}
+	}
+	// No suspended node yet — store for later consumption.
+	s.signals[string(id)+"/"+signalName] = cloneData(data)
+	return "", nil, false, nil
+}
+
+// scheduleResumeOutbox records a resume delivery intent for a woken node.
+func (s *memoryState) scheduleResumeOutbox(id types.ExecutionID, nodeName string, intent engine.ResumeIntent, payload *types.SignalPayload) {
+	task := engine.Task{
+		ExecutionID:  id,
+		NodeName:     nodeName,
+		NodeIdx:      intent.NodeIdx,
+		Type:         engine.TaskTypeNodeResume,
+		Payload:      payload,
+		ActivationID: intent.ActivationID,
+		AutoDepth:    intent.AutoDepth,
+	}
+	entryID := fmt.Sprintf("resume/%s/%s/%d/signal", id, nodeName, intent.ActivationID)
+	s.putOutboxLocked(id, entryID, task, time.Now().UTC())
 }
 
 func (s *memoryState) AcquireResumeLock(_ context.Context, id types.ExecutionID, name string) (bool, error) {

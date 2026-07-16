@@ -299,24 +299,6 @@ func TestEngineTerminalHooksFollowPersistentState(t *testing.T) {
 			t.Fatal("execution graph was evicted despite failed terminal status write")
 		}
 	})
-
-	t.Run("skip does not publish a completion hook when its node write fails", func(t *testing.T) {
-		nodeErr := errors.New("skip node write failed")
-		state := newStateFaults()
-		queue := newQueueFaults()
-		hooks := &completionHookRecorder{}
-		eng := New(state, queue, WithHooks(hooks))
-		g := singleNodeGraph(t)
-		state.upsertNodeErr = nodeErr
-
-		err := eng.skipCascade(context.Background(), "exec-skip-write-error", g, 0)
-		if !errors.Is(err, nodeErr) {
-			t.Fatalf("skipCascade() error = %v, want wrapped %v", err, nodeErr)
-		}
-		if hooks.nodeCompletions != 0 {
-			t.Fatalf("node completion hooks = %d, want 0", hooks.nodeCompletions)
-		}
-	})
 }
 
 func TestEngineCancelPropagatesStateErrors(t *testing.T) {

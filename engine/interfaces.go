@@ -30,16 +30,10 @@ type Nodes interface {
 	// conflicting snapshot and acquired=false without mutating state.
 	AcquireTaskLease(ctx context.Context, lease *TaskLease) (*NodeSnapshot, bool, error)
 	ClaimTaskLease(ctx context.Context, lease *TaskLease) (*NodeSnapshot, bool, error)
-	// ResetNodeForRetry rolls a Running node back to Pending so it can be
-	// re-leased after a backoff delay. Implementations must:
-	//   - validate that the current snapshot is in Running with a matching
-	//     activation (silently no-op otherwise to keep the call idempotent),
-	//   - clear LeaseID / LeaseToken,
-	//   - preserve Attempt (incremented when the next lease is acquired) and
-	//     ActivationID / AutoDepth.
-	// Errors should be returned only for backend failures, not for
-	// "nothing-to-reset" conditions.
-	ResetNodeForRetry(ctx context.Context, id types.ExecutionID, name string) error
+	// ResetNodeForRetry was an unfenced retry-reset method with no production
+	// callers — engine retry paths use the fenced ResetNodeForRetryWithOutbox
+	// (AtomicStateStore) instead. Removed from the interface to prevent future
+	// callers from reaching the unfenced transition.
 	// ListExpiredLeases returns every Running, Committing, or expansion-Waiting
 	// node whose lease deadline has passed (LeaseIssuedAt+LeaseTTL <= before).
 	// Committing and Waiting claims retain the same token/deadline so a crash
@@ -151,6 +145,36 @@ type LeaseExpander interface {
 // after the children have been created.
 type DurableLeaseExpander interface {
 	BeginTaskExpansionWithOutbox(ctx context.Context, lease *TaskLease, children []SubExecution, entries []OutboxEntry) (started bool, err error)
+}
+
+// DurableSignalDeliverer atomically consumes an external signal that wakes a
+// suspended waiter and records the resume delivery intent in the same state
+// transition. This closes the window where the legacy two-step
+// (state.DeliverSignal → queue.Enqueue) could lose a consumed signal if the
+// caller crashed before enqueue succeeded — leaving the node stranded.
+type DurableSignalDeliverer interface {
+	// PeekResumeTarget returns the node name currently suspended and waiting
+	// for signalName, or "" when no waiter exists (the signal will be stored).
+	// It does not consume the signal; the subsequent DeliverSignalWithOutbox
+	// re-validates atomically.
+	PeekResumeTarget(ctx context.Context, id types.ExecutionID, signalName string) (string, error)
+	// DeliverSignalWithOutbox atomically consumes the signal and writes a
+	// resume outbox entry. resumeNode is non-empty and committed=true when a
+	// waiter was woken (the engine then flushes the outbox); committed=false
+	// (resumeNode="") when the signal was stored because no waiter exists or
+	// multi-signal quorum was not yet reached. payload carries the signal
+	// data for the resume task when one is recorded.
+	DeliverSignalWithOutbox(ctx context.Context, id types.ExecutionID, signalName string, data map[string]any, intent ResumeIntent) (resumeNode string, payload *types.SignalPayload, committed bool, err error)
+}
+
+// ResumeIntent carries the graph metadata the backend needs to construct the
+// resume task when atomically consuming a signal. The engine resolves it after
+// peeking the resume target.
+type ResumeIntent struct {
+	NodeName     string
+	NodeIdx      int
+	ActivationID int
+	AutoDepth    int
 }
 
 // HandlerRegistry resolves an ActionHandler for a given execution + node.

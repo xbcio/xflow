@@ -540,7 +540,7 @@ func (e *Engine) commitLegacyNode(ctx context.Context, lease *TaskLease, status 
 			e.EvictExecution(task.ExecutionID)
 			return CommitOutcomeAccepted, nil
 		}
-		if err := e.OnNodeComplete(ctx, task.ExecutionID, g, task.NodeIdx, port, output); err != nil {
+		if err := e.OnNodeComplete(ctx, task.ExecutionID, g, task.NodeIdx, port); err != nil {
 			return CommitOutcomeTransientError, err
 		}
 		return CommitOutcomeAccepted, nil
@@ -910,8 +910,77 @@ func cloneSignalPayload(payload *types.SignalPayload) *types.SignalPayload {
 }
 
 // DeliverSignal routes an external signal to the appropriate suspended node
-// and enqueues a resume task if the node is ready.
+// and enqueues a resume task if the node is ready. When the backend supports
+// DurableSignalDeliverer, the signal consumption and resume-task persistence
+// happen in one atomic transition so a crash between them cannot lose the
+// signal; otherwise the legacy two-step path is used.
 func (e *Engine) DeliverSignal(ctx context.Context, id types.ExecutionID, name string, data map[string]any) error {
+	if durable, ok := e.state.(DurableSignalDeliverer); ok {
+		return e.deliverSignalDurable(ctx, id, name, data, durable)
+	}
+	return e.deliverSignalLegacy(ctx, id, name, data)
+}
+
+// deliverSignalDurable peeks the resume target, resolves graph metadata, then
+// atomically consumes the signal and persists the resume task in one outbox
+// transition. A crash after consumption but before FlushOutbox leaves the
+// resume intent durable; the outbox dispatcher redelivers it.
+func (e *Engine) deliverSignalDurable(ctx context.Context, id types.ExecutionID, name string, data map[string]any, durable DurableSignalDeliverer) error {
+	resumeNode, err := durable.PeekResumeTarget(ctx, id, name)
+	if err != nil {
+		return err
+	}
+
+	var intent ResumeIntent
+	if resumeNode != "" {
+		g, active, err := e.loadActiveGraph(ctx, id)
+		if err != nil {
+			return fmt.Errorf("load graph for signal %q on %q: %w", name, id, err)
+		}
+		if !active {
+			// The execution completed, was canceled, or was cleaned up while
+			// the signal was in flight. Signal delivery is a control/user-facing
+			// operation (unlike runner-facing lease/commit paths), so a terminal
+			// target is a benign no-op — the signal simply has nowhere to resume.
+			// Returning ErrExecutionInactive here would surface as an HTTP 500 on
+			// the control plane's signal endpoint for an already-finished workflow.
+			return nil
+		}
+		nodeIdx, ok := g.Index[resumeNode]
+		if !ok {
+			return fmt.Errorf("signal %q targeted unknown node %q", name, resumeNode)
+		}
+		activationID, err := e.currentActivationID(ctx, id, resumeNode)
+		if err != nil {
+			return fmt.Errorf("read signal target %q/%q: %w", id, resumeNode, err)
+		}
+		intent = ResumeIntent{NodeName: resumeNode, NodeIdx: nodeIdx, ActivationID: activationID}
+	}
+
+	node, _, committed, err := durable.DeliverSignalWithOutbox(ctx, id, name, data, intent)
+	if err != nil {
+		return err
+	}
+
+	if e.hooks != nil {
+		safeHook(ctx, e.logger, func(hookCtx context.Context) {
+			e.hooks.OnSignalDelivered(hookCtx, id, name, data)
+		})
+	}
+
+	if !committed || node == "" {
+		// Signal stored or multi-signal quorum not yet reached; no resume to deliver.
+		return nil
+	}
+	// Resume task is durably persisted in the outbox; flush delivers it now.
+	return e.FlushOutbox(ctx, id)
+}
+
+// deliverSignalLegacy is the non-atomic two-step path used by backends that do
+// not implement DurableSignalDeliverer (e.g. transient). A crash between signal
+// consumption and enqueue can lose the resume — acceptable for non-durable
+// backends whose state is already lost on crash.
+func (e *Engine) deliverSignalLegacy(ctx context.Context, id types.ExecutionID, name string, data map[string]any) error {
 	resumeNode, payload, err := e.state.DeliverSignal(ctx, id, name, data)
 	if err != nil {
 		return err
@@ -933,7 +1002,11 @@ func (e *Engine) DeliverSignal(ctx context.Context, id types.ExecutionID, name s
 		return fmt.Errorf("load graph for signal %q on %q: %w", name, id, err)
 	}
 	if !active {
-		return ErrExecutionInactive
+		// Terminal/cleaned-up target: benign no-op for the control/user-facing
+		// signal path (see deliverSignalDurable for rationale). The signal was
+		// already consumed above; the node is terminal so there is no resume to
+		// enqueue.
+		return nil
 	}
 	nodeIdx, ok := g.Index[resumeNode]
 	if !ok {
