@@ -24,6 +24,8 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"google.golang.org/grpc"
@@ -38,6 +40,19 @@ import (
 	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/service/protocol/runnerpb"
 	"go.uber.org/zap"
+)
+
+// HTTP server timeouts. ReadHeaderTimeout defends against Slowloris-style
+// slow-header attacks; the full Read/Write/Idle bounds cap a single request's
+// resource hold so a misbehaving client cannot exhaust server goroutines.
+const (
+	serverReadHeaderTimeout = 10 * time.Second
+	serverReadTimeout       = 30 * time.Second
+	serverWriteTimeout      = 30 * time.Second
+	serverIdleTimeout       = 120 * time.Second
+	// serverShutdownTimeout bounds graceful shutdown: in-flight handlers get
+	// this long to finish before the listener is force-closed.
+	serverShutdownTimeout = 15 * time.Second
 )
 
 type serverConfig struct {
@@ -167,28 +182,70 @@ func runServer(cfg serverConfig) error {
 		return err
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	// signal.NotifyContext so SIGINT/SIGTERM trigger graceful shutdown: the
+	// HTTP server drains in-flight requests, gRPC GracefulStops, and the
+	// control plane's background goroutines (dispatcher, lease sweeper,
+	// leader election) exit cleanly instead of being killed mid-transition.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	if err := cp.Start(ctx); err != nil {
 		return err
 	}
-	defer func() { _ = cp.Shutdown(context.Background()) }()
 
+	var grpcStop func()
 	if cfg.grpcAddr != "" {
-		grpcStop, err := serveGRPCServer(cfg.grpcAddr, cp.GRPCServer(), tlsCfg)
+		grpcStop, err = serveGRPCServer(cfg.grpcAddr, cp.GRPCServer(), tlsCfg)
 		if err != nil {
 			return err
 		}
-		defer grpcStop()
 	}
 
-	handler := cp.Handler()
-	if tlsCfg == nil {
-		return http.ListenAndServe(cfg.addr, handler)
+	httpSrv := &http.Server{
+		Addr:              cfg.addr,
+		Handler:           cp.Handler(),
+		TLSConfig:         tlsCfg,
+		ReadHeaderTimeout: serverReadHeaderTimeout,
+		ReadTimeout:       serverReadTimeout,
+		WriteTimeout:      serverWriteTimeout,
+		IdleTimeout:       serverIdleTimeout,
 	}
-	srv := &http.Server{Addr: cfg.addr, Handler: handler, TLSConfig: tlsCfg}
-	log.Printf("xflow-server: HTTPS listening on %s (mTLS=%v)", cfg.addr, tlsCfg.ClientAuth == tls.RequireAndVerifyClientCert)
-	return srv.ListenAndServeTLS("", "")
+
+	listenErr := make(chan error, 1)
+	go func() {
+		if tlsCfg == nil {
+			listenErr <- httpSrv.ListenAndServe()
+		} else {
+			log.Printf("xflow-server: HTTPS listening on %s (mTLS=%v)", cfg.addr, tlsCfg.ClientAuth == tls.RequireAndVerifyClientCert)
+			listenErr <- httpSrv.ListenAndServeTLS("", "")
+		}
+	}()
+
+	select {
+	case <-ctx.Done():
+		log.Println("xflow-server: shutdown signal received, draining...")
+	case err := <-listenErr:
+		if err != nil && err != http.ErrServerClosed {
+			if grpcStop != nil {
+				grpcStop()
+			}
+			_ = cp.Shutdown(context.Background())
+			return err
+		}
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), serverShutdownTimeout)
+	defer cancel()
+	if grpcStop != nil {
+		grpcStop()
+	}
+	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("xflow-server: http shutdown error: %v", err)
+	}
+	if err := cp.Shutdown(context.Background()); err != nil {
+		log.Printf("xflow-server: control plane shutdown error: %v", err)
+	}
+	return nil
 }
 
 func buildLogger(cfg serverConfig) (engine.Logger, error) {
