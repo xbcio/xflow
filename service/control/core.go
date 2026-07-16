@@ -20,6 +20,11 @@ var (
 	ErrLeaseRequired         = errors.New("runner_id, session_id and lease are required")
 	ErrEngineNotConfigured   = errors.New("engine not configured")
 	ErrUnauthenticated       = errors.New("unauthenticated")
+	// ErrInternalServer is the generic message returned to clients for any
+	// error that is not a recognised transport-agnostic sentinel. The full
+	// error is logged server-side; clients must never see internal stack
+	// traces, Redis errors, or backend paths.
+	ErrInternalServer = errors.New("internal server error")
 )
 
 // Core holds the transport-independent Runner Protocol logic shared by the HTTP
@@ -262,11 +267,35 @@ func (c *Core) reportResult(ctx context.Context, req protocol.ReportResultReques
 		if errors.Is(err, engine.ErrInvalidLeaseToken) {
 			return protocol.ReportResultResponse{Accepted: false, Error: err.Error()}, err
 		}
-		return protocol.ReportResultResponse{}, err
+		return protocol.ReportResultResponse{}, normalizeRunnerError(err)
 	}
 	return protocol.ReportResultResponse{Accepted: true}, nil
 }
 
+// normalizeRunnerError maps an error returned by Core logic to the message a
+// client should see. Known transport-agnostic sentinel errors (and engine
+// lease-token errors) are returned verbatim so callers receive actionable
+// messages like "runner not found". Any other error is collapsed to the
+// generic ErrInternalServer: the full error never reaches a client, since it
+// may contain Redis error text, internal paths, or backend details that aid
+// reconnaissance. Callers should log the original error before normalizing
+// when the underlying failure is unexpected.
 func normalizeRunnerError(err error) error {
-	return err
+	if err == nil {
+		return nil
+	}
+	switch {
+	case errors.Is(err, ErrRunnerIDRequired),
+		errors.Is(err, ErrRunnerSessionRequired),
+		errors.Is(err, ErrConcurrencyRequired),
+		errors.Is(err, ErrRunnerNotFound),
+		errors.Is(err, ErrLeaseRequired),
+		errors.Is(err, ErrEngineNotConfigured),
+		errors.Is(err, ErrUnauthenticated),
+		errors.Is(err, ErrRunnerSessionStale),
+		errors.Is(err, engine.ErrInvalidLeaseToken):
+		return err
+	default:
+		return ErrInternalServer
+	}
 }

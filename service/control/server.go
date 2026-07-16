@@ -132,7 +132,7 @@ func (s *Server) handleSubmitWorkflow(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := s.core.engine.Submit(r.Context(), g, req.Params)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, ErrInternalServer.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, submitWorkflowResponse{ExecutionID: id})
@@ -323,16 +323,21 @@ func requireMethod(w http.ResponseWriter, r *http.Request, method string) bool {
 	return false
 }
 
+// writeEngineError maps an engine error to an HTTP response. "not found"
+// messages map to 404 so clients can distinguish absent executions; every
+// other failure is collapsed to a generic 500 message — the underlying error
+// (Redis text, internal paths, backend details) must never reach a client.
 func writeEngineError(w http.ResponseWriter, err error) {
 	if strings.Contains(strings.ToLower(err.Error()), "not found") {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
-	writeError(w, http.StatusInternalServerError, err.Error())
+	writeError(w, http.StatusInternalServerError, ErrInternalServer.Error())
 }
 
 // writeRunnerError maps transport-agnostic Core sentinel errors to HTTP status
-// codes.
+// codes. Known sentinels carry an actionable message; the catch-all default
+// returns a generic 500 so internal error details are not leaked.
 func writeRunnerError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, ErrRunnerIDRequired), errors.Is(err, ErrRunnerSessionRequired), errors.Is(err, ErrConcurrencyRequired), errors.Is(err, ErrLeaseRequired):
@@ -344,7 +349,7 @@ func writeRunnerError(w http.ResponseWriter, err error) {
 	case errors.Is(err, ErrUnauthenticated):
 		writeError(w, http.StatusUnauthorized, err.Error())
 	default:
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, ErrInternalServer.Error())
 	}
 }
 

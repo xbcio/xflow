@@ -107,7 +107,7 @@ func (s *GRPCServer) PollTask(ctx context.Context, req *runnerpb.PollTaskRequest
 	}
 	out, err := protocol.PollTaskResponseToProto(resp)
 	if err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
+		return nil, status.Error(codes.Internal, ErrInternalServer.Error())
 	}
 	return out, nil
 }
