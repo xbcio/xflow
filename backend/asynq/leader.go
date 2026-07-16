@@ -194,7 +194,14 @@ func (e *RedisLeaderElector) startRenewal() {
 	}()
 }
 
-// IsLeader reports current leadership without a network round-trip.
+// IsLeader reports current leadership without a network round-trip. On local
+// deadline expiry it clears local leadership but does NOT release the Redis
+// lease key (leaderReleaseScript runs only in Resign) — the Redis key lingers
+// until its TTL (default 15s) expires. This is acceptable because leadership
+// here only gates background maintenance (LeaseSweeper.SweepOnce / RepairOnce),
+// not state mutations: at most one TTL window of skipped sweeps occurs before
+// the next replica takes over. A true control-plane HA path would fence on
+// Redis directly; that is planned, not implemented.
 func (e *RedisLeaderElector) IsLeader() bool {
 	if !e.isLeader.Load() {
 		return false

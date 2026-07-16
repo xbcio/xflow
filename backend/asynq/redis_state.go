@@ -131,6 +131,164 @@ redis.call('SADD', KEYS[4], ARGV[1])
 return nil
 `)
 
+// suspendOrConsumeMultiCollectLua atomically consumes every pre-delivered
+// signal of a multi-signal suspend into the batch hash in one transition.
+// Doing GET→HSET→DEL per signal as separate commands left a window where a
+// crash after DEL removed a signal before the quorum check parked the node,
+// losing the signal. This script collects all ready signals atomically; even
+// if the caller crashes before the quorum check, the signals remain in the
+// batch hash for the next suspend/deliver attempt.
+// KEYS[1] = signal batch hash key, KEYS[2..] = signal keys (one per awaited signal)
+// ARGV[1] = ttl seconds, ARGV[2..] = signal names (parallel to KEYS[2..])
+// Returns a flat array [name, raw, name, raw, ...] of consumed signals.
+var suspendOrConsumeMultiCollectLua = redis.NewScript(`
+local batchKey = KEYS[1]
+local ttl = tonumber(ARGV[1])
+local collected = {}
+for i = 2, #KEYS do
+    local signalKey = KEYS[i]
+    local signalName = ARGV[i]
+    local raw = redis.call('GET', signalKey)
+    if raw then
+        redis.call('DEL', signalKey)
+        redis.call('HSET', batchKey, signalName, raw)
+        table.insert(collected, signalName)
+        table.insert(collected, raw)
+    end
+end
+if #collected > 0 then
+    redis.call('EXPIRE', batchKey, ttl)
+end
+return collected
+`)
+
+// deliverSignalWithOutboxLua atomically consumes an external signal that wakes
+// a suspended waiter and writes the resume delivery intent to the outbox in the
+// same transition. This closes the legacy window where signalOrStoreLua consumed
+// the signal (DEL waiter + SREM suspended) and the engine then enqueued the
+// resume task separately — a crash between them lost the resume permanently.
+//
+// Single-signal: GET waiter; if present, DEL signal+waiter+resumeLock+waiterSpec,
+// SREM suspended, ZREM timeout, and write the resume outbox entry (whose body
+// already carries the payload). If no waiter, SET the signal for later.
+//
+// Multi-signal: HSET the signal into the batch; if quorum reached, build the All
+// payload into the entry body, clean up waiters/spec/batch, and write the entry.
+// If quorum not yet reached, return "" (stored in batch).
+//
+// KEYS[1] = signal key, KEYS[2] = waiter key, KEYS[3] = suspended_nodes SET,
+// KEYS[4] = signal batch hash (multi), KEYS[5] = waiter spec key,
+// KEYS[6] = resume lock key, KEYS[7] = outbox ready ZSET, KEYS[8] = outbox body hash,
+// KEYS[9] = timeout ZSET, KEYS[10..] = multi waiter keys (cleanup on quorum).
+// ARGV[1] = signal data JSON, ARGV[2] = ttl seconds, ARGV[3] = node name,
+// ARGV[4] = outbox entry id, ARGV[5] = outbox entry body JSON,
+// ARGV[6] = now ms, ARGV[7] = multi flag, ARGV[8] = quorum,
+// ARGV[9] = signal name, ARGV[10] = timeout member.
+// Returns nodeName (committed) or "" (stored / quorum not reached).
+var deliverSignalWithOutboxLua = redis.NewScript(`
+local signalKey = KEYS[1]
+local waiterKey = KEYS[2]
+local suspendedKey = KEYS[3]
+local batchKey = KEYS[4]
+local waiterSpecKey = KEYS[5]
+local resumeLockKey = KEYS[6]
+local outboxReady = KEYS[7]
+local outboxBody = KEYS[8]
+local timeoutKey = KEYS[9]
+local dataJSON = ARGV[1]
+local ttl = tonumber(ARGV[2])
+local nodeName = ARGV[3]
+local entryID = ARGV[4]
+local entryBody = ARGV[5]
+local nowMs = tonumber(ARGV[6])
+local multi = tonumber(ARGV[7]) == 1
+local quorum = tonumber(ARGV[8])
+local signalName = ARGV[9]
+local timeoutMember = ARGV[10]
+
+local waiter = redis.call('GET', waiterKey)
+if not waiter then
+    redis.call('SET', signalKey, dataJSON, 'EX', ttl)
+    return ''
+end
+
+local writeOutbox = function(body)
+    redis.call('HSETNX', outboxBody, entryID, body)
+    redis.call('ZADD', outboxReady, nowMs, entryID)
+    redis.call('EXPIRE', outboxReady, ttl)
+    redis.call('EXPIRE', outboxBody, ttl)
+end
+
+if multi then
+    redis.call('HSET', batchKey, signalName, dataJSON)
+    redis.call('EXPIRE', batchKey, ttl)
+    local values = redis.call('HGETALL', batchKey)
+    if #values / 2 < quorum then
+        return ''
+    end
+    local all = {}
+    for i = 1, #values, 2 do
+        all[values[i]] = cjson.decode(values[i + 1])
+    end
+    local entry = cjson.decode(entryBody)
+    entry.task.payload.All = all
+    for i = 10, #KEYS do
+        redis.call('DEL', KEYS[i])
+    end
+    redis.call('DEL', waiterSpecKey, batchKey, resumeLockKey)
+    redis.call('SREM', suspendedKey, nodeName)
+    if timeoutMember ~= '' then
+        redis.call('ZREM', timeoutKey, timeoutMember)
+    end
+    writeOutbox(cjson.encode(entry))
+    return nodeName
+end
+
+redis.call('DEL', signalKey, waiterKey, resumeLockKey, waiterSpecKey)
+redis.call('SREM', suspendedKey, nodeName)
+if timeoutMember ~= '' then
+    redis.call('ZREM', timeoutKey, timeoutMember)
+end
+writeOutbox(entryBody)
+return nodeName
+`)
+
+// updateExecutionStatusLua atomically compares-and-sets the execution status
+// with cancel-aware fencing. It prevents a cyclic completion (or any
+// post-cancel transition) from overwriting a status that Cancel already drove
+// to a terminal or canceling state:
+//
+//   - A terminal status (success/failed/canceled/timeout) is never overwritten.
+//   - canceling blocks any non-canceled write, so a concurrent completeExecution
+//     (→ success/failed) cannot stomp the in-flight cancellation.
+//   - canceled→canceled and running→canceling/canceled proceed normally.
+//
+// KEYS[1] = status key, KEYS[2] = error key (may be empty to skip error write)
+// ARGV[1] = new status, ARGV[2] = error message ("" = none), ARGV[3] = ttl seconds
+// Returns 1 (applied) or 0 (skipped: fenced by a terminal/canceling status).
+var updateExecutionStatusLua = redis.NewScript(`
+local terminal = function(v)
+    return v == 'success' or v == 'failed' or v == 'canceled' or v == 'timeout'
+end
+local current = redis.call('GET', KEYS[1])
+if current then
+    if terminal(current) then
+        return 0
+    end
+    if current == 'canceling' and ARGV[1] ~= 'canceled' then
+        return 0
+    end
+end
+local ttl = tonumber(ARGV[3])
+redis.call('SET', KEYS[1], ARGV[1], 'EX', ttl)
+if ARGV[2] ~= '' then
+    if KEYS[2] ~= '' then
+        redis.call('SET', KEYS[2], ARGV[2], 'EX', ttl)
+    end
+end
+return 1
+`)
+
 // signalOrStoreLua atomically wakes a suspended waiter or stores the signal.
 // KEYS[1] = signal key, KEYS[2] = waiter key, KEYS[3] = suspended_nodes SET
 // ARGV[1] = signal payload JSON, ARGV[2] = ttl seconds
@@ -378,22 +536,10 @@ if not locked then return 0 end
 return 1
 `)
 
-// resetNodeForRetryLua rolls a Running node back to Pending and clears the
-// lease index as part of that same idempotent transition.
-// KEYS[1] = node status key, KEYS[2] = node meta hash, KEYS[3] = lease expiry ZSET
-// ARGV[1] = ttl seconds, ARGV[2] = lease expiry ZSET member
-// Returns 1 (reset) or 0 (no-op).
-var resetNodeForRetryLua = redis.NewScript(`
-local status = redis.call('GET', KEYS[1])
-if status ~= 'running' and status ~= 'committing' and status ~= 'waiting' then
-    return 0
-end
-redis.call('SET', KEYS[1], 'pending', 'EX', tonumber(ARGV[1]))
-redis.call('HSET', KEYS[2], 'lease_token', '', 'lease_id', '', 'lease_issued_at_ms', '0', 'lease_ttl_ms', '0', 'lease_deadline_ms', '0', 'lease_task_type', '0', 'lease_payload', '')
-redis.call('EXPIRE', KEYS[2], tonumber(ARGV[1]))
-redis.call('ZREM', KEYS[3], ARGV[2])
-return 1
-`)
+// resetNodeForRetryLua and the unfenced ResetNodeForRetry method were removed:
+// the engine retry path uses the fenced ResetNodeForRetryWithOutbox
+// (AtomicStateStore) instead. The unfenced transition risked overwriting an
+// active lease owned by another worker.
 
 // revokeLeaseLua atomically verifies and clears a still-current Running or
 // Committing lease, including its expiry-index member.
@@ -610,6 +756,15 @@ func (s *redisState) CreateExecutionWithOutbox(ctx context.Context, e *engine.Ex
 	return s.createExecution(ctx, e, entries)
 }
 
+// createExecution persists the execution, its outbox entries, and the SQL audit
+// projection. The Redis pipeline (including outbox entries scored available-now)
+// commits before the SQL write; on SQL failure, cleanupCreatedExecution deletes
+// the Redis keys including the outbox. There is a narrow (SQL-call-duration)
+// window where the outbox dispatcher could pick up an entry and enqueue an asynq
+// task that references an execution about to be cleaned up — that orphan task
+// fails on dequeue and is retried/dead-lettered by asynq (self-healing, not
+// data corruption). Keeping the outbox in the same pipeline is intentional: it
+// is the common (no-SQL-failure) path that must never strand a root task.
 func (s *redisState) createExecution(ctx context.Context, e *engine.ExecutionSnapshot, entries []engine.OutboxEntry) error {
 	ttl := s.execTTL
 
@@ -805,31 +960,41 @@ func buildExecutionRecord(ctx context.Context, e *engine.ExecutionSnapshot, now 
 
 func (s *redisState) UpdateExecutionStatus(ctx context.Context, id types.ExecutionID, status types.ExecutionStatus, errMsg string) error {
 	ttl := s.getExecTTL(id)
-	pipe := s.rdb.Pipeline()
-	keys := []string{execKey(id, "status")}
-	pipe.Set(ctx, execKey(id, "status"), string(status), ttl)
+	// Compare-and-set with cancel-aware fencing: a terminal or canceling status
+	// blocks non-canceled overwrites, so a concurrent cyclic completeExecution
+	// cannot stomp an in-flight Cancel.
+	errKey := ""
 	if errMsg != "" {
-		pipe.Set(ctx, execKey(id, "error"), errMsg, ttl)
-		keys = append(keys, execKey(id, "error"))
+		errKey = execKey(id, "error")
 	}
-	if _, err := pipe.Exec(ctx); err != nil {
+	applied, err := updateExecutionStatusLua.Run(ctx, s.rdb,
+		[]string{execKey(id, "status"), errKey},
+		string(status), errMsg, int(ttl.Seconds()),
+	).Int64()
+	if err != nil && err != redis.Nil {
 		return fmt.Errorf("update execution status %q: %w", id, err)
 	}
+	keys := []string{execKey(id, "status")}
+	if errKey != "" {
+		keys = append(keys, errKey)
+	}
 	// Clean up timeout ZSET entries when execution is canceled.
-	if status == types.ExecutionStatusCanceled {
+	if applied == 1 && status == types.ExecutionStatusCanceled {
 		s.cleanupOnCancel(ctx, id)
 	}
-	if types.IsTerminalExecutionStatus(status) {
+	if applied == 1 && types.IsTerminalExecutionStatus(status) {
 		if err := s.shortenTransientCompletionTTL(ctx, id, keys...); err != nil {
 			return err
 		}
 		// Redis persists the graph for later inspection/reload; the in-process
 		// cache and per-execution TTL override must not survive a terminal state.
 		s.evictExecutionCaches(id)
-	} else if err := s.refreshTransientTTL(ctx, id, keys...); err != nil {
-		return err
+	} else if applied == 1 {
+		if err := s.refreshTransientTTL(ctx, id, keys...); err != nil {
+			return err
+		}
 	}
-	if s.db != nil && !s.transient {
+	if applied == 1 && s.db != nil && !s.transient {
 		s.auditWrite(ctx, "update_execution_status", func(ctx context.Context) error {
 			return s.db.UpdateExecutionStatus(ctx, id, status, errMsg)
 		})
@@ -923,6 +1088,14 @@ func (s *redisState) LoadGraph(ctx context.Context, id types.ExecutionID) (*grap
 // NodeStore
 // ---------------------------------------------------------------------------
 
+// UpsertNode writes a node snapshot. Unlike the fenced AcquireTaskLease (which
+// performs status + meta + lease-index in one Lua transition), this path writes
+// status (upsertNodeLua), then meta (HSet), then the lease index (ZAdd) as
+// separate commands — a crash between them can leave the meta hash stale
+// relative to the status key. This is the snapshot/recovery path, not the
+// active lease-acquisition path, and the LeaseSweeper self-heals the divergence
+// by pruning lease-index entries whose meta lacks a token. Callers that need a
+// fenced transition must use AcquireTaskLease / CommitNode instead.
 func (s *redisState) UpsertNode(ctx context.Context, n *engine.NodeSnapshot) error {
 	key := nodeStatusKey(n.ExecutionID, n.Name)
 	outKey := outputKey(n.ExecutionID, n.Name)
@@ -1222,21 +1395,6 @@ func (s *redisState) AcquireTaskLease(ctx context.Context, lease *engine.TaskLea
 	return prev, true, nil
 }
 
-func (s *redisState) ResetNodeForRetry(ctx context.Context, id types.ExecutionID, name string) error {
-	ttl := s.getExecTTL(id)
-	_, err := resetNodeForRetryLua.Run(ctx, s.rdb,
-		[]string{nodeStatusKey(id, name), nodeMetaKey(id, name), leaseExpiryZSetKey(id)},
-		int(ttl.Seconds()), leaseExpiryMember(id, name),
-	).Int64()
-	if err != nil && err != redis.Nil {
-		return fmt.Errorf("reset node for retry %q/%q: %w", id, name, err)
-	}
-	if err := s.refreshTransientTTL(ctx, id, nodeStatusKey(id, name), nodeMetaKey(id, name), leaseExpiryZSetKey(id)); err != nil {
-		return err
-	}
-	return nil
-}
-
 // leaseIndexBatchLimit caps a single ListExpiredLeases scan. Small enough that
 // the sweeper stays quick under heavy backlog; the sweeper re-polls until the
 // list drains, so this is not a coverage cap, only a per-call bound.
@@ -1527,7 +1685,9 @@ func (s *redisState) SuspendTaskLease(ctx context.Context, lease *engine.TaskLea
 	if err := s.refreshTransientTTL(ctx, lease.Task.ExecutionID, keys...); err != nil {
 		return nil, false, err
 	}
-	s.extendExecTTL(ctx, lease.Task.ExecutionID, lease.Task.NodeName, s.suspendTTL(lease.Task.ExecutionID, spec))
+	if err := s.extendExecTTL(ctx, lease.Task.ExecutionID, lease.Task.NodeName, s.suspendTTL(lease.Task.ExecutionID, spec)); err != nil {
+		return nil, false, err
+	}
 	name := redisResultString(result[1])
 	raw := redisResultString(result[2])
 	if name == "" || raw == "" {
@@ -1657,13 +1817,17 @@ func (s *redisState) SuspendOrConsume(ctx context.Context, id types.ExecutionID,
 	// Node is parked — register timeout in ZSET if spec has a timeout.
 	if spec.Timeout > 0 {
 		member := timeoutMember(id, name)
-		s.rdb.ZAdd(ctx, timeoutZSetKey, redis.Z{
+		if err := s.rdb.ZAdd(ctx, timeoutZSetKey, redis.Z{
 			Score:  float64(time.Now().Add(spec.Timeout).Unix()),
 			Member: member,
-		})
+		}).Err(); err != nil {
+			return nil, fmt.Errorf("register suspend timeout %q/%q: %w", id, name, err)
+		}
 	}
 	// Extend TTL to prevent key expiry during suspension.
-	s.extendExecTTL(ctx, id, name, s.suspendTTL(id, spec))
+	if err := s.extendExecTTL(ctx, id, name, s.suspendTTL(id, spec)); err != nil {
+		return nil, err
+	}
 	return nil, nil
 }
 
@@ -1671,19 +1835,26 @@ func (s *redisState) suspendOrConsumeMulti(ctx context.Context, id types.Executi
 	ttl := s.suspendTTL(id, spec)
 	batchKey := signalBatchKey(id, name)
 
+	// Atomically collect every pre-delivered signal into the batch hash. The
+	// collection (GET→HSET→DEL per signal) runs in one Lua transition so a crash
+	// cannot delete a signal before the quorum check parks the node.
+	keys := []string{batchKey}
+	args := []any{int(ttl.Seconds())}
 	for _, sigName := range spec.Signals {
-		raw, err := s.rdb.Get(ctx, signalKey(id, sigName)).Result()
-		if err != nil && err != redis.Nil {
-			return nil, fmt.Errorf("multi-signal get %q: %w", sigName, err)
-		}
-		if raw == "" {
-			continue
-		}
-		if err := s.rdb.HSet(ctx, batchKey, sigName, raw).Err(); err != nil {
-			return nil, fmt.Errorf("multi-signal collect %q: %w", sigName, err)
-		}
-		_ = s.rdb.Del(ctx, signalKey(id, sigName)).Err()
-		payload, ready, err := s.multiSignalPayload(ctx, id, name, sigName, raw, spec)
+		keys = append(keys, signalKey(id, sigName))
+		args = append(args, sigName)
+	}
+	collected, err := suspendOrConsumeMultiCollectLua.Run(ctx, s.rdb, keys, args...).StringSlice()
+	if err != nil && err != redis.Nil {
+		return nil, fmt.Errorf("suspend or consume multi collect %q/%q: %w", id, name, err)
+	}
+
+	// Evaluate quorum using the batch hash populated atomically above. Use the
+	// last collected signal as the payload's Data field when quorum is reached.
+	if len(collected) > 0 {
+		lastName := collected[len(collected)-2]
+		lastRaw := collected[len(collected)-1]
+		payload, ready, err := s.multiSignalPayload(ctx, id, name, lastName, lastRaw, spec)
 		if err != nil {
 			return nil, err
 		}
@@ -1711,12 +1882,16 @@ func (s *redisState) suspendOrConsumeMulti(ctx context.Context, id types.Executi
 		return nil, fmt.Errorf("park multi-signal waiter: %w", err)
 	}
 	if spec.Timeout > 0 {
-		s.rdb.ZAdd(ctx, timeoutZSetKey, redis.Z{
+		if err := s.rdb.ZAdd(ctx, timeoutZSetKey, redis.Z{
 			Score:  float64(time.Now().Add(spec.Timeout).Unix()),
 			Member: timeoutMember(id, name),
-		})
+		}).Err(); err != nil {
+			return nil, fmt.Errorf("register multi-signal timeout %q/%q: %w", id, name, err)
+		}
 	}
-	s.extendExecTTL(ctx, id, name, ttl)
+	if err := s.extendExecTTL(ctx, id, name, ttl); err != nil {
+		return nil, err
+	}
 	return nil, nil
 }
 
@@ -1851,6 +2026,98 @@ func (s *redisState) cleanupOnResume(ctx context.Context, id types.ExecutionID, 
 	s.rdb.ZRem(ctx, timeoutZSetKey, timeoutMember(id, nodeName))
 }
 
+// PeekResumeTarget returns the node name suspended and waiting for signalName,
+// or "" when no waiter exists. It does not consume the signal.
+func (s *redisState) PeekResumeTarget(ctx context.Context, id types.ExecutionID, signalName string) (string, error) {
+	waiter, err := s.rdb.Get(ctx, waiterKey(id, signalName)).Result()
+	if err == redis.Nil {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("peek waiter %q/%q: %w", id, signalName, err)
+	}
+	return waiter, nil
+}
+
+// DeliverSignalWithOutbox atomically consumes a signal and writes the resume
+// delivery intent to the outbox in one Lua transition. See
+// deliverSignalWithOutboxLua for the single/multi-signal semantics.
+func (s *redisState) DeliverSignalWithOutbox(ctx context.Context, id types.ExecutionID, signalName string, data map[string]any, intent engine.ResumeIntent) (string, *types.SignalPayload, bool, error) {
+	dataJSON, _ := json.Marshal(data)
+	ttl := s.ttlSec()
+	nowMs := time.Now().UTC().UnixMilli()
+	timeoutMemberStr := ""
+	if intent.NodeName != "" {
+		timeoutMemberStr = timeoutMember(id, intent.NodeName)
+	}
+
+	var (
+		spec      *types.SuspendSpec
+		specErr   error
+		entryID   string
+		entryBody string
+	)
+	if intent.NodeName != "" {
+		spec, specErr = s.loadWaiterSpec(ctx, id, intent.NodeName)
+		if specErr != nil {
+			return "", nil, false, fmt.Errorf("load waiter spec for signal %q/%q: %w", id, intent.NodeName, specErr)
+		}
+		payload := &types.SignalPayload{Triggered: types.SignalReceived, Name: signalName, Data: data}
+		task := engine.Task{
+			ExecutionID:  id,
+			NodeName:     intent.NodeName,
+			NodeIdx:      intent.NodeIdx,
+			Type:         engine.TaskTypeNodeResume,
+			Payload:      payload,
+			ActivationID: intent.ActivationID,
+			AutoDepth:    intent.AutoDepth,
+		}
+		entryID = fmt.Sprintf("resume/%s/%s/%d/signal/%s", id, intent.NodeName, intent.ActivationID, signalName)
+		body, err := marshalRedisOutboxEntry(entryID, task, time.Now().UTC())
+		if err != nil {
+			return "", nil, false, fmt.Errorf("marshal resume outbox %q/%q: %w", id, intent.NodeName, err)
+		}
+		entryBody = body
+	}
+
+	multi := 0
+	if spec != nil && spec.Mode == types.ModeMultiSignal {
+		multi = 1
+	}
+	quorum := signalQuorum(spec)
+
+	keys := []string{
+		signalKey(id, signalName),
+		waiterKey(id, signalName),
+		suspendedNodesKey(id),
+		signalBatchKey(id, intent.NodeName),
+		waiterSpecKey(id, intent.NodeName),
+		resumeLockKey(id, intent.NodeName),
+		outboxReadyKey(id),
+		outboxBodyKey(id),
+		timeoutZSetKey,
+	}
+	if multi == 1 {
+		for _, sig := range spec.Signals {
+			keys = append(keys, waiterKey(id, sig))
+		}
+	}
+	args := []any{
+		string(dataJSON), int(ttl), intent.NodeName,
+		entryID, entryBody, nowMs, multi, quorum, signalName, timeoutMemberStr,
+	}
+
+	result, err := deliverSignalWithOutboxLua.Run(ctx, s.rdb, keys, args...).Result()
+	if err != nil && err != redis.Nil {
+		return "", nil, false, fmt.Errorf("deliver signal with outbox %q/%q: %w", id, signalName, err)
+	}
+	nodeName, _ := result.(string)
+	if nodeName == "" {
+		return "", nil, false, nil
+	}
+	return nodeName, nil, true, nil
+}
+
 func (s *redisState) AcquireResumeLock(ctx context.Context, id types.ExecutionID, name string) (bool, error) {
 	result, err := resumeNodeLua.Run(ctx, s.rdb,
 		[]string{resumeLockKey(id, name)},
@@ -1905,14 +2172,20 @@ func (s *redisState) ResuspendAtomic(ctx context.Context, id types.ExecutionID, 
 	// Node is re-parked — register timeout in ZSET if spec has a timeout.
 	if spec.Timeout > 0 {
 		// Remove any old timeout entry first (signal name may have changed).
-		s.rdb.ZRem(ctx, timeoutZSetKey, timeoutMember(id, nodeName))
-		s.rdb.ZAdd(ctx, timeoutZSetKey, redis.Z{
+		if err := s.rdb.ZRem(ctx, timeoutZSetKey, timeoutMember(id, nodeName)).Err(); err != nil && err != redis.Nil {
+			return nil, fmt.Errorf("clear resuspend timeout %q/%q: %w", id, nodeName, err)
+		}
+		if err := s.rdb.ZAdd(ctx, timeoutZSetKey, redis.Z{
 			Score:  float64(time.Now().Add(spec.Timeout).Unix()),
 			Member: timeoutMember(id, nodeName),
-		})
+		}).Err(); err != nil {
+			return nil, fmt.Errorf("register resuspend timeout %q/%q: %w", id, nodeName, err)
+		}
 	}
 	// Extend TTL to prevent key expiry during suspension.
-	s.extendExecTTL(ctx, id, nodeName, s.suspendTTL(id, spec))
+	if err := s.extendExecTTL(ctx, id, nodeName, s.suspendTTL(id, spec)); err != nil {
+		return nil, err
+	}
 	return nil, nil
 }
 
@@ -1979,8 +2252,11 @@ func (s *redisState) GetOutput(ctx context.Context, id types.ExecutionID, name s
 
 // extendExecTTL renews the TTL on all keys related to an execution and the
 // specific suspended node. Called when a node is parked (suspended) to prevent
-// keys from expiring while waiting for a signal.
-func (s *redisState) extendExecTTL(ctx context.Context, id types.ExecutionID, nodeName string, ttl time.Duration) {
+// keys from expiring while waiting for a signal. A failure here is surfaced
+// rather than swallowed: if the TTL is not extended the execution/node keys may
+// expire while a node is suspended, causing the eventual resume to silently
+// target missing state.
+func (s *redisState) extendExecTTL(ctx context.Context, id types.ExecutionID, nodeName string, ttl time.Duration) error {
 	pipe := s.rdb.Pipeline()
 	prefix := fmt.Sprintf("xflow:exec:{%s}", id)
 	pipe.Expire(ctx, prefix+":status", ttl)
@@ -1992,7 +2268,10 @@ func (s *redisState) extendExecTTL(ctx context.Context, id types.ExecutionID, no
 	pipe.Expire(ctx, prefix+":node:"+nodeName+":status", ttl)
 	pipe.Expire(ctx, prefix+":output:"+nodeName, ttl)
 	pipe.Expire(ctx, prefix+":suspended_nodes", ttl)
-	_, _ = pipe.Exec(ctx)
+	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
+		return fmt.Errorf("extend exec ttl %q/%q: %w", id, nodeName, err)
+	}
+	return nil
 }
 
 // suspendTTL returns the TTL to use when a node is suspended.

@@ -216,6 +216,8 @@ func (s *redisState) SuspendTaskLeaseWithOutbox(ctx context.Context, lease *engi
 	if err := s.refreshTransientTTL(ctx, lease.Task.ExecutionID, keys...); err != nil {
 		return false, err
 	}
-	s.extendExecTTL(ctx, lease.Task.ExecutionID, lease.Task.NodeName, s.suspendTTL(lease.Task.ExecutionID, spec))
+	if err := s.extendExecTTL(ctx, lease.Task.ExecutionID, lease.Task.NodeName, s.suspendTTL(lease.Task.ExecutionID, spec)); err != nil {
+		return false, err
+	}
 	return true, nil
 }

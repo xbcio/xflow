@@ -69,7 +69,10 @@ func (c *auditCounters) snapshot() AuditStats {
 // returns an error: by contract the audit trail is best-effort and Redis is
 // authoritative. Callers that need transactional rollback (e.g.
 // CreateExecution) must NOT use auditWrite — they keep their explicit
-// error-path handling.
+// error-path handling. A failed audit is permanently divergent from Redis
+// until an out-of-band reconcile runs; the `xflow-server audit reconcile` CLI
+// for this is planned, not yet implemented — until then, divergence surfaces
+// only via the audit-failed counters/observer.
 func (s *redisState) auditWrite(ctx context.Context, op string, fn func(context.Context) error) {
 	if s.db == nil {
 		return

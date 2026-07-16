@@ -17,6 +17,12 @@ import (
 // Members are "executionID\x00nodeName", scores are Unix timestamps.
 const timeoutZSetKey = "xflow:timeouts"
 
+// timeoutRetryBackoff is applied when delivering a timeout signal fails. The
+// member is re-added to the ZSET with this delay so the next poll retries
+// delivery instead of permanently dropping the timeout (which would leave the
+// suspended node stranded until execution TTL expiry).
+const timeoutRetryBackoff = 5 * time.Second
+
 // popExpiredLua atomically pops up to ARGV[2] members whose score <= ARGV[1].
 var popExpiredLua = redis.NewScript(`
 local expired = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1], 'LIMIT', 0, ARGV[2])
@@ -101,7 +107,21 @@ func (m *TimeoutMonitor) processTimeouts(now time.Time) {
 		}
 
 		// Directly enqueue a timeout resume task, bypassing signal name matching.
-		_ = m.engine.TimeoutNode(ctx, execID, nodeName)
+		// On failure, re-add the member with a short backoff so the next poll
+		// retries delivery instead of dropping the timeout permanently — a dropped
+		// timeout would strand the suspended node until execution TTL expiry.
+		if err := m.engine.TimeoutNode(ctx, execID, nodeName); err != nil {
+			retryAt := now.Add(timeoutRetryBackoff).Unix()
+			if requeueErr := m.rdb.ZAdd(ctx, timeoutZSetKey, redis.Z{
+				Score:  float64(retryAt),
+				Member: member,
+			}).Err(); requeueErr != nil && m.logger != nil {
+				m.logger.Error("timeout monitor: requeue failed", "execution_id", execID, "node", nodeName, "error", requeueErr)
+			}
+			if m.logger != nil {
+				m.logger.Warnf("timeout monitor: delivery failed, requeued", "execution_id", execID, "node", nodeName, "retry_at", retryAt, "error", err)
+			}
+		}
 	}
 }
 
