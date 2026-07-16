@@ -4,12 +4,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
 	"github.com/xbcio/xflow/service/protocol"
 )
+
+// defaultRunnerShutdownTimeout bounds how long Run waits for in-flight workers
+// to finish after the run context is cancelled. Workers observe the cancelled
+// context and abort their current handler, so this is a safety upper bound.
+const defaultRunnerShutdownTimeout = 10 * time.Second
 
 type ProtocolClient interface {
 	Register(ctx context.Context, req protocol.RegisterRunnerRequest) (protocol.RegisterRunnerResponse, error)
@@ -50,6 +57,11 @@ func New(client ProtocolClient, registry engine.HandlerRegistry, config Config) 
 	}
 }
 
+// Run drives register → poll → execute → report with a pool of Concurrency
+// workers and an independent heartbeat goroutine. Heartbeats are delivered on
+// their own ticker so a long-running handler cannot starve them (which would
+// otherwise let the server's lease sweeper reclaim and re-execute the task).
+// On any transport error Run returns and the caller (cmd/runner) reconnects.
 func (r *Runner) Run(ctx context.Context) error {
 	registerResp, err := r.client.Register(ctx, protocol.RegisterRunnerRequest{
 		RunnerID:     r.config.RunnerID,
@@ -62,33 +74,80 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 	sessionID := registerResp.SessionID
 
-	inFlight := 0
-	if err := r.heartbeat(ctx, sessionID, inFlight); err != nil {
-		return runContextError(ctx, err)
+	var inFlight atomic.Int32
+	leaseCh := make(chan *engine.TaskLease, r.config.Concurrency)
+	var errOnce sync.Once
+	errCh := make(chan error, 1)
+	signalError := func(err error) {
+		errOnce.Do(func() {
+			select {
+			case errCh <- err:
+			default:
+			}
+		})
 	}
 
-	ticker := time.NewTicker(r.config.HeartbeatInterval)
-	defer ticker.Stop()
+	// Independent heartbeat goroutine — survives while workers are blocked on
+	// long handlers, reflecting the true in-flight count to the server.
+	heartbeatCtx, hbCancel := context.WithCancel(ctx)
+	go r.heartbeatLoop(heartbeatCtx, sessionID, &inFlight, signalError)
 
+	// Worker pool of Concurrency goroutines executing leases in parallel.
+	var wg sync.WaitGroup
+	for i := 0; i < r.config.Concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r.workerLoop(ctx, sessionID, leaseCh, &inFlight, signalError)
+		}()
+	}
+
+	pollErr := r.pollLoop(ctx, sessionID, leaseCh, &inFlight)
+	hbCancel()
+
+	// Graceful shutdown: stop polling, then wait (bounded) for workers to
+	// finish in-flight tasks. Workers see ctx cancellation and exit.
+	waitDone := make(chan struct{})
+	go func() { wg.Wait(); close(waitDone) }()
+	select {
+	case <-waitDone:
+	case <-time.After(defaultRunnerShutdownTimeout):
+	}
+
+	if pollErr != nil {
+		return pollErr
+	}
+	select {
+	case err := <-errCh:
+		return err
+	default:
+	}
+	return runContextError(ctx, ctx.Err())
+}
+
+// pollLoop claims leases at the rate the worker pool can absorb them. Capacity
+// is Concurrency minus the current in-flight count, so the server is never told
+// more capacity than the runner can actually run in parallel.
+func (r *Runner) pollLoop(ctx context.Context, sessionID string, leaseCh chan<- *engine.TaskLease, inFlight *atomic.Int32) error {
 	for {
 		select {
 		case <-ctx.Done():
-			if errors.Is(ctx.Err(), context.Canceled) {
-				return nil
-			}
-			return ctx.Err()
-		case <-ticker.C:
-			if err := r.heartbeat(ctx, sessionID, inFlight); err != nil {
-				return runContextError(ctx, err)
-			}
-			continue
+			return nil
 		default:
 		}
-
+		capacity := r.config.Concurrency - int(inFlight.Load())
+		if capacity <= 0 {
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(r.config.PollWait):
+			}
+			continue
+		}
 		resp, err := r.client.Poll(ctx, protocol.PollTaskRequest{
 			RunnerID:     r.config.RunnerID,
 			SessionID:    sessionID,
-			Capacity:     r.config.Concurrency - inFlight,
+			Capacity:     capacity,
 			Capabilities: r.config.Capabilities,
 		})
 		if err != nil {
@@ -104,23 +163,74 @@ func (r *Runner) Run(ctx context.Context) error {
 			}
 			continue
 		}
+		inFlight.Add(1)
+		select {
+		case leaseCh <- resp.Lease:
+		case <-ctx.Done():
+			inFlight.Add(-1)
+			return nil
+		}
+	}
+}
 
-		result, execErr := r.executor.Execute(ctx, resp.Lease)
-		if execErr != nil {
-			result = engine.TaskResult{Error: execErr}
+// workerLoop drains leaseCh and executes one lease at a time per worker.
+func (r *Runner) workerLoop(ctx context.Context, sessionID string, leaseCh <-chan *engine.TaskLease, inFlight *atomic.Int32, signalError func(error)) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case lease := <-leaseCh:
+			if lease == nil {
+				return
+			}
+			r.executeAndReport(ctx, sessionID, lease, inFlight, signalError)
 		}
-		reportResp, err := r.client.ReportResult(ctx, protocol.ReportResultRequest{
-			RunnerID:  r.config.RunnerID,
-			SessionID: sessionID,
-			Lease:     resp.Lease,
-			Result:    result,
-		})
-		inFlight = 0
-		if err != nil {
-			return runContextError(ctx, err)
-		}
-		if !reportResp.Accepted {
-			return fmt.Errorf("task result rejected: %s", reportResp.Error)
+	}
+}
+
+// executeAndReport runs the handler and reports the result. The report uses a
+// background context so that run cancellation (e.g. SIGTERM) does not discard a
+// computed result the server still needs. inFlight is decremented on exit.
+func (r *Runner) executeAndReport(ctx context.Context, sessionID string, lease *engine.TaskLease, inFlight *atomic.Int32, signalError func(error)) {
+	defer inFlight.Add(-1)
+	result, execErr := r.executor.Execute(ctx, lease)
+	if execErr != nil {
+		result = engine.TaskResult{Error: execErr}
+	}
+	reportResp, err := r.client.ReportResult(context.Background(), protocol.ReportResultRequest{
+		RunnerID:  r.config.RunnerID,
+		SessionID: sessionID,
+		Lease:     lease,
+		Result:    result,
+	})
+	if err != nil {
+		signalError(runContextError(ctx, err))
+		return
+	}
+	if !reportResp.Accepted {
+		signalError(fmt.Errorf("task result rejected: %s", reportResp.Error))
+	}
+}
+
+// heartbeatLoop sends heartbeats on its own ticker, independent of task
+// execution. A heartbeat failure signals the run to exit so the caller can
+// reconnect.
+func (r *Runner) heartbeatLoop(ctx context.Context, sessionID string, inFlight *atomic.Int32, signalError func(error)) {
+	if err := r.heartbeat(ctx, sessionID, int(inFlight.Load())); err != nil {
+		signalError(err)
+		return
+	}
+	ticker := time.NewTicker(r.config.HeartbeatInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := r.heartbeat(ctx, sessionID, int(inFlight.Load())); err != nil {
+				signalError(err)
+				return
+			}
 		}
 	}
 }
