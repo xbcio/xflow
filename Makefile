@@ -113,4 +113,7 @@ test-integration:
 
 test-perf:
 	@set -a; [ -f test/env/.env ] && . ./test/env/.env; set +a; \
+	: "$${XFLOW_TEST_REDIS_ADDR:=localhost:$${REDIS_PORT:-6379}}"; \
+	: "$${XFLOW_TEST_KAFKA_BROKERS:=localhost:$${KAFKA_PORT:-9092}}"; \
+	export XFLOW_TEST_REDIS_ADDR XFLOW_TEST_KAFKA_BROKERS; \
 	go test -tags=perf -bench=. -benchtime=2s -timeout 30m ./test/perf/...

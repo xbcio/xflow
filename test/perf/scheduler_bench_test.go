@@ -250,6 +250,61 @@ func benchFullRoundtrip(b *testing.B, wf *xflow.WorkflowBuilder) {
 	}
 }
 
+// BenchmarkSchedulerCompileTopologyMatrix records the pure compiler cost for
+// the release-gate topology matrix. Each graph contains exactly the labelled
+// number of workflow nodes.
+func BenchmarkSchedulerCompileTopologyMatrix(b *testing.B) {
+	topologies := []struct {
+		name  string
+		build func(int) *types.WorkflowDef
+	}{
+		{name: "linear", build: linearChainDef},
+		{name: "fan-out", build: fanOutDef},
+		{name: "fan-in", build: fanInOutDef},
+	}
+
+	for _, topology := range topologies {
+		topology := topology
+		for _, nodes := range []int{20, 100, 1000} {
+			nodes := nodes
+			b.Run(fmt.Sprintf("%s/nodes=%d", topology.name, nodes), func(b *testing.B) {
+				def := topology.build(nodes)
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					if _, err := graph.Compile(def); err != nil {
+						b.Fatal(err)
+					}
+				}
+			})
+		}
+	}
+}
+
+// BenchmarkSchedulerRoundTripTopologyMatrix records the in-memory scheduler
+// path for the same release-gate matrix. The builders include one Start node,
+// so passing nodes-1 preserves the labelled total workflow-node count.
+func BenchmarkSchedulerRoundTripTopologyMatrix(b *testing.B) {
+	topologies := []struct {
+		name  string
+		build func(int) *xflow.WorkflowBuilder
+	}{
+		{name: "linear", build: func(nodes int) *xflow.WorkflowBuilder { return buildLinearChainWF(nodes - 1) }},
+		{name: "fan-out", build: func(nodes int) *xflow.WorkflowBuilder { return buildFanOutWF(nodes - 1) }},
+		{name: "fan-in", build: func(nodes int) *xflow.WorkflowBuilder { return buildFanInOutWF(nodes - 1) }},
+	}
+
+	for _, topology := range topologies {
+		topology := topology
+		for _, nodes := range []int{20, 100, 1000} {
+			nodes := nodes
+			b.Run(fmt.Sprintf("%s/nodes=%d", topology.name, nodes), func(b *testing.B) {
+				benchFullRoundtrip(b, topology.build(nodes))
+			})
+		}
+	}
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 func nodeName(i int) string {
