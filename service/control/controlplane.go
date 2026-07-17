@@ -14,6 +14,7 @@ import (
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/observability/metrics"
+	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/service/protocol/runnerpb"
 )
@@ -38,6 +39,10 @@ type Config struct {
 	// Metrics, when set, wires Prometheus observers into engine hooks, the
 	// dispatcher, auth decisions, and the LeaseSweeper. Optional.
 	Metrics *metrics.Metrics
+	// Tracer, when set, enables distributed tracing for the runner protocol
+	// dispatch and commit path and injects W3C carriers into TaskLease.
+	// Nil means no-op tracing (NoopTracer).
+	Tracer tracing.Tracer
 	// PollWait overrides the long-poll wait duration returned to runners when
 	// no task is available. Zero means the Server/GRPCServer default (1s).
 	PollWait time.Duration
@@ -134,6 +139,9 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 	if cfg.Metrics != nil {
 		serverOpts = append(serverOpts, WithAuthObserver(metrics.NewAuthMetrics(cfg.Metrics)))
 	}
+	if cfg.Tracer != nil {
+		serverOpts = append(serverOpts, WithTracer(cfg.Tracer))
+	}
 	if cfg.PollWait > 0 {
 		serverOpts = append(serverOpts, WithHTTPPollWait(cfg.PollWait))
 	}
@@ -148,6 +156,9 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 	}
 	if cfg.Metrics != nil {
 		grpcOpts = append(grpcOpts, WithGRPCAuthObserver(metrics.NewAuthMetrics(cfg.Metrics)))
+	}
+	if cfg.Tracer != nil {
+		grpcOpts = append(grpcOpts, WithGRPCTracer(cfg.Tracer))
 	}
 	if cfg.PollWait > 0 {
 		grpcOpts = append(grpcOpts, WithGRPCPollWait(cfg.PollWait))

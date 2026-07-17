@@ -12,6 +12,7 @@ import (
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/execution"
+	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/types"
 )
@@ -78,6 +79,18 @@ func WithAuthObserver(observer AuthObserver) ServerOption {
 	return func(s *Server) { s.core.authObserver = observer }
 }
 
+// WithTracer installs a distributed tracing implementation on the control
+// plane's runner-protocol server. The tracer instruments task dispatch and
+// commit spans and injects W3C trace carriers into TaskLease so runners can
+// create properly-parented execution spans. Default is NoopTracer.
+func WithTracer(t tracing.Tracer) ServerOption {
+	return func(s *Server) {
+		if t != nil {
+			s.core.tracer = t
+		}
+	}
+}
+
 // WithHTTPPollWait sets the long-poll wait duration returned to runners when
 // no task is available. Default is one second.
 func WithHTTPPollWait(d time.Duration) ServerOption {
@@ -98,6 +111,7 @@ func NewServer(engine EngineFacade, runners RunnerDirectory, opts ...ServerOptio
 			engine:   engine,
 			runners:  runners,
 			pollWait: time.Second,
+			tracer:   tracing.NoopTracer{},
 		},
 	}
 	for _, o := range opts {

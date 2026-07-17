@@ -100,6 +100,10 @@ type TaskLease struct {
 	NodeVersion int           `json:"node_version,omitempty"`
 	IssuedAt    time.Time     `json:"issued_at"`
 	TTL         time.Duration `json:"ttl,omitempty"`
+	// TraceCarrier holds W3C traceparent/tracestate propagation headers so the
+	// runner can create properly-parented execution spans. Populated by the
+	// control plane when dispatching; nil when tracing is disabled or unsampled.
+	TraceCarrier map[string]string `json:"trace_carrier,omitempty"`
 }
 
 // TaskRouting is the side-effect-free routing metadata for a queued task. It is

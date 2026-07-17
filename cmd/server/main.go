@@ -30,6 +30,7 @@ import (
 	"github.com/xbcio/xflow/engine"
 	obslogger "github.com/xbcio/xflow/observability/logger"
 	"github.com/xbcio/xflow/observability/metrics"
+	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/service/apiserver"
 	"github.com/xbcio/xflow/service/control"
 	"go.uber.org/zap"
@@ -55,7 +56,10 @@ type serverConfig struct {
 	logFormat   string
 	metricsAddr string
 	metricsPath string
-	traceMode   string
+	// traceMode is one of "disabled", "stdout", or "otlp".
+	traceMode     string
+	traceEndpoint string
+	traceInsecure bool
 }
 
 func main() {
@@ -84,15 +88,20 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	fs.StringVar(&cfg.logFormat, "log-format", "text", "Log format: text or json")
 	fs.StringVar(&cfg.metricsAddr, "metrics-addr", "", "Prometheus metrics listen address (empty disables metrics)")
 	fs.StringVar(&cfg.metricsPath, "metrics-path", "/metrics", "Prometheus metrics path")
-	fs.StringVar(&cfg.traceMode, "trace", "disabled", "Tracing mode: disabled")
+	fs.StringVar(&cfg.traceMode, "trace", "disabled", "Tracing mode: disabled|stdout|otlp")
+	fs.StringVar(&cfg.traceEndpoint, "trace-endpoint", "localhost:4317", "OTLP collector gRPC endpoint (--trace=otlp)")
+	fs.BoolVar(&cfg.traceInsecure, "trace-insecure", false, "Disable TLS verification for OTLP connection")
 	if args == nil {
 		args = os.Args[1:]
 	}
 	if err := fs.Parse(args); err != nil {
 		return serverConfig{}, err
 	}
-	if cfg.traceMode != "disabled" {
-		return serverConfig{}, fmt.Errorf("--trace currently supports only disabled")
+	switch cfg.traceMode {
+	case "disabled", "stdout", "otlp":
+		// valid
+	default:
+		return serverConfig{}, fmt.Errorf("--trace must be one of: disabled|stdout|otlp")
 	}
 	if cfg.redis == "" {
 		cfg.memory = true
@@ -115,12 +124,24 @@ func runServer(cfg serverConfig) error {
 		m = metrics.New()
 	}
 
+	tracer, shutdownTracing, err := tracing.NewTracerProvider(context.Background(), tracing.ProviderConfig{
+		Mode:        cfg.traceMode,
+		Endpoint:    cfg.traceEndpoint,
+		Insecure:    cfg.traceInsecure,
+		ServiceName: "xflow-server",
+	})
+	if err != nil {
+		return fmt.Errorf("tracing: %w", err)
+	}
+	defer shutdownTracing(context.Background())
+
 	apiCfg := apiserver.Config{
 		RedisAddr:   cfg.redis, // empty => in-memory backend
 		Concurrency: cfg.concurrency,
 		Auth:        auth,
 		Logger:      logger,
 		Metrics:     m,
+		Tracer:      tracer,
 		HTTPAddr:    cfg.addr,
 		GRPCAddr:    cfg.grpcAddr,
 		MetricsAddr: cfg.metricsAddr,

@@ -44,8 +44,20 @@ func TestParseServerConfigSupportsObservabilityFlags(t *testing.T) {
 }
 
 func TestParseServerConfigRejectsUnsupportedTraceMode(t *testing.T) {
-	if _, err := parseServerConfig([]string{"-trace", "otlp"}); err == nil {
+	if _, err := parseServerConfig([]string{"-trace", "bogus"}); err == nil {
 		t.Fatal("parseServerConfig() error = nil, want error for unsupported trace mode")
+	}
+}
+
+func TestParseServerConfigSupportsTraceModes(t *testing.T) {
+	for _, mode := range []string{"disabled", "stdout", "otlp"} {
+		cfg, err := parseServerConfig([]string{"-memory", "-trace", mode})
+		if err != nil {
+			t.Fatalf("parseServerConfig(-trace %s) error = %v", mode, err)
+		}
+		if cfg.traceMode != mode {
+			t.Fatalf("traceMode = %q, want %q", cfg.traceMode, mode)
+		}
 	}
 }
 

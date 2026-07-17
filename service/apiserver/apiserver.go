@@ -10,6 +10,7 @@ import (
 	backendlocal "github.com/xbcio/xflow/backend/local"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/observability/metrics"
+	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/service/protocol/runnerpb"
 	"github.com/xbcio/xflow/store"
@@ -24,6 +25,9 @@ type Config struct {
 	Auth        control.Authenticator
 	Logger      engine.Logger
 	Metrics     *metrics.Metrics
+	// Tracer, when non-nil, enables OTel HTTP middleware and wires distributed
+	// tracing through the runner dispatch/commit path. Nil means no tracing.
+	Tracer tracing.Tracer
 
 	// Transport configuration. Stage 1 declares but does not use these.
 	HTTPAddr    string
@@ -109,6 +113,7 @@ func buildControlPlane(cfg Config) (*control.ControlPlane, error) {
 		Auth:    cfg.Auth,
 		Logger:  cfg.Logger,
 		Metrics: cfg.Metrics,
+		Tracer:  cfg.Tracer,
 	}
 
 	if cfg.RedisAddr == "" {
@@ -139,7 +144,8 @@ func buildControlPlane(cfg Config) (*control.ControlPlane, error) {
 // APIs. With no HTTPModule registered it is a transparent passthrough to the
 // control plane's handler; with HTTPModules present the routes are mounted
 // onto a fresh mux. Middleware is applied outermost-last so the first
-// registered middleware runs first.
+// registered middleware runs first. When a Tracer is configured, OTel
+// request tracing is applied as the outermost layer.
 func (s *APIServer) Handler() http.Handler {
 	var h http.Handler = s.cp.Handler()
 	if hasHTTPModule(s.modules) {
@@ -153,6 +159,9 @@ func (s *APIServer) Handler() http.Handler {
 	}
 	for i := len(s.middleware) - 1; i >= 0; i-- {
 		h = s.middleware[i](h)
+	}
+	if s.cfg.Tracer != nil {
+		h = tracing.Middleware(s.cfg.Tracer, h)
 	}
 	return h
 }

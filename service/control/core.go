@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/service/protocol"
 )
 
@@ -39,6 +40,9 @@ type Core struct {
 	auth         Authenticator
 	logger       engine.Logger
 	authObserver AuthObserver
+	// tracer instruments the runner protocol dispatch and commit path.
+	// NoopTracer when tracing is disabled.
+	tracer tracing.Tracer
 }
 
 // leaseRecoveryEngine is deliberately optional so custom EngineFacade test
@@ -195,6 +199,7 @@ func (c *Core) pollTask(ctx context.Context, req protocol.PollTaskRequest, info 
 		lease, err := c.engine.BuildTaskLease(ctx, &claim.Assignment.Task)
 		switch {
 		case err == nil:
+			lease.TraceCarrier = tracing.InjectCarrier(ctx)
 			if err := c.runners.FinalizeClaim(ctx, claim.ClaimID, lease); err != nil {
 				_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimRequeue)
 				return protocol.PollTaskResponse{}, normalizeRunnerError(err, c.logger, "poll")
@@ -249,7 +254,30 @@ func (c *Core) reportResult(ctx context.Context, req protocol.ReportResultReques
 	if err := c.runners.ValidateSession(ctx, req.RunnerID, req.SessionID); err != nil {
 		return protocol.ReportResultResponse{}, normalizeRunnerError(err, c.logger, "report_result")
 	}
+
+	// Restore the runner's execute span context so the commit span is properly
+	// parented. Prefer the runner-side report carrier; fall back to the dispatch
+	// carrier embedded in the lease for old runners that don't send their own.
+	carrier := req.TraceCarrier
+	if len(carrier) == 0 {
+		carrier = req.Lease.TraceCarrier
+	}
+	ctx = tracing.ExtractCarrier(ctx, carrier)
+	tracer := c.tracer
+	if tracer == nil {
+		tracer = tracing.NoopTracer{}
+	}
+	_, span := tracer.Start(ctx, "xflow.task.commit",
+		"execution_id", string(req.Lease.Task.ExecutionID),
+		"node_name", req.Lease.Task.NodeName,
+		"attempt", req.Lease.Attempt,
+	)
+	defer span.End()
+
 	outcome, err := c.engine.CommitTaskResultWithOutcome(ctx, req.Lease, req.Result)
+	if err != nil {
+		span.RecordError(err)
+	}
 	if outcome.ReleasesLeasedCapacity() {
 		removeSeen := outcome == engine.CommitOutcomeAccepted || outcome == engine.CommitOutcomeDuplicateTerminal || outcome == engine.CommitOutcomeExecutionInactive
 		if err := c.runners.ReleaseLeased(ctx, ReleaseLeasedRequest{

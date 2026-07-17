@@ -63,14 +63,19 @@ type ReportResultRequest struct {
 	Lease     *engine.TaskLease `json:"lease"`
 	Result    engine.TaskResult `json:"result"`
 	AuthToken string            `json:"auth_token,omitempty"`
+	// TraceCarrier holds W3C traceparent/tracestate headers set by the runner
+	// after executing the task. The control plane extracts these to create a
+	// commit span parented to the runner's execute span.
+	TraceCarrier map[string]string `json:"trace_carrier,omitempty"`
 }
 
 type reportResultRequestJSON struct {
-	RunnerID  string            `json:"runner_id"`
-	SessionID string            `json:"session_id"`
-	Lease     *engine.TaskLease `json:"lease"`
-	Result    json.RawMessage   `json:"result"`
-	AuthToken string            `json:"auth_token,omitempty"`
+	RunnerID     string            `json:"runner_id"`
+	SessionID    string            `json:"session_id"`
+	Lease        *engine.TaskLease `json:"lease"`
+	Result       json.RawMessage   `json:"result"`
+	AuthToken    string            `json:"auth_token,omitempty"`
+	TraceCarrier map[string]string `json:"trace_carrier,omitempty"`
 }
 
 type taskResultJSON struct {
@@ -93,11 +98,12 @@ func (r ReportResultRequest) MarshalJSON() ([]byte, error) {
 		return nil, err
 	}
 	return json.Marshal(reportResultRequestJSON{
-		RunnerID:  r.RunnerID,
-		SessionID: r.SessionID,
-		Lease:     r.Lease,
-		Result:    resultJSON,
-		AuthToken: r.AuthToken,
+		RunnerID:     r.RunnerID,
+		SessionID:    r.SessionID,
+		Lease:        r.Lease,
+		Result:       resultJSON,
+		AuthToken:    r.AuthToken,
+		TraceCarrier: r.TraceCarrier,
 	})
 }
 
@@ -110,6 +116,7 @@ func (r *ReportResultRequest) UnmarshalJSON(data []byte) error {
 	r.SessionID = in.SessionID
 	r.Lease = in.Lease
 	r.AuthToken = in.AuthToken
+	r.TraceCarrier = in.TraceCarrier
 	result, err := UnmarshalTaskResult(in.Result)
 	if err != nil {
 		return err
