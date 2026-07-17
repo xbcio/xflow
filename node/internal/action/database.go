@@ -93,16 +93,16 @@ func (n *DatabaseNode) RawParams() any {
 func (n *DatabaseNode) Execute(ctx context.Context, input *types.Input) (*types.Output, error) {
 	credName := cast.ToString(input.Params["credential"])
 	if credName == "" {
-		return nil, fmt.Errorf("xflow.database: credential parameter is required")
+		return nil, types.NewPermanentError("database.missing_credential", "xflow.database: credential parameter is required")
 	}
 	cred := input.Credential(credName)
 	if cred == nil {
-		return nil, fmt.Errorf("xflow.database: credential %q not found", credName)
+		return nil, types.NewPermanentError("database.credential_not_found", fmt.Sprintf("xflow.database: credential %q not found", credName))
 	}
 
 	dsn := cast.ToString(cred["dsn"])
 	if dsn == "" {
-		return nil, fmt.Errorf("xflow.database: credential %q missing dsn", credName)
+		return nil, types.NewPermanentError("database.missing_dsn", fmt.Sprintf("xflow.database: credential %q missing dsn", credName))
 	}
 
 	driver := cast.ToString(cred["driver"])
@@ -112,18 +112,18 @@ func (n *DatabaseNode) Execute(ctx context.Context, input *types.Input) (*types.
 
 	db, release, err := acquireSQL(ctx, driver, dsn)
 	if err != nil {
-		return nil, fmt.Errorf("xflow.database: open connection: %w", err)
+		return nil, err
 	}
 	defer release()
 
 	operation := cast.ToString(input.Params["operation"])
 	table := cast.ToString(input.Params["table"])
 	if table == "" {
-		return nil, fmt.Errorf("xflow.database: table parameter is required")
+		return nil, types.NewPermanentError("database.missing_table", "xflow.database: table parameter is required")
 	}
 
 	if !isValidIdentifier(table) {
-		return nil, fmt.Errorf("xflow.database: invalid table name %q", table)
+		return nil, types.NewPermanentError("database.invalid_table", fmt.Sprintf("xflow.database: invalid table name %q", table))
 	}
 
 	switch operation {
@@ -138,7 +138,7 @@ func (n *DatabaseNode) Execute(ctx context.Context, input *types.Input) (*types.
 	case "delete":
 		return n.execDelete(ctx, db, table, input)
 	default:
-		return nil, fmt.Errorf("xflow.database: unknown operation %q", operation)
+		return nil, types.NewPermanentError("database.unknown_operation", fmt.Sprintf("xflow.database: unknown operation %q", operation))
 	}
 }
 
@@ -219,7 +219,7 @@ func (n *DatabaseNode) execSelect(ctx context.Context, db *sql.DB, table string,
 func (n *DatabaseNode) execInsert(ctx context.Context, db *sql.DB, table string, input *types.Input) (*types.Output, error) {
 	data, ok := input.Params["data"].(map[string]any)
 	if !ok || len(data) == 0 {
-		return nil, fmt.Errorf("xflow.database: data parameter is required for insert")
+		return nil, types.NewPermanentError("database.missing_data", "xflow.database: data parameter is required for insert")
 	}
 
 	columns := make([]string, 0, len(data))
@@ -227,7 +227,7 @@ func (n *DatabaseNode) execInsert(ctx context.Context, db *sql.DB, table string,
 	args := make([]any, 0, len(data))
 	for k, v := range data {
 		if !isValidIdentifier(k) {
-			return nil, fmt.Errorf("xflow.database: invalid column name %q", k)
+			return nil, types.NewPermanentError("database.invalid_column", fmt.Sprintf("xflow.database: invalid column name %q", k))
 		}
 		columns = append(columns, k)
 		placeholders = append(placeholders, "?")
@@ -250,18 +250,18 @@ func (n *DatabaseNode) execInsert(ctx context.Context, db *sql.DB, table string,
 func (n *DatabaseNode) execInsertMany(ctx context.Context, db *sql.DB, table string, input *types.Input) (*types.Output, error) {
 	rows, ok := input.Params["data"].([]any)
 	if !ok || len(rows) == 0 {
-		return nil, fmt.Errorf("xflow.database: data parameter must be a non-empty array for insert_many")
+		return nil, types.NewPermanentError("database.missing_data", "xflow.database: data parameter must be a non-empty array for insert_many")
 	}
 
 	firstRow, ok := rows[0].(map[string]any)
 	if !ok {
-		return nil, fmt.Errorf("xflow.database: each row must be an object")
+		return nil, types.NewPermanentError("database.invalid_data", "xflow.database: each row must be an object")
 	}
 
 	columns := make([]string, 0, len(firstRow))
 	for k := range firstRow {
 		if !isValidIdentifier(k) {
-			return nil, fmt.Errorf("xflow.database: invalid column name %q", k)
+			return nil, types.NewPermanentError("database.invalid_column", fmt.Sprintf("xflow.database: invalid column name %q", k))
 		}
 		columns = append(columns, k)
 	}
@@ -273,7 +273,7 @@ func (n *DatabaseNode) execInsertMany(ctx context.Context, db *sql.DB, table str
 	for _, r := range rows {
 		row, ok := r.(map[string]any)
 		if !ok {
-			return nil, fmt.Errorf("xflow.database: each row must be an object")
+			return nil, types.NewPermanentError("database.invalid_data", "xflow.database: each row must be an object")
 		}
 		allPlaceholders = append(allPlaceholders, rowPlaceholder)
 		for _, col := range columns {
@@ -296,14 +296,14 @@ func (n *DatabaseNode) execInsertMany(ctx context.Context, db *sql.DB, table str
 func (n *DatabaseNode) execUpdate(ctx context.Context, db *sql.DB, table string, input *types.Input) (*types.Output, error) {
 	data, ok := input.Params["data"].(map[string]any)
 	if !ok || len(data) == 0 {
-		return nil, fmt.Errorf("xflow.database: data parameter is required for update")
+		return nil, types.NewPermanentError("database.missing_data", "xflow.database: data parameter is required for update")
 	}
 
 	setClauses := make([]string, 0, len(data))
 	args := make([]any, 0, len(data))
 	for k, v := range data {
 		if !isValidIdentifier(k) {
-			return nil, fmt.Errorf("xflow.database: invalid column name %q", k)
+			return nil, types.NewPermanentError("database.invalid_column", fmt.Sprintf("xflow.database: invalid column name %q", k))
 		}
 		setClauses = append(setClauses, k+" = ?")
 		args = append(args, v)
@@ -313,11 +313,11 @@ func (n *DatabaseNode) execUpdate(ctx context.Context, db *sql.DB, table string,
 
 	where, ok := input.Params["where"].(map[string]any)
 	if !ok || len(where) == 0 {
-		return nil, fmt.Errorf("xflow.database: where parameter is required for update (safety)")
+		return nil, types.NewPermanentError("database.missing_where", "xflow.database: where parameter is required for update (safety)")
 	}
 	clauses, whereArgs, err := buildWhere(where)
 	if err != nil {
-		return &types.Output{Data: map[string]any{"error": err.Error()}, Port: "error"}, nil
+		return nil, err
 	}
 	query += " WHERE " + clauses
 	args = append(args, whereArgs...)
@@ -334,12 +334,12 @@ func (n *DatabaseNode) execUpdate(ctx context.Context, db *sql.DB, table string,
 func (n *DatabaseNode) execDelete(ctx context.Context, db *sql.DB, table string, input *types.Input) (*types.Output, error) {
 	where, ok := input.Params["where"].(map[string]any)
 	if !ok || len(where) == 0 {
-		return nil, fmt.Errorf("xflow.database: where parameter is required for delete (safety)")
+		return nil, types.NewPermanentError("database.missing_where", "xflow.database: where parameter is required for delete (safety)")
 	}
 
 	clauses, args, err := buildWhere(where)
 	if err != nil {
-		return &types.Output{Data: map[string]any{"error": err.Error()}, Port: "error"}, nil
+		return nil, err
 	}
 	query := fmt.Sprintf("DELETE FROM %s WHERE %s", table, clauses)
 
@@ -361,7 +361,7 @@ func buildWhere(where map[string]any) (string, []any, error) {
 			// the query broader than intended, which on UPDATE/DELETE means
 			// over-scoped modifications. Surface the bad column name so the
 			// workflow author fixes the input instead of hitting more rows.
-			return "", nil, fmt.Errorf("xflow.database: invalid WHERE column name %q", k)
+			return "", nil, types.NewPermanentError("database.invalid_where_column", fmt.Sprintf("xflow.database: invalid WHERE column name %q", k))
 		}
 		clauses = append(clauses, k+" = ?")
 		args = append(args, v)
@@ -386,16 +386,16 @@ func isValidIdentifier(s string) bool {
 }
 
 // acquireSQL fetches a *sql.DB from the request-scoped ResourcePool. Returns
-// an error when no pool is attached — production deployments always inject a
-// pool via the backend's WithResourcePool option.
+// a permanent error when no pool is attached (config issue that won't self-heal
+// on retry), or a transient error when the pool connection fails.
 func acquireSQL(ctx context.Context, driver, dsn string) (*sql.DB, func(), error) {
 	pool := types.ResourcePoolFromContext(ctx)
 	if pool == nil {
-		return nil, nil, fmt.Errorf("xflow.database: no resource pool configured")
+		return nil, nil, types.NewPermanentError("database.no_pool", "xflow.database: no resource pool configured")
 	}
 	db, err := pool.SQL(ctx, driver, dsn)
 	if err != nil {
-		return nil, func() {}, err
+		return nil, func() {}, types.NewTransientError("database.connection", fmt.Sprintf("xflow.database: open connection: %v", err))
 	}
 	return db, func() {}, nil
 }

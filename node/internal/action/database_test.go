@@ -9,7 +9,6 @@ import (
 
 	"github.com/xbcio/xflow/node"
 )
-
 func TestDatabase_Factory(t *testing.T) {
 	b := node.Database("select", "users", "my_db").
 		SetWhere(map[string]any{"id": 1}).
@@ -40,6 +39,9 @@ func TestDatabase_MissingCredential(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for missing credential param")
 	}
+	if !types.IsPermanent(err) {
+		t.Fatalf("missing credential must be permanent; got %v", err)
+	}
 }
 
 func TestDatabase_CredentialNotFound(t *testing.T) {
@@ -51,6 +53,9 @@ func TestDatabase_CredentialNotFound(t *testing.T) {
 	_, err := h.Execute(context.Background(), input)
 	if err == nil {
 		t.Fatal("expected error for credential not found")
+	}
+	if !types.IsPermanent(err) {
+		t.Fatalf("credential not found must be permanent; got %v", err)
 	}
 }
 
@@ -70,6 +75,9 @@ func TestDatabase_InvalidTable(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for invalid table name")
 	}
+	if !types.IsPermanent(err) {
+		t.Fatalf("invalid table name must be permanent; got %v", err)
+	}
 }
 
 func TestDatabase_UnknownOperation(t *testing.T) {
@@ -88,6 +96,9 @@ func TestDatabase_UnknownOperation(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for unknown operation")
 	}
+	if !types.IsPermanent(err) {
+		t.Fatalf("unknown operation must be permanent; got %v", err)
+	}
 }
 
 func TestDatabase_UpdateRequiresWhere(t *testing.T) {
@@ -100,6 +111,9 @@ func TestDatabase_UpdateRequiresWhere(t *testing.T) {
 	_, err := h.Execute(context.Background(), input)
 	if err == nil {
 		t.Fatal("expected error for update without where")
+	}
+	if !types.IsPermanent(err) {
+		t.Fatalf("missing where must be permanent; got %v", err)
 	}
 }
 
@@ -114,17 +128,20 @@ func TestDatabase_DeleteRequiresWhere(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for delete without where")
 	}
+	if !types.IsPermanent(err) {
+		t.Fatalf("missing where must be permanent; got %v", err)
+	}
 }
 
-// TestDatabase_NoPoolErrors pins the Task 2 contract: when no ResourcePool is
-// attached to the context, DatabaseNode.Execute must fail at acquireSQL with
-// "no resource pool configured" — NOT fall back to a per-call *sql.DB.
+// TestDatabase_NoPoolIsPermanent pins the contract: when no ResourcePool is
+// attached to the context, DatabaseNode.Execute must return a permanent
+// classified error — NOT route to the error port. Missing pool is a deployment
+// configuration error that retry will never fix.
 //
-// The input below is constructed to pass every upstream validation gate
-// (credential present + found, dsn non-empty, valid table name, known
-// operation) so the only remaining failure point is the pool lookup. This
-// guards against a regression that re-introduces a fallback dial path.
-func TestDatabase_NoPoolErrors(t *testing.T) {
+// The input is constructed to pass all upstream validation gates (credential
+// present + found, dsn non-empty, valid table, known operation) so the only
+// failure point is the pool lookup inside acquireSQL.
+func TestDatabase_NoPoolIsPermanent(t *testing.T) {
 	h, _ := registry.Lookup("xflow.database")
 	b := node.Database("select", "users", "db")
 	input := &types.Input{Params: b.RawParams().(map[string]any)}
@@ -138,5 +155,8 @@ func TestDatabase_NoPoolErrors(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no resource pool configured") {
 		t.Fatalf("error = %q, want substring %q", err.Error(), "no resource pool configured")
+	}
+	if !types.IsPermanent(err) {
+		t.Fatalf("no-pool error must be permanent (not retried); got %v", err)
 	}
 }

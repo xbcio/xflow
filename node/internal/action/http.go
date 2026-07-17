@@ -178,19 +178,13 @@ func (n *HTTPNode) Execute(ctx context.Context, input *types.Input) (*types.Outp
 	client.Timeout = timeout
 	resp, err := client.Do(req)
 	if err != nil {
-		return &types.Output{
-			Data: map[string]any{"error": err.Error()},
-			Port: "error",
-		}, nil
+		return nil, types.NewTransientError("http.connection", err.Error())
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return &types.Output{
-			Data: map[string]any{"error": fmt.Sprintf("read response: %v", err)},
-			Port: "error",
-		}, nil
+		return nil, types.NewTransientError("http.read_response", fmt.Sprintf("read response: %v", err))
 	}
 
 	data := map[string]any{
@@ -198,7 +192,6 @@ func (n *HTTPNode) Execute(ctx context.Context, input *types.Input) (*types.Outp
 		"status_text": resp.Status,
 		"headers":     flattenHeaders(resp.Header),
 	}
-
 	var jsonBody any
 	if err := json.Unmarshal(respBody, &jsonBody); err == nil {
 		data["body"] = jsonBody
@@ -206,8 +199,23 @@ func (n *HTTPNode) Execute(ctx context.Context, input *types.Input) (*types.Outp
 		data["body"] = string(respBody)
 	}
 
-	if resp.StatusCode >= 400 {
-		return &types.Output{Data: data, Port: "error"}, nil
+	switch {
+	case resp.StatusCode >= 500:
+		return nil, &types.ClassifiedError{
+			Kind:      types.ErrorKindTransient,
+			Code:      "http.5xx",
+			Message:   fmt.Sprintf("HTTP %d: %s", resp.StatusCode, resp.Status),
+			Retryable: true,
+			Details:   data,
+		}
+	case resp.StatusCode >= 400:
+		return nil, &types.ClassifiedError{
+			Kind:      types.ErrorKindPermanent,
+			Code:      "http.4xx",
+			Message:   fmt.Sprintf("HTTP %d: %s", resp.StatusCode, resp.Status),
+			Permanent: true,
+			Details:   data,
+		}
 	}
 	return &types.Output{Data: data, Port: "main"}, nil
 }

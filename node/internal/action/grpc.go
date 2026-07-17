@@ -14,9 +14,11 @@ import (
 	"github.com/xbcio/xflow/node/registry"
 	"github.com/spf13/cast"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
+	grpcstatus "google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/dynamicpb"
@@ -102,15 +104,15 @@ func (n *GRPCNode) RawParams() any {
 func (n *GRPCNode) Execute(ctx context.Context, input *types.Input) (*types.Output, error) {
 	host := cast.ToString(input.Params["host"])
 	if host == "" {
-		return nil, fmt.Errorf("xflow.grpc: host parameter is required")
+		return nil, types.NewPermanentError("grpc.missing_host", "xflow.grpc: host parameter is required")
 	}
 	service := cast.ToString(input.Params["service"])
 	if service == "" {
-		return nil, fmt.Errorf("xflow.grpc: service parameter is required")
+		return nil, types.NewPermanentError("grpc.missing_service", "xflow.grpc: service parameter is required")
 	}
 	method := cast.ToString(input.Params["method"])
 	if method == "" {
-		return nil, fmt.Errorf("xflow.grpc: method parameter is required")
+		return nil, types.NewPermanentError("grpc.missing_method", "xflow.grpc: method parameter is required")
 	}
 
 	timeout := 30 * time.Second
@@ -139,7 +141,7 @@ func (n *GRPCNode) Execute(ctx context.Context, input *types.Input) (*types.Outp
 
 	conn, release, err := acquireGRPC(ctx, host, useTLS, dialOpts...)
 	if err != nil {
-		return &types.Output{Data: map[string]any{"error": fmt.Sprintf("dial: %v", err)}, Port: "error"}, nil
+		return nil, err
 	}
 	defer release()
 
@@ -156,23 +158,33 @@ func (n *GRPCNode) Execute(ctx context.Context, input *types.Input) (*types.Outp
 	reqData, _ := input.Params["request"].(map[string]any)
 	reqBytes, err := json.Marshal(reqData)
 	if err != nil {
-		return nil, fmt.Errorf("xflow.grpc: marshal request: %w", err)
+		return nil, types.NewPermanentError("grpc.marshal_request", fmt.Sprintf("xflow.grpc: marshal request: %v", err))
 	}
 
 	reqMsg, err := structFromJSON(reqBytes)
 	if err != nil {
-		return nil, fmt.Errorf("xflow.grpc: build request message: %w", err)
+		return nil, types.NewPermanentError("grpc.build_request", fmt.Sprintf("xflow.grpc: build request message: %v", err))
 	}
 
 	respMsg := &dynamicpb.Message{}
 	err = conn.Invoke(dialCtx, fullMethod, reqMsg, respMsg)
 	if err != nil {
-		return &types.Output{Data: map[string]any{"error": err.Error()}, Port: "error"}, nil
+		if st, ok := grpcstatus.FromError(err); ok {
+			switch st.Code() {
+			case codes.InvalidArgument, codes.NotFound, codes.PermissionDenied,
+				codes.Unauthenticated, codes.AlreadyExists, codes.Unimplemented,
+				codes.FailedPrecondition, codes.OutOfRange:
+				return nil, types.NewPermanentError("grpc."+st.Code().String(), st.Message())
+			default:
+				return nil, types.NewTransientError("grpc."+st.Code().String(), st.Message())
+			}
+		}
+		return nil, types.NewTransientError("grpc.invoke", err.Error())
 	}
 
 	respBytes, err := protojson.Marshal(proto.Message(respMsg))
 	if err != nil {
-		return &types.Output{Data: map[string]any{"error": fmt.Sprintf("marshal response: %v", err)}, Port: "error"}, nil
+		return nil, types.NewTransientError("grpc.marshal_response", fmt.Sprintf("marshal response: %v", err))
 	}
 
 	var respData map[string]any
@@ -191,16 +203,16 @@ func structFromJSON(data []byte) (proto.Message, error) {
 }
 
 // acquireGRPC fetches a pooled *grpc.ClientConn keyed by (host, tls). Returns
-// an error when no pool is attached to ctx — production deployments always
-// inject a pool via the backend's WithResourcePool option.
+// a permanent error when no pool is attached to ctx (config issue that won't
+// self-heal on retry), or a transient error when the pool dial fails.
 func acquireGRPC(ctx context.Context, host string, secure bool, opts ...grpc.DialOption) (*grpc.ClientConn, func(), error) {
 	pool := types.ResourcePoolFromContext(ctx)
 	if pool == nil {
-		return nil, nil, fmt.Errorf("xflow.grpc: no resource pool configured")
+		return nil, nil, types.NewPermanentError("grpc.no_pool", "xflow.grpc: no resource pool configured")
 	}
 	conn, err := pool.GRPC(ctx, host, secure, opts...)
 	if err != nil {
-		return nil, func() {}, err
+		return nil, func() {}, types.NewTransientError("grpc.dial", fmt.Sprintf("dial %s: %v", host, err))
 	}
 	return conn, func() {}, nil
 }

@@ -3,6 +3,7 @@ package action_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"github.com/xbcio/xflow/node/registry"
 	"github.com/xbcio/xflow/types"
 	"io"
@@ -115,7 +116,7 @@ func TestHTTP_POST_WithBody(t *testing.T) {
 	}
 }
 
-func TestHTTP_ErrorPort_On4xx(t *testing.T) {
+func TestHTTP_4xxIsPermanent(t *testing.T) {
 	withHTTPClient(t, func(r *http.Request) (*http.Response, error) {
 		return jsonResponse(404, `{"error":"not found"}`, nil), nil
 	})
@@ -124,11 +125,66 @@ func TestHTTP_ErrorPort_On4xx(t *testing.T) {
 	b := node.HTTP("GET", "https://example.test")
 	input := &types.Input{Params: b.RawParams().(map[string]any)}
 	out, err := h.Execute(context.Background(), input)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil {
+		t.Fatal("expected permanent error for 4xx, got nil err")
 	}
-	if out.Port != "error" {
-		t.Fatalf("expected port \"error\", got %q", out.Port)
+	if out != nil {
+		t.Fatalf("expected nil output for 4xx, got %+v", out)
+	}
+	if !types.IsPermanent(err) {
+		t.Fatalf("4xx must be permanent (not retried); got err=%v", err)
+	}
+	var ce *types.ClassifiedError
+	if !errors.As(err, &ce) || ce.Code != "http.4xx" {
+		t.Fatalf("expected ClassifiedError code=http.4xx, got %T %v", err, err)
+	}
+}
+
+func TestHTTP_5xxIsTransient(t *testing.T) {
+	withHTTPClient(t, func(r *http.Request) (*http.Response, error) {
+		return jsonResponse(503, `{"error":"service unavailable"}`, nil), nil
+	})
+
+	h, _ := registry.Lookup("xflow.http")
+	b := node.HTTP("GET", "https://example.test")
+	input := &types.Input{Params: b.RawParams().(map[string]any)}
+	out, err := h.Execute(context.Background(), input)
+	if err == nil {
+		t.Fatal("expected transient error for 5xx, got nil err")
+	}
+	if out != nil {
+		t.Fatalf("expected nil output for 5xx, got %+v", out)
+	}
+	if types.IsPermanent(err) {
+		t.Fatalf("5xx must be transient (retryable); got permanent err=%v", err)
+	}
+	var ce *types.ClassifiedError
+	if !errors.As(err, &ce) || ce.Code != "http.5xx" {
+		t.Fatalf("expected ClassifiedError code=http.5xx, got %T %v", err, err)
+	}
+}
+
+func TestHTTP_ConnectionErrorIsTransient(t *testing.T) {
+	withHTTPClient(t, func(r *http.Request) (*http.Response, error) {
+		return nil, errors.New("connection refused")
+	})
+
+	h, _ := registry.Lookup("xflow.http")
+	b := node.HTTP("GET", "https://example.test")
+	input := &types.Input{Params: b.RawParams().(map[string]any)}
+	out, err := h.Execute(context.Background(), input)
+	if err == nil {
+		t.Fatal("expected transient error for connection failure, got nil err")
+	}
+	if out != nil {
+		t.Fatalf("expected nil output for connection error, got %+v", out)
+	}
+	if types.IsPermanent(err) {
+		t.Fatalf("connection error must be transient; got permanent err=%v", err)
+	}
+	var ce *types.ClassifiedError
+	if !errors.As(err, &ce) || ce.Code != "http.connection" {
+		t.Fatalf("expected ClassifiedError code=http.connection, got %T %v", err, err)
 	}
 }
 
