@@ -20,20 +20,39 @@ import (
 // delegates to control.EngineFacade (the *engine.Engine behind the
 // ControlPlane) for every engine call.
 type workflowControlModule struct {
-	cp  *control.ControlPlane
-	eng control.EngineFacade
+	cp   *control.ControlPlane
+	eng  control.EngineFacade
+	auth WorkflowAuthenticator
+	log  engine.Logger
 }
 
-func newWorkflowControlModule(cp *control.ControlPlane) *workflowControlModule {
-	return &workflowControlModule{cp: cp, eng: cp.Engine()}
+func newWorkflowControlModule(cp *control.ControlPlane, auth WorkflowAuthenticator, log engine.Logger) *workflowControlModule {
+	return &workflowControlModule{cp: cp, eng: cp.Engine(), auth: auth, log: log}
 }
 
 func (m *workflowControlModule) Name() string { return "workflow-control" }
 
 func (m *workflowControlModule) RegisterHTTP(mux *http.ServeMux) {
-	mux.HandleFunc("/v1/workflows", m.handleSubmitWorkflow)
-	mux.HandleFunc("/v1/workflows/invoke", m.handleInvoke)
-	mux.HandleFunc("/v1/executions/", m.handleExecution)
+	auth := m.auth
+	if auth == nil {
+		auth = DisabledWorkflowAuth{}
+	}
+	wrap := func(op string, h http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if err := auth.AuthenticateRequest(r); err != nil {
+				if m.log != nil {
+					m.log.Error("workflow_api_auth_denied",
+						"op", op, "remote_addr", r.RemoteAddr, "err", err)
+				}
+				writeError(w, http.StatusUnauthorized, "unauthorized")
+				return
+			}
+			h(w, r)
+		}
+	}
+	mux.HandleFunc("/v1/workflows", wrap("submit_workflow", m.handleSubmitWorkflow))
+	mux.HandleFunc("/v1/workflows/invoke", wrap("invoke_workflow", m.handleInvoke))
+	mux.HandleFunc("/v1/executions/", wrap("execution", m.handleExecution))
 }
 
 type errorResponse struct {

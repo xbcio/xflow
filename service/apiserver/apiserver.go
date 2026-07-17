@@ -2,6 +2,7 @@ package apiserver
 
 import (
 	"context"
+	"errors"
 	"net/http"
 
 	"google.golang.org/grpc"
@@ -28,6 +29,16 @@ type Config struct {
 	// Tracer, when non-nil, enables OTel HTTP middleware and wires distributed
 	// tracing through the runner dispatch/commit path. Nil means no tracing.
 	Tracer tracing.Tracer
+	// WorkflowAuth authenticates callers of the workflow/control API
+	// (/v1/workflows, /v1/executions/*). Nil uses DisabledWorkflowAuth
+	// (allow all). Set RequireWorkflowAuth to enforce that a real authenticator
+	// is present; a nil WorkflowAuth with RequireWorkflowAuth=true causes New
+	// to return an error.
+	WorkflowAuth WorkflowAuthenticator
+	// RequireWorkflowAuth causes New to return an error when WorkflowAuth is
+	// nil. Use this in production deployments to prevent accidentally serving
+	// the workflow API without authentication.
+	RequireWorkflowAuth bool
 
 	// Transport configuration. Stage 1 declares but does not use these.
 	HTTPAddr    string
@@ -72,7 +83,15 @@ type APIServer struct {
 // are wired without callers having to register them explicitly (stage 3
 // moved the workflow routes out of control.Server and into the
 // workflow-control module).
+//
+// New returns an error immediately when cfg.RequireWorkflowAuth is true but
+// cfg.WorkflowAuth is nil (production fail-closed: the workflow API must not
+// be left open without an authenticator).
 func New(cfg Config, opts ...Option) (*APIServer, error) {
+	if cfg.RequireWorkflowAuth && cfg.WorkflowAuth == nil {
+		return nil, errors.New("apiserver: WorkflowAuth must be configured when RequireWorkflowAuth is set")
+	}
+
 	s := &APIServer{cfg: cfg, timeouts: defaultHTTPTimeouts()}
 	for _, o := range opts {
 		o(s)
@@ -85,13 +104,16 @@ func New(cfg Config, opts ...Option) (*APIServer, error) {
 		s.cp = cp
 		s.ownsCP = true
 	}
+
+	workflowAuth := cfg.WorkflowAuth
+
 	// Default modules are prepended so a caller that also uses WithModule to
 	// add a custom module still gets the core API surface; the default
 	// modules' paths (/v1/runners/*, /v1/workflows, /v1/executions/) do not
 	// overlap with each other.
 	s.modules = append([]Module{
 		newRunnerProtocolModule(s.cp),
-		newWorkflowControlModule(s.cp),
+		newWorkflowControlModule(s.cp, workflowAuth, cfg.Logger),
 	}, s.modules...)
 	// The management module is opt-in (R5): it is only registered when
 	// WithManagement was passed. Registration happens here, after s.cp is

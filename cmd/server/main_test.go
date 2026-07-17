@@ -86,3 +86,23 @@ func TestRunServerBuildsFromMemoryConfig(t *testing.T) {
 		t.Fatal("apiserver.New returned nil")
 	}
 }
+
+func TestParseServerConfigSupportsAPIAuthToken(t *testing.T) {
+	cfg, err := parseServerConfig([]string{"-memory", "-api-auth-token", "mysecrettoken"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.apiAuthToken != "mysecrettoken" {
+		t.Fatalf("apiAuthToken = %q, want mysecrettoken", cfg.apiAuthToken)
+	}
+}
+
+func TestParseServerConfigRequireAPIAuthFlag(t *testing.T) {
+	cfg, err := parseServerConfig([]string{"-memory", "-require-api-auth"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.requireAPIAuth {
+		t.Fatal("requireAPIAuth = false, want true")
+	}
+}

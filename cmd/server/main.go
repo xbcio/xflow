@@ -48,6 +48,14 @@ type serverConfig struct {
 	// authDryRun logs auth violations but lets the request proceed. Meant for
 	// the rollout window between adding runners.yaml and enforcing it.
 	authDryRun bool
+	// apiAuthToken, when non-empty, enables BearerTokenAuth on the workflow/
+	// control API (/v1/workflows, /v1/executions/*). The same token must be
+	// supplied by callers in the Authorization: Bearer <token> header.
+	apiAuthToken string
+	// requireAPIAuth causes the server to fail to start if no workflow API
+	// authenticator is configured. Use in production to prevent accidentally
+	// serving the workflow API without authentication.
+	requireAPIAuth bool
 	// TLS: server cert/key enable TLS on the HTTP + gRPC listeners; presence
 	// of tlsClientCA additionally requires a client cert (mTLS).
 	tlsCert     string
@@ -82,6 +90,8 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	fs.IntVar(&cfg.concurrency, "concurrency", cfg.concurrency, "Queue consumer concurrency")
 	fs.StringVar(&cfg.authPolicy, "auth-policy", "", "Path to runners.yaml (empty = auth disabled)")
 	fs.BoolVar(&cfg.authDryRun, "auth-dry-run", false, "Log auth violations but let requests through (rollout aid)")
+	fs.StringVar(&cfg.apiAuthToken, "api-auth-token", "", "Static bearer token for workflow API authentication (sets Authorization: Bearer guard on /v1/workflows and /v1/executions/*)")
+	fs.BoolVar(&cfg.requireAPIAuth, "require-api-auth", false, "Fail to start if no workflow API authenticator is configured (production fail-closed)")
 	fs.StringVar(&cfg.tlsCert, "tls-cert", "", "Path to server TLS certificate (enables TLS)")
 	fs.StringVar(&cfg.tlsKey, "tls-key", "", "Path to server TLS private key (required with --tls-cert)")
 	fs.StringVar(&cfg.tlsClientCA, "tls-client-ca", "", "Path to CA bundle to verify runner certs (enables mTLS)")
@@ -135,17 +145,24 @@ func runServer(cfg serverConfig) error {
 	}
 	defer shutdownTracing(context.Background())
 
+	var workflowAuth apiserver.WorkflowAuthenticator
+	if cfg.apiAuthToken != "" {
+		workflowAuth = apiserver.NewBearerTokenAuth(cfg.apiAuthToken)
+	}
+
 	apiCfg := apiserver.Config{
-		RedisAddr:   cfg.redis, // empty => in-memory backend
-		Concurrency: cfg.concurrency,
-		Auth:        auth,
-		Logger:      logger,
-		Metrics:     m,
-		Tracer:      tracer,
-		HTTPAddr:    cfg.addr,
-		GRPCAddr:    cfg.grpcAddr,
-		MetricsAddr: cfg.metricsAddr,
-		MetricsPath: cfg.metricsPath,
+		RedisAddr:           cfg.redis, // empty => in-memory backend
+		Concurrency:         cfg.concurrency,
+		Auth:                auth,
+		Logger:              logger,
+		Metrics:             m,
+		Tracer:              tracer,
+		WorkflowAuth:        workflowAuth,
+		RequireWorkflowAuth: cfg.requireAPIAuth,
+		HTTPAddr:            cfg.addr,
+		GRPCAddr:            cfg.grpcAddr,
+		MetricsAddr:         cfg.metricsAddr,
+		MetricsPath:         cfg.metricsPath,
 	}
 	if cfg.tlsCert != "" || cfg.tlsKey != "" || cfg.tlsClientCA != "" {
 		apiCfg.TLS = &apiserver.TLSConfig{Cert: cfg.tlsCert, Key: cfg.tlsKey, ClientCA: cfg.tlsClientCA}
