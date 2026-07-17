@@ -1,5 +1,5 @@
 .PHONY: all build test test-concurrency lint fmt tidy clean run-server run-runner install-hooks proto proto-tools \
-        env-up env-down env-reset env-logs env-migrate test-integration test-perf
+        env-up env-down env-reset env-logs env-migrate test-integration test-perf perf-sample
 
 # ── Build ──────────────────────────────────────────────────────────────────────
 
@@ -117,3 +117,13 @@ test-perf:
 	: "$${XFLOW_TEST_KAFKA_BROKERS:=localhost:$${KAFKA_PORT:-9092}}"; \
 	export XFLOW_TEST_REDIS_ADDR XFLOW_TEST_KAFKA_BROKERS; \
 	go test -tags=perf -bench=. -benchtime=2s -timeout 30m ./test/perf/...
+
+# perf-sample runs the perf bench suite and records results to a file for
+# regression monitoring. Sampling only — NOT a capacity commitment. Requires
+# `make env-up` (Redis + Kafka). See docs/design/HIGH-THROUGHPUT-INGESTION.md §6.
+perf-sample:
+	@set -a; [ -f test/env/.env ] && . ./test/env/.env; set +a; \
+	: "$${XFLOW_TEST_REDIS_ADDR:=localhost:$${REDIS_PORT:-6379}}"; \
+	: "$${XFLOW_TEST_KAFKA_BROKERS:=localhost:$${KAFKA_PORT:-9092}}"; \
+	export XFLOW_TEST_REDIS_ADDR XFLOW_TEST_KAFKA_BROKERS; \
+	./scripts/perf-sample.sh

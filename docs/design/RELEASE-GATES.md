@@ -48,6 +48,12 @@ xflow 采用分层发布门槛，不再用单个测试替代完整 release gate�
 | C1 store GORM tags 下沉 | ✅ | `4724eec` | `store/models.go` 不携带 ORM schema；`store/sqlstore/models.go` 维护 `dbExecution`/`dbNode`/`dbSignal` 内部持久化类型与转换 |
 | C2 Graph 深层不可变性 | ✅ | `b05b9a5` | `engine/graph.Graph` 字段私有化 + 17 个只读 accessor；defensive copy；无 setter |
 
+### D — 高吞吐路径（独立架构，不阻塞审批 release gate）
+
+| 项 | 状态 | 说明 |
+|---|---|---|
+| D1 采集与审批工作流分离 | ✅ 文档 + 采样脚本 | 两条独立参考架构（server workflow API + 外部 ingress / SDK cluster transient + KafkaTrigger）+ 容量基线方法 + `make perf-sample` 采样脚本。详见 [HIGH-THROUGHPUT-INGESTION](HIGH-THROUGHPUT-INGESTION.md)。审批工作流始终使用 durable mode；不得用 transient 容量承诺审批产能 |
+
 ## 3. G1 部署承诺与限制
 
 **可宣称**：
