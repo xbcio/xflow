@@ -10,7 +10,7 @@ executions. It also resolves the dual-write asymmetry described in
 
 | Store | Role | What happens on write failure |
 | --- | --- | --- |
-| Redis (`backend/asynq/redis_state.go`) | **Authoritative** for execution state, leases, scheduling counters, durable outbox, and runner handoff state. Scheduling is consistent iff Redis is consistent. | The operation fails; callers must not treat it as a successful state transition. |
+| Redis (`backend/distributed/redis_state.go`) | **Authoritative** for execution state, leases, scheduling counters, durable outbox, and runner handoff state. Scheduling is consistent iff Redis is consistent. | The operation fails; callers must not treat it as a successful state transition. |
 | `store.Store` (sqlstore) | **Audit trail** and query projection. It is not a scheduling source of truth. | Best-effort writes report failure through `AuditObserver` and atomic counters; accepted Redis scheduling state remains valid. |
 
 On restart, recovery reads Redis; SQL is never used to reconstruct scheduling

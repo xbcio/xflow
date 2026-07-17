@@ -12,7 +12,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/xbcio/xflow/backend/asynq"
+	"github.com/xbcio/xflow/backend/distributed"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/types"
 )
@@ -21,7 +21,7 @@ import (
 // real Redis instance (consumer disabled — no competing reader).
 func BenchmarkAsynqQueueEnqueueRealRedis(b *testing.B) {
 	addr := realRedisAddr(b)
-	bk, err := asynq.New(addr, nil, asynq.WithConsumer(false))
+	bk, err := distributed.New(addr, nil, distributed.WithConsumer(false))
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -45,7 +45,7 @@ func BenchmarkAsynqQueueEnqueueRealRedis(b *testing.B) {
 // waits (via ticker, no time.Sleep) until all have been processed.
 func BenchmarkAsynqQueueEnqueueConsumeRealRedis(b *testing.B) {
 	addr := realRedisAddr(b)
-	bk, err := asynq.New(addr, nil, asynq.WithConcurrency(4), asynq.WithConsumer(true))
+	bk, err := distributed.New(addr, nil, distributed.WithConcurrency(4), distributed.WithConsumer(true))
 	if err != nil {
 		b.Fatal(err)
 	}

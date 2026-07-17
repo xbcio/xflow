@@ -10,16 +10,15 @@ import (
 // Builder is returned by built-in node factory functions and Definition.New.
 // It is passed to WorkflowBuilder.AddNode.
 // HandlerCarrier is implemented by builders that can expose a process-local
-// handler instance for embedded SDK execution.
-type HandlerCarrier interface {
-	Handler() types.ActionHandler
-}
+// handler instance for embedded SDK execution. It is an alias for the public
+// types.HandlerProvider so internal callers and the SDK share one named
+// contract instead of duplicating anonymous interface assertions.
+type HandlerCarrier = types.HandlerProvider
 
 // TriggerHandlerCarrier is implemented by trigger builders that can expose a
-// process-local trigger handler instance for embedded SDK activation.
-type TriggerHandlerCarrier interface {
-	TriggerHandler() types.TriggerHandler
-}
+// process-local trigger handler instance for embedded SDK activation. It is an
+// alias for the public types.TriggerHandlerProvider.
+type TriggerHandlerCarrier = types.TriggerHandlerProvider
 
 const (
 	OnErrorStop       = types.OnErrorStop

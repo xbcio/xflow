@@ -22,16 +22,16 @@
 | `execution/` | 通用执行边界：`Dispatcher`、`Executor`、embedded `Runner`、embedded handler `Registry` | 具体队列、持久化、TCP/gRPC/WebSocket 实现 |
 | `backend/` | 可复用后端抽象：`Provider`、可选能力如 `Waiter` | 具体存储、具体队列、SDK API |
 | `backend/memory` | 可复用内存后端：内存 `StateStore`、内存 `TaskQueue`、embedded 生命周期、Waiter | Redis、Asynq、server 控制面、网络协议 |
-| `backend/asynq` | 可复用 Redis + Asynq 后端：Redis `StateStore`、Asynq `TaskQueue`、TimeoutMonitor、embedded 生命周期 | runner 协议、server 专属控制面、远端 runner 连接实现 |
+| `backend/distributed` | 可复用 Redis + Asynq 后端：Redis `StateStore`、Asynq `TaskQueue`、TimeoutMonitor、embedded 生命周期 | runner 协议、server 专属控制面、远端 runner 连接实现 |
 | `sdk/xflow` | 面向用户的 SDK API，组装 local / cluster 后端 | 业务调度算法、server 专属状态机 |
 
 后续 `cmd/server` / `cmd/runner` / `remote` 应复用 `engine/` 与
 `execution/` / `backend/*`，只新增服务层状态、协议和部署适配；不能反向依赖
 `sdk/internal`。
 
-> 命名约束：底层包按实现能力命名，SDK 工厂按用户部署模式命名。
+> 命名约束：底层包按运行形态命名（`memory` 进程内、`distributed` 分布式），SDK 工厂按用户部署模式命名。
 > 因此 SDK 保留 `NewLocal` / `NewCluster`，但底层实现是
-> `backend/memory` / `backend/asynq`。如果后续能力只属于 Control Plane，
+> `backend/memory` / `backend/distributed`。如果后续能力只属于 Control Plane，
 > 则放入服务层包，而不是放入通用 backend 包。
 
 ## 架构一览

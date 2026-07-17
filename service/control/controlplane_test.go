@@ -12,7 +12,7 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 
-	backendasynq "github.com/xbcio/xflow/backend/asynq"
+	"github.com/xbcio/xflow/backend/distributed"
 	backendmemory "github.com/xbcio/xflow/backend/memory"
 	"github.com/xbcio/xflow/observability/metrics"
 )
@@ -24,7 +24,11 @@ func TestNewControlPlaneRequiresBackend(t *testing.T) {
 	}
 }
 
-func TestControlPlaneHandlerServesSubmitWorkflow(t *testing.T) {
+// TestControlPlaneHandlerServesRunnerProtocol verifies that Handler() wires
+// the runner-protocol routes. Stage 3 narrowed control.Server.Handler to the
+// runner protocol only; workflow/control routes now live in the apiserver
+// workflow-control module.
+func TestControlPlaneHandlerServesRunnerProtocol(t *testing.T) {
 	cp, err := NewControlPlane(Config{Backend: backendmemory.New()})
 	if err != nil {
 		t.Fatal(err)
@@ -36,13 +40,14 @@ func TestControlPlaneHandlerServesSubmitWorkflow(t *testing.T) {
 	}
 	defer func() { _ = cp.Shutdown(context.Background()) }()
 
-	req := httptest.NewRequest(http.MethodPost, SubmitWorkflowPath, nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/runners/register", nil)
 	rec := httptest.NewRecorder()
 	cp.Handler().ServeHTTP(rec, req)
 
-	// Empty body -> 400, but this proves the route is wired, not 404.
+	// Empty body -> 400 (invalid JSON), but this proves the route is wired,
+	// not 404.
 	if rec.Code == http.StatusNotFound {
-		t.Fatalf("Handler() did not route %s, got 404", SubmitWorkflowPath)
+		t.Fatalf("Handler() did not route /v1/runners/register, got 404")
 	}
 }
 
@@ -125,7 +130,7 @@ func TestNewControlPlaneWiresPollWait(t *testing.T) {
 }
 
 // TestNewControlPlaneActivatesRedisLeaderElection guards against a regression
-// where *backendasynq.Backend only exposed leader election via a
+// where *distributed.Backend only exposed leader election via a
 // LeaderElector() getter rather than satisfying backend.LeaderElector itself.
 // NewControlPlane detects leader election support via a type assertion on
 // cfg.Backend directly (cfg.Backend.(backend.LeaderElector)); if *Backend
@@ -140,7 +145,7 @@ func TestNewControlPlaneActivatesRedisLeaderElection(t *testing.T) {
 	}
 	defer mr.Close()
 
-	b, err := backendasynq.New(mr.Addr(), nil)
+	b, err := distributed.New(mr.Addr(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,8 +154,8 @@ func TestNewControlPlaneActivatesRedisLeaderElection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := cp.elector.(*backendasynq.Backend); !ok {
-		t.Fatalf("cp.elector = %T, want *backendasynq.Backend (Redis leader election should activate, not fall back to AlwaysLeader)", cp.elector)
+	if _, ok := cp.elector.(*distributed.Backend); !ok {
+		t.Fatalf("cp.elector = %T, want *distributed.Backend (Redis leader election should activate, not fall back to AlwaysLeader)", cp.elector)
 	}
 }
 

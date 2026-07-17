@@ -462,61 +462,6 @@ func TestHTTPReportResultStaleTokenKeepsReplacementLeaseAndSeen(t *testing.T) {
 	}
 }
 
-func TestHTTPInspectSignalAndCancel(t *testing.T) {
-	fake := &fakeControlEngine{
-		inspectDetail: engine.ExecutionDetail{
-			ExecutionID: types.ExecutionID("exec-1"),
-			Status:      types.ExecutionStatusRunning,
-		},
-	}
-	server := httptest.NewServer(NewServer(fake, NewMemoryRunnerDirectory()).Handler())
-	defer server.Close()
-
-	resp, err := http.Get(server.URL + "/v1/executions/exec-1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("inspect status = %d, want 200", resp.StatusCode)
-	}
-	var detail engine.ExecutionDetail
-	if err := json.NewDecoder(resp.Body).Decode(&detail); err != nil {
-		t.Fatal(err)
-	}
-	if detail.ExecutionID != "exec-1" || detail.Status != types.ExecutionStatusRunning {
-		t.Fatalf("detail = %+v, want exec-1 running", detail)
-	}
-
-	postJSON(t, server.URL+"/v1/executions/exec-1/signal", signalRequest{
-		Name: "approve",
-		Data: map[string]any{"approved": true},
-	}, http.StatusOK, nil)
-	if fake.signalName != "approve" || fake.signalData["approved"] != true {
-		t.Fatalf("signal = %q %v, want approve approved=true", fake.signalName, fake.signalData)
-	}
-
-	postJSON(t, server.URL+"/v1/executions/exec-1/cancel", map[string]any{}, http.StatusOK, nil)
-	if fake.canceledID != "exec-1" {
-		t.Fatalf("canceled id = %q, want exec-1", fake.canceledID)
-	}
-}
-
-func TestHTTPInspectUnknownExecutionReturnsNotFound(t *testing.T) {
-	fake := &fakeControlEngine{inspectErr: errExecutionNotFound}
-	server := httptest.NewServer(NewServer(fake, NewMemoryRunnerDirectory()).Handler())
-	defer server.Close()
-
-	resp, err := http.Get(server.URL + "/v1/executions/missing")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404", resp.StatusCode)
-	}
-}
-
 type fakeControlEngine struct {
 	inspectDetail   engine.ExecutionDetail
 	inspectErr      error
@@ -553,6 +498,14 @@ func (f *fakeControlEngine) DeliverSignal(_ context.Context, _ types.ExecutionID
 
 func (f *fakeControlEngine) Cancel(_ context.Context, id types.ExecutionID) error {
 	f.canceledID = id
+	return nil
+}
+
+func (f *fakeControlEngine) Invoke(_ context.Context, _ *graph.Graph, _ string, _ map[string]any, _ ...*types.Runtime) (types.ExecutionID, error) {
+	return types.ExecutionID("exec-invoke"), nil
+}
+
+func (f *fakeControlEngine) RevokeSignal(_ context.Context, _ types.ExecutionID, _ string) error {
 	return nil
 }
 
@@ -679,8 +632,6 @@ func postJSONRaw(t *testing.T, url string, body any) *http.Response {
 	}
 	return resp
 }
-
-var errExecutionNotFound = errors.New("execution not found")
 
 func TestCorePollRecoversLeaseAfterFinalizeCrashWindow(t *testing.T) {
 	ctx := context.Background()

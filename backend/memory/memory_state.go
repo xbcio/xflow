@@ -221,8 +221,11 @@ func (s *memoryState) AcquireTaskLease(_ context.Context, lease *engine.TaskLeas
 		}
 	}
 
+	// Mirrors acquireTaskLeaseLua: attempt counts retries within one activation
+	// and restarts at 1 on a cyclic re-entry (a higher ActivationID), so a
+	// looping node cannot exhaust MaxAttempts across activations.
 	attempt := 1
-	if current != nil {
+	if current != nil && current.ActivationID == lease.Task.ActivationID {
 		attempt = current.Attempt + 1
 	}
 	s.nodes[key] = &engine.NodeSnapshot{
@@ -578,7 +581,7 @@ func (s *memoryState) PeekResumeTarget(_ context.Context, id types.ExecutionID, 
 }
 
 // DeliverSignalWithOutbox consumes a signal and records the resume delivery
-// intent in the outbox within the same locked transition, mirroring the asynq
+// intent in the outbox within the same locked transition, mirroring the distributed
 // durable path. A crash after this call still leaves the resume recoverable.
 func (s *memoryState) DeliverSignalWithOutbox(_ context.Context, id types.ExecutionID, signalName string, data map[string]any, intent engine.ResumeIntent) (string, *types.SignalPayload, bool, error) {
 	s.mu.Lock()

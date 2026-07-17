@@ -10,7 +10,7 @@ import (
 )
 
 func TestWebhookRuntimeHandlesRegisteredRoute(t *testing.T) {
-	rt := newWebhookRuntime()
+	rt := newWebhookRuntime(nil)
 	_, err := rt.Handle(http.MethodPost, "/hooks/orders", func(ctx context.Context, req *http.Request) (*types.TriggerEvent, error) {
 		return &types.TriggerEvent{ID: req.Header.Get("X-Event-ID")}, nil
 	})

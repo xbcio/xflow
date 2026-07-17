@@ -77,7 +77,7 @@ func TestSuspend_SignalAfterSuspend(t *testing.T) {
 		"test.echo":    &echoHandler{},
 		"test.suspend": &fakeSuspendHandler{},
 	}}
-	eng := newTestEngine(state, queue, reg)
+	eng := newTestEngine(t, state, queue, reg)
 	ctx := context.Background()
 
 	id, _ := eng.Submit(ctx, g, nil)
@@ -146,7 +146,7 @@ func TestSuspend_SignalBeforeSuspend(t *testing.T) {
 		"test.echo":    &echoHandler{},
 		"test.suspend": &fakeSuspendHandler{},
 	}}
-	eng := newTestEngine(state, queue, reg)
+	eng := newTestEngine(t, state, queue, reg)
 	ctx := context.Background()
 
 	id, _ := eng.Submit(ctx, g, nil)
@@ -194,7 +194,7 @@ func TestSuspend_Cancel(t *testing.T) {
 	reg := &fakeRegistry{handlers: map[string]types.ActionHandler{
 		"test.suspend": &fakeSuspendHandler{},
 	}}
-	eng := newTestEngine(state, queue, reg)
+	eng := newTestEngine(t, state, queue, reg)
 	ctx := context.Background()
 
 	id, _ := eng.Submit(ctx, g, nil)
@@ -244,7 +244,7 @@ func TestSuspend_MultiSignalWaitsForQuorumAndPassesAllSignals(t *testing.T) {
 		"test.echo":         &echoHandler{},
 		"test.multi_signal": &fakeMultiSignalHandler{},
 	}}
-	eng := newTestEngine(state, queue, reg)
+	eng := newTestEngine(t, state, queue, reg)
 	ctx := context.Background()
 
 	id, _ := eng.Submit(ctx, g, nil)
@@ -321,7 +321,7 @@ func TestSuspendPersistsInitialInputAsResumeBase(t *testing.T) {
 	reg := &fakeRegistry{handlers: map[string]types.ActionHandler{
 		"test.resume_base": &resumeBaseSuspendHandler{},
 	}}
-	eng := newTestEngine(state, queue, reg)
+	eng := newTestEngine(t, state, queue, reg)
 	ctx := context.Background()
 
 	id, err := eng.Submit(ctx, g, map[string]any{

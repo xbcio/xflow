@@ -163,8 +163,10 @@ func (f *fakeState) AcquireTaskLease(_ context.Context, lease *TaskLease) (*Node
 		}
 	}
 
+	// Mirrors acquireTaskLeaseLua: attempt counts retries within one activation
+	// and restarts at 1 on a cyclic re-entry (a higher ActivationID).
 	attempt := 1
-	if current != nil {
+	if current != nil && current.ActivationID == lease.Task.ActivationID {
 		attempt = current.Attempt + 1
 	}
 	f.nodes[key] = &NodeSnapshot{

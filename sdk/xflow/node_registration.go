@@ -3,7 +3,7 @@ package xflow
 import (
 	"fmt"
 
-	"github.com/xbcio/xflow/execution"
+	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/node/registry"
 	"github.com/xbcio/xflow/types"
 )
@@ -16,7 +16,7 @@ func (e *Engine) registerNodeDefinitions(defs []types.Handler) error {
 	if len(defs) == 0 {
 		return nil
 	}
-	lr, ok := e.registry.(*execution.Registry)
+	lr, ok := e.registry.(engine.HandlerRegistrar)
 	for _, def := range defs {
 		if def == nil {
 			continue
@@ -46,7 +46,7 @@ func (e *Engine) registerDirectHandlers(wf *WorkflowBuilder) error {
 	if len(wf.directHandlers()) == 0 {
 		return nil
 	}
-	lr, ok := e.registry.(*execution.Registry)
+	lr, ok := e.registry.(engine.HandlerRegistrar)
 	if !cfgAllowsDirectHandlers(e) || !ok {
 		names := make([]string, 0, len(wf.directHandlers()))
 		for n := range wf.directHandlers() {
@@ -54,7 +54,23 @@ func (e *Engine) registerDirectHandlers(wf *WorkflowBuilder) error {
 		}
 		return fmt.Errorf("nodes %v use direct action handlers (local mode only); with cluster, define custom nodes with node.Define and register consumer capabilities with xflow.WithNodes", names)
 	}
+	wfName := wf.name
+	if wfName == "" {
+		wfName = "<unnamed>"
+	}
 	for nodeName, h := range wf.directHandlers() {
+		// LocalNode handlers are stored in a process-global map keyed by node
+		// name (execution.Registry.nodeHandlers). Two workflows that declare a
+		// LocalNode with the same name therefore collide and the later
+		// registration silently shadows the earlier one. Surface it as a
+		// warning rather than leaving it to fail at runtime.
+		if existing, exists := e.directHandlerNames[nodeName]; exists {
+			msg := fmt.Sprintf("direct handler name %q is already registered by workflow %q; the new registration from workflow %q will shadow it", nodeName, existing, wfName)
+			if e.logger != nil {
+				e.logger.Warn(msg)
+			}
+		}
+		e.directHandlerNames[nodeName] = wfName
 		lr.RegisterNodeHandler(nodeName, h)
 	}
 	return nil
@@ -66,7 +82,7 @@ func (e *Engine) registerWorkflowHandlers(wf *WorkflowBuilder) error {
 	if wf == nil || len(wf.workflowHandlers()) == 0 {
 		return nil
 	}
-	lr, ok := e.registry.(*execution.Registry)
+	lr, ok := e.registry.(engine.HandlerRegistrar)
 	if !ok {
 		return fmt.Errorf("registry does not support workflow handler registration")
 	}

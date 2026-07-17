@@ -9,11 +9,13 @@ import (
 // letting the runner main loop stay transport-agnostic. Performance degrades to
 // polling, matching the HTTP-as-debug-entrypoint role.
 type httpStream struct {
-	client *Client
-	ctx    context.Context
-	recvCh chan ServerFrame
-	sendCh chan RunnerFrame
-	stop   context.CancelFunc
+	client    *Client
+	ctx       context.Context
+	recvCh    chan ServerFrame
+	sendCh    chan RunnerFrame
+	stop      context.CancelFunc
+	sessionID string
+	authToken string
 }
 
 // Connect returns an *httpStream that implements FrameStream using the HTTP
@@ -50,15 +52,19 @@ func (s *httpStream) run() {
 	}
 
 	// Register with the control plane.
-	if _, err := s.client.Register(s.ctx, RegisterRunnerRequest{
+	s.authToken = s.client.token
+	registerResp, err := s.client.Register(s.ctx, RegisterRunnerRequest{
 		RunnerID:     hello.RunnerID,
 		Concurrency:  hello.Concurrency,
 		Capabilities: hello.Capabilities,
 		Labels:       hello.Labels,
-	}); err != nil {
+		AuthToken:    s.authToken,
+	})
+	if err != nil {
 		s.recvCh <- ServerFrame{Ack: &AckFrame{Accepted: false, Error: err.Error()}}
 		return
 	}
+	s.sessionID = registerResp.SessionID
 
 	// Emit WELCOME.
 	s.recvCh <- ServerFrame{Welcome: &WelcomeFrame{RunnerID: hello.RunnerID, ServerTime: time.Now().Unix()}}
@@ -72,9 +78,11 @@ func (s *httpStream) run() {
 			case fr := <-s.sendCh:
 				if fr.Result != nil {
 					resp, err := s.client.ReportResult(s.ctx, ReportResultRequest{
-						RunnerID: hello.RunnerID,
-						Lease:    fr.Result.Lease,
-						Result:   fr.Result.Result,
+						RunnerID:  hello.RunnerID,
+						SessionID: s.sessionID,
+						Lease:     fr.Result.Lease,
+						Result:    fr.Result.Result,
+						AuthToken: s.authToken,
 					})
 					if err != nil {
 						s.recvCh <- ServerFrame{Ack: &AckFrame{LeaseID: fr.Result.LeaseID, Accepted: false, Error: err.Error()}}
@@ -103,9 +111,11 @@ func (s *httpStream) run() {
 
 		resp, err := s.client.Poll(s.ctx, PollTaskRequest{
 			RunnerID:     hello.RunnerID,
+			SessionID:    s.sessionID,
 			Capacity:     hello.Concurrency,
 			Capabilities: hello.Capabilities,
 			Labels:       hello.Labels,
+			AuthToken:    s.authToken,
 		})
 		if err != nil {
 			<-resultDone

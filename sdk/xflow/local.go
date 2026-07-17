@@ -2,7 +2,6 @@ package xflow
 
 import (
 	backendmemory "github.com/xbcio/xflow/backend/memory"
-	backendtransient "github.com/xbcio/xflow/backend/transient"
 	"github.com/xbcio/xflow/node/resource"
 	"github.com/xbcio/xflow/types"
 )
@@ -15,6 +14,12 @@ import (
 // process memory: stopping the process loses executions, signals, outputs, and
 // queued work. For distributed workers, durable Redis state, or API-only pods,
 // use NewCluster instead.
+//
+// NewLocal only supports ExecutionModeDefault. Transient execution mode is a
+// cluster/Redis-only concept: it needs Redis TTLs and Asynq's fire-and-forget
+// dispatch, which the in-memory backend cannot provide. Requesting
+// ExecutionModeTransient from NewLocal returns ErrTransientRequiresCluster; use
+// NewCluster instead.
 func NewLocal(opts ...Option) (*Engine, error) {
 	cfg := &engineConfig{concurrency: 4, allowDirectHandlers: true}
 	for _, o := range opts {
@@ -23,21 +28,13 @@ func NewLocal(opts ...Option) (*Engine, error) {
 	if err := validateExecutionModeConfig(cfg); err != nil {
 		return nil, err
 	}
+	if cfg.executionMode == ExecutionModeTransient {
+		return nil, ErrTransientRequiresCluster
+	}
 	if cfg.concurrency <= 0 {
 		cfg.concurrency = 4
 	}
 	pool := resolveResourcePool(cfg)
-	if cfg.executionMode == ExecutionModeTransient {
-		transientOpts := []backendtransient.Option{
-			backendtransient.WithConcurrency(cfg.concurrency),
-			backendtransient.WithActiveTTL(cfg.transientTTL),
-			backendtransient.WithCompletionTTL(cfg.transientCompletionTTL),
-		}
-		if pool != nil {
-			transientOpts = append(transientOpts, backendtransient.WithResourcePool(pool))
-		}
-		return newFromConfig(cfg, backendtransient.New(transientOpts...))
-	}
 	memOpts := []backendmemory.Option{backendmemory.WithConcurrency(cfg.concurrency)}
 	if pool != nil {
 		memOpts = append(memOpts, backendmemory.WithResourcePool(pool))

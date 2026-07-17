@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xbcio/xflow/backend/asynq"
+	"github.com/xbcio/xflow/backend/distributed"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
 	"github.com/xbcio/xflow/service/control"
@@ -88,7 +88,7 @@ func TestE2ELoadRealRedis(t *testing.T) {
 	flushAsynqKeysLoad(context.Background(), t, rdb)
 	_ = rdb.Close()
 
-	bk, err := asynq.New(addr, nil, asynq.WithConcurrency(8), asynq.WithConsumer(true))
+	bk, err := distributed.New(addr, nil, distributed.WithConcurrency(8), distributed.WithConsumer(true))
 	if err != nil {
 		t.Fatal(err)
 	}

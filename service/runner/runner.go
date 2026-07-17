@@ -18,6 +18,13 @@ import (
 // context and abort their current handler, so this is a safety upper bound.
 const defaultRunnerShutdownTimeout = 10 * time.Second
 
+// defaultReportTimeout bounds how long executeAndReport waits for the server
+// to acknowledge a task result. The report deliberately uses a background
+// context (so a cancelled run does not discard a computed result the server
+// still needs), but a bare Background has no upper bound: a hung network could
+// pin a worker forever. This cap releases the worker back to the pool.
+const defaultReportTimeout = 15 * time.Second
+
 type ProtocolClient interface {
 	Register(ctx context.Context, req protocol.RegisterRunnerRequest) (protocol.RegisterRunnerResponse, error)
 	Heartbeat(ctx context.Context, req protocol.HeartbeatRequest) (protocol.HeartbeatResponse, error)
@@ -115,6 +122,14 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 
 	if pollErr != nil {
+		// A worker or heartbeat may have already surfaced a more specific
+		// error; prefer it over the poll error when present so the caller
+		// reports the root cause rather than a transport side-effect.
+		select {
+		case err := <-errCh:
+			return err
+		default:
+		}
 		return pollErr
 	}
 	select {
@@ -189,15 +204,19 @@ func (r *Runner) workerLoop(ctx context.Context, sessionID string, leaseCh <-cha
 }
 
 // executeAndReport runs the handler and reports the result. The report uses a
-// background context so that run cancellation (e.g. SIGTERM) does not discard a
-// computed result the server still needs. inFlight is decremented on exit.
+// detached context with a bounded timeout so that run cancellation (e.g.
+// SIGTERM) does not discard a computed result the server still needs, while
+// still guaranteeing a hung network cannot pin the worker forever. inFlight is
+// decremented on exit.
 func (r *Runner) executeAndReport(ctx context.Context, sessionID string, lease *engine.TaskLease, inFlight *atomic.Int32, signalError func(error)) {
 	defer inFlight.Add(-1)
 	result, execErr := r.executor.Execute(ctx, lease)
 	if execErr != nil {
 		result = engine.TaskResult{Error: execErr}
 	}
-	reportResp, err := r.client.ReportResult(context.Background(), protocol.ReportResultRequest{
+	reportCtx, cancel := context.WithTimeout(context.Background(), defaultReportTimeout)
+	defer cancel()
+	reportResp, err := r.client.ReportResult(reportCtx, protocol.ReportResultRequest{
 		RunnerID:  r.config.RunnerID,
 		SessionID: sessionID,
 		Lease:     lease,

@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
-	"github.com/xbcio/xflow/backend/asynq"
+	"github.com/xbcio/xflow/backend/distributed"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/types"
@@ -34,11 +34,11 @@ func init() {
 }
 
 // benchStateStore runs CreateExecution + GetExecution b.N times against addr.
-// Setup (asynq.New) happens before b.ResetTimer so it is excluded from the
+// Setup (distributed.New) happens before b.ResetTimer so it is excluded from the
 // measured time.
 func benchStateStore(b *testing.B, addr string, skipOnErr bool) {
 	b.Helper()
-	bk, err := asynq.New(addr, nil, asynq.WithConsumer(false))
+	bk, err := distributed.New(addr, nil, distributed.WithConsumer(false))
 	if err != nil {
 		if skipOnErr {
 			b.Skipf("redis not reachable at %s: %v", addr, err)

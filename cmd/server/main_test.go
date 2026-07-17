@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	obslogger "github.com/xbcio/xflow/observability/logger"
+	"github.com/xbcio/xflow/service/apiserver"
 )
 
 func TestParseServerConfigSupportsMemoryMode(t *testing.T) {
@@ -64,14 +65,12 @@ func TestBuildLoggerUsesZap(t *testing.T) {
 	}
 }
 
-func TestRunServerBuildsControlPlaneFromMemoryConfig(t *testing.T) {
-	cfg := serverConfig{addr: "127.0.0.1:0", memory: true, concurrency: 2}
-	cp, cleanup, err := buildControlPlane(cfg)
+func TestRunServerBuildsFromMemoryConfig(t *testing.T) {
+	srv, err := apiserver.New(apiserver.Config{Concurrency: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer cleanup()
-	if cp == nil {
-		t.Fatal("buildControlPlane() returned nil ControlPlane")
+	if srv == nil {
+		t.Fatal("apiserver.New returned nil")
 	}
 }

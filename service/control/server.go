@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -15,13 +16,30 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
+// SubmitWorkflowPath is the HTTP path of the workflow submit endpoint.
+// Stage 3 moved the workflow/control routes out of Server.Handler (which now
+// serves only the runner protocol) and into the apiserver workflow-control
+// module. The constant is retained so external callers (sdk, integration and
+// perf tests) that build URLs against this path keep compiling; the route
+// itself is hosted by service/apiserver.
 const SubmitWorkflowPath = "/v1/workflows"
 
+// EngineFacade is the subset of *engine.Engine the runner-protocol Server and
+// the apiserver control modules need. *engine.Engine implements every method
+// below (Submit/Invoke/Inspect/DeliverSignal/RevokeSignal/Cancel plus the
+// embedded execution.Engine lease/routing surface), so it satisfies this
+// interface without any adapter.
 type EngineFacade interface {
 	execution.Engine
 	Submit(ctx context.Context, g *graph.Graph, params map[string]any, runtime ...*types.Runtime) (types.ExecutionID, error)
+	// Invoke starts a new execution from an explicit entry node. Implemented
+	// by *engine.Engine (engine.go).
+	Invoke(ctx context.Context, g *graph.Graph, entryNode string, input map[string]any, runtime ...*types.Runtime) (types.ExecutionID, error)
 	Inspect(ctx context.Context, id types.ExecutionID, nodeNames ...string) (engine.ExecutionDetail, error)
 	DeliverSignal(ctx context.Context, id types.ExecutionID, name string, data map[string]any) error
+	// RevokeSignal atomically revokes a delivered-but-unconsumed signal.
+	// Implemented by *engine.Engine (engine.go).
+	RevokeSignal(ctx context.Context, id types.ExecutionID, signalName string) error
 	Cancel(ctx context.Context, id types.ExecutionID) error
 	BuildTaskLease(ctx context.Context, task *engine.Task) (*engine.TaskLease, error)
 	CommitTaskResultWithOutcome(ctx context.Context, lease *engine.TaskLease, result engine.TaskResult) (engine.CommitOutcome, error)
@@ -29,20 +47,6 @@ type EngineFacade interface {
 
 type Server struct {
 	core *Core
-}
-
-type signalRequest struct {
-	Name string         `json:"name"`
-	Data map[string]any `json:"data,omitempty"`
-}
-
-type submitWorkflowRequest struct {
-	Workflow *types.WorkflowDef `json:"workflow"`
-	Params   map[string]any     `json:"params,omitempty"`
-}
-
-type submitWorkflowResponse struct {
-	ExecutionID types.ExecutionID `json:"execution_id"`
 }
 
 type errorResponse struct {
@@ -86,6 +90,7 @@ func WithHTTPPollWait(d time.Duration) ServerOption {
 
 func NewServer(engine EngineFacade, runners RunnerDirectory, opts ...ServerOption) *Server {
 	if runners == nil {
+		log.Printf("control: runners directory is nil; using in-memory runner directory; not safe for multi-replica deployments")
 		runners = NewMemoryRunnerDirectory()
 	}
 	srv := &Server{
@@ -104,38 +109,7 @@ func NewServer(engine EngineFacade, runners RunnerDirectory, opts ...ServerOptio
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	protocol.RegisterRunnerRoutes(mux, s)
-	mux.HandleFunc(SubmitWorkflowPath, s.handleSubmitWorkflow)
-	mux.HandleFunc("/v1/executions/", s.handleExecution)
 	return mux
-}
-
-func (s *Server) handleSubmitWorkflow(w http.ResponseWriter, r *http.Request) {
-	if !requireMethod(w, r, http.MethodPost) {
-		return
-	}
-	var req submitWorkflowRequest
-	if !decodeJSON(w, r, &req) {
-		return
-	}
-	if req.Workflow == nil {
-		writeError(w, http.StatusBadRequest, "workflow is required")
-		return
-	}
-	if s.core.engine == nil {
-		writeError(w, http.StatusInternalServerError, "engine not configured")
-		return
-	}
-	g, err := graph.Compile(req.Workflow)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	id, err := s.core.engine.Submit(r.Context(), g, req.Params)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, ErrInternalServer.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, submitWorkflowResponse{ExecutionID: id})
 }
 
 func (s *Server) HandleRegisterRunner(w http.ResponseWriter, r *http.Request) {
@@ -232,80 +206,6 @@ func httpTransportInfo(r *http.Request) TransportInfo {
 	return info
 }
 
-func (s *Server) handleExecution(w http.ResponseWriter, r *http.Request) {
-	path := strings.TrimPrefix(r.URL.Path, "/v1/executions/")
-	parts := strings.Split(strings.Trim(path, "/"), "/")
-	if len(parts) == 0 || parts[0] == "" {
-		writeError(w, http.StatusNotFound, "execution not found")
-		return
-	}
-	id := types.ExecutionID(parts[0])
-	if len(parts) == 1 && r.Method == http.MethodGet {
-		s.handleInspect(w, r, id)
-		return
-	}
-	if len(parts) == 2 && parts[1] == "signal" {
-		s.handleSignal(w, r, id)
-		return
-	}
-	if len(parts) == 2 && parts[1] == "cancel" {
-		s.handleCancel(w, r, id)
-		return
-	}
-	writeError(w, http.StatusNotFound, "route not found")
-}
-
-func (s *Server) handleInspect(w http.ResponseWriter, r *http.Request, id types.ExecutionID) {
-	if s.core.engine == nil {
-		writeError(w, http.StatusInternalServerError, "engine not configured")
-		return
-	}
-	detail, err := s.core.engine.Inspect(r.Context(), id)
-	if err != nil {
-		writeEngineError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, detail)
-}
-
-func (s *Server) handleSignal(w http.ResponseWriter, r *http.Request, id types.ExecutionID) {
-	if !requireMethod(w, r, http.MethodPost) {
-		return
-	}
-	var req signalRequest
-	if !decodeJSON(w, r, &req) {
-		return
-	}
-	if req.Name == "" {
-		writeError(w, http.StatusBadRequest, "name is required")
-		return
-	}
-	if s.core.engine == nil {
-		writeError(w, http.StatusInternalServerError, "engine not configured")
-		return
-	}
-	if err := s.core.engine.DeliverSignal(r.Context(), id, req.Name, req.Data); err != nil {
-		writeEngineError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]bool{"accepted": true})
-}
-
-func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request, id types.ExecutionID) {
-	if !requireMethod(w, r, http.MethodPost) {
-		return
-	}
-	if s.core.engine == nil {
-		writeError(w, http.StatusInternalServerError, "engine not configured")
-		return
-	}
-	if err := s.core.engine.Cancel(r.Context(), id); err != nil {
-		writeEngineError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]bool{"accepted": true})
-}
-
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 	defer func() { _ = r.Body.Close() }()
 	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
@@ -323,18 +223,6 @@ func requireMethod(w http.ResponseWriter, r *http.Request, method string) bool {
 	return false
 }
 
-// writeEngineError maps an engine error to an HTTP response. "not found"
-// messages map to 404 so clients can distinguish absent executions; every
-// other failure is collapsed to a generic 500 message — the underlying error
-// (Redis text, internal paths, backend details) must never reach a client.
-func writeEngineError(w http.ResponseWriter, err error) {
-	if strings.Contains(strings.ToLower(err.Error()), "not found") {
-		writeError(w, http.StatusNotFound, err.Error())
-		return
-	}
-	writeError(w, http.StatusInternalServerError, ErrInternalServer.Error())
-}
-
 // writeRunnerError maps transport-agnostic Core sentinel errors to HTTP status
 // codes. Known sentinels carry an actionable message; the catch-all default
 // returns a generic 500 so internal error details are not leaked.
@@ -345,7 +233,7 @@ func writeRunnerError(w http.ResponseWriter, err error) {
 	case errors.Is(err, ErrRunnerSessionStale):
 		writeError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, ErrRunnerNotFound):
-		writeError(w, http.StatusNotFound, err.Error())
+		writeError(w, http.StatusNotFound, "runner not found")
 	case errors.Is(err, ErrUnauthenticated):
 		writeError(w, http.StatusUnauthorized, err.Error())
 	default:

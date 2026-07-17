@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	backendtransient "github.com/xbcio/xflow/backend/transient"
+	"github.com/xbcio/xflow/engine"
 )
 
 // ExecutionMode controls the runtime state-retention contract used by NewLocal and NewCluster.
@@ -29,7 +29,12 @@ var (
 	// ErrTransientSignalsUnsupported reports that signals are unavailable in transient mode.
 	ErrTransientSignalsUnsupported = errors.New("xflow: signals are unsupported in transient execution mode")
 	// ErrTransientSuspendUnsupported reports that suspend nodes are unsupported in transient mode.
-	ErrTransientSuspendUnsupported = backendtransient.ErrTransientSuspendUnsupported
+	// It aliases engine.ErrSuspendUnsupported so the cluster (distributed) transient path
+	// surfaces the same sentinel the in-process path used to return.
+	ErrTransientSuspendUnsupported = engine.ErrSuspendUnsupported
+	// ErrTransientRequiresCluster reports that transient execution mode needs a
+	// cluster/Redis backend. NewLocal does not support transient mode; use NewCluster.
+	ErrTransientRequiresCluster = errors.New("xflow: transient execution mode requires a cluster/Redis backend, use NewCluster")
 )
 
 // WithExecutionMode selects the runtime state-retention contract.
@@ -41,6 +46,14 @@ func WithExecutionMode(mode ExecutionMode) Option {
 }
 
 // WithTransientTTL sets the active transient runtime-state TTL.
+//
+// It must exceed the maximum end-to-end wall-clock duration of any single
+// execution. Transient mode slides only the execution-scoped structural Redis
+// keys on each mutation; per-node and in-degree keys rely on the EX TTL set at
+// write/creation and are not continuously re-slid, so an execution running
+// longer than this TTL can lose a key mid-run and stall. Size it as a safety
+// ceiling above the slowest expected run, not as a business timeout. Only valid
+// with ExecutionModeTransient (cluster mode).
 func WithTransientTTL(ttl time.Duration) Option {
 	return func(c *engineConfig) {
 		c.transientTTL = ttl

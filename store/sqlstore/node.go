@@ -2,7 +2,6 @@ package sqlstore
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -20,12 +19,16 @@ type nodeRepo struct {
 
 var _ store.Nodes = (*nodeRepo)(nil)
 
+// UpsertNode updates the same column set as the memstore implementation
+// (see store/memstore UpsertNode): node_type, status, lease_id, lease_token,
+// attempt, output, port, signal_name, signal_config, timeout_at, updated_at.
+// Keep these in sync; store/memstore/contract_test.go guards the field set.
 func (r *nodeRepo) UpsertNode(ctx context.Context, rec *store.NodeRecord) error {
 	now := time.Now()
 	rec.CreatedAt = now
 	rec.UpdatedAt = now
 
-	return r.db.WithContext(ctx).
+	err := r.db.WithContext(ctx).
 		Clauses(clause.OnConflict{
 			Columns: []clause.Column{
 				{Name: "execution_id"},
@@ -37,6 +40,7 @@ func (r *nodeRepo) UpsertNode(ctx context.Context, rec *store.NodeRecord) error 
 			}),
 		}).
 		Create(rec).Error
+	return wrapDBErr(fmt.Sprintf("upsert node %q/%q", rec.ExecutionID, rec.NodeName), err)
 }
 
 func (r *nodeRepo) GetNode(ctx context.Context, id types.ExecutionID, name string) (*store.NodeRecord, error) {
@@ -44,16 +48,14 @@ func (r *nodeRepo) GetNode(ctx context.Context, id types.ExecutionID, name strin
 	err := r.db.WithContext(ctx).
 		Where("execution_id = ? AND node_name = ?", string(id), name).
 		First(&rec).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, store.ErrNotFound
-	}
-	if err != nil {
-		return nil, fmt.Errorf("get node %q/%q: %w", id, name, err)
+	if err := wrapDBErr(fmt.Sprintf("get node %q/%q", id, name), err); err != nil {
+		return nil, err
 	}
 	return &rec, nil
 }
 
 func (r *nodeRepo) ListNodes(ctx context.Context, id types.ExecutionID, opts store.ListOptions) ([]*store.NodeRecord, error) {
+	opts = opts.Normalized()
 	var records []*store.NodeRecord
 	err := r.db.WithContext(ctx).
 		Where("execution_id = ?", string(id)).
@@ -61,7 +63,10 @@ func (r *nodeRepo) ListNodes(ctx context.Context, id types.ExecutionID, opts sto
 		Limit(opts.Limit).
 		Offset(opts.Offset).
 		Find(&records).Error
-	return records, err
+	if err := wrapDBErr(fmt.Sprintf("list nodes %q", id), err); err != nil {
+		return nil, err
+	}
+	return records, nil
 }
 
 func (r *nodeRepo) ListSuspendedBySignal(ctx context.Context, id types.ExecutionID, signal string) ([]*store.NodeRecord, error) {
@@ -69,10 +74,14 @@ func (r *nodeRepo) ListSuspendedBySignal(ctx context.Context, id types.Execution
 	err := r.db.WithContext(ctx).
 		Where("execution_id = ? AND status = ? AND signal_name = ?", string(id), string(types.NodeStatusSuspended), signal).
 		Find(&records).Error
-	return records, err
+	if err := wrapDBErr(fmt.Sprintf("list suspended by signal %q/%q", id, signal), err); err != nil {
+		return nil, err
+	}
+	return records, nil
 }
 
 func (r *nodeRepo) ListExpiredSuspensions(ctx context.Context, now time.Time, opts store.ListOptions) ([]*store.NodeRecord, error) {
+	opts = opts.Normalized()
 	var records []*store.NodeRecord
 	err := r.db.WithContext(ctx).
 		Where("status = ? AND timeout_at IS NOT NULL AND timeout_at <= ?", string(types.NodeStatusSuspended), now).
@@ -80,5 +89,8 @@ func (r *nodeRepo) ListExpiredSuspensions(ctx context.Context, now time.Time, op
 		Limit(opts.Limit).
 		Offset(opts.Offset).
 		Find(&records).Error
-	return records, err
+	if err := wrapDBErr("list expired suspensions", err); err != nil {
+		return nil, err
+	}
+	return records, nil
 }

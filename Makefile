@@ -29,7 +29,7 @@ test-examples:
 # Concurrency stress suite. Gated behind the `concurrency` build tag so the
 # default `make test` stays fast. Spec: .claude/specs/lua-concurrency-tests.md
 test-concurrency:
-	go test -tags=concurrency ./backend/memory/ ./backend/asynq/ -race -count=3 -timeout 5m
+	go test -tags=concurrency ./backend/memory/ ./backend/distributed/ -race -count=3 -timeout 5m
 
 # ── Code quality ───────────────────────────────────────────────────────────────
 

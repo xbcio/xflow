@@ -84,7 +84,7 @@ func TestRetry_TransientErrorEventuallySucceeds(t *testing.T) {
 	queue := &fakeQueue{}
 	handler := &flakyHandler{failuresBefore: 2, err: errors.New("transient blip")}
 	reg := &fakeRegistry{handlers: map[string]types.ActionHandler{"test.flaky": handler}}
-	eng := newTestEngine(state, queue, reg)
+	eng := newTestEngine(t, state, queue, reg)
 	ctx := context.Background()
 
 	id, err := eng.Submit(ctx, g, nil)
@@ -124,7 +124,7 @@ func TestRetry_ErrorPortOutputCanRetryBeforeRoutingErrorPort(t *testing.T) {
 	queue := &fakeQueue{}
 	handler := &errorPortFlakyHandler{failuresBefore: 1}
 	reg := &fakeRegistry{handlers: map[string]types.ActionHandler{"test.error_port_flaky": handler}}
-	eng := newTestEngine(state, queue, reg)
+	eng := newTestEngine(t, state, queue, reg)
 	ctx := context.Background()
 
 	id, err := eng.Submit(ctx, g, nil)
@@ -156,7 +156,7 @@ func TestRetry_PermanentErrorSkipsRetry(t *testing.T) {
 	permanent := errors.Join(types.ErrPermanent, errors.New("config bad"))
 	handler := &alwaysFailHandler{err: permanent}
 	reg := &fakeRegistry{handlers: map[string]types.ActionHandler{"test.always_fail": handler}}
-	eng := newTestEngine(state, queue, reg)
+	eng := newTestEngine(t, state, queue, reg)
 	ctx := context.Background()
 
 	if _, err := eng.Submit(ctx, g, nil); err != nil {
@@ -194,7 +194,7 @@ func TestRetry_ExhaustionFallsThroughToOnError(t *testing.T) {
 	queue := &fakeQueue{}
 	handler := &alwaysFailHandler{err: errors.New("transient")}
 	reg := &fakeRegistry{handlers: map[string]types.ActionHandler{"test.always_fail": handler}}
-	eng := newTestEngine(state, queue, reg)
+	eng := newTestEngine(t, state, queue, reg)
 	ctx := context.Background()
 
 	id, err := eng.Submit(ctx, g, nil)
@@ -222,7 +222,7 @@ func TestRetry_DisabledByDefault(t *testing.T) {
 	queue := &fakeQueue{}
 	handler := &alwaysFailHandler{err: errors.New("boom")}
 	reg := &fakeRegistry{handlers: map[string]types.ActionHandler{"test.always_fail": handler}}
-	eng := newTestEngine(state, queue, reg)
+	eng := newTestEngine(t, state, queue, reg)
 	ctx := context.Background()
 	if _, err := eng.Submit(ctx, g, nil); err != nil {
 		t.Fatalf("Submit() error = %v", err)
@@ -267,7 +267,7 @@ func TestRetry_PerNodeOverridesWorkflowDefault(t *testing.T) {
 	queue := &fakeQueue{}
 	handler := &alwaysFailHandler{err: errors.New("transient")}
 	reg := &fakeRegistry{handlers: map[string]types.ActionHandler{"test.always_fail": handler}}
-	eng := newTestEngine(state, queue, reg)
+	eng := newTestEngine(t, state, queue, reg)
 	ctx := context.Background()
 	id, err := eng.Submit(ctx, g, nil)
 	if err != nil {

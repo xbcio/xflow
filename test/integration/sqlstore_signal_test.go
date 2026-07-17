@@ -31,7 +31,7 @@ func TestSQLStoreSaveSignalInsert(t *testing.T) {
 	if len(sigs) != 1 {
 		t.Fatalf("len(sigs)=%d, want 1", len(sigs))
 	}
-	if sigs[0].Status != "active" {
+	if sigs[0].Status != types.SignalStatusActive {
 		t.Fatalf("status=%q, want active", sigs[0].Status)
 	}
 	if !jsonEqual(sigs[0].Payload, []byte(`{"a":1}`)) {
@@ -62,7 +62,7 @@ func TestSQLStoreSaveSignalUpsert(t *testing.T) {
 	if !jsonEqual(sigs[0].Payload, []byte(`{"v":2}`)) {
 		t.Fatalf("payload=%s, want {\"v\":2} (upserted)", string(sigs[0].Payload))
 	}
-	if sigs[0].Status != "active" {
+	if sigs[0].Status != types.SignalStatusActive {
 		t.Fatalf("status=%q, want active", sigs[0].Status)
 	}
 }

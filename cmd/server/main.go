@@ -12,46 +12,27 @@
 //
 // It does NOT execute node handlers — that is the runner's job. Redis, Asynq,
 // and StateStore access stay on this side of the boundary.
+//
+// Transport hosting (listeners, TLS, timeouts, metrics server, graceful
+// shutdown) lives in service/apiserver; this command only parses flags,
+// builds the logger and authenticator, and invokes APIServer.Run.
 package main
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"flag"
 	"fmt"
 	"log"
-	"net"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
-
-	"github.com/xbcio/xflow/backend/asynq"
-	"github.com/xbcio/xflow/backend/memory"
 	"github.com/xbcio/xflow/engine"
 	obslogger "github.com/xbcio/xflow/observability/logger"
 	"github.com/xbcio/xflow/observability/metrics"
+	"github.com/xbcio/xflow/service/apiserver"
 	"github.com/xbcio/xflow/service/control"
-	"github.com/xbcio/xflow/service/protocol/runnerpb"
 	"go.uber.org/zap"
-)
-
-// HTTP server timeouts. ReadHeaderTimeout defends against Slowloris-style
-// slow-header attacks; the full Read/Write/Idle bounds cap a single request's
-// resource hold so a misbehaving client cannot exhaust server goroutines.
-const (
-	serverReadHeaderTimeout = 10 * time.Second
-	serverReadTimeout       = 30 * time.Second
-	serverWriteTimeout      = 30 * time.Second
-	serverIdleTimeout       = 120 * time.Second
-	// serverShutdownTimeout bounds graceful shutdown: in-flight handlers get
-	// this long to finish before the listener is force-closed.
-	serverShutdownTimeout = 15 * time.Second
 )
 
 type serverConfig struct {
@@ -119,67 +100,37 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	return cfg, nil
 }
 
-// buildControlPlane assembles a *control.ControlPlane from CLI config. The
-// returned cleanup function releases backend resources (Redis connections,
-// etc.) that NewControlPlane itself does not own — call it after
-// ControlPlane.Shutdown.
-func buildControlPlane(cfg serverConfig) (*control.ControlPlane, func(), error) {
-	logger, err := buildLogger(cfg)
-	if err != nil {
-		return nil, nil, err
-	}
-	metricsCollector := (*metrics.Metrics)(nil)
-	metricsCleanup := func() {}
-	if cfg.metricsAddr != "" {
-		metricsCollector = metrics.New()
-		stop, err := serveMetrics(cfg.metricsAddr, cfg.metricsPath, metricsCollector)
-		if err != nil {
-			return nil, nil, err
-		}
-		metricsCleanup = stop
-	}
-
-	auth, err := buildAuthenticator(cfg)
-	if err != nil {
-		metricsCleanup()
-		return nil, nil, err
-	}
-
-	ccfg := control.Config{Auth: auth, Logger: logger, Metrics: metricsCollector}
-	if cfg.memory {
-		ccfg.Backend = memory.New(memory.WithConcurrency(cfg.concurrency))
-	} else {
-		asynqOpts := []asynq.Option{asynq.WithConcurrency(cfg.concurrency), asynq.WithStateLogger(logger)}
-		if metricsCollector != nil {
-			asynqOpts = append(asynqOpts,
-				asynq.WithAuditObserver(metrics.NewAuditMetrics(metricsCollector)),
-				asynq.WithLeaseObserver(metrics.NewLeaseMetrics(metricsCollector)),
-			)
-		}
-		backend, err := asynq.New(cfg.redis, nil, asynqOpts...)
-		if err != nil {
-			metricsCleanup()
-			return nil, nil, err
-		}
-		ccfg.Backend = backend
-	}
-
-	cp, err := control.NewControlPlane(ccfg)
-	if err != nil {
-		metricsCleanup()
-		return nil, nil, err
-	}
-	return cp, metricsCleanup, nil
-}
-
 func runServer(cfg serverConfig) error {
-	cp, cleanup, err := buildControlPlane(cfg)
+	logger, err := buildLogger(cfg)
 	if err != nil {
 		return err
 	}
-	defer cleanup()
+	auth, err := buildAuthenticator(cfg)
+	if err != nil {
+		return err
+	}
 
-	tlsCfg, err := buildTLSConfig(cfg)
+	var m *metrics.Metrics
+	if cfg.metricsAddr != "" {
+		m = metrics.New()
+	}
+
+	apiCfg := apiserver.Config{
+		RedisAddr:   cfg.redis, // empty => in-memory backend
+		Concurrency: cfg.concurrency,
+		Auth:        auth,
+		Logger:      logger,
+		Metrics:     m,
+		HTTPAddr:    cfg.addr,
+		GRPCAddr:    cfg.grpcAddr,
+		MetricsAddr: cfg.metricsAddr,
+		MetricsPath: cfg.metricsPath,
+	}
+	if cfg.tlsCert != "" || cfg.tlsKey != "" || cfg.tlsClientCA != "" {
+		apiCfg.TLS = &apiserver.TLSConfig{Cert: cfg.tlsCert, Key: cfg.tlsKey, ClientCA: cfg.tlsClientCA}
+	}
+
+	srv, err := apiserver.New(apiCfg)
 	if err != nil {
 		return err
 	}
@@ -190,64 +141,7 @@ func runServer(cfg serverConfig) error {
 	// leader election) exit cleanly instead of being killed mid-transition.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-
-	if err := cp.Start(ctx); err != nil {
-		return err
-	}
-
-	var grpcStop func()
-	if cfg.grpcAddr != "" {
-		grpcStop, err = serveGRPCServer(cfg.grpcAddr, cp.GRPCServer(), tlsCfg)
-		if err != nil {
-			return err
-		}
-	}
-
-	httpSrv := &http.Server{
-		Addr:              cfg.addr,
-		Handler:           cp.Handler(),
-		TLSConfig:         tlsCfg,
-		ReadHeaderTimeout: serverReadHeaderTimeout,
-		ReadTimeout:       serverReadTimeout,
-		WriteTimeout:      serverWriteTimeout,
-		IdleTimeout:       serverIdleTimeout,
-	}
-
-	listenErr := make(chan error, 1)
-	go func() {
-		if tlsCfg == nil {
-			listenErr <- httpSrv.ListenAndServe()
-		} else {
-			log.Printf("xflow-server: HTTPS listening on %s (mTLS=%v)", cfg.addr, tlsCfg.ClientAuth == tls.RequireAndVerifyClientCert)
-			listenErr <- httpSrv.ListenAndServeTLS("", "")
-		}
-	}()
-
-	select {
-	case <-ctx.Done():
-		log.Println("xflow-server: shutdown signal received, draining...")
-	case err := <-listenErr:
-		if err != nil && err != http.ErrServerClosed {
-			if grpcStop != nil {
-				grpcStop()
-			}
-			_ = cp.Shutdown(context.Background())
-			return err
-		}
-	}
-
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), serverShutdownTimeout)
-	defer cancel()
-	if grpcStop != nil {
-		grpcStop()
-	}
-	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
-		log.Printf("xflow-server: http shutdown error: %v", err)
-	}
-	if err := cp.Shutdown(context.Background()); err != nil {
-		log.Printf("xflow-server: control plane shutdown error: %v", err)
-	}
-	return nil
+	return srv.Run(ctx)
 }
 
 func buildLogger(cfg serverConfig) (engine.Logger, error) {
@@ -270,61 +164,6 @@ func buildLogger(cfg serverConfig) (engine.Logger, error) {
 	return obslogger.NewZapLogger(log), nil
 }
 
-func serveMetrics(addr string, path string, metrics *metrics.Metrics) (func(), error) {
-	if path == "" {
-		path = "/metrics"
-	}
-	mux := http.NewServeMux()
-	mux.Handle(path, metrics.Handler())
-	srv := &http.Server{Addr: addr, Handler: mux}
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		return nil, err
-	}
-	go func() {
-		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
-			log.Printf("metrics server stopped: %v", err)
-		}
-	}()
-	return func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(ctx)
-	}, nil
-}
-
-// buildTLSConfig resolves the server TLS config from CLI flags. Returns nil
-// when no cert was configured (plaintext, dev default).
-func buildTLSConfig(cfg serverConfig) (*tls.Config, error) {
-	switch {
-	case cfg.tlsCert == "" && cfg.tlsKey == "" && cfg.tlsClientCA == "":
-		return nil, nil
-	case cfg.tlsCert == "" || cfg.tlsKey == "":
-		return nil, fmt.Errorf("--tls-cert and --tls-key must be provided together")
-	}
-	cert, err := tls.LoadX509KeyPair(cfg.tlsCert, cfg.tlsKey)
-	if err != nil {
-		return nil, fmt.Errorf("load tls keypair: %w", err)
-	}
-	tlsCfg := &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		MinVersion:   tls.VersionTLS12,
-	}
-	if cfg.tlsClientCA != "" {
-		caPEM, err := os.ReadFile(cfg.tlsClientCA)
-		if err != nil {
-			return nil, fmt.Errorf("read tls client CA: %w", err)
-		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(caPEM) {
-			return nil, fmt.Errorf("tls client CA %q contains no valid certs", cfg.tlsClientCA)
-		}
-		tlsCfg.ClientCAs = pool
-		tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
-	}
-	return tlsCfg, nil
-}
-
 // buildAuthenticator resolves the runner-protocol authenticator from CLI
 // flags. Empty --auth-policy falls back to the permissive dev default.
 func buildAuthenticator(cfg serverConfig) (control.Authenticator, error) {
@@ -344,27 +183,4 @@ func buildAuthenticator(cfg serverConfig) (control.Authenticator, error) {
 	}
 	log.Printf("xflow-server: runner auth policy loaded from %q (%s)", cfg.authPolicy, mode)
 	return store, nil
-}
-
-// serveGRPCServer starts the gRPC Runner Protocol server on its own listener,
-// serving the RunnerProtocolServer implementation the ControlPlane already
-// assembled (so HTTP and gRPC transports share the same engine/runner state).
-func serveGRPCServer(addr string, impl runnerpb.RunnerProtocolServer, tlsCfg *tls.Config) (func(), error) {
-	lis, err := net.Listen("tcp", addr)
-	if err != nil {
-		return nil, err
-	}
-	var opts []grpc.ServerOption
-	if tlsCfg != nil {
-		opts = append(opts, grpc.Creds(credentials.NewTLS(tlsCfg)))
-		log.Printf("xflow-server: gRPC listening on %s (mTLS=%v)", addr, tlsCfg.ClientAuth == tls.RequireAndVerifyClientCert)
-	}
-	grpcServer := grpc.NewServer(opts...)
-	runnerpb.RegisterRunnerProtocolServer(grpcServer, impl)
-	go func() {
-		if serveErr := grpcServer.Serve(lis); serveErr != nil {
-			log.Printf("gRPC server stopped: %v", serveErr)
-		}
-	}()
-	return grpcServer.GracefulStop, nil
 }

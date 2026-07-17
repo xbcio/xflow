@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/xbcio/xflow/backend"
+	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/node/registry"
 	"github.com/xbcio/xflow/types"
 )
@@ -25,7 +26,11 @@ type activatedSub struct {
 }
 
 func newTriggerRuntime(e *Engine, p backend.TriggerPrimitives) *triggerRuntime {
-	return &triggerRuntime{eng: e, primitives: p, webhooks: newWebhookRuntime(), subs: make(map[string]types.TriggerSubscription)}
+	var logger engine.Logger
+	if e != nil {
+		logger = e.logger
+	}
+	return &triggerRuntime{eng: e, primitives: p, webhooks: newWebhookRuntime(logger), subs: make(map[string]types.TriggerSubscription)}
 }
 
 func (r *triggerRuntime) ReconcileWorkflow(ctx context.Context, rec backend.WorkflowRecord) error {

@@ -28,7 +28,7 @@ func TestEngineLoopSplitStaleBatchCannotFinalizeReclaimedParent(t *testing.T) {
 
 	state := newFakeState()
 	queue := &fakeQueue{}
-	eng := newTestEngine(state, queue, &fakeRegistry{})
+	eng := newTestEngine(t, state, queue, &fakeRegistry{})
 	ctx := context.Background()
 	id, err := eng.Submit(ctx, g, nil)
 	if err != nil {

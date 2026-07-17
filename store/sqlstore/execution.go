@@ -2,7 +2,6 @@ package sqlstore
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"gorm.io/gorm"
@@ -19,7 +18,7 @@ type executionRepo struct {
 var _ store.Executions = (*executionRepo)(nil)
 
 func (r *executionRepo) CreateExecution(ctx context.Context, rec *store.ExecutionRecord) error {
-	return r.db.WithContext(ctx).Create(rec).Error
+	return wrapDBErr(fmt.Sprintf("create execution %q", rec.ExecutionID), r.db.WithContext(ctx).Create(rec).Error)
 }
 
 func (r *executionRepo) UpdateExecutionStatus(ctx context.Context, id types.ExecutionID, status types.ExecutionStatus, errMsg string) error {
@@ -30,8 +29,8 @@ func (r *executionRepo) UpdateExecutionStatus(ctx context.Context, id types.Exec
 			"status":    string(status),
 			"error_msg": errMsg,
 		})
-	if result.Error != nil {
-		return fmt.Errorf("update execution status %q: %w", id, result.Error)
+	if err := wrapDBErr(fmt.Sprintf("update execution status %q", id), result.Error); err != nil {
+		return err
 	}
 	if result.RowsAffected == 0 {
 		return fmt.Errorf("update execution status %q: %w", id, store.ErrNotFound)
@@ -44,11 +43,8 @@ func (r *executionRepo) GetExecution(ctx context.Context, id types.ExecutionID) 
 	err := r.db.WithContext(ctx).
 		Where("execution_id = ?", string(id)).
 		First(&rec).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, store.ErrNotFound
-	}
-	if err != nil {
-		return nil, fmt.Errorf("get execution %q: %w", id, err)
+	if err := wrapDBErr(fmt.Sprintf("get execution %q", id), err); err != nil {
+		return nil, err
 	}
 	return &rec, nil
 }

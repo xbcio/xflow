@@ -132,7 +132,7 @@ func (e *Engine) Submit(ctx context.Context, g *graph.Graph, params map[string]a
 		ID:     id,
 		Graph:  g,
 		Status: types.ExecutionStatusRunning,
-		Params: params,
+		Params: cloneMap(params),
 	}
 	attachTraceMetadata(ctx, snap)
 	if len(runtime) > 0 {
@@ -153,7 +153,7 @@ func (e *Engine) Invoke(ctx context.Context, g *graph.Graph, entryName string, p
 		ID:     id,
 		Graph:  g,
 		Status: types.ExecutionStatusRunning,
-		Params: params,
+		Params: cloneMap(params),
 	}
 	attachTraceMetadata(ctx, snap)
 	if len(runtime) > 0 {
@@ -229,8 +229,14 @@ func (e *Engine) BuildTaskLease(ctx context.Context, t *Task) (*TaskLease, error
 		return nil, e.classifyLeaseAcquireFailure(g, t, prev, issuedAt)
 	}
 
+	// Attempt counts retries WITHIN a single activation. A cyclic node that
+	// re-enters carries a new (higher) ActivationID; that is a fresh execution
+	// of the node, not a retry, so the attempt counter must restart at 1.
+	// Carrying prev.Attempt+1 across activation boundaries would let a node that
+	// loops N times exhaust its per-activation MaxAttempts budget and be
+	// misclassified as permanently failed.
 	lease.Attempt = 1
-	if prev != nil {
+	if prev != nil && prev.ActivationID == t.ActivationID {
 		lease.Attempt = prev.Attempt + 1
 	}
 
@@ -606,6 +612,20 @@ func (e *Engine) loadActiveGraph(ctx context.Context, id types.ExecutionID) (*gr
 	g, ok := e.graphs[id]
 	e.mu.RUnlock()
 	if ok {
+		// A cache hit is not sufficient to treat the execution as active: a
+		// concurrent Cancel or a delayed EvictExecution can leave a terminal
+		// execution's graph in the cache. Confirm the execution is still
+		// non-terminal before handing the graph to a lease/schedule path,
+		// otherwise a lease could be issued against an already-finished
+		// execution. Evict the stale entry so we do not re-check it forever.
+		snap, err := e.state.GetExecution(ctx, id)
+		if err != nil {
+			return nil, false, err
+		}
+		if snap == nil || types.IsTerminalExecutionStatus(snap.Status) {
+			e.EvictExecution(id)
+			return nil, false, nil
+		}
 		return g, true, nil
 	}
 
@@ -628,38 +648,41 @@ func (e *Engine) loadActiveGraph(ctx context.Context, id types.ExecutionID) (*gr
 	return g, true, nil
 }
 
+// classifyNodeForTask captures the route-staleness checks shared between
+// checkTaskRouteActive and classifyLeaseAcquireFailure. It returns nil if the
+// task is still routable to the node, otherwise the reason the route is
+// inactive (ErrExecutionInactive). The lease-active check is intentionally
+// handled by classifyLeaseAcquireFailure only.
+func (e *Engine) classifyNodeForTask(g *graph.Graph, t *Task, ns *NodeSnapshot) error {
+	if g.AllowCycles && t.ActivationID <= 0 {
+		return ErrExecutionInactive
+	}
+	if ns != nil && g.AllowCycles && ns.ActivationID > t.ActivationID {
+		return ErrExecutionInactive
+	}
+	if ns != nil && types.IsTerminalNodeStatus(ns.Status) && (!g.AllowCycles || ns.ActivationID >= t.ActivationID) {
+		return ErrExecutionInactive
+	}
+	if ns != nil && ns.Status == types.NodeStatusCommitting {
+		return ErrExecutionInactive
+	}
+	return nil
+}
+
 func (e *Engine) checkTaskRouteActive(ctx context.Context, g *graph.Graph, t *Task) (*NodeSnapshot, error) {
 	ns, err := e.state.GetNode(ctx, t.ExecutionID, t.NodeName)
 	if err != nil {
 		return nil, err
 	}
-	if g.AllowCycles && t.ActivationID <= 0 {
-		return nil, ErrExecutionInactive
-	}
-	if ns != nil && g.AllowCycles && ns.ActivationID > t.ActivationID {
-		return nil, ErrExecutionInactive
-	}
-	if ns != nil && types.IsTerminalNodeStatus(ns.Status) && (!g.AllowCycles || ns.ActivationID >= t.ActivationID) {
-		return nil, ErrExecutionInactive
-	}
-	if ns != nil && ns.Status == types.NodeStatusCommitting {
-		return nil, ErrExecutionInactive
+	if cerr := e.classifyNodeForTask(g, t, ns); cerr != nil {
+		return nil, cerr
 	}
 	return ns, nil
 }
 
 func (e *Engine) classifyLeaseAcquireFailure(g *graph.Graph, t *Task, ns *NodeSnapshot, now time.Time) error {
-	if g.AllowCycles && t.ActivationID <= 0 {
-		return ErrExecutionInactive
-	}
-	if ns != nil && g.AllowCycles && ns.ActivationID > t.ActivationID {
-		return ErrExecutionInactive
-	}
-	if ns != nil && types.IsTerminalNodeStatus(ns.Status) && (!g.AllowCycles || ns.ActivationID >= t.ActivationID) {
-		return ErrExecutionInactive
-	}
-	if ns != nil && ns.Status == types.NodeStatusCommitting {
-		return ErrExecutionInactive
+	if cerr := e.classifyNodeForTask(g, t, ns); cerr != nil {
+		return cerr
 	}
 	if ns != nil && ns.Status == types.NodeStatusRunning && ns.LeaseToken != "" {
 		deadline := ns.LeaseIssuedAt.Add(ns.LeaseTTL)
@@ -855,6 +878,11 @@ func cloneRuntime(runtime *types.Runtime) *types.Runtime {
 	if runtime == nil {
 		return nil
 	}
+	// NOTE: types.Runtime currently only has Vars. Any new field added to
+	// types.Runtime MUST be explicitly copied here — otherwise the clone will
+	// silently drop it, leading to shared-aliasing or lost-data bugs across
+	// snapshots. Do not switch to a value copy without auditing deep-clone
+	// semantics for any new map/slice/pointer fields.
 	cp := &types.Runtime{}
 	if runtime.Vars != nil {
 		cp.Vars = cloneMap(runtime.Vars)

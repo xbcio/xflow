@@ -58,7 +58,7 @@ func TestSQLStoreTransactionCommit(t *testing.T) {
 		t.Fatalf("GetNode after commit: got=%v err=%v", got, err)
 	}
 	sigs, err := p.ListSignalsByNames(ctx, execID, []string{"sig1"}, store.DefaultListOptions())
-	if err != nil || len(sigs) != 1 || sigs[0].Status != "active" {
+	if err != nil || len(sigs) != 1 || sigs[0].Status != types.SignalStatusActive {
 		t.Fatalf("ListSignalsByNames after commit: sigs=%v err=%v", sigs, err)
 	}
 }

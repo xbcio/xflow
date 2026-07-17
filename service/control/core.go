@@ -121,7 +121,7 @@ func (c *Core) register(ctx context.Context, req protocol.RegisterRunnerRequest,
 		Now:          time.Now(),
 	})
 	if err != nil {
-		return protocol.RegisterRunnerResponse{}, normalizeRunnerError(err)
+		return protocol.RegisterRunnerResponse{}, normalizeRunnerError(err, c.logger, "register")
 	}
 	return protocol.RegisterRunnerResponse{RunnerID: req.RunnerID, SessionID: session.SessionID}, nil
 }
@@ -145,7 +145,7 @@ func (c *Core) heartbeat(ctx context.Context, req protocol.HeartbeatRequest, inf
 		InFlight:  req.InFlight,
 		Now:       at,
 	}); err != nil {
-		return protocol.HeartbeatResponse{}, normalizeRunnerError(err)
+		return protocol.HeartbeatResponse{}, normalizeRunnerError(err, c.logger, "heartbeat")
 	}
 	return protocol.HeartbeatResponse{ServerTime: time.Now().Unix()}, nil
 }
@@ -167,7 +167,7 @@ func (c *Core) pollTask(ctx context.Context, req protocol.PollTaskRequest, info 
 			Now:          time.Now(),
 		})
 		if err != nil {
-			return protocol.PollTaskResponse{}, normalizeRunnerError(err)
+			return protocol.PollTaskResponse{}, normalizeRunnerError(err, c.logger, "poll")
 		}
 		if !ok {
 			return protocol.PollTaskResponse{Wait: c.pollWait}, nil
@@ -197,7 +197,7 @@ func (c *Core) pollTask(ctx context.Context, req protocol.PollTaskRequest, info 
 		case err == nil:
 			if err := c.runners.FinalizeClaim(ctx, claim.ClaimID, lease); err != nil {
 				_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimRequeue)
-				return protocol.PollTaskResponse{}, normalizeRunnerError(err)
+				return protocol.PollTaskResponse{}, normalizeRunnerError(err, c.logger, "poll")
 			}
 			return protocol.PollTaskResponse{Lease: lease}, nil
 		case errors.Is(err, engine.ErrLeaseAlreadyActive):
@@ -208,7 +208,7 @@ func (c *Core) pollTask(ctx context.Context, req protocol.PollTaskRequest, info 
 			if recoverErr == nil {
 				if finalizeErr := c.runners.FinalizeClaim(ctx, claim.ClaimID, recovered); finalizeErr != nil {
 					_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimRequeue)
-					return protocol.PollTaskResponse{}, normalizeRunnerError(finalizeErr)
+					return protocol.PollTaskResponse{}, normalizeRunnerError(finalizeErr, c.logger, "poll")
 				}
 				return protocol.PollTaskResponse{Lease: recovered}, nil
 			}
@@ -247,7 +247,7 @@ func (c *Core) reportResult(ctx context.Context, req protocol.ReportResultReques
 		return protocol.ReportResultResponse{}, ErrEngineNotConfigured
 	}
 	if err := c.runners.ValidateSession(ctx, req.RunnerID, req.SessionID); err != nil {
-		return protocol.ReportResultResponse{}, normalizeRunnerError(err)
+		return protocol.ReportResultResponse{}, normalizeRunnerError(err, c.logger, "report_result")
 	}
 	outcome, err := c.engine.CommitTaskResultWithOutcome(ctx, req.Lease, req.Result)
 	if outcome.ReleasesLeasedCapacity() {
@@ -260,14 +260,14 @@ func (c *Core) reportResult(ctx context.Context, req protocol.ReportResultReques
 			LeaseToken:   req.Lease.LeaseToken,
 			RemoveSeen:   removeSeen,
 		}); err != nil {
-			return protocol.ReportResultResponse{}, normalizeRunnerError(err)
+			return protocol.ReportResultResponse{}, normalizeRunnerError(err, c.logger, "report_result")
 		}
 	}
 	if err != nil {
 		if errors.Is(err, engine.ErrInvalidLeaseToken) {
 			return protocol.ReportResultResponse{Accepted: false, Error: err.Error()}, err
 		}
-		return protocol.ReportResultResponse{}, normalizeRunnerError(err)
+		return protocol.ReportResultResponse{}, normalizeRunnerError(err, c.logger, "report_result")
 	}
 	return protocol.ReportResultResponse{Accepted: true}, nil
 }
@@ -278,9 +278,9 @@ func (c *Core) reportResult(ctx context.Context, req protocol.ReportResultReques
 // messages like "runner not found". Any other error is collapsed to the
 // generic ErrInternalServer: the full error never reaches a client, since it
 // may contain Redis error text, internal paths, or backend details that aid
-// reconnaissance. Callers should log the original error before normalizing
-// when the underlying failure is unexpected.
-func normalizeRunnerError(err error) error {
+// reconnaissance. The original error is logged server-side (with op) for the
+// default branch only — known sentinels are expected outcomes and not logged.
+func normalizeRunnerError(err error, logger engine.Logger, op string) error {
 	if err == nil {
 		return nil
 	}
@@ -296,6 +296,9 @@ func normalizeRunnerError(err error) error {
 		errors.Is(err, engine.ErrInvalidLeaseToken):
 		return err
 	default:
+		if logger != nil {
+			logger.Error("runner op failed", "op", op, "err", err)
+		}
 		return ErrInternalServer
 	}
 }

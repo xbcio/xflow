@@ -19,7 +19,7 @@ full path under the root module.
 | `types/` | Public DSL/runtime contracts: `WorkflowDef`, handler interfaces, descriptors, statuses, `Result` — zero impl deps |
 | `node/` | Public node DSL and builtin implementations (`node.HTTP`, `node.Function`, `node.KafkaTrigger`, etc.) |
 | `execution/` | Reusable embedded task execution boundary: Dispatcher, Runner, Registry |
-| `backend/` | Reusable backend providers: `backend.go` (`Provider` + optional capabilities), `memory/` (in-memory StateStore + goroutine pool TaskQueue), `asynq/` (Redis StateStore + Asynq TaskQueue) |
+| `backend/` | Reusable backend providers: `backend.go` (`Provider` + optional capabilities), `memory/` (in-memory StateStore + goroutine pool TaskQueue), `distributed/` (Redis StateStore + Asynq TaskQueue) |
 | `store/` | Public persistence interfaces + domain models; `memstore/` (in-memory), `sqlstore/` (dialect-agnostic GORM; `sqlstore/mysqlstore/` for MySQL) |
 | `service/` | Server/runner control-plane and execution-plane code: `service/control` (dispatcher, lease sweeper, HTTP/gRPC server), `service/protocol` (Runner Protocol DTOs/client), `service/runner` (runner-side execution) |
 | `sdk/` | Public SDK grouping: `sdk/xflow` (`package xflow`, `NewLocal`/`NewCluster` factories, WorkflowBuilder), `sdk/examples` (runnable `.go` usage examples) |

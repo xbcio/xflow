@@ -32,9 +32,14 @@ func taskNames(tasks []*Task) []string {
 
 var testRegistries sync.Map
 
-func newTestEngine(state StateStore, queue TaskQueue, reg HandlerRegistry) *Engine {
+func newTestEngine(t *testing.T, state StateStore, queue TaskQueue, reg HandlerRegistry) *Engine {
+	t.Helper()
 	eng := New(state, queue)
 	testRegistries.Store(eng, reg)
+	// testRegistries is a package-level sync.Map that is never garbage
+	// collected between tests. Delete the entry on cleanup to avoid leaking
+	// *Engine keys (and their registered handlers) across the suite.
+	t.Cleanup(func() { testRegistries.Delete(eng) })
 	return eng
 }
 
@@ -117,7 +122,7 @@ func TestScheduler_LinearChain(t *testing.T) {
 	state := newFakeState()
 	queue := &fakeQueue{}
 	reg := &fakeRegistry{handlers: map[string]types.ActionHandler{"test.echo": &echoHandler{}}}
-	eng := newTestEngine(state, queue, reg)
+	eng := newTestEngine(t, state, queue, reg)
 	ctx := context.Background()
 
 	id, err := eng.Submit(ctx, g, nil)
@@ -175,7 +180,7 @@ func TestEngineBuildTaskLeaseKeepsStaticVarsAndRuntimeVarsSeparate(t *testing.T)
 	state := newFakeState()
 	queue := &fakeQueue{}
 	reg := &fakeRegistry{handlers: map[string]types.ActionHandler{"test.echo": &echoHandler{}}}
-	eng := newTestEngine(state, queue, reg)
+	eng := newTestEngine(t, state, queue, reg)
 	ctx := context.Background()
 
 	_, err = eng.Submit(ctx, g, map[string]any{"ticket": "VULN-1"}, &types.Runtime{
@@ -225,7 +230,7 @@ func TestEngineBuildTaskLeaseIncludesSubmittedTraceMetadata(t *testing.T) {
 	state := newFakeState()
 	queue := &fakeQueue{}
 	reg := &fakeRegistry{handlers: map[string]types.ActionHandler{"test.echo": &echoHandler{}}}
-	eng := newTestEngine(state, queue, reg)
+	eng := newTestEngine(t, state, queue, reg)
 	ctx := WithSpanID(WithTraceID(context.Background(), "trace-123"), "span-456")
 
 	_, err = eng.Submit(ctx, g, nil)
@@ -269,7 +274,7 @@ func TestInvokeStartsOnlyNamedEntryAndDoesNotBlockSharedDownstream(t *testing.T)
 	state := newFakeState()
 	queue := &fakeQueue{}
 	reg := &fakeRegistry{handlers: map[string]types.ActionHandler{"test.echo": &echoHandler{}}}
-	eng := newTestEngine(state, queue, reg)
+	eng := newTestEngine(t, state, queue, reg)
 
 	id, err := eng.Invoke(context.Background(), g, "kafka", map[string]any{"id": "e1"})
 	if err != nil {
@@ -306,7 +311,7 @@ func TestScheduler_FanOutFanIn(t *testing.T) {
 	state := newFakeState()
 	queue := &fakeQueue{}
 	reg := &fakeRegistry{handlers: map[string]types.ActionHandler{"test.echo": &echoHandler{}}}
-	eng := newTestEngine(state, queue, reg)
+	eng := newTestEngine(t, state, queue, reg)
 	ctx := context.Background()
 
 	id, _ := eng.Submit(ctx, g, nil)
@@ -365,7 +370,7 @@ func TestScheduler_SkipCascade(t *testing.T) {
 	reg := &fakeRegistry{handlers: map[string]types.ActionHandler{
 		"test.echo": &echoHandler{},
 	}}
-	eng := newTestEngine(state, queue, reg)
+	eng := newTestEngine(t, state, queue, reg)
 	ctx := context.Background()
 
 	id, _ := eng.Submit(ctx, g, nil)
@@ -408,7 +413,7 @@ func TestScheduler_ErrorFatal(t *testing.T) {
 	reg := &fakeRegistry{handlers: map[string]types.ActionHandler{
 		"test.fail": &failHandler{},
 	}}
-	eng := newTestEngine(state, queue, reg)
+	eng := newTestEngine(t, state, queue, reg)
 	ctx := context.Background()
 
 	id, _ := eng.Submit(ctx, g, nil)

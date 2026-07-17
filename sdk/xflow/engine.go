@@ -25,6 +25,14 @@ type Engine struct {
 	stopFns             []func()
 	allowDirectHandlers bool
 	executionMode       ExecutionMode
+	logger              engine.Logger
+	// directHandlerNames tracks LocalNode handler names this Engine has already
+	// registered, keyed by node name with the registering workflow's name as the
+	// value. LocalNode handlers are registered into a process-global map (see
+	// execution.Registry.RegisterNodeHandler), so a second workflow reusing the
+	// same node name silently shadows the first. This map surfaces that
+	// collision as a warning instead of failing silently.
+	directHandlerNames map[string]string
 }
 
 // newFromConfig assembles an Engine from a resolved engineConfig and a backend provider.
@@ -57,12 +65,12 @@ func newFromConfig(cfg *engineConfig, provider backend.Provider) (*Engine, error
 
 	eng := engine.New(cfg.state, cfg.queue, engOpts...)
 
-	if lr, ok := cfg.registry.(*execution.Registry); ok {
+	if vc, ok := cfg.registry.(execution.VersionConfigurator); ok {
 		if cfg.versionPolicySet {
-			lr.SetVersionPolicy(cfg.versionPolicy)
+			vc.SetVersionPolicy(cfg.versionPolicy)
 		}
 		if cfg.logger != nil {
-			lr.SetLogger(cfg.logger)
+			vc.SetLogger(cfg.logger)
 		}
 	}
 
@@ -74,6 +82,8 @@ func newFromConfig(cfg *engineConfig, provider backend.Provider) (*Engine, error
 		stopFns:             cfg.stopFns,
 		allowDirectHandlers: cfg.allowDirectHandlers,
 		executionMode:       cfg.executionMode,
+		logger:              cfg.logger,
+		directHandlerNames:  make(map[string]string),
 	}
 	e.triggerRuntime = newTriggerRuntime(e, provider.TriggerPrimitives())
 

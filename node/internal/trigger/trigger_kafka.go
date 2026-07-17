@@ -60,7 +60,7 @@ type KafkaAggregateConfig struct {
 var newKafkaConsumer = newKafkaGoConsumer
 
 type KafkaTriggerNode struct {
-	nodeinternal.BaseNode
+	nodeinternal.BaseTrigger
 	BrokersValue     []string
 	TopicValue       string
 	GroupValue       string
@@ -165,9 +165,6 @@ func (n *KafkaTriggerNode) OnError(s types.OnError) types.Builder {
 	return n
 }
 func (n *KafkaTriggerNode) TriggerHandler() types.TriggerHandler { return n }
-func (n *KafkaTriggerNode) Execute(_ context.Context, input *types.Input) (*types.Output, error) {
-	return nodeinternal.ExecuteTriggerEntry(input)
-}
 
 func (n *KafkaTriggerNode) Activate(ctx context.Context, in *types.TriggerActivateInput) (types.TriggerSubscription, error) {
 	cfg, err := kafkaConfigFromParams(in.Params)

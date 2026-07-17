@@ -20,7 +20,7 @@ import (
 const defaultWebhookMaxBodyBytes = int64(1 << 20)
 
 type WebhookTriggerNode struct {
-	nodeinternal.BaseNode
+	nodeinternal.BaseTrigger
 	MethodValue        string
 	PathValue          string
 	EventIDHeaderValue string
@@ -84,9 +84,6 @@ func (n *WebhookTriggerNode) OnError(s types.OnError) types.Builder {
 	return n
 }
 func (n *WebhookTriggerNode) TriggerHandler() types.TriggerHandler { return n }
-func (n *WebhookTriggerNode) Execute(_ context.Context, input *types.Input) (*types.Output, error) {
-	return nodeinternal.ExecuteTriggerEntry(input)
-}
 
 func (n *WebhookTriggerNode) Activate(ctx context.Context, in *types.TriggerActivateInput) (types.TriggerSubscription, error) {
 	method := strings.ToUpper(in.GetString("method"))

@@ -51,7 +51,7 @@ type SignalRecord struct {
 	ExecutionID types.ExecutionID `gorm:"column:execution_id;type:varchar(64);uniqueIndex:uk_exec_signal"`
 	SignalName  string            `gorm:"column:signal_name;type:varchar(255);uniqueIndex:uk_exec_signal"`
 	Payload     []byte            `gorm:"column:payload;type:json"`
-	Status      string            `gorm:"column:status;type:varchar(16)"`
+	Status      types.SignalStatus `gorm:"column:status;type:varchar(16)"`
 	CreatedAt   time.Time         `gorm:"column:created_at;autoCreateTime:milli"`
 	UpdatedAt   time.Time         `gorm:"column:updated_at;autoUpdateTime:milli"`
 }

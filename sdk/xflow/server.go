@@ -4,16 +4,25 @@
 // returns a *Server rather than an *Engine, because a server does not
 // execute node handlers itself — it dispatches them to remote runners over
 // the Runner Protocol. See docs/design/DEPLOYMENT-TOPOLOGIES.md.
+//
+// As of stage 4 (SDK convergence) Server is a thin facade over
+// service/apiserver.APIServer, so an embedded SDK server exposes the same
+// module surface (Runner Protocol + workflow/control API) as the standalone
+// cmd/server binary. Callers that only need Handler/Start/Shutdown/IsLeader
+// keep their existing code; callers that want the apiserver to host its own
+// transports can use Run with the WithServerHTTPAddr / WithServerGRPCAddr /
+// WithServerTLS / WithServerMetricsAddr options.
 package xflow
 
 import (
 	"context"
 	"net/http"
 
-	backendasynq "github.com/xbcio/xflow/backend/asynq"
-	backendmemory "github.com/xbcio/xflow/backend/memory"
+	"google.golang.org/grpc"
+
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/observability/metrics"
+	"github.com/xbcio/xflow/service/apiserver"
 	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/store"
 )
@@ -29,9 +38,14 @@ type ServerConfig struct {
 }
 
 type serverConfig struct {
-	auth    control.Authenticator
-	logger  engine.Logger
-	metrics *metrics.Metrics
+	auth        control.Authenticator
+	logger      engine.Logger
+	metrics     *metrics.Metrics
+	httpAddr    string
+	grpcAddr    string
+	metricsAddr string
+	metricsPath string
+	tls         *apiserver.TLSConfig
 }
 
 // ServerOption configures a Server.
@@ -50,9 +64,46 @@ func WithServerLogger(l engine.Logger) ServerOption {
 }
 
 // WithServerMetrics wires Prometheus observers into the engine and
-// dispatcher.
+// dispatcher. When WithServerMetricsAddr is also set, the same Metrics
+// instance backs the scrape endpoint.
 func WithServerMetrics(m *metrics.Metrics) ServerOption {
 	return func(c *serverConfig) { c.metrics = m }
+}
+
+// WithServerHTTPAddr sets the HTTP listen address for Server.Run. When empty
+// (the default) Run does not host an HTTP listener; mount Handler() into a
+// host mux instead.
+func WithServerHTTPAddr(addr string) ServerOption {
+	return func(c *serverConfig) { c.httpAddr = addr }
+}
+
+// WithServerGRPCAddr sets the gRPC Runner Protocol listen address for
+// Server.Run. When empty Run does not host a gRPC listener.
+func WithServerGRPCAddr(addr string) ServerOption {
+	return func(c *serverConfig) { c.grpcAddr = addr }
+}
+
+// WithServerMetricsAddr sets the Prometheus scrape listen address for
+// Server.Run. Requires WithServerMetrics to also be set; otherwise the
+// metrics server is skipped.
+func WithServerMetricsAddr(addr string, path string) ServerOption {
+	return func(c *serverConfig) {
+		c.metricsAddr = addr
+		c.metricsPath = path
+	}
+}
+
+// WithServerTLS configures TLS material for the HTTP and gRPC listeners
+// started by Server.Run. When cert is empty no TLS is applied. cert and key
+// must be provided together; clientCA is optional (enables mTLS when set).
+func WithServerTLS(cert, key, clientCA string) ServerOption {
+	return func(c *serverConfig) {
+		if cert == "" && key == "" && clientCA == "" {
+			c.tls = nil
+			return
+		}
+		c.tls = &apiserver.TLSConfig{Cert: cert, Key: key, ClientCA: clientCA}
+	}
 }
 
 // Server is the embeddable xflow control-plane server: it accepts workflow
@@ -60,14 +111,17 @@ func WithServerMetrics(m *metrics.Metrics) ServerOption {
 // Runner Protocol. It does not execute node handlers itself.
 //
 // Mount Handler() into a host program's own http.Server / http.ServeMux, or
-// serve it directly. Call Start before serving traffic and Shutdown when the
-// host program is stopping.
+// serve it directly via Run. Call Start before serving traffic and Shutdown
+// when the host program is stopping.
 type Server struct {
-	cp *control.ControlPlane
+	api *apiserver.APIServer
 }
 
 // NewServer creates an embeddable control-plane server. RedisAddr empty means
 // an in-memory backend (no external dependency, single process only).
+//
+// The server delegates to service/apiserver.APIServer so it exposes the same
+// module surface (Runner Protocol + workflow/control API) as cmd/server.
 //
 // Example:
 //
@@ -82,40 +136,49 @@ func NewServer(cfg ServerConfig, opts ...ServerOption) (*Server, error) {
 		o(sc)
 	}
 
-	ccfg := control.Config{
-		Auth:    sc.auth,
-		Logger:  sc.logger,
-		Metrics: sc.metrics,
+	apiCfg := apiserver.Config{
+		RedisAddr:   cfg.RedisAddr,
+		Store:       cfg.Store,
+		Auth:        sc.auth,
+		Logger:      sc.logger,
+		Metrics:     sc.metrics,
+		HTTPAddr:    sc.httpAddr,
+		GRPCAddr:    sc.grpcAddr,
+		MetricsAddr: sc.metricsAddr,
+		MetricsPath: sc.metricsPath,
+		TLS:         sc.tls,
 	}
-
-	if cfg.RedisAddr == "" {
-		ccfg.Backend = backendmemory.New()
-	} else {
-		b, err := backendasynq.New(cfg.RedisAddr, cfg.Store, backendasynq.WithConsumer(true))
-		if err != nil {
-			return nil, err
-		}
-		ccfg.Backend = b
-	}
-
-	cp, err := control.NewControlPlane(ccfg)
+	api, err := apiserver.New(apiCfg)
 	if err != nil {
 		return nil, err
 	}
-	return &Server{cp: cp}, nil
+	return &Server{api: api}, nil
 }
 
 // Handler returns the HTTP Runner Protocol + workflow submission/query API.
-func (s *Server) Handler() http.Handler { return s.cp.Handler() }
+func (s *Server) Handler() http.Handler { return s.api.Handler() }
 
 // Start begins dispatching queued tasks to runners and starts background
 // maintenance (lease sweeping, leader election). Does not block.
-func (s *Server) Start(ctx context.Context) error { return s.cp.Start(ctx) }
+func (s *Server) Start(ctx context.Context) error { return s.api.Start(ctx) }
 
 // Shutdown stops background maintenance and releases backend resources.
-func (s *Server) Shutdown(ctx context.Context) error { return s.cp.Shutdown(ctx) }
+func (s *Server) Shutdown(ctx context.Context) error { return s.api.Shutdown(ctx) }
 
 // IsLeader reports whether this Server replica currently holds leadership.
 // Single-replica in-memory deployments always report true. Useful for health
 // checks and observability in multi-replica Redis-backed deployments.
-func (s *Server) IsLeader() bool { return s.cp.IsLeader() }
+func (s *Server) IsLeader() bool { return s.api.IsLeader() }
+
+// RegisterGRPC registers the Runner Protocol gRPC service onto g, matching
+// the service surface exposed by cmd/server. Optional: only needed when the
+// host program owns its own grpc.Server.
+func (s *Server) RegisterGRPC(g *grpc.Server) { s.api.RegisterGRPC(g) }
+
+// Run starts the server's transports (gRPC, metrics, HTTP — whichever
+// addresses were configured via WithServerHTTPAddr / WithServerGRPCAddr /
+// WithServerMetricsAddr) and blocks until ctx is cancelled or a listener
+// fails. On exit it drains in-flight requests and tears down the control
+// plane. This is the self-hosting mode for callers that do not want to wire
+// Handler() into their own http.Server.
+func (s *Server) Run(ctx context.Context) error { return s.api.Run(ctx) }

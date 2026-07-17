@@ -21,7 +21,7 @@ type Store struct {
 
 type signalEntry struct {
 	record *store.SignalRecord
-	status string // "active", "consumed", "revoked"
+	status types.SignalStatus // "active", "consumed", "revoked"
 }
 
 // compile-time interface checks
@@ -198,7 +198,7 @@ func (s *Store) ListNodes(_ context.Context, id types.ExecutionID, opts store.Li
 			all = append(all, &cp)
 		}
 	}
-	return applyPagination(all, opts), nil
+	return paginate(all, opts), nil
 }
 
 func (s *Store) ListSuspendedBySignal(_ context.Context, id types.ExecutionID, signal string) ([]*store.NodeRecord, error) {
@@ -224,7 +224,7 @@ func (s *Store) ListExpiredSuspensions(_ context.Context, now time.Time, opts st
 			all = append(all, &cp)
 		}
 	}
-	return applyPagination(all, opts), nil
+	return paginate(all, opts), nil
 }
 
 // ---------------------------------------------------------------------------
@@ -239,13 +239,13 @@ func (s *Store) SaveSignal(_ context.Context, rec *store.SignalRecord) error {
 	if existing, ok := s.signals[key]; ok {
 		existing.record.Payload = rec.Payload
 		existing.record.UpdatedAt = now
-		existing.status = "active"
+		existing.status = types.SignalStatusActive
 	} else {
 		rec.ID = s.nextAutoID()
 		rec.CreatedAt = now
 		rec.UpdatedAt = now
 		cp := *rec
-		s.signals[key] = &signalEntry{record: &cp, status: "active"}
+		s.signals[key] = &signalEntry{record: &cp, status: types.SignalStatusActive}
 	}
 	return nil
 }
@@ -255,10 +255,10 @@ func (s *Store) ConsumeSignal(_ context.Context, id types.ExecutionID, name stri
 	defer s.mu.Unlock()
 	key := signalKey(id, name)
 	entry, ok := s.signals[key]
-	if !ok || entry.status != "active" {
+	if !ok || entry.status != types.SignalStatusActive {
 		return nil, store.ErrNotFound
 	}
-	entry.status = "consumed"
+	entry.status = types.SignalStatusConsumed
 	entry.record.UpdatedAt = time.Now()
 	cp := *entry.record
 	return &cp, nil
@@ -269,10 +269,10 @@ func (s *Store) RevokeSignal(_ context.Context, id types.ExecutionID, name strin
 	defer s.mu.Unlock()
 	key := signalKey(id, name)
 	entry, ok := s.signals[key]
-	if !ok || entry.status != "active" {
+	if !ok || entry.status != types.SignalStatusActive {
 		return false, nil
 	}
-	entry.status = "revoked"
+	entry.status = types.SignalStatusRevoked
 	entry.record.UpdatedAt = time.Now()
 	return true, nil
 }
@@ -286,7 +286,7 @@ func (s *Store) CountSignalsByNames(_ context.Context, id types.ExecutionID, nam
 	}
 	count := 0
 	for _, entry := range s.signals {
-		if entry.record.ExecutionID == id && entry.status == "active" {
+		if entry.record.ExecutionID == id && entry.status == types.SignalStatusActive {
 			if _, ok := nameSet[entry.record.SignalName]; ok {
 				count++
 			}
@@ -307,32 +307,26 @@ func (s *Store) ListSignalsByNames(_ context.Context, id types.ExecutionID, name
 	}
 	var all []*store.SignalRecord
 	for _, entry := range s.signals {
-		if entry.record.ExecutionID == id && entry.status == "active" {
+		if entry.record.ExecutionID == id && entry.status == types.SignalStatusActive {
 			if _, ok := nameSet[entry.record.SignalName]; ok {
 				cp := *entry.record
 				all = append(all, &cp)
 			}
 		}
 	}
-	return applySignalPagination(all, opts), nil
+	return paginate(all, opts), nil
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-func applyPagination(records []*store.NodeRecord, opts store.ListOptions) []*store.NodeRecord {
-	if opts.Offset >= len(records) {
-		return nil
-	}
-	records = records[opts.Offset:]
-	if opts.Limit > 0 && opts.Limit < len(records) {
-		records = records[:opts.Limit]
-	}
-	return records
-}
-
-func applySignalPagination(records []*store.SignalRecord, opts store.ListOptions) []*store.SignalRecord {
+// paginate applies the ListOptions offset/limit to a slice of records. It
+// normalizes opts first so a negative offset or limit never panics. It is
+// generic over the record type so both node and signal listings share one
+// implementation.
+func paginate[T any](records []T, opts store.ListOptions) []T {
+	opts = opts.Normalized()
 	if opts.Offset >= len(records) {
 		return nil
 	}

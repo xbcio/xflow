@@ -182,6 +182,17 @@ type HandlerRegistry interface {
 	Get(executionID types.ExecutionID, nodeName string, nodeType string, version int) (types.ActionHandler, error)
 }
 
+// HandlerRegistrar is the write-side of a handler registry: it lets the SDK
+// register process-local and execution-scoped action handlers without depending
+// on a concrete registry implementation. Implementations MUST be safe for
+// concurrent use. Read-side resolution stays on HandlerRegistry; the two are
+// kept separate so a read-only or remote registry can implement only Get.
+type HandlerRegistrar interface {
+	RegisterGlobal(nodeType string, h types.ActionHandler)
+	RegisterNodeHandler(nodeName string, h types.ActionHandler)
+	RegisterExecutionHandler(id types.ExecutionID, nodeName string, h types.ActionHandler)
+}
+
 // Hooks receives lifecycle events from the engine. All methods must be non-blocking.
 type Hooks interface {
 	OnNodeStart(ctx context.Context, id types.ExecutionID, name string)

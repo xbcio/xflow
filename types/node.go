@@ -25,6 +25,20 @@ type Builder interface {
 	OnErrorStrategy() OnError
 }
 
+// HandlerProvider is implemented by builders that can expose a process-local
+// action handler instance for embedded SDK execution. It is the public
+// counterpart of the internal HandlerCarrier interface so that SDK callers can
+// assert it via a named interface instead of an anonymous one.
+type HandlerProvider interface {
+	Handler() ActionHandler
+}
+
+// TriggerHandlerProvider is implemented by trigger builders that can expose a
+// process-local trigger handler instance for embedded SDK activation.
+type TriggerHandlerProvider interface {
+	TriggerHandler() TriggerHandler
+}
+
 // OnError is the error handling strategy for a workflow node.
 type OnError string
 

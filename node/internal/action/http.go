@@ -32,8 +32,17 @@ type HTTPNode struct {
 }
 
 // DefaultHTTPClient is used by HTTPNode.Execute. Tests and embedded runtimes
-// may replace it to inject custom transports.
-var DefaultHTTPClient = &http.Client{}
+// may replace it to inject custom transports. It ships with a transport that
+// caps per-host and idle connections so a misbehaving endpoint cannot exhaust
+// the process's file descriptors under the default client.
+var defaultHTTPTransport = &http.Transport{
+	MaxConnsPerHost:     100,
+	MaxIdleConnsPerHost: 10,
+	MaxIdleConns:        100,
+	IdleConnTimeout:     90 * time.Second,
+}
+
+var DefaultHTTPClient = &http.Client{Transport: defaultHTTPTransport}
 
 // HTTP creates an HTTP request node.
 //

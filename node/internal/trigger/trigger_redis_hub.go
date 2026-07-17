@@ -45,7 +45,7 @@ var newRedisHubConsumer = func(RedisHubConsumerConfig) (RedisHubConsumer, error)
 var redisHubPubSubLockTTL = time.Minute
 
 type RedisHubTriggerNode struct {
-	nodeinternal.BaseNode
+	nodeinternal.BaseTrigger
 	ModeValue        string
 	StreamValue      string
 	GroupValue       string
@@ -121,9 +121,6 @@ func (n *RedisHubTriggerNode) OnError(s types.OnError) types.Builder {
 	return n
 }
 func (n *RedisHubTriggerNode) TriggerHandler() types.TriggerHandler { return n }
-func (n *RedisHubTriggerNode) Execute(_ context.Context, input *types.Input) (*types.Output, error) {
-	return nodeinternal.ExecuteTriggerEntry(input)
-}
 
 func (n *RedisHubTriggerNode) Activate(ctx context.Context, in *types.TriggerActivateInput) (types.TriggerSubscription, error) {
 	cfg, err := redisHubConfigFromParams(in.Params)
@@ -158,8 +155,9 @@ func (n *RedisHubTriggerNode) Activate(ctx context.Context, in *types.TriggerAct
 	sem := make(chan struct{}, cfg.MaxInflight)
 	done := make(chan struct{})
 	var (
-		closeOnce sync.Once
-		closeErr  error
+		emitWG     sync.WaitGroup
+		closeOnce  sync.Once
+		closeErr   error
 	)
 	stop := func(releaseCtx context.Context) error {
 		closeOnce.Do(func() {
@@ -190,7 +188,9 @@ func (n *RedisHubTriggerNode) Activate(ctx context.Context, in *types.TriggerAct
 				case <-runCtx.Done():
 					return
 				}
+				emitWG.Add(1)
 				go func(msg RedisHubMessage) {
+					defer emitWG.Done()
 					defer func() { <-sem }()
 					emitRedisHubMessage(runCtx, in, cfg.Mode, msg)
 				}(msg)
@@ -221,10 +221,12 @@ func (n *RedisHubTriggerNode) Activate(ctx context.Context, in *types.TriggerAct
 	}
 	return types.CloseFunc(func(context.Context) error {
 		err := stop(context.Background())
-		select {
-		case <-done:
-		case <-time.After(time.Second):
-		}
+		// Wait for in-flight emit goroutines to finish so shutdown does not
+		// drop events still being processed. done is closed by the main loop
+		// once it returns from runCtx.Done() (cancelled by stop above), but
+		// emitWG.Wait() is the real barrier for the worker goroutines.
+		emitWG.Wait()
+		<-done
 		return err
 	}), nil
 }

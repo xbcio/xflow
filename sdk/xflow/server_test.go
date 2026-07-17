@@ -88,9 +88,9 @@ func TestServerIsLeader(t *testing.T) {
 }
 
 // TestNewServerRedisBackendDispatchesTaskToRunner guards against a regression
-// where NewServer's Redis branch passed backendasynq.WithConsumer(false),
+// where NewServer's Redis branch passed distributed.WithConsumer(false),
 // which disables the Asynq subscription entirely (no mux registration, no
-// timeout monitor, no consumer goroutine — see (*asynq.Backend).BindHandler).
+// timeout monitor, no consumer goroutine — see (*distributed.Backend).BindHandler).
 // That left submitted workflows enqueued forever with nothing ever consuming
 // the queue and dispatching to a registered runner. This test exercises the
 // full path against real (miniredis) Redis: submit a workflow through the

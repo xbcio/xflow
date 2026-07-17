@@ -14,7 +14,7 @@ import (
 )
 
 type CronTriggerNode struct {
-	nodeinternal.BaseNode
+	nodeinternal.BaseTrigger
 	Expression string
 	Timezone   string
 }
@@ -55,9 +55,6 @@ func (n *CronTriggerNode) OnError(s types.OnError) types.Builder {
 	return n
 }
 func (n *CronTriggerNode) TriggerHandler() types.TriggerHandler { return n }
-func (n *CronTriggerNode) Execute(_ context.Context, input *types.Input) (*types.Output, error) {
-	return nodeinternal.ExecuteTriggerEntry(input)
-}
 
 func (n *CronTriggerNode) Activate(ctx context.Context, in *types.TriggerActivateInput) (types.TriggerSubscription, error) {
 	expr := cast.ToString(in.Params["expression"])

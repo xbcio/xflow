@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 
-	backendasynq "github.com/xbcio/xflow/backend/asynq"
+	"github.com/xbcio/xflow/backend/distributed"
 	"github.com/xbcio/xflow/store"
 )
 
@@ -63,18 +63,18 @@ func NewCluster(clusterCfg ClusterConfig, opts ...Option) (*Engine, error) {
 		cfg.concurrency = 10
 	}
 
-	asynqOpts := []backendasynq.Option{
-		backendasynq.WithConcurrency(cfg.concurrency),
-		backendasynq.WithConsumer(!clusterCfg.DisableConsumer),
+	asynqOpts := []distributed.Option{
+		distributed.WithConcurrency(cfg.concurrency),
+		distributed.WithConsumer(!clusterCfg.DisableConsumer),
 	}
 	if cfg.executionMode == ExecutionModeTransient {
-		asynqOpts = append(asynqOpts, backendasynq.WithTransientMode(cfg.transientTTL, cfg.transientCompletionTTL))
+		asynqOpts = append(asynqOpts, distributed.WithTransientMode(cfg.transientTTL, cfg.transientCompletionTTL))
 	}
 	if pool := resolveResourcePool(cfg); pool != nil && !clusterCfg.DisableConsumer {
 		// Only worker pods need a pool; API-only pods don't dispatch handlers.
-		asynqOpts = append(asynqOpts, backendasynq.WithResourcePool(pool))
+		asynqOpts = append(asynqOpts, distributed.WithResourcePool(pool))
 	}
-	a, err := backendasynq.New(clusterCfg.RedisAddr, clusterCfg.Store, asynqOpts...)
+	a, err := distributed.New(clusterCfg.RedisAddr, clusterCfg.Store, asynqOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("cluster: %w", err)
 	}

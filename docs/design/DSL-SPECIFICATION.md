@@ -1252,7 +1252,7 @@ execID, err := eng.Invoke(ctx, workflowID, xflow.Trigger("order_created"), event
   - workflow registry、trigger subscription、dedup、lock、trigger state 都在当前进程内存中。
   - 这意味着 local 只提供进程内触发协调；进程重启后 subscription 和 dedup/lock/state 都会丢失，也没有跨实例协同能力。
 
-- **Asynq backend (`backend/asynq`)**
+- **Asynq backend (`backend/distributed`)**
   - workflow registry 存在 Redis 中；trigger dedup、lock、state 也都基于 Redis key 实现。
   - trigger subscription / listener 本身仍然是进程内激活的：只有当前进程执行 `AddWorkflow` 并触发 `ReconcileWorkflow` 时，才会在该进程里调用各 trigger handler 的 `Activate`。
   - Redis 会持久化 workflow registry 和 trigger primitive，但当前没有启动期 bootstrap 逻辑去扫描 registry record 并在重启后重新激活 listener；从未调用过 `AddWorkflow` 的进程也不会仅凭 Redis 中已有 registry 自动挂起订阅。

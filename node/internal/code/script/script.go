@@ -147,12 +147,12 @@ func (n *ScriptNode) Execute(ctx context.Context, input *types.Input) (*types.Ou
 		return &types.Output{Data: map[string]any{"error": err.Error()}, Port: "error"}, nil
 	}
 	data := engine.MapResult(result)
-	if sizeErr := checkResultSize(data); sizeErr != nil {
+	b, sizeErr := checkResultSize(data)
+	if sizeErr != nil {
 		observeExecute(language, runtime, "error", time.Since(start))
 		return &types.Output{Data: map[string]any{"error": sizeErr.Error()}, Port: "error"}, nil
 	}
 
-	b, _ := json.Marshal(data)
 	observeOutputBytes(language, runtime, len(b))
 	observeExecute(language, runtime, "main", time.Since(start))
 	return &types.Output{Data: data, Port: "main"}, nil
@@ -160,16 +160,17 @@ func (n *ScriptNode) Execute(ctx context.Context, input *types.Input) (*types.Ou
 
 // checkResultSize enforces DefaultMaxOutputBytes on the JSON-encoded result.
 // Done at the node layer so every engine inherits the same cap without
-// having to thread limits through each runtime.
-func checkResultSize(data map[string]any) error {
+// having to thread limits through each runtime. It returns the encoded
+// bytes so the caller can reuse them for telemetry instead of re-marshalling.
+func checkResultSize(data map[string]any) ([]byte, error) {
 	b, err := json.Marshal(data)
 	if err != nil {
-		return fmt.Errorf("xflow.script: encode result: %w", err)
+		return nil, fmt.Errorf("xflow.script: encode result: %w", err)
 	}
 	if len(b) > engine.DefaultMaxOutputBytes {
-		return &engine.OutputSizeError{Size: len(b), Limit: engine.DefaultMaxOutputBytes}
+		return b, &engine.OutputSizeError{Size: len(b), Limit: engine.DefaultMaxOutputBytes}
 	}
-	return nil
+	return b, nil
 }
 
 // readCredNames accepts both []string (Go DSL) and []any (decoded YAML/JSON).

@@ -159,13 +159,13 @@ func (w *WorkflowBuilder) Node(name string, builder types.Builder) *NodeRef {
 		builder: builder,
 		onError: builder.OnErrorStrategy(),
 	}
-	if hb, ok := builder.(interface{ Handler() types.ActionHandler }); ok {
+	if hb, ok := builder.(types.HandlerProvider); ok {
 		h := hb.Handler()
 		if h != nil {
 			w.handlers[builder.NodeType()] = h
 		}
 	}
-	if hb, ok := builder.(interface{ TriggerHandler() types.TriggerHandler }); ok {
+	if hb, ok := builder.(types.TriggerHandlerProvider); ok {
 		h := hb.TriggerHandler()
 		if h != nil {
 			w.triggers[builder.NodeType()] = h

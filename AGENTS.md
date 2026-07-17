@@ -22,7 +22,7 @@ golangci-lint run        # Lint
   - `sqlstore/` — dialect-agnostic GORM implementation; `sqlstore/mysqlstore/` — MySQL dialect entry (`mysqlstore.New`)
 - **backend/** — Reusable backend providers and implementations
   - `memory/` — In-memory StateStore + goroutine pool TaskQueue
-  - `asynq/` — Redis StateStore + Asynq TaskQueue
+  - `distributed/` — Redis StateStore + Asynq TaskQueue
 - **execution/** — Reusable embedded task execution boundary: Dispatcher, Runner, Registry
 - **sdk/**
   - `xflow/` — `package xflow`: `NewLocal` / `NewCluster` factories, WorkflowBuilder, and production control APIs (`AddWorkflow`, `Invoke`, `Wait`, `Signal`, `RevokeSignal`, `Cancel`, `Inspect`)

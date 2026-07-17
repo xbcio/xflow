@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xbcio/xflow/backend/asynq"
+	"github.com/xbcio/xflow/backend/distributed"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -20,7 +20,7 @@ func TestRedisLeaderElectionRealRedis(t *testing.T) {
 	t.Run("single instance becomes leader", func(t *testing.T) {
 		rdb := redis.NewClient(&redis.Options{Addr: addr})
 		t.Cleanup(func() { _ = rdb.Close() })
-		el := asynq.NewRedisLeaderElector(rdb, key+":single", ttl)
+		el := distributed.NewRedisLeaderElector(rdb, key+":single", ttl)
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		if err := el.Campaign(ctx); err != nil {
@@ -44,8 +44,8 @@ func TestRedisLeaderElectionRealRedis(t *testing.T) {
 		// clear stale key
 		_ = rdb.Del(context.Background(), k).Err()
 
-		a := asynq.NewRedisLeaderElector(rdb, k, ttl)
-		b := asynq.NewRedisLeaderElector(rdb, k, ttl)
+		a := distributed.NewRedisLeaderElector(rdb, k, ttl)
+		b := distributed.NewRedisLeaderElector(rdb, k, ttl)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
@@ -72,8 +72,8 @@ func TestRedisLeaderElectionRealRedis(t *testing.T) {
 		t.Cleanup(func() { _ = rdb.Close() })
 		_ = rdb.Del(context.Background(), k).Err()
 
-		a := asynq.NewRedisLeaderElector(rdb, k, ttl)
-		b := asynq.NewRedisLeaderElector(rdb, k, ttl)
+		a := distributed.NewRedisLeaderElector(rdb, k, ttl)
+		b := distributed.NewRedisLeaderElector(rdb, k, ttl)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
@@ -101,7 +101,7 @@ func TestRedisLeaderElectionRealRedis(t *testing.T) {
 
 		// Use a separate client for a so we can close it to simulate process death.
 		aRdb := redis.NewClient(&redis.Options{Addr: addr})
-		a := asynq.NewRedisLeaderElector(aRdb, k, ttl)
+		a := distributed.NewRedisLeaderElector(aRdb, k, ttl)
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		if err := a.Campaign(ctx); err != nil {
@@ -113,7 +113,7 @@ func TestRedisLeaderElectionRealRedis(t *testing.T) {
 		_ = aRdb.Close()
 
 		// b waits out the TTL then wins.
-		b := asynq.NewRedisLeaderElector(rdb, k, ttl)
+		b := distributed.NewRedisLeaderElector(rdb, k, ttl)
 		notify := b.Notify()
 		// poll campaign with a budget > ttl
 		bctx, bcancel := context.WithTimeout(context.Background(), 3*ttl)

@@ -2,6 +2,7 @@ package action
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/xbcio/xflow/node/registry"
 	"github.com/spf13/cast"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -129,7 +131,9 @@ func (n *GRPCNode) Execute(ctx context.Context, input *types.Input) (*types.Outp
 	defer dialCancel()
 
 	var dialOpts []grpc.DialOption
-	if !useTLS {
+	if useTLS {
+		dialOpts = append(dialOpts, grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{})))
+	} else {
 		dialOpts = append(dialOpts, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	}
 

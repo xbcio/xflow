@@ -13,7 +13,7 @@ import (
 )
 
 type TimerTriggerNode struct {
-	nodeinternal.BaseNode
+	nodeinternal.BaseTrigger
 	Interval time.Duration
 }
 
@@ -47,9 +47,6 @@ func (n *TimerTriggerNode) OnError(s types.OnError) types.Builder {
 	return n
 }
 func (n *TimerTriggerNode) TriggerHandler() types.TriggerHandler { return n }
-func (n *TimerTriggerNode) Execute(_ context.Context, input *types.Input) (*types.Output, error) {
-	return nodeinternal.ExecuteTriggerEntry(input)
-}
 
 func (n *TimerTriggerNode) Activate(ctx context.Context, in *types.TriggerActivateInput) (types.TriggerSubscription, error) {
 	interval, err := conv.PositiveDuration(in.Params["interval"])

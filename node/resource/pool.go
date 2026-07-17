@@ -30,7 +30,7 @@ type defaultResourcePool struct {
 }
 
 // NewDefaultResourcePool builds a process-scope pool. Pass to a backend via
-// the backend's WithResourcePool option (memory or asynq).
+// the backend's WithResourcePool option (memory or distributed).
 func NewDefaultResourcePool(cfg types.ResourcePoolConfig) types.ResourcePool {
 	cfg = normalizeConfig(cfg)
 	return &defaultResourcePool{

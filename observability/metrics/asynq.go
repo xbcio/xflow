@@ -3,7 +3,7 @@ package metrics
 import (
 	"time"
 
-	backendasynq "github.com/xbcio/xflow/backend/asynq"
+	"github.com/xbcio/xflow/backend/distributed"
 )
 
 // Asynq backend metric names.
@@ -19,7 +19,7 @@ const (
 	metricLeaseRepairReconciled   = "xflow_lease_repair_reconciled"
 )
 
-// AuditMetrics observes backend/asynq audit-store dual-write outcomes.
+// AuditMetrics observes backend/distributed audit-store dual-write outcomes.
 type AuditMetrics struct {
 	Metrics *Metrics
 }
@@ -36,9 +36,9 @@ func (a AuditMetrics) OnAuditFailed(op string, _ error) {
 	a.Metrics.Inc(metricAuditWrite, map[string]string{"op": op, "result": "failed"})
 }
 
-var _ backendasynq.AuditObserver = AuditMetrics{}
+var _ distributed.AuditObserver = AuditMetrics{}
 
-// LeaseMetrics observes backend/asynq lease lifecycle operations.
+// LeaseMetrics observes backend/distributed lease lifecycle operations.
 type LeaseMetrics struct {
 	Metrics *Metrics
 }
@@ -79,4 +79,4 @@ func (l LeaseMetrics) OnLeaseRepair(reconciled int, elapsed time.Duration, err e
 	l.Metrics.Set(metricLeaseRepairReconciled, labels, float64(reconciled))
 }
 
-var _ backendasynq.LeaseObserver = LeaseMetrics{}
+var _ distributed.LeaseObserver = LeaseMetrics{}

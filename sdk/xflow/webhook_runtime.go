@@ -3,20 +3,23 @@ package xflow
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
 
+	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/types"
 )
 
 type webhookRuntime struct {
 	mu     sync.RWMutex
 	routes map[string]types.WebhookHandler
+	logger engine.Logger
 }
 
-func newWebhookRuntime() *webhookRuntime {
-	return &webhookRuntime{routes: make(map[string]types.WebhookHandler)}
+func newWebhookRuntime(logger engine.Logger) *webhookRuntime {
+	return &webhookRuntime{routes: make(map[string]types.WebhookHandler), logger: logger}
 }
 
 func (r *webhookRuntime) Handle(method string, path string, handler types.WebhookHandler) (types.TriggerSubscription, error) {
@@ -53,7 +56,15 @@ func (r *webhookRuntime) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	if _, err := handler(req.Context(), req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		// Never echo the internal error to the caller — it may leak handler
+		// internals, paths, or credentials. Return a fixed message and log the
+		// real error server-side.
+		if r.logger != nil {
+			r.logger.Errorf("webhook handler error: %v", err)
+		} else {
+			log.Printf("webhook handler error: %v", err)
+		}
+		http.Error(w, "webhook handler error", http.StatusBadRequest)
 		return
 	}
 	w.WriteHeader(http.StatusAccepted)

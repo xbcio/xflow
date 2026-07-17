@@ -20,7 +20,7 @@ execution/         Reusable task execution boundary (Dispatcher, Runner, Executo
       ↑                    ↑
 backend/         Backend Provider abstraction
 backend/memory   In-memory backend provider
-backend/asynq    Redis + Asynq backend provider
+backend/distributed    Redis + Asynq backend provider
       ↑                    ↑
 sdk/             cmd/server + cmd/runner
 ```
@@ -31,13 +31,13 @@ sdk/             cmd/server + cmd/runner
 - `execution/` must NOT import redis/asynq/mysql/sql or network transports; it only adapts engine leases to an in-process or protocol-backed executor
 - `backend/` owns the reusable `Provider` interface: `StateStore + TaskQueue + HandlerRegistry + WorkflowRegistry + TriggerPrimitives + lifecycle binding`
 - `backend/memory/` is a reusable in-memory provider for embedded and test deployments; it must remain free of Redis/Asynq/MySQL/network dependencies
-- `backend/asynq/` is a reusable Redis + Asynq provider for SDK cluster mode and server-side control-plane reuse (`service/control`)
+- `backend/distributed/` is a reusable Redis + Asynq provider for SDK cluster mode and server-side control-plane reuse (`service/control`)
 - SDK assembles reusable packages and must not become the owner of reusable backend behavior
 - cmd/server and cmd/runner use `engine/`, `execution/`, and reusable backend packages directly to build cluster infrastructure
 
 Naming note: backend packages are named by implementation capability, not SDK
 deployment mode. `local` and `cluster` remain public SDK factory names, while
-the reusable implementations are `backend/memory` and `backend/asynq`.
+the reusable implementations are `backend/memory` and `backend/distributed`.
 
 ## Engine Core's 2 Interfaces
 
@@ -80,7 +80,7 @@ This package is intentionally not under `sdk/internal/`: SDK local/cluster,
 - `backend/memory/` contains the in-memory `StateStore`, in-memory
   `TaskQueue`, embedded `execution.Registry`, and embedded lifecycle binding.
   It is used by `xflow.NewLocal` and by tests.
-- `backend/asynq/` contains the Redis-backed `StateStore`, Asynq-backed
+- `backend/distributed/` contains the Redis-backed `StateStore`, Asynq-backed
   `TaskQueue`, timeout monitor, embedded `execution.Registry`, and embedded
   lifecycle binding. It is used by `xflow.NewCluster` today. Server
   deployments (`service/control`) reuse the storage and queue semantics here,

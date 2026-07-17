@@ -47,6 +47,15 @@ type VersionLogger interface {
 	Warnf(format string, args ...any)
 }
 
+// VersionConfigurator is implemented by handler registries that expose
+// version-miss policy and logger configuration. The SDK asserts this interface
+// instead of the concrete *Registry so alternative implementations can plug in
+// without the SDK depending on a concrete type.
+type VersionConfigurator interface {
+	SetVersionPolicy(VersionPolicy)
+	SetLogger(VersionLogger)
+}
+
 // Registry resolves handlers for embedded execution.
 //
 // Resolution order is:

@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	backendasynq "github.com/xbcio/xflow/backend/asynq"
+	"github.com/xbcio/xflow/backend/distributed"
 	backendmemory "github.com/xbcio/xflow/backend/memory"
 	"github.com/redis/go-redis/v9"
 
@@ -15,6 +15,7 @@ import (
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/observability/metrics"
+	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/service/protocol/runnerpb"
 )
 
@@ -81,6 +82,11 @@ type ControlPlane struct {
 	sweeperCancel       context.CancelFunc
 	claimRecoveryCancel context.CancelFunc
 	unbind              func()
+	// wg tracks the background goroutines started by Start (leader campaign,
+	// sweeper, claim recovery). Shutdown cancels their contexts and then waits
+	// for them to exit, bounded by the Shutdown context so a stuck goroutine
+	// cannot hang shutdown.
+	wg sync.WaitGroup
 }
 
 // NewControlPlane assembles a ControlPlane from cfg. It does not start any
@@ -180,6 +186,23 @@ func (cp *ControlPlane) Handler() http.Handler { return cp.httpServer.Handler() 
 // want to register it on their own grpc.Server.
 func (cp *ControlPlane) GRPCServer() runnerpb.RunnerProtocolServer { return cp.grpcServer }
 
+// RunnerHTTPHandler returns the runner-protocol HTTP adapter for module-based
+// route mounting (the apiserver runner-protocol module delegates to it).
+func (cp *ControlPlane) RunnerHTTPHandler() protocol.RunnerHTTPHandler {
+	return cp.httpServer
+}
+
+// Engine returns the engine facade for control API modules (submit/invoke/
+// inspect/signal/revoke-signal/cancel). The *engine.Engine satisfies
+// control.EngineFacade, so no adapter is required.
+func (cp *ControlPlane) Engine() EngineFacade { return cp.eng }
+
+// RunnerDirectory exposes the runner directory for management/observability
+// modules. It is intended for read-only single-runner lookup (the directory
+// interface has no list API), so management endpoints can answer
+// /v1/management/runners/{id} without re-implementing directory access.
+func (cp *ControlPlane) RunnerDirectory() RunnerDirectory { return cp.runners }
+
 // Start binds the Task Dispatcher onto the backend's queue, begins leader
 // election (if the backend supports it), and starts the LeaseSweeper loop.
 // It does not block.
@@ -200,16 +223,28 @@ func (cp *ControlPlane) Start(ctx context.Context) error {
 
 	leaderCtx, leaderCancel := context.WithCancel(ctx)
 	cp.leaderCancel = leaderCancel
-	go cp.runLeaderCampaign(leaderCtx)
+	cp.wg.Add(1)
+	go func() {
+		defer cp.wg.Done()
+		cp.runLeaderCampaign(leaderCtx)
+	}()
 
 	sweepCtx, cancel := context.WithCancel(context.Background())
 	cp.sweeperCancel = cancel
-	go cp.sweeper.Run(sweepCtx)
+	cp.wg.Add(1)
+	go func() {
+		defer cp.wg.Done()
+		cp.sweeper.Run(sweepCtx)
+	}()
 
 	if reclaimer, ok := cp.runners.(ClaimReclaimer); ok {
 		claimCtx, claimCancel := context.WithCancel(context.Background())
 		cp.claimRecoveryCancel = claimCancel
-		go cp.runClaimRecovery(claimCtx, reclaimer)
+		cp.wg.Add(1)
+		go func() {
+			defer cp.wg.Done()
+			cp.runClaimRecovery(claimCtx, reclaimer)
+		}()
 	}
 
 	return nil
@@ -295,6 +330,16 @@ func (cp *ControlPlane) Shutdown(ctx context.Context) error {
 	if cp.leaderCancel != nil {
 		cp.leaderCancel()
 	}
+	// Wait for the background goroutines to observe their cancelled contexts
+	// and return, but bound the wait by ctx so a stuck goroutine cannot hang
+	// shutdown. sweeper.Run exits when its sleepFunc returns ctx.Err(); the
+	// leader and claim-recovery loops select on ctx.Done().
+	waitDone := make(chan struct{})
+	go func() { cp.wg.Wait(); close(waitDone) }()
+	select {
+	case <-waitDone:
+	case <-ctx.Done():
+	}
 	if err := cp.elector.Resign(ctx); err != nil {
 		errs = append(errs, err)
 	}
@@ -308,7 +353,7 @@ func (cp *ControlPlane) bindDispatcher() func() {
 	switch b := cp.backend.(type) {
 	case *backendmemory.Backend:
 		return b.BindHandlerWithEngine(cp.eng, cp.dispatcher.HandleTask)
-	case *backendasynq.Backend:
+	case *distributed.Backend:
 		return b.BindHandler(cp.eng, cp.dispatcher.HandleTask)
 	default:
 		return cp.backend.Bind(cp.eng)

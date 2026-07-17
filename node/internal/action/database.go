@@ -205,6 +205,14 @@ func (n *DatabaseNode) execSelect(ctx context.Context, db *sql.DB, table string,
 		results = append(results, row)
 	}
 
+	// rows.Next() returns false both at normal end-of-result and when iteration
+	// is aborted by an underlying error (e.g. a dropped connection mid-stream).
+	// Without this check the node would silently return a truncated result set
+	// as success, corrupting downstream data integrity.
+	if err := rows.Err(); err != nil {
+		return &types.Output{Data: map[string]any{"error": err.Error()}, Port: "error"}, nil
+	}
+
 	return &types.Output{Data: map[string]any{"rows": results, "count": len(results)}}, nil
 }
 
@@ -309,7 +317,7 @@ func (n *DatabaseNode) execUpdate(ctx context.Context, db *sql.DB, table string,
 	}
 	clauses, whereArgs, err := buildWhere(where)
 	if err != nil {
-		return nil, err
+		return &types.Output{Data: map[string]any{"error": err.Error()}, Port: "error"}, nil
 	}
 	query += " WHERE " + clauses
 	args = append(args, whereArgs...)
@@ -331,7 +339,7 @@ func (n *DatabaseNode) execDelete(ctx context.Context, db *sql.DB, table string,
 
 	clauses, args, err := buildWhere(where)
 	if err != nil {
-		return nil, err
+		return &types.Output{Data: map[string]any{"error": err.Error()}, Port: "error"}, nil
 	}
 	query := fmt.Sprintf("DELETE FROM %s WHERE %s", table, clauses)
 

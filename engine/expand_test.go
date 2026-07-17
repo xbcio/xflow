@@ -43,7 +43,7 @@ func TestScheduler_MergeWaitAny_TriggersOnFirstActive(t *testing.T) {
 		"test.echo":   &echoHandler{},
 		"xflow.merge": &echoHandler{},
 	}}
-	eng := newTestEngine(state, queue, reg)
+	eng := newTestEngine(t, state, queue, reg)
 	ctx := context.Background()
 
 	id, err := eng.Submit(ctx, g, nil)
@@ -107,7 +107,7 @@ func TestScheduler_MergeWaitAll_WaitsForAll(t *testing.T) {
 		"test.echo":   &echoHandler{},
 		"xflow.merge": &echoHandler{},
 	}}
-	eng := newTestEngine(state, queue, reg)
+	eng := newTestEngine(t, state, queue, reg)
 	ctx := context.Background()
 
 	_, err = eng.Submit(ctx, g, nil)
@@ -197,7 +197,7 @@ func TestScheduler_LoopExpansion_CreatesSubExecutions(t *testing.T) {
 		"xflow.loop": &loopHandler{},
 		"test.echo":  &echoHandler{},
 	}}
-	eng := newTestEngine(state, queue, reg)
+	eng := newTestEngine(t, state, queue, reg)
 	ctx := context.Background()
 
 	id, err := eng.Submit(ctx, g, nil)
