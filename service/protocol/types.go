@@ -76,7 +76,15 @@ type reportResultRequestJSON struct {
 type taskResultJSON struct {
 	Output  *types.Output      `json:"output,omitempty"`
 	Suspend *types.SuspendSpec `json:"suspend,omitempty"`
-	Error   string             `json:"error,omitempty"`
+	// Error is the legacy string-only error representation. It is always
+	// populated when result.Error is non-nil so older peers that only read this
+	// field continue to function (without classification).
+	Error string `json:"error,omitempty"`
+	// ErrorDetail carries the structured wire error DTO. Newer peers read it
+	// to recover retry/permanent classification; older peers ignore it. It is
+	// set when result.Error is a *types.ClassifiedError or is marked permanent
+	// via types.ErrPermanent.
+	ErrorDetail *types.ClassifiedError `json:"error_detail,omitempty"`
 }
 
 func (r ReportResultRequest) MarshalJSON() ([]byte, error) {
@@ -115,9 +123,15 @@ type ReportResultResponse struct {
 	Error    string `json:"error,omitempty"`
 }
 
-// MarshalTaskResult encodes a task result to JSON using the protocol's
-// error-as-string convention. It is the single source of truth for result
-// serialization shared by the HTTP and gRPC transports.
+// MarshalTaskResult encodes a task result to JSON. It is the single source of
+// truth for result serialization shared by the HTTP and gRPC transports.
+//
+// Error classification is preserved across the wire: when result.Error is a
+// *types.ClassifiedError (or is marked permanent via types.ErrPermanent), the
+// structured DTO is emitted in error_detail alongside the legacy error string.
+// This lets new servers apply retry/on-error policy without parsing error text
+// while old peers still read the string. Unmarked errors serialize as the
+// legacy string only, preserving the pre-DTO behavior.
 func MarshalTaskResult(result engine.TaskResult) ([]byte, error) {
 	out := taskResultJSON{
 		Output:  result.Output,
@@ -125,11 +139,32 @@ func MarshalTaskResult(result engine.TaskResult) ([]byte, error) {
 	}
 	if result.Error != nil {
 		out.Error = result.Error.Error()
+		switch err := result.Error.(type) {
+		case *types.ClassifiedError:
+			out.ErrorDetail = err
+		default:
+			// An error stamped permanent via errors.Join(ErrPermanent, ...)
+			// (e.g. the dispatcher's PermanentConfiguration failure) is not a
+			// *ClassifiedError, but its classification must still survive the
+			// wire: synthesize a permanent DTO from it.
+			if types.IsPermanent(err) {
+				out.ErrorDetail = &types.ClassifiedError{
+					Kind:      types.ErrorKindPermanent,
+					Message:   err.Error(),
+					Permanent: true,
+				}
+			}
+		}
 	}
 	return json.Marshal(out)
 }
 
 // UnmarshalTaskResult decodes a task result produced by MarshalTaskResult.
+//
+// When error_detail is present the structured ClassifiedError is recovered so
+// types.IsPermanent(result.Error) reflects the runner's classification. When
+// only the legacy error string is present (old runner), a plain error is
+// reconstructed — equivalent to the pre-DTO behavior, treated as transient.
 func UnmarshalTaskResult(data []byte) (engine.TaskResult, error) {
 	var in taskResultJSON
 	if err := json.Unmarshal(data, &in); err != nil {
@@ -139,7 +174,10 @@ func UnmarshalTaskResult(data []byte) (engine.TaskResult, error) {
 		Output:  in.Output,
 		Suspend: in.Suspend,
 	}
-	if in.Error != "" {
+	switch {
+	case in.ErrorDetail != nil:
+		result.Error = in.ErrorDetail
+	case in.Error != "":
 		result.Error = errors.New(in.Error)
 	}
 	return result, nil

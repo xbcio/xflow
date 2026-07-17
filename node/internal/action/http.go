@@ -117,12 +117,12 @@ func (n *HTTPNode) Execute(ctx context.Context, input *types.Input) (*types.Outp
 
 	rawURL := cast.ToString(input.Params["url"])
 	if rawURL == "" {
-		return nil, fmt.Errorf("xflow.http: url parameter is required")
+		return nil, types.NewPermanentError("http.url_required", "url parameter is required")
 	}
 
 	parsedURL, err := url.Parse(rawURL)
 	if err != nil {
-		return nil, fmt.Errorf("xflow.http: invalid url: %w", err)
+		return nil, types.NewPermanentError("http.invalid_url", err.Error())
 	}
 
 	if query, ok := input.Params["query"].(map[string]any); ok {
@@ -137,14 +137,14 @@ func (n *HTTPNode) Execute(ctx context.Context, input *types.Input) (*types.Outp
 	if body := input.Params["body"]; body != nil {
 		bodyBytes, err := json.Marshal(body)
 		if err != nil {
-			return nil, fmt.Errorf("xflow.http: marshal body: %w", err)
+			return nil, types.NewPermanentError("http.marshal_body", err.Error())
 		}
 		bodyReader = bytes.NewReader(bodyBytes)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, method, parsedURL.String(), bodyReader)
 	if err != nil {
-		return nil, fmt.Errorf("xflow.http: create request: %w", err)
+		return nil, types.NewPermanentError("http.create_request", err.Error())
 	}
 
 	if bodyReader != nil {
