@@ -134,7 +134,7 @@ func decrementInDegreeAtomicCase(t *testing.T, state engine.StateStore) {
 	}); err != nil {
 		t.Fatalf("CreateExecution() error = %v", err)
 	}
-	targetIdx := g.Index["target"]
+	targetIdx, _ := g.NodeIndex("target")
 
 	// Each goroutine performs exactly one decrement with portActive=true.
 	// Atomicity expectations:

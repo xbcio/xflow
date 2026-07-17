@@ -342,7 +342,7 @@ func (e *Engine) handleSystemTask(ctx context.Context, task *Task, flush bool) (
 		if !active {
 			return true, nil
 		}
-		if task.NodeIdx < 0 || task.NodeIdx >= len(g.Nodes) {
+		if task.NodeIdx < 0 || task.NodeIdx >= g.NodeCount() {
 			return true, fmt.Errorf("skip node index %d is out of range", task.NodeIdx)
 		}
 		advance := &Task{
@@ -380,14 +380,14 @@ func (e *Engine) handleSystemTask(ctx context.Context, task *Task, flush bool) (
 }
 
 func downstreamArrivals(g *graph.Graph, sourceIdx int, activePort string) []DownstreamArrival {
-	if g == nil || sourceIdx < 0 || sourceIdx >= len(g.OutEdges) {
+	if g == nil || sourceIdx < 0 || sourceIdx >= g.NodeCount() {
 		return nil
 	}
 	byDestination := make(map[int]DownstreamArrival)
-	for _, edge := range g.OutEdges[sourceIdx] {
+	for _, edge := range g.NodeOutEdges(sourceIdx) {
 		arrival := byDestination[edge.DstIdx]
 		if arrival.ArrivalCount == 0 {
-			meta := g.Nodes[edge.DstIdx]
+			meta := g.NodeAt(edge.DstIdx)
 			arrival = DownstreamArrival{
 				NodeName:  meta.Name,
 				NodeIdx:   edge.DstIdx,

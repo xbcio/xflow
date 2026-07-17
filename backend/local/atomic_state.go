@@ -86,7 +86,7 @@ func (s *memoryState) CommitNode(_ context.Context, req engine.CommitNodeRequest
 	}
 
 	result := engine.CommitNodeResult{Outcome: engine.CommitOutcomeAccepted, Applied: true}
-	if entry.snap.Graph != nil && !entry.snap.Graph.AllowCycles {
+	if entry.snap.Graph != nil && !entry.snap.Graph.AllowCycles() {
 		s.remaining[req.ExecutionID]--
 		if req.Status == types.NodeStatusFailed {
 			s.failed[req.ExecutionID]++
@@ -113,7 +113,7 @@ func (s *memoryState) CommitNode(_ context.Context, req engine.CommitNodeRequest
 	// skipped for AllowCycles). Persist the engine-computed downstream intents,
 	// or finalize the execution when the branch terminated, in this same locked
 	// transition so a crash cannot lose them (#7).
-	if entry.snap.Graph != nil && entry.snap.Graph.AllowCycles && !req.Fatal && !result.ExecutionDone {
+	if entry.snap.Graph != nil && entry.snap.Graph.AllowCycles() && !req.Fatal && !result.ExecutionDone {
 		if len(req.CyclicOutbox) > 0 {
 			for _, oe := range req.CyclicOutbox {
 				if s.putOutboxEntryLocked(req.ExecutionID, oe) {

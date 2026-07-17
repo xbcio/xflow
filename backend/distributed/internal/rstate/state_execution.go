@@ -96,14 +96,15 @@ func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot
 	}
 	// Acyclic executions use these counters as the O(1) completion source of
 	// truth. Cyclic graphs retain their activation-based completion protocol.
-	if e.Graph != nil && !e.Graph.AllowCycles {
-		pipe.Set(ctx, remainingNodesKey(e.ID), len(e.Graph.Nodes), ttl)
+	if e.Graph != nil && !e.Graph.AllowCycles() {
+		pipe.Set(ctx, remainingNodesKey(e.ID), e.Graph.NodeCount(), ttl)
 		pipe.Set(ctx, failedNodesKey(e.ID), 0, ttl)
 		keys = append(keys, remainingNodesKey(e.ID), failedNodesKey(e.ID))
 	}
 	// Seed in-degree counters.
 	if e.Graph != nil {
-		for i, d := range e.Graph.InDegree {
+		for i := 0; i < e.Graph.NodeCount(); i++ {
+			d := e.Graph.InDegreeAt(i)
 			if d > 0 {
 				pipe.Set(ctx, inDegreeKey(e.ID, i), d, ttl)
 				keys = append(keys, inDegreeKey(e.ID, i))
@@ -181,7 +182,8 @@ func (s *Store) cleanupCreatedExecution(ctx context.Context, e *engine.Execution
 		executionKeySetKey(e.ID),
 	)
 	if e.Graph != nil {
-		for i, node := range e.Graph.Nodes {
+		for i := 0; i < e.Graph.NodeCount(); i++ {
+			node := e.Graph.NodeAt(i)
 			pipe.Del(ctx,
 				inDegreeKey(e.ID, i),
 				activeInputsKey(e.ID, i),

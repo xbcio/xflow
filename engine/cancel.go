@@ -33,7 +33,7 @@ func (e *Engine) Cancel(ctx context.Context, id types.ExecutionID) error {
 		return fmt.Errorf("list suspended nodes for %q: %w", id, err)
 	}
 	for _, nodeName := range suspendedNodes {
-		nodeIdx, ok := g.Index[nodeName]
+		nodeIdx, ok := g.NodeIndex(nodeName)
 		if !ok {
 			return fmt.Errorf("suspended node %q is not in execution graph", nodeName)
 		}

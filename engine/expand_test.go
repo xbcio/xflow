@@ -32,9 +32,9 @@ func TestScheduler_MergeWaitAny_TriggersOnFirstActive(t *testing.T) {
 	}
 
 	// Verify merge mode was extracted.
-	mergeIdx := g.Index["merge"]
-	if g.Nodes[mergeIdx].MergeMode != "wait_any" {
-		t.Fatalf("expected MergeMode=wait_any, got %q", g.Nodes[mergeIdx].MergeMode)
+	mergeIdx, _ := g.NodeIndex("merge")
+	if g.NodeAt(mergeIdx).MergeMode != "wait_any" {
+		t.Fatalf("expected MergeMode=wait_any, got %q", g.NodeAt(mergeIdx).MergeMode)
 	}
 
 	state := newFakeState()

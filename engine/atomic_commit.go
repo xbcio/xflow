@@ -14,7 +14,7 @@ import (
 // counting semantics yet.
 func (e *Engine) commitAcyclicTaskResult(ctx context.Context, lease *TaskLease, g *graph.Graph, result TaskResult) (CommitOutcome, error) {
 	task := &lease.Task
-	meta := g.Nodes[task.NodeIdx]
+	meta := g.NodeAt(task.NodeIdx)
 
 	if result.Error != nil || (result.Output != nil && result.Output.Error != nil) {
 		var businessErr *types.Error

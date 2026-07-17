@@ -230,16 +230,9 @@ func assertWorkflowRegistryRecord(t *testing.T, got, want backend.WorkflowRecord
 	if want.Graph == nil {
 		t.Fatal("want.Graph = nil, test fixture is invalid")
 	}
-	if !reflect.DeepEqual(got.Graph.Nodes, want.Graph.Nodes) {
-		t.Fatalf("Graph.Nodes = %#v, want %#v", got.Graph.Nodes, want.Graph.Nodes)
-	}
-	if !reflect.DeepEqual(got.Graph.Index, want.Graph.Index) {
-		t.Fatalf("Graph.Index = %#v, want %#v", got.Graph.Index, want.Graph.Index)
-	}
-	if !reflect.DeepEqual(got.Graph.EntryIndexes, want.Graph.EntryIndexes) {
-		t.Fatalf("Graph.EntryIndexes = %#v, want %#v", got.Graph.EntryIndexes, want.Graph.EntryIndexes)
-	}
-	if !reflect.DeepEqual(got.Graph.InDegree, want.Graph.InDegree) {
-		t.Fatalf("Graph.InDegree = %#v, want %#v", got.Graph.InDegree, want.Graph.InDegree)
+	// Compare graph structure via the stable compiled hash (covers nodes,
+	// edges, index, in-degree, and all other structural fields).
+	if got.Graph.Hash() != want.Graph.Hash() {
+		t.Fatalf("Graph.Hash = %q, want %q (graphs differ structurally)", got.Graph.Hash(), want.Graph.Hash())
 	}
 }

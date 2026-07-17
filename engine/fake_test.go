@@ -63,7 +63,8 @@ func (f *fakeState) createExecutionLocked(e *ExecutionSnapshot) {
 	f.executions[e.ID] = e
 	// Initialize in-degree counters from the graph.
 	if e.Graph != nil {
-		for i, deg := range e.Graph.InDegree {
+		for i := 0; i < e.Graph.NodeCount(); i++ {
+			deg := e.Graph.InDegreeAt(i)
 			key := fmt.Sprintf("%s/%d", e.ID, i)
 			f.inDegrees[key] = deg
 		}
@@ -499,7 +500,8 @@ func (f *fakeState) ListSuspendedNodes(_ context.Context, id types.ExecutionID) 
 func (f *fakeState) InitInDegrees(id types.ExecutionID, g *graph.Graph) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	for i, d := range g.InDegree {
+	for i := 0; i < g.NodeCount(); i++ {
+		d := g.InDegreeAt(i)
 		key := fmt.Sprintf("%s/%d", id, i)
 		f.inDegrees[key] = d
 	}

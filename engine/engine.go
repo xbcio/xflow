@@ -147,7 +147,7 @@ func (e *Engine) Submit(ctx context.Context, g *graph.Graph, params map[string]a
 
 // Invoke starts a new execution from one explicit entry node.
 func (e *Engine) Invoke(ctx context.Context, g *graph.Graph, entryName string, params map[string]any, runtime ...*types.Runtime) (types.ExecutionID, error) {
-	entryIdx, ok := g.EntryIndexes[entryName]
+	entryIdx, ok := g.EntryIndex(entryName)
 	if !ok {
 		return "", fmt.Errorf("entry node %q not found", entryName)
 	}
@@ -163,7 +163,7 @@ func (e *Engine) Invoke(ctx context.Context, g *graph.Graph, entryName string, p
 	if len(runtime) > 0 {
 		snap.Runtime = cloneRuntime(runtime[0])
 	}
-	entry := g.Nodes[entryIdx]
+	entry := g.NodeAt(entryIdx)
 	return e.startExecution(ctx, snap, []initialTask{{
 		task: Task{
 			ExecutionID:  id,

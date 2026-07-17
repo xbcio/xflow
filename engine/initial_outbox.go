@@ -17,13 +17,13 @@ type initialTask struct {
 }
 
 func submitInitialTasks(id types.ExecutionID, g *graph.Graph) []initialTask {
-	if g.AllowCycles {
-		start := g.Nodes[g.StartIdx]
+	if g.AllowCycles() {
+		start := g.NodeAt(g.StartIndex())
 		return []initialTask{{
 			task: Task{
 				ExecutionID:  id,
 				NodeName:     start.Name,
-				NodeIdx:      g.StartIdx,
+				NodeIdx:      g.StartIndex(),
 				Type:         TaskTypeNodeExec,
 				ActivationID: 1,
 			},
@@ -32,8 +32,9 @@ func submitInitialTasks(id types.ExecutionID, g *graph.Graph) []initialTask {
 	}
 
 	tasks := make([]initialTask, 0)
-	for nodeIdx, node := range g.Nodes {
-		if g.InDegree[nodeIdx] != 0 {
+	for nodeIdx := 0; nodeIdx < g.NodeCount(); nodeIdx++ {
+		node := g.NodeAt(nodeIdx)
+		if g.InDegreeAt(nodeIdx) != 0 {
 			continue
 		}
 		tasks = append(tasks, initialTask{

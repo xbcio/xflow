@@ -53,25 +53,25 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 	}
 
 	g := &Graph{
-		Name:            def.Name,
-		WorkflowVersion: def.Version,
-		CompilerVersion: compilerVersion,
-		Nodes:           make([]NodeMeta, n),
-		Index:           make(map[string]int, n),
-		EntryIndexes:    make(map[string]int),
-		OutEdges:        make([][]Edge, n),
-		InEdges:         make([][]Edge, n),
-		InDegree:        make([]int, n),
-		StartIdx:        -1,
+		name:            def.Name,
+		workflowVersion: def.Version,
+		compilerVersion: compilerVersion,
+		nodes:           make([]NodeMeta, n),
+		index:           make(map[string]int, n),
+		entryIndexes:    make(map[string]int),
+		outEdges:        make([][]Edge, n),
+		inEdges:         make([][]Edge, n),
+		inDegree:        make([]int, n),
+		startIdx:        -1,
 	}
 	var experimentalExpand bool
 	if def.Options != nil {
-		g.AllowCycles = def.Options.AllowCycles
-		g.MaxAutoDepth = def.Options.MaxAutoDepth
+		g.allowCycles = def.Options.AllowCycles
+		g.maxAutoDepth = def.Options.MaxAutoDepth
 		experimentalExpand = def.Options.ExperimentalExpand
 	}
-	if g.AllowCycles && g.MaxAutoDepth <= 0 {
-		g.MaxAutoDepth = DefaultMaxAutoDepth
+	if g.allowCycles && g.maxAutoDepth <= 0 {
+		g.maxAutoDepth = DefaultMaxAutoDepth
 	}
 
 	// Compile-time gate: block xflow.loop / xflow.split unless the workflow
@@ -91,8 +91,8 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 	}
 
 	if def.Context != nil {
-		g.Vars = cloneStringAnyMap(def.Context.Vars)
-		g.Config = cloneStringAnyMap(def.Context.Config)
+		g.vars = cloneStringAnyMap(def.Context.Vars)
+		g.config = cloneStringAnyMap(def.Context.Config)
 	}
 
 	startCount, err := registerNodes(def, g)
@@ -103,7 +103,7 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 		return nil, err
 	}
 
-	if g.AllowCycles {
+	if g.allowCycles {
 		if startCount != 1 {
 			return nil, fmt.Errorf("cyclic workflow requires exactly one xflow.start node, got %d", startCount)
 		}
@@ -119,21 +119,21 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 	return g, nil
 }
 
-// registerNodes performs the first compile pass: it populates g.Index/g.Nodes,
+// registerNodes performs the first compile pass: it populates g.index/g.nodes,
 // records entry/start nodes, and returns the count of xflow.start nodes for
 // cyclic-workflow validation.
 func registerNodes(def *types.WorkflowDef, g *Graph) (int, error) {
 	startCount := 0
 	for i, nd := range def.Nodes {
-		if _, dup := g.Index[nd.Name]; dup {
+		if _, dup := g.index[nd.Name]; dup {
 			return 0, fmt.Errorf("duplicate node name: %s", nd.Name)
 		}
 		runnerSelector, err := resolveRunnerSelector(def.RunnerSelector, nd.RunnerSelector)
 		if err != nil {
 			return 0, fmt.Errorf("node %q: %w", nd.Name, err)
 		}
-		g.Index[nd.Name] = i
-		g.Nodes[i] = NodeMeta{
+		g.index[nd.Name] = i
+		g.nodes[i] = NodeMeta{
 			Name:           nd.Name,
 			Type:           nd.Type,
 			Kind:           nd.Kind,
@@ -145,12 +145,12 @@ func registerNodes(def *types.WorkflowDef, g *Graph) (int, error) {
 			Retry:          resolveRetry(nd.Retry, def.Settings),
 		}
 		if nd.Type == "xflow.start" || nd.Kind == types.NodeKindTrigger {
-			g.EntryIndexes[nd.Name] = i
+			g.entryIndexes[nd.Name] = i
 		}
-		if g.AllowCycles {
+		if g.allowCycles {
 			if nd.Type == "xflow.start" {
 				startCount++
-				g.StartIdx = i
+				g.startIdx = i
 			}
 			if nd.Type == "xflow.merge" && extractMergeMode(nd) == "wait_all" {
 				return 0, errors.New("xflow.merge wait_all is not supported in cyclic workflows")
@@ -161,8 +161,8 @@ func registerNodes(def *types.WorkflowDef, g *Graph) (int, error) {
 }
 
 // buildEdges performs the second compile pass: it materializes Connections into
-// g.OutEdges/g.InEdges/g.InDegree and records the distinct output port names
-// per source node on g.Nodes[i].PortOuts.
+// g.outEdges/g.inEdges/g.inDegree and records the distinct output port names
+// per source node on g.nodes[i].PortOuts.
 func buildEdges(def *types.WorkflowDef, g *Graph) error {
 	sources := make([]string, 0, len(def.Connections))
 	for srcName := range def.Connections {
@@ -172,7 +172,7 @@ func buildEdges(def *types.WorkflowDef, g *Graph) error {
 
 	for _, srcName := range sources {
 		ports := def.Connections[srcName]
-		srcIdx, ok := g.Index[srcName]
+		srcIdx, ok := g.index[srcName]
 		if !ok {
 			return fmt.Errorf("connection references unknown source node: %s", srcName)
 		}
@@ -186,7 +186,7 @@ func buildEdges(def *types.WorkflowDef, g *Graph) error {
 		for _, port := range portNames {
 			conns := ports[port]
 			for _, c := range conns {
-				dstIdx, ok := g.Index[c.Node]
+				dstIdx, ok := g.index[c.Node]
 				if !ok {
 					return fmt.Errorf("connection references unknown destination node: %s", c.Node)
 				}
@@ -196,15 +196,15 @@ func buildEdges(def *types.WorkflowDef, g *Graph) error {
 					SrcPort: port,
 					DstPort: c.Input,
 				}
-				g.OutEdges[srcIdx] = append(g.OutEdges[srcIdx], edge)
-				g.InEdges[dstIdx] = append(g.InEdges[dstIdx], edge)
-				g.InDegree[dstIdx]++
+				g.outEdges[srcIdx] = append(g.outEdges[srcIdx], edge)
+				g.inEdges[dstIdx] = append(g.inEdges[dstIdx], edge)
+				g.inDegree[dstIdx]++
 			}
 			if len(conns) > 0 {
 				portOuts = append(portOuts, port)
 			}
 		}
-		g.Nodes[srcIdx].PortOuts = portOuts
+		g.nodes[srcIdx].PortOuts = portOuts
 	}
 	return nil
 }
@@ -343,9 +343,9 @@ func extractMergeMode(nd types.NodeDef) string {
 
 // detectCycle uses Kahn's algorithm (topological sort) to detect cycles.
 func detectCycle(g *Graph) error {
-	n := len(g.Nodes)
+	n := len(g.nodes)
 	inDeg := make([]int, n)
-	copy(inDeg, g.InDegree)
+	copy(inDeg, g.inDegree)
 
 	queue := make([]int, 0, n)
 	for i, d := range inDeg {
@@ -359,7 +359,7 @@ func detectCycle(g *Graph) error {
 		cur := queue[0]
 		queue = queue[1:]
 		visited++
-		for _, e := range g.OutEdges[cur] {
+		for _, e := range g.outEdges[cur] {
 			inDeg[e.DstIdx]--
 			if inDeg[e.DstIdx] == 0 {
 				queue = append(queue, e.DstIdx)

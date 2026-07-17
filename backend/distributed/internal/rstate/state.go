@@ -129,7 +129,8 @@ func transientExecutionKeys(id types.ExecutionID, g *graph.Graph) []string {
 		outboxDeadBodyKey(id),
 	}
 	if g != nil {
-		for i, node := range g.Nodes {
+		for i := 0; i < g.NodeCount(); i++ {
+			node := g.NodeAt(i)
 			keys = append(keys,
 				inDegreeKey(id, i),
 				activeInputsKey(id, i),

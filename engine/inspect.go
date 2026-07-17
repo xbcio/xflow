@@ -50,9 +50,9 @@ func (e *Engine) Inspect(ctx context.Context, id types.ExecutionID, nodeNames ..
 		if g == nil {
 			return detail, nil
 		}
-		names = make([]string, 0, len(g.Nodes))
-		for _, n := range g.Nodes {
-			names = append(names, n.Name)
+		names = make([]string, 0, g.NodeCount())
+		for i := 0; i < g.NodeCount(); i++ {
+			names = append(names, g.NodeAt(i).Name)
 		}
 	}
 

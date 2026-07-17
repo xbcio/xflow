@@ -36,7 +36,8 @@ func (s *Store) CheckCompletion(ctx context.Context, id types.ExecutionID, total
 
 	keys := make([]string, 0, 1+totalNodes)
 	keys = append(keys, execKey(id, "status"))
-	for _, nd := range g.Nodes {
+	for i := 0; i < g.NodeCount(); i++ {
+		nd := g.NodeAt(i)
 		keys = append(keys, nodeStatusKey(id, nd.Name))
 	}
 

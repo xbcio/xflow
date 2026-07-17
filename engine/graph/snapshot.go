@@ -90,27 +90,27 @@ func cloneReflectValue(value reflect.Value) reflect.Value {
 
 func assignGraphHash(g *Graph) error {
 	payload := graphHashPayload{
-		Name:            g.Name,
-		WorkflowVersion: g.WorkflowVersion,
-		CompilerVersion: g.CompilerVersion,
-		Nodes:           g.Nodes,
-		Index:           g.Index,
-		EntryIndexes:    g.EntryIndexes,
-		OutEdges:        g.OutEdges,
-		InEdges:         g.InEdges,
-		InDegree:        g.InDegree,
-		Vars:            g.Vars,
-		Config:          g.Config,
-		AllowCycles:     g.AllowCycles,
-		StartIdx:        g.StartIdx,
-		MaxAutoDepth:    g.MaxAutoDepth,
+		Name:            g.name,
+		WorkflowVersion: g.workflowVersion,
+		CompilerVersion: g.compilerVersion,
+		Nodes:           g.nodes,
+		Index:           g.index,
+		EntryIndexes:    g.entryIndexes,
+		OutEdges:        g.outEdges,
+		InEdges:         g.inEdges,
+		InDegree:        g.inDegree,
+		Vars:            g.vars,
+		Config:          g.config,
+		AllowCycles:     g.allowCycles,
+		StartIdx:        g.startIdx,
+		MaxAutoDepth:    g.maxAutoDepth,
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshal graph hash payload: %w", err)
 	}
 	sum := sha256.Sum256(data)
-	g.GraphHash = "sha256:" + hex.EncodeToString(sum[:])
+	g.graphHash = "sha256:" + hex.EncodeToString(sum[:])
 	return nil
 }
 
@@ -129,4 +129,78 @@ type graphHashPayload struct {
 	AllowCycles     bool
 	StartIdx        int
 	MaxAutoDepth    int
+}
+
+// graphSerializedForm is the on-wire / at-rest JSON representation of a Graph.
+// It mirrors the private Graph fields so that encoding/json can round-trip the
+// compiled graph through Redis (distributed backend) or any other JSON store
+// without leaking the private field names into the Graph API.
+type graphSerializedForm struct {
+	GraphHash       string         `json:"graph_hash"`
+	Name            string         `json:"name"`
+	WorkflowVersion string         `json:"workflow_version"`
+	CompilerVersion string         `json:"compiler_version"`
+	Nodes           []NodeMeta     `json:"nodes"`
+	Index           map[string]int `json:"index"`
+	EntryIndexes    map[string]int `json:"entry_indexes"`
+	OutEdges        [][]Edge       `json:"out_edges"`
+	InEdges         [][]Edge       `json:"in_edges"`
+	InDegree        []int          `json:"in_degree"`
+	Vars            map[string]any `json:"vars,omitempty"`
+	Config          map[string]any `json:"config,omitempty"`
+	AllowCycles     bool           `json:"allow_cycles"`
+	StartIdx        int            `json:"start_idx"`
+	MaxAutoDepth    int            `json:"max_auto_depth"`
+}
+
+// MarshalJSON implements json.Marshaler so that encoding/json can serialize a
+// Graph even though all its fields are unexported. The output uses
+// graphSerializedForm as a stable, versioned wire format.
+func (g *Graph) MarshalJSON() ([]byte, error) {
+	if g == nil {
+		return []byte("null"), nil
+	}
+	return json.Marshal(graphSerializedForm{
+		GraphHash:       g.graphHash,
+		Name:            g.name,
+		WorkflowVersion: g.workflowVersion,
+		CompilerVersion: g.compilerVersion,
+		Nodes:           g.nodes,
+		Index:           g.index,
+		EntryIndexes:    g.entryIndexes,
+		OutEdges:        g.outEdges,
+		InEdges:         g.inEdges,
+		InDegree:        g.inDegree,
+		Vars:            g.vars,
+		Config:          g.config,
+		AllowCycles:     g.allowCycles,
+		StartIdx:        g.startIdx,
+		MaxAutoDepth:    g.maxAutoDepth,
+	})
+}
+
+// UnmarshalJSON implements json.Unmarshaler, the inverse of MarshalJSON.
+// It populates the Graph's unexported fields from the stable wire format so
+// that a deserialized graph is fully functional without recompilation.
+func (g *Graph) UnmarshalJSON(data []byte) error {
+	var sf graphSerializedForm
+	if err := json.Unmarshal(data, &sf); err != nil {
+		return err
+	}
+	g.graphHash = sf.GraphHash
+	g.name = sf.Name
+	g.workflowVersion = sf.WorkflowVersion
+	g.compilerVersion = sf.CompilerVersion
+	g.nodes = sf.Nodes
+	g.index = sf.Index
+	g.entryIndexes = sf.EntryIndexes
+	g.outEdges = sf.OutEdges
+	g.inEdges = sf.InEdges
+	g.inDegree = sf.InDegree
+	g.vars = sf.Vars
+	g.config = sf.Config
+	g.allowCycles = sf.AllowCycles
+	g.startIdx = sf.StartIdx
+	g.maxAutoDepth = sf.MaxAutoDepth
+	return nil
 }

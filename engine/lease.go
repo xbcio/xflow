@@ -64,7 +64,7 @@ func (e *Engine) BuildTaskLease(ctx context.Context, t *Task) (*TaskLease, error
 		lease.Attempt = prev.Attempt + 1
 	}
 
-	meta := g.Nodes[t.NodeIdx]
+	meta := g.NodeAt(t.NodeIdx)
 	input, err := e.buildInput(ctx, t, g)
 	if err != nil {
 		released, releaseErr := e.ReleaseTaskLease(ctx, lease)
@@ -108,7 +108,7 @@ func (e *Engine) RecoverTaskLease(ctx context.Context, task *Task) (*TaskLease, 
 	if err != nil {
 		return nil, err
 	}
-	if !active || task.NodeIdx < 0 || task.NodeIdx >= len(g.Nodes) || g.Nodes[task.NodeIdx].Name != task.NodeName {
+	if !active || task.NodeIdx < 0 || task.NodeIdx >= g.NodeCount() || g.NodeAt(task.NodeIdx).Name != task.NodeName {
 		return nil, ErrExecutionInactive
 	}
 
@@ -130,7 +130,7 @@ func (e *Engine) RecoverTaskLease(ctx context.Context, task *Task) (*TaskLease, 
 	if err != nil {
 		return nil, fmt.Errorf("recover task lease %q/%q: build input: %w", task.ExecutionID, task.NodeName, err)
 	}
-	meta := g.Nodes[task.NodeIdx]
+	meta := g.NodeAt(task.NodeIdx)
 	return &TaskLease{
 		LeaseID:     node.LeaseID,
 		LeaseToken:  node.LeaseToken,
@@ -157,7 +157,7 @@ func (e *Engine) TaskRouting(ctx context.Context, t *Task) (TaskRouting, error) 
 	if _, err := e.checkTaskRouteActive(ctx, g, t); err != nil {
 		return TaskRouting{}, err
 	}
-	meta := g.Nodes[t.NodeIdx]
+	meta := g.NodeAt(t.NodeIdx)
 	return TaskRouting{
 		NodeType:       meta.Type,
 		NodeVersion:    meta.Version,
@@ -187,13 +187,13 @@ func cloneRunnerSelector(selector *types.RunnerSelector) *types.RunnerSelector {
 // inactive (ErrExecutionInactive). The lease-active check is intentionally
 // handled by classifyLeaseAcquireFailure only.
 func (e *Engine) classifyNodeForTask(g *graph.Graph, t *Task, ns *NodeSnapshot) error {
-	if g.AllowCycles && t.ActivationID <= 0 {
+	if g.AllowCycles() && t.ActivationID <= 0 {
 		return ErrExecutionInactive
 	}
-	if ns != nil && g.AllowCycles && ns.ActivationID > t.ActivationID {
+	if ns != nil && g.AllowCycles() && ns.ActivationID > t.ActivationID {
 		return ErrExecutionInactive
 	}
-	if ns != nil && types.IsTerminalNodeStatus(ns.Status) && (!g.AllowCycles || ns.ActivationID >= t.ActivationID) {
+	if ns != nil && types.IsTerminalNodeStatus(ns.Status) && (!g.AllowCycles() || ns.ActivationID >= t.ActivationID) {
 		return ErrExecutionInactive
 	}
 	if ns != nil && ns.Status == types.NodeStatusCommitting {

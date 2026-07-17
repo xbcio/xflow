@@ -22,9 +22,9 @@ func (e *Engine) buildInput(ctx context.Context, t *Task, g *graph.Graph) (*type
 
 	runtime := snap.Runtime
 	input := &types.Input{
-		Params:      cloneMap(g.Nodes[t.NodeIdx].Parameters),
-		Vars:        mergeVars(g.Vars, runtimeVars(runtime)),
-		Config:      cloneMap(g.Config),
+		Params:      cloneMap(g.NodeAt(t.NodeIdx).Parameters),
+		Vars:        mergeVars(g.Vars(), runtimeVars(runtime)),
+		Config:      cloneMap(g.Config()),
 		Runtime:     cloneRuntime(runtime),
 		ExecutionID: string(t.ExecutionID),
 		NodeName:    t.NodeName,
@@ -41,8 +41,8 @@ func (e *Engine) buildInput(ctx context.Context, t *Task, g *graph.Graph) (*type
 		return input, nil
 	}
 
-	inEdges := g.InEdges[t.NodeIdx]
-	if g.AllowCycles && t.NodeIdx == g.StartIdx && t.ActivationID == 1 {
+	inEdges := g.NodeInEdges(t.NodeIdx)
+	if g.AllowCycles() && t.NodeIdx == g.StartIndex() && t.ActivationID == 1 {
 		input.Data = cloneMap(snap.Params)
 		return input, nil
 	}
@@ -52,16 +52,16 @@ func (e *Engine) buildInput(ctx context.Context, t *Task, g *graph.Graph) (*type
 		// source handlers can read them (mirrors ClusterRunner behaviour).
 		input.Data = cloneMap(snap.Params)
 	case 1:
-		data, err := e.state.GetOutput(ctx, t.ExecutionID, g.Nodes[inEdges[0].SrcIdx].Name)
+		data, err := e.state.GetOutput(ctx, t.ExecutionID, g.NodeAt(inEdges[0].SrcIdx).Name)
 		if err != nil {
-			return nil, fmt.Errorf("get upstream output %q/%q: %w", t.ExecutionID, g.Nodes[inEdges[0].SrcIdx].Name, err)
+			return nil, fmt.Errorf("get upstream output %q/%q: %w", t.ExecutionID, g.NodeAt(inEdges[0].SrcIdx).Name, err)
 		}
 		input.Data = cloneMap(data)
 	default:
 		// Fan-in: expose all upstream outputs keyed by node name.
 		inputs := make(map[string]any, len(inEdges))
 		for _, edge := range inEdges {
-			name := g.Nodes[edge.SrcIdx].Name
+			name := g.NodeAt(edge.SrcIdx).Name
 			data, err := e.state.GetOutput(ctx, t.ExecutionID, name)
 			if err != nil {
 				return nil, fmt.Errorf("get upstream output %q/%q: %w", t.ExecutionID, name, err)

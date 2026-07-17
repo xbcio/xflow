@@ -205,10 +205,11 @@ func (f *fakeState) CommitNode(_ context.Context, req CommitNodeRequest) (Commit
 	}
 
 	result := CommitNodeResult{Outcome: CommitOutcomeAccepted, Applied: true}
-	if exec.Graph != nil && !exec.Graph.AllowCycles {
+	if exec.Graph != nil && !exec.Graph.AllowCycles() {
 		remaining := 0
 		hasFailed := false
-		for _, meta := range exec.Graph.Nodes {
+		for i := 0; i < exec.Graph.NodeCount(); i++ {
+			meta := exec.Graph.NodeAt(i)
 			snapshot := f.nodes[string(req.ExecutionID)+"/"+meta.Name]
 			if snapshot == nil || !types.IsTerminalNodeStatus(snapshot.Status) {
 				remaining++
@@ -240,7 +241,7 @@ func (f *fakeState) CommitNode(_ context.Context, req CommitNodeRequest) (Commit
 	// Reference mirror of the production cyclic path (#7): persist the
 	// engine-computed downstream intents, or finalize the execution when the
 	// active branch terminated, in the same mutex-guarded transition.
-	if exec.Graph != nil && exec.Graph.AllowCycles && !req.Fatal && !result.ExecutionDone {
+	if exec.Graph != nil && exec.Graph.AllowCycles() && !req.Fatal && !result.ExecutionDone {
 		if len(req.CyclicOutbox) > 0 {
 			for _, oe := range req.CyclicOutbox {
 				if f.putAtomicOutboxLocked(req.ExecutionID, oe.ID, oe.Task, oe.AvailableAt) {

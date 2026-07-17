@@ -95,12 +95,13 @@ func (s *memoryState) createExecutionLocked(e *engine.ExecutionSnapshot) {
 	s.doneCh[e.ID] = make(chan struct{})
 	// Seed in-degree counters and O(1) completion counters from the compiled graph.
 	if e.Graph != nil {
-		for i, d := range e.Graph.InDegree {
+		for i := 0; i < e.Graph.NodeCount(); i++ {
+			d := e.Graph.InDegreeAt(i)
 			key := fmt.Sprintf("%s/%d", e.ID, i)
 			s.inDegrees[key] = d
 		}
-		if !e.Graph.AllowCycles {
-			s.remaining[e.ID] = len(e.Graph.Nodes)
+		if !e.Graph.AllowCycles() {
+			s.remaining[e.ID] = e.Graph.NodeCount()
 			s.failed[e.ID] = 0
 		}
 	}

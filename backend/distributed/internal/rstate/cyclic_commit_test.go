@@ -40,7 +40,7 @@ func TestRedisCommitLeasedNodeCyclicPersistsDownstreamAtomically(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reviewIdx := g.Index["review"]
+	reviewIdx, _ := g.NodeIndex("review")
 	lease := &engine.TaskLease{
 		LeaseID:    "lease-review",
 		LeaseToken: "token-review",
@@ -64,7 +64,7 @@ func TestRedisCommitLeasedNodeCyclicPersistsDownstreamAtomically(t *testing.T) {
 		Task: engine.Task{
 			ExecutionID:  id,
 			NodeName:     "start",
-			NodeIdx:      g.Index["start"],
+			NodeIdx:      func() int { idx, _ := g.NodeIndex("start"); return idx }(),
 			Type:         engine.TaskTypeNodeExec,
 			ActivationID: 2,
 			AutoDepth:    1,
@@ -144,7 +144,7 @@ func TestRedisCommitLeasedNodeCyclicCompletionIsAtomic(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	finishIdx := g.Index["finish"]
+	finishIdx, _ := g.NodeIndex("finish")
 	lease := &engine.TaskLease{
 		LeaseID:    "lease-finish",
 		LeaseToken: "token-finish",

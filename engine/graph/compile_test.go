@@ -26,16 +26,16 @@ func TestCompile_LinearChain(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(g.Nodes) != 3 {
-		t.Fatalf("expected 3 nodes, got %d", len(g.Nodes))
+	if len(g.nodes) != 3 {
+		t.Fatalf("expected 3 nodes, got %d", len(g.nodes))
 	}
-	if g.InDegree[g.Index["A"]] != 0 {
+	if g.inDegree[g.index["A"]] != 0 {
 		t.Error("A should have in-degree 0")
 	}
-	if g.InDegree[g.Index["B"]] != 1 {
+	if g.inDegree[g.index["B"]] != 1 {
 		t.Error("B should have in-degree 1")
 	}
-	if g.InDegree[g.Index["C"]] != 1 {
+	if g.inDegree[g.index["C"]] != 1 {
 		t.Error("C should have in-degree 1")
 	}
 }
@@ -77,14 +77,14 @@ func TestCompile_AllowCyclesAllowsCycleWithStart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !g.AllowCycles {
+	if !g.allowCycles {
 		t.Fatal("expected cyclic graph")
 	}
-	if g.StartIdx != g.Index["start"] {
-		t.Fatalf("StartIdx = %d, want %d", g.StartIdx, g.Index["start"])
+	if g.startIdx != g.index["start"] {
+		t.Fatalf("startIdx = %d, want %d", g.startIdx, g.index["start"])
 	}
-	if g.MaxAutoDepth != 7 {
-		t.Fatalf("MaxAutoDepth = %d, want 7", g.MaxAutoDepth)
+	if g.maxAutoDepth != 7 {
+		t.Fatalf("maxAutoDepth = %d, want 7", g.maxAutoDepth)
 	}
 }
 
@@ -105,11 +105,11 @@ func TestCompileCollectsStartAndTriggerEntries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(g.EntryIndexes) != 2 {
-		t.Fatalf("EntryIndexes len = %d, want 2", len(g.EntryIndexes))
+	if len(g.entryIndexes) != 2 {
+		t.Fatalf("entryIndexes len = %d, want 2", len(g.entryIndexes))
 	}
-	if g.EntryIndexes["start"] != 0 || g.EntryIndexes["cron"] != 1 {
-		t.Fatalf("EntryIndexes = %+v", g.EntryIndexes)
+	if g.entryIndexes["start"] != 0 || g.entryIndexes["cron"] != 1 {
+		t.Fatalf("entryIndexes = %+v", g.entryIndexes)
 	}
 }
 
@@ -139,7 +139,7 @@ func TestCompileResolvesRunnerSelectors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	selector := g.Nodes[g.Index["scan"]].RunnerSelector
+	selector := g.nodes[g.index["scan"]].RunnerSelector
 	if selector == nil {
 		t.Fatal("scan RunnerSelector is nil")
 	}
@@ -206,8 +206,8 @@ func TestCompile_AllowCyclesDefaultsMaxAutoDepth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if g.MaxAutoDepth != DefaultMaxAutoDepth {
-		t.Fatalf("MaxAutoDepth = %d, want %d", g.MaxAutoDepth, DefaultMaxAutoDepth)
+	if g.maxAutoDepth != DefaultMaxAutoDepth {
+		t.Fatalf("maxAutoDepth = %d, want %d", g.maxAutoDepth, DefaultMaxAutoDepth)
 	}
 }
 
@@ -258,8 +258,8 @@ func TestCompile_AllowCyclesDoesNotRejectTriggerEntry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if g.EntryIndexes["trigger"] != 1 {
-		t.Fatalf("trigger entry index = %d, want 1", g.EntryIndexes["trigger"])
+	if g.entryIndexes["trigger"] != 1 {
+		t.Fatalf("trigger entry index = %d, want 1", g.entryIndexes["trigger"])
 	}
 }
 
@@ -306,9 +306,9 @@ func TestCompile_FanOutFanIn(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	joinIdx := g.Index["join"]
-	if g.InDegree[joinIdx] != 2 {
-		t.Errorf("join should have in-degree 2, got %d", g.InDegree[joinIdx])
+	joinIdx := g.index["join"]
+	if g.inDegree[joinIdx] != 2 {
+		t.Errorf("join should have in-degree 2, got %d", g.inDegree[joinIdx])
 	}
 }
 
@@ -333,12 +333,12 @@ func TestCompile_PortRouting(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	checkIdx := g.Index["check"]
-	if len(g.OutEdges[checkIdx]) != 2 {
-		t.Errorf("check should have 2 out-edges, got %d", len(g.OutEdges[checkIdx]))
+	checkIdx := g.index["check"]
+	if len(g.outEdges[checkIdx]) != 2 {
+		t.Errorf("check should have 2 out-edges, got %d", len(g.outEdges[checkIdx]))
 	}
 
-	for _, e := range g.OutEdges[checkIdx] {
+	for _, e := range g.outEdges[checkIdx] {
 		if e.SrcPort != "main" && e.SrcPort != "error" {
 			t.Errorf("unexpected port: %s", e.SrcPort)
 		}
@@ -496,7 +496,7 @@ func TestCompileSnapshotsMutableDefinition(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	originalHash := g.GraphHash
+	originalHash := g.graphHash
 
 	def.Context.Vars["new"] = "changed"
 	def.Context.Vars["nested"].(map[string]any)["value"] = "changed"
@@ -513,29 +513,29 @@ func TestCompileSnapshotsMutableDefinition(t *testing.T) {
 	def.Nodes[1].Retry.MaxAttempts = 99
 
 	t.Run("context maps and nested values", func(t *testing.T) {
-		if _, ok := g.Vars["new"]; ok {
-			t.Fatal("Vars contains mutation made after Compile")
+		if _, ok := g.vars["new"]; ok {
+			t.Fatal("vars contains mutation made after Compile")
 		}
-		if got := g.Vars["nested"].(map[string]any)["value"]; got != "vars-original" {
-			t.Fatalf("Vars nested value = %q, want %q", got, "vars-original")
+		if got := g.vars["nested"].(map[string]any)["value"]; got != "vars-original" {
+			t.Fatalf("vars nested value = %q, want %q", got, "vars-original")
 		}
-		if got := g.Vars["list"].([]any)[0].(map[string]any)["value"]; got != "vars-list-original" {
-			t.Fatalf("Vars nested list map value = %q, want %q", got, "vars-list-original")
+		if got := g.vars["list"].([]any)[0].(map[string]any)["value"]; got != "vars-list-original" {
+			t.Fatalf("vars nested list map value = %q, want %q", got, "vars-list-original")
 		}
-		if got := g.Vars["list"].([]any)[1].([]string)[0]; got != "one" {
-			t.Fatalf("Vars nested list slice value = %q, want %q", got, "one")
+		if got := g.vars["list"].([]any)[1].([]string)[0]; got != "one" {
+			t.Fatalf("vars nested list slice value = %q, want %q", got, "one")
 		}
-		if _, ok := g.Config["new"]; ok {
-			t.Fatal("Config contains mutation made after Compile")
+		if _, ok := g.config["new"]; ok {
+			t.Fatal("config contains mutation made after Compile")
 		}
-		if got := g.Config["nested"].(map[string][]string)["labels"][0]; got != "prod" {
-			t.Fatalf("Config nested slice value = %q, want %q", got, "prod")
+		if got := g.config["nested"].(map[string][]string)["labels"][0]; got != "prod" {
+			t.Fatalf("config nested slice value = %q, want %q", got, "prod")
 		}
 	})
 
 	t.Run("node metadata", func(t *testing.T) {
-		start := g.Nodes[g.Index["start"]]
-		worker := g.Nodes[g.Index["worker"]]
+		start := g.nodes[g.index["start"]]
+		worker := g.nodes[g.index["worker"]]
 		if got := start.RunnerSelector.MatchLabels["workflow"]; got != "original" {
 			t.Fatalf("start workflow selector = %q, want %q", got, "original")
 		}
@@ -563,18 +563,18 @@ func TestCompileSnapshotsMutableDefinition(t *testing.T) {
 	})
 
 	t.Run("hash remains a snapshot", func(t *testing.T) {
-		if g.GraphHash == "" {
-			t.Fatal("GraphHash is empty")
+		if g.graphHash == "" {
+			t.Fatal("graphHash is empty")
 		}
-		if g.GraphHash != originalHash {
-			t.Fatalf("GraphHash = %q, want original %q", g.GraphHash, originalHash)
+		if g.graphHash != originalHash {
+			t.Fatalf("graphHash = %q, want original %q", g.graphHash, originalHash)
 		}
 		updated, err := Compile(def)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if updated.GraphHash == g.GraphHash {
-			t.Fatalf("GraphHash = %q after source mutation, want a new compiled graph hash", updated.GraphHash)
+		if updated.graphHash == g.graphHash {
+			t.Fatalf("graphHash = %q after source mutation, want a new compiled graph hash", updated.graphHash)
 		}
 	})
 }
@@ -608,21 +608,21 @@ func TestCompileGraphMetadataIsStable(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if g.WorkflowVersion != def.Version {
-			t.Fatalf("WorkflowVersion = %q, want %q", g.WorkflowVersion, def.Version)
+		if g.workflowVersion != def.Version {
+			t.Fatalf("workflowVersion = %q, want %q", g.workflowVersion, def.Version)
 		}
-		if g.CompilerVersion != compilerVersion {
-			t.Fatalf("CompilerVersion = %q, want %q", g.CompilerVersion, compilerVersion)
+		if g.compilerVersion != compilerVersion {
+			t.Fatalf("compilerVersion = %q, want %q", g.compilerVersion, compilerVersion)
 		}
-		if g.GraphHash == "" {
-			t.Fatal("GraphHash is empty")
+		if g.graphHash == "" {
+			t.Fatal("graphHash is empty")
 		}
 		if i == 0 {
-			graphHash = g.GraphHash
+			graphHash = g.graphHash
 			continue
 		}
-		if g.GraphHash != graphHash {
-			t.Fatalf("GraphHash = %q, want stable value %q", g.GraphHash, graphHash)
+		if g.graphHash != graphHash {
+			t.Fatalf("graphHash = %q, want stable value %q", g.graphHash, graphHash)
 		}
 	}
 }

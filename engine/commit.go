@@ -44,7 +44,7 @@ func (e *Engine) CommitTaskResultWithOutcome(ctx context.Context, lease *TaskLea
 		return CommitOutcomeAccepted, nil
 	}
 
-	if !g.AllowCycles && result.Suspend == nil && (result.Output == nil || !isLoopSplitOutput(result.Output.Data)) {
+	if !g.AllowCycles() && result.Suspend == nil && (result.Output == nil || !isLoopSplitOutput(result.Output.Data)) {
 		return e.commitAcyclicTaskResult(ctx, lease, g, result)
 	}
 	if result.Suspend != nil {
@@ -71,7 +71,7 @@ func (e *Engine) CommitTaskFailure(ctx context.Context, lease *TaskLease, failur
 	if !active {
 		return nil
 	}
-	if !g.AllowCycles {
+	if !g.AllowCycles() {
 		return e.commitAcyclicFailure(ctx, lease, failure)
 	}
 	outcome, err := e.commitLegacyNode(ctx, lease, types.NodeStatusFailed, nil, "", failure.Error(), true)
@@ -90,7 +90,7 @@ func (e *Engine) CommitTaskFailure(ctx context.Context, lease *TaskLease, failur
 // explicit claim protocol because they have additional coordination state.
 func (e *Engine) commitLegacyTaskResult(ctx context.Context, lease *TaskLease, g *graph.Graph, result TaskResult) (CommitOutcome, error) {
 	task := &lease.Task
-	meta := g.Nodes[task.NodeIdx]
+	meta := g.NodeAt(task.NodeIdx)
 	if result.Error != nil || (result.Output != nil && result.Output.Error != nil) {
 		var businessErr *types.Error
 		if result.Output != nil {
@@ -160,7 +160,7 @@ func (e *Engine) commitLegacyNode(ctx context.Context, lease *TaskLease, status 
 	// reaches an intermediate waiting state. Once the fenced child generation
 	// completes, use the normal atomic commit/outbox path so downstream work is
 	// not left to the legacy direct scheduler.
-	if !g.AllowCycles {
+	if !g.AllowCycles() {
 		return e.commitAcyclicNode(ctx, lease, status, output, port, errMsg, fatal)
 	}
 

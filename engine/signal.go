@@ -44,7 +44,7 @@ func (e *Engine) deliverSignalDurable(ctx context.Context, id types.ExecutionID,
 			// the control plane's signal endpoint for an already-finished workflow.
 			return nil
 		}
-		nodeIdx, ok := g.Index[resumeNode]
+		nodeIdx, ok := g.NodeIndex(resumeNode)
 		if !ok {
 			return fmt.Errorf("signal %q targeted unknown node %q", name, resumeNode)
 		}
@@ -106,7 +106,7 @@ func (e *Engine) deliverSignalLegacy(ctx context.Context, id types.ExecutionID, 
 		// enqueue.
 		return nil
 	}
-	nodeIdx, ok := g.Index[resumeNode]
+	nodeIdx, ok := g.NodeIndex(resumeNode)
 	if !ok {
 		return fmt.Errorf("signal %q targeted unknown node %q", name, resumeNode)
 	}
@@ -149,7 +149,7 @@ func (e *Engine) TimeoutNode(ctx context.Context, id types.ExecutionID, nodeName
 	if !active {
 		return ErrExecutionInactive
 	}
-	nodeIdx, ok := g.Index[nodeName]
+	nodeIdx, ok := g.NodeIndex(nodeName)
 	if !ok {
 		return fmt.Errorf("timeout targeted unknown node %q", nodeName)
 	}

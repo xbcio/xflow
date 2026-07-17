@@ -27,7 +27,7 @@ type cyclicPlan struct {
 // which is what lets the intent be persisted atomically with the terminal
 // commit and replayed from the outbox after a crash (#7).
 func (e *Engine) planCyclicDownstream(g *graph.Graph, task *Task, activePort string) cyclicPlan {
-	outEdges := g.OutEdges[task.NodeIdx]
+	outEdges := g.NodeOutEdges(task.NodeIdx)
 	if len(outEdges) == 0 {
 		return cyclicPlan{complete: true, finalStatus: types.ExecutionStatusSuccess}
 	}
@@ -40,10 +40,10 @@ func (e *Engine) planCyclicDownstream(g *graph.Graph, task *Task, activePort str
 		if edge.SrcPort != activePort {
 			continue
 		}
-		if nextDepth > g.MaxAutoDepth {
+		if nextDepth > g.MaxAutoDepth() {
 			return cyclicPlan{complete: true, finalStatus: types.ExecutionStatusFailed, finalError: "max auto execution depth exceeded"}
 		}
-		dstMeta := g.Nodes[edge.DstIdx]
+		dstMeta := g.NodeAt(edge.DstIdx)
 		id := cyclicOutboxID(task.ExecutionID, dstMeta.Name, nextActivationID)
 		if _, dup := seen[id]; dup {
 			// Parallel edges to the same destination in the same activation

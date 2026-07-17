@@ -472,7 +472,7 @@ func (s *Store) CommitNode(ctx context.Context, req engine.CommitNodeRequest) (e
 		fatal = 1
 	}
 	allowCycles := 0
-	if g, err := s.LoadGraph(ctx, req.ExecutionID); err == nil && g != nil && g.AllowCycles {
+	if g, err := s.LoadGraph(ctx, req.ExecutionID); err == nil && g != nil && g.AllowCycles() {
 		allowCycles = 1
 	}
 	cyclicComplete := 0

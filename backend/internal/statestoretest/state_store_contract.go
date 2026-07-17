@@ -49,7 +49,7 @@ func RunStateStoreContract(t *testing.T, state engine.StateStore) {
 	if err != nil {
 		t.Fatalf("LoadGraph() error = %v", err)
 	}
-	if loaded == nil || loaded.Name != "contract" {
+	if loaded == nil || loaded.Name() != "contract" {
 		t.Fatalf("LoadGraph() = %+v, want graph named contract", loaded)
 	}
 
