@@ -2,6 +2,7 @@ package distributed
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -224,6 +225,7 @@ func (b *Backend) Resign(ctx context.Context) error   { return b.leaderElector.R
 func (b *Backend) Notify() <-chan bool                { return b.leaderElector.Notify() }
 
 var _ backend.LeaderElector = (*Backend)(nil)
+var _ backend.TaskHandlerBinder = (*Backend)(nil)
 
 // New creates a distributed backend connected to the given Redis address.
 // db may be nil for pure-Redis mode (no MySQL persistence).
@@ -343,4 +345,28 @@ func (b *Backend) BindHandler(eng *engine.Engine, handler func(context.Context, 
 			_ = b.resourcePool.Close(ctx)
 		}
 	}
+}
+
+// BindTaskHandler implements backend.TaskHandlerBinder. It is the control-plane
+// binding path: the caller-supplied handler (the control-plane dispatcher) is
+// wired into the transport, and the durable outbox dispatcher plus lease
+// timeout monitor are started. A nil engine is a configuration error — the
+// outbox dispatcher and timeout monitor both require it — so we fail closed
+// rather than silently starting a backend that cannot make scheduling progress.
+//
+// A backend configured with WithConsumer(false) is also a configuration error
+// for a control plane: without a consumer it cannot receive task results, so
+// dispatch would silently go nowhere. We reject it here instead of returning a
+// no-op stop.
+func (b *Backend) BindTaskHandler(eng *engine.Engine, handler func(context.Context, *engine.Task) error) (func(), error) {
+	if eng == nil {
+		return nil, errors.New("distributed: BindTaskHandler requires a non-nil engine")
+	}
+	if handler == nil {
+		return nil, errors.New("distributed: BindTaskHandler requires a non-nil handler")
+	}
+	if !b.consumer {
+		return nil, errors.New("distributed: BindTaskHandler requires a backend configured with WithConsumer(true); a non-consumer backend cannot serve a control plane")
+	}
+	return b.BindHandler(eng, handler), nil
 }

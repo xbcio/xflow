@@ -2,6 +2,7 @@ package local
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/xbcio/xflow/backend"
@@ -123,6 +124,23 @@ func (b *Backend) BindHandlerWithEngine(eng *engine.Engine, handler func(context
 		return b.BindHandler(handler)
 	}
 	return b.bindHandlerWithOutbox(eng, handler, time.Second)
+}
+
+// BindTaskHandler implements backend.TaskHandlerBinder. It is the control-plane
+// binding path: the caller-supplied handler (the control-plane dispatcher)
+// replaces the embedded execution dispatcher, and the durable outbox
+// dispatcher is started so that scheduling intents survive queue handoff
+// failures. A nil engine is a configuration error — without it the outbox
+// dispatcher cannot run, so we fail closed instead of silently degrading to the
+// no-outbox BindHandler path.
+func (b *Backend) BindTaskHandler(eng *engine.Engine, handler func(context.Context, *engine.Task) error) (func(), error) {
+	if eng == nil {
+		return nil, errors.New("local: BindTaskHandler requires a non-nil engine")
+	}
+	if handler == nil {
+		return nil, errors.New("local: BindTaskHandler requires a non-nil handler")
+	}
+	return b.bindHandlerWithOutbox(eng, handler, time.Second), nil
 }
 
 func (b *Backend) bindHandlerWithOutbox(eng *engine.Engine, handler func(context.Context, *engine.Task) error, interval time.Duration) func() {

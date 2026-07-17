@@ -12,8 +12,10 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 
+	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/backend/distributed"
 	backendlocal "github.com/xbcio/xflow/backend/local"
+	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/observability/metrics"
 )
 
@@ -178,7 +180,6 @@ func (b *leaderBackend) Campaign(ctx context.Context) error { return b.elector.C
 func (b *leaderBackend) IsLeader() bool                     { return b.elector.IsLeader() }
 func (b *leaderBackend) Resign(ctx context.Context) error   { return b.elector.Resign(ctx) }
 func (b *leaderBackend) Notify() <-chan bool                { return b.elector.Notify() }
-
 type countingElector struct {
 	campaigns atomic.Int64
 	leader    atomic.Bool
@@ -291,5 +292,123 @@ func TestControlPlaneStartsAndStopsClaimRecoveryLoop(t *testing.T) {
 	case <-directory.stopped:
 	case <-time.After(time.Second):
 		t.Fatal("claim recovery context was not canceled during Shutdown")
+	}
+}
+
+// recordingBackend wraps a real *backendlocal.Backend, recording whether the
+// control plane reaches it via TaskHandlerBinder (correct) or Provider.Bind
+// (the embedded-dispatcher fallback that A1 removes). BindTaskHandler delegates
+// to the real backend so the durable outbox dispatcher actually starts and
+// stops, exercising the real lifecycle.
+type recordingBackend struct {
+	*backendlocal.Backend
+	mu            sync.Mutex
+	bindCalls     int64
+	bindTaskCalls int64
+	stopCalled    bool
+}
+
+func (b *recordingBackend) Bind(eng *engine.Engine) func() {
+	b.mu.Lock()
+	b.bindCalls++
+	b.mu.Unlock()
+	return b.Backend.Bind(eng)
+}
+
+func (b *recordingBackend) BindTaskHandler(eng *engine.Engine, handler func(context.Context, *engine.Task) error) (func(), error) {
+	b.mu.Lock()
+	b.bindTaskCalls++
+	b.mu.Unlock()
+	stop, err := b.Backend.BindTaskHandler(eng, handler)
+	if err != nil {
+		return nil, err
+	}
+	return func() {
+		b.mu.Lock()
+		b.stopCalled = true
+		b.mu.Unlock()
+		stop()
+	}, nil
+}
+
+// TestControlPlaneBindsViaTaskHandlerBinderNotBind verifies that Start binds
+// the control-plane dispatcher through the TaskHandlerBinder capability and
+// never calls Provider.Bind (which would wire the embedded execution
+// dispatcher and run handlers in-process, bypassing remote dispatch).
+func TestControlPlaneBindsViaTaskHandlerBinderNotBind(t *testing.T) {
+	bk := &recordingBackend{Backend: backendlocal.New()}
+	cp, err := NewControlPlane(Config{Backend: bk})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := cp.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	defer func() { _ = cp.Shutdown(context.Background()) }()
+
+	bk.mu.Lock()
+	bindTaskCalls, bindCalls := bk.bindTaskCalls, bk.bindCalls
+	bk.mu.Unlock()
+	if bindTaskCalls != 1 {
+		t.Fatalf("BindTaskHandler called %d times, want 1", bindTaskCalls)
+	}
+	if bindCalls != 0 {
+		t.Fatalf("Provider.Bind called %d times, want 0 (control plane must not wire the embedded dispatcher)", bindCalls)
+	}
+}
+
+// TestControlPlaneShutdownInvokesBinderStop verifies the stop function
+// returned by TaskHandlerBinder is invoked during Shutdown.
+func TestControlPlaneShutdownInvokesBinderStop(t *testing.T) {
+	bk := &recordingBackend{Backend: backendlocal.New()}
+	cp, err := NewControlPlane(Config{Backend: bk})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cp.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if err := cp.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown() error = %v", err)
+	}
+	bk.mu.Lock()
+	stopCalled := bk.stopCalled
+	bk.mu.Unlock()
+	if !stopCalled {
+		t.Fatal("TaskHandlerBinder stop function was not called during Shutdown")
+	}
+}
+
+// nonBinderBackend satisfies backend.Provider but deliberately does NOT
+// implement backend.TaskHandlerBinder. It is used to verify the control plane
+// fails closed instead of silently falling back to Provider.Bind.
+type nonBinderBackend struct {
+	b *backendlocal.Backend
+}
+
+func (n *nonBinderBackend) State() engine.StateStore            { return n.b.State() }
+func (n *nonBinderBackend) Queue() engine.TaskQueue              { return n.b.Queue() }
+func (n *nonBinderBackend) Registry() engine.HandlerRegistry    { return n.b.Registry() }
+func (n *nonBinderBackend) WorkflowRegistry() backend.WorkflowRegistry {
+	return n.b.WorkflowRegistry()
+}
+func (n *nonBinderBackend) TriggerPrimitives() backend.TriggerPrimitives {
+	return n.b.TriggerPrimitives()
+}
+func (n *nonBinderBackend) Bind(eng *engine.Engine) func() { return n.b.Bind(eng) }
+
+// TestControlPlaneStartFailsClosedWithoutTaskHandlerBinder verifies that a
+// backend lacking the TaskHandlerBinder capability causes Start to return a
+// configuration error rather than silently falling back to Provider.Bind.
+func TestControlPlaneStartFailsClosedWithoutTaskHandlerBinder(t *testing.T) {
+	bk := &nonBinderBackend{b: backendlocal.New()}
+	cp, err := NewControlPlane(Config{Backend: bk})
+	if err != nil {
+		t.Fatalf("NewControlPlane() error = %v", err)
+	}
+	if err := cp.Start(context.Background()); err == nil {
+		t.Fatal("Start() = nil, want error for backend without TaskHandlerBinder capability")
 	}
 }

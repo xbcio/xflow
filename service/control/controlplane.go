@@ -3,12 +3,11 @@ package control
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"sync"
 	"time"
 
-	"github.com/xbcio/xflow/backend/distributed"
-	backendlocal "github.com/xbcio/xflow/backend/local"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/xbcio/xflow/backend"
@@ -219,7 +218,14 @@ func (cp *ControlPlane) Start(ctx context.Context) error {
 	cp.started = true
 	cp.lifecycleMu.Unlock()
 
-	cp.unbind = cp.bindDispatcher()
+	unbind, err := cp.bindDispatcher()
+	if err != nil {
+		cp.lifecycleMu.Lock()
+		cp.started = false
+		cp.lifecycleMu.Unlock()
+		return err
+	}
+	cp.unbind = unbind
 
 	leaderCtx, leaderCancel := context.WithCancel(ctx)
 	cp.leaderCancel = leaderCancel
@@ -349,13 +355,17 @@ func (cp *ControlPlane) Shutdown(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-func (cp *ControlPlane) bindDispatcher() func() {
-	switch b := cp.backend.(type) {
-	case *backendlocal.Backend:
-		return b.BindHandlerWithEngine(cp.eng, cp.dispatcher.HandleTask)
-	case *distributed.Backend:
-		return b.BindHandler(cp.eng, cp.dispatcher.HandleTask)
-	default:
-		return cp.backend.Bind(cp.eng)
+// bindDispatcher wires the control-plane dispatcher's task handler into the
+// backend's queue/transport via the TaskHandlerBinder capability. Backends
+// that do not implement TaskHandlerBinder cannot serve a control plane —
+// falling back to Provider.Bind would run the embedded execution dispatcher
+// in-process (silently executing handlers inside the server instead of
+// dispatching to remote runners), so we fail closed with a configuration
+// error instead.
+func (cp *ControlPlane) bindDispatcher() (func(), error) {
+	binder, ok := cp.backend.(backend.TaskHandlerBinder)
+	if !ok {
+		return nil, fmt.Errorf("control: backend %T does not implement backend.TaskHandlerBinder; this backend cannot serve a control plane (configure a local or distributed backend)", cp.backend)
 	}
+	return binder.BindTaskHandler(cp.eng, cp.dispatcher.HandleTask)
 }
