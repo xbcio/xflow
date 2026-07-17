@@ -28,6 +28,7 @@ func (r *nodeRepo) UpsertNode(ctx context.Context, rec *store.NodeRecord) error 
 	rec.CreatedAt = now
 	rec.UpdatedAt = now
 
+	d := toDBNode(rec)
 	err := r.db.WithContext(ctx).
 		Clauses(clause.OnConflict{
 			Columns: []clause.Column{
@@ -39,58 +40,61 @@ func (r *nodeRepo) UpsertNode(ctx context.Context, rec *store.NodeRecord) error 
 				"signal_name", "signal_config", "timeout_at", "updated_at",
 			}),
 		}).
-		Create(rec).Error
+		Create(d).Error
+	if err == nil {
+		rec.ID = d.ID
+	}
 	return wrapDBErr(fmt.Sprintf("upsert node %q/%q", rec.ExecutionID, rec.NodeName), err)
 }
 
 func (r *nodeRepo) GetNode(ctx context.Context, id types.ExecutionID, name string) (*store.NodeRecord, error) {
-	var rec store.NodeRecord
+	var d dbNode
 	err := r.db.WithContext(ctx).
 		Where("execution_id = ? AND node_name = ?", string(id), name).
-		First(&rec).Error
+		First(&d).Error
 	if err := wrapDBErr(fmt.Sprintf("get node %q/%q", id, name), err); err != nil {
 		return nil, err
 	}
-	return &rec, nil
+	return fromDBNode(&d), nil
 }
 
 func (r *nodeRepo) ListNodes(ctx context.Context, id types.ExecutionID, opts store.ListOptions) ([]*store.NodeRecord, error) {
 	opts = opts.Normalized()
-	var records []*store.NodeRecord
+	var ds []*dbNode
 	err := r.db.WithContext(ctx).
 		Where("execution_id = ?", string(id)).
 		Order("id").
 		Limit(opts.Limit).
 		Offset(opts.Offset).
-		Find(&records).Error
+		Find(&ds).Error
 	if err := wrapDBErr(fmt.Sprintf("list nodes %q", id), err); err != nil {
 		return nil, err
 	}
-	return records, nil
+	return fromDBNodes(ds), nil
 }
 
 func (r *nodeRepo) ListSuspendedBySignal(ctx context.Context, id types.ExecutionID, signal string) ([]*store.NodeRecord, error) {
-	var records []*store.NodeRecord
+	var ds []*dbNode
 	err := r.db.WithContext(ctx).
 		Where("execution_id = ? AND status = ? AND signal_name = ?", string(id), string(types.NodeStatusSuspended), signal).
-		Find(&records).Error
+		Find(&ds).Error
 	if err := wrapDBErr(fmt.Sprintf("list suspended by signal %q/%q", id, signal), err); err != nil {
 		return nil, err
 	}
-	return records, nil
+	return fromDBNodes(ds), nil
 }
 
 func (r *nodeRepo) ListExpiredSuspensions(ctx context.Context, now time.Time, opts store.ListOptions) ([]*store.NodeRecord, error) {
 	opts = opts.Normalized()
-	var records []*store.NodeRecord
+	var ds []*dbNode
 	err := r.db.WithContext(ctx).
 		Where("status = ? AND timeout_at IS NOT NULL AND timeout_at <= ?", string(types.NodeStatusSuspended), now).
 		Order("id").
 		Limit(opts.Limit).
 		Offset(opts.Offset).
-		Find(&records).Error
+		Find(&ds).Error
 	if err := wrapDBErr("list expired suspensions", err); err != nil {
 		return nil, err
 	}
-	return records, nil
+	return fromDBNodes(ds), nil
 }

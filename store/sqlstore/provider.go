@@ -58,8 +58,8 @@ func storesFor(db *gorm.DB) store.Set {
 // production schema is managed via db/xflow_schema.sql.
 func AutoMigrate(db *gorm.DB) error {
 	return db.AutoMigrate(
-		&store.ExecutionRecord{},
-		&store.NodeRecord{},
-		&store.SignalRecord{},
+		&dbExecution{},
+		&dbNode{},
+		&dbSignal{},
 	)
 }

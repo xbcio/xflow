@@ -25,6 +25,7 @@ func (r *signalRepo) SaveSignal(ctx context.Context, rec *store.SignalRecord) er
 	rec.CreatedAt = now
 	rec.UpdatedAt = now
 
+	d := toDBSignal(rec)
 	err := r.db.WithContext(ctx).
 		Clauses(clause.OnConflict{
 			Columns: []clause.Column{
@@ -32,28 +33,31 @@ func (r *signalRepo) SaveSignal(ctx context.Context, rec *store.SignalRecord) er
 				{Name: "signal_name"},
 			},
 			DoUpdates: clause.Assignments(map[string]any{
-				"payload":    rec.Payload,
+				"payload":    d.Payload,
 				"status":     types.SignalStatusActive,
 				"updated_at": now,
 			}),
 		}).
-		Create(rec).Error
+		Create(d).Error
+	if err == nil {
+		rec.ID = d.ID
+	}
 	return wrapDBErr(fmt.Sprintf("save signal %q/%q", rec.ExecutionID, rec.SignalName), err)
 }
 
 func (r *signalRepo) ConsumeSignal(ctx context.Context, id types.ExecutionID, name string) (*store.SignalRecord, error) {
-	var rec store.SignalRecord
+	var d dbSignal
 
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.
 			Clauses(clause.Locking{Strength: "UPDATE"}).
 			Where("execution_id = ? AND signal_name = ? AND status = ?", string(id), name, types.SignalStatusActive).
-			First(&rec).Error; err != nil {
+			First(&d).Error; err != nil {
 			return err
 		}
 
 		return tx.
-			Model(&store.SignalRecord{}).
+			Model(&dbSignal{}).
 			Where("execution_id = ? AND signal_name = ?", string(id), name).
 			Update("status", types.SignalStatusConsumed).Error
 	})
@@ -61,12 +65,12 @@ func (r *signalRepo) ConsumeSignal(ctx context.Context, id types.ExecutionID, na
 	if err := wrapDBErr(fmt.Sprintf("consume signal %q/%q", id, name), err); err != nil {
 		return nil, err
 	}
-	return &rec, nil
+	return fromDBSignal(&d), nil
 }
 
 func (r *signalRepo) RevokeSignal(ctx context.Context, id types.ExecutionID, name string) (bool, error) {
 	result := r.db.WithContext(ctx).
-		Model(&store.SignalRecord{}).
+		Model(&dbSignal{}).
 		Where("execution_id = ? AND signal_name = ? AND status = ?", string(id), name, types.SignalStatusActive).
 		Update("status", types.SignalStatusRevoked)
 	if err := wrapDBErr(fmt.Sprintf("revoke signal %q/%q", id, name), result.Error); err != nil {
@@ -81,7 +85,7 @@ func (r *signalRepo) CountSignalsByNames(ctx context.Context, id types.Execution
 	}
 	var count int64
 	err := r.db.WithContext(ctx).
-		Model(&store.SignalRecord{}).
+		Model(&dbSignal{}).
 		Where("execution_id = ? AND status = ? AND signal_name IN ?", string(id), types.SignalStatusActive, names).
 		Count(&count).Error
 	if err := wrapDBErr(fmt.Sprintf("count signals %q", id), err); err != nil {
@@ -95,15 +99,15 @@ func (r *signalRepo) ListSignalsByNames(ctx context.Context, id types.ExecutionI
 		return nil, nil
 	}
 	opts = opts.Normalized()
-	var records []*store.SignalRecord
+	var ds []*dbSignal
 	err := r.db.WithContext(ctx).
 		Where("execution_id = ? AND status = ? AND signal_name IN ?", string(id), types.SignalStatusActive, names).
 		Order("id").
 		Limit(opts.Limit).
 		Offset(opts.Offset).
-		Find(&records).Error
+		Find(&ds).Error
 	if err := wrapDBErr(fmt.Sprintf("list signals %q", id), err); err != nil {
 		return nil, err
 	}
-	return records, nil
+	return fromDBSignals(ds), nil
 }
