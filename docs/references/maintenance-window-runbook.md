@@ -75,8 +75,8 @@ curl -s https://server:8080/v1/management/leader
 curl -s https://server:8090/metrics | grep xflow_outbox_dead_letters
 ```
 
-> `/healthz`、`/readyz`、`/v1/management/leader` 由 management 模块提供（`WithManagement()` 启用）。
-> **当前 `cmd/server` 尚未默认启用 management 模块**——SDK 嵌入方通过 `WithManagement()` 启用；`cmd/server` 的接线（管理端点 + 鉴权门控）在 B2 代码准备中。在此之前，k8s 探针可退化为 TCP 探针或进程存活检查。非 leader 副本也 ready，调用方可据 `leader` 字段路由写入。
+> `/healthz`、`/readyz`、`/v1/management/leader` 由 management 模块提供，`cmd/server` 通过 `--management` flag 启用。
+> 启用后 `/v1/management/*` 由 `ManagementAuthMiddleware` 用 `--api-auth-token` 门控；`/healthz`、`/readyz` 保持开放供 Kubernetes 探针。未设 `--api-auth-token` 时 `/v1/management/*` 开放（仅 dev / 外部网关后），生产应同时配置 `--api-auth-token`。非 leader 副本也 ready，调用方可据 `leader` 字段路由写入。
 
 验证通过后恢复流量接入。
 

@@ -38,7 +38,7 @@ xflow 采用分层发布门槛，不再用单个测试替代完整 release gate�
 
 | 项 | 状态 | 说明 |
 |---|---|---|
-| B2 control-plane HA + Redis HA soak | ⏳ | 需多副本 + Redis HA 环境，执行 kill/restart、网络中断、主从切换 soak，产出故障矩阵与 SLO。代码侧 leader election/graceful shutdown 已具备，缺 Redis HA 客户端（sentinel/cluster）和 soak 框架 |
+| B2 control-plane HA + Redis HA soak | ⏳ | 代码侧：leader election/graceful shutdown/management 端点已具备；缺 Redis HA 客户端（sentinel/cluster）和 soak 框架。详见 [ha-soak-plan](../references/ha-soak-plan.md) |
 | 多租户 tenant boundary | ⏳ | G2 多租户需覆盖 Redis key/索引、workflow registry、runner placement、credential、metrics/log/trace、dead-letter 和审计数据隔离 |
 
 ### C — 内部抽象加固（非门槛，已完成）

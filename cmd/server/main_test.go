@@ -106,3 +106,13 @@ func TestParseServerConfigRequireAPIAuthFlag(t *testing.T) {
 		t.Fatal("requireAPIAuth = false, want true")
 	}
 }
+
+func TestParseServerConfigSupportsManagementFlag(t *testing.T) {
+	cfg, err := parseServerConfig([]string{"-memory", "-management"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.management {
+		t.Fatal("management = false, want true")
+	}
+}

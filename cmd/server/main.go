@@ -56,6 +56,13 @@ type serverConfig struct {
 	// authenticator is configured. Use in production to prevent accidentally
 	// serving the workflow API without authentication.
 	requireAPIAuth bool
+	// management enables the ops read-only management module (/healthz,
+	// /readyz, /v1/management/*). The /v1/management/* surface is gated by
+	// the management authz middleware (reuses the workflow API authenticator
+	// when --api-auth-token is set); /healthz and /readyz stay open for
+	// Kubernetes probes. Opt-in because the management surface exposes
+	// runner directory and execution state.
+	management bool
 	// TLS: server cert/key enable TLS on the HTTP + gRPC listeners; presence
 	// of tlsClientCA additionally requires a client cert (mTLS).
 	tlsCert     string
@@ -92,6 +99,7 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	fs.BoolVar(&cfg.authDryRun, "auth-dry-run", false, "Log auth violations but let requests through (rollout aid)")
 	fs.StringVar(&cfg.apiAuthToken, "api-auth-token", "", "Static bearer token for workflow API authentication (sets Authorization: Bearer guard on /v1/workflows and /v1/executions/*)")
 	fs.BoolVar(&cfg.requireAPIAuth, "require-api-auth", false, "Fail to start if no workflow API authenticator is configured (production fail-closed)")
+	fs.BoolVar(&cfg.management, "management", false, "Enable ops management module (/healthz /readyz /v1/management/*); /v1/management/* gated by --api-auth-token")
 	fs.StringVar(&cfg.tlsCert, "tls-cert", "", "Path to server TLS certificate (enables TLS)")
 	fs.StringVar(&cfg.tlsKey, "tls-key", "", "Path to server TLS private key (required with --tls-cert)")
 	fs.StringVar(&cfg.tlsClientCA, "tls-client-ca", "", "Path to CA bundle to verify runner certs (enables mTLS)")
@@ -168,7 +176,22 @@ func runServer(cfg serverConfig) error {
 		apiCfg.TLS = &apiserver.TLSConfig{Cert: cfg.tlsCert, Key: cfg.tlsKey, ClientCA: cfg.tlsClientCA}
 	}
 
-	srv, err := apiserver.New(apiCfg)
+	var apiOpts []apiserver.Option
+	if cfg.management {
+		apiOpts = append(apiOpts, apiserver.WithManagement())
+		// Gate /v1/management/* with the workflow API authenticator when
+		// configured; /healthz and /readyz stay open for probes. When no
+		// token is set the management surface is open (dev / behind an
+		// external gateway) — log a warning so production mis-config is loud.
+		if workflowAuth != nil {
+			apiOpts = append(apiOpts, apiserver.WithHTTPMiddleware(apiserver.ManagementAuthMiddleware(workflowAuth)))
+			log.Println("xflow-server: management module enabled; /v1/management/* gated by --api-auth-token")
+		} else {
+			log.Println("xflow-server: WARNING management module enabled without --api-auth-token; /v1/management/* is open (dev only)")
+		}
+	}
+
+	srv, err := apiserver.New(apiCfg, apiOpts...)
 	if err != nil {
 		return err
 	}

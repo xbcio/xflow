@@ -22,7 +22,8 @@ xflow-server \
   --trace-insecure false \
   --metrics-addr :9090 \
   --metrics-path /metrics \
-  --log-format json
+  --log-format json \
+  --management
 ```
 
 ### Flag 说明
@@ -47,6 +48,7 @@ xflow-server \
 | `--trace` | `disabled` | `otlp` | tracing 模式：`disabled`/`stdout`/`otlp` |
 | `--trace-endpoint` | `localhost:4317` | OTLP collector | OTLP gRPC endpoint（`--trace=otlp` 时） |
 | `--trace-insecure` | `false` | `false` | 是否禁用 OTLP TLS 验证 |
+| `--management` | `false` | **必设** | 启用 ops management 模块（`/healthz` `/readyz` `/v1/management/*`）；`/v1/management/*` 由 `--api-auth-token` 门控 |
 
 ## 2. runners.yaml 示例
 
@@ -133,7 +135,7 @@ groups:
 | readiness | `GET /readyz` | 就绪 + leader 字段；`leader:false` 持续应告警 |
 | leader | `GET /v1/management/leader` | 显式 leader 状态，`is_leader:false` 持续表示无主 |
 
-> management 端点需 `WithManagement()` 启用。**当前 `cmd/server` 尚未默认启用 management 模块**（SDK 嵌入方可直接用 `WithManagement()`）；`cmd/server` 的管理端点接线属 B2 代码准备范围。在此之前用 TCP / 进程探针。多副本部署中持续 `is_leader:false` 表示 leader 选举异常，应触发 critical 告警。
+> management 端点由 `--management` flag 启用。启用后 `/v1/management/*` 由 `ManagementAuthMiddleware` 用 `--api-auth-token` 门控；`/healthz`、`/readyz` 保持开放供 Kubernetes 探针。未设 `--api-auth-token` 时 `/v1/management/*` 开放（仅 dev / 外部网关后）。多副本部署中持续 `is_leader:false` 表示 leader 选举异常，应触发 critical 告警。
 
 > 指标名以 `observability/metrics/` 实际导出为准；上述是 G1 必备的最小告警集。
 
@@ -147,6 +149,7 @@ groups:
 - [ ] `--tls-cert`/`--tls-key` 配置；runner 连接走 TLS，推荐 mTLS（`--tls-client-ca`）
 - [ ] `--trace otlp` 指向 collector；`--trace-insecure=false`
 - [ ] `--metrics-addr` 配置，Prometheus 抓取正常
+- [ ] `--management` 启用；`/v1/management/*` 由 `--api-auth-token` 门控，`/healthz` `/readyz` 开放供探针
 - [ ] `--log-format json`
 - [ ] Redis 备份/恢复演练已完成并记录
 - [ ] dead-letter 告警接入值班通知
