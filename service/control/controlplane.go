@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/xbcio/xflow/backend/distributed"
-	backendmemory "github.com/xbcio/xflow/backend/memory"
+	backendlocal "github.com/xbcio/xflow/backend/local"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/xbcio/xflow/backend"
@@ -351,7 +351,7 @@ func (cp *ControlPlane) Shutdown(ctx context.Context) error {
 
 func (cp *ControlPlane) bindDispatcher() func() {
 	switch b := cp.backend.(type) {
-	case *backendmemory.Backend:
+	case *backendlocal.Backend:
 		return b.BindHandlerWithEngine(cp.eng, cp.dispatcher.HandleTask)
 	case *distributed.Backend:
 		return b.BindHandler(cp.eng, cp.dispatcher.HandleTask)

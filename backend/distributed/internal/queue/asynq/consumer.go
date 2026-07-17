@@ -5,7 +5,7 @@ import (
 
 	asynqlib "github.com/hibiken/asynq"
 
-	"github.com/xbcio/xflow/backend/queue"
+	"github.com/xbcio/xflow/backend/distributed/internal/queue"
 )
 
 // StartConsumer starts an Asynq server that decodes each task and dispatches it

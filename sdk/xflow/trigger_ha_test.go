@@ -5,11 +5,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xbcio/xflow/backend/memory"
+	"github.com/xbcio/xflow/backend/local"
 )
 
 func TestTriggerDedupSharedPrimitivesAllowsOnlyOneInstance(t *testing.T) {
-	primitives := memory.New().TriggerPrimitives()
+	primitives := local.New().TriggerPrimitives()
 	ctx := context.Background()
 
 	first, err := primitives.Dedup(ctx, "event:1", time.Minute)
@@ -26,7 +26,7 @@ func TestTriggerDedupSharedPrimitivesAllowsOnlyOneInstance(t *testing.T) {
 }
 
 func TestCronSingletonSharedPrimitivesAllowsOnlyOneInstance(t *testing.T) {
-	primitives := memory.New().TriggerPrimitives()
+	primitives := local.New().TriggerPrimitives()
 	ctx := context.Background()
 
 	lock, ok, err := primitives.TryLock(ctx, "cron:wf:node", time.Minute)

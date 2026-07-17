@@ -1,7 +1,7 @@
 //go:build concurrency
 
 // Spec: .claude/specs/lua-concurrency-tests.md
-package memory
+package local
 
 import (
 	"testing"

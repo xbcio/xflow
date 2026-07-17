@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"context"
+	"fmt"
 	"hash/fnv"
 	"time"
 
@@ -84,4 +86,52 @@ func retryFor(meta graph.NodeMeta) *types.RetrySettings {
 		return meta.Retry
 	}
 	return nil
+}
+
+// scheduleRetry resets a current attempt and records the next task. Atomic
+// StateStores make the reset and durable delayed intent one transition; legacy
+// stores retain the historical direct queue fallback.
+func (e *Engine) scheduleRetry(ctx context.Context, task *Task, attempt int, settings *types.RetrySettings, token LeaseToken) (bool, error) {
+	delay := retryBackoff(attempt, settings, task.ExecutionID, task.NodeName)
+	retryTask := Task{
+		ExecutionID:  task.ExecutionID,
+		NodeName:     task.NodeName,
+		NodeIdx:      task.NodeIdx,
+		Type:         TaskTypeNodeExec,
+		ActivationID: task.ActivationID,
+		AutoDepth:    task.AutoDepth,
+	}
+
+	if state, ok := e.state.(AtomicStateStore); ok {
+		availableAt := time.Now().UTC().Add(delay)
+		scheduled, err := state.ResetNodeForRetryWithOutbox(ctx, task.ExecutionID, task.NodeName, token, OutboxEntry{
+			ID:          retryOutboxID(task.ExecutionID, task.NodeName, task.ActivationID, attempt),
+			Task:        retryTask,
+			AvailableAt: availableAt,
+		})
+		if err != nil {
+			return false, fmt.Errorf("reset retry state for %q/%q: %w", task.ExecutionID, task.NodeName, err)
+		}
+		if !scheduled {
+			return false, fmt.Errorf("%w: retry state for %q/%q is no longer active", ErrInvalidLeaseToken, task.ExecutionID, task.NodeName)
+		}
+		e.notifyNodeRetry(ctx, task.ExecutionID, task.NodeName, attempt, delay)
+		if err := e.FlushOutbox(ctx, task.ExecutionID); err != nil {
+			return true, fmt.Errorf("deliver retry outbox for %q/%q: %w", task.ExecutionID, task.NodeName, err)
+		}
+		return true, nil
+	}
+
+	released, err := e.state.RevokeLease(ctx, task.ExecutionID, task.NodeName, token)
+	if err != nil {
+		return false, fmt.Errorf("reset retry lease %q/%q: %w", task.ExecutionID, task.NodeName, err)
+	}
+	if !released {
+		return false, fmt.Errorf("%w: retry lease for %q/%q is no longer active", ErrInvalidLeaseToken, task.ExecutionID, task.NodeName)
+	}
+	if err := e.queue.EnqueueDelayed(ctx, &retryTask, delay); err != nil {
+		return false, err
+	}
+	e.notifyNodeRetry(ctx, task.ExecutionID, task.NodeName, attempt, delay)
+	return true, nil
 }

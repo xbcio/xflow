@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/xbcio/xflow/backend/memory"
+	"github.com/xbcio/xflow/backend/local"
 	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/types"
 )
@@ -140,7 +140,7 @@ func TestWorkflowBuilderAllowCyclesEmitsOptionsAndSkipsBuilderCycleDetection(t *
 }
 
 func TestEngineAddWorkflowRejectsDirectHandlersWhenBackendDoesNotAllowThem(t *testing.T) {
-	provider := memory.New()
+	provider := local.New()
 	eng, err := newFromConfig(&engineConfig{allowDirectHandlers: false}, provider)
 	if err != nil {
 		t.Fatalf("newFromConfig() error = %v", err)
@@ -160,7 +160,7 @@ func TestEngineAddWorkflowRejectsDirectHandlersWhenBackendDoesNotAllowThem(t *te
 }
 
 func TestEngineInvokeRegistersWorkflowDeclaredHandlers(t *testing.T) {
-	provider := memory.New()
+	provider := local.New()
 	eng, err := newFromConfig(&engineConfig{allowDirectHandlers: false}, provider)
 	if err != nil {
 		t.Fatalf("newFromConfig() error = %v", err)
@@ -247,7 +247,7 @@ func TestEngineInvokePassesRuntimeVarsToEveryExecution(t *testing.T) {
 }
 
 func TestWithNodesRegistersConsumerCapabilities(t *testing.T) {
-	provider := memory.New()
+	provider := local.New()
 	eng, err := newFromConfig(&engineConfig{
 		allowDirectHandlers: false,
 		nodes:               []types.Handler{testWorkflowDeclaredNode},

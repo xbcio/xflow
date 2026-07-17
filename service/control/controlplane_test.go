@@ -13,7 +13,7 @@ import (
 	"github.com/alicebob/miniredis/v2"
 
 	"github.com/xbcio/xflow/backend/distributed"
-	backendmemory "github.com/xbcio/xflow/backend/memory"
+	backendlocal "github.com/xbcio/xflow/backend/local"
 	"github.com/xbcio/xflow/observability/metrics"
 )
 
@@ -29,7 +29,7 @@ func TestNewControlPlaneRequiresBackend(t *testing.T) {
 // runner protocol only; workflow/control routes now live in the apiserver
 // workflow-control module.
 func TestControlPlaneHandlerServesRunnerProtocol(t *testing.T) {
-	cp, err := NewControlPlane(Config{Backend: backendmemory.New()})
+	cp, err := NewControlPlane(Config{Backend: backendlocal.New()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +52,7 @@ func TestControlPlaneHandlerServesRunnerProtocol(t *testing.T) {
 }
 
 func TestControlPlaneStartStopIsIdempotentSafe(t *testing.T) {
-	cp, err := NewControlPlane(Config{Backend: backendmemory.New()})
+	cp, err := NewControlPlane(Config{Backend: backendlocal.New()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestControlPlaneStartStopIsIdempotentSafe(t *testing.T) {
 }
 
 func TestControlPlaneStartReturnsErrorWhenAlreadyStarted(t *testing.T) {
-	cp, err := NewControlPlane(Config{Backend: backendmemory.New()})
+	cp, err := NewControlPlane(Config{Backend: backendlocal.New()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +83,7 @@ func TestControlPlaneStartReturnsErrorWhenAlreadyStarted(t *testing.T) {
 }
 
 func TestControlPlaneStartReturnsErrorAfterShutdown(t *testing.T) {
-	cp, err := NewControlPlane(Config{Backend: backendmemory.New()})
+	cp, err := NewControlPlane(Config{Backend: backendlocal.New()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +101,7 @@ func TestControlPlaneStartReturnsErrorAfterShutdown(t *testing.T) {
 
 func TestNewControlPlaneWiresMetricsIntoAuthAndSweeper(t *testing.T) {
 	m := metrics.New()
-	cp, err := NewControlPlane(Config{Backend: backendmemory.New(), Metrics: m})
+	cp, err := NewControlPlane(Config{Backend: backendlocal.New(), Metrics: m})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func TestNewControlPlaneWiresMetricsIntoAuthAndSweeper(t *testing.T) {
 }
 
 func TestNewControlPlaneWiresPollWait(t *testing.T) {
-	cp, err := NewControlPlane(Config{Backend: backendmemory.New(), PollWait: 5 * time.Second})
+	cp, err := NewControlPlane(Config{Backend: backendlocal.New(), PollWait: 5 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +160,7 @@ func TestNewControlPlaneActivatesRedisLeaderElection(t *testing.T) {
 }
 
 func TestControlPlaneIsLeader(t *testing.T) {
-	cp, err := NewControlPlane(Config{Backend: backendmemory.New()})
+	cp, err := NewControlPlane(Config{Backend: backendlocal.New()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +170,7 @@ func TestControlPlaneIsLeader(t *testing.T) {
 }
 
 type leaderBackend struct {
-	*backendmemory.Backend
+	*backendlocal.Backend
 	elector *countingElector
 }
 
@@ -212,7 +212,7 @@ func (e *countingElector) Notify() <-chan bool { return e.notifyCh }
 
 func TestControlPlaneRecampaignsAfterLeadershipLoss(t *testing.T) {
 	elector := newCountingElector()
-	cp, err := NewControlPlane(Config{Backend: &leaderBackend{Backend: backendmemory.New(), elector: elector}})
+	cp, err := NewControlPlane(Config{Backend: &leaderBackend{Backend: backendlocal.New(), elector: elector}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,7 +268,7 @@ func TestControlPlaneStartsAndStopsClaimRecoveryLoop(t *testing.T) {
 		stopped:               make(chan struct{}, 1),
 	}
 	cp, err := NewControlPlane(Config{
-		Backend:         backendmemory.New(),
+		Backend:         backendlocal.New(),
 		RunnerDirectory: directory,
 	})
 	if err != nil {

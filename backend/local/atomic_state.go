@@ -1,4 +1,4 @@
-package memory
+package local
 
 import (
 	"context"
@@ -105,6 +105,24 @@ func (s *memoryState) CommitNode(_ context.Context, req engine.CommitNodeRequest
 		outboxID := advanceOutboxID(req.ExecutionID, req.NodeName, req.ActivationID)
 		if s.putOutboxLocked(req.ExecutionID, outboxID, *req.AdvanceTask, time.Time{}) {
 			result.OutboxIDs = append(result.OutboxIDs, outboxID)
+		}
+	}
+
+	// Cyclic graphs are not static in-degree counted (the acyclic block above is
+	// skipped for AllowCycles). Persist the engine-computed downstream intents,
+	// or finalize the execution when the branch terminated, in this same locked
+	// transition so a crash cannot lose them (#7).
+	if entry.snap.Graph != nil && entry.snap.Graph.AllowCycles && !req.Fatal && !result.ExecutionDone {
+		if len(req.CyclicOutbox) > 0 {
+			for _, oe := range req.CyclicOutbox {
+				if s.putOutboxEntryLocked(req.ExecutionID, oe) {
+					result.OutboxIDs = append(result.OutboxIDs, oe.ID)
+				}
+			}
+		} else if req.CyclicComplete {
+			s.finishExecutionLocked(req.ExecutionID, entry, req.CyclicFinalStatus)
+			result.ExecutionDone = true
+			result.ExecutionStatus = req.CyclicFinalStatus
 		}
 	}
 	return result, nil

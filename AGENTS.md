@@ -21,7 +21,7 @@ golangci-lint run        # Lint
   - `memstore/` — in-memory implementation (test / local)
   - `sqlstore/` — dialect-agnostic GORM implementation; `sqlstore/mysqlstore/` — MySQL dialect entry (`mysqlstore.New`)
 - **backend/** — Reusable backend providers and implementations
-  - `memory/` — In-memory StateStore + goroutine pool TaskQueue
+  - `local/` — In-memory StateStore + goroutine pool TaskQueue
   - `distributed/` — Redis StateStore + Asynq TaskQueue
 - **execution/** — Reusable embedded task execution boundary: Dispatcher, Runner, Registry
 - **sdk/**

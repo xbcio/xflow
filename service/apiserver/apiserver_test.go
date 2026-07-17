@@ -5,7 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	backendmemory "github.com/xbcio/xflow/backend/memory"
+	backendlocal "github.com/xbcio/xflow/backend/local"
 	"github.com/xbcio/xflow/service/control"
 )
 
@@ -14,7 +14,7 @@ import (
 func newMemoryControlPlane(t *testing.T, concurrency int) *control.ControlPlane {
 	t.Helper()
 	cp, err := control.NewControlPlane(control.Config{
-		Backend: backendmemory.New(backendmemory.WithConcurrency(concurrency)),
+		Backend: backendlocal.New(backendlocal.WithConcurrency(concurrency)),
 	})
 	if err != nil {
 		t.Fatalf("control.NewControlPlane: %v", err)

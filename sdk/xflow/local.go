@@ -1,7 +1,7 @@
 package xflow
 
 import (
-	backendmemory "github.com/xbcio/xflow/backend/memory"
+	backendlocal "github.com/xbcio/xflow/backend/local"
 	"github.com/xbcio/xflow/node/resource"
 	"github.com/xbcio/xflow/types"
 )
@@ -35,11 +35,11 @@ func NewLocal(opts ...Option) (*Engine, error) {
 		cfg.concurrency = 4
 	}
 	pool := resolveResourcePool(cfg)
-	memOpts := []backendmemory.Option{backendmemory.WithConcurrency(cfg.concurrency)}
+	memOpts := []backendlocal.Option{backendlocal.WithConcurrency(cfg.concurrency)}
 	if pool != nil {
-		memOpts = append(memOpts, backendmemory.WithResourcePool(pool))
+		memOpts = append(memOpts, backendlocal.WithResourcePool(pool))
 	}
-	provider := backendmemory.New(memOpts...)
+	provider := backendlocal.New(memOpts...)
 	return newFromConfig(cfg, provider)
 }
 

@@ -25,7 +25,7 @@ Fake StateStore uses mutex (~100 lines) to simulate concurrent contention.
 
 ## Backend / IO Binding Integration Tests
 
-- `backend/memory/` — real memoryState + memoryQueue, end-to-end
+- `backend/local/` — real memoryState + memoryQueue, end-to-end
 - `backend/distributed/` — Redis state + Asynq queue, full scenario coverage
 - Shared `compat_test.go` test cases (same workflows run on both local/cluster)
 

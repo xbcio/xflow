@@ -121,6 +121,27 @@ if done == 0 and tonumber(ARGV[12]) == 0 and ARGV[15] ~= '' then
         redis.call('EXPIRE', KEYS[10], ttl)
     end
 end
+if tonumber(ARGV[16]) == 1 and done == 0 and tonumber(ARGV[12]) == 0 then
+    local ncyc = tonumber(ARGV[22] or '0')
+    if ncyc > 0 then
+        for i = 1, ncyc do
+            local cid = ARGV[22 + (i - 1) * 2 + 1]
+            local cbody = ARGV[22 + (i - 1) * 2 + 2]
+            if redis.call('HSETNX', KEYS[10], cid, cbody) == 1 then
+                redis.call('ZADD', KEYS[9], tonumber(ARGV[18]), cid)
+            end
+        end
+        redis.call('EXPIRE', KEYS[9], ttl)
+        redis.call('EXPIRE', KEYS[10], ttl)
+    elseif tonumber(ARGV[19] or '0') == 1 then
+        finalStatus = ARGV[20]
+        redis.call('SET', KEYS[1], finalStatus, 'EX', ttl)
+        if finalStatus == 'failed' and ARGV[21] ~= '' then
+            redis.call('SET', KEYS[2], ARGV[21], 'EX', ttl)
+        end
+        done = 1
+    end
+end
 return {1, done, finalStatus}
 `)
 
@@ -417,6 +438,30 @@ func (s *Store) CommitNode(ctx context.Context, req engine.CommitNodeRequest) (e
 	if g, err := s.LoadGraph(ctx, req.ExecutionID); err == nil && g != nil && g.AllowCycles {
 		allowCycles = 1
 	}
+	cyclicComplete := 0
+	cyclicFinalStatus := ""
+	cyclicFinalError := ""
+	if req.CyclicComplete {
+		cyclicComplete = 1
+		cyclicFinalStatus = string(req.CyclicFinalStatus)
+		cyclicFinalError = req.CyclicFinalError
+	}
+	cyclicArgs := make([]any, 0, len(req.CyclicOutbox)*2)
+	for _, entry := range req.CyclicOutbox {
+		body, err := marshalRedisOutboxEntry(entry.ID, entry.Task, entry.AvailableAt)
+		if err != nil {
+			return engine.CommitNodeResult{}, err
+		}
+		cyclicArgs = append(cyclicArgs, entry.ID, body)
+	}
+	args := []any{
+		string(req.Status), string(req.LeaseID), string(req.LeaseToken), req.Attempt,
+		req.ActivationID, req.AutoDepth, storeOutput, outputJSON, req.Port, req.Error,
+		system, fatal, int(ttl.Seconds()), leaseExpiryMember(req.ExecutionID, req.NodeName),
+		advanceID, allowCycles, advanceJSON, time.Now().UTC().UnixMilli(),
+		cyclicComplete, cyclicFinalStatus, cyclicFinalError, len(req.CyclicOutbox),
+	}
+	args = append(args, cyclicArgs...)
 	result, err := commitNodeLua.Run(ctx, s.rdb, []string{
 		execKey(req.ExecutionID, "status"),
 		execKey(req.ExecutionID, "error"),
@@ -429,12 +474,7 @@ func (s *Store) CommitNode(ctx context.Context, req engine.CommitNodeRequest) (e
 		outboxReadyKey(req.ExecutionID),
 		outboxBodyKey(req.ExecutionID),
 		scheduleKey(req.ExecutionID, req.NodeIdx),
-	},
-		string(req.Status), string(req.LeaseID), string(req.LeaseToken), req.Attempt,
-		req.ActivationID, req.AutoDepth, storeOutput, outputJSON, req.Port, req.Error,
-		system, fatal, int(ttl.Seconds()), leaseExpiryMember(req.ExecutionID, req.NodeName),
-		advanceID, allowCycles, advanceJSON, time.Now().UTC().UnixMilli(),
-	).Slice()
+	}, args...).Slice()
 	if err != nil {
 		return engine.CommitNodeResult{}, fmt.Errorf("commit node %q/%q: %w", req.ExecutionID, req.NodeName, err)
 	}
@@ -451,8 +491,13 @@ func (s *Store) CommitNode(ctx context.Context, req engine.CommitNodeRequest) (e
 		out.Applied = true
 		out.ExecutionDone = redisResultInt(result[1]) == 1
 		out.ExecutionStatus = types.ExecutionStatus(redisResultString(result[2]))
-		if advanceID != "" && !out.ExecutionDone && !req.Fatal {
-			out.OutboxIDs = []string{advanceID}
+		if !out.ExecutionDone && !req.Fatal {
+			if advanceID != "" {
+				out.OutboxIDs = append(out.OutboxIDs, advanceID)
+			}
+			for _, entry := range req.CyclicOutbox {
+				out.OutboxIDs = append(out.OutboxIDs, entry.ID)
+			}
 		}
 	case 2:
 		out.Outcome = engine.CommitOutcomeDuplicateTerminal

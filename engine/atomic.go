@@ -50,6 +50,23 @@ type CommitNodeRequest struct {
 	System       bool
 	Fatal        bool
 	AdvanceTask  *Task
+	// CyclicOutbox carries downstream delivery intents for a cyclic-graph node
+	// commit. Cyclic downstream is dynamic and is not static in-degree counted
+	// like the acyclic AdvanceTask, so the engine computes it deterministically
+	// before the commit and the backend persists these entries in the SAME
+	// fenced transition as the terminal node write. This closes the window
+	// where a crash (or enqueue failure) between the terminal commit and a
+	// separate Enqueue permanently lost downstream cyclic tasks. Empty for
+	// acyclic commits.
+	CyclicOutbox []OutboxEntry
+	// CyclicComplete marks a cyclic node whose active branch has no downstream
+	// (or exceeded MaxAutoDepth): the backend finalizes the execution status
+	// (CyclicFinalStatus, with CyclicFinalError recorded when failed) atomically
+	// with the terminal node write. Ignored for acyclic commits and when
+	// CyclicOutbox is non-empty.
+	CyclicComplete    bool
+	CyclicFinalStatus types.ExecutionStatus
+	CyclicFinalError  string
 }
 
 // CommitNodeResult is the stable result of an atomic node commit.

@@ -1248,7 +1248,7 @@ execID, err := eng.Invoke(ctx, workflowID, xflow.Trigger("order_created"), event
 
 当前实现提供的是"按后端能力协调 + 节点级最佳努力去重"；不要把它理解成统一的 exactly-once 或完整 HA 保证。
 
-- **Local backend (`backend/memory`)**
+- **Local backend (`backend/local`)**
   - workflow registry、trigger subscription、dedup、lock、trigger state 都在当前进程内存中。
   - 这意味着 local 只提供进程内触发协调；进程重启后 subscription 和 dedup/lock/state 都会丢失，也没有跨实例协同能力。
 

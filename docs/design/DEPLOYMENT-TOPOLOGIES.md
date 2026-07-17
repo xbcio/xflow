@@ -4,7 +4,7 @@
 
 xflow 是一个通用、可嵌入的工作流引擎 SDK：用户用 DAG 编排节点（内置或自定义），SDK 本身即分布式载体。本文梳理 SDK 的三种运行模式与未来的 server + runner 集群架构，帮助使用者和开发者理解每种拓扑的定位、依赖、执行者、适用场景与限制。
 
-> 阅读前提：引擎核心 `engine/` 只依赖两个接口 —— `StateStore`（状态存储）与 `TaskQueue`（任务入队）。通用执行边界在 `execution/`：`Dispatcher` 构建 `TaskLease`，`Executor` 执行或转发，`Runner` 是进程内执行器。`backend.Provider` 抽象出可复用后端装配契约，SDK 负责组装核心能力：`NewLocal` 使用 `backend/memory`，`NewCluster` 使用 `backend/distributed`。底层包按运行形态命名（`memory` 为进程内实现，`distributed` 为分布式实现），SDK 工厂按用户部署模式命名（`NewLocal` / `NewCluster`）。详见 [ARCHITECTURE.md](./ARCHITECTURE.md)。
+> 阅读前提：引擎核心 `engine/` 只依赖两个接口 —— `StateStore`（状态存储）与 `TaskQueue`（任务入队）。通用执行边界在 `execution/`：`Dispatcher` 构建 `TaskLease`，`Executor` 执行或转发，`Runner` 是进程内执行器。`backend.Provider` 抽象出可复用后端装配契约，SDK 负责组装核心能力：`NewLocal` 使用 `backend/local`，`NewCluster` 使用 `backend/distributed`。底层包与 SDK 工厂均按部署模式命名（`backend/local` ↔ `NewLocal`，`backend/distributed` ↔ `NewCluster`）；包内的状态存储与队列实现名仍按技术命名（`memoryState` / `memoryQueue` 为进程内实现，`rstate` 为 Redis 实现）。详见 [ARCHITECTURE.md](./ARCHITECTURE.md)。
 
 ---
 
@@ -33,13 +33,13 @@ xflow 是一个通用、可嵌入的工作流引擎 SDK：用户用 DAG 编排�
 | 维度 | 说明 |
 |---|---|
 | 工厂 | `xflow.NewLocal(opts...)` |
-| Backend | `backend/memory` |
-| StateStore | `memoryState`（进程内存，位于 `backend/memory`） |
-| TaskQueue | `memoryQueue`（goroutine 池，默认并发 4，位于 `backend/memory`） |
+| Backend | `backend/local` |
+| StateStore | `memoryState`（进程内存，位于 `backend/local`） |
+| TaskQueue | `memoryQueue`（goroutine 池，默认并发 4，位于 `backend/local`） |
 | Registry | `execution.Registry`（支持 direct node handler 与 type/version lookup） |
 | 外部依赖 | 无 |
 
-**执行模型**：`NewLocal` 内部 `backend/memory.New()` 组装内存组件，`Bind(eng)` 把 `execution.NewEmbeddedDispatcher` 挂到内存队列并启动 queue consumer pool。提交与执行在同一进程、同一组 goroutine 内闭环，但执行边界仍经过 `TaskLease -> Runner -> TaskResult`，与 cluster / Control Plane + Execution Plane 模型保持一致。`memory.Backend` 实现了 `backend.Provider` 和 `backend.Waiter`，因此 `Wait()` 是事件驱动而非轮询。
+**执行模型**：`NewLocal` 内部 `backend/local.New()` 组装内存组件，`Bind(eng)` 把 `execution.NewEmbeddedDispatcher` 挂到内存队列并启动 queue consumer pool。提交与执行在同一进程、同一组 goroutine 内闭环，但执行边界仍经过 `TaskLease -> Runner -> TaskResult`，与 cluster / Control Plane + Execution Plane 模型保持一致。`memory.Backend` 实现了 `backend.Provider` 和 `backend.Waiter`，因此 `Wait()` 是事件驱动而非轮询。
 
 **direct ActionHandler 支持**：local 模式是唯一支持「内联直挂 handler」的模式。当使用 `wf.LocalNode(name, h)` 时，该 handler 被存入 builder 的 direct map，并在 `AddWorkflow` 时按节点名注册进 `execution.Registry`。生产/分布式自定义节点统一使用 `node.Define(...).New(params)`，consumer 进程通过 `xflow.WithNodes(...)` 声明可执行能力。
 
@@ -91,7 +91,7 @@ SDK 作为**瘦客户端**：自己不执行节点、不需要 Redis，通过网
 
 **何时用**：嵌入方不愿引入 Redis 依赖、不愿承担节点执行负载，只想把工作流「托管」给集群运行。
 
-**当前状态**：本地内存后端位于 `backend/memory/`；当前 embedded cluster backend 位于 `backend/distributed/`；**没有 remote 实现**；代码中也无 remote 工厂或客户端实现。属于规划，尚未落地。后续实现 remote 时应按客户端能力命名，不必延续 `adapter` 叫法。
+**当前状态**：本地内存后端位于 `backend/local/`；当前 embedded cluster backend 位于 `backend/distributed/`；**没有 remote 实现**；代码中也无 remote 工厂或客户端实现。属于规划，尚未落地。后续实现 remote 时应按客户端能力命名，不必延续 `adapter` 叫法。
 
 ---
 
@@ -347,7 +347,7 @@ Relay Gateway 用于 runner 无法直连 server、不能互相直连或需要本
 
 | 拓扑 / 组件 | 状态 | 依据 |
 |---|---|---|
-| local 模式 | **已实现** | `backend/memory/` 完整：内存 state/queue + reusable `execution.Registry` + Waiter |
+| local 模式 | **已实现** | `backend/local/` 完整：内存 state/queue + reusable `execution.Registry` + Waiter |
 | cluster 模式 | **已实现** | `backend/distributed/` 完整：Redis state + Asynq queue + reusable `execution.Dispatcher` / `execution.Runner` / `execution.Registry` + TimeoutMonitor |
 | remote 模式 | **规划** | 无 remote SDK client/backend，无 remote 工厂 |
 | server 管理面 | **MVP 已实现** | `cmd/server` 可启动 HTTP 控制面，支持 workflow invoke、inspect、signal、cancel、runner register/heartbeat/poll/result |
