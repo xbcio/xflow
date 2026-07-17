@@ -19,6 +19,7 @@ var _ engine.LegacyNodeCommitter = (*memoryState)(nil)
 var _ engine.DurableLeaseSuspender = (*memoryState)(nil)
 var _ engine.OutboxFailureRecorder = (*memoryState)(nil)
 var _ engine.OutboxMetricsReader = (*memoryState)(nil)
+var _ engine.DeadLetterStore = (*memoryState)(nil)
 
 // CommitLeasedNode shares the storage fence used by CommitNode while callers
 // retain legacy cycle/expansion scheduling outside the static-DAG counter.
@@ -296,6 +297,70 @@ func (s *memoryState) OutboxMetrics(_ context.Context) (engine.OutboxMetricsSnap
 		snapshot.DeadLettered += len(entries)
 	}
 	return snapshot, nil
+}
+
+// ListDeadLetters returns up to limit dead-lettered entries for an execution,
+// oldest-first. Entries are not removed.
+func (s *memoryState) ListDeadLetters(_ context.Context, id types.ExecutionID, limit int) ([]engine.OutboxEntry, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	deadEntries := s.deadOutbox[id]
+	out := make([]engine.OutboxEntry, 0, len(deadEntries))
+	for _, stored := range deadEntries {
+		out = append(out, stored.entry)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		ai, aj := out[i].CreatedAt, out[j].CreatedAt
+		if ai.IsZero() {
+			ai = out[i].AvailableAt
+		}
+		if aj.IsZero() {
+			aj = out[j].AvailableAt
+		}
+		return ai.Before(aj)
+	})
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+// ReplayDeadLetter moves a dead-lettered entry back to the ready set. The
+// memory mutex serializes replays so concurrent calls collapse to exactly one
+// ReplayReplayed. Terminal/expired executions are rejected.
+func (s *memoryState) ReplayDeadLetter(_ context.Context, id types.ExecutionID, entryID string) (engine.DeadLetterReplayOutcome, error) {
+	if entryID == "" {
+		return engine.ReplayNotFound, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	exec, ok := s.executions[id]
+	if !ok || exec == nil {
+		return engine.ReplayRejectedInactive, nil
+	}
+	if types.IsTerminalExecutionStatus(exec.snap.Status) {
+		return engine.ReplayRejectedTerminal, nil
+	}
+	deadEntries := s.deadOutbox[id]
+	stored, ok := deadEntries[entryID]
+	if !ok {
+		return engine.ReplayNotFound, nil
+	}
+	stored.entry.Attempts = 0
+	readyEntries := s.outbox[id]
+	if readyEntries == nil {
+		readyEntries = make(map[string]memoryOutboxEntry)
+		s.outbox[id] = readyEntries
+	}
+	readyEntries[entryID] = stored
+	delete(deadEntries, entryID)
+	if len(deadEntries) == 0 {
+		delete(s.deadOutbox, id)
+	}
+	return engine.ReplayReplayed, nil
 }
 
 // ListOutboxExecutions identifies executions with at least one durable intent

@@ -283,6 +283,7 @@ var metricHelp = map[string]string{
 	"xflow_outbox_retries_total":                    "Outbox message dispatch retry attempts.",
 	"xflow_outbox_dead_letters_total":               "Outbox messages sent to the dead-letter queue.",
 	"xflow_outbox_dead_letters":                     "Current count of outbox messages in the dead-letter queue.",
+	"xflow_outbox_dead_letters_replayed_total":      "Dead-letter messages replayed back to the ready set, partitioned by outcome.",
 	"xflow_outbox_pending":                          "Current count of outbox messages pending dispatch.",
 	"xflow_outbox_oldest_pending_age_seconds":        "Age of the oldest pending outbox message.",
 	"xflow_outbox_errors_total":                     "Outbox dispatch errors, partitioned by operation.",

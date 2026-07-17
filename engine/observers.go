@@ -22,6 +22,7 @@ type CommitObserver interface {
 type OutboxObserver interface {
 	OnOutboxRetry(ctx context.Context, attempt int)
 	OnOutboxDeadLetter(ctx context.Context)
+	OnOutboxReplayed(ctx context.Context, outcome DeadLetterReplayOutcome)
 	OnOutboxPending(ctx context.Context, pending int, deadLettered int, oldestAge time.Duration)
 	OnOutboxError(ctx context.Context, operation string, err error)
 }
@@ -108,6 +109,15 @@ func (e *Engine) notifyOutboxDeadLetter(ctx context.Context) {
 	}
 	safeHook(ctx, e.logger, func(observerCtx context.Context) {
 		e.outboxObserver.OnOutboxDeadLetter(observerCtx)
+	})
+}
+
+func (e *Engine) notifyOutboxReplayed(ctx context.Context, outcome DeadLetterReplayOutcome) {
+	if e.outboxObserver == nil {
+		return
+	}
+	safeHook(ctx, e.logger, func(observerCtx context.Context) {
+		e.outboxObserver.OnOutboxReplayed(observerCtx, outcome)
 	})
 }
 

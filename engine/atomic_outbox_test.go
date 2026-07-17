@@ -467,6 +467,7 @@ func (s *outboxObserverState) OutboxMetrics(_ context.Context) (OutboxMetricsSna
 type outboxObserverRecorder struct {
 	retries     []int
 	deadLetters int
+	replayed    []DeadLetterReplayOutcome
 	pending     []OutboxMetricsSnapshot
 	operations  []string
 }
@@ -477,6 +478,10 @@ func (r *outboxObserverRecorder) OnOutboxRetry(_ context.Context, attempt int) {
 
 func (r *outboxObserverRecorder) OnOutboxDeadLetter(context.Context) {
 	r.deadLetters++
+}
+
+func (r *outboxObserverRecorder) OnOutboxReplayed(_ context.Context, outcome DeadLetterReplayOutcome) {
+	r.replayed = append(r.replayed, outcome)
 }
 
 func (r *outboxObserverRecorder) OnOutboxPending(_ context.Context, pending, deadLettered int, oldestAge time.Duration) {

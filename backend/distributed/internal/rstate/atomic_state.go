@@ -249,6 +249,42 @@ redis.call('EXPIRE', KEYS[3], ttl)
 return {attempts, 0}
 `)
 
+// replayDeadLetterLua atomically moves a dead-lettered entry back to the ready
+// set. It is the inverse of recordOutboxFailureLua and is safe under concurrent
+// replays: once an entry leaves dead-letter storage (via ZREM+HDEL), a second
+// replay finds no body and returns the not_found outcome — exactly one caller
+// sees "replayed". The delivery attempt counter is cleared so the entry is not
+// immediately re-dead-lettered. The original immutable body is preserved.
+//
+// KEYS: 1=outbox:dead 2=outbox:dead:body 3=outbox:ready 4=outbox:body
+//       5=outbox:attempts 6=exec:status
+// ARGV: 1=entryID 2=now_ms 3=ttl_seconds
+// Returns {outcome} where 1=replayed, 0=not_found, 2=rejected_terminal,
+// 3=rejected_inactive (expired/missing execution).
+var replayDeadLetterLua = redis.NewScript(`
+local status = redis.call('GET', KEYS[6])
+if not status then
+    return {3}
+end
+if status == 'success' or status == 'failed' or status == 'canceled' or status == 'timeout' then
+    return {2}
+end
+local body = redis.call('HGET', KEYS[2], ARGV[1])
+if not body then
+    return {0}
+end
+local ttl = tonumber(ARGV[3])
+redis.call('HSET', KEYS[4], ARGV[1], body)
+redis.call('ZADD', KEYS[3], tonumber(ARGV[2]), ARGV[1])
+redis.call('HDEL', KEYS[5], ARGV[1])
+redis.call('ZREM', KEYS[1], ARGV[1])
+redis.call('HDEL', KEYS[2], ARGV[1])
+redis.call('EXPIRE', KEYS[3], ttl)
+redis.call('EXPIRE', KEYS[4], ttl)
+redis.call('EXPIRE', KEYS[5], ttl)
+return {1}
+`)
+
 // resetNodeForRetryWithOutboxLua combines the legacy retry reset with the
 // durable retry delivery intent so a process crash cannot leave a pending node
 // without a task to execute.
@@ -309,6 +345,7 @@ var _ engine.AtomicStateStore = (*Store)(nil)
 var _ engine.LegacyNodeCommitter = (*Store)(nil)
 var _ engine.OutboxFailureRecorder = (*Store)(nil)
 var _ engine.OutboxMetricsReader = (*Store)(nil)
+var _ engine.DeadLetterStore = (*Store)(nil)
 
 // CommitLeasedNode reuses the fenced Redis node transition for legacy cycle
 // paths, whose follow-up scheduling remains outside CommitNode's DAG counter.
@@ -726,6 +763,74 @@ func (s *Store) OutboxMetrics(ctx context.Context) (engine.OutboxMetricsSnapshot
 		}
 	}
 	return snapshot, nil
+}
+
+// ListDeadLetters returns up to limit dead-lettered outbox entries for one
+// execution, ordered oldest-first. It reads the dead-letter body hash directly;
+// entries are not removed. limit<=0 returns nil.
+func (s *Store) ListDeadLetters(ctx context.Context, id types.ExecutionID, limit int) ([]engine.OutboxEntry, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	ids, err := s.rdb.ZRangeArgs(ctx, redis.ZRangeArgs{
+		Key: outboxDeadKey(id), Start: "-inf", Stop: "+inf", ByScore: true, Offset: 0, Count: int64(limit),
+	}).Result()
+	if err != nil {
+		return nil, fmt.Errorf("list dead letters %q: %w", id, err)
+	}
+	out := make([]engine.OutboxEntry, 0, len(ids))
+	for _, entryID := range ids {
+		raw, err := s.rdb.HGet(ctx, outboxDeadBodyKey(id), entryID).Result()
+		if err == redis.Nil {
+			// body missing while index still references it: self-heal by removing the stale index entry
+			_ = s.rdb.ZRem(ctx, outboxDeadKey(id), entryID).Err()
+			continue
+		}
+		if err != nil {
+			return out, fmt.Errorf("read dead letter %q/%q: %w", id, entryID, err)
+		}
+		entry, err := unmarshalRedisOutboxEntry(raw)
+		if err != nil {
+			return out, fmt.Errorf("decode dead letter %q/%q: %w", id, entryID, err)
+		}
+		out = append(out, entry)
+	}
+	return out, nil
+}
+
+// ReplayDeadLetter moves a dead-lettered entry atomically back to the ready
+// set so the OutboxDispatcher redelivers it. Concurrent replays of the same
+// entry are idempotent (exactly one ReplayReplayed, the rest ReplayNotFound).
+// Replays of terminal/expired executions are rejected without mutating state.
+func (s *Store) ReplayDeadLetter(ctx context.Context, id types.ExecutionID, entryID string) (engine.DeadLetterReplayOutcome, error) {
+	if entryID == "" {
+		return engine.ReplayNotFound, nil
+	}
+	ttl := s.getExecTTL(id)
+	result, err := replayDeadLetterLua.Run(ctx, s.rdb, []string{
+		outboxDeadKey(id),
+		outboxDeadBodyKey(id),
+		outboxReadyKey(id),
+		outboxBodyKey(id),
+		outboxAttemptsKey(id),
+		execKey(id, "status"),
+	}, entryID, time.Now().UTC().UnixMilli(), int(ttl.Seconds())).Slice()
+	if err != nil {
+		return "", fmt.Errorf("replay dead letter %q/%q: %w", id, entryID, err)
+	}
+	if len(result) != 1 {
+		return "", fmt.Errorf("replay dead letter %q/%q: unexpected result %v", id, entryID, result)
+	}
+	switch redisResultInt(result[0]) {
+	case 1:
+		return engine.ReplayReplayed, nil
+	case 2:
+		return engine.ReplayRejectedTerminal, nil
+	case 3:
+		return engine.ReplayRejectedInactive, nil
+	default:
+		return engine.ReplayNotFound, nil
+	}
 }
 
 // ListOutboxExecutions scans execution-scoped ready indexes. The index is

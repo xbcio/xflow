@@ -21,11 +21,12 @@ const (
 	metricExecutionCompleted     = "xflow_execution_completed_total"
 	metricCommitOutcomes         = "xflow_commit_outcomes_total"
 	metricOutboxRetries          = "xflow_outbox_retries_total"
-	metricOutboxDeadLettersTotal = "xflow_outbox_dead_letters_total"
-	metricOutboxDeadLetters      = "xflow_outbox_dead_letters"
-	metricOutboxPending          = "xflow_outbox_pending"
-	metricOutboxOldestPendingAge = "xflow_outbox_oldest_pending_age_seconds"
-	metricOutboxErrors           = "xflow_outbox_errors_total"
+	metricOutboxDeadLettersTotal  = "xflow_outbox_dead_letters_total"
+	metricOutboxDeadLetters       = "xflow_outbox_dead_letters"
+	metricOutboxDeadLettersReplayed = "xflow_outbox_dead_letters_replayed_total"
+	metricOutboxPending           = "xflow_outbox_pending"
+	metricOutboxOldestPendingAge  = "xflow_outbox_oldest_pending_age_seconds"
+	metricOutboxErrors            = "xflow_outbox_errors_total"
 )
 
 // MetricsHooks turns engine lifecycle hooks into xflow_ Prometheus counters.
@@ -122,6 +123,12 @@ func (o OutboxMetrics) OnOutboxRetry(context.Context, int) {
 // OnOutboxDeadLetter records an entry moved to durable dead-letter storage.
 func (o OutboxMetrics) OnOutboxDeadLetter(context.Context) {
 	o.Metrics.Inc(metricOutboxDeadLettersTotal, nil)
+}
+
+// OnOutboxReplayed records a dead-letter replay attempt, partitioned by
+// outcome (replayed/not_found/rejected_terminal/rejected_inactive).
+func (o OutboxMetrics) OnOutboxReplayed(_ context.Context, outcome engine.DeadLetterReplayOutcome) {
+	o.Metrics.Inc(metricOutboxDeadLettersReplayed, map[string]string{"outcome": string(outcome)})
 }
 
 // OnOutboxPending records the current pending and dead-letter backlog gauges
