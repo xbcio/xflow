@@ -273,7 +273,7 @@ func newResuspendCredHandler() *resuspendCredHandler {
 	}
 }
 
-func (resuspendCredHandler) Descriptor() types.Descriptor {
+func (*resuspendCredHandler) Descriptor() types.Descriptor {
 	return types.Descriptor{Type: "test.cred-resuspend"}
 }
 
