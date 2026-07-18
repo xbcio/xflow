@@ -456,3 +456,136 @@ func runServerRunnerParity(t *testing.T, addr string, def *types.WorkflowDef, re
 
 	return collectParityOutcome(t, h.state, execID, result, def)
 }
+
+// TestGRPCActionErrorParityProductionWiring exercises the production
+// ResourcePool wiring added in task-42 against the gRPC node. Unlike the
+// wrapper-based fixtures (which register grpcPoolWrapper to inject a pool),
+// this registers the real xflow.grpc handler directly and installs the pool
+// via runnersvc.Config.ResourcePool — the production path. The gRPC node does
+// not consume credentials (it dials host directly), so only the pool is set.
+func TestGRPCActionErrorParityProductionWiring(t *testing.T) {
+	addr := requireRedis(t)
+
+	delegate, ok := registry.Lookup("xflow.grpc")
+	if !ok {
+		t.Fatal("xflow.grpc handler not found in node registry")
+	}
+
+	cases := []struct {
+		name        string
+		host        string
+		wantAttempt int
+		wantStatus  types.ExecutionStatus
+		errContains string
+	}{
+		{
+			name:        "grpc_production_wiring_not_found_permanent",
+			host:        startGRPCStatusServer(t, codes.NotFound),
+			wantAttempt: 1,
+			wantStatus:  types.ExecutionStatusFailed,
+			errContains: "grpc.NotFound",
+		},
+		{
+			name:        "grpc_production_wiring_unavailable_transient_exhausted",
+			host:        startGRPCStatusServer(t, codes.Unavailable),
+			wantAttempt: 2,
+			wantStatus:  types.ExecutionStatusFailed,
+			errContains: "grpc.Unavailable",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			source := grpcNodeDef(tc.host)
+			retry := &types.RetrySettings{
+				MaxAttempts:     2,
+				InitialInterval: 50,
+			}
+			def := ParityWorkflow(source, retry)
+
+			// Production wiring: register the real handler directly, install
+			// the pool via runnersvc.Config (no wrapper, no credential resolver).
+			register := func(reg engine.HandlerRegistrar) {
+				reg.RegisterGlobal("xflow.grpc", delegate)
+			}
+			pool := resource.NewDefaultResourcePool(types.DefaultResourcePoolConfig())
+			t.Cleanup(func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				_ = pool.Close(ctx)
+			})
+
+			out := runServerRunnerParityWithPool(t, addr, def, register, pool)
+			if out.Attempt != tc.wantAttempt {
+				t.Errorf("server-runner attempt=%d, want %d", out.Attempt, tc.wantAttempt)
+			}
+			if out.Status != tc.wantStatus {
+				t.Errorf("server-runner status=%s, want %s", out.Status, tc.wantStatus)
+			}
+			if !strings.Contains(out.ErrStr, tc.errContains) {
+				t.Errorf("server-runner error=%q, want substring %q", out.ErrStr, tc.errContains)
+			}
+		})
+	}
+}
+
+// runServerRunnerParityWithPool mirrors runServerRunnerParity but installs a
+// ResourcePool on the runnersvc.Config, exercising the production wiring path.
+func runServerRunnerParityWithPool(t *testing.T, addr string, def *types.WorkflowDef, register func(engine.HandlerRegistrar), pool types.ResourcePool) ParityOutcome {
+	t.Helper()
+	h := newServerRunnerHarnessFast(t, addr, 1)
+	if len(def.Nodes) == 0 {
+		t.Fatal("runServerRunnerParityWithPool: workflow has no nodes")
+	}
+
+	reg := execution.NewRegistry()
+	if register != nil {
+		register(reg)
+	}
+
+	capSet := make(map[string]struct{})
+	for _, n := range def.Nodes {
+		capSet[n.Type] = struct{}{}
+	}
+	caps := make([]protocol.Capability, 0, len(capSet))
+	for nodeType := range capSet {
+		caps = append(caps, protocol.Capability{NodeType: nodeType})
+	}
+
+	runnerID := "grpc-parity-prod-" + strings.ReplaceAll(t.Name(), "/", "-")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runner := runnersvc.New(
+		protocol.NewClient(h.httpSrv.URL, h.httpSrv.Client()),
+		reg,
+		runnersvc.Config{
+			RunnerID:     runnerID,
+			Concurrency:  1,
+			Capabilities: caps,
+			PollWait:     5 * time.Millisecond,
+			ResourcePool: pool,
+		},
+	)
+	errCh := make(chan error, 1)
+	go func() { errCh <- runner.Run(ctx) }()
+	waitForE2ERunner(t, h.runners, runnerID)
+
+	execID := submitWorkflowHTTP(t, h.httpSrv.URL, h.httpSrv.Client(), def, nil)
+
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer waitCancel()
+	result := waitForCompletion(waitCtx, t, h.state, execID, def.Nodes[0].Name)
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("runner error = %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("runner did not stop in time")
+	}
+
+	return collectParityOutcome(t, h.state, execID, result, def)
+}
