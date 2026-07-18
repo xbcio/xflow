@@ -314,8 +314,8 @@ func holdDeadlockRow(t *testing.T, dsn string) func() {
 	}
 
 	return func() {
-		connCancel()
 		_ = tx.Rollback()
+		connCancel()
 		_ = conn.Close()
 		_ = db.Close()
 	}
@@ -343,8 +343,9 @@ func seedConstraintRow(t *testing.T, db *sql.DB) {
 
 // newAcceptCloseListener starts a TCP listener on an ephemeral port that
 // accepts each inbound connection and immediately closes it. The MySQL driver
-// dials, begins the handshake, and receives EOF → io.EOF → classified
-// database.connection_lost (transient). The loop serves one accept per engine
+// dials, begins the handshake, and receives EOF; the driver wraps it as
+// ErrInvalidConn ("invalid connection"), a plain error that the classifier
+// routes to database.unknown (transient). The loop serves one accept per engine
 // attempt (MaxAttempts=2 → two accepts). The listener is closed in t.Cleanup.
 func newAcceptCloseListener(t *testing.T) string {
 	t.Helper()
@@ -373,5 +374,5 @@ func badConnDSN(t *testing.T, addr string) string {
 	t.Helper()
 	pw := envOr("MYSQL_ROOT_PASSWORD", "xflow")
 	dbName := envOr("MYSQL_DATABASE", "xflow")
-	return fmt.Sprintf("root:%s@tcp(%s)/%s?parseTime=true", pw, addr, dbName)
+	return fmt.Sprintf("root:%s@tcp(%s)/%s?parseTime=true&multiStatements=true", pw, addr, dbName)
 }
