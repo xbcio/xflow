@@ -12,6 +12,7 @@ import (
 	"github.com/xbcio/xflow/execution"
 	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/service/protocol"
+	"github.com/xbcio/xflow/types"
 )
 
 // defaultRunnerShutdownTimeout bounds how long Run waits for in-flight workers
@@ -45,6 +46,14 @@ type Config struct {
 	// an xflow.task.execute span, and injects a report carrier so the server's
 	// commit span is properly parented. Nil means no-op tracing.
 	Tracer tracing.Tracer
+	// ResourcePool, when set, is installed on the per-call context so
+	// resource-aware nodes (xflow.database, xflow.grpc) can pool connections.
+	// nil preserves the existing no-pool behavior (resource-aware nodes error).
+	ResourcePool types.ResourcePool
+	// CredentialResolver, when set, is applied to each Input before the handler
+	// runs so nodes can resolve named credentials via input.Credential(name).
+	// nil means no resolver; existing behavior is unchanged.
+	CredentialResolver func(name string) map[string]any
 }
 
 type Runner struct {
@@ -70,7 +79,7 @@ func New(client ProtocolClient, registry engine.HandlerRegistry, config Config) 
 	}
 	return &Runner{
 		client:   client,
-		executor: execution.NewRunner(registry),
+		executor: execution.NewRunner(registry, execution.WithResourcePool(config.ResourcePool), execution.WithCredentialResolver(config.CredentialResolver)),
 		config:   config,
 		tracer:   tracer,
 	}
