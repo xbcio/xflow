@@ -26,11 +26,10 @@ import (
 // is produced by a deterministic fake ResourcePool so the tests do not require
 // a real MySQL server.
 //
-// The server-runner topology is intentionally not covered here. Injecting a
-// deterministic fake resource pool into a separate runner goroutine across the
-// HTTP wire is not feasible without a real MySQL test container, which is not
-// available in this environment. A3 §6 acknowledges that runtime-dependent
-// matrix items can be partial without the required external services.
+// The server-runner topology is covered by a sibling test,
+// TestDatabaseActionErrorParityServerRunner in action_parity_database_server_test.go,
+// which drives the same four fixtures through the real Redis/HTTP runner
+// against a live MySQL container.
 func TestDatabaseActionErrorParity(t *testing.T) {
 	inner, ok := registry.Lookup("xflow.database")
 	if !ok {
@@ -125,15 +124,9 @@ func TestDatabaseActionErrorParity(t *testing.T) {
 	}
 }
 
-// TestDatabaseActionErrorParityServerRunner documents the server-runner matrix
-// exclusion for database action parity. Injecting a deterministic fake resource
-// pool into a remote runner goroutine across the HTTP wire is not feasible
-// without a real MySQL test container, which is not available in this
-// environment. A3 §6 acknowledges that runtime-dependent matrix items can be
-// partial without the required external services.
-func TestDatabaseActionErrorParityServerRunner(t *testing.T) {
-	t.Skip("server-runner database parity requires a real MySQL test container and is not exercised here")
-}
+// TestDatabaseActionErrorParityServerRunner is implemented in
+// action_parity_database_server_test.go (real Redis + real MySQL server-runner
+// topology).
 
 // databaseParityHandler wraps the real xflow.database handler and injects a
 // deterministic credential resolver and optional ResourcePool. This lets parity
