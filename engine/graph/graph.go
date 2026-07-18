@@ -51,8 +51,25 @@ func (g *Graph) CompilerVersion() string { return g.compilerVersion }
 // NodeCount returns the number of nodes in the graph.
 func (g *Graph) NodeCount() int { return len(g.nodes) }
 
-// NodeAt returns a copy of the NodeMeta at position i.
-func (g *Graph) NodeAt(i int) NodeMeta { return g.nodes[i] }
+// NodeName returns the name of the node at position i without copying the rest
+// of the node's mutable fields. It is the hot-path accessor for code that only
+// needs the (immutable, string) name — e.g. resolving upstream node names in
+// fan-in scheduling — so it pays no defensive-copy cost.
+func (g *Graph) NodeName(i int) string { return g.nodes[i].Name }
+
+// NodeAt returns a defensive deep copy of the NodeMeta at position i. Every
+// mutable reference field (Parameters, PortOuts, RunnerSelector, Retry) is
+// recursively cloned so the caller cannot mutate the Graph's internal state
+// through the returned value. Callers that only need the node name should use
+// NodeName to avoid the copy.
+func (g *Graph) NodeAt(i int) NodeMeta {
+	n := g.nodes[i] // struct value copy; strings and value fields are isolated
+	n.Parameters = cloneStringAnyMap(n.Parameters)
+	n.PortOuts = cloneStringSlice(n.PortOuts)
+	n.RunnerSelector = cloneRunnerSelector(n.RunnerSelector)
+	n.Retry = cloneRetry(n.Retry)
+	return n
+}
 
 // NodeIndex looks up a node by name and returns its slice index.
 func (g *Graph) NodeIndex(name string) (int, bool) {
@@ -88,22 +105,18 @@ func (g *Graph) NodeInEdges(nodeIdx int) []Edge {
 // InDegreeAt returns the static in-degree for nodeIdx.
 func (g *Graph) InDegreeAt(nodeIdx int) int { return g.inDegree[nodeIdx] }
 
-// Vars returns a defensive copy of the workflow-level variable map.
+// Vars returns a defensive deep copy of the workflow-level variable map.
+// Nested maps and slices are recursively cloned so the caller cannot mutate
+// the Graph's internal state through the returned map.
 func (g *Graph) Vars() map[string]any {
-	out := make(map[string]any, len(g.vars))
-	for k, v := range g.vars {
-		out[k] = v
-	}
-	return out
+	return cloneStringAnyMap(g.vars)
 }
 
-// Config returns a defensive copy of the workflow-level config map.
+// Config returns a defensive deep copy of the workflow-level config map.
+// Nested maps and slices are recursively cloned so the caller cannot mutate
+// the Graph's internal state through the returned map.
 func (g *Graph) Config() map[string]any {
-	out := make(map[string]any, len(g.config))
-	for k, v := range g.config {
-		out[k] = v
-	}
-	return out
+	return cloneStringAnyMap(g.config)
 }
 
 // AllowCycles reports whether this graph uses cyclic active-port scheduling.

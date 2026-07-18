@@ -61,8 +61,8 @@ xflow 采用分层发布门槛，不再用单个测试替代完整 release gate�
 
 | 项 | 状态 | 缺口 | Commit |
 |---|---|---|---|
-| C1 store GORM tags 下沉 | 🟡 部分完成 | `store/models.go` 已无 `gorm:` tag；但领域模型仍保留 `TableName()` schema concern，未完全下沉 | `4724eec` |
-| C2 Graph 深层不可变性 | 🛠 修复中 | 字段已私有化 + 只读 accessor；但 accessor 浅拷贝仍泄漏可变引用（RunnerSelector/MatchLabels/Parameters/PortOuts/Retry/Vars/Config），不达"deep immutable" | `b05b9a5` |
+| C1 store GORM tags 下沉 | ✅ 完成 | `store/models.go` 已无 `gorm:` tag 与 `TableName()`；ORM schema 完全下沉至 `store/sqlstore` 的 `dbExecution`/`dbNode`/`dbSignal` | `a36f19b` |
+| C2 Graph 深层不可变性 | ✅ 完成 | 公开 accessor 全部深层不可变：`NodeAt` 递归拷贝 `Parameters`/`PortOuts`/`RunnerSelector`/`Retry`；`Vars()`/`Config()` 递归深拷贝；`NodeOutEdges`/`NodeInEdges` 返回新 slice。Compile 阶段 value-domain 校验拒绝 pointer/func/chan/非字符串键 map。热路径 `NodeName` 零拷贝。深层 mutation + race + 值域拒绝 + accessor benchmark 通过（per-dispatch 隔离拷贝 ~0.9µs，handler 不可信不可避免） | `beae6f0` |
 
 ### D — 高吞吐路径（独立架构，不阻塞审批 release gate）
 

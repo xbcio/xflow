@@ -22,9 +22,13 @@ func (e *Engine) buildInput(ctx context.Context, t *Task, g *graph.Graph) (*type
 
 	runtime := snap.Runtime
 	input := &types.Input{
-		Params:      cloneMap(g.NodeAt(t.NodeIdx).Parameters),
+		// NodeAt returns a defensive deep copy of Parameters; the engine owns
+		// that copy, so no further clone is needed before handing it to the
+		// handler. (The handler is untrusted; the Graph stays isolated because
+		// the copy is independent.)
+		Params:      g.NodeAt(t.NodeIdx).Parameters,
 		Vars:        mergeVars(g.Vars(), runtimeVars(runtime)),
-		Config:      cloneMap(g.Config()),
+		Config:      g.Config(),
 		Runtime:     cloneRuntime(runtime),
 		ExecutionID: string(t.ExecutionID),
 		NodeName:    t.NodeName,
@@ -52,16 +56,17 @@ func (e *Engine) buildInput(ctx context.Context, t *Task, g *graph.Graph) (*type
 		// source handlers can read them (mirrors ClusterRunner behaviour).
 		input.Data = cloneMap(snap.Params)
 	case 1:
-		data, err := e.state.GetOutput(ctx, t.ExecutionID, g.NodeAt(inEdges[0].SrcIdx).Name)
+		name := g.NodeName(inEdges[0].SrcIdx)
+		data, err := e.state.GetOutput(ctx, t.ExecutionID, name)
 		if err != nil {
-			return nil, fmt.Errorf("get upstream output %q/%q: %w", t.ExecutionID, g.NodeAt(inEdges[0].SrcIdx).Name, err)
+			return nil, fmt.Errorf("get upstream output %q/%q: %w", t.ExecutionID, name, err)
 		}
 		input.Data = cloneMap(data)
 	default:
 		// Fan-in: expose all upstream outputs keyed by node name.
 		inputs := make(map[string]any, len(inEdges))
 		for _, edge := range inEdges {
-			name := g.NodeAt(edge.SrcIdx).Name
+			name := g.NodeName(edge.SrcIdx)
 			data, err := e.state.GetOutput(ctx, t.ExecutionID, name)
 			if err != nil {
 				return nil, fmt.Errorf("get upstream output %q/%q: %w", t.ExecutionID, name, err)

@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+
+	"github.com/xbcio/xflow/types"
 )
 
 // compilerVersion identifies the graph compiler format.
@@ -22,11 +24,37 @@ func cloneStringAnyMap(src map[string]any) map[string]any {
 	return dst
 }
 
+// cloneAny returns a deep copy of value via reflection. It is the foundation
+// of the Graph's deep-immutable accessors: every map/slice/struct reachable
+// from Parameters/Vars/Config is reproduced as an independent tree so callers
+// cannot mutate Graph state through a returned reference.
 func cloneAny(value any) any {
 	if value == nil {
 		return nil
 	}
 	return cloneReflectValue(reflect.ValueOf(value)).Interface()
+}
+
+// cloneStringSlice returns a fresh copy of src so callers cannot mutate the
+// Graph's internal slice. Returns nil for nil input to preserve the zero value.
+func cloneStringSlice(src []string) []string {
+	if src == nil {
+		return nil
+	}
+	out := make([]string, len(src))
+	copy(out, src)
+	return out
+}
+
+// cloneRetry returns a fresh *types.RetrySettings so callers cannot mutate the
+// Graph's internal value. RetrySettings is a value-only struct (no maps/slices/
+// pointers), so a shallow pointer copy is a complete deep copy.
+func cloneRetry(r *types.RetrySettings) *types.RetrySettings {
+	if r == nil {
+		return nil
+	}
+	cp := *r
+	return &cp
 }
 
 func cloneReflectValue(value reflect.Value) reflect.Value {
@@ -86,6 +114,98 @@ func cloneReflectValue(value reflect.Value) reflect.Value {
 	default:
 		return value
 	}
+}
+
+// supportedValueDomain describes the immutable value domain permitted inside
+// Parameters, Vars, and Config. The Graph deep-clones whatever it stores, but
+// the domain gate additionally rejects mutable reference types (pointers,
+// funcs, chans) and non-string-keyed maps so an arbitrary caller-owned alias
+// can never be smuggled into the compiled Graph. The accepted kinds are:
+//
+//   - nil
+//   - bool, string
+//   - integers (int*, uint*), floats (float*)
+//   - map with string keys, whose values are in the domain
+//   - slice / array, whose elements are in the domain
+//   - struct, whose fields are in the domain
+//
+// Rejected kinds: Pointer, Func, Chan, UnsafePointer, and any Map whose key
+// kind is not String. A rejected value causes Compile to fail.
+func validateValueDomain(path string, value any) error {
+	return validateReflectDomain(path, reflect.ValueOf(value))
+}
+
+func validateReflectDomain(path string, value reflect.Value) error {
+	if !value.IsValid() {
+		// nil interface or zero value — allowed.
+		return nil
+	}
+	switch value.Kind() {
+	case reflect.Bool, reflect.String,
+		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+		reflect.Float32, reflect.Float64:
+		return nil
+	case reflect.Map:
+		if value.Type().Key().Kind() != reflect.String {
+			return fmt.Errorf("value domain: %s has map with non-string key %s; only string keys are supported", path, value.Type().Key())
+		}
+		iter := value.MapRange()
+		for iter.Next() {
+			if err := validateReflectDomain(path+"."+iter.Key().String(), iter.Value()); err != nil {
+				return err
+			}
+		}
+		return nil
+	case reflect.Slice, reflect.Array:
+		for i := 0; i < value.Len(); i++ {
+			if err := validateReflectDomain(fmt.Sprintf("%s[%d]", path, i), value.Index(i)); err != nil {
+				return err
+			}
+		}
+		return nil
+	case reflect.Struct:
+		for i := 0; i < value.NumField(); i++ {
+			f := value.Type().Field(i)
+			if !f.IsExported() {
+				continue
+			}
+			if err := validateReflectDomain(path+"."+f.Name, value.Field(i)); err != nil {
+				return err
+			}
+		}
+		return nil
+	case reflect.Interface:
+		if value.IsNil() {
+			return nil
+		}
+		return validateReflectDomain(path, value.Elem())
+	case reflect.Pointer, reflect.Func, reflect.Chan, reflect.UnsafePointer:
+		return fmt.Errorf("value domain: %s has unsupported mutable %s value; Parameters/Vars/Config must be immutable value types", path, value.Kind())
+	default:
+		return fmt.Errorf("value domain: %s has unsupported %s value", path, value.Kind())
+	}
+}
+
+// validateGraphValueDomain ensures every Parameters/Vars/Config value stored on
+// the compiled Graph belongs to the supported immutable value domain. It is
+// the Compile-time gate that prevents an arbitrary caller-owned mutable
+// reference (pointer, func, chan, non-string-keyed map) from being smuggled
+// into the Graph. See validateValueDomain for the accepted kinds.
+func validateGraphValueDomain(g *Graph) error {
+	if err := validateValueDomain("vars", g.vars); err != nil {
+		return err
+	}
+	if err := validateValueDomain("config", g.config); err != nil {
+		return err
+	}
+	for i := range g.nodes {
+		name := g.nodes[i].Name
+		if err := validateValueDomain("node "+name+" parameters", g.nodes[i].Parameters); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func assignGraphHash(g *Graph) error {
