@@ -62,6 +62,26 @@ const (
 	parityErrorPort            = "error_port"
 )
 
+// parityFixture is the configuration for the shared parity action handler.
+// The build function creates a fresh handler instance for each topology so
+// per-topology attempt counters are isolated.
+type parityFixture struct {
+	behaviour  string
+	failBefore int32 // transient failures before success (transient_then_success only)
+	code       string
+	msg        string // error message for business_error / error_port
+}
+
+func (f *parityFixture) handler(nodeType string) *parityFixtureHandler {
+	return &parityFixtureHandler{
+		nodeType:   nodeType,
+		behaviour:  f.behaviour,
+		failBefore: f.failBefore,
+		code:       f.code,
+		msg:        f.msg,
+	}
+}
+
 // parityFixtureHandler is the shared action fixture. It returns one of:
 //   - types.ClassifiedError (transient/permanent) — exercises the engine's
 //     retry classification path in-process and across the wire.
@@ -72,9 +92,9 @@ const (
 type parityFixtureHandler struct {
 	nodeType   string
 	behaviour  string
-	failBefore int32 // transient failures before success (transient_then_success only)
+	failBefore int32
 	code       string
-	msg        string // error message for business_error / error_port
+	msg        string
 	attempts   atomic.Int32
 }
 
@@ -101,163 +121,291 @@ func (h *parityFixtureHandler) Execute(_ context.Context, _ *types.Input) (*type
 	}
 }
 
-// parityOutcome is the topology-independent contract a fixture must reach.
-type parityOutcome struct {
-	attempt int
-	status  types.ExecutionStatus
-	errStr  string // node.Error (ClassifiedError.Error() == "code: message")
+// downstreamExpectation describes the expected state of a single downstream node.
+type downstreamExpectation struct {
+	Status types.NodeStatus
+	Output map[string]any
 }
 
-func parityWorkflow(nodeType string, maxAttempts int) *types.WorkflowDef {
+// ParityOutcome is the topology-independent contract a fixture must reach.
+// It is exported so that subsequent fixture files can reuse the parity runners.
+type ParityOutcome struct {
+	Attempt            int
+	Status             types.ExecutionStatus
+	ErrStr             string // node.Error (ClassifiedError.Error() == "code: message")
+	Port               string // source node output port
+	DownstreamStatuses map[string]types.NodeStatus
+	DownstreamOutputs  map[string]map[string]any
+}
+
+// parityCase holds a single parity fixture configuration.
+type parityCase struct {
+	Name        string
+	Build       func() (source types.NodeDef, register func(engine.HandlerRegistrar))
+	MaxAttempts int
+	WantAttempt int
+	WantStatus  types.ExecutionStatus
+	ErrContains string // substring expected in node.Error for failed fixtures
+	OKNode      types.NodeDef
+	ErrNode     types.NodeDef
+	// WantDownstream maps downstream node name to expected terminal state.
+	WantDownstream map[string]downstreamExpectation
+}
+
+// ParityWorkflow builds a single-source workflow with per-node retry settings.
+// The source node's Retry field is set to retry; retry may be nil to inherit
+// workflow defaults.
+func ParityWorkflow(source types.NodeDef, retry *types.RetrySettings) *types.WorkflowDef {
+	source.Retry = retry
 	return &types.WorkflowDef{
-		Name: "action-parity-" + nodeType,
-		Nodes: []types.NodeDef{{
-			Name: "start",
-			Type: nodeType,
-			// InitialInterval 50ms keeps the matrix fast while still exercising
-			// the real retryBackoff + delayed-outbox delivery path.
-			Retry: &types.RetrySettings{
-				MaxAttempts:     maxAttempts,
-				InitialInterval: 50,
-			},
-		}},
+		Name:  "action-parity-" + source.Name,
+		Nodes: []types.NodeDef{source},
+	}
+}
+
+// ParityWorkflowWithDownstream builds a workflow with a source node plus optional
+// ok/err downstream nodes. okNode is wired to the source's "main" port; errNode
+// is wired to the source's "error" port. Either downstream node may be the zero
+// value to omit it. The source node's Retry field is set to retry.
+func ParityWorkflowWithDownstream(source types.NodeDef, retry *types.RetrySettings, okNode, errNode types.NodeDef) *types.WorkflowDef {
+	source.Retry = retry
+	nodes := []types.NodeDef{source}
+	conns := make(types.Connections)
+	if okNode.Name != "" {
+		nodes = append(nodes, okNode)
+		conns[source.Name] = map[string][]types.Connection{
+			"main": {{Node: okNode.Name}},
+		}
+	}
+	if errNode.Name != "" {
+		nodes = append(nodes, errNode)
+		if conns[source.Name] == nil {
+			conns[source.Name] = map[string][]types.Connection{}
+		}
+		conns[source.Name]["error"] = []types.Connection{{Node: errNode.Name}}
+	}
+	return &types.WorkflowDef{
+		Name:        "action-parity-" + source.Name,
+		Nodes:       nodes,
+		Connections: conns,
 	}
 }
 
 func TestActionErrorParityMatrix(t *testing.T) {
 	addr := requireRedis(t)
 
-	cases := []struct {
-		name        string
-		behaviour   string
-		failBefore  int32
-		maxAttempts int
-		wantAttempt int
-		wantStatus  types.ExecutionStatus
-		wantErr     bool
-		errContains string // substring expected in node.Error for failed fixtures
-	}{
+	cases := []parityCase{
 		{
-			name:        "transient_then_success",
-			behaviour:   parityTransientThenSuccess,
-			failBefore:  1, // attempt 1 transient, attempt 2 succeeds
-			maxAttempts: 3,
-			wantAttempt: 2,
-			wantStatus:  types.ExecutionStatusSuccess,
-			wantErr:     false,
-			errContains: "",
+			Name: "transient_then_success",
+			Build: func() (types.NodeDef, func(engine.HandlerRegistrar)) {
+				nodeType := "test.parity.transient.then.success"
+				f := &parityFixture{
+					behaviour:  parityTransientThenSuccess,
+					failBefore: 1, // attempt 1 transient, attempt 2 succeeds
+					code:       "parity.transient_then_success",
+					msg:        "business.reject",
+				}
+				return types.NodeDef{Name: "start", Type: nodeType},
+					func(reg engine.HandlerRegistrar) { reg.RegisterGlobal(nodeType, f.handler(nodeType)) }
+			},
+			MaxAttempts: 3,
+			WantAttempt: 2,
+			WantStatus:  types.ExecutionStatusSuccess,
 		},
 		{
-			name:        "transient_retry_exhausted",
-			behaviour:   parityTransientExhausted,
-			maxAttempts: 2, // attempt 1 + 1 retry, then exhausted
-			wantAttempt: 2,
-			wantStatus:  types.ExecutionStatusFailed,
-			wantErr:     true,
-			errContains: "",
+			Name: "transient_retry_exhausted",
+			Build: func() (types.NodeDef, func(engine.HandlerRegistrar)) {
+				nodeType := "test.parity.transient.retry.exhausted"
+				f := &parityFixture{
+					behaviour: parityTransientExhausted,
+					code:      "parity.transient_retry_exhausted",
+					msg:       "business.reject",
+				}
+				return types.NodeDef{Name: "start", Type: nodeType},
+					func(reg engine.HandlerRegistrar) { reg.RegisterGlobal(nodeType, f.handler(nodeType)) }
+			},
+			MaxAttempts: 2, // attempt 1 + 1 retry, then exhausted
+			WantAttempt: 2,
+			WantStatus:  types.ExecutionStatusFailed,
+			ErrContains: "parity.transient_retry_exhausted",
 		},
 		{
-			name:        "permanent_no_retry",
-			behaviour:   parityPermanent,
-			maxAttempts: 3, // permanent bypasses retry entirely
-			wantAttempt: 1,
-			wantStatus:  types.ExecutionStatusFailed,
-			wantErr:     true,
-			errContains: "",
+			Name: "permanent_no_retry",
+			Build: func() (types.NodeDef, func(engine.HandlerRegistrar)) {
+				nodeType := "test.parity.permanent.no.retry"
+				f := &parityFixture{
+					behaviour: parityPermanent,
+					code:      "parity.permanent_no_retry",
+					msg:       "business.reject",
+				}
+				return types.NodeDef{Name: "start", Type: nodeType},
+					func(reg engine.HandlerRegistrar) { reg.RegisterGlobal(nodeType, f.handler(nodeType)) }
+			},
+			MaxAttempts: 3, // permanent bypasses retry entirely
+			WantAttempt: 1,
+			WantStatus:  types.ExecutionStatusFailed,
+			ErrContains: "parity.permanent_no_retry",
 		},
 		{
-			name:        "error_port_retry_exhausted",
-			behaviour:   parityErrorPort,
-			maxAttempts: 3, // explicit error-port output is transient (outputPortRetryError)
-			wantAttempt: 3,
-			wantStatus:  types.ExecutionStatusFailed,
-			wantErr:     true,
-			errContains: "business.reject",
+			Name: "error_port_retry_exhausted",
+			Build: func() (types.NodeDef, func(engine.HandlerRegistrar)) {
+				nodeType := "test.parity.error.port"
+				f := &parityFixture{
+					behaviour: parityErrorPort,
+					code:      "parity.error_port_retry_exhausted",
+					msg:       "business.reject",
+				}
+				return types.NodeDef{Name: "start", Type: nodeType},
+					func(reg engine.HandlerRegistrar) { reg.RegisterGlobal(nodeType, f.handler(nodeType)) }
+			},
+			MaxAttempts: 3, // explicit error-port output is transient (outputPortRetryError)
+			WantAttempt: 3,
+			WantStatus:  types.ExecutionStatusFailed,
+			ErrContains: "business.reject",
 		},
 		{
-			name:        "business_error_no_retry",
-			behaviour:   parityBusinessError,
-			maxAttempts: 3, // business error bypasses retry (Output.Error)
-			wantAttempt: 1,
-			wantStatus:  types.ExecutionStatusFailed,
-			wantErr:     true,
-			errContains: "business.reject",
+			Name: "business_error_no_retry",
+			Build: func() (types.NodeDef, func(engine.HandlerRegistrar)) {
+				nodeType := "test.parity.business.error"
+				f := &parityFixture{
+					behaviour: parityBusinessError,
+					code:      "parity.business_error_no_retry",
+					msg:       "business.reject",
+				}
+				return types.NodeDef{Name: "start", Type: nodeType},
+					func(reg engine.HandlerRegistrar) { reg.RegisterGlobal(nodeType, f.handler(nodeType)) }
+			},
+			MaxAttempts: 3, // business error bypasses retry (Output.Error)
+			WantAttempt: 1,
+			WantStatus:  types.ExecutionStatusFailed,
+			ErrContains: "business.reject",
 		},
 	}
 
 	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			nodeType := "test.parity." + strings.ReplaceAll(tc.name, "_", ".")
-			code := "parity." + tc.name
-			def := parityWorkflow(nodeType, tc.maxAttempts)
+		t.Run(tc.Name, func(t *testing.T) {
+			source, register := tc.Build()
+			retry := &types.RetrySettings{
+				MaxAttempts:     tc.MaxAttempts,
+				InitialInterval: 50, // 50ms keeps the matrix fast while exercising real backoff.
+			}
+			var def *types.WorkflowDef
+			if tc.OKNode.Name != "" || tc.ErrNode.Name != "" {
+				def = ParityWorkflowWithDownstream(source, retry, tc.OKNode, tc.ErrNode)
+			} else {
+				def = ParityWorkflow(source, retry)
+			}
 
-			localHandler := &parityFixtureHandler{
-				nodeType: nodeType, behaviour: tc.behaviour,
-				failBefore: tc.failBefore, code: code, msg: "business.reject",
-			}
-			serverHandler := &parityFixtureHandler{
-				nodeType: nodeType, behaviour: tc.behaviour,
-				failBefore: tc.failBefore, code: code, msg: "business.reject",
-			}
+			localOut := RunParityLocal(t, def, register)
+			serverOut := RunParityServerRunner(t, addr, def, register)
 
-			localOut := runParityLocal(t, def, localHandler)
-			serverOut := runParityServerRunner(t, addr, def, serverHandler, nodeType)
-
-			// Parity: both topologies reach the same logical attempt count and
-			// terminal status for the same fixture.
-			if localOut.attempt != serverOut.attempt {
-				t.Errorf("attempt parity: local=%d server-runner=%d, want equal", localOut.attempt, serverOut.attempt)
-			}
-			if localOut.status != serverOut.status {
-				t.Errorf("status parity: local=%s server-runner=%s, want equal", localOut.status, serverOut.status)
-			}
-			localHasErr, serverHasErr := localOut.errStr != "", serverOut.errStr != ""
-			if localHasErr != serverHasErr {
-				t.Errorf("error presence parity: local=%v server-runner=%v, want equal", localHasErr, serverHasErr)
-			}
-			// Contract: each topology independently matches the expected outcome.
-			if localOut.attempt != tc.wantAttempt {
-				t.Errorf("local attempt=%d, want %d", localOut.attempt, tc.wantAttempt)
-			}
-			if localOut.status != tc.wantStatus {
-				t.Errorf("local status=%s, want %s", localOut.status, tc.wantStatus)
-			}
-			if serverOut.attempt != tc.wantAttempt {
-				t.Errorf("server-runner attempt=%d, want %d", serverOut.attempt, tc.wantAttempt)
-			}
-			if serverOut.status != tc.wantStatus {
-				t.Errorf("server-runner status=%s, want %s", serverOut.status, tc.wantStatus)
-			}
-			// For failed fixtures the error message/code must survive the wire and
-			// be recorded in the node's Error field. ClassifiedErrors carry
-			// "code: message"; explicit error-port output carries the raw message.
-			if tc.wantErr {
-				wantSubstr := tc.errContains
-				if wantSubstr == "" {
-					wantSubstr = code
-				}
-				if !localHasErr || !strings.Contains(localOut.errStr, wantSubstr) {
-					t.Errorf("local node error %q missing %q", localOut.errStr, wantSubstr)
-				}
-				if !serverHasErr || !strings.Contains(serverOut.errStr, wantSubstr) {
-					t.Errorf("server-runner node error %q missing %q", serverOut.errStr, wantSubstr)
-				}
-			}
+			assertParity(t, tc, localOut, serverOut)
 		})
 	}
 }
 
-// runParityLocal runs the fixture through the local embedded topology and
-// returns the terminal outcome. The handler runs in-process via the embedded
-// dispatcher, so the ClassifiedError never serializes.
-func runParityLocal(t *testing.T, def *types.WorkflowDef, handler *parityFixtureHandler) parityOutcome {
+func assertParity(t *testing.T, tc parityCase, localOut, serverOut ParityOutcome) {
+	t.Helper()
+
+	// Parity: both topologies reach the same logical attempt count and
+	// terminal status for the same fixture.
+	if localOut.Attempt != serverOut.Attempt {
+		t.Errorf("attempt parity: local=%d server-runner=%d, want equal", localOut.Attempt, serverOut.Attempt)
+	}
+	if localOut.Status != serverOut.Status {
+		t.Errorf("status parity: local=%s server-runner=%s, want equal", localOut.Status, serverOut.Status)
+	}
+	localHasErr, serverHasErr := localOut.ErrStr != "", serverOut.ErrStr != ""
+	if localHasErr != serverHasErr {
+		t.Errorf("error presence parity: local=%v server-runner=%v, want equal", localHasErr, serverHasErr)
+	}
+
+	// Contract: each topology independently matches the expected outcome.
+	if localOut.Attempt != tc.WantAttempt {
+		t.Errorf("local attempt=%d, want %d", localOut.Attempt, tc.WantAttempt)
+	}
+	if localOut.Status != tc.WantStatus {
+		t.Errorf("local status=%s, want %s", localOut.Status, tc.WantStatus)
+	}
+	if serverOut.Attempt != tc.WantAttempt {
+		t.Errorf("server-runner attempt=%d, want %d", serverOut.Attempt, tc.WantAttempt)
+	}
+	if serverOut.Status != tc.WantStatus {
+		t.Errorf("server-runner status=%s, want %s", serverOut.Status, tc.WantStatus)
+	}
+
+	// For failed fixtures the error message/code must survive the wire and
+	// be recorded in the node's Error field. ClassifiedErrors carry
+	// "code: message"; explicit error-port output carries the raw message.
+	if tc.WantStatus != types.ExecutionStatusSuccess && tc.ErrContains != "" {
+		if !localHasErr || !strings.Contains(localOut.ErrStr, tc.ErrContains) {
+			t.Errorf("local node error %q missing %q", localOut.ErrStr, tc.ErrContains)
+		}
+		if !serverHasErr || !strings.Contains(serverOut.ErrStr, tc.ErrContains) {
+			t.Errorf("server-runner node error %q missing %q", serverOut.ErrStr, tc.ErrContains)
+		}
+	}
+
+	// Downstream routing assertions.
+	for name, want := range tc.WantDownstream {
+		localStatus, lok := localOut.DownstreamStatuses[name]
+		serverStatus, sok := serverOut.DownstreamStatuses[name]
+		if !lok {
+			t.Errorf("local downstream node %q not found", name)
+			continue
+		}
+		if !sok {
+			t.Errorf("server-runner downstream node %q not found", name)
+			continue
+		}
+		if localStatus != serverStatus {
+			t.Errorf("downstream status parity for %q: local=%s server-runner=%s", name, localStatus, serverStatus)
+		}
+		if localStatus != want.Status {
+			t.Errorf("local downstream %q status=%s, want %s", name, localStatus, want.Status)
+		}
+		if serverStatus != want.Status {
+			t.Errorf("server-runner downstream %q status=%s, want %s", name, serverStatus, want.Status)
+		}
+		if want.Output != nil {
+			localOutMap := localOut.DownstreamOutputs[name]
+			serverOutMap := serverOut.DownstreamOutputs[name]
+			if !mapContains(localOutMap, want.Output) {
+				t.Errorf("local downstream %q output=%v, want superset of %v", name, localOutMap, want.Output)
+			}
+			if !mapContains(serverOutMap, want.Output) {
+				t.Errorf("server-runner downstream %q output=%v, want superset of %v", name, serverOutMap, want.Output)
+			}
+		}
+	}
+}
+
+func mapContains(got, want map[string]any) bool {
+	if got == nil {
+		return len(want) == 0
+	}
+	for k, v := range want {
+		if got[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+// RunParityLocal runs the fixture through the local embedded topology and
+// returns the terminal outcome. The register callback installs any custom
+// handlers needed by the fixture; built-in node types resolve through the
+// global node registry.
+func RunParityLocal(t *testing.T, def *types.WorkflowDef, register func(engine.HandlerRegistrar)) ParityOutcome {
 	t.Helper()
 	b := backendlocal.New(backendlocal.WithConcurrency(1))
 	reg, ok := b.Registry().(engine.HandlerRegistrar)
 	if !ok {
 		t.Fatalf("local backend registry does not implement HandlerRegistrar: %T", b.Registry())
 	}
-	reg.RegisterGlobal(handler.nodeType, handler)
+	if register != nil {
+		register(reg)
+	}
 	eng := engine.New(b.State(), b.Queue(), engine.WithDefaultLeaseTTL(time.Minute))
 	t.Cleanup(b.Bind(eng))
 
@@ -275,23 +423,33 @@ func runParityLocal(t *testing.T, def *types.WorkflowDef, handler *parityFixture
 	if err != nil {
 		t.Fatalf("local wait: %v", err)
 	}
-	node, err := b.State().GetNode(ctx, id, "start")
-	if err != nil || node == nil {
-		t.Fatalf("local GetNode: %v (node=%v)", err, node)
-	}
-	return parityOutcome{attempt: node.Attempt, status: result.Status, errStr: node.Error}
+	return collectParityOutcome(t, b.State(), id, result, def)
 }
 
-// runParityServerRunner runs the same fixture through the server-runner
-// topology against real Redis. The handler runs in a runner process and its
-// ClassifiedError crosses the wire via protocol.error_detail, recovered
-// server-side before retry classification.
-func runParityServerRunner(t *testing.T, addr string, def *types.WorkflowDef, handler *parityFixtureHandler, nodeType string) parityOutcome {
+// RunParityServerRunner runs the same fixture through the server-runner
+// topology against real Redis. The register callback installs custom handlers
+// in the runner's execution.Registry; built-in node types resolve through the
+// global node registry.
+func RunParityServerRunner(t *testing.T, addr string, def *types.WorkflowDef, register func(engine.HandlerRegistrar)) ParityOutcome {
 	t.Helper()
 	h := newServerRunnerHarness(t, addr, 1)
+	if len(def.Nodes) == 0 {
+		t.Fatal("RunParityServerRunner: workflow has no nodes")
+	}
 
 	registry := execution.NewRegistry()
-	registry.RegisterGlobal(nodeType, handler)
+	if register != nil {
+		register(registry)
+	}
+
+	capSet := make(map[string]struct{})
+	for _, n := range def.Nodes {
+		capSet[n.Type] = struct{}{}
+	}
+	caps := make([]protocol.Capability, 0, len(capSet))
+	for nodeType := range capSet {
+		caps = append(caps, protocol.Capability{NodeType: nodeType})
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -301,7 +459,7 @@ func runParityServerRunner(t *testing.T, addr string, def *types.WorkflowDef, ha
 		runnersvc.Config{
 			RunnerID:     "runner-parity-1",
 			Concurrency:  1,
-			Capabilities: []protocol.Capability{{NodeType: nodeType}},
+			Capabilities: caps,
 			PollWait:     5 * time.Millisecond,
 		},
 	)
@@ -313,7 +471,7 @@ func runParityServerRunner(t *testing.T, addr string, def *types.WorkflowDef, ha
 
 	waitCtx, waitCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer waitCancel()
-	result := waitForCompletion(waitCtx, t, h.state, execID, "start")
+	result := waitForCompletion(waitCtx, t, h.state, execID, def.Nodes[0].Name)
 
 	cancel()
 	select {
@@ -326,11 +484,44 @@ func runParityServerRunner(t *testing.T, addr string, def *types.WorkflowDef, ha
 	}
 
 	// Fresh context: the runner ctx above was cancelled on shutdown.
+	return collectParityOutcome(t, h.state, execID, result, def)
+}
+
+func collectParityOutcome(t *testing.T, state engine.StateStore, execID types.ExecutionID, result types.Result, def *types.WorkflowDef) ParityOutcome {
+	t.Helper()
+	if len(def.Nodes) == 0 {
+		t.Fatal("collectParityOutcome: workflow has no nodes")
+	}
+	sourceName := def.Nodes[0].Name
+
 	getCtx, getCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer getCancel()
-	node, err := h.state.GetNode(getCtx, execID, "start")
+	node, err := state.GetNode(getCtx, execID, sourceName)
 	if err != nil || node == nil {
-		t.Fatalf("server-runner GetNode: %v (node=%v)", err, node)
+		t.Fatalf("GetNode %q: %v (node=%v)", sourceName, err, node)
 	}
-	return parityOutcome{attempt: node.Attempt, status: result.Status, errStr: node.Error}
+
+	out := ParityOutcome{
+		Attempt:            node.Attempt,
+		Status:             result.Status,
+		ErrStr:             node.Error,
+		Port:               node.Port,
+		DownstreamStatuses: make(map[string]types.NodeStatus),
+		DownstreamOutputs:  make(map[string]map[string]any),
+	}
+
+	for _, n := range def.Nodes {
+		if n.Name == sourceName {
+			continue
+		}
+		dn, err := state.GetNode(getCtx, execID, n.Name)
+		if err != nil || dn == nil {
+			continue
+		}
+		out.DownstreamStatuses[n.Name] = dn.Status
+		if v, err := state.GetOutput(getCtx, execID, n.Name); err == nil && v != nil {
+			out.DownstreamOutputs[n.Name] = v
+		}
+	}
+	return out
 }
