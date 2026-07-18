@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -181,6 +182,7 @@ type Backend struct {
 	transient      bool
 	resourcePool   types.ResourcePool
 	leaderElector  backend.LeaderElector
+	testHooks      bindStartHooks
 }
 
 // State returns the StateStore implementation.
@@ -281,12 +283,14 @@ func New(redisAddr string, db store.Store, opts ...Option) (*Backend, error) {
 
 // Bind wires the embedded execution dispatcher into the task transport and
 // starts the timeout monitor. Returns a stop function for graceful shutdown.
+//
+// This is the Provider.Bind path used by the SDK (NewLocal/NewCluster). It
+// cannot change the engine's start error surface, so a consumer-start failure
+// is logged and a resource-cleanup stop is returned. The control-plane path
+// (BindTaskHandler) propagates the same error instead — see bindHandler.
 func (b *Backend) Bind(eng *engine.Engine) func() {
 	if !b.consumer {
-		return func() {
-			_ = b.transport.Close()
-			_ = b.rdb.Close()
-		}
+		return b.nonConsumerStop()
 	}
 
 	var opts []execution.RunnerOption
@@ -294,57 +298,154 @@ func (b *Backend) Bind(eng *engine.Engine) func() {
 		opts = append(opts, execution.WithResourcePool(b.resourcePool))
 	}
 	dispatcher := execution.NewEmbeddedDispatcher(eng, b.registry, opts...)
-	return b.BindHandler(eng, dispatcher.HandleTask)
+	stop, err := b.bindHandler(eng, dispatcher.HandleTask)
+	if err != nil {
+		log.Printf("xflow: bind error (Provider.Bind path): %v", err)
+		return b.nonConsumerStop()
+	}
+	return stop
 }
 
 // BindHandler wires a custom task handler into the task transport and starts
-// the timeout monitor. It is used by the control-plane server to dispatch
-// tasks to remote runners instead of executing handlers in-process.
+// the outbox dispatcher and timeout monitor. It is retained for compatibility
+// with callers that bind a custom handler outside the control-plane contract.
 //
-// In transient (fire-and-forget) mode the timeout monitor is not started,
-// since there are no suspend/timeout semantics and its poll is pure overhead.
+// Prefer BindTaskHandler for the control-plane path: it propagates consumer
+// start errors instead of swallowing them. In transient (fire-and-forget) mode
+// the timeout monitor is not started, since there are no suspend/timeout
+// semantics and its poll is pure overhead.
 func (b *Backend) BindHandler(eng *engine.Engine, handler func(context.Context, *engine.Task) error) func() {
-	if !b.consumer {
-		return func() {
+	stop, err := b.bindHandler(eng, handler)
+	if err != nil {
+		log.Printf("xflow: bind error (BindHandler path): %v", err)
+		return b.nonConsumerStop()
+	}
+	return stop
+}
+
+// nonConsumerStop releases transport and Redis resources for a backend that is
+// not configured to consume (API-only instances). It is idempotent.
+func (b *Backend) nonConsumerStop() func() {
+	var once sync.Once
+	return func() {
+		once.Do(func() {
 			_ = b.transport.Close()
 			_ = b.rdb.Close()
-		}
+			if b.resourcePool != nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				_ = b.resourcePool.Close(ctx)
+			}
+		})
+	}
+}
+
+// bindStartHooks are test-only injection points for the binder lifecycle. They
+// are nil in production. Each hook returns an error to simulate a component
+// failing to start, so the reverse-order rollback path is covered even though
+// the outbox dispatcher and timeout monitor cannot fail to start on their own.
+type bindStartHooks struct {
+	afterConsumerStart func() error // simulate outbox dispatcher start failure
+	afterOutboxStart   func() error // simulate timeout monitor start failure
+}
+
+// bindHandler is the unified internal lifecycle entry: it wires a task handler
+// into the transport and starts the durable outbox dispatcher and lease
+// timeout monitor. Components are acquired in order; on any failure the
+// already-started components are stopped in reverse order and their goroutines
+// awaited before returning. The returned stop func is idempotent and waits for
+// background goroutines to exit before releasing the resources they depend on.
+//
+// Fail-closed contract: a consumer start error is returned to the caller
+// (BindTaskHandler propagates it to ControlPlane.Start) rather than logged and
+// ignored, so readiness can never be reported while the consumer is down.
+func (b *Backend) bindHandler(eng *engine.Engine, handler func(context.Context, *engine.Task) error) (func(), error) {
+	if !b.consumer {
+		return b.nonConsumerStop(), nil
 	}
 
+	// 1. Start the consumer (broker-side task delivery). This is the only step
+	//    that can fail against a real broker; its error must propagate.
 	stopConsumer, err := b.transport.StartConsumer(
 		queue.ConsumerConfig{Concurrency: b.concurrency, Transient: b.transient},
 		queue.TaskHandler(handler),
 	)
 	if err != nil {
-		log.Printf("xflow: start consumer error: %v", err)
+		// Consumer never started; release the delivery transport so a failed
+		// bind leaves no broker resources open. rdb remains for the backend
+		// owner / state store; it is closed on successful teardown (stop).
+		_ = b.transport.Close()
+		return nil, fmt.Errorf("distributed: start consumer: %w", err)
+	}
+	if b.testHooks.afterConsumerStart != nil {
+		if err := b.testHooks.afterConsumerStart(); err != nil {
+			stopConsumer()
+			_ = b.transport.Close()
+			return nil, fmt.Errorf("distributed: start outbox dispatcher: %w", err)
+		}
 	}
 
+	// 2. Start the durable outbox dispatcher. It exits when ctx is canceled.
 	outboxCtx, cancelOutbox := context.WithCancel(context.Background())
 	outboxDispatcher := engine.NewOutboxDispatcher(eng, time.Second)
-	go outboxDispatcher.Run(outboxCtx)
+	outboxDone := make(chan struct{})
+	go func() {
+		defer close(outboxDone)
+		outboxDispatcher.Run(outboxCtx)
+	}()
 
+	// 3. Start the lease timeout monitor (durable only). Transient mode has no
+	//    suspend/timeout semantics, so the poll would be pure overhead.
+	var tm *timeout.Monitor
+	tmDone := make(chan struct{})
 	if !b.transient {
-		tm := timeout.New(b.rdb, eng, nil, nil, 5*time.Second)
+		tm = timeout.New(b.rdb, eng, nil, nil, 5*time.Second)
 		b.timeoutMonitor = tm
-		go tm.Run()
+		go func() {
+			defer close(tmDone)
+			tm.Run()
+		}()
+		if b.testHooks.afterOutboxStart != nil {
+			if err := b.testHooks.afterOutboxStart(); err != nil {
+				// Reverse-order rollback: stop monitor (not yet tracked), stop
+				// outbox dispatcher and wait, then stop consumer + transport.
+				cancelOutbox()
+				<-outboxDone
+				if stopConsumer != nil {
+					stopConsumer()
+				}
+				_ = b.transport.Close()
+				return nil, fmt.Errorf("distributed: start timeout monitor: %w", err)
+			}
+		}
+	} else {
+		close(tmDone)
 	}
 
-	return func() {
-		cancelOutbox()
-		if b.timeoutMonitor != nil {
-			b.timeoutMonitor.Stop()
-		}
-		if stopConsumer != nil {
-			stopConsumer()
-		}
-		_ = b.transport.Close()
-		_ = b.rdb.Close()
-		if b.resourcePool != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			_ = b.resourcePool.Close(ctx)
-		}
+	var stopOnce sync.Once
+	stop := func() {
+		stopOnce.Do(func() {
+			// Block new work, then wait for each goroutine to exit before
+			// releasing the resources (Redis, transport, pool) they use.
+			cancelOutbox()
+			<-outboxDone
+			if tm != nil {
+				tm.Stop()
+				<-tmDone
+			}
+			if stopConsumer != nil {
+				stopConsumer()
+			}
+			_ = b.transport.Close()
+			_ = b.rdb.Close()
+			if b.resourcePool != nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				_ = b.resourcePool.Close(ctx)
+			}
+		})
 	}
+	return stop, nil
 }
 
 // BindTaskHandler implements backend.TaskHandlerBinder. It is the control-plane
@@ -358,6 +459,9 @@ func (b *Backend) BindHandler(eng *engine.Engine, handler func(context.Context, 
 // for a control plane: without a consumer it cannot receive task results, so
 // dispatch would silently go nowhere. We reject it here instead of returning a
 // no-op stop.
+//
+// Consumer start errors propagate to ControlPlane.Start via the returned error
+// (fail-closed): readiness can never be reported while the consumer is down.
 func (b *Backend) BindTaskHandler(eng *engine.Engine, handler func(context.Context, *engine.Task) error) (func(), error) {
 	if eng == nil {
 		return nil, errors.New("distributed: BindTaskHandler requires a non-nil engine")
@@ -368,5 +472,5 @@ func (b *Backend) BindTaskHandler(eng *engine.Engine, handler func(context.Conte
 	if !b.consumer {
 		return nil, errors.New("distributed: BindTaskHandler requires a backend configured with WithConsumer(true); a non-consumer backend cannot serve a control plane")
 	}
-	return b.BindHandler(eng, handler), nil
+	return b.bindHandler(eng, handler)
 }

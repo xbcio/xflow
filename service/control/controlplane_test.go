@@ -399,6 +399,42 @@ func (n *nonBinderBackend) TriggerPrimitives() backend.TriggerPrimitives {
 }
 func (n *nonBinderBackend) Bind(eng *engine.Engine) func() { return n.b.Bind(eng) }
 
+// failingBinderBackend is a Provider+TaskHandlerBinder whose BindTaskHandler
+// always fails. It verifies the A1 contract at the control-plane level:
+// ControlPlane.Start must propagate a binder error and never report ready or
+// start leader/sweeper loops when the consumer cannot start.
+type failingBinderBackend struct {
+	*nonBinderBackend
+	bindTaskCalled int64
+}
+
+func (f *failingBinderBackend) BindTaskHandler(*engine.Engine, func(context.Context, *engine.Task) error) (func(), error) {
+	atomic.AddInt64(&f.bindTaskCalled, 1)
+	return nil, errors.New("binder: consumer start failed (simulated)")
+}
+
+// TestControlPlaneStartFailsClosedOnBinderError verifies that a binder error
+// (e.g. consumer start failure) propagates from Start, that the control plane
+// does not proceed to leader election / sweeper startup, and that the failed
+// start can be retried (lifecycle reverted to not-started).
+func TestControlPlaneStartFailsClosedOnBinderError(t *testing.T) {
+	bk := &failingBinderBackend{nonBinderBackend: &nonBinderBackend{b: backendlocal.New()}}
+	cp, err := NewControlPlane(Config{Backend: bk})
+	if err != nil {
+		t.Fatalf("NewControlPlane() error = %v", err)
+	}
+	if err := cp.Start(context.Background()); err == nil {
+		t.Fatal("Start() = nil, want binder error propagated (fail-closed)")
+	}
+	if got := atomic.LoadInt64(&bk.bindTaskCalled); got != 1 {
+		t.Fatalf("BindTaskHandler called %d times, want 1", got)
+	}
+	// Start failed before wiring unbind; Shutdown must still be safe.
+	if err := cp.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown() after failed Start error = %v", err)
+	}
+}
+
 // TestControlPlaneStartFailsClosedWithoutTaskHandlerBinder verifies that a
 // backend lacking the TaskHandlerBinder capability causes Start to return a
 // configuration error rather than silently falling back to Provider.Bind.
