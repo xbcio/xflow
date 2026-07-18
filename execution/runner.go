@@ -9,8 +9,9 @@ import (
 
 // Runner executes task leases using a handler registry.
 type Runner struct {
-	registry engine.HandlerRegistry
-	pool     types.ResourcePool
+	registry           engine.HandlerRegistry
+	pool               types.ResourcePool
+	credentialResolver func(name string) map[string]any
 }
 
 // RunnerOption customizes a Runner.
@@ -22,6 +23,15 @@ type RunnerOption func(*Runner)
 // error at runtime.
 func WithResourcePool(p types.ResourcePool) RunnerOption {
 	return func(r *Runner) { r.pool = p }
+}
+
+// WithCredentialResolver installs a credential resolver that the Runner applies
+// to each Input before invoking the handler. nil = no resolver; nodes calling
+// input.Credential(name) will get nil (existing behavior). The resolver is a
+// pure, idempotent closure keyed by credential name; it is applied to the
+// shared lease.Input in place (same pattern as the parity test wrappers).
+func WithCredentialResolver(fn func(name string) map[string]any) RunnerOption {
+	return func(r *Runner) { r.credentialResolver = fn }
 }
 
 // NewRunner creates an in-process task runner.
@@ -47,6 +57,15 @@ func (r *Runner) Execute(ctx context.Context, lease *engine.TaskLease) (engine.T
 	}
 	if r.pool != nil {
 		ctx = types.WithResourcePool(ctx, r.pool)
+	}
+	// Apply the credential resolver to the input the handler sees. This covers
+	// both the non-suspending Execute path and the suspending path
+	// (OnResume/PrepareSuspend). The resolver is a pure, idempotent closure;
+	// applying it in place on the shared lease.Input mirrors what the parity
+	// test wrappers do and is safe because the same resolver applies to every
+	// call. cloneInputWithData preserves it via the shallow struct copy.
+	if r.credentialResolver != nil && lease.Input != nil {
+		lease.Input.SetCredentialResolver(r.credentialResolver)
 	}
 	if sh, ok := handler.(types.SuspendingHandler); ok {
 		return r.executeSuspending(ctx, lease, sh)

@@ -165,3 +165,184 @@ func (h errHandler) Execute(context.Context, *types.Input) (*types.Output, error
 
 // compile-time guard: sentinelPool must satisfy types.ResourcePool.
 var _ types.ResourcePool = sentinelPool{}
+
+// credRecordingHandler captures the credential map that the resolver returned
+// for a given name. It records the value observed on the input it actually
+// received, so it can assert the runner attached the resolver before dispatch.
+type credRecordingHandler struct {
+	mu     sync.Mutex
+	seen   map[string]map[string]any
+	seenOK map[string]bool
+}
+
+func newCredRecordingHandler() *credRecordingHandler {
+	return &credRecordingHandler{
+		seen:   make(map[string]map[string]any),
+		seenOK: make(map[string]bool),
+	}
+}
+
+func (h *credRecordingHandler) Descriptor() types.Descriptor {
+	return types.Descriptor{Type: "test.cred-probe"}
+}
+
+func (h *credRecordingHandler) Execute(_ context.Context, input *types.Input) (*types.Output, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	v := input.Credential("db")
+	h.seen[input.ExecutionID] = v
+	h.seenOK[input.ExecutionID] = v != nil
+	return &types.Output{Data: map[string]any{"ok": true}}, nil
+}
+
+func (h *credRecordingHandler) observed(id string) (map[string]any, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.seen[id], h.seenOK[id]
+}
+
+// TestRunner_WithCredentialResolverAttachesToInput pins the contract added in
+// task-42: when a Runner is constructed via WithCredentialResolver(fn),
+// Execute must call input.SetCredentialResolver(fn) so the handler observes
+// the resolved credential map via input.Credential(name).
+func TestRunner_WithCredentialResolverAttachesToInput(t *testing.T) {
+	want := map[string]any{"dsn": "user:pass@tcp(db:3306)/xflow", "driver": "mysql"}
+	resolver := func(name string) map[string]any {
+		if name == "db" {
+			return want
+		}
+		return nil
+	}
+	rec := newCredRecordingHandler()
+	runner := NewRunner(singleHandlerRegistry{handler: rec}, WithCredentialResolver(resolver))
+
+	lease := &engine.TaskLease{
+		Task:     engine.Task{ExecutionID: "exec-cred", NodeName: "probe"},
+		Input:    &types.Input{ExecutionID: "exec-cred", NodeName: "probe"},
+		NodeType: "test.cred-probe",
+	}
+	if _, err := runner.Execute(context.Background(), lease); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	got, ok := rec.observed("exec-cred")
+	if !ok {
+		t.Fatal("handler observed nil credential, want the resolver value injected by the Runner")
+	}
+	if got["dsn"] != want["dsn"] {
+		t.Fatalf("handler observed dsn = %v, want %v", got["dsn"], want["dsn"])
+	}
+}
+
+// TestRunner_NilCredentialResolverIsNoOp pins the complementary contract: a
+// Runner constructed WITHOUT WithCredentialResolver must leave
+// input.Credential(name) returning nil (existing behavior). Guards against a
+// future change that injects a nil resolver in a way that panics or surprises.
+func TestRunner_NilCredentialResolverIsNoOp(t *testing.T) {
+	rec := newCredRecordingHandler()
+	runner := NewRunner(singleHandlerRegistry{handler: rec})
+
+	lease := &engine.TaskLease{
+		Task:     engine.Task{ExecutionID: "exec-nocred", NodeName: "probe"},
+		Input:    &types.Input{ExecutionID: "exec-nocred", NodeName: "probe"},
+		NodeType: "test.cred-probe",
+	}
+	if _, err := runner.Execute(context.Background(), lease); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	got, ok := rec.observed("exec-nocred")
+	if ok {
+		t.Fatalf("handler observed non-nil credential %v, want nil (no resolver injected)", got)
+	}
+}
+
+// resuspendCredHandler is a SuspendingHandler that exercises the
+// TaskTypeNodeResume resuspend path. OnResume returns Resuspend=true with
+// non-nil Data, forcing executeSuspending to clone the input via
+// cloneInputWithData. PrepareSuspend then records whether the cloned input
+// retains the credential resolver.
+type resuspendCredHandler struct {
+	mu          sync.Mutex
+	prepareSeen map[string]map[string]any
+	prepareOK   map[string]bool
+}
+
+func newResuspendCredHandler() *resuspendCredHandler {
+	return &resuspendCredHandler{
+		prepareSeen: make(map[string]map[string]any),
+		prepareOK:   make(map[string]bool),
+	}
+}
+
+func (resuspendCredHandler) Descriptor() types.Descriptor {
+	return types.Descriptor{Type: "test.cred-resuspend"}
+}
+
+func (h *resuspendCredHandler) OnResume(_ context.Context, _ *types.Input, _ *types.SignalPayload) (*types.Output, error) {
+	// Resuspend with non-nil Data so executeSuspending runs
+	// cloneInputWithData(lease.Input, output.Data) before PrepareSuspend.
+	return &types.Output{Data: map[string]any{"step": 2}, Resuspend: true}, nil
+}
+
+// Execute is unreachable on the NodeResume resuspend path but is required to
+// satisfy types.ActionHandler.
+func (h *resuspendCredHandler) Execute(context.Context, *types.Input) (*types.Output, error) {
+	return nil, errors.New("resuspendCredHandler.Execute must not be called on the resume path")
+}
+
+func (h *resuspendCredHandler) PrepareSuspend(_ context.Context, input *types.Input) (*types.SuspendSpec, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	v := input.Credential("db")
+	h.prepareSeen[input.ExecutionID] = v
+	h.prepareOK[input.ExecutionID] = v != nil
+	return &types.SuspendSpec{Mode: types.ModeSignal, Signals: []string{"approval"}}, nil
+}
+
+func (h *resuspendCredHandler) prepareObserved(id string) (map[string]any, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.prepareSeen[id], h.prepareOK[id]
+}
+
+// TestRunner_CredentialResolverSurvivesCloneInputWithData pins the contract
+// documented in task-41 design §7: the credential resolver applied to
+// lease.Input survives the shallow clone performed by cloneInputWithData in
+// the resuspend path, so PrepareSuspend receives an input whose
+// Credential(name) still resolves. The unexported credential func field is
+// copied by value (it is a pointer), so the cloned input retains the resolver.
+func TestRunner_CredentialResolverSurvivesCloneInputWithData(t *testing.T) {
+	want := map[string]any{"dsn": "user:pass@tcp(db:3306)/xflow", "driver": "mysql"}
+	resolver := func(name string) map[string]any {
+		if name == "db" {
+			return want
+		}
+		return nil
+	}
+	rec := newResuspendCredHandler()
+	runner := NewRunner(singleHandlerRegistry{handler: rec}, WithCredentialResolver(resolver))
+
+	lease := &engine.TaskLease{
+		Task: engine.Task{
+			ExecutionID: "exec-resuspend",
+			NodeName:    "probe",
+			Type:        engine.TaskTypeNodeResume,
+			Payload:     &types.SignalPayload{Name: "approval"},
+		},
+		Input:    &types.Input{ExecutionID: "exec-resuspend", NodeName: "probe"},
+		NodeType: "test.cred-resuspend",
+	}
+	res, err := runner.Execute(context.Background(), lease)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if res.Suspend == nil {
+		t.Fatal("Execute() Suspend = nil, want a suspend spec from PrepareSuspend on the resuspend path")
+	}
+	got, ok := rec.prepareObserved("exec-resuspend")
+	if !ok {
+		t.Fatal("PrepareSuspend observed nil credential on cloned input, want the resolver value")
+	}
+	if got["dsn"] != want["dsn"] {
+		t.Fatalf("PrepareSuspend observed dsn = %v, want %v (resolver must survive cloneInputWithData)", got["dsn"], want["dsn"])
+	}
+}
