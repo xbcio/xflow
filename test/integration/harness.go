@@ -62,6 +62,10 @@ func kafkaBrokers(t *testing.T) []string {
 
 // --- reachability gates (skip, not fail) ---
 
+// requireRedis returns the Redis address, skipping the test when Redis is
+// unreachable. Under XFLOW_REQUIRE_REDIS_INTEGRATION=1 (CI gating mode) it
+// fails the test instead, so a missing dependency cannot be mistaken for a
+// passing gate (per 2026-07-18 remediation §6.3).
 func requireRedis(t *testing.T) string {
 	t.Helper()
 	addr := redisAddr(t)
@@ -70,10 +74,14 @@ func requireRedis(t *testing.T) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if err := c.Ping(ctx).Err(); err != nil {
+		if os.Getenv("XFLOW_REQUIRE_REDIS_INTEGRATION") == "1" {
+			t.Fatalf("XFLOW_REQUIRE_REDIS_INTEGRATION=1: redis unavailable at %s: %v (run `make env-up`)", addr, err)
+		}
 		t.Skipf("redis unavailable at %s: %v (run `make env-up`)", addr, err)
 	}
 	return addr
 }
+
 
 func requireMySQL(t *testing.T) string {
 	t.Helper()

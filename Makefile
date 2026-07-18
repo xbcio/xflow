@@ -1,5 +1,5 @@
 .PHONY: all build test test-concurrency lint fmt tidy clean run-server run-runner install-hooks proto proto-tools \
-        env-up env-down env-reset env-logs env-migrate test-integration test-perf perf-sample
+        env-up env-down env-reset env-logs env-migrate test-integration test-integration-required test-perf perf-sample
 
 # ── Build ──────────────────────────────────────────────────────────────────────
 
@@ -107,8 +107,16 @@ env-migrate:
 	@bash test/env/migrate.sh
 
 # ── Integration / perf tests (gated by build tags) ───────────────────────────
+# test-integration skips when Redis/MySQL/Kafka are unavailable (local dev).
+# test-integration-required fails the job when deps are missing — use in CI so a
+# skipped dependency cannot be mistaken for a passing gate (A0, 2026-07-18 §6.3).
 test-integration:
 	@set -a; [ -f test/env/.env ] && . ./test/env/.env; set +a; \
+	go test -tags=integration -race -count=1 -timeout 600s ./test/integration/...
+
+test-integration-required:
+	@set -a; [ -f test/env/.env ] && . ./test/env/.env; set +a; \
+	XFLOW_REQUIRE_REDIS_INTEGRATION=1 \
 	go test -tags=integration -race -count=1 -timeout 600s ./test/integration/...
 
 test-perf:
