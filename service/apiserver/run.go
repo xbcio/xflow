@@ -12,6 +12,8 @@ import (
 	"os"
 	"time"
 
+	"github.com/xbcio/xflow/observability/tracing"
+
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 )
@@ -113,6 +115,14 @@ func (s *APIServer) Run(ctx context.Context) error {
 			log.Printf("apiserver: gRPC listening on %s (mTLS=%v)", s.cfg.GRPCAddr, tlsCfg.ClientAuth == tls.RequireAndVerifyClientCert)
 		} else {
 			log.Printf("apiserver: gRPC listening on %s", s.cfg.GRPCAddr)
+		}
+		// B1: extract W3C tracecontext from gRPC metadata and start a server
+		// span for each unary RPC, mirroring the HTTP tracing middleware so
+		// the runner-protocol RPCs (Register/Heartbeat/PollTask/ReportResult)
+		// inherit a remote parent and the dispatch/commit spans they start are
+		// not root spans. Pass-through when no Tracer is configured.
+		if s.cfg.Tracer != nil {
+			opts = append(opts, grpc.UnaryInterceptor(tracing.GRPCUnaryServerInterceptor(s.cfg.Tracer)))
 		}
 		grpcServer = grpc.NewServer(opts...)
 		s.RegisterGRPC(grpcServer)
