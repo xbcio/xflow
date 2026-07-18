@@ -132,8 +132,9 @@ type downstreamExpectation struct {
 type ParityOutcome struct {
 	Attempt            int
 	Status             types.ExecutionStatus
-	ErrStr             string // node.Error (ClassifiedError.Error() == "code: message")
-	Port               string // source node output port
+	SourceStatus       types.NodeStatus // terminal status of the source node
+	ErrStr             string           // node.Error (ClassifiedError.Error() == "code: message")
+	Port               string           // source node output port
 	DownstreamStatuses map[string]types.NodeStatus
 	DownstreamOutputs  map[string]map[string]any
 }
@@ -504,6 +505,7 @@ func collectParityOutcome(t *testing.T, state engine.StateStore, execID types.Ex
 	out := ParityOutcome{
 		Attempt:            node.Attempt,
 		Status:             result.Status,
+		SourceStatus:       node.Status,
 		ErrStr:             node.Error,
 		Port:               node.Port,
 		DownstreamStatuses: make(map[string]types.NodeStatus),
