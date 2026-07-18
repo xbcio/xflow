@@ -1,6 +1,7 @@
 package apiserver
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -20,10 +21,16 @@ import (
 // delegates to control.EngineFacade (the *engine.Engine behind the
 // ControlPlane) for every engine call.
 type workflowControlModule struct {
-	cp   *control.ControlPlane
-	eng  control.EngineFacade
-	auth WorkflowAuthenticator
-	log  engine.Logger
+	cp     *control.ControlPlane
+	eng    control.EngineFacade
+	auth   WorkflowAuthenticator
+	// principalAuth + authorizer + audit implement the B3 resource/operation
+	// authz path. When principalAuth is nil, the module falls back to the
+	// legacy WorkflowAuthenticator (bearer-only) for backward compatibility.
+	principalAuth PrincipalAuthenticator
+	authorizer    Authorizer
+	audit         AuditSink
+	log           engine.Logger
 }
 
 func newWorkflowControlModule(cp *control.ControlPlane, auth WorkflowAuthenticator, log engine.Logger) *workflowControlModule {
@@ -33,6 +40,14 @@ func newWorkflowControlModule(cp *control.ControlPlane, auth WorkflowAuthenticat
 func (m *workflowControlModule) Name() string { return "workflow-control" }
 
 func (m *workflowControlModule) RegisterHTTP(mux *http.ServeMux) {
+	// B3 authz path: when a PrincipalAuthenticator is configured, the module
+	// enforces resource/operation-level authorization with append-only audit
+	// before each handler runs. Without it, it falls back to the legacy
+	// bearer-only WorkflowAuthenticator (fail-closed if RequireWorkflowAuth).
+	if m.principalAuth != nil {
+		m.registerAuthzRoutes(mux)
+		return
+	}
 	auth := m.auth
 	if auth == nil {
 		auth = DisabledWorkflowAuth{}
@@ -53,6 +68,107 @@ func (m *workflowControlModule) RegisterHTTP(mux *http.ServeMux) {
 	mux.HandleFunc("/v1/workflows", wrap("submit_workflow", m.handleSubmitWorkflow))
 	mux.HandleFunc("/v1/workflows/invoke", wrap("invoke_workflow", m.handleInvoke))
 	mux.HandleFunc("/v1/executions/", wrap("execution", m.handleExecution))
+}
+
+// registerAuthzRoutes mounts the control routes behind the B3 authz wrapper:
+// authenticate → resolve operation/resource → authorize (default-deny) → audit
+// admission → handler → audit outcome. Mutations fail-closed if the admission
+// audit cannot be persisted.
+func (m *workflowControlModule) registerAuthzRoutes(mux *http.ServeMux) {
+	authz := func(op string, isMutation bool, h http.HandlerFunc, resourceResolver func(*http.Request) (resource, workflowID, executionID string)) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			principal, err := m.principalAuth.Authenticate(r)
+			if err != nil {
+				m.auditDeny(r, principal, op, "", "", "", "unauthenticated")
+				writeError(w, http.StatusUnauthorized, "unauthorized")
+				return
+			}
+			resource, wfID, execID := "", "", ""
+			if resourceResolver != nil {
+				resource, wfID, execID = resourceResolver(r)
+			}
+			decision, derr := m.authorizer.Authorize(r.Context(), AuthorizationRequest{
+				Principal: principal, Operation: op, Resource: resource,
+				WorkflowID: wfID, ExecutionID: execID,
+			})
+			if derr != nil || decision != DecisionAllow {
+				reason := "denied"
+				if derr != nil {
+					reason = "error"
+				}
+				m.auditDeny(r, principal, op, resource, wfID, execID, reason)
+				writeError(w, http.StatusForbidden, "forbidden")
+				return
+			}
+			// Mutation fail-closed: persist the admission audit BEFORE the
+			// operation. If the audit sink is unavailable, deny rather than
+			// execute an unaudited mutation.
+			reqID := newRequestID(r)
+			if isMutation {
+				if err := m.audit.Append(r.Context(), AuditEvent{
+					RequestID: reqID, Principal: principal.Subject, TenantID: principal.TenantID,
+					Operation: op, Resource: resource, WorkflowID: wfID, ExecutionID: execID,
+					Decision: DecisionAllow, Reason: "admitted", Outcome: "admitted",
+					Timestamp: time.Now().UTC(),
+				}); err != nil {
+					m.auditDeny(r, principal, op, resource, wfID, execID, "audit_unavailable")
+					writeError(w, http.StatusServiceUnavailable, "audit unavailable")
+					return
+				}
+			} else {
+				// Read paths record the decision without fail-closed; an audit
+				// gap is observable but does not block reads.
+				_ = m.audit.Append(r.Context(), AuditEvent{
+					RequestID: reqID, Principal: principal.Subject, TenantID: principal.TenantID,
+					Operation: op, Resource: resource, WorkflowID: wfID, ExecutionID: execID,
+					Decision: DecisionAllow, Reason: "admitted", Outcome: "admitted",
+					Timestamp: time.Now().UTC(),
+				})
+			}
+			r = r.WithContext(context.WithValue(r.Context(), authzContextKey{}, principal))
+			h(w, r)
+		}
+	}
+	mux.HandleFunc("/v1/workflows", authz(OpWorkflowCreate, true, m.handleSubmitWorkflow, nil))
+	mux.HandleFunc("/v1/workflows/invoke", authz(OpWorkflowInvoke, true, m.handleInvoke, nil))
+	mux.HandleFunc("/v1/executions/", authz(OpExecutionRead, false, m.handleExecution, func(r *http.Request) (string, string, string) {
+		_, execID := splitExecutionPath(r.URL.Path)
+		return "execution", "", execID
+	}))
+}
+
+// splitExecutionPath extracts the execution ID from /v1/executions/<id>[/...].
+func splitExecutionPath(path string) (op string, execID string) {
+	rest := strings.TrimPrefix(path, "/v1/executions/")
+	parts := strings.Split(strings.Trim(rest, "/"), "/")
+	if len(parts) == 0 || parts[0] == "" {
+		return "", ""
+	}
+	if len(parts) >= 2 {
+		return parts[1], parts[0]
+	}
+	return "", parts[0]
+}
+
+// auditDeny records a deny decision before returning the rejection. Deny
+// audits are written best-effort (a sink gap must not mask the denial).
+func (m *workflowControlModule) auditDeny(r *http.Request, principal Principal, op, resource, wfID, execID, reason string) {
+	if m.audit == nil {
+		return
+	}
+	_ = m.audit.Append(r.Context(), AuditEvent{
+		RequestID:   newRequestID(r),
+		Principal:   principal.Subject,
+		TenantID:    principal.TenantID,
+		Operation:   op,
+		Resource:    resource,
+		WorkflowID:  wfID,
+		ExecutionID: execID,
+		Decision:    DecisionDeny,
+		Reason:      reason,
+		Outcome:     "denied",
+		Timestamp:   time.Now().UTC(),
+	})
 }
 
 type errorResponse struct {

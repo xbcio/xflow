@@ -39,6 +39,21 @@ type Config struct {
 	// nil. Use this in production deployments to prevent accidentally serving
 	// the workflow API without authentication.
 	RequireWorkflowAuth bool
+	// PrincipalAuth, when set, enables the B3 resource/operation-level authz
+	// path: the module authenticates to a Principal, runs the Authorizer
+	// (default-deny), and writes append-only audit via AuditSink before each
+	// handler. When nil, the module falls back to WorkflowAuth (bearer-only).
+	// RequireWorkflowAuth=true with nil PrincipalAuth is allowed for backward
+	// compatibility; production should set PrincipalAuth + Authorizer + Audit.
+	PrincipalAuth PrincipalAuthenticator
+	// Authorizer decides allow/deny per operation+resource. Defaults to
+	// ScopeAuthorizer (G1 single-tenant reference) when PrincipalAuth is set.
+	Authorizer Authorizer
+	// AuditSink records append-only authorization/mutation events. In
+	// production this must be a durable sink (SQL projection reconciled
+	// against the authoritative operation receipts). Mutations fail-closed
+	// when the admission audit cannot be persisted.
+	AuditSink AuditSink
 
 	// Transport configuration. Stage 1 declares but does not use these.
 	HTTPAddr    string
@@ -88,8 +103,20 @@ type APIServer struct {
 // cfg.WorkflowAuth is nil (production fail-closed: the workflow API must not
 // be left open without an authenticator).
 func New(cfg Config, opts ...Option) (*APIServer, error) {
-	if cfg.RequireWorkflowAuth && cfg.WorkflowAuth == nil {
-		return nil, errors.New("apiserver: WorkflowAuth must be configured when RequireWorkflowAuth is set")
+	if cfg.RequireWorkflowAuth && cfg.WorkflowAuth == nil && cfg.PrincipalAuth == nil {
+		return nil, errors.New("apiserver: WorkflowAuth (or PrincipalAuth) must be configured when RequireWorkflowAuth is set")
+	}
+	// B3 production fail-closed: when PrincipalAuth is configured for the
+	// resource/operation authz path, an Authorizer and a durable AuditSink are
+	// also required. A missing authorizer would default-deny everything; a
+	// missing audit sink would leave mutations unaudited.
+	if cfg.PrincipalAuth != nil {
+		if cfg.Authorizer == nil {
+			return nil, errors.New("apiserver: PrincipalAuth requires an Authorizer (use ScopeAuthorizer for the G1 single-tenant reference)")
+		}
+		if cfg.AuditSink == nil {
+			return nil, errors.New("apiserver: PrincipalAuth requires an AuditSink (mutations must be audited before execution)")
+		}
 	}
 
 	s := &APIServer{cfg: cfg, timeouts: defaultHTTPTimeouts()}
@@ -106,6 +133,12 @@ func New(cfg Config, opts ...Option) (*APIServer, error) {
 	}
 
 	workflowAuth := cfg.WorkflowAuth
+	ctrlModule := newWorkflowControlModule(s.cp, workflowAuth, cfg.Logger)
+	if cfg.PrincipalAuth != nil {
+		ctrlModule.principalAuth = cfg.PrincipalAuth
+		ctrlModule.authorizer = cfg.Authorizer
+		ctrlModule.audit = cfg.AuditSink
+	}
 
 	// Default modules are prepended so a caller that also uses WithModule to
 	// add a custom module still gets the core API surface; the default
@@ -113,7 +146,7 @@ func New(cfg Config, opts ...Option) (*APIServer, error) {
 	// overlap with each other.
 	s.modules = append([]Module{
 		newRunnerProtocolModule(s.cp),
-		newWorkflowControlModule(s.cp, workflowAuth, cfg.Logger),
+		ctrlModule,
 	}, s.modules...)
 	// The management module is opt-in (R5): it is only registered when
 	// WithManagement was passed. Registration happens here, after s.cp is

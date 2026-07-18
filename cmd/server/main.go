@@ -163,9 +163,22 @@ func runServer(cfg serverConfig) error {
 	defer shutdownTracing(context.Background())
 
 	var workflowAuth apiserver.WorkflowAuthenticator
+	var principalAuth apiserver.PrincipalAuthenticator
 	if cfg.apiAuthToken != "" {
 		workflowAuth = apiserver.NewBearerTokenAuth(cfg.apiAuthToken)
+		// B3: map the static token to a principal with the G1 single-tenant
+		// operator scopes so resource/operation authz + audit are enforced.
+		// The subject is server-configured; callers cannot self-report it.
+		principalAuth = apiserver.NewBearerPrincipalAuth(cfg.apiAuthToken, "xflow-operator",
+			[]string{"workflow", "execution", "deadletter.list", "deadletter.replay", "management.read", "management.write"})
 	}
+	// G1 audit projection: an in-memory sink records authorization/mutation
+	// events for the process lifetime. A durable SQL sink reconciled against
+	// the authoritative operation receipts is required for production audit
+	// durability (see docs/design/RELEASE-GATES.md §4); the in-memory sink is
+	// the G0/prod-preview projection and is not authoritative. Mutations
+	// fail-closed via the apiserver admission-audit check before execution.
+	audit := apiserver.NewInMemoryAuditSink()
 
 	apiCfg := apiserver.Config{
 		RedisAddr:           cfg.redis, // empty => in-memory backend
@@ -176,6 +189,9 @@ func runServer(cfg serverConfig) error {
 		Tracer:              tracer,
 		WorkflowAuth:        workflowAuth,
 		RequireWorkflowAuth: cfg.requireAPIAuth,
+		PrincipalAuth:       principalAuth,
+		Authorizer:          apiserver.ScopeAuthorizer{},
+		AuditSink:           audit,
 		HTTPAddr:            cfg.addr,
 		GRPCAddr:            cfg.grpcAddr,
 		MetricsAddr:         cfg.metricsAddr,
