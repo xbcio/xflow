@@ -32,6 +32,10 @@ func (e *Engine) commitAcyclicTaskResult(ctx context.Context, lease *TaskLease, 
 		if retried {
 			return CommitOutcomeAccepted, nil
 		}
+		// Retry budget exhausted: the explicit error-port output is a terminal
+		// failure. Apply the node's OnError strategy rather than committing it
+		// as a success on the error port.
+		return e.commitAcyclicNodeError(ctx, lease, meta, retryErr, result.Output, nil)
 	}
 
 	data := make(map[string]any)

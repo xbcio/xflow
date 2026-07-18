@@ -2,6 +2,7 @@ package code
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/xbcio/xflow/types"
@@ -74,7 +75,7 @@ func (n *FunctionNode) Execute(ctx context.Context, input *types.Input) (*types.
 	code, _ := input.Params["code"].(string)
 
 	if fnName == "" && code == "" {
-		return nil, fmt.Errorf("xflow.function: either function_name or code is required")
+		return nil, types.NewPermanentError("function.config_required", "xflow.function: either function_name or code is required")
 	}
 
 	if fnName != "" {
@@ -86,11 +87,21 @@ func (n *FunctionNode) Execute(ctx context.Context, input *types.Input) (*types.
 func (n *FunctionNode) executeNamed(ctx context.Context, input *types.Input, name string) (*types.Output, error) {
 	fn, ok := LookupFunc(name)
 	if !ok {
-		return nil, fmt.Errorf("xflow.function: function %q not registered", name)
+		// Config error: a missing registration cannot self-heal on retry.
+		return nil, types.NewPermanentError("function.not_registered", fmt.Sprintf("xflow.function: function %q not registered", name))
 	}
 
 	result, err := fn(ctx, input)
 	if err != nil {
+		// A deadline/timeout is a transient system condition that may succeed
+		// on retry; classify it so the classification survives the wire instead
+		// of collapsing to a bare transient string. Any other error from a user
+		// function is treated as a routable business error via the explicit
+		// "error" port (engine/outputPortRetryError), preserving existing
+		// OnError routing semantics.
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, types.NewTransientError("function.timeout", err.Error())
+		}
 		return &types.Output{
 			Data: map[string]any{"error": err.Error()},
 			Port: "error",
@@ -108,10 +119,9 @@ func (n *FunctionNode) executeExpr(_ context.Context, input *types.Input, code s
 
 	result, err := exprx.EvalExpr(code, env, false)
 	if err != nil {
-		return &types.Output{
-			Data: map[string]any{"error": err.Error()},
-			Port: "error",
-		}, nil
+		// Expression evaluation failures (syntax/type/coercion) are
+		// deterministic — retrying with the same input cannot help.
+		return nil, types.NewPermanentError("function.expr_eval", err.Error())
 	}
 
 	switch v := result.(type) {

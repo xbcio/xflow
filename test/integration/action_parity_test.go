@@ -34,10 +34,23 @@ import (
 // against local/server-runner would be a category error. A3 §6.4 covers it
 // under a separate collection-path exclusion.
 //
+// TestActionErrorParityMatrix contains five fixtures:
+//
+//   - transient-then-success: handler fails once with a transient ClassifiedError,
+//     then succeeds on the next attempt.
+//   - transient-retry-exhausted: handler always returns a transient ClassifiedError;
+//     MaxAttempts is reached.
+//   - permanent-no-retry: handler returns a permanent ClassifiedError; no retry.
+//   - business-error-no-retry: handler returns Output.Error (structured business
+//     rejection); the engine applies OnError without retry.
+//   - error-port-retry-exhausted: handler always returns an explicit error-port
+//     output (legacy matrix row); the engine converts this to a transient retry
+//     via outputPortRetryError and exhausts MaxAttempts.
+//
 // The matrix asserts the topology-independent retry contract in engine/
 // atomic_commit.go (tryRetryWithAttempt: no retry when settings==nil,
 // types.IsPermanent(cause), or attempt>=MaxAttempts): for each fixture the
-// final node.Attempt, execution status, and error code match across
+// final node.Attempt, execution status, and error message/code match across
 // topologies. node.Attempt is the engine's logical attempt count (deduped via
 // CommittedLeaseToken), so it is stable under at-least-once handler delivery.
 
@@ -45,17 +58,23 @@ const (
 	parityTransientThenSuccess = "transient_then_success"
 	parityTransientExhausted   = "transient_exhausted"
 	parityPermanent            = "permanent"
+	parityBusinessError        = "business_error"
+	parityErrorPort            = "error_port"
 )
 
-// parityFixtureHandler is the shared action fixture. It returns
-// types.ClassifiedError instances so the engine's retry classification path
-// (NewTransientError/NewPermanentError → types.IsPermanent) is exercised
-// identically in-process and across the wire.
+// parityFixtureHandler is the shared action fixture. It returns one of:
+//   - types.ClassifiedError (transient/permanent) — exercises the engine's
+//     retry classification path in-process and across the wire.
+//   - types.Output with Error set — a routable business error (no retry, OnError
+//     decides terminal routing).
+//   - types.Output with Port="error" — the legacy explicit error-port output
+//     (engine/outputPortRetryError converts it to a transient retry).
 type parityFixtureHandler struct {
 	nodeType   string
 	behaviour  string
 	failBefore int32 // transient failures before success (transient_then_success only)
 	code       string
+	msg        string // error message for business_error / error_port
 	attempts   atomic.Int32
 }
 
@@ -70,6 +89,10 @@ func (h *parityFixtureHandler) Execute(_ context.Context, _ *types.Input) (*type
 		return nil, types.NewPermanentError(h.code, "permanent fixture failure")
 	case parityTransientExhausted:
 		return nil, types.NewTransientError(h.code, "transient fixture failure")
+	case parityBusinessError:
+		return &types.Output{Error: &types.Error{Message: h.msg}}, nil
+	case parityErrorPort:
+		return &types.Output{Data: map[string]any{"error": h.msg}, Port: "error"}, nil
 	default: // parityTransientThenSuccess
 		if n <= h.failBefore {
 			return nil, types.NewTransientError(h.code, "transient fixture failure")
@@ -112,6 +135,7 @@ func TestActionErrorParityMatrix(t *testing.T) {
 		wantAttempt int
 		wantStatus  types.ExecutionStatus
 		wantErr     bool
+		errContains string // substring expected in node.Error for failed fixtures
 	}{
 		{
 			name:        "transient_then_success",
@@ -121,6 +145,7 @@ func TestActionErrorParityMatrix(t *testing.T) {
 			wantAttempt: 2,
 			wantStatus:  types.ExecutionStatusSuccess,
 			wantErr:     false,
+			errContains: "",
 		},
 		{
 			name:        "transient_retry_exhausted",
@@ -129,6 +154,7 @@ func TestActionErrorParityMatrix(t *testing.T) {
 			wantAttempt: 2,
 			wantStatus:  types.ExecutionStatusFailed,
 			wantErr:     true,
+			errContains: "",
 		},
 		{
 			name:        "permanent_no_retry",
@@ -137,6 +163,25 @@ func TestActionErrorParityMatrix(t *testing.T) {
 			wantAttempt: 1,
 			wantStatus:  types.ExecutionStatusFailed,
 			wantErr:     true,
+			errContains: "",
+		},
+		{
+			name:        "error_port_retry_exhausted",
+			behaviour:   parityErrorPort,
+			maxAttempts: 3, // explicit error-port output is transient (outputPortRetryError)
+			wantAttempt: 3,
+			wantStatus:  types.ExecutionStatusFailed,
+			wantErr:     true,
+			errContains: "business.reject",
+		},
+		{
+			name:        "business_error_no_retry",
+			behaviour:   parityBusinessError,
+			maxAttempts: 3, // business error bypasses retry (Output.Error)
+			wantAttempt: 1,
+			wantStatus:  types.ExecutionStatusFailed,
+			wantErr:     true,
+			errContains: "business.reject",
 		},
 	}
 
@@ -148,11 +193,11 @@ func TestActionErrorParityMatrix(t *testing.T) {
 
 			localHandler := &parityFixtureHandler{
 				nodeType: nodeType, behaviour: tc.behaviour,
-				failBefore: tc.failBefore, code: code,
+				failBefore: tc.failBefore, code: code, msg: "business.reject",
 			}
 			serverHandler := &parityFixtureHandler{
 				nodeType: nodeType, behaviour: tc.behaviour,
-				failBefore: tc.failBefore, code: code,
+				failBefore: tc.failBefore, code: code, msg: "business.reject",
 			}
 
 			localOut := runParityLocal(t, def, localHandler)
@@ -183,15 +228,19 @@ func TestActionErrorParityMatrix(t *testing.T) {
 			if serverOut.status != tc.wantStatus {
 				t.Errorf("server-runner status=%s, want %s", serverOut.status, tc.wantStatus)
 			}
-			// For failed fixtures the classified error code must survive the wire
-			// (ClassifiedError.Error() == "code: message") so the engine's
-			// OnError "stop" outcome records it in the node's Error field.
+			// For failed fixtures the error message/code must survive the wire and
+			// be recorded in the node's Error field. ClassifiedErrors carry
+			// "code: message"; explicit error-port output carries the raw message.
 			if tc.wantErr {
-				if !localHasErr || !strings.Contains(localOut.errStr, code) {
-					t.Errorf("local node error %q missing code %q", localOut.errStr, code)
+				wantSubstr := tc.errContains
+				if wantSubstr == "" {
+					wantSubstr = code
 				}
-				if !serverHasErr || !strings.Contains(serverOut.errStr, code) {
-					t.Errorf("server-runner node error %q missing code %q", serverOut.errStr, code)
+				if !localHasErr || !strings.Contains(localOut.errStr, wantSubstr) {
+					t.Errorf("local node error %q missing %q", localOut.errStr, wantSubstr)
+				}
+				if !serverHasErr || !strings.Contains(serverOut.errStr, wantSubstr) {
+					t.Errorf("server-runner node error %q missing %q", serverOut.errStr, wantSubstr)
 				}
 			}
 		})

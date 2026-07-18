@@ -2,6 +2,7 @@ package script_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -126,6 +127,67 @@ func TestScript_MissingRuntime_ConfigError(t *testing.T) {
 	input := &types.Input{Params: map[string]any{"code": `({})`, "language": "js"}}
 	if _, err := h.Execute(context.Background(), input); err == nil {
 		t.Fatal("expected Go config error for missing runtime")
+	}
+}
+
+// TestScript_ConfigErrorsArePermanent verifies the A3 code/script classifier
+// migration (2026-07-18 remediation §6.4 step 5): script config errors that
+// cannot self-heal on retry are NewPermanentError, not bare fmt.Errorf.
+func TestScript_ConfigErrorsArePermanent(t *testing.T) {
+	h, _ := registry.Lookup("xflow.script")
+
+	cases := []struct {
+		name   string
+		params map[string]any
+		code   string
+	}{
+		{"missing_code", map[string]any{}, "script.code_required"},
+		{"missing_language", map[string]any{"code": `({})`, "runtime": "goja"}, "script.language_required"},
+		{"missing_runtime", map[string]any{"code": `({})`, "language": "js"}, "script.runtime_required"},
+		{"unknown_engine", map[string]any{"code": `({})`, "language": "js", "runtime": "v8"}, "script.unknown_engine"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			input := &types.Input{Params: c.params}
+			_, err := h.Execute(context.Background(), input)
+			if err == nil {
+				t.Fatalf("expected error for %s", c.name)
+			}
+			if !types.IsPermanent(err) {
+				t.Fatalf("%s must be permanent (not retried); got err=%v", c.name, err)
+			}
+			var ce *types.ClassifiedError
+			if !errors.As(err, &ce) || ce.Code != c.code {
+				t.Fatalf("expected ClassifiedError code=%q, got %T %v", c.code, err, err)
+			}
+		})
+	}
+}
+
+// TestScript_CancelledContextIsTransient verifies that when the per-execution
+// context expires (deadline/cancellation), the script node classifies the
+// failure as transient with code script.timeout regardless of how the runtime
+// surfaces it (goja raises an Interrupt error, qjs/wazero wrap ctx.Err()).
+// A pre-cancelled context makes the test deterministic without depending on
+// wall-clock timeout races.
+func TestScript_CancelledContextIsTransient(t *testing.T) {
+	h, _ := registry.Lookup("xflow.script")
+	b := node.Script(`({})`).Language("js").Runtime("goja")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	input := &types.Input{Params: b.RawParams().(map[string]any), Timeout: 10 * time.Second}
+	_, err := h.Execute(ctx, input)
+	if err == nil {
+		t.Fatal("expected transient error for cancelled execution context")
+	}
+	if types.IsPermanent(err) {
+		t.Fatalf("cancelled context must be transient (retryable); got permanent err=%v", err)
+	}
+	var ce *types.ClassifiedError
+	if !errors.As(err, &ce) || ce.Code != "script.timeout" {
+		t.Fatalf("expected ClassifiedError code=script.timeout, got %T %v", err, err)
 	}
 }
 
