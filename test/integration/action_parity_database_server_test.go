@@ -49,12 +49,14 @@ import (
 //     .superpowers/sdd-remediation/task-39-design.md §5.3.
 //   - db_constraint_permanent       — pre-inserted row id=1 → MySQL 1062 (attempt 1)
 //
-// The runner process does not wire a ResourcePool / credential resolver today
-// (a separate production follow-up). The test works around it by registering
-// the existing databaseParityHandler wrapper — which injects a real
-// resource.NewDefaultResourcePool and a credential resolver pointing at the
-// real MySQL DSN — into the runner's execution.Registry. The runner executes
-// that handler in-process, so the real pool is reachable across the wire.
+// This test deliberately uses the databaseParityHandler wrapper path (injected
+// real resource.NewDefaultResourcePool + credential resolver pointing at the
+// real MySQL DSN) so it can reproduce the no-pool and bad-conn edge cases that
+// the production wiring cannot (pool: nil, arbitrary DSN). The production
+// ResourcePool/credential-resolver wiring is covered by the sibling
+// TestDatabaseActionErrorParityServerRunnerProductionWiring below, which
+// registers the real (unwrapped) xflow.database handler and installs the pool
+// via runnersvc.Config.
 func TestDatabaseActionErrorParityServerRunner(t *testing.T) {
 	addr := requireRedis(t)
 	dsn := requireMySQL(t)

@@ -88,7 +88,10 @@ func requireMySQL(t *testing.T) string {
 	dsn := mysqlDSN(t)
 	// lazy import to avoid pulling driver into non-integration builds
 	if err := pingMySQL(dsn); err != nil {
-		t.Skipf("mysql unavailable (%s): %v (run `make env-up && make env-migrate`)", dsn, err)
+		// Do not echo the DSN: it embeds MYSQL_ROOT_PASSWORD. Print only the
+		// host:port so a skipped test does not leak the credential.
+		port := envOr("MYSQL_PORT", "3306")
+		t.Skipf("mysql unavailable at localhost:%s: %v (run `make env-up && make env-migrate`)", port, err)
 	}
 	return dsn
 }
