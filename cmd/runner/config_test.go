@@ -2,10 +2,12 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadRunnerConfigFromYAML(t *testing.T) {
@@ -512,5 +514,254 @@ func TestValidateRunnerConfigRejectsInvalidValues(t *testing.T) {
 				t.Fatalf("error = %v, want containing %q", err, tt.want)
 			}
 		})
+	}
+}
+
+func TestLoadRunnerConfigFromYAML_Credentials(t *testing.T) {
+	t.Setenv("XFLOW_DB_PASSWORD", "s3cret")
+	t.Setenv("XFLOW_API_TOKEN", "tok-123")
+	data := []byte(`
+credentials:
+  db:
+    driver: mysql
+    dsn: "user:${XFLOW_DB_PASSWORD}@tcp(db:3306)/xflow?parseTime=true"
+  api:
+    token: "${XFLOW_API_TOKEN}"
+    base_url: "https://api.example.com"
+`)
+	cfg, err := loadRunnerConfigFromBytes(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.credentials == nil {
+		t.Fatal("credentials = nil, want parsed map")
+	}
+	db := cfg.credentials["db"]
+	if db["driver"] != "mysql" {
+		t.Fatalf("db.driver = %v, want mysql", db["driver"])
+	}
+	wantDSN := "user:s3cret@tcp(db:3306)/xflow?parseTime=true"
+	if db["dsn"] != wantDSN {
+		t.Fatalf("db.dsn = %q, want %q (env-expanded)", db["dsn"], wantDSN)
+	}
+	api := cfg.credentials["api"]
+	if api["token"] != "tok-123" {
+		t.Fatalf("api.token = %v, want tok-123 (env-expanded)", api["token"])
+	}
+	if api["base_url"] != "https://api.example.com" {
+		t.Fatalf("api.base_url = %v, want unchanged (no env ref)", api["base_url"])
+	}
+}
+
+func TestLoadRunnerConfigFromYAML_CredentialsMissingEnvFails(t *testing.T) {
+	// Ensure the var is genuinely unset so the missing reference is detected.
+	t.Setenv("XFLOW_DB_PASSWORD", "")
+	os.Unsetenv("XFLOW_DB_PASSWORD")
+
+	data := []byte(`
+credentials:
+  db:
+    dsn: "user:${XFLOW_DB_PASSWORD}@tcp(db:3306)/xflow"
+`)
+	_, err := loadRunnerConfigFromBytes(data)
+	if err == nil {
+		t.Fatal("error = nil, want a fail-closed error for missing env var")
+	}
+	if !strings.Contains(err.Error(), "XFLOW_DB_PASSWORD") {
+		t.Fatalf("error = %v, want substring %q", err, "XFLOW_DB_PASSWORD")
+	}
+	// Security: error must not include the placeholder's surrounding context
+	// (i.e. must not echo the partial DSN); it lists only the variable NAME.
+	if strings.Contains(err.Error(), "user:") {
+		t.Fatalf("error leaked credential context: %v", err)
+	}
+}
+
+func TestLoadRunnerConfigFromYAML_CredentialsDollarVarExpanded(t *testing.T) {
+	// $VAR (no braces) form is supported via os.Expand semantics.
+	t.Setenv("XFLOW_API_TOKEN", "tok-dollar")
+	data := []byte(`
+credentials:
+  api:
+    token: "$XFLOW_API_TOKEN"
+`)
+	cfg, err := loadRunnerConfigFromBytes(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.credentials["api"]["token"]; got != "tok-dollar" {
+		t.Fatalf("api.token = %v, want tok-dollar ($VAR form)", got)
+	}
+}
+
+func TestLoadRunnerConfigFromYAML_CredentialsNonStringLeavesUnchanged(t *testing.T) {
+	t.Setenv("XFLOW_DB_PASSWORD", "s3cret")
+	data := []byte(`
+credentials:
+  db:
+    driver: mysql
+    dsn: "user:${XFLOW_DB_PASSWORD}@tcp(db:3306)/xflow"
+    max_open_conns: 25
+    nested:
+      inner: "${XFLOW_DB_PASSWORD}"
+      count: 3
+`)
+	cfg, err := loadRunnerConfigFromBytes(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db := cfg.credentials["db"]
+	if got, ok := db["max_open_conns"].(int); !ok || got != 25 {
+		t.Fatalf("max_open_conns = %v (%T), want int 25 (non-string leaves unchanged)", db["max_open_conns"], db["max_open_conns"])
+	}
+	nested, ok := db["nested"].(map[string]any)
+	if !ok {
+		t.Fatalf("nested = %T, want map[string]any", db["nested"])
+	}
+	if nested["inner"] != "s3cret" {
+		t.Fatalf("nested.inner = %v, want s3cret (env-expanded string leaf in nested map)", nested["inner"])
+	}
+	if got, ok := nested["count"].(int); !ok || got != 3 {
+		t.Fatalf("nested.count = %v (%T), want int 3 (non-string leaf in nested map)", nested["count"], nested["count"])
+	}
+}
+
+func TestLoadRunnerConfigFromYAML_ResourcePoolDurations(t *testing.T) {
+	data := []byte(`
+resource_pool:
+  sql:
+    max_open_conns: 10
+    max_idle_conns: 2
+    conn_max_lifetime: "30m"
+  grpc:
+    keepalive_time: "30s"
+    keepalive_timeout: "10s"
+`)
+	cfg, err := loadRunnerConfigFromBytes(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.resourcePoolConfig.SQL.MaxOpenConns != 10 {
+		t.Fatalf("sql.MaxOpenConns = %d, want 10", cfg.resourcePoolConfig.SQL.MaxOpenConns)
+	}
+	if cfg.resourcePoolConfig.SQL.MaxIdleConns != 2 {
+		t.Fatalf("sql.MaxIdleConns = %d, want 2", cfg.resourcePoolConfig.SQL.MaxIdleConns)
+	}
+	if cfg.resourcePoolConfig.SQL.ConnMaxLifetime != 30*time.Minute {
+		t.Fatalf("sql.ConnMaxLifetime = %v, want 30m", cfg.resourcePoolConfig.SQL.ConnMaxLifetime)
+	}
+	if cfg.resourcePoolConfig.GRPC.KeepaliveTime != 30*time.Second {
+		t.Fatalf("grpc.KeepaliveTime = %v, want 30s", cfg.resourcePoolConfig.GRPC.KeepaliveTime)
+	}
+	if cfg.resourcePoolConfig.GRPC.KeepaliveTimeout != 10*time.Second {
+		t.Fatalf("grpc.KeepaliveTimeout = %v, want 10s", cfg.resourcePoolConfig.GRPC.KeepaliveTimeout)
+	}
+}
+
+func TestLoadRunnerConfigFromYAML_ResourcePoolAbsentLeavesZero(t *testing.T) {
+	data := []byte(`
+runner:
+  id: "r"
+  capabilities:
+    - xflow.function
+server:
+  url: http://localhost:8080
+`)
+	cfg, err := loadRunnerConfigFromBytes(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.resourcePoolConfig.SQL.MaxOpenConns != 0 {
+		t.Fatalf("sql.MaxOpenConns = %d, want 0 (absent resource_pool)", cfg.resourcePoolConfig.SQL.MaxOpenConns)
+	}
+	if cfg.resourcePoolConfig.SQL.ConnMaxLifetime != 0 {
+		t.Fatalf("sql.ConnMaxLifetime = %v, want 0 (absent resource_pool)", cfg.resourcePoolConfig.SQL.ConnMaxLifetime)
+	}
+	if cfg.resourcePoolConfig.GRPC.KeepaliveTime != 0 {
+		t.Fatalf("grpc.KeepaliveTime = %v, want 0 (absent resource_pool)", cfg.resourcePoolConfig.GRPC.KeepaliveTime)
+	}
+}
+
+func TestLoadRunnerConfigFromYAML_ResourcePoolInvalidDurationFails(t *testing.T) {
+	data := []byte(`
+resource_pool:
+  sql:
+    conn_max_lifetime: "not-a-duration"
+`)
+	_, err := loadRunnerConfigFromBytes(data)
+	if err == nil || !strings.Contains(err.Error(), "conn_max_lifetime") {
+		t.Fatalf("error = %v, want containing %q", err, "conn_max_lifetime")
+	}
+}
+
+func TestShouldConstructPool(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  runnerConfig
+		want bool
+	}{
+		{name: "no credentials, no db/grpc cap", cfg: runnerConfig{capabilities: parseCapabilities("xflow.function")}, want: false},
+		{name: "credentials present", cfg: runnerConfig{capabilities: parseCapabilities("xflow.function"), credentials: map[string]map[string]any{"db": {"dsn": "x"}}}, want: true},
+		{name: "xflow.database capability", cfg: runnerConfig{capabilities: parseCapabilities("xflow.function,xflow.database")}, want: true},
+		{name: "xflow.grpc capability", cfg: runnerConfig{capabilities: parseCapabilities("xflow.function,xflow.grpc")}, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldConstructPool(tt.cfg); got != tt.want {
+				t.Fatalf("shouldConstructPool = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRunnerServiceConfig_ConstructsPoolAndResolverWhenConfigured(t *testing.T) {
+	t.Setenv("XFLOW_DB_PASSWORD", "s3cret")
+	cfg := defaultRunnerConfig()
+	cfg.capabilities = parseCapabilities("xflow.database")
+	cfg.credentials = map[string]map[string]any{
+		"db": {"dsn": "user:${XFLOW_DB_PASSWORD}@tcp(db:3306)/xflow", "driver": "mysql"},
+	}
+	// Expand env leaves (loadRunnerConfigFromBytes does this; emulate here so
+	// the unit test exercises the resolver closure directly).
+	if err := expandEnvCredentialValues(cfg.credentials); err != nil {
+		t.Fatal(err)
+	}
+
+	svcCfg, err := runnerServiceConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if svcCfg.ResourcePool == nil {
+		t.Fatal("ResourcePool = nil, want a constructed pool")
+	}
+	if svcCfg.CredentialResolver == nil {
+		t.Fatal("CredentialResolver = nil, want a resolver closure")
+	}
+	got := svcCfg.CredentialResolver("db")
+	if got["dsn"] != "user:s3cret@tcp(db:3306)/xflow" {
+		t.Fatalf("resolver returned dsn = %v, want env-expanded dsn", got["dsn"])
+	}
+	if svcCfg.CredentialResolver("missing") != nil {
+		t.Fatal("resolver returned non-nil for unknown credential name")
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = svcCfg.ResourcePool.Close(ctx)
+	})
+}
+
+func TestRunnerServiceConfig_NoPoolWhenNotConfigured(t *testing.T) {
+	cfg := defaultRunnerConfig()
+	cfg.capabilities = parseCapabilities("xflow.function")
+	svcCfg, err := runnerServiceConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if svcCfg.ResourcePool != nil {
+		t.Fatalf("ResourcePool = %T, want nil (no credentials and no db/grpc capability)", svcCfg.ResourcePool)
+	}
+	if svcCfg.CredentialResolver != nil {
+		t.Fatal("CredentialResolver = non-nil, want nil (no credentials)")
 	}
 }

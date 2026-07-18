@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/xbcio/xflow/types"
 	"gopkg.in/yaml.v3"
 )
 
@@ -30,6 +31,35 @@ type runnerConfigFile struct {
 	Heartbeat struct {
 		Interval *string `yaml:"interval"`
 	} `yaml:"heartbeat"`
+	// Credentials holds named credential maps (driver/dsn, token/base_url, …)
+	// consumed by resource-aware nodes via input.Credential(name). String leaves
+	// are expanded via os.Expand at load time so secrets are sourced from the
+	// environment, not the config file. A referenced-but-unset env var fails
+	// closed (see expandEnvCredentialValues).
+	Credentials map[string]map[string]any `yaml:"credentials"`
+	// ResourcePool, when present, overrides the default pool tunables. Absent
+	// means the runner uses types.DefaultResourcePoolConfig().
+	ResourcePool *resourcePoolFile `yaml:"resource_pool"`
+}
+
+// resourcePoolFile mirrors the resource_pool YAML section. Durations are
+// parsed from their string form so YAML's implicit typing does not coerce
+// them into ints (a bare "30m" is a string; YAML only treats unquoted 30 as
+// an int).
+type resourcePoolFile struct {
+	SQL  *sqlPoolFile  `yaml:"sql"`
+	GRPC *grpcPoolFile `yaml:"grpc"`
+}
+
+type sqlPoolFile struct {
+	MaxOpenConns    *int    `yaml:"max_open_conns"`
+	MaxIdleConns    *int    `yaml:"max_idle_conns"`
+	ConnMaxLifetime *string `yaml:"conn_max_lifetime"`
+}
+
+type grpcPoolFile struct {
+	KeepaliveTime    *string `yaml:"keepalive_time"`
+	KeepaliveTimeout *string `yaml:"keepalive_timeout"`
 }
 
 func defaultRunnerConfig() runnerConfig {
@@ -99,6 +129,30 @@ func loadRunnerConfigFromBytes(data []byte) (runnerConfig, error) {
 	}
 	if file.Heartbeat.Interval != nil {
 		cfg.heartbeatInterval = *file.Heartbeat.Interval
+	}
+
+	if len(file.Credentials) > 0 {
+		// Copy first so we never mutate the yaml-parsed map.
+		creds := make(map[string]map[string]any, len(file.Credentials))
+		for name, m := range file.Credentials {
+			cp := make(map[string]any, len(m))
+			for k, v := range m {
+				cp[k] = v
+			}
+			creds[name] = cp
+		}
+		if err := expandEnvCredentialValues(creds); err != nil {
+			return runnerConfig{}, err
+		}
+		cfg.credentials = creds
+	}
+
+	if file.ResourcePool != nil {
+		rpc, err := parseResourcePoolConfig(file.ResourcePool)
+		if err != nil {
+			return runnerConfig{}, err
+		}
+		cfg.resourcePoolConfig = rpc
 	}
 
 	cfg.capabilities = parseCapabilities(cfg.capRaw)
@@ -398,5 +452,121 @@ poll:
 
 heartbeat:
   interval: "5s"
+
+# Credentials: named maps consumed by resource-aware nodes via
+# input.Credential(name). String leaves are env-expanded at load time
+# (${VAR} and $VAR) so secrets live in the environment, not the file. A
+# referenced-but-unset env var fails closed at config load.
+#
+# credentials:
+#   db:
+#     driver: mysql
+#     dsn: "user:${XFLOW_DB_PASSWORD}@tcp(db:3306)/xflow?parseTime=true"
+#   api:
+#     token: "${XFLOW_API_TOKEN}"
+#     base_url: "https://api.example.com"
+#
+# resource_pool:
+#   sql:
+#     max_open_conns: 25
+#     max_idle_conns: 5
+#     conn_max_lifetime: "30m"
+#   grpc:
+#     keepalive_time: "30s"
+#     keepalive_timeout: "10s"
 `
+}
+
+// expandEnvCredentialValues walks each credential map and applies os.Expand to
+// every string leaf. ${VAR} and $VAR are both supported. A referenced env var
+// that is not set in the environment causes a fail-closed error so a
+// misconfigured secret surfaces at load time rather than producing an empty
+// DSN deep in a node. Non-string leaves (ints, bools, nested maps/slices) are
+// left unchanged — only string leaves can carry ${VAR} placeholders.
+//
+// Security: expanded values are held only in the returned map (in memory,
+// behind the resolver closure); they are never logged or written back to
+// disk. The error message lists only the missing variable NAMES, never
+// credential values.
+func expandEnvCredentialValues(creds map[string]map[string]any) error {
+	var missing []string
+	expandMapping := func(name string) string {
+		v, ok := os.LookupEnv(name)
+		if !ok {
+			missing = append(missing, name)
+			return ""
+		}
+		return v
+	}
+	for _, m := range creds {
+		expandStringLeaves(m, expandMapping)
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("credentials reference unset environment variables: %s", strings.Join(missing, ", "))
+	}
+	return nil
+}
+
+// expandStringLeaves recursively applies os.Expand to string leaves of v in
+// place. Map and slice values are recursed; non-string scalars are left as-is.
+func expandStringLeaves(v any, mapping func(string) string) {
+	switch t := v.(type) {
+	case map[string]any:
+		for k, child := range t {
+			if s, ok := child.(string); ok {
+				t[k] = os.Expand(s, mapping)
+				continue
+			}
+			expandStringLeaves(child, mapping)
+		}
+	case []any:
+		for i, child := range t {
+			if s, ok := child.(string); ok {
+				t[i] = os.Expand(s, mapping)
+				continue
+			}
+			expandStringLeaves(child, mapping)
+		}
+	}
+}
+
+// parseResourcePoolConfig translates the YAML resource_pool section into a
+// types.ResourcePoolConfig. Absent sub-sections leave the corresponding
+// zero-valued config, so resource.NewDefaultResourcePool applies its own
+// normalizeConfig defaults for those tunables (matching
+// types.DefaultResourcePoolConfig).
+func parseResourcePoolConfig(file *resourcePoolFile) (types.ResourcePoolConfig, error) {
+	var cfg types.ResourcePoolConfig
+	if file.SQL != nil {
+		if file.SQL.MaxOpenConns != nil {
+			cfg.SQL.MaxOpenConns = *file.SQL.MaxOpenConns
+		}
+		if file.SQL.MaxIdleConns != nil {
+			cfg.SQL.MaxIdleConns = *file.SQL.MaxIdleConns
+		}
+		if file.SQL.ConnMaxLifetime != nil {
+			d, err := parsePositiveDuration("resource_pool.sql.conn_max_lifetime", *file.SQL.ConnMaxLifetime)
+			if err != nil {
+				return types.ResourcePoolConfig{}, err
+			}
+			cfg.SQL.ConnMaxLifetime = d
+		}
+	}
+	if file.GRPC != nil {
+		if file.GRPC.KeepaliveTime != nil {
+			d, err := parsePositiveDuration("resource_pool.grpc.keepalive_time", *file.GRPC.KeepaliveTime)
+			if err != nil {
+				return types.ResourcePoolConfig{}, err
+			}
+			cfg.GRPC.KeepaliveTime = d
+		}
+		if file.GRPC.KeepaliveTimeout != nil {
+			d, err := parsePositiveDuration("resource_pool.grpc.keepalive_timeout", *file.GRPC.KeepaliveTimeout)
+			if err != nil {
+				return types.ResourcePoolConfig{}, err
+			}
+			cfg.GRPC.KeepaliveTimeout = d
+		}
+	}
+	return cfg, nil
 }

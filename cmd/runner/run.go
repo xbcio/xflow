@@ -21,9 +21,11 @@ import (
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
 	_ "github.com/xbcio/xflow/node"
+	"github.com/xbcio/xflow/node/resource"
 	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/service/protocol"
 	runnersvc "github.com/xbcio/xflow/service/runner"
+	"github.com/xbcio/xflow/types"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -74,6 +76,14 @@ type runnerConfig struct {
 	traceRatio    float64
 	traceBaggage  bool
 	tracer         tracing.Tracer
+	// credentials holds named credential maps (driver/dsn, token/base_url, …)
+	// with string leaves already env-expanded at load time. Passed to the
+	// runner as a CredentialResolver closure. nil/empty means no resolver.
+	credentials map[string]map[string]any
+	// resourcePoolConfig carries the parsed resource_pool tunables. The zero
+	// value signals "use defaults" — the pool is only constructed when
+	// credentials are present or a db/grpc capability is declared.
+	resourcePoolConfig types.ResourcePoolConfig
 }
 
 func newRunCommand(opts commandOptions, cfg *runnerConfig) *cobra.Command {
@@ -174,6 +184,16 @@ func runRunner(ctx context.Context, cfg runnerConfig) error {
 		return err
 	}
 	defer cleanup()
+	// The ResourcePool is process-scoped (caches *sql.DB and *grpc.ClientConn).
+	// Close it on runner shutdown with a bounded context so a hung close cannot
+	// pin the process. Mirrors the parity tests' cleanup pattern. Idempotent.
+	if serviceCfg.ResourcePool != nil {
+		defer func() {
+			closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = serviceCfg.ResourcePool.Close(closeCtx)
+		}()
+	}
 	registry := execution.NewRegistry()
 	runner := newRunnerService(client, registry, serviceCfg)
 	return runner.Run(ctx)
@@ -259,14 +279,52 @@ func runnerServiceConfig(cfg runnerConfig) (runnersvc.Config, error) {
 	if err != nil {
 		return runnersvc.Config{}, err
 	}
-	return runnersvc.Config{
+	poolCfg := cfg.resourcePoolConfig
+	// If the file overrode nothing, fall back to the recommended defaults so
+	// the pool gets sane conn limits. normalizeConfig (inside the pool) also
+	// fills zeros, but using the documented default here keeps the intent
+	// explicit and testable.
+	if poolCfg == (types.ResourcePoolConfig{}) {
+		poolCfg = types.DefaultResourcePoolConfig()
+	}
+	svcCfg := runnersvc.Config{
 		RunnerID:     cfg.runnerID,
 		Concurrency:  cfg.concurrency,
 		Labels:       cloneStringMap(cfg.labels),
 		Capabilities: cfg.capabilities,
 		PollWait:     pollWait,
 		Tracer:       cfg.tracer,
-	}, nil
+	}
+	if shouldConstructPool(cfg) {
+		svcCfg.ResourcePool = resource.NewDefaultResourcePool(poolCfg)
+	}
+	if len(cfg.credentials) > 0 {
+		// Capture credentials in the closure; never log or surface in errors.
+		// The resolver is a pure lookup keyed by name. input.Credential returns
+		// the map verbatim, matching the cred["dsn"]/cred["driver"] access
+		// pattern in node/internal/action/database.go.
+		creds := cfg.credentials
+		svcCfg.CredentialResolver = func(name string) map[string]any {
+			return creds[name]
+		}
+	}
+	return svcCfg, nil
+}
+
+// shouldConstructPool reports whether the production runner should construct a
+// ResourcePool. Per the design: construct when a credentials section is present
+// OR a db/grpc capability is declared. Otherwise leave the pool nil to
+// preserve the no-pool contract (TestRunner_NoPoolLeavesCtxWithoutPool).
+func shouldConstructPool(cfg runnerConfig) bool {
+	if len(cfg.credentials) > 0 {
+		return true
+	}
+	for _, c := range cfg.capabilities {
+		if c.NodeType == "xflow.database" || c.NodeType == "xflow.grpc" {
+			return true
+		}
+	}
+	return false
 }
 func runWithSignals(cfg runnerConfig) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
