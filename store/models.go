@@ -6,7 +6,9 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
-// ExecutionRecord holds the persistent state of a workflow execution.
+// ExecutionRecord holds the persistent state of a workflow execution. It is a
+// domain record: ORM schema concerns (table name, GORM tags) live in
+// store/sqlstore's internal dbExecution type, not here.
 type ExecutionRecord struct {
 	ID           uint64
 	ExecutionID  types.ExecutionID
@@ -22,9 +24,8 @@ type ExecutionRecord struct {
 	UpdatedAt    time.Time
 }
 
-func (ExecutionRecord) TableName() string { return "xflow_executions" }
-
 // NodeRecord holds the persistent state of a single node within an execution.
+// Domain record; ORM schema lives in store/sqlstore.dbNode.
 type NodeRecord struct {
 	ID           uint64
 	ExecutionID  types.ExecutionID
@@ -43,9 +44,8 @@ type NodeRecord struct {
 	UpdatedAt    time.Time
 }
 
-func (NodeRecord) TableName() string { return "xflow_nodes" }
-
 // SignalRecord holds a signal payload delivered to a workflow execution.
+// Domain record; ORM schema lives in store/sqlstore.dbSignal.
 type SignalRecord struct {
 	ID          uint64
 	ExecutionID types.ExecutionID
@@ -55,5 +55,3 @@ type SignalRecord struct {
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 }
-
-func (SignalRecord) TableName() string { return "xflow_signals" }
