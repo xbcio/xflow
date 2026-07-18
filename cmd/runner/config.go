@@ -490,10 +490,14 @@ heartbeat:
 // credential values.
 func expandEnvCredentialValues(creds map[string]map[string]any) error {
 	var missing []string
+	seenMissing := make(map[string]struct{})
 	expandMapping := func(name string) string {
 		v, ok := os.LookupEnv(name)
 		if !ok {
-			missing = append(missing, name)
+			if _, dup := seenMissing[name]; !dup {
+				seenMissing[name] = struct{}{}
+				missing = append(missing, name)
+			}
 			return ""
 		}
 		return v
