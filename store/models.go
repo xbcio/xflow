@@ -55,3 +55,28 @@ type SignalRecord struct {
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 }
+
+// AuditRecord holds one append-only authorization / mutation audit event.
+// It is the durable projection of the in-process authz decision: identity
+// (subject/tenant), operation, resource ids, decision, reason, outcome, and
+// trace correlation. It must NEVER carry secrets (tokens, payloads,
+// credentials). The authoritative operation receipts (Redis) are reconciled
+// against the audit log; the audit log is not itself the source of truth
+// for execution state.
+//
+// Domain record; ORM schema lives in store/sqlstore.dbAuditEvent.
+type AuditRecord struct {
+	ID          uint64
+	RequestID   string
+	Principal   string
+	TenantID    string
+	Operation   string
+	Resource    string
+	WorkflowID  string
+	ExecutionID string
+	Decision    string
+	Reason      string
+	Outcome     string // admitted / denied / reconciled
+	TraceID     string
+	Timestamp   time.Time
+}

@@ -213,6 +213,13 @@ func (cp *ControlPlane) Engine() EngineFacade { return cp.eng }
 // /v1/management/runners/{id} without re-implementing directory access.
 func (cp *ControlPlane) RunnerDirectory() RunnerDirectory { return cp.runners }
 
+// Backend exposes the backend provider for management modules that need a
+// capability of the StateStore beyond the engine facade — e.g. the
+// DeadLetterStore capability for the dead-letter list/replay management API.
+// It is intended for read-only capability checks; the StateStore remains the
+// authoritative execution state.
+func (cp *ControlPlane) Backend() backend.Provider { return cp.backend }
+
 // Start binds the Task Dispatcher onto the backend's queue, begins leader
 // election (if the backend supports it), and starts the LeaseSweeper loop.
 // It does not block.

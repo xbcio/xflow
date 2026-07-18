@@ -87,6 +87,10 @@ func (f *failingStore) ListSignalsByNames(context.Context, types.ExecutionID, []
 	return nil, nil
 }
 
+func (f *failingStore) AppendAudit(context.Context, *store.AuditRecord) error {
+	return nil
+}
+
 func (c *countingStore) CreateExecution(context.Context, *store.ExecutionRecord) error {
 	c.createExecutionCalls++
 	return nil
@@ -142,6 +146,10 @@ func (c *countingStore) CountSignalsByNames(context.Context, types.ExecutionID, 
 
 func (c *countingStore) ListSignalsByNames(context.Context, types.ExecutionID, []string, store.ListOptions) ([]*store.SignalRecord, error) {
 	return nil, nil
+}
+
+func (c *countingStore) AppendAudit(context.Context, *store.AuditRecord) error {
+	return nil
 }
 
 type recordingObserver struct {

@@ -224,7 +224,6 @@ func (s *InMemoryAuditSink) Events() []AuditEvent {
 // ErrAuditUnavailable is returned when the audit sink cannot accept an event.
 // Mutations must fail-closed when the admission audit cannot be persisted.
 var ErrAuditUnavailable = errors.New("apiserver: audit sink unavailable")
-
 // authzContextKey carries the resolved Principal + AuthorizationRequest
 // through the handler chain so handlers don't re-resolve operation/resource.
 type authzContextKey struct{}

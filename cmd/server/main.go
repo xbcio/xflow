@@ -33,6 +33,8 @@ import (
 	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/service/apiserver"
 	"github.com/xbcio/xflow/service/control"
+	"github.com/xbcio/xflow/store"
+	"github.com/xbcio/xflow/store/sqlstore/mysqlstore"
 	"go.uber.org/zap"
 )
 
@@ -78,6 +80,11 @@ type serverConfig struct {
 	traceSampler  string
 	traceRatio    float64
 	traceBaggage  bool
+	// mysqlDSN, when non-empty, opens a MySQL-backed store.Store for durable
+	// execution state AND a durable SQL audit sink (replaces the in-memory
+	// audit projection). Empty keeps the in-memory store + in-memory audit
+	// (dev / single-process preview only).
+	mysqlDSN string
 }
 
 func main() {
@@ -115,6 +122,7 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	fs.StringVar(&cfg.traceSampler, "trace-sampler", "parentbased", "OTel sampler: parentbased|always_on|always_off|traceidratio")
 	fs.Float64Var(&cfg.traceRatio, "trace-ratio", 1.0, "Sampling ratio for --trace-sampler=traceidratio, in [0,1]")
 	fs.BoolVar(&cfg.traceBaggage, "trace-baggage", false, "Propagate W3C baggage in addition to tracecontext (opt-in; bound accepted keys)")
+	fs.StringVar(&cfg.mysqlDSN, "mysql-dsn", "", "MySQL DSN for durable execution state + durable SQL audit sink (parseTime=true required). Empty = in-memory store + in-memory audit (dev only)")
 	if args == nil {
 		args = os.Args[1:]
 	}
@@ -172,16 +180,29 @@ func runServer(cfg serverConfig) error {
 		principalAuth = apiserver.NewBearerPrincipalAuth(cfg.apiAuthToken, "xflow-operator",
 			[]string{"workflow", "execution", "deadletter.list", "deadletter.replay", "management.read", "management.write"})
 	}
-	// G1 audit projection: an in-memory sink records authorization/mutation
-	// events for the process lifetime. A durable SQL sink reconciled against
-	// the authoritative operation receipts is required for production audit
-	// durability (see docs/design/RELEASE-GATES.md §4); the in-memory sink is
-	// the G0/prod-preview projection and is not authoritative. Mutations
-	// fail-closed via the apiserver admission-audit check before execution.
-	audit := apiserver.NewInMemoryAuditSink()
+	// G1 audit projection. When --mysql-dsn is set, a durable SQL sink is the
+	// authoritative audit target (admission audit persisted before mutations,
+	// fail-closed on sink error). Without MySQL, the in-memory sink is the
+	// G0/prod-preview projection and is NOT authoritative — production must
+	// configure --mysql-dsn. See docs/design/RELEASE-GATES.md §4.
+	var sqlStore store.Store
+	var audit apiserver.AuditSink
+	if cfg.mysqlDSN != "" {
+		p, err := mysqlstore.New(cfg.mysqlDSN)
+		if err != nil {
+			return fmt.Errorf("open mysql store: %w", err)
+		}
+		sqlStore = p
+		audit = apiserver.NewSQLAuditSink(p)
+		log.Println("xflow-server: durable SQL store + audit sink enabled (MySQL)")
+	} else {
+		audit = apiserver.NewInMemoryAuditSink()
+		log.Println("xflow-server: WARNING --mysql-dsn not set; using in-memory store + in-memory audit (dev only; not production)")
+	}
 
 	apiCfg := apiserver.Config{
 		RedisAddr:           cfg.redis, // empty => in-memory backend
+		Store:               sqlStore,
 		Concurrency:         cfg.concurrency,
 		Auth:                auth,
 		Logger:              logger,

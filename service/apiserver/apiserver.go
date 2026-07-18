@@ -153,7 +153,13 @@ func New(cfg Config, opts ...Option) (*APIServer, error) {
 	// guaranteed non-nil, so the module never sees a nil ControlPlane even
 	// when WithManagement is ordered before an injected/built ControlPlane.
 	if s.enableManagement {
-		s.modules = append(s.modules, newManagementModule(s.cp))
+		mgmt := newManagementModule(s.cp)
+		if cfg.PrincipalAuth != nil {
+			mgmt.principalAuth = cfg.PrincipalAuth
+			mgmt.authorizer = cfg.Authorizer
+			mgmt.audit = cfg.AuditSink
+		}
+		s.modules = append(s.modules, mgmt)
 	}
 	return s, nil
 }

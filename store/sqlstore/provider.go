@@ -17,6 +17,7 @@ type Provider struct {
 	*executionRepo
 	*nodeRepo
 	*signalRepo
+	*auditRepo
 }
 
 // compile-time interface checks
@@ -34,6 +35,7 @@ func New(db *gorm.DB) *Provider {
 		executionRepo: &executionRepo{db: db},
 		nodeRepo:      &nodeRepo{db: db},
 		signalRepo:    &signalRepo{db: db},
+		auditRepo:     &auditRepo{db: db},
 	}
 }
 
@@ -51,6 +53,7 @@ func storesFor(db *gorm.DB) store.Set {
 		Execution: &executionRepo{db: db},
 		Node:      &nodeRepo{db: db},
 		Signal:    &signalRepo{db: db},
+		Audit:     &auditRepo{db: db},
 	}
 }
 
@@ -61,5 +64,6 @@ func AutoMigrate(db *gorm.DB) error {
 		&dbExecution{},
 		&dbNode{},
 		&dbSignal{},
+		&dbAuditEvent{},
 	)
 }

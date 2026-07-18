@@ -62,3 +62,28 @@ CREATE TABLE IF NOT EXISTS xflow_signals (
     INDEX idx_created_at (created_at),
     INDEX idx_updated_at (updated_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 授权 / 变更审计事件（append-only，不可变）
+-- B3 durable audit sink 的权威 reconcile 目标。仅记录身份、操作、资源 ID、
+-- 决策、原因、outcome、trace 关联；绝不含 token/payload/凭证等敏感字段。
+CREATE TABLE IF NOT EXISTS xflow_audit_events (
+    id           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    request_id   VARCHAR(128) NOT NULL DEFAULT ''  COMMENT '请求关联 ID（不可信为身份）',
+    principal    VARCHAR(255) NOT NULL DEFAULT ''  COMMENT '服务端注入的主体',
+    tenant_id    VARCHAR(128) NOT NULL DEFAULT ''  COMMENT '租户',
+    operation    VARCHAR(64)  NOT NULL DEFAULT ''  COMMENT '操作词汇 (workflow.create 等)',
+    resource     VARCHAR(255) NOT NULL DEFAULT ''  COMMENT '资源描述',
+    workflow_id  VARCHAR(255) NOT NULL DEFAULT ''  COMMENT '工作流 ID',
+    execution_id VARCHAR(64)  NOT NULL DEFAULT ''  COMMENT '执行 ID',
+    decision     VARCHAR(16)  NOT NULL DEFAULT ''  COMMENT 'allow/deny',
+    reason       VARCHAR(128) NOT NULL DEFAULT ''  COMMENT '拒绝原因码（非自由文本）',
+    outcome      VARCHAR(32)  NOT NULL DEFAULT ''  COMMENT 'admitted/denied/reconciled',
+    trace_id     VARCHAR(64)  NOT NULL DEFAULT ''  COMMENT 'OTel trace 关联',
+    ts           DATETIME(3)  NOT NULL              COMMENT '事件时间戳',
+    created_at   DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    INDEX idx_principal (principal),
+    INDEX idx_operation (operation),
+    INDEX idx_execution_id (execution_id),
+    INDEX idx_outcome (outcome),
+    INDEX idx_ts (ts)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

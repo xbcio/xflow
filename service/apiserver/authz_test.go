@@ -59,10 +59,18 @@ func TestAuthzAllowsPrincipalWithRequiredScope(t *testing.T) {
 	if rec.Code == http.StatusUnauthorized || rec.Code == http.StatusForbidden {
 		t.Fatalf("status = %d, want request to reach handler (authz should allow)", rec.Code)
 	}
-	// An admission audit event was recorded for the mutation.
+	// A mutation records an admission audit event (admitted) plus a reconcile
+	// outcome (failed, because the handler returned 400 for the missing
+	// workflow body). The admission row carries the server-injected principal.
 	events := audit.Events()
-	if len(events) != 1 || events[0].Decision != DecisionAllow || events[0].Outcome != "admitted" {
-		t.Fatalf("audit = %+v, want one allow/admitted admission", events)
+	if len(events) != 2 {
+		t.Fatalf("audit = %+v, want 2 events (admission + reconcile)", events)
+	}
+	if events[0].Decision != DecisionAllow || events[0].Outcome != "admitted" {
+		t.Fatalf("admission = %+v, want allow/admitted", events[0])
+	}
+	if events[1].Outcome != "failed" {
+		t.Fatalf("reconcile outcome = %q, want failed (handler returned 400)", events[1].Outcome)
 	}
 	if events[0].Principal != "alice" {
 		t.Fatalf("audit principal = %q, want alice (server-injected)", events[0].Principal)
@@ -197,4 +205,71 @@ func TestNewFailsClosedWhenPrincipalAuthMissingAuthorizerOrAudit(t *testing.T) {
 		t.Fatalf("New() with all three: %v", err)
 	}
 	_ = srv
+}
+
+// TestAuthzMutationAppendsReconcileOutcome proves the authz wrapper appends a
+// second audit row after a mutation handler settles: reconciled on 2xx,
+// failed on non-2xx. The admission row (admitted) and the reconcile row share
+// the RequestID so audit reconciliation can join them.
+func TestAuthzMutationAppendsReconcileOutcome(t *testing.T) {
+	auth := staticPrincipalAuth{principal: Principal{Subject: "alice", Scopes: []string{"workflow"}}}
+
+	t.Run("reconciled on 2xx", func(t *testing.T) {
+		audit := NewInMemoryAuditSink()
+		m := authzModule(t, auth, ScopeAuthorizer{}, audit)
+		// Mount a mutation handler that succeeds (writes 200).
+		mux := http.NewServeMux()
+		mux.HandleFunc("/v1/workflows", func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+		})
+		// Re-register through the authz wrapper by reaching into the module's
+		// helper: the production path is registerAuthzRoutes; here we exercise
+		// the same authz closure directly via a minimal mux mount.
+		wrapped := m.wrapForTest(OpWorkflowCreate, true, func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+		}, nil)
+		mux2 := http.NewServeMux()
+		mux2.HandleFunc("/v1/workflows", wrapped)
+
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/v1/workflows", nil)
+		mux2.ServeHTTP(rec, req)
+
+		events := audit.Events()
+		// admission (admitted) + reconcile (reconciled)
+		if len(events) != 2 {
+			t.Fatalf("audit events = %d, want 2 (admission + reconcile)", len(events))
+		}
+		if events[0].Outcome != "admitted" {
+			t.Fatalf("first event outcome = %q, want admitted", events[0].Outcome)
+		}
+		if events[1].Outcome != "reconciled" {
+			t.Fatalf("second event outcome = %q, want reconciled", events[1].Outcome)
+		}
+		if events[0].RequestID != events[1].RequestID {
+			t.Fatalf("admission and reconcile RequestIDs differ: %q vs %q", events[0].RequestID, events[1].RequestID)
+		}
+	})
+
+	t.Run("failed on 5xx", func(t *testing.T) {
+		audit := NewInMemoryAuditSink()
+		m := authzModule(t, auth, ScopeAuthorizer{}, audit)
+		wrapped := m.wrapForTest(OpWorkflowCreate, true, func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "boom"})
+		}, nil)
+		mux := http.NewServeMux()
+		mux.HandleFunc("/v1/workflows", wrapped)
+
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/v1/workflows", nil)
+		mux.ServeHTTP(rec, req)
+
+		events := audit.Events()
+		if len(events) != 2 {
+			t.Fatalf("audit events = %d, want 2 (admission + reconcile)", len(events))
+		}
+		if events[1].Outcome != "failed" {
+			t.Fatalf("second event outcome = %q, want failed", events[1].Outcome)
+		}
+	})
 }

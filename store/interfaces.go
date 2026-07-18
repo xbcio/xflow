@@ -35,13 +35,26 @@ type Signals interface {
 	ListSignalsByNames(ctx context.Context, id types.ExecutionID, names []string, opts ListOptions) ([]*SignalRecord, error)
 }
 
+// AuditAppender appends one durable audit record. Audit records are
+// append-only: there is no update or delete path. A failing Append must
+// surface an error so callers can fail-closed (mutations are admitted only
+// once the admission audit is durably persisted).
+//
+// Audit records must never carry secrets (tokens, payloads, credentials);
+// see docs/design/RELEASE-GATES.md §4. The fields here are identity,
+// operation, resource ids, decision, reason, and trace correlation only.
+type AuditAppender interface {
+	AppendAudit(ctx context.Context, rec *AuditRecord) error
+}
+
 // Store is the full persistence surface, composing the per-domain interfaces.
 // Consumers that only need one domain should depend on the narrower interface
-// (Executions, Nodes, or Signals) instead.
+// (Executions, Nodes, Signals, or Audit) instead.
 type Store interface {
 	Executions
 	Nodes
 	Signals
+	AuditAppender
 }
 
 // Set bundles the per-domain stores bound to a single backend or transaction.
@@ -50,6 +63,7 @@ type Set struct {
 	Execution Executions
 	Node      Nodes
 	Signal    Signals
+	Audit     AuditAppender
 }
 
 // Transactor runs fn within a single transaction. Every store in the supplied

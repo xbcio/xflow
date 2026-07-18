@@ -1,23 +1,29 @@
 package apiserver
 
 import (
+	"errors"
+	"fmt"
 	"net/http"
+	"os"
 	"strings"
 
+	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/types"
 )
 
-// managementModule mounts the ops read-only management HTTP API: leader
-// status, single-runner lookup, single-execution inspect, and the process
-// liveness/readiness probes. It is opt-in (registered only via WithManagement)
-// because it exposes runner directory and execution state that should sit
-// behind an authz middleware.
+// managementModule mounts the ops management HTTP API: leader status,
+// single-runner lookup, single-execution inspect, dead-letter list/replay,
+// and the process liveness/readiness probes. It is opt-in (registered only
+// via WithManagement) because it exposes runner directory, execution state,
+// and dead-letter operations that must sit behind authz.
 //
 // Per R1, the underlying runner directory and store interfaces expose no list
-// API, so this module intentionally provides no listing endpoints — only
-// single-resource lookups, leader status, and health probes.
+// API, so this module intentionally provides no listing endpoints for
+// runners/executions — only single-resource lookups, leader status, dead-letter
+// operations, and health probes.
 type managementModule struct {
+	authzHolder
 	cp  *control.ControlPlane
 	eng control.EngineFacade
 }
@@ -31,7 +37,8 @@ func (m *managementModule) Name() string { return "management" }
 func (m *managementModule) RegisterHTTP(mux *http.ServeMux) {
 	mux.HandleFunc("/v1/management/leader", m.handleLeader)
 	mux.HandleFunc("/v1/management/runners/", m.handleRunner)       // /v1/management/runners/{id}
-	mux.HandleFunc("/v1/management/executions/", m.handleExecution) // /v1/management/executions/{id}
+	mux.HandleFunc("/v1/management/executions/", m.handleExecution)  // /v1/management/executions/{id}
+	mux.HandleFunc("/v1/management/dead-letters/", m.handleDeadLetters)
 	mux.HandleFunc("/healthz", m.handleHealthz)
 	mux.HandleFunc("/readyz", m.handleReadyz)
 }
@@ -117,4 +124,180 @@ func (m *managementModule) handleReadyz(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusOK, readyResponse{Ready: true, Leader: m.cp.IsLeader()})
+}
+
+// deadLetterListResponse is the JSON shape for a dead-letter list page.
+type deadLetterListResponse struct {
+	Entries    []engine.OutboxEntry `json:"entries"`
+	NextCursor string               `json:"next_cursor,omitempty"`
+}
+
+// deadLetterReplayRequest is the request body for replay.
+type deadLetterReplayRequest struct {
+	EntryID  string `json:"entry_id"`
+	RequestID string `json:"request_id"`
+	Reason   string `json:"reason"`
+}
+
+// deadLetterReplayResponse is the JSON shape for a replay result.
+type deadLetterReplayResponse struct {
+	Outcome      string `json:"outcome"`
+	AuditID      string `json:"audit_id,omitempty"`
+	ExecutionID  string `json:"execution_id,omitempty"`
+	NodeID       string `json:"node_id,omitempty"`
+	ActivationID string `json:"activation_id,omitempty"`
+}
+
+// handleDeadLetters routes dead-letter requests through the B3 authz wrapper.
+//   - GET  /v1/management/dead-letters/{execID}              → list (cursor page)
+//   - POST /v1/management/dead-letters/{execID}/replay       → replay
+//
+// When no PrincipalAuthenticator is configured the routes return 404 so a
+// dev/preview server without authz never exposes the privileged replay path.
+func (m *managementModule) handleDeadLetters(w http.ResponseWriter, r *http.Request) {
+	if m.principalAuth == nil {
+		writeError(w, http.StatusNotFound, "route not found")
+		return
+	}
+	rest := strings.TrimPrefix(r.URL.Path, "/v1/management/dead-letters/")
+	rest = strings.Trim(rest, "/")
+	if rest == "" {
+		writeError(w, http.StatusNotFound, "execution id required")
+		return
+	}
+	parts := strings.Split(rest, "/")
+	execID := parts[0]
+	resource := "dead-letters/" + execID
+
+	switch {
+	case len(parts) == 1 && r.Method == http.MethodGet:
+		m.authzWrap(OpDeadLetterList, false, m.handleDeadLetterList, func(*http.Request) (string, string, string) {
+			return resource, "", execID
+		})(w, r)
+	case len(parts) == 2 && parts[1] == "replay" && r.Method == http.MethodPost:
+		m.authzWrap(OpDeadLetterReplay, true, m.handleDeadLetterReplay, func(*http.Request) (string, string, string) {
+			return resource, "", execID
+		})(w, r)
+	default:
+		writeError(w, http.StatusNotFound, "route not found")
+	}
+}
+
+func (m *managementModule) handleDeadLetterList(w http.ResponseWriter, r *http.Request) {
+	execID := m.deadLetterExecID(r)
+	mgr, err := m.deadLetterManager()
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "dead-letter backend unavailable")
+		return
+	}
+	q := r.URL.Query()
+	limit := 0
+	if v := q.Get("limit"); v != "" {
+		// Best-effort parse; an invalid limit falls back to the store default.
+		var n int
+		_, _ = fmt.Sscanf(v, "%d", &n)
+		if n > 0 {
+			limit = n
+		}
+	}
+	list, err := mgr.List(r.Context(), types.ExecutionID(execID), engine.DeadLetterPage{
+		Cursor: q.Get("cursor"),
+		Limit:  limit,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	writeJSON(w, http.StatusOK, deadLetterListResponse{
+		Entries:    list.Entries,
+		NextCursor: list.NextCursor,
+	})
+}
+
+func (m *managementModule) handleDeadLetterReplay(w http.ResponseWriter, r *http.Request) {
+	execID := m.deadLetterExecID(r)
+	mgr, err := m.deadLetterManager()
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "dead-letter backend unavailable")
+		return
+	}
+	var req deadLetterReplayRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.EntryID == "" || req.Reason == "" {
+		writeError(w, http.StatusBadRequest, "entry_id and reason are required")
+		return
+	}
+	// Principal is server-injected by the authz wrapper; the operator is taken
+	// from it, never self-reported. The manager re-checks the scope.
+	p, ok := principalFromRequest(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	res, derr := mgr.Replay(r.Context(), control.DeadLetterReplayPrincipal{
+		Subject:  p.Subject,
+		TenantID: p.TenantID,
+		Scopes:   p.Scopes,
+	}, engine.ReplayDeadLetterRequest{
+		ExecutionID: types.ExecutionID(execID),
+		EntryID:     req.EntryID,
+		RequestID:   req.RequestID,
+		Reason:      req.Reason,
+	})
+	if derr != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	status := http.StatusOK
+	if res.Outcome == engine.ReplayInvalidRequest {
+		status = http.StatusBadRequest
+	} else if res.Outcome == engine.ReplayUnauthorized {
+		status = http.StatusForbidden
+	} else if res.Outcome == engine.ReplayNotFound {
+		status = http.StatusNotFound
+	}
+	writeJSON(w, status, deadLetterReplayResponse{
+		Outcome:      string(res.Outcome),
+		AuditID:      res.AuditID,
+		ExecutionID:  string(res.ExecutionID),
+		NodeID:       res.NodeID,
+		ActivationID: res.ActivationID,
+	})
+}
+
+// deadLetterExecID extracts the execution id the authz wrapper resolved for
+// this request (stored on the resource string). Falls back to parsing the
+// path again if the context value is absent.
+func (m *managementModule) deadLetterExecID(r *http.Request) string {
+	rest := strings.TrimPrefix(r.URL.Path, "/v1/management/dead-letters/")
+	parts := strings.Split(strings.Trim(rest, "/"), "/")
+	if len(parts) == 0 {
+		return ""
+	}
+	return parts[0]
+}
+
+// deadLetterManager lazily builds a DeadLetterManager from the control plane's
+// backend state when it implements engine.DeadLetterStore. Returns an error
+// when the configured backend cannot serve dead-letter operations (e.g. the
+// in-memory backend used in dev); the HTTP route surfaces 503 in that case.
+func (m *managementModule) deadLetterManager() (*control.DeadLetterManager, error) {
+	if m.cp.Backend() == nil {
+		return nil, errors.New("management: no backend")
+	}
+	state := m.cp.Backend().State()
+	store, ok := state.(engine.DeadLetterStore)
+	if !ok {
+		return nil, errors.New("management: backend state does not implement DeadLetterStore")
+	}
+	audit := control.NewStdoutDeadLetterAuditSink(func(line string) {
+		// G1 projection: replay receipts are emitted to stderr. The
+		// authoritative receipt is the Redis record written atomically by the
+		// DeadLetterStore. A durable SQL projection of replay receipts is a
+		// future reconcile target; until then stderr is the audit trail.
+		fmt.Fprintln(os.Stderr, line)
+	})
+	return control.NewDeadLetterManager(store, nil, audit), nil
 }

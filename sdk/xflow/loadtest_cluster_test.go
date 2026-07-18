@@ -340,3 +340,7 @@ func (s *latencyStore) CountSignalsByNames(context.Context, types.ExecutionID, [
 func (s *latencyStore) ListSignalsByNames(context.Context, types.ExecutionID, []string, store.ListOptions) ([]*store.SignalRecord, error) {
 	return nil, nil
 }
+
+func (s *latencyStore) AppendAudit(context.Context, *store.AuditRecord) error {
+	return nil
+}

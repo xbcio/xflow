@@ -16,6 +16,7 @@ type Store struct {
 	executions map[types.ExecutionID]*store.ExecutionRecord
 	nodes      map[string]*store.NodeRecord // key: "execID/nodeName"
 	signals    map[string]*signalEntry      // key: "execID/signalName"
+	audit      []*store.AuditRecord
 	nextID     uint64
 }
 
@@ -48,15 +49,17 @@ func (s *Store) Transaction(_ context.Context, fn func(st store.Set) error) erro
 	snapExec := cloneExecutions(s.executions)
 	snapNodes := cloneNodes(s.nodes)
 	snapSignals := cloneSignals(s.signals)
+	snapAudit := cloneAudit(s.audit)
 	snapID := s.nextID
 	s.mu.Unlock()
 
-	bundle := store.Set{Execution: s, Node: s, Signal: s}
+	bundle := store.Set{Execution: s, Node: s, Signal: s, Audit: s}
 	if err := fn(bundle); err != nil {
 		s.mu.Lock()
 		s.executions = snapExec
 		s.nodes = snapNodes
 		s.signals = snapSignals
+		s.audit = snapAudit
 		s.nextID = snapID
 		s.mu.Unlock()
 		return err
@@ -87,6 +90,18 @@ func cloneSignals(m map[string]*signalEntry) map[string]*signalEntry {
 	for k, v := range m {
 		recCp := *v.record
 		out[k] = &signalEntry{record: &recCp, status: v.status}
+	}
+	return out
+}
+
+func cloneAudit(in []*store.AuditRecord) []*store.AuditRecord {
+	if in == nil {
+		return nil
+	}
+	out := make([]*store.AuditRecord, len(in))
+	for i, v := range in {
+		cp := *v
+		out[i] = &cp
 	}
 	return out
 }
@@ -315,6 +330,36 @@ func (s *Store) ListSignalsByNames(_ context.Context, id types.ExecutionID, name
 		}
 	}
 	return paginate(all, opts), nil
+}
+
+// ---------------------------------------------------------------------------
+// Audit
+// ---------------------------------------------------------------------------
+
+// AppendAudit records one append-only audit event. The in-memory store is a
+// test-grade projection; production uses the SQL sink.
+func (s *Store) AppendAudit(_ context.Context, rec *store.AuditRecord) error {
+	if rec == nil {
+		return store.ErrNotFound
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec.ID = s.nextAutoID()
+	cp := *rec
+	s.audit = append(s.audit, &cp)
+	return nil
+}
+
+// AuditRecords returns a copy of the recorded audit events (test helper).
+func (s *Store) AuditRecords() []*store.AuditRecord {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]*store.AuditRecord, len(s.audit))
+	for i, v := range s.audit {
+		cp := *v
+		out[i] = &cp
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------
