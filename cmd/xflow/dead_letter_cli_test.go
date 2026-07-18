@@ -38,6 +38,7 @@ func seedDeadLetterRedis(t *testing.T, addr, execID, entryID string) {
 	statusKey := "xflow:exec:{" + execID + "}:status"
 	deadKey := "xflow:exec:{" + execID + "}:outbox:dead"
 	deadBodyKey := "xflow:exec:{" + execID + "}:outbox:dead:body"
+	deadMetaKey := "xflow:exec:{" + execID + "}:outbox:dead:meta:" + entryID
 	if err := rdb.Set(ctx, statusKey, "running", time.Minute).Err(); err != nil {
 		t.Fatalf("set status: %v", err)
 	}
@@ -50,6 +51,9 @@ func seedDeadLetterRedis(t *testing.T, addr, execID, entryID string) {
 	}
 	if err := rdb.ZAdd(ctx, deadKey, redis.Z{Score: float64(time.Now().UnixMilli()), Member: entryID}).Err(); err != nil {
 		t.Fatalf("zadd dead: %v", err)
+	}
+	if err := rdb.HSet(ctx, deadMetaKey, "node", "review", "activation", "1").Err(); err != nil {
+		t.Fatalf("hset dead meta: %v", err)
 	}
 }
 
@@ -90,32 +94,36 @@ func TestDeadLetterCLIListAndReplay(t *testing.T) {
 	// replay
 	var replayOut bytes.Buffer
 	if err := executeRootWith(&replayOut, "dead-letter", "--redis-addr", mr.Addr(), "replay",
-		"--execution", execID, "--entry", entryID, "--reason", "operator triage", "--operator", "alice"); err != nil {
+		"--execution", execID, "--entry", entryID, "--reason", "operator triage", "--request-id", "req-1"); err != nil {
 		t.Fatalf("dead-letter replay: %v", err)
 	}
-	var audit map[string]any
-	if err := json.Unmarshal(replayOut.Bytes(), &audit); err != nil {
-		t.Fatalf("unmarshal audit: %v", err)
+	var res map[string]any
+	if err := json.Unmarshal(replayOut.Bytes(), &res); err != nil {
+		t.Fatalf("unmarshal replay result: %v (out=%q)", err, replayOut.String())
 	}
-	if audit["outcome"] != "replayed" {
-		t.Fatalf("audit outcome = %v, want replayed", audit["outcome"])
+	if res["outcome"] != "replayed" {
+		t.Fatalf("replay outcome = %v, want replayed", res["outcome"])
 	}
-	if audit["operator"] != "alice" || audit["reason"] != "operator triage" || audit["entry"] != entryID {
-		t.Fatalf("audit missing fields: %+v", audit)
+	if res["audit_id"] == "" || res["execution"] != execID || res["node"] != "review" {
+		t.Fatalf("replay result missing fields: %+v", res)
 	}
 
-	// second replay is an idempotent no-op (not_found)
+	// second replay with the same --request-id returns already_replayed with the
+	// original audit_id (response-loss recovery), not a fresh replay.
 	var replayOut2 bytes.Buffer
 	if err := executeRootWith(&replayOut2, "dead-letter", "--redis-addr", mr.Addr(), "replay",
-		"--execution", execID, "--entry", entryID, "--reason", "duplicate", "--operator", "bob"); err != nil {
+		"--execution", execID, "--entry", entryID, "--reason", "retry after lost response", "--request-id", "req-1"); err != nil {
 		t.Fatalf("second dead-letter replay: %v", err)
 	}
-	var audit2 map[string]any
-	if err := json.Unmarshal(replayOut2.Bytes(), &audit2); err != nil {
-		t.Fatalf("unmarshal audit2: %v", err)
+	var res2 map[string]any
+	if err := json.Unmarshal(replayOut2.Bytes(), &res2); err != nil {
+		t.Fatalf("unmarshal replay2 result: %v (out=%q)", err, replayOut2.String())
 	}
-	if audit2["outcome"] != "not_found" {
-		t.Fatalf("second replay outcome = %v, want not_found", audit2["outcome"])
+	if res2["outcome"] != "already_replayed" {
+		t.Fatalf("second replay outcome = %v, want already_replayed", res2["outcome"])
+	}
+	if res2["audit_id"] != res["audit_id"] {
+		t.Fatalf("second replay audit_id = %v, want original %v", res2["audit_id"], res["audit_id"])
 	}
 }
 

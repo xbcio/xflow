@@ -426,22 +426,22 @@ func newOutboxObserverState() *outboxObserverState {
 	return &outboxObserverState{fakeState: newFakeState()}
 }
 
-func (s *outboxObserverState) RecordOutboxFailure(_ context.Context, id types.ExecutionID, entryID string, maxAttempts int) (OutboxDeliveryFailure, error) {
+func (s *outboxObserverState) RecordOutboxFailure(_ context.Context, id types.ExecutionID, entry OutboxEntry, maxAttempts int) (OutboxDeliveryFailure, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	entries := s.atomicOutbox[id]
-	entry, ok := entries[entryID]
+	stored, ok := entries[entry.ID]
 	if !ok {
 		return OutboxDeliveryFailure{}, nil
 	}
 	if maxAttempts <= 0 {
 		maxAttempts = DefaultOutboxMaxDeliveryAttempts
 	}
-	entry.Attempts++
-	result := OutboxDeliveryFailure{Attempts: entry.Attempts}
-	if entry.Attempts >= maxAttempts {
-		delete(entries, entryID)
+	stored.Attempts++
+	result := OutboxDeliveryFailure{Attempts: stored.Attempts}
+	if stored.Attempts >= maxAttempts {
+		delete(entries, entry.ID)
 		if len(entries) == 0 {
 			delete(s.atomicOutbox, id)
 		}
@@ -449,7 +449,7 @@ func (s *outboxObserverState) RecordOutboxFailure(_ context.Context, id types.Ex
 		result.DeadLettered = true
 		return result, nil
 	}
-	entries[entryID] = entry
+	entries[entry.ID] = stored
 	return result, nil
 }
 

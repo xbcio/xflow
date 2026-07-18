@@ -20,14 +20,14 @@ func TestMemoryOutboxFailureTracksAttemptsAndDeadLetters(t *testing.T) {
 		t.Fatalf("CreateExecutionWithOutbox() error = %v", err)
 	}
 
-	first, err := state.RecordOutboxFailure(ctx, id, entry.ID, 2)
+	first, err := state.RecordOutboxFailure(ctx, id, entry, 2)
 	if err != nil {
 		t.Fatalf("first RecordOutboxFailure() error = %v", err)
 	}
 	if first.Attempts != 1 || first.DeadLettered {
 		t.Fatalf("first RecordOutboxFailure() = %+v, want retained first attempt", first)
 	}
-	second, err := state.RecordOutboxFailure(ctx, id, entry.ID, 2)
+	second, err := state.RecordOutboxFailure(ctx, id, entry, 2)
 	if err != nil {
 		t.Fatalf("second RecordOutboxFailure() error = %v", err)
 	}

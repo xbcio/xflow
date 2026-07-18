@@ -44,9 +44,11 @@ type OutboxMetricsSnapshot struct {
 
 // OutboxFailureRecorder is an optional StateStore capability that durably
 // records a failed outbox handoff. Backends that implement it must move entries
-// that reach maxAttempts to independent dead-letter storage.
+// that reach maxAttempts to independent dead-letter storage, writing immutable
+// node/activation metadata so later replay can guard against stale activations
+// without parsing the entry body.
 type OutboxFailureRecorder interface {
-	RecordOutboxFailure(ctx context.Context, id types.ExecutionID, entryID string, maxAttempts int) (OutboxDeliveryFailure, error)
+	RecordOutboxFailure(ctx context.Context, id types.ExecutionID, entry OutboxEntry, maxAttempts int) (OutboxDeliveryFailure, error)
 }
 
 // OutboxMetricsReader is an optional StateStore capability that reports the
@@ -146,7 +148,7 @@ func (e *Engine) recordOutboxDeliveryFailure(ctx context.Context, state AtomicSt
 	if !ok {
 		return
 	}
-	result, err := recorder.RecordOutboxFailure(ctx, id, entry.ID, e.outboxMaxDeliveryAttempt)
+	result, err := recorder.RecordOutboxFailure(ctx, id, entry, e.outboxMaxDeliveryAttempt)
 	if err != nil {
 		e.notifyOutboxError(ctx, "record_failure", err)
 		return

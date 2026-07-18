@@ -26,6 +26,11 @@ type memoryState struct {
 	scheduled  map[string]string
 	outbox     map[types.ExecutionID]map[string]memoryOutboxEntry
 	deadOutbox map[types.ExecutionID]map[string]memoryOutboxEntry
+	// replayReceipts is the authoritative in-memory receipt keyed by
+	// execution→requestID; replayEntryIdx maps execution→entryID→requestID so a
+	// retried replay with a different RequestID returns already_replayed.
+	replayReceipts map[types.ExecutionID]map[string]*memoryReplayReceipt
+	replayEntryIdx map[types.ExecutionID]map[string]string
 	outputs    map[string]map[string]any     // key: execID+"/"+name
 	suspended  map[string]*types.SuspendSpec // key: execID+"/"+nodeName
 	signals    map[string]map[string]any     // pre-delivered: key: execID+"/"+signalName
@@ -53,8 +58,10 @@ func newMemoryState() *memoryState {
 		failed:        make(map[types.ExecutionID]int),
 		advanced:      make(map[string]bool),
 		scheduled:     make(map[string]string),
-		outbox:        make(map[types.ExecutionID]map[string]memoryOutboxEntry),
-		deadOutbox:    make(map[types.ExecutionID]map[string]memoryOutboxEntry),
+		outbox:           make(map[types.ExecutionID]map[string]memoryOutboxEntry),
+		deadOutbox:       make(map[types.ExecutionID]map[string]memoryOutboxEntry),
+		replayReceipts:   make(map[types.ExecutionID]map[string]*memoryReplayReceipt),
+		replayEntryIdx:   make(map[types.ExecutionID]map[string]string),
 		outputs:       make(map[string]map[string]any),
 		suspended:     make(map[string]*types.SuspendSpec),
 		signals:       make(map[string]map[string]any),

@@ -13,6 +13,7 @@ import (
 
 	"github.com/xbcio/xflow/backend/distributed"
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -31,12 +32,16 @@ func newDeadLetterCommand(out io.Writer) *cobra.Command {
 delivery attempt limit and were moved to dead-letter storage.
 
 Replay moves an entry atomically back to the ready set; the control plane's
-running OutboxDispatcher redelivers it. Concurrent replays of the same entry
-are idempotent. Replays of terminal or expired executions are rejected.
+running OutboxDispatcher redelivers it. Replay is activation-safe: it rejects
+entries whose node is terminal or whose activation no longer matches the
+node's current activation, so a stale cyclic re-entry cannot be resurrected.
+Replay is idempotent under --request-id: retrying with the same request-id
+after a lost response returns already_replayed with the original audit_id.
 
-All commands connect directly to the Redis-backed StateStore through the
-DeadLetterStore capability — they never construct Redis keys directly, so the
-atomicity and state-guard contract stays inside the backend.`,
+Operator identity is derived from the authenticated principal — the CLI
+injects "cli:<user>" for the G0 maintenance path; --operator is not accepted.
+The authoritative receipt is written to Redis; the stdout audit line is a
+secondary projection only.`,
 	}
 	cmd.PersistentFlags().StringVar(&opts.redisAddr, "redis-addr", envOr("XFLOW_REDIS_ADDR", "localhost:6379"),
 		"Redis address backing the distributed StateStore (env: XFLOW_REDIS_ADDR)")
@@ -56,47 +61,60 @@ func envOr(key, fallback string) string {
 func newDeadLetterListCommand(opts *deadLetterOptions) *cobra.Command {
 	var executionID string
 	var limit int
+	var cursor string
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List dead-lettered outbox entries for an execution (read-only)",
+		Short: "List dead-lettered outbox entries for an execution (read-only, paginated)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if executionID == "" {
 				return fmt.Errorf("--execution is required")
 			}
-			store, closeFn, err := openDeadLetterStore(opts.redisAddr)
+			mgr, closeFn, err := openDeadLetterManager(opts.redisAddr, opts.out)
 			if err != nil {
 				return err
 			}
 			defer closeFn()
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			entries, err := store.ListDeadLetters(ctx, types.ExecutionID(executionID), limit)
+			page := engine.DeadLetterPage{Limit: limit, Cursor: cursor}
+			list, err := mgr.List(ctx, types.ExecutionID(executionID), page)
 			if err != nil {
 				return err
 			}
-			for _, entry := range entries {
+			for _, entry := range list.Entries {
 				if err := writeJSONLines(opts.out, entry); err != nil {
 					return err
 				}
+			}
+			if list.NextCursor != "" {
+				fmt.Fprintf(opts.out, `{"next_cursor":%q}`+"\n", list.NextCursor)
 			}
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&executionID, "execution", "", "Execution ID (required)")
-	cmd.Flags().IntVar(&limit, "limit", 100, "Maximum entries to return")
+	cmd.Flags().IntVar(&limit, "limit", 100, "Maximum entries to return per page (bounded)")
+	cmd.Flags().StringVar(&cursor, "cursor", "", "Opaque cursor from a prior page's next_cursor")
 	return cmd
 }
 
 func newDeadLetterReplayCommand(opts *deadLetterOptions) *cobra.Command {
-	var executionID, entryID, reason, operator string
+	var executionID, entryID, reason, requestID string
 	cmd := &cobra.Command{
 		Use:   "replay",
 		Short: "Replay a dead-lettered entry back to the ready set",
-		Long: `Replay moves one dead-lettered entry atomically back to the ready set so the
-control plane redelivers it. This is a privileged write operation: record an
-operator and reason for every invocation — the audit line is emitted to stdout
-as JSON and should be captured by the deployment's log pipeline.`,
+		Long: `Replay moves one dead-lettered entry atomically and activation-safely back
+to the ready set so the control plane redelivers it. This is a privileged write
+operation: --reason is required and length-bounded; the operator identity is
+"cli:<user>" (from the authenticated principal), not self-reported.
+
+Pass --request-id to make the replay recoverable: if the response is lost,
+retrying with the same --request-id returns already_replayed and the original
+audit_id, proving the operation happened exactly once.
+
+The authoritative receipt is written to Redis; the stdout audit line is a
+secondary projection only.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if executionID == "" {
@@ -108,48 +126,57 @@ as JSON and should be captured by the deployment's log pipeline.`,
 			if reason == "" {
 				return fmt.Errorf("--reason is required (record why this entry is being replayed)")
 			}
-			if operator == "" {
-				operator = os.Getenv("USER")
-			}
-			store, closeFn, err := openDeadLetterStore(opts.redisAddr)
+			mgr, closeFn, err := openDeadLetterManager(opts.redisAddr, opts.out)
 			if err != nil {
 				return err
 			}
 			defer closeFn()
+			// G0 maintenance path: the CLI is a trusted operator tool with the
+			// replay scope. G1 replaces this with the B3 authorizer over the
+			// HTTP management API; the CLI must then call the API, not Redis.
+			principal := control.DeadLetterReplayPrincipal{
+				Subject: "cli:" + envOr("USER", "unknown"),
+				Scopes:  []string{control.ScopeDeadLetterReplay},
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			outcome, err := store.ReplayDeadLetter(ctx, types.ExecutionID(executionID), entryID)
-			audit := replayAudit{
-				Operator:   operator,
-				Reason:     reason,
-				Execution:  executionID,
-				Entry:      entryID,
-				Outcome:    string(outcome),
-				OccurredAt: time.Now().UTC().Format(time.RFC3339Nano),
-			}
-			if err != nil {
-				audit.Error = err.Error()
-			}
-			if err := writeJSONLines(opts.out, audit); err != nil {
-				return err
-			}
+			res, err := mgr.Replay(ctx, principal, engine.ReplayDeadLetterRequest{
+				ExecutionID: types.ExecutionID(executionID),
+				EntryID:     entryID,
+				RequestID:   requestID,
+				Reason:      reason,
+			})
 			if err != nil {
 				return err
 			}
-			return nil
+			return writeJSONLines(opts.out, replayResultJSON(res))
 		},
 	}
 	cmd.Flags().StringVar(&executionID, "execution", "", "Execution ID (required)")
 	cmd.Flags().StringVar(&entryID, "entry", "", "Dead-letter entry ID (required)")
-	cmd.Flags().StringVar(&reason, "reason", "", "Reason for replay (required)")
-	cmd.Flags().StringVar(&operator, "operator", "", "Operator identity (default: $USER)")
+	cmd.Flags().StringVar(&reason, "reason", "", "Reason for replay (required, length-bounded)")
+	cmd.Flags().StringVar(&requestID, "request-id", "", "Idempotency key; retry with the same value to recover a lost response")
 	return cmd
 }
 
-// openDeadLetterStore connects a distributed backend to the given Redis
+func replayResultJSON(res engine.ReplayDeadLetterResult) map[string]any {
+	return map[string]any{
+		"outcome":      string(res.Outcome),
+		"audit_id":     res.AuditID,
+		"execution":    string(res.ExecutionID),
+		"node":         res.NodeID,
+		"activation":   res.ActivationID,
+		"occurred_at":  time.Now().UTC().Format(time.RFC3339Nano),
+	}
+}
+
+// openDeadLetterManager connects a distributed backend to the given Redis
 // address without starting a consumer or dispatcher, then returns the
-// DeadLetterStore capability. The returned closer releases the Redis client.
-func openDeadLetterStore(addr string) (engine.DeadLetterStore, func(), error) {
+// DeadLetterManager over the DeadLetterStore capability. The manager owns
+// request validation, the metric outlet, and the audit projection; the store
+// owns the Redis atomic contract and the authoritative receipt. The returned
+// closer releases the Redis client.
+func openDeadLetterManager(addr string, out io.Writer) (*control.DeadLetterManager, func(), error) {
 	b, err := distributed.New(addr, nil, distributed.WithConsumer(false))
 	if err != nil {
 		return nil, nil, fmt.Errorf("connect redis %q: %w", addr, err)
@@ -159,8 +186,10 @@ func openDeadLetterStore(addr string) (engine.DeadLetterStore, func(), error) {
 		closeRedis(b)
 		return nil, nil, fmt.Errorf("StateStore %T does not implement DeadLetterStore; the configured backend cannot serve dead-letter operations", b.State())
 	}
+	audit := control.NewStdoutDeadLetterAuditSink(func(line string) { fmt.Fprintln(os.Stderr, line) })
+	mgr := control.NewDeadLetterManager(store, nil, audit)
 	closeFn := func() { closeRedis(b) }
-	return store, closeFn, nil
+	return mgr, closeFn, nil
 }
 
 // closeRedis best-effort closes the backend's Redis client. The Cmdable
@@ -178,14 +207,4 @@ func writeJSONLines(w io.Writer, value any) error {
 	}
 	_, err = fmt.Fprintln(w, string(data))
 	return err
-}
-
-type replayAudit struct {
-	Operator   string `json:"operator"`
-	Reason     string `json:"reason"`
-	Execution  string `json:"execution"`
-	Entry      string `json:"entry"`
-	Outcome    string `json:"outcome"`
-	Error      string `json:"error,omitempty"`
-	OccurredAt string `json:"occurred_at"`
 }

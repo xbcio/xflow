@@ -14,6 +14,20 @@ type memoryOutboxEntry struct {
 	entry engine.OutboxEntry
 }
 
+// memoryReplayReceipt is the authoritative in-memory record of one replay,
+// keyed by execution→requestID. It survives the dead entry's removal so a
+// retried replay with the same RequestID returns already_replayed.
+type memoryReplayReceipt struct {
+	auditID      string
+	node         string
+	activation   string
+	entryID      string
+	operator     string
+	reason       string
+	outcome      engine.DeadLetterReplayOutcome
+	occurredAtMs int64
+}
+
 var _ engine.AtomicStateStore = (*memoryState)(nil)
 var _ engine.LegacyNodeCommitter = (*memoryState)(nil)
 var _ engine.DurableLeaseSuspender = (*memoryState)(nil)
@@ -242,10 +256,11 @@ func (s *memoryState) AckOutbox(_ context.Context, id types.ExecutionID, entryID
 
 // RecordOutboxFailure increments one durable delivery attempt and moves an
 // entry to in-memory dead-letter storage once the configured threshold is met.
-func (s *memoryState) RecordOutboxFailure(_ context.Context, id types.ExecutionID, entryID string, maxAttempts int) (engine.OutboxDeliveryFailure, error) {
+func (s *memoryState) RecordOutboxFailure(_ context.Context, id types.ExecutionID, entry engine.OutboxEntry, maxAttempts int) (engine.OutboxDeliveryFailure, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	entryID := entry.ID
 	entries := s.outbox[id]
 	stored, ok := entries[entryID]
 	if !ok {
@@ -299,11 +314,16 @@ func (s *memoryState) OutboxMetrics(_ context.Context) (engine.OutboxMetricsSnap
 	return snapshot, nil
 }
 
-// ListDeadLetters returns up to limit dead-lettered entries for an execution,
-// oldest-first. Entries are not removed.
-func (s *memoryState) ListDeadLetters(_ context.Context, id types.ExecutionID, limit int) ([]engine.OutboxEntry, error) {
-	if limit <= 0 {
-		return nil, nil
+// ListDeadLetters returns one page of dead-lettered entries for an execution,
+// oldest-first, using a stable opaque cursor (the last entry ID). Entries are
+// not removed. An empty NextCursor marks the final page.
+func (s *memoryState) ListDeadLetters(_ context.Context, id types.ExecutionID, page engine.DeadLetterPage) (engine.DeadLetterList, error) {
+	const defaultLimit, maxLimit = 100, 500
+	if page.Limit <= 0 {
+		page.Limit = defaultLimit
+	}
+	if page.Limit > maxLimit {
+		page.Limit = maxLimit
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -322,45 +342,114 @@ func (s *memoryState) ListDeadLetters(_ context.Context, id types.ExecutionID, l
 		}
 		return ai.Before(aj)
 	})
-	if len(out) > limit {
-		out = out[:limit]
+	// Stable cursor: skip past the cursor entry ID, then bound to Limit+1 to
+	// detect a next page.
+	start := 0
+	if page.Cursor != "" {
+		for start < len(out) && out[start].ID != page.Cursor {
+			start++
+		}
+		if start < len(out) {
+			start++ // skip the cursor itself
+		}
 	}
-	return out, nil
+	page2 := out[start:]
+	var nextCursor string
+	if len(page2) > page.Limit {
+		nextCursor = page2[page.Limit-1].ID
+		page2 = page2[:page.Limit]
+	}
+	return engine.DeadLetterList{Entries: page2, NextCursor: nextCursor}, nil
 }
 
 // ReplayDeadLetter moves a dead-lettered entry back to the ready set. The
-// memory mutex serializes replays so concurrent calls collapse to exactly one
-// ReplayReplayed. Terminal/expired executions are rejected.
-func (s *memoryState) ReplayDeadLetter(_ context.Context, id types.ExecutionID, entryID string) (engine.DeadLetterReplayOutcome, error) {
-	if entryID == "" {
-		return engine.ReplayNotFound, nil
+// memory mutex serializes replays so concurrent calls collapse: exactly one
+// returns ReplayReplayed, the rest return ReplayAlreadyReplayed with the
+// original AuditID. Terminal/expired executions, terminal nodes, and stale
+// activations are rejected without mutating state.
+func (s *memoryState) ReplayDeadLetter(_ context.Context, req engine.ReplayDeadLetterRequest) (engine.ReplayDeadLetterResult, error) {
+	if req.EntryID == "" {
+		return engine.ReplayDeadLetterResult{Outcome: engine.ReplayNotFound, ExecutionID: req.ExecutionID}, nil
+	}
+	requestID := req.RequestID
+	if requestID == "" {
+		requestID = req.EntryID
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	exec, ok := s.executions[id]
+
+	// 1. Idempotency: same RequestID or same entry already replayed.
+	if receipts, ok := s.replayReceipts[req.ExecutionID]; ok {
+		if r, ok := receipts[requestID]; ok {
+			return engine.ReplayDeadLetterResult{Outcome: engine.ReplayAlreadyReplayed, AuditID: r.auditID, ExecutionID: req.ExecutionID, NodeID: r.node, ActivationID: r.activation}, nil
+		}
+	}
+	if idx, ok := s.replayEntryIdx[req.ExecutionID]; ok {
+		if priorReqID, ok := idx[req.EntryID]; ok && priorReqID != "" {
+			if r, ok := s.replayReceipts[req.ExecutionID][priorReqID]; ok {
+				return engine.ReplayDeadLetterResult{Outcome: engine.ReplayAlreadyReplayed, AuditID: r.auditID, ExecutionID: req.ExecutionID, NodeID: r.node, ActivationID: r.activation}, nil
+			}
+		}
+	}
+
+	// 2. Execution status guard.
+	exec, ok := s.executions[req.ExecutionID]
 	if !ok || exec == nil {
-		return engine.ReplayRejectedInactive, nil
+		return engine.ReplayDeadLetterResult{Outcome: engine.ReplayRejectedInactive, ExecutionID: req.ExecutionID}, nil
 	}
 	if types.IsTerminalExecutionStatus(exec.snap.Status) {
-		return engine.ReplayRejectedTerminal, nil
+		return engine.ReplayDeadLetterResult{Outcome: engine.ReplayRejectedTerminal, ExecutionID: req.ExecutionID}, nil
 	}
-	deadEntries := s.deadOutbox[id]
-	stored, ok := deadEntries[entryID]
+
+	// 3. Read dead entry + node guard.
+	deadEntries := s.deadOutbox[req.ExecutionID]
+	stored, ok := deadEntries[req.EntryID]
 	if !ok {
-		return engine.ReplayNotFound, nil
+		return engine.ReplayDeadLetterResult{Outcome: engine.ReplayNotFound, ExecutionID: req.ExecutionID}, nil
 	}
+	nodeName := stored.entry.Task.NodeName
+	entryActivation := stored.entry.Task.ActivationID
+	if nodeName != "" {
+		node := s.nodes[memoryNodeKey(req.ExecutionID, nodeName)]
+		if node != nil && isTerminalNode(node.Status) {
+			return engine.ReplayDeadLetterResult{Outcome: engine.ReplayRejectedNodeTerminal, ExecutionID: req.ExecutionID, NodeID: nodeName, ActivationID: fmt.Sprintf("%d", entryActivation)}, nil
+		}
+		if entryActivation > 0 && node != nil && node.ActivationID != 0 && node.ActivationID != entryActivation {
+			return engine.ReplayDeadLetterResult{Outcome: engine.ReplayRejectedActivationMismatch, ExecutionID: req.ExecutionID, NodeID: nodeName, ActivationID: fmt.Sprintf("%d", entryActivation)}, nil
+		}
+	}
+
+	// 4. Atomic dead->ready move: preserve body, reset attempts.
 	stored.entry.Attempts = 0
-	readyEntries := s.outbox[id]
+	readyEntries := s.outbox[req.ExecutionID]
 	if readyEntries == nil {
 		readyEntries = make(map[string]memoryOutboxEntry)
-		s.outbox[id] = readyEntries
+		s.outbox[req.ExecutionID] = readyEntries
 	}
-	readyEntries[entryID] = stored
-	delete(deadEntries, entryID)
+	readyEntries[req.EntryID] = stored
+	delete(deadEntries, req.EntryID)
 	if len(deadEntries) == 0 {
-		delete(s.deadOutbox, id)
+		delete(s.deadOutbox, req.ExecutionID)
 	}
-	return engine.ReplayReplayed, nil
+
+	// 5. Write authoritative receipt + entry index.
+	auditID := requestID + ":" + fmt.Sprintf("%d", time.Now().UTC().UnixMilli())
+	receipt := &memoryReplayReceipt{
+		auditID: auditID, node: nodeName,
+		activation:   fmt.Sprintf("%d", entryActivation),
+		entryID:      req.EntryID, operator: req.Operator, reason: req.Reason,
+		outcome: engine.ReplayReplayed, occurredAtMs: time.Now().UTC().UnixMilli(),
+	}
+	if s.replayReceipts[req.ExecutionID] == nil {
+		s.replayReceipts[req.ExecutionID] = make(map[string]*memoryReplayReceipt)
+	}
+	s.replayReceipts[req.ExecutionID][requestID] = receipt
+	if s.replayEntryIdx[req.ExecutionID] == nil {
+		s.replayEntryIdx[req.ExecutionID] = make(map[string]string)
+	}
+	s.replayEntryIdx[req.ExecutionID][req.EntryID] = requestID
+
+	return engine.ReplayDeadLetterResult{Outcome: engine.ReplayReplayed, AuditID: auditID, ExecutionID: req.ExecutionID, NodeID: nodeName, ActivationID: receipt.activation}, nil
 }
 
 // ListOutboxExecutions identifies executions with at least one durable intent

@@ -29,7 +29,7 @@ func TestRedisOutboxFailureTracksAttemptsAndDeadLetters(t *testing.T) {
 		t.Fatalf("initial OutboxMetrics() = %+v, want one timestamped pending entry", initial)
 	}
 
-	first, err := state.RecordOutboxFailure(ctx, id, entry.ID, 2)
+	first, err := state.RecordOutboxFailure(ctx, id, entry, 2)
 	if err != nil {
 		t.Fatalf("first RecordOutboxFailure() error = %v", err)
 	}
@@ -40,7 +40,7 @@ func TestRedisOutboxFailureTracksAttemptsAndDeadLetters(t *testing.T) {
 		t.Fatalf("outbox after first failure entries=%+v err=%v, want retained entry", entries, err)
 	}
 
-	second, err := state.RecordOutboxFailure(ctx, id, entry.ID, 2)
+	second, err := state.RecordOutboxFailure(ctx, id, entry, 2)
 	if err != nil {
 		t.Fatalf("second RecordOutboxFailure() error = %v", err)
 	}
