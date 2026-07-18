@@ -56,9 +56,12 @@ func TestDatabaseActionErrorParityServerRunner(t *testing.T) {
 	addr := requireRedis(t)
 	dsn := requireMySQL(t)
 
-	// Idempotent parity schema + shared admin handle for per-case setup.
-	adminDB := setupParitySchema(t, dsn)
+	// Open admin handle first, lower the lock-wait timeout, then apply the
+	// idempotent parity schema. Shortening the timeout before the cleanup DELETE
+	// ensures a stale row lock from a crashed prior run does not hang for 50s.
+	adminDB := openParityAdminDB(t, dsn)
 	shortenLockWaitTimeout(t, adminDB, 1)
+	setupParitySchema(t, adminDB)
 
 	inner, ok := registry.Lookup("xflow.database")
 	if !ok {
@@ -224,16 +227,23 @@ func TestDatabaseActionErrorParityServerRunner(t *testing.T) {
 	}
 }
 
-// setupParitySchema opens an admin *sql.DB against the real MySQL DSN and
-// applies the idempotent parity DDL. The returned handle is reused by per-case
-// setup helpers; it is closed via t.Cleanup.
-func setupParitySchema(t *testing.T, dsn string) *sql.DB {
+// openParityAdminDB opens an admin *sql.DB against the real MySQL DSN. The
+// returned handle is reused by per-case setup helpers; it is closed via t.Cleanup.
+func openParityAdminDB(t *testing.T, dsn string) *sql.DB {
 	t.Helper()
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		t.Fatalf("open admin db: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
+	return db
+}
+
+// setupParitySchema applies the idempotent parity DDL and clears any leftover
+// rows from a previous interrupted run. The caller must supply an already-open
+// admin *sql.DB.
+func setupParitySchema(t *testing.T, db *sql.DB) {
+	t.Helper()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -253,7 +263,6 @@ func setupParitySchema(t *testing.T, dsn string) *sql.DB {
 	if _, err := db.ExecContext(ctx, "DELETE FROM parity_deadlock"); err != nil {
 		t.Fatalf("clear parity_deadlock: %v", err)
 	}
-	return db
 }
 
 // shortenLockWaitTimeout lowers the GLOBAL innodb_lock_wait_timeout so the
