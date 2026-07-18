@@ -163,7 +163,7 @@ func (n *DatabaseNode) execSelect(ctx context.Context, db *sql.DB, table string,
 	if where, ok := input.Params["where"].(map[string]any); ok && len(where) > 0 {
 		clauses, whereArgs, err := buildWhere(where)
 		if err != nil {
-			return &types.Output{Data: map[string]any{"error": err.Error()}, Port: "error"}, nil
+			return nil, types.NewPermanentError("database.invalid_where", err.Error())
 		}
 		query += " WHERE " + clauses
 		args = append(args, whereArgs...)
@@ -175,13 +175,13 @@ func (n *DatabaseNode) execSelect(ctx context.Context, db *sql.DB, table string,
 
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return &types.Output{Data: map[string]any{"error": err.Error()}, Port: "error"}, nil
+		return nil, classifyDBError(err)
 	}
 	defer func() { _ = rows.Close() }()
 
 	columns, err := rows.Columns()
 	if err != nil {
-		return &types.Output{Data: map[string]any{"error": err.Error()}, Port: "error"}, nil
+		return nil, classifyDBError(err)
 	}
 
 	var results []map[string]any
@@ -192,7 +192,7 @@ func (n *DatabaseNode) execSelect(ctx context.Context, db *sql.DB, table string,
 			ptrs[i] = &values[i]
 		}
 		if err := rows.Scan(ptrs...); err != nil {
-			return &types.Output{Data: map[string]any{"error": err.Error()}, Port: "error"}, nil
+			return nil, classifyDBError(err)
 		}
 		row := make(map[string]any, len(columns))
 		for i, col := range columns {
@@ -210,7 +210,7 @@ func (n *DatabaseNode) execSelect(ctx context.Context, db *sql.DB, table string,
 	// Without this check the node would silently return a truncated result set
 	// as success, corrupting downstream data integrity.
 	if err := rows.Err(); err != nil {
-		return &types.Output{Data: map[string]any{"error": err.Error()}, Port: "error"}, nil
+		return nil, classifyDBError(err)
 	}
 
 	return &types.Output{Data: map[string]any{"rows": results, "count": len(results)}}, nil
@@ -239,7 +239,7 @@ func (n *DatabaseNode) execInsert(ctx context.Context, db *sql.DB, table string,
 
 	result, err := db.ExecContext(ctx, query, args...)
 	if err != nil {
-		return &types.Output{Data: map[string]any{"error": err.Error()}, Port: "error"}, nil
+		return nil, classifyDBError(err)
 	}
 
 	lastID, _ := result.LastInsertId()
@@ -286,7 +286,7 @@ func (n *DatabaseNode) execInsertMany(ctx context.Context, db *sql.DB, table str
 
 	result, err := db.ExecContext(ctx, query, args...)
 	if err != nil {
-		return &types.Output{Data: map[string]any{"error": err.Error()}, Port: "error"}, nil
+		return nil, classifyDBError(err)
 	}
 
 	affected, _ := result.RowsAffected()
@@ -324,7 +324,7 @@ func (n *DatabaseNode) execUpdate(ctx context.Context, db *sql.DB, table string,
 
 	result, err := db.ExecContext(ctx, query, args...)
 	if err != nil {
-		return &types.Output{Data: map[string]any{"error": err.Error()}, Port: "error"}, nil
+		return nil, classifyDBError(err)
 	}
 
 	affected, _ := result.RowsAffected()
@@ -345,7 +345,7 @@ func (n *DatabaseNode) execDelete(ctx context.Context, db *sql.DB, table string,
 
 	result, err := db.ExecContext(ctx, query, args...)
 	if err != nil {
-		return &types.Output{Data: map[string]any{"error": err.Error()}, Port: "error"}, nil
+		return nil, classifyDBError(err)
 	}
 
 	affected, _ := result.RowsAffected()

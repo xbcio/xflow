@@ -200,6 +200,17 @@ func (n *HTTPNode) Execute(ctx context.Context, input *types.Input) (*types.Outp
 	}
 
 	switch {
+	case resp.StatusCode == http.StatusRequestTimeout, resp.StatusCode == http.StatusTooManyRequests:
+		// 408 and 429 have explicit retry semantics per RFC; they are NOT
+		// permanent 4xx config errors. Classify by a stable table, not by the
+		// leading digit, so a backoff can succeed.
+		return nil, &types.ClassifiedError{
+			Kind:      types.ErrorKindTransient,
+			Code:      fmt.Sprintf("http.%d", resp.StatusCode),
+			Message:   fmt.Sprintf("HTTP %d: %s", resp.StatusCode, resp.Status),
+			Retryable: true,
+			Details:   data,
+		}
 	case resp.StatusCode >= 500:
 		return nil, &types.ClassifiedError{
 			Kind:      types.ErrorKindTransient,

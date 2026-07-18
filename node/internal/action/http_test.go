@@ -140,6 +140,37 @@ func TestHTTP_4xxIsPermanent(t *testing.T) {
 	}
 }
 
+// TestHTTP_408And429AreTransient verifies the A3 stable strategy table: 408 and
+// 429 have explicit retry semantics and must NOT be classified as permanent
+// 4xx config errors, even though their leading digit is 4. Classification is by
+// explicit status code, not by leading digit.
+func TestHTTP_408And429AreTransient(t *testing.T) {
+	for _, code := range []int{http.StatusRequestTimeout, http.StatusTooManyRequests} {
+		t.Run(http.StatusText(code), func(t *testing.T) {
+			withHTTPClient(t, func(r *http.Request) (*http.Response, error) {
+				return jsonResponse(code, `{"error":"retry later"}`, nil), nil
+			})
+			h, _ := registry.Lookup("xflow.http")
+			b := node.HTTP("GET", "https://example.test")
+			input := &types.Input{Params: b.RawParams().(map[string]any)}
+			out, err := h.Execute(context.Background(), input)
+			if err == nil {
+				t.Fatalf("expected retryable error for %d, got nil err", code)
+			}
+			if out != nil {
+				t.Fatalf("expected nil output for %d, got %+v", code, out)
+			}
+			if types.IsPermanent(err) {
+				t.Fatalf("%d must be transient (retryable), got permanent err=%v", code, err)
+			}
+			var ce *types.ClassifiedError
+			if !errors.As(err, &ce) || !ce.Retryable {
+				t.Fatalf("expected retryable ClassifiedError for %d, got %T %v", code, err, err)
+			}
+		})
+	}
+}
+
 func TestHTTP_5xxIsTransient(t *testing.T) {
 	withHTTPClient(t, func(r *http.Request) (*http.Response, error) {
 		return jsonResponse(503, `{"error":"service unavailable"}`, nil), nil
