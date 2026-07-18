@@ -32,7 +32,7 @@ xflow 采用分层发布门槛，不再用单个测试替代完整 release gate�
 | A0 真实 Redis cyclic 崩溃恢复 | 🟡 部分完成 | 测试代码存在但本地因 Redis 不可用被 Skip；无独立 OS 进程 kill/restart 恢复报告；CI 未强制 require-real-Redis | `4a04057` |
 | A1 control-plane binder fail-closed | 🟡 部分完成 | control 已不回退 `Provider.Bind`；但 distributed 吞掉 `StartConsumer` 错误，dispatcher/monitor 仍启动并报 ready；无逆序回滚与 goroutine 等待 | `5ee3414` |
 | A2 dead-letter 原子处置契约 | 🟡 部分完成 | 原子 dead→ready 已有；缺 node/activation guard、不可变 replay receipt、统一 manager、真正 cursor 分页、CLI 绕过 Engine | `fe15676` |
-| A3 跨进程错误分类与兼容语义 | 🟡 部分完成 | wire DTO 与 `ClassifiedError` 基础完成；HTTP/gRPC/Database/script action 仍大量落入 legacy error port，三拓扑 parity 未完成 | `1995148`、`6f16260` |
+| A3 跨进程错误分类与兼容语义 | 🟡 部分完成 | wire DTO + `ClassifiedError` 完成；HTTP 408/429 transient、Database 按 SQLState/number 分类、gRPC codes 表完成；**三拓扑 parity 矩阵 harness 已完成**（local embedded + server-runner，真 Redis，transient-then-success / retry-exhausted / permanent 三 fixture 跨拓扑 attempt/status/error-code 一致，cluster-transient 因无 handler retry 为 collection-path 排除）。⚠️ 剩余：error-taxonomy spec §6 分阶段清单未全部关闭（HTTP 4xx/5xx 全表、gRPC 全 codes、DB deadlock/connection-lost/constraint 逐 fixture 矩阵、script/function 分类），清单关闭前 A3 不标 G0 完成 | `1995148`、`6f16260`、`1815635` |
 
 > G0 退出条件见修复设计 §12。在 A0–A3 全部满足三层证据前，G0 不得恢复"已完成"。
 
@@ -43,7 +43,7 @@ xflow 采用分层发布门槛，不再用单个测试替代完整 release gate�
 | 项 | 状态 | 缺口 | 既有 commit |
 |---|---|---|---|
 | G0 基线 | ⛔ | G0 修复中 | 见上 |
-| B1 OTel 端到端接线 | 🟡 部分完成 | provider/HTTP/commit span 已有；runner 不 extract `TaskLease.TraceCarrier`、不建 execute span、report 不 inject carrier、report timeout 用 `context.Background()` 断链；gRPC 无完整 interceptor；sampler 不可配、baggage 默认传播 | `aa5143f` |
+| B1 OTel 端到端接线 | ✅ 修复完成（G0 阻断 G1） | provider 可配 sampler（默认 parentbased）+ baggage opt-in + 幂等 shutdown；runner extract `TaskLease.TraceCarrier` 建 execute span、report inject carrier（`WithoutCancel` 保留 SpanContext 不再裸 `context.Background()` 断链）；dispatch span；cmd flags；gRPC unary interceptor（W3C metadata extraction + server span）；runner trace-graph + grpc interceptor 测试 green。server-runner e2e（HTTP + gRPC）已修复并真 Redis 跑通（此前 `control.NewServer` 不再 serve `/v1/workflows` 致 404，且 Redis 在 :6380 非 :6379 长期 skip 掩盖）。⚠️ gRPC runner concurrency>1 credit-flow 路径 double-dispatch 为实验性后续（测试 docstring 已标注，非 release gate） | `0b21125`、`1815635` |
 | B3 API authz + fail-closed | 🟡 部分完成 | 仅有静态 bearer 认证 + fail-closed；无 principal、无资源/操作级 authz、无不可变可 reconcile 审计；所有 operation 共享 allow-all | `c238e1d` |
 
 > G1 退出条件见修复设计 §12。即便 B1/B3 单项完成，G0 未完成前不得宣称 G1。
