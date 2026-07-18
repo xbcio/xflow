@@ -1,20 +1,22 @@
 #!/usr/bin/env bash
 # CI / local perf sampling for xflow high-throughput paths (D1).
 #
-# Runs the perf-bench suite against the test/env docker-compose stack
-# (Redis + Kafka + MySQL) and records p50/p95/p99-style bench output to a
-# results file for regression monitoring.
+# Runs the perf-bench suite AND the E2E load test against the test/env
+# docker-compose stack (Redis + Kafka + MySQL), recording p50/p95/p99 latency
+# quantiles plus ns/op + allocs/op bench numbers to a results file for
+# regression monitoring.
 #
 # This is a SAMPLING harness, NOT a hard gate. Bench results vary with the
 # host; use it to detect order-of-magnitude regressions, not to commit to
 # capacity numbers. Capacity commitments require a controlled host with
 # multiple samples and a separate report (see
-# docs/design/HIGH-THROUGHPUT-INGESTION.md §6).
+# docs/design/HIGH-THROUGHPUT-INGESTION.md §6 and
+# docs/references/capacity-report-template.md).
 #
 # Usage:
 #   make env-up                  # start Redis + Kafka + MySQL
-#   ./scripts/perf-sample.sh     # run perf benches, write results
-#   ./scripts/perf-sample.sh -v  # verbose (stream bench output)
+#   ./scripts/perf-sample.sh     # run perf benches + E2E load, write results
+#   ./scripts/perf-sample.sh -v  # verbose (stream output)
 #
 # Env:
 #   XFLOW_PERF_OUT   results file (default: ./perf-sample-results.txt)
@@ -41,6 +43,7 @@ stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "# benchtime:  ${BENCHTIME}"
   echo "# host:       $(uname -srm 2>/dev/null || echo unknown)"
   echo "# commit:     $(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  echo "# topology:   server+runner durable (E2E load) + unit benches"
   echo
 } > "${OUT}"
 
@@ -67,8 +70,27 @@ else
     | tee -a "${OUT}" >/dev/null
 fi
 
+# D1: also run the E2E load test (a Test, not a Benchmark) so p50/p95/p99 of a
+# 1000-task end-to-end run are captured alongside the micro-benches. It emits
+# `perf.metric topology=server-runner ...` lines that the metrics section
+# below collects into a machine-parseable block.
+echo "perf-sample: running E2E load test (p50/p95/p99) -> ${OUT}"
+if [[ "${VERBOSE}" == "1" ]]; then
+  go test -tags=perf -run='E2ELoad' -timeout 30m ./test/perf/... 2>&1 \
+    | tee -a "${OUT}"
+else
+  go test -tags=perf -run='E2ELoad' -timeout 30m ./test/perf/... 2>&1 \
+    | tee -a "${OUT}" >/dev/null
+fi
+
+# Collect structured perf.metric lines into a single parseable block so the CI
+# sampling job can trend p50/p95/p99 + throughput without re-parsing free text.
+echo >> "${OUT}"
+echo "# structured metrics (key=value, one per line)" >> "${OUT}"
+grep -h '^perf\.metric ' "${OUT}" >> "${OUT}" 2>/dev/null || true
+
 echo >> "${OUT}"
 echo "# end of sample" >> "${OUT}"
 
-echo "perf-sample: done. Review ${OUT} for ns/op and allocs/op trends."
+echo "perf-sample: done. Review ${OUT} for ns/op, allocs/op, and p50/p95/p99 trends."
 echo "perf-sample: remember — sampling only, not a capacity commitment."

@@ -191,17 +191,29 @@ func TestE2ELoadRealRedis(t *testing.T) {
 		t.Fatalf("%d submit error(s); aborting result evaluation", len(submitErrors))
 	}
 
-	// Compute p50 / p99.
+	// Compute p50 / p95 / p99. D1 requires the perf harness to record all
+	// three quantiles so regressions are visible across the distribution, not
+	// only the median and tail.
 	sorted := make([]time.Duration, total)
 	copy(sorted, latencies)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
-	p50 := sorted[total*50/100]
-	p99 := sorted[total*99/100]
+	p50 := percentileLatency(sorted, 0.50)
+	p95 := percentileLatency(sorted, 0.95)
+	p99 := percentileLatency(sorted, 0.99)
 
-	fmt.Printf("E2E load: total=%d workers=%d elapsed=%v throughput=%.0f/s failed=%d timeouts=%d p50=%v p99=%v\n",
+	throughput := float64(done) / elapsed.Seconds()
+	fmt.Printf("E2E load: total=%d workers=%d elapsed=%v throughput=%.0f/s failed=%d timeouts=%d p50=%v p95=%v p99=%v\n",
 		total, workers, elapsed.Round(time.Millisecond),
-		float64(done)/elapsed.Seconds(),
-		failed, timeouts, p50.Round(time.Millisecond), p99.Round(time.Millisecond))
+		throughput,
+		failed, timeouts, p50.Round(time.Millisecond), p95.Round(time.Millisecond), p99.Round(time.Millisecond))
+
+	// Structured metric line for scripts/perf-sample.sh to collect. Keep the
+	// key=value format stable so the CI sampling job can parse and trend it.
+	// topology=server-runner so the report cannot be misread as SDK transient
+	// capacity (D1: transient data must not commit to durable capacity).
+	fmt.Printf("perf.metric topology=server-runner test=e2e_load total=%d workers=%d throughput=%.0f/s failed=%d timeouts=%d p50_ms=%.3f p95_ms=%.3f p99_ms=%.3f\n",
+		total, workers, throughput, failed, timeouts,
+		p50.Seconds()*1000, p95.Seconds()*1000, p99.Seconds()*1000)
 
 	if failed > 0 {
 		t.Errorf("failed = %d (non-timeout failures)", failed)
@@ -209,6 +221,23 @@ func TestE2ELoadRealRedis(t *testing.T) {
 	if timeouts > 0 {
 		t.Logf("timeouts = %d (tasks did not complete within 15s per-task budget)", timeouts)
 	}
+}
+
+// percentileLatency returns the quantile (0..1) of an ascending-sorted
+// duration slice using the nearest-rank method so p50/p95/p99 map to actual
+// observed samples (interpolation would invent values between samples).
+func percentileLatency(sorted []time.Duration, q float64) time.Duration {
+	if len(sorted) == 0 {
+		return 0
+	}
+	idx := int(float64(len(sorted)-1) * q)
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(sorted) {
+		idx = len(sorted) - 1
+	}
+	return sorted[idx]
 }
 
 // submitLoad submits one workflow execution and returns the ExecutionID.

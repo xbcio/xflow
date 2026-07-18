@@ -176,14 +176,16 @@ node.KafkaTrigger().
 
 ### 6.3 CI 采样脚本
 
-`scripts/perf-sample.sh`（见仓库）运行 perf bench 并记录结果，用于回归监控：
+`scripts/perf-sample.sh`（见仓库）运行 perf bench **与 E2E load 测试**，记录 p50/p95/p99 + ns/op + allocs/op，并在结果文件尾部追加结构化 `perf.metric` 行，用于回归监控：
 
 ```bash
 # 需要真实 Redis + Kafka（test/env/docker-compose.yml）
 ./scripts/perf-sample.sh
 ```
 
-> CI perf 采样受环境差异影响大，**不作为硬性门槛**；用于发现量级回归。容量承诺须在受控 host 多样本后单独出具报告。
+CI 采样 job（`.github/workflows/perf-sample.yml`）每日与手动触发，运行 `make perf-sample` 并上传 `perf-sample-results.txt` 为 artifact（保留 90 天）。
+
+> CI perf 采样受环境差异影响大，**不作为硬性门槛**；`continue-on-error: true`，用于发现量级回归与趋势对比。容量承诺须在受控 host 多样本后用 [capacity-report-template.md](../references/capacity-report-template.md) 单独出具报告，且不得用 transient 数据承诺 durable 产能。
 
 ## 7. 选型决策
 

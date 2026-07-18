@@ -68,7 +68,7 @@ xflow 采用分层发布门槛，不再用单个测试替代完整 release gate�
 
 | 项 | 状态 | 说明 |
 |---|---|---|
-| D1 采集与审批工作流分离 | 🟡 架构/采样就绪，容量基线未完成 | 两条独立参考架构 + `make perf-sample` 采样脚本已就绪；但 CI 采样 job 未接入，受控 host 多样本容量报告未产出。**仅有报告后才可称"容量基线完成"，目前为"架构与采样准备完成"**。详见 [HIGH-THROUGHPUT-INGESTION](HIGH-THROUGHPUT-INGESTION.md)。审批工作流始终使用 durable mode；不得用 transient 容量承诺审批产能 |
+| D1 采集与审批工作流分离 | 🟡 架构/采样就绪，容量基线未完成 | 两条独立参考架构 + `make perf-sample` 采样脚本就绪；E2E load 输出 p50/p95/p99 + 结构化 `perf.metric` 行；CI 采样 job `.github/workflows/perf-sample.yml`（每日 + 手动，`continue-on-error`，非门槛，上传 90 天 artifact）已接入；受控 host 多样本报告模板 [capacity-report-template.md](../references/capacity-report-template.md) 已就绪。**受控 host 多样本报告未填实前只能称"架构与采样准备完成"，不得称"容量基线完成"**。详见 [HIGH-THROUGHPUT-INGESTION](HIGH-THROUGHPUT-INGESTION.md)。审批工作流始终使用 durable mode；不得用 transient 容量承诺审批产能 |
 
 ## 3. G1 部署承诺与限制
 

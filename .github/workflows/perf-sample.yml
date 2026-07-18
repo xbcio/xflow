@@ -1,0 +1,79 @@
+name: Perf Sample
+
+# D1: CI perf sampling for trend monitoring and downloadable artifacts. This
+# is NOT a hard gate — results vary across GitHub-hosted runners and must not
+# be read as capacity commitments. Capacity baselines require a controlled host
+# with multiple samples and a separate report (see
+# docs/references/capacity-report-template.md).
+#
+# Runs nightly and on manual dispatch. Avoids running on every PR to keep it
+# a sampling/trend signal rather than a pass/fail gate.
+
+on:
+  schedule:
+    # 07:00 UTC daily.
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  perf-sample:
+    name: Perf Sample
+    runs-on: ubuntu-latest
+    # Sampling only — never block merges on runner-noisy bench numbers.
+    continue-on-error: true
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      kafka:
+        image: bitnami/kafka:3.7
+        env:
+          KAFKA_CFG_NODE_ID: 1
+          KAFKA_CFG_PROCESS_ROLES: controller,broker
+          KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+          KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://127.0.0.1:9092
+          KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 1@127.0.0.1:9093
+          KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+        ports:
+          - 9092:9092
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Wait for services
+        run: |
+          for i in $(seq 1 30); do
+            redis-cli -h 127.0.0.1 -p 6379 ping && break
+            sleep 2
+          done
+
+      - name: Run perf sample
+        run: make perf-sample
+        env:
+          XFLOW_TEST_REDIS_ADDR: 127.0.0.1:6379
+          XFLOW_TEST_KAFKA_BROKERS: 127.0.0.1:9092
+          REDIS_ADDR: redis://127.0.0.1:6379/0
+          KAFKA_BROKERS: 127.0.0.1:9092
+
+      - name: Upload perf results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-sample-results
+          path: perf-sample-results.txt
+          retention-days: 90
