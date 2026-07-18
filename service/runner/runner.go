@@ -10,6 +10,7 @@ import (
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
+	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/service/protocol"
 )
 
@@ -39,12 +40,18 @@ type Config struct {
 	Capabilities      []protocol.Capability
 	HeartbeatInterval time.Duration
 	PollWait          time.Duration
+	// Tracer, when set, enables the server→runner→server trace graph: the
+	// runner extracts the remote parent from the lease's TraceCarrier, starts
+	// an xflow.task.execute span, and injects a report carrier so the server's
+	// commit span is properly parented. Nil means no-op tracing.
+	Tracer tracing.Tracer
 }
 
 type Runner struct {
 	client   ProtocolClient
 	executor *execution.Runner
 	config   Config
+	tracer   tracing.Tracer
 }
 
 func New(client ProtocolClient, registry engine.HandlerRegistry, config Config) *Runner {
@@ -57,10 +64,15 @@ func New(client ProtocolClient, registry engine.HandlerRegistry, config Config) 
 	if config.PollWait <= 0 {
 		config.PollWait = time.Second
 	}
+	tracer := config.Tracer
+	if tracer == nil {
+		tracer = tracing.NoopTracer{}
+	}
 	return &Runner{
 		client:   client,
 		executor: execution.NewRunner(registry),
 		config:   config,
+		tracer:   tracer,
 	}
 }
 
@@ -203,25 +215,56 @@ func (r *Runner) workerLoop(ctx context.Context, sessionID string, leaseCh <-cha
 	}
 }
 
-// executeAndReport runs the handler and reports the result. The report uses a
-// detached context with a bounded timeout so that run cancellation (e.g.
-// SIGTERM) does not discard a computed result the server still needs, while
-// still guaranteeing a hung network cannot pin the worker forever. inFlight is
-// decremented on exit.
+// executeAndReport runs the handler and reports the result. It closes the
+// server→runner→server trace graph: the lease carries a W3C carrier injected
+// at dispatch; the runner extracts the remote parent, starts an
+// xflow.task.execute span, and injects a report carrier from the execute
+// context so the server's commit span is properly parented.
+//
+// The report uses a context detached from the execute context
+// (context.WithoutCancel + WithTimeout) so that cancelling the run (e.g.
+// SIGTERM) does not discard a computed result the server still needs — but
+// the detached context PRESERVES the SpanContext, so the report/commit trace
+// is not broken. A bare context.Background() would lose the SpanContext.
 func (r *Runner) executeAndReport(ctx context.Context, sessionID string, lease *engine.TaskLease, inFlight *atomic.Int32, signalError func(error)) {
 	defer inFlight.Add(-1)
-	result, execErr := r.executor.Execute(ctx, lease)
+
+	// Extract the remote parent from the lease carrier (injected by the
+	// control plane at dispatch). Creates an xflow.task.execute span as a
+	// child of the dispatch span — same trace, remote parent.
+	execCtx := tracing.ExtractCarrier(ctx, lease.TraceCarrier)
+	execCtx, span := r.tracer.Start(execCtx, "xflow.task.execute",
+		"execution_id", string(lease.Task.ExecutionID),
+		"node_name", lease.Task.NodeName,
+		"node_type", lease.NodeType,
+		"attempt", lease.Attempt,
+	)
+	defer span.End()
+
+	result, execErr := r.executor.Execute(execCtx, lease)
 	if execErr != nil {
 		result = engine.TaskResult{Error: execErr}
+		span.RecordError(execErr)
 	}
-	reportCtx, cancel := context.WithTimeout(context.Background(), defaultReportTimeout)
+
+	// Detach from the execute context so run cancellation cannot discard the
+	// result, but keep the SpanContext so the report carrier links the
+	// commit span to this execute span. context.WithoutCancel preserves the
+	// context.Value (incl. span) while dropping cancellation/deadline.
+	detached := context.WithoutCancel(execCtx)
+	reportCtx, cancel := context.WithTimeout(detached, defaultReportTimeout)
 	defer cancel()
-	reportResp, err := r.client.ReportResult(reportCtx, protocol.ReportResultRequest{
+
+	req := protocol.ReportResultRequest{
 		RunnerID:  r.config.RunnerID,
 		SessionID: sessionID,
 		Lease:     lease,
 		Result:    result,
-	})
+		// Inject the execute span context so the server's report/commit span
+		// is a child of xflow.task.execute rather than a fresh root.
+		TraceCarrier: tracing.InjectCarrier(reportCtx),
+	}
+	reportResp, err := r.client.ReportResult(reportCtx, req)
 	if err != nil {
 		signalError(runContextError(ctx, err))
 		return

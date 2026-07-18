@@ -199,11 +199,25 @@ func (c *Core) pollTask(ctx context.Context, req protocol.PollTaskRequest, info 
 		lease, err := c.engine.BuildTaskLease(ctx, &claim.Assignment.Task)
 		switch {
 		case err == nil:
-			lease.TraceCarrier = tracing.InjectCarrier(ctx)
-			if err := c.runners.FinalizeClaim(ctx, claim.ClaimID, lease); err != nil {
+			// xflow.task.dispatch spans the BuildTaskLease + FinalizeClaim
+			// assignment and injects the W3C carrier the runner extracts to
+			// start its execute span as a remote child.
+			tracer := c.tracer
+			if tracer == nil {
+				tracer = tracing.NoopTracer{}
+			}
+			dispatchCtx, dispatchSpan := tracer.Start(ctx, "xflow.task.dispatch",
+				"execution_id", string(claim.Assignment.Task.ExecutionID),
+				"node_name", claim.Assignment.Task.NodeName,
+			)
+			lease.TraceCarrier = tracing.InjectCarrier(dispatchCtx)
+			if err := c.runners.FinalizeClaim(dispatchCtx, claim.ClaimID, lease); err != nil {
+				dispatchSpan.RecordError(err)
+				dispatchSpan.End()
 				_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimRequeue)
 				return protocol.PollTaskResponse{}, normalizeRunnerError(err, c.logger, "poll")
 			}
+			dispatchSpan.End()
 			return protocol.PollTaskResponse{Lease: lease}, nil
 		case errors.Is(err, engine.ErrLeaseAlreadyActive):
 			// BuildTaskLease may already have committed a running lease when a

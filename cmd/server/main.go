@@ -75,6 +75,9 @@ type serverConfig struct {
 	traceMode     string
 	traceEndpoint string
 	traceInsecure bool
+	traceSampler  string
+	traceRatio    float64
+	traceBaggage  bool
 }
 
 func main() {
@@ -109,6 +112,9 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	fs.StringVar(&cfg.traceMode, "trace", "disabled", "Tracing mode: disabled|stdout|otlp")
 	fs.StringVar(&cfg.traceEndpoint, "trace-endpoint", "localhost:4317", "OTLP collector gRPC endpoint (--trace=otlp)")
 	fs.BoolVar(&cfg.traceInsecure, "trace-insecure", false, "Disable TLS verification for OTLP connection")
+	fs.StringVar(&cfg.traceSampler, "trace-sampler", "parentbased", "OTel sampler: parentbased|always_on|always_off|traceidratio")
+	fs.Float64Var(&cfg.traceRatio, "trace-ratio", 1.0, "Sampling ratio for --trace-sampler=traceidratio, in [0,1]")
+	fs.BoolVar(&cfg.traceBaggage, "trace-baggage", false, "Propagate W3C baggage in addition to tracecontext (opt-in; bound accepted keys)")
 	if args == nil {
 		args = os.Args[1:]
 	}
@@ -147,6 +153,9 @@ func runServer(cfg serverConfig) error {
 		Endpoint:    cfg.traceEndpoint,
 		Insecure:    cfg.traceInsecure,
 		ServiceName: "xflow-server",
+		Sampler:     tracing.SamplerMode(cfg.traceSampler),
+		SampleRatio: cfg.traceRatio,
+		Baggage:     cfg.traceBaggage,
 	})
 	if err != nil {
 		return fmt.Errorf("tracing: %w", err)

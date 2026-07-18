@@ -21,6 +21,7 @@ import (
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
 	_ "github.com/xbcio/xflow/node"
+	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/service/protocol"
 	runnersvc "github.com/xbcio/xflow/service/runner"
 	"github.com/spf13/cobra"
@@ -65,6 +66,14 @@ type runnerConfig struct {
 	tlsServerCA   string
 	tlsClientCert string
 	tlsClientKey  string
+	// tracing
+	traceMode     string
+	traceEndpoint string
+	traceInsecure bool
+	traceSampler  string
+	traceRatio    float64
+	traceBaggage  bool
+	tracer         tracing.Tracer
 }
 
 func newRunCommand(opts commandOptions, cfg *runnerConfig) *cobra.Command {
@@ -99,6 +108,12 @@ func bindRunnerFlags(cmd *cobra.Command, cfg *runnerConfig) {
 	cmd.Flags().StringVar(&cfg.tlsServerCA, "tls-server-ca", cfg.tlsServerCA, "Path to server CA bundle (enables TLS)")
 	cmd.Flags().StringVar(&cfg.tlsClientCert, "tls-client-cert", cfg.tlsClientCert, "Path to client TLS certificate (enables mTLS)")
 	cmd.Flags().StringVar(&cfg.tlsClientKey, "tls-client-key", cfg.tlsClientKey, "Path to client TLS private key")
+	cmd.Flags().StringVar(&cfg.traceMode, "trace", "disabled", "Tracing mode: disabled|stdout|otlp")
+	cmd.Flags().StringVar(&cfg.traceEndpoint, "trace-endpoint", "localhost:4317", "OTLP collector gRPC endpoint (--trace=otlp)")
+	cmd.Flags().BoolVar(&cfg.traceInsecure, "trace-insecure", false, "Disable TLS verification for OTLP connection")
+	cmd.Flags().StringVar(&cfg.traceSampler, "trace-sampler", "parentbased", "OTel sampler: parentbased|always_on|always_off|traceidratio")
+	cmd.Flags().Float64Var(&cfg.traceRatio, "trace-ratio", 1.0, "Sampling ratio for --trace-sampler=traceidratio, in [0,1]")
+	cmd.Flags().BoolVar(&cfg.traceBaggage, "trace-baggage", false, "Propagate W3C baggage in addition to tracecontext (opt-in)")
 }
 
 func recordChangedFlags(cmd *cobra.Command, cfg *runnerConfig) {
@@ -136,6 +151,24 @@ func runRunner(ctx context.Context, cfg runnerConfig) error {
 	if err != nil {
 		return err
 	}
+	// Initialize tracing so the runner extracts the remote parent from the
+	// lease carrier, starts xflow.task.execute, and injects the report carrier.
+	tracer, shutdownTracing, err := tracing.NewTracerProvider(ctx, tracing.ProviderConfig{
+		Mode:        cfg.traceMode,
+		Endpoint:    cfg.traceEndpoint,
+		Insecure:    cfg.traceInsecure,
+		ServiceName: "xflow-runner",
+		Sampler:     tracing.SamplerMode(cfg.traceSampler),
+		SampleRatio: cfg.traceRatio,
+		Baggage:     cfg.traceBaggage,
+	})
+	if err != nil {
+		return fmt.Errorf("tracing: %w", err)
+	}
+	defer shutdownTracing(context.Background())
+	cfg.tracer = tracer
+	serviceCfg.Tracer = tracer
+
 	client, cleanup, err := newProtocolClient(cfg)
 	if err != nil {
 		return err
@@ -232,9 +265,9 @@ func runnerServiceConfig(cfg runnerConfig) (runnersvc.Config, error) {
 		Labels:       cloneStringMap(cfg.labels),
 		Capabilities: cfg.capabilities,
 		PollWait:     pollWait,
+		Tracer:       cfg.tracer,
 	}, nil
 }
-
 func runWithSignals(cfg runnerConfig) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
