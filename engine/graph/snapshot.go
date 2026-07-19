@@ -101,14 +101,21 @@ func cloneReflectValue(value reflect.Value) reflect.Value {
 		clone.Elem().Set(cloneReflectValue(value.Elem()))
 		return clone
 	case reflect.Struct:
+		// Validator guarantees that every field of a struct in the value domain is
+		// exported (CanInterface) and recursively auditable. We therefore build the
+		// clone field-by-field rather than shallow-copying the whole struct, which
+		// would share unexported mutable fields (maps/slices/pointers) with the
+		// original value.
 		clone := reflect.New(value.Type()).Elem()
-		clone.Set(value)
 		for i := 0; i < value.NumField(); i++ {
 			sourceField := value.Field(i)
 			targetField := clone.Field(i)
-			if targetField.CanSet() && sourceField.CanInterface() {
-				targetField.Set(cloneReflectValue(sourceField))
+			if !sourceField.CanInterface() || !targetField.CanSet() {
+				// Defensive: this branch should be unreachable because the validator
+				// rejects structs with unexported fields before cloning.
+				continue
 			}
+			targetField.Set(cloneReflectValue(sourceField))
 		}
 		return clone
 	default:
@@ -168,7 +175,7 @@ func validateReflectDomain(path string, value reflect.Value) error {
 		for i := 0; i < value.NumField(); i++ {
 			f := value.Type().Field(i)
 			if !f.IsExported() {
-				continue
+				return fmt.Errorf("value domain: %s.%s is an unexported field; it cannot be audited for deep immutability. Convert the value to an exported value struct or map[string]any", path, f.Name)
 			}
 			if err := validateReflectDomain(path+"."+f.Name, value.Field(i)); err != nil {
 				return err
