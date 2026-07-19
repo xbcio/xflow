@@ -146,7 +146,7 @@ Time:     ~2s
 
 ## Commits
 
-(To be filled after commit.)
+- `8f62656` — feat(web): scaffold pnpm/turbo workspace with boundary tooling
 
 ## Notes / Concerns
 
