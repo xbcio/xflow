@@ -81,7 +81,7 @@
 
 ## 6. 已知限制与诚实声明
 
-1. **Redis HA 客户端（sentinel/cluster）**：截至本模板生成时，`backend/distributed/backend.go` 仍使用单节点 `redis.NewClient`；sentinel/cluster 模式未完成。真实 Redis 主从切换 soak 须等待该改造完成，详见 [ha-soak-plan.md](ha-soak-plan.md) §3。
+1. **Redis HA 客户端（sentinel/cluster）**：Redis HA 客户端代码已落地（Task 1.1–4.1：`redis.UniversalClient` 宽化、`RedisConfig`（single/sentinel/cluster）+ `WithRedisConfig` Option、asynq transport 接 `RedisConnOpt` 经 `AsAsynqConnOpt` 三模式映射、cmd/server `--redis-mode` flag 与 `apiserver.Config.RedisConfig` 透传）。但**真实 sentinel/cluster Redis 环境的连通性、failover 行为、多副本 soak 验收仍为 ENV-GATED**，详见 [ha-soak-plan.md](ha-soak-plan.md) §3。
 2. **in-process harness 限制**：`test/soak/` 中的 in-process 故障注入仅验证 leader graceful transfer（LeaderKill / LeaderRestart），其余 5 类故障（RedisFailover、NetworkPartition、RunnerKill、ReportResponseLoss、OutboxFlushFail）返回 `ErrEnvGated`，不在 miniredis 中伪装执行。
 3. **重复 invocation 率分母**：`SLOReport.DuplicateInvocationRate` 当前以 API 样本数为分母；真实 soak 应结合宿主 idempotency-key 日志修正为“重复 delivery / 总 delivery”。
 4. **模板数据门控**：本文件所有 `<!-- SOAK_DATA: ... -->` 占位值在真实 soak 完成前不得替换为伪造数值。
