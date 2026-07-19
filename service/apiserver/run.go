@@ -117,12 +117,16 @@ func (s *APIServer) Run(ctx context.Context) error {
 			log.Printf("apiserver: gRPC listening on %s", s.cfg.GRPCAddr)
 		}
 		// B1: extract W3C tracecontext from gRPC metadata and start a server
-		// span for each unary RPC, mirroring the HTTP tracing middleware so
-		// the runner-protocol RPCs (Register/Heartbeat/PollTask/ReportResult)
-		// inherit a remote parent and the dispatch/commit spans they start are
-		// not root spans. Pass-through when no Tracer is configured.
+		// span for each unary AND stream RPC, mirroring the HTTP tracing
+		// middleware so the runner-protocol RPCs (Register/Heartbeat/PollTask/
+		// ReportResult and the Connect bidi stream) inherit a remote parent and
+		// the dispatch/commit spans they start are not root spans. Pass-through
+		// when no Tracer is configured.
 		if s.cfg.Tracer != nil {
-			opts = append(opts, grpc.UnaryInterceptor(tracing.GRPCUnaryServerInterceptor(s.cfg.Tracer)))
+			opts = append(opts,
+				grpc.UnaryInterceptor(tracing.GRPCUnaryServerInterceptor(s.cfg.Tracer)),
+				grpc.StreamInterceptor(tracing.GRPCStreamServerInterceptor(s.cfg.Tracer)),
+			)
 		}
 		grpcServer = grpc.NewServer(opts...)
 		s.RegisterGRPC(grpcServer)

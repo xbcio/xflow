@@ -156,3 +156,72 @@ func TestRegisterResponseProtoRoundTripPreservesSessionID(t *testing.T) {
 		t.Fatalf("register response round trip = %+v, want %+v", got, want)
 	}
 }
+
+// TestReportResultRequestProtoRoundTripPreservesTraceCarrier proves the gRPC
+// ReportResultRequest carries the W3C TraceCarrier in both directions so the
+// server's commit span can be parented to the runner's execute span via a real
+// W3C ExtractCarrier round-trip. This closes B1 blocker 1 (the gRPC proto /
+// converter previously dropped TraceCarrier, forcing a fallback to the lease
+// dispatch carrier and breaking execute→commit causality).
+func TestReportResultRequestProtoRoundTripPreservesTraceCarrier(t *testing.T) {
+	lease := &engine.TaskLease{
+		LeaseID:    "lease-1",
+		LeaseToken: "tok",
+		Task:       engine.Task{ExecutionID: "exec-1", NodeName: "n"},
+		NodeType:   "xflow.function",
+	}
+	original := ReportResultRequest{
+		RunnerID:  "runner-1",
+		SessionID: "session-1",
+		Lease:     lease,
+		Result:    engine.TaskResult{Output: &types.Output{Data: map[string]any{"k": "v"}}},
+		TraceCarrier: map[string]string{
+			"traceparent": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+			"tracestate":  "vendor=xflow",
+		},
+	}
+	pb, err := ReportResultRequestToProto(original)
+	if err != nil {
+		t.Fatalf("to proto: %v", err)
+	}
+	if len(pb.GetTraceCarrier()) == 0 {
+		t.Fatal("trace_carrier_fields = 0 (gRPC proto did not carry TraceCarrier)")
+	}
+	got, err := ReportResultRequestFromProto(pb)
+	if err != nil {
+		t.Fatalf("from proto: %v", err)
+	}
+	if got.TraceCarrier["traceparent"] != original.TraceCarrier["traceparent"] {
+		t.Fatalf("traceparent lost: got %q want %q", got.TraceCarrier["traceparent"], original.TraceCarrier["traceparent"])
+	}
+	if got.TraceCarrier["tracestate"] != original.TraceCarrier["tracestate"] {
+		t.Fatalf("tracestate lost: got %q want %q", got.TraceCarrier["tracestate"], original.TraceCarrier["tracestate"])
+	}
+}
+
+// TestReportResultRequestProtoRoundTripEmptyCarrier proves a request without a
+// carrier round-trips cleanly (no carrier set), so old runners that do not
+// populate TraceCarrier continue to work — the server falls back to the lease
+// dispatch carrier.
+func TestReportResultRequestProtoRoundTripEmptyCarrier(t *testing.T) {
+	original := ReportResultRequest{
+		RunnerID:  "runner-1",
+		SessionID: "session-1",
+		Lease:     &engine.TaskLease{LeaseID: "lease-1", LeaseToken: "tok"},
+		Result:    engine.TaskResult{Output: &types.Output{Data: map[string]any{"k": "v"}}},
+	}
+	pb, err := ReportResultRequestToProto(original)
+	if err != nil {
+		t.Fatalf("to proto: %v", err)
+	}
+	if len(pb.GetTraceCarrier()) != 0 {
+		t.Fatalf("expected no carrier, got %v", pb.GetTraceCarrier())
+	}
+	got, err := ReportResultRequestFromProto(pb)
+	if err != nil {
+		t.Fatalf("from proto: %v", err)
+	}
+	if len(got.TraceCarrier) != 0 {
+		t.Fatalf("expected no carrier on round-trip, got %v", got.TraceCarrier)
+	}
+}

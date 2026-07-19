@@ -57,3 +57,42 @@ func extractFromGRPCMetadata(ctx context.Context) context.Context {
 	}
 	return ExtractCarrier(ctx, carrier)
 }
+
+// GRPCStreamServerInterceptor returns a grpc.StreamServerInterceptor that
+// extracts W3C traceparent/tracestate from incoming gRPC metadata for every
+// streamed message and starts a server span covering the stream RPC. It is the
+// stream-RPC analogue of GRPCUnaryServerInterceptor and mirrors the HTTP
+// Middleware on the gRPC path.
+//
+// The extraction runs once per stream (on the incoming context) so bidi
+// streams like the runner protocol's Connect inherit the caller's trace across
+// the whole lifecycle. When tracer is nil the interceptor is a pass-through
+// (tracing disabled).
+func GRPCStreamServerInterceptor(tracer Tracer) grpc.StreamServerInterceptor {
+	if tracer == nil {
+		return func(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+			return handler(srv, ss)
+		}
+	}
+	return func(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+		ctx := extractFromGRPCMetadata(ss.Context())
+		ctx, span := tracer.Start(ctx, "grpc."+info.FullMethod)
+		defer span.End()
+		// Wrap the stream so handlers see the trace-enriched context.
+		wrapped := &tracedServerStream{ServerStream: ss, ctx: ctx}
+		err := handler(srv, wrapped)
+		if err != nil {
+			span.RecordError(err)
+		}
+		return err
+	}
+}
+
+// tracedServerStream forwards a grpc.ServerStream while replacing its context
+// with one carrying the extracted traceparent and the started server span.
+type tracedServerStream struct {
+	grpc.ServerStream
+	ctx context.Context
+}
+
+func (s *tracedServerStream) Context() context.Context { return s.ctx }

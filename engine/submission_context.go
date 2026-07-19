@@ -11,6 +11,7 @@ type executionTTLCtxKey struct{}
 type workflowDefCtxKey struct{}
 type traceIDCtxKey struct{}
 type spanIDCtxKey struct{}
+type traceCarrierCtxKey struct{}
 
 // WithExecutionTTL attaches a retention TTL hint for a single execution
 // submission. StateStore implementations may use it to choose key or record
@@ -75,4 +76,24 @@ func WithSpanID(ctx context.Context, spanID string) context.Context {
 func SpanIDFromContext(ctx context.Context) (string, bool) {
 	spanID, ok := ctx.Value(spanIDCtxKey{}).(string)
 	return spanID, ok && spanID != ""
+}
+
+// WithTraceCarrier attaches the W3C traceparent/tracestate carrier captured at
+// submission so the engine can persist it on the ExecutionSnapshot and a later
+// asynchronous dispatch can extract a real remote parent (via the W3C
+// propagator) for the dispatch span. Unlike TraceID/SpanID, the full carrier
+// preserves tracestate and the sampled flag and is parsed — not reconstructed
+// — by the propagator, so it does not fake a parent (RELEASE-GATES §4).
+func WithTraceCarrier(ctx context.Context, carrier map[string]string) context.Context {
+	if len(carrier) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, traceCarrierCtxKey{}, carrier)
+}
+
+// TraceCarrierFromContext extracts the W3C carrier attached to the submission
+// context. Returns nil when none was attached.
+func TraceCarrierFromContext(ctx context.Context) map[string]string {
+	carrier, _ := ctx.Value(traceCarrierCtxKey{}).(map[string]string)
+	return carrier
 }

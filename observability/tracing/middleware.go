@@ -6,6 +6,7 @@ import (
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
 // Middleware wraps an http.Handler to extract W3C traceparent/tracestate from
@@ -35,9 +36,20 @@ func InjectCarrier(ctx context.Context) map[string]string {
 // ExtractCarrier restores a SpanContext from a W3C propagation map into ctx so
 // downstream code can create properly-parented child spans. Returns ctx
 // unchanged when carrier is nil or empty.
+//
+// A malformed traceparent (present but unparseable) does not panic: the W3C
+// propagator returns an invalid SpanContext, which we surface via the
+// CarrierParseFailures counter so operators can detect broken propagation
+// without a process crash.
 func ExtractCarrier(ctx context.Context, carrier map[string]string) context.Context {
 	if len(carrier) == 0 {
 		return ctx
 	}
-	return otel.GetTextMapPropagator().Extract(ctx, propagation.MapCarrier(carrier))
+	extracted := otel.GetTextMapPropagator().Extract(ctx, propagation.MapCarrier(carrier))
+	if _, hasTP := carrier["traceparent"]; hasTP {
+		if sc := oteltrace.SpanFromContext(extracted).SpanContext(); !sc.IsValid() {
+			recordCarrierParseFailure()
+		}
+	}
+	return extracted
 }

@@ -211,6 +211,8 @@ func (e *Engine) ListDeadLetters(ctx context.Context, id types.ExecutionID, page
 // OutboxObserver (via WithOutboxObserver) and audit the replay themselves.
 // CLI/HTTP callers must use DeadLetterManager.Replay.
 func (e *Engine) ReplayDeadLetter(ctx context.Context, req ReplayDeadLetterRequest) (ReplayDeadLetterResult, error) {
+	ctx, span := outboxTracer().Start(ctx, "xflow.outbox.replay", "entry_id", req.EntryID)
+	defer span.End()
 	state, err := e.atomicState()
 	if err != nil {
 		return ReplayDeadLetterResult{}, err

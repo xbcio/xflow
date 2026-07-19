@@ -116,12 +116,14 @@ func NewTracerProvider(ctx context.Context, cfg ProviderConfig) (Tracer, func(co
 	otel.SetTracerProvider(tp)
 	// Default propagator is W3C TraceContext only. Baggage is opt-in: it can
 	// carry unbounded cross-tenant data, so callers must explicitly enable it
-	// and bound accepted keys/values.
+	// and the propagator enforces a BaggagePolicy (key denylist + value/size
+	// caps) on extraction. The standard Baggage propagator is never installed
+	// directly.
 	var prop propagation.TextMapPropagator = propagation.TraceContext{}
 	if cfg.Baggage {
 		prop = propagation.NewCompositeTextMapPropagator(
 			propagation.TraceContext{},
-			propagation.Baggage{},
+			FilteredBaggagePropagator(DefaultBaggagePolicy()),
 		)
 	}
 	otel.SetTextMapPropagator(prop)

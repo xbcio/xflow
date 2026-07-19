@@ -148,7 +148,16 @@ type ExecutionSnapshot struct {
 	Runtime  *types.Runtime
 	TraceID  string
 	SpanID   string
-	ParentID types.ExecutionID // non-empty for sub-executions
+	// TraceCarrier holds the W3C traceparent/tracestate headers captured at
+	// submission (xflow.workflow.submit / xflow.workflow.invoke) so a later,
+	// asynchronous dispatch (xflow.task.dispatch, potentially in a different
+	// goroutine or control-plane replica) can extract a REAL W3C remote parent
+	// for the dispatch span — not a trace_id/span_id string reconstruction
+	// (RELEASE-GATES §4 forbids faking a parent from raw id strings). The
+	// carrier round-trips through the W3C propagator, which preserves
+	// tracestate and the sampled flag.
+	TraceCarrier map[string]string `json:"trace_carrier,omitempty"`
+	ParentID     types.ExecutionID // non-empty for sub-executions
 }
 
 // NodeSnapshot is the engine's view of a single node's latest state stored in

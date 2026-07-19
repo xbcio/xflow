@@ -26,7 +26,7 @@ func fakeControlPlaneForAuthz(t *testing.T) *control.ControlPlane {
 
 func authzModule(t *testing.T, auth PrincipalAuthenticator, authorizer Authorizer, audit AuditSink) *workflowControlModule {
 	t.Helper()
-	m := newWorkflowControlModule(fakeControlPlaneForAuthz(t), nil, nil)
+	m := newWorkflowControlModule(fakeControlPlaneForAuthz(t), nil, nil, nil)
 	m.principalAuth = auth
 	m.authorizer = authorizer
 	m.audit = audit

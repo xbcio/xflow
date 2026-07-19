@@ -2,6 +2,7 @@ package tracing
 
 import (
 	"context"
+	"net"
 	"testing"
 
 	"go.opentelemetry.io/otel"
@@ -9,7 +10,10 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
+
+	"github.com/xbcio/xflow/service/protocol/runnerpb"
 )
 
 // TestGRPCUnaryInterceptorExtractsRemoteParent proves that a traceparent
@@ -128,4 +132,115 @@ func testTracerProvider() (*sdktrace.TracerProvider, *tracetest.SpanRecorder) {
 	sr := tracetest.NewSpanRecorder()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sr))
 	return tp, sr
+}
+
+// TestGRPCStreamInterceptorExtractsRemoteParentOnConnect proves the stream
+// interceptor (B1 blocker 4) extracts a remote parent from incoming gRPC
+// metadata on a bidi stream RPC and starts a server span covering the stream.
+// The test drives the real Connect bidi stream RPC end-to-end on an in-process
+// gRPC server (not a unary RPC renamed "stream"), so the stream interceptor
+// actually wraps _RunnerProtocol_Connect_Handler.
+func TestGRPCStreamInterceptorExtractsRemoteParentOnConnect(t *testing.T) {
+	// Caller-side: start a parent span and inject traceparent into metadata.
+	callerTP := sdktrace.NewTracerProvider()
+	defer callerTP.Shutdown(context.Background())
+	callerTracer := callerTP.Tracer("caller")
+	ctx, parentSpan := callerTracer.Start(context.Background(), "caller.connect")
+	defer parentSpan.End()
+
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	md := metadata.New(nil)
+	carrier := propagation.MapCarrier{}
+	otel.GetTextMapPropagator().Inject(ctx, carrier)
+	for k, v := range carrier {
+		md.Set(k, v)
+	}
+
+	// Server-side: fresh provider + recorder so the only spans recorded are the
+	// interceptor's stream server span (proving it inherited the parent).
+	serverTP, serverSR := testTracerProvider()
+	defer serverTP.Shutdown(context.Background())
+	serverTracer := NewOTelTracer(serverTP.Tracer("xflow-server"))
+
+	// A custom RunnerProtocolServer whose Connect records the context it
+	// receives and immediately returns so the stream closes cleanly.
+	srv := &connectTraceServer{}
+
+	grpcServer := grpc.NewServer(grpc.StreamInterceptor(GRPCStreamServerInterceptor(serverTracer)))
+	runnerpb.RegisterRunnerProtocolServer(grpcServer, srv)
+
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go func() { _ = grpcServer.Serve(lis) }()
+	defer grpcServer.GracefulStop()
+
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	client := runnerpb.NewRunnerProtocolClient(conn)
+	streamCtx := metadata.NewOutgoingContext(context.Background(), md)
+	stream, err := client.Connect(streamCtx)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	// Close the send side so the server's Recv returns io.EOF and Connect returns.
+	if err := stream.CloseSend(); err != nil {
+		t.Fatalf("CloseSend: %v", err)
+	}
+	// Drain until the server closes.
+	for {
+		if _, err := stream.Recv(); err != nil {
+			break
+		}
+	}
+
+	if srv.gotCtx == nil {
+		t.Fatal("Connect handler was never invoked")
+	}
+	spans := serverSR.Ended()
+	var streamSpan sdktrace.ReadOnlySpan
+	for _, s := range spans {
+		if s.Name() == "grpc./xflow.runner.v1.RunnerProtocol/Connect" {
+			streamSpan = s
+		}
+	}
+	if streamSpan == nil {
+		t.Fatalf("stream server span not recorded; spans=%v", spanNames(spans))
+	}
+	if !streamSpan.Parent().IsValid() {
+		t.Fatalf("stream span has no valid parent; tracecontext was not extracted from gRPC metadata (span=%+v)", streamSpan)
+	}
+	if streamSpan.Parent().SpanID() != parentSpan.SpanContext().SpanID() {
+		t.Fatalf("stream span parent = %v, want caller %v", streamSpan.Parent().SpanID(), parentSpan.SpanContext().SpanID())
+	}
+}
+
+// connectTraceServer is a RunnerProtocolServer that records the stream context
+// its Connect handler receives, then returns immediately (closing the stream).
+type connectTraceServer struct {
+	runnerpb.UnimplementedRunnerProtocolServer
+	gotCtx context.Context
+}
+
+func (s *connectTraceServer) Connect(stream runnerpb.RunnerProtocol_ConnectServer) error {
+	s.gotCtx = stream.Context()
+	// Drain until the client closes send, then return.
+	for {
+		if _, err := stream.Recv(); err != nil {
+			return nil
+		}
+	}
+}
+
+func spanNames(spans []sdktrace.ReadOnlySpan) []string {
+	out := make([]string, 0, len(spans))
+	for _, s := range spans {
+		out = append(out, s.Name())
+	}
+	return out
 }

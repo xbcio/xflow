@@ -87,6 +87,13 @@ message ReportResultRequest {
   // result_json is the JSON-encoded protocol task result.
   bytes result_json = 3;
   string session_id = 4;
+  // trace_carrier carries W3C traceparent/tracestate headers injected by the
+  // runner from its xflow.task.execute span so the server's report/commit span
+  // is parented to the runner's execute span (real W3C remote parent, not a
+  // trace_id/span_id string reconstruction). Additive map field; older peers
+  // that do not populate it simply leave it empty and the server falls back to
+  // the lease's dispatch carrier.
+  map<string, string> trace_carrier = 5;
 }
 
 message ReportResultResponse {

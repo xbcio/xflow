@@ -108,6 +108,14 @@ func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot
 		pipe.Set(ctx, execKey(t, e.ID, "span_id"), e.SpanID, ttl)
 		keys = append(keys, execKey(t, e.ID, "span_id"))
 	}
+	if len(e.TraceCarrier) > 0 {
+		carrierJSON, err := json.Marshal(e.TraceCarrier)
+		if err != nil {
+			return fmt.Errorf("marshal execution trace carrier for %q: %w", e.ID, err)
+		}
+		pipe.Set(ctx, execKey(t, e.ID, "trace_carrier"), string(carrierJSON), ttl)
+		keys = append(keys, execKey(t, e.ID, "trace_carrier"))
+	}
 	// Acyclic executions use these counters as the O(1) completion source of
 	// truth. Cyclic graphs retain their activation-based completion protocol.
 	if e.Graph != nil && !e.Graph.AllowCycles() {
@@ -186,6 +194,7 @@ func (s *Store) cleanupCreatedExecution(ctx context.Context, e *engine.Execution
 		execKey(t, e.ID, "runtime"),
 		execKey(t, e.ID, "trace_id"),
 		execKey(t, e.ID, "span_id"),
+		execKey(t, e.ID, "trace_carrier"),
 		remainingNodesKey(t, e.ID),
 		failedNodesKey(t, e.ID),
 		leaseExpiryZSetKey(t, e.ID),
@@ -337,13 +346,22 @@ func (s *Store) GetExecution(ctx context.Context, id types.ExecutionID) (*engine
 	} else if err != redis.Nil {
 		return nil, fmt.Errorf("get execution span ID %q: %w", id, err)
 	}
+	var traceCarrier map[string]string
+	if raw, err := s.rdb.Get(ctx, execKey(t, id, "trace_carrier")).Bytes(); err == nil {
+		if err := json.Unmarshal(raw, &traceCarrier); err != nil {
+			return nil, fmt.Errorf("unmarshal execution trace carrier %q: %w", id, err)
+		}
+	} else if err != redis.Nil {
+		return nil, fmt.Errorf("get execution trace carrier %q: %w", id, err)
+	}
 	return &engine.ExecutionSnapshot{
-		ID:      id,
-		Graph:   g,
-		Status:  types.ExecutionStatus(val),
-		Params:  params,
-		Runtime: runtime,
-		TraceID: traceID,
-		SpanID:  spanID,
+		ID:           id,
+		Graph:        g,
+		Status:       types.ExecutionStatus(val),
+		Params:       params,
+		Runtime:      runtime,
+		TraceID:      traceID,
+		SpanID:       spanID,
+		TraceCarrier: traceCarrier,
 	}, nil
 }

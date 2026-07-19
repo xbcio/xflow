@@ -136,6 +136,7 @@ func transientExecutionKeys(t tenant.TenantID, id types.ExecutionID, g *graph.Gr
 		execKey(t, id, "runtime"),
 		execKey(t, id, "trace_id"),
 		execKey(t, id, "span_id"),
+		execKey(t, id, "trace_carrier"),
 		remainingNodesKey(t, id),
 		failedNodesKey(t, id),
 		leaseExpiryZSetKey(t, id),

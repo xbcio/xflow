@@ -11,6 +11,23 @@ import (
 	"github.com/google/uuid"
 )
 
+// ExecutionTraceCarrier returns the W3C traceparent/tracestate carrier
+// captured at submission and persisted on the execution snapshot. The control
+// plane uses it to parent the asynchronous dispatch span to the original
+// submit/invoke trace via a real W3C ExtractCarrier round-trip (not a
+// trace_id/span_id string parent). Returns nil when the execution is gone or
+// tracing was disabled at submission time.
+func (e *Engine) ExecutionTraceCarrier(ctx context.Context, id types.ExecutionID) (map[string]string, error) {
+	snap, err := e.state.GetExecution(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if snap == nil {
+		return nil, nil
+	}
+	return snap.TraceCarrier, nil
+}
+
 // BuildTaskLease assembles a runner-facing task lease from a queued task.
 // The lease includes both handler routing metadata and the concrete input, so
 // runner-side code does not need to access graph or state internals.

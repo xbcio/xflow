@@ -206,6 +206,8 @@ func (e *Engine) commitNode(ctx context.Context, req CommitNodeRequest) (CommitN
 // succeeds before AckOutbox fails is deliberately retried later; lease fencing
 // makes that duplicate delivery safe.
 func (e *Engine) FlushOutbox(ctx context.Context, id types.ExecutionID) error {
+	ctx, span := outboxTracer().Start(ctx, "xflow.outbox.flush", "execution_id", string(id))
+	defer span.End()
 	state, err := e.atomicState()
 	if err != nil {
 		return err

@@ -170,10 +170,11 @@ func ReportResultRequestToProto(req ReportResultRequest) (*runnerpb.ReportResult
 		return nil, err
 	}
 	return &runnerpb.ReportResultRequest{
-		RunnerId:   req.RunnerID,
-		LeaseJson:  leaseJSON,
-		ResultJson: resultJSON,
-		SessionId:  req.SessionID,
+		RunnerId:     req.RunnerID,
+		LeaseJson:    leaseJSON,
+		ResultJson:   resultJSON,
+		SessionId:    req.SessionID,
+		TraceCarrier: cloneLabels(req.TraceCarrier),
 	}, nil
 }
 
@@ -187,10 +188,11 @@ func ReportResultRequestFromProto(req *runnerpb.ReportResultRequest) (ReportResu
 		return ReportResultRequest{}, err
 	}
 	return ReportResultRequest{
-		RunnerID:  req.GetRunnerId(),
-		SessionID: req.GetSessionId(),
-		Lease:     lease,
-		Result:    result,
+		RunnerID:     req.GetRunnerId(),
+		SessionID:    req.GetSessionId(),
+		Lease:        lease,
+		Result:       result,
+		TraceCarrier: cloneLabels(req.GetTraceCarrier()),
 	}, nil
 }
 

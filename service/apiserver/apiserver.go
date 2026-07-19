@@ -140,7 +140,7 @@ func New(cfg Config, opts ...Option) (*APIServer, error) {
 	}
 
 	workflowAuth := cfg.WorkflowAuth
-	ctrlModule := newWorkflowControlModule(s.cp, workflowAuth, cfg.Logger)
+	ctrlModule := newWorkflowControlModule(s.cp, workflowAuth, cfg.Logger, cfg.Tracer)
 	if cfg.PrincipalAuth != nil {
 		ctrlModule.principalAuth = cfg.PrincipalAuth
 		ctrlModule.authorizer = cfg.Authorizer

@@ -10,6 +10,7 @@ import (
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/service/protocol"
+	"github.com/xbcio/xflow/types"
 )
 
 // Transport-agnostic outcome errors. Each transport (HTTP, gRPC) maps these to
@@ -53,6 +54,15 @@ type Core struct {
 // it to replay a lease that was committed before a control-plane crash.
 type leaseRecoveryEngine interface {
 	RecoverTaskLease(ctx context.Context, task *engine.Task) (*engine.TaskLease, error)
+}
+
+// traceCarrierFetcher is an optional capability of EngineFacade: the concrete
+// *engine.Engine exposes the W3C carrier persisted at submission so the
+// dispatch span can inherit submit/invoke causality via a real W3C remote
+// parent. Test doubles that do not implement it simply fall back to the poll
+// context (no submit parent), preserving source compatibility.
+type traceCarrierFetcher interface {
+	ExecutionTraceCarrier(ctx context.Context, id types.ExecutionID) (map[string]string, error)
 }
 
 // AuthObserver receives auth allow/deny/dry-run decisions.
@@ -205,20 +215,33 @@ func (c *Core) pollTask(ctx context.Context, req protocol.PollTaskRequest, info 
 			_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimRequeue)
 			return protocol.PollTaskResponse{}, ErrEngineNotConfigured
 		}
-		lease, err := c.engine.BuildTaskLease(ctx, &claim.Assignment.Task)
+		tracer := c.tracer
+		if tracer == nil {
+			tracer = tracing.NoopTracer{}
+		}
+		// Inherit the workflow submit/invoke causality: extract the W3C carrier
+		// persisted on the execution snapshot at submission. This is a real W3C
+		// remote-parent round-trip (preserves tracestate + sampled flag), NOT a
+		// trace_id/span_id string reconstruction (RELEASE-GATES §4 forbids that).
+		// Falls back to the poll context (no submit parent) when the engine does
+		// not expose the carrier or tracing was disabled at submission.
+		dispatchCtx := ctx
+		if fetcher, ok := c.engine.(traceCarrierFetcher); ok {
+			if carrier, ferr := fetcher.ExecutionTraceCarrier(ctx, claim.Assignment.Task.ExecutionID); ferr == nil && len(carrier) > 0 {
+				dispatchCtx = tracing.ExtractCarrier(ctx, carrier)
+			}
+		}
+		// xflow.task.dispatch spans BuildTaskLease + FinalizeClaim (not started
+		// after Build) and is parented to the submit/invoke carrier above. It
+		// injects the W3C carrier the runner extracts to start its execute span
+		// as a remote child of dispatch.
+		dispatchCtx, dispatchSpan := tracer.Start(dispatchCtx, "xflow.task.dispatch",
+			"execution_id", string(claim.Assignment.Task.ExecutionID),
+			"node_name", claim.Assignment.Task.NodeName,
+		)
+		lease, err := c.engine.BuildTaskLease(dispatchCtx, &claim.Assignment.Task)
 		switch {
 		case err == nil:
-			// xflow.task.dispatch spans the BuildTaskLease + FinalizeClaim
-			// assignment and injects the W3C carrier the runner extracts to
-			// start its execute span as a remote child.
-			tracer := c.tracer
-			if tracer == nil {
-				tracer = tracing.NoopTracer{}
-			}
-			dispatchCtx, dispatchSpan := tracer.Start(ctx, "xflow.task.dispatch",
-				"execution_id", string(claim.Assignment.Task.ExecutionID),
-				"node_name", claim.Assignment.Task.NodeName,
-			)
 			lease.TraceCarrier = tracing.InjectCarrier(dispatchCtx)
 			if err := c.runners.FinalizeClaim(dispatchCtx, claim.ClaimID, lease); err != nil {
 				dispatchSpan.RecordError(err)
@@ -229,6 +252,7 @@ func (c *Core) pollTask(ctx context.Context, req protocol.PollTaskRequest, info 
 			dispatchSpan.End()
 			return protocol.PollTaskResponse{Lease: lease}, nil
 		case errors.Is(err, engine.ErrLeaseAlreadyActive):
+			dispatchSpan.End()
 			// BuildTaskLease may already have committed a running lease when a
 			// prior control-plane process died before FinalizeClaim. Recover and
 			// finalize that exact fenced lease instead of waiting for its TTL.
@@ -247,8 +271,11 @@ func (c *Core) pollTask(ctx context.Context, req protocol.PollTaskRequest, info 
 			_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimRequeue)
 			return protocol.PollTaskResponse{}, recoverErr
 		case errors.Is(err, engine.ErrExecutionInactive):
+			dispatchSpan.End()
 			_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimDrop)
 		default:
+			dispatchSpan.RecordError(err)
+			dispatchSpan.End()
 			_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimRequeue)
 			return protocol.PollTaskResponse{}, err
 		}
@@ -264,6 +291,34 @@ func (c *Core) recoverTaskLease(ctx context.Context, task *engine.Task) (*engine
 }
 
 func (c *Core) reportResult(ctx context.Context, req protocol.ReportResultRequest, info TransportInfo) (protocol.ReportResultResponse, error) {
+	tracer := c.tracer
+	if tracer == nil {
+		tracer = tracing.NoopTracer{}
+	}
+	// Restore the runner's execute span context so the report/commit spans are
+	// properly parented. Prefer the runner-side report carrier; fall back to the
+	// dispatch carrier embedded in the lease for old runners that don't send
+	// their own. This is a real W3C ExtractCarrier round-trip (preserves
+	// tracestate + sampled flag), not a trace_id/span_id string reconstruction.
+	if req.Lease != nil {
+		carrier := req.TraceCarrier
+		if len(carrier) == 0 {
+			carrier = req.Lease.TraceCarrier
+		}
+		ctx = tracing.ExtractCarrier(ctx, carrier)
+	}
+	// xflow.task.report spans the whole server-side report RPC (auth, session
+	// validation, commit, capacity release). It is parented to the runner's
+	// execute span via the carrier above (NOT to the inbound transport span,
+	// since the runner does not inject traceparent into gRPC metadata for the
+	// report RPC — it carries it in the request body). The narrower
+	// xflow.task.commit span below is its child.
+	reportCtx, reportSpan := tracer.Start(ctx, "xflow.task.report",
+		"runner_id", req.RunnerID,
+	)
+	defer reportSpan.End()
+	ctx = reportCtx
+
 	if req.RunnerID == "" || req.SessionID == "" || req.Lease == nil {
 		return protocol.ReportResultResponse{}, ErrLeaseRequired
 	}
@@ -278,18 +333,6 @@ func (c *Core) reportResult(ctx context.Context, req protocol.ReportResultReques
 		return protocol.ReportResultResponse{}, normalizeRunnerError(err, c.logger, "report_result")
 	}
 
-	// Restore the runner's execute span context so the commit span is properly
-	// parented. Prefer the runner-side report carrier; fall back to the dispatch
-	// carrier embedded in the lease for old runners that don't send their own.
-	carrier := req.TraceCarrier
-	if len(carrier) == 0 {
-		carrier = req.Lease.TraceCarrier
-	}
-	ctx = tracing.ExtractCarrier(ctx, carrier)
-	tracer := c.tracer
-	if tracer == nil {
-		tracer = tracing.NoopTracer{}
-	}
 	_, span := tracer.Start(ctx, "xflow.task.commit",
 		"execution_id", string(req.Lease.Task.ExecutionID),
 		"node_name", req.Lease.Task.NodeName,

@@ -238,4 +238,7 @@ func attachTraceMetadata(ctx context.Context, snap *ExecutionSnapshot) {
 	if spanID, ok := SpanIDFromContext(ctx); ok {
 		snap.SpanID = spanID
 	}
+	if carrier := TraceCarrierFromContext(ctx); len(carrier) > 0 {
+		snap.TraceCarrier = carrier
+	}
 }

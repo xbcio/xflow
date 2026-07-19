@@ -85,6 +85,7 @@ func (s *Store) extendExecTTL(ctx context.Context, id types.ExecutionID, nodeNam
 	pipe.Expire(ctx, execKey(t, id, "runtime"), ttl)
 	pipe.Expire(ctx, execKey(t, id, "trace_id"), ttl)
 	pipe.Expire(ctx, execKey(t, id, "span_id"), ttl)
+	pipe.Expire(ctx, execKey(t, id, "trace_carrier"), ttl)
 	pipe.Expire(ctx, execKey(t, id, "graph"), ttl)
 	pipe.Expire(ctx, suspendedNodesKey(t, id), ttl)
 	for _, key := range suspendNodeTTLKeys(t, id, nodeName, spec) {

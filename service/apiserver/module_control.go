@@ -9,6 +9,7 @@ import (
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
+	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/types"
 )
@@ -25,10 +26,18 @@ type workflowControlModule struct {
 	eng  control.EngineFacade
 	auth WorkflowAuthenticator
 	log  engine.Logger
+	// tracer instruments submit/invoke so their span context is persisted on
+	// the execution snapshot (via engine.WithTraceCarrier) and later inherited
+	// by the asynchronous dispatch span — closing the submit→dispatch trace
+	// causality gap. NoopTracer when tracing is disabled.
+	tracer tracing.Tracer
 }
 
-func newWorkflowControlModule(cp *control.ControlPlane, auth WorkflowAuthenticator, log engine.Logger) *workflowControlModule {
-	return &workflowControlModule{cp: cp, eng: cp.Engine(), auth: auth, log: log}
+func newWorkflowControlModule(cp *control.ControlPlane, auth WorkflowAuthenticator, log engine.Logger, tracer tracing.Tracer) *workflowControlModule {
+	if tracer == nil {
+		tracer = tracing.NoopTracer{}
+	}
+	return &workflowControlModule{cp: cp, eng: cp.Engine(), auth: auth, log: log, tracer: tracer}
 }
 
 func (m *workflowControlModule) Name() string { return "workflow-control" }
@@ -145,7 +154,19 @@ func (m *workflowControlModule) handleSubmitWorkflow(w http.ResponseWriter, r *h
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	id, err := m.eng.Submit(r.Context(), g, req.Params)
+	// xflow.workflow.submit starts the inbound trace for a workflow execution.
+	// Its SpanContext is persisted on the execution snapshot (via
+	// engine.WithTraceCarrier) so the later, asynchronous dispatch span can
+	// inherit it as a real W3C remote parent — closing the submit→dispatch
+	// causality gap without faking a parent from trace_id/span_id strings.
+	tracer := m.tracer
+	if tracer == nil {
+		tracer = tracing.NoopTracer{}
+	}
+	ctx, span := tracer.Start(r.Context(), "xflow.workflow.submit")
+	defer span.End()
+	ctx = engine.WithTraceCarrier(ctx, tracing.InjectCarrier(ctx))
+	id, err := m.eng.Submit(ctx, g, req.Params)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
@@ -174,7 +195,16 @@ func (m *workflowControlModule) handleInvoke(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	id, err := m.eng.Invoke(r.Context(), g, req.Entry, req.Input)
+	// xflow.workflow.invoke mirrors submit for the explicit-entry path. Its
+	// SpanContext is persisted for asynchronous dispatch causality.
+	tracer := m.tracer
+	if tracer == nil {
+		tracer = tracing.NoopTracer{}
+	}
+	ctx, span := tracer.Start(r.Context(), "xflow.workflow.invoke", "entry", req.Entry)
+	defer span.End()
+	ctx = engine.WithTraceCarrier(ctx, tracing.InjectCarrier(ctx))
+	id, err := m.eng.Invoke(ctx, g, req.Entry, req.Input)
 	if err != nil {
 		// An unknown entry node is a client error (400), not a 404: the
 		// missing resource is the entry in the submitted graph, not an

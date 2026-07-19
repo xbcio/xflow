@@ -159,3 +159,114 @@ func spanNames(spans []sdktrace.ReadOnlySpan) []string {
 	}
 	return out
 }
+
+// TestRunnerReportPreservesSpanContextOnCancelledContext proves that when the
+// run context is cancelled (e.g. SIGTERM mid-execute), the report still
+// carries the execute SpanContext (the detached context preserves it) and the
+// report exits within defaultReportTimeout. B1 blocker 6.
+func TestRunnerReportPreservesSpanContextOnCancelledContext(t *testing.T) {
+	rec := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithSpanProcessor(rec),
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+	)
+	otel.SetTracerProvider(tp)
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+
+	tracer := tracing.NewOTelTracer(tp.Tracer("xflow-test"))
+	dispatchCtx, dispatchSpan := tracer.Start(context.Background(), "xflow.task.dispatch")
+	carrier := tracing.InjectCarrier(dispatchCtx)
+	dispatchSpan.End()
+
+	lease := &engine.TaskLease{
+		LeaseID:      engine.LeaseID("lease-cancel"),
+		Task:         engine.Task{ExecutionID: types.ExecutionID("exec-cancel"), NodeName: "start"},
+		Input:        &types.Input{Data: map[string]any{"claim_id": "c-cancel"}},
+		NodeType:     "test.function",
+		TraceCarrier: carrier,
+	}
+
+	// A client that blocks the report until the test signals it, so we can
+	// observe the report context. The runner uses a detached+timeout context,
+	// so even though runCtx is cancelled the report call still proceeds.
+	reportStarted := make(chan struct{})
+	reportBlocked := make(chan struct{})
+	client := &cancelReportClient{
+		lease:         lease,
+		reportStarted: reportStarted,
+		reportBlocked: reportBlocked,
+	}
+	registry := execution.NewRegistry()
+	registry.RegisterGlobal("test.function", functionHandler{})
+
+	r := New(client, registry, Config{
+		RunnerID:          "runner-cancel",
+		Concurrency:       1,
+		Capabilities:      []protocol.Capability{{NodeType: "test.function"}},
+		HeartbeatInterval: time.Hour,
+		PollWait:          time.Millisecond,
+		Tracer:            tracer,
+	})
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runErr := make(chan error, 1)
+	go func() { runErr <- r.Run(runCtx) }()
+
+	// Wait for the report to start, then cancel the run context and unblock
+	// the report so the worker exits within the report timeout.
+	<-reportStarted
+	cancel()
+	close(reportBlocked)
+
+	select {
+	case err := <-runErr:
+		// Cancellation maps to a nil error per runContextError; any non-cancel
+		// error is a bug.
+		if err != nil && err != context.Canceled {
+			t.Fatalf("Run() error = %v", err)
+		}
+	case <-time.After(defaultReportTimeout + 2*time.Second):
+		t.Fatal("Run did not exit within report timeout after cancellation (bounded exit broken)")
+	}
+
+	if len(client.reported.TraceCarrier) == 0 {
+		t.Fatal("runner did not inject a report carrier on cancelled context")
+	}
+	reportCtx := tracing.ExtractCarrier(context.Background(), client.reported.TraceCarrier)
+	sc := oteltrace.SpanFromContext(reportCtx).SpanContext()
+	if !sc.IsValid() {
+		t.Fatal("report carrier on cancelled context did not carry a valid SpanContext")
+	}
+}
+
+// cancelReportClient delivers one lease, then blocks the report until
+// reportBlocked is closed, signaling that the report path was reached.
+type cancelReportClient struct {
+	lease         *engine.TaskLease
+	reported      protocol.ReportResultRequest
+	got           bool
+	reportStarted chan struct{}
+	reportBlocked chan struct{}
+}
+
+func (c *cancelReportClient) Register(context.Context, protocol.RegisterRunnerRequest) (protocol.RegisterRunnerResponse, error) {
+	return protocol.RegisterRunnerResponse{SessionID: "session-cancel"}, nil
+}
+func (c *cancelReportClient) Heartbeat(context.Context, protocol.HeartbeatRequest) (protocol.HeartbeatResponse, error) {
+	return protocol.HeartbeatResponse{}, nil
+}
+func (c *cancelReportClient) Poll(ctx context.Context, _ protocol.PollTaskRequest) (protocol.PollTaskResponse, error) {
+	if c.got {
+		<-ctx.Done()
+		return protocol.PollTaskResponse{}, ctx.Err()
+	}
+	c.got = true
+	return protocol.PollTaskResponse{Lease: c.lease}, nil
+}
+func (c *cancelReportClient) ReportResult(_ context.Context, req protocol.ReportResultRequest) (protocol.ReportResultResponse, error) {
+	c.reported = req
+	close(c.reportStarted)
+	<-c.reportBlocked
+	return protocol.ReportResultResponse{Accepted: true}, nil
+}
