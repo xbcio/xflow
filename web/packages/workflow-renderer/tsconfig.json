@@ -7,10 +7,8 @@
     "tsBuildInfoFile": "./dist/.tsbuildinfo"
   },
   "include": ["src/**/*"],
-  "exclude": ["dist", "node_modules", "**/*.test.ts"],
+  "exclude": ["dist", "node_modules", "**/*.test.ts", "**/*.test.tsx"],
   "references": [
-    { "path": "../workflow-core" },
-    { "path": "../node-registry" },
-    { "path": "../workflow-provider" }
+    { "path": "../workflow-core" }
   ]
 }

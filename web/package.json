@@ -30,6 +30,7 @@
     "@typescript-eslint/parser": "8.32.0",
     "@xflow/eslint-config": "workspace:*",
     "@xflow/typescript-config": "workspace:*",
+    "@xyflow/react": "12.5.0",
     "eslint": "9.25.0",
     "eslint-import-resolver-typescript": "3.10.0",
     "eslint-plugin-import": "2.31.0",

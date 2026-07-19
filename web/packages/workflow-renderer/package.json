@@ -10,6 +10,9 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./styles.css": {
+      "default": "./dist/styles.css"
     }
   },
   "scripts": {
@@ -19,24 +22,19 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@xflow/node-registry": "workspace:*",
-    "@xflow/workflow-core": "workspace:*",
-    "@xflow/workflow-provider": "workspace:*"
+    "@xflow/workflow-core": "workspace:*"
   },
   "peerDependencies": {
     "react": "19.1.0",
     "react-dom": "19.1.0",
     "@xyflow/react": "12.5.0"
   },
-  "peerDependenciesMeta": {
-    "@xyflow/react": {
-      "optional": true
-    }
-  },
   "devDependencies": {
+    "@xflow/tailwind-config": "workspace:*",
     "@xflow/typescript-config": "workspace:*",
     "react": "19.1.0",
     "react-dom": "19.1.0",
+    "tailwindcss": "3.4.17",
     "typescript": "5.8.3",
     "vitest": "3.2.0"
   }
