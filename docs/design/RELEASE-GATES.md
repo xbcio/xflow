@@ -52,10 +52,19 @@ xflow 采用分层发布门槛，不再用单个测试替代完整 release gate�
 
 | 项 | 状态 | 说明 |
 |---|---|---|
-| B2 control-plane HA + Redis HA soak | ⏳ | 代码侧：leader election/graceful shutdown/management 端点已具备；缺 Redis HA 客户端（sentinel/cluster）和 soak 框架。详见 [ha-soak-plan](../references/ha-soak-plan.md) |
-| 多租户 tenant boundary | ⏳ | G2 多租户需覆盖 Redis key/索引、workflow registry、runner placement、credential、metrics/log/trace、dead-letter 和审计数据隔离 |
+| B2 control-plane HA + Redis HA soak | ⏳ | 代码侧：leader election/graceful shutdown/management 端点已具备；**Redis HA 客户端代码已完成**（Task 1.1–4.1：`redis.UniversalClient` 宽化 + `RedisConfig` single/sentinel/cluster + `WithRedisConfig` Option + asynq `AsAsynqConnOpt` 三模式映射 + `cmd/server --redis-mode` flag + `apiserver.Config.RedisConfig` 透传 + sentinel 认证字段，commits `9a39996`..`c292d7d`）；**workflowreg/trigger cluster-safety 已修**（Task 2.1 hash tag + Task 2.2 单 key 核查，commits `aed4db3`/`1c54be0`）；**soak 框架代码已完成**（Task 5.1 harness + 5.2 故障注入器 + 5.3 SLO 报告类型与模板，commits `dc13301`..`065974a`）。**仍缺（ENV-GATED）**：真实 sentinel/cluster Redis 环境连通性/failover 验收、多副本 soak 报告填实、SLO 量化达标判定、真实 cluster 下 CROSSSLOT 回归。详见 [ha-soak-plan](../references/ha-soak-plan.md) 与 [ha-soak-report-template](../references/ha-soak-report-template.md) |
+| 多租户 tenant boundary | ⏳ | tenant boundary 全链路（Redis key/索引、workflow registry、runner placement、credential、metrics/log/trace、dead-letter 和审计数据隔离）与越权测试为 Phase 6-8，未启动 |
 
 > leader election、hash tag 或 namespace 单独存在都不等同于 control-plane HA 或多租户隔离。本轮 G0/G1 修复不得顺带宣称 G2。
+
+#### G2 control-plane HA 承诺与边界声明
+
+G2 control-plane HA 的承诺范围与限制（映射 §4 反声明，在 G2 整体达成前不得对外宣称）：
+
+- **承诺 at-least-once，不承诺 exactly-once**：handler 与 Runner Protocol 保持 at-least-once；failover 或 lease replay 可能重复 invocation，业务副作用只产生一次依赖宿主幂等键兜底（映射 §4「failover 不重执行」反声明）。
+- **leader election 仅协调 leader-only maintenance**：`RedisLeaderElector` SETNX + Lua 续约/释放只用于 gate `lease_sweeper` 等维护任务，不提供完整 HA SLO；「leader election 等于 control-plane HA」是反声明（§4）。
+- **Redis HA 客户端代码就绪 ≠ control-plane HA 已验收**：`UniversalClient` 宽化与 sentinel/cluster 构造代码落地（Task 1.1–4.1）只保证"可配置 sentinel/cluster 模式"，真实多副本 soak + SLO 量化是 ENV-GATED；未填实 [ha-soak-report-template](../references/ha-soak-report-template.md) 前 G2 不得标完成。
+- **hash tag / namespace / leader election 单独存在 ≠ HA 或多租户隔离**：hash tag 只保证 Redis Cluster 下 key 共置同 slot（不触发 CROSSSLOT），不是 HA 承诺；namespace 是命名空间隔离，不是安全边界；leader election 不等于 control-plane HA。三者均映射 §4 反声明。
 
 ### C — 内部抽象加固（非门槛）
 
