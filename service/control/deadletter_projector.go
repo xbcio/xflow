@@ -80,6 +80,7 @@ func receiptToAuditRecord(r engine.ReplayReceipt) *store.AuditRecord {
 		Decision:       "allow",
 		Reason:         "replay_receipt",
 		Outcome:        string(r.Outcome),
+		Phase:          store.AuditPhaseReceipt,
 		Timestamp:      ts,
 		NodeID:         r.NodeID,
 		ActivationID:   r.ActivationID,

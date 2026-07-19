@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"gorm.io/gorm"
 
@@ -19,6 +20,7 @@ type auditRepo struct {
 }
 
 var _ store.AuditAppender = (*auditRepo)(nil)
+var _ store.AuditReconciler = (*auditRepo)(nil)
 
 func (r *auditRepo) AppendAudit(ctx context.Context, rec *store.AuditRecord) error {
 	if rec == nil {
@@ -116,6 +118,7 @@ func toDBAudit(r *store.AuditRecord) *dbAuditEvent {
 		Outcome:        r.Outcome,
 		TraceID:        r.TraceID,
 		Timestamp:      r.Timestamp,
+		Phase:          r.Phase,
 		NodeID:         r.NodeID,
 		ActivationID:   r.ActivationID,
 		EntryID:        r.EntryID,
@@ -138,9 +141,90 @@ func fromDBAudit(d *dbAuditEvent) *store.AuditRecord {
 		Outcome:        d.Outcome,
 		TraceID:        d.TraceID,
 		Timestamp:      d.Timestamp,
+		Phase:          d.Phase,
 		NodeID:         d.NodeID,
 		ActivationID:   d.ActivationID,
 		EntryID:        d.EntryID,
 		ReceiptAuditID: d.ReceiptAuditID,
 	}
+}
+
+// ListUnreconciledAdmissions returns admitted mutation audit rows (phase=
+// "admission", outcome="admitted") with created_at older than `before` for
+// which no outcome-phase row (phase="outcome") exists for the same
+// (tenant_id, request_id). These are the admissions the T9 reconcile worker
+// must settle: the mutation was admitted (fail-closed admission audit
+// persisted) but no post-handler outcome was ever appended (e.g. a crash
+// between the mutation and the outcome audit, or a handler panic).
+//
+// The NOT EXISTS subquery is covered by idx_tenant_request_phase, so the
+// pending scan is index-only and bounded by `limit`. Rows are returned
+// oldest-first so the oldest backlog is settled first.
+func (r *auditRepo) ListUnreconciledAdmissions(ctx context.Context, before time.Time, limit int) ([]*store.AuditRecord, error) {
+	if limit <= 0 {
+		limit = 256
+	}
+	var rows []dbAuditEvent
+	err := r.db.WithContext(ctx).Raw(`
+SELECT a.* FROM xflow_audit_events a
+WHERE a.phase = ? AND a.outcome = ? AND a.created_at < ?
+  AND NOT EXISTS (
+      SELECT 1 FROM xflow_audit_events b
+      WHERE b.tenant_id = a.tenant_id
+        AND b.request_id = a.request_id
+        AND b.phase = ?
+  )
+ORDER BY a.created_at ASC
+LIMIT ?`, store.AuditPhaseAdmission, store.AuditOutcomeAdmitted, before, store.AuditPhaseOutcome, limit).Scan(&rows).Error
+	if err := wrapDBErr("list unreconciled admissions", err); err != nil {
+		return nil, err
+	}
+	out := make([]*store.AuditRecord, len(rows))
+	for i, d := range rows {
+		out[i] = fromDBAudit(&d)
+	}
+	return out, nil
+}
+
+// AppendOutcomeIfAbsent idempotently appends an outcome-phase audit row. It
+// is the T9 reconcile worker's settle path: before appending, it checks that
+// no outcome row already exists for the same (tenant_id, request_id,
+// phase="outcome"). A duplicate (e.g. a concurrent worker or a leader
+// switch racing two sweeps) is caught by the check-then-append here AND by
+// the unique uk_phase_key index on the generated phase_key column, so the
+// duplicate insert surfaces as gorm.ErrDuplicatedKey and is reported as
+// appended=false rather than an error.
+//
+// The row's Phase is forced to "outcome" so the idempotency key is stable
+// regardless of caller. A record with an empty RequestID has no idempotency
+// key and is always appended (it cannot be a reconcile outcome).
+func (r *auditRepo) AppendOutcomeIfAbsent(ctx context.Context, rec *store.AuditRecord) (bool, error) {
+	if rec == nil {
+		return false, fmt.Errorf("append outcome if absent: nil record")
+	}
+	rec.Phase = store.AuditPhaseOutcome
+	if rec.RequestID != "" && rec.TenantID != "" {
+		var existing dbAuditEvent
+		err := r.db.WithContext(ctx).
+			Where("tenant_id = ? AND request_id = ? AND phase = ?", rec.TenantID, rec.RequestID, store.AuditPhaseOutcome).
+			First(&existing).Error
+		if err == nil {
+			return false, nil
+		}
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return false, wrapDBErr("append outcome if absent: lookup", err)
+		}
+	}
+	d := toDBAudit(rec)
+	if err := r.db.WithContext(ctx).Create(d).Error; err != nil {
+		// A duplicate-key violation (concurrent insert between our check and
+		// create) means another worker appended the outcome first; treat it
+		// as a benign idempotent skip, not an error.
+		if errors.Is(err, gorm.ErrDuplicatedKey) {
+			return false, nil
+		}
+		return false, wrapDBErr("append outcome if absent", err)
+	}
+	rec.ID = d.ID
+	return true, nil
 }

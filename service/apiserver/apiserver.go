@@ -7,6 +7,7 @@ import (
 
 	"google.golang.org/grpc"
 
+	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/backend/distributed"
 	backendlocal "github.com/xbcio/xflow/backend/local"
 	"github.com/xbcio/xflow/engine"
@@ -274,6 +275,15 @@ func (s *APIServer) Shutdown(ctx context.Context) error {
 // IsLeader reports whether this replica currently holds leadership.
 // Transparent passthrough to the underlying ControlPlane.
 func (s *APIServer) IsLeader() bool { return s.cp.IsLeader() }
+
+// Backend returns the control-plane backend provider. It is the authoritative
+// execution-state store (engine StateStore) and, for the distributed backend,
+// the Redis leader elector. Exposed so a host program (e.g. cmd/server) can
+// wire leader-gated background workers — the T9 audit reconcile worker uses
+// Backend().State() as its AdmissionAuthority and IsLeader() as its leader
+// gate. Returns the backend even when the APIServer does not own the control
+// plane (an injected one); callers type-assert the capabilities they need.
+func (s *APIServer) Backend() backend.Provider { return s.cp.Backend() }
 
 // hasHTTPModule reports whether any registered module implements HTTPModule.
 func hasHTTPModule(modules []Module) bool {

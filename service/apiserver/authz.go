@@ -319,6 +319,7 @@ type AuditEvent struct {
 	Decision    Decision
 	Reason      string // deny reason code, not free text
 	Outcome     string // admitted/denied/reconciled
+	Phase       string // immutable audit phase: admission/outcome (T9)
 	TraceID     string
 	Timestamp   time.Time
 	// Receipt correlation (T4 dead-letter receipt projector; T9 outcome

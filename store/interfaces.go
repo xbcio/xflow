@@ -66,6 +66,54 @@ type ReceiptAuditAppender interface {
 	AuditByReceiptAuditID(ctx context.Context, receiptAuditID string) (*AuditRecord, error)
 }
 
+// AuditReconciler is the optional AuditAppender capability the T9 crash-safe
+// reconcile worker depends on. It scans the durable audit log for admitted
+// mutations that never received a post-handler outcome (e.g. a crash between
+// the mutation and the outcome append) and appends the missing outcome
+// idempotently. The worker NEVER re-executes the mutation: it only observes
+// authoritative state (engine StateStore) and appends an audit outcome.
+//
+// ListUnreconciledAdmissions returns admitted (phase="admission",
+// outcome="admitted") rows older than `before` for which no outcome-phase
+// row exists for the same (tenant_id, request_id). AppendOutcomeIfAbsent
+// appends an outcome-phase row keyed idempotently on (tenant_id, request_id,
+// phase="outcome"): a duplicate append (concurrent worker / leader switch)
+// returns appended=false.
+type AuditReconciler interface {
+	ListUnreconciledAdmissions(ctx context.Context, before time.Time, limit int) ([]*AuditRecord, error)
+	AppendOutcomeIfAbsent(ctx context.Context, rec *AuditRecord) (bool, error)
+}
+
+// Audit phase constants (T9). Each audit row belongs to exactly one
+// immutable phase; the (TenantID, RequestID, Phase) triple is the reconcile
+// worker's idempotency key.
+const (
+	// AuditPhaseAdmission is the pre-handler fail-closed admission audit row
+	// (outcome="admitted" for an allowed mutation, "denied" for a deny).
+	AuditPhaseAdmission = "admission"
+	// AuditPhaseOutcome is the post-handler outcome row (outcome="reconciled"
+	// on a 2xx, "failed" otherwise) — written inline by the authz wrapper
+	// or, after a crash, by the T9 reconcile worker.
+	AuditPhaseOutcome = "outcome"
+	// AuditPhaseReceipt is the T4 dead-letter replay receipt projection row.
+	AuditPhaseReceipt = "receipt"
+)
+
+// Audit outcome constants (T9). The outcome column records the result of
+// the phase's decision; phase + outcome together fully describe a row.
+const (
+	// AuditOutcomeAdmitted marks an admission row that allowed a mutation.
+	AuditOutcomeAdmitted = "admitted"
+	// AuditOutcomeDenied marks an admission row that denied a request.
+	AuditOutcomeDenied = "denied"
+	// AuditOutcomeReconciled marks an outcome row whose mutation landed.
+	AuditOutcomeReconciled = "reconciled"
+	// AuditOutcomeFailed marks an outcome row whose mutation did not land
+	// (handler returned non-2xx, or the reconcile worker determined the
+	// mutation had no effect after a crash).
+	AuditOutcomeFailed = "failed"
+)
+
 // Store is the full persistence surface, composing the per-domain interfaces.
 // Consumers that only need one domain should depend on the narrower interface
 // (Executions, Nodes, Signals, or Audit) instead.

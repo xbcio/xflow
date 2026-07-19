@@ -280,6 +280,13 @@ func withTenant(ctx context.Context, labels map[string]string) map[string]string
 // explosion.
 var metricHelp = map[string]string{
 	"xflow_audit_write_total":                   "Audit log write attempts, partitioned by operation and result.",
+	"xflow_audit_reconcile_scan_total":           "Audit reconcile sweep cycles run, partitioned by result.",
+	"xflow_audit_reconcile_scan_duration_seconds":"Duration of audit reconcile pending-admission scans.",
+	"xflow_audit_reconcile_settled_total":        "Audit admissions settled by the reconcile worker, partitioned by outcome and result.",
+	"xflow_audit_reconcile_skipped_total":        "Audit admissions left pending (indeterminate authority), partitioned by reason.",
+	"xflow_audit_reconcile_errors_total":         "Audit reconcile per-admission probe/append errors.",
+	"xflow_audit_reconcile_backlog_age_seconds":  "Age of the oldest pending audit admission observed in the last sweep.",
+	"xflow_audit_reconcile_pending":              "Number of pending audit admissions observed in the last reconcile sweep.",
 	"xflow_commit_outcomes_total":               "Graph commit outcomes, partitioned by outcome (committed/aborted/failed).",
 	"xflow_dispatch_transient_total":            "Transient dispatch failures scheduled for retry, partitioned by reason.",
 	"xflow_execution_completed_total":           "Workflow executions completed, partitioned by terminal status.",

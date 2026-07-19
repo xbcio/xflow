@@ -30,6 +30,11 @@ type dbAuditEvent struct {
 	TraceID       string    `gorm:"column:trace_id;type:varchar(64)"`
 	Timestamp     time.Time `gorm:"column:ts"`
 	CreatedAt     time.Time `gorm:"column:created_at;autoCreateTime:milli"`
+	// Phase is the immutable audit phase (T9): admission / outcome / receipt.
+	// The generated phase_key column (NULL for empty phase/request_id) is the
+	// unique idempotency key for outcome rows; it is computed by MySQL and is
+	// intentionally absent from this struct so GORM never writes it.
+	Phase string `gorm:"column:phase;type:varchar(16);default:''"`
 	// Receipt correlation fields (T4 dead-letter receipt projector; T9
 	// outcome-phase worker reuses them). Populated only by the receipt
 	// projector; admission/outcome rows leave them empty. ReceiptAuditID is

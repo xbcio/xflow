@@ -30,7 +30,13 @@ func defaultConfig() *config {
 		maxOpenConns:    25,
 		maxIdleConns:    5,
 		connMaxLifetime: 5 * time.Minute,
-		gormCfg:         &gorm.Config{},
+		// TranslateError maps MySQL duplicate-key (1062) and not-found errors
+		// to gorm.ErrDuplicatedKey / gorm.ErrRecordNotFound so the
+		// dialect-agnostic sqlstore core can branch on sentinels. Required by
+		// the T9 audit reconcile worker's idempotent AppendOutcomeIfAbsent,
+		// which treats a duplicate outcome insert (concurrent worker / leader
+		// switch racing two sweeps) as a benign idempotent skip.
+		gormCfg: &gorm.Config{TranslateError: true},
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/xbcio/xflow/backend/tenant"
+	"github.com/xbcio/xflow/observability/tracing"
 )
 
 // authzHolder carries the B3 resource/operation authz dependencies shared by
@@ -63,11 +64,14 @@ func (h *authzHolder) authzWrap(op string, isMutation bool, fn http.HandlerFunc,
 		// operation. If the audit sink is unavailable, deny rather than
 		// execute an unaudited mutation.
 		reqID := newRequestID(r)
+		traceID := tracing.TraceIDFromContext(r.Context())
 		if isMutation {
 			if err := h.audit.Append(r.Context(), AuditEvent{
 				RequestID: reqID, Principal: principal.Subject, TenantID: principal.TenantID,
 				Operation: op, Resource: resource, WorkflowID: wfID, ExecutionID: execID,
 				Decision: DecisionAllow, Reason: "admitted", Outcome: "admitted",
+				Phase:     "admission",
+				TraceID:   traceID,
 				Timestamp: time.Now().UTC(),
 			}); err != nil {
 				h.auditDeny(r, principal, op, resource, wfID, execID, "audit_unavailable")
@@ -81,6 +85,8 @@ func (h *authzHolder) authzWrap(op string, isMutation bool, fn http.HandlerFunc,
 				RequestID: reqID, Principal: principal.Subject, TenantID: principal.TenantID,
 				Operation: op, Resource: resource, WorkflowID: wfID, ExecutionID: execID,
 				Decision: DecisionAllow, Reason: "admitted", Outcome: "admitted",
+				Phase:     "admission",
+				TraceID:   traceID,
 				Timestamp: time.Now().UTC(),
 			})
 		}
@@ -164,6 +170,8 @@ func (h *authzHolder) auditDeny(r *http.Request, principal Principal, op, resour
 		Decision:    DecisionDeny,
 		Reason:      reason,
 		Outcome:     "denied",
+		Phase:       "admission",
+		TraceID:     tracing.TraceIDFromContext(r.Context()),
 		Timestamp:   time.Now().UTC(),
 	})
 }
@@ -194,6 +202,8 @@ func (h *authzHolder) auditReconcile(r *http.Request, principal Principal, op, r
 		Decision:    DecisionAllow,
 		Reason:      reason,
 		Outcome:     outcome,
+		Phase:       "outcome",
+		TraceID:     tracing.TraceIDFromContext(r.Context()),
 		Timestamp:   time.Now().UTC(),
 	})
 }

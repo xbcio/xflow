@@ -85,6 +85,16 @@ CREATE TABLE IF NOT EXISTS xflow_audit_events (
     -- projector (and T9's outcome-phase worker). Admission/outcome rows leave
     -- them empty. receipt_audit_id is the Redis receipt's audit_id and the
     -- projector's idempotency key.
+    -- T9: phase discriminator. Each audit row belongs to exactly one
+    -- immutable phase: 'admission' (the pre-handler fail-closed admission
+    -- audit), 'outcome' (the post-handler reconciled/failed outcome, whether
+    -- written inline by the authz wrapper or by the crash-safe reconcile
+    -- worker), or 'receipt' (the T4 dead-letter replay receipt projection).
+    -- Admission/outcome rows for the same RequestID are joinable on
+    -- (tenant_id, request_id); the phase column lets the reconcile worker's
+    -- pending scan index "admitted but no outcome" efficiently and makes the
+    -- append-only one-row-per-phase contract explicit.
+    phase            VARCHAR(16)  NOT NULL DEFAULT ''  COMMENT '事件阶段 admission/outcome/receipt',
     node_id         VARCHAR(255) NOT NULL DEFAULT ''  COMMENT 'receipt 关联：节点名',
     activation_id   VARCHAR(64)  NOT NULL DEFAULT ''  COMMENT 'receipt 关联：activation',
     entry_id        VARCHAR(255) NOT NULL DEFAULT ''  COMMENT 'receipt 关联：dead-letter entry',
@@ -94,7 +104,25 @@ CREATE TABLE IF NOT EXISTS xflow_audit_events (
     INDEX idx_execution_id (execution_id),
     INDEX idx_outcome (outcome),
     INDEX idx_ts (ts),
-    INDEX idx_receipt_audit_id (receipt_audit_id)
+    INDEX idx_receipt_audit_id (receipt_audit_id),
+    INDEX idx_tenant_request_phase (tenant_id, request_id, phase),
+    -- Idempotency for outcome-phase rows: at most one outcome row per
+    -- (tenant_id, request_id). Expressed via a generated column that is NULL
+    -- unless phase='outcome' (and request_id is set), so admission rows
+    -- (phase='admission', written once per request) and receipt projection
+    -- rows (phase='receipt', deduped by ReceiptAuditID via
+    -- AppendAuditIfAbsent) do NOT collide under the UNIQUE index — only the
+    -- T9 reconcile worker's outcome appends are idempotency-guarded. MySQL
+    -- permits multiple NULLs. A concurrent/duplicate outcome append for the
+    -- same RequestID violates this index and is treated as appended=false by
+    -- the worker (check-then-append + unique index = crash-safe idempotency
+    -- across leader switches).
+    phase_key VARCHAR(320) GENERATED ALWAYS AS (
+        CASE WHEN phase = 'outcome' AND request_id <> ''
+             THEN CONCAT(tenant_id, '|', request_id, '|', phase)
+             ELSE NULL END
+    ) STORED COMMENT '幂等键：仅 outcome 行 (tenant_id, request_id)；NULL 跳过其他行',
+    UNIQUE INDEX uk_phase_key (phase_key)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- T4 receipt-correlation columns are additive. CREATE TABLE IF NOT EXISTS is a
@@ -123,3 +151,35 @@ END$$
 DELIMITER ;
 CALL xflow_add_receipt_audit_columns();
 DROP PROCEDURE IF EXISTS xflow_add_receipt_audit_columns;
+
+-- T9 audit-phase column + idempotency index. CREATE TABLE IF NOT EXISTS is a
+-- no-op on a pre-existing table, so the phase column, the (tenant, request,
+-- phase) scan index, and the generated phase_key unique index are back-filled
+-- here via an INFORMATION_SCHEMA guard (MySQL lacks ADD COLUMN IF NOT EXISTS).
+-- The generated phase_key is NULL for rows with empty phase/request_id so
+-- admission rows that legitimately share an empty tuple do not collide under
+-- the UNIQUE index. Idempotent: re-applying the schema is always safe.
+DROP PROCEDURE IF EXISTS xflow_add_phase_column;
+DELIMITER $$
+CREATE PROCEDURE xflow_add_phase_column()
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'xflow_audit_events'
+          AND COLUMN_NAME = 'phase'
+    ) THEN
+        ALTER TABLE xflow_audit_events
+            ADD COLUMN phase VARCHAR(16) NOT NULL DEFAULT '' COMMENT '事件阶段 admission/outcome/receipt' AFTER outcome,
+            ADD COLUMN phase_key VARCHAR(320) GENERATED ALWAYS AS (
+                CASE WHEN phase = 'outcome' AND request_id <> ''
+                     THEN CONCAT(tenant_id, '|', request_id, '|', phase)
+                     ELSE NULL END
+            ) STORED COMMENT '幂等键：仅 outcome 行 (tenant_id, request_id)；NULL 跳过其他行',
+            ADD INDEX idx_tenant_request_phase (tenant_id, request_id, phase),
+            ADD UNIQUE INDEX uk_phase_key (phase_key);
+    END IF;
+END$$
+DELIMITER ;
+CALL xflow_add_phase_column();
+DROP PROCEDURE IF EXISTS xflow_add_phase_column;

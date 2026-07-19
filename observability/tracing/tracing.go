@@ -36,6 +36,24 @@ func SpanFromContext(ctx context.Context) Span {
 	return span
 }
 
+// TraceIDFromContext returns the W3C trace ID of the active OTel span in
+// ctx, or "" when no span is active or tracing is disabled. It reads the
+// OpenTelemetry span context directly (not the xflow Span wrapper) so it
+// works for any span attached by the tracing middleware, including ones
+// extracted from an inbound traceparent. Used by the audit path to correlate
+// audit rows with the request's distributed trace (T7 span context → T9
+// audit trace_id). Never returns a span id or baggage — only the trace id.
+func TraceIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	sc := oteltrace.SpanContextFromContext(ctx)
+	if !sc.IsValid() {
+		return ""
+	}
+	return sc.TraceID().String()
+}
+
 // NoopTracer is a tracing implementation that records nothing.
 type NoopTracer struct{}
 

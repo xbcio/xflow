@@ -391,31 +391,6 @@ func runServer(cfg serverConfig) error {
 		log.Println("xflow-server: WARNING --mysql-dsn not set; using in-memory store + in-memory audit (dev only; not production)")
 	}
 
-	// Reconciler: T8 introduces the seam; the general leader-gated
-	// admission/outcome/reconciled-phase crash-safe worker is T9's scope (see
-	// .claude/plans/2026-07-19-sdk-server-production-readiness-followup.md §T9
-	// and cmd/xflow/dead_letter_reconcile.go). Production requires a non-nil
-	// reconciler so the seam is explicit; noopReconciler runs until ctx cancel.
-	rec := newReconciler()
-
-	// Task 8 blocker 3: production posture enforcement. Production fails
-	// closed when any of PrincipalAuthenticator, Authorizer, durable AuditSink,
-	// or Reconciler is missing. Dev allows the in-memory audit sink, single-
-	// token, and anonymous auth with a loud stderr warning.
-	if err := validateProduction(cfg.mode, productionDeps{
-		principalAuth: principalAuth,
-		authorizer:    apiserver.TenantAwareAuthorizer{},
-		auditSink:     audit,
-		durableAudit:  durableAudit,
-		reconciler:    rec,
-		singleToken:   singleToken,
-	}); err != nil {
-		return err
-	}
-	if cfg.mode == "dev" {
-		fmt.Fprintln(os.Stderr, "xflow-server: WARNING --mode=dev: in-memory audit / single-token / anonymous auth are non-production; do not run in production")
-	}
-
 	redisConfig, err := buildRedisConfig(cfg)
 	if err != nil {
 		return fmt.Errorf("redis config: %w", err)
@@ -478,6 +453,36 @@ func runServer(cfg serverConfig) error {
 		return err
 	}
 
+	// Reconciler (T9): the crash-safe audit reconcile worker. It scans
+	// admitted mutations that never received a post-handler outcome (e.g. a
+	// crash between a successful mutation and its outcome audit append),
+	// consults authoritative state (the control-plane backend's StateStore)
+	// WITHOUT re-executing the mutation, and appends the missing outcome
+	// idempotently (tenant+RequestID+phase). Leader-gated via the control-
+	// plane elector (IsLeader); backoff is the per-sweep period — a probe or
+	// append error leaves the admission pending for the next sweep. Nil (dev)
+	// when no durable audit sink is configured; production requires a non-nil
+	// reconciler so a mis-config fails closed.
+	rec := newReconciler(sqlStore, srv, m, logger)
+
+	// Task 8 blocker 3: production posture enforcement. Production fails
+	// closed when any of PrincipalAuthenticator, Authorizer, durable AuditSink,
+	// or Reconciler is missing. Dev allows the in-memory audit sink, single-
+	// token, and anonymous auth with a loud stderr warning.
+	if err := validateProduction(cfg.mode, productionDeps{
+		principalAuth: principalAuth,
+		authorizer:    apiserver.TenantAwareAuthorizer{},
+		auditSink:     audit,
+		durableAudit:  durableAudit,
+		reconciler:    rec,
+		singleToken:   singleToken,
+	}); err != nil {
+		return err
+	}
+	if cfg.mode == "dev" {
+		fmt.Fprintln(os.Stderr, "xflow-server: WARNING --mode=dev: in-memory audit / single-token / anonymous auth are non-production; do not run in production")
+	}
+
 	// signal.NotifyContext so SIGINT/SIGTERM trigger graceful shutdown: the
 	// HTTP server drains in-flight requests, gRPC GracefulStops, and the
 	// control plane's background goroutines (dispatcher, lease sweeper,
@@ -485,10 +490,9 @@ func runServer(cfg serverConfig) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Start the reconciler (T8 seam). It runs in the background until ctx is
-	// cancelled. noopReconciler is the T8 placeholder; the general leader-gated
-	// admission/outcome crash-safe reconcile worker is T9's scope and will
-	// share the SQL audit schema T8 already wires.
+	// Start the reconcile worker in the background. It runs until ctx is
+	// cancelled; a nil (dev) reconciler is a no-op. The worker's leader gate
+	// is the control-plane elector, so only the leader replica scans.
 	go func() { _ = rec.Run(ctx) }()
 
 	return srv.Run(ctx)
@@ -586,19 +590,17 @@ func loadAuthTokenMappings(cfg serverConfig) ([]apiserver.TokenPrincipalMapping,
 // reconciler is a leader-gated background loop that durably settles
 // admission/outcome audit for mutations that did not reconcile before a
 // process exit (e.g. a crash between a successful mutation and its outcome
-// audit append). Task 8 introduces the SEAM only: production requires a
-// non-nil reconciler so the dependency is explicit and a future mis-config
-// fails closed. The general crash-safe admission/outcome/reconciled-phase
-// worker is Task 9's scope (see
-// .claude/plans/2026-07-19-sdk-server-production-readiness-followup.md §T9
-// and cmd/xflow/dead_letter_reconcile.go). T8's noopReconciler shares the
-// SQL audit schema T9 will reuse.
+// audit append). T9 provides the real crash-safe worker
+// (service/control.AuditReconcileWorker); production requires a non-nil
+// reconciler so the dependency is explicit and a mis-config fails closed.
 type reconciler interface {
 	Run(ctx context.Context) error
 }
 
-// noopReconciler is the T8 placeholder. Run blocks until ctx is cancelled and
-// does no reconcile work; T9 replaces it with the real crash-safe worker.
+// noopReconciler is the dev fallback: when no durable audit sink is
+// configured (--mysql-dsn unset) there is nothing to reconcile against, so
+// Run blocks until ctx is cancelled. Production configures --mysql-dsn and
+// gets the real AuditReconcileWorker via newReconciler instead.
 type noopReconciler struct{}
 
 func (noopReconciler) Run(ctx context.Context) error {
@@ -606,9 +608,56 @@ func (noopReconciler) Run(ctx context.Context) error {
 	return nil
 }
 
-// newReconciler returns the T8 placeholder reconciler. T9 will return the real
-// crash-safe admission/outcome worker here.
-func newReconciler() reconciler { return noopReconciler{} }
+// newReconciler builds the T9 crash-safe audit reconcile worker. The worker
+// is wired with: the durable audit store (as store.AuditReconciler) for
+// pending-admission scans + idempotent outcome appends; the control-plane
+// backend's StateStore (engine.StateStore) as the AdmissionAuthority —
+// consulted WITHOUT re-executing mutations; the control-plane elector
+// (srv.IsLeader) as the leader gate so only the leader replica scans; and a
+// metrics observer when --metrics-addr is set. Returns nil (dev) when no
+// durable audit sink is configured.
+func newReconciler(sqlStore store.Store, srv *apiserver.APIServer, m *metrics.Metrics, logger engine.Logger) reconciler {
+	if sqlStore == nil {
+		return noopReconciler{}
+	}
+	ar, ok := sqlStore.(store.AuditReconciler)
+	if !ok {
+		// The configured store does not support reconcile scans (e.g. a
+		// custom store without the AuditReconciler capability). Production
+		// would fail-closed at validateProduction via a nil reconciler, but
+		// the sqlstore.Provider implements it, so this branch is defensive.
+		return noopReconciler{}
+	}
+	var authority control.AdmissionAuthority
+	var elector control.LeaderGate
+	if srv != nil {
+		authority = control.NewExecutionAuthority(srv.Backend().State())
+		elector = leaderGateAdapter{isLeader: srv.IsLeader}
+	}
+	cfg := control.AuditReconcileConfig{
+		Logger:  logger,
+		Elector: elector,
+	}
+	if m != nil {
+		cfg.Observer = metrics.NewReconcileMetrics(m)
+	}
+	return control.NewAuditReconcileWorker(ar, authority, cfg)
+}
+
+// leaderGateAdapter adapts *apiserver.APIServer.IsLeader to the worker's
+// LeaderGate interface without forcing the apiserver type to implement the
+// full backend.LeaderElector surface (Campaign/Resign/Notify are owned by
+// the control plane's leader campaign, not the worker).
+type leaderGateAdapter struct {
+	isLeader func() bool
+}
+
+func (g leaderGateAdapter) IsLeader() bool {
+	if g.isLeader == nil {
+		return false
+	}
+	return g.isLeader()
+}
 
 // productionDeps bundles the production-required components so validateProduction
 // can assert each is present in a single, testable call.

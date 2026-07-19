@@ -73,6 +73,7 @@ func (s *SQLAuditSink) Append(ctx context.Context, ev AuditEvent) error {
 		Decision:       string(ev.Decision),
 		Reason:         ev.Reason,
 		Outcome:        ev.Outcome,
+		Phase:          ev.Phase,
 		TraceID:        ev.TraceID,
 		Timestamp:      ev.Timestamp,
 		NodeID:         ev.NodeID,

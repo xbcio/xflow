@@ -27,8 +27,9 @@ type signalEntry struct {
 
 // compile-time interface checks
 var (
-	_ store.Store      = (*Store)(nil)
-	_ store.Transactor = (*Store)(nil)
+	_ store.Store          = (*Store)(nil)
+	_ store.Transactor     = (*Store)(nil)
+	_ store.AuditReconciler = (*Store)(nil)
 )
 
 // New creates a new in-memory store.
@@ -348,6 +349,74 @@ func (s *Store) AppendAudit(_ context.Context, rec *store.AuditRecord) error {
 	cp := *rec
 	s.audit = append(s.audit, &cp)
 	return nil
+}
+
+// ListUnreconciledAdmissions returns admitted mutation audit rows (phase=
+// "admission", outcome="admitted") older than `before` for which no
+// outcome-phase row exists for the same (tenant, request_id). In-memory
+// mirror of the SQL provider's pending scan; used by the T9 reconcile worker
+// unit tests. Rows are returned oldest-first.
+func (s *Store) ListUnreconciledAdmissions(_ context.Context, before time.Time, limit int) ([]*store.AuditRecord, error) {
+	if limit <= 0 {
+		limit = 256
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Index existing outcome rows by (tenant, request_id) for the NOT EXISTS
+	// filter.
+	hasOutcome := make(map[string]bool, len(s.audit))
+	for _, r := range s.audit {
+		if r.Phase == store.AuditPhaseOutcome && r.RequestID != "" {
+			hasOutcome[r.TenantID+"|"+r.RequestID] = true
+		}
+	}
+	var out []*store.AuditRecord
+	for _, r := range s.audit {
+		if r.Phase != store.AuditPhaseAdmission || r.Outcome != store.AuditOutcomeAdmitted {
+			continue
+		}
+		// The in-memory store has no separate created_at; use the event
+		// timestamp. A zero timestamp (never set) is treated as old enough so
+		// tests that build records directly can reconcile immediately.
+		if !r.Timestamp.IsZero() && !r.Timestamp.Before(before) {
+			continue
+		}
+		if r.RequestID != "" && hasOutcome[r.TenantID+"|"+r.RequestID] {
+			continue
+		}
+		cp := *r
+		out = append(out, &cp)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+// AppendOutcomeIfAbsent idempotently appends an outcome-phase row. In-memory
+// mirror of the SQL provider's check-then-append + unique phase_key index:
+// the mutex makes the check-then-append atomic, so a concurrent worker or a
+// leader switch can never append a duplicate outcome. Returns appended=false
+// when an outcome row already exists for the same (tenant, request_id).
+func (s *Store) AppendOutcomeIfAbsent(_ context.Context, rec *store.AuditRecord) (bool, error) {
+	if rec == nil {
+		return false, store.ErrNotFound
+	}
+	rec.Phase = store.AuditPhaseOutcome
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if rec.RequestID != "" && rec.TenantID != "" {
+		key := rec.TenantID + "|" + rec.RequestID
+		for _, r := range s.audit {
+			if r.Phase == store.AuditPhaseOutcome && r.TenantID+"|"+r.RequestID == key {
+				return false, nil
+			}
+		}
+	}
+	rec.ID = s.nextAutoID()
+	cp := *rec
+	s.audit = append(s.audit, &cp)
+	return true, nil
 }
 
 // AuditRecords returns a copy of the recorded audit events (test helper).
