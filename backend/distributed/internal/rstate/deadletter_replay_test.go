@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -897,6 +898,73 @@ func TestListDeadLettersConcurrentInsertNoDrop(t *testing.T) {
 			t.Errorf("initial entry %q was dropped", m)
 		}
 	}
+}
+
+// TestListDeadLettersDeleteBoundaryEntryNoDrop verifies that deleting the
+// boundary (cursor-bearing) entry of a page after the index fetch but before
+// cursor construction does not drop the over-fetched entry or anything after
+// it. With the score captured atomically via ZRangeWithScores, the cursor is
+// built from the fetched data even if the boundary member is concurrently
+// removed from the dead-letter index.
+func TestListDeadLettersDeleteBoundaryEntryNoDrop(t *testing.T) {
+	state, _, _ := newTestRedisState(t)
+	ctx := context.Background()
+	id := types.ExecutionID("dl-list-delete-boundary")
+	members := []string{"d0", "d1", "d2", "d3", "d4", "d5", "d6"}
+	scores := []float64{0, 1, 2, 3, 4, 5, 6}
+	seedDeadLettersBulk(t, state, id, scores, members)
+
+	// Install a hook that deletes the page-1 boundary entry (d2) from the
+	// dead-letter index after the fetch but before the next cursor is signed.
+	var once sync.Once
+	origHook := listDeadLettersAfterFetchHook
+	listDeadLettersAfterFetchHook = func() {
+		once.Do(func() {
+			_ = state.rdb.ZRem(ctx, outboxDeadKey(tenant.DefaultTenant, id), "d2").Err()
+		})
+	}
+	defer func() { listDeadLettersAfterFetchHook = origHook }()
+
+	first, err := state.ListDeadLetters(ctx, id, engine.DeadLetterPage{Limit: 3})
+	if err != nil {
+		t.Fatalf("first page: %v", err)
+	}
+	if got := entryIDs(first.Entries); !slices.Equal(got, []string{"d0", "d1", "d2"}) {
+		t.Fatalf("first page = %v, want [d0 d1 d2]", got)
+	}
+	if first.NextCursor == "" {
+		t.Fatal("expected a next cursor after boundary deletion")
+	}
+
+	second, err := state.ListDeadLetters(ctx, id, engine.DeadLetterPage{Limit: 3, Cursor: first.NextCursor})
+	if err != nil {
+		t.Fatalf("second page: %v", err)
+	}
+	if got := entryIDs(second.Entries); !slices.Equal(got, []string{"d3", "d4", "d5"}) {
+		t.Fatalf("second page = %v, want [d3 d4 d5] (over-fetched entry and later entries must not be dropped)", got)
+	}
+	if second.NextCursor == "" {
+		t.Fatal("expected a next cursor for the final entry")
+	}
+
+	third, err := state.ListDeadLetters(ctx, id, engine.DeadLetterPage{Limit: 3, Cursor: second.NextCursor})
+	if err != nil {
+		t.Fatalf("third page: %v", err)
+	}
+	if got := entryIDs(third.Entries); !slices.Equal(got, []string{"d6"}) {
+		t.Fatalf("third page = %v, want [d6]", got)
+	}
+	if third.NextCursor != "" {
+		t.Fatalf("third page NextCursor = %q, want empty", third.NextCursor)
+	}
+}
+
+func entryIDs(entries []engine.OutboxEntry) []string {
+	ids := make([]string, len(entries))
+	for i, e := range entries {
+		ids[i] = e.ID
+	}
+	return ids
 }
 
 // TestListDeadLettersDeleteDuringPagination verifies self-heal when an entry on

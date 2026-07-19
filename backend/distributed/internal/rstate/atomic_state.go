@@ -335,6 +335,10 @@ local outcomeCode = function(s)
     elseif s == 'rejected_activation_mismatch' then return 5
     elseif s == 'rejected_metadata_missing' then return 7
     end
+    -- Unknown outcomes fall back to 6 (already_replayed). This is defensive:
+    -- writeReceipt must only ever persist the outcome strings listed above.
+    -- If a new outcome is added to writeReceipt without a matching branch here,
+    -- it would silently surface as already_replayed; keep this mapping in sync.
     return 6
 end
 
@@ -518,6 +522,12 @@ var _ engine.LegacyNodeCommitter = (*Store)(nil)
 var _ engine.OutboxFailureRecorder = (*Store)(nil)
 var _ engine.OutboxMetricsReader = (*Store)(nil)
 var _ engine.DeadLetterStore = (*Store)(nil)
+
+// listDeadLettersAfterFetchHook is a test-only hook invoked after
+// ListDeadLetters fetches the dead-letter index but before it constructs the
+// next cursor. It exists solely to exercise races that are no longer possible
+// after the WithScores fetch made score capture atomic.
+var listDeadLettersAfterFetchHook func()
 
 // CommitLeasedNode reuses the fenced Redis node transition for legacy cycle
 // paths, whose follow-up scheduling remains outside CommitNode's DAG counter.
@@ -996,73 +1006,97 @@ func (s *Store) ListDeadLetters(ctx context.Context, id types.ExecutionID, page 
 	// tail (members with score == cursorScore and member > cursorMember) and
 	// the strictly-higher scores, then concatenate. Over-fetch by one to detect
 	// a next page without an extra round-trip.
-	var ids []string
+	// captured atomically with its member, so the next cursor can be signed
+	// without a separate ZScore round-trip. That removes the race where the
+	// boundary entry is replayed/deleted between listing and scoring.
+	type deadLetterIndexEntry struct {
+		Member string
+		Score  float64
+	}
+
+	var entries []deadLetterIndexEntry
 	if page.Cursor == "" {
-		ids, err = s.rdb.ZRangeArgs(ctx, redis.ZRangeArgs{
+		zs, err := s.rdb.ZRangeArgsWithScores(ctx, redis.ZRangeArgs{
 			Key: deadKey, Start: "-inf", Stop: "+inf", ByScore: true, Offset: 0, Count: int64(page.Limit + 1),
 		}).Result()
 		if err != nil {
 			return engine.DeadLetterList{}, fmt.Errorf("list dead letters %q: %w", id, err)
 		}
+		entries = make([]deadLetterIndexEntry, 0, len(zs))
+		for _, z := range zs {
+			m, ok := z.Member.(string)
+			if !ok {
+				continue
+			}
+			entries = append(entries, deadLetterIndexEntry{Member: m, Score: z.Score})
+		}
 	} else {
 		// Same-score tail: members at cursorScore, filtered in Go to member >
 		// cursorMember (Redis orders same-score members by member lex, so the
 		// slice is already in correct order).
-		sameScore, serr := s.rdb.ZRangeArgs(ctx, redis.ZRangeArgs{
+		sameScore, serr := s.rdb.ZRangeArgsWithScores(ctx, redis.ZRangeArgs{
 			Key: deadKey, Start: formatScore(cursorScore), Stop: formatScore(cursorScore), ByScore: true, Offset: 0, Count: -1,
 		}).Result()
 		if serr != nil {
 			return engine.DeadLetterList{}, fmt.Errorf("list dead letters %q: %w", id, serr)
 		}
-		ids = make([]string, 0, len(sameScore)+page.Limit+1)
-		for _, m := range sameScore {
+		entries = make([]deadLetterIndexEntry, 0, len(sameScore)+page.Limit+1)
+		for _, z := range sameScore {
+			m, ok := z.Member.(string)
+			if !ok {
+				continue
+			}
 			if m > cursorMember {
-				ids = append(ids, m)
+				entries = append(entries, deadLetterIndexEntry{Member: m, Score: z.Score})
 			}
 		}
 		// Strictly-higher scores. Bound by limit+1 minus what we already have,
 		// but keep at least limit+1 so the next-page detection stays correct
 		// when the same-score tail was shorter than a page.
-		higher, herr := s.rdb.ZRangeArgs(ctx, redis.ZRangeArgs{
+		higher, herr := s.rdb.ZRangeArgsWithScores(ctx, redis.ZRangeArgs{
 			Key: deadKey, Start: "(" + formatScore(cursorScore), Stop: "+inf", ByScore: true, Offset: 0, Count: int64(page.Limit + 1),
 		}).Result()
 		if herr != nil {
 			return engine.DeadLetterList{}, fmt.Errorf("list dead letters %q: %w", id, herr)
 		}
-		ids = append(ids, higher...)
+		for _, z := range higher {
+			m, ok := z.Member.(string)
+			if !ok {
+				continue
+			}
+			entries = append(entries, deadLetterIndexEntry{Member: m, Score: z.Score})
+		}
+	}
+
+	if listDeadLettersAfterFetchHook != nil {
+		listDeadLettersAfterFetchHook()
 	}
 
 	var nextCursor string
-	if len(ids) > page.Limit {
+	if len(entries) > page.Limit {
 		// Build the next cursor from the (score, member) of the last entry on
-		// this page. Fetching its score is one round-trip; if it vanished
-		// between listing and scoring (concurrent replay/delete), fall back to
-		// no next cursor — the caller re-lists from the start, which only
-		// re-scans the surviving entries.
-		lastID := ids[page.Limit-1]
-		score, serr := s.rdb.ZScore(ctx, deadKey, lastID).Result()
-		if serr == nil {
-			nextCursor = s.encodeDeadLetterCursor(id, score, lastID)
-		} else if serr != redis.Nil {
-			return engine.DeadLetterList{}, fmt.Errorf("list dead letters %q: %w", id, serr)
-		}
-		ids = ids[:page.Limit]
+		// this page. The score was captured atomically with the member in the
+		// ZRangeWithScores fetch above, so a concurrent replay/delete of the
+		// boundary entry cannot leave the cursor empty or drop later entries.
+		boundary := entries[page.Limit-1]
+		nextCursor = s.encodeDeadLetterCursor(id, boundary.Score, boundary.Member)
+		entries = entries[:page.Limit]
 	}
 
-	out := make([]engine.OutboxEntry, 0, len(ids))
-	for _, entryID := range ids {
-		raw, err := s.rdb.HGet(ctx, outboxDeadBodyKey(t, id), entryID).Result()
+	out := make([]engine.OutboxEntry, 0, len(entries))
+	for _, e := range entries {
+		raw, err := s.rdb.HGet(ctx, outboxDeadBodyKey(t, id), e.Member).Result()
 		if err == redis.Nil {
 			// body missing while index still references it: self-heal by removing the stale index entry
-			_ = s.rdb.ZRem(ctx, deadKey, entryID).Err()
+			_ = s.rdb.ZRem(ctx, deadKey, e.Member).Err()
 			continue
 		}
 		if err != nil {
-			return engine.DeadLetterList{Entries: out}, fmt.Errorf("read dead letter %q/%q: %w", id, entryID, err)
+			return engine.DeadLetterList{Entries: out}, fmt.Errorf("read dead letter %q/%q: %w", id, e.Member, err)
 		}
 		entry, err := unmarshalRedisOutboxEntry(raw)
 		if err != nil {
-			return engine.DeadLetterList{Entries: out}, fmt.Errorf("decode dead letter %q/%q: %w", id, entryID, err)
+			return engine.DeadLetterList{Entries: out}, fmt.Errorf("decode dead letter %q/%q: %w", id, e.Member, err)
 		}
 		out = append(out, entry)
 	}
@@ -1071,8 +1105,9 @@ func (s *Store) ListDeadLetters(ctx context.Context, id types.ExecutionID, page 
 
 // formatScore renders a ZSET score as the exact string Redis round-trips, so a
 // cursor's exclusive/inclusive score bounds match the stored member score
-// byte-for-byte. Redis scores are IEEE-754 doubles; %g reproduces the shortest
-// exact representation Go and Redis agree on for millisecond timestamps.
+// byte-for-byte. Redis scores are IEEE-754 doubles; 'f' with -1 precision
+// produces the decimal representation Go and Redis agree on for millisecond
+// timestamps.
 func formatScore(score float64) string {
 	return strconv.FormatFloat(score, 'f', -1, 64)
 }
