@@ -14,7 +14,7 @@ import (
 )
 
 type Store struct {
-	rdb                    *redis.Client
+	rdb                    redis.UniversalClient
 	db                     store.Store // may be nil
 	execTTL                time.Duration
 	transient              bool
@@ -44,7 +44,7 @@ type Store struct {
 	logger        engine.Logger
 }
 
-func New(rdb *redis.Client, db store.Store, execTTL time.Duration) *Store {
+func New(rdb redis.UniversalClient, db store.Store, execTTL time.Duration) *Store {
 	return &Store{
 		rdb:           rdb,
 		db:            db,

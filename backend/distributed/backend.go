@@ -175,7 +175,7 @@ type Backend struct {
 	registry       *execution.Registry
 	workflowReg    *workflowreg.Registry
 	triggerRuntime *trigger.Primitives
-	rdb            *redis.Client
+	rdb            redis.UniversalClient
 	timeoutMonitor *timeout.Monitor
 	concurrency    int
 	consumer       bool

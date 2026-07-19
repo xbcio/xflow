@@ -39,7 +39,7 @@ return 0
 // RedisLeaderElector coordinates leadership across replicas sharing the same
 // Redis instance using a SETNX-based lease with periodic renewal.
 type RedisLeaderElector struct {
-	rdb *redis.Client
+	rdb redis.UniversalClient
 	key string
 	ttl time.Duration
 
@@ -55,7 +55,7 @@ type RedisLeaderElector struct {
 
 // NewRedisLeaderElector builds an elector bound to key with the given lease
 // TTL. Renewal runs at ttl/3 while leadership is held.
-func NewRedisLeaderElector(rdb *redis.Client, key string, ttl time.Duration) *RedisLeaderElector {
+func NewRedisLeaderElector(rdb redis.UniversalClient, key string, ttl time.Duration) *RedisLeaderElector {
 	return &RedisLeaderElector{
 		rdb:  rdb,
 		key:  key,

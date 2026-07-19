@@ -15,7 +15,7 @@ import (
 )
 
 type Registry struct {
-	rdb *redis.Client
+	rdb redis.UniversalClient
 }
 
 type storedWorkflowRecord struct {
@@ -29,7 +29,7 @@ type storedWorkflowRecord struct {
 	Graph          *graph.Graph       `json:"graph,omitempty"`
 }
 
-func New(rdb *redis.Client) *Registry {
+func New(rdb redis.UniversalClient) *Registry {
 	return &Registry{rdb: rdb}
 }
 

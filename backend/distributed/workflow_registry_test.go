@@ -189,7 +189,7 @@ func workflowRegistryTestRecord(t *testing.T, nameSuffix, hash string) backend.W
 	}
 }
 
-func cleanupWorkflowRegistryRecord(t *testing.T, rdb *redis.Client, rec backend.WorkflowRecord) {
+func cleanupWorkflowRegistryRecord(t *testing.T, rdb redis.UniversalClient, rec backend.WorkflowRecord) {
 	t.Helper()
 
 	if rec.ID == "" {

@@ -12,10 +12,10 @@ import (
 )
 
 type Primitives struct {
-	rdb *redis.Client
+	rdb redis.UniversalClient
 }
 
-func New(rdb *redis.Client) *Primitives {
+func New(rdb redis.UniversalClient) *Primitives {
 	return &Primitives{rdb: rdb}
 }
 
@@ -51,7 +51,7 @@ func (p *Primitives) State(_ context.Context, scope string) types.TriggerState {
 }
 
 type triggerLock struct {
-	rdb   *redis.Client
+	rdb   redis.UniversalClient
 	key   string
 	token string
 }
@@ -96,7 +96,7 @@ func (l *triggerLock) Release(ctx context.Context) error {
 }
 
 type triggerState struct {
-	rdb   *redis.Client
+	rdb   redis.UniversalClient
 	scope string
 }
 
