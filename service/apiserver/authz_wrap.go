@@ -86,14 +86,15 @@ func (h *authzHolder) authzWrap(op string, isMutation bool, fn http.HandlerFunc,
 		}
 		if isMutation {
 			// Wrap the response writer so we can observe the handler's status
-			// code and append a reconcile outcome once it settles. A 2xx flips
-			// admitted→reconciled (the authoritative effect landed); a non-2xx
-			// records failed. The reconcile append is best-effort: a gap here
-			// is observable in audit but must not fail the already-admitted
-			// mutation.
+			// code and append a reconcile outcome inline after the handler
+			// returns. A 2xx flips admitted→reconciled (the authoritative effect
+			// landed); a non-2xx records failed. The reconcile append is
+			// best-effort: a gap here is observable in audit but must not fail
+			// the already-admitted mutation. Crash-safety for a panic between
+			// the mutation success and this append is explicitly T9's scope.
 			rw := &statusRecorder{ResponseWriter: w}
-			defer h.auditReconcile(r, principal, op, resource, wfID, execID, reqID, rw)
 			fn(rw, r)
+			h.auditReconcile(r, principal, op, resource, wfID, execID, reqID, rw)
 			return
 		}
 		fn(w, r)

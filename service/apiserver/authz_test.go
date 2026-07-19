@@ -404,7 +404,36 @@ func TestNewFailsClosedWhenPrincipalAuthMissingAuthorizerOrAudit(t *testing.T) {
 	_ = srv
 }
 
-// TestAuthzMutationAppendsReconcileOutcome proves the authz wrapper appends a
+// TestAuthzMutationOutcomeIsSynchronousNotDefer proves the post-handler
+// outcome audit is appended inline after the handler returns, not deferred.
+// If the handler panics, the reconcile row must NOT be written by a deferred
+// cleanup (crash-safety for that gap is T9's scope).
+func TestAuthzMutationOutcomeIsSynchronousNotDefer(t *testing.T) {
+	auth := staticPrincipalAuth{principal: Principal{Subject: "alice", Scopes: []string{"workflow"}}}
+	audit := NewInMemoryAuditSink()
+	m := authzModule(t, auth, ScopeAuthorizer{}, audit)
+
+	wrapped := m.wrapForTest(OpWorkflowCreate, true, func(w http.ResponseWriter, r *http.Request) {
+		panic("expected handler panic")
+	}, nil)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/workflows", nil)
+
+	func() {
+		defer func() {
+			if rec := recover(); rec == nil {
+				t.Fatal("expected handler panic")
+			}
+		}()
+		wrapped.ServeHTTP(rec, req)
+	}()
+
+	events := audit.Events()
+	if len(events) != 1 || events[0].Outcome != "admitted" {
+		t.Fatalf("audit = %+v, want exactly one admission event (outcome is synchronous, not deferred)", events)
+	}
+}
 // second audit row after a mutation handler settles: reconciled on 2xx,
 // failed on non-2xx. The admission row (admitted) and the reconcile row share
 // the RequestID so audit reconciliation can join them.
