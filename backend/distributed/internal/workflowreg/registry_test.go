@@ -192,6 +192,30 @@ func TestRegistryRemoveMissing(t *testing.T) {
 	}
 }
 
+func TestRegistryRemoveCorrupt(t *testing.T) {
+	ctx := context.Background()
+	reg, srv := newTestRegistry(t)
+
+	rec := testRecord(t, uuid.NewString(), "sha256:abc")
+	created, err := reg.AddWorkflow(ctx, rec)
+	if err != nil {
+		t.Fatalf("AddWorkflow: %v", err)
+	}
+
+	// Simulate a corrupt index: the idmap points to the key, but the tagged
+	// records have been lost. RemoveWorkflow should report not-found and clean
+	// up the stale idmap.
+	srv.Del(workflowByKeyKey(created.Key))
+	srv.Del(workflowByIDKey(created.Key, created.ID))
+
+	if err := reg.RemoveWorkflow(ctx, created.ID); !errors.Is(err, backend.ErrWorkflowNotFound) {
+		t.Fatalf("RemoveWorkflow corrupt = %v, want ErrWorkflowNotFound", err)
+	}
+	if srv.Exists(workflowIDMapKey(created.ID)) {
+		t.Fatalf("stale idmap still present after RemoveWorkflow for corrupt workflow %q", created.Key)
+	}
+}
+
 // TestRegistryKeyByIDSharesTag locks in the exported schema: KeyByID must place
 // the byid record in the same slot as KeyByKey (both carry `{<key>}`).
 func TestRegistryKeyByIDSharesTag(t *testing.T) {

@@ -184,16 +184,24 @@ func (r *Registry) RemoveWorkflow(ctx context.Context, id types.WorkflowID) erro
 	}
 
 	// bykey and byid:<id> share the `{<key>}` tag -> same slot -> Lua-safe.
-	if _, err := removeWorkflowRecordLua.Run(
+	res, err := removeWorkflowRecordLua.Run(
 		ctx,
 		r.rdb,
 		[]string{workflowByKeyKey(key), workflowByIDKey(key, id)},
-	).Result(); err != nil {
+	).Result()
+	if err != nil {
 		return fmt.Errorf("remove workflow %q: %w", id, err)
 	}
 
 	// Best-effort cleanup of the untagged reverse index (single-key op).
 	_ = r.rdb.Del(ctx, workflowIDMapKey(id)).Err()
+
+	// A zero count means neither bykey nor byid existed: the workflow was not
+	// actually present, so report it as not found even if the idmap index was
+	// stale (corrupt state).
+	if n, ok := res.(int64); ok && n == 0 {
+		return backend.ErrWorkflowNotFound
+	}
 	return nil
 }
 

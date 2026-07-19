@@ -72,8 +72,7 @@ func (c RedisConfig) Validate() error {
 }
 
 // firstAddr returns the first configured address, or an empty string if none is
-// configured. It is still used for single-mode: when redisAddr is empty it
-// provides the bootstrap address for the legacy asynq transport fallback.
+// configured. It is used for single-mode client construction.
 func (c RedisConfig) firstAddr() string {
 	if len(c.Addrs) == 0 {
 		return ""
@@ -139,9 +138,9 @@ func newRedisClient(cfg RedisConfig) (redis.UniversalClient, error) {
 			DB:        cfg.DB,
 		}), nil
 	case RedisModeSentinel, RedisModeCluster:
-		// redis.NewUniversalClient returns a *redis.Client failover client for
-		// sentinel and a *redis.ClusterClient for cluster when Addrs has more
-		// than one entry (or even one entry without MasterName).
+		// redis.NewUniversalClient returns a failover *redis.Client for sentinel
+		// (MasterName non-empty) and a *redis.ClusterClient for cluster
+		// (MasterName empty), regardless of the number of addresses.
 		return redis.NewUniversalClient(&redis.UniversalOptions{
 			MasterName:       cfg.MasterName,
 			Addrs:            cfg.Addrs,
