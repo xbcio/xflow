@@ -20,7 +20,14 @@ import (
 // Config configures an APIServer. Transport-facing fields (HTTPAddr, etc.)
 // are declared here but only consumed in stage 2 when APIServer.Run lands.
 type Config struct {
-	RedisAddr   string
+	// RedisAddr is the legacy single-node Redis address. It is used when
+	// RedisConfig is nil to preserve backwards compatibility. An empty value
+	// selects the in-memory backend.
+	RedisAddr string
+	// RedisConfig is the optional Redis HA configuration (single/sentinel/cluster).
+	// When non-nil it takes precedence over RedisAddr and is passed to
+	// distributed.New via WithRedisConfig.
+	RedisConfig *distributed.RedisConfig
 	Store       store.Store
 	Concurrency int
 	Auth        control.Authenticator
@@ -165,10 +172,10 @@ func New(cfg Config, opts ...Option) (*APIServer, error) {
 }
 
 // buildControlPlane assembles a *control.ControlPlane from cfg. It mirrors
-// cmd/server's buildControlPlane for backend selection (memory when
-// RedisAddr is empty, distributed otherwise) but does NOT start a metrics
-// HTTP server — cfg.Metrics is passed through verbatim and is the caller's
-// responsibility to construct.
+// cmd/server's buildControlPlane for backend selection (memory when neither
+// RedisAddr nor RedisConfig is set, distributed otherwise) but does NOT start
+// a metrics HTTP server — cfg.Metrics is passed through verbatim and is the
+// caller's responsibility to construct.
 func buildControlPlane(cfg Config) (*control.ControlPlane, error) {
 	ccfg := control.Config{
 		Auth:    cfg.Auth,
@@ -177,7 +184,8 @@ func buildControlPlane(cfg Config) (*control.ControlPlane, error) {
 		Tracer:  cfg.Tracer,
 	}
 
-	if cfg.RedisAddr == "" {
+	useRedis := cfg.RedisConfig != nil || cfg.RedisAddr != ""
+	if !useRedis {
 		ccfg.Backend = backendlocal.New(backendlocal.WithConcurrency(cfg.Concurrency))
 	} else {
 		opts := []distributed.Option{
@@ -191,7 +199,14 @@ func buildControlPlane(cfg Config) (*control.ControlPlane, error) {
 				distributed.WithLeaseObserver(metrics.NewLeaseMetrics(cfg.Metrics)),
 			)
 		}
-		b, err := distributed.New(cfg.RedisAddr, cfg.Store, opts...)
+		var b *distributed.Backend
+		var err error
+		if cfg.RedisConfig != nil {
+			opts = append(opts, distributed.WithRedisConfig(*cfg.RedisConfig))
+			b, err = distributed.New("", cfg.Store, opts...)
+		} else {
+			b, err = distributed.New(cfg.RedisAddr, cfg.Store, opts...)
+		}
 		if err != nil {
 			return nil, err
 		}

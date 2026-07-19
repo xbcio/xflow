@@ -3,8 +3,10 @@ package apiserver
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/xbcio/xflow/backend/distributed"
 	backendlocal "github.com/xbcio/xflow/backend/local"
 	"github.com/xbcio/xflow/service/control"
 )
@@ -146,5 +148,69 @@ func TestWithControlPlaneInjectsUnowned(t *testing.T) {
 	}
 	if srv.ownsCP {
 		t.Fatal("APIServer.ownsCP = true, want false for injected CP")
+	}
+}
+
+// TestBuildControlPlaneUsesRedisConfigPath verifies that when RedisConfig is
+// set, buildControlPlane attempts to construct a distributed backend using it.
+// An invalid mode fails before any network call, proving the option is wired.
+func TestBuildControlPlaneUsesRedisConfigPath(t *testing.T) {
+	_, err := buildControlPlane(Config{
+		Concurrency: 1,
+		RedisConfig: &distributed.RedisConfig{Mode: "bogus"},
+	})
+	if err == nil {
+		t.Fatal("buildControlPlane() error = nil, want error for invalid RedisConfig mode")
+	}
+	if !strings.Contains(err.Error(), "unsupported redis mode") {
+		t.Fatalf("error = %v, want unsupported redis mode", err)
+	}
+}
+
+// TestBuildControlPlaneRedisConfigPrecedence verifies RedisConfig takes
+// precedence over an empty RedisAddr (i.e. it does not fall back to memory).
+func TestBuildControlPlaneRedisConfigPrecedence(t *testing.T) {
+	_, err := buildControlPlane(Config{
+		Concurrency: 1,
+		RedisAddr:   "",
+		RedisConfig: &distributed.RedisConfig{Mode: "bogus"},
+	})
+	if err == nil {
+		t.Fatal("buildControlPlane() error = nil, want error when RedisConfig is set")
+	}
+	if !strings.Contains(err.Error(), "unsupported redis mode") {
+		t.Fatalf("error = %v, want unsupported redis mode", err)
+	}
+}
+
+// TestBuildControlPlaneFallsBackToMemoryWhenRedisUnset verifies the in-memory
+// backend is selected when both RedisAddr and RedisConfig are absent.
+func TestBuildControlPlaneFallsBackToMemoryWhenRedisUnset(t *testing.T) {
+	cp, err := buildControlPlane(Config{Concurrency: 1})
+	if err != nil {
+		t.Fatalf("buildControlPlane: %v", err)
+	}
+	if cp == nil {
+		t.Fatal("buildControlPlane returned nil ControlPlane")
+	}
+	// Memory backend always reports itself as leader.
+	if !cp.IsLeader() {
+		t.Fatal("IsLeader() = false for memory backend, want true")
+	}
+}
+
+// TestBuildControlPlaneKeepsLegacyRedisAddrPath verifies that a non-empty
+// RedisAddr still selects the distributed backend path.
+func TestBuildControlPlaneKeepsLegacyRedisAddrPath(t *testing.T) {
+	_, err := buildControlPlane(Config{
+		Concurrency: 1,
+		RedisAddr:   "127.0.0.1:1",
+	})
+	if err == nil {
+		t.Fatal("buildControlPlane() error = nil, want error for unreachable RedisAddr")
+	}
+	// The legacy path creates a redis.Client and pings it; expect a connection error.
+	if !strings.Contains(err.Error(), "redis ping") && !strings.Contains(err.Error(), "connection refused") {
+		t.Fatalf("error = %v, want redis ping / connection refused error", err)
 	}
 }

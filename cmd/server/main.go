@@ -20,13 +20,16 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
+	"github.com/xbcio/xflow/backend/distributed"
 	"github.com/xbcio/xflow/engine"
 	obslogger "github.com/xbcio/xflow/observability/logger"
 	"github.com/xbcio/xflow/observability/metrics"
@@ -44,6 +47,19 @@ type serverConfig struct {
 	redis       string
 	memory      bool
 	concurrency int
+	// redisMode selects the Redis deployment topology: single (default),
+	// sentinel, or cluster.
+	redisMode string
+	// redisSentinelMaster is the name of the Redis master monitored by sentinels.
+	redisSentinelMaster string
+	// redisClusterAddrs is a comma-separated list of Redis cluster node addresses.
+	redisClusterAddrs string
+	// redisSentinelAddrs is a comma-separated list of Sentinel node addresses.
+	redisSentinelAddrs string
+	redisUsername      string
+	redisPassword      string
+	redisDB            int
+	redisTLS           bool
 	// authPolicy is the path to runners.yaml. Empty means DisabledAuthenticator
 	// (dev / MVP behavior).
 	authPolicy string
@@ -102,7 +118,15 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	cfg := serverConfig{addr: ":8080", concurrency: 10}
 	fs.StringVar(&cfg.addr, "addr", cfg.addr, "HTTP listen address")
 	fs.StringVar(&cfg.grpcAddr, "grpc-addr", "", "gRPC Runner Protocol listen address (empty disables gRPC)")
-	fs.StringVar(&cfg.redis, "redis", "", "Redis address for Asynq backend")
+	fs.StringVar(&cfg.redis, "redis", "", "Redis address for Asynq backend (single-node; legacy compatible)")
+	fs.StringVar(&cfg.redisMode, "redis-mode", "", "Redis deployment mode: single|sentinel|cluster (default single)")
+	fs.StringVar(&cfg.redisSentinelMaster, "redis-sentinel-master", "", "Redis sentinel master name (required for --redis-mode=sentinel)")
+	fs.StringVar(&cfg.redisClusterAddrs, "redis-cluster-addrs", "", "Comma-separated Redis cluster node addresses (required for --redis-mode=cluster)")
+	fs.StringVar(&cfg.redisSentinelAddrs, "redis-sentinel-addrs", "", "Comma-separated Redis sentinel node addresses (required for --redis-mode=sentinel)")
+	fs.StringVar(&cfg.redisUsername, "redis-username", "", "Redis username (ACL)")
+	fs.StringVar(&cfg.redisPassword, "redis-password", "", "Redis password")
+	fs.IntVar(&cfg.redisDB, "redis-db", 0, "Redis logical database (single/sentinel)")
+	fs.BoolVar(&cfg.redisTLS, "redis-tls", false, "Enable TLS for Redis connections")
 	fs.BoolVar(&cfg.memory, "memory", false, "Use in-memory backend")
 	fs.IntVar(&cfg.concurrency, "concurrency", cfg.concurrency, "Queue consumer concurrency")
 	fs.StringVar(&cfg.authPolicy, "auth-policy", "", "Path to runners.yaml (empty = auth disabled)")
@@ -135,10 +159,114 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	default:
 		return serverConfig{}, fmt.Errorf("--trace must be one of: disabled|stdout|otlp")
 	}
-	if cfg.redis == "" {
+	switch cfg.redisMode {
+	case "", distributed.RedisModeSingle, distributed.RedisModeSentinel, distributed.RedisModeCluster:
+		// valid
+	default:
+		return serverConfig{}, fmt.Errorf("--redis-mode must be one of: single|sentinel|cluster")
+	}
+	// Backwards compatibility: when no Redis address and no HA topology flags
+	// are provided, default to the in-memory backend.
+	haConfigured := cfg.redisMode != "" || cfg.redisSentinelAddrs != "" || cfg.redisClusterAddrs != ""
+	if cfg.redis == "" && !haConfigured {
 		cfg.memory = true
 	}
 	return cfg, nil
+}
+
+// buildRedisConfig assembles a distributed.RedisConfig from CLI flags. It
+// returns nil when the legacy single-address path should be used, preserving
+// backwards compatibility for deployments that only pass --redis. It is
+// fail-closed: invalid mode/address combinations return an error.
+func buildRedisConfig(cfg serverConfig) (*distributed.RedisConfig, error) {
+	mode := cfg.redisMode
+	if mode == "" {
+		mode = distributed.RedisModeSingle
+	}
+
+	// If only --redis is provided (no HA-specific flags), keep the legacy
+	// RedisAddr path so existing deployments are untouched.
+	haConfigured := cfg.redisMode != "" ||
+		cfg.redisSentinelAddrs != "" ||
+		cfg.redisClusterAddrs != "" ||
+		cfg.redisSentinelMaster != "" ||
+		cfg.redisUsername != "" ||
+		cfg.redisPassword != "" ||
+		cfg.redisDB != 0 ||
+		cfg.redisTLS
+
+	switch mode {
+	case distributed.RedisModeSingle:
+		if !haConfigured {
+			return nil, nil
+		}
+		if cfg.redis == "" {
+			return nil, fmt.Errorf("--redis is required for --redis-mode=single")
+		}
+		rc := &distributed.RedisConfig{
+			Mode:     distributed.RedisModeSingle,
+			Addrs:    []string{cfg.redis},
+			Username: cfg.redisUsername,
+			Password: cfg.redisPassword,
+			DB:       cfg.redisDB,
+		}
+		if cfg.redisTLS {
+			rc.TLSConfig = &tls.Config{}
+		}
+		return rc, nil
+
+	case distributed.RedisModeSentinel:
+		if cfg.redisSentinelMaster == "" {
+			return nil, fmt.Errorf("--redis-sentinel-master is required for --redis-mode=sentinel")
+		}
+		if cfg.redisSentinelAddrs == "" {
+			return nil, fmt.Errorf("--redis-sentinel-addrs is required for --redis-mode=sentinel")
+		}
+		rc := &distributed.RedisConfig{
+			Mode:             distributed.RedisModeSentinel,
+			Addrs:            splitAddrs(cfg.redisSentinelAddrs),
+			MasterName:       cfg.redisSentinelMaster,
+			Username:         cfg.redisUsername,
+			Password:         cfg.redisPassword,
+			SentinelUsername: cfg.redisUsername,
+			SentinelPassword: cfg.redisPassword,
+			DB:               cfg.redisDB,
+		}
+		if cfg.redisTLS {
+			rc.TLSConfig = &tls.Config{}
+		}
+		return rc, nil
+
+	case distributed.RedisModeCluster:
+		if cfg.redisClusterAddrs == "" {
+			return nil, fmt.Errorf("--redis-cluster-addrs is required for --redis-mode=cluster")
+		}
+		rc := &distributed.RedisConfig{
+			Mode:     distributed.RedisModeCluster,
+			Addrs:    splitAddrs(cfg.redisClusterAddrs),
+			Username: cfg.redisUsername,
+			Password: cfg.redisPassword,
+		}
+		if cfg.redisTLS {
+			rc.TLSConfig = &tls.Config{}
+		}
+		return rc, nil
+
+	default:
+		return nil, fmt.Errorf("unsupported redis mode %q", mode)
+	}
+}
+
+func splitAddrs(s string) []string {
+	parts := strings.Split(s, ",")
+	addrs := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			addrs = append(addrs, p)
+		}
+	}
+	return addrs
 }
 
 func runServer(cfg serverConfig) error {
@@ -200,8 +328,21 @@ func runServer(cfg serverConfig) error {
 		log.Println("xflow-server: WARNING --mysql-dsn not set; using in-memory store + in-memory audit (dev only; not production)")
 	}
 
+	redisConfig, err := buildRedisConfig(cfg)
+	if err != nil {
+		return fmt.Errorf("redis config: %w", err)
+	}
+	if cfg.memory {
+		log.Println("xflow-server: using in-memory backend")
+	} else if redisConfig != nil {
+		log.Printf("xflow-server: using distributed backend (mode=%s addrs=%d master=%q tls=%v db=%d)", redisConfig.Mode, len(redisConfig.Addrs), redisConfig.MasterName, redisConfig.TLSConfig != nil, redisConfig.DB)
+	} else if cfg.redis != "" {
+		log.Printf("xflow-server: using distributed backend (redis=%s)", cfg.redis)
+	}
+
 	apiCfg := apiserver.Config{
-		RedisAddr:           cfg.redis, // empty => in-memory backend
+		RedisAddr:           cfg.redis, // legacy single-node path
+		RedisConfig:         redisConfig,
 		Store:               sqlStore,
 		Concurrency:         cfg.concurrency,
 		Auth:                auth,

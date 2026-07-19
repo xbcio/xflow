@@ -1,8 +1,10 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
+	"github.com/xbcio/xflow/backend/distributed"
 	obslogger "github.com/xbcio/xflow/observability/logger"
 	"github.com/xbcio/xflow/service/apiserver"
 )
@@ -114,5 +116,134 @@ func TestParseServerConfigSupportsManagementFlag(t *testing.T) {
 	}
 	if !cfg.management {
 		t.Fatal("management = false, want true")
+	}
+}
+
+func TestParseServerConfigRedisModeFlag(t *testing.T) {
+	cfg, err := parseServerConfig([]string{
+		"-redis-mode", "sentinel",
+		"-redis-sentinel-master", "mymaster",
+		"-redis-sentinel-addrs", "s1:26379,s2:26379",
+		"-redis-password", "secret",
+		"-redis-db", "3",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.redisMode != "sentinel" {
+		t.Fatalf("redisMode = %q, want sentinel", cfg.redisMode)
+	}
+	if cfg.memory {
+		t.Fatal("memory = true, want false when HA topology is configured")
+	}
+	if cfg.redisSentinelMaster != "mymaster" || cfg.redisSentinelAddrs != "s1:26379,s2:26379" || cfg.redisPassword != "secret" || cfg.redisDB != 3 {
+		t.Fatalf("unexpected HA flags: %+v", cfg)
+	}
+}
+
+func TestParseServerConfigRejectsInvalidRedisMode(t *testing.T) {
+	if _, err := parseServerConfig([]string{"-redis-mode", "bogus"}); err == nil {
+		t.Fatal("parseServerConfig() error = nil, want error for invalid --redis-mode")
+	}
+}
+
+func TestBuildRedisConfigLegacySingleReturnsNil(t *testing.T) {
+	cfg := serverConfig{redis: "localhost:6379"}
+	rc, err := buildRedisConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rc != nil {
+		t.Fatalf("buildRedisConfig() = %+v, want nil for legacy --redis", rc)
+	}
+}
+
+func TestBuildRedisConfigDefaultRedisEmptyGoesInMemory(t *testing.T) {
+	cfg := serverConfig{}
+	rc, err := buildRedisConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rc != nil {
+		t.Fatalf("buildRedisConfig() = %+v, want nil for empty redis", rc)
+	}
+}
+
+func TestBuildRedisConfigSingleMode(t *testing.T) {
+	cfg := serverConfig{redis: "localhost:6379", redisMode: "single", redisPassword: "secret", redisDB: 2, redisTLS: true}
+	rc, err := buildRedisConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rc == nil {
+		t.Fatal("buildRedisConfig() = nil, want RedisConfig")
+	}
+	if rc.Mode != distributed.RedisModeSingle || len(rc.Addrs) != 1 || rc.Addrs[0] != "localhost:6379" || rc.Password != "secret" || rc.DB != 2 || rc.TLSConfig == nil {
+		t.Fatalf("unexpected RedisConfig: %+v", rc)
+	}
+}
+
+func TestBuildRedisConfigSentinelRequiresMaster(t *testing.T) {
+	cfg := serverConfig{redisMode: "sentinel", redisSentinelAddrs: "s1:26379"}
+	if _, err := buildRedisConfig(cfg); err == nil {
+		t.Fatal("buildRedisConfig() error = nil, want error for missing master")
+	}
+}
+
+func TestBuildRedisConfigSentinelRequiresAddrs(t *testing.T) {
+	cfg := serverConfig{redisMode: "sentinel", redisSentinelMaster: "mymaster"}
+	if _, err := buildRedisConfig(cfg); err == nil {
+		t.Fatal("buildRedisConfig() error = nil, want error for missing sentinel addrs")
+	}
+}
+
+func TestBuildRedisConfigSentinelMode(t *testing.T) {
+	cfg := serverConfig{
+		redisMode:           "sentinel",
+		redisSentinelMaster: "mymaster",
+		redisSentinelAddrs:  "s1:26379, s2:26379 ,s3:26379",
+		redisUsername:       "u",
+		redisPassword:       "p",
+		redisDB:             1,
+		redisTLS:            true,
+	}
+	rc, err := buildRedisConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rc == nil {
+		t.Fatal("buildRedisConfig() = nil, want RedisConfig")
+	}
+	want := []string{"s1:26379", "s2:26379", "s3:26379"}
+	if rc.Mode != distributed.RedisModeSentinel || rc.MasterName != "mymaster" || len(rc.Addrs) != 3 || strings.Join(rc.Addrs, ",") != strings.Join(want, ",") || rc.Username != "u" || rc.Password != "p" || rc.SentinelUsername != "u" || rc.SentinelPassword != "p" || rc.DB != 1 || rc.TLSConfig == nil {
+		t.Fatalf("unexpected RedisConfig: %+v", rc)
+	}
+}
+
+func TestBuildRedisConfigClusterRequiresAddrs(t *testing.T) {
+	cfg := serverConfig{redisMode: "cluster"}
+	if _, err := buildRedisConfig(cfg); err == nil {
+		t.Fatal("buildRedisConfig() error = nil, want error for missing cluster addrs")
+	}
+}
+
+func TestBuildRedisConfigClusterMode(t *testing.T) {
+	cfg := serverConfig{
+		redisMode:         "cluster",
+		redisClusterAddrs: "c1:6379,c2:6379",
+		redisUsername:     "u",
+		redisPassword:     "p",
+		redisTLS:          true,
+	}
+	rc, err := buildRedisConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rc == nil {
+		t.Fatal("buildRedisConfig() = nil, want RedisConfig")
+	}
+	want := []string{"c1:6379", "c2:6379"}
+	if rc.Mode != distributed.RedisModeCluster || len(rc.Addrs) != 2 || strings.Join(rc.Addrs, ",") != strings.Join(want, ",") || rc.Username != "u" || rc.Password != "p" || rc.TLSConfig == nil {
+		t.Fatalf("unexpected RedisConfig: %+v", rc)
 	}
 }
