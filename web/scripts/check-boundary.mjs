@@ -9,9 +9,13 @@ const packagesDir = path.resolve(__dirname, "../packages");
 
 // Forbidden dependency patterns. A dependency is rejected when any pattern
 // matches its full name. Patterns cover exact names, scopes, or prefixes.
+// ADR D9: ahooks and zustand are app-layer only; public packages must not
+// declare them (not even as optional peers).
 const forbiddenPatterns = [
   { source: "@umijs/max", regex: /^@umijs\// },
   { source: "@ant-design/pro-layout", regex: /^@ant-design\/pro-/ },
+  { source: "ahooks", regex: /^ahooks$/ },
+  { source: "zustand", regex: /^zustand$/ },
 ];
 
 const dependencyFields = [
@@ -69,41 +73,51 @@ async function checkPackages() {
 }
 
 async function runNegativeTest() {
-  const tmpDir = await mkdtemp(path.join(os.tmpdir(), "xflow-boundary-test-"));
-  const pkgJsonPath = path.join(tmpDir, "package.json");
+  // Each fixture maps a forbidden dependency to the pattern that should catch
+  // it. Covers scopes, prefixes, and exact app-layer names (ahooks/zustand).
+  const fixtures = [
+    { dep: "@umijs/max", version: "4.0.0", source: "@umijs/max" },
+    { dep: "@ant-design/pro-layout", version: "2.8.8", source: "@ant-design/pro-layout" },
+    { dep: "ahooks", version: "3.8.4", source: "ahooks" },
+    { dep: "zustand", version: "5.0.5", source: "zustand" },
+  ];
 
-  try {
-    await writeFile(
-      pkgJsonPath,
-      JSON.stringify({
-        name: "@xflow/boundary-negative-fixture",
-        optionalDependencies: {
-          "@umijs/max": "4.0.0",
-        },
-      })
-    );
+  let failed = false;
 
-    // Read the fixture through the same logic used for real packages.
-    const pkgJson = JSON.parse(await readFile(pkgJsonPath, "utf-8"));
-    const deps = {};
-    for (const field of dependencyFields) {
-      if (pkgJson[field] && typeof pkgJson[field] === "object") {
-        Object.assign(deps, pkgJson[field]);
+  for (const { dep, version, source } of fixtures) {
+    const tmpDir = await mkdtemp(path.join(os.tmpdir(), "xflow-boundary-test-"));
+    const pkgJsonPath = path.join(tmpDir, "package.json");
+
+    try {
+      await writeFile(
+        pkgJsonPath,
+        JSON.stringify({
+          name: "@xflow/boundary-negative-fixture",
+          optionalDependencies: { [dep]: version },
+        })
+      );
+
+      const pkgJson = JSON.parse(await readFile(pkgJsonPath, "utf-8"));
+      const deps = {};
+      for (const field of dependencyFields) {
+        if (pkgJson[field] && typeof pkgJson[field] === "object") {
+          Object.assign(deps, pkgJson[field]);
+        }
       }
-    }
 
-    for (const dep of Object.keys(deps)) {
-      if (isForbidden(dep)) {
-        console.log("Negative test passed: fixture with @umijs/max was rejected.");
-        return false;
+      const matched = Object.keys(deps).some((d) => isForbidden(d) === source);
+      if (matched) {
+        console.log(`Negative test passed: fixture with ${dep} was rejected.`);
+      } else {
+        console.error(`Negative test failed: fixture with ${dep} was not rejected.`);
+        failed = true;
       }
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
     }
-
-    console.error("Negative test failed: fixture with @umijs/max was not rejected.");
-    return true;
-  } finally {
-    await rm(tmpDir, { recursive: true, force: true });
   }
+
+  return failed;
 }
 
 async function main() {
