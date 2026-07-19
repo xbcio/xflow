@@ -630,10 +630,15 @@ func newReconciler(sqlStore store.Store, srv *apiserver.APIServer, m *metrics.Me
 	}
 	var authority control.AdmissionAuthority
 	var elector control.LeaderGate
-	if srv != nil {
-		authority = control.NewExecutionAuthority(srv.Backend().State())
-		elector = leaderGateAdapter{isLeader: srv.IsLeader}
+	if srv == nil {
+		// No authority source (no StateStore / no elector). Without srv we
+		// cannot consult authoritative state, so the worker would panic on the
+		// first settle. Return the dev no-op instead; production validation
+		// will fail closed if this path is reached with durable audit.
+		return noopReconciler{}
 	}
+	authority = control.NewExecutionAuthority(srv.Backend().State())
+	elector = leaderGateAdapter{isLeader: srv.IsLeader}
 	cfg := control.AuditReconcileConfig{
 		Logger:  logger,
 		Elector: elector,

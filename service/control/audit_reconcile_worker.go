@@ -28,7 +28,10 @@ const (
 // wrapper using the same strings.
 const (
 	opWorkflowCreate = "workflow.create"
-	opWorkflowInvoke  = "workflow.invoke"
+	opWorkflowInvoke = "workflow.invoke"
+	opExecutionSignal = "execution.signal"
+	opExecutionRevoke = "execution.revoke"
+	opExecutionCancel = "execution.cancel"
 )
 
 // DefaultReconcilePeriod is how often the worker scans for unreconciled
@@ -326,10 +329,11 @@ func (w *AuditReconcileWorker) observe(fn func(ReconcileObserver)) {
 // the existence of the execution in authoritative state is the clean
 // signal: found → confirmed (the create landed), not found → absent (the
 // handler crashed before the execution was persisted). For execution-scoped
-// mutations (signal/revoke/cancel) the execution being reachable means the
-// admission's target exists; the worker treats a reachable execution as
-// confirmed and an unreachable/missing one as indeterminate (the admission
-// is retried rather than fabricating an outcome).
+// mutations (signal/revoke/cancel) GetExecution is not decisive: a reachable
+// execution only proves the target exists, not that the signal/revoke/cancel
+// was actually applied. Those operations therefore return EffectIndeterminate
+// (retry) until a future per-operation probe can inspect the execution more
+// closely; a missing/unreachable execution is also indeterminate.
 //
 // It NEVER mutates state: GetExecution is a read. The Redis receipt (dead-
 // letter replay) remains authoritative for replay mutations and is
@@ -377,12 +381,20 @@ func (a *ExecutionAuthority) Probe(ctx context.Context, rec *store.AuditRecord) 
 			return EffectIndeterminate, nil
 		}
 	}
-	// Execution found in authoritative state → the mutation's target is
-	// present. For create/invoke this confirms the create landed. For
-	// execution-scoped mutations the admission was authorized and the
-	// execution is reachable; the tiny crash window between mutation and
-	// outcome append means the most defensible judgment is confirmed.
-	return EffectConfirmed, nil
+	// Execution found in authoritative state. For create/invoke this confirms
+	// the mutation landed. For execution-scoped mutations (signal/revoke/cancel)
+	// a reachable execution is ambiguous: it proves the target existed, not that
+	// the mutation itself was applied. Defer to a future per-operation probe;
+	// retry rather than fabricate a confirmed outcome.
+	switch rec.Operation {
+	case opWorkflowCreate, opWorkflowInvoke:
+		return EffectConfirmed, nil
+	case opExecutionSignal, opExecutionRevoke, opExecutionCancel:
+		return EffectIndeterminate, nil
+	default:
+		// Unknown operation: no decisive evidence, retry.
+		return EffectIndeterminate, nil
+	}
 }
 
 // Compile-time: *Backend satisfies LeaderGate via IsLeader(). The worker

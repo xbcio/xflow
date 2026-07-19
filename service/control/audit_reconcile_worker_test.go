@@ -372,7 +372,27 @@ func TestReconcileIndeterminateEffectRetries(t *testing.T) {
 	}
 }
 
-// TestReconcileDoesNotReExecuteMutation is the explicit security invariant:
+// TestReconcileSignalMutationReachableRetries proves a reachable execution is
+// not treated as confirmation for execution.signal/revoke/cancel. The real
+// ExecutionAuthority returns EffectIndeterminate, so the worker retries without
+// fabricating a reconciled outcome.
+func TestReconcileSignalMutationReachableRetries(t *testing.T) {
+	for _, op := range []string{opExecutionSignal, opExecutionRevoke, opExecutionCancel} {
+		t.Run(op, func(t *testing.T) {
+			audit := &fakeAuditReconciler{}
+			authority := NewExecutionAuthority(&fakeExecutions{snap: &engine.ExecutionSnapshot{}})
+			audit.addAdmission(admissionForRow("req-signal", "tenant-a", op, "exec-signal", time.Now().Add(-time.Minute)))
+
+			w := newWorkerForTest(audit, authority, backend.AlwaysLeader{}, nil)
+			if n := w.ReconcileOnce(context.Background()); n != 0 {
+				t.Fatalf("settled = %d, want 0 (%s on reachable exec is indeterminate)", n, op)
+			}
+			if got := audit.outcomeCount(); got != 0 {
+				t.Fatalf("outcome rows for %s = %d, want 0 (must not fabricate)", op, got)
+			}
+		})
+	}
+}
 // the worker only probes authority and appends audit. The fakeAuthority has
 // no mutation method, and the worker's settle path has no call into the
 // engine or backend beyond the read-only Probe + AppendOutcomeIfAbsent.
@@ -426,9 +446,33 @@ func TestExecutionAuthorityProbesGetExecution(t *testing.T) {
 	t.Run("signal on missing exec -> indeterminate", func(t *testing.T) {
 		st := &fakeExecutions{notFound: true}
 		a := NewExecutionAuthority(st)
-		eff, err := a.Probe(context.Background(), &store.AuditRecord{Operation: "execution.signal", ExecutionID: "exec-x"})
+		eff, err := a.Probe(context.Background(), &store.AuditRecord{Operation: opExecutionSignal, ExecutionID: "exec-x"})
 		if err != nil || eff != EffectIndeterminate {
 			t.Fatalf("eff=%v err=%v, want indeterminate/nil", eff, err)
+		}
+	})
+	t.Run("signal on found exec -> indeterminate", func(t *testing.T) {
+		st := &fakeExecutions{snap: &engine.ExecutionSnapshot{}}
+		a := NewExecutionAuthority(st)
+		eff, err := a.Probe(context.Background(), &store.AuditRecord{Operation: opExecutionSignal, ExecutionID: "exec-x"})
+		if err != nil || eff != EffectIndeterminate {
+			t.Fatalf("eff=%v err=%v, want indeterminate/nil (reachable execution is not decisive)", eff, err)
+		}
+	})
+	t.Run("revoke on found exec -> indeterminate", func(t *testing.T) {
+		st := &fakeExecutions{snap: &engine.ExecutionSnapshot{}}
+		a := NewExecutionAuthority(st)
+		eff, err := a.Probe(context.Background(), &store.AuditRecord{Operation: opExecutionRevoke, ExecutionID: "exec-x"})
+		if err != nil || eff != EffectIndeterminate {
+			t.Fatalf("eff=%v err=%v, want indeterminate/nil (reachable execution is not decisive)", eff, err)
+		}
+	})
+	t.Run("cancel on found exec -> indeterminate", func(t *testing.T) {
+		st := &fakeExecutions{snap: &engine.ExecutionSnapshot{}}
+		a := NewExecutionAuthority(st)
+		eff, err := a.Probe(context.Background(), &store.AuditRecord{Operation: opExecutionCancel, ExecutionID: "exec-x"})
+		if err != nil || eff != EffectIndeterminate {
+			t.Fatalf("eff=%v err=%v, want indeterminate/nil (reachable execution is not decisive)", eff, err)
 		}
 	})
 	t.Run("authority error -> indeterminate + err", func(t *testing.T) {

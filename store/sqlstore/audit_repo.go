@@ -211,7 +211,7 @@ func (r *auditRepo) AppendOutcomeIfAbsent(ctx context.Context, rec *store.AuditR
 		if err == nil {
 			return false, nil
 		}
-		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return false, wrapDBErr("append outcome if absent: lookup", err)
 		}
 	}
