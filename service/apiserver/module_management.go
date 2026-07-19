@@ -47,23 +47,38 @@ func newManagementModule(cp *control.ControlPlane) *managementModule {
 func (m *managementModule) Name() string { return "management" }
 
 func (m *managementModule) RegisterHTTP(mux *http.ServeMux) {
-	mux.HandleFunc("/v1/management/leader", m.handleLeader)
-	mux.HandleFunc("/v1/management/runners/", m.handleRunner) // /v1/management/runners/{id}
-	// Tenant boundary (Task 7.3): the execution-inspect route is mounted
-	// behind the B3 authz wrapper when a PrincipalAuthenticator is configured
-	// so the verified principal's TenantID is injected into the request
-	// context. Inspect then reads from the principal's tenant namespace
-	// (xflow:t<tenant>:exec:{<id>}); a cross-tenant execID resolves to
-	// not-found → 404, which is the IDOR defense and does not leak existence.
-	// When PrincipalAuth is nil (dev / behind an external gateway) the route
-	// is served directly and the tenant defaults to tenant.DefaultTenant.
+	// Task 8 blocker 2: when a PrincipalAuthenticator is configured, the
+	// leader/runner/executions routes go through the B3 authz wrapper so each
+	// gets its own stable operation + scope + admission/outcome audit, not a
+	// blanket management.read. leader → management.leader.read, runner →
+	// management.runner.read, execution inspect → management.read (single-
+	// resource lookup; no list API). dead-letters self-wrap below. healthz/
+	// readyz stay open for probes (minimal public info only).
+	//
+	// When PrincipalAuth is nil (dev / behind an external gateway) the routes
+	// are served directly and the tenant defaults to tenant.DefaultTenant.
 	if m.principalAuth != nil {
+		mux.HandleFunc("/v1/management/leader", m.authzWrap(OpManagementLeaderRead, false, m.handleLeader, func(*http.Request) (string, string, string, string) {
+			return "management/leader", "", "", ""
+		}))
+		mux.HandleFunc("/v1/management/runners/", m.authzWrap(OpManagementRunnerRead, false, m.handleRunner, func(r *http.Request) (string, string, string, string) {
+			id := strings.TrimPrefix(r.URL.Path, "/v1/management/runners/")
+			id = strings.Trim(id, "/")
+			return "management/runner/" + id, "", "", ""
+		}))
+		// Tenant boundary (Task 7.3): the execution-inspect route injects the
+		// verified principal's TenantID into the request context. Inspect reads
+		// from the principal's tenant namespace; a cross-tenant execID resolves
+		// to not-found → 404, which is the IDOR defense and does not leak
+		// existence.
 		mux.HandleFunc("/v1/management/executions/", m.authzWrap(OpManagementRead, false, m.handleExecution, func(r *http.Request) (string, string, string, string) {
 			id := strings.TrimPrefix(r.URL.Path, "/v1/management/executions/")
 			id = strings.Trim(id, "/")
 			return "management/execution/" + id, "", id, ""
 		}))
 	} else {
+		mux.HandleFunc("/v1/management/leader", m.handleLeader)
+		mux.HandleFunc("/v1/management/runners/", m.handleRunner)
 		mux.HandleFunc("/v1/management/executions/", m.handleExecution)
 	}
 	mux.HandleFunc("/v1/management/dead-letters/", m.handleDeadLetters)

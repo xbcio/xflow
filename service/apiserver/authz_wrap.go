@@ -105,6 +105,47 @@ func (h *authzHolder) wrapForTest(op string, isMutation bool, fn http.HandlerFun
 	return h.authzWrap(op, isMutation, fn, resolver)
 }
 
+// resolvedRoute is the per-request authz decision resolved from the request path
+// and method BEFORE the authz wrapper runs. It lets a single mounted path
+// (e.g. /v1/executions/) serve multiple operations with different mutation
+// semantics: inspect/wait → execution.read (non-mutation), signal →
+// execution.signal (mutation), revoke-signal → execution.revoke (mutation),
+// cancel → execution.cancel (mutation). ok=false means the verb is unknown → the
+// wrapper denies (default-deny) and returns 404 without invoking the handler.
+type resolvedRoute struct {
+	operation      string
+	resource       string
+	workflowID     string
+	executionID    string
+	resourceTenant string
+	isMutation     bool
+}
+
+// authzWrapResolved is like authzWrap but resolves the operation, mutation
+// flag, and resource ids from the request inside the wrapper (per-verb). Used by
+// the /v1/executions/ subtree whose sub-paths map to distinct operations. An
+// unknown verb (ok=false) is denied and answered 404 "route not found" — no
+// existence leak, no authz audit row for an operation that does not exist
+// (unknown op default-deny). It delegates to authzWrap with the resolved op so
+// the admission+outcome audit + fail-closed path is identical to static-op
+// routes.
+func (h *authzHolder) authzWrapResolved(fn http.HandlerFunc, resolver func(*http.Request) (resolvedRoute, bool)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		rt, ok := resolver(r)
+		if !ok {
+			// Unknown verb: default-deny. 404 (not 403) so a probe learns nothing
+			// about which verbs exist; the authz audit sink records nothing for a
+			// non-existent operation (there is no principal yet for an unmounted
+			// route, and an unknown op would be denied anyway).
+			writeError(w, http.StatusNotFound, "route not found")
+			return
+		}
+		h.authzWrap(rt.operation, rt.isMutation, fn, func(*http.Request) (string, string, string, string) {
+			return rt.resource, rt.workflowID, rt.executionID, rt.resourceTenant
+		})(w, r)
+	}
+}
+
 // auditDeny records a deny decision before returning the rejection. Deny
 // audits are written best-effort (a sink gap must not mask the denial).
 func (h *authzHolder) auditDeny(r *http.Request, principal Principal, op, resource, wfID, execID, reason string) {

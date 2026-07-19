@@ -116,6 +116,15 @@ type serverConfig struct {
 	// audit projection). Empty keeps the in-memory store + in-memory audit
 	// (dev / single-process preview only).
 	mysqlDSN string
+	// mode selects the runtime posture: "dev" or "production". Production
+	// (the default, fail-closed) requires PrincipalAuthenticator (--auth-tokens-
+	// file), Authorizer, a durable AuditSink (--mysql-dsn), and a running
+	// Reconciler; missing any one fails to start. Dev allows the in-memory
+	// audit sink, the single-token (--api-auth-token) authenticator, and
+	// anonymous/allow-all auth, but prints a loud stderr warning. The single-
+	// token path is NOT allowed in production: production requires a token→
+	// principal/scopes registry so one token cannot self-grant all scopes.
+	mode string
 }
 
 func main() {
@@ -165,11 +174,18 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	fs.Float64Var(&cfg.traceRatio, "trace-ratio", 1.0, "Sampling ratio for --trace-sampler=traceidratio, in [0,1]")
 	fs.BoolVar(&cfg.traceBaggage, "trace-baggage", false, "Propagate W3C baggage in addition to tracecontext (opt-in; bound accepted keys)")
 	fs.StringVar(&cfg.mysqlDSN, "mysql-dsn", "", "MySQL DSN for durable execution state + durable SQL audit sink (parseTime=true required). Empty = in-memory store + in-memory audit (dev only)")
+	fs.StringVar(&cfg.mode, "mode", "production", "Runtime posture: dev|production. Production (default, fail-closed) requires --auth-tokens-file + --mysql-dsn + reconciler. Dev allows in-memory audit + single-token with a stderr warning.")
 	if args == nil {
 		args = os.Args[1:]
 	}
 	if err := fs.Parse(args); err != nil {
 		return serverConfig{}, err
+	}
+	switch cfg.mode {
+	case "dev", "production":
+		// valid
+	default:
+		return serverConfig{}, fmt.Errorf("--mode must be one of: dev|production")
 	}
 	switch cfg.traceMode {
 	case "disabled", "stdout", "otlp":
@@ -326,6 +342,7 @@ func runServer(cfg serverConfig) error {
 
 	var workflowAuth apiserver.WorkflowAuthenticator
 	var principalAuth apiserver.PrincipalAuthenticator
+	singleToken := false
 	if mappings, err := loadAuthTokenMappings(cfg); err != nil {
 		return err
 	} else if len(mappings) > 0 {
@@ -339,14 +356,18 @@ func runServer(cfg serverConfig) error {
 		principalAuth = auth
 		log.Printf("xflow-server: multi-tenant principal auth enabled (%d token(s))", len(mappings))
 	} else if cfg.apiAuthToken != "" {
-		// B3 single-tenant: map the static token to a principal with the G1
-		// operator scopes under the default tenant so resource/operation
-		// authz + audit are enforced. The subject is server-configured;
-		// callers cannot self-report it.
+		// Single-token path: DEV ONLY. Production must use --auth-tokens-file
+		// so one token cannot self-grant all scopes (Task 8 blocker 4). The
+		// single token is mapped to the G1 operator scopes under the default
+		// tenant; the subject is server-configured, callers cannot self-report
+		// it. runServer rejects this in production mode (see validateProduction).
 		auth := apiserver.NewBearerPrincipalAuth(cfg.apiAuthToken, "xflow-operator",
-			[]string{"workflow", "execution", "deadletter.list", "deadletter.replay", "management.read", "management.write"})
+			[]string{"workflow", "execution", "deadletter.list", "deadletter.replay",
+				"management.read", "management.write",
+				"management.leader.read", "management.runner.read"})
 		workflowAuth = auth
 		principalAuth = auth
+		singleToken = true
 	}
 	// G1 audit projection. When --mysql-dsn is set, a durable SQL sink is the
 	// authoritative audit target (admission audit persisted before mutations,
@@ -355,6 +376,7 @@ func runServer(cfg serverConfig) error {
 	// configure --mysql-dsn. See docs/design/RELEASE-GATES.md §4.
 	var sqlStore store.Store
 	var audit apiserver.AuditSink
+	durableAudit := false
 	if cfg.mysqlDSN != "" {
 		p, err := mysqlstore.New(cfg.mysqlDSN)
 		if err != nil {
@@ -362,10 +384,36 @@ func runServer(cfg serverConfig) error {
 		}
 		sqlStore = p
 		audit = apiserver.NewSQLAuditSink(p)
+		durableAudit = true
 		log.Println("xflow-server: durable SQL store + audit sink enabled (MySQL)")
 	} else {
 		audit = apiserver.NewInMemoryAuditSink()
 		log.Println("xflow-server: WARNING --mysql-dsn not set; using in-memory store + in-memory audit (dev only; not production)")
+	}
+
+	// Reconciler: T8 introduces the seam; the general leader-gated
+	// admission/outcome/reconciled-phase crash-safe worker is T9's scope (see
+	// .claude/plans/2026-07-19-sdk-server-production-readiness-followup.md §T9
+	// and cmd/xflow/dead_letter_reconcile.go). Production requires a non-nil
+	// reconciler so the seam is explicit; noopReconciler runs until ctx cancel.
+	rec := newReconciler()
+
+	// Task 8 blocker 3: production posture enforcement. Production fails
+	// closed when any of PrincipalAuthenticator, Authorizer, durable AuditSink,
+	// or Reconciler is missing. Dev allows the in-memory audit sink, single-
+	// token, and anonymous auth with a loud stderr warning.
+	if err := validateProduction(cfg.mode, productionDeps{
+		principalAuth: principalAuth,
+		authorizer:    apiserver.TenantAwareAuthorizer{},
+		auditSink:     audit,
+		durableAudit:  durableAudit,
+		reconciler:    rec,
+		singleToken:   singleToken,
+	}); err != nil {
+		return err
+	}
+	if cfg.mode == "dev" {
+		fmt.Fprintln(os.Stderr, "xflow-server: WARNING --mode=dev: in-memory audit / single-token / anonymous auth are non-production; do not run in production")
 	}
 
 	redisConfig, err := buildRedisConfig(cfg)
@@ -436,6 +484,13 @@ func runServer(cfg serverConfig) error {
 	// leader election) exit cleanly instead of being killed mid-transition.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// Start the reconciler (T8 seam). It runs in the background until ctx is
+	// cancelled. noopReconciler is the T8 placeholder; the general leader-gated
+	// admission/outcome crash-safe reconcile worker is T9's scope and will
+	// share the SQL audit schema T8 already wires.
+	go func() { _ = rec.Run(ctx) }()
+
 	return srv.Run(ctx)
 }
 
@@ -526,4 +581,80 @@ func loadAuthTokenMappings(cfg serverConfig) ([]apiserver.TokenPrincipalMapping,
 		})
 	}
 	return out, nil
+}
+
+// reconciler is a leader-gated background loop that durably settles
+// admission/outcome audit for mutations that did not reconcile before a
+// process exit (e.g. a crash between a successful mutation and its outcome
+// audit append). Task 8 introduces the SEAM only: production requires a
+// non-nil reconciler so the dependency is explicit and a future mis-config
+// fails closed. The general crash-safe admission/outcome/reconciled-phase
+// worker is Task 9's scope (see
+// .claude/plans/2026-07-19-sdk-server-production-readiness-followup.md §T9
+// and cmd/xflow/dead_letter_reconcile.go). T8's noopReconciler shares the
+// SQL audit schema T9 will reuse.
+type reconciler interface {
+	Run(ctx context.Context) error
+}
+
+// noopReconciler is the T8 placeholder. Run blocks until ctx is cancelled and
+// does no reconcile work; T9 replaces it with the real crash-safe worker.
+type noopReconciler struct{}
+
+func (noopReconciler) Run(ctx context.Context) error {
+	<-ctx.Done()
+	return nil
+}
+
+// newReconciler returns the T8 placeholder reconciler. T9 will return the real
+// crash-safe admission/outcome worker here.
+func newReconciler() reconciler { return noopReconciler{} }
+
+// productionDeps bundles the production-required components so validateProduction
+// can assert each is present in a single, testable call.
+type productionDeps struct {
+	principalAuth apiserver.PrincipalAuthenticator
+	authorizer    apiserver.Authorizer
+	auditSink     apiserver.AuditSink
+	durableAudit  bool // auditSink is backed by a durable store (SQL)
+	reconciler    reconciler
+	// singleToken indicates the PrincipalAuthenticator was built from the
+	// single-token --api-auth-token path (no multi-tenant registry). Production
+	// forbids this: one static token must not self-grant operator scopes
+	// (Task 8 blocker 4). Production requires --auth-tokens-file.
+	singleToken bool
+}
+
+// validateProduction enforces the Task 8 blocker 3 production posture. In
+// production mode it fails closed when any of the following is missing:
+//   - PrincipalAuthenticator (production must use --auth-tokens-file so a
+//     single token cannot self-grant all scopes; the single-token
+//     --api-auth-token path is dev-only),
+//   - Authorizer (default-deny per operation+resource),
+//   - durable AuditSink (admission audit persisted before mutations; the
+//     in-memory sink is dev-only and not authoritative),
+//   - Reconciler (the T8 seam; T9 provides the crash-safe worker).
+//
+// dev mode allows every combination above (in-memory audit, single-token,
+// anonymous) and is expected to print a stderr warning at startup.
+func validateProduction(mode string, deps productionDeps) error {
+	if mode != "production" {
+		return nil
+	}
+	if deps.principalAuth == nil {
+		return fmt.Errorf("production mode requires a PrincipalAuthenticator (--auth-tokens-file); --api-auth-token is dev-only")
+	}
+	if deps.singleToken {
+		return fmt.Errorf("production mode requires --auth-tokens-file (multi-tenant token→principal/scopes registry); --api-auth-token is dev-only")
+	}
+	if deps.authorizer == nil {
+		return fmt.Errorf("production mode requires an Authorizer")
+	}
+	if deps.auditSink == nil || !deps.durableAudit {
+		return fmt.Errorf("production mode requires a durable AuditSink (--mysql-dsn); the in-memory sink is dev-only")
+	}
+	if deps.reconciler == nil {
+		return fmt.Errorf("production mode requires a Reconciler (T8 seam; T9 provides the crash-safe worker)")
+	}
+	return nil
 }

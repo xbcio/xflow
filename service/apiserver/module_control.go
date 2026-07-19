@@ -77,27 +77,55 @@ func (m *workflowControlModule) RegisterHTTP(mux *http.ServeMux) {
 // authenticate → resolve operation/resource → authorize (default-deny) → audit
 // admission → handler → audit outcome. Mutations fail-closed if the admission
 // audit cannot be persisted.
+//
+// Task 8 blocker 1: the /v1/executions/ subtree is NOT blanket-wrapped as
+// execution.read. The sub-path + verb are resolved to the correct (operation,
+// isMutation) BEFORE the authz wrapper runs, so signal/revoke/cancel each get
+// their own operation + mutation admission audit (fail-closed) + outcome audit:
+//   - GET  /v1/executions/{id}            → execution.read      (non-mutation)
+//   - GET  /v1/executions/{id}/wait       → execution.read      (non-mutation)
+//   - POST /v1/executions/{id}/signal     → execution.signal    (mutation)
+//   - POST /v1/executions/{id}/revoke-signal → execution.revoke (mutation)
+//   - POST /v1/executions/{id}/cancel     → execution.cancel    (mutation)
+// An unknown verb resolves to ok=false → 404 (default-deny, no existence leak).
 func (m *workflowControlModule) registerAuthzRoutes(mux *http.ServeMux) {
 	authz := m.authzWrap
 	mux.HandleFunc("/v1/workflows", authz(OpWorkflowCreate, true, m.handleSubmitWorkflow, nil))
 	mux.HandleFunc("/v1/workflows/invoke", authz(OpWorkflowInvoke, true, m.handleInvoke, nil))
-	mux.HandleFunc("/v1/executions/", authz(OpExecutionRead, false, m.handleExecution, func(r *http.Request) (string, string, string, string) {
-		_, execID := splitExecutionPath(r.URL.Path)
-		return "execution", "", execID, ""
-	}))
+	mux.HandleFunc("/v1/executions/", m.authzWrapResolved(m.handleExecution, resolveExecutionRoute))
 }
 
-// splitExecutionPath extracts the execution ID from /v1/executions/<id>[/...].
-func splitExecutionPath(path string) (op string, execID string) {
-	rest := strings.TrimPrefix(path, "/v1/executions/")
+// resolveExecutionRoute parses /v1/executions/<id>[/verb] + method and returns
+// the stable operation + mutation flag for the authz wrapper. ok=false for an
+// unknown verb or missing id (the wrapper answers 404, default-deny). The
+// resource is execution-scoped so the audit row carries the targeted execution
+// id; ResourceTenant is left empty — the authoritative IDOR defense is the
+// tenant-scoped store read (the authz wrapper injects the principal's tenant
+// into the request context so handleInspect/handleSignal read from the
+// principal's tenant namespace; a cross-tenant execID resolves to not-found →
+// 404, never leaking existence).
+func resolveExecutionRoute(r *http.Request) (resolvedRoute, bool) {
+	rest := strings.TrimPrefix(r.URL.Path, "/v1/executions/")
 	parts := strings.Split(strings.Trim(rest, "/"), "/")
 	if len(parts) == 0 || parts[0] == "" {
-		return "", ""
+		return resolvedRoute{}, false
 	}
-	if len(parts) >= 2 {
-		return parts[1], parts[0]
+	execID := parts[0]
+	resource := "execution/" + execID
+	switch {
+	case len(parts) == 1 && r.Method == http.MethodGet:
+		return resolvedRoute{operation: OpExecutionRead, resource: resource, executionID: execID, isMutation: false}, true
+	case len(parts) == 2 && parts[1] == "wait" && r.Method == http.MethodGet:
+		return resolvedRoute{operation: OpExecutionRead, resource: resource + "/wait", executionID: execID, isMutation: false}, true
+	case len(parts) == 2 && parts[1] == "signal" && r.Method == http.MethodPost:
+		return resolvedRoute{operation: OpExecutionSignal, resource: resource + "/signal", executionID: execID, isMutation: true}, true
+	case len(parts) == 2 && parts[1] == "revoke-signal" && r.Method == http.MethodPost:
+		return resolvedRoute{operation: OpExecutionRevoke, resource: resource + "/revoke-signal", executionID: execID, isMutation: true}, true
+	case len(parts) == 2 && parts[1] == "cancel" && r.Method == http.MethodPost:
+		return resolvedRoute{operation: OpExecutionCancel, resource: resource + "/cancel", executionID: execID, isMutation: true}, true
+	default:
+		return resolvedRoute{}, false
 	}
-	return "", parts[0]
 }
 
 // auditDeny / auditReconcile / statusRecorder live in authz_wrap.go, shared

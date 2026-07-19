@@ -83,8 +83,18 @@ const (
 	OpExecutionCancel  = "execution.cancel"
 	OpDeadLetterList   = "deadletter.list"
 	OpDeadLetterReplay = "deadletter.replay"
-	OpManagementRead   = "management.read"
-	OpManagementWrite  = "management.write"
+	// OpManagementRead is the stable operation for management execution inspect
+	// (single-resource lookup; the management surface exposes no list API). It
+	// maps to the "management.read" scope.
+	OpManagementRead = "management.read"
+	// OpManagementLeaderRead and OpManagementRunnerRead give the leader-status
+	// and single-runner-lookup routes their own stable operations + scopes
+	// (Task 8 blocker 2: management leader/runner get independent scopes rather
+	// than riding on a blanket management.read). Each maps to its own scope so a
+	// token can be granted runner read without leader read and vice-versa.
+	OpManagementLeaderRead = "management.leader.read"
+	OpManagementRunnerRead  = "management.runner.read"
+	OpManagementWrite       = "management.write"
 )
 
 // scopeForOperation maps an operation to the scope it requires. A principal
@@ -102,6 +112,10 @@ func scopeForOperation(op string) string {
 		return "deadletter.replay"
 	case OpManagementRead:
 		return "management.read"
+	case OpManagementLeaderRead:
+		return "management.leader.read"
+	case OpManagementRunnerRead:
+		return "management.runner.read"
 	case OpManagementWrite:
 		return "management.write"
 	default:
