@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/node/registry"
@@ -141,7 +142,8 @@ type databaseParityHandler struct {
 func (h *databaseParityHandler) Descriptor() types.Descriptor { return h.inner.Descriptor() }
 
 func (h *databaseParityHandler) Execute(ctx context.Context, input *types.Input) (*types.Output, error) {
-	input.SetCredentialResolver(func(name string) map[string]any { return h.cred })
+	input.SetTenant(tenant.DefaultTenant)
+	input.SetCredentialResolver(func(tenant tenant.TenantID, name string) map[string]any { return h.cred })
 	if h.pool != nil {
 		ctx = types.WithResourcePool(ctx, h.pool)
 	}

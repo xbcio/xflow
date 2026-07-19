@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/xbcio/xflow/backend/tenant"
 )
 
 func TestLoadRunnerConfigFromYAML(t *testing.T) {
@@ -737,11 +739,11 @@ func TestRunnerServiceConfig_ConstructsPoolAndResolverWhenConfigured(t *testing.
 	if svcCfg.CredentialResolver == nil {
 		t.Fatal("CredentialResolver = nil, want a resolver closure")
 	}
-	got := svcCfg.CredentialResolver("db")
+	got := svcCfg.CredentialResolver(tenant.DefaultTenant, "db")
 	if got["dsn"] != "user:s3cret@tcp(db:3306)/xflow" {
 		t.Fatalf("resolver returned dsn = %v, want env-expanded dsn", got["dsn"])
 	}
-	if svcCfg.CredentialResolver("missing") != nil {
+	if svcCfg.CredentialResolver(tenant.DefaultTenant, "missing") != nil {
 		t.Fatal("resolver returned non-nil for unknown credential name")
 	}
 	t.Cleanup(func() {
@@ -763,5 +765,98 @@ func TestRunnerServiceConfig_NoPoolWhenNotConfigured(t *testing.T) {
 	}
 	if svcCfg.CredentialResolver != nil {
 		t.Fatal("CredentialResolver = non-nil, want nil (no credentials)")
+	}
+}
+
+func TestLoadRunnerConfigTenants(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "runner.yaml")
+	data := []byte(`
+runner:
+  id: tenant-runner
+  tenants:
+    - tenant-a
+    - tenant-b
+    - tenant-a
+server:
+  url: http://server:8080
+`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadRunnerConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.tenants) != 2 || cfg.tenants[0] != "tenant-a" || cfg.tenants[1] != "tenant-b" {
+		t.Fatalf("tenants = %v, want [tenant-a tenant-b]", cfg.tenants)
+	}
+}
+
+func TestApplyEnvOverridesTenants(t *testing.T) {
+	cfg := runnerConfig{tenantRaw: []string{"tenant-a"}}
+	got := applyEnvOverrides(cfg, func(key string) string {
+		if key == "XFLOW_RUNNER_TENANTS" {
+			return "tenant-b, tenant-c"
+		}
+		return ""
+	})
+	if len(got.tenants) != 2 || got.tenants[0] != "tenant-b" || got.tenants[1] != "tenant-c" {
+		t.Fatalf("tenants = %v, want [tenant-b tenant-c]", got.tenants)
+	}
+}
+
+func TestResolveRunnerConfigTenantCLIOverridesFileAndEnv(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "runner.yaml")
+	data := []byte(`
+runner:
+  id: file-runner
+  tenants:
+    - tenant-file
+server:
+  url: http://server:8080
+`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("XFLOW_RUNNER_TENANTS", "tenant-env")
+
+	base := defaultRunnerConfig()
+	base.configPath = path
+	base.tenantRaw = []string{"tenant-cli"}
+	base.changed = map[string]bool{"tenant": true}
+
+	got, err := resolveRunnerConfig(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.tenants) != 1 || got.tenants[0] != "tenant-cli" {
+		t.Fatalf("tenants = %v, want [tenant-cli]", got.tenants)
+	}
+}
+
+func TestResolveRunnerConfigRejectsInvalidTenant(t *testing.T) {
+	base := defaultRunnerConfig()
+	base.tenantRaw = []string{"bad:tenant"}
+	base.changed = map[string]bool{"tenant": true}
+
+	_, err := resolveRunnerConfig(base)
+	if err == nil {
+		t.Fatal("expected error for invalid tenant")
+	}
+	if !strings.Contains(err.Error(), "invalid tenant") {
+		t.Fatalf("error = %v, want invalid tenant", err)
+	}
+}
+
+func TestRunnerServiceConfigPassesTenants(t *testing.T) {
+	cfg := defaultRunnerConfig()
+	cfg.tenants = []tenant.TenantID{"tenant-a", "tenant-b"}
+	svcCfg, err := runnerServiceConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(svcCfg.Tenants) != 2 || svcCfg.Tenants[0] != "tenant-a" || svcCfg.Tenants[1] != "tenant-b" {
+		t.Fatalf("Tenants = %v, want [tenant-a tenant-b]", svcCfg.Tenants)
 	}
 }

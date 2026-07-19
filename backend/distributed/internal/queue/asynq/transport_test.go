@@ -1,9 +1,19 @@
 package asynq
 
 import (
+	"context"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	asynqlib "github.com/hibiken/asynq"
+	"github.com/alicebob/miniredis/v2"
+
+	"github.com/xbcio/xflow/backend/distributed/internal/queue"
+	"github.com/xbcio/xflow/backend/tenant"
+	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/types"
 )
 
 func TestNewUsesRedisClientOpt(t *testing.T) {
@@ -86,5 +96,103 @@ func TestNewWithNilConnOptFallsBack(t *testing.T) {
 	}
 	if err := tr.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
+	}
+}
+
+func TestTransportEnqueueCarriesTenant(t *testing.T) {
+	server, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	defer server.Close()
+
+	transport := New(server.Addr())
+	defer func() { _ = transport.Close() }()
+
+	ctx := tenant.WithTenant(context.Background(), "tenant-acme")
+	task := &engine.Task{
+		ExecutionID: types.ExecutionID("exec-1"),
+		NodeName:    "node-a",
+		NodeIdx:     0,
+		Type:        engine.TaskTypeNodeExec,
+	}
+	if err := transport.Enqueue(ctx, task); err != nil {
+		t.Fatalf("Enqueue() error = %v", err)
+	}
+
+	var gotTenant tenant.TenantID
+	var gotTask *engine.Task
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	stop, err := transport.StartConsumer(queue.ConsumerConfig{Concurrency: 1}, func(ctx context.Context, t *engine.Task) error {
+		gotTask = t
+		gotTenant = tenant.FromContext(ctx)
+		wg.Done()
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("StartConsumer() error = %v", err)
+	}
+	defer stop()
+
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("consumer did not receive task")
+	}
+
+	if gotTenant != "tenant-acme" {
+		t.Fatalf("consumer tenant = %q, want tenant-acme", gotTenant)
+	}
+	if gotTask == nil || string(gotTask.ExecutionID) != "exec-1" {
+		t.Fatalf("consumer task = %+v, want exec-1", gotTask)
+	}
+}
+
+func TestTransportConsumerDefaultsToDefaultTenant(t *testing.T) {
+	server, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	defer server.Close()
+
+	transport := New(server.Addr())
+	defer func() { _ = transport.Close() }()
+
+	task := &engine.Task{
+		ExecutionID: types.ExecutionID("exec-default"),
+		NodeName:    "node-a",
+		NodeIdx:     0,
+		Type:        engine.TaskTypeNodeExec,
+	}
+	if err := transport.Enqueue(context.Background(), task); err != nil {
+		t.Fatalf("Enqueue() error = %v", err)
+	}
+
+	var gotTenant tenant.TenantID
+	var received atomic.Bool
+
+	stop, err := transport.StartConsumer(queue.ConsumerConfig{Concurrency: 1}, func(ctx context.Context, t *engine.Task) error {
+		gotTenant = tenant.FromContext(ctx)
+		received.Store(true)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("StartConsumer() error = %v", err)
+	}
+	defer stop()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && !received.Load() {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !received.Load() {
+		t.Fatal("consumer did not receive task")
+	}
+	if gotTenant != tenant.DefaultTenant {
+		t.Fatalf("tenant = %q, want default", gotTenant)
 	}
 }

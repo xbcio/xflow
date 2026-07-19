@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/service/protocol"
@@ -122,6 +123,7 @@ func (c *Core) register(ctx context.Context, req protocol.RegisterRunnerRequest,
 		Capacity:     req.Concurrency,
 		Capabilities: req.Capabilities,
 		Policy:       policy,
+		Tenants:      tenantIDs(req.Tenants),
 		Now:          time.Now(),
 	})
 	if err != nil {
@@ -343,4 +345,24 @@ func normalizeRunnerError(err error, logger engine.Logger, op string) error {
 		}
 		return ErrInternalServer
 	}
+}
+
+func tenantIDs(strs []string) []tenant.TenantID {
+	if len(strs) == 0 {
+		return nil
+	}
+	out := make([]tenant.TenantID, 0, len(strs))
+	seen := make(map[tenant.TenantID]struct{})
+	for _, s := range strs {
+		if s == "" {
+			continue
+		}
+		t := tenant.TenantID(s)
+		if _, ok := seen[t]; ok {
+			continue
+		}
+		seen[t] = struct{}{}
+		out = append(out, t)
+	}
+	return out
 }

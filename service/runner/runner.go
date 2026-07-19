@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
 	"github.com/xbcio/xflow/observability/tracing"
@@ -53,7 +54,10 @@ type Config struct {
 	// CredentialResolver, when set, is applied to each Input before the handler
 	// runs so nodes can resolve named credentials via input.Credential(name).
 	// nil means no resolver; existing behavior is unchanged.
-	CredentialResolver func(name string) map[string]any
+	CredentialResolver func(tenant tenant.TenantID, name string) map[string]any
+	// Tenants lists the tenants this runner is willing to serve. Empty or nil
+	// means ["default"] for single-tenant compatibility.
+	Tenants []tenant.TenantID
 }
 
 type Runner struct {
@@ -96,6 +100,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		Concurrency:  r.config.Concurrency,
 		Capabilities: r.config.Capabilities,
 		Labels:       r.config.Labels,
+		Tenants:      tenantStrings(r.config.Tenants),
 	})
 	if err != nil {
 		return runContextError(ctx, err)
@@ -336,4 +341,15 @@ func sleepContext(ctx context.Context, delay time.Duration) error {
 	case <-timer.C:
 		return nil
 	}
+}
+
+func tenantStrings(tenants []tenant.TenantID) []string {
+	if len(tenants) == 0 {
+		return []string{string(tenant.DefaultTenant)}
+	}
+	out := make([]string, len(tenants))
+	for i, t := range tenants {
+		out[i] = string(t)
+	}
+	return out
 }

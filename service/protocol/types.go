@@ -19,6 +19,7 @@ type RegisterRunnerRequest struct {
 	Concurrency  int               `json:"concurrency"`
 	Labels       map[string]string `json:"labels,omitempty"`
 	Capabilities []Capability      `json:"capabilities"`
+	Tenants      []string          `json:"tenants,omitempty"`
 	// AuthToken is the runner's bearer token. Preferred: Authorization
 	// header. This body field is a fallback for transports that can't set
 	// headers.
@@ -202,6 +203,7 @@ type HelloFrame struct {
 	Concurrency  int
 	Capabilities []Capability
 	Labels       map[string]string
+	Tenants      []string
 }
 
 type ResultFrame struct {

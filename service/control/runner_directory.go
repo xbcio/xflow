@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/service/protocol"
 )
@@ -27,6 +28,7 @@ type Assignment struct {
 	AssignmentID AssignmentID
 	Task         engine.Task
 	Routing      engine.TaskRouting
+	TenantID     tenant.TenantID
 }
 
 // BuildAssignmentID derives the stable control-plane identity for a queued
@@ -46,6 +48,7 @@ type RegisterRunnerRequest struct {
 	Capacity     int
 	Capabilities []protocol.Capability
 	Policy       RunnerPolicy
+	Tenants      []tenant.TenantID
 	Now          time.Time
 }
 
@@ -64,6 +67,7 @@ type RunnerSnapshot struct {
 	InFlight      int
 	Labels        map[string]string
 	Capabilities  []protocol.Capability
+	Tenants       []tenant.TenantID
 	LastHeartbeat time.Time
 }
 

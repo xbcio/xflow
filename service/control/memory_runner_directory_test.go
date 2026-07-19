@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/service/protocol"
 )
@@ -413,5 +414,86 @@ func testAssignment(id AssignmentID) Assignment {
 			ActivationID: 1,
 		},
 		Routing: engine.TaskRouting{NodeType: "xflow.function"},
+	}
+}
+
+func TestMemoryRunnerDirectoryTenantIsolation(t *testing.T) {
+	ctx := context.Background()
+	dir := NewMemoryRunnerDirectory()
+
+	// Runner A serves only tenant A.
+	sessionA, err := dir.Register(ctx, RegisterRunnerRequest{
+		RunnerID:     "runner-a",
+		Capacity:     1,
+		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
+		Policy:       RunnerPolicy{AllowedNodeTypes: []string{"xflow.function"}},
+		Tenants:      []tenant.TenantID{"tenant-a"},
+		Now:          time.Unix(10, 0),
+	})
+	if err != nil {
+		t.Fatalf("Register(runner-a) error = %v", err)
+	}
+
+	// Place a tenant-b assignment.
+	bAssignment := testAssignment("exec-b/node-b/activation-1")
+	bAssignment.TenantID = "tenant-b"
+	mustEnqueueAssignment(t, ctx, dir, bAssignment)
+
+	// Runner A must not claim the cross-tenant assignment.
+	_, ok, err := dir.ClaimForRunner(ctx, ClaimRequest{
+		RunnerID:     "runner-a",
+		SessionID:    sessionA.SessionID,
+		Capacity:     1,
+		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
+	})
+	if err != nil {
+		t.Fatalf("ClaimForRunner() error = %v", err)
+	}
+	if ok {
+		t.Fatal("runner-a claimed tenant-b assignment, want cross-tenant isolation")
+	}
+
+	// Runner B serving tenant-b can claim it.
+	sessionB, err := dir.Register(ctx, RegisterRunnerRequest{
+		RunnerID:     "runner-b",
+		Capacity:     1,
+		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
+		Policy:       RunnerPolicy{AllowedNodeTypes: []string{"xflow.function"}},
+		Tenants:      []tenant.TenantID{"tenant-b"},
+		Now:          time.Unix(10, 0),
+	})
+	if err != nil {
+		t.Fatalf("Register(runner-b) error = %v", err)
+	}
+	claim, ok, err := dir.ClaimForRunner(ctx, ClaimRequest{
+		RunnerID:     "runner-b",
+		SessionID:    sessionB.SessionID,
+		Capacity:     1,
+		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
+	})
+	if err != nil {
+		t.Fatalf("ClaimForRunner(runner-b) error = %v", err)
+	}
+	if !ok {
+		t.Fatal("runner-b did not claim tenant-b assignment")
+	}
+	if claim.Assignment.TenantID != "tenant-b" {
+		t.Fatalf("claimed assignment tenant = %q, want tenant-b", claim.Assignment.TenantID)
+	}
+}
+
+func TestMemoryRunnerDirectoryDefaultTenantBackCompat(t *testing.T) {
+	ctx := context.Background()
+	dir := NewMemoryRunnerDirectory()
+	// No tenants configured -> defaults to ["default"].
+	session := mustRegisterMemoryRunner(t, ctx, dir, "runner-1", 1)
+
+	assignment := testAssignment("exec-1/node-a/activation-1")
+	assignment.TenantID = tenant.DefaultTenant
+	mustEnqueueAssignment(t, ctx, dir, assignment)
+
+	claim := mustClaimAssignment(t, ctx, dir, session)
+	if claim.Assignment.TenantID != tenant.DefaultTenant {
+		t.Fatalf("tenant = %q, want default", claim.Assignment.TenantID)
 	}
 }

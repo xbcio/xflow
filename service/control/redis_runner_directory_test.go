@@ -11,6 +11,7 @@ import (
 
 	"github.com/xbcio/xflow/backend/distributed"
 	backendlocal "github.com/xbcio/xflow/backend/local"
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/types"
@@ -235,7 +236,7 @@ func newRedisRunnerDirectoryTestClient(t *testing.T) (*miniredis.Miniredis, *red
 	return redisServer, rdb
 }
 
-func registerRedisDirectoryRunner(t *testing.T, ctx context.Context, directory *RedisRunnerDirectory, runnerID string, capacity int) RunnerSession {
+func registerRedisDirectoryRunner(t *testing.T, ctx context.Context, directory *RedisRunnerDirectory, runnerID string, capacity int, tenants ...tenant.TenantID) RunnerSession {
 	t.Helper()
 
 	session, err := directory.Register(ctx, RegisterRunnerRequest{
@@ -243,6 +244,7 @@ func registerRedisDirectoryRunner(t *testing.T, ctx context.Context, directory *
 		Capacity:     capacity,
 		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
 		Policy:       RunnerPolicy{AllowedNodeTypes: []string{"xflow.function"}},
+		Tenants:      tenants,
 		Now:          time.Unix(10, 0),
 	})
 	if err != nil {
@@ -286,7 +288,11 @@ func redisDirectoryClaimRequest(session RunnerSession, capacity int) ClaimReques
 	}
 }
 
-func redisDirectoryTestAssignment(id AssignmentID) Assignment {
+func redisDirectoryTestAssignment(id AssignmentID, tenants ...tenant.TenantID) Assignment {
+	tenantID := tenant.DefaultTenant
+	if len(tenants) > 0 {
+		tenantID = tenants[0]
+	}
 	return Assignment{
 		AssignmentID: id,
 		Task: engine.Task{
@@ -297,7 +303,8 @@ func redisDirectoryTestAssignment(id AssignmentID) Assignment {
 			ActivationID: 7,
 			AutoDepth:    3,
 		},
-		Routing: engine.TaskRouting{NodeType: "xflow.function"},
+		Routing:  engine.TaskRouting{NodeType: "xflow.function"},
+		TenantID: tenantID,
 	}
 }
 
@@ -376,5 +383,77 @@ func TestRedisRunnerDirectoryFinalizeCleansClaimIndexes(t *testing.T) {
 	}
 	if _, err := rdb.ZScore(ctx, directory.keys.claimsExpiry, string(claim.ClaimID)).Result(); !errors.Is(err, redis.Nil) {
 		t.Fatalf("claim expiry index still contains %q: err=%v", claim.ClaimID, err)
+	}
+}
+
+func TestRedisRunnerDirectoryTenantIsolation(t *testing.T) {
+	ctx := context.Background()
+	_, rdb := newRedisRunnerDirectoryTestClient(t)
+	directory := NewRedisRunnerDirectory(rdb)
+
+	sessionA := registerRedisDirectoryRunner(t, ctx, directory, "runner-a", 1, "tenant-a")
+	bAssignment := redisDirectoryTestAssignment("exec-b/node-b/activation-1", "tenant-b")
+	mustEnqueueRedisDirectoryAssignment(t, ctx, directory, bAssignment)
+
+	_, ok, err := directory.ClaimForRunner(ctx, ClaimRequest{
+		RunnerID:     "runner-a",
+		SessionID:    sessionA.SessionID,
+		Capacity:     1,
+		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
+	})
+	if err != nil {
+		t.Fatalf("ClaimForRunner() error = %v", err)
+	}
+	if ok {
+		t.Fatal("runner-a claimed tenant-b assignment, want cross-tenant isolation")
+	}
+
+	sessionB := registerRedisDirectoryRunner(t, ctx, directory, "runner-b", 1, "tenant-b")
+	claim, ok, err := directory.ClaimForRunner(ctx, ClaimRequest{
+		RunnerID:     "runner-b",
+		SessionID:    sessionB.SessionID,
+		Capacity:     1,
+		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
+	})
+	if err != nil {
+		t.Fatalf("ClaimForRunner(runner-b) error = %v", err)
+	}
+	if !ok {
+		t.Fatal("runner-b did not claim tenant-b assignment")
+	}
+	if claim.Assignment.TenantID != "tenant-b" {
+		t.Fatalf("claimed assignment tenant = %q, want tenant-b", claim.Assignment.TenantID)
+	}
+}
+
+func TestRedisRunnerDirectoryDefaultTenantBackCompat(t *testing.T) {
+	ctx := context.Background()
+	_, rdb := newRedisRunnerDirectoryTestClient(t)
+	directory := NewRedisRunnerDirectory(rdb)
+	// No explicit tenants -> single-tenant default.
+	session := registerRedisDirectoryRunner(t, ctx, directory, "runner-1", 1)
+	assignment := redisDirectoryTestAssignment("exec-1/node-a/activation-1")
+	mustEnqueueRedisDirectoryAssignment(t, ctx, directory, assignment)
+
+	claim := claimRedisDirectoryAssignment(t, ctx, directory, session, 1)
+	if claim.Assignment.TenantID != tenant.DefaultTenant {
+		t.Fatalf("tenant = %q, want default", claim.Assignment.TenantID)
+	}
+}
+
+func TestRedisRunnerDirectoryTenantRoundTripThroughCodec(t *testing.T) {
+	ctx := context.Background()
+	_, rdb := newRedisRunnerDirectoryTestClient(t)
+	directory := NewRedisRunnerDirectory(rdb)
+	session := registerRedisDirectoryRunner(t, ctx, directory, "runner-1", 1, "tenant-a", "tenant-b")
+
+	assignment := redisDirectoryTestAssignment("exec-1/node-a/activation-1", "tenant-b")
+	mustEnqueueRedisDirectoryAssignment(t, ctx, directory, assignment)
+
+	// Recreate directory to force reading the persisted assignment record.
+	recreated := NewRedisRunnerDirectory(rdb)
+	claim := claimRedisDirectoryAssignment(t, ctx, recreated, session, 1)
+	if claim.Assignment.TenantID != "tenant-b" {
+		t.Fatalf("tenant = %q, want tenant-b", claim.Assignment.TenantID)
 	}
 }

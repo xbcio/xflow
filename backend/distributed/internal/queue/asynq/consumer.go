@@ -6,6 +6,7 @@ import (
 	asynqlib "github.com/hibiken/asynq"
 
 	"github.com/xbcio/xflow/backend/distributed/internal/queue"
+	"github.com/xbcio/xflow/backend/tenant"
 )
 
 // StartConsumer starts an Asynq server that decodes each task and dispatches it
@@ -24,10 +25,11 @@ func (t *Transport) StartConsumer(cfg queue.ConsumerConfig, handler queue.TaskHa
 	)
 	mux := asynqlib.NewServeMux()
 	mux.HandleFunc(taskType, func(ctx context.Context, at *asynqlib.Task) error {
-		task, err := queue.Unmarshal(at.Payload())
+		task, tenantID, err := queue.Unmarshal(at.Payload())
 		if err != nil {
 			return err
 		}
+		ctx = tenant.WithTenant(ctx, tenantID)
 		return handlerError(handler(ctx, task), cfg.Transient)
 	})
 

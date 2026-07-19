@@ -3,6 +3,7 @@ package execution
 import (
 	"context"
 
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/types"
 )
@@ -11,7 +12,7 @@ import (
 type Runner struct {
 	registry           engine.HandlerRegistry
 	pool               types.ResourcePool
-	credentialResolver func(name string) map[string]any
+	credentialResolver func(tenant tenant.TenantID, name string) map[string]any
 }
 
 // RunnerOption customizes a Runner.
@@ -28,9 +29,9 @@ func WithResourcePool(p types.ResourcePool) RunnerOption {
 // WithCredentialResolver installs a credential resolver that the Runner applies
 // to each Input before invoking the handler. nil = no resolver; nodes calling
 // input.Credential(name) will get nil (existing behavior). The resolver is a
-// pure, idempotent closure keyed by credential name; it is applied to the
-// shared lease.Input in place (same pattern as the parity test wrappers).
-func WithCredentialResolver(fn func(name string) map[string]any) RunnerOption {
+// pure, idempotent closure keyed by tenant and credential name; it is applied to
+// the shared lease.Input in place (same pattern as the parity test wrappers).
+func WithCredentialResolver(fn func(tenant tenant.TenantID, name string) map[string]any) RunnerOption {
 	return func(r *Runner) { r.credentialResolver = fn }
 }
 
@@ -65,6 +66,7 @@ func (r *Runner) Execute(ctx context.Context, lease *engine.TaskLease) (engine.T
 	// test wrappers do and is safe because the same resolver applies to every
 	// call. cloneInputWithData preserves it via the shallow struct copy.
 	if r.credentialResolver != nil && lease.Input != nil {
+		lease.Input.SetTenant(tenant.FromContext(ctx))
 		lease.Input.SetCredentialResolver(r.credentialResolver)
 	}
 	if sh, ok := handler.(types.SuspendingHandler); ok {
