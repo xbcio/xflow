@@ -2,22 +2,26 @@
   "name": "@xflow/app-workflow-editor",
   "version": "0.1.0",
   "private": true,
-  "description": "Vite workflow editor application (placeholder, full config in Task 4)",
+  "description": "Vite workflow editor application",
   "type": "module",
   "scripts": {
-    "build": "tsc --build",
-    "typecheck": "tsc --build --noEmit",
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
     "lint": "eslint .",
-    "test": "vitest run"
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@xflow/workflow-editor": "workspace:*",
     "react": "19.1.0",
-    "react-dom": "19.1.0"
+    "react-dom": "19.1.0",
+    "react-router-dom": "7.6.1"
   },
   "devDependencies": {
+    "@vitejs/plugin-react": "4.5.0",
     "@xflow/typescript-config": "workspace:*",
     "typescript": "5.8.3",
+    "vite": "6.3.5",
     "vitest": "3.2.0"
   }
 }
