@@ -12,14 +12,15 @@ var ErrWorkflowConflict = errors.New("workflow key already exists with different
 var ErrWorkflowNotFound = errors.New("workflow not found")
 
 type WorkflowRecord struct {
-	ID             types.WorkflowID
-	Key            string
-	Namespace      string
-	Name           string
-	Version        string
-	DefinitionHash string
-	Definition     *types.WorkflowDef
-	Graph          *graph.Graph
+	ID               types.WorkflowID
+	Key              string
+	Namespace        string
+	Name             string
+	Version          string
+	DefinitionHash   string
+	AuditFingerprint string
+	Definition       *types.WorkflowDef
+	Graph            *graph.Graph
 }
 
 type WorkflowRegistry interface {

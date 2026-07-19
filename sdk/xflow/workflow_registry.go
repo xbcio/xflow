@@ -62,18 +62,25 @@ func (e *Engine) AddWorkflow(ctx context.Context, wf *WorkflowBuilder) (types.Wo
 	if err != nil {
 		return "", err
 	}
-	hash, err := definitionHash(def)
+	hash, err := runtimeHash(def)
+	if err != nil {
+		return "", err
+	}
+	// Preserve a full-definition audit fingerprint so exported records can
+	// trace the exact original payload (including editor metadata).
+	audit, err := legacyDefinitionHash(def)
 	if err != nil {
 		return "", err
 	}
 	rec, err := e.workflowRegistry.AddWorkflow(ctx, backend.WorkflowRecord{
-		Key:            workflowKey(def),
-		Namespace:      def.Namespace,
-		Name:           def.Name,
-		Version:        def.Version,
-		DefinitionHash: hash,
-		Definition:     def,
-		Graph:          g,
+		Key:              workflowKey(def),
+		Namespace:        def.Namespace,
+		Name:             def.Name,
+		Version:          def.Version,
+		DefinitionHash:   hash,
+		AuditFingerprint: audit,
+		Definition:       def,
+		Graph:            g,
 	})
 	if err != nil {
 		return "", err

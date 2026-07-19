@@ -160,25 +160,39 @@ DSL 在后端以 Go `types.WorkflowDef` 为权威，前端需要明确 wire form
 
 ### Decision
 
-**运行时定义字段(影响执行与 hash)**:
+**运行时定义字段(影响执行与 semantic hash)**:
 
-- `WorkflowDef`:`id`、`namespace`、`name`、`version`、`description`、`spec`、`runnerSelector`、`context`、`settings`、`options`、`credentials`、`params`、`nodes`(运行时相关子字段)、`connections`、`outputs`。
+- `WorkflowDef`:`namespace`、`name`、`version`、`description`、`spec`、`runnerSelector`、`context`、`settings`、`options`、`credentials`、`params`、`node_templates`、`nodes`(运行时相关子字段)、`connections`、`outputs`、`pin_data`。
 - `NodeDef`:`id`、`name`、`type`、`kind`、`version`、`template`、`disabled`、`on_error`、`runnerSelector`、`inputs`、`output_schema`、`parameters`、`retry`。
 
-**编辑器元数据字段(不影响执行与 hash)**:
+**编辑器元数据字段(不影响执行与 semantic hash)**:
 
 - `WorkflowDef`:无顶层 UI 字段(当前 `types` 中未定义),未来如需 `viewport`、`canvasLayout` 等放入独立的 `WorkflowEditorMetadata`。
 - `NodeDef`:`position`、`notes`、`ui`。
-- **`pin_data` 计入 semantic hash**(2026-07-19 followup 用户决策):pin_data 固定节点输入数据,改变会导致执行输出不同,属执行语义而非展示元数据,与 `position`/`ui`/`notes`/`viewport` 排除规则不冲突。
+
+**明确排除的实例标识字段**:
+
+- `WorkflowDef.ID`:仅标识工作流实例/记录,不是运行时语义;重生成 ID 不应改变 runtime hash。
+- `WorkflowDef.TenantID`:服务端从认证上下文注入,`json:"-"` 已不参与 marshal,同样不参与 runtime hash。
+
+**`pin_data` 计入 semantic hash**(2026-07-19 followup 用户决策):pin_data 固定节点输入数据,改变会导致执行输出不同,属执行语义而非展示元数据,与 `position`/`ui`/`notes`/`viewport` 排除规则不冲突。
 
 **M0.2 核查结论(已确认)**:Task 1 核查报告证实 —— 后端 `sdk/xflow/workflow_identity.go:16` 的 `definitionHash` 直接 `json.Marshal(def)`,`NodeDef.Position`(带 `json:"position,omitempty"` tag)和 `NodeDef.UI`(`json:"ui,omitempty"`)都会进入 hash;实测修改 `Position`/`UI` 会改变 `definitionHash`。运行时编译器(`engine/graph/compile.go` 的 `registerNodes`)不读取这两个字段,`engine/graph/snapshot.go:211-233` 的 `assignGraphHash` 已经排除 editor metadata。因此现状是:**`definitionHash`(用于注册表 key 级冲突检测)与 `graph hash`(运行时图身份)语义不一致** —— 编辑器接入后,用户仅拖动画布就会改变 `definitionHash`,触发 `backend.ErrWorkflowConflict`(`backend/local/workflow_registry.go:32`、`backend/distributed/internal/workflowreg/registry.go:93-95` 均按 `DefinitionHash` 判冲突)。
+
+**F0.3 实施后状态(后端)**:
+
+1. 新增 `sdk/xflow/runtimeHash(def)` helper,使用结构体字段顺序固定的 normalized payload 做 `json.Marshal` + SHA-256,格式为 `runtime-sha256:v1:<hex>`。
+2. `Engine.AddWorkflow`(`sdk/xflow/workflow_registry.go`)已改用 `runtimeHash` 生成 `WorkflowRecord.DefinitionHash`;本地/分布式注册表继续用该字段做 key 级冲突检测,比较的是运行时语义。
+3. 原 `definitionHash(def)` 重命名为 `legacyDefinitionHash(def)`,格式为 `sha256:audit:v1:<hex>`,作为 `WorkflowRecord.AuditFingerprint` 持久化,用于审计/导出追溯。
+4. Editor metadata(`position`/`ui`/`notes`)不再影响注册表冲突检测;`pin_data` 计入 runtime hash。
+5. 兼容策略采用**选项 B**:version bump 时自然采用新 hash。本期 prototype 分支无存量生产数据,不遍历重算存量 `definition_hash`;存量记录视为 legacy hash,运行时语义未变即可继续读取。
 
 **边界规则**:
 
 1. 前端保存草稿时,完整保留 `WorkflowDef` + `WorkflowEditorMetadata`。
 2. 前端"发布"或调用 `POST /v1/workflows` 时,必须向后台提交**运行时定义**;`position`、`ui`、`notes`、`viewport` 不应进入 canonical execution hash;`pin_data` **计入** semantic hash(见上)。
-3. 后端迁移(留待 ADR 批准后实施,不在本次 M0 范围):新增 `runtimeHash(def)`,仅对运行时语义字段做规范化 JSON 后取 SHA-256,显式排除 `Nodes[].Position`、`Nodes[].UI`(并评估是否同时排除 `Description`、`Nodes[].Notes`)。`Engine.AddWorkflow`(`sdk/xflow/workflow_registry.go:65`)改用 `runtimeHash` 生成 `WorkflowRecord.DefinitionHash`;本地/分布式注册表继续用该字段做 key 级冲突检测,但此时比较的是运行时语义。`definitionHash`(全字段)保留为审计/导出指纹。
-4. 既有 `WorkflowDef` 可继续读取(`Position`/`UI` 字段保留在 `types.NodeDef` 中,反序列化不受影响);已发布版本运行时语义不变。存量记录的 `definition_hash` 迁移策略(选项 A:升级时遍历重算并保留 `legacy_definition_hash`;选项 B:version bump 时自然采用新 hash)在 M2 持久化层设计时定夺。
+3. Editor metadata 必须按 `NodeDef.ID` 索引(而不是 `NodeDef.Name`);`NodeDef.Name` 仅用于 DSL connection 和表达式引用。Go 侧当前无 editor metadata 持久化路径,未来 M2 Repository 实现时按 node ID 约束。
+4. 既有 `WorkflowDef` 可继续读取(`Position`/`UI` 字段保留在 `types.NodeDef` 中,反序列化不受影响);已发布版本运行时语义不变。
 5. 推荐在 M1/M3 即引入前端 `WorkflowEditorMetadata` 类型(`@xflow/workflow-core` 中,与 `WorkflowDef` 并列),将 `positions`、`viewport`、`ui`、`notes`、`pinData` 移入其中,彻底避免污染运行时定义;提交发布时剥离。
 6. **草稿 revision 乐观锁**独立于 hash —— 仓库当前无 draft/revision 概念(grep `draft`/`revision` 无结果),draft 的并发控制使用独立的 `revision` 整数/version vector,不依赖 `definitionHash`。
 
@@ -463,7 +477,7 @@ editor/viewer/admin 需要管理三类状态:① server state(请求/缓存/分�
 1. **企业身份源**:D6 的 OIDC/SAML 具体供应商与 IdP 返回的 groups 字段命名,需在部署前确定;前端 `src/access.ts` 的映射函数(`ACCESS_MAPPING` 环境变量)据此调整。M0 先用 `BearerTokenAuth`/`BearerPrincipalAuth` 占位。
 2. **iframe token 降级**:若 M2 持久化层仅内存 backend,`jti` replay 存储需 Redis;M0/M1 可降级为"token 仅 exp 校验,不保证单次使用",M2 接 Redis 后补全。
 3. **`Description`/`Nodes[].Notes` 是否纳入 editor metadata 排除**:M0 ADR 暂定排除(与 `assignGraphHash` 对齐),最终在 M2 后端 `runtimeHash` 迁移时定夺。
-4. **存量 `definition_hash` 迁移策略**:选项 A(升级时遍历重算并保留 `legacy_definition_hash`)vs 选项 B(version bump 自然采用新 hash),在 M2 持久化层设计时定夺。该迁移属后端工作,不在本次 M0 范围。
+4. **存量 `definition_hash` 迁移策略**:F0.3 已选定**选项 B**(version bump 自然采用新 hash)。本期 prototype 分支无存量生产数据,不遍历重算;运行时语义未变的存量记录继续可读,新增/升级版本自动使用 `runtime-sha256:v1:`。
 
 ---
 

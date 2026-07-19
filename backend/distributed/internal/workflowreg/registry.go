@@ -20,14 +20,15 @@ type Registry struct {
 }
 
 type storedWorkflowRecord struct {
-	ID             types.WorkflowID   `json:"id"`
-	Key            string             `json:"key"`
-	Namespace      string             `json:"namespace"`
-	Name           string             `json:"name"`
-	Version        string             `json:"version"`
-	DefinitionHash string             `json:"definition_hash"`
-	Definition     *types.WorkflowDef `json:"definition,omitempty"`
-	Graph          *graph.Graph       `json:"graph,omitempty"`
+	ID               types.WorkflowID   `json:"id"`
+	Key              string             `json:"key"`
+	Namespace        string             `json:"namespace"`
+	Name             string             `json:"name"`
+	Version          string             `json:"version"`
+	DefinitionHash   string             `json:"definition_hash"`
+	AuditFingerprint string             `json:"audit_fingerprint,omitempty"`
+	Definition       *types.WorkflowDef `json:"definition,omitempty"`
+	Graph            *graph.Graph       `json:"graph,omitempty"`
 }
 
 func New(rdb redis.UniversalClient) *Registry {
@@ -229,14 +230,15 @@ type marshaledWorkflowRecord struct {
 
 func marshalWorkflowRecord(rec backend.WorkflowRecord) (*marshaledWorkflowRecord, error) {
 	stored := storedWorkflowRecord{
-		ID:             rec.ID,
-		Key:            rec.Key,
-		Namespace:      rec.Namespace,
-		Name:           rec.Name,
-		Version:        rec.Version,
-		DefinitionHash: rec.DefinitionHash,
-		Definition:     rec.Definition,
-		Graph:          rec.Graph,
+		ID:               rec.ID,
+		Key:              rec.Key,
+		Namespace:        rec.Namespace,
+		Name:             rec.Name,
+		Version:          rec.Version,
+		DefinitionHash:   rec.DefinitionHash,
+		AuditFingerprint: rec.AuditFingerprint,
+		Definition:       rec.Definition,
+		Graph:            rec.Graph,
 	}
 	if stored.ID == "" {
 		stored.ID = types.WorkflowID(uuid.NewString())
@@ -269,14 +271,15 @@ func unmarshalWorkflowRecord(raw []byte) (backend.WorkflowRecord, error) {
 	}
 
 	record := backend.WorkflowRecord{
-		ID:             stored.ID,
-		Key:            stored.Key,
-		Namespace:      stored.Namespace,
-		Name:           stored.Name,
-		Version:        stored.Version,
-		DefinitionHash: stored.DefinitionHash,
-		Definition:     stored.Definition,
-		Graph:          stored.Graph,
+		ID:               stored.ID,
+		Key:              stored.Key,
+		Namespace:        stored.Namespace,
+		Name:             stored.Name,
+		Version:          stored.Version,
+		DefinitionHash:   stored.DefinitionHash,
+		AuditFingerprint: stored.AuditFingerprint,
+		Definition:       stored.Definition,
+		Graph:            stored.Graph,
 	}
 	if record.Graph == nil && record.Definition != nil {
 		g, err := graph.Compile(record.Definition)
