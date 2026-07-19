@@ -4,7 +4,7 @@ const isCI = Boolean(process.env.CI);
 
 export default defineConfig({
   testDir: "./e2e",
-  testIgnore: "**/preview.spec.ts",
+  testMatch: "preview.spec.ts",
   fullyParallel: true,
   forbidOnly: isCI,
   retries: isCI ? 1 : 0,
@@ -23,14 +23,16 @@ export default defineConfig({
   ],
   webServer: [
     {
-      command: "pnpm --filter @xflow/app-workflow-editor dev",
-      url: "http://localhost:5173",
+      command:
+        "pnpm --filter @xflow/app-workflow-editor preview --port 4173 --strictPort",
+      url: "http://localhost:4173",
       reuseExistingServer: !isCI,
       timeout: 120 * 1000,
     },
     {
-      command: "pnpm --filter @xflow/app-workflow-viewer dev",
-      url: "http://localhost:5174",
+      command:
+        "pnpm --filter @xflow/app-workflow-viewer preview --port 4174 --strictPort",
+      url: "http://localhost:4174",
       reuseExistingServer: !isCI,
       timeout: 120 * 1000,
     },

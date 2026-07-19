@@ -1,0 +1,8 @@
+import type { WorkflowDef } from "@xflow/workflow-core";
+
+export type MockWorkflow = WorkflowDef;
+
+export async function loadMockWorkflow(): Promise<MockWorkflow> {
+  const m = await import("./fixtures");
+  return m.workflowFixture;
+}

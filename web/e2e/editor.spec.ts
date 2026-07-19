@@ -28,8 +28,8 @@ test.describe("Workflow Editor", () => {
       page.getByRole("heading", { name: "Editor: some-workflow-id" }),
     ).toBeVisible();
     await expect(page.getByTestId("editor-page")).toBeVisible();
-    await expect(page.getByTestId("fixture-json")).toContainText(
-      '"name": "health-check"',
+    await expect(page.getByTestId("fixture-summary")).toContainText(
+      "Editor mock loaded: health-check",
     );
   });
 

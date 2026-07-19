@@ -13,7 +13,7 @@ export function App() {
       <ErrorBoundary>
         <Routes>
           <Route path="/" element={<HealthPage config={runtimeConfig} />} />
-          <Route path="/view/:workflowId" element={<ViewerPage />} />
+          <Route path="/view/:workflowId" element={<ViewerPage config={runtimeConfig} />} />
           {import.meta.env.DEV && (
             <Route path="/__error" element={<ErrorTriggerPage />} />
           )}

@@ -16,6 +16,7 @@
     "test": "vitest run",
     "check:boundaries": "node scripts/check-boundary.mjs",
     "e2e": "playwright test",
+    "e2e:preview": "pnpm build && playwright test --config playwright.preview.config.ts",
     "generate": "echo 'OpenAPI/TS generation deferred to M2/M3' && exit 0",
     "changeset": "changeset"
   },
