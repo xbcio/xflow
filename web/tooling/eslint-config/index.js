@@ -10,6 +10,13 @@ const sourceFiles = [
   "apps/*/src/**/*.tsx",
 ];
 
+const packageFiles = [
+  "packages/*/src/**/*.ts",
+  "packages/*/src/**/*.tsx",
+];
+
+const workflowCoreFiles = ["packages/workflow-core/src/**/*.ts"];
+
 const configFiles = [
   "eslint.config.js",
   "vitest.config.ts",
@@ -50,7 +57,7 @@ export default [
     },
   },
   {
-    name: "xflow/boundaries",
+    name: "xflow/boundaries-direction",
     files: sourceFiles,
     rules: {
       "import/no-restricted-paths": [
@@ -62,35 +69,48 @@ export default [
               from: "./apps/**/*",
               message: "Public packages cannot import from apps.",
             },
-            {
-              target: "./packages/**/*",
-              from: ["@umijs/max", "@ant-design/pro-layout"],
-              message: "Public packages cannot import Umi or ProLayout.",
-            },
-            {
-              target: "./packages/workflow-core/**/*",
-              from: ["react", "react-dom", "@xyflow/react", "@umijs/max", "@ant-design/pro-layout"],
-              message: "workflow-core must not depend on React/DOM/ReactFlow/AntD/Umi.",
-            },
-            {
-              target: "./packages/workflow-renderer/**/*",
-              from: ["@umijs/max"],
-              message: "workflow-renderer must not depend on Umi.",
-            },
-            {
-              target: "./packages/api-client/**/*",
-              from: ["@umijs/max"],
-              message: "api-client must not depend on Umi.",
-            },
           ],
         },
       ],
+    },
+  },
+  {
+    name: "xflow/boundaries-public-packages",
+    files: packageFiles,
+    rules: {
       "no-restricted-imports": [
         "error",
         {
           paths: [
             { name: "@umijs/max", message: "Umi is only allowed in apps/admin." },
             { name: "@ant-design/pro-layout", message: "ProLayout is only allowed in apps/admin." },
+          ],
+          patterns: [
+            { group: ["@umijs/*"], message: "Umi packages are only allowed in apps/admin." },
+            { group: ["@ant-design/pro-*"], message: "ProComponents are only allowed in apps/admin." },
+          ],
+        },
+      ],
+    },
+  },
+  {
+    name: "xflow/boundaries-workflow-core",
+    files: workflowCoreFiles,
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: [
+            { name: "react", message: "workflow-core must not depend on React." },
+            { name: "react-dom", message: "workflow-core must not depend on React DOM." },
+            { name: "@xyflow/react", message: "workflow-core must not depend on React Flow." },
+            { name: "@umijs/max", message: "workflow-core must not depend on Umi." },
+            { name: "@ant-design/pro-layout", message: "workflow-core must not depend on ProLayout." },
+          ],
+          patterns: [
+            { group: ["@umijs/*"], message: "workflow-core must not depend on Umi packages." },
+            { group: ["@xyflow/*"], message: "workflow-core must not depend on React Flow packages." },
+            { group: ["@ant-design/pro-*"], message: "workflow-core must not depend on ProComponents." },
           ],
         },
       ],

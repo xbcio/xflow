@@ -1,16 +1,17 @@
 {
-  "files": [],
-  "references": [
-    { "path": "./apps/workflow-editor" },
-    { "path": "./apps/workflow-viewer" },
-    { "path": "./packages/api-client" },
-    { "path": "./packages/embed-sdk" },
-    { "path": "./packages/node-registry" },
-    { "path": "./packages/workflow-components" },
-    { "path": "./packages/workflow-core" },
-    { "path": "./packages/workflow-editor" },
-    { "path": "./packages/workflow-provider" },
-    { "path": "./packages/workflow-renderer" },
-    { "path": "./packages/workflow-viewer" }
-  ]
+  "$schema": "https://json.schemastore.org/tsconfig.json",
+  "extends": "@xflow/typescript-config/base",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@xflow/*": ["./packages/*/src/index.ts"]
+    }
+  },
+  "include": [
+    "packages/*/src/**/*.ts",
+    "packages/*/src/**/*.tsx",
+    "apps/*/src/**/*.ts",
+    "apps/*/src/**/*.tsx"
+  ],
+  "exclude": ["dist", "node_modules", "**/*.test.ts", "**/*.test.tsx"]
 }

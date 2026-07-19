@@ -11,7 +11,7 @@
   "type": "module",
   "scripts": {
     "build": "turbo run build",
-    "typecheck": "tsc --build",
+    "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "test": "vitest run",
     "check:boundaries": "node scripts/check-boundary.mjs",
