@@ -220,6 +220,72 @@ func TestBuildRedisConfigSentinelMode(t *testing.T) {
 	}
 }
 
+func TestBuildRedisConfigSentinelUsesDedicatedCreds(t *testing.T) {
+	cfg := serverConfig{
+		redisMode:             "sentinel",
+		redisSentinelMaster:   "mymaster",
+		redisSentinelAddrs:    "s1:26379,s2:26379",
+		redisUsername:         "master-user",
+		redisPassword:         "master-pass",
+		redisSentinelUsername: "sentinel-user",
+		redisSentinelPassword: "sentinel-pass",
+	}
+	rc, err := buildRedisConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rc == nil {
+		t.Fatal("buildRedisConfig() = nil, want RedisConfig")
+	}
+	if rc.Username != "master-user" || rc.Password != "master-pass" {
+		t.Fatalf("unexpected master creds: username=%q password=%q", rc.Username, rc.Password)
+	}
+	if rc.SentinelUsername != "sentinel-user" || rc.SentinelPassword != "sentinel-pass" {
+		t.Fatalf("unexpected sentinel creds: username=%q password=%q", rc.SentinelUsername, rc.SentinelPassword)
+	}
+}
+
+func TestBuildRedisConfigSentinelFallsBackToMasterCreds(t *testing.T) {
+	cfg := serverConfig{
+		redisMode:           "sentinel",
+		redisSentinelMaster: "mymaster",
+		redisSentinelAddrs:  "s1:26379",
+		redisUsername:       "shared-user",
+		redisPassword:       "shared-pass",
+	}
+	rc, err := buildRedisConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rc == nil {
+		t.Fatal("buildRedisConfig() = nil, want RedisConfig")
+	}
+	if rc.SentinelUsername != "shared-user" || rc.SentinelPassword != "shared-pass" {
+		t.Fatalf("sentinel creds did not fall back to master creds: username=%q password=%q", rc.SentinelUsername, rc.SentinelPassword)
+	}
+}
+
+func TestParseServerConfigSupportsSentinelAuthFlags(t *testing.T) {
+	cfg, err := parseServerConfig([]string{
+		"-redis-mode", "sentinel",
+		"-redis-sentinel-master", "mymaster",
+		"-redis-sentinel-addrs", "s1:26379",
+		"-redis-username", "master-user",
+		"-redis-password", "master-pass",
+		"-redis-sentinel-username", "sentinel-user",
+		"-redis-sentinel-password", "sentinel-pass",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.redisUsername != "master-user" || cfg.redisPassword != "master-pass" {
+		t.Fatalf("master creds = %q/%q, want master-user/master-pass", cfg.redisUsername, cfg.redisPassword)
+	}
+	if cfg.redisSentinelUsername != "sentinel-user" || cfg.redisSentinelPassword != "sentinel-pass" {
+		t.Fatalf("sentinel creds = %q/%q, want sentinel-user/sentinel-pass", cfg.redisSentinelUsername, cfg.redisSentinelPassword)
+	}
+}
+
 func TestBuildRedisConfigClusterRequiresAddrs(t *testing.T) {
 	cfg := serverConfig{redisMode: "cluster"}
 	if _, err := buildRedisConfig(cfg); err == nil {

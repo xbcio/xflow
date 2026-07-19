@@ -58,8 +58,14 @@ type serverConfig struct {
 	redisSentinelAddrs string
 	redisUsername      string
 	redisPassword      string
-	redisDB            int
-	redisTLS           bool
+	// redisSentinelUsername and redisSentinelPassword allow sentinel deployments
+	// to use ACL credentials that differ from the Redis master credentials.
+	// When empty, they fall back to redisUsername/redisPassword for backwards
+	// compatibility with shared-credentials setups.
+	redisSentinelUsername string
+	redisSentinelPassword string
+	redisDB               int
+	redisTLS              bool
 	// authPolicy is the path to runners.yaml. Empty means DisabledAuthenticator
 	// (dev / MVP behavior).
 	authPolicy string
@@ -125,6 +131,8 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	fs.StringVar(&cfg.redisSentinelAddrs, "redis-sentinel-addrs", "", "Comma-separated Redis sentinel node addresses (required for --redis-mode=sentinel)")
 	fs.StringVar(&cfg.redisUsername, "redis-username", "", "Redis username (ACL)")
 	fs.StringVar(&cfg.redisPassword, "redis-password", "", "Redis password")
+	fs.StringVar(&cfg.redisSentinelUsername, "redis-sentinel-username", "", "Redis sentinel username (ACL); falls back to --redis-username if empty")
+	fs.StringVar(&cfg.redisSentinelPassword, "redis-sentinel-password", "", "Redis sentinel password; falls back to --redis-password if empty")
 	fs.IntVar(&cfg.redisDB, "redis-db", 0, "Redis logical database (single/sentinel)")
 	fs.BoolVar(&cfg.redisTLS, "redis-tls", false, "Enable TLS for Redis connections")
 	fs.BoolVar(&cfg.memory, "memory", false, "Use in-memory backend")
@@ -192,69 +200,77 @@ func buildRedisConfig(cfg serverConfig) (*distributed.RedisConfig, error) {
 		cfg.redisSentinelMaster != "" ||
 		cfg.redisUsername != "" ||
 		cfg.redisPassword != "" ||
+		cfg.redisSentinelUsername != "" ||
+		cfg.redisSentinelPassword != "" ||
 		cfg.redisDB != 0 ||
 		cfg.redisTLS
 
+	// Sentinel deployments may use credentials that differ from the Redis
+	// master credentials. Fall back to the master credentials when the
+	// sentinel-specific flags are not supplied.
+	sentinelUsername := cfg.redisSentinelUsername
+	if sentinelUsername == "" {
+		sentinelUsername = cfg.redisUsername
+	}
+	sentinelPassword := cfg.redisSentinelPassword
+	if sentinelPassword == "" {
+		sentinelPassword = cfg.redisPassword
+	}
+
+	var rc *distributed.RedisConfig
 	switch mode {
 	case distributed.RedisModeSingle:
 		if !haConfigured {
 			return nil, nil
 		}
-		if cfg.redis == "" {
-			return nil, fmt.Errorf("--redis is required for --redis-mode=single")
+		if cfg.redis != "" {
+			rc = &distributed.RedisConfig{
+				Mode:     distributed.RedisModeSingle,
+				Addrs:    []string{cfg.redis},
+				Username: cfg.redisUsername,
+				Password: cfg.redisPassword,
+				DB:       cfg.redisDB,
+			}
+		} else {
+			rc = &distributed.RedisConfig{
+				Mode:     distributed.RedisModeSingle,
+				Username: cfg.redisUsername,
+				Password: cfg.redisPassword,
+				DB:       cfg.redisDB,
+			}
 		}
-		rc := &distributed.RedisConfig{
-			Mode:     distributed.RedisModeSingle,
-			Addrs:    []string{cfg.redis},
-			Username: cfg.redisUsername,
-			Password: cfg.redisPassword,
-			DB:       cfg.redisDB,
-		}
-		if cfg.redisTLS {
-			rc.TLSConfig = &tls.Config{}
-		}
-		return rc, nil
 
 	case distributed.RedisModeSentinel:
-		if cfg.redisSentinelMaster == "" {
-			return nil, fmt.Errorf("--redis-sentinel-master is required for --redis-mode=sentinel")
-		}
-		if cfg.redisSentinelAddrs == "" {
-			return nil, fmt.Errorf("--redis-sentinel-addrs is required for --redis-mode=sentinel")
-		}
-		rc := &distributed.RedisConfig{
+		rc = &distributed.RedisConfig{
 			Mode:             distributed.RedisModeSentinel,
 			Addrs:            splitAddrs(cfg.redisSentinelAddrs),
 			MasterName:       cfg.redisSentinelMaster,
 			Username:         cfg.redisUsername,
 			Password:         cfg.redisPassword,
-			SentinelUsername: cfg.redisUsername,
-			SentinelPassword: cfg.redisPassword,
+			SentinelUsername: sentinelUsername,
+			SentinelPassword: sentinelPassword,
 			DB:               cfg.redisDB,
 		}
-		if cfg.redisTLS {
-			rc.TLSConfig = &tls.Config{}
-		}
-		return rc, nil
 
 	case distributed.RedisModeCluster:
-		if cfg.redisClusterAddrs == "" {
-			return nil, fmt.Errorf("--redis-cluster-addrs is required for --redis-mode=cluster")
-		}
-		rc := &distributed.RedisConfig{
+		rc = &distributed.RedisConfig{
 			Mode:     distributed.RedisModeCluster,
 			Addrs:    splitAddrs(cfg.redisClusterAddrs),
 			Username: cfg.redisUsername,
 			Password: cfg.redisPassword,
 		}
-		if cfg.redisTLS {
-			rc.TLSConfig = &tls.Config{}
-		}
-		return rc, nil
 
 	default:
 		return nil, fmt.Errorf("unsupported redis mode %q", mode)
 	}
+
+	if cfg.redisTLS {
+		rc.TLSConfig = &tls.Config{}
+	}
+	if err := rc.Validate(); err != nil {
+		return nil, err
+	}
+	return rc, nil
 }
 
 func splitAddrs(s string) []string {
@@ -332,8 +348,15 @@ func runServer(cfg serverConfig) error {
 	if err != nil {
 		return fmt.Errorf("redis config: %w", err)
 	}
+
+	redisAddr := cfg.redis
 	if cfg.memory {
 		log.Println("xflow-server: using in-memory backend")
+		if redisConfig != nil || cfg.redis != "" {
+			log.Println("xflow-server: WARNING memory flag set, ignoring redis configuration")
+			redisConfig = nil
+			redisAddr = ""
+		}
 	} else if redisConfig != nil {
 		log.Printf("xflow-server: using distributed backend (mode=%s addrs=%d master=%q tls=%v db=%d)", redisConfig.Mode, len(redisConfig.Addrs), redisConfig.MasterName, redisConfig.TLSConfig != nil, redisConfig.DB)
 	} else if cfg.redis != "" {
@@ -341,7 +364,7 @@ func runServer(cfg serverConfig) error {
 	}
 
 	apiCfg := apiserver.Config{
-		RedisAddr:           cfg.redis, // legacy single-node path
+		RedisAddr:           redisAddr, // legacy single-node path
 		RedisConfig:         redisConfig,
 		Store:               sqlStore,
 		Concurrency:         cfg.concurrency,

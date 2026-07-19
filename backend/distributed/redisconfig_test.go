@@ -17,8 +17,9 @@ func TestRedisConfigValidate(t *testing.T) {
 		wantErr string
 	}{
 		{
-			name: "single ok empty addrs",
-			cfg:  RedisConfig{Mode: RedisModeSingle},
+			name:    "single empty addrs rejected",
+			cfg:     RedisConfig{Mode: RedisModeSingle},
+			wantErr: "single mode requires at least one address",
 		},
 		{
 			name: "single ok with addr",

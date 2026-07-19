@@ -41,6 +41,9 @@ func (c RedisConfig) validate() error {
 		if c.MasterName != "" {
 			return errors.New("redis single mode does not use MasterName")
 		}
+		if len(c.Addrs) == 0 {
+			return errors.New("redis single mode requires at least one address")
+		}
 	case RedisModeSentinel:
 		if c.MasterName == "" {
 			return errors.New("redis sentinel mode requires MasterName")
@@ -59,6 +62,13 @@ func (c RedisConfig) validate() error {
 		return fmt.Errorf("unsupported redis mode %q", c.Mode)
 	}
 	return nil
+}
+
+// Validate is the exported entry point for RedisConfig validation. It returns
+// the same result as the unexported validate method and is exposed so callers
+// outside the distributed package can reuse the fail-closed checks.
+func (c RedisConfig) Validate() error {
+	return c.validate()
 }
 
 // firstAddr returns the first configured address, or an empty string if none is
