@@ -7,6 +7,11 @@
 > `.claude/specs/2026-07-18-sdk-server-production-readiness-remediation-design.md`），
 > 此前 G0/G1/C2 标记"已完成"与代码事实不符，已回退。状态以本节为准；
 > 任一条目恢复"已完成"必须满足该 spec §2 的三层证据（实现 + 测试 + 运行 artifact）。
+>
+> **2026-07-19 验收纠正**：对 HEAD `fdc0206` 的复验确认 G0/G1 仍不通过、G2 仍未完成，
+> 并再次证伪 B1“修复完成”、A3“三拓扑完成”和 C2“深层不可变完成”的声明。
+> 详细证据见 `.claude/specs/2026-07-19-sdk-server-production-readiness-acceptance.md`；
+> 后续任务见 `.claude/plans/2026-07-19-sdk-server-production-readiness-followup.md`。
 
 ## 1. 门槛分层
 
@@ -29,10 +34,10 @@ xflow 采用分层发布门槛，不再用单个测试替代完整 release gate�
 
 | 项 | 状态 | 缺口 | 既有 commit |
 |---|---|---|---|
-| A0 真实 Redis cyclic 崩溃恢复 | 🟡 部分完成 | 测试代码存在但本地因 Redis 不可用被 Skip；无独立 OS 进程 kill/restart 恢复报告；CI 未强制 require-real-Redis | `4a04057` |
-| A1 control-plane binder fail-closed | 🟡 部分完成 | control 已不回退 `Provider.Bind`；但 distributed 吞掉 `StartConsumer` 错误，dispatcher/monitor 仍启动并报 ready；无逆序回滚与 goroutine 等待 | `5ee3414` |
-| A2 dead-letter 原子处置契约 | 🟡 部分完成 | 原子 dead→ready 已有；缺 node/activation guard、不可变 replay receipt、统一 manager、真正 cursor 分页、CLI 绕过 Engine | `fe15676` |
-| A3 跨进程错误分类与兼容语义 | 🟡 部分完成 | wire DTO + `ClassifiedError` 完成；HTTP 408/429 transient、Database 按 SQLState/number 分类、gRPC codes 表完成；**三拓扑 parity 矩阵已完成**（local embedded + server-runner，真 Redis）：覆盖 HTTP 4xx/408/429/5xx/connection、gRPC 全 status codes 表（no-pool/NotFound/Unavailable/connection + InvalidArgument/PermissionDenied/Unauthenticated/AlreadyExists/Unimplemented/FailedPrecondition/OutOfRange/DeadlineExceeded/ResourceExhausted/Aborted/Canceled/Unknown/Internal/DataLoss）、DB no-pool/bad-conn（server-runner 真实 mysql driver 判为 `database.unknown`，与 local `database.connection_lost` 属同 transient 分支，仅 code 字面不同）/deadlock(1205)/constraint、OnError stop/error_output/main_output/continue、script/function config/timeout/user-error。cluster-transient 因无 handler retry 为 collection-path 排除。**生产 runner ResourcePool/credential resolver 接线已完成**（`execution.WithCredentialResolver` + `runnersvc.Config` 透传 + `cmd/runner` YAML `credentials`/`resource_pool` 段 + `${VAR}` env 展开 fail-closed；无 public API break；生产路径 parity 测试变体已覆盖 db+grpc）；no-pool 契约（无 credentials/db/grpc 时不构造 pool）保留。清单关闭前 A3 不标 G0 完成 | `1995148`、`6f16260`、`1815635`、`987a8ff`、`31338fb`、`681ba6f`、`6bdc794`、`bdf0ad3`、`81d6b58`、`1430bda`、`8cc51d3`、`8abb1c2`、`bfb1e9f`、`e38a1c5`、`d0a2352`、`aae23ef`、`472a16a`、`e007c97`、`69fdcde` |
+| A0 真实 Redis cyclic 崩溃恢复 | 🟡 部分完成 | require-real-Redis helper、真实 Redis cyclic test 和双进程 recovery test 已存在；但 CI 仍调用可 Skip 的 `make test-integration`，没有强制 required 模式或上传 A0 artifact。process test 仅覆盖 commit 后 flush 前退出/后台恢复，未完成 response-loss、真实 queue handoff、OS kill 矩阵；报告字段未填全且只写入临时目录。2026-07-19 本机强制运行因 `localhost:6379` 不可用而 fail-fast，不能计为通过 | `4a04057`；2026-07-19 验收 |
+| A1 control-plane binder fail-closed | 🟡 部分完成 | control-plane 已只走 `TaskHandlerBinder`，`BindTaskHandler` 会传播 consumer start error，正常 stop/race 测试存在；但 SDK `Provider.Bind`/兼容 `BindHandler` 仍只记录 bind 错误并返回 cleanup，`NewCluster` 调用方不可观察失败。timeout monitor 启动后的 rollback 分支未 `Stop`/等待，正常 stop 也未先阻止新消费 | `5ee3414`；2026-07-19 验收 |
+| A2 dead-letter 原子处置契约 | 🟡 部分完成 | 结构化请求、成功 receipt、并发幂等、execution/node/activation guard 和 manager 基础已实现；但 legacy/missing meta 会跳过 guard，拒绝 outcome 无权威 receipt。cursor 暴露 raw entry ID 且真实 Redis 稳定分页未证明；API/CLI manager 的 metrics 为 nil，CLI 仍直连 Redis并自行注入身份，Engine 仍有 manager 外 replay 路径；Redis receipt→SQL crash-safe reconcile 未实现 | `fe15676`；2026-07-19 验收 |
+| A3 跨进程错误分类与兼容语义 | 🟡 部分完成 | wire DTO、HTTP/gRPC/MySQL/script/function classifier、local embedded + server-runner parity 及生产 runner ResourcePool/credential wiring 已实现；**当前只有两种拓扑**，`test/integration/action_parity_test.go` 明确排除 SDK cluster，故不得称“三拓扑完成”。同 fixture 的 structured kind/code/port/DAG 断言仍不完整，PostgreSQL classifier/运行范围未决，且没有附本轮真实 Redis parity artifact | `1995148`..`69fdcde`；2026-07-19 验收 |
 
 > G0 退出条件见修复设计 §12。在 A0–A3 全部满足三层证据前，G0 不得恢复"已完成"。
 
@@ -43,8 +48,8 @@ xflow 采用分层发布门槛，不再用单个测试替代完整 release gate�
 | 项 | 状态 | 缺口 | 既有 commit |
 |---|---|---|---|
 | G0 基线 | ⛔ | G0 修复中 | 见上 |
-| B1 OTel 端到端接线 | ✅ 修复完成（G0 阻断 G1） | provider 可配 sampler（默认 parentbased）+ baggage opt-in + 幂等 shutdown；runner extract `TaskLease.TraceCarrier` 建 execute span、report inject carrier（`WithoutCancel` 保留 SpanContext 不再裸 `context.Background()` 断链）；dispatch span；cmd flags；gRPC unary interceptor（W3C metadata extraction + server span）；runner trace-graph + grpc interceptor 测试 green。server-runner e2e（HTTP + gRPC）已修复并真 Redis 跑通（此前 `control.NewServer` 不再 serve `/v1/workflows` 致 404，且 Redis 在 :6380 非 :6379 长期 skip 掩盖）。⚠️ gRPC runner concurrency>1 credit-flow 路径 double-dispatch 为实验性后续（测试 docstring 已标注，非 release gate） | `0b21125`、`1815635` |
-| B3 API authz + fail-closed | 🟡 部分完成 | 仅有静态 bearer 认证 + fail-closed；无 principal、无资源/操作级 authz、无不可变可 reconcile 审计；所有 operation 共享 allow-all | `c238e1d` |
+| B1 OTel 端到端接线 | 🟡 部分完成 | provider sampler、TraceContext、baggage opt-in、runner execute span、`WithoutCancel` report context、HTTP middleware 和 gRPC unary interceptor 已实现；但 gRPC `ReportResultRequest` proto/converter 不携带 `TraceCarrier`，report→commit 会回退到 dispatch carrier。缺 workflow submit/invoke、task report、outbox spans，dispatch 也未继承 submit/invoke 因果链；无 stream interceptor、baggage allowlist和 HTTP/gRPC 完整 graph artifact。2026-07-19 round-trip 探针确认 carrier 丢失 | `0b21125`、`1815635`；2026-07-19 验收 |
+| B3 API authz + fail-closed | 🟡 部分完成 | Principal、operation/resource Authorizer、默认 deny、tenant IDOR、mutation admission audit 和 SQL append-only sink 已实现；但 execution 子路由整体被固定成 `execution.read` 非 mutation，signal/revoke/cancel 未按操作授权审计，management leader/runner 未统一 authz。无 MySQL 时 server 仍可使用内存 audit 启动，单 token 自动拥有全部 scope；post-handler defer 不是 crash-safe reconcile，dead-letter receipt 也未投影/对账到 SQL | `d3bf6ba`、tenant boundary commits；2026-07-19 验收 |
 
 > G1 退出条件见修复设计 §12。即便 B1/B3 单项完成，G0 未完成前不得宣称 G1。
 
@@ -52,7 +57,7 @@ xflow 采用分层发布门槛，不再用单个测试替代完整 release gate�
 
 | 项 | 状态 | 说明 |
 |---|---|---|
-| B2 control-plane HA + Redis HA soak | ⏳ | 代码侧：leader election/graceful shutdown/management 端点已具备；**Redis HA 客户端代码已完成**（Task 1.1–4.1：`redis.UniversalClient` 宽化 + `RedisConfig` single/sentinel/cluster + `WithRedisConfig` Option + asynq `AsAsynqConnOpt` 三模式映射 + `cmd/server --redis-mode` flag + `apiserver.Config.RedisConfig` 透传 + sentinel 认证字段，commits `9a39996`..`c292d7d`）；**workflowreg/trigger cluster-safety 已修**（Task 2.1 hash tag + Task 2.2 单 key 核查，commits `aed4db3`/`1c54be0`）；**soak 框架代码已完成**（Task 5.1 harness + 5.2 故障注入器 + 5.3 SLO 报告类型与模板，commits `dc13301`..`065974a`）。**仍缺（ENV-GATED）**：真实 sentinel/cluster Redis 环境连通性/failover 验收、多副本 soak 报告填实、SLO 量化达标判定、真实 cluster 下 CROSSSLOT 回归。详见 [ha-soak-plan](../references/ha-soak-plan.md) 与 [ha-soak-report-template](../references/ha-soak-report-template.md) |
+| B2 control-plane HA + Redis HA soak | ⏳ | 代码侧：leader election/graceful shutdown/management 端点已具备；**Redis HA 客户端代码已完成**（Task 1.1–4.1：`redis.UniversalClient` 宽化 + `RedisConfig` single/sentinel/cluster + `WithRedisConfig` Option + asynq `AsAsynqConnOpt` 三模式映射 + `cmd/server --redis-mode` flag + `apiserver.Config.RedisConfig` 透传 + sentinel 认证字段，commits `9a39996`..`c292d7d`）；**workflowreg/trigger cluster-safety 已修**（Task 2.1 hash tag + Task 2.2 单 key 核查，commits `aed4db3`/`1c54be0`）；**soak 脚手架与报告类型已完成**（Task 5.1 harness + 5.2 in-process graceful 场景/ENV-GATED stub + 5.3 SLO 报告类型与模板，commits `dc13301`..`065974a`）；Redis failover、network partition、runner kill、report response loss、outbox flush fault 仍未在真实环境执行。**仍缺（ENV-GATED）**：真实 sentinel/cluster Redis 环境连通性/failover 验收、多副本 soak 报告填实、SLO 量化达标判定、真实 cluster 下 CROSSSLOT 回归。详见 [ha-soak-plan](../references/ha-soak-plan.md) 与 [ha-soak-report-template](../references/ha-soak-report-template.md) |
 | 多租户 tenant boundary | ⏳ 代码与测试完成 | tenant boundary 全链路代码已完成（Phase 6-8）：`backend/tenant` context 原语 + `WorkflowDef.TenantID`（`json:"-"` 编译期禁止不可信客户端，commit `726e6df`）；rstate/workflowreg/trigger key 全部 tenant 前缀（`xflow:t<tenant>:...`，无花括号保 hash tag，Task 7.1/7.2）；API 层 principal 签发 + `TenantAwareAuthorizer` + IDOR（请求体 tenant 忽略，跨 tenant → 404 不泄漏存在性，Task 7.3）；audit/metrics/trace tenant 标签 + 高基数防护（Task 7.4）；runner placement + credential tenant scope + asynq payload tenant（Task 7.5）；dead-letter/outbox manager 双保险 + CLI `--tenant`（Task 7.6）；越权测试矩阵 `test/security/tenant_isolation_test.go` 10 场景全绿（Task 8.1，miniredis，非 ENV-GATED）。**仍缺（ENV-GATED）**：真实多租户部署的端到端验收（多 principal 并发、跨 tenant 性能隔离基线、真实 Redis Cluster 下 tenant key 分布）。详见 [tenant-boundary-design](../../.claude/specs/2026-07-19-tenant-boundary-design.md) |
 
 > leader election、hash tag 或 namespace 单独存在都不等同于 control-plane HA 或多租户隔离。本轮 G0/G1 修复不得顺带宣称 G2。
@@ -71,13 +76,13 @@ G2 control-plane HA 的承诺范围与限制（映射 §4 反声明，在 G2 整
 | 项 | 状态 | 缺口 | Commit |
 |---|---|---|---|
 | C1 store GORM tags 下沉 | ✅ 完成 | `store/models.go` 已无 `gorm:` tag 与 `TableName()`；ORM schema 完全下沉至 `store/sqlstore` 的 `dbExecution`/`dbNode`/`dbSignal` | `a36f19b` |
-| C2 Graph 深层不可变性 | ✅ 完成 | 公开 accessor 全部深层不可变：`NodeAt` 递归拷贝 `Parameters`/`PortOuts`/`RunnerSelector`/`Retry`；`Vars()`/`Config()` 递归深拷贝；`NodeOutEdges`/`NodeInEdges` 返回新 slice。Compile 阶段 value-domain 校验拒绝 pointer/func/chan/非字符串键 map。热路径 `NodeName` 零拷贝。深层 mutation + race + 值域拒绝 + accessor benchmark 通过（per-dispatch 隔离拷贝 ~0.9µs，handler 不可信不可避免） | `7355570` |
+| C2 Graph 深层不可变性 | 🛠 修复中 | 常规 map/slice accessor defensive copy、value-domain gate、race 与 benchmark 已实现；但 validator 跳过 struct 未导出字段，cloner 先浅拷贝 struct，未导出 map/slice/pointer 可保留 alias。2026-07-19 外部探针同时复现 Compile 输入修改和 `NodeAt` 返回值修改会改变 Graph 内部值，故不得声明 deep immutable | `7355570`；2026-07-19 验收 |
 
 ### D — 高吞吐路径（独立架构，不阻塞审批 release gate）
 
 | 项 | 状态 | 说明 |
 |---|---|---|
-| D1 采集与审批工作流分离 | 🟡 架构/采样就绪，容量基线未完成 | 两条独立参考架构 + `make perf-sample` 采样脚本就绪；E2E load 输出 p50/p95/p99 + 结构化 `perf.metric` 行；CI 采样 job `.github/workflows/perf-sample.yml`（每日 + 手动，`continue-on-error`，非门槛，上传 90 天 artifact）已接入；受控 host 多样本报告模板 [capacity-report-template.md](../references/capacity-report-template.md) 已就绪。**受控 host 多样本报告未填实前只能称"架构与采样准备完成"，不得称"容量基线完成"**。详见 [HIGH-THROUGHPUT-INGESTION](HIGH-THROUGHPUT-INGESTION.md)。审批工作流始终使用 durable mode；不得用 transient 容量承诺审批产能 |
+| D1 采集与审批工作流分离 | 🟡 架构/采样就绪，容量基线未完成 | 两条独立参考架构、`make perf-sample`、p50/p95/p99 和结构化 `perf.metric` 已实现；`.github/workflows/perf-sample.yml` 已配置每日/手动非门槛采样与 artifact 上传，但当前 release evidence 未附可核验成功 run/artifact。受控 host 报告仍是空模板；**两拓扑多样本报告填实前只能称“架构与采样准备完成”**。审批始终使用 durable mode，不得用 transient 数据承诺审批产能 |
 
 ## 3. G1 部署承诺与限制
 
@@ -126,7 +131,9 @@ G1 生产部署必须配置以下能力，详细示例见 [deployment-examples.m
 
 | 能力 | 配置 | runbook |
 |---|---|---|
-| workflow API 鉴权 | `--api-auth-token` + `--require-api-auth` | — |
+| workflow API 鉴权 | token→principal/scopes 映射 + `--require-api-auth`；单一全 scope token 不满足最终 G1 | — |
+| durable audit | `--mysql-dsn ...` 或等价持久 sink；内存 audit 仅开发使用 | — |
+| audit reconciliation | crash-safe admission/outcome 与 dead-letter receipt reconcile worker；**当前未实现，阻断 G1** | — |
 | runner 协议鉴权 | `--auth-policy runners.yaml` | — |
 | 传输安全 | `--tls-cert`/`--tls-key`/`--tls-client-ca`（mTLS） | — |
 | 分布式 tracing | `--trace otlp --trace-endpoint ...` | — |
