@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/types"
 
@@ -110,27 +111,30 @@ func TestMetricsHooksDoNotExportExecutionIDAsLabel(t *testing.T) {
 	if strings.Contains(body, "exec-123") {
 		t.Fatalf("metrics body leaked execution id: %s", body)
 	}
-	if !strings.Contains(body, `xflow_node_completed_total{node="send_email",status="success"} 1`) {
+	if !strings.Contains(body, `xflow_node_completed_total{node="send_email",status="success",tenant="default"} 1`) {
 		t.Fatalf("node completed metric missing from body: %s", body)
 	}
 }
 
 func TestObserverAdaptersIncrementExpectedMetrics(t *testing.T) {
 	metrics := New()
+	ctx := context.Background()
 
-	NewAuditMetrics(metrics).OnAuditFailed("save_signal", assertErr{})
-	NewSweepMetrics(metrics).OnSweepReclaim("exec-1", "node-1", 1500)
-	NewSweepMetrics(metrics).OnSweepReclaimResult("reclaimed", time.Millisecond)
-	NewDispatcherMetrics(metrics).OnDispatchTransient("no_capacity")
-	NewAuthMetrics(metrics).OnAuthDecision("register", "deny", "enforcing")
-	NewCommitMetrics(metrics).OnCommitOutcome(context.Background(), engine.CommitOutcomeAccepted)
+	NewAuditMetrics(metrics).OnAuditFailed(ctx, "save_signal", assertErr{})
+	NewSweepMetrics(metrics).OnSweepReclaim(ctx, "exec-1", "node-1", 1500)
+	NewSweepMetrics(metrics).OnSweepReclaimResult(ctx, "reclaimed", time.Millisecond)
+	NewDispatcherMetrics(metrics).OnDispatchTransient(ctx, "no_capacity")
+	NewAuthMetrics(metrics).OnAuthDecision(ctx, "register", "deny", "enforcing")
+	NewCommitMetrics(metrics).OnCommitOutcome(ctx, engine.CommitOutcomeAccepted)
 	outbox := NewOutboxMetrics(metrics)
-	outbox.OnOutboxRetry(context.Background(), 1)
-	outbox.OnOutboxDeadLetter(context.Background())
-	outbox.OnOutboxPending(context.Background(), 2, 1, time.Second)
-	NewLeaseMetrics(metrics).OnLeaseAcquire("acquired", time.Millisecond)
-	NewRunnerClaimMetrics(metrics).OnRunnerClaimReclaimed(2)
-	NewRunnerClaimMetrics(metrics).OnRunnerLeaseReplayed()
+	outbox.OnOutboxRetry(ctx, 1)
+	outbox.OnOutboxDeadLetter(ctx)
+	outbox.OnOutboxPending(ctx, 2, 1, time.Second)
+	NewLeaseMetrics(metrics).OnLeaseAcquire(ctx, "acquired", time.Millisecond)
+	NewRunnerClaimMetrics(metrics).OnRunnerClaimReclaimed(ctx, 2)
+	NewRunnerClaimMetrics(metrics).OnRunnerLeaseReplayed(ctx)
+	NewScriptMetrics(metrics).OnScriptExecute(ctx, "js", "goja", "main", 5*time.Millisecond)
+	NewScriptMetrics(metrics).OnScriptOutputBytes(ctx, "js", "goja", 2048)
 
 	req := httptest.NewRequest("GET", "/metrics", nil)
 	rec := httptest.NewRecorder()
@@ -138,23 +142,53 @@ func TestObserverAdaptersIncrementExpectedMetrics(t *testing.T) {
 	body := rec.Body.String()
 
 	for _, want := range []string{
-		`xflow_audit_write_total{op="save_signal",result="failed"} 1`,
-		`xflow_lease_sweep_reclaimed_total{result="reclaimed"} 1`,
-		`xflow_dispatch_transient_total{reason="no_capacity"} 1`,
-		`xflow_runner_auth_decisions_total{auth_mode="enforcing",result="deny"} 1`,
-		`xflow_lease_age_seconds_count{result="reclaimed"} 1`,
-		`xflow_commit_outcomes_total{outcome="accepted"} 1`,
-		`xflow_outbox_retries_total 1`,
-		`xflow_outbox_dead_letters_total 1`,
-		`xflow_outbox_pending 2`,
-		`xflow_outbox_dead_letters 1`,
-		`xflow_lease_acquire_total{result="acquired"} 1`,
-		`xflow_runner_claim_reclaimed_total 2`,
-		`xflow_runner_lease_replayed_total 1`,
+		`xflow_audit_write_total{op="save_signal",result="failed",tenant="default"} 1`,
+		`xflow_lease_sweep_reclaimed_total{result="reclaimed",tenant="default"} 1`,
+		`xflow_dispatch_transient_total{reason="no_capacity",tenant="default"} 1`,
+		`xflow_runner_auth_decisions_total{auth_mode="enforcing",result="deny",tenant="default"} 1`,
+		`xflow_lease_age_seconds_count{result="reclaimed",tenant="default"} 1`,
+		`xflow_commit_outcomes_total{outcome="accepted",tenant="default"} 1`,
+		`xflow_outbox_retries_total{tenant="default"} 1`,
+		`xflow_outbox_dead_letters_total{tenant="default"} 1`,
+		`xflow_outbox_pending{tenant="default"} 2`,
+		`xflow_outbox_dead_letters{tenant="default"} 1`,
+		`xflow_lease_acquire_total{result="acquired",tenant="default"} 1`,
+		`xflow_runner_claim_reclaimed_total{tenant="default"} 2`,
+		`xflow_runner_lease_replayed_total{tenant="default"} 1`,
+		`xflow_script_execute_total{language="js",outcome="main",runtime="goja",tenant="default"} 1`,
+		`xflow_script_output_bytes_count{language="js",runtime="goja",tenant="default"} 1`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("metrics body missing %q:\n%s", want, body)
 		}
+	}
+}
+
+func TestMetricsHooksCarryTenantLabel(t *testing.T) {
+	metrics := New()
+	hooks := NewMetricsHooks(metrics)
+
+	ctx := tenant.WithTenant(context.Background(), tenant.TenantID("tenant-a"))
+	hooks.OnNodeStart(ctx, types.ExecutionID("exec-123"), "send_email")
+	hooks.OnNodeComplete(ctx, types.ExecutionID("exec-123"), "send_email", types.NodeStatusSuccess)
+	hooks.OnExecutionComplete(ctx, types.ExecutionID("exec-123"), types.ExecutionStatusSuccess)
+
+	req := httptest.NewRequest("GET", "/metrics", nil)
+	rec := httptest.NewRecorder()
+	metrics.Handler().ServeHTTP(rec, req)
+	body := rec.Body.String()
+
+	for _, want := range []string{
+		`xflow_node_started_total{node="send_email",tenant="tenant-a"} 1`,
+		`xflow_node_completed_total{node="send_email",status="success",tenant="tenant-a"} 1`,
+		`xflow_execution_completed_total{status="success",tenant="tenant-a"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("metrics body missing %q:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "exec-123") {
+		t.Fatalf("metrics body leaked execution id: %s", body)
 	}
 }
 

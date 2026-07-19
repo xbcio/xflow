@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"context"
 	"time"
 
 	"github.com/xbcio/xflow/backend/distributed"
@@ -28,12 +29,12 @@ func NewAuditMetrics(metrics *Metrics) AuditMetrics {
 	return AuditMetrics{Metrics: metrics}
 }
 
-func (a AuditMetrics) OnAuditOK(op string) {
-	a.Metrics.Inc(metricAuditWrite, map[string]string{"op": op, "result": "ok"})
+func (a AuditMetrics) OnAuditOK(ctx context.Context, op string) {
+	a.Metrics.Inc(metricAuditWrite, withTenant(ctx, map[string]string{"op": op, "result": "ok"}))
 }
 
-func (a AuditMetrics) OnAuditFailed(op string, _ error) {
-	a.Metrics.Inc(metricAuditWrite, map[string]string{"op": op, "result": "failed"})
+func (a AuditMetrics) OnAuditFailed(ctx context.Context, op string, _ error) {
+	a.Metrics.Inc(metricAuditWrite, withTenant(ctx, map[string]string{"op": op, "result": "failed"}))
 }
 
 var _ distributed.AuditObserver = AuditMetrics{}
@@ -49,31 +50,31 @@ func NewLeaseMetrics(metrics *Metrics) LeaseMetrics {
 }
 
 // OnLeaseAcquire records a lease acquisition attempt and its storage latency.
-func (l LeaseMetrics) OnLeaseAcquire(result string, elapsed time.Duration) {
-	labels := map[string]string{"result": result}
+func (l LeaseMetrics) OnLeaseAcquire(ctx context.Context, result string, elapsed time.Duration) {
+	labels := withTenant(ctx, map[string]string{"result": result})
 	l.Metrics.Inc(metricLeaseAcquire, labels)
 	l.Metrics.Observe(metricLeaseAcquireDuration, labels, elapsed)
 }
 
 // OnLeaseExpiryScan records an expiry-index scan and its candidate count.
-func (l LeaseMetrics) OnLeaseExpiryScan(candidates int, elapsed time.Duration, err error) {
+func (l LeaseMetrics) OnLeaseExpiryScan(ctx context.Context, candidates int, elapsed time.Duration, err error) {
 	result := "ok"
 	if err != nil {
 		result = "error"
 	}
-	labels := map[string]string{"result": result}
+	labels := withTenant(ctx, map[string]string{"result": result})
 	l.Metrics.Inc(metricLeaseExpiryScan, labels)
 	l.Metrics.Observe(metricLeaseExpiryScanDuration, labels, elapsed)
-	l.Metrics.Set(metricLeaseExpiryCandidates, nil, float64(candidates))
+	l.Metrics.Set(metricLeaseExpiryCandidates, withTenant(ctx, nil), float64(candidates))
 }
 
 // OnLeaseRepair records a bounded lease-index reconciliation pass.
-func (l LeaseMetrics) OnLeaseRepair(reconciled int, elapsed time.Duration, err error) {
+func (l LeaseMetrics) OnLeaseRepair(ctx context.Context, reconciled int, elapsed time.Duration, err error) {
 	result := "ok"
 	if err != nil {
 		result = "error"
 	}
-	labels := map[string]string{"result": result}
+	labels := withTenant(ctx, map[string]string{"result": result})
 	l.Metrics.Inc(metricLeaseRepairRuns, labels)
 	l.Metrics.Observe(metricLeaseRepairDuration, labels, elapsed)
 	l.Metrics.Set(metricLeaseRepairReconciled, labels, float64(reconciled))

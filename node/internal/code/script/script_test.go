@@ -333,13 +333,13 @@ type recordingScriptObserver struct {
 	outputBytes  int
 }
 
-func (r *recordingScriptObserver) OnScriptExecute(language, runtime, outcome string, duration time.Duration) {
+func (r *recordingScriptObserver) OnScriptExecute(ctx context.Context, language, runtime, outcome string, duration time.Duration) {
 	r.executes++
 	r.lastOutcome = outcome
 	r.lastLanguage = language
 	r.lastRuntime = runtime
 }
 
-func (r *recordingScriptObserver) OnScriptOutputBytes(language, runtime string, size int) {
+func (r *recordingScriptObserver) OnScriptOutputBytes(ctx context.Context, language, runtime string, size int) {
 	r.outputBytes = size
 }

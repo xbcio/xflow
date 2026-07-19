@@ -22,7 +22,7 @@ func (s *Store) AcquireTaskLease(ctx context.Context, lease *engine.TaskLease) (
 		} else if !acquired {
 			result = "rejected"
 		}
-		s.observeLeaseAcquire(result, time.Since(started))
+		s.observeLeaseAcquire(ctx, result, time.Since(started))
 	}()
 
 	ttl := s.getExecTTL(lease.Task.ExecutionID)
@@ -132,7 +132,7 @@ const leaseIndexBatchLimit = 256
 func (s *Store) ListExpiredLeases(ctx context.Context, before time.Time) (expired []engine.ExpiredLease, err error) {
 	started := time.Now()
 	defer func() {
-		s.observeLeaseExpiryScan(len(expired), time.Since(started), err)
+		s.observeLeaseExpiryScan(ctx, len(expired), time.Since(started), err)
 	}()
 
 	const scanCount = int64(128)

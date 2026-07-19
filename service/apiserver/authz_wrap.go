@@ -53,6 +53,12 @@ func (h *authzHolder) authzWrap(op string, isMutation bool, fn http.HandlerFunc,
 			writeError(w, http.StatusForbidden, "forbidden")
 			return
 		}
+		// Tenant boundary (Task 7.3/7.4): inject the verified principal's tenant
+		// into the request context before audit and handler execution so every
+		// downstream read and the audit sink draw tenant from the same source:
+		// tenant.FromContext(ctx).
+		r = r.WithContext(tenant.WithTenant(context.WithValue(r.Context(), authzContextKey{}, principal), tenant.TenantID(principal.TenantID)))
+
 		// Mutation fail-closed: persist the admission audit BEFORE the
 		// operation. If the audit sink is unavailable, deny rather than
 		// execute an unaudited mutation.
@@ -78,7 +84,6 @@ func (h *authzHolder) authzWrap(op string, isMutation bool, fn http.HandlerFunc,
 				Timestamp: time.Now().UTC(),
 			})
 		}
-		r = r.WithContext(tenant.WithTenant(context.WithValue(r.Context(), authzContextKey{}, principal), tenant.TenantID(principal.TenantID)))
 		if isMutation {
 			// Wrap the response writer so we can observe the handler's status
 			// code and append a reconcile outcome once it settles. A 2xx flips

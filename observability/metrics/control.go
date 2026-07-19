@@ -1,6 +1,9 @@
 package metrics
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 // Control-plane metric names.
 const (
@@ -23,28 +26,28 @@ const (
 
 // Local mirror interfaces avoid an import cycle with service/control.
 type authObserver interface {
-	OnAuthDecision(op, result, authMode string)
+	OnAuthDecision(ctx context.Context, op, result, authMode string)
 }
 
 type sweepObserver interface {
-	OnSweepReclaim(execID, nodeName string, ageMs int64)
-	OnSweepRace(execID, nodeName string)
-	OnSweepError(execID, nodeName string, err error)
+	OnSweepReclaim(ctx context.Context, execID, nodeName string, ageMs int64)
+	OnSweepRace(ctx context.Context, execID, nodeName string)
+	OnSweepError(ctx context.Context, execID, nodeName string, err error)
 }
 
 type sweepTimingObserver interface {
-	OnSweepListExpired(candidates int, elapsed time.Duration, err error)
-	OnSweepReclaimResult(result string, elapsed time.Duration)
-	OnSweepRepair(reconciled int, elapsed time.Duration, err error)
+	OnSweepListExpired(ctx context.Context, candidates int, elapsed time.Duration, err error)
+	OnSweepReclaimResult(ctx context.Context, result string, elapsed time.Duration)
+	OnSweepRepair(ctx context.Context, reconciled int, elapsed time.Duration, err error)
 }
 
 type runnerClaimObserver interface {
-	OnRunnerClaimReclaimed(count int)
-	OnRunnerLeaseReplayed()
+	OnRunnerClaimReclaimed(ctx context.Context, count int)
+	OnRunnerLeaseReplayed(ctx context.Context)
 }
 
 type dispatcherObserver interface {
-	OnDispatchTransient(reason string)
+	OnDispatchTransient(ctx context.Context, reason string)
 }
 
 // AuthMetrics observes runner-protocol auth decisions.
@@ -56,8 +59,8 @@ func NewAuthMetrics(metrics *Metrics) AuthMetrics {
 	return AuthMetrics{Metrics: metrics}
 }
 
-func (a AuthMetrics) OnAuthDecision(_, result, authMode string) {
-	a.Metrics.Inc(metricRunnerAuthDecisions, map[string]string{"result": result, "auth_mode": authMode})
+func (a AuthMetrics) OnAuthDecision(ctx context.Context, _, result, authMode string) {
+	a.Metrics.Inc(metricRunnerAuthDecisions, withTenant(ctx, map[string]string{"result": result, "auth_mode": authMode}))
 }
 
 var _ authObserver = AuthMetrics{}
@@ -72,42 +75,42 @@ func NewSweepMetrics(metrics *Metrics) SweepMetrics {
 	return SweepMetrics{Metrics: metrics}
 }
 
-func (s SweepMetrics) OnSweepReclaim(_, _ string, ageMs int64) {
-	s.Metrics.Inc(metricLeaseSweepReclaimed, map[string]string{"result": "reclaimed"})
-	s.Metrics.Observe(metricLeaseAge, map[string]string{"result": "reclaimed"}, time.Duration(ageMs)*time.Millisecond)
+func (s SweepMetrics) OnSweepReclaim(ctx context.Context, _, _ string, ageMs int64) {
+	s.Metrics.Inc(metricLeaseSweepReclaimed, withTenant(ctx, map[string]string{"result": "reclaimed"}))
+	s.Metrics.Observe(metricLeaseAge, withTenant(ctx, map[string]string{"result": "reclaimed"}), time.Duration(ageMs)*time.Millisecond)
 }
 
-func (s SweepMetrics) OnSweepRace(_, _ string) {
-	s.Metrics.Inc(metricLeaseSweepReclaimed, map[string]string{"result": "race"})
+func (s SweepMetrics) OnSweepRace(ctx context.Context, _, _ string) {
+	s.Metrics.Inc(metricLeaseSweepReclaimed, withTenant(ctx, map[string]string{"result": "race"}))
 }
 
-func (s SweepMetrics) OnSweepError(_, _ string, _ error) {
-	s.Metrics.Inc(metricLeaseSweepErrors, map[string]string{"reason": "reclaim_error"})
+func (s SweepMetrics) OnSweepError(ctx context.Context, _, _ string, _ error) {
+	s.Metrics.Inc(metricLeaseSweepErrors, withTenant(ctx, map[string]string{"reason": "reclaim_error"}))
 }
 
-func (s SweepMetrics) OnSweepListExpired(candidates int, elapsed time.Duration, err error) {
+func (s SweepMetrics) OnSweepListExpired(ctx context.Context, candidates int, elapsed time.Duration, err error) {
 	result := "ok"
 	if err != nil {
 		result = "error"
 	}
-	labels := map[string]string{"result": result}
+	labels := withTenant(ctx, map[string]string{"result": result})
 	s.Metrics.Inc(metricLeaseSweepScan, labels)
 	s.Metrics.Observe(metricLeaseSweepScanDuration, labels, elapsed)
-	s.Metrics.Set(metricLeaseSweepCandidates, nil, float64(candidates))
+	s.Metrics.Set(metricLeaseSweepCandidates, withTenant(ctx, nil), float64(candidates))
 }
 
-func (s SweepMetrics) OnSweepReclaimResult(result string, elapsed time.Duration) {
-	labels := map[string]string{"result": result}
+func (s SweepMetrics) OnSweepReclaimResult(ctx context.Context, result string, elapsed time.Duration) {
+	labels := withTenant(ctx, map[string]string{"result": result})
 	s.Metrics.Inc(metricLeaseReclaim, labels)
 	s.Metrics.Observe(metricLeaseReclaimDuration, labels, elapsed)
 }
 
-func (s SweepMetrics) OnSweepRepair(reconciled int, elapsed time.Duration, err error) {
+func (s SweepMetrics) OnSweepRepair(ctx context.Context, reconciled int, elapsed time.Duration, err error) {
 	result := "ok"
 	if err != nil {
 		result = "error"
 	}
-	labels := map[string]string{"result": result}
+	labels := withTenant(ctx, map[string]string{"result": result})
 	s.Metrics.Inc(metricLeaseSweepRepair, labels)
 	s.Metrics.Observe(metricLeaseSweepRepairDuration, labels, elapsed)
 	s.Metrics.Set(metricLeaseSweepRepairReconciled, labels, float64(reconciled))
@@ -128,14 +131,14 @@ func NewRunnerClaimMetrics(metrics *Metrics) RunnerClaimMetrics {
 	return RunnerClaimMetrics{Metrics: metrics}
 }
 
-func (r RunnerClaimMetrics) OnRunnerClaimReclaimed(count int) {
+func (r RunnerClaimMetrics) OnRunnerClaimReclaimed(ctx context.Context, count int) {
 	for i := 0; i < count; i++ {
-		r.Metrics.Inc(metricRunnerClaimReclaimed, nil)
+		r.Metrics.Inc(metricRunnerClaimReclaimed, withTenant(ctx, nil))
 	}
 }
 
-func (r RunnerClaimMetrics) OnRunnerLeaseReplayed() {
-	r.Metrics.Inc(metricRunnerLeaseReplayed, nil)
+func (r RunnerClaimMetrics) OnRunnerLeaseReplayed(ctx context.Context) {
+	r.Metrics.Inc(metricRunnerLeaseReplayed, withTenant(ctx, nil))
 }
 
 var _ runnerClaimObserver = RunnerClaimMetrics{}
@@ -149,8 +152,8 @@ func NewDispatcherMetrics(metrics *Metrics) DispatcherMetrics {
 	return DispatcherMetrics{Metrics: metrics}
 }
 
-func (d DispatcherMetrics) OnDispatchTransient(reason string) {
-	d.Metrics.Inc(metricDispatchTransient, map[string]string{"reason": reason})
+func (d DispatcherMetrics) OnDispatchTransient(ctx context.Context, reason string) {
+	d.Metrics.Inc(metricDispatchTransient, withTenant(ctx, map[string]string{"reason": reason}))
 }
 
 var _ dispatcherObserver = DispatcherMetrics{}

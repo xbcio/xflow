@@ -9,6 +9,7 @@ import (
 	"github.com/xbcio/xflow/backend/local"
 	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/service/control"
+	"github.com/xbcio/xflow/store/memstore"
 )
 
 // fakeControlPlaneForAuthz builds a minimal memory-backed control plane.
@@ -340,6 +341,34 @@ func TestAuthzWrapInjectsPrincipalTenantIntoContext(t *testing.T) {
 
 	if observed != "tenantA" {
 		t.Fatalf("context tenant = %q, want tenantA (principal-injected)", observed)
+	}
+}
+
+func TestAuthzWrapAuditCarriesPrincipalTenant(t *testing.T) {
+	// Tenant boundary (Task 7.4): the authz wrapper injects tenant into context
+	// before audit append, and the SQL audit sink reads tenant from context. The
+	// persisted audit record must carry the principal's tenant.
+	auth := staticPrincipalAuth{principal: Principal{Subject: "alice", TenantID: "tenantA", Scopes: []string{"workflow"}}}
+	db := memstore.New()
+	audit := NewSQLAuditSink(db)
+	m := authzModule(t, auth, TenantAwareAuthorizer{}, audit)
+
+	wrapped := m.wrapForTest(OpWorkflowCreate, true, func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	}, nil)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/workflows", nil)
+	wrapped.ServeHTTP(rec, req)
+
+	records := db.AuditRecords()
+	if len(records) == 0 {
+		t.Fatal("no audit records persisted")
+	}
+	for _, r := range records {
+		if r.TenantID != "tenantA" {
+			t.Fatalf("audit TenantID = %q, want tenantA; record=%+v", r.TenantID, r)
+		}
 	}
 }
 

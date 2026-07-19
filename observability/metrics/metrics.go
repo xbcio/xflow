@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"sort"
@@ -8,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -246,10 +248,33 @@ func labelNames(labels map[string]string) []string {
 	return names
 }
 
+// withTenant returns labels with a "tenant" dimension drawn from ctx. It
+// preserves the existing map when possible. Tenant is always emitted as a
+// label for tenant-scoped metrics; callers that intentionally omit tenant
+// (global metrics such as leader election) should not use this helper.
+//
+// Security/ops: tenant IDs are expected to be low-cardinality (tens to low
+// hundreds). Do not use high-cardinality values such as execution IDs or node
+// names as metric labels.
+func withTenant(ctx context.Context, labels map[string]string) map[string]string {
+	if labels == nil {
+		return map[string]string{"tenant": string(tenant.FromContext(ctx))}
+	}
+	labels["tenant"] = string(tenant.FromContext(ctx))
+	return labels
+}
+
 // metricHelp maps metric names to human-readable help text used as the
 // Prometheus metric Help string. New metrics should be registered here; an
 // unknown name falls back to a generic description so a missing entry never
 // panics at registration time.
+//
+// Tenant dimension (Task 7.4): tenant-scoped metrics carry a "tenant" label
+// drawn from context. Tenant IDs are expected to be low-cardinality (tens to
+// low hundreds). Do not add high-cardinality dimensions such as execution IDs,
+// node names, or lease tokens to metric labels. For very large tenant counts,
+// disable or aggregate the tenant dimension to avoid Prometheus cardinality
+// explosion.
 var metricHelp = map[string]string{
 	"xflow_audit_write_total":                      "Audit log write attempts, partitioned by operation and result.",
 	"xflow_commit_outcomes_total":                   "Graph commit outcomes, partitioned by outcome (committed/aborted/failed).",

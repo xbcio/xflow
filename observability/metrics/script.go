@@ -1,6 +1,9 @@
 package metrics
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 // Script metric names.
 const (
@@ -11,8 +14,8 @@ const (
 
 // Local mirror interface avoids importing the internal script package.
 type scriptObserver interface {
-	OnScriptExecute(language, runtime, outcome string, duration time.Duration)
-	OnScriptOutputBytes(language, runtime string, size int)
+	OnScriptExecute(ctx context.Context, language, runtime, outcome string, duration time.Duration)
+	OnScriptOutputBytes(ctx context.Context, language, runtime string, size int)
 }
 
 // ScriptMetrics observes xflow.script executions.
@@ -26,22 +29,22 @@ func NewScriptMetrics(metrics *Metrics) ScriptMetrics {
 }
 
 // OnScriptExecute records a script execution counter and duration histogram.
-func (s ScriptMetrics) OnScriptExecute(language, runtime, outcome string, duration time.Duration) {
-	labels := map[string]string{
+func (s ScriptMetrics) OnScriptExecute(ctx context.Context, language, runtime, outcome string, duration time.Duration) {
+	labels := withTenant(ctx, map[string]string{
 		"language": language,
 		"runtime":  runtime,
 		"outcome":  outcome,
-	}
+	})
 	s.Metrics.Inc(metricScriptExecute, labels)
 	s.Metrics.Observe(metricScriptExecuteDuration, labels, duration)
 }
 
 // OnScriptOutputBytes records the JSON-encoded result size histogram.
-func (s ScriptMetrics) OnScriptOutputBytes(language, runtime string, size int) {
-	s.Metrics.ObserveBytes(metricScriptOutputBytes, map[string]string{
+func (s ScriptMetrics) OnScriptOutputBytes(ctx context.Context, language, runtime string, size int) {
+	s.Metrics.ObserveBytes(metricScriptOutputBytes, withTenant(ctx, map[string]string{
 		"language": language,
 		"runtime":  runtime,
-	}, size)
+	}), size)
 }
 
 var _ scriptObserver = ScriptMetrics{}

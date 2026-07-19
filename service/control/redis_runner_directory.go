@@ -349,7 +349,7 @@ func (d *RedisRunnerDirectory) replayLease(ctx context.Context, runnerID, sessio
 		if err != nil {
 			return Claim{}, false, fmt.Errorf("decode persisted lease %q: %w", assignmentID, err)
 		}
-		d.observeLeaseReplay()
+		d.observeLeaseReplay(ctx)
 		return Claim{Assignment: assignment, Lease: lease}, true, nil
 	}
 	return Claim{}, false, nil
@@ -634,7 +634,7 @@ func (d *RedisRunnerDirectory) ReclaimExpiredClaims(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("recover expired redis claims: %w", err)
 	}
-	d.observeClaimReclaimed(int(reclaimed))
+	d.observeClaimReclaimed(ctx, int(reclaimed))
 	return nil
 }
 

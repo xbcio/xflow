@@ -19,12 +19,12 @@ import (
 type AuditObserver interface {
 	// OnAuditOK fires when an audit write succeeded for the named operation
 	// (e.g. "upsert_node", "save_signal", "revoke_signal").
-	OnAuditOK(op string)
+	OnAuditOK(ctx context.Context, op string)
 	// OnAuditFailed fires when the audit-store write failed. The Redis side
 	// of the dual-write already succeeded; the workflow is correct, but the
 	// audit trail diverged for that record. err is the underlying database
 	// error for logging.
-	OnAuditFailed(op string, err error)
+	OnAuditFailed(ctx context.Context, op string, err error)
 }
 
 // AuditStats is an atomic counter view of audit outcomes — useful for tests
@@ -48,8 +48,8 @@ func (c *auditCounters) inc(m *sync.Map, op string) {
 	v.(*atomic.Uint64).Add(1)
 }
 
-func (c *auditCounters) OnAuditOK(op string)              { c.inc(&c.ok, op) }
-func (c *auditCounters) OnAuditFailed(op string, _ error) { c.inc(&c.failed, op) }
+func (c *auditCounters) OnAuditOK(ctx context.Context, op string)              { c.inc(&c.ok, op) }
+func (c *auditCounters) OnAuditFailed(ctx context.Context, op string, _ error) { c.inc(&c.failed, op) }
 
 func (c *auditCounters) snapshot() AuditStats {
 	out := AuditStats{OK: map[string]uint64{}, Failed: map[string]uint64{}}
@@ -85,18 +85,18 @@ func (s *Store) auditWrite(ctx context.Context, op string, fn func(context.Conte
 		return
 	}
 	if err := fn(ctx); err != nil {
-		s.audit.OnAuditFailed(op, err)
+		s.audit.OnAuditFailed(ctx, op, err)
 		if s.auditCounters != nil {
-			s.auditCounters.OnAuditFailed(op, err)
+			s.auditCounters.OnAuditFailed(ctx, op, err)
 		}
 		if s.logger != nil {
 			s.logger.Error("audit_write_failed", "op", op, "err", err)
 		}
 		return
 	}
-	s.audit.OnAuditOK(op)
+	s.audit.OnAuditOK(ctx, op)
 	if s.auditCounters != nil {
-		s.auditCounters.OnAuditOK(op)
+		s.auditCounters.OnAuditOK(ctx, op)
 	}
 }
 
@@ -105,5 +105,5 @@ func (s *Store) auditWrite(ctx context.Context, op string, fn func(context.Conte
 // observer is wired in.
 type noopAuditObserver struct{}
 
-func (noopAuditObserver) OnAuditOK(string)            {}
-func (noopAuditObserver) OnAuditFailed(string, error) {}
+func (noopAuditObserver) OnAuditOK(context.Context, string)            {}
+func (noopAuditObserver) OnAuditFailed(context.Context, string, error) {}

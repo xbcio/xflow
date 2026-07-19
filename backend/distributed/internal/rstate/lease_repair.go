@@ -60,7 +60,7 @@ return 1
 func (s *Store) RepairLeaseIndex(ctx context.Context, limit int) (reconciled int, err error) {
 	started := time.Now()
 	defer func() {
-		s.observeLeaseRepair(reconciled, time.Since(started), err)
+		s.observeLeaseRepair(ctx, reconciled, time.Since(started), err)
 	}()
 
 	if limit <= 0 {

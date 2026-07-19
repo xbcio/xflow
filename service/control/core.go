@@ -54,7 +54,7 @@ type leaseRecoveryEngine interface {
 
 // AuthObserver receives auth allow/deny/dry-run decisions.
 type AuthObserver interface {
-	OnAuthDecision(op, result, authMode string)
+	OnAuthDecision(ctx context.Context, op, result, authMode string)
 }
 
 func (c *Core) authn() Authenticator {
@@ -67,20 +67,20 @@ func (c *Core) authn() Authenticator {
 // authDeny logs an auth outcome (with fingerprinted token) and returns the
 // transport-agnostic unauthenticated sentinel. Dry-run denials are logged but
 // return nil so the request proceeds.
-func (c *Core) authDeny(runnerID, token, op string, info TransportInfo, err error) error {
+func (c *Core) authDeny(ctx context.Context, runnerID, token, op string, info TransportInfo, err error) error {
 	if err == nil {
-		c.observeAuth(op, "allow")
+		c.observeAuth(ctx, op, "allow")
 		return nil
 	}
 	if IsDryRunDenial(err) {
-		c.observeAuth(op, "dry_run_allow")
+		c.observeAuth(ctx, op, "dry_run_allow")
 		if c.logger != nil {
 			c.logger.Error("auth_dry_run_violation",
 				"op", op, "runner", runnerID, "token", TokenFingerprint(token), "cn", info.TLSPeerCN, "err", err)
 		}
 		return nil
 	}
-	c.observeAuth(op, "deny")
+	c.observeAuth(ctx, op, "deny")
 	if c.logger != nil {
 		c.logger.Error("auth_denied",
 			"op", op, "runner", runnerID, "token", TokenFingerprint(token), "cn", info.TLSPeerCN, "err", err)
@@ -88,11 +88,11 @@ func (c *Core) authDeny(runnerID, token, op string, info TransportInfo, err erro
 	return ErrUnauthenticated
 }
 
-func (c *Core) observeAuth(op, result string) {
+func (c *Core) observeAuth(ctx context.Context, op, result string) {
 	if c.authObserver == nil {
 		return
 	}
-	c.authObserver.OnAuthDecision(op, result, authMode(c.authn()))
+	c.authObserver.OnAuthDecision(ctx, op, result, authMode(c.authn()))
 }
 
 func authMode(auth Authenticator) string {
@@ -114,7 +114,7 @@ func (c *Core) register(ctx context.Context, req protocol.RegisterRunnerRequest,
 		return protocol.RegisterRunnerResponse{}, ErrConcurrencyRequired
 	}
 	policy, authErr := c.authn().AuthenticateRegister(req.RunnerID, req.AuthToken, info)
-	if err := c.authDeny(req.RunnerID, req.AuthToken, "register", info, authErr); err != nil {
+	if err := c.authDeny(ctx, req.RunnerID, req.AuthToken, "register", info, authErr); err != nil {
 		return protocol.RegisterRunnerResponse{}, err
 	}
 	session, err := c.runners.Register(ctx, RegisterRunnerRequest{
@@ -135,7 +135,7 @@ func (c *Core) heartbeat(ctx context.Context, req protocol.HeartbeatRequest, inf
 		return protocol.HeartbeatResponse{}, ErrRunnerSessionRequired
 	}
 	_, authErr := c.authn().AuthenticateOngoing(req.RunnerID, req.AuthToken, info)
-	if err := c.authDeny(req.RunnerID, req.AuthToken, "heartbeat", info, authErr); err != nil {
+	if err := c.authDeny(ctx, req.RunnerID, req.AuthToken, "heartbeat", info, authErr); err != nil {
 		return protocol.HeartbeatResponse{}, err
 	}
 	at := time.Unix(req.Timestamp, 0)
@@ -159,7 +159,7 @@ func (c *Core) pollTask(ctx context.Context, req protocol.PollTaskRequest, info 
 		return protocol.PollTaskResponse{}, ErrRunnerSessionRequired
 	}
 	_, authErr := c.authn().AuthenticateOngoing(req.RunnerID, req.AuthToken, info)
-	if err := c.authDeny(req.RunnerID, req.AuthToken, "poll", info, authErr); err != nil {
+	if err := c.authDeny(ctx, req.RunnerID, req.AuthToken, "poll", info, authErr); err != nil {
 		return protocol.PollTaskResponse{}, err
 	}
 	for {
@@ -259,7 +259,7 @@ func (c *Core) reportResult(ctx context.Context, req protocol.ReportResultReques
 		return protocol.ReportResultResponse{}, ErrLeaseRequired
 	}
 	_, authErr := c.authn().AuthenticateOngoing(req.RunnerID, req.AuthToken, info)
-	if err := c.authDeny(req.RunnerID, req.AuthToken, "report_result", info, authErr); err != nil {
+	if err := c.authDeny(ctx, req.RunnerID, req.AuthToken, "report_result", info, authErr); err != nil {
 		return protocol.ReportResultResponse{}, err
 	}
 	if c.engine == nil {

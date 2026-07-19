@@ -1,18 +1,22 @@
 package metrics
 
 import (
+	"context"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/xbcio/xflow/backend/tenant"
 )
 
 func TestScriptMetricsEmitsExecuteAndBytes(t *testing.T) {
 	metrics := New()
 	script := NewScriptMetrics(metrics)
+	ctx := context.Background()
 
-	script.OnScriptExecute("js", "goja", "main", 5*time.Millisecond)
-	script.OnScriptOutputBytes("js", "goja", 2048)
+	script.OnScriptExecute(ctx, "js", "goja", "main", 5*time.Millisecond)
+	script.OnScriptOutputBytes(ctx, "js", "goja", 2048)
 
 	req := httptest.NewRequest("GET", "/metrics", nil)
 	rec := httptest.NewRecorder()
@@ -20,9 +24,9 @@ func TestScriptMetricsEmitsExecuteAndBytes(t *testing.T) {
 	body := rec.Body.String()
 
 	want := []string{
-		`xflow_script_execute_total{language="js",outcome="main",runtime="goja"} 1`,
-		`xflow_script_execute_duration_seconds_count{language="js",outcome="main",runtime="goja"} 1`,
-		`xflow_script_output_bytes_bucket{language="js",runtime="goja",le="4096"} 1`,
+		`xflow_script_execute_total{language="js",outcome="main",runtime="goja",tenant="default"} 1`,
+		`xflow_script_execute_duration_seconds_count{language="js",outcome="main",runtime="goja",tenant="default"} 1`,
+		`xflow_script_output_bytes_bucket{language="js",runtime="goja",tenant="default",le="4096"} 1`,
 	}
 	for _, w := range want {
 		if !strings.Contains(body, w) {
@@ -34,16 +38,17 @@ func TestScriptMetricsEmitsExecuteAndBytes(t *testing.T) {
 func TestScriptMetricsEmitsErrorAndConfigOutcomes(t *testing.T) {
 	metrics := New()
 	script := NewScriptMetrics(metrics)
+	ctx := tenant.WithTenant(context.Background(), tenant.TenantID("tenant-b"))
 
-	script.OnScriptExecute("js", "goja", "error", time.Millisecond)
-	script.OnScriptExecute("js", "goja", "config", time.Millisecond)
+	script.OnScriptExecute(ctx, "js", "goja", "error", time.Millisecond)
+	script.OnScriptExecute(ctx, "js", "goja", "config", time.Millisecond)
 
 	body := gatherMetricsBody(t, metrics)
 	for _, want := range []string{
-		`xflow_script_execute_total{language="js",outcome="error",runtime="goja"} 1`,
-		`xflow_script_execute_total{language="js",outcome="config",runtime="goja"} 1`,
-		`xflow_script_execute_duration_seconds_count{language="js",outcome="error",runtime="goja"} 1`,
-		`xflow_script_execute_duration_seconds_count{language="js",outcome="config",runtime="goja"} 1`,
+		`xflow_script_execute_total{language="js",outcome="error",runtime="goja",tenant="tenant-b"} 1`,
+		`xflow_script_execute_total{language="js",outcome="config",runtime="goja",tenant="tenant-b"} 1`,
+		`xflow_script_execute_duration_seconds_count{language="js",outcome="error",runtime="goja",tenant="tenant-b"} 1`,
+		`xflow_script_execute_duration_seconds_count{language="js",outcome="config",runtime="goja",tenant="tenant-b"} 1`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("metrics body missing %q:\n%s", want, body)
@@ -55,7 +60,7 @@ func TestScriptMetricsNegativeBytesIgnored(t *testing.T) {
 	metrics := New()
 	script := NewScriptMetrics(metrics)
 
-	script.OnScriptOutputBytes("js", "goja", -1)
+	script.OnScriptOutputBytes(context.Background(), "js", "goja", -1)
 
 	body := gatherMetricsBody(t, metrics)
 	if strings.Contains(body, "xflow_script_output_bytes") {

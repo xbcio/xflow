@@ -254,7 +254,7 @@ type recordingAuthObserver struct {
 	events []string
 }
 
-func (o *recordingAuthObserver) OnAuthDecision(op, result, authMode string) {
+func (o *recordingAuthObserver) OnAuthDecision(ctx context.Context, op, result, authMode string) {
 	o.events = append(o.events, op+":"+result+":"+authMode)
 }
 

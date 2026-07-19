@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/store/memstore"
 )
@@ -75,5 +76,54 @@ func TestSQLAuditSinkStampsTimestampWhenZero(t *testing.T) {
 	r := db.AuditRecords()[0]
 	if r.Timestamp.IsZero() {
 		t.Fatal("audit record timestamp not stamped when caller left it zero")
+	}
+}
+
+func TestSQLAuditSinkPrefersTenantFromContext(t *testing.T) {
+	db := memstore.New()
+	sink := NewSQLAuditSink(db)
+
+	ctx := tenant.WithTenant(context.Background(), tenant.TenantID("tenant-ctx"))
+	ev := AuditEvent{
+		Principal: "alice",
+		TenantID:  "tenant-event",
+		Operation: OpWorkflowCreate,
+		Decision:  DecisionAllow,
+		Outcome:   "admitted",
+	}
+	if err := sink.Append(ctx, ev); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	records := db.AuditRecords()
+	if len(records) != 1 {
+		t.Fatalf("audit records = %d, want 1", len(records))
+	}
+	if got := records[0].TenantID; got != "tenant-ctx" {
+		t.Fatalf("audit TenantID = %q, want tenant-ctx (from context)", got)
+	}
+}
+
+func TestSQLAuditSinkFallsBackToEventTenant(t *testing.T) {
+	db := memstore.New()
+	sink := NewSQLAuditSink(db)
+
+	ev := AuditEvent{
+		Principal: "alice",
+		TenantID:  "tenant-event",
+		Operation: OpWorkflowCreate,
+		Decision:  DecisionAllow,
+		Outcome:   "admitted",
+	}
+	if err := sink.Append(context.Background(), ev); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	records := db.AuditRecords()
+	if len(records) != 1 {
+		t.Fatalf("audit records = %d, want 1", len(records))
+	}
+	if got := records[0].TenantID; got != "tenant-event" {
+		t.Fatalf("audit TenantID = %q, want tenant-event (fallback)", got)
 	}
 }
