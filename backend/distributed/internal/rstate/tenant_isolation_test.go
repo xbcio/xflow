@@ -228,6 +228,40 @@ func TestTenantRegistryRoundTrip(t *testing.T) {
 	}
 }
 
+// TestRegisterTenantRejectsUnsafeNames verifies that registerTenant refuses
+// tenant names that would break the Redis key schema, and does not write them
+// to the tenant registry.
+func TestRegisterTenantRejectsUnsafeNames(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mr.Close()
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer func() { _ = rdb.Close() }()
+	state := New(rdb, nil, time.Minute)
+	ctx := context.Background()
+
+	for _, bad := range []tenant.TenantID{
+		"acme:corp",
+		"acme{corp}",
+		"acme}corp",
+		"malicious:exec:{globex}",
+	} {
+		if err := state.registerTenant(ctx, bad); err == nil {
+			t.Fatalf("registerTenant(%q) succeeded, want error", bad)
+		}
+	}
+
+	members, err := rdb.SMembers(ctx, tenantSetKey).Result()
+	if err != nil {
+		t.Fatalf("SMembers: %v", err)
+	}
+	if len(members) != 0 {
+		t.Fatalf("invalid tenants leaked into registry: %v", members)
+	}
+}
+
 // TestRegisterTenantSkippedInTransientMode verifies the fire-and-forget
 // invariant: transient CreateExecution does not SADD to the tenant registry,
 // keeping the per-mutation no-bookkeeping contract while the default tenant

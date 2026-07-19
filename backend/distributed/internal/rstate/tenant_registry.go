@@ -33,6 +33,9 @@ func (s *Store) registerTenant(ctx context.Context, t tenant.TenantID) error {
 	if t == "" {
 		t = tenant.DefaultTenant
 	}
+	if err := tenant.Validate(t); err != nil {
+		return fmt.Errorf("register tenant %q: %w", t, err)
+	}
 	if err := s.rdb.SAdd(ctx, tenantSetKey, string(t)).Err(); err != nil {
 		return fmt.Errorf("register tenant %q: %w", t, err)
 	}
