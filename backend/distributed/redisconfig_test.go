@@ -1,9 +1,11 @@
 package distributed
 
 import (
+	"context"
 	"strings"
 	"testing"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -24,6 +26,11 @@ func TestRedisConfigValidate(t *testing.T) {
 		{
 			name:    "single with MasterName rejected",
 			cfg:     RedisConfig{Mode: RedisModeSingle, MasterName: "mymaster"},
+			wantErr: "single mode does not use MasterName",
+		},
+		{
+			name:    "single with addr and MasterName rejected",
+			cfg:     RedisConfig{Mode: RedisModeSingle, Addrs: []string{"127.0.0.1:6379"}, MasterName: "mymaster"},
 			wantErr: "single mode does not use MasterName",
 		},
 		{
@@ -164,5 +171,32 @@ func TestWithRedisConfig(t *testing.T) {
 	}
 	if len(c.redisConfig.Addrs) != 1 || c.redisConfig.Addrs[0] != "127.0.0.1:6379" {
 		t.Fatalf("WithRedisConfig Addrs = %v, want [127.0.0.1:6379]", c.redisConfig.Addrs)
+	}
+}
+
+func TestNewWithRedisConfigSingle(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis.Run() error = %v", err)
+	}
+	defer mr.Close()
+
+	b, err := New("", nil,
+		WithConsumer(false),
+		WithRedisConfig(RedisConfig{
+			Mode:  RedisModeSingle,
+			Addrs: []string{mr.Addr()},
+		}),
+	)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer b.nonConsumerStop()()
+
+	if b.RedisClient() == nil {
+		t.Fatal("Backend.RedisClient() = nil, want non-nil")
+	}
+	if err := b.RedisClient().Ping(context.Background()).Err(); err != nil {
+		t.Fatalf("RedisClient().Ping() error = %v", err)
 	}
 }

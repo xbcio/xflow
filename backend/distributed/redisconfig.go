@@ -35,7 +35,7 @@ type RedisConfig struct {
 func (c RedisConfig) validate() error {
 	switch c.Mode {
 	case RedisModeSingle:
-		if len(c.Addrs) == 0 && c.MasterName != "" {
+		if c.MasterName != "" {
 			return errors.New("redis single mode does not use MasterName")
 		}
 	case RedisModeSentinel:
