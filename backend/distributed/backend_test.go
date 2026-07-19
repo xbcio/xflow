@@ -7,10 +7,22 @@ import (
 	"testing"
 	"time"
 
+	"github.com/redis/go-redis/v9"
+
 	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/backend/distributed/internal/queue"
 	"github.com/xbcio/xflow/engine"
 )
+
+// assertRDBClosed fails the test if the backend's Redis client is not closed.
+// It is used by the fail-closed rollback tests to prove no Redis resources leak
+// when StartBinding returns an error.
+func assertRDBClosed(t *testing.T, b *Backend) {
+	t.Helper()
+	if err := b.rdb.Ping(context.Background()).Err(); !errors.Is(err, redis.ErrClosed) {
+		t.Fatalf("redis client was not closed after failed bind: ping error = %v, want redis.ErrClosed", err)
+	}
+}
 
 // TestStartBindingFailsClosedOnConsumerStartError verifies the SDK fail-closed
 // contract: when transport.StartConsumer fails, StartBinding returns the error
@@ -30,6 +42,7 @@ func TestStartBindingFailsClosedOnConsumerStartError(t *testing.T) {
 	if !stub.closed.Load() {
 		t.Fatal("transport was not closed after consumer start failure")
 	}
+	assertRDBClosed(t, b)
 }
 
 // TestStartBindingRollsBackOnOutboxStartFailure verifies reverse-order rollback
@@ -53,6 +66,7 @@ func TestStartBindingRollsBackOnOutboxStartFailure(t *testing.T) {
 	if !stub.closed.Load() {
 		t.Fatal("transport was not closed during rollback")
 	}
+	assertRDBClosed(t, b)
 }
 
 // TestStartBindingRollsBackOnMonitorStartFailure verifies that when the timeout
@@ -96,6 +110,7 @@ func TestStartBindingRollsBackOnMonitorStartFailure(t *testing.T) {
 	if got := goroutineCount(); got > before {
 		t.Fatalf("goroutine count after rollback = %d, before = %d (leak)", got, before)
 	}
+	assertRDBClosed(t, b)
 }
 
 // TestStartBindingStopIsIdempotentAndConcurrent verifies that the stop function
@@ -224,9 +239,9 @@ func TestStartBindingImmediateStop(t *testing.T) {
 }
 
 // TestStartBindingFailedStartSafeToStop verifies that after StartBinding returns
-// an error, there is no goroutine leak and the transport is closed. There is no
-// stop function to call (it is nil on error), so the assertion is on resource
-// cleanup performed by the rollback path itself.
+// an error, there is no goroutine leak, the transport is closed, and the Redis
+// client is closed. There is no stop function to call (it is nil on error), so
+// the assertion is on resource cleanup performed by the rollback path itself.
 func TestStartBindingFailedStartSafeToStop(t *testing.T) {
 	stub := &stubTransport{}
 	b := newTestBackend(t, stub)
@@ -251,9 +266,5 @@ func TestStartBindingFailedStartSafeToStop(t *testing.T) {
 	if got := goroutineCount(); got > before {
 		t.Fatalf("goroutine count after failed start = %d, before = %d (leak)", got, before)
 	}
-
-	// Note: the rollback path closes the transport but does not close b.rdb;
-	// the redis.Client is cleaned up by newRedisStateTestClient's t.Cleanup.
-	// This is a known gap in the fail-closed rollback path that the current
-	// production code leaves to the Backend owner.
+	assertRDBClosed(t, b)
 }

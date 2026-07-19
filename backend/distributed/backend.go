@@ -421,16 +421,17 @@ func (b *Backend) bindHandler(eng *engine.Engine, handler func(context.Context, 
 		queue.TaskHandler(handler),
 	)
 	if err != nil {
-		// Consumer never started; release the delivery transport so a failed
-		// bind leaves no broker resources open. rdb remains for the backend
-		// owner / state store; it is closed on successful teardown (stop).
+		// Consumer never started; release the delivery transport and Redis
+		// client so a failed bind leaves no resources behind.
 		_ = b.transport.Close()
+		_ = b.rdb.Close()
 		return nil, fmt.Errorf("distributed: start consumer: %w", err)
 	}
 	if b.testHooks.afterConsumerStart != nil {
 		if err := b.testHooks.afterConsumerStart(); err != nil {
 			stopConsumer()
 			_ = b.transport.Close()
+			_ = b.rdb.Close()
 			return nil, fmt.Errorf("distributed: start outbox dispatcher: %w", err)
 		}
 	}
@@ -472,6 +473,7 @@ func (b *Backend) bindHandler(eng *engine.Engine, handler func(context.Context, 
 					stopConsumer()
 				}
 				_ = b.transport.Close()
+				_ = b.rdb.Close()
 				return nil, fmt.Errorf("distributed: start timeout monitor: %w", err)
 			}
 		}
