@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -290,7 +291,18 @@ return {attempts, 0}
 // ARGV: 1=entryID 2=now_ms 3=ttl_seconds 4=request_id 5=operator 6=reason 7=exec_id 8=tenant
 // Returns {outcome, audit_id, node, activation} where outcome:
 //   1=replayed 2=rejected_terminal 3=rejected_inactive 4=rejected_node_terminal
-//   5=rejected_activation_mismatch 6=already_replayed 0=not_found
+//   5=rejected_activation_mismatch 6=already_replayed 7=rejected_metadata_missing
+//   0=not_found
+//
+// Fail-closed contract: when the per-entry dead-meta hash is absent or lacks
+// node/activation (a legacy entry), the node/activation guards cannot be
+// evaluated safely, so the script returns outcome 7 (rejected_metadata_missing)
+// WITHOUT moving the entry. An immutable receipt is written for every
+// determinable rejection (terminal/inactive/node_terminal/activation_mismatch/
+// metadata_missing) so a retry with the same RequestID recovers the same
+// outcome and AuditID instead of degrading to not_found. The first segment
+// reads the stored outcome (not a hardcoded already_replayed) so rejected
+// receipts recover as the same rejection.
 //
 // Node status/meta keys are derived inside the script from the dead-meta node
 // name; all keys share the execution hash tag so they are co-located on a
@@ -300,47 +312,81 @@ return {attempts, 0}
 // server-issued (from context), never trusted from a client request body.
 var replayDeadLetterLua = redis.NewScript(`
 local entryID = ARGV[1]
+local nowMs = ARGV[2]
 local requestID = ARGV[4]
 local execID = ARGV[7]
 local tenant = ARGV[8]
 local keyPrefix = 'xflow:t' .. tenant .. ':exec:{' .. execID .. '}:'
 local receiptKey = keyPrefix .. 'replay:receipt:' .. requestID
+local operator = ARGV[5]
+local reason = ARGV[6]
+local ttl = tonumber(ARGV[3])
 
--- decode a receipt hash into node/activation/audit_id
+-- outcomeCode maps a stored receipt outcome string to the int the caller
+-- expects. A 'replayed' receipt recovered under the same RequestID surfaces as
+-- already_replayed (6) — the move happened, the caller is just re-confirming.
+-- Rejection outcomes recover as themselves so the same RequestID always yields
+-- the same stable rejection.
+local outcomeCode = function(s)
+    if s == 'replayed' then return 6
+    elseif s == 'rejected_terminal' then return 2
+    elseif s == 'rejected_inactive' then return 3
+    elseif s == 'rejected_node_terminal' then return 4
+    elseif s == 'rejected_activation_mismatch' then return 5
+    elseif s == 'rejected_metadata_missing' then return 7
+    end
+    return 6
+end
+
+-- decode a receipt hash into outcome/node/activation/audit_id
 local readReceipt = function(key)
     if redis.call('EXISTS', key) == 0 then return nil end
     return {
+        outcome = redis.call('HGET', key, 'outcome') or '',
         node = redis.call('HGET', key, 'node') or '',
         activation = redis.call('HGET', key, 'activation') or '',
         audit_id = redis.call('HGET', key, 'audit_id') or '',
     }
 end
 
--- 1. Idempotency: same RequestID already replayed -> return original receipt.
+-- writeReceipt persists an immutable receipt. It carries only operational
+-- metadata (no task payload/body) so the audit trail never logs sensitive
+-- request content. The audit_id is requestID:nowMs so it is stable for the
+-- lifetime of one RequestID and recoverable on retry.
+local writeReceipt = function(key, outcomeStr, node, activation, auditID)
+    redis.call('HSET', key,
+        'node', node,
+        'activation', activation,
+        'audit_id', auditID,
+        'outcome', outcomeStr,
+        'operator', operator,
+        'reason', reason,
+        'entry_id', entryID,
+        'ts_ms', nowMs)
+    redis.call('EXPIRE', key, ttl)
+end
+
+-- 1. Idempotency: same RequestID already produced a receipt -> recover the
+--    stored outcome + original audit_id (covers both replayed and rejections).
 local r = readReceipt(receiptKey)
 if r then
-    return {6, r.audit_id, r.node, r.activation}
+    return {outcomeCode(r.outcome), r.audit_id, r.node, r.activation}
 end
--- Different RequestID for an already-replayed entry?
+-- Different RequestID for an already-replayed entry? The entry index is only
+-- written on a successful dead->ready move, so a hit here means the entry was
+-- moved under another RequestID: collapse to that receipt.
 local priorReqID = redis.call('HGET', KEYS[8], entryID)
 if priorReqID and priorReqID ~= '' then
     local priorKey = keyPrefix .. 'replay:receipt:' .. priorReqID
     local pr = readReceipt(priorKey)
     if pr then
-        return {6, pr.audit_id, pr.node, pr.activation}
+        return {outcomeCode(pr.outcome), pr.audit_id, pr.node, pr.activation}
     end
 end
 
--- 2. Execution status guard.
-local status = redis.call('GET', KEYS[6])
-if not status then
-    return {3, '', '', ''}
-end
-if status == 'success' or status == 'failed' or status == 'canceled' or status == 'timeout' then
-    return {2, '', '', ''}
-end
-
--- 3. Read dead body + immutable meta (per-entry hash fields).
+-- 2. Read dead body + immutable meta (per-entry hash fields). Body missing
+--    means the entry is gone (replayed then expired, or never dead-lettered):
+--    a stable not_found with no receipt.
 local body = redis.call('HGET', KEYS[2], entryID)
 if not body then
     return {0, '', '', ''}
@@ -348,31 +394,52 @@ end
 local nodeName = redis.call('HGET', KEYS[7], 'node') or ''
 local entryActivation = redis.call('HGET', KEYS[7], 'activation') or ''
 
--- 4. Node guard: reject if the node is terminal, or if the entry's
---    activation no longer matches the node's current activation (stale
---    cyclic re-entry). Skipped only when meta is absent (legacy entry).
-if nodeName ~= '' then
-    local nodeStatusKey = keyPrefix .. 'node:' .. nodeName .. ':status'
-    local nodeMetaKey   = keyPrefix .. 'node:' .. nodeName .. ':meta'
-    local nstatus = redis.call('GET', nodeStatusKey)
-    if nstatus then
-        if nstatus == 'success' or nstatus == 'failed' or nstatus == 'skipped'
-           or nstatus == 'canceled' or nstatus == 'continued' then
-            return {4, '', nodeName, entryActivation}
-        end
-    end
-    if entryActivation ~= '' then
-        local currentActivation = redis.call('HGET', nodeMetaKey, 'activation_id') or ''
-        if currentActivation ~= '' and currentActivation ~= entryActivation then
-            return {5, '', nodeName, entryActivation}
-        end
-    end
+-- 3. Fail-closed metadata guard: if the per-entry meta is absent or missing
+--    node/activation (a legacy entry), the node/activation guards cannot be
+--    evaluated. Do NOT move; write a recoverable rejection receipt.
+if nodeName == '' or entryActivation == '' then
+    local auditID = requestID .. ':' .. nowMs
+    writeReceipt(receiptKey, 'rejected_metadata_missing', nodeName, entryActivation, auditID)
+    return {7, auditID, nodeName, entryActivation}
 end
 
--- 5. Atomic dead->ready move: preserve body, reset attempts.
-local ttl = tonumber(ARGV[3])
+-- 4. Execution status guard. Terminal/inactive executions reject with a
+--    recoverable receipt (node/activation from meta are available here).
+local status = redis.call('GET', KEYS[6])
+if not status then
+    local auditID = requestID .. ':' .. nowMs
+    writeReceipt(receiptKey, 'rejected_inactive', nodeName, entryActivation, auditID)
+    return {3, auditID, nodeName, entryActivation}
+end
+if status == 'success' or status == 'failed' or status == 'canceled' or status == 'timeout' then
+    local auditID = requestID .. ':' .. nowMs
+    writeReceipt(receiptKey, 'rejected_terminal', nodeName, entryActivation, auditID)
+    return {2, auditID, nodeName, entryActivation}
+end
+
+-- 5. Node guard: reject if the node is terminal, or if the entry's activation
+--    no longer matches the node's current activation (stale cyclic re-entry).
+local nodeStatusKey = keyPrefix .. 'node:' .. nodeName .. ':status'
+local nodeMetaKey   = keyPrefix .. 'node:' .. nodeName .. ':meta'
+local nstatus = redis.call('GET', nodeStatusKey)
+if nstatus then
+    if nstatus == 'success' or nstatus == 'failed' or nstatus == 'skipped'
+       or nstatus == 'canceled' or nstatus == 'continued' then
+        local auditID = requestID .. ':' .. nowMs
+        writeReceipt(receiptKey, 'rejected_node_terminal', nodeName, entryActivation, auditID)
+        return {4, auditID, nodeName, entryActivation}
+    end
+end
+local currentActivation = redis.call('HGET', nodeMetaKey, 'activation_id') or ''
+if currentActivation ~= '' and currentActivation ~= entryActivation then
+    local auditID = requestID .. ':' .. nowMs
+    writeReceipt(receiptKey, 'rejected_activation_mismatch', nodeName, entryActivation, auditID)
+    return {5, auditID, nodeName, entryActivation}
+end
+
+-- 6. Atomic dead->ready move: preserve body, reset attempts.
 redis.call('HSET', KEYS[4], entryID, body)
-redis.call('ZADD', KEYS[3], tonumber(ARGV[2]), entryID)
+redis.call('ZADD', KEYS[3], tonumber(nowMs), entryID)
 redis.call('HDEL', KEYS[5], entryID)
 redis.call('ZREM', KEYS[1], entryID)
 redis.call('HDEL', KEYS[2], entryID)
@@ -381,18 +448,9 @@ redis.call('EXPIRE', KEYS[3], ttl)
 redis.call('EXPIRE', KEYS[4], ttl)
 redis.call('EXPIRE', KEYS[5], ttl)
 
--- 6. Write authoritative immutable receipt + entry index.
-local auditID = requestID .. ':' .. ARGV[2]
-redis.call('HSET', receiptKey,
-    'node', nodeName,
-    'activation', entryActivation,
-    'audit_id', auditID,
-    'outcome', 'replayed',
-    'operator', ARGV[5],
-    'reason', ARGV[6],
-    'entry_id', entryID,
-    'ts_ms', ARGV[2])
-redis.call('EXPIRE', receiptKey, ttl)
+-- 7. Write authoritative immutable receipt + entry index.
+local auditID = requestID .. ':' .. nowMs
+writeReceipt(receiptKey, 'replayed', nodeName, entryActivation, auditID)
 redis.call('HSET', KEYS[8], entryID, requestID)
 redis.call('EXPIRE', KEYS[8], ttl)
 
@@ -905,9 +963,14 @@ func (s *Store) scanOutboxMetricsForTenant(ctx context.Context, t tenant.TenantI
 }
 
 // ListDeadLetters returns one page of dead-lettered outbox entries for one
-// execution, ordered oldest-first. It reads the dead-letter body hash directly;
-// entries are not removed. Pagination uses a stable opaque cursor (the last
-// entry ID returned); an empty cursor starts from the oldest entry. limit<=0
+// execution, ordered oldest-first by (score, member) — i.e. dead-letter
+// timestamp, with entry ID as the tie-break so same-millisecond dead-letters
+// still paginate stably. It reads the dead-letter body hash directly; entries
+// are not removed. Pagination uses an opaque HMAC-signed cursor carrying the
+// (score, member) resume point; an empty cursor starts from the oldest entry.
+// The cursor is bound to the execution and signed with a process-local key,
+// so a tampered, cross-execution, or stale (post-restart) cursor returns
+// ErrCursorExpired and the caller must restart from the first page. limit<=0
 // defaults to a bounded page size. The returned NextCursor is empty when the
 // page is the last.
 func (s *Store) ListDeadLetters(ctx context.Context, id types.ExecutionID, page engine.DeadLetterPage) (engine.DeadLetterList, error) {
@@ -918,32 +981,80 @@ func (s *Store) ListDeadLetters(ctx context.Context, id types.ExecutionID, page 
 	if page.Limit > maxLimit {
 		page.Limit = maxLimit
 	}
-	// Stable lexicographic pagination by entry ID (a member cursor). The dead
-	// index is append-only by unique entry ID, so a member cursor is stable for
-	// the lifetime of a listing. Over-fetch by one to detect a next page.
 	t := tenant.FromContext(ctx)
-	args := redis.ZRangeArgs{
-		Key: outboxDeadKey(t, id), Start: "-", Stop: "+", ByLex: true, Offset: 0, Count: int64(page.Limit + 1),
-	}
-	if page.Cursor != "" {
-		// Exclusive lower bound: resume strictly after the cursor member.
-		args.Start = "(" + page.Cursor
-	}
-	ids, err := s.rdb.ZRangeArgs(ctx, args).Result()
+	deadKey := outboxDeadKey(t, id)
+
+	cursorScore, cursorMember, err := s.decodeDeadLetterCursor(page.Cursor, id)
 	if err != nil {
 		return engine.DeadLetterList{}, fmt.Errorf("list dead letters %q: %w", id, err)
 	}
+
+	// Stable (score, member) pagination. The dead-letter index is a ZSET keyed
+	// by dead-letter timestamp (now_ms) with the unique entry ID as member, so
+	// Redis' native (score, member) ordering gives a stable total order. To
+	// resume strictly after (cursorScore, cursorMember) we fetch the same-score
+	// tail (members with score == cursorScore and member > cursorMember) and
+	// the strictly-higher scores, then concatenate. Over-fetch by one to detect
+	// a next page without an extra round-trip.
+	var ids []string
+	if page.Cursor == "" {
+		ids, err = s.rdb.ZRangeArgs(ctx, redis.ZRangeArgs{
+			Key: deadKey, Start: "-inf", Stop: "+inf", ByScore: true, Offset: 0, Count: int64(page.Limit + 1),
+		}).Result()
+		if err != nil {
+			return engine.DeadLetterList{}, fmt.Errorf("list dead letters %q: %w", id, err)
+		}
+	} else {
+		// Same-score tail: members at cursorScore, filtered in Go to member >
+		// cursorMember (Redis orders same-score members by member lex, so the
+		// slice is already in correct order).
+		sameScore, serr := s.rdb.ZRangeArgs(ctx, redis.ZRangeArgs{
+			Key: deadKey, Start: formatScore(cursorScore), Stop: formatScore(cursorScore), ByScore: true, Offset: 0, Count: -1,
+		}).Result()
+		if serr != nil {
+			return engine.DeadLetterList{}, fmt.Errorf("list dead letters %q: %w", id, serr)
+		}
+		ids = make([]string, 0, len(sameScore)+page.Limit+1)
+		for _, m := range sameScore {
+			if m > cursorMember {
+				ids = append(ids, m)
+			}
+		}
+		// Strictly-higher scores. Bound by limit+1 minus what we already have,
+		// but keep at least limit+1 so the next-page detection stays correct
+		// when the same-score tail was shorter than a page.
+		higher, herr := s.rdb.ZRangeArgs(ctx, redis.ZRangeArgs{
+			Key: deadKey, Start: "(" + formatScore(cursorScore), Stop: "+inf", ByScore: true, Offset: 0, Count: int64(page.Limit + 1),
+		}).Result()
+		if herr != nil {
+			return engine.DeadLetterList{}, fmt.Errorf("list dead letters %q: %w", id, herr)
+		}
+		ids = append(ids, higher...)
+	}
+
 	var nextCursor string
 	if len(ids) > page.Limit {
-		nextCursor = ids[page.Limit-1]
+		// Build the next cursor from the (score, member) of the last entry on
+		// this page. Fetching its score is one round-trip; if it vanished
+		// between listing and scoring (concurrent replay/delete), fall back to
+		// no next cursor — the caller re-lists from the start, which only
+		// re-scans the surviving entries.
+		lastID := ids[page.Limit-1]
+		score, serr := s.rdb.ZScore(ctx, deadKey, lastID).Result()
+		if serr == nil {
+			nextCursor = s.encodeDeadLetterCursor(id, score, lastID)
+		} else if serr != redis.Nil {
+			return engine.DeadLetterList{}, fmt.Errorf("list dead letters %q: %w", id, serr)
+		}
 		ids = ids[:page.Limit]
 	}
+
 	out := make([]engine.OutboxEntry, 0, len(ids))
 	for _, entryID := range ids {
 		raw, err := s.rdb.HGet(ctx, outboxDeadBodyKey(t, id), entryID).Result()
 		if err == redis.Nil {
 			// body missing while index still references it: self-heal by removing the stale index entry
-			_ = s.rdb.ZRem(ctx, outboxDeadKey(t, id), entryID).Err()
+			_ = s.rdb.ZRem(ctx, deadKey, entryID).Err()
 			continue
 		}
 		if err != nil {
@@ -956,6 +1067,14 @@ func (s *Store) ListDeadLetters(ctx context.Context, id types.ExecutionID, page 
 		out = append(out, entry)
 	}
 	return engine.DeadLetterList{Entries: out, NextCursor: nextCursor}, nil
+}
+
+// formatScore renders a ZSET score as the exact string Redis round-trips, so a
+// cursor's exclusive/inclusive score bounds match the stored member score
+// byte-for-byte. Redis scores are IEEE-754 doubles; %g reproduces the shortest
+// exact representation Go and Redis agree on for millisecond timestamps.
+func formatScore(score float64) string {
+	return strconv.FormatFloat(score, 'f', -1, 64)
 }
 
 // ReplayDeadLetter moves a dead-lettered entry atomically and activation-safely
@@ -1015,6 +1134,8 @@ func replayOutcomeFromInt(n int64) engine.DeadLetterReplayOutcome {
 		return engine.ReplayRejectedActivationMismatch
 	case 6:
 		return engine.ReplayAlreadyReplayed
+	case 7:
+		return engine.ReplayRejectedMetadataMissing
 	default:
 		return engine.ReplayNotFound
 	}

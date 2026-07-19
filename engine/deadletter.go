@@ -40,6 +40,15 @@ const (
 	// match the node's current activation — a stale activation from a prior
 	// cyclic re-entry. Replaying it would unsafely resurrect dead intent.
 	ReplayRejectedActivationMismatch DeadLetterReplayOutcome = "rejected_activation_mismatch"
+	// ReplayRejectedMetadataMissing means the entry's immutable dead-letter
+	// metadata (node name and/or activation) is absent, so the activation-safe
+	// replay guards cannot be evaluated. The replay fails closed: no state is
+	// mutated and the entry remains in dead-letter storage. Legacy entries
+	// written before the per-entry meta hash existed land here and must be
+	// repaired/quarantined by an explicit operator tool rather than silently
+	// replayed. An immutable receipt is still written so the rejection is
+	// recoverable under the same RequestID.
+	ReplayRejectedMetadataMissing DeadLetterReplayOutcome = "rejected_metadata_missing"
 	// ReplayInvalidRequest means the request was malformed (missing required
 	// fields, over-length reason, etc.). Produced by the manager layer before
 	// touching Redis; never by the Lua script.
@@ -107,12 +116,18 @@ type DeadLetterList struct {
 //     ReplayReplayed; the rest return ReplayAlreadyReplayed.
 //   - Replay is rejected when the execution is terminal, canceled, expired,
 //     or otherwise inactive.
+//   - Replay fails closed when the entry's immutable node/activation metadata
+//     is absent (e.g. a legacy entry): it is not silently replayed. Legacy
+//     entries require an explicit repair/quarantine tool.
 //   - The original immutable body is preserved across the move; the delivery
 //     attempt counter is reset to zero on replay.
-//   - An immutable receipt is written atomically with the move, recording
-//     entry, execution, node, activation, operator, reason, outcome, time.
-//   - ListDeadLetters uses a stable opaque cursor and a bounded limit; it never
-//     returns the full set in one call.
+//   - An immutable receipt is written atomically with the move (and with every
+//     determinable rejection: terminal/inactive/node-terminal/activation-
+//     mismatch/metadata-missing), recording entry, execution, node,
+//     activation, operator, reason, outcome, time. A retry with the same
+//     RequestID recovers the original outcome and AuditID.
+//   - ListDeadLetters uses a stable opaque signed cursor and a bounded limit;
+//     it never returns the full set in one call.
 //
 // CLI/admin tooling must go through the DeadLetterManager (which wraps this
 // capability with metrics and audit) rather than constructing Redis keys

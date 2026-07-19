@@ -45,6 +45,17 @@ type Store struct {
 	auditCounters *auditCounters
 	leaseObserver LeaseObserver
 	logger        engine.Logger
+
+	// cursorKey is a process-local random key used to HMAC-sign opaque
+	// ListDeadLetters pagination cursors. It is generated once at Store
+	// construction and never persisted, so cursors are valid only for the
+	// lifetime of the process that issued them: after a restart, decode fails
+	// with a clear "cursor expired" error and the caller must restart the
+	// listing from the first page. This needs no configuration and keeps the
+	// signing secret out of logs/config. It is not a security boundary
+	// (dead-letter listings are already operator-scoped); it only prevents
+	// accidental cross-execution or stale-cursor replay.
+	cursorKey []byte
 }
 
 func New(rdb redis.UniversalClient, db store.Store, execTTL time.Duration) *Store {
@@ -57,6 +68,7 @@ func New(rdb redis.UniversalClient, db store.Store, execTTL time.Duration) *Stor
 		leaseRepairCursor: make(map[tenant.TenantID]uint64),
 		audit:             noopAuditObserver{},
 		auditCounters:     &auditCounters{},
+		cursorKey:         newCursorSigningKey(),
 	}
 	// The default tenant is registered lazily on the first durable execution
 	// create, and listTenants also defensively includes the default tenant, so
