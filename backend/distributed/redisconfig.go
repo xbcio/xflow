@@ -22,13 +22,15 @@ const (
 // with redis.NewUniversalClient; otherwise New keeps the legacy single-address
 // behavior.
 type RedisConfig struct {
-	Mode       string
-	Addrs      []string
-	MasterName string
-	Username   string
-	Password   string
-	TLSConfig  *tls.Config
-	DB         int
+	Mode             string
+	Addrs            []string
+	MasterName       string
+	Username         string
+	Password         string
+	SentinelUsername string
+	SentinelPassword string
+	TLSConfig        *tls.Config
+	DB               int
 }
 
 // validate checks that the configuration is self-consistent. It is fail-closed:
@@ -60,8 +62,8 @@ func (c RedisConfig) validate() error {
 }
 
 // firstAddr returns the first configured address, or an empty string if none is
-// configured. It is used to keep the legacy asynq transport address string alive
-// until Task 3.1 replaces it with HA-specific connection options.
+// configured. It is still used for single-mode: when redisAddr is empty it
+// provides the bootstrap address for the legacy asynq transport fallback.
 func (c RedisConfig) firstAddr() string {
 	if len(c.Addrs) == 0 {
 		return ""
@@ -88,12 +90,14 @@ func (c RedisConfig) AsAsynqConnOpt() (asynqlib.RedisConnOpt, error) {
 		}, nil
 	case RedisModeSentinel:
 		return asynqlib.RedisFailoverClientOpt{
-			MasterName:    c.MasterName,
-			SentinelAddrs: c.Addrs,
-			Username:      c.Username,
-			Password:      c.Password,
-			TLSConfig:     c.TLSConfig,
-			DB:            c.DB,
+			MasterName:       c.MasterName,
+			SentinelAddrs:    c.Addrs,
+			Username:         c.Username,
+			Password:         c.Password,
+			SentinelUsername: c.SentinelUsername,
+			SentinelPassword: c.SentinelPassword,
+			TLSConfig:        c.TLSConfig,
+			DB:               c.DB,
 		}, nil
 	case RedisModeCluster:
 		return asynqlib.RedisClusterClientOpt{
@@ -129,12 +133,14 @@ func newRedisClient(cfg RedisConfig) (redis.UniversalClient, error) {
 		// sentinel and a *redis.ClusterClient for cluster when Addrs has more
 		// than one entry (or even one entry without MasterName).
 		return redis.NewUniversalClient(&redis.UniversalOptions{
-			MasterName: cfg.MasterName,
-			Addrs:      cfg.Addrs,
-			Username:   cfg.Username,
-			Password:   cfg.Password,
-			TLSConfig:  cfg.TLSConfig,
-			DB:         cfg.DB,
+			MasterName:       cfg.MasterName,
+			Addrs:            cfg.Addrs,
+			Username:         cfg.Username,
+			Password:         cfg.Password,
+			SentinelUsername: cfg.SentinelUsername,
+			SentinelPassword: cfg.SentinelPassword,
+			TLSConfig:        cfg.TLSConfig,
+			DB:               cfg.DB,
 		}), nil
 	default:
 		return nil, fmt.Errorf("unsupported redis mode %q", cfg.Mode)

@@ -228,12 +228,14 @@ func TestRedisConfigAsAsynqConnOptSingle(t *testing.T) {
 
 func TestRedisConfigAsAsynqConnOptSentinel(t *testing.T) {
 	cfg := RedisConfig{
-		Mode:       RedisModeSentinel,
-		MasterName: "mymaster",
-		Addrs:      []string{"127.0.0.1:26379", "127.0.0.1:26380"},
-		Username:   "u",
-		Password:   "p",
-		DB:         2,
+		Mode:             RedisModeSentinel,
+		MasterName:       "mymaster",
+		Addrs:            []string{"127.0.0.1:26379", "127.0.0.1:26380"},
+		Username:         "u",
+		Password:         "p",
+		SentinelUsername: "su",
+		SentinelPassword: "sp",
+		DB:               2,
 	}
 	opt, err := cfg.AsAsynqConnOpt()
 	if err != nil {
@@ -251,6 +253,33 @@ func TestRedisConfigAsAsynqConnOptSentinel(t *testing.T) {
 	}
 	if got.Username != "u" || got.Password != "p" || got.DB != 2 {
 		t.Fatalf("unexpected fields: username=%q password=%q db=%d", got.Username, got.Password, got.DB)
+	}
+	if got.SentinelUsername != "su" || got.SentinelPassword != "sp" {
+		t.Fatalf("unexpected sentinel fields: sentinelUsername=%q sentinelPassword=%q", got.SentinelUsername, got.SentinelPassword)
+	}
+}
+
+func TestRedisConfigAsAsynqConnOptSentinelNoAuth(t *testing.T) {
+	// Sentinel auth is optional; empty sentinel credentials must still validate
+	// and map cleanly.
+	cfg := RedisConfig{
+		Mode:       RedisModeSentinel,
+		MasterName: "mymaster",
+		Addrs:      []string{"127.0.0.1:26379"},
+		Username:   "u",
+		Password:   "p",
+		DB:         1,
+	}
+	opt, err := cfg.AsAsynqConnOpt()
+	if err != nil {
+		t.Fatalf("AsAsynqConnOpt() error = %v", err)
+	}
+	got, ok := opt.(asynqlib.RedisFailoverClientOpt)
+	if !ok {
+		t.Fatalf("opt type = %T, want RedisFailoverClientOpt", opt)
+	}
+	if got.SentinelUsername != "" || got.SentinelPassword != "" {
+		t.Fatalf("sentinel auth fields = %q/%q, want empty", got.SentinelUsername, got.SentinelPassword)
 	}
 }
 
