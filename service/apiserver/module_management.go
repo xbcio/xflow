@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/observability/metrics"
@@ -35,7 +36,8 @@ type managementModule struct {
 	// built once on first use with the metrics observer + durable audit
 	// projector and reused for every subsequent list/replay so the API never
 	// builds a fresh manager per request with nil metrics.
-	dlMgr *control.DeadLetterManager
+	dlMgr     *control.DeadLetterManager
+	dlMgrOnce sync.Once
 }
 
 func newManagementModule(cp *control.ControlPlane) *managementModule {
@@ -324,7 +326,7 @@ func (m *managementModule) deadLetterExecID(r *http.Request) string {
 
 // deadLetterManager lazily builds a shared DeadLetterManager from the control
 // plane's backend state when it implements engine.DeadLetterStore. The manager
-// is constructed ONCE (cached on the module) with:
+// is constructed exactly once via sync.Once (cached on the module) with:
 //   - a non-nil metrics observer (when cfg.Metrics is set) so the replay
 //     outcome counter and pending/dead-lettered gauge are emitted at the
 //     single outlet the CLI also uses;
@@ -337,6 +339,22 @@ func (m *managementModule) deadLetterExecID(r *http.Request) string {
 // operations (e.g. the in-memory backend used in dev); the HTTP route surfaces
 // 503 in that case.
 func (m *managementModule) deadLetterManager() (*control.DeadLetterManager, error) {
+	m.dlMgrOnce.Do(func() {
+		if m.cp.Backend() == nil {
+			return
+		}
+		state := m.cp.Backend().State()
+		store, ok := state.(engine.DeadLetterStore)
+		if !ok {
+			return
+		}
+		var observer engine.OutboxObserver
+		if m.metrics != nil {
+			observer = metrics.NewOutboxMetrics(m.metrics)
+		}
+		audit := m.deadLetterAuditSink(observer)
+		m.dlMgr = control.NewDeadLetterManager(store, observer, audit)
+	})
 	if m.dlMgr != nil {
 		return m.dlMgr, nil
 	}
@@ -344,31 +362,19 @@ func (m *managementModule) deadLetterManager() (*control.DeadLetterManager, erro
 		return nil, errors.New("management: no backend")
 	}
 	state := m.cp.Backend().State()
-	store, ok := state.(engine.DeadLetterStore)
-	if !ok {
+	if _, ok := state.(engine.DeadLetterStore); !ok {
 		return nil, errors.New("management: backend state does not implement DeadLetterStore")
 	}
-	var observer engine.OutboxObserver
-	if m.metrics != nil {
-		observer = metrics.NewOutboxMetrics(m.metrics)
-	}
-	audit := m.deadLetterAuditSink()
-	mgr := control.NewDeadLetterManager(store, observer, audit)
-	m.dlMgr = mgr
-	return mgr, nil
+	return nil, errors.New("management: dead-letter manager initialization failed")
 }
 
 // deadLetterAuditSink selects the durable receipt-projector sink when the
 // configured audit sink is SQL-backed, falling back to the stderr projection
 // otherwise. The Redis receipt is always authoritative; the sink is the
 // secondary durable projection reconciled against it.
-func (m *managementModule) deadLetterAuditSink() engine.DeadLetterAuditSink {
+func (m *managementModule) deadLetterAuditSink(observer engine.OutboxObserver) engine.DeadLetterAuditSink {
 	if sql, ok := m.audit.(*SQLAuditSink); ok {
 		if ra := sql.ReceiptAppender(); ra != nil {
-			var observer engine.OutboxObserver
-			if m.metrics != nil {
-				observer = metrics.NewOutboxMetrics(m.metrics)
-			}
 			return control.NewProjectorAuditSink(control.NewReceiptProjector(ra), observer)
 		}
 	}

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -137,6 +136,3 @@ func runReconcile(opts *deadLetterOptions, redisAddr string, dryRun bool) error 
 	}
 	return writeJSONLines(opts.out, stats)
 }
-
-// silence the json import if writeJSONLines is refactored to a non-json path.
-var _ = json.Valid

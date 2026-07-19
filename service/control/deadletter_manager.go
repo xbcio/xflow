@@ -120,6 +120,14 @@ func (m *DeadLetterManager) Replay(ctx context.Context, principal DeadLetterRepl
 func (m *DeadLetterManager) finish(ctx context.Context, res engine.ReplayDeadLetterResult, req engine.ReplayDeadLetterRequest, validationErr error) (engine.ReplayDeadLetterResult, error) {
 	if m.metrics != nil {
 		m.metrics.OnOutboxReplayed(ctx, res.Outcome)
+		// The pending/dead-lettered gauge is owned by the outbox dispatcher's
+		// periodic backlog scan (OnOutboxPending), not the replay path: replay
+		// moves one entry from dead back to ready, but the manager does not have
+		// the aggregate backlog snapshot here. Updating the gauge would require
+		// an extra store read or a new observer method; we deliberately keep the
+		// gauge emission in the dispatcher's existing scan to avoid
+		// over-engineering and to preserve a single source of truth for backlog
+		// metrics.
 	}
 	if m.audit != nil {
 		_ = m.audit.RecordReplay(ctx, res, req)

@@ -261,6 +261,16 @@ func TestDeadLetterReplayAuthzDenialsAudited(t *testing.T) {
 	if rec2.Code != http.StatusBadRequest {
 		t.Fatalf("missing reason: status = %d, want 400", rec2.Code)
 	}
+	foundAdmission := false
+	for _, ev := range audit2.Events() {
+		if ev.Operation == OpDeadLetterReplay && ev.Outcome == "admitted" {
+			foundAdmission = true
+			break
+		}
+	}
+	if !foundAdmission {
+		t.Fatalf("missing reason did not write admission audit: %+v", audit2.Events())
+	}
 	// The forged-operator case: a request body cannot self-report identity.
 	// The manager ignores req.Operator and uses the principal's subject, so a
 	// forged "operator":"admin" in the body never affects the audit.
@@ -402,6 +412,38 @@ func TestDeadLetterReplayProjectionFailureThenReconcile(t *testing.T) {
 	if res2.AuditID != res.AuditID {
 		t.Fatalf("re-replay audit_id = %q, want original %q", res2.AuditID, res.AuditID)
 	}
+}
+
+// TestDeadLetterManagerLazyInitRace guards the dlMgr sync.Once construction.
+// Multiple goroutines may call deadLetterManager() from concurrent HTTP replay
+// requests; without synchronization the field would be read and written
+// concurrently. The race detector catches that; this test exercises it.
+func TestDeadLetterManagerLazyInitRace(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mr.Close()
+
+	appender := &fakeReceiptAuditAppender{}
+	m, _ := newMgmtIntegrationModule(t, mr, appender)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			mgr, err := m.deadLetterManager()
+			if err != nil {
+				t.Errorf("deadLetterManager: %v", err)
+				return
+			}
+			if mgr == nil {
+				t.Error("deadLetterManager returned nil")
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 // errProjectionBoom is the sentinel for the projection-failure injection.
