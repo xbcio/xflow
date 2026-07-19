@@ -96,3 +96,30 @@ CREATE TABLE IF NOT EXISTS xflow_audit_events (
     INDEX idx_ts (ts),
     INDEX idx_receipt_audit_id (receipt_audit_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- T4 receipt-correlation columns are additive. CREATE TABLE IF NOT EXISTS is a
+-- no-op when the table already exists (e.g. an upgraded deployment), so these
+-- ALTERs back-fill the columns on pre-existing tables. They are idempotent via
+-- an INFORMATION_SCHEMA guard so re-applying the schema is always safe; MySQL
+-- (unlike MariaDB) has no ADD COLUMN IF NOT EXISTS, so the guard is required.
+DROP PROCEDURE IF EXISTS xflow_add_receipt_audit_columns;
+DELIMITER $$
+CREATE PROCEDURE xflow_add_receipt_audit_columns()
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'xflow_audit_events'
+          AND COLUMN_NAME = 'node_id'
+    ) THEN
+        ALTER TABLE xflow_audit_events
+            ADD COLUMN node_id          VARCHAR(255) NOT NULL DEFAULT '' COMMENT 'receipt 关联：节点名' AFTER trace_id,
+            ADD COLUMN activation_id    VARCHAR(64)  NOT NULL DEFAULT '' COMMENT 'receipt 关联：activation' AFTER node_id,
+            ADD COLUMN entry_id          VARCHAR(255) NOT NULL DEFAULT '' COMMENT 'receipt 关联：dead-letter entry' AFTER activation_id,
+            ADD COLUMN receipt_audit_id  VARCHAR(128) NOT NULL DEFAULT '' COMMENT 'receipt 关联：Redis receipt audit_id（幂等键）' AFTER entry_id,
+            ADD INDEX idx_receipt_audit_id (receipt_audit_id);
+    END IF;
+END$$
+DELIMITER ;
+CALL xflow_add_receipt_audit_columns();
+DROP PROCEDURE IF EXISTS xflow_add_receipt_audit_columns;
