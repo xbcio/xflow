@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/types"
@@ -27,16 +28,17 @@ func (s *Store) SuspendOrConsume(ctx context.Context, id types.ExecutionID, name
 	// Track waiter keys registered in previous iterations so we can clean them
 	// up if a later signal is found pre-delivered.
 	var registeredWaiters []string
+	t := tenant.FromContext(ctx)
 
 	// Check each awaited signal name.
 	for _, sigName := range spec.Signals {
 		result, err := suspendOrConsumeLua.Run(ctx, s.rdb,
 			[]string{
-				signalKey(id, sigName),
-				nodeStatusKey(id, name),
-				waiterKey(id, sigName),
-				suspendedNodesKey(id),
-				resumeLockKey(id, name),
+				signalKey(t, id, sigName),
+				nodeStatusKey(t, id, name),
+				waiterKey(t, id, sigName),
+				suspendedNodesKey(t, id),
+				resumeLockKey(t, id, name),
 			},
 			name, s.ttlSec(),
 		).Result()
@@ -52,7 +54,7 @@ func (s *Store) SuspendOrConsume(ctx context.Context, id types.ExecutionID, name
 					for _, wk := range registeredWaiters {
 						pipe.Del(ctx, wk)
 					}
-					pipe.SRem(ctx, suspendedNodesKey(id), name)
+					pipe.SRem(ctx, suspendedNodesKey(t, id), name)
 					_, _ = pipe.Exec(ctx)
 				}
 				var data map[string]any
@@ -63,12 +65,12 @@ func (s *Store) SuspendOrConsume(ctx context.Context, id types.ExecutionID, name
 			}
 		}
 		// This signal was not pre-delivered; a waiter key was registered.
-		registeredWaiters = append(registeredWaiters, waiterKey(id, sigName))
+		registeredWaiters = append(registeredWaiters, waiterKey(t, id, sigName))
 	}
 	// Node is parked — register timeout in ZSET if spec has a timeout.
 	if spec.Timeout > 0 {
 		member := timeoutMember(id, name)
-		if err := s.rdb.ZAdd(ctx, timeoutZSetKey(id), redis.Z{
+		if err := s.rdb.ZAdd(ctx, timeoutZSetKey(t, id), redis.Z{
 			Score:  float64(time.Now().Add(spec.Timeout).Unix()),
 			Member: member,
 		}).Err(); err != nil {
@@ -84,7 +86,8 @@ func (s *Store) SuspendOrConsume(ctx context.Context, id types.ExecutionID, name
 
 func (s *Store) suspendOrConsumeMulti(ctx context.Context, id types.ExecutionID, name string, spec *types.SuspendSpec) (*types.SignalPayload, error) {
 	ttl := s.suspendTTL(id, spec)
-	batchKey := signalBatchKey(id, name)
+	t := tenant.FromContext(ctx)
+	batchKey := signalBatchKey(t, id, name)
 
 	// Atomically collect every pre-delivered signal into the batch hash. The
 	// collection (GET→HSET→DEL per signal) runs in one Lua transition so a crash
@@ -92,7 +95,7 @@ func (s *Store) suspendOrConsumeMulti(ctx context.Context, id types.ExecutionID,
 	keys := []string{batchKey}
 	args := []any{int(ttl.Seconds())}
 	for _, sigName := range spec.Signals {
-		keys = append(keys, signalKey(id, sigName))
+		keys = append(keys, signalKey(t, id, sigName))
 		args = append(args, sigName)
 	}
 	collected, err := suspendOrConsumeMultiCollectLua.Run(ctx, s.rdb, keys, args...).StringSlice()
@@ -120,20 +123,20 @@ func (s *Store) suspendOrConsumeMulti(ctx context.Context, id types.ExecutionID,
 		return nil, fmt.Errorf("marshal multi-signal spec: %w", err)
 	}
 	pipe := s.rdb.Pipeline()
-	pipe.Del(ctx, resumeLockKey(id, name))
-	pipe.Set(ctx, nodeStatusKey(id, name), string(types.NodeStatusSuspended), ttl)
-	pipe.Set(ctx, waiterSpecKey(id, name), string(specJSON), ttl)
+	pipe.Del(ctx, resumeLockKey(t, id, name))
+	pipe.Set(ctx, nodeStatusKey(t, id, name), string(types.NodeStatusSuspended), ttl)
+	pipe.Set(ctx, waiterSpecKey(t, id, name), string(specJSON), ttl)
 	pipe.Expire(ctx, batchKey, ttl)
 	for _, sigName := range spec.Signals {
-		pipe.Set(ctx, waiterKey(id, sigName), name, ttl)
+		pipe.Set(ctx, waiterKey(t, id, sigName), name, ttl)
 	}
-	pipe.SAdd(ctx, suspendedNodesKey(id), name)
-	pipe.Expire(ctx, suspendedNodesKey(id), ttl)
+	pipe.SAdd(ctx, suspendedNodesKey(t, id), name)
+	pipe.Expire(ctx, suspendedNodesKey(t, id), ttl)
 	if _, err := pipe.Exec(ctx); err != nil {
 		return nil, fmt.Errorf("park multi-signal waiter: %w", err)
 	}
 	if spec.Timeout > 0 {
-		if err := s.rdb.ZAdd(ctx, timeoutZSetKey(id), redis.Z{
+		if err := s.rdb.ZAdd(ctx, timeoutZSetKey(t, id), redis.Z{
 			Score:  float64(time.Now().Add(spec.Timeout).Unix()),
 			Member: timeoutMember(id, name),
 		}).Err(); err != nil {
@@ -147,7 +150,8 @@ func (s *Store) suspendOrConsumeMulti(ctx context.Context, id types.ExecutionID,
 }
 
 func (s *Store) loadWaiterSpec(ctx context.Context, id types.ExecutionID, nodeName string) (*types.SuspendSpec, error) {
-	raw, err := s.rdb.Get(ctx, waiterSpecKey(id, nodeName)).Bytes()
+	t := tenant.FromContext(ctx)
+	raw, err := s.rdb.Get(ctx, waiterSpecKey(t, id, nodeName)).Bytes()
 	if err == redis.Nil {
 		return nil, nil
 	}
@@ -162,15 +166,17 @@ func (s *Store) loadWaiterSpec(ctx context.Context, id types.ExecutionID, nodeNa
 }
 
 func (s *Store) addMultiSignal(ctx context.Context, id types.ExecutionID, nodeName string, signalName string, dataJSON string, spec *types.SuspendSpec) (*types.SignalPayload, bool, error) {
-	if err := s.rdb.HSet(ctx, signalBatchKey(id, nodeName), signalName, dataJSON).Err(); err != nil {
+	t := tenant.FromContext(ctx)
+	if err := s.rdb.HSet(ctx, signalBatchKey(t, id, nodeName), signalName, dataJSON).Err(); err != nil {
 		return nil, false, fmt.Errorf("add multi-signal %q/%q/%q: %w", id, nodeName, signalName, err)
 	}
-	_ = s.rdb.Expire(ctx, signalBatchKey(id, nodeName), s.suspendTTL(id, spec)).Err()
+	_ = s.rdb.Expire(ctx, signalBatchKey(t, id, nodeName), s.suspendTTL(id, spec)).Err()
 	return s.multiSignalPayload(ctx, id, nodeName, signalName, dataJSON, spec)
 }
 
 func (s *Store) multiSignalPayload(ctx context.Context, id types.ExecutionID, nodeName string, signalName string, dataJSON string, spec *types.SuspendSpec) (*types.SignalPayload, bool, error) {
-	rawAll, err := s.rdb.HGetAll(ctx, signalBatchKey(id, nodeName)).Result()
+	t := tenant.FromContext(ctx)
+	rawAll, err := s.rdb.HGetAll(ctx, signalBatchKey(t, id, nodeName)).Result()
 	if err != nil {
 		return nil, false, fmt.Errorf("read multi-signal batch %q/%q: %w", id, nodeName, err)
 	}
@@ -199,13 +205,14 @@ func (s *Store) multiSignalPayload(ctx context.Context, id types.ExecutionID, no
 }
 
 func (s *Store) cleanupMultiSignal(ctx context.Context, id types.ExecutionID, nodeName string, spec *types.SuspendSpec) {
+	t := tenant.FromContext(ctx)
 	pipe := s.rdb.Pipeline()
 	for _, sigName := range spec.Signals {
-		pipe.Del(ctx, waiterKey(id, sigName))
+		pipe.Del(ctx, waiterKey(t, id, sigName))
 	}
-	pipe.Del(ctx, waiterSpecKey(id, nodeName), signalBatchKey(id, nodeName))
-	pipe.SRem(ctx, suspendedNodesKey(id), nodeName)
-	pipe.ZRem(ctx, timeoutZSetKey(id), timeoutMember(id, nodeName))
+	pipe.Del(ctx, waiterSpecKey(t, id, nodeName), signalBatchKey(t, id, nodeName))
+	pipe.SRem(ctx, suspendedNodesKey(t, id), nodeName)
+	pipe.ZRem(ctx, timeoutZSetKey(t, id), timeoutMember(id, nodeName))
 	_, _ = pipe.Exec(ctx)
 }
 
@@ -224,8 +231,9 @@ func signalQuorum(spec *types.SuspendSpec) int {
 
 func (s *Store) DeliverSignal(ctx context.Context, id types.ExecutionID, signalName string, data map[string]any) (string, *types.SignalPayload, error) {
 	dataJSON, _ := json.Marshal(data) // json.Marshal of map[string]any cannot fail
+	t := tenant.FromContext(ctx)
 
-	waiter, err := s.rdb.Get(ctx, waiterKey(id, signalName)).Result()
+	waiter, err := s.rdb.Get(ctx, waiterKey(t, id, signalName)).Result()
 	if err != nil && err != redis.Nil {
 		return "", nil, fmt.Errorf("get waiter: %w", err)
 	}
@@ -248,7 +256,7 @@ func (s *Store) DeliverSignal(ctx context.Context, id types.ExecutionID, signalN
 	}
 
 	result, err := signalOrStoreLua.Run(ctx, s.rdb,
-		[]string{signalKey(id, signalName), waiterKey(id, signalName), suspendedNodesKey(id)},
+		[]string{signalKey(t, id, signalName), waiterKey(t, id, signalName), suspendedNodesKey(t, id)},
 		string(dataJSON), s.ttlSec(),
 	).Result()
 	if err != nil && err != redis.Nil {
@@ -278,13 +286,15 @@ func (s *Store) DeliverSignal(ctx context.Context, id types.ExecutionID, signalN
 
 // cleanupOnResume removes the timeout ZSET entry for a node that is being resumed.
 func (s *Store) cleanupOnResume(ctx context.Context, id types.ExecutionID, nodeName string) {
-	s.rdb.ZRem(ctx, timeoutZSetKey(id), timeoutMember(id, nodeName))
+	t := tenant.FromContext(ctx)
+	s.rdb.ZRem(ctx, timeoutZSetKey(t, id), timeoutMember(id, nodeName))
 }
 
 // PeekResumeTarget returns the node name suspended and waiting for signalName,
 // or "" when no waiter exists. It does not consume the signal.
 func (s *Store) PeekResumeTarget(ctx context.Context, id types.ExecutionID, signalName string) (string, error) {
-	waiter, err := s.rdb.Get(ctx, waiterKey(id, signalName)).Result()
+	t := tenant.FromContext(ctx)
+	waiter, err := s.rdb.Get(ctx, waiterKey(t, id, signalName)).Result()
 	if err == redis.Nil {
 		return "", nil
 	}
@@ -340,21 +350,22 @@ func (s *Store) DeliverSignalWithOutbox(ctx context.Context, id types.ExecutionI
 		multi = 1
 	}
 	quorum := signalQuorum(spec)
+	t := tenant.FromContext(ctx)
 
 	keys := []string{
-		signalKey(id, signalName),
-		waiterKey(id, signalName),
-		suspendedNodesKey(id),
-		signalBatchKey(id, intent.NodeName),
-		waiterSpecKey(id, intent.NodeName),
-		resumeLockKey(id, intent.NodeName),
-		outboxReadyKey(id),
-		outboxBodyKey(id),
-		timeoutZSetKey(id),
+		signalKey(t, id, signalName),
+		waiterKey(t, id, signalName),
+		suspendedNodesKey(t, id),
+		signalBatchKey(t, id, intent.NodeName),
+		waiterSpecKey(t, id, intent.NodeName),
+		resumeLockKey(t, id, intent.NodeName),
+		outboxReadyKey(t, id),
+		outboxBodyKey(t, id),
+		timeoutZSetKey(t, id),
 	}
 	if multi == 1 {
 		for _, sig := range spec.Signals {
-			keys = append(keys, waiterKey(id, sig))
+			keys = append(keys, waiterKey(t, id, sig))
 		}
 	}
 	args := []any{
@@ -374,8 +385,9 @@ func (s *Store) DeliverSignalWithOutbox(ctx context.Context, id types.ExecutionI
 }
 
 func (s *Store) AcquireResumeLock(ctx context.Context, id types.ExecutionID, name string) (bool, error) {
+	t := tenant.FromContext(ctx)
 	result, err := resumeNodeLua.Run(ctx, s.rdb,
-		[]string{resumeLockKey(id, name)},
+		[]string{resumeLockKey(t, id, name)},
 		s.ttlSec(),
 	).Int64()
 	if err != nil {
@@ -385,9 +397,10 @@ func (s *Store) AcquireResumeLock(ctx context.Context, id types.ExecutionID, nam
 }
 
 func (s *Store) RevokeSignal(ctx context.Context, id types.ExecutionID, signalName string) (bool, error) {
+	t := tenant.FromContext(ctx)
 	result, err := revokeSignalLua.Run(ctx, s.rdb,
-		[]string{signalKey(id, signalName), waiterKey(id, signalName)},
-		fmt.Sprintf("xflow:exec:{%s}:node:", id),
+		[]string{signalKey(t, id, signalName), waiterKey(t, id, signalName)},
+		fmt.Sprintf("xflow:t%s:exec:{%s}:node:", t, id),
 		":resume_lock",
 	).Int64()
 	if err != nil {
@@ -407,13 +420,14 @@ func (s *Store) ResuspendAtomic(ctx context.Context, id types.ExecutionID, nodeN
 		// See SuspendOrConsume: transient mode never parks a waiter.
 		return nil, engine.ErrSuspendUnsupported
 	}
+	t := tenant.FromContext(ctx)
 	result, err := resuspendAtomicLua.Run(ctx, s.rdb,
 		[]string{
-			resumeLockKey(id, nodeName),
-			waiterKey(id, oldSignalName),
-			signalKey(id, newSignalName),
-			waiterKey(id, newSignalName),
-			suspendedNodesKey(id),
+			resumeLockKey(t, id, nodeName),
+			waiterKey(t, id, oldSignalName),
+			signalKey(t, id, newSignalName),
+			waiterKey(t, id, newSignalName),
+			suspendedNodesKey(t, id),
 		},
 		nodeName, s.ttlSec(),
 	).Result()
@@ -433,10 +447,10 @@ func (s *Store) ResuspendAtomic(ctx context.Context, id types.ExecutionID, nodeN
 	// Node is re-parked — register timeout in ZSET if spec has a timeout.
 	if spec.Timeout > 0 {
 		// Remove any old timeout entry first (signal name may have changed).
-		if err := s.rdb.ZRem(ctx, timeoutZSetKey(id), timeoutMember(id, nodeName)).Err(); err != nil && err != redis.Nil {
+		if err := s.rdb.ZRem(ctx, timeoutZSetKey(t, id), timeoutMember(id, nodeName)).Err(); err != nil && err != redis.Nil {
 			return nil, fmt.Errorf("clear resuspend timeout %q/%q: %w", id, nodeName, err)
 		}
-		if err := s.rdb.ZAdd(ctx, timeoutZSetKey(id), redis.Z{
+		if err := s.rdb.ZAdd(ctx, timeoutZSetKey(t, id), redis.Z{
 			Score:  float64(time.Now().Add(spec.Timeout).Unix()),
 			Member: timeoutMember(id, nodeName),
 		}).Err(); err != nil {
@@ -455,13 +469,15 @@ func (s *Store) ResuspendAtomic(ctx context.Context, id types.ExecutionID, nodeN
 // ---------------------------------------------------------------------------
 
 func (s *Store) ListSuspendedNodes(ctx context.Context, id types.ExecutionID) ([]string, error) {
-	return s.rdb.SMembers(ctx, suspendedNodesKey(id)).Result()
+	t := tenant.FromContext(ctx)
+	return s.rdb.SMembers(ctx, suspendedNodesKey(t, id)).Result()
 }
 
 // cleanupOnCancel removes timeout ZSET entries for all suspended nodes of a
 // canceled execution and deletes the suspended_nodes SET itself.
 func (s *Store) cleanupOnCancel(ctx context.Context, id types.ExecutionID) {
-	nodes, err := s.rdb.SMembers(ctx, suspendedNodesKey(id)).Result()
+	t := tenant.FromContext(ctx)
+	nodes, err := s.rdb.SMembers(ctx, suspendedNodesKey(t, id)).Result()
 	// Resolve the waiter/signal keys for each suspended node BEFORE opening the
 	// pipeline: deriving signal-name-keyed keys requires reading each node's
 	// stored waiter spec, which cannot be done inside a queued pipeline.
@@ -474,7 +490,7 @@ func (s *Store) cleanupOnCancel(ctx context.Context, id types.ExecutionID) {
 	pipe := s.rdb.Pipeline()
 	if err == nil {
 		for _, name := range nodes {
-			pipe.ZRem(ctx, timeoutZSetKey(id), timeoutMember(id, name))
+			pipe.ZRem(ctx, timeoutZSetKey(t, id), timeoutMember(id, name))
 		}
 	}
 	// Delete every waiter-related key for the canceled execution's suspended
@@ -489,12 +505,12 @@ func (s *Store) cleanupOnCancel(ctx context.Context, id types.ExecutionID) {
 	// no worker may recover work from them; removing them prevents stale leases
 	// or undelivered outbox tasks from reviving a canceled execution.
 	pipe.Del(ctx,
-		suspendedNodesKey(id),
-		leaseExpiryZSetKey(id),
-		outboxReadyKey(id),
-		outboxBodyKey(id),
-		remainingNodesKey(id),
-		failedNodesKey(id),
+		suspendedNodesKey(t, id),
+		leaseExpiryZSetKey(t, id),
+		outboxReadyKey(t, id),
+		outboxBodyKey(t, id),
+		remainingNodesKey(t, id),
+		failedNodesKey(t, id),
 	)
 	_, _ = pipe.Exec(ctx)
 }
@@ -506,14 +522,15 @@ func (s *Store) cleanupOnCancel(ctx context.Context, id types.ExecutionID) {
 // Inspect can still surface where the execution stopped; none of the retained
 // keys can trigger a resume once the waiter keys are gone.
 func (s *Store) suspendedWaiterKeys(ctx context.Context, id types.ExecutionID, nodeName string) []string {
+	t := tenant.FromContext(ctx)
 	keys := []string{
-		waiterSpecKey(id, nodeName),
-		signalBatchKey(id, nodeName),
-		resumeLockKey(id, nodeName),
+		waiterSpecKey(t, id, nodeName),
+		signalBatchKey(t, id, nodeName),
+		resumeLockKey(t, id, nodeName),
 	}
 	if spec, err := s.loadWaiterSpec(ctx, id, nodeName); err == nil && spec != nil {
 		for _, sigName := range spec.Signals {
-			keys = append(keys, waiterKey(id, sigName), signalKey(id, sigName))
+			keys = append(keys, waiterKey(t, id, sigName), signalKey(t, id, sigName))
 		}
 	}
 	return keys

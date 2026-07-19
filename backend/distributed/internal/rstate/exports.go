@@ -3,6 +3,7 @@ package rstate
 import (
 	"time"
 
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/types"
 )
@@ -40,8 +41,14 @@ func (s *Store) AuditStats() AuditStats { return s.auditCounters.snapshot() }
 
 // ExecKey returns the execution-scoped Redis key for the given suffix. It
 // exposes the store's key schema to out-of-store readers (e.g. the timeout
-// monitor) that must read the same keys the store writes.
-func ExecKey(id types.ExecutionID, suffix string) string { return execKey(id, suffix) }
+// monitor) that must read the same keys the store writes. The tenant scopes
+// the key to a tenant namespace; callers must pass the tenant from the
+// request context (tenant.FromContext), never a client-supplied value.
+func ExecKey(t tenant.TenantID, id types.ExecutionID, suffix string) string {
+	return execKey(t, id, suffix)
+}
 
 // NodeStatusKey returns the Redis key holding a node's status string.
-func NodeStatusKey(id types.ExecutionID, name string) string { return nodeStatusKey(id, name) }
+func NodeStatusKey(t tenant.TenantID, id types.ExecutionID, name string) string {
+	return nodeStatusKey(t, id, name)
+}

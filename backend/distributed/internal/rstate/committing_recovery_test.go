@@ -8,6 +8,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -51,7 +52,7 @@ func TestRedisClaimedLeaseRemainsDiscoverableAndRecoverable(t *testing.T) {
 	if node == nil || node.Status != types.NodeStatusCommitting || node.LeaseID != lease.LeaseID || node.LeaseToken != lease.LeaseToken || node.LeaseTaskType != engine.TaskTypeNodeResume || node.LeasePayload == nil || node.LeasePayload.Name != "approval" {
 		t.Fatalf("claimed node = %+v, want preserved lease metadata", node)
 	}
-	if _, err := rdb.ZScore(ctx, leaseExpiryZSetKey(id), leaseExpiryMember(id, "wait")).Result(); err != nil {
+	if _, err := rdb.ZScore(ctx, leaseExpiryZSetKey(tenant.DefaultTenant, id), leaseExpiryMember(id, "wait")).Result(); err != nil {
 		t.Fatalf("committing lease is missing expiry index: %v", err)
 	}
 
@@ -72,7 +73,7 @@ func TestRedisClaimedLeaseRemainsDiscoverableAndRecoverable(t *testing.T) {
 	if err != nil || node == nil || node.Status != types.NodeStatusPending || node.LeaseToken != "" {
 		t.Fatalf("node after recovery = %+v err=%v, want pending tokenless node", node, err)
 	}
-	if _, err := rdb.ZScore(ctx, leaseExpiryZSetKey(id), leaseExpiryMember(id, "wait")).Result(); err != redis.Nil {
+	if _, err := rdb.ZScore(ctx, leaseExpiryZSetKey(tenant.DefaultTenant, id), leaseExpiryMember(id, "wait")).Result(); err != redis.Nil {
 		t.Fatalf("recovered lease index entry = %v, want removed", err)
 	}
 }
@@ -216,7 +217,7 @@ func TestRedisWaitingExpansionLeaseIsRepairableAndFencesOldBatches(t *testing.T)
 		t.Fatalf("CreateExpandedSubExecution(first) accepted=%v err=%v, want true/nil", accepted, err)
 	}
 
-	index := leaseExpiryZSetKey(id)
+	index := leaseExpiryZSetKey(tenant.DefaultTenant, id)
 	member := leaseExpiryMember(id, "loop")
 	if err := rdb.Del(ctx, index).Err(); err != nil {
 		t.Fatalf("delete waiting lease index: %v", err)

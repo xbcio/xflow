@@ -5,50 +5,54 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/types"
 )
 
-func remainingNodesKey(id types.ExecutionID) string { return execKey(id, "remaining_nodes") }
-func failedNodesKey(id types.ExecutionID) string    { return execKey(id, "failed_nodes") }
-func advanceMarkerKey(id types.ExecutionID, name string, activationID int) string {
-	return execKey(id, fmt.Sprintf("node:%s:advance:%d", name, activationID))
+func remainingNodesKey(t tenant.TenantID, id types.ExecutionID) string {
+	return execKey(t, id, "remaining_nodes")
 }
-func scheduleKey(id types.ExecutionID, nodeIdx int) string {
-	return execKey(id, fmt.Sprintf("schedule:%d", nodeIdx))
+func failedNodesKey(t tenant.TenantID, id types.ExecutionID) string { return execKey(t, id, "failed_nodes") }
+func advanceMarkerKey(t tenant.TenantID, id types.ExecutionID, name string, activationID int) string {
+	return execKey(t, id, fmt.Sprintf("node:%s:advance:%d", name, activationID))
 }
-func outboxReadyKey(id types.ExecutionID) string    { return execKey(id, "outbox:ready") }
-func outboxBodyKey(id types.ExecutionID) string     { return execKey(id, "outbox:body") }
-func outboxAttemptsKey(id types.ExecutionID) string { return execKey(id, "outbox:attempts") }
-func outboxDeadKey(id types.ExecutionID) string     { return execKey(id, "outbox:dead") }
-func outboxDeadBodyKey(id types.ExecutionID) string { return execKey(id, "outbox:dead:body") }
+func scheduleKey(t tenant.TenantID, id types.ExecutionID, nodeIdx int) string {
+	return execKey(t, id, fmt.Sprintf("schedule:%d", nodeIdx))
+}
+func outboxReadyKey(t tenant.TenantID, id types.ExecutionID) string    { return execKey(t, id, "outbox:ready") }
+func outboxBodyKey(t tenant.TenantID, id types.ExecutionID) string     { return execKey(t, id, "outbox:body") }
+func outboxAttemptsKey(t tenant.TenantID, id types.ExecutionID) string { return execKey(t, id, "outbox:attempts") }
+func outboxDeadKey(t tenant.TenantID, id types.ExecutionID) string    { return execKey(t, id, "outbox:dead") }
+func outboxDeadBodyKey(t tenant.TenantID, id types.ExecutionID) string { return execKey(t, id, "outbox:dead:body") }
 
 // outboxDeadMetaKey holds compact immutable per-entry metadata (node + activation)
 // as a per-entry hash, written at dead-letter time so the activation-safe replay
 // guard can read node/activation without parsing the JSON body. Per-entry hashing
 // avoids any delimiter ambiguity under Redis Lua 5.1.
-func outboxDeadMetaKey(id types.ExecutionID, entryID string) string {
-	return execKey(id, "outbox:dead:meta:"+entryID)
+func outboxDeadMetaKey(t tenant.TenantID, id types.ExecutionID, entryID string) string {
+	return execKey(t, id, "outbox:dead:meta:"+entryID)
 }
 
 // outboxReplayEntryIdxKey maps a dead-letter entry ID to the RequestID of the
 // replay that moved it, so a concurrent or retried replay with a different
 // RequestID returns already_replayed (with the original receipt) instead of
 // degrading to not_found once the dead body is gone.
-func outboxReplayEntryIdxKey(id types.ExecutionID) string { return execKey(id, "replay:entryidx") }
+func outboxReplayEntryIdxKey(t tenant.TenantID, id types.ExecutionID) string {
+	return execKey(t, id, "replay:entryidx")
+}
 
 // outboxReplayReceiptKey holds the authoritative immutable receipt for one
 // replay RequestID. It is written atomically with the dead→ready move and
 // survives the loss of the dead body, so a retry with the same RequestID
 // recovers the original outcome and AuditID.
-func outboxReplayReceiptKey(id types.ExecutionID, requestID string) string {
-	return execKey(id, "replay:receipt:"+requestID)
+func outboxReplayReceiptKey(t tenant.TenantID, id types.ExecutionID, requestID string) string {
+	return execKey(t, id, "replay:receipt:"+requestID)
 }
 
 // commitNodeLua is the durable linearization point for ordinary acyclic node
@@ -283,19 +287,24 @@ return {attempts, 0}
 //
 // KEYS: 1=outbox:dead 2=outbox:dead:body 3=outbox:ready 4=outbox:body
 //       5=outbox:attempts 6=exec:status 7=outbox:dead:meta 8=replay:entryidx
-// ARGV: 1=entryID 2=now_ms 3=ttl_seconds 4=request_id 5=operator 6=reason 7=exec_id
+// ARGV: 1=entryID 2=now_ms 3=ttl_seconds 4=request_id 5=operator 6=reason 7=exec_id 8=tenant
 // Returns {outcome, audit_id, node, activation} where outcome:
 //   1=replayed 2=rejected_terminal 3=rejected_inactive 4=rejected_node_terminal
 //   5=rejected_activation_mismatch 6=already_replayed 0=not_found
 //
 // Node status/meta keys are derived inside the script from the dead-meta node
 // name; all keys share the execution hash tag so they are co-located on a
-// single-node (G0) or hash-tagged Cluster (G2) deployment.
+// single-node (G0) or hash-tagged Cluster (G2) deployment. The tenant ARGV
+// carries the brace-less tenant prefix so the derived keys match the
+// caller's key schema (xflow:t<tenant>:exec:{<id>}:...). The tenant is
+// server-issued (from context), never trusted from a client request body.
 var replayDeadLetterLua = redis.NewScript(`
 local entryID = ARGV[1]
 local requestID = ARGV[4]
 local execID = ARGV[7]
-local receiptKey = 'xflow:exec:{' .. execID .. '}:replay:receipt:' .. requestID
+local tenant = ARGV[8]
+local keyPrefix = 'xflow:t' .. tenant .. ':exec:{' .. execID .. '}:'
+local receiptKey = keyPrefix .. 'replay:receipt:' .. requestID
 
 -- decode a receipt hash into node/activation/audit_id
 local readReceipt = function(key)
@@ -315,7 +324,7 @@ end
 -- Different RequestID for an already-replayed entry?
 local priorReqID = redis.call('HGET', KEYS[8], entryID)
 if priorReqID and priorReqID ~= '' then
-    local priorKey = 'xflow:exec:{' .. execID .. '}:replay:receipt:' .. priorReqID
+    local priorKey = keyPrefix .. 'replay:receipt:' .. priorReqID
     local pr = readReceipt(priorKey)
     if pr then
         return {6, pr.audit_id, pr.node, pr.activation}
@@ -343,8 +352,8 @@ local entryActivation = redis.call('HGET', KEYS[7], 'activation') or ''
 --    activation no longer matches the node's current activation (stale
 --    cyclic re-entry). Skipped only when meta is absent (legacy entry).
 if nodeName ~= '' then
-    local nodeStatusKey = 'xflow:exec:{' .. execID .. '}:node:' .. nodeName .. ':status'
-    local nodeMetaKey   = 'xflow:exec:{' .. execID .. '}:node:' .. nodeName .. ':meta'
+    local nodeStatusKey = keyPrefix .. 'node:' .. nodeName .. ':status'
+    local nodeMetaKey   = keyPrefix .. 'node:' .. nodeName .. ':meta'
     local nstatus = redis.call('GET', nodeStatusKey)
     if nstatus then
         if nstatus == 'success' or nstatus == 'failed' or nstatus == 'skipped'
@@ -473,12 +482,13 @@ func (s *Store) ResetNodeForRetryWithOutbox(ctx context.Context, id types.Execut
 		availableAt = entry.AvailableAt.UTC().UnixMilli()
 	}
 	ttl := s.getExecTTL(id)
+	t := tenant.FromContext(ctx)
 	result, err := resetNodeForRetryWithOutboxLua.Run(ctx, s.rdb, []string{
-		nodeStatusKey(id, nodeName),
-		nodeMetaKey(id, nodeName),
-		leaseExpiryZSetKey(id),
-		outboxReadyKey(id),
-		outboxBodyKey(id),
+		nodeStatusKey(t, id, nodeName),
+		nodeMetaKey(t, id, nodeName),
+		leaseExpiryZSetKey(t, id),
+		outboxReadyKey(t, id),
+		outboxBodyKey(t, id),
 	}, string(token), int(ttl.Seconds()), leaseExpiryMember(id, nodeName), entry.ID, encoded, availableAt).Int64()
 	if err != nil && err != redis.Nil {
 		return false, fmt.Errorf("reset node for retry with outbox %q/%q: %w", id, nodeName, err)
@@ -487,11 +497,11 @@ func (s *Store) ResetNodeForRetryWithOutbox(ctx context.Context, id types.Execut
 		return false, nil
 	}
 	if err := s.refreshTransientTTL(ctx, id,
-		nodeStatusKey(id, nodeName),
-		nodeMetaKey(id, nodeName),
-		leaseExpiryZSetKey(id),
-		outboxReadyKey(id),
-		outboxBodyKey(id),
+		nodeStatusKey(t, id, nodeName),
+		nodeMetaKey(t, id, nodeName),
+		leaseExpiryZSetKey(t, id),
+		outboxReadyKey(t, id),
+		outboxBodyKey(t, id),
 	); err != nil {
 		return false, err
 	}
@@ -516,12 +526,13 @@ func (s *Store) RevokeLeaseWithOutbox(ctx context.Context, id types.ExecutionID,
 		availableAt = entry.AvailableAt.UTC().UnixMilli()
 	}
 	ttl := s.getExecTTL(id)
+	t := tenant.FromContext(ctx)
 	result, err := revokeLeaseWithOutboxLua.Run(ctx, s.rdb, []string{
-		nodeStatusKey(id, nodeName),
-		nodeMetaKey(id, nodeName),
-		leaseExpiryZSetKey(id),
-		outboxReadyKey(id),
-		outboxBodyKey(id),
+		nodeStatusKey(t, id, nodeName),
+		nodeMetaKey(t, id, nodeName),
+		leaseExpiryZSetKey(t, id),
+		outboxReadyKey(t, id),
+		outboxBodyKey(t, id),
 	}, string(token), int(ttl.Seconds()), leaseExpiryMember(id, nodeName), entry.ID, encoded, availableAt).Int64()
 	if err != nil && err != redis.Nil {
 		return false, fmt.Errorf("revoke lease with outbox %q/%q: %w", id, nodeName, err)
@@ -530,11 +541,11 @@ func (s *Store) RevokeLeaseWithOutbox(ctx context.Context, id types.ExecutionID,
 		return false, nil
 	}
 	if err := s.refreshTransientTTL(ctx, id,
-		nodeStatusKey(id, nodeName),
-		nodeMetaKey(id, nodeName),
-		leaseExpiryZSetKey(id),
-		outboxReadyKey(id),
-		outboxBodyKey(id),
+		nodeStatusKey(t, id, nodeName),
+		nodeMetaKey(t, id, nodeName),
+		leaseExpiryZSetKey(t, id),
+		outboxReadyKey(t, id),
+		outboxBodyKey(t, id),
 	); err != nil {
 		return false, err
 	}
@@ -604,18 +615,19 @@ func (s *Store) CommitNode(ctx context.Context, req engine.CommitNodeRequest) (e
 		cyclicComplete, cyclicFinalStatus, cyclicFinalError, len(req.CyclicOutbox),
 	}
 	args = append(args, cyclicArgs...)
+	t := tenant.FromContext(ctx)
 	result, err := commitNodeLua.Run(ctx, s.rdb, []string{
-		execKey(req.ExecutionID, "status"),
-		execKey(req.ExecutionID, "error"),
-		remainingNodesKey(req.ExecutionID),
-		failedNodesKey(req.ExecutionID),
-		nodeStatusKey(req.ExecutionID, req.NodeName),
-		nodeMetaKey(req.ExecutionID, req.NodeName),
-		outputKey(req.ExecutionID, req.NodeName),
-		leaseExpiryZSetKey(req.ExecutionID),
-		outboxReadyKey(req.ExecutionID),
-		outboxBodyKey(req.ExecutionID),
-		scheduleKey(req.ExecutionID, req.NodeIdx),
+		execKey(t, req.ExecutionID, "status"),
+		execKey(t, req.ExecutionID, "error"),
+		remainingNodesKey(t, req.ExecutionID),
+		failedNodesKey(t, req.ExecutionID),
+		nodeStatusKey(t, req.ExecutionID, req.NodeName),
+		nodeMetaKey(t, req.ExecutionID, req.NodeName),
+		outputKey(t, req.ExecutionID, req.NodeName),
+		leaseExpiryZSetKey(t, req.ExecutionID),
+		outboxReadyKey(t, req.ExecutionID),
+		outboxBodyKey(t, req.ExecutionID),
+		scheduleKey(t, req.ExecutionID, req.NodeIdx),
 	}, args...).Slice()
 	if err != nil {
 		return engine.CommitNodeResult{}, fmt.Errorf("commit node %q/%q: %w", req.ExecutionID, req.NodeName, err)
@@ -676,21 +688,22 @@ func (s *Store) AdvanceNode(ctx context.Context, req engine.AdvanceNodeRequest) 
 		return engine.AdvanceNodeResult{Applied: true}, nil
 	}
 	ttl := s.getExecTTL(req.ExecutionID)
+	t := tenant.FromContext(ctx)
 	keys := []string{
-		execKey(req.ExecutionID, "status"),
-		nodeStatusKey(req.ExecutionID, req.NodeName),
-		nodeMetaKey(req.ExecutionID, req.NodeName),
-		advanceMarkerKey(req.ExecutionID, req.NodeName, req.ActivationID),
-		outboxReadyKey(req.ExecutionID),
-		outboxBodyKey(req.ExecutionID),
+		execKey(t, req.ExecutionID, "status"),
+		nodeStatusKey(t, req.ExecutionID, req.NodeName),
+		nodeMetaKey(t, req.ExecutionID, req.NodeName),
+		advanceMarkerKey(t, req.ExecutionID, req.NodeName, req.ActivationID),
+		outboxReadyKey(t, req.ExecutionID),
+		outboxBodyKey(t, req.ExecutionID),
 	}
 	args := []any{req.ActivationID, int(ttl.Seconds()), len(req.Arrivals), time.Now().UTC().UnixMilli()}
 	outboxIDs := make([]string, 0, len(req.Arrivals))
 	for _, arrival := range req.Arrivals {
 		keys = append(keys,
-			inDegreeKey(req.ExecutionID, arrival.NodeIdx),
-			activeInputsKey(req.ExecutionID, arrival.NodeIdx),
-			scheduleKey(req.ExecutionID, arrival.NodeIdx),
+			inDegreeKey(t, req.ExecutionID, arrival.NodeIdx),
+			activeInputsKey(t, req.ExecutionID, arrival.NodeIdx),
+			scheduleKey(t, req.ExecutionID, arrival.NodeIdx),
 		)
 		executeID := redisExecuteOutboxID(req.ExecutionID, arrival.NodeName, req.ActivationID)
 		skipID := redisSkipOutboxID(req.ExecutionID, arrival.NodeName, req.ActivationID)
@@ -735,17 +748,18 @@ func (s *Store) ListOutbox(ctx context.Context, id types.ExecutionID, before tim
 	if limit <= 0 {
 		return nil, nil
 	}
+	t := tenant.FromContext(ctx)
 	ids, err := s.rdb.ZRangeArgs(ctx, redis.ZRangeArgs{
-		Key: outboxReadyKey(id), Start: "-inf", Stop: fmt.Sprintf("%d", before.UnixMilli()), ByScore: true, Offset: 0, Count: int64(limit),
+		Key: outboxReadyKey(t, id), Start: "-inf", Stop: fmt.Sprintf("%d", before.UnixMilli()), ByScore: true, Offset: 0, Count: int64(limit),
 	}).Result()
 	if err != nil {
 		return nil, fmt.Errorf("list outbox %q: %w", id, err)
 	}
 	out := make([]engine.OutboxEntry, 0, len(ids))
 	for _, entryID := range ids {
-		raw, err := s.rdb.HGet(ctx, outboxBodyKey(id), entryID).Result()
+		raw, err := s.rdb.HGet(ctx, outboxBodyKey(t, id), entryID).Result()
 		if err == redis.Nil {
-			_ = ackOutboxLua.Run(ctx, s.rdb, []string{outboxReadyKey(id), outboxBodyKey(id), outboxAttemptsKey(id)}, entryID).Err()
+			_ = ackOutboxLua.Run(ctx, s.rdb, []string{outboxReadyKey(t, id), outboxBodyKey(t, id), outboxAttemptsKey(t, id)}, entryID).Err()
 			continue
 		}
 		if err != nil {
@@ -762,7 +776,8 @@ func (s *Store) ListOutbox(ctx context.Context, id types.ExecutionID, before tim
 
 // AckOutbox removes an already-enqueued entry atomically and idempotently.
 func (s *Store) AckOutbox(ctx context.Context, id types.ExecutionID, entryID string) error {
-	if err := ackOutboxLua.Run(ctx, s.rdb, []string{outboxReadyKey(id), outboxBodyKey(id), outboxAttemptsKey(id)}, entryID).Err(); err != nil {
+	t := tenant.FromContext(ctx)
+	if err := ackOutboxLua.Run(ctx, s.rdb, []string{outboxReadyKey(t, id), outboxBodyKey(t, id), outboxAttemptsKey(t, id)}, entryID).Err(); err != nil {
 		return fmt.Errorf("ack outbox %q/%q: %w", id, entryID, err)
 	}
 	return nil
@@ -777,13 +792,14 @@ func (s *Store) RecordOutboxFailure(ctx context.Context, id types.ExecutionID, e
 		maxAttempts = engine.DefaultOutboxMaxDeliveryAttempts
 	}
 	ttl := s.getExecTTL(id)
+	t := tenant.FromContext(ctx)
 	result, err := recordOutboxFailureLua.Run(ctx, s.rdb, []string{
-		outboxReadyKey(id),
-		outboxBodyKey(id),
-		outboxAttemptsKey(id),
-		outboxDeadKey(id),
-		outboxDeadBodyKey(id),
-		outboxDeadMetaKey(id, entry.ID),
+		outboxReadyKey(t, id),
+		outboxBodyKey(t, id),
+		outboxAttemptsKey(t, id),
+		outboxDeadKey(t, id),
+		outboxDeadBodyKey(t, id),
+		outboxDeadMetaKey(t, id, entry.ID),
 	}, entry.ID, maxAttempts, time.Now().UTC().UnixMilli(), int(ttl.Seconds()),
 		entry.Task.NodeName, entry.Task.ActivationID).Slice()
 	if err != nil {
@@ -794,12 +810,12 @@ func (s *Store) RecordOutboxFailure(ctx context.Context, id types.ExecutionID, e
 	}
 	failure := engine.OutboxDeliveryFailure{Attempts: int(redisResultInt(result[0])), DeadLettered: redisResultInt(result[1]) == 1}
 	if err := s.refreshTransientTTL(ctx, id,
-		outboxReadyKey(id),
-		outboxBodyKey(id),
-		outboxAttemptsKey(id),
-		outboxDeadKey(id),
-		outboxDeadBodyKey(id),
-		outboxDeadMetaKey(id, entry.ID),
+		outboxReadyKey(t, id),
+		outboxBodyKey(t, id),
+		outboxAttemptsKey(t, id),
+		outboxDeadKey(t, id),
+		outboxDeadBodyKey(t, id),
+		outboxDeadMetaKey(t, id, entry.ID),
 	); err != nil {
 		return engine.OutboxDeliveryFailure{}, err
 	}
@@ -811,16 +827,29 @@ func (s *Store) RecordOutboxFailure(ctx context.Context, id types.ExecutionID, e
 // the task-delivery hot path.
 func (s *Store) OutboxMetrics(ctx context.Context) (engine.OutboxMetricsSnapshot, error) {
 	var snapshot engine.OutboxMetricsSnapshot
+	tenants, err := s.listTenants(ctx)
+	if err != nil {
+		return engine.OutboxMetricsSnapshot{}, fmt.Errorf("list tenants for outbox metrics: %w", err)
+	}
+	for _, t := range tenants {
+		if err := s.scanOutboxMetricsForTenant(ctx, t, &snapshot); err != nil {
+			return engine.OutboxMetricsSnapshot{}, err
+		}
+	}
+	return snapshot, nil
+}
+
+func (s *Store) scanOutboxMetricsForTenant(ctx context.Context, t tenant.TenantID, snapshot *engine.OutboxMetricsSnapshot) error {
 	var cursor uint64
 	for {
-		keys, next, err := s.rdb.Scan(ctx, cursor, "xflow:exec:{*}:outbox:ready", 128).Result()
+		keys, next, err := s.rdb.Scan(ctx, cursor, execScanPattern(t, "outbox:ready"), 128).Result()
 		if err != nil {
-			return engine.OutboxMetricsSnapshot{}, fmt.Errorf("scan pending outbox indexes: %w", err)
+			return fmt.Errorf("scan pending outbox indexes: %w", err)
 		}
 		for _, key := range keys {
 			count, err := s.rdb.ZCard(ctx, key).Result()
 			if err != nil {
-				return engine.OutboxMetricsSnapshot{}, fmt.Errorf("count pending outbox %q: %w", key, err)
+				return fmt.Errorf("count pending outbox %q: %w", key, err)
 			}
 			snapshot.Pending += int(count)
 			if count == 0 {
@@ -830,14 +859,14 @@ func (s *Store) OutboxMetrics(ctx context.Context) (engine.OutboxMetricsSnapshot
 			if !ok {
 				continue
 			}
-			entries, err := s.rdb.HVals(ctx, outboxBodyKey(id)).Result()
+			entries, err := s.rdb.HVals(ctx, outboxBodyKey(t, id)).Result()
 			if err != nil {
-				return engine.OutboxMetricsSnapshot{}, fmt.Errorf("read pending outbox bodies %q: %w", key, err)
+				return fmt.Errorf("read pending outbox bodies %q: %w", key, err)
 			}
 			for _, raw := range entries {
 				entry, err := unmarshalRedisOutboxEntry(raw)
 				if err != nil {
-					return engine.OutboxMetricsSnapshot{}, fmt.Errorf("decode pending outbox body %q: %w", key, err)
+					return fmt.Errorf("decode pending outbox body %q: %w", key, err)
 				}
 				createdAt := entry.CreatedAt
 				if createdAt.IsZero() {
@@ -856,14 +885,14 @@ func (s *Store) OutboxMetrics(ctx context.Context) (engine.OutboxMetricsSnapshot
 
 	cursor = 0
 	for {
-		keys, next, err := s.rdb.Scan(ctx, cursor, "xflow:exec:{*}:outbox:dead", 128).Result()
+		keys, next, err := s.rdb.Scan(ctx, cursor, execScanPattern(t, "outbox:dead"), 128).Result()
 		if err != nil {
-			return engine.OutboxMetricsSnapshot{}, fmt.Errorf("scan dead-letter outbox indexes: %w", err)
+			return fmt.Errorf("scan dead-letter outbox indexes: %w", err)
 		}
 		for _, key := range keys {
 			count, err := s.rdb.ZCard(ctx, key).Result()
 			if err != nil {
-				return engine.OutboxMetricsSnapshot{}, fmt.Errorf("count dead-letter outbox %q: %w", key, err)
+				return fmt.Errorf("count dead-letter outbox %q: %w", key, err)
 			}
 			snapshot.DeadLettered += int(count)
 		}
@@ -872,7 +901,7 @@ func (s *Store) OutboxMetrics(ctx context.Context) (engine.OutboxMetricsSnapshot
 			break
 		}
 	}
-	return snapshot, nil
+	return nil
 }
 
 // ListDeadLetters returns one page of dead-lettered outbox entries for one
@@ -892,8 +921,9 @@ func (s *Store) ListDeadLetters(ctx context.Context, id types.ExecutionID, page 
 	// Stable lexicographic pagination by entry ID (a member cursor). The dead
 	// index is append-only by unique entry ID, so a member cursor is stable for
 	// the lifetime of a listing. Over-fetch by one to detect a next page.
+	t := tenant.FromContext(ctx)
 	args := redis.ZRangeArgs{
-		Key: outboxDeadKey(id), Start: "-", Stop: "+", ByLex: true, Offset: 0, Count: int64(page.Limit + 1),
+		Key: outboxDeadKey(t, id), Start: "-", Stop: "+", ByLex: true, Offset: 0, Count: int64(page.Limit + 1),
 	}
 	if page.Cursor != "" {
 		// Exclusive lower bound: resume strictly after the cursor member.
@@ -910,10 +940,10 @@ func (s *Store) ListDeadLetters(ctx context.Context, id types.ExecutionID, page 
 	}
 	out := make([]engine.OutboxEntry, 0, len(ids))
 	for _, entryID := range ids {
-		raw, err := s.rdb.HGet(ctx, outboxDeadBodyKey(id), entryID).Result()
+		raw, err := s.rdb.HGet(ctx, outboxDeadBodyKey(t, id), entryID).Result()
 		if err == redis.Nil {
 			// body missing while index still references it: self-heal by removing the stale index entry
-			_ = s.rdb.ZRem(ctx, outboxDeadKey(id), entryID).Err()
+			_ = s.rdb.ZRem(ctx, outboxDeadKey(t, id), entryID).Err()
 			continue
 		}
 		if err != nil {
@@ -943,17 +973,18 @@ func (s *Store) ReplayDeadLetter(ctx context.Context, req engine.ReplayDeadLette
 		requestID = req.EntryID
 	}
 	ttl := s.getExecTTL(req.ExecutionID)
+	t := tenant.FromContext(ctx)
 	result, err := replayDeadLetterLua.Run(ctx, s.rdb, []string{
-		outboxDeadKey(req.ExecutionID),
-		outboxDeadBodyKey(req.ExecutionID),
-		outboxReadyKey(req.ExecutionID),
-		outboxBodyKey(req.ExecutionID),
-		outboxAttemptsKey(req.ExecutionID),
-		execKey(req.ExecutionID, "status"),
-		outboxDeadMetaKey(req.ExecutionID, req.EntryID),
-		outboxReplayEntryIdxKey(req.ExecutionID),
+		outboxDeadKey(t, req.ExecutionID),
+		outboxDeadBodyKey(t, req.ExecutionID),
+		outboxReadyKey(t, req.ExecutionID),
+		outboxBodyKey(t, req.ExecutionID),
+		outboxAttemptsKey(t, req.ExecutionID),
+		execKey(t, req.ExecutionID, "status"),
+		outboxDeadMetaKey(t, req.ExecutionID, req.EntryID),
+		outboxReplayEntryIdxKey(t, req.ExecutionID),
 	}, req.EntryID, time.Now().UTC().UnixMilli(), int(ttl.Seconds()),
-		requestID, req.Operator, req.Reason, string(req.ExecutionID)).Slice()
+		requestID, req.Operator, req.Reason, string(req.ExecutionID), string(t)).Slice()
 	if err != nil {
 		return engine.ReplayDeadLetterResult{}, fmt.Errorf("replay dead letter %q/%q: %w", req.ExecutionID, req.EntryID, err)
 	}
@@ -996,11 +1027,32 @@ func (s *Store) ListOutboxExecutions(ctx context.Context, limit int) ([]types.Ex
 		return nil, nil
 	}
 	ids := make(map[types.ExecutionID]struct{})
+	tenants, err := s.listTenants(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list tenants for outbox discovery: %w", err)
+	}
+	for _, t := range tenants {
+		if len(ids) >= limit {
+			break
+		}
+		if err := s.scanOutboxExecutionsForTenant(ctx, t, limit, ids); err != nil {
+			return nil, err
+		}
+	}
+	out := make([]types.ExecutionID, 0, len(ids))
+	for id := range ids {
+		out = append(out, id)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out, nil
+}
+
+func (s *Store) scanOutboxExecutionsForTenant(ctx context.Context, t tenant.TenantID, limit int, ids map[types.ExecutionID]struct{}) error {
 	var cursor uint64
 	for len(ids) < limit {
-		keys, next, err := s.rdb.Scan(ctx, cursor, "xflow:exec:{*}:outbox:ready", 128).Result()
+		keys, next, err := s.rdb.Scan(ctx, cursor, execScanPattern(t, "outbox:ready"), 128).Result()
 		if err != nil {
-			return nil, fmt.Errorf("scan outbox indexes: %w", err)
+			return fmt.Errorf("scan outbox indexes: %w", err)
 		}
 		for _, key := range keys {
 			id, ok := executionIDFromKey(key)
@@ -1016,12 +1068,7 @@ func (s *Store) ListOutboxExecutions(ctx context.Context, limit int) ([]types.Ex
 			break
 		}
 	}
-	out := make([]types.ExecutionID, 0, len(ids))
-	for id := range ids {
-		out = append(out, id)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
-	return out, nil
+	return nil
 }
 
 func marshalRedisOutboxEntry(id string, task engine.Task, availableAt time.Time) (string, error) {
@@ -1088,19 +1135,6 @@ func redisResultString(value any) string {
 		return text
 	}
 	return ""
-}
-
-func executionIDFromKey(key string) (types.ExecutionID, bool) {
-	const prefix = "xflow:exec:{"
-	if !strings.HasPrefix(key, prefix) {
-		return "", false
-	}
-	rest := strings.TrimPrefix(key, prefix)
-	end := strings.IndexByte(rest, '}')
-	if end <= 0 {
-		return "", false
-	}
-	return types.ExecutionID(rest[:end]), true
 }
 
 func (s *Store) evictExecutionCaches(id types.ExecutionID) {

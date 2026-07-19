@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/types"
@@ -25,6 +26,7 @@ func (s *Store) AcquireTaskLease(ctx context.Context, lease *engine.TaskLease) (
 	}()
 
 	ttl := s.getExecTTL(lease.Task.ExecutionID)
+	t := tenant.FromContext(ctx)
 	payloadJSON := ""
 	if lease.Task.Payload != nil {
 		encoded, err := json.Marshal(lease.Task.Payload)
@@ -35,9 +37,9 @@ func (s *Store) AcquireTaskLease(ctx context.Context, lease *engine.TaskLease) (
 	}
 	result, err := acquireTaskLeaseLua.Run(ctx, s.rdb,
 		[]string{
-			nodeStatusKey(lease.Task.ExecutionID, lease.Task.NodeName),
-			nodeMetaKey(lease.Task.ExecutionID, lease.Task.NodeName),
-			leaseExpiryZSetKey(lease.Task.ExecutionID),
+			nodeStatusKey(t, lease.Task.ExecutionID, lease.Task.NodeName),
+			nodeMetaKey(t, lease.Task.ExecutionID, lease.Task.NodeName),
+			leaseExpiryZSetKey(t, lease.Task.ExecutionID),
 		},
 		string(lease.LeaseID), string(lease.LeaseToken), lease.IssuedAt.UnixMilli(), int(ttl.Seconds()), lease.Task.ActivationID, lease.Task.AutoDepth, lease.TTL.Milliseconds(), leaseExpiryMember(lease.Task.ExecutionID, lease.Task.NodeName), int(lease.Task.Type), payloadJSON, lease.Task.NodeIdx,
 	).Slice()
@@ -93,9 +95,9 @@ func (s *Store) AcquireTaskLease(ctx context.Context, lease *engine.TaskLease) (
 	}
 
 	if err := s.refreshTransientTTL(ctx, lease.Task.ExecutionID,
-		nodeStatusKey(lease.Task.ExecutionID, lease.Task.NodeName),
-		nodeMetaKey(lease.Task.ExecutionID, lease.Task.NodeName),
-		leaseExpiryZSetKey(lease.Task.ExecutionID),
+		nodeStatusKey(t, lease.Task.ExecutionID, lease.Task.NodeName),
+		nodeMetaKey(t, lease.Task.ExecutionID, lease.Task.NodeName),
+		leaseExpiryZSetKey(t, lease.Task.ExecutionID),
 	); err != nil {
 		return nil, false, err
 	}
@@ -138,57 +140,76 @@ func (s *Store) ListExpiredLeases(ctx context.Context, before time.Time) (expire
 	max := fmt.Sprintf("%d", before.UnixMilli())
 	out := make([]engine.ExpiredLease, 0, leaseIndexBatchLimit)
 	seenIndexes := make(map[string]struct{})
-	var cursor uint64
 
-	for len(out) < leaseIndexBatchLimit {
-		indexKeys, next, err := s.rdb.Scan(ctx, cursor, "xflow:exec:{*}:leases", scanCount).Result()
+	tenants, err := s.listTenants(ctx)
+	if err != nil {
+		return out, fmt.Errorf("list tenants for lease scan: %w", err)
+	}
+	for _, t := range tenants {
+		if len(out) >= leaseIndexBatchLimit {
+			break
+		}
+		if err := s.scanExpiredLeasesForTenant(ctx, t, before, max, scanCount, seenIndexes, &out); err != nil {
+			return out, err
+		}
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
+}
+
+func (s *Store) scanExpiredLeasesForTenant(ctx context.Context, t tenant.TenantID, before time.Time, max string, scanCount int64, seenIndexes map[string]struct{}, out *[]engine.ExpiredLease) error {
+	var cursor uint64
+	for len(*out) < leaseIndexBatchLimit {
+		indexKeys, next, err := s.rdb.Scan(ctx, cursor, execScanPattern(t, "leases"), scanCount).Result()
 		if err != nil {
-			return out, fmt.Errorf("scan lease indexes: %w", err)
+			return fmt.Errorf("scan lease indexes: %w", err)
 		}
 		for _, indexKey := range indexKeys {
 			if _, seen := seenIndexes[indexKey]; seen {
 				continue
 			}
 			seenIndexes[indexKey] = struct{}{}
-			indexExecID, validIndex := executionIDFromKey(indexKey)
-			if !validIndex {
+			indexTenant, indexExecID, validIndex := parseTenantExecKey(indexKey)
+			if !validIndex || indexTenant != t {
 				continue
 			}
 
-			remaining := leaseIndexBatchLimit - len(out)
+			remaining := leaseIndexBatchLimit - len(*out)
 			members, err := s.rdb.ZRangeArgs(ctx, redis.ZRangeArgs{
 				Key: indexKey, Start: "-inf", Stop: max, ByScore: true, Offset: 0, Count: int64(remaining),
 			}).Result()
 			if err != nil {
-				return out, fmt.Errorf("list expired leases for %q: %w", indexExecID, err)
+				return fmt.Errorf("list expired leases for %q: %w", indexExecID, err)
 			}
 			for _, member := range members {
 				execID, nodeName, ok := splitLeaseMember(member)
 				if !ok || execID != indexExecID {
 					if err := s.rdb.ZRem(ctx, indexKey, member).Err(); err != nil {
-						return out, fmt.Errorf("prune malformed lease index member %q: %w", member, err)
+						return fmt.Errorf("prune malformed lease index member %q: %w", member, err)
 					}
 					continue
 				}
 
-				status, err := s.rdb.Get(ctx, nodeStatusKey(execID, nodeName)).Result()
+				status, err := s.rdb.Get(ctx, nodeStatusKey(t, execID, nodeName)).Result()
 				if err == redis.Nil || (err == nil && status != string(types.NodeStatusRunning) && status != string(types.NodeStatusCommitting) && status != string(types.NodeStatusWaiting)) {
 					if removeErr := s.rdb.ZRem(ctx, indexKey, member).Err(); removeErr != nil {
-						return out, fmt.Errorf("prune stale lease %q/%q: %w", execID, nodeName, removeErr)
+						return fmt.Errorf("prune stale lease %q/%q: %w", execID, nodeName, removeErr)
 					}
 					continue
 				}
 				if err != nil {
-					return out, fmt.Errorf("read node status %q/%q: %w", execID, nodeName, err)
+					return fmt.Errorf("read node status %q/%q: %w", execID, nodeName, err)
 				}
 
-				meta, err := s.rdb.HGetAll(ctx, nodeMetaKey(execID, nodeName)).Result()
+				meta, err := s.rdb.HGetAll(ctx, nodeMetaKey(t, execID, nodeName)).Result()
 				if err != nil {
-					return out, fmt.Errorf("read node meta %q/%q: %w", execID, nodeName, err)
+					return fmt.Errorf("read node meta %q/%q: %w", execID, nodeName, err)
 				}
 				if meta["lease_token"] == "" {
 					if removeErr := s.rdb.ZRem(ctx, indexKey, member).Err(); removeErr != nil {
-						return out, fmt.Errorf("prune tokenless lease %q/%q: %w", execID, nodeName, removeErr)
+						return fmt.Errorf("prune tokenless lease %q/%q: %w", execID, nodeName, removeErr)
 					}
 					continue
 				}
@@ -205,7 +226,7 @@ func (s *Store) ListExpiredLeases(ctx context.Context, before time.Time) (expire
 				}
 				if deadlineMs > before.UnixMilli() {
 					if err := s.rdb.ZAdd(ctx, indexKey, redis.Z{Score: float64(deadlineMs), Member: member}).Err(); err != nil {
-						return out, fmt.Errorf("repair lease index %q/%q: %w", execID, nodeName, err)
+						return fmt.Errorf("repair lease index %q/%q: %w", execID, nodeName, err)
 					}
 					continue
 				}
@@ -229,16 +250,16 @@ func (s *Store) ListExpiredLeases(ctx context.Context, before time.Time) (expire
 				if rawPayload := meta["lease_payload"]; rawPayload != "" {
 					var payload types.SignalPayload
 					if err := json.Unmarshal([]byte(rawPayload), &payload); err != nil {
-						return out, fmt.Errorf("decode expired lease payload %q/%q: %w", execID, nodeName, err)
+						return fmt.Errorf("decode expired lease payload %q/%q: %w", execID, nodeName, err)
 					}
 					lease.Payload = &payload
 				}
-				out = append(out, lease)
-				if len(out) == leaseIndexBatchLimit {
+				*out = append(*out, lease)
+				if len(*out) == leaseIndexBatchLimit {
 					break
 				}
 			}
-			if len(out) == leaseIndexBatchLimit {
+			if len(*out) == leaseIndexBatchLimit {
 				break
 			}
 		}
@@ -247,10 +268,7 @@ func (s *Store) ListExpiredLeases(ctx context.Context, before time.Time) (expire
 			break
 		}
 	}
-	if len(out) == 0 {
-		return nil, nil
-	}
-	return out, nil
+	return nil
 }
 
 func (s *Store) RevokeLease(ctx context.Context, id types.ExecutionID, name string, token engine.LeaseToken) (bool, error) {
@@ -258,15 +276,16 @@ func (s *Store) RevokeLease(ctx context.Context, id types.ExecutionID, name stri
 		return false, nil
 	}
 	ttl := s.getExecTTL(id)
+	t := tenant.FromContext(ctx)
 	result, err := revokeLeaseLua.Run(ctx, s.rdb,
-		[]string{nodeStatusKey(id, name), nodeMetaKey(id, name), leaseExpiryZSetKey(id)},
+		[]string{nodeStatusKey(t, id, name), nodeMetaKey(t, id, name), leaseExpiryZSetKey(t, id)},
 		string(token), int(ttl.Seconds()), leaseExpiryMember(id, name),
 	).Int64()
 	if err != nil && err != redis.Nil {
 		return false, fmt.Errorf("revoke lease %q/%q: %w", id, name, err)
 	}
 	if result == 1 {
-		if err := s.refreshTransientTTL(ctx, id, nodeStatusKey(id, name), nodeMetaKey(id, name), leaseExpiryZSetKey(id)); err != nil {
+		if err := s.refreshTransientTTL(ctx, id, nodeStatusKey(t, id, name), nodeMetaKey(t, id, name), leaseExpiryZSetKey(t, id)); err != nil {
 			return false, err
 		}
 	}
@@ -286,8 +305,9 @@ func parseInt64(s string, cb func(int64)) {
 }
 
 func (s *Store) ClaimTaskLease(ctx context.Context, lease *engine.TaskLease) (*engine.NodeSnapshot, bool, error) {
+	t := tenant.FromContext(ctx)
 	if s.transient {
-		execStatus, err := s.rdb.Get(ctx, execKey(lease.Task.ExecutionID, "status")).Result()
+		execStatus, err := s.rdb.Get(ctx, execKey(t, lease.Task.ExecutionID, "status")).Result()
 		if err != nil && err != redis.Nil {
 			return nil, false, fmt.Errorf("claim task lease %q/%q: get execution status: %w", lease.Task.ExecutionID, lease.Task.NodeName, err)
 		}
@@ -306,9 +326,9 @@ func (s *Store) ClaimTaskLease(ctx context.Context, lease *engine.TaskLease) (*e
 	ttl := s.getExecTTL(lease.Task.ExecutionID)
 	result, err := claimTaskLeaseLua.Run(ctx, s.rdb,
 		[]string{
-			nodeStatusKey(lease.Task.ExecutionID, lease.Task.NodeName),
-			nodeMetaKey(lease.Task.ExecutionID, lease.Task.NodeName),
-			leaseExpiryZSetKey(lease.Task.ExecutionID),
+			nodeStatusKey(t, lease.Task.ExecutionID, lease.Task.NodeName),
+			nodeMetaKey(t, lease.Task.ExecutionID, lease.Task.NodeName),
+			leaseExpiryZSetKey(t, lease.Task.ExecutionID),
 		},
 		string(lease.LeaseToken), int(ttl.Seconds()), lease.Task.ActivationID, leaseExpiryMember(lease.Task.ExecutionID, lease.Task.NodeName),
 	).Slice()
@@ -333,9 +353,9 @@ func (s *Store) ClaimTaskLease(ctx context.Context, lease *engine.TaskLease) (*e
 		return ns, false, nil
 	}
 	if err := s.refreshTransientTTL(ctx, lease.Task.ExecutionID,
-		nodeStatusKey(lease.Task.ExecutionID, lease.Task.NodeName),
-		nodeMetaKey(lease.Task.ExecutionID, lease.Task.NodeName),
-		leaseExpiryZSetKey(lease.Task.ExecutionID),
+		nodeStatusKey(t, lease.Task.ExecutionID, lease.Task.NodeName),
+		nodeMetaKey(t, lease.Task.ExecutionID, lease.Task.NodeName),
+		leaseExpiryZSetKey(t, lease.Task.ExecutionID),
 	); err != nil {
 		return nil, false, err
 	}
@@ -374,22 +394,23 @@ func (s *Store) SuspendTaskLease(ctx context.Context, lease *engine.TaskLease, o
 	if oldWaiter == "" {
 		oldWaiter = "__none__"
 	}
+	t := tenant.FromContext(ctx)
 	keys := []string{
-		nodeStatusKey(lease.Task.ExecutionID, lease.Task.NodeName),
-		nodeMetaKey(lease.Task.ExecutionID, lease.Task.NodeName),
-		outputKey(lease.Task.ExecutionID, lease.Task.NodeName),
-		leaseExpiryZSetKey(lease.Task.ExecutionID),
-		suspendedNodesKey(lease.Task.ExecutionID),
-		resumeLockKey(lease.Task.ExecutionID, lease.Task.NodeName),
-		waiterKey(lease.Task.ExecutionID, oldWaiter),
-		waiterSpecKey(lease.Task.ExecutionID, lease.Task.NodeName),
-		signalBatchKey(lease.Task.ExecutionID, lease.Task.NodeName),
+		nodeStatusKey(t, lease.Task.ExecutionID, lease.Task.NodeName),
+		nodeMetaKey(t, lease.Task.ExecutionID, lease.Task.NodeName),
+		outputKey(t, lease.Task.ExecutionID, lease.Task.NodeName),
+		leaseExpiryZSetKey(t, lease.Task.ExecutionID),
+		suspendedNodesKey(t, lease.Task.ExecutionID),
+		resumeLockKey(t, lease.Task.ExecutionID, lease.Task.NodeName),
+		waiterKey(t, lease.Task.ExecutionID, oldWaiter),
+		waiterSpecKey(t, lease.Task.ExecutionID, lease.Task.NodeName),
+		signalBatchKey(t, lease.Task.ExecutionID, lease.Task.NodeName),
 	}
 	for _, signalName := range spec.Signals {
-		keys = append(keys, signalKey(lease.Task.ExecutionID, signalName))
+		keys = append(keys, signalKey(t, lease.Task.ExecutionID, signalName))
 	}
 	for _, signalName := range spec.Signals {
-		keys = append(keys, waiterKey(lease.Task.ExecutionID, signalName))
+		keys = append(keys, waiterKey(t, lease.Task.ExecutionID, signalName))
 	}
 	store := 0
 	if storeOutput {

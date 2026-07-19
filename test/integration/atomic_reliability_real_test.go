@@ -167,7 +167,7 @@ func deleteAtomicReliabilityKeys(t *testing.T, rdb *redis.Client, id types.Execu
 
 	var cursor uint64
 	for {
-		keys, next, err := rdb.Scan(ctx, cursor, fmt.Sprintf("xflow:exec:{%s}:*", id), 128).Result()
+		keys, next, err := rdb.Scan(ctx, cursor, fmt.Sprintf("xflow:tdefault:exec:{%s}:*", id), 128).Result()
 		if err != nil {
 			t.Errorf("scan test execution keys: %v", err)
 			return

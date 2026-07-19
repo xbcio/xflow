@@ -127,7 +127,7 @@ xflow-server \
 | `--redis-db` | `0` | single/sentinel 可用 | Redis 逻辑库，cluster 模式忽略 |
 | `--redis-tls` | `false` | 生产推荐 | 为 Redis 连接启用 TLS |
 
-> 注意：cluster 模式使用 `xflow:exec:{<id>}:...` hash tag 保证同一 execution 的 key 共置同 slot；sentinel 模式仍使用单一 master 路由。配置错误时 `cmd/server` fail-closed 启动失败。
+> 注意：cluster 模式使用 `xflow:t<tenant>:exec:{<id>}:... (tenant 前缀无花括号，hash tag 仍为 {<id>})` hash tag 保证同一 execution 的 key 共置同 slot；sentinel 模式仍使用单一 master 路由。配置错误时 `cmd/server` fail-closed 启动失败。
 
 ## 2. runners.yaml 示例
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/types"
@@ -67,53 +68,66 @@ func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot
 	}
 
 	pipe := s.rdb.TxPipeline()
-	keys := []string{execKey(e.ID, "status"), execKey(e.ID, "graph")}
-	pipe.Set(ctx, execKey(e.ID, "status"), string(e.Status), ttl)
-	pipe.Set(ctx, execKey(e.ID, "graph"), string(graphJSON), ttl)
+	t := tenant.FromContext(ctx)
+	// Register the tenant in the discovery registry so maintenance loops
+	// (sweeper, lease repair, outbox dispatcher, timeout monitor) SCAN its
+	// namespace. Skipped in transient mode to preserve the fire-and-forget
+	// no-bookkeeping invariant; the default tenant is always scanned anyway.
+	if !s.transient {
+		if err := s.registerTenant(ctx, t); err != nil {
+			// Non-fatal: the tenant is re-registered on the next durable
+			// write and listTenants always includes the default tenant, so a
+			// transient SADD failure cannot strand a tenant's keys outside the
+			// sweeper.
+		}
+	}
+	keys := []string{execKey(t, e.ID, "status"), execKey(t, e.ID, "graph")}
+	pipe.Set(ctx, execKey(t, e.ID, "status"), string(e.Status), ttl)
+	pipe.Set(ctx, execKey(t, e.ID, "graph"), string(graphJSON), ttl)
 	if e.Params != nil {
 		paramsJSON, err := json.Marshal(e.Params)
 		if err != nil {
 			return fmt.Errorf("marshal execution params for %q: %w", e.ID, err)
 		}
-		pipe.Set(ctx, execKey(e.ID, "params"), string(paramsJSON), ttl)
-		keys = append(keys, execKey(e.ID, "params"))
+		pipe.Set(ctx, execKey(t, e.ID, "params"), string(paramsJSON), ttl)
+		keys = append(keys, execKey(t, e.ID, "params"))
 	}
 	if e.Runtime != nil {
 		runtimeJSON, err := json.Marshal(e.Runtime)
 		if err != nil {
 			return fmt.Errorf("marshal execution runtime for %q: %w", e.ID, err)
 		}
-		pipe.Set(ctx, execKey(e.ID, "runtime"), string(runtimeJSON), ttl)
-		keys = append(keys, execKey(e.ID, "runtime"))
+		pipe.Set(ctx, execKey(t, e.ID, "runtime"), string(runtimeJSON), ttl)
+		keys = append(keys, execKey(t, e.ID, "runtime"))
 	}
 	if e.TraceID != "" {
-		pipe.Set(ctx, execKey(e.ID, "trace_id"), e.TraceID, ttl)
-		keys = append(keys, execKey(e.ID, "trace_id"))
+		pipe.Set(ctx, execKey(t, e.ID, "trace_id"), e.TraceID, ttl)
+		keys = append(keys, execKey(t, e.ID, "trace_id"))
 	}
 	if e.SpanID != "" {
-		pipe.Set(ctx, execKey(e.ID, "span_id"), e.SpanID, ttl)
-		keys = append(keys, execKey(e.ID, "span_id"))
+		pipe.Set(ctx, execKey(t, e.ID, "span_id"), e.SpanID, ttl)
+		keys = append(keys, execKey(t, e.ID, "span_id"))
 	}
 	// Acyclic executions use these counters as the O(1) completion source of
 	// truth. Cyclic graphs retain their activation-based completion protocol.
 	if e.Graph != nil && !e.Graph.AllowCycles() {
-		pipe.Set(ctx, remainingNodesKey(e.ID), e.Graph.NodeCount(), ttl)
-		pipe.Set(ctx, failedNodesKey(e.ID), 0, ttl)
-		keys = append(keys, remainingNodesKey(e.ID), failedNodesKey(e.ID))
+		pipe.Set(ctx, remainingNodesKey(t, e.ID), e.Graph.NodeCount(), ttl)
+		pipe.Set(ctx, failedNodesKey(t, e.ID), 0, ttl)
+		keys = append(keys, remainingNodesKey(t, e.ID), failedNodesKey(t, e.ID))
 	}
 	// Seed in-degree counters.
 	if e.Graph != nil {
 		for i := 0; i < e.Graph.NodeCount(); i++ {
 			d := e.Graph.InDegreeAt(i)
 			if d > 0 {
-				pipe.Set(ctx, inDegreeKey(e.ID, i), d, ttl)
-				keys = append(keys, inDegreeKey(e.ID, i))
+				pipe.Set(ctx, inDegreeKey(t, e.ID, i), d, ttl)
+				keys = append(keys, inDegreeKey(t, e.ID, i))
 			}
 		}
 	}
 	if len(entries) > 0 {
-		readyKey := outboxReadyKey(e.ID)
-		bodyKey := outboxBodyKey(e.ID)
+		readyKey := outboxReadyKey(t, e.ID)
+		bodyKey := outboxBodyKey(t, e.ID)
 		availableNow := time.Now().UTC().UnixMilli()
 		for _, entry := range entries {
 			if entry.ID == "" {
@@ -162,35 +176,36 @@ func (s *Store) cleanupCreatedExecution(ctx context.Context, e *engine.Execution
 	delete(s.execTTLs, e.ID)
 	s.ttlMu.Unlock()
 
+	t := tenant.FromContext(ctx)
 	pipe := s.rdb.Pipeline()
 	pipe.Del(ctx,
-		execKey(e.ID, "status"),
-		execKey(e.ID, "graph"),
-		execKey(e.ID, "error"),
-		execKey(e.ID, "params"),
-		execKey(e.ID, "runtime"),
-		execKey(e.ID, "trace_id"),
-		execKey(e.ID, "span_id"),
-		remainingNodesKey(e.ID),
-		failedNodesKey(e.ID),
-		leaseExpiryZSetKey(e.ID),
-		outboxReadyKey(e.ID),
-		outboxBodyKey(e.ID),
-		outboxAttemptsKey(e.ID),
-		outboxDeadKey(e.ID),
-		outboxDeadBodyKey(e.ID),
-		executionKeySetKey(e.ID),
+		execKey(t, e.ID, "status"),
+		execKey(t, e.ID, "graph"),
+		execKey(t, e.ID, "error"),
+		execKey(t, e.ID, "params"),
+		execKey(t, e.ID, "runtime"),
+		execKey(t, e.ID, "trace_id"),
+		execKey(t, e.ID, "span_id"),
+		remainingNodesKey(t, e.ID),
+		failedNodesKey(t, e.ID),
+		leaseExpiryZSetKey(t, e.ID),
+		outboxReadyKey(t, e.ID),
+		outboxBodyKey(t, e.ID),
+		outboxAttemptsKey(t, e.ID),
+		outboxDeadKey(t, e.ID),
+		outboxDeadBodyKey(t, e.ID),
+		executionKeySetKey(t, e.ID),
 	)
 	if e.Graph != nil {
 		for i := 0; i < e.Graph.NodeCount(); i++ {
 			node := e.Graph.NodeAt(i)
 			pipe.Del(ctx,
-				inDegreeKey(e.ID, i),
-				activeInputsKey(e.ID, i),
-				scheduleKey(e.ID, i),
-				nodeStatusKey(e.ID, node.Name),
-				nodeMetaKey(e.ID, node.Name),
-				outputKey(e.ID, node.Name),
+				inDegreeKey(t, e.ID, i),
+				activeInputsKey(t, e.ID, i),
+				scheduleKey(t, e.ID, i),
+				nodeStatusKey(t, e.ID, node.Name),
+				nodeMetaKey(t, e.ID, node.Name),
+				outputKey(t, e.ID, node.Name),
 			)
 		}
 	}
@@ -236,21 +251,22 @@ func buildExecutionRecord(ctx context.Context, e *engine.ExecutionSnapshot, now 
 
 func (s *Store) UpdateExecutionStatus(ctx context.Context, id types.ExecutionID, status types.ExecutionStatus, errMsg string) error {
 	ttl := s.getExecTTL(id)
+	t := tenant.FromContext(ctx)
 	// Compare-and-set with cancel-aware fencing: a terminal or canceling status
 	// blocks non-canceled overwrites, so a concurrent cyclic completeExecution
 	// cannot stomp an in-flight Cancel.
 	errKey := ""
 	if errMsg != "" {
-		errKey = execKey(id, "error")
+		errKey = execKey(t, id, "error")
 	}
 	applied, err := updateExecutionStatusLua.Run(ctx, s.rdb,
-		[]string{execKey(id, "status"), errKey},
+		[]string{execKey(t, id, "status"), errKey},
 		string(status), errMsg, int(ttl.Seconds()),
 	).Int64()
 	if err != nil && err != redis.Nil {
 		return fmt.Errorf("update execution status %q: %w", id, err)
 	}
-	keys := []string{execKey(id, "status")}
+	keys := []string{execKey(t, id, "status")}
 	if errKey != "" {
 		keys = append(keys, errKey)
 	}
@@ -280,7 +296,8 @@ func (s *Store) UpdateExecutionStatus(ctx context.Context, id types.ExecutionID,
 }
 
 func (s *Store) GetExecution(ctx context.Context, id types.ExecutionID) (*engine.ExecutionSnapshot, error) {
-	val, err := s.rdb.Get(ctx, execKey(id, "status")).Result()
+	t := tenant.FromContext(ctx)
+	val, err := s.rdb.Get(ctx, execKey(t, id, "status")).Result()
 	if err == redis.Nil {
 		return nil, nil
 	}
@@ -291,7 +308,7 @@ func (s *Store) GetExecution(ctx context.Context, id types.ExecutionID) (*engine
 	g := s.graphs[id]
 	s.mu.RUnlock()
 	var params map[string]any
-	if raw, err := s.rdb.Get(ctx, execKey(id, "params")).Bytes(); err == nil {
+	if raw, err := s.rdb.Get(ctx, execKey(t, id, "params")).Bytes(); err == nil {
 		if err := json.Unmarshal(raw, &params); err != nil {
 			return nil, fmt.Errorf("unmarshal execution params %q: %w", id, err)
 		}
@@ -299,7 +316,7 @@ func (s *Store) GetExecution(ctx context.Context, id types.ExecutionID) (*engine
 		return nil, fmt.Errorf("get execution params %q: %w", id, err)
 	}
 	var runtime *types.Runtime
-	if raw, err := s.rdb.Get(ctx, execKey(id, "runtime")).Bytes(); err == nil {
+	if raw, err := s.rdb.Get(ctx, execKey(t, id, "runtime")).Bytes(); err == nil {
 		var decoded types.Runtime
 		if err := json.Unmarshal(raw, &decoded); err != nil {
 			return nil, fmt.Errorf("unmarshal execution runtime %q: %w", id, err)
@@ -309,13 +326,13 @@ func (s *Store) GetExecution(ctx context.Context, id types.ExecutionID) (*engine
 		return nil, fmt.Errorf("get execution runtime %q: %w", id, err)
 	}
 	var traceID string
-	if raw, err := s.rdb.Get(ctx, execKey(id, "trace_id")).Result(); err == nil {
+	if raw, err := s.rdb.Get(ctx, execKey(t, id, "trace_id")).Result(); err == nil {
 		traceID = raw
 	} else if err != redis.Nil {
 		return nil, fmt.Errorf("get execution trace ID %q: %w", id, err)
 	}
 	var spanID string
-	if raw, err := s.rdb.Get(ctx, execKey(id, "span_id")).Result(); err == nil {
+	if raw, err := s.rdb.Get(ctx, execKey(t, id, "span_id")).Result(); err == nil {
 		spanID = raw
 	} else if err != redis.Nil {
 		return nil, fmt.Errorf("get execution span ID %q: %w", id, err)

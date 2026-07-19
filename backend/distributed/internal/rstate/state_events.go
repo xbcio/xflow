@@ -5,12 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/types"
 )
 
-func doneChannel(id types.ExecutionID) string {
-	return fmt.Sprintf("xflow:exec:{%s}:done", id)
+func doneChannel(t tenant.TenantID, id types.ExecutionID) string {
+	return fmt.Sprintf("xflow:t%s:exec:{%s}:done", t, id)
 }
 
 func (s *Store) PublishExecutionEvent(ctx context.Context, event engine.ExecutionEvent) error {
@@ -18,11 +19,13 @@ func (s *Store) PublishExecutionEvent(ctx context.Context, event engine.Executio
 	if err != nil {
 		return fmt.Errorf("marshal execution event: %w", err)
 	}
-	return s.rdb.Publish(ctx, doneChannel(event.ExecutionID), data).Err()
+	t := tenant.FromContext(ctx)
+	return s.rdb.Publish(ctx, doneChannel(t, event.ExecutionID), data).Err()
 }
 
 func (s *Store) WatchExecution(ctx context.Context, id types.ExecutionID) (<-chan engine.ExecutionEvent, error) {
-	pubsub := s.rdb.Subscribe(ctx, doneChannel(id))
+	t := tenant.FromContext(ctx)
+	pubsub := s.rdb.Subscribe(ctx, doneChannel(t, id))
 	if _, err := pubsub.Receive(ctx); err != nil {
 		_ = pubsub.Close()
 		return nil, fmt.Errorf("subscribe execution events %q: %w", id, err)

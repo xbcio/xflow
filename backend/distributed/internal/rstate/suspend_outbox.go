@@ -8,6 +8,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/types"
 )
@@ -163,24 +164,25 @@ func (s *Store) SuspendTaskLeaseWithOutbox(ctx context.Context, lease *engine.Ta
 	if oldWaiter == "" {
 		oldWaiter = "__none__"
 	}
+	t := tenant.FromContext(ctx)
 	keys := []string{
-		nodeStatusKey(lease.Task.ExecutionID, lease.Task.NodeName),
-		nodeMetaKey(lease.Task.ExecutionID, lease.Task.NodeName),
-		outputKey(lease.Task.ExecutionID, lease.Task.NodeName),
-		leaseExpiryZSetKey(lease.Task.ExecutionID),
-		suspendedNodesKey(lease.Task.ExecutionID),
-		resumeLockKey(lease.Task.ExecutionID, lease.Task.NodeName),
-		waiterKey(lease.Task.ExecutionID, oldWaiter),
-		waiterSpecKey(lease.Task.ExecutionID, lease.Task.NodeName),
-		signalBatchKey(lease.Task.ExecutionID, lease.Task.NodeName),
-		outboxReadyKey(lease.Task.ExecutionID),
-		outboxBodyKey(lease.Task.ExecutionID),
+		nodeStatusKey(t, lease.Task.ExecutionID, lease.Task.NodeName),
+		nodeMetaKey(t, lease.Task.ExecutionID, lease.Task.NodeName),
+		outputKey(t, lease.Task.ExecutionID, lease.Task.NodeName),
+		leaseExpiryZSetKey(t, lease.Task.ExecutionID),
+		suspendedNodesKey(t, lease.Task.ExecutionID),
+		resumeLockKey(t, lease.Task.ExecutionID, lease.Task.NodeName),
+		waiterKey(t, lease.Task.ExecutionID, oldWaiter),
+		waiterSpecKey(t, lease.Task.ExecutionID, lease.Task.NodeName),
+		signalBatchKey(t, lease.Task.ExecutionID, lease.Task.NodeName),
+		outboxReadyKey(t, lease.Task.ExecutionID),
+		outboxBodyKey(t, lease.Task.ExecutionID),
 	}
 	for _, signalName := range spec.Signals {
-		keys = append(keys, signalKey(lease.Task.ExecutionID, signalName))
+		keys = append(keys, signalKey(t, lease.Task.ExecutionID, signalName))
 	}
 	for _, signalName := range spec.Signals {
-		keys = append(keys, waiterKey(lease.Task.ExecutionID, signalName))
+		keys = append(keys, waiterKey(t, lease.Task.ExecutionID, signalName))
 	}
 	store := 0
 	if storeOutput {

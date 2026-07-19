@@ -10,6 +10,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -40,17 +41,17 @@ func seedDeadLetter(t *testing.T, state *Store, id types.ExecutionID, entryID st
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := state.rdb.HSet(ctx, outboxBodyKey(id), entryID, body).Err(); err != nil {
+	if err := state.rdb.HSet(ctx, outboxBodyKey(tenant.DefaultTenant, id), entryID, body).Err(); err != nil {
 		t.Fatalf("HSet outbox body: %v", err)
 	}
-	if err := state.rdb.ZAdd(ctx, outboxReadyKey(id), redis.Z{Score: float64(time.Now().UTC().UnixMilli()), Member: entryID}).Err(); err != nil {
+	if err := state.rdb.ZAdd(ctx, outboxReadyKey(tenant.DefaultTenant, id), redis.Z{Score: float64(time.Now().UTC().UnixMilli()), Member: entryID}).Err(); err != nil {
 		t.Fatalf("ZAdd outbox ready: %v", err)
 	}
 	// Seed the node at activation 1 so the activation guard has a current value.
-	if err := state.rdb.Set(ctx, nodeStatusKey(id, "review"), "running", time.Minute).Err(); err != nil {
+	if err := state.rdb.Set(ctx, nodeStatusKey(tenant.DefaultTenant, id, "review"), "running", time.Minute).Err(); err != nil {
 		t.Fatalf("set node status: %v", err)
 	}
-	if err := state.rdb.HSet(ctx, nodeMetaKey(id, "review"), "activation_id", 1).Err(); err != nil {
+	if err := state.rdb.HSet(ctx, nodeMetaKey(tenant.DefaultTenant, id, "review"), "activation_id", 1).Err(); err != nil {
 		t.Fatalf("set node meta: %v", err)
 	}
 	for i := 0; i < engine.DefaultOutboxMaxDeliveryAttempts; i++ {
@@ -232,7 +233,7 @@ func TestReplayDeadLetterRejectsTerminalExecution(t *testing.T) {
 	entryID := "execute/dl-replay-terminal/review/1"
 	seedDeadLetter(t, state, id, entryID)
 
-	if err := state.rdb.Set(ctx, execKey(id, "status"), "success", time.Minute).Err(); err != nil {
+	if err := state.rdb.Set(ctx, execKey(tenant.DefaultTenant, id, "status"), "success", time.Minute).Err(); err != nil {
 		t.Fatalf("set terminal status: %v", err)
 	}
 	res, err := state.ReplayDeadLetter(ctx, replayReq(id, entryID, "req-term"))
@@ -258,7 +259,7 @@ func TestReplayDeadLetterRejectsInactiveExecution(t *testing.T) {
 	entryID := "execute/dl-replay-inactive/review/1"
 	seedDeadLetter(t, state, id, entryID)
 
-	if err := state.rdb.Del(ctx, execKey(id, "status")).Err(); err != nil {
+	if err := state.rdb.Del(ctx, execKey(tenant.DefaultTenant, id, "status")).Err(); err != nil {
 		t.Fatalf("del status: %v", err)
 	}
 	_ = mr
@@ -281,7 +282,7 @@ func TestReplayDeadLetterRejectsNodeTerminal(t *testing.T) {
 	entryID := "execute/dl-replay-nodeterm/review/1"
 	seedDeadLetter(t, state, id, entryID)
 
-	if err := state.rdb.Set(ctx, nodeStatusKey(id, "review"), "success", time.Minute).Err(); err != nil {
+	if err := state.rdb.Set(ctx, nodeStatusKey(tenant.DefaultTenant, id, "review"), "success", time.Minute).Err(); err != nil {
 		t.Fatalf("set node terminal status: %v", err)
 	}
 	res, err := state.ReplayDeadLetter(ctx, replayReq(id, entryID, "req-nodeterm"))
@@ -315,7 +316,7 @@ func TestReplayDeadLetterRejectsActivationMismatch(t *testing.T) {
 	seedDeadLetter(t, state, id, entryID) // entry activation = 1
 
 	// Node advanced to activation 2 via cyclic re-entry; entry is stale.
-	if err := state.rdb.HSet(ctx, nodeMetaKey(id, "review"), "activation_id", 2).Err(); err != nil {
+	if err := state.rdb.HSet(ctx, nodeMetaKey(tenant.DefaultTenant, id, "review"), "activation_id", 2).Err(); err != nil {
 		t.Fatalf("bump activation: %v", err)
 	}
 	res, err := state.ReplayDeadLetter(ctx, replayReq(id, entryID, "req-stale"))
@@ -361,14 +362,14 @@ func TestReplayDeadLetterBodyPreserved(t *testing.T) {
 	entryID := "execute/dl-replay-body/review/1"
 	seedDeadLetter(t, state, id, entryID)
 
-	deadBody, err := state.rdb.HGet(ctx, outboxDeadBodyKey(id), entryID).Result()
+	deadBody, err := state.rdb.HGet(ctx, outboxDeadBodyKey(tenant.DefaultTenant, id), entryID).Result()
 	if err != nil {
 		t.Fatalf("read dead body before replay: %v", err)
 	}
 	if _, err := state.ReplayDeadLetter(ctx, replayReq(id, entryID, "req-body")); err != nil {
 		t.Fatalf("ReplayDeadLetter: %v", err)
 	}
-	readyBody, err := state.rdb.HGet(ctx, outboxBodyKey(id), entryID).Result()
+	readyBody, err := state.rdb.HGet(ctx, outboxBodyKey(tenant.DefaultTenant, id), entryID).Result()
 	if err != nil {
 		t.Fatalf("read ready body after replay: %v", err)
 	}
@@ -411,13 +412,13 @@ func TestListDeadLettersCursorPagination(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := state.rdb.HSet(ctx, outboxDeadBodyKey(id), entryID, body).Err(); err != nil {
+		if err := state.rdb.HSet(ctx, outboxDeadBodyKey(tenant.DefaultTenant, id), entryID, body).Err(); err != nil {
 			t.Fatalf("HSet: %v", err)
 		}
-		if err := state.rdb.ZAdd(ctx, outboxDeadKey(id), redis.Z{Score: float64(i), Member: entryID}).Err(); err != nil {
+		if err := state.rdb.ZAdd(ctx, outboxDeadKey(tenant.DefaultTenant, id), redis.Z{Score: float64(i), Member: entryID}).Err(); err != nil {
 			t.Fatalf("ZAdd: %v", err)
 		}
-		if err := state.rdb.HSet(ctx, outboxDeadMetaKey(id, entryID), "node", "review", "activation", "1").Err(); err != nil {
+		if err := state.rdb.HSet(ctx, outboxDeadMetaKey(tenant.DefaultTenant, id, entryID), "node", "review", "activation", "1").Err(); err != nil {
 			t.Fatalf("HSet meta: %v", err)
 		}
 	}

@@ -35,10 +35,10 @@ func seedDeadLetterRedis(t *testing.T, addr, execID, entryID string) {
 	rdb := redis.NewClient(&redis.Options{Addr: addr})
 	t.Cleanup(func() { _ = rdb.Close() })
 	ctx := context.Background()
-	statusKey := "xflow:exec:{" + execID + "}:status"
-	deadKey := "xflow:exec:{" + execID + "}:outbox:dead"
-	deadBodyKey := "xflow:exec:{" + execID + "}:outbox:dead:body"
-	deadMetaKey := "xflow:exec:{" + execID + "}:outbox:dead:meta:" + entryID
+	statusKey := "xflow:tdefault:exec:{" + execID + "}:status"
+	deadKey := "xflow:tdefault:exec:{" + execID + "}:outbox:dead"
+	deadBodyKey := "xflow:tdefault:exec:{" + execID + "}:outbox:dead:body"
+	deadMetaKey := "xflow:tdefault:exec:{" + execID + "}:outbox:dead:meta:" + entryID
 	if err := rdb.Set(ctx, statusKey, "running", time.Minute).Err(); err != nil {
 		t.Fatalf("set status: %v", err)
 	}

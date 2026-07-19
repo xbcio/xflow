@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/types"
 	"github.com/redis/go-redis/v9"
 )
@@ -69,13 +70,36 @@ func (s *Store) RepairLeaseIndex(ctx context.Context, limit int) (reconciled int
 	s.leaseRepairMu.Lock()
 	defer s.leaseRepairMu.Unlock()
 
-	keys, next, err := s.rdb.Scan(ctx, s.leaseRepairCursor, "xflow:exec:{*}:node:*:status", int64(limit)).Result()
+	tenants, err := s.listTenants(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("list tenants for lease repair: %w", err)
+	}
+	reconciled = 0
+	for _, t := range tenants {
+		if reconciled >= limit {
+			break
+		}
+		n, err := s.repairLeaseIndexForTenant(ctx, t, limit-reconciled)
+		if err != nil {
+			return reconciled, err
+		}
+		reconciled += n
+	}
+	return reconciled, nil
+}
+
+func (s *Store) repairLeaseIndexForTenant(ctx context.Context, t tenant.TenantID, limit int) (int, error) {
+	if limit <= 0 {
+		return 0, nil
+	}
+	cursor := s.leaseRepairCursor[t]
+	keys, next, err := s.rdb.Scan(ctx, cursor, execScanPattern(t, "node:*:status"), int64(limit)).Result()
 	if err != nil {
 		return 0, fmt.Errorf("scan lease repair candidates: %w", err)
 	}
-	s.leaseRepairCursor = next
+	s.leaseRepairCursor[t] = next
 
-	reconciled = 0
+	reconciled := 0
 	for _, statusKey := range keys {
 		executionID, nodeName, ok := executionNodeFromStatusKey(statusKey)
 		if !ok {
@@ -83,8 +107,8 @@ func (s *Store) RepairLeaseIndex(ctx context.Context, limit int) (reconciled int
 		}
 		result, err := reconcileLeaseIndexLua.Run(ctx, s.rdb, []string{
 			statusKey,
-			nodeMetaKey(executionID, nodeName),
-			leaseExpiryZSetKey(executionID),
+			nodeMetaKey(t, executionID, nodeName),
+			leaseExpiryZSetKey(t, executionID),
 		}, int(s.getExecTTL(executionID).Seconds()), leaseExpiryMember(executionID, nodeName)).Int64()
 		if err != nil && err != redis.Nil {
 			return reconciled, fmt.Errorf("reconcile lease index %q/%q: %w", executionID, nodeName, err)
@@ -97,20 +121,35 @@ func (s *Store) RepairLeaseIndex(ctx context.Context, limit int) (reconciled int
 }
 
 func executionNodeFromStatusKey(key string) (types.ExecutionID, string, bool) {
-	const prefix = "xflow:exec:{"
 	const nodeSeparator = "}:node:"
 	const suffix = ":status"
-	if !strings.HasPrefix(key, prefix) || !strings.HasSuffix(key, suffix) {
+	if !strings.HasSuffix(key, suffix) {
 		return "", "", false
 	}
-	rest := strings.TrimPrefix(key, prefix)
-	separator := strings.Index(rest, nodeSeparator)
-	if separator <= 0 {
+	// Strip the trailing :status, then locate the }:node: separator that ends
+	// the execution id hash tag. The key shape is
+	// xflow:t<tenant>:exec:{<id>}:node:<name>:status; the tenant prefix is
+	// not needed here, only the execution id and node name.
+	rest := strings.TrimSuffix(key, suffix)
+	sepIdx := strings.Index(rest, nodeSeparator)
+	if sepIdx <= 0 {
 		return "", "", false
 	}
-	nodeName := strings.TrimSuffix(rest[separator+len(nodeSeparator):], suffix)
+	nodeName := rest[sepIdx+len(nodeSeparator):]
 	if nodeName == "" {
 		return "", "", false
 	}
-	return types.ExecutionID(rest[:separator]), nodeName, true
+	// The execution id is the substring between '{' and '}' immediately before
+	// the }:node: separator. The '}' is the first char of "}:node:", so the id
+	// ends at sepIdx.
+	braceOpen := strings.LastIndex(rest[:sepIdx], "{")
+	braceClose := sepIdx // rest[sepIdx] == '}'
+	if braceOpen < 0 || rest[braceClose] != '}' {
+		return "", "", false
+	}
+	execID := rest[braceOpen+1 : braceClose]
+	if execID == "" {
+		return "", "", false
+	}
+	return types.ExecutionID(execID), nodeName, true
 }

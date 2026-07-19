@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+
+	"github.com/xbcio/xflow/backend/tenant"
 )
 
 func TestRepairLeaseIndexRestoresMissingCorrectsMismatchAndPrunesStale(t *testing.T) {
@@ -15,7 +17,7 @@ func TestRepairLeaseIndexRestoresMissingCorrectsMismatchAndPrunesStale(t *testin
 	const leaseTTL = 30 * time.Second
 	mustUpsertRunning(t, state, "repair-exec", "active", "token-active", issued, leaseTTL)
 
-	index := leaseExpiryZSetKey("repair-exec")
+	index := leaseExpiryZSetKey(tenant.DefaultTenant, "repair-exec")
 	member := leaseExpiryMember("repair-exec", "active")
 	if err := rdb.Del(ctx, index).Err(); err != nil {
 		t.Fatalf("delete lease index: %v", err)
@@ -38,7 +40,7 @@ func TestRepairLeaseIndexRestoresMissingCorrectsMismatchAndPrunesStale(t *testin
 		t.Fatalf("corrected index score=%v err=%v, want %v/nil", got, err, wantDeadline)
 	}
 
-	if err := rdb.Set(ctx, nodeStatusKey("repair-exec", "active"), "success", time.Minute).Err(); err != nil {
+	if err := rdb.Set(ctx, nodeStatusKey(tenant.DefaultTenant, "repair-exec", "active"), "success", time.Minute).Err(); err != nil {
 		t.Fatalf("mark node terminal: %v", err)
 	}
 	if reconciled, err := state.RepairLeaseIndex(ctx, 16); err != nil || reconciled != 0 {
@@ -56,16 +58,16 @@ func TestRepairLeaseIndexBackfillsLegacyDeadline(t *testing.T) {
 	const leaseTTL = 15 * time.Second
 	mustUpsertRunning(t, state, "legacy-repair", "active", "token-active", issued, leaseTTL)
 
-	if err := rdb.HDel(ctx, nodeMetaKey("legacy-repair", "active"), "lease_deadline_ms").Err(); err != nil {
+	if err := rdb.HDel(ctx, nodeMetaKey(tenant.DefaultTenant, "legacy-repair", "active"), "lease_deadline_ms").Err(); err != nil {
 		t.Fatalf("delete legacy deadline: %v", err)
 	}
-	if err := rdb.Del(ctx, leaseExpiryZSetKey("legacy-repair")).Err(); err != nil {
+	if err := rdb.Del(ctx, leaseExpiryZSetKey(tenant.DefaultTenant, "legacy-repair")).Err(); err != nil {
 		t.Fatalf("delete index: %v", err)
 	}
 	if reconciled, err := state.RepairLeaseIndex(ctx, 16); err != nil || reconciled != 1 {
 		t.Fatalf("RepairLeaseIndex() reconciled=%d err=%v, want 1/nil", reconciled, err)
 	}
-	deadline, err := rdb.HGet(ctx, nodeMetaKey("legacy-repair", "active"), "lease_deadline_ms").Int64()
+	deadline, err := rdb.HGet(ctx, nodeMetaKey(tenant.DefaultTenant, "legacy-repair", "active"), "lease_deadline_ms").Int64()
 	if err != nil {
 		t.Fatalf("read backfilled deadline: %v", err)
 	}

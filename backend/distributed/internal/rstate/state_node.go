@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/store"
@@ -23,7 +24,8 @@ func (s *Store) LoadGraph(ctx context.Context, id types.ExecutionID) (*graph.Gra
 	}
 
 	// Load from Redis.
-	raw, err := s.rdb.Get(ctx, execKey(id, "graph")).Result()
+	t := tenant.FromContext(ctx)
+	raw, err := s.rdb.Get(ctx, execKey(t, id, "graph")).Result()
 	if err == redis.Nil {
 		return nil, nil
 	}
@@ -57,9 +59,10 @@ func (s *Store) LoadGraph(ctx context.Context, id types.ExecutionID) (*graph.Gra
 // by pruning lease-index entries whose meta lacks a token. Callers that need a
 // fenced transition must use AcquireTaskLease / CommitNode instead.
 func (s *Store) UpsertNode(ctx context.Context, n *engine.NodeSnapshot) error {
-	key := nodeStatusKey(n.ExecutionID, n.Name)
-	outKey := outputKey(n.ExecutionID, n.Name)
-	metaKey := nodeMetaKey(n.ExecutionID, n.Name)
+	t := tenant.FromContext(ctx)
+	key := nodeStatusKey(t, n.ExecutionID, n.Name)
+	outKey := outputKey(t, n.ExecutionID, n.Name)
+	metaKey := nodeMetaKey(t, n.ExecutionID, n.Name)
 
 	var outputJSON string
 	if n.Output != nil {
@@ -128,7 +131,7 @@ func (s *Store) UpsertNode(ctx context.Context, n *engine.NodeSnapshot) error {
 	// Lease-expiry discovery is per execution so it shares the hash tag with
 	// the node status and metadata. AcquireTaskLease updates all three in one
 	// Lua command; this path keeps generic snapshot upserts recoverable too.
-	leaseIndexKey := leaseExpiryZSetKey(n.ExecutionID)
+	leaseIndexKey := leaseExpiryZSetKey(t, n.ExecutionID)
 	member := leaseExpiryMember(n.ExecutionID, n.Name)
 	keys = append(keys, leaseIndexKey)
 	if (n.Status == types.NodeStatusRunning || n.Status == types.NodeStatusCommitting || n.Status == types.NodeStatusWaiting) && n.LeaseToken != "" && !n.LeaseIssuedAt.IsZero() && n.LeaseTTL > 0 {
@@ -170,7 +173,8 @@ func (s *Store) UpsertNode(ctx context.Context, n *engine.NodeSnapshot) error {
 }
 
 func (s *Store) GetNode(ctx context.Context, id types.ExecutionID, name string) (*engine.NodeSnapshot, error) {
-	val, err := s.rdb.Get(ctx, nodeStatusKey(id, name)).Result()
+	t := tenant.FromContext(ctx)
+	val, err := s.rdb.Get(ctx, nodeStatusKey(t, id, name)).Result()
 	if err == redis.Nil {
 		return nil, nil
 	}
@@ -178,7 +182,7 @@ func (s *Store) GetNode(ctx context.Context, id types.ExecutionID, name string) 
 		return nil, fmt.Errorf("get node %q/%q: %w", id, name, err)
 	}
 	ns := &engine.NodeSnapshot{ExecutionID: id, Name: name, Status: types.NodeStatus(val)}
-	meta, err := s.rdb.HGetAll(ctx, nodeMetaKey(id, name)).Result()
+	meta, err := s.rdb.HGetAll(ctx, nodeMetaKey(t, id, name)).Result()
 	if err != nil {
 		return nil, fmt.Errorf("get node lease %q/%q: %w", id, name, err)
 	}

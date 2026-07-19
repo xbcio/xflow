@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -13,14 +14,15 @@ func (s *Store) DecrementInDegree(ctx context.Context, id types.ExecutionID, nod
 		activeFlag = 1
 	}
 	ttl := int(s.getExecTTL(id).Seconds())
+	t := tenant.FromContext(ctx)
 	vals, err := propagateLua.Run(ctx, s.rdb,
-		[]string{inDegreeKey(id, nodeIdx), activeInputsKey(id, nodeIdx)},
+		[]string{inDegreeKey(t, id, nodeIdx), activeInputsKey(t, id, nodeIdx)},
 		activeFlag, ttl,
 	).Int64Slice()
 	if err != nil {
 		return 0, 0, fmt.Errorf("propagate lua: %w", err)
 	}
-	if err := s.refreshTransientTTL(ctx, id, inDegreeKey(id, nodeIdx), activeInputsKey(id, nodeIdx)); err != nil {
+	if err := s.refreshTransientTTL(ctx, id, inDegreeKey(t, id, nodeIdx), activeInputsKey(t, id, nodeIdx)); err != nil {
 		return 0, 0, err
 	}
 	return int(vals[0]), int(vals[1]), nil
@@ -34,11 +36,12 @@ func (s *Store) CheckCompletion(ctx context.Context, id types.ExecutionID, total
 		return false, false, nil
 	}
 
+	t := tenant.FromContext(ctx)
 	keys := make([]string, 0, 1+totalNodes)
-	keys = append(keys, execKey(id, "status"))
+	keys = append(keys, execKey(t, id, "status"))
 	for i := 0; i < g.NodeCount(); i++ {
 		nd := g.NodeAt(i)
-		keys = append(keys, nodeStatusKey(id, nd.Name))
+		keys = append(keys, nodeStatusKey(t, id, nd.Name))
 	}
 
 	result, err := checkCompletionLua.Run(ctx, s.rdb, keys, s.ttlSec()).Int64()

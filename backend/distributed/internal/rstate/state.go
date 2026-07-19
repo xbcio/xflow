@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/store"
@@ -30,10 +31,12 @@ type Store struct {
 	execTTLs map[types.ExecutionID]time.Duration
 
 	// leaseRepairCursor advances a bounded reconciliation scan across node
-	// status keys. The mutex prevents concurrent control-plane maintenance
-	// loops from repeatedly scanning the same Redis page.
+	// status keys, one cursor per tenant so a multi-tenant store never lets
+	// one tenant's scan progress starve another. The mutex prevents
+	// concurrent control-plane maintenance loops from repeatedly scanning the
+	// same Redis page.
 	leaseRepairMu     sync.Mutex
-	leaseRepairCursor uint64
+	leaseRepairCursor map[tenant.TenantID]uint64
 
 	// Audit-trail observability — Redis is system-of-record; the store/sqlstore
 	// audit trail is best-effort. auditWrite routes failures through these
@@ -45,15 +48,23 @@ type Store struct {
 }
 
 func New(rdb redis.UniversalClient, db store.Store, execTTL time.Duration) *Store {
-	return &Store{
-		rdb:           rdb,
-		db:            db,
-		execTTL:       execTTL,
-		graphs:        make(map[types.ExecutionID]*graph.Graph),
-		execTTLs:      make(map[types.ExecutionID]time.Duration),
-		audit:         noopAuditObserver{},
-		auditCounters: &auditCounters{},
+	s := &Store{
+		rdb:               rdb,
+		db:                db,
+		execTTL:           execTTL,
+		graphs:            make(map[types.ExecutionID]*graph.Graph),
+		execTTLs:          make(map[types.ExecutionID]time.Duration),
+		leaseRepairCursor: make(map[tenant.TenantID]uint64),
+		audit:             noopAuditObserver{},
+		auditCounters:     &auditCounters{},
 	}
+	// The default tenant is registered lazily on the first durable execution
+	// create, and listTenants also defensively includes the default tenant, so
+	// single-tenant deployments work without any eager SADD. Transient
+	// (fire-and-forget) mode skips the registry write entirely to preserve the
+	// documented no-bookkeeping-on-mutation invariant; its keys are still
+	// discoverable because the default tenant is always scanned.
+	return s
 }
 
 func (s *Store) ttlSec() int {
@@ -77,8 +88,8 @@ func (s *Store) getExecTTL(id types.ExecutionID) time.Duration {
 	return s.execTTL
 }
 
-func executionKeySetKey(id types.ExecutionID) string {
-	return execKey(id, "keys")
+func executionKeySetKey(t tenant.TenantID, id types.ExecutionID) string {
+	return execKey(t, id, "keys")
 }
 
 func (s *Store) refreshTransientTTL(_ context.Context, _ types.ExecutionID, _ ...string) error {
@@ -104,40 +115,40 @@ func (s *Store) refreshTransientTTL(_ context.Context, _ types.ExecutionID, _ ..
 // derived deterministically from its graph (mirrors cleanupCreatedExecution).
 // It replaces the per-mutation-maintained :keys set as the source of truth for
 // completion-time TTL shortening.
-func transientExecutionKeys(id types.ExecutionID, g *graph.Graph) []string {
+func transientExecutionKeys(t tenant.TenantID, id types.ExecutionID, g *graph.Graph) []string {
 	keys := []string{
-		execKey(id, "status"),
-		execKey(id, "graph"),
-		execKey(id, "error"),
-		execKey(id, "params"),
-		execKey(id, "runtime"),
-		execKey(id, "trace_id"),
-		execKey(id, "span_id"),
-		remainingNodesKey(id),
-		failedNodesKey(id),
-		leaseExpiryZSetKey(id),
-		outboxReadyKey(id),
-		outboxBodyKey(id),
+		execKey(t, id, "status"),
+		execKey(t, id, "graph"),
+		execKey(t, id, "error"),
+		execKey(t, id, "params"),
+		execKey(t, id, "runtime"),
+		execKey(t, id, "trace_id"),
+		execKey(t, id, "span_id"),
+		remainingNodesKey(t, id),
+		failedNodesKey(t, id),
+		leaseExpiryZSetKey(t, id),
+		outboxReadyKey(t, id),
+		outboxBodyKey(t, id),
 		// The outbox dead-letter keys are enumerated here even though transient
 		// mode does not produce suspend-related keys: an outbox entry that
 		// exhausts its retries still lands on the attempts counter and the
 		// dead-letter/body hashes regardless of mode, so completion-time TTL
 		// shortening must cover them or they outlive the execution's shortened
 		// completion TTL.
-		outboxAttemptsKey(id),
-		outboxDeadKey(id),
-		outboxDeadBodyKey(id),
+		outboxAttemptsKey(t, id),
+		outboxDeadKey(t, id),
+		outboxDeadBodyKey(t, id),
 	}
 	if g != nil {
 		for i := 0; i < g.NodeCount(); i++ {
 			node := g.NodeAt(i)
 			keys = append(keys,
-				inDegreeKey(id, i),
-				activeInputsKey(id, i),
-				scheduleKey(id, i),
-				nodeStatusKey(id, node.Name),
-				nodeMetaKey(id, node.Name),
-				outputKey(id, node.Name),
+				inDegreeKey(t, id, i),
+				activeInputsKey(t, id, i),
+				scheduleKey(t, id, i),
+				nodeStatusKey(t, id, node.Name),
+				nodeMetaKey(t, id, node.Name),
+				outputKey(t, id, node.Name),
 			)
 		}
 	}
@@ -156,8 +167,9 @@ func (s *Store) shortenTransientCompletionTTL(ctx context.Context, id types.Exec
 	// its (cached) graph rather than from a per-mutation-maintained :keys set —
 	// the SADD/SMEMBERS bookkeeping the hot path used to pay is gone. EXPIRE on a
 	// missing key is a harmless no-op, so over-enumeration is safe.
+	t := tenant.FromContext(ctx)
 	g, _ := s.LoadGraph(ctx, id)
-	keys := transientExecutionKeys(id, g)
+	keys := transientExecutionKeys(t, id, g)
 	keys = append(keys, newKeys...)
 	pipe := s.rdb.Pipeline()
 	for _, key := range keys {
