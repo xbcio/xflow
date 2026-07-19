@@ -59,6 +59,7 @@ type config struct {
 	transientCompletionTTL time.Duration
 	transport              queue.Transport
 	queueObserver          queue.Observer
+	redisConfig            *RedisConfig
 }
 
 // WithConcurrency sets the number of task consumer goroutines. Default is 10.
@@ -165,6 +166,14 @@ func WithQueueObserver(obs QueueObserver) Option {
 	}
 }
 
+// WithRedisConfig injects a Redis HA connection description. When present,
+// New builds the appropriate go-redis client (single/sentinel/cluster) using
+// redis.NewUniversalClient and ignores the redisAddr argument. When absent,
+// New keeps the legacy single-address behavior.
+func WithRedisConfig(rc RedisConfig) Option {
+	return func(c *config) { c.redisConfig = &rc }
+}
+
 // Backend wires the Engine Core to Redis state (internal/rstate) and a
 // pluggable task transport (default: Asynq). It is a thin facade over the
 // internal state, timeout, trigger, and workflow-registry subpackages.
@@ -238,7 +247,19 @@ func New(redisAddr string, db store.Store, opts ...Option) (*Backend, error) {
 		o(cfg)
 	}
 
-	rdb := redis.NewClient(&redis.Options{Addr: redisAddr})
+	var rdb redis.UniversalClient
+	var err error
+	if cfg.redisConfig != nil {
+		if err := cfg.redisConfig.validate(); err != nil {
+			return nil, fmt.Errorf("redis config: %w", err)
+		}
+		rdb, err = newRedisClient(*cfg.redisConfig)
+		if err != nil {
+			return nil, fmt.Errorf("redis client: %w", err)
+		}
+	} else {
+		rdb = redis.NewClient(&redis.Options{Addr: redisAddr})
+	}
 
 	if err := rdb.Ping(context.Background()).Err(); err != nil {
 		_ = rdb.Close()
@@ -252,13 +273,21 @@ func New(redisAddr string, db store.Store, opts ...Option) (*Backend, error) {
 	state.ConfigureTransient(cfg.transient, cfg.transientTTL, cfg.transientCompletionTTL)
 
 	// Default to the Asynq transport; WithTransport can inject an alternative.
+	// asynq HA connection options are handled in Task 3.1; here we keep the
+	// legacy single-address string path. If RedisConfig was injected but no
+	// redisAddr was supplied, fall back to the first configured address so the
+	// transport still has a bootstrap endpoint.
 	transport := cfg.transport
 	if transport == nil {
 		var topts []asynqtransport.Option
 		if cfg.queueObserver != nil {
 			topts = append(topts, asynqtransport.WithObserver(cfg.queueObserver))
 		}
-		transport = asynqtransport.New(redisAddr, topts...)
+		asynqRedisAddr := redisAddr
+		if asynqRedisAddr == "" && cfg.redisConfig != nil {
+			asynqRedisAddr = cfg.redisConfig.firstAddr()
+		}
+		transport = asynqtransport.New(asynqRedisAddr, topts...)
 	}
 
 	registry := execution.NewRegistry()
