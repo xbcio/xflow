@@ -335,7 +335,7 @@ func (c *Cluster) rebuildReplica(ctx context.Context, index int) error {
 	}
 	c.mu.Unlock()
 
-	r, err := c.newReplica(ctx, index)
+	r, err := c.newReplica(context.Background(), index)
 	if err != nil {
 		return err
 	}

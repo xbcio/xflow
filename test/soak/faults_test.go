@@ -155,6 +155,9 @@ func TestInjectorLeaderKillInProcess(t *testing.T) {
 	if rec.recoveryTimeCount() != 1 {
 		t.Fatalf("expected 1 RecoveryTime event, got %d", rec.recoveryTimeCount())
 	}
+	if rec.duplicates != 0 {
+		t.Fatalf("expected 0 duplicate invocations on graceful transfer, got %d", rec.duplicates)
+	}
 }
 
 // TestInjectorLeaderRestartInProcess verifies the in-process LeaderRestart
@@ -195,6 +198,9 @@ func TestInjectorLeaderRestartInProcess(t *testing.T) {
 	}
 	if rec.recoveryTimeCount() != 1 {
 		t.Fatalf("expected 1 RecoveryTime event, got %d", rec.recoveryTimeCount())
+	}
+	if rec.duplicates != 0 {
+		t.Fatalf("expected 0 duplicate invocations on graceful transfer, got %d", rec.duplicates)
 	}
 }
 
