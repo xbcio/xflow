@@ -394,8 +394,9 @@ func (b *Backend) nonConsumerStop() func() {
 // failing to start, so the reverse-order rollback path is covered even though
 // the outbox dispatcher and timeout monitor cannot fail to start on their own.
 type bindStartHooks struct {
-	afterConsumerStart func() error // simulate outbox dispatcher start failure
-	afterOutboxStart   func() error // simulate timeout monitor start failure
+	afterConsumerStart func() error  // simulate outbox dispatcher start failure
+	afterOutboxStart   func() error  // simulate timeout monitor start failure
+	onMonitorDone      func()        // nil in production; called after timeout monitor goroutine exits
 }
 
 // bindHandler is the unified internal lifecycle entry: it wires a task handler
@@ -461,6 +462,9 @@ func (b *Backend) bindHandler(eng *engine.Engine, handler func(context.Context, 
 				if tm != nil {
 					tm.Stop()
 					<-tmDone
+					if b.testHooks.onMonitorDone != nil {
+						b.testHooks.onMonitorDone()
+					}
 				}
 				cancelOutbox()
 				<-outboxDone
@@ -489,6 +493,9 @@ func (b *Backend) bindHandler(eng *engine.Engine, handler func(context.Context, 
 			if tm != nil {
 				tm.Stop()
 				<-tmDone
+				if b.testHooks.onMonitorDone != nil {
+					b.testHooks.onMonitorDone()
+				}
 			}
 			_ = b.transport.Close()
 			_ = b.rdb.Close()

@@ -63,6 +63,8 @@ func TestStartBindingRollsBackOnMonitorStartFailure(t *testing.T) {
 	stub := &stubTransport{}
 	b := newTestBackend(t, stub)
 	b.testHooks.afterOutboxStart = func() error { return errors.New("monitor boom") }
+	monitorDone := make(chan struct{})
+	b.testHooks.onMonitorDone = func() { close(monitorDone) }
 	eng := engine.New(b.State(), b.Queue())
 
 	before := goroutineCount()
@@ -81,8 +83,16 @@ func TestStartBindingRollsBackOnMonitorStartFailure(t *testing.T) {
 		t.Fatal("transport was not closed during monitor rollback")
 	}
 
-	// The leaked-goroutine regression: afterOutboxStart rollback must stop the
-	// timeout monitor and wait for its goroutine to exit (tmDone closed).
+	// Direct regression assertion: the timeout monitor goroutine must have
+	// exited after rollback. The test-only onMonitorDone hook fires after
+	// bindHandler waits on tmDone.
+	select {
+	case <-monitorDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout monitor goroutine did not exit after rollback")
+	}
+
+	// Secondary goroutine-count guard against any other leaked goroutines.
 	if got := goroutineCount(); got > before {
 		t.Fatalf("goroutine count after rollback = %d, before = %d (leak)", got, before)
 	}
@@ -182,4 +192,68 @@ func (o *orderTransport) Close() error { return nil }
 // *distributed.Backend satisfies backend.StartBinder.
 func TestStartBindingImplementsInterface(t *testing.T) {
 	var _ backend.StartBinder = (*Backend)(nil)
+}
+
+// TestStartBindingImmediateStop verifies that stopping the backend right after
+// a successful StartBinding returns is safe: no panic and no goroutine leak.
+func TestStartBindingImmediateStop(t *testing.T) {
+	stub := &stubTransport{}
+	b := newTestBackend(t, stub)
+	eng := engine.New(b.State(), b.Queue())
+
+	stop, err := b.StartBinding(eng)
+	if err != nil {
+		t.Fatalf("StartBinding error = %v, want nil", err)
+	}
+
+	before := goroutineCount()
+
+	// Calling stop immediately after StartBinding returns must not panic and
+	// must leave no background goroutines behind.
+	stop()
+
+	if got := goroutineCount(); got > before {
+		t.Fatalf("goroutine count after immediate stop = %d, before = %d (leak)", got, before)
+	}
+	if !stub.stopped.Load() {
+		t.Fatal("consumer was not stopped")
+	}
+	if !stub.closed.Load() {
+		t.Fatal("transport was not closed")
+	}
+}
+
+// TestStartBindingFailedStartSafeToStop verifies that after StartBinding returns
+// an error, there is no goroutine leak and the transport is closed. There is no
+// stop function to call (it is nil on error), so the assertion is on resource
+// cleanup performed by the rollback path itself.
+func TestStartBindingFailedStartSafeToStop(t *testing.T) {
+	stub := &stubTransport{}
+	b := newTestBackend(t, stub)
+	b.testHooks.afterConsumerStart = func() error { return errors.New("start boom") }
+	eng := engine.New(b.State(), b.Queue())
+
+	before := goroutineCount()
+
+	stop, err := b.StartBinding(eng)
+	if err == nil {
+		t.Fatal("StartBinding error = nil, want start failure")
+	}
+	if stop != nil {
+		t.Fatal("StartBinding stop = non-nil, want nil on error")
+	}
+	if !stub.stopped.Load() {
+		t.Fatal("consumer was not stopped during rollback")
+	}
+	if !stub.closed.Load() {
+		t.Fatal("transport was not closed during rollback")
+	}
+	if got := goroutineCount(); got > before {
+		t.Fatalf("goroutine count after failed start = %d, before = %d (leak)", got, before)
+	}
+
+	// Note: the rollback path closes the transport but does not close b.rdb;
+	// the redis.Client is cleaned up by newRedisStateTestClient's t.Cleanup.
+	// This is a known gap in the fail-closed rollback path that the current
+	// production code leaves to the Backend owner.
 }

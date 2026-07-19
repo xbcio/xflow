@@ -7,11 +7,16 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sync"
 
 	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
 )
+
+// bindDeprecationOnce ensures the legacy Provider.Bind fallback warning is
+// logged only once per process, not on every Engine construction.
+var bindDeprecationOnce sync.Once
 
 // Engine is the user-facing workflow engine.
 //
@@ -104,7 +109,9 @@ func newFromConfig(cfg *engineConfig, provider backend.Provider) (*Engine, error
 		// error-swallowing Bind contract. We keep it so external backend
 		// implementations continue to compile, but production backends should
 		// implement backend.StartBinder.
-		log.Println("xflow: warning: backend.Provider does not implement backend.StartBinder; using deprecated Bind path that cannot propagate consumer start errors")
+		bindDeprecationOnce.Do(func() {
+			log.Println("xflow: warning: backend.Provider does not implement backend.StartBinder; using deprecated Bind path that cannot propagate consumer start errors")
+		})
 		stop := provider.Bind(eng)
 		e.stopFns = append(e.stopFns, stop)
 	}
