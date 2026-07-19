@@ -3,6 +3,8 @@ package trigger
 import (
 	"context"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -340,17 +342,26 @@ func TestTriggerLuaScriptsAreSingleKey(t *testing.T) {
 		"renewTriggerLockScript":   renewTriggerLockScriptSrc,
 	}
 
+	keysPattern := regexp.MustCompile(`KEYS\[(\d+)\]`)
+
 	for name, src := range scripts {
 		// Multi-key Lua would reference KEYS[2] or higher.
-		if strings.Contains(src, "KEYS[2]") || strings.Contains(src, "KEYS[3]") {
-			t.Errorf("%s references multiple KEYS; add a shared hash tag and update the cluster-safety audit", name)
+		for _, match := range keysPattern.FindAllStringSubmatch(src, -1) {
+			idx, err := strconv.Atoi(match[1])
+			if err != nil {
+				t.Fatalf("%s: cannot parse KEYS index %q: %v", name, match[1], err)
+			}
+			if idx >= 2 {
+				t.Errorf("%s references multiple KEYS (KEYS[%d]); add a shared hash tag and update the cluster-safety audit", name, idx)
+			}
 		}
 
-		// Dynamic key construction inside redis.call is a CROSSSLOT risk unless
-		// the constructed prefix carries the same hash tag as the declared KEYS.
-		for _, line := range strings.Split(src, "\n") {
+		// Dynamic key construction inside redis.call / redis.pcall is a CROSSSLOT
+		// risk unless the constructed prefix carries the same hash tag as the
+		// declared KEYS.
+		for line := range strings.SplitSeq(src, "\n") {
 			line = strings.TrimSpace(line)
-			if strings.Contains(line, "redis.call") && strings.Contains(line, "..") {
+			if (strings.Contains(line, "redis.call") || strings.Contains(line, "redis.pcall")) && strings.Contains(line, "..") {
 				t.Errorf("%s constructs a key dynamically with '..'; verify the prefix shares the KEYS hash tag", name)
 			}
 		}
