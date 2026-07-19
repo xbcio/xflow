@@ -293,9 +293,6 @@ importers:
         specifier: workspace:*
         version: link:../workflow-core
     devDependencies:
-      '@xflow/tailwind-config':
-        specifier: workspace:*
-        version: link:../../tooling/tailwind-config
       '@xflow/typescript-config':
         specifier: workspace:*
         version: link:../../tooling/typescript-config
@@ -305,9 +302,6 @@ importers:
       react-dom:
         specifier: 19.1.0
         version: 19.1.0(react@19.1.0)
-      tailwindcss:
-        specifier: 3.4.17
-        version: 3.4.17
       typescript:
         specifier: 5.8.3
         version: 5.8.3

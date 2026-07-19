@@ -1,11 +1,10 @@
 /* React Flow base styles imported at build-time by consumers; scoped below. */
 @import url("@xyflow/react/dist/style.css");
 
-@config "../../tooling/tailwind-config/tailwind.config.js";
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
-
+/* Self-contained static CSS for the workflow renderer.
+ * No Tailwind @config / @tailwind directives: this file is consumed as plain CSS
+ * by apps with or without Tailwind, and the xf-* classes are defined explicitly.
+ */
 .xflow-root {
   --xf-color-running: #3b82f6;
   --xf-color-completed: #22c55e;
