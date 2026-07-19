@@ -12,21 +12,21 @@ import (
 
 // Engine metric names.
 const (
-	metricNodeStarted            = "xflow_node_started_total"
-	metricNodeCompleted          = "xflow_node_completed_total"
-	metricNodeDuration           = "xflow_node_duration_seconds"
-	metricNodeSuspended          = "xflow_node_suspended_total"
-	metricNodeTimedOut           = "xflow_node_timed_out_total"
-	metricNodeRetried            = "xflow_node_retried_total"
-	metricExecutionCompleted     = "xflow_execution_completed_total"
-	metricCommitOutcomes         = "xflow_commit_outcomes_total"
-	metricOutboxRetries          = "xflow_outbox_retries_total"
-	metricOutboxDeadLettersTotal  = "xflow_outbox_dead_letters_total"
-	metricOutboxDeadLetters       = "xflow_outbox_dead_letters"
+	metricNodeStarted               = "xflow_node_started_total"
+	metricNodeCompleted             = "xflow_node_completed_total"
+	metricNodeDuration              = "xflow_node_duration_seconds"
+	metricNodeSuspended             = "xflow_node_suspended_total"
+	metricNodeTimedOut              = "xflow_node_timed_out_total"
+	metricNodeRetried               = "xflow_node_retried_total"
+	metricExecutionCompleted        = "xflow_execution_completed_total"
+	metricCommitOutcomes            = "xflow_commit_outcomes_total"
+	metricOutboxRetries             = "xflow_outbox_retries_total"
+	metricOutboxDeadLettersTotal    = "xflow_outbox_dead_letters_total"
+	metricOutboxDeadLetters         = "xflow_outbox_dead_letters"
 	metricOutboxDeadLettersReplayed = "xflow_outbox_dead_letters_replayed_total"
-	metricOutboxPending           = "xflow_outbox_pending"
-	metricOutboxOldestPendingAge  = "xflow_outbox_oldest_pending_age_seconds"
-	metricOutboxErrors            = "xflow_outbox_errors_total"
+	metricOutboxPending             = "xflow_outbox_pending"
+	metricOutboxOldestPendingAge    = "xflow_outbox_oldest_pending_age_seconds"
+	metricOutboxErrors              = "xflow_outbox_errors_total"
 )
 
 // MetricsHooks turns engine lifecycle hooks into xflow_ Prometheus counters.

@@ -7,21 +7,21 @@ import (
 
 // Control-plane metric names.
 const (
-	metricLeaseSweepReclaimed      = "xflow_lease_sweep_reclaimed_total"
-	metricLeaseAge                 = "xflow_lease_age_seconds"
-	metricLeaseSweepErrors         = "xflow_lease_sweep_errors_total"
-	metricLeaseSweepScan           = "xflow_lease_sweep_scan_total"
-	metricLeaseSweepScanDuration   = "xflow_lease_sweep_scan_duration_seconds"
-	metricLeaseSweepCandidates     = "xflow_lease_sweep_candidates"
-	metricLeaseReclaim             = "xflow_lease_reclaim_total"
-	metricLeaseReclaimDuration     = "xflow_lease_reclaim_duration_seconds"
-	metricLeaseSweepRepair         = "xflow_lease_sweep_repair_total"
-	metricLeaseSweepRepairDuration = "xflow_lease_sweep_repair_duration_seconds"
+	metricLeaseSweepReclaimed        = "xflow_lease_sweep_reclaimed_total"
+	metricLeaseAge                   = "xflow_lease_age_seconds"
+	metricLeaseSweepErrors           = "xflow_lease_sweep_errors_total"
+	metricLeaseSweepScan             = "xflow_lease_sweep_scan_total"
+	metricLeaseSweepScanDuration     = "xflow_lease_sweep_scan_duration_seconds"
+	metricLeaseSweepCandidates       = "xflow_lease_sweep_candidates"
+	metricLeaseReclaim               = "xflow_lease_reclaim_total"
+	metricLeaseReclaimDuration       = "xflow_lease_reclaim_duration_seconds"
+	metricLeaseSweepRepair           = "xflow_lease_sweep_repair_total"
+	metricLeaseSweepRepairDuration   = "xflow_lease_sweep_repair_duration_seconds"
 	metricLeaseSweepRepairReconciled = "xflow_lease_sweep_repair_reconciled"
-	metricRunnerAuthDecisions      = "xflow_runner_auth_decisions_total"
-	metricRunnerClaimReclaimed     = "xflow_runner_claim_reclaimed_total"
-	metricRunnerLeaseReplayed      = "xflow_runner_lease_replayed_total"
-	metricDispatchTransient        = "xflow_dispatch_transient_total"
+	metricRunnerAuthDecisions        = "xflow_runner_auth_decisions_total"
+	metricRunnerClaimReclaimed       = "xflow_runner_claim_reclaimed_total"
+	metricRunnerLeaseReplayed        = "xflow_runner_lease_replayed_total"
+	metricDispatchTransient          = "xflow_dispatch_transient_total"
 )
 
 // Local mirror interfaces avoid an import cycle with service/control.
