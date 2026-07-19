@@ -8,6 +8,7 @@ const sourceFiles = [
   "packages/*/src/**/*.tsx",
   "apps/*/src/**/*.ts",
   "apps/*/src/**/*.tsx",
+  "e2e/**/*.ts",
 ];
 
 const packageFiles = [
@@ -20,13 +21,14 @@ const workflowCoreFiles = ["packages/workflow-core/src/**/*.ts"];
 const configFiles = [
   "eslint.config.js",
   "vitest.config.ts",
+  "playwright.config.ts",
   "tooling/**/*.js",
   "tooling/**/*.ts",
   "scripts/**/*.mjs",
 ];
 
 export default [
-  { name: "xflow/ignores", ignores: ["**/dist/**", "**/node_modules/**", "**/.turbo/**", "**/coverage/**", "**/*.d.ts", "**/*.test.*"] },
+  { name: "xflow/ignores", ignores: ["**/dist/**", "**/node_modules/**", "**/.turbo/**", "**/coverage/**", "**/*.d.ts", "apps/**/*.test.*", "packages/**/*.test.*"] },
   js.configs.recommended,
   {
     name: "xflow/typescript",

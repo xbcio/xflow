@@ -1,6 +1,7 @@
 import { BrowserRouter, Route, Routes } from "react-router-dom";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { createRuntimeConfig } from "./config/runtime";
+import { ErrorTriggerPage } from "./pages/ErrorTriggerPage";
 import { HealthPage } from "./pages/HealthPage";
 import { ViewerPage } from "./pages/ViewerPage";
 
@@ -13,6 +14,9 @@ export function App() {
         <Routes>
           <Route path="/" element={<HealthPage config={runtimeConfig} />} />
           <Route path="/view/:workflowId" element={<ViewerPage />} />
+          {import.meta.env.DEV && (
+            <Route path="/__error" element={<ErrorTriggerPage />} />
+          )}
         </Routes>
       </ErrorBoundary>
     </BrowserRouter>

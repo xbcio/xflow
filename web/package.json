@@ -15,7 +15,7 @@
     "lint": "eslint .",
     "test": "vitest run",
     "check:boundaries": "node scripts/check-boundary.mjs",
-    "e2e": "echo 'e2e deferred to M8' && exit 0",
+    "e2e": "playwright test",
     "generate": "echo 'OpenAPI/TS generation deferred to M2/M3' && exit 0",
     "changeset": "changeset"
   },
