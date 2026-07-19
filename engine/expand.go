@@ -158,16 +158,11 @@ func (e *Engine) ExecuteBatch(ctx context.Context, t *Task) error {
 		return nil
 	}
 
-	e.mu.RLock()
-	g := e.graphs[lease.Task.ExecutionID]
-	e.mu.RUnlock()
-	if g == nil {
-		g, err = e.state.LoadGraph(ctx, lease.Task.ExecutionID)
-		if err != nil {
-			return fmt.Errorf("load graph for loop/split parent %q: %w", lease.Task.ExecutionID, err)
-		}
+	g, active, err := e.loadActiveGraph(ctx, lease.Task.ExecutionID)
+	if err != nil {
+		return fmt.Errorf("load graph for loop/split parent %q: %w", lease.Task.ExecutionID, err)
 	}
-	if g == nil {
+	if !active {
 		return ErrExecutionInactive
 	}
 	return e.completeLoopSplit(ctx, lease, g, results)
