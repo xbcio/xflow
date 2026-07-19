@@ -11,16 +11,18 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
+
+	"github.com/xbcio/xflow/backend/tenant"
 )
 
 func TestTriggerDedupIsSharedAcrossPrimitiveInstances(t *testing.T) {
-	ctx := context.Background()
+	ctx := tenant.WithTenant(context.Background(), tenant.TenantID("tenant-a"))
 	rdb := newTriggerRuntimeTestRedisClient(t)
 
 	key := "test-trigger-dedup-" + uuid.NewString()
 	t.Cleanup(func() {
-		if err := rdb.Del(ctx, triggerDedupKey(key)).Err(); err != nil {
-			t.Fatalf("Del(%q) error = %v", triggerDedupKey(key), err)
+		if err := rdb.Del(ctx, triggerDedupKey(tenant.FromContext(ctx), key)).Err(); err != nil {
+			t.Fatalf("Del(%q) error = %v", triggerDedupKey(tenant.FromContext(ctx), key), err)
 		}
 	})
 
@@ -45,13 +47,13 @@ func TestTriggerDedupIsSharedAcrossPrimitiveInstances(t *testing.T) {
 }
 
 func TestTriggerLockIsSharedAcrossPrimitiveInstances(t *testing.T) {
-	ctx := context.Background()
+	ctx := tenant.WithTenant(context.Background(), tenant.TenantID("tenant-a"))
 	rdb := newTriggerRuntimeTestRedisClient(t)
 
 	key := "test-trigger-lock-" + uuid.NewString()
 	t.Cleanup(func() {
-		if err := rdb.Del(ctx, triggerLockKey(key)).Err(); err != nil {
-			t.Fatalf("Del(%q) error = %v", triggerLockKey(key), err)
+		if err := rdb.Del(ctx, triggerLockKey(tenant.FromContext(ctx), key)).Err(); err != nil {
+			t.Fatalf("Del(%q) error = %v", triggerLockKey(tenant.FromContext(ctx), key), err)
 		}
 	})
 
@@ -94,11 +96,11 @@ func TestTriggerLockIsSharedAcrossPrimitiveInstances(t *testing.T) {
 }
 
 func TestTriggerLockRenewPreservesOwnership(t *testing.T) {
-	ctx := context.Background()
+	ctx := tenant.WithTenant(context.Background(), tenant.TenantID("tenant-a"))
 	rdb := newTriggerRuntimeTestRedisClient(t)
 
 	key := "test-trigger-lock-renew-" + uuid.NewString()
-	lockKey := triggerLockKey(key)
+	lockKey := triggerLockKey(tenant.FromContext(ctx), key)
 	t.Cleanup(func() {
 		if err := rdb.Del(ctx, lockKey).Err(); err != nil {
 			t.Fatalf("Del(%q) error = %v", lockKey, err)
@@ -149,11 +151,11 @@ func TestTriggerLockRenewPreservesOwnership(t *testing.T) {
 }
 
 func TestTriggerLockRenewPositiveSubMillisecondTTLDoesNotExpireImmediately(t *testing.T) {
-	ctx := context.Background()
+	ctx := tenant.WithTenant(context.Background(), tenant.TenantID("tenant-a"))
 	rdb := newTriggerRuntimeTestRedisClient(t)
 
 	key := "test-trigger-lock-renew-sub-ms-" + uuid.NewString()
-	lockKey := triggerLockKey(key)
+	lockKey := triggerLockKey(tenant.FromContext(ctx), key)
 	t.Cleanup(func() {
 		if err := rdb.Del(ctx, lockKey).Err(); err != nil {
 			t.Fatalf("Del(%q) error = %v", lockKey, err)
@@ -195,11 +197,11 @@ func TestTriggerLockRenewPositiveSubMillisecondTTLDoesNotExpireImmediately(t *te
 }
 
 func TestTriggerLockReleaseDoesNotDeleteNewOwner(t *testing.T) {
-	ctx := context.Background()
+	ctx := tenant.WithTenant(context.Background(), tenant.TenantID("tenant-a"))
 	rdb := newTriggerRuntimeTestRedisClient(t)
 
 	key := "test-trigger-lock-stale-release-" + uuid.NewString()
-	lockKey := triggerLockKey(key)
+	lockKey := triggerLockKey(tenant.FromContext(ctx), key)
 	t.Cleanup(func() {
 		if err := rdb.Del(ctx, lockKey).Err(); err != nil {
 			t.Fatalf("Del(%q) error = %v", lockKey, err)
@@ -256,15 +258,15 @@ func TestTriggerLockReleaseDoesNotDeleteNewOwner(t *testing.T) {
 }
 
 func TestTriggerStateIsSharedAcrossPrimitiveInstances(t *testing.T) {
-	ctx := context.Background()
+	ctx := tenant.WithTenant(context.Background(), tenant.TenantID("tenant-a"))
 	rdb := newTriggerRuntimeTestRedisClient(t)
 
 	scope := "test-trigger-state-" + uuid.NewString()
 	key := "payload"
 	value := []byte(`{"ok":true}`)
 	t.Cleanup(func() {
-		if err := rdb.Del(ctx, triggerStateKey(scope, key)).Err(); err != nil {
-			t.Fatalf("Del(%q) error = %v", triggerStateKey(scope, key), err)
+		if err := rdb.Del(ctx, triggerStateKey(tenant.FromContext(ctx), scope, key)).Err(); err != nil {
+			t.Fatalf("Del(%q) error = %v", triggerStateKey(tenant.FromContext(ctx), scope, key), err)
 		}
 	})
 
@@ -293,6 +295,87 @@ func TestTriggerStateIsSharedAcrossPrimitiveInstances(t *testing.T) {
 	}
 	if got != nil {
 		t.Fatalf("State(first).Get() after delete = %q, want nil", got)
+	}
+}
+
+// TestTriggerTenantIsolation asserts that dedup, lock, and state keys are
+// isolated by tenant.
+func TestTriggerTenantIsolation(t *testing.T) {
+	ctxA := tenant.WithTenant(context.Background(), tenant.TenantID("tenant-a"))
+	ctxB := tenant.WithTenant(context.Background(), tenant.TenantID("tenant-b"))
+	rdb := newTriggerRuntimeTestRedisClient(t)
+
+	key := "test-trigger-isolation-" + uuid.NewString()
+	stateScope := "test-trigger-scope-" + uuid.NewString()
+	t.Cleanup(func() {
+		tnA := tenant.FromContext(ctxA)
+		tnB := tenant.FromContext(ctxB)
+		_ = rdb.Del(ctxA, triggerDedupKey(tnA, key), triggerLockKey(tnA, key), triggerStateKey(tnA, stateScope, key)).Err()
+		_ = rdb.Del(ctxB, triggerDedupKey(tnB, key), triggerLockKey(tnB, key), triggerStateKey(tnB, stateScope, key)).Err()
+	})
+
+	first := New(rdb)
+
+	// Dedup is independent per tenant.
+	ok, err := first.Dedup(ctxA, key, time.Minute)
+	if err != nil {
+		t.Fatalf("Dedup(tenant-a) error = %v", err)
+	}
+	if !ok {
+		t.Fatalf("Dedup(tenant-a) = %v, want true", ok)
+	}
+	ok, err = first.Dedup(ctxB, key, time.Minute)
+	if err != nil {
+		t.Fatalf("Dedup(tenant-b) error = %v", err)
+	}
+	if !ok {
+		t.Fatalf("Dedup(tenant-b) = %v, want true", ok)
+	}
+
+	// Lock is independent per tenant.
+	lockA, ok, err := first.TryLock(ctxA, key, time.Minute)
+	if err != nil {
+		t.Fatalf("TryLock(tenant-a) error = %v", err)
+	}
+	if !ok {
+		t.Fatalf("TryLock(tenant-a) = %v, want true", ok)
+	}
+	lockB, ok, err := first.TryLock(ctxB, key, time.Minute)
+	if err != nil {
+		t.Fatalf("TryLock(tenant-b) error = %v", err)
+	}
+	if !ok {
+		t.Fatalf("TryLock(tenant-b) = %v, want true", ok)
+	}
+	if err := lockA.Release(ctxA); err != nil {
+		t.Fatalf("Release(tenant-a) error = %v", err)
+	}
+	if err := lockB.Release(ctxB); err != nil {
+		t.Fatalf("Release(tenant-b) error = %v", err)
+	}
+
+	// State is independent per tenant.
+	valueA := []byte(`{"tenant":"a"}`)
+	valueB := []byte(`{"tenant":"b"}`)
+	if err := first.State(ctxA, stateScope).Set(ctxA, key, valueA, time.Minute); err != nil {
+		t.Fatalf("State(tenant-a).Set() error = %v", err)
+	}
+	if err := first.State(ctxB, stateScope).Set(ctxB, key, valueB, time.Minute); err != nil {
+		t.Fatalf("State(tenant-b).Set() error = %v", err)
+	}
+	gotA, err := first.State(ctxA, stateScope).Get(ctxA, key)
+	if err != nil {
+		t.Fatalf("State(tenant-a).Get() error = %v", err)
+	}
+	gotB, err := first.State(ctxB, stateScope).Get(ctxB, key)
+	if err != nil {
+		t.Fatalf("State(tenant-b).Get() error = %v", err)
+	}
+	if string(gotA) != string(valueA) {
+		t.Fatalf("State(tenant-a).Get() = %q, want %q", gotA, valueA)
+	}
+	if string(gotB) != string(valueB) {
+		t.Fatalf("State(tenant-b).Get() = %q, want %q", gotB, valueB)
 	}
 }
 
