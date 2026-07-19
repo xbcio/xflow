@@ -102,7 +102,7 @@ func newDeadLetterListCommand(opts *deadLetterOptions) *cobra.Command {
 	cmd.Flags().StringVar(&executionID, "execution", "", "Execution ID (required)")
 	cmd.Flags().IntVar(&limit, "limit", 100, "Maximum entries to return per page (bounded)")
 	cmd.Flags().StringVar(&cursor, "cursor", "", "Opaque cursor from a prior page's next_cursor")
-	cmd.Flags().StringVar(&tenantFlag, "tenant", string(tenant.DefaultTenant), "Tenant namespace (env: XFLOW_TENANT)")
+	cmd.Flags().StringVar(&tenantFlag, "tenant", envOr("XFLOW_TENANT", string(tenant.DefaultTenant)), "Tenant namespace (env: XFLOW_TENANT)")
 	return cmd
 }
 
@@ -169,7 +169,7 @@ secondary projection only.`,
 	cmd.Flags().StringVar(&entryID, "entry", "", "Dead-letter entry ID (required)")
 	cmd.Flags().StringVar(&reason, "reason", "", "Reason for replay (required, length-bounded)")
 	cmd.Flags().StringVar(&requestID, "request-id", "", "Idempotency key; retry with the same value to recover a lost response")
-	cmd.Flags().StringVar(&tenantFlag, "tenant", string(tenant.DefaultTenant), "Tenant namespace (env: XFLOW_TENANT)")
+	cmd.Flags().StringVar(&tenantFlag, "tenant", envOr("XFLOW_TENANT", string(tenant.DefaultTenant)), "Tenant namespace (env: XFLOW_TENANT)")
 	return cmd
 }
 

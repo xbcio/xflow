@@ -161,6 +161,11 @@ func TestDeadLetterCLIRejectsInvalidTenant(t *testing.T) {
 	if err == nil {
 		t.Fatal("replay with invalid tenant = nil, want error")
 	}
+	// The list subcommand shares the same --tenant validation path.
+	err = executeRootWith(&out, "dead-letter", "list", "--execution", "x", "--tenant", "bad:tenant")
+	if err == nil {
+		t.Fatal("list with invalid tenant = nil, want error")
+	}
 }
 
 func TestDeadLetterCLITenantListAndReplay(t *testing.T) {
