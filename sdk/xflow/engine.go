@@ -5,6 +5,8 @@ package xflow
 
 import (
 	"context"
+	"fmt"
+	"log"
 
 	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/engine"
@@ -91,8 +93,21 @@ func newFromConfig(cfg *engineConfig, provider backend.Provider) (*Engine, error
 		return nil, err
 	}
 
-	stop := provider.Bind(eng)
-	e.stopFns = append(e.stopFns, stop)
+	if sb, ok := provider.(backend.StartBinder); ok {
+		stop, err := sb.StartBinding(eng)
+		if err != nil {
+			return nil, fmt.Errorf("xflow: start backend: %w", err)
+		}
+		e.stopFns = append(e.stopFns, stop)
+	} else {
+		// Deprecated compatibility path: legacy providers only expose the
+		// error-swallowing Bind contract. We keep it so external backend
+		// implementations continue to compile, but production backends should
+		// implement backend.StartBinder.
+		log.Println("xflow: warning: backend.Provider does not implement backend.StartBinder; using deprecated Bind path that cannot propagate consumer start errors")
+		stop := provider.Bind(eng)
+		e.stopFns = append(e.stopFns, stop)
+	}
 	e.stopFns = append(e.stopFns, func() { _ = e.triggerRuntime.Close(context.Background()) })
 
 	return e, nil

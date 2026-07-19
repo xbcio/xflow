@@ -38,3 +38,12 @@ type Waiter interface {
 type TaskHandlerBinder interface {
 	BindTaskHandler(eng *engine.Engine, handler func(context.Context, *engine.Task) error) (func(), error)
 }
+
+// StartBinder is the fail-closed production startup path. It starts the
+// consumer, durable outbox dispatcher and lease timeout monitor, returning
+// an error if any component fails — so the SDK factory (NewCluster/NewLocal)
+// never returns a ready Engine while the consumer is down. Provider.Bind is
+// retained only as a compatibility adapter for legacy callers.
+type StartBinder interface {
+	StartBinding(eng *engine.Engine) (func(), error)
+}

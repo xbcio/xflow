@@ -237,6 +237,7 @@ func (b *Backend) Notify() <-chan bool                { return b.leaderElector.N
 
 var _ backend.LeaderElector = (*Backend)(nil)
 var _ backend.TaskHandlerBinder = (*Backend)(nil)
+var _ backend.StartBinder = (*Backend)(nil)
 
 // New creates a distributed backend connected to the given Redis address.
 // db may be nil for pure-Redis mode (no MySQL persistence).
@@ -316,10 +317,9 @@ func New(redisAddr string, db store.Store, opts ...Option) (*Backend, error) {
 // Bind wires the embedded execution dispatcher into the task transport and
 // starts the timeout monitor. Returns a stop function for graceful shutdown.
 //
-// This is the Provider.Bind path used by the SDK (NewLocal/NewCluster). It
-// cannot change the engine's start error surface, so a consumer-start failure
-// is logged and a resource-cleanup stop is returned. The control-plane path
-// (BindTaskHandler) propagates the same error instead — see bindHandler.
+// Deprecated: Provider.Bind is the legacy SDK path that cannot propagate start
+// errors. New code should use StartBinding, which returns an error so callers
+// can fail closed when the consumer does not start.
 func (b *Backend) Bind(eng *engine.Engine) func() {
 	if !b.consumer {
 		return b.nonConsumerStop()
@@ -338,14 +338,31 @@ func (b *Backend) Bind(eng *engine.Engine) func() {
 	return stop
 }
 
+// StartBinding implements backend.StartBinder. It wires the embedded execution
+// dispatcher into the task transport and starts the durable outbox dispatcher
+// and lease timeout monitor, returning an error if any component fails so the
+// SDK factory (NewCluster/NewLocal) never returns a ready Engine while the
+// consumer is down.
+func (b *Backend) StartBinding(eng *engine.Engine) (func(), error) {
+	if !b.consumer {
+		return b.nonConsumerStop(), nil
+	}
+
+	var opts []execution.RunnerOption
+	if b.resourcePool != nil {
+		opts = append(opts, execution.WithResourcePool(b.resourcePool))
+	}
+	dispatcher := execution.NewEmbeddedDispatcher(eng, b.registry, opts...)
+	return b.bindHandler(eng, dispatcher.HandleTask)
+}
+
 // BindHandler wires a custom task handler into the task transport and starts
 // the outbox dispatcher and timeout monitor. It is retained for compatibility
 // with callers that bind a custom handler outside the control-plane contract.
 //
-// Prefer BindTaskHandler for the control-plane path: it propagates consumer
-// start errors instead of swallowing them. In transient (fire-and-forget) mode
-// the timeout monitor is not started, since there are no suspend/timeout
-// semantics and its poll is pure overhead.
+// Deprecated: Prefer StartBinding for the SDK path or BindTaskHandler for the
+// control-plane path. BindHandler swallows consumer start errors; production
+// callers should use the error-returning alternatives.
 func (b *Backend) BindHandler(eng *engine.Engine, handler func(context.Context, *engine.Task) error) func() {
 	stop, err := b.bindHandler(eng, handler)
 	if err != nil {
@@ -439,8 +456,12 @@ func (b *Backend) bindHandler(eng *engine.Engine, handler func(context.Context, 
 		}()
 		if b.testHooks.afterOutboxStart != nil {
 			if err := b.testHooks.afterOutboxStart(); err != nil {
-				// Reverse-order rollback: stop monitor (not yet tracked), stop
-				// outbox dispatcher and wait, then stop consumer + transport.
+				// Reverse-order rollback: stop monitor and wait, stop outbox
+				// dispatcher and wait, then stop consumer + transport.
+				if tm != nil {
+					tm.Stop()
+					<-tmDone
+				}
 				cancelOutbox()
 				<-outboxDone
 				if stopConsumer != nil {
@@ -457,16 +478,17 @@ func (b *Backend) bindHandler(eng *engine.Engine, handler func(context.Context, 
 	var stopOnce sync.Once
 	stop := func() {
 		stopOnce.Do(func() {
-			// Block new work, then wait for each goroutine to exit before
-			// releasing the resources (Redis, transport, pool) they use.
+			// Stop the consumer first to block new work, then cancel background
+			// loops and wait for their goroutines to exit before releasing the
+			// resources (Redis, transport, pool) they use.
+			if stopConsumer != nil {
+				stopConsumer()
+			}
 			cancelOutbox()
 			<-outboxDone
 			if tm != nil {
 				tm.Stop()
 				<-tmDone
-			}
-			if stopConsumer != nil {
-				stopConsumer()
 			}
 			_ = b.transport.Close()
 			_ = b.rdb.Close()
