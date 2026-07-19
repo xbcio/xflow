@@ -1,15 +1,20 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/xbcio/xflow/backend/distributed"
 	obslogger "github.com/xbcio/xflow/observability/logger"
 	"github.com/xbcio/xflow/service/apiserver"
+	"github.com/xbcio/xflow/service/control"
 )
 
 func TestParseServerConfigSupportsMemoryMode(t *testing.T) {
@@ -426,5 +431,117 @@ func TestBuildRedisConfigClusterMode(t *testing.T) {
 	want := []string{"c1:6379", "c2:6379"}
 	if rc.Mode != distributed.RedisModeCluster || len(rc.Addrs) != 2 || strings.Join(rc.Addrs, ",") != strings.Join(want, ",") || rc.Username != "u" || rc.Password != "p" || rc.TLSConfig == nil {
 		t.Fatalf("unexpected RedisConfig: %+v", rc)
+	}
+}
+
+// TestRunServerMultiTenantManagementHTTPAuth is a cmd/server-level end-to-end
+// regression test for the Task 7.3 review finding: the outer
+// ManagementAuthMiddleware must accept any token in the multi-tenant registry,
+// not just the first one. tenantB (tok-b) must reach the route-level authz
+// wrapper and successfully inspect its own execution; unknown tokens are still
+// rejected; cross-tenant access remains 404.
+func TestRunServerMultiTenantManagementHTTPAuth(t *testing.T) {
+	redisServer, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	t.Cleanup(redisServer.Close)
+
+	// Build the same backend/control-plane stack runServer would use, but with
+	// the queue consumer disabled so queued tasks do not race with the test.
+	backend, err := distributed.New(redisServer.Addr(), nil, distributed.WithConsumer(false))
+	if err != nil {
+		t.Fatalf("distributed.New: %v", err)
+	}
+	cp, err := control.NewControlPlane(control.Config{Backend: backend})
+	if err != nil {
+		t.Fatalf("NewControlPlane: %v", err)
+	}
+
+	path := writeTokenFile(t, "tokens.json",
+		`[{"token":"tok-a","subject":"op-a","tenant":"tenantA","scopes":["workflow","execution","management.read"]},`+
+			`{"token":"tok-b","subject":"op-b","tenant":"tenantB","scopes":["workflow","execution","management.read"]}]`,
+		0600)
+	cfg, err := parseServerConfig([]string{"-redis", redisServer.Addr(), "-auth-tokens-file", path, "-management"})
+	if err != nil {
+		t.Fatalf("parseServerConfig: %v", err)
+	}
+	mappings, err := loadAuthTokenMappings(cfg)
+	if err != nil {
+		t.Fatalf("loadAuthTokenMappings: %v", err)
+	}
+	principalAuth := apiserver.NewBearerPrincipalAuthMulti(mappings)
+
+	// Replicate runServer's production wiring: PrincipalAuth drives the B3
+	// authz wrapper, and the same registry also gates /v1/management/* via the
+	// outer ManagementAuthMiddleware.
+	srv, err := apiserver.New(apiserver.Config{
+		RedisAddr:     redisServer.Addr(),
+		Concurrency:   1,
+		PrincipalAuth: principalAuth,
+		Authorizer:    apiserver.TenantAwareAuthorizer{},
+		AuditSink:     apiserver.NewInMemoryAuditSink(),
+	}, apiserver.WithControlPlane(cp), apiserver.WithManagement(),
+		apiserver.WithHTTPMiddleware(apiserver.ManagementAuthMiddleware(principalAuth)))
+	if err != nil {
+		t.Fatalf("apiserver.New: %v", err)
+	}
+	httpSrv := httptest.NewServer(srv.Handler())
+	t.Cleanup(httpSrv.Close)
+
+	submitWorkflow := func(token string) string {
+		body := map[string]any{
+			"workflow": map[string]any{
+				"name":  "mgmt-auth-wf",
+				"nodes": []map[string]any{{"name": "start", "type": "test.echo"}},
+			},
+		}
+		var buf bytes.Buffer
+		_ = json.NewEncoder(&buf).Encode(body)
+		req, _ := http.NewRequest(http.MethodPost, httpSrv.URL+"/v1/workflows", &buf)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("submit %s: %v", token, err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("submit %s status = %d, want 200", token, resp.StatusCode)
+		}
+		var out struct {
+			ExecutionID string `json:"execution_id"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&out)
+		if out.ExecutionID == "" {
+			t.Fatalf("submit %s returned empty execution_id", token)
+		}
+		return out.ExecutionID
+	}
+
+	managementExecStatus := func(token, execID string) int {
+		req, _ := http.NewRequest(http.MethodGet, httpSrv.URL+"/v1/management/executions/"+execID, nil)
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("management exec %s/%s: %v", token, execID, err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		return resp.StatusCode
+	}
+
+	execB := submitWorkflow("tok-b")
+	execA := submitWorkflow("tok-a")
+
+	if code := managementExecStatus("tok-b", execB); code != http.StatusOK {
+		t.Fatalf("tenantB inspect own exec = %d, want 200 (outer middleware must accept tok-b)", code)
+	}
+	if code := managementExecStatus("tok-unknown", execB); code != http.StatusUnauthorized {
+		t.Fatalf("unknown token = %d, want 401", code)
+	}
+	if code := managementExecStatus("tok-b", execA); code != http.StatusNotFound {
+		t.Fatalf("tenantB inspect tenantA exec = %d, want 404 (IDOR, no existence leak)", code)
 	}
 }

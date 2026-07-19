@@ -234,6 +234,36 @@ func TestBearerPrincipalAuthMultiMapsTokenToTenant(t *testing.T) {
 	}
 }
 
+// TestBearerPrincipalAuthImplementsWorkflowAuthenticator proves the multi-token
+// registry can also gate the outer management middleware: any registered token
+// passes AuthenticateRequest, and an unknown token fails with the same error as
+// a missing token.
+func TestBearerPrincipalAuthImplementsWorkflowAuthenticator(t *testing.T) {
+	var auth WorkflowAuthenticator = NewBearerPrincipalAuthMulti([]TokenPrincipalMapping{
+		{Token: "tok-a", Subject: "op-a", TenantID: "tenantA", Scopes: []string{"management.read"}},
+		{Token: "tok-b", Subject: "op-b", TenantID: "tenantB", Scopes: []string{"management.read"}},
+	})
+
+	for _, tok := range []string{"tok-a", "tok-b"} {
+		req := httptest.NewRequest(http.MethodGet, "/v1/management/leader", nil)
+		req.Header.Set("Authorization", "Bearer "+tok)
+		if err := auth.AuthenticateRequest(req); err != nil {
+			t.Fatalf("%s: AuthenticateRequest = %v, want nil", tok, err)
+		}
+	}
+
+	reqUnknown := httptest.NewRequest(http.MethodGet, "/v1/management/leader", nil)
+	reqUnknown.Header.Set("Authorization", "Bearer tok-x")
+	if err := auth.AuthenticateRequest(reqUnknown); err != ErrWorkflowUnauthenticated {
+		t.Fatalf("unknown token: err = %v, want ErrWorkflowUnauthenticated", err)
+	}
+
+	reqMissing := httptest.NewRequest(http.MethodGet, "/v1/management/leader", nil)
+	if err := auth.AuthenticateRequest(reqMissing); err != ErrWorkflowUnauthenticated {
+		t.Fatalf("missing token: err = %v, want ErrWorkflowUnauthenticated", err)
+	}
+}
+
 func TestTenantAwareAuthorizerDeniesEmptyTenant(t *testing.T) {
 	// A principal with scopes but no tenant must be denied — fail-closed.
 	dec, err := TenantAwareAuthorizer{}.Authorize(context.Background(), AuthorizationRequest{

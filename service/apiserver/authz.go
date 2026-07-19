@@ -270,6 +270,16 @@ func (a *BearerPrincipalAuth) Authenticate(r *http.Request) (Principal, error) {
 	return Principal{Subject: entry.subject, TenantID: entry.tenantID, Scopes: entry.scopes}, nil
 }
 
+// AuthenticateRequest implements WorkflowAuthenticator so the same multi-token
+// registry can gate the outer management middleware while the route-level authz
+// wrapper supplies the principal, scopes, and tenant. It delegates to
+// Authenticate and returns only the authentication error, so plaintext tokens
+// are never retained and the outcome is simply valid/invalid.
+func (a *BearerPrincipalAuth) AuthenticateRequest(r *http.Request) error {
+	_, err := a.Authenticate(r)
+	return err
+}
+
 // disabledPrincipalAuth is the dev authenticator that returns an anonymous
 // principal with the wildcard scope. It must NOT be the production default.
 type disabledPrincipalAuth struct{}

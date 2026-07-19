@@ -330,22 +330,23 @@ func runServer(cfg serverConfig) error {
 		return err
 	} else if len(mappings) > 0 {
 		// Multi-tenant path (design §2.3 scheme A): each token binds to its
-		// own (subject, tenant, scopes). The workflow-control bearer guard
-		// still uses the legacy BearerTokenAuth on the first token for
-		// backwards-compatible 401 semantics; principal authz + tenant
-		// injection go through BearerPrincipalAuthMulti. Plaintext tokens
-		// are hashed in the constructor and never retained or logged.
-		workflowAuth = apiserver.NewBearerTokenAuth(mappings[0].Token)
-		principalAuth = apiserver.NewBearerPrincipalAuthMulti(mappings)
+		// own (subject, tenant, scopes). The same multi-token registry gates
+		// the outer management middleware (via WorkflowAuthenticator) and the
+		// route-level authz wrapper (via PrincipalAuthenticator). Plaintext
+		// tokens are hashed in the constructor and never retained or logged.
+		auth := apiserver.NewBearerPrincipalAuthMulti(mappings)
+		workflowAuth = auth
+		principalAuth = auth
 		log.Printf("xflow-server: multi-tenant principal auth enabled (%d token(s))", len(mappings))
 	} else if cfg.apiAuthToken != "" {
-		workflowAuth = apiserver.NewBearerTokenAuth(cfg.apiAuthToken)
 		// B3 single-tenant: map the static token to a principal with the G1
 		// operator scopes under the default tenant so resource/operation
 		// authz + audit are enforced. The subject is server-configured;
 		// callers cannot self-report it.
-		principalAuth = apiserver.NewBearerPrincipalAuth(cfg.apiAuthToken, "xflow-operator",
+		auth := apiserver.NewBearerPrincipalAuth(cfg.apiAuthToken, "xflow-operator",
 			[]string{"workflow", "execution", "deadletter.list", "deadletter.replay", "management.read", "management.write"})
+		workflowAuth = auth
+		principalAuth = auth
 	}
 	// G1 audit projection. When --mysql-dsn is set, a durable SQL sink is the
 	// authoritative audit target (admission audit persisted before mutations,
