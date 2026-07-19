@@ -19,6 +19,25 @@ func New(rdb redis.UniversalClient) *Primitives {
 	return &Primitives{rdb: rdb}
 }
 
+// Key schema (Redis Cluster-safe, G2 Phase 2 / Task 2.2).
+//
+// All Redis operations in this package are single-key. There is no Lua script
+// that touches more than one key, so no hash tag is required for cluster
+// safety. Each primitive owns a distinct key prefix:
+//
+//	xflow:trigger:dedup:<key>       -> dedup marker (SetNX, single-key)
+//	xflow:trigger:lock:<key>        -> distributed lock value (SetNX + Lua)
+//	xflow:trigger:state:<scope>:<key> -> scoped state payload (Get/Set/Del)
+//
+// The two Lua scripts (release/renew trigger lock) only reference KEYS[1],
+// which is the lock key for the same <key>. They are therefore cluster-safe
+// without hash tags.
+//
+// Tenant prefix is reserved for Task 7.2 (Phase 6/7). When a tenant prefix is
+// added, the expected shape is `xflow:{tenant}:trigger:dedup:<key>` etc.,
+// keeping the per-key operation model unchanged. The hash tag for any future
+// multi-key Lua must be anchored on a scope+key that all KEYS share, e.g.
+// `{<scope>:<key>}` or `{<key>}`.
 func triggerDedupKey(key string) string { return "xflow:trigger:dedup:" + key }
 
 func triggerLockKey(key string) string { return "xflow:trigger:lock:" + key }
@@ -56,19 +75,24 @@ type triggerLock struct {
 	token string
 }
 
-var releaseTriggerLockScript = redis.NewScript(`
+const (
+	releaseTriggerLockScriptSrc = `
 if redis.call("GET", KEYS[1]) == ARGV[1] then
 	return redis.call("DEL", KEYS[1])
 end
 return 0
-`)
-
-var renewTriggerLockScript = redis.NewScript(`
+`
+	renewTriggerLockScriptSrc = `
 if redis.call("GET", KEYS[1]) == ARGV[1] then
 	return redis.call("PEXPIRE", KEYS[1], ARGV[2])
 end
 return 0
-`)
+`
+)
+
+var releaseTriggerLockScript = redis.NewScript(releaseTriggerLockScriptSrc)
+
+var renewTriggerLockScript = redis.NewScript(renewTriggerLockScriptSrc)
 
 func (l *triggerLock) Renew(ctx context.Context, ttl time.Duration) (bool, error) {
 	if ttl <= 0 {

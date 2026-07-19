@@ -3,6 +3,7 @@ package trigger
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -324,6 +325,34 @@ func waitForRedisCondition(t *testing.T, timeout time.Duration, condition func()
 		case <-ticker.C:
 		case <-deadline.C:
 			t.Fatal("condition was not met before timeout")
+		}
+	}
+}
+
+// TestTriggerLuaScriptsAreSingleKey is a static lock on the cluster-safety
+// audit performed in G2 Phase 2 / Task 2.2. It asserts that every Lua script
+// in this package operates on a single key only. If a future change introduces
+// multi-key Lua (or dynamic key construction), this test must be updated and
+// the cluster-safety note in trigger.go must be revisited.
+func TestTriggerLuaScriptsAreSingleKey(t *testing.T) {
+	scripts := map[string]string{
+		"releaseTriggerLockScript": releaseTriggerLockScriptSrc,
+		"renewTriggerLockScript":   renewTriggerLockScriptSrc,
+	}
+
+	for name, src := range scripts {
+		// Multi-key Lua would reference KEYS[2] or higher.
+		if strings.Contains(src, "KEYS[2]") || strings.Contains(src, "KEYS[3]") {
+			t.Errorf("%s references multiple KEYS; add a shared hash tag and update the cluster-safety audit", name)
+		}
+
+		// Dynamic key construction inside redis.call is a CROSSSLOT risk unless
+		// the constructed prefix carries the same hash tag as the declared KEYS.
+		for _, line := range strings.Split(src, "\n") {
+			line = strings.TrimSpace(line)
+			if strings.Contains(line, "redis.call") && strings.Contains(line, "..") {
+				t.Errorf("%s constructs a key dynamically with '..'; verify the prefix shares the KEYS hash tag", name)
+			}
 		}
 	}
 }
