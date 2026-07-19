@@ -24,8 +24,8 @@ export function HealthPage({ config }: HealthPageProps) {
 
         <h3>Nodes</h3>
         <ul data-testid="fixture-nodes">
-          {workflowFixture.nodes.map((node) => (
-            <li key={node.id}>
+          {(workflowFixture.nodes ?? []).map((node) => (
+            <li key={node.id ?? node.name}>
               {node.name} ({node.type}) — {node.kind}
             </li>
           ))}
@@ -33,9 +33,9 @@ export function HealthPage({ config }: HealthPageProps) {
 
         <h3>Connections</h3>
         <ul data-testid="fixture-connections">
-          {Object.entries(workflowFixture.connections).map(([source, ports]) =>
+          {Object.entries(workflowFixture.connections ?? {}).map(([source, ports]) =>
             Object.entries(ports).map(([port, targets]) =>
-              targets.map((target) => (
+              (targets ?? []).map((target) => (
                 <li key={`${source}-${port}-${target.node}`}>
                   {source}:{port} → {target.node}:{target.input}
                 </li>

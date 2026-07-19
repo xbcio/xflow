@@ -1,5 +1,9 @@
-import { WORKFLOW_RENDERER_VERSION } from "@xflow/workflow-renderer";
-import { API_CLIENT_VERSION } from "@xflow/api-client";
-
 export const WORKFLOW_VIEWER_VERSION = "0.1.0";
-export { WORKFLOW_RENDERER_VERSION, API_CLIENT_VERSION };
+
+export { WorkflowViewer } from "./WorkflowViewer";
+export { ExecutionViewer } from "./ExecutionViewer";
+
+export type { WorkflowViewerProps } from "./WorkflowViewer";
+export type { ExecutionViewerProps } from "./ExecutionViewer";
+
+export type { ExecutionSnapshot } from "@xflow/workflow-renderer";

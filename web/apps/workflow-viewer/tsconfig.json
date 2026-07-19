@@ -3,5 +3,10 @@
   "compilerOptions": {
     "noEmit": true
   },
-  "include": ["src/**/*", "vite.config.ts"]
+  "include": ["src/**/*", "vite.config.ts"],
+  "references": [
+    { "path": "../../packages/workflow-core" },
+    { "path": "../../packages/workflow-renderer" },
+    { "path": "../../packages/workflow-viewer" }
+  ]
 }

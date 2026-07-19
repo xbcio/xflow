@@ -1,3 +1,5 @@
+import type { WorkflowDef } from "@xflow/workflow-core";
+
 export interface Position {
   x: number;
   y: number;
@@ -17,7 +19,7 @@ export interface Connection {
   input: string;
 }
 
-export interface WorkflowDef {
+export interface WorkflowFixtureDef {
   id: string;
   namespace: string;
   name: string;
@@ -38,7 +40,7 @@ export const workflowFixture: WorkflowDef = {
   nodes: [
     {
       id: "start",
-      name: "Start",
+      name: "start",
       type: "xflow.start",
       kind: "trigger",
       version: 1,
@@ -46,7 +48,7 @@ export const workflowFixture: WorkflowDef = {
     },
     {
       id: "end",
-      name: "End",
+      name: "end",
       type: "xflow.end",
       kind: "action",
       version: 1,

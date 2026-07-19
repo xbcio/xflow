@@ -12,25 +12,27 @@ test.describe("Workflow Viewer", () => {
     await expect(page.getByText("Mock: enabled")).toBeVisible();
     await expect(
       page.getByTestId("fixture-nodes"),
-    ).toContainText("Start (xflow.start) — trigger");
+    ).toContainText("start (xflow.start) — trigger");
     await expect(
       page.getByTestId("fixture-nodes"),
-    ).toContainText("End (xflow.end) — action");
+    ).toContainText("end (xflow.end) — action");
     await expect(
       page.getByTestId("fixture-connections"),
     ).toContainText("start:default → end:default");
   });
 
-  test("navigates to viewer workflow page", async ({ page }) => {
+  test("navigates to viewer workflow page and renders the canvas", async ({ page }) => {
     await page.goto("http://localhost:5174/view/some-workflow-id");
 
     await expect(
       page.getByRole("heading", { name: "Viewer: some-workflow-id" }),
     ).toBeVisible();
     await expect(page.getByTestId("viewer-page")).toBeVisible();
-    await expect(page.getByTestId("fixture-json")).toContainText(
-      '"name": "health-check"',
-    );
+
+    const canvas = page.locator(".xflow-root");
+    await expect(canvas).toBeVisible();
+    await expect(canvas.locator(".react-flow__node").first()).toBeVisible();
+    await expect(page.getByTestId("fixture-json")).toHaveCount(0);
   });
 
   test("error boundary catches render errors without leaking stack traces", async ({

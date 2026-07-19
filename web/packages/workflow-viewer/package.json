@@ -19,27 +19,18 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@xflow/api-client": "workspace:*",
-    "@xflow/node-registry": "workspace:*",
-    "@xflow/workflow-components": "workspace:*",
     "@xflow/workflow-core": "workspace:*",
-    "@xflow/workflow-provider": "workspace:*",
     "@xflow/workflow-renderer": "workspace:*"
   },
   "peerDependencies": {
     "react": "19.1.0",
     "react-dom": "19.1.0",
-    "@xyflow/react": "12.5.0",
-    "zustand": "5.0.5",
-    "@tanstack/react-query": "5.75.0"
-  },
-  "peerDependenciesMeta": {
-    "@xyflow/react": { "optional": true },
-    "zustand": { "optional": true },
-    "@tanstack/react-query": { "optional": true }
+    "@xyflow/react": "12.5.0"
   },
   "devDependencies": {
     "@xflow/typescript-config": "workspace:*",
+    "@types/react": "19.1.17",
+    "@types/react-dom": "19.1.10",
     "react": "19.1.0",
     "react-dom": "19.1.0",
     "typescript": "5.8.3",

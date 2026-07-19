@@ -102,6 +102,15 @@ importers:
 
   apps/workflow-viewer:
     dependencies:
+      '@xflow/workflow-core':
+        specifier: workspace:*
+        version: link:../../packages/workflow-core
+      '@xflow/workflow-renderer':
+        specifier: workspace:*
+        version: link:../../packages/workflow-renderer
+      '@xflow/workflow-viewer':
+        specifier: workspace:*
+        version: link:../../packages/workflow-viewer
       react:
         specifier: 19.1.0
         version: 19.1.0
@@ -311,25 +320,19 @@ importers:
 
   packages/workflow-viewer:
     dependencies:
-      '@xflow/api-client':
-        specifier: workspace:*
-        version: link:../api-client
-      '@xflow/node-registry':
-        specifier: workspace:*
-        version: link:../node-registry
-      '@xflow/workflow-components':
-        specifier: workspace:*
-        version: link:../workflow-components
       '@xflow/workflow-core':
         specifier: workspace:*
         version: link:../workflow-core
-      '@xflow/workflow-provider':
-        specifier: workspace:*
-        version: link:../workflow-provider
       '@xflow/workflow-renderer':
         specifier: workspace:*
         version: link:../workflow-renderer
     devDependencies:
+      '@types/react':
+        specifier: 19.1.17
+        version: 19.1.17
+      '@types/react-dom':
+        specifier: 19.1.10
+        version: 19.1.10(@types/react@19.1.17)
       '@xflow/typescript-config':
         specifier: workspace:*
         version: link:../../tooling/typescript-config

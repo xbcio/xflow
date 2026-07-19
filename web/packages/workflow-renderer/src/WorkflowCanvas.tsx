@@ -86,17 +86,28 @@ export const WorkflowCanvas = React.forwardRef<HTMLDivElement, WorkflowCanvasPro
       className,
       nodeTypes,
       overlays = [selectionOverlay, executionOverlay, diagnosticOverlay],
+      selectable = true,
+      selectedNodeIds: controlledSelectedNodeIds,
+      onSelectionChange,
     },
     ref
   ) {
-    const [selectedNodeIds, setSelectedNodeIds] = React.useState<string[]>([]);
+    const [internalSelectedNodeIds, setInternalSelectedNodeIds] = React.useState<string[]>([]);
+    const isSelectionControlled = controlledSelectedNodeIds !== undefined;
+    const selectedNodeIds = isSelectionControlled
+      ? controlledSelectedNodeIds
+      : internalSelectedNodeIds;
     const { nodes, edges } = useFlowModel(definition, executionSnapshot);
 
     const handleSelectionChange = React.useCallback(
       (params: OnSelectionChangeParams) => {
-        setSelectedNodeIds(params.nodes.map((n) => n.id));
+        const ids = params.nodes.map((n) => n.id);
+        if (!isSelectionControlled) {
+          setInternalSelectedNodeIds(ids);
+        }
+        onSelectionChange?.(ids);
       },
-      [setSelectedNodeIds]
+      [isSelectionControlled, onSelectionChange]
     );
 
     const nodesWithSelection = React.useMemo(() => {
@@ -130,12 +141,12 @@ export const WorkflowCanvas = React.forwardRef<HTMLDivElement, WorkflowCanvasPro
           nodesConnectable={!readOnly}
           nodesFocusable={!readOnly}
           edgesFocusable={!readOnly}
-          elementsSelectable={!readOnly}
+          elementsSelectable={selectable}
           onSelectionChange={handleSelectionChange}
           attributionPosition="bottom-right"
         >
           <Background gap={16} size={1} />
-          <Controls />
+          {!readOnly && <Controls />}
           <MiniMap />
         </ReactFlow>
         {overlays.map((Overlay, index) => (

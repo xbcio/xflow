@@ -53,6 +53,12 @@ export interface WorkflowCanvasProps {
   className?: string;
   nodeTypes?: Record<string, React.ComponentType<unknown>>;
   overlays?: React.ComponentType<WorkflowCanvasOverlayProps>[];
+  /** Allow selecting nodes even when readOnly is true. Defaults to true. */
+  selectable?: boolean;
+  /** Controlled selection. If omitted, selection is managed internally. */
+  selectedNodeIds?: string[];
+  /** Called when the selection changes (node clicks or controlled updates). */
+  onSelectionChange?: (nodeIds: string[]) => void;
 }
 
 export interface WorkflowCanvasOverlayProps {
