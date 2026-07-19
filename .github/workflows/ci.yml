@@ -165,3 +165,17 @@ jobs:
 
       - name: Build
         run: cd web && pnpm build
+
+      - name: Install Playwright browsers
+        run: cd web && pnpm exec playwright install --with-deps chromium
+
+      - name: Run e2e tests
+        run: cd web && pnpm e2e
+
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: web/playwright-report/
+          retention-days: 7

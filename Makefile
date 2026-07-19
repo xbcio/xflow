@@ -166,6 +166,6 @@ web-e2e:
 web-generate:
 	@cd $(WEB_DIR) && pnpm generate
 
-web-ci: web-install web-lint web-typecheck web-test web-check-boundaries web-build
+web-ci: web-install web-lint web-typecheck web-test web-check-boundaries web-build web-e2e
 
 web-all: web-ci
