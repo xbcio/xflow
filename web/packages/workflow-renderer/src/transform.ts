@@ -17,8 +17,10 @@ const SPECIFIC_NODE_TYPES: Record<string, ResolvedNodeType> = {
   "xflow.switch": "switch",
   "xflow.merge": "merge",
   "xflow.wait": "wait",
+  "xflow.approval": "approval",
   "approval.request": "approval",
   "approval.human": "approval",
+  "xflow.generic": "generic",
 };
 
 export function resolveNodeType(nodeDef: NodeDef): ResolvedNodeType {
@@ -27,7 +29,10 @@ export function resolveNodeType(nodeDef: NodeDef): ResolvedNodeType {
   const normalized = raw
     .replace(/^node:/, "xflow.")
     .replace(/^@xflow\//, "xflow.");
-  return SPECIFIC_NODE_TYPES[normalized] ?? SPECIFIC_NODE_TYPES[raw] ?? (raw.startsWith("xflow.") ? "generic" : "unknown");
+  // Only built-in types or an explicit xflow.generic resolve to a concrete
+  // renderer type. Unregistered xflow.* types degrade to "unknown" so they
+  // are rendered by UnknownNode rather than silently treated as generic.
+  return SPECIFIC_NODE_TYPES[normalized] ?? SPECIFIC_NODE_TYPES[raw] ?? "unknown";
 }
 
 function computeLayerIndex(
@@ -110,8 +115,12 @@ function autoLayout(def: WorkflowDef): Record<string, { x: number; y: number }> 
   return positions;
 }
 
-function expandEdges(connections: Connections): FlowViewModel["edges"] {
+function expandEdges(
+  connections: Connections,
+  nodeNames: Set<string>
+): Pick<FlowViewModel, "edges" | "danglingTargets"> {
   const edges: FlowViewModel["edges"] = [];
+  const danglingTargets: FlowViewModel["danglingTargets"] = [];
   let edgeIndex = 0;
 
   function edgeId(conn: Connection, source: string, port: string, index: number): string {
@@ -126,6 +135,17 @@ function expandEdges(connections: Connections): FlowViewModel["edges"] {
         const conn = targets[i];
         const targetNode = conn.node;
         if (!targetNode) continue;
+
+        if (!nodeNames.has(targetNode)) {
+          danglingTargets.push({
+            source: sourceNode,
+            port,
+            target: targetNode,
+            input: conn.input,
+          });
+          continue;
+        }
+
         edges.push({
           id: edgeId(conn, sourceNode, port, i),
           source: sourceNode,
@@ -136,15 +156,17 @@ function expandEdges(connections: Connections): FlowViewModel["edges"] {
       }
     }
   }
-  return edges;
+  return { edges, danglingTargets };
 }
 
 export function workflowToFlow(def: WorkflowDef): FlowViewModel {
   const autoPositions = autoLayout(def);
   const nodes: FlowViewModel["nodes"] = [];
+  const nodeNames = new Set<string>();
 
   for (const node of def.nodes ?? []) {
     const name = node.name ?? node.id ?? `node-${nodes.length}`;
+    nodeNames.add(name);
     const position =
       node.position?.x != null && node.position?.y != null
         ? { x: node.position.x, y: node.position.y }
@@ -158,8 +180,8 @@ export function workflowToFlow(def: WorkflowDef): FlowViewModel {
     });
   }
 
-  const edges = expandEdges(def.connections ?? {});
-  return { nodes, edges };
+  const { edges, danglingTargets } = expandEdges(def.connections ?? {}, nodeNames);
+  return { nodes, edges, danglingTargets };
 }
 
 /**

@@ -15,6 +15,13 @@ export interface NodeData extends Record<string, unknown> {
   diagnostics?: Diagnostic[];
 }
 
+export interface DanglingTarget {
+  source: string;
+  port: string;
+  target: string;
+  input?: string;
+}
+
 export interface FlowViewModel {
   nodes: Array<{
     id: string;
@@ -29,6 +36,8 @@ export interface FlowViewModel {
     sourceHandle?: string;
     targetHandle?: string;
   }>;
+  /** Edges that reference a target node not present in the workflow definition. */
+  danglingTargets: DanglingTarget[];
 }
 
 export type ResolvedNodeType =
@@ -49,6 +58,7 @@ export type ResolvedNodeType =
 export interface WorkflowCanvasProps {
   definition: WorkflowDef;
   executionSnapshot?: ExecutionSnapshot;
+  diagnostics?: Diagnostic[];
   readOnly?: boolean;
   className?: string;
   nodeTypes?: Record<string, React.ComponentType<unknown>>;

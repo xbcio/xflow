@@ -3,7 +3,7 @@
 import * as React from "react";
 import { describe, expect, it, beforeAll } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
-import type { WorkflowDef } from "@xflow/workflow-core";
+import type { Diagnostic, WorkflowDef } from "@xflow/workflow-core";
 import { WorkflowViewer } from "./WorkflowViewer";
 
 class ResizeObserverStub {
@@ -36,27 +36,15 @@ const basicDef: WorkflowDef = {
   },
 };
 
-const approvalDef: WorkflowDef = {
-  name: "approval-flow",
-  nodes: [
-    { name: "start", type: "xflow.start", kind: "trigger" },
-    {
-      name: "request",
-      type: "approval.request",
-      kind: "action",
-      inputs: [{ name: "approver", required: true }],
-    },
-    { name: "approve", type: "approval.human", kind: "action" },
-  ],
-  connections: {
-    start: {
-      default: [{ node: "request", input: "approver" }],
-    },
-    request: {
-      default: [{ node: "approve", input: "decision" }],
-    },
+const diagnostics: Diagnostic[] = [
+  {
+    code: "PORT_UNKNOWN_INPUT",
+    severity: "error",
+    message: "No input port message",
+    nodeId: "hello",
+    connectionRef: { node: "hello", input: "message" },
   },
-};
+];
 
 function renderViewer(element: React.ReactElement) {
   return render(
@@ -74,13 +62,18 @@ describe("WorkflowViewer", () => {
     expect(container.querySelector('[data-testid="node-hello"]')).not.toBeNull();
   });
 
-  it("renders all approval workflow nodes", () => {
+  it("remains read-only without mutation controls", () => {
+    const { container } = renderViewer(<WorkflowViewer definition={basicDef} />);
+    expect(container.querySelector(".react-flow__controls")).toBeNull();
+  });
+
+  it("passes diagnostics to the canvas and renders node markers", () => {
     const { container } = renderViewer(
-      <WorkflowViewer definition={approvalDef} />
+      <WorkflowViewer definition={basicDef} diagnostics={diagnostics} />
     );
-    expect(container.querySelector('[data-testid="node-start"]')).not.toBeNull();
-    expect(container.querySelector('[data-testid="node-request"]')).not.toBeNull();
-    expect(container.querySelector('[data-testid="node-approve"]')).not.toBeNull();
+    const badge = container.querySelector('[data-testid="node-diagnostics-hello"]');
+    expect(badge).not.toBeNull();
+    expect(badge?.textContent).toBe("1");
   });
 
   it("overlays execution snapshot status on nodes", () => {

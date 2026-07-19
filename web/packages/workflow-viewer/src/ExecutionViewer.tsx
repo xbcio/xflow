@@ -1,17 +1,19 @@
 import * as React from "react";
-import type { WorkflowDef } from "@xflow/workflow-core";
+import type { WorkflowDef, Diagnostic } from "@xflow/workflow-core";
 import type { ExecutionSnapshot } from "@xflow/workflow-renderer";
 import { WorkflowViewer } from "./WorkflowViewer";
 
 export interface ExecutionViewerProps {
   definition: WorkflowDef;
   executionSnapshot: ExecutionSnapshot;
+  diagnostics?: Diagnostic[];
   className?: string;
 }
 
 export function ExecutionViewer({
   definition,
   executionSnapshot,
+  diagnostics,
   className,
 }: ExecutionViewerProps) {
   const counts = React.useMemo(() => {
@@ -35,6 +37,7 @@ export function ExecutionViewer({
       <WorkflowViewer
         definition={definition}
         executionSnapshot={executionSnapshot}
+        diagnostics={diagnostics}
         className={className}
       />
       <div

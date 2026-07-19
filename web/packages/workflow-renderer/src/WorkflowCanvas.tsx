@@ -8,7 +8,7 @@ import {
   type Node,
   type OnSelectionChangeParams,
 } from "@xyflow/react";
-import type { WorkflowDef } from "@xflow/workflow-core";
+import type { Diagnostic, WorkflowDef } from "@xflow/workflow-core";
 import { GenericNode } from "./nodes/GenericNode";
 import { UnknownNode } from "./nodes/UnknownNode";
 import {
@@ -51,9 +51,36 @@ function applyExecutionSnapshot(
   });
 }
 
+function applyDiagnostics(
+  nodes: Node<NodeData>[],
+  diagnostics?: Diagnostic[]
+): Node<NodeData>[] {
+  if (!diagnostics || diagnostics.length === 0) return nodes;
+
+  const byNode = new Map<string, Diagnostic[]>();
+  for (const d of diagnostics) {
+    const nodeId = d.nodeId ?? d.connectionRef?.node;
+    if (!nodeId) continue;
+    if (!byNode.has(nodeId)) {
+      byNode.set(nodeId, []);
+    }
+    byNode.get(nodeId)!.push(d);
+  }
+
+  return nodes.map((node) => {
+    const nodeDiagnostics = byNode.get(node.id);
+    if (!nodeDiagnostics || nodeDiagnostics.length === 0) return node;
+    return {
+      ...node,
+      data: { ...node.data, diagnostics: nodeDiagnostics },
+    };
+  });
+}
+
 function useFlowModel(
   definition: WorkflowDef,
-  executionSnapshot?: ExecutionSnapshot
+  executionSnapshot?: ExecutionSnapshot,
+  diagnostics?: Diagnostic[]
 ): { nodes: Node<NodeData>[]; edges: Edge[] } {
   return React.useMemo(() => {
     const { nodes, edges } = workflowToFlow(definition);
@@ -70,11 +97,12 @@ function useFlowModel(
       sourceHandle: e.sourceHandle,
       targetHandle: e.targetHandle,
     }));
+    const withStatus = applyExecutionSnapshot(rfNodes, executionSnapshot);
     return {
-      nodes: applyExecutionSnapshot(rfNodes, executionSnapshot),
+      nodes: applyDiagnostics(withStatus, diagnostics),
       edges: rfEdges,
     };
-  }, [definition, executionSnapshot]);
+  }, [definition, executionSnapshot, diagnostics]);
 }
 
 export const WorkflowCanvas = React.forwardRef<HTMLDivElement, WorkflowCanvasProps>(
@@ -82,6 +110,7 @@ export const WorkflowCanvas = React.forwardRef<HTMLDivElement, WorkflowCanvasPro
     {
       definition,
       executionSnapshot,
+      diagnostics,
       readOnly = true,
       className,
       nodeTypes,
@@ -97,7 +126,7 @@ export const WorkflowCanvas = React.forwardRef<HTMLDivElement, WorkflowCanvasPro
     const selectedNodeIds = isSelectionControlled
       ? controlledSelectedNodeIds
       : internalSelectedNodeIds;
-    const { nodes, edges } = useFlowModel(definition, executionSnapshot);
+    const { nodes, edges } = useFlowModel(definition, executionSnapshot, diagnostics);
 
     const handleSelectionChange = React.useCallback(
       (params: OnSelectionChangeParams) => {
@@ -127,6 +156,7 @@ export const WorkflowCanvas = React.forwardRef<HTMLDivElement, WorkflowCanvasPro
     const overlayProps: WorkflowCanvasOverlayProps = {
       definition,
       executionSnapshot,
+      diagnostics,
       selectedNodeIds,
     };
 

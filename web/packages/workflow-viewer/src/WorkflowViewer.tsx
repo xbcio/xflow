@@ -1,6 +1,6 @@
 import * as React from "react";
 import { ReactFlowProvider, useReactFlow } from "@xyflow/react";
-import type { WorkflowDef } from "@xflow/workflow-core";
+import type { WorkflowDef, Diagnostic } from "@xflow/workflow-core";
 import { WorkflowCanvas } from "@xflow/workflow-renderer";
 import type { ExecutionSnapshot } from "@xflow/workflow-renderer";
 import { workflowToFlow } from "@xflow/workflow-renderer";
@@ -8,6 +8,7 @@ import { workflowToFlow } from "@xflow/workflow-renderer";
 export interface WorkflowViewerProps {
   definition: WorkflowDef;
   executionSnapshot?: ExecutionSnapshot;
+  diagnostics?: Diagnostic[];
   className?: string;
 }
 
@@ -39,6 +40,7 @@ const ForwardedFlowViewportController = React.forwardRef(FlowViewportController)
 export function WorkflowViewer({
   definition,
   executionSnapshot,
+  diagnostics,
   className,
 }: WorkflowViewerProps) {
   const [keyword, setKeyword] = React.useState("");
@@ -97,6 +99,7 @@ export function WorkflowViewer({
         <WorkflowCanvas
           definition={definition}
           executionSnapshot={executionSnapshot}
+          diagnostics={diagnostics}
           readOnly
           selectable
           selectedNodeIds={selectedNodeIds}

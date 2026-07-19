@@ -60,6 +60,15 @@ describe("resolveNodeType", () => {
     expect(resolveNodeType({ type: "acme.custom" })).toBe("unknown");
     expect(resolveNodeType({})).toBe("unknown");
   });
+
+  it("returns unknown for unregistered xflow.* types", () => {
+    expect(resolveNodeType({ type: "xflow.unknownType" })).toBe("unknown");
+    expect(resolveNodeType({ type: "xflow.custom" })).toBe("unknown");
+  });
+
+  it("preserves explicit generic type", () => {
+    expect(resolveNodeType({ type: "xflow.generic" })).toBe("generic");
+  });
 });
 
 describe("workflowToFlow", () => {
@@ -69,7 +78,7 @@ describe("workflowToFlow", () => {
     expect(flow.nodes[0].id).toBe("trigger");
     expect(flow.nodes[0].type).toBe("start");
     expect(flow.nodes[1].id).toBe("hello");
-    expect(flow.nodes[1].type).toBe("generic");
+    expect(flow.nodes[1].type).toBe("unknown");
 
     expect(flow.edges).toHaveLength(1);
     expect(flow.edges[0].source).toBe("trigger");
@@ -106,6 +115,28 @@ describe("workflowToFlow", () => {
     const flow = workflowToFlow({ name: "empty" });
     expect(flow.nodes).toHaveLength(0);
     expect(flow.edges).toHaveLength(0);
+    expect(flow.danglingTargets).toHaveLength(0);
+  });
+
+  it("collects dangling targets", () => {
+    const def: WorkflowDef = {
+      name: "dangling",
+      nodes: [{ name: "a", type: "xflow.start" }],
+      connections: {
+        a: {
+          default: [{ node: "ghost", input: "in" }],
+        },
+      },
+    };
+    const flow = workflowToFlow(def);
+    expect(flow.edges).toHaveLength(0);
+    expect(flow.danglingTargets).toHaveLength(1);
+    expect(flow.danglingTargets[0]).toEqual({
+      source: "a",
+      port: "default",
+      target: "ghost",
+      input: "in",
+    });
   });
 
   it("skips edges with missing target node", () => {
