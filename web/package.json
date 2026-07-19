@@ -1,0 +1,39 @@
+{
+  "name": "@xflow/web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "xflow frontend workflow management workspace",
+  "packageManager": "pnpm@10.10.0",
+  "engines": {
+    "node": "22.15.0",
+    "pnpm": ">=10.10.0"
+  },
+  "type": "module",
+  "scripts": {
+    "build": "turbo run build",
+    "typecheck": "tsc --build",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "check:boundaries": "node scripts/check-boundary.mjs",
+    "changeset": "changeset"
+  },
+  "devDependencies": {
+    "@changesets/cli": "2.29.0",
+    "@types/node": "22.15.0",
+    "@types/react": "19.1.17",
+    "@types/react-dom": "19.1.10",
+    "@typescript-eslint/eslint-plugin": "8.32.0",
+    "@typescript-eslint/parser": "8.32.0",
+    "@xflow/eslint-config": "workspace:*",
+    "@xflow/typescript-config": "workspace:*",
+    "eslint": "9.25.0",
+    "eslint-import-resolver-typescript": "3.10.0",
+    "eslint-plugin-import": "2.31.0",
+    "playwright": "1.52.0",
+    "react": "19.1.0",
+    "react-dom": "19.1.0",
+    "turbo": "2.5.0",
+    "typescript": "5.8.3",
+    "vitest": "3.2.0"
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "name": "@xflow/workflow-viewer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Viewer component package: read-only display and execution overlay",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc --build",
+    "typecheck": "tsc --build --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@xflow/api-client": "workspace:*",
+    "@xflow/node-registry": "workspace:*",
+    "@xflow/workflow-components": "workspace:*",
+    "@xflow/workflow-core": "workspace:*",
+    "@xflow/workflow-provider": "workspace:*",
+    "@xflow/workflow-renderer": "workspace:*"
+  },
+  "peerDependencies": {
+    "react": "19.1.0",
+    "react-dom": "19.1.0",
+    "@xyflow/react": "12.5.0",
+    "zustand": "5.0.5",
+    "@tanstack/react-query": "5.75.0"
+  },
+  "peerDependenciesMeta": {
+    "@xyflow/react": { "optional": true },
+    "zustand": { "optional": true },
+    "@tanstack/react-query": { "optional": true }
+  },
+  "devDependencies": {
+    "@xflow/typescript-config": "workspace:*",
+    "react": "19.1.0",
+    "react-dom": "19.1.0",
+    "typescript": "5.8.3",
+    "vitest": "3.2.0"
+  }
+}
