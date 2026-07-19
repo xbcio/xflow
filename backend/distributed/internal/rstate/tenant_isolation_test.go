@@ -262,6 +262,96 @@ func TestRegisterTenantRejectsUnsafeNames(t *testing.T) {
 	}
 }
 
+// TestSweeperReclaimPropagatesTenantContext verifies that ListExpiredLeases
+// stamps each ExpiredLease with its owning tenant and that engine.ReclaimLease
+// uses that tenant to operate in the correct key namespace. Before the fix,
+// ReclaimLease inherited the sweeper's default-tenant context and would
+// fail-closed on non-default tenants, leaving expired leases unreclaimed.
+func TestSweeperReclaimPropagatesTenantContext(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mr.Close()
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer func() { _ = rdb.Close() }()
+	state := New(rdb, nil, time.Hour)
+
+	const tenantB tenant.TenantID = "tenant-b"
+	ctxB := tenant.WithTenant(context.Background(), tenantB)
+	ctxSweeper := context.Background() // no tenant -> default
+
+	queue := &StoreTestQueue{}
+	eng := engine.New(state, queue, engine.WithDefaultLeaseTTL(50*time.Millisecond))
+
+	id, err := eng.Submit(ctxB, testGraphOneNode(), nil)
+	if err != nil {
+		t.Fatalf("Submit() error = %v", err)
+	}
+	if len(queue.tasks) != 1 {
+		t.Fatalf("initial tasks = %d, want 1", len(queue.tasks))
+	}
+	task := queue.tasks[0]
+	queue.tasks = nil
+
+	if _, err := eng.BuildTaskLease(ctxB, task); err != nil {
+		t.Fatalf("BuildTaskLease() error = %v", err)
+	}
+
+	// Wait past lease deadline.
+	mr.FastForward(100 * time.Millisecond)
+
+	// Sweeper calls ListExpiredLeases with a default-tenant context.
+	expired, err := state.ListExpiredLeases(ctxSweeper, time.Now().UTC().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("ListExpiredLeases() error = %v", err)
+	}
+	if len(expired) != 1 {
+		t.Fatalf("expired leases = %v, want 1", len(expired))
+	}
+	if expired[0].TenantID != tenantB {
+		t.Fatalf("expired lease tenant = %q, want %q", expired[0].TenantID, tenantB)
+	}
+	if expired[0].NodeName != "start" {
+		t.Fatalf("expired lease node = %q, want start", expired[0].NodeName)
+	}
+
+	// Reclaim from the sweeper context (default tenant) must still succeed
+	// because ExpiredLease carries the owning tenant.
+	ok, err := eng.ReclaimLease(ctxSweeper, expired[0])
+	if err != nil || !ok {
+		t.Fatalf("ReclaimLease() ok=%v err=%v", ok, err)
+	}
+
+	// The task was redelivered.
+	if len(queue.tasks) != 1 || queue.tasks[0].NodeName != "start" {
+		t.Fatalf("redelivered tasks = %v, want [start]", taskNamesFromQueue(queue.tasks))
+	}
+
+	// Tenant B's node is back to pending with no lease token.
+	ns, err := state.GetNode(ctxB, id, "start")
+	if err != nil {
+		t.Fatalf("GetNode(B) error = %v", err)
+	}
+	if ns == nil || ns.Status != types.NodeStatusPending || ns.LeaseToken != "" {
+		t.Fatalf("tenant B node after reclaim = %+v, want pending+empty token", ns)
+	}
+
+	// Default tenant namespace was never touched.
+	defaultStatus, err := rdb.Get(ctxSweeper, nodeStatusKey(tenant.DefaultTenant, id, "start")).Result()
+	if err != redis.Nil {
+		t.Fatalf("default tenant status key should not exist, got %q err=%v", defaultStatus, err)
+	}
+}
+
+func taskNamesFromQueue(tasks []*engine.Task) []string {
+	out := make([]string, len(tasks))
+	for i, t := range tasks {
+		out[i] = t.NodeName
+	}
+	return out
+}
+
 // TestRegisterTenantSkippedInTransientMode verifies the fire-and-forget
 // invariant: transient CreateExecution does not SADD to the tenant registry,
 // keeping the per-mutation no-bookkeeping contract while the default tenant

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/types"
 	"github.com/google/uuid"
@@ -279,6 +280,14 @@ func (e *Engine) ReleaseTaskLease(ctx context.Context, lease *TaskLease) (bool, 
 func (e *Engine) ReclaimLease(ctx context.Context, lease ExpiredLease) (bool, error) {
 	if lease.LeaseToken == "" {
 		return false, nil
+	}
+	// Restore the tenant that owns this lease. The sweeper runs with the
+	// default tenant in its context, but ListExpiredLeases discovers leases
+	// across all tenants and stamps each ExpiredLease with its owner.
+	// Reclaim must operate in that owner's namespace or the store keys will
+	// not match and the lease will be silently fail-closed.
+	if lease.TenantID != "" {
+		ctx = tenant.WithTenant(ctx, lease.TenantID)
 	}
 	task := Task{
 		ExecutionID:  lease.ExecutionID,

@@ -236,6 +236,7 @@ func (s *Store) scanExpiredLeasesForTenant(ctx context.Context, t tenant.TenantI
 					NodeName:    nodeName,
 					LeaseID:     engine.LeaseID(meta["lease_id"]),
 					LeaseToken:  engine.LeaseToken(meta["lease_token"]),
+					TenantID:    t,
 				}
 				if issuedAtMs > 0 {
 					lease.IssuedAt = time.UnixMilli(issuedAtMs).UTC()
