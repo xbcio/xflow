@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/alicebob/miniredis/v2"
+	asynqlib "github.com/hibiken/asynq"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -198,5 +199,87 @@ func TestNewWithRedisConfigSingle(t *testing.T) {
 	}
 	if err := b.RedisClient().Ping(context.Background()).Err(); err != nil {
 		t.Fatalf("RedisClient().Ping() error = %v", err)
+	}
+}
+
+func TestRedisConfigAsAsynqConnOptSingle(t *testing.T) {
+	cfg := RedisConfig{
+		Mode:     RedisModeSingle,
+		Addrs:    []string{"127.0.0.1:6379"},
+		Username: "u",
+		Password: "p",
+		DB:       3,
+	}
+	opt, err := cfg.AsAsynqConnOpt()
+	if err != nil {
+		t.Fatalf("AsAsynqConnOpt() error = %v", err)
+	}
+	got, ok := opt.(asynqlib.RedisClientOpt)
+	if !ok {
+		t.Fatalf("opt type = %T, want RedisClientOpt", opt)
+	}
+	if got.Addr != "127.0.0.1:6379" {
+		t.Fatalf("Addr = %q, want 127.0.0.1:6379", got.Addr)
+	}
+	if got.Username != "u" || got.Password != "p" || got.DB != 3 {
+		t.Fatalf("unexpected fields: username=%q password=%q db=%d", got.Username, got.Password, got.DB)
+	}
+}
+
+func TestRedisConfigAsAsynqConnOptSentinel(t *testing.T) {
+	cfg := RedisConfig{
+		Mode:       RedisModeSentinel,
+		MasterName: "mymaster",
+		Addrs:      []string{"127.0.0.1:26379", "127.0.0.1:26380"},
+		Username:   "u",
+		Password:   "p",
+		DB:         2,
+	}
+	opt, err := cfg.AsAsynqConnOpt()
+	if err != nil {
+		t.Fatalf("AsAsynqConnOpt() error = %v", err)
+	}
+	got, ok := opt.(asynqlib.RedisFailoverClientOpt)
+	if !ok {
+		t.Fatalf("opt type = %T, want RedisFailoverClientOpt", opt)
+	}
+	if got.MasterName != "mymaster" {
+		t.Fatalf("MasterName = %q, want mymaster", got.MasterName)
+	}
+	if len(got.SentinelAddrs) != 2 || got.SentinelAddrs[0] != "127.0.0.1:26379" || got.SentinelAddrs[1] != "127.0.0.1:26380" {
+		t.Fatalf("SentinelAddrs = %v, want [127.0.0.1:26379 127.0.0.1:26380]", got.SentinelAddrs)
+	}
+	if got.Username != "u" || got.Password != "p" || got.DB != 2 {
+		t.Fatalf("unexpected fields: username=%q password=%q db=%d", got.Username, got.Password, got.DB)
+	}
+}
+
+func TestRedisConfigAsAsynqConnOptCluster(t *testing.T) {
+	cfg := RedisConfig{
+		Mode:     RedisModeCluster,
+		Addrs:    []string{"127.0.0.1:6379", "127.0.0.1:6380"},
+		Username: "u",
+		Password: "p",
+	}
+	opt, err := cfg.AsAsynqConnOpt()
+	if err != nil {
+		t.Fatalf("AsAsynqConnOpt() error = %v", err)
+	}
+	got, ok := opt.(asynqlib.RedisClusterClientOpt)
+	if !ok {
+		t.Fatalf("opt type = %T, want RedisClusterClientOpt", opt)
+	}
+	if len(got.Addrs) != 2 || got.Addrs[0] != "127.0.0.1:6379" || got.Addrs[1] != "127.0.0.1:6380" {
+		t.Fatalf("Addrs = %v, want [127.0.0.1:6379 127.0.0.1:6380]", got.Addrs)
+	}
+	if got.Username != "u" || got.Password != "p" {
+		t.Fatalf("unexpected fields: username=%q password=%q", got.Username, got.Password)
+	}
+}
+
+func TestRedisConfigAsAsynqConnOptInvalid(t *testing.T) {
+	cfg := RedisConfig{Mode: RedisModeSentinel}
+	if _, err := cfg.AsAsynqConnOpt(); err == nil {
+		t.Fatal("AsAsynqConnOpt(invalid) error = nil, want non-nil")
 	}
 }

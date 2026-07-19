@@ -19,7 +19,7 @@ import (
 // broker connection, independent of any state-store Redis client.
 func (t *Transport) StartConsumer(cfg queue.ConsumerConfig, handler queue.TaskHandler) (func(), error) {
 	srv := asynqlib.NewServer(
-		asynqlib.RedisClientOpt{Addr: t.redisAddr},
+		t.connOpt,
 		asynqlib.Config{Concurrency: cfg.Concurrency},
 	)
 	mux := asynqlib.NewServeMux()

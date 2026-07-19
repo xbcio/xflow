@@ -273,21 +273,26 @@ func New(redisAddr string, db store.Store, opts ...Option) (*Backend, error) {
 	state.ConfigureTransient(cfg.transient, cfg.transientTTL, cfg.transientCompletionTTL)
 
 	// Default to the Asynq transport; WithTransport can inject an alternative.
-	// asynq HA connection options are handled in Task 3.1; here we keep the
-	// legacy single-address string path. If RedisConfig was injected but no
-	// redisAddr was supplied, fall back to the first configured address so the
-	// transport still has a bootstrap endpoint.
+	// If a RedisConfig was injected, map it to the corresponding asynq HA
+	// connection option (single/sentinel/cluster). Otherwise keep the legacy
+	// single-address string path. If RedisConfig was injected but no redisAddr
+	// was supplied, fall back to the first configured address so the legacy
+	// string path still has a bootstrap endpoint.
 	transport := cfg.transport
 	if transport == nil {
 		var topts []asynqtransport.Option
 		if cfg.queueObserver != nil {
 			topts = append(topts, asynqtransport.WithObserver(cfg.queueObserver))
 		}
-		asynqRedisAddr := redisAddr
-		if asynqRedisAddr == "" && cfg.redisConfig != nil {
-			asynqRedisAddr = cfg.redisConfig.firstAddr()
+		if cfg.redisConfig != nil {
+			connOpt, err := cfg.redisConfig.AsAsynqConnOpt()
+			if err != nil {
+				return nil, fmt.Errorf("asynq redis conn opt: %w", err)
+			}
+			transport = asynqtransport.NewWithConnOpt(connOpt, topts...)
+		} else {
+			transport = asynqtransport.New(redisAddr, topts...)
 		}
-		transport = asynqtransport.New(asynqRedisAddr, topts...)
 	}
 
 	registry := execution.NewRegistry()

@@ -32,17 +32,31 @@ func WithObserver(obs queue.Observer) Option {
 // eagerly; the consumer server is created lazily in StartConsumer so API-only
 // instances pay no server cost.
 type Transport struct {
+	connOpt   asynqlib.RedisConnOpt
 	redisAddr string
 	client    *asynqlib.Client
 	observer  queue.Observer
 }
 
 // New creates an Asynq transport connected to the given Redis address.
+// It is the legacy constructor kept for backward compatibility.
 func New(redisAddr string, opts ...Option) *Transport {
+	return NewWithConnOpt(asynqlib.RedisClientOpt{Addr: redisAddr}, opts...)
+}
+
+// NewWithConnOpt creates an Asynq transport from an explicit asynq connection
+// option. It supports single-node, sentinel, and cluster Redis deployments.
+func NewWithConnOpt(connOpt asynqlib.RedisConnOpt, opts ...Option) *Transport {
+	if connOpt == nil {
+		connOpt = asynqlib.RedisClientOpt{}
+	}
 	t := &Transport{
-		redisAddr: redisAddr,
-		client:    asynqlib.NewClient(asynqlib.RedisClientOpt{Addr: redisAddr}),
+		connOpt:   connOpt,
+		client:    asynqlib.NewClient(connOpt),
 		observer:  noopObserver{},
+	}
+	if opt, ok := connOpt.(asynqlib.RedisClientOpt); ok {
+		t.redisAddr = opt.Addr
 	}
 	for _, o := range opts {
 		o(t)

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	asynqlib "github.com/hibiken/asynq"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -66,6 +67,44 @@ func (c RedisConfig) firstAddr() string {
 		return ""
 	}
 	return c.Addrs[0]
+}
+
+// AsAsynqConnOpt maps the RedisConfig to the equivalent asynq RedisConnOpt.
+// It returns RedisClientOpt for single-node, RedisFailoverClientOpt for
+// sentinel, and RedisClusterClientOpt for cluster deployments.
+func (c RedisConfig) AsAsynqConnOpt() (asynqlib.RedisConnOpt, error) {
+	if err := c.validate(); err != nil {
+		return nil, err
+	}
+
+	switch c.Mode {
+	case RedisModeSingle:
+		return asynqlib.RedisClientOpt{
+			Addr:      c.firstAddr(),
+			Username:  c.Username,
+			Password:  c.Password,
+			TLSConfig: c.TLSConfig,
+			DB:        c.DB,
+		}, nil
+	case RedisModeSentinel:
+		return asynqlib.RedisFailoverClientOpt{
+			MasterName:    c.MasterName,
+			SentinelAddrs: c.Addrs,
+			Username:      c.Username,
+			Password:      c.Password,
+			TLSConfig:     c.TLSConfig,
+			DB:            c.DB,
+		}, nil
+	case RedisModeCluster:
+		return asynqlib.RedisClusterClientOpt{
+			Addrs:     c.Addrs,
+			Username:  c.Username,
+			Password:  c.Password,
+			TLSConfig: c.TLSConfig,
+		}, nil
+	default:
+		return nil, fmt.Errorf("unsupported redis mode %q", c.Mode)
+	}
 }
 
 // newRedisClient constructs the go-redis client appropriate for cfg.Mode.
