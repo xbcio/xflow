@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/xbcio/xflow/backend/distributed"
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/types"
@@ -62,6 +63,7 @@ func newDeadLetterListCommand(opts *deadLetterOptions) *cobra.Command {
 	var executionID string
 	var limit int
 	var cursor string
+	var tenantFlag string
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List dead-lettered outbox entries for an execution (read-only, paginated)",
@@ -70,6 +72,9 @@ func newDeadLetterListCommand(opts *deadLetterOptions) *cobra.Command {
 			if executionID == "" {
 				return fmt.Errorf("--execution is required")
 			}
+			if err := tenant.Validate(tenant.TenantID(tenantFlag)); err != nil {
+				return fmt.Errorf("invalid --tenant: %w", err)
+			}
 			mgr, closeFn, err := openDeadLetterManager(opts.redisAddr, opts.out)
 			if err != nil {
 				return err
@@ -77,6 +82,7 @@ func newDeadLetterListCommand(opts *deadLetterOptions) *cobra.Command {
 			defer closeFn()
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
+			ctx = tenant.WithTenant(ctx, tenant.TenantID(tenantFlag))
 			page := engine.DeadLetterPage{Limit: limit, Cursor: cursor}
 			list, err := mgr.List(ctx, types.ExecutionID(executionID), page)
 			if err != nil {
@@ -96,11 +102,13 @@ func newDeadLetterListCommand(opts *deadLetterOptions) *cobra.Command {
 	cmd.Flags().StringVar(&executionID, "execution", "", "Execution ID (required)")
 	cmd.Flags().IntVar(&limit, "limit", 100, "Maximum entries to return per page (bounded)")
 	cmd.Flags().StringVar(&cursor, "cursor", "", "Opaque cursor from a prior page's next_cursor")
+	cmd.Flags().StringVar(&tenantFlag, "tenant", string(tenant.DefaultTenant), "Tenant namespace (env: XFLOW_TENANT)")
 	return cmd
 }
 
 func newDeadLetterReplayCommand(opts *deadLetterOptions) *cobra.Command {
 	var executionID, entryID, reason, requestID string
+	var tenantFlag string
 	cmd := &cobra.Command{
 		Use:   "replay",
 		Short: "Replay a dead-lettered entry back to the ready set",
@@ -126,6 +134,9 @@ secondary projection only.`,
 			if reason == "" {
 				return fmt.Errorf("--reason is required (record why this entry is being replayed)")
 			}
+			if err := tenant.Validate(tenant.TenantID(tenantFlag)); err != nil {
+				return fmt.Errorf("invalid --tenant: %w", err)
+			}
 			mgr, closeFn, err := openDeadLetterManager(opts.redisAddr, opts.out)
 			if err != nil {
 				return err
@@ -135,11 +146,13 @@ secondary projection only.`,
 			// replay scope. G1 replaces this with the B3 authorizer over the
 			// HTTP management API; the CLI must then call the API, not Redis.
 			principal := control.DeadLetterReplayPrincipal{
-				Subject: "cli:" + envOr("USER", "unknown"),
-				Scopes:  []string{control.ScopeDeadLetterReplay},
+				Subject:  "cli:" + envOr("USER", "unknown"),
+				TenantID: tenantFlag,
+				Scopes:   []string{control.ScopeDeadLetterReplay},
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
+			ctx = tenant.WithTenant(ctx, tenant.TenantID(tenantFlag))
 			res, err := mgr.Replay(ctx, principal, engine.ReplayDeadLetterRequest{
 				ExecutionID: types.ExecutionID(executionID),
 				EntryID:     entryID,
@@ -156,6 +169,7 @@ secondary projection only.`,
 	cmd.Flags().StringVar(&entryID, "entry", "", "Dead-letter entry ID (required)")
 	cmd.Flags().StringVar(&reason, "reason", "", "Reason for replay (required, length-bounded)")
 	cmd.Flags().StringVar(&requestID, "request-id", "", "Idempotency key; retry with the same value to recover a lost response")
+	cmd.Flags().StringVar(&tenantFlag, "tenant", string(tenant.DefaultTenant), "Tenant namespace (env: XFLOW_TENANT)")
 	return cmd
 }
 

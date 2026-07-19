@@ -30,15 +30,15 @@ type deadLetterTask struct {
 	Type        int    `json:"type"`
 }
 
-func seedDeadLetterRedis(t *testing.T, addr, execID, entryID string) {
+func seedDeadLetterRedis(t *testing.T, addr, tenantName, execID, entryID string) {
 	t.Helper()
 	rdb := redis.NewClient(&redis.Options{Addr: addr})
 	t.Cleanup(func() { _ = rdb.Close() })
 	ctx := context.Background()
-	statusKey := "xflow:tdefault:exec:{" + execID + "}:status"
-	deadKey := "xflow:tdefault:exec:{" + execID + "}:outbox:dead"
-	deadBodyKey := "xflow:tdefault:exec:{" + execID + "}:outbox:dead:body"
-	deadMetaKey := "xflow:tdefault:exec:{" + execID + "}:outbox:dead:meta:" + entryID
+	statusKey := "xflow:t" + tenantName + ":exec:{" + execID + "}:status"
+	deadKey := "xflow:t" + tenantName + ":exec:{" + execID + "}:outbox:dead"
+	deadBodyKey := "xflow:t" + tenantName + ":exec:{" + execID + "}:outbox:dead:body"
+	deadMetaKey := "xflow:t" + tenantName + ":exec:{" + execID + "}:outbox:dead:meta:" + entryID
 	if err := rdb.Set(ctx, statusKey, "running", time.Minute).Err(); err != nil {
 		t.Fatalf("set status: %v", err)
 	}
@@ -66,11 +66,11 @@ func TestDeadLetterCLIListAndReplay(t *testing.T) {
 
 	execID := "cli-dl-1"
 	entryID := "execute/cli-dl-1/review/1"
-	seedDeadLetterRedis(t, mr.Addr(), execID, entryID)
+	seedDeadLetterRedis(t, mr.Addr(), "default", execID, entryID)
 
 	// list
 	var listOut bytes.Buffer
-	if err := executeRootWith(&listOut, "dead-letter", "--redis-addr", mr.Addr(), "list", "--execution", execID); err != nil {
+	if err := executeRootWith(&listOut, "dead-letter", "--redis-addr", mr.Addr(), "list", "--execution", execID, "--tenant", "default"); err != nil {
 		t.Fatalf("dead-letter list: %v", err)
 	}
 	var listed []map[string]any
@@ -94,7 +94,7 @@ func TestDeadLetterCLIListAndReplay(t *testing.T) {
 	// replay
 	var replayOut bytes.Buffer
 	if err := executeRootWith(&replayOut, "dead-letter", "--redis-addr", mr.Addr(), "replay",
-		"--execution", execID, "--entry", entryID, "--reason", "operator triage", "--request-id", "req-1"); err != nil {
+		"--execution", execID, "--entry", entryID, "--reason", "operator triage", "--request-id", "req-1", "--tenant", "default"); err != nil {
 		t.Fatalf("dead-letter replay: %v", err)
 	}
 	var res map[string]any
@@ -112,7 +112,7 @@ func TestDeadLetterCLIListAndReplay(t *testing.T) {
 	// original audit_id (response-loss recovery), not a fresh replay.
 	var replayOut2 bytes.Buffer
 	if err := executeRootWith(&replayOut2, "dead-letter", "--redis-addr", mr.Addr(), "replay",
-		"--execution", execID, "--entry", entryID, "--reason", "retry after lost response", "--request-id", "req-1"); err != nil {
+		"--execution", execID, "--entry", entryID, "--reason", "retry after lost response", "--request-id", "req-1", "--tenant", "default"); err != nil {
 		t.Fatalf("second dead-letter replay: %v", err)
 	}
 	var res2 map[string]any
@@ -124,6 +124,86 @@ func TestDeadLetterCLIListAndReplay(t *testing.T) {
 	}
 	if res2["audit_id"] != res["audit_id"] {
 		t.Fatalf("second replay audit_id = %v, want original %v", res2["audit_id"], res["audit_id"])
+	}
+}
+
+func TestDeadLetterCLITenantReplayCrossTenantFails(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mr.Close()
+
+	execID := "cli-dl-tenant-1"
+	entryID := "execute/cli-dl-tenant-1/review/1"
+	seedDeadLetterRedis(t, mr.Addr(), "tenant-a", execID, entryID)
+
+	var replayOut bytes.Buffer
+	if err := executeRootWith(&replayOut, "dead-letter", "--redis-addr", mr.Addr(), "replay",
+		"--execution", execID, "--entry", entryID, "--reason", "operator triage", "--tenant", "tenant-b"); err != nil {
+		t.Fatalf("dead-letter replay: %v", err)
+	}
+	var res map[string]any
+	if err := json.Unmarshal(replayOut.Bytes(), &res); err != nil {
+		t.Fatalf("unmarshal replay result: %v (out=%q)", err, replayOut.String())
+	}
+	// The store key for tenant-b has no execution status, so the Lua script
+	// returns rejected_inactive. This still proves cross-tenant isolation:
+	// the tenant-a dead-letter entry is never replayed.
+	if res["outcome"] != "rejected_inactive" {
+		t.Fatalf("replay outcome = %v, want rejected_inactive", res["outcome"])
+	}
+}
+
+func TestDeadLetterCLIRejectsInvalidTenant(t *testing.T) {
+	var out bytes.Buffer
+	err := executeRootWith(&out, "dead-letter", "replay", "--execution", "x", "--entry", "y", "--reason", "r", "--tenant", "bad:tenant")
+	if err == nil {
+		t.Fatal("replay with invalid tenant = nil, want error")
+	}
+}
+
+func TestDeadLetterCLITenantListAndReplay(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mr.Close()
+
+	execID := "cli-dl-tenant-ok"
+	entryID := "execute/cli-dl-tenant-ok/review/1"
+	seedDeadLetterRedis(t, mr.Addr(), "tenant-a", execID, entryID)
+
+	var listOut bytes.Buffer
+	if err := executeRootWith(&listOut, "dead-letter", "--redis-addr", mr.Addr(), "list", "--execution", execID, "--tenant", "tenant-a"); err != nil {
+		t.Fatalf("dead-letter list: %v", err)
+	}
+	var listed []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(listOut.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var entry map[string]any
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatalf("unmarshal list line %q: %v", line, err)
+		}
+		listed = append(listed, entry)
+	}
+	if len(listed) != 1 {
+		t.Fatalf("listed %d entries, want 1: %s", len(listed), listOut.String())
+	}
+
+	var replayOut bytes.Buffer
+	if err := executeRootWith(&replayOut, "dead-letter", "--redis-addr", mr.Addr(), "replay",
+		"--execution", execID, "--entry", entryID, "--reason", "operator triage", "--tenant", "tenant-a"); err != nil {
+		t.Fatalf("dead-letter replay: %v", err)
+	}
+	var res map[string]any
+	if err := json.Unmarshal(replayOut.Bytes(), &res); err != nil {
+		t.Fatalf("unmarshal replay result: %v (out=%q)", err, replayOut.String())
+	}
+	if res["outcome"] != "replayed" {
+		t.Fatalf("replay outcome = %v, want replayed", res["outcome"])
 	}
 }
 
