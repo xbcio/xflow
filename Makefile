@@ -1,6 +1,6 @@
 .PHONY: all build test test-concurrency lint fmt tidy clean run-server run-runner install-hooks proto proto-tools \
         env-up env-down env-reset env-logs env-migrate test-integration test-integration-required test-perf perf-sample test-soak \
-        web-install web-lint web-typecheck web-test web-check-boundaries web-build web-e2e web-generate web-ci web-all
+        web-install web-lint web-typecheck web-test web-check-boundaries web-build web-e2e web-ci web-all
 
 # ── Build ──────────────────────────────────────────────────────────────────────
 
@@ -174,9 +174,6 @@ web-build:
 
 web-e2e:
 	@cd $(WEB_DIR) && pnpm e2e
-
-web-generate:
-	@cd $(WEB_DIR) && pnpm generate
 
 web-ci: web-install web-lint web-typecheck web-test web-check-boundaries web-build web-e2e
 

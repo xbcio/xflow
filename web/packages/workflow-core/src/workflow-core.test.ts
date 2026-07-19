@@ -62,7 +62,7 @@ describe("serialize utilities", () => {
   it("preserves unknown fields during parse", () => {
     const json = JSON.stringify({ name: "demo", unknownField: 42 });
     const parsed = parseWorkflow(json);
-    expect(parsed.unknownField).toBe(42);
+    expect((parsed as Record<string, unknown>).unknownField).toBe(42);
   });
 
   it("cloneWorkflow creates a deep copy", () => {

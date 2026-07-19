@@ -6,8 +6,12 @@ import importPlugin from "eslint-plugin-import";
 const sourceFiles = [
   "packages/*/src/**/*.ts",
   "packages/*/src/**/*.tsx",
+  "packages/*/src/**/*.test.ts",
+  "packages/*/src/**/*.test.tsx",
   "apps/*/src/**/*.ts",
   "apps/*/src/**/*.tsx",
+  "apps/*/src/**/*.test.ts",
+  "apps/*/src/**/*.test.tsx",
   "e2e/**/*.ts",
 ];
 
@@ -28,7 +32,7 @@ const configFiles = [
 ];
 
 export default [
-  { name: "xflow/ignores", ignores: ["**/dist/**", "**/node_modules/**", "**/.turbo/**", "**/coverage/**", "**/*.d.ts", "apps/**/*.test.*", "packages/**/*.test.*"] },
+  { name: "xflow/ignores", ignores: ["**/dist/**", "**/node_modules/**", "**/.turbo/**", "**/coverage/**", "**/*.d.ts"] },
   js.configs.recommended,
   {
     name: "xflow/typescript",

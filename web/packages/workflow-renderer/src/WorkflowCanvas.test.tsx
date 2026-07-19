@@ -1,6 +1,5 @@
 // @vitest-environment jsdom
 
-import * as React from "react";
 import { describe, expect, it } from "vitest";
 import { render } from "@testing-library/react";
 import type { Diagnostic, WorkflowDef } from "@xflow/workflow-core";

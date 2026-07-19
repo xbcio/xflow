@@ -172,6 +172,9 @@ jobs:
       - name: Run e2e tests
         run: cd web && pnpm e2e
 
+      - name: Run e2e tests on production preview
+        run: cd web && pnpm e2e:preview
+
       - name: Upload Playwright report
         if: failure()
         uses: actions/upload-artifact@v4
