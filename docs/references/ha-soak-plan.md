@@ -32,7 +32,7 @@ B2 soak 需要**真实**分布式环境，非单机可完整覆盖：
 1. `backend/distributed/backend.go:New` — 接受 `redis.UniversalClient` 或 sentinel 配置，替代 `redis.NewClient`。
 2. `backend/distributed/internal/queue/asynq/transport.go` — asynq 的 `RedisConnOpt` 需支持 sentinel/cluster（asynq 支持 `asynq.RedisFailoverClientOpt` / `asynq.RedisClusterClientOpt`）。
 3. `cmd/server/main.go` — 新增 `--redis-sentinel-master` / `--redis-cluster` flag，区分单节点/sentinel/cluster 模式。
-4. `RedisLeaderElector`、`workflowreg`、`triggerRuntime` 均使用注入的 client，无需单独改造。
+4. `RedisLeaderElector`、`workflowreg`、`triggerRuntime` 均使用注入的 client。`workflowreg` 的 key 已加 `{<key>}` hash tag 使 bykey/byid 共置同 slot（G2 Phase 2 Task 2.1，cluster-safe）；`triggerRuntime` 命名空间 cluster-safety 见 G2 Phase 2 Task 2.2。
 
 验收：sentinel 模式下主从切换期间 leader election 在 TTL 内转移；cluster 模式下 hash tag 保证 key 共置不触发 CROSSSLOT 错误。
 

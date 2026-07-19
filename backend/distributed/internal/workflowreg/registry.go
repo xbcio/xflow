@@ -33,15 +33,56 @@ func New(rdb redis.UniversalClient) *Registry {
 	return &Registry{rdb: rdb}
 }
 
-func workflowByIDKey(id types.WorkflowID) string { return "xflow:workflow:id:" + string(id) }
+// Key schema (Redis Cluster-safe, G2 Phase 2 / Task 2.1).
+//
+// A workflow is addressed by its human-meaningful `key` (namespace/name@version).
+// All per-workflow records live under a single hash-tagged slot so they can be
+// touched atomically by one Lua script without triggering CROSSSLOT:
+//
+//	xflow:workflow:{<key>}:bykey        -> workflow ID (the "exists" pointer)
+//	xflow:workflow:{<key>}:byid:<id>    -> storedWorkflowRecord payload (JSON)
+//
+// `{<key>}` is the literal Redis Cluster hash tag (the bytes between the first
+// `{` and the first subsequent `}`), so bykey and byid:<id> always hash to the
+// same slot regardless of <id>.
+//
+// GetWorkflow(id) is given only an id, which is not enough to construct a
+// `{<key>}`-tagged key. We therefore keep a global reverse index
+//
+//	xflow:workflow:idmap:<id>           -> key   (no hash tag, single-key op)
+//
+// which is cluster-safe on its own (single-key commands are never CROSSSLOT).
+// It is written strictly after the tagged record is durable and is idempotent,
+// so a crash between the two writes leaves the workflow addressable by key and
+// re-registration self-heals the index (see AddWorkflow).
+func workflowByKeyKey(key string) string {
+	return "xflow:workflow:{" + key + "}:bykey"
+}
 
-func workflowByKeyKey(key string) string { return "xflow:workflow:key:" + key }
+func workflowByIDKey(key string, id types.WorkflowID) string {
+	return "xflow:workflow:{" + key + "}:byid:" + string(id)
+}
 
-// KeyByID and KeyByKey expose the registry's Redis key schema for out-of-package
-// readers (e.g. Backend-level tests and ops tooling) that must address the same
-// keys the registry writes.
-func KeyByID(id types.WorkflowID) string { return workflowByIDKey(id) }
-func KeyByKey(key string) string         { return workflowByKeyKey(key) }
+// workflowByIDKeyPrefix returns the byid key prefix INCLUDING the `{<key>}`
+// hash tag. The addWorkflowRecordLua script concatenates this prefix with an
+// existing workflow id to address an existing byid key; because the prefix
+// already carries the tag, every key the script constructs lands in the same
+// slot as the declared KEYS.
+func workflowByIDKeyPrefix(key string) string {
+	return "xflow:workflow:{" + key + "}:byid:"
+}
+
+func workflowIDMapKey(id types.WorkflowID) string {
+	return "xflow:workflow:idmap:" + string(id)
+}
+
+// KeyByID, KeyByKey, and KeyIDMap expose the registry's Redis key schema for
+// out-of-package readers (e.g. Backend-level tests and ops tooling) that must
+// address the same keys the registry writes. KeyByID takes the workflow `key`
+// because the byid record lives in the `{<key>}` hash-tagged slot.
+func KeyByID(key string, id types.WorkflowID) string { return workflowByIDKey(key, id) }
+func KeyByKey(key string) string                     { return workflowByKeyKey(key) }
+func KeyIDMap(id types.WorkflowID) string            { return workflowIDMapKey(id) }
 
 var addWorkflowRecordLua = redis.NewScript(`
 local existingID = redis.call('GET', KEYS[1])
@@ -62,16 +103,8 @@ return {'created', ARGV[4]}
 `)
 
 var removeWorkflowRecordLua = redis.NewScript(`
-local existingRaw = redis.call('GET', KEYS[1])
-if not existingRaw then
-	return 0
-end
-local existing = cjson.decode(existingRaw)
-redis.call('DEL', KEYS[1])
-if existing.key then
-	redis.call('DEL', ARGV[1] .. existing.key)
-end
-return 1
+local n = redis.call('DEL', KEYS[1], KEYS[2])
+return n
 `)
 
 func (r *Registry) AddWorkflow(ctx context.Context, rec backend.WorkflowRecord) (backend.WorkflowRecord, error) {
@@ -83,8 +116,8 @@ func (r *Registry) AddWorkflow(ctx context.Context, rec backend.WorkflowRecord) 
 	result, err := addWorkflowRecordLua.Run(
 		ctx,
 		r.rdb,
-		[]string{workflowByKeyKey(stored.Key), workflowByIDKey(stored.ID)},
-		"xflow:workflow:id:",
+		[]string{workflowByKeyKey(stored.Key), workflowByIDKey(stored.Key, stored.ID)},
+		workflowByIDKeyPrefix(stored.Key),
 		stored.DefinitionHash,
 		string(stored.ID),
 		stored.payload,
@@ -105,11 +138,28 @@ func (r *Registry) AddWorkflow(ctx context.Context, rec backend.WorkflowRecord) 
 	if err != nil {
 		return backend.WorkflowRecord{}, fmt.Errorf("add workflow %q: %w", stored.Key, err)
 	}
+
+	// Maintain the id -> key reverse index so GetWorkflow(id) can resolve the
+	// `{<key>}`-tagged record keys. Single-key op on an untagged key
+	// (cluster-safe on its own), written after the tagged record is durable and
+	// idempotent, so the "existing" path self-heals a partially-written index.
+	if err := r.rdb.Set(ctx, workflowIDMapKey(record.ID), record.Key, 0).Err(); err != nil {
+		return backend.WorkflowRecord{}, fmt.Errorf("add workflow %q: %w", stored.Key, err)
+	}
+
 	return record, nil
 }
 
 func (r *Registry) GetWorkflow(ctx context.Context, id types.WorkflowID) (backend.WorkflowRecord, error) {
-	raw, err := r.rdb.Get(ctx, workflowByIDKey(id)).Bytes()
+	key, err := r.rdb.Get(ctx, workflowIDMapKey(id)).Result()
+	if errors.Is(err, redis.Nil) {
+		return backend.WorkflowRecord{}, backend.ErrWorkflowNotFound
+	}
+	if err != nil {
+		return backend.WorkflowRecord{}, fmt.Errorf("get workflow %q: %w", id, err)
+	}
+
+	raw, err := r.rdb.Get(ctx, workflowByIDKey(key, id)).Bytes()
 	if errors.Is(err, redis.Nil) {
 		return backend.WorkflowRecord{}, backend.ErrWorkflowNotFound
 	}
@@ -125,18 +175,25 @@ func (r *Registry) GetWorkflow(ctx context.Context, id types.WorkflowID) (backen
 }
 
 func (r *Registry) RemoveWorkflow(ctx context.Context, id types.WorkflowID) error {
-	removed, err := removeWorkflowRecordLua.Run(
-		ctx,
-		r.rdb,
-		[]string{workflowByIDKey(id)},
-		"xflow:workflow:key:",
-	).Int64()
+	key, err := r.rdb.Get(ctx, workflowIDMapKey(id)).Result()
+	if errors.Is(err, redis.Nil) {
+		return backend.ErrWorkflowNotFound
+	}
 	if err != nil {
 		return fmt.Errorf("remove workflow %q: %w", id, err)
 	}
-	if removed == 0 {
-		return backend.ErrWorkflowNotFound
+
+	// bykey and byid:<id> share the `{<key>}` tag -> same slot -> Lua-safe.
+	if _, err := removeWorkflowRecordLua.Run(
+		ctx,
+		r.rdb,
+		[]string{workflowByKeyKey(key), workflowByIDKey(key, id)},
+	).Result(); err != nil {
+		return fmt.Errorf("remove workflow %q: %w", id, err)
 	}
+
+	// Best-effort cleanup of the untagged reverse index (single-key op).
+	_ = r.rdb.Del(ctx, workflowIDMapKey(id)).Err()
 	return nil
 }
 

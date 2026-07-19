@@ -195,8 +195,8 @@ func cleanupWorkflowRegistryRecord(t *testing.T, rdb redis.UniversalClient, rec 
 	if rec.ID == "" {
 		return
 	}
-	if err := rdb.Del(context.Background(), workflowreg.KeyByID(rec.ID), workflowreg.KeyByKey(rec.Key)).Err(); err != nil {
-		t.Fatalf("Del(%q, %q) error = %v", workflowreg.KeyByID(rec.ID), workflowreg.KeyByKey(rec.Key), err)
+	if err := rdb.Del(context.Background(), workflowreg.KeyByID(rec.Key, rec.ID), workflowreg.KeyByKey(rec.Key), workflowreg.KeyIDMap(rec.ID)).Err(); err != nil {
+		t.Fatalf("Del(%q, %q, %q) error = %v", workflowreg.KeyByID(rec.Key, rec.ID), workflowreg.KeyByKey(rec.Key), workflowreg.KeyIDMap(rec.ID), err)
 	}
 }
 
