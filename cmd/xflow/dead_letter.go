@@ -1,11 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -18,10 +22,31 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
-// deadLetterOptions holds the shared --redis-addr flag and the output sink.
+// deadLetterOptions holds the shared flags for the dead-letter CLI. By default
+// the CLI talks to the protected management HTTP API (server addr + auth
+// token); --break-glass switches to the Redis-direct maintenance path.
 type deadLetterOptions struct {
-	redisAddr string
-	out       io.Writer
+	// API path (default). server is the management API base URL; token is the
+	// bearer credential. The token is sent only in the Authorization header —
+	// never logged — and cross-tenant executions surface as 404 (the API's
+	// IDOR defense).
+	server string
+	token  string
+
+	// Break-glass path: connect directly to Redis, bypassing the management
+	// API and its authz/metric/audit outlet. Requires --break-glass to be set
+	// explicitly; emits a prominent stderr warning. The break-glass identity
+	// is "cli:breakglass:<user>" so audit can distinguish it from the normal
+	// cli path.
+	breakGlass bool
+	redisAddr  string
+
+	// SQL store DSN for the reconcile subcommand's durable projection. When
+	// empty, reconcile runs the projector against the Redis receipt diff and
+	// reports unprojected receipts; durability requires a real MySQL DSN.
+	mysqlDSN string
+
+	out io.Writer
 }
 
 func newDeadLetterCommand(out io.Writer) *cobra.Command {
@@ -32,23 +57,44 @@ func newDeadLetterCommand(out io.Writer) *cobra.Command {
 		Long: `Inspect and replay durable scheduling outbox entries that exceeded the
 delivery attempt limit and were moved to dead-letter storage.
 
+By default this command calls the protected management HTTP API
+(/v1/management/dead-letters/*) so authorization, metrics, and the durable
+SQL receipt projection are owned by the server. Configure --server and
+--token (or XFLOW_API_ADDR / XFLOW_API_TOKEN). The token is sent only in
+the Authorization header and is never logged; a cross-tenant execution
+surfaces as 404 (the API's IDOR defense).
+
 Replay moves an entry atomically back to the ready set; the control plane's
 running OutboxDispatcher redelivers it. Replay is activation-safe: it rejects
 entries whose node is terminal or whose activation no longer matches the
-node's current activation, so a stale cyclic re-entry cannot be resurrected.
-Replay is idempotent under --request-id: retrying with the same request-id
-after a lost response returns already_replayed with the original audit_id.
+node's current activation. Replay is idempotent under --request-id: retrying
+with the same request-id after a lost response returns already_replayed
+with the original audit_id.
 
-Operator identity is derived from the authenticated principal — the CLI
-injects "cli:<user>" for the G0 maintenance path; --operator is not accepted.
-The authoritative receipt is written to Redis; the stdout audit line is a
-secondary projection only.`,
+The authoritative receipt is written to Redis by the server; the SQL
+projection is the durable secondary reconciled against it.
+
+--break-glass switches to a Redis-direct maintenance path that bypasses the
+management API (and its authz/metric/audit outlet). It is intended only for
+emergencies when the API is unavailable and requires a distinct operator
+credential in production; it emits a prominent stderr warning and records a
+"cli:breakglass:<user>" operator identity so the break-glass use is
+distinguishable in audit.`,
 	}
+	cmd.PersistentFlags().StringVar(&opts.server, "server", envOr("XFLOW_API_ADDR", ""),
+		"Management API base URL, e.g. http://127.0.0.1:8080 (env: XFLOW_API_ADDR). Default path; required unless --break-glass")
+	cmd.PersistentFlags().StringVar(&opts.token, "token", envOr("XFLOW_API_TOKEN", ""),
+		"Bearer token for the management API (env: XFLOW_API_TOKEN). Sent only in the Authorization header; never logged")
+	cmd.PersistentFlags().BoolVar(&opts.breakGlass, "break-glass", false,
+		"Bypass the management API and connect directly to Redis (emergency maintenance only)")
 	cmd.PersistentFlags().StringVar(&opts.redisAddr, "redis-addr", envOr("XFLOW_REDIS_ADDR", "localhost:6379"),
-		"Redis address backing the distributed StateStore (env: XFLOW_REDIS_ADDR)")
+		"Redis address (break-glass only; env: XFLOW_REDIS_ADDR)")
+	cmd.PersistentFlags().StringVar(&opts.mysqlDSN, "mysql-dsn", envOr("XFLOW_MYSQL_DSN", ""),
+		"MySQL DSN for the reconcile subcommand's durable projection (env: XFLOW_MYSQL_DSN)")
 
 	cmd.AddCommand(newDeadLetterListCommand(opts))
 	cmd.AddCommand(newDeadLetterReplayCommand(opts))
+	cmd.AddCommand(newDeadLetterReconcileCommand(opts))
 	return cmd
 }
 
@@ -57,6 +103,32 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// deadLetterClient is the transport-agnostic interface shared by the API
+// (default) and break-glass (Redis-direct) paths. Both produce the same
+// outcome metric + audit projection server-side (API path) or via the
+// manager (break-glass path).
+type deadLetterClient interface {
+	List(ctx context.Context, execID, tenantName string, page engine.DeadLetterPage) (engine.DeadLetterList, error)
+	Replay(ctx context.Context, principal control.DeadLetterReplayPrincipal, req engine.ReplayDeadLetterRequest) (engine.ReplayDeadLetterResult, error)
+}
+
+// newDeadLetterClient selects the API client by default and the break-glass
+// Redis-direct client when --break-glass is set. It emits a prominent stderr
+// warning for break-glass so an operator cannot use it silently.
+func newDeadLetterClient(opts *deadLetterOptions) (deadLetterClient, func(), error) {
+	if opts.breakGlass {
+		fmt.Fprintln(os.Stderr, "WARNING: --break-glass bypasses the management API and its authorization/metrics/audit outlet. Use only when the API is unavailable and record a break-glass operator credential.")
+		return openBreakGlassDeadLetterClient(opts.redisAddr)
+	}
+	if opts.server == "" {
+		return nil, nil, errors.New("--server (or XFLOW_API_ADDR) is required; alternatively use --break-glass for the Redis-direct maintenance path")
+	}
+	if opts.token == "" {
+		return nil, nil, errors.New("--token (or XFLOW_API_TOKEN) is required for the management API; alternatively use --break-glass")
+	}
+	return &apiDeadLetterClient{server: strings.TrimRight(opts.server, "/"), token: opts.token}, nil, nil
 }
 
 func newDeadLetterListCommand(opts *deadLetterOptions) *cobra.Command {
@@ -70,21 +142,22 @@ func newDeadLetterListCommand(opts *deadLetterOptions) *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if executionID == "" {
-				return fmt.Errorf("--execution is required")
+				return errors.New("--execution is required")
 			}
 			if err := tenant.Validate(tenant.TenantID(tenantFlag)); err != nil {
 				return fmt.Errorf("invalid --tenant: %w", err)
 			}
-			mgr, closeFn, err := openDeadLetterManager(opts.redisAddr, opts.out)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			client, closeFn, err := newDeadLetterClient(opts)
 			if err != nil {
 				return err
 			}
-			defer closeFn()
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			ctx = tenant.WithTenant(ctx, tenant.TenantID(tenantFlag))
+			if closeFn != nil {
+				defer closeFn()
+			}
 			page := engine.DeadLetterPage{Limit: limit, Cursor: cursor}
-			list, err := mgr.List(ctx, types.ExecutionID(executionID), page)
+			list, err := client.List(ctx, executionID, tenantFlag, page)
 			if err != nil {
 				return err
 			}
@@ -115,45 +188,39 @@ func newDeadLetterReplayCommand(opts *deadLetterOptions) *cobra.Command {
 		Long: `Replay moves one dead-lettered entry atomically and activation-safely back
 to the ready set so the control plane redelivers it. This is a privileged write
 operation: --reason is required and length-bounded; the operator identity is
-"cli:<user>" (from the authenticated principal), not self-reported.
+server-injected from the authenticated principal, not self-reported.
 
 Pass --request-id to make the replay recoverable: if the response is lost,
 retrying with the same --request-id returns already_replayed and the original
 audit_id, proving the operation happened exactly once.
 
-The authoritative receipt is written to Redis; the stdout audit line is a
-secondary projection only.`,
+By default this command calls the protected management API; --break-glass
+switches to the Redis-direct maintenance path.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if executionID == "" {
-				return fmt.Errorf("--execution is required")
+				return errors.New("--execution is required")
 			}
 			if entryID == "" {
-				return fmt.Errorf("--entry is required")
+				return errors.New("--entry is required")
 			}
 			if reason == "" {
-				return fmt.Errorf("--reason is required (record why this entry is being replayed)")
+				return errors.New("--reason is required (record why this entry is being replayed)")
 			}
 			if err := tenant.Validate(tenant.TenantID(tenantFlag)); err != nil {
 				return fmt.Errorf("invalid --tenant: %w", err)
 			}
-			mgr, closeFn, err := openDeadLetterManager(opts.redisAddr, opts.out)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			client, closeFn, err := newDeadLetterClient(opts)
 			if err != nil {
 				return err
 			}
-			defer closeFn()
-			// G0 maintenance path: the CLI is a trusted operator tool with the
-			// replay scope. G1 replaces this with the B3 authorizer over the
-			// HTTP management API; the CLI must then call the API, not Redis.
-			principal := control.DeadLetterReplayPrincipal{
-				Subject:  "cli:" + envOr("USER", "unknown"),
-				TenantID: tenantFlag,
-				Scopes:   []string{control.ScopeDeadLetterReplay},
+			if closeFn != nil {
+				defer closeFn()
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			ctx = tenant.WithTenant(ctx, tenant.TenantID(tenantFlag))
-			res, err := mgr.Replay(ctx, principal, engine.ReplayDeadLetterRequest{
+			principal := newDeadLetterPrincipal(opts, tenantFlag)
+			res, err := client.Replay(ctx, principal, engine.ReplayDeadLetterRequest{
 				ExecutionID: types.ExecutionID(executionID),
 				EntryID:     entryID,
 				RequestID:   requestID,
@@ -173,24 +240,169 @@ secondary projection only.`,
 	return cmd
 }
 
-func replayResultJSON(res engine.ReplayDeadLetterResult) map[string]any {
-	return map[string]any{
-		"outcome":      string(res.Outcome),
-		"audit_id":     res.AuditID,
-		"execution":    string(res.ExecutionID),
-		"node":         res.NodeID,
-		"activation":   res.ActivationID,
-		"occurred_at":  time.Now().UTC().Format(time.RFC3339Nano),
+// newDeadLetterPrincipal builds the principal the CLI injects. The API path
+// does not use the principal's scopes (the server authenticates the bearer
+// token and injects the real principal); the break-glass path uses the
+// "cli:breakglass:<user>" subject so audit can distinguish break-glass use
+// from the normal cli path.
+func newDeadLetterPrincipal(opts *deadLetterOptions, tenantFlag string) control.DeadLetterReplayPrincipal {
+	if opts.breakGlass {
+		return control.DeadLetterReplayPrincipal{
+			Subject:  "cli:breakglass:" + envOr("USER", "unknown"),
+			TenantID: tenantFlag,
+			Scopes:   []string{control.ScopeDeadLetterReplay},
+		}
+	}
+	// API path: the server injects the real principal from the bearer token.
+	return control.DeadLetterReplayPrincipal{
+		Subject:  "",
+		TenantID: tenantFlag,
+		Scopes:   []string{control.ScopeDeadLetterReplay},
 	}
 }
 
-// openDeadLetterManager connects a distributed backend to the given Redis
-// address without starting a consumer or dispatcher, then returns the
-// DeadLetterManager over the DeadLetterStore capability. The manager owns
-// request validation, the metric outlet, and the audit projection; the store
-// owns the Redis atomic contract and the authoritative receipt. The returned
-// closer releases the Redis client.
-func openDeadLetterManager(addr string, out io.Writer) (*control.DeadLetterManager, func(), error) {
+func replayResultJSON(res engine.ReplayDeadLetterResult) map[string]any {
+	return map[string]any{
+		"outcome":     string(res.Outcome),
+		"audit_id":    res.AuditID,
+		"execution":   string(res.ExecutionID),
+		"node":        res.NodeID,
+		"activation":  res.ActivationID,
+		"occurred_at": time.Now().UTC().Format(time.RFC3339Nano),
+	}
+}
+
+// apiDeadLetterClient talks to the protected management HTTP API. The token
+// is sent only in the Authorization header; it is never logged. Cross-tenant
+// executions surface as 404 (the API's IDOR defense).
+type apiDeadLetterClient struct {
+	server string
+	token  string
+}
+
+func (c *apiDeadLetterClient) List(ctx context.Context, execID, tenantName string, page engine.DeadLetterPage) (engine.DeadLetterList, error) {
+	u := fmt.Sprintf("%s/v1/management/dead-letters/%s?limit=%d", c.server, execID, page.Limit)
+	if page.Cursor != "" {
+		u += "&cursor=" + page.Cursor
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return engine.DeadLetterList{}, err
+	}
+	c.setAuth(req)
+	req.Header.Set("X-XFlow-Tenant", tenantName)
+	var resp deadLetterListResponse
+	if err := c.do(req, &resp); err != nil {
+		return engine.DeadLetterList{}, err
+	}
+	return engine.DeadLetterList{Entries: resp.Entries, NextCursor: resp.NextCursor}, nil
+}
+
+func (c *apiDeadLetterClient) Replay(ctx context.Context, _ control.DeadLetterReplayPrincipal, req engine.ReplayDeadLetterRequest) (engine.ReplayDeadLetterResult, error) {
+	body, _ := json.Marshal(deadLetterReplayRequest{
+		EntryID:   req.EntryID,
+		RequestID: req.RequestID,
+		Reason:    req.Reason,
+	})
+	u := fmt.Sprintf("%s/v1/management/dead-letters/%s/replay", c.server, req.ExecutionID)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(body))
+	if err != nil {
+		return engine.ReplayDeadLetterResult{}, err
+	}
+	c.setAuth(httpReq)
+	httpReq.Header.Set("Content-Type", "application/json")
+	var resp deadLetterReplayResponse
+	if err := c.do(httpReq, &resp); err != nil {
+		return engine.ReplayDeadLetterResult{}, err
+	}
+	return engine.ReplayDeadLetterResult{
+		Outcome:      engine.DeadLetterReplayOutcome(resp.Outcome),
+		AuditID:      resp.AuditID,
+		ExecutionID:  types.ExecutionID(resp.ExecutionID),
+		NodeID:       resp.NodeID,
+		ActivationID: resp.ActivationID,
+	}, nil
+}
+
+// setAuth sets the Authorization header. The token is never logged anywhere;
+// the do helper surfaces only the URL path (no query) in error messages.
+func (c *apiDeadLetterClient) setAuth(req *http.Request) {
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+}
+
+// do executes an HTTP request and decodes the JSON body into out. A non-2xx
+// response is decoded (when possible) and surfaced as an error carrying only
+// the status code and outcome — never the Authorization header value.
+func (c *apiDeadLetterClient) do(req *http.Request, out any) error {
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("call %s %s: %w", req.Method, redactURL(req.URL.String()), err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		// Best-effort decode the body so callers can map outcome to status.
+		if out != nil {
+			_ = json.NewDecoder(resp.Body).Decode(out)
+		}
+		return httpStatusError{status: resp.StatusCode, path: redactURL(req.URL.String())}
+	}
+	if out == nil {
+		return nil
+	}
+	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		return fmt.Errorf("decode response from %s %s: %w", req.Method, redactURL(req.URL.String()), err)
+	}
+	return nil
+}
+
+// httpStatusError carries the HTTP status of a non-2xx management API
+// response. It is the CLI's signal to map replay outcomes (404 → cross-tenant
+// or missing; 403 → unauthorized; 400 → invalid request) without leaking the
+// body or the Authorization header.
+type httpStatusError struct {
+	status int
+	path   string
+}
+
+func (e httpStatusError) Error() string {
+	switch e.status {
+	case http.StatusNotFound:
+		return fmt.Sprintf("execution or entry not found (status 404)")
+	case http.StatusForbidden:
+		return fmt.Sprintf("replay unauthorized (status 403)")
+	case http.StatusBadRequest:
+		return fmt.Sprintf("replay rejected: invalid request (status 400)")
+	default:
+		return fmt.Sprintf("management API %s: status %d", e.path, e.status)
+	}
+}
+
+// redactURL returns the URL path without the query. The query may carry the
+// cursor or tenant but never the token (the token lives only in the header);
+// redacting keeps error messages stable and free of caller-supplied params.
+func redactURL(u string) string {
+	if i := strings.IndexByte(u, '?'); i >= 0 {
+		return u[:i]
+	}
+	return u
+}
+
+// breakGlassDeadLetterClient talks directly to Redis via a distributed backend
+// (no consumer/dispatcher), wrapping the DeadLetterManager so the break-glass
+// path still routes through the single outlet (validation + metrics + audit).
+// It is the emergency fallback for when the management API is unavailable. The
+// manager's audit sink is the stderr projection (no durable SQL projection in
+// break-glass) and the metrics observer is nil — the server's metric outlet is
+// bypassed, which is exactly why break-glass requires a distinct operator
+// credential and is recorded as "cli:breakglass:<user>".
+type breakGlassDeadLetterClient struct {
+	mgr     *control.DeadLetterManager
+	closeFn func()
+}
+
+func openBreakGlassDeadLetterClient(addr string) (deadLetterClient, func(), error) {
 	b, err := distributed.New(addr, nil, distributed.WithConsumer(false))
 	if err != nil {
 		return nil, nil, fmt.Errorf("connect redis %q: %w", addr, err)
@@ -200,10 +412,26 @@ func openDeadLetterManager(addr string, out io.Writer) (*control.DeadLetterManag
 		closeRedis(b)
 		return nil, nil, fmt.Errorf("StateStore %T does not implement DeadLetterStore; the configured backend cannot serve dead-letter operations", b.State())
 	}
-	audit := control.NewStdoutDeadLetterAuditSink(func(line string) { fmt.Fprintln(os.Stderr, line) })
+	audit := control.NewStdoutDeadLetterAuditSink(func(line string) {
+		fmt.Fprintln(os.Stderr, line)
+	})
+	// metrics is intentionally nil: break-glass bypasses the server's metric
+	// outlet. The Redis receipt remains authoritative; audit is the stderr
+	// projection only. This is why break-glass requires a distinct credential
+	// and an explicit operator record in production.
 	mgr := control.NewDeadLetterManager(store, nil, audit)
 	closeFn := func() { closeRedis(b) }
-	return mgr, closeFn, nil
+	return &breakGlassDeadLetterClient{mgr: mgr, closeFn: closeFn}, closeFn, nil
+}
+
+func (c *breakGlassDeadLetterClient) List(ctx context.Context, execID, tenantName string, page engine.DeadLetterPage) (engine.DeadLetterList, error) {
+	ctx = tenant.WithTenant(ctx, tenant.TenantID(tenantName))
+	return c.mgr.List(ctx, types.ExecutionID(execID), page)
+}
+
+func (c *breakGlassDeadLetterClient) Replay(ctx context.Context, principal control.DeadLetterReplayPrincipal, req engine.ReplayDeadLetterRequest) (engine.ReplayDeadLetterResult, error) {
+	ctx = tenant.WithTenant(ctx, tenant.TenantID(principal.TenantID))
+	return c.mgr.Replay(ctx, principal, req)
 }
 
 // closeRedis best-effort closes the backend's Redis client. The Cmdable
@@ -221,4 +449,26 @@ func writeJSONLines(w io.Writer, value any) error {
 	}
 	_, err = fmt.Fprintln(w, string(data))
 	return err
+}
+
+// deadLetterListResponse mirrors the management API's list JSON shape.
+type deadLetterListResponse struct {
+	Entries    []engine.OutboxEntry `json:"entries"`
+	NextCursor string               `json:"next_cursor,omitempty"`
+}
+
+// deadLetterReplayRequest is the request body for replay.
+type deadLetterReplayRequest struct {
+	EntryID   string `json:"entry_id"`
+	RequestID string `json:"request_id"`
+	Reason    string `json:"reason"`
+}
+
+// deadLetterReplayResponse is the JSON shape for a replay result.
+type deadLetterReplayResponse struct {
+	Outcome      string `json:"outcome"`
+	AuditID      string `json:"audit_id,omitempty"`
+	ExecutionID  string `json:"execution_id,omitempty"`
+	NodeID       string `json:"node_id,omitempty"`
+	ActivationID string `json:"activation_id,omitempty"`
 }

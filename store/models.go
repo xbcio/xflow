@@ -64,19 +64,33 @@ type SignalRecord struct {
 // against the audit log; the audit log is not itself the source of truth
 // for execution state.
 //
+// The receipt-correlation fields (NodeID, ActivationID, EntryID,
+// ReceiptAuditID) are populated only by the dead-letter receipt projector
+// (T4) and, later, T9's general outcome-phase worker. Admission/outcome
+// audit rows leave them empty. ReceiptAuditID is the Redis receipt's
+// audit_id (requestID:ts_ms); it is the idempotency key for receipt
+// projection — the projector skips appending when a row with the same
+// ReceiptAuditID already exists, so a retry after a lost SQL write does not
+// duplicate the projection. The Redis receipt remains authoritative; this
+// row is the durable secondary projection reconciled against it.
+//
 // Domain record; ORM schema lives in store/sqlstore.dbAuditEvent.
 type AuditRecord struct {
-	ID          uint64
-	RequestID   string
-	Principal   string
-	TenantID    string
-	Operation   string
-	Resource    string
-	WorkflowID  string
-	ExecutionID string
-	Decision    string
-	Reason      string
-	Outcome     string // admitted / denied / reconciled
-	TraceID     string
-	Timestamp   time.Time
+	ID            uint64
+	RequestID     string
+	Principal     string
+	TenantID      string
+	Operation     string
+	Resource      string
+	WorkflowID    string
+	ExecutionID   string
+	Decision      string
+	Reason        string
+	Outcome       string // admitted / denied / reconciled
+	TraceID       string
+	Timestamp     time.Time
+	NodeID        string // receipt correlation: node name (dead-letter replay)
+	ActivationID  string // receipt correlation: activation id
+	EntryID       string // receipt correlation: dead-letter entry id
+	ReceiptAuditID string // receipt correlation: Redis receipt audit_id (idempotency key)
 }

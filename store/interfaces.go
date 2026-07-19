@@ -47,6 +47,25 @@ type AuditAppender interface {
 	AppendAudit(ctx context.Context, rec *AuditRecord) error
 }
 
+// ReceiptAuditAppender is an optional AuditAppender capability that appends
+// a receipt projection idempotently by the receipt's AuditID
+// (rec.ReceiptAuditID). The dead-letter receipt projector (T4) and T9's
+// outcome-phase worker use it so a retry after a lost SQL write does not
+// duplicate the durable projection. The Redis receipt remains authoritative;
+// this is the durable secondary projection reconciled against it.
+//
+// AppendAuditIfAbsent returns appended=true when a new row was inserted and
+// appended=false when a row with the same ReceiptAuditID already existed (a
+// duplicate projection, skipped). A record with an empty ReceiptAuditID is
+// always appended — it is not a receipt projection and has no idempotency
+// key.
+type ReceiptAuditAppender interface {
+	AppendAuditIfAbsent(ctx context.Context, rec *AuditRecord) (bool, error)
+	// AuditByReceiptAuditID reads one receipt projection row by its
+	// ReceiptAuditID. Returns ErrNotFound when no row exists.
+	AuditByReceiptAuditID(ctx context.Context, receiptAuditID string) (*AuditRecord, error)
+}
+
 // Store is the full persistence surface, composing the per-domain interfaces.
 // Consumers that only need one domain should depend on the narrower interface
 // (Executions, Nodes, Signals, or Audit) instead.

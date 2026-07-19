@@ -81,9 +81,18 @@ CREATE TABLE IF NOT EXISTS xflow_audit_events (
     trace_id     VARCHAR(64)  NOT NULL DEFAULT ''  COMMENT 'OTel trace 关联',
     ts           DATETIME(3)  NOT NULL              COMMENT '事件时间戳',
     created_at   DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    -- T4: receipt-correlation fields populated only by the dead-letter receipt
+    -- projector (and T9's outcome-phase worker). Admission/outcome rows leave
+    -- them empty. receipt_audit_id is the Redis receipt's audit_id and the
+    -- projector's idempotency key.
+    node_id         VARCHAR(255) NOT NULL DEFAULT ''  COMMENT 'receipt 关联：节点名',
+    activation_id   VARCHAR(64)  NOT NULL DEFAULT ''  COMMENT 'receipt 关联：activation',
+    entry_id        VARCHAR(255) NOT NULL DEFAULT ''  COMMENT 'receipt 关联：dead-letter entry',
+    receipt_audit_id VARCHAR(128) NOT NULL DEFAULT '' COMMENT 'receipt 关联：Redis receipt audit_id（幂等键）',
     INDEX idx_principal (principal),
     INDEX idx_operation (operation),
     INDEX idx_execution_id (execution_id),
     INDEX idx_outcome (outcome),
-    INDEX idx_ts (ts)
+    INDEX idx_ts (ts),
+    INDEX idx_receipt_audit_id (receipt_audit_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

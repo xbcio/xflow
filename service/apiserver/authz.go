@@ -307,6 +307,14 @@ type AuditEvent struct {
 	Outcome     string // admitted/denied/reconciled
 	TraceID     string
 	Timestamp   time.Time
+	// Receipt correlation (T4 dead-letter receipt projector; T9 outcome
+	// phase). Populated only by the receipt projection path; admission and
+	// reconcile outcome rows leave them empty. ReceiptAuditID is the Redis
+	// receipt audit_id and the projector's idempotency key.
+	NodeID         string
+	ActivationID   string
+	EntryID        string
+	ReceiptAuditID string
 }
 
 // AuditSink is an append-only projection of authorization + mutation events.

@@ -38,25 +38,47 @@ func (f *fakeDeadLetterStore) ReplayDeadLetter(_ context.Context, req engine.Rep
 	return f.result, nil
 }
 
-// captureOutboxObserver records every OnOutboxReplayed outcome.
+// captureOutboxObserver records every OnOutboxReplayed outcome and
+// OnOutboxError operation for metric/alarm assertions.
 type captureOutboxObserver struct {
 	mu       sync.Mutex
 	outcomes []engine.DeadLetterReplayOutcome
 	errors   int
+	errOps   []string
+	pending  []int
+	dead     []int
 }
 
 func (c *captureOutboxObserver) OnOutboxRetry(context.Context, int)                    {}
 func (c *captureOutboxObserver) OnOutboxDeadLetter(context.Context)                     {}
-func (c *captureOutboxObserver) OnOutboxPending(context.Context, int, int, time.Duration) {}
-func (c *captureOutboxObserver) OnOutboxError(context.Context, string, error) {
+func (c *captureOutboxObserver) OnOutboxPending(_ context.Context, pending, deadLettered int, _ time.Duration) {
+	c.mu.Lock()
+	c.pending = append(c.pending, pending)
+	c.dead = append(c.dead, deadLettered)
+	c.mu.Unlock()
+}
+func (c *captureOutboxObserver) OnOutboxError(_ context.Context, op string, _ error) {
 	c.mu.Lock()
 	c.errors++
+	c.errOps = append(c.errOps, op)
 	c.mu.Unlock()
 }
 func (c *captureOutboxObserver) OnOutboxReplayed(_ context.Context, outcome engine.DeadLetterReplayOutcome) {
 	c.mu.Lock()
 	c.outcomes = append(c.outcomes, outcome)
 	c.mu.Unlock()
+}
+
+func (c *captureOutboxObserver) countErrors(op string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n := 0
+	for _, e := range c.errOps {
+		if e == op {
+			n++
+		}
+	}
+	return n
 }
 
 type fakeAuditSink struct {

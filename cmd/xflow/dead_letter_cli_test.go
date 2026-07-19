@@ -70,7 +70,7 @@ func TestDeadLetterCLIListAndReplay(t *testing.T) {
 
 	// list
 	var listOut bytes.Buffer
-	if err := executeRootWith(&listOut, "dead-letter", "--redis-addr", mr.Addr(), "list", "--execution", execID, "--tenant", "default"); err != nil {
+	if err := executeRootWith(&listOut, "dead-letter", "--break-glass", "--redis-addr", mr.Addr(), "list", "--execution", execID, "--tenant", "default"); err != nil {
 		t.Fatalf("dead-letter list: %v", err)
 	}
 	var listed []map[string]any
@@ -93,7 +93,7 @@ func TestDeadLetterCLIListAndReplay(t *testing.T) {
 
 	// replay
 	var replayOut bytes.Buffer
-	if err := executeRootWith(&replayOut, "dead-letter", "--redis-addr", mr.Addr(), "replay",
+	if err := executeRootWith(&replayOut, "dead-letter", "--break-glass", "--redis-addr", mr.Addr(), "replay",
 		"--execution", execID, "--entry", entryID, "--reason", "operator triage", "--request-id", "req-1", "--tenant", "default"); err != nil {
 		t.Fatalf("dead-letter replay: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestDeadLetterCLIListAndReplay(t *testing.T) {
 	// second replay with the same --request-id returns already_replayed with the
 	// original audit_id (response-loss recovery), not a fresh replay.
 	var replayOut2 bytes.Buffer
-	if err := executeRootWith(&replayOut2, "dead-letter", "--redis-addr", mr.Addr(), "replay",
+	if err := executeRootWith(&replayOut2, "dead-letter", "--break-glass", "--redis-addr", mr.Addr(), "replay",
 		"--execution", execID, "--entry", entryID, "--reason", "retry after lost response", "--request-id", "req-1", "--tenant", "default"); err != nil {
 		t.Fatalf("second dead-letter replay: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestDeadLetterCLITenantReplayCrossTenantFails(t *testing.T) {
 	seedDeadLetterRedis(t, mr.Addr(), "tenant-a", execID, entryID)
 
 	var replayOut bytes.Buffer
-	if err := executeRootWith(&replayOut, "dead-letter", "--redis-addr", mr.Addr(), "replay",
+	if err := executeRootWith(&replayOut, "dead-letter", "--break-glass", "--redis-addr", mr.Addr(), "replay",
 		"--execution", execID, "--entry", entryID, "--reason", "operator triage", "--tenant", "tenant-b"); err != nil {
 		t.Fatalf("dead-letter replay: %v", err)
 	}
@@ -147,11 +147,15 @@ func TestDeadLetterCLITenantReplayCrossTenantFails(t *testing.T) {
 	if err := json.Unmarshal(replayOut.Bytes(), &res); err != nil {
 		t.Fatalf("unmarshal replay result: %v (out=%q)", err, replayOut.String())
 	}
-	// The store key for tenant-b has no execution status, so the Lua script
-	// returns rejected_inactive. This still proves cross-tenant isolation:
-	// the tenant-a dead-letter entry is never replayed.
-	if res["outcome"] != "rejected_inactive" {
-		t.Fatalf("replay outcome = %v, want rejected_inactive", res["outcome"])
+	// Under tenant-b the store has no execution status and no dead body, so the
+	// Lua script returns not_found (a stable no-op). This still proves
+	// cross-tenant isolation: the tenant-a dead-letter entry is never
+	// replayed — tenant-b's namespace is empty.
+	if res["outcome"] != "not_found" && res["outcome"] != "rejected_inactive" {
+		t.Fatalf("replay outcome = %v, want not_found or rejected_inactive (cross-tenant isolation)", res["outcome"])
+	}
+	if res["audit_id"] != "" {
+		t.Fatalf("cross-tenant replay must not produce a receipt, got audit_id=%v", res["audit_id"])
 	}
 }
 
@@ -180,7 +184,7 @@ func TestDeadLetterCLITenantListAndReplay(t *testing.T) {
 	seedDeadLetterRedis(t, mr.Addr(), "tenant-a", execID, entryID)
 
 	var listOut bytes.Buffer
-	if err := executeRootWith(&listOut, "dead-letter", "--redis-addr", mr.Addr(), "list", "--execution", execID, "--tenant", "tenant-a"); err != nil {
+	if err := executeRootWith(&listOut, "dead-letter", "--break-glass", "--redis-addr", mr.Addr(), "list", "--execution", execID, "--tenant", "tenant-a"); err != nil {
 		t.Fatalf("dead-letter list: %v", err)
 	}
 	var listed []map[string]any
@@ -199,7 +203,7 @@ func TestDeadLetterCLITenantListAndReplay(t *testing.T) {
 	}
 
 	var replayOut bytes.Buffer
-	if err := executeRootWith(&replayOut, "dead-letter", "--redis-addr", mr.Addr(), "replay",
+	if err := executeRootWith(&replayOut, "dead-letter", "--break-glass", "--redis-addr", mr.Addr(), "replay",
 		"--execution", execID, "--entry", entryID, "--reason", "operator triage", "--tenant", "tenant-a"); err != nil {
 		t.Fatalf("dead-letter replay: %v", err)
 	}

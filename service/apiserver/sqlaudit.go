@@ -31,6 +31,18 @@ func NewSQLAuditSink(appender store.AuditAppender) *SQLAuditSink {
 	return &SQLAuditSink{appender: appender}
 }
 
+// ReceiptAppender returns the underlying appender as a ReceiptAuditAppender
+// when the backing store supports idempotent receipt projection (the SQL
+// provider does; an in-memory sink does not). The dead-letter receipt
+// projector uses it for idempotent append-by-audit_id; when nil, callers
+// fall back to the non-idempotent Append path (dev only).
+func (s *SQLAuditSink) ReceiptAppender() store.ReceiptAuditAppender {
+	if ra, ok := s.appender.(store.ReceiptAuditAppender); ok {
+		return ra
+	}
+	return nil
+}
+
 // Append persists one audit event durably. On error the caller must fail
 // closed for mutations — never execute an unaudited mutation.
 //
@@ -51,18 +63,22 @@ func (s *SQLAuditSink) Append(ctx context.Context, ev AuditEvent) error {
 		tenantID = ev.TenantID
 	}
 	rec := &store.AuditRecord{
-		RequestID:   ev.RequestID,
-		Principal:   ev.Principal,
-		TenantID:    tenantID,
-		Operation:   ev.Operation,
-		Resource:    ev.Resource,
-		WorkflowID:  ev.WorkflowID,
-		ExecutionID: ev.ExecutionID,
-		Decision:    string(ev.Decision),
-		Reason:      ev.Reason,
-		Outcome:     ev.Outcome,
-		TraceID:     ev.TraceID,
-		Timestamp:   ev.Timestamp,
+		RequestID:      ev.RequestID,
+		Principal:      ev.Principal,
+		TenantID:       tenantID,
+		Operation:      ev.Operation,
+		Resource:       ev.Resource,
+		WorkflowID:     ev.WorkflowID,
+		ExecutionID:    ev.ExecutionID,
+		Decision:       string(ev.Decision),
+		Reason:         ev.Reason,
+		Outcome:        ev.Outcome,
+		TraceID:        ev.TraceID,
+		Timestamp:      ev.Timestamp,
+		NodeID:         ev.NodeID,
+		ActivationID:   ev.ActivationID,
+		EntryID:        ev.EntryID,
+		ReceiptAuditID: ev.ReceiptAuditID,
 	}
 	if rec.Timestamp.IsZero() {
 		rec.Timestamp = time.Now()

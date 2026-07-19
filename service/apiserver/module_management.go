@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/observability/metrics"
 	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/types"
 )
@@ -26,6 +27,15 @@ type managementModule struct {
 	authzHolder
 	cp  *control.ControlPlane
 	eng control.EngineFacade
+	// metrics wires the OutboxObserver (replay outcome counter + pending/dead
+	// gauge) into the shared DeadLetterManager so the API and CLI paths
+	// produce identical telemetry. Nil leaves metrics off (dev).
+	metrics *metrics.Metrics
+	// dlMgr is the shared, lazily-constructed dead-letter manager. It is
+	// built once on first use with the metrics observer + durable audit
+	// projector and reused for every subsequent list/replay so the API never
+	// builds a fresh manager per request with nil metrics.
+	dlMgr *control.DeadLetterManager
 }
 
 func newManagementModule(cp *control.ControlPlane) *managementModule {
@@ -312,11 +322,24 @@ func (m *managementModule) deadLetterExecID(r *http.Request) string {
 	return parts[0]
 }
 
-// deadLetterManager lazily builds a DeadLetterManager from the control plane's
-// backend state when it implements engine.DeadLetterStore. Returns an error
-// when the configured backend cannot serve dead-letter operations (e.g. the
-// in-memory backend used in dev); the HTTP route surfaces 503 in that case.
+// deadLetterManager lazily builds a shared DeadLetterManager from the control
+// plane's backend state when it implements engine.DeadLetterStore. The manager
+// is constructed ONCE (cached on the module) with:
+//   - a non-nil metrics observer (when cfg.Metrics is set) so the replay
+//     outcome counter and pending/dead-lettered gauge are emitted at the
+//     single outlet the CLI also uses;
+//   - a durable receipt projector audit sink (when the configured AuditSink
+//     is backed by a SQL store) so replay receipts are durably projected to
+//     SQL idempotently for reconcile; otherwise the stdout/stderr sink is the
+//     dev-only projection (Redis receipt remains authoritative).
+//
+// Returns an error when the configured backend cannot serve dead-letter
+// operations (e.g. the in-memory backend used in dev); the HTTP route surfaces
+// 503 in that case.
 func (m *managementModule) deadLetterManager() (*control.DeadLetterManager, error) {
+	if m.dlMgr != nil {
+		return m.dlMgr, nil
+	}
 	if m.cp.Backend() == nil {
 		return nil, errors.New("management: no backend")
 	}
@@ -325,12 +348,36 @@ func (m *managementModule) deadLetterManager() (*control.DeadLetterManager, erro
 	if !ok {
 		return nil, errors.New("management: backend state does not implement DeadLetterStore")
 	}
-	audit := control.NewStdoutDeadLetterAuditSink(func(line string) {
-		// G1 projection: replay receipts are emitted to stderr. The
+	var observer engine.OutboxObserver
+	if m.metrics != nil {
+		observer = metrics.NewOutboxMetrics(m.metrics)
+	}
+	audit := m.deadLetterAuditSink()
+	mgr := control.NewDeadLetterManager(store, observer, audit)
+	m.dlMgr = mgr
+	return mgr, nil
+}
+
+// deadLetterAuditSink selects the durable receipt-projector sink when the
+// configured audit sink is SQL-backed, falling back to the stderr projection
+// otherwise. The Redis receipt is always authoritative; the sink is the
+// secondary durable projection reconciled against it.
+func (m *managementModule) deadLetterAuditSink() engine.DeadLetterAuditSink {
+	if sql, ok := m.audit.(*SQLAuditSink); ok {
+		if ra := sql.ReceiptAppender(); ra != nil {
+			var observer engine.OutboxObserver
+			if m.metrics != nil {
+				observer = metrics.NewOutboxMetrics(m.metrics)
+			}
+			return control.NewProjectorAuditSink(control.NewReceiptProjector(ra), observer)
+		}
+	}
+	return control.NewStdoutDeadLetterAuditSink(func(line string) {
+		// G0/dev projection: replay receipts are emitted to stderr. The
 		// authoritative receipt is the Redis record written atomically by the
-		// DeadLetterStore. A durable SQL projection of replay receipts is a
-		// future reconcile target; until then stderr is the audit trail.
+		// DeadLetterStore. A durable SQL projection of replay receipts is the
+		// reconcile target; until a SQL sink is configured, stderr is the
+		// audit trail.
 		fmt.Fprintln(os.Stderr, line)
 	})
-	return control.NewDeadLetterManager(store, nil, audit), nil
 }

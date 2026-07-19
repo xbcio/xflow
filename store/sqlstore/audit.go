@@ -16,20 +16,28 @@ import (
 // carries identity (subject/tenant), operation, resource ids, decision,
 // reason, and trace correlation ids — none of which are secrets.
 type dbAuditEvent struct {
-	ID           uint64    `gorm:"column:id;primaryKey;autoIncrement"`
-	RequestID    string    `gorm:"column:request_id;type:varchar(128)"`
-	Principal    string    `gorm:"column:principal;type:varchar(255)"`
-	TenantID     string    `gorm:"column:tenant_id;type:varchar(128)"`
-	Operation    string    `gorm:"column:operation;type:varchar(64)"`
-	Resource     string    `gorm:"column:resource;type:varchar(255)"`
-	WorkflowID   string    `gorm:"column:workflow_id;type:varchar(255)"`
-	ExecutionID  string    `gorm:"column:execution_id;type:varchar(64)"`
-	Decision     string    `gorm:"column:decision;type:varchar(16)"`
-	Reason       string    `gorm:"column:reason;type:varchar(128)"`
-	Outcome      string    `gorm:"column:outcome;type:varchar(32)"`
-	TraceID      string    `gorm:"column:trace_id;type:varchar(64)"`
-	Timestamp    time.Time `gorm:"column:ts"`
-	CreatedAt    time.Time `gorm:"column:created_at;autoCreateTime:milli"`
+	ID            uint64    `gorm:"column:id;primaryKey;autoIncrement"`
+	RequestID     string    `gorm:"column:request_id;type:varchar(128)"`
+	Principal     string    `gorm:"column:principal;type:varchar(255)"`
+	TenantID      string    `gorm:"column:tenant_id;type:varchar(128)"`
+	Operation     string    `gorm:"column:operation;type:varchar(64)"`
+	Resource      string    `gorm:"column:resource;type:varchar(255)"`
+	WorkflowID    string    `gorm:"column:workflow_id;type:varchar(255)"`
+	ExecutionID   string    `gorm:"column:execution_id;type:varchar(64)"`
+	Decision      string    `gorm:"column:decision;type:varchar(16)"`
+	Reason        string    `gorm:"column:reason;type:varchar(128)"`
+	Outcome       string    `gorm:"column:outcome;type:varchar(32)"`
+	TraceID       string    `gorm:"column:trace_id;type:varchar(64)"`
+	Timestamp     time.Time `gorm:"column:ts"`
+	CreatedAt     time.Time `gorm:"column:created_at;autoCreateTime:milli"`
+	// Receipt correlation fields (T4 dead-letter receipt projector; T9
+	// outcome-phase worker reuses them). Populated only by the receipt
+	// projector; admission/outcome rows leave them empty. ReceiptAuditID is
+	// the Redis receipt's audit_id and the projector's idempotency key.
+	NodeID         string `gorm:"column:node_id;type:varchar(255);default:''"`
+	ActivationID   string `gorm:"column:activation_id;type:varchar(64);default:''"`
+	EntryID        string `gorm:"column:entry_id;type:varchar(255);default:''"`
+	ReceiptAuditID string `gorm:"column:receipt_audit_id;type:varchar(128);default:'';index:idx_receipt_audit_id"`
 }
 
 func (dbAuditEvent) TableName() string { return "xflow_audit_events" }

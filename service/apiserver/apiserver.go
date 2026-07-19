@@ -161,6 +161,7 @@ func New(cfg Config, opts ...Option) (*APIServer, error) {
 	// when WithManagement is ordered before an injected/built ControlPlane.
 	if s.enableManagement {
 		mgmt := newManagementModule(s.cp)
+		mgmt.metrics = cfg.Metrics
 		if cfg.PrincipalAuth != nil {
 			mgmt.principalAuth = cfg.PrincipalAuth
 			mgmt.authorizer = cfg.Authorizer

@@ -145,6 +145,42 @@ type DeadLetterAuditSink interface {
 	RecordReplay(ctx context.Context, res ReplayDeadLetterResult, req ReplayDeadLetterRequest) error
 }
 
+// ReplayReceipt is the decoded form of an authoritative Redis replay receipt
+// (key xflow:t<tenant>:exec:{<id>}:replay:receipt:<requestID>). It carries
+// only operational metadata — never the task body or any credential — so the
+// durable SQL projection reconciled against it never persists sensitive
+// request content. The Reason field is the operator's bounded free-text
+// rationale captured in Redis; projectors that must avoid free text in audit
+// (the SQL projector) omit it from the durable row.
+type ReplayReceipt struct {
+	TenantID     string
+	ExecutionID  string
+	RequestID    string
+	AuditID      string
+	NodeID       string
+	ActivationID string
+	Outcome      DeadLetterReplayOutcome
+	Operator     string
+	Reason       string
+	EntryID      string
+	TimestampMs  int64
+}
+
+// ReplayReceiptReader is an optional StateStore capability that scans the
+// authoritative Redis replay receipts across tenants and executions. The
+// dead-letter receipt projector + reconcile command (T4) uses it as the
+// diff-scan source: every receipt with no matching SQL projection row is
+// projected idempotently. It does not mutate Redis (read-only); the
+// authoritative receipts survive regardless of the SQL projection state.
+//
+// The scan visits receipts in tenant-then-execution order. fn is called once
+// per receipt; returning a non-nil error aborts the scan. A receipt whose
+// hash is malformed (legacy or partial) is skipped with a best-effort metric
+// rather than aborting the whole reconcile.
+type ReplayReceiptReader interface {
+	ScanReplayReceipts(ctx context.Context, fn func(ReplayReceipt) error) error
+}
+
 // ListDeadLetters returns one page of dead-lettered outbox entries for an
 // execution. It returns ErrDeadLetterUnsupported when the StateStore does not
 // implement DeadLetterStore.
@@ -162,9 +198,18 @@ func (e *Engine) ListDeadLetters(ctx context.Context, id types.ExecutionID, page
 
 // ReplayDeadLetter moves a dead-lettered entry back to the ready set via the
 // DeadLetterStore capability and notifies observers of the outcome. It is the
-// programmatic in-process entry point for replay. CLI/HTTP callers should go
-// through the DeadLetterManager instead so metrics and audit are recorded at a
-// single outlet.
+// programmatic in-process entry point for replay.
+//
+// Capability boundary (T4): production server and CLI paths MUST go through
+// service/control.DeadLetterManager instead. The manager owns the single
+// authorization, metric, and audit outlet — calling Engine.ReplayDeadLetter
+// directly bypasses the deadletter.replay scope check, the tenant principal
+// injection, and the unified outcome metric/audit projection, so a production
+// caller using it directly would produce an unauthorized, un-audited, and
+// un-metriced replay. This method is retained only for the embedded SDK /
+// in-process test path; embedded callers must inject their own
+// OutboxObserver (via WithOutboxObserver) and audit the replay themselves.
+// CLI/HTTP callers must use DeadLetterManager.Replay.
 func (e *Engine) ReplayDeadLetter(ctx context.Context, req ReplayDeadLetterRequest) (ReplayDeadLetterResult, error) {
 	state, err := e.atomicState()
 	if err != nil {
