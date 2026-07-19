@@ -34,7 +34,10 @@ test-concurrency:
 # ── Code quality ───────────────────────────────────────────────────────────────
 
 lint:
-	golangci-lint run ./...
+	# --build-tags soak makes the standalone soak harness package visible to
+	# the linter (it is excluded from the default build config). Pre-existing
+	# issues surfaced by broader tags (integration/perf) are out of scope here.
+	golangci-lint run --build-tags soak ./...
 
 fmt:
 	go fmt ./...

@@ -604,11 +604,7 @@ func (noopSLORecorder) RunnerStopped(int)            {}
 func RequireRedis(t testing.TB) string {
 	t.Helper()
 	addr := redisAddr()
-	c := redisPingClient(addr)
-	defer c.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := c.Ping(ctx).Err(); err != nil {
+	if err := pingRedis(addr, 2*time.Second); err != nil {
 		if envOr("XFLOW_REQUIRE_REDIS_INTEGRATION", "") == "1" {
 			t.Fatalf("XFLOW_REQUIRE_REDIS_INTEGRATION=1: redis unavailable at %s: %v (run `make env-up`)", addr, err)
 		}

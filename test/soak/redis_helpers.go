@@ -34,17 +34,14 @@ func redisAddr() string {
 	return "localhost:6379"
 }
 
-// redisPingClient builds a short-lived client used only for reachability
-// probing in RequireRedis. The caller closes it.
-func redisPingClient(addr string) *redis.Client {
-	return redis.NewClient(&redis.Options{Addr: addr})
-}
-
 // flushAsynqKeys deletes only asynq's own key namespace ("asynq:*") rather
 // than the whole Redis DB, mirroring test/integration/harness.go so a soak
 // run does not disturb keys other tests (e.g. leader election) may use in
-// the same DB. Used by real-environment soak entry points (Task 5.2), not
-// the miniredis smoke (miniredis is fresh per test).
+// the same DB. Used by real-environment soak entry points to reset asynq
+// queues between iterations; not invoked by the miniredis in-process smoke
+// (miniredis is fresh per test).
+//
+//nolint:unused // retained for real-env soak iteration reset (Task 5.3 / future real-env fault runs)
 func flushAsynqKeys(ctx context.Context, t interface {
 	Helper()
 	Fatalf(format string, args ...any)
@@ -69,10 +66,10 @@ func flushAsynqKeys(ctx context.Context, t interface {
 }
 
 // pingRedis returns nil if addr is reachable within the timeout. Used by
-// real-environment soak entry points.
+// RequireRedis (real-environment soak preflight).
 func pingRedis(addr string, timeout time.Duration) error {
 	c := redis.NewClient(&redis.Options{Addr: addr})
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	return c.Ping(ctx).Err()
