@@ -72,9 +72,9 @@ func (m *workflowControlModule) registerAuthzRoutes(mux *http.ServeMux) {
 	authz := m.authzWrap
 	mux.HandleFunc("/v1/workflows", authz(OpWorkflowCreate, true, m.handleSubmitWorkflow, nil))
 	mux.HandleFunc("/v1/workflows/invoke", authz(OpWorkflowInvoke, true, m.handleInvoke, nil))
-	mux.HandleFunc("/v1/executions/", authz(OpExecutionRead, false, m.handleExecution, func(r *http.Request) (string, string, string) {
+	mux.HandleFunc("/v1/executions/", authz(OpExecutionRead, false, m.handleExecution, func(r *http.Request) (string, string, string, string) {
 		_, execID := splitExecutionPath(r.URL.Path)
-		return "execution", "", execID
+		return "execution", "", execID, ""
 	}))
 }
 

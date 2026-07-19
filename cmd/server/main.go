@@ -21,6 +21,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -74,8 +75,16 @@ type serverConfig struct {
 	authDryRun bool
 	// apiAuthToken, when non-empty, enables BearerTokenAuth on the workflow/
 	// control API (/v1/workflows, /v1/executions/*). The same token must be
-	// supplied by callers in the Authorization: Bearer <token> header.
+	// supplied by callers in the Authorization: Bearer <token> header. When set
+	// the token is mapped to a principal in tenant.DefaultTenant (single-tenant
+	// compatibility). For multi-tenant operation use --auth-tokens-file.
 	apiAuthToken string
+	// authTokensFile, when non-empty, loads a JSON array of token→principal
+	// mappings (see apiserver.TokenPrincipalMapping) so each token binds to its
+	// own (subject, tenant, scopes). This is the multi-tenant path (design §2.3
+	// scheme A). When set it takes precedence over --api-auth-token. The file
+	// contains sensitive bearer tokens: it must be 0600 and never logged.
+	authTokensFile string
 	// requireAPIAuth causes the server to fail to start if no workflow API
 	// authenticator is configured. Use in production to prevent accidentally
 	// serving the workflow API without authentication.
@@ -139,7 +148,8 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	fs.IntVar(&cfg.concurrency, "concurrency", cfg.concurrency, "Queue consumer concurrency")
 	fs.StringVar(&cfg.authPolicy, "auth-policy", "", "Path to runners.yaml (empty = auth disabled)")
 	fs.BoolVar(&cfg.authDryRun, "auth-dry-run", false, "Log auth violations but let requests through (rollout aid)")
-	fs.StringVar(&cfg.apiAuthToken, "api-auth-token", "", "Static bearer token for workflow API authentication (sets Authorization: Bearer guard on /v1/workflows and /v1/executions/*)")
+	fs.StringVar(&cfg.apiAuthToken, "api-auth-token", "", "Static bearer token for workflow API authentication (sets Authorization: Bearer guard on /v1/workflows and /v1/executions/*); single-tenant → default tenant. For multi-tenant use --auth-tokens-file.")
+	fs.StringVar(&cfg.authTokensFile, "auth-tokens-file", "", "JSON file of [{token,subject,tenant,scopes}] mappings; each token binds to its own tenant (multi-tenant). Takes precedence over --api-auth-token. File must be 0600.")
 	fs.BoolVar(&cfg.requireAPIAuth, "require-api-auth", false, "Fail to start if no workflow API authenticator is configured (production fail-closed)")
 	fs.BoolVar(&cfg.management, "management", false, "Enable ops management module (/healthz /readyz /v1/management/*); /v1/management/* gated by --api-auth-token")
 	fs.StringVar(&cfg.tlsCert, "tls-cert", "", "Path to server TLS certificate (enables TLS)")
@@ -316,11 +326,24 @@ func runServer(cfg serverConfig) error {
 
 	var workflowAuth apiserver.WorkflowAuthenticator
 	var principalAuth apiserver.PrincipalAuthenticator
-	if cfg.apiAuthToken != "" {
+	if mappings, err := loadAuthTokenMappings(cfg); err != nil {
+		return err
+	} else if len(mappings) > 0 {
+		// Multi-tenant path (design §2.3 scheme A): each token binds to its
+		// own (subject, tenant, scopes). The workflow-control bearer guard
+		// still uses the legacy BearerTokenAuth on the first token for
+		// backwards-compatible 401 semantics; principal authz + tenant
+		// injection go through BearerPrincipalAuthMulti. Plaintext tokens
+		// are hashed in the constructor and never retained or logged.
+		workflowAuth = apiserver.NewBearerTokenAuth(mappings[0].Token)
+		principalAuth = apiserver.NewBearerPrincipalAuthMulti(mappings)
+		log.Printf("xflow-server: multi-tenant principal auth enabled (%d token(s))", len(mappings))
+	} else if cfg.apiAuthToken != "" {
 		workflowAuth = apiserver.NewBearerTokenAuth(cfg.apiAuthToken)
-		// B3: map the static token to a principal with the G1 single-tenant
-		// operator scopes so resource/operation authz + audit are enforced.
-		// The subject is server-configured; callers cannot self-report it.
+		// B3 single-tenant: map the static token to a principal with the G1
+		// operator scopes under the default tenant so resource/operation
+		// authz + audit are enforced. The subject is server-configured;
+		// callers cannot self-report it.
 		principalAuth = apiserver.NewBearerPrincipalAuth(cfg.apiAuthToken, "xflow-operator",
 			[]string{"workflow", "execution", "deadletter.list", "deadletter.replay", "management.read", "management.write"})
 	}
@@ -375,7 +398,7 @@ func runServer(cfg serverConfig) error {
 		WorkflowAuth:        workflowAuth,
 		RequireWorkflowAuth: cfg.requireAPIAuth,
 		PrincipalAuth:       principalAuth,
-		Authorizer:          apiserver.ScopeAuthorizer{},
+		Authorizer:          apiserver.TenantAwareAuthorizer{},
 		AuditSink:           audit,
 		HTTPAddr:            cfg.addr,
 		GRPCAddr:            cfg.grpcAddr,
@@ -454,4 +477,52 @@ func buildAuthenticator(cfg serverConfig) (control.Authenticator, error) {
 	}
 	log.Printf("xflow-server: runner auth policy loaded from %q (%s)", cfg.authPolicy, mode)
 	return store, nil
+}
+
+// loadAuthTokenMappings resolves the multi-tenant token→principal registry
+// from --auth-tokens-file. The file is a JSON array of objects with fields
+// token, subject, tenant, scopes. It returns nil (no error) when neither
+// --auth-tokens-file nor --api-auth-token is set so the caller falls back to
+// the legacy single-token path. Plaintext tokens are read only here and hashed
+// inside NewBearerPrincipalAuthMulti; they are never logged.
+//
+// File permissions are checked: a world- or group-readable token file is
+// rejected (0600 recommended) to avoid leaking bearer tokens.
+func loadAuthTokenMappings(cfg serverConfig) ([]apiserver.TokenPrincipalMapping, error) {
+	if cfg.authTokensFile == "" {
+		return nil, nil
+	}
+	info, err := os.Stat(cfg.authTokensFile)
+	if err != nil {
+		return nil, fmt.Errorf("auth-tokens-file: %w", err)
+	}
+	if mode := info.Mode().Perm(); mode&0077 != 0 {
+		return nil, fmt.Errorf("auth-tokens-file %s is group/world readable (mode %o); chmod 0600", cfg.authTokensFile, mode)
+	}
+	data, err := os.ReadFile(cfg.authTokensFile)
+	if err != nil {
+		return nil, fmt.Errorf("auth-tokens-file: %w", err)
+	}
+	var raw []struct {
+		Token    string   `json:"token"`
+		Subject  string   `json:"subject"`
+		Tenant   string   `json:"tenant"`
+		Scopes   []string `json:"scopes"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("auth-tokens-file: invalid JSON: %w", err)
+	}
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("auth-tokens-file: no token mappings")
+	}
+	out := make([]apiserver.TokenPrincipalMapping, 0, len(raw))
+	for _, r := range raw {
+		if r.Token == "" || r.Subject == "" || r.Tenant == "" {
+			return nil, fmt.Errorf("auth-tokens-file: each mapping requires token, subject, and tenant")
+		}
+		out = append(out, apiserver.TokenPrincipalMapping{
+			Token: r.Token, Subject: r.Subject, TenantID: r.Tenant, Scopes: r.Scopes,
+		})
+	}
+	return out, nil
 }

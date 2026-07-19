@@ -1,6 +1,9 @@
 package main
 
 import (
+	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -96,6 +99,118 @@ func TestParseServerConfigSupportsAPIAuthToken(t *testing.T) {
 	}
 	if cfg.apiAuthToken != "mysecrettoken" {
 		t.Fatalf("apiAuthToken = %q, want mysecrettoken", cfg.apiAuthToken)
+	}
+}
+
+func TestParseServerConfigSupportsAuthTokensFile(t *testing.T) {
+	cfg, err := parseServerConfig([]string{"-memory", "-auth-tokens-file", "/etc/xflow/tokens.json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.authTokensFile != "/etc/xflow/tokens.json" {
+		t.Fatalf("authTokensFile = %q, want /etc/xflow/tokens.json", cfg.authTokensFile)
+	}
+}
+
+// writeTokenFile writes a JSON token mapping file with the given mode for
+// loadAuthTokenMappings tests.
+func writeTokenFile(t *testing.T, name, content string, mode os.FileMode) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, []byte(content), mode); err != nil {
+		t.Fatalf("write %s: %v", name, err)
+	}
+	return path
+}
+
+func TestLoadAuthTokenMappingsParsesMultiTenantRegistry(t *testing.T) {
+	path := writeTokenFile(t, "tokens.json",
+		`[{"token":"tok-a","subject":"op-a","tenant":"tenantA","scopes":["workflow","management.read"]},{"token":"tok-b","subject":"op-b","tenant":"tenantB","scopes":["workflow"]}]`,
+		0600)
+	mappings, err := loadAuthTokenMappings(serverConfig{authTokensFile: path})
+	if err != nil {
+		t.Fatalf("loadAuthTokenMappings: %v", err)
+	}
+	if len(mappings) != 2 {
+		t.Fatalf("mappings = %d, want 2", len(mappings))
+	}
+	if mappings[0].TenantID != "tenantA" || mappings[0].Subject != "op-a" || mappings[0].Token != "tok-a" {
+		t.Fatalf("mappings[0] = %+v, want op-a/tenantA/tok-a", mappings[0])
+	}
+	if mappings[1].TenantID != "tenantB" {
+		t.Fatalf("mappings[1].TenantID = %q, want tenantB", mappings[1].TenantID)
+	}
+}
+
+func TestLoadAuthTokenMappingsRejectsWorldReadableFile(t *testing.T) {
+	// 0644 is group/world readable → must be rejected to avoid leaking tokens.
+	path := writeTokenFile(t, "tokens.json", `[]`, 0644)
+	if _, err := loadAuthTokenMappings(serverConfig{authTokensFile: path}); err == nil {
+		t.Fatal("loadAuthTokenMappings() error = nil, want error for group/world-readable token file")
+	}
+}
+
+func TestLoadAuthTokenMappingsRejectsMissingFields(t *testing.T) {
+	// tenant is required (empty normalized to default is only for the
+	// single-token constructor path, not the file).
+	path := writeTokenFile(t, "tokens.json", `[{"token":"t","subject":"s"}]`, 0600)
+	if _, err := loadAuthTokenMappings(serverConfig{authTokensFile: path}); err == nil {
+		t.Fatal("loadAuthTokenMappings() error = nil, want error for missing tenant")
+	}
+}
+
+func TestLoadAuthTokenMappingsNilWhenUnset(t *testing.T) {
+	mappings, err := loadAuthTokenMappings(serverConfig{})
+	if err != nil {
+		t.Fatalf("loadAuthTokenMappings: %v", err)
+	}
+	if mappings != nil {
+		t.Fatalf("mappings = %v, want nil when no file configured", mappings)
+	}
+}
+
+func TestRunServerMultiTenantTokenFileBuildsPrincipalAuth(t *testing.T) {
+	// Verify the --auth-tokens-file path end-to-end at the builder layer (which
+	// runServer calls): the file is parsed into a multi-tenant token registry
+	// and each token resolves to its bound tenant via the authenticator. Tokens
+	// are hashed in-process; the file is 0600.
+	path := writeTokenFile(t, "tokens.json",
+		`[{"token":"tok-a","subject":"op-a","tenant":"tenantA","scopes":["workflow","execution","management.read","management.write","deadletter.list","deadletter.replay"]},{"token":"tok-b","subject":"op-b","tenant":"tenantB","scopes":["workflow"]}]`,
+		0600)
+	cfg, err := parseServerConfig([]string{"-memory", "-auth-tokens-file", path, "-management"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mappings, err := loadAuthTokenMappings(cfg)
+	if err != nil {
+		t.Fatalf("loadAuthTokenMappings: %v", err)
+	}
+	auth := apiserver.NewBearerPrincipalAuthMulti(mappings)
+
+	reqA, _ := http.NewRequest(http.MethodGet, "/", nil)
+	reqA.Header.Set("Authorization", "Bearer tok-a")
+	pA, err := auth.Authenticate(reqA)
+	if err != nil {
+		t.Fatalf("Authenticate tok-a: %v", err)
+	}
+	if pA.TenantID != "tenantA" || pA.Subject != "op-a" {
+		t.Fatalf("tok-a principal = %+v, want op-a/tenantA", pA)
+	}
+
+	reqB, _ := http.NewRequest(http.MethodGet, "/", nil)
+	reqB.Header.Set("Authorization", "Bearer tok-b")
+	pB, err := auth.Authenticate(reqB)
+	if err != nil {
+		t.Fatalf("Authenticate tok-b: %v", err)
+	}
+	if pB.TenantID != "tenantB" {
+		t.Fatalf("tok-b tenant = %q, want tenantB", pB.TenantID)
+	}
+
+	// --auth-tokens-file takes precedence over --api-auth-token; verify the
+	// flag was parsed and cfg.apiAuthToken is unset (we did not pass it).
+	if cfg.apiAuthToken != "" {
+		t.Fatalf("apiAuthToken = %q, want empty (file takes precedence)", cfg.apiAuthToken)
 	}
 }
 

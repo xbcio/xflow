@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/xbcio/xflow/backend/local"
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/service/control"
 )
 
@@ -166,12 +167,149 @@ func TestBearerPrincipalAuthMapsTokenToPrincipal(t *testing.T) {
 	if p.Subject != "operator-1" || !p.HasScope("workflow") {
 		t.Fatalf("principal = %+v, want operator-1 with workflow scope", p)
 	}
+	// Single-token constructor maps to the default tenant so downstream code
+	// always sees a non-empty, key-safe tenant.
+	if p.TenantID != string(tenant.DefaultTenant) {
+		t.Fatalf("single-token tenant = %q, want %q (default)", p.TenantID, tenant.DefaultTenant)
+	}
 
 	// Wrong token must not authenticate and must not leak principal.
 	req2 := httptest.NewRequest(http.MethodGet, "/", nil)
 	req2.Header.Set("Authorization", "Bearer wrong")
 	if _, err := a.Authenticate(req2); err != ErrWorkflowUnauthenticated {
 		t.Fatalf("wrong token: err=%v, want ErrWorkflowUnauthenticated", err)
+	}
+}
+
+// TestBearerPrincipalAuthMultiMapsTokenToTenant proves the multi-tenant token
+// registry (design §2.3 scheme A) binds each token to its own tenant, and that
+// the tenant is server-issued from the token (never self-reported).
+func TestBearerPrincipalAuthMultiMapsTokenToTenant(t *testing.T) {
+	a := NewBearerPrincipalAuthMulti([]TokenPrincipalMapping{
+		{Token: "tok-a", Subject: "op-a", TenantID: "tenantA", Scopes: []string{"workflow", "execution", "management.read"}},
+		{Token: "tok-b", Subject: "op-b", TenantID: "tenantB", Scopes: []string{"workflow", "execution", "management.read"}},
+	})
+
+	reqA := httptest.NewRequest(http.MethodGet, "/", nil)
+	reqA.Header.Set("Authorization", "Bearer tok-a")
+	pa, err := a.Authenticate(reqA)
+	if err != nil {
+		t.Fatalf("tok-a: %v", err)
+	}
+	if pa.Subject != "op-a" || pa.TenantID != "tenantA" {
+		t.Fatalf("tok-a principal = %+v, want op-a/tenantA", pa)
+	}
+
+	reqB := httptest.NewRequest(http.MethodGet, "/", nil)
+	reqB.Header.Set("Authorization", "Bearer tok-b")
+	pb, err := a.Authenticate(reqB)
+	if err != nil {
+		t.Fatalf("tok-b: %v", err)
+	}
+	if pb.Subject != "op-b" || pb.TenantID != "tenantB" {
+		t.Fatalf("tok-b principal = %+v, want op-b/tenantB", pb)
+	}
+
+	// A token not in the registry must not authenticate and must not leak which
+	// tokens exist (same error as a missing token).
+	reqX := httptest.NewRequest(http.MethodGet, "/", nil)
+	reqX.Header.Set("Authorization", "Bearer tok-x")
+	if _, err := a.Authenticate(reqX); err != ErrWorkflowUnauthenticated {
+		t.Fatalf("unknown token: err=%v, want ErrWorkflowUnauthenticated", err)
+	}
+
+	// Empty TenantID in a mapping normalizes to default so every authenticated
+	// principal carries a non-empty tenant (TenantAwareAuthorizer requires it).
+	aDef := NewBearerPrincipalAuthMulti([]TokenPrincipalMapping{
+		{Token: "tok-d", Subject: "op-d", Scopes: []string{"workflow"}},
+	})
+	reqD := httptest.NewRequest(http.MethodGet, "/", nil)
+	reqD.Header.Set("Authorization", "Bearer tok-d")
+	pd, err := aDef.Authenticate(reqD)
+	if err != nil {
+		t.Fatalf("tok-d: %v", err)
+	}
+	if pd.TenantID != string(tenant.DefaultTenant) {
+		t.Fatalf("empty tenant mapping normalized to %q, want %q", pd.TenantID, tenant.DefaultTenant)
+	}
+}
+
+func TestTenantAwareAuthorizerDeniesEmptyTenant(t *testing.T) {
+	// A principal with scopes but no tenant must be denied — fail-closed.
+	dec, err := TenantAwareAuthorizer{}.Authorize(context.Background(), AuthorizationRequest{
+		Principal: Principal{Subject: "x", TenantID: "", Scopes: []string{"workflow"}},
+		Operation: OpWorkflowCreate,
+	})
+	if err != nil {
+		t.Fatalf("Authorize: %v", err)
+	}
+	if dec != DecisionDeny {
+		t.Fatalf("empty tenant decision = %q, want deny (fail-closed)", dec)
+	}
+}
+
+func TestTenantAwareAuthorizerDeniesMissingScope(t *testing.T) {
+	dec, err := TenantAwareAuthorizer{}.Authorize(context.Background(), AuthorizationRequest{
+		Principal: Principal{Subject: "x", TenantID: "tenantA", Scopes: []string{}},
+		Operation: OpWorkflowCreate,
+	})
+	if err != nil {
+		t.Fatalf("Authorize: %v", err)
+	}
+	if dec != DecisionDeny {
+		t.Fatalf("missing scope decision = %q, want deny", dec)
+	}
+}
+
+func TestTenantAwareAuthorizerAllowsMatchingTenantAndScope(t *testing.T) {
+	dec, err := TenantAwareAuthorizer{}.Authorize(context.Background(), AuthorizationRequest{
+		Principal: Principal{Subject: "x", TenantID: "tenantA", Scopes: []string{"management.read"}},
+		Operation: OpManagementRead,
+	})
+	if err != nil {
+		t.Fatalf("Authorize: %v", err)
+	}
+	if dec != DecisionAllow {
+		t.Fatalf("matching decision = %q, want allow", dec)
+	}
+}
+
+func TestTenantAwareAuthorizerDeniesCrossTenantResource(t *testing.T) {
+	// ResourceTenant resolved by the route layer disagrees with the principal's
+	// tenant → deny (defense in depth; the authoritative IDOR path is the
+	// tenant-scoped store read, exercised in tenant_idor_test.go).
+	dec, err := TenantAwareAuthorizer{}.Authorize(context.Background(), AuthorizationRequest{
+		Principal:      Principal{Subject: "x", TenantID: "tenantA", Scopes: []string{"management.read"}},
+		Operation:      OpManagementRead,
+		ResourceTenant: "tenantB",
+	})
+	if err != nil {
+		t.Fatalf("Authorize: %v", err)
+	}
+	if dec != DecisionDeny {
+		t.Fatalf("cross-tenant resource decision = %q, want deny", dec)
+	}
+}
+
+func TestAuthzWrapInjectsPrincipalTenantIntoContext(t *testing.T) {
+	// The authz wrapper injects the principal's TenantID into the request
+	// context so downstream store reads are tenant-scoped. A stub handler
+	// observes the context.
+	auth := staticPrincipalAuth{principal: Principal{Subject: "alice", TenantID: "tenantA", Scopes: []string{"workflow"}}}
+	m := authzModule(t, auth, TenantAwareAuthorizer{}, NewInMemoryAuditSink())
+
+	var observed tenant.TenantID
+	wrapped := m.wrapForTest(OpWorkflowCreate, true, func(w http.ResponseWriter, r *http.Request) {
+		observed = tenant.FromContext(r.Context())
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	}, nil)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/workflows", nil)
+	wrapped.ServeHTTP(rec, req)
+
+	if observed != "tenantA" {
+		t.Fatalf("context tenant = %q, want tenantA (principal-injected)", observed)
 	}
 }
 

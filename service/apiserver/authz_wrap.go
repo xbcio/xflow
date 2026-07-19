@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"time"
+
+	"github.com/xbcio/xflow/backend/tenant"
 )
 
 // authzHolder carries the B3 resource/operation authz dependencies shared by
@@ -21,7 +23,12 @@ type authzHolder struct {
 // admission → handler → audit reconcile outcome. Extracted so any module that
 // embeds authzHolder can wrap its routes, and tests can exercise the wrapper
 // against stub handlers without mounting real routes.
-func (h *authzHolder) authzWrap(op string, isMutation bool, fn http.HandlerFunc, resourceResolver func(*http.Request) (resource, workflowID, executionID string)) http.HandlerFunc {
+//
+// Tenant boundary (Task 7.3): the verified principal's TenantID is injected
+// into the request context here (tenant.WithTenant) so every downstream store
+// read is scoped to the principal's tenant — the authoritative IDOR defense.
+// The client request body is never consulted for tenant.
+func (h *authzHolder) authzWrap(op string, isMutation bool, fn http.HandlerFunc, resourceResolver func(*http.Request) (resource, workflowID, executionID, resourceTenant string)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		principal, err := h.principalAuth.Authenticate(r)
 		if err != nil {
@@ -29,13 +36,13 @@ func (h *authzHolder) authzWrap(op string, isMutation bool, fn http.HandlerFunc,
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
-		resource, wfID, execID := "", "", ""
+		resource, wfID, execID, resTenant := "", "", "", ""
 		if resourceResolver != nil {
-			resource, wfID, execID = resourceResolver(r)
+			resource, wfID, execID, resTenant = resourceResolver(r)
 		}
 		decision, derr := h.authorizer.Authorize(r.Context(), AuthorizationRequest{
 			Principal: principal, Operation: op, Resource: resource,
-			WorkflowID: wfID, ExecutionID: execID,
+			WorkflowID: wfID, ExecutionID: execID, ResourceTenant: resTenant,
 		})
 		if derr != nil || decision != DecisionAllow {
 			reason := "denied"
@@ -71,7 +78,7 @@ func (h *authzHolder) authzWrap(op string, isMutation bool, fn http.HandlerFunc,
 				Timestamp: time.Now().UTC(),
 			})
 		}
-		r = r.WithContext(context.WithValue(r.Context(), authzContextKey{}, principal))
+		r = r.WithContext(tenant.WithTenant(context.WithValue(r.Context(), authzContextKey{}, principal), tenant.TenantID(principal.TenantID)))
 		if isMutation {
 			// Wrap the response writer so we can observe the handler's status
 			// code and append a reconcile outcome once it settles. A 2xx flips
@@ -89,7 +96,7 @@ func (h *authzHolder) authzWrap(op string, isMutation bool, fn http.HandlerFunc,
 }
 
 // wrapForTest exposes the authz wrapper for tests with a stub handler.
-func (h *authzHolder) wrapForTest(op string, isMutation bool, fn http.HandlerFunc, resolver func(*http.Request) (string, string, string)) http.HandlerFunc {
+func (h *authzHolder) wrapForTest(op string, isMutation bool, fn http.HandlerFunc, resolver func(*http.Request) (string, string, string, string)) http.HandlerFunc {
 	return h.authzWrap(op, isMutation, fn, resolver)
 }
 
