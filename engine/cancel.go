@@ -20,7 +20,7 @@ func (e *Engine) Cancel(ctx context.Context, id types.ExecutionID) error {
 		return fmt.Errorf("load graph for canceled execution %q: %w", id, err)
 	}
 	if !active {
-		return fmt.Errorf("execution %q not found: %w", id, ErrExecutionInactive)
+		return fmt.Errorf("execution %q: %w", id, ErrExecutionInactive)
 	}
 
 	if err := e.state.UpdateExecutionStatus(ctx, id, types.ExecutionStatusCanceling, ""); err != nil {
