@@ -34,10 +34,13 @@ func New(rdb redis.UniversalClient) *Primitives {
 // without hash tags.
 //
 // Tenant prefix is reserved for Task 7.2 (Phase 6/7). When a tenant prefix is
-// added, the expected shape is `xflow:{tenant}:trigger:dedup:<key>` etc.,
-// keeping the per-key operation model unchanged. The hash tag for any future
-// multi-key Lua must be anchored on a scope+key that all KEYS share, e.g.
-// `{<scope>:<key>}` or `{<key>}`.
+// added, the expected shape is `xflow:t<tenant>:trigger:dedup:<key>` etc.
+// (tenant prefix WITHOUT braces), keeping the per-key operation model unchanged.
+// The tenant prefix must be brace-free: Redis Cluster hash tag is "first { to
+// first }", so a braced `{tenant}` would steal the hash tag from any later
+// `{<key>}`/`{<scope>:<key>}` and collapse a whole tenant into one slot. The
+// hash tag for any future multi-key Lua must be anchored on a scope+key that
+// all KEYS share, e.g. `{<scope>:<key>}` or `{<key>}`.
 func triggerDedupKey(key string) string { return "xflow:trigger:dedup:" + key }
 
 func triggerLockKey(key string) string { return "xflow:trigger:lock:" + key }
