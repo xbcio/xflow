@@ -305,17 +305,13 @@ func runnerServiceConfig(cfg runnerConfig) (runnersvc.Config, error) {
 	}
 	if len(cfg.credentials) > 0 {
 		// Capture credentials in the closure; never log or surface in errors.
-		// The resolver is a pure lookup keyed by tenant and credential name.
-		// input.Credential returns the map verbatim, matching the
-		// cred["dsn"]/cred["driver"] access pattern in
-		// node/internal/action/database.go.
+		// The config currently stores credentials as map[name]map[key]value,
+		// so the resolver looks up by credential name only. Per-tenant credential
+		// namespaces are not supported by the current YAML schema; the
+		// tenant argument is kept because the runner service hook is already in
+		// place and future config work only needs to update this closure.
 		creds := cfg.credentials
 		svcCfg.CredentialResolver = func(t tenant.TenantID, name string) map[string]any {
-			// Single-tenant runners store credentials under the default tenant.
-			// Multi-tenant runners may namespace credentials by tenant name.
-			if perTenant, ok := creds[string(t)]; ok {
-				return perTenant
-			}
 			return creds[name]
 		}
 	}

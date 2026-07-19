@@ -627,7 +627,9 @@ func (d *RedisRunnerDirectory) runnerForClaim(ctx context.Context, runnerID stri
 		return redisClaimRunner{}, false, fmt.Errorf("read runner policy: %w", err)
 	}
 	tenantsRaw, err := d.rdb.HGet(ctx, d.keys.runnerTenants, runnerID).Result()
-	if err != nil {
+	if errors.Is(err, redis.Nil) {
+		tenantsRaw = ""
+	} else if err != nil {
 		return redisClaimRunner{}, false, fmt.Errorf("read runner tenants: %w", err)
 	}
 	var capabilities []protocol.Capability

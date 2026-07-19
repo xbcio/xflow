@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/xbcio/xflow/backend/tenant"
@@ -18,6 +19,7 @@ var (
 	ErrRunnerIDRequired      = errors.New("runner_id is required")
 	ErrRunnerSessionRequired = errors.New("runner_id and session_id are required")
 	ErrConcurrencyRequired   = errors.New("runner_id and concurrency are required")
+	ErrInvalidTenant         = errors.New("invalid tenant")
 	ErrRunnerNotFound        = errors.New("runner not found")
 	ErrLeaseRequired         = errors.New("runner_id, session_id and lease are required")
 	ErrEngineNotConfigured   = errors.New("engine not configured")
@@ -113,6 +115,11 @@ func authMode(auth Authenticator) string {
 func (c *Core) register(ctx context.Context, req protocol.RegisterRunnerRequest, info TransportInfo) (protocol.RegisterRunnerResponse, error) {
 	if req.RunnerID == "" || req.Concurrency <= 0 {
 		return protocol.RegisterRunnerResponse{}, ErrConcurrencyRequired
+	}
+	for _, t := range tenantIDs(req.Tenants) {
+		if err := tenant.Validate(t); err != nil {
+			return protocol.RegisterRunnerResponse{}, fmt.Errorf("%w: %v", ErrInvalidTenant, err)
+		}
 	}
 	policy, authErr := c.authn().AuthenticateRegister(req.RunnerID, req.AuthToken, info)
 	if err := c.authDeny(ctx, req.RunnerID, req.AuthToken, "register", info, authErr); err != nil {
@@ -332,6 +339,7 @@ func normalizeRunnerError(err error, logger engine.Logger, op string) error {
 	case errors.Is(err, ErrRunnerIDRequired),
 		errors.Is(err, ErrRunnerSessionRequired),
 		errors.Is(err, ErrConcurrencyRequired),
+		errors.Is(err, ErrInvalidTenant),
 		errors.Is(err, ErrRunnerNotFound),
 		errors.Is(err, ErrLeaseRequired),
 		errors.Is(err, ErrEngineNotConfigured),

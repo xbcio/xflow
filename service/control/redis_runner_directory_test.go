@@ -457,3 +457,24 @@ func TestRedisRunnerDirectoryTenantRoundTripThroughCodec(t *testing.T) {
 		t.Fatalf("tenant = %q, want tenant-b", claim.Assignment.TenantID)
 	}
 }
+
+func TestRedisRunnerDirectoryClaimForRunnerFallsBackToDefaultTenantWhenTenantsFieldMissing(t *testing.T) {
+	ctx := context.Background()
+	_, rdb := newRedisRunnerDirectoryTestClient(t)
+	directory := NewRedisRunnerDirectory(rdb)
+	session := registerRedisDirectoryRunner(t, ctx, directory, "runner-1", 1)
+	// Simulate a runner session written by an older version that did not persist
+	// the runnerTenants hash field. ClaimForRunner must treat the missing field
+	// as the default tenant rather than returning an error.
+	if err := rdb.HDel(ctx, directory.keys.runnerTenants, session.RunnerID).Err(); err != nil {
+		t.Fatalf("HDel runnerTenants: %v", err)
+	}
+
+	assignment := redisDirectoryTestAssignment("exec-1/node-a/activation-1")
+	mustEnqueueRedisDirectoryAssignment(t, ctx, directory, assignment)
+
+	claim := claimRedisDirectoryAssignment(t, ctx, directory, session, 1)
+	if claim.Assignment.TenantID != tenant.DefaultTenant {
+		t.Fatalf("tenant = %q, want default", claim.Assignment.TenantID)
+	}
+}

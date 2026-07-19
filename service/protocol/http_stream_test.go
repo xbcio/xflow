@@ -12,8 +12,14 @@ import (
 )
 
 func TestHTTPStreamSimulatesConnect(t *testing.T) {
+	var receivedRegister *RegisterRunnerRequest
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/runners/register", func(w http.ResponseWriter, r *http.Request) {
+		var req RegisterRunnerRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode register request: %v", err)
+		}
+		receivedRegister = &req
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(map[string]any{"runner_id": "r1"})
 	})
@@ -45,7 +51,7 @@ func TestHTTPStreamSimulatesConnect(t *testing.T) {
 	}
 	defer func() { _ = stream.Close() }()
 
-	if err := stream.Send(RunnerFrame{Hello: &HelloFrame{RunnerID: "r1", Concurrency: 1, Capabilities: []Capability{{NodeType: "xflow.function"}}}}); err != nil {
+	if err := stream.Send(RunnerFrame{Hello: &HelloFrame{RunnerID: "r1", Concurrency: 1, Capabilities: []Capability{{NodeType: "xflow.function"}}, Tenants: []string{"tenant-a", "tenant-b"}}}); err != nil {
 		t.Fatalf("send hello: %v", err)
 	}
 	if fr, err := stream.Recv(); err != nil || fr.Welcome == nil || fr.Welcome.RunnerID != "r1" {
@@ -59,5 +65,11 @@ func TestHTTPStreamSimulatesConnect(t *testing.T) {
 	}
 	if fr, err := stream.Recv(); err != nil || fr.Ack == nil || !fr.Ack.Accepted {
 		t.Fatalf("expected ACK accepted, got fr=%+v err=%v", fr, err)
+	}
+	if receivedRegister == nil {
+		t.Fatal("register request was not received")
+	}
+	if got := receivedRegister.Tenants; len(got) != 2 || got[0] != "tenant-a" || got[1] != "tenant-b" {
+		t.Fatalf("register tenants = %v, want [tenant-a tenant-b]", got)
 	}
 }
