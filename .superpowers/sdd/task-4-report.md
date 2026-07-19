@@ -1,118 +1,156 @@
-# Task 4 Report: Assignment-First MemoryRunnerDirectory
+# Task 4 (M1.2) Report: Vite App Shells
 
 ## Status
 
-DONE
+Completed. Both `apps/workflow-editor` and `apps/workflow-viewer` have been upgraded from placeholders to real Vite applications with routing, ErrorBoundary, runtime config, dev mock toggle, production mock disable, static fixtures, and component tests. All six validation commands pass.
 
-## Scope Delivered
+## File Trees
 
-- Added `service/control/runner_directory.go` with the new assignment-first directory DTOs, interface, and `ErrRunnerSessionStale`.
-- Added `service/control/memory_runner_directory.go` with a mutex-backed in-memory implementation:
-  - runner registration with session fencing
-  - FIFO assignment queue with seen de-duplication
-  - claim/finalize/release bookkeeping
-  - leased-capacity accounting based on `capacity - inFlight - finalized - activeClaims`
-  - stable requeue ordering for active claims on runner re-registration
-- Preserved `RunnerPool` compatibility:
-  - existing API unchanged
-  - matching logic now reuses route-aware capability checks
-  - added a regression test for versioned routing with version-omitted capabilities
+### `web/apps/workflow-editor`
 
-## TDD Notes
-
-### RED
-
-Added `service/control/memory_runner_directory_test.go` first, then ran:
-
-```bash
-go test ./service/control -run 'TestMemoryRunnerDirectory' -count=1
+```
+index.html
+package.json
+src/App.tsx
+src/main.tsx
+vite.config.ts
+tsconfig.json
+src/components/
+  ErrorBoundary.tsx
+  ErrorBoundary.test.tsx
+src/config/
+  runtime.ts
+src/mocks/
+  fixtures.ts
+src/pages/
+  EditorPage.tsx
+  HealthPage.tsx
+  HealthPage.test.tsx
+src/styles/
+  index.css
 ```
 
-Observed expected build failures for undefined directory types and constructor.
+### `web/apps/workflow-viewer`
 
-### GREEN
-
-Implemented the new directory/types and reran:
-
-```bash
-go test ./service/control -run 'TestMemoryRunnerDirectory|TestRunnerPool' -count=1
+```
+index.html
+package.json
+src/App.tsx
+src/main.tsx
+vite.config.ts
+tsconfig.json
+src/components/
+  ErrorBoundary.tsx
+  ErrorBoundary.test.tsx
+src/config/
+  runtime.ts
+src/mocks/
+  fixtures.ts
+src/pages/
+  ViewerPage.tsx
+  HealthPage.tsx
+  HealthPage.test.tsx
+src/styles/
+  index.css
 ```
 
-Passed.
+## Key Dependencies (pinned, per ADR D1)
 
-## Verification
+| Package | Version | Scope | Note |
+|---------|---------|-------|------|
+| `vite` | `6.3.5` | app devDep | latest stable 6.x at install time |
+| `@vitejs/plugin-react` | `4.5.0` | app devDep | matches Vite 6 |
+| `react` / `react-dom` | `19.1.0` | app dep / root devDep | pinned per ADR |
+| `react-router-dom` | `7.6.1` | app dep | React 19 compatible |
+| `@testing-library/react` | `16.1.0` | root devDep | React 19 compatible |
+| `@testing-library/dom` | `10.4.0` | root devDep | peer of testing-library/react |
+| `jsdom` | `26.0.0` | root devDep | Vitest jsdom environment |
+| `vitest` | `3.2.0` | root/app devDep | existing workspace version |
 
-Ran after formatting:
+Excluded (per brief): Umi, AntD, ProComponents, React Flow, Monaco, zustand, TanStack Query.
+
+## Configuration Highlights
+
+### Vite
+
+Each app has its own `vite.config.ts`:
+
+- `@vitejs/plugin-react` for JSX / Fast Refresh.
+- `resolve.alias["@"]` points to `src`.
+- `build.outDir` is `dist`.
+- Editor dev server port: `5173`; Viewer dev server port: `5174`.
+
+### Routing (`react-router-dom`)
+
+- Editor: `/` health page, `/editor/:workflowId` placeholder editor page.
+- Viewer: `/` health page, `/view/:workflowId` read-only viewer page.
+- Both apps use `BrowserRouter` wrapped in `ErrorBoundary`.
+
+### ErrorBoundary
+
+- Class-based React ErrorBoundary catching render errors.
+- Displays a generic message (`Something went wrong`) and never exposes stack traces, paths, or error details to the UI.
+
+### Runtime Config / Mock Toggle
+
+`src/config/runtime.ts` reads Vite env vars:
+
+- `apiBaseUrl`: placeholder, defaults to empty string (`VITE_API_BASE_URL`).
+- `mockEnabled`:
+  - Development default: `true` unless `VITE_MOCK_ENABLED=false`.
+  - Production (`import.meta.env.PROD`): forced to `false`.
+- `environment`: `import.meta.env.MODE`.
+
+This satisfies the requirement that production builds disable mock fixtures at runtime.
+
+### Static Fixture
+
+`src/mocks/fixtures.ts` defines a minimal `WorkflowDef` (start → end) with `id`, `namespace`, `name`, `version`, `spec`, `nodes`, and `connections`, matching the shape of `types/workflow.go`. No HTTP calls are made.
+
+### Health Page
+
+Renders app name, version, environment, mock status, and a textual list of fixture nodes/connections without React Flow.
+
+## Validation Summary (all green)
 
 ```bash
-gofmt -w service/control/runner_directory.go service/control/memory_runner_directory.go service/control/memory_runner_directory_test.go service/control/runner_pool.go service/control/runner_pool_test.go
-go test ./service/control -run 'TestMemoryRunnerDirectory|TestRunnerPool' -count=1
-go test ./service/control -count=1
+cd <repo-root>/.worktrees/frontend-mgmt/web
+pnpm install          # OK (network available)
+pnpm typecheck        # OK — tsc --noEmit passes
+pnpm lint             # OK — ESLint passes
+pnpm test             # OK — 13 files / 15 tests pass
+pnpm check:boundaries # OK — no public package depends on Umi/ProLayout
+pnpm build            # OK — Turbo build of all packages + both Vite apps succeeds
 ```
 
-Results:
+Additional independent app builds:
 
-- Focused suite: `8 passed`
-- Full `service/control` package: `42 passed`
+```bash
+pnpm --filter @xflow/app-workflow-editor build  # OK — dist/index.html + assets generated
+pnpm --filter @xflow/app-workflow-viewer build   # OK — dist/index.html + assets generated
+```
 
-## Files Changed
+Production bundle verification:
 
-- `service/control/runner_directory.go`
-- `service/control/memory_runner_directory.go`
-- `service/control/memory_runner_directory_test.go`
-- `service/control/runner_pool.go`
-- `service/control/runner_pool_test.go`
+- `grep -o 'mockEnabled:[^,]*' apps/*/dist/assets/index-*.js` returns `mockEnabled:!1` (i.e., `false`), confirming production mock disablement.
 
-## Concerns
+## Test Coverage
 
-- None for this task boundary. `RunnerPool` remains the compatibility path; dispatcher/core migration to `RunnerDirectory` is intentionally left for later tasks.
+- Editor HealthPage rendering and fixture node/connection counts.
+- Editor ErrorBoundary fallback and no stack-leak assertion.
+- Viewer HealthPage rendering and fixture node/connection counts.
+- Viewer ErrorBoundary fallback and no stack-leak assertion.
 
-## Review Fix Follow-Up
+Total: **15 tests** across **13 test files** (9 package placeholder tests + 4 app tests).
 
-### Findings Addressed
+## Commit Hash
 
-- Preserved finalized lease accounting across `MemoryRunnerDirectory.Register` re-registration so runner headroom cannot reopen until `ReleaseLeased`.
-- Added focused regression coverage for:
-  - headroom math with `InFlight`, active claims, and finalized leases
-  - `ReleaseClaimRequeue`, `ReleaseClaimDrop`, and `ReleaseClaimKeepSeen`
-  - seen-marker retention/removal in `ReleaseLeased`
-  - re-registration keeping finalized lease accounting while requeueing active claims
+Code commit: `1bfba95`
 
-### TDD / Verification
+## Open Issues / Notes
 
-- RED:
-  - `go test ./service/control -run 'TestMemoryRunnerDirectory' -count=1`
-  - failed on `TestMemoryRunnerDirectoryReregisterPreservesFinalizedLeasesAndRequeuesActiveClaims`, confirming the leased-accounting reset bug
-- GREEN:
-  - `go test ./service/control -run 'TestMemoryRunnerDirectory' -count=1`
-  - `9 passed`
-- Required verification:
-  - `go test ./service/control -run 'TestMemoryRunnerDirectory|TestRunnerPool' -count=1`
-  - `15 passed`
-  - `go test ./service/control -count=1`
-  - `49 passed`
-
-## Re-review Fix Follow-Up
-
-### Finding Addressed
-
-- Preserved the last known `RunnerSnapshot.InFlight` across `MemoryRunnerDirectory.Register` re-registration so `headroom()` cannot over-assign capacity before the replacement session sends its first heartbeat.
-
-### TDD / Verification
-
-- RED:
-  - `go test ./service/control -run 'TestMemoryRunnerDirectoryReregisterPreservesInflightUntilHeartbeat' -count=1`
-  - failed on the new regression test, confirming re-registration reset `InFlight` and allowed an extra claim
-- GREEN:
-  - `go test ./service/control -run 'TestMemoryRunnerDirectoryReregisterPreservesInflightUntilHeartbeat' -count=1`
-  - `1 passed`
-- Required verification:
-  - `go test ./service/control -run 'TestMemoryRunnerDirectory|TestRunnerPool' -count=1`
-  - `16 passed`
-  - `go test ./service/control -count=1`
-  - `50 passed`
-
-### Files Updated
-
-- `service/control/memory_runner_directory.go`
-- `service/control/memory_runner_directory_test.go`
+1. **Engine warning**: local Node is `v22.18.0`, while `package.json` pins `22.15.0`. This produces a pnpm warning but does not fail any command.
+2. **Placeholder public packages**: the 9 `@xflow/*` public packages remain empty skeletons; the apps deliberately do not import them in this milestone.
+3. **No real API calls**: all workflow data comes from `src/mocks/fixtures.ts`.
+4. **Styles are intentionally minimal**: `.xflow-root` scope is in place; Tailwind integration is deferred to a later milestone.
+5. **Dist directories** are generated by Vite and covered by `.gitignore`; they are not committed.

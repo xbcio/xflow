@@ -1,5 +1,6 @@
 .PHONY: all build test test-concurrency lint fmt tidy clean run-server run-runner install-hooks proto proto-tools \
-        env-up env-down env-reset env-logs env-migrate test-integration test-integration-required test-perf perf-sample
+        env-up env-down env-reset env-logs env-migrate test-integration test-integration-required test-perf perf-sample \
+        web-install web-lint web-typecheck web-test web-check-boundaries web-build web-e2e web-generate web-ci web-all
 
 # ── Build ──────────────────────────────────────────────────────────────────────
 
@@ -135,3 +136,36 @@ perf-sample:
 	: "$${XFLOW_TEST_KAFKA_BROKERS:=localhost:$${KAFKA_PORT:-9092}}"; \
 	export XFLOW_TEST_REDIS_ADDR XFLOW_TEST_KAFKA_BROKERS; \
 	./scripts/perf-sample.sh
+
+# ── Web (frontend) ─────────────────────────────────────────────────────────────
+
+WEB_DIR := web
+WEB_LOCKFILE := $(WEB_DIR)/pnpm-lock.yaml
+
+web-install:
+	@cd $(WEB_DIR) && if [ -f pnpm-lock.yaml ]; then pnpm install --frozen-lockfile; else pnpm install; fi
+
+web-lint:
+	@cd $(WEB_DIR) && pnpm lint
+
+web-typecheck:
+	@cd $(WEB_DIR) && pnpm typecheck
+
+web-test:
+	@cd $(WEB_DIR) && pnpm test
+
+web-check-boundaries:
+	@cd $(WEB_DIR) && pnpm check:boundaries
+
+web-build:
+	@cd $(WEB_DIR) && pnpm build
+
+web-e2e:
+	@cd $(WEB_DIR) && pnpm e2e
+
+web-generate:
+	@cd $(WEB_DIR) && pnpm generate
+
+web-ci: web-install web-lint web-typecheck web-test web-check-boundaries web-build
+
+web-all: web-ci
