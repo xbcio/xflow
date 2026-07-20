@@ -340,7 +340,9 @@ func assertParityAll(t *testing.T, tc parityCase, outs ...namedParityOutcome) {
 	}
 
 	// Parity: every topology reaches the same logical attempt count, terminal
-	// status, and error presence for the same fixture.
+	// status, source node status, error string, and output port for the same
+	// fixture. This is the topology-independent contract: if any field diverges
+	// across topologies, the wire/classification path has a regression.
 	for i := 0; i < len(outs); i++ {
 		for j := i + 1; j < len(outs); j++ {
 			a, b := outs[i], outs[j]
@@ -350,9 +352,16 @@ func assertParityAll(t *testing.T, tc parityCase, outs ...namedParityOutcome) {
 			if a.Out.Status != b.Out.Status {
 				t.Errorf("status parity: %s=%s vs %s=%s, want equal", a.Topology, a.Out.Status, b.Topology, b.Out.Status)
 			}
-			aHasErr, bHasErr := a.Out.ErrStr != "", b.Out.ErrStr != ""
-			if aHasErr != bHasErr {
-				t.Errorf("error presence parity: %s=%v vs %s=%v, want equal", a.Topology, aHasErr, b.Topology, bHasErr)
+			// Node terminal status (SourceStatus) must also be topology-independent.
+			if a.Out.SourceStatus != b.Out.SourceStatus {
+				t.Errorf("source status parity: %s=%s vs %s=%s, want equal", a.Topology, a.Out.SourceStatus, b.Topology, b.Out.SourceStatus)
+			}
+			// Full error string equality: the ClassifiedError serializes as
+			// "code: message" and must survive the wire identically across
+			// topologies. Substring checks per-topology (ErrContains) are a
+			// contract check; this is a parity check.
+			if a.Out.ErrStr != b.Out.ErrStr {
+				t.Errorf("error parity: %s=%q vs %s=%q, want equal", a.Topology, a.Out.ErrStr, b.Topology, b.Out.ErrStr)
 			}
 			// Output port must also match: the same fixture routes to the same
 			// downstream branch (main/error) regardless of topology.
