@@ -193,8 +193,27 @@ DSL 在后端以 Go `types.WorkflowDef` 为权威，前端需要明确 wire form
 2. 前端"发布"或调用 `POST /v1/workflows` 时,必须向后台提交**运行时定义**;`position`、`ui`、`notes`、`viewport` 不应进入 canonical execution hash;`pin_data` **计入** semantic hash(见上)。
 3. Editor metadata 必须按 `NodeDef.ID` 索引(而不是 `NodeDef.Name`);`NodeDef.Name` 仅用于 DSL connection 和表达式引用。Go 侧当前无 editor metadata 持久化路径,未来 M2 Repository 实现时按 node ID 约束。
 4. 既有 `WorkflowDef` 可继续读取(`Position`/`UI` 字段保留在 `types.NodeDef` 中,反序列化不受影响);已发布版本运行时语义不变。
-5. 推荐在 M1/M3 即引入前端 `WorkflowEditorMetadata` 类型(`@xflow/workflow-core` 中,与 `WorkflowDef` 并列),将 `positions`、`viewport`、`ui`、`notes`、`pinData` 移入其中,彻底避免污染运行时定义;提交发布时剥离。
+5. **`pin_data` 是 runtime-semantic,不进入 `WorkflowEditorMetadata` 的权威源**。前端 `WorkflowEditorMetadata.pinData` 仅作为只读派生缓存(便于 UI 读取 pin 状态展示),不得作为 pin_data 的权威存储。`splitEditorMetadata` 不得从 `WorkflowDef` 中移除 `pin_data`;`mergeEditorMetadata` 不得用 metadata 的 `pinData` 覆盖 `WorkflowDef.pin_data`(若两者冲突,以 `WorkflowDef.pin_data` 为准)。这是 F0-A2 的硬规则,确保前端 split 后提交的 runtime def 仍包含 `pin_data`,与 Go 端 `runtimeHash` 计入 PinData 的语义一致。
 6. **草稿 revision 乐观锁**独立于 hash —— 仓库当前无 draft/revision 概念(grep `draft`/`revision` 无结果),draft 的并发控制使用独立的 `revision` 整数/version vector,不依赖 `definitionHash`。
+
+### 字段分类表(F0-A1)
+
+| 字段 | 分类 | runtime hash | audit fingerprint |
+|---|---|---|---|
+| namespace/name/version | workflow identity | ✓ | ✓ |
+| spec, settings, options, context | runtime config | ✓ | ✓ |
+| credentials, params | runtime input | ✓ | ✓ |
+| node_templates, connections, outputs | runtime graph | ✓ | ✓ |
+| pin_data | runtime execution | ✓ | ✓ |
+| nodes[].type/kind/version/parameters/inputs/... | node runtime | ✓ | ✓ |
+| nodes[].id | stable editor identity | ✗ | ✓ |
+| description | descriptive | ✗ | ✓ |
+| nodes[].position/ui/notes | editor-only | ✗ | ✓ |
+| WorkflowDef.ID, TenantID | instance | ✗ | ✗(TenantID json:"-") |
+
+**说明**:`runtime hash` 即 `sdk/xflow/workflow_identity.go` 中的 `runtimeHash(def)`,格式 `runtime-sha256:v1:<hex>`,用于 registry 冲突检测;`audit fingerprint` 即 `legacyDefinitionHash(def)`,格式 `sha256:audit:v1:<hex>`,持久化为 `WorkflowRecord.AuditFingerprint`,保留全字段(含 editor metadata 与 instance identity)用于审计/导出追溯。
+
+> **注**:本表为字段分类的目标状态(F0-A 修订后)。当前 `runtimeHash` 实现中 `Description` 仍计入 hash;F0-A3 将进一步剥离 `Description` 与 `NodeDef.ID`,届时本表与实现即对齐。
 
 ### 备选方案
 
@@ -203,8 +222,8 @@ DSL 在后端以 Go `types.WorkflowDef` 为权威，前端需要明确 wire form
 
 ### 风险
 
-- `definitionHash` → `runtimeHash` 的迁移会改变 `DefinitionHash` 字段语义(从全字段指纹变为 runtime hash),需同步更新字段注释、文档,以及 `backend/local`、`backend/distributed` 注册表的冲突检测测试。该迁移属后端工作,不在本次 M0(决策+基线)范围,记入 M2 backlog。
-- `Description`/`Nodes[].Notes` 是否一并排除 editor metadata 需在 M2 后端迁移时定夺;M0 ADR 暂定排除以与 `assignGraphHash` 对齐。
+- `definitionHash` → `runtimeHash` 的迁移已在 F0.3 完成(`sdk/xflow/workflow_identity.go`),`DefinitionHash` 字段语义已从全字段指纹变为 runtime hash;原 `definitionHash(def)` 已重命名为 `legacyDefinitionHash(def)` 并作为 `AuditFingerprint` 持久化。`backend/local`、`backend/distributed` 注册表的冲突检测已改用 `DefinitionHash`(=runtimeHash) 比较。
+- `Description` 当前仍计入 `runtimeHash`(尚未剥离),`Nodes[].Notes` 在 `runtimeHash` 中已排除;若后续 F0-A3 进一步收紧 runtime hash(剥离 Description/NodeDef.ID),需同步更新本表与本节说明。
 - 用户可能把 `notes` 误以为是运行时注释,UI 需明确标注"仅编辑器可见"。
 
 ---
@@ -483,4 +502,4 @@ editor/viewer/admin 需要管理三类状态:① server state(请求/缓存/分�
 
 ## 结论
 
-M0 前端工程采用 **React 19 + TypeScript 5.8 + Umi 4 + Ant Design 5 + React Flow 12 + Monaco + Zustand + TanStack Query + Vitest + Playwright** 技术栈,版本全部写死;Editor / Viewer(Vite)同域不同路径独立部署、组件包独立、Admin 用 Umi 脚手架;JSON 为 canonical format,YAML 仅作投影;运行时定义与编辑器元数据分离(`definitionHash` 当前含 Position/UI,M2 迁移至 `runtimeHash` 排除 editor metadata);鉴权走 Bearer token + OIDC 占位 + 短期 iframe JWT;Admin 不接本地用户/角色 CRUD;浏览器支持 Evergreen 最近两个主版本;npm 统一 `@xflow/*` scope(9 个公共包 + 3 个 app)并在 API 稳定前保持 private / pre-release;公共包通过 ESLint + CI 脚本强制与 Umi / ProLayout / Admin alias 隔离。
+M0 前端工程采用 **React 19 + TypeScript 5.8 + Umi 4 + Ant Design 5 + React Flow 12 + Monaco + Zustand + ahooks(`useRequest`) + Vitest + Playwright** 技术栈,版本全部写死;Editor / Viewer(Vite)同域不同路径独立部署、组件包独立、Admin 用 Umi 脚手架;JSON 为 canonical format,YAML 仅作投影;运行时定义与编辑器元数据分离(`runtimeHash` 已在 `sdk/xflow/workflow_identity.go` 实现,排除 Position/UI/Notes,计入 PinData;`legacyDefinitionHash` 作为 `AuditFingerprint` 保留全字段审计追溯);鉴权走 Bearer token + OIDC 占位 + 短期 iframe JWT;Admin 不接本地用户/角色 CRUD;浏览器支持 Evergreen 最近两个主版本;npm 统一 `@xflow/*` scope(9 个公共包 + 3 个 app)并在 API 稳定前保持 private / pre-release;公共包通过 ESLint + CI 脚本强制与 Umi / ProLayout / Admin alias 隔离。

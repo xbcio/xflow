@@ -205,8 +205,8 @@ describe("renameNode", () => {
   });
 });
 
-describe("editor metadata split/merge", () => {
-  it("splitEditorMetadata strips editor fields from def", async () => {
+describe("editor metadata split/merge (F0-A2)", () => {
+  it("splitEditorMetadata strips editor-only fields from def but preserves pin_data", async () => {
     const def = await readFixture("with-editor-metadata");
     const { def: stripped, metadata } = splitEditorMetadata(def);
 
@@ -215,18 +215,123 @@ describe("editor metadata split/merge", () => {
       expect(node.ui).toBeUndefined();
       expect(node.notes).toBeUndefined();
     }
-    expect(stripped.pin_data).toBeUndefined();
+    // F0-A2: pin_data is runtime-semantic, MUST remain in stripped def.
+    expect(stripped.pin_data).toEqual(def.pin_data);
+    expect(stripped.pin_data?.trigger).toEqual({ event: "demo" });
 
-    expect(metadata.positions?.trigger).toEqual({ x: 50, y: 50 });
-    expect(metadata.ui?.action).toEqual({ color: "#0000ff", icon: "bug" });
-    expect(metadata.notes?.trigger).toBe("Start here");
-    expect(metadata.pinData?.trigger).toEqual({ event: "demo" });
+    // Metadata is keyed by node.id when present (node-trigger / node-action).
+    expect(metadata.positions?.["node-trigger"]).toEqual({ x: 50, y: 50 });
+    expect(metadata.ui?.["node-action"]).toEqual({ color: "#0000ff", icon: "bug" });
+    expect(metadata.notes?.["node-trigger"]).toBe("Start here");
+    // pinData in metadata is a read-only derived cache of def.pin_data.
+    expect(metadata.pinData).toEqual(def.pin_data);
   });
 
-  it("mergeEditorMetadata restores editor fields", async () => {
+  it("metadata.pinData is a reference copy of def.pin_data (read-only cache)", async () => {
+    const def = await readFixture("with-editor-metadata");
+    const { metadata } = splitEditorMetadata(def);
+    expect(metadata.pinData).toEqual(def.pin_data);
+  });
+
+  it("merge round-trip preserves pin_data from the def (not from metadata)", async () => {
     const def = await readFixture("with-editor-metadata");
     const { def: stripped, metadata } = splitEditorMetadata(def);
     const merged = mergeEditorMetadata(stripped, metadata);
     expect(normalizeWorkflow(merged)).toEqual(normalizeWorkflow(def));
+    // pin_data came from the def, not from metadata.pinData.
+    expect(merged.pin_data).toEqual(def.pin_data);
+  });
+
+  it("merge does not overwrite def.pin_data with metadata.pinData (def wins)", async () => {
+    const def = await readFixture("with-editor-metadata");
+    const { def: stripped, metadata } = splitEditorMetadata(def);
+    // Tamper with metadata.pinData; def.pin_data is canonical and must win.
+    const tamperedMetadata = {
+      ...metadata,
+      pinData: { trigger: { event: "TAMPERED" } },
+    };
+    const merged = mergeEditorMetadata(stripped, tamperedMetadata);
+    expect(merged.pin_data).toEqual(stripped.pin_data);
+    expect(merged.pin_data?.trigger).toEqual({ event: "demo" });
+  });
+
+  it("positions/ui/notes indexed by node.id when id is present", async () => {
+    const def: WorkflowDef = {
+      name: "id-indexed",
+      nodes: [
+        {
+          id: "n1",
+          name: "alpha",
+          position: { x: 1, y: 1 },
+          ui: { color: "red" },
+          notes: "first",
+        },
+        {
+          id: "n2",
+          name: "beta",
+          position: { x: 2, y: 2 },
+          ui: { color: "blue" },
+          notes: "second",
+        },
+      ],
+    };
+    const { def: stripped, metadata } = splitEditorMetadata(def);
+    expect(metadata.positions?.n1).toEqual({ x: 1, y: 1 });
+    expect(metadata.positions?.n2).toEqual({ x: 2, y: 2 });
+    expect(metadata.ui?.n1).toEqual({ color: "red" });
+    expect(metadata.notes?.n2).toBe("second");
+    for (const node of stripped.nodes ?? []) {
+      expect(node.position).toBeUndefined();
+    }
+  });
+
+  it("falls back to node.name when id is absent", () => {
+    const def: WorkflowDef = {
+      name: "name-fallback",
+      nodes: [
+        {
+          name: "legacy-a",
+          position: { x: 10, y: 10 },
+          notes: "legacy note",
+        },
+      ],
+    };
+    const { metadata } = splitEditorMetadata(def);
+    expect(metadata.positions?.["legacy-a"]).toEqual({ x: 10, y: 10 });
+    expect(metadata.notes?.["legacy-a"]).toBe("legacy note");
+  });
+
+  it("two nodes with same name but different ids do not cross metadata", () => {
+    const def: WorkflowDef = {
+      name: "id-disambiguates",
+      nodes: [
+        {
+          id: "id-a",
+          name: "dup",
+          position: { x: 100, y: 100 },
+          notes: "A",
+        },
+        {
+          id: "id-b",
+          name: "dup",
+          position: { x: 200, y: 200 },
+          notes: "B",
+        },
+      ],
+    };
+    const { metadata, def: stripped } = splitEditorMetadata(def);
+    expect(metadata.positions?.["id-a"]).toEqual({ x: 100, y: 100 });
+    expect(metadata.positions?.["id-b"]).toEqual({ x: 200, y: 200 });
+    expect(metadata.notes?.["id-a"]).toBe("A");
+    expect(metadata.notes?.["id-b"]).toBe("B");
+
+    // Round-trip restores the correct per-node metadata via id.
+    const merged = mergeEditorMetadata(stripped, metadata);
+    const a = merged.nodes?.find((n) => n.id === "id-a");
+    const b = merged.nodes?.find((n) => n.id === "id-b");
+    expect(a?.position).toEqual({ x: 100, y: 100 });
+    expect(a?.notes).toBe("A");
+    expect(b?.position).toEqual({ x: 200, y: 200 });
+    expect(b?.notes).toBe("B");
   });
 });

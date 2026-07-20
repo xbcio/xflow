@@ -137,5 +137,13 @@ export interface WorkflowEditorMetadata {
   };
   ui?: Record<string, Record<string, unknown>>;
   notes?: Record<string, string>;
-  pinData?: Record<string, unknown>;
+  /**
+   * Read-only derived cache of `WorkflowDef.pin_data` for UI display
+   * convenience. NOT the authoritative source — `WorkflowDef.pin_data`
+   * remains canonical. `splitEditorMetadata` does not remove `pin_data`
+   * from the runtime def; `mergeEditorMetadata` does not overwrite
+   * `WorkflowDef.pin_data` with this field (def wins on conflict).
+   * See ADR D4 / F0-A2.
+   */
+  pinData?: Readonly<Record<string, unknown>>;
 }
