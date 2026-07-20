@@ -4,6 +4,7 @@ package integration
 
 import (
 	"context"
+	"fmt"
 	"net/http/httptest"
 	"sync"
 	"testing"
@@ -55,11 +56,21 @@ func (l *testLogger) Error(msg string, args ...any) {
 func (l *testLogger) Errorf(format string, args ...any) {
 	l.t.Logf("[engine] ERROR "+format, args...)
 }
+// Panic/Panicf log the engine panic message via t.Errorf (visible from any
+// goroutine) and then re-panic so a recovering caller surfaces the failure.
+// t.Fatalf is unsafe here: the engine may invoke Panic from a background
+// goroutine (e.g. OutboxDispatcher), and testing.Fatalf terminates the
+// test goroutine only — cross-goroutine Fatalf races the test runner and
+// can mark the test passed before the failure is recorded. t.Errorf records
+// the failure deterministically; the panic lets any deferred recover handle
+// the unwind.
 func (l *testLogger) Panic(msg string, args ...any) {
-	l.t.Fatalf("[engine] PANIC %s %v", msg, args)
+	l.t.Errorf("[engine] PANIC %s %v", msg, args)
+	panic(fmt.Sprintf("[engine] PANIC %s %v", msg, args))
 }
 func (l *testLogger) Panicf(format string, args ...any) {
-	l.t.Fatalf("[engine] PANIC "+format, args...)
+	l.t.Errorf("[engine] PANIC "+format, args...)
+	panic(fmt.Sprintf("[engine] PANIC "+format, args...))
 }
 
 var _ engine.Logger = (*testLogger)(nil)

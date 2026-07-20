@@ -31,6 +31,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -277,6 +278,71 @@ func g1WaitForTerminal(t *testing.T, baseURL, token string, id types.ExecutionID
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+}
+
+// g1WaitForExecutionStatus polls /v1/executions/{id} until the execution
+// reaches one of want (or timeout). Replaces fixed-duration sleeps that waited
+// for the engine to materialize execution state in Redis. Returns the detail
+// at the matching status.
+func g1WaitForExecutionStatus(t *testing.T, baseURL, token string, id types.ExecutionID, want []types.ExecutionStatus, timeout time.Duration) engine.ExecutionDetail {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		status, detail := g1InspectAuth(t, baseURL, token, id)
+		if status == http.StatusOK {
+			for _, w := range want {
+				if detail.Status == w {
+					return detail
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timeout waiting for execution %s to reach %v (last=%d %s)", id, want, status, detail.Status)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// g1WaitForNodeStatus polls /v1/executions/{id} until the named node reaches
+// one of want (or the execution reaches a terminal state, which is a test
+// failure because the node cannot progress further). Replaces fixed-duration
+// time.Sleep calls that waited for the wait node to suspend.
+func g1WaitForNodeStatus(t *testing.T, baseURL, token string, id types.ExecutionID, node string, want []types.NodeStatus, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		status, detail := g1InspectAuth(t, baseURL, token, id)
+		if status == http.StatusOK {
+			if types.IsTerminalExecutionStatus(detail.Status) {
+				t.Fatalf("execution %s reached terminal %s before node %q reached %v", id, detail.Status, node, want)
+			}
+			for _, n := range detail.Nodes {
+				if n.Name == node {
+					for _, w := range want {
+						if n.Status == w {
+							return
+						}
+					}
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timeout waiting for node %q on %s to reach %v (last=%d detail=%+v)", node, id, want, status, detail)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// g1NodeStatuses returns a compact status=Name summary for debug logging.
+func g1NodeStatuses(d engine.ExecutionDetail) string {
+	if len(d.Nodes) == 0 {
+		return "(no nodes)"
+	}
+	parts := make([]string, 0, len(d.Nodes))
+	for _, n := range d.Nodes {
+		parts = append(parts, fmt.Sprintf("%s=%s", n.Name, n.Status))
+	}
+	return strings.Join(parts, ",")
 }
 
 // g1ProductionMappings returns the multi-tenant token registry used by the
@@ -541,6 +607,10 @@ func TestG1ProductionE2E(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal artifact: %v", err)
 	}
+	// M1: verify no token values leak into the artifact JSON before persisting
+	// it (g1EnsureNoLeak was previously defined but never called — a dead
+	// safety check).
+	g1EnsureNoLeak(t, raw)
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 		t.Fatalf("mkdir artifact dir: %v", err)
 	}
@@ -779,8 +849,9 @@ func g1RunApprovalMultiSignal(t *testing.T, h *productionServerRunnerHarness) {
 
 	execID := g1SubmitAllowed(t, h.httpSrv.URL, g1TokDefault, g1MultiSignalWaitDef("g1-multi-signal", []string{"sec", "app"}, 2))
 
-	// Wait for the wait node to suspend.
-	time.Sleep(300 * time.Millisecond)
+	// Wait for the wait node to suspend (polling replaces a fixed 300ms sleep
+	// that was flaky under load).
+	g1WaitForNodeStatus(t, h.httpSrv.URL, g1TokDefault, execID, "wait", []types.NodeStatus{types.NodeStatusSuspended, types.NodeStatusWaiting}, 5*time.Second)
 
 	// Deliver two signals to meet the quorum.
 	status, _ := g1SignalAuth(t, h.httpSrv.URL, g1TokDefault, execID, "sec", map[string]any{"by": "sec"})
@@ -825,7 +896,10 @@ func g1RunExecutionCancel(t *testing.T, h *productionServerRunnerHarness) {
 	wf := g1SignalWaitDef("g1-cancel", "approval")
 	execID := g1SubmitAllowed(t, h.httpSrv.URL, g1TokDefault, wf)
 
-	time.Sleep(300 * time.Millisecond)
+	// Wait for the wait node to suspend so /cancel fires against a stable
+	// non-terminal execution (polling replaces a fixed 300ms sleep that was
+	// flaky under load).
+	g1WaitForNodeStatus(t, h.httpSrv.URL, g1TokDefault, execID, "wait", []types.NodeStatus{types.NodeStatusSuspended, types.NodeStatusWaiting}, 5*time.Second)
 
 	status, _ := g1CancelAuth(t, h.httpSrv.URL, g1TokDefault, execID)
 	if status != 200 {
@@ -931,7 +1005,9 @@ func g1RunRepeatSignalConflict(t *testing.T, h *productionServerRunnerHarness) {
 
 	execID := g1SubmitAllowed(t, h.httpSrv.URL, g1TokDefault, g1SignalWaitDef("g1-repeat-signal", "approval"))
 
-	time.Sleep(300 * time.Millisecond)
+	// Wait for the wait node to suspend so the signal is consumed by the
+	// resumed node (polling replaces a fixed 300ms sleep that was flaky).
+	g1WaitForNodeStatus(t, h.httpSrv.URL, g1TokDefault, execID, "wait", []types.NodeStatus{types.NodeStatusSuspended, types.NodeStatusWaiting}, 5*time.Second)
 
 	// Deliver the signal once (accepted).
 	status, _ := g1SignalAuth(t, h.httpSrv.URL, g1TokDefault, execID, "approval", map[string]any{"by": "ops"})
@@ -954,22 +1030,41 @@ func g1RunRepeatSignalConflict(t *testing.T, h *productionServerRunnerHarness) {
 	}
 }
 
-// g1RunDeadLetterReplay seeds a dead-letter entry via RecordOutboxFailure on
-// the real Redis state, then exercises the HTTP management replay endpoint.
-// The T4 receipt projection must land in MySQL (idempotent on ReceiptAuditID).
+// g1RunDeadLetterReplay seeds a real dead-letter entry on the live Redis
+// state, then exercises the HTTP management replay endpoint end-to-end. The
+// T4 receipt projection must land in MySQL (idempotent on ReceiptAuditID).
+//
+// I1 fix: the prior implementation never seeded a real outbox:body hash field
+// for the entry ID passed to RecordOutboxFailure. recordOutboxFailureLua's
+// first line is `local body = redis.call('HGET', KEYS[2], ARGV[1])` and returns
+// {0,0} when the body is nil — so the dead-letter index was never written and
+// replay always returned outcome=not_found, making the assertion
+// `outcome != ""` a no-op tautology.
+//
+// This version writes a real outbox:body hash field (mirroring
+// marshalRedisOutboxEntry's JSON shape) plus the node status/meta the replay
+// guard reads, so RecordOutboxFailure crosses the threshold and moves the
+// entry into outbox:dead/outbox:dead:body/outbox:dead:meta. The replay then
+// returns outcome=replayed with a real audit_id, and the ReceiptProjector
+// writes a durable SQL projection row we can read back via AuditByReceiptAuditID.
+//
+// Constraint: no engine/backend production code is modified. Seeding uses a
+// plain redis client (the test owns the redis address). The Lua KEYS/ARGV
+// shape is the production contract exposed via RecordOutboxFailure; we only
+// write the inputs the Lua script already reads.
 func g1RunDeadLetterReplay(t *testing.T, h *productionServerRunnerHarness, addr string) g1DeadLetter {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Submit a workflow so the execution exists in authoritative state.
-	// Uses the default tenant because RecordOutboxFailure runs with
-	// context.Background() (no tenant → default), so the execution must be
-	// under the default tenant for the dead-letter seeding to find the
-	// outbox body.
-	wf := g1SignalWaitDef("g1-deadletter-seed", "approval")
+	// Submit a workflow under the default tenant so the execution exists in
+	// authoritative Redis state with status=running. g1TokDefault carries
+	// tenant=default, which matches tenant.FromContext(ctx) when RecordOutboxFailure
+	// is later called with a background context (defaults to default tenant).
+	wf := g1StartWorkflowDef("g1-deadletter-seed")
 	execID := g1SubmitAllowed(t, h.httpSrv.URL, g1TokDefault, wf)
-	time.Sleep(300 * time.Millisecond)
+	// Poll for the execution to materialize in Redis (replaces a fixed sleep).
+	g1WaitForExecutionStatus(t, h.httpSrv.URL, g1TokDefault, execID, []types.ExecutionStatus{types.ExecutionStatusRunning}, 5*time.Second)
 
 	// Cast the harness backend state to OutboxFailureRecorder.
 	recorder, ok := h.state.(engine.OutboxFailureRecorder)
@@ -977,34 +1072,110 @@ func g1RunDeadLetterReplay(t *testing.T, h *productionServerRunnerHarness, addr 
 		t.Fatalf("state %T does not implement OutboxFailureRecorder", h.state)
 	}
 
-	entryID := fmt.Sprintf("root/%s/wait/1", execID)
-	entry := engine.OutboxEntry{
-		ID: entryID,
-		Task: engine.Task{
-			ExecutionID:  execID,
-			NodeName:     "wait",
-			NodeIdx:      1,
-			Type:         engine.TaskTypeNodeExec,
-			ActivationID: 1,
-		},
-		CreatedAt: time.Now().UTC(),
+	// Seed a real outbox:body hash field so recordOutboxFailureLua's HGET
+	// returns non-nil and the dead-letter branch fires at the threshold. The
+	// JSON shape mirrors marshalRedisOutboxEntry (id+task+auto_depth+
+	// activation_id+available_at_ms+created_at_ms).
+	entryID := fmt.Sprintf("root/%s/start/1", execID)
+	tenantID := "default"
+	task := engine.Task{
+		ExecutionID:  execID,
+		NodeName:     "start",
+		NodeIdx:      0,
+		Type:         engine.TaskTypeNodeExec,
+		ActivationID: 1,
+	}
+	nowMs := time.Now().UTC().UnixMilli()
+	body := struct {
+		ID          string      `json:"id"`
+		Task        engine.Task `json:"task"`
+		AutoDepth   int         `json:"auto_depth,omitempty"`
+		Activation  int         `json:"activation_id,omitempty"`
+		AvailableAt int64       `json:"available_at_ms,omitempty"`
+		CreatedAt   int64       `json:"created_at_ms,omitempty"`
+	}{
+		ID:          entryID,
+		Task:        task,
+		Activation:  1,
+		AvailableAt: nowMs,
+		CreatedAt:   nowMs,
+	}
+	bodyJSON, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal outbox body: %v", err)
+	}
+
+	rdb := redis.NewClient(&redis.Options{Addr: addr})
+	defer rdb.Close()
+	bodyKey := fmt.Sprintf("xflow:t%s:exec:{%s}:outbox:body", tenantID, execID)
+	readyKey := fmt.Sprintf("xflow:t%s:exec:{%s}:outbox:ready", tenantID, execID)
+	nodeStatus := fmt.Sprintf("xflow:t%s:exec:{%s}:node:%s:status", tenantID, execID, "start")
+	nodeMeta := fmt.Sprintf("xflow:t%s:exec:{%s}:node:%s:meta", tenantID, execID, "start")
+	if err := rdb.HSet(ctx, bodyKey, entryID, string(bodyJSON)).Err(); err != nil {
+		t.Fatalf("HSet outbox body: %v", err)
+	}
+	if err := rdb.ZAdd(ctx, readyKey, redis.Z{Score: float64(nowMs), Member: entryID}).Err(); err != nil {
+		t.Fatalf("ZAdd outbox ready: %v", err)
+	}
+	// Seed node status + activation meta so replayDeadLetterLua's node/activation
+	// guard accepts the replay (status=running + activation_id=1 matching the
+	// entry's ActivationID).
+	if err := rdb.Set(ctx, nodeStatus, "running", 10*time.Minute).Err(); err != nil {
+		t.Fatalf("set node status: %v", err)
+	}
+	if err := rdb.HSet(ctx, nodeMeta, "activation_id", 1).Err(); err != nil {
+		t.Fatalf("set node meta: %v", err)
 	}
 
 	// Drive RecordOutboxFailure maxAttempts times so the entry lands in the
-	// dead-letter index. Errors are expected when seeding without a real ready
-	// body; the dead-letter index may still have been written on the threshold.
+	// dead-letter index. The final call must report DeadLettered=true.
+	entry := engine.OutboxEntry{
+		ID:   entryID,
+		Task: task,
+	}
 	maxAttempts := engine.DefaultOutboxMaxDeliveryAttempts
+	var deadLettered bool
+	var lastAttempts int
 	for i := 0; i < maxAttempts; i++ {
-		if _, err := recorder.RecordOutboxFailure(ctx, execID, entry, maxAttempts); err != nil {
-			t.Logf("RecordOutboxFailure[%d]: %v (expected when seeding without a real ready body)", i, err)
+		res, err := recorder.RecordOutboxFailure(ctx, execID, entry, maxAttempts)
+		if err != nil {
+			t.Fatalf("RecordOutboxFailure[%d]: %v", i, err)
+		}
+		lastAttempts = res.Attempts
+		if res.DeadLettered {
+			deadLettered = true
 		}
 	}
+	if !deadLettered {
+		t.Fatalf("RecordOutboxFailure did not dead-letter after %d attempts (last attempts=%d)", maxAttempts, lastAttempts)
+	}
+	t.Logf("dead-letter seeded: entry=%q attempts=%d dead_lettered=%v", entryID, lastAttempts, deadLettered)
 
-	// List dead-letters via the HTTP API.
+	// List dead-letters via the HTTP API. M2: a 200 is required (not just
+	// logged) — the list endpoint is the contract under test.
 	listResp, listBody := g1DoAuth(t, http.MethodGet, h.httpSrv.URL,
 		"/v1/management/dead-letters/"+string(execID), g1TokDefault, nil)
 	if listResp.StatusCode != 200 {
-		t.Logf("dead-letter list: status=%d body=%s", listResp.StatusCode, string(listBody))
+		t.Fatalf("dead-letter list: status=%d body=%s", listResp.StatusCode, string(listBody))
+	}
+	var listParsed struct {
+		Entries []struct {
+			ID string `json:"id"`
+		} `json:"entries"`
+	}
+	_ = json.Unmarshal(listBody, &listParsed)
+	if len(listParsed.Entries) == 0 {
+		t.Fatalf("dead-letter list returned 0 entries, want >=1 with entry %q", entryID)
+	}
+	gotEntry := false
+	for _, e := range listParsed.Entries {
+		if e.ID == entryID {
+			gotEntry = true
+			break
+		}
+	}
+	if !gotEntry {
+		t.Fatalf("dead-letter list did not contain seeded entry %q (got %+v)", entryID, listParsed.Entries)
 	}
 
 	// Replay via the HTTP management route.
@@ -1024,32 +1195,45 @@ func g1RunDeadLetterReplay(t *testing.T, h *productionServerRunnerHarness, addr 
 		ActivationID string `json:"activation_id,omitempty"`
 	}
 	_ = json.Unmarshal(replayRaw, &replayRespParsed)
-	// The replay endpoint may return 200 (entry replayed) or 404 (no
-	// dead-letter entry found — seeding without internal package access may
-	// not create a proper entry). Both prove the HTTP contract + authz on the
-	// management endpoint works.
-	if replayResp.StatusCode != 200 && replayResp.StatusCode != 404 {
+	if replayResp.StatusCode != 200 {
 		t.Fatalf("dead-letter replay: status=%d body=%s", replayResp.StatusCode, string(replayRaw))
 	}
-	if replayRespParsed.Outcome == "" {
-		t.Fatalf("replay response missing outcome: %s", string(replayRaw))
+	if replayRespParsed.Outcome != string(engine.ReplayReplayed) {
+		t.Fatalf("replay outcome=%q, want %q (audit_id=%q body=%s)", replayRespParsed.Outcome, engine.ReplayReplayed, replayRespParsed.AuditID, string(replayRaw))
+	}
+	if replayRespParsed.AuditID == "" {
+		t.Fatalf("replay returned outcome=replayed but no audit_id: %s", string(replayRaw))
 	}
 
 	out := g1DeadLetter{
-		Seeded:        true,
-		ReplayOutcome: replayRespParsed.Outcome,
+		Seeded:            deadLettered,
+		ReplayOutcome:     replayRespParsed.Outcome,
+		ReceiptAuditIDSet: replayRespParsed.AuditID != "",
 	}
-	if replayRespParsed.AuditID != "" {
-		out.ReceiptAuditIDSet = true
-		// Verify the receipt projection row landed in MySQL.
-		rec, rerr := interface{}(h.provider).(store.ReceiptAuditAppender).AuditByReceiptAuditID(ctx, replayRespParsed.AuditID)
+	// Verify the durable receipt projection row landed in MySQL via the T4
+	// ReceiptProjector + AuditByReceiptAuditID. A non-nil record proves the
+	// HTTP replay -> DeadLetterManager -> projectorAuditSink -> SQL appender
+	// chain end-to-end. The projector appends synchronously inside the replay
+	// path, but the SQL write and the subsequent read may cross a connection
+	// boundary, so poll briefly rather than racing a single immediate lookup.
+	appender, okApp := interface{}(h.provider).(store.ReceiptAuditAppender)
+	if !okApp {
+		t.Fatalf("provider %T does not implement ReceiptAuditAppender", h.provider)
+	}
+	recDeadline := time.Now().Add(3 * time.Second)
+	for {
+		rec, rerr := appender.AuditByReceiptAuditID(ctx, replayRespParsed.AuditID)
 		if rerr != nil {
-			t.Logf("AuditByReceiptAuditID(%q): %v (receipt projection may be best-effort)", replayRespParsed.AuditID, rerr)
-		} else if rec != nil {
-			out.DurableProjectionRows = 1
+			t.Fatalf("AuditByReceiptAuditID(%q): %v (receipt projection must be durable)", replayRespParsed.AuditID, rerr)
 		}
-	} else {
-		t.Logf("replay response has no audit_id (outcome=%s); receipt projection skipped", replayRespParsed.Outcome)
+		if rec != nil {
+			out.DurableProjectionRows = 1
+			break
+		}
+		if time.Now().After(recDeadline) {
+			t.Fatalf("receipt projection for audit_id=%q never landed in MySQL (DurableProjectionRows=0); replay->projector->SQL chain broken", replayRespParsed.AuditID)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 	return out
 }
@@ -1063,7 +1247,13 @@ func g1RunAuditReconcile(t *testing.T, h *productionServerRunnerHarness) g1Audit
 	defer cancel()
 
 	g1SubmitAllowed(t, h.httpSrv.URL, g1TokFullA, g1StartWorkflowDef("g1-audit-reconcile"))
-	time.Sleep(200 * time.Millisecond)
+	// Poll for the admission audit row (written inline by the authz wrapper
+	// before the HTTP response returns; a poll is more robust than a fixed
+	// sleep and removes flakiness under load).
+	deadline := time.Now().Add(3 * time.Second)
+	for g1CountUnreconciled(t, h.provider) == 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
 
 	ar, ok := interface{}(h.provider).(store.AuditReconciler)
 	if !ok {
@@ -1265,9 +1455,11 @@ func g1RunIdempotencyReport(t *testing.T, h *productionServerRunnerHarness, addr
 
 // g1EnsureNoLeak verifies no token values appear in the artifact JSON.
 // This is a safety check; the artifact struct never records token values.
+// Called before os.WriteFile so a leak aborts the test before the artifact
+// is persisted.
 func g1EnsureNoLeak(t *testing.T, raw []byte) {
 	t.Helper()
-	for _, tok := range []string{g1TokFullA, g1TokNoExA, g1TokFullB} {
+	for _, tok := range []string{g1TokFullA, g1TokNoExA, g1TokFullB, g1TokDefault} {
 		if bytes.Contains(raw, []byte(tok)) {
 			t.Fatalf("SEC: token value leaked into artifact JSON")
 		}
