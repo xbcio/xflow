@@ -237,9 +237,9 @@ describe("editor metadata split/merge (F0-A2)", () => {
     const def = await readFixture("with-editor-metadata");
     const { def: stripped, metadata } = splitEditorMetadata(def);
     const merged = mergeEditorMetadata(stripped, metadata);
-    expect(normalizeWorkflow(merged)).toEqual(normalizeWorkflow(def));
+    expect(normalizeWorkflow(merged.def)).toEqual(normalizeWorkflow(def));
     // pin_data came from the def, not from metadata.pinData.
-    expect(merged.pin_data).toEqual(def.pin_data);
+    expect(merged.def.pin_data).toEqual(def.pin_data);
   });
 
   it("merge does not overwrite def.pin_data with metadata.pinData (def wins)", async () => {
@@ -251,8 +251,8 @@ describe("editor metadata split/merge (F0-A2)", () => {
       pinData: { trigger: { event: "TAMPERED" } },
     };
     const merged = mergeEditorMetadata(stripped, tamperedMetadata);
-    expect(merged.pin_data).toEqual(stripped.pin_data);
-    expect(merged.pin_data?.trigger).toEqual({ event: "demo" });
+    expect(merged.def.pin_data).toEqual(stripped.pin_data);
+    expect(merged.def.pin_data?.trigger).toEqual({ event: "demo" });
   });
 
   it("positions/ui/notes indexed by node.id when id is present", async () => {
@@ -296,9 +296,69 @@ describe("editor metadata split/merge (F0-A2)", () => {
         },
       ],
     };
-    const { metadata } = splitEditorMetadata(def);
+    const { metadata, diagnostics } = splitEditorMetadata(def);
     expect(metadata.positions?.["legacy-a"]).toEqual({ x: 10, y: 10 });
     expect(metadata.notes?.["legacy-a"]).toBe("legacy note");
+
+    // F0-A review follow-up: a fallback diagnostic MUST be emitted once
+    // per node that falls back to name-based keying due to missing id.
+    const fallbackDiags = diagnostics.filter(
+      (d) => d.code === "NODE_METADATA_KEYED_BY_NAME"
+    );
+    expect(fallbackDiags).toHaveLength(1);
+    expect(fallbackDiags[0].severity).toBe("warning");
+    expect(fallbackDiags[0].message).toContain("legacy-a");
+    expect(fallbackDiags[0].message).toContain("node.id");
+    expect(fallbackDiags[0].path).toBe("nodes[0]");
+  });
+
+  it("does NOT emit fallback diagnostic when id is present", async () => {
+    // Reuses the with-editor-metadata fixture whose nodes carry `id`.
+    const def = await readFixture("with-editor-metadata");
+    const { diagnostics } = splitEditorMetadata(def);
+    const fallbackDiags = diagnostics.filter(
+      (d) => d.code === "NODE_METADATA_KEYED_BY_NAME"
+    );
+    expect(fallbackDiags).toHaveLength(0);
+  });
+
+  it("emits one fallback diagnostic per name-keyed node (no double-fire across fields)", () => {
+    const def: WorkflowDef = {
+      name: "multi-fallback",
+      nodes: [
+        { name: "a", position: { x: 1, y: 1 }, notes: "n-a", ui: { k: 1 } },
+        { name: "b", position: { x: 2, y: 2 } },
+      ],
+    };
+    const { diagnostics } = splitEditorMetadata(def);
+    const fallbackDiags = diagnostics.filter(
+      (d) => d.code === "NODE_METADATA_KEYED_BY_NAME"
+    );
+    expect(fallbackDiags).toHaveLength(2);
+    expect(fallbackDiags[0].path).toBe("nodes[0]");
+    expect(fallbackDiags[1].path).toBe("nodes[1]");
+  });
+
+  it("mergeEditorMetadata emits fallback diagnostic symmetrically", () => {
+    const def: WorkflowDef = {
+      name: "merge-fallback",
+      nodes: [{ name: "legacy-a", position: { x: 1, y: 1 } }],
+    };
+    const { metadata, diagnostics: splitDiags } = splitEditorMetadata(def);
+    expect(
+      splitDiags.filter((d) => d.code === "NODE_METADATA_KEYED_BY_NAME")
+    ).toHaveLength(1);
+
+    // Build a fresh def without going through split; merge should still
+    // report the fallback.
+    const fresh: WorkflowDef = {
+      name: "merge-fallback",
+      nodes: [{ name: "legacy-a" }],
+    };
+    const { diagnostics: mergeDiags } = mergeEditorMetadata(fresh, metadata);
+    expect(
+      mergeDiags.filter((d) => d.code === "NODE_METADATA_KEYED_BY_NAME")
+    ).toHaveLength(1);
   });
 
   it("two nodes with same name but different ids do not cross metadata", () => {
@@ -327,8 +387,8 @@ describe("editor metadata split/merge (F0-A2)", () => {
 
     // Round-trip restores the correct per-node metadata via id.
     const merged = mergeEditorMetadata(stripped, metadata);
-    const a = merged.nodes?.find((n) => n.id === "id-a");
-    const b = merged.nodes?.find((n) => n.id === "id-b");
+    const a = merged.def.nodes?.find((n) => n.id === "id-a");
+    const b = merged.def.nodes?.find((n) => n.id === "id-b");
     expect(a?.position).toEqual({ x: 100, y: 100 });
     expect(a?.notes).toBe("A");
     expect(b?.position).toEqual({ x: 200, y: 200 });
