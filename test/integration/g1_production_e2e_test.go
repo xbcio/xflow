@@ -752,13 +752,11 @@ func g1RunGRPCRunnerConnectReport(t *testing.T, h *productionServerRunnerHarness
 	go func() { errCh <- runner.Run(ctx) }()
 	waitForE2ERunner(t, h.runners, "runner-g1-grpc")
 
-	// G1 is single-tenant scope: runner-dispatch subtests use the default
-	// tenant token because the production runner protocol (pollTask) does not
-	// propagate the assignment's tenant into the engine context — a known
-	// gap that is out of T10 scope (fixing it would require modifying
-	// service/control production code, which the brief forbids). Cross-
-	// tenant IDOR coverage stays in AuthzMatrix (HTTP-only, doesn't need
-	// runner dispatch).
+	// R4 (2026-07-20): the pollTask tenant injection (service/control/core.go)
+	// now propagates Assignment.TenantID into the engine context, so the W3C
+	// carrier is read from the correct Redis namespace for both the default
+	// tenant and non-default tenants. The trace-graph assertions below are
+	// strong (t.Fatalf) — WARN degradation has been removed.
 	execID := g1SubmitAllowed(t, h.httpSrv.URL, g1TokDefault, g1StartWorkflowDef("g1-grpc-runner"))
 
 	detail := g1WaitForTerminal(t, h.httpSrv.URL, g1TokDefault, execID, 15*time.Second)
@@ -801,42 +799,34 @@ func g1RunGRPCRunnerConnectReport(t *testing.T, h *productionServerRunnerHarness
 	report := byName["xflow.task.report"]
 	commit := byName["xflow.task.commit"]
 
-	// W3C parentage assertions: the submit→dispatch causality chain depends
-	// on ExecutionTraceCarrier being called with the correct tenant context in
-	// pollTask. The production code path (service/control/core.go pollTask)
-	// calls ExecutionTraceCarrier(ctx, execID) where ctx is the runner-protocol
-	// context (no tenant injected). For executions created under the default
-	// tenant this resolves correctly, but the trace carrier extraction may
-	// still fail due to timing (the execution may not have its trace_carrier
-	// key persisted before the first poll). When the carrier is not found,
-	// dispatch starts as a root span (different trace ID). This is an existing
-	// behavior constraint, not a test workaround.
-	//
-	// We assert all 5 spans exist (proving the tracer is wired through HTTP
-	// middleware, gRPC interceptors, and the engine's dispatch/commit path).
-	// The W3C parentage (one trace ID, dispatch parented to submit, commit
-	// parented to report) is asserted as a best-effort check, not a hard
-	// requirement — a false value is recorded in the artifact but does not
-	// fail the test, honestly reflecting the production trace carrier gap.
+	// R4 (2026-07-20): strong assertions — no WARN degradation. The pollTask
+	// tenant injection (service/control/core.go) propagates
+	// Assignment.TenantID into the engine context so the W3C carrier is read
+	// from the correct Redis namespace. All 5 spans must share one TraceID,
+	// dispatch must be parented to submit (real W3C remote parent via persisted
+	// carrier), execute to dispatch (lease carrier), report to execute (gRPC
+	// report carrier), and commit to report.
 	root := submit.SpanContext().TraceID()
 	tg.OneTraceID = true
 	for _, s := range []sdktrace.ReadOnlySpan{dispatch, byName["xflow.task.execute"], report, commit} {
 		if s.SpanContext().TraceID() != root {
-			tg.OneTraceID = false
-			t.Logf("WARN: span %q trace %s != submit trace %s (trace carrier not extracted; known production gap)", s.Name(), s.SpanContext().TraceID(), root)
-			break
+			t.Fatalf("span %q trace %s != submit trace %s (trace graph broken; pollTask tenant injection or carrier extraction failed)", s.Name(), s.SpanContext().TraceID(), root)
 		}
 	}
-	if dispatch.Parent().SpanID() == submit.SpanContext().SpanID() {
-		tg.DispatchParentedToSubmit = true
-	} else {
-		t.Logf("WARN: dispatch parent %s != submit %s (trace carrier not extracted; known production gap)", dispatch.Parent().SpanID(), submit.SpanContext().SpanID())
+	if dispatch.Parent().SpanID() != submit.SpanContext().SpanID() {
+		t.Fatalf("dispatch parent %s != submit %s (dispatch did not inherit submit causality via carrier)", dispatch.Parent().SpanID(), submit.SpanContext().SpanID())
 	}
-	if commit.Parent().SpanID() == report.SpanContext().SpanID() {
-		tg.CommitParentedToReport = true
-	} else {
-		t.Logf("WARN: commit parent %s != report %s (gRPC report carrier gap)", commit.Parent().SpanID(), report.SpanContext().SpanID())
+	tg.DispatchParentedToSubmit = true
+	if byName["xflow.task.execute"].Parent().SpanID() != dispatch.SpanContext().SpanID() {
+		t.Fatalf("execute parent %s != dispatch %s (lease carrier not wired)", byName["xflow.task.execute"].Parent().SpanID(), dispatch.SpanContext().SpanID())
 	}
+	if report.Parent().SpanID() != byName["xflow.task.execute"].SpanContext().SpanID() {
+		t.Fatalf("report parent %s != execute %s (gRPC report carrier not parented to execute)", report.Parent().SpanID(), byName["xflow.task.execute"].SpanContext().SpanID())
+	}
+	if commit.Parent().SpanID() != report.SpanContext().SpanID() {
+		t.Fatalf("commit parent %s != report %s (report/commit nesting broken)", commit.Parent().SpanID(), report.SpanContext().SpanID())
+	}
+	tg.CommitParentedToReport = true
 	return tg
 }
 

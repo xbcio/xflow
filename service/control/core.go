@@ -196,6 +196,21 @@ func (c *Core) pollTask(ctx context.Context, req protocol.PollTaskRequest, info 
 			return protocol.PollTaskResponse{Wait: c.pollWait}, nil
 		}
 
+		// Inject the assignment's authoritative tenant so the downstream
+		// ExecutionTraceCarrier / BuildTaskLease / RecoverTaskLease calls read
+		// the W3C carrier and engine state from the correct Redis namespace.
+		// The runner-protocol poll context (gRPC PollTask / HTTP HandlePollTask)
+		// does not carry tenant — there is no principal resolver on the runner
+		// protocol path. Assignment.TenantID is the submit-time authoritative
+		// value recorded by the control plane from the authenticated principal,
+		// so it is the correct source — NOT a client-supplied value. It is only
+		// used as a span attribute and ctx injection (tenant.WithTenant); it is
+		// never placed in W3C baggage (RELEASE-GATES §4.1, cross-tenant leak
+		// risk).
+		if tid := claim.Assignment.TenantID; tid != "" {
+			ctx = tenant.WithTenant(ctx, tid)
+		}
+
 		// A leased claim is a durable replay after a response-loss or process
 		// restart. It must not call BuildTaskLease again: doing so would either
 		// create a new lease or strand the existing fenced ownership.

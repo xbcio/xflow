@@ -3,7 +3,9 @@ package tracing
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
@@ -13,6 +15,12 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 )
+
+// shutdownFlushTimeout bounds the TracerProvider Shutdown call so a stuck
+// exporter cannot block process exit indefinitely. Five seconds is the OTel
+// SDK's own default batch-timeout ceiling; longer than that almost certainly
+// means the exporter is unreachable.
+const shutdownFlushTimeout = 5 * time.Second
 
 // SamplerMode selects the OTel sampler. Default is ParentBased(AlwaysSample),
 // which honors an upstream sampling decision and samples at 100% when there is
@@ -129,7 +137,23 @@ func NewTracerProvider(ctx context.Context, cfg ProviderConfig) (Tracer, func(co
 	otel.SetTextMapPropagator(prop)
 
 	tracer := NewOTelTracer(tp.Tracer(instrumentationName))
-	return tracer, idempotentShutdown(func(ctx context.Context) { _ = tp.Shutdown(ctx) }), nil
+	return tracer, idempotentShutdown(func(ctx context.Context) {
+		// Bound the shutdown so a stuck exporter cannot block process exit.
+		// When the caller's context already has a deadline we honor it;
+		// otherwise we substitute a bounded one.
+		shutdownCtx := ctx
+		if _, ok := shutdownCtx.Deadline(); !ok {
+			var cancel context.CancelFunc
+			shutdownCtx, cancel = context.WithTimeout(context.Background(), shutdownFlushTimeout)
+			defer cancel()
+		}
+		if err := tp.Shutdown(shutdownCtx); err != nil {
+			// Log the flush error so a lost span batch is observable. We do
+			// not return it: shutdown is best-effort and the caller (defer
+			// in cmd/) has no way to act on it at process exit.
+			log.Printf("tracing: provider shutdown error: %v", err)
+		}
+	}), nil
 }
 
 // newSampler builds the SDK sampler from cfg, defaulting to
