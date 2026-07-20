@@ -286,6 +286,9 @@ func New(redisAddr string, db store.Store, opts ...Option) (*Backend, error) {
 		if cfg.redisConfig != nil {
 			connOpt, err := cfg.redisConfig.AsAsynqConnOpt()
 			if err != nil {
+				// rdb has been Pinged successfully and is owned by this function
+				// until a Backend is returned; on failure it must be released.
+				_ = rdb.Close()
 				return nil, fmt.Errorf("asynq redis conn opt: %w", err)
 			}
 			transport = asynqtransport.NewWithConnOpt(connOpt, topts...)
@@ -399,6 +402,29 @@ type bindStartHooks struct {
 	onMonitorDone      func()        // nil in production; called after timeout monitor goroutine exits
 }
 
+// closeOwnedResources releases the resources owned by bindHandler in
+// reverse-acquisition order: transport, Redis client, then the injected
+// ResourcePool (if any). Used by all failed-start rollback paths so a failed
+// bind leaves no resources behind, mirroring the normal stop order (the pool
+// is closed last because it may depend on the Redis client and transport).
+//
+// The startup error is primary: cleanup errors are joined via errors.Join but
+// never mask it — callers can still unwrap the original startup error.
+// Each resource is closed at most once along this path because a failed bind
+// returns a nil stop func, so the normal stop path is never reached.
+func (b *Backend) closeOwnedResources(startupErr error) error {
+	_ = b.transport.Close()
+	_ = b.rdb.Close()
+	if b.resourcePool != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if cerr := b.resourcePool.Close(ctx); cerr != nil {
+			return errors.Join(startupErr, fmt.Errorf("distributed: close resource pool: %w", cerr))
+		}
+	}
+	return startupErr
+}
+
 // bindHandler is the unified internal lifecycle entry: it wires a task handler
 // into the transport and starts the durable outbox dispatcher and lease
 // timeout monitor. Components are acquired in order; on any failure the
@@ -421,18 +447,15 @@ func (b *Backend) bindHandler(eng *engine.Engine, handler func(context.Context, 
 		queue.TaskHandler(handler),
 	)
 	if err != nil {
-		// Consumer never started; release the delivery transport and Redis
-		// client so a failed bind leaves no resources behind.
-		_ = b.transport.Close()
-		_ = b.rdb.Close()
-		return nil, fmt.Errorf("distributed: start consumer: %w", err)
+		// Consumer never started; release the delivery transport, Redis
+		// client, and the injected ResourcePool so a failed bind leaves no
+		// resources behind. Mirrors the normal stop order.
+		return nil, b.closeOwnedResources(fmt.Errorf("distributed: start consumer: %w", err))
 	}
 	if b.testHooks.afterConsumerStart != nil {
 		if err := b.testHooks.afterConsumerStart(); err != nil {
 			stopConsumer()
-			_ = b.transport.Close()
-			_ = b.rdb.Close()
-			return nil, fmt.Errorf("distributed: start outbox dispatcher: %w", err)
+			return nil, b.closeOwnedResources(fmt.Errorf("distributed: start outbox dispatcher: %w", err))
 		}
 	}
 
@@ -459,7 +482,9 @@ func (b *Backend) bindHandler(eng *engine.Engine, handler func(context.Context, 
 		if b.testHooks.afterOutboxStart != nil {
 			if err := b.testHooks.afterOutboxStart(); err != nil {
 				// Reverse-order rollback: stop monitor and wait, stop outbox
-				// dispatcher and wait, then stop consumer + transport.
+				// dispatcher and wait, then stop consumer. The transport,
+				// Redis client, and ResourcePool are released via
+				// closeOwnedResources (mirroring the normal stop order).
 				if tm != nil {
 					tm.Stop()
 					<-tmDone
@@ -472,9 +497,7 @@ func (b *Backend) bindHandler(eng *engine.Engine, handler func(context.Context, 
 				if stopConsumer != nil {
 					stopConsumer()
 				}
-				_ = b.transport.Close()
-				_ = b.rdb.Close()
-				return nil, fmt.Errorf("distributed: start timeout monitor: %w", err)
+				return nil, b.closeOwnedResources(fmt.Errorf("distributed: start timeout monitor: %w", err))
 			}
 		}
 	} else {
