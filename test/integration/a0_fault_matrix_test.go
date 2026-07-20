@@ -62,13 +62,10 @@ type a0FaultMatrixArtifact struct {
 
 // a0ArtifactPath is the fixed release-artifact location (relative to the repo
 // root). CI uploads this file alongside the Go test JSON output. It is
-// overwritten on each full run; when a single subtest is executed it writes
-// only that scenario (still valid evidence).
+// regenerated from scratch on each full run (TestA0FaultMatrix deletes any
+// stale copy before subtests start) so a previous run's pass:true entries can
+// never leak into a CI artifact.
 const a0ArtifactPath = "test/integration/testdata/a0_fault_matrix_report.json"
-
-// a0FaultMatrixMu serializes accumulation across subtests so concurrent
-// `-parallel` runs do not corrupt the artifact file.
-var a0FaultMatrixMu sync.Mutex
 
 // resolveA0ArtifactPath finds the repo root (the directory containing go.mod)
 // and joins it with a0ArtifactPath so the report is written to a stable
@@ -86,10 +83,11 @@ func resolveA0ArtifactPath(t *testing.T) string {
 // writeA0FaultReport accumulates r into the artifact file. If the file already
 // exists, scenarios with the same name are replaced; otherwise the scenario is
 // appended. This keeps the artifact stable when a single subtest is re-run.
+//
+// Subtests do not run with t.Parallel(), so no mutex is required here — the
+// Go test runner executes them sequentially within TestA0FaultMatrix.
 func writeA0FaultReport(t *testing.T, r a0FaultReport) {
 	t.Helper()
-	a0FaultMatrixMu.Lock()
-	defer a0FaultMatrixMu.Unlock()
 
 	abs := resolveA0ArtifactPath(t)
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
@@ -323,6 +321,17 @@ func newA0FaultEnv(t *testing.T, addr string, consumer bool) *a0FaultEnv {
 func TestA0FaultMatrix(t *testing.T) {
 	addr := requireRedis(t)
 
+	// Reset the artifact so each run starts from an empty file. This prevents
+	// a stale checked-in or previously-generated report (e.g. from a different
+	// commit_sha with pass:true entries) from leaking into the CI-uploaded
+	// artifact if a subtest fails before reaching writeA0FaultReport. The file
+	// is gitignored and regenerated per run.
+	abs := resolveA0ArtifactPath(t)
+	if err := os.Remove(abs); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("remove stale artifact %q: %v", abs, err)
+	}
+	t.Logf("a0 artifact reset: %s", abs)
+
 	t.Run("CommitThenFlushBeforeDelivery", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -385,6 +394,7 @@ func TestA0FaultMatrix(t *testing.T) {
 		// Recovery: queue available again. FlushOutbox drains the retained
 		// downstream entry to the fake queue, then we lease + commit the
 		// downstream to finalize the execution.
+		recoveryStart := time.Now()
 		env.queue.setError(nil)
 		if err := env.eng.FlushOutbox(ctx, id); err != nil {
 			t.Fatalf("FlushOutbox() recovery error = %v", err)
@@ -410,6 +420,7 @@ func TestA0FaultMatrix(t *testing.T) {
 		if finalExec == nil || finalExec.Status != types.ExecutionStatusSuccess {
 			t.Fatalf("execution after downstream commit = %+v, want Success", finalExec)
 		}
+		recoveryTimeMS := time.Since(recoveryStart).Milliseconds()
 
 		report := a0FaultReport{
 			Scenario:           "commit-then-flush-before-delivery",
@@ -425,7 +436,7 @@ func TestA0FaultMatrix(t *testing.T) {
 			HandlerInvocations: 2,
 			DAGAdvances:        2,
 			FinalStatus:        string(finalExec.Status),
-			RecoveryTimeMS:     0,
+			RecoveryTimeMS:     recoveryTimeMS,
 			Pass:               true,
 		}
 		writeA0FaultReport(t, report)
@@ -486,19 +497,40 @@ func TestA0FaultMatrix(t *testing.T) {
 			t.Fatalf("lease1 = %+v, want non-empty token", lease1)
 		}
 
-		// Wait for the lease to expire. The node remains Running with lease1's
-		// token until the reclaim path revokes it.
-		time.Sleep(300 * time.Millisecond)
+		// Wait for the lease to expire, polling ListExpiredLeases rather than a
+		// fixed Sleep so the reclaim path is exercised as soon as the TTL
+		// elapses (and so the test does not reclaim before expiry, which would
+		// be a flaky no-op). The node remains Running with lease1's token until
+		// the reclaim path revokes it.
+		recoveryStart := time.Now()
+		var expired []engine.ExpiredLease
+		expireDeadline := time.Now().Add(5 * time.Second)
+		found := false
+		for !found {
+			expired, err = backend.State().ListExpiredLeases(ctx, time.Now())
+			if err != nil {
+				t.Fatalf("ListExpiredLeases() error = %v", err)
+			}
+			for _, e := range expired {
+				if e.ExecutionID == id && e.NodeName == "start" {
+					found = true
+					break
+				}
+			}
+			if found {
+				break
+			}
+			if time.Now().After(expireDeadline) {
+				t.Fatalf("timeout waiting for lease1 to expire (expired=%+v)", expired)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
 
 		// Simulate the leader-only LeaseSweeper: ListExpiredLeases + ReclaimLease.
 		// The timeout monitor started by Bind only handles suspended-node
 		// timeouts; lease reclaim is the sweeper's responsibility. We drive it
 		// here directly because the sweeper is a control-plane component, not a
 		// backend component.
-		expired, err := backend.State().ListExpiredLeases(ctx, time.Now())
-		if err != nil {
-			t.Fatalf("ListExpiredLeases() error = %v", err)
-		}
 		var reclaimed bool
 		for _, e := range expired {
 			if e.ExecutionID == id && e.NodeName == "start" {
@@ -589,10 +621,15 @@ func TestA0FaultMatrix(t *testing.T) {
 			ExecutionStatus:    string(execution.Status),
 			CommitOutcome:      string(outcome2),
 			QueueDeliveries:    queue.totalDeliveries(),
+			// HandlerInvocations is a logical estimate, not a measured count:
+			// this scenario does not run a real handler (CommitTaskResult is
+			// driven directly by the test). The value reflects the
+			// exactly-once DAG semantics: lease1's "lost" commit does not
+			// advance the DAG; only lease2's commit does (DAGAdvances=1).
 			HandlerInvocations: 1,
 			DAGAdvances:        1,
 			FinalStatus:        string(execution.Status),
-			RecoveryTimeMS:     0,
+			RecoveryTimeMS:     time.Since(recoveryStart).Milliseconds(),
 			Pass:               true,
 		}
 		writeA0FaultReport(t, report)
@@ -804,6 +841,10 @@ func TestA0FaultMatrix(t *testing.T) {
 		// reclaimed.
 		// Recovery path 2 — lease reclaim: drive the LeaseSweeper path
 		// (ListExpiredLeases + ReclaimLease) to revoke lease1 and re-enqueue.
+		// recoveryStart brackets both recovery paths (outbox scan + lease
+		// reclaim) plus the redelivery wait, matching the user-visible
+		// "time to recover" semantics.
+		recoveryStart := time.Now()
 		var reclaimed bool
 		reclaimDeadline := time.Now().Add(10 * time.Second)
 		for {
@@ -906,10 +947,15 @@ func TestA0FaultMatrix(t *testing.T) {
 			ExecutionStatus:    string(result.Status),
 			CommitOutcome:      string(outcome2),
 			QueueDeliveries:    queue2.totalDeliveries(),
+			// HandlerInvocations is a logical estimate, not a measured count:
+			// this scenario does not run a real handler (CommitTaskResult is
+			// driven directly by the test). The value reflects the
+			// exactly-once DAG semantics: lease1's "lost" commit does not
+			// advance the DAG; only lease2's commit does (DAGAdvances=1).
 			HandlerInvocations: 1,
 			DAGAdvances:        1,
 			FinalStatus:        string(result.Status),
-			RecoveryTimeMS:     0,
+			RecoveryTimeMS:     time.Since(recoveryStart).Milliseconds(),
 			Pass:               true,
 		}
 		writeA0FaultReport(t, report)

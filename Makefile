@@ -120,7 +120,7 @@ test-integration:
 test-integration-required:
 	@set -a; [ -f test/env/.env ] && . ./test/env/.env; set +a; \
 	XFLOW_REQUIRE_REDIS_INTEGRATION=1 \
-	go test -tags=integration -race -count=1 -timeout 600s ./test/integration/...
+	go test -tags=integration -race -count=1 -timeout 600s -json ./test/integration/...
 
 test-perf:
 	@set -a; [ -f test/env/.env ] && . ./test/env/.env; set +a; \

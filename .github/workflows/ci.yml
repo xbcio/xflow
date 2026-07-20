@@ -128,7 +128,7 @@ jobs:
           fi
 
       - name: Integration tests
-        run: make test-integration-required
+        run: make test-integration-required 2>&1 | tee integration-test-output.json
         env:
           XFLOW_TEST_REDIS_ADDR: 127.0.0.1:6379
           XFLOW_TEST_MYSQL_DSN: "root:xflow@tcp(127.0.0.1:3306)/xflow?parseTime=true"
@@ -140,13 +140,12 @@ jobs:
         with:
           name: a0-fault-matrix-report
           path: test/integration/testdata/a0_fault_matrix_report.json
-          if-no-files-found: warn
+          if-no-files-found: error
 
       - name: Upload integration test output
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: integration-test-output
-          path: |
-            coverage.out
-          if-no-files-found: warn
+          path: integration-test-output.json
+          if-no-files-found: error
