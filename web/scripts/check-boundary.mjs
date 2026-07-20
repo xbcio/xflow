@@ -11,11 +11,15 @@ const packagesDir = path.resolve(__dirname, "../packages");
 // matches its full name. Patterns cover exact names, scopes, or prefixes.
 // ADR D9: ahooks and zustand are app-layer only; public packages must not
 // declare them (not even as optional peers).
+// ADR D9 (2026-07-19): @tanstack/react-query is forbidden across the whole
+// web workspace; the boundary script rejects it in public packages too so
+// CI catches accidental reintroduction.
 const forbiddenPatterns = [
   { source: "@umijs/max", regex: /^@umijs\// },
   { source: "@ant-design/pro-layout", regex: /^@ant-design\/pro-/ },
   { source: "ahooks", regex: /^ahooks$/ },
   { source: "zustand", regex: /^zustand$/ },
+  { source: "@tanstack/react-query", regex: /^@tanstack\/react-query$/ },
 ];
 
 const dependencyFields = [
@@ -80,6 +84,7 @@ async function runNegativeTest() {
     { dep: "@ant-design/pro-layout", version: "2.8.8", source: "@ant-design/pro-layout" },
     { dep: "ahooks", version: "3.8.4", source: "ahooks" },
     { dep: "zustand", version: "5.0.5", source: "zustand" },
+    { dep: "@tanstack/react-query", version: "5.62.0", source: "@tanstack/react-query" },
   ];
 
   let failed = false;
@@ -135,7 +140,7 @@ async function main() {
     process.exit(1);
   }
 
-  console.log("Boundary check passed: no public package depends on Umi/ProComponents.");
+  console.log("Boundary check passed: no public package depends on Umi/ProComponents/TanStack Query.");
 }
 
 main().catch((err) => {

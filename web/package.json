@@ -16,6 +16,7 @@
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "check:boundaries": "node scripts/check-boundary.mjs",
+    "check:production-fixtures": "node scripts/check-production-fixtures.mjs",
     "e2e": "playwright test",
     "e2e:preview": "pnpm build && playwright test --config playwright.preview.config.ts",
     "changeset": "changeset"

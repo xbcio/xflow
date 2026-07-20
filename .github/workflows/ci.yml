@@ -163,6 +163,9 @@ jobs:
       - name: Check boundaries
         run: cd web && pnpm check:boundaries
 
+      - name: Check production fixtures
+        run: cd web && pnpm check:production-fixtures
+
       - name: Build
         run: cd web && pnpm build
 
@@ -174,6 +177,13 @@ jobs:
 
       - name: Run e2e tests on production preview
         run: cd web && pnpm e2e:preview
+
+      # Coverage runs after build/e2e so fast-feedback gates (lint/type/test/
+      # boundaries/fixtures/build/e2e) surface failures first. test:coverage
+      # re-executes the test suite with --coverage; a threshold regression
+      # fails the job.
+      - name: Coverage
+        run: cd web && pnpm test:coverage
 
       - name: Upload Playwright report
         if: failure()
