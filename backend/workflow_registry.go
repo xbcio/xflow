@@ -26,5 +26,16 @@ type WorkflowRecord struct {
 type WorkflowRegistry interface {
 	AddWorkflow(ctx context.Context, rec WorkflowRecord) (WorkflowRecord, error)
 	GetWorkflow(ctx context.Context, id types.WorkflowID) (WorkflowRecord, error)
+	// GetWorkflowByKey returns the record currently registered under key, or
+	// ErrWorkflowNotFound if no record exists. It is used by Engine.AddWorkflow
+	// to inspect a conflicting existing record for legacy-hash reconciliation.
+	GetWorkflowByKey(ctx context.Context, key string) (WorkflowRecord, error)
+	// UpdateDefinitionHash atomically updates the DefinitionHash of the record
+	// with id, but only if the currently-stored hash equals expectedOldHash.
+	// Returns ErrWorkflowNotFound if the id is unknown and
+	// ErrWorkflowConflict if the stored hash no longer matches expectedOldHash
+	// (e.g. another registrar upgraded it concurrently). It is used by
+	// Engine.AddWorkflow to upgrade legacy-format hashes when semantics match.
+	UpdateDefinitionHash(ctx context.Context, id types.WorkflowID, expectedOldHash, newHash string) error
 	RemoveWorkflow(ctx context.Context, id types.WorkflowID) error
 }

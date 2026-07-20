@@ -185,7 +185,7 @@ DSL 在后端以 Go `types.WorkflowDef` 为权威，前端需要明确 wire form
 2. `Engine.AddWorkflow`(`sdk/xflow/workflow_registry.go`)已改用 `runtimeHash` 生成 `WorkflowRecord.DefinitionHash`;本地/分布式注册表继续用该字段做 key 级冲突检测,比较的是运行时语义。
 3. 原 `definitionHash(def)` 重命名为 `legacyDefinitionHash(def)`,格式为 `sha256:audit:v1:<hex>`,作为 `WorkflowRecord.AuditFingerprint` 持久化,用于审计/导出追溯。
 4. Editor metadata(`position`/`ui`/`notes`)不再影响注册表冲突检测;`pin_data` 计入 runtime hash。
-5. 兼容策略采用**选项 B**:version bump 时自然采用新 hash。本期 prototype 分支无存量生产数据,不遍历重算存量 `definition_hash`;存量记录视为 legacy hash,运行时语义未变即可继续读取。
+5. 兼容策略采用**选项 A(recompute-on-conflict)**:F0-A4 在 `Engine.AddWorkflow` 中实现 legacy hash 自动升级 —— 当 registry 因新旧 hash 格式不同而返回 `ErrWorkflowConflict` 时,从存储的 Definition 重算 runtime hash,语义匹配则原子升级记录的 `DefinitionHash` 为新格式并幂等返回原 ID,语义不同仍返回 `ErrWorkflowConflict`。本期 prototype 分支无生产数据,该路径主要保护从 F0.3 前 hash 格式平滑过渡到 F0-A3 收紧后的 runtime hash。
 
 **边界规则**:
 
@@ -213,7 +213,7 @@ DSL 在后端以 Go `types.WorkflowDef` 为权威，前端需要明确 wire form
 
 **说明**:`runtime hash` 即 `sdk/xflow/workflow_identity.go` 中的 `runtimeHash(def)`,格式 `runtime-sha256:v1:<hex>`,用于 registry 冲突检测;`audit fingerprint` 即 `legacyDefinitionHash(def)`,格式 `sha256:audit:v1:<hex>`,持久化为 `WorkflowRecord.AuditFingerprint`,保留全字段(含 editor metadata 与 instance identity)用于审计/导出追溯。
 
-> **注**:本表为字段分类的目标状态(F0-A 修订后)。当前 `runtimeHash` 实现中 `Description` 仍计入 hash;F0-A3 将进一步剥离 `Description` 与 `NodeDef.ID`,届时本表与实现即对齐。
+> **注**:本表为字段分类的目标状态,F0-A3 已实施并与之对齐 —— `runtimeHash` 已剥离 `Description`(descriptive,不影响执行)与 `NodeDef.ID`(stable editor identity,重导入不应失效记录),保留 `NodeDef.Name`(运行时连接与 pin_data 引用键)与 `pin_data`(执行语义)。
 
 ### 备选方案
 
@@ -223,7 +223,8 @@ DSL 在后端以 Go `types.WorkflowDef` 为权威，前端需要明确 wire form
 ### 风险
 
 - `definitionHash` → `runtimeHash` 的迁移已在 F0.3 完成(`sdk/xflow/workflow_identity.go`),`DefinitionHash` 字段语义已从全字段指纹变为 runtime hash;原 `definitionHash(def)` 已重命名为 `legacyDefinitionHash(def)` 并作为 `AuditFingerprint` 持久化。`backend/local`、`backend/distributed` 注册表的冲突检测已改用 `DefinitionHash`(=runtimeHash) 比较。
-- `Description` 当前仍计入 `runtimeHash`(尚未剥离),`Nodes[].Notes` 在 `runtimeHash` 中已排除;若后续 F0-A3 进一步收紧 runtime hash(剥离 Description/NodeDef.ID),需同步更新本表与本节说明。
+- F0-A3 已剥离 `Description`(descriptive)与 `NodeDef.ID`(stable editor identity),`Nodes[].Notes`/`Position`/`UI` 在 `runtimeHash` 中也已排除;三者仍由 `legacyDefinitionHash(audit fingerprint)` 保留。`NodeDef.Name` 与 `pin_data` 继续计入 runtime hash(运行时连接与执行语义)。
+- F0-A4 已实现 legacy hash 兼容路径:`Engine.AddWorkflow` 在冲突时通过 `reconcileDefinitionHash` + registry 的 `GetWorkflowByKey`/`UpdateDefinitionHash` 自动升级 F0.3 前的 `sha256:<hex>` 格式记录为 `runtime-sha256:v1:`,CAS 保证并发升级不覆盖。
 - 用户可能把 `notes` 误以为是运行时注释,UI 需明确标注"仅编辑器可见"。
 
 ---
@@ -495,8 +496,8 @@ editor/viewer/admin 需要管理三类状态:① server state(请求/缓存/分�
 
 1. **企业身份源**:D6 的 OIDC/SAML 具体供应商与 IdP 返回的 groups 字段命名,需在部署前确定;前端 `src/access.ts` 的映射函数(`ACCESS_MAPPING` 环境变量)据此调整。M0 先用 `BearerTokenAuth`/`BearerPrincipalAuth` 占位。
 2. **iframe token 降级**:若 M2 持久化层仅内存 backend,`jti` replay 存储需 Redis;M0/M1 可降级为"token 仅 exp 校验,不保证单次使用",M2 接 Redis 后补全。
-3. **`Description`/`Nodes[].Notes` 是否纳入 editor metadata 排除**:M0 ADR 暂定排除(与 `assignGraphHash` 对齐),最终在 M2 后端 `runtimeHash` 迁移时定夺。
-4. **存量 `definition_hash` 迁移策略**:F0.3 已选定**选项 B**(version bump 自然采用新 hash)。本期 prototype 分支无存量生产数据,不遍历重算;运行时语义未变的存量记录继续可读,新增/升级版本自动使用 `runtime-sha256:v1:`。
+3. **`Description`/`Nodes[].Notes` 是否纳入 editor metadata 排除**:F0-A3 已决策并实施 —— `Description` 与 `NodeDef.ID` 均从 runtime hash 剥离(Description 是 descriptive 不影响执行;NodeDef.ID 是 stable editor identity,重导入不应失效记录);`NodeDef.Notes` 已在 F0.3 剥离。三者仍由 `legacyDefinitionHash` 保留作 audit fingerprint。
+4. **存量 `definition_hash` 迁移策略**:F0-A4 采用**选项 A(recompute-on-conflict)**:`Engine.AddWorkflow` 在 registry 返回 `ErrWorkflowConflict` 时,通过 `reconcileDefinitionHash(storedHash, storedDef)` 从存储的 Definition 重算 runtime hash。语义匹配则原子升级记录(`WorkflowRegistry.UpdateDefinitionHash` CAS);语义不同仍返回 `ErrWorkflowConflict`。Local 与 distributed(registry Lua CAS)均已实现。本期 prototype 无生产数据,该路径主要保护 F0.3 前 hash 格式(`sha256:<hex>`)的平滑过渡。
 
 ---
 
