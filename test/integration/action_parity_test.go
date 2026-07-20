@@ -4,35 +4,45 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	backendlocal "github.com/xbcio/xflow/backend/local"
+	"github.com/xbcio/xflow/backend/distributed"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/execution"
 	"github.com/xbcio/xflow/service/protocol"
 	runnersvc "github.com/xbcio/xflow/service/runner"
 	"github.com/xbcio/xflow/types"
+	"github.com/redis/go-redis/v9"
 )
 
 // action_parity_test.go implements the A3 three-topology action-error parity
 // matrix (.claude/specs/2026-07-18-sdk-server-production-readiness-remediation-design.md
-// §6.4). The same classified-error fixture runs across two topologies:
+// §6.4). The same classified-error fixture runs across three topologies:
 //
 //   - local embedded — in-memory backend + engine + embedded dispatcher
 //     (handler runs in-process; the ClassifiedError is a live Go error).
 //   - server-runner — real Redis/Asynq backend + apiserver + HTTP runner
 //     (the ClassifiedError crosses the wire via protocol.error_detail and is
 //     recovered server-side before retry classification).
+//   - cluster-durable — real Redis/Asynq backend + embedded engine + in-process
+//     consumer (durable/default mode). This is the same distributed backend
+//     sdk/xflow.NewCluster constructs internally (distributed.New + engine.New +
+//     StartBinding), so the durable outbox dispatcher, lease timeout monitor,
+//     and Asynq consumer all run in-process against the real broker. The
+//     ClassifiedError stays a live Go error (no HTTP boundary), but the task
+//     lease/outbox/commit path is the real distributed one.
 //
 // The cluster-transient topology is intentionally excluded from this matrix:
 // it has no handler-level retry (transient dispatch failures back off at the
 // queue, not the engine's MaxAttempts path), so comparing its retry count
-// against local/server-runner would be a category error. A3 §6.4 covers it
-// under a separate collection-path exclusion.
+// against the three topologies above would be a category error. A3 §6.4 covers
+// it under a separate collection-path exclusion.
 //
 // TestActionErrorParityMatrix contains five fixtures:
 //
@@ -299,86 +309,150 @@ func TestActionErrorParityMatrix(t *testing.T) {
 
 			localOut := RunParityLocal(t, def, register)
 			serverOut := RunParityServerRunner(t, addr, def, register)
+			clusterOut := RunParityCluster(t, addr, def, register)
 
-			assertParity(t, tc, localOut, serverOut)
+			assertParityThreeWay(t, tc, localOut, serverOut, clusterOut)
+
+			logParityMatrixRow(t, tc, "local", localOut)
+			logParityMatrixRow(t, tc, "server-runner", serverOut)
+			logParityMatrixRow(t, tc, "cluster-durable", clusterOut)
 		})
 	}
 }
 
-func assertParity(t *testing.T, tc parityCase, localOut, serverOut ParityOutcome) {
-	t.Helper()
+// namedParityOutcome pairs a topology label with its observed outcome so the
+// parity core can report which topology diverged.
+type namedParityOutcome struct {
+	Topology string
+	Out      ParityOutcome
+}
 
-	// Parity: both topologies reach the same logical attempt count and
-	// terminal status for the same fixture.
-	if localOut.Attempt != serverOut.Attempt {
-		t.Errorf("attempt parity: local=%d server-runner=%d, want equal", localOut.Attempt, serverOut.Attempt)
+// assertParityAll is the topology-independent parity core. It asserts that
+// every supplied topology reaches the same logical attempt count, terminal
+// status, error presence, error message/code, and downstream routing — and that
+// each independently matches the fixture's expected contract. It works for any
+// number of topologies (two-way for the gRPC/DB variants, three-way for the
+// core matrix).
+func assertParityAll(t *testing.T, tc parityCase, outs ...namedParityOutcome) {
+	t.Helper()
+	if len(outs) < 2 {
+		t.Fatalf("assertParityAll requires at least 2 topologies, got %d", len(outs))
 	}
-	if localOut.Status != serverOut.Status {
-		t.Errorf("status parity: local=%s server-runner=%s, want equal", localOut.Status, serverOut.Status)
-	}
-	localHasErr, serverHasErr := localOut.ErrStr != "", serverOut.ErrStr != ""
-	if localHasErr != serverHasErr {
-		t.Errorf("error presence parity: local=%v server-runner=%v, want equal", localHasErr, serverHasErr)
+
+	// Parity: every topology reaches the same logical attempt count, terminal
+	// status, and error presence for the same fixture.
+	for i := 0; i < len(outs); i++ {
+		for j := i + 1; j < len(outs); j++ {
+			a, b := outs[i], outs[j]
+			if a.Out.Attempt != b.Out.Attempt {
+				t.Errorf("attempt parity: %s=%d vs %s=%d, want equal", a.Topology, a.Out.Attempt, b.Topology, b.Out.Attempt)
+			}
+			if a.Out.Status != b.Out.Status {
+				t.Errorf("status parity: %s=%s vs %s=%s, want equal", a.Topology, a.Out.Status, b.Topology, b.Out.Status)
+			}
+			aHasErr, bHasErr := a.Out.ErrStr != "", b.Out.ErrStr != ""
+			if aHasErr != bHasErr {
+				t.Errorf("error presence parity: %s=%v vs %s=%v, want equal", a.Topology, aHasErr, b.Topology, bHasErr)
+			}
+			// Output port must also match: the same fixture routes to the same
+			// downstream branch (main/error) regardless of topology.
+			if a.Out.Port != b.Out.Port {
+				t.Errorf("port parity: %s=%q vs %s=%q, want equal", a.Topology, a.Out.Port, b.Topology, b.Out.Port)
+			}
+		}
 	}
 
 	// Contract: each topology independently matches the expected outcome.
-	if localOut.Attempt != tc.WantAttempt {
-		t.Errorf("local attempt=%d, want %d", localOut.Attempt, tc.WantAttempt)
-	}
-	if localOut.Status != tc.WantStatus {
-		t.Errorf("local status=%s, want %s", localOut.Status, tc.WantStatus)
-	}
-	if serverOut.Attempt != tc.WantAttempt {
-		t.Errorf("server-runner attempt=%d, want %d", serverOut.Attempt, tc.WantAttempt)
-	}
-	if serverOut.Status != tc.WantStatus {
-		t.Errorf("server-runner status=%s, want %s", serverOut.Status, tc.WantStatus)
-	}
+	for _, o := range outs {
+		if o.Out.Attempt != tc.WantAttempt {
+			t.Errorf("%s attempt=%d, want %d", o.Topology, o.Out.Attempt, tc.WantAttempt)
+		}
+		if o.Out.Status != tc.WantStatus {
+			t.Errorf("%s status=%s, want %s", o.Topology, o.Out.Status, tc.WantStatus)
+		}
 
-	// For failed fixtures the error message/code must survive the wire and
-	// be recorded in the node's Error field. ClassifiedErrors carry
-	// "code: message"; explicit error-port output carries the raw message.
-	if tc.WantStatus != types.ExecutionStatusSuccess && tc.ErrContains != "" {
-		if !localHasErr || !strings.Contains(localOut.ErrStr, tc.ErrContains) {
-			t.Errorf("local node error %q missing %q", localOut.ErrStr, tc.ErrContains)
-		}
-		if !serverHasErr || !strings.Contains(serverOut.ErrStr, tc.ErrContains) {
-			t.Errorf("server-runner node error %q missing %q", serverOut.ErrStr, tc.ErrContains)
-		}
-	}
-
-	// Downstream routing assertions.
-	for name, want := range tc.WantDownstream {
-		localStatus, lok := localOut.DownstreamStatuses[name]
-		serverStatus, sok := serverOut.DownstreamStatuses[name]
-		if !lok {
-			t.Errorf("local downstream node %q not found", name)
-			continue
-		}
-		if !sok {
-			t.Errorf("server-runner downstream node %q not found", name)
-			continue
-		}
-		if localStatus != serverStatus {
-			t.Errorf("downstream status parity for %q: local=%s server-runner=%s", name, localStatus, serverStatus)
-		}
-		if localStatus != want.Status {
-			t.Errorf("local downstream %q status=%s, want %s", name, localStatus, want.Status)
-		}
-		if serverStatus != want.Status {
-			t.Errorf("server-runner downstream %q status=%s, want %s", name, serverStatus, want.Status)
-		}
-		if want.Output != nil {
-			localOutMap := localOut.DownstreamOutputs[name]
-			serverOutMap := serverOut.DownstreamOutputs[name]
-			if !mapContains(localOutMap, want.Output) {
-				t.Errorf("local downstream %q output=%v, want superset of %v", name, localOutMap, want.Output)
+		// For failed fixtures the error message/code must survive the wire and
+		// be recorded in the node's Error field. ClassifiedErrors carry
+		// "code: message"; explicit error-port output carries the raw message.
+		if tc.WantStatus != types.ExecutionStatusSuccess && tc.ErrContains != "" {
+			if o.Out.ErrStr == "" || !strings.Contains(o.Out.ErrStr, tc.ErrContains) {
+				t.Errorf("%s node error %q missing %q", o.Topology, o.Out.ErrStr, tc.ErrContains)
 			}
-			if !mapContains(serverOutMap, want.Output) {
-				t.Errorf("server-runner downstream %q output=%v, want superset of %v", name, serverOutMap, want.Output)
+		}
+
+		// Downstream DAG-advance routing assertions.
+		for name, want := range tc.WantDownstream {
+			gotStatus, ok := o.Out.DownstreamStatuses[name]
+			if !ok {
+				t.Errorf("%s downstream node %q not found", o.Topology, name)
+				continue
+			}
+			if gotStatus != want.Status {
+				t.Errorf("%s downstream %q status=%s, want %s", o.Topology, name, gotStatus, want.Status)
+			}
+			if want.Output != nil {
+				if !mapContains(o.Out.DownstreamOutputs[name], want.Output) {
+					t.Errorf("%s downstream %q output=%v, want superset of %v", o.Topology, name, o.Out.DownstreamOutputs[name], want.Output)
+				}
 			}
 		}
 	}
+}
+
+// assertParity asserts two-topology parity for the gRPC/DB parity variants
+// that do not yet run the durable SDK cluster topology.
+func assertParity(t *testing.T, tc parityCase, localOut, serverOut ParityOutcome) {
+	t.Helper()
+	assertParityAll(t, tc,
+		namedParityOutcome{Topology: "local", Out: localOut},
+		namedParityOutcome{Topology: "server-runner", Out: serverOut},
+	)
+}
+
+// assertParityThreeWay asserts three-topology parity across local embedded,
+// server-runner, and the durable SDK cluster. Used by the core A3 matrix.
+func assertParityThreeWay(t *testing.T, tc parityCase, localOut, serverOut, clusterOut ParityOutcome) {
+	t.Helper()
+	assertParityAll(t, tc,
+		namedParityOutcome{Topology: "local", Out: localOut},
+		namedParityOutcome{Topology: "server-runner", Out: serverOut},
+		namedParityOutcome{Topology: "cluster-durable", Out: clusterOut},
+	)
+}
+
+// logParityMatrixRow emits a machine-readable JSON line per fixture x topology
+// into the test log. Each row carries the A3 contract fields: attempt, terminal
+// status, source node status, output port, error string (which encodes the
+// classified error code as "code: message"), and the count of downstream nodes
+// that reached a terminal state (DAG advance). Grepping the test output for
+// "PARITY_MATRIX" yields the full three-topology matrix artifact.
+func logParityMatrixRow(t *testing.T, tc parityCase, topology string, out ParityOutcome) {
+	t.Helper()
+	downstreamAdvances := 0
+	for _, s := range out.DownstreamStatuses {
+		if types.IsTerminalNodeStatus(s) {
+			downstreamAdvances++
+		}
+	}
+	row := map[string]any{
+		"fixture":             tc.Name,
+		"topology":             topology,
+		"attempt":              out.Attempt,
+		"want_attempt":         tc.WantAttempt,
+		"status":               string(out.Status),
+		"want_status":         string(tc.WantStatus),
+		"source_status":        string(out.SourceStatus),
+		"port":                 out.Port,
+		"error":                out.ErrStr,
+		"downstream_statuses":  out.DownstreamStatuses,
+		"downstream_advances":  downstreamAdvances,
+	}
+	b, err := json.Marshal(row)
+	if err != nil {
+		t.Logf("PARITY_MATRIX marshal error: %v", err)
+		return
+	}
+	t.Logf("PARITY_MATRIX %s", b)
 }
 
 func mapContains(got, want map[string]any) bool {
@@ -485,7 +559,75 @@ func RunParityServerRunner(t *testing.T, addr string, def *types.WorkflowDef, re
 	}
 
 	// Fresh context: the runner ctx above was cancelled on shutdown.
-	return collectParityOutcome(t, h.state, execID, result, def)
+	out := collectParityOutcome(t, h.state, execID, result, def)
+	// Stop this topology's control plane (apiserver + its Asynq consumer) before
+	// returning so it does not race the next topology's consumer for the shared
+	// Asynq queue. See serverRunnerHarness.stop for why this is required.
+	h.stop()
+	return out
+}
+
+// RunParityCluster runs the same fixture through the durable SDK cluster
+// topology against real Redis. It constructs the distributed backend the same
+// way sdk/xflow.NewCluster does internally — distributed.New (real Redis/Asynq
+// transport, durable/default mode, consumer enabled) + engine.New +
+// backend.StartBinding — so the embedded engine, durable outbox dispatcher,
+// lease timeout monitor, and Asynq consumer all run in-process against the real
+// broker. This is NOT cluster-transient: tasks carry durable assignment/lease/
+// outbox semantics, so the engine's MaxAttempts retry path is exercised exactly
+// as in local embedded and server-runner.
+//
+// Custom handlers are registered against the backend's own HandlerRegistrar
+// before StartBinding starts the consumer, so the in-process dispatcher resolves
+// them without crossing an HTTP boundary. The register callback installs a
+// fresh handler instance per topology (the parity fixtures do this by
+// construction), keeping per-topology attempt counters isolated.
+//
+// Stale asynq tasks from prior crashed runs are flushed (scoped to the asynq:*
+// namespace) so they cannot be picked up by this consumer.
+func RunParityCluster(t *testing.T, addr string, def *types.WorkflowDef, register func(engine.HandlerRegistrar)) ParityOutcome {
+	t.Helper()
+	if len(def.Nodes) == 0 {
+		t.Fatal("RunParityCluster: workflow has no nodes")
+	}
+	b, err := distributed.New(addr, nil, distributed.WithConcurrency(1), distributed.WithConsumer(true))
+	if err != nil {
+		t.Fatalf("distributed.New: %v", err)
+	}
+	rdb := redis.NewClient(&redis.Options{Addr: addr})
+	flushAsynqKeys(context.Background(), t, rdb)
+	_ = rdb.Close()
+
+	reg, ok := b.Registry().(engine.HandlerRegistrar)
+	if !ok {
+		t.Fatalf("cluster backend registry does not implement HandlerRegistrar: %T", b.Registry())
+	}
+	if register != nil {
+		register(reg)
+	}
+
+	eng := engine.New(b.State(), b.Queue(), engine.WithDefaultLeaseTTL(time.Minute))
+	stop, err := b.StartBinding(eng)
+	if err != nil {
+		t.Fatalf("cluster StartBinding: %v", err)
+	}
+	t.Cleanup(stop)
+
+	g, err := graph.Compile(def)
+	if err != nil {
+		t.Fatalf("cluster compile: %v", err)
+	}
+	submitCtx, submitCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer submitCancel()
+	id, err := eng.Submit(submitCtx, g, nil)
+	if err != nil {
+		t.Fatalf("cluster submit: %v", err)
+	}
+
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer waitCancel()
+	result := waitForCompletion(waitCtx, t, b.State(), id, def.Nodes[0].Name)
+	return collectParityOutcome(t, b.State(), id, result, def)
 }
 
 func collectParityOutcome(t *testing.T, state engine.StateStore, execID types.ExecutionID, result types.Result, def *types.WorkflowDef) ParityOutcome {

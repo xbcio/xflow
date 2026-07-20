@@ -5,6 +5,7 @@ package integration
 import (
 	"context"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -31,6 +32,39 @@ type serverRunnerHarness struct {
 	httpSrv *httptest.Server
 	state   engine.StateStore
 	runners control.RunnerDirectory
+	cancel  context.CancelFunc
+
+	stopOnce sync.Once
+}
+
+// stop tears the harness down: it stops the control plane (which stops the
+// durable outbox dispatcher, lease monitor, and — critically for test isolation
+// — the Asynq consumer bound by ControlPlane.Start) and closes the HTTP test
+// server. It is idempotent via sync.Once so it is safe to call explicitly (to
+// release the consumer before a later topology runs in the same subtest) and
+// again from the t.Cleanup registered by newServerRunnerHarness.
+//
+// Why this matters: ControlPlane.Start binds the control-plane dispatcher to
+// the Asynq queue and starts a consumer. That consumer's dispatcher looks up
+// handlers in the control-plane backend registry, which a parity test does NOT
+// populate with its custom node-type handlers (those live in the runner's own
+// registry). If the consumer keeps running after this topology finishes, it
+// races the next topology's consumer for the same Asynq queue and fails every
+// task it grabs with "no handler registered", stalling the next execution. The
+// parity matrix compares topologies that must each run in isolation, so we stop
+// this harness's consumer as soon as its execution is observed.
+func (h *serverRunnerHarness) stop() {
+	h.stopOnce.Do(func() {
+		if h.cancel != nil {
+			h.cancel()
+		}
+		shutdownCtx, sc := context.WithTimeout(context.Background(), 5*time.Second)
+		defer sc()
+		_ = h.srv.Shutdown(shutdownCtx)
+		if h.httpSrv != nil {
+			h.httpSrv.Close()
+		}
+	})
 }
 
 // newServerRunnerHarness brings up the server-runner topology against addr
@@ -61,12 +95,13 @@ func newServerRunnerHarness(t *testing.T, addr string, concurrency int) *serverR
 		t.Fatalf("apiserver.Start: %v", err)
 	}
 	httpSrv := httptest.NewServer(srv.Handler())
-	t.Cleanup(func() {
-		cancel()
-		shutdownCtx, sc := context.WithTimeout(context.Background(), 5*time.Second)
-		defer sc()
-		_ = srv.Shutdown(shutdownCtx)
-		httpSrv.Close()
-	})
-	return &serverRunnerHarness{srv: srv, httpSrv: httpSrv, state: b.State(), runners: cp.RunnerDirectory()}
+	h := &serverRunnerHarness{
+		srv:     srv,
+		httpSrv: httpSrv,
+		state:   b.State(),
+		runners: cp.RunnerDirectory(),
+		cancel:  cancel,
+	}
+	t.Cleanup(func() { h.stop() })
+	return h
 }

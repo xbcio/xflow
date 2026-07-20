@@ -9,7 +9,7 @@ Redis/Asynq-backed execution.
 
 - **Task Scheduling**: Asynq (Redis-based)
 - **Expression Engine**: Expr (expr-lang/expr)
-- **State Storage**: Redis + PostgreSQL/MySQL
+- **State Storage**: Redis + MySQL (PostgreSQL: no typed error classifier or runtime evidence yet — see RELEASE-GATES §A3; not in G0/G1 support scope)
 - **Monitoring**: Prometheus + Grafana
 - **Tracing**: OpenTelemetry
 - **API**: gRPC + HTTP
