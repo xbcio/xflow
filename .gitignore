@@ -28,6 +28,9 @@ test_output.txt
 # A0 fault matrix artifact is generated per CI run; never check it in.
 test/integration/testdata/a0_fault_matrix_report.json
 
+# G1 production e2e artifact is generated per CI run; never check it in.
+test/integration/testdata/g1_e2e_report.json
+
 # env file
 .env
 

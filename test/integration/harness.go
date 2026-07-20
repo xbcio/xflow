@@ -108,6 +108,8 @@ func requireKafka(t *testing.T) []string {
 // flushAsynqKeys deletes only asynq's own key namespace ("asynq:*") rather
 // than the whole Redis DB, so it does not disturb keys other integration
 // tests (e.g. leader election) may be using concurrently in the same DB.
+// flushAsynqKeys deletes all asynq:* keys so a stale task from a prior crashed
+// run cannot race the consumer this harness starts.
 func flushAsynqKeys(ctx context.Context, t *testing.T, rdb *redis.Client) {
 	t.Helper()
 	var cursor uint64
@@ -119,6 +121,30 @@ func flushAsynqKeys(ctx context.Context, t *testing.T, rdb *redis.Client) {
 		if len(keys) > 0 {
 			if err := rdb.Del(ctx, keys...).Err(); err != nil {
 				t.Fatalf("del asynq keys: %v", err)
+			}
+		}
+		cursor = next
+		if cursor == 0 {
+			return
+		}
+	}
+}
+
+// flushXflowKeys deletes all xflow:* keys so stale runner directory entries,
+// assignment queues, and execution state from prior crashed runs cannot
+// interfere with the current test. Used by the production harness which
+// accumulates state across subtests and needs a clean slate.
+func flushXflowKeys(ctx context.Context, t *testing.T, rdb *redis.Client) {
+	t.Helper()
+	var cursor uint64
+	for {
+		keys, next, err := rdb.Scan(ctx, cursor, "xflow:*", 500).Result()
+		if err != nil {
+			t.Fatalf("scan xflow keys: %v", err)
+		}
+		if len(keys) > 0 {
+			if err := rdb.Del(ctx, keys...).Err(); err != nil {
+				t.Fatalf("del xflow keys: %v", err)
 			}
 		}
 		cursor = next

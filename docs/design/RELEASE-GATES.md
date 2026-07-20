@@ -53,6 +53,8 @@ xflow 采用分层发布门槛，不再用单个测试替代完整 release gate�
 
 > G1 退出条件见修复设计 §12。即便 B1/B3 单项完成，G0 未完成前不得宣称 G1。
 
+> **G1 生产 e2e 覆盖（T10）**：`test/integration/g1_production_e2e_test.go` 在真实 Redis + MySQL 下覆盖 production-auth 全链路：PrincipalAuth + TenantAwareAuthorizer + SQLAuditSink + AuditReconcileWorker + Metrics + Tracer + RequireWorkflowAuth + WithManagement。HTTP 入口 submit/invoke/signal/revoke-signal/cancel 的 allow/deny 矩阵 + 跨租户 IDOR → 404（不泄漏存在性）；gRPC runner Connect + ReportResult 端到端；B1 trace graph 5 span 全部存在（submit/dispatch/execute/report/commit），W3C parentage 有已知 gap（pollTask 未注入 tenant context 到 ExecutionTraceCarrier，dispatch span 可能不继承 submit trace——production 代码修复超 T10 范围）；复杂审批 DAG（会签 quorum、timer、cancel、cyclic reset、重复 signal → 409）；dead-letter replay HTTP 合约；T9 reconcile 幂等；metrics scrape；降级幂等断言（at-least-once，host-side dedup，`>=1` 不写 `==1` 伪断言）。artifact JSON `test/integration/testdata/g1_e2e_report.json` 不入库（.gitignore + os.Remove）。此测试覆盖既有行为，不修改 engine/backend 生产代码；G1 整体状态仍为 ⛔（依赖 G0 + B1 + B3 三层证据全部满足）。
+
 ### G2 — 多副本 HA / 多租户 ⏳ 未完成
 
 | 项 | 状态 | 说明 |
