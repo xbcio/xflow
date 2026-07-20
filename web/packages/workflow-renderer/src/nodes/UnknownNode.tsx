@@ -20,6 +20,15 @@ function collectUnknownPorts(id: string, diagnostics?: Diagnostic[]): string[] {
   return Array.from(ports);
 }
 
+function targetHandleIds(data: NodeData): string[] | undefined {
+  const inputs = data.nodeDef.inputs;
+  if (!inputs || inputs.length === 0) return undefined;
+  const named = inputs
+    .map((input) => input.name)
+    .filter((name): name is string => typeof name === "string" && name.length > 0);
+  return named.length > 0 ? named : undefined;
+}
+
 export const UnknownNode = React.memo(function UnknownNode({
   id,
   data,
@@ -33,6 +42,7 @@ export const UnknownNode = React.memo(function UnknownNode({
   const hasError = diagnostics.some((d) => d.severity === "error");
   const hasWarning = diagnostics.some((d) => d.severity === "warning");
   const unknownPorts = collectUnknownPorts(id, diagnostics);
+  const targetIds = targetHandleIds(data);
 
   return (
     <div
@@ -52,7 +62,23 @@ export const UnknownNode = React.memo(function UnknownNode({
       role="status"
       aria-label={`Unknown node type: ${type}`}
     >
-      <Handle type="target" position={RfPosition.Left} className="xf-port xf-port--target" />
+      {targetIds ? (
+        targetIds.map((handleId) => (
+          <Handle
+            key={handleId}
+            type="target"
+            position={RfPosition.Left}
+            id={handleId}
+            className="xf-port xf-port--target"
+          />
+        ))
+      ) : (
+        <Handle
+          type="target"
+          position={RfPosition.Left}
+          className="xf-port xf-port--target"
+        />
+      )}
       <div className="xf-node__header">
         <span className="xf-node__icon" aria-hidden="true">!</span>
         <span className="xf-node__name" title={name}>{name}</span>
@@ -82,6 +108,7 @@ export const UnknownNode = React.memo(function UnknownNode({
         )}
         <span className="xf-node__hint">unknown node</span>
       </div>
+      {/* Single default source Handle (no id); see GenericNode for rationale. */}
       <Handle type="source" position={RfPosition.Right} className="xf-port xf-port--source" />
     </div>
   );

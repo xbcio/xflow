@@ -22,6 +22,13 @@ export interface DanglingTarget {
   input?: string;
 }
 
+export interface MissingSource {
+  source: string;
+  port: string;
+  target: string;
+  input?: string;
+}
+
 export interface FlowViewModel {
   nodes: Array<{
     id: string;
@@ -38,6 +45,12 @@ export interface FlowViewModel {
   }>;
   /** Edges that reference a target node not present in the workflow definition. */
   danglingTargets: DanglingTarget[];
+  /**
+   * Edges whose source node is not present in the workflow definition. These
+   * are NOT emitted to React Flow (a missing source node would produce a
+   * "couldn't create edge" warning); they surface only for diagnostics.
+   */
+  missingSources: MissingSource[];
 }
 
 export type ResolvedNodeType =

@@ -1,9 +1,22 @@
-/* React Flow base styles imported at build-time by consumers; scoped below. */
+/*
+ * React Flow base styles are imported globally. This is a known isolation
+ * limitation: `@import url("@xyflow/react/dist/style.css")` is a side-effect
+ * import that pollutes the global `.react-flow__*` namespace. F0-B3 scopes
+ * our own `.xf-*` classes under `.xflow-root` so they cannot leak into or be
+ * affected by host application styles. Full third-party CSS isolation
+ * (Shadow DOM or build-time prefixing of `.react-flow__*`) is deferred to
+ * Embed hardening — do NOT assume the renderer is fully CSS-isolated today.
+ */
 @import url("@xyflow/react/dist/style.css");
 
 /* Self-contained static CSS for the workflow renderer.
  * No Tailwind @config / @tailwind directives: this file is consumed as plain CSS
  * by apps with or without Tailwind, and the xf-* classes are defined explicitly.
+ *
+ * All `.xf-*` selectors are scoped under `.xflow-root` so a host application
+ * cannot accidentally pick up renderer styles, and any `.xf-*` classes the
+ * host happens to define will not affect the renderer. The `:where()` wrapper
+ * keeps specificity at 0,1,0 so host overrides remain easy.
  */
 .xflow-root {
   --xf-color-running: #3b82f6;
@@ -24,6 +37,12 @@
   position: relative;
 }
 
+/* Overlay position variables: hosts can override these on .xflow-root (or any
+ * ancestor — CSS variables are inherited) to relocate the canvas overlays
+ * without forking the components. Defaults keep the historical positions
+ * (top: 12, left/right: 12). We do NOT declare the variables on .xflow-root
+ * itself so an override set on an ancestor wrapper is inherited cleanly. */
+
 .xflow-root .react-flow {
   background: transparent;
 }
@@ -32,7 +51,7 @@
   font-size: 10px;
 }
 
-.xf-node {
+:where(.xflow-root) .xf-node {
   display: flex;
   flex-direction: column;
   width: 180px;
@@ -48,38 +67,38 @@
   overflow: hidden;
 }
 
-.xf-node--selected {
+:where(.xflow-root) .xf-node--selected {
   outline: 2px solid var(--xf-color-running);
   outline-offset: 2px;
 }
 
-.xf-node--running {
+:where(.xflow-root) .xf-node--running {
   border-color: var(--xf-color-running);
 }
 
-.xf-node--completed {
+:where(.xflow-root) .xf-node--completed {
   border-color: var(--xf-color-completed);
 }
 
-.xf-node--failed,
-.xf-node--error {
+:where(.xflow-root) .xf-node--failed,
+:where(.xflow-root) .xf-node--error {
   border-color: var(--xf-color-failed);
 }
 
-.xf-node--warning {
+:where(.xflow-root) .xf-node--warning {
   border-color: var(--xf-color-warning);
 }
 
-.xf-node--suspended {
+:where(.xflow-root) .xf-node--suspended {
   border-color: var(--xf-color-suspended);
 }
 
-.xf-node--unknown {
+:where(.xflow-root) .xf-node--unknown {
   border-color: var(--xf-color-unknown);
   background: #f9fafb;
 }
 
-.xf-node__header {
+:where(.xflow-root) .xf-node__header {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -88,7 +107,7 @@
   background: #f3f4f6;
 }
 
-.xf-node__icon {
+:where(.xflow-root) .xf-node__icon {
   flex-shrink: 0;
   width: 16px;
   height: 16px;
@@ -102,7 +121,7 @@
   font-weight: 700;
 }
 
-.xf-node__name {
+:where(.xflow-root) .xf-node__name {
   flex: 1 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -110,19 +129,19 @@
   font-weight: 600;
 }
 
-.xf-node__body {
+:where(.xflow-root) .xf-node__body {
   display: flex;
   flex-direction: column;
   gap: 2px;
   padding: 6px 10px;
 }
 
-.xf-node__type {
+:where(.xflow-root) .xf-node__type {
   color: #6b7280;
   font-size: 11px;
 }
 
-.xf-node__status {
+:where(.xflow-root) .xf-node__status {
   display: inline-block;
   margin-top: 2px;
   padding: 1px 6px;
@@ -133,13 +152,13 @@
   text-transform: uppercase;
 }
 
-.xf-node__hint {
+:where(.xflow-root) .xf-node__hint {
   color: var(--xf-color-unknown);
   font-size: 10px;
   font-style: italic;
 }
 
-.xf-node__diagnostic-badge {
+:where(.xflow-root) .xf-node__diagnostic-badge {
   flex-shrink: 0;
   min-width: 16px;
   height: 16px;
@@ -154,14 +173,14 @@
   font-weight: 700;
 }
 
-.xf-node__unknown-ports {
+:where(.xflow-root) .xf-node__unknown-ports {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
   margin-top: 4px;
 }
 
-.xf-port {
+:where(.xflow-root) .xf-port {
   width: 8px;
   height: 8px;
   border-radius: 50%;
@@ -169,15 +188,15 @@
   border: 1px solid #ffffff;
 }
 
-.xf-port--target {
+:where(.xflow-root) .xf-port--target {
   left: -4px;
 }
 
-.xf-port--source {
+:where(.xflow-root) .xf-port--source {
   right: -4px;
 }
 
-.xf-port--unknown {
+:where(.xflow-root) .xf-port--unknown {
   width: 12px;
   height: 12px;
   background: var(--xf-color-error);
@@ -189,7 +208,7 @@
   border-radius: 2px;
 }
 
-.xf-overlay {
+:where(.xflow-root) .xf-overlay {
   position: absolute;
   z-index: 5;
   display: flex;
@@ -206,30 +225,31 @@
   flex-wrap: wrap;
 }
 
-.xf-overlay--selection {
-  top: 12px;
-  left: 12px;
+:where(.xflow-root) .xf-overlay--selection {
+  top: var(--xf-overlay-selection-top, 12px);
+  left: var(--xf-overlay-selection-left, 12px);
 }
 
-.xf-overlay--execution {
-  top: 12px;
+:where(.xflow-root) .xf-overlay--execution {
+  top: var(--xf-overlay-exec-top, 12px);
   left: 50%;
   transform: translateX(-50%);
 }
 
-.xf-overlay--diagnostic {
-  top: 12px;
-  right: 12px;
+:where(.xflow-root) .xf-overlay--diagnostic {
+  top: var(--xf-overlay-diag-top, 12px);
+  right: var(--xf-overlay-diag-right, 12px);
+  bottom: var(--xf-overlay-diag-bottom, auto);
 }
 
-.xf-overlay__label {
+:where(.xflow-root) .xf-overlay__label {
   font-weight: 600;
   color: #6b7280;
   text-transform: uppercase;
   letter-spacing: 0.3px;
 }
 
-.xf-overlay__value {
+:where(.xflow-root) .xf-overlay__value {
   min-width: 18px;
   height: 18px;
   padding: 0 5px;
@@ -242,7 +262,7 @@
   font-weight: 700;
 }
 
-.xf-overlay__detail {
+:where(.xflow-root) .xf-overlay__detail {
   color: #6b7280;
   white-space: nowrap;
   overflow: hidden;
@@ -250,7 +270,7 @@
   max-width: 140px;
 }
 
-.xf-overlay__list {
+:where(.xflow-root) .xf-overlay__list {
   list-style: none;
   margin: 4px 0 0;
   padding: 0;
@@ -260,12 +280,12 @@
   gap: 4px;
 }
 
-.xf-overlay__list > li {
+:where(.xflow-root) .xf-overlay__list > li {
   display: flex;
   align-items: center;
   gap: 6px;
 }
 
-.xf-overlay__list-text {
+:where(.xflow-root) .xf-overlay__list-text {
   color: #6b7280;
 }

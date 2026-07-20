@@ -153,9 +153,97 @@ describe("workflowToFlow", () => {
     expect(flow.edges).toHaveLength(0);
   });
 
-  it("preserves named source ports", () => {
+  it("preserves named source ports as undefined sourceHandle", () => {
     const flow = workflowToFlow(approvalDef);
     const approvedEdge = flow.edges.find((e) => e.source === "approve")!;
-    expect(approvedEdge.sourceHandle).toBe("approved");
+    // Node defs declare only output_schema, never named output ports, so
+    // GenericNode renders a single default source Handle (no id). transform
+    // must set sourceHandle=undefined even for named source ports, otherwise
+    // React Flow cannot match the edge to a Handle and warns.
+    expect(approvedEdge.sourceHandle).toBeUndefined();
+    // The named input port is still preserved on the target side.
+    expect(approvedEdge.targetHandle).toBe("to");
+  });
+
+  it("normalizes main/default/empty target input to undefined", () => {
+    const def: WorkflowDef = {
+      name: "port-normalization",
+      nodes: [
+        { name: "a", type: "xflow.start" },
+        { name: "b", type: "xflow.end" },
+        { name: "c", type: "xflow.end" },
+        { name: "d", type: "xflow.end" },
+      ],
+      connections: {
+        a: {
+          default: [
+            { node: "b", input: "main" },
+            { node: "c", input: "default" },
+            { node: "d", input: "" },
+          ],
+        },
+      },
+    };
+    const flow = workflowToFlow(def);
+    expect(flow.edges).toHaveLength(3);
+    for (const edge of flow.edges) {
+      expect(edge.targetHandle).toBeUndefined();
+      expect(edge.sourceHandle).toBeUndefined();
+    }
+  });
+
+  it("keeps named input port as targetHandle", () => {
+    const def: WorkflowDef = {
+      name: "named-input",
+      nodes: [
+        { name: "src", type: "xflow.start" },
+        { name: "dst", type: "xflow.log", inputs: [{ name: "message", required: true }] },
+      ],
+      connections: {
+        src: { default: [{ node: "dst", input: "message" }] },
+      },
+    };
+    const flow = workflowToFlow(def);
+    expect(flow.edges).toHaveLength(1);
+    expect(flow.edges[0].targetHandle).toBe("message");
+    expect(flow.edges[0].sourceHandle).toBeUndefined();
+  });
+
+  it("records missing source nodes without emitting dangling edges", () => {
+    const def: WorkflowDef = {
+      name: "missing-source",
+      nodes: [{ name: "b", type: "xflow.end" }],
+      connections: {
+        ghost: {
+          default: [{ node: "b", input: "in" }],
+        },
+      },
+    };
+    const flow = workflowToFlow(def);
+    expect(flow.edges).toHaveLength(0);
+    expect(flow.missingSources).toHaveLength(1);
+    expect(flow.missingSources[0]).toEqual({
+      source: "ghost",
+      port: "default",
+      target: "b",
+      input: "in",
+    });
+  });
+
+  it("missing source and dangling target are tracked separately", () => {
+    const def: WorkflowDef = {
+      name: "both-missing",
+      nodes: [{ name: "real", type: "xflow.start" }],
+      connections: {
+        ghost: { default: [{ node: "real" }] },
+        real: { default: [{ node: "phantom" }] },
+      },
+    };
+    const flow = workflowToFlow(def);
+    expect(flow.edges).toHaveLength(0);
+    expect(flow.missingSources).toHaveLength(1);
+    expect(flow.missingSources[0].source).toBe("ghost");
+    expect(flow.danglingTargets).toHaveLength(1);
+    expect(flow.danglingTargets[0].target).toBe("phantom");
   });
 });

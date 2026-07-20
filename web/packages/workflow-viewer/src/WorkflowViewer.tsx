@@ -90,7 +90,18 @@ export function WorkflowViewer({
         height: "100%",
         position: "relative",
         overflow: "hidden",
-      }}
+        // Explicitly reposition canvas overlays so they do not collide with
+        // the search panel (top-left) or detail panel (top-right). The
+        // selection overlay is pushed below the search box; the diagnostic
+        // overlay is moved to the bottom-right corner so it never overlaps
+        // the detail panel (which lives at top-right and may extend full
+        // height). These are CSS variables consumed by styles.css in
+        // @xflow/workflow-renderer.
+        "--xf-overlay-selection-top": "60px",
+        "--xf-overlay-exec-top": "60px",
+        "--xf-overlay-diag-top": "auto",
+        "--xf-overlay-diag-bottom": "12px",
+      } as React.CSSProperties}
       className={className}
       data-testid="workflow-viewer"
     >

@@ -115,12 +115,24 @@ function autoLayout(def: WorkflowDef): Record<string, { x: number; y: number }> 
   return positions;
 }
 
+// Canonical "default" port names: these normalize to undefined so React Flow
+// uses the single default Handle (no id) on a node. Any other value is a
+// named port and must match a Handle with that id.
+const DEFAULT_PORT_NAMES = new Set(["", "default", "main"]);
+
+function normalizePort(port: string | undefined): string | undefined {
+  if (port === undefined) return undefined;
+  if (DEFAULT_PORT_NAMES.has(port)) return undefined;
+  return port;
+}
+
 function expandEdges(
   connections: Connections,
   nodeNames: Set<string>
-): Pick<FlowViewModel, "edges" | "danglingTargets"> {
+): Pick<FlowViewModel, "edges" | "danglingTargets" | "missingSources"> {
   const edges: FlowViewModel["edges"] = [];
   const danglingTargets: FlowViewModel["danglingTargets"] = [];
+  const missingSources: FlowViewModel["missingSources"] = [];
   let edgeIndex = 0;
 
   function edgeId(conn: Connection, source: string, port: string, index: number): string {
@@ -130,11 +142,27 @@ function expandEdges(
   }
 
   for (const [sourceNode, ports] of Object.entries(connections ?? {})) {
+    // If the source node itself isn't in the workflow, record every outgoing
+    // connection as a missing source. We must NOT emit dangling edges whose
+    // source React Flow cannot resolve to a node — those would surface as
+    // "couldn't create edge" warnings.
+    const sourceMissing = !nodeNames.has(sourceNode);
+
     for (const [port, targets] of Object.entries(ports)) {
       for (let i = 0; i < (targets ?? []).length; i++) {
         const conn = targets[i];
         const targetNode = conn.node;
         if (!targetNode) continue;
+
+        if (sourceMissing) {
+          missingSources.push({
+            source: sourceNode,
+            port,
+            target: targetNode,
+            input: conn.input,
+          });
+          continue;
+        }
 
         if (!nodeNames.has(targetNode)) {
           danglingTargets.push({
@@ -149,14 +177,19 @@ function expandEdges(
         edges.push({
           id: edgeId(conn, sourceNode, port, i),
           source: sourceNode,
-          sourceHandle: port === "default" || port === "" ? undefined : port,
+          // Node defs declare only `output_schema`, not named output ports.
+          // GenericNode/UnknownNode render a single default source Handle (no
+          // id), so every edge must use sourceHandle=undefined. Named source
+          // ports in the workflow def are recorded for diagnostics but the
+          // rendered edge uses the default Handle.
+          sourceHandle: undefined,
           target: targetNode,
-          targetHandle: conn.input ?? undefined,
+          targetHandle: normalizePort(conn.input),
         });
       }
     }
   }
-  return { edges, danglingTargets };
+  return { edges, danglingTargets, missingSources };
 }
 
 export function workflowToFlow(def: WorkflowDef): FlowViewModel {
@@ -180,8 +213,11 @@ export function workflowToFlow(def: WorkflowDef): FlowViewModel {
     });
   }
 
-  const { edges, danglingTargets } = expandEdges(def.connections ?? {}, nodeNames);
-  return { nodes, edges, danglingTargets };
+  const { edges, danglingTargets, missingSources } = expandEdges(
+    def.connections ?? {},
+    nodeNames
+  );
+  return { nodes, edges, danglingTargets, missingSources };
 }
 
 /**
