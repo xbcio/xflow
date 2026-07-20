@@ -1040,24 +1040,44 @@ func TestListDeadLettersDeleteDuringPagination(t *testing.T) {
 	}
 }
 
-// realRedisAddr returns the real Redis address from the test env, or skips.
+// realRedisAddr returns the real Redis address from the test env. Under
+// XFLOW_REQUIRE_REDIS_INTEGRATION=1 (CI gating mode) it fails the test when
+// Redis is unreachable, so a missing dependency cannot be mistaken for a
+// passing gate. Otherwise it skips, preserving local dev ergonomics.
 func realRedisAddr(t *testing.T) string {
 	t.Helper()
 	addr := os.Getenv("XFLOW_TEST_REDIS_ADDR")
 	if addr == "" {
+		if os.Getenv("XFLOW_REQUIRE_REDIS_INTEGRATION") == "1" {
+			t.Fatal("XFLOW_REQUIRE_REDIS_INTEGRATION=1: XFLOW_TEST_REDIS_ADDR not set (use 127.0.0.1:6380)")
+		}
 		t.Skipf("XFLOW_TEST_REDIS_ADDR not set; skipping real-Redis dead-letter regression")
+	}
+	c := redis.NewClient(&redis.Options{Addr: addr})
+	defer func() { _ = c.Close() }()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := c.Ping(ctx).Err(); err != nil {
+		if os.Getenv("XFLOW_REQUIRE_REDIS_INTEGRATION") == "1" {
+			t.Fatalf("XFLOW_REQUIRE_REDIS_INTEGRATION=1: redis unavailable at %s: %v", addr, err)
+		}
+		t.Skipf("real Redis at %s unreachable: %v", addr, err)
 	}
 	return addr
 }
 
 // newRealRedisState builds a Store backed by a real Redis for regression.
 // It uses a unique execution namespace per test (caller-controlled keys) so
-// cross-test interference is impossible.
+// cross-test interference is impossible. Under XFLOW_REQUIRE_REDIS_INTEGRATION=1
+// a ping failure is fatal (no silent skip).
 func newRealRedisState(t *testing.T, addr string) *Store {
 	t.Helper()
 	rdb := redis.NewClient(&redis.Options{Addr: addr})
 	t.Cleanup(func() { _ = rdb.Close() })
 	if err := rdb.Ping(context.Background()).Err(); err != nil {
+		if os.Getenv("XFLOW_REQUIRE_REDIS_INTEGRATION") == "1" {
+			t.Fatalf("XFLOW_REQUIRE_REDIS_INTEGRATION=1: redis unavailable at %s: %v", addr, err)
+		}
 		t.Skipf("real Redis at %s unreachable: %v", addr, err)
 	}
 	return New(rdb, nil, time.Minute)
@@ -1114,6 +1134,19 @@ func TestListDeadLettersRealRedisMultiPage(t *testing.T) {
 		t.Fatalf("saw %d unique entries, want %d", len(seen), total)
 	}
 
+	// Seed the node-level guard state so the replay at the end of this test
+	// can proceed (node:status=running, node:meta activation_id=1 match the
+	// dead-meta activation seeded by seedDeadLettersBulk). Without this, the
+	// fail-closed guard added in 2026-07-20 correctly rejects with
+	// rejected_metadata_missing — this test exercises pagination, not the
+	// fail-closed path.
+	if err := state.rdb.Set(ctx, nodeStatusKey(tenant.DefaultTenant, id, "review"), "running", time.Minute).Err(); err != nil {
+		t.Fatalf("set node status: %v", err)
+	}
+	if err := state.rdb.HSet(ctx, nodeMetaKey(tenant.DefaultTenant, id, "review"), "activation_id", 1).Err(); err != nil {
+		t.Fatalf("set node meta: %v", err)
+	}
+
 	// Replay one entry against the real Redis to exercise the full Lua path.
 	res, err := state.ReplayDeadLetter(ctx, replayReq(id, "exec0", "req-real"))
 	if err != nil {
@@ -1128,5 +1161,273 @@ func TestListDeadLettersRealRedisMultiPage(t *testing.T) {
 	}
 	if again.Outcome != engine.ReplayAlreadyReplayed || again.AuditID != res.AuditID {
 		t.Fatalf("retry = %+v, want already_replayed with same audit_id %q", again, res.AuditID)
+	}
+}
+
+// seedDeadLetterFullGuard seeds a dead-letter entry WITH the per-entry meta
+// hash AND all node-level guard state (node:status=running,
+// node:meta.activation_id=1, exec:status=running). The caller then breaks one
+// guard key to exercise a specific fail-closed path. Used by the
+// missing-guard-state regression matrix.
+func seedDeadLetterFullGuard(t *testing.T, state *Store, id types.ExecutionID, entryID string) {
+	t.Helper()
+	ctx := context.Background()
+	if err := state.CreateExecution(ctx, &engine.ExecutionSnapshot{
+		ID:     id,
+		Status: types.ExecutionStatusRunning,
+	}); err != nil {
+		t.Fatalf("CreateExecution: %v", err)
+	}
+	entry := engine.OutboxEntry{
+		ID: entryID,
+		Task: engine.Task{
+			ExecutionID:  id,
+			NodeName:     "review",
+			NodeIdx:      1,
+			Type:         engine.TaskTypeNodeExec,
+			ActivationID: 1,
+		},
+	}
+	body, err := marshalRedisOutboxEntry(entryID, entry.Task, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := state.rdb.HSet(ctx, outboxDeadBodyKey(tenant.DefaultTenant, id), entryID, body).Err(); err != nil {
+		t.Fatalf("HSet dead body: %v", err)
+	}
+	if err := state.rdb.ZAdd(ctx, outboxDeadKey(tenant.DefaultTenant, id), redis.Z{Score: float64(time.Now().UTC().UnixMilli()), Member: entryID}).Err(); err != nil {
+		t.Fatalf("ZAdd dead: %v", err)
+	}
+	if err := state.rdb.HSet(ctx, outboxDeadMetaKey(tenant.DefaultTenant, id, entryID), "node", "review", "activation", "1").Err(); err != nil {
+		t.Fatalf("HSet dead meta: %v", err)
+	}
+	// Eligible non-terminal node status with a matching activation_id — i.e. a
+	// baseline where replay would otherwise succeed.
+	if err := state.rdb.Set(ctx, nodeStatusKey(tenant.DefaultTenant, id, "review"), "running", time.Minute).Err(); err != nil {
+		t.Fatalf("set node status: %v", err)
+	}
+	if err := state.rdb.HSet(ctx, nodeMetaKey(tenant.DefaultTenant, id, "review"), "activation_id", 1).Err(); err != nil {
+		t.Fatalf("set node meta: %v", err)
+	}
+}
+
+// TestReplayDeadLetterFailClosedOnMissingNodeGuardState is the formal regression
+// for the 2026-07-20 reacceptance finding: the replay Lua must NOT silently
+// move an entry when node guard state is missing or unrecognised. Each subtest
+// breaks one guard key, then asserts outcome 7 (rejected_metadata_missing), no
+// dead->ready move, an immutable receipt, and recoverable audit_id on retry
+// with the same RequestID. Real Redis only (no miniredis) per brief.
+func TestReplayDeadLetterFailClosedOnMissingNodeGuardState(t *testing.T) {
+	addr := realRedisAddr(t)
+	ctx := context.Background()
+
+	cases := []struct {
+		name    string
+		execID   string
+		prepare  func(t *testing.T, state *Store, id types.ExecutionID)
+		// wantOutcome==0 means "any non-replayed outcome is acceptable" (used
+		// for the execution-status-missing case, which is outcome 3).
+		wantOutcome engine.DeadLetterReplayOutcome
+		wantExact   bool
+	}{
+		{
+			name:        "missing_execution_status",
+			execID:       "dl-guard-execstatus",
+			wantOutcome: engine.ReplayRejectedInactive,
+			wantExact:   true,
+			prepare: func(t *testing.T, state *Store, id types.ExecutionID) {
+				if err := state.rdb.Del(ctx, execKey(tenant.DefaultTenant, id, "status")).Err(); err != nil {
+					t.Fatalf("del exec status: %v", err)
+				}
+			},
+		},
+		{
+			name:        "missing_node_status",
+			execID:       "dl-guard-nodestatus",
+			wantOutcome: engine.ReplayRejectedMetadataMissing,
+			wantExact:   true,
+			prepare: func(t *testing.T, state *Store, id types.ExecutionID) {
+				if err := state.rdb.Del(ctx, nodeStatusKey(tenant.DefaultTenant, id, "review")).Err(); err != nil {
+					t.Fatalf("del node status: %v", err)
+				}
+			},
+		},
+		{
+			name:        "missing_node_meta",
+			execID:       "dl-guard-nodemeta",
+			wantOutcome: engine.ReplayRejectedMetadataMissing,
+			wantExact:   true,
+			prepare: func(t *testing.T, state *Store, id types.ExecutionID) {
+				if err := state.rdb.Del(ctx, nodeMetaKey(tenant.DefaultTenant, id, "review")).Err(); err != nil {
+					t.Fatalf("del node meta: %v", err)
+				}
+			},
+		},
+		{
+			name:        "missing_activation_id_field",
+			execID:       "dl-guard-actfield",
+			wantOutcome: engine.ReplayRejectedMetadataMissing,
+			wantExact:   true,
+			prepare: func(t *testing.T, state *Store, id types.ExecutionID) {
+				if err := state.rdb.HDel(ctx, nodeMetaKey(tenant.DefaultTenant, id, "review"), "activation_id").Err(); err != nil {
+					t.Fatalf("hdel activation_id: %v", err)
+				}
+			},
+		},
+		{
+			name:        "unknown_node_status_value",
+			execID:       "dl-guard-bogusstatus",
+			wantOutcome: engine.ReplayRejectedMetadataMissing,
+			wantExact:   true,
+			prepare: func(t *testing.T, state *Store, id types.ExecutionID) {
+				if err := state.rdb.Set(ctx, nodeStatusKey(tenant.DefaultTenant, id, "review"), "bogus", time.Minute).Err(); err != nil {
+					t.Fatalf("set bogus node status: %v", err)
+				}
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			state := newRealRedisState(t, addr)
+			id := types.ExecutionID(tc.execID)
+			entryID := "execute/" + tc.execID + "/review/1"
+			seedDeadLetterFullGuard(t, state, id, entryID)
+			tc.prepare(t, state, id)
+
+			first, err := state.ReplayDeadLetter(ctx, replayReq(id, entryID, "req-guard"))
+			if err != nil {
+				t.Fatalf("first replay: %v", err)
+			}
+			if first.Outcome == engine.ReplayReplayed {
+				t.Fatalf("outcome = replayed; fail-open: missing guard state must not move the entry")
+			}
+			if tc.wantExact && first.Outcome != tc.wantOutcome {
+				t.Fatalf("outcome = %q, want %q", first.Outcome, tc.wantOutcome)
+			}
+			if first.AuditID == "" {
+				t.Fatalf("rejected replay must write a receipt (audit_id empty)")
+			}
+			if first.NodeID != "review" || first.ActivationID != "1" {
+				t.Fatalf("result = %+v, want node=review activation=1", first)
+			}
+
+			// dead/ready/attempts invariants: dead still 1, ready still 0.
+			dead, err := state.ListDeadLetters(ctx, id, engine.DeadLetterPage{Limit: 10})
+			if err != nil {
+				t.Fatalf("ListDeadLetters: %v", err)
+			}
+			if len(dead.Entries) != 1 {
+				t.Fatalf("dead-letter entries = %d, want 1 (fail-closed must not move)", len(dead.Entries))
+			}
+			ready, err := state.ListOutbox(ctx, id, time.Now().Add(time.Second), 10)
+			if err != nil {
+				t.Fatalf("ListOutbox: %v", err)
+			}
+			if len(ready) != 0 {
+				t.Fatalf("ready entries = %d, want 0 (fail-closed must not enqueue)", len(ready))
+			}
+			// attempts must be unchanged: dead-letter has no attempts hash
+			// after move-to-dead, and fail-closed must not reset it.
+			attempts, err := state.rdb.HExists(ctx, outboxAttemptsKey(tenant.DefaultTenant, id), entryID).Result()
+			if err != nil {
+				t.Fatalf("HExists attempts: %v", err)
+			}
+			if attempts {
+				t.Fatalf("attempts entry must not exist after fail-closed rejection")
+			}
+
+			// Receipt must not record token/payload — only operational metadata.
+			receiptHash, err := state.rdb.HGetAll(ctx, outboxReplayReceiptKey(tenant.DefaultTenant, id, "req-guard")).Result()
+			if err != nil {
+				t.Fatalf("HGetAll receipt: %v", err)
+			}
+			if len(receiptHash) == 0 {
+				t.Fatalf("receipt must be present after rejection")
+			}
+			for _, k := range []string{"body", "payload", "token", "task"} {
+				if v, ok := receiptHash[k]; ok && v != "" {
+					t.Fatalf("receipt must not record sensitive field %q (got %q)", k, v)
+				}
+			}
+
+			// Same RequestID retry recovers the same outcome + audit_id.
+			second, err := state.ReplayDeadLetter(ctx, replayReq(id, entryID, "req-guard"))
+			if err != nil {
+				t.Fatalf("retry replay: %v", err)
+			}
+			if second.Outcome != first.Outcome {
+				t.Fatalf("retry outcome = %q, want %q (receipt must recover)", second.Outcome, first.Outcome)
+			}
+			if second.AuditID != first.AuditID {
+				t.Fatalf("retry audit_id = %q, want original %q", second.AuditID, first.AuditID)
+			}
+		})
+	}
+}
+
+// TestReplayDeadLetterFailClosedConcurrentNoLeak verifies that two concurrent
+// replays with distinct RequestIDs against the same guard-state-missing entry
+// cannot leak one through as replayed. Both must return a rejection
+// (outcome 7); dead must remain 1, ready must remain 0. Real Redis only.
+func TestReplayDeadLetterFailClosedConcurrentNoLeak(t *testing.T) {
+	addr := realRedisAddr(t)
+	state := newRealRedisState(t, addr)
+	ctx := context.Background()
+	id := types.ExecutionID("dl-guard-concurrent-" + time.Now().Format("150405.000000000"))
+	entryID := "execute/" + string(id) + "/review/1"
+	seedDeadLetterFullGuard(t, state, id, entryID)
+
+	// Break the guard: delete node:status so replay must fail-closed.
+	if err := state.rdb.Del(ctx, nodeStatusKey(tenant.DefaultTenant, id, "review")).Err(); err != nil {
+		t.Fatalf("del node status: %v", err)
+	}
+
+	const n = 8
+	var leaked atomic.Int64
+	var rejected atomic.Int64
+	var wg sync.WaitGroup
+	wg.Add(n)
+	start := make(chan struct{})
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			res, err := state.ReplayDeadLetter(ctx, replayReq(id, entryID, fmtReq(i)+"-guard"))
+			if err != nil {
+				t.Errorf("ReplayDeadLetter[%d]: %v", i, err)
+				return
+			}
+			if res.Outcome == engine.ReplayReplayed {
+				leaked.Add(1)
+				t.Errorf("goroutine %d: outcome = replayed; fail-open under concurrent replay", i)
+				return
+			}
+			rejected.Add(1)
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	if leaked.Load() != 0 {
+		t.Fatalf("leaked replays = %d, want 0 (fail-closed must hold under concurrency)", leaked.Load())
+	}
+	if rejected.Load() != int64(n) {
+		t.Fatalf("rejected = %d, want %d", rejected.Load(), n)
+	}
+
+	dead, err := state.rdb.ZCard(ctx, outboxDeadKey(tenant.DefaultTenant, id)).Result()
+	if err != nil {
+		t.Fatalf("ZCard dead: %v", err)
+	}
+	if dead != 1 {
+		t.Fatalf("dead cardinality = %d, want 1 (no move under fail-closed)", dead)
+	}
+	ready, err := state.rdb.ZCard(ctx, outboxReadyKey(tenant.DefaultTenant, id)).Result()
+	if err != nil {
+		t.Fatalf("ZCard ready: %v", err)
+	}
+	if ready != 0 {
+		t.Fatalf("ready cardinality = %d, want 0 (no enqueue under fail-closed)", ready)
 	}
 }

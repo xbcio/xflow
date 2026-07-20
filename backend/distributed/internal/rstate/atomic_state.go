@@ -294,15 +294,31 @@ return {attempts, 0}
 //   5=rejected_activation_mismatch 6=already_replayed 7=rejected_metadata_missing
 //   0=not_found
 //
-// Fail-closed contract: when the per-entry dead-meta hash is absent or lacks
-// node/activation (a legacy entry), the node/activation guards cannot be
-// evaluated safely, so the script returns outcome 7 (rejected_metadata_missing)
-// WITHOUT moving the entry. An immutable receipt is written for every
+// Outcome 7 (rejected_metadata_missing) covers BOTH:
+//   (a) the per-entry dead-meta hash is absent or lacks node/activation
+//       (a legacy entry written before the meta hash existed); AND
+//   (b) the node-level guard state is missing or unrecognised — i.e. the
+//       node:status key does not exist, holds a value outside the known
+//       terminal ∪ eligible-non-terminal allowlist, or node:meta lacks an
+//       activation_id field. In any of these cases the activation-staleness
+//       guard cannot be evaluated safely, so the entry must NOT move.
+//
+// Fail-closed contract: when any guard state required to evaluate
+// activation-staleness is absent or unrecognised, the script returns outcome 7
+// (rejected_metadata_missing) WITHOUT moving the entry. Terminal node statuses
+// (success/failed/skipped/canceled/continued) remain distinguished as outcome 4
+// (rejected_node_terminal). An immutable receipt is written for every
 // determinable rejection (terminal/inactive/node_terminal/activation_mismatch/
 // metadata_missing) so a retry with the same RequestID recovers the same
 // outcome and AuditID instead of degrading to not_found. The first segment
 // reads the stored outcome (not a hardcoded already_replayed) so rejected
 // receipts recover as the same rejection.
+//
+// Eligible non-terminal node statuses (the only values that proceed to the
+// activation guard): running, committing, waiting — matching the lease-bearing
+// states accepted by resetNodeForRetryWithOutboxLua/revokeLeaseWithOutboxLua.
+// pending/suspended carry no current activation_id, and any other value is
+// treated as corrupt/unknown; both paths fall through to outcome 7.
 //
 // Node status/meta keys are derived inside the script from the dead-meta node
 // name; all keys share the execution hash tag so they are co-located on a
@@ -423,20 +439,33 @@ end
 
 -- 5. Node guard: reject if the node is terminal, or if the entry's activation
 --    no longer matches the node's current activation (stale cyclic re-entry).
+--    Fail-closed: a missing node:status key, an unrecognised status value, or a
+--    missing current activation_id all surface as outcome 7
+--    (rejected_metadata_missing) — the guard state required to safely evaluate
+--    activation staleness is absent, so the entry must NOT move. Only the
+--    eligible non-terminal (lease-bearing) statuses running/committing/waiting
+--    proceed to the activation comparison.
 local nodeStatusKey = keyPrefix .. 'node:' .. nodeName .. ':status'
 local nodeMetaKey   = keyPrefix .. 'node:' .. nodeName .. ':meta'
 local nstatus = redis.call('GET', nodeStatusKey)
-if nstatus then
-    if nstatus == 'success' or nstatus == 'failed' or nstatus == 'skipped'
-       or nstatus == 'canceled' or nstatus == 'continued' then
-        local auditID = requestID .. ':' .. nowMs
-        writeReceipt(receiptKey, 'rejected_node_terminal', nodeName, entryActivation, auditID)
-        return {4, auditID, nodeName, entryActivation}
-    end
+local auditID = requestID .. ':' .. nowMs
+if nstatus == 'success' or nstatus == 'failed' or nstatus == 'skipped'
+   or nstatus == 'canceled' or nstatus == 'continued' then
+    writeReceipt(receiptKey, 'rejected_node_terminal', nodeName, entryActivation, auditID)
+    return {4, auditID, nodeName, entryActivation}
+end
+-- nstatus is false (key absent), or a non-terminal/non-eligible value
+-- (pending/suspended/bogus). Any of these is missing guard state.
+if nstatus ~= 'running' and nstatus ~= 'committing' and nstatus ~= 'waiting' then
+    writeReceipt(receiptKey, 'rejected_metadata_missing', nodeName, entryActivation, auditID)
+    return {7, auditID, nodeName, entryActivation}
 end
 local currentActivation = redis.call('HGET', nodeMetaKey, 'activation_id') or ''
-if currentActivation ~= '' and currentActivation ~= entryActivation then
-    local auditID = requestID .. ':' .. nowMs
+if currentActivation == '' then
+    writeReceipt(receiptKey, 'rejected_metadata_missing', nodeName, entryActivation, auditID)
+    return {7, auditID, nodeName, entryActivation}
+end
+if currentActivation ~= entryActivation then
     writeReceipt(receiptKey, 'rejected_activation_mismatch', nodeName, entryActivation, auditID)
     return {5, auditID, nodeName, entryActivation}
 end
