@@ -314,6 +314,13 @@ func (e *Engine) handleSystemTask(ctx context.Context, task *Task, flush bool) (
 			return true, nil
 		}
 		if node.ActivationID != task.ActivationID {
+			if e.logger != nil {
+				e.logger.Warn("dropped stale advance task",
+					"execution_id", string(task.ExecutionID),
+					"node_name", task.NodeName,
+					"task_activation", task.ActivationID,
+					"node_activation", node.ActivationID)
+			}
 			return true, nil
 		}
 		arrivals := downstreamArrivals(g, task.NodeIdx, node.Port)
