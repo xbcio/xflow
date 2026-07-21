@@ -16,7 +16,11 @@ operator review. This runbook covers detection, inspection, and safe replay.
 - **Activation-safe**: replay rejects an entry whose node is already terminal
   (`rejected_node_terminal`) or whose activation no longer matches the node's
   current activation (`rejected_activation_mismatch`) — a stale cyclic re-entry
-  cannot be resurrected to advance a node that has moved on.
+  cannot be resurrected to advance a node that has moved on. `advance` intents
+  are the exception: an advance entry's source node is necessarily terminal
+  (the commit writes the source terminal and the advance outbox atomically), so
+  a terminal source is the required precondition for replaying an advance;
+  idempotency is the advance marker, not the node status.
 - **Idempotent under request-id**: a retry with the same `--request-id` after a
   lost response returns `already_replayed` with the original `audit_id`, not an
   unprovable `not_found`. Concurrent replays of the same entry collapse to
@@ -41,7 +45,7 @@ operator review. This runbook covers detection, inspection, and safe replay.
 | `not_found` | No dead entry and no prior receipt for this `--request-id`. Stable no-op. |
 | `rejected_terminal` | Execution is already terminal (success/failed/canceled/timeout). |
 | `rejected_inactive` | Execution status key is gone (expired/missing). |
-| `rejected_node_terminal` | The entry's node is already terminal; replaying would advance a node that has moved on. |
+| `rejected_node_terminal` | The entry's node is already terminal; replaying would advance a node that has moved on. Does NOT apply to `advance` intents — an advance entry's source is always terminal (required precondition, idempotent via the advance marker). |
 | `rejected_activation_mismatch` | The entry's activation no longer matches the node's current activation (stale cyclic re-entry). |
 | `unauthorized` | The principal lacks `deadletter.replay` scope (G1 authorizer). Never reaches Redis. |
 | `invalid_request` | Missing required fields or over-length reason (manager layer). Never reaches Redis. |
