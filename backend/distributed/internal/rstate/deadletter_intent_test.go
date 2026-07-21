@@ -203,8 +203,12 @@ func TestReplayDeadLetterLegacyIntentFailClosed(t *testing.T) {
 	ctx := context.Background()
 	id := types.ExecutionID("dl-legacy-no-intent")
 	entryID := "execute/dl-legacy-no-intent/review/1"
-	// seedDeadLetterFullGuard deliberately omits intent (legacy shape).
+	// seedDeadLetterFullGuard now writes intent/task_type; delete them to
+	// simulate legacy shape (no intent) for the migration safety contract.
 	seedDeadLetterFullGuard(t, state, id, entryID)
+	if err := state.rdb.HDel(ctx, outboxDeadMetaKey(tenant.DefaultTenant, id, entryID), "intent", "task_type").Err(); err != nil {
+		t.Fatalf("HDel intent/task_type: %v", err)
+	}
 
 	res, err := state.ReplayDeadLetter(ctx, replayReq(id, entryID, "req-legacy"))
 	if err != nil {
