@@ -1,8 +1,11 @@
 package distributed
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -322,28 +325,176 @@ func (r *recordingLogger) Errorf(format string, args ...any) {
 func (r *recordingLogger) hasError(wantMsg string, wantErr error) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	wantText := wantErr.Error()
 	for _, e := range r.errors {
-		if !contains(e.msg, wantMsg) {
+		if !strings.Contains(e.msg, wantMsg) {
 			continue
 		}
 		for _, a := range e.args {
-			if err, ok := a.(error); ok && errors.Is(err, wantErr) {
-				return true
+			switch v := a.(type) {
+			case error:
+				if errors.Is(v, wantErr) {
+					return true
+				}
+			case string:
+				if strings.Contains(v, wantText) {
+					return true
+				}
 			}
 		}
 	}
 	return false
 }
 
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(substr) == 0 || containsInternal(s, substr))
+// logTextContaining returns the concatenation of all string argument values
+// from the first log entry whose message contains wantMsg, and ok=false if
+// none is found.
+func (r *recordingLogger) logTextContaining(wantMsg string) (string, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, e := range r.errors {
+		if !strings.Contains(e.msg, wantMsg) {
+			continue
+		}
+		var parts []string
+		for _, a := range e.args {
+			if s, ok := a.(string); ok {
+				parts = append(parts, s)
+			}
+		}
+		return strings.Join(parts, " "), true
+	}
+	return "", false
 }
 
-func containsInternal(s, substr string) bool {
-	for i := 0; i+len(substr) <= len(s); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
+// panickingShutdownObserver simulates an observer that panics so the stop path
+// can prove it does not crash shutdown.
+type panickingShutdownObserver struct{}
+
+func (panickingShutdownObserver) OnShutdown(ShutdownReport) {
+	panic("observer boom")
+}
+
+// TestShutdownErrorDeliveredRawToObserver verifies that the observer receives
+// the raw close error unchanged, even when it contains credential substrings.
+func TestShutdownErrorDeliveredRawToObserver(t *testing.T) {
+	transportErr := errors.New("transport close boom: postgres://user:secretPass@db.example.com:5432/xflow?password=dbpass&ak=AKIAIOS&sk=abcd")
+
+	transport := &closeErrAfterStartTransport{closeErr: transportErr}
+	pool := &countingPool{closeFn: func(context.Context) error { return nil }}
+	obs := &recordingShutdownObserver{}
+
+	b := newTestBackendWithPool(t, transport, pool)
+	b.shutdownObserver = obs
+
+	eng := engine.New(b.State(), b.Queue())
+	stop, err := b.StartBinding(eng)
+	if err != nil {
+		t.Fatalf("StartBinding error = %v", err)
+	}
+
+	stop()
+
+	r := obs.First()
+	if !errors.Is(r.TransportErr, transportErr) {
+		t.Fatalf("observer received %v, want raw error %v", r.TransportErr, transportErr)
+	}
+}
+
+// TestShutdownErrorRedactedInLogger verifies that credentials in close errors
+// are masked before reaching the engine.Logger fallback path.
+func TestShutdownErrorRedactedInLogger(t *testing.T) {
+	transportErr := errors.New("transport close boom: postgres://user:secretPass@db.example.com:5432/xflow?password=dbpass&ak=AKIAIOS&sk=abcd")
+
+	transport := &closeErrAfterStartTransport{closeErr: transportErr}
+	pool := &countingPool{closeFn: func(context.Context) error { return nil }}
+	logger := &recordingLogger{}
+
+	b := newTestBackendWithPool(t, transport, pool)
+	b.logger = logger
+
+	eng := engine.New(b.State(), b.Queue())
+	stop, err := b.StartBinding(eng)
+	if err != nil {
+		t.Fatalf("StartBinding error = %v", err)
+	}
+
+	stop()
+
+	text, ok := logger.logTextContaining("transport close error")
+	if !ok {
+		t.Fatal("logger did not record transport close error")
+	}
+	if !strings.Contains(text, "postgres://***:***@") {
+		t.Errorf("logger text did not redact URL credentials: %q", text)
+	}
+	for _, secret := range []string{"secretPass", "dbpass", "AKIAIOS", "abcd"} {
+		if strings.Contains(text, secret) {
+			t.Errorf("logger text leaked secret %q: %q", secret, text)
 		}
 	}
-	return false
+}
+
+// TestShutdownErrorRedactedInStdlibLog verifies the stdlib log fallback also
+// redacts credentials when no observer or engine.Logger is configured.
+func TestShutdownErrorRedactedInStdlibLog(t *testing.T) {
+	transportErr := errors.New("redis close boom: mysql://admin:hunter2@mysql.example.com/xflow?secret=shh")
+
+	transport := &closeErrAfterStartTransport{}
+	pool := &countingPool{closeFn: func(context.Context) error { return nil }}
+
+	b := newTestBackendWithPool(t, transport, pool)
+
+	eng := engine.New(b.State(), b.Queue())
+	stop, err := b.StartBinding(eng)
+	if err != nil {
+		t.Fatalf("StartBinding error = %v", err)
+	}
+
+	// Wrap the real Redis client so Close returns the credential-bearing error.
+	b.rdb = &closeErrRedisClient{UniversalClient: b.rdb, closeErr: transportErr}
+
+	var buf bytes.Buffer
+	orig := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(orig)
+
+	stop()
+
+	out := buf.String()
+	if !strings.Contains(out, "mysql://***:***@") {
+		t.Errorf("stdlib log did not redact URL credentials: %q", out)
+	}
+	for _, secret := range []string{"hunter2", "shh"} {
+		if strings.Contains(out, secret) {
+			t.Errorf("stdlib log leaked secret %q: %q", secret, out)
+		}
+	}
+}
+
+// TestShutdownObserverPanicDoesNotCrashShutdown verifies that a panicking
+// observer is recovered and shutdown still releases resources.
+func TestShutdownObserverPanicDoesNotCrashShutdown(t *testing.T) {
+	transport := &closeErrAfterStartTransport{}
+	pool := &countingPool{closeFn: func(context.Context) error { return nil }}
+	logger := &recordingLogger{}
+
+	b := newTestBackendWithPool(t, transport, pool)
+	b.shutdownObserver = panickingShutdownObserver{}
+	b.logger = logger
+
+	eng := engine.New(b.State(), b.Queue())
+	stop, err := b.StartBinding(eng)
+	if err != nil {
+		t.Fatalf("StartBinding error = %v", err)
+	}
+
+	stop()
+
+	if got := transport.closes.Load(); got != 1 {
+		t.Fatalf("transport.Close calls = %d, want 1", got)
+	}
+	if !logger.hasError("shutdown observer panicked", errors.New("observer boom")) {
+		t.Fatal("logger did not record observer panic")
+	}
 }
