@@ -313,6 +313,9 @@ func (e *Engine) handleSystemTask(ctx context.Context, task *Task, flush bool) (
 		if node == nil || !types.IsTerminalNodeStatus(node.Status) {
 			return true, nil
 		}
+		if node.ActivationID != task.ActivationID {
+			return true, nil
+		}
 		arrivals := downstreamArrivals(g, task.NodeIdx, node.Port)
 		state, err := e.atomicState()
 		if err != nil {
