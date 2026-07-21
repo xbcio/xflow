@@ -319,6 +319,48 @@ func (d *MemoryRunnerDirectory) Runner(_ context.Context, runnerID string) (Runn
 	return snapshot, true
 }
 
+// LookupLease returns the server-authoritative finalized lease for one
+// (runner, session, lease-identity) triple. It is the tenant authority on the
+// report path: the lease JSON echoed by the runner is unsigned and mutable, so
+// reportResult resolves the lease from server state here instead of trusting
+// req.Lease.TenantID. ok=false means no finalized lease matches (not found,
+// already released, wrong runner/session, or token/leaseID mismatch); err is
+// non-nil only on internal failure.
+func (d *MemoryRunnerDirectory) LookupLease(_ context.Context, runnerID, sessionID string, key LeaseLookupKey) (*engine.TaskLease, bool, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	state := d.runners[runnerID]
+	if state == nil {
+		return nil, false, nil
+	}
+	// Session fence: a stale session (post re-register) must not resolve leases
+	// for the current session. Re-register preserves finalizedLease across
+	// sessions (see Register), so we gate on sessionID explicitly. This is the
+	// session check ReleaseLeased deliberately omits (report cleanup races
+	// re-register); LookupLease is a single-RPC authority read, not a cleanup,
+	// so session fencing is correct here.
+	if state.sessionID != sessionID {
+		return nil, false, nil
+	}
+	req := ReleaseLeasedRequest{
+		RunnerID:     runnerID,
+		AssignmentID: key.AssignmentID,
+		LeaseID:      key.LeaseID,
+		LeaseToken:   key.LeaseToken,
+	}
+	assignmentID, ok := state.resolveAssignmentID(req)
+	if !ok {
+		return nil, false, nil
+	}
+	current, ok := state.finalizedLease[assignmentID]
+	if !ok || !matchesReleasedLease(current, req) {
+		return nil, false, nil
+	}
+	lease := current
+	return &lease, true, nil
+}
+
 func (d *MemoryRunnerDirectory) runnerForSessionLocked(runnerID, sessionID string) (*memoryRunnerState, error) {
 	state := d.runners[runnerID]
 	if state == nil {

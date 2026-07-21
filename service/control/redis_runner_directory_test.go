@@ -478,3 +478,112 @@ func TestRedisRunnerDirectoryClaimForRunnerFallsBackToDefaultTenantWhenTenantsFi
 		t.Fatalf("tenant = %q, want default", claim.Assignment.TenantID)
 	}
 }
+
+// TestRedisRunnerDirectoryLookupLeaseResolvesAuthoritativeLease proves the
+// Redis directory's LookupLease returns the server-authoritative finalized
+// lease (with the real TenantID and immutable identity) for the
+// (runner, session, lease-token) triple — the authority source for the report
+// path's tenant injection. Regression for the 2026-07-21 trust-boundary probe.
+func TestRedisRunnerDirectoryLookupLeaseResolvesAuthoritativeLease(t *testing.T) {
+	ctx := context.Background()
+	_, rdb := newRedisRunnerDirectoryTestClient(t)
+	directory := NewRedisRunnerDirectory(rdb)
+	session := registerRedisDirectoryRunner(t, ctx, directory, "runner-1", 1, tenant.TenantID("tenant-a"))
+	assignment := redisDirectoryTestAssignment("exec-1/node-lookup/activation-1", tenant.TenantID("tenant-a"))
+	mustEnqueueRedisDirectoryAssignment(t, ctx, directory, assignment)
+	claim := claimRedisDirectoryAssignment(t, ctx, directory, session, 1)
+	lease := &engine.TaskLease{
+		LeaseID:    "lease-lookup",
+		LeaseToken: "token-lookup",
+		Attempt:    3,
+		Task:       assignment.Task,
+		NodeType:   assignment.Routing.NodeType,
+		TenantID:   tenant.TenantID("tenant-a"),
+	}
+	if err := directory.FinalizeClaim(ctx, claim.ClaimID, lease); err != nil {
+		t.Fatalf("FinalizeClaim() error = %v", err)
+	}
+
+	resolved, ok, err := directory.LookupLease(ctx, session.RunnerID, session.SessionID, LeaseLookupKey{
+		AssignmentID: assignment.AssignmentID,
+		LeaseID:      lease.LeaseID,
+		LeaseToken:   lease.LeaseToken,
+	})
+	if err != nil || !ok {
+		t.Fatalf("LookupLease() ok=%v err=%v, want authoritative lease", ok, err)
+	}
+	if resolved.LeaseToken != lease.LeaseToken || resolved.LeaseID != lease.LeaseID || resolved.Attempt != lease.Attempt {
+		t.Fatalf("resolved lease identity = %+v, want %+v", resolved, lease)
+	}
+	if resolved.TenantID != tenant.TenantID("tenant-a") {
+		t.Fatalf("resolved tenant = %q, want tenant-a (authoritative)", resolved.TenantID)
+	}
+}
+
+// TestRedisRunnerDirectoryLookupLeaseSurvivesRestart proves LookupLease resolves
+// the authoritative lease after the control plane restarts (re-reading durable
+// directory state), so a runner that re-registers under a new session can still
+// have its report resolved to the correct tenant — the durable-lease recovery
+// contract required by the report tenant authority fix.
+func TestRedisRunnerDirectoryLookupLeaseSurvivesRestart(t *testing.T) {
+	ctx := context.Background()
+	_, rdb := newRedisRunnerDirectoryTestClient(t)
+	directory := NewRedisRunnerDirectory(rdb)
+	firstSession := registerRedisDirectoryRunner(t, ctx, directory, "runner-1", 1, tenant.TenantID("tenant-a"))
+	assignment := redisDirectoryTestAssignment("exec-1/node-restart/activation-1", tenant.TenantID("tenant-a"))
+	mustEnqueueRedisDirectoryAssignment(t, ctx, directory, assignment)
+	claim := claimRedisDirectoryAssignment(t, ctx, directory, firstSession, 1)
+	lease := &engine.TaskLease{
+		LeaseID:    "lease-restart",
+		LeaseToken: "token-restart",
+		Task:       assignment.Task,
+		NodeType:   assignment.Routing.NodeType,
+		TenantID:   tenant.TenantID("tenant-a"),
+	}
+	if err := directory.FinalizeClaim(ctx, claim.ClaimID, lease); err != nil {
+		t.Fatalf("FinalizeClaim() error = %v", err)
+	}
+
+	// Control plane restarts: a fresh directory over the same Redis state.
+	recreated := NewRedisRunnerDirectory(rdb)
+	// The lease was finalized under firstSession; LookupLease must still
+	// resolve it for firstSession (durable), and must NOT resolve it under a
+	// different arbitrary session.
+	resolved, ok, err := recreated.LookupLease(ctx, firstSession.RunnerID, firstSession.SessionID, LeaseLookupKey{
+		LeaseToken: lease.LeaseToken,
+	})
+	if err != nil || !ok {
+		t.Fatalf("LookupLease after restart ok=%v err=%v, want durable lease", ok, err)
+	}
+	if resolved.TenantID != tenant.TenantID("tenant-a") {
+		t.Fatalf("resolved tenant = %q, want tenant-a after restart", resolved.TenantID)
+	}
+
+	// A stale/wrong session must not resolve the lease (session fence).
+	_, staleOk, err := recreated.LookupLease(ctx, firstSession.RunnerID, "wrong-session", LeaseLookupKey{
+		LeaseToken: lease.LeaseToken,
+	})
+	if err != nil {
+		t.Fatalf("LookupLease wrong-session err = %v", err)
+	}
+	if staleOk {
+		t.Fatal("LookupLease wrong-session ok=true, want false (session fence)")
+	}
+
+	// After ReleaseLeased, LookupLease must report the lease as gone.
+	if err := recreated.ReleaseLeased(ctx, ReleaseLeasedRequest{
+		RunnerID: firstSession.RunnerID, SessionID: firstSession.SessionID,
+		AssignmentID: assignment.AssignmentID, LeaseToken: lease.LeaseToken, RemoveSeen: true,
+	}); err != nil {
+		t.Fatalf("ReleaseLeased: %v", err)
+	}
+	_, releasedOk, err := recreated.LookupLease(ctx, firstSession.RunnerID, firstSession.SessionID, LeaseLookupKey{
+		LeaseToken: lease.LeaseToken,
+	})
+	if err != nil {
+		t.Fatalf("LookupLease after release err = %v", err)
+	}
+	if releasedOk {
+		t.Fatal("LookupLease after release ok=true, want false (lease released)")
+	}
+}

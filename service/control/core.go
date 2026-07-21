@@ -309,16 +309,65 @@ func (c *Core) recoverTaskLease(ctx context.Context, task *engine.Task) (*engine
 }
 
 func (c *Core) reportResult(ctx context.Context, req protocol.ReportResultRequest, info TransportInfo) (protocol.ReportResultResponse, error) {
-	// Inject the lease's authoritative tenant so the commit path reads/writes
-	// from the correct Redis namespace. The runner-protocol report context
-	// (gRPC ReportResult / HTTP HandleReportResult) does not carry tenant —
-	// there is no principal resolver on the runner protocol path. The lease's
-	// TenantID was set at dispatch time from claim.Assignment.TenantID (the
-	// submit-time authoritative value), so it is NOT a client-supplied value.
-	// It is only used as ctx injection (tenant.WithTenant); it is never placed
-	// in W3C baggage (RELEASE-GATES §4.1, cross-tenant leak risk).
-	if req.Lease != nil && req.Lease.TenantID != "" {
-		ctx = tenant.WithTenant(ctx, req.Lease.TenantID)
+	if req.RunnerID == "" || req.SessionID == "" || req.Lease == nil {
+		return protocol.ReportResultResponse{}, ErrLeaseRequired
+	}
+	// Resolve the server-authoritative lease before injecting tenant. The
+	// runner-protocol report context (gRPC ReportResult / HTTP HandleReportResult)
+	// carries no principal and no tenant; the lease JSON the runner echoes back
+	// (req.Lease.TenantID) is unsigned and client-mutable, so it MUST NOT be the
+	// tenant authority for selecting the commit Redis namespace. The directory's
+	// LookupLease resolves the finalized lease from server state (indexed by
+	// lease token/ID, fenced to runner+session), giving us the authoritative
+	// TenantID and immutable task identity. A runner that tampers with
+	// req.Lease.TenantID can no longer redirect a commit into another tenant's
+	// namespace (RELEASE-GATES §4.1, cross-tenant authority).
+	authoritativeLease := req.Lease
+	lookup, dirSupportsLookup := c.runners.(LeaseLookup)
+	if dirSupportsLookup {
+		resolved, ok, lerr := lookup.LookupLease(ctx, req.RunnerID, req.SessionID, LeaseLookupKey{
+			AssignmentID: BuildAssignmentID(&req.Lease.Task),
+			LeaseID:      req.Lease.LeaseID,
+			LeaseToken:   req.Lease.LeaseToken,
+		})
+		if lerr != nil {
+			return protocol.ReportResultResponse{}, normalizeRunnerError(lerr, c.logger, "report_result")
+		}
+		if ok {
+			// Immutable fields must match what the runner echoed. A mismatch on
+			// ExecutionID/NodeName/ActivationID/Attempt/LeaseID/LeaseToken means
+			// the runner is reporting against a different lease than the one it
+			// was issued — reject with the existing fencing sentinel. TenantID
+			// is NOT in this set: an old runner may echo a stale/missing
+			// TenantID, so tenant is always taken from the authoritative lease
+			// (logged if it disagrees, but not rejected for compat).
+			if leaseImmutableMismatch(resolved, req.Lease) {
+				return protocol.ReportResultResponse{Accepted: false, Error: engine.ErrInvalidLeaseToken.Error()}, engine.ErrInvalidLeaseToken
+			}
+			if req.Lease.TenantID != resolved.TenantID && c.logger != nil {
+				c.logger.Warn("report tenant mismatch: runner echoed tenant differs from authoritative lease; using authoritative",
+					"runner_id", req.RunnerID,
+					"echoed_tenant", string(req.Lease.TenantID),
+					"authoritative_tenant", string(resolved.TenantID))
+			}
+			authoritativeLease = resolved
+		} else if c.logger != nil {
+			// ok=false: no finalized lease matches (already released, wrong
+			// runner/session, or token mismatch). Fall back to req.Lease for the
+			// commit attempt so CommitTaskResultWithOutcome's own token fencing
+			// rejects it — but the tenant we inject comes from req.Lease here as
+			// the only available source, marked as degraded. This is the old
+			// runner / post-release compat path; the commit will still be fenced
+			// by the engine's node-state token comparison.
+			c.logger.Warn("report could not resolve authoritative lease; falling back to echoed lease tenant (degraded)",
+				"runner_id", req.RunnerID)
+		}
+	}
+	// Inject the authoritative tenant so the commit path reads/writes from the
+	// correct Redis namespace. This is ctx injection only (tenant.WithTenant);
+	// the tenant is never placed in W3C baggage (RELEASE-GATES §4.1).
+	if authoritativeLease.TenantID != "" {
+		ctx = tenant.WithTenant(ctx, authoritativeLease.TenantID)
 	}
 	tracer := c.tracer
 	if tracer == nil {
@@ -329,13 +378,11 @@ func (c *Core) reportResult(ctx context.Context, req protocol.ReportResultReques
 	// dispatch carrier embedded in the lease for old runners that don't send
 	// their own. This is a real W3C ExtractCarrier round-trip (preserves
 	// tracestate + sampled flag), not a trace_id/span_id string reconstruction.
-	if req.Lease != nil {
-		carrier := req.TraceCarrier
-		if len(carrier) == 0 {
-			carrier = req.Lease.TraceCarrier
-		}
-		ctx = tracing.ExtractCarrier(ctx, carrier)
+	carrier := req.TraceCarrier
+	if len(carrier) == 0 {
+		carrier = req.Lease.TraceCarrier
 	}
+	ctx = tracing.ExtractCarrier(ctx, carrier)
 	// xflow.task.report spans the whole server-side report RPC (auth, session
 	// validation, commit, capacity release). It is parented to the runner's
 	// execute span via the carrier above (NOT to the inbound transport span,
@@ -348,7 +395,7 @@ func (c *Core) reportResult(ctx context.Context, req protocol.ReportResultReques
 	defer reportSpan.End()
 	ctx = reportCtx
 
-	if req.RunnerID == "" || req.SessionID == "" || req.Lease == nil {
+	if req.RunnerID == "" || req.SessionID == "" {
 		return protocol.ReportResultResponse{}, ErrLeaseRequired
 	}
 	_, authErr := c.authn().AuthenticateOngoing(req.RunnerID, req.AuthToken, info)
@@ -363,13 +410,13 @@ func (c *Core) reportResult(ctx context.Context, req protocol.ReportResultReques
 	}
 
 	_, span := tracer.Start(ctx, "xflow.task.commit",
-		"execution_id", string(req.Lease.Task.ExecutionID),
-		"node_name", req.Lease.Task.NodeName,
-		"attempt", req.Lease.Attempt,
+		"execution_id", string(authoritativeLease.Task.ExecutionID),
+		"node_name", authoritativeLease.Task.NodeName,
+		"attempt", authoritativeLease.Attempt,
 	)
 	defer span.End()
 
-	outcome, err := c.engine.CommitTaskResultWithOutcome(ctx, req.Lease, req.Result)
+	outcome, err := c.engine.CommitTaskResultWithOutcome(ctx, authoritativeLease, req.Result)
 	if err != nil {
 		span.RecordError(err)
 	}
@@ -378,9 +425,9 @@ func (c *Core) reportResult(ctx context.Context, req protocol.ReportResultReques
 		if err := c.runners.ReleaseLeased(ctx, ReleaseLeasedRequest{
 			RunnerID:     req.RunnerID,
 			SessionID:    req.SessionID,
-			AssignmentID: BuildAssignmentID(&req.Lease.Task),
-			LeaseID:      req.Lease.LeaseID,
-			LeaseToken:   req.Lease.LeaseToken,
+			AssignmentID: BuildAssignmentID(&authoritativeLease.Task),
+			LeaseID:      authoritativeLease.LeaseID,
+			LeaseToken:   authoritativeLease.LeaseToken,
 			RemoveSeen:   removeSeen,
 		}); err != nil {
 			return protocol.ReportResultResponse{}, normalizeRunnerError(err, c.logger, "report_result")
@@ -393,6 +440,32 @@ func (c *Core) reportResult(ctx context.Context, req protocol.ReportResultReques
 		return protocol.ReportResultResponse{}, normalizeRunnerError(err, c.logger, "report_result")
 	}
 	return protocol.ReportResultResponse{Accepted: true}, nil
+}
+
+// leaseImmutableMismatch reports whether the lease a runner echoed back differs
+// from the authoritative finalized lease on any immutable identity field that is
+// part of the runner JSON contract. The runner must report against the exact
+// lease it was issued; a mismatch on ExecutionID/NodeName/NodeIdx/Attempt/
+// LeaseID/LeaseToken is a fencing violation (engine.ErrInvalidLeaseToken).
+//
+// ActivationID and AutoDepth are intentionally excluded: they are tagged
+// json:"-" on engine.Task (internal cyclic metadata) and are NOT carried in
+// the runner-facing lease JSON, so a runner echo always round-trips them as 0.
+// Their authority is guaranteed instead by committing with the authoritative
+// (resolved) lease, whose Task carries the real values, rather than the echoed
+// req.Lease. TenantID is also excluded — taken unconditionally from the
+// authoritative lease so an old runner that echoes a stale/missing TenantID is
+// not penalized.
+func leaseImmutableMismatch(authoritative, echoed *engine.TaskLease) bool {
+	if authoritative == nil || echoed == nil {
+		return false
+	}
+	return authoritative.Task.ExecutionID != echoed.Task.ExecutionID ||
+		authoritative.Task.NodeName != echoed.Task.NodeName ||
+		authoritative.Task.NodeIdx != echoed.Task.NodeIdx ||
+		authoritative.Attempt != echoed.Attempt ||
+		authoritative.LeaseID != echoed.LeaseID ||
+		authoritative.LeaseToken != echoed.LeaseToken
 }
 
 // normalizeRunnerError maps an error returned by Core logic to the message a

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/service/protocol"
@@ -493,6 +494,7 @@ type fakeControlEngine struct {
 	commitErr       error
 	committedLease  *engine.TaskLease
 	committedResult engine.TaskResult
+	committedTenant tenant.TenantID
 	signalName      string
 	signalData      map[string]any
 	canceledID      types.ExecutionID
@@ -550,7 +552,8 @@ func (f *fakeControlEngine) RecoverTaskLease(_ context.Context, task *engine.Tas
 	return nil, engine.ErrLeaseNotRecoverable
 }
 
-func (f *fakeControlEngine) CommitTaskResultWithOutcome(_ context.Context, lease *engine.TaskLease, result engine.TaskResult) (engine.CommitOutcome, error) {
+func (f *fakeControlEngine) CommitTaskResultWithOutcome(ctx context.Context, lease *engine.TaskLease, result engine.TaskResult) (engine.CommitOutcome, error) {
+	f.committedTenant = tenant.FromContext(ctx)
 	if f.commitHook != nil {
 		f.commitHook()
 	}

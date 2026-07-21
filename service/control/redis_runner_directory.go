@@ -506,6 +506,91 @@ func (d *RedisRunnerDirectory) ReleaseLeased(ctx context.Context, req ReleaseLea
 	}
 }
 
+// LookupLease returns the server-authoritative finalized lease for one
+// (runner, session, lease-identity) triple. It is the tenant authority on the
+// report path: the lease JSON echoed by the runner is unsigned and mutable, so
+// reportResult resolves the lease from server state here instead of trusting
+// req.Lease.TenantID. Resolution mirrors ReleaseLeased (token > leaseID >
+// assignmentID via the lease:by-token / lease:by-id indexes), then validates
+// the assignment is still leased to (runnerID, sessionID). ok=false means no
+// match (not found, already released, wrong runner/session, or identity
+// mismatch); err is non-nil only on internal failure.
+func (d *RedisRunnerDirectory) LookupLease(ctx context.Context, runnerID, sessionID string, key LeaseLookupKey) (*engine.TaskLease, bool, error) {
+	assignmentID, ok, err := d.resolveLeaseAssignmentID(ctx, key)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return nil, false, nil
+	}
+	state, err := d.rdb.HGet(ctx, d.keys.assignmentState, assignmentID).Result()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return nil, false, fmt.Errorf("lookup lease state %q: %w", assignmentID, err)
+	}
+	if errors.Is(err, redis.Nil) || state != redisAssignmentLeased {
+		return nil, false, nil
+	}
+	owner, err := d.rdb.HGet(ctx, d.keys.assignmentRunner, assignmentID).Result()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return nil, false, fmt.Errorf("lookup lease owner %q: %w", assignmentID, err)
+	}
+	if errors.Is(err, redis.Nil) || owner != runnerID {
+		return nil, false, nil
+	}
+	session, err := d.rdb.HGet(ctx, d.keys.assignmentSession, assignmentID).Result()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return nil, false, fmt.Errorf("lookup lease session %q: %w", assignmentID, err)
+	}
+	if errors.Is(err, redis.Nil) || session != sessionID {
+		return nil, false, nil
+	}
+	rawAssignment, err := d.rdb.HGet(ctx, d.keys.assignmentData, assignmentID).Result()
+	if err != nil {
+		return nil, false, fmt.Errorf("read leased assignment %q: %w", assignmentID, err)
+	}
+	assignment, err := unmarshalRedisAssignment(rawAssignment)
+	if err != nil {
+		return nil, false, err
+	}
+	rawLease, err := d.rdb.HGet(ctx, d.keys.assignmentLeaseMeta, assignmentID).Result()
+	if err != nil {
+		return nil, false, fmt.Errorf("read persisted lease %q: %w", assignmentID, err)
+	}
+	lease, err := unmarshalRedisLeaseMeta(rawLease, assignment.Task)
+	if err != nil {
+		return nil, false, fmt.Errorf("decode persisted lease %q: %w", assignmentID, err)
+	}
+	return lease, true, nil
+}
+
+// resolveLeaseAssignmentID resolves a finalized assignment ID from a lease
+// identity, mirroring ReleaseLeased's token > leaseID > assignmentID precedence
+// but read-only. ok=false means no index entry matches.
+func (d *RedisRunnerDirectory) resolveLeaseAssignmentID(ctx context.Context, key LeaseLookupKey) (string, bool, error) {
+	if key.LeaseToken != "" {
+		assignmentID, err := d.rdb.HGet(ctx, d.keys.leaseByToken, string(key.LeaseToken)).Result()
+		if err == nil {
+			return assignmentID, true, nil
+		}
+		if !errors.Is(err, redis.Nil) {
+			return "", false, fmt.Errorf("resolve lease by token: %w", err)
+		}
+	}
+	if key.LeaseID != "" {
+		assignmentID, err := d.rdb.HGet(ctx, d.keys.leaseByID, string(key.LeaseID)).Result()
+		if err == nil {
+			return assignmentID, true, nil
+		}
+		if !errors.Is(err, redis.Nil) {
+			return "", false, fmt.Errorf("resolve lease by id: %w", err)
+		}
+	}
+	if key.AssignmentID != "" {
+		return string(key.AssignmentID), true, nil
+	}
+	return "", false, nil
+}
+
 // ClearAssignment removes the assignment from durable queue, claim, lease,
 // and dedupe records.
 func (d *RedisRunnerDirectory) ClearAssignment(ctx context.Context, assignmentID AssignmentID) error {

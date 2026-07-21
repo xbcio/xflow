@@ -155,3 +155,28 @@ type RunnerDirectory interface {
 type ClaimReclaimer interface {
 	ReclaimExpiredClaims(ctx context.Context) error
 }
+
+// LeaseLookupKey identifies one finalized lease by its immutable identity. The
+// caller fills whichever fields it has; the directory resolves token > id >
+// assignmentID, mirroring ReleaseLeased.
+type LeaseLookupKey struct {
+	AssignmentID AssignmentID
+	LeaseID      engine.LeaseID
+	LeaseToken   engine.LeaseToken
+}
+
+// LeaseLookup is an optional directory capability that returns the
+// server-authoritative finalized lease for one (runner, session, lease-identity)
+// triple. It is the authority source for tenant on the report path: the lease
+// JSON a runner echoes back is unsigned and client-mutable, so reportResult
+// must not trust req.Lease.TenantID. LookupLease resolves the lease from server
+// state instead.
+//
+// ok=false (err=nil) means no finalized lease matches: the lease was never
+// finalized, was already released, belongs to a different runner/session, or
+// the token/leaseID did not match. A non-nil err signals an internal failure.
+// Implementations must NOT distinguish "wrong tenant" from "not found" in the
+// return value (both are ok=false) to avoid leaking cross-tenant state.
+type LeaseLookup interface {
+	LookupLease(ctx context.Context, runnerID, sessionID string, key LeaseLookupKey) (*engine.TaskLease, bool, error)
+}
