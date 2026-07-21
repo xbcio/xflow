@@ -70,6 +70,84 @@ func mustRegisterHTTPRunnerForTenant(t *testing.T, dir *MemoryRunnerDirectory, t
 	return session
 }
 
+// mustRegisterHTTPRunnerForTenantNamed registers a runner with an explicit
+// runnerID scoped to a single tenant, so a test can stage multiple distinct
+// runner sessions in one directory (e.g. the cross-runner lease-swap probe).
+func mustRegisterHTTPRunnerForTenantNamed(t *testing.T, dir *MemoryRunnerDirectory, runnerID string, tenantID tenant.TenantID) RunnerSession {
+	t.Helper()
+	session, err := dir.Register(context.Background(), RegisterRunnerRequest{
+		RunnerID:     runnerID,
+		Capacity:     4,
+		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
+		Policy:       RunnerPolicy{AllowedNodeTypes: []string{"*"}},
+		Tenants:      []tenant.TenantID{tenantID},
+	})
+	if err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	return session
+}
+
+// finalizeTenantLeaseFor is the named-runner variant of finalizeTenantLease:
+// register runnerID under tenantID, enqueue+claim a tenant-scoped assignment,
+// and finalize a lease carrying the authoritative TenantID.
+func finalizeTenantLeaseFor(t *testing.T, dir *MemoryRunnerDirectory, runnerID string, tenantID tenant.TenantID) (*engine.TaskLease, RunnerSession) {
+	t.Helper()
+	ctx := context.Background()
+	session := mustRegisterHTTPRunnerForTenantNamed(t, dir, runnerID, tenantID)
+	assignment := tenantAssignment(tenantID, "exec-"+string(tenantID), "node-"+string(tenantID))
+	mustEnqueueAssignment(t, ctx, dir, assignment)
+	claim := mustClaimAssignment(t, ctx, dir, session)
+	lease := &engine.TaskLease{
+		LeaseID:    engine.LeaseID("lease-" + string(tenantID)),
+		LeaseToken: engine.LeaseToken("token-" + string(tenantID)),
+		Task:       claim.Assignment.Task,
+		NodeType:   claim.Assignment.Routing.NodeType,
+		TenantID:   tenantID,
+	}
+	if err := dir.FinalizeClaim(ctx, claim.ClaimID, lease); err != nil {
+		t.Fatalf("FinalizeClaim() error = %v", err)
+	}
+	return lease, session
+}
+
+// TestReportResultRejectsCrossRunnerLeaseSwap is the 2026-07-21 P0 probe for B1:
+// runner-a/session-a reports runner-b's fully-valid tenant-b lease. The
+// directory's LookupLease fences by (runner, session) and returns ok=false
+// (runner-a never finalized tenant-b's lease). reportResult MUST reject fail
+// closed — not fall back to req.Lease and commit cross-tenant.
+func TestReportResultRejectsCrossRunnerLeaseSwap(t *testing.T) {
+	fake := &fakeControlEngine{}
+	dir := NewMemoryRunnerDirectory()
+	server := httptest.NewServer(NewServer(fake, dir).Handler())
+	defer server.Close()
+
+	// runner-b/tenant-b finalizes a valid tenant-b lease.
+	leaseB, _ := finalizeTenantLeaseFor(t, dir, "runner-b", tenant.TenantID("tenant-b"))
+
+	// runner-a/tenant-a is a separate live session.
+	sessionA := mustRegisterHTTPRunnerForTenantNamed(t, dir, "runner-a", tenant.TenantID("tenant-a"))
+
+	// runner-a reports runner-b's lease verbatim. req.Lease is a complete,
+	// valid tenant-b lease token — the only thing wrong is the reporter.
+	var resp protocol.ReportResultResponse
+	postJSON(t, server.URL+protocol.ReportResultPath, protocol.ReportResultRequest{
+		RunnerID:  sessionA.RunnerID,
+		SessionID: sessionA.SessionID,
+		Lease:     leaseB,
+		Result:    engine.TaskResult{Output: &types.Output{Data: map[string]any{"ok": true}}},
+	}, http.StatusConflict, &resp)
+	if resp.Accepted {
+		t.Fatal("cross-runner report must not be accepted")
+	}
+	if fake.committedLease != nil {
+		t.Fatalf("commit must not run for a cross-runner lease swap, got %+v", fake.committedLease)
+	}
+	if fake.committedTenant != "" {
+		t.Fatalf("commit tenant must be empty, got %q", fake.committedTenant)
+	}
+}
+
 // TestReportResultTenantTampering proves the report path uses the
 // server-authoritative lease TenantID, not the runner-echoed lease JSON. A
 // runner registered for tenant-a echoes back the lease with TenantID rewritten

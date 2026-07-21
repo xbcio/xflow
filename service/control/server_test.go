@@ -288,13 +288,26 @@ func TestHTTPReportResultPreservesRunnerError(t *testing.T) {
 	server := httptest.NewServer(NewServer(fake, dir).Handler())
 	defer server.Close()
 
+	ctx := context.Background()
 	session := mustRegisterHTTPRunner(t, dir)
+	assignment := stableTestAssignment("node-a")
+	mustEnqueueAssignment(t, ctx, dir, assignment)
+	claim := mustClaimAssignment(t, ctx, dir, session)
+	lease := &engine.TaskLease{
+		LeaseID:    "lease-1",
+		LeaseToken: "token-1",
+		Task:       claim.Assignment.Task,
+		NodeType:   claim.Assignment.Routing.NodeType,
+	}
+	if err := dir.FinalizeClaim(ctx, claim.ClaimID, lease); err != nil {
+		t.Fatalf("FinalizeClaim() error = %v", err)
+	}
 
 	var resultResp protocol.ReportResultResponse
 	postJSON(t, server.URL+protocol.ReportResultPath, protocol.ReportResultRequest{
 		RunnerID:  "runner-1",
 		SessionID: session.SessionID,
-		Lease:     &engine.TaskLease{LeaseID: engine.LeaseID("lease-1"), Task: engine.Task{ExecutionID: "exec-1", NodeName: "start"}, NodeType: "xflow.function"},
+		Lease:     lease,
 		Result:    engine.TaskResult{Error: errors.New("handler failed")},
 	}, http.StatusOK, &resultResp)
 	if !resultResp.Accepted {
