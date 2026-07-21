@@ -1548,3 +1548,202 @@ func TestReplayDeadLetterAdvanceRealLifecycle(t *testing.T) {
 		t.Fatalf("ready = %+v, want advance entry %q back in ready after replay", ready2, advanceID)
 	}
 }
+
+// TestAdvanceNodeActivationFenceRealLifecycle is the 2026-07-21 P0 regression for
+// A2. A real advance outbox entry is produced by Store.CommitNode, dead-lettered,
+// and replayed back to the ready outbox. Before the advance is consumed, cyclic
+// re-entry moves the source node to a newer activation. Store.AdvanceNode for the
+// OLD activation must return Applied=false without mutating downstream counters or
+// creating execute/skip intents. The test also verifies that the advance marker
+// still collapses duplicate deliveries of the SAME activation.
+func TestAdvanceNodeActivationFenceRealLifecycle(t *testing.T) {
+	state, _, _ := newTestRedisState(t)
+	ctx := context.Background()
+	id := types.ExecutionID("advance-fence-real")
+	g := twoNodeLinearGraph(t)
+
+	createEntry := engine.OutboxEntry{
+		ID:   "exec/" + string(id) + "/start/0",
+		Task: engine.Task{ExecutionID: id, NodeName: "start", NodeIdx: 0, Type: engine.TaskTypeNodeExec},
+	}
+	if err := state.CreateExecutionWithOutbox(ctx, &engine.ExecutionSnapshot{
+		ID:     id,
+		Graph:  g,
+		Status: types.ExecutionStatusRunning,
+	}, []engine.OutboxEntry{createEntry}); err != nil {
+		t.Fatalf("CreateExecutionWithOutbox: %v", err)
+	}
+	lease := &engine.TaskLease{
+		LeaseID:    "lease",
+		LeaseToken: "token",
+		Task:       engine.Task{ExecutionID: id, NodeName: "start", NodeIdx: 0, Type: engine.TaskTypeNodeExec},
+	}
+	if _, acquired, err := state.AcquireTaskLease(ctx, lease); err != nil || !acquired {
+		t.Fatalf("AcquireTaskLease() acquired=%v err=%v", acquired, err)
+	}
+	advance := &engine.Task{ExecutionID: id, NodeName: "start", NodeIdx: 0, Type: engine.TaskTypeNodeAdvance, ActivationID: 0}
+	if _, err := state.CommitNode(ctx, engine.CommitNodeRequest{
+		ExecutionID: id,
+		NodeName:    "start",
+		NodeIdx:     0,
+		LeaseID:     "lease",
+		LeaseToken:  "token",
+		Attempt:     1,
+		Status:      types.NodeStatusSuccess,
+		Output:      map[string]any{"ok": true},
+		StoreOutput: true,
+		Port:        "main",
+		AdvanceTask: advance,
+	}); err != nil {
+		t.Fatalf("CommitNode: %v", err)
+	}
+
+	advanceID := redisAdvanceOutboxID(id, "start", 0)
+	ready, err := state.ListOutbox(ctx, id, time.Now().Add(time.Minute), 16)
+	if err != nil {
+		t.Fatalf("ListOutbox: %v", err)
+	}
+	var advanceEntry engine.OutboxEntry
+	for _, e := range ready {
+		if e.ID == advanceID {
+			advanceEntry = e
+			break
+		}
+	}
+	if advanceEntry.ID == "" {
+		t.Fatalf("advance entry %q not in ready outbox (got %v)", advanceID, ready)
+	}
+
+	// Dead-letter the advance entry the production way.
+	for i := 0; i < engine.DefaultOutboxMaxDeliveryAttempts; i++ {
+		if _, err := state.RecordOutboxFailure(ctx, id, advanceEntry, engine.DefaultOutboxMaxDeliveryAttempts); err != nil {
+			t.Fatalf("RecordOutboxFailure[%d]: %v", i, err)
+		}
+	}
+	dead, err := state.ListDeadLetters(ctx, id, engine.DeadLetterPage{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListDeadLetters: %v", err)
+	}
+	if len(dead.Entries) != 1 || dead.Entries[0].ID != advanceID {
+		t.Fatalf("dead = %+v, want 1 entry %q", dead, advanceID)
+	}
+
+	// Replay: source is terminal so the advance entry returns to the ready outbox.
+	res, err := state.ReplayDeadLetter(ctx, replayReq(id, advanceID, "req-advance-fence"))
+	if err != nil {
+		t.Fatalf("ReplayDeadLetter: %v", err)
+	}
+	if res.Outcome != engine.ReplayReplayed {
+		t.Fatalf("outcome = %q, want replayed", res.Outcome)
+	}
+
+	// Simulate cyclic re-entry before the advance is consumed: the source node is
+	// now terminal at activation 1, so an advance task carrying activation 0 is
+	// stale and must not mutate downstream state.
+	if err := state.rdb.HSet(ctx, nodeMetaKey(tenant.DefaultTenant, id, "start"), "activation_id", 1).Err(); err != nil {
+		t.Fatalf("bump source activation: %v", err)
+	}
+	if err := state.rdb.Set(ctx, nodeStatusKey(tenant.DefaultTenant, id, "start"), "success", time.Minute).Err(); err != nil {
+		t.Fatalf("set source terminal status: %v", err)
+	}
+
+	arrivals := []engine.DownstreamArrival{{
+		NodeName:     "next",
+		NodeIdx:      1,
+		ArrivalCount: 1,
+		ActiveCount:  1,
+		MergeMode:    "wait_all",
+	}}
+
+	// Stale activation 0 advance must be rejected.
+	result, err := state.AdvanceNode(ctx, engine.AdvanceNodeRequest{
+		ExecutionID:  id,
+		NodeName:     "start",
+		NodeIdx:      0,
+		ActivationID: 0,
+		Arrivals:     arrivals,
+	})
+	if err != nil {
+		t.Fatalf("AdvanceNode stale: %v", err)
+	}
+	if result.Applied {
+		t.Fatalf("stale activation advance Applied=true, want false")
+	}
+
+	// Downstream counters must be unchanged.
+	inDegree, err := state.rdb.Get(ctx, inDegreeKey(tenant.DefaultTenant, id, 1)).Int()
+	if err != nil && err != redis.Nil {
+		t.Fatalf("Get in-degree: %v", err)
+	}
+	if inDegree != 1 {
+		t.Fatalf("in-degree = %d, want 1 (unchanged)", inDegree)
+	}
+	active, err := state.rdb.Get(ctx, activeInputsKey(tenant.DefaultTenant, id, 1)).Int()
+	if err != nil && err != redis.Nil {
+		t.Fatalf("Get active inputs: %v", err)
+	}
+	if active != 0 {
+		t.Fatalf("active inputs = %d, want 0 (unchanged)", active)
+	}
+
+	// No execute/skip outbox entries must have been created.
+	readyAfter, err := state.ListOutbox(ctx, id, time.Now().Add(time.Minute), 16)
+	if err != nil {
+		t.Fatalf("ListOutbox after stale advance: %v", err)
+	}
+	for _, e := range readyAfter {
+		if e.ID == redisExecuteOutboxID(id, "next", 0) || e.ID == redisSkipOutboxID(id, "next", 0) {
+			t.Fatalf("stale advance created outbox entry %q", e.ID)
+		}
+	}
+
+	// Same stale activation redelivered must still be rejected (marker was never
+	// set for the mismatched activation).
+	result2, err := state.AdvanceNode(ctx, engine.AdvanceNodeRequest{
+		ExecutionID:  id,
+		NodeName:     "start",
+		NodeIdx:      0,
+		ActivationID: 0,
+		Arrivals:     arrivals,
+	})
+	if err != nil {
+		t.Fatalf("AdvanceNode stale retry: %v", err)
+	}
+	if result2.Applied {
+		t.Fatalf("stale activation retry Applied=true, want false")
+	}
+
+	// Restore the source to activation 0 to demonstrate that matching-activation
+	// delivery still sets the marker and that a second matching delivery collapses
+	// to a single application.
+	if err := state.rdb.HSet(ctx, nodeMetaKey(tenant.DefaultTenant, id, "start"), "activation_id", 0).Err(); err != nil {
+		t.Fatalf("restore source activation: %v", err)
+	}
+	result3, err := state.AdvanceNode(ctx, engine.AdvanceNodeRequest{
+		ExecutionID:  id,
+		NodeName:     "start",
+		NodeIdx:      0,
+		ActivationID: 0,
+		Arrivals:     arrivals,
+	})
+	if err != nil {
+		t.Fatalf("AdvanceNode matching: %v", err)
+	}
+	if !result3.Applied {
+		t.Fatalf("matching activation advance Applied=false, want true")
+	}
+
+	result4, err := state.AdvanceNode(ctx, engine.AdvanceNodeRequest{
+		ExecutionID:  id,
+		NodeName:     "start",
+		NodeIdx:      0,
+		ActivationID: 0,
+		Arrivals:     arrivals,
+	})
+	if err != nil {
+		t.Fatalf("AdvanceNode matching retry: %v", err)
+	}
+	if result4.Applied {
+		t.Fatalf("matching activation retry Applied=true, want false (marker idempotency)")
+	}
+}
