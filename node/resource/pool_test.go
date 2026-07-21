@@ -2,6 +2,7 @@ package resource
 
 import (
 	"context"
+	"errors"
 	"net"
 	"sync"
 	"testing"
@@ -229,5 +230,33 @@ func TestResourcePoolCloseIdempotent(t *testing.T) {
 	}
 	if err := p.Close(ctx); err != nil {
 		t.Fatalf("third Close error = %v, want nil (idempotent)", err)
+	}
+}
+// fakeCloser is a closer whose Close returns a configured sentinel error.
+type fakeCloser struct{ err error }
+
+func (f fakeCloser) Close() error { return f.err }
+
+var errCloseSentinelA = errors.New("close A failed")
+var errCloseSentinelB = errors.New("close B failed")
+
+// TestCloseAllJoinsErrors proves closeAll aggregates every close error (not
+// just the first) and surfaces each via errors.Is, so a partial resource-pool
+// shutdown no longer silently drops DB/gRPC close failures (A1 residual).
+func TestCloseAllJoinsErrors(t *testing.T) {
+	items := map[string]closer{
+		"a": fakeCloser{err: errCloseSentinelA},
+		"b": fakeCloser{err: errCloseSentinelB},
+		"c": fakeCloser{err: nil},
+	}
+	err := closeAll(items)
+	if err == nil {
+		t.Fatal("closeAll returned nil, want joined error")
+	}
+	if !errors.Is(err, errCloseSentinelA) {
+		t.Fatalf("joined error does not wrap errCloseSentinelA: %v", err)
+	}
+	if !errors.Is(err, errCloseSentinelB) {
+		t.Fatalf("joined error does not wrap errCloseSentinelB: %v", err)
 	}
 }

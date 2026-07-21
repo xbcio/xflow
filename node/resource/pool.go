@@ -5,6 +5,7 @@ package resource
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -104,9 +105,16 @@ func (p *defaultResourcePool) GRPC(_ context.Context, host string, secure bool, 
 	return conn, nil
 }
 
+// closer is the close contract shared by *sql.DB and *grpc.ClientConn.
+type closer interface {
+	Close() error
+}
+
 // Close shuts down every cached resource. Subsequent SQL/GRPC calls return
 // errPoolClosed. Idempotent. ctx bounds the wait for in-flight close
-// goroutines; on timeout the close continues in the background.
+// goroutines; on timeout the close continues in the background. Every close
+// error is joined (not discarded) so the backend observes DB/gRPC shutdown
+// failures instead of silently dropping them.
 func (p *defaultResourcePool) Close(ctx context.Context) error {
 	if p.closed.Load() {
 		return nil
@@ -126,37 +134,35 @@ func (p *defaultResourcePool) Close(ctx context.Context) error {
 	p.grpcMu.Unlock()
 
 	errCh := make(chan error, 2)
-	go func() { errCh <- closeAllDBs(dbs) }()
-	go func() { errCh <- closeAllConns(conns) }()
+	go func() { errCh <- closeAll(dbs) }()
+	go func() { errCh <- closeAll(conns) }()
 
+	var errs []error
 	for i := 0; i < 2; i++ {
 		select {
-		case <-errCh:
+		case e := <-errCh:
+			if e != nil {
+				errs = append(errs, e)
+			}
 		case <-ctx.Done():
-			return ctx.Err()
+			return errors.Join(append(errs, ctx.Err())...)
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
-func closeAllDBs(dbs map[string]*sql.DB) error {
-	var firstErr error
-	for _, db := range dbs {
-		if err := db.Close(); err != nil && firstErr == nil {
-			firstErr = err
+// closeAll closes every cached resource of one kind, joining all errors so a
+// caller sees every failure rather than only the first. Every resource is
+// closed regardless of individual failures so a partial close still releases
+// the whole set.
+func closeAll[K comparable, V closer](items map[K]V) error {
+	var errs []error
+	for _, c := range items {
+		if err := c.Close(); err != nil {
+			errs = append(errs, err)
 		}
 	}
-	return firstErr
-}
-
-func closeAllConns(conns map[string]*grpc.ClientConn) error {
-	var firstErr error
-	for _, c := range conns {
-		if err := c.Close(); err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-	return firstErr
+	return errors.Join(errs...)
 }
 
 func boolFlag(b bool) string {
