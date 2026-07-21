@@ -139,7 +139,11 @@ func seedDeadLetterForMgmt(t *testing.T, mr *miniredis.Miniredis, tenantName, ex
 	if err := rdb.ZAdd(ctx, deadKey, redis.Z{Score: 0, Member: entryID}).Err(); err != nil {
 		t.Fatalf("zadd dead: %v", err)
 	}
-	if err := rdb.HSet(ctx, deadMetaKey, "node", "review", "activation", "1").Err(); err != nil {
+	intent := entryID
+	if i := strings.IndexByte(entryID, '/'); i > 0 {
+		intent = entryID[:i]
+	}
+	if err := rdb.HSet(ctx, deadMetaKey, "node", "review", "activation", "1", "intent", intent, "task_type", 0).Err(); err != nil {
 		t.Fatalf("hset dead meta: %v", err)
 	}
 }

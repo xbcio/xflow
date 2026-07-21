@@ -255,10 +255,13 @@ return 1
 // recordOutboxFailureLua increments a durable delivery-attempt counter. Once
 // the configured threshold is reached it removes the pending intent and moves
 // its immutable body to an independent dead-letter index for operator review,
-// alongside compact node/activation metadata so later replay can guard against
-// stale activations without parsing the JSON body.
+// alongside compact node/activation/intent metadata so later replay can guard
+// against stale activations without parsing the JSON body, and can branch its
+// guard rules by intent source (root/retry/requeue/resume/advance/execute/skip).
 // KEYS: 1=outbox:ready 2=outbox:body 3=outbox:attempts 4=outbox:dead 5=outbox:dead:body 6=outbox:dead:meta
 // ARGV: 1=entryID 2=maxAttempts 3=now_ms 4=ttl_seconds 5=node_name 6=activation_id
+//       7=intent (entry ID prefix: root/retry/requeue/resume/advance/execute/skip)
+//       8=task_type (engine.TaskType int; the kind of queued task)
 var recordOutboxFailureLua = redis.NewScript(`
 local body = redis.call('HGET', KEYS[2], ARGV[1])
 if not body then
@@ -272,7 +275,7 @@ if attempts >= tonumber(ARGV[2]) then
     redis.call('HDEL', KEYS[3], ARGV[1])
     redis.call('HSET', KEYS[5], ARGV[1], body)
     redis.call('ZADD', KEYS[4], tonumber(ARGV[3]), ARGV[1])
-    redis.call('HSET', KEYS[6], 'node', ARGV[5], 'activation', ARGV[6])
+    redis.call('HSET', KEYS[6], 'node', ARGV[5], 'activation', ARGV[6], 'intent', ARGV[7], 'task_type', ARGV[8])
     redis.call('EXPIRE', KEYS[4], ttl)
     redis.call('EXPIRE', KEYS[5], ttl)
     redis.call('EXPIRE', KEYS[6], ttl)
@@ -314,11 +317,12 @@ return {attempts, 0}
 // reads the stored outcome (not a hardcoded already_replayed) so rejected
 // receipts recover as the same rejection.
 //
-// Eligible non-terminal node statuses (the only values that proceed to the
-// activation guard): running, committing, waiting — matching the lease-bearing
-// states accepted by resetNodeForRetryWithOutboxLua/revokeLeaseWithOutboxLua.
-// pending/suspended carry no current activation_id, and any other value is
-// treated as corrupt/unknown; both paths fall through to outcome 7.
+// Eligible non-terminal node statuses are branched by intent (step 5): each
+// intent source (root/retry/requeue/resume/advance/execute/skip) has a
+// different "safe to replay" precondition, because the lifecycle leaves node
+// status in different states when each intent is dead-lettered. A single
+// running/committing/waiting allowlist would wrongly reject the typical
+// initial/retry/requeue/resume dead-letter (pending/suspended/absent).
 //
 // Node status/meta keys are derived inside the script from the dead-meta node
 // name; all keys share the execution hash tag so they are co-located on a
@@ -417,6 +421,7 @@ local entryActivation = redis.call('HGET', KEYS[7], 'activation') or ''
 -- 3. Fail-closed metadata guard: if the per-entry meta is absent or missing
 --    node/activation (a legacy entry), the node/activation guards cannot be
 --    evaluated. Do NOT move; write a recoverable rejection receipt.
+local intent = redis.call('HGET', KEYS[7], 'intent') or ''
 if nodeName == '' or entryActivation == '' then
     local auditID = requestID .. ':' .. nowMs
     writeReceipt(receiptKey, 'rejected_metadata_missing', nodeName, entryActivation, auditID)
@@ -425,49 +430,92 @@ end
 
 -- 4. Execution status guard. Terminal/inactive executions reject with a
 --    recoverable receipt (node/activation from meta are available here).
+--    canceling is NOT in the eligible allowlist: a cancel must not be bypassed
+--    by replay (the control-plane cancel flow owns retry/requeue cleanup during
+--    canceling). Only the explicit "running" execution status proceeds.
 local status = redis.call('GET', KEYS[6])
 if not status then
     local auditID = requestID .. ':' .. nowMs
     writeReceipt(receiptKey, 'rejected_inactive', nodeName, entryActivation, auditID)
     return {3, auditID, nodeName, entryActivation}
 end
-if status == 'success' or status == 'failed' or status == 'canceled' or status == 'timeout' then
+if status ~= 'running' then
     local auditID = requestID .. ':' .. nowMs
     writeReceipt(receiptKey, 'rejected_terminal', nodeName, entryActivation, auditID)
     return {2, auditID, nodeName, entryActivation}
 end
 
--- 5. Node guard: reject if the node is terminal, or if the entry's activation
---    no longer matches the node's current activation (stale cyclic re-entry).
---    Fail-closed: a missing node:status key, an unrecognised status value, or a
---    missing current activation_id all surface as outcome 7
---    (rejected_metadata_missing) — the guard state required to safely evaluate
---    activation staleness is absent, so the entry must NOT move. Only the
---    eligible non-terminal (lease-bearing) statuses running/committing/waiting
---    proceed to the activation comparison.
+-- 5. Intent-branched node guard. The previous single allowlist
+--    (running/committing/waiting) wrongly rejected the typical dead-letter:
+--    resetNodeForRetry/revokeLease set node:status=pending before enqueueing
+--    retry/requeue; CreateExecutionWithOutbox writes root entries with no
+--    node:status yet; Suspend writes resume entries with node suspended. Each
+--    intent has a different "safe to replay" precondition, evaluated below.
+--    An empty/unknown intent is a legacy entry → fail-closed outcome 7.
 local nodeStatusKey = keyPrefix .. 'node:' .. nodeName .. ':status'
 local nodeMetaKey   = keyPrefix .. 'node:' .. nodeName .. ':meta'
 local nstatus = redis.call('GET', nodeStatusKey)
 local auditID = requestID .. ':' .. nowMs
+
+-- terminal node statuses always reject, regardless of intent.
 if nstatus == 'success' or nstatus == 'failed' or nstatus == 'skipped'
    or nstatus == 'canceled' or nstatus == 'continued' then
     writeReceipt(receiptKey, 'rejected_node_terminal', nodeName, entryActivation, auditID)
     return {4, auditID, nodeName, entryActivation}
 end
--- nstatus is false (key absent), or a non-terminal/non-eligible value
--- (pending/suspended/bogus). Any of these is missing guard state.
-if nstatus ~= 'running' and nstatus ~= 'committing' and nstatus ~= 'waiting' then
+
+-- nodeAllows reports whether nstatus is an eligible non-terminal value for
+-- the given intent. nstatus may be false (key absent) for root/advance/execute/
+-- skip, which is normal at scheduling time.
+local nodeAllows = function(value)
+    if intent == 'root' then
+        -- initial root intent: node has not started executing; no node:status is
+        -- expected. Any non-terminal value is acceptable; absence is acceptable.
+        return value == false or value == 'pending' or value == 'running'
+            or value == 'committing' or value == 'waiting'
+    elseif intent == 'retry' or intent == 'requeue' then
+        -- reset/revoke set node:status=pending before enqueueing; dispatcher may
+        -- have since moved it to running/committing/waiting. suspended/missing/
+        -- unknown is corrupt guard state.
+        return value == 'pending' or value == 'running'
+            or value == 'committing' or value == 'waiting'
+    elseif intent == 'resume' then
+        -- resume (signal/timer/timeout) targets a suspended or pending node.
+        return value == 'suspended' or value == 'pending'
+    elseif intent == 'advance' or intent == 'execute' or intent == 'skip' then
+        -- scheduling-stage intents: target node may have no status yet, or be
+        -- pending/running/committing/waiting once dispatched. suspended is not
+        -- a valid target for a fresh schedule.
+        return value == false or value == 'pending' or value == 'running'
+            or value == 'committing' or value == 'waiting'
+    end
+    -- unknown/empty intent (legacy entry): fail-closed.
+    return false
+end
+
+if not nodeAllows(nstatus) then
     writeReceipt(receiptKey, 'rejected_metadata_missing', nodeName, entryActivation, auditID)
     return {7, auditID, nodeName, entryActivation}
 end
-local currentActivation = redis.call('HGET', nodeMetaKey, 'activation_id') or ''
-if currentActivation == '' then
-    writeReceipt(receiptKey, 'rejected_metadata_missing', nodeName, entryActivation, auditID)
-    return {7, auditID, nodeName, entryActivation}
-end
-if currentActivation ~= entryActivation then
-    writeReceipt(receiptKey, 'rejected_activation_mismatch', nodeName, entryActivation, auditID)
-    return {5, auditID, nodeName, entryActivation}
+
+-- 6. Activation guard (fail-closed). For intents whose node has a current
+--    activation, the entry's activation must match — stale cyclic re-entry is
+--    rejected. root/advance/execute/skip skip this when node:status is absent
+--    (the node has not started, so there is no current activation to compare
+--    and no staleness risk); when node:status IS present they still require the
+--    current activation to match.
+local skipActivation = (intent == 'root' or intent == 'advance'
+    or intent == 'execute' or intent == 'skip') and nstatus == false
+if not skipActivation then
+    local currentActivation = redis.call('HGET', nodeMetaKey, 'activation_id') or ''
+    if currentActivation == '' then
+        writeReceipt(receiptKey, 'rejected_metadata_missing', nodeName, entryActivation, auditID)
+        return {7, auditID, nodeName, entryActivation}
+    end
+    if currentActivation ~= entryActivation then
+        writeReceipt(receiptKey, 'rejected_activation_mismatch', nodeName, entryActivation, auditID)
+        return {5, auditID, nodeName, entryActivation}
+    end
 end
 
 -- 6. Atomic dead->ready move: preserve body, reset attempts.
@@ -898,7 +946,8 @@ func (s *Store) RecordOutboxFailure(ctx context.Context, id types.ExecutionID, e
 		outboxDeadBodyKey(t, id),
 		outboxDeadMetaKey(t, id, entry.ID),
 	}, entry.ID, maxAttempts, time.Now().UTC().UnixMilli(), int(ttl.Seconds()),
-		entry.Task.NodeName, entry.Task.ActivationID).Slice()
+		entry.Task.NodeName, entry.Task.ActivationID,
+		deadLetterIntent(entry.ID), int(entry.Task.Type)).Slice()
 	if err != nil {
 		return engine.OutboxDeliveryFailure{}, fmt.Errorf("record outbox failure %q/%q: %w", id, entry.ID, err)
 	}
@@ -1300,6 +1349,23 @@ func redisExecuteOutboxID(id types.ExecutionID, name string, activationID int) s
 }
 func redisSkipOutboxID(id types.ExecutionID, name string, activationID int) string {
 	return fmt.Sprintf("skip/%s/%s/%d", id, name, activationID)
+}
+
+// deadLetterIntent extracts the intent prefix from an outbox entry ID
+// (root/retry/requeue/resume/advance/execute/skip). It is written into the
+// dead-letter meta hash at dead-letter time so replayDeadLetterLua can branch
+// its guard rules by intent source instead of applying a single
+// running/committing/waiting allowlist that wrongly rejects the typical
+// initial/retry/requeue/resume dead-letters (whose node status is pending,
+// suspended, or absent at dead-letter time). An empty/unknown intent falls
+// back to "" and is treated by replay as legacy metadata → outcome 7.
+func deadLetterIntent(entryID string) string {
+	for i := 0; i < len(entryID); i++ {
+		if entryID[i] == '/' {
+			return entryID[:i]
+		}
+	}
+	return ""
 }
 
 func redisResultInt(value any) int64 {
