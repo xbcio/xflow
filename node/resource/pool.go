@@ -108,6 +108,9 @@ func (p *defaultResourcePool) GRPC(_ context.Context, host string, secure bool, 
 // errPoolClosed. Idempotent. ctx bounds the wait for in-flight close
 // goroutines; on timeout the close continues in the background.
 func (p *defaultResourcePool) Close(ctx context.Context) error {
+	if p.closed.Load() {
+		return nil
+	}
 	p.sqlMu.Lock()
 	dbs := p.dbs
 	p.dbs = nil

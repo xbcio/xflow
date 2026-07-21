@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/xbcio/xflow/backend/distributed/internal/queue"
 	"github.com/xbcio/xflow/engine"
@@ -53,6 +54,26 @@ func newTestBackendWithPool(t *testing.T, transport queue.Transport, pool *count
 		t.Fatalf("New() error = %v", err)
 	}
 	return b
+}
+
+// closeErrTransport is a queue.Transport whose Close returns a configurable
+// error. It is used to prove closeOwnedResources aggregates transport/rdb/pool
+// cleanup errors instead of swallowing them.
+type closeErrTransport struct {
+	closes   atomic.Int64
+	closeErr error
+}
+
+func (c *closeErrTransport) Enqueue(context.Context, *engine.Task) error { return nil }
+func (c *closeErrTransport) EnqueueDelayed(context.Context, *engine.Task, time.Duration) error {
+	return nil
+}
+func (c *closeErrTransport) StartConsumer(queue.ConsumerConfig, queue.TaskHandler) (func(), error) {
+	return nil, errors.New("boom: consumer unavailable")
+}
+func (c *closeErrTransport) Close() error {
+	c.closes.Add(1)
+	return c.closeErr
 }
 
 // assertPoolClosedOnce fails the test if the pool was not closed exactly once.
@@ -211,3 +232,65 @@ func TestStartBindingRollback_NoPoolIsNoop(t *testing.T) {
 	}
 	assertErrorContains(t, err, "start consumer")
 }
+
+// TestCloseOwnedResourcesAggregatesTransportAndPoolErrors asserts that
+// closeOwnedResources no longer swallows transport.Close / pool.Close errors
+// (regression 2026-07-21: `_ =` discarded transport+rdb cleanup errors). Both
+// the startup error and every cleanup error must be visible in the joined error
+// returned to the caller.
+func TestCloseOwnedResourcesAggregatesTransportAndPoolErrors(t *testing.T) {
+	stub := &closeErrTransport{closeErr: errors.New("transport close boom")}
+	pool := &countingPool{
+		closeFn: func(context.Context) error { return errors.New("pool close boom") },
+	}
+	b := newTestBackendWithPool(t, stub, pool)
+	eng := engine.New(b.State(), b.Queue())
+
+	stop, err := b.StartBinding(eng)
+	if err == nil {
+		t.Fatal("StartBinding error = nil, want consumer start failure")
+	}
+	if stop != nil {
+		t.Fatal("StartBinding stop = non-nil, want nil on error")
+	}
+	// startup + transport + pool errors all visible; rdb close is best-effort.
+	assertErrorContains(t, err, "start consumer")
+	assertErrorContains(t, err, "boom: consumer unavailable")
+	assertErrorContains(t, err, "transport close boom")
+	assertErrorContains(t, err, "close resource pool")
+	assertErrorContains(t, err, "pool close boom")
+	if got := stub.closes.Load(); got != 1 {
+		t.Fatalf("transport.Close calls = %d, want 1", got)
+	}
+	assertPoolClosedOnce(t, pool)
+	assertRDBClosed(t, b)
+}
+
+// TestDeprecatedBindFailureNoDoubleClose asserts that the deprecated Bind
+// path, when bindHandler fails, returns a stop func that does NOT close
+// resources again — closeOwnedResources already did. Regression 2026-07-21:
+// Bind returned nonConsumerStop(), whose stop() re-closed transport/rdb/pool
+// (ResourcePool.Close calls=2).
+func TestDeprecatedBindFailureNoDoubleClose(t *testing.T) {
+	stub := &stubTransport{}
+	pool := &countingPool{}
+	b := newTestBackendWithPool(t, stub, pool)
+	b.testHooks.afterConsumerStart = func() error { return errors.New("outbox boom") }
+	eng := engine.New(b.State(), b.Queue())
+
+	stop := b.Bind(eng)
+	if stop == nil {
+		t.Fatal("Bind stop = nil, want non-nil noop stop on deprecated path")
+	}
+	// Calling stop must be a true no-op: resources were already released by
+	// closeOwnedResources during the failed bind.
+	stop()
+	stop() // idempotent
+	if got := pool.closes.Load(); got != 1 {
+		t.Fatalf("ResourcePool.Close calls = %d, want exactly 1 (closed once during rollback, not re-closed by stop)", got)
+	}
+	if got := stub.closed.Load(); !got {
+		t.Fatal("transport was not closed during rollback")
+	}
+}
+

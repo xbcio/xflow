@@ -336,7 +336,7 @@ func (b *Backend) Bind(eng *engine.Engine) func() {
 	stop, err := b.bindHandler(eng, dispatcher.HandleTask)
 	if err != nil {
 		log.Printf("xflow: bind error (Provider.Bind path): %v", err)
-		return b.nonConsumerStop()
+		return noopStop()
 	}
 	return stop
 }
@@ -370,9 +370,21 @@ func (b *Backend) BindHandler(eng *engine.Engine, handler func(context.Context, 
 	stop, err := b.bindHandler(eng, handler)
 	if err != nil {
 		log.Printf("xflow: bind error (BindHandler path): %v", err)
-		return b.nonConsumerStop()
+		return noopStop()
 	}
 	return stop
+}
+
+// noopStop returns a truly empty stop func. It is the correct return value
+// for the deprecated Bind/BindHandler paths when bindHandler has failed:
+// closeOwnedResources has already released transport/Redis/pool, so the
+// returned stop must NOT close them again. nonConsumerStop would double-close
+// (regression 2026-07-21: ResourcePool.Close calls=2). Idempotent.
+func noopStop() func() {
+	var once sync.Once
+	return func() {
+		once.Do(func() {})
+	}
 }
 
 // nonConsumerStop releases transport and Redis resources for a backend that is
@@ -413,16 +425,21 @@ type bindStartHooks struct {
 // Each resource is closed at most once along this path because a failed bind
 // returns a nil stop func, so the normal stop path is never reached.
 func (b *Backend) closeOwnedResources(startupErr error) error {
-	_ = b.transport.Close()
-	_ = b.rdb.Close()
+	transportErr := b.transport.Close()
+	rdbErr := b.rdb.Close()
+	cleanupErrs := []error{startupErr, transportErr, rdbErr}
 	if b.resourcePool != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if cerr := b.resourcePool.Close(ctx); cerr != nil {
-			return errors.Join(startupErr, fmt.Errorf("distributed: close resource pool: %w", cerr))
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("distributed: close resource pool: %w", cerr))
 		}
 	}
-	return startupErr
+	joined := errors.Join(cleanupErrs...)
+	if joined == nil {
+		return nil
+	}
+	return joined
 }
 
 // bindHandler is the unified internal lifecycle entry: it wires a task handler

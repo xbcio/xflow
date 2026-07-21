@@ -213,3 +213,21 @@ func startNoopGRPC(t *testing.T) noopGRPC {
 	})
 	return noopGRPC{addr: lis.Addr().String(), stop: srv.Stop}
 }
+
+// TestResourcePoolCloseIdempotent asserts that Close is safe to call more
+// than once (regression 2026-07-21: double-close from deprecated Bind path).
+// The second call must return nil and not panic.
+func TestResourcePoolCloseIdempotent(t *testing.T) {
+	p := NewDefaultResourcePool(types.DefaultResourcePoolConfig())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := p.Close(ctx); err != nil {
+		t.Fatalf("first Close error = %v", err)
+	}
+	if err := p.Close(ctx); err != nil {
+		t.Fatalf("second Close error = %v, want nil (idempotent)", err)
+	}
+	if err := p.Close(ctx); err != nil {
+		t.Fatalf("third Close error = %v, want nil (idempotent)", err)
+	}
+}
