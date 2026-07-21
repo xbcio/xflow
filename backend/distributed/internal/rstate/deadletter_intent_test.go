@@ -95,7 +95,9 @@ func TestReplayDeadLetterIntentAllowlist(t *testing.T) {
 		{"requeue_pending", "dl-intent-requeue", "requeue/dl-intent-requeue/review/1", "pending", 1},
 		{"resume_suspended", "dl-intent-resume", "resume/dl-intent-resume/review/1", "suspended", 1},
 		{"resume_pending", "dl-intent-resume-pending", "resume/dl-intent-resume-pending/review/1", "pending", 1},
-		{"advance_no_node_status", "dl-intent-advance", "advance/dl-intent-advance/review/1", "", 0},
+		// A real advance entry's source is ALWAYS terminal (commitNodeLua writes
+		// source terminal + advance outbox atomically). Model that lifecycle here.
+		{"advance_source_terminal", "dl-intent-advance", "advance/dl-intent-advance/review/1", "success", 1},
 		{"execute_running", "dl-intent-execute", "execute/dl-intent-execute/review/1", "running", 1},
 		{"execute_no_node_status", "dl-intent-execute-missing", "execute/dl-intent-execute-missing/review/1", "", 0},
 		{"skip_no_node_status", "dl-intent-skip", "skip/dl-intent-skip/review/1", "", 0},
@@ -156,6 +158,12 @@ func TestReplayDeadLetterIntentRejects(t *testing.T) {
 		{"resume_running_invalid", "dl-rej-resume-running", "resume/dl-rej-resume-running/review/1", "running", 1, engine.ReplayRejectedMetadataMissing},
 		// advance on a suspended node is not a valid fresh schedule → outcome 7.
 		{"advance_suspended_invalid", "dl-rej-advance-susp", "advance/dl-rej-advance-susp/review/1", "suspended", 1, engine.ReplayRejectedMetadataMissing},
+		// advance whose source is NOT terminal is inconsistent with the advance
+		// lifecycle (commitNodeLua writes source terminal + advance outbox
+		// atomically; the entry cannot exist with a non-terminal source) → 7.
+		{"advance_source_running_invalid", "dl-rej-advance-running", "advance/dl-rej-advance-running/review/1", "running", 1, engine.ReplayRejectedMetadataMissing},
+		// advance with an absent source is likewise not a real advance dead-letter → 7.
+		{"advance_source_absent_invalid", "dl-rej-advance-absent", "advance/dl-rej-advance-absent/review/1", "", 0, engine.ReplayRejectedMetadataMissing},
 		// terminal node rejects regardless of intent → outcome 4.
 		{"execute_node_success_terminal", "dl-rej-execute-succ", "execute/dl-rej-execute-succ/review/1", "success", 1, engine.ReplayRejectedNodeTerminal},
 		// retry with a current activation that does not match the entry's stale

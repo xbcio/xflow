@@ -457,55 +457,80 @@ local nodeMetaKey   = keyPrefix .. 'node:' .. nodeName .. ':meta'
 local nstatus = redis.call('GET', nodeStatusKey)
 local auditID = requestID .. ':' .. nowMs
 
--- terminal node statuses always reject, regardless of intent.
-if nstatus == 'success' or nstatus == 'failed' or nstatus == 'skipped'
-   or nstatus == 'canceled' or nstatus == 'continued' then
-    writeReceipt(receiptKey, 'rejected_node_terminal', nodeName, entryActivation, auditID)
-    return {4, auditID, nodeName, entryActivation}
-end
+local isTerminal = nstatus == 'success' or nstatus == 'failed' or nstatus == 'skipped'
+    or nstatus == 'canceled' or nstatus == 'continued'
 
--- nodeAllows reports whether nstatus is an eligible non-terminal value for
--- the given intent. nstatus may be false (key absent) for root/advance/execute/
--- skip, which is normal at scheduling time.
-local nodeAllows = function(value)
-    if intent == 'root' then
-        -- initial root intent: node has not started executing; no node:status is
-        -- expected. Any non-terminal value is acceptable; absence is acceptable.
-        return value == false or value == 'pending' or value == 'running'
-            or value == 'committing' or value == 'waiting'
-    elseif intent == 'retry' or intent == 'requeue' then
-        -- reset/revoke set node:status=pending before enqueueing; dispatcher may
-        -- have since moved it to running/committing/waiting. suspended/missing/
-        -- unknown is corrupt guard state.
-        return value == 'pending' or value == 'running'
-            or value == 'committing' or value == 'waiting'
-    elseif intent == 'resume' then
-        -- resume (signal/timer/timeout) targets a suspended or pending node.
-        return value == 'suspended' or value == 'pending'
-    elseif intent == 'advance' or intent == 'execute' or intent == 'skip' then
-        -- scheduling-stage intents: target node may have no status yet, or be
-        -- pending/running/committing/waiting once dispatched. suspended is not
-        -- a valid target for a fresh schedule.
-        return value == false or value == 'pending' or value == 'running'
-            or value == 'committing' or value == 'waiting'
+-- Intent-branched terminal/non-terminal guard.
+--
+-- advance is the exception to the terminal-node rule. An advance entry's
+-- source node is ALWAYS terminal: commitNodeLua writes the source terminal
+-- and the advance outbox in one atomic script (the entry cannot exist
+-- otherwise). A terminal source is therefore the REQUIRED precondition for
+-- replaying an advance — the old "terminal rejects regardless of intent"
+-- branch made every real advance dead-letter return
+-- rejected_node_terminal and left downstream nodes un-advanced. Idempotency
+-- on redelivery is guaranteed by the advance marker (advanceNodeLua SET NX
+-- on advanceMarkerKey), NOT by the node status. A non-terminal or absent
+-- source for an advance entry means the guard state is inconsistent with the
+-- advance lifecycle → fail-closed (7).
+if intent == 'advance' then
+    if not isTerminal then
+        writeReceipt(receiptKey, 'rejected_metadata_missing', nodeName, entryActivation, auditID)
+        return {7, auditID, nodeName, entryActivation}
     end
-    -- unknown/empty intent (legacy entry): fail-closed.
-    return false
-end
-
-if not nodeAllows(nstatus) then
-    writeReceipt(receiptKey, 'rejected_metadata_missing', nodeName, entryActivation, auditID)
-    return {7, auditID, nodeName, entryActivation}
+    -- terminal source confirmed; fall through to the activation guard.
+else
+    -- every non-advance intent: a terminal node means the dead-lettered task
+    -- has already completed → must not re-deliver (4).
+    if isTerminal then
+        writeReceipt(receiptKey, 'rejected_node_terminal', nodeName, entryActivation, auditID)
+        return {4, auditID, nodeName, entryActivation}
+    end
+    -- nodeAllows reports whether nstatus is an eligible non-terminal value
+    -- for the given intent. nstatus may be false (key absent) for root/execute/
+    -- skip, which is normal at scheduling time. advance is handled above and
+    -- is intentionally absent here.
+    local nodeAllows = function(value)
+        if intent == 'root' then
+            -- initial root intent: node has not started executing; no node:status is
+            -- expected. Any non-terminal value is acceptable; absence is acceptable.
+            return value == false or value == 'pending' or value == 'running'
+                or value == 'committing' or value == 'waiting'
+        elseif intent == 'retry' or intent == 'requeue' then
+            -- reset/revoke set node:status=pending before enqueueing; dispatcher may
+            -- have since moved it to running/committing/waiting. suspended/missing/
+            -- unknown is corrupt guard state.
+            return value == 'pending' or value == 'running'
+                or value == 'committing' or value == 'waiting'
+        elseif intent == 'resume' then
+            -- resume (signal/timer/timeout) targets a suspended or pending node.
+            return value == 'suspended' or value == 'pending'
+        elseif intent == 'execute' or intent == 'skip' then
+            -- scheduling-stage intents: target node may have no status yet, or be
+            -- pending/running/committing/waiting once dispatched. suspended is not
+            -- a valid target for a fresh schedule.
+            return value == false or value == 'pending' or value == 'running'
+                or value == 'committing' or value == 'waiting'
+        end
+        -- unknown/empty intent (legacy entry): fail-closed.
+        return false
+    end
+    if not nodeAllows(nstatus) then
+        writeReceipt(receiptKey, 'rejected_metadata_missing', nodeName, entryActivation, auditID)
+        return {7, auditID, nodeName, entryActivation}
+    end
 end
 
 -- 6. Activation guard (fail-closed). For intents whose node has a current
 --    activation, the entry's activation must match — stale cyclic re-entry is
---    rejected. root/advance/execute/skip skip this when node:status is absent
---    (the node has not started, so there is no current activation to compare
---    and no staleness risk); when node:status IS present they still require the
---    current activation to match.
-local skipActivation = (intent == 'root' or intent == 'advance'
-    or intent == 'execute' or intent == 'skip') and nstatus == false
+--    rejected. root/execute/skip skip this when node:status is absent (the node
+--    has not started, so there is no current activation to compare and no
+--    staleness risk); when node:status IS present they still require the
+--    current activation to match. advance always reaches here with a terminal
+--    nstatus (handled above), so its activation guard always runs (cyclic
+--    re-entry check against the source node's current activation).
+local skipActivation = (intent == 'root' or intent == 'execute'
+    or intent == 'skip') and nstatus == false
 if not skipActivation then
     local currentActivation = redis.call('HGET', nodeMetaKey, 'activation_id') or ''
     if currentActivation == '' then

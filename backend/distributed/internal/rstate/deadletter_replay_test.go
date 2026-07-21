@@ -1431,3 +1431,120 @@ func TestReplayDeadLetterFailClosedConcurrentNoLeak(t *testing.T) {
 		t.Fatalf("ready cardinality = %d, want 0 (no enqueue under fail-closed)", ready)
 	}
 }
+
+// TestReplayDeadLetterAdvanceRealLifecycle is the 2026-07-21 P0 probe for A2.
+// A real advance outbox entry is produced by Store.CommitNode (which writes the
+// source node terminal AND the advance outbox in one atomic Lua script), then
+// dead-lettered via repeated RecordOutboxFailure, then replayed. The source
+// node ("start") is necessarily terminal (success). The old replay guard
+// rejected ALL terminal nodes regardless of intent, so a real advance
+// dead-letter was unrecoverable (rejected_node_terminal). The intent-branched
+// guard must allow advance when its source is terminal (idempotency = advance
+// marker, owned by advanceNodeLua's SET NX).
+func TestReplayDeadLetterAdvanceRealLifecycle(t *testing.T) {
+	state, _, _ := newTestRedisState(t)
+	ctx := context.Background()
+	id := types.ExecutionID("dl-advance-real")
+	g := twoNodeLinearGraph(t)
+
+	createEntry := engine.OutboxEntry{
+		ID:   "exec/" + string(id) + "/start/0",
+		Task: engine.Task{ExecutionID: id, NodeName: "start", NodeIdx: 0, Type: engine.TaskTypeNodeExec},
+	}
+	if err := state.CreateExecutionWithOutbox(ctx, &engine.ExecutionSnapshot{
+		ID:     id,
+		Graph:  g,
+		Status: types.ExecutionStatusRunning,
+	}, []engine.OutboxEntry{createEntry}); err != nil {
+		t.Fatalf("CreateExecutionWithOutbox: %v", err)
+	}
+	lease := &engine.TaskLease{
+		LeaseID:    "lease",
+		LeaseToken: "token",
+		Task:       engine.Task{ExecutionID: id, NodeName: "start", NodeIdx: 0, Type: engine.TaskTypeNodeExec},
+	}
+	if _, acquired, err := state.AcquireTaskLease(ctx, lease); err != nil || !acquired {
+		t.Fatalf("AcquireTaskLease() acquired=%v err=%v", acquired, err)
+	}
+	advance := &engine.Task{ExecutionID: id, NodeName: "start", NodeIdx: 0, Type: engine.TaskTypeNodeAdvance}
+	if _, err := state.CommitNode(ctx, engine.CommitNodeRequest{
+		ExecutionID: id,
+		NodeName:    "start",
+		NodeIdx:     0,
+		LeaseID:     "lease",
+		LeaseToken:  "token",
+		Attempt:     1,
+		Status:      types.NodeStatusSuccess,
+		Output:      map[string]any{"ok": true},
+		StoreOutput:  true,
+		Port:        "main",
+		AdvanceTask:  advance,
+	}); err != nil {
+		t.Fatalf("CommitNode: %v", err)
+	}
+
+	// The advance intent the commit wrote must be in the ready outbox.
+	advanceID := redisAdvanceOutboxID(id, "start", 0)
+	ready, err := state.ListOutbox(ctx, id, time.Now().Add(time.Minute), 16)
+	if err != nil {
+		t.Fatalf("ListOutbox: %v", err)
+	}
+	var advanceEntry engine.OutboxEntry
+	for _, e := range ready {
+		if e.ID == advanceID {
+			advanceEntry = e
+			break
+		}
+	}
+	if advanceEntry.ID == "" {
+		t.Fatalf("advance entry %q not in ready outbox (got %v)", advanceID, ready)
+	}
+
+	// The source node guard state must show terminal (success) by construction.
+	got, err := state.GetNode(ctx, id, "start")
+	if err != nil {
+		t.Fatalf("GetNode: %v", err)
+	}
+	if got == nil || got.Status != types.NodeStatusSuccess {
+		t.Fatalf("source node status = %v, want success (terminal)", got)
+	}
+
+	// Dead-letter the advance entry the production way: repeated delivery failure.
+	for i := 0; i < engine.DefaultOutboxMaxDeliveryAttempts; i++ {
+		if _, err := state.RecordOutboxFailure(ctx, id, advanceEntry, engine.DefaultOutboxMaxDeliveryAttempts); err != nil {
+			t.Fatalf("RecordOutboxFailure[%d]: %v", i, err)
+		}
+	}
+	dead, err := state.ListDeadLetters(ctx, id, engine.DeadLetterPage{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListDeadLetters: %v", err)
+	}
+	if len(dead.Entries) != 1 || dead.Entries[0].ID != advanceID {
+		t.Fatalf("dead = %+v, want 1 entry %q", dead, advanceID)
+	}
+
+	// Replay: source is terminal → MUST replay (advance's required precondition).
+	res, err := state.ReplayDeadLetter(ctx, replayReq(id, advanceID, "req-advance-real"))
+	if err != nil {
+		t.Fatalf("ReplayDeadLetter: %v", err)
+	}
+	if res.Outcome != engine.ReplayReplayed {
+		t.Fatalf("outcome = %q, want replayed (advance source is terminal by construction)", res.Outcome)
+	}
+	// dead→ready move happened; entry is back in the ready outbox.
+	dead2, _ := state.ListDeadLetters(ctx, id, engine.DeadLetterPage{Limit: 10})
+	if len(dead2.Entries) != 0 {
+		t.Fatalf("dead = %d entries, want 0 after replay", len(dead2.Entries))
+	}
+	ready2, _ := state.ListOutbox(ctx, id, time.Now().Add(time.Minute), 16)
+	var foundAdvance bool
+	for _, e := range ready2 {
+		if e.ID == advanceID {
+			foundAdvance = true
+			break
+		}
+	}
+	if !foundAdvance {
+		t.Fatalf("ready = %+v, want advance entry %q back in ready after replay", ready2, advanceID)
+	}
+}
