@@ -31,4 +31,3 @@ full isolation today must wrap the renderer in a Shadow DOM or apply a
 build-time prefix to `@xyflow/react` styles; that work is deferred to Embed
 hardening. Do not assume the renderer is fully CSS-isolated from the host
 today.
-
