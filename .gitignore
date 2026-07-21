@@ -55,5 +55,9 @@ data/
 .claude/settings.local.json
 .claude/specs/
 
+# Superpowers internal reports (local-only; some historical files remain tracked
+# but new reports should not enter the repo).
+.superpowers/
+
 # Editor local settings
 .vscode/
