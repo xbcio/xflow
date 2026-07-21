@@ -1,0 +1,21 @@
+extends: ["spectral:oas", "spectral:asyncapi"]
+
+rules:
+  operation-operationId: error
+  operation-description: warn
+  operation-tags: warn
+  operation-success-response: error
+  schema-names-pascal-case:
+    description: Schema names MUST be PascalCase.
+    message: "Schema name '{{value}}' should be PascalCase."
+    given: "$..schemas.*~"
+    then:
+      function: pattern
+      functionOptions:
+        match: "^[A-Z][a-zA-Z0-9]*$"
+  no-empty-descriptions:
+    description: Operation and schema descriptions should not be empty.
+    given:
+      - "$..[?(@.description=='')]"
+    then:
+      function: falsy

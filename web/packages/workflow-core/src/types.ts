@@ -1,4 +1,7 @@
-// NOTE: 手写对照 Go types/workflow.go。M2 OpenAPI 冻结后替换为生成，勿视作稳定 wire contract。golden fixtures 保证一致。
+// NOTE: 手写对照 Go types/workflow.go 与 api/openapi/xflow-v1.yaml。
+// C0 已冻结 WorkflowEditorMetadata / Diagnostic / WorkflowDefinitionRuntime 等 wire contract；
+// 新增管理类型（WorkflowDefinition / WorkflowDraft / WorkflowDefinitionVersion / ExecutionSnapshot）
+// 与 OpenAPI 一一对应。openapi-types.ts 由 openapi-typescript 生成，用于 CI diff 校验。
 
 export type NodeKind = "action" | "trigger";
 
@@ -146,4 +149,134 @@ export interface WorkflowEditorMetadata {
    * See ADR D4 / F0-A2.
    */
   pinData?: Readonly<Record<string, unknown>>;
+}
+
+export type ExecutionStatus =
+  | "pending"
+  | "running"
+  | "success"
+  | "failed"
+  | "canceling"
+  | "canceled"
+  | "timeout";
+
+export type NodeStatus =
+  | "pending"
+  | "running"
+  | "committing"
+  | "success"
+  | "failed"
+  | "skipped"
+  | "suspended"
+  | "continued"
+  | "canceled"
+  | "waiting";
+
+export interface WorkflowDefinition {
+  id: string;
+  namespace: string;
+  name: string;
+  description?: string;
+  createdAt: string;
+  updatedAt: string;
+  createdBy?: string;
+  tenantId?: string;
+  latestVersion?: string;
+  draftRevision?: number;
+}
+
+export interface WorkflowDefinitionList {
+  items: WorkflowDefinition[];
+  nextPageToken?: string;
+}
+
+export interface WorkflowDefinitionRuntime {
+  namespace: string;
+  name: string;
+  versionTag?: string;
+  description?: string;
+  spec?: string;
+  runnerSelector?: RunnerSelector;
+  context?: WorkflowContext;
+  settings?: WorkflowSettings;
+  options?: WorkflowOptions;
+  credentials?: Record<string, CredentialDef>;
+  params?: Record<string, ParamDef>;
+  node_templates?: Record<string, NodeTemplate>;
+  nodes?: RuntimeNodeDef[];
+  connections?: Connections;
+  outputs?: Record<string, WorkflowOutput>;
+  pin_data?: Record<string, unknown>;
+}
+
+export interface RuntimeNodeDef {
+  name: string;
+  type: string;
+  kind?: NodeKind;
+  version?: number;
+  template?: string;
+  disabled?: boolean;
+  on_error?: string;
+  runnerSelector?: RunnerSelector;
+  inputs?: PortDecl[];
+  output_schema?: Record<string, unknown>;
+  parameters?: Record<string, unknown>;
+  retry?: RetrySettings;
+}
+
+export interface WorkflowDraft {
+  definition: WorkflowDefinitionRuntime;
+  editorMetadata?: WorkflowEditorMetadata;
+  revision: number;
+  definitionHash?: string;
+  auditFingerprint?: string;
+  updatedAt?: string;
+}
+
+export interface WorkflowDefinitionVersion extends WorkflowDraft {
+  version: string;
+  publishedAt?: string;
+  publishedBy?: string;
+  immutable: boolean;
+}
+
+export interface WorkflowDefinitionVersionList {
+  items: WorkflowDefinitionVersion[];
+  nextPageToken?: string;
+}
+
+export interface ValidationResult {
+  valid: boolean;
+  definitionHash?: string;
+  diagnostics?: Diagnostic[];
+}
+
+export interface ExecutionSnapshot {
+  id: string;
+  status: ExecutionStatus;
+  params?: Record<string, unknown>;
+  nodeStatuses?: Record<string, NodeStatus>;
+  parentId?: string;
+  traceId?: string;
+  startedAt?: string;
+  finishedAt?: string;
+}
+
+export interface PublishWorkflowVersionRequest {
+  version: string;
+}
+
+export interface InvokeWorkflowRequest {
+  entry: string;
+  input?: Record<string, unknown>;
+}
+
+export interface InvokeWorkflowResponse {
+  executionId: string;
+}
+
+export interface XflowError {
+  code: string;
+  message: string;
+  details?: Record<string, unknown>;
 }

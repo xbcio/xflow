@@ -74,15 +74,21 @@ type Authorizer interface {
 // Operation vocabulary. The route layer resolves each inbound request to one
 // of these before invoking the handler.
 const (
-	OpWorkflowCreate  = "workflow.create"
-	OpWorkflowInvoke   = "workflow.invoke"
-	OpWorkflowRead     = "workflow.read"
-	OpExecutionRead    = "execution.read"
-	OpExecutionSignal  = "execution.signal"
-	OpExecutionRevoke  = "execution.revoke"
-	OpExecutionCancel  = "execution.cancel"
-	OpDeadLetterList   = "deadletter.list"
-	OpDeadLetterReplay = "deadletter.replay"
+	OpWorkflowCreate             = "workflow.create"
+	OpWorkflowInvoke             = "workflow.invoke"
+	OpWorkflowRead               = "workflow.read"
+	OpWorkflowDefinitionCreate   = "workflowdefinition.create"
+	OpWorkflowDefinitionRead     = "workflowdefinition.read"
+	OpWorkflowDefinitionUpdate   = "workflowdefinition.update" // draft
+	OpWorkflowDefinitionValidate = "workflowdefinition.validate"
+	OpWorkflowDefinitionPublish  = "workflowdefinition.publish"
+	OpWorkflowExecutionInvoke    = "workflowexecution.invoke"
+	OpExecutionRead              = "execution.read"
+	OpExecutionSignal            = "execution.signal"
+	OpExecutionRevoke            = "execution.revoke"
+	OpExecutionCancel            = "execution.cancel"
+	OpDeadLetterList             = "deadletter.list"
+	OpDeadLetterReplay           = "deadletter.replay"
 	// OpManagementRead is the stable operation for management execution inspect
 	// (single-resource lookup; the management surface exposes no list API). It
 	// maps to the "management.read" scope.
@@ -93,8 +99,8 @@ const (
 	// than riding on a blanket management.read). Each maps to its own scope so a
 	// token can be granted runner read without leader read and vice-versa.
 	OpManagementLeaderRead = "management.leader.read"
-	OpManagementRunnerRead  = "management.runner.read"
-	OpManagementWrite       = "management.write"
+	OpManagementRunnerRead = "management.runner.read"
+	OpManagementWrite      = "management.write"
 )
 
 // scopeForOperation maps an operation to the scope it requires. A principal
@@ -102,7 +108,9 @@ const (
 // policy; G2/G3 may substitute a richer authorizer.
 func scopeForOperation(op string) string {
 	switch op {
-	case OpWorkflowCreate, OpWorkflowInvoke, OpWorkflowRead:
+	case OpWorkflowCreate, OpWorkflowInvoke, OpWorkflowRead,
+		OpWorkflowDefinitionCreate, OpWorkflowDefinitionRead, OpWorkflowDefinitionUpdate,
+		OpWorkflowDefinitionValidate, OpWorkflowDefinitionPublish, OpWorkflowExecutionInvoke:
 		return "workflow"
 	case OpExecutionRead, OpExecutionSignal, OpExecutionRevoke, OpExecutionCancel:
 		return "execution"
@@ -365,6 +373,7 @@ func (s *InMemoryAuditSink) Events() []AuditEvent {
 // ErrAuditUnavailable is returned when the audit sink cannot accept an event.
 // Mutations must fail-closed when the admission audit cannot be persisted.
 var ErrAuditUnavailable = errors.New("apiserver: audit sink unavailable")
+
 // authzContextKey carries the resolved Principal + AuthorizationRequest
 // through the handler chain so handlers don't re-resolve operation/resource.
 type authzContextKey struct{}

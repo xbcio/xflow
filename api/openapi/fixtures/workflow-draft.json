@@ -1,0 +1,44 @@
+{
+  "definition": {
+    "namespace": "default",
+    "name": "health-check",
+    "versionTag": "1.0.0",
+    "description": "Static workflow fixture used for the health page",
+    "spec": "1.0",
+    "nodes": [
+      {
+        "name": "Start",
+        "type": "xflow.start",
+        "kind": "trigger",
+        "version": 1
+      },
+      {
+        "name": "End",
+        "type": "xflow.end",
+        "kind": "action",
+        "version": 1
+      }
+    ],
+    "connections": {
+      "Start": {
+        "default": [
+          { "node": "End", "input": "default" }
+        ]
+      }
+    }
+  },
+  "editorMetadata": {
+    "positions": {
+      "start": { "x": 0, "y": 0 },
+      "end": { "x": 200, "y": 0 }
+    },
+    "viewport": { "x": 0, "y": 0, "zoom": 1 },
+    "ui": {},
+    "notes": {},
+    "pinData": {}
+  },
+  "revision": 3,
+  "definitionHash": "runtime-sha256:v1:abcdef1234567890",
+  "auditFingerprint": "sha256:audit:v1:1234567890abcdef",
+  "updatedAt": "2026-07-21T12:00:00Z"
+}

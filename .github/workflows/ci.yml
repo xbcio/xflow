@@ -216,3 +216,37 @@ jobs:
           name: playwright-report
           path: web/playwright-report/
           retention-days: 7
+
+  openapi:
+    name: OpenAPI Contract
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.10.0
+          run_install: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: web/.nvmrc
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: cd web && pnpm install --frozen-lockfile
+
+      - name: Validate OpenAPI contract
+        run: make validate-openapi
