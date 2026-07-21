@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"regexp"
 	"sync"
 	"time"
 
@@ -47,6 +48,12 @@ type (
 // resources during normal shutdown. All fields are nil when shutdown cleanup
 // succeeds; otherwise each field carries the error returned by the matching
 // Close call.
+//
+// Observers and log sinks must not emit these errors verbatim in production:
+// close errors may contain DSNs or credentials. The built-in fallback logging
+// paths redact URL credentials and common query parameters before printing, but
+// external observers receive the raw error and are responsible for their own
+// sanitization.
 type ShutdownReport struct {
 	TransportErr error
 	RedisErr     error
@@ -55,7 +62,9 @@ type ShutdownReport struct {
 
 // ShutdownObserver receives the ShutdownReport after a normal stop completes.
 // Implementations must be non-blocking: the observer is called synchronously
-// inside the sync.Once-guarded stop path.
+// inside the sync.Once-guarded stop path. The report is delivered raw; observers
+// and downstream log sinks must sanitize any sensitive substrings (DSNs,
+// passwords, tokens) before emitting them.
 type ShutdownObserver interface {
 	OnShutdown(r ShutdownReport)
 }
@@ -166,7 +175,9 @@ func WithStateLogger(l engine.Logger) Option {
 // after normal shutdown completes. When no observer is configured, shutdown
 // errors are still logged via the configured engine.Logger, or via the
 // standard log package if no logger is configured, so close failures are never
-// silently swallowed.
+// silently swallowed. The raw error is delivered to the observer; callers must
+// ensure observer-side sinks do not emit sensitive substrings such as DSNs or
+// credentials in production.
 func WithShutdownObserver(obs ShutdownObserver) Option {
 	return func(c *config) {
 		if obs != nil {
@@ -422,35 +433,67 @@ func noopStop() func() {
 	}
 }
 
+var (
+	// urlCredsRe matches scheme://user:password@host patterns. The scheme group
+	// is restricted to a leading letter so it does not over-match arbitrary text.
+	urlCredsRe = regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*)://([^:@\s]+):([^@\s]+)@`)
+	// queryCredsRe matches common credential-bearing query parameters.
+	queryCredsRe = regexp.MustCompile(`(?i)([?&;])(password|pwd|secret|ak|sk)=[^&;\s]*`)
+)
+
+// sanitizeLogError masks URL/DSN-like credential substrings and common
+// credential query parameters before an error is printed. It is intentionally
+// conservative: it only removes substrings that look like credentials, leaving
+// the rest of the error intact. Observers receive the raw error unchanged.
+func sanitizeLogError(err error) string {
+	if err == nil {
+		return ""
+	}
+	s := err.Error()
+	s = urlCredsRe.ReplaceAllString(s, "$1://***:***@")
+	s = queryCredsRe.ReplaceAllString(s, "${1}${2}=***")
+	return s
+}
+
 // reportShutdown emits a ShutdownReport to the configured observer or logs any
 // non-nil close errors. It is called synchronously from the sync.Once-guarded
 // stop path so shutdown remains observable even when no external observer is
-// installed.
+// installed. Errors sent to the built-in logger/stdlib log path are sanitized;
+// when an observer is configured it receives the raw error and no fallback
+// logging occurs.
 func (b *Backend) reportShutdown(r ShutdownReport) {
 	if b.shutdownObserver != nil {
+		// A panicking observer must not crash the shutdown path. The panic is
+		// swallowed; the configured logger still receives a record of the panic
+		// if one is available.
+		defer func() {
+			if rec := recover(); rec != nil && b.logger != nil {
+				b.logger.Error("distributed backend: shutdown observer panicked", "panic", rec)
+			}
+		}()
 		b.shutdownObserver.OnShutdown(r)
 		return
 	}
 	if b.logger != nil {
 		if r.TransportErr != nil {
-			b.logger.Error("distributed backend: transport close error", "error", r.TransportErr)
+			b.logger.Error("distributed backend: transport close error", "error", sanitizeLogError(r.TransportErr))
 		}
 		if r.RedisErr != nil {
-			b.logger.Error("distributed backend: redis close error", "error", r.RedisErr)
+			b.logger.Error("distributed backend: redis close error", "error", sanitizeLogError(r.RedisErr))
 		}
 		if r.PoolErr != nil {
-			b.logger.Error("distributed backend: resource pool close error", "error", r.PoolErr)
+			b.logger.Error("distributed backend: resource pool close error", "error", sanitizeLogError(r.PoolErr))
 		}
 		return
 	}
 	if r.TransportErr != nil {
-		log.Printf("xflow: distributed backend transport close error: %v", r.TransportErr)
+		log.Printf("xflow: distributed backend transport close error: %v", sanitizeLogError(r.TransportErr))
 	}
 	if r.RedisErr != nil {
-		log.Printf("xflow: distributed backend redis close error: %v", r.RedisErr)
+		log.Printf("xflow: distributed backend redis close error: %v", sanitizeLogError(r.RedisErr))
 	}
 	if r.PoolErr != nil {
-		log.Printf("xflow: distributed backend resource pool close error: %v", r.PoolErr)
+		log.Printf("xflow: distributed backend resource pool close error: %v", sanitizeLogError(r.PoolErr))
 	}
 }
 
