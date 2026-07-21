@@ -101,6 +101,13 @@ type TaskLease struct {
 	NodeVersion int           `json:"node_version,omitempty"`
 	IssuedAt    time.Time     `json:"issued_at"`
 	TTL         time.Duration `json:"ttl,omitempty"`
+	// TenantID is the authoritative tenant recorded on the assignment at
+	// submit time. It is set by the control plane when building/recovering the
+	// lease so the report/commit path (which has no principal resolver) can
+	// inject it into ctx and read/write the correct Redis namespace. This is
+	// NOT placed in W3C baggage (RELEASE-GATES §4.1); it travels in the lease
+	// payload, not in trace propagation headers.
+	TenantID tenant.TenantID `json:"tenant_id,omitempty"`
 	// TraceCarrier holds W3C traceparent/tracestate propagation headers so the
 	// runner can create properly-parented execution spans. Populated by the
 	// control plane when dispatching; nil when tracing is disabled or unsampled.

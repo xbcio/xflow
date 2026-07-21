@@ -223,6 +223,7 @@ func (c *Core) pollTask(ctx context.Context, req protocol.PollTaskRequest, info 
 					return protocol.PollTaskResponse{}, recoverErr
 				}
 			}
+			lease.TenantID = claim.Assignment.TenantID
 			return protocol.PollTaskResponse{Lease: lease}, nil
 		}
 
@@ -258,6 +259,7 @@ func (c *Core) pollTask(ctx context.Context, req protocol.PollTaskRequest, info 
 		switch {
 		case err == nil:
 			lease.TraceCarrier = tracing.InjectCarrier(dispatchCtx)
+			lease.TenantID = claim.Assignment.TenantID
 			if err := c.runners.FinalizeClaim(dispatchCtx, claim.ClaimID, lease); err != nil {
 				dispatchSpan.RecordError(err)
 				dispatchSpan.End()
@@ -273,6 +275,7 @@ func (c *Core) pollTask(ctx context.Context, req protocol.PollTaskRequest, info 
 			// finalize that exact fenced lease instead of waiting for its TTL.
 			recovered, recoverErr := c.recoverTaskLease(ctx, &claim.Assignment.Task)
 			if recoverErr == nil {
+				recovered.TenantID = claim.Assignment.TenantID
 				if finalizeErr := c.runners.FinalizeClaim(ctx, claim.ClaimID, recovered); finalizeErr != nil {
 					_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimRequeue)
 					return protocol.PollTaskResponse{}, normalizeRunnerError(finalizeErr, c.logger, "poll")
@@ -306,6 +309,17 @@ func (c *Core) recoverTaskLease(ctx context.Context, task *engine.Task) (*engine
 }
 
 func (c *Core) reportResult(ctx context.Context, req protocol.ReportResultRequest, info TransportInfo) (protocol.ReportResultResponse, error) {
+	// Inject the lease's authoritative tenant so the commit path reads/writes
+	// from the correct Redis namespace. The runner-protocol report context
+	// (gRPC ReportResult / HTTP HandleReportResult) does not carry tenant —
+	// there is no principal resolver on the runner protocol path. The lease's
+	// TenantID was set at dispatch time from claim.Assignment.TenantID (the
+	// submit-time authoritative value), so it is NOT a client-supplied value.
+	// It is only used as ctx injection (tenant.WithTenant); it is never placed
+	// in W3C baggage (RELEASE-GATES §4.1, cross-tenant leak risk).
+	if req.Lease != nil && req.Lease.TenantID != "" {
+		ctx = tenant.WithTenant(ctx, req.Lease.TenantID)
+	}
 	tracer := c.tracer
 	if tracer == nil {
 		tracer = tracing.NoopTracer{}

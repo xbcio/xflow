@@ -32,6 +32,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -114,6 +115,19 @@ type g1TraceGraph struct {
 	OneTraceID               bool     `json:"one_trace_id"`
 	DispatchParentedToSubmit bool     `json:"dispatch_parented_to_submit"`
 	CommitParentedToReport   bool     `json:"commit_parented_to_report"`
+	// TenantA fields: the same strong assertions run against a non-default
+	// tenant workflow (g1TokFullA). The pollTask tenant injection in
+	// service/control/core.go must read the W3C carrier from the tenantA
+	// Redis namespace, so the full 5-span graph holds with one TraceID and
+	// correct parentage.
+	TenantAOneTraceID               bool `json:"tenant_a_one_trace_id"`
+	TenantADispatchParentedToSubmit bool `json:"tenant_a_dispatch_parented_to_submit"`
+	TenantACommitParentedToReport   bool `json:"tenant_a_commit_parented_to_report"`
+	// CrossTenantCarrierIsolated: tenantA + tenantB workflows submitted
+	// concurrently — the tenantA dispatch span must NOT inherit tenantB's
+	// submit trace (and vice versa). Proves the carrier lookup is namespace-
+	// scoped, not a global read.
+	CrossTenantCarrierIsolated bool `json:"cross_tenant_carrier_isolated"`
 }
 
 type g1ApprovalDAG struct {
@@ -554,6 +568,17 @@ func TestG1ProductionE2E(t *testing.T) {
 		traceGraph = g1RunGRPCRunnerConnectReport(t, h)
 	})
 
+	t.Run("GRPCRunnerConnectReportTenantA", func(t *testing.T) {
+		tgA := g1RunGRPCRunnerConnectReportForTenant(t, h, g1TokFullA, "g1-grpc-tenantA")
+		traceGraph.TenantAOneTraceID = tgA.OneTraceID
+		traceGraph.TenantADispatchParentedToSubmit = tgA.DispatchParentedToSubmit
+		traceGraph.TenantACommitParentedToReport = tgA.CommitParentedToReport
+	})
+
+	t.Run("CrossTenantCarrierIsolation", func(t *testing.T) {
+		traceGraph.CrossTenantCarrierIsolated = g1RunCrossTenantCarrierIsolation(t, h)
+	})
+
 	t.Run("ApprovalMultiSignal", func(t *testing.T) {
 		g1RunApprovalMultiSignal(t, h)
 		approvalDAG.MultiSignalQuorum = "pass"
@@ -830,7 +855,323 @@ func g1RunGRPCRunnerConnectReport(t *testing.T, h *productionServerRunnerHarness
 	return tg
 }
 
-// g1RunApprovalMultiSignal drives a multi-signal wait DAG through the runner.
+// g1RunGRPCRunnerConnectReportForTenant is the tenantA variant of
+// g1RunGRPCRunnerConnectReport. It creates its own gRPC server + runner,
+// submits a workflow with the given token, waits for terminal Success, then
+// strongly asserts the B1 trace graph (5 spans, one TraceID, 4 parent edges
+// via W3C carriers). Strong assertions (t.Fatalf) — no WARN degradation.
+//
+// The span recorder is global, so the function filters spans by the submit
+// span's TraceID to exclude spans from earlier subtests' workflows that the
+// runner may have drained.
+func g1RunGRPCRunnerConnectReportForTenant(t *testing.T, h *productionServerRunnerHarness, token, wfName string) g1TraceGraph {
+	t.Helper()
+
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	grpcSrv := grpc.NewServer(
+		grpc.UnaryInterceptor(tracing.GRPCUnaryServerInterceptor(h.tracer)),
+		grpc.StreamInterceptor(tracing.GRPCStreamServerInterceptor(h.tracer)),
+	)
+	h.srv.RegisterGRPC(grpcSrv)
+	go func() { _ = grpcSrv.Serve(lis) }()
+	t.Cleanup(grpcSrv.Stop)
+
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dial gRPC: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	registry := g1RegistryForProduction()
+	runner := runnersvc.New(
+		protocol.NewGRPCClient(conn),
+		registry,
+		runnersvc.Config{
+			RunnerID:     "runner-g1-grpc-" + wfName,
+			Concurrency:  1,
+			Capabilities: []protocol.Capability{{NodeType: "test.g1.real"}, {NodeType: "xflow.wait"}},
+			PollWait:     5 * time.Millisecond,
+			Tracer:       h.tracer,
+			Tenants:      []tenant.TenantID{"default", g1TenantA, g1TenantB},
+		},
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- runner.Run(ctx) }()
+	waitForE2ERunner(t, h.runners, "runner-g1-grpc-"+wfName)
+
+	execID := g1SubmitAllowed(t, h.httpSrv.URL, token, g1StartWorkflowDef(wfName))
+
+	detail := g1WaitForTerminal(t, h.httpSrv.URL, token, execID, 15*time.Second)
+	if detail.Status != types.ExecutionStatusSuccess {
+		t.Fatalf("[%s] execution status = %s, want success", wfName, detail.Status)
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil && err != context.Canceled {
+			t.Fatalf("runner error = %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("runner did not stop in time")
+	}
+
+	_ = h.tracerProv.ForceFlush(ctx)
+
+	spans := h.spanRecorder.Ended()
+	// Locate the submit span for this run by finding the most recent
+	// xflow.workflow.submit span. Filter downstream spans by its TraceID
+	// to exclude orphaned spans from earlier subtests.
+	var submit sdktrace.ReadOnlySpan
+	for i := len(spans) - 1; i >= 0; i-- {
+		if spans[i].Name() == "xflow.workflow.submit" {
+			submit = spans[i]
+			break
+		}
+	}
+	if submit == nil {
+		t.Fatalf("[%s] missing submit span; got %v", wfName, spanNamesIntegration(spans))
+	}
+	root := submit.SpanContext().TraceID()
+	byName := map[string]sdktrace.ReadOnlySpan{}
+	for _, s := range spans {
+		if s.SpanContext().TraceID() != root {
+			continue
+		}
+		switch s.Name() {
+		case "xflow.task.dispatch", "xflow.task.execute", "xflow.task.report", "xflow.task.commit":
+			if _, ok := byName[s.Name()]; !ok {
+				byName[s.Name()] = s
+			}
+		}
+	}
+	tg := g1TraceGraph{SpansPresent: []string{"xflow.workflow.submit"}}
+	for _, name := range []string{"xflow.task.dispatch", "xflow.task.execute", "xflow.task.report", "xflow.task.commit"} {
+		if byName[name] == nil {
+			t.Fatalf("[%s] missing span %q for trace %s; got %v", wfName, name, root, spanNamesIntegration(spans))
+		}
+		tg.SpansPresent = append(tg.SpansPresent, name)
+	}
+	dispatch := byName["xflow.task.dispatch"]
+	execute := byName["xflow.task.execute"]
+	report := byName["xflow.task.report"]
+	commit := byName["xflow.task.commit"]
+	tg.OneTraceID = true
+	if dispatch.Parent().SpanID() != submit.SpanContext().SpanID() {
+		t.Fatalf("[%s] dispatch parent %s != submit %s (dispatch did not inherit submit causality via carrier)", wfName, dispatch.Parent().SpanID(), submit.SpanContext().SpanID())
+	}
+	tg.DispatchParentedToSubmit = true
+	if execute.Parent().SpanID() != dispatch.SpanContext().SpanID() {
+		t.Fatalf("[%s] execute parent %s != dispatch %s (lease carrier not wired)", wfName, execute.Parent().SpanID(), dispatch.SpanContext().SpanID())
+	}
+	if report.Parent().SpanID() != execute.SpanContext().SpanID() {
+		t.Fatalf("[%s] report parent %s != execute %s (gRPC report carrier not parented to execute)", wfName, report.Parent().SpanID(), execute.SpanContext().SpanID())
+	}
+	if commit.Parent().SpanID() != report.SpanContext().SpanID() {
+		t.Fatalf("[%s] commit parent %s != report %s (report/commit nesting broken)", wfName, commit.Parent().SpanID(), report.SpanContext().SpanID())
+	}
+	tg.CommitParentedToReport = true
+	return tg
+}
+
+// g1RunCrossTenantCarrierIsolation submits tenantA and tenantB workflows
+// concurrently, waits for both to reach terminal Success via a shared gRPC
+// runner, then asserts the carrier lookup did not cross tenant boundaries:
+// each dispatch span is parented to one of the two submit spans, the two
+// dispatch spans sit in different traces, and each dispatch is parented to a
+// distinct submit.
+//
+// g1DoAuth/g1SubmitAuth call t.Fatalf, which is unsafe in goroutines
+// (runtime.Goexit deadlocks the waiter). g1SubmitConcurrent is a non-fatal
+// submit helper so both submits can run concurrently.
+func g1RunCrossTenantCarrierIsolation(t *testing.T, h *productionServerRunnerHarness) bool {
+	t.Helper()
+
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	grpcSrv := grpc.NewServer(
+		grpc.UnaryInterceptor(tracing.GRPCUnaryServerInterceptor(h.tracer)),
+		grpc.StreamInterceptor(tracing.GRPCStreamServerInterceptor(h.tracer)),
+	)
+	h.srv.RegisterGRPC(grpcSrv)
+	go func() { _ = grpcSrv.Serve(lis) }()
+	t.Cleanup(grpcSrv.Stop)
+
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dial gRPC: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	registry := g1RegistryForProduction()
+	runner := runnersvc.New(
+		protocol.NewGRPCClient(conn),
+		registry,
+		runnersvc.Config{
+			RunnerID:     "runner-g1-cross-tenant",
+			Concurrency:  1,
+			Capabilities: []protocol.Capability{{NodeType: "test.g1.real"}, {NodeType: "xflow.wait"}},
+			PollWait:     5 * time.Millisecond,
+			Tracer:       h.tracer,
+			Tenants:      []tenant.TenantID{"default", g1TenantA, g1TenantB},
+		},
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- runner.Run(ctx) }()
+	waitForE2ERunner(t, h.runners, "runner-g1-cross-tenant")
+
+	// Submit tenantA and tenantB workflows concurrently so both carriers sit
+	// in Redis simultaneously. g1SubmitConcurrent is non-fatal so it is safe
+	// to call from goroutines (t.Fatalf in a goroutine deadlocks via Goexit).
+	var (
+		idA, idB types.ExecutionID
+		stA, stB int
+		wg       sync.WaitGroup
+	)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		idA, stA = g1SubmitConcurrent(h.httpSrv.URL, g1TokFullA, g1StartWorkflowDef("g1-x-tenantA"))
+	}()
+	go func() {
+		defer wg.Done()
+		idB, stB = g1SubmitConcurrent(h.httpSrv.URL, g1TokFullB, g1StartWorkflowDef("g1-x-tenantB"))
+	}()
+	wg.Wait()
+	if stA != 200 || idA == "" {
+		t.Fatalf("cross-tenant tenantA concurrent submit: status=%d id=%q", stA, idA)
+	}
+	if stB != 200 || idB == "" {
+		t.Fatalf("cross-tenant tenantB concurrent submit: status=%d id=%q", stB, idB)
+	}
+
+	detailA := g1WaitForTerminal(t, h.httpSrv.URL, g1TokFullA, idA, 15*time.Second)
+	if detailA.Status != types.ExecutionStatusSuccess {
+		t.Fatalf("cross-tenant tenantA execution status = %s, want success", detailA.Status)
+	}
+	detailB := g1WaitForTerminal(t, h.httpSrv.URL, g1TokFullB, idB, 15*time.Second)
+	if detailB.Status != types.ExecutionStatusSuccess {
+		t.Fatalf("cross-tenant tenantB execution status = %s, want success", detailB.Status)
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil && err != context.Canceled {
+			t.Fatalf("runner error = %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("runner did not stop in time")
+	}
+
+	_ = h.tracerProv.ForceFlush(ctx)
+
+	spans := h.spanRecorder.Ended()
+	// Find the two most recent submit spans (tenantA + tenantB).
+	var submits []sdktrace.ReadOnlySpan
+	for i := len(spans) - 1; i >= 0 && len(submits) < 2; i-- {
+		if spans[i].Name() == "xflow.workflow.submit" {
+			submits = append(submits, spans[i])
+		}
+	}
+	if len(submits) != 2 {
+		t.Fatalf("cross-tenant: expected 2 submit spans, got %d (%v)", len(submits), spanNamesIntegration(spans))
+	}
+
+	// Find dispatch spans whose trace ID matches one of the two submit trace
+	// IDs.
+	submitTraceIDs := map[string]bool{
+		submits[0].SpanContext().TraceID().String(): true,
+		submits[1].SpanContext().TraceID().String(): true,
+	}
+	var dispatches []sdktrace.ReadOnlySpan
+	for _, s := range spans {
+		if s.Name() != "xflow.task.dispatch" {
+			continue
+		}
+		if submitTraceIDs[s.SpanContext().TraceID().String()] {
+			dispatches = append(dispatches, s)
+		}
+	}
+	if len(dispatches) != 2 {
+		t.Fatalf("cross-tenant: expected 2 dispatch spans matching the 2 submit traces, got %d (%v)", len(dispatches), spanNamesIntegration(spans))
+	}
+
+	// Each dispatch must be parented to one of the two submits, and the
+	// dispatch's trace ID must equal that submit's trace ID. If the carrier
+	// crossed tenants, a dispatch would be parented to the wrong submit (or
+	// not parented to any submit at all).
+	for _, d := range dispatches {
+		parentID := d.Parent().SpanID()
+		matched := false
+		for _, s := range submits {
+			if parentID == s.SpanContext().SpanID() {
+				matched = true
+				if d.SpanContext().TraceID() != s.SpanContext().TraceID() {
+					t.Fatalf("cross-tenant: dispatch trace %s != parent submit trace %s (carrier crossed tenants)", d.SpanContext().TraceID(), s.SpanContext().TraceID())
+				}
+				break
+			}
+		}
+		if !matched {
+			t.Fatalf("cross-tenant: dispatch parent %s does not match any submit span ID (carrier orphaned or crossed)", parentID)
+		}
+	}
+
+	// The two dispatch spans must sit in different traces — proves tenantA's
+	// dispatch did not inherit tenantB's submit trace (and vice versa).
+	if dispatches[0].SpanContext().TraceID() == dispatches[1].SpanContext().TraceID() {
+		t.Fatalf("cross-tenant: both dispatch spans share trace %s — carrier crossed tenants", dispatches[0].SpanContext().TraceID())
+	}
+
+	// Each dispatch must be parented to a distinct submit (no both-to-same
+	// short-circuit).
+	if dispatches[0].Parent().SpanID() == dispatches[1].Parent().SpanID() {
+		t.Fatalf("cross-tenant: both dispatch spans parented to the same submit %s — one tenant's carrier leaked into the other", dispatches[0].Parent().SpanID())
+	}
+
+	return true
+}
+
+// g1SubmitConcurrent is a non-fatal submit helper safe to call from goroutines
+// (t.Fatalf in a goroutine deadlocks the test via runtime.Goexit). Returns the
+// execution ID and HTTP status; the caller asserts.
+func g1SubmitConcurrent(baseURL, token string, wf *types.WorkflowDef) (types.ExecutionID, int) {
+	body := map[string]any{"workflow": wf}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return "", -1
+	}
+	req, err := http.NewRequest(http.MethodPost, baseURL+"/v1/workflows", bytes.NewReader(raw))
+	if err != nil {
+		return "", -1
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := g1HTTPClient.Do(req)
+	if err != nil {
+		return "", -1
+	}
+	defer resp.Body.Close()
+	payload, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", resp.StatusCode
+	}
+	var out e2eSubmitResp
+	if err := json.Unmarshal(payload, &out); err != nil {
+		return "", resp.StatusCode
+	}
+	return out.ExecutionID, resp.StatusCode
+}
 // Two signals are delivered via HTTP; the second triggers the resume.
 func g1RunApprovalMultiSignal(t *testing.T, h *productionServerRunnerHarness) {
 	t.Helper()
