@@ -43,6 +43,23 @@ type (
 	AuditStats    = rstate.AuditStats
 )
 
+// ShutdownReport captures the outcomes of releasing the backend's owned
+// resources during normal shutdown. All fields are nil when shutdown cleanup
+// succeeds; otherwise each field carries the error returned by the matching
+// Close call.
+type ShutdownReport struct {
+	TransportErr error
+	RedisErr     error
+	PoolErr      error
+}
+
+// ShutdownObserver receives the ShutdownReport after a normal stop completes.
+// Implementations must be non-blocking: the observer is called synchronously
+// inside the sync.Once-guarded stop path.
+type ShutdownObserver interface {
+	OnShutdown(r ShutdownReport)
+}
+
 // Option configures the distributed backend.
 type Option func(*config)
 
@@ -53,6 +70,7 @@ type config struct {
 	resourcePool           types.ResourcePool
 	auditObserver          AuditObserver
 	leaseObserver          LeaseObserver
+	shutdownObserver       ShutdownObserver
 	logger                 engine.Logger
 	transient              bool
 	transientTTL           time.Duration
@@ -144,6 +162,19 @@ func WithStateLogger(l engine.Logger) Option {
 	}
 }
 
+// WithShutdownObserver installs an observer that receives a ShutdownReport
+// after normal shutdown completes. When no observer is configured, shutdown
+// errors are still logged via the configured engine.Logger, or via the
+// standard log package if no logger is configured, so close failures are never
+// silently swallowed.
+func WithShutdownObserver(obs ShutdownObserver) Option {
+	return func(c *config) {
+		if obs != nil {
+			c.shutdownObserver = obs
+		}
+	}
+}
+
 // WithTransport injects a custom task transport, replacing the default Asynq
 // transport entirely. This is the seam that makes the queue technology
 // pluggable: a broker only has to implement queue.Transport.
@@ -179,19 +210,21 @@ func WithRedisConfig(rc RedisConfig) Option {
 // internal state, timeout, trigger, and workflow-registry subpackages.
 // Call Bind() after creating the engine to start the consumer and monitors.
 type Backend struct {
-	state          *rstate.Store
-	transport      queue.Transport
-	registry       *execution.Registry
-	workflowReg    *workflowreg.Registry
-	triggerRuntime *trigger.Primitives
-	rdb            redis.UniversalClient
-	timeoutMonitor *timeout.Monitor
-	concurrency    int
-	consumer       bool
-	transient      bool
-	resourcePool   types.ResourcePool
-	leaderElector  backend.LeaderElector
-	testHooks      bindStartHooks
+	state            *rstate.Store
+	transport        queue.Transport
+	registry         *execution.Registry
+	workflowReg      *workflowreg.Registry
+	triggerRuntime   *trigger.Primitives
+	rdb              redis.UniversalClient
+	timeoutMonitor   *timeout.Monitor
+	concurrency      int
+	consumer         bool
+	transient        bool
+	resourcePool     types.ResourcePool
+	leaderElector    backend.LeaderElector
+	shutdownObserver ShutdownObserver
+	logger           engine.Logger
+	testHooks        bindStartHooks
 }
 
 // State returns the StateStore implementation.
@@ -303,17 +336,19 @@ func New(redisAddr string, db store.Store, opts ...Option) (*Backend, error) {
 	leaderElector := NewRedisLeaderElector(rdb, leaderKey, defaultLeaderLeaseTTL)
 
 	return &Backend{
-		state:          state,
-		transport:      transport,
-		registry:       registry,
-		workflowReg:    workflowreg.New(rdb),
-		triggerRuntime: trigger.New(rdb),
-		rdb:            rdb,
-		concurrency:    cfg.concurrency,
-		consumer:       cfg.consumer,
-		transient:      cfg.transient,
-		resourcePool:   cfg.resourcePool,
-		leaderElector:  leaderElector,
+		state:            state,
+		transport:        transport,
+		registry:         registry,
+		workflowReg:      workflowreg.New(rdb),
+		triggerRuntime:   trigger.New(rdb),
+		rdb:              rdb,
+		concurrency:      cfg.concurrency,
+		consumer:         cfg.consumer,
+		transient:        cfg.transient,
+		resourcePool:     cfg.resourcePool,
+		leaderElector:    leaderElector,
+		shutdownObserver: cfg.shutdownObserver,
+		logger:           cfg.logger,
 	}, nil
 }
 
@@ -387,19 +422,54 @@ func noopStop() func() {
 	}
 }
 
+// reportShutdown emits a ShutdownReport to the configured observer or logs any
+// non-nil close errors. It is called synchronously from the sync.Once-guarded
+// stop path so shutdown remains observable even when no external observer is
+// installed.
+func (b *Backend) reportShutdown(r ShutdownReport) {
+	if b.shutdownObserver != nil {
+		b.shutdownObserver.OnShutdown(r)
+		return
+	}
+	if b.logger != nil {
+		if r.TransportErr != nil {
+			b.logger.Error("distributed backend: transport close error", "error", r.TransportErr)
+		}
+		if r.RedisErr != nil {
+			b.logger.Error("distributed backend: redis close error", "error", r.RedisErr)
+		}
+		if r.PoolErr != nil {
+			b.logger.Error("distributed backend: resource pool close error", "error", r.PoolErr)
+		}
+		return
+	}
+	if r.TransportErr != nil {
+		log.Printf("xflow: distributed backend transport close error: %v", r.TransportErr)
+	}
+	if r.RedisErr != nil {
+		log.Printf("xflow: distributed backend redis close error: %v", r.RedisErr)
+	}
+	if r.PoolErr != nil {
+		log.Printf("xflow: distributed backend resource pool close error: %v", r.PoolErr)
+	}
+}
+
 // nonConsumerStop releases transport and Redis resources for a backend that is
-// not configured to consume (API-only instances). It is idempotent.
+// not configured to consume (API-only instances). It is idempotent and reports
+// a ShutdownReport exactly once.
 func (b *Backend) nonConsumerStop() func() {
 	var once sync.Once
 	return func() {
 		once.Do(func() {
-			_ = b.transport.Close()
-			_ = b.rdb.Close()
+			var r ShutdownReport
+			r.TransportErr = b.transport.Close()
+			r.RedisErr = b.rdb.Close()
 			if b.resourcePool != nil {
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
-				_ = b.resourcePool.Close(ctx)
+				r.PoolErr = b.resourcePool.Close(ctx)
 			}
+			b.reportShutdown(r)
 		})
 	}
 }
@@ -409,9 +479,9 @@ func (b *Backend) nonConsumerStop() func() {
 // failing to start, so the reverse-order rollback path is covered even though
 // the outbox dispatcher and timeout monitor cannot fail to start on their own.
 type bindStartHooks struct {
-	afterConsumerStart func() error  // simulate outbox dispatcher start failure
-	afterOutboxStart   func() error  // simulate timeout monitor start failure
-	onMonitorDone      func()        // nil in production; called after timeout monitor goroutine exits
+	afterConsumerStart func() error // simulate outbox dispatcher start failure
+	afterOutboxStart   func() error // simulate timeout monitor start failure
+	onMonitorDone      func()       // nil in production; called after timeout monitor goroutine exits
 }
 
 // closeOwnedResources releases the resources owned by bindHandler in
@@ -539,13 +609,15 @@ func (b *Backend) bindHandler(eng *engine.Engine, handler func(context.Context, 
 					b.testHooks.onMonitorDone()
 				}
 			}
-			_ = b.transport.Close()
-			_ = b.rdb.Close()
+			var r ShutdownReport
+			r.TransportErr = b.transport.Close()
+			r.RedisErr = b.rdb.Close()
 			if b.resourcePool != nil {
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
-				_ = b.resourcePool.Close(ctx)
+				r.PoolErr = b.resourcePool.Close(ctx)
 			}
+			b.reportShutdown(r)
 		})
 	}
 	return stop, nil
