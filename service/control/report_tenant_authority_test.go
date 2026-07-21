@@ -242,30 +242,61 @@ func TestReportResultImmutableFieldMismatch(t *testing.T) {
 	}
 }
 
-// noLookupDirectory wraps a MemoryRunnerDirectory but deliberately does NOT
-// implement LeaseLookup, simulating an old directory implementation (or a test
-// double) that cannot resolve authoritative leases. reportResult must fall back
-// to the echoed lease and still succeed for a normal report.
-type noLookupDirectory struct {
-	*MemoryRunnerDirectory
+// lookuplessDirectory wraps a MemoryRunnerDirectory via a NAMED (non-embedded)
+// field so Go method promotion does NOT surface LookupLease. It forwards the
+// RunnerDirectory methods but deliberately does not implement LeaseLookup,
+// simulating a production directory that cannot resolve authoritative leases.
+// reportResult must reject (fail closed) rather than fall back to req.Lease.
+type lookuplessDirectory struct {
+	inner *MemoryRunnerDirectory
 }
 
-func (n *noLookupDirectory) Register(ctx context.Context, req RegisterRunnerRequest) (RunnerSession, error) {
-	return n.MemoryRunnerDirectory.Register(ctx, req)
+func (d *lookuplessDirectory) Register(ctx context.Context, req RegisterRunnerRequest) (RunnerSession, error) {
+	return d.inner.Register(ctx, req)
+}
+func (d *lookuplessDirectory) ValidateSession(ctx context.Context, runnerID, sessionID string) error {
+	return d.inner.ValidateSession(ctx, runnerID, sessionID)
+}
+func (d *lookuplessDirectory) Heartbeat(ctx context.Context, req HeartbeatRequest) error {
+	return d.inner.Heartbeat(ctx, req)
+}
+func (d *lookuplessDirectory) EnqueueAssignment(ctx context.Context, assignment Assignment) (bool, error) {
+	return d.inner.EnqueueAssignment(ctx, assignment)
+}
+func (d *lookuplessDirectory) ClaimForRunner(ctx context.Context, req ClaimRequest) (Claim, bool, error) {
+	return d.inner.ClaimForRunner(ctx, req)
+}
+func (d *lookuplessDirectory) FinalizeClaim(ctx context.Context, claimID ClaimID, lease *engine.TaskLease) error {
+	return d.inner.FinalizeClaim(ctx, claimID, lease)
+}
+func (d *lookuplessDirectory) ReleaseClaim(ctx context.Context, claimID ClaimID, reason ReleaseClaimReason) error {
+	return d.inner.ReleaseClaim(ctx, claimID, reason)
+}
+func (d *lookuplessDirectory) ReleaseLeased(ctx context.Context, req ReleaseLeasedRequest) error {
+	return d.inner.ReleaseLeased(ctx, req)
+}
+func (d *lookuplessDirectory) ClearAssignment(ctx context.Context, assignmentID AssignmentID) error {
+	return d.inner.ClearAssignment(ctx, assignmentID)
+}
+func (d *lookuplessDirectory) Runner(ctx context.Context, runnerID string) (RunnerSnapshot, bool) {
+	return d.inner.Runner(ctx, runnerID)
 }
 
-// TestReportResultOldRunnerCompat proves the fallback path: when the directory
-// does not implement LeaseLookup, reportResult falls back to the echoed lease
-// (with a degraded-authority log) and the report still succeeds. The commit
-// tenant then comes from the echoed lease — this is the documented compat risk
-// for directories that predate the LeaseLookup capability.
-func TestReportResultOldRunnerCompat(t *testing.T) {
+// Compile-time guard: lookuplessDirectory satisfies RunnerDirectory but does
+// NOT satisfy LeaseLookup (no promoted LookupLease via the named field).
+var _ RunnerDirectory = (*lookuplessDirectory)(nil)
+
+// TestReportResultRejectsDirectoryWithoutLeaseLookup proves a directory that
+// does not implement LeaseLookup is rejected fail-closed on the report path,
+// rather than silently falling back to the echoed (client-mutable) lease.
+func TestReportResultRejectsDirectoryWithoutLeaseLookup(t *testing.T) {
 	fake := &fakeControlEngine{}
-	dir := &noLookupDirectory{MemoryRunnerDirectory: NewMemoryRunnerDirectory()}
+	inner := NewMemoryRunnerDirectory()
+	dir := &lookuplessDirectory{inner: inner}
 	server := httptest.NewServer(NewServer(fake, dir).Handler())
 	defer server.Close()
 
-	lease, session := finalizeTenantLease(t, dir.MemoryRunnerDirectory, tenant.TenantID("tenant-a"))
+	lease, session := finalizeTenantLease(t, inner, tenant.TenantID("tenant-a"))
 
 	var resp protocol.ReportResultResponse
 	postJSON(t, server.URL+protocol.ReportResultPath, protocol.ReportResultRequest{
@@ -273,12 +304,11 @@ func TestReportResultOldRunnerCompat(t *testing.T) {
 		SessionID: session.SessionID,
 		Lease:     lease,
 		Result:    engine.TaskResult{Output: &types.Output{Data: map[string]any{"ok": true}}},
-	}, http.StatusOK, &resp)
-	if !resp.Accepted {
-		t.Fatalf("report not accepted on fallback path: %+v", resp)
+	}, http.StatusConflict, &resp)
+	if resp.Accepted {
+		t.Fatal("report on a directory without LeaseLookup must not be accepted")
 	}
-	// Fallback uses the echoed lease tenant (no authoritative resolution).
-	if fake.committedTenant != tenant.TenantID("tenant-a") {
-		t.Fatalf("commit tenant = %q, want tenant-a (echoed, fallback path)", fake.committedTenant)
+	if fake.committedLease != nil {
+		t.Fatalf("commit must not run without LeaseLookup, got %+v", fake.committedLease)
 	}
 }
