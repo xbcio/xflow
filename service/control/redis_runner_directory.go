@@ -70,6 +70,7 @@ type RedisRunnerDirectory struct {
 
 var _ RunnerDirectory = (*RedisRunnerDirectory)(nil)
 var _ ClaimReclaimer = (*RedisRunnerDirectory)(nil)
+var _ ExpiredLeaseReleaser = (*RedisRunnerDirectory)(nil)
 
 // NewRedisRunnerDirectory constructs a Redis-backed RunnerDirectory. Every
 // key used by its Lua transitions includes the same Redis Cluster hash tag.
@@ -589,6 +590,42 @@ func (d *RedisRunnerDirectory) resolveLeaseAssignmentID(ctx context.Context, key
 		return string(key.AssignmentID), true, nil
 	}
 	return "", false, nil
+}
+
+// ReleaseExpiredLease removes a finalized lease from the directory only when
+// AssignmentID, LeaseID, and LeaseToken all match the stored record. It is used
+// by the LeaseSweeper before engine reclaim to prevent a stale finalized lease
+// from occupying runner capacity or suppressing redelivery via the seen marker
+// after the engine has revoked and re-issued the lease. Runner and session
+// registration are preserved.
+func (d *RedisRunnerDirectory) ReleaseExpiredLease(ctx context.Context, req ExpiredDirectoryLeaseRequest) (ExpiredDirectoryLeaseOutcome, error) {
+	status, err := d.evalStatus(ctx, redisReleaseExpiredLeaseLua, []string{
+		d.keys.assignmentData,
+		d.keys.assignmentState,
+		d.keys.assignmentRunner,
+		d.keys.assignmentSession,
+		d.keys.assignmentLeaseID,
+		d.keys.assignmentLeaseToken,
+		d.keys.assignmentLeaseMeta,
+		d.keys.leaseByID,
+		d.keys.leaseByToken,
+		d.keys.runnerLeaseCount,
+		d.keys.seen,
+		d.keys.queue,
+	}, string(req.AssignmentID), string(req.LeaseID), string(req.LeaseToken))
+	if err != nil {
+		return "", fmt.Errorf("release expired redis lease: %w", err)
+	}
+	switch status {
+	case "released":
+		return ExpiredDirectoryLeaseReleased, nil
+	case "already_released":
+		return ExpiredDirectoryLeaseAlreadyReleased, nil
+	case "token_mismatch":
+		return ExpiredDirectoryLeaseTokenMismatch, nil
+	default:
+		return "", fmt.Errorf("release expired redis lease: unexpected result %q", status)
+	}
 }
 
 // ClearAssignment removes the assignment from durable queue, claim, lease,
@@ -1162,4 +1199,50 @@ redis.call('HDEL', KEYS[8], ARGV[1])
 redis.call('HDEL', KEYS[9], ARGV[1])
 redis.call('HDEL', KEYS[10], ARGV[1])
 return 'cleared'
+`
+
+const redisReleaseExpiredLeaseLua = `
+local assignmentID = ARGV[1]
+local leaseID = ARGV[2]
+local leaseToken = ARGV[3]
+
+local state = redis.call('HGET', KEYS[2], assignmentID)
+if state ~= 'leased' then
+  return 'already_released'
+end
+
+local currentLeaseID = redis.call('HGET', KEYS[5], assignmentID) or ''
+local currentLeaseToken = redis.call('HGET', KEYS[6], assignmentID) or ''
+if currentLeaseID ~= leaseID or currentLeaseToken ~= leaseToken then
+  return 'token_mismatch'
+end
+
+local runnerID = redis.call('HGET', KEYS[3], assignmentID)
+
+redis.call('HDEL', KEYS[1], assignmentID)
+redis.call('HDEL', KEYS[2], assignmentID)
+redis.call('HDEL', KEYS[3], assignmentID)
+redis.call('HDEL', KEYS[4], assignmentID)
+redis.call('HDEL', KEYS[5], assignmentID)
+redis.call('HDEL', KEYS[6], assignmentID)
+redis.call('HDEL', KEYS[7], assignmentID)
+
+if leaseID ~= '' and redis.call('HGET', KEYS[8], leaseID) == assignmentID then
+  redis.call('HDEL', KEYS[8], leaseID)
+end
+if leaseToken ~= '' and redis.call('HGET', KEYS[9], leaseToken) == assignmentID then
+  redis.call('HDEL', KEYS[9], leaseToken)
+end
+
+if runnerID then
+  local leases = tonumber(redis.call('HGET', KEYS[10], runnerID) or '0')
+  if leases > 0 then
+    redis.call('HINCRBY', KEYS[10], runnerID, -1)
+  end
+end
+
+redis.call('SREM', KEYS[11], assignmentID)
+redis.call('LREM', KEYS[12], 0, assignmentID)
+
+return 'released'
 `

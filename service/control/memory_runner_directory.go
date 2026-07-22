@@ -248,6 +248,31 @@ func (d *MemoryRunnerDirectory) ReleaseClaim(_ context.Context, claimID ClaimID,
 	return nil
 }
 
+// ReleaseExpiredLease removes a finalized lease from the directory only when
+// AssignmentID, LeaseID, and LeaseToken all match the stored record. It is
+// used by the LeaseSweeper before engine reclaim to prevent a stale finalized
+// lease from occupying runner capacity or suppressing redelivery via the seen
+// marker after the engine has revoked and re-issued the lease.
+func (d *MemoryRunnerDirectory) ReleaseExpiredLease(_ context.Context, req ExpiredDirectoryLeaseRequest) (ExpiredDirectoryLeaseOutcome, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	for _, state := range d.runners {
+		lease, exists := state.finalizedLease[req.AssignmentID]
+		if !exists {
+			continue
+		}
+		if lease.LeaseID != req.LeaseID || lease.LeaseToken != req.LeaseToken {
+			return ExpiredDirectoryLeaseTokenMismatch, nil
+		}
+		delete(state.finalizedLease, req.AssignmentID)
+		state.removeLeaseIndexes(req.AssignmentID, lease)
+		delete(d.seen, req.AssignmentID)
+		return ExpiredDirectoryLeaseReleased, nil
+	}
+	return ExpiredDirectoryLeaseAlreadyReleased, nil
+}
+
 // ReleaseLeased removes leased-capacity accounting for a finalized assignment.
 // It resolves the live finalized lease by lease identity, so cleanup remains
 // safe if the runner re-registers after report validation but before commit

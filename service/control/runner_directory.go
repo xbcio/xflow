@@ -180,3 +180,35 @@ type LeaseLookupKey struct {
 type LeaseLookup interface {
 	LookupLease(ctx context.Context, runnerID, sessionID string, key LeaseLookupKey) (*engine.TaskLease, bool, error)
 }
+
+// ExpiredDirectoryLeaseRequest identifies an expired lease to release from the
+// runner directory. All three fields must match the directory's finalized
+// lease record; any mismatch fails closed.
+type ExpiredDirectoryLeaseRequest struct {
+	AssignmentID AssignmentID
+	LeaseID      engine.LeaseID
+	LeaseToken   engine.LeaseToken
+}
+
+// ExpiredDirectoryLeaseOutcome is the result of a token-fenced release.
+type ExpiredDirectoryLeaseOutcome string
+
+const (
+	// ExpiredDirectoryLeaseReleased means the finalized lease record was
+	// removed and capacity/seen bookkeeping was cleaned up.
+	ExpiredDirectoryLeaseReleased ExpiredDirectoryLeaseOutcome = "released"
+	// ExpiredDirectoryLeaseAlreadyReleased means the assignment has no
+	// finalized lease record; repeated calls remain idempotent.
+	ExpiredDirectoryLeaseAlreadyReleased ExpiredDirectoryLeaseOutcome = "already_released"
+	// ExpiredDirectoryLeaseTokenMismatch means the lease identity did not
+	// match the directory's record. The caller must not retry: another lease
+	// generation now owns the assignment.
+	ExpiredDirectoryLeaseTokenMismatch ExpiredDirectoryLeaseOutcome = "token_mismatch"
+)
+
+// ExpiredLeaseReleaser is an optional durable-directory capability used by the
+// LeaseSweeper to clean up a directory's finalized lease/capacity/seen state
+// before engine reclaim. It must fail closed on token mismatch.
+type ExpiredLeaseReleaser interface {
+	ReleaseExpiredLease(ctx context.Context, req ExpiredDirectoryLeaseRequest) (ExpiredDirectoryLeaseOutcome, error)
+}
