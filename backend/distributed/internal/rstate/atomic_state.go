@@ -186,8 +186,18 @@ end
 if not terminal(redis.call('GET', KEYS[2])) then
     return 0
 end
-local storedActivation = tonumber(redis.call('HGET', KEYS[3], 'activation_id') or '0')
-if storedActivation ~= tonumber(ARGV[1]) then
+-- Fail closed when the source node's activation_id field is absent or empty:
+-- the activation-staleness guard cannot be evaluated safely, so the advance
+-- must not proceed (and must not mutate the marker, counters, or outbox).
+-- Only when a real activation_id is present do we compare it against the
+-- task's activation. This rejects the prior defect where a missing field
+-- was coerced to 0 by 'or 0' and matched an activation-0 task.
+local rawActivation = redis.call('HGET', KEYS[3], 'activation_id')
+if rawActivation == false or rawActivation == nil or rawActivation == '' then
+    return 0
+end
+local storedActivation = tonumber(rawActivation)
+if storedActivation == nil or storedActivation ~= tonumber(ARGV[1]) then
     return 0
 end
 if redis.call('SET', KEYS[4], '1', 'NX', 'EX', tonumber(ARGV[2])) == false then

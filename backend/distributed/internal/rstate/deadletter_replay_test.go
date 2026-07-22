@@ -1797,3 +1797,138 @@ func TestAdvanceNodeActivationFenceRealLifecycle(t *testing.T) {
 		t.Fatalf("matching activation retry Applied=true, want false (marker idempotency)")
 	}
 }
+
+// TestAdvanceNodeFailClosedOnMissingSourceActivation asserts the P0 fix: when
+// the source node's activation_id field is absent (or empty), an advance task
+// must NOT be applied — it is fail-closed rather than coerced to 0. This covers
+// the regression where `or '0'` made a missing field match an activation-0
+// task. The marker, downstream counters, active inputs, and outbox must all
+// remain untouched on both first delivery and redelivery.
+func TestAdvanceNodeFailClosedOnMissingSourceActivation(t *testing.T) {
+	state, _, _ := newTestRedisState(t)
+	ctx := context.Background()
+	id := types.ExecutionID("advance-missing-activation")
+	g := twoNodeLinearGraph(t)
+
+	createEntry := engine.OutboxEntry{
+		ID:   "exec/" + string(id) + "/start/0",
+		Task: engine.Task{ExecutionID: id, NodeName: "start", NodeIdx: 0, Type: engine.TaskTypeNodeExec},
+	}
+	if err := state.CreateExecutionWithOutbox(ctx, &engine.ExecutionSnapshot{
+		ID:     id,
+		Graph:  g,
+		Status: types.ExecutionStatusRunning,
+	}, []engine.OutboxEntry{createEntry}); err != nil {
+		t.Fatalf("CreateExecutionWithOutbox: %v", err)
+	}
+
+	// Seed downstream counters so we can assert they are NOT mutated by the
+	// rejected advance. The next node starts with in-degree 1 / 0 active.
+	inDegree := inDegreeKey(tenant.DefaultTenant, id, 1)
+	if err := state.rdb.Set(ctx, inDegree, 1, time.Minute).Err(); err != nil {
+		t.Fatalf("seed in-degree: %v", err)
+	}
+
+	// Source is terminal but its node:meta has NO activation_id field at all —
+	// the guard state required to evaluate activation-staleness is missing.
+	if err := state.rdb.Set(ctx, nodeStatusKey(tenant.DefaultTenant, id, "start"), "success", time.Minute).Err(); err != nil {
+		t.Fatalf("set source terminal status: %v", err)
+	}
+	// Deliberately do NOT write activation_id to node:meta.
+
+	arrivals := []engine.DownstreamArrival{{
+		NodeName:     "next",
+		NodeIdx:      1,
+		ArrivalCount: 1,
+		ActiveCount:  1,
+		MergeMode:    "wait_all",
+	}}
+
+	// An activation-0 advance against a source with a missing activation field
+	// must be rejected (not treated as matching 0).
+	result, err := state.AdvanceNode(ctx, engine.AdvanceNodeRequest{
+		ExecutionID:  id,
+		NodeName:     "start",
+		NodeIdx:      0,
+		ActivationID: 0,
+		Arrivals:     arrivals,
+	})
+	if err != nil {
+		t.Fatalf("AdvanceNode missing activation: %v", err)
+	}
+	if result.Applied {
+		t.Fatalf("missing-activation advance Applied=true, want false (fail closed)")
+	}
+
+	// The advance marker must NOT have been set (otherwise a later legitimate
+	// activation-0 advance would be wrongly collapsed to a no-op).
+	marker := advanceMarkerKey(tenant.DefaultTenant, id, "start", 0)
+	exists, err := state.rdb.Exists(ctx, marker).Result()
+	if err != nil {
+		t.Fatalf("Exists marker: %v", err)
+	}
+	if exists != 0 {
+		t.Fatalf("missing-activation advance set marker, want absent")
+	}
+
+	// Downstream in-degree and active inputs unchanged.
+	got, err := state.rdb.Get(ctx, inDegree).Int()
+	if err != nil {
+		t.Fatalf("Get in-degree: %v", err)
+	}
+	if got != 1 {
+		t.Fatalf("in-degree = %d, want 1 (unchanged)", got)
+	}
+	active, err := state.rdb.Get(ctx, activeInputsKey(tenant.DefaultTenant, id, 1)).Int()
+	if err != nil && err != redis.Nil {
+		t.Fatalf("Get active inputs: %v", err)
+	}
+	if active != 0 {
+		t.Fatalf("active inputs = %d, want 0 (unchanged)", active)
+	}
+
+	// No execute/skip outbox entries created.
+	ready, err := state.ListOutbox(ctx, id, time.Now().Add(time.Minute), 16)
+	if err != nil {
+		t.Fatalf("ListOutbox after missing-activation advance: %v", err)
+	}
+	for _, e := range ready {
+		if e.ID == redisExecuteOutboxID(id, "next", 0) || e.ID == redisSkipOutboxID(id, "next", 0) {
+			t.Fatalf("missing-activation advance created outbox entry %q", e.ID)
+		}
+	}
+
+	// Redelivery must still be rejected (marker was never set).
+	result2, err := state.AdvanceNode(ctx, engine.AdvanceNodeRequest{
+		ExecutionID:  id,
+		NodeName:     "start",
+		NodeIdx:      0,
+		ActivationID: 0,
+		Arrivals:     arrivals,
+	})
+	if err != nil {
+		t.Fatalf("AdvanceNode missing activation retry: %v", err)
+	}
+	if result2.Applied {
+		t.Fatalf("missing-activation retry Applied=true, want false")
+	}
+
+	// Sanity: writing a real activation_id=0 now makes the same advance apply,
+	// proving the rejection was due to the missing field, not a hard-coded block.
+	if err := state.rdb.HSet(ctx, nodeMetaKey(tenant.DefaultTenant, id, "start"), "activation_id", 0).Err(); err != nil {
+		t.Fatalf("write source activation: %v", err)
+	}
+	result3, err := state.AdvanceNode(ctx, engine.AdvanceNodeRequest{
+		ExecutionID:  id,
+		NodeName:     "start",
+		NodeIdx:      0,
+		ActivationID: 0,
+		Arrivals:     arrivals,
+	})
+	if err != nil {
+		t.Fatalf("AdvanceNode after restoring activation: %v", err)
+	}
+	if !result3.Applied {
+		t.Fatalf("restored-activation advance Applied=false, want true")
+	}
+}

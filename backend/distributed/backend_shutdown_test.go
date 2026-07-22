@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 
@@ -472,6 +473,138 @@ func TestShutdownErrorRedactedInStdlibLog(t *testing.T) {
 	}
 }
 
+// credentialErrorTransport is a queue.Transport whose StartConsumer fails with
+// a credential-bearing error, used to verify the deprecated Bind/BindHandler
+// paths sanitize the bind error before logging it.
+type credentialErrorTransport struct {
+	closed atomic.Bool
+}
+
+func (c *credentialErrorTransport) Enqueue(context.Context, *engine.Task) error { return nil }
+func (c *credentialErrorTransport) EnqueueDelayed(context.Context, *engine.Task, time.Duration) error {
+	return nil
+}
+func (c *credentialErrorTransport) StartConsumer(queue.ConsumerConfig, queue.TaskHandler) (func(), error) {
+	return nil, errors.New("start consumer: dial redis://:redis-bind-secret@10.0.0.5:6379 failed; access_token=redis-bind-secret")
+}
+func (c *credentialErrorTransport) Close() error { c.closed.Store(true); return nil }
+
+// TestBindErrorRedactedOnDeprecatedPaths verifies P1-3: the deprecated Bind
+// and BindHandler paths sanitize consumer-start errors (which can carry DSN/
+// credential substrings) before logging, both via engine.Logger and the
+// stdlib fallback.
+func TestBindErrorRedactedOnDeprecatedPaths(t *testing.T) {
+	t.Run("Bind via engine.Logger", func(t *testing.T) {
+		transport := &credentialErrorTransport{}
+		b := newTestBackend(t, transport)
+		logger := &recordingLogger{}
+		b.logger = logger
+
+		eng := engine.New(b.State(), b.Queue())
+		stop := b.Bind(eng)
+		defer stop()
+
+		text, ok := logger.logTextContaining("bind error")
+		if !ok {
+			t.Fatal("logger did not record bind error")
+		}
+		if strings.Contains(text, "redis-bind-secret") {
+			t.Fatalf("Bind path leaked credential: %q", text)
+		}
+		if !strings.Contains(text, "redis://***:***@") || !strings.Contains(text, "access_token=***") {
+			t.Fatalf("Bind path did not redact credentials: %q", text)
+		}
+	})
+
+	t.Run("BindHandler via stdlib log", func(t *testing.T) {
+		transport := &credentialErrorTransport{}
+		b := newTestBackend(t, transport)
+		// No logger configured -> stdlib log fallback.
+
+		var buf bytes.Buffer
+		orig := log.Writer()
+		log.SetOutput(&buf)
+		defer log.SetOutput(orig)
+
+		eng := engine.New(b.State(), b.Queue())
+		stop := b.BindHandler(eng, func(context.Context, *engine.Task) error { return nil })
+		defer stop()
+
+		out := buf.String()
+		if !strings.Contains(out, "bind error") {
+			t.Fatalf("stdlib log did not record bind error: %q", out)
+		}
+		if strings.Contains(out, "redis-bind-secret") {
+			t.Fatalf("BindHandler path leaked credential: %q", out)
+		}
+		if !strings.Contains(out, "redis://***:***@") || !strings.Contains(out, "access_token=***") {
+			t.Fatalf("BindHandler path did not redact credentials: %q", out)
+		}
+	})
+}
+
+// covering the forms the reacceptance probe found leaking: the
+// scheme://:password@host form (empty username), token-bearing query
+// parameters (access_token/token/api_key), and a non-credential-bearing
+// password= parameter. Each case asserts the secret is masked while the
+// surrounding host/path text survives.
+func TestSanitizeLogErrorMatrix(t *testing.T) {
+	cases := []struct {
+		name   string
+		err    string
+		secret string
+		want   string
+	}{
+		{
+			name:   "empty username redis url",
+			err:    "close redis://:redis-pass-acceptance@127.0.0.1:6379 failed",
+			secret: "redis-pass-acceptance",
+			want:   "redis://***:***@127.0.0.1:6379",
+		},
+		{
+			name:   "user password redis url",
+			err:    "dial redis://default:hunter2@redis.example.com:6379 failed",
+			secret: "hunter2",
+			want:   "redis://***:***@redis.example.com:6379",
+		},
+		{
+			name:   "access_token query param",
+			err:    "close redis://:redis-pass-acceptance@127.0.0.1:6379 failed; access_token=redis-pass-acceptance",
+			secret: "redis-pass-acceptance",
+			want:   "access_token=***",
+		},
+		{
+			name:   "token query param",
+			err:    "refresh failed token=eyJabc.SECRET&foo=bar",
+			secret: "eyJabc.SECRET",
+			want:   "token=***",
+		},
+		{
+			name:   "api_key query param",
+			secret: "AKIAIOSFODNN7EXAMPLE",
+			err:    "sts call failed api_key=AKIAIOSFODNN7EXAMPLE",
+			want:   "api_key=***",
+		},
+		{
+			name:   "password query param still redacted",
+			err:    "dsn postgres://u:p@db?password=dbpass",
+			secret: "dbpass",
+			want:   "password=***",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := sanitizeLogError(errors.New(tc.err))
+			if strings.Contains(got, tc.secret) {
+				t.Errorf("leaked secret %q in %q", tc.secret, got)
+			}
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("redacted output missing %q: %q", tc.want, got)
+			}
+		})
+	}
+}
+
 // TestShutdownObserverPanicDoesNotCrashShutdown verifies that a panicking
 // observer is recovered and shutdown still releases resources.
 func TestShutdownObserverPanicDoesNotCrashShutdown(t *testing.T) {
@@ -496,5 +629,44 @@ func TestShutdownObserverPanicDoesNotCrashShutdown(t *testing.T) {
 	}
 	if !logger.hasError("shutdown observer panicked", errors.New("observer boom")) {
 		t.Fatal("logger did not record observer panic")
+	}
+}
+
+// TestShutdownObserverPanicPreservesCollectedReport verifies the P1-2 fix: when
+// a configured observer panics, the already-collected ShutdownReport must not
+// be dropped. The transport Close error that was gathered before the observer
+// ran must still reach the sanitized logger fallback.
+func TestShutdownObserverPanicPreservesCollectedReport(t *testing.T) {
+	transportErr := errors.New("close redis://:redis-pass-acceptance@127.0.0.1:6379 failed")
+	transport := &closeErrAfterStartTransport{closeErr: transportErr}
+	pool := &countingPool{closeFn: func(context.Context) error { return nil }}
+	logger := &recordingLogger{}
+
+	b := newTestBackendWithPool(t, transport, pool)
+	b.shutdownObserver = panickingShutdownObserver{}
+	b.logger = logger
+
+	eng := engine.New(b.State(), b.Queue())
+	stop, err := b.StartBinding(eng)
+	if err != nil {
+		t.Fatalf("StartBinding error = %v", err)
+	}
+
+	stop()
+
+	// The panic was recorded.
+	if !logger.hasError("shutdown observer panicked", errors.New("observer boom")) {
+		t.Fatal("logger did not record observer panic")
+	}
+	// The collected transport close error survived via the sanitized fallback.
+	text, ok := logger.logTextContaining("transport close error")
+	if !ok {
+		t.Fatal("logger did not record transport close error after observer panic")
+	}
+	if strings.Contains(text, "redis-pass-acceptance") {
+		t.Fatalf("fallback leaked transport credential: %q", text)
+	}
+	if !strings.Contains(text, "redis://***:***@") {
+		t.Fatalf("fallback did not redact transport url: %q", text)
 	}
 }
