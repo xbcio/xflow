@@ -4,24 +4,21 @@
   color: #1a1a1a;
 
   /* Editor layout dimensions */
-  --xflow-toolbar-height: 48px;
-  --xflow-left-sidebar-width: 240px;
-  --xflow-right-sidebar-width: 280px;
-  --xflow-bottom-panel-height: 200px;
-  --xflow-panel-min-size: 10;
-  --xflow-panel-max-size: 90;
+  --editor-toolbar-height: 48px;
+  --editor-left-sidebar-width: 240px;
+  --editor-right-sidebar-width: 280px;
+  --editor-bottom-panel-height: 200px;
+  --editor-panel-min-size: 10;
+  --editor-panel-max-size: 90;
 
   /* Editor layout colors */
-  --xflow-canvas-bg: #f4f5f7;
-  --xflow-sidebar-bg: #ffffff;
-  --xflow-panel-bg: #ffffff;
-  --xflow-border-color: #d1d5db;
-  --xflow-text-primary: #1a1a1a;
-  --xflow-text-secondary: #6b7280;
-  --xflow-accent: #2563eb;
-
-  /* Editor canvas background */
-  --editor-canvas-bg: #f8fafc;
+  --editor-canvas-bg: #f4f5f7;
+  --editor-sidebar-bg: #ffffff;
+  --editor-panel-bg: #ffffff;
+  --editor-border-color: #d1d5db;
+  --editor-text-primary: #1a1a1a;
+  --editor-text-secondary: #6b7280;
+  --editor-accent: #2563eb;
 }
 
 .xflow-root * {

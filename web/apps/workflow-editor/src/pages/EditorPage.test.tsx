@@ -1,8 +1,12 @@
 // @vitest-environment jsdom
-import { render, screen, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { cleanup, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { MemoryRouter } from "react-router-dom";
+import type { ReactNode } from "react";
 import { createRuntimeConfig } from "../config/runtime";
 import { EditorPage } from "./EditorPage";
+
+afterEach(cleanup);
 
 vi.mock("../mocks", () => ({
   loadMockWorkflow: vi.fn().mockResolvedValue({
@@ -17,28 +21,79 @@ vi.mock("../mocks", () => ({
   }),
 }));
 
-describe("EditorPage", () => {
-  it("does not render fixture-json or placeholder text when mock is disabled", () => {
-    const config = createRuntimeConfig("Workflow Editor", "0.1.0");
-    config.mockEnabled = false;
-    render(<EditorPage config={config} />);
+vi.mock("@xflow/workflow-renderer", () => ({
+  WorkflowCanvas: (props: { readOnly?: boolean; selectable?: boolean; definition: { name?: string }; selectedNodeIds?: string[] }) => (
+    <div
+      data-testid="workflow-canvas"
+      data-readonly={String(props.readOnly)}
+      data-selectable={String(props.selectable)}
+      data-definition={props.definition.name}
+      data-selected={JSON.stringify(props.selectedNodeIds)}
+    >
+      WorkflowCanvas
+    </div>
+  ),
+}));
 
-    expect(screen.queryByTestId("fixture-json")).toBeNull();
-    expect(
-      screen.queryByText(/read-only placeholder editor/i),
-    ).toBeNull();
-    expect(screen.getByTestId("empty-state")).toBeDefined();
+vi.mock("@xyflow/react", () => ({
+  ReactFlowProvider: ({ children }: { children: ReactNode }) => <>{children}</>,
+}));
+
+const config = createRuntimeConfig("Workflow Editor", "0.1.0");
+config.mockEnabled = false;
+
+describe("EditorPage", () => {
+  it("renders the editor page shell", () => {
+    render(
+      <MemoryRouter>
+        <EditorPage config={config} />
+      </MemoryRouter>,
+    );
+    expect(screen.getByTestId("editor-page")).toBeDefined();
   });
 
-  it("renders fixture summary when mock is enabled", async () => {
-    const config = createRuntimeConfig("Workflow Editor", "0.1.0");
-    config.mockEnabled = true;
-    render(<EditorPage config={config} />);
+  it("renders the top toolbar", () => {
+    render(
+      <MemoryRouter>
+        <EditorPage config={config} />
+      </MemoryRouter>,
+    );
+    expect(screen.getByRole("toolbar")).toBeDefined();
+  });
 
-    await waitFor(() => {
-      expect(screen.getByTestId("fixture-summary")).toBeDefined();
-    });
-    expect(screen.getByText(/test-workflow/)).toBeDefined();
-    expect(screen.queryByTestId("fixture-json")).toBeNull();
+  it("renders the left sidebar", () => {
+    render(
+      <MemoryRouter>
+        <EditorPage config={config} />
+      </MemoryRouter>,
+    );
+    expect(screen.getByTestId("left-sidebar")).toBeDefined();
+  });
+
+  it("renders the canvas container", () => {
+    render(
+      <MemoryRouter>
+        <EditorPage config={config} />
+      </MemoryRouter>,
+    );
+    expect(screen.getByTestId("canvas-container")).toBeDefined();
+  });
+
+  it("renders the right sidebar", () => {
+    render(
+      <MemoryRouter>
+        <EditorPage config={config} />
+      </MemoryRouter>,
+    );
+    expect(screen.getByTestId("right-sidebar")).toBeDefined();
+  });
+
+  it("renders the bottom panel", () => {
+    render(
+      <MemoryRouter>
+        <EditorPage config={config} />
+      </MemoryRouter>,
+    );
+    expect(screen.getByTestId("bottom-panel")).toBeDefined();
   });
 });
