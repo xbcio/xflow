@@ -46,6 +46,10 @@ type Config struct {
 	// PollWait overrides the long-poll wait duration returned to runners when
 	// no task is available. Zero means the Server/GRPCServer default (1s).
 	PollWait time.Duration
+	// RuntimeEvidenceBuffer, when non-nil, is wired into the internal engine as
+	// a read-only evidence sink. NewControlPlane converts only this typed
+	// buffer to an engine Option; it does not expose arbitrary []engine.Option.
+	RuntimeEvidenceBuffer *engine.RuntimeEvidenceBuffer
 }
 
 type redisClientProvider interface {
@@ -103,6 +107,9 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 	var engOpts []engine.Option
 	if cfg.Logger != nil {
 		engOpts = append(engOpts, engine.WithLogger(cfg.Logger))
+	}
+	if cfg.RuntimeEvidenceBuffer != nil {
+		engOpts = append(engOpts, engine.WithRuntimeEvidenceBuffer(cfg.RuntimeEvidenceBuffer))
 	}
 	if cfg.Metrics != nil {
 		engOpts = append(engOpts,

@@ -103,6 +103,9 @@ func (b *RuntimeEvidenceBuffer) Dropped() uint64 {
 	return b.dropped.Load()
 }
 
+// EvidenceBuffer returns the wired evidence buffer for test/verification access.
+func (e *Engine) EvidenceBuffer() *RuntimeEvidenceBuffer { return e.evidenceBuffer }
+
 // publishRuntimeEvidence sends a non-blocking event. A nil buffer or a full
 // channel never blocks or panics; a full channel increments dropped.
 func publishRuntimeEvidence(b *RuntimeEvidenceBuffer, event RuntimeEvidenceEvent) {
