@@ -186,6 +186,10 @@ end
 if not terminal(redis.call('GET', KEYS[2])) then
     return 0
 end
+local storedActivation = tonumber(redis.call('HGET', KEYS[3], 'activation_id') or '0')
+if storedActivation ~= tonumber(ARGV[1]) then
+    return 0
+end
 if redis.call('SET', KEYS[4], '1', 'NX', 'EX', tonumber(ARGV[2])) == false then
     return 0
 end
