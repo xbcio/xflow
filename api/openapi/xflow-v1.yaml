@@ -1,0 +1,856 @@
+openapi: 3.1.0
+info:
+  title: xflow Workflow Management API
+  version: 1.0.0
+  description: |
+    Contract for managing workflow definitions, drafts, versions, and executions.
+    This spec freezes the resource semantics and wire shapes for the B1 vertical
+    slice: draft → validate → publish → invoke → inspect.
+  contact:
+    name: xflow maintainers
+    url: https://github.com/xbcio/xflow
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: /v1
+
+tags:
+  - name: Workflow Definitions
+    description: Manage workflow definitions, drafts, and published versions.
+  - name: Workflow Executions
+    description: Invoke and inspect workflow executions.
+
+security:
+  - bearerAuth: []
+
+paths:
+  /workflow-definitions:
+    get:
+      operationId: listWorkflowDefinitions
+      summary: List workflow definitions
+      description: Returns a paginated list of workflow definitions scoped to the caller's tenant.
+      tags:
+        - Workflow Definitions
+      parameters:
+        - name: pageToken
+          in: query
+          schema:
+            type: string
+        - name: pageSize
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        "200":
+          description: Paginated list of workflow definitions.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowDefinitionList"
+        default:
+          $ref: "#/components/responses/DefaultError"
+    post:
+      operationId: createWorkflowDefinition
+      summary: Create a workflow definition
+      description: Creates a new workflow definition with an empty draft.
+      tags:
+        - Workflow Definitions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateWorkflowDefinitionRequest"
+      responses:
+        "201":
+          description: Workflow definition created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowDefinition"
+        default:
+          $ref: "#/components/responses/DefaultError"
+
+  /workflow-definitions/{id}:
+    get:
+      operationId: getWorkflowDefinition
+      summary: Get a workflow definition
+      description: Returns the management resource for a single workflow definition.
+      tags:
+        - Workflow Definitions
+      parameters:
+        - $ref: "#/components/parameters/WorkflowDefinitionId"
+      responses:
+        "200":
+          description: Workflow definition resource.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowDefinition"
+        default:
+          $ref: "#/components/responses/DefaultError"
+
+  /workflow-definitions/{id}/draft:
+    put:
+      operationId: updateWorkflowDraft
+      summary: Update the draft
+      description: |
+        Replaces the mutable draft for a workflow definition. The request body
+        carries the runtime definition and editor metadata separately. Clients
+        should send `If-Match: "rev-<n>"` for optimistic concurrency.
+      tags:
+        - Workflow Definitions
+      parameters:
+        - $ref: "#/components/parameters/WorkflowDefinitionId"
+        - name: If-Match
+          in: header
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkflowDraft"
+      responses:
+        "200":
+          description: Updated draft.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowDraft"
+        "412":
+          $ref: "#/components/responses/DefaultError"
+        default:
+          $ref: "#/components/responses/DefaultError"
+
+  /workflow-definitions/{id}/validate:
+    post:
+      operationId: validateWorkflowDraft
+      summary: Validate the current draft
+      description: |
+        Validates the current draft against the server-side node registry and
+        returns diagnostics plus the canonical runtime hash.
+      tags:
+        - Workflow Definitions
+      parameters:
+        - $ref: "#/components/parameters/WorkflowDefinitionId"
+      responses:
+        "200":
+          description: Validation result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ValidationResult"
+        default:
+          $ref: "#/components/responses/DefaultError"
+
+  /workflow-definitions/{id}/publish:
+    post:
+      operationId: publishWorkflowVersion
+      summary: Publish a new version
+      description: |
+        Copies the current draft into an immutable version. Clients should send
+        `If-Match: "rev-<n>"` to ensure they publish the draft they validated.
+      tags:
+        - Workflow Definitions
+      parameters:
+        - $ref: "#/components/parameters/WorkflowDefinitionId"
+        - name: If-Match
+          in: header
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PublishWorkflowVersionRequest"
+      responses:
+        "201":
+          description: Published version.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowDefinitionVersion"
+        "412":
+          $ref: "#/components/responses/DefaultError"
+        default:
+          $ref: "#/components/responses/DefaultError"
+
+  /workflow-definitions/{id}/versions:
+    get:
+      operationId: listWorkflowDefinitionVersions
+      summary: List published versions
+      description: Returns a paginated list of published versions for a workflow definition.
+      tags:
+        - Workflow Definitions
+      parameters:
+        - $ref: "#/components/parameters/WorkflowDefinitionId"
+        - name: pageToken
+          in: query
+          schema:
+            type: string
+        - name: pageSize
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        "200":
+          description: Paginated list of versions.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowDefinitionVersionList"
+        default:
+          $ref: "#/components/responses/DefaultError"
+
+  /workflow-definitions/{id}/versions/{version}:
+    get:
+      operationId: getWorkflowDefinitionVersion
+      summary: Get a published version
+      description: Returns a single immutable published version.
+      tags:
+        - Workflow Definitions
+      parameters:
+        - $ref: "#/components/parameters/WorkflowDefinitionId"
+        - $ref: "#/components/parameters/Version"
+      responses:
+        "200":
+          description: Published version.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowDefinitionVersion"
+        default:
+          $ref: "#/components/responses/DefaultError"
+
+  /workflow-definitions/{id}/versions/{version}/invoke:
+    post:
+      operationId: invokeWorkflowVersion
+      summary: Invoke a published version
+      description: Starts an execution of the published version and returns the execution id.
+      tags:
+        - Workflow Executions
+      parameters:
+        - $ref: "#/components/parameters/WorkflowDefinitionId"
+        - $ref: "#/components/parameters/Version"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InvokeWorkflowRequest"
+      responses:
+        "202":
+          description: Execution accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InvokeWorkflowResponse"
+        default:
+          $ref: "#/components/responses/DefaultError"
+
+  /executions/{executionId}:
+    get:
+      operationId: getExecutionSnapshot
+      summary: Inspect an execution
+      description: Returns the current execution snapshot, including node statuses.
+      tags:
+        - Workflow Executions
+      parameters:
+        - name: executionId
+          in: path
+          required: true
+          description: Stable execution UUID.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Execution snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExecutionSnapshot"
+        default:
+          $ref: "#/components/responses/DefaultError"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    WorkflowDefinitionId:
+      name: id
+      in: path
+      required: true
+      description: Stable workflow definition UUID.
+      schema:
+        type: string
+        format: uuid
+    Version:
+      name: version
+      in: path
+      required: true
+      description: Client-supplied version string.
+      schema:
+        type: string
+
+  responses:
+    DefaultError:
+      description: Error response.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+  schemas:
+    WorkflowDefinition:
+      type: object
+      required:
+        - id
+        - namespace
+        - name
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        namespace:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        createdBy:
+          type: string
+        tenantId:
+          type: string
+        latestVersion:
+          type: string
+        draftRevision:
+          type: integer
+
+    WorkflowDefinitionList:
+      type: object
+      required:
+        - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkflowDefinition"
+        nextPageToken:
+          type: string
+
+    CreateWorkflowDefinitionRequest:
+      type: object
+      required:
+        - namespace
+        - name
+      properties:
+        namespace:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+
+    WorkflowDraft:
+      type: object
+      required:
+        - definition
+        - revision
+      properties:
+        definition:
+          $ref: "#/components/schemas/WorkflowDefinitionRuntime"
+        editorMetadata:
+          $ref: "#/components/schemas/WorkflowEditorMetadata"
+        revision:
+          type: integer
+          description: Per-definition monotonic integer for optimistic concurrency.
+        definitionHash:
+          type: string
+          description: Canonical runtime hash (runtime-sha256:v1:...).
+        auditFingerprint:
+          type: string
+          description: Full-definition audit hash (sha256:audit:v1:...).
+        updatedAt:
+          type: string
+          format: date-time
+
+    WorkflowDefinitionVersion:
+      type: object
+      required:
+        - definition
+        - version
+        - revision
+        - immutable
+      properties:
+        definition:
+          $ref: "#/components/schemas/WorkflowDefinitionRuntime"
+        editorMetadata:
+          $ref: "#/components/schemas/WorkflowEditorMetadata"
+        revision:
+          type: integer
+        definitionHash:
+          type: string
+        auditFingerprint:
+          type: string
+        updatedAt:
+          type: string
+          format: date-time
+        version:
+          type: string
+          description: Client-supplied version string.
+        publishedAt:
+          type: string
+          format: date-time
+        publishedBy:
+          type: string
+        immutable:
+          type: boolean
+
+    WorkflowDefinitionVersionList:
+      type: object
+      required:
+        - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkflowDefinitionVersion"
+        nextPageToken:
+          type: string
+
+    PublishWorkflowVersionRequest:
+      type: object
+      required:
+        - version
+      properties:
+        version:
+          type: string
+
+    WorkflowDefinitionRuntime:
+      type: object
+      required:
+        - namespace
+        - name
+      properties:
+        namespace:
+          type: string
+        name:
+          type: string
+        versionTag:
+          type: string
+          description: Optional runtime version tag (maps to WorkflowDef.Version).
+        description:
+          type: string
+          description: Human documentation; excluded from the runtime hash.
+        spec:
+          type: string
+        runnerSelector:
+          $ref: "#/components/schemas/RunnerSelector"
+        context:
+          $ref: "#/components/schemas/WorkflowContext"
+        settings:
+          $ref: "#/components/schemas/WorkflowSettings"
+        options:
+          $ref: "#/components/schemas/WorkflowOptions"
+        credentials:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/CredentialDef"
+        params:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/ParamDef"
+        node_templates:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/NodeTemplate"
+        nodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuntimeNodeDef"
+        connections:
+          $ref: "#/components/schemas/Connections"
+        outputs:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/WorkflowOutput"
+        pin_data:
+          type: object
+          additionalProperties: true
+          description: Runtime-semantic pinned node inputs.
+
+    WorkflowEditorMetadata:
+      type: object
+      properties:
+        positions:
+          type: object
+          description: Map of node id/name to visual position.
+          additionalProperties:
+            $ref: "#/components/schemas/Position"
+        viewport:
+          type: object
+          properties:
+            x:
+              type: number
+            y:
+              type: number
+            zoom:
+              type: number
+        ui:
+          type: object
+          description: Map of node id/name to UI overrides.
+          additionalProperties:
+            type: object
+            additionalProperties: true
+        notes:
+          type: object
+          description: Map of node id/name to author notes.
+          additionalProperties:
+            type: string
+        pinData:
+          type: object
+          additionalProperties: true
+          readOnly: true
+          description: Read-only derived cache of WorkflowDefinitionRuntime.pin_data.
+
+    RuntimeNodeDef:
+      type: object
+      required:
+        - name
+        - type
+      properties:
+        name:
+          type: string
+        type:
+          type: string
+        kind:
+          $ref: "#/components/schemas/NodeKind"
+        version:
+          type: integer
+        template:
+          type: string
+        disabled:
+          type: boolean
+        on_error:
+          type: string
+        runnerSelector:
+          $ref: "#/components/schemas/RunnerSelector"
+        inputs:
+          type: array
+          items:
+            $ref: "#/components/schemas/PortDecl"
+        output_schema:
+          type: object
+          additionalProperties: true
+        parameters:
+          type: object
+          additionalProperties: true
+        retry:
+          $ref: "#/components/schemas/RetrySettings"
+
+    NodeKind:
+      type: string
+      enum:
+        - action
+        - trigger
+
+    Position:
+      type: object
+      properties:
+        x:
+          type: number
+        y:
+          type: number
+
+    PortDecl:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+        required:
+          type: boolean
+
+    Connection:
+      type: object
+      required:
+        - node
+        - input
+      properties:
+        node:
+          type: string
+        input:
+          type: string
+
+    Connections:
+      type: object
+      description: Map[source_node]map[output_port][]Connection(target).
+      additionalProperties:
+        type: object
+        additionalProperties:
+          type: array
+          items:
+            $ref: "#/components/schemas/Connection"
+
+    WorkflowContext:
+      type: object
+      properties:
+        vars:
+          type: object
+          additionalProperties: true
+        config:
+          type: object
+          additionalProperties: true
+
+    WorkflowSettings:
+      type: object
+      properties:
+        timeout:
+          type: integer
+        concurrency:
+          type: integer
+        timezone:
+          type: string
+        on_error:
+          type: string
+        pin_data_mode:
+          type: string
+        retry:
+          $ref: "#/components/schemas/RetrySettings"
+
+    RetrySettings:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+        max_attempts:
+          type: integer
+        strategy:
+          type: string
+        initial_interval:
+          type: integer
+        max_interval:
+          type: integer
+        multiplier:
+          type: number
+
+    RunnerSelector:
+      type: object
+      properties:
+        mode:
+          $ref: "#/components/schemas/RunnerSelectorMode"
+        matchLabels:
+          type: object
+          additionalProperties:
+            type: string
+
+    RunnerSelectorMode:
+      type: string
+      enum:
+        - default
+        - required
+
+    WorkflowOptions:
+      type: object
+      properties:
+        allow_cycles:
+          type: boolean
+        max_auto_depth:
+          type: integer
+        experimental_expand:
+          type: boolean
+
+    CredentialDef:
+      type: object
+      properties:
+        name:
+          type: string
+        type:
+          type: string
+
+    ParamDef:
+      type: object
+      required:
+        - type
+      properties:
+        type:
+          type: string
+        required:
+          type: boolean
+        display_name:
+          type: string
+        default: {}
+        validation:
+          type: object
+          additionalProperties: true
+
+    NodeTemplate:
+      type: object
+      properties:
+        type:
+          type: string
+        parameters:
+          type: object
+          additionalProperties: true
+
+    WorkflowOutput:
+      type: object
+      properties:
+        value: {}
+        display_name:
+          type: string
+
+    Diagnostic:
+      type: object
+      required:
+        - code
+        - severity
+        - message
+      properties:
+        code:
+          type: string
+        severity:
+          type: string
+          enum:
+            - error
+            - warning
+            - info
+        message:
+          type: string
+        path:
+          type: string
+        nodeId:
+          type: string
+        connectionRef:
+          type: object
+          properties:
+            node:
+              type: string
+            input:
+              type: string
+
+    ValidationResult:
+      type: object
+      required:
+        - valid
+      properties:
+        valid:
+          type: boolean
+        definitionHash:
+          type: string
+        diagnostics:
+          type: array
+          items:
+            $ref: "#/components/schemas/Diagnostic"
+
+    InvokeWorkflowRequest:
+      type: object
+      required:
+        - entry
+      properties:
+        entry:
+          type: string
+        input:
+          type: object
+          additionalProperties: true
+
+    InvokeWorkflowResponse:
+      type: object
+      required:
+        - executionId
+      properties:
+        executionId:
+          type: string
+
+    ExecutionSnapshot:
+      type: object
+      required:
+        - id
+        - status
+      properties:
+        id:
+          type: string
+        status:
+          $ref: "#/components/schemas/ExecutionStatus"
+        params:
+          type: object
+        nodeStatuses:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/NodeStatus"
+        parentId:
+          type: string
+        traceId:
+          type: string
+        startedAt:
+          type: string
+          format: date-time
+        finishedAt:
+          type: string
+          format: date-time
+
+    ExecutionStatus:
+      type: string
+      enum:
+        - pending
+        - running
+        - success
+        - failed
+        - canceling
+        - canceled
+        - timeout
+
+    NodeStatus:
+      type: string
+      enum:
+        - pending
+        - running
+        - committing
+        - success
+        - failed
+        - skipped
+        - suspended
+        - continued
+        - canceled
+        - waiting
+
+    Error:
+      type: object
+      required:
+        - code
+        - message
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        details:
+          type: object
+          additionalProperties: true

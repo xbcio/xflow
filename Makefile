@@ -1,6 +1,6 @@
 .PHONY: all build test test-concurrency lint fmt tidy clean run-server run-runner install-hooks proto proto-tools \
         env-up env-down env-reset env-logs env-migrate test-integration test-integration-required test-perf perf-sample test-soak \
-        web-install web-lint web-typecheck web-test web-check-boundaries web-build web-e2e web-ci web-all
+        web-install web-lint web-typecheck web-test web-check-boundaries web-build web-e2e web-ci web-all validate-openapi
 
 # ── Build ──────────────────────────────────────────────────────────────────────
 
@@ -178,3 +178,14 @@ web-e2e:
 web-ci: web-install web-lint web-typecheck web-test web-check-boundaries web-build web-e2e
 
 web-all: web-ci
+
+# ── OpenAPI contract validation (C0) ───────────────────────────────────────────
+validate-openapi:
+	@echo "Linting OpenAPI spec with Spectral..."
+	npx @stoplight/spectral-cli lint api/openapi/xflow-v1.yaml --ruleset api/openapi/.spectral.yaml
+	@echo "Validating OpenAPI spec structure with redocly..."
+	cd web && pnpm exec redocly lint --config ../.redocly.yaml ../api/openapi/xflow-v1.yaml
+	@echo "Running Go OpenAPI fixture + round-trip tests..."
+	go test ./api/openapi/ -count=1
+	@echo "Checking generated TypeScript types are up-to-date..."
+	cd web && pnpm check:openapi

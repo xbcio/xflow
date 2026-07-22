@@ -19,6 +19,8 @@
     "check:production-fixtures": "node scripts/check-production-fixtures.mjs",
     "e2e": "playwright test",
     "e2e:preview": "pnpm build && playwright test --config playwright.preview.config.ts",
+    "openapi:generate": "openapi-typescript ../api/openapi/xflow-v1.yaml -o packages/workflow-core/src/openapi-types.ts",
+    "check:openapi": "pnpm openapi:generate && git diff --exit-code packages/workflow-core/src/openapi-types.ts",
     "changeset": "changeset"
   },
   "devDependencies": {
@@ -38,7 +40,9 @@
     "eslint-import-resolver-typescript": "3.10.0",
     "eslint-plugin-import": "2.31.0",
     "jsdom": "26.0.0",
+    "openapi-typescript": "7.13.0",
     "playwright": "1.52.0",
+    "@redocly/cli": "1.34.1",
     "react": "19.1.0",
     "react-dom": "19.1.0",
     "turbo": "2.5.0",

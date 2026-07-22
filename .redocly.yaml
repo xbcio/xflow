@@ -1,0 +1,11 @@
+extends:
+  - recommended
+
+rules:
+  # We use a single `default` error response (Problem Details-style Error
+  # schema) rather than enumerating every possible 4XX.
+  operation-4xx-response: off
+
+apis:
+  xflow-v1:
+    root: ./api/openapi/xflow-v1.yaml

@@ -1,0 +1,13 @@
+{
+  "id": "exec-018ff7a0-1234-7abc-8def-0123456789ab",
+  "status": "success",
+  "params": { "name": "alice" },
+  "nodeStatuses": {
+    "Start": "success",
+    "End": "success"
+  },
+  "parentId": "",
+  "traceId": "trace-1234567890abcdef",
+  "startedAt": "2026-07-21T12:10:00Z",
+  "finishedAt": "2026-07-21T12:10:05Z"
+}

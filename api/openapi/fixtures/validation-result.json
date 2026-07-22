@@ -1,0 +1,13 @@
+{
+  "valid": false,
+  "definitionHash": "runtime-sha256:v1:abcdef1234567890",
+  "diagnostics": [
+    {
+      "code": "NODE_METADATA_KEYED_BY_NAME",
+      "severity": "warning",
+      "message": "editor metadata for node \"End\" is keyed by name because node.id is missing; set a stable id to avoid metadata collisions on rename or duplicate",
+      "path": "nodes[1]",
+      "nodeId": "end"
+    }
+  ]
+}
