@@ -16,8 +16,15 @@ import (
 // error taxonomy matrix (2026-07-18 remediation §6.4). Classification is by
 // MySQL SQLState / error number, never by error text.
 //
+// PostgreSQL is NOT supported: only the MySQL driver is classified. PG errors
+// do not unmarshal as *mysqldriver.MySQLError and therefore fall through to the
+// conservative-transient fallback. Supporting PG would require its own typed
+// classifier (PG SQLState differs, e.g. 40P01 deadlock / 23505 unique_violation)
+// — out of scope; see error_taxonomy §6.
+//
 //   - connection-lost (driver.ErrBadConn, net errors, EOF) -> transient
-//   - deadlock / serialization failure (1213, 1205, 40001, 40P01) -> transient
+//   - deadlock / lock wait / serialization failure (1213, 1205, 40001) ->
+//     transient
 //   - constraint violations (1062 dup, 1452/1451 FK, 1048 not-null, 23000) ->
 //     permanent (data error, retrying with the same payload cannot help)
 //   - syntax/config (1064 syntax, 1146 no table, 42xxx) -> permanent
@@ -56,7 +63,7 @@ func classifyMySQLError(e *mysqldriver.MySQLError) error {
 		return types.NewTransientError(code, msg)
 	}
 	switch state {
-	case "40001", "40P01": // serialization failure (MySQL/PG)
+	case "40001": // serialization failure
 		return types.NewTransientError(code, msg)
 	case "23000", "23001": // integrity constraint violation
 		return types.NewPermanentError(code, msg)
