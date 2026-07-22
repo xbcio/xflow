@@ -88,6 +88,14 @@ func (s SweepMetrics) OnSweepError(ctx context.Context, _, _ string, _ error) {
 	s.Metrics.Inc(metricLeaseSweepErrors, withTenant(ctx, map[string]string{"reason": "reclaim_error"}))
 }
 
+func (s SweepMetrics) OnSweepReclaimApplied(ctx context.Context, _, _ string, ageMs int64) {
+	// Reclaim state was applied but the synchronous outbox flush failed. The
+	// durable OutboxDispatcher will retry delivery; count it as applied-pending
+	// rather than a completed delivery.
+	s.Metrics.Inc(metricLeaseSweepReclaimed, withTenant(ctx, map[string]string{"result": "applied_pending"}))
+	s.Metrics.Observe(metricLeaseAge, withTenant(ctx, map[string]string{"result": "applied_pending"}), time.Duration(ageMs)*time.Millisecond)
+}
+
 func (s SweepMetrics) OnSweepListExpired(ctx context.Context, candidates int, elapsed time.Duration, err error) {
 	result := "ok"
 	if err != nil {

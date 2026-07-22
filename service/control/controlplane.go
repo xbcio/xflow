@@ -169,7 +169,11 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 	if !ok {
 		elector = backend.AlwaysLeader{}
 	}
-	sweeperCfg := LeaseSweeperConfig{Elector: elector, Logger: cfg.Logger}
+	var expiredLeaseReleaser ExpiredLeaseReleaser
+	if r, ok := runners.(ExpiredLeaseReleaser); ok {
+		expiredLeaseReleaser = r
+	}
+	sweeperCfg := LeaseSweeperConfig{Elector: elector, Logger: cfg.Logger, RunnerDirectory: expiredLeaseReleaser}
 	if cfg.Metrics != nil {
 		sweeperCfg.Observer = metrics.NewSweepMetrics(cfg.Metrics)
 	}

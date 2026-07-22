@@ -41,6 +41,7 @@ type LeaseIndexRepairer interface {
 type LeaseSweeper struct {
 	state          LeaseLister
 	engine         execution.Engine
+	directory      ExpiredLeaseReleaser
 	period         time.Duration
 	grace          time.Duration
 	log            engine.Logger
@@ -85,6 +86,10 @@ type LeaseSweeperConfig struct {
 	Logger engine.Logger
 	// Observer receives sweep outcomes. Optional.
 	Observer SweepObserver
+	// RunnerDirectory is the token-fenced directory cleanup capability. When
+	// non-nil, SweepOnce releases the expired lease in the directory before
+	// engine reclaim; token mismatch fails closed (no reclaim).
+	RunnerDirectory ExpiredLeaseReleaser
 	// Elector gates leader-only execution: when set and IsLeader() is false,
 	// SweepOnce is a no-op. Nil means "always run" (backward-compatible
 	// single-replica default).
@@ -117,6 +122,7 @@ func NewLeaseSweeper(state LeaseLister, eng execution.Engine, cfg LeaseSweeperCo
 	return &LeaseSweeper{
 		state:          state,
 		engine:         eng,
+		directory:      cfg.RunnerDirectory,
 		period:         cfg.Period,
 		grace:          cfg.Grace,
 		log:            cfg.Logger,
@@ -206,9 +212,64 @@ func (s *LeaseSweeper) SweepOnce(ctx context.Context) int {
 			return reclaimed
 		default:
 		}
+		// 1. Directory cleanup first (token-fenced). This prevents a stale
+		// finalized lease from occupying runner capacity or suppressing
+		// redelivery after the engine has revoked the lease.
+		if s.directory != nil {
+			req := ExpiredDirectoryLeaseRequest{
+				AssignmentID: BuildAssignmentID(taskFromExpiredLease(&lease)),
+				LeaseID:      lease.LeaseID,
+				LeaseToken:   lease.LeaseToken,
+			}
+			out, derr := s.directory.ReleaseExpiredLease(ctx, req)
+			if derr != nil || out == ExpiredDirectoryLeaseTokenMismatch {
+				// Fail closed: do not attempt engine reclaim. The next sweep
+				// will see a fresh lease generation if one exists.
+				if derr != nil && s.log != nil {
+					s.log.Error("release expired lease in directory",
+						"exec", string(lease.ExecutionID),
+						"node", lease.NodeName,
+						"err", derr,
+					)
+				}
+				continue
+			}
+		}
+
+		// 2. Engine reclaim. Judge reclaimed before err (spec §3.3.1 step 5).
 		reclaimStarted := time.Now()
 		ok, err := s.engine.ReclaimLease(ctx, lease)
-		if err != nil {
+		switch {
+		case ok && err == nil:
+			s.observeTiming(func(observer SweepTimingObserver) {
+				observer.OnSweepReclaimResult(ctx, "reclaimed", time.Since(reclaimStarted))
+			})
+			reclaimed++
+			if s.observer != nil {
+				ageMs := s.clock().Sub(lease.IssuedAt.Add(lease.TTL)).Milliseconds()
+				s.observer.OnSweepReclaim(ctx, string(lease.ExecutionID), lease.NodeName, ageMs)
+			}
+		case ok && err != nil:
+			// Revoke/outbox applied, but immediate FlushOutbox failed. The
+			// lease is already revoked (it will not be re-listed), so count
+			// the reclaim as applied and let the durable OutboxDispatcher
+			// retry delivery — do not wait for the next lease sweep.
+			s.observeTiming(func(observer SweepTimingObserver) {
+				observer.OnSweepReclaimResult(ctx, "applied_pending", time.Since(reclaimStarted))
+			})
+			reclaimed++
+			s.recordReclaimApplied(ctx, lease, err)
+		case !ok && err == nil:
+			// A racing commit/report won; no new mutation was applied.
+			s.observeTiming(func(observer SweepTimingObserver) {
+				observer.OnSweepReclaimResult(ctx, "race", time.Since(reclaimStarted))
+			})
+			if s.observer != nil {
+				s.observer.OnSweepRace(ctx, string(lease.ExecutionID), lease.NodeName)
+			}
+		case !ok && err != nil:
+			// State mutation not applied; leave the expired lease in place
+			// and retry on the next sweep.
 			s.observeTiming(func(observer SweepTimingObserver) {
 				observer.OnSweepReclaimResult(ctx, "error", time.Since(reclaimStarted))
 			})
@@ -222,27 +283,50 @@ func (s *LeaseSweeper) SweepOnce(ctx context.Context) int {
 			if s.observer != nil {
 				s.observer.OnSweepError(ctx, string(lease.ExecutionID), lease.NodeName, err)
 			}
-			continue
-		}
-		if !ok {
-			s.observeTiming(func(observer SweepTimingObserver) {
-				observer.OnSweepReclaimResult(ctx, "race", time.Since(reclaimStarted))
-			})
-			if s.observer != nil {
-				s.observer.OnSweepRace(ctx, string(lease.ExecutionID), lease.NodeName)
-			}
-			continue
-		}
-		s.observeTiming(func(observer SweepTimingObserver) {
-			observer.OnSweepReclaimResult(ctx, "reclaimed", time.Since(reclaimStarted))
-		})
-		reclaimed++
-		if s.observer != nil {
-			ageMs := s.clock().Sub(lease.IssuedAt.Add(lease.TTL)).Milliseconds()
-			s.observer.OnSweepReclaim(ctx, string(lease.ExecutionID), lease.NodeName, ageMs)
 		}
 	}
 	return reclaimed
+}
+
+// taskFromExpiredLease reconstructs the queued task identity used to derive
+// the runner-directory AssignmentID. The directory key is built from the same
+// immutable fields as BuildAssignmentID.
+func taskFromExpiredLease(lease *engine.ExpiredLease) *engine.Task {
+	if lease == nil {
+		return nil
+	}
+	return &engine.Task{
+		ExecutionID:  lease.ExecutionID,
+		NodeName:     lease.NodeName,
+		NodeIdx:      lease.NodeIdx,
+		ActivationID: lease.ActivationID,
+		AutoDepth:    lease.AutoDepth,
+		Payload:      lease.Payload,
+	}
+}
+
+// reclaimAppliedObserver is an optional extension that records a reclaim whose
+// state transition was applied but whose immediate delivery flush failed.
+// Implementations must not block.
+type reclaimAppliedObserver interface {
+	OnSweepReclaimApplied(ctx context.Context, execID, nodeName string, ageMs int64)
+}
+
+// recordReclaimApplied preserves the fact that a reclaim was applied even
+// though the synchronous outbox flush returned an error. It must not be
+// recorded as a delivery failure and must not erase the applied reclaim.
+func (s *LeaseSweeper) recordReclaimApplied(ctx context.Context, lease engine.ExpiredLease, flushErr error) {
+	ageMs := s.clock().Sub(lease.IssuedAt.Add(lease.TTL)).Milliseconds()
+	if obs, ok := s.observer.(reclaimAppliedObserver); ok {
+		obs.OnSweepReclaimApplied(ctx, string(lease.ExecutionID), lease.NodeName, ageMs)
+	} else if s.log != nil {
+		s.log.Error("reclaim applied but flush failed",
+			"exec", string(lease.ExecutionID),
+			"node", lease.NodeName,
+			"age_ms", ageMs,
+			"err", flushErr,
+		)
+	}
 }
 
 func (s *LeaseSweeper) observeTiming(fn func(SweepTimingObserver)) {
