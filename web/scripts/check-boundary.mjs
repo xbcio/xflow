@@ -6,14 +6,15 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const packagesDir = path.resolve(__dirname, "../packages");
+const appsDir = path.resolve(__dirname, "../apps");
 
 // Forbidden dependency patterns. A dependency is rejected when any pattern
 // matches its full name. Patterns cover exact names, scopes, or prefixes.
 // ADR D9: ahooks and zustand are app-layer only; public packages must not
 // declare them (not even as optional peers).
 // ADR D9 (2026-07-19): @tanstack/react-query is forbidden across the whole
-// web workspace; the boundary script rejects it in public packages too so
-// CI catches accidental reintroduction.
+// web workspace; the boundary script rejects it in public packages and apps
+// so CI catches accidental reintroduction.
 const forbiddenPatterns = [
   { source: "@umijs/max", regex: /^@umijs\// },
   { source: "@ant-design/pro-layout", regex: /^@ant-design\/pro-/ },
@@ -38,14 +39,14 @@ function isForbidden(dep) {
   return null;
 }
 
-async function checkPackages() {
-  const entries = await readdir(packagesDir, { withFileTypes: true });
-  const packages = entries.filter((e) => e.isDirectory()).map((e) => e.name);
+async function checkWorkspaceDir(dir, label) {
+  const entries = await readdir(dir, { withFileTypes: true });
+  const projects = entries.filter((e) => e.isDirectory()).map((e) => e.name);
 
   let failed = false;
 
-  for (const pkg of packages) {
-    const pkgJsonPath = path.join(packagesDir, pkg, "package.json");
+  for (const project of projects) {
+    const pkgJsonPath = path.join(dir, project, "package.json");
     let pkgJson;
     try {
       pkgJson = JSON.parse(await readFile(pkgJsonPath, "utf-8"));
@@ -66,7 +67,7 @@ async function checkPackages() {
       const source = isForbidden(dep);
       if (source) {
         console.error(
-          `BOUNDARY VIOLATION: public package ${pkgJson.name} declares forbidden dependency "${dep}" (matched by "${source}")`
+          `BOUNDARY VIOLATION: ${label} ${pkgJson.name} declares forbidden dependency "${dep}" (matched by "${source}")`
         );
         failed = true;
       }
@@ -133,14 +134,15 @@ async function main() {
     process.exit(failed ? 1 : 0);
   }
 
-  const packageFailed = await checkPackages();
+  const packagesFailed = await checkWorkspaceDir(packagesDir, "public package");
+  const appsFailed = await checkWorkspaceDir(appsDir, "app");
   const negativeFailed = await runNegativeTest();
 
-  if (packageFailed || negativeFailed) {
+  if (packagesFailed || appsFailed || negativeFailed) {
     process.exit(1);
   }
 
-  console.log("Boundary check passed: no public package depends on Umi/ProComponents/TanStack Query.");
+  console.log("Boundary check passed: no public package or app depends on Umi/ProComponents/TanStack Query.");
 }
 
 main().catch((err) => {
