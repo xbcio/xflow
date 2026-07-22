@@ -41,198 +41,216 @@ func TestGRPCActionErrorParity(t *testing.T) {
 		{
 			Name: "grpc_no_pool_permanent",
 			Build: func() (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
-				return grpcNodeDef("127.0.0.1:1"), nil, nil
+				return grpcParityBuild(t, "grpc_no_pool_permanent", grpcNodeDef("127.0.0.1:1"), false)
 			},
-			MaxAttempts: 2,
-			WantAttempt: 1,
-			WantStatus:  types.ExecutionStatusFailed,
-			ErrContains: "grpc.no_pool",
+			MaxAttempts:            2,
+			WantAttempt:            1,
+			WantStatus:             types.ExecutionStatusFailed,
+			ErrContains:            "grpc.no_pool",
+			WantHandlerInvocations: 1,
 		},
 		{
 			Name: "grpc_connection_transient_exhausted",
 			Build: func() (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
-				return grpcNodeDef("127.0.0.1:1"), nil, nil
+				return grpcParityBuild(t, "grpc_connection_transient_exhausted", grpcNodeDef("127.0.0.1:1"), true)
 			},
-			MaxAttempts: 2,
-			WantAttempt: 2,
-			WantStatus:  types.ExecutionStatusFailed,
-			ErrContains: "grpc.",
+			MaxAttempts:            2,
+			WantAttempt:            2,
+			WantStatus:             types.ExecutionStatusFailed,
+			ErrContains:            "grpc.",
+			WantHandlerInvocations: 2,
 		},
 		{
 			Name: "grpc_not_found_permanent",
 			Build: func() (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
 				host := startGRPCStatusServer(t, codes.NotFound)
-				return grpcNodeDef(host), nil, nil
+				return grpcParityBuild(t, "grpc_not_found_permanent", grpcNodeDef(host), true)
 			},
-			MaxAttempts: 2,
-			WantAttempt: 1,
-			WantStatus:  types.ExecutionStatusFailed,
-			ErrContains: "grpc.NotFound",
+			MaxAttempts:            2,
+			WantAttempt:            1,
+			WantStatus:             types.ExecutionStatusFailed,
+			ErrContains:            "grpc.NotFound",
+			WantHandlerInvocations: 1,
 		},
 		{
 			Name: "grpc_unavailable_transient_exhausted",
 			Build: func() (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
 				host := startGRPCStatusServer(t, codes.Unavailable)
-				return grpcNodeDef(host), nil, nil
+				return grpcParityBuild(t, "grpc_unavailable_transient_exhausted", grpcNodeDef(host), true)
 			},
-			MaxAttempts: 2,
-			WantAttempt: 2,
-			WantStatus:  types.ExecutionStatusFailed,
-			ErrContains: "grpc.Unavailable",
+			MaxAttempts:            2,
+			WantAttempt:            2,
+			WantStatus:             types.ExecutionStatusFailed,
+			ErrContains:            "grpc.Unavailable",
+			WantHandlerInvocations: 2,
 		},
 		{
 			Name: "grpc_invalid_argument_permanent",
 			Build: func() (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
 				host := startGRPCStatusServer(t, codes.InvalidArgument)
-				return grpcNodeDef(host), nil, nil
+				return grpcParityBuild(t, "grpc_invalid_argument_permanent", grpcNodeDef(host), true)
 			},
-			MaxAttempts: 2,
-			WantAttempt: 1,
-			WantStatus:  types.ExecutionStatusFailed,
-			ErrContains: "grpc.InvalidArgument",
+			MaxAttempts:            2,
+			WantAttempt:            1,
+			WantStatus:             types.ExecutionStatusFailed,
+			ErrContains:            "grpc.InvalidArgument",
+			WantHandlerInvocations: 1,
 		},
 		{
 			Name: "grpc_permission_denied_permanent",
 			Build: func() (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
 				host := startGRPCStatusServer(t, codes.PermissionDenied)
-				return grpcNodeDef(host), nil, nil
+				return grpcParityBuild(t, "grpc_permission_denied_permanent", grpcNodeDef(host), true)
 			},
-			MaxAttempts: 2,
-			WantAttempt: 1,
-			WantStatus:  types.ExecutionStatusFailed,
-			ErrContains: "grpc.PermissionDenied",
+			MaxAttempts:            2,
+			WantAttempt:            1,
+			WantStatus:             types.ExecutionStatusFailed,
+			ErrContains:            "grpc.PermissionDenied",
+			WantHandlerInvocations: 1,
 		},
 		{
 			Name: "grpc_unauthenticated_permanent",
 			Build: func() (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
 				host := startGRPCStatusServer(t, codes.Unauthenticated)
-				return grpcNodeDef(host), nil, nil
+				return grpcParityBuild(t, "grpc_unauthenticated_permanent", grpcNodeDef(host), true)
 			},
-			MaxAttempts: 2,
-			WantAttempt: 1,
-			WantStatus:  types.ExecutionStatusFailed,
-			ErrContains: "grpc.Unauthenticated",
+			MaxAttempts:            2,
+			WantAttempt:            1,
+			WantStatus:             types.ExecutionStatusFailed,
+			ErrContains:            "grpc.Unauthenticated",
+			WantHandlerInvocations: 1,
 		},
 		{
 			Name: "grpc_already_exists_permanent",
 			Build: func() (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
 				host := startGRPCStatusServer(t, codes.AlreadyExists)
-				return grpcNodeDef(host), nil, nil
+				return grpcParityBuild(t, "grpc_already_exists_permanent", grpcNodeDef(host), true)
 			},
-			MaxAttempts: 2,
-			WantAttempt: 1,
-			WantStatus:  types.ExecutionStatusFailed,
-			ErrContains: "grpc.AlreadyExists",
+			MaxAttempts:            2,
+			WantAttempt:            1,
+			WantStatus:             types.ExecutionStatusFailed,
+			ErrContains:            "grpc.AlreadyExists",
+			WantHandlerInvocations: 1,
 		},
 		{
 			Name: "grpc_unimplemented_permanent",
 			Build: func() (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
 				host := startGRPCStatusServer(t, codes.Unimplemented)
-				return grpcNodeDef(host), nil, nil
+				return grpcParityBuild(t, "grpc_unimplemented_permanent", grpcNodeDef(host), true)
 			},
-			MaxAttempts: 2,
-			WantAttempt: 1,
-			WantStatus:  types.ExecutionStatusFailed,
-			ErrContains: "grpc.Unimplemented",
+			MaxAttempts:            2,
+			WantAttempt:            1,
+			WantStatus:             types.ExecutionStatusFailed,
+			ErrContains:            "grpc.Unimplemented",
+			WantHandlerInvocations: 1,
 		},
 		{
 			Name: "grpc_failed_precondition_permanent",
 			Build: func() (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
 				host := startGRPCStatusServer(t, codes.FailedPrecondition)
-				return grpcNodeDef(host), nil, nil
+				return grpcParityBuild(t, "grpc_failed_precondition_permanent", grpcNodeDef(host), true)
 			},
-			MaxAttempts: 2,
-			WantAttempt: 1,
-			WantStatus:  types.ExecutionStatusFailed,
-			ErrContains: "grpc.FailedPrecondition",
+			MaxAttempts:            2,
+			WantAttempt:            1,
+			WantStatus:             types.ExecutionStatusFailed,
+			ErrContains:            "grpc.FailedPrecondition",
+			WantHandlerInvocations: 1,
 		},
 		{
 			Name: "grpc_out_of_range_permanent",
 			Build: func() (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
 				host := startGRPCStatusServer(t, codes.OutOfRange)
-				return grpcNodeDef(host), nil, nil
+				return grpcParityBuild(t, "grpc_out_of_range_permanent", grpcNodeDef(host), true)
 			},
-			MaxAttempts: 2,
-			WantAttempt: 1,
-			WantStatus:  types.ExecutionStatusFailed,
-			ErrContains: "grpc.OutOfRange",
+			MaxAttempts:            2,
+			WantAttempt:            1,
+			WantStatus:             types.ExecutionStatusFailed,
+			ErrContains:            "grpc.OutOfRange",
+			WantHandlerInvocations: 1,
 		},
 		{
 			Name: "grpc_deadline_exceeded_transient_exhausted",
 			Build: func() (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
 				host := startGRPCStatusServer(t, codes.DeadlineExceeded)
-				return grpcNodeDef(host), nil, nil
+				return grpcParityBuild(t, "grpc_deadline_exceeded_transient_exhausted", grpcNodeDef(host), true)
 			},
-			MaxAttempts: 2,
-			WantAttempt: 2,
-			WantStatus:  types.ExecutionStatusFailed,
-			ErrContains: "grpc.DeadlineExceeded",
+			MaxAttempts:            2,
+			WantAttempt:            2,
+			WantStatus:             types.ExecutionStatusFailed,
+			ErrContains:            "grpc.DeadlineExceeded",
+			WantHandlerInvocations: 2,
 		},
 		{
 			Name: "grpc_resource_exhausted_transient_exhausted",
 			Build: func() (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
 				host := startGRPCStatusServer(t, codes.ResourceExhausted)
-				return grpcNodeDef(host), nil, nil
+				return grpcParityBuild(t, "grpc_resource_exhausted_transient_exhausted", grpcNodeDef(host), true)
 			},
-			MaxAttempts: 2,
-			WantAttempt: 2,
-			WantStatus:  types.ExecutionStatusFailed,
-			ErrContains: "grpc.ResourceExhausted",
+			MaxAttempts:            2,
+			WantAttempt:            2,
+			WantStatus:             types.ExecutionStatusFailed,
+			ErrContains:            "grpc.ResourceExhausted",
+			WantHandlerInvocations: 2,
 		},
 		{
 			Name: "grpc_aborted_transient_exhausted",
 			Build: func() (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
 				host := startGRPCStatusServer(t, codes.Aborted)
-				return grpcNodeDef(host), nil, nil
+				return grpcParityBuild(t, "grpc_aborted_transient_exhausted", grpcNodeDef(host), true)
 			},
-			MaxAttempts: 2,
-			WantAttempt: 2,
-			WantStatus:  types.ExecutionStatusFailed,
-			ErrContains: "grpc.Aborted",
+			MaxAttempts:            2,
+			WantAttempt:            2,
+			WantStatus:             types.ExecutionStatusFailed,
+			ErrContains:            "grpc.Aborted",
+			WantHandlerInvocations: 2,
 		},
 		{
 			Name: "grpc_canceled_transient_exhausted",
 			Build: func() (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
 				host := startGRPCStatusServer(t, codes.Canceled)
-				return grpcNodeDef(host), nil, nil
+				return grpcParityBuild(t, "grpc_canceled_transient_exhausted", grpcNodeDef(host), true)
 			},
-			MaxAttempts: 2,
-			WantAttempt: 2,
-			WantStatus:  types.ExecutionStatusFailed,
-			ErrContains: "grpc.Canceled",
+			MaxAttempts:            2,
+			WantAttempt:            2,
+			WantStatus:             types.ExecutionStatusFailed,
+			ErrContains:            "grpc.Canceled",
+			WantHandlerInvocations: 2,
 		},
 		{
 			Name: "grpc_unknown_transient_exhausted",
 			Build: func() (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
 				host := startGRPCStatusServer(t, codes.Unknown)
-				return grpcNodeDef(host), nil, nil
+				return grpcParityBuild(t, "grpc_unknown_transient_exhausted", grpcNodeDef(host), true)
 			},
-			MaxAttempts: 2,
-			WantAttempt: 2,
-			WantStatus:  types.ExecutionStatusFailed,
-			ErrContains: "grpc.Unknown",
+			MaxAttempts:            2,
+			WantAttempt:            2,
+			WantStatus:             types.ExecutionStatusFailed,
+			ErrContains:            "grpc.Unknown",
+			WantHandlerInvocations: 2,
 		},
 		{
 			Name: "grpc_internal_transient_exhausted",
 			Build: func() (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
 				host := startGRPCStatusServer(t, codes.Internal)
-				return grpcNodeDef(host), nil, nil
+				return grpcParityBuild(t, "grpc_internal_transient_exhausted", grpcNodeDef(host), true)
 			},
-			MaxAttempts: 2,
-			WantAttempt: 2,
-			WantStatus:  types.ExecutionStatusFailed,
-			ErrContains: "grpc.Internal",
+			MaxAttempts:            2,
+			WantAttempt:            2,
+			WantStatus:             types.ExecutionStatusFailed,
+			ErrContains:            "grpc.Internal",
+			WantHandlerInvocations: 2,
 		},
 		{
 			Name: "grpc_data_loss_transient_exhausted",
 			Build: func() (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
 				host := startGRPCStatusServer(t, codes.DataLoss)
-				return grpcNodeDef(host), nil, nil
+				return grpcParityBuild(t, "grpc_data_loss_transient_exhausted", grpcNodeDef(host), true)
 			},
-			MaxAttempts: 2,
-			WantAttempt: 2,
-			WantStatus:  types.ExecutionStatusFailed,
-			ErrContains: "grpc.DataLoss",
+			MaxAttempts:            2,
+			WantAttempt:            2,
+			WantStatus:             types.ExecutionStatusFailed,
+			ErrContains:            "grpc.DataLoss",
+			WantHandlerInvocations: 2,
 		},
 	}
 
@@ -245,32 +263,14 @@ func TestGRPCActionErrorParity(t *testing.T) {
 			}
 			def := ParityWorkflow(source, retry)
 
-			// gRPC cases use the real xflow.grpc action handler (no fixture
-			// counter), so invocations is nil; WantKind/WantRetryable are derived
-			// from the case name (which encodes permanent/transient).
+			// gRPC cases use the real xflow.grpc action handler via a counting
+			// wrapper; WantKind/WantRetryable are derived from the case name
+			// (which encodes permanent/transient).
 			tc.WantKind, tc.WantRetryable = parityKindFromName(tc.Name)
 
-			var localOut, serverOut, clusterOut ParityOutcome
-			if needsPool(tc.Name) {
-				pool := resource.NewDefaultResourcePool(types.DefaultResourcePoolConfig())
-				t.Cleanup(func() {
-					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-					defer cancel()
-					_ = pool.Close(ctx)
-				})
-				// The grpcPoolWrapper self-injects the pool into ctx, so the
-				// same register arg works for all three topologies — including
-				// cluster-durable, whose in-process EmbeddedDispatcher resolves
-				// the wrapper without crossing an HTTP boundary.
-				regArg := withResourcePool(register, pool)
-				localOut = RunParityLocal(t, def, regArg)
-				serverOut = runServerRunnerParity(t, addr, def, regArg)
-				clusterOut = RunParityCluster(t, addr, def, regArg)
-			} else {
-				localOut = RunParityLocal(t, def, register)
-				serverOut = runServerRunnerParity(t, addr, def, register)
-				clusterOut = RunParityCluster(t, addr, def, register)
-			}
+			localOut := RunParityLocal(t, def, register)
+			serverOut := runServerRunnerParity(t, addr, def, register)
+			clusterOut := RunParityCluster(t, addr, def, register)
 
 			invocations := invCount(inv)
 			for _, o := range []*ParityOutcome{&localOut, &serverOut, &clusterOut} {
@@ -284,32 +284,6 @@ func TestGRPCActionErrorParity(t *testing.T) {
 			logParityMatrixRow(t, tc, "cluster-durable", clusterOut)
 		})
 	}
-}
-
-// needsPool reports whether the named fixture requires a ResourcePool to reach
-// its expected classification.
-func needsPool(name string) bool {
-	switch name {
-	case "grpc_connection_transient_exhausted",
-		"grpc_not_found_permanent",
-		"grpc_unavailable_transient_exhausted",
-		"grpc_invalid_argument_permanent",
-		"grpc_permission_denied_permanent",
-		"grpc_unauthenticated_permanent",
-		"grpc_already_exists_permanent",
-		"grpc_unimplemented_permanent",
-		"grpc_failed_precondition_permanent",
-		"grpc_out_of_range_permanent",
-		"grpc_deadline_exceeded_transient_exhausted",
-		"grpc_resource_exhausted_transient_exhausted",
-		"grpc_aborted_transient_exhausted",
-		"grpc_canceled_transient_exhausted",
-		"grpc_unknown_transient_exhausted",
-		"grpc_internal_transient_exhausted",
-		"grpc_data_loss_transient_exhausted":
-		return true
-	}
-	return false
 }
 
 // grpcNodeDef builds an xflow.grpc source node with a short timeout so closed
@@ -347,24 +321,44 @@ func startGRPCStatusServer(t *testing.T, code codes.Code) string {
 	return lis.Addr().String()
 }
 
-// withResourcePool returns a register function that installs a pool-injecting
-// wrapper around the built-in xflow.grpc handler. This lets both topologies
-// exercise connection and status-code fixtures without changing the production
-// runner constructor.
-func withResourcePool(register func(engine.HandlerRegistrar), pool types.ResourcePool) func(engine.HandlerRegistrar) {
-	return func(reg engine.HandlerRegistrar) {
-		if register != nil {
-			register(reg)
-		}
-		if pool == nil {
-			return
-		}
-		delegate, ok := registry.Lookup("xflow.grpc")
-		if !ok {
-			panic("xflow.grpc handler not found in node registry")
-		}
-		reg.RegisterGlobal("xflow.grpc", &grpcPoolWrapper{delegate: delegate, pool: pool})
+// grpcParityBuild returns a parityCase.Build tuple for the xflow.grpc built-in
+// handler. When needsPool is true, the returned register callback installs a
+// grpcPoolWrapper around a fresh counting handler; otherwise it registers the
+// counting handler directly. This keeps counting innermost
+// (pool(counting(production))) so the counter is never bypassed by the pool
+// wrapper. A fresh counting handler is created on each register call (one per
+// topology) and the invocations func reads the most-recently-registered counter.
+func grpcParityBuild(t *testing.T, name string, nodeDef types.NodeDef, needsPool bool) (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
+	inner, ok := registry.Lookup("xflow.grpc")
+	if !ok {
+		t.Fatal("xflow.grpc handler not found in node registry")
 	}
+	var pool types.ResourcePool
+	if needsPool {
+		pool = resource.NewDefaultResourcePool(types.DefaultResourcePoolConfig())
+		t.Cleanup(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = pool.Close(ctx)
+		})
+	}
+	var cur *countingHandler
+	register := func(reg engine.HandlerRegistrar) {
+		wrapped, c := buildInstrumentedHandler(inner, "grpc-"+name)
+		cur = c
+		if pool != nil {
+			reg.RegisterGlobal("xflow.grpc", &grpcPoolWrapper{delegate: wrapped, pool: pool})
+		} else {
+			reg.RegisterGlobal("xflow.grpc", wrapped)
+		}
+	}
+	invocations := func() int {
+		if cur == nil {
+			return 0
+		}
+		return cur.Count()
+	}
+	return nodeDef, register, invocations
 }
 
 // grpcPoolWrapper injects a ResourcePool into the handler context before

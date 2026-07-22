@@ -38,28 +38,31 @@ func TestDatabaseActionErrorParity(t *testing.T) {
 	}
 
 	cases := []struct {
-		name        string
-		pool        types.ResourcePool
-		maxAttempts int
-		wantAttempt int
-		wantStatus  types.ExecutionStatus
-		errContains string
+		name                 string
+		pool                 types.ResourcePool
+		maxAttempts          int
+		wantAttempt          int
+		wantStatus           types.ExecutionStatus
+		errContains          string
+		wantHandlerInvocations int
 	}{
 		{
-			name:        "db_no_pool_permanent",
-			pool:        nil,
-			maxAttempts: 3,
-			wantAttempt: 1,
-			wantStatus:  types.ExecutionStatusFailed,
-			errContains: "database.no_pool",
+			name:                   "db_no_pool_permanent",
+			pool:                   nil,
+			maxAttempts:            3,
+			wantAttempt:            1,
+			wantStatus:             types.ExecutionStatusFailed,
+			errContains:            "database.no_pool",
+			wantHandlerInvocations: 1,
 		},
 		{
-			name:        "db_bad_conn_transient_exhausted",
-			pool:        newFakeDBPool(t, driver.ErrBadConn),
-			maxAttempts: 2,
-			wantAttempt: 2,
-			wantStatus:  types.ExecutionStatusFailed,
-			errContains: "database.connection_lost",
+			name:                   "db_bad_conn_transient_exhausted",
+			pool:                   newFakeDBPool(t, driver.ErrBadConn),
+			maxAttempts:            2,
+			wantAttempt:            2,
+			wantStatus:             types.ExecutionStatusFailed,
+			errContains:            "database.connection_lost",
+			wantHandlerInvocations: 2,
 		},
 		{
 			name: "db_deadlock_transient_exhausted",
@@ -67,10 +70,11 @@ func TestDatabaseActionErrorParity(t *testing.T) {
 				Number:  1213,
 				Message: "Deadlock found when trying to get lock; try restarting transaction",
 			}),
-			maxAttempts: 2,
-			wantAttempt: 2,
-			wantStatus:  types.ExecutionStatusFailed,
-			errContains: "1213",
+			maxAttempts:            2,
+			wantAttempt:            2,
+			wantStatus:             types.ExecutionStatusFailed,
+			errContains:            "1213",
+			wantHandlerInvocations: 2,
 		},
 		{
 			name: "db_constraint_permanent",
@@ -78,10 +82,11 @@ func TestDatabaseActionErrorParity(t *testing.T) {
 				Number:  1062,
 				Message: "Duplicate entry '1' for key 'PRIMARY'",
 			}),
-			maxAttempts: 3,
-			wantAttempt: 1,
-			wantStatus:  types.ExecutionStatusFailed,
-			errContains: "1062",
+			maxAttempts:            3,
+			wantAttempt:            1,
+			wantStatus:             types.ExecutionStatusFailed,
+			errContains:            "1062",
+			wantHandlerInvocations: 1,
 		},
 	}
 
@@ -99,18 +104,24 @@ func TestDatabaseActionErrorParity(t *testing.T) {
 			}
 			def := ParityWorkflow(source, retry)
 
+			var cur *databaseParityHandler
 			register := func(reg engine.HandlerRegistrar) {
-				reg.RegisterGlobal("xflow.database", &databaseParityHandler{
+				h := &databaseParityHandler{
 					inner: inner,
 					cred: map[string]any{
 						"dsn":    "fake://fake",
 						"driver": "mysql",
 					},
 					pool: tc.pool,
-				})
+				}
+				cur = h
+				reg.RegisterGlobal("xflow.database", h)
 			}
 
 			localOut := RunParityLocal(t, def, register)
+			if cur != nil {
+				localOut.HandlerInvocations = cur.Count()
+			}
 
 			if localOut.Attempt != tc.wantAttempt {
 				t.Errorf("attempt=%d, want %d", localOut.Attempt, tc.wantAttempt)
@@ -120,6 +131,9 @@ func TestDatabaseActionErrorParity(t *testing.T) {
 			}
 			if tc.errContains != "" && !strings.Contains(localOut.ErrStr, tc.errContains) {
 				t.Errorf("error=%q, want substring %q", localOut.ErrStr, tc.errContains)
+			}
+			if localOut.HandlerInvocations != tc.wantHandlerInvocations {
+				t.Errorf("handler_invocations=%d, want %d", localOut.HandlerInvocations, tc.wantHandlerInvocations)
 			}
 		})
 	}
@@ -134,14 +148,16 @@ func TestDatabaseActionErrorParity(t *testing.T) {
 // fixtures exercise the DatabaseNode's error classification through the engine
 // without requiring a real MySQL server.
 type databaseParityHandler struct {
-	inner types.ActionHandler
-	cred  map[string]any
-	pool  types.ResourcePool
+	inner    types.ActionHandler
+	cred     map[string]any
+	pool     types.ResourcePool
+	attempts atomic.Int32
 }
 
 func (h *databaseParityHandler) Descriptor() types.Descriptor { return h.inner.Descriptor() }
 
 func (h *databaseParityHandler) Execute(ctx context.Context, input *types.Input) (*types.Output, error) {
+	h.attempts.Add(1)
 	input.SetTenant(tenant.DefaultTenant)
 	input.SetCredentialResolver(func(tenant tenant.TenantID, name string) map[string]any { return h.cred })
 	if h.pool != nil {
@@ -149,6 +165,8 @@ func (h *databaseParityHandler) Execute(ctx context.Context, input *types.Input)
 	}
 	return h.inner.Execute(ctx, input)
 }
+
+func (h *databaseParityHandler) Count() int { return int(h.attempts.Load()) }
 
 // fake driver machinery
 

@@ -9,6 +9,7 @@ import (
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/node"
+	"github.com/xbcio/xflow/node/registry"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -24,18 +25,23 @@ func TestScriptFunctionActionParity(t *testing.T) {
 		{
 			Name: "function_config_permanent",
 			Build: func() (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
-				return types.NodeDef{
+				inner, ok := registry.Lookup("xflow.function")
+				if !ok {
+					t.Fatal("xflow.function handler not found in node registry")
+				}
+				return instrumentedBuiltinBuild(types.NodeDef{
 					Name: "source",
 					Type: "xflow.function",
 					Parameters: map[string]any{
 						"function_name": "unregistered_parity_func",
 					},
-				}, nil, nil
+				}, inner, "function_config_permanent")
 			},
-			MaxAttempts: 2,
-			WantAttempt: 1,
-			WantStatus:  types.ExecutionStatusFailed,
-			ErrContains: "function.not_registered",
+			MaxAttempts:            2,
+			WantAttempt:            1,
+			WantStatus:             types.ExecutionStatusFailed,
+			ErrContains:            "function.not_registered",
+			WantHandlerInvocations: 1,
 		},
 		{
 			Name: "function_timeout_transient_exhausted",
@@ -44,18 +50,23 @@ func TestScriptFunctionActionParity(t *testing.T) {
 				node.RegisterFunc(fnName, func(_ context.Context, _ *types.Input) (*types.Output, error) {
 					return nil, context.DeadlineExceeded
 				})
-				return types.NodeDef{
+				inner, ok := registry.Lookup("xflow.function")
+				if !ok {
+					t.Fatal("xflow.function handler not found in node registry")
+				}
+				return instrumentedBuiltinBuild(types.NodeDef{
 					Name: "source",
 					Type: "xflow.function",
 					Parameters: map[string]any{
 						"function_name": fnName,
 					},
-				}, nil, nil
+				}, inner, "function_timeout_transient_exhausted")
 			},
-			MaxAttempts: 2,
-			WantAttempt: 2,
-			WantStatus:  types.ExecutionStatusFailed,
-			ErrContains: "function.timeout",
+			MaxAttempts:            2,
+			WantAttempt:            2,
+			WantStatus:             types.ExecutionStatusFailed,
+			ErrContains:            "function.timeout",
+			WantHandlerInvocations: 2,
 		},
 		{
 			Name: "function_user_error_port",
@@ -64,18 +75,23 @@ func TestScriptFunctionActionParity(t *testing.T) {
 				node.RegisterFunc(fnName, func(_ context.Context, _ *types.Input) (*types.Output, error) {
 					return nil, errors.New("user function error")
 				})
-				return types.NodeDef{
+				inner, ok := registry.Lookup("xflow.function")
+				if !ok {
+					t.Fatal("xflow.function handler not found in node registry")
+				}
+				return instrumentedBuiltinBuild(types.NodeDef{
 					Name:    "source",
 					Type:    "xflow.function",
 					OnError: string(types.OnErrorOutput),
 					Parameters: map[string]any{
 						"function_name": fnName,
 					},
-				}, nil, nil
+				}, inner, "function_user_error_port")
 			},
-			MaxAttempts: 1,
-			WantAttempt: 1,
-			WantStatus:  types.ExecutionStatusSuccess,
+			MaxAttempts:            1,
+			WantAttempt:            1,
+			WantStatus:             types.ExecutionStatusSuccess,
+			WantHandlerInvocations: 1,
 			OKNode: types.NodeDef{
 				Name: "ok",
 				Type: "xflow.function",
@@ -101,24 +117,33 @@ func TestScriptFunctionActionParity(t *testing.T) {
 		{
 			Name: "script_config_permanent",
 			Build: func() (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
-				return types.NodeDef{
+				inner, ok := registry.Lookup("xflow.script")
+				if !ok {
+					t.Fatal("xflow.script handler not found in node registry")
+				}
+				return instrumentedBuiltinBuild(types.NodeDef{
 					Name: "source",
 					Type: "xflow.script",
 					Parameters: map[string]any{
 						"language": "js",
 						"runtime":  "goja",
 					},
-				}, nil, nil
+				}, inner, "script_config_permanent")
 			},
-			MaxAttempts: 2,
-			WantAttempt: 1,
-			WantStatus:  types.ExecutionStatusFailed,
-			ErrContains: "script.code_required",
+			MaxAttempts:            2,
+			WantAttempt:            1,
+			WantStatus:             types.ExecutionStatusFailed,
+			ErrContains:            "script.code_required",
+			WantHandlerInvocations: 1,
 		},
 		{
 			Name: "script_timeout_transient_exhausted",
 			Build: func() (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
-				return types.NodeDef{
+				inner, ok := registry.Lookup("xflow.script")
+				if !ok {
+					t.Fatal("xflow.script handler not found in node registry")
+				}
+				return instrumentedBuiltinBuild(types.NodeDef{
 					Name: "source",
 					Type: "xflow.script",
 					Parameters: map[string]any{
@@ -127,17 +152,22 @@ func TestScriptFunctionActionParity(t *testing.T) {
 						"code":     "while(true){}",
 						"timeout":  "50ms",
 					},
-				}, nil, nil
+				}, inner, "script_timeout_transient_exhausted")
 			},
-			MaxAttempts: 2,
-			WantAttempt: 2,
-			WantStatus:  types.ExecutionStatusFailed,
-			ErrContains: "script.timeout",
+			MaxAttempts:            2,
+			WantAttempt:            2,
+			WantStatus:             types.ExecutionStatusFailed,
+			ErrContains:            "script.timeout",
+			WantHandlerInvocations: 2,
 		},
 		{
 			Name: "script_user_error_port",
 			Build: func() (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
-				return types.NodeDef{
+				inner, ok := registry.Lookup("xflow.script")
+				if !ok {
+					t.Fatal("xflow.script handler not found in node registry")
+				}
+				return instrumentedBuiltinBuild(types.NodeDef{
 					Name:    "source",
 					Type:    "xflow.script",
 					OnError: string(types.OnErrorOutput),
@@ -146,11 +176,12 @@ func TestScriptFunctionActionParity(t *testing.T) {
 						"runtime":  "goja",
 						"code":     "throw new Error('user')",
 					},
-				}, nil, nil
+				}, inner, "script_user_error_port")
 			},
-			MaxAttempts: 1,
-			WantAttempt: 1,
-			WantStatus:  types.ExecutionStatusSuccess,
+			MaxAttempts:            1,
+			WantAttempt:            1,
+			WantStatus:             types.ExecutionStatusSuccess,
+			WantHandlerInvocations: 1,
 			OKNode: types.NodeDef{
 				Name: "ok",
 				Type: "xflow.function",
@@ -189,8 +220,8 @@ func TestScriptFunctionActionParity(t *testing.T) {
 				def = ParityWorkflow(source, retry)
 			}
 
-			// script/function cases use the real built-in handlers (no fixture
-			// counter). The user-error-port fixtures reach Success (routed, not
+			// script/function cases use the real built-in handlers via counting
+			// wrappers. The user-error-port fixtures reach Success (routed, not
 			// failed), so parityKindFromName returns "" for them.
 			tc.WantKind, tc.WantRetryable = parityKindFromName(tc.Name)
 

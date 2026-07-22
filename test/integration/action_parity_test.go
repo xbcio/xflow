@@ -114,6 +114,55 @@ func parityFixtureBuild(nodeType string, f *parityFixture) (types.NodeDef, func(
 	return types.NodeDef{Name: "start", Type: nodeType}, register, invocations
 }
 
+// countingHandler wraps a production action handler and counts Execute()
+// invocations. It does not modify input, output, error, retry, timeout, or
+// classification behavior.
+type countingHandler struct {
+	inner    types.ActionHandler
+	attempts atomic.Int32
+	id       string
+}
+
+func (h *countingHandler) Descriptor() types.Descriptor { return h.inner.Descriptor() }
+
+func (h *countingHandler) Execute(ctx context.Context, in *types.Input) (*types.Output, error) {
+	h.attempts.Add(1)
+	return h.inner.Execute(ctx, in)
+}
+
+// buildInstrumentedHandler wraps a production built-in handler with a counting
+// wrapper, returning the handler to register and a counter handle bound to that
+// exact instance. The handle is snapshotted per-topology after the run.
+func buildInstrumentedHandler(inner types.ActionHandler, counterID string) (types.ActionHandler, *countingHandler) {
+	c := &countingHandler{inner: inner, id: counterID}
+	return c, c
+}
+
+func (h *countingHandler) Count() int { return int(h.attempts.Load()) }
+func (h *countingHandler) ID() string { return h.id }
+
+// instrumentedBuiltinBuild returns a parityCase.Build tuple for a production
+// built-in handler. It creates a FRESH counting wrapper on each register call
+// (one per topology) so per-topology invocation counters stay isolated. The
+// counting wrapper is registered by node name so downstream nodes of the same
+// type are not counted. invocations() reads the most-recently-registered
+// counter, so the test must call it immediately after each Run.
+func instrumentedBuiltinBuild(nodeDef types.NodeDef, inner types.ActionHandler, counterID string) (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
+	var cur *countingHandler
+	register := func(reg engine.HandlerRegistrar) {
+		wrapped, c := buildInstrumentedHandler(inner, counterID)
+		cur = c
+		reg.RegisterNodeHandler(nodeDef.Name, wrapped)
+	}
+	invocations := func() int {
+		if cur == nil {
+			return 0
+		}
+		return cur.Count()
+	}
+	return nodeDef, register, invocations
+}
+
 // parityFixtureHandler is the shared action fixture. It returns one of:
 //   - types.ClassifiedError (transient/permanent) — exercises the engine's
 //     retry classification path in-process and across the wire.
@@ -533,10 +582,8 @@ func parityErrCode(errStr string) string {
 }
 
 // invCount returns the measured handler invocation count, or 0 when the fixture
-// does not expose one. Real action handlers (xflow.grpc / xflow.database /
-// xflow.http / xflow.script) have no test fixture counter, so their parityCase
-// Build returns nil here; parityFixtureHandler-based fixtures return a real
-// atomic counter accessor.
+// does not expose one. parityFixtureHandler-based fixtures and the instrumented
+// built-in wrappers both return a real atomic counter accessor.
 func invCount(inv func() int) int {
 	if inv == nil {
 		return 0

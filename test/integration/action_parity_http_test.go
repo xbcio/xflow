@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/node/registry"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -26,12 +27,17 @@ func TestHTTPActionErrorParity(t *testing.T) {
 					http.Error(w, "bad request", http.StatusBadRequest)
 				}))
 				t.Cleanup(srv.Close)
-				return httpNodeDef(srv.URL), nil, nil
+				inner, ok := registry.Lookup("xflow.http")
+				if !ok {
+					t.Fatal("xflow.http handler not found in node registry")
+				}
+				return instrumentedBuiltinBuild(httpNodeDef(srv.URL), inner, "http_4xx_permanent")
 			},
-			MaxAttempts: 3,
-			WantAttempt: 1,
-			WantStatus:  types.ExecutionStatusFailed,
-			ErrContains: "http.4xx",
+			MaxAttempts:            3,
+			WantAttempt:            1,
+			WantStatus:             types.ExecutionStatusFailed,
+			ErrContains:            "http.4xx",
+			WantHandlerInvocations: 1,
 		},
 		{
 			Name: "http_408_transient_exhausted",
@@ -40,12 +46,17 @@ func TestHTTPActionErrorParity(t *testing.T) {
 					http.Error(w, "request timeout", http.StatusRequestTimeout)
 				}))
 				t.Cleanup(srv.Close)
-				return httpNodeDef(srv.URL), nil, nil
+				inner, ok := registry.Lookup("xflow.http")
+				if !ok {
+					t.Fatal("xflow.http handler not found in node registry")
+				}
+				return instrumentedBuiltinBuild(httpNodeDef(srv.URL), inner, "http_408_transient_exhausted")
 			},
-			MaxAttempts: 2,
-			WantAttempt: 2,
-			WantStatus:  types.ExecutionStatusFailed,
-			ErrContains: "http.408",
+			MaxAttempts:            2,
+			WantAttempt:            2,
+			WantStatus:             types.ExecutionStatusFailed,
+			ErrContains:            "http.408",
+			WantHandlerInvocations: 2,
 		},
 		{
 			Name: "http_429_transient_exhausted",
@@ -54,12 +65,17 @@ func TestHTTPActionErrorParity(t *testing.T) {
 					http.Error(w, "too many requests", http.StatusTooManyRequests)
 				}))
 				t.Cleanup(srv.Close)
-				return httpNodeDef(srv.URL), nil, nil
+				inner, ok := registry.Lookup("xflow.http")
+				if !ok {
+					t.Fatal("xflow.http handler not found in node registry")
+				}
+				return instrumentedBuiltinBuild(httpNodeDef(srv.URL), inner, "http_429_transient_exhausted")
 			},
-			MaxAttempts: 2,
-			WantAttempt: 2,
-			WantStatus:  types.ExecutionStatusFailed,
-			ErrContains: "http.429",
+			MaxAttempts:            2,
+			WantAttempt:            2,
+			WantStatus:             types.ExecutionStatusFailed,
+			ErrContains:            "http.429",
+			WantHandlerInvocations: 2,
 		},
 		{
 			Name: "http_5xx_transient_exhausted",
@@ -68,22 +84,32 @@ func TestHTTPActionErrorParity(t *testing.T) {
 					http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 				}))
 				t.Cleanup(srv.Close)
-				return httpNodeDef(srv.URL), nil, nil
+				inner, ok := registry.Lookup("xflow.http")
+				if !ok {
+					t.Fatal("xflow.http handler not found in node registry")
+				}
+				return instrumentedBuiltinBuild(httpNodeDef(srv.URL), inner, "http_5xx_transient_exhausted")
 			},
-			MaxAttempts: 2,
-			WantAttempt: 2,
-			WantStatus:  types.ExecutionStatusFailed,
-			ErrContains: "http.5xx",
+			MaxAttempts:            2,
+			WantAttempt:            2,
+			WantStatus:             types.ExecutionStatusFailed,
+			ErrContains:            "http.5xx",
+			WantHandlerInvocations: 2,
 		},
 		{
 			Name: "http_connection_transient_exhausted",
 			Build: func() (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
-				return httpNodeDef("http://127.0.0.1:1/"), nil, nil
+				inner, ok := registry.Lookup("xflow.http")
+				if !ok {
+					t.Fatal("xflow.http handler not found in node registry")
+				}
+				return instrumentedBuiltinBuild(httpNodeDef("http://127.0.0.1:1/"), inner, "http_connection_transient_exhausted")
 			},
-			MaxAttempts: 2,
-			WantAttempt: 2,
-			WantStatus:  types.ExecutionStatusFailed,
-			ErrContains: "http.connection",
+			MaxAttempts:            2,
+			WantAttempt:            2,
+			WantStatus:             types.ExecutionStatusFailed,
+			ErrContains:            "http.connection",
+			WantHandlerInvocations: 2,
 		},
 	}
 
@@ -96,7 +122,7 @@ func TestHTTPActionErrorParity(t *testing.T) {
 			}
 			def := ParityWorkflow(source, retry)
 
-			// HTTP cases use the real xflow.http handler (no fixture counter).
+			// HTTP cases use the real xflow.http handler via a counting wrapper.
 			tc.WantKind, tc.WantRetryable = parityKindFromName(tc.Name)
 
 			localOut := RunParityLocal(t, def, register)

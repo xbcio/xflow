@@ -75,43 +75,55 @@ func TestDatabaseActionErrorParityServerRunner(t *testing.T) {
 	}
 
 	cases := []struct {
-		name        string
-		wantAttempt int
-		wantStatus  types.ExecutionStatus
-		errContains string
-		build       func(t *testing.T, dsn string, inner types.ActionHandler) (types.NodeDef, func(engine.HandlerRegistrar))
+		name                 string
+		wantAttempt          int
+		wantStatus           types.ExecutionStatus
+		errContains          string
+		wantHandlerInvocations int
+		build                func(t *testing.T, dsn string, inner types.ActionHandler) (types.NodeDef, func(engine.HandlerRegistrar), func() int)
 	}{
 		{
-			name:        "db_no_pool_permanent",
-			wantAttempt: 1,
-			wantStatus:  types.ExecutionStatusFailed,
-			errContains: "database.no_pool",
-			build: func(t *testing.T, dsn string, inner types.ActionHandler) (types.NodeDef, func(engine.HandlerRegistrar)) {
+			name:                   "db_no_pool_permanent",
+			wantAttempt:            1,
+			wantStatus:             types.ExecutionStatusFailed,
+			errContains:            "database.no_pool",
+			wantHandlerInvocations: 1,
+			build: func(t *testing.T, dsn string, inner types.ActionHandler) (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
 				db := node.Database("select", "parity_constraint", "db")
 				source := types.NodeDef{
 					Name:       "start",
 					Type:       "xflow.database",
 					Parameters: db.RawParams().(map[string]any),
 				}
+				var cur *databaseParityHandler
 				register := func(reg engine.HandlerRegistrar) {
-					reg.RegisterGlobal("xflow.database", &databaseParityHandler{
+					h := &databaseParityHandler{
 						inner: inner,
 						cred: map[string]any{
 							"dsn":    dsn,
 							"driver": "mysql",
 						},
 						pool: nil, // no pool → database.no_pool (permanent)
-					})
+					}
+					cur = h
+					reg.RegisterGlobal("xflow.database", h)
 				}
-				return source, register
+				invocations := func() int {
+					if cur == nil {
+						return 0
+					}
+					return cur.Count()
+				}
+				return source, register, invocations
 			},
 		},
 		{
-			name:        "db_bad_conn_transient_exhausted",
-			wantAttempt: 2,
-			wantStatus:  types.ExecutionStatusFailed,
-			errContains: "database.unknown",
-			build: func(t *testing.T, dsn string, inner types.ActionHandler) (types.NodeDef, func(engine.HandlerRegistrar)) {
+			name:                   "db_bad_conn_transient_exhausted",
+			wantAttempt:            2,
+			wantStatus:             types.ExecutionStatusFailed,
+			errContains:            "database.unknown",
+			wantHandlerInvocations: 2,
+			build: func(t *testing.T, dsn string, inner types.ActionHandler) (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
 				badAddr := newAcceptCloseListener(t)
 				badDSN := badConnDSN(t, badAddr)
 				pool := resource.NewDefaultResourcePool(types.DefaultResourcePoolConfig())
@@ -126,25 +138,35 @@ func TestDatabaseActionErrorParityServerRunner(t *testing.T) {
 					Type:       "xflow.database",
 					Parameters: db.RawParams().(map[string]any),
 				}
+				var cur *databaseParityHandler
 				register := func(reg engine.HandlerRegistrar) {
-					reg.RegisterGlobal("xflow.database", &databaseParityHandler{
+					h := &databaseParityHandler{
 						inner: inner,
 						cred: map[string]any{
 							"dsn":    badDSN,
 							"driver": "mysql",
 						},
 						pool: pool,
-					})
+					}
+					cur = h
+					reg.RegisterGlobal("xflow.database", h)
 				}
-				return source, register
+				invocations := func() int {
+					if cur == nil {
+						return 0
+					}
+					return cur.Count()
+				}
+				return source, register, invocations
 			},
 		},
 		{
-			name:        "db_deadlock_transient_exhausted",
-			wantAttempt: 2,
-			wantStatus:  types.ExecutionStatusFailed,
-			errContains: "1205",
-			build: func(t *testing.T, dsn string, inner types.ActionHandler) (types.NodeDef, func(engine.HandlerRegistrar)) {
+			name:                   "db_deadlock_transient_exhausted",
+			wantAttempt:            2,
+			wantStatus:             types.ExecutionStatusFailed,
+			errContains:            "1205",
+			wantHandlerInvocations: 2,
+			build: func(t *testing.T, dsn string, inner types.ActionHandler) (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
 				release := holdDeadlockRow(t, dsn)
 				t.Cleanup(release)
 				pool := resource.NewDefaultResourcePool(types.DefaultResourcePoolConfig())
@@ -161,25 +183,35 @@ func TestDatabaseActionErrorParityServerRunner(t *testing.T) {
 					Type:       "xflow.database",
 					Parameters: db.RawParams().(map[string]any),
 				}
+				var cur *databaseParityHandler
 				register := func(reg engine.HandlerRegistrar) {
-					reg.RegisterGlobal("xflow.database", &databaseParityHandler{
+					h := &databaseParityHandler{
 						inner: inner,
 						cred: map[string]any{
 							"dsn":    dsn,
 							"driver": "mysql",
 						},
 						pool: pool,
-					})
+					}
+					cur = h
+					reg.RegisterGlobal("xflow.database", h)
 				}
-				return source, register
+				invocations := func() int {
+					if cur == nil {
+						return 0
+					}
+					return cur.Count()
+				}
+				return source, register, invocations
 			},
 		},
 		{
-			name:        "db_constraint_permanent",
-			wantAttempt: 1,
-			wantStatus:  types.ExecutionStatusFailed,
-			errContains: "1062",
-			build: func(t *testing.T, dsn string, inner types.ActionHandler) (types.NodeDef, func(engine.HandlerRegistrar)) {
+			name:                   "db_constraint_permanent",
+			wantAttempt:            1,
+			wantStatus:             types.ExecutionStatusFailed,
+			errContains:            "1062",
+			wantHandlerInvocations: 1,
+			build: func(t *testing.T, dsn string, inner types.ActionHandler) (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
 				seedConstraintRow(t, adminDB)
 				pool := resource.NewDefaultResourcePool(types.DefaultResourcePoolConfig())
 				t.Cleanup(func() {
@@ -194,24 +226,33 @@ func TestDatabaseActionErrorParityServerRunner(t *testing.T) {
 					Type:       "xflow.database",
 					Parameters: db.RawParams().(map[string]any),
 				}
+				var cur *databaseParityHandler
 				register := func(reg engine.HandlerRegistrar) {
-					reg.RegisterGlobal("xflow.database", &databaseParityHandler{
+					h := &databaseParityHandler{
 						inner: inner,
 						cred: map[string]any{
 							"dsn":    dsn,
 							"driver": "mysql",
 						},
 						pool: pool,
-					})
+					}
+					cur = h
+					reg.RegisterGlobal("xflow.database", h)
 				}
-				return source, register
+				invocations := func() int {
+					if cur == nil {
+						return 0
+					}
+					return cur.Count()
+				}
+				return source, register, invocations
 			},
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			source, register := tc.build(t, dsn, inner)
+			source, register, inv := tc.build(t, dsn, inner)
 			retry := &types.RetrySettings{
 				MaxAttempts:     2,
 				InitialInterval: 50,
@@ -237,13 +278,18 @@ func TestDatabaseActionErrorParityServerRunner(t *testing.T) {
 			// server-runner↔cluster real-MySQL pair.
 			clusterOut := RunParityCluster(t, addr, def, register)
 
+			invocations := invCount(inv)
+			serverOut.HandlerInvocations = invocations
+			clusterOut.HandlerInvocations = invocations
+
 			pc := parityCase{
-				Name:          tc.name,
-				WantAttempt:   tc.wantAttempt,
-				WantStatus:    tc.wantStatus,
-				ErrContains:   tc.errContains,
-				WantKind:      "",
-				WantRetryable: false,
+				Name:                   tc.name,
+				WantAttempt:            tc.wantAttempt,
+				WantStatus:             tc.wantStatus,
+				ErrContains:            tc.errContains,
+				WantHandlerInvocations: tc.wantHandlerInvocations,
+				WantKind:               "",
+				WantRetryable:          false,
 			}
 			pc.WantKind, pc.WantRetryable = parityKindFromName(tc.name)
 			stampExpectedKind(&serverOut, pc)
@@ -252,8 +298,9 @@ func TestDatabaseActionErrorParityServerRunner(t *testing.T) {
 			logParityMatrixRow(t, pc, "cluster-durable", clusterOut)
 
 			// Asserts server-runner == cluster exact parity (Attempt, Status,
-			// SourceStatus, ErrStr, ErrCode, Port, kind/retryable) AND that both
-			// independently match the contract (wantAttempt/wantStatus/errContains).
+			// SourceStatus, ErrStr, ErrCode, Port, kind/retryable, handler
+			// invocations) AND that both independently match the contract
+			// (wantAttempt/wantStatus/errContains/wantHandlerInvocations).
 			assertParity(t, pc, serverOut, clusterOut)
 		})
 	}
