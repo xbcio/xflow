@@ -639,60 +639,136 @@ func (r *GlobalReconciler) shouldTakeOver(instanceID string) bool {
 
 ### 10.1 WorkflowDef（工作流模板）
 
+> 运行时定义只保留影响执行语义的字段。编辑器专属字段（`position`、`ui`、`notes`）和 `description` 已从 `WorkflowDef` / `NodeDef` 中拆分出来，单独存放在 `WorkflowEditorMetadata` 中；详见 [ADR-D4-runtime-editor-metadata-split.md](./ADR-D4-runtime-editor-metadata-split.md)。
+
 ```go
 type WorkflowDef struct {
-    ID          string                     `json:"id"`
-    Spec        string                     `json:"spec"`        // DSL schema 版本
-    Name        string                     `json:"name"`
-    Version     string                     `json:"version"`
-    Description string                     `json:"description"`
-    Context     *Context                   `json:"context"`
-    Settings    *Settings                  `json:"settings"`
-    Credentials map[string]*Credential     `json:"credentials"`
-    Inputs      map[string]*InputDef       `json:"inputs"`
-    Nodes       []*NodeDef                 `json:"nodes"`
-    Connections map[string]PortConnections `json:"connections"` // key = 源节点名
-    Outputs     map[string]*OutputDef      `json:"outputs"`
-    PinData     map[string]interface{}     `json:"pin_data,omitempty"`
-    Metadata    map[string]interface{}     `json:"metadata"`
-    CreatedAt   time.Time                  `json:"created_at"`
-    UpdatedAt   time.Time                  `json:"updated_at"`
+    ID        string                    `json:"id,omitempty"`
+    Namespace string                    `json:"namespace,omitempty"`
+    // TenantID 由服务端从认证主体注入，客户端提供的值会被忽略。
+    TenantID       string                    `json:"-"`
+    Name           string                    `json:"name,omitempty"`
+    Version        string                    `json:"version,omitempty"`
+    Description    string                    `json:"description,omitempty"` // 编辑器/展示用，不参与运行时 hash
+    Spec           string                    `json:"spec,omitempty"`        // DSL schema 版本
+    RunnerSelector *RunnerSelector           `json:"runnerSelector,omitempty"`
+    Context        *WorkflowContext          `json:"context,omitempty"`
+    Settings       *WorkflowSettings         `json:"settings,omitempty"`
+    Options        *WorkflowOptions          `json:"options,omitempty"`
+    Credentials    map[string]CredentialDef  `json:"credentials,omitempty"`
+    Params         map[string]ParamDef       `json:"params,omitempty"`
+    NodeTemplates  map[string]NodeTemplate   `json:"node_templates,omitempty"`
+    Nodes          []NodeDef                 `json:"nodes,omitempty"`
+    Connections    Connections               `json:"connections,omitempty"` // key = 源节点名
+    Outputs        map[string]WorkflowOutput `json:"outputs,omitempty"`
+    PinData        map[string]any            `json:"pin_data,omitempty"`    // 运行时语义，参与运行时 hash
 }
 
-type Settings struct {
-    Timeout     time.Duration `json:"timeout"`
-    Concurrency int           `json:"concurrency"`
-    Timezone    string        `json:"timezone"`
-    OnError     ErrorStrategy `json:"on_error,omitempty"`
-    PinDataMode PinDataMode   `json:"pin_data_mode,omitempty"`
-    Retry       *RetryPolicy  `json:"retry"`
+type WorkflowSettings struct {
+    Timeout     int            `json:"timeout,omitempty"`
+    Concurrency int            `json:"concurrency,omitempty"`
+    Timezone    string         `json:"timezone,omitempty"`
+    OnError     string         `json:"on_error,omitempty"`
+    PinDataMode string         `json:"pin_data_mode,omitempty"`
+    Retry       *RetrySettings `json:"retry,omitempty"`
 }
 
-type Context struct {
-    Vars   map[string]interface{} `json:"vars"`   // 业务逻辑常量，$vars
-    Config map[string]interface{} `json:"config"` // 环境配置，$config
+type WorkflowContext struct {
+    Vars   map[string]any `json:"vars,omitempty"`   // 业务逻辑常量，$vars
+    Config map[string]any `json:"config,omitempty"` // 环境配置，$config
+}
+
+type WorkflowOptions struct {
+    AllowCycles        bool `json:"allow_cycles,omitempty"`        // 是否允许循环执行
+    MaxAutoDepth       int  `json:"max_auto_depth,omitempty"`      // 循环模式最大自动调度深度
+    ExperimentalExpand bool `json:"experimental_expand,omitempty"` // 是否启用实验性 loop/split 展开
+}
+
+type RunnerSelector struct {
+    Mode        RunnerSelectorMode `json:"mode,omitempty"`
+    MatchLabels map[string]string  `json:"matchLabels,omitempty"`
+}
+
+type RunnerSelectorMode string
+
+const (
+    RunnerSelectorModeDefault  RunnerSelectorMode = "default"
+    RunnerSelectorModeRequired RunnerSelectorMode = "required"
+)
+
+type CredentialDef struct {
+    Name string `json:"name,omitempty"`
+    Type string `json:"type,omitempty"`
+}
+
+type ParamDef struct {
+    Type        string         `json:"type,omitempty"`
+    Required    bool           `json:"required,omitempty"`
+    DisplayName string         `json:"display_name,omitempty"`
+    Default     any            `json:"default,omitempty"`
+    Validation  map[string]any `json:"validation,omitempty"`
+}
+
+type NodeTemplate struct {
+    Type       string         `json:"type,omitempty"`
+    Parameters map[string]any `json:"parameters,omitempty"`
+}
+
+type WorkflowOutput struct {
+    Value       any    `json:"value,omitempty"`
+    DisplayName string `json:"display_name,omitempty"`
 }
 
 type NodeDef struct {
-    ID           string                 `json:"id,omitempty"`
-    Name         string                 `json:"name"`
-    Type         NodeType               `json:"type"`
-    Template     string                 `json:"template,omitempty"`
-    Position     [2]int                 `json:"position"`
-    Disabled     bool                   `json:"disabled"`
-    OnError      ErrorStrategy          `json:"on_error,omitempty"`
-    Notes        string                 `json:"notes"`
-    Inputs       []InputPortDef         `json:"inputs,omitempty"`
-    OutputSchema map[string]interface{} `json:"output_schema,omitempty"`
-    UI           map[string]interface{} `json:"ui,omitempty"`
-    Parameters   map[string]interface{} `json:"parameters"`
+    ID             string          `json:"id,omitempty"` // 稳定编辑器标识，不参与运行时 hash
+    Name           string          `json:"name,omitempty"`
+    Type           string          `json:"type,omitempty"`
+    Kind           NodeKind        `json:"kind,omitempty"`
+    Version        int             `json:"version,omitempty"`
+    Template       string          `json:"template,omitempty"`
+    Position       *Position       `json:"position,omitempty"` // 编辑器专属，不参与运行时 hash
+    Disabled       bool            `json:"disabled,omitempty"`
+    OnError        string          `json:"on_error,omitempty"`
+    RunnerSelector *RunnerSelector `json:"runnerSelector,omitempty"`
+    Notes          string          `json:"notes,omitempty"` // 编辑器专属，不参与运行时 hash
+    Inputs         []PortDecl      `json:"inputs,omitempty"`
+    OutputSchema   map[string]any  `json:"output_schema,omitempty"`
+    Parameters     map[string]any  `json:"parameters,omitempty"`
+    UI             map[string]any  `json:"ui,omitempty"` // 编辑器专属，不参与运行时 hash
+    Retry          *RetrySettings  `json:"retry,omitempty"`
 }
 
-type PortConnections map[string][]Connection // key = 输出端口名
+type NodeKind string
+
+const (
+    NodeKindAction  NodeKind = "action"
+    NodeKindTrigger NodeKind = "trigger"
+)
+
+type Position struct {
+    X float64 `json:"x,omitempty"`
+    Y float64 `json:"y,omitempty"`
+}
+
+type PortDecl struct {
+    Name     string `json:"name,omitempty"`
+    Required bool   `json:"required,omitempty"`
+}
+
+type Connections map[string]map[string][]Connection // key1 = 源节点名, key2 = 输出端口名
 
 type Connection struct {
-    Node  string `json:"node"`
+    Node  string `json:"node,omitempty"`
     Input string `json:"input,omitempty"` // 目标输入端口，默认 main
+}
+
+type RetrySettings struct {
+    Enabled         bool    `json:"enabled,omitempty"`
+    MaxAttempts     int     `json:"max_attempts,omitempty"`
+    Strategy        string  `json:"strategy,omitempty"` // fixed/exponential
+    InitialInterval int     `json:"initial_interval,omitempty"`
+    MaxInterval     int     `json:"max_interval,omitempty"`
+    Multiplier      float64 `json:"multiplier,omitempty"`
 }
 ```
 
@@ -847,6 +923,14 @@ const (
     NodeTypeSplit        NodeType = "xflow.split"
 )
 
+// NodeKind 节点运行时角色
+type NodeKind string
+
+const (
+    NodeKindAction  NodeKind = "action"
+    NodeKindTrigger NodeKind = "trigger"
+)
+
 // ExecutionStatus 执行状态机：pending → running → [success|failed|canceled|timeout|paused]
 type ExecutionStatus string
 
@@ -889,13 +973,13 @@ const (
     PinDataModeDisabled PinDataMode = "disabled"
 )
 
-type RetryPolicy struct {
-    Enabled         bool          `json:"enabled"`
-    MaxAttempts     int           `json:"max_attempts"`
-    Strategy        string        `json:"strategy"` // fixed/exponential
-    InitialInterval time.Duration `json:"initial_interval"`
-    MaxInterval     time.Duration `json:"max_interval"`
-    Multiplier      float64       `json:"multiplier"`
+type RetrySettings struct {
+    Enabled         bool    `json:"enabled,omitempty"`
+    MaxAttempts     int     `json:"max_attempts,omitempty"`
+    Strategy        string  `json:"strategy,omitempty"` // fixed/exponential
+    InitialInterval int     `json:"initial_interval,omitempty"`
+    MaxInterval     int     `json:"max_interval,omitempty"`
+    Multiplier      float64 `json:"multiplier,omitempty"`
 }
 
 type ExecutionError struct {
