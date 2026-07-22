@@ -63,10 +63,16 @@ func (e *Engine) commitAcyclicNodeError(ctx context.Context, lease *TaskLease, m
 	}
 
 	outcome := ApplyOnError(meta.OnError, systemErr, businessErr, output)
-	return e.commitAcyclicNode(ctx, lease, outcome.NodeStatus, outcome.Output, outcome.RoutePort, outcome.ErrorMessage, outcome.ExecFatal)
+	errorPort := outcome.RoutePort == "error" && businessErr == nil
+	cls := buildEffectiveClassification(systemErr, businessErr, errorPort)
+	return e.commitAcyclicNodeWithClassification(ctx, lease, outcome.NodeStatus, outcome.Output, outcome.RoutePort, outcome.ErrorMessage, outcome.ExecFatal, cls)
 }
 
 func (e *Engine) commitAcyclicNode(ctx context.Context, lease *TaskLease, status types.NodeStatus, output map[string]any, port, errMsg string, fatal bool) (CommitOutcome, error) {
+	return e.commitAcyclicNodeWithClassification(ctx, lease, status, output, port, errMsg, fatal, EffectiveClassification{})
+}
+
+func (e *Engine) commitAcyclicNodeWithClassification(ctx context.Context, lease *TaskLease, status types.NodeStatus, output map[string]any, port, errMsg string, fatal bool, cls EffectiveClassification) (CommitOutcome, error) {
 	task := &lease.Task
 	var advanceTask *Task
 	if !fatal {
@@ -100,7 +106,42 @@ func (e *Engine) commitAcyclicNode(ctx context.Context, lease *TaskLease, status
 	if err != nil {
 		return CommitOutcomeTransientError, fmt.Errorf("atomic commit node %q/%q: %w", task.ExecutionID, task.NodeName, err)
 	}
+	e.publishCommitReceipt(ctx, req, result, cls)
 	return e.finishAtomicCommit(ctx, req, result)
+}
+
+// publishCommitReceipt publishes a read-only commit evidence event after the
+// authoritative CommitNode mutation returned. Non-blocking; never changes the
+// commit outcome. cls is the EffectiveClassification bound to this commit
+// request (empty for non-error commits).
+func (e *Engine) publishCommitReceipt(ctx context.Context, req CommitNodeRequest, result CommitNodeResult, cls EffectiveClassification) {
+	if e.evidenceBuffer == nil {
+		return
+	}
+	if cls.Source == "" {
+		cls.Source = ErrorSourceUnclassified
+	}
+	publishRuntimeEvidence(e.evidenceBuffer, RuntimeEvidenceEvent{
+		Version:       1,
+		EventID:       newRuntimeEventID(ctx, req.ExecutionID, req.NodeName, req.Attempt),
+		Type:          RuntimeEvidenceCommit,
+		ExecutionID:   req.ExecutionID,
+		NodeName:      req.NodeName,
+		NodeIdx:       req.NodeIdx,
+		ActivationID:  req.ActivationID,
+		Attempt:       req.Attempt,
+		CommitOutcome: result.Outcome,
+		Applied:       result.Applied,
+		OutboxIDs:     result.OutboxIDs,
+		ErrorSource:   cls.Source,
+		Classified:    cls.Classified,
+		ErrorKind:     cls.Kind,
+		Retryable:     cls.Retryable,
+		Permanent:     cls.Permanent,
+		ErrorCode:     cls.Code,
+		NodeStatus:    req.Status,
+		RoutePort:     req.Port,
+	})
 }
 
 func (e *Engine) commitAcyclicFailure(ctx context.Context, lease *TaskLease, failure error) error {
@@ -126,6 +167,7 @@ func (e *Engine) commitAcyclicFailure(ctx context.Context, lease *TaskLease, fai
 	if err != nil {
 		return fmt.Errorf("atomic fail node %q/%q: %w", task.ExecutionID, task.NodeName, err)
 	}
+	e.publishCommitReceipt(ctx, req, result, EffectiveClassification{})
 	outcome, err := e.finishAtomicCommit(ctx, req, result)
 	if err != nil {
 		return err

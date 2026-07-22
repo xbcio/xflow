@@ -2,6 +2,8 @@ package engine
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync/atomic"
 
 	"github.com/xbcio/xflow/types"
@@ -114,4 +116,36 @@ func publishRuntimeEvidence(b *RuntimeEvidenceBuffer, event RuntimeEvidenceEvent
 	}
 }
 
-var _ = context.Background
+var runtimeEventSeq uint64
+
+func newRuntimeEventID(ctx context.Context, execID types.ExecutionID, node string, attempt int) string {
+	n := atomic.AddUint64(&runtimeEventSeq, 1)
+	return fmt.Sprintf("rev-%d-%s-%s-%d", n, execID, node, attempt)
+}
+
+// buildEffectiveClassification derives the production classification bound to a
+// commit. source distinguishes ordinary system error from explicit error-port
+// output; it cannot be inferred from systemErr's type alone.
+func buildEffectiveClassification(systemErr error, businessErr *types.Error, errorPort bool) EffectiveClassification {
+	switch {
+	case errorPort:
+		return EffectiveClassification{Source: ErrorSourceErrorPort, Classified: false}
+	case businessErr != nil:
+		return EffectiveClassification{Source: ErrorSourceBusiness, Classified: false}
+	case systemErr == nil:
+		return EffectiveClassification{Source: ErrorSourceUnclassified, Classified: false}
+	}
+	var ce *types.ClassifiedError
+	if errors.As(systemErr, &ce) {
+		r := ce.Retryable
+		p := ce.Permanent
+		return EffectiveClassification{Source: ErrorSourceSystem, Classified: true, Kind: ce.Kind, Retryable: &r, Permanent: &p, Code: ce.Code}
+	}
+	// wrapped permanent but no ClassifiedError
+	if types.IsPermanent(systemErr) {
+		f := false
+		tr := true
+		return EffectiveClassification{Source: ErrorSourceSystem, Classified: true, Kind: types.ErrorKindPermanent, Retryable: &f, Permanent: &tr}
+	}
+	return EffectiveClassification{Source: ErrorSourceUnclassified, Classified: false}
+}
