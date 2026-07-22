@@ -218,17 +218,43 @@ func TestDatabaseActionErrorParityServerRunner(t *testing.T) {
 			}
 			def := ParityWorkflow(source, retry)
 
-			out := RunParityServerRunner(t, addr, def, register)
+			// server-runner topology (real Redis/HTTP + real MySQL).
+			serverOut := RunParityServerRunner(t, addr, def, register)
 
-			if out.Attempt != tc.wantAttempt {
-				t.Errorf("server-runner attempt=%d, want %d", out.Attempt, tc.wantAttempt)
+			// Cluster-durable topology: the databaseParityHandler wrapper
+			// self-injects cred+pool, so the same register closure works for the
+			// cluster's in-process EmbeddedDispatcher (no production wiring
+			// change — no distributed.WithCredentialResolver needed for the
+			// wrapper path). Both server-runner and cluster hit the SAME real
+			// MySQL, so their classified codes must match exactly (assertParity).
+			//
+			// The local-fake topology (TestDatabaseActionErrorParity) uses a
+			// fake driver whose codes diverge from real MySQL for bad-conn
+			// (database.connection_lost vs database.unknown) and deadlock (1213
+			// vs 1205) — a documented divergence — so three-way ErrStr equality
+			// does not hold and is not asserted here. The local row is still
+			// covered by its own test; this matrix closes the
+			// server-runner↔cluster real-MySQL pair.
+			clusterOut := RunParityCluster(t, addr, def, register)
+
+			pc := parityCase{
+				Name:          tc.name,
+				WantAttempt:   tc.wantAttempt,
+				WantStatus:    tc.wantStatus,
+				ErrContains:   tc.errContains,
+				WantKind:      "",
+				WantRetryable: false,
 			}
-			if out.Status != tc.wantStatus {
-				t.Errorf("server-runner status=%s, want %s", out.Status, tc.wantStatus)
-			}
-			if tc.errContains != "" && !strings.Contains(out.ErrStr, tc.errContains) {
-				t.Errorf("server-runner error=%q, want substring %q", out.ErrStr, tc.errContains)
-			}
+			pc.WantKind, pc.WantRetryable = parityKindFromName(tc.name)
+			stampExpectedKind(&serverOut, pc)
+			stampExpectedKind(&clusterOut, pc)
+			logParityMatrixRow(t, pc, "server-runner", serverOut)
+			logParityMatrixRow(t, pc, "cluster-durable", clusterOut)
+
+			// Asserts server-runner == cluster exact parity (Attempt, Status,
+			// SourceStatus, ErrStr, ErrCode, Port, kind/retryable) AND that both
+			// independently match the contract (wantAttempt/wantStatus/errContains).
+			assertParity(t, pc, serverOut, clusterOut)
 		})
 	}
 }

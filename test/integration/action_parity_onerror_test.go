@@ -40,7 +40,7 @@ func TestOnErrorActionParity(t *testing.T) {
 		{
 			parityCase: parityCase{
 				Name: "onerror_stop",
-				Build: func() (types.NodeDef, func(engine.HandlerRegistrar)) {
+				Build: func() (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
 					return types.NodeDef{
 							Name:    "source",
 							Type:    srcStop,
@@ -48,7 +48,7 @@ func TestOnErrorActionParity(t *testing.T) {
 						}, func(reg engine.HandlerRegistrar) {
 							reg.RegisterGlobal(srcStop, &onErrorSourceHandler{nodeType: srcStop, mode: "permanent"})
 							reg.RegisterGlobal(dstStop, onErrorDownstreamHandler{nodeType: dstStop})
-						}
+						}, nil
 				},
 				MaxAttempts:    1,
 				WantAttempt:    1,
@@ -63,7 +63,7 @@ func TestOnErrorActionParity(t *testing.T) {
 		{
 			parityCase: parityCase{
 				Name: "onerror_error_output",
-				Build: func() (types.NodeDef, func(engine.HandlerRegistrar)) {
+				Build: func() (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
 					return types.NodeDef{
 							Name:    "source",
 							Type:    srcErrorOutput,
@@ -71,7 +71,7 @@ func TestOnErrorActionParity(t *testing.T) {
 						}, func(reg engine.HandlerRegistrar) {
 							reg.RegisterGlobal(srcErrorOutput, &onErrorSourceHandler{nodeType: srcErrorOutput, mode: "business"})
 							reg.RegisterGlobal(dstErrorOutput, onErrorDownstreamHandler{nodeType: dstErrorOutput})
-						}
+						}, nil
 				},
 				MaxAttempts: 1,
 				WantAttempt: 1,
@@ -91,7 +91,7 @@ func TestOnErrorActionParity(t *testing.T) {
 		{
 			parityCase: parityCase{
 				Name: "onerror_main_output",
-				Build: func() (types.NodeDef, func(engine.HandlerRegistrar)) {
+				Build: func() (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
 					return types.NodeDef{
 							Name:    "source",
 							Type:    srcMainOutput,
@@ -99,7 +99,7 @@ func TestOnErrorActionParity(t *testing.T) {
 						}, func(reg engine.HandlerRegistrar) {
 							reg.RegisterGlobal(srcMainOutput, &onErrorSourceHandler{nodeType: srcMainOutput, mode: "business"})
 							reg.RegisterGlobal(dstMainOutput, onErrorDownstreamHandler{nodeType: dstMainOutput})
-						}
+						}, nil
 				},
 				MaxAttempts: 1,
 				WantAttempt: 1,
@@ -119,7 +119,7 @@ func TestOnErrorActionParity(t *testing.T) {
 		{
 			parityCase: parityCase{
 				Name: "onerror_continue",
-				Build: func() (types.NodeDef, func(engine.HandlerRegistrar)) {
+				Build: func() (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
 					return types.NodeDef{
 							Name:    "source",
 							Type:    srcContinue,
@@ -127,7 +127,7 @@ func TestOnErrorActionParity(t *testing.T) {
 						}, func(reg engine.HandlerRegistrar) {
 							reg.RegisterGlobal(srcContinue, &onErrorSourceHandler{nodeType: srcContinue, mode: "permanent"})
 							reg.RegisterGlobal(dstContinue, onErrorDownstreamHandler{nodeType: dstContinue})
-						}
+						}, nil
 				},
 				MaxAttempts: 1,
 				WantAttempt: 1,
@@ -148,18 +148,38 @@ func TestOnErrorActionParity(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.Name, func(t *testing.T) {
-			source, register := tc.Build()
+			source, register, inv := tc.Build()
 			retry := &types.RetrySettings{
 				MaxAttempts:     tc.MaxAttempts,
 				InitialInterval: 50,
 			}
 			def := ParityWorkflowWithDownstream(source, retry, tc.OKNode, tc.ErrNode)
 
+			// onerror fixtures use custom handlers (no fixture counter). The
+			// source produces a permanent ClassifiedError (stop/continue) or a
+			// business Output.Error (error_output/main_output); the kind is
+			// derived from the strategy, not the name.
+			switch tc.Name {
+			case "onerror_stop", "onerror_continue":
+				tc.WantKind, tc.WantRetryable = string(types.ErrorKindPermanent), false
+			case "onerror_error_output", "onerror_main_output":
+				tc.WantKind, tc.WantRetryable = string(types.ErrorKindBusiness), false
+			}
+
 			localOut := RunParityLocal(t, def, register)
 			serverOut := RunParityServerRunner(t, addr, def, register)
 			clusterOut := RunParityCluster(t, addr, def, register)
 
+			invocations := invCount(inv)
+			for _, o := range []*ParityOutcome{&localOut, &serverOut, &clusterOut} {
+				stampExpectedKind(o, tc.parityCase)
+				o.HandlerInvocations = invocations
+			}
+
 			assertParityThreeWay(t, tc.parityCase, localOut, serverOut, clusterOut)
+			logParityMatrixRow(t, tc.parityCase, "local", localOut)
+			logParityMatrixRow(t, tc.parityCase, "server-runner", serverOut)
+			logParityMatrixRow(t, tc.parityCase, "cluster-durable", clusterOut)
 
 			if localOut.SourceStatus != serverOut.SourceStatus {
 				t.Errorf("source status parity: local=%s server-runner=%s", localOut.SourceStatus, serverOut.SourceStatus)
@@ -170,10 +190,14 @@ func TestOnErrorActionParity(t *testing.T) {
 			if serverOut.SourceStatus != tc.WantSourceStatus {
 				t.Errorf("server-runner source status=%s, want %s", serverOut.SourceStatus, tc.WantSourceStatus)
 			}
+			if clusterOut.SourceStatus != tc.WantSourceStatus {
+				t.Errorf("cluster source status=%s, want %s", clusterOut.SourceStatus, tc.WantSourceStatus)
+			}
 
 			if tc.Name == "onerror_stop" {
 				assertNoActivatedDownstream(t, localOut)
 				assertNoActivatedDownstream(t, serverOut)
+				assertNoActivatedDownstream(t, clusterOut)
 			}
 		})
 	}

@@ -23,14 +23,14 @@ func TestScriptFunctionActionParity(t *testing.T) {
 	cases := []parityCase{
 		{
 			Name: "function_config_permanent",
-			Build: func() (types.NodeDef, func(engine.HandlerRegistrar)) {
+			Build: func() (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
 				return types.NodeDef{
 					Name: "source",
 					Type: "xflow.function",
 					Parameters: map[string]any{
 						"function_name": "unregistered_parity_func",
 					},
-				}, nil
+				}, nil, nil
 			},
 			MaxAttempts: 2,
 			WantAttempt: 1,
@@ -39,7 +39,7 @@ func TestScriptFunctionActionParity(t *testing.T) {
 		},
 		{
 			Name: "function_timeout_transient_exhausted",
-			Build: func() (types.NodeDef, func(engine.HandlerRegistrar)) {
+			Build: func() (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
 				fnName := "parity_function_timeout"
 				node.RegisterFunc(fnName, func(_ context.Context, _ *types.Input) (*types.Output, error) {
 					return nil, context.DeadlineExceeded
@@ -50,7 +50,7 @@ func TestScriptFunctionActionParity(t *testing.T) {
 					Parameters: map[string]any{
 						"function_name": fnName,
 					},
-				}, nil
+				}, nil, nil
 			},
 			MaxAttempts: 2,
 			WantAttempt: 2,
@@ -59,7 +59,7 @@ func TestScriptFunctionActionParity(t *testing.T) {
 		},
 		{
 			Name: "function_user_error_port",
-			Build: func() (types.NodeDef, func(engine.HandlerRegistrar)) {
+			Build: func() (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
 				fnName := "parity_function_user_error"
 				node.RegisterFunc(fnName, func(_ context.Context, _ *types.Input) (*types.Output, error) {
 					return nil, errors.New("user function error")
@@ -71,7 +71,7 @@ func TestScriptFunctionActionParity(t *testing.T) {
 					Parameters: map[string]any{
 						"function_name": fnName,
 					},
-				}, nil
+				}, nil, nil
 			},
 			MaxAttempts: 1,
 			WantAttempt: 1,
@@ -100,7 +100,7 @@ func TestScriptFunctionActionParity(t *testing.T) {
 		},
 		{
 			Name: "script_config_permanent",
-			Build: func() (types.NodeDef, func(engine.HandlerRegistrar)) {
+			Build: func() (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
 				return types.NodeDef{
 					Name: "source",
 					Type: "xflow.script",
@@ -108,7 +108,7 @@ func TestScriptFunctionActionParity(t *testing.T) {
 						"language": "js",
 						"runtime":  "goja",
 					},
-				}, nil
+				}, nil, nil
 			},
 			MaxAttempts: 2,
 			WantAttempt: 1,
@@ -117,7 +117,7 @@ func TestScriptFunctionActionParity(t *testing.T) {
 		},
 		{
 			Name: "script_timeout_transient_exhausted",
-			Build: func() (types.NodeDef, func(engine.HandlerRegistrar)) {
+			Build: func() (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
 				return types.NodeDef{
 					Name: "source",
 					Type: "xflow.script",
@@ -127,7 +127,7 @@ func TestScriptFunctionActionParity(t *testing.T) {
 						"code":     "while(true){}",
 						"timeout":  "50ms",
 					},
-				}, nil
+				}, nil, nil
 			},
 			MaxAttempts: 2,
 			WantAttempt: 2,
@@ -136,7 +136,7 @@ func TestScriptFunctionActionParity(t *testing.T) {
 		},
 		{
 			Name: "script_user_error_port",
-			Build: func() (types.NodeDef, func(engine.HandlerRegistrar)) {
+			Build: func() (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
 				return types.NodeDef{
 					Name:    "source",
 					Type:    "xflow.script",
@@ -146,7 +146,7 @@ func TestScriptFunctionActionParity(t *testing.T) {
 						"runtime":  "goja",
 						"code":     "throw new Error('user')",
 					},
-				}, nil
+				}, nil, nil
 			},
 			MaxAttempts: 1,
 			WantAttempt: 1,
@@ -177,7 +177,7 @@ func TestScriptFunctionActionParity(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.Name, func(t *testing.T) {
-			source, register := tc.Build()
+			source, register, inv := tc.Build()
 			retry := &types.RetrySettings{
 				MaxAttempts:     tc.MaxAttempts,
 				InitialInterval: 50,
@@ -189,11 +189,25 @@ func TestScriptFunctionActionParity(t *testing.T) {
 				def = ParityWorkflow(source, retry)
 			}
 
+			// script/function cases use the real built-in handlers (no fixture
+			// counter). The user-error-port fixtures reach Success (routed, not
+			// failed), so parityKindFromName returns "" for them.
+			tc.WantKind, tc.WantRetryable = parityKindFromName(tc.Name)
+
 			localOut := RunParityLocal(t, def, register)
 			serverOut := RunParityServerRunner(t, addr, def, register)
 			clusterOut := RunParityCluster(t, addr, def, register)
 
+			invocations := invCount(inv)
+			for _, o := range []*ParityOutcome{&localOut, &serverOut, &clusterOut} {
+				stampExpectedKind(o, tc)
+				o.HandlerInvocations = invocations
+			}
+
 			assertParityThreeWay(t, tc, localOut, serverOut, clusterOut)
+			logParityMatrixRow(t, tc, "local", localOut)
+			logParityMatrixRow(t, tc, "server-runner", serverOut)
+			logParityMatrixRow(t, tc, "cluster-durable", clusterOut)
 		})
 	}
 }

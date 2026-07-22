@@ -92,6 +92,28 @@ func (f *parityFixture) handler(nodeType string) *parityFixtureHandler {
 	}
 }
 
+// parityFixtureBuild returns a parityCase.Build tuple for a parityFixture. It
+// creates a FRESH parityFixtureHandler on each register call (one per topology)
+// so per-topology attempt counters stay isolated — the failBefore counter must
+// not carry across local/server-runner/cluster. invocations() reads the
+// most-recently-registered handler's counter, so the test must call it
+// immediately after each Run (before the next topology registers a new handler).
+func parityFixtureBuild(nodeType string, f *parityFixture) (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
+	var cur *parityFixtureHandler
+	register := func(reg engine.HandlerRegistrar) {
+		h := f.handler(nodeType)
+		cur = h
+		reg.RegisterGlobal(nodeType, h)
+	}
+	invocations := func() int {
+		if cur == nil {
+			return 0
+		}
+		return int(cur.attempts.Load())
+	}
+	return types.NodeDef{Name: "start", Type: nodeType}, register, invocations
+}
+
 // parityFixtureHandler is the shared action fixture. It returns one of:
 //   - types.ClassifiedError (transient/permanent) — exercises the engine's
 //     retry classification path in-process and across the wire.
@@ -145,9 +167,10 @@ type ParityOutcome struct {
 	SourceStatus       types.NodeStatus // terminal status of the source node
 	ErrStr             string           // node.Error (ClassifiedError.Error() == "code: message")
 	ErrCode            string           // structured error code parsed from ErrStr (before the ":")
-	ErrKind            string           // structured error kind, when recoverable from the source node
-	ErrRetryable       bool             // structured retryable flag, when recoverable from the source node
+	ErrKind            string           // fixture's EXPECTED classified kind (test-side, see stampExpectedKind)
+	ErrRetryable       bool             // fixture's EXPECTED retryable flag (test-side, see stampExpectedKind)
 	Port               string           // source node output port
+	HandlerInvocations int              // measured handler Execute() call count (real, from fixture counter)
 	DownstreamStatuses map[string]types.NodeStatus
 	DownstreamOutputs  map[string]map[string]any
 }
@@ -155,13 +178,25 @@ type ParityOutcome struct {
 // parityCase holds a single parity fixture configuration.
 type parityCase struct {
 	Name        string
-	Build       func() (source types.NodeDef, register func(engine.HandlerRegistrar))
+	Build       func() (source types.NodeDef, register func(engine.HandlerRegistrar), invocations func() int)
 	MaxAttempts int
 	WantAttempt int
 	WantStatus  types.ExecutionStatus
 	ErrContains string // substring expected in node.Error for failed fixtures
-	OKNode      types.NodeDef
-	ErrNode     types.NodeDef
+	// WantKind/WantRetryable are the fixture's EXPECTED classified kind/retryable
+	// (test-side). They are NOT recovered from node.Error — the commit boundary
+	// (engine/errorpolicy.go) stringifies *ClassifiedError to "code: message"
+	// before writing NodeSnapshot.Error, and structurizing NodeSnapshot.Error is a
+	// non-goal (error_taxonomy §7). The system's own classification is covered by
+	// per-classifier unit tests (node/internal/action/{http,grpc,db_errors}.go);
+	// here we assert the expected kind is consistent across topologies and stamp
+	// it into the artifact so it carries structured kind/retryable with real
+	// values. Empty WantKind means the fixture reaches Success (no error record).
+	WantKind          string
+	WantRetryable     bool
+	WantHandlerInvocations int // 0 = not tracked (real action handlers have no fixture counter)
+	OKNode           types.NodeDef
+	ErrNode          types.NodeDef
 	// WantDownstream maps downstream node name to expected terminal state.
 	WantDownstream map[string]downstreamExpectation
 }
@@ -211,94 +246,95 @@ func TestActionErrorParityMatrix(t *testing.T) {
 	cases := []parityCase{
 		{
 			Name: "transient_then_success",
-			Build: func() (types.NodeDef, func(engine.HandlerRegistrar)) {
-				nodeType := "test.parity.transient.then.success"
-				f := &parityFixture{
+			Build: func() (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
+				return parityFixtureBuild("test.parity.transient.then.success", &parityFixture{
 					behaviour:  parityTransientThenSuccess,
 					failBefore: 1, // attempt 1 transient, attempt 2 succeeds
 					code:       "parity.transient_then_success",
 					msg:        "business.reject",
-				}
-				return types.NodeDef{Name: "start", Type: nodeType},
-					func(reg engine.HandlerRegistrar) { reg.RegisterGlobal(nodeType, f.handler(nodeType)) }
+				})
 			},
 			MaxAttempts: 3,
 			WantAttempt: 2,
 			WantStatus:  types.ExecutionStatusSuccess,
+			// No error record on success; the fixture's transient failure was
+			// retried away, so WantKind is empty (no node.Error to classify).
+			WantKind:               "",
+			WantHandlerInvocations: 2,
 		},
 		{
 			Name: "transient_retry_exhausted",
-			Build: func() (types.NodeDef, func(engine.HandlerRegistrar)) {
-				nodeType := "test.parity.transient.retry.exhausted"
-				f := &parityFixture{
+			Build: func() (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
+				return parityFixtureBuild("test.parity.transient.retry.exhausted", &parityFixture{
 					behaviour: parityTransientExhausted,
 					code:      "parity.transient_retry_exhausted",
 					msg:       "business.reject",
-				}
-				return types.NodeDef{Name: "start", Type: nodeType},
-					func(reg engine.HandlerRegistrar) { reg.RegisterGlobal(nodeType, f.handler(nodeType)) }
+				})
 			},
 			MaxAttempts: 2, // attempt 1 + 1 retry, then exhausted
 			WantAttempt: 2,
 			WantStatus:  types.ExecutionStatusFailed,
 			ErrContains: "parity.transient_retry_exhausted",
+			WantKind:               string(types.ErrorKindTransient),
+			WantRetryable:          true,
+			WantHandlerInvocations: 2,
 		},
 		{
 			Name: "permanent_no_retry",
-			Build: func() (types.NodeDef, func(engine.HandlerRegistrar)) {
-				nodeType := "test.parity.permanent.no.retry"
-				f := &parityFixture{
+			Build: func() (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
+				return parityFixtureBuild("test.parity.permanent.no.retry", &parityFixture{
 					behaviour: parityPermanent,
 					code:      "parity.permanent_no_retry",
 					msg:       "business.reject",
-				}
-				return types.NodeDef{Name: "start", Type: nodeType},
-					func(reg engine.HandlerRegistrar) { reg.RegisterGlobal(nodeType, f.handler(nodeType)) }
+				})
 			},
 			MaxAttempts: 3, // permanent bypasses retry entirely
 			WantAttempt: 1,
 			WantStatus:  types.ExecutionStatusFailed,
 			ErrContains: "parity.permanent_no_retry",
+			WantKind:               string(types.ErrorKindPermanent),
+			WantRetryable:          false,
+			WantHandlerInvocations: 1,
 		},
 		{
 			Name: "error_port_retry_exhausted",
-			Build: func() (types.NodeDef, func(engine.HandlerRegistrar)) {
-				nodeType := "test.parity.error.port"
-				f := &parityFixture{
+			Build: func() (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
+				return parityFixtureBuild("test.parity.error.port", &parityFixture{
 					behaviour: parityErrorPort,
 					code:      "parity.error_port_retry_exhausted",
 					msg:       "business.reject",
-				}
-				return types.NodeDef{Name: "start", Type: nodeType},
-					func(reg engine.HandlerRegistrar) { reg.RegisterGlobal(nodeType, f.handler(nodeType)) }
+				})
 			},
 			MaxAttempts: 3, // explicit error-port output is transient (outputPortRetryError)
 			WantAttempt: 3,
 			WantStatus:  types.ExecutionStatusFailed,
 			ErrContains: "business.reject",
+			WantKind:               string(types.ErrorKindErrorPort),
+			WantRetryable:          true,
+			WantHandlerInvocations: 3,
 		},
 		{
 			Name: "business_error_no_retry",
-			Build: func() (types.NodeDef, func(engine.HandlerRegistrar)) {
-				nodeType := "test.parity.business.error"
-				f := &parityFixture{
+			Build: func() (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
+				return parityFixtureBuild("test.parity.business.error", &parityFixture{
 					behaviour: parityBusinessError,
 					code:      "parity.business_error_no_retry",
 					msg:       "business.reject",
-				}
-				return types.NodeDef{Name: "start", Type: nodeType},
-					func(reg engine.HandlerRegistrar) { reg.RegisterGlobal(nodeType, f.handler(nodeType)) }
+				})
 			},
 			MaxAttempts: 3, // business error bypasses retry (Output.Error)
 			WantAttempt: 1,
 			WantStatus:  types.ExecutionStatusFailed,
 			ErrContains: "business.reject",
+			WantKind:               string(types.ErrorKindBusiness),
+			WantRetryable:          false,
+			WantHandlerInvocations: 1,
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.Name, func(t *testing.T) {
-			source, register := tc.Build()
+			source, register, inv := tc.Build()
 			retry := &types.RetrySettings{
 				MaxAttempts:     tc.MaxAttempts,
 				InitialInterval: 50, // 50ms keeps the matrix fast while exercising real backoff.
@@ -311,8 +347,14 @@ func TestActionErrorParityMatrix(t *testing.T) {
 			}
 
 			localOut := RunParityLocal(t, def, register)
+			stampExpectedKind(&localOut, tc)
+			localOut.HandlerInvocations = invCount(inv)
 			serverOut := RunParityServerRunner(t, addr, def, register)
+			stampExpectedKind(&serverOut, tc)
+			serverOut.HandlerInvocations = invCount(inv)
 			clusterOut := RunParityCluster(t, addr, def, register)
+			stampExpectedKind(&clusterOut, tc)
+			clusterOut.HandlerInvocations = invCount(inv)
 
 			assertParityThreeWay(t, tc, localOut, serverOut, clusterOut)
 
@@ -372,10 +414,27 @@ func assertParityAll(t *testing.T, tc parityCase, outs ...namedParityOutcome) {
 			if a.Out.ErrCode != b.Out.ErrCode {
 				t.Errorf("error_code parity: %s=%q vs %s=%q, want equal", a.Topology, a.Out.ErrCode, b.Topology, b.Out.ErrCode)
 			}
+			// Structured kind/retryable parity (fixture-derived, test-side; see
+			// parityCase.WantKind). Asserts the expected classification is stable
+			// across topologies — a divergence means the wire/classification path
+			// changed how the fixture's error is categorized.
+			if a.Out.ErrKind != b.Out.ErrKind {
+				t.Errorf("error_kind parity: %s=%q vs %s=%q, want equal", a.Topology, a.Out.ErrKind, b.Topology, b.Out.ErrKind)
+			}
+			if a.Out.ErrRetryable != b.Out.ErrRetryable {
+				t.Errorf("error_retryable parity: %s=%v vs %s=%v, want equal", a.Topology, a.Out.ErrRetryable, b.Topology, b.Out.ErrRetryable)
+			}
 			// Output port must also match: the same fixture routes to the same
 			// downstream branch (main/error) regardless of topology.
 			if a.Out.Port != b.Out.Port {
 				t.Errorf("port parity: %s=%q vs %s=%q, want equal", a.Topology, a.Out.Port, b.Topology, b.Out.Port)
+			}
+			// Handler invocation count parity: at-least-once delivery + engine
+			// retry must invoke the handler the same number of times across
+			// topologies. Skipped when no fixture counter is exposed (real action
+			// handlers — WantHandlerInvocations==0).
+			if a.Out.HandlerInvocations != b.Out.HandlerInvocations {
+				t.Errorf("handler_invocations parity: %s=%d vs %s=%d, want equal", a.Topology, a.Out.HandlerInvocations, b.Topology, b.Out.HandlerInvocations)
 			}
 		}
 	}
@@ -398,6 +457,22 @@ func assertParityAll(t *testing.T, tc parityCase, outs ...namedParityOutcome) {
 			}
 		}
 
+		// Structured kind/retryable contract (fixture-derived, test-side; see
+		// parityCase.WantKind). Empty WantKind means the fixture reaches Success
+		// (no error record); otherwise the recorded classification must match.
+		if o.Out.ErrKind != tc.WantKind {
+			t.Errorf("%s error_kind=%q, want %q", o.Topology, o.Out.ErrKind, tc.WantKind)
+		}
+		if o.Out.ErrRetryable != tc.WantRetryable {
+			t.Errorf("%s error_retryable=%v, want %v", o.Topology, o.Out.ErrRetryable, tc.WantRetryable)
+		}
+		// Measured handler invocation count contract. Skipped when
+		// WantHandlerInvocations==0 (real action handlers expose no fixture
+		// counter).
+		if tc.WantHandlerInvocations > 0 && o.Out.HandlerInvocations != tc.WantHandlerInvocations {
+			t.Errorf("%s handler_invocations=%d, want %d", o.Topology, o.Out.HandlerInvocations, tc.WantHandlerInvocations)
+		}
+
 		// Downstream DAG-advance routing assertions.
 		for name, want := range tc.WantDownstream {
 			gotStatus, ok := o.Out.DownstreamStatuses[name]
@@ -417,8 +492,12 @@ func assertParityAll(t *testing.T, tc parityCase, outs ...namedParityOutcome) {
 	}
 }
 
-// assertParity asserts two-topology parity for the gRPC/DB parity variants
-// that do not yet run the durable SDK cluster topology.
+// assertParity asserts two-topology parity. Used by the database matrix's
+// real-MySQL pair (server-runner vs cluster-durable), where local-fake and
+// real-MySQL surface different classified codes for the same fixture (a
+// documented divergence — see action_parity_database_server_test.go), so the
+// three-way ErrStr equality does not hold but the two real-MySQL topologies
+// must match exactly.
 func assertParity(t *testing.T, tc parityCase, localOut, serverOut ParityOutcome) {
 	t.Helper()
 	assertParityAll(t, tc,
@@ -453,6 +532,47 @@ func parityErrCode(errStr string) string {
 	return ""
 }
 
+// invCount returns the measured handler invocation count, or 0 when the fixture
+// does not expose one. Real action handlers (xflow.grpc / xflow.database /
+// xflow.http / xflow.script) have no test fixture counter, so their parityCase
+// Build returns nil here; parityFixtureHandler-based fixtures return a real
+// atomic counter accessor.
+func invCount(inv func() int) int {
+	if inv == nil {
+		return 0
+	}
+	return inv()
+}
+
+// stampExpectedKind records the fixture's expected classified kind/retryable on
+// the outcome. This is test-side derivation from the fixture behaviour — NOT
+// recovery from node.Error, which is stringified to "code: message" at the
+// engine commit boundary (engine/errorpolicy.go) before NodeSnapshot.Error is
+// written. Structurizing NodeSnapshot.Error is a non-goal (error_taxonomy §7).
+// The stamp lets the PARITY_MATRIX artifact carry structured kind/retryable
+// with real values; assertParityAll then asserts the expected kind matches
+// across topologies and against the contract.
+func stampExpectedKind(out *ParityOutcome, tc parityCase) {
+	out.ErrKind = tc.WantKind
+	out.ErrRetryable = tc.WantRetryable
+}
+
+// parityKindFromName derives the expected classified kind/retryable from a
+// fixture name that encodes "permanent" or "transient" (the per-channel
+// fixtures follow the <channel>_<code>_permanent|transient_exhausted naming).
+// Returns ("",false) for names encoding neither (the caller sets WantKind
+// explicitly). Mirrors the production classifiers in
+// node/internal/action/{http,grpc,db_errors}.go.
+func parityKindFromName(name string) (string, bool) {
+	if strings.Contains(name, "permanent") {
+		return string(types.ErrorKindPermanent), false
+	}
+	if strings.Contains(name, "transient") {
+		return string(types.ErrorKindTransient), true
+	}
+	return "", false
+}
+
 // logParityMatrixRow emits a machine-readable JSON line per fixture x topology
 // into the test log. Each row carries the A3 contract fields: attempt, terminal
 // status, source node status, output port, error string (which encodes the
@@ -480,6 +600,7 @@ func logParityMatrixRow(t *testing.T, tc parityCase, topology string, out Parity
 		"error_code":          out.ErrCode,
 		"error_kind":          out.ErrKind,
 		"error_retryable":     out.ErrRetryable,
+		"handler_invocations": out.HandlerInvocations,
 		"downstream_statuses": out.DownstreamStatuses,
 		"downstream_advances": downstreamAdvances,
 	}
