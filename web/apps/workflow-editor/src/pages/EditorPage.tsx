@@ -7,7 +7,6 @@ import { LeftSidebar } from "../components/layout/LeftSidebar";
 import { CanvasContainer } from "../components/canvas/CanvasContainer";
 import { RightSidebar } from "../components/layout/RightSidebar";
 import { BottomPanel } from "../components/layout/BottomPanel";
-import { loadMockWorkflow } from "../mocks";
 
 interface EditorPageProps {
   config: RuntimeConfig;
@@ -34,11 +33,13 @@ function EditorPageInner({ workflowId, config }: EditorPageInnerProps) {
   useEffect(() => {
     if (import.meta.env.DEV && config.mockEnabled) {
       let cancelled = false;
-      loadMockWorkflow().then((definition) => {
-        if (!cancelled) {
-          setDefinition(definition);
-        }
-      });
+      import("../mocks")
+        .then((m) => m.loadMockWorkflow())
+        .then((definition) => {
+          if (!cancelled) {
+            setDefinition(definition);
+          }
+        });
       return () => {
         cancelled = true;
       };

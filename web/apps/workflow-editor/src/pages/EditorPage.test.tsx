@@ -1,10 +1,12 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 import type { ReactNode } from "react";
 import { createRuntimeConfig } from "../config/runtime";
 import { EditorPage } from "./EditorPage";
+import { loadMockWorkflow } from "../mocks";
+import { workflowFixture } from "../mocks/fixtures";
 
 afterEach(cleanup);
 
@@ -95,5 +97,30 @@ describe("EditorPage", () => {
       </MemoryRouter>,
     );
     expect(screen.getByTestId("bottom-panel")).toBeDefined();
+  });
+
+  it("loads the mock fixture and renders all fixture nodes in the outline", async () => {
+    vi.mocked(loadMockWorkflow).mockResolvedValue(workflowFixture);
+
+    const mockConfig = createRuntimeConfig("Workflow Editor", "0.1.0");
+    mockConfig.mockEnabled = true;
+
+    render(
+      <MemoryRouter>
+        <EditorPage config={mockConfig} />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("node-outline")).toBeDefined();
+    });
+
+    expect(screen.getByTestId("node-outline-item-start")).toBeDefined();
+    expect(screen.getByTestId("node-outline-item-http")).toBeDefined();
+    expect(screen.getByTestId("node-outline-item-if")).toBeDefined();
+    expect(screen.getByTestId("node-outline-item-database")).toBeDefined();
+    expect(screen.getByTestId("node-outline-item-function")).toBeDefined();
+    expect(screen.getByTestId("node-outline-item-merge")).toBeDefined();
+    expect(screen.getByTestId("node-outline-item-end")).toBeDefined();
   });
 });
