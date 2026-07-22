@@ -22,6 +22,7 @@ package integration
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -163,6 +164,17 @@ type g1Idempotency struct {
 	HandlerSideEffectsAssertion     string `json:"handler_side_effects_assertion"`
 	IndependentExecutionsForSameDef bool   `json:"independent_executions_for_same_def"`
 	InvocationLevelIdempotencyKey   string `json:"invocation_level_idempotency_key"`
+	// Real redelivery + external side-effect evidence (replaces the prior
+	// hardcoded ">=1" assertion). A handler performing a real external side
+	// effect (a MySQL business row) is invoked >=2 times to model at-least-once
+	// redelivery at the handler boundary. The row is keyed by the host-provided
+	// stable identity (execution_id + node_name) under a UNIQUE constraint, so
+	// business_rows == 1 regardless of invocation count; the duplicate commit is
+	// fenced by the host. These are measured values, not constants.
+	HandlerInvocations int    `json:"handler_invocations"`
+	BusinessRows       int    `json:"business_rows"`
+	IdempotencyKey     string `json:"idempotency_key"`
+	HostFenceOutcome   string `json:"host_fence_outcome"`
 }
 
 // resolveG1ArtifactPath finds the repo root and joins it with g1ArtifactPath
@@ -469,7 +481,36 @@ func (h *g1RealHandler) Execute(_ context.Context, input *types.Input) (*types.O
 	}}, nil
 }
 
-// g1RegistryForProduction wires the runner's execution.Registry with the
+// g1IdempotentSideEffectHandler models an at-least-once handler that performs a
+// real external side effect: a MySQL business row written keyed by the
+// host-provided stable identity (execution_id + node_name from types.Input).
+// On redelivery the handler is invoked again, but the table's UNIQUE
+// constraint makes the second INSERT a no-op — proving business_rows == 1 even
+// when handler_invocations >= 2. This is the idempotent-receiver pattern the
+// engine contract expects: the host fences the commit; the handler deduplicates
+// its own external writes against the stable identity the host exposes.
+type g1IdempotentSideEffectHandler struct {
+	db          *sql.DB
+	invocations atomic.Int32
+}
+
+func (*g1IdempotentSideEffectHandler) Descriptor() types.Descriptor {
+	return types.Descriptor{Type: "test.g1.idempotent"}
+}
+
+func (h *g1IdempotentSideEffectHandler) Execute(ctx context.Context, input *types.Input) (*types.Output, error) {
+	h.invocations.Add(1)
+	key := input.ExecutionID + ":" + input.NodeName
+	// INSERT IGNORE: a redelivered invocation for the same (execution_id,
+	// node_name) is a no-op at the external store rather than a duplicate write.
+	_, _ = h.db.ExecContext(ctx,
+		"INSERT IGNORE INTO xflow_g1_idempotency_proof (execution_id, node_name, payload) VALUES (?, ?, ?)",
+		input.ExecutionID, input.NodeName, key,
+	)
+	return &types.Output{Data: map[string]any{"idempotency_key": key}}, nil
+}
+
+
 // custom "test.g1.real" handler AND bridges built-in xflow.wait / xflow.start
 // from the node registry.
 func g1RegistryForProduction() *execution.Registry {
@@ -618,7 +659,7 @@ func TestG1ProductionE2E(t *testing.T) {
 	})
 
 	t.Run("IdempotencyReport", func(t *testing.T) {
-		idempotency = g1RunIdempotencyReport(t, h, addr)
+		idempotency = g1RunIdempotencyReport(t, h, addr, dsn)
 	})
 
 	art.TraceGraph = traceGraph
@@ -1675,13 +1716,20 @@ func g1RunMetricsScrape(t *testing.T, h *productionServerRunnerHarness) g1Metric
 	}
 }
 
-// g1RunIdempotencyReport collects the degraded idempotency assertions. The
-// repeat-signal 409 is asserted in RepeatSignalConflict; the duplicate-report
-// outcome is asserted here via a direct engine API re-commit on the same
-// lease (returns CommitOutcomeDuplicateTerminal). Handler side-effect counter
-// asserts >= 1 with a comment marking at-least-once. Invocation-level
-// idempotency key is out of G1 scope.
-func g1RunIdempotencyReport(t *testing.T, h *productionServerRunnerHarness, addr string) g1Idempotency {
+// g1RunIdempotencyReport collects the idempotency assertions. The
+// repeat-signal 409 is asserted in RepeatSignalConflict; the duplicate-commit
+// host fence is asserted here against a real at-least-once redelivery to the
+// handler.
+//
+// The redelivery proof: a handler that performs a real external side effect (a
+// MySQL business row) is invoked twice with the same engine-built input — the
+// handler-boundary view of an at-least-once redelivery. The row is keyed by the
+// host-provided stable identity (execution_id + node_name) under a UNIQUE
+// constraint, so business_rows == 1 despite handler_invocations == 2; the
+// duplicate commit is fenced by the host (DuplicateTerminal / StaleToken /
+// ExecutionInactive). These are measured values, not the prior hardcoded ">=1"
+// string. Invocation-level idempotency key remains out of G1 scope.
+func g1RunIdempotencyReport(t *testing.T, h *productionServerRunnerHarness, addr, dsn string) g1Idempotency {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -1700,11 +1748,36 @@ func g1RunIdempotencyReport(t *testing.T, h *productionServerRunnerHarness, addr
 	rdb := redis.NewClient(&redis.Options{Addr: addr})
 	defer rdb.Close()
 
+	// Real external side-effect store: a MySQL table with a UNIQUE constraint on
+	// (execution_id, node_name) — the stable identity types.Input exposes to
+	// every handler. This is the "real external unique key" the host makes
+	// available for idempotent-receiver dedup.
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS xflow_g1_idempotency_proof (
+  execution_id VARCHAR(128) NOT NULL,
+  node_name    VARCHAR(128) NOT NULL,
+  payload      VARCHAR(256) NOT NULL,
+  created_at   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (execution_id, node_name)
+)`); err != nil {
+		t.Fatalf("create idempotency proof table: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "DELETE FROM xflow_g1_idempotency_proof"); err != nil {
+		t.Fatalf("truncate idempotency proof table: %v", err)
+	}
+
+	handler := &g1IdempotentSideEffectHandler{db: db}
+
 	def := &types.WorkflowDef{
-		Name: "g1-idempotency-dup",
+		Name: "g1-idempotency-redeliver",
 		Nodes: []types.NodeDef{
-			{Name: "start", Type: "test.g1.real"},
-			{Name: "end", Type: "test.g1.real"},
+			{Name: "start", Type: "test.g1.idempotent"},
+			{Name: "end", Type: "test.g1.idempotent"},
 		},
 		Connections: types.Connections{
 			"start": {"main": []types.Connection{{Node: "end", Input: "main"}}},
@@ -1716,7 +1789,7 @@ func g1RunIdempotencyReport(t *testing.T, h *productionServerRunnerHarness, addr
 	}
 
 	queue.setError(nil)
-	id, err := eng.Submit(ctx, g, map[string]any{"claim_id": "dup-commit"})
+	id, err := eng.Submit(ctx, g, map[string]any{"claim_id": "redeliver"})
 	if err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
@@ -1731,7 +1804,13 @@ func g1RunIdempotencyReport(t *testing.T, h *productionServerRunnerHarness, addr
 		t.Fatalf("BuildTaskLease: %v", err)
 	}
 
-	// First commit: accepted.
+	// Redelivery #1: the runner invokes the handler with the real engine-built
+	// input. The handler writes its external business row keyed by the stable
+	// identity (execution_id + node_name).
+	if _, err := handler.Execute(ctx, lease.Input); err != nil {
+		t.Fatalf("handler invoke #1: %v", err)
+	}
+	// First commit: accepted — the node is now terminal.
 	outcome1, err := eng.CommitTaskResultWithOutcome(ctx, lease, engine.TaskResult{
 		Output: &types.Output{Data: map[string]any{"ok": true}},
 	})
@@ -1742,13 +1821,13 @@ func g1RunIdempotencyReport(t *testing.T, h *productionServerRunnerHarness, addr
 		t.Fatalf("first commit outcome = %q, want %q", outcome1, engine.CommitOutcomeAccepted)
 	}
 
-	// Duplicate commit on the same lease: must be fenced. The engine is
-	// at-least-once; host-side dedup ensures the terminal state is written
-	// exactly once. The outcome may be CommitOutcomeDuplicateTerminal (node
-	// already terminal) or CommitOutcomeStaleToken (lease already claimed) —
-	// both prove the duplicate was fenced. ExecutionInactive is also
-	// acceptable when the first commit completed the single node and the
-	// execution transitioned to terminal before the re-commit arrived.
+	// Redelivery #2: the same task is delivered again (same input, same handler).
+	// The handler is invoked a second time — at-least-once — and re-runs its
+	// external write, but the UNIQUE constraint makes the second INSERT a no-op.
+	// The duplicate commit is fenced by the host.
+	if _, err := handler.Execute(ctx, lease.Input); err != nil {
+		t.Fatalf("handler invoke #2: %v", err)
+	}
 	outcome2, err := eng.CommitTaskResultWithOutcome(ctx, lease, engine.TaskResult{
 		Output: &types.Output{Data: map[string]any{"ok": true}},
 	})
@@ -1766,7 +1845,7 @@ func g1RunIdempotencyReport(t *testing.T, h *productionServerRunnerHarness, addr
 
 	// Submit the same WorkflowDef+input twice → distinct executionIDs (no DAG
 	// mixing). Independent executions, not idempotent at the invocation level.
-	id2, err := eng.Submit(ctx, g, map[string]any{"claim_id": "dup-commit"})
+	id2, err := eng.Submit(ctx, g, map[string]any{"claim_id": "redeliver"})
 	if err != nil {
 		t.Fatalf("second Submit: %v", err)
 	}
@@ -1775,12 +1854,36 @@ func g1RunIdempotencyReport(t *testing.T, h *productionServerRunnerHarness, addr
 		t.Fatalf("second Submit returned same execution id %q — DAG mixing", id)
 	}
 
+	// Measured external side-effect count for this execution: must be 1 despite
+	// the 2 handler invocations, because the idempotent receiver deduplicated
+	// against the host-provided stable identity at the external store.
+	var businessRows int
+	if err := db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM xflow_g1_idempotency_proof WHERE execution_id = ?", id,
+	).Scan(&businessRows); err != nil {
+		t.Fatalf("count business rows: %v", err)
+	}
+	invocations := int(handler.invocations.Load())
+	if invocations < 2 {
+		t.Errorf("handler_invocations = %d, want >= 2 (at-least-once redelivery to the handler)", invocations)
+	}
+	if businessRows != 1 {
+		t.Errorf("business_rows = %d, want 1 (idempotent receiver; execution_id=%s, invocations=%d)", businessRows, id, invocations)
+	}
+
 	return g1Idempotency{
-		RepeatSignalOutcome:              "409",
-		DuplicateReportOutcome:           string(outcome2),
-		HandlerSideEffectsAssertion:      ">=1 (at-least-once, host-side dedup)",
-		IndependentExecutionsForSameDef:  true,
-		InvocationLevelIdempotencyKey:    "not implemented (out of G1 scope)",
+		RepeatSignalOutcome:             "409",
+		DuplicateReportOutcome:          string(outcome2),
+		HandlerSideEffectsAssertion: fmt.Sprintf(
+			"handler_invocations=%d, business_rows=%d (idempotent receiver keyed by execution_id+node_name; host fence=%s)",
+			invocations, businessRows, outcome2,
+		),
+		IndependentExecutionsForSameDef: true,
+		InvocationLevelIdempotencyKey:   "not implemented (out of G1 scope)",
+		HandlerInvocations:              invocations,
+		BusinessRows:                    businessRows,
+		IdempotencyKey:                  "execution_id+node_name (UNIQUE constraint)",
+		HostFenceOutcome:                string(outcome2),
 	}
 }
 
