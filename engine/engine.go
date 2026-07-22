@@ -92,6 +92,8 @@ type Engine struct {
 
 	mu     sync.RWMutex
 	graphs map[types.ExecutionID]*graph.Graph
+
+	evidenceBuffer *RuntimeEvidenceBuffer
 }
 
 // New creates an Engine wired to the given state store and task queue.
