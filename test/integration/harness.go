@@ -91,6 +91,12 @@ func requireMySQL(t *testing.T) string {
 		// Do not echo the DSN: it embeds MYSQL_ROOT_PASSWORD. Print only the
 		// host:port so a skipped test does not leak the credential.
 		port := envOr("MYSQL_PORT", "3306")
+		// Under XFLOW_REQUIRE_MYSQL_INTEGRATION=1 (CI gating mode) fail the test
+		// instead of skipping, so a missing MySQL dependency cannot be mistaken
+		// for a passing gate (R7, mirrors Redis required mode).
+		if os.Getenv("XFLOW_REQUIRE_MYSQL_INTEGRATION") == "1" {
+			t.Fatalf("XFLOW_REQUIRE_MYSQL_INTEGRATION=1: mysql unavailable at localhost:%s: %v (run `make env-up && make env-migrate`)", port, err)
+		}
 		t.Skipf("mysql unavailable at localhost:%s: %v (run `make env-up && make env-migrate`)", port, err)
 	}
 	return dsn
@@ -100,6 +106,12 @@ func requireKafka(t *testing.T) []string {
 	t.Helper()
 	brokers := kafkaBrokers(t)
 	if err := pingKafka(brokers); err != nil {
+		// Under XFLOW_REQUIRE_KAFKA_INTEGRATION=1 (CI gating mode) fail the test
+		// instead of skipping, so a missing Kafka dependency cannot be mistaken
+		// for a passing gate (R7, mirrors Redis required mode).
+		if os.Getenv("XFLOW_REQUIRE_KAFKA_INTEGRATION") == "1" {
+			t.Fatalf("XFLOW_REQUIRE_KAFKA_INTEGRATION=1: kafka unavailable (%v): %v (run `make env-up`)", brokers, err)
+		}
 		t.Skipf("kafka unavailable (%v): %v (run `make env-up`)", brokers, err)
 	}
 	return brokers

@@ -114,6 +114,8 @@ env-migrate:
 # test-integration skips when Redis/MySQL/Kafka are unavailable (local dev).
 # test-integration-required fails the job when deps are missing — use in CI so a
 # skipped dependency cannot be mistaken for a passing gate (A0, 2026-07-18 §6.3).
+# R7: Redis, MySQL, and Kafka are all required so a missing dependency on any
+# integration surface (sqlstore / distributed / queue) fails rather than skips.
 test-integration:
 	@set -a; [ -f test/env/.env ] && . ./test/env/.env; set +a; \
 	go test -tags=integration -race -count=1 -timeout 600s ./test/integration/...
@@ -121,6 +123,8 @@ test-integration:
 test-integration-required:
 	@set -a; [ -f test/env/.env ] && . ./test/env/.env; set +a; \
 	XFLOW_REQUIRE_REDIS_INTEGRATION=1 \
+	XFLOW_REQUIRE_MYSQL_INTEGRATION=1 \
+	XFLOW_REQUIRE_KAFKA_INTEGRATION=1 \
 	go test -tags=integration -race -count=1 -timeout 600s -json ./test/integration/...
 
 test-perf:
