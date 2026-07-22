@@ -77,6 +77,15 @@ func WithOutboxObserver(observer OutboxObserver) Option {
 	}
 }
 
+// WithRuntimeEvidenceBuffer installs a read-only evidence sink. nil or absent
+// buffer means zero behavior change. The same buffer must not be reused across
+// topologies.
+func WithRuntimeEvidenceBuffer(buf *RuntimeEvidenceBuffer) Option {
+	return func(e *Engine) {
+		e.evidenceBuffer = buf
+	}
+}
+
 // WithOutboxMaxDeliveryAttempts changes the number of failed queue handoffs
 // allowed before a backend moves an outbox entry to dead-letter storage.
 func WithOutboxMaxDeliveryAttempts(maxAttempts int) Option {
