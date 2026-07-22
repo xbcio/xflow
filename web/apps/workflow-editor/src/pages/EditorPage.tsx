@@ -48,11 +48,14 @@ function EditorPageInner({ workflowId, config }: EditorPageInnerProps) {
   }, [config.mockEnabled, setDefinition]);
 
   return (
-    <div className="xflow-root editor-page" data-testid="editor-page">
+    <div
+      className="xflow-root flex flex-col w-screen h-screen overflow-hidden bg-editor-canvas"
+      data-testid="editor-page"
+    >
       <TopToolbar workflowId={workflowId} />
-      <div className="editor-page__workspace">
+      <div className="flex flex-row flex-1 min-h-0 overflow-hidden">
         <LeftSidebar />
-        <main className="editor-page__canvas">
+        <main className="flex-1 min-w-0 min-h-0 relative overflow-hidden">
           <CanvasContainer />
         </main>
         <RightSidebar />
