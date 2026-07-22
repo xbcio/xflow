@@ -1,6 +1,13 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { useParams } from "react-router-dom";
 import type { RuntimeConfig } from "../config/runtime";
+import { EditorProvider, useEditor } from "../context/EditorContext";
+import { TopToolbar } from "../components/layout/TopToolbar";
+import { LeftSidebar } from "../components/layout/LeftSidebar";
+import { CanvasContainer } from "../components/canvas/CanvasContainer";
+import { RightSidebar } from "../components/layout/RightSidebar";
+import { BottomPanel } from "../components/layout/BottomPanel";
+import { loadMockWorkflow } from "../mocks";
 
 interface EditorPageProps {
   config: RuntimeConfig;
@@ -8,28 +15,48 @@ interface EditorPageProps {
 
 export function EditorPage({ config }: EditorPageProps) {
   const { workflowId } = useParams();
-  const [fixtureName, setFixtureName] = useState<string | null>(null);
+
+  return (
+    <EditorProvider>
+      <EditorPageInner workflowId={workflowId} config={config} />
+    </EditorProvider>
+  );
+}
+
+interface EditorPageInnerProps {
+  workflowId?: string;
+  config: RuntimeConfig;
+}
+
+function EditorPageInner({ workflowId, config }: EditorPageInnerProps) {
+  const { setDefinition } = useEditor();
 
   useEffect(() => {
     if (import.meta.env.DEV && config.mockEnabled) {
-      import("../mocks")
-        .then((m) => m.loadMockWorkflow())
-        .then((f) => setFixtureName(f.name));
+      let cancelled = false;
+      loadMockWorkflow().then((definition) => {
+        if (!cancelled) {
+          setDefinition(definition);
+        }
+      });
+      return () => {
+        cancelled = true;
+      };
     }
-  }, [config.mockEnabled]);
+    return undefined;
+  }, [config.mockEnabled, setDefinition]);
 
   return (
     <div className="xflow-root editor-page" data-testid="editor-page">
-      <h1>Editor: {workflowId}</h1>
-      {config.mockEnabled && fixtureName ? (
-        <p data-testid="fixture-summary">
-          Editor mock loaded: {fixtureName}
-        </p>
-      ) : (
-        <p data-testid="empty-state">
-          Editor not configured. Connect a workflow provider to begin editing.
-        </p>
-      )}
+      <TopToolbar workflowId={workflowId} />
+      <div className="editor-page__workspace">
+        <LeftSidebar />
+        <main className="editor-page__canvas">
+          <CanvasContainer />
+        </main>
+        <RightSidebar />
+      </div>
+      <BottomPanel />
     </div>
   );
 }
