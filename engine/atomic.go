@@ -328,16 +328,18 @@ func (e *Engine) handleSystemTask(ctx context.Context, task *Task, flush bool) (
 		if err != nil {
 			return true, err
 		}
-		if _, err := state.AdvanceNode(ctx, AdvanceNodeRequest{
+		result, err := state.AdvanceNode(ctx, AdvanceNodeRequest{
 			ExecutionID:  task.ExecutionID,
 			NodeName:     task.NodeName,
 			NodeIdx:      task.NodeIdx,
 			ActivationID: task.ActivationID,
 			AutoDepth:    task.AutoDepth,
 			Arrivals:     arrivals,
-		}); err != nil {
+		})
+		if err != nil {
 			return true, fmt.Errorf("advance node %q/%q: %w", task.ExecutionID, task.NodeName, err)
 		}
+		e.publishAdvanceReceipt(ctx, task, result)
 		if !flush {
 			return true, nil
 		}

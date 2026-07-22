@@ -116,6 +116,62 @@ func buildAcceptedLeaseForTest(t *testing.T, eng *Engine, queue *fakeQueue, node
 	return lease
 }
 
+func triggerAdvanceForTest(t *testing.T, eng *Engine, queue *fakeQueue) {
+	t.Helper()
+	ctx := context.Background()
+	def := &types.WorkflowDef{
+		Name: "advance-receipt",
+		Nodes: []types.NodeDef{
+			{Name: "start", Type: "test.echo"},
+			{Name: "end", Type: "test.echo"},
+		},
+		Connections: types.Connections{
+			"start": {"main": []types.Connection{{Node: "end", Input: "main"}}},
+		},
+	}
+	g, err := graph.Compile(def)
+	if err != nil {
+		t.Fatalf("compile graph: %v", err)
+	}
+	if _, err := eng.Submit(ctx, g, nil); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	tasks := queue.Drain()
+	if len(tasks) != 1 || tasks[0].NodeName != "start" {
+		t.Fatalf("expected 1 start task, got %d: %v", len(tasks), taskNames(tasks))
+	}
+	lease, err := eng.BuildTaskLease(ctx, tasks[0])
+	if err != nil {
+		t.Fatalf("build lease: %v", err)
+	}
+	if _, err := eng.CommitTaskResultWithOutcome(ctx, lease, TaskResult{
+		Output: &types.Output{Data: map[string]any{"ok": true}},
+	}); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+}
+
+func TestAdvanceReceiptPublishedApplied(t *testing.T) {
+	buf := NewRuntimeEvidenceBuffer(8)
+	eng, queue := newTestEngineWithBuffer(t, buf)
+	triggerAdvanceForTest(t, eng, queue)
+
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case ev := <-buf.Events():
+			if ev.Type == RuntimeEvidenceAdvance && ev.Applied {
+				if ev.ExecutionID == "" || ev.NodeName == "" {
+					t.Fatalf("advance event missing identity: %+v", ev)
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatalf("no applied advance receipt published")
+		}
+	}
+}
+
 func TestCommitReceiptPublishedAfterCommitNode(t *testing.T) {
 	buf := NewRuntimeEvidenceBuffer(8)
 	eng, queue := newTestEngineWithBuffer(t, buf)

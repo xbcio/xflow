@@ -123,6 +123,27 @@ func newRuntimeEventID(ctx context.Context, execID types.ExecutionID, node strin
 	return fmt.Sprintf("rev-%d-%s-%s-%d", n, execID, node, attempt)
 }
 
+// publishAdvanceReceipt publishes a read-only advance evidence event after the
+// authoritative AdvanceNode mutation returned. Non-blocking; never changes the
+// advance control flow or return values.
+func (e *Engine) publishAdvanceReceipt(ctx context.Context, task *Task, result AdvanceNodeResult) {
+	if e.evidenceBuffer == nil {
+		return
+	}
+	publishRuntimeEvidence(e.evidenceBuffer, RuntimeEvidenceEvent{
+		Version:      1,
+		EventID:      newRuntimeEventID(ctx, task.ExecutionID, task.NodeName, 0),
+		Type:         RuntimeEvidenceAdvance,
+		ExecutionID:  task.ExecutionID,
+		NodeName:     task.NodeName,
+		NodeIdx:      task.NodeIdx,
+		ActivationID: task.ActivationID,
+		Attempt:      0,
+		Applied:      result.Applied,
+		OutboxIDs:    result.OutboxIDs,
+	})
+}
+
 // buildEffectiveClassification derives the production classification bound to a
 // commit. source distinguishes ordinary system error from explicit error-port
 // output; it cannot be inferred from systemErr's type alone.
