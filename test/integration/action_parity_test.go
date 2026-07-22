@@ -144,6 +144,9 @@ type ParityOutcome struct {
 	Status             types.ExecutionStatus
 	SourceStatus       types.NodeStatus // terminal status of the source node
 	ErrStr             string           // node.Error (ClassifiedError.Error() == "code: message")
+	ErrCode            string           // structured error code parsed from ErrStr (before the ":")
+	ErrKind            string           // structured error kind, when recoverable from the source node
+	ErrRetryable       bool             // structured retryable flag, when recoverable from the source node
 	Port               string           // source node output port
 	DownstreamStatuses map[string]types.NodeStatus
 	DownstreamOutputs  map[string]map[string]any
@@ -363,6 +366,12 @@ func assertParityAll(t *testing.T, tc parityCase, outs ...namedParityOutcome) {
 			if a.Out.ErrStr != b.Out.ErrStr {
 				t.Errorf("error parity: %s=%q vs %s=%q, want equal", a.Topology, a.Out.ErrStr, b.Topology, b.Out.ErrStr)
 			}
+			// Structured error code parity: the machine-readable code (before the
+			// ":") must also be topology-independent, so the artifact reports a
+			// structured code rather than treating the whole error string as one.
+			if a.Out.ErrCode != b.Out.ErrCode {
+				t.Errorf("error_code parity: %s=%q vs %s=%q, want equal", a.Topology, a.Out.ErrCode, b.Topology, b.Out.ErrCode)
+			}
 			// Output port must also match: the same fixture routes to the same
 			// downstream branch (main/error) regardless of topology.
 			if a.Out.Port != b.Out.Port {
@@ -429,6 +438,21 @@ func assertParityThreeWay(t *testing.T, tc parityCase, localOut, serverOut, clus
 	)
 }
 
+// parityErrCode extracts the structured error code from a ClassifiedError's
+// "code: message" string form. The node record stores only the string form of
+// the classified error; the code is the stable, machine-readable identifier
+// (e.g. "grpc.DataLoss", "http.connection"), distinct from the human message
+// that follows the colon. Returns "" when the error is absent or has no code.
+func parityErrCode(errStr string) string {
+	if errStr == "" {
+		return ""
+	}
+	if idx := strings.IndexByte(errStr, ':'); idx > 0 {
+		return strings.TrimSpace(errStr[:idx])
+	}
+	return ""
+}
+
 // logParityMatrixRow emits a machine-readable JSON line per fixture x topology
 // into the test log. Each row carries the A3 contract fields: attempt, terminal
 // status, source node status, output port, error string (which encodes the
@@ -445,16 +469,19 @@ func logParityMatrixRow(t *testing.T, tc parityCase, topology string, out Parity
 	}
 	row := map[string]any{
 		"fixture":             tc.Name,
-		"topology":             topology,
-		"attempt":              out.Attempt,
-		"want_attempt":         tc.WantAttempt,
-		"status":               string(out.Status),
+		"topology":            topology,
+		"attempt":             out.Attempt,
+		"want_attempt":        tc.WantAttempt,
+		"status":              string(out.Status),
 		"want_status":         string(tc.WantStatus),
-		"source_status":        string(out.SourceStatus),
-		"port":                 out.Port,
-		"error":                out.ErrStr,
-		"downstream_statuses":  out.DownstreamStatuses,
-		"downstream_advances":  downstreamAdvances,
+		"source_status":       string(out.SourceStatus),
+		"port":                out.Port,
+		"error":               out.ErrStr,
+		"error_code":          out.ErrCode,
+		"error_kind":          out.ErrKind,
+		"error_retryable":     out.ErrRetryable,
+		"downstream_statuses": out.DownstreamStatuses,
+		"downstream_advances": downstreamAdvances,
 	}
 	b, err := json.Marshal(row)
 	if err != nil {
@@ -658,6 +685,7 @@ func collectParityOutcome(t *testing.T, state engine.StateStore, execID types.Ex
 		Status:             result.Status,
 		SourceStatus:       node.Status,
 		ErrStr:             node.Error,
+		ErrCode:            parityErrCode(node.Error),
 		Port:               node.Port,
 		DownstreamStatuses: make(map[string]types.NodeStatus),
 		DownstreamOutputs:  make(map[string]map[string]any),

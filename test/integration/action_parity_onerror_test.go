@@ -157,8 +157,9 @@ func TestOnErrorActionParity(t *testing.T) {
 
 			localOut := RunParityLocal(t, def, register)
 			serverOut := RunParityServerRunner(t, addr, def, register)
+			clusterOut := RunParityCluster(t, addr, def, register)
 
-			assertParity(t, tc.parityCase, localOut, serverOut)
+			assertParityThreeWay(t, tc.parityCase, localOut, serverOut, clusterOut)
 
 			if localOut.SourceStatus != serverOut.SourceStatus {
 				t.Errorf("source status parity: local=%s server-runner=%s", localOut.SourceStatus, serverOut.SourceStatus)

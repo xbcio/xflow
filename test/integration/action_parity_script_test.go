@@ -191,8 +191,9 @@ func TestScriptFunctionActionParity(t *testing.T) {
 
 			localOut := RunParityLocal(t, def, register)
 			serverOut := RunParityServerRunner(t, addr, def, register)
+			clusterOut := RunParityCluster(t, addr, def, register)
 
-			assertParity(t, tc, localOut, serverOut)
+			assertParityThreeWay(t, tc, localOut, serverOut, clusterOut)
 		})
 	}
 }
