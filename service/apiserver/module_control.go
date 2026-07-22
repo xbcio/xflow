@@ -194,6 +194,11 @@ func (m *workflowControlModule) handleSubmitWorkflow(w http.ResponseWriter, r *h
 	ctx, span := tracer.Start(r.Context(), "xflow.workflow.submit")
 	defer span.End()
 	ctx = engine.WithTraceCarrier(ctx, tracing.InjectCarrier(ctx))
+	// Attach the original workflow definition so the durable SQL execution
+	// projection (buildExecutionRecord) can persist workflow_def (NOT NULL).
+	// Without this, production mode with a SQL store fails submit with a
+	// NOT-NULL violation on xflow_executions.workflow_def.
+	ctx = engine.WithWorkflowDef(ctx, req.Workflow)
 	id, err := m.eng.Submit(ctx, g, req.Params)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
@@ -232,6 +237,9 @@ func (m *workflowControlModule) handleInvoke(w http.ResponseWriter, r *http.Requ
 	ctx, span := tracer.Start(r.Context(), "xflow.workflow.invoke", "entry", req.Entry)
 	defer span.End()
 	ctx = engine.WithTraceCarrier(ctx, tracing.InjectCarrier(ctx))
+	// Attach the original workflow definition so the durable SQL execution
+	// projection can persist workflow_def (see handleSubmitWorkflow).
+	ctx = engine.WithWorkflowDef(ctx, req.Workflow)
 	id, err := m.eng.Invoke(ctx, g, req.Entry, req.Input)
 	if err != nil {
 		// An unknown entry node is a client error (400), not a 404: the
