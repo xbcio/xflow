@@ -281,6 +281,9 @@ func (d *lookuplessDirectory) ClearAssignment(ctx context.Context, assignmentID 
 func (d *lookuplessDirectory) Runner(ctx context.Context, runnerID string) (RunnerSnapshot, bool) {
 	return d.inner.Runner(ctx, runnerID)
 }
+func (d *lookuplessDirectory) ReleaseExpiredLease(ctx context.Context, req ExpiredDirectoryLeaseRequest) (ExpiredDirectoryLeaseOutcome, error) {
+	return d.inner.ReleaseExpiredLease(ctx, req)
+}
 
 // Compile-time guard: lookuplessDirectory satisfies RunnerDirectory but does
 // NOT satisfy LeaseLookup (no promoted LookupLease via the named field).

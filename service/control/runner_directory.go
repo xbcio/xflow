@@ -136,7 +136,11 @@ type ReleaseLeasedRequest struct {
 
 // RunnerDirectory owns runner registration, assignment placement, and session
 // fencing independently from any specific transport or persistence backend.
+// ExpiredLeaseReleaser is embedded so the LeaseSweeper can rely on a compile-time
+// guarantee that any RunnerDirectory can clean up finalized lease/capacity/seen
+// state before engine reclaim. No runtime type assertion is required.
 type RunnerDirectory interface {
+	ExpiredLeaseReleaser
 	Register(ctx context.Context, req RegisterRunnerRequest) (RunnerSession, error)
 	ValidateSession(ctx context.Context, runnerID, sessionID string) error
 	Heartbeat(ctx context.Context, req HeartbeatRequest) error
