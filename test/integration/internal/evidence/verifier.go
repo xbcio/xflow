@@ -292,12 +292,15 @@ func checkRawLedgerIntegrity(env *Envelope) []string {
 	}
 
 	eventIDs := make(map[string]int)
-	for _, ev := range env.Raw.RuntimeEvents {
-		if ev.EventID == "" {
-			errs = append(errs, "ledger: runtime event with empty event_id")
+	for i, ev := range env.Raw.RuntimeEvents {
+		if ev.Meta.ExecutionID != ev.Event.ExecutionID {
+			errs = append(errs, fmt.Sprintf("ledger: runtime event %d meta.execution_id %q != event.execution_id %q", i, ev.Meta.ExecutionID, ev.Event.ExecutionID))
+		}
+		if ev.Event.EventID == "" {
+			errs = append(errs, fmt.Sprintf("ledger: runtime event %d with empty event_id", i))
 			continue
 		}
-		eventIDs[ev.EventID]++
+		eventIDs[ev.Event.EventID]++
 	}
 	for id, n := range eventIDs {
 		if n > 1 {
@@ -383,7 +386,7 @@ func (v *Verifier) computeDerivedObservations(env *Envelope) []DerivedObservatio
 	// Index runtime events by execution ID.
 	eventsByExec := make(map[types.ExecutionID][]engine.RuntimeEvidenceEvent)
 	for _, ev := range env.Raw.RuntimeEvents {
-		eventsByExec[ev.ExecutionID] = append(eventsByExec[ev.ExecutionID], ev)
+		eventsByExec[ev.Event.ExecutionID] = append(eventsByExec[ev.Event.ExecutionID], ev.Event)
 	}
 
 	// Index counter snapshots by execution ID.
@@ -597,10 +600,10 @@ func (v *Verifier) checkA0(env *Envelope, derived []DerivedObservation, duplicat
 	if req, ok := byScenario[string(A0ReportRequestLoss)]; ok {
 		var firstAccepted, authorityRejected bool
 		for _, ev := range env.Raw.RuntimeEvents {
-			if ev.Type != engine.RuntimeEvidenceCommit || ev.ExecutionID != req.ExecutionID {
+			if ev.Event.Type != engine.RuntimeEvidenceCommit || ev.Event.ExecutionID != req.ExecutionID {
 				continue
 			}
-			if ev.Attempt == 1 && ev.CommitOutcome == engine.CommitOutcomeAccepted {
+			if ev.Event.Attempt == 1 && ev.Event.CommitOutcome == engine.CommitOutcomeAccepted {
 				firstAccepted = true
 			}
 		}
@@ -687,8 +690,8 @@ func (v *Verifier) checkA3(env *Envelope, derived []DerivedObservation, duplicat
 			} else {
 				var re *engine.RuntimeEvidenceEvent
 				for i := range env.Raw.RuntimeEvents {
-					if env.Raw.RuntimeEvents[i].EventID == obs.RetryEventID {
-						re = &env.Raw.RuntimeEvents[i]
+					if env.Raw.RuntimeEvents[i].Event.EventID == obs.RetryEventID {
+						re = &env.Raw.RuntimeEvents[i].Event
 						break
 					}
 				}
@@ -697,8 +700,8 @@ func (v *Verifier) checkA3(env *Envelope, derived []DerivedObservation, duplicat
 				} else {
 					var commitAttempt int
 					for _, ev := range env.Raw.RuntimeEvents {
-						if ev.EventID == obs.CommitEventID {
-							commitAttempt = ev.Attempt
+						if ev.Event.EventID == obs.CommitEventID {
+							commitAttempt = ev.Event.Attempt
 							break
 						}
 					}

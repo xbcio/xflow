@@ -58,11 +58,31 @@ type SuiteSummary struct {
 // RawLedger holds all raw observations. Tests write only these records; they
 // never write derived_observations or pre-aggregated gate rows.
 type RawLedger struct {
-	RuntimeEvents        []engine.RuntimeEvidenceEvent `json:"runtime_events"`
-	CounterSnapshots     []CounterSnapshot             `json:"counter_snapshots"`
-	ProtocolObservations []ProtocolObservation         `json:"protocol_observations"`
-	StateSnapshots       []StateSnapshot               `json:"state_snapshots"`
-	SuiteRecords         []SuiteRecord                 `json:"suite_records"`
+	RuntimeEvents        []CollectedRuntimeEvidenceEvent `json:"runtime_events"`
+	CounterSnapshots     []CounterSnapshot               `json:"counter_snapshots"`
+	ProtocolObservations []ProtocolObservation           `json:"protocol_observations"`
+	StateSnapshots       []StateSnapshot                 `json:"state_snapshots"`
+	SuiteRecords         []SuiteRecord                   `json:"suite_records"`
+}
+
+// EvidenceRecordMeta is the envelope metadata for a collected runtime evidence
+// event. It records who produced the observation, when it was observed, and
+// how it maps back to the run and execution.
+type EvidenceRecordMeta struct {
+	RunID            string            `json:"run_id"`
+	Topology         string            `json:"topology,omitempty"`
+	ProducerID       string            `json:"producer_id"`
+	ExecutionID      types.ExecutionID `json:"execution_id"`
+	ObservedAt       time.Time         `json:"observed_at"`
+	SourceDigest     string            `json:"source_digest,omitempty"`
+	TestBinaryDigest string            `json:"test_binary_digest,omitempty"`
+}
+
+// CollectedRuntimeEvidenceEvent wraps a raw engine.RuntimeEvidenceEvent with
+// collector-side metadata. This is the element type stored in RawLedger.RuntimeEvents.
+type CollectedRuntimeEvidenceEvent struct {
+	Meta  EvidenceRecordMeta      `json:"meta"`
+	Event engine.RuntimeEvidenceEvent `json:"event"`
 }
 
 // CounterSnapshot records a handler counter value bound to a specific instance.

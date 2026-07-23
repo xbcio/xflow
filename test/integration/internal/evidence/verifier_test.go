@@ -63,6 +63,19 @@ func validEnvelope() *Envelope {
 	return env
 }
 
+// wrapEvent builds a CollectedRuntimeEvidenceEvent with valid Meta for tests.
+func wrapEvent(env *Envelope, ev engine.RuntimeEvidenceEvent) CollectedRuntimeEvidenceEvent {
+	return CollectedRuntimeEvidenceEvent{
+		Meta: EvidenceRecordMeta{
+			RunID:       env.RunID,
+			ProducerID:  "test-producer",
+			ExecutionID: ev.ExecutionID,
+			ObservedAt:  time.Now().UTC(),
+		},
+		Event: ev,
+	}
+}
+
 func markA0Scenario(env *Envelope, scenario A0Scenario, execID types.ExecutionID) {
 	env.Raw.ProtocolObservations = append(env.Raw.ProtocolObservations, ProtocolObservation{
 		RunID: env.RunID, Topology: string(scenario), ExecutionID: execID,
@@ -75,14 +88,14 @@ func markA0Scenario(env *Envelope, scenario A0Scenario, execID types.ExecutionID
 		})
 	}
 	env.Raw.RuntimeEvents = append(env.Raw.RuntimeEvents,
-		engine.RuntimeEvidenceEvent{
+		wrapEvent(env, engine.RuntimeEvidenceEvent{
 			EventID: "commit-" + string(scenario) + "-" + string(execID), Type: engine.RuntimeEvidenceCommit,
 			ExecutionID: execID, NodeName: "node", CommitOutcome: engine.CommitOutcomeAccepted,
-		},
-		engine.RuntimeEvidenceEvent{
+		}),
+		wrapEvent(env, engine.RuntimeEvidenceEvent{
 			EventID: "advance-" + string(scenario) + "-" + string(execID), Type: engine.RuntimeEvidenceAdvance,
 			ExecutionID: execID, NodeName: "node", Applied: true,
-		},
+		}),
 	)
 }
 
@@ -141,38 +154,38 @@ func markA3Row(env *Envelope, fixture A3Fixture, topology A3Topology, execID typ
 		commitEvent.Attempt = 3
 	}
 
-	env.Raw.RuntimeEvents = append(env.Raw.RuntimeEvents, commitEvent)
+	env.Raw.RuntimeEvents = append(env.Raw.RuntimeEvents, wrapEvent(env, commitEvent))
 
 	// Only non-fatal success produces an applied advance task.
 	if fixture == A3TransientThenSuccess {
-		env.Raw.RuntimeEvents = append(env.Raw.RuntimeEvents, engine.RuntimeEvidenceEvent{
+		env.Raw.RuntimeEvents = append(env.Raw.RuntimeEvents, wrapEvent(env, engine.RuntimeEvidenceEvent{
 			EventID: "advance-" + string(fixture) + "-" + string(topology),
 			Type:    engine.RuntimeEvidenceAdvance, ExecutionID: execID, NodeName: "node", Applied: true,
-		})
+		}))
 	}
 
 	// Add retry receipts for fixtures that retry before the terminal commit.
 	switch fixture {
 	case A3TransientThenSuccess:
-		env.Raw.RuntimeEvents = append(env.Raw.RuntimeEvents, engine.RuntimeEvidenceEvent{
+		env.Raw.RuntimeEvents = append(env.Raw.RuntimeEvents, wrapEvent(env, engine.RuntimeEvidenceEvent{
 			EventID: "retry-" + string(fixture) + "-" + string(topology),
 			Type:    engine.RuntimeEvidenceRetry, ExecutionID: execID, NodeName: "node", Attempt: 1,
-		})
+		}))
 	case A3TransientRetryExhausted:
-		env.Raw.RuntimeEvents = append(env.Raw.RuntimeEvents, engine.RuntimeEvidenceEvent{
+		env.Raw.RuntimeEvents = append(env.Raw.RuntimeEvents, wrapEvent(env, engine.RuntimeEvidenceEvent{
 			EventID: "retry-" + string(fixture) + "-" + string(topology),
 			Type:    engine.RuntimeEvidenceRetry, ExecutionID: execID, NodeName: "node", Attempt: 1,
-		})
+		}))
 	case A3ErrorPortRetryExhausted:
 		env.Raw.RuntimeEvents = append(env.Raw.RuntimeEvents,
-			engine.RuntimeEvidenceEvent{
+			wrapEvent(env, engine.RuntimeEvidenceEvent{
 				EventID: "retry1-" + string(fixture) + "-" + string(topology),
 				Type:    engine.RuntimeEvidenceRetry, ExecutionID: execID, NodeName: "node", Attempt: 1,
-			},
-			engine.RuntimeEvidenceEvent{
+			}),
+			wrapEvent(env, engine.RuntimeEvidenceEvent{
 				EventID: "retry2-" + string(fixture) + "-" + string(topology),
 				Type:    engine.RuntimeEvidenceRetry, ExecutionID: execID, NodeName: "node", Attempt: 2,
-			},
+			}),
 		)
 	}
 }
@@ -220,9 +233,9 @@ func TestVerifyRejectsMissingA0Scenario(t *testing.T) {
 	env := validEnvelope()
 	markAllRequired(env)
 	// Remove CommitThenFlushBeforeDelivery events (exec-a0-0).
-	var filtered []engine.RuntimeEvidenceEvent
+	var filtered []CollectedRuntimeEvidenceEvent
 	for _, ev := range env.Raw.RuntimeEvents {
-		if ev.ExecutionID != types.ExecutionID("exec-a0-0") {
+		if ev.Event.ExecutionID != types.ExecutionID("exec-a0-0") {
 			filtered = append(filtered, ev)
 		}
 	}
@@ -347,9 +360,9 @@ func TestVerifyRejectsMissingA3Row(t *testing.T) {
 	env := validEnvelope()
 	markAllRequired(env)
 	// Remove all rows for local topology.
-	var filtered []engine.RuntimeEvidenceEvent
+	var filtered []CollectedRuntimeEvidenceEvent
 	for _, ev := range env.Raw.RuntimeEvents {
-		if ev.ExecutionID != types.ExecutionID("exec-a3-"+string(A3TransientThenSuccess)+"-"+string(A3Local)) {
+		if ev.Event.ExecutionID != types.ExecutionID("exec-a3-"+string(A3TransientThenSuccess)+"-"+string(A3Local)) {
 			filtered = append(filtered, ev)
 		}
 	}
@@ -385,9 +398,9 @@ func TestVerifyRejectsMissingRetryEventReference(t *testing.T) {
 	env := validEnvelope()
 	markAllRequired(env)
 	// Remove the retry receipt for one transient_then_success row.
-	var filtered []engine.RuntimeEvidenceEvent
+	var filtered []CollectedRuntimeEvidenceEvent
 	for _, ev := range env.Raw.RuntimeEvents {
-		if ev.EventID == "retry-"+string(A3TransientThenSuccess)+"-"+string(A3Local) {
+		if ev.Event.EventID == "retry-"+string(A3TransientThenSuccess)+"-"+string(A3Local) {
 			continue
 		}
 		filtered = append(filtered, ev)
@@ -412,9 +425,9 @@ func TestVerifyRejectsMissingAppliedAdvance(t *testing.T) {
 	env := validEnvelope()
 	markAllRequired(env)
 	// Remove the applied advance for the transient_then_success local row.
-	var filtered []engine.RuntimeEvidenceEvent
+	var filtered []CollectedRuntimeEvidenceEvent
 	for _, ev := range env.Raw.RuntimeEvents {
-		if ev.EventID == "advance-"+string(A3TransientThenSuccess)+"-"+string(A3Local) {
+		if ev.Event.EventID == "advance-"+string(A3TransientThenSuccess)+"-"+string(A3Local) {
 			continue
 		}
 		filtered = append(filtered, ev)
@@ -440,13 +453,13 @@ func TestVerifyRejectsAppliedAdvanceOnTerminalFailure(t *testing.T) {
 	markAllRequired(env)
 	// Inject an applied advance for a terminal-failure fixture that must not
 	// produce one (permanent_no_retry local).
-	env.Raw.RuntimeEvents = append(env.Raw.RuntimeEvents, engine.RuntimeEvidenceEvent{
+	env.Raw.RuntimeEvents = append(env.Raw.RuntimeEvents, wrapEvent(env, engine.RuntimeEvidenceEvent{
 		EventID:     "advance-bad-" + string(A3PermanentNoRetry) + "-" + string(A3Local),
 		Type:        engine.RuntimeEvidenceAdvance,
 		ExecutionID: types.ExecutionID("exec-a3-" + string(A3PermanentNoRetry) + "-" + string(A3Local)),
 		NodeName:    "node",
 		Applied:     true,
-	})
+	}))
 	v := NewVerifier(defaultFakeProvenance())
 	res := v.Verify(env, passEvents())
 	requireNotPassed(t, res, "applied advance on terminal failure")
@@ -467,7 +480,7 @@ func TestVerifyRejectsBusinessErrorMissingClassification(t *testing.T) {
 	markAllRequired(env)
 	// Replace the business_error_no_retry local commit with an unclassified one.
 	for i := range env.Raw.RuntimeEvents {
-		ev := &env.Raw.RuntimeEvents[i]
+		ev := &env.Raw.RuntimeEvents[i].Event
 		if ev.EventID == "commit-"+string(A3BusinessErrorNoRetry)+"-"+string(A3Local) {
 			ev.ErrorSource = engine.ErrorSourceUnclassified
 			ev.Classified = false
@@ -523,11 +536,32 @@ func TestVerifyRejectsDuplicateEventID(t *testing.T) {
 	env := validEnvelope()
 	markAllRequired(env)
 	if len(env.Raw.RuntimeEvents) > 0 {
-		env.Raw.RuntimeEvents[1].EventID = env.Raw.RuntimeEvents[0].EventID
+		env.Raw.RuntimeEvents[1].Event.EventID = env.Raw.RuntimeEvents[0].Event.EventID
 	}
 	v := NewVerifier(defaultFakeProvenance())
 	res := v.Verify(env, passEvents())
 	requireNotPassed(t, res, "duplicate event ID")
+}
+
+func TestVerifyRejectsMismatchedMetaExecutionID(t *testing.T) {
+	env := validEnvelope()
+	markAllRequired(env)
+	if len(env.Raw.RuntimeEvents) > 0 {
+		env.Raw.RuntimeEvents[0].Meta.ExecutionID = types.ExecutionID("mismatched")
+	}
+	v := NewVerifier(defaultFakeProvenance())
+	res := v.Verify(env, passEvents())
+	requireNotPassed(t, res, "mismatched meta execution_id")
+	found := false
+	for _, e := range res.Errors {
+		if strings.Contains(e, "meta.execution_id") && strings.Contains(e, "event.execution_id") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected meta/event execution_id mismatch error, got %v", res.Errors)
+	}
 }
 
 func TestVerifyRejectsPreaggregatedDerivedObservations(t *testing.T) {

@@ -14,6 +14,7 @@ import (
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/test/integration/internal/evidence"
 	"github.com/xbcio/xflow/types"
+	"github.com/google/uuid"
 )
 
 // cachedSourceProvenance holds the source provenance observed at test time,
@@ -44,10 +45,11 @@ var (
 // is a no-op (nil receiver) so normal test runs and the existing
 // a0_fault_matrix_report.json artifact are unaffected.
 type evidenceRecorder struct {
-	runID  string
-	rawDir string
-	name   string // fragment filename stem (unique per scenario)
-	env    *evidence.Envelope
+	runID      string
+	rawDir     string
+	name       string // fragment filename stem (unique per scenario)
+	producerID string // per-collector crypto/rand UUID; distinct per OS process
+	env        *evidence.Envelope
 }
 
 // newEvidenceRecorder returns a recorder bound to the run ID and raw dir
@@ -62,9 +64,10 @@ func newEvidenceRecorder(t *testing.T, name string) *evidenceRecorder {
 		return nil
 	}
 	return &evidenceRecorder{
-		runID:  runID,
-		rawDir: rawDir,
-		name:   name,
+		runID:      runID,
+		rawDir:     rawDir,
+		name:       name,
+		producerID: uuid.New().String(), // crypto/rand UUID, distinct per collector instance / OS process
 		env: &evidence.Envelope{
 			SchemaVersion: evidence.SchemaVersion,
 			RunID:         runID,
@@ -75,13 +78,37 @@ func newEvidenceRecorder(t *testing.T, name string) *evidenceRecorder {
 
 // recordRuntimeEvents appends drained buffer events. The events already carry
 // ExecutionID/NodeName/Attempt/Applied/CommitOutcome/OutboxIDs/ErrorSource/
-// Classified/Kind/Retryable/etc. — the recorder only transports them verbatim;
-// it must not fabricate or pre-aggregate.
+// Classified/Kind/Retryable/etc. — the recorder wraps each one with
+// EvidenceRecordMeta and must not fabricate or pre-aggregate.
 func (r *evidenceRecorder) recordRuntimeEvents(evs []engine.RuntimeEvidenceEvent) {
 	if r == nil {
 		return
 	}
-	r.env.Raw.RuntimeEvents = append(r.env.Raw.RuntimeEvents, evs...)
+	for _, ev := range evs {
+		r.env.Raw.RuntimeEvents = append(r.env.Raw.RuntimeEvents, r.wrapRuntimeEvent(ev))
+	}
+}
+
+// wrapRuntimeEvent wraps a raw engine event with collector-side metadata.
+// ProducerID is generated once per evidenceRecorder instance, so distinct OS
+// processes (e.g. the SIGKILL scenario) produce distinct producer IDs.
+func (r *evidenceRecorder) wrapRuntimeEvent(ev engine.RuntimeEvidenceEvent) evidence.CollectedRuntimeEvidenceEvent {
+	return evidence.CollectedRuntimeEvidenceEvent{
+		Meta: evidence.EvidenceRecordMeta{
+			RunID:      r.runID,
+			ProducerID: r.producerID,
+			// Topology is scenario/topology context, not present on the raw event.
+			Topology: "",
+			// ExecutionID must match Event.ExecutionID; see verifier integrity check.
+			ExecutionID: ev.ExecutionID,
+			ObservedAt:  time.Now().UTC(),
+			// SourceDigest/TestBinaryDigest: populated from cached source provenance
+			// if already observed; Task R3 may refine the exact digest semantics.
+			SourceDigest:     cachedSource.CommitSHA,       // TODO(R3): refine source digest
+			TestBinaryDigest: cachedSource.TestBinarySHA256, // TODO(R3): refine binary digest
+		},
+		Event: ev,
+	}
 }
 
 // recordCounter appends a counter snapshot. The counting wrappers from
