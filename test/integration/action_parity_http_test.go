@@ -37,6 +37,8 @@ func TestHTTPActionErrorParity(t *testing.T) {
 			WantAttempt:            1,
 			WantStatus:             types.ExecutionStatusFailed,
 			ErrContains:            "http.4xx",
+			WantKind:               string(types.ErrorKindPermanent),
+			WantRetryable:          false,
 			WantHandlerInvocations: 1,
 		},
 		{
@@ -56,6 +58,8 @@ func TestHTTPActionErrorParity(t *testing.T) {
 			WantAttempt:            2,
 			WantStatus:             types.ExecutionStatusFailed,
 			ErrContains:            "http.408",
+			WantKind:               string(types.ErrorKindTransient),
+			WantRetryable:          true,
 			WantHandlerInvocations: 2,
 		},
 		{
@@ -75,6 +79,8 @@ func TestHTTPActionErrorParity(t *testing.T) {
 			WantAttempt:            2,
 			WantStatus:             types.ExecutionStatusFailed,
 			ErrContains:            "http.429",
+			WantKind:               string(types.ErrorKindTransient),
+			WantRetryable:          true,
 			WantHandlerInvocations: 2,
 		},
 		{
@@ -94,6 +100,8 @@ func TestHTTPActionErrorParity(t *testing.T) {
 			WantAttempt:            2,
 			WantStatus:             types.ExecutionStatusFailed,
 			ErrContains:            "http.5xx",
+			WantKind:               string(types.ErrorKindTransient),
+			WantRetryable:          true,
 			WantHandlerInvocations: 2,
 		},
 		{
@@ -109,6 +117,8 @@ func TestHTTPActionErrorParity(t *testing.T) {
 			WantAttempt:            2,
 			WantStatus:             types.ExecutionStatusFailed,
 			ErrContains:            "http.connection",
+			WantKind:               string(types.ErrorKindTransient),
+			WantRetryable:          true,
 			WantHandlerInvocations: 2,
 		},
 	}
@@ -122,8 +132,8 @@ func TestHTTPActionErrorParity(t *testing.T) {
 			}
 			def := ParityWorkflow(source, retry)
 
-			// HTTP cases use the real xflow.http handler via a counting wrapper.
-			tc.WantKind, tc.WantRetryable = parityKindFromName(tc.Name)
+			// HTTP cases use the real xflow.http handler via a counting wrapper;
+			// WantKind/WantRetryable are explicit manifest literals above.
 
 			localOut := RunParityLocal(t, def, register)
 			serverOut := RunParityServerRunner(t, addr, def, register)
@@ -131,7 +141,6 @@ func TestHTTPActionErrorParity(t *testing.T) {
 
 			invocations := invCount(inv)
 			for _, o := range []*ParityOutcome{&localOut, &serverOut, &clusterOut} {
-				stampExpectedKind(o, tc)
 				o.HandlerInvocations = invocations
 			}
 

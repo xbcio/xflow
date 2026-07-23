@@ -291,9 +291,12 @@ func TestDatabaseActionErrorParityServerRunner(t *testing.T) {
 				WantKind:               "",
 				WantRetryable:          false,
 			}
-			pc.WantKind, pc.WantRetryable = parityKindFromName(tc.name)
-			stampExpectedKind(&serverOut, pc)
-			stampExpectedKind(&clusterOut, pc)
+			switch tc.name {
+			case "db_no_pool_permanent", "db_constraint_permanent":
+				pc.WantKind, pc.WantRetryable = string(types.ErrorKindPermanent), false
+			case "db_bad_conn_transient_exhausted", "db_deadlock_transient_exhausted":
+				pc.WantKind, pc.WantRetryable = string(types.ErrorKindTransient), true
+			}
 			logParityMatrixRow(t, pc, "server-runner", serverOut)
 			logParityMatrixRow(t, pc, "cluster-durable", clusterOut)
 
@@ -641,5 +644,5 @@ func runParityServerRunnerWithPool(t *testing.T, addr string, def *types.Workflo
 		t.Fatal("runner did not stop in time")
 	}
 
-	return collectParityOutcome(t, h.state, execID, result, def)
+	return collectParityOutcome(t, h.state, execID, result, def, h.evidence)
 }

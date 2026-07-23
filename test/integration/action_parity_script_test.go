@@ -41,6 +41,8 @@ func TestScriptFunctionActionParity(t *testing.T) {
 			WantAttempt:            1,
 			WantStatus:             types.ExecutionStatusFailed,
 			ErrContains:            "function.not_registered",
+			WantKind:               string(types.ErrorKindPermanent),
+			WantRetryable:          false,
 			WantHandlerInvocations: 1,
 		},
 		{
@@ -66,6 +68,8 @@ func TestScriptFunctionActionParity(t *testing.T) {
 			WantAttempt:            2,
 			WantStatus:             types.ExecutionStatusFailed,
 			ErrContains:            "function.timeout",
+			WantKind:               string(types.ErrorKindTransient),
+			WantRetryable:          true,
 			WantHandlerInvocations: 2,
 		},
 		{
@@ -91,6 +95,10 @@ func TestScriptFunctionActionParity(t *testing.T) {
 			MaxAttempts:            1,
 			WantAttempt:            1,
 			WantStatus:             types.ExecutionStatusSuccess,
+			// OnError=error_output routes the handler error to the error port;
+			// the runtime receipt marks it as ErrorSourceErrorPort.
+			WantKind:               string(types.ErrorKindErrorPort),
+			WantRetryable:          true,
 			WantHandlerInvocations: 1,
 			OKNode: types.NodeDef{
 				Name: "ok",
@@ -134,6 +142,8 @@ func TestScriptFunctionActionParity(t *testing.T) {
 			WantAttempt:            1,
 			WantStatus:             types.ExecutionStatusFailed,
 			ErrContains:            "script.code_required",
+			WantKind:               string(types.ErrorKindPermanent),
+			WantRetryable:          false,
 			WantHandlerInvocations: 1,
 		},
 		{
@@ -158,6 +168,8 @@ func TestScriptFunctionActionParity(t *testing.T) {
 			WantAttempt:            2,
 			WantStatus:             types.ExecutionStatusFailed,
 			ErrContains:            "script.timeout",
+			WantKind:               string(types.ErrorKindTransient),
+			WantRetryable:          true,
 			WantHandlerInvocations: 2,
 		},
 		{
@@ -181,6 +193,10 @@ func TestScriptFunctionActionParity(t *testing.T) {
 			MaxAttempts:            1,
 			WantAttempt:            1,
 			WantStatus:             types.ExecutionStatusSuccess,
+			// OnError=error_output routes the handler error to the error port;
+			// the runtime receipt marks it as ErrorSourceErrorPort.
+			WantKind:               string(types.ErrorKindErrorPort),
+			WantRetryable:          true,
 			WantHandlerInvocations: 1,
 			OKNode: types.NodeDef{
 				Name: "ok",
@@ -221,9 +237,7 @@ func TestScriptFunctionActionParity(t *testing.T) {
 			}
 
 			// script/function cases use the real built-in handlers via counting
-			// wrappers. The user-error-port fixtures reach Success (routed, not
-			// failed), so parityKindFromName returns "" for them.
-			tc.WantKind, tc.WantRetryable = parityKindFromName(tc.Name)
+			// wrappers; WantKind/WantRetryable are explicit manifest literals above.
 
 			localOut := RunParityLocal(t, def, register)
 			serverOut := RunParityServerRunner(t, addr, def, register)
@@ -231,7 +245,6 @@ func TestScriptFunctionActionParity(t *testing.T) {
 
 			invocations := invCount(inv)
 			for _, o := range []*ParityOutcome{&localOut, &serverOut, &clusterOut} {
-				stampExpectedKind(o, tc)
 				o.HandlerInvocations = invocations
 			}
 

@@ -216,8 +216,8 @@ type ParityOutcome struct {
 	SourceStatus       types.NodeStatus // terminal status of the source node
 	ErrStr             string           // node.Error (ClassifiedError.Error() == "code: message")
 	ErrCode            string           // structured error code parsed from ErrStr (before the ":")
-	ErrKind            string           // fixture's EXPECTED classified kind (test-side, see stampExpectedKind)
-	ErrRetryable       bool             // fixture's EXPECTED retryable flag (test-side, see stampExpectedKind)
+	ErrKind            string           // production-derived actual classification (from runtime commit receipt, see collectParityOutcome)
+	ErrRetryable       bool             // production-derived actual retryable flag (from runtime commit receipt, see collectParityOutcome)
 	Port               string           // source node output port
 	HandlerInvocations int              // measured handler Execute() call count (real, from fixture counter)
 	DownstreamStatuses map[string]types.NodeStatus
@@ -358,8 +358,11 @@ func TestActionErrorParityMatrix(t *testing.T) {
 			WantAttempt: 3,
 			WantStatus:  types.ExecutionStatusFailed,
 			ErrContains: "business.reject",
-			WantKind:               string(types.ErrorKindErrorPort),
-			WantRetryable:          true,
+			// The engine commits the exhausted error-port output as an
+			// unclassified terminal failure (OnError default = stop), so the
+			// runtime receipt carries no classified kind/retryable.
+			WantKind:               "",
+			WantRetryable:          false,
 			WantHandlerInvocations: 3,
 		},
 		{
@@ -396,13 +399,10 @@ func TestActionErrorParityMatrix(t *testing.T) {
 			}
 
 			localOut := RunParityLocal(t, def, register)
-			stampExpectedKind(&localOut, tc)
 			localOut.HandlerInvocations = invCount(inv)
 			serverOut := RunParityServerRunner(t, addr, def, register)
-			stampExpectedKind(&serverOut, tc)
 			serverOut.HandlerInvocations = invCount(inv)
 			clusterOut := RunParityCluster(t, addr, def, register)
-			stampExpectedKind(&clusterOut, tc)
 			clusterOut.HandlerInvocations = invCount(inv)
 
 			assertParityThreeWay(t, tc, localOut, serverOut, clusterOut)
@@ -463,10 +463,10 @@ func assertParityAll(t *testing.T, tc parityCase, outs ...namedParityOutcome) {
 			if a.Out.ErrCode != b.Out.ErrCode {
 				t.Errorf("error_code parity: %s=%q vs %s=%q, want equal", a.Topology, a.Out.ErrCode, b.Topology, b.Out.ErrCode)
 			}
-			// Structured kind/retryable parity (fixture-derived, test-side; see
-			// parityCase.WantKind). Asserts the expected classification is stable
-			// across topologies — a divergence means the wire/classification path
-			// changed how the fixture's error is categorized.
+			// Structured kind/retryable parity (production-derived from runtime
+			// receipt). Asserts the expected classification is stable across
+			// topologies — a divergence means the wire/classification path changed
+			// how the fixture's error is categorized.
 			if a.Out.ErrKind != b.Out.ErrKind {
 				t.Errorf("error_kind parity: %s=%q vs %s=%q, want equal", a.Topology, a.Out.ErrKind, b.Topology, b.Out.ErrKind)
 			}
@@ -506,9 +506,10 @@ func assertParityAll(t *testing.T, tc parityCase, outs ...namedParityOutcome) {
 			}
 		}
 
-		// Structured kind/retryable contract (fixture-derived, test-side; see
-		// parityCase.WantKind). Empty WantKind means the fixture reaches Success
-		// (no error record); otherwise the recorded classification must match.
+		// Structured kind/retryable contract (runtime receipt actual vs manifest
+		// expected; see parityCase.WantKind). Empty WantKind means the fixture
+		// reaches Success (no error record); otherwise the recorded classification
+		// must match.
 		if o.Out.ErrKind != tc.WantKind {
 			t.Errorf("%s error_kind=%q, want %q", o.Topology, o.Out.ErrKind, tc.WantKind)
 		}
@@ -591,33 +592,75 @@ func invCount(inv func() int) int {
 	return inv()
 }
 
-// stampExpectedKind records the fixture's expected classified kind/retryable on
-// the outcome. This is test-side derivation from the fixture behaviour — NOT
-// recovery from node.Error, which is stringified to "code: message" at the
-// engine commit boundary (engine/errorpolicy.go) before NodeSnapshot.Error is
-// written. Structurizing NodeSnapshot.Error is a non-goal (error_taxonomy §7).
-// The stamp lets the PARITY_MATRIX artifact carry structured kind/retryable
-// with real values; assertParityAll then asserts the expected kind matches
-// across topologies and against the contract.
-func stampExpectedKind(out *ParityOutcome, tc parityCase) {
-	out.ErrKind = tc.WantKind
-	out.ErrRetryable = tc.WantRetryable
+// applyActualFromClassification drains the topology's evidence buffer and
+// derives the production-observed classification from the unique applied
+// commit receipt for (execID, sourceName). It writes ONLY actual fields
+// (ErrKind/ErrRetryable) — never expected values.
+func applyActualFromClassification(out *ParityOutcome, t *testing.T, buf *engine.RuntimeEvidenceBuffer, execID types.ExecutionID, source string) {
+	t.Helper()
+	if buf == nil {
+		return
+	}
+	var evs []engine.RuntimeEvidenceEvent
+	for {
+		select {
+		case ev := <-buf.Events():
+			evs = append(evs, ev)
+		default:
+			goto done
+		}
+	}
+done:
+	var applied []engine.RuntimeEvidenceEvent
+	for _, ev := range evs {
+		if ev.Type == engine.RuntimeEvidenceCommit && ev.ExecutionID == execID && ev.NodeName == source && ev.Applied {
+			applied = append(applied, ev)
+		}
+	}
+	if len(applied) == 0 {
+		t.Fatalf("no applied commit receipt for %s/%s — evidence wiring broken", execID, source)
+	}
+	if len(applied) > 1 {
+		t.Fatalf("multiple applied commit receipts (%d) for %s/%s", len(applied), execID, source)
+	}
+	ev := applied[0]
+	out.ErrKind = receiptActualKind(ev)
+	out.ErrRetryable = receiptActualRetryable(ev)
 }
 
-// parityKindFromName derives the expected classified kind/retryable from a
-// fixture name that encodes "permanent" or "transient" (the per-channel
-// fixtures follow the <channel>_<code>_permanent|transient_exhausted naming).
-// Returns ("",false) for names encoding neither (the caller sets WantKind
-// explicitly). Mirrors the production classifiers in
-// node/internal/action/{http,grpc,db_errors}.go.
-func parityKindFromName(name string) (string, bool) {
-	if strings.Contains(name, "permanent") {
-		return string(types.ErrorKindPermanent), false
+// receiptActualKind maps the production receipt's ErrorSource/Classified/Kind to
+// the manifest kind vocabulary. business/error_port are not *ClassifiedError
+// (Classified==false) but still carry a kind by matrix convention.
+func receiptActualKind(ev engine.RuntimeEvidenceEvent) string {
+	switch ev.ErrorSource {
+	case engine.ErrorSourceSystem:
+		if ev.Classified {
+			return string(ev.ErrorKind)
+		}
+		return ""
+	case engine.ErrorSourceBusiness:
+		return string(types.ErrorKindBusiness)
+	case engine.ErrorSourceErrorPort:
+		return string(types.ErrorKindErrorPort)
+	default:
+		return ""
 	}
-	if strings.Contains(name, "transient") {
-		return string(types.ErrorKindTransient), true
+}
+
+func receiptActualRetryable(ev engine.RuntimeEvidenceEvent) bool {
+	switch ev.ErrorSource {
+	case engine.ErrorSourceSystem:
+		if ev.Retryable != nil {
+			return *ev.Retryable
+		}
+		return false
+	case engine.ErrorSourceBusiness:
+		return false
+	case engine.ErrorSourceErrorPort:
+		return true
+	default:
+		return false
 	}
-	return "", false
 }
 
 // logParityMatrixRow emits a machine-readable JSON line per fixture x topology
@@ -685,7 +728,8 @@ func RunParityLocal(t *testing.T, def *types.WorkflowDef, register func(engine.H
 	if register != nil {
 		register(reg)
 	}
-	eng := engine.New(b.State(), b.Queue(), engine.WithDefaultLeaseTTL(time.Minute))
+	buf := engine.NewRuntimeEvidenceBuffer(64)
+	eng := engine.New(b.State(), b.Queue(), engine.WithDefaultLeaseTTL(time.Minute), engine.WithRuntimeEvidenceBuffer(buf))
 	t.Cleanup(b.Bind(eng))
 
 	g, err := graph.Compile(def)
@@ -702,7 +746,7 @@ func RunParityLocal(t *testing.T, def *types.WorkflowDef, register func(engine.H
 	if err != nil {
 		t.Fatalf("local wait: %v", err)
 	}
-	return collectParityOutcome(t, b.State(), id, result, def)
+	return collectParityOutcome(t, b.State(), id, result, def, buf)
 }
 
 // RunParityServerRunner runs the same fixture through the server-runner
@@ -763,7 +807,7 @@ func RunParityServerRunner(t *testing.T, addr string, def *types.WorkflowDef, re
 	}
 
 	// Fresh context: the runner ctx above was cancelled on shutdown.
-	out := collectParityOutcome(t, h.state, execID, result, def)
+	out := collectParityOutcome(t, h.state, execID, result, def, h.evidence)
 	// Stop this topology's control plane (apiserver + its Asynq consumer) before
 	// returning so it does not race the next topology's consumer for the shared
 	// Asynq queue. See serverRunnerHarness.stop for why this is required.
@@ -810,7 +854,8 @@ func RunParityCluster(t *testing.T, addr string, def *types.WorkflowDef, registe
 		register(reg)
 	}
 
-	eng := engine.New(b.State(), b.Queue(), engine.WithDefaultLeaseTTL(time.Minute))
+	buf := engine.NewRuntimeEvidenceBuffer(64)
+	eng := engine.New(b.State(), b.Queue(), engine.WithDefaultLeaseTTL(time.Minute), engine.WithRuntimeEvidenceBuffer(buf))
 	stop, err := b.StartBinding(eng)
 	if err != nil {
 		t.Fatalf("cluster StartBinding: %v", err)
@@ -831,10 +876,10 @@ func RunParityCluster(t *testing.T, addr string, def *types.WorkflowDef, registe
 	waitCtx, waitCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer waitCancel()
 	result := waitForCompletion(waitCtx, t, b.State(), id, def.Nodes[0].Name)
-	return collectParityOutcome(t, b.State(), id, result, def)
+	return collectParityOutcome(t, b.State(), id, result, def, buf)
 }
 
-func collectParityOutcome(t *testing.T, state engine.StateStore, execID types.ExecutionID, result types.Result, def *types.WorkflowDef) ParityOutcome {
+func collectParityOutcome(t *testing.T, state engine.StateStore, execID types.ExecutionID, result types.Result, def *types.WorkflowDef, buf *engine.RuntimeEvidenceBuffer) ParityOutcome {
 	t.Helper()
 	if len(def.Nodes) == 0 {
 		t.Fatal("collectParityOutcome: workflow has no nodes")
@@ -858,6 +903,8 @@ func collectParityOutcome(t *testing.T, state engine.StateStore, execID types.Ex
 		DownstreamStatuses: make(map[string]types.NodeStatus),
 		DownstreamOutputs:  make(map[string]map[string]any),
 	}
+
+	applyActualFromClassification(&out, t, buf, execID, sourceName)
 
 	for _, n := range def.Nodes {
 		if n.Name == sourceName {

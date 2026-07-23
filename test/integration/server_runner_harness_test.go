@@ -87,11 +87,12 @@ var _ engine.Logger = (*testLogger)(nil)
 // use apiserver.New (not control.NewServer) for the workflow submit route to
 // resolve — control.NewServer now serves only the runner protocol.
 type serverRunnerHarness struct {
-	srv     *apiserver.APIServer
-	httpSrv *httptest.Server
-	state   engine.StateStore
-	runners control.RunnerDirectory
-	cancel  context.CancelFunc
+	srv      *apiserver.APIServer
+	httpSrv  *httptest.Server
+	state    engine.StateStore
+	runners  control.RunnerDirectory
+	cancel   context.CancelFunc
+	evidence *engine.RuntimeEvidenceBuffer
 
 	stopOnce sync.Once
 }
@@ -126,6 +127,10 @@ func (h *serverRunnerHarness) stop() {
 	})
 }
 
+// EvidenceBuffer returns the topology's runtime evidence buffer. Each harness
+// owns a separate buffer; it must not be reused across topologies.
+func (h *serverRunnerHarness) EvidenceBuffer() *engine.RuntimeEvidenceBuffer { return h.evidence }
+
 // newServerRunnerHarness brings up the server-runner topology against addr
 // (Redis). It flushes stale asynq tasks from prior crashed runs (scoped to the
 // asynq:* namespace so it does not disturb leader-election keys), starts the
@@ -140,7 +145,8 @@ func newServerRunnerHarness(t *testing.T, addr string, concurrency int) *serverR
 	flushAsynqKeys(context.Background(), t, rdb)
 	_ = rdb.Close()
 
-	cp, err := control.NewControlPlane(control.Config{Backend: b})
+	buf := engine.NewRuntimeEvidenceBuffer(64)
+	cp, err := control.NewControlPlane(control.Config{Backend: b, RuntimeEvidenceBuffer: buf})
 	if err != nil {
 		t.Fatalf("NewControlPlane: %v", err)
 	}
@@ -155,11 +161,12 @@ func newServerRunnerHarness(t *testing.T, addr string, concurrency int) *serverR
 	}
 	httpSrv := httptest.NewServer(srv.Handler())
 	h := &serverRunnerHarness{
-		srv:     srv,
-		httpSrv: httpSrv,
-		state:   b.State(),
-		runners: cp.RunnerDirectory(),
-		cancel:  cancel,
+		srv:      srv,
+		httpSrv:  httpSrv,
+		state:    b.State(),
+		runners:  cp.RunnerDirectory(),
+		cancel:   cancel,
+		evidence: buf,
 	}
 	t.Cleanup(func() { h.stop() })
 	return h

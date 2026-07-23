@@ -172,7 +172,6 @@ func TestOnErrorActionParity(t *testing.T) {
 
 			invocations := invCount(inv)
 			for _, o := range []*ParityOutcome{&localOut, &serverOut, &clusterOut} {
-				stampExpectedKind(o, tc.parityCase)
 				o.HandlerInvocations = invocations
 			}
 

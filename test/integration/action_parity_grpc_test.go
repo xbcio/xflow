@@ -47,6 +47,8 @@ func TestGRPCActionErrorParity(t *testing.T) {
 			WantAttempt:            1,
 			WantStatus:             types.ExecutionStatusFailed,
 			ErrContains:            "grpc.no_pool",
+			WantKind:               string(types.ErrorKindPermanent),
+			WantRetryable:          false,
 			WantHandlerInvocations: 1,
 		},
 		{
@@ -58,6 +60,8 @@ func TestGRPCActionErrorParity(t *testing.T) {
 			WantAttempt:            2,
 			WantStatus:             types.ExecutionStatusFailed,
 			ErrContains:            "grpc.",
+			WantKind:               string(types.ErrorKindTransient),
+			WantRetryable:          true,
 			WantHandlerInvocations: 2,
 		},
 		{
@@ -70,6 +74,8 @@ func TestGRPCActionErrorParity(t *testing.T) {
 			WantAttempt:            1,
 			WantStatus:             types.ExecutionStatusFailed,
 			ErrContains:            "grpc.NotFound",
+			WantKind:               string(types.ErrorKindPermanent),
+			WantRetryable:          false,
 			WantHandlerInvocations: 1,
 		},
 		{
@@ -82,6 +88,8 @@ func TestGRPCActionErrorParity(t *testing.T) {
 			WantAttempt:            2,
 			WantStatus:             types.ExecutionStatusFailed,
 			ErrContains:            "grpc.Unavailable",
+			WantKind:               string(types.ErrorKindTransient),
+			WantRetryable:          true,
 			WantHandlerInvocations: 2,
 		},
 		{
@@ -94,6 +102,8 @@ func TestGRPCActionErrorParity(t *testing.T) {
 			WantAttempt:            1,
 			WantStatus:             types.ExecutionStatusFailed,
 			ErrContains:            "grpc.InvalidArgument",
+			WantKind:               string(types.ErrorKindPermanent),
+			WantRetryable:          false,
 			WantHandlerInvocations: 1,
 		},
 		{
@@ -106,6 +116,8 @@ func TestGRPCActionErrorParity(t *testing.T) {
 			WantAttempt:            1,
 			WantStatus:             types.ExecutionStatusFailed,
 			ErrContains:            "grpc.PermissionDenied",
+			WantKind:               string(types.ErrorKindPermanent),
+			WantRetryable:          false,
 			WantHandlerInvocations: 1,
 		},
 		{
@@ -118,6 +130,8 @@ func TestGRPCActionErrorParity(t *testing.T) {
 			WantAttempt:            1,
 			WantStatus:             types.ExecutionStatusFailed,
 			ErrContains:            "grpc.Unauthenticated",
+			WantKind:               string(types.ErrorKindPermanent),
+			WantRetryable:          false,
 			WantHandlerInvocations: 1,
 		},
 		{
@@ -130,6 +144,8 @@ func TestGRPCActionErrorParity(t *testing.T) {
 			WantAttempt:            1,
 			WantStatus:             types.ExecutionStatusFailed,
 			ErrContains:            "grpc.AlreadyExists",
+			WantKind:               string(types.ErrorKindPermanent),
+			WantRetryable:          false,
 			WantHandlerInvocations: 1,
 		},
 		{
@@ -142,6 +158,8 @@ func TestGRPCActionErrorParity(t *testing.T) {
 			WantAttempt:            1,
 			WantStatus:             types.ExecutionStatusFailed,
 			ErrContains:            "grpc.Unimplemented",
+			WantKind:               string(types.ErrorKindPermanent),
+			WantRetryable:          false,
 			WantHandlerInvocations: 1,
 		},
 		{
@@ -154,6 +172,8 @@ func TestGRPCActionErrorParity(t *testing.T) {
 			WantAttempt:            1,
 			WantStatus:             types.ExecutionStatusFailed,
 			ErrContains:            "grpc.FailedPrecondition",
+			WantKind:               string(types.ErrorKindPermanent),
+			WantRetryable:          false,
 			WantHandlerInvocations: 1,
 		},
 		{
@@ -166,6 +186,8 @@ func TestGRPCActionErrorParity(t *testing.T) {
 			WantAttempt:            1,
 			WantStatus:             types.ExecutionStatusFailed,
 			ErrContains:            "grpc.OutOfRange",
+			WantKind:               string(types.ErrorKindPermanent),
+			WantRetryable:          false,
 			WantHandlerInvocations: 1,
 		},
 		{
@@ -178,6 +200,8 @@ func TestGRPCActionErrorParity(t *testing.T) {
 			WantAttempt:            2,
 			WantStatus:             types.ExecutionStatusFailed,
 			ErrContains:            "grpc.DeadlineExceeded",
+			WantKind:               string(types.ErrorKindTransient),
+			WantRetryable:          true,
 			WantHandlerInvocations: 2,
 		},
 		{
@@ -190,6 +214,8 @@ func TestGRPCActionErrorParity(t *testing.T) {
 			WantAttempt:            2,
 			WantStatus:             types.ExecutionStatusFailed,
 			ErrContains:            "grpc.ResourceExhausted",
+			WantKind:               string(types.ErrorKindTransient),
+			WantRetryable:          true,
 			WantHandlerInvocations: 2,
 		},
 		{
@@ -202,6 +228,8 @@ func TestGRPCActionErrorParity(t *testing.T) {
 			WantAttempt:            2,
 			WantStatus:             types.ExecutionStatusFailed,
 			ErrContains:            "grpc.Aborted",
+			WantKind:               string(types.ErrorKindTransient),
+			WantRetryable:          true,
 			WantHandlerInvocations: 2,
 		},
 		{
@@ -214,6 +242,8 @@ func TestGRPCActionErrorParity(t *testing.T) {
 			WantAttempt:            2,
 			WantStatus:             types.ExecutionStatusFailed,
 			ErrContains:            "grpc.Canceled",
+			WantKind:               string(types.ErrorKindTransient),
+			WantRetryable:          true,
 			WantHandlerInvocations: 2,
 		},
 		{
@@ -226,6 +256,8 @@ func TestGRPCActionErrorParity(t *testing.T) {
 			WantAttempt:            2,
 			WantStatus:             types.ExecutionStatusFailed,
 			ErrContains:            "grpc.Unknown",
+			WantKind:               string(types.ErrorKindTransient),
+			WantRetryable:          true,
 			WantHandlerInvocations: 2,
 		},
 		{
@@ -238,6 +270,8 @@ func TestGRPCActionErrorParity(t *testing.T) {
 			WantAttempt:            2,
 			WantStatus:             types.ExecutionStatusFailed,
 			ErrContains:            "grpc.Internal",
+			WantKind:               string(types.ErrorKindTransient),
+			WantRetryable:          true,
 			WantHandlerInvocations: 2,
 		},
 		{
@@ -250,6 +284,8 @@ func TestGRPCActionErrorParity(t *testing.T) {
 			WantAttempt:            2,
 			WantStatus:             types.ExecutionStatusFailed,
 			ErrContains:            "grpc.DataLoss",
+			WantKind:               string(types.ErrorKindTransient),
+			WantRetryable:          true,
 			WantHandlerInvocations: 2,
 		},
 	}
@@ -264,9 +300,7 @@ func TestGRPCActionErrorParity(t *testing.T) {
 			def := ParityWorkflow(source, retry)
 
 			// gRPC cases use the real xflow.grpc action handler via a counting
-			// wrapper; WantKind/WantRetryable are derived from the case name
-			// (which encodes permanent/transient).
-			tc.WantKind, tc.WantRetryable = parityKindFromName(tc.Name)
+			// wrapper; WantKind/WantRetryable are explicit manifest literals above.
 
 			localOut := RunParityLocal(t, def, register)
 			serverOut := runServerRunnerParity(t, addr, def, register)
@@ -274,7 +308,6 @@ func TestGRPCActionErrorParity(t *testing.T) {
 
 			invocations := invCount(inv)
 			for _, o := range []*ParityOutcome{&localOut, &serverOut, &clusterOut} {
-				stampExpectedKind(o, tc)
 				o.HandlerInvocations = invocations
 			}
 
@@ -387,7 +420,8 @@ func newServerRunnerHarnessFast(t *testing.T, addr string, concurrency int) *ser
 	flushAsynqKeys(context.Background(), t, rdb)
 	_ = rdb.Close()
 
-	cp, err := control.NewControlPlane(control.Config{Backend: b, PollWait: 50 * time.Millisecond})
+	buf := engine.NewRuntimeEvidenceBuffer(64)
+	cp, err := control.NewControlPlane(control.Config{Backend: b, PollWait: 50 * time.Millisecond, RuntimeEvidenceBuffer: buf})
 	if err != nil {
 		t.Fatalf("NewControlPlane: %v", err)
 	}
@@ -408,7 +442,7 @@ func newServerRunnerHarnessFast(t *testing.T, addr string, concurrency int) *ser
 		_ = srv.Shutdown(shutdownCtx)
 		httpSrv.Close()
 	})
-	return &serverRunnerHarness{srv: srv, httpSrv: httpSrv, state: b.State(), runners: cp.RunnerDirectory(), cancel: cancel}
+	return &serverRunnerHarness{srv: srv, httpSrv: httpSrv, state: b.State(), runners: cp.RunnerDirectory(), cancel: cancel, evidence: buf}
 }
 
 // runServerRunnerParity is a variant of RunParityServerRunner that uses a
@@ -469,7 +503,7 @@ func runServerRunnerParity(t *testing.T, addr string, def *types.WorkflowDef, re
 		t.Fatal("runner did not stop in time")
 	}
 
-	out := collectParityOutcome(t, h.state, execID, result, def)
+	out := collectParityOutcome(t, h.state, execID, result, def, h.evidence)
 	// Stop this topology's control plane (apiserver + its Asynq consumer) before
 	// returning so it does not race a subsequent topology's consumer for the
 	// shared Asynq queue. See serverRunnerHarness.stop.
@@ -607,7 +641,7 @@ func runServerRunnerParityWithPool(t *testing.T, addr string, def *types.Workflo
 		t.Fatal("runner did not stop in time")
 	}
 
-	out := collectParityOutcome(t, h.state, execID, result, def)
+	out := collectParityOutcome(t, h.state, execID, result, def, h.evidence)
 	// Stop this topology's control plane (apiserver + its Asynq consumer) before
 	// returning so it does not race a subsequent topology's consumer for the
 	// shared Asynq queue. See serverRunnerHarness.stop.
