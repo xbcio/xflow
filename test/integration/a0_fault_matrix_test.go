@@ -51,6 +51,20 @@ type a0FaultReport struct {
 	ReplayOutcome      string `json:"replay_outcome,omitempty"`
 	Err                string `json:"err,omitempty"`
 	Pass               bool   `json:"pass"`
+
+	// SIGKILL IPC receipt + business/system count separation (Task 13).
+	// CommitEventID/AcceptedCommit/AppliedCommit/OutboxIDs carry process A's
+	// commit receipt sent over stdout (the only channel a SIGKILLed process
+	// can use). BusinessHandlerInvocations is real business-handler calls only;
+	// SystemTaskDeliveries is the redelivery/advance delivery count. The two
+	// are kept strictly separate — deliveries are never copied into
+	// HandlerInvocations.
+	CommitEventID              string `json:"commit_event_id,omitempty"`
+	AcceptedCommit             bool   `json:"accepted_commit,omitempty"`
+	AppliedCommit              bool   `json:"applied_commit,omitempty"`
+	OutboxIDs                  string `json:"outbox_ids,omitempty"`
+	BusinessHandlerInvocations int    `json:"business_handler_invocations,omitempty"`
+	SystemTaskDeliveries       int    `json:"system_task_deliveries,omitempty"`
 }
 
 // a0FaultMatrixArtifact is the machine-readable artifact uploaded from CI. It
@@ -1115,14 +1129,25 @@ func TestA0FaultMatrix(t *testing.T) {
 	})
 
 	t.Run("OSKill", func(t *testing.T) {
-		// Non-graceful termination post-submit. env1 submits with the fake
-		// queue failing (process died before delivery) and builds a lease that
-		// never commits (process died mid-handler). env2 binds a fresh engine
-		// to the same Redis: the background OutboxDispatcher scans and
-		// redelivers the stranded durable intent, and the expired-lease
-		// reclaim path (production: LeaseSweeper) revokes the stranded lease
-		// and re-enqueues. Both recovery paths converge on a single
-		// exactly-once DAG advance.
+		// DIAGNOSTIC, in-process os-kill simulation (NOT a real OS SIGKILL).
+		// This scenario models non-graceful termination within one process:
+		// env1 submits with the fake queue failing (process died before
+		// delivery) and builds a lease that never commits (process died
+		// mid-handler). env2 binds a fresh engine to the same Redis: the
+		// background OutboxDispatcher scans and redelivers the stranded
+		// durable intent, and the expired-lease reclaim path (production:
+		// LeaseSweeper) revokes the stranded lease and re-enqueues. Both
+		// recovery paths converge on a single exactly-once DAG advance.
+		//
+		// Per spec §3.5 this in-process simulation must NOT satisfy the
+		// required "OS-kill" manifest entry. The required real-OS-SIGKILL
+		// evidence is provided by scenario "os-kill-sigkill" in
+		// TestA0OSKillSIGKILLRecovery (cyclic_reliability_process_test.go),
+		// which maps to manifest A0OSKillSIGKILL. The verifier
+		// (checkA0) additionally rejects any "synthetic_os_kill" protocol
+		// observation, so this diagnostic cannot masquerade as the required
+		// evidence. Kept here as a diagnostic of the in-process lease-reclaim +
+		// fencing path; do not add "os-kill" to A0RequiredScenarios().
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 

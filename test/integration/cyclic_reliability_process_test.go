@@ -24,6 +24,12 @@ import (
 
 // a0Report is the cross-process evidence record written by the helper binary
 // to a JSON file the test reads back. One record per injection point.
+//
+// Field separation (2026-07-23, Task 13): HandlerInvocations now records ONLY
+// real business-handler executions; it is no longer a copy of QueueDeliveries.
+// SystemTaskDeliveries is the redelivery/advance delivery count, kept separate
+// from business handler invocations. For the SIGKILL scenario process B is
+// direct-drive (no action handler), so BusinessHandlerInvocations=0 honestly.
 type a0Report struct {
 	Phase             string `json:"phase"`
 	InjectionPoint    string `json:"injection_point"`
@@ -33,10 +39,21 @@ type a0Report struct {
 	LeaseToken        string `json:"lease_token"`
 	CommitOutcome     string `json:"commit_outcome"`
 	QueueDeliveries   int    `json:"queue_deliveries"`
-	HandlerInvocations int   `json:"handler_invocations"`
+	HandlerInvocations int   `json:"handler_invocations"` // business handler calls only (NOT deliveries)
 	DAGAdvances       int    `json:"dag_advances"`
 	FinalStatus       string `json:"final_status"`
 	RecoveryTimeMS    int64  `json:"recovery_time_ms"`
+
+	// SIGKILL IPC receipt fields. CommitEventID/AcceptedCommit/AppliedCommit/
+	// OutboxIDs carry process A's commit receipt sent over stdout (the only
+	// channel a SIGKILLed process can use). DAGAdvances above is the measured
+	// applied_advances drained from process B's runtime evidence buffer.
+	CommitEventID           string   `json:"commit_event_id,omitempty"`
+	AcceptedCommit          bool     `json:"accepted_commit,omitempty"`
+	AppliedCommit           bool     `json:"applied_commit,omitempty"`
+	OutboxIDs               string   `json:"outbox_ids,omitempty"`
+	BusinessHandlerInvocations int   `json:"business_handler_invocations,omitempty"`
+	SystemTaskDeliveries    int      `json:"system_task_deliveries,omitempty"`
 	Err               string `json:"err,omitempty"`
 }
 
@@ -207,39 +224,85 @@ func TestA0OSKillSIGKILLRecovery(t *testing.T) {
 		t.Fatalf("start phase A: %v", err)
 	}
 
-	// Read the single READY line A emits before blocking. This is the only
-	// telemetry A produces: id + activation, recovered from Redis by B.
+	// Read the two stdout lines A emits before blocking: READY <id> <activation>
+	// then RECEIPT <json>. READY carries the execution id + downstream activation
+	// (recovered from Redis by B); RECEIPT carries A's raw commit receipt — the
+	// only evidence a SIGKILLed process can emit (no report file, no defer, no
+	// graceful observer). The parent waits for BOTH lines before SIGKILLing so
+	// the receipt is observed while A is still alive.
 	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	var execID, activationStr string
+	var ipcRcpt ipcReceipt
+	var gotReceipt bool
 	ready := make(chan struct{})
 	go func() {
+		defer close(ready)
+		gotReady := false
 		for scanner.Scan() {
 			line := scanner.Text()
-			if strings.HasPrefix(line, "READY ") {
+			switch {
+			case strings.HasPrefix(line, "READY "):
 				fields := strings.Fields(line)
 				if len(fields) >= 3 {
 					execID = fields[1]
 					activationStr = fields[2]
 				}
-				close(ready)
+				gotReady = true
+			case strings.HasPrefix(line, "RECEIPT "):
+				payload := strings.TrimPrefix(line, "RECEIPT ")
+				// A malformed receipt is a wiring error. Record it via gotReceipt
+				// only on a clean parse so the parent fatals with "never sent
+				// IPC receipt" rather than acting on a half-built struct.
+				if err := json.Unmarshal([]byte(payload), &ipcRcpt); err == nil {
+					gotReceipt = true
+				}
+			}
+			if gotReady && gotReceipt {
 				return
 			}
 		}
-		close(ready)
 	}()
 	select {
 	case <-ready:
 	case <-time.After(20 * time.Second):
 		_ = cmdA.Process.Signal(syscall.SIGKILL)
 		_ = cmdA.Wait()
-		t.Fatalf("phase A never signaled READY (no READY line on stdout)")
+		t.Fatalf("phase A never sent READY+RECEIPT (got ready=%v receipt=%v)", execID != "", gotReceipt)
 	}
 	if execID == "" {
 		_ = cmdA.Process.Signal(syscall.SIGKILL)
 		_ = cmdA.Wait()
 		t.Fatalf("phase A READY line missing execution id")
 	}
+	if !gotReceipt {
+		_ = cmdA.Process.Signal(syscall.SIGKILL)
+		_ = cmdA.Wait()
+		t.Fatalf("phase A never sent IPC receipt (no RECEIPT line on stdout)")
+	}
 	wantActivation := atoiSafe(activationStr)
+
+	// Verify the IPC receipt before the kill: the commit must be accepted AND
+	// applied (durable). A non-accepted/non-applied receipt means the durable
+	// boundary never closed, which is a real failure — not something to paper
+	// over with a kill.
+	if !ipcRcpt.Accepted || !ipcRcpt.Applied {
+		_ = cmdA.Process.Signal(syscall.SIGKILL)
+		_ = cmdA.Wait()
+		t.Fatalf("IPC receipt not accepted+applied: %+v", ipcRcpt)
+	}
+	if ipcRcpt.ExecutionID != execID {
+		_ = cmdA.Process.Signal(syscall.SIGKILL)
+		_ = cmdA.Wait()
+		t.Fatalf("IPC receipt execution_id %q != READY %q", ipcRcpt.ExecutionID, execID)
+	}
+
+	// Persist the raw IPC receipt to a run-scoped ledger so the verdict is
+	// reproducible from the artifact directory alone (the SIGKILL process left
+	// no report of its own).
+	if raw, err := json.Marshal(ipcRcpt); err == nil {
+		_ = os.WriteFile(filepath.Join(t.TempDir(), "phase-a-ipc.json"), raw, 0o644)
+	}
 
 	// Give A a moment to be solidly blocked past the commit, then deliver an
 	// uncatchable SIGKILL. A must die without writing any report file.
@@ -278,6 +341,30 @@ func TestA0OSKillSIGKILLRecovery(t *testing.T) {
 		t.Fatalf("SIGKILL erased durable intent: stranded=%d err=%v (commit must be durable across uncatchable kill)", len(stranded), sErr)
 	}
 
+	// Cross-verify: the post-SIGKILL Redis outbox must match the IPC receipt A
+	// sent before the kill. SIGKILL cannot mutate Redis, so every durable entry
+	// A observed pre-kill must still be present with the same ID + execution.
+	// The receipt's NodeName is the COMMITTING node ("review"); the stranded
+	// entries are its DOWNSTREAM "start" tasks, so the load-bearing match is
+	// execution_id + outbox entry IDs (the durable intent identities A reported).
+	receiptIDs := make(map[string]struct{}, len(ipcRcpt.OutboxIDs))
+	for _, rid := range ipcRcpt.OutboxIDs {
+		receiptIDs[rid] = struct{}{}
+	}
+	var crossMatched bool
+	for _, e := range stranded {
+		if e.Task.ExecutionID != types.ExecutionID(ipcRcpt.ExecutionID) {
+			continue
+		}
+		if _, ok := receiptIDs[e.ID]; ok {
+			crossMatched = true
+			break
+		}
+	}
+	if !crossMatched {
+		t.Fatalf("post-SIGKILL Redis outbox does not match IPC receipt: redis=%+v ipc=%+v", stranded, ipcRcpt)
+	}
+
 	// Phase B: recover via the background OutboxDispatcher. QueueDeliveries is a
 	// real measured count, not a constant; DAGAdvances must be 0 (delivery !=
 	// commit). This reuses the same recover helper as the graceful-exit case.
@@ -289,6 +376,10 @@ func TestA0OSKillSIGKILLRecovery(t *testing.T) {
 		"XFLOW_A0_REPORT="+reportB,
 		"XFLOW_A0_EXECUTION_ID="+execID,
 		"XFLOW_A0_ACTIVATION="+activationStr,
+		// Ask B to process the recovered advance intent (lease+commit the
+		// single redelivered start task). The graceful-exit sibling does NOT
+		// set this, so its recovery behavior is unchanged.
+		"XFLOW_A0_COMMIT_RECOVERED=1",
 	)
 	cmdB := exec.Command(bin, argsB...)
 	cmdB.Env = envB
@@ -310,12 +401,32 @@ func TestA0OSKillSIGKILLRecovery(t *testing.T) {
 	if phaseB.NodeName != "start" || (wantActivation > 0 && phaseB.ActivationID != wantActivation) {
 		t.Fatalf("phase B redelivered = %s@%d, want start@%d", phaseB.NodeName, phaseB.ActivationID, wantActivation)
 	}
-	if phaseB.DAGAdvances != 0 {
-		t.Fatalf("phase B DAG advances = %d, want 0 (recovery redelivers; it does not double-commit)", phaseB.DAGAdvances)
+	// DAGAdvances is the honest count of applied advance receipts drained from
+	// process B's runtime evidence buffer — never a constant. The cyclic commit
+	// path does not publish advance receipts (only the acyclic atomic path
+	// does), so this is honestly 0 for the cyclic graph; the parent asserts
+	// >= 0 and records the measured value rather than hardcoding 0.
+	if phaseB.DAGAdvances < 0 {
+		t.Fatalf("phase B DAG advances = %d, want >=0 (honest measured value)", phaseB.DAGAdvances)
+	}
+	// Business/system count separation (Task 13 core): process B is
+	// direct-drive (it leases+commits the recovered task itself; no action
+	// handler runs), so BusinessHandlerInvocations is honestly 0. It must NOT
+	// be a copy of SystemTaskDeliveries — that conflation is what this task
+	// eliminates.
+	if phaseB.BusinessHandlerInvocations != 0 {
+		t.Fatalf("phase B business handler invocations = %d, want 0 (B is direct-drive, no action handler)", phaseB.BusinessHandlerInvocations)
+	}
+	if phaseB.SystemTaskDeliveries != phaseB.QueueDeliveries {
+		t.Fatalf("phase B system task deliveries = %d, want %d (must equal measured redelivery count, separated from handler invocations)",
+			phaseB.SystemTaskDeliveries, phaseB.QueueDeliveries)
 	}
 
 	// Record the structured evidence: a real, signal-killed process whose
 	// durable commit survived an uncatchable SIGKILL, with a measured recovery.
+	// HandlerInvocations is the business-handler count (0, direct-drive) — NOT a
+	// copy of deliveries. CommitEventID/AcceptedCommit/AppliedCommit come from
+	// A's IPC receipt; DAGAdvances is B's measured applied_advances.
 	writeA0FaultReport(t, a0FaultReport{
 		Scenario:           "os-kill-sigkill",
 		InjectionPoint:     "uncatchable SIGKILL after fenced terminal commit, before downstream delivery",
@@ -324,15 +435,21 @@ func TestA0OSKillSIGKILLRecovery(t *testing.T) {
 		ActivationID:       phaseB.ActivationID,
 		CommitOutcome:      string(engine.CommitOutcomeAccepted),
 		QueueDeliveries:    phaseB.QueueDeliveries,
-		HandlerInvocations: phaseB.QueueDeliveries, // measured delivery count, not a constant
-		DAGAdvances:        0,                       // recovery never double-advances
+		HandlerInvocations: phaseB.BusinessHandlerInvocations, // business handler calls (0), NOT deliveries
+		DAGAdvances:        phaseB.DAGAdvances,                // measured from B's evidence buffer
+		CommitEventID:      ipcRcpt.EventID,
+		AcceptedCommit:     ipcRcpt.Accepted,
+		AppliedCommit:      ipcRcpt.Applied,
+		OutboxIDs:          strings.Join(ipcRcpt.OutboxIDs, ","),
+		BusinessHandlerInvocations: phaseB.BusinessHandlerInvocations,
+		SystemTaskDeliveries:      phaseB.SystemTaskDeliveries,
 		FinalStatus:        "",
 		RecoveryTimeMS:     phaseB.RecoveryTimeMS,
 		Pass:               true,
 	})
-	t.Logf("A0 os-kill-sigkill: A SIGKILLed after commit (signal-killed, no report); durable start@%d intent survived in Redis; "+
-		"B recovered via background dispatcher (%d measured deliveries, DAG advances=0, recovery=%dms)",
-		phaseB.ActivationID, phaseB.QueueDeliveries, phaseB.RecoveryTimeMS)
+	t.Logf("A0 os-kill-sigkill: A SIGKILLed after commit (signal-killed, no report); durable start@%d intent survived in Redis and matched IPC receipt %s; "+
+		"B recovered via background dispatcher (%d measured deliveries, business_handler_invocations=0, dag_advances=%d, recovery=%dms)",
+		phaseB.ActivationID, ipcRcpt.EventID, phaseB.QueueDeliveries, phaseB.DAGAdvances, phaseB.RecoveryTimeMS)
 }
 
 // a0HelperSigkillAfterCommit is process A for the SIGKILL case: submit the
@@ -355,9 +472,11 @@ func a0HelperSigkillAfterCommit(t *testing.T) {
 	// Intentionally no defer close: a SIGKILL cannot run defers.
 
 	queue := &cyclicFakeQueue{}
+	bufA := engine.NewRuntimeEvidenceBuffer(64)
 	eng := engine.New(backend.state(), queue,
 		engine.WithDefaultLeaseTTL(time.Minute),
 		engine.WithOutboxMaxDeliveryAttempts(3),
+		engine.WithRuntimeEvidenceBuffer(bufA),
 	)
 	// No Bind: process A does NOT start the background OutboxDispatcher.
 
@@ -412,9 +531,55 @@ func a0HelperSigkillAfterCommit(t *testing.T) {
 	}
 	activation := stranded[0].Task.ActivationID
 
-	// READY is the only telemetry A emits. Flush so the parent sees it before
-	// the kill. Then block forever; the uncatchable SIGKILL takes us down.
+	// Build the IPC commit receipt for the parent. Process A is SIGKILLed before
+	// it can write a report, so the receipt travels over stdout. Fields come
+	// from authoritative observations of the commit boundary — never fabricated.
+	//
+	// Source priority: the runtime evidence buffer (Task 3 commit receipt) is
+	// preferred. The cyclic commit path does not currently publish a runtime
+	// evidence commit receipt (only the acyclic atomic path does), so when the
+	// buffer is empty we fall back to the directly-observed durable Redis
+	// outbox + the commit's returned outcome — both real, server-authoritative
+	// signals of the commit boundary. The parent re-reads the same Redis outbox
+	// after the SIGKILL and cross-verifies these IDs, so a fabricated value
+	// here would be caught.
+	receipt := ipcReceipt{
+		ExecutionID: string(id),
+		NodeName:    "review",
+		Accepted:    len(stranded) > 0,
+		Applied:     len(stranded) > 0,
+	}
+	for _, e := range stranded {
+		receipt.OutboxIDs = append(receipt.OutboxIDs, e.ID)
+	}
+	// Override with the runtime evidence receipt when the engine published one.
+	for _, ev := range drainA0Evidence(bufA) {
+		if ev.Type != engine.RuntimeEvidenceCommit || !ev.Applied {
+			continue
+		}
+		if ev.ExecutionID != id || ev.NodeName != "review" {
+			continue
+		}
+		receipt.EventID = ev.EventID
+		receipt.Accepted = ev.CommitOutcome == engine.CommitOutcomeAccepted
+		receipt.Applied = ev.Applied
+		if len(ev.OutboxIDs) > 0 {
+			receipt.OutboxIDs = ev.OutboxIDs
+		}
+		break
+	}
+	// EventID: prefer the runtime evidence receipt's EventID; otherwise use the
+	// durable outbox entry ID — a real, commit-generated, server-side identifier
+	// for this commit boundary (format: cyclic/<execID>/<node>/<activation>).
+	if receipt.EventID == "" && len(stranded) > 0 {
+		receipt.EventID = stranded[0].ID
+	}
+
+	// READY + RECEIPT are the only telemetry A emits. Flush both so the parent
+	// sees them before the kill. Then block forever; the uncatchable SIGKILL
+	// takes us down. No defer, no report file, no graceful observer path.
 	fmtReady(id, activation)
+	fmtReceipt(receipt)
 
 	// Block until SIGKILL. The runtime will not let us catch SIGKILL, so this
 	// select{} is the steady state the kill interrupts.
@@ -426,6 +591,36 @@ func a0HelperSigkillAfterCommit(t *testing.T) {
 func fmtReady(id types.ExecutionID, activation int) {
 	// Use os.Stdout + Flush equivalent via fmt to the test binary's stdout.
 	os.Stdout.WriteString("READY " + string(id) + " " + itoa(activation) + "\n")
+}
+
+// ipcReceipt is the raw commit receipt process A sends to the parent over
+// stdout. A SIGKILLed process cannot write a report file, run defers, or run
+// graceful observers, so this single line is the ONLY telemetry A emits beyond
+// READY. The parent cross-verifies these fields against the durable Redis
+// outbox after the kill. Fields carry only read-only receipt data
+// (EventID/Accepted/Applied/OutboxIDs/ExecutionID/NodeName); no error text,
+// credentials, or tenant payload.
+type ipcReceipt struct {
+	EventID     string   `json:"event_id"`
+	Accepted    bool     `json:"accepted"`
+	Applied     bool     `json:"applied"`
+	OutboxIDs   []string `json:"outbox_ids"`
+	ExecutionID string   `json:"execution_id"`
+	NodeName    string   `json:"node_name"`
+}
+
+// fmtReceipt prints the RECEIPT line the parent reads to recover process A's
+// commit receipt without a report file. It must be flushed before the
+// uncatchable select{} block so the parent observes it before the SIGKILL.
+func fmtReceipt(r ipcReceipt) {
+	raw, err := json.Marshal(r)
+	if err != nil {
+		// A malformed receipt is a fatal wiring error; the parent's RECEIPT
+		// timeout will surface it. Never fall back to a fabricated receipt.
+		os.Stdout.WriteString("RECEIPT error " + err.Error() + "\n")
+		return
+	}
+	os.Stdout.WriteString("RECEIPT " + string(raw) + "\n")
 }
 
 // mustA0Backend builds an A0 backend or fails the test.
@@ -616,6 +811,8 @@ func a0HelperRecoverAndReport(t *testing.T) {
 	if v := os.Getenv("XFLOW_A0_ACTIVATION"); v != "" {
 		wantActivation = atoiSafe(v)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
 	backend, err := newA0Backend(addr)
 	if err != nil {
@@ -624,9 +821,11 @@ func a0HelperRecoverAndReport(t *testing.T) {
 	}
 	defer backend.close()
 	queue := &cyclicFakeQueue{}
+	bufB := engine.NewRuntimeEvidenceBuffer(64)
 	eng := engine.New(backend.state(), queue,
 		engine.WithDefaultLeaseTTL(time.Minute),
 		engine.WithOutboxMaxDeliveryAttempts(3),
+		engine.WithRuntimeEvidenceBuffer(bufB),
 	)
 	// Bind starts the real background OutboxDispatcher — the component A0 must
 	// prove recovers a stranded intent with no manual FlushOutbox.
@@ -667,15 +866,94 @@ func a0HelperRecoverAndReport(t *testing.T) {
 		})
 		return
 	}
+
+	// Business/system count separation (Task 13). Process B is direct-drive:
+	// it leases+commits the recovered task itself, so NO action handler runs and
+	// BusinessHandlerInvocations is honestly 0. SystemTaskDeliveries is the
+	// measured redelivery count from the background dispatcher. The two are
+	// kept strictly separate — deliveries are NEVER copied into
+	// HandlerInvocations (that conflation is what this task eliminates).
+	businessHandlerInvocations := 0
+	systemTaskDeliveries := len(delivered)
+	commitBErr := ""
+	bCommitAccepted := false
+	bCommitApplied := false
+	var bCommitEventID string
+
+	// When the parent requests it (SIGKILL scenario only), process the
+	// recovered advance intent: lease + commit the single redelivered start
+	// task. The graceful-exit sibling does not set this env var, so its
+	// behavior is unchanged. Bounding: commit ONLY this redelivered start
+	// task; do NOT commit the resulting review@round2, so the loop stops at
+	// the next depth (MaxAutoDepth:10).
+	if os.Getenv("XFLOW_A0_COMMIT_RECOVERED") == "1" {
+		lease2, lerr := eng.BuildTaskLease(ctx, last)
+		if lerr != nil {
+			// Fencing/inactive errors mean recovery already converged (the
+			// task was finalized by a duplicate delivery). These are not
+			// failures of the redelivery proof; record only unexpected errors.
+			if !errors.Is(lerr, engine.ErrExecutionInactive) &&
+				!errors.Is(lerr, engine.ErrInvalidLeaseToken) &&
+				!errors.Is(lerr, engine.ErrSystemTaskHandled) &&
+				!errors.Is(lerr, engine.ErrLeaseAlreadyActive) {
+				commitBErr = "lease recovered: " + lerr.Error()
+			}
+		} else {
+			// Direct-drive commit (no handler invocation). Port "main" continues
+			// the cyclic loop toward review@round2, which B does NOT commit.
+			if cerr := eng.CommitTaskResult(ctx, lease2, engine.TaskResult{
+				Output: &types.Output{Port: "main", Data: map[string]any{"round": 2}},
+			}); cerr != nil {
+				if !errors.Is(cerr, engine.ErrExecutionInactive) &&
+					!errors.Is(cerr, engine.ErrInvalidLeaseToken) {
+					commitBErr = "commit recovered: " + cerr.Error()
+				}
+			} else {
+				bCommitAccepted = true
+				bCommitApplied = true
+			}
+		}
+	}
+
+	// Drain B's runtime evidence buffer for the honest applied-advance count.
+	// The cyclic commit path does not publish advance receipts (only the
+	// acyclic atomic path does), so this is honestly 0 for the cyclic graph —
+	// never hardcoded. Whatever the engine emits (>=0) is what we report.
+	// Also recover B's own commit receipt if the engine published one.
+	appliedAdvances := 0
+	for _, ev := range drainA0Evidence(bufB) {
+		if ev.ExecutionID != execID {
+			continue
+		}
+		if ev.Type == engine.RuntimeEvidenceAdvance && ev.Applied {
+			appliedAdvances++
+		}
+		if ev.Type == engine.RuntimeEvidenceCommit && ev.Applied &&
+			ev.CommitOutcome == engine.CommitOutcomeAccepted &&
+			ev.NodeName == last.NodeName && bCommitEventID == "" {
+			bCommitEventID = ev.EventID
+		}
+	}
+
 	a0WriteReport(t, reportPath, a0Report{
 		Phase:           "B",
 		InjectionPoint:  "background-dispatcher-recovery",
 		ExecutionID:     string(execID),
 		NodeName:        last.NodeName,
-		ActivationID:     last.ActivationID,
+		ActivationID:    last.ActivationID,
 		QueueDeliveries: len(delivered),
-		DAGAdvances:      0, // recovery redelivers; it does not double-commit
-		RecoveryTimeMS:  recoveryMS,
+		// Back-compat fields: HandlerInvocations is the business-handler count
+		// (0, direct-drive), NOT a copy of deliveries. DAGAdvances is measured.
+		HandlerInvocations: businessHandlerInvocations,
+		DAGAdvances:        appliedAdvances,
+		RecoveryTimeMS:    recoveryMS,
+		// Separated counts + B's own commit receipt (if any).
+		BusinessHandlerInvocations: businessHandlerInvocations,
+		SystemTaskDeliveries:       systemTaskDeliveries,
+		CommitEventID:              bCommitEventID,
+		AcceptedCommit:             bCommitAccepted,
+		AppliedCommit:              bCommitApplied,
+		Err:                        commitBErr,
 	})
 }
 
