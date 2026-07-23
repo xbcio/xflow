@@ -260,7 +260,7 @@ func TestDatabaseActionErrorParityServerRunner(t *testing.T) {
 			def := ParityWorkflow(source, retry)
 
 			// server-runner topology (real Redis/HTTP + real MySQL).
-			serverOut := RunParityServerRunner(t, addr, def, register)
+			serverOut := RunParityServerRunner(t, addr, def, register, nil, tc.name, "server-runner")
 
 			// Cluster-durable topology: the databaseParityHandler wrapper
 			// self-injects cred+pool, so the same register closure works for the
@@ -276,7 +276,7 @@ func TestDatabaseActionErrorParityServerRunner(t *testing.T) {
 			// does not hold and is not asserted here. The local row is still
 			// covered by its own test; this matrix closes the
 			// server-runner↔cluster real-MySQL pair.
-			clusterOut := RunParityCluster(t, addr, def, register)
+			clusterOut := RunParityCluster(t, addr, def, register, nil, tc.name, "cluster-durable")
 
 			invocations := invCount(inv)
 			serverOut.HandlerInvocations = invocations
@@ -570,7 +570,7 @@ func TestDatabaseActionErrorParityServerRunnerProductionWiring(t *testing.T) {
 			cred := tc.cred
 			resolver := func(tenant tenant.TenantID, name string) map[string]any { return cred[name] }
 
-			out := runParityServerRunnerWithPool(t, addr, def, register, pool, resolver)
+			out := runParityServerRunnerWithPool(t, addr, def, register, pool, resolver, nil, tc.name, "server-runner")
 
 			if out.Attempt != tc.wantAttempt {
 				t.Errorf("server-runner attempt=%d, want %d", out.Attempt, tc.wantAttempt)
@@ -589,7 +589,7 @@ func TestDatabaseActionErrorParityServerRunnerProductionWiring(t *testing.T) {
 // installs a ResourcePool and CredentialResolver on the runnersvc.Config,
 // exercising the production wiring path. The register callback installs the
 // real (unwrapped) handler into the execution.Registry.
-func runParityServerRunnerWithPool(t *testing.T, addr string, def *types.WorkflowDef, register func(engine.HandlerRegistrar), pool types.ResourcePool, resolver func(tenant tenant.TenantID, name string) map[string]any) ParityOutcome {
+func runParityServerRunnerWithPool(t *testing.T, addr string, def *types.WorkflowDef, register func(engine.HandlerRegistrar), pool types.ResourcePool, resolver func(tenant tenant.TenantID, name string) map[string]any, rec *evidenceRecorder, fixture, topology string) ParityOutcome {
 	t.Helper()
 	h := newServerRunnerHarness(t, addr, 1)
 	if len(def.Nodes) == 0 {
@@ -644,5 +644,5 @@ func runParityServerRunnerWithPool(t *testing.T, addr string, def *types.Workflo
 		t.Fatal("runner did not stop in time")
 	}
 
-	return collectParityOutcome(t, h.state, execID, result, def, h.evidence)
+	return collectParityOutcome(t, h.state, execID, result, def, h.evidence, rec, fixture, topology)
 }

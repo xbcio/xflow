@@ -135,9 +135,14 @@ func TestHTTPActionErrorParity(t *testing.T) {
 			// HTTP cases use the real xflow.http handler via a counting wrapper;
 			// WantKind/WantRetryable are explicit manifest literals above.
 
-			localOut := RunParityLocal(t, def, register)
-			serverOut := RunParityServerRunner(t, addr, def, register)
-			clusterOut := RunParityCluster(t, addr, def, register)
+			// HTTP/gRPC/script/onerror/database parity fixtures use fixture
+			// names that do not match the manifest A3Fixture constants, so they
+			// cannot produce required A3 rows; a nil recorder keeps the shared
+			// RunParity* signatures uniform without emitting stray fragments.
+			// (Only TestActionErrorParityMatrix uses the manifest fixture names.)
+			localOut := RunParityLocal(t, def, register, nil, tc.Name, "local")
+			serverOut := RunParityServerRunner(t, addr, def, register, nil, tc.Name, "server-runner")
+			clusterOut := RunParityCluster(t, addr, def, register, nil, tc.Name, "cluster-durable")
 
 			invocations := invCount(inv)
 			for _, o := range []*ParityOutcome{&localOut, &serverOut, &clusterOut} {

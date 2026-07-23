@@ -239,9 +239,9 @@ func TestScriptFunctionActionParity(t *testing.T) {
 			// script/function cases use the real built-in handlers via counting
 			// wrappers; WantKind/WantRetryable are explicit manifest literals above.
 
-			localOut := RunParityLocal(t, def, register)
-			serverOut := RunParityServerRunner(t, addr, def, register)
-			clusterOut := RunParityCluster(t, addr, def, register)
+			localOut := RunParityLocal(t, def, register, nil, tc.Name, "local")
+			serverOut := RunParityServerRunner(t, addr, def, register, nil, tc.Name, "server-runner")
+			clusterOut := RunParityCluster(t, addr, def, register, nil, tc.Name, "cluster-durable")
 
 			invocations := invCount(inv)
 			for _, o := range []*ParityOutcome{&localOut, &serverOut, &clusterOut} {

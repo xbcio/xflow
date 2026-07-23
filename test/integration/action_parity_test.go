@@ -211,6 +211,7 @@ type downstreamExpectation struct {
 // ParityOutcome is the topology-independent contract a fixture must reach.
 // It is exported so that subsequent fixture files can reuse the parity runners.
 type ParityOutcome struct {
+	ExecutionID types.ExecutionID // bound to runtime evidence + counter snapshots (recorder wiring)
 	Attempt            int
 	Status             types.ExecutionStatus
 	SourceStatus       types.NodeStatus // terminal status of the source node
@@ -296,12 +297,42 @@ func TestActionErrorParityMatrix(t *testing.T) {
 		{
 			Name: "transient_then_success",
 			Build: func() (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
-				return parityFixtureBuild("test.parity.transient.then.success", &parityFixture{
-					behaviour:  parityTransientThenSuccess,
-					failBefore: 1, // attempt 1 transient, attempt 2 succeeds
-					code:       "parity.transient_then_success",
-					msg:        "business.reject",
-				})
+				// Source: transient fail once, then succeed. A downstream "ok"
+				// node is wired so the source's success commit emits an applied
+				// advance receipt — a single-node workflow marks execution done
+				// immediately (remaining==0) and never enqueues the advance
+				// task. The downstream ok handler always succeeds; its events
+				// are excluded from the recorder's focal slice (filtered to the
+				// source node) so the verifier still sees exactly one accepted
+				// commit for this execution. The source counter is tracked
+				// separately from the ok handler so WantHandlerInvocations
+				// reflects only the source's retry path.
+				srcType := "test.parity.transient.then.success"
+				okType := "test.parity.ok"
+				var srcCur *parityFixtureHandler
+				register := func(reg engine.HandlerRegistrar) {
+					src := (&parityFixture{
+						behaviour:  parityTransientThenSuccess,
+						failBefore: 1, // attempt 1 transient, attempt 2 succeeds
+						code:       "parity.transient_then_success",
+						msg:        "business.reject",
+					}).handler(srcType)
+					srcCur = src
+					reg.RegisterGlobal(srcType, src)
+					ok := (&parityFixture{
+						behaviour:  parityTransientThenSuccess,
+						failBefore: 0, // always succeeds
+					}).handler(okType)
+					reg.RegisterGlobal(okType, ok)
+				}
+				invocations := func() int {
+					if srcCur == nil {
+						return 0
+					}
+					return int(srcCur.attempts.Load())
+				}
+				source := types.NodeDef{Name: "start", Type: srcType}
+				return source, register, invocations
 			},
 			MaxAttempts: 3,
 			WantAttempt: 2,
@@ -310,6 +341,7 @@ func TestActionErrorParityMatrix(t *testing.T) {
 			// retried away, so WantKind is empty (no node.Error to classify).
 			WantKind:               "",
 			WantHandlerInvocations: 2,
+			OKNode:                 types.NodeDef{Name: "ok", Type: "test.parity.ok"},
 		},
 		{
 			Name: "transient_retry_exhausted",
@@ -398,12 +430,26 @@ func TestActionErrorParityMatrix(t *testing.T) {
 				def = ParityWorkflow(source, retry)
 			}
 
-			localOut := RunParityLocal(t, def, register)
+			// One recorder per (fixture, topology) row. nil-safe when env vars
+			// are unset (normal test runs unaffected). The recorder transports the
+			// already-drained runtime events + a3_row_marker from inside
+			// collectParityOutcome→applyActualFromClassification, and the counter
+			// snapshot is recorded here where the counting handle lives.
+			recLocal := newEvidenceRecorder(t, tc.Name+"-local")
+			recServer := newEvidenceRecorder(t, tc.Name+"-server-runner")
+			recCluster := newEvidenceRecorder(t, tc.Name+"-cluster-durable")
+
+			localOut := RunParityLocal(t, def, register, recLocal, tc.Name, "local")
 			localOut.HandlerInvocations = invCount(inv)
-			serverOut := RunParityServerRunner(t, addr, def, register)
+			recordParityCounter(t, recLocal, "local", localOut.ExecutionID, source.Name, tc.Name, localOut.HandlerInvocations)
+
+			serverOut := RunParityServerRunner(t, addr, def, register, recServer, tc.Name, "server-runner")
 			serverOut.HandlerInvocations = invCount(inv)
-			clusterOut := RunParityCluster(t, addr, def, register)
+			recordParityCounter(t, recServer, "server-runner", serverOut.ExecutionID, source.Name, tc.Name, serverOut.HandlerInvocations)
+
+			clusterOut := RunParityCluster(t, addr, def, register, recCluster, tc.Name, "cluster-durable")
 			clusterOut.HandlerInvocations = invCount(inv)
+			recordParityCounter(t, recCluster, "cluster-durable", clusterOut.ExecutionID, source.Name, tc.Name, clusterOut.HandlerInvocations)
 
 			assertParityThreeWay(t, tc, localOut, serverOut, clusterOut)
 
@@ -592,11 +638,31 @@ func invCount(inv func() int) int {
 	return inv()
 }
 
+// recordParityCounter appends a counter snapshot for one (fixture, topology)
+// row and flushes the row's fragment. The counting handle lives in the matrix
+// loop (parityFixtureBuild / instrumentedBuiltinBuild), not in
+// collectParityOutcome, so the snapshot is recorded here after the Run returns.
+// nil-safe: a no-op when the recorder is disabled (env unset). The counterID is
+// the fixture name; the verifier reads it back as obs.CounterSnapshotID.
+func recordParityCounter(t *testing.T, rec *evidenceRecorder, topology string, execID types.ExecutionID, node, counterID string, value int) {
+	t.Helper()
+	if rec == nil {
+		return
+	}
+	rec.recordCounter(topology, execID, node, counterID, value)
+	rec.flush(t)
+}
+
 // applyActualFromClassification drains the topology's evidence buffer and
 // derives the production-observed classification from the unique applied
 // commit receipt for (execID, sourceName). It writes ONLY actual fields
 // (ErrKind/ErrRetryable) — never expected values.
-func applyActualFromClassification(out *ParityOutcome, t *testing.T, buf *engine.RuntimeEvidenceBuffer, execID types.ExecutionID, source string) {
+//
+// When rec != nil, it also transports the already-drained evs slice to the
+// recorder (recordRuntimeEvents) and stamps an a3_row_marker bound to
+// (execID, fixture, topology). It MUST NOT re-drain the buffer: evs is the
+// already-drained slice consumed below; the recorder only copies it verbatim.
+func applyActualFromClassification(out *ParityOutcome, t *testing.T, buf *engine.RuntimeEvidenceBuffer, execID types.ExecutionID, source string, rec *evidenceRecorder, fixture, topology string) {
 	t.Helper()
 	if buf == nil {
 		return
@@ -611,6 +677,25 @@ func applyActualFromClassification(out *ParityOutcome, t *testing.T, buf *engine
 		}
 	}
 done:
+	// Transport a FOCAL slice of the drained events to the recorder: only the
+	// source node's mutation-boundary events for this execution. This mirrors
+	// the A0 recorder's focal filter (evidence_recorder_test.go pattern) and is
+	// required for the transient_then_success fixture, which wires a downstream
+	// "ok" node so the source's commit emits an applied advance receipt. Without
+	// the focal filter, the downstream's accepted commit would land in the same
+	// execution's ledger and the verifier would see two accepted commits
+	// (len(commits)!=1) and refuse to bind a commit_event_id. The recorder only
+	// copies the already-drained evs; it never re-drains the buffer. nil-safe.
+	if rec != nil {
+		var focal []engine.RuntimeEvidenceEvent
+		for _, ev := range evs {
+			if ev.ExecutionID == execID && ev.NodeName == source {
+				focal = append(focal, ev)
+			}
+		}
+		rec.recordRuntimeEvents(focal)
+		rec.recordA3RowMarker(execID, fixture, topology)
+	}
 	var applied []engine.RuntimeEvidenceEvent
 	for _, ev := range evs {
 		if ev.Type == engine.RuntimeEvidenceCommit && ev.ExecutionID == execID && ev.NodeName == source && ev.Applied {
@@ -718,7 +803,7 @@ func mapContains(got, want map[string]any) bool {
 // returns the terminal outcome. The register callback installs any custom
 // handlers needed by the fixture; built-in node types resolve through the
 // global node registry.
-func RunParityLocal(t *testing.T, def *types.WorkflowDef, register func(engine.HandlerRegistrar)) ParityOutcome {
+func RunParityLocal(t *testing.T, def *types.WorkflowDef, register func(engine.HandlerRegistrar), rec *evidenceRecorder, fixture, topology string) ParityOutcome {
 	t.Helper()
 	b := backendlocal.New(backendlocal.WithConcurrency(1))
 	reg, ok := b.Registry().(engine.HandlerRegistrar)
@@ -746,14 +831,14 @@ func RunParityLocal(t *testing.T, def *types.WorkflowDef, register func(engine.H
 	if err != nil {
 		t.Fatalf("local wait: %v", err)
 	}
-	return collectParityOutcome(t, b.State(), id, result, def, buf)
+	return collectParityOutcome(t, b.State(), id, result, def, buf, rec, fixture, topology)
 }
 
 // RunParityServerRunner runs the same fixture through the server-runner
 // topology against real Redis. The register callback installs custom handlers
 // in the runner's execution.Registry; built-in node types resolve through the
 // global node registry.
-func RunParityServerRunner(t *testing.T, addr string, def *types.WorkflowDef, register func(engine.HandlerRegistrar)) ParityOutcome {
+func RunParityServerRunner(t *testing.T, addr string, def *types.WorkflowDef, register func(engine.HandlerRegistrar), rec *evidenceRecorder, fixture, topology string) ParityOutcome {
 	t.Helper()
 	h := newServerRunnerHarness(t, addr, 1)
 	if len(def.Nodes) == 0 {
@@ -807,7 +892,7 @@ func RunParityServerRunner(t *testing.T, addr string, def *types.WorkflowDef, re
 	}
 
 	// Fresh context: the runner ctx above was cancelled on shutdown.
-	out := collectParityOutcome(t, h.state, execID, result, def, h.evidence)
+	out := collectParityOutcome(t, h.state, execID, result, def, h.evidence, rec, fixture, topology)
 	// Stop this topology's control plane (apiserver + its Asynq consumer) before
 	// returning so it does not race the next topology's consumer for the shared
 	// Asynq queue. See serverRunnerHarness.stop for why this is required.
@@ -833,7 +918,7 @@ func RunParityServerRunner(t *testing.T, addr string, def *types.WorkflowDef, re
 //
 // Stale asynq tasks from prior crashed runs are flushed (scoped to the asynq:*
 // namespace) so they cannot be picked up by this consumer.
-func RunParityCluster(t *testing.T, addr string, def *types.WorkflowDef, register func(engine.HandlerRegistrar)) ParityOutcome {
+func RunParityCluster(t *testing.T, addr string, def *types.WorkflowDef, register func(engine.HandlerRegistrar), rec *evidenceRecorder, fixture, topology string) ParityOutcome {
 	t.Helper()
 	if len(def.Nodes) == 0 {
 		t.Fatal("RunParityCluster: workflow has no nodes")
@@ -876,10 +961,10 @@ func RunParityCluster(t *testing.T, addr string, def *types.WorkflowDef, registe
 	waitCtx, waitCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer waitCancel()
 	result := waitForCompletion(waitCtx, t, b.State(), id, def.Nodes[0].Name)
-	return collectParityOutcome(t, b.State(), id, result, def, buf)
+	return collectParityOutcome(t, b.State(), id, result, def, buf, rec, fixture, topology)
 }
 
-func collectParityOutcome(t *testing.T, state engine.StateStore, execID types.ExecutionID, result types.Result, def *types.WorkflowDef, buf *engine.RuntimeEvidenceBuffer) ParityOutcome {
+func collectParityOutcome(t *testing.T, state engine.StateStore, execID types.ExecutionID, result types.Result, def *types.WorkflowDef, buf *engine.RuntimeEvidenceBuffer, rec *evidenceRecorder, fixture, topology string) ParityOutcome {
 	t.Helper()
 	if len(def.Nodes) == 0 {
 		t.Fatal("collectParityOutcome: workflow has no nodes")
@@ -894,6 +979,7 @@ func collectParityOutcome(t *testing.T, state engine.StateStore, execID types.Ex
 	}
 
 	out := ParityOutcome{
+		ExecutionID:         execID,
 		Attempt:            node.Attempt,
 		Status:             result.Status,
 		SourceStatus:       node.Status,
@@ -904,7 +990,7 @@ func collectParityOutcome(t *testing.T, state engine.StateStore, execID types.Ex
 		DownstreamOutputs:  make(map[string]map[string]any),
 	}
 
-	applyActualFromClassification(&out, t, buf, execID, sourceName)
+	applyActualFromClassification(&out, t, buf, execID, sourceName, rec, fixture, topology)
 
 	for _, n := range def.Nodes {
 		if n.Name == sourceName {

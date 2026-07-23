@@ -302,9 +302,9 @@ func TestGRPCActionErrorParity(t *testing.T) {
 			// gRPC cases use the real xflow.grpc action handler via a counting
 			// wrapper; WantKind/WantRetryable are explicit manifest literals above.
 
-			localOut := RunParityLocal(t, def, register)
-			serverOut := runServerRunnerParity(t, addr, def, register)
-			clusterOut := RunParityCluster(t, addr, def, register)
+			localOut := RunParityLocal(t, def, register, nil, tc.Name, "local")
+			serverOut := runServerRunnerParity(t, addr, def, register, nil, tc.Name, "server-runner")
+			clusterOut := RunParityCluster(t, addr, def, register, nil, tc.Name, "cluster-durable")
 
 			invocations := invCount(inv)
 			for _, o := range []*ParityOutcome{&localOut, &serverOut, &clusterOut} {
@@ -448,7 +448,7 @@ func newServerRunnerHarnessFast(t *testing.T, addr string, concurrency int) *ser
 // runServerRunnerParity is a variant of RunParityServerRunner that uses a
 // unique runner ID per subtest and a low control-plane poll wait so stale
 // runner-directory sessions do not collide and retries are processed quickly.
-func runServerRunnerParity(t *testing.T, addr string, def *types.WorkflowDef, register func(engine.HandlerRegistrar)) ParityOutcome {
+func runServerRunnerParity(t *testing.T, addr string, def *types.WorkflowDef, register func(engine.HandlerRegistrar), rec *evidenceRecorder, fixture, topology string) ParityOutcome {
 	t.Helper()
 	h := newServerRunnerHarnessFast(t, addr, 1)
 	if len(def.Nodes) == 0 {
@@ -503,7 +503,7 @@ func runServerRunnerParity(t *testing.T, addr string, def *types.WorkflowDef, re
 		t.Fatal("runner did not stop in time")
 	}
 
-	out := collectParityOutcome(t, h.state, execID, result, def, h.evidence)
+	out := collectParityOutcome(t, h.state, execID, result, def, h.evidence, rec, fixture, topology)
 	// Stop this topology's control plane (apiserver + its Asynq consumer) before
 	// returning so it does not race a subsequent topology's consumer for the
 	// shared Asynq queue. See serverRunnerHarness.stop.
@@ -569,7 +569,7 @@ func TestGRPCActionErrorParityProductionWiring(t *testing.T) {
 				_ = pool.Close(ctx)
 			})
 
-			out := runServerRunnerParityWithPool(t, addr, def, register, pool)
+			out := runServerRunnerParityWithPool(t, addr, def, register, pool, nil, tc.name, "server-runner")
 			if out.Attempt != tc.wantAttempt {
 				t.Errorf("server-runner attempt=%d, want %d", out.Attempt, tc.wantAttempt)
 			}
@@ -585,7 +585,7 @@ func TestGRPCActionErrorParityProductionWiring(t *testing.T) {
 
 // runServerRunnerParityWithPool mirrors runServerRunnerParity but installs a
 // ResourcePool on the runnersvc.Config, exercising the production wiring path.
-func runServerRunnerParityWithPool(t *testing.T, addr string, def *types.WorkflowDef, register func(engine.HandlerRegistrar), pool types.ResourcePool) ParityOutcome {
+func runServerRunnerParityWithPool(t *testing.T, addr string, def *types.WorkflowDef, register func(engine.HandlerRegistrar), pool types.ResourcePool, rec *evidenceRecorder, fixture, topology string) ParityOutcome {
 	t.Helper()
 	h := newServerRunnerHarnessFast(t, addr, 1)
 	if len(def.Nodes) == 0 {
@@ -641,7 +641,7 @@ func runServerRunnerParityWithPool(t *testing.T, addr string, def *types.Workflo
 		t.Fatal("runner did not stop in time")
 	}
 
-	out := collectParityOutcome(t, h.state, execID, result, def, h.evidence)
+	out := collectParityOutcome(t, h.state, execID, result, def, h.evidence, rec, fixture, topology)
 	// Stop this topology's control plane (apiserver + its Asynq consumer) before
 	// returning so it does not race a subsequent topology's consumer for the
 	// shared Asynq queue. See serverRunnerHarness.stop.

@@ -118,7 +118,7 @@ func TestDatabaseActionErrorParity(t *testing.T) {
 				reg.RegisterGlobal("xflow.database", h)
 			}
 
-			localOut := RunParityLocal(t, def, register)
+			localOut := RunParityLocal(t, def, register, nil, tc.name, "local")
 			if cur != nil {
 				localOut.HandlerInvocations = cur.Count()
 			}
