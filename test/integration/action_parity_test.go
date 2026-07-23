@@ -653,6 +653,51 @@ func recordParityCounter(t *testing.T, rec *evidenceRecorder, topology string, e
 	rec.flush(t)
 }
 
+// waitForEvidenceReceipt polls the buffer, ACCUMULATING drained events across
+// iterations, until the predicate is satisfied or the timeout elapses. This
+// closes the race where a one-shot non-blocking drain returns before the
+// engine has published the commit receipt (notably in the server-runner gRPC
+// path, where the commit happens in a different goroutine/context than the
+// test's drain). It returns ALL drained events so the caller can run further
+// focal filters / assertions. nil-safe: buf == nil returns nil immediately.
+// The caller fatals if the predicate was still unsatisfied at timeout — that
+// is a genuine wiring break, not a scheduling race.
+func waitForEvidenceReceipt(t *testing.T, buf *engine.RuntimeEvidenceBuffer, timeout time.Duration,
+	predicate func(evs []engine.RuntimeEvidenceEvent) bool) []engine.RuntimeEvidenceEvent {
+	t.Helper()
+	if buf == nil {
+		return nil
+	}
+	var evs []engine.RuntimeEvidenceEvent
+	deadline := time.Now().Add(timeout)
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		// Drain everything currently available without blocking. Events are
+		// accumulated across iterations so the recorder's focal slice and the
+		// applied/advance counts see the full ledger, not a per-poll fragment.
+		draining := true
+		for draining {
+			select {
+			case ev := <-buf.Events():
+				evs = append(evs, ev)
+			default:
+				draining = false
+			}
+		}
+		if predicate(evs) {
+			return evs
+		}
+		if time.Now().After(deadline) {
+			return evs
+		}
+		select {
+		case <-ticker.C:
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
 // applyActualFromClassification drains the topology's evidence buffer and
 // derives the production-observed classification from the unique applied
 // commit receipt for (execID, sourceName). It writes ONLY actual fields
@@ -667,16 +712,21 @@ func applyActualFromClassification(out *ParityOutcome, t *testing.T, buf *engine
 	if buf == nil {
 		return
 	}
-	var evs []engine.RuntimeEvidenceEvent
-	for {
-		select {
-		case ev := <-buf.Events():
-			evs = append(evs, ev)
-		default:
-			goto done
+	// Convergence-gated drain: poll until the applied commit receipt for
+	// (execID, source) appears (or the 5s timeout elapses). The receipt is
+	// published synchronously at the commit boundary, but in the server-runner
+	// gRPC path that commit runs in a different goroutine than this drain, so a
+	// one-shot non-blocking drain can race the publisher and falsely report
+	// "evidence wiring broken". All drained events are accumulated so the
+	// focal filter and the applied/advance assertions below see the full ledger.
+	evs := waitForEvidenceReceipt(t, buf, 5*time.Second, func(evs []engine.RuntimeEvidenceEvent) bool {
+		for _, ev := range evs {
+			if ev.Type == engine.RuntimeEvidenceCommit && ev.ExecutionID == execID && ev.NodeName == source && ev.Applied {
+				return true
+			}
 		}
-	}
-done:
+		return false
+	})
 	// Transport a FOCAL slice of the drained events to the recorder: only the
 	// source node's mutation-boundary events for this execution. This mirrors
 	// the A0 recorder's focal filter (evidence_recorder_test.go pattern) and is
