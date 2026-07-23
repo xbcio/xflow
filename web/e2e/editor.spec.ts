@@ -12,25 +12,25 @@ test.describe("Workflow Editor", () => {
     await expect(page.getByText("Mock: enabled")).toBeVisible();
     await expect(
       page.getByTestId("fixture-nodes"),
-    ).toContainText("Start (xflow.start) — trigger");
+    ).toContainText("Start (start) — trigger");
     await expect(
       page.getByTestId("fixture-nodes"),
-    ).toContainText("End (xflow.end) — action");
+    ).toContainText("End (end) — action");
     await expect(
       page.getByTestId("fixture-connections"),
-    ).toContainText("start:default → end:default");
+    ).toContainText("start:default → http:default");
+    await expect(
+      page.getByTestId("fixture-connections"),
+    ).toContainText("merge:default → end:default");
   });
 
   test("navigates to editor workflow page", async ({ page }) => {
     await page.goto("http://localhost:5173/editor/some-workflow-id");
 
-    await expect(
-      page.getByRole("heading", { name: "Editor: some-workflow-id" }),
-    ).toBeVisible();
     await expect(page.getByTestId("editor-page")).toBeVisible();
-    await expect(page.getByTestId("fixture-summary")).toContainText(
-      "Editor mock loaded: health-check",
-    );
+    await expect(
+      page.getByText("Workflows / default / health-check"),
+    ).toBeVisible();
   });
 
   test("error boundary catches render errors without leaking stack traces", async ({
