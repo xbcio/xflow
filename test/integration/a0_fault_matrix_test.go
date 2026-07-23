@@ -50,7 +50,11 @@ type a0FaultReport struct {
 	RecoveryTimeMS     int64  `json:"recovery_time_ms"`
 	ReplayOutcome      string `json:"replay_outcome,omitempty"`
 	Err                string `json:"err,omitempty"`
-	Pass               bool   `json:"pass"`
+
+	// NotApplicableReason explains why a numeric field is unobservable or
+	// not applicable for this scenario (spec §1.3). It is written alongside
+	// a zero/null value so the artifact never carries a bare constant.
+	NotApplicableReason string `json:"not_applicable_reason,omitempty"`
 
 	// SIGKILL IPC receipt + business/system count separation (Task 13).
 	// CommitEventID/AcceptedCommit/AppliedCommit/OutboxIDs carry process A's
@@ -146,7 +150,7 @@ func writeA0FaultReport(t *testing.T, r a0FaultReport) {
 	if err := os.WriteFile(abs, raw, 0o644); err != nil {
 		t.Fatalf("write artifact %q: %v", abs, err)
 	}
-	t.Logf("a0 fault matrix artifact written: %s (scenario=%s pass=%v)", abs, r.Scenario, r.Pass)
+	t.Logf("a0 fault matrix artifact written: %s (scenario=%s)", abs, r.Scenario)
 }
 
 func loadA0Artifact(t *testing.T, path string) *a0FaultMatrixArtifact {
@@ -232,10 +236,22 @@ func (q *a0FaultQueue) totalDeliveries() int {
 	return q.deliveries
 }
 
+// a0FaultHandler is the real action handler for the "test.fault" node type used
+// by the A0 fault-matrix scenarios. It returns a plain success output on the
+// default "main" port so acyclic downstream routing works without test-fabricated
+// results.
+type a0FaultHandler struct{}
+
+func (a0FaultHandler) Descriptor() types.Descriptor { return types.Descriptor{Type: "test.fault"} }
+func (a0FaultHandler) Execute(_ context.Context, input *types.Input) (*types.Output, error) {
+	return &types.Output{Data: map[string]any{"handled": true, "input": input.Data}}, nil
+}
+
 // a0AcyclicGraph builds a single-root acyclic graph for the fault matrix. The
-// node type "test.fault" has no registered handler; the tests drive DAG commits
-// explicitly via BuildTaskLease + CommitTaskResult so the matrix exercises the
-// real Redis atomic paths without coupling to handler runtime behavior.
+// node type "test.fault" is registered with a counting-wrapped real handler in
+// scenarios that need measured handler invocations; other scenarios still drive
+// commits explicitly via BuildTaskLease + CommitTaskResult to exercise the real
+// Redis atomic paths without coupling to handler runtime behavior.
 func a0AcyclicGraph(t *testing.T, name string) *graph.Graph {
 	t.Helper()
 	def := &types.WorkflowDef{
@@ -399,10 +415,12 @@ func postReportResultRaw(t *testing.T, baseURL string, client *http.Client, req 
 // uploads as a release artifact.
 //
 // Fault matrix:
-//  1. commit-then-flush-before-delivery (existing behavior, full report)
+//  1. commit-then-flush-before-delivery (real handler, measured delivery + recovery)
 //  2. report-ack-loss (real runner report chain: server committed, runner ACK lost)
 //  3. queue handoff (task enqueued, consumer crash before process → new consumer)
-//  4. OS kill (non-graceful termination post-submit → outbox scan + lease reclaim)
+//  The real OS-kill evidence is provided by TestA0OSKillSIGKILLRecovery in
+//  cyclic_reliability_process_test.go; no synthetic in-process OS-kill row is
+//  written here.
 func TestA0FaultMatrix(t *testing.T) {
 	addr := requireRedis(t)
 
@@ -425,6 +443,16 @@ func TestA0FaultMatrix(t *testing.T) {
 		g := a0TwoNodeGraph(t, "a0-commit-then-flush")
 		env.queue.setError(nil)
 
+		// Register a counting-wrapped real handler for test.fault and a plain
+		// handler for the downstream "done" node. The focal "start" node is the
+		// only one whose Execute increments the counter, so HandlerInvocations
+		// reflects real business-handler calls (not appliedCommits).
+		registry := execution.NewRegistry()
+		startHandler, startCounter := buildInstrumentedHandler(a0FaultHandler{}, "a0-commit-then-flush-start")
+		registry.RegisterGlobal("test.fault", startHandler)
+		registry.RegisterNodeHandler("done", a0FaultHandler{})
+		runner := execution.NewRunner(registry)
+
 		id, err := env.eng.Submit(ctx, g, map[string]any{"round": 1})
 		if err != nil {
 			t.Fatalf("Submit() error = %v", err)
@@ -442,13 +470,19 @@ func TestA0FaultMatrix(t *testing.T) {
 			t.Fatalf("BuildTaskLease() error = %v", err)
 		}
 
+		// Execute the real handler on the production commit path (mirror the
+		// ReportAckLoss startCounter pattern). The handler output is what gets
+		// committed — not a test-fabricated result.
+		result, err := runner.Execute(ctx, lease)
+		if err != nil {
+			t.Fatalf("Execute(start) error = %v", err)
+		}
+
 		// Injection: queue unavailable during the post-commit flush. The fenced
 		// start commit must persist; the durable downstream ("done") outbox
 		// entry must survive even though Enqueue failed.
 		env.queue.setError(errA0QueueUnavailable)
-		outcome, commitErr := env.eng.CommitTaskResultWithOutcome(ctx, lease, engine.TaskResult{
-			Output: &types.Output{Data: map[string]any{"ok": true}},
-		})
+		outcome, commitErr := env.eng.CommitTaskResultWithOutcome(ctx, lease, result)
 		if commitErr != nil && !errors.Is(commitErr, errA0QueueUnavailable) {
 			t.Fatalf("CommitTaskResult() error = %v, want queue outage after durable commit", commitErr)
 		}
@@ -496,9 +530,11 @@ func TestA0FaultMatrix(t *testing.T) {
 		if err != nil {
 			t.Fatalf("BuildTaskLease(done) error = %v", err)
 		}
-		if _, err := env.eng.CommitTaskResultWithOutcome(ctx, doneLease, engine.TaskResult{
-			Output: &types.Output{Data: map[string]any{"done": true}},
-		}); err != nil {
+		doneResult, err := runner.Execute(ctx, doneLease)
+		if err != nil {
+			t.Fatalf("Execute(done) error = %v", err)
+		}
+		if _, err := env.eng.CommitTaskResultWithOutcome(ctx, doneLease, doneResult); err != nil {
 			t.Fatalf("CommitTaskResult(done) error = %v", err)
 		}
 		finalExec, _ := env.backend.State().GetExecution(ctx, id)
@@ -525,6 +561,11 @@ func TestA0FaultMatrix(t *testing.T) {
 			t.Fatalf("no applied commit receipts for %s — evidence wiring broken", id)
 		}
 
+		handlerInvocations := startCounter.Count()
+		if handlerInvocations != 1 {
+			t.Fatalf("start handler invocations = %d, want 1", handlerInvocations)
+		}
+
 		report := a0FaultReport{
 			Scenario:           "commit-then-flush-before-delivery",
 			InjectionPoint:     "queue unavailable during post-commit flush of start->done downstream",
@@ -536,11 +577,10 @@ func TestA0FaultMatrix(t *testing.T) {
 			ExecutionStatus:    string(finalExec.Status),
 			CommitOutcome:      string(outcome),
 			QueueDeliveries:    env.queue.totalDeliveries(),
-			HandlerInvocations: appliedCommits,
+			HandlerInvocations: handlerInvocations,
 			DAGAdvances:        appliedAdvances,
 			FinalStatus:        string(finalExec.Status),
 			RecoveryTimeMS:     recoveryTimeMS,
-			Pass:               true,
 		}
 		writeA0FaultReport(t, report)
 		t.Logf("A0 scenario 1: commit-then-flush-before-delivery: start committed %s under outage, downstream recovered, final=%s",
@@ -562,7 +602,7 @@ func TestA0FaultMatrix(t *testing.T) {
 				}
 			}
 			rec.recordRuntimeEvents(focal)
-			rec.recordCounter("local", id, "start", "direct-commit", 0)
+			rec.recordCounter("local", id, "start", "a0-commit-then-flush-start", handlerInvocations)
 			rec.recordA0ScenarioMarker(id, "CommitThenFlushBeforeDelivery")
 			rec.recordState("local", id, "final", map[string]any{
 				"execution_status": string(finalExec.Status),
@@ -712,21 +752,21 @@ func TestA0FaultMatrix(t *testing.T) {
 		}
 
 		report := a0FaultReport{
-			Scenario:           "report-ack-loss",
-			InjectionPoint:     "runner ReportResult accepted by control but response ACK lost",
-			ExecutionID:        string(execID),
-			NodeName:           "start",
-			ActivationID:       captured.Lease.Task.ActivationID,
-			LeaseToken:         string(captured.Lease.LeaseToken),
-			NodeStatus:         string(node.Status),
-			ExecutionStatus:    string(result.Status),
-			CommitOutcome:      string(commitOutcome),
-			QueueDeliveries:    1,
-			HandlerInvocations: handlerInvocations,
-			DAGAdvances:        appliedAdvances,
-			FinalStatus:        string(result.Status),
-			RecoveryTimeMS:     0,
-			Pass:               true,
+			Scenario:            "report-ack-loss",
+			InjectionPoint:      "runner ReportResult accepted by control but response ACK lost",
+			ExecutionID:         string(execID),
+			NodeName:            "start",
+			ActivationID:        captured.Lease.Task.ActivationID,
+			LeaseToken:          string(captured.Lease.LeaseToken),
+			NodeStatus:          string(node.Status),
+			ExecutionStatus:     string(result.Status),
+			CommitOutcome:       string(commitOutcome),
+			QueueDeliveries:     0,
+			HandlerInvocations:  handlerInvocations,
+			DAGAdvances:         appliedAdvances,
+			FinalStatus:         string(result.Status),
+			RecoveryTimeMS:      0,
+			NotApplicableReason: "queue delivery count and recovery time are not observable in the runner report-ack-loss path (loss is on the HTTP ACK, not the task queue); handler_invocations is the real counter-backed count",
 		}
 		writeA0FaultReport(t, report)
 		t.Logf("A0 scenario ReportAckLoss: handler invocations=%d, applied commits=%d, applied advances=%d, saw transport error=%v, final=%s",
@@ -1016,22 +1056,22 @@ func TestA0FaultMatrix(t *testing.T) {
 		}
 
 		report := a0FaultReport{
-			Scenario:           "report-request-loss",
-			InjectionPoint:     "runner ReportResult request lost before reaching control plane",
-			ExecutionID:        string(execID),
-			NodeName:           "start",
-			ActivationID:       captured.Lease.Task.ActivationID,
-			LeaseToken:         string(captured.Lease.LeaseToken),
-			NodeStatus:         string(node.Status),
-			ExecutionStatus:    string(result.Status),
-			CommitOutcome:      string(commitOutcome),
-			QueueDeliveries:    1,
-			HandlerInvocations: handlerInvocations,
-			DAGAdvances:        appliedAdvances,
-			FinalStatus:        string(result.Status),
-			RecoveryTimeMS:     0,
-			ReplayOutcome:      replayOutcome,
-			Pass:               true,
+			Scenario:            "report-request-loss",
+			InjectionPoint:      "runner ReportResult request lost before reaching control plane",
+			ExecutionID:         string(execID),
+			NodeName:            "start",
+			ActivationID:        captured.Lease.Task.ActivationID,
+			LeaseToken:          string(captured.Lease.LeaseToken),
+			NodeStatus:          string(node.Status),
+			ExecutionStatus:     string(result.Status),
+			CommitOutcome:       string(commitOutcome),
+			QueueDeliveries:     0,
+			HandlerInvocations:  handlerInvocations,
+			DAGAdvances:         appliedAdvances,
+			FinalStatus:         string(result.Status),
+			RecoveryTimeMS:      0,
+			ReplayOutcome:       replayOutcome,
+			NotApplicableReason: "queue delivery count and recovery time are not observable in the runner report-request-loss path (loss is on the HTTP request, not the task queue); handler_invocations is the real counter-backed count",
 		}
 		writeA0FaultReport(t, report)
 		t.Logf("A0 scenario ReportRequestLoss: handler invocations=%d, applied commits=%d, applied advances=%d, replay outcome=%s, final=%s",
@@ -1203,7 +1243,6 @@ func TestA0FaultMatrix(t *testing.T) {
 			DAGAdvances:        appliedAdvances,
 			FinalStatus:        string(result.Status),
 			RecoveryTimeMS:     time.Since(recoveryStart).Milliseconds(),
-			Pass:               true,
 		}
 		writeA0FaultReport(t, report)
 		t.Logf("A0 scenario 3: queue-handoff: handler invocations=%d, DAG advances=%d, deliveries=%d, final=%s",
@@ -1239,226 +1278,6 @@ func TestA0FaultMatrix(t *testing.T) {
 		}
 	})
 
-	t.Run("OSKill", func(t *testing.T) {
-		// DIAGNOSTIC, in-process os-kill simulation (NOT a real OS SIGKILL).
-		// This scenario models non-graceful termination within one process:
-		// env1 submits with the fake queue failing (process died before
-		// delivery) and builds a lease that never commits (process died
-		// mid-handler). env2 binds a fresh engine to the same Redis: the
-		// background OutboxDispatcher scans and redelivers the stranded
-		// durable intent, and the expired-lease reclaim path (production:
-		// LeaseSweeper) revokes the stranded lease and re-enqueues. Both
-		// recovery paths converge on a single exactly-once DAG advance.
-		//
-		// Per spec §3.5 this in-process simulation must NOT satisfy the
-		// required "OS-kill" manifest entry. The required real-OS-SIGKILL
-		// evidence is provided by scenario "os-kill-sigkill" in
-		// TestA0OSKillSIGKILLRecovery (cyclic_reliability_process_test.go),
-		// which maps to manifest A0OSKillSIGKILL. The verifier
-		// (checkA0) additionally rejects any "synthetic_os_kill" protocol
-		// observation, so this diagnostic cannot masquerade as the required
-		// evidence. Kept here as a diagnostic of the in-process lease-reclaim +
-		// fencing path; do not add "os-kill" to A0RequiredScenarios().
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		// env1: fake queue failing (simulates process death before delivery).
-		// No Bind: no background OutboxDispatcher or timeout monitor.
-		env1, err := distributed.New(addr, nil, distributed.WithConsumer(false))
-		if err != nil {
-			t.Fatalf("env1 distributed.New() error = %v", err)
-		}
-		queue1 := &a0FaultQueue{err: errA0QueueUnavailable}
-		eng1 := engine.New(env1.State(), queue1,
-			engine.WithDefaultLeaseTTL(150*time.Millisecond),
-			engine.WithOutboxMaxDeliveryAttempts(5),
-		)
-		g := a0AcyclicGraph(t, "a0-os-kill")
-		id, err := eng1.Submit(ctx, g, map[string]any{"round": 1})
-		if err != nil {
-			t.Fatalf("env1 Submit() error = %v", err)
-		}
-		// The durable outbox entry survives: Submit does not fail even though
-		// the queue is unavailable.
-		atomicState1, ok := env1.State().(engine.AtomicStateStore)
-		if !ok {
-			t.Fatal("env1 StateStore does not implement AtomicStateStore")
-		}
-		stranded, err := atomicState1.ListOutbox(ctx, id, time.Now().Add(time.Second), 16)
-		if err != nil || len(stranded) != 1 {
-			t.Fatalf("env1 outbox after submit = %+v err=%v, want exactly 1 stranded entry", stranded, err)
-		}
-
-		// env1 also built a lease before "dying" — model this by building a
-		// lease on the stranded task. The lease is held in Redis state.
-		lease1, err := eng1.BuildTaskLease(ctx, &stranded[0].Task)
-		if err != nil {
-			t.Fatalf("env1 BuildTaskLease() error = %v", err)
-		}
-		if lease1 == nil || lease1.LeaseToken == "" {
-			t.Fatalf("env1 lease1 = %+v, want non-empty token", lease1)
-		}
-
-		// env1 "OS-killed" — non-graceful: release transport + Redis via the
-		// non-consumer Bind stop path.
-		env1Stop := env1.Bind(eng1)
-		env1Stop()
-
-		rdb := redis.NewClient(&redis.Options{Addr: addr})
-		t.Cleanup(func() {
-			deleteAtomicReliabilityKeys(t, rdb, id)
-			_ = rdb.Close()
-		})
-
-		// Wait for the stranded lease to expire so the reclaim path can revoke it.
-		time.Sleep(300 * time.Millisecond)
-
-		// env2: fresh engine bound to the same Redis. Bind starts the
-		// background OutboxDispatcher (outbox scan) and the timeout monitor.
-		env2, err := distributed.New(addr, nil, distributed.WithConsumer(true))
-		if err != nil {
-			t.Fatalf("env2 distributed.New() error = %v", err)
-		}
-		queue2 := &a0FaultQueue{}
-		eng2 := engine.New(env2.State(), queue2,
-			engine.WithDefaultLeaseTTL(time.Minute),
-			engine.WithOutboxMaxDeliveryAttempts(5),
-		)
-		atomicState2, ok := env2.State().(engine.AtomicStateStore)
-		if !ok {
-			t.Fatal("env2 StateStore does not implement AtomicStateStore")
-		}
-		stop := env2.Bind(eng2)
-		t.Cleanup(stop)
-
-		// Recovery path 1 — outbox scan: the background OutboxDispatcher
-		// redelivers the stranded durable intent. The redelivered task lands
-		// in queue2 (fake). Because env1 also left an expired lease, the
-		// redelivered task cannot acquire a lease until the expired lease is
-		// reclaimed.
-		// Recovery path 2 — lease reclaim: drive the LeaseSweeper path
-		// (ListExpiredLeases + ReclaimLease) to revoke lease1 and re-enqueue.
-		// recoveryStart brackets both recovery paths (outbox scan + lease
-		// reclaim) plus the redelivery wait, matching the user-visible
-		// "time to recover" semantics.
-		recoveryStart := time.Now()
-		var reclaimed bool
-		reclaimDeadline := time.Now().Add(10 * time.Second)
-		for {
-			expired, err := env2.State().ListExpiredLeases(ctx, time.Now())
-			if err != nil {
-				t.Fatalf("env2 ListExpiredLeases() error = %v", err)
-			}
-			for _, e := range expired {
-				if e.ExecutionID == id && e.NodeName == "start" {
-					if done, rerr := eng2.ReclaimLease(ctx, e); rerr != nil {
-						t.Fatalf("env2 ReclaimLease() error = %v", rerr)
-					} else if done {
-						reclaimed = true
-					}
-				}
-			}
-			if reclaimed {
-				break
-			}
-			if time.Now().After(reclaimDeadline) {
-				t.Fatalf("timeout waiting for expired-lease reclaim (expired=%+v)", expired)
-			}
-			time.Sleep(50 * time.Millisecond)
-		}
-
-		// Drain all redelivered tasks (from both outbox scan and reclaim).
-		// Multiple deliveries are allowed under at-least-once; each carries
-		// the same start task. BuildTaskLease succeeds for the first one (the
-		// reclaimed lease has been revoked); later duplicates are rejected as
-		// lease-already-active or execution-inactive, which is the fencing.
-		var redelivered *engine.Task
-		deliveryDeadline := time.Now().Add(10 * time.Second)
-		for {
-			tasks := queue2.drain()
-			if len(tasks) > 0 {
-				redelivered = tasks[len(tasks)-1]
-				break
-			}
-			if time.Now().After(deliveryDeadline) {
-				t.Fatalf("timeout waiting for redelivery after reclaim (deliveries=%d)", queue2.totalDeliveries())
-			}
-			time.Sleep(20 * time.Millisecond)
-		}
-
-		lease2, err := eng2.BuildTaskLease(ctx, redelivered)
-		if err != nil {
-			t.Fatalf("env2 BuildTaskLease() error = %v", err)
-		}
-
-		// Fencing: the original lease1 commit arriving late (e.g. delayed
-		// report from env1 before it died) must be classified stale_token —
-		// the reclaimed lease has been re-issued under lease2's token. This
-		// must be checked BEFORE lease2 commits (while the node is Running
-		// under lease2's token); after the terminal commit the late commit
-		// would be classified execution_inactive (also fencing, but not the
-		// path this scenario targets).
-		lateOutcome, lateErr := eng2.CommitTaskResultWithOutcome(ctx, lease1, engine.TaskResult{
-			Output: &types.Output{Data: map[string]any{"ok": true}},
-		})
-		if lateErr != nil && !errors.Is(lateErr, engine.ErrInvalidLeaseToken) {
-			t.Fatalf("late lease1 commit error = %v, want nil or ErrInvalidLeaseToken", lateErr)
-		}
-		if lateOutcome != engine.CommitOutcomeStaleToken {
-			t.Fatalf("late lease1 commit outcome = %q, want %q (fenced)", lateOutcome, engine.CommitOutcomeStaleToken)
-		}
-
-		// The retry commit (lease2) is the one that advances the DAG.
-		outcome2, err := eng2.CommitTaskResultWithOutcome(ctx, lease2, engine.TaskResult{
-			Output: &types.Output{Data: map[string]any{"ok": true}},
-		})
-		if err != nil {
-			t.Fatalf("env2 CommitTaskResult() error = %v", err)
-		}
-		if outcome2 != engine.CommitOutcomeAccepted {
-			t.Fatalf("env2 commit outcome = %q, want %q", outcome2, engine.CommitOutcomeAccepted)
-		}
-
-		// Final state: node + execution Success; outbox drained.
-		result := waitForCompletion(ctx, t, env2.State(), id)
-		if result.Status != types.ExecutionStatusSuccess {
-			t.Fatalf("execution after OS-kill recovery = %s, want %s", result.Status, types.ExecutionStatusSuccess)
-		}
-		node, _ := env2.State().GetNode(ctx, id, "start")
-		if node == nil || node.Status != types.NodeStatusSuccess {
-			t.Fatalf("node after OS-kill recovery = %+v, want Success", node)
-		}
-		postEntries, _ := atomicState2.ListOutbox(ctx, id, time.Now().Add(time.Second), 16)
-		if len(postEntries) != 0 {
-			t.Fatalf("outbox after recovery = %d, want 0 (terminal intent acked)", len(postEntries))
-		}
-
-		report := a0FaultReport{
-			Scenario:           "os-kill",
-			InjectionPoint:     "non-graceful termination post-submit (env1 killed before delivery + mid-handler lease1)",
-			ExecutionID:        string(id),
-			NodeName:           "start",
-			ActivationID:       redelivered.ActivationID,
-			LeaseToken:         string(lease2.LeaseToken),
-			NodeStatus:         string(node.Status),
-			ExecutionStatus:    string(result.Status),
-			CommitOutcome:      string(outcome2),
-			QueueDeliveries:    queue2.totalDeliveries(),
-			// HandlerInvocations is a logical estimate, not a measured count:
-			// this scenario does not run a real handler (CommitTaskResult is
-			// driven directly by the test). The value reflects the
-			// exactly-once DAG semantics: lease1's "lost" commit does not
-			// advance the DAG; only lease2's commit does (DAGAdvances=1).
-			HandlerInvocations: 1,
-			DAGAdvances:        1,
-			FinalStatus:        string(result.Status),
-			RecoveryTimeMS:     time.Since(recoveryStart).Milliseconds(),
-			Pass:               true,
-		}
-		writeA0FaultReport(t, report)
-		t.Logf("A0 scenario 4: os-kill: outbox scan + lease reclaim recovered; lease1 fenced=%s, lease2=%s, final=%s",
-			lateOutcome, outcome2, result.Status)
-	})
 }
 
 // errA0QueueUnavailable models a transient queue outage between the fenced

@@ -446,7 +446,6 @@ func TestA0OSKillSIGKILLRecovery(t *testing.T) {
 		SystemTaskDeliveries:       phaseB.SystemTaskDeliveries,
 		FinalStatus:                "",
 		RecoveryTimeMS:             phaseB.RecoveryTimeMS,
-		Pass:                       true,
 	})
 
 	// Raw-ledger fragment for the independent verifier (Task 15c). A is
