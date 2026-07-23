@@ -50,6 +50,11 @@ type Config struct {
 	// a read-only evidence sink. NewControlPlane converts only this typed
 	// buffer to an engine Option; it does not expose arbitrary []engine.Option.
 	RuntimeEvidenceBuffer *engine.RuntimeEvidenceBuffer
+	// LeaseTTL, when greater than zero, overrides the engine default lease TTL
+	// (60s). This is an additive seam for deterministic A0 request-loss tests
+	// that need a short TTL so the production LeaseSweeper reclaims the lease
+	// synchronously. LeaseTTL == 0 preserves the existing 60s default.
+	LeaseTTL time.Duration
 }
 
 type redisClientProvider interface {
@@ -110,6 +115,9 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 	}
 	if cfg.RuntimeEvidenceBuffer != nil {
 		engOpts = append(engOpts, engine.WithRuntimeEvidenceBuffer(cfg.RuntimeEvidenceBuffer))
+	}
+	if cfg.LeaseTTL > 0 {
+		engOpts = append(engOpts, engine.WithDefaultLeaseTTL(cfg.LeaseTTL))
 	}
 	if cfg.Metrics != nil {
 		engOpts = append(engOpts,
@@ -226,6 +234,11 @@ func (cp *ControlPlane) RunnerDirectory() RunnerDirectory { return cp.runners }
 // It is intended for read-only capability checks; the StateStore remains the
 // authoritative execution state.
 func (cp *ControlPlane) Backend() backend.Provider { return cp.backend }
+
+// Sweeper exposes the production LeaseSweeper for tests and admin tooling that
+// need to drive a synchronous sweep without waiting for the background loop.
+// It mirrors the read-only accessor pattern of RunnerDirectory() and Backend().
+func (cp *ControlPlane) Sweeper() *LeaseSweeper { return cp.sweeper }
 
 // Start binds the Task Dispatcher onto the backend's queue, begins leader
 // election (if the backend supports it), and starts the LeaseSweeper loop.

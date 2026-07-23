@@ -3,10 +3,13 @@
 package integration
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -45,6 +48,7 @@ type a0FaultReport struct {
 	DAGAdvances        int    `json:"dag_advances"`
 	FinalStatus        string `json:"final_status"`
 	RecoveryTimeMS     int64  `json:"recovery_time_ms"`
+	ReplayOutcome      string `json:"replay_outcome,omitempty"`
 	Err                string `json:"err,omitempty"`
 	Pass               bool   `json:"pass"`
 }
@@ -324,6 +328,49 @@ func drainA0Evidence(buf *engine.RuntimeEvidenceBuffer) []engine.RuntimeEvidence
 			return events
 		}
 	}
+}
+
+// waitForCondition polls fn until it returns true or ctx is canceled.
+func waitForCondition(ctx context.Context, fn func() bool, interval time.Duration) error {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		if fn() {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+// postReportResultRaw sends a ReportResult request directly through the HTTP
+// test server and returns the raw status code, decoded response (when the body
+// is valid JSON), and raw body. It is used by the request-loss scenario to
+// replay the captured first report and observe the server-authoritative
+// rejection without the runner protocol client's error-only abstraction.
+func postReportResultRaw(t *testing.T, baseURL string, client *http.Client, req protocol.ReportResultRequest) (int, protocol.ReportResultResponse, string) {
+	t.Helper()
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal report result request: %v", err)
+	}
+	httpReq, err := http.NewRequest(http.MethodPost, baseURL+protocol.ReportResultPath, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("build report result request: %v", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		t.Fatalf("post report result: %v", err)
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(resp.Body)
+	var out protocol.ReportResultResponse
+	_ = json.Unmarshal(data, &out)
+	return resp.StatusCode, out, string(data)
 }
 
 // TestA0FaultMatrix exercises the A0 process-level fault scenarios against a
@@ -623,6 +670,284 @@ func TestA0FaultMatrix(t *testing.T) {
 
 		// Stop the control-plane consumer before the next scenario so it does not
 		// race for the shared Asynq queue.
+		h.stop()
+	})
+
+	t.Run("ReportRequestLoss", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		defer cancel()
+
+		// Short TTL so the production LeaseSweeper reclaims the lost report's
+		// lease deterministically within the test timeout.
+		h := newServerRunnerHarnessWithLeaseTTL(t, addr, 1, 1*time.Second)
+
+		registry := execution.NewRegistry()
+		startHandler, startCounter := buildInstrumentedHandler(e2eRealHandler{}, "a0-report-request-loss-start")
+		registry.RegisterGlobal("test.a0.start", startHandler)
+		registry.RegisterGlobal("test.a0.done", e2eRealHandler{})
+
+		proxy := newRequestLossProtocolClient(protocol.NewClient(h.httpSrv.URL, h.httpSrv.Client()))
+
+		runnerAID := "runner-a0-report-request-loss-a"
+		runnerACtx, runnerACancel := context.WithCancel(context.Background())
+		defer runnerACancel()
+		runnerA := runnersvc.New(
+			proxy,
+			registry,
+			runnersvc.Config{
+				RunnerID:    runnerAID,
+				Concurrency: 1,
+				Capabilities: []protocol.Capability{
+					{NodeType: "test.a0.start"},
+					{NodeType: "test.a0.done"},
+				},
+				PollWait: 5 * time.Millisecond,
+			},
+		)
+		runnerAErrCh := make(chan error, 1)
+		go func() { runnerAErrCh <- runnerA.Run(runnerACtx) }()
+		waitForE2ERunner(t, h.runners, runnerAID)
+
+		def := &types.WorkflowDef{
+			Name: "a0-report-request-loss",
+			Nodes: []types.NodeDef{
+				{Name: "start", Type: "test.a0.start"},
+				{Name: "done", Type: "test.a0.done"},
+			},
+			Connections: types.Connections{
+				"start": {"main": []types.Connection{{Node: "done", Input: "main"}}},
+			},
+		}
+		execID := submitWorkflowHTTP(t, h.httpSrv.URL, h.httpSrv.Client(), def, map[string]any{"claim_id": "request-loss"})
+
+		// Wait for runner A to execute the handler and attempt the first report.
+		if err := waitForCondition(ctx, func() bool { return startCounter.Count() >= 1 }, 50*time.Millisecond); err != nil {
+			t.Fatalf("runner A did not execute start handler: %v", err)
+		}
+		if !proxy.SawTransportError() {
+			t.Fatalf("proxy did not capture and drop the first report")
+		}
+
+		// The server never received the first report, so there must be no
+		// accepted/applied commit receipt at this point.
+		preEvents := drainA0Evidence(h.EvidenceBuffer())
+		if dropped := h.EvidenceBuffer().Dropped(); dropped > 0 {
+			t.Fatalf("evidence buffer dropped %d events", dropped)
+		}
+		var preCommits, preAdvances int
+		for _, e := range preEvents {
+			if e.ExecutionID != execID || e.NodeName != "start" {
+				continue
+			}
+			if e.Type == engine.RuntimeEvidenceCommit && e.Applied {
+				preCommits++
+			}
+			if e.Type == engine.RuntimeEvidenceAdvance && e.Applied {
+				preAdvances++
+			}
+		}
+		if preCommits != 0 {
+			t.Fatalf("first report produced %d applied commits before reaching server, want 0", preCommits)
+		}
+		if preAdvances != 0 {
+			t.Fatalf("first report produced %d applied advances before reaching server, want 0", preAdvances)
+		}
+
+		// Runner A exits because it observed a transport error.
+		runnerACancel()
+		select {
+		case err := <-runnerAErrCh:
+			if err == nil {
+				t.Fatalf("runner A expected transport error, got nil")
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("runner A did not stop in time")
+		}
+
+		captured := proxy.CapturedRequest()
+		if captured == nil || captured.Lease == nil {
+			t.Fatalf("proxy did not capture the original report request")
+		}
+
+		// Wait for the engine lease to expire, then drive the REAL production
+		// LeaseSweeper (directory cleanup first, then engine reclaim). This is
+		// the spec §3.3 mandated path: no test-pieced ListExpiredLeases +
+		// CommitTaskResult.
+		if err := waitForCondition(ctx, func() bool {
+			expired, lerr := h.state.ListExpiredLeases(ctx, time.Now())
+			if lerr != nil {
+				t.Logf("ListExpiredLeases error: %v", lerr)
+				return false
+			}
+			for _, e := range expired {
+				if e.ExecutionID == execID && e.NodeName == "start" {
+					return true
+				}
+			}
+			return false
+		}, 50*time.Millisecond); err != nil {
+			t.Fatalf("start lease did not expire: %v", err)
+		}
+		swept := h.Sweeper().SweepOnce(ctx)
+		t.Logf("LeaseSweeper reclaimed %d lease(s)", swept)
+
+		// Verify directory cleanup: the old finalized lease/seen/capacity must
+		// have been released by the sweeper's token-fenced ReleaseExpiredLease.
+		lookup, ok := h.runners.(control.LeaseLookup)
+		if !ok {
+			t.Fatal("runner directory does not implement LeaseLookup")
+		}
+		_, found, _ := lookup.LookupLease(ctx, captured.RunnerID, captured.SessionID, control.LeaseLookupKey{
+			LeaseToken: captured.Lease.LeaseToken,
+		})
+		if found {
+			t.Fatalf("old finalized lease still found in runner directory after SweepOnce")
+		}
+
+		// Runner B is a fresh session with a distinct RunnerID. It must be able
+		// to claim the reclaimed assignment and execute the handler a second time.
+		runnerBID := "runner-a0-report-request-loss-b"
+		runnerBCtx, runnerBCancel := context.WithCancel(context.Background())
+		defer runnerBCancel()
+		runnerB := runnersvc.New(
+			protocol.NewClient(h.httpSrv.URL, h.httpSrv.Client()),
+			registry,
+			runnersvc.Config{
+				RunnerID:    runnerBID,
+				Concurrency: 1,
+				Capabilities: []protocol.Capability{
+					{NodeType: "test.a0.start"},
+					{NodeType: "test.a0.done"},
+				},
+				PollWait: 5 * time.Millisecond,
+			},
+		)
+		runnerBErrCh := make(chan error, 1)
+		go func() { runnerBErrCh <- runnerB.Run(runnerBCtx) }()
+		waitForE2ERunner(t, h.runners, runnerBID)
+
+		result := waitForCompletion(ctx, t, h.state, execID, "start")
+
+		// Drain the runtime evidence and count the authoritative commit/advance
+		// receipts for the start node.
+		events := drainA0Evidence(h.EvidenceBuffer())
+		if dropped := h.EvidenceBuffer().Dropped(); dropped > 0 {
+			t.Fatalf("evidence buffer dropped %d events", dropped)
+		}
+		var appliedCommits, appliedAdvances int
+		var commitOutcome engine.CommitOutcome
+		for _, e := range events {
+			if e.ExecutionID != execID || e.NodeName != "start" {
+				continue
+			}
+			switch e.Type {
+			case engine.RuntimeEvidenceCommit:
+				if e.Applied {
+					appliedCommits++
+					commitOutcome = e.CommitOutcome
+				}
+			case engine.RuntimeEvidenceAdvance:
+				if e.Applied {
+					appliedAdvances++
+				}
+			}
+		}
+
+		handlerInvocations := startCounter.Count()
+		if handlerInvocations < 2 {
+			t.Fatalf("handler invocations = %d, want >= 2", handlerInvocations)
+		}
+		if appliedCommits != 1 {
+			t.Fatalf("applied commit receipts = %d, want 1", appliedCommits)
+		}
+		if appliedAdvances != 1 {
+			t.Fatalf("applied advance receipts = %d, want 1", appliedAdvances)
+		}
+
+		node, err := h.state.GetNode(ctx, execID, "start")
+		if err != nil || node == nil || node.Status != types.NodeStatusSuccess {
+			t.Fatalf("start node after request-loss = %+v err=%v, want Success", node, err)
+		}
+		doneNode, err := h.state.GetNode(ctx, execID, "done")
+		if err != nil || doneNode == nil || doneNode.Status != types.NodeStatusSuccess {
+			t.Fatalf("done node after request-loss = %+v err=%v, want Success", doneNode, err)
+		}
+		if result.Status != types.ExecutionStatusSuccess {
+			t.Fatalf("execution after request-loss = %s, want Success", result.Status)
+		}
+
+		// Replay the captured first report directly against the control plane.
+		// The old lease has been reclaimed, so the report must be rejected with
+		// an authority error and must produce zero new mutation.
+		statusCode, replayResp, replayBody := postReportResultRaw(t, h.httpSrv.URL, h.httpSrv.Client(), *captured)
+		var replayOutcome string
+		switch {
+		case statusCode == http.StatusOK && replayResp.Accepted:
+			t.Fatalf("replayed first report was accepted unexpectedly")
+		case strings.Contains(strings.ToLower(replayBody), "invalid lease token"):
+			replayOutcome = "invalid_lease_token"
+		case strings.Contains(strings.ToLower(replayBody), "stale"),
+			strings.Contains(strings.ToLower(replayBody), "unauthenticated"),
+			strings.Contains(strings.ToLower(replayBody), "runner not found"):
+			replayOutcome = "authority_rejected"
+		default:
+			replayOutcome = "rejected"
+		}
+		if replayOutcome == "" {
+			t.Fatalf("replayed first report outcome is empty")
+		}
+
+		postReplayEvents := drainA0Evidence(h.EvidenceBuffer())
+		var replayCommits, replayAdvances int
+		for _, e := range postReplayEvents {
+			if e.ExecutionID != execID || e.NodeName != "start" {
+				continue
+			}
+			if e.Type == engine.RuntimeEvidenceCommit && e.Applied {
+				replayCommits++
+			}
+			if e.Type == engine.RuntimeEvidenceAdvance && e.Applied {
+				replayAdvances++
+			}
+		}
+		if replayCommits != 0 || replayAdvances != 0 {
+			t.Fatalf("replayed first report produced mutations: commits=%d advances=%d, want 0/0", replayCommits, replayAdvances)
+		}
+
+		// Release runner B's consumer before writing the report so the next
+		// scenario does not race for the shared Asynq queue.
+		runnerBCancel()
+		select {
+		case err := <-runnerBErrCh:
+			if err != nil && !errors.Is(err, context.Canceled) {
+				t.Logf("runner B exit error: %v", err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Logf("runner B did not exit cleanly within timeout")
+		}
+
+		report := a0FaultReport{
+			Scenario:           "report-request-loss",
+			InjectionPoint:     "runner ReportResult request lost before reaching control plane",
+			ExecutionID:        string(execID),
+			NodeName:           "start",
+			ActivationID:       captured.Lease.Task.ActivationID,
+			LeaseToken:         string(captured.Lease.LeaseToken),
+			NodeStatus:         string(node.Status),
+			ExecutionStatus:    string(result.Status),
+			CommitOutcome:      string(commitOutcome),
+			QueueDeliveries:    1,
+			HandlerInvocations: handlerInvocations,
+			DAGAdvances:        appliedAdvances,
+			FinalStatus:        string(result.Status),
+			RecoveryTimeMS:     0,
+			ReplayOutcome:      replayOutcome,
+			Pass:               true,
+		}
+		writeA0FaultReport(t, report)
+		t.Logf("A0 scenario ReportRequestLoss: handler invocations=%d, applied commits=%d, applied advances=%d, replay outcome=%s, final=%s",
+			handlerInvocations, appliedCommits, appliedAdvances, replayOutcome, result.Status)
+
 		h.stop()
 	})
 

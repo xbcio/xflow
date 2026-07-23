@@ -91,6 +91,7 @@ type serverRunnerHarness struct {
 	httpSrv  *httptest.Server
 	state    engine.StateStore
 	runners  control.RunnerDirectory
+	cp       *control.ControlPlane
 	cancel   context.CancelFunc
 	evidence *engine.RuntimeEvidenceBuffer
 
@@ -131,6 +132,10 @@ func (h *serverRunnerHarness) stop() {
 // owns a separate buffer; it must not be reused across topologies.
 func (h *serverRunnerHarness) EvidenceBuffer() *engine.RuntimeEvidenceBuffer { return h.evidence }
 
+// Sweeper returns the production LeaseSweeper so A0 request-loss tests can
+// drive directory cleanup + engine reclaim synchronously with a short TTL.
+func (h *serverRunnerHarness) Sweeper() *control.LeaseSweeper { return h.cp.Sweeper() }
+
 // newServerRunnerHarness brings up the server-runner topology against addr
 // (Redis). It flushes stale asynq tasks from prior crashed runs (scoped to the
 // asynq:* namespace so it does not disturb leader-election keys), starts the
@@ -165,6 +170,48 @@ func newServerRunnerHarness(t *testing.T, addr string, concurrency int) *serverR
 		httpSrv:  httpSrv,
 		state:    b.State(),
 		runners:  cp.RunnerDirectory(),
+		cp:       cp,
+		cancel:   cancel,
+		evidence: buf,
+	}
+	t.Cleanup(func() { h.stop() })
+	return h
+}
+
+// newServerRunnerHarnessWithLeaseTTL is like newServerRunnerHarness but starts
+// the control plane with a short engine lease TTL so A0 request-loss tests can
+// deterministically reclaim the expired lease via the production sweeper.
+func newServerRunnerHarnessWithLeaseTTL(t *testing.T, addr string, concurrency int, ttl time.Duration) *serverRunnerHarness {
+	t.Helper()
+	b, err := distributed.New(addr, nil, distributed.WithConcurrency(concurrency), distributed.WithConsumer(true))
+	if err != nil {
+		t.Fatalf("distributed.New: %v", err)
+	}
+	rdb := redis.NewClient(&redis.Options{Addr: addr})
+	flushAsynqKeys(context.Background(), t, rdb)
+	_ = rdb.Close()
+
+	buf := engine.NewRuntimeEvidenceBuffer(64)
+	cp, err := control.NewControlPlane(control.Config{Backend: b, RuntimeEvidenceBuffer: buf, LeaseTTL: ttl})
+	if err != nil {
+		t.Fatalf("NewControlPlane: %v", err)
+	}
+	srv, err := apiserver.New(apiserver.Config{}, apiserver.WithControlPlane(cp))
+	if err != nil {
+		t.Fatalf("apiserver.New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	if err := srv.Start(ctx); err != nil {
+		cancel()
+		t.Fatalf("apiserver.Start: %v", err)
+	}
+	httpSrv := httptest.NewServer(srv.Handler())
+	h := &serverRunnerHarness{
+		srv:      srv,
+		httpSrv:  httpSrv,
+		state:    b.State(),
+		runners:  cp.RunnerDirectory(),
+		cp:       cp,
 		cancel:   cancel,
 		evidence: buf,
 	}
@@ -288,6 +335,7 @@ func newProductionServerRunnerHarness(t *testing.T, addr, dsn string, mappings [
 		httpSrv: httpSrv,
 		state:   b.State(),
 		runners: cp.RunnerDirectory(),
+		cp:      cp,
 		cancel:  cancel,
 	}
 	t.Cleanup(func() {
