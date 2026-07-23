@@ -268,6 +268,7 @@ type a0FaultEnv struct {
 	rdb     *redis.Client
 	addr    string
 	stop    func()
+	evidence *engine.RuntimeEvidenceBuffer
 }
 
 func newA0FaultEnv(t *testing.T, addr string, consumer bool) *a0FaultEnv {
@@ -277,9 +278,11 @@ func newA0FaultEnv(t *testing.T, addr string, consumer bool) *a0FaultEnv {
 		t.Fatalf("distributed.New() error = %v", err)
 	}
 	queue := &a0FaultQueue{}
+	buf := engine.NewRuntimeEvidenceBuffer(64)
 	eng := engine.New(backend.State(), queue,
 		engine.WithDefaultLeaseTTL(time.Minute),
 		engine.WithOutboxMaxDeliveryAttempts(5),
+		engine.WithRuntimeEvidenceBuffer(buf),
 	)
 	var stop func()
 	if consumer {
@@ -307,6 +310,7 @@ func newA0FaultEnv(t *testing.T, addr string, consumer bool) *a0FaultEnv {
 		rdb:     rdb,
 		addr:    addr,
 		stop:    stop,
+		evidence: buf,
 	}
 	t.Cleanup(func() {
 		_ = rdb.Close()
@@ -314,6 +318,8 @@ func newA0FaultEnv(t *testing.T, addr string, consumer bool) *a0FaultEnv {
 	})
 	return env
 }
+
+func (env *a0FaultEnv) EvidenceBuffer() *engine.RuntimeEvidenceBuffer { return env.evidence }
 
 // drainA0Evidence non-blockingly reads all currently available events from the
 // runtime evidence buffer. It is used after a scenario converges so the test
@@ -487,6 +493,24 @@ func TestA0FaultMatrix(t *testing.T) {
 		}
 		recoveryTimeMS := time.Since(recoveryStart).Milliseconds()
 
+		evs := drainA0Evidence(env.EvidenceBuffer())
+		appliedCommits := 0
+		appliedAdvances := 0
+		for _, ev := range evs {
+			if ev.ExecutionID != id {
+				continue
+			}
+			if ev.Type == engine.RuntimeEvidenceCommit && ev.Applied {
+				appliedCommits++
+			}
+			if ev.Type == engine.RuntimeEvidenceAdvance && ev.Applied {
+				appliedAdvances++
+			}
+		}
+		if appliedCommits == 0 {
+			t.Fatalf("no applied commit receipts for %s — evidence wiring broken", id)
+		}
+
 		report := a0FaultReport{
 			Scenario:           "commit-then-flush-before-delivery",
 			InjectionPoint:     "queue unavailable during post-commit flush of start->done downstream",
@@ -498,8 +522,8 @@ func TestA0FaultMatrix(t *testing.T) {
 			ExecutionStatus:    string(finalExec.Status),
 			CommitOutcome:      string(outcome),
 			QueueDeliveries:    env.queue.totalDeliveries(),
-			HandlerInvocations: 2,
-			DAGAdvances:        2,
+			HandlerInvocations: appliedCommits,
+			DAGAdvances:        appliedAdvances,
 			FinalStatus:        string(finalExec.Status),
 			RecoveryTimeMS:     recoveryTimeMS,
 			Pass:               true,
@@ -999,13 +1023,18 @@ func TestA0FaultMatrix(t *testing.T) {
 		if err != nil {
 			t.Fatalf("env2 distributed.New() error = %v", err)
 		}
+		buf2 := engine.NewRuntimeEvidenceBuffer(64)
 		eng2 := engine.New(env2.State(), env2.Queue(),
 			engine.WithDefaultLeaseTTL(time.Minute),
+			engine.WithRuntimeEvidenceBuffer(buf2),
 		)
 
 		handlerInvocations := 0
+		deliveries := 0
 		handlerDone := make(chan error, 1)
+		recoveryStart := time.Now()
 		stop := env2.BindHandler(eng2, func(ctx context.Context, task *engine.Task) error {
+			deliveries++
 			handlerInvocations++
 			lease, lerr := eng2.BuildTaskLease(ctx, task)
 			if lerr != nil {
@@ -1045,6 +1074,24 @@ func TestA0FaultMatrix(t *testing.T) {
 			t.Fatalf("node after handoff = %+v, want Success", node)
 		}
 
+		evs := drainA0Evidence(buf2)
+		appliedCommits := 0
+		appliedAdvances := 0
+		for _, ev := range evs {
+			if ev.ExecutionID != id {
+				continue
+			}
+			if ev.Type == engine.RuntimeEvidenceCommit && ev.Applied {
+				appliedCommits++
+			}
+			if ev.Type == engine.RuntimeEvidenceAdvance && ev.Applied {
+				appliedAdvances++
+			}
+		}
+		if appliedCommits == 0 {
+			t.Fatalf("no applied commit receipts for %s — evidence wiring broken", id)
+		}
+
 		report := a0FaultReport{
 			Scenario:           "queue-handoff",
 			InjectionPoint:     "consumer crash before process (env1 submitted without consumer; env2 binds fresh consumer)",
@@ -1055,16 +1102,16 @@ func TestA0FaultMatrix(t *testing.T) {
 			NodeStatus:         string(node.Status),
 			ExecutionStatus:    string(result.Status),
 			CommitOutcome:      string(engine.CommitOutcomeAccepted),
-			QueueDeliveries:    1,
+			QueueDeliveries:    deliveries,
 			HandlerInvocations: handlerInvocations,
-			DAGAdvances:        1,
+			DAGAdvances:        appliedAdvances,
 			FinalStatus:        string(result.Status),
-			RecoveryTimeMS:     0,
+			RecoveryTimeMS:     time.Since(recoveryStart).Milliseconds(),
 			Pass:               true,
 		}
 		writeA0FaultReport(t, report)
-		t.Logf("A0 scenario 3: queue-handoff: handler invocations=%d, DAG advances=1, final=%s",
-			handlerInvocations, result.Status)
+		t.Logf("A0 scenario 3: queue-handoff: handler invocations=%d, DAG advances=%d, deliveries=%d, final=%s",
+			handlerInvocations, appliedAdvances, deliveries, result.Status)
 	})
 
 	t.Run("OSKill", func(t *testing.T) {
