@@ -3,8 +3,9 @@ package engine
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync/atomic"
+
+	"github.com/google/uuid"
 
 	"github.com/xbcio/xflow/types"
 )
@@ -119,11 +120,8 @@ func publishRuntimeEvidence(b *RuntimeEvidenceBuffer, event RuntimeEvidenceEvent
 	}
 }
 
-var runtimeEventSeq uint64
-
 func newRuntimeEventID(ctx context.Context, execID types.ExecutionID, node string, attempt int) string {
-	n := atomic.AddUint64(&runtimeEventSeq, 1)
-	return fmt.Sprintf("rev-%d-%s-%s-%d", n, execID, node, attempt)
+	return uuid.New().String()
 }
 
 // publishAdvanceReceipt publishes a read-only advance evidence event after the
