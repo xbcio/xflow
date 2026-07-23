@@ -144,13 +144,25 @@ func (e *Engine) commitLegacyNodeError(ctx context.Context, lease *TaskLease, me
 	if retried, err := e.tryRetryWithAttempt(ctx, &lease.Task, meta, systemErr, lease.Attempt, lease.LeaseToken); err != nil {
 		return CommitOutcomeTransientError, fmt.Errorf("retry node %q/%q: %w", lease.Task.ExecutionID, lease.Task.NodeName, err)
 	} else if retried {
+		e.publishRetryReceipt(ctx, &lease.Task, lease.Attempt)
 		return CommitOutcomeAccepted, nil
 	}
 	outcome := ApplyOnError(meta.OnError, systemErr, businessErr, output)
-	return e.commitLegacyNode(ctx, lease, outcome.NodeStatus, outcome.Output, outcome.RoutePort, outcome.ErrorMessage, outcome.ExecFatal)
+	errorPort := outcome.RoutePort == "error" && businessErr == nil
+	cls := buildEffectiveClassification(systemErr, businessErr, errorPort)
+	return e.commitLegacyNodeWithClassification(ctx, lease, outcome.NodeStatus, outcome.Output, outcome.RoutePort, outcome.ErrorMessage, outcome.ExecFatal, cls)
 }
 
 func (e *Engine) commitLegacyNode(ctx context.Context, lease *TaskLease, status types.NodeStatus, output map[string]any, port, errMsg string, fatal bool) (CommitOutcome, error) {
+	return e.commitLegacyNodeWithClassification(ctx, lease, status, output, port, errMsg, fatal, EffectiveClassification{})
+}
+
+// commitLegacyNodeWithClassification applies a fenced terminal transition for a
+// cyclic (or experimental loop/split) node and its deterministic downstream
+// intent in one backend transaction. cls is the EffectiveClassification bound
+// to this commit (empty for non-error commits); it is only carried on the
+// read-only commit receipt and never changes control flow.
+func (e *Engine) commitLegacyNodeWithClassification(ctx context.Context, lease *TaskLease, status types.NodeStatus, output map[string]any, port, errMsg string, fatal bool, cls EffectiveClassification) (CommitOutcome, error) {
 	task := &lease.Task
 	g, active, err := e.loadActiveGraph(ctx, task.ExecutionID)
 	if err != nil {
@@ -184,7 +196,7 @@ func (e *Engine) commitLegacyNode(ctx context.Context, lease *TaskLease, status 
 		plan = e.planCyclicDownstream(g, &lease.Task, port)
 	}
 
-	result, err := committer.CommitLeasedNode(ctx, CommitNodeRequest{
+	req := CommitNodeRequest{
 		ExecutionID:       task.ExecutionID,
 		NodeName:          task.NodeName,
 		NodeIdx:           task.NodeIdx,
@@ -203,9 +215,24 @@ func (e *Engine) commitLegacyNode(ctx context.Context, lease *TaskLease, status 
 		CyclicComplete:    plan.complete,
 		CyclicFinalStatus: plan.finalStatus,
 		CyclicFinalError:  plan.finalError,
-	})
+	}
+	result, err := committer.CommitLeasedNode(ctx, req)
 	if err != nil {
 		return CommitOutcomeTransientError, err
+	}
+	// Publish read-only runtime evidence receipts for the accepted terminal
+	// case, mirroring the acyclic atomic path (Tasks 3/4). Non-blocking and
+	// nil-buffer-safe; never changes commit control flow or return values. The
+	// cyclic "advance" is the activation of the downstream cyclic task: the
+	// durable outbox entry persisted within this same fenced commit IS the
+	// advance, so an advance receipt is published when downstream intents were
+	// actually applied (result.OutboxIDs carries the cyclic outbox entry IDs
+	// because the cyclic request sets no AdvanceTask).
+	if result.Outcome == CommitOutcomeAccepted {
+		e.publishCommitReceipt(ctx, req, result, cls)
+		if result.Applied && len(result.OutboxIDs) > 0 {
+			e.publishAdvanceReceipt(ctx, task, AdvanceNodeResult{Applied: true, OutboxIDs: result.OutboxIDs})
+		}
 	}
 	switch result.Outcome {
 	case CommitOutcomeAccepted:

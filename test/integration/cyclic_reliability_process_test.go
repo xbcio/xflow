@@ -403,11 +403,12 @@ func TestA0OSKillSIGKILLRecovery(t *testing.T) {
 	}
 	// DAGAdvances is the honest count of applied advance receipts drained from
 	// process B's runtime evidence buffer — never a constant. The cyclic commit
-	// path does not publish advance receipts (only the acyclic atomic path
-	// does), so this is honestly 0 for the cyclic graph; the parent asserts
-	// >= 0 and records the measured value rather than hardcoding 0.
-	if phaseB.DAGAdvances < 0 {
-		t.Fatalf("phase B DAG advances = %d, want >=0 (honest measured value)", phaseB.DAGAdvances)
+	// path now publishes an advance receipt when a downstream cyclic outbox
+	// entry is persisted in an accepted commit (the cyclic "advance"). B
+	// committed the recovered start task on port "main", which persists the
+	// downstream review@round2 intent, so this is honestly >=1.
+	if phaseB.DAGAdvances < 1 {
+		t.Fatalf("phase B DAG advances = %d, want >=1 (B's recovered start commit persists a downstream cyclic outbox entry → advance receipt)", phaseB.DAGAdvances)
 	}
 	// Business/system count separation (Task 13 core): process B is
 	// direct-drive (it leases+commits the recovered task itself; no action
@@ -535,14 +536,12 @@ func a0HelperSigkillAfterCommit(t *testing.T) {
 	// it can write a report, so the receipt travels over stdout. Fields come
 	// from authoritative observations of the commit boundary — never fabricated.
 	//
-	// Source priority: the runtime evidence buffer (Task 3 commit receipt) is
-	// preferred. The cyclic commit path does not currently publish a runtime
-	// evidence commit receipt (only the acyclic atomic path does), so when the
-	// buffer is empty we fall back to the directly-observed durable Redis
-	// outbox + the commit's returned outcome — both real, server-authoritative
-	// signals of the commit boundary. The parent re-reads the same Redis outbox
-	// after the SIGKILL and cross-verifies these IDs, so a fabricated value
-	// here would be caught.
+	// Source priority: the runtime evidence buffer commit receipt (Task 3/4
+	// receipt, now published by the cyclic commit path) is PREFERRED for
+	// EventID/Accepted/Applied/OutboxIDs. The cyclic path emits a commit receipt
+	// for every accepted terminal commit, so the buffer must contain one for
+	// "review"; if it does not, that is a wiring regression and we fatal. The
+	// Redis-outbox fallback below is retained as defense-in-depth only.
 	receipt := ipcReceipt{
 		ExecutionID: string(id),
 		NodeName:    "review",
@@ -552,14 +551,17 @@ func a0HelperSigkillAfterCommit(t *testing.T) {
 	for _, e := range stranded {
 		receipt.OutboxIDs = append(receipt.OutboxIDs, e.ID)
 	}
-	// Override with the runtime evidence receipt when the engine published one.
+	// Override with the runtime evidence receipt — the authoritative signal the
+	// engine emits at the commit boundary.
+	var bufHasCommitReceipt bool
 	for _, ev := range drainA0Evidence(bufA) {
-		if ev.Type != engine.RuntimeEvidenceCommit || !ev.Applied {
+		if ev.Type != engine.RuntimeEvidenceCommit {
 			continue
 		}
 		if ev.ExecutionID != id || ev.NodeName != "review" {
 			continue
 		}
+		bufHasCommitReceipt = true
 		receipt.EventID = ev.EventID
 		receipt.Accepted = ev.CommitOutcome == engine.CommitOutcomeAccepted
 		receipt.Applied = ev.Applied
@@ -567,6 +569,9 @@ func a0HelperSigkillAfterCommit(t *testing.T) {
 			receipt.OutboxIDs = ev.OutboxIDs
 		}
 		break
+	}
+	if !bufHasCommitReceipt {
+		t.Fatalf("cyclic commit path did not publish a commit receipt for review/%s — engine regression (buffer empty, falling back to Redis-outbox only)", id)
 	}
 	// EventID: prefer the runtime evidence receipt's EventID; otherwise use the
 	// durable outbox entry ID — a real, commit-generated, server-side identifier
@@ -876,8 +881,10 @@ func a0HelperRecoverAndReport(t *testing.T) {
 	businessHandlerInvocations := 0
 	systemTaskDeliveries := len(delivered)
 	commitBErr := ""
-	bCommitAccepted := false
-	bCommitApplied := false
+	// bCommitAccepted/bCommitApplied/bCommitEventID are drained from B's runtime
+	// evidence buffer (the authoritative commit receipt the engine emits at the
+	// commit boundary), NOT derived from the commit call's nil-error return.
+	var bCommitAccepted, bCommitApplied bool
 	var bCommitEventID string
 
 	// When the parent requests it (SIGKILL scenario only), process the
@@ -908,18 +915,20 @@ func a0HelperRecoverAndReport(t *testing.T) {
 					!errors.Is(cerr, engine.ErrInvalidLeaseToken) {
 					commitBErr = "commit recovered: " + cerr.Error()
 				}
-			} else {
-				bCommitAccepted = true
-				bCommitApplied = true
 			}
+			// Accepted/Applied are resolved from the buffer receipt below, not
+			// from the nil-error return, so the proof is bound to the engine's
+			// own commit-boundary observation.
 		}
 	}
 
-	// Drain B's runtime evidence buffer for the honest applied-advance count.
-	// The cyclic commit path does not publish advance receipts (only the
-	// acyclic atomic path does), so this is honestly 0 for the cyclic graph —
-	// never hardcoded. Whatever the engine emits (>=0) is what we report.
-	// Also recover B's own commit receipt if the engine published one.
+	// Drain B's runtime evidence buffer for the honest commit/advance counts.
+	// The cyclic commit path now publishes both a commit receipt and an
+	// advance receipt for every accepted terminal commit that persists a
+	// downstream cyclic outbox entry (the cyclic "advance" = activating the
+	// downstream cyclic task within the same fenced commit). So when B
+	// committed the recovered start task, appliedAdvances is >=1; when B did
+	// not commit (graceful-exit sibling), it is honestly 0.
 	appliedAdvances := 0
 	for _, ev := range drainA0Evidence(bufB) {
 		if ev.ExecutionID != execID {
@@ -928,10 +937,13 @@ func a0HelperRecoverAndReport(t *testing.T) {
 		if ev.Type == engine.RuntimeEvidenceAdvance && ev.Applied {
 			appliedAdvances++
 		}
-		if ev.Type == engine.RuntimeEvidenceCommit && ev.Applied &&
+		if ev.Type == engine.RuntimeEvidenceCommit &&
 			ev.CommitOutcome == engine.CommitOutcomeAccepted &&
+			ev.Applied &&
 			ev.NodeName == last.NodeName && bCommitEventID == "" {
 			bCommitEventID = ev.EventID
+			bCommitAccepted = true
+			bCommitApplied = true
 		}
 	}
 
