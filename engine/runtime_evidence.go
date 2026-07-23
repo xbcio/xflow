@@ -147,6 +147,26 @@ func (e *Engine) publishAdvanceReceipt(ctx context.Context, task *Task, result A
 	})
 }
 
+// publishRetryReceipt publishes a read-only retry evidence event after the
+// engine decided to schedule a retry. Non-blocking; never changes retry control
+// flow or return values. It carries no error full text, credentials, or tenant
+// payload.
+func (e *Engine) publishRetryReceipt(ctx context.Context, task *Task, attempt int) {
+	if e.evidenceBuffer == nil {
+		return
+	}
+	publishRuntimeEvidence(e.evidenceBuffer, RuntimeEvidenceEvent{
+		Version:      1,
+		EventID:      newRuntimeEventID(ctx, task.ExecutionID, task.NodeName, attempt),
+		Type:         RuntimeEvidenceRetry,
+		ExecutionID:  task.ExecutionID,
+		NodeName:     task.NodeName,
+		NodeIdx:      task.NodeIdx,
+		ActivationID: task.ActivationID,
+		Attempt:      attempt,
+	})
+}
+
 // buildEffectiveClassification derives the production classification bound to a
 // commit. source distinguishes ordinary system error from explicit error-port
 // output; it cannot be inferred from systemErr's type alone.

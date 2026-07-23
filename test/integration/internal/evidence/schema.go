@@ -160,16 +160,36 @@ func NewEnvelope() *Envelope {
 
 // EffectiveClassificationFromEvent projects an engine event into the envelope
 // classification struct without copying full error text or tenant payload.
+//
+// Business and explicit error-port outputs are not wrapped in a ClassifiedError
+// (Classified==false), but they still carry a stable kind by matrix convention,
+// so they are projected here. Unclassified successful commits return nil.
 func EffectiveClassificationFromEvent(ev engine.RuntimeEvidenceEvent) *EffectiveClassification {
-	if !ev.Classified {
+	switch {
+	case ev.Classified:
+		// keep projection below
+	case ev.ErrorSource == engine.ErrorSourceBusiness, ev.ErrorSource == engine.ErrorSourceErrorPort:
+		// recognized categories with a stable kind despite Classified==false
+	default:
 		return nil
 	}
+
+	kind := ev.ErrorKind
+	if kind == "" {
+		switch ev.ErrorSource {
+		case engine.ErrorSourceBusiness:
+			kind = types.ErrorKindBusiness
+		case engine.ErrorSourceErrorPort:
+			kind = types.ErrorKindErrorPort
+		}
+	}
+
 	return &EffectiveClassification{
-		Source:    ev.ErrorSource,
+		Source:     ev.ErrorSource,
 		Classified: ev.Classified,
-		Kind:      ev.ErrorKind,
-		Retryable: ev.Retryable,
-		Permanent: ev.Permanent,
-		Code:      ev.ErrorCode,
+		Kind:       kind,
+		Retryable:  ev.Retryable,
+		Permanent:  ev.Permanent,
+		Code:       ev.ErrorCode,
 	}
 }

@@ -15,6 +15,9 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
+// a3RowKey identifies one cell of the A3 fixture × topology matrix.
+type a3RowKey struct{ fixture, topology string }
+
 // ProvenanceProvider abstracts git/binary provenance so unit tests can inject
 // controlled values without touching the real repo or filesystem.
 type ProvenanceProvider interface {
@@ -232,11 +235,14 @@ func (v *Verifier) Verify(env *Envelope, suiteEvents []GoTestEvent) Verification
 	derived := v.computeDerivedObservations(env)
 	env.DerivedObservations = derived
 
+	// 4b. Detect duplicate scenario/row markers from distinct executions.
+	dupA0, dupA3 := findDuplicateMarkers(env.Raw.ProtocolObservations)
+
 	// 5. A0 checks.
-	errors = append(errors, v.checkA0(env, derived)...)
+	errors = append(errors, v.checkA0(env, derived, dupA0)...)
 
 	// 6. A3 checks.
-	errors = append(errors, v.checkA3(env, derived)...)
+	errors = append(errors, v.checkA3(env, derived, dupA3)...)
 
 	passed := len(errors) == 0
 	env.Verification = Verification{
@@ -340,6 +346,39 @@ func checkNoPreaggregatedFields(env *Envelope) []string {
 	return errs
 }
 
+// findDuplicateMarkers scans protocol observations for two distinct executions
+// claiming the same A0 scenario or A3 row. The verifier uses these maps to
+// reject duplicate rows before deriving observations, because the derivation
+// loop only produces one observation per manifest entry.
+func findDuplicateMarkers(pos []ProtocolObservation) (map[string]struct{}, map[a3RowKey]struct{}) {
+	dupA0 := make(map[string]struct{})
+	dupA3 := make(map[a3RowKey]struct{})
+	a0Seen := make(map[string]types.ExecutionID)
+	a3Seen := make(map[a3RowKey]types.ExecutionID)
+
+	for _, po := range pos {
+		switch po.Type {
+		case "scenario_marker":
+			scenario := po.Topology
+			if prev, ok := a0Seen[scenario]; ok && prev != po.ExecutionID {
+				dupA0[scenario] = struct{}{}
+			} else {
+				a0Seen[scenario] = po.ExecutionID
+			}
+		case "a3_row_marker":
+			fixture, _ := po.Detail["fixture"].(string)
+			topology, _ := po.Detail["topology"].(string)
+			key := a3RowKey{fixture: fixture, topology: topology}
+			if prev, ok := a3Seen[key]; ok && prev != po.ExecutionID {
+				dupA3[key] = struct{}{}
+			} else {
+				a3Seen[key] = po.ExecutionID
+			}
+		}
+	}
+	return dupA0, dupA3
+}
+
 func (v *Verifier) computeDerivedObservations(env *Envelope) []DerivedObservation {
 	// Index runtime events by execution ID.
 	eventsByExec := make(map[types.ExecutionID][]engine.RuntimeEvidenceEvent)
@@ -362,13 +401,12 @@ func (v *Verifier) computeDerivedObservations(env *Envelope) []DerivedObservatio
 	}
 
 	// Build execution -> A3 row mapping from markers.
-	type a3Key struct{ fixture, topology string }
-	a3ExecToRow := make(map[types.ExecutionID]a3Key)
+	a3ExecToRow := make(map[types.ExecutionID]a3RowKey)
 	for _, po := range env.Raw.ProtocolObservations {
 		if po.Type == "a3_row_marker" {
 			fixture, _ := po.Detail["fixture"].(string)
 			topology, _ := po.Detail["topology"].(string)
-			a3ExecToRow[po.ExecutionID] = a3Key{fixture: fixture, topology: topology}
+			a3ExecToRow[po.ExecutionID] = a3RowKey{fixture: fixture, topology: topology}
 		}
 	}
 
@@ -472,8 +510,20 @@ func (v *Verifier) computeDerivedObservations(env *Envelope) []DerivedObservatio
 			obs.AppliedAdvance = true
 			obs.AdvanceEventID = advances[0].EventID
 		}
-		if len(retries) == 1 {
-			obs.RetryEventID = retries[0].EventID
+		if len(retries) > 0 {
+			// Reference the latest retry whose failed attempt precedes the
+			// terminal accepted commit. This satisfies the spec requirement that
+			// success-after-retry fixtures reference a corresponding retry event.
+			chosen := retries[len(retries)-1]
+			if len(commits) == 1 {
+				commitAttempt := commits[0].Attempt
+				for _, r := range retries {
+					if r.Attempt < commitAttempt && r.Attempt > chosen.Attempt {
+						chosen = r
+					}
+				}
+			}
+			obs.RetryEventID = chosen.EventID
 		}
 		for _, cs := range countersByExec[execID] {
 			obs.HandlerInvocations += cs.Value
@@ -495,15 +545,16 @@ func (v *Verifier) computeDerivedObservations(env *Envelope) []DerivedObservatio
 	return derived
 }
 
-func (v *Verifier) checkA0(env *Envelope, derived []DerivedObservation) []string {
+func (v *Verifier) checkA0(env *Envelope, derived []DerivedObservation, duplicateScenarios map[string]struct{}) []string {
 	var errs []string
+
+	for scenario := range duplicateScenarios {
+		errs = append(errs, fmt.Sprintf("a0: duplicate scenario row %s", scenario))
+	}
 
 	byScenario := make(map[string]DerivedObservation)
 	for _, obs := range derived {
 		if obs.Kind == "a0_scenario" {
-			if _, exists := byScenario[obs.Scenario]; exists {
-				errs = append(errs, fmt.Sprintf("a0: duplicate scenario row %s", obs.Scenario))
-			}
 			byScenario[obs.Scenario] = obs
 		}
 	}
@@ -576,23 +627,33 @@ func (v *Verifier) checkA0(env *Envelope, derived []DerivedObservation) []string
 	return errs
 }
 
-func (v *Verifier) checkA3(env *Envelope, derived []DerivedObservation) []string {
+func (v *Verifier) checkA3(env *Envelope, derived []DerivedObservation, duplicateRows map[a3RowKey]struct{}) []string {
 	var errs []string
 
-	type rowKey struct{ fixture, topology string }
-	byRow := make(map[rowKey]DerivedObservation)
+	for key := range duplicateRows {
+		errs = append(errs, fmt.Sprintf("a3: duplicate matrix row (%s, %s)", key.fixture, key.topology))
+	}
+
+	byRow := make(map[a3RowKey]DerivedObservation)
 	for _, obs := range derived {
 		if obs.Kind == "a3_matrix_row" {
-			key := rowKey{fixture: obs.Fixture, topology: obs.Topology}
-			if _, exists := byRow[key]; exists {
-				errs = append(errs, fmt.Sprintf("a3: duplicate matrix row (%s, %s)", obs.Fixture, obs.Topology))
-			}
-			byRow[key] = obs
+			byRow[a3RowKey{fixture: obs.Fixture, topology: obs.Topology}] = obs
 		}
 	}
 
+	classifiedTerminalFixtures := map[A3Fixture]bool{
+		A3TransientRetryExhausted: true,
+		A3PermanentNoRetry:        true,
+		A3BusinessErrorNoRetry:    true,
+	}
+	retriedFixtures := map[A3Fixture]bool{
+		A3TransientThenSuccess:    true,
+		A3TransientRetryExhausted: true,
+		A3ErrorPortRetryExhausted: true,
+	}
+
 	for _, row := range v.Manifest.A3Rows {
-		key := rowKey{fixture: string(row.Fixture), topology: string(row.Topology)}
+		key := a3RowKey{fixture: string(row.Fixture), topology: string(row.Topology)}
 		obs, ok := byRow[key]
 		if !ok {
 			errs = append(errs, fmt.Sprintf("a3: missing matrix row (%s, %s)", row.Fixture, row.Topology))
@@ -606,18 +667,46 @@ func (v *Verifier) checkA3(env *Envelope, derived []DerivedObservation) []string
 			errs = append(errs, fmt.Sprintf("a3: row (%s, %s) commit is not accepted", row.Fixture, row.Topology))
 		}
 
-		terminalClassified := row.Fixture == A3TransientRetryExhausted ||
-			row.Fixture == A3PermanentNoRetry ||
-			row.Fixture == A3ErrorPortRetryExhausted
-		if terminalClassified && obs.Classification == nil {
+		if classifiedTerminalFixtures[row.Fixture] && obs.Classification == nil {
 			errs = append(errs, fmt.Sprintf("a3: terminal classified fixture (%s, %s) missing classification", row.Fixture, row.Topology))
 		}
-		if !terminalClassified && obs.Classification != nil {
-			errs = append(errs, fmt.Sprintf("a3: success fixture (%s, %s) must not have classification", row.Fixture, row.Topology))
+		if !classifiedTerminalFixtures[row.Fixture] && obs.Classification != nil {
+			errs = append(errs, fmt.Sprintf("a3: success/unclassified fixture (%s, %s) must not have classification", row.Fixture, row.Topology))
 		}
-		if !terminalClassified && (row.Fixture == A3TransientThenSuccess || row.Fixture == A3ErrorPortRetryExhausted) && obs.RetryEventID == "" {
-			// Transient_then_success and error_port_retry_exhausted imply a retry happened.
-			// Note: error_port_retry_exhausted is terminal classified, so it also needs retry event.
+
+		if row.Fixture == A3TransientThenSuccess && !obs.AppliedAdvance {
+			errs = append(errs, fmt.Sprintf("a3: row (%s, %s) success fixture missing applied advance", row.Fixture, row.Topology))
+		}
+		if row.Fixture != A3TransientThenSuccess && obs.AppliedAdvance {
+			errs = append(errs, fmt.Sprintf("a3: row (%s, %s) terminal failure fixture has applied advance", row.Fixture, row.Topology))
+		}
+
+		if retriedFixtures[row.Fixture] {
+			if obs.RetryEventID == "" {
+				errs = append(errs, fmt.Sprintf("a3: row (%s, %s) retried fixture missing retry event reference", row.Fixture, row.Topology))
+			} else {
+				var re *engine.RuntimeEvidenceEvent
+				for i := range env.Raw.RuntimeEvents {
+					if env.Raw.RuntimeEvents[i].EventID == obs.RetryEventID {
+						re = &env.Raw.RuntimeEvents[i]
+						break
+					}
+				}
+				if re == nil || re.Type != engine.RuntimeEvidenceRetry || re.ExecutionID != obs.ExecutionID {
+					errs = append(errs, fmt.Sprintf("a3: row (%s, %s) retry event reference invalid", row.Fixture, row.Topology))
+				} else {
+					var commitAttempt int
+					for _, ev := range env.Raw.RuntimeEvents {
+						if ev.EventID == obs.CommitEventID {
+							commitAttempt = ev.Attempt
+							break
+						}
+					}
+					if commitAttempt > 0 && re.Attempt >= commitAttempt {
+						errs = append(errs, fmt.Sprintf("a3: row (%s, %s) retry event attempt >= commit attempt", row.Fixture, row.Topology))
+					}
+				}
+			}
 		}
 
 		if !row.IsDatabaseLocalFake && obs.HandlerInvocations <= 0 {
@@ -634,7 +723,7 @@ func (v *Verifier) checkA3(env *Envelope, derived []DerivedObservation) []string
 		if realPairRows[row.Fixture] == nil {
 			realPairRows[row.Fixture] = make(map[A3Topology]DerivedObservation)
 		}
-		if obs, ok := byRow[rowKey{fixture: string(row.Fixture), topology: string(row.Topology)}]; ok {
+		if obs, ok := byRow[a3RowKey{fixture: string(row.Fixture), topology: string(row.Topology)}]; ok {
 			realPairRows[row.Fixture][row.Topology] = obs
 		}
 	}

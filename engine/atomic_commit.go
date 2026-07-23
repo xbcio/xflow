@@ -30,6 +30,7 @@ func (e *Engine) commitAcyclicTaskResult(ctx context.Context, lease *TaskLease, 
 			return CommitOutcomeTransientError, fmt.Errorf("retry node %q/%q: %w", task.ExecutionID, task.NodeName, err)
 		}
 		if retried {
+			e.publishRetryReceipt(ctx, task, lease.Attempt)
 			return CommitOutcomeAccepted, nil
 		}
 		// Retry budget exhausted: the explicit error-port output is a terminal
@@ -59,6 +60,7 @@ func (e *Engine) commitAcyclicNodeError(ctx context.Context, lease *TaskLease, m
 	if retried, err := e.tryRetryWithAttempt(ctx, &lease.Task, meta, systemErr, lease.Attempt, lease.LeaseToken); err != nil {
 		return CommitOutcomeTransientError, fmt.Errorf("retry node %q/%q: %w", lease.Task.ExecutionID, lease.Task.NodeName, err)
 	} else if retried {
+		e.publishRetryReceipt(ctx, &lease.Task, lease.Attempt)
 		return CommitOutcomeAccepted, nil
 	}
 
