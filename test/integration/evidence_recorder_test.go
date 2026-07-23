@@ -3,7 +3,10 @@
 package integration
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +18,9 @@ import (
 	"github.com/xbcio/xflow/test/integration/internal/evidence"
 	"github.com/xbcio/xflow/types"
 	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
+
+	_ "github.com/go-sql-driver/mysql"
 )
 
 // cachedSourceProvenance holds the source provenance observed at test time,
@@ -28,7 +34,44 @@ import (
 var (
 	cachedSourceOnce sync.Once
 	cachedSource     evidence.SourceProvenance
+	cachedEnvOnce    sync.Once
+	cachedEnv        evidence.Environment
 )
+
+// queryRedisVersion parses redis_version from Redis INFO server output.
+func queryRedisVersion(addr string) (string, error) {
+	c := redis.NewClient(&redis.Options{Addr: addr})
+	defer c.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	info, err := c.Info(ctx, "server").Result()
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(info, "\r\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "redis_version:") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "redis_version:")), nil
+		}
+	}
+	return "", fmt.Errorf("redis_version not found in INFO server")
+}
+
+// queryMySQLVersion returns the result of SELECT VERSION().
+func queryMySQLVersion(dsn string) (string, error) {
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		return "", err
+	}
+	defer db.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	var ver string
+	if err := db.QueryRowContext(ctx, "SELECT VERSION()").Scan(&ver); err != nil {
+		return "", err
+	}
+	return ver, nil
+}
 
 // evidenceRecorder accumulates one scenario's raw observations into a fragment
 // envelope bound to a shared run ID, then flushes it atomically at the end of
@@ -97,15 +140,14 @@ func (r *evidenceRecorder) wrapRuntimeEvent(ev engine.RuntimeEvidenceEvent) evid
 		Meta: evidence.EvidenceRecordMeta{
 			RunID:      r.runID,
 			ProducerID: r.producerID,
-			// Topology is scenario/topology context, not present on the raw event.
-			Topology: "",
+			// Topology is the scenario/topology context carried by the recorder name.
+			Topology: r.name,
 			// ExecutionID must match Event.ExecutionID; see verifier integrity check.
 			ExecutionID: ev.ExecutionID,
 			ObservedAt:  time.Now().UTC(),
-			// SourceDigest/TestBinaryDigest: populated from cached source provenance
-			// if already observed; Task R3 may refine the exact digest semantics.
-			SourceDigest:     cachedSource.CommitSHA,       // TODO(R3): refine source digest
-			TestBinaryDigest: cachedSource.TestBinarySHA256, // TODO(R3): refine binary digest
+			// SourceDigest = relevant-diff digest; TestBinaryDigest = fixed test binary SHA-256.
+			SourceDigest:     cachedSource.RelevantDiffSHA256,
+			TestBinaryDigest: cachedSource.TestBinarySHA256,
 		},
 		Event: ev,
 	}
@@ -210,9 +252,10 @@ func (r *evidenceRecorder) recordState(topology string, execID types.ExecutionID
 // stampProvenance records the real source provenance observed at test time
 // (git HEAD SHA, relevant-tree cleanliness, relevant-diff digest, test-binary
 // digest, Go version) into the fragment's env.Source. It uses RealProvenance
-// with TestBinaryPath = os.Args[0] so the binary digest it records is the
-// digest of the exact test binary this scenario ran as — which the verifier
-// recomputes independently from the same binary path and compares.
+// with TestBinaryPath from XFLOW_G0_TEST_BIN (set by the make target) falling
+// back to os.Args[0], so the binary digest it records is the digest of the
+// exact fixed test binary this scenario ran as — which the verifier recomputes
+// independently from the same binary path and compares.
 //
 // This is an honest observation, not a fabrication or a constant: the values
 // reflect the repo and binary state at the moment the test ran. The verifier
@@ -232,7 +275,11 @@ func (r *evidenceRecorder) stampProvenance(t *testing.T) {
 		return
 	}
 	cachedSourceOnce.Do(func() {
-		prov := evidence.RealProvenance{TestBinaryPath: os.Args[0]}
+		binaryPath := os.Getenv("XFLOW_G0_TEST_BIN")
+		if binaryPath == "" {
+			binaryPath = os.Args[0]
+		}
+		prov := evidence.RealProvenance{TestBinaryPath: binaryPath}
 		if sha, err := prov.CommitSHA(); err == nil {
 			cachedSource.CommitSHA = sha
 		} else {
@@ -262,6 +309,91 @@ func (r *evidenceRecorder) stampProvenance(t *testing.T) {
 	r.env.Source = cachedSource
 }
 
+// stampEnvironment queries Redis and MySQL at runtime and records their versions
+// in both the typed environment block and typed environment_observations. The
+// query is performed once per process; each fragment copies the cached result.
+// In the required gate (XFLOW_REQUIRE_*_INTEGRATION=1) an unreachable service
+// fails the test; otherwise the capture is skipped gracefully so ordinary
+// `go test` runs without services are not broken.
+func (r *evidenceRecorder) stampEnvironment(t *testing.T) {
+	t.Helper()
+	if r == nil || r.env == nil {
+		return
+	}
+	cachedEnvOnce.Do(func() {
+		requiredRedis := os.Getenv("XFLOW_REQUIRE_REDIS_INTEGRATION") == "1"
+		requiredMySQL := os.Getenv("XFLOW_REQUIRE_MYSQL_INTEGRATION") == "1"
+
+		addr := redisAddr(t)
+		if ver, err := queryRedisVersion(addr); err == nil && ver != "" {
+			cachedEnv.RedisVersion = ver
+		} else {
+			msg := fmt.Sprintf("evidence recorder: redis version unavailable at %s: %v", addr, err)
+			if requiredRedis {
+				t.Fatalf("%s", msg)
+			}
+			t.Logf("%s", msg)
+		}
+
+		dsn := mysqlDSN(t)
+		if ver, err := queryMySQLVersion(dsn); err == nil && ver != "" {
+			cachedEnv.MySQLVersion = ver
+		} else {
+			// Do not log the DSN: it embeds MYSQL_ROOT_PASSWORD.
+			port := envOr("MYSQL_PORT", "3306")
+			msg := fmt.Sprintf("evidence recorder: mysql version unavailable at localhost:%s: %v", port, err)
+			if requiredMySQL {
+				t.Fatalf("%s", msg)
+			}
+			t.Logf("%s", msg)
+		}
+	})
+	r.env.Environment = cachedEnv
+	if cachedEnv.RedisVersion != "" {
+		r.env.Raw.EnvironmentObservations = append(r.env.Raw.EnvironmentObservations, evidence.EnvironmentObservation{
+			RunID:      r.runID,
+			Topology:   r.name,
+			Component:  "redis",
+			Query:      "INFO server",
+			Result:     cachedEnv.RedisVersion,
+			ObservedAt: time.Now().UTC(),
+		})
+	}
+	if cachedEnv.MySQLVersion != "" {
+		r.env.Raw.EnvironmentObservations = append(r.env.Raw.EnvironmentObservations, evidence.EnvironmentObservation{
+			RunID:      r.runID,
+			Topology:   r.name,
+			Component:  "mysql",
+			Query:      "SELECT VERSION()",
+			Result:     cachedEnv.MySQLVersion,
+			ObservedAt: time.Now().UTC(),
+		})
+	}
+}
+
+// stampRunIdentity emits a typed run_identity record carrying the random run_id,
+// the fixed test binary digest, and the required manifest digest. It reuses the
+// source-provenance test binary digest so the large binary is hashed once.
+func (r *evidenceRecorder) stampRunIdentity(t *testing.T) {
+	t.Helper()
+	if r == nil || r.env == nil {
+		return
+	}
+	var manifestDig string
+	if dig, err := evidence.ManifestDigest(evidence.DefaultManifest()); err == nil {
+		manifestDig = dig
+	} else {
+		t.Logf("evidence recorder: manifest digest unavailable: %v", err)
+	}
+	r.env.Raw.RunIdentities = append(r.env.Raw.RunIdentities, evidence.RunIdentity{
+		RunID:            r.runID,
+		TestBinaryDigest: cachedSource.TestBinarySHA256,
+		ManifestDigest:   manifestDig,
+		ProducerID:       r.producerID,
+		ObservedAt:       time.Now().UTC(),
+	})
+}
+
 // flush atomically writes the fragment envelope to $RAW_DIR/{name}.json via a
 // temp file + rename so a partial write is never observed by the CLI merge.
 func (r *evidenceRecorder) flush(t *testing.T) {
@@ -270,6 +402,8 @@ func (r *evidenceRecorder) flush(t *testing.T) {
 		return
 	}
 	r.stampProvenance(t)
+	r.stampEnvironment(t)
+	r.stampRunIdentity(t)
 	if err := os.MkdirAll(r.rawDir, 0o755); err != nil {
 		t.Fatalf("evidence recorder: mkdir %q: %v", r.rawDir, err)
 	}

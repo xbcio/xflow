@@ -92,6 +92,8 @@ func MergeRawEnvelopes(dir string) (*Envelope, error) {
 		merged.Raw.ProtocolObservations = append(merged.Raw.ProtocolObservations, frag.Raw.ProtocolObservations...)
 		merged.Raw.StateSnapshots = append(merged.Raw.StateSnapshots, frag.Raw.StateSnapshots...)
 		merged.Raw.SuiteRecords = append(merged.Raw.SuiteRecords, frag.Raw.SuiteRecords...)
+		merged.Raw.RunIdentities = append(merged.Raw.RunIdentities, frag.Raw.RunIdentities...)
+		merged.Raw.EnvironmentObservations = append(merged.Raw.EnvironmentObservations, frag.Raw.EnvironmentObservations...)
 		// Environment / Suite are recomputed by the verifier; do not merge
 		// self-reported values. Source is an exception: it is the test-time
 		// observed provenance the verifier compares against (see above).
@@ -108,5 +110,7 @@ func isEmptyFragment(env *Envelope) bool {
 		len(env.Raw.CounterSnapshots) == 0 &&
 		len(env.Raw.ProtocolObservations) == 0 &&
 		len(env.Raw.StateSnapshots) == 0 &&
-		len(env.Raw.SuiteRecords) == 0
+		len(env.Raw.SuiteRecords) == 0 &&
+		len(env.Raw.RunIdentities) == 0 &&
+		len(env.Raw.EnvironmentObservations) == 0
 }

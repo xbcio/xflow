@@ -58,11 +58,13 @@ type SuiteSummary struct {
 // RawLedger holds all raw observations. Tests write only these records; they
 // never write derived_observations or pre-aggregated gate rows.
 type RawLedger struct {
-	RuntimeEvents        []CollectedRuntimeEvidenceEvent `json:"runtime_events"`
-	CounterSnapshots     []CounterSnapshot               `json:"counter_snapshots"`
-	ProtocolObservations []ProtocolObservation           `json:"protocol_observations"`
-	StateSnapshots       []StateSnapshot                 `json:"state_snapshots"`
-	SuiteRecords         []SuiteRecord                   `json:"suite_records"`
+	RuntimeEvents           []CollectedRuntimeEvidenceEvent `json:"runtime_events"`
+	CounterSnapshots        []CounterSnapshot               `json:"counter_snapshots"`
+	ProtocolObservations    []ProtocolObservation           `json:"protocol_observations"`
+	StateSnapshots          []StateSnapshot                 `json:"state_snapshots"`
+	SuiteRecords            []SuiteRecord                   `json:"suite_records"`
+	RunIdentities           []RunIdentity                   `json:"run_identities"`
+	EnvironmentObservations []EnvironmentObservation        `json:"environment_observations"`
 }
 
 // EvidenceRecordMeta is the envelope metadata for a collected runtime evidence
@@ -126,6 +128,27 @@ type SuiteRecord struct {
 	Action         string  `json:"action"`
 	ElapsedSeconds float64 `json:"elapsed_seconds"`
 	Output         string  `json:"output,omitempty"`
+}
+
+// RunIdentity identifies the run and binds the test binary and manifest digests.
+// It is emitted by the test binary into the raw ledger and checked by the
+// verifier for consistency with the orchestrated run.
+type RunIdentity struct {
+	RunID            string    `json:"run_id"`
+	TestBinaryDigest string    `json:"test_binary_digest"`
+	ManifestDigest   string    `json:"manifest_digest"`
+	ProducerID       string    `json:"producer_id,omitempty"`
+	ObservedAt       time.Time `json:"observed_at"`
+}
+
+// EnvironmentObservation records a runtime environment version query.
+type EnvironmentObservation struct {
+	RunID      string    `json:"run_id"`
+	Topology   string    `json:"topology"`
+	Component  string    `json:"component"` // "redis" or "mysql"
+	Query      string    `json:"query"`     // exact query string
+	Result     string    `json:"result"`    // parsed version
+	ObservedAt time.Time `json:"observed_at"`
 }
 
 // DerivedObservation is produced mechanically by the verifier from raw records.

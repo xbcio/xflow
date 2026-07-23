@@ -158,8 +158,9 @@ test-g0-evidence-required:
 	rm -rf $(G0_RAW_DIR) && mkdir -p $(G0_RAW_DIR); \
 	XFLOW_REQUIRE_REDIS_INTEGRATION=1 \
 	XFLOW_REQUIRE_MYSQL_INTEGRATION=1 \
-	XFLOW_G0_EVIDENCE_RUN_ID=$$(git rev-parse HEAD) \
+	XFLOW_G0_EVIDENCE_RUN_ID=$$(python3 -c "import uuid; print(uuid.uuid4())" 2>/dev/null || uuidgen | tr 'A-F' 'a-f') \
 	XFLOW_G0_EVIDENCE_RAW_DIR=$(G0_RAW_DIR) \
+	XFLOW_G0_TEST_BIN=$(G0_TEST_BIN) \
 	go tool test2json -p github.com/xbcio/xflow/test/integration $(G0_TEST_BIN) \
 		-test.run '^TestA0FaultMatrix$$|^TestA0OSKillSIGKILLRecovery$$|^TestActionErrorParityMatrix$$|^TestHTTPActionErrorParity$$|^TestGRPCActionErrorParity$$|^TestScriptFunctionActionParity$$|^TestOnErrorActionParity$$|^TestDatabaseActionErrorParity$$' \
 		-test.timeout=900s -test.v > $(G0_JSON); rc=$$?; \

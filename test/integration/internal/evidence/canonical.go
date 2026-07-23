@@ -24,6 +24,19 @@ func MarshalCanonical(v any) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// ManifestDigest returns the SHA-256 canonical digest of the required manifest.
+func ManifestDigest(m *Manifest) (string, error) {
+	if m == nil {
+		return "", fmt.Errorf("manifest digest: nil manifest")
+	}
+	data, err := MarshalCanonical(m)
+	if err != nil {
+		return "", fmt.Errorf("manifest digest: %w", err)
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
+}
+
 // AtomicFinalize writes the envelope to a temp file in dir and atomically
 // renames it to the final artifact path. It also writes a sidecar SHA-256
 // digest file computed over the canonical JSON (the digest field is not part
