@@ -285,9 +285,9 @@ describe("editor metadata split/merge (F0-A2)", () => {
     }
   });
 
-  it("falls back to node.name when id is absent", () => {
+  it("migrates a missing node id to a deterministic stable id", () => {
     const def: WorkflowDef = {
-      name: "name-fallback",
+      name: "id-migrated",
       nodes: [
         {
           name: "legacy-a",
@@ -296,23 +296,38 @@ describe("editor metadata split/merge (F0-A2)", () => {
         },
       ],
     };
-    const { metadata, diagnostics } = splitEditorMetadata(def);
-    expect(metadata.positions?.["legacy-a"]).toEqual({ x: 10, y: 10 });
-    expect(metadata.notes?.["legacy-a"]).toBe("legacy note");
+    const { def: migrated, metadata, diagnostics } = splitEditorMetadata(def);
 
-    // F0-A review follow-up: a fallback diagnostic MUST be emitted once
-    // per node that falls back to name-based keying due to missing id.
-    const fallbackDiags = diagnostics.filter(
-      (d) => d.code === "NODE_METADATA_KEYED_BY_NAME"
+    // The migrated runtime node carries the new stable id and has editor-only
+    // fields stripped (as split always does).
+    expect(migrated.nodes?.[0]).toEqual({
+      id: "node-0-legacy-a",
+      name: "legacy-a",
+    });
+
+    // Metadata is keyed by the new stable id, not by name.
+    expect(metadata.positions?.["node-0-legacy-a"]).toEqual({ x: 10, y: 10 });
+    expect(metadata.notes?.["node-0-legacy-a"]).toBe("legacy note");
+    expect(metadata.positions?.["legacy-a"]).toBeUndefined();
+
+    // A NODE_METADATA_ID_MIGRATED diagnostic is emitted once per migrated node.
+    const migratedDiags = diagnostics.filter(
+      (d) => d.code === "NODE_METADATA_ID_MIGRATED"
     );
-    expect(fallbackDiags).toHaveLength(1);
-    expect(fallbackDiags[0].severity).toBe("warning");
-    expect(fallbackDiags[0].message).toContain("legacy-a");
-    expect(fallbackDiags[0].message).toContain("node.id");
-    expect(fallbackDiags[0].path).toBe("nodes[0]");
+    expect(migratedDiags).toHaveLength(1);
+    expect(migratedDiags[0].severity).toBe("warning");
+    expect(migratedDiags[0].message).toContain("legacy-a");
+    expect(migratedDiags[0].message).toContain("node-0-legacy-a");
+    expect(migratedDiags[0].path).toBe("nodes[0]");
+    expect(migratedDiags[0].nodeId).toBe("node-0-legacy-a");
+
+    // The old fallback diagnostic is no longer emitted.
+    expect(
+      diagnostics.filter((d) => d.code === "NODE_METADATA_KEYED_BY_NAME")
+    ).toHaveLength(0);
   });
 
-  it("does NOT emit fallback diagnostic when id is present", async () => {
+  it("does NOT emit migration diagnostic when all ids are present", async () => {
     // Reuses the with-editor-metadata fixture whose nodes carry `id`.
     const def = await readFixture("with-editor-metadata");
     const { diagnostics } = splitEditorMetadata(def);
@@ -322,43 +337,61 @@ describe("editor metadata split/merge (F0-A2)", () => {
     expect(fallbackDiags).toHaveLength(0);
   });
 
-  it("emits one fallback diagnostic per name-keyed node (no double-fire across fields)", () => {
+  it("emits one migration diagnostic per node with a missing id", () => {
     const def: WorkflowDef = {
-      name: "multi-fallback",
+      name: "multi-missing-id",
       nodes: [
         { name: "a", position: { x: 1, y: 1 }, notes: "n-a", ui: { k: 1 } },
         { name: "b", position: { x: 2, y: 2 } },
       ],
     };
-    const { diagnostics } = splitEditorMetadata(def);
-    const fallbackDiags = diagnostics.filter(
-      (d) => d.code === "NODE_METADATA_KEYED_BY_NAME"
+    const { def: migrated, diagnostics } = splitEditorMetadata(def);
+
+    const migratedDiags = diagnostics.filter(
+      (d) => d.code === "NODE_METADATA_ID_MIGRATED"
     );
-    expect(fallbackDiags).toHaveLength(2);
-    expect(fallbackDiags[0].path).toBe("nodes[0]");
-    expect(fallbackDiags[1].path).toBe("nodes[1]");
+    expect(migratedDiags).toHaveLength(2);
+    expect(migratedDiags[0].path).toBe("nodes[0]");
+    expect(migratedDiags[1].path).toBe("nodes[1]");
+
+    // Each node received a deterministic id based on its index and name.
+    expect(migrated.nodes?.[0].id).toBe("node-0-a");
+    expect(migrated.nodes?.[1].id).toBe("node-1-b");
+
+    // Metadata is keyed by the new stable ids.
+    expect(migratedDiags[0].nodeId).toBe("node-0-a");
+    expect(migratedDiags[1].nodeId).toBe("node-1-b");
   });
 
-  it("mergeEditorMetadata emits fallback diagnostic symmetrically", () => {
+  it("mergeEditorMetadata emits migration diagnostic symmetrically", () => {
     const def: WorkflowDef = {
-      name: "merge-fallback",
+      name: "merge-migrated",
       nodes: [{ name: "legacy-a", position: { x: 1, y: 1 } }],
     };
     const { metadata, diagnostics: splitDiags } = splitEditorMetadata(def);
     expect(
-      splitDiags.filter((d) => d.code === "NODE_METADATA_KEYED_BY_NAME")
+      splitDiags.filter((d) => d.code === "NODE_METADATA_ID_MIGRATED")
     ).toHaveLength(1);
 
     // Build a fresh def without going through split; merge should still
-    // report the fallback.
+    // migrate ids and report the migration.
     const fresh: WorkflowDef = {
-      name: "merge-fallback",
+      name: "merge-migrated",
       nodes: [{ name: "legacy-a" }],
     };
-    const { diagnostics: mergeDiags } = mergeEditorMetadata(fresh, metadata);
-    expect(
-      mergeDiags.filter((d) => d.code === "NODE_METADATA_KEYED_BY_NAME")
-    ).toHaveLength(1);
+    const { def: mergedDef, diagnostics: mergeDiags } = mergeEditorMetadata(
+      fresh,
+      metadata
+    );
+    const migratedMergeDiags = mergeDiags.filter(
+      (d) => d.code === "NODE_METADATA_ID_MIGRATED"
+    );
+    expect(migratedMergeDiags).toHaveLength(1);
+    expect(migratedMergeDiags[0].nodeId).toBe("node-0-legacy-a");
+    expect(mergedDef.nodes?.[0].id).toBe("node-0-legacy-a");
+
+    // The metadata keyed by the stable id is restored.
+    expect(mergedDef.nodes?.[0].position).toEqual({ x: 1, y: 1 });
   });
 
   it("two nodes with same name but different ids do not cross metadata", () => {
@@ -393,5 +426,169 @@ describe("editor metadata split/merge (F0-A2)", () => {
     expect(a?.notes).toBe("A");
     expect(b?.position).toEqual({ x: 200, y: 200 });
     expect(b?.notes).toBe("B");
+  });
+
+  it("migrates duplicate node ids to distinct deterministic ids", () => {
+    const def: WorkflowDef = {
+      name: "duplicate-ids",
+      nodes: [
+        {
+          id: "dup",
+          name: "alpha",
+          position: { x: 10, y: 10 },
+          notes: "first",
+        },
+        {
+          id: "dup",
+          name: "beta",
+          position: { x: 20, y: 20 },
+          notes: "second",
+        },
+      ],
+    };
+    const { def: migrated, metadata, diagnostics } = splitEditorMetadata(def);
+
+    // Both colliding nodes are migrated to different stable ids.
+    const ids = migrated.nodes?.map((n) => n.id);
+    expect(ids).toContain("node-0-alpha");
+    expect(ids).toContain("node-1-beta");
+    expect(ids?.[0]).not.toBe(ids?.[1]);
+
+    // Metadata is keyed separately under the new ids.
+    expect(metadata.positions?.["node-0-alpha"]).toEqual({ x: 10, y: 10 });
+    expect(metadata.positions?.["node-1-beta"]).toEqual({ x: 20, y: 20 });
+    expect(metadata.notes?.["node-0-alpha"]).toBe("first");
+    expect(metadata.notes?.["node-1-beta"]).toBe("second");
+
+    // Duplicate-id diagnostics are emitted per migrated node.
+    const duplicateDiags = diagnostics.filter(
+      (d) => d.code === "NODE_METADATA_DUPLICATE_IDS_MIGRATED"
+    );
+    expect(duplicateDiags).toHaveLength(2);
+    expect(duplicateDiags[0].path).toBe("nodes[0]");
+    expect(duplicateDiags[1].path).toBe("nodes[1]");
+    expect(duplicateDiags[0].message).toContain("dup");
+    expect(duplicateDiags[1].message).toContain("dup");
+  });
+
+  it("renameNode does not change node id or metadata binding", () => {
+    const def: WorkflowDef = {
+      name: "rename-stable",
+      nodes: [
+        {
+          id: "n1",
+          name: "alpha",
+          position: { x: 1, y: 1 },
+          ui: { color: "red" },
+          notes: "note-alpha",
+        },
+      ],
+    };
+    const renamed = renameNode(def, "alpha", "beta");
+
+    // renameNode only changes name; id is untouched.
+    expect(renamed.nodes?.[0].id).toBe("n1");
+    expect(renamed.nodes?.[0].name).toBe("beta");
+
+    // Split still binds metadata via the original stable id.
+    const { def: stripped, metadata } = splitEditorMetadata(renamed);
+    expect(metadata.positions?.n1).toEqual({ x: 1, y: 1 });
+    expect(metadata.ui?.n1).toEqual({ color: "red" });
+    expect(metadata.notes?.n1).toBe("note-alpha");
+
+    // Round-trip preserves the binding.
+    const merged = mergeEditorMetadata(stripped, metadata);
+    expect(merged.def.nodes?.[0].id).toBe("n1");
+    expect(merged.def.nodes?.[0].position).toEqual({ x: 1, y: 1 });
+    expect(merged.def.nodes?.[0].ui).toEqual({ color: "red" });
+  });
+
+  it("split/merge round-trips positions/ui/notes/pin_data after migration", () => {
+    const def: WorkflowDef = {
+      name: "round-trip-migration",
+      nodes: [
+        {
+          name: "first",
+          position: { x: 1, y: 2 },
+          ui: { color: "red" },
+          notes: "note-first",
+        },
+        {
+          id: "dup",
+          name: "second",
+          position: { x: 3, y: 4 },
+          ui: { color: "blue" },
+          notes: "note-second",
+        },
+        {
+          id: "dup",
+          name: "third",
+          position: { x: 5, y: 6 },
+          ui: { color: "green" },
+          notes: "note-third",
+        },
+      ],
+      pin_data: {
+        first: { value: 1 },
+        second: { value: 2 },
+      },
+    };
+
+    const { def: stripped, metadata, diagnostics } = splitEditorMetadata(def);
+
+    // All problematic ids were migrated.
+    expect(diagnostics.map((d) => d.code).sort()).toEqual([
+      "NODE_METADATA_DUPLICATE_IDS_MIGRATED",
+      "NODE_METADATA_DUPLICATE_IDS_MIGRATED",
+      "NODE_METADATA_ID_MIGRATED",
+    ]);
+
+    // Editor-only fields are stripped from the runtime def.
+    for (const node of stripped.nodes ?? []) {
+      expect(node.position).toBeUndefined();
+      expect(node.ui).toBeUndefined();
+      expect(node.notes).toBeUndefined();
+    }
+
+    // pin_data stays on the runtime def.
+    expect(stripped.pin_data).toEqual(def.pin_data);
+
+    // Metadata is keyed by the new stable ids.
+    expect(metadata.positions?.["node-0-first"]).toEqual({ x: 1, y: 2 });
+    expect(metadata.positions?.["node-1-second"]).toEqual({ x: 3, y: 4 });
+    expect(metadata.positions?.["node-2-third"]).toEqual({ x: 5, y: 6 });
+    expect(metadata.ui?.["node-0-first"]).toEqual({ color: "red" });
+    expect(metadata.notes?.["node-2-third"]).toBe("note-third");
+
+    // Merge restores editor-only fields on the migrated nodes. Because the
+    // stripped def already carries stable ids, merge does not re-emit
+    // migration diagnostics.
+    const { def: merged, diagnostics: mergeDiags } = mergeEditorMetadata(
+      stripped,
+      metadata
+    );
+    expect(mergeDiags).toHaveLength(0);
+
+    const first = merged.nodes?.find((n) => n.name === "first");
+    const second = merged.nodes?.find((n) => n.name === "second");
+    const third = merged.nodes?.find((n) => n.name === "third");
+
+    expect(first?.id).toBe("node-0-first");
+    expect(first?.position).toEqual({ x: 1, y: 2 });
+    expect(first?.ui).toEqual({ color: "red" });
+    expect(first?.notes).toBe("note-first");
+
+    expect(second?.id).toBe("node-1-second");
+    expect(second?.position).toEqual({ x: 3, y: 4 });
+    expect(second?.ui).toEqual({ color: "blue" });
+    expect(second?.notes).toBe("note-second");
+
+    expect(third?.id).toBe("node-2-third");
+    expect(third?.position).toEqual({ x: 5, y: 6 });
+    expect(third?.ui).toEqual({ color: "green" });
+    expect(third?.notes).toBe("note-third");
+
+    // pin_data is preserved from the runtime def, not overwritten.
+    expect(merged.pin_data).toEqual(def.pin_data);
   });
 });

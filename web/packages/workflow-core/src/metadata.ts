@@ -12,6 +12,9 @@ import type {
  * Per ADR D4: metadata MUST be keyed by `NodeDef.ID` (stable editor
  * identity), falling back to `NodeDef.Name` only when `id` is absent
  * (legacy/backward-compat). Returns `undefined` when neither is present.
+ *
+ * Callers that need deterministic stable keys should run `migrateNodeIds`
+ * first so that every node has an `id`.
  */
 function nodeMetadataKey(node: NodeDef): string | undefined {
   if (node.id && node.id.length > 0) {
@@ -24,21 +27,129 @@ function nodeMetadataKey(node: NodeDef): string | undefined {
 }
 
 /**
- * Build a fallback-name diagnostic for a node that lacks a stable id.
+ * Normalize a node name into a URL-safe, deterministic slug.
  *
- * Emitted once per node when `nodeMetadataKey` falls back to `node.name`
- * because `node.id` is absent. The host can surface this to warn authors
- * that editor metadata will be keyed by an unstable identifier and may
- * silently cross-contaminate if the node name is later renamed or
- * duplicated. See ADR D4 / F0-A2.
+ * The slug is used as the human-readable part of a generated stable id.
+ * Collisions are impossible at generation time because the index is also
+ * included; the slug only makes the id recognizable.
  */
-function fallbackNameDiagnostic(node: NodeDef, index: number): Diagnostic {
-  return {
-    code: "NODE_METADATA_KEYED_BY_NAME",
-    severity: "warning",
-    message: `editor metadata for node "${node.name}" is keyed by name because node.id is missing; set a stable id to avoid metadata collisions on rename or duplicate`,
-    path: `nodes[${index}]`,
-  };
+function slugify(name: string): string {
+  return (
+    name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "") || "node"
+  );
+}
+
+/**
+ * Generate a deterministic stable id for a node that lacks one or that
+ * participates in a duplicate-id collision.
+ *
+ * The id is derived from the node's index in the `nodes` array and its
+ * `name` (or "node" if no name is present). Because the index is unique,
+ * generated ids never collide with each other. In the extremely unlikely
+ * case that a generated id collides with an existing id that is being
+ * preserved, a deterministic counter suffix is appended.
+ */
+function generateStableId(
+  node: NodeDef,
+  index: number,
+  reserved: Set<string>
+): string {
+  const nameSlug = node.name && node.name.length > 0 ? slugify(node.name) : "node";
+  const candidates = [
+    `node-${index}-${nameSlug}`,
+    `node-${index}-${nameSlug}-migrated`,
+  ];
+  for (const candidate of candidates) {
+    if (!reserved.has(candidate)) {
+      reserved.add(candidate);
+      return candidate;
+    }
+  }
+  let counter = 1;
+  while (true) {
+    const candidate = `node-${index}-${nameSlug}-migrated-${counter}`;
+    if (!reserved.has(candidate)) {
+      reserved.add(candidate);
+      return candidate;
+    }
+    counter++;
+  }
+}
+
+/**
+ * Migrate missing or duplicate `NodeDef.ID` values to deterministic stable
+ * ids.
+ *
+ * Rules:
+ * - A node with no `id` (empty or absent) gets a generated stable id.
+ * - A node whose `id` is shared by two or more nodes gets a generated stable
+ *   id; all colliding nodes are migrated so metadata can be keyed uniquely.
+ * - A node with a unique, non-empty `id` is preserved unchanged.
+ *
+ * Diagnostics:
+ * - `NODE_METADATA_ID_MIGRATED` per node that had a missing id.
+ * - `NODE_METADATA_DUPLICATE_IDS_MIGRATED` per node that had a duplicate id.
+ *
+ * This is an immutable update.
+ */
+function migrateNodeIds(nodes: NodeDef[]): {
+  nodes: NodeDef[];
+  diagnostics: Diagnostic[];
+} {
+  const diagnostics: Diagnostic[] = [];
+
+  // Count how many times each id appears so we can detect duplicates.
+  const idCounts = new Map<string, number>();
+  for (const node of nodes) {
+    if (node.id && node.id.length > 0) {
+      idCounts.set(node.id, (idCounts.get(node.id) ?? 0) + 1);
+    }
+  }
+
+  // Decide which nodes need migration and reserve ids that will be kept.
+  const reserved = new Set<string>();
+  const needsMigration = nodes.map((node) => {
+    if (!node.id || node.id.length === 0) {
+      return true;
+    }
+    return (idCounts.get(node.id) ?? 0) > 1;
+  });
+
+  for (const [index, node] of nodes.entries()) {
+    if (!needsMigration[index] && node.id) {
+      reserved.add(node.id);
+    }
+  }
+
+  const migratedNodes = nodes.map((node, index) => {
+    if (!needsMigration[index]) {
+      return node;
+    }
+
+    const hadId = node.id && node.id.length > 0;
+    const newId = generateStableId(node, index, reserved);
+    const code = hadId
+      ? "NODE_METADATA_DUPLICATE_IDS_MIGRATED"
+      : "NODE_METADATA_ID_MIGRATED";
+    const message = hadId
+      ? `node "${node.name ?? ""}" at index ${index} had duplicate id "${node.id}"; assigned deterministic id "${newId}"`
+      : `node "${node.name ?? ""}" at index ${index} had no stable id; assigned deterministic id "${newId}"`;
+
+    diagnostics.push({
+      code,
+      severity: "warning",
+      message,
+      path: `nodes[${index}]`,
+      nodeId: newId,
+    });
+
+    return { ...node, id: newId };
+  });
+
+  return { nodes: migratedNodes, diagnostics };
 }
 
 /**
@@ -52,10 +163,11 @@ function fallbackNameDiagnostic(node: NodeDef, index: number): Diagnostic {
  * from `def.pin_data` for UI display convenience; it is NOT the canonical
  * source. See ADR D4 / F0-A2.
  *
- * Metadata keys use `node.id` when present, falling back to `node.name`
- * for backward compatibility. A `NODE_METADATA_KEYED_BY_NAME` diagnostic
- * is emitted once per node that falls back to `node.name`, so hosts can
- * surface the missing-stable-id condition.
+ * Missing or duplicate `NodeDef.ID` values are migrated to deterministic
+ * stable ids before metadata is keyed. Diagnostics are emitted for every
+ * migrated node:
+ * - `NODE_METADATA_ID_MIGRATED` for nodes that lacked an id.
+ * - `NODE_METADATA_DUPLICATE_IDS_MIGRATED` for nodes that had a duplicate id.
  *
  * This is an immutable update.
  */
@@ -64,22 +176,18 @@ export function splitEditorMetadata(def: WorkflowDef): {
   metadata: WorkflowEditorMetadata;
   diagnostics: Diagnostic[];
 } {
+  const { nodes: migratedNodes, diagnostics: migrationDiags } = migrateNodeIds(
+    def.nodes ?? []
+  );
+
   const positions: Record<string, Position> = {};
   const ui: Record<string, Record<string, unknown>> = {};
   const notes: Record<string, string> = {};
   const strippedNodes: NodeDef[] = [];
-  const diagnostics: Diagnostic[] = [];
 
-  for (const [index, node] of (def.nodes ?? []).entries()) {
+  for (const node of migratedNodes) {
     const key = nodeMetadataKey(node);
     const { position, ui: nodeUi, notes: nodeNotes, ...rest } = node;
-
-    // Diagnostic: id absent but name present → metadata keyed by name.
-    // Fires exactly once per node that falls back, regardless of how
-    // many editor-only fields it carries.
-    if ((!node.id || node.id.length === 0) && node.name && node.name.length > 0) {
-      diagnostics.push(fallbackNameDiagnostic(node, index));
-    }
 
     if (key) {
       if (position) {
@@ -111,7 +219,7 @@ export function splitEditorMetadata(def: WorkflowDef): {
       nodes: strippedNodes,
     },
     metadata,
-    diagnostics,
+    diagnostics: migrationDiags,
   };
 }
 
@@ -126,25 +234,25 @@ export function splitEditorMetadata(def: WorkflowDef): {
  * the metadata-derived cache is NOT written back; callers must ensure the
  * runtime def already carries `pin_data` (e.g. by not stripping it during
  * split). See ADR D4 / F0-A2.
+ *
+ * Missing or duplicate `NodeDef.ID` values are migrated to the same
+ * deterministic stable ids used by `splitEditorMetadata` before metadata is
+ * looked up, so split/merge round-trips are stable. Diagnostics are emitted
+ * for every migrated node.
  */
 export function mergeEditorMetadata(
   def: WorkflowDef,
   metadata: WorkflowEditorMetadata
 ): { def: WorkflowDef; diagnostics: Diagnostic[] } {
-  const mergedNodes: NodeDef[] = [];
-  const diagnostics: Diagnostic[] = [];
+  const { nodes: migratedNodes, diagnostics: migrationDiags } = migrateNodeIds(
+    def.nodes ?? []
+  );
 
-  for (const [index, node] of (def.nodes ?? []).entries()) {
+  const mergedNodes: NodeDef[] = [];
+
+  for (const node of migratedNodes) {
     const key = nodeMetadataKey(node);
     const extra: Partial<NodeDef> = {};
-
-    // Symmetrical diagnostic: a node on the def being merged into
-    // metadata lacks a stable id and falls back to name. This catches
-    // the case where the caller merges metadata onto a freshly-built
-    // def that never went through `splitEditorMetadata`.
-    if ((!node.id || node.id.length === 0) && node.name && node.name.length > 0) {
-      diagnostics.push(fallbackNameDiagnostic(node, index));
-    }
 
     if (key) {
       if (metadata.positions?.[key]) {
@@ -167,6 +275,6 @@ export function mergeEditorMetadata(
       ...def,
       nodes: mergedNodes,
     },
-    diagnostics,
+    diagnostics: migrationDiags,
   };
 }
