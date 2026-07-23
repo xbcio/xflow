@@ -29,6 +29,12 @@ function targetHandleIds(data: NodeData): string[] | undefined {
   return named.length > 0 ? named : undefined;
 }
 
+function sourceHandleIds(data: NodeData): string[] | undefined {
+  const sourcePorts = data.sourcePorts;
+  if (!sourcePorts || sourcePorts.length === 0) return undefined;
+  return sourcePorts;
+}
+
 export const UnknownNode = React.memo(function UnknownNode({
   id,
   data,
@@ -43,6 +49,7 @@ export const UnknownNode = React.memo(function UnknownNode({
   const hasWarning = diagnostics.some((d) => d.severity === "warning");
   const unknownPorts = collectUnknownPorts(id, diagnostics);
   const targetIds = targetHandleIds(data);
+  const sourceIds = sourceHandleIds(data);
 
   return (
     <div
@@ -108,8 +115,19 @@ export const UnknownNode = React.memo(function UnknownNode({
         )}
         <span className="xf-node__hint">unknown node</span>
       </div>
-      {/* Single default source Handle (no id); see GenericNode for rationale. */}
-      <Handle type="source" position={RfPosition.Right} className="xf-port xf-port--source" />
+      {sourceIds ? (
+        sourceIds.map((handleId) => (
+          <Handle
+            key={handleId}
+            type="source"
+            position={RfPosition.Right}
+            id={handleId}
+            className="xf-port xf-port--source"
+          />
+        ))
+      ) : (
+        <Handle type="source" position={RfPosition.Right} className="xf-port xf-port--source" />
+      )}
     </div>
   );
 });

@@ -13,6 +13,8 @@ export interface NodeData extends Record<string, unknown> {
   status?: "running" | "completed" | "failed" | "suspended";
   selected?: boolean;
   diagnostics?: Diagnostic[];
+  /** Named source ports used by outgoing edges; undefined when only the default port is used. */
+  sourcePorts?: string[];
 }
 
 export interface DanglingTarget {

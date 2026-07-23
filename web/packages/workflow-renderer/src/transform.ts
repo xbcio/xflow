@@ -177,12 +177,10 @@ function expandEdges(
         edges.push({
           id: edgeId(conn, sourceNode, port, i),
           source: sourceNode,
-          // Node defs declare only `output_schema`, not named output ports.
-          // GenericNode/UnknownNode render a single default source Handle (no
-          // id), so every edge must use sourceHandle=undefined. Named source
-          // ports in the workflow def are recorded for diagnostics but the
-          // rendered edge uses the default Handle.
-          sourceHandle: undefined,
+          // Named source ports must match a real <Handle id="..."> on the
+          // source node. Default port names collapse to undefined so React Flow
+          // uses the single default source Handle (no id).
+          sourceHandle: normalizePort(port),
           target: targetNode,
           targetHandle: normalizePort(conn.input),
         });
@@ -192,10 +190,24 @@ function expandEdges(
   return { edges, danglingTargets, missingSources };
 }
 
+function buildSourcePortMap(connections: Connections): Map<string, string[]> {
+  const map = new Map<string, string[]>();
+  for (const [sourceNode, ports] of Object.entries(connections ?? {})) {
+    const named = Object.keys(ports ?? {}).filter(
+      (port) => normalizePort(port) !== undefined
+    );
+    if (named.length > 0) {
+      map.set(sourceNode, named);
+    }
+  }
+  return map;
+}
+
 export function workflowToFlow(def: WorkflowDef): FlowViewModel {
   const autoPositions = autoLayout(def);
   const nodes: FlowViewModel["nodes"] = [];
   const nodeNames = new Set<string>();
+  const sourcePortMap = buildSourcePortMap(def.connections ?? {});
 
   for (const node of def.nodes ?? []) {
     const name = node.name ?? node.id ?? `node-${nodes.length}`;
@@ -204,11 +216,12 @@ export function workflowToFlow(def: WorkflowDef): FlowViewModel {
       node.position?.x != null && node.position?.y != null
         ? { x: node.position.x, y: node.position.y }
         : autoPositions[name] ?? { x: 0, y: 0 };
+    const sourcePorts = sourcePortMap.get(name);
 
     nodes.push({
       id: name,
       position,
-      data: { nodeDef: node },
+      data: { nodeDef: node, sourcePorts },
       type: resolveNodeType(node),
     });
   }

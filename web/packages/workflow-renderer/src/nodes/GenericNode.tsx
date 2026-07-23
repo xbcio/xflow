@@ -46,6 +46,12 @@ function targetHandleIds(data: NodeData): string[] | undefined {
   return named.length > 0 ? named : undefined;
 }
 
+function sourceHandleIds(data: NodeData): string[] | undefined {
+  const sourcePorts = data.sourcePorts;
+  if (!sourcePorts || sourcePorts.length === 0) return undefined;
+  return sourcePorts;
+}
+
 export const GenericNode = React.memo(function GenericNode({
   id,
   data,
@@ -60,6 +66,7 @@ export const GenericNode = React.memo(function GenericNode({
   const hasWarning = diagnostics.some((d) => d.severity === "warning");
   const unknownPorts = collectUnknownPorts(id, diagnostics);
   const targetIds = targetHandleIds(data);
+  const sourceIds = sourceHandleIds(data);
 
   return (
     <div
@@ -121,10 +128,19 @@ export const GenericNode = React.memo(function GenericNode({
           </span>
         )}
       </div>
-      {/* Single default source Handle (no id). Node defs declare only
-          output_schema, never named output ports, so every outgoing edge uses
-          sourceHandle=undefined and connects here. */}
-      <Handle type="source" position={RfPosition.Right} className="xf-port xf-port--source" />
+      {sourceIds ? (
+        sourceIds.map((handleId) => (
+          <Handle
+            key={handleId}
+            type="source"
+            position={RfPosition.Right}
+            id={handleId}
+            className="xf-port xf-port--source"
+          />
+        ))
+      ) : (
+        <Handle type="source" position={RfPosition.Right} className="xf-port xf-port--source" />
+      )}
     </div>
   );
 });

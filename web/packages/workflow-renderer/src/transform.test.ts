@@ -153,14 +153,12 @@ describe("workflowToFlow", () => {
     expect(flow.edges).toHaveLength(0);
   });
 
-  it("preserves named source ports as undefined sourceHandle", () => {
+  it("emits named source ports as sourceHandle", () => {
     const flow = workflowToFlow(approvalDef);
     const approvedEdge = flow.edges.find((e) => e.source === "approve")!;
-    // Node defs declare only output_schema, never named output ports, so
-    // GenericNode renders a single default source Handle (no id). transform
-    // must set sourceHandle=undefined even for named source ports, otherwise
-    // React Flow cannot match the edge to a Handle and warns.
-    expect(approvedEdge.sourceHandle).toBeUndefined();
+    // Named source ports must match a real <Handle id="..."> on the source
+    // node so React Flow can connect the edge without warnings.
+    expect(approvedEdge.sourceHandle).toBe("approved");
     // The named input port is still preserved on the target side.
     expect(approvedEdge.targetHandle).toBe("to");
   });
@@ -207,6 +205,41 @@ describe("workflowToFlow", () => {
     expect(flow.edges).toHaveLength(1);
     expect(flow.edges[0].targetHandle).toBe("message");
     expect(flow.edges[0].sourceHandle).toBeUndefined();
+  });
+
+  it("sets sourcePorts on node data for named output ports", () => {
+    const flow = workflowToFlow(approvalDef);
+    const approveNode = flow.nodes.find((n) => n.id === "approve")!;
+    expect(approveNode.data.sourcePorts).toEqual(["approved"]);
+
+    const startNode = flow.nodes.find((n) => n.id === "start")!;
+    expect(startNode.data.sourcePorts).toBeUndefined();
+  });
+
+  it("normalizes main/default/empty source ports to undefined", () => {
+    const def: WorkflowDef = {
+      name: "source-normalization",
+      nodes: [
+        { name: "a", type: "xflow.start" },
+        { name: "b", type: "xflow.end" },
+        { name: "c", type: "xflow.end" },
+        { name: "d", type: "xflow.end" },
+      ],
+      connections: {
+        a: {
+          main: [{ node: "b" }],
+          default: [{ node: "c" }],
+          "": [{ node: "d" }],
+        },
+      },
+    };
+    const flow = workflowToFlow(def);
+    expect(flow.edges).toHaveLength(3);
+    for (const edge of flow.edges) {
+      expect(edge.sourceHandle).toBeUndefined();
+    }
+    const aNode = flow.nodes.find((n) => n.id === "a")!;
+    expect(aNode.data.sourcePorts).toBeUndefined();
   });
 
   it("records missing source nodes without emitting dangling edges", () => {
