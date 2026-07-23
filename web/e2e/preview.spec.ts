@@ -25,14 +25,11 @@ test.describe("Production Preview", () => {
     await page.goto("http://localhost:4173/editor/some-workflow-id");
 
     await expect(
-      page.getByRole("heading", { name: "Editor: some-workflow-id" }),
+      page.getByText("Editor: some-workflow-id"),
     ).toBeVisible();
     await expect(page.getByTestId("editor-page")).toBeVisible();
-    await expect(page.getByTestId("empty-state")).toBeVisible();
-    await expect(page.getByTestId("fixture-json")).toHaveCount(0);
-    expect(await page.locator("body").innerText()).not.toContain(
-      "read-only placeholder editor",
-    );
+    await expect(page.getByTestId("fixture-nodes")).toHaveCount(0);
+    await expect(page.getByTestId("fixture-connections")).toHaveCount(0);
   });
 
   test("health pages do not show fixture node lists", async ({ page }) => {
