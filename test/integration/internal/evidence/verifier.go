@@ -211,8 +211,11 @@ func (v *Verifier) Verify(env *Envelope, suiteEvents []GoTestEvent) Verification
 		}
 	}
 
-	// 2. Suite outcome: recompute from go test -json events.
-	recomputedSuite := recomputeSuite(suiteEvents)
+	// 2. Suite outcome: recompute from go test -json events. recomputeSuite
+	// also repopulates env.Suite.RequiredRows (from the manifest) and
+	// env.Raw.SuiteRecords (parsed from the events file, spec §8.3 step 12),
+	// so a recorder that left them empty is healed when the events are intact.
+	recomputedSuite := recomputeSuite(env, suiteEvents)
 	if env.Suite.ExitCode != recomputedSuite.ExitCode {
 		errors = append(errors, fmt.Sprintf("suite: exit_code mismatch: envelope=%d recomputed=%d", env.Suite.ExitCode, recomputedSuite.ExitCode))
 	}
@@ -231,8 +234,26 @@ func (v *Verifier) Verify(env *Envelope, suiteEvents []GoTestEvent) Verification
 
 	// Spec §8.5: required_rows and observed_rows must both be non-zero and
 	// must be exactly equal. The OLD verifier never checked these, so an
-	// artifact with both at 0 (and no observed matrix) passed. The raw
-	// suite_records slice must also be non-empty (spec §8.3 step 12 / §8.4).
+	// artifact with both at 0 (and no observed matrix) passed. recomputeSuite
+	// repopulates RequiredRows and SuiteRecords; the derived-observation
+	// recompute below repopulates ObservedRows. These checks now guard the
+	// recomputed values: a recorder that left them at 0 is healed by recompute
+	// when the raw ledger is intact, and still fails when the raw ledger is
+	// corrupt (events empty → SuiteRecords empty; manifest unavailable →
+	// RequiredRows 0).
+	//
+	// Reject pre-aggregated or self-reported derived fields BEFORE recomputing
+	// derived_observations, so the check sees the input envelope state (the
+	// recompute below overwrites env.DerivedObservations).
+	errors = append(errors, checkNoPreaggregatedFields(env)...)
+
+	// 4. Compute derived observations from raw ledger; do not trust input
+	// derived_observations. ObservedRows is the recomputed derived count, set
+	// here so the suite-rows checks below see the authoritative value.
+	derived := v.computeDerivedObservations(env)
+	env.DerivedObservations = derived
+	env.Suite.ObservedRows = len(derived)
+
 	if env.Suite.RequiredRows <= 0 {
 		errors = append(errors, fmt.Sprintf("suite: required_rows must be > 0 (got %d)", env.Suite.RequiredRows))
 	}
@@ -251,9 +272,6 @@ func (v *Verifier) Verify(env *Envelope, suiteEvents []GoTestEvent) Verification
 	// 3. Raw ledger integrity.
 	errors = append(errors, checkRawLedgerIntegrity(env)...)
 
-	// 3b. Reject pre-aggregated or self-reported derived fields in the raw ledger.
-	errors = append(errors, checkNoPreaggregatedFields(env)...)
-
 	// 3c. run_identity integrity (spec §8.3 step 3): the raw ledger MUST carry
 	// at least one RunIdentity record, and all records MUST share the same
 	// RunID, TestBinaryDigest, and ManifestDigest. Missing, duplicate, or
@@ -262,13 +280,14 @@ func (v *Verifier) Verify(env *Envelope, suiteEvents []GoTestEvent) Verification
 
 	// 3d. environment integrity (spec §8.1/§8.5): redis_version and mysql_version
 	// MUST be non-empty AND sourced from typed EnvironmentObservation records,
-	// not hardcoded image tags. The typed records are authoritative; the typed
-	// Environment block is cross-checked against them and rejected on disagreement.
+	// not hardcoded image tags. recomputeEnvironment repopulates the typed
+	// Environment block from the authoritative raw observations; the typed
+	// records are authoritative per R4's own design, so the self-reported
+	// block is overwritten from them (healed when observations agree, left
+	// empty so checkEnvironmentIntegrity fails when they are absent/empty/
+	// disagree).
+	recomputeEnvironment(env)
 	errors = append(errors, checkEnvironmentIntegrity(env)...)
-
-	// 4. Compute derived observations from raw ledger; do not trust input derived_observations.
-	derived := v.computeDerivedObservations(env)
-	env.DerivedObservations = derived
 
 	// 4b. Detect duplicate scenario/row markers from distinct executions.
 	dupA0, dupA3 := findDuplicateMarkers(env.Raw.ProtocolObservations)
@@ -289,35 +308,111 @@ func (v *Verifier) Verify(env *Envelope, suiteEvents []GoTestEvent) Verification
 	return env.Verification
 }
 
-func recomputeSuite(events []GoTestEvent) SuiteSummary {
+func recomputeSuite(env *Envelope, events []GoTestEvent) SuiteSummary {
 	summary := SuiteSummary{}
+	// RequiredRows is recomputed from the authoritative manifest (spec §8.5),
+	// never trusted from the envelope. 5 A0 scenarios + 15 A3 rows = 20.
+	env.Suite.RequiredRows = len(A0RequiredScenarios()) + len(A3RequiredRows())
+
 	if len(events) == 0 {
 		summary.ExitCode = 1 // no output means failure
+		env.Raw.SuiteRecords = nil
 		return summary
 	}
 
-	// Collect per-test outcomes and package-level pass/fail.
+	// Collect per-test outcomes and package-level pass/fail. Dedup to the final
+	// terminal action per distinct test (spec §8.3 step 12: suite_records must
+	// be parsed from the events file).
 	testFailed := make(map[string]bool)
 	testSkipped := make(map[string]bool)
 	var packageFail bool
+	finalAction := make(map[string]string)
+	pkgForTest := make(map[string]string)
+	elapsedForTest := make(map[string]float64)
+	var order []string
 	for _, ev := range events {
-		if ev.Test != "" {
-			switch ev.Action {
-			case "fail":
-				testFailed[ev.Test] = true
-			case "skip":
-				testSkipped[ev.Test] = true
+		if ev.Test == "" {
+			if ev.Action == "fail" {
+				packageFail = true
 			}
-		} else if ev.Action == "fail" {
-			packageFail = true
+			continue
 		}
+		if _, seen := finalAction[ev.Test]; !seen {
+			order = append(order, ev.Test)
+		}
+		switch ev.Action {
+		case "fail":
+			testFailed[ev.Test] = true
+			finalAction[ev.Test] = "fail"
+		case "skip":
+			testSkipped[ev.Test] = true
+			finalAction[ev.Test] = "skip"
+		case "pass":
+			finalAction[ev.Test] = "pass"
+		}
+		if ev.Package != "" {
+			pkgForTest[ev.Test] = ev.Package
+		}
+		elapsedForTest[ev.Test] += ev.Elapsed
 	}
+
+	records := make([]SuiteRecord, 0, len(order))
+	for _, test := range order {
+		action := finalAction[test]
+		if action == "" {
+			continue
+		}
+		records = append(records, SuiteRecord{
+			RunID:          env.RunID,
+			TestName:       test,
+			Package:        pkgForTest[test],
+			Action:         action,
+			ElapsedSeconds: elapsedForTest[test],
+		})
+	}
+	env.Raw.SuiteRecords = records
 
 	if packageFail || len(testFailed) > 0 {
 		summary.ExitCode = 1
 	}
 	summary.SkipCount = len(testSkipped)
 	return summary
+}
+
+// recomputeEnvironment repopulates the typed Environment block from the
+// authoritative raw EnvironmentObservation records (spec §8.1/§8.5). The typed
+// records are authoritative per R4's own design; the self-reported Environment
+// block is overwritten from them so a recorder that left the block empty (the
+// false-positive shape exposed by the gate run) is healed when the raw
+// observations are present and agree, and left empty — so
+// checkEnvironmentIntegrity fails appropriately — when the observations are
+// absent, empty, disagree, or reference a different run. Cross-run observations
+// are not used for derivation; checkRawLedgerIntegrity flags them separately.
+func recomputeEnvironment(env *Envelope) {
+	var redisResults, mysqlResults []string
+	for _, eo := range env.Raw.EnvironmentObservations {
+		if eo.RunID != "" && eo.RunID != env.RunID {
+			continue
+		}
+		switch eo.Component {
+		case "redis":
+			if eo.Result != "" {
+				redisResults = append(redisResults, eo.Result)
+			}
+		case "mysql":
+			if eo.Result != "" {
+				mysqlResults = append(mysqlResults, eo.Result)
+			}
+		}
+	}
+	env.Environment.RedisVersion = ""
+	if valuesAgree(redisResults) && len(redisResults) > 0 {
+		env.Environment.RedisVersion = redisResults[0]
+	}
+	env.Environment.MySQLVersion = ""
+	if valuesAgree(mysqlResults) && len(mysqlResults) > 0 {
+		env.Environment.MySQLVersion = mysqlResults[0]
+	}
 }
 
 func checkRawLedgerIntegrity(env *Envelope) []string {

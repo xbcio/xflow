@@ -266,9 +266,28 @@ func requirePassed(t *testing.T, v Verification) {
 func TestVerifyPassesForValidEnvelope(t *testing.T) {
 	env := validEnvelope()
 	markAllRequired(env)
+	// Simulate the false-positive recorder shape: the suite summary fields and
+	// suite_records are left empty. recomputeSuite + derived must repopulate
+	// RequiredRows=20, ObservedRows=20, and a non-empty suite_records so the
+	// gate's suite-rows checks pass for a valid raw ledger.
+	env.Suite.RequiredRows = 0
+	env.Suite.ObservedRows = 0
+	env.Raw.SuiteRecords = nil
 	v := NewVerifier(defaultFakeProvenance())
 	res := v.Verify(env, passEvents())
 	requirePassed(t, res)
+	if env.Suite.RequiredRows != 20 {
+		t.Fatalf("expected recomputed RequiredRows=20, got %d", env.Suite.RequiredRows)
+	}
+	if env.Suite.ObservedRows != 20 {
+		t.Fatalf("expected recomputed ObservedRows=20, got %d", env.Suite.ObservedRows)
+	}
+	if len(env.Raw.SuiteRecords) == 0 {
+		t.Fatal("expected recomputed suite_records to be non-empty")
+	}
+	if env.Environment.RedisVersion != "7.2" || env.Environment.MySQLVersion != "8.0" {
+		t.Fatalf("expected recomputed environment redis=7.2 mysql=8.0, got redis=%q mysql=%q", env.Environment.RedisVersion, env.Environment.MySQLVersion)
+	}
 }
 
 // TestVerifyRejectsFalsePositiveEnvelope constructs the minimal envelope that
@@ -276,7 +295,16 @@ func TestVerifyPassesForValidEnvelope(t *testing.T) {
 // from the 2026-07-23 review (empty environment, required_rows==0,
 // observed_rows==0, null suite_records, all five A0 handler_invocations==0, and
 // a dirty relevant tree that honestly reports false). The new verifier MUST fail
-// each missing field with an error naming it.
+// each surviving false-positive dimension with an error naming it.
+//
+// After the R8b recompute fix, the suite-rows dimensions (RequiredRows,
+// ObservedRows, SuiteRecords) are RECOMPUTED from the manifest/events/derived, so
+// a recorder that left them at 0 is healed and no longer a false-positive
+// surface. The remaining dimensions — dirty tree, missing run_identity, missing
+// environment observations (so the Environment block cannot be derived), and A0
+// handler_invocations==0 — still fail with field-specific errors. The suite-rows
+// assertions are therefore dropped; the positive-path test
+// (TestVerifyPassesForValidEnvelope) guards that recompute repopulates them.
 func TestVerifyRejectsFalsePositiveEnvelope(t *testing.T) {
 	prov := defaultFakeProvenance()
 	// Dirty relevant tree, honestly reported as false by the envelope. The OLD
@@ -293,10 +321,12 @@ func TestVerifyRejectsFalsePositiveEnvelope(t *testing.T) {
 	// Revert every field the new enforcements cover to the false-positive state.
 	env.Source.RelevantTreeClean = false // honest: tree is dirty
 	env.Source.RelevantDiffSHA256 = sha256String("dirty")
-	env.Environment = Environment{} // empty environment
-	env.Suite.RequiredRows = 0
-	env.Suite.ObservedRows = 0
-	env.Raw.SuiteRecords = nil
+	// Corrupt the RAW ledger (not the recomputed summary fields) so recompute
+	// cannot heal the false-positive. Deleting EnvironmentObservations and
+	// RunIdentities leaves the Environment block un-derivable and the run
+	// un-identified; RequiredRows/ObservedRows/SuiteRecords are left to
+	// recompute (which repopulates them) — those dimensions are no longer
+	// false-positive surfaces after R8b.
 	env.Raw.RunIdentities = nil
 	env.Raw.EnvironmentObservations = nil
 
@@ -336,15 +366,11 @@ func TestVerifyRejectsFalsePositiveEnvelope(t *testing.T) {
 
 	// dirty relevant tree (honest false) must now fail.
 	requireErrorContains("relevant_tree_clean must be true")
-	// empty environment + no typed observations.
+	// empty environment + no typed observations (recompute cannot derive the
+	// block from absent observations).
 	requireErrorContains("environment_observation record required")
 	requireErrorContains("redis_version must be non-empty")
 	requireErrorContains("mysql_version must be non-empty")
-	// required_rows / observed_rows.
-	requireErrorContains("required_rows must be > 0")
-	requireErrorContains("observed_rows must be > 0")
-	// null suite_records.
-	requireErrorContains("suite_records must be non-empty")
 	// run_identity missing.
 	requireErrorContains("run_identity: at least one run_identity record required")
 	// A0 handler_invocations: the four non-OSKill scenarios must each fail
@@ -392,33 +418,22 @@ func TestVerifyRejectsInvalidArtifacts(t *testing.T) {
 		wantErrSubstr string
 	}{
 		{
-			name: "empty redis and mysql version",
+			// Corrupting the RAW environment observations (not the recomputed
+			// Environment block) so recomputeEnvironment cannot derive the
+			// block; checkEnvironmentIntegrity then fails on redis/mysql.
+			name: "environment observations removed",
 			mutate: func(env *Envelope) {
-				env.Environment = Environment{}
+				env.Raw.EnvironmentObservations = nil
 			},
 			wantErrSubstr: "redis_version must be non-empty",
 		},
-		{
-			name: "suite required_rows zero",
-			mutate: func(env *Envelope) {
-				env.Suite.RequiredRows = 0
-			},
-			wantErrSubstr: "required_rows must be > 0",
-		},
-		{
-			name: "suite observed_rows zero",
-			mutate: func(env *Envelope) {
-				env.Suite.ObservedRows = 0
-			},
-			wantErrSubstr: "observed_rows must be > 0",
-		},
-		{
-			name: "suite_records empty",
-			mutate: func(env *Envelope) {
-				env.Raw.SuiteRecords = nil
-			},
-			wantErrSubstr: "suite_records must be non-empty",
-		},
+		// The "required_rows zero", "observed_rows zero", and
+		// "suite_records empty" cases are intentionally absent after R8b:
+		// recomputeSuite/recomputeDerived repopulate these from the manifest
+		// and events, so mutating the recomputed summary fields no longer
+		// produces a verifiable failure. The positive-path test
+		// (TestVerifyPassesForValidEnvelope) guards that they are repopulated
+		// to 20/20/non-empty for a valid ledger.
 		{
 			name: "a0 scenario missing counter snapshot and handler_invocations zero",
 			mutate: func(env *Envelope) {
