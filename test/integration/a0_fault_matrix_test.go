@@ -19,6 +19,10 @@ import (
 	"github.com/xbcio/xflow/backend/distributed"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
+	"github.com/xbcio/xflow/execution"
+	"github.com/xbcio/xflow/service/control"
+	"github.com/xbcio/xflow/service/protocol"
+	runnersvc "github.com/xbcio/xflow/service/runner"
 	"github.com/xbcio/xflow/types"
 	"github.com/redis/go-redis/v9"
 )
@@ -307,15 +311,29 @@ func newA0FaultEnv(t *testing.T, addr string, consumer bool) *a0FaultEnv {
 	return env
 }
 
-// TestA0FaultMatrix exercises the four A0 process-level fault scenarios
-// (2026-07-19-sdk-server-production-readiness-followup.md §T6) against a real
-// Redis instance. Each scenario fills a structured report and accumulates it
-// into test/integration/testdata/a0_fault_matrix_report.json, which CI uploads
-// as a release artifact.
+// drainA0Evidence non-blockingly reads all currently available events from the
+// runtime evidence buffer. It is used after a scenario converges so the test
+// can count applied commits/advances without waiting for background producers.
+func drainA0Evidence(buf *engine.RuntimeEvidenceBuffer) []engine.RuntimeEvidenceEvent {
+	var events []engine.RuntimeEvidenceEvent
+	for {
+		select {
+		case e := <-buf.Events():
+			events = append(events, e)
+		default:
+			return events
+		}
+	}
+}
+
+// TestA0FaultMatrix exercises the A0 process-level fault scenarios against a
+// real Redis instance. Each scenario fills a structured report and accumulates
+// it into test/integration/testdata/a0_fault_matrix_report.json, which CI
+// uploads as a release artifact.
 //
 // Fault matrix:
 //  1. commit-then-flush-before-delivery (existing behavior, full report)
-//  2. response-loss (handler success, commit response lost → lease reclaim)
+//  2. report-ack-loss (real runner report chain: server committed, runner ACK lost)
 //  3. queue handoff (task enqueued, consumer crash before process → new consumer)
 //  4. OS kill (non-graceful termination post-submit → outbox scan + lease reclaim)
 func TestA0FaultMatrix(t *testing.T) {
@@ -444,197 +462,168 @@ func TestA0FaultMatrix(t *testing.T) {
 			outcome, finalExec.Status)
 	})
 
-	t.Run("ResponseLoss", func(t *testing.T) {
+	t.Run("ReportAckLoss", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		// Short lease TTL so the expired-lease reclaim path is exercised quickly.
-		// WithConsumer(false): no background OutboxDispatcher or timeout monitor —
-		// the test drives all recovery manually (ListExpiredLeases +
-		// ReclaimLease). This isolates the response-loss path from background
-		// delivery races.
-		backend, err := distributed.New(addr, nil, distributed.WithConsumer(false))
-		if err != nil {
-			t.Fatalf("distributed.New() error = %v", err)
-		}
-		queue := &a0FaultQueue{}
-		eng := engine.New(backend.State(), queue,
-			engine.WithDefaultLeaseTTL(150*time.Millisecond),
-			engine.WithOutboxMaxDeliveryAttempts(5),
+		h := newServerRunnerHarness(t, addr, 1)
+
+		registry := execution.NewRegistry()
+		startHandler, startCounter := buildInstrumentedHandler(e2eRealHandler{}, "a0-report-ack-loss-start")
+		registry.RegisterGlobal("test.a0.start", startHandler)
+		registry.RegisterGlobal("test.a0.done", e2eRealHandler{})
+
+		proxy := newAckLossProtocolClient(protocol.NewClient(h.httpSrv.URL, h.httpSrv.Client()))
+
+		runnerID := "runner-a0-report-ack-loss-1"
+		runnerCtx, runnerCancel := context.WithCancel(context.Background())
+		defer runnerCancel()
+		runner := runnersvc.New(
+			proxy,
+			registry,
+			runnersvc.Config{
+				RunnerID:    runnerID,
+				Concurrency: 1,
+				Capabilities: []protocol.Capability{
+					{NodeType: "test.a0.start"},
+					{NodeType: "test.a0.done"},
+				},
+				PollWait: 5 * time.Millisecond,
+			},
 		)
-		rdb := redis.NewClient(&redis.Options{Addr: addr})
-		t.Cleanup(func() {
-			_ = rdb.Close()
-			if c, ok := backend.RedisClient().(*redis.Client); ok {
-				_ = c.Close()
+		errCh := make(chan error, 1)
+		go func() { errCh <- runner.Run(runnerCtx) }()
+		waitForE2ERunner(t, h.runners, runnerID)
+
+		def := &types.WorkflowDef{
+			Name: "a0-report-ack-loss",
+			Nodes: []types.NodeDef{
+				{Name: "start", Type: "test.a0.start"},
+				{Name: "done", Type: "test.a0.done"},
+			},
+			Connections: types.Connections{
+				"start": {"main": []types.Connection{{Node: "done", Input: "main"}}},
+			},
+		}
+		execID := submitWorkflowHTTP(t, h.httpSrv.URL, h.httpSrv.Client(), def, map[string]any{"claim_id": "ack-loss"})
+
+		waitCtx, waitCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer waitCancel()
+		result := waitForCompletion(waitCtx, t, h.state, execID, "start")
+
+		if !proxy.SawTransportError() {
+			t.Fatalf("proxy did not inject ack-loss transport error")
+		}
+
+		events := drainA0Evidence(h.EvidenceBuffer())
+		if dropped := h.EvidenceBuffer().Dropped(); dropped > 0 {
+			t.Fatalf("evidence buffer dropped %d events", dropped)
+		}
+
+		var appliedCommits, appliedAdvances int
+		var commitOutcome engine.CommitOutcome
+		for _, e := range events {
+			if e.ExecutionID != execID || e.NodeName != "start" {
+				continue
 			}
-		})
-
-		g := a0AcyclicGraph(t, "a0-response-loss")
-		queue.setError(nil)
-		id, err := eng.Submit(ctx, g, map[string]any{"round": 1})
-		if err != nil {
-			t.Fatalf("Submit() error = %v", err)
-		}
-		t.Cleanup(func() { deleteAtomicReliabilityKeys(t, rdb, id) })
-
-		rootTasks := queue.drain()
-		if len(rootTasks) != 1 || rootTasks[0].NodeName != "start" {
-			t.Fatalf("after Submit delivered = %+v, want one start task", rootTasks)
-		}
-		startTask := rootTasks[0]
-
-		// Lease the task with a short TTL. The handler "returns OK" but its
-		// commit response is lost — we model this by never calling
-		// CommitTaskResult for lease1. The lease will expire and the engine's
-		// lease-reclaim path (production: the leader-only LeaseSweeper) must
-		// revoke it and re-enqueue the task.
-		lease1, err := eng.BuildTaskLease(ctx, startTask)
-		if err != nil {
-			t.Fatalf("BuildTaskLease(lease1) error = %v", err)
-		}
-		if lease1 == nil || lease1.LeaseToken == "" {
-			t.Fatalf("lease1 = %+v, want non-empty token", lease1)
-		}
-
-		// Wait for the lease to expire, polling ListExpiredLeases rather than a
-		// fixed Sleep so the reclaim path is exercised as soon as the TTL
-		// elapses (and so the test does not reclaim before expiry, which would
-		// be a flaky no-op). The node remains Running with lease1's token until
-		// the reclaim path revokes it.
-		recoveryStart := time.Now()
-		var expired []engine.ExpiredLease
-		expireDeadline := time.Now().Add(5 * time.Second)
-		found := false
-		for !found {
-			expired, err = backend.State().ListExpiredLeases(ctx, time.Now())
-			if err != nil {
-				t.Fatalf("ListExpiredLeases() error = %v", err)
-			}
-			for _, e := range expired {
-				if e.ExecutionID == id && e.NodeName == "start" {
-					found = true
-					break
+			switch e.Type {
+			case engine.RuntimeEvidenceCommit:
+				if e.Applied {
+					appliedCommits++
+					commitOutcome = e.CommitOutcome
 				}
-			}
-			if found {
-				break
-			}
-			if time.Now().After(expireDeadline) {
-				t.Fatalf("timeout waiting for lease1 to expire (expired=%+v)", expired)
-			}
-			time.Sleep(20 * time.Millisecond)
-		}
-
-		// Simulate the leader-only LeaseSweeper: ListExpiredLeases + ReclaimLease.
-		// The timeout monitor started by Bind only handles suspended-node
-		// timeouts; lease reclaim is the sweeper's responsibility. We drive it
-		// here directly because the sweeper is a control-plane component, not a
-		// backend component.
-		var reclaimed bool
-		for _, e := range expired {
-			if e.ExecutionID == id && e.NodeName == "start" {
-				reclaimed, err = eng.ReclaimLease(ctx, e)
-				if err != nil {
-					t.Fatalf("ReclaimLease() error = %v", err)
-				}
-				if reclaimed {
-					break
+			case engine.RuntimeEvidenceAdvance:
+				if e.Applied {
+					appliedAdvances++
 				}
 			}
 		}
-		if !reclaimed {
-			t.Fatalf("expired lease for %s/start was not reclaimed (expired list = %+v)", id, expired)
+
+		handlerInvocations := startCounter.Count()
+		if handlerInvocations != 1 {
+			t.Fatalf("handler invocations = %d, want 1", handlerInvocations)
+		}
+		if appliedCommits != 1 {
+			t.Fatalf("applied commit receipts = %d, want 1", appliedCommits)
+		}
+		if appliedAdvances != 1 {
+			t.Fatalf("applied advance receipts = %d, want 1", appliedAdvances)
 		}
 
-		// Reclaim re-enqueues the task via the durable outbox + FlushOutbox.
-		// Drain the redelivered task and build a fresh lease.
-		var redelivered *engine.Task
-		deadline := time.Now().Add(5 * time.Second)
-		for {
-			tasks := queue.drain()
-			if len(tasks) > 0 {
-				redelivered = tasks[len(tasks)-1]
-				break
-			}
-			if time.Now().After(deadline) {
-				t.Fatalf("timeout waiting for reclaimed task redelivery")
-			}
-			time.Sleep(20 * time.Millisecond)
+		node, err := h.state.GetNode(ctx, execID, "start")
+		if err != nil || node == nil || node.Status != types.NodeStatusSuccess {
+			t.Fatalf("node after ack-loss = %+v err=%v, want Success", node, err)
 		}
-		if redelivered.NodeName != "start" {
-			t.Fatalf("redelivered task = %s, want start", redelivered.NodeName)
+		if result.Status != types.ExecutionStatusSuccess {
+			t.Fatalf("execution after ack-loss = %s, want Success", result.Status)
+		}
+		doneNode, err := h.state.GetNode(ctx, execID, "done")
+		if err != nil || doneNode == nil || doneNode.Status != types.NodeStatusSuccess {
+			t.Fatalf("done node after ack-loss = %+v err=%v, want Success", doneNode, err)
 		}
 
-		lease2, err := eng.BuildTaskLease(ctx, redelivered)
-		if err != nil {
-			t.Fatalf("BuildTaskLease(lease2) error = %v", err)
+		captured := proxy.CapturedRequest()
+		if captured == nil || captured.Lease == nil {
+			t.Fatalf("proxy did not capture the original report request")
 		}
-
-		// Fencing proof: the "lost response" arriving late (a duplicate commit
-		// on the original lease1 token) must be classified stale_token — the
-		// reclaimed lease has been re-issued under lease2's token, so lease1
-		// can no longer fence a commit. This must hold BEFORE lease2 commits
-		// (while the node is still Running under lease2's token); after the
-		// terminal commit the late commit would be classified
-		// execution_inactive, which is also a fencing outcome but not the one
-		// the response-loss matrix is proving.
-		lateOutcome, lateErr := eng.CommitTaskResultWithOutcome(ctx, lease1, engine.TaskResult{
-			Output: &types.Output{Data: map[string]any{"ok": true}},
+		lookup, ok := h.runners.(control.LeaseLookup)
+		if !ok {
+			t.Fatal("runner directory does not implement LeaseLookup")
+		}
+		_, found, _ := lookup.LookupLease(ctx, runnerID, captured.SessionID, control.LeaseLookupKey{
+			LeaseToken: captured.Lease.LeaseToken,
 		})
-		if lateErr != nil && !errors.Is(lateErr, engine.ErrInvalidLeaseToken) {
-			t.Fatalf("late commit error = %v, want nil or ErrInvalidLeaseToken (stale token)", lateErr)
-		}
-		if lateOutcome != engine.CommitOutcomeStaleToken {
-			t.Fatalf("late commit outcome = %q, want %q (fenced)", lateOutcome, engine.CommitOutcomeStaleToken)
+		if found {
+			t.Fatalf("lease still found in runner directory after commit+release")
 		}
 
-		// The retry commit (lease2) is the one that advances the DAG.
-		outcome2, err := eng.CommitTaskResultWithOutcome(ctx, lease2, engine.TaskResult{
-			Output: &types.Output{Data: map[string]any{"ok": true}},
-		})
+		atomicState, ok := h.state.(engine.AtomicStateStore)
+		if !ok {
+			t.Fatal("state store does not implement AtomicStateStore")
+		}
+		entries, err := atomicState.ListOutbox(ctx, execID, time.Now().Add(time.Second), 16)
 		if err != nil {
-			t.Fatalf("CommitTaskResult(lease2) error = %v", err)
+			t.Fatalf("ListOutbox() error = %v", err)
 		}
-		if outcome2 != engine.CommitOutcomeAccepted {
-			t.Fatalf("lease2 commit outcome = %q, want %q", outcome2, engine.CommitOutcomeAccepted)
+		if len(entries) != 0 {
+			t.Fatalf("outbox after convergence = %d entries, want 0", len(entries))
 		}
 
-		// Final state: node Success, execution Success, exactly one DAG advance.
-		node, _ := backend.State().GetNode(ctx, id, "start")
-		execution, _ := backend.State().GetExecution(ctx, id)
-		if node == nil || node.Status != types.NodeStatusSuccess {
-			t.Fatalf("node = %+v, want Success", node)
-		}
-		if execution == nil || execution.Status != types.ExecutionStatusSuccess {
-			t.Fatalf("execution = %+v, want Success", execution)
+		// The runner must have exited because of the injected transport error.
+		runnerCancel()
+		select {
+		case err := <-errCh:
+			if err == nil {
+				t.Fatalf("runner error expected transport error, got nil")
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("runner did not stop in time")
 		}
 
 		report := a0FaultReport{
-			Scenario:           "response-loss",
-			InjectionPoint:     "handler returned OK but commit response lost (lease1 never committed); lease reclaimed and task redelivered",
-			ExecutionID:        string(id),
+			Scenario:           "report-ack-loss",
+			InjectionPoint:     "runner ReportResult accepted by control but response ACK lost",
+			ExecutionID:        string(execID),
 			NodeName:           "start",
-			ActivationID:       redelivered.ActivationID,
-			LeaseToken:         string(lease2.LeaseToken),
+			ActivationID:       captured.Lease.Task.ActivationID,
+			LeaseToken:         string(captured.Lease.LeaseToken),
 			NodeStatus:         string(node.Status),
-			ExecutionStatus:    string(execution.Status),
-			CommitOutcome:      string(outcome2),
-			QueueDeliveries:    queue.totalDeliveries(),
-			// HandlerInvocations is a logical estimate, not a measured count:
-			// this scenario does not run a real handler (CommitTaskResult is
-			// driven directly by the test). The value reflects the
-			// exactly-once DAG semantics: lease1's "lost" commit does not
-			// advance the DAG; only lease2's commit does (DAGAdvances=1).
-			HandlerInvocations: 1,
-			DAGAdvances:        1,
-			FinalStatus:        string(execution.Status),
-			RecoveryTimeMS:     time.Since(recoveryStart).Milliseconds(),
+			ExecutionStatus:    string(result.Status),
+			CommitOutcome:      string(commitOutcome),
+			QueueDeliveries:    1,
+			HandlerInvocations: handlerInvocations,
+			DAGAdvances:        appliedAdvances,
+			FinalStatus:        string(result.Status),
+			RecoveryTimeMS:     0,
 			Pass:               true,
 		}
 		writeA0FaultReport(t, report)
-		t.Logf("A0 scenario 2: response-loss: lease1 fenced as %s, lease2 committed %s, DAG advances=1, final=%s",
-			lateOutcome, outcome2, execution.Status)
+		t.Logf("A0 scenario ReportAckLoss: handler invocations=%d, applied commits=%d, applied advances=%d, saw transport error=%v, final=%s",
+			handlerInvocations, appliedCommits, appliedAdvances, proxy.SawTransportError(), result.Status)
+
+		// Stop the control-plane consumer before the next scenario so it does not
+		// race for the shared Asynq queue.
+		h.stop()
 	})
 
 	t.Run("QueueHandoff", func(t *testing.T) {
