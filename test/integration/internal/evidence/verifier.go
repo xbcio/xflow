@@ -171,11 +171,17 @@ func (v *Verifier) Verify(env *Envelope, suiteEvents []GoTestEvent) Verification
 	clean, dirtyDetails, err := v.Provenance.RelevantTreeClean(relevantPaths)
 	if err != nil {
 		errors = append(errors, fmt.Sprintf("source: cannot check relevant tree cleanliness: %v", err))
-	} else if env.Source.RelevantTreeClean != clean {
-		errors = append(errors, fmt.Sprintf("source: relevant_tree_clean mismatch: envelope=%v recomputed=%v", env.Source.RelevantTreeClean, clean))
+	} else if !clean {
+		// Spec §8.2: recomputed_clean must be true. A dirty relevant tree fails
+		// verification EVEN IF the envelope honestly reports RelevantTreeClean
+		// == false. The previous mismatch-only check let an honest-false dirty
+		// tree through; this is the false-positive root cause.
+		errors = append(errors, "source: relevant_tree_clean must be true (dirty relevant tree)")
 		if dirtyDetails != "" {
 			errors = append(errors, fmt.Sprintf("source: dirty details: %s", strings.TrimSpace(dirtyDetails)))
 		}
+	} else if env.Source.RelevantTreeClean != clean {
+		errors = append(errors, fmt.Sprintf("source: relevant_tree_clean mismatch: envelope=%v recomputed=%v", env.Source.RelevantTreeClean, clean))
 	}
 
 	diffDigest, err := v.Provenance.RelevantDiffDigest(relevantPaths)
@@ -223,6 +229,23 @@ func (v *Verifier) Verify(env *Envelope, suiteEvents []GoTestEvent) Verification
 		errors = append(errors, fmt.Sprintf("suite: dropped_runtime_events must be zero: %d", env.Suite.DroppedRuntimeEvents))
 	}
 
+	// Spec §8.5: required_rows and observed_rows must both be non-zero and
+	// must be exactly equal. The OLD verifier never checked these, so an
+	// artifact with both at 0 (and no observed matrix) passed. The raw
+	// suite_records slice must also be non-empty (spec §8.3 step 12 / §8.4).
+	if env.Suite.RequiredRows <= 0 {
+		errors = append(errors, fmt.Sprintf("suite: required_rows must be > 0 (got %d)", env.Suite.RequiredRows))
+	}
+	if env.Suite.ObservedRows <= 0 {
+		errors = append(errors, fmt.Sprintf("suite: observed_rows must be > 0 (got %d)", env.Suite.ObservedRows))
+	}
+	if env.Suite.RequiredRows != env.Suite.ObservedRows {
+		errors = append(errors, fmt.Sprintf("suite: required_rows != observed_rows: required=%d observed=%d", env.Suite.RequiredRows, env.Suite.ObservedRows))
+	}
+	if len(env.Raw.SuiteRecords) == 0 {
+		errors = append(errors, "suite: suite_records must be non-empty")
+	}
+
 	suiteRecomputed := true
 
 	// 3. Raw ledger integrity.
@@ -230,6 +253,18 @@ func (v *Verifier) Verify(env *Envelope, suiteEvents []GoTestEvent) Verification
 
 	// 3b. Reject pre-aggregated or self-reported derived fields in the raw ledger.
 	errors = append(errors, checkNoPreaggregatedFields(env)...)
+
+	// 3c. run_identity integrity (spec §8.3 step 3): the raw ledger MUST carry
+	// at least one RunIdentity record, and all records MUST share the same
+	// RunID, TestBinaryDigest, and ManifestDigest. Missing, duplicate, or
+	// inconsistent run_identity fails verification.
+	errors = append(errors, checkRunIdentityIntegrity(env)...)
+
+	// 3d. environment integrity (spec §8.1/§8.5): redis_version and mysql_version
+	// MUST be non-empty AND sourced from typed EnvironmentObservation records,
+	// not hardcoded image tags. The typed records are authoritative; the typed
+	// Environment block is cross-checked against them and rejected on disagreement.
+	errors = append(errors, checkEnvironmentIntegrity(env)...)
 
 	// 4. Compute derived observations from raw ledger; do not trust input derived_observations.
 	derived := v.computeDerivedObservations(env)
@@ -349,7 +384,164 @@ func checkNoPreaggregatedFields(env *Envelope) []string {
 	return errs
 }
 
-// findDuplicateMarkers scans protocol observations for two distinct executions
+// checkRunIdentityIntegrity enforces spec §8.3 step 3: the raw ledger MUST
+// carry at least one RunIdentity, and all records MUST share the same RunID,
+// TestBinaryDigest, and ManifestDigest. The RunID MUST also match the envelope
+// run_id (the same cross-run-reference rule applied to every other raw record
+// type). Missing, duplicate, or inconsistent run_identity fails.
+func checkRunIdentityIntegrity(env *Envelope) []string {
+	var errs []string
+	if len(env.Raw.RunIdentities) == 0 {
+		errs = append(errs, "run_identity: at least one run_identity record required")
+		return errs
+	}
+	first := env.Raw.RunIdentities[0]
+	if first.RunID == "" {
+		errs = append(errs, "run_identity: record 0 has empty run_id")
+	} else if first.RunID != env.RunID {
+		errs = append(errs, fmt.Sprintf("run_identity: record 0 run_id %q != envelope run_id %q", first.RunID, env.RunID))
+	}
+	if first.TestBinaryDigest == "" {
+		errs = append(errs, "run_identity: record 0 has empty test_binary_digest")
+	}
+	if first.ManifestDigest == "" {
+		errs = append(errs, "run_identity: record 0 has empty manifest_digest")
+	}
+	for i, ri := range env.Raw.RunIdentities {
+		if i == 0 {
+			continue
+		}
+		if ri.RunID != first.RunID {
+			errs = append(errs, fmt.Sprintf("run_identity: record %d run_id %q != %q (cross-identity)", i, ri.RunID, first.RunID))
+		}
+		if ri.TestBinaryDigest != first.TestBinaryDigest {
+			errs = append(errs, fmt.Sprintf("run_identity: record %d test_binary_digest %q != %q", i, ri.TestBinaryDigest, first.TestBinaryDigest))
+		}
+		if ri.ManifestDigest != first.ManifestDigest {
+			errs = append(errs, fmt.Sprintf("run_identity: record %d manifest_digest %q != %q", i, ri.ManifestDigest, first.ManifestDigest))
+		}
+	}
+	return errs
+}
+
+// checkEnvironmentIntegrity enforces spec §8.1/§8.5: redis_version and
+// mysql_version MUST be non-empty AND sourced from typed EnvironmentObservation
+// records. The typed records are authoritative; the self-reported Environment
+// block is cross-checked against them and rejected if they disagree or are
+// empty. At least one redis and one mysql observation with non-empty Result is
+// required; all redis Results must agree; all mysql Results must agree
+// (deduplication across fragments is fine, but inconsistent versions fail).
+func checkEnvironmentIntegrity(env *Envelope) []string {
+	var errs []string
+
+	if len(env.Raw.EnvironmentObservations) == 0 {
+		errs = append(errs, "environment: at least one environment_observation record required")
+		if env.Environment.RedisVersion == "" {
+			errs = append(errs, "environment: redis_version must be non-empty")
+		}
+		if env.Environment.MySQLVersion == "" {
+			errs = append(errs, "environment: mysql_version must be non-empty")
+		}
+		return errs
+	}
+
+	var redisResults, mysqlResults []string
+	for i, eo := range env.Raw.EnvironmentObservations {
+		switch eo.Component {
+		case "redis":
+			if eo.Result == "" {
+				errs = append(errs, fmt.Sprintf("environment: environment_observation %d (redis) has empty result", i))
+				continue
+			}
+			redisResults = append(redisResults, eo.Result)
+		case "mysql":
+			if eo.Result == "" {
+				errs = append(errs, fmt.Sprintf("environment: environment_observation %d (mysql) has empty result", i))
+				continue
+			}
+			mysqlResults = append(mysqlResults, eo.Result)
+		}
+	}
+	if len(redisResults) == 0 {
+		errs = append(errs, "environment: at least one redis observation with non-empty result required")
+	}
+	if len(mysqlResults) == 0 {
+		errs = append(errs, "environment: at least one mysql observation with non-empty result required")
+	}
+	redisAgreed := valuesAgree(redisResults)
+	mysqlAgreed := valuesAgree(mysqlResults)
+	if !redisAgreed {
+		errs = append(errs, fmt.Sprintf("environment: redis observation results disagree: %v", redisResults))
+	}
+	if !mysqlAgreed {
+		errs = append(errs, fmt.Sprintf("environment: mysql observation results disagree: %v", mysqlResults))
+	}
+	if env.Environment.RedisVersion == "" {
+		errs = append(errs, "environment: redis_version must be non-empty")
+	} else if redisAgreed && len(redisResults) > 0 && env.Environment.RedisVersion != redisResults[0] {
+		errs = append(errs, fmt.Sprintf("environment: redis_version %q != observed result %q", env.Environment.RedisVersion, redisResults[0]))
+	}
+	if env.Environment.MySQLVersion == "" {
+		errs = append(errs, "environment: mysql_version must be non-empty")
+	} else if mysqlAgreed && len(mysqlResults) > 0 && env.Environment.MySQLVersion != mysqlResults[0] {
+		errs = append(errs, fmt.Sprintf("environment: mysql_version %q != observed result %q", env.Environment.MySQLVersion, mysqlResults[0]))
+	}
+	return errs
+}
+
+// valuesAgree reports whether all non-empty strings in vals are identical.
+func valuesAgree(vals []string) bool {
+	if len(vals) == 0 {
+		return true
+	}
+	first := vals[0]
+	for _, v := range vals[1:] {
+		if v != first {
+			return false
+		}
+	}
+	return true
+}
+
+// hasSystemTaskDelivery reports whether a "system_task_delivery" protocol
+// observation bound to execID carries system_task_deliveries (or deliveries) >= 1.
+// This is the OSKillSIGKILL phase-B exception in checkA0 (spec §3.5).
+func hasSystemTaskDelivery(env *Envelope, execID types.ExecutionID) bool {
+	for _, po := range env.Raw.ProtocolObservations {
+		if po.Type != "system_task_delivery" {
+			continue
+		}
+		if execID != "" && po.ExecutionID != execID {
+			continue
+		}
+		if n, ok := intFromDetail(po.Detail, "system_task_deliveries"); ok && n >= 1 {
+			return true
+		}
+		if n, ok := intFromDetail(po.Detail, "deliveries"); ok && n >= 1 {
+			return true
+		}
+	}
+	return false
+}
+
+// intFromDetail extracts an int from a protocol-observation Detail map value,
+// tolerating the int / int64 / float64 representations produced by Go construction
+// and JSON unmarshalling.
+func intFromDetail(m map[string]any, key string) (int, bool) {
+	v, ok := m[key]
+	if !ok {
+		return 0, false
+	}
+	switch n := v.(type) {
+	case int:
+		return n, true
+	case int64:
+		return int(n), true
+	case float64:
+		return int(n), true
+	}
+	return 0, false
+}
 // claiming the same A0 scenario or A3 row. The verifier uses these maps to
 // reject duplicate rows before deriving observations, because the derivation
 // loop only produces one observation per manifest entry.
@@ -470,6 +662,15 @@ func (v *Verifier) computeDerivedObservations(env *Envelope) []DerivedObservatio
 			obs.AppliedAdvance = true
 			obs.AdvanceEventID = advances[0].EventID
 		}
+		// Aggregate handler counters for the A0 execution so checkA0 can enforce
+		// handler_invocations > 0 (except OSKillSIGKILL phase B, which is
+		// direct-drive and uses system_task_delivery instead). Each value MUST
+		// reference a counter snapshot ID — a bare number with no counter reference
+		// is rejected by checkA0.
+		for _, cs := range countersByExec[execID] {
+			obs.HandlerInvocations += cs.Value
+			obs.CounterSnapshotID = cs.CounterID
+		}
 		derived = append(derived, obs)
 	}
 
@@ -578,6 +779,25 @@ func (v *Verifier) checkA0(env *Envelope, derived []DerivedObservation, duplicat
 		// Every numeric field must have evidence_source or a null reason.
 		if obs.EvidenceSource == "" && obs.Reason == "" {
 			errs = append(errs, fmt.Sprintf("a0: scenario %s missing evidence_source or reason", scenario))
+		}
+
+		// A0 handler_invocations (spec §8.5): each scenario MUST show positive
+		// handler activity backed by a counter snapshot reference. The only
+		// exception is OSKillSIGKILL phase B, which is direct-drive: business
+		// handler_invocations is legitimately 0, so it is required instead to
+		// show system_task_delivery >= 1 (spec §3.5). A bare handler_invocations
+		// number with no counter snapshot reference is rejected.
+		if scenario == A0OSKillSIGKILL {
+			if !hasSystemTaskDelivery(env, obs.ExecutionID) {
+				errs = append(errs, fmt.Sprintf("a0: scenario %s requires system_task_delivery >= 1 (direct-drive phase B)", scenario))
+			}
+		} else {
+			if obs.HandlerInvocations <= 0 {
+				errs = append(errs, fmt.Sprintf("a0: scenario %s handler_invocations must be > 0", scenario))
+			}
+			if obs.CounterSnapshotID == "" {
+				errs = append(errs, fmt.Sprintf("a0: scenario %s handler_invocations missing counter snapshot reference", scenario))
+			}
 		}
 	}
 

@@ -59,7 +59,27 @@ func validEnvelope() *Envelope {
 		GoVersion:          runtime.Version(),
 	}
 	env.Environment = Environment{RedisVersion: "7.2", MySQLVersion: "8.0"}
-	env.Suite = SuiteSummary{ExitCode: 0, SkipCount: 0, DroppedRuntimeEvents: 0}
+	env.Suite = SuiteSummary{
+		ExitCode:             0,
+		SkipCount:            0,
+		DroppedRuntimeEvents: 0,
+		RequiredRows:         20,
+		ObservedRows:         20,
+	}
+	env.Raw.SuiteRecords = []SuiteRecord{{
+		RunID: env.RunID, TestName: "TestA0FaultMatrix",
+		Package: "github.com/xbcio/xflow/test/integration", Action: "pass",
+	}}
+	env.Raw.RunIdentities = []RunIdentity{{
+		RunID:            env.RunID,
+		TestBinaryDigest: sha256String("binary"),
+		ManifestDigest:   sha256String("manifest"),
+		ProducerID:       "test-producer",
+	}}
+	env.Raw.EnvironmentObservations = []EnvironmentObservation{
+		{RunID: env.RunID, Component: "redis", Query: "INFO server", Result: "7.2"},
+		{RunID: env.RunID, Component: "mysql", Query: "SELECT VERSION()", Result: "8.0"},
+	}
 	return env
 }
 
@@ -85,6 +105,28 @@ func markA0Scenario(env *Envelope, scenario A0Scenario, execID types.ExecutionID
 		env.Raw.ProtocolObservations = append(env.Raw.ProtocolObservations, ProtocolObservation{
 			RunID: env.RunID, Topology: string(scenario), ExecutionID: execID,
 			Type: "authority_rejected", ObservedAt: time.Now().UTC(),
+		})
+	}
+	// OSKillSIGKILL phase B is direct-drive: business handler_invocations is
+	// legitimately 0, so no counter snapshot is recorded. The scenario is
+	// required instead to carry a system_task_delivery protocol observation
+	// (spec §3.5). Every other scenario records a counter snapshot so
+	// checkA0 can enforce handler_invocations > 0 with a counter reference.
+	if scenario == A0OSKillSIGKILL {
+		env.Raw.ProtocolObservations = append(env.Raw.ProtocolObservations, ProtocolObservation{
+			RunID: env.RunID, Topology: "cluster-durable", ExecutionID: execID,
+			Type: "system_task_delivery", ObservedAt: time.Now().UTC(),
+			Detail: map[string]any{
+				"system_task_deliveries":       1,
+				"deliveries":                   1,
+				"business_handler_invocations": 0,
+			},
+		})
+	} else {
+		env.Raw.CounterSnapshots = append(env.Raw.CounterSnapshots, CounterSnapshot{
+			RunID: env.RunID, Topology: string(scenario), ExecutionID: execID,
+			NodeName: "node", CounterID: "counter-a0-" + string(scenario),
+			HandlerName: "handler", Value: 1, ObservedAt: time.Now().UTC(),
 		})
 	}
 	env.Raw.RuntimeEvents = append(env.Raw.RuntimeEvents,
@@ -227,6 +269,91 @@ func TestVerifyPassesForValidEnvelope(t *testing.T) {
 	v := NewVerifier(defaultFakeProvenance())
 	res := v.Verify(env, passEvents())
 	requirePassed(t, res)
+}
+
+// TestVerifyRejectsFalsePositiveEnvelope constructs the minimal envelope that
+// passes ALL the OLD verifier checks but carries the exact false-positive shape
+// from the 2026-07-23 review (empty environment, required_rows==0,
+// observed_rows==0, null suite_records, all five A0 handler_invocations==0, and
+// a dirty relevant tree that honestly reports false). The new verifier MUST fail
+// each missing field with an error naming it.
+func TestVerifyRejectsFalsePositiveEnvelope(t *testing.T) {
+	prov := defaultFakeProvenance()
+	// Dirty relevant tree, honestly reported as false by the envelope. The OLD
+	// mismatch-only check saw false==false and passed; the new check requires
+	// clean==true. The diff digest is set to match the recomputed (dirty) value
+	// so the OLD diff-digest check still passes — isolating the failure to the
+	// new enforcements.
+	prov.relevantTreeClean = false
+	prov.relevantDiffSHA256 = sha256String("dirty")
+
+	env := validEnvelope()
+	markAllRequired(env)
+
+	// Revert every field the new enforcements cover to the false-positive state.
+	env.Source.RelevantTreeClean = false // honest: tree is dirty
+	env.Source.RelevantDiffSHA256 = sha256String("dirty")
+	env.Environment = Environment{} // empty environment
+	env.Suite.RequiredRows = 0
+	env.Suite.ObservedRows = 0
+	env.Raw.SuiteRecords = nil
+	env.Raw.RunIdentities = nil
+	env.Raw.EnvironmentObservations = nil
+
+	// Strip A0 counter snapshots and the OSKill system_task_delivery
+	// observation so all five A0 scenarios carry handler_invocations==0 (the
+	// OLD verifier never inspected A0 counters, so it still passes).
+	var keptCounters []CounterSnapshot
+	for _, cs := range env.Raw.CounterSnapshots {
+		if strings.HasPrefix(cs.CounterID, "counter-a0-") {
+			continue
+		}
+		keptCounters = append(keptCounters, cs)
+	}
+	env.Raw.CounterSnapshots = keptCounters
+	var keptPO []ProtocolObservation
+	for _, po := range env.Raw.ProtocolObservations {
+		if po.Type == "system_task_delivery" {
+			continue
+		}
+		keptPO = append(keptPO, po)
+	}
+	env.Raw.ProtocolObservations = keptPO
+
+	v := NewVerifier(prov)
+	res := v.Verify(env, passEvents())
+	requireNotPassed(t, res, "false-positive envelope")
+
+	requireErrorContains := func(needle string) {
+		t.Helper()
+		for _, e := range res.Errors {
+			if strings.Contains(e, needle) {
+				return
+			}
+		}
+		t.Fatalf("expected an error containing %q, got: %v", needle, res.Errors)
+	}
+
+	// dirty relevant tree (honest false) must now fail.
+	requireErrorContains("relevant_tree_clean must be true")
+	// empty environment + no typed observations.
+	requireErrorContains("environment_observation record required")
+	requireErrorContains("redis_version must be non-empty")
+	requireErrorContains("mysql_version must be non-empty")
+	// required_rows / observed_rows.
+	requireErrorContains("required_rows must be > 0")
+	requireErrorContains("observed_rows must be > 0")
+	// null suite_records.
+	requireErrorContains("suite_records must be non-empty")
+	// run_identity missing.
+	requireErrorContains("run_identity: at least one run_identity record required")
+	// A0 handler_invocations: the four non-OSKill scenarios must each fail
+	// handler_invocations > 0, and OSKillSIGKILL must fail system_task_delivery.
+	requireErrorContains("a0: scenario CommitThenFlushBeforeDelivery handler_invocations must be > 0")
+	requireErrorContains("a0: scenario ReportAckLoss handler_invocations must be > 0")
+	requireErrorContains("a0: scenario ReportRequestLoss handler_invocations must be > 0")
+	requireErrorContains("a0: scenario QueueHandoff handler_invocations must be > 0")
+	requireErrorContains("a0: scenario OSKillSIGKILL requires system_task_delivery >= 1")
 }
 
 func TestVerifyRejectsMissingA0Scenario(t *testing.T) {
