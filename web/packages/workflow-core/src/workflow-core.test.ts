@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   type WorkflowDef,
+  type WorkflowEditorMetadata,
   buildAdjacency,
   cloneWorkflow,
   detectCycle,
@@ -501,6 +502,61 @@ describe("editor metadata split/merge (F0-A2)", () => {
     expect(merged.def.nodes?.[0].id).toBe("n1");
     expect(merged.def.nodes?.[0].position).toEqual({ x: 1, y: 1 });
     expect(merged.def.nodes?.[0].ui).toEqual({ color: "red" });
+  });
+
+  it("mergeEditorMetadata falls back to name-keyed legacy metadata", () => {
+    const def: WorkflowDef = {
+      name: "legacy-name-keyed",
+      nodes: [
+        {
+          id: "node-0-legacy-a",
+          name: "legacy-a",
+        },
+      ],
+    };
+    const metadata: WorkflowEditorMetadata = {
+      positions: { "legacy-a": { x: 10, y: 20 } },
+      ui: { "legacy-a": { color: "red" } },
+      notes: { "legacy-a": "legacy note" },
+    };
+
+    const { def: merged, diagnostics } = mergeEditorMetadata(def, metadata);
+
+    // Legacy metadata keyed by name is restored onto the node.
+    expect(merged.nodes?.[0].position).toEqual({ x: 10, y: 20 });
+    expect(merged.nodes?.[0].ui).toEqual({ color: "red" });
+    expect(merged.nodes?.[0].notes).toBe("legacy note");
+
+    // A diagnostic is emitted so callers know the fallback happened.
+    const fallbackDiags = diagnostics.filter(
+      (d) => d.code === "NODE_METADATA_NAME_KEY_FALLBACK"
+    );
+    expect(fallbackDiags).toHaveLength(1);
+    expect(fallbackDiags[0].severity).toBe("warning");
+    expect(fallbackDiags[0].message).toContain("legacy-a");
+    expect(fallbackDiags[0].path).toBe("nodes[0]");
+    expect(fallbackDiags[0].nodeId).toBe("node-0-legacy-a");
+  });
+
+  it("mergeEditorMetadata prefers id-keyed metadata and does not emit name fallback", () => {
+    const def: WorkflowDef = {
+      name: "id-keyed-wins",
+      nodes: [
+        {
+          id: "n1",
+          name: "alpha",
+        },
+      ],
+    };
+    const metadata: WorkflowEditorMetadata = {
+      positions: { n1: { x: 1, y: 1 }, alpha: { x: 99, y: 99 } },
+    };
+
+    const { def: merged, diagnostics } = mergeEditorMetadata(def, metadata);
+    expect(merged.nodes?.[0].position).toEqual({ x: 1, y: 1 });
+    expect(
+      diagnostics.some((d) => d.code === "NODE_METADATA_NAME_KEY_FALLBACK")
+    ).toBe(false);
   });
 
   it("split/merge round-trips positions/ui/notes/pin_data after migration", () => {

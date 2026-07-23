@@ -249,11 +249,36 @@ export function mergeEditorMetadata(
   );
 
   const mergedNodes: NodeDef[] = [];
+  const diagnostics: Diagnostic[] = [...migrationDiags];
 
-  for (const node of migratedNodes) {
-    const key = nodeMetadataKey(node);
+  for (const [index, node] of migratedNodes.entries()) {
+    const idKey = node.id && node.id.length > 0 ? node.id : undefined;
+    const nameKey = node.name && node.name.length > 0 ? node.name : undefined;
+
+    // Prefer stable-id-keyed metadata. If nothing is found under the stable id,
+    // fall back to the legacy name-keyed metadata so old persisted editor
+    // metadata is not silently lost.
+    const hasIdMetadata =
+      idKey &&
+      (metadata.positions?.[idKey] !== undefined ||
+        metadata.ui?.[idKey] !== undefined ||
+        metadata.notes?.[idKey] !== undefined);
+
+    let key: string | undefined;
+    let usedNameFallback = false;
+    if (hasIdMetadata) {
+      key = idKey;
+    } else if (
+      nameKey &&
+      (metadata.positions?.[nameKey] !== undefined ||
+        metadata.ui?.[nameKey] !== undefined ||
+        metadata.notes?.[nameKey] !== undefined)
+    ) {
+      key = nameKey;
+      usedNameFallback = true;
+    }
+
     const extra: Partial<NodeDef> = {};
-
     if (key) {
       if (metadata.positions?.[key]) {
         extra.position = metadata.positions[key];
@@ -265,6 +290,17 @@ export function mergeEditorMetadata(
         extra.notes = metadata.notes[key];
       }
     }
+
+    if (usedNameFallback) {
+      diagnostics.push({
+        code: "NODE_METADATA_NAME_KEY_FALLBACK",
+        severity: "warning",
+        message: `node "${node.name ?? ""}" at index ${index} had no metadata under stable id "${idKey ?? ""}"; restored editor metadata keyed by name "${nameKey ?? ""}"`,
+        path: `nodes[${index}]`,
+        nodeId: idKey,
+      });
+    }
+
     mergedNodes.push({ ...node, ...extra });
   }
 
@@ -275,6 +311,6 @@ export function mergeEditorMetadata(
       ...def,
       nodes: mergedNodes,
     },
-    diagnostics: migrationDiags,
+    diagnostics,
   };
 }

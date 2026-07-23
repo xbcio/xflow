@@ -14,6 +14,18 @@ function renderWithProvider(element: React.ReactElement) {
   return render(<ReactFlowProvider>{element}</ReactFlowProvider>);
 }
 
+function sourceHandleTestIds(container: HTMLElement, nodeId: string): string[] {
+  return Array.from(
+    container.querySelectorAll(`[data-testid^="source-handle-${nodeId}-"]`)
+  ).map((el) => el.getAttribute("data-testid") ?? "");
+}
+
+function targetHandleTestIds(container: HTMLElement, nodeId: string): string[] {
+  return Array.from(
+    container.querySelectorAll(`[data-testid^="target-handle-${nodeId}-"]`)
+  ).map((el) => el.getAttribute("data-testid") ?? "");
+}
+
 describe("UnknownNode", () => {
   it("renders a single default source Handle when sourcePorts is absent", () => {
     const { container } = renderWithProvider(
@@ -22,11 +34,9 @@ describe("UnknownNode", () => {
         data={data({ nodeDef: { name: "a", type: "acme.unknown" } })}
       />
     );
-    const handles = container.querySelectorAll(
-      '.react-flow__handle[data-handlepos="right"]'
-    );
-    expect(handles).toHaveLength(1);
-    expect(handles[0].getAttribute("data-handleid")).toBeNull();
+    const ids = sourceHandleTestIds(container, "a");
+    expect(ids).toHaveLength(1);
+    expect(ids).toContain("source-handle-a-default");
   });
 
   it("renders one source Handle per named source port", () => {
@@ -39,15 +49,10 @@ describe("UnknownNode", () => {
         })}
       />
     );
-    const handles = container.querySelectorAll(
-      '.react-flow__handle[data-handlepos="right"]'
-    );
-    expect(handles).toHaveLength(2);
-    const ids = Array.from(handles).map((h) =>
-      h.getAttribute("data-handleid")
-    );
-    expect(ids).toContain("out");
-    expect(ids).toContain("alt");
+    const ids = sourceHandleTestIds(container, "a");
+    expect(ids).toHaveLength(2);
+    expect(ids).toContain("source-handle-a-out");
+    expect(ids).toContain("source-handle-a-alt");
   });
 
   it("renders default source Handle alongside named source ports", () => {
@@ -61,15 +66,10 @@ describe("UnknownNode", () => {
         })}
       />
     );
-    const handles = container.querySelectorAll(
-      '.react-flow__handle[data-handlepos="right"]'
-    );
-    expect(handles).toHaveLength(2);
-    const ids = Array.from(handles).map((h) =>
-      h.getAttribute("data-handleid")
-    );
-    expect(ids).toContain("out");
-    expect(ids).toContain(null);
+    const ids = sourceHandleTestIds(container, "a");
+    expect(ids).toHaveLength(2);
+    expect(ids).toContain("source-handle-a-out");
+    expect(ids).toContain("source-handle-a-default");
   });
 
   it("renders one target Handle per named input", () => {
@@ -85,10 +85,8 @@ describe("UnknownNode", () => {
         })}
       />
     );
-    const handles = container.querySelectorAll(
-      '.react-flow__handle[data-handlepos="left"]'
-    );
-    expect(handles).toHaveLength(1);
-    expect(handles[0].getAttribute("data-handleid")).toBe("value");
+    const ids = targetHandleTestIds(container, "a");
+    expect(ids).toHaveLength(1);
+    expect(ids).toContain("target-handle-a-value");
   });
 });

@@ -1,7 +1,9 @@
 import * as React from "react";
 import { Handle, Position as RfPosition } from "@xyflow/react";
-import type { Diagnostic, NodeData } from "../types";
+import type { NodeData } from "../types";
+import { SourceHandles } from "./SourceHandles";
 import { UnknownPort } from "./UnknownPort";
+import { collectUnknownPorts, targetHandleIds } from "./nodeCommon";
 
 export interface GenericNodeProps {
   id: string;
@@ -22,28 +24,6 @@ function statusClass(status?: NodeData["status"]): string {
     default:
       return "";
   }
-}
-
-function collectUnknownPorts(id: string, diagnostics?: Diagnostic[]): string[] {
-  if (!diagnostics) return [];
-  const ports = new Set<string>();
-  for (const d of diagnostics) {
-    if (d.connectionRef && d.connectionRef.node === id && d.connectionRef.input) {
-      ports.add(d.connectionRef.input);
-    }
-  }
-  return Array.from(ports);
-}
-
-function targetHandleIds(data: NodeData): string[] | undefined {
-  const inputs = data.nodeDef.inputs;
-  if (!inputs || inputs.length === 0) return undefined;
-  // Filter to inputs that have a name; unnamed inputs collapse to the default
-  // Handle. If every input is unnamed, fall back to a single default Handle.
-  const named = inputs
-    .map((input) => input.name)
-    .filter((name): name is string => typeof name === "string" && name.length > 0);
-  return named.length > 0 ? named : undefined;
 }
 
 
@@ -88,6 +68,7 @@ export const GenericNode = React.memo(function GenericNode({
             position={RfPosition.Left}
             id={handleId}
             className="xf-port xf-port--target"
+            data-testid={`target-handle-${id}-${handleId}`}
           />
         ))
       ) : (
@@ -95,6 +76,7 @@ export const GenericNode = React.memo(function GenericNode({
           type="target"
           position={RfPosition.Left}
           className="xf-port xf-port--target"
+          data-testid={`target-handle-${id}-default`}
         />
       )}
       <div className="xf-node__header">
@@ -124,28 +106,11 @@ export const GenericNode = React.memo(function GenericNode({
           </span>
         )}
       </div>
-      {sourcePorts && sourcePorts.length > 0 ? (
-        <>
-          {sourcePorts.map((handleId) => (
-            <Handle
-              key={handleId}
-              type="source"
-              position={RfPosition.Right}
-              id={handleId}
-              className="xf-port xf-port--source"
-            />
-          ))}
-          {hasDefaultSourcePort && (
-            <Handle
-              type="source"
-              position={RfPosition.Right}
-              className="xf-port xf-port--source"
-            />
-          )}
-        </>
-      ) : (
-        <Handle type="source" position={RfPosition.Right} className="xf-port xf-port--source" />
-      )}
+      <SourceHandles
+        nodeId={id}
+        sourcePorts={sourcePorts}
+        hasDefaultSourcePort={hasDefaultSourcePort}
+      />
     </div>
   );
 });
