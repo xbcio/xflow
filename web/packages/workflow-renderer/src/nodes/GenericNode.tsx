@@ -46,11 +46,6 @@ function targetHandleIds(data: NodeData): string[] | undefined {
   return named.length > 0 ? named : undefined;
 }
 
-function sourceHandleIds(data: NodeData): string[] | undefined {
-  const sourcePorts = data.sourcePorts;
-  if (!sourcePorts || sourcePorts.length === 0) return undefined;
-  return sourcePorts;
-}
 
 export const GenericNode = React.memo(function GenericNode({
   id,
@@ -66,7 +61,8 @@ export const GenericNode = React.memo(function GenericNode({
   const hasWarning = diagnostics.some((d) => d.severity === "warning");
   const unknownPorts = collectUnknownPorts(id, diagnostics);
   const targetIds = targetHandleIds(data);
-  const sourceIds = sourceHandleIds(data);
+  const sourcePorts = data.sourcePorts;
+  const hasDefaultSourcePort = data.hasDefaultSourcePort ?? false;
 
   return (
     <div
@@ -128,16 +124,25 @@ export const GenericNode = React.memo(function GenericNode({
           </span>
         )}
       </div>
-      {sourceIds ? (
-        sourceIds.map((handleId) => (
-          <Handle
-            key={handleId}
-            type="source"
-            position={RfPosition.Right}
-            id={handleId}
-            className="xf-port xf-port--source"
-          />
-        ))
+      {sourcePorts && sourcePorts.length > 0 ? (
+        <>
+          {sourcePorts.map((handleId) => (
+            <Handle
+              key={handleId}
+              type="source"
+              position={RfPosition.Right}
+              id={handleId}
+              className="xf-port xf-port--source"
+            />
+          ))}
+          {hasDefaultSourcePort && (
+            <Handle
+              type="source"
+              position={RfPosition.Right}
+              className="xf-port xf-port--source"
+            />
+          )}
+        </>
       ) : (
         <Handle type="source" position={RfPosition.Right} className="xf-port xf-port--source" />
       )}

@@ -7,10 +7,7 @@ import type { NodeData } from "../types";
 import { UnknownNode } from "./UnknownNode";
 
 function data(partial: Partial<NodeData> & { nodeDef: NodeData["nodeDef"] }): NodeData {
-  return {
-    ...partial,
-    nodeDef: partial.nodeDef,
-  };
+  return { ...partial };
 }
 
 function renderWithProvider(element: React.ReactElement) {
@@ -51,6 +48,28 @@ describe("UnknownNode", () => {
     );
     expect(ids).toContain("out");
     expect(ids).toContain("alt");
+  });
+
+  it("renders default source Handle alongside named source ports", () => {
+    const { container } = renderWithProvider(
+      <UnknownNode
+        id="a"
+        data={data({
+          nodeDef: { name: "a", type: "acme.unknown" },
+          sourcePorts: ["out"],
+          hasDefaultSourcePort: true,
+        })}
+      />
+    );
+    const handles = container.querySelectorAll(
+      '.react-flow__handle[data-handlepos="right"]'
+    );
+    expect(handles).toHaveLength(2);
+    const ids = Array.from(handles).map((h) =>
+      h.getAttribute("data-handleid")
+    );
+    expect(ids).toContain("out");
+    expect(ids).toContain(null);
   });
 
   it("renders one target Handle per named input", () => {

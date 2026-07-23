@@ -240,6 +240,33 @@ describe("workflowToFlow", () => {
     }
     const aNode = flow.nodes.find((n) => n.id === "a")!;
     expect(aNode.data.sourcePorts).toBeUndefined();
+    expect(aNode.data.hasDefaultSourcePort).toBe(true);
+  });
+
+  it("marks mixed named + default source ports on node data", () => {
+    const def: WorkflowDef = {
+      name: "mixed-source",
+      nodes: [
+        { name: "a", type: "xflow.if" },
+        { name: "b", type: "xflow.end" },
+        { name: "c", type: "xflow.end" },
+      ],
+      connections: {
+        a: {
+          approved: [{ node: "b" }],
+          default: [{ node: "c" }],
+        },
+      },
+    };
+    const flow = workflowToFlow(def);
+    const aNode = flow.nodes.find((n) => n.id === "a")!;
+    expect(aNode.data.sourcePorts).toEqual(["approved"]);
+    expect(aNode.data.hasDefaultSourcePort).toBe(true);
+
+    const namedEdge = flow.edges.find((e) => e.sourceHandle === "approved")!;
+    expect(namedEdge.target).toBe("b");
+    const defaultEdge = flow.edges.find((e) => e.sourceHandle === undefined)!;
+    expect(defaultEdge.target).toBe("c");
   });
 
   it("records missing source nodes without emitting dangling edges", () => {

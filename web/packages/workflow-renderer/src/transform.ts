@@ -190,14 +190,25 @@ function expandEdges(
   return { edges, danglingTargets, missingSources };
 }
 
-function buildSourcePortMap(connections: Connections): Map<string, string[]> {
-  const map = new Map<string, string[]>();
+interface SourcePortInfo {
+  named: string[];
+  hasDefault: boolean;
+}
+
+function buildSourcePortMap(connections: Connections): Map<string, SourcePortInfo> {
+  const map = new Map<string, SourcePortInfo>();
   for (const [sourceNode, ports] of Object.entries(connections ?? {})) {
-    const named = Object.keys(ports ?? {}).filter(
-      (port) => normalizePort(port) !== undefined
-    );
-    if (named.length > 0) {
-      map.set(sourceNode, named);
+    const info: SourcePortInfo = { named: [], hasDefault: false };
+    for (const port of Object.keys(ports ?? {})) {
+      const normalized = normalizePort(port);
+      if (normalized !== undefined) {
+        info.named.push(normalized);
+      } else {
+        info.hasDefault = true;
+      }
+    }
+    if (info.named.length > 0 || info.hasDefault) {
+      map.set(sourceNode, info);
     }
   }
   return map;
@@ -216,12 +227,15 @@ export function workflowToFlow(def: WorkflowDef): FlowViewModel {
       node.position?.x != null && node.position?.y != null
         ? { x: node.position.x, y: node.position.y }
         : autoPositions[name] ?? { x: 0, y: 0 };
-    const sourcePorts = sourcePortMap.get(name);
+    const sourcePortInfo = sourcePortMap.get(name);
+    const sourcePorts =
+      sourcePortInfo && sourcePortInfo.named.length > 0 ? sourcePortInfo.named : undefined;
+    const hasDefaultSourcePort = sourcePortInfo?.hasDefault ?? false;
 
     nodes.push({
       id: name,
       position,
-      data: { nodeDef: node, sourcePorts },
+      data: { nodeDef: node, sourcePorts, hasDefaultSourcePort },
       type: resolveNodeType(node),
     });
   }

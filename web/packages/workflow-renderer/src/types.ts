@@ -15,6 +15,8 @@ export interface NodeData extends Record<string, unknown> {
   diagnostics?: Diagnostic[];
   /** Named source ports used by outgoing edges; undefined when only the default port is used. */
   sourcePorts?: string[];
+  /** True when the node has at least one default/unnamed outgoing port (main/default/empty). */
+  hasDefaultSourcePort?: boolean;
 }
 
 export interface DanglingTarget {
