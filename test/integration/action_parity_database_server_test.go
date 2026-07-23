@@ -43,11 +43,11 @@ import (
 //     the specific classified code differs, due to how the real driver surfaces
 //     a handshake-time connection drop. See task-39-design.md §5.2 and the
 //     task-40 report.
-//   - db_deadlock_transient_exhausted — real InnoDB row lock held by a background
-//     transaction with innodb_lock_wait_timeout=1 → MySQL 1205 → transient
-//     (attempt 2). 1205 shares the same classifier branch as the local fake's
-//     1213; the parity contract (transient + exhausted) is preserved. See
-//     .superpowers/sdd-remediation/task-39-design.md §5.3.
+//   - db_lock_wait_transient_exhausted — real InnoDB row lock held by a background
+//     transaction with innodb_lock_wait_timeout=1 → MySQL 1205 (lock-wait
+//     timeout) → transient (attempt 2). 1205 shares the same classifier branch
+//     as the local fake's 1213 deadlock; the parity contract (transient +
+//     exhausted) is preserved. See .superpowers/sdd-remediation/task-39-design.md §5.3.
 //   - db_constraint_permanent       — pre-inserted row id=1 → MySQL 1062 (attempt 1)
 //
 // This test deliberately uses the databaseParityHandler wrapper path (injected
@@ -161,7 +161,7 @@ func TestDatabaseActionErrorParityServerRunner(t *testing.T) {
 			},
 		},
 		{
-			name:                   "db_deadlock_transient_exhausted",
+			name:                   "db_lock_wait_transient_exhausted",
 			wantAttempt:            2,
 			wantStatus:             types.ExecutionStatusFailed,
 			errContains:            "1205",
@@ -294,7 +294,7 @@ func TestDatabaseActionErrorParityServerRunner(t *testing.T) {
 			switch tc.name {
 			case "db_no_pool_permanent", "db_constraint_permanent":
 				pc.WantKind, pc.WantRetryable = string(types.ErrorKindPermanent), false
-			case "db_bad_conn_transient_exhausted", "db_deadlock_transient_exhausted":
+			case "db_bad_conn_transient_exhausted", "db_lock_wait_transient_exhausted":
 				pc.WantKind, pc.WantRetryable = string(types.ErrorKindTransient), true
 			}
 			logParityMatrixRow(t, pc, "server-runner", serverOut)
@@ -348,7 +348,7 @@ func setupParitySchema(t *testing.T, db *sql.DB) {
 }
 
 // shortenLockWaitTimeout lowers the GLOBAL innodb_lock_wait_timeout so the
-// deadlock fixture's blocked UPDATE returns MySQL 1205 within ~1s instead of
+// lock-wait fixture's blocked UPDATE returns MySQL 1205 within ~1s instead of
 // the default 50s. The previous value is restored in t.Cleanup. This affects
 // the shared test container for the test's duration; the save/restore plus
 // the case's short runtime make concurrent interference unlikely.
