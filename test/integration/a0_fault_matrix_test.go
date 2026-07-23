@@ -545,6 +545,32 @@ func TestA0FaultMatrix(t *testing.T) {
 		writeA0FaultReport(t, report)
 		t.Logf("A0 scenario 1: commit-then-flush-before-delivery: start committed %s under outage, downstream recovered, final=%s",
 			outcome, finalExec.Status)
+
+		// Raw-ledger fragment for the independent verifier (Task 15a). The
+		// recorder is env-gated; when disabled this is a no-op. Record only the
+		// focal "start" node's mutation-boundary events so the verifier derives
+		// exactly one accepted commit + one applied advance for this execution
+		// (the "done" node is recovery verification, not the scenario's focal
+		// commit). The events themselves are transported verbatim — no
+		// fabrication or pre-aggregation.
+		rec := newEvidenceRecorder(t, "CommitThenFlushBeforeDelivery")
+		if rec != nil {
+			var focal []engine.RuntimeEvidenceEvent
+			for _, ev := range evs {
+				if ev.NodeName == "start" {
+					focal = append(focal, ev)
+				}
+			}
+			rec.recordRuntimeEvents(focal)
+			rec.recordCounter("local", id, "start", "direct-commit", 0)
+			rec.recordA0ScenarioMarker(id, "CommitThenFlushBeforeDelivery")
+			rec.recordState("local", id, "final", map[string]any{
+				"execution_status": string(finalExec.Status),
+				"node_status":       string(node.Status),
+				"outbox_after":      "drained",
+			})
+			rec.flush(t)
+		}
 	})
 
 	t.Run("ReportAckLoss", func(t *testing.T) {
@@ -705,6 +731,31 @@ func TestA0FaultMatrix(t *testing.T) {
 		writeA0FaultReport(t, report)
 		t.Logf("A0 scenario ReportAckLoss: handler invocations=%d, applied commits=%d, applied advances=%d, saw transport error=%v, final=%s",
 			handlerInvocations, appliedCommits, appliedAdvances, proxy.SawTransportError(), result.Status)
+
+		// Raw-ledger fragment for the independent verifier (Task 15a). Record
+		// only the focal "start" node's events so the verifier derives exactly
+		// one accepted commit for this execution. The ACK-loss scenario is
+		// exempt from the applied-advance requirement (verifier checkA0), but
+		// the start node still produces one applied advance which is recorded
+		// verbatim. No lease_reclaim observation is emitted (ACK-loss must not
+		// show one) — the server accepted the report, so no reclaim occurred.
+		rec := newEvidenceRecorder(t, "ReportAckLoss")
+		if rec != nil {
+			var focal []engine.RuntimeEvidenceEvent
+			for _, ev := range events {
+				if ev.NodeName == "start" {
+					focal = append(focal, ev)
+				}
+			}
+			rec.recordRuntimeEvents(focal)
+			rec.recordCounter("server-runner", execID, "start", "http-built-in", startCounter.Count())
+			rec.recordA0ScenarioMarker(execID, "ReportAckLoss")
+			rec.recordState("server-runner", execID, "final", map[string]any{
+				"execution_status": string(result.Status),
+				"node_status":       string(node.Status),
+			})
+			rec.flush(t)
+		}
 
 		// Stop the control-plane consumer before the next scenario so it does not
 		// race for the shared Asynq queue.
@@ -986,6 +1037,37 @@ func TestA0FaultMatrix(t *testing.T) {
 		t.Logf("A0 scenario ReportRequestLoss: handler invocations=%d, applied commits=%d, applied advances=%d, replay outcome=%s, final=%s",
 			handlerInvocations, appliedCommits, appliedAdvances, replayOutcome, result.Status)
 
+		// Raw-ledger fragment for the independent verifier (Task 15a). Record
+		// only the focal "start" node's events: runner A's first report was
+		// lost in transit (no server-side commit), so the only accepted commit
+		// for this execution is runner B's reclaim commit (attempt > 1). The
+		// verifier's request-loss rule (checkA0) requires (a) no attempt==1
+		// accepted commit — satisfied because the first report never reached
+		// the server — and (b) an authority_rejected protocol observation from
+		// the replayed first report. Both are produced here verbatim.
+		rec := newEvidenceRecorder(t, "ReportRequestLoss")
+		if rec != nil {
+			var focal []engine.RuntimeEvidenceEvent
+			for _, ev := range events {
+				if ev.NodeName == "start" {
+					focal = append(focal, ev)
+				}
+			}
+			rec.recordRuntimeEvents(focal)
+			rec.recordCounter("server-runner", execID, "start", "http-built-in", startCounter.Count())
+			rec.recordA0ScenarioMarker(execID, "ReportRequestLoss")
+			rec.recordProtocol("server-runner", execID, "authority_rejected", map[string]any{
+				"replay_outcome": replayOutcome,
+				"reason":         "stale lease token after reclaim",
+			})
+			rec.recordState("server-runner", execID, "final", map[string]any{
+				"execution_status": string(result.Status),
+				"node_status":       string(node.Status),
+				"handler_invocations": handlerInvocations,
+			})
+			rec.flush(t)
+		}
+
 		h.stop()
 	})
 
@@ -1009,7 +1091,7 @@ func TestA0FaultMatrix(t *testing.T) {
 		eng1 := engine.New(env1.State(), env1.Queue(),
 			engine.WithDefaultLeaseTTL(time.Minute),
 		)
-		g := a0AcyclicGraph(t, "a0-queue-handoff")
+		g := a0TwoNodeGraph(t, "a0-queue-handoff")
 		id, err := eng1.Submit(ctx, g, map[string]any{"round": 1})
 		if err != nil {
 			t.Fatalf("env1 Submit() error = %v", err)
@@ -1126,6 +1208,35 @@ func TestA0FaultMatrix(t *testing.T) {
 		writeA0FaultReport(t, report)
 		t.Logf("A0 scenario 3: queue-handoff: handler invocations=%d, DAG advances=%d, deliveries=%d, final=%s",
 			handlerInvocations, appliedAdvances, deliveries, result.Status)
+
+		// Raw-ledger fragment for the independent verifier (Task 15a). The
+		// graph is start->done so the start commit leaves the execution active
+		// and the engine enqueues + processes the start advance task, producing
+		// a real advance receipt. Record only the focal "start" node's events
+		// so the verifier derives exactly one accepted commit + one applied
+		// advance for this execution (the "done" node is downstream recovery,
+		// not the scenario's focal commit). QueueHandoff uses a direct-drive
+		// consumer (no built-in HTTP handler counting wrapper); the counter is
+		// recorded honestly with the actual direct-drive handler invocation
+		// count and a counter_id reflecting the direct-drive path.
+		rec := newEvidenceRecorder(t, "QueueHandoff")
+		if rec != nil {
+			var focal []engine.RuntimeEvidenceEvent
+			for _, ev := range evs {
+				if ev.NodeName == "start" {
+					focal = append(focal, ev)
+				}
+			}
+			rec.recordRuntimeEvents(focal)
+			rec.recordCounter("local", id, "start", "queue-handoff-consumer", handlerInvocations)
+			rec.recordA0ScenarioMarker(id, "QueueHandoff")
+			rec.recordState("local", id, "final", map[string]any{
+				"execution_status": string(result.Status),
+				"node_status":       string(node.Status),
+				"deliveries":       deliveries,
+			})
+			rec.flush(t)
+		}
 	})
 
 	t.Run("OSKill", func(t *testing.T) {

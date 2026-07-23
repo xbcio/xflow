@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/xbcio/xflow/test/integration/internal/evidence"
@@ -34,7 +33,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	env, err := readRawEnvelope(*rawDir)
+	env, err := evidence.MergeRawEnvelopes(*rawDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to read raw ledger: %v\n", err)
 		os.Exit(1)
@@ -89,32 +88,4 @@ func readGoTestJSON(path string) ([]evidence.GoTestEvent, error) {
 		return nil, err
 	}
 	return events, nil
-}
-
-func readRawEnvelope(dir string) (*evidence.Envelope, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, err
-	}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		if strings.HasSuffix(name, ".json") && !strings.Contains(name, ".diagnostic.") {
-			path := filepath.Join(dir, name)
-			data, err := os.ReadFile(path)
-			if err != nil {
-				return nil, err
-			}
-			var env evidence.Envelope
-			if err := json.Unmarshal(data, &env); err != nil {
-				return nil, fmt.Errorf("parse %s: %w", path, err)
-			}
-			if env.RunID != "" {
-				return &env, nil
-			}
-		}
-	}
-	return nil, fmt.Errorf("no raw envelope found in %s", dir)
 }
