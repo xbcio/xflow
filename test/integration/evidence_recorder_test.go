@@ -6,12 +6,27 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/test/integration/internal/evidence"
 	"github.com/xbcio/xflow/types"
+)
+
+// cachedSourceProvenance holds the source provenance observed at test time,
+// computed once per process via cachedSourceOnce. All fragments in one run
+// stamp identical Source (HEAD, the test binary, and the Go runtime do not
+// change during a single test invocation), so recomputing per flush would be
+// wasteful — and notably would re-read the (large, race-instrumented) test
+// binary on every flush, causing GC/scheduling pressure that destabilizes
+// timing-sensitive drains in later tests. Computing once keeps the recorder
+// cheap and keeps non-recorder tests (which pass a nil recorder) unaffected.
+var (
+	cachedSourceOnce sync.Once
+	cachedSource     evidence.SourceProvenance
 )
 
 // evidenceRecorder accumulates one scenario's raw observations into a fragment
@@ -165,6 +180,61 @@ func (r *evidenceRecorder) recordState(topology string, execID types.ExecutionID
 	})
 }
 
+// stampProvenance records the real source provenance observed at test time
+// (git HEAD SHA, relevant-tree cleanliness, relevant-diff digest, test-binary
+// digest, Go version) into the fragment's env.Source. It uses RealProvenance
+// with TestBinaryPath = os.Args[0] so the binary digest it records is the
+// digest of the exact test binary this scenario ran as — which the verifier
+// recomputes independently from the same binary path and compares.
+//
+// This is an honest observation, not a fabrication or a constant: the values
+// reflect the repo and binary state at the moment the test ran. The verifier
+// recomputes them at verify time; if the tree or binary changed between test
+// and verify, the comparison catches it. All fragments in one run stamp
+// identical Source (HEAD, binary, and Go version do not change during a single
+// test invocation), and MergeRawEnvelopes keeps the first fragment's Source.
+//
+// The provenance is computed once per process (see cachedSourceOnce) and
+// reused for every fragment, so the (large) test binary is read and hashed
+// exactly once per run rather than once per flush.
+//
+// nil-safe: a no-op when the recorder is nil or env was never initialized.
+func (r *evidenceRecorder) stampProvenance(t *testing.T) {
+	t.Helper()
+	if r == nil || r.env == nil {
+		return
+	}
+	cachedSourceOnce.Do(func() {
+		prov := evidence.RealProvenance{TestBinaryPath: os.Args[0]}
+		if sha, err := prov.CommitSHA(); err == nil {
+			cachedSource.CommitSHA = sha
+		} else {
+			t.Logf("evidence recorder: commit SHA unavailable: %v", err)
+		}
+		paths := evidence.RelevantSourcePaths()
+		if clean, dirty, err := prov.RelevantTreeClean(paths); err == nil {
+			cachedSource.RelevantTreeClean = clean
+			if dirty != "" {
+				t.Logf("evidence recorder: relevant tree dirty:\n%s", strings.TrimSpace(dirty))
+			}
+		} else {
+			t.Logf("evidence recorder: relevant tree clean unavailable: %v", err)
+		}
+		if dig, err := prov.RelevantDiffDigest(paths); err == nil {
+			cachedSource.RelevantDiffSHA256 = dig
+		} else {
+			t.Logf("evidence recorder: relevant diff digest unavailable: %v", err)
+		}
+		if dig, err := prov.TestBinaryDigest(""); err == nil {
+			cachedSource.TestBinarySHA256 = dig
+		} else {
+			t.Logf("evidence recorder: test binary digest unavailable: %v", err)
+		}
+		cachedSource.GoVersion = prov.GoVersion()
+	})
+	r.env.Source = cachedSource
+}
+
 // flush atomically writes the fragment envelope to $RAW_DIR/{name}.json via a
 // temp file + rename so a partial write is never observed by the CLI merge.
 func (r *evidenceRecorder) flush(t *testing.T) {
@@ -172,6 +242,7 @@ func (r *evidenceRecorder) flush(t *testing.T) {
 	if r == nil {
 		return
 	}
+	r.stampProvenance(t)
 	if err := os.MkdirAll(r.rawDir, 0o755); err != nil {
 		t.Fatalf("evidence recorder: mkdir %q: %v", r.rawDir, err)
 	}

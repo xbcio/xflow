@@ -31,6 +31,13 @@ test/integration/testdata/a0_fault_matrix_report.json
 # G1 production e2e artifact is generated per CI run; never check it in.
 test/integration/testdata/g1_e2e_report.json
 
+# G0 evidence run artifacts (raw fragments + merged go-test json + final
+# artifact + fixed test binary) are generated per `make
+# test-g0-evidence-required` run; never check them in. The fixed test binary
+# is also covered by *.test above.
+test/integration/testdata/evidence/
+test/integration/testdata/g0-evidence.json
+
 # env file
 .env
 

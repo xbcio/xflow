@@ -1,5 +1,5 @@
 .PHONY: all build test test-concurrency lint fmt tidy clean run-server run-runner install-hooks proto proto-tools \
-        env-up env-down env-reset env-logs env-migrate test-integration test-integration-required test-perf perf-sample test-soak \
+        env-up env-down env-reset env-logs env-migrate test-integration test-integration-required test-g0-evidence-required test-perf perf-sample test-soak \
         web-install web-lint web-typecheck web-test web-check-boundaries web-build web-e2e web-ci web-all validate-openapi
 
 # ── Build ──────────────────────────────────────────────────────────────────────
@@ -126,6 +126,48 @@ test-integration-required:
 	XFLOW_REQUIRE_MYSQL_INTEGRATION=1 \
 	XFLOW_REQUIRE_KAFKA_INTEGRATION=1 \
 	go test -tags=integration -race -count=1 -timeout 600s -json ./test/integration/...
+
+# test-g0-evidence-required is the single P0-G0 A0/A3 real-evidence entry
+# (spec §9). It builds ONE fixed test binary, runs the A0/A3 required manifest
+# directly from that binary (so os.Args[0] is stable and its digest can be
+# recomputed), records raw ledger fragments stamped with real test-time source
+# provenance, then runs the independent verifier. The verifier recomputes
+# source provenance from the SAME binary path and the SAME git tree and compares
+# to the recorder's stamped values; only on PASS does it atomically publish the
+# final artifact + digest. A0/A3 do not depend on Kafka, so
+# XFLOW_REQUIRE_KAFKA_INTEGRATION is intentionally NOT set (Kafka unavailability
+# must not cause a skip). Redis (6380) + MySQL (3306) are required.
+#
+# JSON capture: the prebuilt test binary does not accept `go test`'s `-json`
+# driver flag (only `-test.*` flags). `go tool test2json` runs the binary
+# directly and converts its `-test.v` stream into the GoTestEvent JSON the
+# verifier parses; test2json's exit code mirrors the binary's, so a non-zero
+# suite exit fails the target before the verifier runs.
+G0_TEST_BIN := test/integration/testdata/xflow-g0.test
+G0_RAW_DIR  := test/integration/testdata/evidence
+# G0_JSON is the `go test -json` stream. It MUST live OUTSIDE G0_RAW_DIR so
+# MergeRawEnvelopes (which scans G0_RAW_DIR for *.json fragments) does not try
+# to parse the go-test stream as an evidence fragment.
+G0_JSON     := test/integration/testdata/g0-evidence.json
+
+test-g0-evidence-required:
+	@set -a; [ -f test/env/.env ] && . ./test/env/.env; set +a; \
+	echo "==> building fixed test binary"; \
+	go test -c -tags=integration -race -o $(G0_TEST_BIN) ./test/integration/; \
+	echo "==> running A0/A3 required manifest"; \
+	rm -rf $(G0_RAW_DIR) && mkdir -p $(G0_RAW_DIR); \
+	XFLOW_REQUIRE_REDIS_INTEGRATION=1 \
+	XFLOW_REQUIRE_MYSQL_INTEGRATION=1 \
+	XFLOW_G0_EVIDENCE_RUN_ID=$$(git rev-parse HEAD) \
+	XFLOW_G0_EVIDENCE_RAW_DIR=$(G0_RAW_DIR) \
+	go tool test2json -p github.com/xbcio/xflow/test/integration $(G0_TEST_BIN) \
+		-test.run '^TestA0FaultMatrix$$|^TestA0OSKillSIGKILLRecovery$$|^TestActionErrorParityMatrix$$|^TestHTTPActionErrorParity$$|^TestGRPCActionErrorParity$$|^TestScriptFunctionActionParity$$|^TestOnErrorActionParity$$|^TestDatabaseActionErrorParity$$' \
+		-test.timeout=900s -test.v > $(G0_JSON); rc=$$?; \
+	if [ $$rc -ne 0 ]; then echo "test suite failed (exit $$rc)"; cat $(G0_JSON); exit 1; fi; \
+	echo "==> running independent verifier"; \
+	go run ./test/integration/cmd/evidence-verify \
+		-in $(G0_JSON) -raw $(G0_RAW_DIR) -binary $(G0_TEST_BIN) -out $(G0_RAW_DIR); \
+	echo "==> G0 evidence artifact published"
 
 test-perf:
 	@set -a; [ -f test/env/.env ] && . ./test/env/.env; set +a; \

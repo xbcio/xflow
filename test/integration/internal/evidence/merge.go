@@ -74,6 +74,15 @@ func MergeRawEnvelopes(dir string) (*Envelope, error) {
 			merged.RunID = frag.RunID
 			merged.SchemaVersion = frag.SchemaVersion
 			merged.StartedAt = frag.StartedAt
+			// Source provenance is stamped by the recorder at test time (real
+			// git/binary/go-version observations, not fabrications). The merge
+			// keeps the first fragment's Source so the verifier can compare it
+			// against its own independent recomputation. All fragments in one
+			// run stamp identical Source (HEAD/binary/go-version do not change
+			// during a single test invocation); keeping the first is therefore
+			// representative. Environment / Suite are still NOT merged: they are
+			// recomputed by the verifier (Suite) or optional (Environment).
+			merged.Source = frag.Source
 		}
 		if frag.RunID != merged.RunID {
 			return nil, fmt.Errorf("fragment %q run_id %q != %q (cross-run merge refused)", path, frag.RunID, merged.RunID)
@@ -83,8 +92,9 @@ func MergeRawEnvelopes(dir string) (*Envelope, error) {
 		merged.Raw.ProtocolObservations = append(merged.Raw.ProtocolObservations, frag.Raw.ProtocolObservations...)
 		merged.Raw.StateSnapshots = append(merged.Raw.StateSnapshots, frag.Raw.StateSnapshots...)
 		merged.Raw.SuiteRecords = append(merged.Raw.SuiteRecords, frag.Raw.SuiteRecords...)
-		// Source / Environment / Suite are recomputed by the verifier; do not
-		// merge self-reported values.
+		// Environment / Suite are recomputed by the verifier; do not merge
+		// self-reported values. Source is an exception: it is the test-time
+		// observed provenance the verifier compares against (see above).
 	}
 	if merged.RunID == "" {
 		return nil, fmt.Errorf("no raw envelopes with run_id in dir %q", dir)
