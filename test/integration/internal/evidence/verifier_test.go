@@ -356,6 +356,172 @@ func TestVerifyRejectsFalsePositiveEnvelope(t *testing.T) {
 	requireErrorContains("a0: scenario OSKillSIGKILL requires system_task_delivery >= 1")
 }
 
+// TestVerifyRejectsInvalidArtifacts is the adversarial negative-case table from
+// spec §11.5. Each row starts from the shared minimal-valid envelope, mutates a
+// single field, and asserts that verification fails with an error naming the
+// specific violation.
+func TestVerifyRejectsInvalidArtifacts(t *testing.T) {
+	setRunID := func(env *Envelope, runID string) {
+		env.RunID = runID
+		for i := range env.Raw.SuiteRecords {
+			env.Raw.SuiteRecords[i].RunID = runID
+		}
+		for i := range env.Raw.RunIdentities {
+			env.Raw.RunIdentities[i].RunID = runID
+		}
+		for i := range env.Raw.EnvironmentObservations {
+			env.Raw.EnvironmentObservations[i].RunID = runID
+		}
+		for i := range env.Raw.CounterSnapshots {
+			env.Raw.CounterSnapshots[i].RunID = runID
+		}
+		for i := range env.Raw.ProtocolObservations {
+			env.Raw.ProtocolObservations[i].RunID = runID
+		}
+		for i := range env.Raw.StateSnapshots {
+			env.Raw.StateSnapshots[i].RunID = runID
+		}
+		for i := range env.Raw.RuntimeEvents {
+			env.Raw.RuntimeEvents[i].Meta.RunID = runID
+		}
+	}
+
+	cases := []struct {
+		name          string
+		mutate        func(*Envelope)
+		wantErrSubstr string
+	}{
+		{
+			name: "empty redis and mysql version",
+			mutate: func(env *Envelope) {
+				env.Environment = Environment{}
+			},
+			wantErrSubstr: "redis_version must be non-empty",
+		},
+		{
+			name: "suite required_rows zero",
+			mutate: func(env *Envelope) {
+				env.Suite.RequiredRows = 0
+			},
+			wantErrSubstr: "required_rows must be > 0",
+		},
+		{
+			name: "suite observed_rows zero",
+			mutate: func(env *Envelope) {
+				env.Suite.ObservedRows = 0
+			},
+			wantErrSubstr: "observed_rows must be > 0",
+		},
+		{
+			name: "suite_records empty",
+			mutate: func(env *Envelope) {
+				env.Raw.SuiteRecords = nil
+			},
+			wantErrSubstr: "suite_records must be non-empty",
+		},
+		{
+			name: "a0 scenario missing counter snapshot and handler_invocations zero",
+			mutate: func(env *Envelope) {
+				var kept []CounterSnapshot
+				for _, cs := range env.Raw.CounterSnapshots {
+					if cs.CounterID == "counter-a0-"+string(A0CommitThenFlushBeforeDelivery) {
+						continue
+					}
+					kept = append(kept, cs)
+				}
+				env.Raw.CounterSnapshots = kept
+			},
+			wantErrSubstr: "handler_invocations must be > 0",
+		},
+		{
+			name: "dirty relevant tree with envelope honestly false",
+			mutate: func(env *Envelope) {
+				env.Source.RelevantTreeClean = false
+				env.Source.RelevantDiffSHA256 = sha256String("dirty")
+			},
+			wantErrSubstr: "relevant_tree_clean must be true",
+		},
+		{
+			name: "run_id is a 40-hex commit SHA",
+			mutate: func(env *Envelope) {
+				setRunID(env, "abcdef1234567890abcdef1234567890abcdef12")
+			},
+			wantErrSubstr: "looks like a commit SHA",
+		},
+		{
+			name: "bare runtime evidence event without meta wrapper",
+			mutate: func(env *Envelope) {
+				env.Raw.RuntimeEvents = append(env.Raw.RuntimeEvents, CollectedRuntimeEvidenceEvent{
+					Event: engine.RuntimeEvidenceEvent{
+						EventID:       "bare-event-no-meta",
+						Type:          engine.RuntimeEvidenceCommit,
+						ExecutionID:   types.ExecutionID("exec-bare"),
+						NodeName:      "node",
+						CommitOutcome: engine.CommitOutcomeAccepted,
+					},
+				})
+			},
+			wantErrSubstr: "meta.execution_id",
+		},
+		{
+			name: "duplicate event ID across producers",
+			mutate: func(env *Envelope) {
+				if len(env.Raw.RuntimeEvents) == 0 {
+					t.Skip("no runtime events to duplicate")
+				}
+				dup := env.Raw.RuntimeEvents[0]
+				dup.Meta.ProducerID = "other-producer"
+				env.Raw.RuntimeEvents = append(env.Raw.RuntimeEvents, dup)
+			},
+			wantErrSubstr: "duplicate runtime event_id",
+		},
+		{
+			name: "pre-aggregated derived observations",
+			mutate: func(env *Envelope) {
+				env.DerivedObservations = []DerivedObservation{{
+					Kind: "a0_scenario", Scenario: string(A0OSKillSIGKILL),
+					EvidenceSource: "fixture", AcceptedCommit: true,
+				}}
+			},
+			wantErrSubstr: "derived_observations must be empty on input",
+		},
+		{
+			name: "environment observation cross-run reference",
+			mutate: func(env *Envelope) {
+				if len(env.Raw.EnvironmentObservations) > 0 {
+					env.Raw.EnvironmentObservations[0].RunID = "other-run"
+				}
+			},
+			wantErrSubstr: "environment observation 0 cross-run reference",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := validEnvelope()
+			markAllRequired(env)
+			tc.mutate(env)
+
+			prov := defaultFakeProvenance()
+			if tc.name == "dirty relevant tree with envelope honestly false" {
+				prov.relevantTreeClean = false
+				prov.relevantDiffSHA256 = sha256String("dirty")
+			}
+
+			res := NewVerifier(prov).Verify(env, passEvents())
+			if res.Passed {
+				t.Fatalf("expected verification to fail for %q, but it passed", tc.name)
+			}
+			for _, e := range res.Errors {
+				if strings.Contains(e, tc.wantErrSubstr) {
+					return
+				}
+			}
+			t.Fatalf("expected an error containing %q for %q, got: %v", tc.wantErrSubstr, tc.name, res.Errors)
+		})
+	}
+}
+
 func TestVerifyRejectsMissingA0Scenario(t *testing.T) {
 	env := validEnvelope()
 	markAllRequired(env)

@@ -324,6 +324,9 @@ func checkRawLedgerIntegrity(env *Envelope) []string {
 	var errs []string
 	if env.RunID == "" {
 		errs = append(errs, "ledger: empty run_id")
+	} else if looksLikeCommitSHA(env.RunID) {
+		// Spec §8.3 step 1: run_id must be a random UUIDv4, never a commit SHA.
+		errs = append(errs, fmt.Sprintf("ledger: run_id %q looks like a commit SHA; run_id must be a UUIDv4", env.RunID))
 	}
 
 	eventIDs := make(map[string]int)
@@ -361,8 +364,27 @@ func checkRawLedgerIntegrity(env *Envelope) []string {
 			errs = append(errs, fmt.Sprintf("ledger: state snapshot %d cross-run reference", i))
 		}
 	}
+	for i, eo := range env.Raw.EnvironmentObservations {
+		if eo.RunID != "" && eo.RunID != env.RunID {
+			errs = append(errs, fmt.Sprintf("ledger: environment observation %d cross-run reference", i))
+		}
+	}
 
 	return errs
+}
+
+// looksLikeCommitSHA reports whether s is a 40-character hexadecimal string,
+// i.e. a full git commit SHA. UUIDv4 run IDs must not collide with this shape.
+func looksLikeCommitSHA(s string) bool {
+	if len(s) != 40 {
+		return false
+	}
+	for _, r := range s {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
+			return false
+		}
+	}
+	return true
 }
 
 func checkNoPreaggregatedFields(env *Envelope) []string {
