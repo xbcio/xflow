@@ -346,6 +346,7 @@ func (s *Store) AppendAudit(_ context.Context, rec *store.AuditRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rec.ID = s.nextAutoID()
+	rec.SeqID = rec.ID
 	cp := *rec
 	s.audit = append(s.audit, &cp)
 	return nil
@@ -355,8 +356,9 @@ func (s *Store) AppendAudit(_ context.Context, rec *store.AuditRecord) error {
 // "admission", outcome="admitted") older than `before` for which no
 // outcome-phase row exists for the same (tenant, request_id). In-memory
 // mirror of the SQL provider's pending scan; used by the T9 reconcile worker
-// unit tests. Rows are returned oldest-first.
-func (s *Store) ListUnreconciledAdmissions(_ context.Context, before time.Time, limit int) ([]*store.AuditRecord, error) {
+// unit tests. Rows are returned oldest-first. When afterSeqID > 0 only rows
+// with ID > afterSeqID are considered (cursor pagination).
+func (s *Store) ListUnreconciledAdmissions(_ context.Context, before time.Time, afterSeqID uint64, limit int) ([]*store.AuditRecord, error) {
 	if limit <= 0 {
 		limit = 256
 	}
@@ -372,6 +374,9 @@ func (s *Store) ListUnreconciledAdmissions(_ context.Context, before time.Time, 
 	}
 	var out []*store.AuditRecord
 	for _, r := range s.audit {
+		if afterSeqID > 0 && r.ID <= afterSeqID {
+			continue
+		}
 		if r.Phase != store.AuditPhaseAdmission || r.Outcome != store.AuditOutcomeAdmitted {
 			continue
 		}
@@ -414,9 +419,43 @@ func (s *Store) AppendOutcomeIfAbsent(_ context.Context, rec *store.AuditRecord)
 		}
 	}
 	rec.ID = s.nextAutoID()
+	rec.SeqID = rec.ID
 	cp := *rec
 	s.audit = append(s.audit, &cp)
 	return true, nil
+}
+
+// CountUnreconciledAdmissions returns the total count of pending admissions
+// older than `before` and the timestamp of the oldest one (full-table backlog
+// metrics, independent of the cursor). When no pending rows exist, pending=0
+// and oldest is the zero time.
+func (s *Store) CountUnreconciledAdmissions(_ context.Context, before time.Time) (int, time.Time, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	hasOutcome := make(map[string]bool, len(s.audit))
+	for _, r := range s.audit {
+		if r.Phase == store.AuditPhaseOutcome && r.RequestID != "" {
+			hasOutcome[r.TenantID+"|"+r.RequestID] = true
+		}
+	}
+	var count int
+	var oldest time.Time
+	for _, r := range s.audit {
+		if r.Phase != store.AuditPhaseAdmission || r.Outcome != store.AuditOutcomeAdmitted {
+			continue
+		}
+		if !r.Timestamp.IsZero() && !r.Timestamp.Before(before) {
+			continue
+		}
+		if r.RequestID != "" && hasOutcome[r.TenantID+"|"+r.RequestID] {
+			continue
+		}
+		count++
+		if oldest.IsZero() || (!r.Timestamp.IsZero() && r.Timestamp.Before(oldest)) {
+			oldest = r.Timestamp
+		}
+	}
+	return count, oldest, nil
 }
 
 // AuditRecords returns a copy of the recorded audit events (test helper).

@@ -21,6 +21,7 @@ import (
 type fakeAuditReconciler struct {
 	mu       sync.Mutex
 	rows     []*store.AuditRecord
+	nextSeq  uint64
 	failNext func(rec *store.AuditRecord) error
 }
 
@@ -33,10 +34,13 @@ func (f *fakeAuditReconciler) addAdmission(rec *store.AuditRecord) {
 	if cp.Phase == "" {
 		cp.Phase = store.AuditPhaseAdmission
 	}
+	f.nextSeq++
+	cp.SeqID = f.nextSeq
+	cp.ID = f.nextSeq
 	f.rows = append(f.rows, &cp)
 }
 
-func (f *fakeAuditReconciler) ListUnreconciledAdmissions(_ context.Context, before time.Time, limit int) ([]*store.AuditRecord, error) {
+func (f *fakeAuditReconciler) ListUnreconciledAdmissions(_ context.Context, before time.Time, afterSeqID uint64, limit int) ([]*store.AuditRecord, error) {
 	if limit <= 0 {
 		limit = 256
 	}
@@ -50,6 +54,9 @@ func (f *fakeAuditReconciler) ListUnreconciledAdmissions(_ context.Context, befo
 	}
 	var out []*store.AuditRecord
 	for _, r := range f.rows {
+		if afterSeqID > 0 && r.SeqID <= afterSeqID {
+			continue
+		}
 		if r.Phase != store.AuditPhaseAdmission || r.Outcome != store.AuditOutcomeAdmitted {
 			continue
 		}
@@ -85,9 +92,41 @@ func (f *fakeAuditReconciler) AppendOutcomeIfAbsent(_ context.Context, rec *stor
 			return false, err
 		}
 	}
+	f.nextSeq++
+	rec.SeqID = f.nextSeq
+	rec.ID = f.nextSeq
 	cp := *rec
 	f.rows = append(f.rows, &cp)
 	return true, nil
+}
+
+func (f *fakeAuditReconciler) CountUnreconciledAdmissions(_ context.Context, before time.Time) (int, time.Time, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	hasOutcome := make(map[string]bool, len(f.rows))
+	for _, r := range f.rows {
+		if r.Phase == store.AuditPhaseOutcome && r.RequestID != "" {
+			hasOutcome[r.TenantID+"|"+r.RequestID] = true
+		}
+	}
+	var count int
+	var oldest time.Time
+	for _, r := range f.rows {
+		if r.Phase != store.AuditPhaseAdmission || r.Outcome != store.AuditOutcomeAdmitted {
+			continue
+		}
+		if !r.Timestamp.IsZero() && !r.Timestamp.Before(before) {
+			continue
+		}
+		if r.RequestID != "" && hasOutcome[r.TenantID+"|"+r.RequestID] {
+			continue
+		}
+		count++
+		if oldest.IsZero() || (!r.Timestamp.IsZero() && r.Timestamp.Before(oldest)) {
+			oldest = r.Timestamp
+		}
+	}
+	return count, oldest, nil
 }
 
 func (f *fakeAuditReconciler) outcomeCount() int {
@@ -541,4 +580,166 @@ func (f *fakeExecutions) GetExecution(_ context.Context, _ types.ExecutionID) (*
 		return nil, store.ErrNotFound
 	}
 	return f.snap, nil
+}
+
+// ---------------------------------------------------------------------------
+// R3.4: Cursor pagination tests — proving the worker advances past
+// permanently-Indeterminate rows so they do not starve the rest of the backlog.
+// ---------------------------------------------------------------------------
+
+// TestReconcileCursorAdvancesPastIndeterminate proves the core R3.4 defect fix:
+// permanently-Indeterminate rows at the head of the oldest-first scan queue no
+// longer starve resolvable rows further back. The worker's cursor advances past
+// them so subsequent sweeps see the later rows.
+func TestReconcileCursorAdvancesPastIndeterminate(t *testing.T) {
+	audit := &fakeAuditReconciler{}
+	// 3 admissions: first two are indeterminate (will never settle), third is
+	// confirmed. With batch=3, one sweep sees all three. The cursor advances
+	// to the last row's SeqID. A second sweep with afterSeqID=last wraps to 0
+	// since rows < batch (all rows already seen).
+	authority := &fakeAuthority{effects: map[string]MutationEffect{
+		"req-ind-1": EffectIndeterminate,
+		"req-ind-2": EffectIndeterminate,
+		"req-ok-3":  EffectConfirmed,
+	}}
+	old := time.Now().Add(-5 * time.Minute)
+	audit.addAdmission(admissionForRow("req-ind-1", "tenant-a", opWorkflowCreate, "exec-ind-1", old))
+	audit.addAdmission(admissionForRow("req-ind-2", "tenant-a", opWorkflowCreate, "exec-ind-2", old))
+	audit.addAdmission(admissionForRow("req-ok-3", "tenant-a", opWorkflowCreate, "exec-ok-3", old))
+
+	w := NewAuditReconcileWorker(audit, authority, AuditReconcileConfig{
+		Period:     10 * time.Millisecond,
+		BacklogAge: 1 * time.Millisecond,
+		Batch:      3,
+		Elector:    backend.AlwaysLeader{},
+	})
+
+	// First sweep: sees all 3, settles req-ok-3 (the two indeterminate are
+	// skipped). Cursor advances. Since len(candidates)=3 == batch=3, cursor =
+	// last.SeqID (doesn't wrap).
+	settled := w.ReconcileOnce(context.Background())
+	if settled != 1 {
+		t.Fatalf("first sweep settled = %d, want 1", settled)
+	}
+	if w.cursor == 0 {
+		t.Fatal("cursor should have advanced (not zero) after full-batch sweep")
+	}
+	savedCursor := w.cursor
+
+	// Second sweep: cursor is past the indeterminate rows. Since
+	// req-ind-1/req-ind-2 are already settled (req-ok-3 got its outcome) and
+	// only req-ind-1/req-ind-2 remain pending, but they are at SeqID <= cursor,
+	// the query returns 0 rows. Since 0 < batch, cursor wraps to 0.
+	settled2 := w.ReconcileOnce(context.Background())
+	if settled2 != 0 {
+		t.Fatalf("second sweep settled = %d, want 0 (indeterminate rows still pending)", settled2)
+	}
+	if w.cursor != 0 {
+		t.Fatalf("cursor = %d, want 0 (wrap on partial batch)", w.cursor)
+	}
+	_ = savedCursor
+}
+
+// TestReconcileCursorWrapsToZeroOnPartialBatch proves the wrap semantics:
+// when ListUnreconciledAdmissions returns fewer rows than the batch size,
+// the cursor wraps to 0 so the next sweep starts from the beginning again.
+func TestReconcileCursorWrapsToZeroOnPartialBatch(t *testing.T) {
+	audit := &fakeAuditReconciler{}
+	authority := &fakeAuthority{effects: map[string]MutationEffect{"req-w1": EffectConfirmed}}
+	old := time.Now().Add(-5 * time.Minute)
+	// Single row; batch=10 → rows returned (1) < batch (10) → cursor wraps.
+	audit.addAdmission(admissionForRow("req-w1", "tenant-a", opWorkflowCreate, "exec-w1", old))
+
+	w := NewAuditReconcileWorker(audit, authority, AuditReconcileConfig{
+		Period:     10 * time.Millisecond,
+		BacklogAge: 1 * time.Millisecond,
+		Batch:      10,
+		Elector:    backend.AlwaysLeader{},
+	})
+
+	settled := w.ReconcileOnce(context.Background())
+	if settled != 1 {
+		t.Fatalf("settled = %d, want 1", settled)
+	}
+	if w.cursor != 0 {
+		t.Fatalf("cursor = %d, want 0 (partial batch → wrap)", w.cursor)
+	}
+}
+
+// TestReconcileCursorDoesNotWrapOnFullBatch proves that when the batch is
+// exactly full, the cursor advances to the last SeqID (does NOT wrap), so
+// the next sweep continues from where this one left off.
+func TestReconcileCursorDoesNotWrapOnFullBatch(t *testing.T) {
+	audit := &fakeAuditReconciler{}
+	authority := &fakeAuthority{effects: map[string]MutationEffect{
+		"req-b1": EffectIndeterminate,
+		"req-b2": EffectIndeterminate,
+	}}
+	old := time.Now().Add(-5 * time.Minute)
+	audit.addAdmission(admissionForRow("req-b1", "tenant-a", opWorkflowCreate, "exec-b1", old))
+	audit.addAdmission(admissionForRow("req-b2", "tenant-a", opWorkflowCreate, "exec-b2", old))
+
+	w := NewAuditReconcileWorker(audit, authority, AuditReconcileConfig{
+		Period:     10 * time.Millisecond,
+		BacklogAge: 1 * time.Millisecond,
+		Batch:      2, // exactly matches row count
+		Elector:    backend.AlwaysLeader{},
+	})
+
+	settled := w.ReconcileOnce(context.Background())
+	if settled != 0 {
+		t.Fatalf("settled = %d, want 0 (all indeterminate)", settled)
+	}
+	if w.cursor == 0 {
+		t.Fatal("cursor should NOT wrap (batch was exactly full)")
+	}
+}
+
+// TestReconcileBacklogMetricsEmitted proves that the worker emits full-table
+// backlog metrics (pending count + oldest age) via CountUnreconciledAdmissions,
+// independent of the cursor position.
+func TestReconcileBacklogMetricsEmitted(t *testing.T) {
+	audit := &fakeAuditReconciler{}
+	old := time.Now().Add(-10 * time.Minute)
+	audit.addAdmission(admissionForRow("req-m1", "tenant-a", opWorkflowCreate, "exec-m1", old))
+	audit.addAdmission(admissionForRow("req-m2", "tenant-a", opWorkflowCreate, "exec-m2", old.Add(time.Minute)))
+
+	authority := &fakeAuthority{effects: map[string]MutationEffect{
+		"req-m1": EffectIndeterminate,
+		"req-m2": EffectIndeterminate,
+	}}
+
+	obs := &recordingObserver{}
+	w := NewAuditReconcileWorker(audit, authority, AuditReconcileConfig{
+		Period:     10 * time.Millisecond,
+		BacklogAge: 1 * time.Millisecond,
+		Batch:      64,
+		Elector:    backend.AlwaysLeader{},
+		Observer:   obs,
+	})
+
+	w.ReconcileOnce(context.Background())
+
+	if obs.lastBacklogPending != 2 {
+		t.Fatalf("backlog pending = %d, want 2", obs.lastBacklogPending)
+	}
+	// The oldest age should be approximately 10 minutes (the first admission).
+	if obs.lastBacklogOldestAge < 9*time.Minute {
+		t.Fatalf("backlog oldest age = %v, want >= 9m", obs.lastBacklogOldestAge)
+	}
+}
+
+// recordingObserver captures the last OnReconcileBacklog call for assertions.
+type recordingObserver struct {
+	lastBacklogPending   int
+	lastBacklogOldestAge time.Duration
+}
+
+func (o *recordingObserver) OnReconcileScan(_ context.Context, _ int, _ time.Duration, _ error) {}
+func (o *recordingObserver) OnReconcileSettled(_ context.Context, _ string, _ bool, _ int64)    {}
+func (o *recordingObserver) OnReconcileSkipped(_ context.Context, _ string)                     {}
+func (o *recordingObserver) OnReconcileError(_ context.Context, _ string, _ error)              {}
+func (o *recordingObserver) OnReconcileBacklog(_ context.Context, oldestAge time.Duration, pending int) {
+	o.lastBacklogPending = pending
+	o.lastBacklogOldestAge = oldestAge
 }

@@ -91,7 +91,7 @@ type sharedFakeAuditReconciler struct {
 	rows []*store.AuditRecord
 }
 
-func (s *sharedFakeAuditReconciler) ListUnreconciledAdmissions(_ context.Context, _ time.Time, _ int) ([]*store.AuditRecord, error) {
+func (s *sharedFakeAuditReconciler) ListUnreconciledAdmissions(_ context.Context, _ time.Time, _ uint64, _ int) ([]*store.AuditRecord, error) {
 	out := make([]*store.AuditRecord, 0, len(s.rows))
 	hasOutcome := make(map[string]bool)
 	for _, r := range s.rows {
@@ -119,6 +119,27 @@ func (s *sharedFakeAuditReconciler) AppendOutcomeIfAbsent(_ context.Context, rec
 	cp := *rec
 	s.rows = append(s.rows, &cp)
 	return true, nil
+}
+
+func (s *sharedFakeAuditReconciler) CountUnreconciledAdmissions(_ context.Context, _ time.Time) (int, time.Time, error) {
+	hasOutcome := make(map[string]bool)
+	for _, r := range s.rows {
+		if r.Phase == store.AuditPhaseOutcome && r.RequestID != "" {
+			hasOutcome[r.TenantID+"|"+r.RequestID] = true
+		}
+	}
+	var count int
+	var oldest time.Time
+	for _, r := range s.rows {
+		if r.Phase == store.AuditPhaseAdmission && r.Outcome == store.AuditOutcomeAdmitted &&
+			!(r.RequestID != "" && hasOutcome[r.TenantID+"|"+r.RequestID]) {
+			count++
+			if oldest.IsZero() || (!r.Timestamp.IsZero() && r.Timestamp.Before(oldest)) {
+				oldest = r.Timestamp
+			}
+		}
+	}
+	return count, oldest, nil
 }
 
 func (s *sharedFakeAuditReconciler) outcomeCount() int {

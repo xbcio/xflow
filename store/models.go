@@ -77,6 +77,7 @@ type SignalRecord struct {
 // Domain record; ORM schema lives in store/sqlstore.dbAuditEvent.
 type AuditRecord struct {
 	ID            uint64
+	SeqID         uint64 // monotonic cursor key: maps to xflow_audit_events.id (AUTO_INCREMENT)
 	RequestID     string
 	Principal     string
 	TenantID      string

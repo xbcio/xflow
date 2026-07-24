@@ -129,6 +129,7 @@ func toDBAudit(r *store.AuditRecord) *dbAuditEvent {
 func fromDBAudit(d *dbAuditEvent) *store.AuditRecord {
 	return &store.AuditRecord{
 		ID:             d.ID,
+		SeqID:          d.ID, // SeqID maps to the AUTO_INCREMENT primary key
 		RequestID:      d.RequestID,
 		Principal:      d.Principal,
 		TenantID:       d.TenantID,
@@ -157,25 +158,28 @@ func fromDBAudit(d *dbAuditEvent) *store.AuditRecord {
 // persisted) but no post-handler outcome was ever appended (e.g. a crash
 // between the mutation and the outcome audit, or a handler panic).
 //
+// When afterSeqID > 0 only rows with id > afterSeqID are returned (cursor
+// pagination to skip past permanently-Indeterminate rows crowding the head).
+//
 // The NOT EXISTS subquery is covered by idx_tenant_request_phase, so the
 // pending scan is index-only and bounded by `limit`. Rows are returned
-// oldest-first so the oldest backlog is settled first.
-func (r *auditRepo) ListUnreconciledAdmissions(ctx context.Context, before time.Time, limit int) ([]*store.AuditRecord, error) {
+// oldest-first (by id) so the cursor advances monotonically.
+func (r *auditRepo) ListUnreconciledAdmissions(ctx context.Context, before time.Time, afterSeqID uint64, limit int) ([]*store.AuditRecord, error) {
 	if limit <= 0 {
 		limit = 256
 	}
 	var rows []dbAuditEvent
 	err := r.db.WithContext(ctx).Raw(`
 SELECT a.* FROM xflow_audit_events a
-WHERE a.phase = ? AND a.outcome = ? AND a.created_at < ?
+WHERE a.phase = ? AND a.outcome = ? AND a.created_at < ? AND a.id > ?
   AND NOT EXISTS (
       SELECT 1 FROM xflow_audit_events b
       WHERE b.tenant_id = a.tenant_id
         AND b.request_id = a.request_id
         AND b.phase = ?
   )
-ORDER BY a.created_at ASC
-LIMIT ?`, store.AuditPhaseAdmission, store.AuditOutcomeAdmitted, before, store.AuditPhaseOutcome, limit).Scan(&rows).Error
+ORDER BY a.id ASC
+LIMIT ?`, store.AuditPhaseAdmission, store.AuditOutcomeAdmitted, before, afterSeqID, store.AuditPhaseOutcome, limit).Scan(&rows).Error
 	if err := wrapDBErr("list unreconciled admissions", err); err != nil {
 		return nil, err
 	}
@@ -227,4 +231,28 @@ func (r *auditRepo) AppendOutcomeIfAbsent(ctx context.Context, rec *store.AuditR
 	}
 	rec.ID = d.ID
 	return true, nil
+}
+
+// CountUnreconciledAdmissions returns the total count of pending admissions
+// older than `before` and the timestamp of the oldest one (full-table backlog
+// metrics). When no pending rows exist, pending=0 and oldest is the zero time.
+func (r *auditRepo) CountUnreconciledAdmissions(ctx context.Context, before time.Time) (int, time.Time, error) {
+	type result struct {
+		Cnt    int       `gorm:"column:cnt"`
+		Oldest time.Time `gorm:"column:oldest"`
+	}
+	var res result
+	err := r.db.WithContext(ctx).Raw(`
+SELECT COUNT(*) AS cnt, MIN(a.created_at) AS oldest FROM xflow_audit_events a
+WHERE a.phase = ? AND a.outcome = ? AND a.created_at < ?
+  AND NOT EXISTS (
+      SELECT 1 FROM xflow_audit_events b
+      WHERE b.tenant_id = a.tenant_id
+        AND b.request_id = a.request_id
+        AND b.phase = ?
+  )`, store.AuditPhaseAdmission, store.AuditOutcomeAdmitted, before, store.AuditPhaseOutcome).Scan(&res).Error
+	if err := wrapDBErr("count unreconciled admissions", err); err != nil {
+		return 0, time.Time{}, err
+	}
+	return res.Cnt, res.Oldest, nil
 }

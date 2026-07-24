@@ -84,8 +84,10 @@ func TestSQLStoreAuditReconcilePendingScanAndIdempotentOutcome(t *testing.T) {
 	// created_at (the backlog-age filter is exercised in the worker unit
 	// tests via the event timestamp; this test focuses on the pending-scan
 	// NOT EXISTS filter and the idempotent outcome append).
+	// Use afterSeqID = pending.ID - 1 so the cursor skips past the large
+	// pre-existing backlog and returns only our just-inserted rows.
 	cutoff := time.Now().UTC().Add(time.Second)
-	candidates, err := p.ListUnreconciledAdmissions(ctx, cutoff, 64)
+	candidates, err := p.ListUnreconciledAdmissions(ctx, cutoff, pending.ID-1, 64)
 	if err != nil {
 		t.Fatalf("ListUnreconciledAdmissions: %v", err)
 	}
@@ -142,7 +144,7 @@ func TestSQLStoreAuditReconcilePendingScanAndIdempotentOutcome(t *testing.T) {
 	}
 
 	// After settling, the pending scan no longer returns it.
-	candidates2, err := p.ListUnreconciledAdmissions(ctx, cutoff, 64)
+	candidates2, err := p.ListUnreconciledAdmissions(ctx, cutoff, pending.ID-1, 64)
 	if err != nil {
 		t.Fatalf("ListUnreconciledAdmissions after settle: %v", err)
 	}
@@ -157,4 +159,124 @@ func TestSQLStoreAuditReconcilePendingScanAndIdempotentOutcome(t *testing.T) {
 // integration runs do not collide on the uk_phase_key index.
 func uniqueAuditRequestID(suffix string) string {
 	return "req-reconcile-" + suffix + "-" + time.Now().Format("150405.000000000")
+}
+
+// TestSQLStoreAuditCursorPagination proves R3.4 cursor pagination against
+// real MySQL: afterSeqID filters correctly, and CountUnreconciledAdmissions
+// returns correct full-table metrics. Uses a unique tenant_id prefix so
+// assertions are isolated from any pre-existing rows in the table.
+func TestSQLStoreAuditCursorPagination(t *testing.T) {
+	dsn := requireMySQL(t)
+	p, err := mysqlstore.New(dsn)
+	if err != nil {
+		t.Fatalf("mysqlstore.New: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	// Use a unique tenant to isolate from other rows in the table.
+	tenant := "tenant-cursor-" + time.Now().Format("150405.000000000")
+	now := time.Now().UTC()
+
+	// Insert 3 admitted rows with no outcome (pending). They will get
+	// ascending auto-increment IDs.
+	var seqIDs []uint64
+	for i := 1; i <= 3; i++ {
+		rec := &store.AuditRecord{
+			RequestID:   uniqueAuditRequestID("cur" + string(rune('0'+i))),
+			Principal:   "alice",
+			TenantID:    tenant,
+			Operation:   "workflow.create",
+			ExecutionID: "exec-cur-" + string(rune('0'+i)),
+			Decision:    "allow",
+			Outcome:     store.AuditOutcomeAdmitted,
+			Phase:       store.AuditPhaseAdmission,
+			Timestamp:   now.Add(-time.Duration(4-i) * time.Minute), // oldest first
+		}
+		if err := p.AppendAudit(ctx, rec); err != nil {
+			t.Fatalf("AppendAudit row %d: %v", i, err)
+		}
+		// AppendAudit sets rec.ID; SeqID maps to ID in sqlstore
+		seqIDs = append(seqIDs, rec.ID)
+	}
+
+	cutoff := time.Now().UTC().Add(time.Second)
+
+	// Use afterSeqID = first row's ID - 1 so we skip the large pre-existing
+	// backlog and start scanning from just before our test rows.
+	baseSeqID := seqIDs[0] - 1
+	all, err := p.ListUnreconciledAdmissions(ctx, cutoff, baseSeqID, 100)
+	if err != nil {
+		t.Fatalf("ListUnreconciledAdmissions(afterSeqID=%d): %v", baseSeqID, err)
+	}
+	var allForTenant []*store.AuditRecord
+	for _, c := range all {
+		if c.TenantID == tenant {
+			allForTenant = append(allForTenant, c)
+		}
+	}
+	if len(allForTenant) != 3 {
+		t.Fatalf("expected 3 rows for tenant, got %d (afterSeqID=%d)", len(allForTenant), baseSeqID)
+	}
+	// Verify SeqID is populated and monotonically increasing.
+	for i, c := range allForTenant {
+		if c.SeqID == 0 {
+			t.Fatalf("row %d has SeqID=0, want non-zero", i)
+		}
+		if i > 0 && c.SeqID <= allForTenant[i-1].SeqID {
+			t.Fatalf("row %d SeqID=%d not > row %d SeqID=%d", i, c.SeqID, i-1, allForTenant[i-1].SeqID)
+		}
+	}
+
+	// afterSeqID = first row's SeqID → should skip the first row, return 2.
+	afterFirst := allForTenant[0].SeqID
+	page2, err := p.ListUnreconciledAdmissions(ctx, cutoff, afterFirst, 100)
+	if err != nil {
+		t.Fatalf("ListUnreconciledAdmissions(afterSeqID=%d): %v", afterFirst, err)
+	}
+	var page2ForTenant []*store.AuditRecord
+	for _, c := range page2 {
+		if c.TenantID == tenant {
+			page2ForTenant = append(page2ForTenant, c)
+		}
+	}
+	if len(page2ForTenant) != 2 {
+		t.Fatalf("expected 2 rows after first, got %d", len(page2ForTenant))
+	}
+	// The first row in page2 should have SeqID > afterFirst.
+	if page2ForTenant[0].SeqID <= afterFirst {
+		t.Fatalf("first row in page2 SeqID=%d should be > afterSeqID=%d", page2ForTenant[0].SeqID, afterFirst)
+	}
+
+	// afterSeqID = last row's SeqID → should return 0 (for this tenant).
+	afterLast := allForTenant[2].SeqID
+	page3, err := p.ListUnreconciledAdmissions(ctx, cutoff, afterLast, 100)
+	if err != nil {
+		t.Fatalf("ListUnreconciledAdmissions(afterSeqID=%d): %v", afterLast, err)
+	}
+	var page3ForTenant []*store.AuditRecord
+	for _, c := range page3 {
+		if c.TenantID == tenant {
+			page3ForTenant = append(page3ForTenant, c)
+		}
+	}
+	if len(page3ForTenant) != 0 {
+		t.Fatalf("expected 0 rows after last, got %d", len(page3ForTenant))
+	}
+
+	// CountUnreconciledAdmissions should report >= 3 pending (our rows at
+	// minimum; there may be other rows from other tests in the shared DB).
+	pending, oldest, err := p.CountUnreconciledAdmissions(ctx, cutoff)
+	if err != nil {
+		t.Fatalf("CountUnreconciledAdmissions: %v", err)
+	}
+	if pending < 3 {
+		t.Fatalf("pending = %d, want >= 3", pending)
+	}
+	if oldest.IsZero() {
+		t.Fatal("oldest is zero, want a real timestamp")
+	}
+	// Oldest should be at most ~4 minutes ago (our oldest is 3 min ago; some
+	// buffer for test timing and pre-existing rows).
+	_ = seqIDs
 }

@@ -162,6 +162,7 @@ type AuditReconcileWorker struct {
 	batch     int
 	clock     func() time.Time
 	sleepFunc func(context.Context, time.Duration) error
+	cursor    uint64 // in-memory cursor: advances past processed rows, wraps to 0 at tail
 }
 
 // NewAuditReconcileWorker builds a worker. audit and authority are required
@@ -214,6 +215,11 @@ func (w *AuditReconcileWorker) Run(ctx context.Context) error {
 // ReconcileOnce executes exactly one sweep. Exported so tests and admin
 // tooling can trigger a reconcile without waiting for the next tick.
 // Returns the number of admissions settled (appended an outcome) this sweep.
+//
+// The worker advances an in-memory cursor (the SeqID of the last row seen)
+// so that permanently-Indeterminate rows near the head of the oldest-first
+// queue do not starve the rest of the backlog. When a batch returns fewer
+// rows than the batch size the cursor has reached the tail and wraps to 0.
 func (w *AuditReconcileWorker) ReconcileOnce(ctx context.Context) int {
 	if w == nil || w.audit == nil {
 		return 0
@@ -222,8 +228,23 @@ func (w *AuditReconcileWorker) ReconcileOnce(ctx context.Context) int {
 		return 0
 	}
 	before := w.clock().Add(-w.backlog)
+
+	// Emit full-table backlog metrics (independent of cursor position).
+	pending, oldest, countErr := w.audit.CountUnreconciledAdmissions(ctx, before)
+	if countErr == nil {
+		var oldestAge time.Duration
+		if !oldest.IsZero() {
+			oldestAge = w.clock().Sub(oldest)
+		}
+		w.observe(func(o ReconcileObserver) {
+			o.OnReconcileBacklog(ctx, oldestAge, pending)
+		})
+	} else if w.log != nil {
+		w.log.Error("audit reconcile: count unreconciled admissions", "err", countErr)
+	}
+
 	started := time.Now()
-	candidates, err := w.audit.ListUnreconciledAdmissions(ctx, before, w.batch)
+	candidates, err := w.audit.ListUnreconciledAdmissions(ctx, before, w.cursor, w.batch)
 	w.observe(func(o ReconcileObserver) {
 		o.OnReconcileScan(ctx, len(candidates), time.Since(started), err)
 	})
@@ -233,17 +254,20 @@ func (w *AuditReconcileWorker) ReconcileOnce(ctx context.Context) int {
 		}
 		return 0
 	}
+
+	// Advance cursor. If we got fewer rows than the batch size, we reached
+	// the tail — wrap to 0 so the next sweep starts from the beginning.
+	if len(candidates) < w.batch {
+		w.cursor = 0
+	} else if len(candidates) > 0 {
+		last := candidates[len(candidates)-1]
+		w.cursor = last.SeqID
+	}
+
 	settled := 0
-	var oldestAge time.Duration
 	for _, rec := range candidates {
-		if age := w.clock().Sub(rec.Timestamp); age > oldestAge {
-			oldestAge = age
-		}
 		settled += w.settle(ctx, rec)
 	}
-	w.observe(func(o ReconcileObserver) {
-		o.OnReconcileBacklog(ctx, oldestAge, len(candidates))
-	})
 	return settled
 }
 

@@ -80,8 +80,14 @@ type ReceiptAuditAppender interface {
 // phase="outcome"): a duplicate append (concurrent worker / leader switch)
 // returns appended=false.
 type AuditReconciler interface {
-	ListUnreconciledAdmissions(ctx context.Context, before time.Time, limit int) ([]*AuditRecord, error)
+	ListUnreconciledAdmissions(ctx context.Context, before time.Time, afterSeqID uint64, limit int) ([]*AuditRecord, error)
 	AppendOutcomeIfAbsent(ctx context.Context, rec *AuditRecord) (bool, error)
+	// CountUnreconciledAdmissions returns the total count of pending
+	// admissions older than `before` and the timestamp of the oldest one.
+	// Used by the worker for full-table backlog metrics (independent of the
+	// cursor position). When no pending rows exist, pending=0 and oldest is
+	// the zero time.
+	CountUnreconciledAdmissions(ctx context.Context, before time.Time) (pending int, oldest time.Time, err error)
 }
 
 // Audit phase constants (T9). Each audit row belongs to exactly one

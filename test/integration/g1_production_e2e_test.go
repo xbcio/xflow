@@ -1683,7 +1683,7 @@ func g1CountUnreconciled(t *testing.T, p *sqlstore.Provider) int {
 	if !ok {
 		return 0
 	}
-	rows, err := ar.ListUnreconciledAdmissions(ctx, time.Now().Add(time.Second), 1024)
+	rows, err := ar.ListUnreconciledAdmissions(ctx, time.Now().Add(time.Second), 0, 1024)
 	if err != nil {
 		t.Logf("ListUnreconciledAdmissions: %v", err)
 		return 0
