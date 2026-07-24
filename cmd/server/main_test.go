@@ -1,10 +1,20 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/alicebob/miniredis/v2"
+	"github.com/xbcio/xflow/backend/distributed"
 	obslogger "github.com/xbcio/xflow/observability/logger"
 	"github.com/xbcio/xflow/service/apiserver"
+	"github.com/xbcio/xflow/service/control"
 )
 
 func TestParseServerConfigSupportsMemoryMode(t *testing.T) {
@@ -97,6 +107,118 @@ func TestParseServerConfigSupportsAPIAuthToken(t *testing.T) {
 	}
 }
 
+func TestParseServerConfigSupportsAuthTokensFile(t *testing.T) {
+	cfg, err := parseServerConfig([]string{"-memory", "-auth-tokens-file", "/etc/xflow/tokens.json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.authTokensFile != "/etc/xflow/tokens.json" {
+		t.Fatalf("authTokensFile = %q, want /etc/xflow/tokens.json", cfg.authTokensFile)
+	}
+}
+
+// writeTokenFile writes a JSON token mapping file with the given mode for
+// loadAuthTokenMappings tests.
+func writeTokenFile(t *testing.T, name, content string, mode os.FileMode) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, []byte(content), mode); err != nil {
+		t.Fatalf("write %s: %v", name, err)
+	}
+	return path
+}
+
+func TestLoadAuthTokenMappingsParsesMultiTenantRegistry(t *testing.T) {
+	path := writeTokenFile(t, "tokens.json",
+		`[{"token":"tok-a","subject":"op-a","tenant":"tenantA","scopes":["workflow","management.read"]},{"token":"tok-b","subject":"op-b","tenant":"tenantB","scopes":["workflow"]}]`,
+		0600)
+	mappings, err := loadAuthTokenMappings(serverConfig{authTokensFile: path})
+	if err != nil {
+		t.Fatalf("loadAuthTokenMappings: %v", err)
+	}
+	if len(mappings) != 2 {
+		t.Fatalf("mappings = %d, want 2", len(mappings))
+	}
+	if mappings[0].TenantID != "tenantA" || mappings[0].Subject != "op-a" || mappings[0].Token != "tok-a" {
+		t.Fatalf("mappings[0] = %+v, want op-a/tenantA/tok-a", mappings[0])
+	}
+	if mappings[1].TenantID != "tenantB" {
+		t.Fatalf("mappings[1].TenantID = %q, want tenantB", mappings[1].TenantID)
+	}
+}
+
+func TestLoadAuthTokenMappingsRejectsWorldReadableFile(t *testing.T) {
+	// 0644 is group/world readable → must be rejected to avoid leaking tokens.
+	path := writeTokenFile(t, "tokens.json", `[]`, 0644)
+	if _, err := loadAuthTokenMappings(serverConfig{authTokensFile: path}); err == nil {
+		t.Fatal("loadAuthTokenMappings() error = nil, want error for group/world-readable token file")
+	}
+}
+
+func TestLoadAuthTokenMappingsRejectsMissingFields(t *testing.T) {
+	// tenant is required (empty normalized to default is only for the
+	// single-token constructor path, not the file).
+	path := writeTokenFile(t, "tokens.json", `[{"token":"t","subject":"s"}]`, 0600)
+	if _, err := loadAuthTokenMappings(serverConfig{authTokensFile: path}); err == nil {
+		t.Fatal("loadAuthTokenMappings() error = nil, want error for missing tenant")
+	}
+}
+
+func TestLoadAuthTokenMappingsNilWhenUnset(t *testing.T) {
+	mappings, err := loadAuthTokenMappings(serverConfig{})
+	if err != nil {
+		t.Fatalf("loadAuthTokenMappings: %v", err)
+	}
+	if mappings != nil {
+		t.Fatalf("mappings = %v, want nil when no file configured", mappings)
+	}
+}
+
+func TestRunServerMultiTenantTokenFileBuildsPrincipalAuth(t *testing.T) {
+	// Verify the --auth-tokens-file path end-to-end at the builder layer (which
+	// runServer calls): the file is parsed into a multi-tenant token registry
+	// and each token resolves to its bound tenant via the authenticator. Tokens
+	// are hashed in-process; the file is 0600.
+	path := writeTokenFile(t, "tokens.json",
+		`[{"token":"tok-a","subject":"op-a","tenant":"tenantA","scopes":["workflow","execution","management.read","management.write","deadletter.list","deadletter.replay"]},{"token":"tok-b","subject":"op-b","tenant":"tenantB","scopes":["workflow"]}]`,
+		0600)
+	cfg, err := parseServerConfig([]string{"-memory", "-auth-tokens-file", path, "-management"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mappings, err := loadAuthTokenMappings(cfg)
+	if err != nil {
+		t.Fatalf("loadAuthTokenMappings: %v", err)
+	}
+	auth := apiserver.NewBearerPrincipalAuthMulti(mappings)
+
+	reqA, _ := http.NewRequest(http.MethodGet, "/", nil)
+	reqA.Header.Set("Authorization", "Bearer tok-a")
+	pA, err := auth.Authenticate(reqA)
+	if err != nil {
+		t.Fatalf("Authenticate tok-a: %v", err)
+	}
+	if pA.TenantID != "tenantA" || pA.Subject != "op-a" {
+		t.Fatalf("tok-a principal = %+v, want op-a/tenantA", pA)
+	}
+
+	reqB, _ := http.NewRequest(http.MethodGet, "/", nil)
+	reqB.Header.Set("Authorization", "Bearer tok-b")
+	pB, err := auth.Authenticate(reqB)
+	if err != nil {
+		t.Fatalf("Authenticate tok-b: %v", err)
+	}
+	if pB.TenantID != "tenantB" {
+		t.Fatalf("tok-b tenant = %q, want tenantB", pB.TenantID)
+	}
+
+	// --auth-tokens-file takes precedence over --api-auth-token; verify the
+	// flag was parsed and cfg.apiAuthToken is unset (we did not pass it).
+	if cfg.apiAuthToken != "" {
+		t.Fatalf("apiAuthToken = %q, want empty (file takes precedence)", cfg.apiAuthToken)
+	}
+}
+
 func TestParseServerConfigRequireAPIAuthFlag(t *testing.T) {
 	cfg, err := parseServerConfig([]string{"-memory", "-require-api-auth"})
 	if err != nil {
@@ -114,5 +236,312 @@ func TestParseServerConfigSupportsManagementFlag(t *testing.T) {
 	}
 	if !cfg.management {
 		t.Fatal("management = false, want true")
+	}
+}
+
+func TestParseServerConfigRedisModeFlag(t *testing.T) {
+	cfg, err := parseServerConfig([]string{
+		"-redis-mode", "sentinel",
+		"-redis-sentinel-master", "mymaster",
+		"-redis-sentinel-addrs", "s1:26379,s2:26379",
+		"-redis-password", "secret",
+		"-redis-db", "3",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.redisMode != "sentinel" {
+		t.Fatalf("redisMode = %q, want sentinel", cfg.redisMode)
+	}
+	if cfg.memory {
+		t.Fatal("memory = true, want false when HA topology is configured")
+	}
+	if cfg.redisSentinelMaster != "mymaster" || cfg.redisSentinelAddrs != "s1:26379,s2:26379" || cfg.redisPassword != "secret" || cfg.redisDB != 3 {
+		t.Fatalf("unexpected HA flags: %+v", cfg)
+	}
+}
+
+func TestParseServerConfigRejectsInvalidRedisMode(t *testing.T) {
+	if _, err := parseServerConfig([]string{"-redis-mode", "bogus"}); err == nil {
+		t.Fatal("parseServerConfig() error = nil, want error for invalid --redis-mode")
+	}
+}
+
+func TestBuildRedisConfigLegacySingleReturnsNil(t *testing.T) {
+	cfg := serverConfig{redis: "localhost:6379"}
+	rc, err := buildRedisConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rc != nil {
+		t.Fatalf("buildRedisConfig() = %+v, want nil for legacy --redis", rc)
+	}
+}
+
+func TestBuildRedisConfigDefaultRedisEmptyGoesInMemory(t *testing.T) {
+	cfg := serverConfig{}
+	rc, err := buildRedisConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rc != nil {
+		t.Fatalf("buildRedisConfig() = %+v, want nil for empty redis", rc)
+	}
+}
+
+func TestBuildRedisConfigSingleMode(t *testing.T) {
+	cfg := serverConfig{redis: "localhost:6379", redisMode: "single", redisPassword: "secret", redisDB: 2, redisTLS: true}
+	rc, err := buildRedisConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rc == nil {
+		t.Fatal("buildRedisConfig() = nil, want RedisConfig")
+	}
+	if rc.Mode != distributed.RedisModeSingle || len(rc.Addrs) != 1 || rc.Addrs[0] != "localhost:6379" || rc.Password != "secret" || rc.DB != 2 || rc.TLSConfig == nil {
+		t.Fatalf("unexpected RedisConfig: %+v", rc)
+	}
+}
+
+func TestBuildRedisConfigSentinelRequiresMaster(t *testing.T) {
+	cfg := serverConfig{redisMode: "sentinel", redisSentinelAddrs: "s1:26379"}
+	if _, err := buildRedisConfig(cfg); err == nil {
+		t.Fatal("buildRedisConfig() error = nil, want error for missing master")
+	}
+}
+
+func TestBuildRedisConfigSentinelRequiresAddrs(t *testing.T) {
+	cfg := serverConfig{redisMode: "sentinel", redisSentinelMaster: "mymaster"}
+	if _, err := buildRedisConfig(cfg); err == nil {
+		t.Fatal("buildRedisConfig() error = nil, want error for missing sentinel addrs")
+	}
+}
+
+func TestBuildRedisConfigSentinelMode(t *testing.T) {
+	cfg := serverConfig{
+		redisMode:           "sentinel",
+		redisSentinelMaster: "mymaster",
+		redisSentinelAddrs:  "s1:26379, s2:26379 ,s3:26379",
+		redisUsername:       "u",
+		redisPassword:       "p",
+		redisDB:             1,
+		redisTLS:            true,
+	}
+	rc, err := buildRedisConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rc == nil {
+		t.Fatal("buildRedisConfig() = nil, want RedisConfig")
+	}
+	want := []string{"s1:26379", "s2:26379", "s3:26379"}
+	if rc.Mode != distributed.RedisModeSentinel || rc.MasterName != "mymaster" || len(rc.Addrs) != 3 || strings.Join(rc.Addrs, ",") != strings.Join(want, ",") || rc.Username != "u" || rc.Password != "p" || rc.SentinelUsername != "u" || rc.SentinelPassword != "p" || rc.DB != 1 || rc.TLSConfig == nil {
+		t.Fatalf("unexpected RedisConfig: %+v", rc)
+	}
+}
+
+func TestBuildRedisConfigSentinelUsesDedicatedCreds(t *testing.T) {
+	cfg := serverConfig{
+		redisMode:             "sentinel",
+		redisSentinelMaster:   "mymaster",
+		redisSentinelAddrs:    "s1:26379,s2:26379",
+		redisUsername:         "master-user",
+		redisPassword:         "master-pass",
+		redisSentinelUsername: "sentinel-user",
+		redisSentinelPassword: "sentinel-pass",
+	}
+	rc, err := buildRedisConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rc == nil {
+		t.Fatal("buildRedisConfig() = nil, want RedisConfig")
+	}
+	if rc.Username != "master-user" || rc.Password != "master-pass" {
+		t.Fatalf("unexpected master creds: username=%q password=%q", rc.Username, rc.Password)
+	}
+	if rc.SentinelUsername != "sentinel-user" || rc.SentinelPassword != "sentinel-pass" {
+		t.Fatalf("unexpected sentinel creds: username=%q password=%q", rc.SentinelUsername, rc.SentinelPassword)
+	}
+}
+
+func TestBuildRedisConfigSentinelFallsBackToMasterCreds(t *testing.T) {
+	cfg := serverConfig{
+		redisMode:           "sentinel",
+		redisSentinelMaster: "mymaster",
+		redisSentinelAddrs:  "s1:26379",
+		redisUsername:       "shared-user",
+		redisPassword:       "shared-pass",
+	}
+	rc, err := buildRedisConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rc == nil {
+		t.Fatal("buildRedisConfig() = nil, want RedisConfig")
+	}
+	if rc.SentinelUsername != "shared-user" || rc.SentinelPassword != "shared-pass" {
+		t.Fatalf("sentinel creds did not fall back to master creds: username=%q password=%q", rc.SentinelUsername, rc.SentinelPassword)
+	}
+}
+
+func TestParseServerConfigSupportsSentinelAuthFlags(t *testing.T) {
+	cfg, err := parseServerConfig([]string{
+		"-redis-mode", "sentinel",
+		"-redis-sentinel-master", "mymaster",
+		"-redis-sentinel-addrs", "s1:26379",
+		"-redis-username", "master-user",
+		"-redis-password", "master-pass",
+		"-redis-sentinel-username", "sentinel-user",
+		"-redis-sentinel-password", "sentinel-pass",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.redisUsername != "master-user" || cfg.redisPassword != "master-pass" {
+		t.Fatalf("master creds = %q/%q, want master-user/master-pass", cfg.redisUsername, cfg.redisPassword)
+	}
+	if cfg.redisSentinelUsername != "sentinel-user" || cfg.redisSentinelPassword != "sentinel-pass" {
+		t.Fatalf("sentinel creds = %q/%q, want sentinel-user/sentinel-pass", cfg.redisSentinelUsername, cfg.redisSentinelPassword)
+	}
+}
+
+func TestBuildRedisConfigClusterRequiresAddrs(t *testing.T) {
+	cfg := serverConfig{redisMode: "cluster"}
+	if _, err := buildRedisConfig(cfg); err == nil {
+		t.Fatal("buildRedisConfig() error = nil, want error for missing cluster addrs")
+	}
+}
+
+func TestBuildRedisConfigClusterMode(t *testing.T) {
+	cfg := serverConfig{
+		redisMode:         "cluster",
+		redisClusterAddrs: "c1:6379,c2:6379",
+		redisUsername:     "u",
+		redisPassword:     "p",
+		redisTLS:          true,
+	}
+	rc, err := buildRedisConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rc == nil {
+		t.Fatal("buildRedisConfig() = nil, want RedisConfig")
+	}
+	want := []string{"c1:6379", "c2:6379"}
+	if rc.Mode != distributed.RedisModeCluster || len(rc.Addrs) != 2 || strings.Join(rc.Addrs, ",") != strings.Join(want, ",") || rc.Username != "u" || rc.Password != "p" || rc.TLSConfig == nil {
+		t.Fatalf("unexpected RedisConfig: %+v", rc)
+	}
+}
+
+// TestRunServerMultiTenantManagementHTTPAuth is a cmd/server-level end-to-end
+// regression test for the Task 7.3 review finding: the outer
+// ManagementAuthMiddleware must accept any token in the multi-tenant registry,
+// not just the first one. tenantB (tok-b) must reach the route-level authz
+// wrapper and successfully inspect its own execution; unknown tokens are still
+// rejected; cross-tenant access remains 404.
+func TestRunServerMultiTenantManagementHTTPAuth(t *testing.T) {
+	redisServer, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	t.Cleanup(redisServer.Close)
+
+	// Build the same backend/control-plane stack runServer would use, but with
+	// the queue consumer disabled so queued tasks do not race with the test.
+	backend, err := distributed.New(redisServer.Addr(), nil, distributed.WithConsumer(false))
+	if err != nil {
+		t.Fatalf("distributed.New: %v", err)
+	}
+	cp, err := control.NewControlPlane(control.Config{Backend: backend})
+	if err != nil {
+		t.Fatalf("NewControlPlane: %v", err)
+	}
+
+	path := writeTokenFile(t, "tokens.json",
+		`[{"token":"tok-a","subject":"op-a","tenant":"tenantA","scopes":["workflow","execution","management.read"]},`+
+			`{"token":"tok-b","subject":"op-b","tenant":"tenantB","scopes":["workflow","execution","management.read"]}]`,
+		0600)
+	cfg, err := parseServerConfig([]string{"-redis", redisServer.Addr(), "-auth-tokens-file", path, "-management"})
+	if err != nil {
+		t.Fatalf("parseServerConfig: %v", err)
+	}
+	mappings, err := loadAuthTokenMappings(cfg)
+	if err != nil {
+		t.Fatalf("loadAuthTokenMappings: %v", err)
+	}
+	principalAuth := apiserver.NewBearerPrincipalAuthMulti(mappings)
+
+	// Replicate runServer's production wiring: PrincipalAuth drives the B3
+	// authz wrapper, and the same registry also gates /v1/management/* via the
+	// outer ManagementAuthMiddleware.
+	srv, err := apiserver.New(apiserver.Config{
+		RedisAddr:     redisServer.Addr(),
+		Concurrency:   1,
+		PrincipalAuth: principalAuth,
+		Authorizer:    apiserver.TenantAwareAuthorizer{},
+		AuditSink:     apiserver.NewInMemoryAuditSink(),
+	}, apiserver.WithControlPlane(cp), apiserver.WithManagement(),
+		apiserver.WithHTTPMiddleware(apiserver.ManagementAuthMiddleware(principalAuth)))
+	if err != nil {
+		t.Fatalf("apiserver.New: %v", err)
+	}
+	httpSrv := httptest.NewServer(srv.Handler())
+	t.Cleanup(httpSrv.Close)
+
+	submitWorkflow := func(token string) string {
+		body := map[string]any{
+			"workflow": map[string]any{
+				"name":  "mgmt-auth-wf",
+				"nodes": []map[string]any{{"name": "start", "type": "test.echo"}},
+			},
+		}
+		var buf bytes.Buffer
+		_ = json.NewEncoder(&buf).Encode(body)
+		req, _ := http.NewRequest(http.MethodPost, httpSrv.URL+"/v1/workflows", &buf)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("submit %s: %v", token, err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("submit %s status = %d, want 200", token, resp.StatusCode)
+		}
+		var out struct {
+			ExecutionID string `json:"execution_id"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&out)
+		if out.ExecutionID == "" {
+			t.Fatalf("submit %s returned empty execution_id", token)
+		}
+		return out.ExecutionID
+	}
+
+	managementExecStatus := func(token, execID string) int {
+		req, _ := http.NewRequest(http.MethodGet, httpSrv.URL+"/v1/management/executions/"+execID, nil)
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("management exec %s/%s: %v", token, execID, err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		return resp.StatusCode
+	}
+
+	execB := submitWorkflow("tok-b")
+	execA := submitWorkflow("tok-a")
+
+	if code := managementExecStatus("tok-b", execB); code != http.StatusOK {
+		t.Fatalf("tenantB inspect own exec = %d, want 200 (outer middleware must accept tok-b)", code)
+	}
+	if code := managementExecStatus("tok-unknown", execB); code != http.StatusUnauthorized {
+		t.Fatalf("unknown token = %d, want 401", code)
+	}
+	if code := managementExecStatus("tok-b", execA); code != http.StatusNotFound {
+		t.Fatalf("tenantB inspect tenantA exec = %d, want 404 (IDOR, no existence leak)", code)
 	}
 }

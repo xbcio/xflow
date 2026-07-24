@@ -12,12 +12,13 @@ import (
 
 	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/backend/distributed/internal/workflowreg"
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/types"
 )
 
 func TestWorkflowRegistryIsSharedAcrossInstances(t *testing.T) {
-	ctx := context.Background()
+	ctx := tenant.WithTenant(context.Background(), tenant.DefaultTenant)
 	first := newWorkflowRegistryTestBackend(t)
 	second := newWorkflowRegistryTestBackend(t)
 
@@ -39,7 +40,7 @@ func TestWorkflowRegistryIsSharedAcrossInstances(t *testing.T) {
 }
 
 func TestWorkflowRegistryAddIsIdempotentByKeyAndHashAcrossInstances(t *testing.T) {
-	ctx := context.Background()
+	ctx := tenant.WithTenant(context.Background(), tenant.DefaultTenant)
 	first := newWorkflowRegistryTestBackend(t)
 	second := newWorkflowRegistryTestBackend(t)
 
@@ -73,7 +74,7 @@ func TestWorkflowRegistryAddIsIdempotentByKeyAndHashAcrossInstances(t *testing.T
 }
 
 func TestWorkflowRegistryConflictsAcrossInstances(t *testing.T) {
-	ctx := context.Background()
+	ctx := tenant.WithTenant(context.Background(), tenant.DefaultTenant)
 	first := newWorkflowRegistryTestBackend(t)
 	second := newWorkflowRegistryTestBackend(t)
 
@@ -99,7 +100,7 @@ func TestWorkflowRegistryConflictsAcrossInstances(t *testing.T) {
 }
 
 func TestWorkflowRegistryRemoveDeletesKeyAndID(t *testing.T) {
-	ctx := context.Background()
+	ctx := tenant.WithTenant(context.Background(), tenant.DefaultTenant)
 	first := newWorkflowRegistryTestBackend(t)
 	second := newWorkflowRegistryTestBackend(t)
 
@@ -195,8 +196,8 @@ func cleanupWorkflowRegistryRecord(t *testing.T, rdb redis.UniversalClient, rec 
 	if rec.ID == "" {
 		return
 	}
-	if err := rdb.Del(context.Background(), workflowreg.KeyByID(rec.Key, rec.ID), workflowreg.KeyByKey(rec.Key), workflowreg.KeyIDMap(rec.ID)).Err(); err != nil {
-		t.Fatalf("Del(%q, %q, %q) error = %v", workflowreg.KeyByID(rec.Key, rec.ID), workflowreg.KeyByKey(rec.Key), workflowreg.KeyIDMap(rec.ID), err)
+	if err := rdb.Del(context.Background(), workflowreg.KeyByID(tenant.DefaultTenant, rec.Key, rec.ID), workflowreg.KeyByKey(tenant.DefaultTenant, rec.Key), workflowreg.KeyIDMap(tenant.DefaultTenant, rec.ID)).Err(); err != nil {
+		t.Fatalf("Del(%q, %q, %q) error = %v", workflowreg.KeyByID(tenant.DefaultTenant, rec.Key, rec.ID), workflowreg.KeyByKey(tenant.DefaultTenant, rec.Key), workflowreg.KeyIDMap(tenant.DefaultTenant, rec.ID), err)
 	}
 }
 

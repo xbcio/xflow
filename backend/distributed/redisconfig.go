@@ -22,13 +22,15 @@ const (
 // with redis.NewUniversalClient; otherwise New keeps the legacy single-address
 // behavior.
 type RedisConfig struct {
-	Mode       string
-	Addrs      []string
-	MasterName string
-	Username   string
-	Password   string
-	TLSConfig  *tls.Config
-	DB         int
+	Mode             string
+	Addrs            []string
+	MasterName       string
+	Username         string
+	Password         string
+	SentinelUsername string
+	SentinelPassword string
+	TLSConfig        *tls.Config
+	DB               int
 }
 
 // validate checks that the configuration is self-consistent. It is fail-closed:
@@ -38,6 +40,9 @@ func (c RedisConfig) validate() error {
 	case RedisModeSingle:
 		if c.MasterName != "" {
 			return errors.New("redis single mode does not use MasterName")
+		}
+		if len(c.Addrs) == 0 {
+			return errors.New("redis single mode requires at least one address")
 		}
 	case RedisModeSentinel:
 		if c.MasterName == "" {
@@ -59,9 +64,15 @@ func (c RedisConfig) validate() error {
 	return nil
 }
 
+// Validate is the exported entry point for RedisConfig validation. It returns
+// the same result as the unexported validate method and is exposed so callers
+// outside the distributed package can reuse the fail-closed checks.
+func (c RedisConfig) Validate() error {
+	return c.validate()
+}
+
 // firstAddr returns the first configured address, or an empty string if none is
-// configured. It is used to keep the legacy asynq transport address string alive
-// until Task 3.1 replaces it with HA-specific connection options.
+// configured. It is used for single-mode client construction.
 func (c RedisConfig) firstAddr() string {
 	if len(c.Addrs) == 0 {
 		return ""
@@ -88,12 +99,14 @@ func (c RedisConfig) AsAsynqConnOpt() (asynqlib.RedisConnOpt, error) {
 		}, nil
 	case RedisModeSentinel:
 		return asynqlib.RedisFailoverClientOpt{
-			MasterName:    c.MasterName,
-			SentinelAddrs: c.Addrs,
-			Username:      c.Username,
-			Password:      c.Password,
-			TLSConfig:     c.TLSConfig,
-			DB:            c.DB,
+			MasterName:       c.MasterName,
+			SentinelAddrs:    c.Addrs,
+			Username:         c.Username,
+			Password:         c.Password,
+			SentinelUsername: c.SentinelUsername,
+			SentinelPassword: c.SentinelPassword,
+			TLSConfig:        c.TLSConfig,
+			DB:               c.DB,
 		}, nil
 	case RedisModeCluster:
 		return asynqlib.RedisClusterClientOpt{
@@ -125,16 +138,18 @@ func newRedisClient(cfg RedisConfig) (redis.UniversalClient, error) {
 			DB:        cfg.DB,
 		}), nil
 	case RedisModeSentinel, RedisModeCluster:
-		// redis.NewUniversalClient returns a *redis.Client failover client for
-		// sentinel and a *redis.ClusterClient for cluster when Addrs has more
-		// than one entry (or even one entry without MasterName).
+		// redis.NewUniversalClient returns a failover *redis.Client for sentinel
+		// (MasterName non-empty) and a *redis.ClusterClient for cluster
+		// (MasterName empty), regardless of the number of addresses.
 		return redis.NewUniversalClient(&redis.UniversalOptions{
-			MasterName: cfg.MasterName,
-			Addrs:      cfg.Addrs,
-			Username:   cfg.Username,
-			Password:   cfg.Password,
-			TLSConfig:  cfg.TLSConfig,
-			DB:         cfg.DB,
+			MasterName:       cfg.MasterName,
+			Addrs:            cfg.Addrs,
+			Username:         cfg.Username,
+			Password:         cfg.Password,
+			SentinelUsername: cfg.SentinelUsername,
+			SentinelPassword: cfg.SentinelPassword,
+			TLSConfig:        cfg.TLSConfig,
+			DB:               cfg.DB,
 		}), nil
 	default:
 		return nil, fmt.Errorf("unsupported redis mode %q", cfg.Mode)

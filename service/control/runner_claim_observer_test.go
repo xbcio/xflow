@@ -15,11 +15,11 @@ type runnerClaimObserverRecorder struct {
 	replayed  int
 }
 
-func (r *runnerClaimObserverRecorder) OnRunnerClaimReclaimed(count int) {
+func (r *runnerClaimObserverRecorder) OnRunnerClaimReclaimed(ctx context.Context, count int) {
 	r.reclaimed += count
 }
 
-func (r *runnerClaimObserverRecorder) OnRunnerLeaseReplayed() {
+func (r *runnerClaimObserverRecorder) OnRunnerLeaseReplayed(ctx context.Context) {
 	r.replayed++
 }
 

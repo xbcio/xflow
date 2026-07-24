@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/service/protocol"
 )
@@ -109,6 +110,10 @@ func (d *RedisRunnerDirectory) Register(ctx context.Context, req RegisterRunnerR
 	if err != nil {
 		return RunnerSession{}, fmt.Errorf("marshal runner policy: %w", err)
 	}
+	tenants, err := json.Marshal(normalizeRunnerTenants(req.Tenants))
+	if err != nil {
+		return RunnerSession{}, fmt.Errorf("marshal runner tenants: %w", err)
+	}
 
 	now := req.Now
 	if now.IsZero() {
@@ -131,10 +136,11 @@ func (d *RedisRunnerDirectory) Register(ctx context.Context, req RegisterRunnerR
 		d.keys.runnerInflight,
 		d.keys.runnerCapabilities,
 		d.keys.runnerPolicy,
+		d.keys.runnerTenants,
 		d.keys.runnerHeartbeat,
 		d.keys.runnerLeaseCount,
 		d.keys.claimsExpiry,
-	}, req.RunnerID, session.SessionID, strconv.Itoa(req.Capacity), string(capabilities), string(policy), strconv.FormatInt(now.UnixMilli(), 10))
+	}, req.RunnerID, session.SessionID, strconv.Itoa(req.Capacity), string(capabilities), string(policy), string(tenants), strconv.FormatInt(now.UnixMilli(), 10))
 	if err != nil {
 		return RunnerSession{}, fmt.Errorf("register redis runner: %w", err)
 	}
@@ -272,6 +278,9 @@ func (d *RedisRunnerDirectory) ClaimForRunner(ctx context.Context, req ClaimRequ
 		if !canRunRouting(capabilities, assignment.Routing) || !runner.policy.Allows(assignment.Routing.NodeType) {
 			continue
 		}
+		if !canServeTenant(runner.tenants, assignment.TenantID) {
+			continue
+		}
 
 		claimID := ClaimID(uuid.NewString())
 		status, err := d.claim(ctx, req, capabilitiesChanged, string(capabilitiesJSON), assignmentID, raw, claimID)
@@ -349,7 +358,7 @@ func (d *RedisRunnerDirectory) replayLease(ctx context.Context, runnerID, sessio
 		if err != nil {
 			return Claim{}, false, fmt.Errorf("decode persisted lease %q: %w", assignmentID, err)
 		}
-		d.observeLeaseReplay()
+		d.observeLeaseReplay(ctx)
 		return Claim{Assignment: assignment, Lease: lease}, true, nil
 	}
 	return Claim{}, false, nil
@@ -549,6 +558,12 @@ func (d *RedisRunnerDirectory) Runner(ctx context.Context, runnerID string) (Run
 	if err != nil {
 		return RunnerSnapshot{}, false
 	}
+	tenantsRaw, err := d.rdb.HGet(ctx, d.keys.runnerTenants, runnerID).Result()
+	if errors.Is(err, redis.Nil) {
+		tenantsRaw = ""
+	} else if err != nil {
+		return RunnerSnapshot{}, false
+	}
 	heartbeatRaw, err := d.rdb.HGet(ctx, d.keys.runnerHeartbeat, runnerID).Result()
 	if errors.Is(err, redis.Nil) {
 		heartbeatRaw = "0"
@@ -572,11 +587,18 @@ func (d *RedisRunnerDirectory) Runner(ctx context.Context, runnerID string) (Run
 	if err := json.Unmarshal([]byte(capabilitiesRaw), &capabilities); err != nil {
 		return RunnerSnapshot{}, false
 	}
+	tenants := normalizeRunnerTenants(nil)
+	if tenantsRaw != "" {
+		if err := json.Unmarshal([]byte(tenantsRaw), &tenants); err != nil {
+			return RunnerSnapshot{}, false
+		}
+	}
 	return RunnerSnapshot{
 		RunnerID:      runnerID,
 		Capacity:      capacity,
 		InFlight:      inFlight,
 		Capabilities:  cloneCapabilities(capabilities),
+		Tenants:       tenants,
 		LastHeartbeat: time.UnixMilli(heartbeatMillis),
 	}, true
 }
@@ -585,6 +607,7 @@ type redisClaimRunner struct {
 	sessionID    string
 	capabilities []protocol.Capability
 	policy       RunnerPolicy
+	tenants      []tenant.TenantID
 }
 
 func (d *RedisRunnerDirectory) runnerForClaim(ctx context.Context, runnerID string) (redisClaimRunner, bool, error) {
@@ -603,6 +626,12 @@ func (d *RedisRunnerDirectory) runnerForClaim(ctx context.Context, runnerID stri
 	if err != nil {
 		return redisClaimRunner{}, false, fmt.Errorf("read runner policy: %w", err)
 	}
+	tenantsRaw, err := d.rdb.HGet(ctx, d.keys.runnerTenants, runnerID).Result()
+	if errors.Is(err, redis.Nil) {
+		tenantsRaw = ""
+	} else if err != nil {
+		return redisClaimRunner{}, false, fmt.Errorf("read runner tenants: %w", err)
+	}
 	var capabilities []protocol.Capability
 	if err := json.Unmarshal([]byte(capabilitiesRaw), &capabilities); err != nil {
 		return redisClaimRunner{}, false, fmt.Errorf("decode runner capabilities: %w", err)
@@ -611,7 +640,13 @@ func (d *RedisRunnerDirectory) runnerForClaim(ctx context.Context, runnerID stri
 	if err := json.Unmarshal([]byte(policyRaw), &policy); err != nil {
 		return redisClaimRunner{}, false, fmt.Errorf("decode runner policy: %w", err)
 	}
-	return redisClaimRunner{sessionID: sessionID, capabilities: capabilities, policy: policy}, true, nil
+	tenants := normalizeRunnerTenants(nil)
+	if tenantsRaw != "" {
+		if err := json.Unmarshal([]byte(tenantsRaw), &tenants); err != nil {
+			return redisClaimRunner{}, false, fmt.Errorf("decode runner tenants: %w", err)
+		}
+	}
+	return redisClaimRunner{sessionID: sessionID, capabilities: capabilities, policy: policy, tenants: tenants}, true, nil
 }
 
 // ReclaimExpiredClaims returns expired unfinalized claims to the durable
@@ -634,7 +669,7 @@ func (d *RedisRunnerDirectory) ReclaimExpiredClaims(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("recover expired redis claims: %w", err)
 	}
-	d.observeClaimReclaimed(int(reclaimed))
+	d.observeClaimReclaimed(ctx, int(reclaimed))
 	return nil
 }
 
@@ -670,6 +705,21 @@ func runnerSessionStatusError(status string) error {
 	}
 }
 
+func canServeTenant(tenants []tenant.TenantID, t tenant.TenantID) bool {
+	if len(tenants) == 0 {
+		return t == tenant.DefaultTenant || t == ""
+	}
+	if t == "" {
+		t = tenant.DefaultTenant
+	}
+	for _, allowed := range tenants {
+		if allowed == t {
+			return true
+		}
+	}
+	return false
+}
+
 const redisRegisterRunnerLua = `
 local claims = redis.call('HKEYS', KEYS[8])
 for _, claimID in ipairs(claims) do
@@ -690,7 +740,7 @@ for _, claimID in ipairs(claims) do
     redis.call('HDEL', KEYS[7], claimID)
     redis.call('HDEL', KEYS[8], claimID)
     redis.call('HDEL', KEYS[9], claimID)
-    redis.call('ZREM', KEYS[18], claimID)
+    redis.call('ZREM', KEYS[19], claimID)
   end
 end
 local states = redis.call('HGETALL', KEYS[3])
@@ -707,8 +757,9 @@ redis.call('HSETNX', KEYS[13], ARGV[1], '0')
 redis.call('HSET', KEYS[14], ARGV[1], ARGV[4])
 redis.call('HSET', KEYS[15], ARGV[1], ARGV[5])
 redis.call('HSET', KEYS[16], ARGV[1], ARGV[6])
+redis.call('HSET', KEYS[17], ARGV[1], ARGV[7])
 redis.call('HSET', KEYS[10], ARGV[1], '0')
-redis.call('HSETNX', KEYS[17], ARGV[1], '0')
+redis.call('HSETNX', KEYS[18], ARGV[1], '0')
 return 'registered'
 `
 

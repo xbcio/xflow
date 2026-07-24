@@ -3,6 +3,8 @@ package types
 import (
 	"context"
 	"time"
+
+	"github.com/xbcio/xflow/backend/tenant"
 )
 
 // DescriptorProvider provides type identity, credential declarations, and schema
@@ -71,7 +73,9 @@ type Input struct {
 	Timeout     time.Duration // zero means no limit
 
 	// credential resolver injected by the engine; accessed via Credential().
-	credential func(name string) map[string]any
+	credential func(tenant tenant.TenantID, name string) map[string]any
+	// tenant scopes the credential resolver to the execution's tenant.
+	tenant tenant.TenantID
 }
 
 // Credential returns the credential values for the given name.
@@ -81,13 +85,19 @@ func (n *Input) Credential(name string) map[string]any {
 	if n.credential == nil {
 		return nil
 	}
-	return n.credential(name)
+	return n.credential(n.tenant, name)
 }
 
 // SetCredentialResolver sets the credential resolver function.
-// Called by engine implementations before Execute is invoked.
-func (n *Input) SetCredentialResolver(fn func(name string) map[string]any) {
+// Called by engine implementations before Execute is invoked. The resolver is
+// tenant-scoped; the tenant is bound separately via SetTenant.
+func (n *Input) SetCredentialResolver(fn func(tenant tenant.TenantID, name string) map[string]any) {
 	n.credential = fn
+}
+
+// SetTenant scopes the credential resolver to the given tenant.
+func (n *Input) SetTenant(t tenant.TenantID) {
+	n.tenant = t
 }
 
 // Output is the result produced by a node handler.

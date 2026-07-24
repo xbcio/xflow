@@ -182,7 +182,7 @@ func grpcTransportInfo(ctx context.Context) TransportInfo {
 // runnerStatus maps transport-agnostic Core sentinel errors to gRPC status codes.
 func runnerStatus(err error) error {
 	switch {
-	case errors.Is(err, ErrRunnerIDRequired), errors.Is(err, ErrRunnerSessionRequired), errors.Is(err, ErrConcurrencyRequired), errors.Is(err, ErrLeaseRequired):
+	case errors.Is(err, ErrRunnerIDRequired), errors.Is(err, ErrRunnerSessionRequired), errors.Is(err, ErrConcurrencyRequired), errors.Is(err, ErrInvalidTenant), errors.Is(err, ErrLeaseRequired):
 		return status.Error(codes.InvalidArgument, err.Error())
 	case errors.Is(err, ErrRunnerSessionStale):
 		return status.Error(codes.FailedPrecondition, err.Error())

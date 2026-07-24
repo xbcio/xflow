@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/types"
 )
 
 func (s *Store) CreateSubExecution(ctx context.Context, sub *engine.SubExecution) error {
-	key := fmt.Sprintf("xflow:exec:{%s}:subs:%s", sub.ParentExecID, sub.ParentNode)
+	t := tenant.FromContext(ctx)
+	key := subExecutionKey(t, sub.ParentExecID, sub.ParentNode)
 	data, err := json.Marshal(sub)
 	if err != nil {
 		return fmt.Errorf("marshal sub-execution %q/%q: %w", sub.ParentExecID, sub.ParentNode, err)
@@ -29,7 +31,8 @@ func (s *Store) CreateSubExecution(ctx context.Context, sub *engine.SubExecution
 }
 
 func (s *Store) CompleteSubExecution(ctx context.Context, parentExecID types.ExecutionID, parentNode string, childExecID types.ExecutionID, status types.ExecutionStatus, result map[string]any) (bool, error) {
-	key := fmt.Sprintf("xflow:exec:{%s}:subs:%s", parentExecID, parentNode)
+	t := tenant.FromContext(ctx)
+	key := subExecutionKey(t, parentExecID, parentNode)
 
 	sub := &engine.SubExecution{
 		ParentExecID: parentExecID,
@@ -72,7 +75,8 @@ func (s *Store) CompleteSubExecution(ctx context.Context, parentExecID types.Exe
 }
 
 func (s *Store) GetSubExecutionResults(ctx context.Context, parentExecID types.ExecutionID, parentNode string) ([]map[string]any, error) {
-	key := fmt.Sprintf("xflow:exec:{%s}:subs:%s", parentExecID, parentNode)
+	t := tenant.FromContext(ctx)
+	key := subExecutionKey(t, parentExecID, parentNode)
 	all, err := s.rdb.HGetAll(ctx, key).Result()
 	if err != nil {
 		return nil, err

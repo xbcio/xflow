@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
 	"github.com/xbcio/xflow/node"
@@ -491,7 +492,7 @@ func TestDatabaseActionErrorParityServerRunnerProductionWiring(t *testing.T) {
 				_ = pool.Close(ctx)
 			})
 			cred := tc.cred
-			resolver := func(name string) map[string]any { return cred[name] }
+			resolver := func(tenant tenant.TenantID, name string) map[string]any { return cred[name] }
 
 			out := runParityServerRunnerWithPool(t, addr, def, register, pool, resolver)
 
@@ -512,7 +513,7 @@ func TestDatabaseActionErrorParityServerRunnerProductionWiring(t *testing.T) {
 // installs a ResourcePool and CredentialResolver on the runnersvc.Config,
 // exercising the production wiring path. The register callback installs the
 // real (unwrapped) handler into the execution.Registry.
-func runParityServerRunnerWithPool(t *testing.T, addr string, def *types.WorkflowDef, register func(engine.HandlerRegistrar), pool types.ResourcePool, resolver func(name string) map[string]any) ParityOutcome {
+func runParityServerRunnerWithPool(t *testing.T, addr string, def *types.WorkflowDef, register func(engine.HandlerRegistrar), pool types.ResourcePool, resolver func(tenant tenant.TenantID, name string) map[string]any) ParityOutcome {
 	t.Helper()
 	h := newServerRunnerHarness(t, addr, 1)
 	if len(def.Nodes) == 0 {

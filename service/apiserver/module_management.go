@@ -36,8 +36,24 @@ func (m *managementModule) Name() string { return "management" }
 
 func (m *managementModule) RegisterHTTP(mux *http.ServeMux) {
 	mux.HandleFunc("/v1/management/leader", m.handleLeader)
-	mux.HandleFunc("/v1/management/runners/", m.handleRunner)       // /v1/management/runners/{id}
-	mux.HandleFunc("/v1/management/executions/", m.handleExecution)  // /v1/management/executions/{id}
+	mux.HandleFunc("/v1/management/runners/", m.handleRunner) // /v1/management/runners/{id}
+	// Tenant boundary (Task 7.3): the execution-inspect route is mounted
+	// behind the B3 authz wrapper when a PrincipalAuthenticator is configured
+	// so the verified principal's TenantID is injected into the request
+	// context. Inspect then reads from the principal's tenant namespace
+	// (xflow:t<tenant>:exec:{<id>}); a cross-tenant execID resolves to
+	// not-found → 404, which is the IDOR defense and does not leak existence.
+	// When PrincipalAuth is nil (dev / behind an external gateway) the route
+	// is served directly and the tenant defaults to tenant.DefaultTenant.
+	if m.principalAuth != nil {
+		mux.HandleFunc("/v1/management/executions/", m.authzWrap(OpManagementRead, false, m.handleExecution, func(r *http.Request) (string, string, string, string) {
+			id := strings.TrimPrefix(r.URL.Path, "/v1/management/executions/")
+			id = strings.Trim(id, "/")
+			return "management/execution/" + id, "", id, ""
+		}))
+	} else {
+		mux.HandleFunc("/v1/management/executions/", m.handleExecution)
+	}
 	mux.HandleFunc("/v1/management/dead-letters/", m.handleDeadLetters)
 	mux.HandleFunc("/healthz", m.handleHealthz)
 	mux.HandleFunc("/readyz", m.handleReadyz)
@@ -171,12 +187,12 @@ func (m *managementModule) handleDeadLetters(w http.ResponseWriter, r *http.Requ
 
 	switch {
 	case len(parts) == 1 && r.Method == http.MethodGet:
-		m.authzWrap(OpDeadLetterList, false, m.handleDeadLetterList, func(*http.Request) (string, string, string) {
-			return resource, "", execID
+		m.authzWrap(OpDeadLetterList, false, m.handleDeadLetterList, func(*http.Request) (string, string, string, string) {
+			return resource, "", execID, ""
 		})(w, r)
 	case len(parts) == 2 && parts[1] == "replay" && r.Method == http.MethodPost:
-		m.authzWrap(OpDeadLetterReplay, true, m.handleDeadLetterReplay, func(*http.Request) (string, string, string) {
-			return resource, "", execID
+		m.authzWrap(OpDeadLetterReplay, true, m.handleDeadLetterReplay, func(*http.Request) (string, string, string, string) {
+			return resource, "", execID, ""
 		})(w, r)
 	default:
 		writeError(w, http.StatusNotFound, "route not found")
@@ -188,6 +204,16 @@ func (m *managementModule) handleDeadLetterList(w http.ResponseWriter, r *http.R
 	mgr, err := m.deadLetterManager()
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "dead-letter backend unavailable")
+		return
+	}
+	// IDOR defense (Task 7.3): confirm the execution belongs to the caller's
+	// tenant before listing its dead-letters. The authz wrapper injected the
+	// principal's TenantID into r.Context(), so Inspect is tenant-scoped: a
+	// cross-tenant execID resolves to not-found → 404, never leaking that the
+	// execution exists in another tenant. This matches the executions/ endpoint
+	// behavior and the design §5.1 requirement (404, not 403).
+	if _, err := m.eng.Inspect(r.Context(), types.ExecutionID(execID)); err != nil {
+		writeEngineError(w, err)
 		return
 	}
 	q := r.URL.Query()
@@ -227,6 +253,13 @@ func (m *managementModule) handleDeadLetterReplay(w http.ResponseWriter, r *http
 	}
 	if req.EntryID == "" || req.Reason == "" {
 		writeError(w, http.StatusBadRequest, "entry_id and reason are required")
+		return
+	}
+	// IDOR defense (Task 7.3): confirm the execution belongs to the caller's
+	// tenant before replaying one of its dead-letters. Tenant-scoped via the
+	// authz-injected context; cross-tenant execID → 404 (no existence leak).
+	if _, err := m.eng.Inspect(r.Context(), types.ExecutionID(execID)); err != nil {
+		writeEngineError(w, err)
 		return
 	}
 	// Principal is server-injected by the authz wrapper; the operator is taken

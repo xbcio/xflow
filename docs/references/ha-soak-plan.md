@@ -21,20 +21,21 @@ B2 soak 需要**真实**分布式环境，非单机可完整覆盖：
 | Graceful shutdown（Resign + unbind） | ✅ | `service/apiserver/run.go` + `service/control/controlplane.go:Shutdown` |
 | Health/readiness/leader 端点 | ✅ | `module_management.go`，`--management` 启用，`/v1/management/*` 由 `ManagementAuthMiddleware` 门控 |
 | Redis key cluster-ready（hash tag） | ✅ | `backend/distributed/internal/rstate/keys.go` 全部 key 用 `{id}` hash tag |
-| **Redis HA 客户端（sentinel/cluster）** | ❌ 待办 | `backend/distributed/backend.go:239` 仅 `redis.NewClient`，无 `NewFailoverClient`/`NewClusterClient`；asynq transport 同样单节点 |
-| **Soak 框架 / 故障注入** | ❌ 待办 | 现有可靠性测试为手动注入（`test/integration/`），无系统化 soak |
+| **Redis HA 客户端（sentinel/cluster）** | ✅ 代码完成 | Task 1.1–4.1：`redis.UniversalClient` 宽化 + `RedisConfig`（single/sentinel/cluster）+ `WithRedisConfig` Option + asynq `AsAsynqConnOpt` 三模式映射 + `cmd/server --redis-mode` flag + `apiserver.Config.RedisConfig` 透传 + sentinel 认证字段（commits `9a39996`..`c292d7d`）。**真实 sentinel/cluster 环境连通性/failover 验收仍 ENV-GATED**（见 §3） |
+| **Soak 框架 / 故障注入** | ✅ 代码完成 | Task 5.1–5.3：in-process harness + 7 故障注入器（leader kill/restart 真实执行；RedisFailover/NetworkPartition/RunnerKill/ReportResponseLoss/OutboxFlushFail 后 5 类返回 `ErrEnvGated`）+ SLO 报告类型 + 报告模板（commits `dc13301`..`065974a`）。**填实报告仍 ENV-GATED** |
 
-## 3. Redis HA 客户端改造（待办）
+## 3. Redis HA 客户端改造（代码完成，验收 ENV-GATED）
 
-当前 `redis.NewClient(&redis.Options{Addr: addr})` 是单节点。数据模型已 cluster-ready（hash tag 使 key 共置），但客户端层不支持 sentinel/cluster。
+代码层改造已完成（Task 1.1–4.1，commits `9a39996`..`c292d7d`）：
+1. ✅ `backend/distributed/backend.go:New` — 已接受 `redis.UniversalClient`（Task 1.1 宽化 rdb 类型 + Task 1.2 `RedisConfig`（single/sentinel/cluster）+ `WithRedisConfig` Option）。
+2. ✅ `backend/distributed/internal/queue/asynq/transport.go` — asynq transport 已接 `RedisConnOpt`，经 `AsAsynqConnOpt` 三模式映射（Task 3.1）。
+3. ✅ `cmd/server/main.go` — `--redis-mode` flag + `apiserver.Config.RedisConfig` 透传 + sentinel 认证字段（Task 4.1）。
+4. ✅ `RedisLeaderElector`、`workflowreg`、`triggerRuntime` 均使用注入的 client。`workflowreg` 的 key 已加 `{<key>}` hash tag 使 bykey/byid 共置同 slot（G2 Phase 2 Task 2.1，cluster-safe）；`triggerRuntime` 单 key 操作无需 hash tag（G2 Phase 2 Task 2.2 核查确认）。
 
-改造范围：
-1. `backend/distributed/backend.go:New` — 接受 `redis.UniversalClient` 或 sentinel 配置，替代 `redis.NewClient`。
-2. `backend/distributed/internal/queue/asynq/transport.go` — asynq 的 `RedisConnOpt` 需支持 sentinel/cluster（asynq 支持 `asynq.RedisFailoverClientOpt` / `asynq.RedisClusterClientOpt`）。
-3. `cmd/server/main.go` — 新增 `--redis-sentinel-master` / `--redis-cluster` flag，区分单节点/sentinel/cluster 模式。
-4. `RedisLeaderElector`、`workflowreg`、`triggerRuntime` 均使用注入的 client。`workflowreg` 的 key 已加 `{<key>}` hash tag 使 bykey/byid 共置同 slot（G2 Phase 2 Task 2.1，cluster-safe）；`triggerRuntime` 命名空间 cluster-safety 见 G2 Phase 2 Task 2.2。
-
-验收：sentinel 模式下主从切换期间 leader election 在 TTL 内转移；cluster 模式下 hash tag 保证 key 共置不触发 CROSSSLOT 错误。
+**仍 ENV-GATED**（miniredis 不能模拟）：
+- sentinel 模式下主从切换期间 leader election 在 TTL 内转移；
+- cluster 模式下 hash tag 保证 key 共置不触发 CROSSSLOT 错误（真实 cluster 回归）；
+- single/sentinel/cluster 三模式连通性 + failover 行为验收。
 
 ## 4. 故障矩阵
 
@@ -100,8 +101,8 @@ soak 在此基线上扩展为多副本 + Redis HA + 长时间运行的故障矩�
 
 B2 完成须产出：
 
-- [ ] Redis HA 客户端（sentinel/cluster）改造并通过单节点/sentinel/cluster 三种模式测试
-- [ ] soak 报告：故障矩阵（§4）、注入时刻、重复 delivery/commit outcome、恢复时间
-- [ ] SLO 量化报告（§6）
-- [ ] HA 边界声明：明确 control-plane HA 的承诺与不承诺（不承诺 exactly-once）
-- [ ] 业务幂等验证：重复 invocation 下副作用只产生一次的证据
+- [x] Redis HA 客户端（sentinel/cluster）代码改造完成（Task 1.1–4.1，commits `9a39996`..`c292d7d`）— single/sentinel/cluster 三模式真实环境连通性验收 **ENV-GATED**
+- [ ] soak 报告：故障矩阵（§4）、注入时刻、重复 delivery/commit outcome、恢复时间 — 框架与模板已就绪（Task 5.1–5.3），填实报告 **ENV-GATED**
+- [ ] SLO 量化报告（§6）— 采集代码已就绪（Task 5.3），量化数据 **ENV-GATED**
+- [x] HA 边界声明：明确 control-plane HA 的承诺与不承诺（不承诺 exactly-once）— 见 [RELEASE-GATES.md](../design/RELEASE-GATES.md) §2 G2 段「G2 control-plane HA 承诺与边界声明」
+- [ ] 业务幂等验证：重复 invocation 下副作用只产生一次的证据 — 采集位已就绪（Task 5.2/5.3），真实样本 **ENV-GATED**

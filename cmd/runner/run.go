@@ -18,6 +18,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
 	_ "github.com/xbcio/xflow/node"
@@ -57,6 +58,8 @@ type runnerConfig struct {
 	capabilities      []protocol.Capability
 	labelRaw          []string
 	labels            map[string]string
+	tenantRaw         []string
+	tenants           []tenant.TenantID
 	heartbeatInterval string
 	pollWait          string
 	// token is the runner's bearer token (matched against the server's
@@ -112,6 +115,7 @@ func bindRunnerFlags(cmd *cobra.Command, cfg *runnerConfig) {
 	cmd.Flags().IntVar(&cfg.concurrency, "concurrency", cfg.concurrency, "Runner concurrency")
 	cmd.Flags().StringVar(&cfg.capRaw, "cap", cfg.capRaw, "Comma-separated node type capabilities")
 	cmd.Flags().StringArrayVar(&cfg.labelRaw, "label", cfg.labelRaw, "Runner label as key=value; repeatable")
+	cmd.Flags().StringArrayVar(&cfg.tenantRaw, "tenant", cfg.tenantRaw, "Tenant this runner serves; repeatable (default: default)")
 	cmd.Flags().StringVar(&cfg.heartbeatInterval, "heartbeat-interval", cfg.heartbeatInterval, "Heartbeat interval")
 	cmd.Flags().StringVar(&cfg.pollWait, "poll-wait", cfg.pollWait, "Poll wait duration when no task is available")
 	cmd.Flags().StringVar(&cfg.token, "token", cfg.token, "Runner bearer token (prefer XFLOW_RUNNER_TOKEN env)")
@@ -294,17 +298,20 @@ func runnerServiceConfig(cfg runnerConfig) (runnersvc.Config, error) {
 		Capabilities: cfg.capabilities,
 		PollWait:     pollWait,
 		Tracer:       cfg.tracer,
+		Tenants:      cfg.tenants,
 	}
 	if shouldConstructPool(cfg) {
 		svcCfg.ResourcePool = resource.NewDefaultResourcePool(poolCfg)
 	}
 	if len(cfg.credentials) > 0 {
 		// Capture credentials in the closure; never log or surface in errors.
-		// The resolver is a pure lookup keyed by name. input.Credential returns
-		// the map verbatim, matching the cred["dsn"]/cred["driver"] access
-		// pattern in node/internal/action/database.go.
+		// The config currently stores credentials as map[name]map[key]value,
+		// so the resolver looks up by credential name only. Per-tenant credential
+		// namespaces are not supported by the current YAML schema; the
+		// tenant argument is kept because the runner service hook is already in
+		// place and future config work only needs to update this closure.
 		creds := cfg.credentials
-		svcCfg.CredentialResolver = func(name string) map[string]any {
+		svcCfg.CredentialResolver = func(t tenant.TenantID, name string) map[string]any {
 			return creds[name]
 		}
 	}

@@ -9,6 +9,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -42,7 +43,7 @@ func TestUpsertNodeIndexesLeaseAndUnsindexesOnTerminal(t *testing.T) {
 		t.Fatalf("UpsertNode() error = %v", err)
 	}
 	// The lease is 1500ms past deadline; it should be visible in the index.
-	got, err := rdb.ZScore(ctx, leaseExpiryZSetKey("e1"), leaseExpiryMember("e1", "n")).Result()
+	got, err := rdb.ZScore(ctx, leaseExpiryZSetKey(tenant.DefaultTenant, "e1"), leaseExpiryMember("e1", "n")).Result()
 	if err != nil {
 		t.Fatalf("ZScore() error = %v", err)
 	}
@@ -66,7 +67,7 @@ func TestUpsertNodeIndexesLeaseAndUnsindexesOnTerminal(t *testing.T) {
 	if err := state.UpsertNode(ctx, &term); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := rdb.ZScore(ctx, leaseExpiryZSetKey("e1"), leaseExpiryMember("e1", "n")).Result(); err != redis.Nil {
+	if _, err := rdb.ZScore(ctx, leaseExpiryZSetKey(tenant.DefaultTenant, "e1"), leaseExpiryMember("e1", "n")).Result(); err != redis.Nil {
 		t.Fatalf("terminal upsert did not drop index entry: %v", err)
 	}
 }
@@ -103,17 +104,17 @@ func TestRevokeLeaseAtomicallyRollsBackWhenTokenMatches(t *testing.T) {
 		t.Fatalf("RevokeLease(matching) ok=%v err=%v", ok, err)
 	}
 	// Node should be back to pending, index cleared, token blanked.
-	status, err := rdb.Get(ctx, nodeStatusKey("e1", "n")).Result()
+	status, err := rdb.Get(ctx, nodeStatusKey(tenant.DefaultTenant, "e1", "n")).Result()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if status != string(types.NodeStatusPending) {
 		t.Fatalf("status after revoke = %q, want pending", status)
 	}
-	if _, err := rdb.ZScore(ctx, leaseExpiryZSetKey("e1"), leaseExpiryMember("e1", "n")).Result(); err != redis.Nil {
+	if _, err := rdb.ZScore(ctx, leaseExpiryZSetKey(tenant.DefaultTenant, "e1"), leaseExpiryMember("e1", "n")).Result(); err != redis.Nil {
 		t.Fatalf("index entry not cleared: %v", err)
 	}
-	tok, _ := rdb.HGet(ctx, nodeMetaKey("e1", "n"), "lease_token").Result()
+	tok, _ := rdb.HGet(ctx, nodeMetaKey(tenant.DefaultTenant, "e1", "n"), "lease_token").Result()
 	if tok != "" {
 		t.Fatalf("lease_token = %q, want empty", tok)
 	}
@@ -126,10 +127,10 @@ func TestRevokeLeaseLosesRaceToConcurrentCommit(t *testing.T) {
 	mustUpsertRunning(t, state, "e1", "n", "tok-1", issued, time.Second)
 
 	// Simulate a runner commit having already flipped status + cleared token.
-	if err := rdb.Set(ctx, nodeStatusKey("e1", "n"), string(types.NodeStatusCommitting), time.Minute).Err(); err != nil {
+	if err := rdb.Set(ctx, nodeStatusKey(tenant.DefaultTenant, "e1", "n"), string(types.NodeStatusCommitting), time.Minute).Err(); err != nil {
 		t.Fatal(err)
 	}
-	if err := rdb.HSet(ctx, nodeMetaKey("e1", "n"), "lease_token", "").Err(); err != nil {
+	if err := rdb.HSet(ctx, nodeMetaKey(tenant.DefaultTenant, "e1", "n"), "lease_token", "").Err(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -149,7 +150,7 @@ func TestListExpiredLeasesPrunesStaleIndexEntries(t *testing.T) {
 	// Insert a bare ZSET member without a corresponding node status — simulates
 	// a crashed / TTL'd node where the status expired but the index lingered.
 	past := time.Now().Add(-time.Minute)
-	if err := rdb.ZAdd(ctx, leaseExpiryZSetKey("e1"), redis.Z{
+	if err := rdb.ZAdd(ctx, leaseExpiryZSetKey(tenant.DefaultTenant, "e1"), redis.Z{
 		Score: float64(past.UnixMilli()), Member: leaseExpiryMember("e1", "gone"),
 	}).Err(); err != nil {
 		t.Fatal(err)
@@ -163,7 +164,7 @@ func TestListExpiredLeasesPrunesStaleIndexEntries(t *testing.T) {
 		t.Fatalf("expired = %+v, want empty", expired)
 	}
 	// And the stale member should be pruned.
-	if _, err := rdb.ZScore(ctx, leaseExpiryZSetKey("e1"), leaseExpiryMember("e1", "gone")).Result(); err != redis.Nil {
+	if _, err := rdb.ZScore(ctx, leaseExpiryZSetKey(tenant.DefaultTenant, "e1"), leaseExpiryMember("e1", "gone")).Result(); err != redis.Nil {
 		t.Fatalf("stale index entry not pruned: %v", err)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -50,7 +51,7 @@ func TestRedisOutboxFailureTracksAttemptsAndDeadLetters(t *testing.T) {
 	if entries, err := state.ListOutbox(ctx, id, time.Now().Add(time.Second), 2); err != nil || len(entries) != 0 {
 		t.Fatalf("outbox after dead letter entries=%+v err=%v, want empty", entries, err)
 	}
-	if _, err := rdb.HGet(ctx, outboxDeadBodyKey(id), entry.ID).Result(); err != nil {
+	if _, err := rdb.HGet(ctx, outboxDeadBodyKey(tenant.DefaultTenant, id), entry.ID).Result(); err != nil {
 		t.Fatalf("dead-letter body missing: %v", err)
 	}
 	final, err := state.OutboxMetrics(ctx)

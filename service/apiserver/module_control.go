@@ -72,9 +72,9 @@ func (m *workflowControlModule) registerAuthzRoutes(mux *http.ServeMux) {
 	authz := m.authzWrap
 	mux.HandleFunc("/v1/workflows", authz(OpWorkflowCreate, true, m.handleSubmitWorkflow, nil))
 	mux.HandleFunc("/v1/workflows/invoke", authz(OpWorkflowInvoke, true, m.handleInvoke, nil))
-	mux.HandleFunc("/v1/executions/", authz(OpExecutionRead, false, m.handleExecution, func(r *http.Request) (string, string, string) {
+	mux.HandleFunc("/v1/executions/", authz(OpExecutionRead, false, m.handleExecution, func(r *http.Request) (string, string, string, string) {
 		_, execID := splitExecutionPath(r.URL.Path)
-		return "execution", "", execID
+		return "execution", "", execID, ""
 	}))
 }
 
@@ -384,6 +384,10 @@ func requireMethod(w http.ResponseWriter, r *http.Request, method string) bool {
 // other failure is collapsed to a generic 500 message — the underlying error
 // (Redis text, internal paths, backend details) must never reach a client.
 func writeEngineError(w http.ResponseWriter, err error) {
+	if errors.Is(err, engine.ErrExecutionInactive) {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
 	if strings.Contains(strings.ToLower(err.Error()), "not found") {
 		writeError(w, http.StatusNotFound, err.Error())
 		return

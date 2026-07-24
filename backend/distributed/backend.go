@@ -274,10 +274,8 @@ func New(redisAddr string, db store.Store, opts ...Option) (*Backend, error) {
 
 	// Default to the Asynq transport; WithTransport can inject an alternative.
 	// If a RedisConfig was injected, map it to the corresponding asynq HA
-	// connection option (single/sentinel/cluster). Otherwise keep the legacy
-	// single-address string path. If RedisConfig was injected but no redisAddr
-	// was supplied, fall back to the first configured address so the legacy
-	// string path still has a bootstrap endpoint.
+	// connection option (single/sentinel/cluster) and use NewWithConnOpt.
+	// Otherwise keep the legacy single-address string path via New(redisAddr).
 	transport := cfg.transport
 	if transport == nil {
 		var topts []asynqtransport.Option

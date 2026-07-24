@@ -20,13 +20,17 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
+	"github.com/xbcio/xflow/backend/distributed"
 	"github.com/xbcio/xflow/engine"
 	obslogger "github.com/xbcio/xflow/observability/logger"
 	"github.com/xbcio/xflow/observability/metrics"
@@ -44,6 +48,25 @@ type serverConfig struct {
 	redis       string
 	memory      bool
 	concurrency int
+	// redisMode selects the Redis deployment topology: single (default),
+	// sentinel, or cluster.
+	redisMode string
+	// redisSentinelMaster is the name of the Redis master monitored by sentinels.
+	redisSentinelMaster string
+	// redisClusterAddrs is a comma-separated list of Redis cluster node addresses.
+	redisClusterAddrs string
+	// redisSentinelAddrs is a comma-separated list of Sentinel node addresses.
+	redisSentinelAddrs string
+	redisUsername      string
+	redisPassword      string
+	// redisSentinelUsername and redisSentinelPassword allow sentinel deployments
+	// to use ACL credentials that differ from the Redis master credentials.
+	// When empty, they fall back to redisUsername/redisPassword for backwards
+	// compatibility with shared-credentials setups.
+	redisSentinelUsername string
+	redisSentinelPassword string
+	redisDB               int
+	redisTLS              bool
 	// authPolicy is the path to runners.yaml. Empty means DisabledAuthenticator
 	// (dev / MVP behavior).
 	authPolicy string
@@ -52,8 +75,16 @@ type serverConfig struct {
 	authDryRun bool
 	// apiAuthToken, when non-empty, enables BearerTokenAuth on the workflow/
 	// control API (/v1/workflows, /v1/executions/*). The same token must be
-	// supplied by callers in the Authorization: Bearer <token> header.
+	// supplied by callers in the Authorization: Bearer <token> header. When set
+	// the token is mapped to a principal in tenant.DefaultTenant (single-tenant
+	// compatibility). For multi-tenant operation use --auth-tokens-file.
 	apiAuthToken string
+	// authTokensFile, when non-empty, loads a JSON array of token→principal
+	// mappings (see apiserver.TokenPrincipalMapping) so each token binds to its
+	// own (subject, tenant, scopes). This is the multi-tenant path (design §2.3
+	// scheme A). When set it takes precedence over --api-auth-token. The file
+	// contains sensitive bearer tokens: it must be 0600 and never logged.
+	authTokensFile string
 	// requireAPIAuth causes the server to fail to start if no workflow API
 	// authenticator is configured. Use in production to prevent accidentally
 	// serving the workflow API without authentication.
@@ -102,12 +133,23 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	cfg := serverConfig{addr: ":8080", concurrency: 10}
 	fs.StringVar(&cfg.addr, "addr", cfg.addr, "HTTP listen address")
 	fs.StringVar(&cfg.grpcAddr, "grpc-addr", "", "gRPC Runner Protocol listen address (empty disables gRPC)")
-	fs.StringVar(&cfg.redis, "redis", "", "Redis address for Asynq backend")
+	fs.StringVar(&cfg.redis, "redis", "", "Redis address for Asynq backend (single-node; legacy compatible)")
+	fs.StringVar(&cfg.redisMode, "redis-mode", "", "Redis deployment mode: single|sentinel|cluster (default single)")
+	fs.StringVar(&cfg.redisSentinelMaster, "redis-sentinel-master", "", "Redis sentinel master name (required for --redis-mode=sentinel)")
+	fs.StringVar(&cfg.redisClusterAddrs, "redis-cluster-addrs", "", "Comma-separated Redis cluster node addresses (required for --redis-mode=cluster)")
+	fs.StringVar(&cfg.redisSentinelAddrs, "redis-sentinel-addrs", "", "Comma-separated Redis sentinel node addresses (required for --redis-mode=sentinel)")
+	fs.StringVar(&cfg.redisUsername, "redis-username", "", "Redis username (ACL)")
+	fs.StringVar(&cfg.redisPassword, "redis-password", "", "Redis password")
+	fs.StringVar(&cfg.redisSentinelUsername, "redis-sentinel-username", "", "Redis sentinel username (ACL); falls back to --redis-username if empty")
+	fs.StringVar(&cfg.redisSentinelPassword, "redis-sentinel-password", "", "Redis sentinel password; falls back to --redis-password if empty")
+	fs.IntVar(&cfg.redisDB, "redis-db", 0, "Redis logical database (single/sentinel)")
+	fs.BoolVar(&cfg.redisTLS, "redis-tls", false, "Enable TLS for Redis connections")
 	fs.BoolVar(&cfg.memory, "memory", false, "Use in-memory backend")
 	fs.IntVar(&cfg.concurrency, "concurrency", cfg.concurrency, "Queue consumer concurrency")
 	fs.StringVar(&cfg.authPolicy, "auth-policy", "", "Path to runners.yaml (empty = auth disabled)")
 	fs.BoolVar(&cfg.authDryRun, "auth-dry-run", false, "Log auth violations but let requests through (rollout aid)")
-	fs.StringVar(&cfg.apiAuthToken, "api-auth-token", "", "Static bearer token for workflow API authentication (sets Authorization: Bearer guard on /v1/workflows and /v1/executions/*)")
+	fs.StringVar(&cfg.apiAuthToken, "api-auth-token", "", "Static bearer token for workflow API authentication (sets Authorization: Bearer guard on /v1/workflows and /v1/executions/*); single-tenant → default tenant. For multi-tenant use --auth-tokens-file.")
+	fs.StringVar(&cfg.authTokensFile, "auth-tokens-file", "", "JSON file of [{token,subject,tenant,scopes}] mappings; each token binds to its own tenant (multi-tenant). Takes precedence over --api-auth-token. File must be 0600.")
 	fs.BoolVar(&cfg.requireAPIAuth, "require-api-auth", false, "Fail to start if no workflow API authenticator is configured (production fail-closed)")
 	fs.BoolVar(&cfg.management, "management", false, "Enable ops management module (/healthz /readyz /v1/management/*); /v1/management/* gated by --api-auth-token")
 	fs.StringVar(&cfg.tlsCert, "tls-cert", "", "Path to server TLS certificate (enables TLS)")
@@ -135,10 +177,122 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	default:
 		return serverConfig{}, fmt.Errorf("--trace must be one of: disabled|stdout|otlp")
 	}
-	if cfg.redis == "" {
+	switch cfg.redisMode {
+	case "", distributed.RedisModeSingle, distributed.RedisModeSentinel, distributed.RedisModeCluster:
+		// valid
+	default:
+		return serverConfig{}, fmt.Errorf("--redis-mode must be one of: single|sentinel|cluster")
+	}
+	// Backwards compatibility: when no Redis address and no HA topology flags
+	// are provided, default to the in-memory backend.
+	haConfigured := cfg.redisMode != "" || cfg.redisSentinelAddrs != "" || cfg.redisClusterAddrs != ""
+	if cfg.redis == "" && !haConfigured {
 		cfg.memory = true
 	}
 	return cfg, nil
+}
+
+// buildRedisConfig assembles a distributed.RedisConfig from CLI flags. It
+// returns nil when the legacy single-address path should be used, preserving
+// backwards compatibility for deployments that only pass --redis. It is
+// fail-closed: invalid mode/address combinations return an error.
+func buildRedisConfig(cfg serverConfig) (*distributed.RedisConfig, error) {
+	mode := cfg.redisMode
+	if mode == "" {
+		mode = distributed.RedisModeSingle
+	}
+
+	// If only --redis is provided (no HA-specific flags), keep the legacy
+	// RedisAddr path so existing deployments are untouched.
+	haConfigured := cfg.redisMode != "" ||
+		cfg.redisSentinelAddrs != "" ||
+		cfg.redisClusterAddrs != "" ||
+		cfg.redisSentinelMaster != "" ||
+		cfg.redisUsername != "" ||
+		cfg.redisPassword != "" ||
+		cfg.redisSentinelUsername != "" ||
+		cfg.redisSentinelPassword != "" ||
+		cfg.redisDB != 0 ||
+		cfg.redisTLS
+
+	// Sentinel deployments may use credentials that differ from the Redis
+	// master credentials. Fall back to the master credentials when the
+	// sentinel-specific flags are not supplied.
+	sentinelUsername := cfg.redisSentinelUsername
+	if sentinelUsername == "" {
+		sentinelUsername = cfg.redisUsername
+	}
+	sentinelPassword := cfg.redisSentinelPassword
+	if sentinelPassword == "" {
+		sentinelPassword = cfg.redisPassword
+	}
+
+	var rc *distributed.RedisConfig
+	switch mode {
+	case distributed.RedisModeSingle:
+		if !haConfigured {
+			return nil, nil
+		}
+		if cfg.redis != "" {
+			rc = &distributed.RedisConfig{
+				Mode:     distributed.RedisModeSingle,
+				Addrs:    []string{cfg.redis},
+				Username: cfg.redisUsername,
+				Password: cfg.redisPassword,
+				DB:       cfg.redisDB,
+			}
+		} else {
+			rc = &distributed.RedisConfig{
+				Mode:     distributed.RedisModeSingle,
+				Username: cfg.redisUsername,
+				Password: cfg.redisPassword,
+				DB:       cfg.redisDB,
+			}
+		}
+
+	case distributed.RedisModeSentinel:
+		rc = &distributed.RedisConfig{
+			Mode:             distributed.RedisModeSentinel,
+			Addrs:            splitAddrs(cfg.redisSentinelAddrs),
+			MasterName:       cfg.redisSentinelMaster,
+			Username:         cfg.redisUsername,
+			Password:         cfg.redisPassword,
+			SentinelUsername: sentinelUsername,
+			SentinelPassword: sentinelPassword,
+			DB:               cfg.redisDB,
+		}
+
+	case distributed.RedisModeCluster:
+		rc = &distributed.RedisConfig{
+			Mode:     distributed.RedisModeCluster,
+			Addrs:    splitAddrs(cfg.redisClusterAddrs),
+			Username: cfg.redisUsername,
+			Password: cfg.redisPassword,
+		}
+
+	default:
+		return nil, fmt.Errorf("unsupported redis mode %q", mode)
+	}
+
+	if cfg.redisTLS {
+		rc.TLSConfig = &tls.Config{}
+	}
+	if err := rc.Validate(); err != nil {
+		return nil, err
+	}
+	return rc, nil
+}
+
+func splitAddrs(s string) []string {
+	parts := strings.Split(s, ",")
+	addrs := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			addrs = append(addrs, p)
+		}
+	}
+	return addrs
 }
 
 func runServer(cfg serverConfig) error {
@@ -172,13 +326,27 @@ func runServer(cfg serverConfig) error {
 
 	var workflowAuth apiserver.WorkflowAuthenticator
 	var principalAuth apiserver.PrincipalAuthenticator
-	if cfg.apiAuthToken != "" {
-		workflowAuth = apiserver.NewBearerTokenAuth(cfg.apiAuthToken)
-		// B3: map the static token to a principal with the G1 single-tenant
-		// operator scopes so resource/operation authz + audit are enforced.
-		// The subject is server-configured; callers cannot self-report it.
-		principalAuth = apiserver.NewBearerPrincipalAuth(cfg.apiAuthToken, "xflow-operator",
+	if mappings, err := loadAuthTokenMappings(cfg); err != nil {
+		return err
+	} else if len(mappings) > 0 {
+		// Multi-tenant path (design §2.3 scheme A): each token binds to its
+		// own (subject, tenant, scopes). The same multi-token registry gates
+		// the outer management middleware (via WorkflowAuthenticator) and the
+		// route-level authz wrapper (via PrincipalAuthenticator). Plaintext
+		// tokens are hashed in the constructor and never retained or logged.
+		auth := apiserver.NewBearerPrincipalAuthMulti(mappings)
+		workflowAuth = auth
+		principalAuth = auth
+		log.Printf("xflow-server: multi-tenant principal auth enabled (%d token(s))", len(mappings))
+	} else if cfg.apiAuthToken != "" {
+		// B3 single-tenant: map the static token to a principal with the G1
+		// operator scopes under the default tenant so resource/operation
+		// authz + audit are enforced. The subject is server-configured;
+		// callers cannot self-report it.
+		auth := apiserver.NewBearerPrincipalAuth(cfg.apiAuthToken, "xflow-operator",
 			[]string{"workflow", "execution", "deadletter.list", "deadletter.replay", "management.read", "management.write"})
+		workflowAuth = auth
+		principalAuth = auth
 	}
 	// G1 audit projection. When --mysql-dsn is set, a durable SQL sink is the
 	// authoritative audit target (admission audit persisted before mutations,
@@ -200,8 +368,28 @@ func runServer(cfg serverConfig) error {
 		log.Println("xflow-server: WARNING --mysql-dsn not set; using in-memory store + in-memory audit (dev only; not production)")
 	}
 
+	redisConfig, err := buildRedisConfig(cfg)
+	if err != nil {
+		return fmt.Errorf("redis config: %w", err)
+	}
+
+	redisAddr := cfg.redis
+	if cfg.memory {
+		log.Println("xflow-server: using in-memory backend")
+		if redisConfig != nil || cfg.redis != "" {
+			log.Println("xflow-server: WARNING memory flag set, ignoring redis configuration")
+			redisConfig = nil
+			redisAddr = ""
+		}
+	} else if redisConfig != nil {
+		log.Printf("xflow-server: using distributed backend (mode=%s addrs=%d master=%q tls=%v db=%d)", redisConfig.Mode, len(redisConfig.Addrs), redisConfig.MasterName, redisConfig.TLSConfig != nil, redisConfig.DB)
+	} else if cfg.redis != "" {
+		log.Printf("xflow-server: using distributed backend (redis=%s)", cfg.redis)
+	}
+
 	apiCfg := apiserver.Config{
-		RedisAddr:           cfg.redis, // empty => in-memory backend
+		RedisAddr:           redisAddr, // legacy single-node path
+		RedisConfig:         redisConfig,
 		Store:               sqlStore,
 		Concurrency:         cfg.concurrency,
 		Auth:                auth,
@@ -211,7 +399,7 @@ func runServer(cfg serverConfig) error {
 		WorkflowAuth:        workflowAuth,
 		RequireWorkflowAuth: cfg.requireAPIAuth,
 		PrincipalAuth:       principalAuth,
-		Authorizer:          apiserver.ScopeAuthorizer{},
+		Authorizer:          apiserver.TenantAwareAuthorizer{},
 		AuditSink:           audit,
 		HTTPAddr:            cfg.addr,
 		GRPCAddr:            cfg.grpcAddr,
@@ -290,4 +478,52 @@ func buildAuthenticator(cfg serverConfig) (control.Authenticator, error) {
 	}
 	log.Printf("xflow-server: runner auth policy loaded from %q (%s)", cfg.authPolicy, mode)
 	return store, nil
+}
+
+// loadAuthTokenMappings resolves the multi-tenant token→principal registry
+// from --auth-tokens-file. The file is a JSON array of objects with fields
+// token, subject, tenant, scopes. It returns nil (no error) when neither
+// --auth-tokens-file nor --api-auth-token is set so the caller falls back to
+// the legacy single-token path. Plaintext tokens are read only here and hashed
+// inside NewBearerPrincipalAuthMulti; they are never logged.
+//
+// File permissions are checked: a world- or group-readable token file is
+// rejected (0600 recommended) to avoid leaking bearer tokens.
+func loadAuthTokenMappings(cfg serverConfig) ([]apiserver.TokenPrincipalMapping, error) {
+	if cfg.authTokensFile == "" {
+		return nil, nil
+	}
+	info, err := os.Stat(cfg.authTokensFile)
+	if err != nil {
+		return nil, fmt.Errorf("auth-tokens-file: %w", err)
+	}
+	if mode := info.Mode().Perm(); mode&0077 != 0 {
+		return nil, fmt.Errorf("auth-tokens-file %s is group/world readable (mode %o); chmod 0600", cfg.authTokensFile, mode)
+	}
+	data, err := os.ReadFile(cfg.authTokensFile)
+	if err != nil {
+		return nil, fmt.Errorf("auth-tokens-file: %w", err)
+	}
+	var raw []struct {
+		Token    string   `json:"token"`
+		Subject  string   `json:"subject"`
+		Tenant   string   `json:"tenant"`
+		Scopes   []string `json:"scopes"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("auth-tokens-file: invalid JSON: %w", err)
+	}
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("auth-tokens-file: no token mappings")
+	}
+	out := make([]apiserver.TokenPrincipalMapping, 0, len(raw))
+	for _, r := range raw {
+		if r.Token == "" || r.Subject == "" || r.Tenant == "" {
+			return nil, fmt.Errorf("auth-tokens-file: each mapping requires token, subject, and tenant")
+		}
+		out = append(out, apiserver.TokenPrincipalMapping{
+			Token: r.Token, Subject: r.Subject, TenantID: r.Tenant, Scopes: r.Scopes,
+		})
+	}
+	return out, nil
 }

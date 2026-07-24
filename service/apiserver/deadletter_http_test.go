@@ -72,23 +72,25 @@ func TestDeadLetterReplayDeniesMissingScope(t *testing.T) {
 }
 
 func TestDeadLetterListAllowsAndReachesBackend(t *testing.T) {
-	auth := staticPrincipalAuth{principal: Principal{Subject: "alice", Scopes: []string{"deadletter.list"}}}
+	auth := staticPrincipalAuth{principal: Principal{Subject: "alice", TenantID: "tenantA", Scopes: []string{"deadletter.list"}}}
 	audit := NewInMemoryAuditSink()
-	// The in-memory backend DOES implement DeadLetterStore (local dead-letter
-	// list returns an empty page). This proves the request passed authz and
-	// reached the manager → store, returning 200.
+	// The in-memory backend implements DeadLetterStore, but the exec does not
+	// exist in the caller's tenant. Task 7.3 IDOR defense: the handler runs a
+	// tenant-scoped Inspect before listing; a nonexistent/cross-tenant execID
+	// resolves to 404 (no existence leak). The authz wrapper still allowed the
+	// request (one allow/admitted audit event), proving the handler ran.
 	_, mux := newMgmtAuthzServer(t, auth, ScopeAuthorizer{}, audit)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/management/dead-letters/exec-1?limit=10", nil)
 	mux.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (list reached backend)", rec.Code)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 (nonexistent exec → IDOR not-found)", rec.Code)
 	}
 	events := audit.Events()
 	if len(events) != 1 || events[0].Decision != DecisionAllow || events[0].Outcome != "admitted" {
-		t.Fatalf("audit = %+v, want one allow/admitted (read path)", events)
+		t.Fatalf("audit = %+v, want one allow/admitted (authz passed, handler ran)", events)
 	}
 	if events[0].Operation != OpDeadLetterList {
 		t.Fatalf("audit operation = %q, want %q", events[0].Operation, OpDeadLetterList)
@@ -96,7 +98,7 @@ func TestDeadLetterListAllowsAndReachesBackend(t *testing.T) {
 }
 
 func TestDeadLetterReplayAllowsAndReachesBackend(t *testing.T) {
-	auth := staticPrincipalAuth{principal: Principal{Subject: "alice", Scopes: []string{"deadletter.replay"}}}
+	auth := staticPrincipalAuth{principal: Principal{Subject: "alice", TenantID: "tenantA", Scopes: []string{"deadletter.replay"}}}
 	audit := NewInMemoryAuditSink()
 	_, mux := newMgmtAuthzServer(t, auth, ScopeAuthorizer{}, audit)
 
@@ -106,11 +108,11 @@ func TestDeadLetterReplayAllowsAndReachesBackend(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	mux.ServeHTTP(rec, req)
 
-	// authz allowed → reached manager → store. With no dead-letter entry for a
-	// nonexistent execution the store returns not_found, surfaced as 200 with
-	// the outcome body (replay is idempotent; the outcome carries the verdict).
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (replay reached backend)", rec.Code)
+	// authz allowed → handler ran the tenant-scoped IDOR existence check → the
+	// nonexistent exec resolves to 404 (Task 7.3). The mutation audit records
+	// admission (admitted) + reconcile (failed, because the handler returned 404).
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 (nonexistent exec → IDOR not-found)", rec.Code)
 	}
 	events := audit.Events()
 	if len(events) != 2 {
@@ -119,9 +121,9 @@ func TestDeadLetterReplayAllowsAndReachesBackend(t *testing.T) {
 	if events[0].Outcome != "admitted" {
 		t.Fatalf("admission outcome = %q, want admitted", events[0].Outcome)
 	}
-	// The reconcile row records reconciled (handler returned 2xx).
-	if events[1].Outcome != "reconciled" {
-		t.Fatalf("reconcile outcome = %q, want reconciled", events[1].Outcome)
+	// The reconcile row records failed (handler returned 404, a non-2xx).
+	if events[1].Outcome != "failed" {
+		t.Fatalf("reconcile outcome = %q, want failed (handler returned 404)", events[1].Outcome)
 	}
 }
 

@@ -9,12 +9,13 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/types"
 )
 
-func expansionSubExecutionKey(id types.ExecutionID, nodeName string, leaseID engine.LeaseID) string {
-	return execKey(id, fmt.Sprintf("node:%s:expansion:%s:subs", nodeName, leaseID))
+func expansionSubExecutionKey(t tenant.TenantID, id types.ExecutionID, nodeName string, leaseID engine.LeaseID) string {
+	return execKey(t, id, fmt.Sprintf("node:%s:expansion:%s:subs", nodeName, leaseID))
 }
 
 // beginTaskExpansionLua converts a claimed parent into waiting without
@@ -135,6 +136,7 @@ func (s *Store) BeginTaskExpansionWithOutbox(ctx context.Context, lease *engine.
 		return false, engine.ErrInvalidLeaseToken
 	}
 	ttl := s.getExecTTL(lease.Task.ExecutionID)
+	t := tenant.FromContext(ctx)
 	args := make([]any, 0, 6+len(children)*5)
 	args = append(args, string(lease.LeaseID), string(lease.LeaseToken), lease.Attempt, lease.Task.ActivationID, int(ttl.Seconds()), len(children))
 	for index, child := range children {
@@ -157,11 +159,11 @@ func (s *Store) BeginTaskExpansionWithOutbox(ctx context.Context, lease *engine.
 		args = append(args, string(child.ChildExecID), string(childJSON), entry.ID, outboxJSON, availableAt)
 	}
 	result, err := beginTaskExpansionWithOutboxLua.Run(ctx, s.rdb, []string{
-		nodeStatusKey(lease.Task.ExecutionID, lease.Task.NodeName),
-		nodeMetaKey(lease.Task.ExecutionID, lease.Task.NodeName),
-		expansionSubExecutionKey(lease.Task.ExecutionID, lease.Task.NodeName, lease.LeaseID),
-		outboxReadyKey(lease.Task.ExecutionID),
-		outboxBodyKey(lease.Task.ExecutionID),
+		nodeStatusKey(t, lease.Task.ExecutionID, lease.Task.NodeName),
+		nodeMetaKey(t, lease.Task.ExecutionID, lease.Task.NodeName),
+		expansionSubExecutionKey(t, lease.Task.ExecutionID, lease.Task.NodeName, lease.LeaseID),
+		outboxReadyKey(t, lease.Task.ExecutionID),
+		outboxBodyKey(t, lease.Task.ExecutionID),
 	}, args...).Int64()
 	if err != nil && err != redis.Nil {
 		return false, fmt.Errorf("begin durable expansion %q/%q: %w", lease.Task.ExecutionID, lease.Task.NodeName, err)
@@ -170,12 +172,12 @@ func (s *Store) BeginTaskExpansionWithOutbox(ctx context.Context, lease *engine.
 		return false, nil
 	}
 	if err := s.refreshTransientTTL(ctx, lease.Task.ExecutionID,
-		nodeStatusKey(lease.Task.ExecutionID, lease.Task.NodeName),
-		nodeMetaKey(lease.Task.ExecutionID, lease.Task.NodeName),
-		leaseExpiryZSetKey(lease.Task.ExecutionID),
-		expansionSubExecutionKey(lease.Task.ExecutionID, lease.Task.NodeName, lease.LeaseID),
-		outboxReadyKey(lease.Task.ExecutionID),
-		outboxBodyKey(lease.Task.ExecutionID),
+		nodeStatusKey(t, lease.Task.ExecutionID, lease.Task.NodeName),
+		nodeMetaKey(t, lease.Task.ExecutionID, lease.Task.NodeName),
+		leaseExpiryZSetKey(t, lease.Task.ExecutionID),
+		expansionSubExecutionKey(t, lease.Task.ExecutionID, lease.Task.NodeName, lease.LeaseID),
+		outboxReadyKey(t, lease.Task.ExecutionID),
+		outboxBodyKey(t, lease.Task.ExecutionID),
 	); err != nil {
 		return false, err
 	}
@@ -187,9 +189,10 @@ func (s *Store) BeginTaskExpansion(ctx context.Context, lease *engine.TaskLease)
 		return false, engine.ErrInvalidLeaseToken
 	}
 	ttl := s.getExecTTL(lease.Task.ExecutionID)
+	t := tenant.FromContext(ctx)
 	result, err := beginTaskExpansionLua.Run(ctx, s.rdb, []string{
-		nodeStatusKey(lease.Task.ExecutionID, lease.Task.NodeName),
-		nodeMetaKey(lease.Task.ExecutionID, lease.Task.NodeName),
+		nodeStatusKey(t, lease.Task.ExecutionID, lease.Task.NodeName),
+		nodeMetaKey(t, lease.Task.ExecutionID, lease.Task.NodeName),
 	}, string(lease.LeaseID), string(lease.LeaseToken), lease.Attempt, lease.Task.ActivationID, int(ttl.Seconds())).Int64()
 	if err != nil && err != redis.Nil {
 		return false, fmt.Errorf("begin expansion %q/%q: %w", lease.Task.ExecutionID, lease.Task.NodeName, err)
@@ -198,9 +201,9 @@ func (s *Store) BeginTaskExpansion(ctx context.Context, lease *engine.TaskLease)
 		return false, nil
 	}
 	if err := s.refreshTransientTTL(ctx, lease.Task.ExecutionID,
-		nodeStatusKey(lease.Task.ExecutionID, lease.Task.NodeName),
-		nodeMetaKey(lease.Task.ExecutionID, lease.Task.NodeName),
-		leaseExpiryZSetKey(lease.Task.ExecutionID),
+		nodeStatusKey(t, lease.Task.ExecutionID, lease.Task.NodeName),
+		nodeMetaKey(t, lease.Task.ExecutionID, lease.Task.NodeName),
+		leaseExpiryZSetKey(t, lease.Task.ExecutionID),
 	); err != nil {
 		return false, err
 	}
@@ -216,10 +219,11 @@ func (s *Store) CreateExpandedSubExecution(ctx context.Context, lease *engine.Ta
 		return false, fmt.Errorf("marshal expansion sub-execution: %w", err)
 	}
 	ttl := s.getExecTTL(lease.Task.ExecutionID)
-	key := expansionSubExecutionKey(lease.Task.ExecutionID, lease.Task.NodeName, lease.LeaseID)
+	t := tenant.FromContext(ctx)
+	key := expansionSubExecutionKey(t, lease.Task.ExecutionID, lease.Task.NodeName, lease.LeaseID)
 	result, err := createExpandedSubExecutionLua.Run(ctx, s.rdb, []string{
-		nodeStatusKey(lease.Task.ExecutionID, lease.Task.NodeName),
-		nodeMetaKey(lease.Task.ExecutionID, lease.Task.NodeName),
+		nodeStatusKey(t, lease.Task.ExecutionID, lease.Task.NodeName),
+		nodeMetaKey(t, lease.Task.ExecutionID, lease.Task.NodeName),
 		key,
 	}, string(lease.LeaseID), string(lease.LeaseToken), lease.Attempt, lease.Task.ActivationID, string(sub.ChildExecID), string(data), int(ttl.Seconds())).Int64()
 	if err != nil && err != redis.Nil {
@@ -243,10 +247,11 @@ func (s *Store) CompleteExpandedSubExecution(ctx context.Context, lease *engine.
 		return false, false, nil, fmt.Errorf("marshal expansion result: %w", err)
 	}
 	ttl := s.getExecTTL(lease.Task.ExecutionID)
-	key := expansionSubExecutionKey(lease.Task.ExecutionID, lease.Task.NodeName, lease.LeaseID)
+	t := tenant.FromContext(ctx)
+	key := expansionSubExecutionKey(t, lease.Task.ExecutionID, lease.Task.NodeName, lease.LeaseID)
 	response, err := completeExpandedSubExecutionLua.Run(ctx, s.rdb, []string{
-		nodeStatusKey(lease.Task.ExecutionID, lease.Task.NodeName),
-		nodeMetaKey(lease.Task.ExecutionID, lease.Task.NodeName),
+		nodeStatusKey(t, lease.Task.ExecutionID, lease.Task.NodeName),
+		nodeMetaKey(t, lease.Task.ExecutionID, lease.Task.NodeName),
 		key,
 	}, string(lease.LeaseID), string(lease.LeaseToken), lease.Attempt, lease.Task.ActivationID, string(childExecID), string(status), string(resultJSON), int(ttl.Seconds())).Slice()
 	if err != nil {

@@ -121,6 +121,25 @@ func TestHTTPPollRejectsStaleSession(t *testing.T) {
 	}
 }
 
+func TestHTTPRegisterRejectsInvalidTenant(t *testing.T) {
+	fake := &fakeControlEngine{}
+	dir := NewMemoryRunnerDirectory()
+	server := httptest.NewServer(NewServer(fake, dir).Handler())
+	defer server.Close()
+
+	register := protocol.RegisterRunnerRequest{
+		RunnerID:     "runner-1",
+		Concurrency:  1,
+		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
+		Tenants:      []string{"bad:tenant"},
+	}
+	resp := postJSONRaw(t, server.URL+protocol.RegisterRunnerPath, register)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("register invalid tenant status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+	}
+}
+
 func TestHTTPRunnerSessionRequired(t *testing.T) {
 	fake := &fakeControlEngine{}
 	dir := NewMemoryRunnerDirectory()

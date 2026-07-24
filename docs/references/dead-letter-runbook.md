@@ -121,7 +121,7 @@ entry within its scan interval (default 1s). No restart is required.
 
 ## Audit & reconciliation (G1)
 
-The Redis receipt (`xflow:exec:{id}:replay:receipt:<request_id>` hash) is the
+The Redis receipt (`xflow:t<tenant>:exec:{id}:replay:receipt:<request_id>` hash) is the
 authoritative record of each replay. The SQL audit sink is a secondary
 projection; a reconciliation worker compares the two and appends `reconciled`
 outcomes for receipts missing a SQL projection without modifying the

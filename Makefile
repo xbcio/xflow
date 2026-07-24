@@ -1,5 +1,5 @@
 .PHONY: all build test test-concurrency lint fmt tidy clean run-server run-runner install-hooks proto proto-tools \
-        env-up env-down env-reset env-logs env-migrate test-integration test-integration-required test-perf perf-sample \
+        env-up env-down env-reset env-logs env-migrate test-integration test-integration-required test-perf perf-sample test-soak \
         web-install web-lint web-typecheck web-test web-check-boundaries web-build web-e2e web-generate web-ci web-all
 
 # ── Build ──────────────────────────────────────────────────────────────────────
@@ -35,7 +35,10 @@ test-concurrency:
 # ── Code quality ───────────────────────────────────────────────────────────────
 
 lint:
-	golangci-lint run ./...
+	# --build-tags soak makes the standalone soak harness package visible to
+	# the linter (it is excluded from the default build config). Pre-existing
+	# issues surfaced by broader tags (integration/perf) are out of scope here.
+	golangci-lint run --build-tags soak ./...
 
 fmt:
 	go fmt ./...
@@ -126,6 +129,15 @@ test-perf:
 	: "$${XFLOW_TEST_KAFKA_BROKERS:=localhost:$${KAFKA_PORT:-9092}}"; \
 	export XFLOW_TEST_REDIS_ADDR XFLOW_TEST_KAFKA_BROKERS; \
 	go test -tags=perf -bench=. -benchtime=2s -timeout 30m ./test/perf/...
+
+# test-soak runs the HA soak harness smoke over in-process miniredis (no real
+# Redis / multi-host topology required). The smoke only verifies multi-replica
+# start/stop + single-leader convergence; real fault injection (Task 5.2) and
+# SLO quantification (Task 5.3) are ENVIRONMENT-GATED — see
+# docs/references/ha-soak-plan.md §4/§6. Standalone `soak` build tag keeps the
+# harness out of the default integration suite.
+test-soak:
+	go test -tags=soak -race -count=1 -timeout 120s ./test/soak/...
 
 # perf-sample runs the perf bench suite and records results to a file for
 # regression monitoring. Sampling only — NOT a capacity commitment. Requires

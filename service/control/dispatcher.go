@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
 )
 
@@ -59,12 +60,12 @@ type systemTaskHandler interface {
 // DispatcherObserver receives transient dispatch failures. Implementations
 // must be non-blocking and must avoid high-cardinality labels.
 type DispatcherObserver interface {
-	OnDispatchTransient(reason string)
+	OnDispatchTransient(ctx context.Context, reason string)
 }
 
 type noopDispatcherObserver struct{}
 
-func (noopDispatcherObserver) OnDispatchTransient(string) {}
+func (noopDispatcherObserver) OnDispatchTransient(context.Context, string) {}
 
 // DispatcherOption configures a Dispatcher.
 type DispatcherOption func(*Dispatcher)
@@ -111,16 +112,17 @@ func (d *Dispatcher) HandleTask(ctx context.Context, task *engine.Task) error {
 		return err
 	}
 	if d.runners == nil {
-		d.observeTransient("no_runner_directory")
+		d.observeTransient(ctx, "no_runner_directory")
 		return &Transient{Err: ErrNoMatchingRunner}
 	}
 	_, err = d.runners.EnqueueAssignment(ctx, Assignment{
 		AssignmentID: BuildAssignmentID(task),
 		Task:         *task,
 		Routing:      routing,
+		TenantID:     tenant.FromContext(ctx),
 	})
 	if err != nil {
-		d.observeTransient(dispatchTransientReason(err))
+		d.observeTransient(ctx, dispatchTransientReason(err))
 		return &Transient{Err: err}
 	}
 	return nil
@@ -137,7 +139,7 @@ func dispatchTransientReason(err error) string {
 	}
 }
 
-func (d *Dispatcher) observeTransient(reason string) {
+func (d *Dispatcher) observeTransient(ctx context.Context, reason string) {
 	defer func() { _ = recover() }()
-	d.observer.OnDispatchTransient(reason)
+	d.observer.OnDispatchTransient(ctx, reason)
 }

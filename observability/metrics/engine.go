@@ -12,21 +12,21 @@ import (
 
 // Engine metric names.
 const (
-	metricNodeStarted            = "xflow_node_started_total"
-	metricNodeCompleted          = "xflow_node_completed_total"
-	metricNodeDuration           = "xflow_node_duration_seconds"
-	metricNodeSuspended          = "xflow_node_suspended_total"
-	metricNodeTimedOut           = "xflow_node_timed_out_total"
-	metricNodeRetried            = "xflow_node_retried_total"
-	metricExecutionCompleted     = "xflow_execution_completed_total"
-	metricCommitOutcomes         = "xflow_commit_outcomes_total"
-	metricOutboxRetries          = "xflow_outbox_retries_total"
-	metricOutboxDeadLettersTotal  = "xflow_outbox_dead_letters_total"
-	metricOutboxDeadLetters       = "xflow_outbox_dead_letters"
+	metricNodeStarted               = "xflow_node_started_total"
+	metricNodeCompleted             = "xflow_node_completed_total"
+	metricNodeDuration              = "xflow_node_duration_seconds"
+	metricNodeSuspended             = "xflow_node_suspended_total"
+	metricNodeTimedOut              = "xflow_node_timed_out_total"
+	metricNodeRetried               = "xflow_node_retried_total"
+	metricExecutionCompleted        = "xflow_execution_completed_total"
+	metricCommitOutcomes            = "xflow_commit_outcomes_total"
+	metricOutboxRetries             = "xflow_outbox_retries_total"
+	metricOutboxDeadLettersTotal    = "xflow_outbox_dead_letters_total"
+	metricOutboxDeadLetters         = "xflow_outbox_dead_letters"
 	metricOutboxDeadLettersReplayed = "xflow_outbox_dead_letters_replayed_total"
-	metricOutboxPending           = "xflow_outbox_pending"
-	metricOutboxOldestPendingAge  = "xflow_outbox_oldest_pending_age_seconds"
-	metricOutboxErrors            = "xflow_outbox_errors_total"
+	metricOutboxPending             = "xflow_outbox_pending"
+	metricOutboxOldestPendingAge    = "xflow_outbox_oldest_pending_age_seconds"
+	metricOutboxErrors              = "xflow_outbox_errors_total"
 )
 
 // MetricsHooks turns engine lifecycle hooks into xflow_ Prometheus counters.
@@ -40,45 +40,45 @@ func NewMetricsHooks(metrics *Metrics) *MetricsHooks {
 	return &MetricsHooks{Metrics: metrics}
 }
 
-func (h *MetricsHooks) OnNodeStart(_ context.Context, id types.ExecutionID, name string) {
-	h.Metrics.Inc(metricNodeStarted, h.nodeLabels(id, name, ""))
+func (h *MetricsHooks) OnNodeStart(ctx context.Context, id types.ExecutionID, name string) {
+	h.Metrics.Inc(metricNodeStarted, h.nodeLabels(ctx, id, name, ""))
 	h.started.Store(h.nodeKey(id, name), time.Now())
 }
 
-func (h *MetricsHooks) OnNodeComplete(_ context.Context, id types.ExecutionID, name string, status types.NodeStatus) {
-	labels := h.nodeLabels(id, name, string(status))
+func (h *MetricsHooks) OnNodeComplete(ctx context.Context, id types.ExecutionID, name string, status types.NodeStatus) {
+	labels := h.nodeLabels(ctx, id, name, string(status))
 	h.Metrics.Inc(metricNodeCompleted, labels)
 	if started, ok := h.started.LoadAndDelete(h.nodeKey(id, name)); ok {
 		h.Metrics.Observe(metricNodeDuration, labels, time.Since(started.(time.Time)))
 	}
 }
 
-func (h *MetricsHooks) OnNodeSuspended(_ context.Context, id types.ExecutionID, name string) {
-	h.Metrics.Inc(metricNodeSuspended, h.nodeLabels(id, name, ""))
+func (h *MetricsHooks) OnNodeSuspended(ctx context.Context, id types.ExecutionID, name string) {
+	h.Metrics.Inc(metricNodeSuspended, h.nodeLabels(ctx, id, name, ""))
 }
 
-func (h *MetricsHooks) OnExecutionComplete(_ context.Context, _ types.ExecutionID, status types.ExecutionStatus) {
-	h.Metrics.Inc(metricExecutionCompleted, map[string]string{"status": string(status)})
+func (h *MetricsHooks) OnExecutionComplete(ctx context.Context, _ types.ExecutionID, status types.ExecutionStatus) {
+	h.Metrics.Inc(metricExecutionCompleted, withTenant(ctx, map[string]string{"status": string(status)}))
 }
 
 func (h *MetricsHooks) OnSignalDelivered(context.Context, types.ExecutionID, string, map[string]any) {
 }
 func (h *MetricsHooks) OnSignalRevoked(context.Context, types.ExecutionID, string) {}
 
-func (h *MetricsHooks) OnNodeTimeout(_ context.Context, id types.ExecutionID, nodeName string) {
-	h.Metrics.Inc(metricNodeTimedOut, h.nodeLabels(id, nodeName, ""))
+func (h *MetricsHooks) OnNodeTimeout(ctx context.Context, id types.ExecutionID, nodeName string) {
+	h.Metrics.Inc(metricNodeTimedOut, h.nodeLabels(ctx, id, nodeName, ""))
 }
 
-func (h *MetricsHooks) OnNodeRetry(_ context.Context, id types.ExecutionID, name string, _ int, _ time.Duration) {
-	h.Metrics.Inc(metricNodeRetried, h.nodeLabels(id, name, ""))
+func (h *MetricsHooks) OnNodeRetry(ctx context.Context, id types.ExecutionID, name string, _ int, _ time.Duration) {
+	h.Metrics.Inc(metricNodeRetried, h.nodeLabels(ctx, id, name, ""))
 }
 
-func (h *MetricsHooks) nodeLabels(_ types.ExecutionID, name string, status string) map[string]string {
+func (h *MetricsHooks) nodeLabels(ctx context.Context, _ types.ExecutionID, name string, status string) map[string]string {
 	labels := map[string]string{"node": name}
 	if status != "" {
 		labels["status"] = status
 	}
-	return labels
+	return withTenant(ctx, labels)
 }
 
 func (*MetricsHooks) nodeKey(id types.ExecutionID, name string) string {
@@ -98,8 +98,8 @@ func NewCommitMetrics(metrics *Metrics) CommitMetrics {
 }
 
 // OnCommitOutcome records one stable low-cardinality commit classification.
-func (c CommitMetrics) OnCommitOutcome(_ context.Context, outcome engine.CommitOutcome) {
-	c.Metrics.Inc(metricCommitOutcomes, map[string]string{"outcome": string(outcome)})
+func (c CommitMetrics) OnCommitOutcome(ctx context.Context, outcome engine.CommitOutcome) {
+	c.Metrics.Inc(metricCommitOutcomes, withTenant(ctx, map[string]string{"outcome": string(outcome)}))
 }
 
 var _ engine.CommitObserver = CommitMetrics{}
@@ -116,35 +116,35 @@ func NewOutboxMetrics(metrics *Metrics) OutboxMetrics {
 }
 
 // OnOutboxRetry records a retryable task-queue handoff failure.
-func (o OutboxMetrics) OnOutboxRetry(context.Context, int) {
-	o.Metrics.Inc(metricOutboxRetries, nil)
+func (o OutboxMetrics) OnOutboxRetry(ctx context.Context, _ int) {
+	o.Metrics.Inc(metricOutboxRetries, withTenant(ctx, nil))
 }
 
 // OnOutboxDeadLetter records an entry moved to durable dead-letter storage.
-func (o OutboxMetrics) OnOutboxDeadLetter(context.Context) {
-	o.Metrics.Inc(metricOutboxDeadLettersTotal, nil)
+func (o OutboxMetrics) OnOutboxDeadLetter(ctx context.Context) {
+	o.Metrics.Inc(metricOutboxDeadLettersTotal, withTenant(ctx, nil))
 }
 
 // OnOutboxReplayed records a dead-letter replay attempt, partitioned by
 // outcome (replayed/not_found/rejected_terminal/rejected_inactive).
-func (o OutboxMetrics) OnOutboxReplayed(_ context.Context, outcome engine.DeadLetterReplayOutcome) {
-	o.Metrics.Inc(metricOutboxDeadLettersReplayed, map[string]string{"outcome": string(outcome)})
+func (o OutboxMetrics) OnOutboxReplayed(ctx context.Context, outcome engine.DeadLetterReplayOutcome) {
+	o.Metrics.Inc(metricOutboxDeadLettersReplayed, withTenant(ctx, map[string]string{"outcome": string(outcome)}))
 }
 
 // OnOutboxPending records the current pending and dead-letter backlog gauges
 // and observes the age of the oldest pending entry when one exists.
-func (o OutboxMetrics) OnOutboxPending(_ context.Context, pending int, deadLettered int, oldestAge time.Duration) {
-	o.Metrics.Set(metricOutboxPending, nil, float64(pending))
-	o.Metrics.Set(metricOutboxDeadLetters, nil, float64(deadLettered))
+func (o OutboxMetrics) OnOutboxPending(ctx context.Context, pending int, deadLettered int, oldestAge time.Duration) {
+	o.Metrics.Set(metricOutboxPending, withTenant(ctx, nil), float64(pending))
+	o.Metrics.Set(metricOutboxDeadLetters, withTenant(ctx, nil), float64(deadLettered))
 	if pending > 0 {
-		o.Metrics.Observe(metricOutboxOldestPendingAge, nil, oldestAge)
+		o.Metrics.Observe(metricOutboxOldestPendingAge, withTenant(ctx, nil), oldestAge)
 	}
 }
 
 // OnOutboxError records an outbox operation failure without using error text
 // as a metric label.
-func (o OutboxMetrics) OnOutboxError(_ context.Context, operation string, _ error) {
-	o.Metrics.Inc(metricOutboxErrors, map[string]string{"op": operation})
+func (o OutboxMetrics) OnOutboxError(ctx context.Context, operation string, _ error) {
+	o.Metrics.Inc(metricOutboxErrors, withTenant(ctx, map[string]string{"op": operation}))
 }
 
 var _ engine.OutboxObserver = OutboxMetrics{}

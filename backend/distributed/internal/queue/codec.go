@@ -3,6 +3,7 @@ package queue
 import (
 	"encoding/json"
 
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
 )
 
@@ -14,8 +15,9 @@ import (
 type queuedTask struct {
 	engine.Task
 
-	AutoDepth    int `json:"_auto_depth,omitempty"`
-	ActivationID int `json:"_activation_id,omitempty"`
+	TenantID     tenant.TenantID `json:"_tenant_id,omitempty"`
+	AutoDepth    int             `json:"_auto_depth,omitempty"`
+	ActivationID int             `json:"_activation_id,omitempty"`
 }
 
 // Marshal encodes a task into a transport payload, preserving the scheduler
@@ -31,15 +33,33 @@ func Marshal(t *engine.Task) ([]byte, error) {
 	})
 }
 
+// MarshalWithTenant encodes a task plus tenant into a transport payload.
+func MarshalWithTenant(t *engine.Task, tenantID tenant.TenantID) ([]byte, error) {
+	if t == nil {
+		return json.Marshal((*queuedTask)(nil))
+	}
+	return json.Marshal(queuedTask{
+		Task:         *t,
+		TenantID:     tenantID,
+		AutoDepth:    t.AutoDepth,
+		ActivationID: t.ActivationID,
+	})
+}
+
 // Unmarshal decodes a transport payload back into an engine.Task, restoring the
-// scheduler metadata carried alongside the public fields.
-func Unmarshal(data []byte) (*engine.Task, error) {
+// scheduler metadata carried alongside the public fields. The tenant is returned
+// separately when present.
+func Unmarshal(data []byte) (*engine.Task, tenant.TenantID, error) {
 	var qt queuedTask
 	if err := json.Unmarshal(data, &qt); err != nil {
-		return nil, err
+		return nil, tenant.DefaultTenant, err
 	}
 	task := qt.Task
 	task.AutoDepth = qt.AutoDepth
 	task.ActivationID = qt.ActivationID
-	return &task, nil
+	tenantID := qt.TenantID
+	if tenantID == "" {
+		tenantID = tenant.DefaultTenant
+	}
+	return &task, tenantID, nil
 }

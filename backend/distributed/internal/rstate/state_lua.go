@@ -495,7 +495,7 @@ return 1
 
 // revokeSignalLua atomically removes a signal that has not yet been consumed.
 // KEYS[1] = signal key, KEYS[2] = waiter key (stores node name waiting for this signal)
-// ARGV[1] = resume lock key prefix (xflow:exec:{id}:node:)
+// ARGV[1] = resume lock key prefix (xflow:t<tenant>:exec:{id}:node:)
 // ARGV[2] = resume lock key suffix (:resume_lock)
 // Returns 1 (revoked) or 0 (signal not found or already consumed/resumed).
 var revokeSignalLua = redis.NewScript(`

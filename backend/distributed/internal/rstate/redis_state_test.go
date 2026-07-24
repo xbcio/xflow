@@ -9,6 +9,7 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/types"
 	"github.com/redis/go-redis/v9"
 )
@@ -189,7 +190,7 @@ func TestUpsertNodeStoresStatusString(t *testing.T) {
 		t.Fatalf("UpsertNode() error = %v", err)
 	}
 
-	got, err := rdb.Get(context.Background(), nodeStatusKey(snapshot.ExecutionID, snapshot.Name)).Result()
+	got, err := rdb.Get(context.Background(), nodeStatusKey(tenant.DefaultTenant, snapshot.ExecutionID, snapshot.Name)).Result()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,7 +229,7 @@ func TestTransientModeSetsTransientTTLWithoutPerMutationRefresh(t *testing.T) {
 	// Optimization 4: structural keys are written with transientTTL at creation,
 	// so they outlive the run under the documented constraint (transientTTL > max
 	// wall-clock) WITHOUT any per-mutation refresh.
-	for _, key := range []string{execKey(id, "status"), execKey(id, "graph"), execKey(id, "params")} {
+	for _, key := range []string{execKey(tenant.DefaultTenant, id, "status"), execKey(tenant.DefaultTenant, id, "graph"), execKey(tenant.DefaultTenant, id, "params")} {
 		got := rdb.TTL(ctx, key).Val()
 		if got < 55*time.Second {
 			t.Fatalf("creation TTL for %q = %s, want close to %s", key, got, state.transientTTL)
@@ -245,7 +246,7 @@ func TestTransientModeSetsTransientTTLWithoutPerMutationRefresh(t *testing.T) {
 	}
 
 	// The per-node Lua write carries transientTTL directly; no refresh needed.
-	nodeTTL := rdb.TTL(ctx, nodeStatusKey(id, "start")).Val()
+	nodeTTL := rdb.TTL(ctx, nodeStatusKey(tenant.DefaultTenant, id, "start")).Val()
 	if nodeTTL < 55*time.Second {
 		t.Fatalf("node TTL after mutation = %s, want close to %s", nodeTTL, state.transientTTL)
 	}
@@ -281,7 +282,7 @@ func TestTransientModeShortensTTLOnTerminalExecutionStatus(t *testing.T) {
 		t.Fatalf("UpdateExecutionStatus() error = %v", err)
 	}
 
-	for _, key := range []string{execKey(id, "status"), execKey(id, "graph"), nodeStatusKey(id, "start")} {
+	for _, key := range []string{execKey(tenant.DefaultTenant, id, "status"), execKey(tenant.DefaultTenant, id, "graph"), nodeStatusKey(tenant.DefaultTenant, id, "start")} {
 		got := rdb.TTL(ctx, key).Val()
 		if got < 10*time.Second || got > 15*time.Second {
 			t.Fatalf("TTL for %q = %s, want close to %s", key, got, state.transientCompletionTTL)

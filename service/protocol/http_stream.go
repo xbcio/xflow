@@ -58,6 +58,7 @@ func (s *httpStream) run() {
 		Concurrency:  hello.Concurrency,
 		Capabilities: hello.Capabilities,
 		Labels:       hello.Labels,
+		Tenants:      hello.Tenants,
 		AuthToken:    s.authToken,
 	})
 	if err != nil {

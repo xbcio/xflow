@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/xbcio/xflow/backend/tenant"
 	"go.opentelemetry.io/otel/attribute"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
@@ -16,7 +17,8 @@ func TestOTelTracerRecordsSpanWithAttributesAndErrors(t *testing.T) {
 	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
 	tracer := NewOTelTracer(provider.Tracer("xflow-test"))
 
-	ctx, span := tracer.Start(context.Background(), "dispatch", "execution_id", "e1")
+	ctx := context.Background()
+	ctx, span := tracer.Start(ctx, "dispatch", "execution_id", "e1")
 	if got := SpanFromContext(ctx); got != span {
 		t.Fatalf("SpanFromContext() = %v, want started span", got)
 	}
@@ -41,8 +43,29 @@ func TestOTelTracerRecordsSpanWithAttributesAndErrors(t *testing.T) {
 	if !spanHasAttribute(ended[0], attribute.String("node", "approve")) {
 		t.Fatalf("span attributes = %#v, want node=approve", ended[0].Attributes())
 	}
+	if !spanHasAttribute(ended[0], attribute.String("tenant", "default")) {
+		t.Fatalf("span attributes = %#v, want tenant=default", ended[0].Attributes())
+	}
 	if len(ended[0].Events()) == 0 {
 		t.Fatal("RecordError did not add an OpenTelemetry span event")
+	}
+}
+
+func TestOTelTracerReadsTenantFromContext(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	tracer := NewOTelTracer(provider.Tracer("xflow-test"))
+
+	ctx := tenant.WithTenant(context.Background(), tenant.TenantID("tenant-x"))
+	_, span := tracer.Start(ctx, "execute")
+	span.End()
+
+	ended := recorder.Ended()
+	if len(ended) != 1 {
+		t.Fatalf("ended span count = %d, want 1", len(ended))
+	}
+	if !spanHasAttribute(ended[0], attribute.String("tenant", "tenant-x")) {
+		t.Fatalf("span attributes = %#v, want tenant=tenant-x", ended[0].Attributes())
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/store"
 )
 
@@ -32,14 +33,27 @@ func NewSQLAuditSink(appender store.AuditAppender) *SQLAuditSink {
 
 // Append persists one audit event durably. On error the caller must fail
 // closed for mutations — never execute an unaudited mutation.
+//
+// Tenant boundary (Task 7.4): the authoritative tenant is read from ctx
+// (tenant.FromContext). The event's TenantID is used only as a fallback when
+// ctx carries no explicit tenant, preserving compatibility with callers that
+// already set it from the authenticated principal.
 func (s *SQLAuditSink) Append(ctx context.Context, ev AuditEvent) error {
 	if s.appender == nil {
 		return ErrAuditUnavailable
 	}
+	// Prefer the tenant in context (the consistent cross-cutting source); fall
+	// back to the principal-bound tenant carried by the event. DefaultTenant is
+	// treated as "no explicit tenant in context" so single-tenant callers that
+	// set ev.TenantID still persist it.
+	tenantID := string(tenant.FromContext(ctx))
+	if tenantID == "" || tenantID == string(tenant.DefaultTenant) {
+		tenantID = ev.TenantID
+	}
 	rec := &store.AuditRecord{
 		RequestID:   ev.RequestID,
 		Principal:   ev.Principal,
-		TenantID:    ev.TenantID,
+		TenantID:    tenantID,
 		Operation:   ev.Operation,
 		Resource:    ev.Resource,
 		WorkflowID:  ev.WorkflowID,

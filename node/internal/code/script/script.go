@@ -99,21 +99,21 @@ func (n *ScriptNode) Execute(ctx context.Context, input *types.Input) (*types.Ou
 
 	code, _ := input.Params["code"].(string)
 	if code == "" {
-		observeExecute(language, runtime, "config", time.Since(start))
+		observeExecute(ctx, language, runtime, "config", time.Since(start))
 		return nil, types.NewPermanentError("script.code_required", "xflow.script: code parameter is required")
 	}
 	if language == "" {
-		observeExecute(language, runtime, "config", time.Since(start))
+		observeExecute(ctx, language, runtime, "config", time.Since(start))
 		return nil, types.NewPermanentError("script.language_required", "xflow.script: language parameter is required (choose: js | wasm)")
 	}
 	if runtime == "" {
-		observeExecute(language, runtime, "config", time.Since(start))
+		observeExecute(ctx, language, runtime, "config", time.Since(start))
 		return nil, types.NewPermanentError("script.runtime_required", "xflow.script: runtime parameter is required (js -> goja|qjs, wasm -> wazero)")
 	}
 
 	eng, ok := engine.Lookup(language, runtime)
 	if !ok {
-		observeExecute(language, runtime, "config", time.Since(start))
+		observeExecute(ctx, language, runtime, "config", time.Since(start))
 		return nil, types.NewPermanentError("script.unknown_engine", fmt.Sprintf("xflow.script: unknown engine (language=%q, runtime=%q)", language, runtime))
 	}
 
@@ -124,7 +124,7 @@ func (n *ScriptNode) Execute(ctx context.Context, input *types.Input) (*types.Ou
 		return input.Credential(name), nil
 	})
 	if err != nil {
-		observeExecute(language, runtime, "config", time.Since(start))
+		observeExecute(ctx, language, runtime, "config", time.Since(start))
 		return nil, types.NewPermanentError("script.credentials", err.Error())
 	}
 
@@ -143,7 +143,7 @@ func (n *ScriptNode) Execute(ctx context.Context, input *types.Input) (*types.Ou
 
 	result, err := eng.Execute(ctx, code, globals, engine.DefaultHelpers())
 	if err != nil {
-		observeExecute(language, runtime, "error", time.Since(start))
+		observeExecute(ctx, language, runtime, "error", time.Since(start))
 		// If the per-execution context expired (deadline or cancellation), the
 		// failure is a transient system condition regardless of how the runtime
 		// surfaces it: goja raises an Interrupt error, while qjs/wazero wrap
@@ -161,18 +161,18 @@ func (n *ScriptNode) Execute(ctx context.Context, input *types.Input) (*types.Ou
 	// before the engine started, or a very tight deadline), classify as timeout
 	// instead of accepting a result from a raced engine execution.
 	if ctx.Err() != nil {
-		observeExecute(language, runtime, "error", time.Since(start))
+		observeExecute(ctx, language, runtime, "error", time.Since(start))
 		return nil, types.NewTransientError("script.timeout", ctx.Err().Error())
 	}
 	data := engine.MapResult(result)
 	b, sizeErr := checkResultSize(data)
 	if sizeErr != nil {
-		observeExecute(language, runtime, "error", time.Since(start))
+		observeExecute(ctx, language, runtime, "error", time.Since(start))
 		return &types.Output{Data: map[string]any{"error": sizeErr.Error()}, Port: "error"}, nil
 	}
 
-	observeOutputBytes(language, runtime, len(b))
-	observeExecute(language, runtime, "main", time.Since(start))
+	observeOutputBytes(ctx, language, runtime, len(b))
+	observeExecute(ctx, language, runtime, "main", time.Since(start))
 	return &types.Output{Data: data, Port: "main"}, nil
 }
 

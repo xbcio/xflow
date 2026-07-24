@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/types"
 	"gopkg.in/yaml.v3"
 )
@@ -19,6 +20,7 @@ type runnerConfigFile struct {
 		Concurrency  *int              `yaml:"concurrency"`
 		Capabilities *[]string         `yaml:"capabilities"`
 		Labels       map[string]string `yaml:"labels"`
+		Tenants      *[]string         `yaml:"tenants"`
 	} `yaml:"runner"`
 	Server struct {
 		URL        *string `yaml:"url"`
@@ -124,6 +126,9 @@ func loadRunnerConfigFromBytes(data []byte) (runnerConfig, error) {
 		cfg.labels = cloneStringMap(file.Runner.Labels)
 		cfg.labelRaw = labelsToRaw(cfg.labels)
 	}
+	if file.Runner.Tenants != nil {
+		cfg.tenantRaw = *file.Runner.Tenants
+	}
 	if file.Poll.Wait != nil {
 		cfg.pollWait = *file.Poll.Wait
 	}
@@ -157,7 +162,32 @@ func loadRunnerConfigFromBytes(data []byte) (runnerConfig, error) {
 
 	cfg.capabilities = parseCapabilities(cfg.capRaw)
 	cfg.labels = parseLabels(cfg.labelRaw)
+	cfg.tenants = parseTenants(cfg.tenantRaw)
 	return cfg, nil
+}
+
+func parseTenants(raw []string) []tenant.TenantID {
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make([]tenant.TenantID, 0, len(raw))
+	seen := make(map[tenant.TenantID]struct{})
+	for _, part := range raw {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		t := tenant.TenantID(part)
+		if _, ok := seen[t]; ok {
+			continue
+		}
+		seen[t] = struct{}{}
+		out = append(out, t)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 var runnerConfigIssueOrder = []string{
@@ -168,6 +198,7 @@ var runnerConfigIssueOrder = []string{
 	"concurrency",
 	"cap",
 	"label",
+	"tenant",
 	"heartbeat-interval",
 	"poll-wait",
 }
@@ -207,6 +238,9 @@ func applyLookupEnvOverrides(cfg runnerConfig, lookupEnv func(string) (string, b
 	if v, ok := lookupEnv("XFLOW_RUNNER_LABELS"); ok {
 		cfg.labelRaw = splitCSV(v)
 	}
+	if v, ok := lookupEnv("XFLOW_RUNNER_TENANTS"); ok {
+		cfg.tenantRaw = splitCSV(v)
+	}
 	if v, ok := lookupEnv("XFLOW_RUNNER_HEARTBEAT_INTERVAL"); ok {
 		cfg.heartbeatInterval = v
 	}
@@ -228,6 +262,7 @@ func applyLookupEnvOverrides(cfg runnerConfig, lookupEnv func(string) (string, b
 
 	cfg.capabilities = parseCapabilities(cfg.capRaw)
 	cfg.labels = parseLabels(cfg.labelRaw)
+	cfg.tenants = parseTenants(cfg.tenantRaw)
 	return cfg
 }
 
@@ -308,6 +343,12 @@ func validateRunnerConfig(cfg runnerConfig) error {
 	if len(cfg.capabilities) == 0 {
 		return errors.New("capabilities must contain at least one node type")
 	}
+	cfg.tenants = parseTenants(cfg.tenantRaw)
+	for _, t := range cfg.tenants {
+		if err := tenant.Validate(t); err != nil {
+			return fmt.Errorf("invalid tenant %q: %w", t, err)
+		}
+	}
 	for key, value := range cfg.labels {
 		if strings.TrimSpace(key) == "" {
 			return errors.New("labels must not contain an empty key")
@@ -380,6 +421,10 @@ func resolveRunnerConfig(base runnerConfig) (runnerConfig, error) {
 		clearRunnerConfigIssue(&cfg, "label")
 		cfg.labelRaw = append([]string(nil), base.labelRaw...)
 	}
+	if base.changed["tenant"] {
+		clearRunnerConfigIssue(&cfg, "tenant")
+		cfg.tenantRaw = append([]string(nil), base.tenantRaw...)
+	}
 	if base.changed["heartbeat-interval"] {
 		clearRunnerConfigIssue(&cfg, "heartbeat-interval")
 		cfg.heartbeatInterval = base.heartbeatInterval
@@ -391,6 +436,7 @@ func resolveRunnerConfig(base runnerConfig) (runnerConfig, error) {
 
 	cfg.capabilities = parseCapabilities(cfg.capRaw)
 	cfg.labels = parseLabels(cfg.labelRaw)
+	cfg.tenants = parseTenants(cfg.tenantRaw)
 	if err := firstRunnerConfigIssue(cfg); err != nil {
 		return runnerConfig{}, err
 	}

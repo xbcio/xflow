@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/service/protocol"
 )
@@ -120,6 +121,41 @@ func (e *fakeDispatchEngine) TaskRouting(context.Context, *engine.Task) (engine.
 
 func (e *fakeDispatchEngine) BuildTaskLease(context.Context, *engine.Task) (*engine.TaskLease, error) {
 	panic("dispatcher must not call BuildTaskLease")
+}
+
+func TestDispatcherAssignmentCarriesTenantFromContext(t *testing.T) {
+	ctx := context.Background()
+	ctx = tenant.WithTenant(ctx, "tenant-acme")
+	dir := NewMemoryRunnerDirectory()
+	dispatcher := NewDispatcher(&fakeDispatchEngine{routing: engine.TaskRouting{NodeType: "xflow.function"}}, dir)
+	task := &engine.Task{ExecutionID: "exec-1", NodeName: "node-a", NodeIdx: 0, Type: engine.TaskTypeNodeExec, ActivationID: 1}
+
+	if err := dispatcher.HandleTask(ctx, task); err != nil {
+		t.Fatalf("HandleTask() error = %v", err)
+	}
+
+	session, err := dir.Register(ctx, RegisterRunnerRequest{
+		RunnerID:     "runner-1",
+		Capacity:     1,
+		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
+		Policy:       RunnerPolicy{AllowedNodeTypes: []string{"*"}},
+		Tenants:      []tenant.TenantID{"tenant-acme"},
+	})
+	if err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	claim, ok, err := dir.ClaimForRunner(ctx, ClaimRequest{
+		RunnerID:     "runner-1",
+		SessionID:    session.SessionID,
+		Capacity:     1,
+		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
+	})
+	if err != nil || !ok {
+		t.Fatalf("ClaimForRunner() ok=%v err=%v, want ok", ok, err)
+	}
+	if claim.Assignment.TenantID != "tenant-acme" {
+		t.Fatalf("assignment tenant = %q, want tenant-acme", claim.Assignment.TenantID)
+	}
 }
 
 func TestDispatcherTreatsExecutionInactiveAsNoOp(t *testing.T) {

@@ -59,9 +59,9 @@ type LeaseSweeper struct {
 // SweepObserver receives lease-sweep outcomes so observability layers can
 // emit metrics. All methods must be non-blocking.
 type SweepObserver interface {
-	OnSweepReclaim(execID, nodeName string, ageMs int64)
-	OnSweepRace(execID, nodeName string)
-	OnSweepError(execID, nodeName string, err error)
+	OnSweepReclaim(ctx context.Context, execID, nodeName string, ageMs int64)
+	OnSweepRace(ctx context.Context, execID, nodeName string)
+	OnSweepError(ctx context.Context, execID, nodeName string, err error)
 }
 
 // SweepTimingObserver is an optional extension implemented by observability
@@ -69,9 +69,9 @@ type SweepObserver interface {
 // LeaseSweeper discovers it from LeaseSweeperConfig.Observer without expanding
 // the backwards-compatible SweepObserver contract.
 type SweepTimingObserver interface {
-	OnSweepListExpired(candidates int, elapsed time.Duration, err error)
-	OnSweepReclaimResult(result string, elapsed time.Duration)
-	OnSweepRepair(reconciled int, elapsed time.Duration, err error)
+	OnSweepListExpired(ctx context.Context, candidates int, elapsed time.Duration, err error)
+	OnSweepReclaimResult(ctx context.Context, result string, elapsed time.Duration)
+	OnSweepRepair(ctx context.Context, reconciled int, elapsed time.Duration, err error)
 }
 
 // LeaseSweeperConfig configures a sweeper.
@@ -168,7 +168,7 @@ func (s *LeaseSweeper) RepairOnce(ctx context.Context) int {
 	started := time.Now()
 	reconciled, err := repairer.RepairLeaseIndex(ctx, s.repairBatch)
 	s.observeTiming(func(observer SweepTimingObserver) {
-		observer.OnSweepRepair(reconciled, time.Since(started), err)
+		observer.OnSweepRepair(ctx, reconciled, time.Since(started), err)
 	})
 	if err != nil && s.log != nil {
 		s.log.Error("repair lease expiry index", "err", err)
@@ -191,7 +191,7 @@ func (s *LeaseSweeper) SweepOnce(ctx context.Context) int {
 	listStarted := time.Now()
 	expired, err := s.state.ListExpiredLeases(ctx, before)
 	s.observeTiming(func(observer SweepTimingObserver) {
-		observer.OnSweepListExpired(len(expired), time.Since(listStarted), err)
+		observer.OnSweepListExpired(ctx, len(expired), time.Since(listStarted), err)
 	})
 	if err != nil {
 		if s.log != nil {
@@ -210,7 +210,7 @@ func (s *LeaseSweeper) SweepOnce(ctx context.Context) int {
 		ok, err := s.engine.ReclaimLease(ctx, lease)
 		if err != nil {
 			s.observeTiming(func(observer SweepTimingObserver) {
-				observer.OnSweepReclaimResult("error", time.Since(reclaimStarted))
+				observer.OnSweepReclaimResult(ctx, "error", time.Since(reclaimStarted))
 			})
 			if s.log != nil {
 				s.log.Error("reclaim lease",
@@ -220,26 +220,26 @@ func (s *LeaseSweeper) SweepOnce(ctx context.Context) int {
 				)
 			}
 			if s.observer != nil {
-				s.observer.OnSweepError(string(lease.ExecutionID), lease.NodeName, err)
+				s.observer.OnSweepError(ctx, string(lease.ExecutionID), lease.NodeName, err)
 			}
 			continue
 		}
 		if !ok {
 			s.observeTiming(func(observer SweepTimingObserver) {
-				observer.OnSweepReclaimResult("race", time.Since(reclaimStarted))
+				observer.OnSweepReclaimResult(ctx, "race", time.Since(reclaimStarted))
 			})
 			if s.observer != nil {
-				s.observer.OnSweepRace(string(lease.ExecutionID), lease.NodeName)
+				s.observer.OnSweepRace(ctx, string(lease.ExecutionID), lease.NodeName)
 			}
 			continue
 		}
 		s.observeTiming(func(observer SweepTimingObserver) {
-			observer.OnSweepReclaimResult("reclaimed", time.Since(reclaimStarted))
+			observer.OnSweepReclaimResult(ctx, "reclaimed", time.Since(reclaimStarted))
 		})
 		reclaimed++
 		if s.observer != nil {
 			ageMs := s.clock().Sub(lease.IssuedAt.Add(lease.TTL)).Milliseconds()
-			s.observer.OnSweepReclaim(string(lease.ExecutionID), lease.NodeName, ageMs)
+			s.observer.OnSweepReclaim(ctx, string(lease.ExecutionID), lease.NodeName, ageMs)
 		}
 	}
 	return reclaimed

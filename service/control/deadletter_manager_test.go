@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/types"
 )
@@ -143,6 +144,69 @@ func TestDeadLetterManagerRejectsUnauthorized(t *testing.T) {
 	}
 	if len(obs.outcomes) != 1 || obs.outcomes[0] != engine.ReplayUnauthorized {
 		t.Fatalf("unauthorized metric not recorded: %v", obs.outcomes)
+	}
+}
+
+func TestDeadLetterManagerRejectsTenantMismatch(t *testing.T) {
+	store := &fakeDeadLetterStore{}
+	obs := &captureOutboxObserver{}
+	mgr := NewDeadLetterManager(store, obs, nil)
+
+	ctx := tenant.WithTenant(context.Background(), "tenant-a")
+	principal := DeadLetterReplayPrincipal{Subject: "alice", TenantID: "tenant-b", Scopes: []string{ScopeDeadLetterReplay}}
+	res, _ := mgr.Replay(ctx, principal, engine.ReplayDeadLetterRequest{
+		ExecutionID: "x", EntryID: "e", Reason: "r",
+	})
+	if res.Outcome != engine.ReplayUnauthorized {
+		t.Fatalf("outcome = %q, want unauthorized", res.Outcome)
+	}
+	if store.replayed != 0 {
+		t.Fatalf("tenant-mismatched replay reached the store")
+	}
+	if len(obs.outcomes) != 1 || obs.outcomes[0] != engine.ReplayUnauthorized {
+		t.Fatalf("tenant mismatch metric not recorded: %v", obs.outcomes)
+	}
+}
+
+func TestDeadLetterManagerAllowsTenantMatch(t *testing.T) {
+	store := &fakeDeadLetterStore{}
+	obs := &captureOutboxObserver{}
+	mgr := NewDeadLetterManager(store, obs, nil)
+
+	ctx := tenant.WithTenant(context.Background(), "tenant-a")
+	principal := DeadLetterReplayPrincipal{Subject: "alice", TenantID: "tenant-a", Scopes: []string{ScopeDeadLetterReplay}}
+	res, err := mgr.Replay(ctx, principal, engine.ReplayDeadLetterRequest{
+		ExecutionID: "x", EntryID: "e", Reason: "r",
+	})
+	if err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	if res.Outcome != engine.ReplayReplayed {
+		t.Fatalf("outcome = %q, want replayed", res.Outcome)
+	}
+	if store.replayed != 1 {
+		t.Fatalf("store.replayed = %d, want 1", store.replayed)
+	}
+}
+
+func TestDeadLetterManagerSkipsTenantCheckWhenPrincipalTenantEmpty(t *testing.T) {
+	store := &fakeDeadLetterStore{}
+	obs := &captureOutboxObserver{}
+	mgr := NewDeadLetterManager(store, obs, nil)
+
+	ctx := tenant.WithTenant(context.Background(), "tenant-a")
+	principal := DeadLetterReplayPrincipal{Subject: "alice", TenantID: "", Scopes: []string{ScopeDeadLetterReplay}}
+	res, err := mgr.Replay(ctx, principal, engine.ReplayDeadLetterRequest{
+		ExecutionID: "x", EntryID: "e", Reason: "r",
+	})
+	if err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	if res.Outcome != engine.ReplayReplayed {
+		t.Fatalf("outcome = %q, want replayed", res.Outcome)
+	}
+	if store.replayed != 1 {
+		t.Fatalf("store.replayed = %d, want 1 (G0 backward compatibility)", store.replayed)
 	}
 }
 

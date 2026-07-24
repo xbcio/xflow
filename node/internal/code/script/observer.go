@@ -1,6 +1,7 @@
 package script
 
 import (
+	"context"
 	"sync"
 	"time"
 )
@@ -9,14 +10,14 @@ import (
 // non-blocking and must avoid high-cardinality labels such as execution IDs or
 // raw script source.
 type Observer interface {
-	OnScriptExecute(language, runtime, outcome string, duration time.Duration)
-	OnScriptOutputBytes(language, runtime string, size int)
+	OnScriptExecute(ctx context.Context, language, runtime, outcome string, duration time.Duration)
+	OnScriptOutputBytes(ctx context.Context, language, runtime string, size int)
 }
 
 type noopObserver struct{}
 
-func (noopObserver) OnScriptExecute(string, string, string, time.Duration) {}
-func (noopObserver) OnScriptOutputBytes(string, string, int)             {}
+func (noopObserver) OnScriptExecute(context.Context, string, string, string, time.Duration) {}
+func (noopObserver) OnScriptOutputBytes(context.Context, string, string, int)             {}
 
 var (
 	observerMu sync.RWMutex
@@ -35,16 +36,16 @@ func SetObserver(o Observer) {
 	observer = o
 }
 
-func observeExecute(language, runtime, outcome string, duration time.Duration) {
+func observeExecute(ctx context.Context, language, runtime, outcome string, duration time.Duration) {
 	observerMu.RLock()
 	o := observer
 	observerMu.RUnlock()
-	o.OnScriptExecute(language, runtime, outcome, duration)
+	o.OnScriptExecute(ctx, language, runtime, outcome, duration)
 }
 
-func observeOutputBytes(language, runtime string, size int) {
+func observeOutputBytes(ctx context.Context, language, runtime string, size int) {
 	observerMu.RLock()
 	o := observer
 	observerMu.RUnlock()
-	o.OnScriptOutputBytes(language, runtime, size)
+	o.OnScriptOutputBytes(ctx, language, runtime, size)
 }

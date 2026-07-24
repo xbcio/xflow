@@ -79,6 +79,7 @@ type RegisterRequest struct {
 	Concurrency   int32                  `protobuf:"varint,2,opt,name=concurrency,proto3" json:"concurrency,omitempty"`
 	Capabilities  []*Capability          `protobuf:"bytes,3,rep,name=capabilities,proto3" json:"capabilities,omitempty"`
 	Labels        map[string]string      `protobuf:"bytes,4,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	Tenants       []string               `protobuf:"bytes,5,rep,name=tenants,proto3" json:"tenants,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -137,6 +138,13 @@ func (x *RegisterRequest) GetCapabilities() []*Capability {
 func (x *RegisterRequest) GetLabels() map[string]string {
 	if x != nil {
 		return x.Labels
+	}
+	return nil
+}
+
+func (x *RegisterRequest) GetTenants() []string {
+	if x != nil {
+		return x.Tenants
 	}
 	return nil
 }
@@ -671,6 +679,7 @@ type HelloFrame struct {
 	Concurrency   int32                  `protobuf:"varint,2,opt,name=concurrency,proto3" json:"concurrency,omitempty"`
 	Capabilities  []*Capability          `protobuf:"bytes,3,rep,name=capabilities,proto3" json:"capabilities,omitempty"`
 	Labels        map[string]string      `protobuf:"bytes,4,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	Tenants       []string               `protobuf:"bytes,5,rep,name=tenants,proto3" json:"tenants,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -729,6 +738,13 @@ func (x *HelloFrame) GetCapabilities() []*Capability {
 func (x *HelloFrame) GetLabels() map[string]string {
 	if x != nil {
 		return x.Labels
+	}
+	return nil
+}
+
+func (x *HelloFrame) GetTenants() []string {
+	if x != nil {
+		return x.Tenants
 	}
 	return nil
 }
@@ -1203,12 +1219,13 @@ const file_service_protocol_runnerpb_runner_proto_rawDesc = "" +
 	"\n" +
 	"Capability\x12\x1b\n" +
 	"\tnode_type\x18\x01 \x01(\tR\bnodeType\x12!\n" +
-	"\fnode_version\x18\x02 \x01(\x05R\vnodeVersion\"\x92\x02\n" +
+	"\fnode_version\x18\x02 \x01(\x05R\vnodeVersion\"\xac\x02\n" +
 	"\x0fRegisterRequest\x12\x1b\n" +
 	"\trunner_id\x18\x01 \x01(\tR\brunnerId\x12 \n" +
 	"\vconcurrency\x18\x02 \x01(\x05R\vconcurrency\x12?\n" +
 	"\fcapabilities\x18\x03 \x03(\v2\x1b.xflow.runner.v1.CapabilityR\fcapabilities\x12D\n" +
-	"\x06labels\x18\x04 \x03(\v2,.xflow.runner.v1.RegisterRequest.LabelsEntryR\x06labels\x1a9\n" +
+	"\x06labels\x18\x04 \x03(\v2,.xflow.runner.v1.RegisterRequest.LabelsEntryR\x06labels\x12\x18\n" +
+	"\atenants\x18\x05 \x03(\tR\atenants\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"N\n" +
@@ -1256,13 +1273,14 @@ const file_service_protocol_runnerpb_runner_proto_rawDesc = "" +
 	"\x05hello\x18\x01 \x01(\v2\x1b.xflow.runner.v1.HelloFrameH\x00R\x05hello\x126\n" +
 	"\x06result\x18\x02 \x01(\v2\x1c.xflow.runner.v1.ResultFrameH\x00R\x06result\x12-\n" +
 	"\x03bye\x18\x03 \x01(\v2\x19.xflow.runner.v1.ByeFrameH\x00R\x03byeB\a\n" +
-	"\x05frame\"\x88\x02\n" +
+	"\x05frame\"\xa2\x02\n" +
 	"\n" +
 	"HelloFrame\x12\x1b\n" +
 	"\trunner_id\x18\x01 \x01(\tR\brunnerId\x12 \n" +
 	"\vconcurrency\x18\x02 \x01(\x05R\vconcurrency\x12?\n" +
 	"\fcapabilities\x18\x03 \x03(\v2\x1b.xflow.runner.v1.CapabilityR\fcapabilities\x12?\n" +
-	"\x06labels\x18\x04 \x03(\v2'.xflow.runner.v1.HelloFrame.LabelsEntryR\x06labels\x1a9\n" +
+	"\x06labels\x18\x04 \x03(\v2'.xflow.runner.v1.HelloFrame.LabelsEntryR\x06labels\x12\x18\n" +
+	"\atenants\x18\x05 \x03(\tR\atenants\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"h\n" +

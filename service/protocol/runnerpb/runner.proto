@@ -43,6 +43,7 @@ message RegisterRequest {
   int32 concurrency = 2;
   repeated Capability capabilities = 3;
   map<string, string> labels = 4;
+  repeated string tenants = 5;
 }
 
 message RegisterResponse {
@@ -106,6 +107,7 @@ message HelloFrame {
   int32 concurrency = 2;
   repeated Capability capabilities = 3;
   map<string, string> labels = 4;
+  repeated string tenants = 5;
 }
 
 message ResultFrame {

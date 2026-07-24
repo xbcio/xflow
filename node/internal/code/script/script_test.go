@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/node/registry"
 	"github.com/xbcio/xflow/types"
@@ -195,7 +196,8 @@ func TestScript_CredentialInjected(t *testing.T) {
 	h, _ := registry.Lookup("xflow.script")
 	b := node.Script(`({token: $credential.token})`).Language("js").Runtime("goja").Credentials("api_token")
 	input := &types.Input{Params: b.RawParams().(map[string]any)}
-	input.SetCredentialResolver(func(name string) map[string]any {
+	input.SetTenant(tenant.DefaultTenant)
+	input.SetCredentialResolver(func(tenant tenant.TenantID, name string) map[string]any {
 		if name == "api_token" {
 			return map[string]any{"token": "secret-t"}
 		}
@@ -214,7 +216,8 @@ func TestScript_UndeclaredCredentialInvisible(t *testing.T) {
 	h, _ := registry.Lookup("xflow.script")
 	b := node.Script(`({seen: typeof $credentials.api_token})`).Language("js").Runtime("goja")
 	input := &types.Input{Params: b.RawParams().(map[string]any)}
-	input.SetCredentialResolver(func(string) map[string]any {
+	input.SetTenant(tenant.DefaultTenant)
+	input.SetCredentialResolver(func(tenant tenant.TenantID, name string) map[string]any {
 		return map[string]any{"token": "leak"}
 	})
 	out, err := h.Execute(context.Background(), input)
@@ -333,13 +336,13 @@ type recordingScriptObserver struct {
 	outputBytes  int
 }
 
-func (r *recordingScriptObserver) OnScriptExecute(language, runtime, outcome string, duration time.Duration) {
+func (r *recordingScriptObserver) OnScriptExecute(ctx context.Context, language, runtime, outcome string, duration time.Duration) {
 	r.executes++
 	r.lastOutcome = outcome
 	r.lastLanguage = language
 	r.lastRuntime = runtime
 }
 
-func (r *recordingScriptObserver) OnScriptOutputBytes(language, runtime string, size int) {
+func (r *recordingScriptObserver) OnScriptOutputBytes(ctx context.Context, language, runtime string, size int) {
 	r.outputBytes = size
 }

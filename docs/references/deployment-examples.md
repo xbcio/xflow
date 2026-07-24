@@ -50,6 +50,85 @@ xflow-server \
 | `--trace-insecure` | `false` | `false` | 是否禁用 OTLP TLS 验证 |
 | `--management` | `false` | **必设** | 启用 ops management 模块（`/healthz` `/readyz` `/v1/management/*`）；`/v1/management/*` 由 `--api-auth-token` 门控 |
 
+## 1.1. Redis HA 模式启动示例（sentinel / cluster）
+
+> **诚实性声明 [ENV-GATED]**：本节示例仅展示 Redis HA flag 的正确配置方式。Redis HA 客户端抽象代码（Task 1.1–3.1）与 `cmd/server` flag（Task 4.1）已实现，但真实 sentinel/cluster 环境的连通性、failover 行为与多副本 soak 验收依赖真实部署环境，**尚未完成**。在 [RELEASE-GATES.md](../design/RELEASE-GATES.md) §2 G2 行状态仍为 `⏳ 未完成` 前，不得宣称 "control-plane HA 生产可用"。完整 HA 验收方法论与故障矩阵见 [ha-soak-plan](ha-soak-plan.md)。
+
+### Sentinel 模式
+
+```bash
+xflow-server \
+  --addr :8080 \
+  --grpc-addr :8090 \
+  --redis-mode sentinel \
+  --redis-sentinel-master mymaster \
+  --redis-sentinel-addrs sentinel1:26379,sentinel2:26379,sentinel3:26379 \
+  --redis-username xflow \
+  --redis-password <password> \
+  --redis-sentinel-username xflow-sentinel \
+  --redis-sentinel-password <sentinel-password> \
+  --redis-db 0 \
+  --redis-tls \
+  --concurrency 10 \
+  --auth-policy /etc/xflow/runners.yaml \
+  --api-auth-token "$WORKFLOW_API_TOKEN" \
+  --require-api-auth \
+  --tls-cert /etc/xflow/tls/server.crt \
+  --tls-key /etc/xflow/tls/server.key \
+  --tls-client-ca /etc/xflow/tls/runner-ca.crt \
+  --trace otlp \
+  --trace-endpoint otel-collector.observability:4317 \
+  --trace-insecure false \
+  --metrics-addr :9090 \
+  --metrics-path /metrics \
+  --log-format json \
+  --management
+```
+
+### Cluster 模式
+
+```bash
+xflow-server \
+  --addr :8080 \
+  --grpc-addr :8090 \
+  --redis-mode cluster \
+  --redis-cluster-addrs node1:6379,node2:6379,node3:6379 \
+  --redis-username xflow \
+  --redis-password <password> \
+  --redis-tls \
+  --concurrency 10 \
+  --auth-policy /etc/xflow/runners.yaml \
+  --api-auth-token "$WORKFLOW_API_TOKEN" \
+  --require-api-auth \
+  --tls-cert /etc/xflow/tls/server.crt \
+  --tls-key /etc/xflow/tls/server.key \
+  --tls-client-ca /etc/xflow/tls/runner-ca.crt \
+  --trace otlp \
+  --trace-endpoint otel-collector.observability:4317 \
+  --trace-insecure false \
+  --metrics-addr :9090 \
+  --metrics-path /metrics \
+  --log-format json \
+  --management
+```
+
+### HA flag 说明
+
+| Flag | 默认值 | G1/G2 要求 | 说明 |
+|---|---|---|---|
+| `--redis-mode` | `single` | G2 必设 | Redis 部署模式：`single` / `sentinel` / `cluster`。空值与 `single` 等价，保持向后兼容 |
+| `--redis-sentinel-master` | `""` | sentinel 必设 | Sentinel 监控的 master 名称（如 `mymaster`） |
+| `--redis-sentinel-addrs` | `""` | sentinel 必设 | Sentinel 节点地址，逗号分隔 |
+| `--redis-cluster-addrs` | `""` | cluster 必设 | Redis Cluster 节点地址，逗号分隔 |
+| `--redis-username` | `""` | 按 ACL 配置 | Redis master/cluster 用户名（ACL） |
+| `--redis-password` | `""` | 按 ACL 配置 | Redis master/cluster 密码 |
+| `--redis-sentinel-username` | `""` | 可选 | Sentinel 用户名；空则回退到 `--redis-username` |
+| `--redis-sentinel-password` | `""` | 可选 | Sentinel 密码；空则回退到 `--redis-password` |
+| `--redis-db` | `0` | single/sentinel 可用 | Redis 逻辑库，cluster 模式忽略 |
+| `--redis-tls` | `false` | 生产推荐 | 为 Redis 连接启用 TLS |
+
+> 注意：cluster 模式使用 `xflow:t<tenant>:exec:{<id>}:... (tenant 前缀无花括号，hash tag 仍为 {<id>})` hash tag 保证同一 execution 的 key 共置同 slot；sentinel 模式仍使用单一 master 路由。配置错误时 `cmd/server` fail-closed 启动失败。
+
 ## 2. runners.yaml 示例
 
 runner 协议鉴权策略（`--auth-policy`）。token 在 server 侧以 sha256 constant-time 比较；runner 端在注册时携带。
@@ -143,7 +222,7 @@ groups:
 
 启动 G1 生产前逐项确认：
 
-- [ ] `--redis` 指向可恢复 Redis（持久化开启，RDB/AOF），非 `--memory`
+- [ ] `--redis` 指向可恢复 Redis（持久化开启，RDB/AOF），非 `--memory`；若用 HA 模式，见下方额外检查项
 - [ ] `--auth-policy` 配置 runners.yaml，token 为高熵随机值，未硬编码
 - [ ] `--api-auth-token` 配置，`--require-api-auth` 启用（无 token 启动失败）
 - [ ] `--tls-cert`/`--tls-key` 配置；runner 连接走 TLS，推荐 mTLS（`--tls-client-ca`）
@@ -155,3 +234,12 @@ groups:
 - [ ] dead-letter 告警接入值班通知
 - [ ] 维护窗口流程与值班团队同步
 - [ ] 明确告知业务方：单副本、有维护窗口、at-least-once（业务幂等键）
+
+**若使用 sentinel / cluster 模式，额外确认：**
+
+- [ ] `--redis-mode` 显式设置为 `sentinel` 或 `cluster`
+- [ ] sentinel 模式：`--redis-sentinel-master` 与 `--redis-sentinel-addrs` 已配置，且 master 名与 Sentinel 实际一致
+- [ ] cluster 模式：`--redis-cluster-addrs` 已配置，地址为 cluster 初始节点
+- [ ] `--redis-username` / `--redis-password` 与目标 Redis ACL 一致；sentinel 凭据通过 `--redis-sentinel-username` / `--redis-sentinel-password` 配置或正确回退到 master 凭据
+- [ ] `--redis-tls` 启用时，证书与 Redis 服务端 TLS 互信已配置
+- [ ] 已理解并记录：`--redis-mode=sentinel|cluster` 仅启用客户端 HA 连接，**不等于 control-plane HA 已验收**；多副本 soak 与 SLO 量化见 [ha-soak-plan](ha-soak-plan.md)，当前状态 `[ENV-GATED]`

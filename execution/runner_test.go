@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/types"
 	"google.golang.org/grpc"
@@ -207,7 +208,7 @@ func (h *credRecordingHandler) observed(id string) (map[string]any, bool) {
 // the resolved credential map via input.Credential(name).
 func TestRunner_WithCredentialResolverAttachesToInput(t *testing.T) {
 	want := map[string]any{"dsn": "user:pass@tcp(db:3306)/xflow", "driver": "mysql"}
-	resolver := func(name string) map[string]any {
+	resolver := func(t tenant.TenantID, name string) map[string]any {
 		if name == "db" {
 			return want
 		}
@@ -312,7 +313,7 @@ func (h *resuspendCredHandler) prepareObserved(id string) (map[string]any, bool)
 // copied by value (it is a pointer), so the cloned input retains the resolver.
 func TestRunner_CredentialResolverSurvivesCloneInputWithData(t *testing.T) {
 	want := map[string]any{"dsn": "user:pass@tcp(db:3306)/xflow", "driver": "mysql"}
-	resolver := func(name string) map[string]any {
+	resolver := func(t tenant.TenantID, name string) map[string]any {
 		if name == "db" {
 			return want
 		}
@@ -344,5 +345,37 @@ func TestRunner_CredentialResolverSurvivesCloneInputWithData(t *testing.T) {
 	}
 	if got["dsn"] != want["dsn"] {
 		t.Fatalf("PrepareSuspend observed dsn = %v, want %v (resolver must survive cloneInputWithData)", got["dsn"], want["dsn"])
+	}
+}
+
+// TestRunner_CredentialResolverReceivesTenantFromContext pins that the tenant
+// carried by the execution context is forwarded to the credential resolver.
+// This is the local-runner counterpart to the dispatcher injecting tenant into
+// Assignment and the asynq consumer restoring it before Execute.
+func TestRunner_CredentialResolverReceivesTenantFromContext(t *testing.T) {
+	rec := newCredRecordingHandler()
+	resolver := func(t tenant.TenantID, name string) map[string]any {
+		if name != "db" {
+			return nil
+		}
+		return map[string]any{"tenant": string(t)}
+	}
+	runner := NewRunner(singleHandlerRegistry{handler: rec}, WithCredentialResolver(resolver))
+
+	ctx := tenant.WithTenant(context.Background(), "tenant-acme")
+	lease := &engine.TaskLease{
+		Task:     engine.Task{ExecutionID: "exec-tenant", NodeName: "probe"},
+		Input:    &types.Input{ExecutionID: "exec-tenant", NodeName: "probe"},
+		NodeType: "test.cred-probe",
+	}
+	if _, err := runner.Execute(ctx, lease); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	got, ok := rec.observed("exec-tenant")
+	if !ok {
+		t.Fatal("handler observed nil credential, want tenant-scoped resolver value")
+	}
+	if got["tenant"] != "tenant-acme" {
+		t.Fatalf("handler observed tenant = %v, want tenant-acme", got["tenant"])
 	}
 }

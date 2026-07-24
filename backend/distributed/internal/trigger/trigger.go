@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -19,54 +20,62 @@ func New(rdb redis.UniversalClient) *Primitives {
 	return &Primitives{rdb: rdb}
 }
 
-// Key schema (Redis Cluster-safe, G2 Phase 2 / Task 2.2).
+// Key schema (Redis Cluster-safe, G2 Phase 2 / Task 2.2 + Task 7.2 tenant scope).
 //
 // All Redis operations in this package are single-key. There is no Lua script
 // that touches more than one key, so no hash tag is required for cluster
-// safety. Each primitive owns a distinct key prefix:
+// safety. Each primitive owns a distinct key prefix, now scoped by tenant:
 //
-//	xflow:trigger:dedup:<key>       -> dedup marker (SetNX, single-key)
-//	xflow:trigger:lock:<key>        -> distributed lock value (SetNX + Lua)
-//	xflow:trigger:state:<scope>:<key> -> scoped state payload (Get/Set/Del)
+//	xflow:t<tenant>:trigger:dedup:<key>       -> dedup marker (SetNX, single-key)
+//	xflow:t<tenant>:trigger:lock:<key>        -> distributed lock value (SetNX + Lua)
+//	xflow:t<tenant>:trigger:state:<scope>:<key> -> scoped state payload (Get/Set/Del)
 //
 // The two Lua scripts (release/renew trigger lock) only reference KEYS[1],
 // which is the lock key for the same <key>. They are therefore cluster-safe
 // without hash tags.
 //
-// Tenant prefix is reserved for Task 7.2 (Phase 6/7). When a tenant prefix is
-// added, the expected shape is `xflow:{tenant}:trigger:dedup:<key>` etc.,
-// keeping the per-key operation model unchanged. The hash tag for any future
-// multi-key Lua must be anchored on a scope+key that all KEYS share, e.g.
-// `{<scope>:<key>}` or `{<key>}`.
-func triggerDedupKey(key string) string { return "xflow:trigger:dedup:" + key }
+// Tenant prefix is brace-free: Redis Cluster hash tag is "first { to first }",
+// so a braced `{tenant}` would steal the hash tag from any later `{<key>}` /
+// `{<scope>:<key>}` and collapse a whole tenant into one slot. The hash tag
+// for any future multi-key Lua must be anchored on a scope+key that all KEYS
+// share, e.g. `{<scope>:<key>}` or `{<key>}`.
+func triggerDedupKey(t tenant.TenantID, key string) string {
+	return "xflow:t" + string(t) + ":trigger:dedup:" + key
+}
 
-func triggerLockKey(key string) string { return "xflow:trigger:lock:" + key }
+func triggerLockKey(t tenant.TenantID, key string) string {
+	return "xflow:t" + string(t) + ":trigger:lock:" + key
+}
 
-func triggerStateKey(scope, key string) string {
-	return "xflow:trigger:state:" + scope + ":" + key
+func triggerStateKey(t tenant.TenantID, scope, key string) string {
+	return "xflow:t" + string(t) + ":trigger:state:" + scope + ":" + key
 }
 
 func (p *Primitives) Dedup(ctx context.Context, key string, ttl time.Duration) (bool, error) {
 	if ttl <= 0 {
 		ttl = 24 * time.Hour
 	}
-	return p.rdb.SetNX(ctx, triggerDedupKey(key), "1", ttl).Result()
+	t := tenant.FromContext(ctx)
+	return p.rdb.SetNX(ctx, triggerDedupKey(t, key), "1", ttl).Result()
 }
 
 func (p *Primitives) TryLock(ctx context.Context, key string, ttl time.Duration) (types.TriggerLock, bool, error) {
 	if ttl <= 0 {
 		ttl = time.Minute
 	}
+	t := tenant.FromContext(ctx)
 	token := uuid.NewString()
-	ok, err := p.rdb.SetNX(ctx, triggerLockKey(key), token, ttl).Result()
+	lockKey := triggerLockKey(t, key)
+	ok, err := p.rdb.SetNX(ctx, lockKey, token, ttl).Result()
 	if err != nil || !ok {
 		return nil, ok, err
 	}
-	return &triggerLock{rdb: p.rdb, key: triggerLockKey(key), token: token}, true, nil
+	return &triggerLock{rdb: p.rdb, key: lockKey, token: token}, true, nil
 }
 
-func (p *Primitives) State(_ context.Context, scope string) types.TriggerState {
-	return &triggerState{rdb: p.rdb, scope: scope}
+func (p *Primitives) State(ctx context.Context, scope string) types.TriggerState {
+	t := tenant.FromContext(ctx)
+	return &triggerState{rdb: p.rdb, tenant: t, scope: scope}
 }
 
 type triggerLock struct {
@@ -120,12 +129,13 @@ func (l *triggerLock) Release(ctx context.Context) error {
 }
 
 type triggerState struct {
-	rdb   redis.UniversalClient
-	scope string
+	rdb    redis.UniversalClient
+	tenant tenant.TenantID
+	scope  string
 }
 
 func (s *triggerState) Get(ctx context.Context, key string) ([]byte, error) {
-	b, err := s.rdb.Get(ctx, triggerStateKey(s.scope, key)).Bytes()
+	b, err := s.rdb.Get(ctx, triggerStateKey(s.tenant, s.scope, key)).Bytes()
 	if errors.Is(err, redis.Nil) {
 		return nil, nil
 	}
@@ -134,11 +144,11 @@ func (s *triggerState) Get(ctx context.Context, key string) ([]byte, error) {
 
 func (s *triggerState) Set(ctx context.Context, key string, value []byte, ttl time.Duration) error {
 	if ttl > 0 {
-		return s.rdb.Set(ctx, triggerStateKey(s.scope, key), value, ttl).Err()
+		return s.rdb.Set(ctx, triggerStateKey(s.tenant, s.scope, key), value, ttl).Err()
 	}
-	return s.rdb.Set(ctx, triggerStateKey(s.scope, key), value, 0).Err()
+	return s.rdb.Set(ctx, triggerStateKey(s.tenant, s.scope, key), value, 0).Err()
 }
 
 func (s *triggerState) Delete(ctx context.Context, key string) error {
-	return s.rdb.Del(ctx, triggerStateKey(s.scope, key)).Err()
+	return s.rdb.Del(ctx, triggerStateKey(s.tenant, s.scope, key)).Err()
 }

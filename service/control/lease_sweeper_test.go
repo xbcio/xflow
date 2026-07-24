@@ -81,19 +81,19 @@ type fakeObserver struct {
 	errs     []string
 }
 
-func (o *fakeObserver) OnSweepReclaim(execID, nodeName string, _ int64) {
+func (o *fakeObserver) OnSweepReclaim(ctx context.Context, execID, nodeName string, _ int64) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.reclaims = append(o.reclaims, execID+"/"+nodeName)
 }
 
-func (o *fakeObserver) OnSweepRace(execID, nodeName string) {
+func (o *fakeObserver) OnSweepRace(ctx context.Context, execID, nodeName string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.races = append(o.races, execID+"/"+nodeName)
 }
 
-func (o *fakeObserver) OnSweepError(execID, nodeName string, _ error) {
+func (o *fakeObserver) OnSweepError(ctx context.Context, execID, nodeName string, _ error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.errs = append(o.errs, execID+"/"+nodeName)
@@ -320,15 +320,15 @@ type timingSweepObserver struct {
 	repairs        []int
 }
 
-func (o *timingSweepObserver) OnSweepListExpired(candidates int, _ time.Duration, _ error) {
+func (o *timingSweepObserver) OnSweepListExpired(ctx context.Context, candidates int, _ time.Duration, _ error) {
 	o.listCandidates = append(o.listCandidates, candidates)
 }
 
-func (o *timingSweepObserver) OnSweepReclaimResult(result string, _ time.Duration) {
+func (o *timingSweepObserver) OnSweepReclaimResult(ctx context.Context, result string, _ time.Duration) {
 	o.reclaimResults = append(o.reclaimResults, result)
 }
 
-func (o *timingSweepObserver) OnSweepRepair(reconciled int, _ time.Duration, _ error) {
+func (o *timingSweepObserver) OnSweepRepair(ctx context.Context, reconciled int, _ time.Duration, _ error) {
 	o.repairs = append(o.repairs, reconciled)
 }
 

@@ -15,15 +15,15 @@ type leaseObserverRecorder struct {
 	repairCalls    int
 }
 
-func (r *leaseObserverRecorder) OnLeaseAcquire(result string, _ time.Duration) {
+func (r *leaseObserverRecorder) OnLeaseAcquire(ctx context.Context, result string, _ time.Duration) {
 	r.acquireResults = append(r.acquireResults, result)
 }
 
-func (r *leaseObserverRecorder) OnLeaseExpiryScan(_ int, _ time.Duration, _ error) {
+func (r *leaseObserverRecorder) OnLeaseExpiryScan(_ context.Context, _ int, _ time.Duration, _ error) {
 	r.scanCalls++
 }
 
-func (r *leaseObserverRecorder) OnLeaseRepair(_ int, _ time.Duration, _ error) {
+func (r *leaseObserverRecorder) OnLeaseRepair(_ context.Context, _ int, _ time.Duration, _ error) {
 	r.repairCalls++
 }
 

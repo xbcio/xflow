@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/types"
 )
@@ -90,6 +91,17 @@ func (m *DeadLetterManager) Replay(ctx context.Context, principal DeadLetterRepl
 	// here once B3 is wired; for G0 the caller injects a principal that holds
 	// it. The unauthorized outcome never reaches Redis.
 	if !principal.HasScope(ScopeDeadLetterReplay) {
+		return m.finish(ctx, engine.ReplayDeadLetterResult{Outcome: engine.ReplayUnauthorized, ExecutionID: req.ExecutionID}, req, nil)
+	}
+
+	// Tenant double-check: the authoritative tenant isolation is enforced by
+	// the store layer (Redis keys are prefixed by tenant). This is a fail-closed
+	// guard so the manager rejects a replay when the injected context tenant
+	// does not match the server-issued principal.TenantID before touching Redis.
+	// An empty principal.TenantID skips the check for G0 CLI backward
+	// compatibility; the store still scopes by the context tenant.
+	ctxTenant := tenant.FromContext(ctx)
+	if principal.TenantID != "" && tenant.TenantID(principal.TenantID) != ctxTenant {
 		return m.finish(ctx, engine.ReplayDeadLetterResult{Outcome: engine.ReplayUnauthorized, ExecutionID: req.ExecutionID}, req, nil)
 	}
 

@@ -3,8 +3,10 @@ package control
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/service/protocol"
@@ -17,6 +19,7 @@ var (
 	ErrRunnerIDRequired      = errors.New("runner_id is required")
 	ErrRunnerSessionRequired = errors.New("runner_id and session_id are required")
 	ErrConcurrencyRequired   = errors.New("runner_id and concurrency are required")
+	ErrInvalidTenant         = errors.New("invalid tenant")
 	ErrRunnerNotFound        = errors.New("runner not found")
 	ErrLeaseRequired         = errors.New("runner_id, session_id and lease are required")
 	ErrEngineNotConfigured   = errors.New("engine not configured")
@@ -54,7 +57,7 @@ type leaseRecoveryEngine interface {
 
 // AuthObserver receives auth allow/deny/dry-run decisions.
 type AuthObserver interface {
-	OnAuthDecision(op, result, authMode string)
+	OnAuthDecision(ctx context.Context, op, result, authMode string)
 }
 
 func (c *Core) authn() Authenticator {
@@ -67,20 +70,20 @@ func (c *Core) authn() Authenticator {
 // authDeny logs an auth outcome (with fingerprinted token) and returns the
 // transport-agnostic unauthenticated sentinel. Dry-run denials are logged but
 // return nil so the request proceeds.
-func (c *Core) authDeny(runnerID, token, op string, info TransportInfo, err error) error {
+func (c *Core) authDeny(ctx context.Context, runnerID, token, op string, info TransportInfo, err error) error {
 	if err == nil {
-		c.observeAuth(op, "allow")
+		c.observeAuth(ctx, op, "allow")
 		return nil
 	}
 	if IsDryRunDenial(err) {
-		c.observeAuth(op, "dry_run_allow")
+		c.observeAuth(ctx, op, "dry_run_allow")
 		if c.logger != nil {
 			c.logger.Error("auth_dry_run_violation",
 				"op", op, "runner", runnerID, "token", TokenFingerprint(token), "cn", info.TLSPeerCN, "err", err)
 		}
 		return nil
 	}
-	c.observeAuth(op, "deny")
+	c.observeAuth(ctx, op, "deny")
 	if c.logger != nil {
 		c.logger.Error("auth_denied",
 			"op", op, "runner", runnerID, "token", TokenFingerprint(token), "cn", info.TLSPeerCN, "err", err)
@@ -88,11 +91,11 @@ func (c *Core) authDeny(runnerID, token, op string, info TransportInfo, err erro
 	return ErrUnauthenticated
 }
 
-func (c *Core) observeAuth(op, result string) {
+func (c *Core) observeAuth(ctx context.Context, op, result string) {
 	if c.authObserver == nil {
 		return
 	}
-	c.authObserver.OnAuthDecision(op, result, authMode(c.authn()))
+	c.authObserver.OnAuthDecision(ctx, op, result, authMode(c.authn()))
 }
 
 func authMode(auth Authenticator) string {
@@ -113,8 +116,13 @@ func (c *Core) register(ctx context.Context, req protocol.RegisterRunnerRequest,
 	if req.RunnerID == "" || req.Concurrency <= 0 {
 		return protocol.RegisterRunnerResponse{}, ErrConcurrencyRequired
 	}
+	for _, t := range tenantIDs(req.Tenants) {
+		if err := tenant.Validate(t); err != nil {
+			return protocol.RegisterRunnerResponse{}, fmt.Errorf("%w: %v", ErrInvalidTenant, err)
+		}
+	}
 	policy, authErr := c.authn().AuthenticateRegister(req.RunnerID, req.AuthToken, info)
-	if err := c.authDeny(req.RunnerID, req.AuthToken, "register", info, authErr); err != nil {
+	if err := c.authDeny(ctx, req.RunnerID, req.AuthToken, "register", info, authErr); err != nil {
 		return protocol.RegisterRunnerResponse{}, err
 	}
 	session, err := c.runners.Register(ctx, RegisterRunnerRequest{
@@ -122,6 +130,7 @@ func (c *Core) register(ctx context.Context, req protocol.RegisterRunnerRequest,
 		Capacity:     req.Concurrency,
 		Capabilities: req.Capabilities,
 		Policy:       policy,
+		Tenants:      tenantIDs(req.Tenants),
 		Now:          time.Now(),
 	})
 	if err != nil {
@@ -135,7 +144,7 @@ func (c *Core) heartbeat(ctx context.Context, req protocol.HeartbeatRequest, inf
 		return protocol.HeartbeatResponse{}, ErrRunnerSessionRequired
 	}
 	_, authErr := c.authn().AuthenticateOngoing(req.RunnerID, req.AuthToken, info)
-	if err := c.authDeny(req.RunnerID, req.AuthToken, "heartbeat", info, authErr); err != nil {
+	if err := c.authDeny(ctx, req.RunnerID, req.AuthToken, "heartbeat", info, authErr); err != nil {
 		return protocol.HeartbeatResponse{}, err
 	}
 	at := time.Unix(req.Timestamp, 0)
@@ -159,7 +168,7 @@ func (c *Core) pollTask(ctx context.Context, req protocol.PollTaskRequest, info 
 		return protocol.PollTaskResponse{}, ErrRunnerSessionRequired
 	}
 	_, authErr := c.authn().AuthenticateOngoing(req.RunnerID, req.AuthToken, info)
-	if err := c.authDeny(req.RunnerID, req.AuthToken, "poll", info, authErr); err != nil {
+	if err := c.authDeny(ctx, req.RunnerID, req.AuthToken, "poll", info, authErr); err != nil {
 		return protocol.PollTaskResponse{}, err
 	}
 	for {
@@ -259,7 +268,7 @@ func (c *Core) reportResult(ctx context.Context, req protocol.ReportResultReques
 		return protocol.ReportResultResponse{}, ErrLeaseRequired
 	}
 	_, authErr := c.authn().AuthenticateOngoing(req.RunnerID, req.AuthToken, info)
-	if err := c.authDeny(req.RunnerID, req.AuthToken, "report_result", info, authErr); err != nil {
+	if err := c.authDeny(ctx, req.RunnerID, req.AuthToken, "report_result", info, authErr); err != nil {
 		return protocol.ReportResultResponse{}, err
 	}
 	if c.engine == nil {
@@ -330,6 +339,7 @@ func normalizeRunnerError(err error, logger engine.Logger, op string) error {
 	case errors.Is(err, ErrRunnerIDRequired),
 		errors.Is(err, ErrRunnerSessionRequired),
 		errors.Is(err, ErrConcurrencyRequired),
+		errors.Is(err, ErrInvalidTenant),
 		errors.Is(err, ErrRunnerNotFound),
 		errors.Is(err, ErrLeaseRequired),
 		errors.Is(err, ErrEngineNotConfigured),
@@ -343,4 +353,24 @@ func normalizeRunnerError(err error, logger engine.Logger, op string) error {
 		}
 		return ErrInternalServer
 	}
+}
+
+func tenantIDs(strs []string) []tenant.TenantID {
+	if len(strs) == 0 {
+		return nil
+	}
+	out := make([]tenant.TenantID, 0, len(strs))
+	seen := make(map[tenant.TenantID]struct{})
+	for _, s := range strs {
+		if s == "" {
+			continue
+		}
+		t := tenant.TenantID(s)
+		if _, ok := seen[t]; ok {
+			continue
+		}
+		seen[t] = struct{}{}
+		out = append(out, t)
+	}
+	return out
 }

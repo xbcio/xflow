@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/service/protocol"
 )
@@ -26,6 +27,7 @@ type memoryRunnerState struct {
 	snapshot       RunnerSnapshot
 	policy         RunnerPolicy
 	sessionID      string
+	tenants        map[tenant.TenantID]struct{}
 	activeClaims   map[ClaimID]AssignmentID
 	activeOrder    []ClaimID
 	finalizedLease map[AssignmentID]engine.TaskLease
@@ -82,10 +84,12 @@ func (d *MemoryRunnerDirectory) Register(_ context.Context, req RegisterRunnerRe
 			Capacity:      req.Capacity,
 			Capabilities:  cloneCapabilities(req.Capabilities),
 			InFlight:      inFlight,
+			Tenants:       normalizeRunnerTenants(req.Tenants),
 			LastHeartbeat: now,
 		},
 		policy:         req.Policy,
 		sessionID:      session.SessionID,
+		tenants:        tenantSet(req.Tenants),
 		activeClaims:   make(map[ClaimID]AssignmentID),
 		activeOrder:    nil,
 		finalizedLease: finalizedLease,
@@ -166,6 +170,9 @@ func (d *MemoryRunnerDirectory) ClaimForRunner(_ context.Context, req ClaimReque
 			continue
 		}
 		if !state.policy.Allows(assignment.Routing.NodeType) {
+			continue
+		}
+		if !state.canServeTenant(assignment.TenantID) {
 			continue
 		}
 
@@ -308,6 +315,7 @@ func (d *MemoryRunnerDirectory) Runner(_ context.Context, runnerID string) (Runn
 	}
 	snapshot := state.snapshot
 	snapshot.Capabilities = cloneCapabilities(snapshot.Capabilities)
+	snapshot.Tenants = normalizeRunnerTenants(snapshot.Tenants)
 	return snapshot, true
 }
 
@@ -465,4 +473,32 @@ func canRunRouting(capabilities []protocol.Capability, routing engine.TaskRoutin
 		}
 	}
 	return false
+}
+
+func tenantSet(tenants []tenant.TenantID) map[tenant.TenantID]struct{} {
+	set := make(map[tenant.TenantID]struct{}, len(tenants))
+	for _, t := range tenants {
+		set[t] = struct{}{}
+	}
+	return set
+}
+
+func normalizeRunnerTenants(tenants []tenant.TenantID) []tenant.TenantID {
+	if len(tenants) == 0 {
+		return []tenant.TenantID{tenant.DefaultTenant}
+	}
+	out := make([]tenant.TenantID, len(tenants))
+	copy(out, tenants)
+	return out
+}
+
+func (s *memoryRunnerState) canServeTenant(t tenant.TenantID) bool {
+	if len(s.tenants) == 0 {
+		return t == tenant.DefaultTenant || t == ""
+	}
+	if t == "" {
+		t = tenant.DefaultTenant
+	}
+	_, ok := s.tenants[t]
+	return ok
 }

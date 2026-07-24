@@ -6,20 +6,23 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/types"
 	"github.com/redis/go-redis/v9"
 )
 
 func (s *Store) PutOutput(ctx context.Context, id types.ExecutionID, name string, data map[string]any) error {
+	t := tenant.FromContext(ctx)
 	b, _ := json.Marshal(data) // json.Marshal of map[string]any cannot fail
-	if err := s.rdb.Set(ctx, outputKey(id, name), string(b), s.getExecTTL(id)).Err(); err != nil {
+	if err := s.rdb.Set(ctx, outputKey(t, id, name), string(b), s.getExecTTL(id)).Err(); err != nil {
 		return err
 	}
-	return s.refreshTransientTTL(ctx, id, outputKey(id, name))
+	return s.refreshTransientTTL(ctx, id, outputKey(t, id, name))
 }
 
 func (s *Store) GetOutput(ctx context.Context, id types.ExecutionID, name string) (map[string]any, error) {
-	raw, err := s.rdb.Get(ctx, outputKey(id, name)).Bytes()
+	t := tenant.FromContext(ctx)
+	raw, err := s.rdb.Get(ctx, outputKey(t, id, name)).Bytes()
 	if err == redis.Nil {
 		return nil, nil
 	}
@@ -46,17 +49,17 @@ func (s *Store) GetOutput(ctx context.Context, id types.ExecutionID, name string
 //
 // Signal-name-keyed keys (waiter/signal) are only included when spec is
 // non-nil; the caller supplies the spec it used to park the node.
-func suspendNodeTTLKeys(id types.ExecutionID, nodeName string, spec *types.SuspendSpec) []string {
+func suspendNodeTTLKeys(t tenant.TenantID, id types.ExecutionID, nodeName string, spec *types.SuspendSpec) []string {
 	keys := []string{
-		nodeStatusKey(id, nodeName),
-		nodeMetaKey(id, nodeName),
-		outputKey(id, nodeName),
-		waiterSpecKey(id, nodeName),
-		signalBatchKey(id, nodeName),
+		nodeStatusKey(t, id, nodeName),
+		nodeMetaKey(t, id, nodeName),
+		outputKey(t, id, nodeName),
+		waiterSpecKey(t, id, nodeName),
+		signalBatchKey(t, id, nodeName),
 	}
 	if spec != nil {
 		for _, sigName := range spec.Signals {
-			keys = append(keys, waiterKey(id, sigName), signalKey(id, sigName))
+			keys = append(keys, waiterKey(t, id, sigName), signalKey(t, id, sigName))
 		}
 	}
 	return keys
@@ -75,15 +78,16 @@ func suspendNodeTTLKeys(id types.ExecutionID, nodeName string, spec *types.Suspe
 // multi-signal quorum state) are renewed alongside the execution-level keys. A
 // nil spec renews only the node-name-keyed subset.
 func (s *Store) extendExecTTL(ctx context.Context, id types.ExecutionID, nodeName string, spec *types.SuspendSpec, ttl time.Duration) error {
+	t := tenant.FromContext(ctx)
 	pipe := s.rdb.Pipeline()
-	pipe.Expire(ctx, execKey(id, "status"), ttl)
-	pipe.Expire(ctx, execKey(id, "params"), ttl)
-	pipe.Expire(ctx, execKey(id, "runtime"), ttl)
-	pipe.Expire(ctx, execKey(id, "trace_id"), ttl)
-	pipe.Expire(ctx, execKey(id, "span_id"), ttl)
-	pipe.Expire(ctx, execKey(id, "graph"), ttl)
-	pipe.Expire(ctx, suspendedNodesKey(id), ttl)
-	for _, key := range suspendNodeTTLKeys(id, nodeName, spec) {
+	pipe.Expire(ctx, execKey(t, id, "status"), ttl)
+	pipe.Expire(ctx, execKey(t, id, "params"), ttl)
+	pipe.Expire(ctx, execKey(t, id, "runtime"), ttl)
+	pipe.Expire(ctx, execKey(t, id, "trace_id"), ttl)
+	pipe.Expire(ctx, execKey(t, id, "span_id"), ttl)
+	pipe.Expire(ctx, execKey(t, id, "graph"), ttl)
+	pipe.Expire(ctx, suspendedNodesKey(t, id), ttl)
+	for _, key := range suspendNodeTTLKeys(t, id, nodeName, spec) {
 		pipe.Expire(ctx, key, ttl)
 	}
 	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
