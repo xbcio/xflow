@@ -26,7 +26,7 @@ const fixtureDefinition: WorkflowDef = {
 afterEach(cleanup);
 
 describe("RightSidebar", () => {
-  it("renders the catalog and inspector panels", () => {
+  it("renders the inspector panel", () => {
     render(
       <EditorProvider>
         <RightSidebar />
@@ -34,7 +34,6 @@ describe("RightSidebar", () => {
     );
 
     expect(screen.getByTestId("right-sidebar")).toBeDefined();
-    expect(screen.getByTestId("node-catalog")).toBeDefined();
     expect(screen.getByTestId("node-inspector")).toBeDefined();
     expect(screen.getByTestId("right-sidebar-collapse")).toBeDefined();
   });
@@ -47,8 +46,8 @@ describe("RightSidebar", () => {
       </EditorProvider>
     );
 
-    expect(screen.getByTestId("inspector-name").textContent).toBe("Fetch");
     expect(screen.getByTestId("inspector-type").textContent).toBe("http");
+    expect(screen.getByTestId("inspector-kind").textContent).toBe("action");
   });
 
   it("collapses the sidebar when the collapse button is clicked", () => {

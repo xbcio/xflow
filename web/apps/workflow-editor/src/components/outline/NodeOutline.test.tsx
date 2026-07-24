@@ -42,7 +42,7 @@ describe("NodeOutline", () => {
       />,
     );
 
-    expect(screen.getByText("No nodes")).toBeDefined();
+    expect(screen.getByText("暂无节点")).toBeDefined();
   });
 
   it("renders empty state when definition is null", () => {
@@ -54,7 +54,7 @@ describe("NodeOutline", () => {
       />,
     );
 
-    expect(screen.getByText("No nodes")).toBeDefined();
+    expect(screen.getByText("暂无节点")).toBeDefined();
   });
 
   it("highlights selected nodes", () => {
@@ -66,7 +66,7 @@ describe("NodeOutline", () => {
       />,
     );
 
-    const selectedItem = container.querySelector(".node-outline-item.selected");
+    const selectedItem = container.querySelector(".outline-item.selected");
     expect(selectedItem).not.toBeNull();
     expect(selectedItem?.getAttribute("data-testid")).toBe(
       "node-outline-item-http",

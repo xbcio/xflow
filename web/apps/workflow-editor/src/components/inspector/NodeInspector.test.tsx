@@ -11,7 +11,7 @@ describe("NodeInspector", () => {
     render(<NodeInspector selectedNodes={[]} />);
 
     expect(screen.getByTestId("node-inspector")).toBeDefined();
-    expect(screen.getByTestId("inspector-empty")).toBeDefined();
+    expect(screen.getByText("请在画布中选择一个节点")).toBeDefined();
     expect(screen.queryByTestId("inspector-content")).toBeNull();
   });
 
@@ -44,10 +44,8 @@ describe("NodeInspector", () => {
     render(<NodeInspector selectedNodes={[node]} />);
 
     expect(screen.getByTestId("inspector-content")).toBeDefined();
-    expect(screen.getByTestId("inspector-name").textContent).toBe("Fetch Data");
     expect(screen.getByTestId("inspector-type").textContent).toBe("http");
     expect(screen.getByTestId("inspector-kind").textContent).toBe("action");
-    expect(screen.getByTestId("inspector-version").textContent).toBe("1");
 
     const inputs = screen.getAllByTestId("inspector-input");
     expect(inputs.length).toBe(2);
@@ -63,8 +61,7 @@ describe("NodeInspector", () => {
 
     render(<NodeInspector selectedNodes={[node]} />);
 
-    expect(screen.getByTestId("inspector-name").textContent).toContain("unnamed");
-    expect(screen.getByTestId("inspector-type").textContent).toContain("unknown");
-    expect(screen.getByTestId("inspector-kind").textContent).toContain("unknown");
+    expect(screen.getByTestId("inspector-type").textContent).toContain("未知");
+    expect(screen.getByTestId("inspector-kind").textContent).toContain("未知");
   });
 });

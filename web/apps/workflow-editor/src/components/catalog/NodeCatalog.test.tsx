@@ -16,11 +16,24 @@ describe("NodeCatalog", () => {
     );
 
     expect(screen.getByTestId("node-catalog")).toBeDefined();
-    expect(screen.getByTestId("catalog-search")).toBeDefined();
+    expect(screen.getByTestId("catalog-search-toggle")).toBeDefined();
+    expect(screen.getByTestId("catalog-search-box").classList.contains("hidden")).toBe(true);
 
     for (const item of DEFAULT_CATALOG) {
       expect(screen.getByTestId(`catalog-item-${item.type}`)).toBeDefined();
     }
+  });
+
+  it("shows search input after clicking search toggle", () => {
+    render(
+      <EditorProvider>
+        <NodeCatalog />
+      </EditorProvider>
+    );
+
+    fireEvent.click(screen.getByTestId("catalog-search-toggle"));
+    expect(screen.getByTestId("catalog-search-box").classList.contains("hidden")).toBe(false);
+    expect(screen.getByTestId("catalog-search")).toBeDefined();
   });
 
   it("filters catalog items by keyword", () => {
@@ -30,6 +43,7 @@ describe("NodeCatalog", () => {
       </EditorProvider>
     );
 
+    fireEvent.click(screen.getByTestId("catalog-search-toggle"));
     const searchInput = screen.getByTestId("catalog-search");
     fireEvent.change(searchInput, { target: { value: "http" } });
 
@@ -45,6 +59,7 @@ describe("NodeCatalog", () => {
       </EditorProvider>
     );
 
+    fireEvent.click(screen.getByTestId("catalog-search-toggle"));
     const searchInput = screen.getByTestId("catalog-search");
     fireEvent.change(searchInput, { target: { value: "nonexistent" } });
 

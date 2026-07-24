@@ -18,6 +18,7 @@ const mockFitCanvas = vi.fn();
 const mockToggleLeftSidebar = vi.fn();
 const mockToggleRightSidebar = vi.fn();
 const mockToggleBottomPanel = vi.fn();
+const mockToggleTheme = vi.fn();
 
 const defaultDefinition = {
   id: "wf-1",
@@ -53,6 +54,7 @@ function createMockEditorValue(
     catalogKeyword: "",
     viewport: defaultViewport,
     panels: defaultPanels,
+    theme: "light",
     setDefinition: mockSetDefinition,
     setDiagnostics: mockSetDiagnostics,
     setExecutionSnapshot: mockSetExecutionSnapshot,
@@ -65,6 +67,7 @@ function createMockEditorValue(
     toggleLeftSidebar: mockToggleLeftSidebar,
     toggleRightSidebar: mockToggleRightSidebar,
     toggleBottomPanel: mockToggleBottomPanel,
+    toggleTheme: mockToggleTheme,
     ...overrides,
   };
 }
@@ -98,20 +101,21 @@ describe("TopToolbar", () => {
   it("renders the breadcrumb and all toolbar buttons", () => {
     render(<TopToolbar workflowId="wf-1" />);
 
-    expect(screen.getByText("Workflows / default / health-check")).toBeDefined();
-    expect(screen.getByLabelText("Save workflow")).toBeDefined();
-    expect(screen.getByLabelText("Validate workflow")).toBeDefined();
-    expect(screen.getByLabelText("Publish workflow")).toBeDefined();
-    expect(screen.getByLabelText("Run workflow")).toBeDefined();
-    expect(screen.getByLabelText("Undo")).toBeDefined();
-    expect(screen.getByLabelText("Redo")).toBeDefined();
-    expect(screen.getByLabelText("Zoom out")).toBeDefined();
+    expect(screen.getByText("工作流 / default / health-check")).toBeDefined();
+    expect(screen.getByLabelText("保存工作流")).toBeDefined();
+    expect(screen.getByLabelText("校验工作流")).toBeDefined();
+    expect(screen.getByLabelText("发布工作流")).toBeDefined();
+    expect(screen.getByLabelText("运行工作流")).toBeDefined();
+    expect(screen.getByLabelText("撤销")).toBeDefined();
+    expect(screen.getByLabelText("重做")).toBeDefined();
+    expect(screen.getByLabelText("缩小")).toBeDefined();
     expect(screen.getByText("100%")).toBeDefined();
-    expect(screen.getByLabelText("Zoom in")).toBeDefined();
-    expect(screen.getByLabelText("Fit canvas")).toBeDefined();
-    expect(screen.getByLabelText("Toggle left sidebar")).toBeDefined();
-    expect(screen.getByLabelText("Toggle right sidebar")).toBeDefined();
-    expect(screen.getByLabelText("Toggle bottom panel")).toBeDefined();
+    expect(screen.getByLabelText("放大")).toBeDefined();
+    expect(screen.getByLabelText("适配画布")).toBeDefined();
+    expect(screen.getByLabelText("切换左侧面板")).toBeDefined();
+    expect(screen.getByLabelText("切换右侧面板")).toBeDefined();
+    expect(screen.getByLabelText("切换底部面板")).toBeDefined();
+    expect(screen.getByLabelText("切换主题")).toBeDefined();
   });
 
   it("falls back to Editor: workflowId when namespace or name is missing", () => {
@@ -120,29 +124,29 @@ describe("TopToolbar", () => {
     );
     render(<TopToolbar workflowId="wf-2" />);
 
-    expect(screen.getByText("Editor: wf-2")).toBeDefined();
+    expect(screen.getByText("编辑器: wf-2")).toBeDefined();
   });
 
   it("calls save, validate, publish and run actions on click", () => {
     render(<TopToolbar workflowId="wf-1" />);
 
-    fireEvent.click(screen.getByLabelText("Save workflow"));
+    fireEvent.click(screen.getByLabelText("保存工作流"));
     expect(mockedActions.saveWorkflow).toHaveBeenCalledTimes(1);
     expect(mockedActions.saveWorkflow).toHaveBeenCalledWith(defaultDefinition);
 
-    fireEvent.click(screen.getByLabelText("Validate workflow"));
+    fireEvent.click(screen.getByLabelText("校验工作流"));
     expect(mockedActions.validateWorkflow).toHaveBeenCalledTimes(1);
     expect(mockedActions.validateWorkflow).toHaveBeenCalledWith(
       defaultDefinition
     );
 
-    fireEvent.click(screen.getByLabelText("Publish workflow"));
+    fireEvent.click(screen.getByLabelText("发布工作流"));
     expect(mockedActions.publishWorkflow).toHaveBeenCalledTimes(1);
     expect(mockedActions.publishWorkflow).toHaveBeenCalledWith(
       defaultDefinition
     );
 
-    fireEvent.click(screen.getByLabelText("Run workflow"));
+    fireEvent.click(screen.getByLabelText("运行工作流"));
     expect(mockedActions.runWorkflow).toHaveBeenCalledTimes(1);
     expect(mockedActions.runWorkflow).toHaveBeenCalledWith(defaultDefinition);
   });
@@ -150,37 +154,44 @@ describe("TopToolbar", () => {
   it("calls undo and redo actions on click", () => {
     render(<TopToolbar workflowId="wf-1" />);
 
-    fireEvent.click(screen.getByLabelText("Undo"));
+    fireEvent.click(screen.getByLabelText("撤销"));
     expect(mockedActions.undo).toHaveBeenCalledTimes(1);
 
-    fireEvent.click(screen.getByLabelText("Redo"));
+    fireEvent.click(screen.getByLabelText("重做"));
     expect(mockedActions.redo).toHaveBeenCalledTimes(1);
   });
 
   it("calls zoom and fit actions on click", () => {
     render(<TopToolbar workflowId="wf-1" />);
 
-    fireEvent.click(screen.getByLabelText("Zoom out"));
+    fireEvent.click(screen.getByLabelText("缩小"));
     expect(mockZoomOut).toHaveBeenCalledTimes(1);
 
-    fireEvent.click(screen.getByLabelText("Zoom in"));
+    fireEvent.click(screen.getByLabelText("放大"));
     expect(mockZoomIn).toHaveBeenCalledTimes(1);
 
-    fireEvent.click(screen.getByLabelText("Fit canvas"));
+    fireEvent.click(screen.getByLabelText("适配画布"));
     expect(mockFitCanvas).toHaveBeenCalledTimes(1);
   });
 
   it("calls panel toggle actions on click", () => {
     render(<TopToolbar workflowId="wf-1" />);
 
-    fireEvent.click(screen.getByLabelText("Toggle left sidebar"));
+    fireEvent.click(screen.getByLabelText("切换左侧面板"));
     expect(mockToggleLeftSidebar).toHaveBeenCalledTimes(1);
 
-    fireEvent.click(screen.getByLabelText("Toggle right sidebar"));
+    fireEvent.click(screen.getByLabelText("切换右侧面板"));
     expect(mockToggleRightSidebar).toHaveBeenCalledTimes(1);
 
-    fireEvent.click(screen.getByLabelText("Toggle bottom panel"));
+    fireEvent.click(screen.getByLabelText("切换底部面板"));
     expect(mockToggleBottomPanel).toHaveBeenCalledTimes(1);
+  });
+
+  it("calls theme toggle on click", () => {
+    render(<TopToolbar workflowId="wf-1" />);
+
+    fireEvent.click(screen.getByLabelText("切换主题"));
+    expect(mockToggleTheme).toHaveBeenCalledTimes(1);
   });
 
   it("does not call primary action handlers when no definition is loaded", () => {
@@ -189,16 +200,16 @@ describe("TopToolbar", () => {
     );
     render(<TopToolbar workflowId="wf-empty" />);
 
-    fireEvent.click(screen.getByLabelText("Save workflow"));
+    fireEvent.click(screen.getByLabelText("保存工作流"));
     expect(mockedActions.saveWorkflow).not.toHaveBeenCalled();
 
-    fireEvent.click(screen.getByLabelText("Validate workflow"));
+    fireEvent.click(screen.getByLabelText("校验工作流"));
     expect(mockedActions.validateWorkflow).not.toHaveBeenCalled();
 
-    fireEvent.click(screen.getByLabelText("Publish workflow"));
+    fireEvent.click(screen.getByLabelText("发布工作流"));
     expect(mockedActions.publishWorkflow).not.toHaveBeenCalled();
 
-    fireEvent.click(screen.getByLabelText("Run workflow"));
+    fireEvent.click(screen.getByLabelText("运行工作流"));
     expect(mockedActions.runWorkflow).not.toHaveBeenCalled();
   });
 });

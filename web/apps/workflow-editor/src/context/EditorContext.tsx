@@ -15,6 +15,7 @@ import type {
 import type {
   EditorAction,
   EditorState,
+  EditorTheme,
   PanelVisibility,
   ViewportState,
 } from "../types/editor";
@@ -36,6 +37,7 @@ export interface EditorContextValue extends EditorState {
   toggleLeftSidebar: () => void;
   toggleRightSidebar: () => void;
   toggleBottomPanel: () => void;
+  toggleTheme: () => void;
 }
 
 const defaultPanelVisibility: PanelVisibility = {
@@ -49,6 +51,15 @@ const defaultViewport: ViewportState = {
   y: 0,
   zoom: 1,
 };
+
+function getInitialTheme(): EditorTheme {
+  if (typeof window !== "undefined" && window.matchMedia) {
+    return window.matchMedia("(prefers-color-scheme: dark)").matches
+      ? "dark"
+      : "light";
+  }
+  return "light";
+}
 
 const defaultEditorMetadata: WorkflowEditorMetadata = {
   positions: {},
@@ -66,6 +77,7 @@ const initialState: EditorState = {
   catalogKeyword: "",
   viewport: { ...defaultViewport },
   panels: { ...defaultPanelVisibility },
+  theme: getInitialTheme(),
 };
 
 function clampZoom(zoom: number): number {
@@ -160,6 +172,12 @@ function editorReducer(state: EditorState, action: EditorAction): EditorState {
         },
       };
 
+    case "TOGGLE_THEME":
+      return {
+        ...state,
+        theme: state.theme === "light" ? "dark" : "light",
+      };
+
     default:
       return state;
   }
@@ -232,6 +250,10 @@ export function EditorProvider({
     dispatch({ type: "TOGGLE_BOTTOM_PANEL" });
   }, []);
 
+  const toggleTheme = useCallback(() => {
+    dispatch({ type: "TOGGLE_THEME" });
+  }, []);
+
   const value = useMemo<EditorContextValue>(
     () => ({
       ...state,
@@ -247,6 +269,7 @@ export function EditorProvider({
       toggleLeftSidebar,
       toggleRightSidebar,
       toggleBottomPanel,
+      toggleTheme,
     }),
     [
       state,
@@ -262,6 +285,7 @@ export function EditorProvider({
       toggleLeftSidebar,
       toggleRightSidebar,
       toggleBottomPanel,
+      toggleTheme,
     ]
   );
 

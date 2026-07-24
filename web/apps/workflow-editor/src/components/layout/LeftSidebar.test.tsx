@@ -17,7 +17,7 @@ const mockDefinition: WorkflowDef = {
 afterEach(cleanup);
 
 describe("LeftSidebar", () => {
-  it("renders outline header and node list", () => {
+  it("renders catalog and outline sections", () => {
     render(
       <EditorProvider initialDefinition={mockDefinition}>
         <LeftSidebar />
@@ -25,8 +25,10 @@ describe("LeftSidebar", () => {
     );
 
     expect(screen.getByTestId("left-sidebar")).toBeDefined();
-    expect(screen.getByText("Outline")).toBeDefined();
+    expect(screen.getByText("节点")).toBeDefined();
+    expect(screen.getByText("大纲")).toBeDefined();
     expect(screen.getByTestId("node-outline")).toBeDefined();
+    expect(screen.getByTestId("node-catalog")).toBeDefined();
     expect(screen.getByText("Start")).toBeDefined();
     expect(screen.getByText("HTTP Request")).toBeDefined();
   });
@@ -54,9 +56,8 @@ describe("LeftSidebar", () => {
       </EditorProvider>,
     );
 
-    const collapseButton = screen.getByTestId("left-sidebar-collapse-button");
-    fireEvent.click(collapseButton);
-    fireEvent.click(collapseButton);
+    fireEvent.click(screen.getByTestId("left-sidebar-collapse-button"));
+    fireEvent.click(screen.getByTestId("left-sidebar-collapse-button"));
 
     expect(screen.getByTestId("node-outline")).toBeDefined();
     expect(document.querySelector(".left-sidebar.collapsed")).toBeNull();
@@ -71,7 +72,7 @@ describe("LeftSidebar", () => {
 
     fireEvent.click(screen.getByText("HTTP Request"));
 
-    const selectedItem = document.querySelector(".node-outline-item.selected");
+    const selectedItem = document.querySelector(".outline-item.selected");
     expect(selectedItem).not.toBeNull();
     expect(selectedItem?.getAttribute("data-testid")).toBe(
       "node-outline-item-http",

@@ -28,7 +28,7 @@ interface EditorPageInnerProps {
 }
 
 function EditorPageInner({ workflowId, config }: EditorPageInnerProps) {
-  const { setDefinition } = useEditor();
+  const { setDefinition, theme } = useEditor();
 
   useEffect(() => {
     if (import.meta.env.DEV && config.mockEnabled) {
@@ -49,13 +49,13 @@ function EditorPageInner({ workflowId, config }: EditorPageInnerProps) {
 
   return (
     <div
-      className="xflow-root flex flex-col w-screen h-screen overflow-hidden bg-editor-canvas"
+      className={`xflow-root flex flex-col w-screen h-screen overflow-hidden bg-editor-bg text-editor-text ${theme === "dark" ? "dark" : ""}`}
       data-testid="editor-page"
     >
       <TopToolbar workflowId={workflowId} />
       <div className="flex flex-row flex-1 min-h-0 overflow-hidden">
         <LeftSidebar />
-        <main className="flex-1 min-w-0 min-h-0 relative overflow-hidden">
+        <main className="relative flex-1 min-w-0 min-h-0 p-0 overflow-hidden">
           <CanvasContainer />
         </main>
         <RightSidebar />

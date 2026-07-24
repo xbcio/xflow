@@ -18,6 +18,8 @@
  * host happens to define will not affect the renderer. The `:where()` wrapper
  * keeps specificity at 0,1,0 so host overrides remain easy.
  */
+
+/* Light theme variables (default) */
 .xflow-root {
   --xf-color-running: #3b82f6;
   --xf-color-completed: #22c55e;
@@ -26,15 +28,46 @@
   --xf-color-unknown: #6b7280;
   --xf-color-error: #ef4444;
   --xf-color-warning: #f59e0b;
+
   --xf-node-bg: #ffffff;
   --xf-node-border: #d1d5db;
   --xf-node-text: #111827;
-  --xf-node-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  --xf-node-text-secondary: #6b7280;
+  --xf-node-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --xf-node-selected: #3b82f6;
+  --xf-node-selected-shadow: 0 0 0 2px rgba(59, 130, 246, 0.25);
+  --xf-node-header-bg: #f3f4f6;
+  --xf-node-header-border: #e5e7eb;
+  --xf-port-bg: #9ca3af;
+  --xf-port-border: #ffffff;
 
   width: 100%;
   height: 100%;
   min-height: 320px;
   position: relative;
+}
+
+/* Dark theme overrides */
+.xflow-root.dark {
+  --xf-color-running: #60a5fa;
+  --xf-color-completed: #4ade80;
+  --xf-color-failed: #f87171;
+  --xf-color-suspended: #fbbf24;
+  --xf-color-unknown: #9ca3af;
+  --xf-color-error: #f87171;
+  --xf-color-warning: #fbbf24;
+
+  --xf-node-bg: #262626;
+  --xf-node-border: #404040;
+  --xf-node-text: #e5e5e5;
+  --xf-node-text-secondary: #a0a0a0;
+  --xf-node-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --xf-node-selected: #60a5fa;
+  --xf-node-selected-shadow: 0 0 0 2px rgba(96, 165, 250, 0.3);
+  --xf-node-header-bg: #333333;
+  --xf-node-header-border: #404040;
+  --xf-port-bg: #737373;
+  --xf-port-border: #262626;
 }
 
 /* Overlay position variables: hosts can override these on .xflow-root (or any
@@ -53,23 +86,32 @@
 
 :where(.xflow-root) .xf-node {
   display: flex;
-  flex-direction: column;
-  width: 180px;
-  min-height: 60px;
+  align-items: center;
+  gap: 8px;
+  width: 170px;
+  padding: 8px 10px;
   border: 1px solid var(--xf-node-border);
-  border-radius: 6px;
+  border-radius: 8px;
   background: var(--xf-node-bg);
   color: var(--xf-node-text);
   box-shadow: var(--xf-node-shadow);
   font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   font-size: 12px;
   line-height: 1.4;
-  overflow: hidden;
+  transition: border-color 0.15s, box-shadow 0.15s, background 0.15s;
+}
+
+:where(.xflow-root) .xf-node:hover {
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.08);
+}
+
+:where(.xflow-root.dark) .xf-node:hover {
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.4);
 }
 
 :where(.xflow-root) .xf-node--selected {
-  outline: 2px solid var(--xf-color-running);
-  outline-offset: 2px;
+  border-color: var(--xf-node-selected);
+  box-shadow: var(--xf-node-selected-shadow);
 }
 
 :where(.xflow-root) .xf-node--running {
@@ -98,23 +140,26 @@
   background: #f9fafb;
 }
 
+:where(.xflow-root.dark) .xf-node--unknown {
+  background: #333333;
+}
+
 :where(.xflow-root) .xf-node__header {
   display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 10px;
-  border-bottom: 1px solid #e5e7eb;
-  background: #f3f4f6;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
 }
 
 :where(.xflow-root) .xf-node__icon {
   flex-shrink: 0;
-  width: 16px;
-  height: 16px;
+  width: 24px;
+  height: 24px;
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 50%;
+  border-radius: 6px;
   background: var(--xf-color-failed);
   color: #ffffff;
   font-size: 10px;
@@ -122,23 +167,21 @@
 }
 
 :where(.xflow-root) .xf-node__name {
-  flex: 1 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-weight: 600;
 }
 
+:where(.xflow-root) .xf-node__type {
+  color: var(--xf-node-text-secondary);
+  font-size: 11px;
+}
+
 :where(.xflow-root) .xf-node__body {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  padding: 6px 10px;
-}
-
-:where(.xflow-root) .xf-node__type {
-  color: #6b7280;
-  font-size: 11px;
 }
 
 :where(.xflow-root) .xf-node__status {
@@ -146,10 +189,14 @@
   margin-top: 2px;
   padding: 1px 6px;
   border-radius: 999px;
-  background: #eff6ff;
+  background: rgba(59, 130, 246, 0.1);
   color: var(--xf-color-running);
   font-size: 10px;
   text-transform: uppercase;
+}
+
+:where(.xflow-root.dark) .xf-node__status {
+  background: rgba(96, 165, 250, 0.15);
 }
 
 :where(.xflow-root) .xf-node__hint {
@@ -159,6 +206,9 @@
 }
 
 :where(.xflow-root) .xf-node__diagnostic-badge {
+  position: absolute;
+  top: -6px;
+  right: -6px;
   flex-shrink: 0;
   min-width: 16px;
   height: 16px;
@@ -184,8 +234,13 @@
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #9ca3af;
-  border: 1px solid #ffffff;
+  background: var(--xf-port-bg);
+  border: 1px solid var(--xf-port-border);
+  transition: transform 0.15s, background 0.15s;
+}
+
+:where(.xflow-root) .xf-port:hover {
+  transform: scale(1.4);
 }
 
 :where(.xflow-root) .xf-port--target {
@@ -225,6 +280,11 @@
   flex-wrap: wrap;
 }
 
+:where(.xflow-root.dark) .xf-overlay {
+  background: rgba(38, 38, 38, 0.95);
+  color: #e5e5e5;
+}
+
 :where(.xflow-root) .xf-overlay--selection {
   top: var(--xf-overlay-selection-top, 12px);
   left: var(--xf-overlay-selection-left, 12px);
@@ -249,6 +309,10 @@
   letter-spacing: 0.3px;
 }
 
+:where(.xflow-root.dark) .xf-overlay__label {
+  color: #a0a0a0;
+}
+
 :where(.xflow-root) .xf-overlay__value {
   min-width: 18px;
   height: 18px;
@@ -262,12 +326,21 @@
   font-weight: 700;
 }
 
+:where(.xflow-root.dark) .xf-overlay__value {
+  background: #404040;
+  color: #ffffff;
+}
+
 :where(.xflow-root) .xf-overlay__detail {
   color: #6b7280;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 140px;
+}
+
+:where(.xflow-root.dark) .xf-overlay__detail {
+  color: #a0a0a0;
 }
 
 :where(.xflow-root) .xf-overlay__list {
@@ -288,4 +361,8 @@
 
 :where(.xflow-root) .xf-overlay__list-text {
   color: #6b7280;
+}
+
+:where(.xflow-root.dark) .xf-overlay__list-text {
+  color: #a0a0a0;
 }

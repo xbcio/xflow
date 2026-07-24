@@ -18,15 +18,15 @@ export function HealthPage({ config }: HealthPageProps) {
   }, [config.mockEnabled]);
 
   return (
-    <div className="xflow-root health-page" data-testid="health-page">
-      <h1>{config.appName}</h1>
-      <p className="meta">
+    <div className="xflow-root p-6 max-w-3xl" data-testid="health-page">
+      <h1 className="mb-2 text-2xl">{config.appName}</h1>
+      <p className="text-[#555] mb-4">
         Version: {config.appVersion} · Environment: {config.environment} · Mock:{" "}
         {config.mockEnabled ? "enabled" : "disabled"}
       </p>
 
       {fixture && (
-        <section className="fixture">
+        <section className="mt-6 p-4 border border-[#ddd] rounded-lg bg-[#fafafa]">
           <h2>Workflow Fixture</h2>
           <p>
             <strong>{fixture.name}</strong> ({fixture.namespace} /{" "}
@@ -35,7 +35,7 @@ export function HealthPage({ config }: HealthPageProps) {
           <p>{fixture.description}</p>
 
           <h3>Nodes</h3>
-          <ul data-testid="fixture-nodes">
+          <ul className="my-2 pl-5" data-testid="fixture-nodes">
             {fixture.nodes.map((node) => (
               <li key={node.id}>
                 {node.name} ({node.type}) — {node.kind}
@@ -44,7 +44,7 @@ export function HealthPage({ config }: HealthPageProps) {
           </ul>
 
           <h3>Connections</h3>
-          <ul data-testid="fixture-connections">
+          <ul className="my-2 pl-5" data-testid="fixture-connections">
             {Object.entries(fixture.connections).map(([source, ports]) =>
               Object.entries(ports).map(([port, targets]) =>
                 targets.map((target) => (

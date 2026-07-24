@@ -24,8 +24,8 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
     if (this.state.hasError) {
       return (
         this.props.fallback ?? (
-          <div className="xflow-root error-boundary">
-            <h1>Something went wrong</h1>
+          <div className="xflow-root p-8 text-center">
+            <h1 className="text-[#b00020] text-xl">Something went wrong</h1>
             <p>Please refresh the page or contact support if the problem persists.</p>
           </div>
         )

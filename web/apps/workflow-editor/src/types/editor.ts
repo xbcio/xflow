@@ -5,12 +5,16 @@ import type {
   WorkflowEditorMetadata,
 } from "@xflow/workflow-core";
 
+import type { ReactNode } from "react";
+
 export interface CatalogItem {
   type: string;
   label: string;
   category: string;
-  icon?: string;
+  icon?: ReactNode;
 }
+
+export type EditorTheme = "light" | "dark";
 
 export interface PanelVisibility {
   leftSidebarOpen: boolean;
@@ -42,6 +46,7 @@ export interface EditorState {
   catalogKeyword: string;
   viewport: ViewportState;
   panels: PanelVisibility;
+  theme: EditorTheme;
 }
 
 export type EditorAction =
@@ -57,4 +62,5 @@ export type EditorAction =
   | { type: "TOGGLE_LEFT_SIDEBAR" }
   | { type: "TOGGLE_RIGHT_SIDEBAR" }
   | { type: "TOGGLE_BOTTOM_PANEL" }
-  | { type: "SET_VIEWPORT"; payload: ViewportState };
+  | { type: "SET_VIEWPORT"; payload: ViewportState }
+  | { type: "TOGGLE_THEME" };

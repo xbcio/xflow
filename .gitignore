@@ -68,3 +68,4 @@ data/
 
 # Editor local settings
 .vscode/
+.DS_Store
