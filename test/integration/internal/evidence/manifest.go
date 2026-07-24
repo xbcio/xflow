@@ -29,6 +29,31 @@ func A0RequiredScenarios() []A0Scenario {
 	}
 }
 
+// A0ScenarioHandlerType returns the production handler identifier that each A0
+// scenario's counter snapshot MUST declare under HandlerName. The verifier
+// cross-checks the counter snapshot's HandlerName against this value so a bare
+// counter with an arbitrary HandlerName cannot satisfy the
+// handler_invocations>0 requirement — the counter must be bound to the
+// scenario's actual production delegate.
+//
+// OSKillSIGKILL returns "" because it is phase-B direct-drive: it carries no
+// counter snapshot (business handler_invocations is legitimately 0) and is
+// instead required to show a system_task_delivery protocol observation per
+// spec §3.5, so no HandlerName introspection applies.
+func A0ScenarioHandlerType(s A0Scenario) string {
+	switch s {
+	case A0CommitThenFlushBeforeDelivery:
+		return "test.fault"
+	case A0ReportAckLoss, A0ReportRequestLoss:
+		return "test.a0.start"
+	case A0QueueHandoff:
+		return "queue-handoff-consumer"
+	case A0OSKillSIGKILL:
+		return ""
+	}
+	return ""
+}
+
 // A3Fixture identifies a required error-handling fixture.
 type A3Fixture string
 

@@ -168,6 +168,7 @@ type DerivedObservation struct {
 	AppliedAdvance      bool                     `json:"applied_advance"`
 	Classification      *EffectiveClassification `json:"classification,omitempty"`
 	HandlerInvocations  int                      `json:"handler_invocations"`
+	HandlerName        string                   `json:"handler_name,omitempty"`
 	SourceEventIDs      []string                 `json:"source_event_ids"`
 	EvidenceSource      string                   `json:"evidence_source"`
 	Reason              string                   `json:"reason,omitempty"`

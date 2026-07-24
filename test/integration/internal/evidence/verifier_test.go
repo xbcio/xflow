@@ -126,7 +126,7 @@ func markA0Scenario(env *Envelope, scenario A0Scenario, execID types.ExecutionID
 		env.Raw.CounterSnapshots = append(env.Raw.CounterSnapshots, CounterSnapshot{
 			RunID: env.RunID, Topology: string(scenario), ExecutionID: execID,
 			NodeName: "node", CounterID: "counter-a0-" + string(scenario),
-			HandlerName: "handler", Value: 1, ObservedAt: time.Now().UTC(),
+			HandlerName: A0ScenarioHandlerType(scenario), Value: 1, ObservedAt: time.Now().UTC(),
 		})
 	}
 	env.Raw.RuntimeEvents = append(env.Raw.RuntimeEvents,
@@ -447,6 +447,21 @@ func TestVerifyRejectsInvalidArtifacts(t *testing.T) {
 				env.Raw.CounterSnapshots = kept
 			},
 			wantErrSubstr: "handler_invocations must be > 0",
+		},
+		{
+			// A counter with the right CounterID+Value but a HandlerName that is
+			// not the scenario's production delegate must be rejected: this is
+			// the checkA0 HandlerName introspection that closes the pre-existing
+			// trust boundary where any counter satisfied handler_invocations>0.
+			name: "a0 counter handler_name not the production delegate",
+			mutate: func(env *Envelope) {
+				for i, cs := range env.Raw.CounterSnapshots {
+					if cs.CounterID == "counter-a0-"+string(A0CommitThenFlushBeforeDelivery) {
+						env.Raw.CounterSnapshots[i].HandlerName = "not-the-real-handler"
+					}
+				}
+			},
+			wantErrSubstr: "counter handler_name",
 		},
 		{
 			name: "dirty relevant tree with envelope honestly false",

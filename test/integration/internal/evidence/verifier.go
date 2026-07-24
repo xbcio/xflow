@@ -233,14 +233,16 @@ func (v *Verifier) Verify(env *Envelope, suiteEvents []GoTestEvent) Verification
 	}
 
 	// Spec §8.5: required_rows and observed_rows must both be non-zero and
-	// must be exactly equal. The OLD verifier never checked these, so an
-	// artifact with both at 0 (and no observed matrix) passed. recomputeSuite
-	// repopulates RequiredRows and SuiteRecords; the derived-observation
-	// recompute below repopulates ObservedRows. These checks now guard the
-	// recomputed values: a recorder that left them at 0 is healed by recompute
-	// when the raw ledger is intact, and still fails when the raw ledger is
-	// corrupt (events empty → SuiteRecords empty; manifest unavailable →
-	// RequiredRows 0).
+	// must be exactly equal. recomputeSuite repopulates RequiredRows from the
+	// compile-time manifest (5 A0 + 15 A3 = 20, always > 0) and SuiteRecords
+	// from the events file; the derived-observation recompute below
+	// repopulates ObservedRows. A recorder that left ObservedRows or
+	// SuiteRecords empty is healed by recompute when the raw ledger is intact,
+	// and still fails when the ledger is corrupt (events empty → SuiteRecords
+	// empty; derived empty → ObservedRows 0). RequiredRows has no <= 0 guard
+	// because recomputeSuite sets it unconditionally from the manifest
+	// constant; only ObservedRows (the live derived count), the
+	// required==observed equality, and SuiteRecords non-empty are guarded.
 	//
 	// Reject pre-aggregated or self-reported derived fields BEFORE recomputing
 	// derived_observations, so the check sees the input envelope state (the
@@ -254,9 +256,6 @@ func (v *Verifier) Verify(env *Envelope, suiteEvents []GoTestEvent) Verification
 	env.DerivedObservations = derived
 	env.Suite.ObservedRows = len(derived)
 
-	if env.Suite.RequiredRows <= 0 {
-		errors = append(errors, fmt.Sprintf("suite: required_rows must be > 0 (got %d)", env.Suite.RequiredRows))
-	}
 	if env.Suite.ObservedRows <= 0 {
 		errors = append(errors, fmt.Sprintf("suite: observed_rows must be > 0 (got %d)", env.Suite.ObservedRows))
 	}
@@ -564,6 +563,14 @@ func checkEnvironmentIntegrity(env *Envelope) []string {
 
 	var redisResults, mysqlResults []string
 	for i, eo := range env.Raw.EnvironmentObservations {
+		// Skip cross-run observations: recomputeEnvironment derives the typed
+		// block only from this run's observations, so the integrity
+		// cross-check must use the same set to stay consistent with the
+		// derived values it compares against. Cross-run references are
+		// flagged separately by checkRawLedgerIntegrity.
+		if eo.RunID != "" && eo.RunID != env.RunID {
+			continue
+		}
 		switch eo.Component {
 		case "redis":
 			if eo.Result == "" {
@@ -787,6 +794,9 @@ func (v *Verifier) computeDerivedObservations(env *Envelope) []DerivedObservatio
 		for _, cs := range countersByExec[execID] {
 			obs.HandlerInvocations += cs.Value
 			obs.CounterSnapshotID = cs.CounterID
+			if obs.HandlerName == "" && cs.HandlerName != "" {
+				obs.HandlerName = cs.HandlerName
+			}
 		}
 		derived = append(derived, obs)
 	}
@@ -849,6 +859,9 @@ func (v *Verifier) computeDerivedObservations(env *Envelope) []DerivedObservatio
 		for _, cs := range countersByExec[execID] {
 			obs.HandlerInvocations += cs.Value
 			obs.CounterSnapshotID = cs.CounterID
+			if obs.HandlerName == "" && cs.HandlerName != "" {
+				obs.HandlerName = cs.HandlerName
+			}
 		}
 		derived = append(derived, obs)
 	}
@@ -914,6 +927,15 @@ func (v *Verifier) checkA0(env *Envelope, derived []DerivedObservation, duplicat
 			}
 			if obs.CounterSnapshotID == "" {
 				errs = append(errs, fmt.Sprintf("a0: scenario %s handler_invocations missing counter snapshot reference", scenario))
+			}
+			// Introspect the counter snapshot's HandlerName so a bare counter
+			// with an arbitrary name cannot satisfy the requirement: the
+			// counter MUST be bound to this scenario's production delegate
+			// (A0ScenarioHandlerType). This closes the pre-existing trust
+			// boundary where any CounterID+Value>0 was accepted.
+			wantHandler := A0ScenarioHandlerType(scenario)
+			if wantHandler != "" && obs.HandlerName != wantHandler {
+				errs = append(errs, fmt.Sprintf("a0: scenario %s counter handler_name %q must be %q", scenario, obs.HandlerName, wantHandler))
 			}
 		}
 	}
