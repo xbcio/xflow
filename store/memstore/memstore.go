@@ -374,7 +374,7 @@ func (s *Store) ListUnreconciledAdmissions(_ context.Context, before time.Time, 
 	}
 	var out []*store.AuditRecord
 	for _, r := range s.audit {
-		if afterSeqID > 0 && r.ID <= afterSeqID {
+		if afterSeqID > 0 && r.SeqID <= afterSeqID {
 			continue
 		}
 		if r.Phase != store.AuditPhaseAdmission || r.Outcome != store.AuditOutcomeAdmitted {

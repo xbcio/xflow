@@ -52,7 +52,8 @@ func TestAuditReconcileWorkerLeaderGatedRealRedis(t *testing.T) {
 	// Two workers sharing one in-memory audit reconciler + authority. Only
 	// the leader (a) may settle; b must be a no-op even though it can see the
 	// pending admission through the shared store.
-	audit := &sharedFakeAuditReconciler{rows: []*store.AuditRecord{{
+	audit := &sharedFakeAuditReconciler{}
+	audit.addRow(&store.AuditRecord{
 		RequestID:   "req-leader-gate",
 		Principal:   "alice",
 		TenantID:    "tenant-leader",
@@ -62,7 +63,7 @@ func TestAuditReconcileWorkerLeaderGatedRealRedis(t *testing.T) {
 		Outcome:     store.AuditOutcomeAdmitted,
 		Phase:       store.AuditPhaseAdmission,
 		Timestamp:   time.Now().Add(-2 * time.Minute),
-	}}}
+	})
 	authority := &scriptedAuthority{effect: control.EffectConfirmed}
 
 	wA := control.NewAuditReconcileWorker(audit, authority, control.AuditReconcileConfig{
@@ -88,10 +89,19 @@ func TestAuditReconcileWorkerLeaderGatedRealRedis(t *testing.T) {
 // leader-gating integration test (test/integration cannot import the control
 // package's unexported fakeAuditReconciler).
 type sharedFakeAuditReconciler struct {
-	rows []*store.AuditRecord
+	rows    []*store.AuditRecord
+	nextSeq uint64
 }
 
-func (s *sharedFakeAuditReconciler) ListUnreconciledAdmissions(_ context.Context, _ time.Time, _ uint64, _ int) ([]*store.AuditRecord, error) {
+func (s *sharedFakeAuditReconciler) addRow(rec *store.AuditRecord) {
+	s.nextSeq++
+	rec.SeqID = s.nextSeq
+	rec.ID = s.nextSeq
+	cp := *rec
+	s.rows = append(s.rows, &cp)
+}
+
+func (s *sharedFakeAuditReconciler) ListUnreconciledAdmissions(_ context.Context, _ time.Time, afterSeqID uint64, _ int) ([]*store.AuditRecord, error) {
 	out := make([]*store.AuditRecord, 0, len(s.rows))
 	hasOutcome := make(map[string]bool)
 	for _, r := range s.rows {
@@ -100,6 +110,9 @@ func (s *sharedFakeAuditReconciler) ListUnreconciledAdmissions(_ context.Context
 		}
 	}
 	for _, r := range s.rows {
+		if afterSeqID > 0 && r.SeqID <= afterSeqID {
+			continue
+		}
 		if r.Phase == store.AuditPhaseAdmission && r.Outcome == store.AuditOutcomeAdmitted &&
 			!(r.RequestID != "" && hasOutcome[r.TenantID+"|"+r.RequestID]) {
 			cp := *r

@@ -236,6 +236,15 @@ func (r *auditRepo) AppendOutcomeIfAbsent(ctx context.Context, rec *store.AuditR
 // CountUnreconciledAdmissions returns the total count of pending admissions
 // older than `before` and the timestamp of the oldest one (full-table backlog
 // metrics). When no pending rows exist, pending=0 and oldest is the zero time.
+//
+// Cost model: the query is a full-table COUNT with a correlated NOT EXISTS
+// subquery, executed once per reconcile sweep. This is bounded and acceptable
+// at G1 (restricted single-tenant deployment with a bounded audit table).
+//
+// TODO(G2): at multi-tenant scale this should become an incrementally-maintained
+// counter (e.g. a summary row updated on each admission/outcome append) or a
+// periodic count (not every-sweep) to avoid per-sweep full-table cost on an
+// unbounded Indeterminate backlog.
 func (r *auditRepo) CountUnreconciledAdmissions(ctx context.Context, before time.Time) (int, time.Time, error) {
 	type result struct {
 		Cnt    int       `gorm:"column:cnt"`
