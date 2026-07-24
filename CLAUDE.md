@@ -15,15 +15,18 @@ golangci-lint run        # Lint
 ## Project Structure
 
 - **engine/** — Pure scheduling algorithm (zero IO deps): Graph IR, Scheduler, ErrorPolicy, Suspend
-- **node/** — Node handler contracts (`TaskHandler`, `SuspendingHandler`) + all builtin node types (flat, not split into sub-packages)
-- **types/** — DSL/wire contracts: `WorkflowDef`, `ExecutionID`, `Status`, `Result` (json-tagged, zero impl deps)
+- **nodes/node/** — Builtin task node constructors and implementations (`node.HTTP`, `node.Function`, etc.)
+- **types/** — Public DSL/runtime contracts: `WorkflowDef`, handler interfaces (`ActionHandler`, `SuspendingHandler`), handler IO, descriptors, statuses, `Result` (json-tagged, zero impl deps)
 - **store/** — Public persistence interfaces + domain models
   - `memstore/` — in-memory implementation (test / local)
   - `sqlstore/` — dialect-agnostic GORM implementation; `sqlstore/mysqlstore/` — MySQL dialect entry (`mysqlstore.New`)
+- **execution/** — Reusable execution boundary: Dispatcher, Executor, embedded Runner, handler Registry
+- **backend/** — Reusable backend abstractions and implementations
+  - `backend.go` — `Provider` and optional backend capabilities
+  - `memory/` — in-memory StateStore + goroutine pool TaskQueue + embedded lifecycle binding
+  - `asynq/` — Redis StateStore + Asynq TaskQueue + embedded lifecycle binding
 - **sdk/** — Public SDK grouping
   - `xflow/` — `package xflow`: `NewLocal` / `NewCluster` factories, WorkflowBuilder (import path末段=包名)
-  - `internal/adapter/local/` — In-memory StateBackend + goroutine pool TaskQueue
-  - `internal/adapter/cluster/` — Redis StateBackend + Asynq TaskQueue
   - `examples/` — runnable `.go` usage examples
 - **cmd/server/** — Management server (Master node)
 - **cmd/runner/** — Task runner (Execution node)
@@ -32,11 +35,12 @@ golangci-lint run        # Lint
 
 ## Key Constraints
 
-- `engine/` must NOT import redis/asynq/mysql/sql — only stdlib + types + node
-- `sdk/internal/adapter/` is SDK-private, cmd must not import it
+- `engine/` must NOT import redis/asynq/mysql/sql — only stdlib + types + nodes/node
+- `execution/` and `backend/memory/` must remain free of Redis/Asynq/MySQL/network dependencies
+- SDK should assemble reusable backend providers; server/runner code must not depend on SDK internals
 - Graph IR is immutable after compile, shared lock-free at runtime
-- Engine Core depends on exactly 2 interfaces: `StateBackend` + `TaskQueue`
-- Future server/runner code goes under `service/` (a future module boundary); core packages (engine/node/types/store/sdk) must NEVER import `service/` or `cmd/` — dependencies flow one way only, so a later module split stays mechanical
+- Engine Core depends on exactly 2 interfaces: `StateStore` + `TaskQueue`
+- Future server/runner code goes under `service/` (a future module boundary); core packages (engine/nodes/types/store/sdk) must NEVER import `service/` or `cmd/` — dependencies flow one way only, so a later module split stays mechanical
 
 ## Detailed Documentation
 
