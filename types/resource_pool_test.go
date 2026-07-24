@@ -15,7 +15,8 @@ func TestResourcePoolFromContext_NilWhenAbsent(t *testing.T) {
 }
 
 func TestResourcePoolFromContext_NilContext(t *testing.T) {
-	if got := ResourcePoolFromContext(nil); got != nil {
+	var nilContext context.Context
+	if got := ResourcePoolFromContext(nilContext); got != nil {
 		t.Fatalf("ResourcePoolFromContext(nil) = %v, want nil", got)
 	}
 }

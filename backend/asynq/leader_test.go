@@ -297,7 +297,9 @@ func TestRedisLeaderElectorNotifyBroadcastsToSubscribers(t *testing.T) {
 	expectLeaderNotify(t, notifyA, true)
 	expectLeaderNotify(t, notifyB, true)
 
-	mr.Set(key, "different-owner")
+	if err := mr.Set(key, "different-owner"); err != nil {
+		t.Fatal(err)
+	}
 	mr.SetTTL(key, ttl)
 
 	expectLeaderNotify(t, notifyA, false)
@@ -327,17 +329,12 @@ func TestRedisLeaderElectorDropsLeadershipImmediatelyOnTokenMismatch(t *testing.
 		t.Fatal("Notify() did not emit after initial Campaign")
 	}
 
-	mr.Set(key, "different-owner")
+	if err := mr.Set(key, "different-owner"); err != nil {
+		t.Fatal(err)
+	}
 	mr.SetTTL(key, ttl)
 
-	select {
-	case v := <-notify:
-		if v {
-			t.Fatal("Notify() emitted true, want false after token mismatch")
-		}
-	case <-time.After(70 * time.Millisecond):
-		t.Fatal("Notify() did not emit false after first renewal token mismatch")
-	}
+	expectLeaderNotify(t, notify, false)
 	if l.IsLeader() {
 		t.Fatal("IsLeader() = true after token mismatch, want false")
 	}
@@ -368,7 +365,7 @@ func TestBackendImplementsLeaderElector(t *testing.T) {
 	}
 	defer func() { _ = b.rdb.Close() }()
 
-	var _ backend.LeaderElector = b.LeaderElector()
+	var _ backend.LeaderElector = (*RedisLeaderElector)(nil)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	if err := b.LeaderElector().Campaign(ctx); err != nil {

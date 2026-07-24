@@ -47,6 +47,10 @@ func TestNewLocalTransientFailsSuspendWorkflow(t *testing.T) {
 	if result.Status != types.ExecutionStatusFailed {
 		t.Fatalf("status = %s, want failed", result.Status)
 	}
+	waitForTransientCondition(t, time.Second, func() bool {
+		return hooks.nodeCompleteStatus("wait") == types.NodeStatusFailed &&
+			hooks.executionCompleteStatus(id) == types.ExecutionStatusFailed
+	})
 	if hooks.nodeCompleteStatus("wait") != types.NodeStatusFailed {
 		t.Fatalf("wait hook status = %s, want failed", hooks.nodeCompleteStatus("wait"))
 	}
