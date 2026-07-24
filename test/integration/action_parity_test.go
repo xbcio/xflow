@@ -643,13 +643,15 @@ func invCount(inv func() int) int {
 // loop (parityFixtureBuild / instrumentedBuiltinBuild), not in
 // collectParityOutcome, so the snapshot is recorded here after the Run returns.
 // nil-safe: a no-op when the recorder is disabled (env unset). The counterID is
-// the fixture name; the verifier reads it back as obs.CounterSnapshotID.
+// the fixture name; the verifier reads it back as obs.CounterSnapshotID. A3
+// counters are not HandlerName-introspected by checkA3 (only A0 counters are),
+// so the fixture name doubles as the handler identifier here.
 func recordParityCounter(t *testing.T, rec *evidenceRecorder, topology string, execID types.ExecutionID, node, counterID string, value int) {
 	t.Helper()
 	if rec == nil {
 		return
 	}
-	rec.recordCounter(topology, execID, node, counterID, value)
+	rec.recordCounter(topology, execID, node, counterID, counterID, value)
 	rec.flush(t)
 }
 

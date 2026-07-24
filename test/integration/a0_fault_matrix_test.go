@@ -602,7 +602,7 @@ func TestA0FaultMatrix(t *testing.T) {
 				}
 			}
 			rec.recordRuntimeEvents(focal)
-			rec.recordCounter("local", id, "start", "a0-commit-then-flush-start", handlerInvocations)
+			rec.recordCounter("local", id, "start", "a0-commit-then-flush-start", "test.fault", handlerInvocations)
 			rec.recordA0ScenarioMarker(id, "CommitThenFlushBeforeDelivery")
 			rec.recordState("local", id, "final", map[string]any{
 				"execution_status": string(finalExec.Status),
@@ -788,7 +788,7 @@ func TestA0FaultMatrix(t *testing.T) {
 				}
 			}
 			rec.recordRuntimeEvents(focal)
-			rec.recordCounter("server-runner", execID, "start", "http-built-in", startCounter.Count())
+			rec.recordCounter("server-runner", execID, "start", "http-built-in", "test.a0.start", startCounter.Count())
 			rec.recordA0ScenarioMarker(execID, "ReportAckLoss")
 			rec.recordState("server-runner", execID, "final", map[string]any{
 				"execution_status": string(result.Status),
@@ -1094,7 +1094,7 @@ func TestA0FaultMatrix(t *testing.T) {
 				}
 			}
 			rec.recordRuntimeEvents(focal)
-			rec.recordCounter("server-runner", execID, "start", "http-built-in", startCounter.Count())
+			rec.recordCounter("server-runner", execID, "start", "http-built-in", "test.a0.start", startCounter.Count())
 			rec.recordA0ScenarioMarker(execID, "ReportRequestLoss")
 			rec.recordProtocol("server-runner", execID, "authority_rejected", map[string]any{
 				"replay_outcome": replayOutcome,
@@ -1267,7 +1267,7 @@ func TestA0FaultMatrix(t *testing.T) {
 				}
 			}
 			rec.recordRuntimeEvents(focal)
-			rec.recordCounter("local", id, "start", "queue-handoff-consumer", handlerInvocations)
+			rec.recordCounter("local", id, "start", "queue-handoff-consumer", "queue-handoff-consumer", handlerInvocations)
 			rec.recordA0ScenarioMarker(id, "QueueHandoff")
 			rec.recordState("local", id, "final", map[string]any{
 				"execution_status": string(result.Status),

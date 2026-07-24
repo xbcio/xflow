@@ -155,7 +155,11 @@ func (r *evidenceRecorder) wrapRuntimeEvent(ev engine.RuntimeEvidenceEvent) evid
 
 // recordCounter appends a counter snapshot. The counting wrappers from
 // Tasks 8/10/11 (buildInstrumentedHandler / startCounter) supply the value.
-func (r *evidenceRecorder) recordCounter(topology string, execID types.ExecutionID, node, counterID string, value int) {
+// counterID identifies the counter instance (distinct per SIGKILL process /
+// scenario); handlerName is the production handler type the counter is bound
+// to (e.g. "test.fault", "test.a0.start"), which the verifier introspects in
+// checkA0 to reject a bare counter with an arbitrary name.
+func (r *evidenceRecorder) recordCounter(topology string, execID types.ExecutionID, node, counterID, handlerName string, value int) {
 	if r == nil {
 		return
 	}
@@ -165,7 +169,7 @@ func (r *evidenceRecorder) recordCounter(topology string, execID types.Execution
 		ExecutionID:  execID,
 		NodeName:     node,
 		CounterID:    counterID,
-		HandlerName:  counterID,
+		HandlerName:  handlerName,
 		Value:        value,
 		ObservedAt:   time.Now().UTC(),
 	})
