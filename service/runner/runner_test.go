@@ -11,6 +11,34 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
+func TestRunnerReturnsNilWhenCanceledDuringPoll(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	pollStarted := make(chan struct{})
+	r := New(&blockingPollClient{pollStarted: pollStarted}, execution.NewRegistry(), Config{
+		RunnerID:          "runner-1",
+		HeartbeatInterval: time.Hour,
+	})
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- r.Run(ctx) }()
+
+	select {
+	case <-pollStarted:
+	case <-time.After(time.Second):
+		t.Fatal("runner did not begin polling")
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Run() error = %v, want nil after cancellation", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("runner did not stop after cancellation")
+	}
+}
+
 func TestRunnerRegistersPollsExecutesAndReportsResult(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -48,6 +76,28 @@ func TestRunnerRegistersPollsExecutesAndReportsResult(t *testing.T) {
 	if client.reported.Result.Output == nil || client.reported.Result.Output.Data["claim_id"] != "c-1" {
 		t.Fatalf("reported result = %+v, want claim_id output", client.reported.Result)
 	}
+}
+
+type blockingPollClient struct {
+	pollStarted chan<- struct{}
+}
+
+func (c *blockingPollClient) Register(context.Context, protocol.RegisterRunnerRequest) (protocol.RegisterRunnerResponse, error) {
+	return protocol.RegisterRunnerResponse{SessionID: "session-1"}, nil
+}
+
+func (*blockingPollClient) Heartbeat(context.Context, protocol.HeartbeatRequest) (protocol.HeartbeatResponse, error) {
+	return protocol.HeartbeatResponse{}, nil
+}
+
+func (c *blockingPollClient) Poll(ctx context.Context, _ protocol.PollTaskRequest) (protocol.PollTaskResponse, error) {
+	close(c.pollStarted)
+	<-ctx.Done()
+	return protocol.PollTaskResponse{}, ctx.Err()
+}
+
+func (*blockingPollClient) ReportResult(context.Context, protocol.ReportResultRequest) (protocol.ReportResultResponse, error) {
+	return protocol.ReportResultResponse{}, nil
 }
 
 type fakeProtocolClient struct {

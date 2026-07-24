@@ -70,9 +70,9 @@ func TestRunner_WithResourcePoolAttachesPoolToHandlerContext(t *testing.T) {
 	runner := NewRunner(singleHandlerRegistry{handler: rec}, WithResourcePool(want))
 
 	lease := &engine.TaskLease{
-		Task:      engine.Task{ExecutionID: "exec-pool", NodeName: "probe"},
-		Input:     &types.Input{ExecutionID: "exec-pool", NodeName: "probe"},
-		NodeType:  "test.pool-probe",
+		Task:     engine.Task{ExecutionID: "exec-pool", NodeName: "probe"},
+		Input:    &types.Input{ExecutionID: "exec-pool", NodeName: "probe"},
+		NodeType: "test.pool-probe",
 	}
 	if _, err := runner.Execute(context.Background(), lease); err != nil {
 		t.Fatalf("Execute() error = %v", err)

@@ -58,13 +58,13 @@ func (r *Runner) Run(ctx context.Context) error {
 		Labels:       r.config.Labels,
 	})
 	if err != nil {
-		return err
+		return runContextError(ctx, err)
 	}
 	sessionID := registerResp.SessionID
 
 	inFlight := 0
 	if err := r.heartbeat(ctx, sessionID, inFlight); err != nil {
-		return err
+		return runContextError(ctx, err)
 	}
 
 	ticker := time.NewTicker(r.config.HeartbeatInterval)
@@ -79,7 +79,7 @@ func (r *Runner) Run(ctx context.Context) error {
 			return ctx.Err()
 		case <-ticker.C:
 			if err := r.heartbeat(ctx, sessionID, inFlight); err != nil {
-				return err
+				return runContextError(ctx, err)
 			}
 			continue
 		default:
@@ -92,7 +92,7 @@ func (r *Runner) Run(ctx context.Context) error {
 			Capabilities: r.config.Capabilities,
 		})
 		if err != nil {
-			return err
+			return runContextError(ctx, err)
 		}
 		if resp.Lease == nil {
 			wait := resp.Wait
@@ -100,15 +100,11 @@ func (r *Runner) Run(ctx context.Context) error {
 				wait = r.config.PollWait
 			}
 			if err := sleepContext(ctx, wait); err != nil {
-				if errors.Is(err, context.Canceled) {
-					return nil
-				}
-				return err
+				return runContextError(ctx, err)
 			}
 			continue
 		}
 
-		inFlight = 1
 		result, execErr := r.executor.Execute(ctx, resp.Lease)
 		if execErr != nil {
 			result = engine.TaskResult{Error: execErr}
@@ -121,10 +117,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		})
 		inFlight = 0
 		if err != nil {
-			if errors.Is(err, context.Canceled) {
-				return nil
-			}
-			return err
+			return runContextError(ctx, err)
 		}
 		if !reportResp.Accepted {
 			return fmt.Errorf("task result rejected: %s", reportResp.Error)
@@ -141,6 +134,16 @@ func (r *Runner) heartbeat(ctx context.Context, sessionID string, inFlight int) 
 		Timestamp: time.Now().Unix(),
 	})
 	return err
+}
+
+func runContextError(ctx context.Context, err error) error {
+	if ctx.Err() == nil {
+		return err
+	}
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return nil
+	}
+	return ctx.Err()
 }
 
 func sleepContext(ctx context.Context, delay time.Duration) error {

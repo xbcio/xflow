@@ -110,14 +110,3 @@ func (p *RunnerPool) consumeResult(runnerID, _ string) {
 	}
 	p.mu.Unlock()
 }
-
-// notifyChan returns a read-only view of the runner's notify channel for the
-// send loop to select on. Returns nil if the runner is gone.
-func (p *RunnerPool) notifyChan(runnerID string) <-chan struct{} {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if state, ok := p.runners[runnerID]; ok {
-		return state.notify
-	}
-	return nil
-}

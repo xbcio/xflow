@@ -197,7 +197,7 @@ func TestConfigSamplePrintsYAML(t *testing.T) {
 	if !strings.Contains(out.String(), "runner:") || !strings.Contains(out.String(), "server:") {
 		t.Fatalf("sample output = %q", out.String())
 	}
-	if _, err := loadRunnerConfigFromBytes([]byte(out.String())); err != nil {
+	if _, err := loadRunnerConfigFromBytes(out.Bytes()); err != nil {
 		t.Fatalf("sample is not parseable: %v", err)
 	}
 }

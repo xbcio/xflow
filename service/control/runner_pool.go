@@ -254,11 +254,3 @@ func (p *RunnerPool) bindSession(runnerID string, s *streamSession) {
 		state.session = s
 	}
 }
-
-func (p *RunnerPool) clearSession(runnerID string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if state, ok := p.runners[runnerID]; ok {
-		state.session = nil
-	}
-}
