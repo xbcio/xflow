@@ -325,15 +325,26 @@ func (w *AuditReconcileWorker) observe(fn func(ReconcileObserver)) {
 
 // ExecutionAuthority is the default AdmissionAuthority. It consults the
 // engine StateStore (Redis for the distributed backend) to determine whether
-// an admitted mutation took effect. For workflow.create / workflow.invoke
-// the existence of the execution in authoritative state is the clean
-// signal: found → confirmed (the create landed), not found → absent (the
-// handler crashed before the execution was persisted). For execution-scoped
-// mutations (signal/revoke/cancel) GetExecution is not decisive: a reachable
-// execution only proves the target exists, not that the signal/revoke/cancel
-// was actually applied. Those operations therefore return EffectIndeterminate
-// (retry) until a future per-operation probe can inspect the execution more
-// closely; a missing/unreachable execution is also indeterminate.
+// an admitted mutation took effect.
+//
+// For workflow.create / workflow.invoke the existence of the execution in
+// authoritative state is the clean signal: found → confirmed (the create
+// landed), not found → absent (the handler crashed before the execution was
+// persisted).
+//
+// For execution-scoped mutations (signal/revoke/cancel) the worker only ever
+// probes an admission that has NO inline outcome row — i.e. the handler
+// crashed between the admission audit and the post-handler outcome audit.
+// The handler's engine call (DeliverSignal / RevokeSignal / Cancel) is
+// Redis-atomic, so a crash in that window means the effect either fully
+// landed (and only the outcome audit was lost) or the process died before the
+// atomic op ran. Those two are indistinguishable without a per-operation
+// durable receipt, and the sub-millisecond "before the op" window has no
+// corrective action. So for a REACHABLE execution the worker settles them as
+// EffectConfirmed (R3.2a) — the same rule create/invoke already use. A
+// missing/unreachable execution stays EffectIndeterminate (retry): unlike
+// create/invoke, a signal/revoke/cancel against a now-absent execution cannot
+// be settled as no-effect (the target may have completed and been evicted).
 //
 // It NEVER mutates state: GetExecution is a read. The Redis receipt (dead-
 // letter replay) remains authoritative for replay mutations and is
@@ -383,14 +394,13 @@ func (a *ExecutionAuthority) Probe(ctx context.Context, rec *store.AuditRecord) 
 	}
 	// Execution found in authoritative state. For create/invoke this confirms
 	// the mutation landed. For execution-scoped mutations (signal/revoke/cancel)
-	// a reachable execution is ambiguous: it proves the target existed, not that
-	// the mutation itself was applied. Defer to a future per-operation probe;
-	// retry rather than fabricate a confirmed outcome.
+	// the worker only reaches here for an admission whose inline outcome was
+	// lost to a crash; the engine call is Redis-atomic, so a reachable
+	// execution settles them as confirmed too (R3.2a — see the type doc).
 	switch rec.Operation {
-	case opWorkflowCreate, opWorkflowInvoke:
+	case opWorkflowCreate, opWorkflowInvoke,
+		opExecutionSignal, opExecutionRevoke, opExecutionCancel:
 		return EffectConfirmed, nil
-	case opExecutionSignal, opExecutionRevoke, opExecutionCancel:
-		return EffectIndeterminate, nil
 	default:
 		// Unknown operation: no decisive evidence, retry.
 		return EffectIndeterminate, nil

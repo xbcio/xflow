@@ -63,6 +63,10 @@ xflow 采用分层发布门槛，不再用单个测试替代完整 release gate�
 ### G1 — 受限单租户生产 ⛔ 未满足
 
 > G1 依赖 G0。G0 已重新闭合（本地真实运行证据，2026-07-24 重签，SHA `a75c483`）；G1 阻断项转为 B1/B3 自身缺口（B3 的 R3 reconcile 收敛为确定性代码缺口，非 CI 问题）。
+>
+> **2026-07-24 R3.1 进展**：B3 reconcile 收敛缺口拆为 R3.1–R3.4。R3.1（admission 阶段预分配 ExecutionID correlation）已闭合——`engine.NewExecutionID` + `WithExecutionID` ctx key，`Submit/Invoke` 优先复用 ctx 预分配 id；`authzWrap` 把 create/invoke 路由 `newExecutionIDResolver` 产出的 id 注入 ctx 并写入 admission/outcome 审计行，与响应 `execution_id` 一致（apiserver 单测 `TestAuthzPreallocatedExecutionIDCorrelatesAudit` 三行一致；g1 `AuditReconcile` 实测本轮 execution `Probe` 返回 `EffectConfirmed`）。**仍待**：R3.3（`g1RunAuditReconcile` 加 `ReconciledByWorker>0` 强断言 + 故障矩阵）、R3.4（backlog cursor/age metrics + MySQL 测试隔离——g1 实测 1024 条 pre-R3.1 空 id backlog 挤占 oldest-first 256-batch 使本轮新行不可达，`settled=0` 系此 backlog masking，非 R3.1 失败）。G1 整体仍 ⛔。
+>
+> **2026-07-24 R3.2a 进展**：signal/revoke/cancel 的 per-operation Probe 已闭合——`ExecutionAuthority.Probe`（`service/control/audit_reconcile_worker.go`）对 execution-scoped mutation 在 execution 可达时返回 `EffectConfirmed`（原返回 `EffectIndeterminate` 使 admission 永久悬挂）；依据：worker 仅对**无 inline outcome 行**的 admission 调 Probe（即 handler 在 atomic engine 调用与 outcome 审计之间 crash），`DeliverSignal`/`RevokeSignal`/`Cancel` 均为 Redis 原子操作，可达 execution ⇒ 效果已落地（与 create/invoke 同规则）；execution not-found 仍 `EffectIndeterminate`（不像 create/invoke 判 Absent——signal/revoke/cancel 目标可能已完成并 evict，不可判无效）。`service/control` 单测覆盖三 op 的 found→Confirmed / not-found→Indeterminate 及端到端 `ReconcileOnce` 结算（`TestReconcileSignalMutationReachableSettles`/`TestReconcileSignalMutationMissingExecRetries`）。§9.1 `go build ./...` + `go vet ./...` + `-race` 全绿。**注**：审计行 SignalName 字段（可观测性改进，Probe 非必需）留作可选 R3.2b。**仍待**：R3.3、R3.4。G1 整体仍 ⛔。
 
 | 项 | 状态 | 缺口 | 既有 commit |
 |---|---|---|---|
