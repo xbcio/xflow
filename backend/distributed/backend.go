@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"regexp"
 	"sync"
 	"time"
 
@@ -43,6 +44,31 @@ type (
 	AuditStats    = rstate.AuditStats
 )
 
+// ShutdownReport captures the outcomes of releasing the backend's owned
+// resources during normal shutdown. All fields are nil when shutdown cleanup
+// succeeds; otherwise each field carries the error returned by the matching
+// Close call.
+//
+// Observers and log sinks must not emit these errors verbatim in production:
+// close errors may contain DSNs or credentials. The built-in fallback logging
+// paths redact URL credentials and common query parameters before printing, but
+// external observers receive the raw error and are responsible for their own
+// sanitization.
+type ShutdownReport struct {
+	TransportErr error
+	RedisErr     error
+	PoolErr      error
+}
+
+// ShutdownObserver receives the ShutdownReport after a normal stop completes.
+// Implementations must be non-blocking: the observer is called synchronously
+// inside the sync.Once-guarded stop path. The report is delivered raw; observers
+// and downstream log sinks must sanitize any sensitive substrings (DSNs,
+// passwords, tokens) before emitting them.
+type ShutdownObserver interface {
+	OnShutdown(r ShutdownReport)
+}
+
 // Option configures the distributed backend.
 type Option func(*config)
 
@@ -53,6 +79,7 @@ type config struct {
 	resourcePool           types.ResourcePool
 	auditObserver          AuditObserver
 	leaseObserver          LeaseObserver
+	shutdownObserver       ShutdownObserver
 	logger                 engine.Logger
 	transient              bool
 	transientTTL           time.Duration
@@ -144,6 +171,21 @@ func WithStateLogger(l engine.Logger) Option {
 	}
 }
 
+// WithShutdownObserver installs an observer that receives a ShutdownReport
+// after normal shutdown completes. When no observer is configured, shutdown
+// errors are still logged via the configured engine.Logger, or via the
+// standard log package if no logger is configured, so close failures are never
+// silently swallowed. The raw error is delivered to the observer; callers must
+// ensure observer-side sinks do not emit sensitive substrings such as DSNs or
+// credentials in production.
+func WithShutdownObserver(obs ShutdownObserver) Option {
+	return func(c *config) {
+		if obs != nil {
+			c.shutdownObserver = obs
+		}
+	}
+}
+
 // WithTransport injects a custom task transport, replacing the default Asynq
 // transport entirely. This is the seam that makes the queue technology
 // pluggable: a broker only has to implement queue.Transport.
@@ -179,19 +221,21 @@ func WithRedisConfig(rc RedisConfig) Option {
 // internal state, timeout, trigger, and workflow-registry subpackages.
 // Call Bind() after creating the engine to start the consumer and monitors.
 type Backend struct {
-	state          *rstate.Store
-	transport      queue.Transport
-	registry       *execution.Registry
-	workflowReg    *workflowreg.Registry
-	triggerRuntime *trigger.Primitives
-	rdb            redis.UniversalClient
-	timeoutMonitor *timeout.Monitor
-	concurrency    int
-	consumer       bool
-	transient      bool
-	resourcePool   types.ResourcePool
-	leaderElector  backend.LeaderElector
-	testHooks      bindStartHooks
+	state            *rstate.Store
+	transport        queue.Transport
+	registry         *execution.Registry
+	workflowReg      *workflowreg.Registry
+	triggerRuntime   *trigger.Primitives
+	rdb              redis.UniversalClient
+	timeoutMonitor   *timeout.Monitor
+	concurrency      int
+	consumer         bool
+	transient        bool
+	resourcePool     types.ResourcePool
+	leaderElector    backend.LeaderElector
+	shutdownObserver ShutdownObserver
+	logger           engine.Logger
+	testHooks        bindStartHooks
 }
 
 // State returns the StateStore implementation.
@@ -303,17 +347,19 @@ func New(redisAddr string, db store.Store, opts ...Option) (*Backend, error) {
 	leaderElector := NewRedisLeaderElector(rdb, leaderKey, defaultLeaderLeaseTTL)
 
 	return &Backend{
-		state:          state,
-		transport:      transport,
-		registry:       registry,
-		workflowReg:    workflowreg.New(rdb),
-		triggerRuntime: trigger.New(rdb),
-		rdb:            rdb,
-		concurrency:    cfg.concurrency,
-		consumer:       cfg.consumer,
-		transient:      cfg.transient,
-		resourcePool:   cfg.resourcePool,
-		leaderElector:  leaderElector,
+		state:            state,
+		transport:        transport,
+		registry:         registry,
+		workflowReg:      workflowreg.New(rdb),
+		triggerRuntime:   trigger.New(rdb),
+		rdb:              rdb,
+		concurrency:      cfg.concurrency,
+		consumer:         cfg.consumer,
+		transient:        cfg.transient,
+		resourcePool:     cfg.resourcePool,
+		leaderElector:    leaderElector,
+		shutdownObserver: cfg.shutdownObserver,
+		logger:           cfg.logger,
 	}, nil
 }
 
@@ -387,19 +433,86 @@ func noopStop() func() {
 	}
 }
 
+var (
+	// urlCredsRe matches scheme://user:password@host patterns. The scheme group
+	// is restricted to a leading letter so it does not over-match arbitrary text.
+	urlCredsRe = regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*)://([^:@\s]+):([^@\s]+)@`)
+	// queryCredsRe matches common credential-bearing query parameters.
+	queryCredsRe = regexp.MustCompile(`(?i)([?&;])(password|pwd|secret|ak|sk)=[^&;\s]*`)
+)
+
+// sanitizeLogError masks URL/DSN-like credential substrings and common
+// credential query parameters before an error is printed. It is intentionally
+// conservative: it only removes substrings that look like credentials, leaving
+// the rest of the error intact. Observers receive the raw error unchanged.
+func sanitizeLogError(err error) string {
+	if err == nil {
+		return ""
+	}
+	s := err.Error()
+	s = urlCredsRe.ReplaceAllString(s, "$1://***:***@")
+	s = queryCredsRe.ReplaceAllString(s, "${1}${2}=***")
+	return s
+}
+
+// reportShutdown emits a ShutdownReport to the configured observer or logs any
+// non-nil close errors. It is called synchronously from the sync.Once-guarded
+// stop path so shutdown remains observable even when no external observer is
+// installed. Errors sent to the built-in logger/stdlib log path are sanitized;
+// when an observer is configured it receives the raw error and no fallback
+// logging occurs.
+func (b *Backend) reportShutdown(r ShutdownReport) {
+	if b.shutdownObserver != nil {
+		// A panicking observer must not crash the shutdown path. The panic is
+		// swallowed; the configured logger still receives a record of the panic
+		// if one is available.
+		defer func() {
+			if rec := recover(); rec != nil && b.logger != nil {
+				b.logger.Error("distributed backend: shutdown observer panicked", "panic", rec)
+			}
+		}()
+		b.shutdownObserver.OnShutdown(r)
+		return
+	}
+	if b.logger != nil {
+		if r.TransportErr != nil {
+			b.logger.Error("distributed backend: transport close error", "error", sanitizeLogError(r.TransportErr))
+		}
+		if r.RedisErr != nil {
+			b.logger.Error("distributed backend: redis close error", "error", sanitizeLogError(r.RedisErr))
+		}
+		if r.PoolErr != nil {
+			b.logger.Error("distributed backend: resource pool close error", "error", sanitizeLogError(r.PoolErr))
+		}
+		return
+	}
+	if r.TransportErr != nil {
+		log.Printf("xflow: distributed backend transport close error: %v", sanitizeLogError(r.TransportErr))
+	}
+	if r.RedisErr != nil {
+		log.Printf("xflow: distributed backend redis close error: %v", sanitizeLogError(r.RedisErr))
+	}
+	if r.PoolErr != nil {
+		log.Printf("xflow: distributed backend resource pool close error: %v", sanitizeLogError(r.PoolErr))
+	}
+}
+
 // nonConsumerStop releases transport and Redis resources for a backend that is
-// not configured to consume (API-only instances). It is idempotent.
+// not configured to consume (API-only instances). It is idempotent and reports
+// a ShutdownReport exactly once.
 func (b *Backend) nonConsumerStop() func() {
 	var once sync.Once
 	return func() {
 		once.Do(func() {
-			_ = b.transport.Close()
-			_ = b.rdb.Close()
+			var r ShutdownReport
+			r.TransportErr = b.transport.Close()
+			r.RedisErr = b.rdb.Close()
 			if b.resourcePool != nil {
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
-				_ = b.resourcePool.Close(ctx)
+				r.PoolErr = b.resourcePool.Close(ctx)
 			}
+			b.reportShutdown(r)
 		})
 	}
 }
@@ -409,9 +522,9 @@ func (b *Backend) nonConsumerStop() func() {
 // failing to start, so the reverse-order rollback path is covered even though
 // the outbox dispatcher and timeout monitor cannot fail to start on their own.
 type bindStartHooks struct {
-	afterConsumerStart func() error  // simulate outbox dispatcher start failure
-	afterOutboxStart   func() error  // simulate timeout monitor start failure
-	onMonitorDone      func()        // nil in production; called after timeout monitor goroutine exits
+	afterConsumerStart func() error // simulate outbox dispatcher start failure
+	afterOutboxStart   func() error // simulate timeout monitor start failure
+	onMonitorDone      func()       // nil in production; called after timeout monitor goroutine exits
 }
 
 // closeOwnedResources releases the resources owned by bindHandler in
@@ -539,13 +652,15 @@ func (b *Backend) bindHandler(eng *engine.Engine, handler func(context.Context, 
 					b.testHooks.onMonitorDone()
 				}
 			}
-			_ = b.transport.Close()
-			_ = b.rdb.Close()
+			var r ShutdownReport
+			r.TransportErr = b.transport.Close()
+			r.RedisErr = b.rdb.Close()
 			if b.resourcePool != nil {
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
-				_ = b.resourcePool.Close(ctx)
+				r.PoolErr = b.resourcePool.Close(ctx)
 			}
+			b.reportShutdown(r)
 		})
 	}
 	return stop, nil
