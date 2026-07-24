@@ -17,16 +17,13 @@ build-runner:
 # ── Test ───────────────────────────────────────────────────────────────────────
 
 test:
-	go test ./sdk/... ./engine/... ./node/... ./types/... ./store/... -race -count=1 -timeout 120s
+	go test ./... -race -count=1 -timeout 120s
 
 test-verbose:
-	go test ./sdk/... ./engine/... ./node/... ./types/... ./store/... -race -count=1 -timeout 120s -v
+	go test ./... -race -count=1 -timeout 120s -v
 
 test-examples:
-	go test ./sdk/examples/ -run TestExpenseClaim -race -count=1 -v -timeout 30s
-
-test-cluster:
-	go test ./sdk/examples/ -run TestOrderFulfillment -race -count=1 -v -timeout 60s
+	go test ./sdk/examples/ -race -count=1 -v -timeout 30s
 
 # ── Code quality ───────────────────────────────────────────────────────────────
 
