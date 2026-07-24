@@ -326,7 +326,7 @@ func TestCommitReceiptPublishedForErrorPort(t *testing.T) {
 func TestNewRuntimeEventIDIsUUIDv4(t *testing.T) {
 	re := regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 	for i := 0; i < 1000; i++ {
-		id := newRuntimeEventID(context.Background(), "exec-test", "start", 1)
+		id := newRuntimeEventID()
 		if !re.MatchString(id) {
 			t.Fatalf("newRuntimeEventID returned non-UUIDv4 value: %q", id)
 		}
@@ -337,7 +337,7 @@ func TestNewRuntimeEventIDUnique(t *testing.T) {
 	const n = 1000
 	seen := make(map[string]struct{}, n)
 	for i := 0; i < n; i++ {
-		id := newRuntimeEventID(context.Background(), "exec-test", "start", 1)
+		id := newRuntimeEventID()
 		if _, ok := seen[id]; ok {
 			t.Fatalf("duplicate EventID generated: %q", id)
 		}
@@ -346,8 +346,8 @@ func TestNewRuntimeEventIDUnique(t *testing.T) {
 }
 
 func TestNewRuntimeEventIDDistinctCalls(t *testing.T) {
-	id1 := newRuntimeEventID(context.Background(), "exec-a", "start", 1)
-	id2 := newRuntimeEventID(context.Background(), "exec-a", "start", 1)
+	id1 := newRuntimeEventID()
+	id2 := newRuntimeEventID()
 	if id1 == id2 {
 		t.Fatalf("two EventID calls produced identical values: %q", id1)
 	}

@@ -120,7 +120,11 @@ func publishRuntimeEvidence(b *RuntimeEvidenceBuffer, event RuntimeEvidenceEvent
 	}
 }
 
-func newRuntimeEventID(ctx context.Context, execID types.ExecutionID, node string, attempt int) string {
+// newRuntimeEventID returns a fresh crypto/rand UUIDv4. Per spec §4.3.1 the
+// EventID MUST be a cross-process UUID and MUST NOT be assembled from
+// exec/node/attempt — those values live in separate struct fields on the
+// emitted event, so the generator takes no parameters.
+func newRuntimeEventID() string {
 	return uuid.New().String()
 }
 
@@ -133,7 +137,7 @@ func (e *Engine) publishAdvanceReceipt(ctx context.Context, task *Task, result A
 	}
 	publishRuntimeEvidence(e.evidenceBuffer, RuntimeEvidenceEvent{
 		Version:      1,
-		EventID:      newRuntimeEventID(ctx, task.ExecutionID, task.NodeName, 0),
+		EventID:      newRuntimeEventID(),
 		Type:         RuntimeEvidenceAdvance,
 		ExecutionID:  task.ExecutionID,
 		NodeName:     task.NodeName,
@@ -155,7 +159,7 @@ func (e *Engine) publishRetryReceipt(ctx context.Context, task *Task, attempt in
 	}
 	publishRuntimeEvidence(e.evidenceBuffer, RuntimeEvidenceEvent{
 		Version:      1,
-		EventID:      newRuntimeEventID(ctx, task.ExecutionID, task.NodeName, attempt),
+		EventID:      newRuntimeEventID(),
 		Type:         RuntimeEvidenceRetry,
 		ExecutionID:  task.ExecutionID,
 		NodeName:     task.NodeName,

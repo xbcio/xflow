@@ -125,7 +125,7 @@ func (e *Engine) publishCommitReceipt(ctx context.Context, req CommitNodeRequest
 	}
 	publishRuntimeEvidence(e.evidenceBuffer, RuntimeEvidenceEvent{
 		Version:       1,
-		EventID:       newRuntimeEventID(ctx, req.ExecutionID, req.NodeName, req.Attempt),
+		EventID:       newRuntimeEventID(),
 		Type:          RuntimeEvidenceCommit,
 		ExecutionID:   req.ExecutionID,
 		NodeName:      req.NodeName,
