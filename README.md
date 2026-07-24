@@ -1,6 +1,9 @@
 # XFlow
 
-XFlow is a distributed workflow engine built with Go, using a Master-Worker architecture powered by Asynq (Redis-based task queue). The system enables high-concurrency, highly-available, and scalable workflow orchestration and scheduling.
+XFlow is a Go workflow engine for SDK-embedded orchestration. The current
+production focus is long-running approval workflows: DAG scheduling,
+action-node execution, suspend/resume by signal, cancellation, inspection, and
+Redis/Asynq-backed execution.
 
 ## Key Technologies
 
@@ -12,24 +15,39 @@ XFlow is a distributed workflow engine built with Go, using a Master-Worker arch
 - **API**: gRPC + HTTP
 - **Logging**: Structured logging (logrus/zap)
 
-## Architecture
+## SDK API
 
-```
-Master Cluster (Orchestration & Scheduling)
-    ├── Workflow Engine     - DSL parsing, DAG construction, workflow orchestration
-    ├── Scheduler (Asynq)   - Task scheduling and queuing
-    ├── State Manager       - Workflow and task state management (Redis)
-    ├── Monitor             - Metrics, logging, tracing
-    ├── API Server          - gRPC and HTTP endpoints
-    └── Version Controller  - Version management and rollback
-           ↓
-    Asynq Queue (Redis)
-           ↓
-Worker Pool (Task Execution)
-    ├── Task Handlers       - Execute different task types (HTTP, gRPC, database, etc.)
-    ├── Expression Engine   - Evaluate Expr expressions in task parameters
-    └── Plugin System       - Dynamically loadable custom task handlers
-```
+Use `sdk/xflow` as the public entry point:
+
+- `xflow.NewLocal()` starts an in-process engine for tests and embedded use.
+- `xflow.NewCluster(...)` uses Redis/Asynq for distributed execution.
+- `Engine.Submit` starts a workflow.
+- `Engine.Wait` waits for completion.
+- `Engine.Signal` resumes suspended approval or wait nodes.
+- `Engine.RevokeSignal` revokes a pre-delivered signal before it is consumed.
+- `Engine.Cancel` cancels an active execution.
+- `Engine.Inspect` returns execution and node status for audit/UI flows.
+
+Approval workflows can use `node.Approval(...).WithTimeout("48h", "reject")`
+and wait nodes can use `node.Wait("signal").WithTimeout("30m")`.
+
+## Embedded Production Boundary
+
+For production vulnerability approval systems, embed XFlow as the workflow
+scheduler/runtime, not as the business approval system of record:
+
+- The host service owns approval tickets, permissions, immutable approval
+  events, audit logs, notification delivery, and idempotency keys.
+- XFlow owns DAG scheduling, task execution, suspend/resume, timeout routing,
+  cancellation, and inspection.
+- In cluster mode, do not use `WorkflowBuilder.LocalNode`; every worker process
+  must declare the same custom node capabilities through `xflow.WithNodes(...)`.
+- API-only service instances can use `ClusterConfig{DisableConsumer: true}` so
+  they submit, inspect, signal, and cancel without consuming workflow tasks.
+- Worker instances should use the same Redis backend with consumers enabled and
+  the full custom node definition set loaded.
+- Complex approval nodes should pass an approval event ID in the signal payload
+  and read the authoritative approval event set from the host service database.
 
 ## DSL
 
@@ -37,7 +55,6 @@ XFlow uses an n8n-inspired DSL. Key concepts:
 
 - **Nodes** — Individual workflow steps
 - **Connections** — Explicit data flow between nodes (instead of `depends_on`)
-- **Triggers** — How workflows are initiated (webhook, cron, event, queue)
 - **Context** — Global variables, config, and secrets
 
 ```yaml
@@ -72,12 +89,14 @@ $now()                         # Built-in functions
 | gRPC Call | `xflow.grpc` | Microservice communication |
 | Function | `xflow.function` | Go function execution |
 | Database | `xflow.database` | CRUD operations |
-| Notification | `xflow.notification` | Email, SMS, webhook |
+| IF | `xflow.if` | Boolean branching |
 | Switch | `xflow.switch` | Conditional branching |
-| Parallel | `xflow.parallel` | Concurrent execution |
-| Loop | `xflow.loop` | Iteration over data |
-| Wait | `xflow.wait` | Human approval, external events |
+| Wait | `xflow.wait` | External signals and timers |
+| Approval | `xflow.approval` | Human approval gates |
 | Merge | `xflow.merge` | Combine multiple branches |
+
+`xflow.loop` and `xflow.split` are currently experimental and should not be
+used for production vulnerability approval flows yet.
 
 ## Design Principles
 
