@@ -1,0 +1,46 @@
+{
+  "name": "@xflow/workflow-editor",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Editor component package: instance store, command stack, palette, property panel, Monaco integration",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc --build",
+    "typecheck": "tsc --build --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@xflow/api-client": "workspace:*",
+    "@xflow/node-registry": "workspace:*",
+    "@xflow/workflow-components": "workspace:*",
+    "@xflow/workflow-core": "workspace:*",
+    "@xflow/workflow-provider": "workspace:*",
+    "@xflow/workflow-renderer": "workspace:*"
+  },
+  "peerDependencies": {
+    "react": "19.1.0",
+    "react-dom": "19.1.0",
+    "@xyflow/react": "12.5.0",
+    "@monaco-editor/react": "4.7.0"
+  },
+  "peerDependenciesMeta": {
+    "@xyflow/react": { "optional": true },
+    "@monaco-editor/react": { "optional": true }
+  },
+  "devDependencies": {
+    "@xflow/typescript-config": "workspace:*",
+    "react": "19.1.0",
+    "react-dom": "19.1.0",
+    "typescript": "5.8.3",
+    "vitest": "3.2.0"
+  }
+}

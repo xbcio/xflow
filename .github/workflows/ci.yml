@@ -149,3 +149,70 @@ jobs:
           name: integration-test-output
           path: integration-test-output.json
           if-no-files-found: error
+
+  web:
+    name: Web
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.10.0
+          run_install: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: web/.nvmrc
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: cd web && pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: cd web && pnpm lint
+
+      - name: Typecheck
+        run: cd web && pnpm typecheck
+
+      - name: Test
+        run: cd web && pnpm test
+
+      - name: Check boundaries
+        run: cd web && pnpm check:boundaries
+
+      - name: Check production fixtures
+        run: cd web && pnpm check:production-fixtures
+
+      - name: Build
+        run: cd web && pnpm build
+
+      - name: Install Playwright browsers
+        run: cd web && pnpm exec playwright install --with-deps chromium
+
+      - name: Run e2e tests
+        run: cd web && pnpm e2e
+
+      - name: Run e2e tests on production preview
+        run: cd web && pnpm e2e:preview
+
+      # Coverage runs after build/e2e so fast-feedback gates (lint/type/test/
+      # boundaries/fixtures/build/e2e) surface failures first. test:coverage
+      # re-executes the test suite with --coverage; a threshold regression
+      # fails the job.
+      - name: Coverage
+        run: cd web && pnpm test:coverage
+
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: web/playwright-report/
+          retention-days: 7

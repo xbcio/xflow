@@ -1,0 +1,14 @@
+{
+  "name": "@xflow/tailwind-config",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Shared Tailwind CSS preset for xflow web packages",
+  "type": "module",
+  "main": "tailwind.config.js",
+  "exports": {
+    ".": "./tailwind.config.js"
+  },
+  "dependencies": {
+    "tailwindcss": "3.4.17"
+  }
+}

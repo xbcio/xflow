@@ -1,0 +1,291 @@
+/*
+ * React Flow base styles are imported globally. This is a known isolation
+ * limitation: `@import url("@xyflow/react/dist/style.css")` is a side-effect
+ * import that pollutes the global `.react-flow__*` namespace. F0-B3 scopes
+ * our own `.xf-*` classes under `.xflow-root` so they cannot leak into or be
+ * affected by host application styles. Full third-party CSS isolation
+ * (Shadow DOM or build-time prefixing of `.react-flow__*`) is deferred to
+ * Embed hardening — do NOT assume the renderer is fully CSS-isolated today.
+ */
+@import url("@xyflow/react/dist/style.css");
+
+/* Self-contained static CSS for the workflow renderer.
+ * No Tailwind @config / @tailwind directives: this file is consumed as plain CSS
+ * by apps with or without Tailwind, and the xf-* classes are defined explicitly.
+ *
+ * All `.xf-*` selectors are scoped under `.xflow-root` so a host application
+ * cannot accidentally pick up renderer styles, and any `.xf-*` classes the
+ * host happens to define will not affect the renderer. The `:where()` wrapper
+ * keeps specificity at 0,1,0 so host overrides remain easy.
+ */
+.xflow-root {
+  --xf-color-running: #3b82f6;
+  --xf-color-completed: #22c55e;
+  --xf-color-failed: #ef4444;
+  --xf-color-suspended: #f59e0b;
+  --xf-color-unknown: #6b7280;
+  --xf-color-error: #ef4444;
+  --xf-color-warning: #f59e0b;
+  --xf-node-bg: #ffffff;
+  --xf-node-border: #d1d5db;
+  --xf-node-text: #111827;
+  --xf-node-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+
+  width: 100%;
+  height: 100%;
+  min-height: 320px;
+  position: relative;
+}
+
+/* Overlay position variables: hosts can override these on .xflow-root (or any
+ * ancestor — CSS variables are inherited) to relocate the canvas overlays
+ * without forking the components. Defaults keep the historical positions
+ * (top: 12, left/right: 12). We do NOT declare the variables on .xflow-root
+ * itself so an override set on an ancestor wrapper is inherited cleanly. */
+
+.xflow-root .react-flow {
+  background: transparent;
+}
+
+.xflow-root .react-flow__attribution {
+  font-size: 10px;
+}
+
+:where(.xflow-root) .xf-node {
+  display: flex;
+  flex-direction: column;
+  width: 180px;
+  min-height: 60px;
+  border: 1px solid var(--xf-node-border);
+  border-radius: 6px;
+  background: var(--xf-node-bg);
+  color: var(--xf-node-text);
+  box-shadow: var(--xf-node-shadow);
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 12px;
+  line-height: 1.4;
+  overflow: hidden;
+}
+
+:where(.xflow-root) .xf-node--selected {
+  outline: 2px solid var(--xf-color-running);
+  outline-offset: 2px;
+}
+
+:where(.xflow-root) .xf-node--running {
+  border-color: var(--xf-color-running);
+}
+
+:where(.xflow-root) .xf-node--completed {
+  border-color: var(--xf-color-completed);
+}
+
+:where(.xflow-root) .xf-node--failed,
+:where(.xflow-root) .xf-node--error {
+  border-color: var(--xf-color-failed);
+}
+
+:where(.xflow-root) .xf-node--warning {
+  border-color: var(--xf-color-warning);
+}
+
+:where(.xflow-root) .xf-node--suspended {
+  border-color: var(--xf-color-suspended);
+}
+
+:where(.xflow-root) .xf-node--unknown {
+  border-color: var(--xf-color-unknown);
+  background: #f9fafb;
+}
+
+:where(.xflow-root) .xf-node__header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-bottom: 1px solid #e5e7eb;
+  background: #f3f4f6;
+}
+
+:where(.xflow-root) .xf-node__icon {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--xf-color-failed);
+  color: #ffffff;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+:where(.xflow-root) .xf-node__name {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+:where(.xflow-root) .xf-node__body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 10px;
+}
+
+:where(.xflow-root) .xf-node__type {
+  color: #6b7280;
+  font-size: 11px;
+}
+
+:where(.xflow-root) .xf-node__status {
+  display: inline-block;
+  margin-top: 2px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: #eff6ff;
+  color: var(--xf-color-running);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+:where(.xflow-root) .xf-node__hint {
+  color: var(--xf-color-unknown);
+  font-size: 10px;
+  font-style: italic;
+}
+
+:where(.xflow-root) .xf-node__diagnostic-badge {
+  flex-shrink: 0;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: var(--xf-color-failed);
+  color: #ffffff;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+:where(.xflow-root) .xf-node__unknown-ports {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+:where(.xflow-root) .xf-port {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #9ca3af;
+  border: 1px solid #ffffff;
+}
+
+:where(.xflow-root) .xf-port--target {
+  left: -4px;
+}
+
+:where(.xflow-root) .xf-port--source {
+  right: -4px;
+}
+
+:where(.xflow-root) .xf-port--unknown {
+  width: 12px;
+  height: 12px;
+  background: var(--xf-color-error);
+  color: #ffffff;
+  font-size: 9px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 2px;
+}
+
+:where(.xflow-root) .xf-overlay {
+  position: absolute;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.95);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 11px;
+  color: #374151;
+  max-width: 220px;
+  flex-wrap: wrap;
+}
+
+:where(.xflow-root) .xf-overlay--selection {
+  top: var(--xf-overlay-selection-top, 12px);
+  left: var(--xf-overlay-selection-left, 12px);
+}
+
+:where(.xflow-root) .xf-overlay--execution {
+  top: var(--xf-overlay-exec-top, 12px);
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+:where(.xflow-root) .xf-overlay--diagnostic {
+  top: var(--xf-overlay-diag-top, 12px);
+  right: var(--xf-overlay-diag-right, 12px);
+  bottom: var(--xf-overlay-diag-bottom, auto);
+}
+
+:where(.xflow-root) .xf-overlay__label {
+  font-weight: 600;
+  color: #6b7280;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+:where(.xflow-root) .xf-overlay__value {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: #e5e7eb;
+  color: #111827;
+  font-weight: 700;
+}
+
+:where(.xflow-root) .xf-overlay__detail {
+  color: #6b7280;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 140px;
+}
+
+:where(.xflow-root) .xf-overlay__list {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+:where(.xflow-root) .xf-overlay__list > li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+:where(.xflow-root) .xf-overlay__list-text {
+  color: #6b7280;
+}

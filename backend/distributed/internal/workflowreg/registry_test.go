@@ -308,3 +308,103 @@ func TestRegistryDefaultTenantFallsBack(t *testing.T) {
 		t.Fatalf("GetWorkflow ID = %q, want %q", got.ID, created.ID)
 	}
 }
+
+// TestRegistryGetWorkflowByKey asserts the by-key lookup returns the stored
+// record, used by Engine.AddWorkflow for legacy-hash reconciliation.
+func TestRegistryGetWorkflowByKey(t *testing.T) {
+	ctx := tenant.WithTenant(context.Background(), tenant.TenantID("tenant-a"))
+	reg, _ := newTestRegistry(t)
+
+	if _, err := reg.GetWorkflowByKey(ctx, "default/wf@v1"); !errors.Is(err, backend.ErrWorkflowNotFound) {
+		t.Fatalf("GetWorkflowByKey missing = %v, want ErrWorkflowNotFound", err)
+	}
+
+	created, err := reg.AddWorkflow(ctx, testRecord(t, uuid.NewString(), "sha256:abc"))
+	if err != nil {
+		t.Fatalf("AddWorkflow: %v", err)
+	}
+
+	got, err := reg.GetWorkflowByKey(ctx, created.Key)
+	if err != nil {
+		t.Fatalf("GetWorkflowByKey: %v", err)
+	}
+	if got.ID != created.ID || got.DefinitionHash != "sha256:abc" {
+		t.Fatalf("GetWorkflowByKey = id=%q hash=%q, want id=%q hash=sha256:abc", got.ID, got.DefinitionHash, created.ID)
+	}
+}
+
+// TestRegistryUpdateDefinitionHash exercises the CAS contract and verifies
+// the stored record's hash is upgraded in place.
+func TestRegistryUpdateDefinitionHash(t *testing.T) {
+	ctx := tenant.WithTenant(context.Background(), tenant.TenantID("tenant-a"))
+	reg, _ := newTestRegistry(t)
+
+	if err := reg.UpdateDefinitionHash(ctx, "missing", "sha256:old", "runtime-sha256:v1:new"); !errors.Is(err, backend.ErrWorkflowNotFound) {
+		t.Fatalf("UpdateDefinitionHash missing = %v, want ErrWorkflowNotFound", err)
+	}
+
+	created, err := reg.AddWorkflow(ctx, testRecord(t, uuid.NewString(), "sha256:old"))
+	if err != nil {
+		t.Fatalf("AddWorkflow: %v", err)
+	}
+
+	if err := reg.UpdateDefinitionHash(ctx, created.ID, "sha256:wrong", "runtime-sha256:v1:new"); !errors.Is(err, backend.ErrWorkflowConflict) {
+		t.Fatalf("UpdateDefinitionHash CAS mismatch = %v, want ErrWorkflowConflict", err)
+	}
+
+	if err := reg.UpdateDefinitionHash(ctx, created.ID, "sha256:old", "runtime-sha256:v1:new"); err != nil {
+		t.Fatalf("UpdateDefinitionHash: %v", err)
+	}
+
+	got, err := reg.GetWorkflow(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("GetWorkflow: %v", err)
+	}
+	if got.DefinitionHash != "runtime-sha256:v1:new" {
+		t.Fatalf("DefinitionHash = %q, want runtime-sha256:v1:new", got.DefinitionHash)
+	}
+
+	// Idempotent: re-upgrading against the new hash with the same expected hash
+	// (matching current) is a no-op success.
+	if err := reg.UpdateDefinitionHash(ctx, created.ID, "runtime-sha256:v1:new", "runtime-sha256:v1:new"); err != nil {
+		t.Fatalf("UpdateDefinitionHash idempotent: %v", err)
+	}
+}
+
+// TestRegistryUpdateDefinitionHashConcurrent asserts two concurrent upgrades
+// against the same expectedOldHash cannot both succeed. The loser must see
+// ErrWorkflowConflict. Exercises the Lua CAS path under -race.
+func TestRegistryUpdateDefinitionHashConcurrent(t *testing.T) {
+	ctx := tenant.WithTenant(context.Background(), tenant.TenantID("tenant-a"))
+	reg, _ := newTestRegistry(t)
+
+	created, err := reg.AddWorkflow(ctx, testRecord(t, uuid.NewString(), "sha256:old"))
+	if err != nil {
+		t.Fatalf("AddWorkflow: %v", err)
+	}
+
+	first := make(chan error, 1)
+	second := make(chan error, 1)
+	go func() { first <- reg.UpdateDefinitionHash(ctx, created.ID, "sha256:old", "runtime-sha256:v1:winner") }()
+	go func() { second <- reg.UpdateDefinitionHash(ctx, created.ID, "sha256:old", "runtime-sha256:v1:loser") }()
+
+	err1 := <-first
+	err2 := <-second
+	if err1 == nil && err2 == nil {
+		t.Fatalf("both concurrent upgrades succeeded; expected exactly one ErrWorkflowConflict")
+	}
+	if err1 != nil && !errors.Is(err1, backend.ErrWorkflowConflict) {
+		t.Fatalf("first upgrade err = %v, want ErrWorkflowConflict or nil", err1)
+	}
+	if err2 != nil && !errors.Is(err2, backend.ErrWorkflowConflict) {
+		t.Fatalf("second upgrade err = %v, want ErrWorkflowConflict or nil", err2)
+	}
+
+	got, err := reg.GetWorkflow(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("GetWorkflow: %v", err)
+	}
+	if got.DefinitionHash != "runtime-sha256:v1:winner" && got.DefinitionHash != "runtime-sha256:v1:loser" {
+		t.Fatalf("DefinitionHash = %q after concurrent upgrade", got.DefinitionHash)
+	}
+}

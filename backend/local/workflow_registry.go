@@ -53,6 +53,37 @@ func (r *workflowRegistry) GetWorkflow(_ context.Context, id types.WorkflowID) (
 	return rec, nil
 }
 
+func (r *workflowRegistry) GetWorkflowByKey(_ context.Context, key string) (backend.WorkflowRecord, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	id, ok := r.byKey[key]
+	if !ok {
+		return backend.WorkflowRecord{}, backend.ErrWorkflowNotFound
+	}
+	return r.byID[id], nil
+}
+
+// UpdateDefinitionHash atomically updates the DefinitionHash of the record
+// holding id, but only if the currently-stored hash still matches
+// expectedOldHash. The mutex makes the check-and-set atomic with respect to
+// other in-process registrars.
+func (r *workflowRegistry) UpdateDefinitionHash(_ context.Context, id types.WorkflowID, expectedOldHash, newHash string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	rec, ok := r.byID[id]
+	if !ok {
+		return backend.ErrWorkflowNotFound
+	}
+	if rec.DefinitionHash != expectedOldHash {
+		return backend.ErrWorkflowConflict
+	}
+	rec.DefinitionHash = newHash
+	r.byID[id] = rec
+	return nil
+}
+
 func (r *workflowRegistry) RemoveWorkflow(_ context.Context, id types.WorkflowID) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

@@ -2,6 +2,7 @@ package xflow
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -62,21 +63,70 @@ func (e *Engine) AddWorkflow(ctx context.Context, wf *WorkflowBuilder) (types.Wo
 	if err != nil {
 		return "", err
 	}
-	hash, err := definitionHash(def)
+	hash, err := runtimeHash(def)
+	if err != nil {
+		return "", err
+	}
+	// Preserve a full-definition audit fingerprint so exported records can
+	// trace the exact original payload (including editor metadata).
+	audit, err := legacyDefinitionHash(def)
 	if err != nil {
 		return "", err
 	}
 	rec, err := e.workflowRegistry.AddWorkflow(ctx, backend.WorkflowRecord{
-		Key:            workflowKey(def),
-		Namespace:      def.Namespace,
-		Name:           def.Name,
-		Version:        def.Version,
-		DefinitionHash: hash,
-		Definition:     def,
-		Graph:          g,
+		Key:              workflowKey(def),
+		Namespace:        def.Namespace,
+		Name:             def.Name,
+		Version:          def.Version,
+		DefinitionHash:   hash,
+		AuditFingerprint: audit,
+		Definition:       def,
+		Graph:            g,
 	})
 	if err != nil {
-		return "", err
+		// Legacy-hash compatibility: when a workflow was first registered
+		// before commit 3ef36d9 (or before F0-A3 tightened the runtime hash),
+		// the stored DefinitionHash is in a format that will never equal the
+		// freshly-computed runtime-sha256:v1: hash, so the registry rejects
+		// the re-registration as a conflict. Recompute the runtime hash from
+		// the stored Definition and, if it matches, atomically upgrade the
+		// record's DefinitionHash so future registrations are idempotent.
+		if !errors.Is(err, backend.ErrWorkflowConflict) {
+			return "", err
+		}
+		existing, lookupErr := e.workflowRegistry.GetWorkflowByKey(ctx, workflowKey(def))
+		if lookupErr != nil {
+			// Preserve the original conflict error if the lookup fails —
+			// the caller's contract is "conflict", not "lookup failed".
+			return "", err
+		}
+		effective, needsUpgrade, reconcileErr := reconcileDefinitionHash(existing.DefinitionHash, existing.Definition)
+		if reconcileErr != nil {
+			return "", reconcileErr
+		}
+		if effective != hash {
+			// Real semantic conflict: the stored definition produces a
+			// different runtime hash than the new one. Surface the original
+			// ErrWorkflowConflict.
+			return "", err
+		}
+		if needsUpgrade {
+			if upgradeErr := e.workflowRegistry.UpdateDefinitionHash(ctx, existing.ID, existing.DefinitionHash, hash); upgradeErr != nil {
+				// CAS mismatch means another registrar concurrently
+				// upgraded (or replaced) the record. Re-fetch and re-check
+				// once: if it now matches the new hash, treat as idempotent;
+				// otherwise surface the original conflict.
+				reloaded, reloadErr := e.workflowRegistry.GetWorkflowByKey(ctx, workflowKey(def))
+				if reloadErr == nil && reloaded.DefinitionHash == hash {
+					existing = reloaded
+				} else {
+					return "", err
+				}
+			} else {
+				existing.DefinitionHash = hash
+			}
+		}
+		rec = existing
 	}
 	if e.triggerRuntime != nil {
 		if err := e.triggerRuntime.ReconcileWorkflow(ctx, rec); err != nil {

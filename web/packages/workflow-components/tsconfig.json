@@ -1,0 +1,17 @@
+{
+  "extends": "@xflow/typescript-config/react",
+  "compilerOptions": {
+    "composite": true,
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "tsBuildInfoFile": "./dist/.tsbuildinfo"
+  },
+  "include": ["src/**/*"],
+  "exclude": ["dist", "node_modules", "**/*.test.ts"],
+  "references": [
+    { "path": "../workflow-core" },
+    { "path": "../node-registry" },
+    { "path": "../workflow-provider" },
+    { "path": "../workflow-renderer" }
+  ]
+}

@@ -20,14 +20,15 @@ type Registry struct {
 }
 
 type storedWorkflowRecord struct {
-	ID             types.WorkflowID   `json:"id"`
-	Key            string             `json:"key"`
-	Namespace      string             `json:"namespace"`
-	Name           string             `json:"name"`
-	Version        string             `json:"version"`
-	DefinitionHash string             `json:"definition_hash"`
-	Definition     *types.WorkflowDef `json:"definition,omitempty"`
-	Graph          *graph.Graph       `json:"graph,omitempty"`
+	ID               types.WorkflowID   `json:"id"`
+	Key              string             `json:"key"`
+	Namespace        string             `json:"namespace"`
+	Name             string             `json:"name"`
+	Version          string             `json:"version"`
+	DefinitionHash   string             `json:"definition_hash"`
+	AuditFingerprint string             `json:"audit_fingerprint,omitempty"`
+	Definition       *types.WorkflowDef `json:"definition,omitempty"`
+	Graph            *graph.Graph       `json:"graph,omitempty"`
 }
 
 func New(rdb redis.UniversalClient) *Registry {
@@ -115,6 +116,32 @@ local n = redis.call('DEL', KEYS[1], KEYS[2])
 return n
 `)
 
+// updateWorkflowHashLua atomically updates the definition_hash field of the
+// record stored at byid:<id> (addressed as ARGV[1]..existingID, in the same
+// slot as KEYS[1]). KEYS[1] is the bykey pointer (used only to derive the
+// existing ID via GET); ARGV[1] is the byid key prefix; ARGV[2] is the
+// expected old hash for CAS; ARGV[3] is the new payload (full re-marshalled
+// record with the updated hash).
+//
+// All keys the script touches share the `{<key>}` hash tag, so the script is
+// Redis Cluster-safe.
+var updateWorkflowHashLua = redis.NewScript(`
+local existingID = redis.call('GET', KEYS[1])
+if not existingID then
+	return {'notfound', ''}
+end
+local raw = redis.call('GET', ARGV[1] .. existingID)
+if not raw then
+	return {'notfound', ''}
+end
+local rec = cjson.decode(raw)
+if rec.definition_hash ~= ARGV[2] then
+	return {'conflict', raw}
+end
+redis.call('SET', ARGV[1] .. existingID, ARGV[3])
+return {'ok', ARGV[3]}
+`)
+
 func (r *Registry) AddWorkflow(ctx context.Context, rec backend.WorkflowRecord) (backend.WorkflowRecord, error) {
 	t := tenant.FromContext(ctx)
 	if err := tenant.Validate(t); err != nil {
@@ -188,6 +215,122 @@ func (r *Registry) GetWorkflow(ctx context.Context, id types.WorkflowID) (backen
 	return record, nil
 }
 
+// GetWorkflowByKey fetches the record currently registered under key. The
+// bykey pointer and the byid:<id> record share the `{<key>}` hash tag, so the
+// two GETs are cluster-safe single-key ops in the same slot. Engine.AddWorkflow
+// uses this to inspect a conflicting existing record for legacy-hash
+// reconciliation.
+func (r *Registry) GetWorkflowByKey(ctx context.Context, key string) (backend.WorkflowRecord, error) {
+	t := tenant.FromContext(ctx)
+	if err := tenant.Validate(t); err != nil {
+		return backend.WorkflowRecord{}, fmt.Errorf("get workflow by key: %w", err)
+	}
+
+	id, err := r.rdb.Get(ctx, workflowByKeyKey(t, key)).Result()
+	if errors.Is(err, redis.Nil) {
+		return backend.WorkflowRecord{}, backend.ErrWorkflowNotFound
+	}
+	if err != nil {
+		return backend.WorkflowRecord{}, fmt.Errorf("get workflow by key %q: %w", key, err)
+	}
+
+	raw, err := r.rdb.Get(ctx, workflowByIDKey(t, key, types.WorkflowID(id))).Bytes()
+	if errors.Is(err, redis.Nil) {
+		return backend.WorkflowRecord{}, backend.ErrWorkflowNotFound
+	}
+	if err != nil {
+		return backend.WorkflowRecord{}, fmt.Errorf("get workflow by key %q: %w", key, err)
+	}
+
+	record, err := unmarshalWorkflowRecord(raw)
+	if err != nil {
+		return backend.WorkflowRecord{}, fmt.Errorf("get workflow by key %q: %w", key, err)
+	}
+	return record, nil
+}
+
+// UpdateDefinitionHash atomically upgrades the DefinitionHash of the record
+// holding id, but only if the currently-stored hash still equals
+// expectedOldHash. The CAS check + SET runs in a single Lua script on the
+// `{<key>}` slot, so concurrent upgrades from multiple registrars cannot
+// overwrite each other.
+//
+// The new payload is fully re-marshalled in Go (not by Lua cjson round-trip)
+// to avoid any encoding drift on the complex nested Definition/Graph fields.
+// Returns ErrWorkflowConflict if the stored hash no longer matches
+// expectedOldHash (someone else upgraded it).
+func (r *Registry) UpdateDefinitionHash(ctx context.Context, id types.WorkflowID, expectedOldHash, newHash string) error {
+	t := tenant.FromContext(ctx)
+	if err := tenant.Validate(t); err != nil {
+		return fmt.Errorf("update workflow hash: %w", err)
+	}
+
+	// Resolve the workflow key from the (untagged, single-key) idmap reverse
+	// index so we can address the `{<key>}`-tagged record slots.
+	key, err := r.rdb.Get(ctx, workflowIDMapKey(t, id)).Result()
+	if errors.Is(err, redis.Nil) {
+		return backend.ErrWorkflowNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("update workflow hash %q: %w", id, err)
+	}
+
+	// Fetch existing record so we can re-marshal it with the updated hash.
+	raw, err := r.rdb.Get(ctx, workflowByIDKey(t, key, id)).Bytes()
+	if errors.Is(err, redis.Nil) {
+		return backend.ErrWorkflowNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("update workflow hash %q: %w", id, err)
+	}
+	existing, err := unmarshalWorkflowRecord(raw)
+	if err != nil {
+		return fmt.Errorf("update workflow hash %q: %w", id, err)
+	}
+
+	// Short-circuit: if the stored hash already equals newHash, another
+	// registrar won the race; treat as success (idempotent).
+	if existing.DefinitionHash == newHash {
+		return nil
+	}
+	if existing.DefinitionHash != expectedOldHash {
+		return backend.ErrWorkflowConflict
+	}
+
+	existing.DefinitionHash = newHash
+	newPayload, err := marshalWorkflowRecordPayload(existing)
+	if err != nil {
+		return fmt.Errorf("update workflow hash %q: %w", id, err)
+	}
+
+	result, err := updateWorkflowHashLua.Run(
+		ctx,
+		r.rdb,
+		[]string{workflowByKeyKey(t, key)},
+		workflowByIDKeyPrefix(t, key),
+		expectedOldHash,
+		string(newPayload),
+	).Result()
+	if err != nil {
+		return fmt.Errorf("update workflow hash %q: %w", id, err)
+	}
+
+	state, _, err := decodeWorkflowScriptResult(result)
+	if err != nil {
+		return fmt.Errorf("update workflow hash %q: %w", id, err)
+	}
+	switch state {
+	case "ok":
+		return nil
+	case "conflict":
+		return backend.ErrWorkflowConflict
+	case "notfound":
+		return backend.ErrWorkflowNotFound
+	default:
+		return fmt.Errorf("update workflow hash %q: unexpected script state %q", id, state)
+	}
+}
+
 func (r *Registry) RemoveWorkflow(ctx context.Context, id types.WorkflowID) error {
 	t := tenant.FromContext(ctx)
 	key, err := r.rdb.Get(ctx, workflowIDMapKey(t, id)).Result()
@@ -229,14 +372,15 @@ type marshaledWorkflowRecord struct {
 
 func marshalWorkflowRecord(rec backend.WorkflowRecord) (*marshaledWorkflowRecord, error) {
 	stored := storedWorkflowRecord{
-		ID:             rec.ID,
-		Key:            rec.Key,
-		Namespace:      rec.Namespace,
-		Name:           rec.Name,
-		Version:        rec.Version,
-		DefinitionHash: rec.DefinitionHash,
-		Definition:     rec.Definition,
-		Graph:          rec.Graph,
+		ID:               rec.ID,
+		Key:              rec.Key,
+		Namespace:        rec.Namespace,
+		Name:             rec.Name,
+		Version:          rec.Version,
+		DefinitionHash:   rec.DefinitionHash,
+		AuditFingerprint: rec.AuditFingerprint,
+		Definition:       rec.Definition,
+		Graph:            rec.Graph,
 	}
 	if stored.ID == "" {
 		stored.ID = types.WorkflowID(uuid.NewString())
@@ -262,6 +406,30 @@ func marshalWorkflowRecord(rec backend.WorkflowRecord) (*marshaledWorkflowRecord
 	}, nil
 }
 
+// marshalWorkflowRecordPayload re-marshals an already-stored record (with
+// updated fields such as DefinitionHash) back to the on-wire JSON payload,
+// preserving the ID and Graph that were loaded from storage. It is used by
+// UpdateDefinitionHash to write back the full record after a hash upgrade
+// without going through a Lua cjson round-trip.
+func marshalWorkflowRecordPayload(rec backend.WorkflowRecord) ([]byte, error) {
+	stored := storedWorkflowRecord{
+		ID:               rec.ID,
+		Key:              rec.Key,
+		Namespace:        rec.Namespace,
+		Name:             rec.Name,
+		Version:          rec.Version,
+		DefinitionHash:   rec.DefinitionHash,
+		AuditFingerprint: rec.AuditFingerprint,
+		Definition:       rec.Definition,
+		Graph:            rec.Graph,
+	}
+	payload, err := json.Marshal(stored)
+	if err != nil {
+		return nil, fmt.Errorf("marshal workflow payload %q: %w", stored.Key, err)
+	}
+	return payload, nil
+}
+
 func unmarshalWorkflowRecord(raw []byte) (backend.WorkflowRecord, error) {
 	var stored storedWorkflowRecord
 	if err := json.Unmarshal(raw, &stored); err != nil {
@@ -269,14 +437,15 @@ func unmarshalWorkflowRecord(raw []byte) (backend.WorkflowRecord, error) {
 	}
 
 	record := backend.WorkflowRecord{
-		ID:             stored.ID,
-		Key:            stored.Key,
-		Namespace:      stored.Namespace,
-		Name:           stored.Name,
-		Version:        stored.Version,
-		DefinitionHash: stored.DefinitionHash,
-		Definition:     stored.Definition,
-		Graph:          stored.Graph,
+		ID:               stored.ID,
+		Key:              stored.Key,
+		Namespace:        stored.Namespace,
+		Name:             stored.Name,
+		Version:          stored.Version,
+		DefinitionHash:   stored.DefinitionHash,
+		AuditFingerprint: stored.AuditFingerprint,
+		Definition:       stored.Definition,
+		Graph:            stored.Graph,
 	}
 	if record.Graph == nil && record.Definition != nil {
 		g, err := graph.Compile(record.Definition)

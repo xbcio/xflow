@@ -1,0 +1,48 @@
+{
+  "name": "editor-metadata-demo",
+  "nodes": [
+    {
+      "id": "node-trigger",
+      "name": "trigger",
+      "type": "xflow.start",
+      "kind": "trigger",
+      "notes": "Start here",
+      "position": {
+        "x": 50,
+        "y": 50
+      },
+      "ui": {
+        "color": "#00ff00"
+      }
+    },
+    {
+      "id": "node-action",
+      "name": "action",
+      "type": "xflow.log",
+      "kind": "action",
+      "notes": "Log something",
+      "position": {
+        "x": 250,
+        "y": 50
+      },
+      "ui": {
+        "color": "#0000ff",
+        "icon": "bug"
+      }
+    }
+  ],
+  "connections": {
+    "trigger": {
+      "default": [
+        {
+          "node": "action"
+        }
+      ]
+    }
+  },
+  "pin_data": {
+    "trigger": {
+      "event": "demo"
+    }
+  }
+}
