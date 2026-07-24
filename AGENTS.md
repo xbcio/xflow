@@ -39,13 +39,19 @@ golangci-lint run        # Lint
 - Engine Core depends on exactly 2 interfaces: `StateStore` + `TaskQueue`
 - Future server/runner code goes under `service/` (a future module boundary); core packages (engine/nodes/types/store/sdk) must NEVER import `service/` or `cmd/` — dependencies flow one way only, so a later module split stays mechanical
 
-## AI 生成文档的存放位置
+## AI-Generated Documentation Placement
 
-AI 生成/维护的设计文档、spec、评审报告等统一放到 `.claude/` 下合适的子目录（如
-`.claude/specs/`），不要放到 `docs/`。`docs/` 只保留人工维护的正式架构文档
-（`docs/design/`）和面向使用者的说明（`docs/dsl-samples/`、`docs/references/`）。
-`.claude/` 已在 `.gitignore` 中排除，因此这类文档不进版本库；命名沿用
-`.claude/specs/` 现有约定：`YYYY-MM-DD-<topic>-design.md`。
+AI-generated/maintained design docs, specs, and review reports go under an
+appropriate `.claude/` subdirectory (e.g. `.claude/specs/`), never under
+`docs/`. `docs/` is reserved for human-maintained architecture docs
+(`docs/design/`) and user-facing references (`docs/dsl-samples/`,
+`docs/references/`). `.claude/` is gitignored, so these docs never enter
+version control; follow the existing `.claude/specs/` naming convention:
+`YYYY-MM-DD-<topic>-design.md`.
+
+## Git Commits
+
+Single-line subject, no body: `type(scope): what changed`. Full convention: **[docs/GIT-COMMITS.md](docs/GIT-COMMITS.md)**.
 
 ## Detailed Documentation
 
