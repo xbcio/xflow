@@ -90,9 +90,27 @@ func (m *workflowControlModule) RegisterHTTP(mux *http.ServeMux) {
 // An unknown verb resolves to ok=false → 404 (default-deny, no existence leak).
 func (m *workflowControlModule) registerAuthzRoutes(mux *http.ServeMux) {
 	authz := m.authzWrap
-	mux.HandleFunc("/v1/workflows", authz(OpWorkflowCreate, true, m.handleSubmitWorkflow, nil))
-	mux.HandleFunc("/v1/workflows/invoke", authz(OpWorkflowInvoke, true, m.handleInvoke, nil))
+	mux.HandleFunc("/v1/workflows", authz(OpWorkflowCreate, true, m.handleSubmitWorkflow, newExecutionIDResolver()))
+	mux.HandleFunc("/v1/workflows/invoke", authz(OpWorkflowInvoke, true, m.handleInvoke, newExecutionIDResolver()))
 	mux.HandleFunc("/v1/executions/", m.authzWrapResolved(m.handleExecution, resolveExecutionRoute))
+}
+
+// newExecutionIDResolver is the resource resolver for the workflow create/invoke
+// routes. Unlike the /v1/executions/ subtree — which resolves the targeted
+// execution id from the path — create/invoke have no path id, so the resolver
+// pre-allocates a fresh execution id (R3.1). That id is stamped onto the
+// admission audit row by authzWrap and, via engine.WithExecutionID injected by
+// the same wrapper, reused by engine Submit/Invoke, so the audit row and the
+// persisted execution share one id (closing the audit↔execution correlation
+// gap that left reconcile Probe reading an empty ExecutionID).
+//
+// resource/workflowID/tenant stay empty: create/invoke authz was decided on
+// operation alone before this change, and this resolver only supplies the
+// correlation id, not authz inputs.
+func newExecutionIDResolver() func(*http.Request) (string, string, string, string) {
+	return func(*http.Request) (string, string, string, string) {
+		return "", "", string(engine.NewExecutionID()), ""
+	}
 }
 
 // resolveExecutionRoute parses /v1/executions/<id>[/verb] + method and returns

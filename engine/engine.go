@@ -128,12 +128,30 @@ func (e *Engine) EvictExecution(id types.ExecutionID) {
 	e.mu.Unlock()
 }
 
+// NewExecutionID mints a fresh execution id. Extracted so the apiserver authz
+// wrapper can pre-allocate the id before the mutation handler runs (R3.1),
+// letting the admission audit row carry the same id the engine will persist.
+func NewExecutionID() types.ExecutionID {
+	return types.ExecutionID("exec-" + uuid.New().String())
+}
+
+// preallocOrNewExecutionID returns the caller-pre-allocated id from the
+// submission context when present, otherwise mints a fresh one. Used by
+// Submit/Invoke so a server-side pre-allocated id flows into the persisted
+// snapshot and the audit row simultaneously.
+func preallocOrNewExecutionID(ctx context.Context) types.ExecutionID {
+	if id, ok := ExecutionIDFromContext(ctx); ok {
+		return id
+	}
+	return NewExecutionID()
+}
+
 // Submit starts a new execution of the given graph with the provided params.
 // It persists the execution snapshot, caches the graph, and schedules all
 // root nodes (in-degree == 0) through a durable outbox when the StateStore
 // implements AtomicStateStore.
 func (e *Engine) Submit(ctx context.Context, g *graph.Graph, params map[string]any, runtime ...*types.Runtime) (types.ExecutionID, error) {
-	id := types.ExecutionID("exec-" + uuid.New().String())
+	id := preallocOrNewExecutionID(ctx)
 	snap := &ExecutionSnapshot{
 		ID:     id,
 		Graph:  g,
@@ -154,7 +172,7 @@ func (e *Engine) Invoke(ctx context.Context, g *graph.Graph, entryName string, p
 		return "", fmt.Errorf("entry node %q not found", entryName)
 	}
 
-	id := types.ExecutionID("exec-" + uuid.New().String())
+	id := preallocOrNewExecutionID(ctx)
 	snap := &ExecutionSnapshot{
 		ID:     id,
 		Graph:  g,

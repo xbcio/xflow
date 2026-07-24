@@ -6,7 +6,9 @@ import (
 	"time"
 
 	"github.com/xbcio/xflow/backend/tenant"
+	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/observability/tracing"
+	"github.com/xbcio/xflow/types"
 )
 
 // authzHolder carries the B3 resource/operation authz dependencies shared by
@@ -59,6 +61,17 @@ func (h *authzHolder) authzWrap(op string, isMutation bool, fn http.HandlerFunc,
 		// downstream read and the audit sink draw tenant from the same source:
 		// tenant.FromContext(ctx).
 		r = r.WithContext(tenant.WithTenant(context.WithValue(r.Context(), authzContextKey{}, principal), tenant.TenantID(principal.TenantID)))
+
+		// R3.1: when the resolver carried an execution id (pre-allocated for
+		// workflow create/invoke, or the path param for execution-scoped
+		// mutations), propagate it into the submission context so engine
+		// Submit/Invoke persist the SAME id the admission audit row already
+		// recorded. This closes the audit↔execution correlation gap that left
+		// reconcile Probe reading an empty ExecutionID. signal/revoke/cancel
+		// do not call Submit/Invoke, so injecting their path-param id is inert.
+		if execID != "" {
+			r = r.WithContext(engine.WithExecutionID(r.Context(), types.ExecutionID(execID)))
+		}
 
 		// Mutation fail-closed: persist the admission audit BEFORE the
 		// operation. If the audit sink is unavailable, deny rather than

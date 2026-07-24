@@ -1618,7 +1618,7 @@ func g1RunAuditReconcile(t *testing.T, h *productionServerRunnerHarness) g1Audit
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	g1SubmitAllowed(t, h.httpSrv.URL, g1TokFullA, g1StartWorkflowDef("g1-audit-reconcile"))
+	execID := g1SubmitAllowed(t, h.httpSrv.URL, g1TokFullA, g1StartWorkflowDef("g1-audit-reconcile"))
 	// Poll for the admission audit row (written inline by the authz wrapper
 	// before the HTTP response returns; a poll is more robust than a fixed
 	// sleep and removes flakiness under load).
@@ -1644,6 +1644,27 @@ func g1RunAuditReconcile(t *testing.T, h *productionServerRunnerHarness) g1Audit
 
 	settled2 := w.ReconcileOnce(ctx)
 	afterAdmission2 := g1CountUnreconciled(t, h.provider)
+
+	// R3.1 observation (non-asserting): the authz wrapper now pre-allocates the
+	// ExecutionID into the admission row, so Probe can reach EffectConfirmed for
+	// workflow.create. We prove the leverage directly by probing THIS execution
+	// (whose admission row carries execID per R3.1, proven in
+	// service/apiserver/execution_id_audit_test.go): GetExecution finds it →
+	// Confirmed. The batch worker still reports settled=0 here because a shared-
+	// DB backlog of pre-R3.1 empty-ExecutionID rows (Indeterminate, never
+	// settled) occupies the oldest-first 256-batch before this run's fresh row —
+	// that backlog masking is R3.4's scope, not an R3.1 failure. The hard >0
+	// assertion belongs to R3.3, so this only logs measured values.
+	probeEffect, _ := authority.Probe(tenant.WithTenant(ctx, tenant.TenantID(g1TenantA)), &store.AuditRecord{ExecutionID: string(execID), Operation: "workflow.create"})
+	probeEffectStr := "indeterminate"
+	switch probeEffect {
+	case control.EffectConfirmed:
+		probeEffectStr = "confirmed"
+	case control.EffectAbsent:
+		probeEffectStr = "absent"
+	}
+	t.Logf("g1AuditReconcile: exec_id=%s probe_effect=%s before=%d settled=%d settled2=%d after=%d after2=%d reconciled_by_worker=%d",
+		execID, probeEffectStr, beforeAdmission, settled, settled2, afterAdmission, afterAdmission2, settled+settled2)
 
 	return g1AuditReconcile{
 		AdmissionRows:           beforeAdmission,

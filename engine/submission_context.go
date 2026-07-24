@@ -9,6 +9,7 @@ import (
 
 type executionTTLCtxKey struct{}
 type workflowDefCtxKey struct{}
+type executionIDCtxKey struct{}
 type traceIDCtxKey struct{}
 type spanIDCtxKey struct{}
 type traceCarrierCtxKey struct{}
@@ -44,6 +45,25 @@ func WithWorkflowDef(ctx context.Context, def *types.WorkflowDef) context.Contex
 func WorkflowDefFromContext(ctx context.Context) (*types.WorkflowDef, bool) {
 	def, ok := ctx.Value(workflowDefCtxKey{}).(*types.WorkflowDef)
 	return def, ok && def != nil
+}
+
+// WithExecutionID attaches a pre-allocated execution id to the submission
+// context so the apiserver authz wrapper can stamp the admission audit row with
+// the same id the engine will persist. When set, Submit/Invoke reuse it instead
+// of minting a fresh id; this closes the audit↔execution correlation gap that
+// left reconcile Probe reading an empty ExecutionID (R3.1). Empty id is ignored.
+func WithExecutionID(ctx context.Context, id types.ExecutionID) context.Context {
+	if id == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, executionIDCtxKey{}, id)
+}
+
+// ExecutionIDFromContext extracts a pre-allocated execution id attached to the
+// submission context. Returns "" when none was attached.
+func ExecutionIDFromContext(ctx context.Context) (types.ExecutionID, bool) {
+	id, ok := ctx.Value(executionIDCtxKey{}).(types.ExecutionID)
+	return id, ok && id != ""
 }
 
 // WithTraceID attaches trace metadata for a single execution submission. The

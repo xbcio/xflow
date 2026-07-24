@@ -38,17 +38,27 @@ type fakeControlFacade struct {
 	invokedEnt string
 }
 
-func (f *fakeControlFacade) Submit(context.Context, *graph.Graph, map[string]any, ...*types.Runtime) (types.ExecutionID, error) {
+func (f *fakeControlFacade) Submit(ctx context.Context, _ *graph.Graph, _ map[string]any, _ ...*types.Runtime) (types.ExecutionID, error) {
+	// R3.1: mirror the real engine — when the authz wrapper pre-allocated an
+	// execution id into the submission context, echo it back so the response
+	// execution_id matches the admission audit row. Falls back to the fixed
+	// submitID for tests that don't go through the authz path.
+	if id, ok := engine.ExecutionIDFromContext(ctx); ok {
+		return id, f.submitErr
+	}
 	if f.submitID == "" {
 		return "exec-submit", f.submitErr
 	}
 	return f.submitID, f.submitErr
 }
 
-func (f *fakeControlFacade) Invoke(_ context.Context, _ *graph.Graph, entry string, _ map[string]any, _ ...*types.Runtime) (types.ExecutionID, error) {
+func (f *fakeControlFacade) Invoke(ctx context.Context, _ *graph.Graph, entry string, _ map[string]any, _ ...*types.Runtime) (types.ExecutionID, error) {
 	f.invokedEnt = entry
 	if f.invokeErr != nil {
 		return "", f.invokeErr
+	}
+	if id, ok := engine.ExecutionIDFromContext(ctx); ok {
+		return id, nil
 	}
 	if f.invokeID == "" {
 		return "exec-invoke", nil
