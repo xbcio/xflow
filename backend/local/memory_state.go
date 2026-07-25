@@ -99,7 +99,11 @@ func (s *memoryState) CreateExecutionWithOutbox(_ context.Context, e *engine.Exe
 func (s *memoryState) createExecutionLocked(e *engine.ExecutionSnapshot) {
 	cp := *e
 	s.executions[e.ID] = &execEntry{snap: cp}
-	s.doneCh[e.ID] = make(chan struct{})
+	// Reuse a pre-registered done channel from an early waitDone call (race with
+	// CreateExecution), or create a fresh one.
+	if _, ok := s.doneCh[e.ID]; !ok {
+		s.doneCh[e.ID] = make(chan struct{})
+	}
 	// Seed in-degree counters and O(1) completion counters from the compiled graph.
 	if e.Graph != nil {
 		for i := 0; i < e.Graph.NodeCount(); i++ {
@@ -119,6 +123,16 @@ func (s *memoryState) UpdateExecutionStatus(_ context.Context, id types.Executio
 	defer s.mu.Unlock()
 	entry, ok := s.executions[id]
 	if !ok {
+		return nil
+	}
+	// CAS guard — mirrors the distributed backend's Lua fencing:
+	//   - A terminal status is never overwritten.
+	//   - canceling blocks any non-canceled write (cancel owns the terminal transition).
+	current := entry.snap.Status
+	if isTerminalStatus(current) {
+		return nil
+	}
+	if current == types.ExecutionStatusCanceling && status != types.ExecutionStatusCanceled {
 		return nil
 	}
 	entry.snap.Status = status
@@ -494,6 +508,15 @@ func (s *memoryState) DecrementInDegree(_ context.Context, id types.ExecutionID,
 func (s *memoryState) CheckCompletion(_ context.Context, id types.ExecutionID, totalNodes int) (bool, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Guard: if the execution is already terminal or canceling, report
+	// not-complete so the engine does not try to overwrite the status. Matches
+	// the distributed checkCompletionLua guard.
+	if entry, ok := s.executions[id]; ok {
+		st := entry.snap.Status
+		if isTerminalStatus(st) || st == types.ExecutionStatusCanceling {
+			return false, false, nil
+		}
+	}
 	prefix := string(id) + "/"
 	done := 0
 	hasFailed := false
@@ -526,7 +549,8 @@ func (s *memoryState) SuspendOrConsume(_ context.Context, id types.ExecutionID, 
 		sigKey := string(id) + "/" + sigName
 		if sig, ok := s.signals[sigKey]; ok {
 			delete(s.signals, sigKey)
-			return &types.SignalPayload{Triggered: types.SignalReceived, Name: sigName, Data: sig}, nil
+			// Return a clone to prevent caller from aliasing internal state.
+			return &types.SignalPayload{Triggered: types.SignalReceived, Name: sigName, Data: cloneData(sig)}, nil
 		}
 	}
 	// Park the node.
@@ -562,8 +586,9 @@ func (s *memoryState) DeliverSignal(_ context.Context, id types.ExecutionID, sig
 			}
 		}
 	}
-	// No suspended node yet — store for later consumption.
-	s.signals[string(id)+"/"+signalName] = data
+	// No suspended node yet — store for later consumption. Clone to decouple
+	// from caller's map (matches distributed serialize semantics).
+	s.signals[string(id)+"/"+signalName] = cloneData(data)
 	return "", nil, nil
 }
 
@@ -626,17 +651,24 @@ func (s *memoryState) DeliverSignalWithOutbox(_ context.Context, id types.Execut
 }
 
 // scheduleResumeOutbox records a resume delivery intent for a woken node.
+// It reads the LIVE activation_id from the node state (already under the lock)
+// rather than relying on the caller's snapshot, mirroring the Redis Lua path's
+// authoritative read that closes the TOCTOU window.
 func (s *memoryState) scheduleResumeOutbox(id types.ExecutionID, nodeName string, intent engine.ResumeIntent, payload *types.SignalPayload) {
+	activationID := intent.ActivationID
+	if node, ok := s.nodes[string(id)+"/"+nodeName]; ok {
+		activationID = node.ActivationID
+	}
 	task := engine.Task{
 		ExecutionID:  id,
 		NodeName:     nodeName,
 		NodeIdx:      intent.NodeIdx,
 		Type:         engine.TaskTypeNodeResume,
 		Payload:      payload,
-		ActivationID: intent.ActivationID,
+		ActivationID: activationID,
 		AutoDepth:    intent.AutoDepth,
 	}
-	entryID := fmt.Sprintf("resume/%s/%s/%d/signal", id, nodeName, intent.ActivationID)
+	entryID := fmt.Sprintf("resume/%s/%s/%d/signal", id, nodeName, activationID)
 	s.putOutboxLocked(id, entryID, task, time.Now().UTC())
 }
 
@@ -695,7 +727,7 @@ func (s *memoryState) ResuspendAtomic(_ context.Context, id types.ExecutionID, n
 	newSigKey := execID + "/" + newSignalName
 	if sig, ok := s.signals[newSigKey]; ok {
 		delete(s.signals, newSigKey)
-		return &types.SignalPayload{Triggered: types.SignalReceived, Name: newSignalName, Data: sig}, nil
+		return &types.SignalPayload{Triggered: types.SignalReceived, Name: newSignalName, Data: cloneData(sig)}, nil
 	}
 
 	// 4. No signal available — register new waiter.
@@ -821,10 +853,13 @@ func (s *memoryState) waitDone(id types.ExecutionID) <-chan struct{} {
 	defer s.mu.Unlock()
 	ch, ok := s.doneCh[id]
 	if !ok {
-		// Already completed or unknown — return a pre-closed channel.
-		closed := make(chan struct{})
-		close(closed)
-		return closed
+		// Unknown execution — register a pending channel that will be used when
+		// the execution is created (race with CreateExecution) or closed when it
+		// completes. Callers rely on ctx timeout to avoid blocking forever on
+		// executions that never appear.
+		ch = make(chan struct{})
+		s.doneCh[id] = ch
+		return ch
 	}
 	return ch
 }
@@ -842,23 +877,30 @@ func (s *memoryState) WatchExecution(ctx context.Context, id types.ExecutionID) 
 	s.eventWatchers[id] = append(s.eventWatchers[id], ch)
 	s.mu.Unlock()
 
+	// Clean up when the caller's context is canceled (if cancellable).
 	if done := ctx.Done(); done != nil {
 		go func() {
 			<-done
 			s.mu.Lock()
 			defer s.mu.Unlock()
-			watchers := s.eventWatchers[id]
-			for i, watcher := range watchers {
-				if watcher == ch {
-					s.eventWatchers[id] = append(watchers[:i], watchers[i+1:]...)
-					close(ch)
-					return
-				}
-			}
+			s.removeWatcherLocked(id, ch)
 		}()
 	}
 
 	return ch, nil
+}
+
+// removeWatcherLocked removes a specific watcher channel from eventWatchers and
+// closes it. Caller must hold s.mu.
+func (s *memoryState) removeWatcherLocked(id types.ExecutionID, ch chan engine.ExecutionEvent) {
+	watchers := s.eventWatchers[id]
+	for i, watcher := range watchers {
+		if watcher == ch {
+			s.eventWatchers[id] = append(watchers[:i], watchers[i+1:]...)
+			close(ch)
+			return
+		}
+	}
 }
 
 func (s *memoryState) publishLocked(event engine.ExecutionEvent) {
@@ -867,6 +909,14 @@ func (s *memoryState) publishLocked(event engine.ExecutionEvent) {
 		case watcher <- event:
 		default:
 		}
+	}
+	// On terminal status, close and remove all watchers for this execution to
+	// prevent memory leaks when ctx is non-cancellable (e.g. context.Background).
+	if isTerminalStatus(event.Status) {
+		for _, watcher := range s.eventWatchers[event.ExecutionID] {
+			close(watcher)
+		}
+		delete(s.eventWatchers, event.ExecutionID)
 	}
 }
 

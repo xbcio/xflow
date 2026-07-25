@@ -48,11 +48,11 @@ func (e *Engine) deliverSignalDurable(ctx context.Context, id types.ExecutionID,
 		if !ok {
 			return fmt.Errorf("signal %q targeted unknown node %q", name, resumeNode)
 		}
-		activationID, err := e.currentActivationID(ctx, id, resumeNode)
-		if err != nil {
-			return fmt.Errorf("read signal target %q/%q: %w", id, resumeNode, err)
-		}
-		intent = ResumeIntent{NodeName: resumeNode, NodeIdx: nodeIdx, ActivationID: activationID}
+		// ActivationID is intentionally left zero: the durable backend reads the
+		// live activation_id from node meta inside the atomic Lua transaction,
+		// closing the TOCTOU window where a concurrent re-suspend under a new
+		// activation could make the Go-side snapshot stale.
+		intent = ResumeIntent{NodeName: resumeNode, NodeIdx: nodeIdx}
 	}
 
 	node, _, committed, err := durable.DeliverSignalWithOutbox(ctx, id, name, data, intent)

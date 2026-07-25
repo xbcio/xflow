@@ -130,15 +130,24 @@ if tonumber(ARGV[16]) == 0 then
         redis.call('EXPIRE', KEYS[4], ttl)
     end
     if tonumber(ARGV[12]) == 1 or remaining <= 0 then
-        finalStatus = 'success'
-        if tonumber(ARGV[12]) == 1 or tonumber(redis.call('GET', KEYS[4]) or '0') > 0 then
-            finalStatus = 'failed'
+        -- Guard: do not overwrite canceling/terminal execution status (same
+        -- fence as updateExecutionStatusLua). A concurrent Cancel may have
+        -- transitioned the execution to canceling/canceled while nodes were
+        -- still completing; honor the cancel rather than stomping it.
+        local curExec = redis.call('GET', KEYS[1])
+        if curExec == 'canceling' or curExec == 'canceled' or curExec == 'timeout' or curExec == 'success' or curExec == 'failed' then
+            done = 0
+        else
+            finalStatus = 'success'
+            if tonumber(ARGV[12]) == 1 or tonumber(redis.call('GET', KEYS[4]) or '0') > 0 then
+                finalStatus = 'failed'
+            end
+            redis.call('SET', KEYS[1], finalStatus, 'EX', ttl)
+            if finalStatus == 'failed' and ARGV[10] ~= '' then
+                redis.call('SET', KEYS[2], ARGV[10], 'EX', ttl)
+            end
+            done = 1
         end
-        redis.call('SET', KEYS[1], finalStatus, 'EX', ttl)
-        if finalStatus == 'failed' and ARGV[10] ~= '' then
-            redis.call('SET', KEYS[2], ARGV[10], 'EX', ttl)
-        end
-        done = 1
     end
 end
 if done == 0 and tonumber(ARGV[12]) == 0 and ARGV[15] ~= '' then
@@ -161,12 +170,16 @@ if tonumber(ARGV[16]) == 1 and done == 0 and tonumber(ARGV[12]) == 0 then
         redis.call('EXPIRE', KEYS[9], ttl)
         redis.call('EXPIRE', KEYS[10], ttl)
     elseif tonumber(ARGV[19] or '0') == 1 then
-        finalStatus = ARGV[20]
-        redis.call('SET', KEYS[1], finalStatus, 'EX', ttl)
-        if finalStatus == 'failed' and ARGV[21] ~= '' then
-            redis.call('SET', KEYS[2], ARGV[21], 'EX', ttl)
+        -- Guard: do not overwrite canceling/terminal (same fence as above).
+        local curExec2 = redis.call('GET', KEYS[1])
+        if curExec2 ~= 'canceling' and curExec2 ~= 'canceled' and curExec2 ~= 'timeout' and curExec2 ~= 'success' and curExec2 ~= 'failed' then
+            finalStatus = ARGV[20]
+            redis.call('SET', KEYS[1], finalStatus, 'EX', ttl)
+            if finalStatus == 'failed' and ARGV[21] ~= '' then
+                redis.call('SET', KEYS[2], ARGV[21], 'EX', ttl)
+            end
+            done = 1
         end
-        done = 1
     end
 end
 return {1, done, finalStatus}
@@ -1150,9 +1163,11 @@ func (s *Store) ListDeadLetters(ctx context.Context, id types.ExecutionID, page 
 	} else {
 		// Same-score tail: members at cursorScore, filtered in Go to member >
 		// cursorMember (Redis orders same-score members by member lex, so the
-		// slice is already in correct order).
+		// slice is already in correct order). We cannot cap this fetch at
+		// page.Limit because an unknown number of entries <= cursorMember will
+		// be discarded; use maxLimit as a safety bound instead.
 		sameScore, serr := s.rdb.ZRangeArgsWithScores(ctx, redis.ZRangeArgs{
-			Key: deadKey, Start: formatScore(cursorScore), Stop: formatScore(cursorScore), ByScore: true, Offset: 0, Count: -1,
+			Key: deadKey, Start: formatScore(cursorScore), Stop: formatScore(cursorScore), ByScore: true, Offset: 0, Count: int64(maxLimit),
 		}).Result()
 		if serr != nil {
 			return engine.DeadLetterList{}, fmt.Errorf("list dead letters %q: %w", id, serr)

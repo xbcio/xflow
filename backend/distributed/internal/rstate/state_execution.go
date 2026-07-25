@@ -264,20 +264,21 @@ func (s *Store) UpdateExecutionStatus(ctx context.Context, id types.ExecutionID,
 	// Compare-and-set with cancel-aware fencing: a terminal or canceling status
 	// blocks non-canceled overwrites, so a concurrent cyclic completeExecution
 	// cannot stomp an in-flight Cancel.
-	errKey := ""
+	// Only include the error key in KEYS when non-empty to avoid CROSSSLOT errors
+	// in Redis Cluster: an empty-string key lands on slot 0, which differs from
+	// the {id}-tagged status key's slot.
+	var keys []string
 	if errMsg != "" {
-		errKey = execKey(t, id, "error")
+		keys = []string{execKey(t, id, "status"), execKey(t, id, "error")}
+	} else {
+		keys = []string{execKey(t, id, "status")}
 	}
 	applied, err := updateExecutionStatusLua.Run(ctx, s.rdb,
-		[]string{execKey(t, id, "status"), errKey},
+		keys,
 		string(status), errMsg, int(ttl.Seconds()),
 	).Int64()
 	if err != nil && err != redis.Nil {
 		return fmt.Errorf("update execution status %q: %w", id, err)
-	}
-	keys := []string{execKey(t, id, "status")}
-	if errKey != "" {
-		keys = append(keys, errKey)
 	}
 	// Clean up timeout ZSET entries when execution is canceled.
 	if applied == 1 && status == types.ExecutionStatusCanceled {

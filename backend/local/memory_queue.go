@@ -116,7 +116,10 @@ func (q *memoryQueue) dispatch(env queueEnvelope) {
 		q.logger.Errorf("requeueing task after transient dispatch failure: exec=%s node=%s attempt=%d delay=%s err=%v",
 			env.task.ExecutionID, env.task.NodeName, env.transientTries, delay, err)
 	}
+	// Track the requeue goroutine in wg so Stop waits for pending retries.
+	q.wg.Add(1)
 	go func(env queueEnvelope, delay time.Duration) {
+		defer q.wg.Done()
 		timer := time.NewTimer(delay)
 		defer timer.Stop()
 		select {
@@ -150,26 +153,27 @@ func (q *memoryQueue) Stop() {
 	q.wg.Wait()
 }
 
-func (q *memoryQueue) Enqueue(_ context.Context, t *engine.Task) error {
+func (q *memoryQueue) Enqueue(ctx context.Context, t *engine.Task) error {
 	env := queueEnvelope{task: t}
+	// Respect the caller's ctx: block until space is available, the queue is
+	// stopped, or the context is canceled. No unbounded goroutines.
 	select {
 	case q.ch <- env:
 		return nil
-	default:
-		// Channel full — grow dynamically by spawning a temporary goroutine.
-		go func() {
-			select {
-			case q.ch <- env:
-			case <-q.stopCh:
-			}
-		}()
-		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-q.stopCh:
+		return errors.New("local: queue stopped")
 	}
 }
 
 func (q *memoryQueue) EnqueueDelayed(_ context.Context, t *engine.Task, delay time.Duration) error {
 	env := queueEnvelope{task: t}
+	// Track the delayed goroutine in wg so Stop waits for it instead of
+	// silently dropping scheduled tasks.
+	q.wg.Add(1)
 	go func() {
+		defer q.wg.Done()
 		timer := time.NewTimer(delay)
 		defer timer.Stop()
 		select {

@@ -171,8 +171,13 @@ type DurableSignalDeliverer interface {
 // resume task when atomically consuming a signal. The engine resolves it after
 // peeking the resume target.
 type ResumeIntent struct {
-	NodeName     string
-	NodeIdx      int
+	NodeName string
+	NodeIdx  int
+	// ActivationID is retained for legacy callers but is IGNORED by the durable
+	// DeliverSignalWithOutbox path: that path reads the authoritative live
+	// activation_id from node meta inside the backend's atomic Lua transaction,
+	// closing the TOCTOU window where a concurrent re-suspend could make a
+	// Go-side snapshot stale.
 	ActivationID int
 	AutoDepth    int
 }

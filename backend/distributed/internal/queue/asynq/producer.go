@@ -19,7 +19,8 @@ func (t *Transport) Enqueue(ctx context.Context, task *engine.Task) error {
 		t.observer.OnEnqueue("enqueue", time.Since(started), err)
 		return err
 	}
-	_, err = t.client.Enqueue(asynqlib.NewTask(taskType, payload))
+	// Use EnqueueContext to propagate caller's ctx (timeout/cancel/trace).
+	_, err = t.client.EnqueueContext(ctx, asynqlib.NewTask(taskType, payload))
 	t.observer.OnEnqueue("enqueue", time.Since(started), err)
 	return err
 }
@@ -32,7 +33,8 @@ func (t *Transport) EnqueueDelayed(ctx context.Context, task *engine.Task, delay
 		t.observer.OnEnqueue("enqueue_delayed", time.Since(started), err)
 		return err
 	}
-	_, err = t.client.Enqueue(asynqlib.NewTask(taskType, payload), asynqlib.ProcessIn(delay))
+	// Use EnqueueContext to propagate caller's ctx (timeout/cancel/trace).
+	_, err = t.client.EnqueueContext(ctx, asynqlib.NewTask(taskType, payload), asynqlib.ProcessIn(delay))
 	t.observer.OnEnqueue("enqueue_delayed", time.Since(started), err)
 	return err
 }

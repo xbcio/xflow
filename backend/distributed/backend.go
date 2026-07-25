@@ -653,7 +653,7 @@ func (b *Backend) bindHandler(eng *engine.Engine, handler func(context.Context, 
 	var tm *timeout.Monitor
 	tmDone := make(chan struct{})
 	if !b.transient {
-		tm = timeout.New(b.rdb, eng, nil, nil, 5*time.Second)
+		tm = timeout.New(b.rdb, eng, nil, b.logger, 5*time.Second)
 		b.timeoutMonitor = tm
 		go func() {
 			defer close(tmDone)

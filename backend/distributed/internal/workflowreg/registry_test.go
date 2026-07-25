@@ -213,6 +213,7 @@ func TestRegistryRemoveCorrupt(t *testing.T) {
 	// up the stale idmap.
 	srv.Del(workflowByKeyKey(tenant.FromContext(ctx), created.Key))
 	srv.Del(workflowByIDKey(tenant.FromContext(ctx), created.Key, created.ID))
+	srv.Del(workflowDefHashKey(tenant.FromContext(ctx), created.Key, created.ID))
 
 	if err := reg.RemoveWorkflow(ctx, created.ID); !errors.Is(err, backend.ErrWorkflowNotFound) {
 		t.Fatalf("RemoveWorkflow corrupt = %v, want ErrWorkflowNotFound", err)

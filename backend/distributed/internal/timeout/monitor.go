@@ -3,6 +3,7 @@ package timeout
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -33,13 +34,12 @@ const timeoutScanCount = int64(128)
 // suspended node stranded until execution TTL expiry).
 const timeoutRetryBackoff = 5 * time.Second
 
-// popExpiredLua atomically pops up to ARGV[2] members whose score <= ARGV[1].
-var popExpiredLua = redis.NewScript(`
-local expired = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1], 'LIMIT', 0, ARGV[2])
-if #expired > 0 then
-    redis.call('ZREM', KEYS[1], unpack(expired))
-end
-return expired
+// peekExpiredLua returns up to ARGV[2] members whose score <= ARGV[1] WITHOUT
+// removing them. Removal happens after confirmed delivery, giving at-least-once
+// semantics: a crash between peek and delivery simply re-delivers on the next
+// poll rather than permanently losing the timeout.
+var peekExpiredLua = redis.NewScript(`
+return redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1], 'LIMIT', 0, ARGV[2])
 `)
 
 // Monitor polls a Redis ZSET for expired node timeouts and delivers
@@ -51,14 +51,20 @@ type Monitor struct {
 	logger   engine.Logger
 	interval time.Duration
 	stop     chan struct{}
+	cancel   context.CancelFunc // cancels the ctx used by processTimeouts (#8b)
 	once     sync.Once
 }
 
 // New creates a ZSET-based timeout monitor.
 // interval controls how often the ZSET is polled (default 5s if <= 0).
+// If logger is nil a default slog-based logger is used so errors are never
+// silently swallowed (#6).
 func New(rdb redis.Cmdable, engine *engine.Engine, hooks engine.Hooks, logger engine.Logger, interval time.Duration) *Monitor {
 	if interval <= 0 {
 		interval = 5 * time.Second
+	}
+	if logger == nil {
+		logger = slogAdapter{}
 	}
 	return &Monitor{
 		rdb:      rdb,
@@ -72,20 +78,31 @@ func New(rdb redis.Cmdable, engine *engine.Engine, hooks engine.Hooks, logger en
 
 // Run starts the polling loop. It blocks until Stop is called.
 func (m *Monitor) Run() {
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancel = cancel
 	ticker := time.NewTicker(m.interval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-m.stop:
+			cancel()
 			return
 		case now := <-ticker.C:
-			m.processTimeouts(now)
+			m.processTimeouts(ctx, now)
 		}
 	}
 }
 
-// Stop signals the monitor to exit its polling loop. Safe to call multiple times.
-func (m *Monitor) Stop() { m.once.Do(func() { close(m.stop) }) }
+// Stop signals the monitor to exit its polling loop and cancels any in-flight
+// SCAN/pop operations (#8b). Safe to call multiple times.
+func (m *Monitor) Stop() {
+	m.once.Do(func() {
+		close(m.stop)
+		if m.cancel != nil {
+			m.cancel()
+		}
+	})
+}
 
 // processTimeouts scans every per-execution timeout ZSET, pops expired entries,
 // and delivers timeout signals. It iterates the tenant registry so a SCAN never
@@ -93,8 +110,7 @@ func (m *Monitor) Stop() { m.once.Do(func() { close(m.stop) }) }
 // (xflow:t<tenant>:exec:{id}:timeouts) instead of one global key to avoid a
 // single Redis Cluster slot becoming a write hotspot for every
 // suspend/deliver/resume in the system.
-func (m *Monitor) processTimeouts(now time.Time) {
-	ctx := context.Background()
+func (m *Monitor) processTimeouts(ctx context.Context, now time.Time) {
 	nowUnix := fmt.Sprintf("%d", now.Unix())
 
 	tenants, err := rstate.ListTenants(ctx, m.rdb)
@@ -135,16 +151,18 @@ func (m *Monitor) processTimeoutsForTenant(ctx context.Context, t tenant.TenantI
 	}
 }
 
-// processTimeoutKey pops expired members from a single execution's timeout
-// ZSET and delivers them.
+// processTimeoutKey peeks expired members from a single execution's timeout
+// ZSET and delivers them. Members are removed only after confirmed successful
+// delivery, giving at-least-once semantics: a crash or lock-contention failure
+// leaves the member in the ZSET for retry on the next poll (#8).
 func (m *Monitor) processTimeoutKey(ctx context.Context, t tenant.TenantID, key string, now time.Time, nowUnix string) {
-	results, err := popExpiredLua.Run(ctx, m.rdb,
+	results, err := peekExpiredLua.Run(ctx, m.rdb,
 		[]string{key},
 		nowUnix, "100",
 	).StringSlice()
 	if err != nil && err != redis.Nil {
 		if m.logger != nil {
-			m.logger.Error("timeout monitor: popExpired failed", "key", key, "error", err)
+			m.logger.Error("timeout monitor: peekExpired failed", "key", key, "error", err)
 		}
 		return
 	}
@@ -152,6 +170,8 @@ func (m *Monitor) processTimeoutKey(ctx context.Context, t tenant.TenantID, key 
 	for _, member := range results {
 		parts := strings.SplitN(member, "\x00", 2)
 		if len(parts) != 2 {
+			// Malformed member — remove to avoid infinite retry loop.
+			m.rdb.ZRem(ctx, key, member)
 			continue
 		}
 		execID := types.ExecutionID(parts[0])
@@ -179,10 +199,14 @@ func (m *Monitor) processTimeoutKey(ctx context.Context, t tenant.TenantID, key 
 			// outbox write hiccup) justify a backoff retry.
 			if m.isTimeoutTargetDead(tenantCtx, t, execID, nodeName) {
 				if m.logger != nil {
-					m.logger.Warnf("timeout monitor: delivery failed for terminal/canceled target, dropping", "execution_id", execID, "node", nodeName, "error", err)
+					m.logger.Warnf("timeout monitor: delivery failed for terminal/canceled target, removing", "execution_id", execID, "node", nodeName, "error", err)
 				}
+				// Target is dead — remove from ZSET to prevent infinite retries.
+				m.rdb.ZRem(ctx, key, member)
 				continue
 			}
+			// Transient failure: bump the score to retry after backoff. The member
+			// stays in the ZSET (never removed) so it is not lost.
 			retryAt := now.Add(timeoutRetryBackoff).Unix()
 			if requeueErr := m.rdb.ZAdd(ctx, key, redis.Z{
 				Score:  float64(retryAt),
@@ -191,8 +215,15 @@ func (m *Monitor) processTimeoutKey(ctx context.Context, t tenant.TenantID, key 
 				m.logger.Error("timeout monitor: requeue failed", "execution_id", execID, "node", nodeName, "error", requeueErr)
 			}
 			if m.logger != nil {
-				m.logger.Warnf("timeout monitor: delivery failed, requeued", "execution_id", execID, "node", nodeName, "retry_at", retryAt, "error", err)
+				m.logger.Warnf("timeout monitor: delivery failed, will retry", "execution_id", execID, "node", nodeName, "retry_at", retryAt, "error", err)
 			}
+			continue
+		}
+
+		// Delivery confirmed successful — remove from ZSET. This is the only
+		// path that removes a member, ensuring at-least-once delivery (#8).
+		if remErr := m.rdb.ZRem(ctx, key, member).Err(); remErr != nil && m.logger != nil {
+			m.logger.Error("timeout monitor: ZREM after delivery failed (will re-deliver next poll, idempotent)", "execution_id", execID, "node", nodeName, "error", remErr)
 		}
 	}
 }
@@ -223,4 +254,30 @@ func (m *Monitor) isTimeoutTargetDead(ctx context.Context, t tenant.TenantID, ex
 		}
 	}
 	return false
+}
+
+// slogAdapter is a minimal engine.Logger backed by slog.Default(), used as a
+// fallback when no explicit logger is provided so errors are never silently
+// swallowed (#6).
+type slogAdapter struct{}
+
+func (slogAdapter) Debug(msg string, args ...any)  { slog.Debug(msg, args...) }
+func (slogAdapter) Debugf(format string, args ...any) {
+	slog.Debug(fmt.Sprintf(format, args...))
+}
+func (slogAdapter) Info(msg string, args ...any) { slog.Info(msg, args...) }
+func (slogAdapter) Infof(format string, args ...any) {
+	slog.Info(fmt.Sprintf(format, args...))
+}
+func (slogAdapter) Warn(msg string, args ...any) { slog.Warn(msg, args...) }
+func (slogAdapter) Warnf(format string, args ...any) {
+	slog.Warn(fmt.Sprintf(format, args...))
+}
+func (slogAdapter) Error(msg string, args ...any) { slog.Error(msg, args...) }
+func (slogAdapter) Errorf(format string, args ...any) {
+	slog.Error(fmt.Sprintf(format, args...))
+}
+func (slogAdapter) Panic(msg string, args ...any) { slog.Error(msg, args...) }
+func (slogAdapter) Panicf(format string, args ...any) {
+	slog.Error(fmt.Sprintf(format, args...))
 }

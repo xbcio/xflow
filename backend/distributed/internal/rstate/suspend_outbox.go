@@ -89,25 +89,56 @@ local clearWaiters = function()
     end
     redis.call('SREM', KEYS[5], ARGV[9])
 end
-local scheduleSignal = function(name, raw, all)
-    local entry = cjson.decode(ARGV[15])
-    local payload = {Triggered = 0, Name = name, Data = cjson.decode(raw)}
-    if all then
-        payload.All = all
+-- scheduleSignal builds the resume outbox entry for a pre-delivered signal.
+-- It assembles the SignalPayload JSON from raw stored pieces WITHOUT decoding
+-- user signal data through cjson, preserving exact fidelity (avoids empty-object
+-- {} -> [] mutation and int64>2^53 precision loss). raw is the stored signal
+-- payload JSON; allJSON (multi-signal) is a pre-built raw JSON object or nil.
+-- Field names match Go's types.SignalPayload (Triggered/Name/Data/All).
+local scheduleSignal = function(name, raw, allJSON)
+    local payloadJSON = '{"Triggered":0,"Name":' .. cjson.encode(name) .. ',"Data":' .. raw
+    if allJSON then
+        payloadJSON = payloadJSON .. ',"All":' .. allJSON
     end
-    entry.task.payload = payload
-    addOutbox(ARGV[14], cjson.encode(entry), tonumber(ARGV[16]))
+    payloadJSON = payloadJSON .. '}'
+    -- Splice "payload":<payloadJSON> into the task object of the entry template.
+    -- SuspendResumeOutboxEntry marshals with a nil payload, so omitempty drops the
+    -- "payload" key entirely; we insert it right after the task object's brace:
+    -- {"id":...,"task":{"payload":{...},"execution_id":...}}
+    local entryBody = ARGV[15]
+    local finalBody
+    local taskPos = entryBody:find('"task":')
+    if taskPos then
+        local bracePos = entryBody:find('{', taskPos + 7)
+        if bracePos then
+            finalBody = entryBody:sub(1, bracePos) .. '"payload":' .. payloadJSON .. ',' .. entryBody:sub(bracePos + 1)
+        end
+    end
+    if not finalBody then
+        -- Fallback for unexpected structure: cjson round-trip (correctness over fidelity).
+        local entry = cjson.decode(entryBody)
+        local payload = {Triggered = 0, Name = name, Data = cjson.decode(raw)}
+        if allJSON then
+            payload.All = cjson.decode(allJSON)
+        end
+        entry.task.payload = payload
+        finalBody = cjson.encode(entry)
+    end
+    addOutbox(ARGV[14], finalBody, tonumber(ARGV[16]))
 end
 if multi then
     local values = redis.call('HGETALL', KEYS[9])
     if #values / 2 >= quorum then
-        local all = {}
+        -- Build the All map as raw JSON WITHOUT decoding individual signal
+        -- payloads through cjson, preserving exact fidelity (see scheduleSignal).
+        local parts = {}
         for i = 1, #values, 2 do
-            all[values[i]] = cjson.decode(values[i + 1])
+            table.insert(parts, cjson.encode(values[i]) .. ':' .. values[i + 1])
         end
+        local allJSON = '{' .. table.concat(parts, ',') .. '}'
         clearWaiters()
         redis.call('DEL', KEYS[8], KEYS[9])
-        scheduleSignal(selectedName, selectedPayload, all)
+        scheduleSignal(selectedName, selectedPayload, allJSON)
         return 1
     end
     redis.call('SET', KEYS[8], ARGV[13], 'EX', ttl)

@@ -2,6 +2,7 @@ package asynq
 
 import (
 	"context"
+	"fmt"
 
 	asynqlib "github.com/hibiken/asynq"
 
@@ -27,7 +28,8 @@ func (t *Transport) StartConsumer(cfg queue.ConsumerConfig, handler queue.TaskHa
 	mux.HandleFunc(taskType, func(ctx context.Context, at *asynqlib.Task) error {
 		task, tenantID, err := queue.Unmarshal(at.Payload())
 		if err != nil {
-			return err
+			// Deserialization failure is permanent; skip retry to avoid 25 futile attempts.
+			return fmt.Errorf("%w: unmarshal payload: %w", asynqlib.SkipRetry, err)
 		}
 		ctx = tenant.WithTenant(ctx, tenantID)
 		return handlerError(handler(ctx, task), cfg.Transient)

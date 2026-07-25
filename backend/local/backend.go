@@ -140,7 +140,17 @@ func (b *Backend) BindTaskHandler(eng *engine.Engine, handler func(context.Conte
 	if handler == nil {
 		return nil, errors.New("local: BindTaskHandler requires a non-nil handler")
 	}
-	return b.bindHandlerWithOutbox(eng, handler, time.Second), nil
+	stop := b.bindHandlerWithOutbox(eng, handler, time.Second)
+	// Wrap stop to also close the resourcePool (matching Bind lifecycle).
+	if b.resourcePool != nil {
+		return func() {
+			stop()
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			_ = b.resourcePool.Close(ctx)
+		}, nil
+	}
+	return stop, nil
 }
 
 func (b *Backend) bindHandlerWithOutbox(eng *engine.Engine, handler func(context.Context, *engine.Task) error, interval time.Duration) func() {

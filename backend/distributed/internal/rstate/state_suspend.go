@@ -30,8 +30,25 @@ func (s *Store) SuspendOrConsume(ctx context.Context, id types.ExecutionID, name
 	var registeredWaiters []string
 	t := tenant.FromContext(ctx)
 
+	// Compute timeout score once; only the last signal's Lua call registers it
+	// atomically with the suspend, ensuring no window where the node is parked
+	// without its timeout entry.
+	var timeoutScore float64
+	timeoutMemberStr := ""
+	if spec.Timeout > 0 {
+		timeoutScore = float64(time.Now().Add(spec.Timeout).Unix())
+		timeoutMemberStr = timeoutMember(id, name)
+	}
+
 	// Check each awaited signal name.
-	for _, sigName := range spec.Signals {
+	for i, sigName := range spec.Signals {
+		// Only register timeout atomically on the last signal iteration (all
+		// prior signals were not pre-delivered, so the node will be parked).
+		isLast := i == len(spec.Signals)-1
+		var score float64
+		if isLast {
+			score = timeoutScore
+		}
 		result, err := suspendOrConsumeLua.Run(ctx, s.rdb,
 			[]string{
 				signalKey(t, id, sigName),
@@ -39,8 +56,9 @@ func (s *Store) SuspendOrConsume(ctx context.Context, id types.ExecutionID, name
 				waiterKey(t, id, sigName),
 				suspendedNodesKey(t, id),
 				resumeLockKey(t, id, name),
+				timeoutZSetKey(t, id),
 			},
-			name, s.ttlSec(),
+			name, s.ttlSec(), score, timeoutMemberStr,
 		).Result()
 		if err != nil && err != redis.Nil {
 			return nil, fmt.Errorf("suspend or consume lua: %w", err)
@@ -66,16 +84,6 @@ func (s *Store) SuspendOrConsume(ctx context.Context, id types.ExecutionID, name
 		}
 		// This signal was not pre-delivered; a waiter key was registered.
 		registeredWaiters = append(registeredWaiters, waiterKey(t, id, sigName))
-	}
-	// Node is parked — register timeout in ZSET if spec has a timeout.
-	if spec.Timeout > 0 {
-		member := timeoutMember(id, name)
-		if err := s.rdb.ZAdd(ctx, timeoutZSetKey(t, id), redis.Z{
-			Score:  float64(time.Now().Add(spec.Timeout).Unix()),
-			Member: member,
-		}).Err(); err != nil {
-			return nil, fmt.Errorf("register suspend timeout %q/%q: %w", id, name, err)
-		}
 	}
 	// Extend TTL to prevent key expiry during suspension.
 	if err := s.extendExecTTL(ctx, id, name, spec, s.suspendTTL(id, spec)); err != nil {
@@ -132,16 +140,16 @@ func (s *Store) suspendOrConsumeMulti(ctx context.Context, id types.ExecutionID,
 	}
 	pipe.SAdd(ctx, suspendedNodesKey(t, id), name)
 	pipe.Expire(ctx, suspendedNodesKey(t, id), ttl)
-	if _, err := pipe.Exec(ctx); err != nil {
-		return nil, fmt.Errorf("park multi-signal waiter: %w", err)
-	}
+	// Register timeout atomically with the park to avoid a window where the node
+	// is parked without its timeout entry (#15).
 	if spec.Timeout > 0 {
-		if err := s.rdb.ZAdd(ctx, timeoutZSetKey(t, id), redis.Z{
+		pipe.ZAdd(ctx, timeoutZSetKey(t, id), redis.Z{
 			Score:  float64(time.Now().Add(spec.Timeout).Unix()),
 			Member: timeoutMember(id, name),
-		}).Err(); err != nil {
-			return nil, fmt.Errorf("register multi-signal timeout %q/%q: %w", id, name, err)
-		}
+		})
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		return nil, fmt.Errorf("park multi-signal waiter: %w", err)
 	}
 	if err := s.extendExecTTL(ctx, id, name, spec, ttl); err != nil {
 		return nil, err
@@ -317,9 +325,12 @@ func (s *Store) DeliverSignalWithOutbox(ctx context.Context, id types.ExecutionI
 	}
 
 	var (
-		spec      *types.SuspendSpec
-		specErr   error
-		entryID   string
+		spec    *types.SuspendSpec
+		specErr error
+		// entryBody is marshaled with ActivationID=0 so the "activation_id" field
+		// is dropped (omitempty). The Lua script reads the LIVE activation from node
+		// meta and stamps it into the body exactly once, closing the TOCTOU window
+		// where a concurrent re-suspend could leave a stale activation in the entry.
 		entryBody string
 	)
 	if intent.NodeName != "" {
@@ -334,11 +345,13 @@ func (s *Store) DeliverSignalWithOutbox(ctx context.Context, id types.ExecutionI
 			NodeIdx:      intent.NodeIdx,
 			Type:         engine.TaskTypeNodeResume,
 			Payload:      payload,
-			ActivationID: intent.ActivationID,
+			ActivationID: 0, // Lua reads live value from node meta
 			AutoDepth:    intent.AutoDepth,
 		}
-		entryID = fmt.Sprintf("resume/%s/%s/%d/signal/%s", id, intent.NodeName, intent.ActivationID, signalName)
-		body, err := marshalRedisOutboxEntry(entryID, task, time.Now().UTC())
+		// Use a placeholder entryID for marshaling; Lua rebuilds the real entryID
+		// from the live activation_id read inside the transaction.
+		placeholderID := fmt.Sprintf("resume/%s/%s/0/signal/%s", id, intent.NodeName, signalName)
+		body, err := marshalRedisOutboxEntry(placeholderID, task, time.Now().UTC())
 		if err != nil {
 			return "", nil, false, fmt.Errorf("marshal resume outbox %q/%q: %w", id, intent.NodeName, err)
 		}
@@ -362,6 +375,7 @@ func (s *Store) DeliverSignalWithOutbox(ctx context.Context, id types.ExecutionI
 		outboxReadyKey(t, id),
 		outboxBodyKey(t, id),
 		timeoutZSetKey(t, id),
+		nodeMetaKey(t, id, intent.NodeName), // KEYS[10]: live activation source
 	}
 	if multi == 1 {
 		for _, sig := range spec.Signals {
@@ -370,7 +384,8 @@ func (s *Store) DeliverSignalWithOutbox(ctx context.Context, id types.ExecutionI
 	}
 	args := []any{
 		string(dataJSON), int(ttl), intent.NodeName,
-		entryID, entryBody, nowMs, multi, quorum, signalName, timeoutMemberStr,
+		"", entryBody, nowMs, multi, quorum, signalName, timeoutMemberStr,
+		string(id), intent.NodeName, signalName, // ARGV[11..13]: entryID components for Lua
 	}
 
 	result, err := deliverSignalWithOutboxLua.Run(ctx, s.rdb, keys, args...).Result()
@@ -398,10 +413,20 @@ func (s *Store) AcquireResumeLock(ctx context.Context, id types.ExecutionID, nam
 
 func (s *Store) RevokeSignal(ctx context.Context, id types.ExecutionID, signalName string) (bool, error) {
 	t := tenant.FromContext(ctx)
+	// Pre-read the waiter to build the resume_lock key for Cluster-safe KEYS
+	// declaration. If the waiter is absent, pass a hash-tagged dummy key (the
+	// script's `if nodeName then` guard prevents it from being accessed).
+	waiter, err := s.rdb.Get(ctx, waiterKey(t, id, signalName)).Result()
+	if err != nil && err != redis.Nil {
+		return false, fmt.Errorf("pre-read waiter for revoke %q/%q: %w", id, signalName, err)
+	}
+	lockKey := resumeLockKey(t, id, waiter)
+	if waiter == "" {
+		// No waiter; use a hash-tagged placeholder so all KEYS share the same slot.
+		lockKey = execKey(t, id, "revoke_lock_sentinel")
+	}
 	result, err := revokeSignalLua.Run(ctx, s.rdb,
-		[]string{signalKey(t, id, signalName), waiterKey(t, id, signalName)},
-		fmt.Sprintf("xflow:t%s:exec:{%s}:node:", t, id),
-		":resume_lock",
+		[]string{signalKey(t, id, signalName), waiterKey(t, id, signalName), lockKey},
 	).Int64()
 	if err != nil {
 		return false, fmt.Errorf("revoke signal lua: %w", err)

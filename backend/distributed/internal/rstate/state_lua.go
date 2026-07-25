@@ -16,14 +16,16 @@ if isActive == 1 then
     redis.call('EXPIRE', KEYS[2], ttl)
 end
 local newVal = redis.call('DECR', KEYS[1])
+redis.call('EXPIRE', KEYS[1], ttl)
 local ai = tonumber(redis.call('GET', KEYS[2]) or '0')
 return {newVal, ai}
 `)
 
 // suspendOrConsumeLua atomically checks for an existing signal or parks the node.
 // KEYS[1] = signal key, KEYS[2] = node status key, KEYS[3] = waiter key,
-// KEYS[4] = suspended_nodes SET, KEYS[5] = resume_lock key
-// ARGV[1] = node name, ARGV[2] = ttl seconds
+// KEYS[4] = suspended_nodes SET, KEYS[5] = resume_lock key, KEYS[6] = timeout ZSET
+// ARGV[1] = node name, ARGV[2] = ttl seconds, ARGV[3] = timeout score (0 = no timeout),
+// ARGV[4] = timeout member
 // Returns signal payload JSON (consumed) or nil (suspended).
 var suspendOrConsumeLua = redis.NewScript(`
 local signal = redis.call('GET', KEYS[1])
@@ -35,6 +37,10 @@ redis.call('DEL', KEYS[5])
 redis.call('SET', KEYS[2], 'suspended', 'EX', ARGV[2])
 redis.call('SET', KEYS[3], ARGV[1], 'EX', ARGV[2])
 redis.call('SADD', KEYS[4], ARGV[1])
+local timeoutScore = tonumber(ARGV[3])
+if timeoutScore > 0 then
+    redis.call('ZADD', KEYS[6], timeoutScore, ARGV[4])
+end
 return nil
 `)
 
@@ -86,11 +92,13 @@ return collected
 // KEYS[1] = signal key, KEYS[2] = waiter key, KEYS[3] = suspended_nodes SET,
 // KEYS[4] = signal batch hash (multi), KEYS[5] = waiter spec key,
 // KEYS[6] = resume lock key, KEYS[7] = outbox ready ZSET, KEYS[8] = outbox body hash,
-// KEYS[9] = timeout ZSET, KEYS[10..] = multi waiter keys (cleanup on quorum).
+// KEYS[9] = timeout ZSET, KEYS[10] = node meta hash (live activation source),
+// KEYS[11..] = multi waiter keys (cleanup on quorum).
 // ARGV[1] = signal data JSON, ARGV[2] = ttl seconds, ARGV[3] = node name,
-// ARGV[4] = outbox entry id, ARGV[5] = outbox entry body JSON,
+// ARGV[4] = (unused, empty), ARGV[5] = outbox entry body JSON (activation_id absent),
 // ARGV[6] = now ms, ARGV[7] = multi flag, ARGV[8] = quorum,
-// ARGV[9] = signal name, ARGV[10] = timeout member.
+// ARGV[9] = signal name, ARGV[10] = timeout member,
+// ARGV[11] = execution id, ARGV[12] = node name, ARGV[13] = signal name (for entryID).
 // Returns nodeName (committed) or "" (stored / quorum not reached).
 var deliverSignalWithOutboxLua = redis.NewScript(`
 local signalKey = KEYS[1]
@@ -102,21 +110,57 @@ local resumeLockKey = KEYS[6]
 local outboxReady = KEYS[7]
 local outboxBody = KEYS[8]
 local timeoutKey = KEYS[9]
+local nodeMetaKey = KEYS[10]
 local dataJSON = ARGV[1]
 local ttl = tonumber(ARGV[2])
 local nodeName = ARGV[3]
-local entryID = ARGV[4]
 local entryBody = ARGV[5]
 local nowMs = tonumber(ARGV[6])
 local multi = tonumber(ARGV[7]) == 1
 local quorum = tonumber(ARGV[8])
 local signalName = ARGV[9]
 local timeoutMember = ARGV[10]
+local execID = ARGV[11]
+local nodeNameForID = ARGV[12]
+local signalNameForID = ARGV[13]
 
 local waiter = redis.call('GET', waiterKey)
 if not waiter then
     redis.call('SET', signalKey, dataJSON, 'EX', ttl)
     return ''
+end
+
+-- Read LIVE activation_id from node meta inside the transaction, closing the
+-- TOCTOU window where a concurrent re-suspend under a new activation could
+-- leave a stale activation in the resume entry.
+local liveActivation = tonumber(redis.call('HGET', nodeMetaKey, 'activation_id') or '0')
+local liveActivationStr = string.format('%d', liveActivation)
+
+-- Build the authoritative entryID from the live activation.
+local entryID = 'resume/' .. execID .. '/' .. nodeNameForID .. '/' .. liveActivationStr .. '/signal/' .. signalNameForID
+
+-- Stamp activation_id into the entry body exactly once. Go marshaled the body
+-- with ActivationID=0 (omitempty drops it), so we insert the live value as a
+-- fresh top-level key right after the opening '{'.
+local stampActivation = function(body)
+    if liveActivation == 0 then
+        return body
+    end
+    return '{' .. '"activation_id":' .. liveActivationStr .. ',' .. body:sub(2)
+end
+
+-- Also patch the placeholder "id" field inside the body to carry the real entryID.
+local patchID = function(body)
+    -- The marshal produced "id":"resume/.../0/signal/..." — replace the first
+    -- occurrence of the placeholder ID with the live one using plain string.find
+    -- (gsub treats '-' as a pattern metachar, which breaks on execution IDs).
+    local placeholder = '"id":"resume/' .. execID .. '/' .. nodeNameForID .. '/0/signal/' .. signalNameForID .. '"'
+    local replacement = '"id":"' .. entryID .. '"'
+    local startPos, endPos = body:find(placeholder, 1, true)
+    if startPos then
+        return body:sub(1, startPos - 1) .. replacement .. body:sub(endPos + 1)
+    end
+    return body
 end
 
 local writeOutbox = function(body)
@@ -133,13 +177,36 @@ if multi then
     if #values / 2 < quorum then
         return ''
     end
-    local all = {}
+    -- Build the All map as a raw JSON object from batch values WITHOUT decoding
+    -- individual signal payloads through cjson, preserving exact data fidelity
+    -- (avoids empty-object {} → [] mutation and int64>2^53 precision loss).
+    local parts = {}
     for i = 1, #values, 2 do
-        all[values[i]] = cjson.decode(values[i + 1])
+        table.insert(parts, cjson.encode(values[i]) .. ':' .. values[i + 1])
     end
-    local entry = cjson.decode(entryBody)
-    entry.task.payload.All = all
-    for i = 10, #KEYS do
+    local allJSON = '{' .. table.concat(parts, ',') .. '}'
+    -- Inject All into the entry body. The entry is known-structure JSON from
+    -- marshalRedisOutboxEntry; payload is at .task.payload. We find the payload
+    -- object's opening brace after the "payload": key and insert the All field
+    -- right after it: {"triggered":...,"All":{...},...}
+    local payloadPos = entryBody:find('"payload":')
+    local finalBody
+    if payloadPos then
+        local bracePos = entryBody:find('{', payloadPos + 10)
+        if bracePos then
+            finalBody = entryBody:sub(1, bracePos) .. '"All":' .. allJSON .. ',' .. entryBody:sub(bracePos + 1)
+        end
+    end
+    if not finalBody then
+        -- Fallback for unexpected structure: cjson round-trip (correctness).
+        local entry = cjson.decode(entryBody)
+        entry.task.payload.All = cjson.decode(allJSON)
+        finalBody = cjson.encode(entry)
+    end
+    -- Patch ID and stamp activation into the final body after All splice.
+    finalBody = patchID(finalBody)
+    finalBody = stampActivation(finalBody)
+    for i = 11, #KEYS do
         redis.call('DEL', KEYS[i])
     end
     redis.call('DEL', waiterSpecKey, batchKey, resumeLockKey)
@@ -147,7 +214,7 @@ if multi then
     if timeoutMember ~= '' then
         redis.call('ZREM', timeoutKey, timeoutMember)
     end
-    writeOutbox(cjson.encode(entry))
+    writeOutbox(finalBody)
     return nodeName
 end
 
@@ -156,7 +223,19 @@ redis.call('SREM', suspendedKey, nodeName)
 if timeoutMember ~= '' then
     redis.call('ZREM', timeoutKey, timeoutMember)
 end
-writeOutbox(entryBody)
+-- Guard: if the Go-side pre-peek missed the waiter (TOCTOU), entryBody
+-- will be empty. In that case the Lua-side waiter detection is authoritative but
+-- we lack a valid outbox entry to write. Fall back to storing the signal so a
+-- subsequent resume path can pick it up, rather than writing an empty/corrupt
+-- outbox entry. The waiter cleanup above is harmless (node will re-suspend).
+if entryBody == '' then
+    -- Restore signal for a future delivery attempt that has correct metadata.
+    redis.call('SET', signalKey, dataJSON, 'EX', ttl)
+    return ''
+end
+local finalBody = patchID(entryBody)
+finalBody = stampActivation(finalBody)
+writeOutbox(finalBody)
 return nodeName
 `)
 
@@ -170,7 +249,7 @@ return nodeName
 //     (→ success/failed) cannot stomp the in-flight cancellation.
 //   - canceled→canceled and running→canceling/canceled proceed normally.
 //
-// KEYS[1] = status key, KEYS[2] = error key (may be empty to skip error write)
+// KEYS[1] = status key, KEYS[2] = error key (optional; omitted when errMsg is empty)
 // ARGV[1] = new status, ARGV[2] = error message ("" = none), ARGV[3] = ttl seconds
 // Returns 1 (applied) or 0 (skipped: fenced by a terminal/canceling status).
 var updateExecutionStatusLua = redis.NewScript(`
@@ -188,10 +267,8 @@ if current then
 end
 local ttl = tonumber(ARGV[3])
 redis.call('SET', KEYS[1], ARGV[1], 'EX', ttl)
-if ARGV[2] ~= '' then
-    if KEYS[2] ~= '' then
-        redis.call('SET', KEYS[2], ARGV[2], 'EX', ttl)
-    end
+if ARGV[2] ~= '' and #KEYS >= 2 then
+    redis.call('SET', KEYS[2], ARGV[2], 'EX', ttl)
 end
 return 1
 `)
@@ -495,16 +572,14 @@ return 1
 
 // revokeSignalLua atomically removes a signal that has not yet been consumed.
 // KEYS[1] = signal key, KEYS[2] = waiter key (stores node name waiting for this signal)
-// ARGV[1] = resume lock key prefix (xflow:t<tenant>:exec:{id}:node:)
-// ARGV[2] = resume lock key suffix (:resume_lock)
+// KEYS[3] = resume lock key (pre-built by the caller to satisfy Cluster key declaration)
 // Returns 1 (revoked) or 0 (signal not found or already consumed/resumed).
 var revokeSignalLua = redis.NewScript(`
 local signal = redis.call('GET', KEYS[1])
 if not signal then return 0 end
 local nodeName = redis.call('GET', KEYS[2])
 if nodeName then
-    local lockKey = ARGV[1] .. nodeName .. ARGV[2]
-    if redis.call('EXISTS', lockKey) == 1 then return 0 end
+    if redis.call('EXISTS', KEYS[3]) == 1 then return 0 end
 end
 redis.call('DEL', KEYS[1])
 return 1
@@ -532,9 +607,11 @@ return nil
 
 // checkCompletionLua atomically checks all node statuses.
 // Returns 0 (not complete), 1 (success), -1 (failed).
+// The early-return guard checks terminal states AND canceling/timeout to prevent
+// a concurrent completion from overwriting a cancel/timeout already in progress.
 var checkCompletionLua = redis.NewScript(`
 local execStatus = redis.call('GET', KEYS[1])
-if execStatus == 'success' or execStatus == 'failed' or execStatus == 'canceled' then
+if execStatus == 'success' or execStatus == 'failed' or execStatus == 'canceled' or execStatus == 'timeout' or execStatus == 'canceling' then
     return 0
 end
 local anyFailed = false

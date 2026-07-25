@@ -81,6 +81,19 @@ func workflowIDMapKey(t tenant.TenantID, id types.WorkflowID) string {
 	return "xflow:t" + string(t) + ":workflow:idmap:" + string(id)
 }
 
+// workflowDefHashKey stores only the definition_hash for a workflow in the same
+// `{<key>}` hash-tagged slot as bykey/byid. This avoids cjson.decode of the
+// full record inside Lua scripts that only need to compare hashes.
+func workflowDefHashKey(t tenant.TenantID, key string, id types.WorkflowID) string {
+	return "xflow:t" + string(t) + ":workflow:{" + key + "}:defhash:" + string(id)
+}
+
+// workflowDefHashKeyPrefix returns the defhash key prefix for Lua scripts that
+// need to construct the full key by appending an existing workflow ID.
+func workflowDefHashKeyPrefix(t tenant.TenantID, key string) string {
+	return "xflow:t" + string(t) + ":workflow:{" + key + "}:defhash:"
+}
+
 // KeyByID, KeyByKey, and KeyIDMap expose the registry's Redis key schema for
 // out-of-package readers (e.g. Backend-level tests and ops tooling) that must
 // address the same keys the registry writes. KeyByID takes the workflow `key`
@@ -93,13 +106,31 @@ func KeyByID(t tenant.TenantID, key string, id types.WorkflowID) string {
 func KeyByKey(t tenant.TenantID, key string) string          { return workflowByKeyKey(t, key) }
 func KeyIDMap(t tenant.TenantID, id types.WorkflowID) string { return workflowIDMapKey(t, id) }
 
+// addWorkflowRecordLua registers a workflow atomically.
+// KEYS[1] = bykey, KEYS[2] = byid:<newID>
+// ARGV[1] = byid key prefix, ARGV[2] = new definition_hash,
+// ARGV[3] = new workflow ID, ARGV[4] = new payload JSON,
+// ARGV[5] = defhash key prefix
+//
+// Uses a lightweight defhash key (same slot) to compare hashes instead of
+// cjson.decode on the full record — avoids cjson 1000-layer nesting limit and
+// reduces decode overhead for large Definition+Graph payloads.
+// Falls back to cjson.decode if the defhash key is absent (backward compat with
+// records written before the defhash key was introduced).
 var addWorkflowRecordLua = redis.NewScript(`
 local existingID = redis.call('GET', KEYS[1])
 if existingID then
 	local existingRaw = redis.call('GET', ARGV[1] .. existingID)
 	if existingRaw then
-		local existing = cjson.decode(existingRaw)
-		if existing.definition_hash ~= ARGV[2] then
+		local storedHash = redis.call('GET', ARGV[5] .. existingID)
+		if not storedHash then
+			-- Backward compat: defhash key missing, fall back to record decode.
+			local existing = cjson.decode(existingRaw)
+			storedHash = existing.definition_hash
+			-- Backfill the defhash key for future lookups.
+			redis.call('SET', ARGV[5] .. existingID, storedHash)
+		end
+		if storedHash ~= ARGV[2] then
 			return {'conflict', existingRaw}
 		end
 		return {'existing', existingRaw}
@@ -108,11 +139,15 @@ if existingID then
 end
 redis.call('SET', KEYS[1], ARGV[3])
 redis.call('SET', KEYS[2], ARGV[4])
+redis.call('SET', ARGV[5] .. ARGV[3], ARGV[2])
 return {'created', ARGV[4]}
 `)
 
+// removeWorkflowRecordLua atomically deletes bykey, byid, and defhash keys.
+// KEYS[1] = bykey, KEYS[2] = byid:<id>, KEYS[3] = defhash:<id>
+// All share the `{<key>}` hash tag -> same slot -> Lua-safe.
 var removeWorkflowRecordLua = redis.NewScript(`
-local n = redis.call('DEL', KEYS[1], KEYS[2])
+local n = redis.call('DEL', KEYS[1], KEYS[2], KEYS[3])
 return n
 `)
 
@@ -121,7 +156,12 @@ return n
 // slot as KEYS[1]). KEYS[1] is the bykey pointer (used only to derive the
 // existing ID via GET); ARGV[1] is the byid key prefix; ARGV[2] is the
 // expected old hash for CAS; ARGV[3] is the new payload (full re-marshalled
-// record with the updated hash).
+// record with the updated hash); ARGV[4] is the defhash key prefix;
+// ARGV[5] is the new definition hash value.
+//
+// Uses the lightweight defhash key for CAS comparison instead of cjson.decode
+// on the full record — avoids cjson nesting limits and large-object overhead.
+// Falls back to cjson.decode if defhash key absent (backward compat).
 //
 // All keys the script touches share the `{<key>}` hash tag, so the script is
 // Redis Cluster-safe.
@@ -134,11 +174,17 @@ local raw = redis.call('GET', ARGV[1] .. existingID)
 if not raw then
 	return {'notfound', ''}
 end
-local rec = cjson.decode(raw)
-if rec.definition_hash ~= ARGV[2] then
+local storedHash = redis.call('GET', ARGV[4] .. existingID)
+if not storedHash then
+	-- Backward compat: defhash key missing, fall back to record decode.
+	local rec = cjson.decode(raw)
+	storedHash = rec.definition_hash
+end
+if storedHash ~= ARGV[2] then
 	return {'conflict', raw}
 end
 redis.call('SET', ARGV[1] .. existingID, ARGV[3])
+redis.call('SET', ARGV[4] .. existingID, ARGV[5])
 return {'ok', ARGV[3]}
 `)
 
@@ -161,6 +207,7 @@ func (r *Registry) AddWorkflow(ctx context.Context, rec backend.WorkflowRecord) 
 		stored.DefinitionHash,
 		string(stored.ID),
 		stored.payload,
+		workflowDefHashKeyPrefix(t, stored.Key),
 	).Result()
 	if err != nil {
 		return backend.WorkflowRecord{}, fmt.Errorf("add workflow %q: %w", stored.Key, err)
@@ -310,6 +357,8 @@ func (r *Registry) UpdateDefinitionHash(ctx context.Context, id types.WorkflowID
 		workflowByIDKeyPrefix(t, key),
 		expectedOldHash,
 		string(newPayload),
+		workflowDefHashKeyPrefix(t, key),
+		newHash,
 	).Result()
 	if err != nil {
 		return fmt.Errorf("update workflow hash %q: %w", id, err)
@@ -341,18 +390,22 @@ func (r *Registry) RemoveWorkflow(ctx context.Context, id types.WorkflowID) erro
 		return fmt.Errorf("remove workflow %q: %w", id, err)
 	}
 
-	// bykey and byid:<id> share the `{<key>}` tag -> same slot -> Lua-safe.
+	// bykey, byid:<id>, and defhash:<id> share the `{<key>}` tag -> same slot -> Lua-safe.
 	res, err := removeWorkflowRecordLua.Run(
 		ctx,
 		r.rdb,
-		[]string{workflowByKeyKey(t, key), workflowByIDKey(t, key, id)},
+		[]string{workflowByKeyKey(t, key), workflowByIDKey(t, key, id), workflowDefHashKey(t, key, id)},
 	).Result()
 	if err != nil {
 		return fmt.Errorf("remove workflow %q: %w", id, err)
 	}
 
-	// Best-effort cleanup of the untagged reverse index (single-key op).
-	_ = r.rdb.Del(ctx, workflowIDMapKey(t, id)).Err()
+	// Delete the untagged reverse index (single-key op, different slot so cannot
+	// be in the Lua script). Do not swallow errors — a leftover idmap entry would
+	// leave a dangling pointer for GetWorkflow(id).
+	if err := r.rdb.Del(ctx, workflowIDMapKey(t, id)).Err(); err != nil {
+		return fmt.Errorf("remove workflow %q idmap cleanup: %w", id, err)
+	}
 
 	// A zero count means neither bykey nor byid existed: the workflow was not
 	// actually present, so report it as not found even if the idmap index was

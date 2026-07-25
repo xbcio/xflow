@@ -49,9 +49,18 @@ const (
 )
 
 // SignalPayload carries the data delivered to a resuming node.
+//
+// All is tagged omitempty so a nil All is dropped from the serialized JSON.
+// This is load-bearing for the durable multi-signal resume path: the outbox
+// entry body is marshaled by Go with All=nil (see DeliverSignalWithOutbox),
+// then the deliverSignalWithOutboxLua script splices the collected signal set
+// in as "All" once quorum is reached. Without omitempty the marshaled body
+// would already carry "All":null, and the splice would produce a duplicate
+// "All" key whose trailing null wins on decode — silently dropping every
+// collected signal. All consumers treat nil and absent identically.
 type SignalPayload struct {
 	Triggered SignalTrigger
 	Name      string                    // name of the signal that triggered resumption
 	Data      map[string]any            // payload of the triggering signal
-	All       map[string]map[string]any // all collected signal payloads (multi-signal mode)
+	All       map[string]map[string]any `json:"All,omitempty"` // all collected signal payloads (multi-signal mode)
 }

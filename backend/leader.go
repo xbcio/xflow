@@ -32,6 +32,13 @@ type AlwaysLeader struct{}
 func (AlwaysLeader) Campaign(context.Context) error { return nil }
 func (AlwaysLeader) IsLeader() bool                 { return true }
 func (AlwaysLeader) Resign(context.Context) error   { return nil }
+// AlwaysLeader.Notify returns a buffered channel pre-loaded with true (the
+// current leadership state). Because AlwaysLeader never loses leadership, no
+// further values are ever sent — the channel correctly "emits on every change"
+// (zero changes = zero subsequent sends). The channel is never closed per the
+// interface contract. Consumers must use select with a ctx.Done case (as
+// runLeaderCampaign does); a bare for-range would block after the initial read,
+// which is expected since there is nothing further to report (#9).
 func (AlwaysLeader) Notify() <-chan bool {
 	ch := make(chan bool, 1)
 	ch <- true

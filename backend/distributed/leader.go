@@ -202,6 +202,12 @@ func (e *RedisLeaderElector) startRenewal() {
 // not state mutations: at most one TTL window of skipped sweeps occurs before
 // the next replica takes over. A true control-plane HA path would fence on
 // Redis directly; that is planned, not implemented.
+//
+// NOTE: this "query" has side-effects (stopRenewal + setLeader(false)) when
+// the local deadline has expired. This is an intentional lazy-expiration
+// pattern so callers do not need a separate expiry timer. The method is
+// concurrency-safe: stopRenewal and setLeader both acquire e.mu internally,
+// and the atomic loads provide a fast-path that does not contend.
 func (e *RedisLeaderElector) IsLeader() bool {
 	if !e.isLeader.Load() {
 		return false
@@ -217,7 +223,8 @@ func (e *RedisLeaderElector) IsLeader() bool {
 }
 
 // Resign voluntarily releases leadership so another instance can take over
-// without waiting for the lease TTL to expire.
+// without waiting for the lease TTL to expire. Notify subscriber references are
+// cleared (#9: subs map only-grows mitigation).
 func (e *RedisLeaderElector) Resign(ctx context.Context) error {
 	e.stopRenewal()
 
@@ -230,6 +237,17 @@ func (e *RedisLeaderElector) Resign(ctx context.Context) error {
 	_, err := leaderReleaseScript.Run(ctx, e.rdb, []string{e.key}, token).Result()
 	e.clearLocalDeadline()
 	e.setLeader(false)
+
+	// Clean up subscriber channels to prevent unbounded growth of the subs map
+	// across repeated Campaign/Resign cycles (#9). Channels are not closed (the
+	// interface contract says "Never closed"); consumers detecting leadership
+	// loss via the false emission above should discard their reference. Clearing
+	// the map allows the channel (and its consumer goroutine) to be GC'd once
+	// the consumer drops its reference.
+	e.mu.Lock()
+	e.subs = make(map[chan bool]struct{})
+	e.mu.Unlock()
+
 	return err
 }
 
@@ -273,8 +291,13 @@ func (e *RedisLeaderElector) currentToken() string {
 	return e.token
 }
 
+// extendLocalDeadline refreshes the local leadership deadline. A safety margin
+// of ttl/3 is subtracted so the local view expires before the Redis key's real
+// TTL, reducing the split-brain window where this instance believes it is still
+// leader while Redis has already let the key expire (#9).
 func (e *RedisLeaderElector) extendLocalDeadline() {
-	e.leaseDeadlineUnixNano.Store(time.Now().Add(e.ttl).UnixNano())
+	safetyMargin := e.ttl / 3
+	e.leaseDeadlineUnixNano.Store(time.Now().Add(e.ttl - safetyMargin).UnixNano())
 }
 
 func (e *RedisLeaderElector) clearLocalDeadline() {

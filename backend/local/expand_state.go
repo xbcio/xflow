@@ -29,9 +29,9 @@ func (s *memoryState) BeginTaskExpansionWithOutbox(_ context.Context, lease *eng
 			return false, engine.ErrInvalidLeaseToken
 		}
 	}
-	copy := *node
-	copy.Status = types.NodeStatusWaiting
-	s.nodes[memoryNodeKey(lease.Task.ExecutionID, lease.Task.NodeName)] = &copy
+	nodeCopy := *node
+	nodeCopy.Status = types.NodeStatusWaiting
+	s.nodes[memoryNodeKey(lease.Task.ExecutionID, lease.Task.NodeName)] = &nodeCopy
 	for index, child := range children {
 		childCopy := child
 		childCopy.Result = cloneData(child.Result)
@@ -52,9 +52,9 @@ func (s *memoryState) BeginTaskExpansion(_ context.Context, lease *engine.TaskLe
 	if !matchesExpansionLease(node, lease, types.NodeStatusCommitting) {
 		return false, nil
 	}
-	copy := *node
-	copy.Status = types.NodeStatusWaiting
-	s.nodes[memoryNodeKey(lease.Task.ExecutionID, lease.Task.NodeName)] = &copy
+	nodeCopy := *node
+	nodeCopy.Status = types.NodeStatusWaiting
+	s.nodes[memoryNodeKey(lease.Task.ExecutionID, lease.Task.NodeName)] = &nodeCopy
 	return true, nil
 }
 
@@ -75,9 +75,9 @@ func (s *memoryState) CreateExpandedSubExecution(_ context.Context, lease *engin
 			return true, nil
 		}
 	}
-	copy := *sub
-	copy.Result = cloneData(sub.Result)
-	s.subExecs[key] = append(s.subExecs[key], &copy)
+	subCopy := *sub
+	subCopy.Result = cloneData(sub.Result)
+	s.subExecs[key] = append(s.subExecs[key], &subCopy)
 	return true, nil
 }
 

@@ -2,6 +2,7 @@ package rstate
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -312,5 +313,224 @@ func TestRedisSuspendWithOutboxPersistsPreDeliveredResume(t *testing.T) {
 	node, err := state.GetNode(ctx, id, "wait")
 	if err != nil || node == nil || node.Status != types.NodeStatusSuspended || node.LeaseToken != "" {
 		t.Fatalf("node after durable suspend = %+v err=%v, want suspended without lease", node, err)
+	}
+}
+
+// TestRedisDeliverSignalWithOutboxMultiSignalPreservesAll exercises the durable
+// multi-signal delivery path (deliverSignalWithOutboxLua's quorum splice), which
+// had no direct coverage. It guards against two regressions on that path:
+//   - the duplicate-"All"-key bug: the Go-marshaled entry body carried
+//     "All":null and the splice prepended a second "All", so json decode took
+//     the trailing null and silently dropped every collected signal;
+//   - cjson round-trip mutation of signal payloads (empty object {} -> []).
+func TestRedisDeliverSignalWithOutboxMultiSignalPreservesAll(t *testing.T) {
+	state, _, _ := newTestRedisState(t)
+	ctx := context.Background()
+	id := types.ExecutionID("deliver-outbox-multi")
+	lease := &engine.TaskLease{
+		LeaseID:    "lease-dm",
+		LeaseToken: "token-dm",
+		IssuedAt:   time.Now().UTC().Truncate(time.Millisecond),
+		TTL:        time.Minute,
+		Task: engine.Task{
+			ExecutionID:  id,
+			NodeName:     "wait",
+			NodeIdx:      0,
+			Type:         engine.TaskTypeNodeExec,
+			ActivationID: 1,
+		},
+	}
+	if _, acquired, err := state.AcquireTaskLease(ctx, lease); err != nil || !acquired {
+		t.Fatalf("AcquireTaskLease() acquired=%v err=%v", acquired, err)
+	}
+	lease.Attempt = 1
+	if _, claimed, err := state.ClaimTaskLease(ctx, lease); err != nil || !claimed {
+		t.Fatalf("ClaimTaskLease() claimed=%v err=%v", claimed, err)
+	}
+	// Park the node in multi-signal mode with no signals yet delivered, so the
+	// resume flows through the post-suspension DeliverSignalWithOutbox path
+	// (not the suspend-time consume path).
+	if payload, _, err := state.SuspendTaskLease(ctx, lease, nil, false, &types.SuspendSpec{
+		Mode:    types.ModeMultiSignal,
+		Signals: []string{"security", "approval"},
+		Quorum:  2,
+	}, ""); err != nil || payload != nil {
+		t.Fatalf("SuspendTaskLease() payload=%+v err=%v, want parked (nil payload)", payload, err)
+	}
+
+	intent := engine.ResumeIntent{NodeName: "wait", NodeIdx: 0, ActivationID: 1}
+
+	// First signal: quorum (2) not reached -> stored in batch, no resume.
+	if node, _, committed, err := state.DeliverSignalWithOutbox(ctx, id, "security",
+		map[string]any{"by": "sec", "extra": map[string]any{}}, intent); err != nil || committed || node != "" {
+		t.Fatalf("DeliverSignalWithOutbox(security) node=%q committed=%v err=%v, want stored/no-resume", node, committed, err)
+	}
+	// Second signal: quorum reached -> durable resume entry written via splice.
+	if node, _, committed, err := state.DeliverSignalWithOutbox(ctx, id, "approval",
+		map[string]any{"by": "lead"}, intent); err != nil || !committed || node != "wait" {
+		t.Fatalf("DeliverSignalWithOutbox(approval) node=%q committed=%v err=%v, want resume on wait", node, committed, err)
+	}
+
+	entries, err := state.ListOutbox(ctx, id, time.Now().Add(time.Second), 4)
+	if err != nil {
+		t.Fatalf("ListOutbox() error = %v", err)
+	}
+	if len(entries) != 1 || entries[0].Task.Payload == nil {
+		t.Fatalf("ListOutbox() = %+v, want one resume entry with payload", entries)
+	}
+	all := entries[0].Task.Payload.All
+	if len(all) != 2 {
+		t.Fatalf("resume payload All = %+v, want both collected signals (duplicate-key regression drops them)", all)
+	}
+	if all["security"]["by"] != "sec" || all["approval"]["by"] != "lead" {
+		t.Fatalf("resume payload All = %+v, want security/approval data preserved", all)
+	}
+	if _, ok := all["security"]["extra"].(map[string]any); !ok {
+		t.Fatalf("All[security].extra = %#v, want empty object preserved as map (cjson would mutate {} to [])", all["security"]["extra"])
+	}
+}
+
+// TestRedisSuspendWithOutboxMultiSignalPreservesFidelity exercises the
+// suspend-time consume path (suspendTaskLeaseWithOutboxLua's scheduleSignal),
+// which builds the resume payload from pre-delivered signals. It guards the
+// same fidelity regression the DeliverSignalWithOutbox path had: scheduleSignal
+// must splice the collected signal set into the outbox entry as raw JSON rather
+// than round-tripping user data through cjson (which mutates empty object {} to
+// [] and truncates int64>2^53). This path was untested.
+func TestRedisSuspendWithOutboxMultiSignalPreservesFidelity(t *testing.T) {
+	state, _, _ := newTestRedisState(t)
+	ctx := context.Background()
+	id := types.ExecutionID("suspend-outbox-multi-fidelity")
+	lease := &engine.TaskLease{
+		LeaseID:    "lease-sof",
+		LeaseToken: "token-sof",
+		IssuedAt:   time.Now().UTC().Truncate(time.Millisecond),
+		TTL:        time.Minute,
+		Task: engine.Task{
+			ExecutionID:  id,
+			NodeName:     "wait",
+			NodeIdx:      0,
+			Type:         engine.TaskTypeNodeExec,
+			ActivationID: 1,
+		},
+	}
+	if _, acquired, err := state.AcquireTaskLease(ctx, lease); err != nil || !acquired {
+		t.Fatalf("AcquireTaskLease() acquired=%v err=%v", acquired, err)
+	}
+	lease.Attempt = 1
+	if _, claimed, err := state.ClaimTaskLease(ctx, lease); err != nil || !claimed {
+		t.Fatalf("ClaimTaskLease() claimed=%v err=%v", claimed, err)
+	}
+	// Pre-deliver both signals so the suspend-time consume path reaches quorum
+	// and schedules the durable resume through scheduleSignal.
+	for signalName, data := range map[string]map[string]any{
+		"security": {"by": "sec", "extra": map[string]any{}},
+		"approval": {"by": "lead"},
+	} {
+		if _, _, err := state.DeliverSignal(ctx, id, signalName, data); err != nil {
+			t.Fatalf("DeliverSignal(%q) error = %v", signalName, err)
+		}
+	}
+	if committed, err := state.SuspendTaskLeaseWithOutbox(ctx, lease, nil, false, &types.SuspendSpec{
+		Mode:    types.ModeMultiSignal,
+		Signals: []string{"security", "approval"},
+		Quorum:  2,
+	}, ""); err != nil || !committed {
+		t.Fatalf("SuspendTaskLeaseWithOutbox() committed=%v err=%v, want true/nil", committed, err)
+	}
+	entries, err := state.ListOutbox(ctx, id, time.Now().Add(time.Second), 4)
+	if err != nil {
+		t.Fatalf("ListOutbox() error = %v", err)
+	}
+	if len(entries) != 1 || entries[0].Task.Type != engine.TaskTypeNodeResume || entries[0].Task.Payload == nil {
+		t.Fatalf("ListOutbox() = %+v, want one resume entry with payload", entries)
+	}
+	all := entries[0].Task.Payload.All
+	if len(all) != 2 || all["security"]["by"] != "sec" || all["approval"]["by"] != "lead" {
+		t.Fatalf("resume payload All = %+v, want both pre-delivered signals preserved", all)
+	}
+	if _, ok := all["security"]["extra"].(map[string]any); !ok {
+		t.Fatalf("All[security].extra = %#v, want empty object preserved as map (cjson would mutate {} to [])", all["security"]["extra"])
+	}
+}
+
+// TestRedisDeliverSignalWithOutboxStampsLiveActivation proves the TOCTOU fix:
+// when the node meta activation_id changes between the Go pre-read and the Lua
+// execution (simulating a concurrent re-suspend under a new activation), the Lua
+// script reads the LIVE activation from node meta and stamps it into the resume
+// outbox entry. This prevents stale activation fencing from dropping the resume.
+func TestRedisDeliverSignalWithOutboxStampsLiveActivation(t *testing.T) {
+	state, _, rdb := newTestRedisState(t)
+	ctx := context.Background()
+	id := types.ExecutionID("deliver-outbox-live-activation")
+
+	// Set up: acquire + claim a lease, then suspend with a single-signal spec
+	// so a waiter is parked. This establishes node meta with activation_id = 1.
+	lease := &engine.TaskLease{
+		LeaseID:    "lease-la",
+		LeaseToken: "token-la",
+		IssuedAt:   time.Now().UTC().Truncate(time.Millisecond),
+		TTL:        time.Minute,
+		Task: engine.Task{
+			ExecutionID:  id,
+			NodeName:     "wait",
+			NodeIdx:      3,
+			Type:         engine.TaskTypeNodeExec,
+			ActivationID: 1,
+		},
+	}
+	if _, acquired, err := state.AcquireTaskLease(ctx, lease); err != nil || !acquired {
+		t.Fatalf("AcquireTaskLease() acquired=%v err=%v", acquired, err)
+	}
+	lease.Attempt = 1
+	if _, claimed, err := state.ClaimTaskLease(ctx, lease); err != nil || !claimed {
+		t.Fatalf("ClaimTaskLease() claimed=%v err=%v", claimed, err)
+	}
+	// Park the node waiting for signal "approval" with no pre-delivered signal.
+	if payload, _, err := state.SuspendTaskLease(ctx, lease, nil, false, &types.SuspendSpec{
+		Signals: []string{"approval"},
+	}, ""); err != nil || payload != nil {
+		t.Fatalf("SuspendTaskLease() payload=%+v err=%v, want parked (nil payload)", payload, err)
+	}
+
+	// Simulate TOCTOU: a concurrent timer/timeout resumed this node and it
+	// re-suspended under a NEW activation_id = 2. Manually HSET the node meta
+	// to reflect this — the waiter key remains valid (same signal).
+	metaKey := nodeMetaKey(tenant.DefaultTenant, id, "wait")
+	if err := rdb.HSet(ctx, metaKey, "activation_id", "2").Err(); err != nil {
+		t.Fatalf("HSET activation_id = 2: %v", err)
+	}
+
+	// Build intent with the STALE activation (1) — this is what the engine's
+	// Go pre-read would have returned before the fix removed it.
+	intent := engine.ResumeIntent{NodeName: "wait", NodeIdx: 3, ActivationID: 1}
+	node, _, committed, err := state.DeliverSignalWithOutbox(ctx, id, "approval",
+		map[string]any{"approved": true}, intent)
+	if err != nil {
+		t.Fatalf("DeliverSignalWithOutbox() error = %v", err)
+	}
+	if !committed || node != "wait" {
+		t.Fatalf("DeliverSignalWithOutbox() node=%q committed=%v, want wait/true", node, committed)
+	}
+
+	// Assert the persisted outbox entry carries the LIVE activation (2), not
+	// the stale one (1).
+	entries, err := state.ListOutbox(ctx, id, time.Now().Add(time.Second), 4)
+	if err != nil {
+		t.Fatalf("ListOutbox() error = %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("ListOutbox() = %d entries, want 1", len(entries))
+	}
+	entry := entries[0]
+	if entry.Task.ActivationID != 2 {
+		t.Fatalf("outbox entry Task.ActivationID = %d, want 2 (LIVE), not 1 (stale)", entry.Task.ActivationID)
+	}
+	// Also verify the entry ID string contains "/2/" (live) not "/1/" (stale).
+	if !strings.Contains(entry.ID, "/2/") {
+		t.Fatalf("outbox entry ID = %q, want to contain /2/ (live activation)", entry.ID)
+	}
+	if strings.Contains(entry.ID, "/1/") {
+		t.Fatalf("outbox entry ID = %q, must NOT contain /1/ (stale activation)", entry.ID)
 	}
 }
