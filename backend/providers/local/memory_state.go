@@ -108,8 +108,8 @@ func (s *memoryState) createExecutionLocked(e *engine.ExecutionSnapshot) {
 	}
 	// Seed in-degree counters and O(1) completion counters from the compiled graph.
 	if e.Graph != nil {
-		for i := 0; i < e.Graph.NodeCount(); i++ {
-			d := e.Graph.InDegreeAt(i)
+		for i := 0; i < e.Graph.UnitCount(); i++ {
+			d := e.Graph.UnitInDegreeAt(i)
 			key := fmt.Sprintf("%s/%d", e.ID, i)
 			s.inDegrees[key] = d
 		}

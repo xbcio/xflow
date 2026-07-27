@@ -419,10 +419,17 @@ func downstreamArrivals(g *graph.Graph, sourceIdx int, activePort string) []Down
 		arrival := byDestination[edge.DstIdx]
 		if arrival.ArrivalCount == 0 {
 			meta := g.NodeAt(edge.DstIdx)
+			dstUnit := g.UnitIndexForNode(edge.DstIdx)
+			execType := TaskTypeNodeExec
+			if g.UnitKindAt(dstUnit) == graph.UnitGroup {
+				execType = TaskTypeGroupExec
+			}
 			arrival = DownstreamArrival{
-				NodeName:  meta.Name,
-				NodeIdx:   edge.DstIdx,
-				MergeMode: meta.MergeMode,
+				NodeName:     meta.Name,
+				NodeIdx:      edge.DstIdx,
+				UnitIdx:      dstUnit,
+				MergeMode:    meta.MergeMode,
+				ExecTaskType: execType,
 			}
 		}
 		arrival.ArrivalCount++

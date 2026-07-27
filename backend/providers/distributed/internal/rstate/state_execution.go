@@ -127,8 +127,8 @@ func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot
 	}
 	// Seed in-degree counters.
 	if e.Graph != nil {
-		for i := 0; i < e.Graph.NodeCount(); i++ {
-			d := e.Graph.InDegreeAt(i)
+		for i := 0; i < e.Graph.UnitCount(); i++ {
+			d := e.Graph.UnitInDegreeAt(i)
 			if d > 0 {
 				pipe.Set(ctx, inDegreeKey(t, e.ID, i), d, ttl)
 				keys = append(keys, inDegreeKey(t, e.ID, i))
