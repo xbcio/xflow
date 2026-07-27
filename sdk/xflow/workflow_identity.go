@@ -5,7 +5,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/xbcio/xflow/types"
 )
@@ -29,11 +31,6 @@ const (
 	// stored in WorkflowRecord.AuditFingerprint and must NOT be used as the
 	// conflict-detection hash.
 	auditHashPrefix = "sha256:audit:v1:"
-	// legacyHashPrefix marks the pre-F0.3 definition hash format that was
-	// stored as WorkflowRecord.DefinitionHash before the runtime/audit split
-	// (commit 3ef36d9 and earlier). Records written before that commit carry
-	// this prefix and must be reconciled on conflict.
-	legacyHashPrefix = "sha256:"
 )
 
 // runtimeHash produces a canonical hash over the runtime-semantic fields of
@@ -44,8 +41,8 @@ const (
 //     execution effect;
 //   - stable editor identity (NodeDef.ID) — durable editor-assigned handle
 //     that survives re-imports and must not invalidate a workflow;
-//   - instance identifiers (WorkflowDef.ID, WorkflowDef.TenantID) — runtime
-//     instance pointers, not part of the workflow definition.
+//   - instance identifiers (WorkflowDef.ID) — runtime instance pointers, not
+//     part of the workflow definition.
 //
 // pin_data IS included because it fixes node inputs and therefore affects
 // execution output.
@@ -78,6 +75,7 @@ func runtimeHash(def *types.WorkflowDef) (string, error) {
 		Outputs:        def.Outputs,
 		PinData:        def.PinData,
 		Nodes:          make([]runtimeNodeHashPayload, len(def.Nodes)),
+		Groups:         canonicalizeGroups(def.Groups),
 	}
 	for i, n := range def.Nodes {
 		payload.Nodes[i] = runtimeNodeHashPayload{
@@ -126,6 +124,7 @@ type runtimeHashPayload struct {
 	Connections    types.Connections               `json:"connections,omitempty"`
 	Outputs        map[string]types.WorkflowOutput `json:"outputs,omitempty"`
 	PinData        map[string]any                  `json:"pin_data,omitempty"`
+	Groups         []runtimeHashGroupPayload       `json:"Groups,omitempty"`
 }
 
 // runtimeNodeHashPayload is the runtime-semantic subset of NodeDef used by
@@ -149,6 +148,35 @@ type runtimeNodeHashPayload struct {
 	OutputSchema   map[string]any        `json:"output_schema,omitempty"`
 	Parameters     map[string]any        `json:"parameters,omitempty"`
 	Retry          *types.RetrySettings  `json:"retry,omitempty"`
+}
+
+type runtimeHashGroupPayload struct {
+	Name           string                `json:"name,omitempty"`
+	Members        []string              `json:"members,omitempty"`
+	RunnerSelector *types.RunnerSelector `json:"runnerSelector,omitempty"`
+	OnError        string                `json:"on_error,omitempty"`
+	Retry          *types.RetrySettings  `json:"retry,omitempty"`
+	Timeout        time.Duration         `json:"timeout,omitempty"`
+	Mode           string                `json:"mode,omitempty"`
+}
+
+// canonicalizeGroups returns a sorted, stable group payload; empty input returns
+// nil so that ungrouped definitions produce an identical hash (omitempty + nil).
+func canonicalizeGroups(groups []types.GroupDef) []runtimeHashGroupPayload {
+	if len(groups) == 0 {
+		return nil
+	}
+	out := make([]runtimeHashGroupPayload, 0, len(groups))
+	for _, g := range groups {
+		members := append([]string(nil), g.Members...)
+		sort.Strings(members)
+		out = append(out, runtimeHashGroupPayload{
+			Name: g.Name, Members: members, RunnerSelector: g.RunnerSelector,
+			OnError: g.OnError, Retry: g.Retry, Timeout: g.Timeout, Mode: g.Mode,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }
 
 // legacyDefinitionHash returns a SHA-256 fingerprint over the entire
