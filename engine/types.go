@@ -3,8 +3,8 @@ package engine
 import (
 	"time"
 
-	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine/graph"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -24,6 +24,10 @@ const (
 	// It must be consumed by Engine.ExecuteBatch rather than routed to a node
 	// handler or remote runner.
 	TaskTypeNodeBatch
+	// TaskTypeGroupExec 把一整个 co-location 组作为单元派发给 runner 执行。
+	TaskTypeGroupExec
+	// TaskTypeGroupResume 恢复一个 durable-suspended 组（里程碑 A 预留，暂不消费）。
+	TaskTypeGroupResume
 )
 
 // Task is the unit of work dispatched to the queue.
@@ -45,6 +49,10 @@ type Task struct {
 	// re-enter after a terminal state while fencing stale queued or leased
 	// tasks, but it is not exposed in the public runner JSON contract.
 	ActivationID int `json:"-"`
+
+	// UnitIdx 是任务所属 durable unit 的下标。普通 node 任务恒等于其 node 下标
+	// （无 group 时 unit 索引 == node 索引，退化等价）；group 任务指向 group unit。
+	UnitIdx int `json:"-"`
 }
 
 // LeaseID uniquely identifies one assignment of a queued task to a runner.
@@ -101,13 +109,13 @@ type TaskLease struct {
 	NodeVersion int           `json:"node_version,omitempty"`
 	IssuedAt    time.Time     `json:"issued_at"`
 	TTL         time.Duration `json:"ttl,omitempty"`
-	// TenantID is the authoritative tenant recorded on the assignment at
+	// Namespace is the authoritative namespace recorded on the assignment at
 	// submit time. It is set by the control plane when building/recovering the
 	// lease so the report/commit path (which has no principal resolver) can
 	// inject it into ctx and read/write the correct Redis namespace. This is
 	// NOT placed in W3C baggage (RELEASE-GATES §4.1); it travels in the lease
 	// payload, not in trace propagation headers.
-	TenantID tenant.TenantID `json:"tenant_id,omitempty"`
+	Namespace namespace.Namespace `json:"namespace,omitempty"`
 	// TraceCarrier holds W3C traceparent/tracestate propagation headers so the
 	// runner can create properly-parented execution spans. Populated by the
 	// control plane when dispatching; nil when tracing is disabled or unsampled.
@@ -148,13 +156,13 @@ type RunnerHeartbeat struct {
 
 // ExecutionSnapshot is the engine's view of a running execution stored in the backend.
 type ExecutionSnapshot struct {
-	ID       types.ExecutionID
-	Graph    *graph.Graph
-	Status   types.ExecutionStatus
-	Params   map[string]any
-	Runtime  *types.Runtime
-	TraceID  string
-	SpanID   string
+	ID      types.ExecutionID
+	Graph   *graph.Graph
+	Status  types.ExecutionStatus
+	Params  map[string]any
+	Runtime *types.Runtime
+	TraceID string
+	SpanID  string
 	// TraceCarrier holds the W3C traceparent/tracestate headers captured at
 	// submission (xflow.workflow.submit / xflow.workflow.invoke) so a later,
 	// asynchronous dispatch (xflow.task.dispatch, potentially in a different
@@ -216,10 +224,10 @@ type ExpiredLease struct {
 	TTL          time.Duration
 	ActivationID int
 	AutoDepth    int
-	// TenantID is the tenant that owns the execution. The sweeper uses it to
-	// reconstruct the tenant context for reclaim so keys are looked up in the
+	// Namespace is the namespace that owns the execution. The sweeper uses it to
+	// reconstruct the namespace context for reclaim so keys are looked up in the
 	// correct namespace.
-	TenantID tenant.TenantID
+	Namespace namespace.Namespace
 	// TaskType and Payload reproduce the original queued task exactly when a
 	// running or committing lease is reclaimed after a process crash.
 	TaskType TaskType
@@ -228,12 +236,18 @@ type ExpiredLease struct {
 
 // SubExecution tracks a child execution spawned by a loop/split node.
 type SubExecution struct {
-	ParentExecID types.ExecutionID
-	ParentNode   string
-	ChildExecID  types.ExecutionID
-	BatchIndex   int
-	Status       types.ExecutionStatus
-	Result       map[string]any
+	// JSON tags are lowercase because the Redis expansion Lua
+	// (completeExpandedSubExecutionLua) addresses these fields by name
+	// (child.status / child.result). Without the tags Go marshaled Status/Result
+	// capitalized, so the Lua's status transition silently never fired. Result is
+	// NOT omitempty so an empty-object batch result round-trips as {} rather than
+	// being dropped.
+	ParentExecID types.ExecutionID     `json:"parent_exec_id"`
+	ParentNode   string                `json:"parent_node"`
+	ChildExecID  types.ExecutionID     `json:"child_exec_id"`
+	BatchIndex   int                   `json:"batch_index"`
+	Status       types.ExecutionStatus `json:"status"`
+	Result       map[string]any        `json:"result"`
 }
 
 // ExecutionEvent is emitted when an execution lifecycle state changes.

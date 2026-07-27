@@ -83,10 +83,12 @@ type CommitNodeResult struct {
 // allowing the backend to update each destination once atomically.
 type DownstreamArrival struct {
 	NodeName     string
-	NodeIdx      int
+	NodeIdx      int // 图目标：下游 unit 的代表 node 下标（诊断 / 任务 NodeName 解析）
+	UnitIdx      int // 计数键：下游 durable unit 下标（in-degree / active / schedule 三键均按此）
 	ArrivalCount int
 	ActiveCount  int
 	MergeMode    string
+	ExecTaskType TaskType // 执行意图任务类型：node 下游 TaskTypeNodeExec；group 下游 TaskTypeGroupExec；0 回退 NodeExec
 }
 
 // AdvanceNodeRequest progresses the already-committed source node through its
@@ -223,17 +225,24 @@ func (e *Engine) FlushOutbox(ctx context.Context, id types.ExecutionID) error {
 		if len(entries) == 0 {
 			return nil
 		}
+		var firstErr error
 		for _, entry := range entries {
 			if entry.Task.Type == TaskTypeNodeAdvance || entry.Task.Type == TaskTypeNodeSkip {
 				handled, err := e.handleSystemTask(ctx, &entry.Task, false)
 				if err != nil {
 					e.recordOutboxDeliveryFailure(ctx, state, id, entry, err)
-					return fmt.Errorf("handle outbox system task %q for %q: %w", entry.ID, id, err)
+					if firstErr == nil {
+						firstErr = fmt.Errorf("handle outbox system task %q for %q: %w", entry.ID, id, err)
+					}
+					continue
 				}
 				if !handled {
 					err := fmt.Errorf("outbox task %q for %q was not handled", entry.ID, id)
 					e.recordOutboxDeliveryFailure(ctx, state, id, entry, err)
-					return err
+					if firstErr == nil {
+						firstErr = err
+					}
+					continue
 				}
 			} else {
 				var enqueueErr error
@@ -244,13 +253,19 @@ func (e *Engine) FlushOutbox(ctx context.Context, id types.ExecutionID) error {
 				}
 				if enqueueErr != nil {
 					e.recordOutboxDeliveryFailure(ctx, state, id, entry, enqueueErr)
-					return fmt.Errorf("enqueue outbox %q for %q: %w", entry.ID, id, enqueueErr)
+					if firstErr == nil {
+						firstErr = fmt.Errorf("enqueue outbox %q for %q: %w", entry.ID, id, enqueueErr)
+					}
+					continue
 				}
 			}
 			if err := state.AckOutbox(ctx, id, entry.ID); err != nil {
 				e.notifyOutboxError(ctx, "ack", err)
 				return fmt.Errorf("ack outbox %q for %q: %w", entry.ID, id, err)
 			}
+		}
+		if firstErr != nil {
+			return firstErr
 		}
 		// Continue even after a short batch: handling an internal advance/skip
 		// intent can have appended the next durable intent during this batch.
