@@ -11,10 +11,10 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
-// compilerVersion identifies the graph compiler format. Bumped to v2 when the
-// two-layer unit IR (groups, units, unit edges) was introduced into the compiled
-// snapshot — NodeMeta.GroupIdx and the unit-level topology now enter the hash.
-const compilerVersion = "v2"
+// compilerVersion identifies the graph compiler format. Bumped to v3 when
+// group package projection (PackageHash on GroupMeta) was introduced — the
+// deterministic package hash now enters the graph hash via GroupMeta.
+const compilerVersion = "v3"
 
 // wireNodeMeta is the on-wire representation of one NodeMeta entry. GroupIdx
 // is carried as *int so decode can distinguish "field absent" (legacy,

@@ -90,6 +90,23 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 		}
 	}
 
+	// Reject reserved "xflow.group_*" types in user-authored workflows. These
+	// types are only valid inside projected packages compiled via
+	// CompileProjectedPackage (the trusted path).
+	{
+		var reserved []string
+		for _, nd := range def.Nodes {
+			if strings.HasPrefix(nd.Type, ReservedNodeTypePrefix) {
+				reserved = append(reserved, fmt.Sprintf("%s (%s)", nd.Name, nd.Type))
+			}
+		}
+		if len(reserved) > 0 {
+			sort.Strings(reserved)
+			return nil, fmt.Errorf("reserved node type %q is not allowed in user workflows: %s",
+				ReservedNodeTypePrefix+"*", strings.Join(reserved, ", "))
+		}
+	}
+
 	if def.Context != nil {
 		g.vars = cloneStringAnyMap(def.Context.Vars)
 		g.config = cloneStringAnyMap(def.Context.Config)
@@ -120,6 +137,9 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 	}
 	if err := buildUnits(g); err != nil {
 		return nil, fmt.Errorf("build units: %w", err)
+	}
+	if err := assignPackageHashes(g); err != nil {
+		return nil, fmt.Errorf("package hashes: %w", err)
 	}
 	if err := assignGraphHash(g); err != nil {
 		return nil, fmt.Errorf("hash graph: %w", err)
