@@ -28,7 +28,16 @@ type storedWorkflowRecord struct {
 	DefinitionHash   string             `json:"definition_hash"`
 	AuditFingerprint string             `json:"audit_fingerprint,omitempty"`
 	Definition       *types.WorkflowDef `json:"definition,omitempty"`
-	Graph            *graph.Graph       `json:"graph,omitempty"`
+	// Graph is decoded as raw JSON here (not *graph.Graph) so a Graph decode
+	// failure (e.g. T1's fail-closed legacy/grouped-mismatch detection) does
+	// not abort decoding the whole record — see unmarshalWorkflowRecord,
+	// which decodes this separately and falls back to recompiling from
+	// Definition exactly as it already does for a record with no Graph at
+	// all. Without this split, a *graph.Graph field embedded directly in this
+	// struct would make json.Unmarshal fail as soon as Graph.UnmarshalJSON
+	// returns an error, so the record.Graph == nil && record.Definition !=
+	// nil fallback below could never be reached for such a record.
+	Graph json.RawMessage `json:"graph,omitempty"`
 }
 
 func New(rdb redis.UniversalClient) *Registry {
@@ -424,6 +433,10 @@ type marshaledWorkflowRecord struct {
 }
 
 func marshalWorkflowRecord(rec backend.WorkflowRecord) (*marshaledWorkflowRecord, error) {
+	rawGraph, err := graphToRaw(rec.Graph)
+	if err != nil {
+		return nil, fmt.Errorf("marshal graph for workflow %q: %w", rec.Key, err)
+	}
 	stored := storedWorkflowRecord{
 		ID:               rec.ID,
 		Key:              rec.Key,
@@ -433,17 +446,21 @@ func marshalWorkflowRecord(rec backend.WorkflowRecord) (*marshaledWorkflowRecord
 		DefinitionHash:   rec.DefinitionHash,
 		AuditFingerprint: rec.AuditFingerprint,
 		Definition:       rec.Definition,
-		Graph:            rec.Graph,
+		Graph:            rawGraph,
 	}
 	if stored.ID == "" {
 		stored.ID = types.WorkflowID(uuid.NewString())
 	}
-	if stored.Graph == nil && stored.Definition != nil {
+	if len(stored.Graph) == 0 && stored.Definition != nil {
 		g, err := graph.Compile(stored.Definition)
 		if err != nil {
 			return nil, fmt.Errorf("compile workflow %q: %w", stored.Key, err)
 		}
-		stored.Graph = g
+		rawGraph, err := graphToRaw(g)
+		if err != nil {
+			return nil, fmt.Errorf("marshal compiled graph for workflow %q: %w", stored.Key, err)
+		}
+		stored.Graph = rawGraph
 	}
 
 	payload, err := json.Marshal(stored)
@@ -465,6 +482,10 @@ func marshalWorkflowRecord(rec backend.WorkflowRecord) (*marshaledWorkflowRecord
 // UpdateDefinitionHash to write back the full record after a hash upgrade
 // without going through a Lua cjson round-trip.
 func marshalWorkflowRecordPayload(rec backend.WorkflowRecord) ([]byte, error) {
+	rawGraph, err := graphToRaw(rec.Graph)
+	if err != nil {
+		return nil, fmt.Errorf("marshal graph for workflow %q: %w", rec.Key, err)
+	}
 	stored := storedWorkflowRecord{
 		ID:               rec.ID,
 		Key:              rec.Key,
@@ -474,13 +495,26 @@ func marshalWorkflowRecordPayload(rec backend.WorkflowRecord) ([]byte, error) {
 		DefinitionHash:   rec.DefinitionHash,
 		AuditFingerprint: rec.AuditFingerprint,
 		Definition:       rec.Definition,
-		Graph:            rec.Graph,
+		Graph:            rawGraph,
 	}
 	payload, err := json.Marshal(stored)
 	if err != nil {
 		return nil, fmt.Errorf("marshal workflow payload %q: %w", stored.Key, err)
 	}
 	return payload, nil
+}
+
+// graphToRaw marshals g into a json.RawMessage for storedWorkflowRecord.Graph.
+// Returns nil (omitted field) for a nil graph.
+func graphToRaw(g *graph.Graph) (json.RawMessage, error) {
+	if g == nil {
+		return nil, nil
+	}
+	data, err := json.Marshal(g)
+	if err != nil {
+		return nil, err
+	}
+	return json.RawMessage(data), nil
 }
 
 func unmarshalWorkflowRecord(raw []byte) (backend.WorkflowRecord, error) {
@@ -498,7 +532,20 @@ func unmarshalWorkflowRecord(raw []byte) (backend.WorkflowRecord, error) {
 		DefinitionHash:   stored.DefinitionHash,
 		AuditFingerprint: stored.AuditFingerprint,
 		Definition:       stored.Definition,
-		Graph:            stored.Graph,
+	}
+	// T1 migration reachability: Graph is decoded separately (as raw JSON on
+	// storedWorkflowRecord, not *graph.Graph) precisely so that a
+	// Graph.UnmarshalJSON failure here — e.g. the T1 fail-closed detection of
+	// a grouped-but-missing-unit-IR snapshot — does not abort decoding the
+	// rest of the record above. When Graph decode fails (or the field was
+	// never stored), record.Graph stays nil and the existing
+	// Definition-recompile fallback below runs, exactly as it already does
+	// for a record that never had a persisted Graph at all.
+	if len(stored.Graph) > 0 {
+		g := &graph.Graph{}
+		if err := json.Unmarshal(stored.Graph, g); err == nil {
+			record.Graph = g
+		}
 	}
 	if record.Graph == nil && record.Definition != nil {
 		g, err := graph.Compile(record.Definition)
