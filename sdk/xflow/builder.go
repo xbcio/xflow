@@ -22,6 +22,7 @@ type WorkflowBuilder struct {
 	triggers       map[string]types.TriggerHandler // portable typed trigger handlers
 	options        *types.WorkflowOptions
 	runnerSelector *types.RunnerSelector
+	groups         []*groupEntry
 }
 
 type nodeEntry struct {
@@ -205,7 +206,22 @@ func (w *WorkflowBuilder) Connect(src, dst types.EdgeEndpoint) *WorkflowBuilder 
 
 // build validates the workflow and returns a *types.WorkflowDef.
 func (w *WorkflowBuilder) build() (*types.WorkflowDef, error) {
-	if err := w.compileBodies(); err != nil {
+	return w.buildInternal(map[*WorkflowBuilder]bool{})
+}
+
+// buildInternal is build with cycle detection across attached body
+// sub-workflows. visited holds the builders on the current compilation path; a
+// builder that reappears on its own path is a cyclic (e.g. self-referencing)
+// body and is rejected instead of overflowing the stack. Reuse of the same
+// builder across sibling branches is still allowed.
+func (w *WorkflowBuilder) buildInternal(visited map[*WorkflowBuilder]bool) (*types.WorkflowDef, error) {
+	if visited[w] {
+		return nil, fmt.Errorf("workflow %q: cyclic body reference detected", w.name)
+	}
+	visited[w] = true
+	defer delete(visited, w)
+
+	if err := w.compileBodies(visited); err != nil {
 		return nil, err
 	}
 	if err := w.validateAndNormalizeParams(); err != nil {
@@ -238,18 +254,21 @@ func (w *WorkflowBuilder) build() (*types.WorkflowDef, error) {
 	}
 	w.assembleNodes(def)
 	w.assembleConnections(def)
+	w.assembleGroups(def)
 
 	return def, nil
 }
 
 // compileBodies recursively compiles body sub-workflows attached to node refs
 // and injects the resulting *WorkflowDef into the node's normalized params.
-func (w *WorkflowBuilder) compileBodies() error {
+// visited carries the cycle-detection set from buildInternal down into each
+// body's own build.
+func (w *WorkflowBuilder) compileBodies(visited map[*WorkflowBuilder]bool) error {
 	for i, ref := range w.refs {
 		if ref.body == nil {
 			continue
 		}
-		bodyDef, err := ref.body.build()
+		bodyDef, err := ref.body.buildInternal(visited)
 		if err != nil {
 			return fmt.Errorf("node %q body: %w", ref.name, err)
 		}
@@ -356,40 +375,42 @@ func (w *WorkflowBuilder) directHandlers() map[string]types.ActionHandler {
 // workflowHandlers returns portable typed handlers declared by this workflow.
 func (w *WorkflowBuilder) workflowHandlers() map[string]types.ActionHandler {
 	handlers := make(map[string]types.ActionHandler)
-	w.collectWorkflowHandlers(handlers)
+	w.collectWorkflowHandlers(handlers, map[*WorkflowBuilder]bool{})
 	return handlers
 }
 
 func (w *WorkflowBuilder) workflowTriggerHandlers() map[string]types.TriggerHandler {
 	handlers := make(map[string]types.TriggerHandler)
-	w.collectWorkflowTriggerHandlers(handlers)
+	w.collectWorkflowTriggerHandlers(handlers, map[*WorkflowBuilder]bool{})
 	return handlers
 }
 
-func (w *WorkflowBuilder) collectWorkflowHandlers(handlers map[string]types.ActionHandler) {
-	if w == nil {
+func (w *WorkflowBuilder) collectWorkflowHandlers(handlers map[string]types.ActionHandler, visited map[*WorkflowBuilder]bool) {
+	if w == nil || visited[w] {
 		return
 	}
+	visited[w] = true
 	for nodeType, h := range w.handlers {
 		handlers[nodeType] = h
 	}
 	for _, ref := range w.refs {
 		if ref.body != nil {
-			ref.body.collectWorkflowHandlers(handlers)
+			ref.body.collectWorkflowHandlers(handlers, visited)
 		}
 	}
 }
 
-func (w *WorkflowBuilder) collectWorkflowTriggerHandlers(handlers map[string]types.TriggerHandler) {
-	if w == nil {
+func (w *WorkflowBuilder) collectWorkflowTriggerHandlers(handlers map[string]types.TriggerHandler, visited map[*WorkflowBuilder]bool) {
+	if w == nil || visited[w] {
 		return
 	}
+	visited[w] = true
 	for nodeType, h := range w.triggers {
 		handlers[nodeType] = h
 	}
 	for _, ref := range w.refs {
 		if ref.body != nil {
-			ref.body.collectWorkflowTriggerHandlers(handlers)
+			ref.body.collectWorkflowTriggerHandlers(handlers, visited)
 		}
 	}
 }
@@ -414,7 +435,13 @@ func normalizeParams(raw any) (map[string]any, error) {
 		return map[string]any{}, nil
 	}
 	if m, ok := raw.(map[string]any); ok {
-		return m, nil
+		// Return a shallow copy so callers that write defaults/body into the
+		// result do not mutate the builder's shared RawParams map.
+		out := make(map[string]any, len(m))
+		for k, v := range m {
+			out[k] = v
+		}
+		return out, nil
 	}
 	b, err := json.Marshal(raw)
 	if err != nil {
