@@ -67,10 +67,10 @@ const (
 // — never self-reported by the caller. Reason is required and length-bounded.
 type ReplayDeadLetterRequest struct {
 	ExecutionID types.ExecutionID
-	EntryID    string
-	RequestID  string // caller-supplied idempotency key; empty means the store mints one
-	Operator   string // from authenticated principal; never unverified free text
-	Reason     string // required, length-bounded
+	EntryID     string
+	RequestID   string // caller-supplied idempotency key; empty means the store mints one
+	Operator    string // from authenticated principal; never unverified free text
+	Reason      string // required, length-bounded
 }
 
 // ReplayDeadLetterResult is the stable replay result. AuditID identifies the
@@ -146,14 +146,14 @@ type DeadLetterAuditSink interface {
 }
 
 // ReplayReceipt is the decoded form of an authoritative Redis replay receipt
-// (key xflow:t<tenant>:exec:{<id>}:replay:receipt:<requestID>). It carries
+// (keyxflow:ns:<namespace>:exec:{<id>}:replay:receipt:<requestID>). It carries
 // only operational metadata — never the task body or any credential — so the
 // durable SQL projection reconciled against it never persists sensitive
 // request content. The Reason field is the operator's bounded free-text
 // rationale captured in Redis; projectors that must avoid free text in audit
 // (the SQL projector) omit it from the durable row.
 type ReplayReceipt struct {
-	TenantID     string
+	Namespace    string
 	ExecutionID  string
 	RequestID    string
 	AuditID      string
@@ -167,13 +167,13 @@ type ReplayReceipt struct {
 }
 
 // ReplayReceiptReader is an optional StateStore capability that scans the
-// authoritative Redis replay receipts across tenants and executions. The
+// authoritative Redis replay receipts across namespaces and executions. The
 // dead-letter receipt projector + reconcile command (T4) uses it as the
 // diff-scan source: every receipt with no matching SQL projection row is
 // projected idempotently. It does not mutate Redis (read-only); the
 // authoritative receipts survive regardless of the SQL projection state.
 //
-// The scan visits receipts in tenant-then-execution order. fn is called once
+// The scan visits receipts in namespace-then-execution order. fn is called once
 // per receipt; returning a non-nil error aborts the scan. A receipt whose
 // hash is malformed (legacy or partial) is skipped with a best-effort metric
 // rather than aborting the whole reconcile.
@@ -203,7 +203,7 @@ func (e *Engine) ListDeadLetters(ctx context.Context, id types.ExecutionID, page
 // Capability boundary (T4): production server and CLI paths MUST go through
 // service/control.DeadLetterManager instead. The manager owns the single
 // authorization, metric, and audit outlet — calling Engine.ReplayDeadLetter
-// directly bypasses the deadletter.replay scope check, the tenant principal
+// directly bypasses the deadletter.replay scope check, the namespace principal
 // injection, and the unified outcome metric/audit projection, so a production
 // caller using it directly would produce an unauthorized, un-audited, and
 // un-metriced replay. This method is retained only for the embedded SDK /
@@ -238,7 +238,9 @@ var ErrDeadLetterUnsupported = errDeadLetterUnsupported{}
 
 type errDeadLetterUnsupported struct{}
 
-func (errDeadLetterUnsupported) Error() string { return "engine: StateStore does not implement DeadLetterStore" }
+func (errDeadLetterUnsupported) Error() string {
+	return "engine: StateStore does not implement DeadLetterStore"
+}
 func (errDeadLetterUnsupported) Is(target error) bool {
 	_, ok := target.(errDeadLetterUnsupported)
 	return ok

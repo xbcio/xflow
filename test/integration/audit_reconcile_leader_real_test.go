@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xbcio/xflow/backend/distributed"
+	"github.com/xbcio/xflow/backend/providers/distributed"
 	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/store"
 	"github.com/redis/go-redis/v9"
@@ -21,7 +21,7 @@ import (
 // skips honestly when Redis is unreachable.
 func TestAuditReconcileWorkerLeaderGatedRealRedis(t *testing.T) {
 	addr := requireRedis(t)
-	key := fmt.Sprintf("xflow:test:audit-reconcile-leader:%s:%d", t.Name(), time.Now().UnixNano())
+	key := fmt.Sprintf("xflow:ns:est:audit-reconcile-leader:%s:%d", t.Name(), time.Now().UnixNano())
 	ttl := 2 * time.Second
 
 	rdb := redis.NewClient(&redis.Options{Addr: addr})
@@ -56,7 +56,7 @@ func TestAuditReconcileWorkerLeaderGatedRealRedis(t *testing.T) {
 	audit.addRow(&store.AuditRecord{
 		RequestID:   "req-leader-gate",
 		Principal:   "alice",
-		TenantID:    "tenant-leader",
+		Namespace:   "namespace-leader",
 		Operation:   "workflow.create",
 		ExecutionID: "exec-leader",
 		Decision:    "allow",
@@ -106,7 +106,7 @@ func (s *sharedFakeAuditReconciler) ListUnreconciledAdmissions(_ context.Context
 	hasOutcome := make(map[string]bool)
 	for _, r := range s.rows {
 		if r.Phase == store.AuditPhaseOutcome && r.RequestID != "" {
-			hasOutcome[r.TenantID+"|"+r.RequestID] = true
+			hasOutcome[r.Namespace+"|"+r.RequestID] = true
 		}
 	}
 	for _, r := range s.rows {
@@ -114,7 +114,7 @@ func (s *sharedFakeAuditReconciler) ListUnreconciledAdmissions(_ context.Context
 			continue
 		}
 		if r.Phase == store.AuditPhaseAdmission && r.Outcome == store.AuditOutcomeAdmitted &&
-			!(r.RequestID != "" && hasOutcome[r.TenantID+"|"+r.RequestID]) {
+			!(r.RequestID != "" && hasOutcome[r.Namespace+"|"+r.RequestID]) {
 			cp := *r
 			out = append(out, &cp)
 		}
@@ -125,7 +125,7 @@ func (s *sharedFakeAuditReconciler) ListUnreconciledAdmissions(_ context.Context
 func (s *sharedFakeAuditReconciler) AppendOutcomeIfAbsent(_ context.Context, rec *store.AuditRecord) (bool, error) {
 	rec.Phase = store.AuditPhaseOutcome
 	for _, r := range s.rows {
-		if r.Phase == store.AuditPhaseOutcome && r.RequestID == rec.RequestID && r.TenantID == rec.TenantID {
+		if r.Phase == store.AuditPhaseOutcome && r.RequestID == rec.RequestID && r.Namespace == rec.Namespace {
 			return false, nil
 		}
 	}
@@ -138,14 +138,14 @@ func (s *sharedFakeAuditReconciler) CountUnreconciledAdmissions(_ context.Contex
 	hasOutcome := make(map[string]bool)
 	for _, r := range s.rows {
 		if r.Phase == store.AuditPhaseOutcome && r.RequestID != "" {
-			hasOutcome[r.TenantID+"|"+r.RequestID] = true
+			hasOutcome[r.Namespace+"|"+r.RequestID] = true
 		}
 	}
 	var count int
 	var oldest time.Time
 	for _, r := range s.rows {
 		if r.Phase == store.AuditPhaseAdmission && r.Outcome == store.AuditOutcomeAdmitted &&
-			!(r.RequestID != "" && hasOutcome[r.TenantID+"|"+r.RequestID]) {
+			!(r.RequestID != "" && hasOutcome[r.Namespace+"|"+r.RequestID]) {
 			count++
 			if oldest.IsZero() || (!r.Timestamp.IsZero() && r.Timestamp.Before(oldest)) {
 				oldest = r.Timestamp

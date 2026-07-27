@@ -474,7 +474,11 @@ func looksLikeCommitSHA(s string) bool {
 		return false
 	}
 	for _, r := range s {
-		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
+		switch {
+		case r >= '0' && r <= '9':
+		case r >= 'a' && r <= 'f':
+		case r >= 'A' && r <= 'F':
+		default:
 			return false
 		}
 	}
@@ -666,6 +670,7 @@ func intFromDetail(m map[string]any, key string) (int, bool) {
 	}
 	return 0, false
 }
+
 // claiming the same A0 scenario or A3 row. The verifier uses these maps to
 // reject duplicate rows before deriving observations, because the derivation
 // loop only produces one observation per manifest entry.

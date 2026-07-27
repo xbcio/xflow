@@ -11,6 +11,7 @@ import (
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/service/control"
+	"github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -87,6 +88,7 @@ func (m *workflowControlModule) RegisterHTTP(mux *http.ServeMux) {
 //   - POST /v1/executions/{id}/signal     → execution.signal    (mutation)
 //   - POST /v1/executions/{id}/revoke-signal → execution.revoke (mutation)
 //   - POST /v1/executions/{id}/cancel     → execution.cancel    (mutation)
+//
 // An unknown verb resolves to ok=false → 404 (default-deny, no existence leak).
 func (m *workflowControlModule) registerAuthzRoutes(mux *http.ServeMux) {
 	authz := m.authzWrap
@@ -104,7 +106,7 @@ func (m *workflowControlModule) registerAuthzRoutes(mux *http.ServeMux) {
 // persisted execution share one id (closing the audit↔execution correlation
 // gap that left reconcile Probe reading an empty ExecutionID).
 //
-// resource/workflowID/tenant stay empty: create/invoke authz was decided on
+// resource/workflowID/namespace stay empty: create/invoke authz was decided on
 // operation alone before this change, and this resolver only supplies the
 // correlation id, not authz inputs.
 func newExecutionIDResolver() func(*http.Request) (string, string, string, string) {
@@ -117,10 +119,10 @@ func newExecutionIDResolver() func(*http.Request) (string, string, string, strin
 // the stable operation + mutation flag for the authz wrapper. ok=false for an
 // unknown verb or missing id (the wrapper answers 404, default-deny). The
 // resource is execution-scoped so the audit row carries the targeted execution
-// id; ResourceTenant is left empty — the authoritative IDOR defense is the
-// tenant-scoped store read (the authz wrapper injects the principal's tenant
+// id; ResourceNamespace is left empty — the authoritative IDOR defense is the
+// namespace-scoped store read (the authz wrapper injects the principal's namespace
 // into the request context so handleInspect/handleSignal read from the
-// principal's tenant namespace; a cross-tenant execID resolves to not-found →
+// principal's namespace namespace; a cross-namespace execID resolves to not-found →
 // 404, never leaking existence).
 func resolveExecutionRoute(r *http.Request) (resolvedRoute, bool) {
 	rest := strings.TrimPrefix(r.URL.Path, "/v1/executions/")
@@ -262,9 +264,8 @@ func (m *workflowControlModule) handleInvoke(w http.ResponseWriter, r *http.Requ
 	if err != nil {
 		// An unknown entry node is a client error (400), not a 404: the
 		// missing resource is the entry in the submitted graph, not an
-		// execution in the store. The underlying error text is safe to echo
-		// because it contains only the caller-supplied entry name.
-		if strings.Contains(err.Error(), "not found") {
+		// execution in the store.
+		if errors.Is(err, engine.ErrEntryNotFound) {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -463,16 +464,13 @@ func requireMethod(w http.ResponseWriter, r *http.Request, method string) bool {
 	return false
 }
 
-// writeEngineError maps an engine error to an HTTP response. "not found"
-// messages map to 404 so clients can distinguish absent executions; every
-// other failure is collapsed to a generic 500 message — the underlying error
-// (Redis text, internal paths, backend details) must never reach a client.
+// writeEngineError maps typed engine/store errors to HTTP responses. Every
+// unclassified failure is collapsed to a generic 500 message — the underlying
+// error (Redis text, internal paths, backend details) must never reach a client.
 func writeEngineError(w http.ResponseWriter, err error) {
-	if errors.Is(err, engine.ErrExecutionInactive) {
-		writeError(w, http.StatusNotFound, err.Error())
-		return
-	}
-	if strings.Contains(strings.ToLower(err.Error()), "not found") {
+	if errors.Is(err, engine.ErrExecutionInactive) ||
+		errors.Is(err, engine.ErrExecutionNotFound) ||
+		errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}

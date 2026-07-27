@@ -56,7 +56,7 @@ func (m *managementModule) RegisterHTTP(mux *http.ServeMux) {
 	// readyz stay open for probes (minimal public info only).
 	//
 	// When PrincipalAuth is nil (dev / behind an external gateway) the routes
-	// are served directly and the tenant defaults to tenant.DefaultTenant.
+	// are served directly and the namespace defaults to namespace.Default.
 	if m.principalAuth != nil {
 		mux.HandleFunc("/v1/management/leader", m.authzWrap(OpManagementLeaderRead, false, m.handleLeader, func(*http.Request) (string, string, string, string) {
 			return "management/leader", "", "", ""
@@ -66,9 +66,9 @@ func (m *managementModule) RegisterHTTP(mux *http.ServeMux) {
 			id = strings.Trim(id, "/")
 			return "management/runner/" + id, "", "", ""
 		}))
-		// Tenant boundary (Task 7.3): the execution-inspect route injects the
-		// verified principal's TenantID into the request context. Inspect reads
-		// from the principal's tenant namespace; a cross-tenant execID resolves
+		// Namespace boundary (Task 7.3): the execution-inspect route injects the
+		// verified principal's Namespace into the request context. Inspect reads
+		// from the principal's namespace namespace; a cross-namespace execID resolves
 		// to not-found → 404, which is the IDOR defense and does not leak
 		// existence.
 		mux.HandleFunc("/v1/management/executions/", m.authzWrap(OpManagementRead, false, m.handleExecution, func(r *http.Request) (string, string, string, string) {
@@ -177,9 +177,9 @@ type deadLetterListResponse struct {
 
 // deadLetterReplayRequest is the request body for replay.
 type deadLetterReplayRequest struct {
-	EntryID  string `json:"entry_id"`
+	EntryID   string `json:"entry_id"`
 	RequestID string `json:"request_id"`
-	Reason   string `json:"reason"`
+	Reason    string `json:"reason"`
 }
 
 // deadLetterReplayResponse is the JSON shape for a replay result.
@@ -234,10 +234,10 @@ func (m *managementModule) handleDeadLetterList(w http.ResponseWriter, r *http.R
 		return
 	}
 	// IDOR defense (Task 7.3): confirm the execution belongs to the caller's
-	// tenant before listing its dead-letters. The authz wrapper injected the
-	// principal's TenantID into r.Context(), so Inspect is tenant-scoped: a
-	// cross-tenant execID resolves to not-found → 404, never leaking that the
-	// execution exists in another tenant. This matches the executions/ endpoint
+	// namespace before listing its dead-letters. The authz wrapper injected the
+	// principal's Namespace into r.Context(), so Inspect is namespace-scoped: a
+	// cross-namespace execID resolves to not-found → 404, never leaking that the
+	// execution exists in another namespace. This matches the executions/ endpoint
 	// behavior and the design §5.1 requirement (404, not 403).
 	if _, err := m.eng.Inspect(r.Context(), types.ExecutionID(execID)); err != nil {
 		writeEngineError(w, err)
@@ -283,8 +283,8 @@ func (m *managementModule) handleDeadLetterReplay(w http.ResponseWriter, r *http
 		return
 	}
 	// IDOR defense (Task 7.3): confirm the execution belongs to the caller's
-	// tenant before replaying one of its dead-letters. Tenant-scoped via the
-	// authz-injected context; cross-tenant execID → 404 (no existence leak).
+	// namespace before replaying one of its dead-letters. Namespace-scoped via the
+	// authz-injected context; cross-namespace execID → 404 (no existence leak).
 	if _, err := m.eng.Inspect(r.Context(), types.ExecutionID(execID)); err != nil {
 		writeEngineError(w, err)
 		return
@@ -297,9 +297,9 @@ func (m *managementModule) handleDeadLetterReplay(w http.ResponseWriter, r *http
 		return
 	}
 	res, derr := mgr.Replay(r.Context(), control.DeadLetterReplayPrincipal{
-		Subject:  p.Subject,
-		TenantID: p.TenantID,
-		Scopes:   p.Scopes,
+		Subject:   p.Subject,
+		Namespace: p.Namespace,
+		Scopes:    p.Scopes,
 	}, engine.ReplayDeadLetterRequest{
 		ExecutionID: types.ExecutionID(execID),
 		EntryID:     req.EntryID,
@@ -307,15 +307,15 @@ func (m *managementModule) handleDeadLetterReplay(w http.ResponseWriter, r *http
 		Reason:      req.Reason,
 	})
 	if derr != nil {
+		if res.Outcome == engine.ReplayInvalidRequest {
+			writeError(w, http.StatusBadRequest, derr.Error())
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 	status := http.StatusOK
-	if res.Outcome == engine.ReplayInvalidRequest {
-		status = http.StatusBadRequest
-	} else if res.Outcome == engine.ReplayUnauthorized {
-		status = http.StatusForbidden
-	} else if res.Outcome == engine.ReplayNotFound {
+	if res.Outcome == engine.ReplayNotFound {
 		status = http.StatusNotFound
 	}
 	writeJSON(w, status, deadLetterReplayResponse{

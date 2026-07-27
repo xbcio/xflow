@@ -242,7 +242,7 @@ func requireMethod(w http.ResponseWriter, r *http.Request, method string) bool {
 // returns a generic 500 so internal error details are not leaked.
 func writeRunnerError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, ErrRunnerIDRequired), errors.Is(err, ErrRunnerSessionRequired), errors.Is(err, ErrConcurrencyRequired), errors.Is(err, ErrInvalidTenant), errors.Is(err, ErrLeaseRequired):
+	case errors.Is(err, ErrRunnerIDRequired), errors.Is(err, ErrRunnerSessionRequired), errors.Is(err, ErrConcurrencyRequired), errors.Is(err, ErrInvalidNamespace), errors.Is(err, ErrLeaseRequired):
 		writeError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, ErrRunnerSessionStale):
 		writeError(w, http.StatusConflict, err.Error())

@@ -116,8 +116,15 @@ func (e *Engine) deliverSignalLegacy(ctx context.Context, id types.ExecutionID, 
 	}
 
 	acquired, err := e.state.AcquireResumeLock(ctx, id, resumeNode)
-	if err != nil || !acquired {
+	if err != nil {
 		return err
+	}
+	if !acquired {
+		// The lock is held by a concurrent resume (another signal or timer).
+		// The signal was already consumed above; that holder will enqueue the
+		// resume task. Return a retryable error so upper layers can surface the
+		// contention rather than silently succeeding with no resume enqueued.
+		return fmt.Errorf("resume lock contended for %q/%q: signal consumed but resume delegated to lock holder", id, resumeNode)
 	}
 
 	if payload == nil {
@@ -159,8 +166,14 @@ func (e *Engine) TimeoutNode(ctx context.Context, id types.ExecutionID, nodeName
 	}
 
 	acquired, err := e.state.AcquireResumeLock(ctx, id, nodeName)
-	if err != nil || !acquired {
+	if err != nil {
 		return err
+	}
+	if !acquired {
+		// Another resume path (signal delivery or concurrent timeout) already
+		// holds the lock and will enqueue the resume task. Return a retryable
+		// error to surface the contention.
+		return fmt.Errorf("resume lock contended for timeout %q/%q: delegated to lock holder", id, nodeName)
 	}
 
 	return e.queue.Enqueue(ctx, &Task{

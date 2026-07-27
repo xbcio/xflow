@@ -15,14 +15,14 @@ full path under the root module.
 
 | Directory | Role |
 |---|---|
-| `engine/` | Pure scheduling algorithm (zero IO deps): Graph IR, Scheduler, ErrorPolicy, Suspend |
+| `engine/` | Pure scheduling algorithm (zero business IO deps): Graph IR, Scheduler, ErrorPolicy, Suspend, lease/result semantics |
 | `types/` | Public DSL/runtime contracts: `WorkflowDef`, handler interfaces, descriptors, statuses, `Result` — zero impl deps |
 | `node/` | Public node DSL and builtin implementations (`node.HTTP`, `node.Function`, `node.KafkaTrigger`, etc.) |
 | `execution/` | Reusable embedded task execution boundary: Dispatcher, Runner, Registry |
-| `backend/` | Reusable backend providers: `backend.go` (`Provider` + optional capabilities), `local/` (in-memory StateStore + goroutine pool TaskQueue), `distributed/` (Redis StateStore + Asynq TaskQueue) |
+| `backend/` | Reusable backend providers: `backend.go` (`Provider` + optional capabilities), `providers/local/` (in-memory StateStore + goroutine pool TaskQueue), `providers/distributed/` (Redis StateStore + Asynq TaskQueue) |
 | `store/` | Public persistence interfaces + domain models; `memstore/` (in-memory), `sqlstore/` (dialect-agnostic GORM; `sqlstore/mysqlstore/` for MySQL) |
 | `service/` | Server/runner control-plane and execution-plane code: `service/control` (dispatcher, lease sweeper, HTTP/gRPC server), `service/protocol` (Runner Protocol DTOs/client), `service/runner` (runner-side execution) |
-| `sdk/` | Public SDK grouping: `sdk/xflow` (`package xflow`, `NewLocal`/`NewCluster` factories, WorkflowBuilder), `sdk/examples` (runnable `.go` usage examples) |
+| `sdk/` | Public SDK grouping: `sdk/xflow` (`package xflow`, `NewLocal`/`NewCluster` factories, `NewServer` embedded control-plane facade, WorkflowBuilder), `sdk/examples` (runnable `.go` usage examples) |
 | `cmd/server/` | Management server binary (Control Plane) |
 | `cmd/runner/` | Task runner binary (Execution Plane) |
 | `observability/` | slog/Prometheus/OTLP adapters shared across engine, dispatcher, and runner |
@@ -30,10 +30,10 @@ full path under the root module.
 | `docs/` | Design docs (`design/`), DSL samples (`dsl-samples/`), reference research (`references/`) |
 
 **Rules:**
-- `engine/` must NOT import redis/asynq/mysql/sql — only stdlib + `types/` + `node/`.
-- `execution/` and `backend/local/` must remain free of Redis/Asynq/MySQL/network dependencies.
-- `sdk/` may import `engine/`, `execution/`, `backend/*`, `node/`, and `types/`; it assembles reusable packages and must not own reusable backend behavior.
-- `service/` and `cmd/` may depend on `engine/`, `execution/`, `backend/*`, `store/`, `types/`, `node/`; core packages (`engine`, `node`, `types`, `store`, `sdk`) must NEVER import `service/` or `cmd/` — dependencies flow one way only.
+- `engine/` must NOT import redis/asynq/mysql/sql or network transports. It may depend on public contracts (`types`, `namespace`, `engine/graph`) and the narrow `observability/tracing` facade for engine-owned spans, but not concrete exporters or provider packages.
+- `execution/` and `backend/providers/local/` must remain free of Redis/Asynq/MySQL/network dependencies.
+- `sdk/` may import `engine/`, `execution/`, `backend/*`, `node/`, and `types/`; it assembles reusable packages and must not own reusable backend behavior. `sdk/xflow` may additionally import `service/apiserver` and `service/control` only to expose the supported `xflow.NewServer` embedded control-plane facade.
+- `service/` and `cmd/` may depend on `engine/`, `execution/`, `backend/*`, `store/`, `types/`, `node/`; core packages (`engine`, `node`, `types`, `store`) must NEVER import `service/` or `cmd/` — dependencies flow one way only.
 - `cmd/<name>/` entry points must be thin: assemble from `service/` and `sdk/`, no business logic of their own.
 
 Full dependency graph and layering rationale: [design/ARCHITECTURE.md](./design/ARCHITECTURE.md).
@@ -43,10 +43,10 @@ Full dependency graph and layering rationale: [design/ARCHITECTURE.md](./design/
 | Directory | Purpose | Rule |
 |---|---|---|
 | `cmd/<name>/` | Binary entry points | Must be minimal `main()`; no business logic |
-| `service/` | Server/runner control-plane and execution-plane code | Never imported by `engine/node/types/store/sdk` |
+| `service/` | Server/runner control-plane and execution-plane code | Never imported by `engine/node/types/store`; imported by `sdk/xflow` only for `NewServer` |
 | `node/` | Public node DSL and builtin implementations | Constructors and handlers for action, code, transform, flow, group, trigger, and custom nodes |
 | `types/` | Shared data types | Plain structs + constants; zero business logic |
-| `sdk/` | Embedded engine SDK | Assembles `engine/execution/backend`; public API surface |
+| `sdk/` | Embedded engine SDK | Assembles `engine/execution/backend`; exposes `NewServer` facade over `service/apiserver`; public API surface |
 | `docs/` | Design docs and specs | Keep in sync with code |
 
 **Do not create:** `utils/`, `helpers/`, `common/`, `lib/`, `src/`, `pkg/`.

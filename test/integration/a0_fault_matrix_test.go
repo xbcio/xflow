@@ -19,7 +19,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xbcio/xflow/backend/distributed"
+	"github.com/xbcio/xflow/backend/providers/distributed"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/execution"
@@ -37,7 +37,7 @@ type a0FaultReport struct {
 	Scenario           string `json:"scenario"`
 	InjectionPoint     string `json:"injection_point"`
 	ExecutionID        string `json:"execution_id"`
-	NodeName          string `json:"node_name"`
+	NodeName           string `json:"node_name"`
 	ActivationID       int    `json:"activation_id"`
 	LeaseToken         string `json:"lease_token"`
 	NodeStatus         string `json:"node_status"`
@@ -75,15 +75,15 @@ type a0FaultReport struct {
 // captures the per-scenario evidence plus a version manifest so a reviewer can
 // reproduce the exact environment that produced the report.
 type a0FaultMatrixArtifact struct {
-	GeneratedAt   string           `json:"generated_at"`
-	GoVersion     string           `json:"go_version"`
-	OS            string           `json:"os"`
-	CommitSHA     string           `json:"commit_sha"`
-	RedisAddr     string           `json:"redis_addr"`
-	RedisImage    string           `json:"redis_image"`
-	MySQLImage    string           `json:"mysql_image"`
-	KafkaImage    string           `json:"kafka_image"`
-	Scenarios     []a0FaultReport  `json:"scenarios"`
+	GeneratedAt string          `json:"generated_at"`
+	GoVersion   string          `json:"go_version"`
+	OS          string          `json:"os"`
+	CommitSHA   string          `json:"commit_sha"`
+	RedisAddr   string          `json:"redis_addr"`
+	RedisImage  string          `json:"redis_image"`
+	MySQLImage  string          `json:"mysql_image"`
+	KafkaImage  string          `json:"kafka_image"`
+	Scenarios   []a0FaultReport `json:"scenarios"`
 }
 
 // a0ArtifactPath is the fixed release-artifact location (relative to the repo
@@ -272,7 +272,7 @@ func a0AcyclicGraph(t *testing.T, name string) *graph.Graph {
 func a0TwoNodeGraph(t *testing.T, name string) *graph.Graph {
 	t.Helper()
 	def := &types.WorkflowDef{
-		Name:  name,
+		Name: name,
 		Nodes: []types.NodeDef{
 			{Name: "start", Type: "test.fault"},
 			{Name: "done", Type: "test.fault"},
@@ -291,13 +291,13 @@ func a0TwoNodeGraph(t *testing.T, name string) *graph.Graph {
 // a0FaultEnv bundles a backend+engine+fake queue backed by real Redis. The
 // background OutboxDispatcher is started via Bind when consumer=true.
 type a0FaultEnv struct {
-	backend *distributed.Backend
-	eng     *engine.Engine
-	queue   *a0FaultQueue
-	state   engine.AtomicStateStore
-	rdb     *redis.Client
-	addr    string
-	stop    func()
+	backend  *distributed.Backend
+	eng      *engine.Engine
+	queue    *a0FaultQueue
+	state    engine.AtomicStateStore
+	rdb      *redis.Client
+	addr     string
+	stop     func()
 	evidence *engine.RuntimeEvidenceBuffer
 }
 
@@ -333,13 +333,13 @@ func newA0FaultEnv(t *testing.T, addr string, consumer bool) *a0FaultEnv {
 	}
 
 	env := &a0FaultEnv{
-		backend: backend,
-		eng:     eng,
-		queue:   queue,
-		state:   state,
-		rdb:     rdb,
-		addr:    addr,
-		stop:    stop,
+		backend:  backend,
+		eng:      eng,
+		queue:    queue,
+		state:    state,
+		rdb:      rdb,
+		addr:     addr,
+		stop:     stop,
 		evidence: buf,
 	}
 	t.Cleanup(func() {
@@ -418,9 +418,9 @@ func postReportResultRaw(t *testing.T, baseURL string, client *http.Client, req 
 //  1. commit-then-flush-before-delivery (real handler, measured delivery + recovery)
 //  2. report-ack-loss (real runner report chain: server committed, runner ACK lost)
 //  3. queue handoff (task enqueued, consumer crash before process → new consumer)
-//  The real OS-kill evidence is provided by TestA0OSKillSIGKILLRecovery in
-//  cyclic_reliability_process_test.go; no synthetic in-process OS-kill row is
-//  written here.
+//     The real OS-kill evidence is provided by TestA0OSKillSIGKILLRecovery in
+//     cyclic_reliability_process_test.go; no synthetic in-process OS-kill row is
+//     written here.
 func TestA0FaultMatrix(t *testing.T) {
 	addr := requireRedis(t)
 
@@ -606,8 +606,8 @@ func TestA0FaultMatrix(t *testing.T) {
 			rec.recordA0ScenarioMarker(id, "CommitThenFlushBeforeDelivery")
 			rec.recordState("local", id, "final", map[string]any{
 				"execution_status": string(finalExec.Status),
-				"node_status":       string(node.Status),
-				"outbox_after":      "drained",
+				"node_status":      string(node.Status),
+				"outbox_after":     "drained",
 			})
 			rec.flush(t)
 		}
@@ -792,7 +792,7 @@ func TestA0FaultMatrix(t *testing.T) {
 			rec.recordA0ScenarioMarker(execID, "ReportAckLoss")
 			rec.recordState("server-runner", execID, "final", map[string]any{
 				"execution_status": string(result.Status),
-				"node_status":       string(node.Status),
+				"node_status":      string(node.Status),
 			})
 			rec.flush(t)
 		}
@@ -1101,8 +1101,8 @@ func TestA0FaultMatrix(t *testing.T) {
 				"reason":         "stale lease token after reclaim",
 			})
 			rec.recordState("server-runner", execID, "final", map[string]any{
-				"execution_status": string(result.Status),
-				"node_status":       string(node.Status),
+				"execution_status":    string(result.Status),
+				"node_status":         string(node.Status),
 				"handler_invocations": handlerInvocations,
 			})
 			rec.flush(t)
@@ -1271,7 +1271,7 @@ func TestA0FaultMatrix(t *testing.T) {
 			rec.recordA0ScenarioMarker(id, "QueueHandoff")
 			rec.recordState("local", id, "final", map[string]any{
 				"execution_status": string(result.Status),
-				"node_status":       string(node.Status),
+				"node_status":      string(node.Status),
 				"deliveries":       deliveries,
 			})
 			rec.flush(t)

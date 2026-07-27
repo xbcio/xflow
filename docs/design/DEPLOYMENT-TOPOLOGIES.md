@@ -4,7 +4,7 @@
 
 xflow 是一个通用、可嵌入的工作流引擎 SDK：用户用 DAG 编排节点（内置或自定义），SDK 本身即分布式载体。本文梳理 SDK 的三种运行模式与未来的 server + runner 集群架构，帮助使用者和开发者理解每种拓扑的定位、依赖、执行者、适用场景与限制。
 
-> 阅读前提：引擎核心 `engine/` 只依赖两个接口 —— `StateStore`（状态存储）与 `TaskQueue`（任务入队）。通用执行边界在 `execution/`：`Dispatcher` 构建 `TaskLease`，`Executor` 执行或转发，`Runner` 是进程内执行器。`backend.Provider` 抽象出可复用后端装配契约，SDK 负责组装核心能力：`NewLocal` 使用 `backend/local`，`NewCluster` 使用 `backend/distributed`。底层包与 SDK 工厂均按部署模式命名（`backend/local` ↔ `NewLocal`，`backend/distributed` ↔ `NewCluster`）；包内的状态存储与队列实现名仍按技术命名（`memoryState` / `memoryQueue` 为进程内实现，`rstate` 为 Redis 实现）。详见 [ARCHITECTURE.md](./ARCHITECTURE.md)。
+> 阅读前提：引擎核心 `engine/` 由两个接口装配 —— `StateStore`（状态存储）与 `TaskQueue`（任务入队）。通用执行边界在 `execution/`：`Dispatcher` 构建 `TaskLease`，`Executor` 执行或转发，`Runner` 是进程内执行器。`backend.Provider` 抽象出可复用后端装配契约，SDK 负责组装核心能力：`NewLocal` 使用 `backend/providers/local`，`NewCluster` 使用 `backend/providers/distributed`，`NewServer` 委托 `service/apiserver` 暴露可嵌入控制面。底层包与 SDK 工厂均按部署模式命名（`backend/providers/local` ↔ `NewLocal`，`backend/providers/distributed` ↔ `NewCluster`）；包内的状态存储与队列实现名仍按技术命名（`memoryState` / `memoryQueue` 为进程内实现，`rstate` 为 Redis 实现）。详见 [ARCHITECTURE.md](./ARCHITECTURE.md)。
 
 ---
 
@@ -16,6 +16,7 @@ xflow 是一个通用、可嵌入的工作流引擎 SDK：用户用 DAG 编排�
 | **cluster** | 每个对等进程 | 每个对等进程（自带 Asynq server） | Redis（+ 可选持久化 Store） | Redis | 多副本对等部署、需要持久化与挂起/信号 | 已实现 |
 | **remote** | SDK 瘦客户端 | 远端 runner 集群 | 远端（server 管理） | 网络可达的 server | 轻量嵌入、客户端不愿引入 Redis/执行负载 | 规划 |
 | **server**（Control Plane） | 接受外部提交 | 不执行 handler | 通过 StateStore | Redis / 持久化 Store / Asynq | 集群控制面、调度权威 | MVP 已实现 |
+| **embedded server** (`xflow.NewServer`) | 宿主进程 HTTP/gRPC 或 mounted handler | 不执行 handler | 内存或 Redis-backed server state | 无或 Redis / 持久化 Store / Asynq | 应用进程内嵌控制面，但执行仍交给 runner | MVP 已实现 |
 | **runner protocol**（执行协议） | 不提交 | 不执行 handler | server 持有最终状态 | HTTP+JSON long poll / gRPC | server 与 runner 的统一执行协议 | MVP 已实现（HTTP/gRPC）；streaming / credit-flow 为实验性 |
 | **runner**（执行面） | 不提交 | 通过 Runner Protocol 执行 handler | 通过 Runner Protocol 回报 server | 网络可达的 server 或 Relay Gateway | 集群执行面，横向扩缩容 / 网络隔离执行 | MVP 已实现 |
 | **Relay Gateway**（可选中继） | 不提交 | 不执行 handler | 本地只缓存 pending/inflight；最终状态在 server | 网络可达的 server + 本地 runner 可达的 Relay Gateway | runner 无法直连 server 时延伸执行通道，不暴露 Redis | 规划 |
@@ -24,7 +25,7 @@ xflow 是一个通用、可嵌入的工作流引擎 SDK：用户用 DAG 编排�
 
 ---
 
-## 2. SDK 的三种模式
+## 2. SDK 的运行入口
 
 ### 2.1 local
 
@@ -33,13 +34,13 @@ xflow 是一个通用、可嵌入的工作流引擎 SDK：用户用 DAG 编排�
 | 维度 | 说明 |
 |---|---|
 | 工厂 | `xflow.NewLocal(opts...)` |
-| Backend | `backend/local` |
-| StateStore | `memoryState`（进程内存，位于 `backend/local`） |
-| TaskQueue | `memoryQueue`（goroutine 池，默认并发 4，位于 `backend/local`） |
+| Backend | `backend/providers/local` |
+| StateStore | `memoryState`（进程内存，位于 `backend/providers/local`） |
+| TaskQueue | `memoryQueue`（goroutine 池，默认并发 4，位于 `backend/providers/local`） |
 | Registry | `execution.Registry`（支持 direct node handler 与 type/version lookup） |
 | 外部依赖 | 无 |
 
-**执行模型**：`NewLocal` 内部 `backend/local.New()` 组装内存组件，`Bind(eng)` 把 `execution.NewEmbeddedDispatcher` 挂到内存队列并启动 queue consumer pool。提交与执行在同一进程、同一组 goroutine 内闭环，但执行边界仍经过 `TaskLease -> Runner -> TaskResult`，与 cluster / Control Plane + Execution Plane 模型保持一致。`memory.Backend` 实现了 `backend.Provider` 和 `backend.Waiter`，因此 `Wait()` 是事件驱动而非轮询。
+**执行模型**：`NewLocal` 内部 `backend/providers/local.New()` 组装内存组件，`Bind(eng)` 把 `execution.NewEmbeddedDispatcher` 挂到内存队列并启动 queue consumer pool。提交与执行在同一进程、同一组 goroutine 内闭环，但执行边界仍经过 `TaskLease -> Runner -> TaskResult`，与 cluster / Control Plane + Execution Plane 模型保持一致。`memory.Backend` 实现了 `backend.Provider` 和 `backend.Waiter`，因此 `Wait()` 是事件驱动而非轮询。
 
 **direct ActionHandler 支持**：local 模式是唯一支持「内联直挂 handler」的模式。当使用 `wf.LocalNode(name, h)` 时，该 handler 被存入 builder 的 direct map，并在 `AddWorkflow` 时按节点名注册进 `execution.Registry`。生产/分布式自定义节点统一使用 `node.Define(...).New(params)`，consumer 进程通过 `xflow.WithNodes(...)` 声明可执行能力。
 
@@ -58,7 +59,7 @@ xflow 是一个通用、可嵌入的工作流引擎 SDK：用户用 DAG 编排�
 | 维度 | 说明 |
 |---|---|
 | 工厂 | `xflow.NewCluster(ClusterConfig{RedisAddr, Store}, opts...)` |
-| Backend | `backend/distributed` |
+| Backend | `backend/providers/distributed` |
 | StateStore | `redisState`（Redis；可叠加 `store.ClusterStore` 做持久化投影） |
 | TaskQueue | `asynqQueue`（Asynq over Redis） |
 | Registry | `execution.Registry`（按类型解析，依赖 `node.Register` 全局注册） |
@@ -91,13 +92,33 @@ SDK 作为**瘦客户端**：自己不执行节点、不需要 Redis，通过网
 
 **何时用**：嵌入方不愿引入 Redis 依赖、不愿承担节点执行负载，只想把工作流「托管」给集群运行。
 
-**当前状态**：本地内存后端位于 `backend/local/`；当前 embedded cluster backend 位于 `backend/distributed/`；**没有 remote 实现**；代码中也无 remote 工厂或客户端实现。属于规划，尚未落地。后续实现 remote 时应按客户端能力命名，不必延续 `adapter` 叫法。
+**当前状态**：本地内存后端位于 `backend/providers/local/`；当前 embedded cluster backend 位于 `backend/providers/distributed/`；**没有 remote 实现**；代码中也无 remote 工厂或客户端实现。属于规划，尚未落地。后续实现 remote 时应按客户端能力命名，不必延续 `adapter` 叫法。
+
+### 2.4 embedded server
+
+`xflow.NewServer(ServerConfig, opts...)` 是 SDK 支持的嵌入式控制面入口：
+调用方可以把 server 的 HTTP handler 挂到自己的 `http.ServeMux`，或者让
+`Server.Run` 自行监听 HTTP/gRPC/metrics 地址。它与 `cmd/server` 共享
+`service/apiserver` / `service/control` 的模块表面。
+
+| 维度 | 说明 |
+|---|---|
+| 工厂 | `xflow.NewServer(xflow.ServerConfig{RedisAddr, Store}, opts...)` |
+| Backend | RedisAddr 为空时使用 `backend/providers/local`；非空时使用 `backend/providers/distributed` |
+| 执行者 | 不执行 handler；通过 Runner Protocol 分配给 runner |
+| API | `Handler()` / `Start()` / `Shutdown()` / `Run()` / `RegisterGRPC()` / `IsLeader()` |
+| 典型场景 | 宿主应用希望内嵌控制面、复用自身 HTTP/gRPC 生命周期，但仍采用 server/runner 执行拆分 |
+
+**边界**：`NewServer` 是 `sdk/xflow` 允许导入 `service/apiserver` 与
+`service/control` 的唯一原因。SDK 只暴露 facade；control-plane 状态机、
+runner matching、Runner Protocol、lease handoff 和 auth 逻辑仍归
+`service/` 所有，不能复制到 SDK 包内。
 
 ---
 
 ## 3. server + runner 集群架构（MVP 已实现）
 
-面向「用户通过 UI 定义工作流」的集群服务，由两个角色构成。当前已落地第一版 MVP：`cmd/server` 提供 HTTP 控制面，`cmd/runner` 通过 Runner Protocol（HTTP+JSON long polling，另有 gRPC 通道，见 `service/protocol/grpc_client.go`）领取 lease、执行 handler、回传 result。SDK 的 remote 模式仍是后续计划。
+面向「用户通过 UI 定义工作流」的集群服务，由两个角色构成。当前已落地第一版 MVP：`cmd/server` 或 `xflow.NewServer` 提供 HTTP/gRPC 控制面，`cmd/runner` 或嵌入式 runner 通过 Runner Protocol（HTTP+JSON long polling，另有 gRPC 通道，见 `service/protocol/grpc_client.go`）领取 lease、执行 handler、回传 result。SDK 的 remote 模式仍是后续计划。
 
 ### 3.1 角色职责
 
@@ -114,7 +135,7 @@ runner 可横向扩缩容：跑多个 runner 实例即可线性扩展执行吞�
 **MVP 现有边界**：
 - Runner Protocol 已提供 HTTP+JSON long polling 与 gRPC 通道；**streaming / credit-flow control 仍是实验性传输优化**，不应视为生产级可靠性承诺。
 - 没有 Relay Gateway；runner 必须能直接访问 server。
-- 没有 remote SDK；提交、查询、信号 API 先由 server HTTP handler 暴露。
+- 没有 remote SDK；提交、查询、信号 API 先由 `cmd/server` 或 `xflow.NewServer` 暴露的 server HTTP handler 提供。
 - **已实现** runner bearer token、mTLS、runner policy allowlist 与 dry-run rollout；workflow-level authorization、租户隔离和生产级审计仍需单独设计。
 - **已实现** runner matching 的 `node_type` / `node_version` 精确匹配、runner policy 过滤与容量 gating；tags / env / region / 权重调度仍在规划。
 - **已实现** Redis-backed durable assignment / claim / leased handoff、claim expiry 回收、重连 lease replay，以及 lease TTL + sweeper 回收与 re-enqueue。handler 与协议响应仍是 at-least-once，必须使用业务幂等键。
@@ -347,8 +368,8 @@ Relay Gateway 用于 runner 无法直连 server、不能互相直连或需要本
 
 | 拓扑 / 组件 | 状态 | 依据 |
 |---|---|---|
-| local 模式 | **已实现** | `backend/local/` 完整：内存 state/queue + reusable `execution.Registry` + Waiter |
-| cluster 模式 | **已实现** | `backend/distributed/` 完整：Redis state + Asynq queue + reusable `execution.Dispatcher` / `execution.Runner` / `execution.Registry` + TimeoutMonitor |
+| local 模式 | **已实现** | `backend/providers/local/` 完整：内存 state/queue + reusable `execution.Registry` + Waiter |
+| cluster 模式 | **已实现** | `backend/providers/distributed/` 完整：Redis state + Asynq queue + reusable `execution.Dispatcher` / `execution.Runner` / `execution.Registry` + TimeoutMonitor |
 | remote 模式 | **规划** | 无 remote SDK client/backend，无 remote 工厂 |
 | server 管理面 | **MVP 已实现** | `cmd/server` 可启动 HTTP 控制面，支持 workflow invoke、inspect、signal、cancel、runner register/heartbeat/poll/result |
 | runner 执行面 | **MVP 已实现** | `cmd/runner` 可连接 server，注册 capability，通过 Runner Protocol 执行 lease 并上报 result |

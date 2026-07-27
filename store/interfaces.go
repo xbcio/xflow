@@ -75,8 +75,8 @@ type ReceiptAuditAppender interface {
 //
 // ListUnreconciledAdmissions returns admitted (phase="admission",
 // outcome="admitted") rows older than `before` for which no outcome-phase
-// row exists for the same (tenant_id, request_id). AppendOutcomeIfAbsent
-// appends an outcome-phase row keyed idempotently on (tenant_id, request_id,
+// row exists for the same (namespace, request_id). AppendOutcomeIfAbsent
+// appends an outcome-phase row keyed idempotently on (namespace, request_id,
 // phase="outcome"): a duplicate append (concurrent worker / leader switch)
 // returns appended=false.
 type AuditReconciler interface {
@@ -91,7 +91,7 @@ type AuditReconciler interface {
 }
 
 // Audit phase constants (T9). Each audit row belongs to exactly one
-// immutable phase; the (TenantID, RequestID, Phase) triple is the reconcile
+// immutable phase; the (Namespace, RequestID, Phase) triple is the reconcile
 // worker's idempotency key.
 const (
 	// AuditPhaseAdmission is the pre-handler fail-closed admission audit row

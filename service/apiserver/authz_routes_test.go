@@ -12,10 +12,10 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
-	"github.com/xbcio/xflow/backend/distributed"
-	"github.com/xbcio/xflow/backend/tenant"
+	"github.com/xbcio/xflow/backend/providers/distributed"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/types"
 )
@@ -25,12 +25,12 @@ import (
 // directly through the engine facade).
 type noQueue struct{}
 
-func (noQueue) Enqueue(context.Context, *engine.Task) error                { return nil }
+func (noQueue) Enqueue(context.Context, *engine.Task) error                       { return nil }
 func (noQueue) EnqueueDelayed(context.Context, *engine.Task, time.Duration) error { return nil }
 
 // execRouteFixture wires a miniredis-backed distributed backend + control plane
 // + APIServer with a two-token registry: tok-full has the "execution" scope,
-// tok-none has only "workflow". Both are in tenantA so authz passes the tenant
+// tok-none has only "workflow". Both are in namespaceA so authz passes the namespace
 // check and the decision is driven by scope alone.
 type execRouteFixture struct {
 	t       *testing.T
@@ -58,14 +58,14 @@ func newExecRouteFixture(t *testing.T) *execRouteFixture {
 
 	audit := NewInMemoryAuditSink()
 	principalAuth := NewBearerPrincipalAuthMulti([]TokenPrincipalMapping{
-		{Token: "tok-full", Subject: "op-full", TenantID: "tenantA", Scopes: []string{"workflow", "execution"}},
-		{Token: "tok-none", Subject: "op-none", TenantID: "tenantA", Scopes: []string{"workflow"}},
+		{Token: "tok-full", Subject: "op-full", Namespace: "namespaceA", Scopes: []string{"workflow", "execution"}},
+		{Token: "tok-none", Subject: "op-none", Namespace: "namespaceA", Scopes: []string{"workflow"}},
 	})
 
 	srv, err := New(Config{
 		Concurrency:   1,
 		PrincipalAuth: principalAuth,
-		Authorizer:    TenantAwareAuthorizer{},
+		Authorizer:    NamespaceAwareAuthorizer{},
 		AuditSink:     audit,
 	}, WithControlPlane(cp))
 	if err != nil {
@@ -74,10 +74,10 @@ func newExecRouteFixture(t *testing.T) *execRouteFixture {
 	httpSrv := httptest.NewServer(srv.Handler())
 	t.Cleanup(httpSrv.Close)
 
-	// Seed an execution under tenantA directly through the engine so the seed
+	// Seed an execution under namespaceA directly through the engine so the seed
 	// does not depend on the routes under test.
 	seedEng := engine.New(backend.State(), noQueue{})
-	ctxA := tenant.WithTenant(context.Background(), tenant.TenantID("tenantA"))
+	ctxA := namespace.WithNamespace(context.Background(), namespace.Namespace("namespaceA"))
 	g, err := graph.Compile(&types.WorkflowDef{
 		Name:  "exec-route-wf",
 		Nodes: []types.NodeDef{{Name: "start", Type: "test.echo"}},
@@ -223,10 +223,10 @@ func TestExecutionMutationFailClosedHandlerNotReached(t *testing.T) {
 	}
 	for _, mt := range mutations {
 		t.Run(mt.name, func(t *testing.T) {
-			auth := staticPrincipalAuth{principal: Principal{Subject: "alice", TenantID: "tenantA", Scopes: []string{"execution"}}}
+			auth := staticPrincipalAuth{principal: Principal{Subject: "alice", Namespace: "namespaceA", Scopes: []string{"execution"}}}
 			mod := &workflowControlModule{}
 			mod.principalAuth = auth
-			mod.authorizer = TenantAwareAuthorizer{}
+			mod.authorizer = NamespaceAwareAuthorizer{}
 			mod.audit = failingAuditSink{}
 
 			handlerRan := false
@@ -251,28 +251,28 @@ func TestExecutionMutationFailClosedHandlerNotReached(t *testing.T) {
 	}
 }
 
-// TestExecutionCrossTenantSignalDenied proves a cross-tenant execution mutation
-// is denied. The authorizer rejects tenantB acting on a tenantA resource
-// (defense in depth); the authoritative IDOR path (tenant-scoped store read →
-// 404, no existence leak) is exercised end-to-end in tenant_idor_test.go for
+// TestExecutionCrossNamespaceSignalDenied proves a cross-namespace execution mutation
+// is denied. The authorizer rejects namespaceB acting on a namespaceA resource
+// (defense in depth); the authoritative IDOR path (namespace-scoped store read →
+// 404, no existence leak) is exercised end-to-end in namespaceor_test.go for
 // inspect/list/replay. Here we assert the signal operation's authz decision.
-func TestExecutionCrossTenantSignalDenied(t *testing.T) {
-	dec, err := TenantAwareAuthorizer{}.Authorize(context.Background(), AuthorizationRequest{
-		Principal:      Principal{Subject: "op-b", TenantID: "tenantB", Scopes: []string{"execution"}},
-		Operation:      OpExecutionSignal,
-		ResourceTenant: "tenantA",
+func TestExecutionCrossNamespaceSignalDenied(t *testing.T) {
+	dec, err := NamespaceAwareAuthorizer{}.Authorize(context.Background(), AuthorizationRequest{
+		Principal:         Principal{Subject: "op-b", Namespace: "namespaceB", Scopes: []string{"execution"}},
+		Operation:         OpExecutionSignal,
+		ResourceNamespace: "namespaceA",
 	})
 	if err != nil {
 		t.Fatalf("Authorize: %v", err)
 	}
 	if dec != DecisionDeny {
-		t.Fatalf("cross-tenant signal decision = %q, want deny", dec)
+		t.Fatalf("cross-namespace signal decision = %q, want deny", dec)
 	}
 }
 
 // TestNoTokenInAuditOrLog proves the bearer token plaintext never appears in
 // audit events (security policy §7). The AuditEvent carries only the server-
-// verified Subject + TenantID + operation/resource/decision — never the token.
+// verified Subject + Namespace + operation/resource/decision — never the token.
 func TestNoTokenInAuditOrLog(t *testing.T) {
 	const secret = "super-secret-bearer-token-value-xyz"
 	auth := NewBearerPrincipalAuth(secret, "op", []string{"workflow"})
@@ -295,7 +295,7 @@ func TestNoTokenInAuditOrLog(t *testing.T) {
 		if strings.Contains(ev.Principal, secret) || strings.Contains(ev.Resource, secret) ||
 			strings.Contains(ev.Operation, secret) || strings.Contains(ev.Reason, secret) ||
 			strings.Contains(ev.Outcome, secret) || strings.Contains(ev.RequestID, secret) ||
-			strings.Contains(ev.TenantID, secret) {
+			strings.Contains(ev.Namespace, secret) {
 			t.Fatalf("token plaintext leaked into audit event: %+v", ev)
 		}
 	}

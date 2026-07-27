@@ -30,7 +30,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/xbcio/xflow/backend/distributed"
+	"github.com/xbcio/xflow/backend/providers/distributed"
 	"github.com/xbcio/xflow/engine"
 	obslogger "github.com/xbcio/xflow/observability/logger"
 	"github.com/xbcio/xflow/observability/metrics"
@@ -76,12 +76,12 @@ type serverConfig struct {
 	// apiAuthToken, when non-empty, enables BearerTokenAuth on the workflow/
 	// control API (/v1/workflows, /v1/executions/*). The same token must be
 	// supplied by callers in the Authorization: Bearer <token> header. When set
-	// the token is mapped to a principal in tenant.DefaultTenant (single-tenant
-	// compatibility). For multi-tenant operation use --auth-tokens-file.
+	// the token is mapped to a principal in namespace.Default (single-namespace
+	// compatibility). For multi-namespace operation use --auth-tokens-file.
 	apiAuthToken string
 	// authTokensFile, when non-empty, loads a JSON array of token→principal
 	// mappings (see apiserver.TokenPrincipalMapping) so each token binds to its
-	// own (subject, tenant, scopes). This is the multi-tenant path (design §2.3
+	// own (subject, namespace, scopes). This is the multi-namespace path (design §2.3
 	// scheme A). When set it takes precedence over --api-auth-token. The file
 	// contains sensitive bearer tokens: it must be 0600 and never logged.
 	authTokensFile string
@@ -157,8 +157,8 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	fs.IntVar(&cfg.concurrency, "concurrency", cfg.concurrency, "Queue consumer concurrency")
 	fs.StringVar(&cfg.authPolicy, "auth-policy", "", "Path to runners.yaml (empty = auth disabled)")
 	fs.BoolVar(&cfg.authDryRun, "auth-dry-run", false, "Log auth violations but let requests through (rollout aid)")
-	fs.StringVar(&cfg.apiAuthToken, "api-auth-token", "", "Static bearer token for workflow API authentication (sets Authorization: Bearer guard on /v1/workflows and /v1/executions/*); single-tenant → default tenant. For multi-tenant use --auth-tokens-file.")
-	fs.StringVar(&cfg.authTokensFile, "auth-tokens-file", "", "JSON file of [{token,subject,tenant,scopes}] mappings; each token binds to its own tenant (multi-tenant). Takes precedence over --api-auth-token. File must be 0600.")
+	fs.StringVar(&cfg.apiAuthToken, "api-auth-token", "", "Static bearer token for workflow API authentication (sets Authorization: Bearer guard on /v1/workflows and /v1/executions/*); single-namespace → default namespace. For multi-namespace use --auth-tokens-file.")
+	fs.StringVar(&cfg.authTokensFile, "auth-tokens-file", "", "JSON file of [{token,subject,namespace,scopes}] mappings; each token binds to its own namespace (multi-namespace). Takes precedence over --api-auth-token. File must be 0600.")
 	fs.BoolVar(&cfg.requireAPIAuth, "require-api-auth", false, "Fail to start if no workflow API authenticator is configured (production fail-closed)")
 	fs.BoolVar(&cfg.management, "management", false, "Enable ops management module (/healthz /readyz /v1/management/*); /v1/management/* gated by --api-auth-token")
 	fs.StringVar(&cfg.tlsCert, "tls-cert", "", "Path to server TLS certificate (enables TLS)")
@@ -346,20 +346,20 @@ func runServer(cfg serverConfig) error {
 	if mappings, err := loadAuthTokenMappings(cfg); err != nil {
 		return err
 	} else if len(mappings) > 0 {
-		// Multi-tenant path (design §2.3 scheme A): each token binds to its
-		// own (subject, tenant, scopes). The same multi-token registry gates
+		// Multi-namespace path (design §2.3 scheme A): each token binds to its
+		// own (subject, namespace, scopes). The same multi-token registry gates
 		// the outer management middleware (via WorkflowAuthenticator) and the
 		// route-level authz wrapper (via PrincipalAuthenticator). Plaintext
 		// tokens are hashed in the constructor and never retained or logged.
 		auth := apiserver.NewBearerPrincipalAuthMulti(mappings)
 		workflowAuth = auth
 		principalAuth = auth
-		log.Printf("xflow-server: multi-tenant principal auth enabled (%d token(s))", len(mappings))
+		log.Printf("xflow-server: multi-namespace principal auth enabled (%d token(s))", len(mappings))
 	} else if cfg.apiAuthToken != "" {
 		// Single-token path: DEV ONLY. Production must use --auth-tokens-file
 		// so one token cannot self-grant all scopes (Task 8 blocker 4). The
 		// single token is mapped to the G1 operator scopes under the default
-		// tenant; the subject is server-configured, callers cannot self-report
+		// namespace; the subject is server-configured, callers cannot self-report
 		// it. runServer rejects this in production mode (see validateProduction).
 		auth := apiserver.NewBearerPrincipalAuth(cfg.apiAuthToken, "xflow-operator",
 			[]string{"workflow", "execution", "deadletter.list", "deadletter.replay",
@@ -422,7 +422,7 @@ func runServer(cfg serverConfig) error {
 		WorkflowAuth:        workflowAuth,
 		RequireWorkflowAuth: cfg.requireAPIAuth,
 		PrincipalAuth:       principalAuth,
-		Authorizer:          apiserver.TenantAwareAuthorizer{},
+		Authorizer:          apiserver.NamespaceAwareAuthorizer{},
 		AuditSink:           audit,
 		HTTPAddr:            cfg.addr,
 		GRPCAddr:            cfg.grpcAddr,
@@ -458,7 +458,7 @@ func runServer(cfg serverConfig) error {
 	// crash between a successful mutation and its outcome audit append),
 	// consults authoritative state (the control-plane backend's StateStore)
 	// WITHOUT re-executing the mutation, and appends the missing outcome
-	// idempotently (tenant+RequestID+phase). Leader-gated via the control-
+	// idempotently (namespace+RequestID+phase). Leader-gated via the control-
 	// plane elector (IsLeader); backoff is the per-sweep period — a probe or
 	// append error leaves the admission pending for the next sweep. Nil (dev)
 	// when no durable audit sink is configured; production requires a non-nil
@@ -471,7 +471,7 @@ func runServer(cfg serverConfig) error {
 	// token, and anonymous auth with a loud stderr warning.
 	if err := validateProduction(cfg.mode, productionDeps{
 		principalAuth: principalAuth,
-		authorizer:    apiserver.TenantAwareAuthorizer{},
+		authorizer:    apiserver.NamespaceAwareAuthorizer{},
 		auditSink:     audit,
 		durableAudit:  durableAudit,
 		reconciler:    rec,
@@ -539,9 +539,9 @@ func buildAuthenticator(cfg serverConfig) (control.Authenticator, error) {
 	return store, nil
 }
 
-// loadAuthTokenMappings resolves the multi-tenant token→principal registry
+// loadAuthTokenMappings resolves the multi-namespace token→principal registry
 // from --auth-tokens-file. The file is a JSON array of objects with fields
-// token, subject, tenant, scopes. It returns nil (no error) when neither
+// token, subject, namespace, scopes. It returns nil (no error) when neither
 // --auth-tokens-file nor --api-auth-token is set so the caller falls back to
 // the legacy single-token path. Plaintext tokens are read only here and hashed
 // inside NewBearerPrincipalAuthMulti; they are never logged.
@@ -564,10 +564,10 @@ func loadAuthTokenMappings(cfg serverConfig) ([]apiserver.TokenPrincipalMapping,
 		return nil, fmt.Errorf("auth-tokens-file: %w", err)
 	}
 	var raw []struct {
-		Token    string   `json:"token"`
-		Subject  string   `json:"subject"`
-		Tenant   string   `json:"tenant"`
-		Scopes   []string `json:"scopes"`
+		Token     string   `json:"token"`
+		Subject   string   `json:"subject"`
+		Namespace string   `json:"namespace"`
+		Scopes    []string `json:"scopes"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("auth-tokens-file: invalid JSON: %w", err)
@@ -577,11 +577,11 @@ func loadAuthTokenMappings(cfg serverConfig) ([]apiserver.TokenPrincipalMapping,
 	}
 	out := make([]apiserver.TokenPrincipalMapping, 0, len(raw))
 	for _, r := range raw {
-		if r.Token == "" || r.Subject == "" || r.Tenant == "" {
-			return nil, fmt.Errorf("auth-tokens-file: each mapping requires token, subject, and tenant")
+		if r.Token == "" || r.Subject == "" || r.Namespace == "" {
+			return nil, fmt.Errorf("auth-tokens-file: each mapping requires token, subject, and namespace")
 		}
 		out = append(out, apiserver.TokenPrincipalMapping{
-			Token: r.Token, Subject: r.Subject, TenantID: r.Tenant, Scopes: r.Scopes,
+			Token: r.Token, Subject: r.Subject, Namespace: r.Namespace, Scopes: r.Scopes,
 		})
 	}
 	return out, nil
@@ -673,7 +673,7 @@ type productionDeps struct {
 	durableAudit  bool // auditSink is backed by a durable store (SQL)
 	reconciler    reconciler
 	// singleToken indicates the PrincipalAuthenticator was built from the
-	// single-token --api-auth-token path (no multi-tenant registry). Production
+	// single-token --api-auth-token path (no multi-namespace registry). Production
 	// forbids this: one static token must not self-grant operator scopes
 	// (Task 8 blocker 4). Production requires --auth-tokens-file.
 	singleToken bool
@@ -699,7 +699,7 @@ func validateProduction(mode string, deps productionDeps) error {
 		return fmt.Errorf("production mode requires a PrincipalAuthenticator (--auth-tokens-file); --api-auth-token is dev-only")
 	}
 	if deps.singleToken {
-		return fmt.Errorf("production mode requires --auth-tokens-file (multi-tenant token→principal/scopes registry); --api-auth-token is dev-only")
+		return fmt.Errorf("production mode requires --auth-tokens-file (multi-namespace token→principal/scopes registry); --api-auth-token is dev-only")
 	}
 	if deps.authorizer == nil {
 		return fmt.Errorf("production mode requires an Authorizer")

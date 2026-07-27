@@ -164,8 +164,8 @@ func TestEngineBuildTaskLeaseKeepsStaticVarsAndRuntimeVarsSeparate(t *testing.T)
 		Name: "runtime-context",
 		Context: &types.WorkflowContext{
 			Vars: map[string]any{
-				"region":    "static-region",
-				"tenant_id": "static-tenant",
+				"region":       "static-region",
+				"namespace_id": "static-namespace",
 			},
 		},
 		Nodes: []types.NodeDef{
@@ -184,7 +184,7 @@ func TestEngineBuildTaskLeaseKeepsStaticVarsAndRuntimeVarsSeparate(t *testing.T)
 	ctx := context.Background()
 
 	_, err = eng.Submit(ctx, g, map[string]any{"ticket": "VULN-1"}, &types.Runtime{
-		Vars: map[string]any{"tenant_id": "runtime-tenant"},
+		Vars: map[string]any{"namespace_id": "runtime-namespace"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -202,14 +202,14 @@ func TestEngineBuildTaskLeaseKeepsStaticVarsAndRuntimeVarsSeparate(t *testing.T)
 	if got := lease.Input.Vars["region"]; got != "static-region" {
 		t.Fatalf("Input.Vars[region] = %v, want static-region", got)
 	}
-	if got := lease.Input.Vars["tenant_id"]; got != "runtime-tenant" {
-		t.Fatalf("Input.Vars[tenant_id] = %v, want runtime-tenant", got)
+	if got := lease.Input.Vars["namespace_id"]; got != "runtime-namespace" {
+		t.Fatalf("Input.Vars[namespace_id] = %v, want runtime-namespace", got)
 	}
 	if lease.Input.Runtime == nil {
 		t.Fatal("Input.Runtime = nil, want runtime context")
 	}
-	if got := lease.Input.Runtime.Vars["tenant_id"]; got != "runtime-tenant" {
-		t.Fatalf("Input.Runtime.Vars[tenant_id] = %v, want runtime-tenant", got)
+	if got := lease.Input.Runtime.Vars["namespace_id"]; got != "runtime-namespace" {
+		t.Fatalf("Input.Runtime.Vars[namespace_id] = %v, want runtime-namespace", got)
 	}
 	if got := lease.Input.Data["ticket"]; got != "VULN-1" {
 		t.Fatalf("Input.Data[ticket] = %v, want VULN-1", got)

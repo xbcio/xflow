@@ -7,13 +7,13 @@ import (
 
 // Reconcile metric names (T9 audit reconcile worker).
 const (
-	metricAuditReconcileScan            = "xflow_audit_reconcile_scan_total"
-	metricAuditReconcileScanDuration    = "xflow_audit_reconcile_scan_duration_seconds"
-	metricAuditReconcileSettled         = "xflow_audit_reconcile_settled_total"
-	metricAuditReconcileSkipped         = "xflow_audit_reconcile_skipped_total"
-	metricAuditReconcileErrors         = "xflow_audit_reconcile_errors_total"
-	metricAuditReconcileBacklogAge     = "xflow_audit_reconcile_backlog_age_seconds"
-	metricAuditReconcilePending        = "xflow_audit_reconcile_pending"
+	metricAuditReconcileScan         = "xflow_audit_reconcile_scan_total"
+	metricAuditReconcileScanDuration = "xflow_audit_reconcile_scan_duration_seconds"
+	metricAuditReconcileSettled      = "xflow_audit_reconcile_settled_total"
+	metricAuditReconcileSkipped      = "xflow_audit_reconcile_skipped_total"
+	metricAuditReconcileErrors       = "xflow_audit_reconcile_errors_total"
+	metricAuditReconcileBacklogAge   = "xflow_audit_reconcile_backlog_age_seconds"
+	metricAuditReconcilePending      = "xflow_audit_reconcile_pending"
 )
 
 // reconcileObserver is the local mirror of control.ReconcileObserver, kept
@@ -47,7 +47,7 @@ func (r ReconcileMetrics) OnReconcileScan(ctx context.Context, candidates int, e
 	if err != nil {
 		result = "error"
 	}
-	labels := withTenant(ctx, map[string]string{"result": result})
+	labels := withNamespace(ctx, map[string]string{"result": result})
 	r.Metrics.Inc(metricAuditReconcileScan, labels)
 	r.Metrics.Observe(metricAuditReconcileScanDuration, labels, elapsed)
 }
@@ -57,21 +57,21 @@ func (r ReconcileMetrics) OnReconcileSettled(ctx context.Context, outcome string
 	if !appended {
 		result = "duplicate"
 	}
-	labels := withTenant(ctx, map[string]string{"outcome": outcome, "result": result})
+	labels := withNamespace(ctx, map[string]string{"outcome": outcome, "result": result})
 	r.Metrics.Inc(metricAuditReconcileSettled, labels)
 }
 
 func (r ReconcileMetrics) OnReconcileSkipped(ctx context.Context, reason string) {
-	r.Metrics.Inc(metricAuditReconcileSkipped, withTenant(ctx, map[string]string{"reason": reason}))
+	r.Metrics.Inc(metricAuditReconcileSkipped, withNamespace(ctx, map[string]string{"reason": reason}))
 }
 
 func (r ReconcileMetrics) OnReconcileError(ctx context.Context, _ string, _ error) {
-	r.Metrics.Inc(metricAuditReconcileErrors, withTenant(ctx, nil))
+	r.Metrics.Inc(metricAuditReconcileErrors, withNamespace(ctx, nil))
 }
 
 func (r ReconcileMetrics) OnReconcileBacklog(ctx context.Context, oldestAge time.Duration, pending int) {
-	r.Metrics.Set(metricAuditReconcileBacklogAge, withTenant(ctx, nil), oldestAge.Seconds())
-	r.Metrics.Set(metricAuditReconcilePending, withTenant(ctx, nil), float64(pending))
+	r.Metrics.Set(metricAuditReconcileBacklogAge, withNamespace(ctx, nil), oldestAge.Seconds())
+	r.Metrics.Set(metricAuditReconcilePending, withNamespace(ctx, nil), float64(pending))
 }
 
 var _ reconcileObserver = ReconcileMetrics{}

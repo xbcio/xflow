@@ -192,7 +192,7 @@ func TestCompileRejectsUnsupportedValueDomain(t *testing.T) {
 	ptr := 42
 
 	cases := []struct {
-		name  string
+		name   string
 		mutate func(*types.WorkflowDef)
 	}{
 		{

@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/types"
@@ -20,7 +20,7 @@ var (
 	ErrRunnerIDRequired      = errors.New("runner_id is required")
 	ErrRunnerSessionRequired = errors.New("runner_id and session_id are required")
 	ErrConcurrencyRequired   = errors.New("runner_id and concurrency are required")
-	ErrInvalidTenant         = errors.New("invalid tenant")
+	ErrInvalidNamespace      = errors.New("invalid namespace")
 	ErrRunnerNotFound        = errors.New("runner not found")
 	ErrLeaseRequired         = errors.New("runner_id, session_id and lease are required")
 	ErrEngineNotConfigured   = errors.New("engine not configured")
@@ -126,9 +126,9 @@ func (c *Core) register(ctx context.Context, req protocol.RegisterRunnerRequest,
 	if req.RunnerID == "" || req.Concurrency <= 0 {
 		return protocol.RegisterRunnerResponse{}, ErrConcurrencyRequired
 	}
-	for _, t := range tenantIDs(req.Tenants) {
-		if err := tenant.Validate(t); err != nil {
-			return protocol.RegisterRunnerResponse{}, fmt.Errorf("%w: %v", ErrInvalidTenant, err)
+	for _, t := range namespaceIDs(req.Namespaces) {
+		if err := namespace.Validate(t); err != nil {
+			return protocol.RegisterRunnerResponse{}, fmt.Errorf("%w: %v", ErrInvalidNamespace, err)
 		}
 	}
 	policy, authErr := c.authn().AuthenticateRegister(req.RunnerID, req.AuthToken, info)
@@ -140,7 +140,7 @@ func (c *Core) register(ctx context.Context, req protocol.RegisterRunnerRequest,
 		Capacity:     req.Concurrency,
 		Capabilities: req.Capabilities,
 		Policy:       policy,
-		Tenants:      tenantIDs(req.Tenants),
+		Namespaces:   namespaceIDs(req.Namespaces),
 		Now:          time.Now(),
 	})
 	if err != nil {
@@ -196,19 +196,19 @@ func (c *Core) pollTask(ctx context.Context, req protocol.PollTaskRequest, info 
 			return protocol.PollTaskResponse{Wait: c.pollWait}, nil
 		}
 
-		// Inject the assignment's authoritative tenant so the downstream
+		// Inject the assignment's authoritative namespace so the downstream
 		// ExecutionTraceCarrier / BuildTaskLease / RecoverTaskLease calls read
 		// the W3C carrier and engine state from the correct Redis namespace.
 		// The runner-protocol poll context (gRPC PollTask / HTTP HandlePollTask)
-		// does not carry tenant — there is no principal resolver on the runner
-		// protocol path. Assignment.TenantID is the submit-time authoritative
+		// does not carry namespace — there is no principal resolver on the runner
+		// protocol path. Assignment.Namespace is the submit-time authoritative
 		// value recorded by the control plane from the authenticated principal,
 		// so it is the correct source — NOT a client-supplied value. It is only
-		// used as a span attribute and ctx injection (tenant.WithTenant); it is
-		// never placed in W3C baggage (RELEASE-GATES §4.1, cross-tenant leak
+		// used as a span attribute and ctx injection (namespace.WithNamespace); it is
+		// never placed in W3C baggage (RELEASE-GATES §4.1, cross-namespace leak
 		// risk).
-		if tid := claim.Assignment.TenantID; tid != "" {
-			ctx = tenant.WithTenant(ctx, tid)
+		if tid := claim.Assignment.Namespace; tid != "" {
+			ctx = namespace.WithNamespace(ctx, tid)
 		}
 
 		// A leased claim is a durable replay after a response-loss or process
@@ -223,7 +223,7 @@ func (c *Core) pollTask(ctx context.Context, req protocol.PollTaskRequest, info 
 					return protocol.PollTaskResponse{}, recoverErr
 				}
 			}
-			lease.TenantID = claim.Assignment.TenantID
+			lease.Namespace = claim.Assignment.Namespace
 			return protocol.PollTaskResponse{Lease: lease}, nil
 		}
 
@@ -259,7 +259,7 @@ func (c *Core) pollTask(ctx context.Context, req protocol.PollTaskRequest, info 
 		switch {
 		case err == nil:
 			lease.TraceCarrier = tracing.InjectCarrier(dispatchCtx)
-			lease.TenantID = claim.Assignment.TenantID
+			lease.Namespace = claim.Assignment.Namespace
 			if err := c.runners.FinalizeClaim(dispatchCtx, claim.ClaimID, lease); err != nil {
 				dispatchSpan.RecordError(err)
 				dispatchSpan.End()
@@ -275,7 +275,7 @@ func (c *Core) pollTask(ctx context.Context, req protocol.PollTaskRequest, info 
 			// finalize that exact fenced lease instead of waiting for its TTL.
 			recovered, recoverErr := c.recoverTaskLease(ctx, &claim.Assignment.Task)
 			if recoverErr == nil {
-				recovered.TenantID = claim.Assignment.TenantID
+				recovered.Namespace = claim.Assignment.Namespace
 				if finalizeErr := c.runners.FinalizeClaim(ctx, claim.ClaimID, recovered); finalizeErr != nil {
 					_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimRequeue)
 					return protocol.PollTaskResponse{}, normalizeRunnerError(finalizeErr, c.logger, "poll")
@@ -354,12 +354,12 @@ func (c *Core) reportResult(ctx context.Context, req protocol.ReportResultReques
 
 	// LeaseLookup is a mandatory production capability on the report path. The
 	// lease JSON the runner echoes is unsigned and client-mutable, so it MUST
-	// NOT select the commit namespace's tenant. The directory resolves the
+	// NOT select the commit namespace's namespace. The directory resolves the
 	// authoritative finalized lease, fenced to (runner, session). A directory
 	// that cannot resolve leases, or a lookup that does not hit a finalized
 	// lease for THIS runner+session, is a fencing rejection — fail closed.
 	// There is NO fallback to req.Lease: the old "degraded" fallback let a
-	// runner report another runner's lease and commit cross-tenant
+	// runner report another runner's lease and commit cross-namespace
 	// (2026-07-21 cross-runner lease-swap probe).
 	lookup, hasLookup := c.runners.(LeaseLookup)
 	if !hasLookup {
@@ -380,7 +380,7 @@ func (c *Core) reportResult(ctx context.Context, req protocol.ReportResultReques
 	if !found {
 		// ok=false: no finalized lease matches this runner+session (wrong
 		// runner/session, token/leaseID mismatch, already released, or not
-		// found). Fencing rejection — the commit must NOT run and no tenant
+		// found). Fencing rejection — the commit must NOT run and no namespace
 		// namespace is selected from the echoed lease.
 		if c.logger != nil {
 			c.logger.Warn("report rejected: authoritative lease not found for runner+session (fail closed)",
@@ -391,24 +391,24 @@ func (c *Core) reportResult(ctx context.Context, req protocol.ReportResultReques
 	// Immutable fields must match what the runner echoed. A mismatch on
 	// ExecutionID/NodeName/NodeIdx/Attempt/LeaseID/LeaseToken means the runner
 	// is reporting against a different lease than the one it was issued —
-	// reject with the existing fencing sentinel. TenantID is NOT in this set:
-	// an old runner may echo a stale/missing TenantID, so tenant is always taken
+	// reject with the existing fencing sentinel. Namespace is NOT in this set:
+	// an old runner may echo a stale/missing Namespace, so namespace is always taken
 	// from the authoritative lease (logged if it disagrees, but not rejected).
 	if leaseImmutableMismatch(resolved, req.Lease) {
 		return protocol.ReportResultResponse{Accepted: false, Error: engine.ErrInvalidLeaseToken.Error()}, engine.ErrInvalidLeaseToken
 	}
-	if req.Lease.TenantID != resolved.TenantID && c.logger != nil {
-		c.logger.Warn("report tenant mismatch: runner echoed tenant differs from authoritative lease; using authoritative",
+	if req.Lease.Namespace != resolved.Namespace && c.logger != nil {
+		c.logger.Warn("report namespace mismatch: runner echoed namespace differs from authoritative lease; using authoritative",
 			"runner_id", req.RunnerID,
-			"echoed_tenant", string(req.Lease.TenantID),
-			"authoritative_tenant", string(resolved.TenantID))
+			"echoed_namespace", string(req.Lease.Namespace),
+			"authoritative_namespace", string(resolved.Namespace))
 	}
 	authoritativeLease := resolved
-	// Inject the authoritative tenant so the commit path reads/writes from the
-	// correct Redis namespace. ctx injection only (tenant.WithTenant); the
-	// tenant is never placed in W3C baggage (RELEASE-GATES §4.1).
-	if authoritativeLease.TenantID != "" {
-		ctx = tenant.WithTenant(ctx, authoritativeLease.TenantID)
+	// Inject the authoritative namespace so the commit path reads/writes from the
+	// correct Redis namespace. ctx injection only (namespace.WithNamespace); the
+	// namespace is never placed in W3C baggage (RELEASE-GATES §4.1).
+	if authoritativeLease.Namespace != "" {
+		ctx = namespace.WithNamespace(ctx, authoritativeLease.Namespace)
 	}
 
 	_, span := tracer.Start(ctx, "xflow.task.commit",
@@ -455,8 +455,8 @@ func (c *Core) reportResult(ctx context.Context, req protocol.ReportResultReques
 // the runner-facing lease JSON, so a runner echo always round-trips them as 0.
 // Their authority is guaranteed instead by committing with the authoritative
 // (resolved) lease, whose Task carries the real values, rather than the echoed
-// req.Lease. TenantID is also excluded — taken unconditionally from the
-// authoritative lease so an old runner that echoes a stale/missing TenantID is
+// req.Lease. Namespace is also excluded — taken unconditionally from the
+// authoritative lease so an old runner that echoes a stale/missing Namespace is
 // not penalized.
 func leaseImmutableMismatch(authoritative, echoed *engine.TaskLease) bool {
 	if authoritative == nil || echoed == nil {
@@ -486,7 +486,7 @@ func normalizeRunnerError(err error, logger engine.Logger, op string) error {
 	case errors.Is(err, ErrRunnerIDRequired),
 		errors.Is(err, ErrRunnerSessionRequired),
 		errors.Is(err, ErrConcurrencyRequired),
-		errors.Is(err, ErrInvalidTenant),
+		errors.Is(err, ErrInvalidNamespace),
 		errors.Is(err, ErrRunnerNotFound),
 		errors.Is(err, ErrLeaseRequired),
 		errors.Is(err, ErrEngineNotConfigured),
@@ -502,17 +502,17 @@ func normalizeRunnerError(err error, logger engine.Logger, op string) error {
 	}
 }
 
-func tenantIDs(strs []string) []tenant.TenantID {
+func namespaceIDs(strs []string) []namespace.Namespace {
 	if len(strs) == 0 {
 		return nil
 	}
-	out := make([]tenant.TenantID, 0, len(strs))
-	seen := make(map[tenant.TenantID]struct{})
+	out := make([]namespace.Namespace, 0, len(strs))
+	seen := make(map[namespace.Namespace]struct{})
 	for _, s := range strs {
 		if s == "" {
 			continue
 		}
-		t := tenant.TenantID(s)
+		t := namespace.Namespace(s)
 		if _, ok := seen[t]; ok {
 			continue
 		}

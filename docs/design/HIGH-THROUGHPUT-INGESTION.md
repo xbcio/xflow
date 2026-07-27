@@ -99,7 +99,7 @@ server 启动按 [deployment-examples.md](../references/deployment-examples.md)�
 | `WithTransientCompletionTTL` | `sdk/xflow/execution_mode.go:65` | 完成后结果 TTL，默认 30s |
 | transient 禁用 | `sdk/xflow/engine_control.go:68/80/101`、`engine.go:62` | signal/revoke/inspect/suspend 全部拒绝 |
 | `NewLocal` 拒绝 transient | `sdk/xflow/local.go:31` | transient 要求 cluster，返回 `ErrTransientRequiresCluster` |
-| backend transient | `backend/distributed/backend.go:84/250/315/326` | transient 不启动 TimeoutMonitor，短 TTL 状态 |
+| backend transient | `backend/providers/distributed/backend.go:84/250/315/326` | transient 不启动 TimeoutMonitor，短 TTL 状态 |
 | `KafkaTrigger` | `node/internal/trigger/kafka.go` | per-message 与 aggregate 两种运行时 |
 | trigger runtime 激活 | `sdk/xflow/engine.go:88`、`workflow_registry.go:81` | `AddWorkflow` 时 `ReconcileWorkflow` 激活 trigger |
 

@@ -118,7 +118,7 @@ func TestCompileResolvesRunnerSelectors(t *testing.T) {
 		Name: "placement",
 		RunnerSelector: &types.RunnerSelector{
 			Mode:        types.RunnerSelectorModeRequired,
-			MatchLabels: map[string]string{"tenant": "tenant-a", "env": "prod"},
+			MatchLabels: map[string]string{"namespace": "namespace-a", "env": "prod"},
 		},
 		Nodes: []types.NodeDef{
 			{Name: "start", Type: "xflow.start"},
@@ -143,7 +143,7 @@ func TestCompileResolvesRunnerSelectors(t *testing.T) {
 	if selector == nil {
 		t.Fatal("scan RunnerSelector is nil")
 	}
-	want := map[string]string{"tenant": "tenant-a", "env": "prod", "mode": "remote"}
+	want := map[string]string{"namespace": "namespace-a", "env": "prod", "mode": "remote"}
 	for key, value := range want {
 		if got := selector.MatchLabels[key]; got != value {
 			t.Fatalf("selector[%s] = %q, want %q", key, got, value)

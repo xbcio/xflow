@@ -199,7 +199,7 @@ func (inj *Injector) LeaderRestart(ctx context.Context) error {
 // Real-environment runbook (ha-soak-plan §4 row 3):
 //  1. Deploy Redis as sentinel-managed master/replica (or Redis Cluster).
 //  2. Wire the control plane to a sentinel/cluster client (ha-soak-plan §3 —
-//     currently backend/distributed/backend.go uses redis.NewClient only).
+//     currently backend/providers/distributed/backend.go uses redis.NewClient only).
 //  3. Trigger failover via `redis-cli -p <sentinel> SENTINEL FAILOVER <master>`
 //     or by stopping the master process.
 //  4. Assert: during the switch, leader election / commit calls retry and
@@ -221,7 +221,7 @@ func (inj *Injector) RedisFailover(context.Context) error {
 //  1. Deploy each replica as a separate xflow-server process on its own host
 //     (or network namespace).
 //  2. Block server↔Redis traffic with iptables:
-//       iptables -A OUTPUT -p tcp --dport <redis-port> -j DROP
+//     iptables -A OUTPUT -p tcp --dport <redis-port> -j DROP
 //  3. Assert: the partitioned replica loses leadership (lease expires, no
 //     renewal); no dual leader (§5.3); after partition heals the replica
 //     re-campaigns (§5.4).

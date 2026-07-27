@@ -11,7 +11,7 @@ import (
 	"testing"
 
 	"github.com/alicebob/miniredis/v2"
-	"github.com/xbcio/xflow/backend/distributed"
+	"github.com/xbcio/xflow/backend/providers/distributed"
 	obslogger "github.com/xbcio/xflow/observability/logger"
 	"github.com/xbcio/xflow/service/apiserver"
 	"github.com/xbcio/xflow/service/control"
@@ -128,9 +128,9 @@ func writeTokenFile(t *testing.T, name, content string, mode os.FileMode) string
 	return path
 }
 
-func TestLoadAuthTokenMappingsParsesMultiTenantRegistry(t *testing.T) {
+func TestLoadAuthTokenMappingsParsesMultiNamespaceRegistry(t *testing.T) {
 	path := writeTokenFile(t, "tokens.json",
-		`[{"token":"tok-a","subject":"op-a","tenant":"tenantA","scopes":["workflow","management.read"]},{"token":"tok-b","subject":"op-b","tenant":"tenantB","scopes":["workflow"]}]`,
+		`[{"token":"tok-a","subject":"op-a","namespace":"namespaceA","scopes":["workflow","management.read"]},{"token":"tok-b","subject":"op-b","namespace":"namespaceB","scopes":["workflow"]}]`,
 		0600)
 	mappings, err := loadAuthTokenMappings(serverConfig{authTokensFile: path})
 	if err != nil {
@@ -139,11 +139,11 @@ func TestLoadAuthTokenMappingsParsesMultiTenantRegistry(t *testing.T) {
 	if len(mappings) != 2 {
 		t.Fatalf("mappings = %d, want 2", len(mappings))
 	}
-	if mappings[0].TenantID != "tenantA" || mappings[0].Subject != "op-a" || mappings[0].Token != "tok-a" {
-		t.Fatalf("mappings[0] = %+v, want op-a/tenantA/tok-a", mappings[0])
+	if mappings[0].Namespace != "namespaceA" || mappings[0].Subject != "op-a" || mappings[0].Token != "tok-a" {
+		t.Fatalf("mappings[0] = %+v, want op-a/namespaceA/tok-a", mappings[0])
 	}
-	if mappings[1].TenantID != "tenantB" {
-		t.Fatalf("mappings[1].TenantID = %q, want tenantB", mappings[1].TenantID)
+	if mappings[1].Namespace != "namespaceB" {
+		t.Fatalf("mappings[1].Namespace = %q, want namespaceB", mappings[1].Namespace)
 	}
 }
 
@@ -156,11 +156,11 @@ func TestLoadAuthTokenMappingsRejectsWorldReadableFile(t *testing.T) {
 }
 
 func TestLoadAuthTokenMappingsRejectsMissingFields(t *testing.T) {
-	// tenant is required (empty normalized to default is only for the
+	// namespace is required (empty normalized to default is only for the
 	// single-token constructor path, not the file).
 	path := writeTokenFile(t, "tokens.json", `[{"token":"t","subject":"s"}]`, 0600)
 	if _, err := loadAuthTokenMappings(serverConfig{authTokensFile: path}); err == nil {
-		t.Fatal("loadAuthTokenMappings() error = nil, want error for missing tenant")
+		t.Fatal("loadAuthTokenMappings() error = nil, want error for missing namespace")
 	}
 }
 
@@ -174,13 +174,13 @@ func TestLoadAuthTokenMappingsNilWhenUnset(t *testing.T) {
 	}
 }
 
-func TestRunServerMultiTenantTokenFileBuildsPrincipalAuth(t *testing.T) {
+func TestRunServerMultiNamespaceTokenFileBuildsPrincipalAuth(t *testing.T) {
 	// Verify the --auth-tokens-file path end-to-end at the builder layer (which
-	// runServer calls): the file is parsed into a multi-tenant token registry
-	// and each token resolves to its bound tenant via the authenticator. Tokens
+	// runServer calls): the file is parsed into a multi-namespace token registry
+	// and each token resolves to its bound namespace via the authenticator. Tokens
 	// are hashed in-process; the file is 0600.
 	path := writeTokenFile(t, "tokens.json",
-		`[{"token":"tok-a","subject":"op-a","tenant":"tenantA","scopes":["workflow","execution","management.read","management.write","deadletter.list","deadletter.replay"]},{"token":"tok-b","subject":"op-b","tenant":"tenantB","scopes":["workflow"]}]`,
+		`[{"token":"tok-a","subject":"op-a","namespace":"namespaceA","scopes":["workflow","execution","management.read","management.write","deadletter.list","deadletter.replay"]},{"token":"tok-b","subject":"op-b","namespace":"namespaceB","scopes":["workflow"]}]`,
 		0600)
 	cfg, err := parseServerConfig([]string{"-memory", "-auth-tokens-file", path, "-management"})
 	if err != nil {
@@ -198,8 +198,8 @@ func TestRunServerMultiTenantTokenFileBuildsPrincipalAuth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Authenticate tok-a: %v", err)
 	}
-	if pA.TenantID != "tenantA" || pA.Subject != "op-a" {
-		t.Fatalf("tok-a principal = %+v, want op-a/tenantA", pA)
+	if pA.Namespace != "namespaceA" || pA.Subject != "op-a" {
+		t.Fatalf("tok-a principal = %+v, want op-a/namespaceA", pA)
 	}
 
 	reqB, _ := http.NewRequest(http.MethodGet, "/", nil)
@@ -208,8 +208,8 @@ func TestRunServerMultiTenantTokenFileBuildsPrincipalAuth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Authenticate tok-b: %v", err)
 	}
-	if pB.TenantID != "tenantB" {
-		t.Fatalf("tok-b tenant = %q, want tenantB", pB.TenantID)
+	if pB.Namespace != "namespaceB" {
+		t.Fatalf("tok-b namespace = %q, want namespaceB", pB.Namespace)
 	}
 
 	// --auth-tokens-file takes precedence over --api-auth-token; verify the
@@ -295,9 +295,6 @@ func TestBuildRedisConfigSingleMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rc == nil {
-		t.Fatal("buildRedisConfig() = nil, want RedisConfig")
-	}
 	if rc.Mode != distributed.RedisModeSingle || len(rc.Addrs) != 1 || rc.Addrs[0] != "localhost:6379" || rc.Password != "secret" || rc.DB != 2 || rc.TLSConfig == nil {
 		t.Fatalf("unexpected RedisConfig: %+v", rc)
 	}
@@ -331,9 +328,6 @@ func TestBuildRedisConfigSentinelMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rc == nil {
-		t.Fatal("buildRedisConfig() = nil, want RedisConfig")
-	}
 	want := []string{"s1:26379", "s2:26379", "s3:26379"}
 	if rc.Mode != distributed.RedisModeSentinel || rc.MasterName != "mymaster" || len(rc.Addrs) != 3 || strings.Join(rc.Addrs, ",") != strings.Join(want, ",") || rc.Username != "u" || rc.Password != "p" || rc.SentinelUsername != "u" || rc.SentinelPassword != "p" || rc.DB != 1 || rc.TLSConfig == nil {
 		t.Fatalf("unexpected RedisConfig: %+v", rc)
@@ -354,9 +348,6 @@ func TestBuildRedisConfigSentinelUsesDedicatedCreds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rc == nil {
-		t.Fatal("buildRedisConfig() = nil, want RedisConfig")
-	}
 	if rc.Username != "master-user" || rc.Password != "master-pass" {
 		t.Fatalf("unexpected master creds: username=%q password=%q", rc.Username, rc.Password)
 	}
@@ -376,9 +367,6 @@ func TestBuildRedisConfigSentinelFallsBackToMasterCreds(t *testing.T) {
 	rc, err := buildRedisConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if rc == nil {
-		t.Fatal("buildRedisConfig() = nil, want RedisConfig")
 	}
 	if rc.SentinelUsername != "shared-user" || rc.SentinelPassword != "shared-pass" {
 		t.Fatalf("sentinel creds did not fall back to master creds: username=%q password=%q", rc.SentinelUsername, rc.SentinelPassword)
@@ -425,22 +413,19 @@ func TestBuildRedisConfigClusterMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rc == nil {
-		t.Fatal("buildRedisConfig() = nil, want RedisConfig")
-	}
 	want := []string{"c1:6379", "c2:6379"}
 	if rc.Mode != distributed.RedisModeCluster || len(rc.Addrs) != 2 || strings.Join(rc.Addrs, ",") != strings.Join(want, ",") || rc.Username != "u" || rc.Password != "p" || rc.TLSConfig == nil {
 		t.Fatalf("unexpected RedisConfig: %+v", rc)
 	}
 }
 
-// TestRunServerMultiTenantManagementHTTPAuth is a cmd/server-level end-to-end
+// TestRunServerMultiNamespaceManagementHTTPAuth is a cmd/server-level end-to-end
 // regression test for the Task 7.3 review finding: the outer
-// ManagementAuthMiddleware must accept any token in the multi-tenant registry,
-// not just the first one. tenantB (tok-b) must reach the route-level authz
+// ManagementAuthMiddleware must accept any token in the multi-namespace registry,
+// not just the first one. namespaceB (tok-b) must reach the route-level authz
 // wrapper and successfully inspect its own execution; unknown tokens are still
-// rejected; cross-tenant access remains 404.
-func TestRunServerMultiTenantManagementHTTPAuth(t *testing.T) {
+// rejected; cross-namespace access remains 404.
+func TestRunServerMultiNamespaceManagementHTTPAuth(t *testing.T) {
 	redisServer, err := miniredis.Run()
 	if err != nil {
 		t.Fatalf("miniredis: %v", err)
@@ -459,8 +444,8 @@ func TestRunServerMultiTenantManagementHTTPAuth(t *testing.T) {
 	}
 
 	path := writeTokenFile(t, "tokens.json",
-		`[{"token":"tok-a","subject":"op-a","tenant":"tenantA","scopes":["workflow","execution","management.read"]},`+
-			`{"token":"tok-b","subject":"op-b","tenant":"tenantB","scopes":["workflow","execution","management.read"]}]`,
+		`[{"token":"tok-a","subject":"op-a","namespace":"namespaceA","scopes":["workflow","execution","management.read"]},`+
+			`{"token":"tok-b","subject":"op-b","namespace":"namespaceB","scopes":["workflow","execution","management.read"]}]`,
 		0600)
 	cfg, err := parseServerConfig([]string{"-redis", redisServer.Addr(), "-auth-tokens-file", path, "-management"})
 	if err != nil {
@@ -479,7 +464,7 @@ func TestRunServerMultiTenantManagementHTTPAuth(t *testing.T) {
 		RedisAddr:     redisServer.Addr(),
 		Concurrency:   1,
 		PrincipalAuth: principalAuth,
-		Authorizer:    apiserver.TenantAwareAuthorizer{},
+		Authorizer:    apiserver.NamespaceAwareAuthorizer{},
 		AuditSink:     apiserver.NewInMemoryAuditSink(),
 	}, apiserver.WithControlPlane(cp), apiserver.WithManagement(),
 		apiserver.WithHTTPMiddleware(apiserver.ManagementAuthMiddleware(principalAuth)))
@@ -536,12 +521,12 @@ func TestRunServerMultiTenantManagementHTTPAuth(t *testing.T) {
 	execA := submitWorkflow("tok-a")
 
 	if code := managementExecStatus("tok-b", execB); code != http.StatusOK {
-		t.Fatalf("tenantB inspect own exec = %d, want 200 (outer middleware must accept tok-b)", code)
+		t.Fatalf("namespaceB inspect own exec = %d, want 200 (outer middleware must accept tok-b)", code)
 	}
 	if code := managementExecStatus("tok-unknown", execB); code != http.StatusUnauthorized {
 		t.Fatalf("unknown token = %d, want 401", code)
 	}
 	if code := managementExecStatus("tok-b", execA); code != http.StatusNotFound {
-		t.Fatalf("tenantB inspect tenantA exec = %d, want 404 (IDOR, no existence leak)", code)
+		t.Fatalf("namespaceB inspect namespaceA exec = %d, want 404 (IDOR, no existence leak)", code)
 	}
 }

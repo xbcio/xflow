@@ -24,7 +24,7 @@ type fakeProvenance struct {
 	goVersion          string
 }
 
-func (f fakeProvenance) CommitSHA() (string, error)          { return f.commitSHA, nil }
+func (f fakeProvenance) CommitSHA() (string, error) { return f.commitSHA, nil }
 func (f fakeProvenance) RelevantTreeClean([]string) (bool, string, error) {
 	return f.relevantTreeClean, "", nil
 }

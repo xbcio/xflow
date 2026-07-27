@@ -12,8 +12,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 
-	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/service/protocol"
 )
 
@@ -111,9 +111,9 @@ func (d *RedisRunnerDirectory) Register(ctx context.Context, req RegisterRunnerR
 	if err != nil {
 		return RunnerSession{}, fmt.Errorf("marshal runner policy: %w", err)
 	}
-	tenants, err := json.Marshal(normalizeRunnerTenants(req.Tenants))
+	namespaces, err := json.Marshal(normalizeRunnerNamespaces(req.Namespaces))
 	if err != nil {
-		return RunnerSession{}, fmt.Errorf("marshal runner tenants: %w", err)
+		return RunnerSession{}, fmt.Errorf("marshal runner namespaces: %w", err)
 	}
 
 	now := req.Now
@@ -137,11 +137,11 @@ func (d *RedisRunnerDirectory) Register(ctx context.Context, req RegisterRunnerR
 		d.keys.runnerInflight,
 		d.keys.runnerCapabilities,
 		d.keys.runnerPolicy,
-		d.keys.runnerTenants,
+		d.keys.runnerNamespaces,
 		d.keys.runnerHeartbeat,
 		d.keys.runnerLeaseCount,
 		d.keys.claimsExpiry,
-	}, req.RunnerID, session.SessionID, strconv.Itoa(req.Capacity), string(capabilities), string(policy), string(tenants), strconv.FormatInt(now.UnixMilli(), 10))
+	}, req.RunnerID, session.SessionID, strconv.Itoa(req.Capacity), string(capabilities), string(policy), string(namespaces), strconv.FormatInt(now.UnixMilli(), 10))
 	if err != nil {
 		return RunnerSession{}, fmt.Errorf("register redis runner: %w", err)
 	}
@@ -279,7 +279,7 @@ func (d *RedisRunnerDirectory) ClaimForRunner(ctx context.Context, req ClaimRequ
 		if !canRunRouting(capabilities, assignment.Routing) || !runner.policy.Allows(assignment.Routing.NodeType) {
 			continue
 		}
-		if !canServeTenant(runner.tenants, assignment.TenantID) {
+		if !canServeNamespace(runner.namespaces, assignment.Namespace) {
 			continue
 		}
 
@@ -508,10 +508,10 @@ func (d *RedisRunnerDirectory) ReleaseLeased(ctx context.Context, req ReleaseLea
 }
 
 // LookupLease returns the server-authoritative finalized lease for one
-// (runner, session, lease-identity) triple. It is the tenant authority on the
+// (runner, session, lease-identity) triple. It is the namespace authority on the
 // report path: the lease JSON echoed by the runner is unsigned and mutable, so
 // reportResult resolves the lease from server state here instead of trusting
-// req.Lease.TenantID. Resolution mirrors ReleaseLeased (token > leaseID >
+// req.Lease.Namespace. Resolution mirrors ReleaseLeased (token > leaseID >
 // assignmentID via the lease:by-token / lease:by-id indexes), then validates
 // the assignment is still leased to (runnerID, sessionID). ok=false means no
 // match (not found, already released, wrong runner/session, or identity
@@ -680,9 +680,9 @@ func (d *RedisRunnerDirectory) Runner(ctx context.Context, runnerID string) (Run
 	if err != nil {
 		return RunnerSnapshot{}, false
 	}
-	tenantsRaw, err := d.rdb.HGet(ctx, d.keys.runnerTenants, runnerID).Result()
+	namespacesRaw, err := d.rdb.HGet(ctx, d.keys.runnerNamespaces, runnerID).Result()
 	if errors.Is(err, redis.Nil) {
-		tenantsRaw = ""
+		namespacesRaw = ""
 	} else if err != nil {
 		return RunnerSnapshot{}, false
 	}
@@ -709,9 +709,9 @@ func (d *RedisRunnerDirectory) Runner(ctx context.Context, runnerID string) (Run
 	if err := json.Unmarshal([]byte(capabilitiesRaw), &capabilities); err != nil {
 		return RunnerSnapshot{}, false
 	}
-	tenants := normalizeRunnerTenants(nil)
-	if tenantsRaw != "" {
-		if err := json.Unmarshal([]byte(tenantsRaw), &tenants); err != nil {
+	namespaces := normalizeRunnerNamespaces(nil)
+	if namespacesRaw != "" {
+		if err := json.Unmarshal([]byte(namespacesRaw), &namespaces); err != nil {
 			return RunnerSnapshot{}, false
 		}
 	}
@@ -720,7 +720,7 @@ func (d *RedisRunnerDirectory) Runner(ctx context.Context, runnerID string) (Run
 		Capacity:      capacity,
 		InFlight:      inFlight,
 		Capabilities:  cloneCapabilities(capabilities),
-		Tenants:       tenants,
+		Namespaces:    namespaces,
 		LastHeartbeat: time.UnixMilli(heartbeatMillis),
 	}, true
 }
@@ -729,7 +729,7 @@ type redisClaimRunner struct {
 	sessionID    string
 	capabilities []protocol.Capability
 	policy       RunnerPolicy
-	tenants      []tenant.TenantID
+	namespaces   []namespace.Namespace
 }
 
 func (d *RedisRunnerDirectory) runnerForClaim(ctx context.Context, runnerID string) (redisClaimRunner, bool, error) {
@@ -748,11 +748,11 @@ func (d *RedisRunnerDirectory) runnerForClaim(ctx context.Context, runnerID stri
 	if err != nil {
 		return redisClaimRunner{}, false, fmt.Errorf("read runner policy: %w", err)
 	}
-	tenantsRaw, err := d.rdb.HGet(ctx, d.keys.runnerTenants, runnerID).Result()
+	namespacesRaw, err := d.rdb.HGet(ctx, d.keys.runnerNamespaces, runnerID).Result()
 	if errors.Is(err, redis.Nil) {
-		tenantsRaw = ""
+		namespacesRaw = ""
 	} else if err != nil {
-		return redisClaimRunner{}, false, fmt.Errorf("read runner tenants: %w", err)
+		return redisClaimRunner{}, false, fmt.Errorf("read runner namespaces: %w", err)
 	}
 	var capabilities []protocol.Capability
 	if err := json.Unmarshal([]byte(capabilitiesRaw), &capabilities); err != nil {
@@ -762,13 +762,13 @@ func (d *RedisRunnerDirectory) runnerForClaim(ctx context.Context, runnerID stri
 	if err := json.Unmarshal([]byte(policyRaw), &policy); err != nil {
 		return redisClaimRunner{}, false, fmt.Errorf("decode runner policy: %w", err)
 	}
-	tenants := normalizeRunnerTenants(nil)
-	if tenantsRaw != "" {
-		if err := json.Unmarshal([]byte(tenantsRaw), &tenants); err != nil {
-			return redisClaimRunner{}, false, fmt.Errorf("decode runner tenants: %w", err)
+	namespaces := normalizeRunnerNamespaces(nil)
+	if namespacesRaw != "" {
+		if err := json.Unmarshal([]byte(namespacesRaw), &namespaces); err != nil {
+			return redisClaimRunner{}, false, fmt.Errorf("decode runner namespaces: %w", err)
 		}
 	}
-	return redisClaimRunner{sessionID: sessionID, capabilities: capabilities, policy: policy, tenants: tenants}, true, nil
+	return redisClaimRunner{sessionID: sessionID, capabilities: capabilities, policy: policy, namespaces: namespaces}, true, nil
 }
 
 // ReclaimExpiredClaims returns expired unfinalized claims to the durable
@@ -827,14 +827,14 @@ func runnerSessionStatusError(status string) error {
 	}
 }
 
-func canServeTenant(tenants []tenant.TenantID, t tenant.TenantID) bool {
-	if len(tenants) == 0 {
-		return t == tenant.DefaultTenant || t == ""
+func canServeNamespace(namespaces []namespace.Namespace, t namespace.Namespace) bool {
+	if len(namespaces) == 0 {
+		return t == namespace.Default || t == ""
 	}
 	if t == "" {
-		t = tenant.DefaultTenant
+		t = namespace.Default
 	}
-	for _, allowed := range tenants {
+	for _, allowed := range namespaces {
 		if allowed == t {
 			return true
 		}
@@ -975,15 +975,21 @@ end
 if ARGV[2] == '' or current ~= ARGV[2] then
   return 'stale'
 end
-redis.call('HSET', KEYS[13], ARGV[1], ARGV[3])
 if ARGV[4] == '1' then
   redis.call('HSET', KEYS[15], ARGV[1], ARGV[5])
 end
-local capacity = tonumber(ARGV[3]) or 0
-local inFlight = tonumber(redis.call('HGET', KEYS[14], ARGV[1]) or '0')
+-- Headroom is derived purely from server-side accounting: the authoritative
+-- total capacity (written only by register/heartbeat) minus the tasks this
+-- runner already has in flight (active claims + finalized leases). The poll
+-- request's ARGV[3] Capacity is deliberately NOT written to runnerCapacity and
+-- NOT used here: doing so would let a client-supplied remainder both pollute
+-- RunnerSnapshot.Capacity and double-count in-flight work already reflected by
+-- claims+leases. runnerInflight is a heartbeat observation only and must not
+-- gate the claim.
+local capacity = tonumber(redis.call('HGET', KEYS[13], ARGV[1]) or '0')
 local claims = tonumber(redis.call('HGET', KEYS[10], ARGV[1]) or '0')
 local leases = tonumber(redis.call('HGET', KEYS[11], ARGV[1]) or '0')
-if capacity - inFlight - claims - leases <= 0 then
+if capacity - claims - leases <= 0 then
   return 'none'
 end
 if ARGV[6] == '' then

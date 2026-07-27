@@ -66,17 +66,17 @@ func TestFunction_InlineExpr_ReturnsMap(t *testing.T) {
 
 func TestFunction_InlineExprCanReadRuntimeVars(t *testing.T) {
 	h, _ := registry.Lookup("xflow.function")
-	b := node.Expr(`{"tenant": $runtime.vars.tenant_id}`)
+	b := node.Expr(`{"namespace": $runtime.vars.namespace_id}`)
 	input := &types.Input{
 		Params:  b.RawParams().(map[string]any),
-		Runtime: &types.Runtime{Vars: map[string]any{"tenant_id": "tenant-a"}},
+		Runtime: &types.Runtime{Vars: map[string]any{"namespace_id": "namespace-a"}},
 	}
 	out, err := h.Execute(context.Background(), input)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if out.Data["tenant"] != "tenant-a" {
-		t.Fatalf("tenant = %v, want tenant-a", out.Data["tenant"])
+	if out.Data["namespace"] != "namespace-a" {
+		t.Fatalf("namespace = %v, want namespace-a", out.Data["namespace"])
 	}
 }
 

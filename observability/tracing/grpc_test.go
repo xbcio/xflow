@@ -23,7 +23,7 @@ import (
 func TestGRPCUnaryInterceptorExtractsRemoteParent(t *testing.T) {
 	// Caller-side: start a parent span and inject traceparent into metadata.
 	tp := sdktrace.NewTracerProvider()
-	defer tp.Shutdown(context.Background())
+	defer func() { _ = tp.Shutdown(context.Background()) }()
 	callerTracer := tp.Tracer("caller")
 	ctx, parentSpan := callerTracer.Start(context.Background(), "caller.rpc")
 	defer parentSpan.End()
@@ -40,7 +40,7 @@ func TestGRPCUnaryInterceptorExtractsRemoteParent(t *testing.T) {
 	// Server-side: a fresh provider + recorder so the only span it records is
 	// the interceptor's server span (proving it inherited the parent).
 	serverTP, serverSR := testTracerProvider()
-	defer serverTP.Shutdown(context.Background())
+	defer func() { _ = serverTP.Shutdown(context.Background()) }()
 	serverTracer := NewOTelTracer(serverTP.Tracer("xflow-server"))
 	interceptor := GRPCUnaryServerInterceptor(serverTracer)
 
@@ -98,7 +98,7 @@ func TestGRPCUnaryInterceptorNilTracerIsPassthrough(t *testing.T) {
 // when the handler returns one.
 func TestGRPCUnaryInterceptorRecordsHandlerError(t *testing.T) {
 	tp, sr := testTracerProvider()
-	defer tp.Shutdown(context.Background())
+	defer func() { _ = tp.Shutdown(context.Background()) }()
 	tracer := NewOTelTracer(tp.Tracer("xflow-server"))
 	interceptor := GRPCUnaryServerInterceptor(tracer)
 
@@ -143,7 +143,7 @@ func testTracerProvider() (*sdktrace.TracerProvider, *tracetest.SpanRecorder) {
 func TestGRPCStreamInterceptorExtractsRemoteParentOnConnect(t *testing.T) {
 	// Caller-side: start a parent span and inject traceparent into metadata.
 	callerTP := sdktrace.NewTracerProvider()
-	defer callerTP.Shutdown(context.Background())
+	defer func() { _ = callerTP.Shutdown(context.Background()) }()
 	callerTracer := callerTP.Tracer("caller")
 	ctx, parentSpan := callerTracer.Start(context.Background(), "caller.connect")
 	defer parentSpan.End()
@@ -159,7 +159,7 @@ func TestGRPCStreamInterceptorExtractsRemoteParentOnConnect(t *testing.T) {
 	// Server-side: fresh provider + recorder so the only spans recorded are the
 	// interceptor's stream server span (proving it inherited the parent).
 	serverTP, serverSR := testTracerProvider()
-	defer serverTP.Shutdown(context.Background())
+	defer func() { _ = serverTP.Shutdown(context.Background()) }()
 	serverTracer := NewOTelTracer(serverTP.Tracer("xflow-server"))
 
 	// A custom RunnerProtocolServer whose Connect records the context it
@@ -180,7 +180,7 @@ func TestGRPCStreamInterceptorExtractsRemoteParentOnConnect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	client := runnerpb.NewRunnerProtocolClient(conn)
 	streamCtx := metadata.NewOutgoingContext(context.Background(), md)

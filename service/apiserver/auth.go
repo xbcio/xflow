@@ -14,7 +14,7 @@ import (
 //
 // Implementations can enforce bearer tokens, JWT validation, mTLS subject
 // checks, or any composable chain. The interface is intentionally minimal so
-// callers can wrap it with tenant, workflow, or operation-level checks.
+// callers can wrap it with namespace, workflow, or operation-level checks.
 type WorkflowAuthenticator interface {
 	AuthenticateRequest(r *http.Request) error
 }

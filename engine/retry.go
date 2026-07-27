@@ -34,13 +34,19 @@ func retryBackoff(attempt int, settings *types.RetrySettings, execID types.Execu
 		attempt = 0
 	}
 	// Compute base * multiplier^attempt as float64, then clamp.
+	// Comparison is done in float64 domain to avoid int64 overflow when d
+	// exceeds math.MaxInt64 (which would wrap negative and bypass the cap).
+	capF := float64(retryBackoffCap)
 	d := float64(base)
 	for i := 0; i < attempt && i < 32; i++ {
 		d *= multiplier
-		if time.Duration(d) >= retryBackoffCap {
-			d = float64(retryBackoffCap)
+		if d >= capF {
+			d = capF
 			break
 		}
+	}
+	if d >= capF {
+		d = capF
 	}
 	out := time.Duration(d)
 	if settings != nil && settings.MaxInterval > 0 {
@@ -130,7 +136,13 @@ func (e *Engine) scheduleRetry(ctx context.Context, task *Task, attempt int, set
 		return false, fmt.Errorf("%w: retry lease for %q/%q is no longer active", ErrInvalidLeaseToken, task.ExecutionID, task.NodeName)
 	}
 	if err := e.queue.EnqueueDelayed(ctx, &retryTask, delay); err != nil {
-		return false, err
+		// RevokeLease succeeded but enqueue failed — the node is Pending with no
+		// in-flight task AND no active lease, so the lease sweeper cannot
+		// rediscover it (ListExpiredLeases only returns leased non-terminal
+		// nodes). This legacy (non-AtomicStateStore) path has no automatic
+		// recovery; atomic backends persist the retry redelivery intent durably
+		// (see the outbox branch above). Surface the stuck state to the caller.
+		return true, fmt.Errorf("re-enqueue retry task %q/%q (node left pending, not auto-recoverable): %w", task.ExecutionID, task.NodeName, err)
 	}
 	e.notifyNodeRetry(ctx, task.ExecutionID, task.NodeName, attempt, delay)
 	return true, nil

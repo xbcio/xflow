@@ -12,7 +12,7 @@ import (
 	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
-// TestBaggageAllowlistRejectsForbiddenKeys proves tenant/token/payload (and
+// TestBaggageAllowlistRejectsForbiddenKeys proves namespace/token/payload (and
 // the common secret aliases) never survive extraction — they are dropped and
 // the parse-failure counter increments. B1 blocker 5.
 func TestBaggageAllowlistRejectsForbiddenKeys(t *testing.T) {
@@ -20,7 +20,7 @@ func TestBaggageAllowlistRejectsForbiddenKeys(t *testing.T) {
 	policy := DefaultBaggagePolicy()
 	prop := FilteredBaggagePropagator(policy)
 
-	cases := []string{"tenant", "TENANT", "token", "auth_token", "payload", "secret", "ak"}
+	cases := []string{"namespace", "TENANT", "token", "auth_token", "payload", "secret", "ak"}
 	for _, key := range cases {
 		h := propagation.MapCarrier{"baggage": key + "=sensitive"}
 		ctx := prop.Extract(context.Background(), h)

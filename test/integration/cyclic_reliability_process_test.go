@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xbcio/xflow/backend/distributed"
+	"github.com/xbcio/xflow/backend/providers/distributed"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/types"
@@ -598,7 +598,7 @@ func a0HelperSigkillAfterCommit(t *testing.T) {
 	// These are the real engine-published receipts A emits before the SIGKILL;
 	// the parent reconstructs A's events from this field (no fabrication). The
 	// events carry only read-only receipt data (no error text/credentials/
-	// tenant payload), so transporting them over the enlarged stdout pipe is
+	// namespace payload), so transporting them over the enlarged stdout pipe is
 	// safe. The slice is small (a handful of commit/advance receipts), well
 	// under the parent's 1 MiB scanner buffer.
 	receipt := ipcReceipt{
@@ -666,14 +666,14 @@ func fmtReady(id types.ExecutionID, activation int) {
 // READY. The parent cross-verifies these fields against the durable Redis
 // outbox after the kill. Fields carry only read-only receipt data
 // (EventID/Accepted/Applied/OutboxIDs/ExecutionID/NodeName); no error text,
-// credentials, or tenant payload.
+// credentials, or namespace payload.
 //
 // Events (Task 15c) carries the FULL drained bufA runtime evidence events
 // (commit+advance+retry) the engine published at A's commit boundary. These
 // are the real IPC-transported values A emits before the uncatchable SIGKILL
 // takes it down — the parent reconstructs A's events from this field rather
 // than fabricating them. The events are read-only engine receipts and carry no
-// error full text, credential, or tenant payload.
+// error full text, credential, or namespace payload.
 type ipcReceipt struct {
 	EventID     string                        `json:"event_id"`
 	Accepted    bool                          `json:"accepted"`

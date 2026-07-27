@@ -249,13 +249,34 @@ func (f *fakeState) CommitNode(_ context.Context, req CommitNodeRequest) (Commit
 				}
 			}
 		} else if req.CyclicComplete {
-			exec.Status = req.CyclicFinalStatus
-			f.publishLocked(ExecutionEvent{ExecutionID: req.ExecutionID, Status: req.CyclicFinalStatus, Error: req.CyclicFinalError})
-			result.ExecutionDone = true
-			result.ExecutionStatus = req.CyclicFinalStatus
+			// Cancel-aware finalization fence, mirroring commitNodeLua: a
+			// concurrent Cancel may have moved the execution to canceling/
+			// canceled (or another terminal) while this cyclic node was
+			// completing. The terminal node write above still lands, but the
+			// execution finalization must NOT clobber that cancel/terminal.
+			if !isCancelOrTerminalExecStatus(exec.Status) {
+				exec.Status = req.CyclicFinalStatus
+				f.publishLocked(ExecutionEvent{ExecutionID: req.ExecutionID, Status: req.CyclicFinalStatus, Error: req.CyclicFinalError})
+				result.ExecutionDone = true
+				result.ExecutionStatus = req.CyclicFinalStatus
+			}
 		}
 	}
 	return result, nil
+}
+
+// isCancelOrTerminalExecStatus reports whether an execution status is in the
+// canceling/terminal set that a fenced finalization must not overwrite. It
+// mirrors the guard in commitNodeLua (canceling/canceled/timeout/success/
+// failed).
+func isCancelOrTerminalExecStatus(s types.ExecutionStatus) bool {
+	switch s {
+	case types.ExecutionStatusCanceling, types.ExecutionStatusCanceled,
+		types.ExecutionStatusTimeout, types.ExecutionStatusSuccess,
+		types.ExecutionStatusFailed:
+		return true
+	}
+	return false
 }
 
 func (f *fakeState) AdvanceNode(_ context.Context, req AdvanceNodeRequest) (AdvanceNodeResult, error) {

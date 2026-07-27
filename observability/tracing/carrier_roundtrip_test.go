@@ -25,7 +25,7 @@ func TestCarrierRoundTripPreservesSampledAndTracestate(t *testing.T) {
 		// propagated flags carry the sampled bit the SDK set on the root span.
 		sdktrace.WithSampler(sdktrace.AlwaysSample()),
 	)
-	defer tp.Shutdown(context.Background())
+	defer func() { _ = tp.Shutdown(context.Background()) }()
 	tracer := tp.Tracer("xflow-test")
 
 	// Root span (sampled).
@@ -109,7 +109,7 @@ func TestCarrierSampledNotSampledPreserved(t *testing.T) {
 		sdktrace.WithSpanProcessor(rec),
 		sdktrace.WithSampler(sdktrace.NeverSample()),
 	)
-	defer tp.Shutdown(context.Background())
+	defer func() { _ = tp.Shutdown(context.Background()) }()
 	tracer := tp.Tracer("xflow-test")
 
 	ctx, root := tracer.Start(context.Background(), "xflow.workflow.submit")

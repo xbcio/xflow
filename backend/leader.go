@@ -32,6 +32,7 @@ type AlwaysLeader struct{}
 func (AlwaysLeader) Campaign(context.Context) error { return nil }
 func (AlwaysLeader) IsLeader() bool                 { return true }
 func (AlwaysLeader) Resign(context.Context) error   { return nil }
+
 // AlwaysLeader.Notify returns a buffered channel pre-loaded with true (the
 // current leadership state). Because AlwaysLeader never loses leadership, no
 // further values are ever sent — the channel correctly "emits on every change"

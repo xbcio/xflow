@@ -59,6 +59,7 @@ data/
 .claude/worktrees/
 .claude/plans/
 .claude/superpowers/
+.claude/mockups/
 .claude/settings.local.json
 .claude/specs/
 
@@ -69,3 +70,9 @@ data/
 # Editor local settings
 .vscode/
 .DS_Store
+
+# pnpm store (web monorepo)
+.pnpm-store/
+
+# Agent workspace artifacts
+.agents/

@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -21,9 +21,9 @@ const maxReplayReasonLen = 1024
 // for the G0 maintenance path). It must never come from unverified free text
 // in the request body.
 type DeadLetterReplayPrincipal struct {
-	Subject  string
-	TenantID string
-	Scopes   []string
+	Subject   string
+	Namespace string
+	Scopes    []string
 }
 
 // HasScope reports whether the principal holds a scope.
@@ -94,14 +94,14 @@ func (m *DeadLetterManager) Replay(ctx context.Context, principal DeadLetterRepl
 		return m.finish(ctx, engine.ReplayDeadLetterResult{Outcome: engine.ReplayUnauthorized, ExecutionID: req.ExecutionID}, req, nil)
 	}
 
-	// Tenant double-check: the authoritative tenant isolation is enforced by
-	// the store layer (Redis keys are prefixed by tenant). This is a fail-closed
-	// guard so the manager rejects a replay when the injected context tenant
-	// does not match the server-issued principal.TenantID before touching Redis.
-	// An empty principal.TenantID skips the check for G0 CLI backward
-	// compatibility; the store still scopes by the context tenant.
-	ctxTenant := tenant.FromContext(ctx)
-	if principal.TenantID != "" && tenant.TenantID(principal.TenantID) != ctxTenant {
+	// Namespace double-check: the authoritative namespace isolation is enforced by
+	// the store layer (Redis keys are prefixed by namespace). This is a fail-closed
+	// guard so the manager rejects a replay when the injected context namespace
+	// does not match the server-issued principal.Namespace before touching Redis.
+	// An empty principal.Namespace skips the check for G0 CLI backward
+	// compatibility; the store still scopes by the context namespace.
+	ctxNamespace := namespace.FromContext(ctx)
+	if principal.Namespace != "" && namespace.Namespace(principal.Namespace) != ctxNamespace {
 		return m.finish(ctx, engine.ReplayDeadLetterResult{Outcome: engine.ReplayUnauthorized, ExecutionID: req.ExecutionID}, req, nil)
 	}
 

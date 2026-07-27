@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xbcio/xflow/backend/local"
+	"github.com/xbcio/xflow/backend/providers/local"
 )
 
 func TestTriggerDedupSharedPrimitivesAllowsOnlyOneInstance(t *testing.T) {

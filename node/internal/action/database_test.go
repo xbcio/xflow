@@ -5,11 +5,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/xbcio/xflow/backend/tenant"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/node/registry"
 	"github.com/xbcio/xflow/types"
 )
+
 func TestDatabase_Factory(t *testing.T) {
 	b := node.Database("select", "users", "my_db").
 		SetWhere(map[string]any{"id": 1}).
@@ -69,8 +70,8 @@ func TestDatabase_InvalidTable(t *testing.T) {
 			"credential": "db",
 		},
 	}
-	input.SetTenant(tenant.DefaultTenant)
-	input.SetCredentialResolver(func(tenant tenant.TenantID, name string) map[string]any {
+	input.SetNamespace(namespace.Default)
+	input.SetCredentialResolver(func(namespace namespace.Namespace, name string) map[string]any {
 		return map[string]any{"dsn": "user:pass@tcp(localhost)/test", "driver": "mysql"}
 	})
 	_, err := h.Execute(context.Background(), input)
@@ -91,8 +92,8 @@ func TestDatabase_UnknownOperation(t *testing.T) {
 			"credential": "db",
 		},
 	}
-	input.SetTenant(tenant.DefaultTenant)
-	input.SetCredentialResolver(func(tenant tenant.TenantID, name string) map[string]any {
+	input.SetNamespace(namespace.Default)
+	input.SetCredentialResolver(func(namespace namespace.Namespace, name string) map[string]any {
 		return map[string]any{"dsn": "user:pass@tcp(localhost)/test", "driver": "mysql"}
 	})
 	_, err := h.Execute(context.Background(), input)
@@ -108,8 +109,8 @@ func TestDatabase_UpdateRequiresWhere(t *testing.T) {
 	h, _ := registry.Lookup("xflow.database")
 	b := node.Database("update", "users", "db").SetData(map[string]any{"name": "test"})
 	input := &types.Input{Params: b.RawParams().(map[string]any)}
-	input.SetTenant(tenant.DefaultTenant)
-	input.SetCredentialResolver(func(tenant tenant.TenantID, name string) map[string]any {
+	input.SetNamespace(namespace.Default)
+	input.SetCredentialResolver(func(namespace namespace.Namespace, name string) map[string]any {
 		return map[string]any{"dsn": "user:pass@tcp(localhost)/test", "driver": "mysql"}
 	})
 	_, err := h.Execute(context.Background(), input)
@@ -125,8 +126,8 @@ func TestDatabase_DeleteRequiresWhere(t *testing.T) {
 	h, _ := registry.Lookup("xflow.database")
 	b := node.Database("delete", "users", "db")
 	input := &types.Input{Params: b.RawParams().(map[string]any)}
-	input.SetTenant(tenant.DefaultTenant)
-	input.SetCredentialResolver(func(tenant tenant.TenantID, name string) map[string]any {
+	input.SetNamespace(namespace.Default)
+	input.SetCredentialResolver(func(namespace namespace.Namespace, name string) map[string]any {
 		return map[string]any{"dsn": "user:pass@tcp(localhost)/test", "driver": "mysql"}
 	})
 	_, err := h.Execute(context.Background(), input)
@@ -150,8 +151,8 @@ func TestDatabase_NoPoolIsPermanent(t *testing.T) {
 	h, _ := registry.Lookup("xflow.database")
 	b := node.Database("select", "users", "db")
 	input := &types.Input{Params: b.RawParams().(map[string]any)}
-	input.SetTenant(tenant.DefaultTenant)
-	input.SetCredentialResolver(func(tenant tenant.TenantID, name string) map[string]any {
+	input.SetNamespace(namespace.Default)
+	input.SetCredentialResolver(func(namespace namespace.Namespace, name string) map[string]any {
 		return map[string]any{"dsn": "user:pass@tcp(localhost)/test", "driver": "mysql"}
 	})
 

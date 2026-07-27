@@ -45,11 +45,11 @@ const (
 // function (losing classification); newer peers recover the full DTO. See
 // service/protocol.MarshalTaskResult.
 type ClassifiedError struct {
-	Kind      ErrorKind       `json:"kind,omitempty"`
-	Code      string          `json:"code,omitempty"`
-	Message   string          `json:"message"`
-	Retryable bool            `json:"retryable,omitempty"`
-	Permanent bool            `json:"permanent,omitempty"`
+	Kind      ErrorKind      `json:"kind,omitempty"`
+	Code      string         `json:"code,omitempty"`
+	Message   string         `json:"message"`
+	Retryable bool           `json:"retryable,omitempty"`
+	Permanent bool           `json:"permanent,omitempty"`
 	Details   map[string]any `json:"details,omitempty"`
 }
 

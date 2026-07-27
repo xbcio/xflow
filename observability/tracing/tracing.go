@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/xbcio/xflow/backend/tenant"
+	"github.com/xbcio/xflow/namespace"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	oteltrace "go.opentelemetry.io/otel/trace"
@@ -85,9 +85,9 @@ func NewOTelTracer(tracer oteltrace.Tracer) OTelTracer {
 
 // Start starts an OpenTelemetry span and stores both the OTel span and xflow
 // Span adapter in the returned context. The span is automatically tagged with
-// the tenant carried by ctx (from tenant.FromContext) so every trace has a
-// tenant dimension for multi-tenant observability. Tenant is stored as a span
-// attribute, never as W3C baggage, to avoid cross-tenant leakage.
+// the namespace carried by ctx (from namespace.FromContext) so every trace has a
+// namespace dimension for multi-namespace observability. Namespace is stored as a span
+// attribute, never as W3C baggage, to avoid cross-namespace leakage.
 func (t OTelTracer) Start(ctx context.Context, name string, attrs ...any) (context.Context, Span) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -96,9 +96,9 @@ func (t OTelTracer) Start(ctx context.Context, name string, attrs ...any) (conte
 	if tracer == nil {
 		tracer = otel.Tracer(instrumentationName)
 	}
-	// Always attach the tenant from context. DefaultTenant is emitted explicitly
-	// so single-tenant deployments still have a stable tenant attribute.
-	attrs = append(attrs, "tenant", string(tenant.FromContext(ctx)))
+	// Always attach the namespace from context. DefaultNamespace is emitted explicitly
+	// so single-namespace deployments still have a stable namespace attribute.
+	attrs = append(attrs, "namespace", string(namespace.FromContext(ctx)))
 	ctx, span := tracer.Start(ctx, name, oteltrace.WithAttributes(attributes(attrs...)...))
 	wrapped := otelSpan{span: span}
 	return context.WithValue(ctx, spanContextKey{}, wrapped), wrapped

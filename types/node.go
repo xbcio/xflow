@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/xbcio/xflow/backend/tenant"
+	"github.com/xbcio/xflow/namespace"
 )
 
 // DescriptorProvider provides type identity, credential declarations, and schema
@@ -73,9 +73,9 @@ type Input struct {
 	Timeout     time.Duration // zero means no limit
 
 	// credential resolver injected by the engine; accessed via Credential().
-	credential func(tenant tenant.TenantID, name string) map[string]any
-	// tenant scopes the credential resolver to the execution's tenant.
-	tenant tenant.TenantID
+	credential func(namespace namespace.Namespace, name string) map[string]any
+	// namespace scopes the credential resolver to the execution's namespace.
+	namespace namespace.Namespace
 }
 
 // Credential returns the credential values for the given name.
@@ -85,19 +85,19 @@ func (n *Input) Credential(name string) map[string]any {
 	if n.credential == nil {
 		return nil
 	}
-	return n.credential(n.tenant, name)
+	return n.credential(n.namespace, name)
 }
 
 // SetCredentialResolver sets the credential resolver function.
 // Called by engine implementations before Execute is invoked. The resolver is
-// tenant-scoped; the tenant is bound separately via SetTenant.
-func (n *Input) SetCredentialResolver(fn func(tenant tenant.TenantID, name string) map[string]any) {
+// namespace-scoped; the namespace is bound separately via SetNamespace.
+func (n *Input) SetCredentialResolver(fn func(namespace namespace.Namespace, name string) map[string]any) {
 	n.credential = fn
 }
 
-// SetTenant scopes the credential resolver to the given tenant.
-func (n *Input) SetTenant(t tenant.TenantID) {
-	n.tenant = t
+// SetNamespace scopes the credential resolver to the given namespace.
+func (n *Input) SetNamespace(t namespace.Namespace) {
+	n.namespace = t
 }
 
 // Output is the result produced by a node handler.

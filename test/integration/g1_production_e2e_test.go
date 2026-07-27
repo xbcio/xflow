@@ -4,10 +4,10 @@
 //
 // TestG1ProductionE2E exercises the G1 release-gate posture against real
 // Redis (127.0.0.1:6380) + real MySQL (127.0.0.1:3306) with the production
-// authz stack wired: PrincipalAuth + TenantAwareAuthorizer + SQLAuditSink +
+// authz stack wired: PrincipalAuth + NamespaceAwareAuthorizer + SQLAuditSink +
 // AuditReconcileWorker + Metrics + Tracer + RequireWorkflowAuth +
 // WithManagement. It covers HTTP entries (submit/invoke/signal/revoke/cancel)
-// with an allow/deny matrix, cross-tenant IDOR (404, no existence leak), the
+// with an allow/deny matrix, cross-namespace IDOR (404, no existence leak), the
 // gRPC runner Connect + ReportResult path end-to-end, complex approval DAG
 // features (multi-signal quorum, timer, cancel, cyclic reset, repeat signal
 // → 409), the dead-letter replay HTTP contract, T9 reconcile, metrics
@@ -38,11 +38,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xbcio/xflow/backend/distributed"
-	"github.com/xbcio/xflow/backend/tenant"
+	"github.com/xbcio/xflow/backend/providers/distributed"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/execution"
+	"github.com/xbcio/xflow/namespace"
 	_ "github.com/xbcio/xflow/node" // registers built-in nodes (xflow.start, xflow.wait, etc.) in nodereg
 	nodereg "github.com/xbcio/xflow/node/registry"
 	"github.com/xbcio/xflow/observability/tracing"
@@ -67,20 +67,20 @@ import (
 // before subtests start).
 const g1ArtifactPath = "test/integration/testdata/g1_e2e_report.json"
 
-// g1Tokens — multi-tenant token registry for the production harness.
+// g1Tokens — multi-namespace token registry for the production harness.
 // Token values are carried ONLY in the Authorization header; they are never
 // recorded in the artifact JSON.
 const (
-	g1TokFullA = "g1-tok-full-tenantA-8f3a4c2b9d"
-	g1TokNoExA = "g1-tok-noexec-tenantA-7e1b5d0a3c"
-	g1TokFullB = "g1-tok-full-tenantB-2c9d4e6f8a"
+	g1TokFullA   = "g1-tok-full-namespaceA-8f3a4c2b9d"
+	g1TokNoExA   = "g1-tok-noexec-namespaceA-7e1b5d0a3c"
+	g1TokFullB   = "g1-tok-full-namespaceB-2c9d4e6f8a"
 	g1TokDefault = "g1-tok-full-default-4a7b2c9e1d"
 )
 
-// g1TenantA / g1TenantB are the two tenants used by the authz matrix + IDOR.
+// g1NamespaceA / g1NamespaceB are the two namespaces used by the authz matrix + IDOR.
 const (
-	g1TenantA = "tenantA"
-	g1TenantB = "tenantB"
+	g1NamespaceA = "namespaceA"
+	g1NamespaceB = "namespaceB"
 )
 
 // g1Artifact is the machine-readable coverage record written at the end of
@@ -116,27 +116,27 @@ type g1TraceGraph struct {
 	OneTraceID               bool     `json:"one_trace_id"`
 	DispatchParentedToSubmit bool     `json:"dispatch_parented_to_submit"`
 	CommitParentedToReport   bool     `json:"commit_parented_to_report"`
-	// TenantA fields: the same strong assertions run against a non-default
-	// tenant workflow (g1TokFullA). The pollTask tenant injection in
-	// service/control/core.go must read the W3C carrier from the tenantA
+	// NamespaceA fields: the same strong assertions run against a non-default
+	// namespace workflow (g1TokFullA). The pollTask namespace injection in
+	// service/control/core.go must read the W3C carrier from the namespaceA
 	// Redis namespace, so the full 5-span graph holds with one TraceID and
 	// correct parentage.
-	TenantAOneTraceID               bool `json:"tenant_a_one_trace_id"`
-	TenantADispatchParentedToSubmit bool `json:"tenant_a_dispatch_parented_to_submit"`
-	TenantACommitParentedToReport   bool `json:"tenant_a_commit_parented_to_report"`
-	// CrossTenantCarrierIsolated: tenantA + tenantB workflows submitted
-	// concurrently — the tenantA dispatch span must NOT inherit tenantB's
+	NamespaceAOneTraceID               bool `json:"namespace_a_one_trace_id"`
+	NamespaceADispatchParentedToSubmit bool `json:"namespace_a_dispatch_parented_to_submit"`
+	NamespaceACommitParentedToReport   bool `json:"namespace_a_commit_parented_to_report"`
+	// CrossNamespaceCarrierIsolated: namespaceA + namespaceB workflows submitted
+	// concurrently — the namespaceA dispatch span must NOT inherit namespaceB's
 	// submit trace (and vice versa). Proves the carrier lookup is namespace-
 	// scoped, not a global read.
-	CrossTenantCarrierIsolated bool `json:"cross_tenant_carrier_isolated"`
+	CrossNamespaceCarrierIsolated bool `json:"cross_namespace_carrier_isolated"`
 }
 
 type g1ApprovalDAG struct {
 	MultiSignalQuorum string `json:"multi_signal_quorum"`
-	TimerFired         string `json:"timer_fired"`
-	Cancel             string `json:"cancel"`
-	CyclicReset        string `json:"cyclic_reset"`
-	RepeatSignal409    string `json:"repeat_signal_409"`
+	TimerFired        string `json:"timer_fired"`
+	Cancel            string `json:"cancel"`
+	CyclicReset       string `json:"cyclic_reset"`
+	RepeatSignal409   string `json:"repeat_signal_409"`
 }
 
 type g1AuditReconcile struct {
@@ -373,33 +373,33 @@ func g1NodeStatuses(d engine.ExecutionDetail) string {
 	return strings.Join(parts, ",")
 }
 
-// g1ProductionMappings returns the multi-tenant token registry used by the
+// g1ProductionMappings returns the multi-namespace token registry used by the
 // production harness.
 func g1ProductionMappings() []apiserver.TokenPrincipalMapping {
 	return []apiserver.TokenPrincipalMapping{
 		{
-			Token:    g1TokFullA,
-			Subject:  "alice",
-			TenantID: g1TenantA,
-			Scopes:   []string{"workflow", "execution", "deadletter.list", "deadletter.replay", "management.read", "management.leader.read", "management.runner.read"},
+			Token:     g1TokFullA,
+			Subject:   "alice",
+			Namespace: g1NamespaceA,
+			Scopes:    []string{"workflow", "execution", "deadletter.list", "deadletter.replay", "management.read", "management.leader.read", "management.runner.read"},
 		},
 		{
-			Token:    g1TokNoExA,
-			Subject:  "bob",
-			TenantID: g1TenantA,
-			Scopes:   []string{"workflow"},
+			Token:     g1TokNoExA,
+			Subject:   "bob",
+			Namespace: g1NamespaceA,
+			Scopes:    []string{"workflow"},
 		},
 		{
-			Token:    g1TokFullB,
-			Subject:  "carol",
-			TenantID: g1TenantB,
-			Scopes:   []string{"workflow", "execution"},
+			Token:     g1TokFullB,
+			Subject:   "carol",
+			Namespace: g1NamespaceB,
+			Scopes:    []string{"workflow", "execution"},
 		},
 		{
-			Token:    g1TokDefault,
-			Subject:  "dave",
-			TenantID: "default",
-			Scopes:   []string{"workflow", "execution", "deadletter.list", "deadletter.replay", "management.read", "management.leader.read", "management.runner.read"},
+			Token:     g1TokDefault,
+			Subject:   "dave",
+			Namespace: "default",
+			Scopes:    []string{"workflow", "execution", "deadletter.list", "deadletter.replay", "management.read", "management.leader.read", "management.runner.read"},
 		},
 	}
 }
@@ -512,7 +512,6 @@ func (h *g1IdempotentSideEffectHandler) Execute(ctx context.Context, input *type
 	return &types.Output{Data: map[string]any{"idempotency_key": key}}, nil
 }
 
-
 // custom "test.g1.real" handler AND bridges built-in xflow.wait / xflow.start
 // from the node registry.
 func g1RegistryForProduction() *execution.Registry {
@@ -542,7 +541,7 @@ func g1StartRunner(t *testing.T, h *productionServerRunnerHarness, id string) (c
 			Capabilities: []protocol.Capability{{NodeType: "test.g1.real"}, {NodeType: "xflow.wait"}},
 			PollWait:     5 * time.Millisecond,
 			Tracer:       h.tracer,
-			Tenants:      []tenant.TenantID{"default", g1TenantA, g1TenantB},
+			Namespaces:   []namespace.Namespace{"default", g1NamespaceA, g1NamespaceB},
 		},
 	)
 	errCh := make(chan error, 1)
@@ -611,15 +610,15 @@ func TestG1ProductionE2E(t *testing.T) {
 		traceGraph = g1RunGRPCRunnerConnectReport(t, h)
 	})
 
-	t.Run("GRPCRunnerConnectReportTenantA", func(t *testing.T) {
-		tgA := g1RunGRPCRunnerConnectReportForTenant(t, h, g1TokFullA, "g1-grpc-tenantA")
-		traceGraph.TenantAOneTraceID = tgA.OneTraceID
-		traceGraph.TenantADispatchParentedToSubmit = tgA.DispatchParentedToSubmit
-		traceGraph.TenantACommitParentedToReport = tgA.CommitParentedToReport
+	t.Run("GRPCRunnerConnectReportNamespaceA", func(t *testing.T) {
+		tgA := g1RunGRPCRunnerConnectReportForNamespace(t, h, g1TokFullA, "g1-grpc-namespaceA")
+		traceGraph.NamespaceAOneTraceID = tgA.OneTraceID
+		traceGraph.NamespaceADispatchParentedToSubmit = tgA.DispatchParentedToSubmit
+		traceGraph.NamespaceACommitParentedToReport = tgA.CommitParentedToReport
 	})
 
-	t.Run("CrossTenantCarrierIsolation", func(t *testing.T) {
-		traceGraph.CrossTenantCarrierIsolated = g1RunCrossTenantCarrierIsolation(t, h)
+	t.Run("CrossNamespaceCarrierIsolation", func(t *testing.T) {
+		traceGraph.CrossNamespaceCarrierIsolated = g1RunCrossNamespaceCarrierIsolation(t, h)
 	})
 
 	t.Run("ApprovalMultiSignal", func(t *testing.T) {
@@ -690,7 +689,7 @@ func TestG1ProductionE2E(t *testing.T) {
 
 // g1RunAuthzMatrix exercises the HTTP authz matrix: submit/invoke allow,
 // inspect/signal/revoke/cancel allow (full-A) and deny (noexec-A lacks
-// execution scope → 403), cross-tenant IDOR → 404 (no existence leak).
+// execution scope → 403), cross-namespace IDOR → 404 (no existence leak).
 func g1RunAuthzMatrix(t *testing.T, h *productionServerRunnerHarness) []g1AuthzRow {
 	t.Helper()
 	rows := []g1AuthzRow{}
@@ -713,7 +712,7 @@ func g1RunAuthzMatrix(t *testing.T, h *productionServerRunnerHarness) []g1AuthzR
 	// entry point for the invoke endpoint.
 	invBody := map[string]any{
 		"workflow": &types.WorkflowDef{
-			Name:  "g1-authz-invoke",
+			Name: "g1-authz-invoke",
 			Nodes: []types.NodeDef{
 				{Name: "start", Type: "xflow.start"},
 				{Name: "work", Type: "test.g1.real"},
@@ -731,7 +730,7 @@ func g1RunAuthzMatrix(t *testing.T, h *productionServerRunnerHarness) []g1AuthzR
 		t.Fatalf("invoke allow: status=%d, want 200", resp.StatusCode)
 	}
 
-	// Inspect allow (full-A on its own tenant's execution).
+	// Inspect allow (full-A on its own namespace's execution).
 	statusInspect, _ := g1InspectAuth(t, h.httpSrv.URL, g1TokFullA, idA)
 	rows = append(rows, g1AuthzRow{Route: "GET /v1/executions/{id}", Token: "full-A", Scope: "execution", Expected: 200, Got: statusInspect, Decision: "allow"})
 	if statusInspect != 200 {
@@ -745,11 +744,11 @@ func g1RunAuthzMatrix(t *testing.T, h *productionServerRunnerHarness) []g1AuthzR
 		t.Fatalf("inspect deny: status=%d, want 403 (missing execution scope)", statusInspectDeny)
 	}
 
-	// Cross-tenant IDOR: tenantB token inspecting tenantA's execution → 404.
+	// Cross-namespace IDOR: namespaceB token inspecting namespaceA's execution → 404.
 	statusCross, _ := g1InspectAuth(t, h.httpSrv.URL, g1TokFullB, idA)
-	rows = append(rows, g1AuthzRow{Route: "GET /v1/executions/{id}", Token: "full-B (cross-tenant)", Scope: "execution", Expected: 404, Got: statusCross, Decision: "deny"})
+	rows = append(rows, g1AuthzRow{Route: "GET /v1/executions/{id}", Token: "full-B (cross-namespace)", Scope: "execution", Expected: 404, Got: statusCross, Decision: "deny"})
 	if statusCross != 404 {
-		t.Fatalf("cross-tenant inspect: status=%d, want 404 (no existence leak)", statusCross)
+		t.Fatalf("cross-namespace inspect: status=%d, want 404 (no existence leak)", statusCross)
 	}
 
 	// Signal deny (noexec-A lacks execution scope) → 403.
@@ -811,7 +810,7 @@ func g1RunGRPCRunnerConnectReport(t *testing.T, h *productionServerRunnerHarness
 			Capabilities: []protocol.Capability{{NodeType: "test.g1.real"}, {NodeType: "xflow.wait"}},
 			PollWait:     5 * time.Millisecond,
 			Tracer:       h.tracer,
-			Tenants:      []tenant.TenantID{"default", g1TenantA, g1TenantB},
+			Namespaces:   []namespace.Namespace{"default", g1NamespaceA, g1NamespaceB},
 		},
 	)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -820,10 +819,10 @@ func g1RunGRPCRunnerConnectReport(t *testing.T, h *productionServerRunnerHarness
 	go func() { errCh <- runner.Run(ctx) }()
 	waitForE2ERunner(t, h.runners, "runner-g1-grpc")
 
-	// R4 (2026-07-20): the pollTask tenant injection (service/control/core.go)
-	// now propagates Assignment.TenantID into the engine context, so the W3C
+	// R4 (2026-07-20): the pollTask namespace injection (service/control/core.go)
+	// now propagates Assignment.Namespace into the engine context, so the W3C
 	// carrier is read from the correct Redis namespace for both the default
-	// tenant and non-default tenants. The trace-graph assertions below are
+	// namespace and non-default namespaces. The trace-graph assertions below are
 	// strong (t.Fatalf) — WARN degradation has been removed.
 	execID := g1SubmitAllowed(t, h.httpSrv.URL, g1TokDefault, g1StartWorkflowDef("g1-grpc-runner"))
 
@@ -868,8 +867,8 @@ func g1RunGRPCRunnerConnectReport(t *testing.T, h *productionServerRunnerHarness
 	commit := byName["xflow.task.commit"]
 
 	// R4 (2026-07-20): strong assertions — no WARN degradation. The pollTask
-	// tenant injection (service/control/core.go) propagates
-	// Assignment.TenantID into the engine context so the W3C carrier is read
+	// namespace injection (service/control/core.go) propagates
+	// Assignment.Namespace into the engine context so the W3C carrier is read
 	// from the correct Redis namespace. All 5 spans must share one TraceID,
 	// dispatch must be parented to submit (real W3C remote parent via persisted
 	// carrier), execute to dispatch (lease carrier), report to execute (gRPC
@@ -878,7 +877,7 @@ func g1RunGRPCRunnerConnectReport(t *testing.T, h *productionServerRunnerHarness
 	tg.OneTraceID = true
 	for _, s := range []sdktrace.ReadOnlySpan{dispatch, byName["xflow.task.execute"], report, commit} {
 		if s.SpanContext().TraceID() != root {
-			t.Fatalf("span %q trace %s != submit trace %s (trace graph broken; pollTask tenant injection or carrier extraction failed)", s.Name(), s.SpanContext().TraceID(), root)
+			t.Fatalf("span %q trace %s != submit trace %s (trace graph broken; pollTask namespace injection or carrier extraction failed)", s.Name(), s.SpanContext().TraceID(), root)
 		}
 	}
 	if dispatch.Parent().SpanID() != submit.SpanContext().SpanID() {
@@ -898,7 +897,7 @@ func g1RunGRPCRunnerConnectReport(t *testing.T, h *productionServerRunnerHarness
 	return tg
 }
 
-// g1RunGRPCRunnerConnectReportForTenant is the tenantA variant of
+// g1RunGRPCRunnerConnectReportForNamespace is the namespaceA variant of
 // g1RunGRPCRunnerConnectReport. It creates its own gRPC server + runner,
 // submits a workflow with the given token, waits for terminal Success, then
 // strongly asserts the B1 trace graph (5 spans, one TraceID, 4 parent edges
@@ -907,7 +906,7 @@ func g1RunGRPCRunnerConnectReport(t *testing.T, h *productionServerRunnerHarness
 // The span recorder is global, so the function filters spans by the submit
 // span's TraceID to exclude spans from earlier subtests' workflows that the
 // runner may have drained.
-func g1RunGRPCRunnerConnectReportForTenant(t *testing.T, h *productionServerRunnerHarness, token, wfName string) g1TraceGraph {
+func g1RunGRPCRunnerConnectReportForNamespace(t *testing.T, h *productionServerRunnerHarness, token, wfName string) g1TraceGraph {
 	t.Helper()
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
@@ -938,7 +937,7 @@ func g1RunGRPCRunnerConnectReportForTenant(t *testing.T, h *productionServerRunn
 			Capabilities: []protocol.Capability{{NodeType: "test.g1.real"}, {NodeType: "xflow.wait"}},
 			PollWait:     5 * time.Millisecond,
 			Tracer:       h.tracer,
-			Tenants:      []tenant.TenantID{"default", g1TenantA, g1TenantB},
+			Namespaces:   []namespace.Namespace{"default", g1NamespaceA, g1NamespaceB},
 		},
 	)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1022,9 +1021,9 @@ func g1RunGRPCRunnerConnectReportForTenant(t *testing.T, h *productionServerRunn
 	return tg
 }
 
-// g1RunCrossTenantCarrierIsolation submits tenantA and tenantB workflows
+// g1RunCrossNamespaceCarrierIsolation submits namespaceA and namespaceB workflows
 // concurrently, waits for both to reach terminal Success via a shared gRPC
-// runner, then asserts the carrier lookup did not cross tenant boundaries:
+// runner, then asserts the carrier lookup did not cross namespace boundaries:
 // each dispatch span is parented to one of the two submit spans, the two
 // dispatch spans sit in different traces, and each dispatch is parented to a
 // distinct submit.
@@ -1032,7 +1031,7 @@ func g1RunGRPCRunnerConnectReportForTenant(t *testing.T, h *productionServerRunn
 // g1DoAuth/g1SubmitAuth call t.Fatalf, which is unsafe in goroutines
 // (runtime.Goexit deadlocks the waiter). g1SubmitConcurrent is a non-fatal
 // submit helper so both submits can run concurrently.
-func g1RunCrossTenantCarrierIsolation(t *testing.T, h *productionServerRunnerHarness) bool {
+func g1RunCrossNamespaceCarrierIsolation(t *testing.T, h *productionServerRunnerHarness) bool {
 	t.Helper()
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
@@ -1058,21 +1057,21 @@ func g1RunCrossTenantCarrierIsolation(t *testing.T, h *productionServerRunnerHar
 		protocol.NewGRPCClient(conn),
 		registry,
 		runnersvc.Config{
-			RunnerID:     "runner-g1-cross-tenant",
+			RunnerID:     "runner-g1-cross-namespace",
 			Concurrency:  1,
 			Capabilities: []protocol.Capability{{NodeType: "test.g1.real"}, {NodeType: "xflow.wait"}},
 			PollWait:     5 * time.Millisecond,
 			Tracer:       h.tracer,
-			Tenants:      []tenant.TenantID{"default", g1TenantA, g1TenantB},
+			Namespaces:   []namespace.Namespace{"default", g1NamespaceA, g1NamespaceB},
 		},
 	)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	errCh := make(chan error, 1)
 	go func() { errCh <- runner.Run(ctx) }()
-	waitForE2ERunner(t, h.runners, "runner-g1-cross-tenant")
+	waitForE2ERunner(t, h.runners, "runner-g1-cross-namespace")
 
-	// Submit tenantA and tenantB workflows concurrently so both carriers sit
+	// Submit namespaceA and namespaceB workflows concurrently so both carriers sit
 	// in Redis simultaneously. g1SubmitConcurrent is non-fatal so it is safe
 	// to call from goroutines (t.Fatalf in a goroutine deadlocks via Goexit).
 	var (
@@ -1083,27 +1082,27 @@ func g1RunCrossTenantCarrierIsolation(t *testing.T, h *productionServerRunnerHar
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		idA, stA = g1SubmitConcurrent(h.httpSrv.URL, g1TokFullA, g1StartWorkflowDef("g1-x-tenantA"))
+		idA, stA = g1SubmitConcurrent(h.httpSrv.URL, g1TokFullA, g1StartWorkflowDef("g1-x-namespaceA"))
 	}()
 	go func() {
 		defer wg.Done()
-		idB, stB = g1SubmitConcurrent(h.httpSrv.URL, g1TokFullB, g1StartWorkflowDef("g1-x-tenantB"))
+		idB, stB = g1SubmitConcurrent(h.httpSrv.URL, g1TokFullB, g1StartWorkflowDef("g1-x-namespaceB"))
 	}()
 	wg.Wait()
 	if stA != 200 || idA == "" {
-		t.Fatalf("cross-tenant tenantA concurrent submit: status=%d id=%q", stA, idA)
+		t.Fatalf("cross-namespace namespaceA concurrent submit: status=%d id=%q", stA, idA)
 	}
 	if stB != 200 || idB == "" {
-		t.Fatalf("cross-tenant tenantB concurrent submit: status=%d id=%q", stB, idB)
+		t.Fatalf("cross-namespace namespaceB concurrent submit: status=%d id=%q", stB, idB)
 	}
 
 	detailA := g1WaitForTerminal(t, h.httpSrv.URL, g1TokFullA, idA, 15*time.Second)
 	if detailA.Status != types.ExecutionStatusSuccess {
-		t.Fatalf("cross-tenant tenantA execution status = %s, want success", detailA.Status)
+		t.Fatalf("cross-namespace namespaceA execution status = %s, want success", detailA.Status)
 	}
 	detailB := g1WaitForTerminal(t, h.httpSrv.URL, g1TokFullB, idB, 15*time.Second)
 	if detailB.Status != types.ExecutionStatusSuccess {
-		t.Fatalf("cross-tenant tenantB execution status = %s, want success", detailB.Status)
+		t.Fatalf("cross-namespace namespaceB execution status = %s, want success", detailB.Status)
 	}
 
 	cancel()
@@ -1119,7 +1118,7 @@ func g1RunCrossTenantCarrierIsolation(t *testing.T, h *productionServerRunnerHar
 	_ = h.tracerProv.ForceFlush(ctx)
 
 	spans := h.spanRecorder.Ended()
-	// Find the two most recent submit spans (tenantA + tenantB).
+	// Find the two most recent submit spans (namespaceA + namespaceB).
 	var submits []sdktrace.ReadOnlySpan
 	for i := len(spans) - 1; i >= 0 && len(submits) < 2; i-- {
 		if spans[i].Name() == "xflow.workflow.submit" {
@@ -1127,7 +1126,7 @@ func g1RunCrossTenantCarrierIsolation(t *testing.T, h *productionServerRunnerHar
 		}
 	}
 	if len(submits) != 2 {
-		t.Fatalf("cross-tenant: expected 2 submit spans, got %d (%v)", len(submits), spanNamesIntegration(spans))
+		t.Fatalf("cross-namespace: expected 2 submit spans, got %d (%v)", len(submits), spanNamesIntegration(spans))
 	}
 
 	// Find dispatch spans whose trace ID matches one of the two submit trace
@@ -1146,12 +1145,12 @@ func g1RunCrossTenantCarrierIsolation(t *testing.T, h *productionServerRunnerHar
 		}
 	}
 	if len(dispatches) != 2 {
-		t.Fatalf("cross-tenant: expected 2 dispatch spans matching the 2 submit traces, got %d (%v)", len(dispatches), spanNamesIntegration(spans))
+		t.Fatalf("cross-namespace: expected 2 dispatch spans matching the 2 submit traces, got %d (%v)", len(dispatches), spanNamesIntegration(spans))
 	}
 
 	// Each dispatch must be parented to one of the two submits, and the
 	// dispatch's trace ID must equal that submit's trace ID. If the carrier
-	// crossed tenants, a dispatch would be parented to the wrong submit (or
+	// crossed namespaces, a dispatch would be parented to the wrong submit (or
 	// not parented to any submit at all).
 	for _, d := range dispatches {
 		parentID := d.Parent().SpanID()
@@ -1160,26 +1159,26 @@ func g1RunCrossTenantCarrierIsolation(t *testing.T, h *productionServerRunnerHar
 			if parentID == s.SpanContext().SpanID() {
 				matched = true
 				if d.SpanContext().TraceID() != s.SpanContext().TraceID() {
-					t.Fatalf("cross-tenant: dispatch trace %s != parent submit trace %s (carrier crossed tenants)", d.SpanContext().TraceID(), s.SpanContext().TraceID())
+					t.Fatalf("cross-namespace: dispatch trace %s != parent submit trace %s (carrier crossed namespaces)", d.SpanContext().TraceID(), s.SpanContext().TraceID())
 				}
 				break
 			}
 		}
 		if !matched {
-			t.Fatalf("cross-tenant: dispatch parent %s does not match any submit span ID (carrier orphaned or crossed)", parentID)
+			t.Fatalf("cross-namespace: dispatch parent %s does not match any submit span ID (carrier orphaned or crossed)", parentID)
 		}
 	}
 
-	// The two dispatch spans must sit in different traces — proves tenantA's
-	// dispatch did not inherit tenantB's submit trace (and vice versa).
+	// The two dispatch spans must sit in different traces — proves namespaceA's
+	// dispatch did not inherit namespaceB's submit trace (and vice versa).
 	if dispatches[0].SpanContext().TraceID() == dispatches[1].SpanContext().TraceID() {
-		t.Fatalf("cross-tenant: both dispatch spans share trace %s — carrier crossed tenants", dispatches[0].SpanContext().TraceID())
+		t.Fatalf("cross-namespace: both dispatch spans share trace %s — carrier crossed namespaces", dispatches[0].SpanContext().TraceID())
 	}
 
 	// Each dispatch must be parented to a distinct submit (no both-to-same
 	// short-circuit).
 	if dispatches[0].Parent().SpanID() == dispatches[1].Parent().SpanID() {
-		t.Fatalf("cross-tenant: both dispatch spans parented to the same submit %s — one tenant's carrier leaked into the other", dispatches[0].Parent().SpanID())
+		t.Fatalf("cross-namespace: both dispatch spans parented to the same submit %s — one namespace's carrier leaked into the other", dispatches[0].Parent().SpanID())
 	}
 
 	return true
@@ -1215,6 +1214,7 @@ func g1SubmitConcurrent(baseURL, token string, wf *types.WorkflowDef) (types.Exe
 	}
 	return out.ExecutionID, resp.StatusCode
 }
+
 // Two signals are delivered via HTTP; the second triggers the resume.
 func g1RunApprovalMultiSignal(t *testing.T, h *productionServerRunnerHarness) {
 	t.Helper()
@@ -1244,8 +1244,8 @@ func g1RunApprovalMultiSignal(t *testing.T, h *productionServerRunnerHarness) {
 }
 
 // g1RunApprovalTimer drives a ModeTimer wait (300ms) through the runner.
-// Uses the "default" tenant because the timer outbox entry is flushed by the
-// background OutboxDispatcher which runs without tenant context (defaults to
+// Uses the "default" namespace because the timer outbox entry is flushed by the
+// background OutboxDispatcher which runs without namespace context (defaults to
 // "default"). This is an existing behavior constraint, not a test workaround.
 func g1RunApprovalTimer(t *testing.T, h *productionServerRunnerHarness) {
 	t.Helper()
@@ -1431,10 +1431,10 @@ func g1RunDeadLetterReplay(t *testing.T, h *productionServerRunnerHarness, addr 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Submit a workflow under the default tenant so the execution exists in
+	// Submit a workflow under the default namespace so the execution exists in
 	// authoritative Redis state with status=running. g1TokDefault carries
-	// tenant=default, which matches tenant.FromContext(ctx) when RecordOutboxFailure
-	// is later called with a background context (defaults to default tenant).
+	// namespace=default, which matches namespace.FromContext(ctx) when RecordOutboxFailure
+	// is later called with a background context (defaults to default namespace).
 	wf := g1StartWorkflowDef("g1-deadletter-seed")
 	execID := g1SubmitAllowed(t, h.httpSrv.URL, g1TokDefault, wf)
 	// Poll for the execution to materialize in Redis (replaces a fixed sleep).
@@ -1451,7 +1451,7 @@ func g1RunDeadLetterReplay(t *testing.T, h *productionServerRunnerHarness, addr 
 	// JSON shape mirrors marshalRedisOutboxEntry (id+task+auto_depth+
 	// activation_id+available_at_ms+created_at_ms).
 	entryID := fmt.Sprintf("root/%s/start/1", execID)
-	tenantID := "default"
+	namespaceID := "default"
 	task := engine.Task{
 		ExecutionID:  execID,
 		NodeName:     "start",
@@ -1481,10 +1481,10 @@ func g1RunDeadLetterReplay(t *testing.T, h *productionServerRunnerHarness, addr 
 
 	rdb := redis.NewClient(&redis.Options{Addr: addr})
 	defer rdb.Close()
-	bodyKey := fmt.Sprintf("xflow:t%s:exec:{%s}:outbox:body", tenantID, execID)
-	readyKey := fmt.Sprintf("xflow:t%s:exec:{%s}:outbox:ready", tenantID, execID)
-	nodeStatus := fmt.Sprintf("xflow:t%s:exec:{%s}:node:%s:status", tenantID, execID, "start")
-	nodeMeta := fmt.Sprintf("xflow:t%s:exec:{%s}:node:%s:meta", tenantID, execID, "start")
+	bodyKey := fmt.Sprintf("xflow:ns:%s:exec:{%s}:outbox:body", namespaceID, execID)
+	readyKey := fmt.Sprintf("xflow:ns:%s:exec:{%s}:outbox:ready", namespaceID, execID)
+	nodeStatus := fmt.Sprintf("xflow:ns:%s:exec:{%s}:node:%s:status", namespaceID, execID, "start")
+	nodeMeta := fmt.Sprintf("xflow:ns:%s:exec:{%s}:node:%s:meta", namespaceID, execID, "start")
 	if err := rdb.HSet(ctx, bodyKey, entryID, string(bodyJSON)).Err(); err != nil {
 		t.Fatalf("HSet outbox body: %v", err)
 	}
@@ -1630,7 +1630,7 @@ func g1RunAuditReconcile(t *testing.T, h *productionServerRunnerHarness) g1Audit
 	// Prepare a reachable execution: submit a signal-wait workflow that stays
 	// alive in Redis (never signal it).
 	execID := g1SubmitAllowed(t, h.httpSrv.URL, g1TokFullA, g1SignalWaitDef("g1-r33-conv-wf", "r33-conv-never"))
-	tCtx := tenant.WithTenant(ctx, tenant.TenantID(g1TenantA))
+	tCtx := namespace.WithNamespace(ctx, namespace.Namespace(g1NamespaceA))
 
 	// Inject a crash-simulation admission-only row (no outcome).
 	appender, ok := interface{}(h.provider).(store.AuditAppender)
@@ -1642,7 +1642,7 @@ func g1RunAuditReconcile(t *testing.T, h *productionServerRunnerHarness) g1Audit
 	if err := appender.AppendAudit(tCtx, &store.AuditRecord{
 		RequestID:   convReqID,
 		Principal:   "g1-r33-test",
-		TenantID:    g1TenantA,
+		Namespace:   g1NamespaceA,
 		Operation:   "workflow.create",
 		Resource:    "g1-r33-conv-wf",
 		ExecutionID: string(execID),
@@ -1715,7 +1715,7 @@ func g1RunAuditReconcile(t *testing.T, h *productionServerRunnerHarness) g1Audit
 	faultMatrixPass := g1RunAuditReconcileFaultMatrix(t, h, execID)
 
 	return g1AuditReconcile{
-		AdmissionRows:            initialPending,
+		AdmissionRows: initialPending,
 		// OutcomeRows: count of THIS test's injected rows that got settled (the
 		// single r33-conv row). initialPending minus residual r33-conv rows equals
 		// the worker-settled count for our injection; however, the semantically
@@ -1794,8 +1794,8 @@ func (o *g1ReconcileObserver) OnReconcileSettled(_ context.Context, _ string, ap
 		o.hadNewAppend = true
 	}
 }
-func (o *g1ReconcileObserver) OnReconcileSkipped(_ context.Context, _ string) {}
-func (o *g1ReconcileObserver) OnReconcileError(_ context.Context, _ string, _ error) {}
+func (o *g1ReconcileObserver) OnReconcileSkipped(_ context.Context, _ string)               {}
+func (o *g1ReconcileObserver) OnReconcileError(_ context.Context, _ string, _ error)        {}
 func (o *g1ReconcileObserver) OnReconcileBacklog(_ context.Context, _ time.Duration, _ int) {}
 
 // g1RunAuditReconcileFaultMatrix injects 10 crash-simulation admission rows
@@ -1805,7 +1805,7 @@ func g1RunAuditReconcileFaultMatrix(t *testing.T, h *productionServerRunnerHarne
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	tCtx := tenant.WithTenant(ctx, tenant.TenantID(g1TenantA))
+	tCtx := namespace.WithNamespace(ctx, namespace.Namespace(g1NamespaceA))
 
 	appender, ok := interface{}(h.provider).(store.AuditAppender)
 	if !ok {
@@ -1822,9 +1822,9 @@ func g1RunAuditReconcileFaultMatrix(t *testing.T, h *productionServerRunnerHarne
 	nonce := fmt.Sprintf("%d", time.Now().UnixNano())
 
 	type matrixCell struct {
-		operation   string
-		execID      string
-		reqID       string
+		operation    string
+		execID       string
+		reqID        string
 		shouldSettle bool
 	}
 
@@ -1846,7 +1846,7 @@ func g1RunAuditReconcileFaultMatrix(t *testing.T, h *productionServerRunnerHarne
 		if err := appender.AppendAudit(tCtx, &store.AuditRecord{
 			RequestID:   c.reqID,
 			Principal:   "g1-r33-fault-matrix",
-			TenantID:    g1TenantA,
+			Namespace:   g1NamespaceA,
 			Operation:   c.operation,
 			Resource:    "r33-fault-resource",
 			ExecutionID: c.execID,
@@ -2125,8 +2125,8 @@ CREATE TABLE IF NOT EXISTS xflow_g1_idempotency_proof (
 	}
 
 	return g1Idempotency{
-		RepeatSignalOutcome:             "409",
-		DuplicateReportOutcome:          string(outcome2),
+		RepeatSignalOutcome:    "409",
+		DuplicateReportOutcome: string(outcome2),
 		HandlerSideEffectsAssertion: fmt.Sprintf(
 			"handler_invocations=%d, business_rows=%d (idempotent receiver keyed by execution_id+node_name; host fence=%s)",
 			invocations, businessRows, outcome2,

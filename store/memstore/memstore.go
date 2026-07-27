@@ -354,7 +354,7 @@ func (s *Store) AppendAudit(_ context.Context, rec *store.AuditRecord) error {
 
 // ListUnreconciledAdmissions returns admitted mutation audit rows (phase=
 // "admission", outcome="admitted") older than `before` for which no
-// outcome-phase row exists for the same (tenant, request_id). In-memory
+// outcome-phase row exists for the same (namespace, request_id). In-memory
 // mirror of the SQL provider's pending scan; used by the T9 reconcile worker
 // unit tests. Rows are returned oldest-first. When afterSeqID > 0 only rows
 // with ID > afterSeqID are considered (cursor pagination).
@@ -364,12 +364,12 @@ func (s *Store) ListUnreconciledAdmissions(_ context.Context, before time.Time, 
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// Index existing outcome rows by (tenant, request_id) for the NOT EXISTS
+	// Index existing outcome rows by (namespace, request_id) for the NOT EXISTS
 	// filter.
 	hasOutcome := make(map[string]bool, len(s.audit))
 	for _, r := range s.audit {
 		if r.Phase == store.AuditPhaseOutcome && r.RequestID != "" {
-			hasOutcome[r.TenantID+"|"+r.RequestID] = true
+			hasOutcome[r.Namespace+"|"+r.RequestID] = true
 		}
 	}
 	var out []*store.AuditRecord
@@ -386,7 +386,7 @@ func (s *Store) ListUnreconciledAdmissions(_ context.Context, before time.Time, 
 		if !r.Timestamp.IsZero() && !r.Timestamp.Before(before) {
 			continue
 		}
-		if r.RequestID != "" && hasOutcome[r.TenantID+"|"+r.RequestID] {
+		if r.RequestID != "" && hasOutcome[r.Namespace+"|"+r.RequestID] {
 			continue
 		}
 		cp := *r
@@ -402,7 +402,7 @@ func (s *Store) ListUnreconciledAdmissions(_ context.Context, before time.Time, 
 // mirror of the SQL provider's check-then-append + unique phase_key index:
 // the mutex makes the check-then-append atomic, so a concurrent worker or a
 // leader switch can never append a duplicate outcome. Returns appended=false
-// when an outcome row already exists for the same (tenant, request_id).
+// when an outcome row already exists for the same (namespace, request_id).
 func (s *Store) AppendOutcomeIfAbsent(_ context.Context, rec *store.AuditRecord) (bool, error) {
 	if rec == nil {
 		return false, store.ErrNotFound
@@ -410,10 +410,10 @@ func (s *Store) AppendOutcomeIfAbsent(_ context.Context, rec *store.AuditRecord)
 	rec.Phase = store.AuditPhaseOutcome
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if rec.RequestID != "" && rec.TenantID != "" {
-		key := rec.TenantID + "|" + rec.RequestID
+	if rec.RequestID != "" && rec.Namespace != "" {
+		key := rec.Namespace + "|" + rec.RequestID
 		for _, r := range s.audit {
-			if r.Phase == store.AuditPhaseOutcome && r.TenantID+"|"+r.RequestID == key {
+			if r.Phase == store.AuditPhaseOutcome && r.Namespace+"|"+r.RequestID == key {
 				return false, nil
 			}
 		}
@@ -435,7 +435,7 @@ func (s *Store) CountUnreconciledAdmissions(_ context.Context, before time.Time)
 	hasOutcome := make(map[string]bool, len(s.audit))
 	for _, r := range s.audit {
 		if r.Phase == store.AuditPhaseOutcome && r.RequestID != "" {
-			hasOutcome[r.TenantID+"|"+r.RequestID] = true
+			hasOutcome[r.Namespace+"|"+r.RequestID] = true
 		}
 	}
 	var count int
@@ -447,7 +447,7 @@ func (s *Store) CountUnreconciledAdmissions(_ context.Context, before time.Time)
 		if !r.Timestamp.IsZero() && !r.Timestamp.Before(before) {
 			continue
 		}
-		if r.RequestID != "" && hasOutcome[r.TenantID+"|"+r.RequestID] {
+		if r.RequestID != "" && hasOutcome[r.Namespace+"|"+r.RequestID] {
 			continue
 		}
 		count++

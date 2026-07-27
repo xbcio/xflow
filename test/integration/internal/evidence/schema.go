@@ -83,7 +83,7 @@ type EvidenceRecordMeta struct {
 // CollectedRuntimeEvidenceEvent wraps a raw engine.RuntimeEvidenceEvent with
 // collector-side metadata. This is the element type stored in RawLedger.RuntimeEvents.
 type CollectedRuntimeEvidenceEvent struct {
-	Meta  EvidenceRecordMeta      `json:"meta"`
+	Meta  EvidenceRecordMeta          `json:"meta"`
 	Event engine.RuntimeEvidenceEvent `json:"event"`
 }
 
@@ -155,34 +155,34 @@ type EnvironmentObservation struct {
 // Every observation references the raw event IDs or counter snapshot IDs that
 // justify it.
 type DerivedObservation struct {
-	Kind                string                   `json:"kind"`
-	Scenario            string                   `json:"scenario,omitempty"`
-	Fixture             string                   `json:"fixture,omitempty"`
-	Topology            string                   `json:"topology,omitempty"`
-	ExecutionID         types.ExecutionID        `json:"execution_id,omitempty"`
-	CommitEventID       string                   `json:"commit_event_id,omitempty"`
-	AdvanceEventID      string                   `json:"advance_event_id,omitempty"`
-	CounterSnapshotID   string                   `json:"counter_snapshot_id,omitempty"`
-	RetryEventID        string                   `json:"retry_event_id,omitempty"`
-	AcceptedCommit      bool                     `json:"accepted_commit"`
-	AppliedAdvance      bool                     `json:"applied_advance"`
-	Classification      *EffectiveClassification `json:"classification,omitempty"`
-	HandlerInvocations  int                      `json:"handler_invocations"`
+	Kind               string                   `json:"kind"`
+	Scenario           string                   `json:"scenario,omitempty"`
+	Fixture            string                   `json:"fixture,omitempty"`
+	Topology           string                   `json:"topology,omitempty"`
+	ExecutionID        types.ExecutionID        `json:"execution_id,omitempty"`
+	CommitEventID      string                   `json:"commit_event_id,omitempty"`
+	AdvanceEventID     string                   `json:"advance_event_id,omitempty"`
+	CounterSnapshotID  string                   `json:"counter_snapshot_id,omitempty"`
+	RetryEventID       string                   `json:"retry_event_id,omitempty"`
+	AcceptedCommit     bool                     `json:"accepted_commit"`
+	AppliedAdvance     bool                     `json:"applied_advance"`
+	Classification     *EffectiveClassification `json:"classification,omitempty"`
+	HandlerInvocations int                      `json:"handler_invocations"`
 	HandlerName        string                   `json:"handler_name,omitempty"`
-	SourceEventIDs      []string                 `json:"source_event_ids"`
-	EvidenceSource      string                   `json:"evidence_source"`
-	Reason              string                   `json:"reason,omitempty"`
+	SourceEventIDs     []string                 `json:"source_event_ids"`
+	EvidenceSource     string                   `json:"evidence_source"`
+	Reason             string                   `json:"reason,omitempty"`
 }
 
 // EffectiveClassification is a structured projection of a classified error.
-// It intentionally does not carry error full text, credentials, or tenant data.
+// It intentionally does not carry error full text, credentials, or namespace data.
 type EffectiveClassification struct {
-	Source    engine.ErrorSource `json:"source"`
-	Classified bool              `json:"classified"`
-	Kind      types.ErrorKind    `json:"kind,omitempty"`
-	Retryable *bool              `json:"retryable,omitempty"`
-	Permanent *bool              `json:"permanent,omitempty"`
-	Code      string             `json:"code,omitempty"`
+	Source     engine.ErrorSource `json:"source"`
+	Classified bool               `json:"classified"`
+	Kind       types.ErrorKind    `json:"kind,omitempty"`
+	Retryable  *bool              `json:"retryable,omitempty"`
+	Permanent  *bool              `json:"permanent,omitempty"`
+	Code       string             `json:"code,omitempty"`
 }
 
 // Verification records the independent verifier outcome.
@@ -203,7 +203,7 @@ func NewEnvelope() *Envelope {
 }
 
 // EffectiveClassificationFromEvent projects an engine event into the envelope
-// classification struct without copying full error text or tenant payload.
+// classification struct without copying full error text or namespace payload.
 //
 // Business and explicit error-port outputs are not wrapped in a ClassifiedError
 // (Classified==false), but they still carry a stable kind by matrix convention,

@@ -94,7 +94,7 @@ G1 要求（spec）：Redis 采用可恢复部署并完成备份/恢复演练。
   5. 验证 dead-letter 存储完整
 - **记录**：演练时间、RPO、恢复耗时、验证结果。
 
-> xflow 的 Redis key 全部使用 `{id}` hash tag（`backend/distributed/internal/rstate/keys.go`），数据模型 cluster-ready；但当前客户端是单节点初始化（`redis.NewClient`），sentinel/cluster 客户端支持属 B2 范围。
+> xflow 的 Redis key 全部使用 `{id}` hash tag（`backend/providers/distributed/internal/rstate/keys.go`），数据模型 cluster-ready；但当前客户端是单节点初始化（`redis.NewClient`），sentinel/cluster 客户端支持属 B2 范围。
 
 ## 5. dead-letter 人工处置
 

@@ -34,9 +34,9 @@ var recordRunnerSelectorDecisionNode = node.Define("demo.runner_selector.record_
 func buildRunnerSelectorWorkflow() *xflow.WorkflowBuilder {
 	wf := xflow.Workflow("runner-selector-risk-review").
 		RunnerSelector(xflow.DefaultRunnerSelector(map[string]string{
-			"mode":   "remote",
-			"env":    "prod",
-			"tenant": "tenant-a",
+			"mode":      "remote",
+			"env":       "prod",
+			"namespace": "namespace-a",
 		}))
 
 	start := wf.Node("start", node.Start())

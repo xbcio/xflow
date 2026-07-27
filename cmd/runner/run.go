@@ -18,9 +18,9 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
+	"github.com/xbcio/xflow/namespace"
 	_ "github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/node/resource"
 	"github.com/xbcio/xflow/observability/tracing"
@@ -58,8 +58,8 @@ type runnerConfig struct {
 	capabilities      []protocol.Capability
 	labelRaw          []string
 	labels            map[string]string
-	tenantRaw         []string
-	tenants           []tenant.TenantID
+	namespaceRaw      []string
+	namespaces        []namespace.Namespace
 	heartbeatInterval string
 	pollWait          string
 	// token is the runner's bearer token (matched against the server's
@@ -78,7 +78,7 @@ type runnerConfig struct {
 	traceSampler  string
 	traceRatio    float64
 	traceBaggage  bool
-	tracer         tracing.Tracer
+	tracer        tracing.Tracer
 	// credentials holds named credential maps (driver/dsn, token/base_url, …)
 	// with string leaves already env-expanded at load time. Passed to the
 	// runner as a CredentialResolver closure. nil/empty means no resolver.
@@ -115,7 +115,7 @@ func bindRunnerFlags(cmd *cobra.Command, cfg *runnerConfig) {
 	cmd.Flags().IntVar(&cfg.concurrency, "concurrency", cfg.concurrency, "Runner concurrency")
 	cmd.Flags().StringVar(&cfg.capRaw, "cap", cfg.capRaw, "Comma-separated node type capabilities")
 	cmd.Flags().StringArrayVar(&cfg.labelRaw, "label", cfg.labelRaw, "Runner label as key=value; repeatable")
-	cmd.Flags().StringArrayVar(&cfg.tenantRaw, "tenant", cfg.tenantRaw, "Tenant this runner serves; repeatable (default: default)")
+	cmd.Flags().StringArrayVar(&cfg.namespaceRaw, "namespace", cfg.namespaceRaw, "Namespace this runner serves; repeatable (default: default)")
 	cmd.Flags().StringVar(&cfg.heartbeatInterval, "heartbeat-interval", cfg.heartbeatInterval, "Heartbeat interval")
 	cmd.Flags().StringVar(&cfg.pollWait, "poll-wait", cfg.pollWait, "Poll wait duration when no task is available")
 	cmd.Flags().StringVar(&cfg.token, "token", cfg.token, "Runner bearer token (prefer XFLOW_RUNNER_TOKEN env)")
@@ -298,7 +298,7 @@ func runnerServiceConfig(cfg runnerConfig) (runnersvc.Config, error) {
 		Capabilities: cfg.capabilities,
 		PollWait:     pollWait,
 		Tracer:       cfg.tracer,
-		Tenants:      cfg.tenants,
+		Namespaces:   cfg.namespaces,
 	}
 	if shouldConstructPool(cfg) {
 		svcCfg.ResourcePool = resource.NewDefaultResourcePool(poolCfg)
@@ -306,12 +306,12 @@ func runnerServiceConfig(cfg runnerConfig) (runnersvc.Config, error) {
 	if len(cfg.credentials) > 0 {
 		// Capture credentials in the closure; never log or surface in errors.
 		// The config currently stores credentials as map[name]map[key]value,
-		// so the resolver looks up by credential name only. Per-tenant credential
+		// so the resolver looks up by credential name only. Per-namespace credential
 		// namespaces are not supported by the current YAML schema; the
-		// tenant argument is kept because the runner service hook is already in
+		// namespace argument is kept because the runner service hook is already in
 		// place and future config work only needs to update this closure.
 		creds := cfg.credentials
-		svcCfg.CredentialResolver = func(t tenant.TenantID, name string) map[string]any {
+		svcCfg.CredentialResolver = func(t namespace.Namespace, name string) map[string]any {
 			return creds[name]
 		}
 	}

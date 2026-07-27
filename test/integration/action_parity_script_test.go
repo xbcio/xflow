@@ -92,9 +92,9 @@ func TestScriptFunctionActionParity(t *testing.T) {
 					},
 				}, inner, "function_user_error_port")
 			},
-			MaxAttempts:            1,
-			WantAttempt:            1,
-			WantStatus:             types.ExecutionStatusSuccess,
+			MaxAttempts: 1,
+			WantAttempt: 1,
+			WantStatus:  types.ExecutionStatusSuccess,
 			// OnError=error_output routes the handler error to the error port;
 			// the runtime receipt marks it as ErrorSourceErrorPort.
 			WantKind:               string(types.ErrorKindErrorPort),
@@ -190,9 +190,9 @@ func TestScriptFunctionActionParity(t *testing.T) {
 					},
 				}, inner, "script_user_error_port")
 			},
-			MaxAttempts:            1,
-			WantAttempt:            1,
-			WantStatus:             types.ExecutionStatusSuccess,
+			MaxAttempts: 1,
+			WantAttempt: 1,
+			WantStatus:  types.ExecutionStatusSuccess,
 			// OnError=error_output routes the handler error to the error port;
 			// the runtime receipt marks it as ErrorSourceErrorPort.
 			WantKind:               string(types.ErrorKindErrorPort),

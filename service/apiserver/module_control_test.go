@@ -191,13 +191,24 @@ func TestWorkflowControlInspect(t *testing.T) {
 }
 
 func TestWorkflowControlInspectNotFound(t *testing.T) {
-	f := &fakeControlFacade{inspectErr: errors.New("inspect execution \"missing\": not found")}
+	f := &fakeControlFacade{inspectErr: engine.ErrExecutionNotFound}
 	mux := newControlMux(f)
 
 	resp := doJSON(t, mux, http.MethodGet, "/v1/executions/missing", nil)
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", resp.StatusCode)
+	}
+}
+
+func TestWorkflowControlInspectGenericNotFoundTextReturns500(t *testing.T) {
+	f := &fakeControlFacade{inspectErr: errors.New("upstream cache said not found while reading projection")}
+	mux := newControlMux(f)
+
+	resp := doJSON(t, mux, http.MethodGet, "/v1/executions/exec-1", nil)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 for unclassified error text", resp.StatusCode)
 	}
 }
 
@@ -253,7 +264,7 @@ func TestWorkflowControlInvoke(t *testing.T) {
 }
 
 func TestWorkflowControlInvokeMissingEntryReturns400(t *testing.T) {
-	f := &fakeControlFacade{invokeErr: errors.New("entry node \"missing\" not found")}
+	f := &fakeControlFacade{invokeErr: engine.ErrEntryNotFound}
 	mux := newControlMux(f)
 
 	resp := doJSON(t, mux, http.MethodPost, "/v1/workflows/invoke", invokeRequest{
@@ -263,6 +274,20 @@ func TestWorkflowControlInvokeMissingEntryReturns400(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 for unknown entry", resp.StatusCode)
+	}
+}
+
+func TestWorkflowControlInvokeGenericNotFoundTextReturns500(t *testing.T) {
+	f := &fakeControlFacade{invokeErr: errors.New("registry not found while compiling runtime metadata")}
+	mux := newControlMux(f)
+
+	resp := doJSON(t, mux, http.MethodPost, "/v1/workflows/invoke", invokeRequest{
+		Workflow: validWorkflow(),
+		Entry:    "start",
+	})
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 for unclassified invoke error text", resp.StatusCode)
 	}
 }
 

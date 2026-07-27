@@ -9,10 +9,10 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
 
-	"github.com/xbcio/xflow/backend/distributed"
-	backendlocal "github.com/xbcio/xflow/backend/local"
-	"github.com/xbcio/xflow/backend/tenant"
+	"github.com/xbcio/xflow/backend/providers/distributed"
+	backendlocal "github.com/xbcio/xflow/backend/providers/local"
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/types"
 )
@@ -236,7 +236,7 @@ func newRedisRunnerDirectoryTestClient(t *testing.T) (*miniredis.Miniredis, *red
 	return redisServer, rdb
 }
 
-func registerRedisDirectoryRunner(t *testing.T, ctx context.Context, directory *RedisRunnerDirectory, runnerID string, capacity int, tenants ...tenant.TenantID) RunnerSession {
+func registerRedisDirectoryRunner(t *testing.T, ctx context.Context, directory *RedisRunnerDirectory, runnerID string, capacity int, namespaces ...namespace.Namespace) RunnerSession {
 	t.Helper()
 
 	session, err := directory.Register(ctx, RegisterRunnerRequest{
@@ -244,7 +244,7 @@ func registerRedisDirectoryRunner(t *testing.T, ctx context.Context, directory *
 		Capacity:     capacity,
 		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
 		Policy:       RunnerPolicy{AllowedNodeTypes: []string{"xflow.function"}},
-		Tenants:      tenants,
+		Namespaces:   namespaces,
 		Now:          time.Unix(10, 0),
 	})
 	if err != nil {
@@ -288,10 +288,10 @@ func redisDirectoryClaimRequest(session RunnerSession, capacity int) ClaimReques
 	}
 }
 
-func redisDirectoryTestAssignment(id AssignmentID, tenants ...tenant.TenantID) Assignment {
-	tenantID := tenant.DefaultTenant
-	if len(tenants) > 0 {
-		tenantID = tenants[0]
+func redisDirectoryTestAssignment(id AssignmentID, namespaces ...namespace.Namespace) Assignment {
+	namespaceID := namespace.Default
+	if len(namespaces) > 0 {
+		namespaceID = namespaces[0]
 	}
 	return Assignment{
 		AssignmentID: id,
@@ -303,8 +303,8 @@ func redisDirectoryTestAssignment(id AssignmentID, tenants ...tenant.TenantID) A
 			ActivationID: 7,
 			AutoDepth:    3,
 		},
-		Routing:  engine.TaskRouting{NodeType: "xflow.function"},
-		TenantID: tenantID,
+		Routing:   engine.TaskRouting{NodeType: "xflow.function"},
+		Namespace: namespaceID,
 	}
 }
 
@@ -386,13 +386,13 @@ func TestRedisRunnerDirectoryFinalizeCleansClaimIndexes(t *testing.T) {
 	}
 }
 
-func TestRedisRunnerDirectoryTenantIsolation(t *testing.T) {
+func TestRedisRunnerDirectoryNamespaceIsolation(t *testing.T) {
 	ctx := context.Background()
 	_, rdb := newRedisRunnerDirectoryTestClient(t)
 	directory := NewRedisRunnerDirectory(rdb)
 
-	sessionA := registerRedisDirectoryRunner(t, ctx, directory, "runner-a", 1, "tenant-a")
-	bAssignment := redisDirectoryTestAssignment("exec-b/node-b/activation-1", "tenant-b")
+	sessionA := registerRedisDirectoryRunner(t, ctx, directory, "runner-a", 1, "namespace-a")
+	bAssignment := redisDirectoryTestAssignment("exec-b/node-b/activation-1", "namespace-b")
 	mustEnqueueRedisDirectoryAssignment(t, ctx, directory, bAssignment)
 
 	_, ok, err := directory.ClaimForRunner(ctx, ClaimRequest{
@@ -405,10 +405,10 @@ func TestRedisRunnerDirectoryTenantIsolation(t *testing.T) {
 		t.Fatalf("ClaimForRunner() error = %v", err)
 	}
 	if ok {
-		t.Fatal("runner-a claimed tenant-b assignment, want cross-tenant isolation")
+		t.Fatal("runner-a claimed namespace-b assignment, want cross-namespace isolation")
 	}
 
-	sessionB := registerRedisDirectoryRunner(t, ctx, directory, "runner-b", 1, "tenant-b")
+	sessionB := registerRedisDirectoryRunner(t, ctx, directory, "runner-b", 1, "namespace-b")
 	claim, ok, err := directory.ClaimForRunner(ctx, ClaimRequest{
 		RunnerID:     "runner-b",
 		SessionID:    sessionB.SessionID,
@@ -419,77 +419,77 @@ func TestRedisRunnerDirectoryTenantIsolation(t *testing.T) {
 		t.Fatalf("ClaimForRunner(runner-b) error = %v", err)
 	}
 	if !ok {
-		t.Fatal("runner-b did not claim tenant-b assignment")
+		t.Fatal("runner-b did not claim namespace-b assignment")
 	}
-	if claim.Assignment.TenantID != "tenant-b" {
-		t.Fatalf("claimed assignment tenant = %q, want tenant-b", claim.Assignment.TenantID)
+	if claim.Assignment.Namespace != "namespace-b" {
+		t.Fatalf("claimed assignment namespace = %q, want namespace-b", claim.Assignment.Namespace)
 	}
 }
 
-func TestRedisRunnerDirectoryDefaultTenantBackCompat(t *testing.T) {
+func TestRedisRunnerDirectoryDefaultNamespaceBackCompat(t *testing.T) {
 	ctx := context.Background()
 	_, rdb := newRedisRunnerDirectoryTestClient(t)
 	directory := NewRedisRunnerDirectory(rdb)
-	// No explicit tenants -> single-tenant default.
+	// No explicit namespaces -> single-namespace default.
 	session := registerRedisDirectoryRunner(t, ctx, directory, "runner-1", 1)
 	assignment := redisDirectoryTestAssignment("exec-1/node-a/activation-1")
 	mustEnqueueRedisDirectoryAssignment(t, ctx, directory, assignment)
 
 	claim := claimRedisDirectoryAssignment(t, ctx, directory, session, 1)
-	if claim.Assignment.TenantID != tenant.DefaultTenant {
-		t.Fatalf("tenant = %q, want default", claim.Assignment.TenantID)
+	if claim.Assignment.Namespace != namespace.Default {
+		t.Fatalf("namespace = %q, want default", claim.Assignment.Namespace)
 	}
 }
 
-func TestRedisRunnerDirectoryTenantRoundTripThroughCodec(t *testing.T) {
+func TestRedisRunnerDirectoryNamespaceRoundTripThroughCodec(t *testing.T) {
 	ctx := context.Background()
 	_, rdb := newRedisRunnerDirectoryTestClient(t)
 	directory := NewRedisRunnerDirectory(rdb)
-	session := registerRedisDirectoryRunner(t, ctx, directory, "runner-1", 1, "tenant-a", "tenant-b")
+	session := registerRedisDirectoryRunner(t, ctx, directory, "runner-1", 1, "namespace-a", "namespace-b")
 
-	assignment := redisDirectoryTestAssignment("exec-1/node-a/activation-1", "tenant-b")
+	assignment := redisDirectoryTestAssignment("exec-1/node-a/activation-1", "namespace-b")
 	mustEnqueueRedisDirectoryAssignment(t, ctx, directory, assignment)
 
 	// Recreate directory to force reading the persisted assignment record.
 	recreated := NewRedisRunnerDirectory(rdb)
 	claim := claimRedisDirectoryAssignment(t, ctx, recreated, session, 1)
-	if claim.Assignment.TenantID != "tenant-b" {
-		t.Fatalf("tenant = %q, want tenant-b", claim.Assignment.TenantID)
+	if claim.Assignment.Namespace != "namespace-b" {
+		t.Fatalf("namespace = %q, want namespace-b", claim.Assignment.Namespace)
 	}
 }
 
-func TestRedisRunnerDirectoryClaimForRunnerFallsBackToDefaultTenantWhenTenantsFieldMissing(t *testing.T) {
+func TestRedisRunnerDirectoryClaimForRunnerFallsBackToDefaultNamespaceWhenNamespacesFieldMissing(t *testing.T) {
 	ctx := context.Background()
 	_, rdb := newRedisRunnerDirectoryTestClient(t)
 	directory := NewRedisRunnerDirectory(rdb)
 	session := registerRedisDirectoryRunner(t, ctx, directory, "runner-1", 1)
 	// Simulate a runner session written by an older version that did not persist
-	// the runnerTenants hash field. ClaimForRunner must treat the missing field
-	// as the default tenant rather than returning an error.
-	if err := rdb.HDel(ctx, directory.keys.runnerTenants, session.RunnerID).Err(); err != nil {
-		t.Fatalf("HDel runnerTenants: %v", err)
+	// the runnerNamespaces hash field. ClaimForRunner must treat the missing field
+	// as the default namespace rather than returning an error.
+	if err := rdb.HDel(ctx, directory.keys.runnerNamespaces, session.RunnerID).Err(); err != nil {
+		t.Fatalf("HDel runnerNamespaces: %v", err)
 	}
 
 	assignment := redisDirectoryTestAssignment("exec-1/node-a/activation-1")
 	mustEnqueueRedisDirectoryAssignment(t, ctx, directory, assignment)
 
 	claim := claimRedisDirectoryAssignment(t, ctx, directory, session, 1)
-	if claim.Assignment.TenantID != tenant.DefaultTenant {
-		t.Fatalf("tenant = %q, want default", claim.Assignment.TenantID)
+	if claim.Assignment.Namespace != namespace.Default {
+		t.Fatalf("namespace = %q, want default", claim.Assignment.Namespace)
 	}
 }
 
 // TestRedisRunnerDirectoryLookupLeaseResolvesAuthoritativeLease proves the
 // Redis directory's LookupLease returns the server-authoritative finalized
-// lease (with the real TenantID and immutable identity) for the
+// lease (with the real Namespace and immutable identity) for the
 // (runner, session, lease-token) triple — the authority source for the report
-// path's tenant injection. Regression for the 2026-07-21 trust-boundary probe.
+// path's namespace injection. Regression for the 2026-07-21 trust-boundary probe.
 func TestRedisRunnerDirectoryLookupLeaseResolvesAuthoritativeLease(t *testing.T) {
 	ctx := context.Background()
 	_, rdb := newRedisRunnerDirectoryTestClient(t)
 	directory := NewRedisRunnerDirectory(rdb)
-	session := registerRedisDirectoryRunner(t, ctx, directory, "runner-1", 1, tenant.TenantID("tenant-a"))
-	assignment := redisDirectoryTestAssignment("exec-1/node-lookup/activation-1", tenant.TenantID("tenant-a"))
+	session := registerRedisDirectoryRunner(t, ctx, directory, "runner-1", 1, namespace.Namespace("namespace-a"))
+	assignment := redisDirectoryTestAssignment("exec-1/node-lookup/activation-1", namespace.Namespace("namespace-a"))
 	mustEnqueueRedisDirectoryAssignment(t, ctx, directory, assignment)
 	claim := claimRedisDirectoryAssignment(t, ctx, directory, session, 1)
 	lease := &engine.TaskLease{
@@ -498,7 +498,7 @@ func TestRedisRunnerDirectoryLookupLeaseResolvesAuthoritativeLease(t *testing.T)
 		Attempt:    3,
 		Task:       assignment.Task,
 		NodeType:   assignment.Routing.NodeType,
-		TenantID:   tenant.TenantID("tenant-a"),
+		Namespace:  namespace.Namespace("namespace-a"),
 	}
 	if err := directory.FinalizeClaim(ctx, claim.ClaimID, lease); err != nil {
 		t.Fatalf("FinalizeClaim() error = %v", err)
@@ -515,22 +515,22 @@ func TestRedisRunnerDirectoryLookupLeaseResolvesAuthoritativeLease(t *testing.T)
 	if resolved.LeaseToken != lease.LeaseToken || resolved.LeaseID != lease.LeaseID || resolved.Attempt != lease.Attempt {
 		t.Fatalf("resolved lease identity = %+v, want %+v", resolved, lease)
 	}
-	if resolved.TenantID != tenant.TenantID("tenant-a") {
-		t.Fatalf("resolved tenant = %q, want tenant-a (authoritative)", resolved.TenantID)
+	if resolved.Namespace != namespace.Namespace("namespace-a") {
+		t.Fatalf("resolved namespace = %q, want namespace-a (authoritative)", resolved.Namespace)
 	}
 }
 
 // TestRedisRunnerDirectoryLookupLeaseSurvivesRestart proves LookupLease resolves
 // the authoritative lease after the control plane restarts (re-reading durable
 // directory state), so a runner that re-registers under a new session can still
-// have its report resolved to the correct tenant — the durable-lease recovery
-// contract required by the report tenant authority fix.
+// have its report resolved to the correct namespace — the durable-lease recovery
+// contract required by the report namespace authority fix.
 func TestRedisRunnerDirectoryLookupLeaseSurvivesRestart(t *testing.T) {
 	ctx := context.Background()
 	_, rdb := newRedisRunnerDirectoryTestClient(t)
 	directory := NewRedisRunnerDirectory(rdb)
-	firstSession := registerRedisDirectoryRunner(t, ctx, directory, "runner-1", 1, tenant.TenantID("tenant-a"))
-	assignment := redisDirectoryTestAssignment("exec-1/node-restart/activation-1", tenant.TenantID("tenant-a"))
+	firstSession := registerRedisDirectoryRunner(t, ctx, directory, "runner-1", 1, namespace.Namespace("namespace-a"))
+	assignment := redisDirectoryTestAssignment("exec-1/node-restart/activation-1", namespace.Namespace("namespace-a"))
 	mustEnqueueRedisDirectoryAssignment(t, ctx, directory, assignment)
 	claim := claimRedisDirectoryAssignment(t, ctx, directory, firstSession, 1)
 	lease := &engine.TaskLease{
@@ -538,7 +538,7 @@ func TestRedisRunnerDirectoryLookupLeaseSurvivesRestart(t *testing.T) {
 		LeaseToken: "token-restart",
 		Task:       assignment.Task,
 		NodeType:   assignment.Routing.NodeType,
-		TenantID:   tenant.TenantID("tenant-a"),
+		Namespace:  namespace.Namespace("namespace-a"),
 	}
 	if err := directory.FinalizeClaim(ctx, claim.ClaimID, lease); err != nil {
 		t.Fatalf("FinalizeClaim() error = %v", err)
@@ -555,8 +555,8 @@ func TestRedisRunnerDirectoryLookupLeaseSurvivesRestart(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("LookupLease after restart ok=%v err=%v, want durable lease", ok, err)
 	}
-	if resolved.TenantID != tenant.TenantID("tenant-a") {
-		t.Fatalf("resolved tenant = %q, want tenant-a after restart", resolved.TenantID)
+	if resolved.Namespace != namespace.Namespace("namespace-a") {
+		t.Fatalf("resolved namespace = %q, want namespace-a after restart", resolved.Namespace)
 	}
 
 	// A stale/wrong session must not resolve the lease (session fence).

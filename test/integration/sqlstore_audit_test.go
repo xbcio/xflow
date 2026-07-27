@@ -31,7 +31,7 @@ func TestSQLStoreAuditAppend(t *testing.T) {
 	rec := &store.AuditRecord{
 		RequestID:   "req-audit-real",
 		Principal:   "alice",
-		TenantID:    "tenant-a",
+		Namespace:   "namespace-a",
 		Operation:   "workflow.create",
 		Resource:    "workflow/wf-1",
 		WorkflowID:  "wf-1",
@@ -98,4 +98,3 @@ func TestSQLStoreAuditAppendInTransaction(t *testing.T) {
 // Compile-time: keep sqlstore import meaningful even if only the Provider type
 // is referenced indirectly.
 var _ = (*sqlstore.Provider)(nil)
-

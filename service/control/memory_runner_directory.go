@@ -8,8 +8,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/service/protocol"
 )
 
@@ -27,7 +27,7 @@ type memoryRunnerState struct {
 	snapshot       RunnerSnapshot
 	policy         RunnerPolicy
 	sessionID      string
-	tenants        map[tenant.TenantID]struct{}
+	namespaces     map[namespace.Namespace]struct{}
 	activeClaims   map[ClaimID]AssignmentID
 	activeOrder    []ClaimID
 	finalizedLease map[AssignmentID]engine.TaskLease
@@ -84,12 +84,12 @@ func (d *MemoryRunnerDirectory) Register(_ context.Context, req RegisterRunnerRe
 			Capacity:      req.Capacity,
 			Capabilities:  cloneCapabilities(req.Capabilities),
 			InFlight:      inFlight,
-			Tenants:       normalizeRunnerTenants(req.Tenants),
+			Namespaces:    normalizeRunnerNamespaces(req.Namespaces),
 			LastHeartbeat: now,
 		},
 		policy:         req.Policy,
 		sessionID:      session.SessionID,
-		tenants:        tenantSet(req.Tenants),
+		namespaces:     namespaceSet(req.Namespaces),
 		activeClaims:   make(map[ClaimID]AssignmentID),
 		activeOrder:    nil,
 		finalizedLease: finalizedLease,
@@ -157,7 +157,10 @@ func (d *MemoryRunnerDirectory) ClaimForRunner(_ context.Context, req ClaimReque
 		return Claim{}, false, err
 	}
 
-	state.snapshot.Capacity = req.Capacity
+	// Capacity is the authoritative total, written only by Register/Heartbeat.
+	// A poll must not overwrite it with a client-supplied remainder — that would
+	// both corrupt the snapshot and double-count in-flight work already tracked
+	// by activeClaims + finalizedLease. Capabilities may still refresh per poll.
 	if req.Capabilities != nil {
 		state.snapshot.Capabilities = cloneCapabilities(req.Capabilities)
 	}
@@ -172,7 +175,7 @@ func (d *MemoryRunnerDirectory) ClaimForRunner(_ context.Context, req ClaimReque
 		if !state.policy.Allows(assignment.Routing.NodeType) {
 			continue
 		}
-		if !state.canServeTenant(assignment.TenantID) {
+		if !state.canServeNamespace(assignment.Namespace) {
 			continue
 		}
 
@@ -340,15 +343,15 @@ func (d *MemoryRunnerDirectory) Runner(_ context.Context, runnerID string) (Runn
 	}
 	snapshot := state.snapshot
 	snapshot.Capabilities = cloneCapabilities(snapshot.Capabilities)
-	snapshot.Tenants = normalizeRunnerTenants(snapshot.Tenants)
+	snapshot.Namespaces = normalizeRunnerNamespaces(snapshot.Namespaces)
 	return snapshot, true
 }
 
 // LookupLease returns the server-authoritative finalized lease for one
-// (runner, session, lease-identity) triple. It is the tenant authority on the
+// (runner, session, lease-identity) triple. It is the namespace authority on the
 // report path: the lease JSON echoed by the runner is unsigned and mutable, so
 // reportResult resolves the lease from server state here instead of trusting
-// req.Lease.TenantID. ok=false means no finalized lease matches (not found,
+// req.Lease.Namespace. ok=false means no finalized lease matches (not found,
 // already released, wrong runner/session, or token/leaseID mismatch); err is
 // non-nil only on internal failure.
 func (d *MemoryRunnerDirectory) LookupLease(_ context.Context, runnerID, sessionID string, key LeaseLookupKey) (*engine.TaskLease, bool, error) {
@@ -429,8 +432,14 @@ func (d *MemoryRunnerDirectory) removeQueuedAssignmentLocked(assignmentID Assign
 	d.queue = filtered
 }
 
+// headroom is the number of additional tasks this runner can accept. It is the
+// authoritative total Capacity (from Register/Heartbeat) minus the tasks
+// already in flight — active claims plus finalized leases. snapshot.InFlight is
+// a heartbeat observation only: the directory already tracks every in-flight
+// task via activeClaims + finalizedLease, so subtracting InFlight as well would
+// double-count and silently suppress effective concurrency.
 func (s *memoryRunnerState) headroom() int {
-	headroom := s.snapshot.Capacity - s.snapshot.InFlight - len(s.finalizedLease) - len(s.activeClaims)
+	headroom := s.snapshot.Capacity - len(s.finalizedLease) - len(s.activeClaims)
 	if headroom < 0 {
 		return 0
 	}
@@ -542,30 +551,30 @@ func canRunRouting(capabilities []protocol.Capability, routing engine.TaskRoutin
 	return false
 }
 
-func tenantSet(tenants []tenant.TenantID) map[tenant.TenantID]struct{} {
-	set := make(map[tenant.TenantID]struct{}, len(tenants))
-	for _, t := range tenants {
+func namespaceSet(namespaces []namespace.Namespace) map[namespace.Namespace]struct{} {
+	set := make(map[namespace.Namespace]struct{}, len(namespaces))
+	for _, t := range namespaces {
 		set[t] = struct{}{}
 	}
 	return set
 }
 
-func normalizeRunnerTenants(tenants []tenant.TenantID) []tenant.TenantID {
-	if len(tenants) == 0 {
-		return []tenant.TenantID{tenant.DefaultTenant}
+func normalizeRunnerNamespaces(namespaces []namespace.Namespace) []namespace.Namespace {
+	if len(namespaces) == 0 {
+		return []namespace.Namespace{namespace.Default}
 	}
-	out := make([]tenant.TenantID, len(tenants))
-	copy(out, tenants)
+	out := make([]namespace.Namespace, len(namespaces))
+	copy(out, namespaces)
 	return out
 }
 
-func (s *memoryRunnerState) canServeTenant(t tenant.TenantID) bool {
-	if len(s.tenants) == 0 {
-		return t == tenant.DefaultTenant || t == ""
+func (s *memoryRunnerState) canServeNamespace(t namespace.Namespace) bool {
+	if len(s.namespaces) == 0 {
+		return t == namespace.Default || t == ""
 	}
 	if t == "" {
-		t = tenant.DefaultTenant
+		t = namespace.Default
 	}
-	_, ok := s.tenants[t]
+	_, ok := s.namespaces[t]
 	return ok
 }

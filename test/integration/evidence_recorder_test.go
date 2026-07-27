@@ -164,14 +164,14 @@ func (r *evidenceRecorder) recordCounter(topology string, execID types.Execution
 		return
 	}
 	r.env.Raw.CounterSnapshots = append(r.env.Raw.CounterSnapshots, evidence.CounterSnapshot{
-		RunID:        r.runID,
-		Topology:     topology,
-		ExecutionID:  execID,
-		NodeName:     node,
-		CounterID:    counterID,
-		HandlerName:  handlerName,
-		Value:        value,
-		ObservedAt:   time.Now().UTC(),
+		RunID:       r.runID,
+		Topology:    topology,
+		ExecutionID: execID,
+		NodeName:    node,
+		CounterID:   counterID,
+		HandlerName: handlerName,
+		Value:       value,
+		ObservedAt:  time.Now().UTC(),
 	})
 }
 
@@ -188,11 +188,11 @@ func (r *evidenceRecorder) recordA0ScenarioMarker(execID types.ExecutionID, scen
 		return
 	}
 	r.env.Raw.ProtocolObservations = append(r.env.Raw.ProtocolObservations, evidence.ProtocolObservation{
-		RunID:        r.runID,
-		Topology:     scenario, // verifier reads this as the scenario name
-		ExecutionID:  execID,
-		Type:         "scenario_marker",
-		ObservedAt:   time.Now().UTC(),
+		RunID:       r.runID,
+		Topology:    scenario, // verifier reads this as the scenario name
+		ExecutionID: execID,
+		Type:        "scenario_marker",
+		ObservedAt:  time.Now().UTC(),
 	})
 }
 
@@ -214,8 +214,8 @@ func (r *evidenceRecorder) recordA3RowMarker(execID types.ExecutionID, fixture, 
 		Type:        "a3_row_marker",
 		ObservedAt:  time.Now().UTC(),
 		Detail: map[string]any{
-			"fixture":   fixture,
-			"topology":   topology,
+			"fixture":  fixture,
+			"topology": topology,
 		},
 	})
 }

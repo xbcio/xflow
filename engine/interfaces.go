@@ -113,6 +113,19 @@ type LegacyNodeCommitter interface {
 	CommitLeasedNode(ctx context.Context, req CommitNodeRequest) (CommitNodeResult, error)
 }
 
+// SuspendedNodeCanceler atomically transitions a node from Suspended to
+// Canceled. It reports canceled=false (no error) when the node is no longer
+// Suspended — e.g. a concurrent signal/timer resume already moved it to
+// Running and issued a fresh lease — so the caller leaves that live lease
+// untouched. This closes the Cancel TOCTOU window that a read-then-write
+// UpsertNode cannot: between GetNode and UpsertNode a resume can slip in, and a
+// blind UpsertNode(Canceled) would clobber the running lease. Optional: Cancel
+// falls back to the best-effort read-then-write path when a backend does not
+// implement it.
+type SuspendedNodeCanceler interface {
+	CancelSuspendedNode(ctx context.Context, id types.ExecutionID, nodeName string) (canceled bool, err error)
+}
+
 // LeaseSuspender atomically converts a previously claimed lease into a
 // suspended node. It validates the original lease token, persists optional
 // resume-base output, consumes or registers signals, and clears lease expiry

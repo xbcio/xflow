@@ -8,9 +8,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/types"
@@ -54,10 +54,10 @@ type Config struct {
 	// CredentialResolver, when set, is applied to each Input before the handler
 	// runs so nodes can resolve named credentials via input.Credential(name).
 	// nil means no resolver; existing behavior is unchanged.
-	CredentialResolver func(tenant tenant.TenantID, name string) map[string]any
-	// Tenants lists the tenants this runner is willing to serve. Empty or nil
-	// means ["default"] for single-tenant compatibility.
-	Tenants []tenant.TenantID
+	CredentialResolver func(namespace namespace.Namespace, name string) map[string]any
+	// Namespaces lists the namespaces this runner is willing to serve. Empty or nil
+	// means ["default"] for single-namespace compatibility.
+	Namespaces []namespace.Namespace
 }
 
 type Runner struct {
@@ -100,7 +100,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		Concurrency:  r.config.Concurrency,
 		Capabilities: r.config.Capabilities,
 		Labels:       r.config.Labels,
-		Tenants:      tenantStrings(r.config.Tenants),
+		Namespaces:   namespaceStrings(r.config.Namespaces),
 	})
 	if err != nil {
 		return runContextError(ctx, err)
@@ -166,9 +166,15 @@ func (r *Runner) Run(ctx context.Context) error {
 	return runContextError(ctx, ctx.Err())
 }
 
-// pollLoop claims leases at the rate the worker pool can absorb them. Capacity
-// is Concurrency minus the current in-flight count, so the server is never told
-// more capacity than the runner can actually run in parallel.
+// pollLoop claims leases at the rate the worker pool can absorb them. The
+// Capacity advertised to the server is always the total Concurrency — the
+// single source of truth for this runner's parallelism. The control-plane
+// directory derives server-side headroom from its own claim/lease accounting
+// (which already tracks every in-flight task), so advertising a client-side
+// remainder here would double-count in-flight work and silently suppress the
+// effective concurrency. The local in-flight gate below is a complementary
+// safety valve that stops the runner from claiming more leases than its worker
+// pool can execute in parallel; it does not change the advertised capacity.
 func (r *Runner) pollLoop(ctx context.Context, sessionID string, leaseCh chan<- *engine.TaskLease, inFlight *atomic.Int32) error {
 	for {
 		select {
@@ -176,8 +182,7 @@ func (r *Runner) pollLoop(ctx context.Context, sessionID string, leaseCh chan<- 
 			return nil
 		default:
 		}
-		capacity := r.config.Concurrency - int(inFlight.Load())
-		if capacity <= 0 {
+		if r.config.Concurrency-int(inFlight.Load()) <= 0 {
 			select {
 			case <-ctx.Done():
 				return nil
@@ -188,7 +193,7 @@ func (r *Runner) pollLoop(ctx context.Context, sessionID string, leaseCh chan<- 
 		resp, err := r.client.Poll(ctx, protocol.PollTaskRequest{
 			RunnerID:     r.config.RunnerID,
 			SessionID:    sessionID,
-			Capacity:     capacity,
+			Capacity:     r.config.Concurrency,
 			Capabilities: r.config.Capabilities,
 		})
 		if err != nil {
@@ -343,12 +348,12 @@ func sleepContext(ctx context.Context, delay time.Duration) error {
 	}
 }
 
-func tenantStrings(tenants []tenant.TenantID) []string {
-	if len(tenants) == 0 {
-		return []string{string(tenant.DefaultTenant)}
+func namespaceStrings(namespaces []namespace.Namespace) []string {
+	if len(namespaces) == 0 {
+		return []string{string(namespace.Default)}
 	}
-	out := make([]string, len(tenants))
-	for i, t := range tenants {
+	out := make([]string, len(namespaces))
+	for i, t := range namespaces {
 		out[i] = string(t)
 	}
 	return out

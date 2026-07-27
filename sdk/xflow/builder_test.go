@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/xbcio/xflow/backend/local"
+	"github.com/xbcio/xflow/backend/providers/local"
 	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/types"
 )
@@ -74,7 +74,7 @@ func TestWorkflowBuilderSetsNamespaceAndVersion(t *testing.T) {
 
 func TestWorkflowBuilderEmitsRunnerSelectors(t *testing.T) {
 	wf := Workflow("placement").
-		RunnerSelector(RequiredRunnerSelector(map[string]string{"tenant": "tenant-a", "env": "prod"}))
+		RunnerSelector(RequiredRunnerSelector(map[string]string{"namespace": "namespace-a", "env": "prod"}))
 	start := wf.Node("start", node.Start())
 	approve := wf.Node("approve", node.Function("return input")).
 		RunnerSelector(RunnerSelector(map[string]string{"mode": "local"}))
@@ -90,8 +90,8 @@ func TestWorkflowBuilderEmitsRunnerSelectors(t *testing.T) {
 	if def.RunnerSelector.Mode != types.RunnerSelectorModeRequired {
 		t.Fatalf("workflow selector mode = %q, want required", def.RunnerSelector.Mode)
 	}
-	if got := def.RunnerSelector.MatchLabels["tenant"]; got != "tenant-a" {
-		t.Fatalf("workflow selector tenant = %q, want tenant-a", got)
+	if got := def.RunnerSelector.MatchLabels["namespace"]; got != "namespace-a" {
+		t.Fatalf("workflow selector namespace = %q, want namespace-a", got)
 	}
 	var approveDef *types.NodeDef
 	for i := range def.Nodes {
@@ -208,14 +208,14 @@ func TestEngineInvokePassesRuntimeVarsToEveryExecution(t *testing.T) {
 	}
 	firstID, err := eng.Invoke(context.Background(), workflowID, Start(),
 		map[string]any{"ticket": "VULN-1"},
-		WithRuntimeVars(map[string]any{"tenant_id": "tenant-a"}),
+		WithRuntimeVars(map[string]any{"namespace_id": "namespace-a"}),
 	)
 	if err != nil {
 		t.Fatalf("first Invoke() error = %v", err)
 	}
 	secondID, err := eng.Invoke(context.Background(), workflowID, Start(),
 		map[string]any{"ticket": "VULN-2"},
-		WithRuntimeVars(map[string]any{"tenant_id": "tenant-b"}),
+		WithRuntimeVars(map[string]any{"namespace_id": "namespace-b"}),
 	)
 	if err != nil {
 		t.Fatalf("second Invoke() error = %v", err)
@@ -232,17 +232,17 @@ func TestEngineInvokePassesRuntimeVarsToEveryExecution(t *testing.T) {
 
 	firstOut := first.Output["capture"].(map[string]any)
 	secondOut := second.Output["capture"].(map[string]any)
-	if got := firstOut["runtime_tenant_id"]; got != "tenant-a" {
-		t.Fatalf("first runtime_tenant_id = %v, want tenant-a", got)
+	if got := firstOut["runtime_namespace_id"]; got != "namespace-a" {
+		t.Fatalf("first runtime_namespace_id = %v, want namespace-a", got)
 	}
-	if got := secondOut["runtime_tenant_id"]; got != "tenant-b" {
-		t.Fatalf("second runtime_tenant_id = %v, want tenant-b", got)
+	if got := secondOut["runtime_namespace_id"]; got != "namespace-b" {
+		t.Fatalf("second runtime_namespace_id = %v, want namespace-b", got)
 	}
-	if got := firstOut["vars_tenant_id"]; got != "tenant-a" {
-		t.Fatalf("first vars_tenant_id = %v, want tenant-a", got)
+	if got := firstOut["vars_namespace_id"]; got != "namespace-a" {
+		t.Fatalf("first vars_namespace_id = %v, want namespace-a", got)
 	}
-	if got := secondOut["vars_tenant_id"]; got != "tenant-b" {
-		t.Fatalf("second vars_tenant_id = %v, want tenant-b", got)
+	if got := secondOut["vars_namespace_id"]; got != "namespace-b" {
+		t.Fatalf("second vars_namespace_id = %v, want namespace-b", got)
 	}
 }
 
@@ -304,14 +304,14 @@ var testWorkflowDeclaredNode = node.Define("test.workflow_declared", func(_ cont
 
 var testRuntimeCaptureNode = node.Define("test.runtime_capture", func(_ context.Context, input *types.Input) (*types.Output, error) {
 	out := map[string]any{
-		"runtime_tenant_id": nil,
-		"vars_tenant_id":    nil,
+		"runtime_namespace_id": nil,
+		"vars_namespace_id":    nil,
 	}
 	if input.Vars != nil {
-		out["vars_tenant_id"] = input.Vars["tenant_id"]
+		out["vars_namespace_id"] = input.Vars["namespace_id"]
 	}
 	if input.Runtime != nil && input.Runtime.Vars != nil {
-		out["runtime_tenant_id"] = input.Runtime.Vars["tenant_id"]
+		out["runtime_namespace_id"] = input.Runtime.Vars["namespace_id"]
 	}
 	return &types.Output{Data: out}, nil
 })

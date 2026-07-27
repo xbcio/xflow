@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/node/registry"
 	"github.com/xbcio/xflow/node/resource"
@@ -75,12 +75,12 @@ func TestDatabaseActionErrorParityServerRunner(t *testing.T) {
 	}
 
 	cases := []struct {
-		name                 string
-		wantAttempt          int
-		wantStatus           types.ExecutionStatus
-		errContains          string
+		name                   string
+		wantAttempt            int
+		wantStatus             types.ExecutionStatus
+		errContains            string
 		wantHandlerInvocations int
-		build                func(t *testing.T, dsn string, inner types.ActionHandler) (types.NodeDef, func(engine.HandlerRegistrar), func() int)
+		build                  func(t *testing.T, dsn string, inner types.ActionHandler) (types.NodeDef, func(engine.HandlerRegistrar), func() int)
 	}{
 		{
 			name:                   "db_no_pool_permanent",
@@ -568,7 +568,7 @@ func TestDatabaseActionErrorParityServerRunnerProductionWiring(t *testing.T) {
 				_ = pool.Close(ctx)
 			})
 			cred := tc.cred
-			resolver := func(tenant tenant.TenantID, name string) map[string]any { return cred[name] }
+			resolver := func(namespace namespace.Namespace, name string) map[string]any { return cred[name] }
 
 			out := runParityServerRunnerWithPool(t, addr, def, register, pool, resolver, nil, tc.name, "server-runner")
 
@@ -589,7 +589,7 @@ func TestDatabaseActionErrorParityServerRunnerProductionWiring(t *testing.T) {
 // installs a ResourcePool and CredentialResolver on the runnersvc.Config,
 // exercising the production wiring path. The register callback installs the
 // real (unwrapped) handler into the execution.Registry.
-func runParityServerRunnerWithPool(t *testing.T, addr string, def *types.WorkflowDef, register func(engine.HandlerRegistrar), pool types.ResourcePool, resolver func(tenant tenant.TenantID, name string) map[string]any, rec *evidenceRecorder, fixture, topology string) ParityOutcome {
+func runParityServerRunnerWithPool(t *testing.T, addr string, def *types.WorkflowDef, register func(engine.HandlerRegistrar), pool types.ResourcePool, resolver func(namespace namespace.Namespace, name string) map[string]any, rec *evidenceRecorder, fixture, topology string) ParityOutcome {
 	t.Helper()
 	h := newServerRunnerHarness(t, addr, 1)
 	if len(def.Nodes) == 0 {

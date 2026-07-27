@@ -70,7 +70,7 @@ func RegisterRequestToProto(req RegisterRunnerRequest) *runnerpb.RegisterRequest
 		Concurrency:  int32(req.Concurrency),
 		Capabilities: CapabilitiesToProto(req.Capabilities),
 		Labels:       cloneLabels(req.Labels),
-		Tenants:      cloneStrings(req.Tenants),
+		Namespaces:   cloneStrings(req.Namespaces),
 	}
 }
 
@@ -80,7 +80,7 @@ func RegisterRequestFromProto(req *runnerpb.RegisterRequest) RegisterRunnerReque
 		Concurrency:  int(req.GetConcurrency()),
 		Capabilities: CapabilitiesFromProto(req.GetCapabilities()),
 		Labels:       cloneLabels(req.GetLabels()),
-		Tenants:      req.GetTenants(),
+		Namespaces:   req.GetNamespaces(),
 	}
 }
 
@@ -225,7 +225,7 @@ func RunnerFrameToProto(f RunnerFrame) (*runnerpb.RunnerFrame, error) {
 				Concurrency:  int32(f.Hello.Concurrency),
 				Capabilities: CapabilitiesToProto(f.Hello.Capabilities),
 				Labels:       cloneLabels(f.Hello.Labels),
-				Tenants:      cloneStrings(f.Hello.Tenants),
+				Namespaces:   cloneStrings(f.Hello.Namespaces),
 			},
 		}}, nil
 	case f.Result != nil:
@@ -258,7 +258,7 @@ func RunnerFrameFromProto(pb *runnerpb.RunnerFrame) (RunnerFrame, error) {
 			Concurrency:  int(f.Hello.GetConcurrency()),
 			Capabilities: CapabilitiesFromProto(f.Hello.GetCapabilities()),
 			Labels:       cloneLabels(f.Hello.GetLabels()),
-			Tenants:      f.Hello.GetTenants(),
+			Namespaces:   f.Hello.GetNamespaces(),
 		}}, nil
 	case *runnerpb.RunnerFrame_Result:
 		lease, err := unmarshalLease(f.Result.GetLeaseJson())

@@ -232,6 +232,7 @@ func TestResourcePoolCloseIdempotent(t *testing.T) {
 		t.Fatalf("third Close error = %v, want nil (idempotent)", err)
 	}
 }
+
 // fakeCloser is a closer whose Close returns a configured sentinel error.
 type fakeCloser struct{ err error }
 

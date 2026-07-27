@@ -58,7 +58,7 @@ type SignalRecord struct {
 
 // AuditRecord holds one append-only authorization / mutation audit event.
 // It is the durable projection of the in-process authz decision: identity
-// (subject/tenant), operation, resource ids, decision, reason, outcome, and
+// (subject/namespace), operation, resource ids, decision, reason, outcome, and
 // trace correlation. It must NEVER carry secrets (tokens, payloads,
 // credentials). The authoritative operation receipts (Redis) are reconciled
 // against the audit log; the audit log is not itself the source of truth
@@ -80,7 +80,7 @@ type AuditRecord struct {
 	SeqID         uint64 // monotonic cursor key: maps to xflow_audit_events.id (AUTO_INCREMENT)
 	RequestID     string
 	Principal     string
-	TenantID      string
+	Namespace      string
 	Operation     string
 	Resource      string
 	WorkflowID    string
@@ -94,7 +94,7 @@ type AuditRecord struct {
 	// (pre-handler fail-closed admission audit), "outcome" (post-handler
 	// reconciled/failed outcome, written inline or by the T9 reconcile
 	// worker), or "receipt" (T4 dead-letter replay receipt projection).
-	// The (TenantID, RequestID, Phase) triple is the reconcile worker's
+	// The (Namespace, RequestID, Phase) triple is the reconcile worker's
 	// idempotency key: at most one outcome row per admitted request.
 	Phase          string
 	NodeID        string // receipt correlation: node name (dead-letter replay)

@@ -51,7 +51,7 @@ func TestHTTPStreamSimulatesConnect(t *testing.T) {
 	}
 	defer func() { _ = stream.Close() }()
 
-	if err := stream.Send(RunnerFrame{Hello: &HelloFrame{RunnerID: "r1", Concurrency: 1, Capabilities: []Capability{{NodeType: "xflow.function"}}, Tenants: []string{"tenant-a", "tenant-b"}}}); err != nil {
+	if err := stream.Send(RunnerFrame{Hello: &HelloFrame{RunnerID: "r1", Concurrency: 1, Capabilities: []Capability{{NodeType: "xflow.function"}}, Namespaces: []string{"namespace-a", "namespace-b"}}}); err != nil {
 		t.Fatalf("send hello: %v", err)
 	}
 	if fr, err := stream.Recv(); err != nil || fr.Welcome == nil || fr.Welcome.RunnerID != "r1" {
@@ -69,7 +69,7 @@ func TestHTTPStreamSimulatesConnect(t *testing.T) {
 	if receivedRegister == nil {
 		t.Fatal("register request was not received")
 	}
-	if got := receivedRegister.Tenants; len(got) != 2 || got[0] != "tenant-a" || got[1] != "tenant-b" {
-		t.Fatalf("register tenants = %v, want [tenant-a tenant-b]", got)
+	if got := receivedRegister.Namespaces; len(got) != 2 || got[0] != "namespace-a" || got[1] != "namespace-b" {
+		t.Fatalf("register namespaces = %v, want [namespace-a namespace-b]", got)
 	}
 }

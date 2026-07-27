@@ -12,7 +12,7 @@ import (
 	"github.com/xbcio/xflow/node/registry"
 
 	"github.com/xbcio/xflow/backend"
-	"github.com/xbcio/xflow/backend/local"
+	"github.com/xbcio/xflow/backend/providers/local"
 	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/types"
 )

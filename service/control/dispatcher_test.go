@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/service/protocol"
 )
 
@@ -123,9 +123,9 @@ func (e *fakeDispatchEngine) BuildTaskLease(context.Context, *engine.Task) (*eng
 	panic("dispatcher must not call BuildTaskLease")
 }
 
-func TestDispatcherAssignmentCarriesTenantFromContext(t *testing.T) {
+func TestDispatcherAssignmentCarriesNamespaceFromContext(t *testing.T) {
 	ctx := context.Background()
-	ctx = tenant.WithTenant(ctx, "tenant-acme")
+	ctx = namespace.WithNamespace(ctx, "namespace-acme")
 	dir := NewMemoryRunnerDirectory()
 	dispatcher := NewDispatcher(&fakeDispatchEngine{routing: engine.TaskRouting{NodeType: "xflow.function"}}, dir)
 	task := &engine.Task{ExecutionID: "exec-1", NodeName: "node-a", NodeIdx: 0, Type: engine.TaskTypeNodeExec, ActivationID: 1}
@@ -139,7 +139,7 @@ func TestDispatcherAssignmentCarriesTenantFromContext(t *testing.T) {
 		Capacity:     1,
 		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
 		Policy:       RunnerPolicy{AllowedNodeTypes: []string{"*"}},
-		Tenants:      []tenant.TenantID{"tenant-acme"},
+		Namespaces:   []namespace.Namespace{"namespace-acme"},
 	})
 	if err != nil {
 		t.Fatalf("Register() error = %v", err)
@@ -153,8 +153,8 @@ func TestDispatcherAssignmentCarriesTenantFromContext(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("ClaimForRunner() ok=%v err=%v, want ok", ok, err)
 	}
-	if claim.Assignment.TenantID != "tenant-acme" {
-		t.Fatalf("assignment tenant = %q, want tenant-acme", claim.Assignment.TenantID)
+	if claim.Assignment.Namespace != "namespace-acme" {
+		t.Fatalf("assignment namespace = %q, want namespace-acme", claim.Assignment.Namespace)
 	}
 }
 

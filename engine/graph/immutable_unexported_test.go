@@ -17,7 +17,6 @@ type hiddenMutableStruct struct {
 	Public string
 	hidden map[string]any
 	items  []string
-	next   *hiddenMutableStruct
 }
 
 func hiddenMutableValue() hiddenMutableStruct {

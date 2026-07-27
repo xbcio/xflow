@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"sync"
 	"time"
@@ -34,6 +35,12 @@ type Config struct {
 	RunnerDirectory RunnerDirectory
 	// Auth is the runner-protocol authenticator. Nil means DisabledAuthenticator.
 	Auth Authenticator
+	// RequireRunnerAuth causes NewControlPlane to return an error when Auth is
+	// nil (production fail-closed: the runner protocol must not be left open
+	// with the permissive DisabledAuthenticator). When false the behavior is
+	// unchanged for backward compatibility, but a nil Auth still emits a
+	// prominent warning so an accidentally unauthenticated deployment is visible.
+	RequireRunnerAuth bool
 	// Logger receives engine, dispatcher, and sweeper diagnostics. Optional.
 	Logger engine.Logger
 	// Metrics, when set, wires Prometheus observers into engine hooks, the
@@ -107,6 +114,21 @@ type ControlPlane struct {
 func NewControlPlane(cfg Config) (*ControlPlane, error) {
 	if cfg.Backend == nil {
 		return nil, errors.New("control: Config.Backend is required")
+	}
+	// Runner-protocol auth fail-closed. A nil Auth falls back to the permissive
+	// DisabledAuthenticator (every runner allowed). RequireRunnerAuth turns that
+	// into a hard error so production cannot silently serve the runner protocol
+	// unauthenticated; otherwise it is only a prominent warning (mirroring the
+	// nil-directory warning in NewServer) to preserve backward compatibility.
+	if cfg.Auth == nil {
+		if cfg.RequireRunnerAuth {
+			return nil, errors.New("control: Auth must be configured when RequireRunnerAuth is set")
+		}
+		if cfg.Logger != nil {
+			cfg.Logger.Warn("control: runner-protocol Auth is nil; using permissive DisabledAuthenticator (all runners allowed); set Config.Auth (and RequireRunnerAuth) for production")
+		} else {
+			log.Printf("control: runner-protocol Auth is nil; using permissive DisabledAuthenticator (all runners allowed); set Config.Auth (and RequireRunnerAuth) for production")
+		}
 	}
 
 	var engOpts []engine.Option

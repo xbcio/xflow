@@ -16,7 +16,7 @@ import (
 
 // fakeAuditReconciler is an in-memory store.AuditReconciler for worker unit
 // tests. It mirrors the SQL provider's check-then-append idempotency: a
-// duplicate outcome append (same tenant+request_id) returns appended=false.
+// duplicate outcome append (same namespace+request_id) returns appended=false.
 // failNext lets a test simulate a transient SQL outage.
 type fakeAuditReconciler struct {
 	mu       sync.Mutex
@@ -49,7 +49,7 @@ func (f *fakeAuditReconciler) ListUnreconciledAdmissions(_ context.Context, befo
 	hasOutcome := make(map[string]bool, len(f.rows))
 	for _, r := range f.rows {
 		if r.Phase == store.AuditPhaseOutcome && r.RequestID != "" {
-			hasOutcome[r.TenantID+"|"+r.RequestID] = true
+			hasOutcome[r.Namespace+"|"+r.RequestID] = true
 		}
 	}
 	var out []*store.AuditRecord
@@ -63,7 +63,7 @@ func (f *fakeAuditReconciler) ListUnreconciledAdmissions(_ context.Context, befo
 		if !r.Timestamp.IsZero() && !r.Timestamp.Before(before) {
 			continue
 		}
-		if r.RequestID != "" && hasOutcome[r.TenantID+"|"+r.RequestID] {
+		if r.RequestID != "" && hasOutcome[r.Namespace+"|"+r.RequestID] {
 			continue
 		}
 		cp := *r
@@ -79,10 +79,10 @@ func (f *fakeAuditReconciler) AppendOutcomeIfAbsent(_ context.Context, rec *stor
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	rec.Phase = store.AuditPhaseOutcome
-	if rec.RequestID != "" && rec.TenantID != "" {
-		key := rec.TenantID + "|" + rec.RequestID
+	if rec.RequestID != "" && rec.Namespace != "" {
+		key := rec.Namespace + "|" + rec.RequestID
 		for _, r := range f.rows {
-			if r.Phase == store.AuditPhaseOutcome && r.TenantID+"|"+r.RequestID == key {
+			if r.Phase == store.AuditPhaseOutcome && r.Namespace+"|"+r.RequestID == key {
 				return false, nil
 			}
 		}
@@ -106,7 +106,7 @@ func (f *fakeAuditReconciler) CountUnreconciledAdmissions(_ context.Context, bef
 	hasOutcome := make(map[string]bool, len(f.rows))
 	for _, r := range f.rows {
 		if r.Phase == store.AuditPhaseOutcome && r.RequestID != "" {
-			hasOutcome[r.TenantID+"|"+r.RequestID] = true
+			hasOutcome[r.Namespace+"|"+r.RequestID] = true
 		}
 	}
 	var count int
@@ -118,7 +118,7 @@ func (f *fakeAuditReconciler) CountUnreconciledAdmissions(_ context.Context, bef
 		if !r.Timestamp.IsZero() && !r.Timestamp.Before(before) {
 			continue
 		}
-		if r.RequestID != "" && hasOutcome[r.TenantID+"|"+r.RequestID] {
+		if r.RequestID != "" && hasOutcome[r.Namespace+"|"+r.RequestID] {
 			continue
 		}
 		count++
@@ -191,11 +191,11 @@ func (g *toggleLeaderGate) IsLeader() bool { return g.leader.Load() }
 
 func newWorkerForTest(audit store.AuditReconciler, authority AdmissionAuthority, elector LeaderGate, obs ReconcileObserver) *AuditReconcileWorker {
 	return NewAuditReconcileWorker(audit, authority, AuditReconcileConfig{
-		Period:    10 * time.Millisecond,
+		Period:     10 * time.Millisecond,
 		BacklogAge: 1 * time.Millisecond,
-		Batch:     64,
-		Observer:  obs,
-		Elector:   elector,
+		Batch:      64,
+		Observer:   obs,
+		Elector:    elector,
 	})
 }
 
@@ -203,11 +203,11 @@ func newWorkerForTest(audit store.AuditReconciler, authority AdmissionAuthority,
 // outcome=admitted) like the apiserver authz wrapper writes before a handler
 // runs. ts is the admission timestamp; older than the worker backlog age it
 // becomes a reconcile candidate.
-func admissionForRow(reqID, tenant, op, execID string, ts time.Time) *store.AuditRecord {
+func admissionForRow(reqID, namespace, op, execID string, ts time.Time) *store.AuditRecord {
 	return &store.AuditRecord{
 		RequestID:   reqID,
 		Principal:   "alice",
-		TenantID:    tenant,
+		Namespace:   namespace,
 		Operation:   op,
 		ExecutionID: execID,
 		Decision:    "allow",
@@ -227,7 +227,7 @@ func admissionForRow(reqID, tenant, op, execID string, ts time.Time) *store.Audi
 func TestReconcilePreHandlerCrashRecordsNoEffect(t *testing.T) {
 	audit := &fakeAuditReconciler{}
 	authority := &fakeAuthority{effects: map[string]MutationEffect{"req-1": EffectAbsent}}
-	audit.addAdmission(admissionForRow("req-1", "tenant-a", opWorkflowCreate, "exec-1", time.Now().Add(-time.Minute)))
+	audit.addAdmission(admissionForRow("req-1", "namespace-a", opWorkflowCreate, "exec-1", time.Now().Add(-time.Minute)))
 
 	w := newWorkerForTest(audit, authority, backend.AlwaysLeader{}, nil)
 	settled := w.ReconcileOnce(context.Background())
@@ -263,7 +263,7 @@ func TestReconcilePreHandlerCrashRecordsNoEffect(t *testing.T) {
 func TestReconcilePostMutationCrashAppendsReconciledOnce(t *testing.T) {
 	audit := &fakeAuditReconciler{}
 	authority := &fakeAuthority{effects: map[string]MutationEffect{"req-2": EffectConfirmed}}
-	audit.addAdmission(admissionForRow("req-2", "tenant-a", opWorkflowCreate, "exec-2", time.Now().Add(-time.Minute)))
+	audit.addAdmission(admissionForRow("req-2", "namespace-a", opWorkflowCreate, "exec-2", time.Now().Add(-time.Minute)))
 
 	w := newWorkerForTest(audit, authority, backend.AlwaysLeader{}, nil)
 	if n := w.ReconcileOnce(context.Background()); n != 1 {
@@ -291,7 +291,7 @@ func TestReconcilePostMutationCrashAppendsReconciledOnce(t *testing.T) {
 func TestReconcileAuthorityUnreachableLeavesPending(t *testing.T) {
 	audit := &fakeAuditReconciler{}
 	authority := &fakeAuthority{err: errors.New("redis down")}
-	audit.addAdmission(admissionForRow("req-3", "tenant-a", opWorkflowCreate, "exec-3", time.Now().Add(-time.Minute)))
+	audit.addAdmission(admissionForRow("req-3", "namespace-a", opWorkflowCreate, "exec-3", time.Now().Add(-time.Minute)))
 
 	w := newWorkerForTest(audit, authority, backend.AlwaysLeader{}, nil)
 	if n := w.ReconcileOnce(context.Background()); n != 0 {
@@ -320,7 +320,7 @@ func TestReconcileAuthorityUnreachableLeavesPending(t *testing.T) {
 func TestReconcileSQLDownThenConverges(t *testing.T) {
 	audit := &fakeAuditReconciler{}
 	authority := &fakeAuthority{effects: map[string]MutationEffect{"req-4": EffectConfirmed}}
-	audit.addAdmission(admissionForRow("req-4", "tenant-a", opWorkflowCreate, "exec-4", time.Now().Add(-time.Minute)))
+	audit.addAdmission(admissionForRow("req-4", "namespace-a", opWorkflowCreate, "exec-4", time.Now().Add(-time.Minute)))
 
 	// Simulate a transient SQL outage on the outcome append.
 	audit.failNext = func(*store.AuditRecord) error { return errors.New("sql down") }
@@ -346,11 +346,11 @@ func TestReconcileSQLDownThenConverges(t *testing.T) {
 // two workers (e.g. a leader switch overlap) scanning the same admission do
 // not append duplicate outcome rows. The check-then-append idempotency
 // (mirroring the SQL unique phase_key index) guarantees exactly one outcome
-// per (tenant, request_id, phase).
+// per (namespace, request_id, phase).
 func TestReconcileConcurrentWorkersNoDuplicateOutcomes(t *testing.T) {
 	audit := &fakeAuditReconciler{}
 	authority := &fakeAuthority{effects: map[string]MutationEffect{"req-5": EffectConfirmed}}
-	audit.addAdmission(admissionForRow("req-5", "tenant-a", opWorkflowCreate, "exec-5", time.Now().Add(-time.Minute)))
+	audit.addAdmission(admissionForRow("req-5", "namespace-a", opWorkflowCreate, "exec-5", time.Now().Add(-time.Minute)))
 
 	w1 := newWorkerForTest(audit, authority, backend.AlwaysLeader{}, nil)
 	w2 := newWorkerForTest(audit, authority, backend.AlwaysLeader{}, nil)
@@ -376,7 +376,7 @@ func TestReconcileConcurrentWorkersNoDuplicateOutcomes(t *testing.T) {
 func TestReconcileLeaderGatedNoOpWhenNotLeader(t *testing.T) {
 	audit := &fakeAuditReconciler{}
 	authority := &fakeAuthority{effects: map[string]MutationEffect{"req-6": EffectConfirmed}}
-	audit.addAdmission(admissionForRow("req-6", "tenant-a", opWorkflowCreate, "exec-6", time.Now().Add(-time.Minute)))
+	audit.addAdmission(admissionForRow("req-6", "namespace-a", opWorkflowCreate, "exec-6", time.Now().Add(-time.Minute)))
 
 	gate := &toggleLeaderGate{}
 	gate.leader.Store(false)
@@ -400,7 +400,7 @@ func TestReconcileLeaderGatedNoOpWhenNotLeader(t *testing.T) {
 func TestReconcileIndeterminateEffectRetries(t *testing.T) {
 	audit := &fakeAuditReconciler{}
 	authority := &fakeAuthority{effects: map[string]MutationEffect{"req-7": EffectIndeterminate}}
-	audit.addAdmission(admissionForRow("req-7", "tenant-a", "execution.signal", "exec-7", time.Now().Add(-time.Minute)))
+	audit.addAdmission(admissionForRow("req-7", "namespace-a", "execution.signal", "exec-7", time.Now().Add(-time.Minute)))
 
 	w := newWorkerForTest(audit, authority, backend.AlwaysLeader{}, nil)
 	if n := w.ReconcileOnce(context.Background()); n != 0 {
@@ -422,7 +422,7 @@ func TestReconcileSignalMutationReachableSettles(t *testing.T) {
 		t.Run(op, func(t *testing.T) {
 			audit := &fakeAuditReconciler{}
 			authority := NewExecutionAuthority(&fakeExecutions{snap: &engine.ExecutionSnapshot{}})
-			audit.addAdmission(admissionForRow("req-signal", "tenant-a", op, "exec-signal", time.Now().Add(-time.Minute)))
+			audit.addAdmission(admissionForRow("req-signal", "namespace-a", op, "exec-signal", time.Now().Add(-time.Minute)))
 
 			w := newWorkerForTest(audit, authority, backend.AlwaysLeader{}, nil)
 			if n := w.ReconcileOnce(context.Background()); n != 1 {
@@ -448,7 +448,7 @@ func TestReconcileSignalMutationMissingExecRetries(t *testing.T) {
 		t.Run(op, func(t *testing.T) {
 			audit := &fakeAuditReconciler{}
 			authority := NewExecutionAuthority(&fakeExecutions{notFound: true})
-			audit.addAdmission(admissionForRow("req-signal", "tenant-a", op, "exec-gone", time.Now().Add(-time.Minute)))
+			audit.addAdmission(admissionForRow("req-signal", "namespace-a", op, "exec-gone", time.Now().Add(-time.Minute)))
 
 			w := newWorkerForTest(audit, authority, backend.AlwaysLeader{}, nil)
 			if n := w.ReconcileOnce(context.Background()); n != 0 {
@@ -460,6 +460,7 @@ func TestReconcileSignalMutationMissingExecRetries(t *testing.T) {
 		})
 	}
 }
+
 // the worker only probes authority and appends audit. The fakeAuthority has
 // no mutation method, and the worker's settle path has no call into the
 // engine or backend beyond the read-only Probe + AppendOutcomeIfAbsent.
@@ -467,7 +468,7 @@ func TestReconcileSignalMutationMissingExecRetries(t *testing.T) {
 func TestReconcileDoesNotReExecuteMutation(t *testing.T) {
 	audit := &fakeAuditReconciler{}
 	authority := &fakeAuthority{effects: map[string]MutationEffect{"req-8": EffectConfirmed}}
-	audit.addAdmission(admissionForRow("req-8", "tenant-a", opWorkflowCreate, "exec-8", time.Now().Add(-time.Minute)))
+	audit.addAdmission(admissionForRow("req-8", "namespace-a", opWorkflowCreate, "exec-8", time.Now().Add(-time.Minute)))
 
 	w := newWorkerForTest(audit, authority, backend.AlwaysLeader{}, nil)
 	w.ReconcileOnce(context.Background())
@@ -603,9 +604,9 @@ func TestReconcileCursorAdvancesPastIndeterminate(t *testing.T) {
 		"req-ok-3":  EffectConfirmed,
 	}}
 	old := time.Now().Add(-5 * time.Minute)
-	audit.addAdmission(admissionForRow("req-ind-1", "tenant-a", opWorkflowCreate, "exec-ind-1", old))
-	audit.addAdmission(admissionForRow("req-ind-2", "tenant-a", opWorkflowCreate, "exec-ind-2", old))
-	audit.addAdmission(admissionForRow("req-ok-3", "tenant-a", opWorkflowCreate, "exec-ok-3", old))
+	audit.addAdmission(admissionForRow("req-ind-1", "namespace-a", opWorkflowCreate, "exec-ind-1", old))
+	audit.addAdmission(admissionForRow("req-ind-2", "namespace-a", opWorkflowCreate, "exec-ind-2", old))
+	audit.addAdmission(admissionForRow("req-ok-3", "namespace-a", opWorkflowCreate, "exec-ok-3", old))
 
 	w := NewAuditReconcileWorker(audit, authority, AuditReconcileConfig{
 		Period:     10 * time.Millisecond,
@@ -648,7 +649,7 @@ func TestReconcileCursorWrapsToZeroOnPartialBatch(t *testing.T) {
 	authority := &fakeAuthority{effects: map[string]MutationEffect{"req-w1": EffectConfirmed}}
 	old := time.Now().Add(-5 * time.Minute)
 	// Single row; batch=10 → rows returned (1) < batch (10) → cursor wraps.
-	audit.addAdmission(admissionForRow("req-w1", "tenant-a", opWorkflowCreate, "exec-w1", old))
+	audit.addAdmission(admissionForRow("req-w1", "namespace-a", opWorkflowCreate, "exec-w1", old))
 
 	w := NewAuditReconcileWorker(audit, authority, AuditReconcileConfig{
 		Period:     10 * time.Millisecond,
@@ -676,8 +677,8 @@ func TestReconcileCursorDoesNotWrapOnFullBatch(t *testing.T) {
 		"req-b2": EffectIndeterminate,
 	}}
 	old := time.Now().Add(-5 * time.Minute)
-	audit.addAdmission(admissionForRow("req-b1", "tenant-a", opWorkflowCreate, "exec-b1", old))
-	audit.addAdmission(admissionForRow("req-b2", "tenant-a", opWorkflowCreate, "exec-b2", old))
+	audit.addAdmission(admissionForRow("req-b1", "namespace-a", opWorkflowCreate, "exec-b1", old))
+	audit.addAdmission(admissionForRow("req-b2", "namespace-a", opWorkflowCreate, "exec-b2", old))
 
 	w := NewAuditReconcileWorker(audit, authority, AuditReconcileConfig{
 		Period:     10 * time.Millisecond,
@@ -701,8 +702,8 @@ func TestReconcileCursorDoesNotWrapOnFullBatch(t *testing.T) {
 func TestReconcileBacklogMetricsEmitted(t *testing.T) {
 	audit := &fakeAuditReconciler{}
 	old := time.Now().Add(-10 * time.Minute)
-	audit.addAdmission(admissionForRow("req-m1", "tenant-a", opWorkflowCreate, "exec-m1", old))
-	audit.addAdmission(admissionForRow("req-m2", "tenant-a", opWorkflowCreate, "exec-m2", old.Add(time.Minute)))
+	audit.addAdmission(admissionForRow("req-m1", "namespace-a", opWorkflowCreate, "exec-m1", old))
+	audit.addAdmission(admissionForRow("req-m2", "namespace-a", opWorkflowCreate, "exec-m2", old.Add(time.Minute)))
 
 	authority := &fakeAuthority{effects: map[string]MutationEffect{
 		"req-m1": EffectIndeterminate,

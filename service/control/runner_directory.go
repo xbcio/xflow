@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/service/protocol"
 )
 
@@ -28,7 +28,7 @@ type Assignment struct {
 	AssignmentID AssignmentID
 	Task         engine.Task
 	Routing      engine.TaskRouting
-	TenantID     tenant.TenantID
+	Namespace    namespace.Namespace
 }
 
 // BuildAssignmentID derives the stable control-plane identity for a queued
@@ -48,7 +48,7 @@ type RegisterRunnerRequest struct {
 	Capacity     int
 	Capabilities []protocol.Capability
 	Policy       RunnerPolicy
-	Tenants      []tenant.TenantID
+	Namespaces   []namespace.Namespace
 	Now          time.Time
 }
 
@@ -67,7 +67,7 @@ type RunnerSnapshot struct {
 	InFlight      int
 	Labels        map[string]string
 	Capabilities  []protocol.Capability
-	Tenants       []tenant.TenantID
+	Namespaces    []namespace.Namespace
 	LastHeartbeat time.Time
 }
 
@@ -171,16 +171,16 @@ type LeaseLookupKey struct {
 
 // LeaseLookup is an optional directory capability that returns the
 // server-authoritative finalized lease for one (runner, session, lease-identity)
-// triple. It is the authority source for tenant on the report path: the lease
+// triple. It is the authority source for namespace on the report path: the lease
 // JSON a runner echoes back is unsigned and client-mutable, so reportResult
-// must not trust req.Lease.TenantID. LookupLease resolves the lease from server
+// must not trust req.Lease.Namespace. LookupLease resolves the lease from server
 // state instead.
 //
 // ok=false (err=nil) means no finalized lease matches: the lease was never
 // finalized, was already released, belongs to a different runner/session, or
 // the token/leaseID did not match. A non-nil err signals an internal failure.
-// Implementations must NOT distinguish "wrong tenant" from "not found" in the
-// return value (both are ok=false) to avoid leaking cross-tenant state.
+// Implementations must NOT distinguish "wrong namespace" from "not found" in the
+// return value (both are ok=false) to avoid leaking cross-namespace state.
 type LeaseLookup interface {
 	LookupLease(ctx context.Context, runnerID, sessionID string, key LeaseLookupKey) (*engine.TaskLease, bool, error)
 }

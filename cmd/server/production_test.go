@@ -19,7 +19,7 @@ func TestValidateProductionRequiresEachComponent(t *testing.T) {
 
 	base := productionDeps{
 		principalAuth: auth,
-		authorizer:    apiserver.TenantAwareAuthorizer{},
+		authorizer:    apiserver.NamespaceAwareAuthorizer{},
 		auditSink:     durableAudit,
 		durableAudit:  true,
 		reconciler:    noopReconciler{},
@@ -77,7 +77,7 @@ func TestValidateProductionRejectsSingleToken(t *testing.T) {
 	auth := apiserver.NewBearerPrincipalAuth("tok", "op", []string{"workflow"})
 	deps := productionDeps{
 		principalAuth: auth,
-		authorizer:    apiserver.TenantAwareAuthorizer{},
+		authorizer:    apiserver.NamespaceAwareAuthorizer{},
 		auditSink:     apiserver.NewSQLAuditSink(nil),
 		durableAudit:  true,
 		reconciler:    noopReconciler{},

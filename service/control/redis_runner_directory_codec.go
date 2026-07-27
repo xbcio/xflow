@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/namespace"
 )
 
 // redisRunnerDirectoryKeys is the fixed set of Redis keys backing a
@@ -35,7 +35,7 @@ type redisRunnerDirectoryKeys struct {
 	runnerInflight       string
 	runnerCapabilities   string
 	runnerPolicy         string
-	runnerTenants        string
+	runnerNamespaces     string
 	runnerHeartbeat      string
 	runnerClaimCount     string
 	runnerLeaseCount     string
@@ -65,7 +65,7 @@ func newRedisRunnerDirectoryKeys(prefix string) redisRunnerDirectoryKeys {
 		runnerInflight:       prefix + ":runner:inflight",
 		runnerCapabilities:   prefix + ":runner:capabilities",
 		runnerPolicy:         prefix + ":runner:policy",
-		runnerTenants:        prefix + ":runner:tenants",
+		runnerNamespaces:     prefix + ":runner:namespaces",
 		runnerHeartbeat:      prefix + ":runner:heartbeat",
 		runnerClaimCount:     prefix + ":runner:claim-count",
 		runnerLeaseCount:     prefix + ":runner:lease-count",
@@ -82,12 +82,12 @@ func boolRedisArg(value bool) string {
 }
 
 type redisAssignmentRecord struct {
-	AssignmentID AssignmentID       `json:"assignment_id"`
-	Task         engine.Task        `json:"task"`
-	AutoDepth    int                `json:"auto_depth"`
-	ActivationID int                `json:"activation_id"`
-	Routing      engine.TaskRouting `json:"routing"`
-	TenantID     tenant.TenantID    `json:"tenant_id,omitempty"`
+	AssignmentID AssignmentID        `json:"assignment_id"`
+	Task         engine.Task         `json:"task"`
+	AutoDepth    int                 `json:"auto_depth"`
+	ActivationID int                 `json:"activation_id"`
+	Routing      engine.TaskRouting  `json:"routing"`
+	Namespace    namespace.Namespace `json:"namespace,omitempty"`
 }
 
 func marshalRedisAssignment(assignment Assignment) (string, error) {
@@ -97,7 +97,7 @@ func marshalRedisAssignment(assignment Assignment) (string, error) {
 		AutoDepth:    assignment.Task.AutoDepth,
 		ActivationID: assignment.Task.ActivationID,
 		Routing:      assignment.Routing,
-		TenantID:     assignment.TenantID,
+		Namespace:    assignment.Namespace,
 	})
 	if err != nil {
 		return "", fmt.Errorf("marshal assignment %q: %w", assignment.AssignmentID, err)
@@ -115,10 +115,10 @@ func unmarshalRedisAssignment(payload string) (Assignment, error) {
 	}
 	record.Task.AutoDepth = record.AutoDepth
 	record.Task.ActivationID = record.ActivationID
-	if record.TenantID == "" {
-		record.TenantID = tenant.DefaultTenant
+	if record.Namespace == "" {
+		record.Namespace = namespace.Default
 	}
-	return Assignment{AssignmentID: record.AssignmentID, Task: record.Task, Routing: record.Routing, TenantID: record.TenantID}, nil
+	return Assignment{AssignmentID: record.AssignmentID, Task: record.Task, Routing: record.Routing, Namespace: record.Namespace}, nil
 }
 
 // redisLeaseMeta embeds the complete runner-facing lease rather than only

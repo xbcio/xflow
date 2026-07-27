@@ -709,23 +709,25 @@ collect:
 	first := <-results
 	second := <-results
 
-	var issued *TaskLease
+	var issuedToken LeaseToken
+	issuedCount := 0
 	duplicateErrs := 0
 	for _, got := range []result{first, second} {
 		switch {
 		case got.err == nil:
-			if issued != nil {
-				t.Fatalf("issued multiple leases: first=%+v second=%+v", issued, got.lease)
+			issuedCount++
+			if issuedCount > 1 {
+				t.Fatalf("issued multiple leases: first token=%q second token=%q", issuedToken, got.lease.LeaseToken)
 			}
-			issued = got.lease
+			issuedToken = got.lease.LeaseToken
 		case errors.Is(got.err, ErrLeaseAlreadyActive):
 			duplicateErrs++
 		default:
 			t.Fatalf("BuildTaskLease() error = %v, want nil or ErrLeaseAlreadyActive", got.err)
 		}
 	}
-	if issued == nil {
-		t.Fatal("no lease issued")
+	if issuedCount != 1 {
+		t.Fatalf("issued leases = %d, want 1", issuedCount)
 	}
 	if duplicateErrs != 1 {
 		t.Fatalf("duplicate errors = %d, want 1", duplicateErrs)
@@ -735,11 +737,8 @@ collect:
 	if err != nil {
 		t.Fatalf("GetNode() error = %v", err)
 	}
-	if ns == nil {
-		t.Fatal("node snapshot missing after concurrent acquire")
-	}
-	if ns.LeaseToken != issued.LeaseToken {
-		t.Fatalf("stored lease token = %q, want %q", ns.LeaseToken, issued.LeaseToken)
+	if ns.LeaseToken != issuedToken {
+		t.Fatalf("stored lease token = %q, want %q", ns.LeaseToken, issuedToken)
 	}
 	if ns.Attempt != 1 {
 		t.Fatalf("node attempt = %d, want 1", ns.Attempt)

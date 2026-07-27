@@ -13,8 +13,8 @@ import (
 	"github.com/alicebob/miniredis/v2"
 
 	"github.com/xbcio/xflow/backend"
-	"github.com/xbcio/xflow/backend/distributed"
-	backendlocal "github.com/xbcio/xflow/backend/local"
+	"github.com/xbcio/xflow/backend/providers/distributed"
+	backendlocal "github.com/xbcio/xflow/backend/providers/local"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/observability/metrics"
 )
@@ -25,6 +25,70 @@ func TestNewControlPlaneRequiresBackend(t *testing.T) {
 		t.Fatal("NewControlPlane(Config{}) error = nil, want error for missing Backend")
 	}
 }
+
+// TestNewControlPlaneRequireRunnerAuthFailsClosed verifies the M3 fail-closed
+// switch: with RequireRunnerAuth set, a nil Auth is a hard error rather than a
+// silent fallback to the permissive DisabledAuthenticator.
+func TestNewControlPlaneRequireRunnerAuthFailsClosed(t *testing.T) {
+	_, err := NewControlPlane(Config{Backend: backendlocal.New(), RequireRunnerAuth: true})
+	if err == nil {
+		t.Fatal("NewControlPlane(RequireRunnerAuth without Auth) error = nil, want fail-closed error")
+	}
+}
+
+// TestNewControlPlaneRequireRunnerAuthAllowsConfiguredAuth verifies that a
+// configured Auth satisfies the fail-closed requirement.
+func TestNewControlPlaneRequireRunnerAuthAllowsConfiguredAuth(t *testing.T) {
+	cp, err := NewControlPlane(Config{
+		Backend:           backendlocal.New(),
+		Auth:              DisabledAuthenticator{},
+		RequireRunnerAuth: true,
+	})
+	if err != nil {
+		t.Fatalf("NewControlPlane(RequireRunnerAuth with Auth) error = %v, want success", err)
+	}
+	if cp == nil {
+		t.Fatal("NewControlPlane() returned nil control plane")
+	}
+}
+
+// TestNewControlPlaneNilAuthWarnsButSucceeds verifies backward compatibility:
+// without RequireRunnerAuth, a nil Auth still builds (logging a warning).
+func TestNewControlPlaneNilAuthWarnsButSucceeds(t *testing.T) {
+	var warned bool
+	logger := &warnCapturingLogger{onWarn: func() { warned = true }}
+	cp, err := NewControlPlane(Config{Backend: backendlocal.New(), Logger: logger})
+	if err != nil {
+		t.Fatalf("NewControlPlane(nil Auth) error = %v, want success (backward compatible)", err)
+	}
+	if cp == nil {
+		t.Fatal("NewControlPlane() returned nil control plane")
+	}
+	if !warned {
+		t.Fatal("NewControlPlane(nil Auth) did not emit a warning about the permissive authenticator")
+	}
+}
+
+// warnCapturingLogger records whether Warn was invoked. It satisfies the
+// engine.Logger interface used by the control plane.
+type warnCapturingLogger struct {
+	onWarn func()
+}
+
+func (l *warnCapturingLogger) Debug(string, ...any)  {}
+func (l *warnCapturingLogger) Debugf(string, ...any) {}
+func (l *warnCapturingLogger) Info(string, ...any)   {}
+func (l *warnCapturingLogger) Infof(string, ...any)  {}
+func (l *warnCapturingLogger) Warn(string, ...any) {
+	if l.onWarn != nil {
+		l.onWarn()
+	}
+}
+func (l *warnCapturingLogger) Warnf(string, ...any)  {}
+func (l *warnCapturingLogger) Error(string, ...any)  {}
+func (l *warnCapturingLogger) Errorf(string, ...any) {}
+func (l *warnCapturingLogger) Panic(string, ...any)  {}
+func (l *warnCapturingLogger) Panicf(string, ...any) {}
 
 // TestControlPlaneHandlerServesRunnerProtocol verifies that Handler() wires
 // the runner-protocol routes. Stage 3 narrowed control.Server.Handler to the
@@ -180,6 +244,7 @@ func (b *leaderBackend) Campaign(ctx context.Context) error { return b.elector.C
 func (b *leaderBackend) IsLeader() bool                     { return b.elector.IsLeader() }
 func (b *leaderBackend) Resign(ctx context.Context) error   { return b.elector.Resign(ctx) }
 func (b *leaderBackend) Notify() <-chan bool                { return b.elector.Notify() }
+
 type countingElector struct {
 	campaigns atomic.Int64
 	leader    atomic.Bool
@@ -388,9 +453,9 @@ type nonBinderBackend struct {
 	b *backendlocal.Backend
 }
 
-func (n *nonBinderBackend) State() engine.StateStore            { return n.b.State() }
-func (n *nonBinderBackend) Queue() engine.TaskQueue              { return n.b.Queue() }
-func (n *nonBinderBackend) Registry() engine.HandlerRegistry    { return n.b.Registry() }
+func (n *nonBinderBackend) State() engine.StateStore         { return n.b.State() }
+func (n *nonBinderBackend) Queue() engine.TaskQueue          { return n.b.Queue() }
+func (n *nonBinderBackend) Registry() engine.HandlerRegistry { return n.b.Registry() }
 func (n *nonBinderBackend) WorkflowRegistry() backend.WorkflowRegistry {
 	return n.b.WorkflowRegistry()
 }

@@ -33,7 +33,7 @@ func (e *Engine) Inspect(ctx context.Context, id types.ExecutionID, nodeNames ..
 		return ExecutionDetail{}, fmt.Errorf("inspect execution %q: %w", id, err)
 	}
 	if snap == nil {
-		return ExecutionDetail{}, fmt.Errorf("inspect execution %q: not found", id)
+		return ExecutionDetail{}, fmt.Errorf("inspect execution %q: %w", id, ErrExecutionNotFound)
 	}
 
 	detail := ExecutionDetail{

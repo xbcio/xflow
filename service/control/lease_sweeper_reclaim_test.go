@@ -14,10 +14,9 @@ import (
 // fakeReclaimEngine implements execution.Engine and lets tests control the
 // (reclaimed, err) tuple returned by ReclaimLease.
 type fakeReclaimEngine struct {
-	mu              sync.Mutex
-	reclaimCalls    int
-	reclaimAfterDir bool
-	results         map[string]struct {
+	mu           sync.Mutex
+	reclaimCalls int
+	results      map[string]struct {
 		reclaimed bool
 		err       error
 	}

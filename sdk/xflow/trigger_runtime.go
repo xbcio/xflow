@@ -2,6 +2,7 @@ package xflow
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -12,17 +13,41 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
+// ErrTriggerRuntimeClosed is returned by ReconcileWorkflow once the runtime has
+// been closed (Engine.Stop). New reconciliations are rejected so a late
+// AddWorkflow cannot resurrect subscriptions on a shut-down engine.
+var ErrTriggerRuntimeClosed = errors.New("xflow: trigger runtime closed")
+
 type triggerRuntime struct {
 	eng        *Engine
 	primitives backend.TriggerPrimitives
 	webhooks   *webhookRuntime
 	mu         sync.Mutex
-	subs       map[string]types.TriggerSubscription
+	// idle is signaled when inflight drops to zero so Close can wait for
+	// in-flight activations to finish before tearing everything down.
+	idle *sync.Cond
+	// subs holds committed (activated) subscriptions keyed by
+	// workflowID + "/" + nodeName.
+	subs map[string]types.TriggerSubscription
+	// reservations records in-flight Activate calls keyed the same way, each
+	// tagged with a unique token. Phase 3 only commits a subscription if its
+	// reservation token is still present, so a concurrent Close/RemoveWorkflow
+	// that cleared the reservation causes the freshly-activated sub to be
+	// closed instead of written back (preventing leaks and ghost triggers).
+	reservations map[string]uint64
+	// nextToken hands out unique reservation tokens.
+	nextToken uint64
+	// inflight counts ReconcileWorkflow calls currently between phase 1 and
+	// phase 3 (activation in progress).
+	inflight int
+	// closed rejects new reconciliations after Close.
+	closed bool
 }
 
 type activatedSub struct {
-	key string
-	sub types.TriggerSubscription
+	key   string
+	token uint64
+	sub   types.TriggerSubscription
 }
 
 func newTriggerRuntime(e *Engine, p backend.TriggerPrimitives) *triggerRuntime {
@@ -30,46 +55,131 @@ func newTriggerRuntime(e *Engine, p backend.TriggerPrimitives) *triggerRuntime {
 	if e != nil {
 		logger = e.logger
 	}
-	return &triggerRuntime{eng: e, primitives: p, webhooks: newWebhookRuntime(logger), subs: make(map[string]types.TriggerSubscription)}
+	r := &triggerRuntime{
+		eng:          e,
+		primitives:   p,
+		webhooks:     newWebhookRuntime(logger),
+		subs:         make(map[string]types.TriggerSubscription),
+		reservations: make(map[string]uint64),
+	}
+	r.idle = sync.NewCond(&r.mu)
+	return r
 }
 
 func (r *triggerRuntime) ReconcileWorkflow(ctx context.Context, rec backend.WorkflowRecord) error {
-	var activated []activatedSub
+	if rec.Definition == nil {
+		return nil
+	}
+
+	// Phase 1: under the lock, determine which triggers need activation and
+	// reserve them with a unique token to prevent duplicate concurrent Activate
+	// calls for the same key and to detect a concurrent Close/Remove later.
+	type pending struct {
+		key   string
+		token uint64
+		nd    types.NodeDef
+	}
+	var toActivate []pending
 
 	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return ErrTriggerRuntimeClosed
+	}
 	for _, nd := range rec.Definition.Nodes {
 		if nd.Kind != types.NodeKindTrigger {
 			continue
 		}
-		h, ok := lookupTriggerForNode(nd)
-		if !ok {
-			rollback := detachActivatedSubscriptions(r.subs, activated)
-			r.mu.Unlock()
-			_ = closeSubscriptions(ctx, rollback)
-			return fmt.Errorf("trigger handler %q not registered", nd.Type)
-		}
 		key := string(rec.ID) + "/" + nd.Name
-		_, exists := r.subs[key]
-		if exists {
+		if _, exists := r.subs[key]; exists {
 			continue
+		}
+		if _, reserved := r.reservations[key]; reserved {
+			continue
+		}
+		token := r.nextToken
+		r.nextToken++
+		r.reservations[key] = token
+		toActivate = append(toActivate, pending{key: key, token: token, nd: nd})
+	}
+	if len(toActivate) == 0 {
+		r.mu.Unlock()
+		return nil
+	}
+	// Mark this reconciliation in flight so Close waits for it to finish.
+	r.inflight++
+	r.mu.Unlock()
+
+	// Phase 2: look up handlers and activate outside the lock to avoid blocking
+	// Close/Remove during potentially slow network I/O.
+	var activated []activatedSub
+	var activateErr error
+	for _, p := range toActivate {
+		h, ok := lookupTriggerForNode(p.nd)
+		if !ok {
+			activateErr = fmt.Errorf("trigger handler %q not registered", p.nd.Type)
+			break
 		}
 		sub, err := h.Activate(ctx, &types.TriggerActivateInput{
 			WorkflowID: rec.ID,
-			NodeName:   nd.Name,
-			Params:     nd.Parameters,
+			NodeName:   p.nd.Name,
+			Params:     p.nd.Parameters,
 			Runtime:    r,
 		})
 		if err != nil {
-			rollback := detachActivatedSubscriptions(r.subs, activated)
-			r.mu.Unlock()
-			_ = closeSubscriptions(ctx, rollback)
-			return err
+			activateErr = err
+			break
 		}
-		r.subs[key] = sub
-		activated = append(activated, activatedSub{key: key, sub: sub})
+		activated = append(activated, activatedSub{key: p.key, token: p.token, sub: sub})
+	}
+
+	if activateErr != nil {
+		// Rollback: drop our reservations and close already-activated subs.
+		r.mu.Lock()
+		for _, p := range toActivate {
+			if tok, ok := r.reservations[p.key]; ok && tok == p.token {
+				delete(r.reservations, p.key)
+			}
+		}
+		r.mu.Unlock()
+		_ = closeSubscriptions(ctx, detachSubs(activated))
+		r.finishInflight()
+		return activateErr
+	}
+
+	// Phase 3: commit activated subscriptions, but only for reservations that
+	// still belong to us. If Close/RemoveWorkflow cleared the reservation (or
+	// the runtime is closing), close the freshly-activated sub instead of
+	// writing it back — otherwise it would leak and fire ghost triggers.
+	r.mu.Lock()
+	var toClose []types.TriggerSubscription
+	for _, a := range activated {
+		tok, ok := r.reservations[a.key]
+		if !ok || tok != a.token || r.closed {
+			toClose = append(toClose, a.sub)
+			continue
+		}
+		delete(r.reservations, a.key)
+		r.subs[a.key] = a.sub
 	}
 	r.mu.Unlock()
-	return nil
+
+	// Close discarded subs before signaling completion so Close() genuinely
+	// waits for in-flight activations to be torn down.
+	closeErr := closeSubscriptions(ctx, toClose)
+	r.finishInflight()
+	return closeErr
+}
+
+// finishInflight decrements the in-flight counter and wakes a waiting Close
+// once no activations remain.
+func (r *triggerRuntime) finishInflight() {
+	r.mu.Lock()
+	r.inflight--
+	if r.inflight == 0 {
+		r.idle.Broadcast()
+	}
+	r.mu.Unlock()
 }
 
 func (r *triggerRuntime) RemoveWorkflow(ctx context.Context, workflowID types.WorkflowID) error {
@@ -77,21 +187,43 @@ func (r *triggerRuntime) RemoveWorkflow(ctx context.Context, workflowID types.Wo
 	subs := make([]types.TriggerSubscription, 0)
 	r.mu.Lock()
 	for key, sub := range r.subs {
-		if len(key) < len(prefix) || key[:len(prefix)] != prefix {
+		if !hasPrefix(key, prefix) {
 			continue
 		}
-		subs = append(subs, sub)
+		if sub != nil {
+			subs = append(subs, sub)
+		}
 		delete(r.subs, key)
+	}
+	// Also drop any in-flight reservations for this workflow so a concurrent
+	// activation is discarded in phase 3 rather than resurrected.
+	for key := range r.reservations {
+		if hasPrefix(key, prefix) {
+			delete(r.reservations, key)
+		}
 	}
 	r.mu.Unlock()
 	return closeSubscriptions(ctx, subs)
 }
 
 func (r *triggerRuntime) Close(ctx context.Context) error {
-	subs := make([]types.TriggerSubscription, 0, len(r.subs))
 	r.mu.Lock()
+	r.closed = true
+	// Drop all outstanding reservations so any in-flight activation is
+	// discarded (and closed) by its phase 3 instead of committed here.
+	for key := range r.reservations {
+		delete(r.reservations, key)
+	}
+	// Wait for in-flight activations to finish tearing down before we collect
+	// and close the committed subscriptions.
+	for r.inflight > 0 {
+		r.idle.Wait()
+	}
+	subs := make([]types.TriggerSubscription, 0, len(r.subs))
 	for key, sub := range r.subs {
-		subs = append(subs, sub)
+		if sub != nil {
+			subs = append(subs, sub)
+		}
 		delete(r.subs, key)
 	}
 	r.mu.Unlock()
@@ -122,6 +254,11 @@ func (r *triggerRuntime) State(ctx context.Context, scope string) types.TriggerS
 
 func (r *triggerRuntime) Webhooks() types.WebhookRuntime { return r.webhooks }
 
+// hasPrefix reports whether key starts with prefix.
+func hasPrefix(key, prefix string) bool {
+	return len(key) >= len(prefix) && key[:len(prefix)] == prefix
+}
+
 // lookupTriggerForNode resolves the trigger handler honoring NodeDef.Version
 // when set. Falls back to the latest registered handler when no version is
 // pinned. Returns false if no handler is registered at all so the caller can
@@ -145,14 +282,13 @@ func closeSubscriptions(ctx context.Context, subs []types.TriggerSubscription) e
 	return closeErr
 }
 
-func detachActivatedSubscriptions(subs map[string]types.TriggerSubscription, activated []activatedSub) []types.TriggerSubscription {
+func detachSubs(activated []activatedSub) []types.TriggerSubscription {
 	if len(activated) == 0 {
 		return nil
 	}
-	detached := make([]types.TriggerSubscription, 0, len(activated))
+	out := make([]types.TriggerSubscription, 0, len(activated))
 	for i := len(activated) - 1; i >= 0; i-- {
-		delete(subs, activated[i].key)
-		detached = append(detached, activated[i].sub)
+		out = append(out, activated[i].sub)
 	}
-	return detached
+	return out
 }

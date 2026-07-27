@@ -2,6 +2,7 @@ package xflow
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/xbcio/xflow/engine"
@@ -17,25 +18,39 @@ func (e *Engine) Wait(ctx context.Context, id types.ExecutionID) (types.Result, 
 	if e.waiter != nil {
 		return e.waiter.WaitDone(ctx, id)
 	}
-	// Fallback: poll StateStore.
+	// Fallback: poll StateStore. Check immediately once before entering the
+	// ticker loop so an already-terminal execution returns without waiting a
+	// full 500ms tick.
+	const maxConsecutiveErrors = 5
+	var consecutiveErrs int
+	var lastErr error
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		select {
-		case <-ctx.Done():
-			return types.Result{}, ctx.Err()
-		case <-ticker.C:
-			snap, err := e.eng.State().GetExecution(ctx, id)
-			if err != nil || snap == nil {
-				continue
+		snap, err := e.eng.State().GetExecution(ctx, id)
+		if err != nil {
+			consecutiveErrs++
+			lastErr = err
+			if consecutiveErrs >= maxConsecutiveErrors {
+				return types.Result{}, fmt.Errorf("xflow: Wait: persistent backend error after %d attempts: %w", consecutiveErrs, lastErr)
 			}
-			if isTerminalStatus(snap.Status) {
+		} else {
+			consecutiveErrs = 0
+			if snap != nil && isTerminalStatus(snap.Status) {
 				detail, err := e.eng.Inspect(ctx, id)
 				if err != nil {
 					return types.Result{}, err
 				}
 				return resultFromDetail(detail), nil
 			}
+			// A non-existent execution returns snap==nil with no error; we keep
+			// polling (until ctx is canceled) because the caller may be waiting
+			// for an execution that is about to be created.
+		}
+		select {
+		case <-ctx.Done():
+			return types.Result{}, ctx.Err()
+		case <-ticker.C:
 		}
 	}
 }
