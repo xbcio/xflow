@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/xbcio/xflow/engine/graph"
+	"github.com/xbcio/xflow/types"
 	"github.com/google/uuid"
 )
 
@@ -76,23 +77,129 @@ func (e *Engine) executeGroup(ctx context.Context, task *Task, flush bool) error
 	return e.commitGroup(ctx, g, lease, meta, exits, fatal, execErr, flush)
 }
 
-// commitGroup is a stub for Task 12. It will commit the group result, propagate
-// downstream arrivals, and finalize the execution if all units are done.
-func (e *Engine) commitGroup(_ context.Context, g *graph.Graph, lease *GroupLease, meta graph.GroupMeta, exits []GroupExit, fatal bool, execErr error, flush bool) error {
-	_ = g
-	_ = lease
-	_ = meta
-	_ = exits
-	_ = fatal
-	_ = execErr
-	_ = flush
-	// Placeholder for Task 12: will build GroupCommitRequest and call
-	// GroupStateStore.CommitGroup, then FlushOutbox if flush==true.
+// commitGroup commits one group unit's terminal result, propagates downstream
+// unit arrivals, and finalizes the execution when all units are done.
+func (e *Engine) commitGroup(ctx context.Context, g *graph.Graph, lease *GroupLease, meta graph.GroupMeta, exits []GroupExit, fatal bool, execErr error, flush bool) error {
+	gs := e.state.(GroupStateStore) // executeGroup already asserted
+	outcome := GroupOutcomeSuccess
+	errMsg := ""
+	if execErr != nil {
+		outcome = GroupOutcomeFailed
+		errMsg = execErr.Error()
+		// group-level OnError: reuse node OnError semantics to decide whether
+		// to fail the entire execution.
+		fatal = groupOnErrorFatal(meta.OnError)
+	}
+
+	// Downstream unit arrival descriptions. Arrival counting (in-degree DECR /
+	// active / wait_all|wait_any threshold) is handled by CommitGroup in the
+	// SAME atomic transition — not by a subsequent AdvanceNode call — because a
+	// group has no per-node state, and AdvanceNode's source guard would
+	// fail-closed.
+	var downstream []DownstreamArrival
+	if !fatal {
+		downstream = e.downstreamUnitArrivals(g, meta.UnitIdx, exits)
+	}
+
+	// GroupExit (executor report) → GroupExitResult (commit request, Task 8).
+	reqExits := make([]GroupExitResult, 0, len(exits))
+	for _, ex := range exits {
+		reqExits = append(reqExits, GroupExitResult{
+			NodeIdx: nodeIdxOf(g, ex.NodeName), NodeName: ex.NodeName, Port: ex.Port, Data: ex.Data,
+		})
+	}
+
+	res, err := gs.CommitGroup(ctx, GroupCommitRequest{
+		ExecutionID:  lease.ExecutionID,
+		GroupUnitIdx: lease.GroupUnitIdx,
+		LeaseToken:   lease.LeaseToken,
+		Attempt:      lease.Attempt,
+		Outcome:      outcome,
+		Fatal:        fatal,
+		Error:        errMsg,
+		Exits:        reqExits,
+		Downstream:   downstream,
+	})
+	if err != nil {
+		return fmt.Errorf("commit group %q: %w", meta.Name, err)
+	}
+
+	if res.ExecutionDone {
+		e.notifyExecutionComplete(ctx, lease.ExecutionID, res.ExecutionStatus)
+		e.EvictExecution(lease.ExecutionID)
+		return nil
+	}
+	if flush {
+		return e.FlushOutbox(ctx, lease.ExecutionID)
+	}
 	return nil
 }
 
-// downstreamUnitArrivals is a placeholder for Task 12: computes DownstreamArrival
-// entries from group boundary outputs for the unit-level advance path.
-func downstreamUnitArrivals(_ *graph.Graph, _ int, _ []GroupExit) []DownstreamArrival {
-	return nil
+// nodeIdxOf resolves a member name to a node index. The name is always from
+// the current graph's members/exits so it is guaranteed to exist.
+func nodeIdxOf(g *graph.Graph, name string) int {
+	idx, _ := g.NodeIndex(name)
+	return idx
+}
+
+// groupOnErrorFatal maps the group's OnError strategy to whether a group
+// failure fails the whole execution. Uses the node OnError constants
+// (types/node.go). Milestone A: OnErrorContinue => non-fatal (execution
+// continues); everything else (OnErrorStop, OnErrorOutput, OnErrorMainOutput,
+// or empty/default) => fatal.
+//
+// TODO(milestone-b): OnErrorOutput/OnErrorMainOutput should route the group
+// failure to the error boundary port's downstream, rather than terminating the
+// entire execution. Once error-port routing is implemented, this function
+// should only return true for OnErrorStop.
+func groupOnErrorFatal(onErr string) bool {
+	return onErr != string(types.OnErrorContinue)
+}
+
+// downstreamUnitArrivals maps a source unit's fired boundary exits to per-
+// downstream-unit arrivals — the unit-graph analogue of downstreamArrivals
+// (atomic.go). The active boundary ports select which downstream edges carry
+// an active arrival (execute) vs an inactive one (skip propagation). Consumed
+// by CommitGroup, which does the atomic in-degree/active/threshold counting.
+func (e *Engine) downstreamUnitArrivals(g *graph.Graph, srcUnit int, exits []GroupExit) []DownstreamArrival {
+	active := make(map[string]bool, len(exits))
+	for _, ex := range exits {
+		active[boundaryKey(nodeIdxOf(g, ex.NodeName), ex.Port)] = true
+	}
+	byDst := make(map[int]DownstreamArrival)
+	for _, ue := range g.UnitOutEdges(srcUnit) {
+		a, ok := byDst[ue.DstUnit]
+		if !ok {
+			execType := TaskTypeNodeExec
+			target := g.UnitNodeIndex(ue.DstUnit)
+			name := g.NodeAt(target).Name
+			if g.UnitKindAt(ue.DstUnit) == graph.UnitGroup {
+				gm := g.GroupMetaAt(ue.DstUnit)
+				execType, target, name = TaskTypeGroupExec, gm.EntryIdx, gm.Name
+			}
+			a = DownstreamArrival{
+				NodeName:     name,
+				NodeIdx:      target,
+				UnitIdx:      ue.DstUnit,
+				MergeMode:    g.UnitMergeMode(ue.DstUnit),
+				ExecTaskType: execType,
+			}
+		}
+		a.ArrivalCount++
+		if active[boundaryKey(ue.Src.NodeIdx, ue.Src.Port)] {
+			a.ActiveCount++
+		}
+		byDst[ue.DstUnit] = a
+	}
+	out := make([]DownstreamArrival, 0, len(byDst))
+	for _, a := range byDst {
+		out = append(out, a)
+	}
+	return out
+}
+
+// boundaryKey builds a lookup key from a node index and port name for matching
+// active boundary exits against unit out-edges.
+func boundaryKey(nodeIdx int, port string) string {
+	return fmt.Sprintf("%d\x00%s", nodeIdx, port)
 }
