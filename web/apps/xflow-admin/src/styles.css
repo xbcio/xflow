@@ -1,0 +1,781 @@
+@import "tailwindcss";
+@import "antd/dist/reset.css";
+
+@source "../../../packages";
+
+:root {
+  --admin-bg: #111214;
+  --admin-surface: #181a1d;
+  --admin-surface-2: #202328;
+  --admin-rail: #0f1012;
+  --admin-border: #30343a;
+  --admin-border-soft: #252930;
+  --admin-text: #f0f3f7;
+  --admin-muted: #8f98a6;
+  --admin-subtle: #68717f;
+  --admin-accent: #f6b545;
+  --admin-blue: #3f86ff;
+  --admin-green: #48c78e;
+  --admin-red: #ff6b61;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--admin-bg);
+  color: var(--admin-text);
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+.xflow-admin-shell.ant-layout {
+  background: var(--admin-bg);
+  color: var(--admin-text);
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  height: 100vh;
+  overflow: hidden;
+}
+
+.xflow-admin-rail {
+  background: var(--admin-rail);
+  border-right: 1px solid var(--admin-border);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 12px;
+}
+
+.xflow-admin-rail__brand {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: var(--admin-text);
+  cursor: pointer;
+  display: flex;
+  gap: 10px;
+  height: 42px;
+  padding: 0 8px;
+  text-align: left;
+  width: 100%;
+}
+
+.xflow-admin-rail__brand > span {
+  align-items: center;
+  background: #f6b545;
+  border-radius: 6px;
+  color: #17120a;
+  display: inline-flex;
+  height: 26px;
+  justify-content: center;
+  width: 26px;
+}
+
+.xflow-admin-rail__brand strong {
+  font-size: 15px;
+  font-weight: 720;
+  letter-spacing: 0;
+}
+
+.xflow-admin-rail__nav {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 18px;
+  min-height: 0;
+}
+
+.xflow-admin-rail__nav button {
+  align-items: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  color: #b7bec9;
+  cursor: pointer;
+  display: flex;
+  gap: 10px;
+  height: 34px;
+  padding: 0 10px;
+  text-align: left;
+}
+
+.xflow-admin-rail__nav button:hover {
+  background: #191c20;
+  color: var(--admin-text);
+}
+
+.xflow-admin-rail__nav button[data-active="true"] {
+  background: #202328;
+  border-color: #3a3f47;
+  color: var(--admin-text);
+}
+
+.xflow-admin-rail__nav button[data-active="true"] .anticon {
+  color: var(--admin-accent);
+}
+
+.xflow-admin-rail__nav .anticon {
+  color: #858e9c;
+  font-size: 14px;
+  width: 16px;
+}
+
+.xflow-admin-rail__nav span {
+  font-size: 12px;
+  font-weight: 560;
+}
+
+.xflow-admin-user {
+  align-items: center;
+  background: #17191d;
+  border: 1px solid var(--admin-border-soft);
+  border-radius: 6px;
+  color: var(--admin-text);
+  cursor: pointer;
+  display: flex;
+  gap: 9px;
+  min-height: 46px;
+  padding: 7px;
+  text-align: left;
+}
+
+.xflow-admin-user:hover {
+  background: #202328;
+  border-color: #3a3f47;
+}
+
+.xflow-admin-user > span:not(.ant-avatar) {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.xflow-admin-user strong,
+.xflow-admin-user em {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.xflow-admin-user strong {
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.xflow-admin-user em {
+  color: var(--admin-muted);
+  font-size: 10px;
+  font-style: normal;
+}
+
+.xflow-admin-main.ant-layout {
+  background: var(--admin-bg);
+  min-height: 0;
+  min-width: 0;
+}
+
+.xflow-admin-topbar {
+  align-items: center;
+  background: #16181b;
+  border-bottom: 1px solid var(--admin-border);
+  display: flex;
+  gap: 18px;
+  height: 54px;
+  justify-content: space-between;
+  padding: 0 18px;
+}
+
+.xflow-admin-topbar > div:first-child {
+  display: grid;
+  gap: 2px;
+  min-width: 140px;
+}
+
+.xflow-admin-topbar strong {
+  color: var(--admin-text);
+  font-size: 14px;
+  font-weight: 680;
+}
+
+.xflow-admin-topbar span {
+  color: var(--admin-muted);
+  font-size: 10.5px;
+}
+
+.xflow-admin-topbar__actions {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+.xflow-admin-topbar__actions .ant-input-affix-wrapper {
+  background: #111316;
+  border-color: var(--admin-border);
+  color: var(--admin-text);
+  width: min(360px, 34vw);
+}
+
+.xflow-admin-topbar__actions .ant-input {
+  background: transparent;
+}
+
+.xflow-admin-content.ant-layout-content {
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  position: relative;
+}
+
+.xflow-admin-page {
+  height: 100%;
+  overflow: auto;
+  padding: 20px;
+}
+
+.xflow-admin-page__header {
+  align-items: flex-start;
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+  margin: 0 0 18px;
+}
+
+.xflow-admin-page__header h1 {
+  color: var(--admin-text);
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 0;
+  line-height: 1.2;
+  margin: 0;
+}
+
+.xflow-admin-page__header p {
+  color: var(--admin-muted);
+  font-size: 12px;
+  line-height: 18px;
+  margin: 6px 0 0;
+}
+
+.xflow-admin-metrics {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin-bottom: 14px;
+}
+
+.xflow-admin-metrics article,
+.xflow-admin-card {
+  background: var(--admin-surface);
+  border: 1px solid var(--admin-border);
+  border-radius: 7px;
+}
+
+.xflow-admin-metrics article {
+  display: grid;
+  gap: 6px;
+  min-height: 96px;
+  padding: 14px;
+}
+
+.xflow-admin-metrics span,
+.xflow-admin-metrics em {
+  color: var(--admin-muted);
+  font-size: 11px;
+  font-style: normal;
+}
+
+.xflow-admin-metrics strong {
+  color: var(--admin-text);
+  font-family: SFMono-Regular, Consolas, monospace;
+  font-size: 24px;
+  font-weight: 720;
+  line-height: 1;
+}
+
+.xflow-admin-dashboard-grid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: minmax(0, 1.12fr) minmax(340px, .88fr);
+}
+
+.xflow-admin-card {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.xflow-admin-card__header {
+  align-items: center;
+  background: #1d2025;
+  border-bottom: 1px solid var(--admin-border);
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  min-height: 42px;
+  padding: 0 12px;
+}
+
+.xflow-admin-card__header strong {
+  color: #e8edf4;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.xflow-admin-card__header .ant-input-affix-wrapper {
+  background: #121418;
+  border-color: var(--admin-border);
+  width: 260px;
+}
+
+.xflow-admin-row-list,
+.xflow-admin-runner-list {
+  display: grid;
+  gap: 0;
+}
+
+.xflow-admin-row-list > div,
+.xflow-admin-runner-list > div {
+  align-items: center;
+  border-bottom: 1px solid var(--admin-border-soft);
+  display: grid;
+  gap: 10px;
+  min-height: 48px;
+  padding: 8px 12px;
+}
+
+.xflow-admin-row-list > div {
+  grid-template-columns: 8px minmax(0, 1fr) auto;
+}
+
+.xflow-admin-runner-list > div {
+  grid-template-columns: 8px minmax(0, 1fr) auto;
+}
+
+.xflow-admin-row-list > div:last-child,
+.xflow-admin-runner-list > div:last-child {
+  border-bottom: 0;
+}
+
+.xflow-admin-row-list > div > span:first-child,
+.xflow-admin-runner-list > div > span:first-child,
+.xflow-admin-debug-list button > span {
+  background: #747d8a;
+  border-radius: 999px;
+  height: 7px;
+  width: 7px;
+}
+
+.xflow-admin-row-list > div > span[data-status="success"],
+.xflow-admin-row-list > div > span[data-status="online"],
+.xflow-admin-runner-list > div > span[data-status="success"],
+.xflow-admin-runner-list > div > span[data-status="online"],
+.xflow-admin-debug-list button > span[data-status="success"],
+.xflow-admin-debug-list button > span[data-status="online"] {
+  background: var(--admin-green) !important;
+}
+
+.xflow-admin-row-list > div > span[data-status="running"],
+.xflow-admin-row-list > div > span[data-status="waiting"],
+.xflow-admin-row-list > div > span[data-status="draining"],
+.xflow-admin-runner-list > div > span[data-status="running"],
+.xflow-admin-runner-list > div > span[data-status="waiting"],
+.xflow-admin-runner-list > div > span[data-status="draining"],
+.xflow-admin-debug-list button > span[data-status="running"],
+.xflow-admin-debug-list button > span[data-status="waiting"],
+.xflow-admin-debug-list button > span[data-status="draining"] {
+  background: var(--admin-accent) !important;
+}
+
+.xflow-admin-row-list > div > span[data-status="failed"],
+.xflow-admin-row-list > div > span[data-status="canceled"],
+.xflow-admin-row-list > div > span[data-status="offline"],
+.xflow-admin-runner-list > div > span[data-status="failed"],
+.xflow-admin-runner-list > div > span[data-status="canceled"],
+.xflow-admin-runner-list > div > span[data-status="offline"],
+.xflow-admin-debug-list button > span[data-status="failed"],
+.xflow-admin-debug-list button > span[data-status="canceled"],
+.xflow-admin-debug-list button > span[data-status="offline"] {
+  background: var(--admin-red) !important;
+}
+
+.xflow-admin-row-list strong,
+.xflow-admin-runner-list strong,
+.xflow-admin-workflow-table strong,
+.xflow-admin-runner-table strong {
+  color: var(--admin-text);
+  display: block;
+  font-size: 12px;
+  font-weight: 620;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.xflow-admin-row-list em,
+.xflow-admin-runner-list em,
+.xflow-admin-workflow-table em,
+.xflow-admin-runner-table em {
+  color: var(--admin-muted);
+  display: block;
+  font-family: SFMono-Regular, Consolas, monospace;
+  font-size: 10px;
+  font-style: normal;
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.xflow-admin-workflow-table,
+.xflow-admin-runner-table {
+  display: grid;
+  min-width: 760px;
+}
+
+.xflow-admin-workflow-table__head,
+.xflow-admin-workflow-table button,
+.xflow-admin-runner-table__head,
+.xflow-admin-runner-table > div:not(.xflow-admin-runner-table__head) {
+  align-items: center;
+  display: grid;
+  gap: 12px;
+  min-height: 42px;
+  padding: 0 12px;
+}
+
+.xflow-admin-workflow-table__head,
+.xflow-admin-workflow-table button {
+  grid-template-columns: minmax(220px, 1fr) 94px 104px 168px 58px;
+}
+
+.xflow-admin-runner-table__head,
+.xflow-admin-runner-table > div:not(.xflow-admin-runner-table__head) {
+  grid-template-columns: minmax(190px, .9fr) 100px 92px minmax(260px, 1.2fr) 84px;
+}
+
+.xflow-admin-workflow-table__head,
+.xflow-admin-runner-table__head {
+  background: #171a1e;
+  border-bottom: 1px solid var(--admin-border);
+  color: var(--admin-subtle);
+  font-size: 10px;
+  font-weight: 650;
+  text-transform: uppercase;
+}
+
+.xflow-admin-workflow-table button,
+.xflow-admin-runner-table > div:not(.xflow-admin-runner-table__head) {
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--admin-border-soft);
+  color: #cbd3de;
+  text-align: left;
+}
+
+.xflow-admin-workflow-table button {
+  cursor: pointer;
+}
+
+.xflow-admin-workflow-table button:hover,
+.xflow-admin-workflow-table button[data-active="true"] {
+  background: #202328;
+}
+
+.xflow-admin-workflow-table button[data-active="true"] {
+  box-shadow: inset 2px 0 0 var(--admin-accent);
+}
+
+.xflow-admin-workflow-table button > span:last-child {
+  color: var(--admin-accent);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.xflow-admin-editor-host {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.xflow-admin-alert {
+  left: 16px;
+  position: absolute;
+  right: 16px;
+  top: 14px;
+  z-index: 30;
+}
+
+.xflow-admin-loading {
+  align-items: center;
+  background: var(--admin-bg);
+  display: flex;
+  height: 100%;
+  justify-content: center;
+}
+
+.xflow-admin-run-indicator {
+  align-items: center;
+  background: rgba(24, 26, 29, .96);
+  border: 1px solid #4a3b20;
+  border-radius: 5px;
+  color: #f4d28a;
+  display: inline-flex;
+  font-size: 11px;
+  gap: 6px;
+  left: 50%;
+  line-height: 26px;
+  padding: 0 10px;
+  position: absolute;
+  top: 64px;
+  transform: translateX(-50%);
+  z-index: 25;
+}
+
+.xflow-admin-settings {
+  display: grid;
+  gap: 0;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.xflow-admin-settings > div {
+  border-right: 1px solid var(--admin-border-soft);
+  display: grid;
+  gap: 6px;
+  padding: 16px;
+}
+
+.xflow-admin-settings > div:last-child {
+  border-right: 0;
+}
+
+.xflow-admin-settings span {
+  color: var(--admin-muted);
+  font-size: 11px;
+}
+
+.xflow-admin-settings strong {
+  color: var(--admin-text);
+  font-size: 13px;
+}
+
+.xflow-admin-debug-panel {
+  background: #17191d;
+  border-left: 1px solid var(--admin-border);
+  bottom: 0;
+  box-shadow: -18px 0 32px rgba(0, 0, 0, .28);
+  color: var(--admin-text);
+  overflow: auto;
+  padding: 10px;
+  position: absolute;
+  right: 0;
+  top: 0;
+  width: 392px;
+  z-index: 40;
+}
+
+.xflow-admin-debug-panel__header {
+  align-items: center;
+  background: #1d2025;
+  border-bottom: 1px solid var(--admin-border);
+  display: flex;
+  justify-content: space-between;
+  margin: -10px -10px 10px;
+  min-height: 42px;
+  padding: 0 10px 0 12px;
+}
+
+.xflow-admin-debug-title {
+  align-items: center;
+  color: #eef2f8;
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 650;
+  gap: 6px;
+}
+
+.xflow-admin-debug-summary {
+  background: var(--admin-surface);
+  border: 1px solid var(--admin-border);
+  border-radius: 6px;
+  display: grid;
+  gap: 7px;
+  margin-bottom: 10px;
+  padding: 9px;
+}
+
+.xflow-admin-debug-summary div,
+.xflow-admin-debug-list button {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+}
+
+.xflow-admin-debug-summary span {
+  color: var(--admin-muted);
+  font-size: 10.5px;
+}
+
+.xflow-admin-debug-summary strong {
+  color: var(--admin-text);
+  font-size: 11px;
+}
+
+.xflow-admin-debug-layout {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 128px minmax(0, 1fr);
+  min-height: 0;
+}
+
+.xflow-admin-debug-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  max-height: calc(100vh - 190px);
+  overflow: auto;
+}
+
+.xflow-admin-debug-list button {
+  background: var(--admin-surface);
+  border: 1px solid var(--admin-border);
+  border-radius: 5px;
+  color: #cbd2dc;
+  cursor: pointer;
+  gap: 6px;
+  min-height: 34px;
+  padding: 5px 6px;
+  text-align: left;
+}
+
+.xflow-admin-debug-list button[data-active="true"] {
+  background: #202328;
+  border-color: #4b525d;
+}
+
+.xflow-admin-debug-list button > span {
+  flex: 0 0 7px;
+}
+
+.xflow-admin-debug-list strong {
+  flex: 1;
+  font-size: 10.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.xflow-admin-debug-list em {
+  color: var(--admin-muted);
+  font-size: 9px;
+  font-style: normal;
+}
+
+.xflow-admin-debug-detail {
+  min-width: 0;
+}
+
+.xflow-admin-debug-detail section {
+  background: var(--admin-surface);
+  border: 1px solid var(--admin-border);
+  border-radius: 6px;
+  margin-bottom: 8px;
+  padding: 8px;
+}
+
+.xflow-admin-debug-detail h3 {
+  align-items: center;
+  color: #dce2eb;
+  display: flex;
+  font-size: 11px;
+  gap: 6px;
+  margin: 0 0 7px;
+}
+
+.xflow-admin-debug-detail p {
+  align-items: center;
+  color: #aab3c0;
+  display: flex;
+  font-size: 10.5px;
+  gap: 7px;
+  line-height: 16px;
+  margin: 0;
+}
+
+.xflow-admin-debug-detail pre {
+  background: #101215;
+  border: 1px solid var(--admin-border-soft);
+  border-radius: 5px;
+  color: #aeb8c6;
+  font-family: SFMono-Regular, Consolas, monospace;
+  font-size: 10px;
+  line-height: 1.45;
+  margin: 0;
+  max-height: 190px;
+  overflow: auto;
+  padding: 7px;
+}
+
+.xflow-admin-debug-empty {
+  color: var(--admin-muted);
+  font-size: 11px;
+  margin: 0;
+}
+
+.xflow-admin-shell .ant-btn,
+.xflow-admin-shell .ant-input,
+.xflow-admin-shell .ant-input-affix-wrapper {
+  font-size: 12px;
+}
+
+.xflow-admin-shell .ant-tag {
+  font-size: 10.5px;
+  line-height: 18px;
+  margin-inline-end: 0;
+}
+
+@media (max-width: 980px) {
+  .xflow-admin-shell.ant-layout {
+    grid-template-columns: 64px minmax(0, 1fr);
+  }
+
+  .xflow-admin-rail__brand strong,
+  .xflow-admin-rail__nav span,
+  .xflow-admin-user > span:not(.ant-avatar) {
+    display: none;
+  }
+
+  .xflow-admin-rail {
+    padding: 10px 8px;
+  }
+
+  .xflow-admin-rail__brand,
+  .xflow-admin-rail__nav button,
+  .xflow-admin-user {
+    justify-content: center;
+    padding-left: 0;
+    padding-right: 0;
+  }
+
+  .xflow-admin-metrics,
+  .xflow-admin-dashboard-grid,
+  .xflow-admin-settings {
+    grid-template-columns: 1fr;
+  }
+
+  .xflow-admin-topbar__actions .ant-input-affix-wrapper {
+    display: none;
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "extends": "../../tooling/typescript-config/base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    "tsBuildInfoFile": "dist/tsconfig.tsbuildinfo",
+    "noEmit": true
+  },
+  "include": ["src"],
+  "references": [
+    { "path": "../../packages/xflow-core" },
+    { "path": "../../packages/xflow-api" },
+    { "path": "../../packages/xflow-preview" },
+    { "path": "../../packages/xflow-editor" }
+  ]
+}
+
