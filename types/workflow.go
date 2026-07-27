@@ -4,14 +4,11 @@ type WorkflowID string
 
 // WorkflowDef is the top-level DSL data structure representing a workflow definition.
 type WorkflowDef struct {
-	ID        string `json:"id,omitempty"`
-	Namespace string `json:"namespace,omitempty"`
-	// TenantID is the tenant scope this workflow belongs to. It is
-	// server-injected from the authenticated principal and must not be read
-	// from client-provided workflow definitions (JSON/YAML). The JSON tag "-"
-	// ensures any client-provided value is ignored. Leave empty to let the
-	// server populate it from context.
-	TenantID       string                    `json:"-"`
+	ID string `json:"id,omitempty"`
+	// Namespace is the server-authoritative isolation scope and workflow
+	// namespace. API handlers must inject or validate it against the
+	// authenticated principal; clients cannot use it to cross namespaces.
+	Namespace      string                    `json:"namespace,omitempty"`
 	Name           string                    `json:"name,omitempty"`
 	Version        string                    `json:"version,omitempty"`
 	Description    string                    `json:"description,omitempty"`
@@ -24,6 +21,7 @@ type WorkflowDef struct {
 	Params         map[string]ParamDef       `json:"params,omitempty"`
 	NodeTemplates  map[string]NodeTemplate   `json:"node_templates,omitempty"`
 	Nodes          []NodeDef                 `json:"nodes,omitempty"`
+	Groups         []GroupDef                `json:"groups,omitempty"`
 	Connections    Connections               `json:"connections,omitempty"`
 	Outputs        map[string]WorkflowOutput `json:"outputs,omitempty"`
 	PinData        map[string]any            `json:"pin_data,omitempty"`
