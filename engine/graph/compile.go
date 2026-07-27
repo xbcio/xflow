@@ -105,6 +105,9 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 	if err := buildEdges(def, g); err != nil {
 		return nil, err
 	}
+	if err := compileGroups(g, def); err != nil {
+		return nil, err
+	}
 
 	if g.allowCycles {
 		if startCount != 1 {
