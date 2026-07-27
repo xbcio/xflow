@@ -10,8 +10,10 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
-// compilerVersion identifies the graph compiler format.
-const compilerVersion = "v1"
+// compilerVersion identifies the graph compiler format. Bumped to v2 when the
+// two-layer unit IR (groups, units, unit edges) was introduced into the compiled
+// snapshot — NodeMeta.GroupIdx and the unit-level topology now enter the hash.
+const compilerVersion = "v2"
 
 func cloneStringAnyMap(src map[string]any) map[string]any {
 	if src == nil {
@@ -231,6 +233,10 @@ func assignGraphHash(g *Graph) error {
 		AllowCycles:     g.allowCycles,
 		StartIdx:        g.startIdx,
 		MaxAutoDepth:    g.maxAutoDepth,
+		Groups:          g.groups,
+		Units:           g.units,
+		UnitOutEdges:    g.unitOutEdges,
+		UnitInDegree:    g.unitInDegree,
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -256,6 +262,10 @@ type graphHashPayload struct {
 	AllowCycles     bool
 	StartIdx        int
 	MaxAutoDepth    int
+	Groups          []GroupMeta
+	Units           []UnitMeta
+	UnitOutEdges    [][]UnitEdge
+	UnitInDegree    []int
 }
 
 // graphSerializedForm is the on-wire / at-rest JSON representation of a Graph.
