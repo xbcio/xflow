@@ -82,6 +82,7 @@ func (e *Engine) commitAcyclicNodeWithClassification(ctx context.Context, lease 
 			ExecutionID:  task.ExecutionID,
 			NodeName:     task.NodeName,
 			NodeIdx:      task.NodeIdx,
+			UnitIdx:      task.UnitIdx,
 			Type:         TaskTypeNodeAdvance,
 			ActivationID: task.ActivationID,
 			AutoDepth:    task.AutoDepth,

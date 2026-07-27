@@ -22,6 +22,7 @@ type redisOutboxEntry struct {
 	Task        engine.Task `json:"task"`
 	AutoDepth   int         `json:"auto_depth,omitempty"`
 	Activation  int         `json:"activation_id,omitempty"`
+	UnitIdx     *int        `json:"unit_idx,omitempty"`
 	AvailableAt int64       `json:"available_at_ms,omitempty"`
 	CreatedAt   int64       `json:"created_at_ms,omitempty"`
 }
@@ -240,6 +241,7 @@ func marshalRedisOutboxEntry(id string, task engine.Task, availableAt time.Time)
 		Task:        task,
 		AutoDepth:   task.AutoDepth,
 		Activation:  task.ActivationID,
+		UnitIdx:     redisUnitIdxPtr(task.UnitIdx),
 		AvailableAt: availableAt.UnixMilli(),
 		CreatedAt:   time.Now().UTC().UnixMilli(),
 	}
@@ -253,6 +255,17 @@ func marshalRedisOutboxEntry(id string, task engine.Task, availableAt time.Time)
 	return string(data), nil
 }
 
+// redisUnitIdxPtr omits the wire field when the task's UnitIdx is the
+// "unknown" sentinel, so absence on decode is distinguishable from a real
+// unit index of 0. See engine.UnitIdxUnknown.
+func redisUnitIdxPtr(unitIdx int) *int {
+	if unitIdx == engine.UnitIdxUnknown {
+		return nil
+	}
+	v := unitIdx
+	return &v
+}
+
 func unmarshalRedisOutboxEntry(raw string) (engine.OutboxEntry, error) {
 	var encoded redisOutboxEntry
 	if err := json.Unmarshal([]byte(raw), &encoded); err != nil {
@@ -260,6 +273,11 @@ func unmarshalRedisOutboxEntry(raw string) (engine.OutboxEntry, error) {
 	}
 	encoded.Task.AutoDepth = encoded.AutoDepth
 	encoded.Task.ActivationID = encoded.Activation
+	if encoded.UnitIdx != nil {
+		encoded.Task.UnitIdx = *encoded.UnitIdx
+	} else {
+		encoded.Task.UnitIdx = engine.UnitIdxUnknown
+	}
 	entry := engine.OutboxEntry{ID: encoded.ID, Task: encoded.Task}
 	if encoded.AvailableAt > 0 {
 		entry.AvailableAt = time.UnixMilli(encoded.AvailableAt).UTC()

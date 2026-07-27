@@ -55,6 +55,17 @@ type Task struct {
 	UnitIdx int `json:"-"`
 }
 
+// UnitIdxUnknown is the sentinel value for Task.UnitIdx meaning "the durable
+// wire envelope this task was decoded from did not carry a _unit_idx field".
+// Pure codecs (queue/outbox/dead-letter/assignment) set UnitIdx to this value
+// instead of silently defaulting to 0 or NodeIdx when the field is absent —
+// 0 is a legitimate unit index and NodeIdx is only equal to the unit index
+// for graphs with no groups (see engine/graph/unit.go buildUnits). A
+// graph-aware resolver layer (not the pure codec) is responsible for turning
+// UnitIdxUnknown into a real unit index via Graph.UnitIndexForNode, or
+// failing closed if it cannot load the authoritative graph.
+const UnitIdxUnknown = -1
+
 // LeaseID uniquely identifies one assignment of a queued task to a runner.
 type LeaseID string
 
@@ -181,6 +192,7 @@ type NodeSnapshot struct {
 	ExecutionID types.ExecutionID
 	Name        string
 	NodeIdx     int
+	UnitIdx     int
 	Status      types.NodeStatus
 	LeaseID     LeaseID
 	LeaseToken  LeaseToken
@@ -218,6 +230,7 @@ type ExpiredLease struct {
 	ExecutionID  types.ExecutionID
 	NodeName     string
 	NodeIdx      int
+	UnitIdx      int
 	LeaseID      LeaseID
 	LeaseToken   LeaseToken
 	IssuedAt     time.Time

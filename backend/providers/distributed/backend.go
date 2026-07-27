@@ -620,11 +620,45 @@ func (b *Backend) bindHandler(eng *engine.Engine, handler func(context.Context, 
 		return b.nonConsumerStop(), nil
 	}
 
+	// F1 graph-aware unit-index resolver: the pure queue codec (queue.Unmarshal)
+	// cannot access a StateStore/Graph, so it decodes a task with
+	// UnitIdx == engine.UnitIdxUnknown when the wire payload has no _unit_idx
+	// field (pre-group durable payload). This wrapper is the single owner of
+	// graph-aware recovery: it loads the authoritative Graph for the task's
+	// execution and resolves the real unit index via Graph.UnitIndexForNode
+	// before the task reaches the dispatcher/handler. It never assumes
+	// UnitIdx == NodeIdx (only true for graphs with no groups — buildUnits
+	// places ungrouped nodes before group units, so a mixed graph's node unit
+	// indexes are shifted). A group task (TaskTypeGroupExec) with an unknown
+	// UnitIdx fails closed immediately without attempting graph-aware
+	// recovery: a durable group payload missing its unit identity cannot be
+	// trusted to resolve to the correct group unit even if a graph loads
+	// successfully.
+	resolvedHandler := func(ctx context.Context, task *engine.Task) error {
+		if task != nil && task.UnitIdx == engine.UnitIdxUnknown {
+			if task.Type == engine.TaskTypeGroupExec {
+				return fmt.Errorf("distributed: group task %q/%q missing durable unit identity (stale payload)", task.ExecutionID, task.NodeName)
+			}
+			g, err := b.state.LoadGraph(context.Background(), task.ExecutionID)
+			if err != nil {
+				return fmt.Errorf("distributed: resolve unit index for %q/%q: load graph: %w", task.ExecutionID, task.NodeName, err)
+			}
+			if g == nil {
+				return fmt.Errorf("distributed: resolve unit index for %q/%q: no graph available", task.ExecutionID, task.NodeName)
+			}
+			if task.NodeIdx < 0 || task.NodeIdx >= g.NodeCount() {
+				return fmt.Errorf("distributed: resolve unit index for %q/%q: node index %d out of range", task.ExecutionID, task.NodeName, task.NodeIdx)
+			}
+			task.UnitIdx = g.UnitIndexForNode(task.NodeIdx)
+		}
+		return handler(ctx, task)
+	}
+
 	// 1. Start the consumer (broker-side task delivery). This is the only step
 	//    that can fail against a real broker; its error must propagate.
 	stopConsumer, err := b.transport.StartConsumer(
 		queue.ConsumerConfig{Concurrency: b.concurrency, Transient: b.transient},
-		queue.TaskHandler(handler),
+		queue.TaskHandler(resolvedHandler),
 	)
 	if err != nil {
 		// Consumer never started; release the delivery transport, Redis

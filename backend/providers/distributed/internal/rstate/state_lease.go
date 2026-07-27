@@ -41,7 +41,7 @@ func (s *Store) AcquireTaskLease(ctx context.Context, lease *engine.TaskLease) (
 			nodeMetaKey(t, lease.Task.ExecutionID, lease.Task.NodeName),
 			leaseExpiryZSetKey(t, lease.Task.ExecutionID),
 		},
-		string(lease.LeaseID), string(lease.LeaseToken), lease.IssuedAt.UnixMilli(), int(ttl.Seconds()), lease.Task.ActivationID, lease.Task.AutoDepth, lease.TTL.Milliseconds(), leaseExpiryMember(lease.Task.ExecutionID, lease.Task.NodeName), int(lease.Task.Type), payloadJSON, lease.Task.NodeIdx,
+		string(lease.LeaseID), string(lease.LeaseToken), lease.IssuedAt.UnixMilli(), int(ttl.Seconds()), lease.Task.ActivationID, lease.Task.AutoDepth, lease.TTL.Milliseconds(), leaseExpiryMember(lease.Task.ExecutionID, lease.Task.NodeName), int(lease.Task.Type), payloadJSON, lease.Task.NodeIdx, lease.Task.UnitIdx,
 	).Slice()
 	if err != nil {
 		return nil, false, fmt.Errorf("acquire task lease %q/%q: %w", lease.Task.ExecutionID, lease.Task.NodeName, err)
@@ -77,6 +77,7 @@ func (s *Store) AcquireTaskLease(ctx context.Context, lease *engine.TaskLease) (
 			ExecutionID:  lease.Task.ExecutionID,
 			Name:         lease.Task.NodeName,
 			NodeIdx:      lease.Task.NodeIdx,
+			UnitIdx:      lease.Task.UnitIdx,
 			Status:       types.NodeStatus(prevStatus),
 			Attempt:      int(asInt64(result[2])),
 			ActivationID: int(asInt64(result[3])),
@@ -243,6 +244,7 @@ func (s *Store) scanExpiredLeasesForTenant(ctx context.Context, t namespace.Name
 				lease := engine.ExpiredLease{
 					ExecutionID: execID,
 					NodeName:    nodeName,
+					UnitIdx:     engine.UnitIdxUnknown,
 					LeaseID:     engine.LeaseID(meta["lease_id"]),
 					LeaseToken:  engine.LeaseToken(meta["lease_token"]),
 					Namespace:   t,
@@ -254,6 +256,7 @@ func (s *Store) scanExpiredLeasesForTenant(ctx context.Context, t namespace.Name
 					lease.TTL = time.Duration(leaseTTLms) * time.Millisecond
 				}
 				parseInt64(meta["node_idx"], func(value int64) { lease.NodeIdx = int(value) })
+				parseInt64(meta["unit_idx"], func(value int64) { lease.UnitIdx = int(value) })
 				parseInt64(meta["activation_id"], func(value int64) { lease.ActivationID = int(value) })
 				parseInt64(meta["auto_depth"], func(value int64) { lease.AutoDepth = int(value) })
 				parseInt64(meta["lease_task_type"], func(value int64) { lease.TaskType = engine.TaskType(value) })
@@ -326,6 +329,7 @@ func (s *Store) ClaimTaskLease(ctx context.Context, lease *engine.TaskLease) (*e
 				ExecutionID:  lease.Task.ExecutionID,
 				Name:         lease.Task.NodeName,
 				NodeIdx:      lease.Task.NodeIdx,
+				UnitIdx:      lease.Task.UnitIdx,
 				Status:       types.NodeStatusCanceled,
 				ActivationID: lease.Task.ActivationID,
 				AutoDepth:    lease.Task.AutoDepth,
@@ -355,6 +359,7 @@ func (s *Store) ClaimTaskLease(ctx context.Context, lease *engine.TaskLease) (*e
 		ExecutionID:  lease.Task.ExecutionID,
 		Name:         lease.Task.NodeName,
 		NodeIdx:      lease.Task.NodeIdx,
+		UnitIdx:      lease.Task.UnitIdx,
 		Status:       types.NodeStatus(status),
 		ActivationID: lease.Task.ActivationID,
 		AutoDepth:    lease.Task.AutoDepth,

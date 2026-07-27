@@ -531,7 +531,8 @@ redis.call('HSET', KEYS[2],
 	'lease_deadline_ms', nowMs + tonumber(ARGV[7] or '0'),
 	'lease_task_type', tonumber(ARGV[9] or '0'),
 	'lease_payload', ARGV[10] or '',
-	'node_idx', tonumber(ARGV[11] or '0'))
+	'node_idx', tonumber(ARGV[11] or '0'),
+	'unit_idx', tonumber(ARGV[12] or '-1'))
 redis.call('EXPIRE', KEYS[2], tonumber(ARGV[4]))
 local leaseTTLms = tonumber(ARGV[7] or '0')
 if leaseTTLms > 0 and ARGV[2] ~= '' then

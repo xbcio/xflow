@@ -186,6 +186,7 @@ type DurableSignalDeliverer interface {
 type ResumeIntent struct {
 	NodeName string
 	NodeIdx  int
+	UnitIdx  int
 	// ActivationID is retained for legacy callers but is IGNORED by the durable
 	// DeliverSignalWithOutbox path: that path reads the authoritative live
 	// activation_id from node meta inside the backend's atomic Lua transaction,

@@ -103,6 +103,7 @@ func (e *Engine) scheduleRetry(ctx context.Context, task *Task, attempt int, set
 		ExecutionID:  task.ExecutionID,
 		NodeName:     task.NodeName,
 		NodeIdx:      task.NodeIdx,
+		UnitIdx:      task.UnitIdx,
 		Type:         TaskTypeNodeExec,
 		ActivationID: task.ActivationID,
 		AutoDepth:    task.AutoDepth,

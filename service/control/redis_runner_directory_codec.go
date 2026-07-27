@@ -86,6 +86,7 @@ type redisAssignmentRecord struct {
 	Task         engine.Task         `json:"task"`
 	AutoDepth    int                 `json:"auto_depth"`
 	ActivationID int                 `json:"activation_id"`
+	UnitIdx      *int                `json:"unit_idx,omitempty"`
 	Routing      engine.TaskRouting  `json:"routing"`
 	Namespace    namespace.Namespace `json:"namespace,omitempty"`
 }
@@ -96,6 +97,7 @@ func marshalRedisAssignment(assignment Assignment) (string, error) {
 		Task:         assignment.Task,
 		AutoDepth:    assignment.Task.AutoDepth,
 		ActivationID: assignment.Task.ActivationID,
+		UnitIdx:      controlUnitIdxPtr(assignment.Task.UnitIdx),
 		Routing:      assignment.Routing,
 		Namespace:    assignment.Namespace,
 	})
@@ -115,10 +117,26 @@ func unmarshalRedisAssignment(payload string) (Assignment, error) {
 	}
 	record.Task.AutoDepth = record.AutoDepth
 	record.Task.ActivationID = record.ActivationID
+	if record.UnitIdx != nil {
+		record.Task.UnitIdx = *record.UnitIdx
+	} else {
+		record.Task.UnitIdx = engine.UnitIdxUnknown
+	}
 	if record.Namespace == "" {
 		record.Namespace = namespace.Default
 	}
 	return Assignment{AssignmentID: record.AssignmentID, Task: record.Task, Routing: record.Routing, Namespace: record.Namespace}, nil
+}
+
+// controlUnitIdxPtr omits the wire field when the task's UnitIdx is the
+// "unknown" sentinel, so absence on decode is distinguishable from a real
+// unit index of 0. See engine.UnitIdxUnknown.
+func controlUnitIdxPtr(unitIdx int) *int {
+	if unitIdx == engine.UnitIdxUnknown {
+		return nil
+	}
+	v := unitIdx
+	return &v
 }
 
 // redisLeaseMeta embeds the complete runner-facing lease rather than only

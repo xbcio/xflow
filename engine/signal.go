@@ -52,7 +52,7 @@ func (e *Engine) deliverSignalDurable(ctx context.Context, id types.ExecutionID,
 		// live activation_id from node meta inside the atomic Lua transaction,
 		// closing the TOCTOU window where a concurrent re-suspend under a new
 		// activation could make the Go-side snapshot stale.
-		intent = ResumeIntent{NodeName: resumeNode, NodeIdx: nodeIdx}
+		intent = ResumeIntent{NodeName: resumeNode, NodeIdx: nodeIdx, UnitIdx: g.UnitIndexForNode(nodeIdx)}
 	}
 
 	node, _, committed, err := durable.DeliverSignalWithOutbox(ctx, id, name, data, intent)
@@ -138,6 +138,7 @@ func (e *Engine) deliverSignalLegacy(ctx context.Context, id types.ExecutionID, 
 		ExecutionID:  id,
 		NodeName:     resumeNode,
 		NodeIdx:      nodeIdx,
+		UnitIdx:      g.UnitIndexForNode(nodeIdx),
 		Type:         TaskTypeNodeResume,
 		Payload:      payload,
 		ActivationID: activationID,
@@ -180,6 +181,7 @@ func (e *Engine) TimeoutNode(ctx context.Context, id types.ExecutionID, nodeName
 		ExecutionID: id,
 		NodeName:    nodeName,
 		NodeIdx:     nodeIdx,
+		UnitIdx:     g.UnitIndexForNode(nodeIdx),
 		Type:        TaskTypeNodeResume,
 		Payload: &types.SignalPayload{
 			Triggered: types.TimeoutFired,

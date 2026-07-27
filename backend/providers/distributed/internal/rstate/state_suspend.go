@@ -344,6 +344,7 @@ func (s *Store) DeliverSignalWithOutbox(ctx context.Context, id types.ExecutionI
 			ExecutionID:  id,
 			NodeName:     intent.NodeName,
 			NodeIdx:      intent.NodeIdx,
+			UnitIdx:      intent.UnitIdx,
 			Type:         engine.TaskTypeNodeResume,
 			Payload:      payload,
 			ActivationID: 0, // Lua reads live value from node meta
