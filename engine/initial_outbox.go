@@ -32,16 +32,32 @@ func submitInitialTasks(id types.ExecutionID, g *graph.Graph) []initialTask {
 	}
 
 	tasks := make([]initialTask, 0)
-	for nodeIdx := 0; nodeIdx < g.NodeCount(); nodeIdx++ {
-		node := g.NodeAt(nodeIdx)
-		if g.InDegreeAt(nodeIdx) != 0 {
+	for unitIdx := 0; unitIdx < g.UnitCount(); unitIdx++ {
+		if g.UnitInDegreeAt(unitIdx) != 0 {
 			continue
 		}
+		if g.UnitKindAt(unitIdx) == graph.UnitGroup {
+			gm := g.GroupMetaAt(unitIdx)
+			tasks = append(tasks, initialTask{
+				task: Task{
+					ExecutionID: id,
+					NodeName:    gm.Name,
+					NodeIdx:     gm.EntryIdx,
+					UnitIdx:     unitIdx,
+					Type:        TaskTypeGroupExec,
+				},
+				operation: fmt.Sprintf("enqueue root group %q", gm.Name),
+			})
+			continue
+		}
+		nodeIdx := g.UnitNodeIndex(unitIdx)
+		node := g.NodeAt(nodeIdx)
 		tasks = append(tasks, initialTask{
 			task: Task{
 				ExecutionID: id,
 				NodeName:    node.Name,
 				NodeIdx:     nodeIdx,
+				UnitIdx:     unitIdx,
 				Type:        TaskTypeNodeExec,
 			},
 			operation: fmt.Sprintf("enqueue root node %q", node.Name),

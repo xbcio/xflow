@@ -20,6 +20,14 @@ var ErrSignalConsumed = errors.New("signal already consumed or not found")
 // execution that has already completed, was canceled, or has been cleaned up.
 var ErrExecutionInactive = errors.New("execution inactive")
 
+// ErrExecutionNotFound is returned when a user-facing operation targets an
+// execution that does not exist in the caller's state namespace.
+var ErrExecutionNotFound = errors.New("execution not found")
+
+// ErrEntryNotFound is returned when Invoke targets a graph entry that does not
+// exist in the compiled workflow.
+var ErrEntryNotFound = errors.New("entry not found")
+
 // ErrInvalidLeaseToken is returned when a runner commits with a stale or
 // unknown lease token.
 var ErrInvalidLeaseToken = errors.New("invalid lease token")
@@ -89,6 +97,7 @@ type Engine struct {
 	defaultLeaseTTL          time.Duration
 	suspendDisabled          bool
 	suspendDisabledErr       error
+	groupExecutor            GroupExecutor
 
 	mu     sync.RWMutex
 	graphs map[types.ExecutionID]*graph.Graph
@@ -169,7 +178,7 @@ func (e *Engine) Submit(ctx context.Context, g *graph.Graph, params map[string]a
 func (e *Engine) Invoke(ctx context.Context, g *graph.Graph, entryName string, params map[string]any, runtime ...*types.Runtime) (types.ExecutionID, error) {
 	entryIdx, ok := g.EntryIndex(entryName)
 	if !ok {
-		return "", fmt.Errorf("entry node %q not found", entryName)
+		return "", fmt.Errorf("entry node %q: %w", entryName, ErrEntryNotFound)
 	}
 
 	id := preallocOrNewExecutionID(ctx)

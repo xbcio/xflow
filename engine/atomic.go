@@ -403,6 +403,8 @@ func (e *Engine) handleSystemTask(ctx context.Context, task *Task, flush bool) (
 			AutoDepth:    task.AutoDepth,
 			Status:       types.NodeStatusSkipped,
 		}, result, flush)
+	case TaskTypeGroupExec:
+		return true, e.executeGroup(ctx, task, flush)
 	default:
 		return false, nil
 	}
