@@ -272,6 +272,17 @@ type graphHashPayload struct {
 // It mirrors the private Graph fields so that encoding/json can round-trip the
 // compiled graph through Redis (distributed backend) or any other JSON store
 // without leaking the private field names into the Graph API.
+//
+// Groups carries the co-location group definitions (compiler v2). The
+// derived two-layer unit IR (units/unitInDegree/unitOutEdges/unitInEdges/
+// nodeUnit) is intentionally NOT serialized: UnmarshalJSON re-derives it via
+// buildUnits from Nodes[i].GroupIdx + Groups, the same deterministic
+// construction Compile uses. This keeps the wire format smaller and — more
+// importantly — guarantees the round-tripped Graph's unit topology (in
+// particular UnitCount/UnitInDegreeAt, which size the durable Redis
+// remaining/in-degree counters) always matches what Compile would have
+// produced, instead of silently degrading to zero units after a JSON
+// round-trip (see .claude/plans F9).
 type graphSerializedForm struct {
 	GraphHash       string         `json:"graph_hash"`
 	Name            string         `json:"name"`
@@ -288,6 +299,7 @@ type graphSerializedForm struct {
 	AllowCycles     bool           `json:"allow_cycles"`
 	StartIdx        int            `json:"start_idx"`
 	MaxAutoDepth    int            `json:"max_auto_depth"`
+	Groups          []GroupMeta    `json:"groups,omitempty"`
 }
 
 // MarshalJSON implements json.Marshaler so that encoding/json can serialize a
@@ -313,12 +325,17 @@ func (g *Graph) MarshalJSON() ([]byte, error) {
 		AllowCycles:     g.allowCycles,
 		StartIdx:        g.startIdx,
 		MaxAutoDepth:    g.maxAutoDepth,
+		Groups:          g.groups,
 	})
 }
 
 // UnmarshalJSON implements json.Unmarshaler, the inverse of MarshalJSON.
 // It populates the Graph's unexported fields from the stable wire format so
-// that a deserialized graph is fully functional without recompilation.
+// that a deserialized graph is fully functional without recompilation, then
+// re-derives the two-layer unit IR (buildUnits) exactly as Compile does. A
+// grouped snapshot whose unit topology cannot be rebuilt (e.g. a group
+// boundary cycle) fails closed instead of silently producing a Graph with a
+// zeroed/mismatched UnitCount.
 func (g *Graph) UnmarshalJSON(data []byte) error {
 	var sf graphSerializedForm
 	if err := json.Unmarshal(data, &sf); err != nil {
@@ -339,5 +356,9 @@ func (g *Graph) UnmarshalJSON(data []byte) error {
 	g.allowCycles = sf.AllowCycles
 	g.startIdx = sf.StartIdx
 	g.maxAutoDepth = sf.MaxAutoDepth
+	g.groups = sf.Groups
+	if err := buildUnits(g); err != nil {
+		return fmt.Errorf("rebuild units after graph deserialization: %w", err)
+	}
 	return nil
 }
