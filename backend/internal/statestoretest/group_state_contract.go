@@ -129,6 +129,42 @@ func RunGroupStateContract(t *testing.T, newStore func(*testing.T) GroupStore) {
 		}
 	})
 
+	// F2 regression: a commit attempt fenced out by a stale/wrong token must
+	// not write boundary output at all — before the fix, Store.CommitGroup
+	// wrote output via an unfenced SET before the fenced Lua transition ran,
+	// so a stale attempt's output could still land even though the commit
+	// itself was correctly rejected.
+	t.Run("CommitStaleTokenDoesNotWriteOutput", func(t *testing.T) {
+		s, id, gu := seed(t, twoUnitGraph(t))
+		s.AcquireGroupLease(ctx, lease(id, gu, "T1"))
+		staleReq := commit(id, gu, "STALE")
+		staleReq.Exits = []engine.GroupExitResult{{NodeName: "analyze", Port: "main", Data: map[string]any{"k": "poisoned"}}}
+		res, _ := s.CommitGroup(ctx, staleReq)
+		if res.Applied {
+			t.Fatal("commit with stale token must not apply")
+		}
+		out, err := s.GetOutput(ctx, id, "analyze")
+		if err != nil {
+			t.Fatalf("GetOutput: %v", err)
+		}
+		if out != nil {
+			t.Fatalf("stale commit must not write output, got %+v", out)
+		}
+		// The legitimate T1 commit must still succeed afterward and write its
+		// own (non-poisoned) output.
+		res2, err := s.CommitGroup(ctx, commit(id, gu, "T1"))
+		if err != nil || !res2.Applied {
+			t.Fatalf("legitimate commit after stale attempt: %+v err=%v", res2, err)
+		}
+		out2, err := s.GetOutput(ctx, id, "analyze")
+		if err != nil {
+			t.Fatalf("GetOutput after legitimate commit: %v", err)
+		}
+		if out2["k"] != "v" {
+			t.Fatalf("output after legitimate commit = %+v, want k=v (not poisoned by the earlier stale attempt)", out2)
+		}
+	})
+
 	t.Run("DuplicateCommitIdempotent", func(t *testing.T) {
 		s, id, gu := seed(t, twoUnitGraph(t))
 		s.AcquireGroupLease(ctx, lease(id, gu, "T1"))
@@ -142,6 +178,31 @@ func RunGroupStateContract(t *testing.T, newStore func(*testing.T) GroupStore) {
 		}
 		if r2.Outcome != engine.CommitOutcomeDuplicateTerminal {
 			t.Fatalf("duplicate commit must report duplicate-terminal outcome, got %q", r2.Outcome)
+		}
+	})
+
+	// F2 regression: a duplicate (already-terminal) commit attempt with
+	// different exit data must not overwrite the output written by the
+	// original, accepted commit.
+	t.Run("DuplicateCommitDoesNotOverwriteOutput", func(t *testing.T) {
+		s, id, gu := seed(t, twoUnitGraph(t))
+		s.AcquireGroupLease(ctx, lease(id, gu, "T1"))
+		r1, err := s.CommitGroup(ctx, commit(id, gu, "T1"))
+		if err != nil || !r1.Applied {
+			t.Fatalf("first commit: %+v err=%v", r1, err)
+		}
+		dup := commit(id, gu, "T1")
+		dup.Exits = []engine.GroupExitResult{{NodeName: "analyze", Port: "main", Data: map[string]any{"k": "poisoned"}}}
+		r2, _ := s.CommitGroup(ctx, dup)
+		if r2.Applied {
+			t.Fatal("duplicate commit must be idempotent (Applied=false)")
+		}
+		out, err := s.GetOutput(ctx, id, "analyze")
+		if err != nil {
+			t.Fatalf("GetOutput: %v", err)
+		}
+		if out["k"] != "v" {
+			t.Fatalf("output after duplicate commit = %+v, want unchanged k=v", out)
 		}
 	})
 
