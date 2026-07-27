@@ -1,0 +1,161 @@
+package local
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/types"
+)
+
+const (
+	groupUnitPending = iota
+	groupUnitRunning
+	groupUnitDone
+)
+
+type groupUnitState struct {
+	status         int
+	leaseID        engine.LeaseID
+	leaseToken     engine.LeaseToken
+	attempt        int
+	deadline       time.Time
+	committedToken engine.LeaseToken
+}
+
+var _ engine.GroupStateStore = (*memoryState)(nil)
+
+func groupKey(id types.ExecutionID, unitIdx int) string {
+	return fmt.Sprintf("%s/%d", id, unitIdx)
+}
+
+func (s *memoryState) AcquireGroupLease(_ context.Context, lease *engine.GroupLease) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := groupKey(lease.ExecutionID, lease.GroupUnitIdx)
+	st := s.groupUnits[key]
+	if st == nil {
+		st = &groupUnitState{status: groupUnitPending}
+		s.groupUnits[key] = st
+	}
+	if st.status == groupUnitRunning || st.status == groupUnitDone {
+		return false, nil
+	}
+	st.status = groupUnitRunning
+	st.leaseID, st.leaseToken, st.attempt = lease.LeaseID, lease.LeaseToken, lease.Attempt
+	st.deadline = lease.IssuedAt.Add(lease.TTL)
+	return true, nil
+}
+
+func (s *memoryState) RenewGroupLease(_ context.Context, id types.ExecutionID, unitIdx int, token engine.LeaseToken, deadline time.Time) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.groupUnits[groupKey(id, unitIdx)]
+	if st == nil || st.status != groupUnitRunning || st.leaseToken != token {
+		return false, nil
+	}
+	st.deadline = deadline
+	return true, nil
+}
+
+func (s *memoryState) CommitGroup(_ context.Context, req engine.GroupCommitRequest) (engine.GroupCommitResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.groupUnits[groupKey(req.ExecutionID, req.GroupUnitIdx)]
+	// No lease / already terminal / fence mismatch => not applied.
+	if st == nil || st.leaseToken != req.LeaseToken || st.attempt != req.Attempt || st.status != groupUnitRunning {
+		outcome := engine.CommitOutcomeStaleToken
+		if st != nil && st.status == groupUnitDone {
+			outcome = engine.CommitOutcomeDuplicateTerminal
+		}
+		return engine.GroupCommitResult{Applied: false, Outcome: outcome}, nil
+	}
+	entry := s.executions[req.ExecutionID]
+	if entry == nil || isTerminalStatus(entry.snap.Status) {
+		return engine.GroupCommitResult{Applied: false, Outcome: engine.CommitOutcomeExecutionInactive}, nil
+	}
+	// 1. Persist boundary outputs (same path as CommitNode: s.outputs keyed by execID+"/"+name).
+	for _, ex := range req.Exits {
+		s.outputs[string(req.ExecutionID)+"/"+ex.NodeName] = cloneData(ex.Data)
+	}
+	// 2. Terminalize the group unit.
+	st.status = groupUnitDone
+	st.committedToken = req.LeaseToken
+	st.leaseID, st.leaseToken = "", ""
+	// 3. Decrement remaining by unit (same completion logic as CommitNode).
+	result := engine.GroupCommitResult{Applied: true, Outcome: engine.CommitOutcomeAccepted}
+	if entry.snap.Graph != nil && !entry.snap.Graph.AllowCycles() {
+		s.remaining[req.ExecutionID]--
+		if req.Outcome == engine.GroupOutcomeFailed {
+			s.failed[req.ExecutionID]++
+		}
+		if req.Fatal || s.remaining[req.ExecutionID] == 0 {
+			status := types.ExecutionStatusSuccess
+			if req.Fatal || s.failed[req.ExecutionID] > 0 {
+				status = types.ExecutionStatusFailed
+			}
+			s.finishExecutionLocked(req.ExecutionID, entry, status)
+			result.ExecutionDone = true
+			result.ExecutionStatus = status
+		}
+	}
+	// 4. Downstream unit arrival counting (same unit-keyed counting as AdvanceNode).
+	result.OutboxIDs = append(result.OutboxIDs, s.applyGroupDownstreamLocked(req.ExecutionID, req.Downstream)...)
+	return result, nil
+}
+
+// applyGroupDownstreamLocked converts group commit downstream arrivals into
+// execute/skip outbox intents, using unit-keyed counting with the same semantics
+// as AdvanceNode (DECR in-degree, accumulate active, wait_any/wait_all threshold).
+// Caller must hold s.mu.
+func (s *memoryState) applyGroupDownstreamLocked(id types.ExecutionID, arrivals []engine.DownstreamArrival) []string {
+	var ids []string
+	for _, arrival := range arrivals {
+		if arrival.ArrivalCount <= 0 {
+			continue
+		}
+		counterKey := memoryCounterKey(id, arrival.UnitIdx)
+		previousActive := s.activeIns[counterKey]
+		s.inDegrees[counterKey] -= arrival.ArrivalCount
+		if arrival.ActiveCount > 0 {
+			s.activeIns[counterKey] += arrival.ActiveCount
+		}
+		if s.scheduled[counterKey] != "" {
+			continue
+		}
+		schedule := ""
+		if arrival.MergeMode == "wait_any" && arrival.ActiveCount > 0 && previousActive == 0 {
+			schedule = "execute"
+		} else if s.inDegrees[counterKey] <= 0 {
+			if s.activeIns[counterKey] > 0 {
+				schedule = "execute"
+			} else {
+				schedule = "skip"
+			}
+		}
+		if schedule == "" {
+			continue
+		}
+		s.scheduled[counterKey] = schedule
+		taskType := arrival.ExecTaskType
+		if taskType == 0 {
+			taskType = engine.TaskTypeNodeExec
+		}
+		outboxID := executeOutboxID(id, arrival.NodeName, 0)
+		if schedule == "skip" {
+			taskType = engine.TaskTypeNodeSkip
+			outboxID = skipOutboxID(id, arrival.NodeName, 0)
+		}
+		if s.putOutboxLocked(id, outboxID, engine.Task{
+			ExecutionID: id,
+			NodeName:    arrival.NodeName,
+			NodeIdx:     arrival.NodeIdx,
+			UnitIdx:     arrival.UnitIdx,
+			Type:        taskType,
+		}, time.Time{}) {
+			ids = append(ids, outboxID)
+		}
+	}
+	return ids
+}
