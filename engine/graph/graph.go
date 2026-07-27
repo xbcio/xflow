@@ -42,6 +42,7 @@ type Graph struct {
 	unitOutEdges [][]UnitEdge
 	unitInEdges  [][]UnitEdge
 	unitInDegree []int
+	nodeUnit     []int // nodeIdx → unitIdx mapping
 }
 
 // Name returns the workflow name.
@@ -167,12 +168,7 @@ func (g *Graph) UnitOutEdges(i int) []UnitEdge {
 }
 
 // UnitIndexForNode returns the unit index that the given node index belongs to.
-func (g *Graph) UnitIndexForNode(nodeIdx int) int {
-	// In the no-group degenerate case unit index == node index.
-	// When groups are present, units[nodeIdx] may be invalid; use the
-	// node's GroupIdx to find the group's UnitIdx. For now: identity.
-	return g.units[nodeIdx].NodeIdx
-}
+func (g *Graph) UnitIndexForNode(nodeIdx int) int { return g.nodeUnit[nodeIdx] }
 
 // UnitKindAt returns the UnitKind for the unit at index i.
 func (g *Graph) UnitKindAt(i int) UnitKind { return g.units[i].Kind }
@@ -194,6 +190,21 @@ func (g *Graph) GroupMetaAt(unitIdx int) GroupMeta {
 	}
 	return g.groups[g.units[unitIdx].GroupIdx]
 }
+
+// UnitMergeMode returns the downstream merge semantic for a unit. For a
+// UnitNode it returns the member node's MergeMode. For a UnitGroup it returns
+// "" (default wait_all; group fan-in semantics belong to Milestone B).
+func (g *Graph) UnitMergeMode(unitIdx int) string {
+	u := g.units[unitIdx]
+	if u.Kind == UnitGroup {
+		return ""
+	}
+	return g.nodes[u.NodeIdx].MergeMode
+}
+
+// UnitDisplayName returns a human-readable name for the unit (node name for
+// UnitNode, group name for UnitGroup).
+func (g *Graph) UnitDisplayName(unitIdx int) string { return g.units[unitIdx].Name }
 
 // NodeMeta holds the static metadata for a single node extracted from NodeDef.
 type NodeMeta struct {
