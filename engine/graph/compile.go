@@ -115,6 +115,9 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 			return nil, err
 		}
 	}
+	if err := buildUnits(g); err != nil {
+		return nil, fmt.Errorf("build units: %w", err)
+	}
 	if err := assignGraphHash(g); err != nil {
 		return nil, fmt.Errorf("hash graph: %w", err)
 	}
@@ -146,6 +149,7 @@ func registerNodes(def *types.WorkflowDef, g *Graph) (int, error) {
 			MergeMode:      extractMergeMode(nd),
 			Parameters:     cloneStringAnyMap(nd.Parameters),
 			Retry:          resolveRetry(nd.Retry, def.Settings),
+			GroupIdx:       -1,
 		}
 		if nd.Type == "xflow.start" || nd.Kind == types.NodeKindTrigger {
 			g.entryIndexes[nd.Name] = i

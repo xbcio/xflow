@@ -34,6 +34,14 @@ type Graph struct {
 	startIdx int
 	// maxAutoDepth limits one uninterrupted automatic scheduling chain.
 	maxAutoDepth int
+
+	// Two-layer IR: durable scheduling topology (P0-2). When no groups are
+	// defined the unit graph mirrors the node graph 1:1.
+	groups       []GroupMeta
+	units        []UnitMeta
+	unitOutEdges [][]UnitEdge
+	unitInEdges  [][]UnitEdge
+	unitInDegree []int
 }
 
 // Name returns the workflow name.
@@ -128,6 +136,65 @@ func (g *Graph) StartIndex() int { return g.startIdx }
 // MaxAutoDepth returns the maximum uninterrupted automatic scheduling depth.
 func (g *Graph) MaxAutoDepth() int { return g.maxAutoDepth }
 
+// UnitCount returns the number of scheduling units in the two-layer IR.
+func (g *Graph) UnitCount() int { return len(g.units) }
+
+// UnitAt returns the UnitMeta at position i.
+func (g *Graph) UnitAt(i int) UnitMeta { return g.units[i] }
+
+// Units returns a defensive copy of all UnitMeta entries.
+func (g *Graph) Units() []UnitMeta {
+	out := make([]UnitMeta, len(g.units))
+	copy(out, g.units)
+	return out
+}
+
+// Groups returns a defensive copy of all GroupMeta entries.
+func (g *Graph) Groups() []GroupMeta {
+	out := make([]GroupMeta, len(g.groups))
+	copy(out, g.groups)
+	return out
+}
+
+// UnitInDegreeAt returns the in-degree for unit i in the scheduling topology.
+func (g *Graph) UnitInDegreeAt(i int) int { return g.unitInDegree[i] }
+
+// UnitOutEdges returns a defensive copy of outgoing unit edges for unit i.
+func (g *Graph) UnitOutEdges(i int) []UnitEdge {
+	out := make([]UnitEdge, len(g.unitOutEdges[i]))
+	copy(out, g.unitOutEdges[i])
+	return out
+}
+
+// UnitIndexForNode returns the unit index that the given node index belongs to.
+func (g *Graph) UnitIndexForNode(nodeIdx int) int {
+	// In the no-group degenerate case unit index == node index.
+	// When groups are present, units[nodeIdx] may be invalid; use the
+	// node's GroupIdx to find the group's UnitIdx. For now: identity.
+	return g.units[nodeIdx].NodeIdx
+}
+
+// UnitKindAt returns the UnitKind for the unit at index i.
+func (g *Graph) UnitKindAt(i int) UnitKind { return g.units[i].Kind }
+
+// UnitNodeIndex returns the node index for a UnitNode unit. Panics if the unit
+// is not UnitNode.
+func (g *Graph) UnitNodeIndex(i int) int {
+	if g.units[i].Kind != UnitNode {
+		panic("UnitNodeIndex called on non-UnitNode unit")
+	}
+	return g.units[i].NodeIdx
+}
+
+// GroupMetaAt returns the GroupMeta for a UnitGroup unit. Panics if the unit is
+// not UnitGroup.
+func (g *Graph) GroupMetaAt(unitIdx int) GroupMeta {
+	if g.units[unitIdx].Kind != UnitGroup {
+		panic("GroupMetaAt called on non-UnitGroup unit")
+	}
+	return g.groups[g.units[unitIdx].GroupIdx]
+}
+
 // NodeMeta holds the static metadata for a single node extracted from NodeDef.
 type NodeMeta struct {
 	Name           string
@@ -143,6 +210,9 @@ type NodeMeta struct {
 	// re-enqueue this node with an exponential backoff after a transient
 	// handler failure. Nil means no retries.
 	Retry *types.RetrySettings
+	// GroupIdx is the index of the co-location group this node belongs to;
+	// -1 means the node is ungrouped.
+	GroupIdx int
 }
 
 // Edge represents a directed connection between two nodes.
