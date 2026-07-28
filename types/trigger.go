@@ -80,39 +80,39 @@ type TriggerState interface {
 	Delete(ctx context.Context, key string) error
 }
 
-// TriggerGroupRuntime is an optional capability of TriggerRuntime that supports
-// trigger-group atomic admission. Kafka trigger nodes check for this via type
-// assertion when operating in trigger-group mode. If absent, the trigger falls
-// back to the standard Emit path.
-type TriggerGroupRuntime interface {
-	// SeedTriggeredGroupResult atomically admits a trigger-group result to the
+// EntrySeedRuntime is an optional capability of TriggerRuntime that supports
+// entry-unit seed (single node or group node) atomic admission. Kafka trigger
+// nodes check for this via type assertion when operating in seed mode. If
+// absent, the trigger falls back to the standard Emit path.
+type EntrySeedRuntime interface {
+	// SeedExecutionFromEntry atomically admits an entry-unit result to the
 	// control plane. Only after a successful (accepted/duplicate) response may
 	// the caller commit the Kafka offset.
-	SeedTriggeredGroupResult(ctx context.Context, req TriggerGroupAdmissionRequest) (TriggerGroupAdmissionResponse, error)
+	SeedExecutionFromEntry(ctx context.Context, req EntrySeedRequest) (EntrySeedResponse, error)
 }
 
-// TriggerGroupAdmissionRequest is the caller-facing admission request. It wraps
+// EntrySeedRequest is the caller-facing admission request. It wraps
 // the engine-level types with the fields a Kafka trigger naturally has. The
-// TriggerGroupRuntime implementation maps these to the engine request.
-type TriggerGroupAdmissionRequest struct {
+// EntrySeedRuntime implementation maps these to the engine request.
+type EntrySeedRequest struct {
 	AdmissionKey    string
 	WorkflowID      WorkflowID
 	WorkflowVersion string
-	GroupID         string
+	EntryUnitID     string
 	Outcome         string // "success" or "failed"
-	Exits           []TriggerGroupExit
+	Exits           []BoundaryExit
 	Error           string
 }
 
-// TriggerGroupExit is one boundary output from the group execution.
-type TriggerGroupExit struct {
+// BoundaryExit is one boundary output from the entry-unit execution.
+type BoundaryExit struct {
 	NodeName string
 	Port     string
 	Data     map[string]any
 }
 
-// TriggerGroupAdmissionResponse is the control-plane response.
-type TriggerGroupAdmissionResponse struct {
+// EntrySeedResponse is the control-plane response.
+type EntrySeedResponse struct {
 	Accepted    bool
 	Duplicate   bool
 	Conflict    bool
