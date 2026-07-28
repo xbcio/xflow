@@ -11,11 +11,11 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
-// TriggerAdmissionTestStore is a backend implementing both state and trigger
+// EntryAdmissionTestStore is a backend implementing both state and entry
 // admission capabilities.
-type TriggerAdmissionTestStore interface {
+type EntryAdmissionTestStore interface {
 	engine.StateStore
-	engine.TriggerAdmissionStore
+	engine.EntryAdmissionStore
 }
 
 // triggerGroupOnlyGraph: group "tg" with members [entry, body], no external
@@ -62,7 +62,7 @@ func triggerGroupWithDownstreamGraph(t *testing.T) *graph.Graph {
 	return g
 }
 
-func buildAdmissionRequest(t *testing.T, g *graph.Graph, key engine.AdmissionKey, outcome engine.GroupOutcome, exits []engine.GroupExitResult, downstream []engine.DownstreamArrival) engine.SeedTriggeredGroupResultRequest {
+func buildAdmissionRequest(t *testing.T, g *graph.Graph, key engine.AdmissionKey, outcome engine.GroupOutcome, exits []engine.BoundaryExit, downstream []engine.DownstreamArrival) engine.SeedExecutionFromEntryRequest {
 	t.Helper()
 	groups := g.Groups()
 	if len(groups) == 0 {
@@ -70,13 +70,13 @@ func buildAdmissionRequest(t *testing.T, g *graph.Graph, key engine.AdmissionKey
 	}
 	gm := groups[0]
 	hash := engine.ComputeResultHash(outcome, exits)
-	return engine.SeedTriggeredGroupResultRequest{
+	return engine.SeedExecutionFromEntryRequest{
 		AdmissionKey:    key,
 		Namespace:       namespace.Default,
 		WorkflowID:      "wf-test",
 		WorkflowVersion: "v1",
-		GroupID:         gm.Name,
-		GroupUnitIdx:    gm.UnitIdx,
+		EntryUnitID:     gm.Name,
+		EntryUnitIdx:    gm.UnitIdx,
 		Graph:           g,
 		Outcome:         outcome,
 		Exits:           exits,
@@ -85,21 +85,21 @@ func buildAdmissionRequest(t *testing.T, g *graph.Graph, key engine.AdmissionKey
 	}
 }
 
-// RunTriggerAdmissionContract exercises the TriggerAdmissionStore contract
+// RunEntryAdmissionContract exercises the EntryAdmissionStore contract
 // against a concrete backend. Both local and distributed implementations must
 // pass identically.
-func RunTriggerAdmissionContract(t *testing.T, newStore func(*testing.T) TriggerAdmissionTestStore) {
+func RunEntryAdmissionContract(t *testing.T, newStore func(*testing.T) EntryAdmissionTestStore) {
 	ctx := context.Background()
 
 	t.Run("HappyPath_AbsentToAccepted", func(t *testing.T) {
 		s := newStore(t)
 		g := triggerGroupOnlyGraph(t)
 		req := buildAdmissionRequest(t, g, "k1", engine.GroupOutcomeSuccess,
-			[]engine.GroupExitResult{{NodeName: "body", Port: "main", Data: map[string]any{"x": 1}}},
+			[]engine.BoundaryExit{{NodeName: "body", Port: "main", Data: map[string]any{"x": 1}}},
 			nil)
-		resp, err := s.SeedTriggeredGroupResult(ctx, req)
+		resp, err := s.SeedExecutionFromEntry(ctx, req)
 		if err != nil {
-			t.Fatalf("SeedTriggeredGroupResult: %v", err)
+			t.Fatalf("SeedExecutionFromEntry: %v", err)
 		}
 		if resp.State != engine.AdmissionStateAccepted {
 			t.Fatalf("state = %q, want accepted", resp.State)
@@ -121,13 +121,13 @@ func RunTriggerAdmissionContract(t *testing.T, newStore func(*testing.T) Trigger
 		s := newStore(t)
 		g := triggerGroupOnlyGraph(t)
 		req := buildAdmissionRequest(t, g, "k2", engine.GroupOutcomeSuccess,
-			[]engine.GroupExitResult{{NodeName: "body", Port: "main", Data: map[string]any{"x": 2}}},
+			[]engine.BoundaryExit{{NodeName: "body", Port: "main", Data: map[string]any{"x": 2}}},
 			nil)
-		r1, err := s.SeedTriggeredGroupResult(ctx, req)
+		r1, err := s.SeedExecutionFromEntry(ctx, req)
 		if err != nil {
 			t.Fatalf("first: %v", err)
 		}
-		r2, err := s.SeedTriggeredGroupResult(ctx, req)
+		r2, err := s.SeedExecutionFromEntry(ctx, req)
 		if err != nil {
 			t.Fatalf("second: %v", err)
 		}
@@ -146,17 +146,17 @@ func RunTriggerAdmissionContract(t *testing.T, newStore func(*testing.T) Trigger
 		s := newStore(t)
 		g := triggerGroupOnlyGraph(t)
 		req1 := buildAdmissionRequest(t, g, "k3", engine.GroupOutcomeSuccess,
-			[]engine.GroupExitResult{{NodeName: "body", Port: "main", Data: map[string]any{"x": 1}}},
+			[]engine.BoundaryExit{{NodeName: "body", Port: "main", Data: map[string]any{"x": 1}}},
 			nil)
-		_, err := s.SeedTriggeredGroupResult(ctx, req1)
+		_, err := s.SeedExecutionFromEntry(ctx, req1)
 		if err != nil {
 			t.Fatalf("first: %v", err)
 		}
 		// Same key but different exits => different hash.
 		req2 := buildAdmissionRequest(t, g, "k3", engine.GroupOutcomeSuccess,
-			[]engine.GroupExitResult{{NodeName: "body", Port: "main", Data: map[string]any{"x": 99}}},
+			[]engine.BoundaryExit{{NodeName: "body", Port: "main", Data: map[string]any{"x": 99}}},
 			nil)
-		r2, err := s.SeedTriggeredGroupResult(ctx, req2)
+		r2, err := s.SeedExecutionFromEntry(ctx, req2)
 		if err != nil {
 			t.Fatalf("second: %v", err)
 		}
@@ -172,9 +172,9 @@ func RunTriggerAdmissionContract(t *testing.T, newStore func(*testing.T) Trigger
 		s := newStore(t)
 		g := triggerGroupOnlyGraph(t)
 		req := buildAdmissionRequest(t, g, "k4", engine.GroupOutcomeSuccess,
-			[]engine.GroupExitResult{{NodeName: "body", Port: "main", Data: map[string]any{"v": true}}},
+			[]engine.BoundaryExit{{NodeName: "body", Port: "main", Data: map[string]any{"v": true}}},
 			nil)
-		resp, err := s.SeedTriggeredGroupResult(ctx, req)
+		resp, err := s.SeedExecutionFromEntry(ctx, req)
 		if err != nil {
 			t.Fatalf("admission: %v", err)
 		}
@@ -191,9 +191,9 @@ func RunTriggerAdmissionContract(t *testing.T, newStore func(*testing.T) Trigger
 		s := newStore(t)
 		g := triggerGroupOnlyGraph(t)
 		req := buildAdmissionRequest(t, g, "k5", engine.GroupOutcomeSuccess,
-			[]engine.GroupExitResult{{NodeName: "body", Port: "main", Data: map[string]any{"k": "v"}}},
+			[]engine.BoundaryExit{{NodeName: "body", Port: "main", Data: map[string]any{"k": "v"}}},
 			nil)
-		resp, err := s.SeedTriggeredGroupResult(ctx, req)
+		resp, err := s.SeedExecutionFromEntry(ctx, req)
 		if err != nil {
 			t.Fatalf("admission: %v", err)
 		}
@@ -210,9 +210,9 @@ func RunTriggerAdmissionContract(t *testing.T, newStore func(*testing.T) Trigger
 		s := newStore(t)
 		g := triggerGroupOnlyGraph(t)
 		req := buildAdmissionRequest(t, g, "k6", engine.GroupOutcomeSuccess,
-			[]engine.GroupExitResult{{NodeName: "body", Port: "main", Data: map[string]any{"done": true}}},
+			[]engine.BoundaryExit{{NodeName: "body", Port: "main", Data: map[string]any{"done": true}}},
 			nil)
-		resp, err := s.SeedTriggeredGroupResult(ctx, req)
+		resp, err := s.SeedExecutionFromEntry(ctx, req)
 		if err != nil {
 			t.Fatalf("admission: %v", err)
 		}
@@ -254,21 +254,21 @@ func RunTriggerAdmissionContract(t *testing.T, newStore func(*testing.T) Trigger
 			ExecTaskType: engine.TaskTypeNodeExec,
 		}}
 
-		req := engine.SeedTriggeredGroupResultRequest{
+		req := engine.SeedExecutionFromEntryRequest{
 			AdmissionKey:    "k7",
 			Namespace:       namespace.Default,
 			WorkflowID:      "wf-test",
 			WorkflowVersion: "v1",
-			GroupID:         gm.Name,
-			GroupUnitIdx:    gm.UnitIdx,
+			EntryUnitID:     gm.Name,
+			EntryUnitIdx:    gm.UnitIdx,
 			Graph:           g,
 			Outcome:         engine.GroupOutcomeSuccess,
-			Exits:           []engine.GroupExitResult{{NodeName: "body", Port: "main", Data: map[string]any{"r": 1}}},
-			ResultHash:      engine.ComputeResultHash(engine.GroupOutcomeSuccess, []engine.GroupExitResult{{NodeName: "body", Port: "main", Data: map[string]any{"r": 1}}}),
+			Exits:           []engine.BoundaryExit{{NodeName: "body", Port: "main", Data: map[string]any{"r": 1}}},
+			ResultHash:      engine.ComputeResultHash(engine.GroupOutcomeSuccess, []engine.BoundaryExit{{NodeName: "body", Port: "main", Data: map[string]any{"r": 1}}}),
 			Downstream:      downstream,
 		}
 
-		resp, err := s.SeedTriggeredGroupResult(ctx, req)
+		resp, err := s.SeedExecutionFromEntry(ctx, req)
 		if err != nil {
 			t.Fatalf("admission: %v", err)
 		}
@@ -313,13 +313,13 @@ func RunTriggerAdmissionContract(t *testing.T, newStore func(*testing.T) Trigger
 		g := triggerGroupWithDownstreamGraph(t)
 		groups := g.Groups()
 		gm := groups[0]
-		req := engine.SeedTriggeredGroupResultRequest{
+		req := engine.SeedExecutionFromEntryRequest{
 			AdmissionKey:    "k8",
 			Namespace:       namespace.Default,
 			WorkflowID:      "wf-test",
 			WorkflowVersion: "v1",
-			GroupID:         gm.Name,
-			GroupUnitIdx:    gm.UnitIdx,
+			EntryUnitID:     gm.Name,
+			EntryUnitIdx:    gm.UnitIdx,
 			Graph:           g,
 			Outcome:         engine.GroupOutcomeFailed,
 			Exits:           nil,
@@ -327,7 +327,7 @@ func RunTriggerAdmissionContract(t *testing.T, newStore func(*testing.T) Trigger
 			ResultHash:      engine.ComputeResultHash(engine.GroupOutcomeFailed, nil),
 			Downstream:      nil,
 		}
-		resp, err := s.SeedTriggeredGroupResult(ctx, req)
+		resp, err := s.SeedExecutionFromEntry(ctx, req)
 		if err != nil {
 			t.Fatalf("admission: %v", err)
 		}

@@ -68,7 +68,7 @@ type commitRecordingConsumer struct {
 }
 
 func (c *commitRecordingConsumer) Messages() <-chan KafkaMessage { return c.inner.Messages() }
-func (c *commitRecordingConsumer) Close() error                 { return c.inner.Close() }
+func (c *commitRecordingConsumer) Close() error                  { return c.inner.Close() }
 func (c *commitRecordingConsumer) CommitMessages(_ context.Context, msgs ...KafkaMessage) error {
 	if c.failFirst != nil {
 		var shouldFail bool

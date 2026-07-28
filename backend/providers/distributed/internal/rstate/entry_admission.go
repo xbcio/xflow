@@ -179,25 +179,25 @@ func (s *Store) SeedExecutionFromEntry(ctx context.Context, req engine.SeedExecu
 
 	// Build KEYS.
 	keys := []string{
-		admissionKey(t, execID),                              // 1
-		execKey(t, execID, "status"),                         // 2
-		execKey(t, execID, "graph"),                          // 3
-		remainingNodesKey(t, execID),                         // 4
-		failedNodesKey(t, execID),                            // 5
-		groupUnitStatusKey(t, execID, req.EntryUnitIdx),      // 6
-		groupUnitMetaKey(t, execID, req.EntryUnitIdx),        // 7
-		outboxReadyKey(t, execID),                            // 8
-		outboxBodyKey(t, execID),                             // 9
+		admissionKey(t, execID),                         // 1
+		execKey(t, execID, "status"),                    // 2
+		execKey(t, execID, "graph"),                     // 3
+		remainingNodesKey(t, execID),                    // 4
+		failedNodesKey(t, execID),                       // 5
+		groupUnitStatusKey(t, execID, req.EntryUnitIdx), // 6
+		groupUnitMetaKey(t, execID, req.EntryUnitIdx),   // 7
+		outboxReadyKey(t, execID),                       // 8
+		outboxBodyKey(t, execID),                        // 9
 	}
 
 	// Build ARGV.
 	args := []any{
-		string(req.ResultHash),  // 1
-		int(ttl.Seconds()),      // 2
-		string(graphJSON),       // 3
-		string(req.Outcome),     // 4
-		len(req.Exits),          // 5
-		len(req.Downstream),     // 6
+		string(req.ResultHash), // 1
+		int(ttl.Seconds()),     // 2
+		string(graphJSON),      // 3
+		string(req.Outcome),    // 4
+		len(req.Exits),         // 5
+		len(req.Downstream),    // 6
 	}
 
 	// Exit outputs (keys + args).
