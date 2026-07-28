@@ -782,35 +782,40 @@ func normalizeKafkaAggregateConfig(cfg KafkaAggregateConfig) KafkaAggregateConfi
 func init() { registry.RegisterTrigger(&KafkaTriggerNode{}) }
 
 // ---------------------------------------------------------------------------
-// Trigger-group mode: admission-based emit (Milestone G)
+// Entry-seed mode: admission-based emit (Milestone G)
 // ---------------------------------------------------------------------------
 
-// emitKafkaTriggerGroupMessage processes one message through the trigger-group
-// admission path. Instead of Emit+Dedup, it calls SeedTriggeredGroupResult on
-// the runtime. Only accepted/duplicate-accepted/conflict responses commit the
-// Kafka offset. Transient errors return false (no commit → Kafka redelivery).
+// seedKafkaEntryBatch processes one message through the entry-unit (single node
+// or group node) seed admission path. Instead of Emit+Dedup, it calls
+// SeedExecutionFromEntry on the runtime. Only accepted/duplicate-accepted/conflict
+// responses commit the Kafka offset. Transient errors return false (no commit →
+// Kafka redelivery).
 //
-// This function is the trigger-group analogue of emitKafkaMessage for the
+// This function is the entry-seed analogue of emitKafkaMessage for the
 // per-partition serial worker. It is NOT used by the legacy Emit path.
-func emitKafkaTriggerGroupMessage(ctx context.Context, in *types.TriggerActivateInput, consumer KafkaConsumer, msg KafkaMessage) bool {
-	rt, ok := in.Runtime.(types.TriggerGroupRuntime)
+func seedKafkaEntryBatch(ctx context.Context, in *types.TriggerActivateInput, consumer KafkaConsumer, msg KafkaMessage) bool {
+	rt, ok := in.Runtime.(types.EntrySeedRuntime)
 	if !ok {
-		// Fallback: runtime does not support trigger-group. This should not happen
-		// in a properly configured trigger-group activation.
+		// Fallback: runtime does not support entry-seed. This should not happen
+		// in a properly configured entry-seed activation.
 		return false
 	}
 
-	groupID, _ := in.Params["group_id"].(string)
+	entryUnitID, _ := in.Params["entry_unit_id"].(string)
+	if entryUnitID == "" {
+		// Single-node entry unit ID = node name (spec §11.5).
+		entryUnitID = in.NodeName
+	}
 	workflowVersion, _ := in.Params["workflow_version"].(string)
 
 	// Build the admission key from the message's stable source identity.
 	admissionKey := fmt.Sprintf("%s/%s/%s/%s/%s/%d/%d-%d",
 		"", // namespace is set server-side
-		in.WorkflowID, workflowVersion, groupID,
+		in.WorkflowID, workflowVersion, entryUnitID,
 		msg.Topic, msg.Partition, msg.Offset, msg.Offset)
 
-	// Build exits — for single-message trigger-group, the output is the message data.
-	exits := []types.TriggerGroupExit{{
+	// Build exits — for a single-message entry unit, the output is the message data.
+	exits := []types.BoundaryExit{{
 		NodeName: in.NodeName,
 		Port:     "main",
 		Data: map[string]any{
@@ -822,16 +827,16 @@ func emitKafkaTriggerGroupMessage(ctx context.Context, in *types.TriggerActivate
 		},
 	}}
 
-	req := types.TriggerGroupAdmissionRequest{
+	req := types.EntrySeedRequest{
 		AdmissionKey:    admissionKey,
 		WorkflowID:      in.WorkflowID,
 		WorkflowVersion: workflowVersion,
-		GroupID:         groupID,
+		EntryUnitID:     entryUnitID,
 		Outcome:         "success",
 		Exits:           exits,
 	}
 
-	resp, err := rt.SeedTriggeredGroupResult(ctx, req)
+	resp, err := rt.SeedExecutionFromEntry(ctx, req)
 	if err != nil {
 		// Transient error (network timeout, etc.) — do NOT commit offset.
 		// Kafka will redeliver the message.
@@ -844,7 +849,7 @@ func emitKafkaTriggerGroupMessage(ctx context.Context, in *types.TriggerActivate
 	if resp.Accepted || resp.Duplicate || resp.Conflict {
 		if commitErr := commitKafkaMessages(ctx, consumer, msg); commitErr != nil {
 			// Commit failed — the message will be redelivered. On redelivery,
-			// SeedTriggeredGroupResult returns duplicate-accepted, which is safe.
+			// SeedExecutionFromEntry returns duplicate-accepted, which is safe.
 			return false
 		}
 		return true

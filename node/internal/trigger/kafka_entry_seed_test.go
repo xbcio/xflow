@@ -12,11 +12,11 @@ import (
 
 // --- test infrastructure for trigger-group mode ---
 
-// mockTriggerGroupRuntime implements types.TriggerGroupRuntime for unit tests.
-type mockTriggerGroupRuntime struct {
+// mockEntrySeedRuntime implements types.EntrySeedRuntime for unit tests.
+type mockEntrySeedRuntime struct {
 	mu           sync.Mutex
-	calls        []types.TriggerGroupAdmissionRequest
-	response     types.TriggerGroupAdmissionResponse
+	calls        []types.EntrySeedRequest
+	response     types.EntrySeedResponse
 	err          error
 	callCount    atomic.Int32
 	blockUntil   chan struct{} // if non-nil, blocks until closed
@@ -24,35 +24,35 @@ type mockTriggerGroupRuntime struct {
 	failFirstErr error // if set, first call returns this error
 }
 
-func (m *mockTriggerGroupRuntime) SeedTriggeredGroupResult(ctx context.Context, req types.TriggerGroupAdmissionRequest) (types.TriggerGroupAdmissionResponse, error) {
+func (m *mockEntrySeedRuntime) SeedExecutionFromEntry(ctx context.Context, req types.EntrySeedRequest) (types.EntrySeedResponse, error) {
 	m.callCount.Add(1)
 	if m.blockUntil != nil {
 		select {
 		case <-m.blockUntil:
 		case <-ctx.Done():
-			return types.TriggerGroupAdmissionResponse{}, ctx.Err()
+			return types.EntrySeedResponse{}, ctx.Err()
 		}
 	}
 	if m.failFirstErr != nil {
 		var shouldFail bool
 		m.failOnce.Do(func() { shouldFail = true })
 		if shouldFail {
-			return types.TriggerGroupAdmissionResponse{}, m.failFirstErr
+			return types.EntrySeedResponse{}, m.failFirstErr
 		}
 	}
 	m.mu.Lock()
 	m.calls = append(m.calls, req)
 	m.mu.Unlock()
 	if m.err != nil {
-		return types.TriggerGroupAdmissionResponse{}, m.err
+		return types.EntrySeedResponse{}, m.err
 	}
 	return m.response, nil
 }
 
-func (m *mockTriggerGroupRuntime) getCalls() []types.TriggerGroupAdmissionRequest {
+func (m *mockEntrySeedRuntime) getCalls() []types.EntrySeedRequest {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	cp := make([]types.TriggerGroupAdmissionRequest, len(m.calls))
+	cp := make([]types.EntrySeedRequest, len(m.calls))
 	copy(cp, m.calls)
 	return cp
 }
@@ -118,20 +118,20 @@ func (s *scriptedConsumer) Close() error {
 
 // --- trigger-group mode tests ---
 
-// TestKafkaTriggerGroup_AdmissionAccepted_CommitsOffset verifies that when
-// SeedTriggeredGroupResult returns accepted, the Kafka offset is committed.
-func TestKafkaTriggerGroup_AdmissionAccepted_CommitsOffset(t *testing.T) {
+// TestKafkaEntrySeed_AdmissionAccepted_CommitsOffset verifies that when
+// SeedExecutionFromEntry returns accepted, the Kafka offset is committed.
+func TestKafkaEntrySeed_AdmissionAccepted_CommitsOffset(t *testing.T) {
 	msgs := []KafkaMessage{
 		{Topic: "t", Partition: 0, Offset: 100, Value: []byte("hello")},
 	}
 	consumer := newScriptedConsumer(msgs)
 	recorder := &commitRecordingConsumer{inner: consumer}
 
-	admitter := &mockTriggerGroupRuntime{
-		response: types.TriggerGroupAdmissionResponse{Accepted: true, ExecutionID: "exec-1"},
+	admitter := &mockEntrySeedRuntime{
+		response: types.EntrySeedResponse{Accepted: true, ExecutionID: "exec-1"},
 	}
 
-	rt := &triggerGroupTestRuntime{
+	rt := &entrySeedTestRuntime{
 		admitter: admitter,
 		dedup:    func(ctx context.Context, key string, ttl time.Duration) (bool, error) { return true, nil },
 	}
@@ -139,13 +139,13 @@ func TestKafkaTriggerGroup_AdmissionAccepted_CommitsOffset(t *testing.T) {
 	in := &types.TriggerActivateInput{
 		WorkflowID: "wf1",
 		NodeName:   "trigger",
-		Params:     map[string]any{"group_id": "g1", "workflow_version": "v1"},
+		Params:     map[string]any{"entry_unit_id": "g1", "workflow_version": "v1"},
 		Runtime:    rt,
 	}
 
-	ok := emitKafkaTriggerGroupMessage(context.Background(), in, recorder, msgs[0])
+	ok := seedKafkaEntryBatch(context.Background(), in, recorder, msgs[0])
 	if !ok {
-		t.Fatal("emitKafkaTriggerGroupMessage returned false, want true")
+		t.Fatal("seedKafkaEntryBatch returned false, want true")
 	}
 
 	commits := recorder.getCommits()
@@ -160,21 +160,21 @@ func TestKafkaTriggerGroup_AdmissionAccepted_CommitsOffset(t *testing.T) {
 	}
 }
 
-// TestKafkaTriggerGroup_AdmissionError_NoCommit verifies that when
-// SeedTriggeredGroupResult returns a transient error, the offset is NOT
+// TestKafkaEntrySeed_AdmissionError_NoCommit verifies that when
+// SeedExecutionFromEntry returns a transient error, the offset is NOT
 // committed — allowing Kafka redelivery.
-func TestKafkaTriggerGroup_AdmissionError_NoCommit(t *testing.T) {
+func TestKafkaEntrySeed_AdmissionError_NoCommit(t *testing.T) {
 	msgs := []KafkaMessage{
 		{Topic: "t", Partition: 0, Offset: 200, Value: []byte("world")},
 	}
 	consumer := newScriptedConsumer(msgs)
 	recorder := &commitRecordingConsumer{inner: consumer}
 
-	admitter := &mockTriggerGroupRuntime{
+	admitter := &mockEntrySeedRuntime{
 		err: context.DeadlineExceeded, // transient network timeout
 	}
 
-	rt := &triggerGroupTestRuntime{
+	rt := &entrySeedTestRuntime{
 		admitter: admitter,
 		dedup:    func(ctx context.Context, key string, ttl time.Duration) (bool, error) { return true, nil },
 	}
@@ -182,13 +182,13 @@ func TestKafkaTriggerGroup_AdmissionError_NoCommit(t *testing.T) {
 	in := &types.TriggerActivateInput{
 		WorkflowID: "wf1",
 		NodeName:   "trigger",
-		Params:     map[string]any{"group_id": "g1", "workflow_version": "v1"},
+		Params:     map[string]any{"entry_unit_id": "g1", "workflow_version": "v1"},
 		Runtime:    rt,
 	}
 
-	ok := emitKafkaTriggerGroupMessage(context.Background(), in, recorder, msgs[0])
+	ok := seedKafkaEntryBatch(context.Background(), in, recorder, msgs[0])
 	if ok {
-		t.Fatal("emitKafkaTriggerGroupMessage returned true, want false (transient error)")
+		t.Fatal("seedKafkaEntryBatch returned true, want false (transient error)")
 	}
 
 	commits := recorder.getCommits()
@@ -197,21 +197,21 @@ func TestKafkaTriggerGroup_AdmissionError_NoCommit(t *testing.T) {
 	}
 }
 
-// TestKafkaTriggerGroup_DuplicateAccepted_CommitsOffset verifies that a
+// TestKafkaEntrySeed_DuplicateAccepted_CommitsOffset verifies that a
 // duplicate-accepted response (same key, same hash replayed) still commits the
 // Kafka offset — this is the idempotent recovery path.
-func TestKafkaTriggerGroup_DuplicateAccepted_CommitsOffset(t *testing.T) {
+func TestKafkaEntrySeed_DuplicateAccepted_CommitsOffset(t *testing.T) {
 	msgs := []KafkaMessage{
 		{Topic: "t", Partition: 0, Offset: 300, Value: []byte("dup")},
 	}
 	consumer := newScriptedConsumer(msgs)
 	recorder := &commitRecordingConsumer{inner: consumer}
 
-	admitter := &mockTriggerGroupRuntime{
-		response: types.TriggerGroupAdmissionResponse{Accepted: true, Duplicate: true, ExecutionID: "exec-dup"},
+	admitter := &mockEntrySeedRuntime{
+		response: types.EntrySeedResponse{Accepted: true, Duplicate: true, ExecutionID: "exec-dup"},
 	}
 
-	rt := &triggerGroupTestRuntime{
+	rt := &entrySeedTestRuntime{
 		admitter: admitter,
 		dedup:    func(ctx context.Context, key string, ttl time.Duration) (bool, error) { return true, nil },
 	}
@@ -219,13 +219,13 @@ func TestKafkaTriggerGroup_DuplicateAccepted_CommitsOffset(t *testing.T) {
 	in := &types.TriggerActivateInput{
 		WorkflowID: "wf1",
 		NodeName:   "trigger",
-		Params:     map[string]any{"group_id": "g1", "workflow_version": "v1"},
+		Params:     map[string]any{"entry_unit_id": "g1", "workflow_version": "v1"},
 		Runtime:    rt,
 	}
 
-	ok := emitKafkaTriggerGroupMessage(context.Background(), in, recorder, msgs[0])
+	ok := seedKafkaEntryBatch(context.Background(), in, recorder, msgs[0])
 	if !ok {
-		t.Fatal("emitKafkaTriggerGroupMessage returned false, want true (duplicate accepted)")
+		t.Fatal("seedKafkaEntryBatch returned false, want true (duplicate accepted)")
 	}
 
 	commits := recorder.getCommits()
@@ -234,21 +234,21 @@ func TestKafkaTriggerGroup_DuplicateAccepted_CommitsOffset(t *testing.T) {
 	}
 }
 
-// TestKafkaTriggerGroup_Conflict_CommitsOffset verifies that a conflict response
+// TestKafkaEntrySeed_Conflict_CommitsOffset verifies that a conflict response
 // (same key, different hash — another runner won) still commits the Kafka offset
 // since the admission was already handled by the winning runner.
-func TestKafkaTriggerGroup_Conflict_CommitsOffset(t *testing.T) {
+func TestKafkaEntrySeed_Conflict_CommitsOffset(t *testing.T) {
 	msgs := []KafkaMessage{
 		{Topic: "t", Partition: 0, Offset: 400, Value: []byte("conflict")},
 	}
 	consumer := newScriptedConsumer(msgs)
 	recorder := &commitRecordingConsumer{inner: consumer}
 
-	admitter := &mockTriggerGroupRuntime{
-		response: types.TriggerGroupAdmissionResponse{Conflict: true, ExecutionID: "exec-other"},
+	admitter := &mockEntrySeedRuntime{
+		response: types.EntrySeedResponse{Conflict: true, ExecutionID: "exec-other"},
 	}
 
-	rt := &triggerGroupTestRuntime{
+	rt := &entrySeedTestRuntime{
 		admitter: admitter,
 		dedup:    func(ctx context.Context, key string, ttl time.Duration) (bool, error) { return true, nil },
 	}
@@ -256,13 +256,13 @@ func TestKafkaTriggerGroup_Conflict_CommitsOffset(t *testing.T) {
 	in := &types.TriggerActivateInput{
 		WorkflowID: "wf1",
 		NodeName:   "trigger",
-		Params:     map[string]any{"group_id": "g1", "workflow_version": "v1"},
+		Params:     map[string]any{"entry_unit_id": "g1", "workflow_version": "v1"},
 		Runtime:    rt,
 	}
 
-	ok := emitKafkaTriggerGroupMessage(context.Background(), in, recorder, msgs[0])
+	ok := seedKafkaEntryBatch(context.Background(), in, recorder, msgs[0])
 	if !ok {
-		t.Fatal("emitKafkaTriggerGroupMessage returned false, want true (conflict = admission handled)")
+		t.Fatal("seedKafkaEntryBatch returned false, want true (conflict = admission handled)")
 	}
 
 	commits := recorder.getCommits()
@@ -271,10 +271,10 @@ func TestKafkaTriggerGroup_Conflict_CommitsOffset(t *testing.T) {
 	}
 }
 
-// TestKafkaTriggerGroup_CommitFailure_Safe verifies that when admission
+// TestKafkaEntrySeed_CommitFailure_Safe verifies that when admission
 // succeeds but the Kafka commit fails, the message will be redelivered and
 // the admission returns duplicate-accepted (safe, no data loss).
-func TestKafkaTriggerGroup_CommitFailure_Safe(t *testing.T) {
+func TestKafkaEntrySeed_CommitFailure_Safe(t *testing.T) {
 	msgs := []KafkaMessage{
 		{Topic: "t", Partition: 0, Offset: 500, Value: []byte("commit-fail")},
 	}
@@ -284,11 +284,11 @@ func TestKafkaTriggerGroup_CommitFailure_Safe(t *testing.T) {
 		failFirst: context.DeadlineExceeded,
 	}
 
-	admitter := &mockTriggerGroupRuntime{
-		response: types.TriggerGroupAdmissionResponse{Accepted: true, ExecutionID: "exec-cf"},
+	admitter := &mockEntrySeedRuntime{
+		response: types.EntrySeedResponse{Accepted: true, ExecutionID: "exec-cf"},
 	}
 
-	rt := &triggerGroupTestRuntime{
+	rt := &entrySeedTestRuntime{
 		admitter: admitter,
 		dedup:    func(ctx context.Context, key string, ttl time.Duration) (bool, error) { return true, nil },
 	}
@@ -296,19 +296,19 @@ func TestKafkaTriggerGroup_CommitFailure_Safe(t *testing.T) {
 	in := &types.TriggerActivateInput{
 		WorkflowID: "wf1",
 		NodeName:   "trigger",
-		Params:     map[string]any{"group_id": "g1", "workflow_version": "v1"},
+		Params:     map[string]any{"entry_unit_id": "g1", "workflow_version": "v1"},
 		Runtime:    rt,
 	}
 
 	// First call: admission succeeds, commit fails → returns false (message redelivered).
-	ok := emitKafkaTriggerGroupMessage(context.Background(), in, recorder, msgs[0])
+	ok := seedKafkaEntryBatch(context.Background(), in, recorder, msgs[0])
 	if ok {
 		t.Fatal("first call should return false when commit fails")
 	}
 
 	// Simulate redelivery: admission returns duplicate, commit succeeds.
-	admitter.response = types.TriggerGroupAdmissionResponse{Accepted: true, Duplicate: true, ExecutionID: "exec-cf"}
-	ok = emitKafkaTriggerGroupMessage(context.Background(), in, recorder, msgs[0])
+	admitter.response = types.EntrySeedResponse{Accepted: true, Duplicate: true, ExecutionID: "exec-cf"}
+	ok = seedKafkaEntryBatch(context.Background(), in, recorder, msgs[0])
 	if !ok {
 		t.Fatal("second call should succeed (duplicate accepted + commit succeeds)")
 	}
@@ -321,26 +321,26 @@ func TestKafkaTriggerGroup_CommitFailure_Safe(t *testing.T) {
 
 // --- trigger-group test runtime ---
 
-type triggerGroupTestRuntime struct {
-	admitter types.TriggerGroupRuntime
+type entrySeedTestRuntime struct {
+	admitter types.EntrySeedRuntime
 	dedup    func(ctx context.Context, key string, ttl time.Duration) (bool, error)
 }
 
-func (r *triggerGroupTestRuntime) Emit(_ context.Context, _ types.WorkflowID, _ string, _ *types.TriggerEvent) (types.ExecutionID, error) {
+func (r *entrySeedTestRuntime) Emit(_ context.Context, _ types.WorkflowID, _ string, _ *types.TriggerEvent) (types.ExecutionID, error) {
 	return "", nil
 }
-func (r *triggerGroupTestRuntime) Dedup(ctx context.Context, key string, ttl time.Duration) (bool, error) {
+func (r *entrySeedTestRuntime) Dedup(ctx context.Context, key string, ttl time.Duration) (bool, error) {
 	if r.dedup != nil {
 		return r.dedup(ctx, key, ttl)
 	}
 	return true, nil
 }
-func (r *triggerGroupTestRuntime) TryLock(_ context.Context, _ string, _ time.Duration) (types.TriggerLock, bool, error) {
+func (r *entrySeedTestRuntime) TryLock(_ context.Context, _ string, _ time.Duration) (types.TriggerLock, bool, error) {
 	return nil, false, nil
 }
-func (r *triggerGroupTestRuntime) State(_ context.Context, _ string) types.TriggerState { return nil }
+func (r *entrySeedTestRuntime) State(_ context.Context, _ string) types.TriggerState { return nil }
 
-// SeedTriggeredGroupResult delegates to the embedded admitter.
-func (r *triggerGroupTestRuntime) SeedTriggeredGroupResult(ctx context.Context, req types.TriggerGroupAdmissionRequest) (types.TriggerGroupAdmissionResponse, error) {
-	return r.admitter.SeedTriggeredGroupResult(ctx, req)
+// SeedExecutionFromEntry delegates to the embedded admitter.
+func (r *entrySeedTestRuntime) SeedExecutionFromEntry(ctx context.Context, req types.EntrySeedRequest) (types.EntrySeedResponse, error) {
+	return r.admitter.SeedExecutionFromEntry(ctx, req)
 }
