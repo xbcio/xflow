@@ -58,7 +58,7 @@ func (h *MetricsHooks) OnNodeSuspended(ctx context.Context, id types.ExecutionID
 }
 
 func (h *MetricsHooks) OnExecutionComplete(ctx context.Context, _ types.ExecutionID, status types.ExecutionStatus) {
-	h.Metrics.Inc(metricExecutionCompleted, withTenant(ctx, map[string]string{"status": string(status)}))
+	h.Metrics.Inc(metricExecutionCompleted, withNamespace(ctx, map[string]string{"status": string(status)}))
 }
 
 func (h *MetricsHooks) OnSignalDelivered(context.Context, types.ExecutionID, string, map[string]any) {
@@ -78,7 +78,7 @@ func (h *MetricsHooks) nodeLabels(ctx context.Context, _ types.ExecutionID, name
 	if status != "" {
 		labels["status"] = status
 	}
-	return withTenant(ctx, labels)
+	return withNamespace(ctx, labels)
 }
 
 func (*MetricsHooks) nodeKey(id types.ExecutionID, name string) string {
@@ -99,7 +99,7 @@ func NewCommitMetrics(metrics *Metrics) CommitMetrics {
 
 // OnCommitOutcome records one stable low-cardinality commit classification.
 func (c CommitMetrics) OnCommitOutcome(ctx context.Context, outcome engine.CommitOutcome) {
-	c.Metrics.Inc(metricCommitOutcomes, withTenant(ctx, map[string]string{"outcome": string(outcome)}))
+	c.Metrics.Inc(metricCommitOutcomes, withNamespace(ctx, map[string]string{"outcome": string(outcome)}))
 }
 
 var _ engine.CommitObserver = CommitMetrics{}
@@ -117,34 +117,34 @@ func NewOutboxMetrics(metrics *Metrics) OutboxMetrics {
 
 // OnOutboxRetry records a retryable task-queue handoff failure.
 func (o OutboxMetrics) OnOutboxRetry(ctx context.Context, _ int) {
-	o.Metrics.Inc(metricOutboxRetries, withTenant(ctx, nil))
+	o.Metrics.Inc(metricOutboxRetries, withNamespace(ctx, nil))
 }
 
 // OnOutboxDeadLetter records an entry moved to durable dead-letter storage.
 func (o OutboxMetrics) OnOutboxDeadLetter(ctx context.Context) {
-	o.Metrics.Inc(metricOutboxDeadLettersTotal, withTenant(ctx, nil))
+	o.Metrics.Inc(metricOutboxDeadLettersTotal, withNamespace(ctx, nil))
 }
 
 // OnOutboxReplayed records a dead-letter replay attempt, partitioned by
 // outcome (replayed/not_found/rejected_terminal/rejected_inactive).
 func (o OutboxMetrics) OnOutboxReplayed(ctx context.Context, outcome engine.DeadLetterReplayOutcome) {
-	o.Metrics.Inc(metricOutboxDeadLettersReplayed, withTenant(ctx, map[string]string{"outcome": string(outcome)}))
+	o.Metrics.Inc(metricOutboxDeadLettersReplayed, withNamespace(ctx, map[string]string{"outcome": string(outcome)}))
 }
 
 // OnOutboxPending records the current pending and dead-letter backlog gauges
 // and observes the age of the oldest pending entry when one exists.
 func (o OutboxMetrics) OnOutboxPending(ctx context.Context, pending int, deadLettered int, oldestAge time.Duration) {
-	o.Metrics.Set(metricOutboxPending, withTenant(ctx, nil), float64(pending))
-	o.Metrics.Set(metricOutboxDeadLetters, withTenant(ctx, nil), float64(deadLettered))
+	o.Metrics.Set(metricOutboxPending, withNamespace(ctx, nil), float64(pending))
+	o.Metrics.Set(metricOutboxDeadLetters, withNamespace(ctx, nil), float64(deadLettered))
 	if pending > 0 {
-		o.Metrics.Observe(metricOutboxOldestPendingAge, withTenant(ctx, nil), oldestAge)
+		o.Metrics.Observe(metricOutboxOldestPendingAge, withNamespace(ctx, nil), oldestAge)
 	}
 }
 
 // OnOutboxError records an outbox operation failure without using error text
 // as a metric label.
 func (o OutboxMetrics) OnOutboxError(ctx context.Context, operation string, _ error) {
-	o.Metrics.Inc(metricOutboxErrors, withTenant(ctx, map[string]string{"op": operation}))
+	o.Metrics.Inc(metricOutboxErrors, withNamespace(ctx, map[string]string{"op": operation}))
 }
 
 var _ engine.OutboxObserver = OutboxMetrics{}

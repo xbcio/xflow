@@ -89,7 +89,7 @@ xflow 采用分层发布门槛，不再用单个测试替代完整 release gate�
 | 项 | 状态 | 说明 |
 |---|---|---|
 | B2 control-plane HA + Redis HA soak | ⏳ | 代码侧：leader election/graceful shutdown/management 端点已具备；**Redis HA 客户端代码已完成**（Task 1.1–4.1：`redis.UniversalClient` 宽化 + `RedisConfig` single/sentinel/cluster + `WithRedisConfig` Option + asynq `AsAsynqConnOpt` 三模式映射 + `cmd/server --redis-mode` flag + `apiserver.Config.RedisConfig` 透传 + sentinel 认证字段，commits `9a39996`..`c292d7d`）；**workflowreg/trigger cluster-safety 已修**（Task 2.1 hash tag + Task 2.2 单 key 核查，commits `aed4db3`/`1c54be0`）；**soak 脚手架与报告类型已完成**（Task 5.1 harness + 5.2 in-process graceful 场景/ENV-GATED stub + 5.3 SLO 报告类型与模板，commits `dc13301`..`065974a`）；Redis failover、network partition、runner kill、report response loss、outbox flush fault 仍未在真实环境执行。**仍缺（ENV-GATED）**：真实 sentinel/cluster Redis 环境连通性/failover 验收、多副本 soak 报告填实、SLO 量化达标判定、真实 cluster 下 CROSSSLOT 回归。详见 [ha-soak-plan](../references/ha-soak-plan.md) 与 [ha-soak-report-template](../references/ha-soak-report-template.md) |
-| 多租户 tenant boundary | ⏳ 代码与测试完成 | tenant boundary 全链路代码已完成（Phase 6-8）：`backend/tenant` context 原语 + `WorkflowDef.TenantID`（`json:"-"` 编译期禁止不可信客户端，commit `726e6df`）；rstate/workflowreg/trigger key 全部 tenant 前缀（`xflow:t<tenant>:...`，无花括号保 hash tag，Task 7.1/7.2）；API 层 principal 签发 + `TenantAwareAuthorizer` + IDOR（请求体 tenant 忽略，跨 tenant → 404 不泄漏存在性，Task 7.3）；audit/metrics/trace tenant 标签 + 高基数防护（Task 7.4）；runner placement + credential tenant scope + asynq payload tenant（Task 7.5）；dead-letter/outbox manager 双保险 + CLI `--tenant`（Task 7.6）；越权测试矩阵 `test/security/tenant_isolation_test.go` 10 场景全绿（Task 8.1，miniredis，非 ENV-GATED）。**仍缺（ENV-GATED）**：真实多租户部署的端到端验收（多 principal 并发、跨 tenant 性能隔离基线、真实 Redis Cluster 下 tenant key 分布）。详见 [tenant-boundary-design](tenant-boundary-design.md) |
+| 多租户 tenant boundary | ⏳ 代码与测试完成 | tenant boundary 全链路代码已完成（Phase 6-8）：`backend/tenant` context 原语 + `WorkflowDef.TenantID`（`json:"-"` 编译期禁止不可信客户端，commit `726e6df`）；rstate/workflowreg/trigger key 全部 tenant 前缀（`xflow:ns:<namespace>:...`，无花括号保 hash tag，Task 7.1/7.2）；API 层 principal 签发 + `TenantAwareAuthorizer` + IDOR（请求体 tenant 忽略，跨 tenant → 404 不泄漏存在性，Task 7.3）；audit/metrics/trace tenant 标签 + 高基数防护（Task 7.4）；runner placement + credential tenant scope + asynq payload tenant（Task 7.5）；dead-letter/outbox manager 双保险 + CLI `--tenant`（Task 7.6）；越权测试矩阵 `test/security/tenant_isolation_test.go` 10 场景全绿（Task 8.1，miniredis，非 ENV-GATED）。**仍缺（ENV-GATED）**：真实多租户部署的端到端验收（多 principal 并发、跨 tenant 性能隔离基线、真实 Redis Cluster 下 tenant key 分布）。详见 [tenant-boundary-design](tenant-boundary-design.md) |
 
 > leader election、hash tag 或 namespace 单独存在都不等同于 control-plane HA 或多租户隔离。本轮 G0/G1 修复不得顺带宣称 G2。
 
@@ -147,13 +147,13 @@ G2 control-plane HA 的承诺范围与限制（映射 §4 反声明，在 G2 整
 
 tenant boundary 全链路代码与越权测试已完成（Phase 6-8，详见 §2 G2 行），但在 G2 整体达成前不得对外宣称"多租户隔离已完成"。以下边界声明在真实多租户部署验收（ENV-GATED）前不得放宽：
 
-- **tenant 前缀 ≠ 加密隔离**：Redis key 前缀 `xflow:t<tenant>:...` 只是命名空间隔离，**不是密码学隔离**。跨 tenant 隔离依赖**服务端签发 TenantID（principal，忽略请求体 tenant）+ 全链路 context 校验 + 越权测试**，Redis 层是命名空间隔离不是密码学边界。任何能直接访问 Redis 的组件（如运维 CLI 直连）不受 tenant boundary 保护。
+- **tenant 前缀 ≠ 加密隔离**：Redis key 前缀 `xflow:ns:<namespace>:...` 只是命名空间隔离，**不是密码学隔离**。跨 tenant 隔离依赖**服务端签发 TenantID（principal，忽略请求体 tenant）+ 全链路 context 校验 + 越权测试**，Redis 层是命名空间隔离不是密码学边界。任何能直接访问 Redis 的组件（如运维 CLI 直连）不受 tenant boundary 保护。
 - **runner labels 不是安全边界**：runner placement 用**显式 tenant 归属**（`Assignment.TenantID` + runner 注册的 tenant 列表 + `ClaimForRunner` 过滤），**不得用 `RunnerSelector.MatchLabels` 兜底承载 tenant**。runner label 是调度提示，非隔离机制。
 - **store key 前缀是主防线，manager/API 校验是双保险**：跨 tenant execID 在 rstate key 层因前缀不同直接 NotFound；API 层 `Inspect` 兜底 + deadletter manager 显式 `principal.TenantID == tenant.FromContext(ctx)` 校验是 fail-closed 第二防线。任一防线被绕过不构成隔离失效（纵深防御）。
 - **跨 tenant → 404，不返回 403**：跨 tenant 资源访问一律 NotFound，不泄漏资源存在性（映射组织安全策略 §1「不泄漏 user 是否存在」）。
 - **tenant 是低基数维度**：tenant 作为 metric label / span 属性，基数 = tenant 数量（G2 规模数十），可接受；execution ID / node name 组合 / lease token / runner ID **禁止作为 metric label**（高基数）。tenant **不得放入 W3C baggage** 跨进程传播（跨 tenant 泄漏风险），只作 span 属性。
-- **default tenant 向后兼容**：未配置 tenant 时所有请求归 `default`，行为等价 G1 单租户；`default` 始终在 `xflow:tenants` SET 中（append-only，不回收，防 sweeper 漏扫孤儿 key）。
-- **leader 全局不 per-tenant**：control-plane leader 保持全局单 key `xflow:leader:control-plane`，避免 N 倍 election 开销；leader-only maintenance 按 tenant 迭代（`xflow:tenants` SET）。
+- **default tenant 向后兼容**：未配置 tenant 时所有请求归 `default`，行为等价 G1 单租户；`default` 始终在 `xflow:ns:enants` SET 中（append-only，不回收，防 sweeper 漏扫孤儿 key）。
+- **leader 全局不 per-tenant**：control-plane leader 保持全局单 key `xflow:leader:control-plane`，避免 N 倍 election 开销；leader-only maintenance 按 tenant 迭代（`xflow:ns:enants` SET）。
 - **代码完成 ≠ G2 验收完成**：tenant boundary 代码 + 越权测试完成只解除 G2 退出清单中"tenant boundary 全链路 + 越权测试"一项；G2 整体达成仍依赖 G1 全满足（当前 ⛔）+ Redis HA + 多副本 SLO（ENV-GATED）。
 
 ## 5. 配置要求清单

@@ -3,10 +3,11 @@ package xflow
 import (
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/xbcio/xflow/backend"
-	backendlocal "github.com/xbcio/xflow/backend/local"
+	backendlocal "github.com/xbcio/xflow/backend/providers/local"
 	"github.com/xbcio/xflow/engine"
 )
 
@@ -15,17 +16,15 @@ import (
 type startBinderWrapper struct {
 	*backendlocal.Backend
 	startErr   error
-	stopCalled bool
+	stopCalled atomic.Bool
 }
 
 func (w *startBinderWrapper) StartBinding(eng *engine.Engine) (func(), error) {
 	if w.startErr != nil {
 		return nil, w.startErr
 	}
-	stop := w.Backend.Bind(eng)
 	return func() {
-		w.stopCalled = true
-		stop()
+		w.stopCalled.Store(true)
 	}, nil
 }
 
@@ -37,10 +36,8 @@ type legacyProvider struct {
 }
 
 func (l *legacyProvider) Bind(eng *engine.Engine) func() {
-	stop := l.Backend.Bind(eng)
 	return func() {
 		l.stopCalled = true
-		stop()
 	}
 }
 
@@ -76,7 +73,7 @@ func TestNewFromConfigPrefersStartBinderOverBind(t *testing.T) {
 		t.Fatalf("newFromConfig error = %v", err)
 	}
 	eng.Stop()
-	if !provider.stopCalled {
+	if !provider.stopCalled.Load() {
 		t.Fatal("StartBinding stop was not called")
 	}
 }

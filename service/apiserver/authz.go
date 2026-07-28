@@ -7,20 +7,21 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/xbcio/xflow/backend/tenant"
+	"github.com/xbcio/xflow/namespace"
 )
 
 // Principal is the authenticated identity of a caller. It is produced by an
 // Authenticator (which verifies the credential) and consumed by an Authorizer
-// (which decides allow/deny per operation+resource). The subject, tenant, and
+// (which decides allow/deny per operation+resource). The subject, namespace, and
 // scopes come from the server-side identity source — never from the request
 // body — so a caller cannot self-report another principal.
 type Principal struct {
-	Subject  string
-	TenantID string
-	Scopes   []string
+	Subject   string
+	Namespace string
+	Scopes    []string
 }
 
 // HasScope reports whether the principal holds a scope.
@@ -38,22 +39,22 @@ func (p Principal) HasScope(scope string) bool {
 // request path and method before the handler runs; Principal is the verified
 // identity. Default-deny: an empty decision is Deny.
 //
-// Tenant boundary (Task 7.3): Principal.TenantID is the server-issued tenant
-// and is the authoritative tenant for the decision. ResourceTenant is the
-// tenant of the target resource, resolved by the route layer when it can be
+// Namespace boundary (Task 7.3): Principal.Namespace is the server-issued namespace
+// and is the authoritative namespace for the decision. ResourceNamespace is the
+// namespace of the target resource, resolved by the route layer when it can be
 // looked up without a chicken-and-egg dependency on the authz decision; when
 // empty (e.g. create operations, or management endpoints where the resource
-// tenant is enforced downstream by a tenant-scoped store read) the
-// per-resource tenant check is skipped and IDOR is enforced by the
-// tenant-scoped store read (see module_management.go: a cross-tenant Inspect
+// namespace is enforced downstream by a namespace-scoped store read) the
+// per-resource namespace check is skipped and IDOR is enforced by the
+// namespace-scoped store read (see module_management.go: a cross-namespace Inspect
 // resolves to not-found → 404, never leaking existence).
 type AuthorizationRequest struct {
-	Principal      Principal
-	Operation      string
-	WorkflowID     string
-	ExecutionID    string
-	Resource       string
-	ResourceTenant string
+	Principal         Principal
+	Operation         string
+	WorkflowID        string
+	ExecutionID       string
+	Resource          string
+	ResourceNamespace string
 }
 
 // Decision is the outcome of an authorization check.
@@ -66,7 +67,7 @@ const (
 
 // Authorizer decides whether a principal may perform an operation on a
 // resource. It must default to Deny. Implementations may be a static scope
-// map (G1 single-tenant reference) or a real policy engine (G2/G3).
+// map (G1 single-namespace reference) or a real policy engine (G2/G3).
 type Authorizer interface {
 	Authorize(ctx context.Context, req AuthorizationRequest) (Decision, error)
 }
@@ -104,7 +105,7 @@ const (
 )
 
 // scopeForOperation maps an operation to the scope it requires. A principal
-// must hold the scope to be allowed. This is the G1 single-tenant reference
+// must hold the scope to be allowed. This is the G1 single-namespace reference
 // policy; G2/G3 may substitute a richer authorizer.
 func scopeForOperation(op string) string {
 	switch op {
@@ -133,8 +134,8 @@ func scopeForOperation(op string) string {
 
 // ScopeAuthorizer allows a principal whose scopes include the operation's
 // required scope. It defaults to Deny and denies cross-execution access only
-// at the resource level when a future tenant-bound authorizer is wired (G1
-// single-tenant does not enforce per-execution ownership, which is the host's
+// at the resource level when a future namespace-bound authorizer is wired (G1
+// single-namespace does not enforce per-execution ownership, which is the host's
 // responsibility).
 type ScopeAuthorizer struct{}
 
@@ -152,28 +153,28 @@ func (ScopeAuthorizer) Authorize(_ context.Context, req AuthorizationRequest) (D
 	return DecisionAllow, nil
 }
 
-// TenantAwareAuthorizer is the G2 multi-tenant authorizer. It extends
-// ScopeAuthorizer with tenant-bound enforcement:
+// NamespaceAwareAuthorizer is the G2 multi-namespace authorizer. It extends
+// ScopeAuthorizer with namespace-bound enforcement:
 //
-//  1. Default-deny when Principal.TenantID is empty — a principal without a
-//     server-issued tenant is never allowed. This is fail-closed: every
-//     authenticated principal must carry a tenant (the authenticator normalizes
-//     empty to tenant.DefaultTenant).
+//  1. Default-deny when Principal.Namespace is empty — a principal without a
+//     server-issued namespace is never allowed. This is fail-closed: every
+//     authenticated principal must carry a namespace (the authenticator normalizes
+//     empty to namespace.Default).
 //  2. The operation's required scope (same as ScopeAuthorizer).
-//  3. When the route layer resolved ResourceTenant (the target resource's
-//     tenant), it must equal Principal.TenantID — defense in depth against
-//     cross-tenant access. ResourceTenant is optional: management endpoints
-//     that cannot resolve the resource tenant without a chicken-and-egg store
-//     lookup leave it empty and rely on the tenant-scoped store read
-//     (Inject-in-context → cross-tenant read resolves to not-found → 404) as
+//  3. When the route layer resolved ResourceNamespace (the target resource's
+//     namespace), it must equal Principal.Namespace — defense in depth against
+//     cross-namespace access. ResourceNamespace is optional: management endpoints
+//     that cannot resolve the resource namespace without a chicken-and-egg store
+//     lookup leave it empty and rely on the namespace-scoped store read
+//     (Inject-in-context → cross-namespace read resolves to not-found → 404) as
 //     the authoritative IDOR defense (see module_management.go handleExecution).
-type TenantAwareAuthorizer struct{}
+type NamespaceAwareAuthorizer struct{}
 
-// Authorize returns Allow iff the principal carries a non-empty tenant, holds
-// the operation's required scope, and (when set) the resource tenant matches
-// the principal's tenant. Otherwise Deny.
-func (TenantAwareAuthorizer) Authorize(_ context.Context, req AuthorizationRequest) (Decision, error) {
-	if req.Principal.TenantID == "" {
+// Authorize returns Allow iff the principal carries a non-empty namespace, holds
+// the operation's required scope, and (when set) the resource namespace matches
+// the principal's namespace. Otherwise Deny.
+func (NamespaceAwareAuthorizer) Authorize(_ context.Context, req AuthorizationRequest) (Decision, error) {
+	if req.Principal.Namespace == "" {
 		return DecisionDeny, nil
 	}
 	scope := scopeForOperation(req.Operation)
@@ -183,7 +184,7 @@ func (TenantAwareAuthorizer) Authorize(_ context.Context, req AuthorizationReque
 	if !req.Principal.HasScope(scope) {
 		return DecisionDeny, nil
 	}
-	if req.ResourceTenant != "" && req.ResourceTenant != req.Principal.TenantID {
+	if req.ResourceNamespace != "" && req.ResourceNamespace != req.Principal.Namespace {
 		return DecisionDeny, nil
 	}
 	return DecisionAllow, nil
@@ -199,31 +200,31 @@ type PrincipalAuthenticator interface {
 
 // principalEntry is the server-configured identity bound to one bearer token.
 // The token itself is never stored; only its sha256 is retained as the map key
-// (see BearerPrincipalAuth). The tenant is server-issued and authoritative —
-// callers cannot self-report tenant.
+// (see BearerPrincipalAuth). The namespace is server-issued and authoritative —
+// callers cannot self-report namespace.
 type principalEntry struct {
-	subject  string
-	tenantID string
-	scopes   []string
+	subject     string
+	namespaceID string
+	scopes      []string
 }
 
 // TokenPrincipalMapping binds one static bearer token to a server-issued
-// (subject, tenant, scopes) triple. Used by NewBearerPrincipalAuthMulti to
-// build a multi-tenant token registry (design §2.3 scheme A). The token must
+// (subject, namespace, scopes) triple. Used by NewBearerPrincipalAuthMulti to
+// build a multi-namespace token registry (design §2.3 scheme A). The token must
 // have at least 128 bits of entropy.
 type TokenPrincipalMapping struct {
-	Token    string
-	Subject  string
-	TenantID string
-	Scopes   []string
+	Token     string
+	Subject   string
+	Namespace string
+	Scopes    []string
 }
 
 // BearerPrincipalAuth maps static bearer tokens to verified principals. It
-// supports multi-tenant operation: a registry of token-hash → principalEntry
-// lets each token bind to its own (subject, tenant, scopes). The token
+// supports multi-namespace operation: a registry of token-hash → principalEntry
+// lets each token bind to its own (subject, namespace, scopes). The token
 // comparison is sha256-keyed: the plaintext token is never retained in memory
 // after construction, and token values are never logged (security policy §7
-// password blacklist). The subject, tenant, and scopes are configured
+// password blacklist). The subject, namespace, and scopes are configured
 // server-side, so a caller cannot self-report them — this is the IDOR defense
 // (security policy §1a: identity must come from the server, never the client).
 type BearerPrincipalAuth struct {
@@ -237,29 +238,29 @@ type BearerPrincipalAuth struct {
 
 // NewBearerPrincipalAuth creates a BearerPrincipalAuth that accepts the given
 // single token and maps it to the given subject + scopes under the default
-// tenant. This preserves G1 single-tenant backwards compatibility: when no
-// multi-tenant token registry is configured, every authenticated caller is in
-// tenant.DefaultTenant. The token must have at least 128 bits of entropy.
+// namespace. This preserves G1 single-namespace backwards compatibility: when no
+// multi-namespace token registry is configured, every authenticated caller is in
+// namespace.Default. The token must have at least 128 bits of entropy.
 func NewBearerPrincipalAuth(token, subject string, scopes []string) *BearerPrincipalAuth {
 	return NewBearerPrincipalAuthMulti([]TokenPrincipalMapping{{
-		Token: token, Subject: subject, TenantID: string(tenant.DefaultTenant), Scopes: scopes,
+		Token: token, Subject: subject, Namespace: string(namespace.Default), Scopes: scopes,
 	}})
 }
 
 // NewBearerPrincipalAuthMulti creates a BearerPrincipalAuth from a multi-token
-// registry. Each mapping binds one token to its own (subject, tenant, scopes).
+// registry. Each mapping binds one token to its own (subject, namespace, scopes).
 // At least one mapping is required; a duplicate token is rejected. An empty
-// TenantID in a mapping is normalized to tenant.DefaultTenant so the principal
-// always carries a non-empty, key-safe tenant (required by TenantAwareAuthorizer
-// and every downstream tenant-scoped store read).
+// Namespace in a mapping is normalized to namespace.Default so the principal
+// always carries a non-empty, key-safe namespace (required by NamespaceAwareAuthorizer
+// and every downstream namespace-scoped store read).
 func NewBearerPrincipalAuthMulti(mappings []TokenPrincipalMapping) *BearerPrincipalAuth {
 	byHash := make(map[[32]byte]principalEntry, len(mappings))
 	for _, m := range mappings {
-		t := m.TenantID
+		t := m.Namespace
 		if t == "" {
-			t = string(tenant.DefaultTenant)
+			t = string(namespace.Default)
 		}
-		entry := principalEntry{subject: m.Subject, tenantID: t, scopes: m.Scopes}
+		entry := principalEntry{subject: m.Subject, namespaceID: t, scopes: m.Scopes}
 		h := sha256.Sum256([]byte(m.Token))
 		// Reject duplicate tokens at construction rather than silently shadowing
 		// one principal with another.
@@ -273,7 +274,7 @@ func NewBearerPrincipalAuthMulti(mappings []TokenPrincipalMapping) *BearerPrinci
 
 // Authenticate returns the Principal bound to the request's bearer token, or
 // ErrWorkflowUnauthenticated. The returned Principal carries the server-issued
-// TenantID so downstream tenant-scoped store reads and audit are consistent.
+// Namespace so downstream namespace-scoped store reads and audit are consistent.
 // A wrong token yields the same error as a missing one — no existence leak.
 func (a *BearerPrincipalAuth) Authenticate(r *http.Request) (Principal, error) {
 	hdr := r.Header.Get("Authorization")
@@ -289,12 +290,12 @@ func (a *BearerPrincipalAuth) Authenticate(r *http.Request) (Principal, error) {
 	if !ok {
 		return Principal{}, ErrWorkflowUnauthenticated
 	}
-	return Principal{Subject: entry.subject, TenantID: entry.tenantID, Scopes: entry.scopes}, nil
+	return Principal{Subject: entry.subject, Namespace: entry.namespaceID, Scopes: entry.scopes}, nil
 }
 
 // AuthenticateRequest implements WorkflowAuthenticator so the same multi-token
 // registry can gate the outer management middleware while the route-level authz
-// wrapper supplies the principal, scopes, and tenant. It delegates to
+// wrapper supplies the principal, scopes, and namespace. It delegates to
 // Authenticate and returns only the authentication error, so plaintext tokens
 // are never retained and the outcome is simply valid/invalid.
 func (a *BearerPrincipalAuth) AuthenticateRequest(r *http.Request) error {
@@ -319,7 +320,7 @@ func DisabledPrincipalAuth() PrincipalAuthenticator { return disabledPrincipalAu
 type AuditEvent struct {
 	RequestID   string
 	Principal   string
-	TenantID    string
+	Namespace   string
 	Operation   string
 	Resource    string
 	WorkflowID  string
@@ -352,6 +353,7 @@ type AuditSink interface {
 // InMemoryAuditSink is a dev/test audit sink that records events in memory.
 // It is not authoritative and must not be the sole record in production.
 type InMemoryAuditSink struct {
+	mu     sync.Mutex
 	events []AuditEvent
 }
 
@@ -359,12 +361,16 @@ type InMemoryAuditSink struct {
 func NewInMemoryAuditSink() *InMemoryAuditSink { return &InMemoryAuditSink{} }
 
 func (s *InMemoryAuditSink) Append(_ context.Context, ev AuditEvent) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.events = append(s.events, ev)
 	return nil
 }
 
 // Events returns a copy of the recorded audit events.
 func (s *InMemoryAuditSink) Events() []AuditEvent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	out := make([]AuditEvent, len(s.events))
 	copy(out, s.events)
 	return out

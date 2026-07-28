@@ -41,8 +41,8 @@ func TestGraphHashChangesWithGroupSelector(t *testing.T) {
 	}
 }
 
-func TestCompilerVersionV2(t *testing.T) {
-	if compilerVersion != "v2" {
-		t.Fatalf("compilerVersion = %q, want %q", compilerVersion, "v2")
+func TestCompilerVersionV3(t *testing.T) {
+	if compilerVersion != "v3" {
+		t.Fatalf("compilerVersion = %q, want %q", compilerVersion, "v3")
 	}
 }

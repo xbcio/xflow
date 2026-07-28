@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/types"
 )
@@ -122,7 +122,7 @@ func TestHTTPPollRejectsStaleSession(t *testing.T) {
 	}
 }
 
-func TestHTTPRegisterRejectsInvalidTenant(t *testing.T) {
+func TestHTTPRegisterRejectsInvalidNamespace(t *testing.T) {
 	fake := &fakeControlEngine{}
 	dir := NewMemoryRunnerDirectory()
 	server := httptest.NewServer(NewServer(fake, dir).Handler())
@@ -132,12 +132,12 @@ func TestHTTPRegisterRejectsInvalidTenant(t *testing.T) {
 		RunnerID:     "runner-1",
 		Concurrency:  1,
 		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
-		Tenants:      []string{"bad:tenant"},
+		Namespaces:   []string{"bad:namespace"},
 	}
 	resp := postJSONRaw(t, server.URL+protocol.RegisterRunnerPath, register)
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("register invalid tenant status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+		t.Fatalf("register invalid namespace status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
 	}
 }
 
@@ -496,21 +496,21 @@ func TestHTTPReportResultStaleTokenKeepsReplacementLeaseAndSeen(t *testing.T) {
 }
 
 type fakeControlEngine struct {
-	inspectDetail   engine.ExecutionDetail
-	inspectErr      error
-	buildLease      *engine.TaskLease
-	buildErr        error
-	recoverLease    *engine.TaskLease
-	recoverErr      error
-	commitHook      func()
-	commitOutcome   engine.CommitOutcome
-	commitErr       error
-	committedLease  *engine.TaskLease
-	committedResult engine.TaskResult
-	committedTenant tenant.TenantID
-	signalName      string
-	signalData      map[string]any
-	canceledID      types.ExecutionID
+	inspectDetail      engine.ExecutionDetail
+	inspectErr         error
+	buildLease         *engine.TaskLease
+	buildErr           error
+	recoverLease       *engine.TaskLease
+	recoverErr         error
+	commitHook         func()
+	commitOutcome      engine.CommitOutcome
+	commitErr          error
+	committedLease     *engine.TaskLease
+	committedResult    engine.TaskResult
+	committedNamespace namespace.Namespace
+	signalName         string
+	signalData         map[string]any
+	canceledID         types.ExecutionID
 }
 
 func (f *fakeControlEngine) Submit(context.Context, *graph.Graph, map[string]any, ...*types.Runtime) (types.ExecutionID, error) {
@@ -566,7 +566,7 @@ func (f *fakeControlEngine) RecoverTaskLease(_ context.Context, task *engine.Tas
 }
 
 func (f *fakeControlEngine) CommitTaskResultWithOutcome(ctx context.Context, lease *engine.TaskLease, result engine.TaskResult) (engine.CommitOutcome, error) {
-	f.committedTenant = tenant.FromContext(ctx)
+	f.committedNamespace = namespace.FromContext(ctx)
 	if f.commitHook != nil {
 		f.commitHook()
 	}

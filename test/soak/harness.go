@@ -36,7 +36,7 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 
-	"github.com/xbcio/xflow/backend/distributed"
+	"github.com/xbcio/xflow/backend/providers/distributed"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/service/apiserver"
 	"github.com/xbcio/xflow/service/control"
@@ -60,10 +60,10 @@ const defaultLeaderWait = 5 * time.Second
 // replica is an in-process apiserver+httptest.Server pair, which is sufficient
 // to exercise shared-Redis leader election and the harness contract.
 type Cluster struct {
-	t        testing.TB
-	opts     Options
-	mr       *miniredis.Miniredis // non-nil when running over an in-process miniredis
-	redisAddr string              // resolved Redis address shared by all replicas
+	t         testing.TB
+	opts      Options
+	mr        *miniredis.Miniredis // non-nil when running over an in-process miniredis
+	redisAddr string               // resolved Redis address shared by all replicas
 
 	mu       sync.Mutex
 	replicas []*Replica
@@ -229,14 +229,14 @@ func (c *Cluster) newReplica(ctx context.Context, index int) (*Replica, error) {
 
 	httpSrv := httptest.NewServer(srv.Handler())
 	r := &Replica{
-		cluster:      c,
-		index:        index,
-		backend:      b,
-		cp:           cp,
-		srv:          srv,
-		httpSrv:      httpSrv,
-		startCtx:      startCtx,
-		startCancel:  startCancel,
+		cluster:     c,
+		index:       index,
+		backend:     b,
+		cp:          cp,
+		srv:         srv,
+		httpSrv:     httpSrv,
+		startCtx:    startCtx,
+		startCancel: startCancel,
 	}
 	return r, nil
 }
@@ -326,10 +326,10 @@ func (c *Cluster) AddRunner(replicaIndex int, runnerID string) (*Runner, error) 
 		return nil, fmt.Errorf("soak: replica index %d out of range (have %d replicas)", replicaIndex, len(c.replicas))
 	}
 	r := &Runner{
-		cluster:     c,
-		index:       len(c.runners),
-		replica:     c.replicas[replicaIndex],
-		runnerID:    runnerID,
+		cluster:  c,
+		index:    len(c.runners),
+		replica:  c.replicas[replicaIndex],
+		runnerID: runnerID,
 	}
 	c.runners = append(c.runners, r)
 	return r, nil
@@ -579,14 +579,14 @@ type SLORecorder interface {
 // noopSLORecorder is the default recorder when Options.SLORecorder is nil.
 type noopSLORecorder struct{}
 
-func (noopSLORecorder) LeaderElected(int)             {}
-func (noopSLORecorder) LeaderLost(int)                {}
+func (noopSLORecorder) LeaderElected(int)              {}
+func (noopSLORecorder) LeaderLost(int)                 {}
 func (noopSLORecorder) LeaderSwitchTime(time.Duration) {}
-func (noopSLORecorder) RecoveryTime(time.Duration)    {}
-func (noopSLORecorder) DuplicateInvocation()          {}
-func (noopSLORecorder) ReplicaStopped(int)            {}
-func (noopSLORecorder) RunnerStarted(int)            {}
-func (noopSLORecorder) RunnerStopped(int)            {}
+func (noopSLORecorder) RecoveryTime(time.Duration)     {}
+func (noopSLORecorder) DuplicateInvocation()           {}
+func (noopSLORecorder) ReplicaStopped(int)             {}
+func (noopSLORecorder) RunnerStarted(int)              {}
+func (noopSLORecorder) RunnerStopped(int)              {}
 
 // --- helpers shared with test/integration/harness.go (re-implemented here
 // because soak is a standalone package and cannot import the integration

@@ -10,7 +10,7 @@ executions. It also resolves the dual-write asymmetry described in
 
 | Store | Role | What happens on write failure |
 | --- | --- | --- |
-| Redis (`backend/distributed/redis_state.go`) | **Authoritative** for execution state, leases, scheduling counters, durable outbox, and runner handoff state. Scheduling is consistent iff Redis is consistent. | The operation fails; callers must not treat it as a successful state transition. |
+| Redis (`backend/providers/distributed/internal/rstate`) | **Authoritative** for execution state, leases, scheduling counters, durable outbox, and runner handoff state. Scheduling is consistent iff Redis is consistent. | The operation fails; callers must not treat it as a successful state transition. |
 | `store.Store` (sqlstore) | **Audit trail** and query projection. It is not a scheduling source of truth. | Best-effort writes report failure through `AuditObserver` and atomic counters; accepted Redis scheduling state remains valid. |
 
 On restart, recovery reads Redis; SQL is never used to reconstruct scheduling
@@ -23,6 +23,13 @@ roll back or synthesize Redis state.
 backend. The engine only depends on `StateStore` and `TaskQueue`; it discovers
 this capability by interface assertion and never imports a concrete storage
 implementation.
+
+`StateStore` is a broad facade over the engine's state domains rather than a
+single small repository. Redis-backed implementations should keep the
+`rstate` code organized by contract area: execution/node lifecycle, lease
+fencing and repair, durable outbox/dead-letter, suspend/signal, audit
+projection, and namespace isolation. Changes to one area should update the
+matching state-store contract tests.
 
 For an acyclic execution, `CommitNode` is the durable linearization point. The
 Redis Lua transition validates the active lease identity (lease ID, token,
@@ -101,12 +108,14 @@ Each Redis-to-SQL projection is one of:
 
 ## Observability and reconciliation
 
-`asynq.Backend` exposes `AuditObserver` (`asynq.WithAuditObserver`),
-lock-free `AuditStats()`, and optional state logging (`asynq.WithStateLogger`)
+`distributed.Backend` exposes `AuditObserver`
+(`distributed.WithAuditObserver`),
+lock-free `AuditStats()`, and optional state logging (`distributed.WithStateLogger`)
 for audit projection failures. Lease lifecycle, commit outcome, durable outbox,
 runner-claim recovery, and sweeper timing are exposed through optional observer
-interfaces and can be adapted to Prometheus without adding an observability
-dependency to `engine/`.
+interfaces and can be adapted to Prometheus outside `engine/`. Engine-owned
+spans may use the narrow tracing facade, but concrete metrics, logging, and
+exporter setup must stay outside `engine/`.
 
 A `xflow-server audit reconcile` CLI that produces a Redis-versus-sqlstore
 diff remains **planned**. Until it exists, audit failure counters and observers

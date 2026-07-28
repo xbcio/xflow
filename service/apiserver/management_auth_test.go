@@ -89,7 +89,6 @@ func TestManagementAuthMiddlewareDoesNotGateWorkflowRoutes(t *testing.T) {
 	// /v1/management/ and must NOT be gated by this middleware. The workflow
 	// module applies its own WorkflowAuthenticator. Verify pass-through.
 	auth := NewBearerTokenAuth("secret")
-	srv := newMgmtTestServer(auth)
 
 	// Register a fake workflow route to confirm it is not 401'd.
 	mux := http.NewServeMux()
@@ -99,7 +98,7 @@ func TestManagementAuthMiddlewareDoesNotGateWorkflowRoutes(t *testing.T) {
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
-	srv = ManagementAuthMiddleware(auth)(mux)
+	srv := ManagementAuthMiddleware(auth)(mux)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/workflows", nil)
 	rec := httptest.NewRecorder()

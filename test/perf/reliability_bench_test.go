@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xbcio/xflow/backend/distributed"
+	"github.com/xbcio/xflow/backend/providers/distributed"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/service/control"
@@ -358,7 +358,7 @@ func createExpiredPerfLeases(b *testing.B, ctx context.Context, state engine.Sta
 
 func deletePerfExecution(b *testing.B, ctx context.Context, rdb *redis.Client, id types.ExecutionID) {
 	b.Helper()
-	if err := deletePerfKeys(ctx, rdb, fmt.Sprintf("xflow:tdefault:exec:{%s}:*", id)); err != nil {
+	if err := deletePerfKeys(ctx, rdb, fmt.Sprintf("xflow:ns:default:exec:{%s}:*", id)); err != nil {
 		b.Fatalf("delete execution %q keys: %v", id, err)
 	}
 }

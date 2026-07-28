@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xbcio/xflow/backend/distributed"
+	"github.com/xbcio/xflow/backend/providers/distributed"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/types"
 )

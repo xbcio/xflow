@@ -8,8 +8,8 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/xbcio/xflow/backend"
-	"github.com/xbcio/xflow/backend/distributed"
-	backendlocal "github.com/xbcio/xflow/backend/local"
+	"github.com/xbcio/xflow/backend/providers/distributed"
+	backendlocal "github.com/xbcio/xflow/backend/providers/local"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/observability/metrics"
 	"github.com/xbcio/xflow/observability/tracing"
@@ -55,7 +55,7 @@ type Config struct {
 	// compatibility; production should set PrincipalAuth + Authorizer + Audit.
 	PrincipalAuth PrincipalAuthenticator
 	// Authorizer decides allow/deny per operation+resource. Defaults to
-	// ScopeAuthorizer (G1 single-tenant reference) when PrincipalAuth is set.
+	// ScopeAuthorizer (G1 single-namespace reference) when PrincipalAuth is set.
 	Authorizer Authorizer
 	// AuditSink records append-only authorization/mutation events. In
 	// production this must be a durable sink (SQL projection reconciled
@@ -120,7 +120,7 @@ func New(cfg Config, opts ...Option) (*APIServer, error) {
 	// missing audit sink would leave mutations unaudited.
 	if cfg.PrincipalAuth != nil {
 		if cfg.Authorizer == nil {
-			return nil, errors.New("apiserver: PrincipalAuth requires an Authorizer (use ScopeAuthorizer for the G1 single-tenant reference)")
+			return nil, errors.New("apiserver: PrincipalAuth requires an Authorizer (use ScopeAuthorizer for the G1 single-namespace reference)")
 		}
 		if cfg.AuditSink == nil {
 			return nil, errors.New("apiserver: PrincipalAuth requires an AuditSink (mutations must be audited before execution)")
@@ -225,7 +225,7 @@ func buildControlPlane(cfg Config) (*control.ControlPlane, error) {
 // registered middleware runs first. When a Tracer is configured, OTel
 // request tracing is applied as the outermost layer.
 func (s *APIServer) Handler() http.Handler {
-	var h http.Handler = s.cp.Handler()
+	h := s.cp.Handler()
 	if hasHTTPModule(s.modules) {
 		mux := http.NewServeMux()
 		for _, m := range s.modules {

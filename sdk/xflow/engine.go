@@ -12,6 +12,7 @@ import (
 	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
+	"github.com/xbcio/xflow/types"
 )
 
 // bindDeprecationOnce ensures the legacy Provider.Bind fallback warning is
@@ -33,6 +34,14 @@ type Engine struct {
 	allowDirectHandlers bool
 	executionMode       ExecutionMode
 	logger              engine.Logger
+	// stopOnce guarantees the stopFns run at most once. The local queue's
+	// shutdown closes a channel that panics on a second close, so Stop must be
+	// idempotent for callers that defer Stop and also stop explicitly.
+	stopOnce sync.Once
+	// mu serializes AddWorkflow calls to protect directHandlerNames and the
+	// register→compile→persist sequence from concurrent map access panics and
+	// partial-registration pollution.
+	mu sync.Mutex
 	// directHandlerNames tracks LocalNode handler names this Engine has already
 	// registered, keyed by node name with the registering workflow's name as the
 	// value. LocalNode handlers are registered into a process-global map (see
@@ -40,6 +49,13 @@ type Engine struct {
 	// same node name silently shadows the first. This map surfaces that
 	// collision as a warning instead of failing silently.
 	directHandlerNames map[string]string
+	// directHandlers and globalHandlers mirror the node-name and node-type
+	// handlers this Engine registered into the process registry. The
+	// HandlerRegistrar write API exposes neither reads nor unregistration, so
+	// these mirrors let AddWorkflow restore a previously-overwritten handler
+	// when a later step of the same call fails (rollback). Guarded by e.mu.
+	directHandlers map[string]types.ActionHandler
+	globalHandlers map[string]types.ActionHandler
 }
 
 // newFromConfig assembles an Engine from a resolved engineConfig and a backend provider.
@@ -91,6 +107,8 @@ func newFromConfig(cfg *engineConfig, provider backend.Provider) (*Engine, error
 		executionMode:       cfg.executionMode,
 		logger:              cfg.logger,
 		directHandlerNames:  make(map[string]string),
+		directHandlers:      make(map[string]types.ActionHandler),
+		globalHandlers:      make(map[string]types.ActionHandler),
 	}
 	e.triggerRuntime = newTriggerRuntime(e, provider.TriggerPrimitives())
 
@@ -121,11 +139,15 @@ func newFromConfig(cfg *engineConfig, provider backend.Provider) (*Engine, error
 }
 
 // Stop shuts down background services and releases resources.
-// Stop functions are called in LIFO order.
+// Stop functions are called in LIFO order. Stop is idempotent: repeated calls
+// after the first are no-ops (the local queue panics on a double close, so the
+// stopFns must run exactly once).
 func (e *Engine) Stop() {
-	for i := len(e.stopFns) - 1; i >= 0; i-- {
-		e.stopFns[i]()
-	}
+	e.stopOnce.Do(func() {
+		for i := len(e.stopFns) - 1; i >= 0; i-- {
+			e.stopFns[i]()
+		}
+	})
 }
 
 func cfgAllowsDirectHandlers(e *Engine) bool {

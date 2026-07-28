@@ -1,44 +1,22 @@
-# @xflow/web
+# XFlow Web
 
-pnpm/Turbo workspace for the xflow frontend workflow management system.
+This workspace keeps the frontend small on purpose.
 
-## Structure
+## Packages
 
-```
-web/
-├── apps/
-│   ├── workflow-editor/   # Vite editor app (M1.2)
-│   └── workflow-viewer/   # Vite viewer app (M1.2)
-├── packages/
-│   ├── workflow-core/     # DSL/types/DAG utilities (no React/HTTP)
-│   ├── workflow-renderer/ # React Flow based canvas renderer
-│   ├── workflow-provider/ # Capability provider contracts
-│   ├── workflow-editor/   # Editor component package
-│   ├── workflow-viewer/   # Viewer component package
-│   ├── workflow-components/ # Shared workflow UI components
-│   ├── node-registry/     # Node plugin registry
-│   ├── api-client/        # HTTP transport client
-│   └── embed-sdk/         # iframe embed SDK
-└── tooling/
-    ├── eslint-config/     # Shared flat ESLint config with boundary rules
-    ├── typescript-config/ # Shared tsconfig bases
-    └── tailwind-config/   # Shared Tailwind preset
-```
+- `apps/xflow-admin` - admin app that assembles API, preview, and later editor flows
+- `packages/xflow-core` - React-free workflow types and `WorkflowDef -> GraphModel`
+- `packages/xflow-api` - request client for XFlow backend APIs
+- `packages/xflow-preview` - `XFlowPreview`, the read-only workflow/runtime preview component
+- `packages/xflow-editor` - `XFlowEditor`, built on top of preview
 
 ## Commands
 
 ```bash
 pnpm install
-pnpm typecheck
-pnpm lint
 pnpm test
-pnpm check:boundaries
+pnpm typecheck
 pnpm build
+pnpm dev
 ```
 
-## Constraints
-
-- Node `22.15.0`, pnpm `10.10.0`.
-- Public packages use `@xflow/*` scope and keep `react`/`react-dom` as peer dependencies where applicable.
-- Public packages must not depend on `@umijs/max`, `@ant-design/pro-layout`, Admin `@/` alias, or Umi runtime APIs.
-- `apps/admin` is not implemented in this milestone.

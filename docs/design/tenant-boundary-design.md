@@ -45,7 +45,7 @@ G2 设计 §2.2 发现 7 列出 tenant 仅有零散桩字段。核对代码确�
 G2 设计 §2.2 发现 7 仅说「未参与 key/路由」，但未指出 `Namespace` 已被用作「namespace/name@version」的 namespace 部分（`workflowreg/registry.go:58` 的 `{<key>}` hash tag 锚定的是包含 namespace 的 key）。本设计明确：**新增 `TenantID` 字段，不挪用 `Namespace`**（见 §4.8）。
 
 **不符点 D — trigger 包已预留 tenant 前缀位置但未实现。**
-`backend/distributed/internal/trigger/trigger.go:36-40` 注释明确「Tenant prefix is reserved for Task 7.2 (Phase 6/7). When a tenant prefix is added, the expected shape is `xflow:t<tenant>:trigger:dedup:<key>`」。这是 G2 设计未提及的良好基础，本设计直接采用此无花括号形状（tenant 前缀必须无花括号，原因见 §4.1）。
+`backend/providers/distributed/internal/trigger/trigger.go:36-40` 注释明确「Tenant prefix is reserved for Task 7.2 (Phase 6/7). When a tenant prefix is added, the expected shape is `xflow:ns:<namespace>:trigger:dedup:<key>`」。这是 G2 设计未提及的良好基础，本设计直接采用此无花括号形状（tenant 前缀必须无花括号，原因见 §4.1）。
 
 **不符点 E — `ScopeAuthorizer`（`authz.go:105-119`）不做 per-resource / per-tenant 校验。**
 注释明说「G1 single-tenant does not enforce per-execution ownership, which is the host's responsibility」。G2 必须新增 tenant-aware authorizer：`Authorize` 校验 `req.Principal.TenantID == resource.tenant`，否则 Deny。`AuthorizationRequest`（`authz.go:39-45`）目前无 TenantID 字段，需补。
@@ -64,8 +64,8 @@ G2 设计 §2.2 发现 7 仅说「未参与 key/路由」，但未指出 `Namesp
 | rstate outbox/dead | `xflow:exec:{<id>}:outbox:ready\|dead\|dead:body\|dead:meta:<eid>` | `rstate/atomic_state.go:26-37` | `{<id>}` ✅ |
 | rstate SCAN pattern | `xflow:exec:{*}:outbox:ready\|dead`、`xflow:exec:{*}:node:*:status`、`xflow:exec:{*}:leases` | `atomic_state.go:816,859,1001`、`lease_repair.go:72`、`state_lease.go:144` | `{*}` glob |
 | workflowreg | `xflow:workflow:{<key>}:bykey`、`xflow:workflow:{<key>}:byid:<id>`、`xflow:workflow:idmap:<id>` | `workflowreg/registry.go:58-77` | `{<key>}` ✅（Task 2.1 已修） |
-| trigger | `xflow:trigger:dedup:<key>`、`xflow:trigger:lock:<key>`、`xflow:trigger:state:<scope>:<key>` | `trigger/trigger.go:41-47` | 无（单 key，无需） |
-| leader | `xflow:leader:control-plane` | `backend/distributed/backend.go:298` | 无（全局单 key，**不 per-tenant**，见 §3） |
+| trigger | `xflow:ns:rigger:dedup:<key>`、`xflow:ns:rigger:lock:<key>`、`xflow:ns:rigger:state:<scope>:<key>` | `trigger/trigger.go:41-47` | 无（单 key，无需） |
+| leader | `xflow:leader:control-plane` | `backend/providers/distributed/backend.go:298` | 无（全局单 key，**不 per-tenant**，见 §3） |
 | runner directory | `xflow:runner-directory:{control}` | `redis_runner_directory.go:21` | `{control}` 全局 |
 
 ---
@@ -141,12 +141,12 @@ TokenAuthRegistry {
 
 ### 3.2 leader-only maintenance 需扫所有 tenant
 
-全局 leader 持有 maintenance，但 `lease_sweeper` / `lease_repair` / outbox dispatcher 当前 SCAN 全局 `xflow:exec:{*}:...`（见 §1.3）。加 tenant 前缀后，SCAN pattern 变为 `xflow:t<tenant>:exec:{*}:...`，**全局 leader 需迭代所有 tenant**。
+全局 leader 持有 maintenance，但 `lease_sweeper` / `lease_repair` / outbox dispatcher 当前 SCAN 全局 `xflow:exec:{*}:...`（见 §1.3）。加 tenant 前缀后，SCAN pattern 变为 `xflow:ns:<namespace>:exec:{*}:...`，**全局 leader 需迭代所有 tenant**。
 
 **方案：tenant 注册表 + 按 tenant 迭代**
 
-- 新增 `xflow:tenants` Redis SET，记录所有曾出现过的 tenant（tenant 首次写 key 时 `SADD`）。
-- `lease_sweeper` / `lease_repair` / outbox dispatcher 先 `SMEMBERS xflow:tenants`，再按 tenant 迭代 SCAN `xflow:t<tenant>:exec:{*}:...`。
+- 新增 `xflow:ns:enants` Redis SET，记录所有曾出现过的 tenant（tenant 首次写 key 时 `SADD`）。
+- `lease_sweeper` / `lease_repair` / outbox dispatcher 先 `SMEMBERS xflow:ns:enants`，再按 tenant 迭代 SCAN `xflow:ns:<namespace>:exec:{*}:...`。
 - `default` tenant 始终在集合中（启动时 `SADD`）。
 - **不变式（重要）**：tenant 一经 SADD 即**只增多不回收**——不支持 tenant 删除/下线。理由：(1) 删除 tenant 后若有在途 key（exec/outbox/dead-letter）未被 sweeper 扫净，会形成「孤儿 key 永久漏扫」，违背 lease_repair/outbox 的可靠性契约；(2) SET 元素回收会引入「sweeper 已迭代过该 tenant 后才被 SADD 新 key」的竞态。保持 append-only，确保 sweeper 不会漏扫任何 tenant 的 key。`default` tenant 在 server 启动时 `SADD`，其余 tenant 首次出现时懒发现并 SADD，最终收敛。
 
@@ -167,42 +167,42 @@ TokenAuthRegistry {
 
 ### 4.1 rstate key tenant 前缀（Task 7.1）
 
-**改动**：key 函数增加 tenant 参数，前缀注入 tenant。tenant 前缀采用**无花括号**形式 `xflow:t<tenant>:exec:{<id>}:...`（`t` 前缀可读无歧义）。
+**改动**：key 函数增加 tenant 参数，前缀注入 tenant。tenant 前缀采用**无花括号**形式 `xflow:ns:<namespace>:exec:{<id>}:...`（`t` 前缀可读无歧义）。
 
-- `backend/distributed/internal/rstate/keys.go:17-69`：所有 `xflow:exec:{<id>}:...` → `xflow:t<tenant>:exec:{<id>}:...`。
+- `backend/providers/distributed/internal/rstate/keys.go:17-69`：所有 `xflow:exec:{<id>}:...` → `xflow:ns:<namespace>:exec:{<id>}:...`。
   - `execKey(id, suffix)` → `execKey(tenant tenant.TenantID, id, suffix)`。
   - 同理 `nodeStatusKey`/`nodeMetaKey`/`outputKey`/`signalKey`/`waiterKey`/`waiterSpecKey`/`signalBatchKey`/`inDegreeKey`/`activeInputsKey`/`resumeLockKey`/`suspendedNodesKey`/`leaseExpiryZSetKey`/`timeoutZSetKey`。
-- **关键论证（tenant 前缀必须无花括号）**：Redis Cluster hash tag 规则是「首个 `{` 到首个 `}`」之间的子串作为 slot 计算输入。若 tenant 前缀写成 `{tenant}`（带花括号），则 `xflow:{tenant}:exec:{<id>}:node:...` 的首个 `{...}` 是 `{tenant}`，hash tag = `tenant`，导致同一 tenant 的所有 exec key 全部落到单一 slot——既制造热租户热点，又破坏「exec 内 key 共置 + per-exec slot 分布」的设计意图。因此 tenant 前缀必须**无花括号**。采用 `xflow:t<tenant>:exec:{<id>}:node:...` 后，首个 `{` 出现在 `<id>` 前，hash tag = `{<id>}`：exec 内所有 key 共置同 slot（Lua CROSSSLOT 不触发），同时不同 exec 仍按 `<id>` 分布到不同 slot（per-exec slot 分布保留，避免单 tenant 全部坍缩到单 slot），tenant 仅起命名空间隔离作用。SCAN pattern `xflow:t<tenant>:exec:{*}:...` 同理以 `{*}` 作 glob，不引入 hash tag。
-- `backend/distributed/internal/rstate/state.go:17` `Store` 持有 tenant 或从 context 取；所有调用点传 tenant。
-- `backend/distributed/internal/rstate/atomic_state.go:26-37` outbox/dead key 函数加 tenant 参数。
-- `backend/distributed/internal/rstate/atomic_state.go:816,859,1001` SCAN pattern：`xflow:exec:{*}:outbox:ready` → `xflow:t<tenant>:exec:{*}:outbox:ready`，sweeper 按 tenant 迭代（§3.2）。
-- `backend/distributed/internal/rstate/lease_repair.go:72` SCAN `xflow:exec:{*}:node:*:status` → `xflow:t<tenant>:exec:{*}:node:*:status`。
-- `backend/distributed/internal/rstate/state_lease.go:144` SCAN `xflow:exec:{*}:leases` → `xflow:t<tenant>:exec:{*}:leases`。
-- `backend/distributed/internal/rstate/state_lease.go`、`state_suspend.go`：所有 key 构造点加 tenant。
+- **关键论证（tenant 前缀必须无花括号）**：Redis Cluster hash tag 规则是「首个 `{` 到首个 `}`」之间的子串作为 slot 计算输入。若 tenant 前缀写成 `{tenant}`（带花括号），则 `xflow:{tenant}:exec:{<id>}:node:...` 的首个 `{...}` 是 `{tenant}`，hash tag = `tenant`，导致同一 tenant 的所有 exec key 全部落到单一 slot——既制造热租户热点，又破坏「exec 内 key 共置 + per-exec slot 分布」的设计意图。因此 tenant 前缀必须**无花括号**。采用 `xflow:ns:<namespace>:exec:{<id>}:node:...` 后，首个 `{` 出现在 `<id>` 前，hash tag = `{<id>}`：exec 内所有 key 共置同 slot（Lua CROSSSLOT 不触发），同时不同 exec 仍按 `<id>` 分布到不同 slot（per-exec slot 分布保留，避免单 tenant 全部坍缩到单 slot），tenant 仅起命名空间隔离作用。SCAN pattern `xflow:ns:<namespace>:exec:{*}:...` 同理以 `{*}` 作 glob，不引入 hash tag。
+- `backend/providers/distributed/internal/rstate/state.go:17` `Store` 持有 tenant 或从 context 取；所有调用点传 tenant。
+- `backend/providers/distributed/internal/rstate/atomic_state.go:26-37` outbox/dead key 函数加 tenant 参数。
+- `backend/providers/distributed/internal/rstate/atomic_state.go:816,859,1001` SCAN pattern：`xflow:exec:{*}:outbox:ready` → `xflow:ns:<namespace>:exec:{*}:outbox:ready`，sweeper 按 tenant 迭代（§3.2）。
+- `backend/providers/distributed/internal/rstate/lease_repair.go:72` SCAN `xflow:exec:{*}:node:*:status` → `xflow:ns:<namespace>:exec:{*}:node:*:status`。
+- `backend/providers/distributed/internal/rstate/state_lease.go:144` SCAN `xflow:exec:{*}:leases` → `xflow:ns:<namespace>:exec:{*}:leases`。
+- `backend/providers/distributed/internal/rstate/state_lease.go`、`state_suspend.go`：所有 key 构造点加 tenant。
 - **越权断言**：tenant A 的 sweeper 扫不到 tenant B 的 key（miniredis 单测）。
 
 ### 4.2 workflowreg tenant scope（Task 7.2，与 Task 2.1 hash tag 修复合并）
 
 **改动**：workflow key 加 tenant 前缀（无花括号，理由同 §4.1）。
 
-- `backend/distributed/internal/workflowreg/registry.go:58-77`：
-  - `workflowByKeyKey(key)` → `workflowByKeyKey(tenant, key)` = `xflow:t<tenant>:workflow:{<key>}:bykey`
-  - `workflowByIDKey(key, id)` → `workflowByIDKey(tenant, key, id)` = `xflow:t<tenant>:workflow:{<key>}:byid:<id>`
+- `backend/providers/distributed/internal/workflowreg/registry.go:58-77`：
+  - `workflowByKeyKey(key)` → `workflowByKeyKey(tenant, key)` = `xflow:ns:<namespace>:workflow:{<key>}:bykey`
+  - `workflowByIDKey(key, id)` → `workflowByIDKey(tenant, key, id)` = `xflow:ns:<namespace>:workflow:{<key>}:byid:<id>`
   - `workflowByIDKeyPrefix(key)` → 加 tenant 前缀
-  - `workflowIDMapKey(id)` → `xflow:t<tenant>:workflow:idmap:<id>` 或保持全局 idmap（见下权衡）
+  - `workflowIDMapKey(id)` → `xflow:ns:<namespace>:workflow:idmap:<id>` 或保持全局 idmap（见下权衡）
   - `KeyByID`/`KeyByKey`/`KeyIDMap`（`registry.go:83-85`）同步加 tenant 参数
-- **与 Task 2.1 合并**：Task 2.1 已加 `{<key>}` hash tag，本任务在 hash tag 之外再加无花括号的 `t<tenant>` 前缀。两者在同一 key 改动里完成，形状 `xflow:t<tenant>:workflow:{<key>}:...`。**tenant 前缀必须无花括号**：若写成 `xflow:{tenant}:workflow:{<key>}:...`，则 Redis hash tag 规则取「首个 `{...}`」= `{tenant}`，会令同 tenant 所有 workflow key 坍缩到单 slot，并破坏 `{<key>}` 的共置语义。无花括号形式下首个 `{` 在 `<key>` 前，hash tag = `{<key>}`，bykey/byid 共置保留、per-key slot 分布保留、tenant 命名空间隔离保留。
+- **与 Task 2.1 合并**：Task 2.1 已加 `{<key>}` hash tag，本任务在 hash tag 之外再加无花括号的 `t<tenant>` 前缀。两者在同一 key 改动里完成，形状 `xflow:ns:<namespace>:workflow:{<key>}:...`。**tenant 前缀必须无花括号**：若写成 `xflow:{tenant}:workflow:{<key>}:...`，则 Redis hash tag 规则取「首个 `{...}`」= `{tenant}`，会令同 tenant 所有 workflow key 坍缩到单 slot，并破坏 `{<key>}` 的共置语义。无花括号形式下首个 `{` 在 `<key>` 前，hash tag = `{<key>}`，bykey/byid 共置保留、per-key slot 分布保留、tenant 命名空间隔离保留。
 - `AddWorkflow`/`GetWorkflow`/`RemoveWorkflow`（`registry.go:110,153,177`）签名加 tenant 或从 context 取。
 - **idmap 权衡**：`workflowIDMapKey`（`registry.go:75`）是 id→key 反向索引。若保持全局，则跨 tenant 的 id 碰撞需避免（id 是 UUID，碰撞概率可忽略，但 GetWorkflow(id) 需知道 tenant 才能定位 byid key——这会破坏「仅凭 id 取」语义）。**决策：idmap 也加 tenant 前缀**，`GetWorkflow(tenant, id)` 必须带 tenant。management 端点 `/v1/management/executions/{id}` 先从已认证 principal 取 tenant，再 `GetWorkflow(tenant, id)`（见 §5.1 鸡生蛋问题的解析顺序）。
 
 ### 4.3 trigger tenant scope（Task 7.2）
 
-**改动**：trigger key 加 tenant 前缀（无花括号 `xflow:t<tenant>:trigger:...`，理由同 §4.1），采用 `trigger.go:36-40` 注释已预留的形状。
+**改动**：trigger key 加 tenant 前缀（无花括号 `xflow:ns:<namespace>:trigger:...`，理由同 §4.1），采用 `trigger.go:36-40` 注释已预留的形状。
 
-- `backend/distributed/internal/trigger/trigger.go:41-47`：
-  - `triggerDedupKey(key)` → `triggerDedupKey(tenant, key)` = `xflow:t<tenant>:trigger:dedup:<key>`
-  - `triggerLockKey(key)` → `xflow:t<tenant>:trigger:lock:<key>`
-  - `triggerStateKey(scope, key)` → `xflow:t<tenant>:trigger:state:<scope>:<key>`
+- `backend/providers/distributed/internal/trigger/trigger.go:41-47`：
+  - `triggerDedupKey(key)` → `triggerDedupKey(tenant, key)` = `xflow:ns:<namespace>:trigger:dedup:<key>`
+  - `triggerLockKey(key)` → `xflow:ns:<namespace>:trigger:lock:<key>`
+  - `triggerStateKey(scope, key)` → `xflow:ns:<namespace>:trigger:state:<scope>:<key>`
 - trigger 仍是单 key 操作（`trigger.go:22-34` 注释确认无跨 key Lua），tenant 前缀不影响 cluster-safety；tenant 无花括号也避免了「首个 `{...}` 被 tenant 抢占为 hash tag」的隐患（即便当前 trigger 无多 key Lua，保持 key schema 一致性）。
 - `Primitives` 方法签名加 tenant 或从 context 取。
 
@@ -210,7 +210,7 @@ TokenAuthRegistry {
 
 **改动**：**无**。leader key `xflow:leader:control-plane`（`backend.go:298`）保持全局。
 
-- `backend/distributed/leader.go:42-65` `RedisLeaderElector` 不变。
+- `backend/providers/distributed/leader.go:42-65` `RedisLeaderElector` 不变。
 - 但 leader-only maintenance（`lease_sweeper` / `lease_repair` / outbox dispatcher）按 tenant 迭代（§3.2），改动在 sweeper 侧（§4.1 SCAN + §4.6）。
 - `service/control/controlplane.go:168-176` leader 取用 + sweeper 门控不变。
 
@@ -218,7 +218,7 @@ TokenAuthRegistry {
 
 **改动**：dead-letter key 共享 exec 的 tenant 前缀（已随 §4.1 完成，此处贯通 manager + API）。
 
-- `backend/distributed/internal/rstate/atomic_state.go:280-294` `replayDeadLetterLua` 的 KEYS 全部带 tenant 前缀（随 §4.1 key 函数改造自动生效）。
+- `backend/providers/distributed/internal/rstate/atomic_state.go:280-294` `replayDeadLetterLua` 的 KEYS 全部带 tenant 前缀（随 §4.1 key 函数改造自动生效）。
 - `service/control/deadletter_manager.go:65-67` `List` 签名加 tenant（或从 context 取），传给 `store.ListDeadLetters`。
 - `service/control/deadletter_manager.go:75-104` `Replay` 校验 `req.ExecutionID` 所属 tenant == `principal.TenantID`：replay 调 `store.ReplayDeadLetter` 前，先从 store 读 exec 的 tenant（或 exec key 前缀解析 tenant），比对 `principal.TenantID`，不匹配返回 `ReplayUnauthorized`。
 - `service/apiserver/module_management.go:186,217` `handleDeadLetterList`/`handleDeadLetterReplay` 从 principal 取 tenant 注入 manager 调用。
@@ -228,7 +228,7 @@ TokenAuthRegistry {
 
 **改动**：outbox SCAN 与 dispatcher 按 tenant 隔离。
 
-- `backend/distributed/internal/rstate/atomic_state.go:816,859,1001` outbox SCAN pattern 加 tenant（随 §4.1）。
+- `backend/providers/distributed/internal/rstate/atomic_state.go:816,859,1001` outbox SCAN pattern 加 tenant（随 §4.1）。
 - outbox dispatcher（后台重放）按 tenant 迭代（§3.2 tenant 注册表）。
 - outbox body / attempts / dead:meta key 全部随 exec tenant 前缀（随 §4.1 key 函数改造）。
 
@@ -242,7 +242,7 @@ TokenAuthRegistry {
 - `execution/runner.go:33` `WithCredentialResolver(fn func(name string) map[string]any)` → `WithCredentialResolver(fn func(tenant tenant.TenantID, name string) map[string]any)`：credential resolver 按 tenant scope 凭证（不同 tenant 的同 credential name 解析到不同凭证）。
 - `service/runner/runner.go:56` `CredentialResolver` 签名同步加 tenant。
 - `cmd/runner/config.go`：runner 注册时声明可服务的 tenant 列表（`tenants: [...]`），server 侧 dispatch 校验。
-- asynq 任务携带 tenant：asynq task payload 或 queue 命名空间带 tenant（`backend/distributed/internal/queue/asynq/transport.go` producer enqueue 时注入 tenant 到 payload；`consumer.go:27` 解出 tenant 注入 context）。
+- asynq 任务携带 tenant：asynq task payload 或 queue 命名空间带 tenant（`backend/providers/distributed/internal/queue/asynq/transport.go` producer enqueue 时注入 tenant 到 payload；`consumer.go:27` 解出 tenant 注入 context）。
 - **显式 tenant placement，不能用 runner label 兜底**：`types/workflow.go:83-86` `RunnerSelector.MatchLabels` 不能用于承载 tenant（ha-soak-plan §4 反声明）。runner tenant 归属是 server 端 dispatch 决策，不信任 workflow DSL 里的 label。
 
 ### 4.8 API 层签发 + authz（Task 7.3）
@@ -277,10 +277,10 @@ TokenAuthRegistry {
 
 - `/v1/management/executions/{id}`（`module_management.go:91-107`）：
   - **解析顺序（避免鸡生蛋）**：handler 先从已认证 principal 取 `TenantID`（来自 §4.8 签发，不读请求体），再以 `(principal.TenantID, execID)` 调 `Inspect`/`GetWorkflow`。下游 `GetWorkflow(tenant, id)` 因 idmap 已加 tenant 前缀（§4.2），可直接在已知 tenant 命名空间内反查 id→key，不存在「需先知 tenant 才能反查、又需反查才能知 tenant」的循环。
-  - **execID 所属 tenant 校验**：`Inspect` 前校验 execID 所属 tenant == `principal.TenantID`。exec 所属 tenant 通过 exec key 前缀解析：exec key 形如 `xflow:t<tenant>:exec:{<id>}:...`，从 key 中取出 `t<tenant>` 段与 `principal.TenantID` 比对。若 key 不存在或前缀 tenant 不匹配，一律返回 404。
+  - **execID 所属 tenant 校验**：`Inspect` 前校验 execID 所属 tenant == `principal.TenantID`。exec 所属 tenant 通过 exec key 前缀解析：exec key 形如 `xflow:ns:<namespace>:exec:{<id>}:...`，从 key 中取出 `t<tenant>` 段与 `principal.TenantID` 比对。若 key 不存在或前缀 tenant 不匹配，一律返回 404。
   - 不匹配返回 **404**（不返回 403，避免泄漏 execID 存在性——映射安全策略「Return a generic error on authentication failure; do not reveal whether the user exists」）。
 - `/v1/management/dead-letters/{execID}` list/replay（`module_management.go:186,217`）：
-  - 同样校验 execID.tenant == principal.TenantID，不匹配 404。tenant 同样从 principal 取，再按 exec key 前缀 `xflow:t<tenant>:exec:...` 校验 execID 归属。
+  - 同样校验 execID.tenant == principal.TenantID，不匹配 404。tenant 同样从 principal 取，再按 exec key 前缀 `xflow:ns:<namespace>:exec:...` 校验 execID 归属。
   - replay 操作额外在 `deadletter_manager.go` Replay 内校验（§4.5），双保险。
 
 ### 5.2 批量操作 per-item tenant 校验

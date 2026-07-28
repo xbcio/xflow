@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	backendlocal "github.com/xbcio/xflow/backend/local"
-	"github.com/xbcio/xflow/backend/distributed"
+	"github.com/xbcio/xflow/backend/providers/distributed"
+	backendlocal "github.com/xbcio/xflow/backend/providers/local"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/execution"
@@ -211,7 +211,7 @@ type downstreamExpectation struct {
 // ParityOutcome is the topology-independent contract a fixture must reach.
 // It is exported so that subsequent fixture files can reuse the parity runners.
 type ParityOutcome struct {
-	ExecutionID types.ExecutionID // bound to runtime evidence + counter snapshots (recorder wiring)
+	ExecutionID        types.ExecutionID // bound to runtime evidence + counter snapshots (recorder wiring)
 	Attempt            int
 	Status             types.ExecutionStatus
 	SourceStatus       types.NodeStatus // terminal status of the source node
@@ -242,11 +242,11 @@ type parityCase struct {
 	// here we assert the expected kind is consistent across topologies and stamp
 	// it into the artifact so it carries structured kind/retryable with real
 	// values. Empty WantKind means the fixture reaches Success (no error record).
-	WantKind          string
-	WantRetryable     bool
+	WantKind               string
+	WantRetryable          bool
 	WantHandlerInvocations int // 0 = not tracked (real action handlers have no fixture counter)
-	OKNode           types.NodeDef
-	ErrNode          types.NodeDef
+	OKNode                 types.NodeDef
+	ErrNode                types.NodeDef
 	// WantDownstream maps downstream node name to expected terminal state.
 	WantDownstream map[string]downstreamExpectation
 }
@@ -352,10 +352,10 @@ func TestActionErrorParityMatrix(t *testing.T) {
 					msg:       "business.reject",
 				})
 			},
-			MaxAttempts: 2, // attempt 1 + 1 retry, then exhausted
-			WantAttempt: 2,
-			WantStatus:  types.ExecutionStatusFailed,
-			ErrContains: "parity.transient_retry_exhausted",
+			MaxAttempts:            2, // attempt 1 + 1 retry, then exhausted
+			WantAttempt:            2,
+			WantStatus:             types.ExecutionStatusFailed,
+			ErrContains:            "parity.transient_retry_exhausted",
 			WantKind:               string(types.ErrorKindTransient),
 			WantRetryable:          true,
 			WantHandlerInvocations: 2,
@@ -369,10 +369,10 @@ func TestActionErrorParityMatrix(t *testing.T) {
 					msg:       "business.reject",
 				})
 			},
-			MaxAttempts: 3, // permanent bypasses retry entirely
-			WantAttempt: 1,
-			WantStatus:  types.ExecutionStatusFailed,
-			ErrContains: "parity.permanent_no_retry",
+			MaxAttempts:            3, // permanent bypasses retry entirely
+			WantAttempt:            1,
+			WantStatus:             types.ExecutionStatusFailed,
+			ErrContains:            "parity.permanent_no_retry",
 			WantKind:               string(types.ErrorKindPermanent),
 			WantRetryable:          false,
 			WantHandlerInvocations: 1,
@@ -406,10 +406,10 @@ func TestActionErrorParityMatrix(t *testing.T) {
 					msg:       "business.reject",
 				})
 			},
-			MaxAttempts: 3, // business error bypasses retry (Output.Error)
-			WantAttempt: 1,
-			WantStatus:  types.ExecutionStatusFailed,
-			ErrContains: "business.reject",
+			MaxAttempts:            3, // business error bypasses retry (Output.Error)
+			WantAttempt:            1,
+			WantStatus:             types.ExecutionStatusFailed,
+			ErrContains:            "business.reject",
 			WantKind:               string(types.ErrorKindBusiness),
 			WantRetryable:          false,
 			WantHandlerInvocations: 1,
@@ -1031,7 +1031,7 @@ func collectParityOutcome(t *testing.T, state engine.StateStore, execID types.Ex
 	}
 
 	out := ParityOutcome{
-		ExecutionID:         execID,
+		ExecutionID:        execID,
 		Attempt:            node.Attempt,
 		Status:             result.Status,
 		SourceStatus:       node.Status,

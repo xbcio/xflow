@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xbcio/xflow/backend/tenant"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/store/memstore"
 )
@@ -24,15 +24,15 @@ func TestSQLAuditSinkPersistsEvent(t *testing.T) {
 	sink := NewSQLAuditSink(db)
 
 	ev := AuditEvent{
-		RequestID:   "req-1",
-		Principal:   "alice",
-		TenantID:    "tenant-a",
-		Operation:   OpWorkflowCreate,
-		WorkflowID:  "wf-1",
-		Decision:    DecisionAllow,
-		Outcome:     "admitted",
-		TraceID:     "trace-1",
-		Timestamp:   time.Now(),
+		RequestID:  "req-1",
+		Principal:  "alice",
+		Namespace:  "namespace-a",
+		Operation:  OpWorkflowCreate,
+		WorkflowID: "wf-1",
+		Decision:   DecisionAllow,
+		Outcome:    "admitted",
+		TraceID:    "trace-1",
+		Timestamp:  time.Now(),
 	}
 	if err := sink.Append(context.Background(), ev); err != nil {
 		t.Fatalf("Append: %v", err)
@@ -79,14 +79,14 @@ func TestSQLAuditSinkStampsTimestampWhenZero(t *testing.T) {
 	}
 }
 
-func TestSQLAuditSinkPrefersTenantFromContext(t *testing.T) {
+func TestSQLAuditSinkPrefersNamespaceFromContext(t *testing.T) {
 	db := memstore.New()
 	sink := NewSQLAuditSink(db)
 
-	ctx := tenant.WithTenant(context.Background(), tenant.TenantID("tenant-ctx"))
+	ctx := namespace.WithNamespace(context.Background(), namespace.Namespace("namespace-ctx"))
 	ev := AuditEvent{
 		Principal: "alice",
-		TenantID:  "tenant-event",
+		Namespace: "namespace-event",
 		Operation: OpWorkflowCreate,
 		Decision:  DecisionAllow,
 		Outcome:   "admitted",
@@ -99,18 +99,18 @@ func TestSQLAuditSinkPrefersTenantFromContext(t *testing.T) {
 	if len(records) != 1 {
 		t.Fatalf("audit records = %d, want 1", len(records))
 	}
-	if got := records[0].TenantID; got != "tenant-ctx" {
-		t.Fatalf("audit TenantID = %q, want tenant-ctx (from context)", got)
+	if got := records[0].Namespace; got != "namespace-ctx" {
+		t.Fatalf("audit Namespace = %q, want namespace-ctx (from context)", got)
 	}
 }
 
-func TestSQLAuditSinkFallsBackToEventTenant(t *testing.T) {
+func TestSQLAuditSinkFallsBackToEventNamespace(t *testing.T) {
 	db := memstore.New()
 	sink := NewSQLAuditSink(db)
 
 	ev := AuditEvent{
 		Principal: "alice",
-		TenantID:  "tenant-event",
+		Namespace: "namespace-event",
 		Operation: OpWorkflowCreate,
 		Decision:  DecisionAllow,
 		Outcome:   "admitted",
@@ -123,7 +123,7 @@ func TestSQLAuditSinkFallsBackToEventTenant(t *testing.T) {
 	if len(records) != 1 {
 		t.Fatalf("audit records = %d, want 1", len(records))
 	}
-	if got := records[0].TenantID; got != "tenant-event" {
-		t.Fatalf("audit TenantID = %q, want tenant-event (fallback)", got)
+	if got := records[0].Namespace; got != "namespace-event" {
+		t.Fatalf("audit Namespace = %q, want namespace-event (fallback)", got)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/xbcio/xflow/types"
@@ -43,6 +44,56 @@ var defaultHTTPTransport = &http.Transport{
 }
 
 var DefaultHTTPClient = &http.Client{Transport: defaultHTTPTransport}
+
+// defaultMaxResponseBytes caps how much of a response body HTTPNode.Execute
+// will buffer into memory. Without a cap a malicious or misbehaving endpoint
+// could stream an unbounded body and exhaust the process's memory. It can be
+// overridden per node via options["max_response_bytes"].
+const defaultMaxResponseBytes int64 = 10 << 20 // 10 MiB
+
+// HostPolicy decides whether a request may be dispatched to a given host. A nil
+// return permits the request; a non-nil error aborts it before any bytes are
+// sent. The supplied host is the URL hostname with any port stripped.
+type HostPolicy func(host string) error
+
+// HTTPHostPolicy, when non-nil, is consulted with the destination host before
+// the initial request is dispatched and again for every redirect hop, so a
+// redirect cannot smuggle a request to a host the policy would reject. It is
+// nil by default: with no policy configured the node performs no host filtering
+// and behavior is fully backward compatible. Embedded runtimes may set it to
+// enforce SSRF allow/deny policy.
+var HTTPHostPolicy HostPolicy
+
+// NewHostPolicy builds a HostPolicy from optional allow and deny lists. When
+// allow is non-empty, only hosts present in it are permitted; deny always
+// rejects matching hosts and takes precedence over allow. Host matching is
+// case-insensitive and compares hostnames only (ports are ignored). It returns
+// nil when both lists are empty, preserving the no-filtering default.
+func NewHostPolicy(allow, deny []string) HostPolicy {
+	allowSet := make(map[string]struct{}, len(allow))
+	for _, h := range allow {
+		allowSet[strings.ToLower(h)] = struct{}{}
+	}
+	denySet := make(map[string]struct{}, len(deny))
+	for _, h := range deny {
+		denySet[strings.ToLower(h)] = struct{}{}
+	}
+	if len(allowSet) == 0 && len(denySet) == 0 {
+		return nil
+	}
+	return func(host string) error {
+		h := strings.ToLower(host)
+		if _, denied := denySet[h]; denied {
+			return fmt.Errorf("host %q is denied", host)
+		}
+		if len(allowSet) > 0 {
+			if _, ok := allowSet[h]; !ok {
+				return fmt.Errorf("host %q is not in the allowlist", host)
+			}
+		}
+		return nil
+	}
+}
 
 // HTTP creates an HTTP request node.
 //
@@ -163,10 +214,16 @@ func (n *HTTPNode) Execute(ctx context.Context, input *types.Input) (*types.Outp
 	}
 
 	timeout := 30 * time.Second
+	maxResponseBytes := defaultMaxResponseBytes
 	if options, ok := input.Params["options"].(map[string]any); ok {
 		if t := cast.ToString(options["timeout"]); t != "" {
 			if d, err := time.ParseDuration(t); err == nil {
 				timeout = d
+			}
+		}
+		if _, ok := options["max_response_bytes"]; ok {
+			if n := cast.ToInt64(options["max_response_bytes"]); n > 0 {
+				maxResponseBytes = n
 			}
 		}
 	}
@@ -176,15 +233,50 @@ func (n *HTTPNode) Execute(ctx context.Context, input *types.Input) (*types.Outp
 
 	client := *DefaultHTTPClient
 	client.Timeout = timeout
+
+	// Enforce the host policy (SSRF allow/deny) after the final URL is resolved
+	// but before any request is dispatched. When no policy is configured the
+	// node performs no filtering, preserving backward compatibility.
+	if policy := HTTPHostPolicy; policy != nil {
+		if err := policy(parsedURL.Hostname()); err != nil {
+			return nil, types.NewPermanentError("http.host_not_allowed", err.Error())
+		}
+		// The default client follows redirects, so re-check every redirect hop
+		// with the same policy; otherwise a redirect could smuggle a request to
+		// a disallowed host and bypass the allowlist.
+		client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+			if err := policy(req.URL.Hostname()); err != nil {
+				return types.NewPermanentError("http.host_not_allowed", err.Error())
+			}
+			if len(via) >= 10 {
+				return fmt.Errorf("stopped after 10 redirects")
+			}
+			return nil
+		}
+	}
+
 	resp, err := client.Do(req)
 	if err != nil {
+		// A redirect rejected by the host policy surfaces here wrapped in a
+		// *url.Error; preserve its permanent classification instead of masking
+		// it as a transient connection failure.
+		var ce *types.ClassifiedError
+		if errors.As(err, &ce) && ce.Permanent {
+			return nil, ce
+		}
 		return nil, types.NewTransientError("http.connection", err.Error())
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	respBody, err := io.ReadAll(resp.Body)
+	// Cap the buffered response body so an oversized response cannot exhaust
+	// memory. Read one extra byte to detect an overflow past the limit.
+	limited := io.LimitReader(resp.Body, maxResponseBytes+1)
+	respBody, err := io.ReadAll(limited)
 	if err != nil {
 		return nil, types.NewTransientError("http.read_response", fmt.Sprintf("read response: %v", err))
+	}
+	if int64(len(respBody)) > maxResponseBytes {
+		return nil, types.NewPermanentError("http.response_too_large", fmt.Sprintf("response body exceeds %d bytes", maxResponseBytes))
 	}
 
 	data := map[string]any{

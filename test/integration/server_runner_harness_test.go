@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xbcio/xflow/backend/distributed"
+	"github.com/xbcio/xflow/backend/providers/distributed"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/observability/metrics"
 	"github.com/xbcio/xflow/observability/tracing"
@@ -56,6 +56,7 @@ func (l *testLogger) Error(msg string, args ...any) {
 func (l *testLogger) Errorf(format string, args ...any) {
 	l.t.Logf("[engine] ERROR "+format, args...)
 }
+
 // Panic/Panicf log the engine panic message via t.Errorf (visible from any
 // goroutine) and then re-panic so a recovering caller surfaces the failure.
 // t.Fatalf is unsafe here: the engine may invoke Panic from a background
@@ -222,7 +223,7 @@ func newServerRunnerHarnessWithLeaseTTL(t *testing.T, addr string, concurrency i
 // productionServerRunnerHarness is the G1 production-auth variant of
 // serverRunnerHarness. It wires the same Redis/Asynq control plane but adds
 // the production B3 authz stack: PrincipalAuth (multi-token registry),
-// TenantAwareAuthorizer (default-deny), SQLAuditSink (durable append-only
+// NamespaceAwareAuthorizer (default-deny), SQLAuditSink (durable append-only
 // projection backed by MySQL), the T9 AuditReconcileWorker (leader-gated),
 // OTel tracer, Prometheus metrics, RequireWorkflowAuth fail-closed, and
 // WithManagement (gates /v1/management/dead-letters/*).
@@ -260,10 +261,10 @@ func (g prodLeaderGateAdapter) IsLeader() bool {
 // addr is the Redis address (host:port). dsn is the MySQL DSN. Both must be
 // reachable (requireRedis / requireMySQL gate the caller).
 //
-// mappings is the multi-tenant token registry; each mapping binds one token
-// to a (subject, tenant, scopes) triple. The harness wires PrincipalAuth +
-// TenantAwareAuthorizer + SQLAuditSink so every mutation is admitted under
-// audit (fail-closed) and authorized per operation+resource+tenant.
+// mappings is the multi-namespace token registry; each mapping binds one token
+// to a (subject, namespace, scopes) triple. The harness wires PrincipalAuth +
+// NamespaceAwareAuthorizer + SQLAuditSink so every mutation is admitted under
+// audit (fail-closed) and authorized per operation+resource+namespace.
 func newProductionServerRunnerHarness(t *testing.T, addr, dsn string, mappings []apiserver.TokenPrincipalMapping) *productionServerRunnerHarness {
 	t.Helper()
 
@@ -313,7 +314,7 @@ func newProductionServerRunnerHarness(t *testing.T, addr, dsn string, mappings [
 		Metrics:             m,
 		Tracer:              tracer,
 		PrincipalAuth:       apiserver.NewBearerPrincipalAuthMulti(mappings),
-		Authorizer:          apiserver.TenantAwareAuthorizer{},
+		Authorizer:          apiserver.NamespaceAwareAuthorizer{},
 		AuditSink:           auditSink,
 		RequireWorkflowAuth: true,
 	}, apiserver.WithControlPlane(cp), apiserver.WithManagement())

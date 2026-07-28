@@ -13,6 +13,9 @@ func compileGroups(g *Graph, def *types.WorkflowDef) error {
 	if len(def.Groups) == 0 {
 		return nil
 	}
+	if err := validateGroupsAllowCyclesExclusion(g, true); err != nil {
+		return err
+	}
 	g.groups = make([]GroupMeta, 0, len(def.Groups))
 	seen := map[string]bool{}
 	for i, gd := range def.Groups {
@@ -22,10 +25,19 @@ func compileGroups(g *Graph, def *types.WorkflowDef) error {
 		if seen[gd.Name] {
 			return fmt.Errorf("group %q: duplicate name", gd.Name)
 		}
+		if err := validateGroupNameNotReserved(gd.Name); err != nil {
+			return err
+		}
 		seen[gd.Name] = true
 		meta, err := compileOneGroup(g, gd, len(g.groups))
 		if err != nil {
 			return fmt.Errorf("group %q: %w", gd.Name, err)
+		}
+		if err := validateGroupPortability(g, &meta); err != nil {
+			return err
+		}
+		if err := validateNoSecretLiterals(g, &meta); err != nil {
+			return err
 		}
 		g.groups = append(g.groups, meta)
 	}

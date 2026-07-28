@@ -13,13 +13,13 @@ import (
 //
 // Security: per the organization secure-coding policy this table must NEVER
 // store token, payload, or other sensitive credentials. AuditEvent only
-// carries identity (subject/tenant), operation, resource ids, decision,
+// carries identity (subject/namespace), operation, resource ids, decision,
 // reason, and trace correlation ids — none of which are secrets.
 type dbAuditEvent struct {
 	ID            uint64    `gorm:"column:id;primaryKey;autoIncrement"`
 	RequestID     string    `gorm:"column:request_id;type:varchar(128)"`
 	Principal     string    `gorm:"column:principal;type:varchar(255)"`
-	TenantID      string    `gorm:"column:tenant_id;type:varchar(128)"`
+	Namespace      string    `gorm:"column:namespace;type:varchar(128)"`
 	Operation     string    `gorm:"column:operation;type:varchar(64)"`
 	Resource      string    `gorm:"column:resource;type:varchar(255)"`
 	WorkflowID    string    `gorm:"column:workflow_id;type:varchar(255)"`

@@ -16,19 +16,19 @@ B2 soak 需要**真实**分布式环境，非单机可完整覆盖：
 
 | 能力 | 状态 | 位置 |
 |---|---|---|
-| Leader election | ✅ | `backend/distributed/leader.go` `RedisLeaderElector`，SETNX + Lua 续约/释放，TTL 15s |
+| Leader election | ✅ | `backend/providers/distributed/leader.go` `RedisLeaderElector`，SETNX + Lua 续约/释放，TTL 15s |
 | Leader-only maintenance 门控 | ✅ | `service/control/lease_sweeper.go` SweepOnce 在非 leader 时跳过 |
 | Graceful shutdown（Resign + unbind） | ✅ | `service/apiserver/run.go` + `service/control/controlplane.go:Shutdown` |
 | Health/readiness/leader 端点 | ✅ | `module_management.go`，`--management` 启用，`/v1/management/*` 由 `ManagementAuthMiddleware` 门控 |
-| Redis key cluster-ready（hash tag） | ✅ | `backend/distributed/internal/rstate/keys.go` 全部 key 用 `{id}` hash tag |
+| Redis key cluster-ready（hash tag） | ✅ | `backend/providers/distributed/internal/rstate/keys.go` 全部 key 用 `{id}` hash tag |
 | **Redis HA 客户端（sentinel/cluster）** | ✅ 代码完成 | Task 1.1–4.1：`redis.UniversalClient` 宽化 + `RedisConfig`（single/sentinel/cluster）+ `WithRedisConfig` Option + asynq `AsAsynqConnOpt` 三模式映射 + `cmd/server --redis-mode` flag + `apiserver.Config.RedisConfig` 透传 + sentinel 认证字段（commits `9a39996`..`c292d7d`）。**真实 sentinel/cluster 环境连通性/failover 验收仍 ENV-GATED**（见 §3） |
 | **Soak 框架 / 故障注入** | ✅ 代码完成 | Task 5.1–5.3：in-process harness + 7 故障注入器（leader kill/restart 真实执行；RedisFailover/NetworkPartition/RunnerKill/ReportResponseLoss/OutboxFlushFail 后 5 类返回 `ErrEnvGated`）+ SLO 报告类型 + 报告模板（commits `dc13301`..`065974a`）。**填实报告仍 ENV-GATED** |
 
 ## 3. Redis HA 客户端改造（代码完成，验收 ENV-GATED）
 
 代码层改造已完成（Task 1.1–4.1，commits `9a39996`..`c292d7d`）：
-1. ✅ `backend/distributed/backend.go:New` — 已接受 `redis.UniversalClient`（Task 1.1 宽化 rdb 类型 + Task 1.2 `RedisConfig`（single/sentinel/cluster）+ `WithRedisConfig` Option）。
-2. ✅ `backend/distributed/internal/queue/asynq/transport.go` — asynq transport 已接 `RedisConnOpt`，经 `AsAsynqConnOpt` 三模式映射（Task 3.1）。
+1. ✅ `backend/providers/distributed/backend.go:New` — 已接受 `redis.UniversalClient`（Task 1.1 宽化 rdb 类型 + Task 1.2 `RedisConfig`（single/sentinel/cluster）+ `WithRedisConfig` Option）。
+2. ✅ `backend/providers/distributed/internal/queue/asynq/transport.go` — asynq transport 已接 `RedisConnOpt`，经 `AsAsynqConnOpt` 三模式映射（Task 3.1）。
 3. ✅ `cmd/server/main.go` — `--redis-mode` flag + `apiserver.Config.RedisConfig` 透传 + sentinel 认证字段（Task 4.1）。
 4. ✅ `RedisLeaderElector`、`workflowreg`、`triggerRuntime` 均使用注入的 client。`workflowreg` 的 key 已加 `{<key>}` hash tag 使 bykey/byid 共置同 slot（G2 Phase 2 Task 2.1，cluster-safe）；`triggerRuntime` 单 key 操作无需 hash tag（G2 Phase 2 Task 2.2 核查确认）。
 

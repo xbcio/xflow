@@ -8,9 +8,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/types"
@@ -54,17 +54,27 @@ type Config struct {
 	// CredentialResolver, when set, is applied to each Input before the handler
 	// runs so nodes can resolve named credentials via input.Credential(name).
 	// nil means no resolver; existing behavior is unchanged.
-	CredentialResolver func(tenant tenant.TenantID, name string) map[string]any
-	// Tenants lists the tenants this runner is willing to serve. Empty or nil
-	// means ["default"] for single-tenant compatibility.
-	Tenants []tenant.TenantID
+	CredentialResolver func(namespace namespace.Namespace, name string) map[string]any
+	// Namespaces lists the namespaces this runner is willing to serve. Empty or nil
+	// means ["default"] for single-namespace compatibility.
+	Namespaces []namespace.Namespace
+	// EnableGroupExec enables group task execution. When true, the runner
+	// advertises group.exec.v1 capability and routes group leases to GroupRuntime.
+	EnableGroupExec bool
+	// GroupRuntime executes group subgraphs locally. Required when EnableGroupExec
+	// is true.
+	GroupRuntime *GroupRuntime
+	// ActivationTracker, when set, processes activation directives piggybacked on
+	// heartbeat responses. nil means activations are ignored (passive runner).
+	ActivationTracker *ActivationTracker
 }
 
 type Runner struct {
-	client   ProtocolClient
-	executor *execution.Runner
-	config   Config
-	tracer   tracing.Tracer
+	client            ProtocolClient
+	executor          *execution.Runner
+	config            Config
+	tracer            tracing.Tracer
+	activationTracker *ActivationTracker
 }
 
 func New(client ProtocolClient, registry engine.HandlerRegistry, config Config) *Runner {
@@ -82,10 +92,11 @@ func New(client ProtocolClient, registry engine.HandlerRegistry, config Config) 
 		tracer = tracing.NoopTracer{}
 	}
 	return &Runner{
-		client:   client,
-		executor: execution.NewRunner(registry, execution.WithResourcePool(config.ResourcePool), execution.WithCredentialResolver(config.CredentialResolver)),
-		config:   config,
-		tracer:   tracer,
+		client:            client,
+		executor:          execution.NewRunner(registry, execution.WithResourcePool(config.ResourcePool), execution.WithCredentialResolver(config.CredentialResolver)),
+		config:            config,
+		tracer:            tracer,
+		activationTracker: config.ActivationTracker,
 	}
 }
 
@@ -100,7 +111,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		Concurrency:  r.config.Concurrency,
 		Capabilities: r.config.Capabilities,
 		Labels:       r.config.Labels,
-		Tenants:      tenantStrings(r.config.Tenants),
+		Namespaces:   namespaceStrings(r.config.Namespaces),
 	})
 	if err != nil {
 		return runContextError(ctx, err)
@@ -147,6 +158,13 @@ func (r *Runner) Run(ctx context.Context) error {
 	case <-time.After(defaultRunnerShutdownTimeout):
 	}
 
+	// Shutdown activation tracker if configured.
+	if r.activationTracker != nil {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), defaultRunnerShutdownTimeout)
+		r.activationTracker.Shutdown(shutdownCtx)
+		shutdownCancel()
+	}
+
 	if pollErr != nil {
 		// A worker or heartbeat may have already surfaced a more specific
 		// error; prefer it over the poll error when present so the caller
@@ -166,9 +184,15 @@ func (r *Runner) Run(ctx context.Context) error {
 	return runContextError(ctx, ctx.Err())
 }
 
-// pollLoop claims leases at the rate the worker pool can absorb them. Capacity
-// is Concurrency minus the current in-flight count, so the server is never told
-// more capacity than the runner can actually run in parallel.
+// pollLoop claims leases at the rate the worker pool can absorb them. The
+// Capacity advertised to the server is always the total Concurrency — the
+// single source of truth for this runner's parallelism. The control-plane
+// directory derives server-side headroom from its own claim/lease accounting
+// (which already tracks every in-flight task), so advertising a client-side
+// remainder here would double-count in-flight work and silently suppress the
+// effective concurrency. The local in-flight gate below is a complementary
+// safety valve that stops the runner from claiming more leases than its worker
+// pool can execute in parallel; it does not change the advertised capacity.
 func (r *Runner) pollLoop(ctx context.Context, sessionID string, leaseCh chan<- *engine.TaskLease, inFlight *atomic.Int32) error {
 	for {
 		select {
@@ -176,8 +200,7 @@ func (r *Runner) pollLoop(ctx context.Context, sessionID string, leaseCh chan<- 
 			return nil
 		default:
 		}
-		capacity := r.config.Concurrency - int(inFlight.Load())
-		if capacity <= 0 {
+		if r.config.Concurrency-int(inFlight.Load()) <= 0 {
 			select {
 			case <-ctx.Done():
 				return nil
@@ -188,7 +211,8 @@ func (r *Runner) pollLoop(ctx context.Context, sessionID string, leaseCh chan<- 
 		resp, err := r.client.Poll(ctx, protocol.PollTaskRequest{
 			RunnerID:     r.config.RunnerID,
 			SessionID:    sessionID,
-			Capacity:     capacity,
+			Capacity:     r.config.Concurrency,
+			Labels:       r.config.Labels,
 			Capabilities: r.config.Capabilities,
 		})
 		if err != nil {
@@ -255,10 +279,26 @@ func (r *Runner) executeAndReport(ctx context.Context, sessionID string, lease *
 	)
 	defer span.End()
 
-	result, execErr := r.executor.Execute(execCtx, lease)
-	if execErr != nil {
-		result = engine.TaskResult{Error: execErr}
-		span.RecordError(execErr)
+	var result engine.TaskResult
+	var groupResult *engine.GroupResult
+
+	if lease.GroupPayload != nil && r.config.GroupRuntime != nil {
+		// Group task — execute on embedded group runtime.
+		gr, err := r.config.GroupRuntime.Execute(execCtx, lease)
+		if err != nil {
+			result = engine.TaskResult{Error: err}
+			span.RecordError(err)
+		} else {
+			groupResult = &gr
+		}
+	} else {
+		// Normal node task — execute via the handler registry.
+		var execErr error
+		result, execErr = r.executor.Execute(execCtx, lease)
+		if execErr != nil {
+			result = engine.TaskResult{Error: execErr}
+			span.RecordError(execErr)
+		}
 	}
 
 	// Detach from the execute context so run cancellation cannot discard the
@@ -270,10 +310,11 @@ func (r *Runner) executeAndReport(ctx context.Context, sessionID string, lease *
 	defer cancel()
 
 	req := protocol.ReportResultRequest{
-		RunnerID:  r.config.RunnerID,
-		SessionID: sessionID,
-		Lease:     lease,
-		Result:    result,
+		RunnerID:     r.config.RunnerID,
+		SessionID:    sessionID,
+		Lease:        lease,
+		Result:       result,
+		GroupResult:  groupResult,
 		// Inject the execute span context so the server's report/commit span
 		// is a child of xflow.task.execute rather than a fresh root.
 		TraceCarrier: tracing.InjectCarrier(reportCtx),
@@ -290,12 +331,16 @@ func (r *Runner) executeAndReport(ctx context.Context, sessionID string, lease *
 
 // heartbeatLoop sends heartbeats on its own ticker, independent of task
 // execution. A heartbeat failure signals the run to exit so the caller can
-// reconnect.
+// reconnect. Activation directives piggybacked on the heartbeat response are
+// forwarded to the activation tracker when configured.
 func (r *Runner) heartbeatLoop(ctx context.Context, sessionID string, inFlight *atomic.Int32, signalError func(error)) {
-	if err := r.heartbeat(ctx, sessionID, int(inFlight.Load())); err != nil {
+	resp, err := r.heartbeat(ctx, sessionID, int(inFlight.Load()))
+	if err != nil {
 		signalError(err)
 		return
 	}
+	r.processActivations(ctx, resp)
+
 	ticker := time.NewTicker(r.config.HeartbeatInterval)
 	defer ticker.Stop()
 	for {
@@ -303,23 +348,31 @@ func (r *Runner) heartbeatLoop(ctx context.Context, sessionID string, inFlight *
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := r.heartbeat(ctx, sessionID, int(inFlight.Load())); err != nil {
+			resp, err := r.heartbeat(ctx, sessionID, int(inFlight.Load()))
+			if err != nil {
 				signalError(err)
 				return
 			}
+			r.processActivations(ctx, resp)
 		}
 	}
 }
 
-func (r *Runner) heartbeat(ctx context.Context, sessionID string, inFlight int) error {
-	_, err := r.client.Heartbeat(ctx, protocol.HeartbeatRequest{
+// processActivations forwards heartbeat activation directives to the tracker.
+func (r *Runner) processActivations(ctx context.Context, resp protocol.HeartbeatResponse) {
+	if resp.Activations != nil && r.activationTracker != nil {
+		_ = r.activationTracker.ProcessDirectives(ctx, resp.Activations)
+	}
+}
+
+func (r *Runner) heartbeat(ctx context.Context, sessionID string, inFlight int) (protocol.HeartbeatResponse, error) {
+	return r.client.Heartbeat(ctx, protocol.HeartbeatRequest{
 		RunnerID:  r.config.RunnerID,
 		SessionID: sessionID,
 		Capacity:  r.config.Concurrency,
 		InFlight:  inFlight,
 		Timestamp: time.Now().Unix(),
 	})
-	return err
 }
 
 func runContextError(ctx context.Context, err error) error {
@@ -343,12 +396,12 @@ func sleepContext(ctx context.Context, delay time.Duration) error {
 	}
 }
 
-func tenantStrings(tenants []tenant.TenantID) []string {
-	if len(tenants) == 0 {
-		return []string{string(tenant.DefaultTenant)}
+func namespaceStrings(namespaces []namespace.Namespace) []string {
+	if len(namespaces) == 0 {
+		return []string{string(namespace.Default)}
 	}
-	out := make([]string, len(tenants))
-	for i, t := range tenants {
+	out := make([]string, len(namespaces))
+	for i, t := range namespaces {
 		out[i] = string(t)
 	}
 	return out

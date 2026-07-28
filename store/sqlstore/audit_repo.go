@@ -108,7 +108,7 @@ func toDBAudit(r *store.AuditRecord) *dbAuditEvent {
 	return &dbAuditEvent{
 		RequestID:      r.RequestID,
 		Principal:      r.Principal,
-		TenantID:       r.TenantID,
+		Namespace:       r.Namespace,
 		Operation:      r.Operation,
 		Resource:       r.Resource,
 		WorkflowID:     r.WorkflowID,
@@ -132,7 +132,7 @@ func fromDBAudit(d *dbAuditEvent) *store.AuditRecord {
 		SeqID:          d.ID, // SeqID maps to the AUTO_INCREMENT primary key
 		RequestID:      d.RequestID,
 		Principal:      d.Principal,
-		TenantID:       d.TenantID,
+		Namespace:       d.Namespace,
 		Operation:      d.Operation,
 		Resource:       d.Resource,
 		WorkflowID:     d.WorkflowID,
@@ -153,7 +153,7 @@ func fromDBAudit(d *dbAuditEvent) *store.AuditRecord {
 // ListUnreconciledAdmissions returns admitted mutation audit rows (phase=
 // "admission", outcome="admitted") with created_at older than `before` for
 // which no outcome-phase row (phase="outcome") exists for the same
-// (tenant_id, request_id). These are the admissions the T9 reconcile worker
+// (namespace, request_id). These are the admissions the T9 reconcile worker
 // must settle: the mutation was admitted (fail-closed admission audit
 // persisted) but no post-handler outcome was ever appended (e.g. a crash
 // between the mutation and the outcome audit, or a handler panic).
@@ -161,7 +161,7 @@ func fromDBAudit(d *dbAuditEvent) *store.AuditRecord {
 // When afterSeqID > 0 only rows with id > afterSeqID are returned (cursor
 // pagination to skip past permanently-Indeterminate rows crowding the head).
 //
-// The NOT EXISTS subquery is covered by idx_tenant_request_phase, so the
+// The NOT EXISTS subquery is covered by idx_namespace_request_phase, so the
 // pending scan is index-only and bounded by `limit`. Rows are returned
 // oldest-first (by id) so the cursor advances monotonically.
 func (r *auditRepo) ListUnreconciledAdmissions(ctx context.Context, before time.Time, afterSeqID uint64, limit int) ([]*store.AuditRecord, error) {
@@ -174,7 +174,7 @@ SELECT a.* FROM xflow_audit_events a
 WHERE a.phase = ? AND a.outcome = ? AND a.created_at < ? AND a.id > ?
   AND NOT EXISTS (
       SELECT 1 FROM xflow_audit_events b
-      WHERE b.tenant_id = a.tenant_id
+      WHERE b.namespace = a.namespace
         AND b.request_id = a.request_id
         AND b.phase = ?
   )
@@ -192,7 +192,7 @@ LIMIT ?`, store.AuditPhaseAdmission, store.AuditOutcomeAdmitted, before, afterSe
 
 // AppendOutcomeIfAbsent idempotently appends an outcome-phase audit row. It
 // is the T9 reconcile worker's settle path: before appending, it checks that
-// no outcome row already exists for the same (tenant_id, request_id,
+// no outcome row already exists for the same (namespace, request_id,
 // phase="outcome"). A duplicate (e.g. a concurrent worker or a leader
 // switch racing two sweeps) is caught by the check-then-append here AND by
 // the unique uk_phase_key index on the generated phase_key column, so the
@@ -207,10 +207,10 @@ func (r *auditRepo) AppendOutcomeIfAbsent(ctx context.Context, rec *store.AuditR
 		return false, fmt.Errorf("append outcome if absent: nil record")
 	}
 	rec.Phase = store.AuditPhaseOutcome
-	if rec.RequestID != "" && rec.TenantID != "" {
+	if rec.RequestID != "" && rec.Namespace != "" {
 		var existing dbAuditEvent
 		err := r.db.WithContext(ctx).
-			Where("tenant_id = ? AND request_id = ? AND phase = ?", rec.TenantID, rec.RequestID, store.AuditPhaseOutcome).
+			Where("namespace = ? AND request_id = ? AND phase = ?", rec.Namespace, rec.RequestID, store.AuditPhaseOutcome).
 			First(&existing).Error
 		if err == nil {
 			return false, nil
@@ -239,9 +239,9 @@ func (r *auditRepo) AppendOutcomeIfAbsent(ctx context.Context, rec *store.AuditR
 //
 // Cost model: the query is a full-table COUNT with a correlated NOT EXISTS
 // subquery, executed once per reconcile sweep. This is bounded and acceptable
-// at G1 (restricted single-tenant deployment with a bounded audit table).
+// at G1 (restricted single-namespace deployment with a bounded audit table).
 //
-// TODO(G2): at multi-tenant scale this should become an incrementally-maintained
+// TODO(G2): at multi-namespace scale this should become an incrementally-maintained
 // counter (e.g. a summary row updated on each admission/outcome append) or a
 // periodic count (not every-sweep) to avoid per-sweep full-table cost on an
 // unbounded Indeterminate backlog.
@@ -256,7 +256,7 @@ SELECT COUNT(*) AS cnt, MIN(a.created_at) AS oldest FROM xflow_audit_events a
 WHERE a.phase = ? AND a.outcome = ? AND a.created_at < ?
   AND NOT EXISTS (
       SELECT 1 FROM xflow_audit_events b
-      WHERE b.tenant_id = a.tenant_id
+      WHERE b.namespace = a.namespace
         AND b.request_id = a.request_id
         AND b.phase = ?
   )`, store.AuditPhaseAdmission, store.AuditOutcomeAdmitted, before, store.AuditPhaseOutcome).Scan(&res).Error

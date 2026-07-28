@@ -5,8 +5,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/types"
 )
@@ -27,11 +27,11 @@ type authzHolder struct {
 // embeds authzHolder can wrap its routes, and tests can exercise the wrapper
 // against stub handlers without mounting real routes.
 //
-// Tenant boundary (Task 7.3): the verified principal's TenantID is injected
-// into the request context here (tenant.WithTenant) so every downstream store
-// read is scoped to the principal's tenant — the authoritative IDOR defense.
-// The client request body is never consulted for tenant.
-func (h *authzHolder) authzWrap(op string, isMutation bool, fn http.HandlerFunc, resourceResolver func(*http.Request) (resource, workflowID, executionID, resourceTenant string)) http.HandlerFunc {
+// Namespace boundary (Task 7.3): the verified principal's Namespace is injected
+// into the request context here (namespace.WithNamespace) so every downstream store
+// read is scoped to the principal's namespace — the authoritative IDOR defense.
+// The client request body is never consulted for namespace.
+func (h *authzHolder) authzWrap(op string, isMutation bool, fn http.HandlerFunc, resourceResolver func(*http.Request) (resource, workflowID, executionID, resourceNamespace string)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		principal, err := h.principalAuth.Authenticate(r)
 		if err != nil {
@@ -39,13 +39,13 @@ func (h *authzHolder) authzWrap(op string, isMutation bool, fn http.HandlerFunc,
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
-		resource, wfID, execID, resTenant := "", "", "", ""
+		resource, wfID, execID, resNamespace := "", "", "", ""
 		if resourceResolver != nil {
-			resource, wfID, execID, resTenant = resourceResolver(r)
+			resource, wfID, execID, resNamespace = resourceResolver(r)
 		}
 		decision, derr := h.authorizer.Authorize(r.Context(), AuthorizationRequest{
 			Principal: principal, Operation: op, Resource: resource,
-			WorkflowID: wfID, ExecutionID: execID, ResourceTenant: resTenant,
+			WorkflowID: wfID, ExecutionID: execID, ResourceNamespace: resNamespace,
 		})
 		if derr != nil || decision != DecisionAllow {
 			reason := "denied"
@@ -56,11 +56,11 @@ func (h *authzHolder) authzWrap(op string, isMutation bool, fn http.HandlerFunc,
 			writeError(w, http.StatusForbidden, "forbidden")
 			return
 		}
-		// Tenant boundary (Task 7.3/7.4): inject the verified principal's tenant
+		// Namespace boundary (Task 7.3/7.4): inject the verified principal's namespace
 		// into the request context before audit and handler execution so every
-		// downstream read and the audit sink draw tenant from the same source:
-		// tenant.FromContext(ctx).
-		r = r.WithContext(tenant.WithTenant(context.WithValue(r.Context(), authzContextKey{}, principal), tenant.TenantID(principal.TenantID)))
+		// downstream read and the audit sink draw namespace from the same source:
+		// namespace.FromContext(ctx).
+		r = r.WithContext(namespace.WithNamespace(context.WithValue(r.Context(), authzContextKey{}, principal), namespace.Namespace(principal.Namespace)))
 
 		// R3.1: when the resolver carried an execution id (pre-allocated for
 		// workflow create/invoke, or the path param for execution-scoped
@@ -80,7 +80,7 @@ func (h *authzHolder) authzWrap(op string, isMutation bool, fn http.HandlerFunc,
 		traceID := tracing.TraceIDFromContext(r.Context())
 		if isMutation {
 			if err := h.audit.Append(r.Context(), AuditEvent{
-				RequestID: reqID, Principal: principal.Subject, TenantID: principal.TenantID,
+				RequestID: reqID, Principal: principal.Subject, Namespace: principal.Namespace,
 				Operation: op, Resource: resource, WorkflowID: wfID, ExecutionID: execID,
 				Decision: DecisionAllow, Reason: "admitted", Outcome: "admitted",
 				Phase:     "admission",
@@ -95,7 +95,7 @@ func (h *authzHolder) authzWrap(op string, isMutation bool, fn http.HandlerFunc,
 			// Read paths record the decision without fail-closed; an audit
 			// gap is observable but does not block reads.
 			_ = h.audit.Append(r.Context(), AuditEvent{
-				RequestID: reqID, Principal: principal.Subject, TenantID: principal.TenantID,
+				RequestID: reqID, Principal: principal.Subject, Namespace: principal.Namespace,
 				Operation: op, Resource: resource, WorkflowID: wfID, ExecutionID: execID,
 				Decision: DecisionAllow, Reason: "admitted", Outcome: "admitted",
 				Phase:     "admission",
@@ -133,12 +133,12 @@ func (h *authzHolder) wrapForTest(op string, isMutation bool, fn http.HandlerFun
 // cancel → execution.cancel (mutation). ok=false means the verb is unknown → the
 // wrapper denies (default-deny) and returns 404 without invoking the handler.
 type resolvedRoute struct {
-	operation      string
-	resource       string
-	workflowID     string
-	executionID    string
-	resourceTenant string
-	isMutation     bool
+	operation         string
+	resource          string
+	workflowID        string
+	executionID       string
+	resourceNamespace string
+	isMutation        bool
 }
 
 // authzWrapResolved is like authzWrap but resolves the operation, mutation
@@ -161,7 +161,7 @@ func (h *authzHolder) authzWrapResolved(fn http.HandlerFunc, resolver func(*http
 			return
 		}
 		h.authzWrap(rt.operation, rt.isMutation, fn, func(*http.Request) (string, string, string, string) {
-			return rt.resource, rt.workflowID, rt.executionID, rt.resourceTenant
+			return rt.resource, rt.workflowID, rt.executionID, rt.resourceNamespace
 		})(w, r)
 	}
 }
@@ -175,7 +175,7 @@ func (h *authzHolder) auditDeny(r *http.Request, principal Principal, op, resour
 	_ = h.audit.Append(r.Context(), AuditEvent{
 		RequestID:   newRequestID(r),
 		Principal:   principal.Subject,
-		TenantID:    principal.TenantID,
+		Namespace:   principal.Namespace,
 		Operation:   op,
 		Resource:    resource,
 		WorkflowID:  wfID,
@@ -207,7 +207,7 @@ func (h *authzHolder) auditReconcile(r *http.Request, principal Principal, op, r
 	_ = h.audit.Append(r.Context(), AuditEvent{
 		RequestID:   reqID,
 		Principal:   principal.Subject,
-		TenantID:    principal.TenantID,
+		Namespace:   principal.Namespace,
 		Operation:   op,
 		Resource:    resource,
 		WorkflowID:  wfID,

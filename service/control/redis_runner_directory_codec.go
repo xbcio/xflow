@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/namespace"
 )
 
 // redisRunnerDirectoryKeys is the fixed set of Redis keys backing a
@@ -34,8 +34,9 @@ type redisRunnerDirectoryKeys struct {
 	runnerCapacity       string
 	runnerInflight       string
 	runnerCapabilities   string
+	runnerLabels         string
 	runnerPolicy         string
-	runnerTenants        string
+	runnerNamespaces     string
 	runnerHeartbeat      string
 	runnerClaimCount     string
 	runnerLeaseCount     string
@@ -64,8 +65,9 @@ func newRedisRunnerDirectoryKeys(prefix string) redisRunnerDirectoryKeys {
 		runnerCapacity:       prefix + ":runner:capacity",
 		runnerInflight:       prefix + ":runner:inflight",
 		runnerCapabilities:   prefix + ":runner:capabilities",
+		runnerLabels:         prefix + ":runner:labels",
 		runnerPolicy:         prefix + ":runner:policy",
-		runnerTenants:        prefix + ":runner:tenants",
+		runnerNamespaces:     prefix + ":runner:namespaces",
 		runnerHeartbeat:      prefix + ":runner:heartbeat",
 		runnerClaimCount:     prefix + ":runner:claim-count",
 		runnerLeaseCount:     prefix + ":runner:lease-count",
@@ -82,12 +84,13 @@ func boolRedisArg(value bool) string {
 }
 
 type redisAssignmentRecord struct {
-	AssignmentID AssignmentID       `json:"assignment_id"`
-	Task         engine.Task        `json:"task"`
-	AutoDepth    int                `json:"auto_depth"`
-	ActivationID int                `json:"activation_id"`
-	Routing      engine.TaskRouting `json:"routing"`
-	TenantID     tenant.TenantID    `json:"tenant_id,omitempty"`
+	AssignmentID AssignmentID        `json:"assignment_id"`
+	Task         engine.Task         `json:"task"`
+	AutoDepth    int                 `json:"auto_depth"`
+	ActivationID int                 `json:"activation_id"`
+	UnitIdx      *int                `json:"unit_idx,omitempty"`
+	Routing      engine.TaskRouting  `json:"routing"`
+	Namespace    namespace.Namespace `json:"namespace,omitempty"`
 }
 
 func marshalRedisAssignment(assignment Assignment) (string, error) {
@@ -96,8 +99,9 @@ func marshalRedisAssignment(assignment Assignment) (string, error) {
 		Task:         assignment.Task,
 		AutoDepth:    assignment.Task.AutoDepth,
 		ActivationID: assignment.Task.ActivationID,
+		UnitIdx:      controlUnitIdxPtr(assignment.Task.UnitIdx),
 		Routing:      assignment.Routing,
-		TenantID:     assignment.TenantID,
+		Namespace:    assignment.Namespace,
 	})
 	if err != nil {
 		return "", fmt.Errorf("marshal assignment %q: %w", assignment.AssignmentID, err)
@@ -115,10 +119,26 @@ func unmarshalRedisAssignment(payload string) (Assignment, error) {
 	}
 	record.Task.AutoDepth = record.AutoDepth
 	record.Task.ActivationID = record.ActivationID
-	if record.TenantID == "" {
-		record.TenantID = tenant.DefaultTenant
+	if record.UnitIdx != nil {
+		record.Task.UnitIdx = *record.UnitIdx
+	} else {
+		record.Task.UnitIdx = engine.UnitIdxUnknown
 	}
-	return Assignment{AssignmentID: record.AssignmentID, Task: record.Task, Routing: record.Routing, TenantID: record.TenantID}, nil
+	if record.Namespace == "" {
+		record.Namespace = namespace.Default
+	}
+	return Assignment{AssignmentID: record.AssignmentID, Task: record.Task, Routing: record.Routing, Namespace: record.Namespace}, nil
+}
+
+// controlUnitIdxPtr omits the wire field when the task's UnitIdx is the
+// "unknown" sentinel, so absence on decode is distinguishable from a real
+// unit index of 0. See engine.UnitIdxUnknown.
+func controlUnitIdxPtr(unitIdx int) *int {
+	if unitIdx == engine.UnitIdxUnknown {
+		return nil
+	}
+	v := unitIdx
+	return &v
 }
 
 // redisLeaseMeta embeds the complete runner-facing lease rather than only

@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/xbcio/xflow/backend"
-	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/types"
 )
@@ -27,8 +27,8 @@ const (
 // here. The audit record's Operation field is set by the apiserver authz
 // wrapper using the same strings.
 const (
-	opWorkflowCreate = "workflow.create"
-	opWorkflowInvoke = "workflow.invoke"
+	opWorkflowCreate  = "workflow.create"
+	opWorkflowInvoke  = "workflow.invoke"
 	opExecutionSignal = "execution.signal"
 	opExecutionRevoke = "execution.revoke"
 	opExecutionCancel = "execution.cancel"
@@ -277,8 +277,8 @@ func (w *AuditReconcileWorker) ReconcileOnce(ctx context.Context) int {
 // worker). Never re-executes the mutation.
 func (w *AuditReconcileWorker) settle(ctx context.Context, rec *store.AuditRecord) int {
 	probeCtx := ctx
-	if rec.TenantID != "" {
-		probeCtx = tenant.WithTenant(probeCtx, tenant.TenantID(rec.TenantID))
+	if rec.Namespace != "" {
+		probeCtx = namespace.WithNamespace(probeCtx, namespace.Namespace(rec.Namespace))
 	}
 	effect, err := w.authority.Probe(probeCtx, rec)
 	if err != nil {
@@ -309,7 +309,7 @@ func (w *AuditReconcileWorker) settle(ctx context.Context, rec *store.AuditRecor
 	appended, err := w.audit.AppendOutcomeIfAbsent(ctx, &store.AuditRecord{
 		RequestID:   rec.RequestID,
 		Principal:   rec.Principal,
-		TenantID:    rec.TenantID,
+		Namespace:   rec.Namespace,
 		Operation:   rec.Operation,
 		Resource:    rec.Resource,
 		WorkflowID:  rec.WorkflowID,

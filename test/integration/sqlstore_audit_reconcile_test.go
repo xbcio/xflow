@@ -17,7 +17,7 @@ import (
 //     outcome=admitted) rows older than the cutoff with no matching outcome
 //     row, and excludes admissions that already have an outcome.
 //   - AppendOutcomeIfAbsent appends a phase=outcome row, and a second call
-//     for the same (tenant, request_id) returns appended=false (idempotent),
+//     for the same (namespace, request_id) returns appended=false (idempotent),
 //     enforced by the unique uk_phase_key index on the generated phase_key
 //     column.
 //
@@ -37,7 +37,7 @@ func TestSQLStoreAuditReconcilePendingScanAndIdempotentOutcome(t *testing.T) {
 	pending := &store.AuditRecord{
 		RequestID:   uniqueAuditRequestID("pending"),
 		Principal:   "alice",
-		TenantID:    "tenant-reconcile",
+		Namespace:   "namespace-reconcile",
 		Operation:   "workflow.create",
 		ExecutionID: "exec-pending",
 		Decision:    "allow",
@@ -51,11 +51,11 @@ func TestSQLStoreAuditReconcilePendingScanAndIdempotentOutcome(t *testing.T) {
 	}
 
 	// An admission that already has an outcome — must NOT appear in the
-	// pending scan (NOT EXISTS on phase=outcome for the same tenant+request).
+	// pending scan (NOT EXISTS on phase=outcome for the same namespace+request).
 	settled := &store.AuditRecord{
 		RequestID:   uniqueAuditRequestID("settled"),
 		Principal:   "alice",
-		TenantID:    "tenant-reconcile",
+		Namespace:   "namespace-reconcile",
 		Operation:   "workflow.create",
 		ExecutionID: "exec-settled",
 		Decision:    "allow",
@@ -69,7 +69,7 @@ func TestSQLStoreAuditReconcilePendingScanAndIdempotentOutcome(t *testing.T) {
 	if err := p.AppendAudit(ctx, &store.AuditRecord{
 		RequestID:   settled.RequestID,
 		Principal:   "alice",
-		TenantID:    "tenant-reconcile",
+		Namespace:   "namespace-reconcile",
 		Operation:   "workflow.create",
 		ExecutionID: "exec-settled",
 		Decision:    "allow",
@@ -108,7 +108,7 @@ func TestSQLStoreAuditReconcilePendingScanAndIdempotentOutcome(t *testing.T) {
 	appended, err := p.AppendOutcomeIfAbsent(ctx, &store.AuditRecord{
 		RequestID:   pending.RequestID,
 		Principal:   "alice",
-		TenantID:    "tenant-reconcile",
+		Namespace:   "namespace-reconcile",
 		Operation:   "workflow.create",
 		ExecutionID: "exec-pending",
 		Decision:    "allow",
@@ -123,12 +123,12 @@ func TestSQLStoreAuditReconcilePendingScanAndIdempotentOutcome(t *testing.T) {
 		t.Fatal("first AppendOutcomeIfAbsent: appended=false, want true")
 	}
 
-	// A second append for the same (tenant, request_id) must be a no-op
+	// A second append for the same (namespace, request_id) must be a no-op
 	// (idempotent) — enforced by the unique phase_key index.
 	appended2, err := p.AppendOutcomeIfAbsent(ctx, &store.AuditRecord{
 		RequestID:   pending.RequestID,
 		Principal:   "alice",
-		TenantID:    "tenant-reconcile",
+		Namespace:   "namespace-reconcile",
 		Operation:   "workflow.create",
 		ExecutionID: "exec-pending",
 		Decision:    "allow",
@@ -163,7 +163,7 @@ func uniqueAuditRequestID(suffix string) string {
 
 // TestSQLStoreAuditCursorPagination proves R3.4 cursor pagination against
 // real MySQL: afterSeqID filters correctly, and CountUnreconciledAdmissions
-// returns correct full-table metrics. Uses a unique tenant_id prefix so
+// returns correct full-table metrics. Uses a unique namespace prefix so
 // assertions are isolated from any pre-existing rows in the table.
 func TestSQLStoreAuditCursorPagination(t *testing.T) {
 	dsn := requireMySQL(t)
@@ -174,8 +174,8 @@ func TestSQLStoreAuditCursorPagination(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	// Use a unique tenant to isolate from other rows in the table.
-	tenant := "tenant-cursor-" + time.Now().Format("150405.000000000")
+	// Use a unique namespace to isolate from other rows in the table.
+	namespace := "namespace-cursor-" + time.Now().Format("150405.000000000")
 	now := time.Now().UTC()
 
 	// Insert 3 admitted rows with no outcome (pending). They will get
@@ -185,7 +185,7 @@ func TestSQLStoreAuditCursorPagination(t *testing.T) {
 		rec := &store.AuditRecord{
 			RequestID:   uniqueAuditRequestID("cur" + string(rune('0'+i))),
 			Principal:   "alice",
-			TenantID:    tenant,
+			Namespace:   namespace,
 			Operation:   "workflow.create",
 			ExecutionID: "exec-cur-" + string(rune('0'+i)),
 			Decision:    "allow",
@@ -209,59 +209,59 @@ func TestSQLStoreAuditCursorPagination(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListUnreconciledAdmissions(afterSeqID=%d): %v", baseSeqID, err)
 	}
-	var allForTenant []*store.AuditRecord
+	var allForNamespace []*store.AuditRecord
 	for _, c := range all {
-		if c.TenantID == tenant {
-			allForTenant = append(allForTenant, c)
+		if c.Namespace == namespace {
+			allForNamespace = append(allForNamespace, c)
 		}
 	}
-	if len(allForTenant) != 3 {
-		t.Fatalf("expected 3 rows for tenant, got %d (afterSeqID=%d)", len(allForTenant), baseSeqID)
+	if len(allForNamespace) != 3 {
+		t.Fatalf("expected 3 rows for namespace, got %d (afterSeqID=%d)", len(allForNamespace), baseSeqID)
 	}
 	// Verify SeqID is populated and monotonically increasing.
-	for i, c := range allForTenant {
+	for i, c := range allForNamespace {
 		if c.SeqID == 0 {
 			t.Fatalf("row %d has SeqID=0, want non-zero", i)
 		}
-		if i > 0 && c.SeqID <= allForTenant[i-1].SeqID {
-			t.Fatalf("row %d SeqID=%d not > row %d SeqID=%d", i, c.SeqID, i-1, allForTenant[i-1].SeqID)
+		if i > 0 && c.SeqID <= allForNamespace[i-1].SeqID {
+			t.Fatalf("row %d SeqID=%d not > row %d SeqID=%d", i, c.SeqID, i-1, allForNamespace[i-1].SeqID)
 		}
 	}
 
 	// afterSeqID = first row's SeqID → should skip the first row, return 2.
-	afterFirst := allForTenant[0].SeqID
+	afterFirst := allForNamespace[0].SeqID
 	page2, err := p.ListUnreconciledAdmissions(ctx, cutoff, afterFirst, 100)
 	if err != nil {
 		t.Fatalf("ListUnreconciledAdmissions(afterSeqID=%d): %v", afterFirst, err)
 	}
-	var page2ForTenant []*store.AuditRecord
+	var page2ForNamespace []*store.AuditRecord
 	for _, c := range page2 {
-		if c.TenantID == tenant {
-			page2ForTenant = append(page2ForTenant, c)
+		if c.Namespace == namespace {
+			page2ForNamespace = append(page2ForNamespace, c)
 		}
 	}
-	if len(page2ForTenant) != 2 {
-		t.Fatalf("expected 2 rows after first, got %d", len(page2ForTenant))
+	if len(page2ForNamespace) != 2 {
+		t.Fatalf("expected 2 rows after first, got %d", len(page2ForNamespace))
 	}
 	// The first row in page2 should have SeqID > afterFirst.
-	if page2ForTenant[0].SeqID <= afterFirst {
-		t.Fatalf("first row in page2 SeqID=%d should be > afterSeqID=%d", page2ForTenant[0].SeqID, afterFirst)
+	if page2ForNamespace[0].SeqID <= afterFirst {
+		t.Fatalf("first row in page2 SeqID=%d should be > afterSeqID=%d", page2ForNamespace[0].SeqID, afterFirst)
 	}
 
-	// afterSeqID = last row's SeqID → should return 0 (for this tenant).
-	afterLast := allForTenant[2].SeqID
+	// afterSeqID = last row's SeqID → should return 0 (for this namespace).
+	afterLast := allForNamespace[2].SeqID
 	page3, err := p.ListUnreconciledAdmissions(ctx, cutoff, afterLast, 100)
 	if err != nil {
 		t.Fatalf("ListUnreconciledAdmissions(afterSeqID=%d): %v", afterLast, err)
 	}
-	var page3ForTenant []*store.AuditRecord
+	var page3ForNamespace []*store.AuditRecord
 	for _, c := range page3 {
-		if c.TenantID == tenant {
-			page3ForTenant = append(page3ForTenant, c)
+		if c.Namespace == namespace {
+			page3ForNamespace = append(page3ForNamespace, c)
 		}
 	}
-	if len(page3ForTenant) != 0 {
-		t.Fatalf("expected 0 rows after last, got %d", len(page3ForTenant))
+	if len(page3ForNamespace) != 0 {
+		t.Fatalf("expected 0 rows after last, got %d", len(page3ForNamespace))
 	}
 
 	// CountUnreconciledAdmissions should report >= 3 pending (our rows at

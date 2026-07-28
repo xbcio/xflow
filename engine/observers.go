@@ -86,6 +86,32 @@ func WithRuntimeEvidenceBuffer(buf *RuntimeEvidenceBuffer) Option {
 	}
 }
 
+// ObservedNodeFailure carries context about a node failure sufficient for the
+// group runtime to classify the group outcome without reverse-engineering the
+// error string.
+type ObservedNodeFailure struct {
+	NodeName string
+	Err      error
+	Attempt  int
+	Fatal    bool
+}
+
+// NodeFailureObserver receives per-node failure observations from the engine.
+// Only Fatal==true observations are actionable for group outcome classification.
+type NodeFailureObserver interface {
+	ObserveNodeFailure(execID types.ExecutionID, f ObservedNodeFailure)
+}
+
+// WithNodeFailureObserver installs an observer for node-level failures. Used by
+// the group runtime to capture classified errors from the inner engine.
+func WithNodeFailureObserver(o NodeFailureObserver) Option {
+	return func(e *Engine) {
+		if o != nil {
+			e.nodeFailureObserver = o
+		}
+	}
+}
+
 // WithOutboxMaxDeliveryAttempts changes the number of failed queue handoffs
 // allowed before a backend moves an outbox entry to dead-letter storage.
 func WithOutboxMaxDeliveryAttempts(maxAttempts int) Option {

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xbcio/xflow/backend/tenant"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/node/registry"
 	"github.com/xbcio/xflow/types"
@@ -196,8 +196,8 @@ func TestScript_CredentialInjected(t *testing.T) {
 	h, _ := registry.Lookup("xflow.script")
 	b := node.Script(`({token: $credential.token})`).Language("js").Runtime("goja").Credentials("api_token")
 	input := &types.Input{Params: b.RawParams().(map[string]any)}
-	input.SetTenant(tenant.DefaultTenant)
-	input.SetCredentialResolver(func(tenant tenant.TenantID, name string) map[string]any {
+	input.SetNamespace(namespace.Default)
+	input.SetCredentialResolver(func(namespace namespace.Namespace, name string) map[string]any {
 		if name == "api_token" {
 			return map[string]any{"token": "secret-t"}
 		}
@@ -216,8 +216,8 @@ func TestScript_UndeclaredCredentialInvisible(t *testing.T) {
 	h, _ := registry.Lookup("xflow.script")
 	b := node.Script(`({seen: typeof $credentials.api_token})`).Language("js").Runtime("goja")
 	input := &types.Input{Params: b.RawParams().(map[string]any)}
-	input.SetTenant(tenant.DefaultTenant)
-	input.SetCredentialResolver(func(tenant tenant.TenantID, name string) map[string]any {
+	input.SetNamespace(namespace.Default)
+	input.SetCredentialResolver(func(namespace namespace.Namespace, name string) map[string]any {
 		return map[string]any{"token": "leak"}
 	})
 	out, err := h.Execute(context.Background(), input)

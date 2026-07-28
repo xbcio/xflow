@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/service/protocol"
 )
 
@@ -115,16 +115,20 @@ func TestMemoryRunnerDirectorySessionFencesStaleRequests(t *testing.T) {
 	}
 }
 
-func TestMemoryRunnerDirectoryClaimHeadroomCountsInflightActiveClaimsAndFinalizedLeases(t *testing.T) {
+func TestMemoryRunnerDirectoryClaimHeadroomCountsActiveClaimsAndFinalizedLeases(t *testing.T) {
 	ctx := context.Background()
 	dir := NewMemoryRunnerDirectory()
-	session := mustRegisterMemoryRunner(t, ctx, dir, "runner-1", 3)
+	session := mustRegisterMemoryRunner(t, ctx, dir, "runner-1", 2)
 
+	// A large observed InFlight must NOT reduce headroom: it is a heartbeat
+	// observation only. Headroom is Concurrency minus the directory's own
+	// in-flight accounting (active claims + finalized leases), so with capacity
+	// 2 and nothing claimed yet the runner can still take two tasks.
 	if err := dir.Heartbeat(ctx, HeartbeatRequest{
 		RunnerID:  "runner-1",
 		SessionID: session.SessionID,
-		Capacity:  3,
-		InFlight:  1,
+		Capacity:  2,
+		InFlight:  5,
 	}); err != nil {
 		t.Fatalf("Heartbeat() error = %v", err)
 	}
@@ -136,6 +140,7 @@ func TestMemoryRunnerDirectoryClaimHeadroomCountsInflightActiveClaimsAndFinalize
 	mustEnqueueAssignment(t, ctx, dir, second)
 	mustEnqueueAssignment(t, ctx, dir, third)
 
+	// headroom = 2 - 0 claims - 0 leases = 2 (InFlight=5 ignored).
 	firstClaim := mustClaimAssignment(t, ctx, dir, session)
 	if firstClaim.Assignment.AssignmentID != first.AssignmentID {
 		t.Fatalf("first claim assignment = %q, want %q", firstClaim.Assignment.AssignmentID, first.AssignmentID)
@@ -144,17 +149,20 @@ func TestMemoryRunnerDirectoryClaimHeadroomCountsInflightActiveClaimsAndFinalize
 		t.Fatalf("FinalizeClaim() error = %v", err)
 	}
 
+	// headroom = 2 - 0 claims - 1 lease = 1.
 	secondClaim := mustClaimAssignment(t, ctx, dir, session)
 	if secondClaim.Assignment.AssignmentID != second.AssignmentID {
 		t.Fatalf("second claim assignment = %q, want %q", secondClaim.Assignment.AssignmentID, second.AssignmentID)
 	}
 
-	if _, ok, err := dir.ClaimForRunner(ctx, testClaimRequest(session, 3)); err != nil {
+	// headroom = 2 - 1 claim - 1 lease = 0: no more capacity.
+	if _, ok, err := dir.ClaimForRunner(ctx, testClaimRequest(session, 2)); err != nil {
 		t.Fatalf("ClaimForRunner() error = %v", err)
 	} else if ok {
-		t.Fatal("ClaimForRunner() ok=true, want no claim when inflight, finalized, and active claims exhaust headroom")
+		t.Fatal("ClaimForRunner() ok=true, want no claim when active claims and finalized leases exhaust headroom")
 	}
 
+	// Releasing the active claim frees one slot: headroom = 2 - 0 - 1 = 1.
 	if err := dir.ReleaseClaim(ctx, secondClaim.ClaimID, ReleaseClaimDrop); err != nil {
 		t.Fatalf("ReleaseClaim() error = %v", err)
 	}
@@ -315,11 +323,16 @@ func TestMemoryRunnerDirectoryReregisterPreservesFinalizedLeasesAndRequeuesActiv
 	}
 }
 
-func TestMemoryRunnerDirectoryReregisterPreservesInflightUntilHeartbeat(t *testing.T) {
+func TestMemoryRunnerDirectoryReregisterDoesNotLetStaleInflightGateHeadroom(t *testing.T) {
 	ctx := context.Background()
 	dir := NewMemoryRunnerDirectory()
 	firstSession := mustRegisterMemoryRunner(t, ctx, dir, "runner-1", 2)
 
+	// The prior session reported one task in flight, but holds no finalized
+	// lease or active claim (e.g. the task completed and was released just
+	// before the reconnect). InFlight is a pure observation, so it must NOT be
+	// carried forward as a headroom gate across re-registration — otherwise the
+	// replacement session's effective concurrency is silently suppressed.
 	if err := dir.Heartbeat(ctx, HeartbeatRequest{
 		RunnerID:  "runner-1",
 		SessionID: firstSession.SessionID,
@@ -340,15 +353,15 @@ func TestMemoryRunnerDirectoryReregisterPreservesInflightUntilHeartbeat(t *testi
 		t.Fatalf("sessions should differ, both %q", firstSession.SessionID)
 	}
 
-	claim := mustClaimAssignment(t, ctx, dir, secondSession)
-	if claim.Assignment.AssignmentID != first.AssignmentID {
-		t.Fatalf("first claim assignment = %q, want %q", claim.Assignment.AssignmentID, first.AssignmentID)
+	// Full capacity 2 is available: no real in-flight work (lease/claim)
+	// survives, and the stale InFlight=1 must not reduce headroom.
+	if claim := mustClaimAssignment(t, ctx, dir, secondSession); claim.Assignment.AssignmentID != first.AssignmentID {
+		t.Fatalf("first claim = %q, want %q", claim.Assignment.AssignmentID, first.AssignmentID)
 	}
-
-	if _, ok, err := dir.ClaimForRunner(ctx, testClaimRequest(secondSession, 2)); err != nil {
-		t.Fatalf("ClaimForRunner() error = %v", err)
-	} else if ok {
-		t.Fatal("ClaimForRunner() ok=true, want no second claim before the replacement session heartbeats updated inflight")
+	if claim, ok, err := dir.ClaimForRunner(ctx, testClaimRequest(secondSession, 2)); err != nil || !ok {
+		t.Fatalf("second ClaimForRunner() ok=%v err=%v, want claim (stale InFlight must not gate headroom)", ok, err)
+	} else if claim.Assignment.AssignmentID != second.AssignmentID {
+		t.Fatalf("second claim = %q, want %q", claim.Assignment.AssignmentID, second.AssignmentID)
 	}
 }
 
@@ -417,29 +430,29 @@ func testAssignment(id AssignmentID) Assignment {
 	}
 }
 
-func TestMemoryRunnerDirectoryTenantIsolation(t *testing.T) {
+func TestMemoryRunnerDirectoryNamespaceIsolation(t *testing.T) {
 	ctx := context.Background()
 	dir := NewMemoryRunnerDirectory()
 
-	// Runner A serves only tenant A.
+	// Runner A serves only namespace A.
 	sessionA, err := dir.Register(ctx, RegisterRunnerRequest{
 		RunnerID:     "runner-a",
 		Capacity:     1,
 		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
 		Policy:       RunnerPolicy{AllowedNodeTypes: []string{"xflow.function"}},
-		Tenants:      []tenant.TenantID{"tenant-a"},
+		Namespaces:   []namespace.Namespace{"namespace-a"},
 		Now:          time.Unix(10, 0),
 	})
 	if err != nil {
 		t.Fatalf("Register(runner-a) error = %v", err)
 	}
 
-	// Place a tenant-b assignment.
+	// Place a namespace-b assignment.
 	bAssignment := testAssignment("exec-b/node-b/activation-1")
-	bAssignment.TenantID = "tenant-b"
+	bAssignment.Namespace = "namespace-b"
 	mustEnqueueAssignment(t, ctx, dir, bAssignment)
 
-	// Runner A must not claim the cross-tenant assignment.
+	// Runner A must not claim the cross-namespace assignment.
 	_, ok, err := dir.ClaimForRunner(ctx, ClaimRequest{
 		RunnerID:     "runner-a",
 		SessionID:    sessionA.SessionID,
@@ -450,16 +463,16 @@ func TestMemoryRunnerDirectoryTenantIsolation(t *testing.T) {
 		t.Fatalf("ClaimForRunner() error = %v", err)
 	}
 	if ok {
-		t.Fatal("runner-a claimed tenant-b assignment, want cross-tenant isolation")
+		t.Fatal("runner-a claimed namespace-b assignment, want cross-namespace isolation")
 	}
 
-	// Runner B serving tenant-b can claim it.
+	// Runner B serving namespace-b can claim it.
 	sessionB, err := dir.Register(ctx, RegisterRunnerRequest{
 		RunnerID:     "runner-b",
 		Capacity:     1,
 		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
 		Policy:       RunnerPolicy{AllowedNodeTypes: []string{"xflow.function"}},
-		Tenants:      []tenant.TenantID{"tenant-b"},
+		Namespaces:   []namespace.Namespace{"namespace-b"},
 		Now:          time.Unix(10, 0),
 	})
 	if err != nil {
@@ -475,25 +488,25 @@ func TestMemoryRunnerDirectoryTenantIsolation(t *testing.T) {
 		t.Fatalf("ClaimForRunner(runner-b) error = %v", err)
 	}
 	if !ok {
-		t.Fatal("runner-b did not claim tenant-b assignment")
+		t.Fatal("runner-b did not claim namespace-b assignment")
 	}
-	if claim.Assignment.TenantID != "tenant-b" {
-		t.Fatalf("claimed assignment tenant = %q, want tenant-b", claim.Assignment.TenantID)
+	if claim.Assignment.Namespace != "namespace-b" {
+		t.Fatalf("claimed assignment namespace = %q, want namespace-b", claim.Assignment.Namespace)
 	}
 }
 
-func TestMemoryRunnerDirectoryDefaultTenantBackCompat(t *testing.T) {
+func TestMemoryRunnerDirectoryDefaultNamespaceBackCompat(t *testing.T) {
 	ctx := context.Background()
 	dir := NewMemoryRunnerDirectory()
-	// No tenants configured -> defaults to ["default"].
+	// No namespaces configured -> defaults to ["default"].
 	session := mustRegisterMemoryRunner(t, ctx, dir, "runner-1", 1)
 
 	assignment := testAssignment("exec-1/node-a/activation-1")
-	assignment.TenantID = tenant.DefaultTenant
+	assignment.Namespace = namespace.Default
 	mustEnqueueAssignment(t, ctx, dir, assignment)
 
 	claim := mustClaimAssignment(t, ctx, dir, session)
-	if claim.Assignment.TenantID != tenant.DefaultTenant {
-		t.Fatalf("tenant = %q, want default", claim.Assignment.TenantID)
+	if claim.Assignment.Namespace != namespace.Default {
+		t.Fatalf("namespace = %q, want default", claim.Assignment.Namespace)
 	}
 }

@@ -13,7 +13,7 @@ func newMgmtAuthzModule(t *testing.T, auth PrincipalAuthenticator) *managementMo
 	t.Helper()
 	m := newManagementModule(fakeControlPlaneForAuthz(t))
 	m.principalAuth = auth
-	m.authorizer = TenantAwareAuthorizer{}
+	m.authorizer = NamespaceAwareAuthorizer{}
 	m.audit = NewInMemoryAuditSink()
 	return m
 }
@@ -32,9 +32,9 @@ func mgmtMux(t *testing.T, m *managementModule) http.Handler {
 // denied on leader. Neither rides on a blanket management.read.
 func TestManagementLeaderRunnerIndependentScope(t *testing.T) {
 	principalAuth := NewBearerPrincipalAuthMulti([]TokenPrincipalMapping{
-		{Token: "tok-leader", Subject: "op-leader", TenantID: "tenantA", Scopes: []string{"management.leader.read"}},
-		{Token: "tok-runner", Subject: "op-runner", TenantID: "tenantA", Scopes: []string{"management.runner.read"}},
-		{Token: "tok-both", Subject: "op-both", TenantID: "tenantA", Scopes: []string{"management.leader.read", "management.runner.read"}},
+		{Token: "tok-leader", Subject: "op-leader", Namespace: "namespaceA", Scopes: []string{"management.leader.read"}},
+		{Token: "tok-runner", Subject: "op-runner", Namespace: "namespaceA", Scopes: []string{"management.runner.read"}},
+		{Token: "tok-both", Subject: "op-both", Namespace: "namespaceA", Scopes: []string{"management.leader.read", "management.runner.read"}},
 	})
 	mux := mgmtMux(t, newMgmtAuthzModule(t, principalAuth))
 
@@ -75,7 +75,7 @@ func TestManagementLeaderRunnerIndependentScope(t *testing.T) {
 // (403) on leader and runner.
 func TestManagementLeaderRunnerUnknownOpDenies(t *testing.T) {
 	principalAuth := NewBearerPrincipalAuthMulti([]TokenPrincipalMapping{
-		{Token: "tok-noscope", Subject: "op-noscope", TenantID: "tenantA", Scopes: []string{"workflow"}},
+		{Token: "tok-noscope", Subject: "op-noscope", Namespace: "namespaceA", Scopes: []string{"workflow"}},
 	})
 	mux := mgmtMux(t, newMgmtAuthzModule(t, principalAuth))
 

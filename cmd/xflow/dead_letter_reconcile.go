@@ -9,7 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/xbcio/xflow/backend/distributed"
+	"github.com/xbcio/xflow/backend/providers/distributed"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/store/sqlstore/mysqlstore"
@@ -66,11 +66,11 @@ use the management API: it reads Redis (authoritative) and writes SQL
 
 // reconcileStats summarizes one reconcile run.
 type reconcileStats struct {
-	Scanned    int `json:"scanned"`
-	Projected  int `json:"projected"`
-	Skipped    int `json:"skipped"`
-	Failed     int `json:"failed"`
-	DryRun     bool `json:"dry_run"`
+	Scanned   int  `json:"scanned"`
+	Projected int  `json:"projected"`
+	Skipped   int  `json:"skipped"`
+	Failed    int  `json:"failed"`
+	DryRun    bool `json:"dry_run"`
 }
 
 func runReconcile(opts *deadLetterOptions, redisAddr string, dryRun bool) error {

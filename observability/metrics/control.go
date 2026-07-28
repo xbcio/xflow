@@ -60,7 +60,7 @@ func NewAuthMetrics(metrics *Metrics) AuthMetrics {
 }
 
 func (a AuthMetrics) OnAuthDecision(ctx context.Context, _, result, authMode string) {
-	a.Metrics.Inc(metricRunnerAuthDecisions, withTenant(ctx, map[string]string{"result": result, "auth_mode": authMode}))
+	a.Metrics.Inc(metricRunnerAuthDecisions, withNamespace(ctx, map[string]string{"result": result, "auth_mode": authMode}))
 }
 
 var _ authObserver = AuthMetrics{}
@@ -76,24 +76,24 @@ func NewSweepMetrics(metrics *Metrics) SweepMetrics {
 }
 
 func (s SweepMetrics) OnSweepReclaim(ctx context.Context, _, _ string, ageMs int64) {
-	s.Metrics.Inc(metricLeaseSweepReclaimed, withTenant(ctx, map[string]string{"result": "reclaimed"}))
-	s.Metrics.Observe(metricLeaseAge, withTenant(ctx, map[string]string{"result": "reclaimed"}), time.Duration(ageMs)*time.Millisecond)
+	s.Metrics.Inc(metricLeaseSweepReclaimed, withNamespace(ctx, map[string]string{"result": "reclaimed"}))
+	s.Metrics.Observe(metricLeaseAge, withNamespace(ctx, map[string]string{"result": "reclaimed"}), time.Duration(ageMs)*time.Millisecond)
 }
 
 func (s SweepMetrics) OnSweepRace(ctx context.Context, _, _ string) {
-	s.Metrics.Inc(metricLeaseSweepReclaimed, withTenant(ctx, map[string]string{"result": "race"}))
+	s.Metrics.Inc(metricLeaseSweepReclaimed, withNamespace(ctx, map[string]string{"result": "race"}))
 }
 
 func (s SweepMetrics) OnSweepError(ctx context.Context, _, _ string, _ error) {
-	s.Metrics.Inc(metricLeaseSweepErrors, withTenant(ctx, map[string]string{"reason": "reclaim_error"}))
+	s.Metrics.Inc(metricLeaseSweepErrors, withNamespace(ctx, map[string]string{"reason": "reclaim_error"}))
 }
 
 func (s SweepMetrics) OnSweepReclaimApplied(ctx context.Context, _, _ string, ageMs int64) {
 	// Reclaim state was applied but the synchronous outbox flush failed. The
 	// durable OutboxDispatcher will retry delivery; count it as applied-pending
 	// rather than a completed delivery.
-	s.Metrics.Inc(metricLeaseSweepReclaimed, withTenant(ctx, map[string]string{"result": "applied_pending"}))
-	s.Metrics.Observe(metricLeaseAge, withTenant(ctx, map[string]string{"result": "applied_pending"}), time.Duration(ageMs)*time.Millisecond)
+	s.Metrics.Inc(metricLeaseSweepReclaimed, withNamespace(ctx, map[string]string{"result": "applied_pending"}))
+	s.Metrics.Observe(metricLeaseAge, withNamespace(ctx, map[string]string{"result": "applied_pending"}), time.Duration(ageMs)*time.Millisecond)
 }
 
 func (s SweepMetrics) OnSweepListExpired(ctx context.Context, candidates int, elapsed time.Duration, err error) {
@@ -101,14 +101,14 @@ func (s SweepMetrics) OnSweepListExpired(ctx context.Context, candidates int, el
 	if err != nil {
 		result = "error"
 	}
-	labels := withTenant(ctx, map[string]string{"result": result})
+	labels := withNamespace(ctx, map[string]string{"result": result})
 	s.Metrics.Inc(metricLeaseSweepScan, labels)
 	s.Metrics.Observe(metricLeaseSweepScanDuration, labels, elapsed)
-	s.Metrics.Set(metricLeaseSweepCandidates, withTenant(ctx, nil), float64(candidates))
+	s.Metrics.Set(metricLeaseSweepCandidates, withNamespace(ctx, nil), float64(candidates))
 }
 
 func (s SweepMetrics) OnSweepReclaimResult(ctx context.Context, result string, elapsed time.Duration) {
-	labels := withTenant(ctx, map[string]string{"result": result})
+	labels := withNamespace(ctx, map[string]string{"result": result})
 	s.Metrics.Inc(metricLeaseReclaim, labels)
 	s.Metrics.Observe(metricLeaseReclaimDuration, labels, elapsed)
 }
@@ -118,7 +118,7 @@ func (s SweepMetrics) OnSweepRepair(ctx context.Context, reconciled int, elapsed
 	if err != nil {
 		result = "error"
 	}
-	labels := withTenant(ctx, map[string]string{"result": result})
+	labels := withNamespace(ctx, map[string]string{"result": result})
 	s.Metrics.Inc(metricLeaseSweepRepair, labels)
 	s.Metrics.Observe(metricLeaseSweepRepairDuration, labels, elapsed)
 	s.Metrics.Set(metricLeaseSweepRepairReconciled, labels, float64(reconciled))
@@ -141,12 +141,12 @@ func NewRunnerClaimMetrics(metrics *Metrics) RunnerClaimMetrics {
 
 func (r RunnerClaimMetrics) OnRunnerClaimReclaimed(ctx context.Context, count int) {
 	for i := 0; i < count; i++ {
-		r.Metrics.Inc(metricRunnerClaimReclaimed, withTenant(ctx, nil))
+		r.Metrics.Inc(metricRunnerClaimReclaimed, withNamespace(ctx, nil))
 	}
 }
 
 func (r RunnerClaimMetrics) OnRunnerLeaseReplayed(ctx context.Context) {
-	r.Metrics.Inc(metricRunnerLeaseReplayed, withTenant(ctx, nil))
+	r.Metrics.Inc(metricRunnerLeaseReplayed, withNamespace(ctx, nil))
 }
 
 var _ runnerClaimObserver = RunnerClaimMetrics{}
@@ -161,7 +161,7 @@ func NewDispatcherMetrics(metrics *Metrics) DispatcherMetrics {
 }
 
 func (d DispatcherMetrics) OnDispatchTransient(ctx context.Context, reason string) {
-	d.Metrics.Inc(metricDispatchTransient, withTenant(ctx, map[string]string{"reason": reason}))
+	d.Metrics.Inc(metricDispatchTransient, withNamespace(ctx, map[string]string{"reason": reason}))
 }
 
 var _ dispatcherObserver = DispatcherMetrics{}

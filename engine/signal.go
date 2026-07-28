@@ -52,7 +52,7 @@ func (e *Engine) deliverSignalDurable(ctx context.Context, id types.ExecutionID,
 		// live activation_id from node meta inside the atomic Lua transaction,
 		// closing the TOCTOU window where a concurrent re-suspend under a new
 		// activation could make the Go-side snapshot stale.
-		intent = ResumeIntent{NodeName: resumeNode, NodeIdx: nodeIdx}
+		intent = ResumeIntent{NodeName: resumeNode, NodeIdx: nodeIdx, UnitIdx: g.UnitIndexForNode(nodeIdx)}
 	}
 
 	node, _, committed, err := durable.DeliverSignalWithOutbox(ctx, id, name, data, intent)
@@ -116,8 +116,15 @@ func (e *Engine) deliverSignalLegacy(ctx context.Context, id types.ExecutionID, 
 	}
 
 	acquired, err := e.state.AcquireResumeLock(ctx, id, resumeNode)
-	if err != nil || !acquired {
+	if err != nil {
 		return err
+	}
+	if !acquired {
+		// The lock is held by a concurrent resume (another signal or timer).
+		// The signal was already consumed above; that holder will enqueue the
+		// resume task. Return a retryable error so upper layers can surface the
+		// contention rather than silently succeeding with no resume enqueued.
+		return fmt.Errorf("resume lock contended for %q/%q: signal consumed but resume delegated to lock holder", id, resumeNode)
 	}
 
 	if payload == nil {
@@ -131,6 +138,7 @@ func (e *Engine) deliverSignalLegacy(ctx context.Context, id types.ExecutionID, 
 		ExecutionID:  id,
 		NodeName:     resumeNode,
 		NodeIdx:      nodeIdx,
+		UnitIdx:      g.UnitIndexForNode(nodeIdx),
 		Type:         TaskTypeNodeResume,
 		Payload:      payload,
 		ActivationID: activationID,
@@ -159,14 +167,21 @@ func (e *Engine) TimeoutNode(ctx context.Context, id types.ExecutionID, nodeName
 	}
 
 	acquired, err := e.state.AcquireResumeLock(ctx, id, nodeName)
-	if err != nil || !acquired {
+	if err != nil {
 		return err
+	}
+	if !acquired {
+		// Another resume path (signal delivery or concurrent timeout) already
+		// holds the lock and will enqueue the resume task. Return a retryable
+		// error to surface the contention.
+		return fmt.Errorf("resume lock contended for timeout %q/%q: delegated to lock holder", id, nodeName)
 	}
 
 	return e.queue.Enqueue(ctx, &Task{
 		ExecutionID: id,
 		NodeName:    nodeName,
 		NodeIdx:     nodeIdx,
+		UnitIdx:     g.UnitIndexForNode(nodeIdx),
 		Type:        TaskTypeNodeResume,
 		Payload: &types.SignalPayload{
 			Triggered: types.TimeoutFired,

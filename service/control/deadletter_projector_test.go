@@ -3,13 +3,12 @@ package control
 import (
 	"context"
 	"errors"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/store"
 )
 
@@ -89,7 +88,7 @@ func (f *fakeReceiptAppender) snapshot() []*store.AuditRecord {
 // receiptForTest builds a canonical receipt used across the projector tests.
 func receiptForTest() engine.ReplayReceipt {
 	return engine.ReplayReceipt{
-		TenantID:     "tenant-a",
+		Namespace:    "namespace-a",
 		ExecutionID:  "exec-1",
 		RequestID:    "req-1",
 		AuditID:      "req-1:1700000000000",
@@ -197,7 +196,7 @@ func TestProjectorAuditSinkRetriesThenAlarmsOnTransientFailure(t *testing.T) {
 	req := engine.ReplayDeadLetterRequest{
 		ExecutionID: "exec-1", EntryID: "entry-1", RequestID: "req-1", Reason: "r", Operator: "alice",
 	}
-	ctx := tenant.WithTenant(context.Background(), "tenant-a")
+	ctx := namespace.WithNamespace(context.Background(), "namespace-a")
 	err := sink.RecordReplay(ctx, res, req)
 	if err == nil {
 		t.Fatal("RecordReplay: err = nil, want transient failure propagated after retries")
@@ -239,7 +238,7 @@ func TestProjectorAuditSinkSucceedsAfterTransientRetry(t *testing.T) {
 	req := engine.ReplayDeadLetterRequest{
 		ExecutionID: "exec-1", EntryID: "entry-1", RequestID: "req-1", Reason: "r", Operator: "alice",
 	}
-	ctx := tenant.WithTenant(context.Background(), "tenant-a")
+	ctx := namespace.WithNamespace(context.Background(), "namespace-a")
 	if err := sink.RecordReplay(ctx, res, req); err != nil {
 		t.Fatalf("RecordReplay: %v (should succeed on retry)", err)
 	}
@@ -268,7 +267,7 @@ func TestProjectorAuditSinkSkipsWhenAlreadyProjected(t *testing.T) {
 	req := engine.ReplayDeadLetterRequest{
 		ExecutionID: "exec-1", EntryID: "entry-1", RequestID: "req-1", Reason: "r", Operator: "alice",
 	}
-	ctx := tenant.WithTenant(context.Background(), "tenant-a")
+	ctx := namespace.WithNamespace(context.Background(), "namespace-a")
 	if err := sink.RecordReplay(ctx, res, req); err != nil {
 		t.Fatalf("first RecordReplay: %v", err)
 	}
@@ -291,12 +290,12 @@ func TestProjectorAuditSinkSkipsWhenAlreadyProjected(t *testing.T) {
 func TestReceiptFromReplayCarriesIdempotencyKey(t *testing.T) {
 	res := engine.ReplayDeadLetterResult{AuditID: "req-1:1700000000000", ExecutionID: "exec-1", NodeID: "n", ActivationID: "1", Outcome: engine.ReplayReplayed}
 	req := engine.ReplayDeadLetterRequest{ExecutionID: "exec-1", EntryID: "e1", RequestID: "req-1", Reason: "r", Operator: "alice"}
-	r := receiptFromReplay(res, req, "tenant-a")
+	r := receiptFromReplay(res, req, "namespace-a")
 	if r.AuditID != "req-1:1700000000000" {
 		t.Fatalf("audit_id = %q, want the Redis receipt audit_id", r.AuditID)
 	}
-	if r.TenantID != "tenant-a" {
-		t.Fatalf("tenant = %q, want tenant-a", r.TenantID)
+	if r.Namespace != "namespace-a" {
+		t.Fatalf("namespace = %q, want namespace-a", r.Namespace)
 	}
 	if r.EntryID != "e1" || r.NodeID != "n" || r.ActivationID != "1" {
 		t.Fatalf("correlation fields not carried: %+v", r)
@@ -331,7 +330,7 @@ func TestReceiptProjectorNilAppenderReturnsError(t *testing.T) {
 	if err == nil {
 		t.Fatal("Project with nil appender: err = nil, want error")
 	}
-	if !strings.Contains(err.Error(), "DeadLetter") && !strings.Contains(err.Error(), "unsupported") && !strings.Contains(err.Error(), "nil") {
-		// any non-nil error is acceptable; just confirm it propagated
+	if err.Error() == "" {
+		t.Fatal("Project with nil appender returned an empty error")
 	}
 }

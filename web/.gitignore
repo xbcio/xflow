@@ -12,7 +12,6 @@ dist/
 
 # Testing
 coverage/
-playwright-report/
 test-results/
 
 # Misc
@@ -20,11 +19,5 @@ test-results/
 .env
 .env.local
 .env.*.local
-
-# Logs
 *.log
-pnpm-debug.log*
 
-# Editor
-.vscode/
-.idea/

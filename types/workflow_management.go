@@ -3,7 +3,7 @@ package types
 import "time"
 
 // WorkflowDefinition is the management resource envelope for a workflow.
-// It is identified by a server-assigned UUID (ID) and scoped to a tenant.
+// It is identified by a server-assigned UUID (ID) and scoped to a namespace.
 // The runtime identity remains Namespace+Name+Version, but API paths use the
 // stable ID.
 type WorkflowDefinition struct {
@@ -14,7 +14,6 @@ type WorkflowDefinition struct {
 	CreatedAt     time.Time `json:"createdAt,omitempty"`
 	UpdatedAt     time.Time `json:"updatedAt,omitempty"`
 	CreatedBy     string    `json:"createdBy,omitempty"`
-	TenantID      string    `json:"tenantId,omitempty"`
 	LatestVersion string    `json:"latestVersion,omitempty"`
 	DraftRevision int64     `json:"draftRevision,omitempty"`
 }

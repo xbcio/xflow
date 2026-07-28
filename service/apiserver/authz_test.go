@@ -4,10 +4,11 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
-	"github.com/xbcio/xflow/backend/local"
-	"github.com/xbcio/xflow/backend/tenant"
+	"github.com/xbcio/xflow/backend/providers/local"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/store/memstore"
 )
@@ -36,7 +37,7 @@ func authzModule(t *testing.T, auth PrincipalAuthenticator, authorizer Authorize
 // staticPrincipalAuth returns a fixed principal for tests.
 type staticPrincipalAuth struct {
 	principal Principal
-	err      error
+	err       error
 }
 
 func (s staticPrincipalAuth) Authenticate(*http.Request) (Principal, error) {
@@ -168,10 +169,10 @@ func TestBearerPrincipalAuthMapsTokenToPrincipal(t *testing.T) {
 	if p.Subject != "operator-1" || !p.HasScope("workflow") {
 		t.Fatalf("principal = %+v, want operator-1 with workflow scope", p)
 	}
-	// Single-token constructor maps to the default tenant so downstream code
-	// always sees a non-empty, key-safe tenant.
-	if p.TenantID != string(tenant.DefaultTenant) {
-		t.Fatalf("single-token tenant = %q, want %q (default)", p.TenantID, tenant.DefaultTenant)
+	// Single-token constructor maps to the default namespace so downstream code
+	// always sees a non-empty, key-safe namespace.
+	if p.Namespace != string(namespace.Default) {
+		t.Fatalf("single-token namespace = %q, want %q (default)", p.Namespace, namespace.Default)
 	}
 
 	// Wrong token must not authenticate and must not leak principal.
@@ -182,13 +183,13 @@ func TestBearerPrincipalAuthMapsTokenToPrincipal(t *testing.T) {
 	}
 }
 
-// TestBearerPrincipalAuthMultiMapsTokenToTenant proves the multi-tenant token
-// registry (design §2.3 scheme A) binds each token to its own tenant, and that
-// the tenant is server-issued from the token (never self-reported).
-func TestBearerPrincipalAuthMultiMapsTokenToTenant(t *testing.T) {
+// TestBearerPrincipalAuthMultiMapsTokenToNamespace proves the multi-namespace token
+// registry (design §2.3 scheme A) binds each token to its own namespace, and that
+// the namespace is server-issued from the token (never self-reported).
+func TestBearerPrincipalAuthMultiMapsTokenToNamespace(t *testing.T) {
 	a := NewBearerPrincipalAuthMulti([]TokenPrincipalMapping{
-		{Token: "tok-a", Subject: "op-a", TenantID: "tenantA", Scopes: []string{"workflow", "execution", "management.read"}},
-		{Token: "tok-b", Subject: "op-b", TenantID: "tenantB", Scopes: []string{"workflow", "execution", "management.read"}},
+		{Token: "tok-a", Subject: "op-a", Namespace: "namespaceA", Scopes: []string{"workflow", "execution", "management.read"}},
+		{Token: "tok-b", Subject: "op-b", Namespace: "namespaceB", Scopes: []string{"workflow", "execution", "management.read"}},
 	})
 
 	reqA := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -197,8 +198,8 @@ func TestBearerPrincipalAuthMultiMapsTokenToTenant(t *testing.T) {
 	if err != nil {
 		t.Fatalf("tok-a: %v", err)
 	}
-	if pa.Subject != "op-a" || pa.TenantID != "tenantA" {
-		t.Fatalf("tok-a principal = %+v, want op-a/tenantA", pa)
+	if pa.Subject != "op-a" || pa.Namespace != "namespaceA" {
+		t.Fatalf("tok-a principal = %+v, want op-a/namespaceA", pa)
 	}
 
 	reqB := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -207,8 +208,8 @@ func TestBearerPrincipalAuthMultiMapsTokenToTenant(t *testing.T) {
 	if err != nil {
 		t.Fatalf("tok-b: %v", err)
 	}
-	if pb.Subject != "op-b" || pb.TenantID != "tenantB" {
-		t.Fatalf("tok-b principal = %+v, want op-b/tenantB", pb)
+	if pb.Subject != "op-b" || pb.Namespace != "namespaceB" {
+		t.Fatalf("tok-b principal = %+v, want op-b/namespaceB", pb)
 	}
 
 	// A token not in the registry must not authenticate and must not leak which
@@ -219,8 +220,8 @@ func TestBearerPrincipalAuthMultiMapsTokenToTenant(t *testing.T) {
 		t.Fatalf("unknown token: err=%v, want ErrWorkflowUnauthenticated", err)
 	}
 
-	// Empty TenantID in a mapping normalizes to default so every authenticated
-	// principal carries a non-empty tenant (TenantAwareAuthorizer requires it).
+	// Empty Namespace in a mapping normalizes to default so every authenticated
+	// principal carries a non-empty namespace (NamespaceAwareAuthorizer requires it).
 	aDef := NewBearerPrincipalAuthMulti([]TokenPrincipalMapping{
 		{Token: "tok-d", Subject: "op-d", Scopes: []string{"workflow"}},
 	})
@@ -230,8 +231,8 @@ func TestBearerPrincipalAuthMultiMapsTokenToTenant(t *testing.T) {
 	if err != nil {
 		t.Fatalf("tok-d: %v", err)
 	}
-	if pd.TenantID != string(tenant.DefaultTenant) {
-		t.Fatalf("empty tenant mapping normalized to %q, want %q", pd.TenantID, tenant.DefaultTenant)
+	if pd.Namespace != string(namespace.Default) {
+		t.Fatalf("empty namespace mapping normalized to %q, want %q", pd.Namespace, namespace.Default)
 	}
 }
 
@@ -241,8 +242,8 @@ func TestBearerPrincipalAuthMultiMapsTokenToTenant(t *testing.T) {
 // a missing token.
 func TestBearerPrincipalAuthImplementsWorkflowAuthenticator(t *testing.T) {
 	var auth WorkflowAuthenticator = NewBearerPrincipalAuthMulti([]TokenPrincipalMapping{
-		{Token: "tok-a", Subject: "op-a", TenantID: "tenantA", Scopes: []string{"management.read"}},
-		{Token: "tok-b", Subject: "op-b", TenantID: "tenantB", Scopes: []string{"management.read"}},
+		{Token: "tok-a", Subject: "op-a", Namespace: "namespaceA", Scopes: []string{"management.read"}},
+		{Token: "tok-b", Subject: "op-b", Namespace: "namespaceB", Scopes: []string{"management.read"}},
 	})
 
 	for _, tok := range []string{"tok-a", "tok-b"} {
@@ -265,23 +266,23 @@ func TestBearerPrincipalAuthImplementsWorkflowAuthenticator(t *testing.T) {
 	}
 }
 
-func TestTenantAwareAuthorizerDeniesEmptyTenant(t *testing.T) {
-	// A principal with scopes but no tenant must be denied — fail-closed.
-	dec, err := TenantAwareAuthorizer{}.Authorize(context.Background(), AuthorizationRequest{
-		Principal: Principal{Subject: "x", TenantID: "", Scopes: []string{"workflow"}},
+func TestNamespaceAwareAuthorizerDeniesEmptyNamespace(t *testing.T) {
+	// A principal with scopes but no namespace must be denied — fail-closed.
+	dec, err := NamespaceAwareAuthorizer{}.Authorize(context.Background(), AuthorizationRequest{
+		Principal: Principal{Subject: "x", Namespace: "", Scopes: []string{"workflow"}},
 		Operation: OpWorkflowCreate,
 	})
 	if err != nil {
 		t.Fatalf("Authorize: %v", err)
 	}
 	if dec != DecisionDeny {
-		t.Fatalf("empty tenant decision = %q, want deny (fail-closed)", dec)
+		t.Fatalf("empty namespace decision = %q, want deny (fail-closed)", dec)
 	}
 }
 
-func TestTenantAwareAuthorizerDeniesMissingScope(t *testing.T) {
-	dec, err := TenantAwareAuthorizer{}.Authorize(context.Background(), AuthorizationRequest{
-		Principal: Principal{Subject: "x", TenantID: "tenantA", Scopes: []string{}},
+func TestNamespaceAwareAuthorizerDeniesMissingScope(t *testing.T) {
+	dec, err := NamespaceAwareAuthorizer{}.Authorize(context.Background(), AuthorizationRequest{
+		Principal: Principal{Subject: "x", Namespace: "namespaceA", Scopes: []string{}},
 		Operation: OpWorkflowCreate,
 	})
 	if err != nil {
@@ -292,9 +293,9 @@ func TestTenantAwareAuthorizerDeniesMissingScope(t *testing.T) {
 	}
 }
 
-func TestTenantAwareAuthorizerAllowsMatchingTenantAndScope(t *testing.T) {
-	dec, err := TenantAwareAuthorizer{}.Authorize(context.Background(), AuthorizationRequest{
-		Principal: Principal{Subject: "x", TenantID: "tenantA", Scopes: []string{"management.read"}},
+func TestNamespaceAwareAuthorizerAllowsMatchingNamespaceAndScope(t *testing.T) {
+	dec, err := NamespaceAwareAuthorizer{}.Authorize(context.Background(), AuthorizationRequest{
+		Principal: Principal{Subject: "x", Namespace: "namespaceA", Scopes: []string{"management.read"}},
 		Operation: OpManagementRead,
 	})
 	if err != nil {
@@ -305,33 +306,33 @@ func TestTenantAwareAuthorizerAllowsMatchingTenantAndScope(t *testing.T) {
 	}
 }
 
-func TestTenantAwareAuthorizerDeniesCrossTenantResource(t *testing.T) {
-	// ResourceTenant resolved by the route layer disagrees with the principal's
-	// tenant → deny (defense in depth; the authoritative IDOR path is the
-	// tenant-scoped store read, exercised in tenant_idor_test.go).
-	dec, err := TenantAwareAuthorizer{}.Authorize(context.Background(), AuthorizationRequest{
-		Principal:      Principal{Subject: "x", TenantID: "tenantA", Scopes: []string{"management.read"}},
-		Operation:      OpManagementRead,
-		ResourceTenant: "tenantB",
+func TestNamespaceAwareAuthorizerDeniesCrossNamespaceResource(t *testing.T) {
+	// ResourceNamespace resolved by the route layer disagrees with the principal's
+	// namespace → deny (defense in depth; the authoritative IDOR path is the
+	// namespace-scoped store read, exercised in namespaceor_test.go).
+	dec, err := NamespaceAwareAuthorizer{}.Authorize(context.Background(), AuthorizationRequest{
+		Principal:         Principal{Subject: "x", Namespace: "namespaceA", Scopes: []string{"management.read"}},
+		Operation:         OpManagementRead,
+		ResourceNamespace: "namespaceB",
 	})
 	if err != nil {
 		t.Fatalf("Authorize: %v", err)
 	}
 	if dec != DecisionDeny {
-		t.Fatalf("cross-tenant resource decision = %q, want deny", dec)
+		t.Fatalf("cross-namespace resource decision = %q, want deny", dec)
 	}
 }
 
-func TestAuthzWrapInjectsPrincipalTenantIntoContext(t *testing.T) {
-	// The authz wrapper injects the principal's TenantID into the request
-	// context so downstream store reads are tenant-scoped. A stub handler
+func TestAuthzWrapInjectsPrincipalNamespaceIntoContext(t *testing.T) {
+	// The authz wrapper injects the principal's Namespace into the request
+	// context so downstream store reads are namespace-scoped. A stub handler
 	// observes the context.
-	auth := staticPrincipalAuth{principal: Principal{Subject: "alice", TenantID: "tenantA", Scopes: []string{"workflow"}}}
-	m := authzModule(t, auth, TenantAwareAuthorizer{}, NewInMemoryAuditSink())
+	auth := staticPrincipalAuth{principal: Principal{Subject: "alice", Namespace: "namespaceA", Scopes: []string{"workflow"}}}
+	m := authzModule(t, auth, NamespaceAwareAuthorizer{}, NewInMemoryAuditSink())
 
-	var observed tenant.TenantID
+	var observed namespace.Namespace
 	wrapped := m.wrapForTest(OpWorkflowCreate, true, func(w http.ResponseWriter, r *http.Request) {
-		observed = tenant.FromContext(r.Context())
+		observed = namespace.FromContext(r.Context())
 		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 	}, nil)
 
@@ -339,19 +340,19 @@ func TestAuthzWrapInjectsPrincipalTenantIntoContext(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/workflows", nil)
 	wrapped.ServeHTTP(rec, req)
 
-	if observed != "tenantA" {
-		t.Fatalf("context tenant = %q, want tenantA (principal-injected)", observed)
+	if observed != "namespaceA" {
+		t.Fatalf("context namespace = %q, want namespaceA (principal-injected)", observed)
 	}
 }
 
-func TestAuthzWrapAuditCarriesPrincipalTenant(t *testing.T) {
-	// Tenant boundary (Task 7.4): the authz wrapper injects tenant into context
-	// before audit append, and the SQL audit sink reads tenant from context. The
-	// persisted audit record must carry the principal's tenant.
-	auth := staticPrincipalAuth{principal: Principal{Subject: "alice", TenantID: "tenantA", Scopes: []string{"workflow"}}}
+func TestAuthzWrapAuditCarriesPrincipalNamespace(t *testing.T) {
+	// Namespace boundary (Task 7.4): the authz wrapper injects namespace into context
+	// before audit append, and the SQL audit sink reads namespace from context. The
+	// persisted audit record must carry the principal's namespace.
+	auth := staticPrincipalAuth{principal: Principal{Subject: "alice", Namespace: "namespaceA", Scopes: []string{"workflow"}}}
 	db := memstore.New()
 	audit := NewSQLAuditSink(db)
-	m := authzModule(t, auth, TenantAwareAuthorizer{}, audit)
+	m := authzModule(t, auth, NamespaceAwareAuthorizer{}, audit)
 
 	wrapped := m.wrapForTest(OpWorkflowCreate, true, func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
@@ -366,8 +367,8 @@ func TestAuthzWrapAuditCarriesPrincipalTenant(t *testing.T) {
 		t.Fatal("no audit records persisted")
 	}
 	for _, r := range records {
-		if r.TenantID != "tenantA" {
-			t.Fatalf("audit TenantID = %q, want tenantA; record=%+v", r.TenantID, r)
+		if r.Namespace != "namespaceA" {
+			t.Fatalf("audit Namespace = %q, want namespaceA; record=%+v", r.Namespace, r)
 		}
 	}
 }
@@ -377,15 +378,15 @@ func TestNewFailsClosedWhenPrincipalAuthMissingAuthorizerOrAudit(t *testing.T) {
 
 	// PrincipalAuth without Authorizer.
 	if _, err := New(Config{
-		Concurrency:  1,
+		Concurrency:   1,
 		PrincipalAuth: auth,
-		AuditSink:    NewInMemoryAuditSink(),
+		AuditSink:     NewInMemoryAuditSink(),
 	}); err == nil {
 		t.Fatal("New() = nil, want error when PrincipalAuth set without Authorizer")
 	}
 	// PrincipalAuth without AuditSink.
 	if _, err := New(Config{
-		Concurrency:  1,
+		Concurrency:   1,
 		PrincipalAuth: auth,
 		Authorizer:    ScopeAuthorizer{},
 	}); err == nil {
@@ -393,7 +394,7 @@ func TestNewFailsClosedWhenPrincipalAuthMissingAuthorizerOrAudit(t *testing.T) {
 	}
 	// All three present: OK.
 	srv, err := New(Config{
-		Concurrency:  1,
+		Concurrency:   1,
 		PrincipalAuth: auth,
 		Authorizer:    ScopeAuthorizer{},
 		AuditSink:     NewInMemoryAuditSink(),
@@ -434,6 +435,7 @@ func TestAuthzMutationOutcomeIsSynchronousNotDefer(t *testing.T) {
 		t.Fatalf("audit = %+v, want exactly one admission event (outcome is synchronous, not deferred)", events)
 	}
 }
+
 // second audit row after a mutation handler settles: reconciled on 2xx,
 // failed on non-2xx. The admission row (admitted) and the reconcile row share
 // the RequestID so audit reconciliation can join them.
@@ -498,4 +500,34 @@ func TestAuthzMutationAppendsReconcileOutcome(t *testing.T) {
 			t.Fatalf("second event outcome = %q, want failed", events[1].Outcome)
 		}
 	})
+}
+
+// TestInMemoryAuditSinkConcurrentAppendIsRaceFree exercises the L fix: Append
+// and Events() must be safe under concurrent use. Run with -race to detect the
+// previously unsynchronized slice append.
+func TestInMemoryAuditSinkConcurrentAppendIsRaceFree(t *testing.T) {
+	sink := NewInMemoryAuditSink()
+	const writers = 8
+	const perWriter = 128
+
+	var wg sync.WaitGroup
+	wg.Add(writers)
+	for w := 0; w < writers; w++ {
+		go func() {
+			defer wg.Done()
+			for i := 0; i < perWriter; i++ {
+				if err := sink.Append(context.Background(), AuditEvent{Operation: "op"}); err != nil {
+					t.Errorf("Append() error = %v", err)
+					return
+				}
+				// Concurrent reader path must also be synchronized.
+				_ = sink.Events()
+			}
+		}()
+	}
+	wg.Wait()
+
+	if got := len(sink.Events()); got != writers*perWriter {
+		t.Fatalf("recorded %d events, want %d", got, writers*perWriter)
+	}
 }

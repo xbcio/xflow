@@ -104,6 +104,10 @@ func (e *Engine) commitLegacyTaskResult(ctx context.Context, lease *TaskLease, g
 			return CommitOutcomeTransientError, fmt.Errorf("retry node %q/%q: %w", task.ExecutionID, task.NodeName, err)
 		}
 		if retried {
+			// Mirror commitLegacyNodeError / the acyclic path: record a retry
+			// evidence receipt so the runtime evidence buffer does not drop a
+			// retry event on the cyclic error-port retry branch.
+			e.publishRetryReceipt(ctx, task, lease.Attempt)
 			return CommitOutcomeAccepted, nil
 		}
 		// Retry budget exhausted: the explicit error-port output is a terminal
@@ -189,28 +193,50 @@ func (e *Engine) commitLegacyNodeWithClassification(ctx context.Context, lease *
 	// so the terminal transition and its downstream delivery intents (or the
 	// execution finalization) are persisted in ONE fenced transaction. This
 	// closes the #7 window where a crash between the terminal commit and a
-	// separate queue.Enqueue permanently lost downstream cyclic tasks. A fatal
-	// abort has no downstream: the whole execution fails.
+	// separate queue.Enqueue permanently lost downstream cyclic tasks.
+	//
+	// A fatal abort of a cyclic node has no downstream: the whole execution
+	// fails. Express that failure through the cyclic-completion mechanism
+	// (CyclicComplete + finalStatus=failed) so the terminal node write AND the
+	// execution finalization land in ONE fenced transition, exactly like the
+	// acyclic Fatal path. This code is only reached for genuinely cyclic graphs
+	// — acyclic and experimental loop/split graphs are redirected to
+	// commitAcyclicNode above, where Fatal is already finalized atomically.
+	//
+	// Previously a fatal cyclic node committed terminal here and the engine
+	// finalized the execution with a SEPARATE UpdateExecutionStatus below. A
+	// crash (or error) between the two left the execution stuck Running with a
+	// terminal failed node; the lease sweeper only scans non-terminal nodes, so
+	// nothing could ever recover it (H1). Folding the finalization into the
+	// fenced commit makes it atomic and makes crash recovery idempotent (a
+	// replay observes DuplicateTerminal with the execution already failed).
 	var plan cyclicPlan
-	if !fatal {
+	if fatal {
+		plan = cyclicPlan{complete: true, finalStatus: types.ExecutionStatusFailed, finalError: errMsg}
+	} else {
 		plan = e.planCyclicDownstream(g, &lease.Task, port)
 	}
 
 	req := CommitNodeRequest{
-		ExecutionID:       task.ExecutionID,
-		NodeName:          task.NodeName,
-		NodeIdx:           task.NodeIdx,
-		ActivationID:      task.ActivationID,
-		AutoDepth:         task.AutoDepth,
-		LeaseID:           lease.LeaseID,
-		LeaseToken:        lease.LeaseToken,
-		Attempt:           lease.Attempt,
-		Status:            status,
-		Output:            output,
-		StoreOutput:       true,
-		Port:              port,
-		Error:             errMsg,
-		Fatal:             fatal,
+		ExecutionID:  task.ExecutionID,
+		NodeName:     task.NodeName,
+		NodeIdx:      task.NodeIdx,
+		ActivationID: task.ActivationID,
+		AutoDepth:    task.AutoDepth,
+		LeaseID:      lease.LeaseID,
+		LeaseToken:   lease.LeaseToken,
+		Attempt:      lease.Attempt,
+		Status:       status,
+		Output:       output,
+		StoreOutput:  true,
+		Port:         port,
+		Error:        errMsg,
+		// Fatal is intentionally NOT set for the cyclic path: the backend cyclic
+		// finalization is driven by CyclicComplete (above), and the Fatal flag is
+		// the acyclic-path finalization signal (it is also the guard the backend
+		// uses to skip cyclic downstream). Carrying the fatal intent via
+		// CyclicComplete keeps the whole transition inside one fenced commit.
+		Fatal:             false,
 		CyclicOutbox:      plan.entries,
 		CyclicComplete:    plan.complete,
 		CyclicFinalStatus: plan.finalStatus,
@@ -237,19 +263,12 @@ func (e *Engine) commitLegacyNodeWithClassification(ctx context.Context, lease *
 	switch result.Outcome {
 	case CommitOutcomeAccepted:
 		e.notifyNodeComplete(ctx, task.ExecutionID, task.NodeName, status)
-		if fatal {
-			if err := e.state.UpdateExecutionStatus(ctx, task.ExecutionID, types.ExecutionStatusFailed, errMsg); err != nil {
-				return CommitOutcomeTransientError, fmt.Errorf("mark execution %q failed: %w", task.ExecutionID, err)
-			}
-			e.notifyExecutionComplete(ctx, task.ExecutionID, types.ExecutionStatusFailed)
-			e.EvictExecution(task.ExecutionID)
-			return CommitOutcomeAccepted, nil
-		}
 		if result.ExecutionDone {
-			// The cyclic branch terminated (or exceeded MaxAutoDepth) and the
-			// backend finalized the execution status in the same fenced
-			// transition. Yield the completion notification to an in-flight
-			// Cancel, matching completeExecution's cancel-aware behavior.
+			// The cyclic branch terminated (fatal abort, natural completion, or
+			// MaxAutoDepth) and the backend finalized the execution status in the
+			// SAME fenced transition as the terminal node write. Yield the
+			// completion notification to an in-flight Cancel, matching
+			// completeExecution's cancel-aware behavior.
 			if !e.isCancelingOrCanceled(ctx, task.ExecutionID) {
 				e.notifyExecutionComplete(ctx, task.ExecutionID, result.ExecutionStatus)
 				e.EvictExecution(task.ExecutionID)

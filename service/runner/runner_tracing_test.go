@@ -83,7 +83,7 @@ func TestRunnerExecuteSpanParentedToDispatchCarrier(t *testing.T) {
 		Task:         engine.Task{ExecutionID: types.ExecutionID("exec-trace-1"), NodeName: "start"},
 		Input:        &types.Input{Data: map[string]any{"claim_id": "c-trace"}},
 		NodeType:     "test.function",
-		TraceCarrier:  carrier,
+		TraceCarrier: carrier,
 	}
 	client := &capturingClient{lease: lease}
 	registry := execution.NewRegistry()

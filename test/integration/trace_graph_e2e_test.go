@@ -19,7 +19,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"github.com/xbcio/xflow/backend/distributed"
+	"github.com/xbcio/xflow/backend/providers/distributed"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
 	"github.com/xbcio/xflow/observability/tracing"
@@ -208,23 +208,25 @@ func TestServerRunnerE2ETraceGraphRealRedis(t *testing.T) {
 			report.Parent().SpanID(), execute.SpanContext().SpanID())
 	}
 
-	// Tenant must be a span ATTRIBUTE on submit, never W3C baggage. Assert the
-	// tenant attribute is present and there is no baggage member on the
-	// submit span context (baggage is opt-in and tenant is denylisted).
-	hasTenantAttr := false
+	// Namespace must be a span ATTRIBUTE on submit, never W3C baggage. Assert the
+	// namespace attribute is present and there is no baggage member on the
+	// submit span context (baggage is opt-in and namespace is denylisted).
+	hasNamespaceAttr := false
 	for _, kv := range submit.Attributes() {
-		if string(kv.Key) == "tenant" {
-			hasTenantAttr = true
+		if string(kv.Key) == "namespace" {
+			hasNamespaceAttr = true
 		}
 	}
-	if !hasTenantAttr {
-		t.Fatalf("submit span has no tenant attribute (tenant must be a span attribute, not baggage)")
+	if !hasNamespaceAttr {
+		t.Fatalf("submit span has no namespace attribute (namespace must be a span attribute, not baggage)")
 	}
 }
 
 type traceGraphHandler struct{}
 
-func (traceGraphHandler) Descriptor() types.Descriptor { return types.Descriptor{Type: "test.e2e.trace"} }
+func (traceGraphHandler) Descriptor() types.Descriptor {
+	return types.Descriptor{Type: "test.e2e.trace"}
+}
 func (traceGraphHandler) Execute(_ context.Context, input *types.Input) (*types.Output, error) {
 	return &types.Output{Data: map[string]any{
 		"handled_by": "runner",

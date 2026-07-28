@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/types"
 
 	dto "github.com/prometheus/client_model/go"
@@ -111,7 +111,7 @@ func TestMetricsHooksDoNotExportExecutionIDAsLabel(t *testing.T) {
 	if strings.Contains(body, "exec-123") {
 		t.Fatalf("metrics body leaked execution id: %s", body)
 	}
-	if !strings.Contains(body, `xflow_node_completed_total{node="send_email",status="success",tenant="default"} 1`) {
+	if !strings.Contains(body, `xflow_node_completed_total{namespace="default",node="send_email",status="success"} 1`) {
 		t.Fatalf("node completed metric missing from body: %s", body)
 	}
 }
@@ -142,21 +142,21 @@ func TestObserverAdaptersIncrementExpectedMetrics(t *testing.T) {
 	body := rec.Body.String()
 
 	for _, want := range []string{
-		`xflow_audit_write_total{op="save_signal",result="failed",tenant="default"} 1`,
-		`xflow_lease_sweep_reclaimed_total{result="reclaimed",tenant="default"} 1`,
-		`xflow_dispatch_transient_total{reason="no_capacity",tenant="default"} 1`,
-		`xflow_runner_auth_decisions_total{auth_mode="enforcing",result="deny",tenant="default"} 1`,
-		`xflow_lease_age_seconds_count{result="reclaimed",tenant="default"} 1`,
-		`xflow_commit_outcomes_total{outcome="accepted",tenant="default"} 1`,
-		`xflow_outbox_retries_total{tenant="default"} 1`,
-		`xflow_outbox_dead_letters_total{tenant="default"} 1`,
-		`xflow_outbox_pending{tenant="default"} 2`,
-		`xflow_outbox_dead_letters{tenant="default"} 1`,
-		`xflow_lease_acquire_total{result="acquired",tenant="default"} 1`,
-		`xflow_runner_claim_reclaimed_total{tenant="default"} 2`,
-		`xflow_runner_lease_replayed_total{tenant="default"} 1`,
-		`xflow_script_execute_total{language="js",outcome="main",runtime="goja",tenant="default"} 1`,
-		`xflow_script_output_bytes_count{language="js",runtime="goja",tenant="default"} 1`,
+		`xflow_audit_write_total{namespace="default",op="save_signal",result="failed"} 1`,
+		`xflow_lease_sweep_reclaimed_total{namespace="default",result="reclaimed"} 1`,
+		`xflow_dispatch_transient_total{namespace="default",reason="no_capacity"} 1`,
+		`xflow_runner_auth_decisions_total{auth_mode="enforcing",namespace="default",result="deny"} 1`,
+		`xflow_lease_age_seconds_count{namespace="default",result="reclaimed"} 1`,
+		`xflow_commit_outcomes_total{namespace="default",outcome="accepted"} 1`,
+		`xflow_outbox_retries_total{namespace="default"} 1`,
+		`xflow_outbox_dead_letters_total{namespace="default"} 1`,
+		`xflow_outbox_pending{namespace="default"} 2`,
+		`xflow_outbox_dead_letters{namespace="default"} 1`,
+		`xflow_lease_acquire_total{namespace="default",result="acquired"} 1`,
+		`xflow_runner_claim_reclaimed_total{namespace="default"} 2`,
+		`xflow_runner_lease_replayed_total{namespace="default"} 1`,
+		`xflow_script_execute_total{language="js",namespace="default",outcome="main",runtime="goja"} 1`,
+		`xflow_script_output_bytes_count{language="js",namespace="default",runtime="goja"} 1`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("metrics body missing %q:\n%s", want, body)
@@ -164,11 +164,11 @@ func TestObserverAdaptersIncrementExpectedMetrics(t *testing.T) {
 	}
 }
 
-func TestMetricsHooksCarryTenantLabel(t *testing.T) {
+func TestMetricsHooksCarryNamespaceLabel(t *testing.T) {
 	metrics := New()
 	hooks := NewMetricsHooks(metrics)
 
-	ctx := tenant.WithTenant(context.Background(), tenant.TenantID("tenant-a"))
+	ctx := namespace.WithNamespace(context.Background(), namespace.Namespace("namespace-a"))
 	hooks.OnNodeStart(ctx, types.ExecutionID("exec-123"), "send_email")
 	hooks.OnNodeComplete(ctx, types.ExecutionID("exec-123"), "send_email", types.NodeStatusSuccess)
 	hooks.OnExecutionComplete(ctx, types.ExecutionID("exec-123"), types.ExecutionStatusSuccess)
@@ -179,9 +179,9 @@ func TestMetricsHooksCarryTenantLabel(t *testing.T) {
 	body := rec.Body.String()
 
 	for _, want := range []string{
-		`xflow_node_started_total{node="send_email",tenant="tenant-a"} 1`,
-		`xflow_node_completed_total{node="send_email",status="success",tenant="tenant-a"} 1`,
-		`xflow_execution_completed_total{status="success",tenant="tenant-a"} 1`,
+		`xflow_node_started_total{namespace="namespace-a",node="send_email"} 1`,
+		`xflow_node_completed_total{namespace="namespace-a",node="send_email",status="success"} 1`,
+		`xflow_execution_completed_total{namespace="namespace-a",status="success"} 1`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("metrics body missing %q:\n%s", want, body)

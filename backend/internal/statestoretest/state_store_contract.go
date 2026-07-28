@@ -33,7 +33,7 @@ func RunStateStoreContract(t *testing.T, state engine.StateStore) {
 		Graph:   g,
 		Status:  types.ExecutionStatusRunning,
 		Params:  map[string]any{"claim_id": "c-1"},
-		Runtime: &types.Runtime{Vars: map[string]any{"tenant_id": "tenant-a"}},
+		Runtime: &types.Runtime{Vars: map[string]any{"namespace_id": "namespace-a"}},
 	}); err != nil {
 		t.Fatalf("CreateExecution() error = %v", err)
 	}
@@ -41,8 +41,8 @@ func RunStateStoreContract(t *testing.T, state engine.StateStore) {
 	if err != nil {
 		t.Fatalf("GetExecution() error = %v", err)
 	}
-	if snap.Runtime == nil || snap.Runtime.Vars["tenant_id"] != "tenant-a" {
-		t.Fatalf("Runtime = %#v, want tenant_id tenant-a", snap.Runtime)
+	if snap.Runtime == nil || snap.Runtime.Vars["namespace_id"] != "namespace-a" {
+		t.Fatalf("Runtime = %#v, want namespace_id namespace-a", snap.Runtime)
 	}
 
 	loaded, err := state.LoadGraph(ctx, id)

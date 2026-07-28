@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/xbcio/xflow/backend/local"
+	"github.com/xbcio/xflow/backend/providers/local"
 	"github.com/xbcio/xflow/service/control"
 )
 
@@ -72,11 +72,11 @@ func TestDeadLetterReplayDeniesMissingScope(t *testing.T) {
 }
 
 func TestDeadLetterListAllowsAndReachesBackend(t *testing.T) {
-	auth := staticPrincipalAuth{principal: Principal{Subject: "alice", TenantID: "tenantA", Scopes: []string{"deadletter.list"}}}
+	auth := staticPrincipalAuth{principal: Principal{Subject: "alice", Namespace: "namespaceA", Scopes: []string{"deadletter.list"}}}
 	audit := NewInMemoryAuditSink()
 	// The in-memory backend implements DeadLetterStore, but the exec does not
-	// exist in the caller's tenant. Task 7.3 IDOR defense: the handler runs a
-	// tenant-scoped Inspect before listing; a nonexistent/cross-tenant execID
+	// exist in the caller's namespace. Task 7.3 IDOR defense: the handler runs a
+	// namespace-scoped Inspect before listing; a nonexistent/cross-namespace execID
 	// resolves to 404 (no existence leak). The authz wrapper still allowed the
 	// request (one allow/admitted audit event), proving the handler ran.
 	_, mux := newMgmtAuthzServer(t, auth, ScopeAuthorizer{}, audit)
@@ -98,7 +98,7 @@ func TestDeadLetterListAllowsAndReachesBackend(t *testing.T) {
 }
 
 func TestDeadLetterReplayAllowsAndReachesBackend(t *testing.T) {
-	auth := staticPrincipalAuth{principal: Principal{Subject: "alice", TenantID: "tenantA", Scopes: []string{"deadletter.replay"}}}
+	auth := staticPrincipalAuth{principal: Principal{Subject: "alice", Namespace: "namespaceA", Scopes: []string{"deadletter.replay"}}}
 	audit := NewInMemoryAuditSink()
 	_, mux := newMgmtAuthzServer(t, auth, ScopeAuthorizer{}, audit)
 
@@ -108,7 +108,7 @@ func TestDeadLetterReplayAllowsAndReachesBackend(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	mux.ServeHTTP(rec, req)
 
-	// authz allowed → handler ran the tenant-scoped IDOR existence check → the
+	// authz allowed → handler ran the namespace-scoped IDOR existence check → the
 	// nonexistent exec resolves to 404 (Task 7.3). The mutation audit records
 	// admission (admitted) + reconcile (failed, because the handler returned 404).
 	if rec.Code != http.StatusNotFound {

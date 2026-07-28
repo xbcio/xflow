@@ -1,0 +1,32 @@
+{
+  "name": "@xflow/preview",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./styles.css": "./dist/styles.css"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && cp src/styles.css dist/styles.css",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@ant-design/icons": "5.6.1",
+    "@xflow/core": "workspace:*",
+    "@xyflow/react": "12.5.0",
+    "react": "19.1.0"
+  },
+  "devDependencies": {
+    "@xflow/typescript-config": "workspace:*",
+    "@types/react": "19.1.17"
+  },
+  "peerDependencies": {
+    "react": ">=18"
+  }
+}

@@ -13,9 +13,9 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
 
-	"github.com/xbcio/xflow/backend/distributed"
-	"github.com/xbcio/xflow/backend/tenant"
+	"github.com/xbcio/xflow/backend/providers/distributed"
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/observability/metrics"
 	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/store"
@@ -120,15 +120,15 @@ func newMgmtIntegrationModule(t *testing.T, mr *miniredis.Miniredis, appender *f
 	return m, mm
 }
 
-func seedDeadLetterForMgmt(t *testing.T, mr *miniredis.Miniredis, tenantName, execID, entryID string) {
+func seedDeadLetterForMgmt(t *testing.T, mr *miniredis.Miniredis, namespaceName, execID, entryID string) {
 	t.Helper()
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = rdb.Close() })
 	ctx := context.Background()
-	statusKey := "xflow:t" + tenantName + ":exec:{" + execID + "}:status"
-	deadKey := "xflow:t" + tenantName + ":exec:{" + execID + "}:outbox:dead"
-	deadBodyKey := "xflow:t" + tenantName + ":exec:{" + execID + "}:outbox:dead:body"
-	deadMetaKey := "xflow:t" + tenantName + ":exec:{" + execID + "}:outbox:dead:meta:" + entryID
+	statusKey := "xflow:ns:" + namespaceName + ":exec:{" + execID + "}:status"
+	deadKey := "xflow:ns:" + namespaceName + ":exec:{" + execID + "}:outbox:dead"
+	deadBodyKey := "xflow:ns:" + namespaceName + ":exec:{" + execID + "}:outbox:dead:body"
+	deadMetaKey := "xflow:ns:" + namespaceName + ":exec:{" + execID + "}:outbox:dead:meta:" + entryID
 	if err := rdb.Set(ctx, statusKey, "running", time.Minute).Err(); err != nil {
 		t.Fatalf("set status: %v", err)
 	}
@@ -193,9 +193,9 @@ func TestDeadLetterReplayUnifiedMetricAndProjection(t *testing.T) {
 	entryID := "execute/exec-unified/review/1"
 	seedDeadLetterForMgmt(t, mr, "default", execID, entryID)
 
-	ctx := tenant.WithTenant(context.Background(), tenant.DefaultTenant)
+	ctx := namespace.WithNamespace(context.Background(), namespace.Default)
 	principal := control.DeadLetterReplayPrincipal{
-		Subject: "alice", TenantID: "default", Scopes: []string{control.ScopeDeadLetterReplay},
+		Subject: "alice", Namespace: "default", Scopes: []string{control.ScopeDeadLetterReplay},
 	}
 	res, derr := mgr.Replay(ctx, principal, engine.ReplayDeadLetterRequest{
 		ExecutionID: types.ExecutionID(execID), EntryID: entryID, RequestID: "req-unified", Reason: "root cause fixed",
@@ -312,7 +312,7 @@ func TestDeadLetterReplayProjectionFailureThenReconcile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("distributed.New b1: %v", err)
 	}
-	
+
 	cp1, err := control.NewControlPlane(control.Config{Backend: b1})
 	if err != nil {
 		t.Fatalf("NewControlPlane cp1: %v", err)
@@ -329,9 +329,9 @@ func TestDeadLetterReplayProjectionFailureThenReconcile(t *testing.T) {
 	entryID := "execute/exec-inject/review/1"
 	seedDeadLetterForMgmt(t, mr, "default", execID, entryID)
 
-	ctx := tenant.WithTenant(context.Background(), tenant.DefaultTenant)
+	ctx := namespace.WithNamespace(context.Background(), namespace.Default)
 	principal := control.DeadLetterReplayPrincipal{
-		Subject: "alice", TenantID: "default", Scopes: []string{control.ScopeDeadLetterReplay},
+		Subject: "alice", Namespace: "default", Scopes: []string{control.ScopeDeadLetterReplay},
 	}
 	res, derr := mgr1.Replay(ctx, principal, engine.ReplayDeadLetterRequest{
 		ExecutionID: types.ExecutionID(execID), EntryID: entryID, RequestID: "req-inject", Reason: "fixed",
@@ -352,7 +352,7 @@ func TestDeadLetterReplayProjectionFailureThenReconcile(t *testing.T) {
 	// Verify the Redis receipt survives (authoritative).
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = rdb.Close() })
-	receiptKey := "xflow:tdefault:exec:{" + execID + "}:replay:receipt:req-inject"
+	receiptKey := "xflow:ns:default:exec:{" + execID + "}:replay:receipt:req-inject"
 	exists, err := rdb.Exists(ctx, receiptKey).Result()
 	if err != nil {
 		t.Fatalf("exists receipt: %v", err)
@@ -368,7 +368,7 @@ func TestDeadLetterReplayProjectionFailureThenReconcile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("distributed.New b2: %v", err)
 	}
-	
+
 	reader, ok := b2.State().(engine.ReplayReceiptReader)
 	if !ok {
 		t.Fatalf("StateStore %T does not implement ReplayReceiptReader", b2.State())

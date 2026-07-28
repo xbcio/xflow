@@ -15,9 +15,9 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/spf13/cobra"
 
-	"github.com/xbcio/xflow/backend/distributed"
-	"github.com/xbcio/xflow/backend/tenant"
+	"github.com/xbcio/xflow/backend/providers/distributed"
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/types"
 )
@@ -28,7 +28,7 @@ import (
 type deadLetterOptions struct {
 	// API path (default). server is the management API base URL; token is the
 	// bearer credential. The token is sent only in the Authorization header —
-	// never logged — and cross-tenant executions surface as 404 (the API's
+	// never logged — and cross-namespace executions surface as 404 (the API's
 	// IDOR defense).
 	server string
 	token  string
@@ -61,7 +61,7 @@ By default this command calls the protected management HTTP API
 (/v1/management/dead-letters/*) so authorization, metrics, and the durable
 SQL receipt projection are owned by the server. Configure --server and
 --token (or XFLOW_API_ADDR / XFLOW_API_TOKEN). The token is sent only in
-the Authorization header and is never logged; a cross-tenant execution
+the Authorization header and is never logged; a cross-namespace execution
 surfaces as 404 (the API's IDOR defense).
 
 Replay moves an entry atomically back to the ready set; the control plane's
@@ -110,7 +110,7 @@ func envOr(key, fallback string) string {
 // outcome metric + audit projection server-side (API path) or via the
 // manager (break-glass path).
 type deadLetterClient interface {
-	List(ctx context.Context, execID, tenantName string, page engine.DeadLetterPage) (engine.DeadLetterList, error)
+	List(ctx context.Context, execID, namespaceName string, page engine.DeadLetterPage) (engine.DeadLetterList, error)
 	Replay(ctx context.Context, principal control.DeadLetterReplayPrincipal, req engine.ReplayDeadLetterRequest) (engine.ReplayDeadLetterResult, error)
 }
 
@@ -135,7 +135,7 @@ func newDeadLetterListCommand(opts *deadLetterOptions) *cobra.Command {
 	var executionID string
 	var limit int
 	var cursor string
-	var tenantFlag string
+	var namespaceFlag string
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List dead-lettered outbox entries for an execution (read-only, paginated)",
@@ -144,8 +144,8 @@ func newDeadLetterListCommand(opts *deadLetterOptions) *cobra.Command {
 			if executionID == "" {
 				return errors.New("--execution is required")
 			}
-			if err := tenant.Validate(tenant.TenantID(tenantFlag)); err != nil {
-				return fmt.Errorf("invalid --tenant: %w", err)
+			if err := namespace.Validate(namespace.Namespace(namespaceFlag)); err != nil {
+				return fmt.Errorf("invalid --namespace: %w", err)
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
@@ -157,7 +157,7 @@ func newDeadLetterListCommand(opts *deadLetterOptions) *cobra.Command {
 				defer closeFn()
 			}
 			page := engine.DeadLetterPage{Limit: limit, Cursor: cursor}
-			list, err := client.List(ctx, executionID, tenantFlag, page)
+			list, err := client.List(ctx, executionID, namespaceFlag, page)
 			if err != nil {
 				return err
 			}
@@ -167,7 +167,9 @@ func newDeadLetterListCommand(opts *deadLetterOptions) *cobra.Command {
 				}
 			}
 			if list.NextCursor != "" {
-				fmt.Fprintf(opts.out, `{"next_cursor":%q}`+"\n", list.NextCursor)
+				if _, err := fmt.Fprintf(opts.out, `{"next_cursor":%q}`+"\n", list.NextCursor); err != nil {
+					return err
+				}
 			}
 			return nil
 		},
@@ -175,13 +177,13 @@ func newDeadLetterListCommand(opts *deadLetterOptions) *cobra.Command {
 	cmd.Flags().StringVar(&executionID, "execution", "", "Execution ID (required)")
 	cmd.Flags().IntVar(&limit, "limit", 100, "Maximum entries to return per page (bounded)")
 	cmd.Flags().StringVar(&cursor, "cursor", "", "Opaque cursor from a prior page's next_cursor")
-	cmd.Flags().StringVar(&tenantFlag, "tenant", envOr("XFLOW_TENANT", string(tenant.DefaultTenant)), "Tenant namespace (env: XFLOW_TENANT)")
+	cmd.Flags().StringVar(&namespaceFlag, "namespace", envOr("XFLOW_TENANT", string(namespace.Default)), "Namespace namespace (env: XFLOW_TENANT)")
 	return cmd
 }
 
 func newDeadLetterReplayCommand(opts *deadLetterOptions) *cobra.Command {
 	var executionID, entryID, reason, requestID string
-	var tenantFlag string
+	var namespaceFlag string
 	cmd := &cobra.Command{
 		Use:   "replay",
 		Short: "Replay a dead-lettered entry back to the ready set",
@@ -207,8 +209,8 @@ switches to the Redis-direct maintenance path.`,
 			if reason == "" {
 				return errors.New("--reason is required (record why this entry is being replayed)")
 			}
-			if err := tenant.Validate(tenant.TenantID(tenantFlag)); err != nil {
-				return fmt.Errorf("invalid --tenant: %w", err)
+			if err := namespace.Validate(namespace.Namespace(namespaceFlag)); err != nil {
+				return fmt.Errorf("invalid --namespace: %w", err)
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
@@ -219,7 +221,7 @@ switches to the Redis-direct maintenance path.`,
 			if closeFn != nil {
 				defer closeFn()
 			}
-			principal := newDeadLetterPrincipal(opts, tenantFlag)
+			principal := newDeadLetterPrincipal(opts, namespaceFlag)
 			res, err := client.Replay(ctx, principal, engine.ReplayDeadLetterRequest{
 				ExecutionID: types.ExecutionID(executionID),
 				EntryID:     entryID,
@@ -236,7 +238,7 @@ switches to the Redis-direct maintenance path.`,
 	cmd.Flags().StringVar(&entryID, "entry", "", "Dead-letter entry ID (required)")
 	cmd.Flags().StringVar(&reason, "reason", "", "Reason for replay (required, length-bounded)")
 	cmd.Flags().StringVar(&requestID, "request-id", "", "Idempotency key; retry with the same value to recover a lost response")
-	cmd.Flags().StringVar(&tenantFlag, "tenant", envOr("XFLOW_TENANT", string(tenant.DefaultTenant)), "Tenant namespace (env: XFLOW_TENANT)")
+	cmd.Flags().StringVar(&namespaceFlag, "namespace", envOr("XFLOW_TENANT", string(namespace.Default)), "Namespace namespace (env: XFLOW_TENANT)")
 	return cmd
 }
 
@@ -245,19 +247,19 @@ switches to the Redis-direct maintenance path.`,
 // token and injects the real principal); the break-glass path uses the
 // "cli:breakglass:<user>" subject so audit can distinguish break-glass use
 // from the normal cli path.
-func newDeadLetterPrincipal(opts *deadLetterOptions, tenantFlag string) control.DeadLetterReplayPrincipal {
+func newDeadLetterPrincipal(opts *deadLetterOptions, namespaceFlag string) control.DeadLetterReplayPrincipal {
 	if opts.breakGlass {
 		return control.DeadLetterReplayPrincipal{
-			Subject:  "cli:breakglass:" + envOr("USER", "unknown"),
-			TenantID: tenantFlag,
-			Scopes:   []string{control.ScopeDeadLetterReplay},
+			Subject:   "cli:breakglass:" + envOr("USER", "unknown"),
+			Namespace: namespaceFlag,
+			Scopes:    []string{control.ScopeDeadLetterReplay},
 		}
 	}
 	// API path: the server injects the real principal from the bearer token.
 	return control.DeadLetterReplayPrincipal{
-		Subject:  "",
-		TenantID: tenantFlag,
-		Scopes:   []string{control.ScopeDeadLetterReplay},
+		Subject:   "",
+		Namespace: namespaceFlag,
+		Scopes:    []string{control.ScopeDeadLetterReplay},
 	}
 }
 
@@ -273,14 +275,14 @@ func replayResultJSON(res engine.ReplayDeadLetterResult) map[string]any {
 }
 
 // apiDeadLetterClient talks to the protected management HTTP API. The token
-// is sent only in the Authorization header; it is never logged. Cross-tenant
+// is sent only in the Authorization header; it is never logged. Cross-namespace
 // executions surface as 404 (the API's IDOR defense).
 type apiDeadLetterClient struct {
 	server string
 	token  string
 }
 
-func (c *apiDeadLetterClient) List(ctx context.Context, execID, tenantName string, page engine.DeadLetterPage) (engine.DeadLetterList, error) {
+func (c *apiDeadLetterClient) List(ctx context.Context, execID, namespaceName string, page engine.DeadLetterPage) (engine.DeadLetterList, error) {
 	u := fmt.Sprintf("%s/v1/management/dead-letters/%s?limit=%d", c.server, execID, page.Limit)
 	if page.Cursor != "" {
 		u += "&cursor=" + page.Cursor
@@ -290,7 +292,7 @@ func (c *apiDeadLetterClient) List(ctx context.Context, execID, tenantName strin
 		return engine.DeadLetterList{}, err
 	}
 	c.setAuth(req)
-	req.Header.Set("X-XFlow-Tenant", tenantName)
+	req.Header.Set("X-XFlow-Namespace", namespaceName)
 	var resp deadLetterListResponse
 	if err := c.do(req, &resp); err != nil {
 		return engine.DeadLetterList{}, err
@@ -358,7 +360,7 @@ func (c *apiDeadLetterClient) do(req *http.Request, out any) error {
 }
 
 // httpStatusError carries the HTTP status of a non-2xx management API
-// response. It is the CLI's signal to map replay outcomes (404 → cross-tenant
+// response. It is the CLI's signal to map replay outcomes (404 → cross-namespace
 // or missing; 403 → unauthorized; 400 → invalid request) without leaking the
 // body or the Authorization header.
 type httpStatusError struct {
@@ -369,18 +371,18 @@ type httpStatusError struct {
 func (e httpStatusError) Error() string {
 	switch e.status {
 	case http.StatusNotFound:
-		return fmt.Sprintf("execution or entry not found (status 404)")
+		return "execution or entry not found (status 404)"
 	case http.StatusForbidden:
-		return fmt.Sprintf("replay unauthorized (status 403)")
+		return "replay unauthorized (status 403)"
 	case http.StatusBadRequest:
-		return fmt.Sprintf("replay rejected: invalid request (status 400)")
+		return "replay rejected: invalid request (status 400)"
 	default:
 		return fmt.Sprintf("management API %s: status %d", e.path, e.status)
 	}
 }
 
 // redactURL returns the URL path without the query. The query may carry the
-// cursor or tenant but never the token (the token lives only in the header);
+// cursor or namespace but never the token (the token lives only in the header);
 // redacting keeps error messages stable and free of caller-supplied params.
 func redactURL(u string) string {
 	if i := strings.IndexByte(u, '?'); i >= 0 {
@@ -424,13 +426,13 @@ func openBreakGlassDeadLetterClient(addr string) (deadLetterClient, func(), erro
 	return &breakGlassDeadLetterClient{mgr: mgr, closeFn: closeFn}, closeFn, nil
 }
 
-func (c *breakGlassDeadLetterClient) List(ctx context.Context, execID, tenantName string, page engine.DeadLetterPage) (engine.DeadLetterList, error) {
-	ctx = tenant.WithTenant(ctx, tenant.TenantID(tenantName))
+func (c *breakGlassDeadLetterClient) List(ctx context.Context, execID, namespaceName string, page engine.DeadLetterPage) (engine.DeadLetterList, error) {
+	ctx = namespace.WithNamespace(ctx, namespace.Namespace(namespaceName))
 	return c.mgr.List(ctx, types.ExecutionID(execID), page)
 }
 
 func (c *breakGlassDeadLetterClient) Replay(ctx context.Context, principal control.DeadLetterReplayPrincipal, req engine.ReplayDeadLetterRequest) (engine.ReplayDeadLetterResult, error) {
-	ctx = tenant.WithTenant(ctx, tenant.TenantID(principal.TenantID))
+	ctx = namespace.WithNamespace(ctx, namespace.Namespace(principal.Namespace))
 	return c.mgr.Replay(ctx, principal, req)
 }
 

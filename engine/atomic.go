@@ -157,6 +157,7 @@ func SuspendResumeOutboxEntry(lease *TaskLease, kind string, payload *types.Sign
 			ExecutionID:  lease.Task.ExecutionID,
 			NodeName:     lease.Task.NodeName,
 			NodeIdx:      lease.Task.NodeIdx,
+			UnitIdx:      lease.Task.UnitIdx,
 			Type:         TaskTypeNodeResume,
 			Payload:      cloneSignalPayload(payload),
 			ActivationID: lease.Task.ActivationID,
@@ -378,6 +379,7 @@ func (e *Engine) handleSystemTask(ctx context.Context, task *Task, flush bool) (
 			ExecutionID:  task.ExecutionID,
 			NodeName:     task.NodeName,
 			NodeIdx:      task.NodeIdx,
+			UnitIdx:      task.UnitIdx,
 			Type:         TaskTypeNodeAdvance,
 			ActivationID: task.ActivationID,
 			AutoDepth:    task.AutoDepth,
@@ -404,6 +406,10 @@ func (e *Engine) handleSystemTask(ctx context.Context, task *Task, flush bool) (
 			Status:       types.NodeStatusSkipped,
 		}, result, flush)
 	case TaskTypeGroupExec:
+		if e.groupExecutor == nil {
+			// No local executor — let the Dispatcher route this to a remote runner.
+			return false, nil
+		}
 		return true, e.executeGroup(ctx, task, flush)
 	default:
 		return false, nil

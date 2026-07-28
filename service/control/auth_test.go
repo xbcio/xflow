@@ -71,6 +71,39 @@ func TestFilePolicyStoreEnforcesIDPrefix(t *testing.T) {
 	}
 }
 
+// TestFilePolicyStoreTriesLaterEntryAfterIDPrefixMismatch pins the L fix: when
+// a token matches an entry whose id_prefix rejects the runner, the store must
+// keep scanning subsequent entries (a later entry sharing the token may
+// legitimately allow this runner) instead of denying immediately on the first
+// prefix mismatch.
+func TestFilePolicyStoreTriesLaterEntryAfterIDPrefixMismatch(t *testing.T) {
+	store, err := NewFilePolicyStoreFromConfig(PolicyConfig{
+		Version: 1,
+		Runners: []PolicyEntry{
+			// First entry matches the token but restricts to "payment-".
+			{IDPrefix: "payment-", Token: "shared", AllowedNodeTypes: []string{"xflow.http"}},
+			// Second entry shares the token and allows "order-" runners.
+			{IDPrefix: "order-", Token: "shared", AllowedNodeTypes: []string{"xflow.function"}},
+		},
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An order- runner must be authorized by the second entry, not denied on the
+	// first entry's prefix.
+	policy, err := store.AuthenticateRegister("order-1", "shared", TransportInfo{})
+	if err != nil {
+		t.Fatalf("AuthenticateRegister(order-1) err = %v, want allow via later entry", err)
+	}
+	if policy.IDPrefix != "order-" || !policy.Allows("xflow.function") {
+		t.Fatalf("resolved policy = %+v, want the order- entry's policy", policy)
+	}
+	// A runner matching no entry's prefix still ends in an id-prefix denial.
+	if _, err := store.AuthenticateRegister("evil-1", "shared", TransportInfo{}); !errors.Is(err, ErrAuthIDPrefixDenied) {
+		t.Fatalf("AuthenticateRegister(evil-1) err = %v, want ErrAuthIDPrefixDenied", err)
+	}
+}
+
 func TestFilePolicyStoreRequiresBothTokenAndMTLSWhenConfigured(t *testing.T) {
 	store, err := NewFilePolicyStoreFromConfig(PolicyConfig{
 		Version: 1,

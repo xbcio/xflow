@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xbcio/xflow/backend/tenant"
+	"github.com/xbcio/xflow/namespace"
 )
 
 func TestLoadRunnerConfigFromYAML(t *testing.T) {
@@ -558,7 +558,9 @@ credentials:
 func TestLoadRunnerConfigFromYAML_CredentialsMissingEnvFails(t *testing.T) {
 	// Ensure the var is genuinely unset so the missing reference is detected.
 	t.Setenv("XFLOW_DB_PASSWORD", "")
-	os.Unsetenv("XFLOW_DB_PASSWORD")
+	if err := os.Unsetenv("XFLOW_DB_PASSWORD"); err != nil {
+		t.Fatalf("Unsetenv(XFLOW_DB_PASSWORD): %v", err)
+	}
 
 	data := []byte(`
 credentials:
@@ -739,11 +741,11 @@ func TestRunnerServiceConfig_ConstructsPoolAndResolverWhenConfigured(t *testing.
 	if svcCfg.CredentialResolver == nil {
 		t.Fatal("CredentialResolver = nil, want a resolver closure")
 	}
-	got := svcCfg.CredentialResolver(tenant.DefaultTenant, "db")
+	got := svcCfg.CredentialResolver(namespace.Default, "db")
 	if got["dsn"] != "user:s3cret@tcp(db:3306)/xflow" {
 		t.Fatalf("resolver returned dsn = %v, want env-expanded dsn", got["dsn"])
 	}
-	if svcCfg.CredentialResolver(tenant.DefaultTenant, "missing") != nil {
+	if svcCfg.CredentialResolver(namespace.Default, "missing") != nil {
 		t.Fatal("resolver returned non-nil for unknown credential name")
 	}
 	t.Cleanup(func() {
@@ -768,15 +770,15 @@ func TestRunnerServiceConfig_NoPoolWhenNotConfigured(t *testing.T) {
 	}
 }
 
-func TestLoadRunnerConfigTenants(t *testing.T) {
+func TestLoadRunnerConfigNamespaces(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "runner.yaml")
 	data := []byte(`
 runner:
-  id: tenant-runner
-  tenants:
-    - tenant-a
-    - tenant-b
-    - tenant-a
+  id: namespace-runner
+  namespaces:
+    - namespace-a
+    - namespace-b
+    - namespace-a
 server:
   url: http://server:8080
 `)
@@ -787,31 +789,31 @@ server:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cfg.tenants) != 2 || cfg.tenants[0] != "tenant-a" || cfg.tenants[1] != "tenant-b" {
-		t.Fatalf("tenants = %v, want [tenant-a tenant-b]", cfg.tenants)
+	if len(cfg.namespaces) != 2 || cfg.namespaces[0] != "namespace-a" || cfg.namespaces[1] != "namespace-b" {
+		t.Fatalf("namespaces = %v, want [namespace-a namespace-b]", cfg.namespaces)
 	}
 }
 
-func TestApplyEnvOverridesTenants(t *testing.T) {
-	cfg := runnerConfig{tenantRaw: []string{"tenant-a"}}
+func TestApplyEnvOverridesNamespaces(t *testing.T) {
+	cfg := runnerConfig{namespaceRaw: []string{"namespace-a"}}
 	got := applyEnvOverrides(cfg, func(key string) string {
 		if key == "XFLOW_RUNNER_TENANTS" {
-			return "tenant-b, tenant-c"
+			return "namespace-b, namespace-c"
 		}
 		return ""
 	})
-	if len(got.tenants) != 2 || got.tenants[0] != "tenant-b" || got.tenants[1] != "tenant-c" {
-		t.Fatalf("tenants = %v, want [tenant-b tenant-c]", got.tenants)
+	if len(got.namespaces) != 2 || got.namespaces[0] != "namespace-b" || got.namespaces[1] != "namespace-c" {
+		t.Fatalf("namespaces = %v, want [namespace-b namespace-c]", got.namespaces)
 	}
 }
 
-func TestResolveRunnerConfigTenantCLIOverridesFileAndEnv(t *testing.T) {
+func TestResolveRunnerConfigNamespaceCLIOverridesFileAndEnv(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "runner.yaml")
 	data := []byte(`
 runner:
   id: file-runner
-  tenants:
-    - tenant-file
+  namespaces:
+    - namespace-file
 server:
   url: http://server:8080
 `)
@@ -819,44 +821,44 @@ server:
 		t.Fatal(err)
 	}
 
-	t.Setenv("XFLOW_RUNNER_TENANTS", "tenant-env")
+	t.Setenv("XFLOW_RUNNER_TENANTS", "namespace-env")
 
 	base := defaultRunnerConfig()
 	base.configPath = path
-	base.tenantRaw = []string{"tenant-cli"}
-	base.changed = map[string]bool{"tenant": true}
+	base.namespaceRaw = []string{"namespace-cli"}
+	base.changed = map[string]bool{"namespace": true}
 
 	got, err := resolveRunnerConfig(base)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got.tenants) != 1 || got.tenants[0] != "tenant-cli" {
-		t.Fatalf("tenants = %v, want [tenant-cli]", got.tenants)
+	if len(got.namespaces) != 1 || got.namespaces[0] != "namespace-cli" {
+		t.Fatalf("namespaces = %v, want [namespace-cli]", got.namespaces)
 	}
 }
 
-func TestResolveRunnerConfigRejectsInvalidTenant(t *testing.T) {
+func TestResolveRunnerConfigRejectsInvalidNamespace(t *testing.T) {
 	base := defaultRunnerConfig()
-	base.tenantRaw = []string{"bad:tenant"}
-	base.changed = map[string]bool{"tenant": true}
+	base.namespaceRaw = []string{"bad:namespace"}
+	base.changed = map[string]bool{"namespace": true}
 
 	_, err := resolveRunnerConfig(base)
 	if err == nil {
-		t.Fatal("expected error for invalid tenant")
+		t.Fatal("expected error for invalid namespace")
 	}
-	if !strings.Contains(err.Error(), "invalid tenant") {
-		t.Fatalf("error = %v, want invalid tenant", err)
+	if !strings.Contains(err.Error(), "invalid namespace") {
+		t.Fatalf("error = %v, want invalid namespace", err)
 	}
 }
 
-func TestRunnerServiceConfigPassesTenants(t *testing.T) {
+func TestRunnerServiceConfigPassesNamespaces(t *testing.T) {
 	cfg := defaultRunnerConfig()
-	cfg.tenants = []tenant.TenantID{"tenant-a", "tenant-b"}
+	cfg.namespaces = []namespace.Namespace{"namespace-a", "namespace-b"}
 	svcCfg, err := runnerServiceConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(svcCfg.Tenants) != 2 || svcCfg.Tenants[0] != "tenant-a" || svcCfg.Tenants[1] != "tenant-b" {
-		t.Fatalf("Tenants = %v, want [tenant-a tenant-b]", svcCfg.Tenants)
+	if len(svcCfg.Namespaces) != 2 || svcCfg.Namespaces[0] != "namespace-a" || svcCfg.Namespaces[1] != "namespace-b" {
+		t.Fatalf("Namespaces = %v, want [namespace-a namespace-b]", svcCfg.Namespaces)
 	}
 }

@@ -4,16 +4,131 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 
 	"github.com/xbcio/xflow/types"
 )
 
-// compilerVersion identifies the graph compiler format. Bumped to v2 when the
-// two-layer unit IR (groups, units, unit edges) was introduced into the compiled
-// snapshot — NodeMeta.GroupIdx and the unit-level topology now enter the hash.
-const compilerVersion = "v2"
+// compilerVersion identifies the graph compiler format. Bumped to v3 when
+// group package projection (PackageHash on GroupMeta) was introduced — the
+// deterministic package hash now enters the graph hash via GroupMeta.
+const compilerVersion = "v3"
+
+// wireNodeMeta is the on-wire representation of one NodeMeta entry. GroupIdx
+// is carried as *int so decode can distinguish "field absent" (legacy,
+// pre-group snapshot) from "field present with value -1" (modern, explicitly
+// ungrouped) — a plain int zero value cannot make that distinction, and 0 is
+// itself a legitimate group index. GroupIdxAlt accepts the historical
+// Go-default field name "GroupIdx" (no json tag) that earlier snapshots
+// (including ones already persisted by this repository before this wire
+// format existed) wrote instead of the canonical snake_case "group_idx" —
+// decode must accept either key and fail closed if both are present with
+// conflicting values, never silently prefer one.
+type wireNodeMeta struct {
+	Name           string                `json:"Name"`
+	Type           string                `json:"Type"`
+	Kind           types.NodeKind        `json:"Kind"`
+	Version        int                   `json:"Version"`
+	OnError        string                `json:"OnError"`
+	RunnerSelector *types.RunnerSelector `json:"RunnerSelector"`
+	MergeMode      string                `json:"MergeMode"`
+	Parameters     map[string]any        `json:"Parameters"`
+	PortOuts       []string              `json:"PortOuts"`
+	Retry          *types.RetrySettings  `json:"Retry"`
+	GroupIdx       *int                  `json:"group_idx,omitempty"`
+	GroupIdxAlt    *int                  `json:"GroupIdx,omitempty"`
+}
+
+func toWireNodeMeta(n NodeMeta) wireNodeMeta {
+	idx := n.GroupIdx
+	return wireNodeMeta{
+		Name:           n.Name,
+		Type:           n.Type,
+		Kind:           n.Kind,
+		Version:        n.Version,
+		OnError:        n.OnError,
+		RunnerSelector: n.RunnerSelector,
+		MergeMode:      n.MergeMode,
+		Parameters:     n.Parameters,
+		PortOuts:       n.PortOuts,
+		Retry:          n.Retry,
+		GroupIdx:       &idx,
+	}
+}
+
+// nodeGroupIdxPresence is the outcome of inspecting one decoded wireNodeMeta
+// for group_idx / GroupIdx presence.
+type nodeGroupIdxPresence struct {
+	present bool
+	value   int
+}
+
+// resolveGroupIdxPresence reconciles the canonical "group_idx" key and the
+// legacy Go-default "GroupIdx" key on one wire node. Both present with
+// different values is a corrupt/untrusted snapshot and fails closed; either
+// one present alone is accepted; neither present means legacy-absent.
+func resolveGroupIdxPresence(w wireNodeMeta) (nodeGroupIdxPresence, error) {
+	switch {
+	case w.GroupIdx != nil && w.GroupIdxAlt != nil:
+		if *w.GroupIdx != *w.GroupIdxAlt {
+			return nodeGroupIdxPresence{}, fmt.Errorf("node %q: conflicting group_idx (%d) and GroupIdx (%d) wire keys", w.Name, *w.GroupIdx, *w.GroupIdxAlt)
+		}
+		return nodeGroupIdxPresence{present: true, value: *w.GroupIdx}, nil
+	case w.GroupIdx != nil:
+		return nodeGroupIdxPresence{present: true, value: *w.GroupIdx}, nil
+	case w.GroupIdxAlt != nil:
+		return nodeGroupIdxPresence{present: true, value: *w.GroupIdxAlt}, nil
+	default:
+		return nodeGroupIdxPresence{present: false}, nil
+	}
+}
+
+// decodeWireNodes decodes the wire node array and classifies the snapshot as
+// modern (every node carries an explicit group_idx/GroupIdx, whether or not
+// any node is actually grouped) or legacy (no node carries the field at all —
+// a pre-group snapshot compiled before NodeMeta.GroupIdx existed). A mix of
+// present and absent across nodes in the same snapshot is untrusted/corrupt
+// and fails closed rather than guessing.
+func decodeWireNodes(raw []wireNodeMeta) ([]NodeMeta, bool, error) {
+	nodes := make([]NodeMeta, len(raw))
+	presentCount := 0
+	for i, w := range raw {
+		p, err := resolveGroupIdxPresence(w)
+		if err != nil {
+			return nil, false, err
+		}
+		if p.present {
+			presentCount++
+		}
+		nodes[i] = NodeMeta{
+			Name:           w.Name,
+			Type:           w.Type,
+			Kind:           w.Kind,
+			Version:        w.Version,
+			OnError:        w.OnError,
+			RunnerSelector: w.RunnerSelector,
+			MergeMode:      w.MergeMode,
+			Parameters:     w.Parameters,
+			PortOuts:       w.PortOuts,
+			Retry:          w.Retry,
+			GroupIdx:       p.value,
+		}
+		if !p.present {
+			nodes[i].GroupIdx = -1
+		}
+	}
+	if presentCount == 0 {
+		// Legacy: no node in this snapshot carries a group_idx/GroupIdx field
+		// at all. All nodes are already normalized to GroupIdx=-1 above.
+		return nodes, true, nil
+	}
+	if presentCount != len(raw) {
+		return nil, false, fmt.Errorf("graph snapshot: %d of %d nodes carry group_idx/GroupIdx; a snapshot must have it on either all nodes or none (partial presence is untrusted)", presentCount, len(raw))
+	}
+	return nodes, false, nil
+}
 
 func cloneStringAnyMap(src map[string]any) map[string]any {
 	if src == nil {
@@ -272,12 +387,32 @@ type graphHashPayload struct {
 // It mirrors the private Graph fields so that encoding/json can round-trip the
 // compiled graph through Redis (distributed backend) or any other JSON store
 // without leaking the private field names into the Graph API.
+//
+// Groups carries the co-location group definitions (compiler v2). The
+// derived two-layer unit IR (units/unitInDegree/unitOutEdges/unitInEdges/
+// nodeUnit) is intentionally NOT serialized: UnmarshalJSON re-derives it via
+// buildUnits from Nodes[i].GroupIdx + Groups, the same deterministic
+// construction Compile uses. This keeps the wire format smaller and — more
+// importantly — guarantees the round-tripped Graph's unit topology (in
+// particular UnitCount/UnitInDegreeAt, which size the durable Redis
+// remaining/in-degree counters) always matches what Compile would have
+// produced, instead of silently degrading to zero units after a JSON
+// round-trip (see .claude/plans F9).
+//
+// Nodes uses wireNodeMeta (not NodeMeta directly) so decode can distinguish a
+// true legacy snapshot (no node carries group_idx/GroupIdx at all — compiled
+// before groups existed) from a modern grouped-or-ungrouped snapshot (every
+// node explicitly carries the field, possibly -1). See T1 in
+// .claude/plans/2026-07-27-node-group-milestone-b.md: a legacy snapshot must
+// degrade to a 1:1 unit mapping, while a snapshot that already has grouped
+// nodes (some GroupIdx >= 0) but somehow lost its Groups/units data must fail
+// closed instead of silently rebuilding an incorrect ungrouped topology.
 type graphSerializedForm struct {
 	GraphHash       string         `json:"graph_hash"`
 	Name            string         `json:"name"`
 	WorkflowVersion string         `json:"workflow_version"`
 	CompilerVersion string         `json:"compiler_version"`
-	Nodes           []NodeMeta     `json:"nodes"`
+	Nodes           []wireNodeMeta `json:"nodes"`
 	Index           map[string]int `json:"index"`
 	EntryIndexes    map[string]int `json:"entry_indexes"`
 	OutEdges        [][]Edge       `json:"out_edges"`
@@ -288,6 +423,7 @@ type graphSerializedForm struct {
 	AllowCycles     bool           `json:"allow_cycles"`
 	StartIdx        int            `json:"start_idx"`
 	MaxAutoDepth    int            `json:"max_auto_depth"`
+	Groups          []GroupMeta    `json:"groups,omitempty"`
 }
 
 // MarshalJSON implements json.Marshaler so that encoding/json can serialize a
@@ -297,12 +433,16 @@ func (g *Graph) MarshalJSON() ([]byte, error) {
 	if g == nil {
 		return []byte("null"), nil
 	}
+	wireNodes := make([]wireNodeMeta, len(g.nodes))
+	for i, n := range g.nodes {
+		wireNodes[i] = toWireNodeMeta(n)
+	}
 	return json.Marshal(graphSerializedForm{
 		GraphHash:       g.graphHash,
 		Name:            g.name,
 		WorkflowVersion: g.workflowVersion,
 		CompilerVersion: g.compilerVersion,
-		Nodes:           g.nodes,
+		Nodes:           wireNodes,
 		Index:           g.index,
 		EntryIndexes:    g.entryIndexes,
 		OutEdges:        g.outEdges,
@@ -313,22 +453,61 @@ func (g *Graph) MarshalJSON() ([]byte, error) {
 		AllowCycles:     g.allowCycles,
 		StartIdx:        g.startIdx,
 		MaxAutoDepth:    g.maxAutoDepth,
+		Groups:          g.groups,
 	})
 }
 
+// ErrGroupedSnapshotMissingUnitIR is returned by UnmarshalJSON when a snapshot
+// has nodes with an explicit GroupIdx >= 0 (grouped) but empty Groups — the
+// snapshot claims to be grouped but carries no group definitions to rebuild
+// the unit IR from. This must never be silently treated as ungrouped: doing
+// so would zero out GroupIdx and let the durable remaining/in-degree counters
+// be seeded from the wrong (ungrouped) unit count.
+var ErrGroupedSnapshotMissingUnitIR = errors.New("graph snapshot: grouped nodes present but no group definitions to rebuild unit IR from")
+
 // UnmarshalJSON implements json.Unmarshaler, the inverse of MarshalJSON.
 // It populates the Graph's unexported fields from the stable wire format so
-// that a deserialized graph is fully functional without recompilation.
+// that a deserialized graph is fully functional without recompilation, then
+// re-derives the two-layer unit IR (buildUnits) exactly as Compile does. A
+// grouped snapshot whose unit topology cannot be rebuilt (e.g. a group
+// boundary cycle, or grouped nodes with no matching Groups entries) fails
+// closed instead of silently producing a Graph with a zeroed/mismatched
+// UnitCount. A true legacy snapshot (no node carries group_idx/GroupIdx at
+// all) degrades to a 1:1 unit mapping with every node's GroupIdx normalized
+// to -1.
 func (g *Graph) UnmarshalJSON(data []byte) error {
 	var sf graphSerializedForm
 	if err := json.Unmarshal(data, &sf); err != nil {
 		return err
 	}
+	nodes, legacy, err := decodeWireNodes(sf.Nodes)
+	if err != nil {
+		return fmt.Errorf("decode graph snapshot nodes: %w", err)
+	}
+	if legacy && len(sf.Groups) > 0 {
+		// A snapshot with no per-node group_idx field at all but non-empty
+		// Groups is internally inconsistent (Groups references node indexes
+		// that decodeWireNodes just normalized to ungrouped) — untrusted,
+		// fail closed rather than guess which side is authoritative.
+		return fmt.Errorf("graph snapshot: legacy nodes (no group_idx field) but non-empty groups: %w", ErrGroupedSnapshotMissingUnitIR)
+	}
+	if !legacy {
+		hasGrouped := false
+		for _, n := range nodes {
+			if n.GroupIdx >= 0 {
+				hasGrouped = true
+				break
+			}
+		}
+		if hasGrouped && len(sf.Groups) == 0 {
+			return ErrGroupedSnapshotMissingUnitIR
+		}
+	}
 	g.graphHash = sf.GraphHash
 	g.name = sf.Name
 	g.workflowVersion = sf.WorkflowVersion
 	g.compilerVersion = sf.CompilerVersion
-	g.nodes = sf.Nodes
+	g.nodes = nodes
 	g.index = sf.Index
 	g.entryIndexes = sf.EntryIndexes
 	g.outEdges = sf.OutEdges
@@ -339,5 +518,9 @@ func (g *Graph) UnmarshalJSON(data []byte) error {
 	g.allowCycles = sf.AllowCycles
 	g.startIdx = sf.StartIdx
 	g.maxAutoDepth = sf.MaxAutoDepth
+	g.groups = sf.Groups
+	if err := buildUnits(g); err != nil {
+		return fmt.Errorf("rebuild units after graph deserialization: %w", err)
+	}
 	return nil
 }

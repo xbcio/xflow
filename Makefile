@@ -1,5 +1,5 @@
 .PHONY: all build test test-concurrency lint fmt tidy clean run-server run-runner install-hooks proto proto-tools \
-        env-up env-down env-reset env-logs env-migrate test-integration test-integration-required test-g0-evidence-required test-perf perf-sample test-soak \
+        env-up env-down env-reset env-logs env-migrate env-ready test-integration test-integration-required test-g0-evidence-required test-perf perf-sample test-soak \
         web-install web-lint web-typecheck web-test web-check-boundaries web-build web-e2e web-ci web-all validate-openapi
 
 # ── Build ──────────────────────────────────────────────────────────────────────
@@ -30,7 +30,7 @@ test-examples:
 # Concurrency stress suite. Gated behind the `concurrency` build tag so the
 # default `make test` stays fast. Spec: .claude/specs/lua-concurrency-tests.md
 test-concurrency:
-	go test -tags=concurrency ./backend/local/ ./backend/distributed/... -race -count=3 -timeout 5m
+	go test -tags=concurrency ./backend/providers/local/ ./backend/providers/distributed/... -race -count=3 -timeout 5m
 
 # ── Code quality ───────────────────────────────────────────────────────────────
 
@@ -103,6 +103,9 @@ env-up:
 	@$(COMPOSE) up -d
 env-down:
 	@$(COMPOSE) down
+env-ready:
+	@echo "Waiting for Redis and MySQL healthcheck..."
+	@bash test/env/wait-ready.sh
 env-reset:
 	@$(COMPOSE) down -v
 env-logs:

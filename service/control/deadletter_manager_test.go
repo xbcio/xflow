@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -49,8 +49,8 @@ type captureOutboxObserver struct {
 	dead     []int
 }
 
-func (c *captureOutboxObserver) OnOutboxRetry(context.Context, int)                    {}
-func (c *captureOutboxObserver) OnOutboxDeadLetter(context.Context)                     {}
+func (c *captureOutboxObserver) OnOutboxRetry(context.Context, int) {}
+func (c *captureOutboxObserver) OnOutboxDeadLetter(context.Context) {}
 func (c *captureOutboxObserver) OnOutboxPending(_ context.Context, pending, deadLettered int, _ time.Duration) {
 	c.mu.Lock()
 	c.pending = append(c.pending, pending)
@@ -169,13 +169,13 @@ func TestDeadLetterManagerRejectsUnauthorized(t *testing.T) {
 	}
 }
 
-func TestDeadLetterManagerRejectsTenantMismatch(t *testing.T) {
+func TestDeadLetterManagerRejectsNamespaceMismatch(t *testing.T) {
 	store := &fakeDeadLetterStore{}
 	obs := &captureOutboxObserver{}
 	mgr := NewDeadLetterManager(store, obs, nil)
 
-	ctx := tenant.WithTenant(context.Background(), "tenant-a")
-	principal := DeadLetterReplayPrincipal{Subject: "alice", TenantID: "tenant-b", Scopes: []string{ScopeDeadLetterReplay}}
+	ctx := namespace.WithNamespace(context.Background(), "namespace-a")
+	principal := DeadLetterReplayPrincipal{Subject: "alice", Namespace: "namespace-b", Scopes: []string{ScopeDeadLetterReplay}}
 	res, _ := mgr.Replay(ctx, principal, engine.ReplayDeadLetterRequest{
 		ExecutionID: "x", EntryID: "e", Reason: "r",
 	})
@@ -183,20 +183,20 @@ func TestDeadLetterManagerRejectsTenantMismatch(t *testing.T) {
 		t.Fatalf("outcome = %q, want unauthorized", res.Outcome)
 	}
 	if store.replayed != 0 {
-		t.Fatalf("tenant-mismatched replay reached the store")
+		t.Fatalf("namespace-mismatched replay reached the store")
 	}
 	if len(obs.outcomes) != 1 || obs.outcomes[0] != engine.ReplayUnauthorized {
-		t.Fatalf("tenant mismatch metric not recorded: %v", obs.outcomes)
+		t.Fatalf("namespace mismatch metric not recorded: %v", obs.outcomes)
 	}
 }
 
-func TestDeadLetterManagerAllowsTenantMatch(t *testing.T) {
+func TestDeadLetterManagerAllowsNamespaceMatch(t *testing.T) {
 	store := &fakeDeadLetterStore{}
 	obs := &captureOutboxObserver{}
 	mgr := NewDeadLetterManager(store, obs, nil)
 
-	ctx := tenant.WithTenant(context.Background(), "tenant-a")
-	principal := DeadLetterReplayPrincipal{Subject: "alice", TenantID: "tenant-a", Scopes: []string{ScopeDeadLetterReplay}}
+	ctx := namespace.WithNamespace(context.Background(), "namespace-a")
+	principal := DeadLetterReplayPrincipal{Subject: "alice", Namespace: "namespace-a", Scopes: []string{ScopeDeadLetterReplay}}
 	res, err := mgr.Replay(ctx, principal, engine.ReplayDeadLetterRequest{
 		ExecutionID: "x", EntryID: "e", Reason: "r",
 	})
@@ -211,13 +211,13 @@ func TestDeadLetterManagerAllowsTenantMatch(t *testing.T) {
 	}
 }
 
-func TestDeadLetterManagerSkipsTenantCheckWhenPrincipalTenantEmpty(t *testing.T) {
+func TestDeadLetterManagerSkipsNamespaceCheckWhenPrincipalNamespaceEmpty(t *testing.T) {
 	store := &fakeDeadLetterStore{}
 	obs := &captureOutboxObserver{}
 	mgr := NewDeadLetterManager(store, obs, nil)
 
-	ctx := tenant.WithTenant(context.Background(), "tenant-a")
-	principal := DeadLetterReplayPrincipal{Subject: "alice", TenantID: "", Scopes: []string{ScopeDeadLetterReplay}}
+	ctx := namespace.WithNamespace(context.Background(), "namespace-a")
+	principal := DeadLetterReplayPrincipal{Subject: "alice", Namespace: "", Scopes: []string{ScopeDeadLetterReplay}}
 	res, err := mgr.Replay(ctx, principal, engine.ReplayDeadLetterRequest{
 		ExecutionID: "x", EntryID: "e", Reason: "r",
 	})

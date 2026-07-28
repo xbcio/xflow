@@ -34,6 +34,10 @@ type GroupResult struct {
 	Outcome         GroupOutcome
 	Exits           []GroupExitResult
 	Error           string
+	// Suspend is set when the group outcome is GroupOutcomeSuspended.
+	Suspend *GroupSuspendSpec `json:"suspend,omitempty"`
+	// SignalJournal is the accumulated signal journal from prior resumes.
+	SignalJournal []GroupSignal `json:"signal_journal,omitempty"`
 }
 
 // GroupLease 是整组的所有权租约，语义对齐既有 TaskLease。
@@ -101,4 +105,13 @@ type GroupStateStore interface {
 // doubles and composition.
 type GroupCommitter interface {
 	CommitGroup(ctx context.Context, req GroupCommitRequest) (GroupCommitResult, error)
+}
+
+// GroupLeaseExpirer is an optional capability for reclaiming expired group
+// leases. When a running group lease has passed its deadline, ExpireGroupLease
+// transitions it back to retry-ready and increments the attempt counter.
+// The return value indicates whether the lease was actually expired (it may
+// have already been committed or renewed).
+type GroupLeaseExpirer interface {
+	ExpireGroupLease(ctx context.Context, id types.ExecutionID, unitIdx int, token LeaseToken) (expired bool, err error)
 }

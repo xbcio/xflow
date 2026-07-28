@@ -203,11 +203,13 @@ func TestHandleSystemTask_GroupExecNilExecutor(t *testing.T) {
 		UnitIdx:     groupUnitIdx,
 		Type:        TaskTypeGroupExec,
 	}, true)
-	if !handled {
-		t.Fatal("expected handled=true even when executor is nil")
+	// With no GroupExecutor, the task is NOT handled locally — the Dispatcher
+	// must route it to a remote runner via TaskRouting → EnqueueAssignment.
+	if handled {
+		t.Fatal("expected handled=false when group executor is nil (remote dispatch)")
 	}
-	if err == nil {
-		t.Fatal("expected error when group executor is nil")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

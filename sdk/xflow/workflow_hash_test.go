@@ -10,8 +10,7 @@ import (
 func baseRuntimeDef() *types.WorkflowDef {
 	return &types.WorkflowDef{
 		ID:          "wf-1",
-		Namespace:   "default",
-		TenantID:    "tenant-a",
+		Namespace:   "namespace-a",
 		Name:        "approval",
 		Version:     "v1",
 		Description: "desc",
@@ -128,7 +127,7 @@ func TestRuntimeHashIncludesRuntimeFields(t *testing.T) {
 	}
 }
 
-func TestRuntimeHashExcludesInstanceIdentifiers(t *testing.T) {
+func TestRuntimeHashExcludesInstanceID(t *testing.T) {
 	base := baseRuntimeDef()
 	baseHash := mustRuntimeHash(t, base)
 
@@ -137,11 +136,16 @@ func TestRuntimeHashExcludesInstanceIdentifiers(t *testing.T) {
 	if got := mustRuntimeHash(t, withID); got != baseHash {
 		t.Fatalf("runtime hash changed after changing WorkflowDef.ID: %s != %s", got, baseHash)
 	}
+}
 
-	withTenant := baseRuntimeDef()
-	withTenant.TenantID = "tenant-b"
-	if got := mustRuntimeHash(t, withTenant); got != baseHash {
-		t.Fatalf("runtime hash changed after changing WorkflowDef.TenantID: %s != %s", got, baseHash)
+func TestRuntimeHashIncludesNamespace(t *testing.T) {
+	base := baseRuntimeDef()
+	baseHash := mustRuntimeHash(t, base)
+
+	withNamespace := baseRuntimeDef()
+	withNamespace.Namespace = "namespace-b"
+	if got := mustRuntimeHash(t, withNamespace); got == baseHash {
+		t.Fatalf("runtime hash did not change after changing WorkflowDef.Namespace")
 	}
 }
 

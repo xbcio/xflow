@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/xbcio/xflow/backend/distributed"
+	"github.com/xbcio/xflow/backend/providers/distributed"
 	"github.com/xbcio/xflow/store"
 )
 

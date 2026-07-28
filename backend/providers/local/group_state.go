@@ -13,6 +13,7 @@ const (
 	groupUnitPending = iota
 	groupUnitRunning
 	groupUnitDone
+	groupUnitSuspended
 )
 
 type groupUnitState struct {
@@ -25,6 +26,8 @@ type groupUnitState struct {
 }
 
 var _ engine.GroupStateStore = (*memoryState)(nil)
+var _ engine.GroupLeaseReader = (*memoryState)(nil)
+var _ engine.GroupLeaseExpirer = (*memoryState)(nil)
 
 func groupKey(id types.ExecutionID, unitIdx int) string {
 	return fmt.Sprintf("%s/%d", id, unitIdx)
@@ -43,8 +46,13 @@ func (s *memoryState) AcquireGroupLease(_ context.Context, lease *engine.GroupLe
 		return false, nil
 	}
 	st.status = groupUnitRunning
-	st.leaseID, st.leaseToken, st.attempt = lease.LeaseID, lease.LeaseToken, lease.Attempt
+	attempt := lease.Attempt
+	if st.attempt >= attempt {
+		attempt = st.attempt + 1
+	}
+	st.leaseID, st.leaseToken, st.attempt = lease.LeaseID, lease.LeaseToken, attempt
 	st.deadline = lease.IssuedAt.Add(lease.TTL)
+	lease.Attempt = attempt
 	return true, nil
 }
 
@@ -56,6 +64,39 @@ func (s *memoryState) RenewGroupLease(_ context.Context, id types.ExecutionID, u
 		return false, nil
 	}
 	st.deadline = deadline
+	return true, nil
+}
+
+func (s *memoryState) GetGroupLease(_ context.Context, id types.ExecutionID, unitIdx int) (*engine.GroupLease, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.groupUnits[groupKey(id, unitIdx)]
+	if st == nil || st.status != groupUnitRunning {
+		return nil, nil
+	}
+	return &engine.GroupLease{
+		LeaseID:      st.leaseID,
+		LeaseToken:   st.leaseToken,
+		Attempt:      st.attempt,
+		ExecutionID:  id,
+		GroupUnitIdx: unitIdx,
+		IssuedAt:     st.deadline.Add(-time.Minute),
+		TTL:          time.Minute,
+	}, nil
+}
+
+func (s *memoryState) ExpireGroupLease(_ context.Context, id types.ExecutionID, unitIdx int, token engine.LeaseToken) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.groupUnits[groupKey(id, unitIdx)]
+	if st == nil || st.status != groupUnitRunning || st.leaseToken != token {
+		return false, nil
+	}
+	st.status = groupUnitPending
+	st.leaseID = ""
+	st.leaseToken = ""
+	st.attempt++
+	st.deadline = time.Time{}
 	return true, nil
 }
 

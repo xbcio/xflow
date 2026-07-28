@@ -26,8 +26,8 @@ import (
 type ackLossProtocolClient struct {
 	inner runnersvc.ProtocolClient
 
-	once             sync.Once
-	captured         atomic.Pointer[protocol.ReportResultRequest]
+	once              sync.Once
+	captured          atomic.Pointer[protocol.ReportResultRequest]
 	sawTransportError atomic.Bool
 }
 

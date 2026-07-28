@@ -247,28 +247,32 @@ func TestEngineLegacyRetryQueueFailureDoesNotFallThrough(t *testing.T) {
 }
 
 func TestEngineTerminalHooksFollowPersistentState(t *testing.T) {
-	t.Run("forced failure does not publish execution completion when status write fails", func(t *testing.T) {
-		statusErr := errors.New("execution status write failed")
+	t.Run("forced failure fenced-commit error does not publish completion and retains graph", func(t *testing.T) {
+		// H1: a fatal cyclic node's terminal transition and the execution
+		// finalization are one fenced commit (CyclicComplete). There is no longer
+		// a separate execution-status write that can fail independently of the
+		// node write — the whole fenced commit either applies or it does not. A
+		// failed fenced commit therefore publishes NO node/execution completion
+		// and retains the graph so recovery can retry.
+		commitErr := errors.New("execution status write failed")
 		state := newStateFaults()
 		queue := newQueueFaults()
 		hooks := &completionHookRecorder{}
 		eng, lease, _ := legacyResultLease(t, state, queue, hooks, nil)
-		state.updateStatusErr = map[types.ExecutionStatus]error{
-			types.ExecutionStatusFailed: statusErr,
-		}
+		state.legacyCommitErr = commitErr
 
 		err := eng.CommitTaskFailure(context.Background(), lease, errors.New("runtime incompatible"))
-		if !errors.Is(err, statusErr) {
-			t.Fatalf("CommitTaskFailure() error = %v, want wrapped %v", err, statusErr)
+		if !errors.Is(err, commitErr) {
+			t.Fatalf("CommitTaskFailure() error = %v, want wrapped %v", err, commitErr)
 		}
-		if hooks.nodeCompletions != 1 {
-			t.Fatalf("node completion hooks = %d, want 1 after node state write", hooks.nodeCompletions)
+		if hooks.nodeCompletions != 0 {
+			t.Fatalf("node completion hooks = %d, want 0 after failed fenced commit (atomic finalization)", hooks.nodeCompletions)
 		}
 		if hooks.executionCompletions != 0 {
 			t.Fatalf("execution completion hooks = %d, want 0", hooks.executionCompletions)
 		}
 		if _, ok := eng.graphs[lease.Task.ExecutionID]; !ok {
-			t.Fatal("execution graph was evicted despite failed terminal status write")
+			t.Fatal("execution graph was evicted despite failed fenced terminal commit")
 		}
 	})
 

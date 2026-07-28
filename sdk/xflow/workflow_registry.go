@@ -50,12 +50,9 @@ func (e *Engine) AddWorkflow(ctx context.Context, wf *WorkflowBuilder) (types.Wo
 	if err != nil {
 		return "", err
 	}
-	if err := e.registerWorkflowHandlers(wf); err != nil {
-		return "", err
-	}
-	if err := e.registerDirectHandlers(wf); err != nil {
-		return "", err
-	}
+
+	// Pre-check and compile before mutating global state so failures here
+	// leave no side effects.
 	if err := preCheckHandlerVersions(def, wf); err != nil {
 		return "", err
 	}
@@ -73,6 +70,38 @@ func (e *Engine) AddWorkflow(ctx context.Context, wf *WorkflowBuilder) (types.Wo
 	if err != nil {
 		return "", err
 	}
+
+	// Serialize registration of global handlers and directHandlerNames map
+	// writes to prevent concurrent-map-read-write panics and partial
+	// pollution on failure. Both registrations return a rollback that restores
+	// the process registry to its prior state so a later failure in this call
+	// leaves no side effects behind.
+	e.mu.Lock()
+	rollbackGlobal, err := e.registerWorkflowHandlersTracked(wf)
+	if err != nil {
+		e.mu.Unlock()
+		return "", err
+	}
+	rollbackDirect, err := e.registerDirectHandlersTracked(wf)
+	if err != nil {
+		rollbackGlobal()
+		e.mu.Unlock()
+		return "", err
+	}
+	e.mu.Unlock()
+
+	// rollbackHandlers undoes both handler registrations under the lock.
+	rollbackHandlers := func() {
+		e.mu.Lock()
+		rollbackDirect()
+		rollbackGlobal()
+		e.mu.Unlock()
+	}
+
+	// created tracks whether this call persisted a brand-new record (vs.
+	// matching an existing/idempotent one), so a later reconcile failure only
+	// removes records we ourselves created.
+	created := true
 	rec, err := e.workflowRegistry.AddWorkflow(ctx, backend.WorkflowRecord{
 		Key:              workflowKey(def),
 		Namespace:        def.Namespace,
@@ -92,22 +121,26 @@ func (e *Engine) AddWorkflow(ctx context.Context, wf *WorkflowBuilder) (types.Wo
 		// the stored Definition and, if it matches, atomically upgrade the
 		// record's DefinitionHash so future registrations are idempotent.
 		if !errors.Is(err, backend.ErrWorkflowConflict) {
+			rollbackHandlers()
 			return "", err
 		}
 		existing, lookupErr := e.workflowRegistry.GetWorkflowByKey(ctx, workflowKey(def))
 		if lookupErr != nil {
 			// Preserve the original conflict error if the lookup fails —
 			// the caller's contract is "conflict", not "lookup failed".
+			rollbackHandlers()
 			return "", err
 		}
 		effective, needsUpgrade, reconcileErr := reconcileDefinitionHash(existing.DefinitionHash, existing.Definition)
 		if reconcileErr != nil {
+			rollbackHandlers()
 			return "", reconcileErr
 		}
 		if effective != hash {
 			// Real semantic conflict: the stored definition produces a
 			// different runtime hash than the new one. Surface the original
 			// ErrWorkflowConflict.
+			rollbackHandlers()
 			return "", err
 		}
 		if needsUpgrade {
@@ -120,16 +153,27 @@ func (e *Engine) AddWorkflow(ctx context.Context, wf *WorkflowBuilder) (types.Wo
 				if reloadErr == nil && reloaded.DefinitionHash == hash {
 					existing = reloaded
 				} else {
+					rollbackHandlers()
 					return "", err
 				}
 			} else {
 				existing.DefinitionHash = hash
 			}
 		}
+		// Matched an already-registered record; we did not create it.
+		created = false
 		rec = existing
 	}
 	if e.triggerRuntime != nil {
 		if err := e.triggerRuntime.ReconcileWorkflow(ctx, rec); err != nil {
+			// Undo the half-commit: close any subscriptions this reconcile may
+			// have activated, remove the record if we created it, and roll back
+			// handler registrations so AddWorkflow leaves no residue.
+			_ = e.triggerRuntime.RemoveWorkflow(ctx, rec.ID)
+			if created {
+				_ = e.workflowRegistry.RemoveWorkflow(ctx, rec.ID)
+			}
+			rollbackHandlers()
 			return "", err
 		}
 	}

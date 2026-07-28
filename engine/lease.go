@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine/graph"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/types"
 	"github.com/google/uuid"
 )
@@ -175,11 +175,30 @@ func (e *Engine) TaskRouting(ctx context.Context, t *Task) (TaskRouting, error) 
 	if _, err := e.checkTaskRouteActive(ctx, g, t); err != nil {
 		return TaskRouting{}, err
 	}
+
+	unitIdx := t.UnitIdx
+	if unitIdx >= 0 && unitIdx < g.UnitCount() && g.UnitKindAt(unitIdx) == graph.UnitGroup {
+		gm := g.GroupMetaAt(unitIdx)
+		pkg, _, err := graph.ProjectGroupPackage(g, unitIdx)
+		if err != nil {
+			return TaskRouting{}, fmt.Errorf("project group package for routing: %w", err)
+		}
+		return TaskRouting{
+			NodeType:       "xflow.group",
+			RunnerSelector: cloneRunnerSelector(gm.RunnerSelector),
+			Requirements:   RequirementsFromGraphPackage(pkg.Requirements),
+		}, nil
+	}
+
 	meta := g.NodeAt(t.NodeIdx)
 	return TaskRouting{
 		NodeType:       meta.Type,
 		NodeVersion:    meta.Version,
 		RunnerSelector: cloneRunnerSelector(meta.RunnerSelector),
+		Requirements: NormalizeRequirements([]CapabilityRequirement{{
+			NodeType:    meta.Type,
+			NodeVersion: meta.Version,
+		}}),
 	}, nil
 }
 
@@ -283,7 +302,18 @@ func (e *Engine) ReleaseTaskLease(ctx context.Context, lease *TaskLease) (bool, 
 		return false, nil
 	}
 	if err := e.queue.Enqueue(ctx, &task); err != nil {
-		return true, fmt.Errorf("re-enqueue released task %q/%q: %w", task.ExecutionID, task.NodeName, err)
+		// Enqueue failed after RevokeLease succeeded — the node is now Pending
+		// with no in-flight task AND no active lease. The lease sweeper CANNOT
+		// recover it: ListExpiredLeases only returns Running/Committing/Waiting
+		// nodes with an expired lease, so a Pending-no-lease node is invisible to
+		// it. This legacy (non-AtomicStateStore) path therefore has no automatic
+		// recovery; the error is surfaced to the caller. Atomic backends avoid the
+		// window entirely by persisting the revocation and redelivery intent in
+		// one durable-outbox transition (see RevokeLeaseWithOutbox below). The
+		// only legacy backend is the local in-memory queue, whose Enqueue fails
+		// only on shutdown or context cancellation, so this is not a steady-state
+		// data-loss path — but callers must not assume the node self-heals.
+		return true, fmt.Errorf("re-enqueue released task %q/%q (node left pending, not auto-recoverable): %w", task.ExecutionID, task.NodeName, err)
 	}
 	return true, nil
 }
@@ -298,18 +328,19 @@ func (e *Engine) ReclaimLease(ctx context.Context, lease ExpiredLease) (bool, er
 	if lease.LeaseToken == "" {
 		return false, nil
 	}
-	// Restore the tenant that owns this lease. The sweeper runs with the
-	// default tenant in its context, but ListExpiredLeases discovers leases
-	// across all tenants and stamps each ExpiredLease with its owner.
+	// Restore the namespace that owns this lease. The sweeper runs with the
+	// default namespace in its context, but ListExpiredLeases discovers leases
+	// across all namespaces and stamps each ExpiredLease with its owner.
 	// Reclaim must operate in that owner's namespace or the store keys will
 	// not match and the lease will be silently fail-closed.
-	if lease.TenantID != "" {
-		ctx = tenant.WithTenant(ctx, lease.TenantID)
+	if lease.Namespace != "" {
+		ctx = namespace.WithNamespace(ctx, lease.Namespace)
 	}
 	task := Task{
 		ExecutionID:  lease.ExecutionID,
 		NodeName:     lease.NodeName,
 		NodeIdx:      lease.NodeIdx,
+		UnitIdx:      lease.UnitIdx,
 		Type:         lease.TaskType,
 		Payload:      cloneSignalPayload(lease.Payload),
 		ActivationID: lease.ActivationID,
@@ -340,7 +371,13 @@ func (e *Engine) ReclaimLease(ctx context.Context, lease ExpiredLease) (bool, er
 		return false, nil
 	}
 	if err := e.queue.Enqueue(ctx, &task); err != nil {
-		return true, fmt.Errorf("re-enqueue reclaimed task %q/%q: %w", lease.ExecutionID, lease.NodeName, err)
+		// Enqueue failed after RevokeLease succeeded — the node is Pending with no
+		// in-flight task AND no active lease, so the sweeper cannot rediscover it
+		// (ListExpiredLeases only returns leased non-terminal nodes). This legacy
+		// (non-AtomicStateStore) path has no automatic recovery; the atomic path
+		// above avoids the window via the durable requeue outbox. Surface the
+		// error rather than implying the node self-heals.
+		return true, fmt.Errorf("re-enqueue reclaimed task %q/%q (node left pending, not auto-recoverable): %w", lease.ExecutionID, lease.NodeName, err)
 	}
 	return true, nil
 }

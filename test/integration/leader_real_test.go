@@ -8,13 +8,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xbcio/xflow/backend/distributed"
+	"github.com/xbcio/xflow/backend/providers/distributed"
 	"github.com/redis/go-redis/v9"
 )
 
 func TestRedisLeaderElectionRealRedis(t *testing.T) {
 	addr := requireRedis(t)
-	key := fmt.Sprintf("xflow:test:leader:%s:%d", t.Name(), time.Now().UnixNano())
+	key := fmt.Sprintf("xflow:ns:est:leader:%s:%d", t.Name(), time.Now().UnixNano())
 	ttl := 2 * time.Second
 
 	t.Run("single instance becomes leader", func(t *testing.T) {

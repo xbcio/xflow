@@ -82,7 +82,6 @@ func requireRedis(t *testing.T) string {
 	return addr
 }
 
-
 func requireMySQL(t *testing.T) string {
 	t.Helper()
 	dsn := mysqlDSN(t)

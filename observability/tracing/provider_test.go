@@ -7,8 +7,6 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/baggage"
 	"go.opentelemetry.io/otel/propagation"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 // TestNewTracerProviderDefaults verifies B1 contract: default sampler is
@@ -31,10 +29,7 @@ func TestNewTracerProviderDefaults(t *testing.T) {
 	// bare background context has no span so injection yields nothing. The
 	// point is that the propagator type is TraceContext, not the composite.
 	if _, ok := p.(propagation.TraceContext); !ok {
-		// Could be a composite; assert no baggage by checking fields.
-		if _, isComposite := p.(propagation.TextMapPropagator); !isComposite {
-			t.Fatalf("default propagator = %T, want TraceContext", p)
-		}
+		t.Fatalf("default propagator = %T, want TraceContext", p)
 	}
 }
 
@@ -131,11 +126,4 @@ func baggageContext(t *testing.T) context.Context {
 		t.Fatalf("baggage.New: %v", err)
 	}
 	return baggage.ContextWithBaggage(context.Background(), b)
-}
-
-// in-memory recorder provider for the trace-graph test below.
-func recorderTracer() (Tracer, *tracetest.SpanRecorder, func()) {
-	rec := tracetest.NewSpanRecorder()
-	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
-	return NewOTelTracer(tp.Tracer("xflow-test")), rec, func() { _ = tp.Shutdown(context.Background()) }
 }

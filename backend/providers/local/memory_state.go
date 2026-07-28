@@ -38,6 +38,8 @@ type memoryState struct {
 	resumed        map[string]bool                   // resume lock: key: execID+"/"+nodeName
 	subExecs       map[string][]*engine.SubExecution // key: execID+"/"+nodeName
 	groupUnits     map[string]*groupUnitState        // key: "<execID>/<unitIdx>"
+	suspendedGroups map[suspendedGroupKey]*engine.GroupSuspendState
+	admissions     map[engine.AdmissionKey]*admissionEntry // trigger admission keys
 
 	// done channels allow Wait() callers to block until execution completes.
 	doneCh        map[types.ExecutionID]chan struct{}
@@ -70,6 +72,7 @@ func newMemoryState() *memoryState {
 		resumed:        make(map[string]bool),
 		subExecs:       make(map[string][]*engine.SubExecution),
 		groupUnits:     make(map[string]*groupUnitState),
+		suspendedGroups: make(map[suspendedGroupKey]*engine.GroupSuspendState),
 		doneCh:         make(map[types.ExecutionID]chan struct{}),
 		eventWatchers:  make(map[types.ExecutionID][]chan engine.ExecutionEvent),
 	}
@@ -275,6 +278,7 @@ func (s *memoryState) AcquireTaskLease(_ context.Context, lease *engine.TaskLeas
 		ExecutionID:   lease.Task.ExecutionID,
 		Name:          lease.Task.NodeName,
 		NodeIdx:       lease.Task.NodeIdx,
+		UnitIdx:       lease.Task.UnitIdx,
 		Status:        types.NodeStatusRunning,
 		LeaseID:       lease.LeaseID,
 		LeaseToken:    lease.LeaseToken,
@@ -343,6 +347,7 @@ func (s *memoryState) ListExpiredLeases(_ context.Context, before time.Time) ([]
 			ExecutionID:  ns.ExecutionID,
 			NodeName:     ns.Name,
 			NodeIdx:      ns.NodeIdx,
+			UnitIdx:      ns.UnitIdx,
 			LeaseID:      ns.LeaseID,
 			LeaseToken:   ns.LeaseToken,
 			IssuedAt:     ns.LeaseIssuedAt,
@@ -684,6 +689,7 @@ func (s *memoryState) scheduleResumeOutbox(id types.ExecutionID, nodeName string
 		ExecutionID:  id,
 		NodeName:     nodeName,
 		NodeIdx:      intent.NodeIdx,
+		UnitIdx:      intent.UnitIdx,
 		Type:         engine.TaskTypeNodeResume,
 		Payload:      payload,
 		ActivationID: activationID,

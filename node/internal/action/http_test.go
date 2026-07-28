@@ -246,3 +246,172 @@ func TestHTTP_MissingURL(t *testing.T) {
 		t.Fatal("expected error for missing url")
 	}
 }
+
+func withHostPolicy(t *testing.T, p actionimpl.HostPolicy) {
+	t.Helper()
+	orig := actionimpl.HTTPHostPolicy
+	actionimpl.HTTPHostPolicy = p
+	t.Cleanup(func() { actionimpl.HTTPHostPolicy = orig })
+}
+
+// TestHTTP_ResponseTooLarge verifies M2: a response body larger than the
+// configured limit is rejected with a permanent error and never buffered whole.
+func TestHTTP_ResponseTooLarge(t *testing.T) {
+	withHTTPClient(t, func(r *http.Request) (*http.Response, error) {
+		return jsonResponse(200, `{"data":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`, nil), nil
+	})
+
+	h, _ := registry.Lookup("xflow.http")
+	b := node.HTTP("GET", "https://example.test")
+	params := b.RawParams().(map[string]any)
+	params["options"] = map[string]any{"max_response_bytes": 8}
+	input := &types.Input{Params: params}
+	out, err := h.Execute(context.Background(), input)
+	if err == nil {
+		t.Fatal("expected permanent error for oversized response, got nil err")
+	}
+	if out != nil {
+		t.Fatalf("expected nil output, got %+v", out)
+	}
+	if !types.IsPermanent(err) {
+		t.Fatalf("oversized response must be permanent; got %v", err)
+	}
+	var ce *types.ClassifiedError
+	if !errors.As(err, &ce) || ce.Code != "http.response_too_large" {
+		t.Fatalf("expected code=http.response_too_large, got %T %v", err, err)
+	}
+}
+
+// TestHTTP_ResponseWithinLimit verifies a body at or below the limit still
+// succeeds, so the cap does not truncate legitimate responses.
+func TestHTTP_ResponseWithinLimit(t *testing.T) {
+	body := `{"ok":true}`
+	withHTTPClient(t, func(r *http.Request) (*http.Response, error) {
+		return jsonResponse(200, body, nil), nil
+	})
+
+	h, _ := registry.Lookup("xflow.http")
+	b := node.HTTP("GET", "https://example.test")
+	params := b.RawParams().(map[string]any)
+	params["options"] = map[string]any{"max_response_bytes": len(body)}
+	input := &types.Input{Params: params}
+	out, err := h.Execute(context.Background(), input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Data["status"] != 200 {
+		t.Fatalf("expected status 200, got %v", out.Data["status"])
+	}
+}
+
+// TestHTTP_NoHostPolicyByDefault verifies M1 backward compatibility: with no
+// policy configured, no host is filtered.
+func TestHTTP_NoHostPolicyByDefault(t *testing.T) {
+	withHTTPClient(t, func(r *http.Request) (*http.Response, error) {
+		return jsonResponse(200, `{}`, nil), nil
+	})
+
+	h, _ := registry.Lookup("xflow.http")
+	b := node.HTTP("GET", "https://anything.internal")
+	input := &types.Input{Params: b.RawParams().(map[string]any)}
+	if _, err := h.Execute(context.Background(), input); err != nil {
+		t.Fatalf("default (no policy) must not filter; got %v", err)
+	}
+}
+
+// TestHTTP_AllowlistAllowsListedHost verifies a host in the allowlist passes.
+func TestHTTP_AllowlistAllowsListedHost(t *testing.T) {
+	withHostPolicy(t, actionimpl.NewHostPolicy([]string{"example.test"}, nil))
+	withHTTPClient(t, func(r *http.Request) (*http.Response, error) {
+		return jsonResponse(200, `{}`, nil), nil
+	})
+
+	h, _ := registry.Lookup("xflow.http")
+	b := node.HTTP("GET", "https://example.test/path")
+	input := &types.Input{Params: b.RawParams().(map[string]any)}
+	if _, err := h.Execute(context.Background(), input); err != nil {
+		t.Fatalf("allowlisted host must pass; got %v", err)
+	}
+}
+
+// TestHTTP_AllowlistRejectsUnlistedHost verifies a host absent from the
+// allowlist is rejected with a permanent error and the request is not sent.
+func TestHTTP_AllowlistRejectsUnlistedHost(t *testing.T) {
+	withHostPolicy(t, actionimpl.NewHostPolicy([]string{"example.test"}, nil))
+	called := false
+	withHTTPClient(t, func(r *http.Request) (*http.Response, error) {
+		called = true
+		return jsonResponse(200, `{}`, nil), nil
+	})
+
+	h, _ := registry.Lookup("xflow.http")
+	b := node.HTTP("GET", "https://evil.test/path")
+	input := &types.Input{Params: b.RawParams().(map[string]any)}
+	out, err := h.Execute(context.Background(), input)
+	if err == nil {
+		t.Fatal("expected permanent error for unlisted host, got nil err")
+	}
+	if out != nil {
+		t.Fatalf("expected nil output, got %+v", out)
+	}
+	if called {
+		t.Fatal("request must not be dispatched when host is rejected")
+	}
+	if !types.IsPermanent(err) {
+		t.Fatalf("rejected host must be permanent; got %v", err)
+	}
+	var ce *types.ClassifiedError
+	if !errors.As(err, &ce) || ce.Code != "http.host_not_allowed" {
+		t.Fatalf("expected code=http.host_not_allowed, got %T %v", err, err)
+	}
+}
+
+// TestHTTP_DenylistRejectsHost verifies a denylisted host is rejected even with
+// no allowlist configured.
+func TestHTTP_DenylistRejectsHost(t *testing.T) {
+	withHostPolicy(t, actionimpl.NewHostPolicy(nil, []string{"blocked.test"}))
+	withHTTPClient(t, func(r *http.Request) (*http.Response, error) {
+		return jsonResponse(200, `{}`, nil), nil
+	})
+
+	h, _ := registry.Lookup("xflow.http")
+	b := node.HTTP("GET", "https://blocked.test/x")
+	input := &types.Input{Params: b.RawParams().(map[string]any)}
+	_, err := h.Execute(context.Background(), input)
+	if err == nil {
+		t.Fatal("expected permanent error for denylisted host, got nil err")
+	}
+	var ce *types.ClassifiedError
+	if !errors.As(err, &ce) || ce.Code != "http.host_not_allowed" {
+		t.Fatalf("expected code=http.host_not_allowed, got %T %v", err, err)
+	}
+}
+
+// TestHTTP_RedirectToDisallowedHostRejected verifies the policy is re-applied to
+// redirect targets, so a redirect cannot bypass the allowlist.
+func TestHTTP_RedirectToDisallowedHostRejected(t *testing.T) {
+	withHostPolicy(t, actionimpl.NewHostPolicy([]string{"example.test"}, nil))
+	withHTTPClient(t, func(r *http.Request) (*http.Response, error) {
+		// First hop is allowed; it 302s to a disallowed host.
+		resp := jsonResponse(302, ``, http.Header{"Location": []string{"https://evil.test/steal"}})
+		return resp, nil
+	})
+
+	h, _ := registry.Lookup("xflow.http")
+	b := node.HTTP("GET", "https://example.test/start")
+	input := &types.Input{Params: b.RawParams().(map[string]any)}
+	out, err := h.Execute(context.Background(), input)
+	if err == nil {
+		t.Fatal("expected permanent error for redirect to disallowed host, got nil err")
+	}
+	if out != nil {
+		t.Fatalf("expected nil output, got %+v", out)
+	}
+	if !types.IsPermanent(err) {
+		t.Fatalf("redirect rejection must be permanent; got %v", err)
+	}
+	var ce *types.ClassifiedError
+	if !errors.As(err, &ce) || ce.Code != "http.host_not_allowed" {
+		t.Fatalf("expected code=http.host_not_allowed, got %T %v", err, err)
+	}
+}

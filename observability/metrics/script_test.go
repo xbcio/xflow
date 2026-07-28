@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xbcio/xflow/backend/tenant"
+	"github.com/xbcio/xflow/namespace"
 )
 
 func TestScriptMetricsEmitsExecuteAndBytes(t *testing.T) {
@@ -24,9 +24,9 @@ func TestScriptMetricsEmitsExecuteAndBytes(t *testing.T) {
 	body := rec.Body.String()
 
 	want := []string{
-		`xflow_script_execute_total{language="js",outcome="main",runtime="goja",tenant="default"} 1`,
-		`xflow_script_execute_duration_seconds_count{language="js",outcome="main",runtime="goja",tenant="default"} 1`,
-		`xflow_script_output_bytes_bucket{language="js",runtime="goja",tenant="default",le="4096"} 1`,
+		`xflow_script_execute_total{language="js",namespace="default",outcome="main",runtime="goja"} 1`,
+		`xflow_script_execute_duration_seconds_count{language="js",namespace="default",outcome="main",runtime="goja"} 1`,
+		`xflow_script_output_bytes_bucket{language="js",namespace="default",runtime="goja",le="4096"} 1`,
 	}
 	for _, w := range want {
 		if !strings.Contains(body, w) {
@@ -38,17 +38,17 @@ func TestScriptMetricsEmitsExecuteAndBytes(t *testing.T) {
 func TestScriptMetricsEmitsErrorAndConfigOutcomes(t *testing.T) {
 	metrics := New()
 	script := NewScriptMetrics(metrics)
-	ctx := tenant.WithTenant(context.Background(), tenant.TenantID("tenant-b"))
+	ctx := namespace.WithNamespace(context.Background(), namespace.Namespace("namespace-b"))
 
 	script.OnScriptExecute(ctx, "js", "goja", "error", time.Millisecond)
 	script.OnScriptExecute(ctx, "js", "goja", "config", time.Millisecond)
 
 	body := gatherMetricsBody(t, metrics)
 	for _, want := range []string{
-		`xflow_script_execute_total{language="js",outcome="error",runtime="goja",tenant="tenant-b"} 1`,
-		`xflow_script_execute_total{language="js",outcome="config",runtime="goja",tenant="tenant-b"} 1`,
-		`xflow_script_execute_duration_seconds_count{language="js",outcome="error",runtime="goja",tenant="tenant-b"} 1`,
-		`xflow_script_execute_duration_seconds_count{language="js",outcome="config",runtime="goja",tenant="tenant-b"} 1`,
+		`xflow_script_execute_total{language="js",namespace="namespace-b",outcome="error",runtime="goja"} 1`,
+		`xflow_script_execute_total{language="js",namespace="namespace-b",outcome="config",runtime="goja"} 1`,
+		`xflow_script_execute_duration_seconds_count{language="js",namespace="namespace-b",outcome="error",runtime="goja"} 1`,
+		`xflow_script_execute_duration_seconds_count{language="js",namespace="namespace-b",outcome="config",runtime="goja"} 1`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("metrics body missing %q:\n%s", want, body)

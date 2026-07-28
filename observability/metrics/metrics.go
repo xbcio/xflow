@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/xbcio/xflow/backend/tenant"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -248,22 +248,22 @@ func labelNames(labels map[string]string) []string {
 	return names
 }
 
-// withTenant returns labels with a "tenant" dimension drawn from ctx. The
+// withNamespace returns labels with a "namespace" dimension drawn from ctx. The
 // helper mutates the input map in place: when labels is non-nil it sets
-// labels["tenant"] and returns the same map. Callers must not reuse the
-// passed map for other metric calls unless they want to share the tenant
-// label. When labels is nil a new map is allocated. Tenant is always emitted
-// as a label for tenant-scoped metrics; callers that intentionally omit
-// tenant (global metrics such as leader election) should not use this helper.
+// labels["namespace"] and returns the same map. Callers must not reuse the
+// passed map for other metric calls unless they want to share the namespace
+// label. When labels is nil a new map is allocated. Namespace is always emitted
+// as a label for namespace-scoped metrics; callers that intentionally omit
+// namespace (global metrics such as leader election) should not use this helper.
 //
-// Security/ops: tenant IDs are expected to be low-cardinality (tens to low
+// Security/ops: namespace IDs are expected to be low-cardinality (tens to low
 // hundreds). Do not use high-cardinality values such as execution IDs or node
 // names as metric labels.
-func withTenant(ctx context.Context, labels map[string]string) map[string]string {
+func withNamespace(ctx context.Context, labels map[string]string) map[string]string {
 	if labels == nil {
-		return map[string]string{"tenant": string(tenant.FromContext(ctx))}
+		return map[string]string{"namespace": string(namespace.FromContext(ctx))}
 	}
-	labels["tenant"] = string(tenant.FromContext(ctx))
+	labels["namespace"] = string(namespace.FromContext(ctx))
 	return labels
 }
 
@@ -272,62 +272,75 @@ func withTenant(ctx context.Context, labels map[string]string) map[string]string
 // unknown name falls back to a generic description so a missing entry never
 // panics at registration time.
 //
-// Tenant dimension (Task 7.4): tenant-scoped metrics carry a "tenant" label
-// drawn from context. Tenant IDs are expected to be low-cardinality (tens to
+// Namespace dimension (Task 7.4): namespace-scoped metrics carry a "namespace" label
+// drawn from context. Namespace IDs are expected to be low-cardinality (tens to
 // low hundreds). Do not add high-cardinality dimensions such as execution IDs,
-// node names, or lease tokens to metric labels. For very large tenant counts,
-// disable or aggregate the tenant dimension to avoid Prometheus cardinality
+// node names, or lease tokens to metric labels. For very large namespace counts,
+// disable or aggregate the namespace dimension to avoid Prometheus cardinality
 // explosion.
 var metricHelp = map[string]string{
-	"xflow_audit_write_total":                   "Audit log write attempts, partitioned by operation and result.",
-	"xflow_audit_reconcile_scan_total":           "Audit reconcile sweep cycles run, partitioned by result.",
-	"xflow_audit_reconcile_scan_duration_seconds":"Duration of audit reconcile pending-admission scans.",
-	"xflow_audit_reconcile_settled_total":        "Audit admissions settled by the reconcile worker, partitioned by outcome and result.",
-	"xflow_audit_reconcile_skipped_total":        "Audit admissions left pending (indeterminate authority), partitioned by reason.",
-	"xflow_audit_reconcile_errors_total":         "Audit reconcile per-admission probe/append errors.",
-	"xflow_audit_reconcile_backlog_age_seconds":  "Age of the oldest pending audit admission observed in the last sweep.",
-	"xflow_audit_reconcile_pending":              "Number of pending audit admissions observed in the last reconcile sweep.",
-	"xflow_commit_outcomes_total":               "Graph commit outcomes, partitioned by outcome (committed/aborted/failed).",
-	"xflow_dispatch_transient_total":            "Transient dispatch failures scheduled for retry, partitioned by reason.",
-	"xflow_execution_completed_total":           "Workflow executions completed, partitioned by terminal status.",
-	"xflow_lease_acquire_total":                 "Lease acquisition attempts, partitioned by result.",
-	"xflow_lease_acquire_duration_seconds":      "Latency of lease acquisition attempts.",
-	"xflow_lease_age_seconds":                   "Age of reclaimed leases at the moment of reclaim.",
-	"xflow_lease_expiry_scan_total":             "Lease expiry scan cycles run, partitioned by result.",
-	"xflow_lease_expiry_scan_duration_seconds":  "Duration of lease expiry scan cycles.",
-	"xflow_lease_expiry_candidates":             "Number of leases considered for expiry in the last scan.",
-	"xflow_lease_reclaim_total":                 "Lease reclaim attempts, partitioned by result.",
-	"xflow_lease_reclaim_duration_seconds":      "Duration of lease reclaim operations.",
-	"xflow_lease_repair_runs_total":             "Lease repair runs executed, partitioned by result.",
-	"xflow_lease_repair_duration_seconds":       "Duration of lease repair runs.",
-	"xflow_lease_repair_reconciled":             "Number of leases reconciled in the last repair run.",
-	"xflow_lease_sweep_scan_total":              "Lease sweep scan cycles run, partitioned by labels.",
-	"xflow_lease_sweep_scan_duration_seconds":   "Duration of lease sweep scan cycles.",
-	"xflow_lease_sweep_candidates":              "Number of leases considered during the last sweep scan.",
-	"xflow_lease_sweep_reclaimed_total":         "Leases reclaimed by the sweeper, partitioned by result.",
-	"xflow_lease_sweep_errors_total":            "Lease sweep errors, partitioned by reason.",
-	"xflow_lease_sweep_repair_total":            "Lease sweep repair attempts, partitioned by labels.",
-	"xflow_lease_sweep_repair_duration_seconds": "Duration of lease sweep repair operations.",
-	"xflow_lease_sweep_repair_reconciled":       "Number of leases reconciled in the last sweep repair run.",
-	"xflow_node_started_total":                  "Nodes that started execution.",
-	"xflow_node_completed_total":                "Nodes that completed execution.",
-	"xflow_node_duration_seconds":               "Wall-clock duration of node execution.",
-	"xflow_node_suspended_total":                "Nodes that suspended pending async completion.",
-	"xflow_node_timed_out_total":                "Nodes that exceeded their timeout.",
-	"xflow_node_retried_total":                  "Nodes retried after a failure.",
-	"xflow_outbox_retries_total":                "Outbox message dispatch retry attempts.",
-	"xflow_outbox_dead_letters_total":           "Outbox messages sent to the dead-letter queue.",
-	"xflow_outbox_dead_letters":                 "Current count of outbox messages in the dead-letter queue.",
-	"xflow_outbox_dead_letters_replayed_total":  "Dead-letter messages replayed back to the ready set, partitioned by outcome.",
-	"xflow_outbox_pending":                      "Current count of outbox messages pending dispatch.",
-	"xflow_outbox_oldest_pending_age_seconds":   "Age of the oldest pending outbox message.",
-	"xflow_outbox_errors_total":                 "Outbox dispatch errors, partitioned by operation.",
-	"xflow_runner_auth_decisions_total":         "Runner authorization decisions, partitioned by result and auth mode.",
-	"xflow_runner_claim_reclaimed_total":        "Runner claims reclaimed from stale leases.",
-	"xflow_runner_lease_replayed_total":         "Runner leases replayed after a reclaim.",
-	"xflow_script_execute_total":                "Script execution attempts, partitioned by result.",
-	"xflow_script_execute_duration_seconds":     "Wall-clock duration of script execution.",
-	"xflow_script_output_bytes":                 "Size of script stdout output in bytes.",
+	"xflow_audit_write_total":                     "Audit log write attempts, partitioned by operation and result.",
+	"xflow_audit_reconcile_scan_total":            "Audit reconcile sweep cycles run, partitioned by result.",
+	"xflow_audit_reconcile_scan_duration_seconds": "Duration of audit reconcile pending-admission scans.",
+	"xflow_audit_reconcile_settled_total":         "Audit admissions settled by the reconcile worker, partitioned by outcome and result.",
+	"xflow_audit_reconcile_skipped_total":         "Audit admissions left pending (indeterminate authority), partitioned by reason.",
+	"xflow_audit_reconcile_errors_total":          "Audit reconcile per-admission probe/append errors.",
+	"xflow_audit_reconcile_backlog_age_seconds":   "Age of the oldest pending audit admission observed in the last sweep.",
+	"xflow_audit_reconcile_pending":               "Number of pending audit admissions observed in the last reconcile sweep.",
+	"xflow_commit_outcomes_total":                 "Graph commit outcomes, partitioned by outcome (committed/aborted/failed).",
+	"xflow_group_admission_total":                 "Trigger admission attempts, partitioned by outcome (accepted/duplicate/conflict/error).",
+	"xflow_group_admission_duration_seconds":      "Duration of trigger admission attempts.",
+	"xflow_group_activation_total":                "Activation controller actions, partitioned by action (activate/deactivate/revoke/reconcile).",
+	"xflow_group_activation_generation_fenced_total": "Activation attempts rejected due to generation fence.",
+	"xflow_group_activation_active":               "Number of currently active group activations.",
+	"xflow_group_lease_renew_total":               "Lease renewal attempts, partitioned by result (ok/fenced/error).",
+	"xflow_group_lease_renew_duration_seconds":    "Duration of lease renewal attempts.",
+	"xflow_group_emit_total":                      "Runner emit operations, partitioned by result (accepted/conflict/error/timeout).",
+	"xflow_group_emit_duration_seconds":           "Duration of runner emit operations.",
+	"xflow_group_emit_batch_size":                 "Batch size of runner emit operations.",
+	"xflow_group_emit_inflight":                   "Number of currently in-flight emit operations.",
+	"xflow_group_suspend_total":                   "Group suspend/resume lifecycle events, partitioned by action (suspended/resumed/canceled/timeout).",
+	"xflow_group_backpressure_paused_total":       "Times group processing was paused due to backpressure.",
+	"xflow_dispatch_transient_total":              "Transient dispatch failures scheduled for retry, partitioned by reason.",
+	"xflow_execution_completed_total":             "Workflow executions completed, partitioned by terminal status.",
+	"xflow_lease_acquire_total":                   "Lease acquisition attempts, partitioned by result.",
+	"xflow_lease_acquire_duration_seconds":        "Latency of lease acquisition attempts.",
+	"xflow_lease_age_seconds":                     "Age of reclaimed leases at the moment of reclaim.",
+	"xflow_lease_expiry_scan_total":               "Lease expiry scan cycles run, partitioned by result.",
+	"xflow_lease_expiry_scan_duration_seconds":    "Duration of lease expiry scan cycles.",
+	"xflow_lease_expiry_candidates":               "Number of leases considered for expiry in the last scan.",
+	"xflow_lease_reclaim_total":                   "Lease reclaim attempts, partitioned by result.",
+	"xflow_lease_reclaim_duration_seconds":        "Duration of lease reclaim operations.",
+	"xflow_lease_repair_runs_total":               "Lease repair runs executed, partitioned by result.",
+	"xflow_lease_repair_duration_seconds":         "Duration of lease repair runs.",
+	"xflow_lease_repair_reconciled":               "Number of leases reconciled in the last repair run.",
+	"xflow_lease_sweep_scan_total":                "Lease sweep scan cycles run, partitioned by labels.",
+	"xflow_lease_sweep_scan_duration_seconds":     "Duration of lease sweep scan cycles.",
+	"xflow_lease_sweep_candidates":                "Number of leases considered during the last sweep scan.",
+	"xflow_lease_sweep_reclaimed_total":           "Leases reclaimed by the sweeper, partitioned by result.",
+	"xflow_lease_sweep_errors_total":              "Lease sweep errors, partitioned by reason.",
+	"xflow_lease_sweep_repair_total":              "Lease sweep repair attempts, partitioned by labels.",
+	"xflow_lease_sweep_repair_duration_seconds":   "Duration of lease sweep repair operations.",
+	"xflow_lease_sweep_repair_reconciled":         "Number of leases reconciled in the last sweep repair run.",
+	"xflow_node_started_total":                    "Nodes that started execution.",
+	"xflow_node_completed_total":                  "Nodes that completed execution.",
+	"xflow_node_duration_seconds":                 "Wall-clock duration of node execution.",
+	"xflow_node_suspended_total":                  "Nodes that suspended pending async completion.",
+	"xflow_node_timed_out_total":                  "Nodes that exceeded their timeout.",
+	"xflow_node_retried_total":                    "Nodes retried after a failure.",
+	"xflow_outbox_retries_total":                  "Outbox message dispatch retry attempts.",
+	"xflow_outbox_dead_letters_total":             "Outbox messages sent to the dead-letter queue.",
+	"xflow_outbox_dead_letters":                   "Current count of outbox messages in the dead-letter queue.",
+	"xflow_outbox_dead_letters_replayed_total":    "Dead-letter messages replayed back to the ready set, partitioned by outcome.",
+	"xflow_outbox_pending":                        "Current count of outbox messages pending dispatch.",
+	"xflow_outbox_oldest_pending_age_seconds":     "Age of the oldest pending outbox message.",
+	"xflow_outbox_errors_total":                   "Outbox dispatch errors, partitioned by operation.",
+	"xflow_runner_auth_decisions_total":           "Runner authorization decisions, partitioned by result and auth mode.",
+	"xflow_runner_claim_reclaimed_total":          "Runner claims reclaimed from stale leases.",
+	"xflow_runner_lease_replayed_total":           "Runner leases replayed after a reclaim.",
+	"xflow_script_execute_total":                  "Script execution attempts, partitioned by result.",
+	"xflow_script_execute_duration_seconds":       "Wall-clock duration of script execution.",
+	"xflow_script_output_bytes":                   "Size of script stdout output in bytes.",
 }
 
 func helpText(name string) string {

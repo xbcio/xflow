@@ -155,9 +155,9 @@ func (n *RedisHubTriggerNode) Activate(ctx context.Context, in *types.TriggerAct
 	sem := make(chan struct{}, cfg.MaxInflight)
 	done := make(chan struct{})
 	var (
-		emitWG     sync.WaitGroup
-		closeOnce  sync.Once
-		closeErr   error
+		emitWG    sync.WaitGroup
+		closeOnce sync.Once
+		closeErr  error
 	)
 	stop := func(releaseCtx context.Context) error {
 		closeOnce.Do(func() {

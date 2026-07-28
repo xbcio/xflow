@@ -6,15 +6,15 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/types"
 )
 
-// tenantAssignment builds an assignment whose authoritative TenantID is the
+// namespaceAssignment builds an assignment whose authoritative Namespace is the
 // given value (set server-side at submit time, never trusted from a client).
-func tenantAssignment(tenantID tenant.TenantID, execID, nodeName string) Assignment {
+func namespaceAssignment(namespaceID namespace.Namespace, execID, nodeName string) Assignment {
 	task := engine.Task{
 		ExecutionID: types.ExecutionID(execID),
 		NodeName:    nodeName,
@@ -25,27 +25,27 @@ func tenantAssignment(tenantID tenant.TenantID, execID, nodeName string) Assignm
 		AssignmentID: BuildAssignmentID(&task),
 		Task:         task,
 		Routing:      engine.TaskRouting{NodeType: "xflow.function"},
-		TenantID:     tenantID,
+		Namespace:    namespaceID,
 	}
 }
 
-// finalizeTenantLease registers a runner scoped to tenantID, enqueues+claims a
-// tenant-scoped assignment, and finalizes a lease carrying the authoritative
-// TenantID. It returns the lease and the live runner session so a test can echo
+// finalizeNamespaceLease registers a runner scoped to namespaceID, enqueues+claims a
+// namespace-scoped assignment, and finalizes a lease carrying the authoritative
+// Namespace. It returns the lease and the live runner session so a test can echo
 // (or tamper with) the lease JSON in a ReportResult RPC.
-func finalizeTenantLease(t *testing.T, dir *MemoryRunnerDirectory, tenantID tenant.TenantID) (*engine.TaskLease, RunnerSession) {
+func finalizeNamespaceLease(t *testing.T, dir *MemoryRunnerDirectory, namespaceID namespace.Namespace) (*engine.TaskLease, RunnerSession) {
 	t.Helper()
 	ctx := context.Background()
-	session := mustRegisterHTTPRunnerForTenant(t, dir, tenantID)
-	assignment := tenantAssignment(tenantID, "exec-tenant", "node-a")
+	session := mustRegisterHTTPRunnerForNamespace(t, dir, namespaceID)
+	assignment := namespaceAssignment(namespaceID, "exec-namespace", "node-a")
 	mustEnqueueAssignment(t, ctx, dir, assignment)
 	claim := mustClaimAssignment(t, ctx, dir, session)
 	lease := &engine.TaskLease{
-		LeaseID:    "lease-tenant",
-		LeaseToken: "token-tenant",
+		LeaseID:    "lease-namespace",
+		LeaseToken: "token-namespace",
 		Task:       claim.Assignment.Task,
 		NodeType:   claim.Assignment.Routing.NodeType,
-		TenantID:   tenantID,
+		Namespace:  namespaceID,
 	}
 	if err := dir.FinalizeClaim(ctx, claim.ClaimID, lease); err != nil {
 		t.Fatalf("FinalizeClaim() error = %v", err)
@@ -53,16 +53,16 @@ func finalizeTenantLease(t *testing.T, dir *MemoryRunnerDirectory, tenantID tena
 	return lease, session
 }
 
-// mustRegisterHTTPRunnerForTenant registers a runner scoped to a single tenant
-// (the default mustRegisterHTTPRunner only serves the default tenant).
-func mustRegisterHTTPRunnerForTenant(t *testing.T, dir *MemoryRunnerDirectory, tenantID tenant.TenantID) RunnerSession {
+// mustRegisterHTTPRunnerForNamespace registers a runner scoped to a single namespace
+// (the default mustRegisterHTTPRunner only serves the default namespace).
+func mustRegisterHTTPRunnerForNamespace(t *testing.T, dir *MemoryRunnerDirectory, namespaceID namespace.Namespace) RunnerSession {
 	t.Helper()
 	session, err := dir.Register(context.Background(), RegisterRunnerRequest{
 		RunnerID:     "runner-1",
 		Capacity:     4,
 		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
 		Policy:       RunnerPolicy{AllowedNodeTypes: []string{"*"}},
-		Tenants:      []tenant.TenantID{tenantID},
+		Namespaces:   []namespace.Namespace{namespaceID},
 	})
 	if err != nil {
 		t.Fatalf("Register() error = %v", err)
@@ -70,17 +70,17 @@ func mustRegisterHTTPRunnerForTenant(t *testing.T, dir *MemoryRunnerDirectory, t
 	return session
 }
 
-// mustRegisterHTTPRunnerForTenantNamed registers a runner with an explicit
-// runnerID scoped to a single tenant, so a test can stage multiple distinct
+// mustRegisterHTTPRunnerForNamespaceNamed registers a runner with an explicit
+// runnerID scoped to a single namespace, so a test can stage multiple distinct
 // runner sessions in one directory (e.g. the cross-runner lease-swap probe).
-func mustRegisterHTTPRunnerForTenantNamed(t *testing.T, dir *MemoryRunnerDirectory, runnerID string, tenantID tenant.TenantID) RunnerSession {
+func mustRegisterHTTPRunnerForNamespaceNamed(t *testing.T, dir *MemoryRunnerDirectory, runnerID string, namespaceID namespace.Namespace) RunnerSession {
 	t.Helper()
 	session, err := dir.Register(context.Background(), RegisterRunnerRequest{
 		RunnerID:     runnerID,
 		Capacity:     4,
 		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
 		Policy:       RunnerPolicy{AllowedNodeTypes: []string{"*"}},
-		Tenants:      []tenant.TenantID{tenantID},
+		Namespaces:   []namespace.Namespace{namespaceID},
 	})
 	if err != nil {
 		t.Fatalf("Register() error = %v", err)
@@ -88,22 +88,22 @@ func mustRegisterHTTPRunnerForTenantNamed(t *testing.T, dir *MemoryRunnerDirecto
 	return session
 }
 
-// finalizeTenantLeaseFor is the named-runner variant of finalizeTenantLease:
-// register runnerID under tenantID, enqueue+claim a tenant-scoped assignment,
-// and finalize a lease carrying the authoritative TenantID.
-func finalizeTenantLeaseFor(t *testing.T, dir *MemoryRunnerDirectory, runnerID string, tenantID tenant.TenantID) (*engine.TaskLease, RunnerSession) {
+// finalizeNamespaceLeaseFor is the named-runner variant of finalizeNamespaceLease:
+// register runnerID under namespaceID, enqueue+claim a namespace-scoped assignment,
+// and finalize a lease carrying the authoritative Namespace.
+func finalizeNamespaceLeaseFor(t *testing.T, dir *MemoryRunnerDirectory, runnerID string, namespaceID namespace.Namespace) (*engine.TaskLease, RunnerSession) {
 	t.Helper()
 	ctx := context.Background()
-	session := mustRegisterHTTPRunnerForTenantNamed(t, dir, runnerID, tenantID)
-	assignment := tenantAssignment(tenantID, "exec-"+string(tenantID), "node-"+string(tenantID))
+	session := mustRegisterHTTPRunnerForNamespaceNamed(t, dir, runnerID, namespaceID)
+	assignment := namespaceAssignment(namespaceID, "exec-"+string(namespaceID), "node-"+string(namespaceID))
 	mustEnqueueAssignment(t, ctx, dir, assignment)
 	claim := mustClaimAssignment(t, ctx, dir, session)
 	lease := &engine.TaskLease{
-		LeaseID:    engine.LeaseID("lease-" + string(tenantID)),
-		LeaseToken: engine.LeaseToken("token-" + string(tenantID)),
+		LeaseID:    engine.LeaseID("lease-" + string(namespaceID)),
+		LeaseToken: engine.LeaseToken("token-" + string(namespaceID)),
 		Task:       claim.Assignment.Task,
 		NodeType:   claim.Assignment.Routing.NodeType,
-		TenantID:   tenantID,
+		Namespace:  namespaceID,
 	}
 	if err := dir.FinalizeClaim(ctx, claim.ClaimID, lease); err != nil {
 		t.Fatalf("FinalizeClaim() error = %v", err)
@@ -112,24 +112,24 @@ func finalizeTenantLeaseFor(t *testing.T, dir *MemoryRunnerDirectory, runnerID s
 }
 
 // TestReportResultRejectsCrossRunnerLeaseSwap is the 2026-07-21 P0 probe for B1:
-// runner-a/session-a reports runner-b's fully-valid tenant-b lease. The
+// runner-a/session-a reports runner-b's fully-valid namespace-b lease. The
 // directory's LookupLease fences by (runner, session) and returns ok=false
-// (runner-a never finalized tenant-b's lease). reportResult MUST reject fail
-// closed — not fall back to req.Lease and commit cross-tenant.
+// (runner-a never finalized namespace-b's lease). reportResult MUST reject fail
+// closed — not fall back to req.Lease and commit cross-namespace.
 func TestReportResultRejectsCrossRunnerLeaseSwap(t *testing.T) {
 	fake := &fakeControlEngine{}
 	dir := NewMemoryRunnerDirectory()
 	server := httptest.NewServer(NewServer(fake, dir).Handler())
 	defer server.Close()
 
-	// runner-b/tenant-b finalizes a valid tenant-b lease.
-	leaseB, _ := finalizeTenantLeaseFor(t, dir, "runner-b", tenant.TenantID("tenant-b"))
+	// runner-b/namespace-b finalizes a valid namespace-b lease.
+	leaseB, _ := finalizeNamespaceLeaseFor(t, dir, "runner-b", namespace.Namespace("namespace-b"))
 
-	// runner-a/tenant-a is a separate live session.
-	sessionA := mustRegisterHTTPRunnerForTenantNamed(t, dir, "runner-a", tenant.TenantID("tenant-a"))
+	// runner-a/namespace-a is a separate live session.
+	sessionA := mustRegisterHTTPRunnerForNamespaceNamed(t, dir, "runner-a", namespace.Namespace("namespace-a"))
 
 	// runner-a reports runner-b's lease verbatim. req.Lease is a complete,
-	// valid tenant-b lease token — the only thing wrong is the reporter.
+	// valid namespace-b lease token — the only thing wrong is the reporter.
 	var resp protocol.ReportResultResponse
 	postJSON(t, server.URL+protocol.ReportResultPath, protocol.ReportResultRequest{
 		RunnerID:  sessionA.RunnerID,
@@ -143,28 +143,28 @@ func TestReportResultRejectsCrossRunnerLeaseSwap(t *testing.T) {
 	if fake.committedLease != nil {
 		t.Fatalf("commit must not run for a cross-runner lease swap, got %+v", fake.committedLease)
 	}
-	if fake.committedTenant != "" {
-		t.Fatalf("commit tenant must be empty, got %q", fake.committedTenant)
+	if fake.committedNamespace != "" {
+		t.Fatalf("commit namespace must be empty, got %q", fake.committedNamespace)
 	}
 }
 
-// TestReportResultTenantTampering proves the report path uses the
-// server-authoritative lease TenantID, not the runner-echoed lease JSON. A
-// runner registered for tenant-a echoes back the lease with TenantID rewritten
-// to tenant-b; the commit must still receive the tenant-a namespace context.
+// TestReportResultNamespaceTampering proves the report path uses the
+// server-authoritative lease Namespace, not the runner-echoed lease JSON. A
+// runner registered for namespace-a echoes back the lease with Namespace rewritten
+// to namespace-b; the commit must still receive the namespace-a namespace context.
 // Regression for the 2026-07-21 trust-boundary probe.
-func TestReportResultTenantTampering(t *testing.T) {
+func TestReportResultNamespaceTampering(t *testing.T) {
 	fake := &fakeControlEngine{}
 	dir := NewMemoryRunnerDirectory()
 	server := httptest.NewServer(NewServer(fake, dir).Handler())
 	defer server.Close()
 
-	lease, session := finalizeTenantLease(t, dir, tenant.TenantID("tenant-a"))
-	// Tamper: the runner echoes back tenant-b instead of the authoritative
-	// tenant-a. Without LookupLease this would redirect the commit into the
-	// tenant-b Redis namespace.
+	lease, session := finalizeNamespaceLease(t, dir, namespace.Namespace("namespace-a"))
+	// Tamper: the runner echoes back namespace-b instead of the authoritative
+	// namespace-a. Without LookupLease this would redirect the commit into the
+	// namespace-b Redis namespace.
 	tampered := *lease
-	tampered.TenantID = tenant.TenantID("tenant-b")
+	tampered.Namespace = namespace.Namespace("namespace-b")
 
 	var resp protocol.ReportResultResponse
 	postJSON(t, server.URL+protocol.ReportResultPath, protocol.ReportResultRequest{
@@ -176,25 +176,25 @@ func TestReportResultTenantTampering(t *testing.T) {
 	if !resp.Accepted {
 		t.Fatalf("report not accepted: %+v", resp)
 	}
-	// The authoritative tenant (tenant-a) must win over the tampered echo.
-	if fake.committedTenant != tenant.TenantID("tenant-a") {
-		t.Fatalf("commit tenant = %q, want tenant-a (authoritative), not the tampered tenant-b", fake.committedTenant)
+	// The authoritative namespace (namespace-a) must win over the tampered echo.
+	if fake.committedNamespace != namespace.Namespace("namespace-a") {
+		t.Fatalf("commit namespace = %q, want namespace-a (authoritative), not the tampered namespace-b", fake.committedNamespace)
 	}
 }
 
-// TestReportResultTenantFieldMissing proves that an old runner that drops the
-// TenantID field from the echoed lease still commits under the authoritative
+// TestReportResultNamespaceFieldMissing proves that an old runner that drops the
+// Namespace field from the echoed lease still commits under the authoritative
 // namespace (server-side completion), so cross-namespace commits never silently
 // fall back to default.
-func TestReportResultTenantFieldMissing(t *testing.T) {
+func TestReportResultNamespaceFieldMissing(t *testing.T) {
 	fake := &fakeControlEngine{}
 	dir := NewMemoryRunnerDirectory()
 	server := httptest.NewServer(NewServer(fake, dir).Handler())
 	defer server.Close()
 
-	lease, session := finalizeTenantLease(t, dir, tenant.TenantID("tenant-a"))
+	lease, session := finalizeNamespaceLease(t, dir, namespace.Namespace("namespace-a"))
 	echoed := *lease
-	echoed.TenantID = "" // old runner omits the field
+	echoed.Namespace = "" // old runner omits the field
 
 	var resp protocol.ReportResultResponse
 	postJSON(t, server.URL+protocol.ReportResultPath, protocol.ReportResultRequest{
@@ -206,8 +206,8 @@ func TestReportResultTenantFieldMissing(t *testing.T) {
 	if !resp.Accepted {
 		t.Fatalf("report not accepted: %+v", resp)
 	}
-	if fake.committedTenant != tenant.TenantID("tenant-a") {
-		t.Fatalf("commit tenant = %q, want tenant-a (authoritative, server-completed)", fake.committedTenant)
+	if fake.committedNamespace != namespace.Namespace("namespace-a") {
+		t.Fatalf("commit namespace = %q, want namespace-a (authoritative, server-completed)", fake.committedNamespace)
 	}
 }
 
@@ -223,7 +223,7 @@ func TestReportResultImmutableFieldMismatch(t *testing.T) {
 	server := httptest.NewServer(NewServer(fake, dir).Handler())
 	defer server.Close()
 
-	lease, session := finalizeTenantLease(t, dir, tenant.TenantID("tenant-a"))
+	lease, session := finalizeNamespaceLease(t, dir, namespace.Namespace("namespace-a"))
 	tampered := *lease
 	tampered.Task.ExecutionID = "exec-different" // rewrite immutable identity
 
@@ -299,7 +299,7 @@ func TestReportResultRejectsDirectoryWithoutLeaseLookup(t *testing.T) {
 	server := httptest.NewServer(NewServer(fake, dir).Handler())
 	defer server.Close()
 
-	lease, session := finalizeTenantLease(t, inner, tenant.TenantID("tenant-a"))
+	lease, session := finalizeNamespaceLease(t, inner, namespace.Namespace("namespace-a"))
 
 	var resp protocol.ReportResultResponse
 	postJSON(t, server.URL+protocol.ReportResultPath, protocol.ReportResultRequest{

@@ -10,8 +10,12 @@ import (
 )
 
 type Capability struct {
-	NodeType    string `json:"node_type"`
-	NodeVersion int    `json:"node_version,omitempty"`
+	NodeType    string   `json:"node_type"`
+	NodeVersion int      `json:"node_version,omitempty"`
+	Runtimes    []string `json:"runtimes,omitempty"`
+	Features    []string `json:"features,omitempty"`
+	Resources   []string `json:"resources,omitempty"`
+	Credentials []string `json:"credentials,omitempty"`
 }
 
 type RegisterRunnerRequest struct {
@@ -19,7 +23,7 @@ type RegisterRunnerRequest struct {
 	Concurrency  int               `json:"concurrency"`
 	Labels       map[string]string `json:"labels,omitempty"`
 	Capabilities []Capability      `json:"capabilities"`
-	Tenants      []string          `json:"tenants,omitempty"`
+	Namespaces   []string          `json:"namespaces,omitempty"`
 	// AuthToken is the runner's bearer token. Preferred: Authorization
 	// header. This body field is a fallback for transports that can't set
 	// headers.
@@ -41,7 +45,8 @@ type HeartbeatRequest struct {
 }
 
 type HeartbeatResponse struct {
-	ServerTime int64 `json:"server_time"`
+	ServerTime  int64                `json:"server_time"`
+	Activations *HeartbeatActivations `json:"activations,omitempty"`
 }
 
 type PollTaskRequest struct {
@@ -68,15 +73,20 @@ type ReportResultRequest struct {
 	// after executing the task. The control plane extracts these to create a
 	// commit span parented to the runner's execute span.
 	TraceCarrier map[string]string `json:"trace_carrier,omitempty"`
+	// GroupResult is set (instead of Result) when the runner reports a group
+	// execution outcome. The control plane uses it to commit via
+	// CommitGroupResult rather than CommitTaskResultWithOutcome.
+	GroupResult *engine.GroupResult `json:"group_result,omitempty"`
 }
 
 type reportResultRequestJSON struct {
-	RunnerID     string            `json:"runner_id"`
-	SessionID    string            `json:"session_id"`
-	Lease        *engine.TaskLease `json:"lease"`
-	Result       json.RawMessage   `json:"result"`
-	AuthToken    string            `json:"auth_token,omitempty"`
-	TraceCarrier map[string]string `json:"trace_carrier,omitempty"`
+	RunnerID     string              `json:"runner_id"`
+	SessionID    string              `json:"session_id"`
+	Lease        *engine.TaskLease   `json:"lease"`
+	Result       json.RawMessage     `json:"result"`
+	AuthToken    string              `json:"auth_token,omitempty"`
+	TraceCarrier map[string]string   `json:"trace_carrier,omitempty"`
+	GroupResult  *engine.GroupResult `json:"group_result,omitempty"`
 }
 
 type taskResultJSON struct {
@@ -105,6 +115,7 @@ func (r ReportResultRequest) MarshalJSON() ([]byte, error) {
 		Result:       resultJSON,
 		AuthToken:    r.AuthToken,
 		TraceCarrier: r.TraceCarrier,
+		GroupResult:  r.GroupResult,
 	})
 }
 
@@ -118,6 +129,7 @@ func (r *ReportResultRequest) UnmarshalJSON(data []byte) error {
 	r.Lease = in.Lease
 	r.AuthToken = in.AuthToken
 	r.TraceCarrier = in.TraceCarrier
+	r.GroupResult = in.GroupResult
 	result, err := UnmarshalTaskResult(in.Result)
 	if err != nil {
 		return err
@@ -203,7 +215,7 @@ type HelloFrame struct {
 	Concurrency  int
 	Capabilities []Capability
 	Labels       map[string]string
-	Tenants      []string
+	Namespaces   []string
 }
 
 type ResultFrame struct {

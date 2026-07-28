@@ -30,7 +30,7 @@ func NewScriptMetrics(metrics *Metrics) ScriptMetrics {
 
 // OnScriptExecute records a script execution counter and duration histogram.
 func (s ScriptMetrics) OnScriptExecute(ctx context.Context, language, runtime, outcome string, duration time.Duration) {
-	labels := withTenant(ctx, map[string]string{
+	labels := withNamespace(ctx, map[string]string{
 		"language": language,
 		"runtime":  runtime,
 		"outcome":  outcome,
@@ -41,7 +41,7 @@ func (s ScriptMetrics) OnScriptExecute(ctx context.Context, language, runtime, o
 
 // OnScriptOutputBytes records the JSON-encoded result size histogram.
 func (s ScriptMetrics) OnScriptOutputBytes(ctx context.Context, language, runtime string, size int) {
-	s.Metrics.ObserveBytes(metricScriptOutputBytes, withTenant(ctx, map[string]string{
+	s.Metrics.ObserveBytes(metricScriptOutputBytes, withNamespace(ctx, map[string]string{
 		"language": language,
 		"runtime":  runtime,
 	}), size)

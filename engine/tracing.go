@@ -1,8 +1,8 @@
 package engine
 
 import (
-	"go.opentelemetry.io/otel"
 	"github.com/xbcio/xflow/observability/tracing"
+	"go.opentelemetry.io/otel"
 )
 
 // engineInstrumentationName is the OTel tracer name for engine-owned spans.

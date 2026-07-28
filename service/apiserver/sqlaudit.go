@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/xbcio/xflow/backend/tenant"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/store"
 )
 
@@ -46,26 +46,26 @@ func (s *SQLAuditSink) ReceiptAppender() store.ReceiptAuditAppender {
 // Append persists one audit event durably. On error the caller must fail
 // closed for mutations — never execute an unaudited mutation.
 //
-// Tenant boundary (Task 7.4): the authoritative tenant is read from ctx
-// (tenant.FromContext). The event's TenantID is used only as a fallback when
-// ctx carries no explicit tenant, preserving compatibility with callers that
+// Namespace boundary (Task 7.4): the authoritative namespace is read from ctx
+// (namespace.FromContext). The event's Namespace is used only as a fallback when
+// ctx carries no explicit namespace, preserving compatibility with callers that
 // already set it from the authenticated principal.
 func (s *SQLAuditSink) Append(ctx context.Context, ev AuditEvent) error {
 	if s.appender == nil {
 		return ErrAuditUnavailable
 	}
-	// Prefer the tenant in context (the consistent cross-cutting source); fall
-	// back to the principal-bound tenant carried by the event. DefaultTenant is
-	// treated as "no explicit tenant in context" so single-tenant callers that
-	// set ev.TenantID still persist it.
-	tenantID := string(tenant.FromContext(ctx))
-	if tenantID == "" || tenantID == string(tenant.DefaultTenant) {
-		tenantID = ev.TenantID
+	// Prefer the namespace in context (the consistent cross-cutting source); fall
+	// back to the principal-bound namespace carried by the event. DefaultNamespace is
+	// treated as "no explicit namespace in context" so single-namespace callers that
+	// set ev.Namespace still persist it.
+	namespaceID := string(namespace.FromContext(ctx))
+	if namespaceID == "" || namespaceID == string(namespace.Default) {
+		namespaceID = ev.Namespace
 	}
 	rec := &store.AuditRecord{
 		RequestID:      ev.RequestID,
 		Principal:      ev.Principal,
-		TenantID:       tenantID,
+		Namespace:      namespaceID,
 		Operation:      ev.Operation,
 		Resource:       ev.Resource,
 		WorkflowID:     ev.WorkflowID,

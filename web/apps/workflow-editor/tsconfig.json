@@ -1,7 +1,0 @@
-{
-  "extends": "@xflow/typescript-config/react",
-  "compilerOptions": {
-    "noEmit": true
-  },
-  "include": ["src/**/*", "vite.config.ts"]
-}

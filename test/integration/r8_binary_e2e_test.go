@@ -32,7 +32,7 @@ import (
 // r8Token is a test-only bearer token written to the production auth-tokens
 // file. The server runs in production mode (fail-closed); this token + the
 // tokens file satisfy PrincipalAuth. The token is scoped to the default
-// tenant with workflow/execution/management.read scopes.
+// namespace with workflow/execution/management.read scopes.
 const r8Token = "r8-prod-token-015a3e7f9c"
 
 // r8HTTPClient is the shared client for R8 API calls.
@@ -106,14 +106,14 @@ func buildR8Binaries(t *testing.T) (serverBin, runnerBin string) {
 }
 
 // writeR8TokensFile writes the production auth-tokens file (0600) binding
-// r8Token to the default tenant with workflow/execution/management scopes.
+// r8Token to the default namespace with workflow/execution/management scopes.
 func writeR8TokensFile(t *testing.T) string {
 	t.Helper()
 	mappings := []map[string]any{{
-		"token":   r8Token,
-		"subject": "r8",
-		"tenant":  "default",
-		"scopes":  []string{"workflow", "execution", "management.read", "management.runner.read"},
+		"token":     r8Token,
+		"subject":   "r8",
+		"namespace": "default",
+		"scopes":    []string{"workflow", "execution", "management.read", "management.runner.read"},
 	}}
 	raw, err := json.Marshal(mappings)
 	if err != nil {
@@ -207,8 +207,8 @@ type r8Process struct {
 
 // startR8Runner starts the production runner binary against the server. The
 // runner-protocol auth on the server is DisabledAuthenticator (no -auth-policy),
-// so no -token is needed; the runner serves the default tenant, matching the
-// submitter token's tenant binding.
+// so no -token is needed; the runner serves the default namespace, matching the
+// submitter token's namespace binding.
 func startR8Runner(t *testing.T, runnerBin, httpURL, id string) *r8Process {
 	t.Helper()
 	out := &safeBuffer{}

@@ -30,7 +30,7 @@ const (
 )
 
 // RuntimeEvidenceEvent is a read-only observation of a production mutation
-// boundary. It carries no error full text, credential, tenant payload, or
+// boundary. It carries no error full text, credential, namespace payload, or
 // handler output. It is additive evidence only; it never changes commit
 // control flow or return values.
 type RuntimeEvidenceEvent struct {
@@ -151,7 +151,7 @@ func (e *Engine) publishAdvanceReceipt(ctx context.Context, task *Task, result A
 
 // publishRetryReceipt publishes a read-only retry evidence event after the
 // engine decided to schedule a retry. Non-blocking; never changes retry control
-// flow or return values. It carries no error full text, credentials, or tenant
+// flow or return values. It carries no error full text, credentials, or namespace
 // payload.
 func (e *Engine) publishRetryReceipt(ctx context.Context, task *Task, attempt int) {
 	if e.evidenceBuffer == nil {

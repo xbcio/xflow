@@ -271,6 +271,7 @@ func (s *FilePolicyStore) authenticate(runnerID, token string, info TransportInf
 		tokenHash = sha256.Sum256([]byte(token))
 	}
 	tlsSubject := strings.ToLower(info.TLSPeerCN)
+	idPrefixDenied := false
 	for _, e := range snap.entries {
 		if e.hasToken {
 			if token == "" {
@@ -285,14 +286,23 @@ func (s *FilePolicyStore) authenticate(runnerID, token string, info TransportInf
 				continue
 			}
 		}
+		// The credentials matched this entry but the runner ID is outside its
+		// allowed prefix. Do not deny outright: a later entry may legitimately
+		// authorize the same credentials for this runner ID. Remember the prefix
+		// rejection and, only if no entry ultimately matches, deny with the
+		// prefix reason.
 		if runnerID != "" && !strings.HasPrefix(runnerID, e.idPrefix) {
-			return s.deny(ErrAuthIDPrefixDenied)
+			idPrefixDenied = true
+			continue
 		}
 		return RunnerPolicy{
 			Name:             e.name,
 			IDPrefix:         e.idPrefix,
 			AllowedNodeTypes: append([]string(nil), e.allowedTypes...),
 		}, nil
+	}
+	if idPrefixDenied {
+		return s.deny(ErrAuthIDPrefixDenied)
 	}
 	if token == "" {
 		return s.deny(ErrAuthMissingToken)

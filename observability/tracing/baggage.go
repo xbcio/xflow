@@ -11,14 +11,14 @@ import (
 
 // BaggagePolicy bounds what W3C baggage the propagator accepts on Extract.
 // Baggage is opt-in (see ProviderConfig.Baggage) precisely because it can
-// carry unbounded, cross-tenant, or secret data; this policy enforces a key
+// carry unbounded, cross-namespace, or secret data; this policy enforces a key
 // denylist, per-value length cap, entry-count cap, and total serialized size
 // cap so a malicious or misbehaving peer cannot smuggle sensitive material or
 // exhaust server memory through baggage.
 type BaggagePolicy struct {
 	// ForbiddenKeys are always rejected, regardless of AllowedKeys. They cover
-	// the security-policy §3 / RELEASE-GATES §4.1 tenants: identity, secrets,
-	// and request payloads must never ride in baggage. Tenant travels as a span
+	// the security-policy §3 / RELEASE-GATES §4.1 namespaces: identity, secrets,
+	// and request payloads must never ride in baggage. Namespace travels as a span
 	// attribute only.
 	ForbiddenKeys []string
 	// AllowedKeys, when non-empty, is an allowlist: only these keys are
@@ -36,19 +36,20 @@ type BaggagePolicy struct {
 	MaxTotalBytes int
 }
 
-// DefaultBaggagePolicy returns a safe default policy: tenant/token/payload
+// DefaultBaggagePolicy returns a safe default policy: namespace/token/payload
 // and common secret-ish keys are denied, values are capped at 1KiB, at most 16
 // entries, and 8KiB total.
 func DefaultBaggagePolicy() BaggagePolicy {
 	return BaggagePolicy{
 		ForbiddenKeys: []string{
+			"namespace", "namespace_id", "xflow.namespace",
 			"tenant", "tenant_id", "xflow.tenant",
 			"token", "auth_token", "access_token", "refresh_token",
 			"payload", "body", "secret", "credential", "ak", "sk",
 		},
-		MaxValueLen:    1024,
-		MaxEntries:     16,
-		MaxTotalBytes:  8 * 1024,
+		MaxValueLen:   1024,
+		MaxEntries:    16,
+		MaxTotalBytes: 8 * 1024,
 	}
 }
 

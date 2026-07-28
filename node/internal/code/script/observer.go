@@ -17,7 +17,7 @@ type Observer interface {
 type noopObserver struct{}
 
 func (noopObserver) OnScriptExecute(context.Context, string, string, string, time.Duration) {}
-func (noopObserver) OnScriptOutputBytes(context.Context, string, string, int)             {}
+func (noopObserver) OnScriptOutputBytes(context.Context, string, string, int)               {}
 
 var (
 	observerMu sync.RWMutex

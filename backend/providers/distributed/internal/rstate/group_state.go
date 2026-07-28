@@ -33,12 +33,17 @@ if status == 'running' or status == 'done' then
     return {0}
 end
 local ttl = tonumber(ARGV[4])
+local prevAttempt = tonumber(redis.call('HGET', KEYS[2], 'attempt') or '0')
+local attempt = tonumber(ARGV[3])
+if prevAttempt >= attempt then
+    attempt = prevAttempt + 1
+end
 redis.call('SET', KEYS[1], 'running', 'EX', ttl)
-redis.call('HSET', KEYS[2], 'lease_id', ARGV[1], 'lease_token', ARGV[2], 'attempt', ARGV[3])
+redis.call('HSET', KEYS[2], 'lease_id', ARGV[1], 'lease_token', ARGV[2], 'attempt', tostring(attempt))
 redis.call('EXPIRE', KEYS[2], ttl)
 redis.call('ZADD', KEYS[3], tonumber(ARGV[5]), ARGV[6])
 redis.call('EXPIRE', KEYS[3], ttl)
-return {1}
+return {1, attempt}
 `)
 
 // renewGroupLeaseLua extends the deadline only when token still matches.
@@ -54,16 +59,20 @@ return {1}
 `)
 
 // commitGroupLua terminalizes exactly ONE unit and decrements the unit-based
-// remaining counter — the group analogue of commitNodeLua. Boundary outputs are
-// written per source-member output key by the Go wrapper BEFORE this runs (they
-// are idempotent SETs); this script owns the fence + counter + downstream unit
-// arrival counting (identical to advanceNodeLua's per-unit loop) so the terminal
-// transition, completion decision, and fan-in are one atomic step.
+// remaining counter — the group analogue of commitNodeLua. Boundary outputs
+// are written by THIS script, after the fence check and before any other
+// state mutation (F2 fix): a prior version wrote them via a separate,
+// unchecked s.rdb.Set call before this script ran at all, so a stale/failed
+// commit attempt could still clobber output, and a crash between that write
+// and the fenced transition could leave a half-committed state. Output writes
+// now share the exact same fence (token/attempt/status/execution-active) as
+// the terminal transition and downstream fan-in, in one atomic step.
 //
 // KEYS: 1=exec:status 2=exec:error 3=remaining 4=failed 5=group:status
 //
 //	6=group:meta 7=leases(zset) 8=outbox:ready 9=outbox:body
-//	10.. = per downstream unit: inDegree, active, schedule (3 keys each)
+//	10.. = per exit: output key (1 key each), followed by
+//	       per downstream unit: inDegree, active, schedule (3 keys each)
 //
 // Redis Cluster: all keys share the same {id} hash tag (execution ID) so they
 // map to one slot. The namespace prefix is brace-less and does not participate
@@ -73,8 +82,9 @@ return {1}
 //
 // ARGV: 1=lease_token 2=attempt 3=ttl_s 4=lease_member 5=outcome(success|failed)
 //
-//	6=fatal(0|1) 7=allowCycles(0|1) 8=error 9=downstreamCount
-//	10.. = per unit: arrivalCount, activeCount, mergeMode,
+//	6=fatal(0|1) 7=allowCycles(0|1) 8=error 9=exitCount 10=downstreamCount
+//	11.. = per exit: encoded output data (1 arg each), followed by
+//	       per unit: arrivalCount, activeCount, mergeMode,
 //	       executeID, executeBody, skipID, skipBody (7 args each)
 //
 // Returns {code, done, finalStatus}: code 0=stale 1=accepted 2=duplicate_terminal
@@ -102,6 +112,15 @@ if token == '' or token ~= ARGV[1] or attempt ~= tonumber(ARGV[2]) then
     return {0, 0, ''}
 end
 local ttl = tonumber(ARGV[3])
+-- F2: boundary outputs are written here, strictly after the fence check
+-- above and before any other mutation, so a stale/duplicate/failed commit
+-- attempt can never reach this point and cannot alter output.
+local exitCount = tonumber(ARGV[9] or '0')
+local keypos = 10
+for i = 1, exitCount do
+    redis.call('SET', KEYS[keypos], ARGV[10 + i], 'EX', ttl)
+    keypos = keypos + 1
+end
 redis.call('SET', KEYS[5], 'done', 'EX', ttl)
 redis.call('HSET', KEYS[6], 'lease_id', '', 'lease_token', '', 'committed_lease_token', ARGV[1])
 redis.call('EXPIRE', KEYS[6], ttl)
@@ -132,9 +151,8 @@ if tonumber(ARGV[7]) == 0 then
     end
 end
 if done == 0 and tonumber(ARGV[6]) == 0 and redis.call('GET', KEYS[1]) ~= 'canceling' then
-    local n = tonumber(ARGV[9] or '0')
-    local keypos = 10
-    local argpos = 10
+    local n = tonumber(ARGV[10] or '0')
+    local argpos = 10 + exitCount + 1
     for i = 1, n do
         local inDegreeKey = KEYS[keypos]
         local activeKey = KEYS[keypos + 1]
@@ -195,7 +213,6 @@ return {1, done, finalStatus}
 func (s *Store) AcquireGroupLease(ctx context.Context, lease *engine.GroupLease) (bool, error) {
 	t := namespace.FromContext(ctx)
 	ttl := s.getExecTTL(lease.ExecutionID)
-	// deadline derived from IssuedAt+TTL, consistent with TaskLease.
 	deadlineMs := lease.IssuedAt.Add(lease.TTL).UnixMilli()
 	res, err := acquireGroupLeaseLua.Run(ctx, s.rdb, []string{
 		groupUnitStatusKey(t, lease.ExecutionID, lease.GroupUnitIdx),
@@ -207,7 +224,13 @@ func (s *Store) AcquireGroupLease(ctx context.Context, lease *engine.GroupLease)
 	if err != nil {
 		return false, fmt.Errorf("acquire group lease %q/#%d: %w", lease.ExecutionID, lease.GroupUnitIdx, err)
 	}
-	return len(res) == 1 && redisResultInt(res[0]) == 1, nil
+	if len(res) == 0 || redisResultInt(res[0]) == 0 {
+		return false, nil
+	}
+	if len(res) >= 2 {
+		lease.Attempt = int(redisResultInt(res[1]))
+	}
+	return true, nil
 }
 
 func (s *Store) RenewGroupLease(ctx context.Context, id types.ExecutionID, unitIdx int, token engine.LeaseToken, deadline time.Time) (bool, error) {
@@ -226,15 +249,6 @@ func (s *Store) RenewGroupLease(ctx context.Context, id types.ExecutionID, unitI
 func (s *Store) CommitGroup(ctx context.Context, req engine.GroupCommitRequest) (engine.GroupCommitResult, error) {
 	t := namespace.FromContext(ctx)
 	ttl := s.getExecTTL(req.ExecutionID)
-	// 1. Idempotent boundary output writes (source member name -> output key).
-	// Replay-safe: SET is idempotent.
-	for _, ex := range req.Exits {
-		encoded, err := json.Marshal(ex.Data)
-		if err != nil {
-			return engine.GroupCommitResult{}, fmt.Errorf("marshal group exit %q/%q: %w", req.ExecutionID, ex.NodeName, err)
-		}
-		s.rdb.Set(ctx, outputKey(t, req.ExecutionID, ex.NodeName), string(encoded), ttl)
-	}
 	allowCycles := 0 // Milestone A: group is never cyclic (AllowCycles and group are mutually exclusive)
 	fatal := 0
 	if req.Fatal {
@@ -254,8 +268,23 @@ func (s *Store) CommitGroup(ctx context.Context, req engine.GroupCommitRequest) 
 	args := []any{
 		string(req.LeaseToken), req.Attempt, int(ttl.Seconds()),
 		groupLeaseMember(req.ExecutionID, req.GroupUnitIdx),
-		string(req.Outcome), fatal, allowCycles, req.Error, len(req.Downstream),
+		string(req.Outcome), fatal, allowCycles, req.Error, len(req.Exits), len(req.Downstream),
 	}
+	// F2: boundary outputs are passed as KEYS/ARGV to commitGroupLua so they
+	// are written under the exact same fence as the terminal transition — no
+	// separate, unchecked Set call before the script runs. Encoding errors are
+	// caught here (fail before any Redis command runs); Redis command errors
+	// are surfaced by the single Run() call below.
+	exitArgs := make([]any, 0, len(req.Exits))
+	for _, ex := range req.Exits {
+		encoded, err := json.Marshal(ex.Data)
+		if err != nil {
+			return engine.GroupCommitResult{}, fmt.Errorf("marshal group exit %q/%q: %w", req.ExecutionID, ex.NodeName, err)
+		}
+		keys = append(keys, outputKey(t, req.ExecutionID, ex.NodeName))
+		exitArgs = append(exitArgs, string(encoded))
+	}
+	args = append(args, exitArgs...)
 	// Downstream unit arrivals: each arrival appends 3 counting keys + 7 args
 	// (execute/skip body), structurally identical to AdvanceNode wrapper
 	// (state_commit.go:258-289) but keyed by UnitIdx.
@@ -325,4 +354,83 @@ func (s *Store) CommitGroup(ctx context.Context, req engine.GroupCommitRequest) 
 		s.evictExecutionCaches(req.ExecutionID)
 	}
 	return out, nil
+}
+
+// ---------------------------------------------------------------------------
+// GroupLeaseReader + GroupLeaseExpirer
+// ---------------------------------------------------------------------------
+
+var _ engine.GroupLeaseReader = (*Store)(nil)
+var _ engine.GroupLeaseExpirer = (*Store)(nil)
+
+func (s *Store) GetGroupLease(ctx context.Context, id types.ExecutionID, unitIdx int) (*engine.GroupLease, error) {
+	t := namespace.FromContext(ctx)
+	statusKey := groupUnitStatusKey(t, id, unitIdx)
+	metaKey := groupUnitMetaKey(t, id, unitIdx)
+
+	status, err := s.rdb.Get(ctx, statusKey).Result()
+	if err == redis.Nil || status != "running" {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get group lease status %q/#%d: %w", id, unitIdx, err)
+	}
+
+	meta, err := s.rdb.HGetAll(ctx, metaKey).Result()
+	if err != nil {
+		return nil, fmt.Errorf("get group lease meta %q/#%d: %w", id, unitIdx, err)
+	}
+	if len(meta) == 0 {
+		return nil, nil
+	}
+
+	attempt := 1
+	if v, ok := meta["attempt"]; ok {
+		fmt.Sscanf(v, "%d", &attempt)
+	}
+
+	return &engine.GroupLease{
+		LeaseID:      engine.LeaseID(meta["lease_id"]),
+		LeaseToken:   engine.LeaseToken(meta["lease_token"]),
+		Attempt:      attempt,
+		ExecutionID:  id,
+		GroupUnitIdx: unitIdx,
+	}, nil
+}
+
+// expireGroupLeaseLua transitions a running group unit back to pending (retry-ready)
+// only if the token still matches. Increments attempt. Returns {1} if expired,
+// {0} if token mismatch/already terminal.
+// KEYS: 1=group:status 2=group:meta 3=leases(zset)
+// ARGV: 1=token 2=ttl_s 3=lease_member
+var expireGroupLeaseLua = redis.NewScript(`
+local status = redis.call('GET', KEYS[1])
+if status ~= 'running' then
+    return {0}
+end
+local token = redis.call('HGET', KEYS[2], 'lease_token') or ''
+if token ~= ARGV[1] then
+    return {0}
+end
+local attempt = tonumber(redis.call('HGET', KEYS[2], 'attempt') or '1')
+local ttl = tonumber(ARGV[2])
+redis.call('SET', KEYS[1], 'pending', 'EX', ttl)
+redis.call('HSET', KEYS[2], 'lease_id', '', 'lease_token', '', 'attempt', tostring(attempt + 1))
+redis.call('EXPIRE', KEYS[2], ttl)
+redis.call('ZREM', KEYS[3], ARGV[3])
+return {1}
+`)
+
+func (s *Store) ExpireGroupLease(ctx context.Context, id types.ExecutionID, unitIdx int, token engine.LeaseToken) (bool, error) {
+	t := namespace.FromContext(ctx)
+	ttl := s.getExecTTL(id)
+	res, err := expireGroupLeaseLua.Run(ctx, s.rdb, []string{
+		groupUnitStatusKey(t, id, unitIdx),
+		groupUnitMetaKey(t, id, unitIdx),
+		leaseExpiryZSetKey(t, id),
+	}, string(token), int(ttl.Seconds()), groupLeaseMember(id, unitIdx)).Slice()
+	if err != nil {
+		return false, fmt.Errorf("expire group lease %q/#%d: %w", id, unitIdx, err)
+	}
+	return len(res) == 1 && redisResultInt(res[0]) == 1, nil
 }

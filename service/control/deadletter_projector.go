@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/xbcio/xflow/backend/tenant"
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/store"
 )
 
@@ -73,7 +73,7 @@ func receiptToAuditRecord(r engine.ReplayReceipt) *store.AuditRecord {
 	return &store.AuditRecord{
 		RequestID:      r.RequestID,
 		Principal:      r.Operator,
-		TenantID:       r.TenantID,
+		Namespace:      r.Namespace,
 		Operation:      deadLetterProjectorOperation,
 		Resource:       "dead-letters/" + r.ExecutionID,
 		ExecutionID:    r.ExecutionID,
@@ -96,9 +96,9 @@ func receiptToAuditRecord(r engine.ReplayReceipt) *store.AuditRecord {
 // The AuditID is the same idempotency key the reconcile command reads from
 // the Redis receipt hash, so a projection from either path collapses to one
 // row.
-func receiptFromReplay(res engine.ReplayDeadLetterResult, req engine.ReplayDeadLetterRequest, tenantID string) engine.ReplayReceipt {
+func receiptFromReplay(res engine.ReplayDeadLetterResult, req engine.ReplayDeadLetterRequest, namespaceID string) engine.ReplayReceipt {
 	return engine.ReplayReceipt{
-		TenantID:     tenantID,
+		Namespace:    namespaceID,
 		ExecutionID:  string(res.ExecutionID),
 		RequestID:    req.RequestID,
 		AuditID:      res.AuditID,
@@ -127,9 +127,9 @@ func receiptFromReplay(res engine.ReplayDeadLetterResult, req engine.ReplayDeadL
 // admission/outcome/reconciled-phase framework to T9.
 type projectorAuditSink struct {
 	projector *ReceiptProjector
-	observer engine.OutboxObserver // may be nil
-	maxRetry int
-	sleep    func(time.Duration)
+	observer  engine.OutboxObserver // may be nil
+	maxRetry  int
+	sleep     func(time.Duration)
 }
 
 // NewProjectorAuditSink returns a DeadLetterAuditSink that durably projects
@@ -150,8 +150,8 @@ func NewProjectorAuditSink(projector *ReceiptProjector, observer engine.OutboxOb
 // (Redis is authoritative), and a failed projection is recorded as an alarm
 // metric for the reconcile command to catch up.
 func (s *projectorAuditSink) RecordReplay(ctx context.Context, res engine.ReplayDeadLetterResult, req engine.ReplayDeadLetterRequest) error {
-	tenantID := tenantIDFromContext(ctx)
-	r := receiptFromReplay(res, req, tenantID)
+	namespaceID := namespaceIDFromContext(ctx)
+	r := receiptFromReplay(res, req, namespaceID)
 	var lastErr error
 	backoff := 10 * time.Millisecond
 	for attempt := 0; attempt <= s.maxRetry; attempt++ {
@@ -171,11 +171,11 @@ func (s *projectorAuditSink) RecordReplay(ctx context.Context, res engine.Replay
 	return lastErr
 }
 
-// tenantIDFromContext returns the server-injected tenant from the request
-// context. The authz wrapper injects the verified principal's tenant via
-// tenant.WithTenant; the manager path always carries one. A background
+// namespaceIDFromContext returns the server-injected namespace from the request
+// context. The authz wrapper injects the verified principal's namespace via
+// namespace.WithNamespace; the manager path always carries one. A background
 // context (reconcile command) yields the empty string and the projector
-// relies on the receipt's tenant (read from the Redis receipt key).
-func tenantIDFromContext(ctx context.Context) string {
-	return string(tenant.FromContext(ctx))
+// relies on the receipt's namespace (read from the Redis receipt key).
+func namespaceIDFromContext(ctx context.Context) string {
+	return string(namespace.FromContext(ctx))
 }

@@ -59,7 +59,7 @@ type ProviderConfig struct {
 	SampleRatio float64
 	// Baggage, when true, enables W3C Baggage propagation in addition to
 	// TraceContext. Default false: baggage is opt-in because it can carry
-	// unbounded/cross-tenant data. When enabled, callers should bound the keys
+	// unbounded/cross-namespace data. When enabled, callers should bound the keys
 	// and values they accept.
 	Baggage bool
 }
@@ -123,7 +123,7 @@ func NewTracerProvider(ctx context.Context, cfg ProviderConfig) (Tracer, func(co
 
 	otel.SetTracerProvider(tp)
 	// Default propagator is W3C TraceContext only. Baggage is opt-in: it can
-	// carry unbounded cross-tenant data, so callers must explicitly enable it
+	// carry unbounded cross-namespace data, so callers must explicitly enable it
 	// and the propagator enforces a BaggagePolicy (key denylist + value/size
 	// caps) on extraction. The standard Baggage propagator is never installed
 	// directly.

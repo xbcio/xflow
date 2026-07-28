@@ -3,7 +3,7 @@ package control
 import (
 	"testing"
 
-	backendlocal "github.com/xbcio/xflow/backend/local"
+	backendlocal "github.com/xbcio/xflow/backend/providers/local"
 	"github.com/xbcio/xflow/engine"
 )
 

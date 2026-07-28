@@ -70,7 +70,7 @@ func TestDeadLetterCLIBreakGlassWarning(t *testing.T) {
 
 	var replayOut bytes.Buffer
 	err = executeRootWith(&replayOut, "dead-letter", "--break-glass", "--redis-addr", mr.Addr(), "replay",
-		"--execution", execID, "--entry", entryID, "--reason", "operator triage", "--request-id", "req-bg-warn", "--tenant", "default")
+		"--execution", execID, "--entry", entryID, "--reason", "operator triage", "--request-id", "req-bg-warn", "--namespace", "default")
 	if err != nil {
 		t.Fatalf("break-glass replay: %v", err)
 	}

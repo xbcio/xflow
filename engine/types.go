@@ -55,6 +55,17 @@ type Task struct {
 	UnitIdx int `json:"-"`
 }
 
+// UnitIdxUnknown is the sentinel value for Task.UnitIdx meaning "the durable
+// wire envelope this task was decoded from did not carry a _unit_idx field".
+// Pure codecs (queue/outbox/dead-letter/assignment) set UnitIdx to this value
+// instead of silently defaulting to 0 or NodeIdx when the field is absent —
+// 0 is a legitimate unit index and NodeIdx is only equal to the unit index
+// for graphs with no groups (see engine/graph/unit.go buildUnits). A
+// graph-aware resolver layer (not the pure codec) is responsible for turning
+// UnitIdxUnknown into a real unit index via Graph.UnitIndexForNode, or
+// failing closed if it cannot load the authoritative graph.
+const UnitIdxUnknown = -1
+
 // LeaseID uniquely identifies one assignment of a queued task to a runner.
 type LeaseID string
 
@@ -120,15 +131,21 @@ type TaskLease struct {
 	// runner can create properly-parented execution spans. Populated by the
 	// control plane when dispatching; nil when tracing is disabled or unsampled.
 	TraceCarrier map[string]string `json:"trace_carrier,omitempty"`
+	// GroupPayload carries the full group execution context for TaskTypeGroupExec
+	// tasks. Nil for regular node tasks. The control plane populates this from
+	// BuildGroupLease/RecoverGroupLease and serializes it on the wire so the
+	// runner has the group package, entry input, and idempotency key.
+	GroupPayload *GroupLeasePayload `json:"group_payload,omitempty"`
 }
 
 // TaskRouting is the side-effect-free routing metadata for a queued task. It is
 // used by control-plane dispatchers to pick a capable runner before issuing a
 // lease, so queue backpressure does not consume handler attempts.
 type TaskRouting struct {
-	NodeType       string `json:"node_type"`
-	NodeVersion    int    `json:"node_version,omitempty"`
-	RunnerSelector *types.RunnerSelector
+	NodeType       string                `json:"node_type"`
+	NodeVersion    int                   `json:"node_version,omitempty"`
+	RunnerSelector *types.RunnerSelector `json:"runner_selector,omitempty"`
+	Requirements   []CapabilityRequirement `json:"requirements,omitempty"`
 }
 
 // Deadline returns the wall-clock instant after which the lease is considered
@@ -181,6 +198,7 @@ type NodeSnapshot struct {
 	ExecutionID types.ExecutionID
 	Name        string
 	NodeIdx     int
+	UnitIdx     int
 	Status      types.NodeStatus
 	LeaseID     LeaseID
 	LeaseToken  LeaseToken
@@ -218,6 +236,7 @@ type ExpiredLease struct {
 	ExecutionID  types.ExecutionID
 	NodeName     string
 	NodeIdx      int
+	UnitIdx      int
 	LeaseID      LeaseID
 	LeaseToken   LeaseToken
 	IssuedAt     time.Time
