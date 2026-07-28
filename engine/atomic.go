@@ -406,6 +406,10 @@ func (e *Engine) handleSystemTask(ctx context.Context, task *Task, flush bool) (
 			Status:       types.NodeStatusSkipped,
 		}, result, flush)
 	case TaskTypeGroupExec:
+		if e.groupExecutor == nil {
+			// No local executor — let the Dispatcher route this to a remote runner.
+			return false, nil
+		}
 		return true, e.executeGroup(ctx, task, flush)
 	default:
 		return false, nil

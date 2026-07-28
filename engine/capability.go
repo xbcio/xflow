@@ -125,7 +125,8 @@ func RequirementsFromGraphPackage(graphReqs []graph.Requirement) []CapabilityReq
 		})
 	}
 	reqs = append(reqs, CapabilityRequirement{
-		Feature: FeatureGroupExecV1,
+		NodeType: "xflow.group",
+		Feature:  FeatureGroupExecV1,
 	})
 	return NormalizeRequirements(reqs)
 }
