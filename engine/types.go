@@ -131,6 +131,11 @@ type TaskLease struct {
 	// runner can create properly-parented execution spans. Populated by the
 	// control plane when dispatching; nil when tracing is disabled or unsampled.
 	TraceCarrier map[string]string `json:"trace_carrier,omitempty"`
+	// GroupPayload carries the full group execution context for TaskTypeGroupExec
+	// tasks. Nil for regular node tasks. The control plane populates this from
+	// BuildGroupLease/RecoverGroupLease and serializes it on the wire so the
+	// runner has the group package, entry input, and idempotency key.
+	GroupPayload *GroupLeasePayload `json:"group_payload,omitempty"`
 }
 
 // TaskRouting is the side-effect-free routing metadata for a queued task. It is

@@ -218,7 +218,14 @@ func (c *Core) pollTask(ctx context.Context, req protocol.PollTaskRequest, info 
 		// create a new lease or strand the existing fenced ownership.
 		if claim.Lease != nil {
 			lease := claim.Lease
-			if lease.Input == nil {
+			if isGroupTask(&lease.Task) {
+				// Group replay: rebuild GroupPayload from backend state.
+				var recoverErr error
+				lease, recoverErr = c.replayGroupLease(ctx, lease)
+				if recoverErr != nil {
+					return protocol.PollTaskResponse{}, recoverErr
+				}
+			} else if lease.Input == nil {
 				var recoverErr error
 				lease, recoverErr = c.recoverTaskLease(ctx, &claim.Assignment.Task)
 				if recoverErr != nil {
@@ -233,6 +240,22 @@ func (c *Core) pollTask(ctx context.Context, req protocol.PollTaskRequest, info 
 			_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimRequeue)
 			return protocol.PollTaskResponse{}, ErrEngineNotConfigured
 		}
+
+		// Group tasks dispatch through a separate path that builds a GroupLease
+		// with the full package payload instead of a regular TaskLease.
+		if isGroupTask(&claim.Assignment.Task) {
+			resp, err := c.dispatchGroupLease(ctx, claim)
+			if err != nil {
+				return protocol.PollTaskResponse{}, err
+			}
+			if resp.Lease != nil {
+				return resp, nil
+			}
+			// resp.Lease == nil with no error means the execution is inactive
+			// (dropped). Loop to try the next claim.
+			continue
+		}
+
 		tracer := c.tracer
 		if tracer == nil {
 			tracer = tracing.NoopTracer{}
@@ -420,7 +443,13 @@ func (c *Core) reportResult(ctx context.Context, req protocol.ReportResultReques
 	)
 	defer span.End()
 
-	outcome, err := c.engine.CommitTaskResultWithOutcome(ctx, authoritativeLease, req.Result)
+	var outcome engine.CommitOutcome
+	var err error
+	if req.GroupResult != nil && isGroupTask(&authoritativeLease.Task) {
+		outcome, err = c.commitGroupResult(ctx, authoritativeLease, *req.GroupResult)
+	} else {
+		outcome, err = c.engine.CommitTaskResultWithOutcome(ctx, authoritativeLease, req.Result)
+	}
 	if err != nil {
 		span.RecordError(err)
 	}

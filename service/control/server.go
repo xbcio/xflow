@@ -198,6 +198,23 @@ func (s *Server) HandleReportResult(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+func (s *Server) HandleRenewLease(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+	var req protocol.RenewLeaseRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	overrideTokenFromHeader(r, &req.AuthToken)
+	resp, err := s.core.renewLease(r.Context(), req, httpTransportInfo(r))
+	if err != nil {
+		writeRunnerError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
 // overrideTokenFromHeader gives Authorization: Bearer priority over the body
 // AuthToken field. Header transport is preferred per the spec.
 func overrideTokenFromHeader(r *http.Request, dst *string) {

@@ -72,15 +72,20 @@ type ReportResultRequest struct {
 	// after executing the task. The control plane extracts these to create a
 	// commit span parented to the runner's execute span.
 	TraceCarrier map[string]string `json:"trace_carrier,omitempty"`
+	// GroupResult is set (instead of Result) when the runner reports a group
+	// execution outcome. The control plane uses it to commit via
+	// CommitGroupResult rather than CommitTaskResultWithOutcome.
+	GroupResult *engine.GroupResult `json:"group_result,omitempty"`
 }
 
 type reportResultRequestJSON struct {
-	RunnerID     string            `json:"runner_id"`
-	SessionID    string            `json:"session_id"`
-	Lease        *engine.TaskLease `json:"lease"`
-	Result       json.RawMessage   `json:"result"`
-	AuthToken    string            `json:"auth_token,omitempty"`
-	TraceCarrier map[string]string `json:"trace_carrier,omitempty"`
+	RunnerID     string              `json:"runner_id"`
+	SessionID    string              `json:"session_id"`
+	Lease        *engine.TaskLease   `json:"lease"`
+	Result       json.RawMessage     `json:"result"`
+	AuthToken    string              `json:"auth_token,omitempty"`
+	TraceCarrier map[string]string   `json:"trace_carrier,omitempty"`
+	GroupResult  *engine.GroupResult `json:"group_result,omitempty"`
 }
 
 type taskResultJSON struct {
@@ -109,6 +114,7 @@ func (r ReportResultRequest) MarshalJSON() ([]byte, error) {
 		Result:       resultJSON,
 		AuthToken:    r.AuthToken,
 		TraceCarrier: r.TraceCarrier,
+		GroupResult:  r.GroupResult,
 	})
 }
 
@@ -122,6 +128,7 @@ func (r *ReportResultRequest) UnmarshalJSON(data []byte) error {
 	r.Lease = in.Lease
 	r.AuthToken = in.AuthToken
 	r.TraceCarrier = in.TraceCarrier
+	r.GroupResult = in.GroupResult
 	result, err := UnmarshalTaskResult(in.Result)
 	if err != nil {
 		return err
