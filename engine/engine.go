@@ -93,6 +93,7 @@ type Engine struct {
 	logger                   Logger
 	commitObserver           CommitObserver
 	outboxObserver           OutboxObserver
+	nodeFailureObserver      NodeFailureObserver
 	outboxMaxDeliveryAttempt int
 	defaultLeaseTTL          time.Duration
 	suspendDisabled          bool
@@ -162,10 +163,11 @@ func preallocOrNewExecutionID(ctx context.Context) types.ExecutionID {
 func (e *Engine) Submit(ctx context.Context, g *graph.Graph, params map[string]any, runtime ...*types.Runtime) (types.ExecutionID, error) {
 	id := preallocOrNewExecutionID(ctx)
 	snap := &ExecutionSnapshot{
-		ID:     id,
-		Graph:  g,
-		Status: types.ExecutionStatusRunning,
-		Params: cloneMap(params),
+		ID:           id,
+		Graph:        g,
+		Status:       types.ExecutionStatusRunning,
+		Params:       cloneMap(params),
+		SeededInputs: CloneSeededInputs(SeededInputsFromContext(ctx)),
 	}
 	attachTraceMetadata(ctx, snap)
 	if len(runtime) > 0 {

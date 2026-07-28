@@ -13,6 +13,7 @@ type executionIDCtxKey struct{}
 type traceIDCtxKey struct{}
 type spanIDCtxKey struct{}
 type traceCarrierCtxKey struct{}
+type seededInputsCtxKey struct{}
 
 // WithExecutionTTL attaches a retention TTL hint for a single execution
 // submission. StateStore implementations may use it to choose key or record
@@ -116,4 +117,21 @@ func WithTraceCarrier(ctx context.Context, carrier map[string]string) context.Co
 func TraceCarrierFromContext(ctx context.Context) map[string]string {
 	carrier, _ := ctx.Value(traceCarrierCtxKey{}).(map[string]string)
 	return carrier
+}
+
+// WithSeededInputs attaches per-node input seeds to the submission context.
+// The engine persists them on the ExecutionSnapshot so buildInput can override
+// the normal fan-in logic for seeded nodes. Used by the group runtime to inject
+// checkpoint input into the entry member.
+func WithSeededInputs(ctx context.Context, seeds map[string]SeededInput) context.Context {
+	if len(seeds) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, seededInputsCtxKey{}, seeds)
+}
+
+// SeededInputsFromContext extracts seeded inputs attached to the submission context.
+func SeededInputsFromContext(ctx context.Context) map[string]SeededInput {
+	seeds, _ := ctx.Value(seededInputsCtxKey{}).(map[string]SeededInput)
+	return seeds
 }

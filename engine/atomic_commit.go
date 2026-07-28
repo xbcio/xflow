@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/xbcio/xflow/engine/graph"
@@ -108,6 +109,14 @@ func (e *Engine) commitAcyclicNodeWithClassification(ctx context.Context, lease 
 	result, err := e.commitNode(ctx, req)
 	if err != nil {
 		return CommitOutcomeTransientError, fmt.Errorf("atomic commit node %q/%q: %w", task.ExecutionID, task.NodeName, err)
+	}
+	if fatal && status == types.NodeStatusFailed && e.nodeFailureObserver != nil {
+		e.nodeFailureObserver.ObserveNodeFailure(task.ExecutionID, ObservedNodeFailure{
+			NodeName: task.NodeName,
+			Err:      errors.New(errMsg),
+			Attempt:  lease.Attempt,
+			Fatal:    true,
+		})
 	}
 	e.publishCommitReceipt(ctx, req, result, cls)
 	return e.finishAtomicCommit(ctx, req, result)

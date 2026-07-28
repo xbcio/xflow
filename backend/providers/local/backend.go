@@ -17,6 +17,7 @@ type Option func(*config)
 type config struct {
 	concurrency  int
 	resourcePool types.ResourcePool
+	registry     *execution.Registry
 }
 
 // WithConcurrency sets the number of in-memory queue consumer goroutines. Default is 4.
@@ -38,6 +39,13 @@ func WithResourcePool(p types.ResourcePool) Option {
 	return func(c *config) { c.resourcePool = p }
 }
 
+// WithRegistry injects an external handler registry. Use this when the inner
+// engine must resolve handlers registered outside its own backend (e.g. group
+// runtime injecting the outer runner's member handlers).
+func WithRegistry(reg *execution.Registry) Option {
+	return func(c *config) { c.registry = reg }
+}
+
 // Backend bundles in-memory state, queue, registry, and lifecycle binding.
 // Call Bind() after creating the engine to wire the queue handler.
 type Backend struct {
@@ -57,10 +65,15 @@ func New(opts ...Option) *Backend {
 		o(cfg)
 	}
 
+	reg := cfg.registry
+	if reg == nil {
+		reg = execution.NewRegistry()
+	}
+
 	return &Backend{
 		state:            newMemoryState(),
 		queue:            newMemoryQueue(cfg.concurrency),
-		registry:         execution.NewRegistry(),
+		registry:         reg,
 		workflowRegistry: newWorkflowRegistry(),
 		triggerRuntime:   newTriggerPrimitives(),
 		resourcePool:     cfg.resourcePool,
