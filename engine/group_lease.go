@@ -26,6 +26,10 @@ type GroupLeasePayload struct {
 	Input           *types.Input          `json:"input,omitempty"`
 	IdempotencyKey  string               `json:"idempotency_key"`
 	Deadline        time.Time            `json:"deadline,omitempty"`
+	// SignalJournal carries the full signal history for resume replay.
+	SignalJournal []GroupSignal `json:"signal_journal,omitempty"`
+	// TaskType distinguishes initial group exec from resume.
+	TaskType     TaskType      `json:"task_type,omitempty"`
 }
 
 // ErrGroupLeaseAlreadyActive is returned when BuildGroupLease cannot acquire

@@ -13,6 +13,7 @@ const (
 	groupUnitPending = iota
 	groupUnitRunning
 	groupUnitDone
+	groupUnitSuspended
 )
 
 type groupUnitState struct {
