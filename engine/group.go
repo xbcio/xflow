@@ -26,6 +26,11 @@ type GroupExitResult struct {
 	Data     map[string]any
 }
 
+// BoundaryExit is the seed-context name for a group/entry-unit boundary output.
+// It is a type alias of GroupExitResult so mid-graph commit and entry seed share
+// one struct (spec §11.5): zero data duplication, both names compile.
+type BoundaryExit = GroupExitResult
+
 // GroupResult 是 runner（里程碑 A 为 fake executor）对一次组执行的回报。
 type GroupResult struct {
 	ProtocolVersion int

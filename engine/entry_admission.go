@@ -12,24 +12,24 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
-// AdmissionKey uniquely identifies one trigger-group result submission.
-// Format: namespace/workflowID/workflowVersion/groupID/topic/partition/start-end
+// AdmissionKey uniquely identifies one entry-unit result submission.
+// Format: namespace/workflowID/workflowVersion/entryUnitID/topic/partition/start-end
 type AdmissionKey string
 
 // BuildAdmissionKey constructs a canonical admission key for a Kafka
-// trigger-group batch.
-func BuildAdmissionKey(ns namespace.Namespace, workflowID types.WorkflowID, workflowVersion string, groupID string, topic string, partition int, startOffset, endOffset int64) AdmissionKey {
+// entry-unit (single node or group node) batch.
+func BuildAdmissionKey(ns namespace.Namespace, workflowID types.WorkflowID, workflowVersion string, entryUnitID string, topic string, partition int, startOffset, endOffset int64) AdmissionKey {
 	return AdmissionKey(fmt.Sprintf("%s/%s/%s/%s/%s/%d/%d-%d",
-		ns, workflowID, workflowVersion, groupID, topic, partition, startOffset, endOffset))
+		ns, workflowID, workflowVersion, entryUnitID, topic, partition, startOffset, endOffset))
 }
 
 // BuildAdmissionKeySingle constructs an admission key for a single-message
 // (non-batch) trigger.
-func BuildAdmissionKeySingle(ns namespace.Namespace, workflowID types.WorkflowID, workflowVersion string, groupID string, topic string, partition int, offset int64) AdmissionKey {
-	return BuildAdmissionKey(ns, workflowID, workflowVersion, groupID, topic, partition, offset, offset)
+func BuildAdmissionKeySingle(ns namespace.Namespace, workflowID types.WorkflowID, workflowVersion string, entryUnitID string, topic string, partition int, offset int64) AdmissionKey {
+	return BuildAdmissionKey(ns, workflowID, workflowVersion, entryUnitID, topic, partition, offset, offset)
 }
 
-// AdmissionState classifies the control-plane response to a trigger admission.
+// AdmissionState classifies the control-plane response to an entry admission.
 type AdmissionState string
 
 const (
@@ -40,18 +40,18 @@ const (
 	AdmissionStateConflict AdmissionState = "conflict"
 )
 
-// ResultHash is the content-addressed hash of a trigger-group result, used to
+// ResultHash is the content-addressed hash of an entry-unit result, used to
 // distinguish duplicate-accepted (same key+hash) from conflict (same key,
 // different hash).
 type ResultHash string
 
-// ComputeResultHash deterministically hashes the group outcome and exits.
+// ComputeResultHash deterministically hashes the entry-unit outcome and exits.
 // Exits are sorted by (NodeName, Port) for stability regardless of input order.
-func ComputeResultHash(outcome GroupOutcome, exits []GroupExitResult) ResultHash {
+func ComputeResultHash(outcome GroupOutcome, exits []BoundaryExit) ResultHash {
 	h := sha256.New()
 	h.Write([]byte(outcome))
 	// Sort exits by NodeName+Port for determinism.
-	sorted := make([]GroupExitResult, len(exits))
+	sorted := make([]BoundaryExit, len(exits))
 	copy(sorted, exits)
 	sort.Slice(sorted, func(i, j int) bool {
 		if sorted[i].NodeName != sorted[j].NodeName {
@@ -84,22 +84,22 @@ func DeterministicExecutionID(key AdmissionKey) types.ExecutionID {
 
 // --- Request / Response ---
 
-// SeedTriggeredGroupResultRequest is the atomic admission request from a
-// trigger-group runner to the control plane. It seeds an execution + commits
-// the trigger-group unit result in a single fenced transition.
-type SeedTriggeredGroupResultRequest struct {
+// SeedExecutionFromEntryRequest is the atomic admission request from an
+// entry-unit (single node or group node) runner to the control plane. It seeds
+// an execution + commits the entry-unit result in a single fenced transition.
+type SeedExecutionFromEntryRequest struct {
 	AdmissionKey    AdmissionKey
 	Namespace       namespace.Namespace
 	WorkflowID      types.WorkflowID
 	WorkflowVersion string
-	GroupID         string
-	GroupUnitIdx    int
+	EntryUnitID     string
+	EntryUnitIdx    int
 	Graph           *graph.Graph
 	Outcome         GroupOutcome
-	Exits           []GroupExitResult
+	Exits           []BoundaryExit
 	Error           string
 	ResultHash      ResultHash
-	// Downstream arrivals to schedule after the group unit is admitted.
+	// Downstream arrivals to schedule after the entry unit is admitted.
 	Downstream []DownstreamArrival
 	// Params for the created execution (optional metadata).
 	Params  map[string]any
@@ -108,8 +108,8 @@ type SeedTriggeredGroupResultRequest struct {
 	SpanID  string
 }
 
-// SeedTriggeredGroupResultResponse is the control-plane response.
-type SeedTriggeredGroupResultResponse struct {
+// SeedExecutionFromEntryResponse is the control-plane response.
+type SeedExecutionFromEntryResponse struct {
 	// State is accepted or conflict.
 	State AdmissionState
 	// ExecutionID is the stable, deterministic execution ID for this admission key.
@@ -119,20 +119,21 @@ type SeedTriggeredGroupResultResponse struct {
 	Duplicate bool
 }
 
-// --- TriggerAdmissionStore ---
+// --- EntryAdmissionStore ---
 
-// TriggerAdmissionStore is the atomic admission capability for trigger-group
-// results. It is intentionally separate from GroupStateStore because the
-// trigger-group path has no lease lifecycle — only first-writer-wins admission.
+// EntryAdmissionStore is the atomic admission capability for entry-unit (single
+// node or group node) results. It is intentionally separate from GroupStateStore
+// because the entry-seed path has no lease lifecycle — only first-writer-wins
+// admission.
 //
 // Implementations must guarantee all steps in one atomic transition:
 //  1. admission key unique occupancy (first-writer-wins)
 //  2. create execution
 //  3. initialize unit counters (remaining, failed, in-degree)
-//  4. mark trigger group unit as success/failed
+//  4. mark entry unit as success/failed
 //  5. write all boundary outputs
 //  6. write downstream advance outbox
 //  7. return stable execution ID
-type TriggerAdmissionStore interface {
-	SeedTriggeredGroupResult(ctx context.Context, req SeedTriggeredGroupResultRequest) (SeedTriggeredGroupResultResponse, error)
+type EntryAdmissionStore interface {
+	SeedExecutionFromEntry(ctx context.Context, req SeedExecutionFromEntryRequest) (SeedExecutionFromEntryResponse, error)
 }
