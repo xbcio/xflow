@@ -2,23 +2,34 @@ package apiserver
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	xbackend "github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/backend/providers/local"
+	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/service/protocol"
+	"github.com/xbcio/xflow/types"
 )
 
 // newSeedTestServer builds an apiserver over an in-memory local backend control
 // plane. When withAuth is true a bearer PrincipalAuthenticator is configured so
 // unauthenticated requests are rejected before the handler runs.
+//
+// The control plane resolves the seed's graph + downstream from the workflow
+// registry server-side (spec §11.5), so the helper registers a "wf-1"/v1
+// workflow whose entry unit is "kafka-in" feeding a downstream "store" node.
+// The registry is keyed by workflow ID, so one record serves both the no-auth
+// and with-auth tests.
 func newSeedTestServer(t *testing.T, withAuth bool) *httptest.Server {
 	t.Helper()
 	backend := local.New()
+	registerSeedWorkflow(t, backend)
 	cp, err := control.NewControlPlane(control.Config{Backend: backend})
 	if err != nil {
 		t.Fatalf("NewControlPlane: %v", err)
@@ -38,6 +49,36 @@ func newSeedTestServer(t *testing.T, withAuth bool) *httptest.Server {
 	httpSrv := httptest.NewServer(srv.Handler())
 	t.Cleanup(httpSrv.Close)
 	return httpSrv
+}
+
+// registerSeedWorkflow registers the "wf-1"/v1 workflow used by the seed
+// endpoint tests: entry trigger "kafka-in" → action "store".
+func registerSeedWorkflow(t *testing.T, be *local.Backend) {
+	t.Helper()
+	def := &types.WorkflowDef{
+		Name:    "wf-1",
+		Version: "v1",
+		Nodes: []types.NodeDef{
+			{Name: "kafka-in", Kind: types.NodeKindTrigger},
+			{Name: "store", Kind: types.NodeKindAction},
+		},
+		Connections: types.Connections{"kafka-in": {"main": {{Node: "store", Input: "main"}}}},
+	}
+	g, err := graph.Compile(def)
+	if err != nil {
+		t.Fatalf("compile seed workflow: %v", err)
+	}
+	if _, err := be.WorkflowRegistry().AddWorkflow(context.Background(), xbackend.WorkflowRecord{
+		ID:             "wf-1",
+		Key:            "wf-1@v1",
+		Name:           "wf-1",
+		Version:        "v1",
+		DefinitionHash: "sha256:seed-test",
+		Definition:     def,
+		Graph:          g,
+	}); err != nil {
+		t.Fatalf("AddWorkflow: %v", err)
+	}
 }
 
 func postSeed(t *testing.T, base, token string, body any) *http.Response {

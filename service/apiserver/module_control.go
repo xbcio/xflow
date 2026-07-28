@@ -487,6 +487,15 @@ func (m *workflowControlModule) handleSeedExecution(w http.ResponseWriter, r *ht
 			writeError(w, http.StatusConflict, "stale_generation")
 			return
 		}
+		// The seed references a workflow/entry unit the control plane cannot
+		// resolve (not registered, version mismatch, or unknown entry unit). This
+		// is a fail-closed rejection, not an internal fault — map it to 404 so the
+		// runner can distinguish it from a transient server error. The generic
+		// reason string leaks no internal detail.
+		if errors.Is(err, control.ErrEntrySeedWorkflowUnknown) {
+			writeError(w, http.StatusNotFound, "workflow_unknown")
+			return
+		}
 		if m.log != nil {
 			m.log.Error("seed_execution_failed", "err", err)
 		}

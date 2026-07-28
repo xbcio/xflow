@@ -33,6 +33,12 @@ var (
 	// already-accepted key is NOT an error — it is duplicate-accepted so the
 	// runner can commit its offset.
 	ErrStaleGeneration = errors.New("stale activation generation")
+	// ErrEntrySeedWorkflowUnknown is returned when a remote entry seed cannot be
+	// resolved to a registered workflow graph + entry unit. The seed is rejected
+	// (fail closed): a seed whose workflow is not registered, or whose entry unit
+	// is not found in the compiled graph, must never be admitted with no
+	// downstream fan-out (spec §11.5). Surfaced by the transport as 404/409.
+	ErrEntrySeedWorkflowUnknown = errors.New("entry seed workflow or unit unknown")
 	// ErrInternalServer is the generic message returned to clients for any
 	// error that is not a recognised transport-agnostic sentinel. The full
 	// error is logged server-side; clients must never see internal stack
@@ -513,6 +519,18 @@ func (c *Core) SeedExecutionFromEntry(ctx context.Context, req engine.SeedExecut
 	// Authoritative namespace comes from the request context, not the body.
 	req.Namespace = namespace.FromContext(ctx)
 
+	// Resolve the compiled graph + downstream topology server-side. A remote
+	// runner seeds carrying only the entry-unit ID + generation; the graph,
+	// entry-unit index and downstream arrivals MUST be resolved from the
+	// authoritative registry so the admitted seed actually fans out downstream.
+	// When no registry is wired (embedded / in-process seeds already carry a
+	// resolved Graph/Downstream/EntryUnitIdx), preserve today's behavior.
+	if c.workflowRegistry != nil {
+		if err := c.resolveEntrySeedTopology(ctx, &req); err != nil {
+			return engine.SeedExecutionFromEntryResponse{}, err
+		}
+	}
+
 	// Generation fence (spec §11.6): when an activation store is configured and
 	// the activation exists, a seed carrying a generation below the currently
 	// assigned generation must not create a NEW execution. It is still
@@ -523,6 +541,46 @@ func (c *Core) SeedExecutionFromEntry(ctx context.Context, req engine.SeedExecut
 	}
 
 	return c.engine.SeedExecutionFromEntry(ctx, req)
+}
+
+// resolveEntrySeedTopology looks up the registered workflow for req and stamps
+// the authoritative Graph, EntryUnitIdx and downstream arrivals onto it. It
+// fails CLOSED (ErrEntrySeedWorkflowUnknown) when the workflow is not
+// registered, the version/hash does not match, or the entry unit cannot be
+// resolved in the compiled graph — a remote seed without a resolvable graph
+// must never be admitted with no downstream fan-out (spec §11.5). Any other
+// registry error is normalized to a generic internal error so backend details
+// never reach the caller.
+func (c *Core) resolveEntrySeedTopology(ctx context.Context, req *engine.SeedExecutionFromEntryRequest) error {
+	rec, err := c.workflowRegistry.GetWorkflow(ctx, req.WorkflowID)
+	if err != nil {
+		if errors.Is(err, backend.ErrWorkflowNotFound) {
+			return ErrEntrySeedWorkflowUnknown
+		}
+		return normalizeRunnerError(err, c.logger, "entry_seed_resolve")
+	}
+	// The seed's declared version must match the registered record. A version
+	// skew means the runner is seeding against a graph the control plane does
+	// not host; reject rather than fan out over the wrong topology.
+	if req.WorkflowVersion != "" && rec.Version != "" && req.WorkflowVersion != rec.Version {
+		return ErrEntrySeedWorkflowUnknown
+	}
+	if rec.Graph == nil {
+		return ErrEntrySeedWorkflowUnknown
+	}
+	idx, downstream, err := deriveEntrySeedTopology(rec.Graph, req.EntryUnitID)
+	if err != nil {
+		// deriveEntrySeedTopology only returns ErrEntrySeedWorkflowUnknown-wrapped
+		// errors; surface the sentinel so the transport maps it to 404/409.
+		if errors.Is(err, ErrEntrySeedWorkflowUnknown) {
+			return ErrEntrySeedWorkflowUnknown
+		}
+		return normalizeRunnerError(err, c.logger, "entry_seed_resolve")
+	}
+	req.Graph = rec.Graph
+	req.EntryUnitIdx = idx
+	req.Downstream = downstream
+	return nil
 }
 
 // fenceEntrySeedGeneration enforces the generation fence for one seed request.
