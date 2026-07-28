@@ -142,3 +142,76 @@ func (functionHandler) Descriptor() types.Descriptor {
 func (functionHandler) Execute(_ context.Context, input *types.Input) (*types.Output, error) {
 	return &types.Output{Data: input.Data}, nil
 }
+
+func TestRunnerSendsLabelsOnRegisterAndPoll(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	lease := &engine.TaskLease{
+		LeaseID:  engine.LeaseID("lease-1"),
+		Task:     engine.Task{ExecutionID: types.ExecutionID("exec-1"), NodeName: "start"},
+		Input:    &types.Input{Data: map[string]any{"x": 1}},
+		NodeType: "test.function",
+	}
+	client := &labelCapturingClient{lease: lease, cancel: cancel}
+	registry := execution.NewRegistry()
+	registry.RegisterGlobal("test.function", functionHandler{})
+
+	r := New(client, registry, Config{
+		RunnerID:          "runner-labels",
+		Concurrency:       1,
+		Labels:            map[string]string{"region": "us-east-1", "pool": "gpu"},
+		Capabilities:      []protocol.Capability{{NodeType: "test.function"}},
+		HeartbeatInterval: time.Hour,
+		PollWait:          time.Millisecond,
+	})
+
+	if err := r.Run(ctx); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if client.registerReq.Labels == nil {
+		t.Fatal("Register request missing labels")
+	}
+	if client.registerReq.Labels["region"] != "us-east-1" {
+		t.Errorf("Register Labels[region] = %q", client.registerReq.Labels["region"])
+	}
+
+	if client.lastPollReq.Labels == nil {
+		t.Fatal("Poll request missing labels")
+	}
+	if client.lastPollReq.Labels["pool"] != "gpu" {
+		t.Errorf("Poll Labels[pool] = %q", client.lastPollReq.Labels["pool"])
+	}
+}
+
+type labelCapturingClient struct {
+	lease       *engine.TaskLease
+	cancel      context.CancelFunc
+	registerReq protocol.RegisterRunnerRequest
+	lastPollReq protocol.PollTaskRequest
+}
+
+func (c *labelCapturingClient) Register(_ context.Context, req protocol.RegisterRunnerRequest) (protocol.RegisterRunnerResponse, error) {
+	c.registerReq = req
+	return protocol.RegisterRunnerResponse{RunnerID: req.RunnerID, SessionID: "sess-1"}, nil
+}
+
+func (*labelCapturingClient) Heartbeat(context.Context, protocol.HeartbeatRequest) (protocol.HeartbeatResponse, error) {
+	return protocol.HeartbeatResponse{}, nil
+}
+
+func (c *labelCapturingClient) Poll(_ context.Context, req protocol.PollTaskRequest) (protocol.PollTaskResponse, error) {
+	c.lastPollReq = req
+	if c.lease == nil {
+		return protocol.PollTaskResponse{Wait: time.Millisecond}, nil
+	}
+	lease := c.lease
+	c.lease = nil
+	return protocol.PollTaskResponse{Lease: lease}, nil
+}
+
+func (c *labelCapturingClient) ReportResult(_ context.Context, _ protocol.ReportResultRequest) (protocol.ReportResultResponse, error) {
+	c.cancel()
+	return protocol.ReportResultResponse{Accepted: true}, nil
+}

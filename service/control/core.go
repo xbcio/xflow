@@ -138,6 +138,7 @@ func (c *Core) register(ctx context.Context, req protocol.RegisterRunnerRequest,
 	session, err := c.runners.Register(ctx, RegisterRunnerRequest{
 		RunnerID:     req.RunnerID,
 		Capacity:     req.Concurrency,
+		Labels:       req.Labels,
 		Capabilities: req.Capabilities,
 		Policy:       policy,
 		Namespaces:   namespaceIDs(req.Namespaces),
@@ -186,6 +187,7 @@ func (c *Core) pollTask(ctx context.Context, req protocol.PollTaskRequest, info 
 			RunnerID:     req.RunnerID,
 			SessionID:    req.SessionID,
 			Capacity:     req.Capacity,
+			Labels:       req.Labels,
 			Capabilities: req.Capabilities,
 			Now:          time.Now(),
 		})

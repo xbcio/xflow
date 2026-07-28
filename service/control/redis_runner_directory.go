@@ -115,6 +115,10 @@ func (d *RedisRunnerDirectory) Register(ctx context.Context, req RegisterRunnerR
 	if err != nil {
 		return RunnerSession{}, fmt.Errorf("marshal runner namespaces: %w", err)
 	}
+	labels, err := json.Marshal(cloneLabels(req.Labels))
+	if err != nil {
+		return RunnerSession{}, fmt.Errorf("marshal runner labels: %w", err)
+	}
 
 	now := req.Now
 	if now.IsZero() {
@@ -141,7 +145,8 @@ func (d *RedisRunnerDirectory) Register(ctx context.Context, req RegisterRunnerR
 		d.keys.runnerHeartbeat,
 		d.keys.runnerLeaseCount,
 		d.keys.claimsExpiry,
-	}, req.RunnerID, session.SessionID, strconv.Itoa(req.Capacity), string(capabilities), string(policy), string(namespaces), strconv.FormatInt(now.UnixMilli(), 10))
+		d.keys.runnerLabels,
+	}, req.RunnerID, session.SessionID, strconv.Itoa(req.Capacity), string(capabilities), string(policy), string(namespaces), strconv.FormatInt(now.UnixMilli(), 10), string(labels))
 	if err != nil {
 		return RunnerSession{}, fmt.Errorf("register redis runner: %w", err)
 	}
@@ -258,6 +263,17 @@ func (d *RedisRunnerDirectory) ClaimForRunner(ctx context.Context, req ClaimRequ
 	capabilitiesJSON, err := json.Marshal(capabilities)
 	if err != nil {
 		return Claim{}, false, fmt.Errorf("marshal runner capabilities: %w", err)
+	}
+
+	labelsChanged := req.Labels != nil
+	if labelsChanged {
+		labelsJSON, err := json.Marshal(cloneLabels(req.Labels))
+		if err != nil {
+			return Claim{}, false, fmt.Errorf("marshal runner labels: %w", err)
+		}
+		if err := d.rdb.HSet(ctx, d.keys.runnerLabels, req.RunnerID, string(labelsJSON)).Err(); err != nil {
+			return Claim{}, false, fmt.Errorf("refresh runner labels: %w", err)
+		}
 	}
 
 	assignmentIDs, err := d.rdb.LRange(ctx, d.keys.queue, 0, -1).Result()
@@ -692,6 +708,12 @@ func (d *RedisRunnerDirectory) Runner(ctx context.Context, runnerID string) (Run
 	} else if err != nil {
 		return RunnerSnapshot{}, false
 	}
+	labelsRaw, err := d.rdb.HGet(ctx, d.keys.runnerLabels, runnerID).Result()
+	if errors.Is(err, redis.Nil) {
+		labelsRaw = ""
+	} else if err != nil {
+		return RunnerSnapshot{}, false
+	}
 
 	capacity, err := strconv.Atoi(capacityRaw)
 	if err != nil {
@@ -715,10 +737,17 @@ func (d *RedisRunnerDirectory) Runner(ctx context.Context, runnerID string) (Run
 			return RunnerSnapshot{}, false
 		}
 	}
+	var labels map[string]string
+	if labelsRaw != "" {
+		if err := json.Unmarshal([]byte(labelsRaw), &labels); err != nil {
+			return RunnerSnapshot{}, false
+		}
+	}
 	return RunnerSnapshot{
 		RunnerID:      runnerID,
 		Capacity:      capacity,
 		InFlight:      inFlight,
+		Labels:        labels,
 		Capabilities:  cloneCapabilities(capabilities),
 		Namespaces:    namespaces,
 		LastHeartbeat: time.UnixMilli(heartbeatMillis),
@@ -880,6 +909,7 @@ redis.call('HSET', KEYS[14], ARGV[1], ARGV[4])
 redis.call('HSET', KEYS[15], ARGV[1], ARGV[5])
 redis.call('HSET', KEYS[16], ARGV[1], ARGV[6])
 redis.call('HSET', KEYS[17], ARGV[1], ARGV[7])
+redis.call('HSET', KEYS[20], ARGV[1], ARGV[8])
 redis.call('HSET', KEYS[10], ARGV[1], '0')
 redis.call('HSETNX', KEYS[18], ARGV[1], '0')
 return 'registered'

@@ -82,6 +82,7 @@ func (d *MemoryRunnerDirectory) Register(_ context.Context, req RegisterRunnerRe
 		snapshot: RunnerSnapshot{
 			RunnerID:      req.RunnerID,
 			Capacity:      req.Capacity,
+			Labels:        cloneLabels(req.Labels),
 			Capabilities:  cloneCapabilities(req.Capabilities),
 			InFlight:      inFlight,
 			Namespaces:    normalizeRunnerNamespaces(req.Namespaces),
@@ -160,9 +161,12 @@ func (d *MemoryRunnerDirectory) ClaimForRunner(_ context.Context, req ClaimReque
 	// Capacity is the authoritative total, written only by Register/Heartbeat.
 	// A poll must not overwrite it with a client-supplied remainder — that would
 	// both corrupt the snapshot and double-count in-flight work already tracked
-	// by activeClaims + finalizedLease. Capabilities may still refresh per poll.
+	// by activeClaims + finalizedLease. Capabilities and labels may still refresh per poll.
 	if req.Capabilities != nil {
 		state.snapshot.Capabilities = cloneCapabilities(req.Capabilities)
+	}
+	if req.Labels != nil {
+		state.snapshot.Labels = cloneLabels(req.Labels)
 	}
 	if state.headroom() <= 0 {
 		return Claim{}, false, nil

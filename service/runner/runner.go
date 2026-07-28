@@ -194,6 +194,7 @@ func (r *Runner) pollLoop(ctx context.Context, sessionID string, leaseCh chan<- 
 			RunnerID:     r.config.RunnerID,
 			SessionID:    sessionID,
 			Capacity:     r.config.Concurrency,
+			Labels:       r.config.Labels,
 			Capabilities: r.config.Capabilities,
 		})
 		if err != nil {

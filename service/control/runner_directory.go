@@ -46,6 +46,7 @@ func BuildAssignmentID(task *engine.Task) AssignmentID {
 type RegisterRunnerRequest struct {
 	RunnerID     string
 	Capacity     int
+	Labels       map[string]string
 	Capabilities []protocol.Capability
 	Policy       RunnerPolicy
 	Namespaces   []namespace.Namespace
@@ -59,8 +60,7 @@ type RunnerSession struct {
 }
 
 // RunnerSnapshot is the read-only registration and liveness view returned by
-// a RunnerDirectory. Labels are retained for compatibility with the public
-// runner contract; durable directory implementations may leave them empty.
+// a RunnerDirectory.
 type RunnerSnapshot struct {
 	RunnerID      string
 	Capacity      int
@@ -80,6 +80,17 @@ func cloneCapabilities(capabilities []protocol.Capability) []protocol.Capability
 	return clone
 }
 
+func cloneLabels(labels map[string]string) map[string]string {
+	if len(labels) == 0 {
+		return nil
+	}
+	clone := make(map[string]string, len(labels))
+	for k, v := range labels {
+		clone[k] = v
+	}
+	return clone
+}
+
 // HeartbeatRequest updates observed runner capacity and liveness for an
 // existing session.
 type HeartbeatRequest struct {
@@ -96,6 +107,7 @@ type ClaimRequest struct {
 	RunnerID     string
 	SessionID    string
 	Capacity     int
+	Labels       map[string]string
 	Capabilities []protocol.Capability
 	Now          time.Time
 }
