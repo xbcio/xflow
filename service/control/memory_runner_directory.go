@@ -173,7 +173,7 @@ func (d *MemoryRunnerDirectory) ClaimForRunner(_ context.Context, req ClaimReque
 	}
 
 	for i, assignment := range d.queue {
-		if !canRunRouting(state.snapshot.Capabilities, assignment.Routing) {
+		if !MatchCapabilities(state.snapshot.Capabilities, assignment.Routing) {
 			continue
 		}
 		if !state.policy.Allows(assignment.Routing.NodeType) {

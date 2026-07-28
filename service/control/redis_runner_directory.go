@@ -292,7 +292,7 @@ func (d *RedisRunnerDirectory) ClaimForRunner(ctx context.Context, req ClaimRequ
 		if err != nil {
 			return Claim{}, false, err
 		}
-		if !canRunRouting(capabilities, assignment.Routing) || !runner.policy.Allows(assignment.Routing.NodeType) {
+		if !MatchCapabilities(capabilities, assignment.Routing) || !runner.policy.Allows(assignment.Routing.NodeType) {
 			continue
 		}
 		if !canServeNamespace(runner.namespaces, assignment.Namespace) {
