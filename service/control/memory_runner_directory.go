@@ -182,6 +182,9 @@ func (d *MemoryRunnerDirectory) ClaimForRunner(_ context.Context, req ClaimReque
 		if !state.canServeNamespace(assignment.Namespace) {
 			continue
 		}
+		if rs := assignment.Routing.RunnerSelector; rs != nil && !MatchLabels(state.snapshot.Labels, rs.MatchLabels) {
+			continue
+		}
 
 		claimID := ClaimID(uuid.NewString())
 		d.queue = append(d.queue[:i], d.queue[i+1:]...)
