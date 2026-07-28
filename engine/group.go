@@ -102,3 +102,12 @@ type GroupStateStore interface {
 type GroupCommitter interface {
 	CommitGroup(ctx context.Context, req GroupCommitRequest) (GroupCommitResult, error)
 }
+
+// GroupLeaseExpirer is an optional capability for reclaiming expired group
+// leases. When a running group lease has passed its deadline, ExpireGroupLease
+// transitions it back to retry-ready and increments the attempt counter.
+// The return value indicates whether the lease was actually expired (it may
+// have already been committed or renewed).
+type GroupLeaseExpirer interface {
+	ExpireGroupLease(ctx context.Context, id types.ExecutionID, unitIdx int, token LeaseToken) (expired bool, err error)
+}

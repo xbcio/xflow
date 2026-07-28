@@ -335,3 +335,16 @@ func (f *fakeGroupLeaseState) CommitGroup(_ context.Context, req GroupCommitRequ
 		ExecutionStatus: finalStatus,
 	}, nil
 }
+
+func (f *fakeGroupLeaseState) GetGroupLease(_ context.Context, _ types.ExecutionID, _ int) (*GroupLease, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.acquired || f.committed {
+		return nil, nil
+	}
+	return &GroupLease{
+		LeaseID:    f.leaseID,
+		LeaseToken: f.token,
+		Attempt:    f.attempt,
+	}, nil
+}

@@ -33,12 +33,17 @@ if status == 'running' or status == 'done' then
     return {0}
 end
 local ttl = tonumber(ARGV[4])
+local prevAttempt = tonumber(redis.call('HGET', KEYS[2], 'attempt') or '0')
+local attempt = tonumber(ARGV[3])
+if prevAttempt >= attempt then
+    attempt = prevAttempt + 1
+end
 redis.call('SET', KEYS[1], 'running', 'EX', ttl)
-redis.call('HSET', KEYS[2], 'lease_id', ARGV[1], 'lease_token', ARGV[2], 'attempt', ARGV[3])
+redis.call('HSET', KEYS[2], 'lease_id', ARGV[1], 'lease_token', ARGV[2], 'attempt', tostring(attempt))
 redis.call('EXPIRE', KEYS[2], ttl)
 redis.call('ZADD', KEYS[3], tonumber(ARGV[5]), ARGV[6])
 redis.call('EXPIRE', KEYS[3], ttl)
-return {1}
+return {1, attempt}
 `)
 
 // renewGroupLeaseLua extends the deadline only when token still matches.
@@ -208,7 +213,6 @@ return {1, done, finalStatus}
 func (s *Store) AcquireGroupLease(ctx context.Context, lease *engine.GroupLease) (bool, error) {
 	t := namespace.FromContext(ctx)
 	ttl := s.getExecTTL(lease.ExecutionID)
-	// deadline derived from IssuedAt+TTL, consistent with TaskLease.
 	deadlineMs := lease.IssuedAt.Add(lease.TTL).UnixMilli()
 	res, err := acquireGroupLeaseLua.Run(ctx, s.rdb, []string{
 		groupUnitStatusKey(t, lease.ExecutionID, lease.GroupUnitIdx),
@@ -220,7 +224,13 @@ func (s *Store) AcquireGroupLease(ctx context.Context, lease *engine.GroupLease)
 	if err != nil {
 		return false, fmt.Errorf("acquire group lease %q/#%d: %w", lease.ExecutionID, lease.GroupUnitIdx, err)
 	}
-	return len(res) == 1 && redisResultInt(res[0]) == 1, nil
+	if len(res) == 0 || redisResultInt(res[0]) == 0 {
+		return false, nil
+	}
+	if len(res) >= 2 {
+		lease.Attempt = int(redisResultInt(res[1]))
+	}
+	return true, nil
 }
 
 func (s *Store) RenewGroupLease(ctx context.Context, id types.ExecutionID, unitIdx int, token engine.LeaseToken, deadline time.Time) (bool, error) {
@@ -344,4 +354,83 @@ func (s *Store) CommitGroup(ctx context.Context, req engine.GroupCommitRequest) 
 		s.evictExecutionCaches(req.ExecutionID)
 	}
 	return out, nil
+}
+
+// ---------------------------------------------------------------------------
+// GroupLeaseReader + GroupLeaseExpirer
+// ---------------------------------------------------------------------------
+
+var _ engine.GroupLeaseReader = (*Store)(nil)
+var _ engine.GroupLeaseExpirer = (*Store)(nil)
+
+func (s *Store) GetGroupLease(ctx context.Context, id types.ExecutionID, unitIdx int) (*engine.GroupLease, error) {
+	t := namespace.FromContext(ctx)
+	statusKey := groupUnitStatusKey(t, id, unitIdx)
+	metaKey := groupUnitMetaKey(t, id, unitIdx)
+
+	status, err := s.rdb.Get(ctx, statusKey).Result()
+	if err == redis.Nil || status != "running" {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get group lease status %q/#%d: %w", id, unitIdx, err)
+	}
+
+	meta, err := s.rdb.HGetAll(ctx, metaKey).Result()
+	if err != nil {
+		return nil, fmt.Errorf("get group lease meta %q/#%d: %w", id, unitIdx, err)
+	}
+	if len(meta) == 0 {
+		return nil, nil
+	}
+
+	attempt := 1
+	if v, ok := meta["attempt"]; ok {
+		fmt.Sscanf(v, "%d", &attempt)
+	}
+
+	return &engine.GroupLease{
+		LeaseID:      engine.LeaseID(meta["lease_id"]),
+		LeaseToken:   engine.LeaseToken(meta["lease_token"]),
+		Attempt:      attempt,
+		ExecutionID:  id,
+		GroupUnitIdx: unitIdx,
+	}, nil
+}
+
+// expireGroupLeaseLua transitions a running group unit back to pending (retry-ready)
+// only if the token still matches. Increments attempt. Returns {1} if expired,
+// {0} if token mismatch/already terminal.
+// KEYS: 1=group:status 2=group:meta 3=leases(zset)
+// ARGV: 1=token 2=ttl_s 3=lease_member
+var expireGroupLeaseLua = redis.NewScript(`
+local status = redis.call('GET', KEYS[1])
+if status ~= 'running' then
+    return {0}
+end
+local token = redis.call('HGET', KEYS[2], 'lease_token') or ''
+if token ~= ARGV[1] then
+    return {0}
+end
+local attempt = tonumber(redis.call('HGET', KEYS[2], 'attempt') or '1')
+local ttl = tonumber(ARGV[2])
+redis.call('SET', KEYS[1], 'pending', 'EX', ttl)
+redis.call('HSET', KEYS[2], 'lease_id', '', 'lease_token', '', 'attempt', tostring(attempt + 1))
+redis.call('EXPIRE', KEYS[2], ttl)
+redis.call('ZREM', KEYS[3], ARGV[3])
+return {1}
+`)
+
+func (s *Store) ExpireGroupLease(ctx context.Context, id types.ExecutionID, unitIdx int, token engine.LeaseToken) (bool, error) {
+	t := namespace.FromContext(ctx)
+	ttl := s.getExecTTL(id)
+	res, err := expireGroupLeaseLua.Run(ctx, s.rdb, []string{
+		groupUnitStatusKey(t, id, unitIdx),
+		groupUnitMetaKey(t, id, unitIdx),
+		leaseExpiryZSetKey(t, id),
+	}, string(token), int(ttl.Seconds()), groupLeaseMember(id, unitIdx)).Slice()
+	if err != nil {
+		return false, fmt.Errorf("expire group lease %q/#%d: %w", id, unitIdx, err)
+	}
+	return len(res) == 1 && redisResultInt(res[0]) == 1, nil
 }

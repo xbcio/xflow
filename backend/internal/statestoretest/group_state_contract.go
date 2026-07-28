@@ -14,6 +14,8 @@ import (
 type GroupStore interface {
 	engine.StateStore
 	engine.GroupStateStore
+	engine.GroupLeaseReader
+	engine.GroupLeaseExpirer
 }
 
 // singleGroupGraph: ingest(trigger)->analyze, both in same group, no external nodes => UnitCount=1.
@@ -247,6 +249,116 @@ func RunGroupStateContract(t *testing.T, newStore func(*testing.T) GroupStore) {
 		}
 		if len(res.OutboxIDs) == 0 {
 			t.Fatal("wait_any first arrival must schedule the downstream unit (execute outbox intent)")
+		}
+	})
+
+	t.Run("GetGroupLeaseReturnsActiveCheckpoint", func(t *testing.T) {
+		s, id, gu := seed(t, twoUnitGraph(t))
+		l := lease(id, gu, "T1")
+		if ok, _ := s.AcquireGroupLease(ctx, l); !ok {
+			t.Fatal("acquire must succeed")
+		}
+		got, err := s.GetGroupLease(ctx, id, gu)
+		if err != nil {
+			t.Fatalf("GetGroupLease: %v", err)
+		}
+		if got == nil {
+			t.Fatal("GetGroupLease returned nil for active lease")
+		}
+		if got.LeaseToken != "T1" {
+			t.Errorf("token = %q, want T1", got.LeaseToken)
+		}
+		if got.Attempt < 1 {
+			t.Errorf("attempt = %d, want >= 1", got.Attempt)
+		}
+	})
+
+	t.Run("GetGroupLeaseReturnsNilWhenInactive", func(t *testing.T) {
+		s, id, gu := seed(t, twoUnitGraph(t))
+		got, err := s.GetGroupLease(ctx, id, gu)
+		if err != nil {
+			t.Fatalf("GetGroupLease: %v", err)
+		}
+		if got != nil {
+			t.Fatalf("GetGroupLease must be nil for unacquired unit, got %+v", got)
+		}
+	})
+
+	t.Run("ExpireGroupLeaseTransitionsToPending", func(t *testing.T) {
+		s, id, gu := seed(t, twoUnitGraph(t))
+		l := lease(id, gu, "T1")
+		s.AcquireGroupLease(ctx, l)
+
+		expired, err := s.ExpireGroupLease(ctx, id, gu, "T1")
+		if err != nil {
+			t.Fatalf("ExpireGroupLease: %v", err)
+		}
+		if !expired {
+			t.Fatal("ExpireGroupLease returned false for active lease with matching token")
+		}
+
+		// After expiry, GetGroupLease should return nil (no longer running).
+		got, _ := s.GetGroupLease(ctx, id, gu)
+		if got != nil {
+			t.Fatal("GetGroupLease should be nil after expiry")
+		}
+	})
+
+	t.Run("ExpireGroupLeaseFencedByToken", func(t *testing.T) {
+		s, id, gu := seed(t, twoUnitGraph(t))
+		s.AcquireGroupLease(ctx, lease(id, gu, "T1"))
+
+		expired, err := s.ExpireGroupLease(ctx, id, gu, "WRONG")
+		if err != nil {
+			t.Fatalf("ExpireGroupLease: %v", err)
+		}
+		if expired {
+			t.Fatal("ExpireGroupLease with wrong token must return false")
+		}
+	})
+
+	t.Run("ReacquireAfterExpiryIncrementsAttempt", func(t *testing.T) {
+		s, id, gu := seed(t, twoUnitGraph(t))
+		l1 := lease(id, gu, "T1")
+		s.AcquireGroupLease(ctx, l1)
+		firstAttempt := l1.Attempt
+
+		s.ExpireGroupLease(ctx, id, gu, "T1")
+
+		l2 := lease(id, gu, "T2")
+		ok, err := s.AcquireGroupLease(ctx, l2)
+		if err != nil || !ok {
+			t.Fatalf("re-acquire after expiry: ok=%v err=%v", ok, err)
+		}
+		if l2.Attempt <= firstAttempt {
+			t.Errorf("attempt after re-acquire = %d, want > %d", l2.Attempt, firstAttempt)
+		}
+	})
+
+	t.Run("CommitAfterExpiryStaleTokenRejected", func(t *testing.T) {
+		s, id, gu := seed(t, twoUnitGraph(t))
+		s.AcquireGroupLease(ctx, lease(id, gu, "T1"))
+		s.ExpireGroupLease(ctx, id, gu, "T1")
+
+		// Re-acquire with new token.
+		l2 := lease(id, gu, "T2")
+		s.AcquireGroupLease(ctx, l2)
+
+		// Old token commit must be rejected.
+		res, _ := s.CommitGroup(ctx, commit(id, gu, "T1"))
+		if res.Applied {
+			t.Fatal("commit with expired/stale token must not apply")
+		}
+		if res.Outcome != engine.CommitOutcomeStaleToken {
+			t.Errorf("outcome = %q, want stale-token", res.Outcome)
+		}
+
+		// New token commit succeeds.
+		c := commit(id, gu, "T2")
+		c.Attempt = l2.Attempt
+		res2, err := s.CommitGroup(ctx, c)
+		if err != nil || !res2.Applied {
+			t.Fatalf("commit with current token: %+v err=%v", res2, err)
 		}
 	})
 }
