@@ -64,13 +64,17 @@ type Config struct {
 	// GroupRuntime executes group subgraphs locally. Required when EnableGroupExec
 	// is true.
 	GroupRuntime *GroupRuntime
+	// ActivationTracker, when set, processes activation directives piggybacked on
+	// heartbeat responses. nil means activations are ignored (passive runner).
+	ActivationTracker *ActivationTracker
 }
 
 type Runner struct {
-	client   ProtocolClient
-	executor *execution.Runner
-	config   Config
-	tracer   tracing.Tracer
+	client            ProtocolClient
+	executor          *execution.Runner
+	config            Config
+	tracer            tracing.Tracer
+	activationTracker *ActivationTracker
 }
 
 func New(client ProtocolClient, registry engine.HandlerRegistry, config Config) *Runner {
@@ -88,10 +92,11 @@ func New(client ProtocolClient, registry engine.HandlerRegistry, config Config) 
 		tracer = tracing.NoopTracer{}
 	}
 	return &Runner{
-		client:   client,
-		executor: execution.NewRunner(registry, execution.WithResourcePool(config.ResourcePool), execution.WithCredentialResolver(config.CredentialResolver)),
-		config:   config,
-		tracer:   tracer,
+		client:            client,
+		executor:          execution.NewRunner(registry, execution.WithResourcePool(config.ResourcePool), execution.WithCredentialResolver(config.CredentialResolver)),
+		config:            config,
+		tracer:            tracer,
+		activationTracker: config.ActivationTracker,
 	}
 }
 
@@ -151,6 +156,13 @@ func (r *Runner) Run(ctx context.Context) error {
 	select {
 	case <-waitDone:
 	case <-time.After(defaultRunnerShutdownTimeout):
+	}
+
+	// Shutdown activation tracker if configured.
+	if r.activationTracker != nil {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), defaultRunnerShutdownTimeout)
+		r.activationTracker.Shutdown(shutdownCtx)
+		shutdownCancel()
 	}
 
 	if pollErr != nil {
@@ -319,12 +331,16 @@ func (r *Runner) executeAndReport(ctx context.Context, sessionID string, lease *
 
 // heartbeatLoop sends heartbeats on its own ticker, independent of task
 // execution. A heartbeat failure signals the run to exit so the caller can
-// reconnect.
+// reconnect. Activation directives piggybacked on the heartbeat response are
+// forwarded to the activation tracker when configured.
 func (r *Runner) heartbeatLoop(ctx context.Context, sessionID string, inFlight *atomic.Int32, signalError func(error)) {
-	if err := r.heartbeat(ctx, sessionID, int(inFlight.Load())); err != nil {
+	resp, err := r.heartbeat(ctx, sessionID, int(inFlight.Load()))
+	if err != nil {
 		signalError(err)
 		return
 	}
+	r.processActivations(ctx, resp)
+
 	ticker := time.NewTicker(r.config.HeartbeatInterval)
 	defer ticker.Stop()
 	for {
@@ -332,23 +348,31 @@ func (r *Runner) heartbeatLoop(ctx context.Context, sessionID string, inFlight *
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := r.heartbeat(ctx, sessionID, int(inFlight.Load())); err != nil {
+			resp, err := r.heartbeat(ctx, sessionID, int(inFlight.Load()))
+			if err != nil {
 				signalError(err)
 				return
 			}
+			r.processActivations(ctx, resp)
 		}
 	}
 }
 
-func (r *Runner) heartbeat(ctx context.Context, sessionID string, inFlight int) error {
-	_, err := r.client.Heartbeat(ctx, protocol.HeartbeatRequest{
+// processActivations forwards heartbeat activation directives to the tracker.
+func (r *Runner) processActivations(ctx context.Context, resp protocol.HeartbeatResponse) {
+	if resp.Activations != nil && r.activationTracker != nil {
+		_ = r.activationTracker.ProcessDirectives(ctx, resp.Activations)
+	}
+}
+
+func (r *Runner) heartbeat(ctx context.Context, sessionID string, inFlight int) (protocol.HeartbeatResponse, error) {
+	return r.client.Heartbeat(ctx, protocol.HeartbeatRequest{
 		RunnerID:  r.config.RunnerID,
 		SessionID: sessionID,
 		Capacity:  r.config.Concurrency,
 		InFlight:  inFlight,
 		Timestamp: time.Now().Unix(),
 	})
-	return err
 }
 
 func runContextError(ctx context.Context, err error) error {

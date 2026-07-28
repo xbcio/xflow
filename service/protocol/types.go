@@ -45,7 +45,8 @@ type HeartbeatRequest struct {
 }
 
 type HeartbeatResponse struct {
-	ServerTime int64 `json:"server_time"`
+	ServerTime  int64                `json:"server_time"`
+	Activations *HeartbeatActivations `json:"activations,omitempty"`
 }
 
 type PollTaskRequest struct {

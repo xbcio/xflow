@@ -62,6 +62,10 @@ type Config struct {
 	// that need a short TTL so the production LeaseSweeper reclaims the lease
 	// synchronously. LeaseTTL == 0 preserves the existing 60s default.
 	LeaseTTL time.Duration
+	// TriggerActivationStore, when non-nil, enables the ActivationController
+	// reconciliation loop that assigns trigger-groups to runners and delivers
+	// activate/deactivate directives via heartbeat responses. Optional.
+	TriggerActivationStore engine.TriggerActivationStore
 }
 
 type redisClientProvider interface {
@@ -95,17 +99,22 @@ type ControlPlane struct {
 	elector    backend.LeaderElector
 	logger     engine.Logger
 
+	// activationCtrl is the optional activation reconciliation controller.
+	// Non-nil only when Config.TriggerActivationStore is provided.
+	activationCtrl *ActivationController
+
 	lifecycleMu         sync.Mutex
 	started             bool
 	stopped             bool
 	leaderCancel        context.CancelFunc
 	sweeperCancel       context.CancelFunc
 	claimRecoveryCancel context.CancelFunc
+	activationCancel    context.CancelFunc
 	unbind              func()
 	// wg tracks the background goroutines started by Start (leader campaign,
-	// sweeper, claim recovery). Shutdown cancels their contexts and then waits
-	// for them to exit, bounded by the Shutdown context so a stuck goroutine
-	// cannot hang shutdown.
+	// sweeper, claim recovery, activation controller). Shutdown cancels their
+	// contexts and then waits for them to exit, bounded by the Shutdown context
+	// so a stuck goroutine cannot hang shutdown.
 	wg sync.WaitGroup
 }
 
@@ -212,16 +221,34 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 	}
 	sweeper := NewLeaseSweeper(cfg.Backend.State(), eng, sweeperCfg)
 
+	// Activation controller: optional, created only when a TriggerActivationStore
+	// is provided. The controller is injected into both HTTP and gRPC Core
+	// instances so heartbeat responses carry activation directives.
+	var activationCtrl *ActivationController
+	if cfg.TriggerActivationStore != nil {
+		selector := DefaultRunnerSelector()
+		activationCtrl = NewActivationController(ActivationControllerConfig{
+			Store:     cfg.TriggerActivationStore,
+			Directory: runners,
+			Selector:  &selector,
+			IsLeader:  elector.IsLeader,
+			Logger:    cfg.Logger,
+		})
+		httpServer.core.activationCtrl = activationCtrl
+		grpcServer.core.activationCtrl = activationCtrl
+	}
+
 	return &ControlPlane{
-		backend:    cfg.Backend,
-		eng:        eng,
-		runners:    runners,
-		dispatcher: dispatcher,
-		httpServer: httpServer,
-		grpcServer: grpcServer,
-		sweeper:    sweeper,
-		elector:    elector,
-		logger:     cfg.Logger,
+		backend:        cfg.Backend,
+		eng:            eng,
+		runners:        runners,
+		dispatcher:     dispatcher,
+		httpServer:     httpServer,
+		grpcServer:     grpcServer,
+		sweeper:        sweeper,
+		elector:        elector,
+		logger:         cfg.Logger,
+		activationCtrl: activationCtrl,
 	}, nil
 }
 
@@ -313,6 +340,16 @@ func (cp *ControlPlane) Start(ctx context.Context) error {
 		}()
 	}
 
+	if cp.activationCtrl != nil {
+		actCtx, actCancel := context.WithCancel(context.Background())
+		cp.activationCancel = actCancel
+		cp.wg.Add(1)
+		go func() {
+			defer cp.wg.Done()
+			cp.activationCtrl.Run(actCtx)
+		}()
+	}
+
 	return nil
 }
 
@@ -392,6 +429,9 @@ func (cp *ControlPlane) Shutdown(ctx context.Context) error {
 	}
 	if cp.claimRecoveryCancel != nil {
 		cp.claimRecoveryCancel()
+	}
+	if cp.activationCancel != nil {
+		cp.activationCancel()
 	}
 	if cp.leaderCancel != nil {
 		cp.leaderCancel()

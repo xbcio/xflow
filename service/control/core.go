@@ -47,6 +47,9 @@ type Core struct {
 	// tracer instruments the runner protocol dispatch and commit path.
 	// NoopTracer when tracing is disabled.
 	tracer tracing.Tracer
+	// activationCtrl, when non-nil, supplies activation directives piggybacked
+	// on heartbeat responses. Optional — nil means no activation directives.
+	activationCtrl *ActivationController
 }
 
 // leaseRecoveryEngine is deliberately optional so custom EngineFacade test
@@ -171,7 +174,11 @@ func (c *Core) heartbeat(ctx context.Context, req protocol.HeartbeatRequest, inf
 	}); err != nil {
 		return protocol.HeartbeatResponse{}, normalizeRunnerError(err, c.logger, "heartbeat")
 	}
-	return protocol.HeartbeatResponse{ServerTime: time.Now().Unix()}, nil
+	resp := protocol.HeartbeatResponse{ServerTime: time.Now().Unix()}
+	if c.activationCtrl != nil {
+		resp.Activations = c.activationCtrl.DirectivesForRunner(req.RunnerID)
+	}
+	return resp, nil
 }
 
 func (c *Core) pollTask(ctx context.Context, req protocol.PollTaskRequest, info TransportInfo) (protocol.PollTaskResponse, error) {
