@@ -30,13 +30,17 @@ type SeedExecutionRequest struct {
 	Exits           []BoundaryExit `json:"exits,omitempty"`
 	Error           string         `json:"error,omitempty"`
 	// Generation is the entry-activation generation the seeding runner believes
-	// it currently owns. The control plane fences stale generations: a seed
-	// whose generation is below the currently-assigned activation generation may
-	// not seed a NEW execution, but an already-accepted admission key is still
+	// it currently owns. The control plane fences by EXACT generation: when an
+	// activation record governs this entry unit, a seed must carry precisely the
+	// currently-assigned generation to seed a NEW execution; any other value
+	// (below = superseded runner, above = forged) is treated as stale and
+	// rejected fail-closed, EXCEPT an already-accepted admission key is still
 	// duplicate-accepted so the runner can commit its Kafka offset (spec §11.6).
-	// Zero means the runner supplied no generation (e.g. a locally-hosted single
-	// trigger not driven by an EntryActivation); the control plane treats zero
-	// as "unfenced" and admits normally.
+	// Zero is NOT a bypass: it is fenced like any other mismatch when an
+	// activation governs the unit. Unfenced admission happens only when NO
+	// activation record governs the unit (e.g. a locally-hosted single trigger
+	// not driven by an EntryActivation) — that path is keyed on the absence of
+	// an activation record, never on a magic zero value.
 	Generation uint64 `json:"generation,omitempty"`
 }
 
