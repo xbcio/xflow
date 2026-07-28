@@ -10,8 +10,12 @@ import (
 )
 
 type Capability struct {
-	NodeType    string `json:"node_type"`
-	NodeVersion int    `json:"node_version,omitempty"`
+	NodeType    string   `json:"node_type"`
+	NodeVersion int      `json:"node_version,omitempty"`
+	Runtimes    []string `json:"runtimes,omitempty"`
+	Features    []string `json:"features,omitempty"`
+	Resources   []string `json:"resources,omitempty"`
+	Credentials []string `json:"credentials,omitempty"`
 }
 
 type RegisterRunnerRequest struct {
