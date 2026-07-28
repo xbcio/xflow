@@ -11,6 +11,7 @@ import (
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/service/control"
+	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/types"
 )
@@ -71,6 +72,10 @@ func (m *workflowControlModule) RegisterHTTP(mux *http.ServeMux) {
 	}
 	mux.HandleFunc("/v1/workflows", wrap("submit_workflow", m.handleSubmitWorkflow))
 	mux.HandleFunc("/v1/workflows/invoke", wrap("invoke_workflow", m.handleInvoke))
+	// /v1/executions (no trailing slash) is the entry-seed endpoint; the
+	// /v1/executions/ subtree below is the per-execution GET/signal/cancel/wait
+	// surface. ServeMux treats the two patterns as distinct.
+	mux.HandleFunc("/v1/executions", wrap("seed_execution", m.handleSeedExecution))
 	mux.HandleFunc("/v1/executions/", wrap("execution", m.handleExecution))
 }
 
@@ -94,6 +99,11 @@ func (m *workflowControlModule) registerAuthzRoutes(mux *http.ServeMux) {
 	authz := m.authzWrap
 	mux.HandleFunc("/v1/workflows", authz(OpWorkflowCreate, true, m.handleSubmitWorkflow, newExecutionIDResolver()))
 	mux.HandleFunc("/v1/workflows/invoke", authz(OpWorkflowInvoke, true, m.handleInvoke, newExecutionIDResolver()))
+	// Entry-seed endpoint (exact path, no trailing slash). Distinct from the
+	// /v1/executions/ subtree. The authz wrapper injects the principal's
+	// namespace into the request context; handleSeedExecution reads it via
+	// namespace.FromContext — never from the client body.
+	mux.HandleFunc("/v1/executions", authz(OpExecutionSeed, true, m.handleSeedExecution, newExecutionIDResolver()))
 	mux.HandleFunc("/v1/executions/", m.authzWrapResolved(m.handleExecution, resolveExecutionRoute))
 }
 
@@ -273,6 +283,73 @@ func (m *workflowControlModule) handleInvoke(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	writeJSON(w, http.StatusOK, invokeResponse{ExecutionID: id})
+}
+
+// handleSeedExecution serves POST /v1/executions: it atomically seeds an
+// execution from an entry-unit (single node or group node) result. The
+// authoritative namespace is injected into the request context by the authz
+// wrapper (from the authenticated principal) and resolved server-side in the
+// control Core — it is NEVER read from the request body, so a forged or
+// cross-namespace admission key fails closed. The ResultHash is recomputed
+// server-side from the request's outcome + exits; a client-supplied hash is not
+// trusted.
+func (m *workflowControlModule) handleSeedExecution(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+	var req protocol.SeedExecutionRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.AdmissionKey == "" || req.WorkflowID == "" || req.EntryUnitID == "" || req.Outcome == "" {
+		writeError(w, http.StatusBadRequest, "admission_key, workflow_id, entry_unit_id and outcome are required")
+		return
+	}
+
+	exits := make([]engine.BoundaryExit, 0, len(req.Exits))
+	for _, ex := range req.Exits {
+		exits = append(exits, engine.BoundaryExit{
+			NodeName: ex.NodeName,
+			Port:     ex.Port,
+			Data:     ex.Data,
+		})
+	}
+	outcome := engine.GroupOutcome(req.Outcome)
+
+	engReq := engine.SeedExecutionFromEntryRequest{
+		AdmissionKey:    engine.AdmissionKey(req.AdmissionKey),
+		WorkflowID:      types.WorkflowID(req.WorkflowID),
+		WorkflowVersion: req.WorkflowVersion,
+		EntryUnitID:     req.EntryUnitID,
+		Outcome:         outcome,
+		Exits:           exits,
+		Error:           req.Error,
+		// ResultHash is computed server-side; the client cannot supply it.
+		ResultHash: engine.ComputeResultHash(outcome, exits),
+	}
+
+	// Namespace is resolved server-side by the Core from the request context
+	// (injected by the authz wrapper) — not from engReq.Namespace / the body.
+	resp, err := m.eng.SeedExecutionFromEntry(r.Context(), engReq)
+	if err != nil {
+		if m.log != nil {
+			m.log.Error("seed_execution_failed", "err", err)
+		}
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	if resp.State == engine.AdmissionStateConflict {
+		writeJSON(w, http.StatusConflict, protocol.SeedExecutionResponse{
+			State:       "conflict",
+			ExecutionID: string(resp.ExecutionID),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, protocol.SeedExecutionResponse{
+		State:       string(resp.State),
+		ExecutionID: string(resp.ExecutionID),
+		Duplicate:   resp.Duplicate,
+	})
 }
 
 func (m *workflowControlModule) handleExecution(w http.ResponseWriter, r *http.Request) {

@@ -88,8 +88,12 @@ const (
 	OpExecutionSignal            = "execution.signal"
 	OpExecutionRevoke            = "execution.revoke"
 	OpExecutionCancel            = "execution.cancel"
-	OpDeadLetterList             = "deadletter.list"
-	OpDeadLetterReplay           = "deadletter.replay"
+	// OpExecutionSeed is the mutation that seeds an execution from an entry unit
+	// (single node or group node) result via POST /v1/executions. It maps to the
+	// "execution" scope like the other execution operations.
+	OpExecutionSeed    = "execution.seed"
+	OpDeadLetterList   = "deadletter.list"
+	OpDeadLetterReplay = "deadletter.replay"
 	// OpManagementRead is the stable operation for management execution inspect
 	// (single-resource lookup; the management surface exposes no list API). It
 	// maps to the "management.read" scope.
@@ -113,7 +117,7 @@ func scopeForOperation(op string) string {
 		OpWorkflowDefinitionCreate, OpWorkflowDefinitionRead, OpWorkflowDefinitionUpdate,
 		OpWorkflowDefinitionValidate, OpWorkflowDefinitionPublish, OpWorkflowExecutionInvoke:
 		return "workflow"
-	case OpExecutionRead, OpExecutionSignal, OpExecutionRevoke, OpExecutionCancel:
+	case OpExecutionRead, OpExecutionSignal, OpExecutionRevoke, OpExecutionCancel, OpExecutionSeed:
 		return "execution"
 	case OpDeadLetterList:
 		return "deadletter.list"
