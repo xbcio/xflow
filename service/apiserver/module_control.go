@@ -1,14 +1,19 @@
 package apiserver
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/service/protocol"
@@ -72,6 +77,12 @@ func (m *workflowControlModule) RegisterHTTP(mux *http.ServeMux) {
 	}
 	mux.HandleFunc("/v1/workflows", wrap("submit_workflow", m.handleSubmitWorkflow))
 	mux.HandleFunc("/v1/workflows/invoke", wrap("invoke_workflow", m.handleInvoke))
+	// Registration is a separate, explicit step from submit-and-execute: it
+	// persists the compiled workflow graph so the control plane can resolve it on
+	// seed. /v1/workflows/register (exact) is the POST target; the
+	// /v1/workflows/register/ subtree carries the DELETE {id} path.
+	mux.HandleFunc("/v1/workflows/register", wrap("register_workflow", m.handleRegisterWorkflow))
+	mux.HandleFunc("/v1/workflows/register/", wrap("deregister_workflow", m.handleDeregisterWorkflow))
 	// /v1/executions (no trailing slash) is the entry-seed endpoint; the
 	// /v1/executions/ subtree below is the per-execution GET/signal/cancel/wait
 	// surface. ServeMux treats the two patterns as distinct.
@@ -99,6 +110,12 @@ func (m *workflowControlModule) registerAuthzRoutes(mux *http.ServeMux) {
 	authz := m.authzWrap
 	mux.HandleFunc("/v1/workflows", authz(OpWorkflowCreate, true, m.handleSubmitWorkflow, newExecutionIDResolver()))
 	mux.HandleFunc("/v1/workflows/invoke", authz(OpWorkflowInvoke, true, m.handleInvoke, newExecutionIDResolver()))
+	// Register/deregister persist and remove the compiled workflow graph. Both
+	// are mutations under the workflow scope. The authz wrapper injects the
+	// principal's namespace into the request context; the handlers resolve it via
+	// namespace.FromContext — never from the client body.
+	mux.HandleFunc("/v1/workflows/register", authz(OpWorkflowRegister, true, m.handleRegisterWorkflow, nil))
+	mux.HandleFunc("/v1/workflows/register/", authz(OpWorkflowRegister, true, m.handleDeregisterWorkflow, nil))
 	// Entry-seed endpoint (exact path, no trailing slash). Distinct from the
 	// /v1/executions/ subtree. The authz wrapper injects the principal's
 	// namespace into the request context; handleSeedExecution reads it via
@@ -285,8 +302,129 @@ func (m *workflowControlModule) handleInvoke(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, invokeResponse{ExecutionID: id})
 }
 
+// registerWorkflowResponse echoes the persisted workflow ID (server-assigned
+// when the request did not carry one).
+type registerWorkflowResponse struct {
+	WorkflowID types.WorkflowID `json:"workflow_id"`
+}
+
+// handleRegisterWorkflow serves POST /v1/workflows/register. It is a NEW,
+// explicit step distinct from submit-and-execute (/v1/workflows): it compiles
+// the submitted definition and persists the compiled graph in the server-side
+// workflow registry so later tasks can resolve the graph on seed and derive
+// entry activations. The authoritative namespace is resolved server-side from
+// namespace.FromContext (injected by the authz wrapper), NEVER from the request
+// body, so a caller cannot register into another namespace.
+func (m *workflowControlModule) handleRegisterWorkflow(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+	registry := m.registry()
+	if registry == nil {
+		if m.log != nil {
+			m.log.Error("register_workflow_no_registry")
+		}
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	var def types.WorkflowDef
+	if !decodeJSON(w, r, &def) {
+		return
+	}
+	g, err := graph.Compile(&def)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// Namespace is authoritative from the context, never the body.
+	ns := string(namespace.FromContext(r.Context()))
+	def.Namespace = ns
+
+	rec, err := registry.AddWorkflow(r.Context(), backend.WorkflowRecord{
+		Key:            workflowRegistryKey(ns, def.Name, def.Version),
+		Namespace:      ns,
+		Name:           def.Name,
+		Version:        def.Version,
+		DefinitionHash: definitionHash(&def),
+		Definition:     &def,
+		Graph:          g,
+	})
+	if err != nil {
+		if m.log != nil {
+			m.log.Error("register_workflow_failed", "err", err)
+		}
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	writeJSON(w, http.StatusOK, registerWorkflowResponse{WorkflowID: rec.ID})
+}
+
+// handleDeregisterWorkflow serves DELETE /v1/workflows/register/{id}. It removes
+// the persisted record for the given workflow id. The id is a server-assigned
+// opaque identifier taken from the path; namespace isolation is enforced by the
+// registry record (a later task may add per-namespace scoping on removal).
+func (m *workflowControlModule) handleDeregisterWorkflow(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodDelete) {
+		return
+	}
+	registry := m.registry()
+	if registry == nil {
+		if m.log != nil {
+			m.log.Error("deregister_workflow_no_registry")
+		}
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	id := strings.Trim(strings.TrimPrefix(r.URL.Path, "/v1/workflows/register/"), "/")
+	if id == "" || strings.Contains(id, "/") {
+		writeError(w, http.StatusNotFound, "workflow not found")
+		return
+	}
+	if err := registry.RemoveWorkflow(r.Context(), types.WorkflowID(id)); err != nil {
+		if errors.Is(err, backend.ErrWorkflowNotFound) {
+			writeError(w, http.StatusNotFound, "workflow not found")
+			return
+		}
+		if m.log != nil {
+			m.log.Error("deregister_workflow_failed", "err", err)
+		}
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"removed": true})
+}
+
+// registry returns the control plane's workflow registry, or nil when no
+// ControlPlane is wired (unit tests with a fake facade) or none is configured.
+func (m *workflowControlModule) registry() backend.WorkflowRegistry {
+	if m.cp == nil {
+		return nil
+	}
+	return m.cp.WorkflowRegistry()
+}
+
+// workflowRegistryKey builds the registry conflict-detection key from the
+// server-issued namespace + workflow name + version. It mirrors the SDK's
+// namespace/name@version identity so a definition registered twice is idempotent.
+func workflowRegistryKey(ns, name, version string) string {
+	return fmt.Sprintf("%s/%s@%s", ns, name, version)
+}
+
+// definitionHash returns a stable SHA-256 fingerprint over the JSON-encoded
+// definition. It is used by the registry for conflict detection (a re-register
+// of an identical definition is idempotent; a changed definition under the same
+// key is rejected as a conflict). Marshal errors collapse to an empty hash,
+// which the registry treats as a distinct (always-conflicting) value.
+func definitionHash(def *types.WorkflowDef) string {
+	data, err := json.Marshal(def)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
 // handleSeedExecution serves POST /v1/executions: it atomically seeds an
-// execution from an entry-unit (single node or group node) result. The
 // authoritative namespace is injected into the request context by the authz
 // wrapper (from the authenticated principal) and resolved server-side in the
 // control Core — it is NEVER read from the request body, so a forged or

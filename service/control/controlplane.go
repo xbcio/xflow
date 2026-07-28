@@ -71,6 +71,12 @@ type Config struct {
 	// drive the node-generic EntryActivationReconciler. Optional; nil disables
 	// generation fencing on the seed path.
 	EntryActivationStore engine.EntryActivationStore
+	// WorkflowRegistry, when non-nil, is the durable registry that persists
+	// compiled workflow graphs (by WorkflowID+Version). When nil, NewControlPlane
+	// falls back to a registry exposed by the backend provider (if any). It backs
+	// the explicit /v1/workflows/register endpoint so later tasks can resolve a
+	// graph on seed and derive entry activations. Optional.
+	WorkflowRegistry backend.WorkflowRegistry
 }
 
 type redisClientProvider interface {
@@ -87,6 +93,28 @@ func selectRunnerDirectory(cfg Config, observer RunnerClaimObserver) RunnerDirec
 		}
 	}
 	return NewMemoryRunnerDirectory()
+}
+
+// workflowRegistryProvider is the optional backend capability that exposes a
+// durable workflow registry. The distributed and local providers implement it;
+// backends that do not simply leave the control-plane registry nil.
+type workflowRegistryProvider interface {
+	WorkflowRegistry() backend.WorkflowRegistry
+}
+
+// selectWorkflowRegistry resolves the registry the control plane exposes:
+// Config.WorkflowRegistry wins when set, else the backend provider's registry
+// when it exposes one, else nil.
+func selectWorkflowRegistry(cfg Config) backend.WorkflowRegistry {
+	if cfg.WorkflowRegistry != nil {
+		return cfg.WorkflowRegistry
+	}
+	if provider, ok := cfg.Backend.(workflowRegistryProvider); ok {
+		if reg := provider.WorkflowRegistry(); reg != nil {
+			return reg
+		}
+	}
+	return nil
 }
 
 // ControlPlane bundles the engine, Task Dispatcher, Runner Protocol servers,
@@ -112,6 +140,11 @@ type ControlPlane struct {
 	// activation controller). Non-nil only when Config.EntryActivationStore is
 	// provided. Used for generation fencing on seeds and lifecycle management.
 	entryActivations engine.EntryActivationStore
+
+	// workflowRegistry is the optional durable registry of compiled workflow
+	// graphs. Resolved from Config.WorkflowRegistry, else from the backend
+	// provider when it exposes one, else nil. Exposed via WorkflowRegistry().
+	workflowRegistry backend.WorkflowRegistry
 
 	lifecycleMu         sync.Mutex
 	started             bool
@@ -204,6 +237,10 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 	if cfg.EntryActivationStore != nil {
 		serverOpts = append(serverOpts, WithEntryActivationStore(cfg.EntryActivationStore))
 	}
+	workflowRegistry := selectWorkflowRegistry(cfg)
+	if workflowRegistry != nil {
+		serverOpts = append(serverOpts, WithWorkflowRegistry(workflowRegistry))
+	}
 	httpServer := NewServer(eng, runners, serverOpts...)
 
 	var grpcOpts []GRPCServerOption
@@ -263,6 +300,7 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 		logger:           cfg.Logger,
 		activationCtrl:   activationCtrl,
 		entryActivations: cfg.EntryActivationStore,
+		workflowRegistry: workflowRegistry,
 	}, nil
 }
 
@@ -300,6 +338,14 @@ func (cp *ControlPlane) SeedExecutionFromEntry(ctx context.Context, req engine.S
 // activations on workflow add/update/remove.
 func (cp *ControlPlane) EntryActivationStore() engine.EntryActivationStore {
 	return cp.entryActivations
+}
+
+// WorkflowRegistry returns the durable registry of compiled workflow graphs, or
+// nil when none was configured. The apiserver register/deregister handlers use
+// it to persist/remove compiled graphs; later tasks resolve a graph on seed to
+// derive entry activations.
+func (cp *ControlPlane) WorkflowRegistry() backend.WorkflowRegistry {
+	return cp.workflowRegistry
 }
 
 // RunnerDirectory exposes the runner directory for management/observability

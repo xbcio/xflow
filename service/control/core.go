@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/observability/tracing"
@@ -62,6 +63,11 @@ type Core struct {
 	// generation fencing — every seed is admitted (legacy / locally-hosted
 	// triggers with no remote activation).
 	entryActivations engine.EntryActivationStore
+	// workflowRegistry, when non-nil, is the durable registry of compiled
+	// workflow graphs. Threaded from the ControlPlane so later tasks can resolve
+	// a graph on the seed path to derive entry activations. Nil means no registry
+	// is configured.
+	workflowRegistry backend.WorkflowRegistry
 }
 
 // leaseRecoveryEngine is deliberately optional so custom EngineFacade test

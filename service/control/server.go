@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/execution"
@@ -92,6 +93,18 @@ func WithEntryActivationStore(store engine.EntryActivationStore) ServerOption {
 	return func(s *Server) {
 		if store != nil {
 			s.core.entryActivations = store
+		}
+	}
+}
+
+// WithWorkflowRegistry installs the durable registry of compiled workflow
+// graphs onto the control Core so later tasks can resolve a graph on the seed
+// path to derive entry activations. Nil (the default) leaves the Core without a
+// registry.
+func WithWorkflowRegistry(reg backend.WorkflowRegistry) ServerOption {
+	return func(s *Server) {
+		if reg != nil {
+			s.core.workflowRegistry = reg
 		}
 	}
 }

@@ -75,9 +75,14 @@ type Authorizer interface {
 // Operation vocabulary. The route layer resolves each inbound request to one
 // of these before invoking the handler.
 const (
-	OpWorkflowCreate             = "workflow.create"
-	OpWorkflowInvoke             = "workflow.invoke"
-	OpWorkflowRead               = "workflow.read"
+	OpWorkflowCreate = "workflow.create"
+	OpWorkflowInvoke = "workflow.invoke"
+	OpWorkflowRead   = "workflow.read"
+	// OpWorkflowRegister is the mutation that persists a compiled workflow graph
+	// into the server-side registry via POST /v1/workflows/register, and its
+	// deregister counterpart via DELETE /v1/workflows/register/{id}. It maps to
+	// the "workflow" scope like the other workflow operations.
+	OpWorkflowRegister           = "workflow.register"
 	OpWorkflowDefinitionCreate   = "workflowdefinition.create"
 	OpWorkflowDefinitionRead     = "workflowdefinition.read"
 	OpWorkflowDefinitionUpdate   = "workflowdefinition.update" // draft
@@ -114,6 +119,7 @@ const (
 func scopeForOperation(op string) string {
 	switch op {
 	case OpWorkflowCreate, OpWorkflowInvoke, OpWorkflowRead,
+		OpWorkflowRegister,
 		OpWorkflowDefinitionCreate, OpWorkflowDefinitionRead, OpWorkflowDefinitionUpdate,
 		OpWorkflowDefinitionValidate, OpWorkflowDefinitionPublish, OpWorkflowExecutionInvoke:
 		return "workflow"

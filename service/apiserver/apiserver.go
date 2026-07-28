@@ -215,6 +215,13 @@ func buildControlPlane(cfg Config) (*control.ControlPlane, error) {
 		ccfg.Backend = b
 	}
 
+	// Select the workflow registry the same way the backend is selected: reuse
+	// the backend provider's registry (memory registry for the in-memory path,
+	// the durable one for the distributed path). control.NewControlPlane also
+	// falls back to the backend registry when Config.WorkflowRegistry is nil, but
+	// selecting it explicitly here keeps the apiserver's wiring self-describing.
+	ccfg.WorkflowRegistry = ccfg.Backend.WorkflowRegistry()
+
 	return control.NewControlPlane(ccfg)
 }
 
