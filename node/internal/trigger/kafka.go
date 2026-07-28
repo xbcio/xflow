@@ -607,19 +607,25 @@ func (a *kafkaPartitionAggregator) flush(ctx context.Context, messages []KafkaMe
 	return true
 }
 
+// emitKafkaMessage is the legacy single-message emit path, used only when the
+// runtime does NOT implement types.EntrySeedRuntime (see isEntrySeedActivation).
+// It emits directly and lets the per-partition serial worker commit the offset
+// only after Emit succeeds (kafkaPartitionWorker.run) — offset durability
+// follows the side effect, never precedes it.
+//
+// P0-1: the previous implementation ran a pre-emit Dedup SETNX here. If the
+// process crashed after the SETNX marked the message "seen" but before Emit, the
+// message was lost forever (redelivery saw the dedup marker and skipped it). The
+// SETNX has been removed: the ordered emit-then-commit is the at-least-once
+// guarantee. The downstream is idempotent (host idempotency contract), so a
+// possible duplicate on crash-after-emit-before-commit is safe.
 func emitKafkaMessage(ctx context.Context, in *types.TriggerActivateInput, msg KafkaMessage) bool {
 	event := kafkaSingleEvent(in.NodeName, msg)
 	if event.Time.IsZero() {
 		event.Time = time.Now()
 	}
-	ok, err := dedupKafkaMessage(ctx, in, msg)
-	if err != nil {
+	if _, err := in.Emit(ctx, event); err != nil {
 		return false
-	}
-	if ok {
-		if _, err := in.Emit(ctx, event); err != nil {
-			return false
-		}
 	}
 	return true
 }
