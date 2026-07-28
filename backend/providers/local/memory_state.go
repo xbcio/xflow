@@ -38,6 +38,7 @@ type memoryState struct {
 	resumed        map[string]bool                   // resume lock: key: execID+"/"+nodeName
 	subExecs       map[string][]*engine.SubExecution // key: execID+"/"+nodeName
 	groupUnits     map[string]*groupUnitState        // key: "<execID>/<unitIdx>"
+	admissions     map[engine.AdmissionKey]*admissionEntry // trigger admission keys
 
 	// done channels allow Wait() callers to block until execution completes.
 	doneCh        map[types.ExecutionID]chan struct{}

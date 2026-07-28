@@ -11,3 +11,9 @@ func TestLocalGroupStateContract(t *testing.T) {
 		return New().State().(statestoretest.GroupStore)
 	})
 }
+
+func TestLocalTriggerAdmissionContract(t *testing.T) {
+	statestoretest.RunTriggerAdmissionContract(t, func(t *testing.T) statestoretest.TriggerAdmissionTestStore {
+		return New().State().(statestoretest.TriggerAdmissionTestStore)
+	})
+}

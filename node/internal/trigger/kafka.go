@@ -780,3 +780,76 @@ func normalizeKafkaAggregateConfig(cfg KafkaAggregateConfig) KafkaAggregateConfi
 }
 
 func init() { registry.RegisterTrigger(&KafkaTriggerNode{}) }
+
+// ---------------------------------------------------------------------------
+// Trigger-group mode: admission-based emit (Milestone G)
+// ---------------------------------------------------------------------------
+
+// emitKafkaTriggerGroupMessage processes one message through the trigger-group
+// admission path. Instead of Emit+Dedup, it calls SeedTriggeredGroupResult on
+// the runtime. Only accepted/duplicate-accepted/conflict responses commit the
+// Kafka offset. Transient errors return false (no commit → Kafka redelivery).
+//
+// This function is the trigger-group analogue of emitKafkaMessage for the
+// per-partition serial worker. It is NOT used by the legacy Emit path.
+func emitKafkaTriggerGroupMessage(ctx context.Context, in *types.TriggerActivateInput, consumer KafkaConsumer, msg KafkaMessage) bool {
+	rt, ok := in.Runtime.(types.TriggerGroupRuntime)
+	if !ok {
+		// Fallback: runtime does not support trigger-group. This should not happen
+		// in a properly configured trigger-group activation.
+		return false
+	}
+
+	groupID, _ := in.Params["group_id"].(string)
+	workflowVersion, _ := in.Params["workflow_version"].(string)
+
+	// Build the admission key from the message's stable source identity.
+	admissionKey := fmt.Sprintf("%s/%s/%s/%s/%s/%d/%d-%d",
+		"", // namespace is set server-side
+		in.WorkflowID, workflowVersion, groupID,
+		msg.Topic, msg.Partition, msg.Offset, msg.Offset)
+
+	// Build exits — for single-message trigger-group, the output is the message data.
+	exits := []types.TriggerGroupExit{{
+		NodeName: in.NodeName,
+		Port:     "main",
+		Data: map[string]any{
+			"topic":     msg.Topic,
+			"partition": msg.Partition,
+			"offset":    msg.Offset,
+			"key":       string(msg.Key),
+			"value":     string(msg.Value),
+		},
+	}}
+
+	req := types.TriggerGroupAdmissionRequest{
+		AdmissionKey:    admissionKey,
+		WorkflowID:      in.WorkflowID,
+		WorkflowVersion: workflowVersion,
+		GroupID:         groupID,
+		Outcome:         "success",
+		Exits:           exits,
+	}
+
+	resp, err := rt.SeedTriggeredGroupResult(ctx, req)
+	if err != nil {
+		// Transient error (network timeout, etc.) — do NOT commit offset.
+		// Kafka will redeliver the message.
+		return false
+	}
+
+	// Accepted, duplicate-accepted, or conflict: the admission was handled.
+	// Commit the Kafka offset regardless — for conflict, another runner already
+	// admitted a result for this key, so the message is consumed.
+	if resp.Accepted || resp.Duplicate || resp.Conflict {
+		if commitErr := commitKafkaMessages(ctx, consumer, msg); commitErr != nil {
+			// Commit failed — the message will be redelivered. On redelivery,
+			// SeedTriggeredGroupResult returns duplicate-accepted, which is safe.
+			return false
+		}
+		return true
+	}
+
+	// Unknown state — defensive: don't commit.
+	return false
+}

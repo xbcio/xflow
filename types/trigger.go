@@ -79,3 +79,42 @@ type TriggerState interface {
 	Set(ctx context.Context, key string, value []byte, ttl time.Duration) error
 	Delete(ctx context.Context, key string) error
 }
+
+// TriggerGroupRuntime is an optional capability of TriggerRuntime that supports
+// trigger-group atomic admission. Kafka trigger nodes check for this via type
+// assertion when operating in trigger-group mode. If absent, the trigger falls
+// back to the standard Emit path.
+type TriggerGroupRuntime interface {
+	// SeedTriggeredGroupResult atomically admits a trigger-group result to the
+	// control plane. Only after a successful (accepted/duplicate) response may
+	// the caller commit the Kafka offset.
+	SeedTriggeredGroupResult(ctx context.Context, req TriggerGroupAdmissionRequest) (TriggerGroupAdmissionResponse, error)
+}
+
+// TriggerGroupAdmissionRequest is the caller-facing admission request. It wraps
+// the engine-level types with the fields a Kafka trigger naturally has. The
+// TriggerGroupRuntime implementation maps these to the engine request.
+type TriggerGroupAdmissionRequest struct {
+	AdmissionKey    string
+	WorkflowID      WorkflowID
+	WorkflowVersion string
+	GroupID         string
+	Outcome         string // "success" or "failed"
+	Exits           []TriggerGroupExit
+	Error           string
+}
+
+// TriggerGroupExit is one boundary output from the group execution.
+type TriggerGroupExit struct {
+	NodeName string
+	Port     string
+	Data     map[string]any
+}
+
+// TriggerGroupAdmissionResponse is the control-plane response.
+type TriggerGroupAdmissionResponse struct {
+	Accepted    bool
+	Duplicate   bool
+	Conflict    bool
+	ExecutionID ExecutionID
+}
