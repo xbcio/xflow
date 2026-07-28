@@ -137,9 +137,10 @@ type TaskLease struct {
 // used by control-plane dispatchers to pick a capable runner before issuing a
 // lease, so queue backpressure does not consume handler attempts.
 type TaskRouting struct {
-	NodeType       string `json:"node_type"`
-	NodeVersion    int    `json:"node_version,omitempty"`
-	RunnerSelector *types.RunnerSelector
+	NodeType       string                `json:"node_type"`
+	NodeVersion    int                   `json:"node_version,omitempty"`
+	RunnerSelector *types.RunnerSelector `json:"runner_selector,omitempty"`
+	Requirements   []CapabilityRequirement `json:"requirements,omitempty"`
 }
 
 // Deadline returns the wall-clock instant after which the lease is considered

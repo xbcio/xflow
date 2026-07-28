@@ -175,11 +175,30 @@ func (e *Engine) TaskRouting(ctx context.Context, t *Task) (TaskRouting, error) 
 	if _, err := e.checkTaskRouteActive(ctx, g, t); err != nil {
 		return TaskRouting{}, err
 	}
+
+	unitIdx := t.UnitIdx
+	if unitIdx >= 0 && unitIdx < g.UnitCount() && g.UnitKindAt(unitIdx) == graph.UnitGroup {
+		gm := g.GroupMetaAt(unitIdx)
+		pkg, _, err := graph.ProjectGroupPackage(g, unitIdx)
+		if err != nil {
+			return TaskRouting{}, fmt.Errorf("project group package for routing: %w", err)
+		}
+		return TaskRouting{
+			NodeType:       "xflow.group",
+			RunnerSelector: cloneRunnerSelector(gm.RunnerSelector),
+			Requirements:   RequirementsFromGraphPackage(pkg.Requirements),
+		}, nil
+	}
+
 	meta := g.NodeAt(t.NodeIdx)
 	return TaskRouting{
 		NodeType:       meta.Type,
 		NodeVersion:    meta.Version,
 		RunnerSelector: cloneRunnerSelector(meta.RunnerSelector),
+		Requirements: NormalizeRequirements([]CapabilityRequirement{{
+			NodeType:    meta.Type,
+			NodeVersion: meta.Version,
+		}}),
 	}, nil
 }
 
