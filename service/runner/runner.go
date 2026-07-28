@@ -58,6 +58,12 @@ type Config struct {
 	// Namespaces lists the namespaces this runner is willing to serve. Empty or nil
 	// means ["default"] for single-namespace compatibility.
 	Namespaces []namespace.Namespace
+	// EnableGroupExec enables group task execution. When true, the runner
+	// advertises group.exec.v1 capability and routes group leases to GroupRuntime.
+	EnableGroupExec bool
+	// GroupRuntime executes group subgraphs locally. Required when EnableGroupExec
+	// is true.
+	GroupRuntime *GroupRuntime
 }
 
 type Runner struct {
@@ -261,10 +267,26 @@ func (r *Runner) executeAndReport(ctx context.Context, sessionID string, lease *
 	)
 	defer span.End()
 
-	result, execErr := r.executor.Execute(execCtx, lease)
-	if execErr != nil {
-		result = engine.TaskResult{Error: execErr}
-		span.RecordError(execErr)
+	var result engine.TaskResult
+	var groupResult *engine.GroupResult
+
+	if lease.GroupPayload != nil && r.config.GroupRuntime != nil {
+		// Group task — execute on embedded group runtime.
+		gr, err := r.config.GroupRuntime.Execute(execCtx, lease)
+		if err != nil {
+			result = engine.TaskResult{Error: err}
+			span.RecordError(err)
+		} else {
+			groupResult = &gr
+		}
+	} else {
+		// Normal node task — execute via the handler registry.
+		var execErr error
+		result, execErr = r.executor.Execute(execCtx, lease)
+		if execErr != nil {
+			result = engine.TaskResult{Error: execErr}
+			span.RecordError(execErr)
+		}
 	}
 
 	// Detach from the execute context so run cancellation cannot discard the
@@ -276,10 +298,11 @@ func (r *Runner) executeAndReport(ctx context.Context, sessionID string, lease *
 	defer cancel()
 
 	req := protocol.ReportResultRequest{
-		RunnerID:  r.config.RunnerID,
-		SessionID: sessionID,
-		Lease:     lease,
-		Result:    result,
+		RunnerID:     r.config.RunnerID,
+		SessionID:    sessionID,
+		Lease:        lease,
+		Result:       result,
+		GroupResult:  groupResult,
 		// Inject the execute span context so the server's report/commit span
 		// is a child of xflow.task.execute rather than a fresh root.
 		TraceCarrier: tracing.InjectCarrier(reportCtx),
