@@ -143,7 +143,7 @@ func ProjectGroupPackage(g *Graph, unitIdx int) (*GroupPackage, string, error) {
 		Requirements: reqs,
 	}
 
-	hash, err := computePackageHash(pkg)
+	hash, err := ComputePackageHash(pkg)
 	if err != nil {
 		return nil, "", fmt.Errorf("compute package hash: %w", err)
 	}
@@ -270,7 +270,8 @@ func buildPackageRequirements(g *Graph, memberSet map[int]bool) []Requirement {
 	return reqs
 }
 
-func computePackageHash(pkg *GroupPackage) (string, error) {
+// ComputePackageHash computes the canonical SHA-256 hash of a GroupPackage.
+func ComputePackageHash(pkg *GroupPackage) (string, error) {
 	data, err := json.Marshal(pkg)
 	if err != nil {
 		return "", err

@@ -167,3 +167,27 @@ func Versions(nodeType string) []int {
 	}
 	return result
 }
+
+// Types returns all registered action node types in the global registry.
+func Types() []string {
+	globalRegistry.mu.RLock()
+	defer globalRegistry.mu.RUnlock()
+	result := make([]string, 0, len(globalRegistry.versioned))
+	for t := range globalRegistry.versioned {
+		result = append(result, t)
+	}
+	return result
+}
+
+// HasExact returns true when the global registry has a handler for the exact
+// (nodeType, version) pair. It does NOT fall back to latest version.
+func HasExact(nodeType string, version int) bool {
+	globalRegistry.mu.RLock()
+	defer globalRegistry.mu.RUnlock()
+	versions, ok := globalRegistry.versioned[nodeType]
+	if !ok {
+		return false
+	}
+	_, found := versions[version]
+	return found
+}
