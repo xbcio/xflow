@@ -184,11 +184,12 @@ func (n *KafkaTriggerNode) Activate(ctx context.Context, in *types.TriggerActiva
 func activateKafkaPerMessage(ctx context.Context, in *types.TriggerActivateInput, cfg KafkaConsumerConfig, consumer KafkaConsumer) types.TriggerSubscription {
 	runCtx, cancel := context.WithCancel(ctx)
 	rt := &kafkaPerMessageRuntime{
-		runCtx:   runCtx,
-		in:       in,
-		consumer: consumer,
-		buffer:   cfg.MaxInflight,
-		workers:  make(map[kafkaPartitionKey]*kafkaPartitionWorker),
+		runCtx:    runCtx,
+		in:        in,
+		consumer:  consumer,
+		buffer:    cfg.MaxInflight,
+		workers:   make(map[kafkaPartitionKey]*kafkaPartitionWorker),
+		entrySeed: isEntrySeedActivation(in),
 	}
 	done := make(chan struct{})
 	go func() {
@@ -236,6 +237,34 @@ type kafkaPerMessageRuntime struct {
 	mu        sync.Mutex
 	closeOnce sync.Once
 	workers   map[kafkaPartitionKey]*kafkaPartitionWorker
+	// entrySeed selects the entry-unit seed admission path over the legacy
+	// Emit path for each message. Set once at activation from the trigger
+	// params (see isEntrySeedActivation).
+	entrySeed bool
+}
+
+// isEntrySeedActivation reports whether a Kafka trigger should route each
+// message through the entry-unit seed admission path (seedKafkaEntryBatch)
+// instead of the legacy Emit path. It requires BOTH that the runtime supports
+// entry-seed admission (implements types.EntrySeedRuntime) AND that the trigger
+// is configured as an entry unit — signalled by params `entry_seed=true` or the
+// presence of a non-empty `entry_unit_id`. Requiring the runtime capability
+// keeps existing triggers on the legacy path when the runtime cannot admit
+// seeds, so a misconfigured param can never silently drop messages.
+func isEntrySeedActivation(in *types.TriggerActivateInput) bool {
+	if in == nil {
+		return false
+	}
+	if _, ok := in.Runtime.(types.EntrySeedRuntime); !ok {
+		return false
+	}
+	if cast.ToBool(in.Params["entry_seed"]) {
+		return true
+	}
+	if id, _ := in.Params["entry_unit_id"].(string); id != "" {
+		return true
+	}
+	return false
 }
 
 type kafkaPartitionWorker struct {
@@ -338,7 +367,12 @@ func (w *kafkaPartitionWorker) run() {
 			// Serial per-partition processing: emit then commit in offset order so
 			// a rebalance can never skip a lower offset whose higher peer committed
 			// first. Emit failure skips commit, leaving the message redelivered.
-			if emitKafkaMessage(w.rt.runCtx, w.rt.in, msg) {
+			if w.rt.entrySeed {
+				// Entry-seed mode: admission drives the seed, which commits the
+				// offset internally on accept/duplicate/conflict. Do NOT
+				// double-commit here.
+				_ = seedKafkaEntryBatch(w.rt.runCtx, w.rt.in, w.rt.consumer, msg)
+			} else if emitKafkaMessage(w.rt.runCtx, w.rt.in, msg) {
 				_ = commitKafkaMessages(context.Background(), w.rt.consumer, msg)
 			}
 		case <-idleTimer.C:

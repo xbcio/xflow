@@ -319,14 +319,71 @@ func TestKafkaEntrySeed_CommitFailure_Safe(t *testing.T) {
 	}
 }
 
-// --- trigger-group test runtime ---
+// TestEntrySeedDispatch_PerMessageWorker verifies that when the runtime supports
+// EntrySeedRuntime and the trigger is configured with entry_seed=true, a
+// delivered message drives SeedExecutionFromEntry (not Emit) and the offset is
+// committed only after an accepted response.
+func TestEntrySeedDispatch_PerMessageWorker(t *testing.T) {
+	msgs := []KafkaMessage{
+		{Topic: "t", Partition: 0, Offset: 700, Value: []byte("seed-me")},
+	}
+	consumer := newScriptedConsumer(msgs)
+	recorder := &commitRecordingConsumer{inner: consumer}
 
+	admitter := &mockEntrySeedRuntime{
+		response: types.EntrySeedResponse{Accepted: true, ExecutionID: "exec-seed"},
+	}
+	rt := &entrySeedTestRuntime{
+		admitter: admitter,
+		dedup:    func(ctx context.Context, key string, ttl time.Duration) (bool, error) { return true, nil },
+	}
+
+	in := &types.TriggerActivateInput{
+		WorkflowID: "wf1",
+		NodeName:   "trigger",
+		Params:     map[string]any{"entry_seed": true, "entry_unit_id": "g1", "workflow_version": "v1"},
+		Runtime:    rt,
+	}
+
+	cfg := KafkaConsumerConfig{MaxInflight: 4}
+	sub := activateKafkaPerMessage(context.Background(), in, cfg, recorder)
+	t.Cleanup(func() { _ = sub.Close(context.Background()) })
+
+	// Wait for the message to be admitted + committed.
+	deadline := time.After(2 * time.Second)
+	for {
+		if len(recorder.getCommits()) == 1 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for commit; admission calls=%d commits=%d",
+				admitter.callCount.Load(), len(recorder.getCommits()))
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+
+	if admitter.callCount.Load() != 1 {
+		t.Fatalf("admission calls = %d, want 1 (should drive SeedExecutionFromEntry)", admitter.callCount.Load())
+	}
+	if got := rt.emitCount.Load(); got != 0 {
+		t.Fatalf("Emit calls = %d, want 0 (entry-seed must not use legacy Emit path)", got)
+	}
+	commits := recorder.getCommits()
+	if len(commits) != 1 || commits[0][0].Offset != 700 {
+		t.Fatalf("commits = %+v, want single commit at offset 700", commits)
+	}
+}
+
+// --- trigger-group test runtime ---
 type entrySeedTestRuntime struct {
-	admitter types.EntrySeedRuntime
-	dedup    func(ctx context.Context, key string, ttl time.Duration) (bool, error)
+	admitter  types.EntrySeedRuntime
+	dedup     func(ctx context.Context, key string, ttl time.Duration) (bool, error)
+	emitCount atomic.Int32
 }
 
 func (r *entrySeedTestRuntime) Emit(_ context.Context, _ types.WorkflowID, _ string, _ *types.TriggerEvent) (types.ExecutionID, error) {
+	r.emitCount.Add(1)
 	return "", nil
 }
 func (r *entrySeedTestRuntime) Dedup(ctx context.Context, key string, ttl time.Duration) (bool, error) {
