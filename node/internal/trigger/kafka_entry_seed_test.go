@@ -375,6 +375,124 @@ func TestEntrySeedDispatch_PerMessageWorker(t *testing.T) {
 	}
 }
 
+// durableSeedAdmitter models the control-plane admission store: it keeps a
+// durable record keyed by AdmissionKey. The first admission for a key is
+// Accepted (a new durable execution seed); every subsequent admission for the
+// same key is Duplicate (accepted, but no new seed). This is the offset-safe
+// invariant used to prove no-loss under crash-between-accept-and-commit.
+type durableSeedAdmitter struct {
+	mu        sync.Mutex
+	seeds     map[string]types.ExecutionID // admissionKey -> execID (durable)
+	lastReq   types.EntrySeedRequest
+	callCount atomic.Int32
+}
+
+func newDurableSeedAdmitter() *durableSeedAdmitter {
+	return &durableSeedAdmitter{seeds: map[string]types.ExecutionID{}}
+}
+
+func (d *durableSeedAdmitter) SeedExecutionFromEntry(_ context.Context, req types.EntrySeedRequest) (types.EntrySeedResponse, error) {
+	d.callCount.Add(1)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.lastReq = req
+	if execID, ok := d.seeds[req.AdmissionKey]; ok {
+		// Already durable — idempotent replay.
+		return types.EntrySeedResponse{Accepted: true, Duplicate: true, ExecutionID: execID}, nil
+	}
+	execID := types.ExecutionID("exec-" + req.AdmissionKey)
+	d.seeds[req.AdmissionKey] = execID
+	return types.EntrySeedResponse{Accepted: true, ExecutionID: execID}, nil
+}
+
+func (d *durableSeedAdmitter) seedCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return len(d.seeds)
+}
+
+func (d *durableSeedAdmitter) last() types.EntrySeedRequest {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.lastReq
+}
+
+// TestKafkaSingleNodeSeedNoLoss proves the P0-1 fix for a single-node trigger:
+// a crash between a durable accept and the Kafka commit does NOT lose the event.
+// First delivery: admission accepts (durable seed) but the committer errors →
+// seedKafkaEntryBatch returns false and the offset is NOT committed, so Kafka
+// redelivers. Redelivery of the same offset returns Duplicate (no new seed) and
+// commits. Exactly one durable execution seed exists; no event is lost.
+//
+// The trigger is a single node: no entry_unit_id param, so the entry unit ID
+// falls back to the node name (spec §11.5). The single BoundaryExit carries the
+// message data on port "main", and the admission key is derived from
+// topic/partition/offset (BuildAdmissionKeySingle semantics).
+func TestKafkaSingleNodeSeedNoLoss(t *testing.T) {
+	msg := KafkaMessage{Topic: "orders", Partition: 2, Offset: 900, Key: []byte("k9"), Value: []byte("payload")}
+	consumer := newScriptedConsumer([]KafkaMessage{msg})
+	// First commit fails (crash between accept and commit); redelivery commit succeeds.
+	recorder := &commitRecordingConsumer{inner: consumer, failFirst: context.DeadlineExceeded}
+
+	admitter := newDurableSeedAdmitter()
+	rt := &entrySeedTestRuntime{admitter: admitter}
+
+	// Single node: NO entry_unit_id param — entry unit ID must fall back to NodeName.
+	in := &types.TriggerActivateInput{
+		WorkflowID: "wf1",
+		NodeName:   "single-node",
+		Params:     map[string]any{"workflow_version": "v1"},
+		Runtime:    rt,
+	}
+
+	// First delivery: accept durable, commit fails → false, offset NOT committed.
+	if ok := seedKafkaEntryBatch(context.Background(), in, recorder, msg); ok {
+		t.Fatal("first delivery: seedKafkaEntryBatch returned true, want false (commit failed → redeliver)")
+	}
+	if got := len(recorder.getCommits()); got != 0 {
+		t.Fatalf("first delivery: commits = %d, want 0 (offset must NOT be committed)", got)
+	}
+
+	// Redelivery of the SAME offset: admission is Duplicate, commit succeeds → true.
+	if ok := seedKafkaEntryBatch(context.Background(), in, recorder, msg); !ok {
+		t.Fatal("redelivery: seedKafkaEntryBatch returned false, want true (duplicate accepted + commit)")
+	}
+
+	// Exactly one durable execution seed — no loss, no double-seed.
+	if got := admitter.seedCount(); got != 1 {
+		t.Fatalf("durable execution seeds = %d, want exactly 1", got)
+	}
+	// The offset was committed exactly once (on redelivery).
+	commits := recorder.getCommits()
+	if len(commits) != 1 || commits[0][0].Offset != 900 {
+		t.Fatalf("commits = %+v, want single commit at offset 900", commits)
+	}
+	// Admission attempted twice (once per delivery).
+	if got := admitter.callCount.Load(); got != 2 {
+		t.Fatalf("admission calls = %d, want 2", got)
+	}
+
+	// Single-node specifics: entry unit ID = node name; one exit on port "main".
+	req := admitter.last()
+	if req.EntryUnitID != "single-node" {
+		t.Fatalf("EntryUnitID = %q, want node name %q (single-node fallback)", req.EntryUnitID, "single-node")
+	}
+	if len(req.Exits) != 1 {
+		t.Fatalf("exits = %d, want 1 (cardinality-1 seed)", len(req.Exits))
+	}
+	exit := req.Exits[0]
+	if exit.NodeName != "single-node" || exit.Port != "main" {
+		t.Fatalf("exit = %+v, want NodeName=single-node Port=main", exit)
+	}
+	if exit.Data["offset"] != int64(900) || exit.Data["value"] != "payload" {
+		t.Fatalf("exit data = %+v, want offset=900 value=payload", exit.Data)
+	}
+	// Admission key must derive from topic/partition/offset so redelivery collides.
+	if req.AdmissionKey == "" {
+		t.Fatal("admission key is empty, want topic/partition/offset-derived key")
+	}
+}
+
 // --- trigger-group test runtime ---
 type entrySeedTestRuntime struct {
 	admitter  types.EntrySeedRuntime
