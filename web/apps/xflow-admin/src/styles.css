@@ -4,19 +4,19 @@
 @source "../../../packages";
 
 :root {
-  --admin-bg: #111214;
-  --admin-surface: #181a1d;
-  --admin-surface-2: #202328;
-  --admin-rail: #0f1012;
-  --admin-border: #30343a;
-  --admin-border-soft: #252930;
-  --admin-text: #f0f3f7;
-  --admin-muted: #8f98a6;
+  --admin-bg: #0b0c0e;
+  --admin-surface: #15171b;
+  --admin-surface-2: #1b1e24;
+  --admin-rail: #111217;
+  --admin-border: #2b3038;
+  --admin-border-soft: #20242b;
+  --admin-text: #dce1e8;
+  --admin-muted: #9ba3af;
   --admin-subtle: #68717f;
-  --admin-accent: #f6b545;
-  --admin-blue: #3f86ff;
-  --admin-green: #48c78e;
-  --admin-red: #ff6b61;
+  --admin-accent: #ff9830;
+  --admin-blue: #5794f2;
+  --admin-green: #73bf69;
+  --admin-red: #f2495c;
 }
 
 html,
@@ -44,7 +44,7 @@ textarea {
   background: var(--admin-bg);
   color: var(--admin-text);
   display: grid;
-  grid-template-columns: 220px minmax(0, 1fr);
+  grid-template-columns: 72px minmax(0, 1fr);
   height: 100vh;
   overflow: hidden;
 }
@@ -52,133 +52,115 @@ textarea {
 .xflow-admin-rail {
   background: var(--admin-rail);
   border-right: 1px solid var(--admin-border);
+  min-height: 0;
+}
+
+.xflow-admin-rail .ant-layout-sider-children {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  padding: 12px;
+  padding: 10px 8px;
 }
 
-.xflow-admin-rail__brand {
+.xflow-admin-rail__brand.ant-btn {
   align-items: center;
-  background: transparent;
-  border: 0;
+  background: transparent !important;
+  border: 0 !important;
   color: var(--admin-text);
-  cursor: pointer;
   display: flex;
-  gap: 10px;
   height: 42px;
-  padding: 0 8px;
-  text-align: left;
+  justify-content: center;
+  padding: 0;
   width: 100%;
 }
 
-.xflow-admin-rail__brand > span {
+.xflow-admin-rail__brand.ant-btn .ant-btn-icon {
   align-items: center;
-  background: #f6b545;
-  border-radius: 6px;
-  color: #17120a;
+  background: var(--admin-accent);
+  border-radius: 4px;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, .08) inset;
+  color: #111217;
   display: inline-flex;
-  height: 26px;
+  height: 30px;
   justify-content: center;
-  width: 26px;
+  width: 30px;
 }
 
-.xflow-admin-rail__brand strong {
-  font-size: 15px;
-  font-weight: 720;
-  letter-spacing: 0;
+.xflow-admin-rail__brand.ant-btn .anticon {
+  color: #111217;
 }
 
-.xflow-admin-rail__nav {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  gap: 4px;
-  margin-top: 18px;
-  min-height: 0;
-}
-
-.xflow-admin-rail__nav button {
-  align-items: center;
+.xflow-admin-rail__nav.ant-menu {
   background: transparent;
-  border: 1px solid transparent;
-  border-radius: 5px;
-  color: #b7bec9;
-  cursor: pointer;
-  display: flex;
-  gap: 10px;
-  height: 34px;
-  padding: 0 10px;
-  text-align: left;
+  border-inline-end: 0 !important;
+  flex: 1;
+  margin-top: 20px;
+  min-height: 0;
+  width: 100%;
 }
 
-.xflow-admin-rail__nav button:hover {
-  background: #191c20;
+.xflow-admin-rail__nav.ant-menu-inline-collapsed {
+  width: 100%;
+}
+
+.xflow-admin-rail__nav .ant-menu-item {
+  align-items: center;
+  background: transparent !important;
+  border-left: 3px solid transparent;
+  border-radius: 0 4px 4px 0;
+  color: #9aa4b2;
+  display: flex !important;
+  height: 40px;
+  justify-content: center;
+  line-height: 40px;
+  margin: 0 0 8px !important;
+  padding-inline: 0 !important;
+  width: 100%;
+}
+
+.xflow-admin-rail__nav .ant-menu-item:hover {
+  background: #1b1e24;
   color: var(--admin-text);
 }
 
-.xflow-admin-rail__nav button[data-active="true"] {
-  background: #202328;
-  border-color: #3a3f47;
+.xflow-admin-rail__nav .ant-menu-item-selected {
+  background: #1f232b;
+  border-left-color: var(--admin-accent);
   color: var(--admin-text);
 }
 
-.xflow-admin-rail__nav button[data-active="true"] .anticon {
+.xflow-admin-rail__nav .ant-menu-item-selected .anticon {
   color: var(--admin-accent);
 }
 
 .xflow-admin-rail__nav .anticon {
-  color: #858e9c;
-  font-size: 14px;
+  color: currentColor;
+  font-size: 15px;
+  width: 18px;
+}
+
+.xflow-admin-rail__nav .anticon svg {
+  display: block;
+  height: 16px;
   width: 16px;
 }
 
-.xflow-admin-rail__nav span {
-  font-size: 12px;
-  font-weight: 560;
-}
-
-.xflow-admin-user {
+.xflow-admin-user.ant-btn {
   align-items: center;
-  background: #17191d;
-  border: 1px solid var(--admin-border-soft);
-  border-radius: 6px;
+  background: transparent !important;
+  border: 0 !important;
+  border-radius: 4px;
   color: var(--admin-text);
-  cursor: pointer;
   display: flex;
-  gap: 9px;
-  min-height: 46px;
-  padding: 7px;
-  text-align: left;
+  height: 40px;
+  justify-content: center;
+  min-height: 40px;
+  padding: 0;
+  width: 100%;
 }
 
-.xflow-admin-user:hover {
-  background: #202328;
-  border-color: #3a3f47;
-}
-
-.xflow-admin-user > span:not(.ant-avatar) {
-  display: grid;
-  gap: 1px;
-  min-width: 0;
-}
-
-.xflow-admin-user strong,
-.xflow-admin-user em {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.xflow-admin-user strong {
-  font-size: 12px;
-  font-weight: 650;
-}
-
-.xflow-admin-user em {
-  color: var(--admin-muted);
-  font-size: 10px;
-  font-style: normal;
+.xflow-admin-user.ant-btn:hover {
+  background: #1b1e24 !important;
 }
 
 .xflow-admin-main.ant-layout {
@@ -189,30 +171,33 @@ textarea {
 
 .xflow-admin-topbar {
   align-items: center;
-  background: #16181b;
+  background: #111217;
   border-bottom: 1px solid var(--admin-border);
   display: flex;
   gap: 18px;
-  height: 54px;
+  height: 48px;
   justify-content: space-between;
-  padding: 0 18px;
+  line-height: normal;
+  padding: 0 16px;
 }
 
-.xflow-admin-topbar > div:first-child {
+.xflow-admin-topbar__title {
   display: grid;
-  gap: 2px;
+  gap: 1px;
   min-width: 140px;
 }
 
-.xflow-admin-topbar strong {
+.xflow-admin-topbar__title strong {
   color: var(--admin-text);
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 680;
+  line-height: 16px;
 }
 
-.xflow-admin-topbar span {
+.xflow-admin-topbar__title span {
   color: var(--admin-muted);
-  font-size: 10.5px;
+  font-size: 10px;
+  line-height: 13px;
 }
 
 .xflow-admin-topbar__actions {
@@ -223,10 +208,11 @@ textarea {
 }
 
 .xflow-admin-topbar__actions .ant-input-affix-wrapper {
-  background: #111316;
+  background: #0b0c0e;
   border-color: var(--admin-border);
   color: var(--admin-text);
-  width: min(360px, 34vw);
+  height: 28px;
+  width: min(380px, 34vw);
 }
 
 .xflow-admin-topbar__actions .ant-input {
@@ -243,72 +229,147 @@ textarea {
 .xflow-admin-page {
   height: 100%;
   overflow: auto;
-  padding: 20px;
+  padding: 16px 18px;
 }
 
 .xflow-admin-page__header {
-  align-items: flex-start;
+  align-items: end;
   display: flex;
   gap: 16px;
   justify-content: space-between;
-  margin: 0 0 18px;
+  margin: 0 0 12px;
+}
+
+.xflow-admin-kicker {
+  color: var(--admin-muted);
+  display: block;
+  font-size: 10.5px;
+  line-height: 15px;
+  margin-bottom: 4px;
 }
 
 .xflow-admin-page__header h1 {
   color: var(--admin-text);
-  font-size: 22px;
-  font-weight: 700;
+  font-size: 19px;
+  font-weight: 640;
   letter-spacing: 0;
-  line-height: 1.2;
+  line-height: 24px;
   margin: 0;
 }
 
 .xflow-admin-page__header p {
   color: var(--admin-muted);
-  font-size: 12px;
-  line-height: 18px;
-  margin: 6px 0 0;
+  font-size: 11.5px;
+  line-height: 16px;
+  margin: 3px 0 0;
+}
+
+.xflow-admin-timebar {
+  align-items: center;
+  display: flex;
+  gap: 6px;
 }
 
 .xflow-admin-metrics {
   display: grid;
-  gap: 12px;
+  gap: 8px;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  margin-bottom: 14px;
+  margin-bottom: 8px;
 }
 
-.xflow-admin-metrics article,
-.xflow-admin-card {
+.xflow-admin-metric-card.ant-card,
+.xflow-admin-card.ant-card {
   background: var(--admin-surface);
   border: 1px solid var(--admin-border);
-  border-radius: 7px;
+  border-radius: 3px;
+  color: var(--admin-text);
 }
 
-.xflow-admin-metrics article {
+.xflow-admin-metric-card.ant-card {
+  min-height: 116px;
+}
+
+.xflow-admin-metric-card.ant-card > .ant-card-head,
+.xflow-admin-card.ant-card > .ant-card-head {
+  background: #191c21;
+  border-bottom: 1px solid var(--admin-border);
+  color: #cfd6df;
+  min-height: 34px;
+  padding: 0 10px;
+}
+
+.xflow-admin-metric-card.ant-card > .ant-card-head {
+  background: transparent;
+  border-bottom: 0;
+}
+
+.xflow-admin-metric-card.ant-card > .ant-card-body {
   display: grid;
-  gap: 6px;
-  min-height: 96px;
-  padding: 14px;
+  gap: 5px;
+  padding: 0 12px 8px;
 }
 
-.xflow-admin-metrics span,
-.xflow-admin-metrics em {
+.xflow-admin-card.ant-card > .ant-card-body {
+  padding: 0;
+}
+
+.xflow-admin-metric-card .ant-card-head-title,
+.xflow-admin-card .ant-card-head-title {
+  color: #cfd6df;
+  font-size: 11.5px;
+  font-weight: 650;
+}
+
+.xflow-admin-card-title {
+  align-items: center;
+  color: #dbe2eb;
+  display: inline-flex;
+  gap: 7px;
+}
+
+.xflow-admin-card-title .anticon {
+  color: var(--admin-blue);
+  font-size: 13px;
+}
+
+.xflow-admin-metric-note {
   color: var(--admin-muted);
-  font-size: 11px;
-  font-style: normal;
+  display: block;
+  font-size: 10.5px;
+  line-height: 14px;
 }
 
-.xflow-admin-metrics strong {
+.xflow-admin-metric-card .ant-statistic-content {
   color: var(--admin-text);
   font-family: SFMono-Regular, Consolas, monospace;
-  font-size: 24px;
-  font-weight: 720;
+  font-size: 25px;
+  font-weight: 650;
   line-height: 1;
+}
+
+.xflow-admin-metric-card .ant-statistic-content-value {
+  color: inherit;
+}
+
+.xflow-admin-sparkline {
+  align-items: end;
+  display: grid;
+  gap: 3px;
+  grid-template-columns: repeat(6, 1fr);
+  height: 26px;
+  opacity: .72;
+}
+
+.xflow-admin-sparkline i {
+  background: linear-gradient(180deg, rgba(87, 148, 242, .85), rgba(87, 148, 242, .22));
+  border-radius: 1px 1px 0 0;
+  display: block;
+  min-height: 3px;
 }
 
 .xflow-admin-dashboard-grid {
   display: grid;
-  gap: 14px;
+  gap: 8px;
   grid-template-columns: minmax(0, 1.12fr) minmax(340px, .88fr);
 }
 
@@ -319,119 +380,87 @@ textarea {
 
 .xflow-admin-card__header {
   align-items: center;
-  background: #1d2025;
+  background: #191c21;
   border-bottom: 1px solid var(--admin-border);
   display: flex;
   gap: 12px;
   justify-content: space-between;
-  min-height: 42px;
-  padding: 0 12px;
+  min-height: 34px;
+  padding: 0 10px;
 }
 
 .xflow-admin-card__header strong {
-  color: #e8edf4;
-  font-size: 12px;
+  color: #cfd6df;
+  font-size: 11.5px;
   font-weight: 650;
 }
 
 .xflow-admin-card__header .ant-input-affix-wrapper {
-  background: #121418;
+  background: #0b0c0e;
   border-color: var(--admin-border);
+  height: 26px;
   width: 260px;
 }
 
-.xflow-admin-row-list,
-.xflow-admin-runner-list {
-  display: grid;
-  gap: 0;
+.xflow-admin-card .ant-input-affix-wrapper {
+  background: #0b0c0e;
+  border-color: var(--admin-border);
+  height: 26px;
+  width: 260px;
 }
 
-.xflow-admin-row-list > div,
-.xflow-admin-runner-list > div {
-  align-items: center;
-  border-bottom: 1px solid var(--admin-border-soft);
-  display: grid;
-  gap: 10px;
-  min-height: 48px;
-  padding: 8px 12px;
-}
-
-.xflow-admin-row-list > div {
-  grid-template-columns: 8px minmax(0, 1fr) auto;
-}
-
-.xflow-admin-runner-list > div {
-  grid-template-columns: 8px minmax(0, 1fr) auto;
-}
-
-.xflow-admin-row-list > div:last-child,
-.xflow-admin-runner-list > div:last-child {
-  border-bottom: 0;
-}
-
-.xflow-admin-row-list > div > span:first-child,
-.xflow-admin-runner-list > div > span:first-child,
-.xflow-admin-debug-list button > span {
+.xflow-admin-status-dot,
+.xflow-admin-debug-node > span:first-child {
   background: #747d8a;
   border-radius: 999px;
   height: 7px;
   width: 7px;
 }
 
-.xflow-admin-row-list > div > span[data-status="success"],
-.xflow-admin-row-list > div > span[data-status="online"],
-.xflow-admin-runner-list > div > span[data-status="success"],
-.xflow-admin-runner-list > div > span[data-status="online"],
-.xflow-admin-debug-list button > span[data-status="success"],
-.xflow-admin-debug-list button > span[data-status="online"] {
+.xflow-admin-status-dot[data-status="success"],
+.xflow-admin-status-dot[data-status="online"],
+.xflow-admin-debug-node > span[data-status="success"],
+.xflow-admin-debug-node > span[data-status="online"] {
   background: var(--admin-green) !important;
 }
 
-.xflow-admin-row-list > div > span[data-status="running"],
-.xflow-admin-row-list > div > span[data-status="waiting"],
-.xflow-admin-row-list > div > span[data-status="draining"],
-.xflow-admin-runner-list > div > span[data-status="running"],
-.xflow-admin-runner-list > div > span[data-status="waiting"],
-.xflow-admin-runner-list > div > span[data-status="draining"],
-.xflow-admin-debug-list button > span[data-status="running"],
-.xflow-admin-debug-list button > span[data-status="waiting"],
-.xflow-admin-debug-list button > span[data-status="draining"] {
+.xflow-admin-status-dot[data-status="running"],
+.xflow-admin-status-dot[data-status="waiting"],
+.xflow-admin-status-dot[data-status="draining"],
+.xflow-admin-debug-node > span[data-status="running"],
+.xflow-admin-debug-node > span[data-status="waiting"],
+.xflow-admin-debug-node > span[data-status="draining"] {
   background: var(--admin-accent) !important;
 }
 
-.xflow-admin-row-list > div > span[data-status="failed"],
-.xflow-admin-row-list > div > span[data-status="canceled"],
-.xflow-admin-row-list > div > span[data-status="offline"],
-.xflow-admin-runner-list > div > span[data-status="failed"],
-.xflow-admin-runner-list > div > span[data-status="canceled"],
-.xflow-admin-runner-list > div > span[data-status="offline"],
-.xflow-admin-debug-list button > span[data-status="failed"],
-.xflow-admin-debug-list button > span[data-status="canceled"],
-.xflow-admin-debug-list button > span[data-status="offline"] {
+.xflow-admin-status-dot[data-status="failed"],
+.xflow-admin-status-dot[data-status="canceled"],
+.xflow-admin-status-dot[data-status="offline"],
+.xflow-admin-debug-node > span[data-status="failed"],
+.xflow-admin-debug-node > span[data-status="canceled"],
+.xflow-admin-debug-node > span[data-status="offline"] {
   background: var(--admin-red) !important;
 }
 
-.xflow-admin-row-list strong,
-.xflow-admin-runner-list strong,
+.xflow-admin-list strong,
 .xflow-admin-workflow-table strong,
 .xflow-admin-runner-table strong {
   color: var(--admin-text);
   display: block;
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 620;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.xflow-admin-row-list em,
-.xflow-admin-runner-list em,
+.xflow-admin-list em,
 .xflow-admin-workflow-table em,
 .xflow-admin-runner-table em {
   color: var(--admin-muted);
   display: block;
   font-family: SFMono-Regular, Consolas, monospace;
-  font-size: 10px;
+  font-size: 9.5px;
   font-style: normal;
   margin-top: 2px;
   overflow: hidden;
@@ -439,10 +468,116 @@ textarea {
   white-space: nowrap;
 }
 
+.xflow-admin-list.ant-list {
+  background: transparent;
+}
+
+.xflow-admin-list .ant-list-item {
+  border-block-end: 1px solid var(--admin-border-soft) !important;
+  min-height: 44px;
+  padding: 7px 10px;
+}
+
+.xflow-admin-list .ant-list-item:last-child {
+  border-block-end: 0 !important;
+}
+
+.xflow-admin-list .ant-list-item-meta {
+  align-items: center;
+  min-width: 0;
+}
+
+.xflow-admin-list .ant-list-item-meta-avatar {
+  align-items: center;
+  display: inline-flex;
+  margin-inline-end: 10px;
+}
+
+.xflow-admin-list .ant-list-item-meta-content {
+  min-width: 0;
+}
+
+.xflow-admin-list .ant-list-item-meta-title,
+.xflow-admin-list .ant-list-item-meta-description {
+  margin: 0;
+}
+
 .xflow-admin-workflow-table,
 .xflow-admin-runner-table {
   display: grid;
   min-width: 760px;
+}
+
+.xflow-admin-table.ant-table-wrapper .ant-table {
+  background: transparent;
+  color: #cbd3de;
+}
+
+.xflow-admin-table.ant-table-wrapper .ant-table-thead > tr > th {
+  background: #111217;
+  border-bottom: 1px solid var(--admin-border);
+  color: var(--admin-subtle);
+  font-size: 9.5px;
+  font-weight: 650;
+  padding: 7px 10px;
+  text-transform: uppercase;
+}
+
+.xflow-admin-table.ant-table-wrapper .ant-table-tbody > tr > td {
+  background: transparent;
+  border-bottom: 1px solid var(--admin-border-soft);
+  color: #cbd3de;
+  font-size: 11.5px;
+  padding: 7px 10px;
+}
+
+.xflow-admin-table.ant-table-wrapper .ant-table-tbody > tr:hover > td,
+.xflow-admin-table.ant-table-wrapper .ant-table-tbody > tr.xflow-admin-table-row-active > td {
+  background: #1b1e24 !important;
+}
+
+.xflow-admin-table.ant-table-wrapper .ant-table-tbody > tr.xflow-admin-table-row-active > td:first-child {
+  box-shadow: inset 3px 0 0 var(--admin-accent);
+}
+
+.xflow-admin-table-name strong,
+.xflow-admin-table-name em {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.xflow-admin-table-name strong {
+  color: var(--admin-text);
+  font-size: 11.5px;
+  font-weight: 620;
+}
+
+.xflow-admin-table-name em {
+  color: var(--admin-muted);
+  font-family: SFMono-Regular, Consolas, monospace;
+  font-size: 9.5px;
+  font-style: normal;
+  margin-top: 2px;
+}
+
+.xflow-admin-capacity {
+  align-items: center;
+  display: grid;
+  gap: 6px;
+  grid-template-columns: minmax(48px, 1fr) 34px;
+}
+
+.xflow-admin-capacity .ant-progress {
+  line-height: 1;
+}
+
+.xflow-admin-capacity em {
+  color: var(--admin-muted);
+  font-family: SFMono-Regular, Consolas, monospace;
+  font-size: 9.5px;
+  font-style: normal;
 }
 
 .xflow-admin-workflow-table__head,
@@ -452,8 +587,8 @@ textarea {
   align-items: center;
   display: grid;
   gap: 12px;
-  min-height: 42px;
-  padding: 0 12px;
+  min-height: 38px;
+  padding: 0 10px;
 }
 
 .xflow-admin-workflow-table__head,
@@ -468,10 +603,10 @@ textarea {
 
 .xflow-admin-workflow-table__head,
 .xflow-admin-runner-table__head {
-  background: #171a1e;
+  background: #111217;
   border-bottom: 1px solid var(--admin-border);
   color: var(--admin-subtle);
-  font-size: 10px;
+  font-size: 9.5px;
   font-weight: 650;
   text-transform: uppercase;
 }
@@ -491,11 +626,11 @@ textarea {
 
 .xflow-admin-workflow-table button:hover,
 .xflow-admin-workflow-table button[data-active="true"] {
-  background: #202328;
+  background: #1b1e24;
 }
 
 .xflow-admin-workflow-table button[data-active="true"] {
-  box-shadow: inset 2px 0 0 var(--admin-accent);
+  box-shadow: inset 3px 0 0 var(--admin-accent);
 }
 
 .xflow-admin-workflow-table button > span:last-child {
@@ -544,57 +679,44 @@ textarea {
   z-index: 25;
 }
 
-.xflow-admin-settings {
-  display: grid;
-  gap: 0;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+.xflow-admin-settings.ant-card > .ant-card-body {
+  padding: 12px 14px;
 }
 
-.xflow-admin-settings > div {
-  border-right: 1px solid var(--admin-border-soft);
-  display: grid;
-  gap: 6px;
-  padding: 16px;
-}
-
-.xflow-admin-settings > div:last-child {
-  border-right: 0;
-}
-
-.xflow-admin-settings span {
+.xflow-admin-settings .ant-descriptions-item-label {
   color: var(--admin-muted);
   font-size: 11px;
 }
 
-.xflow-admin-settings strong {
+.xflow-admin-settings .ant-descriptions-item-content {
   color: var(--admin-text);
-  font-size: 13px;
+  font-size: 12px;
+  font-weight: 620;
 }
 
-.xflow-admin-debug-panel {
-  background: #17191d;
-  border-left: 1px solid var(--admin-border);
-  bottom: 0;
-  box-shadow: -18px 0 32px rgba(0, 0, 0, .28);
-  color: var(--admin-text);
-  overflow: auto;
-  padding: 10px;
+.xflow-admin-debug-drawer {
   position: absolute;
-  right: 0;
-  top: 0;
-  width: 392px;
-  z-index: 40;
 }
 
-.xflow-admin-debug-panel__header {
-  align-items: center;
+.xflow-admin-debug-drawer .ant-drawer-content-wrapper {
+  box-shadow: -18px 0 32px rgba(0, 0, 0, .28);
+  width: 392px !important;
+}
+
+.xflow-admin-debug-panel .ant-drawer-content {
+  background: #17191d;
+  color: var(--admin-text);
+}
+
+.xflow-admin-debug-panel .ant-drawer-header {
   background: #1d2025;
   border-bottom: 1px solid var(--admin-border);
-  display: flex;
-  justify-content: space-between;
-  margin: -10px -10px 10px;
   min-height: 42px;
   padding: 0 10px 0 12px;
+}
+
+.xflow-admin-debug-panel .ant-drawer-body {
+  padding: 10px;
 }
 
 .xflow-admin-debug-title {
@@ -606,31 +728,37 @@ textarea {
   gap: 6px;
 }
 
-.xflow-admin-debug-summary {
+.xflow-admin-debug-summary.ant-descriptions {
   background: var(--admin-surface);
   border: 1px solid var(--admin-border);
   border-radius: 6px;
-  display: grid;
-  gap: 7px;
   margin-bottom: 10px;
   padding: 9px;
 }
 
-.xflow-admin-debug-summary div,
-.xflow-admin-debug-list button {
-  align-items: center;
-  display: flex;
-  justify-content: space-between;
+.xflow-admin-debug-summary .ant-descriptions-view {
+  width: 100%;
 }
 
-.xflow-admin-debug-summary span {
+.xflow-admin-debug-summary .ant-descriptions-row > th,
+.xflow-admin-debug-summary .ant-descriptions-row > td {
+  padding-bottom: 4px;
+}
+
+.xflow-admin-debug-summary .ant-descriptions-row:last-child > th,
+.xflow-admin-debug-summary .ant-descriptions-row:last-child > td {
+  padding-bottom: 0;
+}
+
+.xflow-admin-debug-summary .ant-descriptions-item-label {
   color: var(--admin-muted);
   font-size: 10.5px;
 }
 
-.xflow-admin-debug-summary strong {
+.xflow-admin-debug-summary .ant-descriptions-item-content {
   color: var(--admin-text);
   font-size: 11px;
+  justify-content: flex-end;
 }
 
 .xflow-admin-debug-layout {
@@ -648,11 +776,18 @@ textarea {
   overflow: auto;
 }
 
-.xflow-admin-debug-list button {
+.xflow-admin-debug-list .ant-list-item {
+  border-block-end: 0 !important;
+  padding: 0 0 5px;
+}
+
+.xflow-admin-debug-node.ant-btn {
+  align-items: center;
   background: var(--admin-surface);
   border: 1px solid var(--admin-border);
   border-radius: 5px;
   color: #cbd2dc;
+  display: flex;
   cursor: pointer;
   gap: 6px;
   min-height: 34px;
@@ -660,16 +795,16 @@ textarea {
   text-align: left;
 }
 
-.xflow-admin-debug-list button[data-active="true"] {
+.xflow-admin-debug-node.ant-btn[data-active="true"] {
   background: #202328;
   border-color: #4b525d;
 }
 
-.xflow-admin-debug-list button > span {
+.xflow-admin-debug-node.ant-btn > span:first-child {
   flex: 0 0 7px;
 }
 
-.xflow-admin-debug-list strong {
+.xflow-admin-debug-node strong {
   flex: 1;
   font-size: 10.5px;
   overflow: hidden;
@@ -677,7 +812,7 @@ textarea {
   white-space: nowrap;
 }
 
-.xflow-admin-debug-list em {
+.xflow-admin-debug-node em {
   color: var(--admin-muted);
   font-size: 9px;
   font-style: normal;
@@ -737,12 +872,13 @@ textarea {
 .xflow-admin-shell .ant-btn,
 .xflow-admin-shell .ant-input,
 .xflow-admin-shell .ant-input-affix-wrapper {
-  font-size: 12px;
+  font-size: 11.5px;
 }
 
 .xflow-admin-shell .ant-tag {
-  font-size: 10.5px;
-  line-height: 18px;
+  border-radius: 2px;
+  font-size: 10px;
+  line-height: 17px;
   margin-inline-end: 0;
 }
 
@@ -752,7 +888,7 @@ textarea {
   }
 
   .xflow-admin-rail__brand strong,
-  .xflow-admin-rail__nav span,
+  .xflow-admin-rail__label,
   .xflow-admin-user > span:not(.ant-avatar) {
     display: none;
   }

@@ -66,6 +66,11 @@ type Config struct {
 	// reconciliation loop that assigns trigger-groups to runners and delivers
 	// activate/deactivate directives via heartbeat responses. Optional.
 	TriggerActivationStore engine.TriggerActivationStore
+	// EntryActivationStore, when non-nil, is the durable EntryActivation store
+	// used to fence entry seeds by activation generation (spec §11.6) and to
+	// drive the node-generic EntryActivationReconciler. Optional; nil disables
+	// generation fencing on the seed path.
+	EntryActivationStore engine.EntryActivationStore
 }
 
 type redisClientProvider interface {
@@ -102,6 +107,11 @@ type ControlPlane struct {
 	// activationCtrl is the optional activation reconciliation controller.
 	// Non-nil only when Config.TriggerActivationStore is provided.
 	activationCtrl *ActivationController
+
+	// entryActivations is the optional durable EntryActivation store (node-generic
+	// activation controller). Non-nil only when Config.EntryActivationStore is
+	// provided. Used for generation fencing on seeds and lifecycle management.
+	entryActivations engine.EntryActivationStore
 
 	lifecycleMu         sync.Mutex
 	started             bool
@@ -191,6 +201,9 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 	if cfg.PollWait > 0 {
 		serverOpts = append(serverOpts, WithHTTPPollWait(cfg.PollWait))
 	}
+	if cfg.EntryActivationStore != nil {
+		serverOpts = append(serverOpts, WithEntryActivationStore(cfg.EntryActivationStore))
+	}
 	httpServer := NewServer(eng, runners, serverOpts...)
 
 	var grpcOpts []GRPCServerOption
@@ -239,16 +252,17 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 	}
 
 	return &ControlPlane{
-		backend:        cfg.Backend,
-		eng:            eng,
-		runners:        runners,
-		dispatcher:     dispatcher,
-		httpServer:     httpServer,
-		grpcServer:     grpcServer,
-		sweeper:        sweeper,
-		elector:        elector,
-		logger:         cfg.Logger,
-		activationCtrl: activationCtrl,
+		backend:          cfg.Backend,
+		eng:              eng,
+		runners:          runners,
+		dispatcher:       dispatcher,
+		httpServer:       httpServer,
+		grpcServer:       grpcServer,
+		sweeper:          sweeper,
+		elector:          elector,
+		logger:           cfg.Logger,
+		activationCtrl:   activationCtrl,
+		entryActivations: cfg.EntryActivationStore,
 	}, nil
 }
 
@@ -270,6 +284,23 @@ func (cp *ControlPlane) RunnerHTTPHandler() protocol.RunnerHTTPHandler {
 // inspect/signal/revoke-signal/cancel). The *engine.Engine satisfies
 // control.EngineFacade, so no adapter is required.
 func (cp *ControlPlane) Engine() EngineFacade { return cp.eng }
+
+// SeedExecutionFromEntry admits an entry-unit seed through the control Core so
+// the server-side namespace resolution AND generation fence (spec §11.6) always
+// apply — the apiserver seed module MUST route through this rather than calling
+// the raw engine, otherwise a forged/stale-generation seed would fail open. The
+// authoritative namespace is taken from ctx (injected by the authz wrapper), not
+// the request body.
+func (cp *ControlPlane) SeedExecutionFromEntry(ctx context.Context, req engine.SeedExecutionFromEntryRequest) (engine.SeedExecutionFromEntryResponse, error) {
+	return cp.httpServer.core.SeedExecutionFromEntry(ctx, req)
+}
+
+// EntryActivationStore returns the durable EntryActivation store, or nil when
+// none was configured. Used by lifecycle wiring to create/fence/deactivate
+// activations on workflow add/update/remove.
+func (cp *ControlPlane) EntryActivationStore() engine.EntryActivationStore {
+	return cp.entryActivations
+}
 
 // RunnerDirectory exposes the runner directory for management/observability
 // modules. It is intended for read-only single-runner lookup (the directory

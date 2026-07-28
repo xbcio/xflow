@@ -25,6 +25,13 @@ var (
 	ErrLeaseRequired         = errors.New("runner_id, session_id and lease are required")
 	ErrEngineNotConfigured   = errors.New("engine not configured")
 	ErrUnauthenticated       = errors.New("unauthenticated")
+	// ErrStaleGeneration is returned when an entry seed carries an activation
+	// generation older than the currently-assigned generation AND targets an
+	// admission key that has not yet been accepted. It fences a forged or stale
+	// runner from seeding a fresh execution (spec §11.6). A stale seed for an
+	// already-accepted key is NOT an error — it is duplicate-accepted so the
+	// runner can commit its offset.
+	ErrStaleGeneration = errors.New("stale activation generation")
 	// ErrInternalServer is the generic message returned to clients for any
 	// error that is not a recognised transport-agnostic sentinel. The full
 	// error is logged server-side; clients must never see internal stack
@@ -50,6 +57,11 @@ type Core struct {
 	// activationCtrl, when non-nil, supplies activation directives piggybacked
 	// on heartbeat responses. Optional — nil means no activation directives.
 	activationCtrl *ActivationController
+	// entryActivations, when non-nil, is the durable EntryActivation store used
+	// to fence entry seeds by activation generation (spec §11.6). Nil disables
+	// generation fencing — every seed is admitted (legacy / locally-hosted
+	// triggers with no remote activation).
+	entryActivations engine.EntryActivationStore
 }
 
 // leaseRecoveryEngine is deliberately optional so custom EngineFacade test
@@ -494,7 +506,59 @@ func (c *Core) SeedExecutionFromEntry(ctx context.Context, req engine.SeedExecut
 	}
 	// Authoritative namespace comes from the request context, not the body.
 	req.Namespace = namespace.FromContext(ctx)
+
+	// Generation fence (spec §11.6): when an activation store is configured and
+	// the activation exists, a seed carrying a generation below the currently
+	// assigned generation must not create a NEW execution. It is still
+	// duplicate-accepted for an already-accepted admission key so the stale
+	// runner can commit its Kafka offset and stop redelivering.
+	if err := c.fenceEntrySeedGeneration(ctx, req); err != nil {
+		return engine.SeedExecutionFromEntryResponse{}, err
+	}
+
 	return c.engine.SeedExecutionFromEntry(ctx, req)
+}
+
+// fenceEntrySeedGeneration enforces the generation fence for one seed request.
+// It returns ErrStaleGeneration when the seed is stale AND targets an
+// admission key that has not been accepted yet; it returns nil (admit) when the
+// generation is current, when there is no activation record / store, or when the
+// admission key was already accepted (so a duplicate accept can proceed).
+func (c *Core) fenceEntrySeedGeneration(ctx context.Context, req engine.SeedExecutionFromEntryRequest) error {
+	if c.entryActivations == nil {
+		return nil
+	}
+	key := engine.EntryActivationKey{
+		Namespace:       req.Namespace,
+		WorkflowID:      req.WorkflowID,
+		WorkflowVersion: req.WorkflowVersion,
+		EntryUnitID:     req.EntryUnitID,
+	}
+	act, ok, err := c.entryActivations.Get(ctx, key)
+	if err != nil {
+		return normalizeRunnerError(err, c.logger, "entry_seed_fence")
+	}
+	if !ok {
+		// No durable activation governs this entry unit — nothing to fence.
+		return nil
+	}
+	if req.Generation >= act.Generation {
+		// Current (or ahead) — admit normally.
+		return nil
+	}
+	// Stale generation. Only allow it through if the admission key was already
+	// accepted (duplicate accept path). We probe by the deterministic execution
+	// ID: if it exists, the key was accepted and the engine seed will return a
+	// duplicate; otherwise the stale runner must be rejected fail-closed.
+	execID := engine.DeterministicExecutionID(req.AdmissionKey)
+	if _, ierr := c.engine.Inspect(ctx, execID); ierr != nil {
+		if errors.Is(ierr, engine.ErrExecutionNotFound) {
+			return ErrStaleGeneration
+		}
+		return normalizeRunnerError(ierr, c.logger, "entry_seed_fence")
+	}
+	// Execution already exists → allow the duplicate accept to proceed.
+	return nil
 }
 
 // leaseImmutableMismatch reports whether the lease a runner echoed back differs

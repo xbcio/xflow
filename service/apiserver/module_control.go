@@ -324,14 +324,31 @@ func (m *workflowControlModule) handleSeedExecution(w http.ResponseWriter, r *ht
 		Outcome:         outcome,
 		Exits:           exits,
 		Error:           req.Error,
+		Generation:      req.Generation,
 		// ResultHash is computed server-side; the client cannot supply it.
 		ResultHash: engine.ComputeResultHash(outcome, exits),
 	}
 
-	// Namespace is resolved server-side by the Core from the request context
-	// (injected by the authz wrapper) — not from engReq.Namespace / the body.
-	resp, err := m.eng.SeedExecutionFromEntry(r.Context(), engReq)
+	// Route through the ControlPlane's Core so the server-side namespace
+	// resolution and generation fence (spec §11.6) always apply. Namespace is
+	// taken from the request context (injected by the authz wrapper), not the
+	// body. Fall back to the raw engine only when no ControlPlane is wired
+	// (unit tests with a fake facade); that path has no generation fence.
+	var resp engine.SeedExecutionFromEntryResponse
+	var err error
+	if m.cp != nil {
+		resp, err = m.cp.SeedExecutionFromEntry(r.Context(), engReq)
+	} else {
+		resp, err = m.eng.SeedExecutionFromEntry(r.Context(), engReq)
+	}
 	if err != nil {
+		// A stale activation generation for a not-yet-accepted admission key is a
+		// fencing rejection, not an internal fault — map it to 409 so the runner
+		// can distinguish "you lost the activation" from a transient server error.
+		if errors.Is(err, control.ErrStaleGeneration) {
+			writeError(w, http.StatusConflict, "stale_generation")
+			return
+		}
 		if m.log != nil {
 			m.log.Error("seed_execution_failed", "err", err)
 		}

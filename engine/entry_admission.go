@@ -111,6 +111,13 @@ type SeedExecutionFromEntryRequest struct {
 	Runtime *types.Runtime
 	TraceID string
 	SpanID  string
+	// Generation is the entry-activation generation the seeding runner believes
+	// it owns. The control plane fences stale generations (spec §11.6): a seed
+	// whose generation is below the currently-assigned generation may not create
+	// a new execution, though an already-accepted admission key is still
+	// duplicate-accepted so the runner can commit its offset. It is not part of
+	// the content-addressed admission (it never enters ResultHash or the key).
+	Generation uint64
 }
 
 // SeedExecutionFromEntryResponse is the control-plane response.

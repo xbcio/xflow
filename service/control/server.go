@@ -83,6 +83,19 @@ func WithAuthObserver(observer AuthObserver) ServerOption {
 	return func(s *Server) { s.core.authObserver = observer }
 }
 
+// WithEntryActivationStore installs the durable EntryActivation store used to
+// fence entry seeds by activation generation (spec §11.6). When set, a seed
+// carrying a generation older than the currently-assigned generation is
+// rejected for a not-yet-accepted admission key and duplicate-accepted for an
+// already-accepted one. Nil (the default) disables generation fencing.
+func WithEntryActivationStore(store engine.EntryActivationStore) ServerOption {
+	return func(s *Server) {
+		if store != nil {
+			s.core.entryActivations = store
+		}
+	}
+}
+
 // WithTracer installs a distributed tracing implementation on the control
 // plane's runner-protocol server. The tracer instruments task dispatch and
 // commit spans and injects W3C trace carriers into TaskLease so runners can

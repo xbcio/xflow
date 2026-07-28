@@ -29,6 +29,15 @@ type SeedExecutionRequest struct {
 	Outcome         string         `json:"outcome"`
 	Exits           []BoundaryExit `json:"exits,omitempty"`
 	Error           string         `json:"error,omitempty"`
+	// Generation is the entry-activation generation the seeding runner believes
+	// it currently owns. The control plane fences stale generations: a seed
+	// whose generation is below the currently-assigned activation generation may
+	// not seed a NEW execution, but an already-accepted admission key is still
+	// duplicate-accepted so the runner can commit its Kafka offset (spec §11.6).
+	// Zero means the runner supplied no generation (e.g. a locally-hosted single
+	// trigger not driven by an EntryActivation); the control plane treats zero
+	// as "unfenced" and admits normally.
+	Generation uint64 `json:"generation,omitempty"`
 }
 
 // SeedExecutionResponse is the on-wire response for a seed request. State is

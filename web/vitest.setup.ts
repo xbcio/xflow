@@ -19,3 +19,10 @@ Object.defineProperty(window, "matchMedia", {
     dispatchEvent: () => false
   })
 });
+
+const getComputedStyleMock = window.getComputedStyle.bind(window);
+
+Object.defineProperty(window, "getComputedStyle", {
+  writable: true,
+  value: (element: Element) => getComputedStyleMock(element)
+});
