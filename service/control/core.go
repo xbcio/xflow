@@ -522,8 +522,9 @@ func (c *Core) SeedExecutionFromEntry(ctx context.Context, req engine.SeedExecut
 // fenceEntrySeedGeneration enforces the generation fence for one seed request.
 // It returns ErrStaleGeneration when the seed is stale AND targets an
 // admission key that has not been accepted yet; it returns nil (admit) when the
-// generation is current, when there is no activation record / store, or when the
-// admission key was already accepted (so a duplicate accept can proceed).
+// generation exactly matches the currently assigned generation, when there is no
+// activation record / store, or when the admission key was already accepted (so a
+// duplicate accept can proceed).
 func (c *Core) fenceEntrySeedGeneration(ctx context.Context, req engine.SeedExecutionFromEntryRequest) error {
 	if c.entryActivations == nil {
 		return nil
@@ -542,8 +543,14 @@ func (c *Core) fenceEntrySeedGeneration(ctx context.Context, req engine.SeedExec
 		// No durable activation governs this entry unit — nothing to fence.
 		return nil
 	}
-	if req.Generation >= act.Generation {
-		// Current (or ahead) — admit normally.
+	if req.Generation == act.Generation {
+		// Exactly the current assigned generation — admit normally. The
+		// generation is monotonic and every legitimate runner receives its
+		// generation from Assign, so the current owner always carries exactly
+		// act.Generation. Any other value (below = superseded runner, above =
+		// impossible in honest operation, i.e. forged) is treated as stale and
+		// falls through to the duplicate-accept probe below, which fails closed
+		// unless the admission key was already accepted.
 		return nil
 	}
 	// Stale generation. Only allow it through if the admission key was already
