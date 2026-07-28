@@ -44,6 +44,10 @@ type EngineFacade interface {
 	Cancel(ctx context.Context, id types.ExecutionID) error
 	BuildTaskLease(ctx context.Context, task *engine.Task) (*engine.TaskLease, error)
 	CommitTaskResultWithOutcome(ctx context.Context, lease *engine.TaskLease, result engine.TaskResult) (engine.CommitOutcome, error)
+	// SeedExecutionFromEntry atomically seeds an execution from an entry unit
+	// (single node or group node) result. Implemented by *engine.Engine
+	// (entry_admission.go), delegating to the backend EntryAdmissionStore.
+	SeedExecutionFromEntry(ctx context.Context, req engine.SeedExecutionFromEntryRequest) (engine.SeedExecutionFromEntryResponse, error)
 }
 
 type Server struct {

@@ -102,6 +102,10 @@ func (f *fakeControlFacade) ReclaimLease(context.Context, engine.ExpiredLease) (
 	return false, nil
 }
 
+func (f *fakeControlFacade) SeedExecutionFromEntry(context.Context, engine.SeedExecutionFromEntryRequest) (engine.SeedExecutionFromEntryResponse, error) {
+	return engine.SeedExecutionFromEntryResponse{}, nil
+}
+
 // compile-time assertion that fakeControlFacade satisfies the widened facade.
 var _ control.EngineFacade = (*fakeControlFacade)(nil)
 

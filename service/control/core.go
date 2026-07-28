@@ -482,6 +482,21 @@ func (c *Core) reportResult(ctx context.Context, req protocol.ReportResultReques
 	return protocol.ReportResultResponse{Accepted: true}, nil
 }
 
+// SeedExecutionFromEntry admits an entry-unit (single node or group node)
+// result through the engine's EntryAdmissionStore. The namespace is resolved
+// server-side from the request context (injected by the apiserver authz
+// wrapper from the authenticated principal) and stamped onto the request — it
+// is NEVER taken from a client-supplied body, so a forged or cross-namespace
+// admission key fails closed.
+func (c *Core) SeedExecutionFromEntry(ctx context.Context, req engine.SeedExecutionFromEntryRequest) (engine.SeedExecutionFromEntryResponse, error) {
+	if c.engine == nil {
+		return engine.SeedExecutionFromEntryResponse{}, ErrEngineNotConfigured
+	}
+	// Authoritative namespace comes from the request context, not the body.
+	req.Namespace = namespace.FromContext(ctx)
+	return c.engine.SeedExecutionFromEntry(ctx, req)
+}
+
 // leaseImmutableMismatch reports whether the lease a runner echoed back differs
 // from the authoritative finalized lease on any immutable identity field that is
 // part of the runner JSON contract. The runner must report against the exact

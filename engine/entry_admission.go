@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"sort"
 
@@ -11,6 +12,10 @@ import (
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/types"
 )
+
+// ErrEntryAdmissionNotSupported is returned by Engine.SeedExecutionFromEntry
+// when the backing StateStore does not implement EntryAdmissionStore.
+var ErrEntryAdmissionNotSupported = errors.New("entry admission not supported by this backend")
 
 // AdmissionKey uniquely identifies one entry-unit result submission.
 // Format: namespace/workflowID/workflowVersion/entryUnitID/topic/partition/start-end
@@ -136,4 +141,18 @@ type SeedExecutionFromEntryResponse struct {
 //  7. return stable execution ID
 type EntryAdmissionStore interface {
 	SeedExecutionFromEntry(ctx context.Context, req SeedExecutionFromEntryRequest) (SeedExecutionFromEntryResponse, error)
+}
+
+// SeedExecutionFromEntry delegates an entry-unit seed admission to the
+// backing StateStore when it implements EntryAdmissionStore. It mirrors the
+// CommitGroupResult delegation pattern: the atomic admission logic lives in the
+// backend (local mutex or Redis Lua), and the engine merely routes to it. A
+// backend that does not implement EntryAdmissionStore reports
+// ErrEntryAdmissionNotSupported.
+func (e *Engine) SeedExecutionFromEntry(ctx context.Context, req SeedExecutionFromEntryRequest) (SeedExecutionFromEntryResponse, error) {
+	store, ok := e.state.(EntryAdmissionStore)
+	if !ok {
+		return SeedExecutionFromEntryResponse{}, ErrEntryAdmissionNotSupported
+	}
+	return store.SeedExecutionFromEntry(ctx, req)
 }
