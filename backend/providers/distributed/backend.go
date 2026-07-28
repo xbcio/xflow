@@ -263,6 +263,15 @@ func (b *Backend) AuditStats() AuditStats { return b.state.AuditStats() }
 // reusable backend package to service packages.
 func (b *Backend) RedisClient() redis.Cmdable { return b.rdb }
 
+// NewEntryActivationStore returns a Redis-backed engine.EntryActivationStore
+// bound to this backend's Redis client. It lets service-layer coordination
+// (control plane, integration tests) construct the durable EntryActivation
+// store without importing the internal rstate package. ttl bounds how long an
+// untouched activation record survives; every write refreshes it.
+func (b *Backend) NewEntryActivationStore(ttl time.Duration) engine.EntryActivationStore {
+	return rstate.NewEntryActivationStore(b.rdb, ttl)
+}
+
 // LeaderElector returns the Redis-backed leader election coordinator shared
 // by all ControlPlane replicas pointed at the same Redis instance. Used to
 // gate leader-only background work (e.g. LeaseSweeper) so only one replica
