@@ -53,6 +53,14 @@ type WorkflowOptions struct {
 	// rejects workflows that reference these node types unless this flag is
 	// true. Do not enable in production.
 	ExperimentalExpand bool `json:"experimental_expand,omitempty"`
+
+	// ExperimentalNodeGroup opts a workflow into the node-group co-location
+	// protocol. When true, the server advertises group-aware scheduling to
+	// runners that report the FeatureGroupProtocolV1 capability, and the
+	// compiler emits group packages. Setting this to false on a workflow that
+	// contains groups is currently allowed (groups compile normally) but the
+	// scheduler will not co-locate them — individual nodes dispatch as before.
+	ExperimentalNodeGroup bool `json:"experimental_node_group,omitempty"`
 }
 
 // NodeDef describes a single node in the workflow graph.

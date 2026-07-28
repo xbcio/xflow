@@ -13,6 +13,14 @@ import (
 const (
 	ProtocolVersion = 1
 	RenewLeasePath  = "/v1/runners/lease/renew"
+
+	// FeatureGroupProtocolV1 is the capability feature string a runner
+	// advertises (in Capability.Features) to indicate it supports the v1
+	// group co-location protocol — receiving GroupLeaseWire payloads and
+	// reporting GroupResultWire outcomes. Servers use this to gate group-aware
+	// task dispatch: only runners that report this feature receive group
+	// leases.
+	FeatureGroupProtocolV1 = "group_protocol_v1"
 )
 
 // GroupLeaseWire is the on-wire representation of a group lease payload sent
