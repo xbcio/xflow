@@ -93,7 +93,7 @@ local signal = {name = ARGV[1]}
 if ARGV[2] ~= '' and ARGV[2] ~= '{}' then
     signal.data = cjson.decode(ARGV[2])
 end
-if not state.delivered_signals then
+if type(state.delivered_signals) ~= 'table' then
     state.delivered_signals = {}
 end
 table.insert(state.delivered_signals, signal)
