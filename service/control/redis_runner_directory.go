@@ -682,6 +682,81 @@ func (d *RedisRunnerDirectory) ClearAssignment(ctx context.Context, assignmentID
 	return nil
 }
 
+// runnerRawFields holds the raw string values fetched from Redis for a single
+// runner. An empty-string value means the field was absent (redis.Nil).
+type runnerRawFields struct {
+	session      string
+	capacity     string
+	inflight     string
+	capabilities string
+	namespaces   string
+	heartbeat    string
+	labels       string
+}
+
+// decodeRunnerSnapshot converts raw field strings into a RunnerSnapshot.
+// Required fields (session, capacity, capabilities) must be non-empty;
+// optional fields (inflight, namespaces, heartbeat, labels) fall back to
+// defaults when empty — matching the semantics of redis.Nil in the original
+// per-field HGet path.
+func decodeRunnerSnapshot(runnerID string, raw runnerRawFields) (RunnerSnapshot, bool) {
+	if raw.session == "" {
+		return RunnerSnapshot{}, false
+	}
+	if raw.capacity == "" {
+		return RunnerSnapshot{}, false
+	}
+	if raw.capabilities == "" {
+		return RunnerSnapshot{}, false
+	}
+
+	// Optional field defaults (equivalent to redis.Nil handling).
+	if raw.inflight == "" {
+		raw.inflight = "0"
+	}
+	if raw.heartbeat == "" {
+		raw.heartbeat = "0"
+	}
+
+	capacity, err := strconv.Atoi(raw.capacity)
+	if err != nil {
+		return RunnerSnapshot{}, false
+	}
+	inFlight, err := strconv.Atoi(raw.inflight)
+	if err != nil {
+		return RunnerSnapshot{}, false
+	}
+	heartbeatMillis, err := strconv.ParseInt(raw.heartbeat, 10, 64)
+	if err != nil {
+		return RunnerSnapshot{}, false
+	}
+	var capabilities []protocol.Capability
+	if err := json.Unmarshal([]byte(raw.capabilities), &capabilities); err != nil {
+		return RunnerSnapshot{}, false
+	}
+	namespaces := normalizeRunnerNamespaces(nil)
+	if raw.namespaces != "" {
+		if err := json.Unmarshal([]byte(raw.namespaces), &namespaces); err != nil {
+			return RunnerSnapshot{}, false
+		}
+	}
+	var labels map[string]string
+	if raw.labels != "" {
+		if err := json.Unmarshal([]byte(raw.labels), &labels); err != nil {
+			return RunnerSnapshot{}, false
+		}
+	}
+	return RunnerSnapshot{
+		RunnerID:      runnerID,
+		Capacity:      capacity,
+		InFlight:      inFlight,
+		Labels:        labels,
+		Capabilities:  cloneCapabilities(capabilities),
+		Namespaces:    namespaces,
+		LastHeartbeat: time.UnixMilli(heartbeatMillis),
+	}, true
+}
+
 // Runner returns the latest durable snapshot for runnerID.
 func (d *RedisRunnerDirectory) Runner(ctx context.Context, runnerID string) (RunnerSnapshot, bool) {
 	session, err := d.rdb.HGet(ctx, d.keys.runnerSession, runnerID).Result()
@@ -721,64 +796,76 @@ func (d *RedisRunnerDirectory) Runner(ctx context.Context, runnerID string) (Run
 		return RunnerSnapshot{}, false
 	}
 
-	capacity, err := strconv.Atoi(capacityRaw)
-	if err != nil {
-		return RunnerSnapshot{}, false
-	}
-	inFlight, err := strconv.Atoi(inFlightRaw)
-	if err != nil {
-		return RunnerSnapshot{}, false
-	}
-	heartbeatMillis, err := strconv.ParseInt(heartbeatRaw, 10, 64)
-	if err != nil {
-		return RunnerSnapshot{}, false
-	}
-	var capabilities []protocol.Capability
-	if err := json.Unmarshal([]byte(capabilitiesRaw), &capabilities); err != nil {
-		return RunnerSnapshot{}, false
-	}
-	namespaces := normalizeRunnerNamespaces(nil)
-	if namespacesRaw != "" {
-		if err := json.Unmarshal([]byte(namespacesRaw), &namespaces); err != nil {
-			return RunnerSnapshot{}, false
-		}
-	}
-	var labels map[string]string
-	if labelsRaw != "" {
-		if err := json.Unmarshal([]byte(labelsRaw), &labels); err != nil {
-			return RunnerSnapshot{}, false
-		}
-	}
-	return RunnerSnapshot{
-		RunnerID:      runnerID,
-		Capacity:      capacity,
-		InFlight:      inFlight,
-		Labels:        labels,
-		Capabilities:  cloneCapabilities(capabilities),
-		Namespaces:    namespaces,
-		LastHeartbeat: time.UnixMilli(heartbeatMillis),
-	}, true
+	return decodeRunnerSnapshot(runnerID, runnerRawFields{
+		session:      session,
+		capacity:     capacityRaw,
+		inflight:     inFlightRaw,
+		capabilities: capabilitiesRaw,
+		namespaces:   namespacesRaw,
+		heartbeat:    heartbeatRaw,
+		labels:       labelsRaw,
+	})
 }
 
-// ListLiveRunners returns a snapshot of every registered runner. It implements
-// ActivationRunnerLister so the EntryActivationReconciler can enumerate runners
-// for assignment across a replacement control-plane process (the Redis
-// directory holds no process-local state). Runner IDs are enumerated from the
-// durable runner-session hash; each is resolved via the same snapshot builder
-// used by Runner(). Liveness (heartbeat TTL) is applied by the reconciler's
-// selector, so a stale runner is filtered there rather than here.
+// ListLiveRunners returns a snapshot of every registered runner using a
+// pipelined bulk fetch (HKeys + 7 HMGet calls in one round-trip) to avoid
+// O(n) serial Redis calls.
 func (d *RedisRunnerDirectory) ListLiveRunners(ctx context.Context) []RunnerSnapshot {
 	runnerIDs, err := d.rdb.HKeys(ctx, d.keys.runnerSession).Result()
 	if err != nil {
 		return nil
 	}
-	out := make([]RunnerSnapshot, 0, len(runnerIDs))
-	for _, id := range runnerIDs {
-		if snap, ok := d.Runner(ctx, id); ok {
+	if len(runnerIDs) == 0 {
+		return nil
+	}
+
+	pipe := d.rdb.Pipeline()
+	sessionCmd := pipe.HMGet(ctx, d.keys.runnerSession, runnerIDs...)
+	capacityCmd := pipe.HMGet(ctx, d.keys.runnerCapacity, runnerIDs...)
+	inflightCmd := pipe.HMGet(ctx, d.keys.runnerInflight, runnerIDs...)
+	capabilitiesCmd := pipe.HMGet(ctx, d.keys.runnerCapabilities, runnerIDs...)
+	namespacesCmd := pipe.HMGet(ctx, d.keys.runnerNamespaces, runnerIDs...)
+	heartbeatCmd := pipe.HMGet(ctx, d.keys.runnerHeartbeat, runnerIDs...)
+	labelsCmd := pipe.HMGet(ctx, d.keys.runnerLabels, runnerIDs...)
+	if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
+		return nil
+	}
+
+	n := len(runnerIDs)
+	sessions := sessionCmd.Val()
+	capacities := capacityCmd.Val()
+	inflights := inflightCmd.Val()
+	capabilitiesList := capabilitiesCmd.Val()
+	namespacesList := namespacesCmd.Val()
+	heartbeats := heartbeatCmd.Val()
+	labelsList := labelsCmd.Val()
+
+	out := make([]RunnerSnapshot, 0, n)
+	for i := 0; i < n; i++ {
+		raw := runnerRawFields{
+			session:      hmgetString(sessions, i),
+			capacity:     hmgetString(capacities, i),
+			inflight:     hmgetString(inflights, i),
+			capabilities: hmgetString(capabilitiesList, i),
+			namespaces:   hmgetString(namespacesList, i),
+			heartbeat:    hmgetString(heartbeats, i),
+			labels:       hmgetString(labelsList, i),
+		}
+		if snap, ok := decodeRunnerSnapshot(runnerIDs[i], raw); ok {
 			out = append(out, snap)
 		}
 	}
 	return out
+}
+
+// hmgetString safely extracts a string from an HMGet result slice. HMGet
+// returns nil interface{} elements for fields that do not exist in the hash.
+func hmgetString(vals []interface{}, i int) string {
+	if i >= len(vals) || vals[i] == nil {
+		return ""
+	}
+	s, _ := vals[i].(string)
+	return s
 }
 
 type redisClaimRunner struct {

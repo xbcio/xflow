@@ -587,3 +587,176 @@ func TestRedisRunnerDirectoryLookupLeaseSurvivesRestart(t *testing.T) {
 		t.Fatal("LookupLease after release ok=true, want false (lease released)")
 	}
 }
+
+func TestListLiveRunners_MultipleRunnersDecodeCorrectly(t *testing.T) {
+	ctx := context.Background()
+	_, rdb := newRedisRunnerDirectoryTestClient(t)
+	dir := NewRedisRunnerDirectory(rdb)
+
+	ns1 := namespace.Namespace("tenant-a")
+	ns2 := namespace.Namespace("tenant-b")
+
+	// Register two runners with different attributes.
+	_, err := dir.Register(ctx, RegisterRunnerRequest{
+		RunnerID:     "runner-1",
+		Capacity:     5,
+		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}, {NodeType: "xflow.http"}},
+		Policy:       RunnerPolicy{AllowedNodeTypes: []string{"xflow.function", "xflow.http"}},
+		Namespaces:   []namespace.Namespace{ns1},
+		Labels:       map[string]string{"region": "us-east-1"},
+		Now:          time.UnixMilli(1000),
+	})
+	if err != nil {
+		t.Fatalf("Register runner-1: %v", err)
+	}
+	_, err = dir.Register(ctx, RegisterRunnerRequest{
+		RunnerID:     "runner-2",
+		Capacity:     10,
+		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
+		Policy:       RunnerPolicy{AllowedNodeTypes: []string{"xflow.function"}},
+		Namespaces:   []namespace.Namespace{ns2},
+		Labels:       map[string]string{"region": "eu-west-1", "env": "prod"},
+		Now:          time.UnixMilli(2000),
+	})
+	if err != nil {
+		t.Fatalf("Register runner-2: %v", err)
+	}
+
+	runners := dir.ListLiveRunners(ctx)
+	if len(runners) != 2 {
+		t.Fatalf("ListLiveRunners() returned %d runners, want 2", len(runners))
+	}
+
+	byID := make(map[string]RunnerSnapshot, 2)
+	for _, r := range runners {
+		byID[r.RunnerID] = r
+	}
+
+	r1 := byID["runner-1"]
+	if r1.Capacity != 5 {
+		t.Errorf("runner-1 Capacity = %d, want 5", r1.Capacity)
+	}
+	if r1.InFlight != 0 {
+		t.Errorf("runner-1 InFlight = %d, want 0", r1.InFlight)
+	}
+	if len(r1.Capabilities) != 2 {
+		t.Errorf("runner-1 Capabilities len = %d, want 2", len(r1.Capabilities))
+	}
+	if len(r1.Namespaces) != 1 || r1.Namespaces[0] != ns1 {
+		t.Errorf("runner-1 Namespaces = %v, want [%s]", r1.Namespaces, ns1)
+	}
+	if r1.Labels["region"] != "us-east-1" {
+		t.Errorf("runner-1 Labels[region] = %q, want %q", r1.Labels["region"], "us-east-1")
+	}
+	if !r1.LastHeartbeat.Equal(time.UnixMilli(1000)) {
+		t.Errorf("runner-1 LastHeartbeat = %v, want %v", r1.LastHeartbeat, time.UnixMilli(1000))
+	}
+
+	r2 := byID["runner-2"]
+	if r2.Capacity != 10 {
+		t.Errorf("runner-2 Capacity = %d, want 10", r2.Capacity)
+	}
+	if r2.Labels["env"] != "prod" {
+		t.Errorf("runner-2 Labels[env] = %q, want %q", r2.Labels["env"], "prod")
+	}
+	if !r2.LastHeartbeat.Equal(time.UnixMilli(2000)) {
+		t.Errorf("runner-2 LastHeartbeat = %v, want %v", r2.LastHeartbeat, time.UnixMilli(2000))
+	}
+}
+
+func TestListLiveRunners_OptionalFieldsMissing(t *testing.T) {
+	ctx := context.Background()
+	mr, rdb := newRedisRunnerDirectoryTestClient(t)
+	dir := NewRedisRunnerDirectory(rdb)
+
+	// Register a runner normally, then delete its optional hash fields to
+	// simulate partial data (labels, namespaces, inflight, heartbeat absent).
+	_, err := dir.Register(ctx, RegisterRunnerRequest{
+		RunnerID:     "runner-sparse",
+		Capacity:     3,
+		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
+		Policy:       RunnerPolicy{AllowedNodeTypes: []string{"xflow.function"}},
+		Now:          time.UnixMilli(500),
+	})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	// Remove optional fields directly from miniredis.
+	mr.HDel(dir.keys.runnerLabels, "runner-sparse")
+	mr.HDel(dir.keys.runnerNamespaces, "runner-sparse")
+	mr.HDel(dir.keys.runnerInflight, "runner-sparse")
+	mr.HDel(dir.keys.runnerHeartbeat, "runner-sparse")
+
+	runners := dir.ListLiveRunners(ctx)
+	if len(runners) != 1 {
+		t.Fatalf("ListLiveRunners() returned %d runners, want 1", len(runners))
+	}
+	r := runners[0]
+	if r.RunnerID != "runner-sparse" {
+		t.Fatalf("RunnerID = %q, want %q", r.RunnerID, "runner-sparse")
+	}
+	if r.InFlight != 0 {
+		t.Errorf("InFlight = %d, want 0 (default)", r.InFlight)
+	}
+	if !r.LastHeartbeat.Equal(time.UnixMilli(0)) {
+		t.Errorf("LastHeartbeat = %v, want epoch (default)", r.LastHeartbeat)
+	}
+	// Namespaces should fall back to [default].
+	if len(r.Namespaces) != 1 || r.Namespaces[0] != namespace.Default {
+		t.Errorf("Namespaces = %v, want [%s]", r.Namespaces, namespace.Default)
+	}
+	if r.Labels != nil {
+		t.Errorf("Labels = %v, want nil", r.Labels)
+	}
+}
+
+func TestListLiveRunners_CorruptCapabilitiesSkipsRunner(t *testing.T) {
+	ctx := context.Background()
+	mr, rdb := newRedisRunnerDirectoryTestClient(t)
+	dir := NewRedisRunnerDirectory(rdb)
+
+	// Register two runners.
+	_, err := dir.Register(ctx, RegisterRunnerRequest{
+		RunnerID:     "good-runner",
+		Capacity:     2,
+		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
+		Policy:       RunnerPolicy{AllowedNodeTypes: []string{"xflow.function"}},
+		Now:          time.UnixMilli(100),
+	})
+	if err != nil {
+		t.Fatalf("Register good-runner: %v", err)
+	}
+	_, err = dir.Register(ctx, RegisterRunnerRequest{
+		RunnerID:     "bad-runner",
+		Capacity:     4,
+		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
+		Policy:       RunnerPolicy{AllowedNodeTypes: []string{"xflow.function"}},
+		Now:          time.UnixMilli(200),
+	})
+	if err != nil {
+		t.Fatalf("Register bad-runner: %v", err)
+	}
+
+	// Corrupt the capabilities field for bad-runner.
+	mr.HSet(dir.keys.runnerCapabilities, "bad-runner", "not-valid-json{{{")
+
+	runners := dir.ListLiveRunners(ctx)
+	if len(runners) != 1 {
+		t.Fatalf("ListLiveRunners() returned %d runners, want 1 (bad-runner skipped)", len(runners))
+	}
+	if runners[0].RunnerID != "good-runner" {
+		t.Errorf("expected good-runner, got %q", runners[0].RunnerID)
+	}
+}
+
+func TestListLiveRunners_EmptyDirectory(t *testing.T) {
+	ctx := context.Background()
+	_, rdb := newRedisRunnerDirectoryTestClient(t)
+	dir := NewRedisRunnerDirectory(rdb)
+
+	runners := dir.ListLiveRunners(ctx)
+	if runners != nil {
+		t.Errorf("ListLiveRunners() = %v, want nil for empty directory", runners)
+	}
+}
