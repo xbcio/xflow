@@ -231,15 +231,26 @@ func (r *EntryActivationReconciler) chooseRunner(act *engine.EntryActivation, li
 }
 
 // ownerSatisfiesDesired reports whether the activation's CURRENT owner still
-// satisfies the (possibly updated) desired selector and capability requirements.
-// It is used to detect a material change (selector/capability): when a workflow
-// update narrows the selector or requirements so the current owner no longer
-// qualifies, the reconciler must fence + deactivate the old owner and reassign a
-// matching runner. Capacity is not re-checked here — the owner already holds the
-// assignment. Returns false when the owner is no longer among the live runners
-// (that case is already handled by the liveness check, but treating it as a
-// non-match is safe).
+// satisfies the (possibly updated) desired state. It detects a material change
+// along three dimensions: selector, capability requirements, and content
+// (PackageHash — which for a single trigger node fingerprints NodeType+Version+
+// Params, and for a group is the projected package hash). When a workflow update
+// narrows the selector or requirements so the current owner no longer qualifies,
+// OR changes the trigger content within the same version (params/package), the
+// reconciler must fence + deactivate the old owner and reassign so the new
+// desired state (new params) reaches a runner at a new generation. Capacity is
+// not re-checked here — the owner already holds the assignment. Returns false
+// when the owner is no longer among the live runners (that case is already
+// handled by the liveness check, but treating it as a non-match is safe).
 func (r *EntryActivationReconciler) ownerSatisfiesDesired(act *engine.EntryActivation, live []RunnerSnapshot, now time.Time) bool {
+	// Content drift: the desired PackageHash differs from the hash snapshotted
+	// when the owner was assigned. AssignedPackageHash is absent (zero) on records
+	// written before the field existed; in that case skip the content check
+	// (backward-compatible — a legacy owner is not force-migrated) and fall
+	// through to the selector/capability checks.
+	if act.AssignedPackageHash != "" && act.AssignedPackageHash != act.PackageHash {
+		return false
+	}
 	for _, snap := range live {
 		if snap.RunnerID != act.RunnerID {
 			continue

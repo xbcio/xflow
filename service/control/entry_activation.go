@@ -103,6 +103,9 @@ func (s *MemoryEntryActivationStore) Assign(_ context.Context, key engine.EntryA
 	rec.SessionID = sessionID
 	rec.Generation = gen
 	rec.LeaseDeadline = deadline
+	// Snapshot the desired PackageHash in effect at assignment time so the
+	// reconciler can detect a later within-version content change.
+	rec.AssignedPackageHash = rec.PackageHash
 	return true, nil
 }
 
@@ -140,5 +143,6 @@ func (s *MemoryEntryActivationStore) Fence(_ context.Context, key engine.EntryAc
 	rec.RunnerID = ""
 	rec.SessionID = ""
 	rec.LeaseDeadline = time.Time{}
+	rec.AssignedPackageHash = ""
 	return nil
 }

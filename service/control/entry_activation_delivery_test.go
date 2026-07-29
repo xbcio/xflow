@@ -393,3 +393,107 @@ func TestEntryActivationDelivery_DeactivateOnMaterialChangeReassign(t *testing.T
 		t.Fatalf("after material change the owner must be runner-b, got %q", rec.RunnerID)
 	}
 }
+
+// TestEntryActivationDelivery_DeactivateOnParamsChangeSameVersion drives a
+// within-version trigger content change: same workflow version, same node type,
+// same selector, but changed trigger Params. This changes the derived
+// PackageHash, so the current owner (running the OLD params) is stale. After
+// reconcile the owner MUST receive a Deactivate for its old generation AND an
+// Activate at a HIGHER generation carrying the NEW params (typically the same
+// runner, since the selector still matches). This is the "package" dimension of
+// the material-change contract and a regression guard: it fails if the reconciler
+// only checks selector/capability and not content (PackageHash).
+func TestEntryActivationDelivery_DeactivateOnParamsChangeSameVersion(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryEntryActivationStore()
+	mgr := NewEntryActivationManager(store)
+
+	// Initial: params {topic: orders}.
+	gV1 := paramTriggerGraph(t, map[string]any{"topic": "orders"})
+	if err := mgr.AddOrUpdateWorkflow(ctx, namespace.Default, "wf-x", "v1", gV1); err != nil {
+		t.Fatalf("AddOrUpdateWorkflow (orders): %v", err)
+	}
+
+	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	lister := &mockRunnerLister{runners: []RunnerSnapshot{{
+		RunnerID:      "runner-1",
+		Capacity:      4,
+		Labels:        map[string]string{"zone": "a"},
+		Capabilities:  []protocol.Capability{{NodeType: "kafka.source"}},
+		LastHeartbeat: now,
+	}}}
+	sel := DefaultRunnerSelector()
+	r := NewEntryActivationReconciler(EntryActivationReconcilerConfig{
+		Store:      store,
+		Lister:     lister,
+		Selector:   &sel,
+		Namespaces: []namespace.Namespace{namespace.Default},
+		LeaseTTL:   60 * time.Second,
+	})
+
+	// First reconcile assigns runner-1 with the OLD params.
+	if err := r.Reconcile(ctx, now); err != nil {
+		t.Fatalf("Reconcile (assign): %v", err)
+	}
+	dir := r.DirectivesForRunner("runner-1")
+	if dir == nil || len(dir.Activate) != 1 {
+		t.Fatalf("expected an Activate, got %+v", dir)
+	}
+	genOld := dir.Activate[0].Generation
+	if got := dir.Activate[0].Params["topic"]; got != "orders" {
+		t.Fatalf("initial Activate params topic = %v, want orders", got)
+	}
+
+	// Within-version content change: same version, same selector, changed params.
+	gV1b := paramTriggerGraph(t, map[string]any{"topic": "payments"})
+	if err := mgr.AddOrUpdateWorkflow(ctx, namespace.Default, "wf-x", "v1", gV1b); err != nil {
+		t.Fatalf("AddOrUpdateWorkflow (payments): %v", err)
+	}
+	if err := r.Reconcile(ctx, now); err != nil {
+		t.Fatalf("Reconcile (params change): %v", err)
+	}
+
+	dir = r.DirectivesForRunner("runner-1")
+	if dir == nil {
+		t.Fatal("params change: owner MUST receive directives, got nil")
+	}
+	if len(dir.Deactivate) != 1 {
+		t.Fatalf("params change: expected 1 Deactivate for the stale generation, got %+v", dir.Deactivate)
+	}
+	if dir.Deactivate[0].Generation != genOld {
+		t.Errorf("Deactivate.Generation = %d, want %d (old generation)", dir.Deactivate[0].Generation, genOld)
+	}
+	if len(dir.Activate) != 1 {
+		t.Fatalf("params change: expected 1 Activate carrying the NEW params, got %+v", dir.Activate)
+	}
+	a := dir.Activate[0]
+	if a.Generation <= genOld {
+		t.Errorf("new Activate generation %d must exceed old %d", a.Generation, genOld)
+	}
+	if got := a.Params["topic"]; got != "payments" {
+		t.Errorf("new Activate params topic = %v, want payments (the updated value)", got)
+	}
+}
+
+// paramTriggerGraph compiles a single remote-hosted kafka.source trigger node
+// with a fixed {zone: a} selector and the given trigger Params. Used to drive a
+// within-version params change (same version, same selector, different params).
+func paramTriggerGraph(t *testing.T, params map[string]any) *graph.Graph {
+	t.Helper()
+	g, err := graph.Compile(&types.WorkflowDef{
+		Name: "param-trig",
+		Nodes: []types.NodeDef{
+			{
+				Name: "trig", Type: "kafka.source", Version: 1, Kind: types.NodeKindTrigger,
+				RunnerSelector: &types.RunnerSelector{MatchLabels: map[string]string{"zone": "a"}},
+				Parameters:     params,
+			},
+			{Name: "work", Type: "http.request", Version: 1, Kind: types.NodeKindAction},
+		},
+		Connections: types.Connections{"trig": {"main": {{Node: "work", Input: "main"}}}},
+	})
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	return g
+}

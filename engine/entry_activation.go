@@ -16,11 +16,11 @@ import (
 //
 // The desired-state fields (Namespace, WorkflowID, WorkflowVersion, EntryUnitID,
 // NodeType, Params, PackageHash, Selector, Requirements, Desired) are owned by
-// Upsert. The assignment fields (RunnerID, SessionID, Generation, LeaseDeadline)
-// are owned by Assign/Fence/Renew and are guarded by monotonic generation
-// fencing: an Assign only wins when its generation strictly exceeds the
-// currently-stored generation, so a stale caller can never overwrite a newer
-// owner.
+// Upsert. The assignment fields (RunnerID, SessionID, Generation, LeaseDeadline,
+// AssignedPackageHash) are owned by Assign/Fence/Renew and are guarded by
+// monotonic generation fencing: an Assign only wins when its generation strictly
+// exceeds the currently-stored generation, so a stale caller can never overwrite
+// a newer owner.
 type EntryActivation struct {
 	Namespace       namespace.Namespace
 	WorkflowID      types.WorkflowID
@@ -35,7 +35,13 @@ type EntryActivation struct {
 	// trigger — the SAME parameters the WorkflowDef already holds (no new secret
 	// surface). Desired-state, owned by Upsert. Absent on older records (decodes
 	// to nil).
-	Params      map[string]any
+	Params map[string]any
+	// PackageHash is the desired content fingerprint of the entry unit — for a
+	// group it is the projected group package hash; for a single trigger node it
+	// fingerprints (NodeType, Version, Params). A within-version change to the
+	// trigger's params changes this hash, which is how the reconciler detects a
+	// material content change to an already-assigned activation. Desired-state,
+	// owned by Upsert.
 	PackageHash string
 	Selector    *types.RunnerSelector
 	// Requirements are the capability requirements the hosting runner must
@@ -49,6 +55,14 @@ type EntryActivation struct {
 	SessionID     string
 	Generation    uint64
 	LeaseDeadline time.Time
+	// AssignedPackageHash is the PackageHash that was in effect when the current
+	// owner was assigned (snapshotted by Assign). The reconciler compares it
+	// against the desired PackageHash to detect a within-version content change:
+	// when they differ, the current owner is running stale params and must be
+	// fenced + reassigned so the new params reach a runner at a new generation. It
+	// is an assignment field (owned by Assign/Fence). Absent on records written
+	// before this field existed (decodes to "").
+	AssignedPackageHash string
 }
 
 // EntryActivationKey uniquely identifies an entry activation record.
@@ -77,7 +91,10 @@ type EntryActivationStore interface {
 	// Assign atomically claims the activation for runnerID/sessionID at the given
 	// generation. It is first-writer-wins and monotonic: the claim succeeds
 	// (returns true) only when gen strictly exceeds the stored generation;
-	// otherwise it returns false and leaves the existing owner untouched.
+	// otherwise it returns false and leaves the existing owner untouched. On a
+	// successful claim it snapshots the record's current desired PackageHash into
+	// AssignedPackageHash so the reconciler can later detect a within-version
+	// content change (desired PackageHash drifting from the assigned one).
 	Assign(ctx context.Context, key EntryActivationKey, runnerID, sessionID string, gen uint64, deadline time.Time) (bool, error)
 
 	// Renew extends the lease deadline of the current owner WITHOUT advancing the

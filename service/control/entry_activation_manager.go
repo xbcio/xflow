@@ -2,6 +2,9 @@ package control
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 
 	"github.com/xbcio/xflow/engine"
@@ -9,6 +12,34 @@ import (
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/types"
 )
+
+// nodeTriggerPackageHashPrefix namespaces the single-trigger-node content
+// fingerprint so it never collides with a group package hash.
+const nodeTriggerPackageHashPrefix = "node-sha256:v1:"
+
+// nodeTriggerPackageHash computes a deterministic content fingerprint of a single
+// trigger node's hostable identity: its node type, version, and params. A change
+// to any of these (within the same workflow version) changes the hash, which is
+// how the reconciler detects a material within-version content change to an
+// already-assigned activation and re-delivers the new params at a new generation.
+// encoding/json sorts map keys, so the encoding is deterministic.
+func nodeTriggerPackageHash(nodeType string, version int, params map[string]any) string {
+	payload := struct {
+		NodeType string         `json:"node_type"`
+		Version  int            `json:"version"`
+		Params   map[string]any `json:"params,omitempty"`
+	}{NodeType: nodeType, Version: version, Params: params}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		// Fall back to a type+version-only fingerprint if params are not
+		// JSON-encodable (should not happen for validated node params). This still
+		// changes on a type/version change; params drift would be missed, but the
+		// input is already invalid workflow content.
+		data = []byte(fmt.Sprintf("%s:%d", nodeType, version))
+	}
+	sum := sha256.Sum256(data)
+	return nodeTriggerPackageHashPrefix + hex.EncodeToString(sum[:])
+}
 
 // EntryActivationManager translates workflow add/update/remove lifecycle events
 // into durable EntryActivation desired-state records. A trigger entry unit
@@ -94,6 +125,7 @@ func DeriveEntryActivations(g *graph.Graph) ([]EntryUnitActivation, error) {
 				EntryUnitID: nm.Name,
 				NodeType:    nm.Type,
 				Params:      nm.Parameters,
+				PackageHash: nodeTriggerPackageHash(nm.Type, nm.Version, nm.Parameters),
 				Selector:    nm.RunnerSelector,
 				Requirements: engine.NormalizeRequirements([]engine.CapabilityRequirement{{
 					NodeType:    nm.Type,

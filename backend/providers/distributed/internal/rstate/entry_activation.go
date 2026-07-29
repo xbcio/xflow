@@ -65,11 +65,13 @@ local gen = tonumber(ARGV[3])
 if gen <= cur then
     return 0
 end
+local pkg = redis.call('HGET', KEYS[1], 'package_hash') or ''
 redis.call('HSET', KEYS[1],
     'runner_id', ARGV[1],
     'session_id', ARGV[2],
     'generation', ARGV[3],
-    'lease_deadline', ARGV[4])
+    'lease_deadline', ARGV[4],
+    'assigned_package_hash', pkg)
 redis.call('EXPIRE', KEYS[1], tonumber(ARGV[5]))
 return 1
 `)
@@ -91,7 +93,8 @@ end
 redis.call('HSET', KEYS[1],
     'runner_id', '',
     'session_id', '',
-    'lease_deadline', '0')
+    'lease_deadline', '0',
+    'assigned_package_hash', '')
 redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))
 return 1
 `)
@@ -276,15 +279,16 @@ func deadlineToNano(t time.Time) int64 {
 
 func decodeEntryActivation(fields map[string]string) (engine.EntryActivation, error) {
 	act := engine.EntryActivation{
-		Namespace:       namespace.Namespace(fields["namespace"]),
-		WorkflowID:      types.WorkflowID(fields["workflow_id"]),
-		WorkflowVersion: fields["workflow_version"],
-		EntryUnitID:     fields["entry_unit_id"],
-		NodeType:        fields["node_type"],
-		PackageHash:     fields["package_hash"],
-		Desired:         fields["desired"] == "1",
-		RunnerID:        fields["runner_id"],
-		SessionID:       fields["session_id"],
+		Namespace:           namespace.Namespace(fields["namespace"]),
+		WorkflowID:          types.WorkflowID(fields["workflow_id"]),
+		WorkflowVersion:     fields["workflow_version"],
+		EntryUnitID:         fields["entry_unit_id"],
+		NodeType:            fields["node_type"],
+		PackageHash:         fields["package_hash"],
+		Desired:             fields["desired"] == "1",
+		RunnerID:            fields["runner_id"],
+		SessionID:           fields["session_id"],
+		AssignedPackageHash: fields["assigned_package_hash"],
 	}
 	// Params is absent on records written before the field existed; decode
 	// tolerates absence (leaves Params nil).

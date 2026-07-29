@@ -136,6 +136,50 @@ func RunEntryActivationContract(t *testing.T, newStore func(*testing.T) engine.E
 		}
 	})
 
+	t.Run("AssignSnapshotsPackageHashFenceClears", func(t *testing.T) {
+		s := newStore(t)
+		act := sampleEntryActivation("u-pkgsnap")
+		key := entryActivationKey(act)
+		deadline := time.Now().Add(time.Minute)
+		if err := s.Upsert(ctx, act); err != nil {
+			t.Fatalf("Upsert: %v", err)
+		}
+		if ok, err := s.Assign(ctx, key, "runner-1", "sess-1", 1, deadline); err != nil || !ok {
+			t.Fatalf("Assign gen1: ok=%v err=%v", ok, err)
+		}
+		// Assign must snapshot the desired PackageHash in effect at claim time.
+		got, _, err := s.Get(ctx, key)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if got.AssignedPackageHash != act.PackageHash {
+			t.Fatalf("Assign must snapshot PackageHash: got %q want %q", got.AssignedPackageHash, act.PackageHash)
+		}
+		// A desired PackageHash change (Upsert) must NOT alter the assigned
+		// snapshot — that drift is exactly what lets the reconciler detect a
+		// material change.
+		changed := act
+		changed.PackageHash = "pkg-CHANGED"
+		if err := s.Upsert(ctx, changed); err != nil {
+			t.Fatalf("Upsert (change pkg): %v", err)
+		}
+		got, _, _ = s.Get(ctx, key)
+		if got.PackageHash != "pkg-CHANGED" {
+			t.Fatalf("desired PackageHash not updated by Upsert: %+v", got)
+		}
+		if got.AssignedPackageHash != act.PackageHash {
+			t.Fatalf("Upsert must not touch AssignedPackageHash: got %q want %q", got.AssignedPackageHash, act.PackageHash)
+		}
+		// Fence clears the assignment snapshot along with the owner.
+		if err := s.Fence(ctx, key, got.Generation); err != nil {
+			t.Fatalf("Fence: %v", err)
+		}
+		got, _, _ = s.Get(ctx, key)
+		if got.RunnerID != "" || got.AssignedPackageHash != "" {
+			t.Fatalf("Fence must clear owner + AssignedPackageHash: %+v", got)
+		}
+	})
+
 	t.Run("RenewKeepsGenerationExtendsDeadline", func(t *testing.T) {
 		s := newStore(t)
 		act := sampleEntryActivation("u-renew")
