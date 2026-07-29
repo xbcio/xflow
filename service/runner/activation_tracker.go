@@ -19,8 +19,8 @@ type ActivationTracker struct {
 }
 
 type activationID struct {
-	WorkflowID string
-	GroupID    string
+	WorkflowID  string
+	EntryUnitID string
 }
 
 type activeSubscription struct {
@@ -68,7 +68,7 @@ func (t *ActivationTracker) ProcessDirectives(ctx context.Context, directives *p
 		if err := t.activateLocked(ctx, d); err != nil {
 			t.logger.Error("activation failed",
 				"workflow_id", d.WorkflowID,
-				"group_id", d.GroupID,
+				"group_id", d.EntryUnitID,
 				"generation", d.Generation,
 				"error", err,
 			)
@@ -80,7 +80,7 @@ func (t *ActivationTracker) ProcessDirectives(ctx context.Context, directives *p
 }
 
 func (t *ActivationTracker) activateLocked(ctx context.Context, d protocol.ActivateDirective) error {
-	id := activationID{WorkflowID: d.WorkflowID, GroupID: d.GroupID}
+	id := activationID{WorkflowID: d.WorkflowID, EntryUnitID: d.EntryUnitID}
 	existing, ok := t.active[id]
 
 	if ok {
@@ -91,7 +91,7 @@ func (t *ActivationTracker) activateLocked(ctx context.Context, d protocol.Activ
 		// Different (older) generation — cancel old subscription before starting new.
 		t.logger.Info("upgrading activation generation",
 			"workflow_id", d.WorkflowID,
-			"group_id", d.GroupID,
+			"group_id", d.EntryUnitID,
 			"old_generation", existing.Generation,
 			"new_generation", d.Generation,
 		)
@@ -113,7 +113,7 @@ func (t *ActivationTracker) activateLocked(ctx context.Context, d protocol.Activ
 }
 
 func (t *ActivationTracker) deactivateLocked(d protocol.DeactivateDirective) {
-	id := activationID{WorkflowID: d.WorkflowID, GroupID: d.GroupID}
+	id := activationID{WorkflowID: d.WorkflowID, EntryUnitID: d.EntryUnitID}
 	existing, ok := t.active[id]
 	if !ok {
 		// Not active — skip.
@@ -131,7 +131,7 @@ func (t *ActivationTracker) deactivateLocked(d protocol.DeactivateDirective) {
 	if err := t.handler.Deactivate(d); err != nil {
 		t.logger.Warn("deactivation cleanup error",
 			"workflow_id", d.WorkflowID,
-			"group_id", d.GroupID,
+			"group_id", d.EntryUnitID,
 			"generation", d.Generation,
 			"error", err,
 		)
@@ -150,9 +150,9 @@ func (t *ActivationTracker) Inventory() []protocol.ActivationInventoryItem {
 	items := make([]protocol.ActivationInventoryItem, 0, len(t.active))
 	for id, sub := range t.active {
 		items = append(items, protocol.ActivationInventoryItem{
-			WorkflowID: id.WorkflowID,
-			GroupID:    id.GroupID,
-			Generation: sub.Generation,
+			WorkflowID:  id.WorkflowID,
+			EntryUnitID: id.EntryUnitID,
+			Generation:  sub.Generation,
 		})
 	}
 	return items
@@ -166,13 +166,13 @@ func (t *ActivationTracker) Shutdown(ctx context.Context) {
 	for id, sub := range t.active {
 		sub.cancel()
 		if err := t.handler.Deactivate(protocol.DeactivateDirective{
-			WorkflowID: id.WorkflowID,
-			GroupID:    id.GroupID,
-			Generation: sub.Generation,
+			WorkflowID:  id.WorkflowID,
+			EntryUnitID: id.EntryUnitID,
+			Generation:  sub.Generation,
 		}); err != nil {
 			t.logger.Warn("shutdown deactivation error",
 				"workflow_id", id.WorkflowID,
-				"group_id", id.GroupID,
+				"group_id", id.EntryUnitID,
 				"error", err,
 			)
 		}

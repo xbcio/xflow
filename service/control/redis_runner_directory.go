@@ -70,6 +70,7 @@ type RedisRunnerDirectory struct {
 
 var _ RunnerDirectory = (*RedisRunnerDirectory)(nil)
 var _ ClaimReclaimer = (*RedisRunnerDirectory)(nil)
+var _ ActivationRunnerLister = (*RedisRunnerDirectory)(nil)
 var _ ExpiredLeaseReleaser = (*RedisRunnerDirectory)(nil)
 
 // NewRedisRunnerDirectory constructs a Redis-backed RunnerDirectory. Every
@@ -266,8 +267,10 @@ func (d *RedisRunnerDirectory) ClaimForRunner(ctx context.Context, req ClaimRequ
 	}
 
 	labelsChanged := req.Labels != nil
+	effectiveLabels := runner.labels
 	if labelsChanged {
-		labelsJSON, err := json.Marshal(cloneLabels(req.Labels))
+		effectiveLabels = cloneLabels(req.Labels)
+		labelsJSON, err := json.Marshal(effectiveLabels)
 		if err != nil {
 			return Claim{}, false, fmt.Errorf("marshal runner labels: %w", err)
 		}
@@ -296,6 +299,9 @@ func (d *RedisRunnerDirectory) ClaimForRunner(ctx context.Context, req ClaimRequ
 			continue
 		}
 		if !canServeNamespace(runner.namespaces, assignment.Namespace) {
+			continue
+		}
+		if rs := assignment.Routing.RunnerSelector; rs != nil && !MatchLabels(effectiveLabels, rs.MatchLabels) {
 			continue
 		}
 
@@ -754,11 +760,33 @@ func (d *RedisRunnerDirectory) Runner(ctx context.Context, runnerID string) (Run
 	}, true
 }
 
+// ListLiveRunners returns a snapshot of every registered runner. It implements
+// ActivationRunnerLister so the EntryActivationReconciler can enumerate runners
+// for assignment across a replacement control-plane process (the Redis
+// directory holds no process-local state). Runner IDs are enumerated from the
+// durable runner-session hash; each is resolved via the same snapshot builder
+// used by Runner(). Liveness (heartbeat TTL) is applied by the reconciler's
+// selector, so a stale runner is filtered there rather than here.
+func (d *RedisRunnerDirectory) ListLiveRunners(ctx context.Context) []RunnerSnapshot {
+	runnerIDs, err := d.rdb.HKeys(ctx, d.keys.runnerSession).Result()
+	if err != nil {
+		return nil
+	}
+	out := make([]RunnerSnapshot, 0, len(runnerIDs))
+	for _, id := range runnerIDs {
+		if snap, ok := d.Runner(ctx, id); ok {
+			out = append(out, snap)
+		}
+	}
+	return out
+}
+
 type redisClaimRunner struct {
 	sessionID    string
 	capabilities []protocol.Capability
 	policy       RunnerPolicy
 	namespaces   []namespace.Namespace
+	labels       map[string]string
 }
 
 func (d *RedisRunnerDirectory) runnerForClaim(ctx context.Context, runnerID string) (redisClaimRunner, bool, error) {
@@ -797,7 +825,19 @@ func (d *RedisRunnerDirectory) runnerForClaim(ctx context.Context, runnerID stri
 			return redisClaimRunner{}, false, fmt.Errorf("decode runner namespaces: %w", err)
 		}
 	}
-	return redisClaimRunner{sessionID: sessionID, capabilities: capabilities, policy: policy, namespaces: namespaces}, true, nil
+	labelsRaw, err := d.rdb.HGet(ctx, d.keys.runnerLabels, runnerID).Result()
+	if errors.Is(err, redis.Nil) {
+		labelsRaw = ""
+	} else if err != nil {
+		return redisClaimRunner{}, false, fmt.Errorf("read runner labels: %w", err)
+	}
+	var labels map[string]string
+	if labelsRaw != "" {
+		if err := json.Unmarshal([]byte(labelsRaw), &labels); err != nil {
+			return redisClaimRunner{}, false, fmt.Errorf("decode runner labels: %w", err)
+		}
+	}
+	return redisClaimRunner{sessionID: sessionID, capabilities: capabilities, policy: policy, namespaces: namespaces, labels: labels}, true, nil
 }
 
 // ReclaimExpiredClaims returns expired unfinalized claims to the durable

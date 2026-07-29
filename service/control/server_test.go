@@ -611,6 +611,10 @@ func (f *fakeControlEngine) ReclaimLease(context.Context, engine.ExpiredLease) (
 	return false, nil
 }
 
+func (f *fakeControlEngine) SeedExecutionFromEntry(context.Context, engine.SeedExecutionFromEntryRequest) (engine.SeedExecutionFromEntryResponse, error) {
+	return engine.SeedExecutionFromEntryResponse{}, nil
+}
+
 func stableTestAssignment(nodeName string) Assignment {
 	task := engine.Task{
 		ExecutionID: "exec-1",

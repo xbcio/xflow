@@ -188,8 +188,9 @@ type ExecutionSnapshot struct {
 	// (RELEASE-GATES §4 forbids faking a parent from raw id strings). The
 	// carrier round-trips through the W3C propagator, which preserves
 	// tracestate and the sampled flag.
-	TraceCarrier map[string]string `json:"trace_carrier,omitempty"`
-	ParentID     types.ExecutionID // non-empty for sub-executions
+	TraceCarrier map[string]string    `json:"trace_carrier,omitempty"`
+	ParentID     types.ExecutionID   // non-empty for sub-executions
+	SeededInputs map[string]SeededInput `json:"seeded_inputs,omitempty"`
 }
 
 // NodeSnapshot is the engine's view of a single node's latest state stored in

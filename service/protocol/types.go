@@ -28,6 +28,14 @@ type RegisterRunnerRequest struct {
 	// header. This body field is a fallback for transports that can't set
 	// headers.
 	AuthToken string `json:"auth_token,omitempty"`
+	// Activations reports the trigger entry-unit activations the runner is
+	// currently hosting, sent on (re)register so the control plane can reconcile
+	// its assignments on reconnect: still-hosted activations have their lease
+	// renewed (generation unchanged) rather than being orphaned, and assignments
+	// the reconnected runner no longer hosts are revoked for reassignment. Empty
+	// on a fresh runner or one that hosts no triggers. Carries no secret values
+	// (only workflow/entry-unit identity + generation).
+	Activations []ActivationInventoryItem `json:"activations,omitempty"`
 }
 
 type RegisterRunnerResponse struct {

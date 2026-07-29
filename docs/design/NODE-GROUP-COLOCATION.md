@@ -23,7 +23,7 @@ types/group.go           GroupDef contract (Name, Members, RunnerSelector, OnErr
 engine/graph/            Compile-time IR: GroupMeta, UnitMeta (two-layer scheduling), boundary edges
 engine/                  Runtime types: GroupLease, GroupResult, GroupCommitRequest, scheduling intents
 backend/.../rstate/      Redis atomic state: group_state.go (commit Lua), group_suspend.go, trigger_admission.go
-service/control/         Control loop: group dispatch, activation controller, runner selector
+service/control/         Control loop: group dispatch, entry-activation manager + reconciler, runner selector
 service/runner/          Runner-side: group runtime (embedded engine), package cache, backpressure
 service/protocol/        Wire DTOs: GroupLeaseDTO, activation directives, admission RPC
 observability/           metrics/group.go, tracing/group_spans.go, engine/group_audit.go
@@ -60,7 +60,7 @@ type GroupDef struct {
 | `GroupSuspender` | Transition running → suspended; persist spec + signal journal + entry input |
 | `GroupResumer` | Deliver signal → quorum check → produce resume outbox entry |
 | `TriggerAdmissionStore` | Atomic first-writer-wins admission: create execution + commit trigger-group + downstream outbox |
-| `TriggerActivationStore` | Desired/active state for trigger-group runner assignment (SetDesired, AssignRunner, Revoke, Renew) |
+| `EntryActivationStore` | Desired/active state for node-generic entry-activation runner assignment (Upsert desired state, Assign/Renew/Fence for generation-fenced ownership). Replaces the retired group-centric `TriggerActivationStore`. |
 | `GroupLeaseExpirer` | Reclaim expired leases back to retry-ready |
 | `GroupSuspendReader` / `GroupCanceler` / `GroupSignalRevoker` / `GroupTimeoutHandler` | Suspend lifecycle helpers |
 
@@ -91,16 +91,31 @@ Operations: `lease_acquired`, `lease_expired`, `committed`, `admission_accepted`
 ## 5. Lifecycle: Trigger-Group (Admission-Based)
 
 ```
-1. Workflow registered with trigger-group → ActivationController.SetDesired
-2. Reconcile loop assigns a live runner → AssignRunner (generation-fenced lease)
-3. Runner receives ActivateDirective via heartbeat piggyback → starts Kafka consumer
+1. Workflow registered (POST /v1/workflows/register) → control plane persists the
+   compiled graph in the WorkflowRegistry → EntryActivationManager derives the
+   desired per-entry-unit activation (desired-state only; does not fence)
+2. EntryActivationReconciler (single fence+assign authority) matches the activation
+   to a live runner by selector + capability (fail-closed) and assigns it with a
+   generation-fenced lease
+3. Runner receives a node-generic ActivateDirective (carrying the generation) via
+   heartbeat piggyback → TriggerActivationHandler starts the Kafka consumer
 4. Each batch triggers local group execution (embedded engine, same as normal group)
-5. Runner emits result via SeedTriggeredGroupResult (admission key = ns/wf/ver/group/topic/partition/offset-range)
-   → Atomic: first-writer-wins occupancy + create execution + commit group unit + downstream outbox
-6. Control plane responds: accepted | duplicate-accepted (idempotent) | conflict
+5. Runner seeds the entry via SeedExecutionRequest (carrying the generation) →
+   admission key = ns/wf/ver/group/topic/partition/offset-range → Atomic:
+   first-writer-wins occupancy + create execution + commit unit + downstream outbox.
+   The server fence admits a new admission key ONLY when the request generation
+   equals the activation's generation (stale/forged generation fails closed).
+6. Control plane responds: accepted | duplicate-accepted (idempotent) | conflict.
+   A stale-generation 409 does NOT commit the Kafka offset → Kafka replays the batch.
 7. On accepted: runner commits Kafka offsets. On failure/crash: offsets uncommitted → Kafka replays batch
-8. ActivationController renews activation lease; revokes if runner dies
+8. Reconciler renews the lease from reported inventory (generation-stable) and
+   revokes/deactivates assignments for runners that stop reporting; on reconnect it
+   reconciles reported inventory (renew live owners, revoke stale ones)
 ```
+
+> The old group-centric `ActivationController` was retired in favor of the
+> node-generic `EntryActivationManager` (desired state) + `EntryActivationReconciler`
+> (fence/assign/renew/revoke) split described above.
 
 **Backpressure:** Runner limits in-flight unconfirmed emits (`EmitBackpressure` semaphore). Window full → consumer pauses. Kafka offset is the single truth for flow control.
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/observability/tracing"
@@ -25,6 +26,19 @@ var (
 	ErrLeaseRequired         = errors.New("runner_id, session_id and lease are required")
 	ErrEngineNotConfigured   = errors.New("engine not configured")
 	ErrUnauthenticated       = errors.New("unauthenticated")
+	// ErrStaleGeneration is returned when an entry seed carries an activation
+	// generation older than the currently-assigned generation AND targets an
+	// admission key that has not yet been accepted. It fences a forged or stale
+	// runner from seeding a fresh execution (spec §11.6). A stale seed for an
+	// already-accepted key is NOT an error — it is duplicate-accepted so the
+	// runner can commit its offset.
+	ErrStaleGeneration = errors.New("stale activation generation")
+	// ErrEntrySeedWorkflowUnknown is returned when a remote entry seed cannot be
+	// resolved to a registered workflow graph + entry unit. The seed is rejected
+	// (fail closed): a seed whose workflow is not registered, or whose entry unit
+	// is not found in the compiled graph, must never be admitted with no
+	// downstream fan-out (spec §11.5). Surfaced by the transport as 404/409.
+	ErrEntrySeedWorkflowUnknown = errors.New("entry seed workflow or unit unknown")
 	// ErrInternalServer is the generic message returned to clients for any
 	// error that is not a recognised transport-agnostic sentinel. The full
 	// error is logged server-side; clients must never see internal stack
@@ -47,9 +61,20 @@ type Core struct {
 	// tracer instruments the runner protocol dispatch and commit path.
 	// NoopTracer when tracing is disabled.
 	tracer tracing.Tracer
-	// activationCtrl, when non-nil, supplies activation directives piggybacked
-	// on heartbeat responses. Optional — nil means no activation directives.
-	activationCtrl *ActivationController
+	// entryReconciler, when non-nil, is the node-generic entry-activation
+	// reconciler. When set it supplies heartbeat activation directives.
+	// Nil-guarded; wired by the ControlPlane.
+	entryReconciler *EntryActivationReconciler
+	// entryActivations, when non-nil, is the durable EntryActivation store used
+	// to fence entry seeds by activation generation (spec §11.6). Nil disables
+	// generation fencing — every seed is admitted (legacy / locally-hosted
+	// triggers with no remote activation).
+	entryActivations engine.EntryActivationStore
+	// workflowRegistry, when non-nil, is the durable registry of compiled
+	// workflow graphs. Threaded from the ControlPlane so later tasks can resolve
+	// a graph on the seed path to derive entry activations. Nil means no registry
+	// is configured.
+	workflowRegistry backend.WorkflowRegistry
 }
 
 // leaseRecoveryEngine is deliberately optional so custom EngineFacade test
@@ -150,6 +175,16 @@ func (c *Core) register(ctx context.Context, req protocol.RegisterRunnerRequest,
 	if err != nil {
 		return protocol.RegisterRunnerResponse{}, normalizeRunnerError(err, c.logger, "register")
 	}
+	// Reconnect reconciliation: renew leases for activations the runner still
+	// reports hosting (generation unchanged) and revoke assignments it no longer
+	// hosts so they become reassignable. Best-effort — a reconcile failure must
+	// not fail an otherwise-valid registration; the periodic reconcile loop is a
+	// backstop. Only runs when the node-generic reconciler is wired.
+	if c.entryReconciler != nil {
+		if err := c.entryReconciler.ReconcileRunnerInventory(ctx, req.RunnerID, req.Activations, time.Now()); err != nil && c.logger != nil {
+			c.logger.Warn("register inventory reconcile failed", "runner_id", req.RunnerID, "err", err)
+		}
+	}
 	return protocol.RegisterRunnerResponse{RunnerID: req.RunnerID, SessionID: session.SessionID}, nil
 }
 
@@ -175,8 +210,9 @@ func (c *Core) heartbeat(ctx context.Context, req protocol.HeartbeatRequest, inf
 		return protocol.HeartbeatResponse{}, normalizeRunnerError(err, c.logger, "heartbeat")
 	}
 	resp := protocol.HeartbeatResponse{ServerTime: time.Now().Unix()}
-	if c.activationCtrl != nil {
-		resp.Activations = c.activationCtrl.DirectivesForRunner(req.RunnerID)
+	// The node-generic entry reconciler supplies activation directives when wired.
+	if c.entryReconciler != nil {
+		resp.Activations = c.entryReconciler.DirectivesForRunner(req.RunnerID)
 	}
 	return resp, nil
 }
@@ -480,6 +516,135 @@ func (c *Core) reportResult(ctx context.Context, req protocol.ReportResultReques
 		return protocol.ReportResultResponse{}, normalizeRunnerError(err, c.logger, "report_result")
 	}
 	return protocol.ReportResultResponse{Accepted: true}, nil
+}
+
+// SeedExecutionFromEntry admits an entry-unit (single node or group node)
+// result through the engine's EntryAdmissionStore. The namespace is resolved
+// server-side from the request context (injected by the apiserver authz
+// wrapper from the authenticated principal) and stamped onto the request — it
+// is NEVER taken from a client-supplied body, so a forged or cross-namespace
+// admission key fails closed.
+func (c *Core) SeedExecutionFromEntry(ctx context.Context, req engine.SeedExecutionFromEntryRequest) (engine.SeedExecutionFromEntryResponse, error) {
+	if c.engine == nil {
+		return engine.SeedExecutionFromEntryResponse{}, ErrEngineNotConfigured
+	}
+	// Authoritative namespace comes from the request context, not the body.
+	req.Namespace = namespace.FromContext(ctx)
+
+	// Resolve the compiled graph + downstream topology server-side. A remote
+	// runner seeds carrying only the entry-unit ID + generation; the graph,
+	// entry-unit index and downstream arrivals MUST be resolved from the
+	// authoritative registry so the admitted seed actually fans out downstream.
+	// When no registry is wired (embedded / in-process seeds already carry a
+	// resolved Graph/Downstream/EntryUnitIdx), preserve today's behavior.
+	if c.workflowRegistry != nil {
+		if err := c.resolveEntrySeedTopology(ctx, &req); err != nil {
+			return engine.SeedExecutionFromEntryResponse{}, err
+		}
+	}
+
+	// Generation fence (spec §11.6): when an activation store is configured and
+	// the activation exists, a seed carrying a generation below the currently
+	// assigned generation must not create a NEW execution. It is still
+	// duplicate-accepted for an already-accepted admission key so the stale
+	// runner can commit its Kafka offset and stop redelivering.
+	if err := c.fenceEntrySeedGeneration(ctx, req); err != nil {
+		return engine.SeedExecutionFromEntryResponse{}, err
+	}
+
+	return c.engine.SeedExecutionFromEntry(ctx, req)
+}
+
+// resolveEntrySeedTopology looks up the registered workflow for req and stamps
+// the authoritative Graph, EntryUnitIdx and downstream arrivals onto it. It
+// fails CLOSED (ErrEntrySeedWorkflowUnknown) when the workflow is not
+// registered, the version/hash does not match, or the entry unit cannot be
+// resolved in the compiled graph — a remote seed without a resolvable graph
+// must never be admitted with no downstream fan-out (spec §11.5). Any other
+// registry error is normalized to a generic internal error so backend details
+// never reach the caller.
+func (c *Core) resolveEntrySeedTopology(ctx context.Context, req *engine.SeedExecutionFromEntryRequest) error {
+	rec, err := c.workflowRegistry.GetWorkflow(ctx, req.WorkflowID)
+	if err != nil {
+		if errors.Is(err, backend.ErrWorkflowNotFound) {
+			return ErrEntrySeedWorkflowUnknown
+		}
+		return normalizeRunnerError(err, c.logger, "entry_seed_resolve")
+	}
+	// The seed's declared version must match the registered record. On the remote
+	// path (registry present), an empty version is treated as a mismatch and
+	// rejected — a remote runner MUST declare the version it seeds against, and a
+	// fail-open empty-vs-registered bypass would let it fan out over the wrong
+	// topology. A non-empty version that disagrees with the record is likewise
+	// rejected.
+	if req.WorkflowVersion == "" || (rec.Version != "" && req.WorkflowVersion != rec.Version) {
+		return ErrEntrySeedWorkflowUnknown
+	}
+	if rec.Graph == nil {
+		return ErrEntrySeedWorkflowUnknown
+	}
+	idx, downstream, err := deriveEntrySeedTopology(rec.Graph, req.EntryUnitID, req.Exits)
+	if err != nil {
+		// deriveEntrySeedTopology only returns ErrEntrySeedWorkflowUnknown-wrapped
+		// errors; surface the sentinel so the transport maps it to 404/409.
+		if errors.Is(err, ErrEntrySeedWorkflowUnknown) {
+			return ErrEntrySeedWorkflowUnknown
+		}
+		return normalizeRunnerError(err, c.logger, "entry_seed_resolve")
+	}
+	req.Graph = rec.Graph
+	req.EntryUnitIdx = idx
+	req.Downstream = downstream
+	return nil
+}
+
+// fenceEntrySeedGeneration enforces the generation fence for one seed request.
+// It returns ErrStaleGeneration when the seed is stale AND targets an
+// admission key that has not been accepted yet; it returns nil (admit) when the
+// generation exactly matches the currently assigned generation, when there is no
+// activation record / store, or when the admission key was already accepted (so a
+// duplicate accept can proceed).
+func (c *Core) fenceEntrySeedGeneration(ctx context.Context, req engine.SeedExecutionFromEntryRequest) error {
+	if c.entryActivations == nil {
+		return nil
+	}
+	key := engine.EntryActivationKey{
+		Namespace:       req.Namespace,
+		WorkflowID:      req.WorkflowID,
+		WorkflowVersion: req.WorkflowVersion,
+		EntryUnitID:     req.EntryUnitID,
+	}
+	act, ok, err := c.entryActivations.Get(ctx, key)
+	if err != nil {
+		return normalizeRunnerError(err, c.logger, "entry_seed_fence")
+	}
+	if !ok {
+		// No durable activation governs this entry unit — nothing to fence.
+		return nil
+	}
+	if req.Generation == act.Generation {
+		// Exactly the current assigned generation — admit normally. The
+		// generation is monotonic and every legitimate runner receives its
+		// generation from Assign, so the current owner always carries exactly
+		// act.Generation. Any other value (below = superseded runner, above =
+		// impossible in honest operation, i.e. forged) is treated as stale and
+		// falls through to the duplicate-accept probe below, which fails closed
+		// unless the admission key was already accepted.
+		return nil
+	}
+	// Stale generation. Only allow it through if the admission key was already
+	// accepted (duplicate accept path). We probe by the deterministic execution
+	// ID: if it exists, the key was accepted and the engine seed will return a
+	// duplicate; otherwise the stale runner must be rejected fail-closed.
+	execID := engine.DeterministicExecutionID(req.AdmissionKey)
+	if _, ierr := c.engine.Inspect(ctx, execID); ierr != nil {
+		if errors.Is(ierr, engine.ErrExecutionNotFound) {
+			return ErrStaleGeneration
+		}
+		return normalizeRunnerError(ierr, c.logger, "entry_seed_fence")
+	}
+	// Execution already exists → allow the duplicate accept to proceed.
+	return nil
 }
 
 // leaseImmutableMismatch reports whether the lease a runner echoed back differs

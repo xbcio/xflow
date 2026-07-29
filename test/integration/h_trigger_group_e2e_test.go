@@ -16,7 +16,7 @@ import (
 // TestTriggerGroupE2E_LocalBackend exercises the full trigger-group admission
 // path using the local (in-memory) backend. This covers:
 //   - admission key creation
-//   - SeedTriggeredGroupResult with the engine layer
+//   - SeedExecutionFromEntry with the engine layer
 //   - execution creation, group unit marked done, boundary outputs written
 //   - duplicate admission (same key+hash) returns duplicate=true
 //   - conflict (same key, different hash) returns conflict
@@ -78,20 +78,20 @@ func TestTriggerGroupE2E_LocalBackend(t *testing.T) {
 	admissionKey := engine.BuildAdmissionKeySingle(
 		namespace.Default, "wf-tg-e2e", "v1", "tg", "events", 0, 42,
 	)
-	exits := []engine.GroupExitResult{{
+	exits := []engine.BoundaryExit{{
 		NodeName: "body",
 		Port:     "main",
 		Data:     map[string]any{"processed": true, "value": 42},
 	}}
 	resultHash := engine.ComputeResultHash(engine.GroupOutcomeSuccess, exits)
 
-	req := engine.SeedTriggeredGroupResultRequest{
+	req := engine.SeedExecutionFromEntryRequest{
 		AdmissionKey:    admissionKey,
 		Namespace:       namespace.Default,
 		WorkflowID:      "wf-tg-e2e",
 		WorkflowVersion: "v1",
-		GroupID:         gm.Name,
-		GroupUnitIdx:    gm.UnitIdx,
+		EntryUnitID:     gm.Name,
+		EntryUnitIdx:    gm.UnitIdx,
 		Graph:           g,
 		Outcome:         engine.GroupOutcomeSuccess,
 		Exits:           exits,
@@ -102,9 +102,9 @@ func TestTriggerGroupE2E_LocalBackend(t *testing.T) {
 
 	// --- Step 1: First admission → accepted ---
 	t.Run("FirstAdmission_Accepted", func(t *testing.T) {
-		resp, err := be.State().(engine.TriggerAdmissionStore).SeedTriggeredGroupResult(ctx, req)
+		resp, err := be.State().(engine.EntryAdmissionStore).SeedExecutionFromEntry(ctx, req)
 		if err != nil {
-			t.Fatalf("SeedTriggeredGroupResult: %v", err)
+			t.Fatalf("SeedExecutionFromEntry: %v", err)
 		}
 		if resp.State != engine.AdmissionStateAccepted {
 			t.Fatalf("state = %q, want accepted", resp.State)
@@ -153,9 +153,9 @@ func TestTriggerGroupE2E_LocalBackend(t *testing.T) {
 
 	// --- Step 2: Duplicate admission (same key + same hash) → duplicate=true ---
 	t.Run("DuplicateAdmission_SameKeyAndHash", func(t *testing.T) {
-		resp, err := be.State().(engine.TriggerAdmissionStore).SeedTriggeredGroupResult(ctx, req)
+		resp, err := be.State().(engine.EntryAdmissionStore).SeedExecutionFromEntry(ctx, req)
 		if err != nil {
-			t.Fatalf("SeedTriggeredGroupResult (dup): %v", err)
+			t.Fatalf("SeedExecutionFromEntry (dup): %v", err)
 		}
 		if resp.State != engine.AdmissionStateAccepted {
 			t.Fatalf("state = %q, want accepted (duplicate)", resp.State)
@@ -173,7 +173,7 @@ func TestTriggerGroupE2E_LocalBackend(t *testing.T) {
 	// --- Step 3: Conflict (same key, different hash) → conflict ---
 	t.Run("Conflict_SameKeyDifferentHash", func(t *testing.T) {
 		// Build a request with different exits → different result hash.
-		conflictExits := []engine.GroupExitResult{{
+		conflictExits := []engine.BoundaryExit{{
 			NodeName: "body",
 			Port:     "main",
 			Data:     map[string]any{"processed": true, "value": 99},
@@ -183,9 +183,9 @@ func TestTriggerGroupE2E_LocalBackend(t *testing.T) {
 		conflictReq.Exits = conflictExits
 		conflictReq.ResultHash = conflictHash
 
-		resp, err := be.State().(engine.TriggerAdmissionStore).SeedTriggeredGroupResult(ctx, conflictReq)
+		resp, err := be.State().(engine.EntryAdmissionStore).SeedExecutionFromEntry(ctx, conflictReq)
 		if err != nil {
-			t.Fatalf("SeedTriggeredGroupResult (conflict): %v", err)
+			t.Fatalf("SeedExecutionFromEntry (conflict): %v", err)
 		}
 		if resp.State != engine.AdmissionStateConflict {
 			t.Fatalf("state = %q, want conflict", resp.State)
@@ -231,20 +231,20 @@ func TestTriggerGroupE2E_SingleUnit_CompletesExecution(t *testing.T) {
 	admissionKey := engine.BuildAdmissionKeySingle(
 		namespace.Default, "wf-tg-single", "v1", "tg", "events", 0, 100,
 	)
-	exits := []engine.GroupExitResult{{
+	exits := []engine.BoundaryExit{{
 		NodeName: "body",
 		Port:     "main",
 		Data:     map[string]any{"completed": true},
 	}}
 	resultHash := engine.ComputeResultHash(engine.GroupOutcomeSuccess, exits)
 
-	req := engine.SeedTriggeredGroupResultRequest{
+	req := engine.SeedExecutionFromEntryRequest{
 		AdmissionKey:    admissionKey,
 		Namespace:       namespace.Default,
 		WorkflowID:      "wf-tg-single",
 		WorkflowVersion: "v1",
-		GroupID:         gm.Name,
-		GroupUnitIdx:    gm.UnitIdx,
+		EntryUnitID:     gm.Name,
+		EntryUnitIdx:    gm.UnitIdx,
 		Graph:           g,
 		Outcome:         engine.GroupOutcomeSuccess,
 		Exits:           exits,
@@ -252,9 +252,9 @@ func TestTriggerGroupE2E_SingleUnit_CompletesExecution(t *testing.T) {
 		Downstream:      nil, // no downstream
 	}
 
-	resp, err := be.State().(engine.TriggerAdmissionStore).SeedTriggeredGroupResult(ctx, req)
+	resp, err := be.State().(engine.EntryAdmissionStore).SeedExecutionFromEntry(ctx, req)
 	if err != nil {
-		t.Fatalf("SeedTriggeredGroupResult: %v", err)
+		t.Fatalf("SeedExecutionFromEntry: %v", err)
 	}
 	if resp.State != engine.AdmissionStateAccepted {
 		t.Fatalf("state = %q, want accepted", resp.State)
@@ -311,13 +311,13 @@ func TestTriggerGroupE2E_FailedOutcome(t *testing.T) {
 	)
 	resultHash := engine.ComputeResultHash(engine.GroupOutcomeFailed, nil)
 
-	req := engine.SeedTriggeredGroupResultRequest{
+	req := engine.SeedExecutionFromEntryRequest{
 		AdmissionKey:    admissionKey,
 		Namespace:       namespace.Default,
 		WorkflowID:      "wf-tg-failed",
 		WorkflowVersion: "v1",
-		GroupID:         gm.Name,
-		GroupUnitIdx:    gm.UnitIdx,
+		EntryUnitID:     gm.Name,
+		EntryUnitIdx:    gm.UnitIdx,
 		Graph:           g,
 		Outcome:         engine.GroupOutcomeFailed,
 		Exits:           nil,
@@ -326,9 +326,9 @@ func TestTriggerGroupE2E_FailedOutcome(t *testing.T) {
 		Downstream:      nil,
 	}
 
-	resp, err := be.State().(engine.TriggerAdmissionStore).SeedTriggeredGroupResult(ctx, req)
+	resp, err := be.State().(engine.EntryAdmissionStore).SeedExecutionFromEntry(ctx, req)
 	if err != nil {
-		t.Fatalf("SeedTriggeredGroupResult: %v", err)
+		t.Fatalf("SeedExecutionFromEntry: %v", err)
 	}
 	if resp.State != engine.AdmissionStateAccepted {
 		t.Fatalf("state = %q, want accepted", resp.State)

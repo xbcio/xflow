@@ -87,13 +87,15 @@ func TestKafkaTriggerAggregateRawParams(t *testing.T) {
 	}
 }
 
-func TestKafkaTriggerSkipsEmitWhenDedupErrors(t *testing.T) {
+func TestKafkaTriggerLegacyPathEmitsWithoutPreEmitDedup(t *testing.T) {
 	orig := newKafkaConsumer
 	consumer := newScriptedKafkaConsumer([]KafkaMessage{{Topic: "orders", Partition: 0, Offset: 1, Value: []byte("one")}})
 	newKafkaConsumer = func(KafkaConsumerConfig) (KafkaConsumer, error) { return consumer, nil }
 	t.Cleanup(func() { newKafkaConsumer = orig })
 
 	rt := newFakeTriggerRuntime()
+	// P0-1: the legacy single-message path must NOT run a pre-emit Dedup SETNX.
+	// A dedup error must never suppress the emit — that was the data-loss bug.
 	rt.dedupFunc = func(context.Context, string, time.Duration) (bool, error) {
 		return true, errors.New("boom")
 	}
@@ -109,11 +111,14 @@ func TestKafkaTriggerSkipsEmitWhenDedupErrors(t *testing.T) {
 	}
 	defer func() { _ = sub.Close(context.Background()) }()
 
-	if !rt.waitDedup(time.Second) {
-		t.Fatal("kafka trigger did not attempt dedup")
+	// The message is emitted despite the dedup callback erroring, because the
+	// legacy path no longer calls Dedup before Emit.
+	if !rt.waitForEmitCount(1, time.Second) {
+		t.Fatalf("emit count = %d, want 1 (emit must not depend on pre-emit dedup)", rt.emitCount())
 	}
-	if got := rt.emitCount(); got != 0 {
-		t.Fatalf("emit count = %d, want 0", got)
+	// And Dedup must not have been consulted at all on the emit path.
+	if rt.waitDedup(50 * time.Millisecond) {
+		t.Fatal("legacy path called Dedup; pre-emit dedup SETNX must be removed (P0-1)")
 	}
 }
 

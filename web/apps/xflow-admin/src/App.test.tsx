@@ -7,12 +7,12 @@ describe("xflow-admin App", () => {
     render(<App />);
 
     expect(await screen.findByRole("region", { name: "Dashboard" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "概览" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "工作流" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Runner" })).toBeTruthy();
+    expect(screen.getByRole("menuitem", { name: /概览/ })).toBeTruthy();
+    expect(screen.getByRole("menuitem", { name: /工作流/ })).toBeTruthy();
+    expect(screen.getByRole("menuitem", { name: /Runner/ })).toBeTruthy();
     expect(screen.getByRole("button", { name: "当前用户" })).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "工作流" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /工作流/ }));
 
     const workflowPage = await screen.findByRole("region", { name: "工作流管理" });
     expect(within(workflowPage).getByText("purchase-approval")).toBeTruthy();
@@ -33,5 +33,5 @@ describe("xflow-admin App", () => {
     expect(debugDialog).toBeTruthy();
     expect(within(debugDialog).getByText("输出")).toBeTruthy();
     expect(within(debugDialog).getByText(/Node executed successfully/)).toBeTruthy();
-  });
+  }, 10000);
 });

@@ -14,13 +14,13 @@ import (
 )
 
 // Compile-time interface satisfaction.
-var _ engine.TriggerAdmissionStore = (*Store)(nil)
+var _ engine.EntryAdmissionStore = (*Store)(nil)
 
-// seedTriggeredGroupResultLua atomically admits a trigger-group result. It
-// performs all steps in one transition:
+// seedExecutionFromEntryLua atomically admits an entry-unit (single node or
+// group node) result. It performs all steps in one transition:
 //  1. check admission key occupancy (first-writer-wins)
 //  2. create execution (status, graph, remaining, failed, in-degree)
-//  3. mark trigger group unit as done
+//  3. mark entry unit as done
 //  4. write boundary outputs
 //  5. apply downstream fan-in and write outbox intents
 //  6. check completion (remaining=0 → finalize)
@@ -42,7 +42,7 @@ var _ engine.TriggerAdmissionStore = (*Store)(nil)
 //	                   executeID, executeBody, skipID, skipBody (7 each)
 //
 // Returns {code, finalStatus}: code 1=accepted, 2=duplicate, 3=conflict
-var seedTriggeredGroupResultLua = redis.NewScript(`
+var seedExecutionFromEntryLua = redis.NewScript(`
 local existing = redis.call('GET', KEYS[1])
 if existing and existing ~= '' then
     if existing == ARGV[1] then
@@ -139,13 +139,13 @@ end
 return {1, finalStatus}
 `)
 
-// SeedTriggeredGroupResult implements engine.TriggerAdmissionStore using a
+// SeedExecutionFromEntry implements engine.EntryAdmissionStore using a
 // two-phase approach: a TxPipeline seeds the structural keys (remaining,
 // failed, in-degree) and the Lua script atomically occupies the admission key,
-// creates the execution status, marks the group done, writes outputs, decrements
-// remaining, and applies downstream fan-in. Both phases are deterministic and
-// idempotent — the Lua short-circuits on existing admission key.
-func (s *Store) SeedTriggeredGroupResult(ctx context.Context, req engine.SeedTriggeredGroupResultRequest) (engine.SeedTriggeredGroupResultResponse, error) {
+// creates the execution status, marks the entry unit done, writes outputs,
+// decrements remaining, and applies downstream fan-in. Both phases are
+// deterministic and idempotent — the Lua short-circuits on existing admission key.
+func (s *Store) SeedExecutionFromEntry(ctx context.Context, req engine.SeedExecutionFromEntryRequest) (engine.SeedExecutionFromEntryResponse, error) {
 	execID := engine.DeterministicExecutionID(req.AdmissionKey)
 	t := req.Namespace
 	if t == "" {
@@ -167,44 +167,44 @@ func (s *Store) SeedTriggeredGroupResult(ctx context.Context, req engine.SeedTri
 			}
 		}
 		if _, err := pipe.Exec(ctx); err != nil {
-			return engine.SeedTriggeredGroupResultResponse{}, fmt.Errorf("seed counters for %q: %w", execID, err)
+			return engine.SeedExecutionFromEntryResponse{}, fmt.Errorf("seed counters for %q: %w", execID, err)
 		}
 	}
 
 	// Serialize graph.
 	graphJSON, err := json.Marshal(req.Graph)
 	if err != nil {
-		return engine.SeedTriggeredGroupResultResponse{}, fmt.Errorf("marshal graph for admission %q: %w", req.AdmissionKey, err)
+		return engine.SeedExecutionFromEntryResponse{}, fmt.Errorf("marshal graph for admission %q: %w", req.AdmissionKey, err)
 	}
 
 	// Build KEYS.
 	keys := []string{
-		admissionKey(t, execID),                              // 1
-		execKey(t, execID, "status"),                         // 2
-		execKey(t, execID, "graph"),                          // 3
-		remainingNodesKey(t, execID),                         // 4
-		failedNodesKey(t, execID),                            // 5
-		groupUnitStatusKey(t, execID, req.GroupUnitIdx),      // 6
-		groupUnitMetaKey(t, execID, req.GroupUnitIdx),        // 7
-		outboxReadyKey(t, execID),                            // 8
-		outboxBodyKey(t, execID),                             // 9
+		admissionKey(t, execID),                         // 1
+		execKey(t, execID, "status"),                    // 2
+		execKey(t, execID, "graph"),                     // 3
+		remainingNodesKey(t, execID),                    // 4
+		failedNodesKey(t, execID),                       // 5
+		groupUnitStatusKey(t, execID, req.EntryUnitIdx), // 6
+		groupUnitMetaKey(t, execID, req.EntryUnitIdx),   // 7
+		outboxReadyKey(t, execID),                       // 8
+		outboxBodyKey(t, execID),                        // 9
 	}
 
 	// Build ARGV.
 	args := []any{
-		string(req.ResultHash),  // 1
-		int(ttl.Seconds()),      // 2
-		string(graphJSON),       // 3
-		string(req.Outcome),     // 4
-		len(req.Exits),          // 5
-		len(req.Downstream),     // 6
+		string(req.ResultHash), // 1
+		int(ttl.Seconds()),     // 2
+		string(graphJSON),      // 3
+		string(req.Outcome),    // 4
+		len(req.Exits),         // 5
+		len(req.Downstream),    // 6
 	}
 
 	// Exit outputs (keys + args).
 	for _, ex := range req.Exits {
 		encoded, err := json.Marshal(ex.Data)
 		if err != nil {
-			return engine.SeedTriggeredGroupResultResponse{}, fmt.Errorf("marshal exit %q: %w", ex.NodeName, err)
+			return engine.SeedExecutionFromEntryResponse{}, fmt.Errorf("marshal exit %q: %w", ex.NodeName, err)
 		}
 		keys = append(keys, outputKey(t, execID, ex.NodeName))
 		args = append(args, string(encoded))
@@ -231,7 +231,7 @@ func (s *Store) SeedTriggeredGroupResult(ctx context.Context, req engine.SeedTri
 			Type:        execType,
 		}, time.Time{})
 		if err != nil {
-			return engine.SeedTriggeredGroupResultResponse{}, err
+			return engine.SeedExecutionFromEntryResponse{}, err
 		}
 		skipJSON, err := marshalRedisOutboxEntry(skipID, engine.Task{
 			ExecutionID: execID,
@@ -241,42 +241,42 @@ func (s *Store) SeedTriggeredGroupResult(ctx context.Context, req engine.SeedTri
 			Type:        engine.TaskTypeNodeSkip,
 		}, time.Time{})
 		if err != nil {
-			return engine.SeedTriggeredGroupResultResponse{}, err
+			return engine.SeedExecutionFromEntryResponse{}, err
 		}
 		args = append(args, arrival.ArrivalCount, arrival.ActiveCount, arrival.MergeMode, executeID, executeJSON, skipID, skipJSON)
 	}
 
 	// Run Lua.
-	res, err := seedTriggeredGroupResultLua.Run(ctx, s.rdb, keys, args...).Slice()
+	res, err := seedExecutionFromEntryLua.Run(ctx, s.rdb, keys, args...).Slice()
 	if err != nil {
-		return engine.SeedTriggeredGroupResultResponse{}, fmt.Errorf("seed triggered group %q: %w", req.AdmissionKey, err)
+		return engine.SeedExecutionFromEntryResponse{}, fmt.Errorf("seed triggered group %q: %w", req.AdmissionKey, err)
 	}
 	if len(res) < 1 {
-		return engine.SeedTriggeredGroupResultResponse{}, fmt.Errorf("seed triggered group %q: empty response", req.AdmissionKey)
+		return engine.SeedExecutionFromEntryResponse{}, fmt.Errorf("seed triggered group %q: empty response", req.AdmissionKey)
 	}
 
 	code := redisResultInt(res[0])
 	switch code {
 	case 1: // accepted
-		return engine.SeedTriggeredGroupResultResponse{
+		return engine.SeedExecutionFromEntryResponse{
 			State:       engine.AdmissionStateAccepted,
 			ExecutionID: execID,
 			Duplicate:   false,
 		}, nil
 	case 2: // duplicate (same hash)
-		return engine.SeedTriggeredGroupResultResponse{
+		return engine.SeedExecutionFromEntryResponse{
 			State:       engine.AdmissionStateAccepted,
 			ExecutionID: execID,
 			Duplicate:   true,
 		}, nil
 	case 3: // conflict (different hash)
-		return engine.SeedTriggeredGroupResultResponse{
+		return engine.SeedExecutionFromEntryResponse{
 			State:       engine.AdmissionStateConflict,
 			ExecutionID: execID,
 			Duplicate:   false,
 		}, nil
 	default:
-		return engine.SeedTriggeredGroupResultResponse{}, fmt.Errorf("seed triggered group %q: unknown code %d", req.AdmissionKey, code)
+		return engine.SeedExecutionFromEntryResponse{}, fmt.Errorf("seed triggered group %q: unknown code %d", req.AdmissionKey, code)
 	}
 }
 

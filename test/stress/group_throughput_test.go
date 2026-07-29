@@ -49,17 +49,17 @@ func groupUnitIdx(g *graph.Graph) int {
 	return -1
 }
 
-// BenchmarkGroupAdmission measures the throughput of SeedTriggeredGroupResult
+// BenchmarkGroupAdmission measures the throughput of SeedExecutionFromEntry
 // on the local backend with concurrent callers. Each parallel iteration uses a
 // unique admission key so no contention on duplicates.
 func BenchmarkGroupAdmission(b *testing.B) {
 	be := local.New()
-	state := be.State().(engine.TriggerAdmissionStore)
+	state := be.State().(engine.EntryAdmissionStore)
 	g := buildTriggerGroupGraph(b)
 	unitIdx := groupUnitIdx(g)
 
 	ctx := context.Background()
-	hash := engine.ComputeResultHash(engine.GroupOutcomeSuccess, []engine.GroupExitResult{
+	hash := engine.ComputeResultHash(engine.GroupOutcomeSuccess, []engine.BoundaryExit{
 		{NodeName: "g.sink", Port: "main", Data: map[string]any{"v": 1}},
 	})
 
@@ -68,19 +68,19 @@ func BenchmarkGroupAdmission(b *testing.B) {
 		i := 0
 		for pb.Next() {
 			key := engine.AdmissionKey(fmt.Sprintf("bench/wf/v1/g/topic/0/%d-%d", b.N+i, b.N+i))
-			_, err := state.SeedTriggeredGroupResult(ctx, engine.SeedTriggeredGroupResultRequest{
+			_, err := state.SeedExecutionFromEntry(ctx, engine.SeedExecutionFromEntryRequest{
 				AdmissionKey: key,
-				GroupID:      "g",
-				GroupUnitIdx: unitIdx,
+				EntryUnitID:  "g",
+				EntryUnitIdx: unitIdx,
 				Graph:        g,
 				Outcome:      engine.GroupOutcomeSuccess,
-				Exits: []engine.GroupExitResult{
+				Exits: []engine.BoundaryExit{
 					{NodeName: "g.sink", Port: "main", Data: map[string]any{"v": 1}},
 				},
 				ResultHash: hash,
 			})
 			if err != nil {
-				b.Fatalf("SeedTriggeredGroupResult: %v", err)
+				b.Fatalf("SeedExecutionFromEntry: %v", err)
 			}
 			i++
 		}
@@ -160,7 +160,7 @@ func TestGroupStress_ConcurrentAdmissions(t *testing.T) {
 	}
 
 	be := local.New()
-	state := be.State().(engine.TriggerAdmissionStore)
+	state := be.State().(engine.EntryAdmissionStore)
 	g := buildTriggerGroupGraph(t)
 	unitIdx := groupUnitIdx(g)
 	ctx := context.Background()
@@ -177,16 +177,16 @@ func TestGroupStress_ConcurrentAdmissions(t *testing.T) {
 			defer wg.Done()
 			for i := 0; i < opsPerWorker; i++ {
 				key := engine.AdmissionKey(fmt.Sprintf("stress/wf/v1/g/topic/%d/%d-%d", workerID, i, i))
-				hash := engine.ComputeResultHash(engine.GroupOutcomeSuccess, []engine.GroupExitResult{
+				hash := engine.ComputeResultHash(engine.GroupOutcomeSuccess, []engine.BoundaryExit{
 					{NodeName: "g.sink", Port: "main", Data: map[string]any{"w": workerID, "i": i}},
 				})
-				resp, err := state.SeedTriggeredGroupResult(ctx, engine.SeedTriggeredGroupResultRequest{
+				resp, err := state.SeedExecutionFromEntry(ctx, engine.SeedExecutionFromEntryRequest{
 					AdmissionKey: key,
-					GroupID:      "g",
-					GroupUnitIdx: unitIdx,
+					EntryUnitID:  "g",
+					EntryUnitIdx: unitIdx,
 					Graph:        g,
 					Outcome:      engine.GroupOutcomeSuccess,
-					Exits: []engine.GroupExitResult{
+					Exits: []engine.BoundaryExit{
 						{NodeName: "g.sink", Port: "main", Data: map[string]any{"w": workerID, "i": i}},
 					},
 					ResultHash: hash,
@@ -234,7 +234,7 @@ func TestGroupStress_DuplicateAdmissions(t *testing.T) {
 	}
 
 	be := local.New()
-	state := be.State().(engine.TriggerAdmissionStore)
+	state := be.State().(engine.EntryAdmissionStore)
 	g := buildTriggerGroupGraph(t)
 	unitIdx := groupUnitIdx(g)
 	ctx := context.Background()
@@ -242,7 +242,7 @@ func TestGroupStress_DuplicateAdmissions(t *testing.T) {
 	const numWorkers = 50
 	// All workers submit the same admission key with same hash.
 	key := engine.AdmissionKey("dup/wf/v1/g/topic/0/0-0")
-	hash := engine.ComputeResultHash(engine.GroupOutcomeSuccess, []engine.GroupExitResult{
+	hash := engine.ComputeResultHash(engine.GroupOutcomeSuccess, []engine.BoundaryExit{
 		{NodeName: "g.sink", Port: "main", Data: map[string]any{"v": 1}},
 	})
 
@@ -253,19 +253,19 @@ func TestGroupStress_DuplicateAdmissions(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			resp, err := state.SeedTriggeredGroupResult(ctx, engine.SeedTriggeredGroupResultRequest{
+			resp, err := state.SeedExecutionFromEntry(ctx, engine.SeedExecutionFromEntryRequest{
 				AdmissionKey: key,
-				GroupID:      "g",
-				GroupUnitIdx: unitIdx,
+				EntryUnitID:  "g",
+				EntryUnitIdx: unitIdx,
 				Graph:        g,
 				Outcome:      engine.GroupOutcomeSuccess,
-				Exits: []engine.GroupExitResult{
+				Exits: []engine.BoundaryExit{
 					{NodeName: "g.sink", Port: "main", Data: map[string]any{"v": 1}},
 				},
 				ResultHash: hash,
 			})
 			if err != nil {
-				t.Errorf("SeedTriggeredGroupResult: %v", err)
+				t.Errorf("SeedExecutionFromEntry: %v", err)
 				return
 			}
 			if resp.Duplicate {
@@ -306,7 +306,7 @@ func TestGroupStress_BackpressureSaturation(t *testing.T) {
 	var wg sync.WaitGroup
 
 	be := local.New()
-	state := be.State().(engine.TriggerAdmissionStore)
+	state := be.State().(engine.EntryAdmissionStore)
 	g := buildTriggerGroupGraph(t)
 	unitIdx := groupUnitIdx(g)
 	ctx := context.Background()
@@ -335,16 +335,16 @@ func TestGroupStress_BackpressureSaturation(t *testing.T) {
 
 				// Perform admission.
 				key := engine.AdmissionKey(fmt.Sprintf("bp/wf/v1/g/topic/%d/%d-%d", workerID, i, i))
-				hash := engine.ComputeResultHash(engine.GroupOutcomeSuccess, []engine.GroupExitResult{
+				hash := engine.ComputeResultHash(engine.GroupOutcomeSuccess, []engine.BoundaryExit{
 					{NodeName: "g.sink", Port: "main", Data: map[string]any{"w": workerID, "i": i}},
 				})
-				_, err := state.SeedTriggeredGroupResult(ctx, engine.SeedTriggeredGroupResultRequest{
+				_, err := state.SeedExecutionFromEntry(ctx, engine.SeedExecutionFromEntryRequest{
 					AdmissionKey: key,
-					GroupID:      "g",
-					GroupUnitIdx: unitIdx,
+					EntryUnitID:  "g",
+					EntryUnitIdx: unitIdx,
 					Graph:        g,
 					Outcome:      engine.GroupOutcomeSuccess,
-					Exits: []engine.GroupExitResult{
+					Exits: []engine.BoundaryExit{
 						{NodeName: "g.sink", Port: "main", Data: map[string]any{"w": workerID, "i": i}},
 					},
 					ResultHash: hash,

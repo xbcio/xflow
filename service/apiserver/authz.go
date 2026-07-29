@@ -75,9 +75,14 @@ type Authorizer interface {
 // Operation vocabulary. The route layer resolves each inbound request to one
 // of these before invoking the handler.
 const (
-	OpWorkflowCreate             = "workflow.create"
-	OpWorkflowInvoke             = "workflow.invoke"
-	OpWorkflowRead               = "workflow.read"
+	OpWorkflowCreate = "workflow.create"
+	OpWorkflowInvoke = "workflow.invoke"
+	OpWorkflowRead   = "workflow.read"
+	// OpWorkflowRegister is the mutation that persists a compiled workflow graph
+	// into the server-side registry via POST /v1/workflows/register, and its
+	// deregister counterpart via DELETE /v1/workflows/register/{id}. It maps to
+	// the "workflow" scope like the other workflow operations.
+	OpWorkflowRegister           = "workflow.register"
 	OpWorkflowDefinitionCreate   = "workflowdefinition.create"
 	OpWorkflowDefinitionRead     = "workflowdefinition.read"
 	OpWorkflowDefinitionUpdate   = "workflowdefinition.update" // draft
@@ -88,8 +93,12 @@ const (
 	OpExecutionSignal            = "execution.signal"
 	OpExecutionRevoke            = "execution.revoke"
 	OpExecutionCancel            = "execution.cancel"
-	OpDeadLetterList             = "deadletter.list"
-	OpDeadLetterReplay           = "deadletter.replay"
+	// OpExecutionSeed is the mutation that seeds an execution from an entry unit
+	// (single node or group node) result via POST /v1/executions. It maps to the
+	// "execution" scope like the other execution operations.
+	OpExecutionSeed    = "execution.seed"
+	OpDeadLetterList   = "deadletter.list"
+	OpDeadLetterReplay = "deadletter.replay"
 	// OpManagementRead is the stable operation for management execution inspect
 	// (single-resource lookup; the management surface exposes no list API). It
 	// maps to the "management.read" scope.
@@ -110,10 +119,11 @@ const (
 func scopeForOperation(op string) string {
 	switch op {
 	case OpWorkflowCreate, OpWorkflowInvoke, OpWorkflowRead,
+		OpWorkflowRegister,
 		OpWorkflowDefinitionCreate, OpWorkflowDefinitionRead, OpWorkflowDefinitionUpdate,
 		OpWorkflowDefinitionValidate, OpWorkflowDefinitionPublish, OpWorkflowExecutionInvoke:
 		return "workflow"
-	case OpExecutionRead, OpExecutionSignal, OpExecutionRevoke, OpExecutionCancel:
+	case OpExecutionRead, OpExecutionSignal, OpExecutionRevoke, OpExecutionCancel, OpExecutionSeed:
 		return "execution"
 	case OpDeadLetterList:
 		return "deadletter.list"

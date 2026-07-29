@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/execution"
@@ -44,6 +45,10 @@ type EngineFacade interface {
 	Cancel(ctx context.Context, id types.ExecutionID) error
 	BuildTaskLease(ctx context.Context, task *engine.Task) (*engine.TaskLease, error)
 	CommitTaskResultWithOutcome(ctx context.Context, lease *engine.TaskLease, result engine.TaskResult) (engine.CommitOutcome, error)
+	// SeedExecutionFromEntry atomically seeds an execution from an entry unit
+	// (single node or group node) result. Implemented by *engine.Engine
+	// (entry_admission.go), delegating to the backend EntryAdmissionStore.
+	SeedExecutionFromEntry(ctx context.Context, req engine.SeedExecutionFromEntryRequest) (engine.SeedExecutionFromEntryResponse, error)
 }
 
 type Server struct {
@@ -77,6 +82,31 @@ func WithControlLogger(l engine.Logger) ServerOption {
 // WithAuthObserver installs a non-blocking observer for runner auth decisions.
 func WithAuthObserver(observer AuthObserver) ServerOption {
 	return func(s *Server) { s.core.authObserver = observer }
+}
+
+// WithEntryActivationStore installs the durable EntryActivation store used to
+// fence entry seeds by activation generation (spec §11.6). When set, a seed
+// carrying a generation older than the currently-assigned generation is
+// rejected for a not-yet-accepted admission key and duplicate-accepted for an
+// already-accepted one. Nil (the default) disables generation fencing.
+func WithEntryActivationStore(store engine.EntryActivationStore) ServerOption {
+	return func(s *Server) {
+		if store != nil {
+			s.core.entryActivations = store
+		}
+	}
+}
+
+// WithWorkflowRegistry installs the durable registry of compiled workflow
+// graphs onto the control Core so later tasks can resolve a graph on the seed
+// path to derive entry activations. Nil (the default) leaves the Core without a
+// registry.
+func WithWorkflowRegistry(reg backend.WorkflowRegistry) ServerOption {
+	return func(s *Server) {
+		if reg != nil {
+			s.core.workflowRegistry = reg
+		}
+	}
 }
 
 // WithTracer installs a distributed tracing implementation on the control

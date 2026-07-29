@@ -9,18 +9,18 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
-var _ engine.TriggerAdmissionStore = (*memoryState)(nil)
+var _ engine.EntryAdmissionStore = (*memoryState)(nil)
 
-// admissionEntry tracks a previously admitted trigger-group result.
+// admissionEntry tracks a previously admitted entry-unit result.
 type admissionEntry struct {
 	executionID types.ExecutionID
 	resultHash  engine.ResultHash
 }
 
-// SeedTriggeredGroupResult implements engine.TriggerAdmissionStore. It
-// atomically admits a trigger-group result under the single-process mutex,
+// SeedExecutionFromEntry implements engine.EntryAdmissionStore. It
+// atomically admits an entry-unit result under the single-process mutex,
 // performing all 7 steps of the admission contract in one transition.
-func (s *memoryState) SeedTriggeredGroupResult(_ context.Context, req engine.SeedTriggeredGroupResultRequest) (engine.SeedTriggeredGroupResultResponse, error) {
+func (s *memoryState) SeedExecutionFromEntry(_ context.Context, req engine.SeedExecutionFromEntryRequest) (engine.SeedExecutionFromEntryResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -33,14 +33,14 @@ func (s *memoryState) SeedTriggeredGroupResult(_ context.Context, req engine.See
 	if existing, ok := s.admissions[req.AdmissionKey]; ok {
 		if existing.resultHash == req.ResultHash {
 			// Duplicate accepted — same key, same hash.
-			return engine.SeedTriggeredGroupResultResponse{
+			return engine.SeedExecutionFromEntryResponse{
 				State:       engine.AdmissionStateAccepted,
 				ExecutionID: existing.executionID,
 				Duplicate:   true,
 			}, nil
 		}
 		// Conflict — same key, different hash.
-		return engine.SeedTriggeredGroupResultResponse{
+		return engine.SeedExecutionFromEntryResponse{
 			State:       engine.AdmissionStateConflict,
 			ExecutionID: existing.executionID,
 		}, nil
@@ -58,8 +58,8 @@ func (s *memoryState) SeedTriggeredGroupResult(_ context.Context, req engine.See
 	// Step 3: Unit counters were initialized by createExecutionLocked (remaining,
 	// failed, in-degree from the graph).
 
-	// Step 4: Mark trigger group unit as done.
-	gKey := groupKey(execID, req.GroupUnitIdx)
+	// Step 4: Mark entry unit as done.
+	gKey := groupKey(execID, req.EntryUnitIdx)
 	s.groupUnits[gKey] = &groupUnitState{
 		status:         groupUnitDone,
 		committedToken: "seed-triggered",
@@ -71,7 +71,7 @@ func (s *memoryState) SeedTriggeredGroupResult(_ context.Context, req engine.See
 	}
 
 	// Step 6: Completion counting + downstream outbox.
-	var result engine.SeedTriggeredGroupResultResponse
+	var result engine.SeedExecutionFromEntryResponse
 	result.State = engine.AdmissionStateAccepted
 	result.ExecutionID = execID
 
@@ -111,13 +111,13 @@ func admissionOutboxID(id types.ExecutionID, name string) string {
 	return fmt.Sprintf("admission/%s/%s", id, name)
 }
 
-// triggerGroupExecOutboxID builds a deterministic ID for the initial execute
-// task written by trigger admission.
-func triggerGroupExecOutboxID(id types.ExecutionID, name string) string {
+// entrySeedExecOutboxID builds a deterministic ID for the initial execute
+// task written by entry-seed admission.
+func entrySeedExecOutboxID(id types.ExecutionID, name string) string {
 	return fmt.Sprintf("tg-exec/%s/%s", id, name)
 }
 
-// putTriggerAdmissionOutbox writes an outbox entry for the trigger admission
+// putTriggerAdmissionOutbox writes an outbox entry for the entry-seed admission
 // downstream. Currently unused — applyGroupDownstreamLocked handles it.
 func (s *memoryState) putTriggerAdmissionOutbox(id types.ExecutionID, entry engine.OutboxEntry) {
 	s.putOutboxLocked(id, entry.ID, entry.Task, time.Time{})

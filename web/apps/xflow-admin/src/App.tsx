@@ -2,6 +2,7 @@ import {
   AppstoreOutlined,
   BellOutlined,
   BugOutlined,
+  ClockCircleOutlined,
   CheckCircleOutlined,
   CloseOutlined,
   ClusterOutlined,
@@ -9,13 +10,36 @@ import {
   DashboardOutlined,
   DeploymentUnitOutlined,
   FileAddOutlined,
+  ReloadOutlined,
   PlayCircleOutlined,
   SearchOutlined,
   SettingOutlined,
   ThunderboltOutlined,
   UserOutlined
 } from "@ant-design/icons";
-import { Alert, Avatar, Badge, Button, ConfigProvider, Dropdown, Input, Layout, Spin, Tag, theme } from "antd";
+import {
+  Alert,
+  Avatar,
+  Badge,
+  Button,
+  Card,
+  ConfigProvider,
+  Descriptions,
+  Drawer,
+  Dropdown,
+  Input,
+  Layout,
+  List,
+  Menu,
+  Progress,
+  Space,
+  Spin,
+  Statistic,
+  Table,
+  Tag,
+  theme
+} from "antd";
+import type { MenuProps, TableProps } from "antd";
 import * as React from "react";
 import type { RuntimeNodeSnapshot, RuntimeSnapshot, WorkflowDef } from "@xflow/core";
 import type { WorkflowSummary } from "@xflow/api";
@@ -57,6 +81,21 @@ interface RunnerSummary {
 }
 
 const apiClient = createAdminApiClient();
+
+function AdminCardTitle({
+  icon,
+  children
+}: {
+  icon: React.ReactNode;
+  children: React.ReactNode;
+}): React.ReactElement {
+  return (
+    <span className="xflow-admin-card-title">
+      {icon}
+      <span>{children}</span>
+    </span>
+  );
+}
 
 const runners: RunnerSummary[] = [
   {
@@ -218,50 +257,75 @@ function DebugDrawer({
     if (frames[0]) setActiveFrameId(frames[0].id);
   }, [frames]);
 
-  if (!open) {
-    return <></>;
-  }
-
   return (
-    <aside aria-label="调试" className="xflow-admin-debug-panel" role="dialog">
-      <header className="xflow-admin-debug-panel__header">
+    <Drawer
+      aria-label="调试"
+      className="xflow-admin-debug-panel"
+      closeIcon={<CloseOutlined />}
+      getContainer={false}
+      mask={false}
+      open={open}
+      placement="right"
+      rootClassName="xflow-admin-debug-drawer"
+      size="default"
+      title={
         <span className="xflow-admin-debug-title">
           <BugOutlined />
           调试
         </span>
-        <Button aria-label="关闭调试" icon={<CloseOutlined />} size="small" type="text" onClick={onClose} />
-      </header>
-      <div className="xflow-admin-debug-summary">
-        <div>
-          <span>工作流</span>
-          <strong>{workflow?.name ?? "-"}</strong>
-        </div>
-        <div>
-          <span>运行状态</span>
-          <Tag color={statusColor(runtime?.status)}>{runtime?.status ?? "pending"}</Tag>
-        </div>
-        <div>
-          <span>节点数</span>
-          <strong>{workflow?.nodes?.length ?? 0}</strong>
-        </div>
-      </div>
+      }
+      onClose={onClose}
+    >
+      <Descriptions
+        className="xflow-admin-debug-summary"
+        colon={false}
+        column={1}
+        items={[
+          {
+            key: "workflow",
+            label: "工作流",
+            children: workflow?.name ?? "-"
+          },
+          {
+            key: "status",
+            label: "运行状态",
+            children: <Tag color={statusColor(runtime?.status)}>{runtime?.status ?? "pending"}</Tag>
+          },
+          {
+            key: "nodes",
+            label: "节点数",
+            children: workflow?.nodes?.length ?? 0
+          }
+        ]}
+        size="small"
+      />
 
       <div className="xflow-admin-debug-layout">
-        <div className="xflow-admin-debug-list" aria-label="调试节点">
-          {frames.map((frame) => (
-            <button
-              aria-label={`调试节点 ${frame.node}`}
-              data-active={activeFrame?.id === frame.id}
-              key={frame.id}
-              type="button"
-              onClick={() => setActiveFrameId(frame.id)}
-            >
-              <span data-status={frame.status} />
-              <strong>{frame.node}</strong>
-              <em>{frame.durationMs === undefined ? "-" : `${frame.durationMs} ms`}</em>
-            </button>
-          ))}
-        </div>
+        <List<DebugFrame>
+          aria-label="调试节点"
+          className="xflow-admin-debug-list"
+          dataSource={frames}
+          locale={{ emptyText: "暂无调试节点" }}
+          renderItem={(frame) => (
+            <List.Item>
+              <Button
+                aria-label={`调试节点 ${frame.node}`}
+                block
+                className="xflow-admin-debug-node"
+                data-active={activeFrame?.id === frame.id}
+                type="text"
+                onClick={() => setActiveFrameId(frame.id)}
+              >
+                <span data-status={frame.status} />
+                <strong>{frame.node}</strong>
+                <em>{frame.durationMs === undefined ? "-" : `${frame.durationMs} ms`}</em>
+              </Button>
+            </List.Item>
+          )}
+          rowKey="id"
+          size="small"
+          split={false}
+        />
 
         <div className="xflow-admin-debug-detail">
           {activeFrame ? (
@@ -296,7 +360,7 @@ function DebugDrawer({
           )}
         </div>
       </div>
-    </aside>
+    </Drawer>
   );
 }
 
@@ -313,29 +377,39 @@ function AdminRail({
     { key: "runners", label: "Runner", icon: <ClusterOutlined /> },
     { key: "settings", label: "设置", icon: <SettingOutlined /> }
   ];
+  const menuItems: MenuProps["items"] = navItems.map((item) => ({
+    key: item.key,
+    icon: item.icon,
+    label: item.label,
+    title: item.label
+  }));
 
   return (
-      <aside aria-label="XFlow Admin navigation" className="xflow-admin-rail">
-        <button className="xflow-admin-rail__brand" type="button" onClick={() => onNavigate("dashboard")}>
-        <span>
-          <AppstoreOutlined />
-        </span>
-        <strong>XFlow</strong>
-      </button>
-      <nav className="xflow-admin-rail__nav">
-        {navItems.map((item) => (
-          <button
-            aria-label={item.label}
-            data-active={activePage === item.key}
-            key={item.key}
-            type="button"
-            onClick={() => onNavigate(item.key)}
-          >
-            {item.icon}
-            <span>{item.label}</span>
-          </button>
-        ))}
-      </nav>
+    <Layout.Sider
+      className="xflow-admin-rail"
+      collapsed
+      collapsedWidth={72}
+      theme="dark"
+      trigger={null}
+      width={72}
+    >
+      <Button
+        aria-label="XFlow"
+        className="xflow-admin-rail__brand"
+        icon={<AppstoreOutlined />}
+        type="text"
+        onClick={() => onNavigate("dashboard")}
+      />
+      <Menu
+        aria-label="XFlow Admin navigation"
+        className="xflow-admin-rail__nav"
+        inlineCollapsed
+        items={menuItems}
+        mode="inline"
+        selectedKeys={[activePage]}
+        theme="dark"
+        onClick={({ key }) => onNavigate(key as AdminPage)}
+      />
       <Dropdown
         menu={{
           items: [
@@ -347,15 +421,15 @@ function AdminRail({
         placement="topLeft"
         trigger={["click"]}
       >
-        <button aria-label="当前用户" className="xflow-admin-user" type="button">
-          <Avatar icon={<UserOutlined />} shape="square" size={30} />
-          <span>
-            <strong>Admin</strong>
-            <em>default namespace</em>
-          </span>
-        </button>
+        <Button
+          aria-label="当前用户"
+          className="xflow-admin-user"
+          icon={<Avatar icon={<UserOutlined />} shape="square" size={30} />}
+          title="Admin / default namespace"
+          type="text"
+        />
       </Dropdown>
-    </aside>
+    </Layout.Sider>
   );
 }
 
@@ -376,12 +450,12 @@ function AdminTopbar({
   };
 
   return (
-    <header className="xflow-admin-topbar">
-      <div>
+    <Layout.Header className="xflow-admin-topbar">
+      <div className="xflow-admin-topbar__title">
+        <span>Home / XFlow</span>
         <strong>{pageTitle[activePage]}</strong>
-        <span>prod / default namespace</span>
       </div>
-      <div className="xflow-admin-topbar__actions">
+      <Space className="xflow-admin-topbar__actions" size={8}>
         <Input aria-label="全局搜索" placeholder="搜索工作流、Runner、执行记录" prefix={<SearchOutlined />} />
         <Badge dot={running}>
           <Button aria-label="通知" icon={<BellOutlined />} />
@@ -389,8 +463,8 @@ function AdminTopbar({
         <Button aria-label="新建工作流" icon={<FileAddOutlined />} loading={running} type="primary" onClick={onCreateWorkflow}>
           新建工作流
         </Button>
-      </div>
-    </header>
+      </Space>
+    </Layout.Header>
   );
 }
 
@@ -411,84 +485,123 @@ function DashboardPage({
   const totalCapacity = runners.reduce((sum, runner) => sum + runner.capacity, 0);
   const inFlight = runners.reduce((sum, runner) => sum + runner.inFlight, 0);
   const runningWorkflows = workflows.filter((workflow) => workflow.status === "running").length;
+  const successWorkflows = workflows.filter((workflow) => workflow.status === "success").length;
 
   return (
-    <section className="xflow-admin-page" aria-label="Dashboard">
+    <section className="xflow-admin-page xflow-admin-dashboard" aria-label="Dashboard">
       <div className="xflow-admin-page__header">
         <div>
-          <h1>XFlow Admin</h1>
-          <p>控制工作流定义、运行状态和执行面 Runner 的最小管理台。</p>
+          <span className="xflow-admin-kicker">XFlow / Overview</span>
+          <h1>Workflow operations</h1>
+          <p>工作流定义、执行状态和 Runner 容量的最小观测面。</p>
         </div>
-        <Button aria-label="新建工作流" icon={<FileAddOutlined />} type="primary" onClick={onCreateWorkflow}>
-          新建工作流
-        </Button>
+        <Space className="xflow-admin-timebar" size={6}>
+          <Button icon={<ClockCircleOutlined />}>Last 6 hours</Button>
+          <Button icon={<ReloadOutlined />}>Refresh</Button>
+          <Button aria-label="新建工作流" icon={<FileAddOutlined />} type="primary" onClick={onCreateWorkflow}>
+            新建
+          </Button>
+        </Space>
       </div>
 
       <div className="xflow-admin-metrics">
-        <article>
-          <span>工作流</span>
-          <strong>{workflows.length}</strong>
-          <em>{runningWorkflows} running</em>
-        </article>
-        <article>
-          <span>在线 Runner</span>
-          <strong>{onlineRunners}/{runners.length}</strong>
-          <em>{inFlight}/{totalCapacity} in flight</em>
-        </article>
-        <article>
-          <span>最近运行</span>
-          <strong>{runtime?.status ?? "pending"}</strong>
-          <em>{Object.keys(runtime?.nodes ?? {}).length} nodes tracked</em>
-        </article>
-        <article>
-          <span>环境</span>
-          <strong>prod</strong>
-          <em>namespace default</em>
-        </article>
+        <Card className="xflow-admin-metric-card" extra={<Tag>defs</Tag>} size="small" title="Workflows">
+          <Statistic value={workflows.length} />
+          <span className="xflow-admin-metric-note">{runningWorkflows} running</span>
+          <div className="xflow-admin-sparkline" aria-hidden="true">
+            <i style={{ height: "34%" }} />
+            <i style={{ height: "62%" }} />
+            <i style={{ height: "45%" }} />
+            <i style={{ height: "80%" }} />
+            <i style={{ height: "58%" }} />
+            <i style={{ height: "72%" }} />
+          </div>
+        </Card>
+        <Card className="xflow-admin-metric-card" extra={<Tag color="green">live</Tag>} size="small" title="Runner capacity">
+          <Statistic value={`${onlineRunners}/${runners.length}`} />
+          <span className="xflow-admin-metric-note">{inFlight}/{totalCapacity} in flight</span>
+          <div className="xflow-admin-sparkline" aria-hidden="true">
+            <i style={{ height: "38%" }} />
+            <i style={{ height: "46%" }} />
+            <i style={{ height: "61%" }} />
+            <i style={{ height: "54%" }} />
+            <i style={{ height: "68%" }} />
+            <i style={{ height: "48%" }} />
+          </div>
+        </Card>
+        <Card className="xflow-admin-metric-card" extra={<Tag color={statusColor(runtime?.status)}>{runtime?.status ?? "pending"}</Tag>} size="small" title="Last runtime">
+          <Statistic value={runtime?.status ?? "pending"} />
+          <span className="xflow-admin-metric-note">{Object.keys(runtime?.nodes ?? {}).length} nodes tracked</span>
+          <div className="xflow-admin-sparkline" aria-hidden="true">
+            <i style={{ height: "24%" }} />
+            <i style={{ height: "50%" }} />
+            <i style={{ height: "42%" }} />
+            <i style={{ height: "74%" }} />
+            <i style={{ height: "64%" }} />
+            <i style={{ height: "39%" }} />
+          </div>
+        </Card>
+        <Card className="xflow-admin-metric-card" extra={<Tag>prod</Tag>} size="small" title="Environment">
+          <Statistic value="prod" />
+          <span className="xflow-admin-metric-note">{successWorkflows} success / namespace default</span>
+          <div className="xflow-admin-sparkline" aria-hidden="true">
+            <i style={{ height: "52%" }} />
+            <i style={{ height: "52%" }} />
+            <i style={{ height: "52%" }} />
+            <i style={{ height: "52%" }} />
+            <i style={{ height: "52%" }} />
+            <i style={{ height: "52%" }} />
+          </div>
+        </Card>
       </div>
 
       <div className="xflow-admin-dashboard-grid">
-        <section className="xflow-admin-card">
-          <div className="xflow-admin-card__header">
-            <strong>最近工作流</strong>
-            <Button size="small" onClick={onOpenWorkflows}>
-              查看全部
-            </Button>
-          </div>
-          <div className="xflow-admin-row-list">
-            {workflows.slice(0, 5).map((workflow) => (
-              <div key={workflow.id}>
-                <span data-status={workflow.status} />
-                <div>
-                  <strong>{workflow.name}</strong>
-                  <em>{workflow.id}</em>
-                </div>
-                <Tag color={statusColor(workflow.status)}>{workflow.status ?? "pending"}</Tag>
-              </div>
-            ))}
-          </div>
-        </section>
+        <Card
+          className="xflow-admin-card"
+          extra={<Button size="small" onClick={onOpenWorkflows}>查看全部</Button>}
+          size="small"
+          title={<AdminCardTitle icon={<DeploymentUnitOutlined />}>最近工作流</AdminCardTitle>}
+        >
+          <List<WorkflowSummary>
+            className="xflow-admin-list"
+            dataSource={workflows.slice(0, 5)}
+            locale={{ emptyText: "暂无工作流" }}
+            renderItem={(workflow) => (
+              <List.Item extra={<Tag color={statusColor(workflow.status)}>{workflow.status ?? "pending"}</Tag>}>
+                <List.Item.Meta
+                  avatar={<span className="xflow-admin-status-dot" data-status={workflow.status} />}
+                  description={<em>{workflow.id}</em>}
+                  title={<strong>{workflow.name}</strong>}
+                />
+              </List.Item>
+            )}
+            rowKey="id"
+            size="small"
+          />
+        </Card>
 
-        <section className="xflow-admin-card">
-          <div className="xflow-admin-card__header">
-            <strong>Runner 健康度</strong>
-            <Button size="small" onClick={onOpenRunners}>
-              管理
-            </Button>
-          </div>
-          <div className="xflow-admin-runner-list">
-            {runners.map((runner) => (
-              <div key={runner.id}>
-                <span data-status={runner.status} />
-                <div>
-                  <strong>{runner.name}</strong>
-                  <em>{Object.entries(runner.labels).map(([key, value]) => `${key}=${value}`).join(" · ")}</em>
-                </div>
-                <Tag color={runnerStatusColor(runner.status)}>{runner.status}</Tag>
-              </div>
-            ))}
-          </div>
-        </section>
+        <Card
+          className="xflow-admin-card"
+          extra={<Button size="small" onClick={onOpenRunners}>管理</Button>}
+          size="small"
+          title={<AdminCardTitle icon={<ClusterOutlined />}>Runner 健康度</AdminCardTitle>}
+        >
+          <List<RunnerSummary>
+            className="xflow-admin-list"
+            dataSource={runners}
+            renderItem={(runner) => (
+              <List.Item extra={<Tag color={runnerStatusColor(runner.status)}>{runner.status}</Tag>}>
+                <List.Item.Meta
+                  avatar={<span className="xflow-admin-status-dot" data-status={runner.status} />}
+                  description={<em>{Object.entries(runner.labels).map(([key, value]) => `${key}=${value}`).join(" · ")}</em>}
+                  title={<strong>{runner.name}</strong>}
+                />
+              </List.Item>
+            )}
+            rowKey="id"
+            size="small"
+          />
+        </Card>
       </div>
     </section>
   );
@@ -523,6 +636,61 @@ function WorkflowsPage({
   onSave: (workflow: WorkflowDef) => Promise<WorkflowDef>;
   onUpdateWorkflow: (workflow: WorkflowDef) => void;
 }): React.ReactElement {
+  const workflowColumns = React.useMemo<NonNullable<TableProps<WorkflowSummary>["columns"]>>(
+    () => [
+      {
+        title: "名称",
+        dataIndex: "name",
+        key: "name",
+        render: (_value, item) => (
+          <span className="xflow-admin-table-name">
+            <strong>{item.name}</strong>
+            <em>{item.id}</em>
+          </span>
+        )
+      },
+      {
+        title: "版本",
+        dataIndex: "version",
+        key: "version",
+        width: 94,
+        render: (version) => version ?? "-"
+      },
+      {
+        title: "状态",
+        dataIndex: "status",
+        key: "status",
+        width: 112,
+        render: (status) => <Tag color={statusColor(status)}>{status ?? "pending"}</Tag>
+      },
+      {
+        title: "更新",
+        dataIndex: "updatedAt",
+        key: "updatedAt",
+        width: 174,
+        render: (updatedAt) => (updatedAt ? new Date(String(updatedAt)).toLocaleString() : "-")
+      },
+      {
+        title: "",
+        key: "action",
+        width: 64,
+        render: (_value, item) => (
+          <Button
+            size="small"
+            type="link"
+            onClick={(event) => {
+              event.stopPropagation();
+              onOpenWorkflow(item.id);
+            }}
+          >
+            打开
+          </Button>
+        )
+      }
+    ],
+    [onOpenWorkflow]
+  );
+
   if (editorOpen && workflow) {
     return (
       <section className="xflow-admin-editor-host" aria-label="工作流编辑器">
@@ -541,6 +709,7 @@ function WorkflowsPage({
     <section className="xflow-admin-page" aria-label="工作流管理">
       <div className="xflow-admin-page__header">
         <div>
+          <span className="xflow-admin-kicker">XFlow / Workflows</span>
           <h1>工作流</h1>
           <p>创建、编辑、保存和试运行工作流定义。</p>
         </div>
@@ -549,9 +718,9 @@ function WorkflowsPage({
         </Button>
       </div>
 
-      <section className="xflow-admin-card">
-        <div className="xflow-admin-card__header">
-          <strong>工作流定义</strong>
+      <Card
+        className="xflow-admin-card"
+        extra={
           <Input
             allowClear
             aria-label="搜索工作流"
@@ -560,75 +729,102 @@ function WorkflowsPage({
             value={query}
             onChange={(event) => onChangeQuery(event.target.value)}
           />
-        </div>
-        <div className="xflow-admin-workflow-table">
-          <div className="xflow-admin-workflow-table__head">
-            <span>名称</span>
-            <span>版本</span>
-            <span>状态</span>
-            <span>更新</span>
-            <span />
-          </div>
-          {filteredWorkflows.map((item) => (
-            <button
-              aria-label={`打开工作流 ${item.name}`}
-              data-active={item.id === activeWorkflowId}
-              key={item.id}
-              type="button"
-              onClick={() => onOpenWorkflow(item.id)}
-            >
-              <span>
-                <strong>{item.name}</strong>
-                <em>{item.id}</em>
-              </span>
-              <span>{item.version ?? "-"}</span>
-              <Tag color={statusColor(item.status)}>{item.status ?? "pending"}</Tag>
-              <span>{item.updatedAt ? new Date(item.updatedAt).toLocaleString() : "-"}</span>
-              <span>打开</span>
-            </button>
-          ))}
-        </div>
-      </section>
+        }
+        size="small"
+        title="工作流定义"
+      >
+        <Table<WorkflowSummary>
+          className="xflow-admin-table"
+          columns={workflowColumns}
+          dataSource={filteredWorkflows}
+          pagination={false}
+          rowClassName={(item) => (item.id === activeWorkflowId ? "xflow-admin-table-row-active" : "")}
+          rowKey="id"
+          size="small"
+          onRow={(item) => ({
+            onClick: () => onOpenWorkflow(item.id)
+          })}
+        />
+      </Card>
     </section>
   );
 }
 
 function RunnersPage(): React.ReactElement {
+  const runnerColumns = React.useMemo<NonNullable<TableProps<RunnerSummary>["columns"]>>(
+    () => [
+      {
+        title: "Runner",
+        dataIndex: "name",
+        key: "name",
+        render: (_value, runner) => (
+          <span className="xflow-admin-table-name">
+            <strong>{runner.name}</strong>
+            <em>{runner.id}</em>
+          </span>
+        )
+      },
+      {
+        title: "状态",
+        dataIndex: "status",
+        key: "status",
+        width: 110,
+        render: (status) => <Tag color={runnerStatusColor(status)}>{status}</Tag>
+      },
+      {
+        title: "容量",
+        key: "capacity",
+        width: 132,
+        render: (_value, runner) => {
+          const percent = Math.round((runner.inFlight / runner.capacity) * 100);
+          return (
+            <span className="xflow-admin-capacity">
+              <Progress percent={percent} showInfo={false} size="small" status={runner.status === "offline" ? "exception" : "active"} />
+              <em>{runner.inFlight}/{runner.capacity}</em>
+            </span>
+          );
+        }
+      },
+      {
+        title: "标签",
+        dataIndex: "labels",
+        key: "labels",
+        render: (labels) => Object.entries(labels as RunnerSummary["labels"]).map(([key, value]) => `${key}=${value}`).join(", ")
+      },
+      {
+        title: "心跳",
+        dataIndex: "lastSeen",
+        key: "lastSeen",
+        width: 90
+      }
+    ],
+    []
+  );
+
   return (
     <section className="xflow-admin-page" aria-label="Runner 管理">
       <div className="xflow-admin-page__header">
         <div>
+          <span className="xflow-admin-kicker">XFlow / Runners</span>
           <h1>Runner</h1>
           <p>查看执行面实例、容量和标签。当前是最小管理视图，后续再接 runner directory API。</p>
         </div>
       </div>
-      <section className="xflow-admin-card">
-        <div className="xflow-admin-card__header">
-          <strong>Runner 实例</strong>
-          <Tag color="green">{runners.filter((runner) => runner.status === "online").length} online</Tag>
-        </div>
-        <div className="xflow-admin-runner-table">
-          <div className="xflow-admin-runner-table__head">
-            <span>Runner</span>
-            <span>状态</span>
-            <span>容量</span>
-            <span>标签</span>
-            <span>心跳</span>
-          </div>
-          {runners.map((runner) => (
-            <div key={runner.id}>
-              <span>
-                <strong>{runner.name}</strong>
-                <em>{runner.id}</em>
-              </span>
-              <Tag color={runnerStatusColor(runner.status)}>{runner.status}</Tag>
-              <span>{runner.inFlight} / {runner.capacity}</span>
-              <span>{Object.entries(runner.labels).map(([key, value]) => `${key}=${value}`).join(", ")}</span>
-              <span>{runner.lastSeen}</span>
-            </div>
-          ))}
-        </div>
-      </section>
+      <Card
+        className="xflow-admin-card"
+        extra={<Tag color="green">{runners.filter((runner) => runner.status === "online").length} online</Tag>}
+        size="small"
+        title={<AdminCardTitle icon={<ClusterOutlined />}>Runner 实例</AdminCardTitle>}
+      >
+        <Table<RunnerSummary>
+          className="xflow-admin-table"
+          columns={runnerColumns}
+          dataSource={runners}
+          pagination={false}
+          rowKey="id"
+          size="small"
+        />
+      </Card>
     </section>
   );
 }
@@ -638,24 +834,27 @@ function SettingsPage(): React.ReactElement {
     <section className="xflow-admin-page" aria-label="设置">
       <div className="xflow-admin-page__header">
         <div>
+          <span className="xflow-admin-kicker">XFlow / Settings</span>
           <h1>设置</h1>
           <p>最小实现只保留环境和命名空间信息，权限、审计和密钥管理后续拆页。</p>
         </div>
       </div>
-      <section className="xflow-admin-card xflow-admin-settings">
-        <div>
-          <span>Namespace</span>
-          <strong>default</strong>
-        </div>
-        <div>
-          <span>Environment</span>
-          <strong>prod</strong>
-        </div>
-        <div>
-          <span>Control plane</span>
-          <strong>local mock</strong>
-        </div>
-      </section>
+      <Card
+        className="xflow-admin-card xflow-admin-settings"
+        size="small"
+        title={<AdminCardTitle icon={<SettingOutlined />}>运行环境</AdminCardTitle>}
+      >
+        <Descriptions
+          colon={false}
+          column={3}
+          items={[
+            { key: "namespace", label: "Namespace", children: "default" },
+            { key: "environment", label: "Environment", children: "prod" },
+            { key: "control-plane", label: "Control plane", children: "local mock" }
+          ]}
+          size="small"
+        />
+      </Card>
     </section>
   );
 }
@@ -845,7 +1044,13 @@ export function App(): React.ReactElement {
         algorithm: theme.darkAlgorithm,
         token: {
           borderRadius: 6,
-          colorPrimary: "#2878ff"
+          colorBgContainer: "#15171b",
+          colorBgElevated: "#1b1e24",
+          colorBorder: "#2b3038",
+          colorPrimary: "#5794f2",
+          colorText: "#dce1e8",
+          colorTextSecondary: "#9ba3af",
+          fontSize: 12
         }
       }}
     >

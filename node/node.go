@@ -58,6 +58,12 @@ type WebhookTriggerNode = nodetrigger.WebhookTriggerNode
 type KafkaTriggerNode = nodetrigger.KafkaTriggerNode
 type RedisHubTriggerNode = nodetrigger.RedisHubTriggerNode
 
+// HTTPEntrySeedRuntime is the production types.EntrySeedRuntime that posts
+// entry-unit seed admissions to the control plane. It is re-exported here so
+// callers outside node/internal (e.g. the runner's ActivationHandler) can
+// construct a per-activation, generation-stamped seed runtime.
+type HTTPEntrySeedRuntime = nodetrigger.HTTPEntrySeedRuntime
+
 const (
 	HTTPGet    = core.HTTPGet
 	HTTPPost   = core.HTTPPost

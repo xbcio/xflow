@@ -40,6 +40,8 @@ type memoryClaim struct {
 	assignment Assignment
 }
 
+var _ ActivationRunnerLister = (*MemoryRunnerDirectory)(nil)
+
 // NewMemoryRunnerDirectory constructs an empty in-memory runner directory.
 func NewMemoryRunnerDirectory() *MemoryRunnerDirectory {
 	return &MemoryRunnerDirectory{
@@ -180,6 +182,9 @@ func (d *MemoryRunnerDirectory) ClaimForRunner(_ context.Context, req ClaimReque
 			continue
 		}
 		if !state.canServeNamespace(assignment.Namespace) {
+			continue
+		}
+		if rs := assignment.Routing.RunnerSelector; rs != nil && !MatchLabels(state.snapshot.Labels, rs.MatchLabels) {
 			continue
 		}
 
@@ -349,6 +354,28 @@ func (d *MemoryRunnerDirectory) Runner(_ context.Context, runnerID string) (Runn
 	snapshot.Capabilities = cloneCapabilities(snapshot.Capabilities)
 	snapshot.Namespaces = normalizeRunnerNamespaces(snapshot.Namespaces)
 	return snapshot, true
+}
+
+// ListLiveRunners returns a snapshot of every registered runner. It implements
+// ActivationRunnerLister so the EntryActivationReconciler can enumerate runners
+// for assignment. Liveness (heartbeat TTL) is applied by the reconciler's
+// selector, so this returns all registered runners and lets the caller filter.
+func (d *MemoryRunnerDirectory) ListLiveRunners(_ context.Context) []RunnerSnapshot {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	out := make([]RunnerSnapshot, 0, len(d.runners))
+	for _, state := range d.runners {
+		if state == nil {
+			continue
+		}
+		snapshot := state.snapshot
+		snapshot.Labels = cloneLabels(snapshot.Labels)
+		snapshot.Capabilities = cloneCapabilities(snapshot.Capabilities)
+		snapshot.Namespaces = normalizeRunnerNamespaces(snapshot.Namespaces)
+		out = append(out, snapshot)
+	}
+	return out
 }
 
 // LookupLease returns the server-authoritative finalized lease for one

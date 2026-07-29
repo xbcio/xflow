@@ -184,11 +184,12 @@ func (n *KafkaTriggerNode) Activate(ctx context.Context, in *types.TriggerActiva
 func activateKafkaPerMessage(ctx context.Context, in *types.TriggerActivateInput, cfg KafkaConsumerConfig, consumer KafkaConsumer) types.TriggerSubscription {
 	runCtx, cancel := context.WithCancel(ctx)
 	rt := &kafkaPerMessageRuntime{
-		runCtx:   runCtx,
-		in:       in,
-		consumer: consumer,
-		buffer:   cfg.MaxInflight,
-		workers:  make(map[kafkaPartitionKey]*kafkaPartitionWorker),
+		runCtx:    runCtx,
+		in:        in,
+		consumer:  consumer,
+		buffer:    cfg.MaxInflight,
+		workers:   make(map[kafkaPartitionKey]*kafkaPartitionWorker),
+		entrySeed: isEntrySeedActivation(in),
 	}
 	done := make(chan struct{})
 	go func() {
@@ -236,6 +237,34 @@ type kafkaPerMessageRuntime struct {
 	mu        sync.Mutex
 	closeOnce sync.Once
 	workers   map[kafkaPartitionKey]*kafkaPartitionWorker
+	// entrySeed selects the entry-unit seed admission path over the legacy
+	// Emit path for each message. Set once at activation from the trigger
+	// params (see isEntrySeedActivation).
+	entrySeed bool
+}
+
+// isEntrySeedActivation reports whether a Kafka trigger should route each
+// message through the entry-unit seed admission path (seedKafkaEntryBatch)
+// instead of the legacy Emit path. It requires BOTH that the runtime supports
+// entry-seed admission (implements types.EntrySeedRuntime) AND that the trigger
+// is configured as an entry unit — signalled by params `entry_seed=true` or the
+// presence of a non-empty `entry_unit_id`. Requiring the runtime capability
+// keeps existing triggers on the legacy path when the runtime cannot admit
+// seeds, so a misconfigured param can never silently drop messages.
+func isEntrySeedActivation(in *types.TriggerActivateInput) bool {
+	if in == nil {
+		return false
+	}
+	if _, ok := in.Runtime.(types.EntrySeedRuntime); !ok {
+		return false
+	}
+	if cast.ToBool(in.Params["entry_seed"]) {
+		return true
+	}
+	if id, _ := in.Params["entry_unit_id"].(string); id != "" {
+		return true
+	}
+	return false
 }
 
 type kafkaPartitionWorker struct {
@@ -338,7 +367,12 @@ func (w *kafkaPartitionWorker) run() {
 			// Serial per-partition processing: emit then commit in offset order so
 			// a rebalance can never skip a lower offset whose higher peer committed
 			// first. Emit failure skips commit, leaving the message redelivered.
-			if emitKafkaMessage(w.rt.runCtx, w.rt.in, msg) {
+			if w.rt.entrySeed {
+				// Entry-seed mode: admission drives the seed, which commits the
+				// offset internally on accept/duplicate/conflict. Do NOT
+				// double-commit here.
+				_ = seedKafkaEntryBatch(w.rt.runCtx, w.rt.in, w.rt.consumer, msg)
+			} else if emitKafkaMessage(w.rt.runCtx, w.rt.in, msg) {
 				_ = commitKafkaMessages(context.Background(), w.rt.consumer, msg)
 			}
 		case <-idleTimer.C:
@@ -573,19 +607,25 @@ func (a *kafkaPartitionAggregator) flush(ctx context.Context, messages []KafkaMe
 	return true
 }
 
+// emitKafkaMessage is the legacy single-message emit path, used only when the
+// runtime does NOT implement types.EntrySeedRuntime (see isEntrySeedActivation).
+// It emits directly and lets the per-partition serial worker commit the offset
+// only after Emit succeeds (kafkaPartitionWorker.run) — offset durability
+// follows the side effect, never precedes it.
+//
+// P0-1: the previous implementation ran a pre-emit Dedup SETNX here. If the
+// process crashed after the SETNX marked the message "seen" but before Emit, the
+// message was lost forever (redelivery saw the dedup marker and skipped it). The
+// SETNX has been removed: the ordered emit-then-commit is the at-least-once
+// guarantee. The downstream is idempotent (host idempotency contract), so a
+// possible duplicate on crash-after-emit-before-commit is safe.
 func emitKafkaMessage(ctx context.Context, in *types.TriggerActivateInput, msg KafkaMessage) bool {
 	event := kafkaSingleEvent(in.NodeName, msg)
 	if event.Time.IsZero() {
 		event.Time = time.Now()
 	}
-	ok, err := dedupKafkaMessage(ctx, in, msg)
-	if err != nil {
+	if _, err := in.Emit(ctx, event); err != nil {
 		return false
-	}
-	if ok {
-		if _, err := in.Emit(ctx, event); err != nil {
-			return false
-		}
 	}
 	return true
 }
@@ -782,35 +822,40 @@ func normalizeKafkaAggregateConfig(cfg KafkaAggregateConfig) KafkaAggregateConfi
 func init() { registry.RegisterTrigger(&KafkaTriggerNode{}) }
 
 // ---------------------------------------------------------------------------
-// Trigger-group mode: admission-based emit (Milestone G)
+// Entry-seed mode: admission-based emit (Milestone G)
 // ---------------------------------------------------------------------------
 
-// emitKafkaTriggerGroupMessage processes one message through the trigger-group
-// admission path. Instead of Emit+Dedup, it calls SeedTriggeredGroupResult on
-// the runtime. Only accepted/duplicate-accepted/conflict responses commit the
-// Kafka offset. Transient errors return false (no commit → Kafka redelivery).
+// seedKafkaEntryBatch processes one message through the entry-unit (single node
+// or group node) seed admission path. Instead of Emit+Dedup, it calls
+// SeedExecutionFromEntry on the runtime. Only accepted/duplicate-accepted/conflict
+// responses commit the Kafka offset. Transient errors return false (no commit →
+// Kafka redelivery).
 //
-// This function is the trigger-group analogue of emitKafkaMessage for the
+// This function is the entry-seed analogue of emitKafkaMessage for the
 // per-partition serial worker. It is NOT used by the legacy Emit path.
-func emitKafkaTriggerGroupMessage(ctx context.Context, in *types.TriggerActivateInput, consumer KafkaConsumer, msg KafkaMessage) bool {
-	rt, ok := in.Runtime.(types.TriggerGroupRuntime)
+func seedKafkaEntryBatch(ctx context.Context, in *types.TriggerActivateInput, consumer KafkaConsumer, msg KafkaMessage) bool {
+	rt, ok := in.Runtime.(types.EntrySeedRuntime)
 	if !ok {
-		// Fallback: runtime does not support trigger-group. This should not happen
-		// in a properly configured trigger-group activation.
+		// Fallback: runtime does not support entry-seed. This should not happen
+		// in a properly configured entry-seed activation.
 		return false
 	}
 
-	groupID, _ := in.Params["group_id"].(string)
+	entryUnitID, _ := in.Params["entry_unit_id"].(string)
+	if entryUnitID == "" {
+		// Single-node entry unit ID = node name (spec §11.5).
+		entryUnitID = in.NodeName
+	}
 	workflowVersion, _ := in.Params["workflow_version"].(string)
 
 	// Build the admission key from the message's stable source identity.
 	admissionKey := fmt.Sprintf("%s/%s/%s/%s/%s/%d/%d-%d",
 		"", // namespace is set server-side
-		in.WorkflowID, workflowVersion, groupID,
+		in.WorkflowID, workflowVersion, entryUnitID,
 		msg.Topic, msg.Partition, msg.Offset, msg.Offset)
 
-	// Build exits — for single-message trigger-group, the output is the message data.
-	exits := []types.TriggerGroupExit{{
+	// Build exits — for a single-message entry unit, the output is the message data.
+	exits := []types.BoundaryExit{{
 		NodeName: in.NodeName,
 		Port:     "main",
 		Data: map[string]any{
@@ -822,16 +867,16 @@ func emitKafkaTriggerGroupMessage(ctx context.Context, in *types.TriggerActivate
 		},
 	}}
 
-	req := types.TriggerGroupAdmissionRequest{
+	req := types.EntrySeedRequest{
 		AdmissionKey:    admissionKey,
 		WorkflowID:      in.WorkflowID,
 		WorkflowVersion: workflowVersion,
-		GroupID:         groupID,
+		EntryUnitID:     entryUnitID,
 		Outcome:         "success",
 		Exits:           exits,
 	}
 
-	resp, err := rt.SeedTriggeredGroupResult(ctx, req)
+	resp, err := rt.SeedExecutionFromEntry(ctx, req)
 	if err != nil {
 		// Transient error (network timeout, etc.) — do NOT commit offset.
 		// Kafka will redeliver the message.
@@ -844,7 +889,7 @@ func emitKafkaTriggerGroupMessage(ctx context.Context, in *types.TriggerActivate
 	if resp.Accepted || resp.Duplicate || resp.Conflict {
 		if commitErr := commitKafkaMessages(ctx, consumer, msg); commitErr != nil {
 			// Commit failed — the message will be redelivered. On redelivery,
-			// SeedTriggeredGroupResult returns duplicate-accepted, which is safe.
+			// SeedExecutionFromEntry returns duplicate-accepted, which is safe.
 			return false
 		}
 		return true

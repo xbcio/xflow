@@ -1,16 +1,22 @@
 package apiserver
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/service/control"
+	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/types"
 )
@@ -71,6 +77,16 @@ func (m *workflowControlModule) RegisterHTTP(mux *http.ServeMux) {
 	}
 	mux.HandleFunc("/v1/workflows", wrap("submit_workflow", m.handleSubmitWorkflow))
 	mux.HandleFunc("/v1/workflows/invoke", wrap("invoke_workflow", m.handleInvoke))
+	// Registration is a separate, explicit step from submit-and-execute: it
+	// persists the compiled workflow graph so the control plane can resolve it on
+	// seed. /v1/workflows/register (exact) is the POST target; the
+	// /v1/workflows/register/ subtree carries the DELETE {id} path.
+	mux.HandleFunc("/v1/workflows/register", wrap("register_workflow", m.handleRegisterWorkflow))
+	mux.HandleFunc("/v1/workflows/register/", wrap("deregister_workflow", m.handleDeregisterWorkflow))
+	// /v1/executions (no trailing slash) is the entry-seed endpoint; the
+	// /v1/executions/ subtree below is the per-execution GET/signal/cancel/wait
+	// surface. ServeMux treats the two patterns as distinct.
+	mux.HandleFunc("/v1/executions", wrap("seed_execution", m.handleSeedExecution))
 	mux.HandleFunc("/v1/executions/", wrap("execution", m.handleExecution))
 }
 
@@ -94,6 +110,17 @@ func (m *workflowControlModule) registerAuthzRoutes(mux *http.ServeMux) {
 	authz := m.authzWrap
 	mux.HandleFunc("/v1/workflows", authz(OpWorkflowCreate, true, m.handleSubmitWorkflow, newExecutionIDResolver()))
 	mux.HandleFunc("/v1/workflows/invoke", authz(OpWorkflowInvoke, true, m.handleInvoke, newExecutionIDResolver()))
+	// Register/deregister persist and remove the compiled workflow graph. Both
+	// are mutations under the workflow scope. The authz wrapper injects the
+	// principal's namespace into the request context; the handlers resolve it via
+	// namespace.FromContext — never from the client body.
+	mux.HandleFunc("/v1/workflows/register", authz(OpWorkflowRegister, true, m.handleRegisterWorkflow, nil))
+	mux.HandleFunc("/v1/workflows/register/", authz(OpWorkflowRegister, true, m.handleDeregisterWorkflow, nil))
+	// Entry-seed endpoint (exact path, no trailing slash). Distinct from the
+	// /v1/executions/ subtree. The authz wrapper injects the principal's
+	// namespace into the request context; handleSeedExecution reads it via
+	// namespace.FromContext — never from the client body.
+	mux.HandleFunc("/v1/executions", authz(OpExecutionSeed, true, m.handleSeedExecution, newExecutionIDResolver()))
 	mux.HandleFunc("/v1/executions/", m.authzWrapResolved(m.handleExecution, resolveExecutionRoute))
 }
 
@@ -273,6 +300,291 @@ func (m *workflowControlModule) handleInvoke(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	writeJSON(w, http.StatusOK, invokeResponse{ExecutionID: id})
+}
+
+// registerWorkflowResponse echoes the persisted workflow ID (server-assigned
+// when the request did not carry one).
+type registerWorkflowResponse struct {
+	WorkflowID types.WorkflowID `json:"workflow_id"`
+}
+
+// handleRegisterWorkflow serves POST /v1/workflows/register. It is a NEW,
+// explicit step distinct from submit-and-execute (/v1/workflows): it compiles
+// the submitted definition and persists the compiled graph in the server-side
+// workflow registry so later tasks can resolve the graph on seed and derive
+// entry activations. The authoritative namespace is resolved server-side from
+// namespace.FromContext (injected by the authz wrapper), NEVER from the request
+// body, so a caller cannot register into another namespace.
+func (m *workflowControlModule) handleRegisterWorkflow(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+	registry := m.registry()
+	if registry == nil {
+		if m.log != nil {
+			m.log.Error("register_workflow_no_registry")
+		}
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	var def types.WorkflowDef
+	if !decodeJSON(w, r, &def) {
+		return
+	}
+	g, err := graph.Compile(&def)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// Namespace is authoritative from the context, never the body.
+	ns := string(namespace.FromContext(r.Context()))
+	def.Namespace = ns
+
+	rec, err := registry.AddWorkflow(r.Context(), backend.WorkflowRecord{
+		Key:            workflowRegistryKey(ns, def.Name, def.Version),
+		Namespace:      ns,
+		Name:           def.Name,
+		Version:        def.Version,
+		DefinitionHash: definitionHash(&def),
+		Definition:     &def,
+		Graph:          g,
+	})
+	if err != nil {
+		if m.log != nil {
+			m.log.Error("register_workflow_failed", "err", err)
+		}
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	// Derive the node-generic entry activations for this workflow version so the
+	// reconciler can assign remote-hosted trigger entry units to runners. The
+	// namespace is the same server-side value used for the registry record. A
+	// derivation failure fails the register (generic 500) rather than leaving a
+	// registered-but-unactivated workflow — the manager is fail-closed on a group
+	// package that cannot be projected. Nil-guarded: an embedded control plane
+	// without an EntryActivationStore exposes no manager and skips this.
+	if mgr := m.entryActivationManager(); mgr != nil {
+		if err := mgr.AddOrUpdateWorkflow(r.Context(), namespace.FromContext(r.Context()), rec.ID, def.Version, g); err != nil {
+			if m.log != nil {
+				m.log.Error("register_workflow_derive_activations_failed", "err", err)
+			}
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, registerWorkflowResponse{WorkflowID: rec.ID})
+}
+
+// handleDeregisterWorkflow serves DELETE /v1/workflows/register/{id}. It removes
+// the persisted record for the given workflow id. The id is a server-assigned
+// opaque identifier taken from the path; namespace isolation is enforced by the
+// registry record (a later task may add per-namespace scoping on removal).
+func (m *workflowControlModule) handleDeregisterWorkflow(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodDelete) {
+		return
+	}
+	registry := m.registry()
+	if registry == nil {
+		if m.log != nil {
+			m.log.Error("deregister_workflow_no_registry")
+		}
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	id := strings.Trim(strings.TrimPrefix(r.URL.Path, "/v1/workflows/register/"), "/")
+	if id == "" || strings.Contains(id, "/") {
+		writeError(w, http.StatusNotFound, "workflow not found")
+		return
+	}
+	// Fetch the record BEFORE removal so the entry-activation manager can derive
+	// the same trigger entry units (from the persisted compiled graph) to clear,
+	// and so an already-removed workflow 404s. A not-found record is a 404; any
+	// other lookup error is a generic 500. When no activation manager is wired
+	// this lookup is skipped entirely.
+	var toDeactivate *backend.WorkflowRecord
+	if mgr := m.entryActivationManager(); mgr != nil {
+		rec, err := registry.GetWorkflow(r.Context(), types.WorkflowID(id))
+		if err != nil {
+			if errors.Is(err, backend.ErrWorkflowNotFound) {
+				writeError(w, http.StatusNotFound, "workflow not found")
+				return
+			}
+			if m.log != nil {
+				m.log.Error("deregister_workflow_lookup_failed", "err", err)
+			}
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		toDeactivate = &rec
+	}
+	// Clear the desired entry activations BEFORE removing the registry record so
+	// the two steps are independently retryable and no orphaned Desired activation
+	// can survive a partial failure. If this clear fails we return 500 with the
+	// registry record still present, so a retry re-fetches the graph and re-clears;
+	// if we removed the registry record first and then failed here, the retry
+	// would 404 on GetWorkflow and never reach the clear, stranding a Desired
+	// activation the reconciler keeps honoring for entry seeds. The clear is
+	// desired-state only (Desired=false); the reconciler delivers the Deactivate
+	// and fences the owner. The namespace is resolved server-side, never the body.
+	if toDeactivate != nil {
+		mgr := m.entryActivationManager()
+		if err := mgr.RemoveWorkflow(r.Context(), namespace.FromContext(r.Context()), toDeactivate.ID, toDeactivate.Version, toDeactivate.Graph); err != nil {
+			if m.log != nil {
+				m.log.Error("deregister_workflow_clear_activations_failed", "err", err)
+			}
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+	}
+	// Remove the registry record. The manager clear above is idempotent (a repeat
+	// re-marks an already-!Desired record), so a failure here is safely retryable:
+	// the caller retries, re-clears harmlessly, and re-removes.
+	if err := registry.RemoveWorkflow(r.Context(), types.WorkflowID(id)); err != nil {
+		if errors.Is(err, backend.ErrWorkflowNotFound) {
+			writeError(w, http.StatusNotFound, "workflow not found")
+			return
+		}
+		if m.log != nil {
+			m.log.Error("deregister_workflow_failed", "err", err)
+		}
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"removed": true})
+}
+
+// registry returns the control plane's workflow registry, or nil when no
+// ControlPlane is wired (unit tests with a fake facade) or none is configured.
+func (m *workflowControlModule) registry() backend.WorkflowRegistry {
+	if m.cp == nil {
+		return nil
+	}
+	return m.cp.WorkflowRegistry()
+}
+
+// entryActivationManager returns the control plane's node-generic
+// entry-activation manager, or nil when no ControlPlane is wired (unit tests
+// with a fake facade) or no EntryActivationStore is configured (embedded /
+// in-process). Callers nil-guard: registering/deregistering a workflow derives/
+// clears entry activations only when a manager is present.
+func (m *workflowControlModule) entryActivationManager() *control.EntryActivationManager {
+	if m.cp == nil {
+		return nil
+	}
+	return m.cp.EntryActivationManager()
+}
+
+// workflowRegistryKey builds the registry conflict-detection key from the
+// server-issued namespace + workflow name + version. It mirrors the SDK's
+// namespace/name@version identity so a definition registered twice is idempotent.
+func workflowRegistryKey(ns, name, version string) string {
+	return fmt.Sprintf("%s/%s@%s", ns, name, version)
+}
+
+// definitionHash returns a stable SHA-256 fingerprint over the JSON-encoded
+// definition. It is used by the registry for conflict detection (a re-register
+// of an identical definition is idempotent; a changed definition under the same
+// key is rejected as a conflict). Marshal errors collapse to an empty hash,
+// which the registry treats as a distinct (always-conflicting) value.
+func definitionHash(def *types.WorkflowDef) string {
+	data, err := json.Marshal(def)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// handleSeedExecution serves POST /v1/executions: it atomically seeds an
+// authoritative namespace is injected into the request context by the authz
+// wrapper (from the authenticated principal) and resolved server-side in the
+// control Core — it is NEVER read from the request body, so a forged or
+// cross-namespace admission key fails closed. The ResultHash is recomputed
+// server-side from the request's outcome + exits; a client-supplied hash is not
+// trusted.
+func (m *workflowControlModule) handleSeedExecution(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+	var req protocol.SeedExecutionRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.AdmissionKey == "" || req.WorkflowID == "" || req.EntryUnitID == "" || req.Outcome == "" {
+		writeError(w, http.StatusBadRequest, "admission_key, workflow_id, entry_unit_id and outcome are required")
+		return
+	}
+
+	exits := make([]engine.BoundaryExit, 0, len(req.Exits))
+	for _, ex := range req.Exits {
+		exits = append(exits, engine.BoundaryExit{
+			NodeName: ex.NodeName,
+			Port:     ex.Port,
+			Data:     ex.Data,
+		})
+	}
+	outcome := engine.GroupOutcome(req.Outcome)
+
+	engReq := engine.SeedExecutionFromEntryRequest{
+		AdmissionKey:    engine.AdmissionKey(req.AdmissionKey),
+		WorkflowID:      types.WorkflowID(req.WorkflowID),
+		WorkflowVersion: req.WorkflowVersion,
+		EntryUnitID:     req.EntryUnitID,
+		Outcome:         outcome,
+		Exits:           exits,
+		Error:           req.Error,
+		Generation:      req.Generation,
+		// ResultHash is computed server-side; the client cannot supply it.
+		ResultHash: engine.ComputeResultHash(outcome, exits),
+	}
+
+	// Route through the ControlPlane's Core so the server-side namespace
+	// resolution and generation fence (spec §11.6) always apply. Namespace is
+	// taken from the request context (injected by the authz wrapper), not the
+	// body. Fall back to the raw engine only when no ControlPlane is wired
+	// (unit tests with a fake facade); that path has no generation fence.
+	var resp engine.SeedExecutionFromEntryResponse
+	var err error
+	if m.cp != nil {
+		resp, err = m.cp.SeedExecutionFromEntry(r.Context(), engReq)
+	} else {
+		resp, err = m.eng.SeedExecutionFromEntry(r.Context(), engReq)
+	}
+	if err != nil {
+		// A stale activation generation for a not-yet-accepted admission key is a
+		// fencing rejection, not an internal fault — map it to 409 so the runner
+		// can distinguish "you lost the activation" from a transient server error.
+		if errors.Is(err, control.ErrStaleGeneration) {
+			writeError(w, http.StatusConflict, "stale_generation")
+			return
+		}
+		// The seed references a workflow/entry unit the control plane cannot
+		// resolve (not registered, version mismatch, or unknown entry unit). This
+		// is a fail-closed rejection, not an internal fault — map it to 404 so the
+		// runner can distinguish it from a transient server error. The generic
+		// reason string leaks no internal detail.
+		if errors.Is(err, control.ErrEntrySeedWorkflowUnknown) {
+			writeError(w, http.StatusNotFound, "workflow_unknown")
+			return
+		}
+		if m.log != nil {
+			m.log.Error("seed_execution_failed", "err", err)
+		}
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	if resp.State == engine.AdmissionStateConflict {
+		writeJSON(w, http.StatusConflict, protocol.SeedExecutionResponse{
+			State:       "conflict",
+			ExecutionID: string(resp.ExecutionID),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, protocol.SeedExecutionResponse{
+		State:       string(resp.State),
+		ExecutionID: string(resp.ExecutionID),
+		Duplicate:   resp.Duplicate,
+	})
 }
 
 func (m *workflowControlModule) handleExecution(w http.ResponseWriter, r *http.Request) {
