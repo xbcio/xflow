@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -49,6 +50,40 @@ type HTTPEntrySeedRuntime struct {
 }
 
 var _ types.EntrySeedRuntime = (*HTTPEntrySeedRuntime)(nil)
+
+// HTTPEntrySeedRuntime is also a full types.TriggerRuntime so a trigger handler
+// can receive it directly as TriggerActivateInput.Runtime. In entry-seed mode
+// (the only mode this runtime is used for) the trigger routes every message
+// through SeedExecutionFromEntry, so the Emit/Dedup/TryLock/State methods below
+// are never exercised. They are implemented as fail-closed stubs: if a trigger
+// were ever mis-wired onto the legacy Emit path with this runtime, the returned
+// error prevents an offset commit (the message is redelivered) rather than
+// silently dropping it.
+var _ types.TriggerRuntime = (*HTTPEntrySeedRuntime)(nil)
+
+// errNonSeedPathUnsupported is returned by the legacy TriggerRuntime methods.
+// This runtime only supports the entry-seed admission path.
+var errNonSeedPathUnsupported = errors.New("entry-seed: runtime supports only the entry-seed admission path")
+
+// Emit is not supported: this runtime only admits via SeedExecutionFromEntry.
+func (h *HTTPEntrySeedRuntime) Emit(context.Context, types.WorkflowID, string, *types.TriggerEvent) (types.ExecutionID, error) {
+	return "", errNonSeedPathUnsupported
+}
+
+// Dedup is not supported on the entry-seed path (admission is server-side).
+func (h *HTTPEntrySeedRuntime) Dedup(context.Context, string, time.Duration) (bool, error) {
+	return false, errNonSeedPathUnsupported
+}
+
+// TryLock is not supported on the entry-seed path.
+func (h *HTTPEntrySeedRuntime) TryLock(context.Context, string, time.Duration) (types.TriggerLock, bool, error) {
+	return nil, false, errNonSeedPathUnsupported
+}
+
+// State is not supported on the entry-seed path; returns nil.
+func (h *HTTPEntrySeedRuntime) State(context.Context, string) types.TriggerState {
+	return nil
+}
 
 // SeedExecutionFromEntry maps the caller-facing request to the wire DTO, POSTs
 // it, and maps the wire response back. See the type doc for the state mapping.
