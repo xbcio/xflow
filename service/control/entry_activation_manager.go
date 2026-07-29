@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
@@ -37,13 +38,25 @@ type EntryUnitActivation struct {
 	Requirements []engine.CapabilityRequirement
 }
 
+// projectGroupPackage indirects graph.ProjectGroupPackage so the derivation's
+// fail-closed error path can be exercised in tests. Production always uses the
+// real projection.
+var projectGroupPackage = graph.ProjectGroupPackage
+
 // DeriveEntryActivations extracts the trigger entry units from a compiled graph
 // that carry a RunnerSelector (i.e. are meant to run on a remote runner). A
 // single trigger node and a group node whose entry is a trigger both qualify.
 // Units without a selector are skipped — they run inline and need no activation.
-func DeriveEntryActivations(g *graph.Graph) []EntryUnitActivation {
+//
+// It returns an error when a group entry unit's capability requirements cannot
+// be derived (its package fails to project). Propagating rather than swallowing
+// is a fail-closed guarantee: a fresh group activation always carries non-empty
+// requirements (xflow.group + group.exec.v1 at minimum), so an empty-requirements
+// group would otherwise be stored as selector-only and could be placed on a
+// runner that cannot host it (violating the capability contract).
+func DeriveEntryActivations(g *graph.Graph) ([]EntryUnitActivation, error) {
 	if g == nil {
-		return nil
+		return nil, nil
 	}
 	var out []EntryUnitActivation
 	for i := 0; i < g.UnitCount(); i++ {
@@ -55,11 +68,13 @@ func DeriveEntryActivations(g *graph.Graph) []EntryUnitActivation {
 			}
 			// Derive the group's capability requirements from the projected
 			// package (union of member node requirements + the group exec
-			// feature), reusing engine.RequirementsFromGraphPackage.
-			var reqs []engine.CapabilityRequirement
-			if pkg, _, err := graph.ProjectGroupPackage(g, i); err == nil && pkg != nil {
-				reqs = engine.RequirementsFromGraphPackage(pkg.Requirements)
+			// feature), reusing engine.RequirementsFromGraphPackage. A projection
+			// failure is fatal: do not downgrade to a selector-only activation.
+			pkg, _, err := projectGroupPackage(g, i)
+			if err != nil {
+				return nil, fmt.Errorf("derive requirements for group entry unit %q: %w", gm.Name, err)
 			}
+			reqs := engine.RequirementsFromGraphPackage(pkg.Requirements)
 			out = append(out, EntryUnitActivation{
 				EntryUnitID:  gm.Name,
 				PackageHash:  gm.PackageHash,
@@ -82,7 +97,7 @@ func DeriveEntryActivations(g *graph.Graph) []EntryUnitActivation {
 			})
 		}
 	}
-	return out
+	return out, nil
 }
 
 // AddOrUpdateWorkflow reconciles the desired EntryActivations for a workflow
@@ -99,7 +114,11 @@ func (m *EntryActivationManager) AddOrUpdateWorkflow(ctx context.Context, ns nam
 	if ns == "" {
 		ns = namespace.Default
 	}
-	for _, eu := range DeriveEntryActivations(g) {
+	units, err := DeriveEntryActivations(g)
+	if err != nil {
+		return err
+	}
+	for _, eu := range units {
 		key := engine.EntryActivationKey{
 			Namespace:       ns,
 			WorkflowID:      workflowID,
@@ -145,7 +164,11 @@ func (m *EntryActivationManager) RemoveWorkflow(ctx context.Context, ns namespac
 	if ns == "" {
 		ns = namespace.Default
 	}
-	for _, eu := range DeriveEntryActivations(g) {
+	units, err := DeriveEntryActivations(g)
+	if err != nil {
+		return err
+	}
+	for _, eu := range units {
 		key := engine.EntryActivationKey{
 			Namespace:       ns,
 			WorkflowID:      workflowID,
