@@ -326,7 +326,15 @@ func runnerServiceConfig(cfg runnerConfig) (runnersvc.Config, error) {
 	// so the existing no-activation behavior is preserved.
 	if seedBaseURL := triggerSeedBaseURL(cfg); seedBaseURL != "" && hostsTriggers(cfg) {
 		lookup := registryTriggerLookup{}
-		handler := runnersvc.NewTriggerActivationHandler(seedBaseURL, cfg.token, lookup)
+		// The seed HTTP client timeout (30s) is intentionally larger than the
+		// per-request context timeout (entrySeedRequestTimeout = 15s in
+		// entry_seed_runtime.go). The context deadline governs normal
+		// cancellation; the client timeout is an absolute safety net covering
+		// connection setup and full body read, preventing leaked connections if
+		// the context is not propagated correctly.
+		seedClient := &http.Client{Timeout: 30 * time.Second}
+		handler := runnersvc.NewTriggerActivationHandler(seedBaseURL, cfg.token, lookup,
+			runnersvc.WithSeedHTTPClient(seedClient))
 		svcCfg.ActivationTracker = runnersvc.NewActivationTracker(handler, slog.Default())
 	}
 	return svcCfg, nil

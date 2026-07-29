@@ -35,9 +35,26 @@ type TriggerActivationHandler struct {
 	seedBaseURL string
 	authToken   string
 	triggers    TriggerHandlerLookup
+	seedClient  *http.Client // injected via WithSeedHTTPClient; nil uses http.DefaultClient
 
 	mu   sync.Mutex
 	subs map[activationID]types.TriggerSubscription
+}
+
+// TriggerActivationHandlerOption configures a TriggerActivationHandler.
+type TriggerActivationHandlerOption func(*TriggerActivationHandler)
+
+// WithSeedHTTPClient sets the *http.Client used for entry-seed admission
+// requests. When nil (the default), http.DefaultClient is used — matching
+// the fallback in node.HTTPEntrySeedRuntime.
+//
+// The client's Timeout should be set larger than the per-request context
+// timeout (entrySeedRequestTimeout = 15s in entry_seed_runtime.go) so that
+// the context deadline governs normal cancellation while the client Timeout
+// acts as an absolute safety net covering connection setup and body reads.
+// Recommended: 30s.
+func WithSeedHTTPClient(c *http.Client) TriggerActivationHandlerOption {
+	return func(h *TriggerActivationHandler) { h.seedClient = c }
 }
 
 var _ ActivationHandler = (*TriggerActivationHandler)(nil)
@@ -45,13 +62,18 @@ var _ ActivationHandler = (*TriggerActivationHandler)(nil)
 // NewTriggerActivationHandler constructs a TriggerActivationHandler. seedBaseURL
 // is the control-plane origin for entry-seed admissions; authToken is the Bearer
 // token sent with each seed request; triggers resolves NodeType to a handler.
-func NewTriggerActivationHandler(seedBaseURL string, authToken string, triggers TriggerHandlerLookup) *TriggerActivationHandler {
-	return &TriggerActivationHandler{
+// Options (e.g. WithSeedHTTPClient) configure optional fields.
+func NewTriggerActivationHandler(seedBaseURL string, authToken string, triggers TriggerHandlerLookup, opts ...TriggerActivationHandlerOption) *TriggerActivationHandler {
+	h := &TriggerActivationHandler{
 		seedBaseURL: seedBaseURL,
 		authToken:   authToken,
 		triggers:    triggers,
 		subs:        make(map[activationID]types.TriggerSubscription),
 	}
+	for _, o := range opts {
+		o(h)
+	}
+	return h
 }
 
 // Activate looks up the trigger handler for d.NodeType and starts a subscription
@@ -71,7 +93,7 @@ func (h *TriggerActivationHandler) Activate(ctx context.Context, d protocol.Acti
 		Params:     withEntrySeedParams(d),
 		Runtime: &node.HTTPEntrySeedRuntime{
 			BaseURL:    h.seedBaseURL,
-			Client:     http.DefaultClient,
+			Client:     h.seedHTTPClient(),
 			Token:      h.authToken,
 			Generation: d.Generation,
 		},
@@ -84,10 +106,16 @@ func (h *TriggerActivationHandler) Activate(ctx context.Context, d protocol.Acti
 
 	id := activationID{WorkflowID: d.WorkflowID, EntryUnitID: d.EntryUnitID}
 	h.mu.Lock()
-	// If a subscription is already stored for this identity (e.g. a generation
-	// upgrade where the tracker canceled the old ctx), close the stale one so it
-	// does not leak. The tracker canceled its ctx, but Close releases the
-	// consumer/connection deterministically.
+	// Stale-close on generation upgrade: if a subscription already exists for
+	// this activation identity, close it so it does not leak resources (the
+	// tracker already canceled its context, but Close deterministically releases
+	// the consumer/connection).
+	//
+	// Concurrency invariant: ActivationTracker.ProcessDirectives holds t.mu for
+	// the entire directive batch, serializing calls to this handler's Activate
+	// per activation identity. Therefore concurrent Activate calls for the same
+	// (WorkflowID, EntryUnitID) cannot race here, and no additional lock
+	// ordering or CAS is required.
 	if old, exists := h.subs[id]; exists && old != nil {
 		h.mu.Unlock()
 		_ = old.Close(ctx)
@@ -96,6 +124,16 @@ func (h *TriggerActivationHandler) Activate(ctx context.Context, d protocol.Acti
 	h.subs[id] = sub
 	h.mu.Unlock()
 	return nil
+}
+
+// seedHTTPClient returns the configured client or http.DefaultClient when none
+// was injected. This matches the nil-fallback semantics of
+// node.HTTPEntrySeedRuntime.Client.
+func (h *TriggerActivationHandler) seedHTTPClient() *http.Client {
+	if h.seedClient != nil {
+		return h.seedClient
+	}
+	return http.DefaultClient
 }
 
 // Deactivate closes and removes the stored subscription for the directive's

@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/xbcio/xflow/node"
@@ -11,11 +12,13 @@ import (
 
 // fakeTriggerSubscription records whether Close was invoked.
 type fakeTriggerSubscription struct {
-	closed bool
+	closed     bool
+	closeCount int
 }
 
 func (f *fakeTriggerSubscription) Close(ctx context.Context) error {
 	f.closed = true
+	f.closeCount++
 	return nil
 }
 
@@ -24,6 +27,14 @@ func (f *fakeTriggerSubscription) Close(ctx context.Context) error {
 type fakeTriggerHandler struct {
 	gotInput *types.TriggerActivateInput
 	sub      *fakeTriggerSubscription
+
+	// activateErr, when non-nil, is returned by Activate instead of creating
+	// a subscription. Used to test error paths.
+	activateErr error
+
+	// allSubs records every subscription returned by successive Activate calls
+	// in order, enabling stale-close assertions.
+	allSubs []*fakeTriggerSubscription
 }
 
 func (f *fakeTriggerHandler) Descriptor() types.Descriptor {
@@ -32,7 +43,11 @@ func (f *fakeTriggerHandler) Descriptor() types.Descriptor {
 
 func (f *fakeTriggerHandler) Activate(ctx context.Context, input *types.TriggerActivateInput) (types.TriggerSubscription, error) {
 	f.gotInput = input
+	if f.activateErr != nil {
+		return nil, f.activateErr
+	}
 	f.sub = &fakeTriggerSubscription{}
+	f.allSubs = append(f.allSubs, f.sub)
 	return f.sub, nil
 }
 
@@ -156,5 +171,88 @@ func TestTriggerActivationHandler_DeactivateUnknownIsNoop(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("Deactivate of unknown activation should be no-op, got error: %v", err)
+	}
+}
+
+func TestTriggerActivationHandler_StaleCloseOnGenerationUpgrade(t *testing.T) {
+	fh := &fakeTriggerHandler{}
+	lookup := fakeLookup{handlers: map[string]types.TriggerHandler{"fake": fh}}
+	h := NewTriggerActivationHandler("https://control.internal", "token", lookup)
+
+	d1 := protocol.ActivateDirective{
+		WorkflowID:      "wf1",
+		WorkflowVersion: "v1",
+		EntryUnitID:     "t1",
+		NodeType:        "fake",
+		Generation:      1,
+	}
+	if err := h.Activate(context.Background(), d1); err != nil {
+		t.Fatalf("first Activate: %v", err)
+	}
+	firstSub := fh.allSubs[0]
+
+	// Second Activate with a new generation for the same identity.
+	d2 := d1
+	d2.Generation = 2
+	if err := h.Activate(context.Background(), d2); err != nil {
+		t.Fatalf("second Activate: %v", err)
+	}
+	secondSub := fh.allSubs[1]
+
+	// The first subscription must have been closed exactly once.
+	if firstSub.closeCount != 1 {
+		t.Errorf("first subscription closeCount = %d, want 1", firstSub.closeCount)
+	}
+	// The handler must store the second subscription.
+	id := activationID{WorkflowID: "wf1", EntryUnitID: "t1"}
+	h.mu.Lock()
+	stored := h.subs[id]
+	h.mu.Unlock()
+	if stored != secondSub {
+		t.Error("handler.subs stores stale subscription instead of the new one")
+	}
+	// Second sub must not have been closed.
+	if secondSub.closed {
+		t.Error("second subscription should not be closed")
+	}
+}
+
+func TestTriggerActivationHandler_StaleCloseNotCalledOnActivateError(t *testing.T) {
+	fh := &fakeTriggerHandler{}
+	lookup := fakeLookup{handlers: map[string]types.TriggerHandler{"fake": fh}}
+	h := NewTriggerActivationHandler("https://control.internal", "token", lookup)
+
+	// First Activate succeeds.
+	d := protocol.ActivateDirective{
+		WorkflowID:      "wf1",
+		WorkflowVersion: "v1",
+		EntryUnitID:     "t1",
+		NodeType:        "fake",
+		Generation:      1,
+	}
+	if err := h.Activate(context.Background(), d); err != nil {
+		t.Fatalf("first Activate: %v", err)
+	}
+	firstSub := fh.allSubs[0]
+
+	// Make the second Activate fail.
+	fh.activateErr = errors.New("simulated handler failure")
+	d.Generation = 2
+	if err := h.Activate(context.Background(), d); err == nil {
+		t.Fatal("second Activate should have returned an error")
+	}
+
+	// The first subscription must NOT have been closed because the new
+	// Activate failed before reaching the stale-close logic.
+	if firstSub.closed {
+		t.Error("first subscription was closed despite second Activate failing")
+	}
+	// The stored subscription must still be the first one.
+	id := activationID{WorkflowID: "wf1", EntryUnitID: "t1"}
+	h.mu.Lock()
+	stored := h.subs[id]
+	h.mu.Unlock()
+	if stored != firstSub {
+		t.Error("handler.subs should still hold the first subscription after failed second Activate")
 	}
 }

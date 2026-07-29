@@ -150,9 +150,10 @@ func (t *ActivationTracker) Inventory() []protocol.ActivationInventoryItem {
 	items := make([]protocol.ActivationInventoryItem, 0, len(t.active))
 	for id, sub := range t.active {
 		items = append(items, protocol.ActivationInventoryItem{
-			WorkflowID:  id.WorkflowID,
-			EntryUnitID: id.EntryUnitID,
-			Generation:  sub.Generation,
+			WorkflowID:      id.WorkflowID,
+			WorkflowVersion: sub.Directive.WorkflowVersion,
+			EntryUnitID:     id.EntryUnitID,
+			Generation:      sub.Generation,
 		})
 	}
 	return items
