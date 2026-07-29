@@ -73,6 +73,11 @@ type entryRunnerDirectives struct {
 // reassigned. It is fail-closed: a runner that does not satisfy a required
 // selector is never assigned.
 //
+// For "default" selector mode (spec §11.7): when no label-matching runner is
+// available (or all matching runners are at capacity) for longer than
+// FallbackGrace, the reconciler falls back to any capable live runner.
+// Capability checks are never relaxed by fallback.
+//
 // It also produces node-generic activate/deactivate directives per runner as a
 // side effect of reconciliation: an Activate is enqueued after a successful
 // Assign, and a Deactivate after a Fence/expiry-revoke or when the activation is
@@ -84,6 +89,14 @@ type EntryActivationReconciler struct {
 
 	mu         sync.Mutex
 	directives map[string]*entryRunnerDirectives // runnerID -> pending directives
+
+	// noMatchSince tracks, per activation key, the wall time at which the
+	// reconciler first observed no selector-matching runner for a "default"-mode
+	// activation. It is used to implement the fallback grace window. Entries are
+	// cleared when a matching runner is found or the activation is assigned.
+	// Intentionally not persisted — a restart resets the grace window at most one
+	// period (acceptable: spec §11.7).
+	noMatchSince map[engine.EntryActivationKey]time.Time
 }
 
 // NewEntryActivationReconciler constructs a reconciler with defaults applied.
@@ -105,9 +118,10 @@ func NewEntryActivationReconciler(cfg EntryActivationReconcilerConfig) *EntryAct
 		sel = *cfg.Selector
 	}
 	return &EntryActivationReconciler{
-		cfg:        cfg,
-		selector:   sel,
-		directives: make(map[string]*entryRunnerDirectives),
+		cfg:          cfg,
+		selector:     sel,
+		directives:   make(map[string]*entryRunnerDirectives),
+		noMatchSince: make(map[engine.EntryActivationKey]time.Time),
 	}
 }
 
@@ -115,12 +129,14 @@ func NewEntryActivationReconciler(cfg EntryActivationReconcilerConfig) *EntryAct
 // in the reconciler's namespaces, using now as the clock.
 func (r *EntryActivationReconciler) Reconcile(ctx context.Context, now time.Time) error {
 	live := r.liveRunners(ctx, now)
+	seen := make(map[engine.EntryActivationKey]struct{})
 	for _, ns := range r.cfg.Namespaces {
 		acts, err := r.cfg.Store.List(ctx, ns)
 		if err != nil {
 			return err
 		}
 		for i := range acts {
+			seen[keyOf(&acts[i])] = struct{}{}
 			if err := r.reconcileOne(ctx, &acts[i], live, now); err != nil {
 				if r.cfg.Logger != nil {
 					r.cfg.Logger.Warn("entry activation reconcile failed",
@@ -132,16 +148,35 @@ func (r *EntryActivationReconciler) Reconcile(ctx context.Context, now time.Time
 			}
 		}
 	}
+	r.pruneNoMatch(seen)
 	return nil
 }
 
-func (r *EntryActivationReconciler) reconcileOne(ctx context.Context, act *engine.EntryActivation, live []RunnerSnapshot, now time.Time) error {
-	key := engine.EntryActivationKey{
+// pruneNoMatch drops grace-window tracking for activations that no longer exist
+// in the store, so an unregistered workflow does not leak an entry forever. Only
+// safe to call after a full pass over every configured namespace: a key absent
+// from seen was not merely skipped, it is gone.
+func (r *EntryActivationReconciler) pruneNoMatch(seen map[engine.EntryActivationKey]struct{}) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for key := range r.noMatchSince {
+		if _, ok := seen[key]; !ok {
+			delete(r.noMatchSince, key)
+		}
+	}
+}
+
+func keyOf(act *engine.EntryActivation) engine.EntryActivationKey {
+	return engine.EntryActivationKey{
 		Namespace:       act.Namespace,
 		WorkflowID:      act.WorkflowID,
 		WorkflowVersion: act.WorkflowVersion,
 		EntryUnitID:     act.EntryUnitID,
 	}
+}
+
+func (r *EntryActivationReconciler) reconcileOne(ctx context.Context, act *engine.EntryActivation, live []RunnerSnapshot, now time.Time) error {
+	key := keyOf(act)
 
 	// A cleared / non-desired activation should not hold an assignment. Fence any
 	// stale owner, tell it to deactivate, and leave it unassigned.
@@ -192,13 +227,28 @@ func (r *EntryActivationReconciler) reconcileOne(ctx context.Context, act *engin
 	// Unassigned (either fresh or just fenced): choose a matching live runner.
 	chosen, ok := r.chooseRunner(act, live, now)
 	if !ok {
-		// Fail-closed: no capable, selector-matching live runner. Leave it
-		// unassigned for a later pass.
-		// TODO(spec §11.7): default-selector grace fallback — when the selector
-		// mode is "default" and no matching runner exists past the fallback
-		// grace window, fall back to any capable live runner. Deferred by design
-		// (tracked in the spec); only "required" semantics are implemented here.
-		return nil
+		// No selector-matching + capable runner found. Behavior depends on the
+		// selector mode (spec §11.7).
+		if r.selectorIsDefault(act.Selector) {
+			chosen, ok = r.fallbackChooseRunner(act, live, now, key)
+			if !ok {
+				return nil
+			}
+			// Fallback succeeded — observable log.
+			if r.cfg.Logger != nil {
+				r.cfg.Logger.Info("default-selector fallback: assigning to non-matching runner",
+					"workflow_id", act.WorkflowID,
+					"entry_unit_id", act.EntryUnitID,
+					"runner_id", chosen.RunnerID)
+			}
+		} else {
+			// required mode (or nil selector which already matches anything in
+			// chooseRunner): fail-closed — leave unassigned for a later pass.
+			return nil
+		}
+	} else {
+		// Matching runner found: clear any grace-window tracking for this key.
+		r.clearNoMatch(key)
 	}
 
 	nextGen := act.Generation + 1
@@ -336,15 +386,24 @@ func (r *EntryActivationReconciler) ReconcileRunnerInventory(ctx context.Context
 	if runnerID == "" {
 		return nil
 	}
-	// Index the reported inventory by (workflowID, entryUnitID) → generation so
-	// the per-activation lookup is O(1). Identity keys mirror the tracker's
-	// activationID (WorkflowID + EntryUnitID); the durable store is additionally
-	// scoped by namespace + version, so a match also requires the stored
-	// generation to agree (checked below).
-	type invKey struct{ workflowID, entryUnitID string }
+	// Index the reported inventory by (workflowID, workflowVersion, entryUnitID) → generation
+	// so the per-activation lookup is O(1). When WorkflowVersion is empty (old
+	// runner that does not report version), the item is stored under key with
+	// empty version AND we mark it in a separate set so the matching step below
+	// can fall back to a version-agnostic match — this prevents a behavioral
+	// regression where an old runner's reconnect causes all versioned activations
+	// to be incorrectly revoked.
+	type invKey struct{ workflowID, workflowVersion, entryUnitID string }
 	reportedGen := make(map[invKey]uint64, len(reported))
+	// versionless tracks (workflowID, entryUnitID) → generation for items whose
+	// WorkflowVersion is empty (old runner backward-compat fallback).
+	type twoKey struct{ workflowID, entryUnitID string }
+	versionless := make(map[twoKey]uint64)
 	for _, item := range reported {
-		reportedGen[invKey{item.WorkflowID, item.EntryUnitID}] = item.Generation
+		reportedGen[invKey{item.WorkflowID, item.WorkflowVersion, item.EntryUnitID}] = item.Generation
+		if item.WorkflowVersion == "" {
+			versionless[twoKey{item.WorkflowID, item.EntryUnitID}] = item.Generation
+		}
 	}
 
 	for _, ns := range r.cfg.Namespaces {
@@ -363,7 +422,14 @@ func (r *EntryActivationReconciler) ReconcileRunnerInventory(ctx context.Context
 				WorkflowVersion: act.WorkflowVersion,
 				EntryUnitID:     act.EntryUnitID,
 			}
-			gen, ok := reportedGen[invKey{string(act.WorkflowID), act.EntryUnitID}]
+			gen, ok := reportedGen[invKey{string(act.WorkflowID), act.WorkflowVersion, act.EntryUnitID}]
+			if !ok {
+				// Backward-compat: if the runner reported the item with empty
+				// WorkflowVersion (old runner not aware of version), fall back to
+				// a version-agnostic lookup. This avoids revoking activations
+				// that a pre-version runner still legitimately hosts.
+				gen, ok = versionless[twoKey{string(act.WorkflowID), act.EntryUnitID}]
+			}
 			if ok && gen == act.Generation {
 				// Runner still hosts this exact generation → renew the lease,
 				// generation UNCHANGED (do NOT fence the runner's in-flight seeds).
@@ -397,16 +463,79 @@ func (r *EntryActivationReconciler) ReconcileRunnerInventory(ctx context.Context
 	return nil
 }
 
-// selectorMatches applies runner-selector precedence. A nil selector is a
-// default placement (any runner matches). A "required" selector demands the
-// runner's labels satisfy MatchLabels. A "default" selector also currently
-// demands the match; its post-grace fallback to any capable runner is deferred
-// (see the TODO in reconcileOne, spec §11.7).
+// selectorMatches applies runner-selector label matching. A nil selector is a
+// default placement (any runner matches). For non-nil selectors, the runner's
+// labels must satisfy all MatchLabels entries. This function does NOT consider
+// the Mode field — mode-dependent fallback is handled by reconcileOne.
 func selectorMatches(sel *types.RunnerSelector, runnerLabels map[string]string) bool {
 	if sel == nil {
 		return true
 	}
 	return MatchLabels(runnerLabels, sel.MatchLabels)
+}
+
+// selectorIsDefault reports whether the activation's selector uses "default"
+// mode semantics. Per engine/graph/compile.go:resolveRunnerSelector, an empty
+// Mode ("") is equivalent to RunnerSelectorModeDefault — the compiler defaults
+// to "default" when no explicit mode is set. A nil selector means "any capable
+// runner" (no labels to match), so fallback is irrelevant.
+func (r *EntryActivationReconciler) selectorIsDefault(sel *types.RunnerSelector) bool {
+	if sel == nil {
+		return false
+	}
+	return sel.Mode == types.RunnerSelectorModeDefault || sel.Mode == ""
+}
+
+// fallbackChooseRunner implements the default-selector grace fallback (spec
+// §11.7). It is called when no label-matching runner was found for a "default"
+// mode activation. If the grace window has elapsed, it returns any live runner
+// that satisfies capability checks (labels are relaxed, but capabilities are
+// NOT — sending work to a runner that cannot execute it is always wrong).
+// Returns false if the grace window has not elapsed or no capable runner exists.
+func (r *EntryActivationReconciler) fallbackChooseRunner(act *engine.EntryActivation, live []RunnerSnapshot, now time.Time, key engine.EntryActivationKey) (RunnerSnapshot, bool) {
+	r.mu.Lock()
+	firstSeen, tracked := r.noMatchSince[key]
+	if !tracked {
+		r.noMatchSince[key] = now
+		r.mu.Unlock()
+		return RunnerSnapshot{}, false
+	}
+	r.mu.Unlock()
+
+	grace := r.selector.FallbackGrace
+	if grace <= 0 {
+		grace = DefaultSelectorFallback
+	}
+	if now.Sub(firstSeen) < grace {
+		// Grace window not yet elapsed — wait for a matching runner to appear.
+		return RunnerSnapshot{}, false
+	}
+
+	// Grace elapsed: find any live + capable runner (labels relaxed).
+	for _, snap := range live {
+		if !r.selector.IsLive(snap, now) {
+			continue
+		}
+		if snap.Capacity > 0 && snap.InFlight >= snap.Capacity {
+			continue
+		}
+		// Capability check is never bypassed by fallback.
+		if !capabilitiesSatisfy(act, snap) {
+			continue
+		}
+		// Clear tracking on successful fallback assignment.
+		r.clearNoMatch(key)
+		return snap, true
+	}
+	return RunnerSnapshot{}, false
+}
+
+// clearNoMatch removes the grace-window tracking for key. Called when a
+// matching runner is found or assignment succeeds.
+func (r *EntryActivationReconciler) clearNoMatch(key engine.EntryActivationKey) {
+	r.mu.Lock()
+	delete(r.noMatchSince, key)
+	r.mu.Unlock()
 }
 
 // activateDirectiveFor builds the node-generic activate directive for an

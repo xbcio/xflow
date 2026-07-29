@@ -8,6 +8,7 @@ import (
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/service/protocol"
+	"github.com/xbcio/xflow/types"
 )
 
 // mockRunnerLister implements ActivationRunnerLister for tests.
@@ -359,5 +360,695 @@ func TestEntryActivationReconciler_NoMatchingRunner(t *testing.T) {
 	}
 	if got.Generation != 0 {
 		t.Fatalf("no matching runner: generation must stay 0, got %d", got.Generation)
+	}
+}
+
+// TestInventoryReconcile_VersionMatchRenews verifies that when a runner reports
+// an activation whose WorkflowVersion matches the stored activation, the lease is
+// renewed and the generation stays unchanged (same as before, but with version).
+func TestInventoryReconcile_VersionMatchRenews(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryEntryActivationStore()
+
+	act := testEntryActivation() // WorkflowVersion: "v1"
+	key := keyOfActivation(act)
+	if err := store.Upsert(ctx, act); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	ok, err := store.Assign(ctx, key, "runner-match", "sess-1", 1, now.Add(5*time.Second))
+	if err != nil || !ok {
+		t.Fatalf("Assign: ok=%v err=%v", ok, err)
+	}
+
+	sel := DefaultRunnerSelector()
+	r := NewEntryActivationReconciler(EntryActivationReconcilerConfig{
+		Store:      store,
+		Selector:   &sel,
+		Namespaces: []namespace.Namespace{namespace.Default},
+		LeaseTTL:   60 * time.Second,
+	})
+
+	// Report WITH correct version "v1".
+	reported := []protocol.ActivationInventoryItem{{
+		WorkflowID:      string(act.WorkflowID),
+		WorkflowVersion: act.WorkflowVersion,
+		EntryUnitID:     act.EntryUnitID,
+		Generation:      1,
+	}}
+	if err := r.ReconcileRunnerInventory(ctx, "runner-match", reported, now); err != nil {
+		t.Fatalf("ReconcileRunnerInventory: %v", err)
+	}
+
+	got, _, _ := store.Get(ctx, key)
+	if got.Generation != 1 {
+		t.Fatalf("generation must stay 1 on version-matched renew, got %d", got.Generation)
+	}
+	if got.RunnerID != "runner-match" {
+		t.Fatalf("owner must be retained, got %q", got.RunnerID)
+	}
+	wantDeadline := now.Add(60 * time.Second)
+	if !got.LeaseDeadline.Equal(wantDeadline) {
+		t.Fatalf("lease deadline must be renewed to %v, got %v", wantDeadline, got.LeaseDeadline)
+	}
+}
+
+// TestInventoryReconcile_VersionMismatchRevokes verifies that when a runner
+// reports an activation with a WorkflowVersion different from the stored one (same
+// workflowID+entryUnitID but another version), the activation is treated as
+// unreported and is fenced+deactivated for reassignment.
+func TestInventoryReconcile_VersionMismatchRevokes(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryEntryActivationStore()
+
+	act := testEntryActivation() // WorkflowVersion: "v1"
+	key := keyOfActivation(act)
+	if err := store.Upsert(ctx, act); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	ok, err := store.Assign(ctx, key, "runner-match", "sess-1", 1, now.Add(time.Minute))
+	if err != nil || !ok {
+		t.Fatalf("Assign: ok=%v err=%v", ok, err)
+	}
+
+	sel := DefaultRunnerSelector()
+	r := NewEntryActivationReconciler(EntryActivationReconcilerConfig{
+		Store:      store,
+		Selector:   &sel,
+		Namespaces: []namespace.Namespace{namespace.Default},
+		LeaseTTL:   60 * time.Second,
+	})
+
+	// Report with WRONG version "v2" — same workflowID + entryUnitID.
+	reported := []protocol.ActivationInventoryItem{{
+		WorkflowID:      string(act.WorkflowID),
+		WorkflowVersion: "v2",
+		EntryUnitID:     act.EntryUnitID,
+		Generation:      1,
+	}}
+	if err := r.ReconcileRunnerInventory(ctx, "runner-match", reported, now); err != nil {
+		t.Fatalf("ReconcileRunnerInventory: %v", err)
+	}
+
+	got, _, _ := store.Get(ctx, key)
+	if got.RunnerID != "" {
+		t.Fatalf("version-mismatched activation must be revoked, got owner %q", got.RunnerID)
+	}
+	if !got.Desired {
+		t.Fatalf("revoked activation must stay desired (reassignable), got %+v", got)
+	}
+}
+
+// TestInventoryReconcile_EmptyVersionFallbackRenews verifies the backward-
+// compatibility degradation: when an old runner reports an activation with an
+// empty WorkflowVersion, it still matches a versioned store activation and the
+// lease is renewed — preventing false revocation of activations hosted by
+// pre-version runners.
+func TestInventoryReconcile_EmptyVersionFallbackRenews(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryEntryActivationStore()
+
+	act := testEntryActivation() // WorkflowVersion: "v1"
+	key := keyOfActivation(act)
+	if err := store.Upsert(ctx, act); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	ok, err := store.Assign(ctx, key, "runner-match", "sess-1", 1, now.Add(5*time.Second))
+	if err != nil || !ok {
+		t.Fatalf("Assign: ok=%v err=%v", ok, err)
+	}
+
+	sel := DefaultRunnerSelector()
+	r := NewEntryActivationReconciler(EntryActivationReconcilerConfig{
+		Store:      store,
+		Selector:   &sel,
+		Namespaces: []namespace.Namespace{namespace.Default},
+		LeaseTTL:   60 * time.Second,
+	})
+
+	// Old runner reports with EMPTY version (backward-compat).
+	reported := []protocol.ActivationInventoryItem{{
+		WorkflowID:      string(act.WorkflowID),
+		WorkflowVersion: "", // old runner does not know version
+		EntryUnitID:     act.EntryUnitID,
+		Generation:      1,
+	}}
+	if err := r.ReconcileRunnerInventory(ctx, "runner-match", reported, now); err != nil {
+		t.Fatalf("ReconcileRunnerInventory: %v", err)
+	}
+
+	got, _, _ := store.Get(ctx, key)
+	if got.Generation != 1 {
+		t.Fatalf("generation must stay 1 on empty-version fallback renew, got %d", got.Generation)
+	}
+	if got.RunnerID != "runner-match" {
+		t.Fatalf("owner must be retained on empty-version fallback, got %q", got.RunnerID)
+	}
+	wantDeadline := now.Add(60 * time.Second)
+	if !got.LeaseDeadline.Equal(wantDeadline) {
+		t.Fatalf("lease deadline must be renewed to %v, got %v", wantDeadline, got.LeaseDeadline)
+	}
+}
+
+// TestActivateDirectiveCarriesWorkflowVersion verifies that the activate directive
+// built by the reconciler carries the activation's WorkflowVersion, which the
+// runner needs to report back in its inventory on reconnect.
+func TestActivateDirectiveCarriesWorkflowVersion(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryEntryActivationStore()
+
+	act := testEntryActivation() // WorkflowVersion: "v1"
+	key := keyOfActivation(act)
+	if err := store.Upsert(ctx, act); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	runner := RunnerSnapshot{
+		RunnerID:      "runner-match",
+		Capacity:      4,
+		Labels:        map[string]string{"zone": "a"},
+		LastHeartbeat: now,
+	}
+	lister := &mockRunnerLister{runners: []RunnerSnapshot{runner}}
+
+	sel := DefaultRunnerSelector()
+	r := NewEntryActivationReconciler(EntryActivationReconcilerConfig{
+		Store:      store,
+		Lister:     lister,
+		Selector:   &sel,
+		Namespaces: []namespace.Namespace{namespace.Default},
+		LeaseTTL:   60 * time.Second,
+	})
+
+	// First reconcile assigns the activation.
+	if err := r.Reconcile(ctx, now); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	got, _, _ := store.Get(ctx, key)
+	if got.RunnerID != "runner-match" {
+		t.Fatalf("expected assignment to runner-match, got %q", got.RunnerID)
+	}
+
+	// Drain the directive and check WorkflowVersion.
+	dirs := r.DirectivesForRunner("runner-match")
+	if dirs == nil || len(dirs.Activate) == 0 {
+		t.Fatal("expected an activate directive after assignment")
+	}
+	d := dirs.Activate[0]
+	if d.WorkflowVersion != "v1" {
+		t.Fatalf("directive WorkflowVersion = %q, want %q", d.WorkflowVersion, "v1")
+	}
+	if d.WorkflowID != string(act.WorkflowID) {
+		t.Fatalf("directive WorkflowID = %q, want %q", d.WorkflowID, act.WorkflowID)
+	}
+	if d.EntryUnitID != act.EntryUnitID {
+		t.Fatalf("directive EntryUnitID = %q, want %q", d.EntryUnitID, act.EntryUnitID)
+	}
+}
+
+// --- Default-selector fallback grace period tests (spec §11.7) ---
+
+// testDefaultActivation returns an activation with Mode=default, {zone: a}.
+func testDefaultActivation() engine.EntryActivation {
+	return engine.EntryActivation{
+		Namespace:       namespace.Default,
+		WorkflowID:      "wf-default-1",
+		WorkflowVersion: "v1",
+		EntryUnitID:     "tg",
+		PackageHash:     "pkg-def",
+		Selector:        &types.RunnerSelector{Mode: types.RunnerSelectorModeDefault, MatchLabels: map[string]string{"zone": "a"}},
+		Desired:         true,
+	}
+}
+
+// TestDefaultSelector_RequiredModeNoFallback verifies that a required-mode
+// activation is NEVER assigned via fallback, even well past the grace window.
+func TestDefaultSelector_RequiredModeNoFallback(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryEntryActivationStore()
+
+	act := testEntryActivation() // Mode: required, {zone: a}
+	key := keyOfActivation(act)
+	if err := store.Upsert(ctx, act); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	// Only runner with zone: b (non-matching).
+	lister := &mockRunnerLister{runners: []RunnerSnapshot{
+		{RunnerID: "r-b", Capacity: 4, Labels: map[string]string{"zone": "b"}, LastHeartbeat: now},
+	}}
+
+	sel := RunnerSelector{LiveTTL: 30 * time.Second, FallbackGrace: 5 * time.Second}
+	r := NewEntryActivationReconciler(EntryActivationReconcilerConfig{
+		Store:    store,
+		Lister:   lister,
+		Selector: &sel,
+		LeaseTTL: 60 * time.Second,
+	})
+
+	// First reconcile: no match.
+	if err := r.Reconcile(ctx, now); err != nil {
+		t.Fatalf("Reconcile 1: %v", err)
+	}
+	// Way past the grace window (10 minutes later).
+	later := now.Add(10 * time.Minute)
+	lister.runners[0].LastHeartbeat = later
+	if err := r.Reconcile(ctx, later); err != nil {
+		t.Fatalf("Reconcile 2: %v", err)
+	}
+
+	got, _, _ := store.Get(ctx, key)
+	if got.RunnerID != "" {
+		t.Fatalf("required mode must never fallback, got runner %q", got.RunnerID)
+	}
+}
+
+// TestDefaultSelector_MatchingRunnerNoFallback verifies that when a matching
+// runner is available, it is chosen directly without fallback.
+func TestDefaultSelector_MatchingRunnerNoFallback(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryEntryActivationStore()
+
+	act := testDefaultActivation() // Mode: default, {zone: a}
+	key := keyOfActivation(act)
+	if err := store.Upsert(ctx, act); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	matching := RunnerSnapshot{
+		RunnerID:      "r-match",
+		Capacity:      4,
+		Labels:        map[string]string{"zone": "a"},
+		LastHeartbeat: now,
+	}
+	nonMatching := RunnerSnapshot{
+		RunnerID:      "r-other",
+		Capacity:      4,
+		Labels:        map[string]string{"zone": "b"},
+		LastHeartbeat: now,
+	}
+	lister := &mockRunnerLister{runners: []RunnerSnapshot{nonMatching, matching}}
+
+	sel := RunnerSelector{LiveTTL: 30 * time.Second, FallbackGrace: 5 * time.Second}
+	r := NewEntryActivationReconciler(EntryActivationReconcilerConfig{
+		Store:    store,
+		Lister:   lister,
+		Selector: &sel,
+		LeaseTTL: 60 * time.Second,
+	})
+
+	if err := r.Reconcile(ctx, now); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	got, _, _ := store.Get(ctx, key)
+	if got.RunnerID != "r-match" {
+		t.Fatalf("expected matching runner r-match, got %q", got.RunnerID)
+	}
+}
+
+// TestDefaultSelector_NoMatchWithinGrace verifies that when no matching runner
+// exists but the grace window hasn't elapsed, the activation stays unassigned.
+func TestDefaultSelector_NoMatchWithinGrace(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryEntryActivationStore()
+
+	act := testDefaultActivation() // Mode: default, {zone: a}
+	key := keyOfActivation(act)
+	if err := store.Upsert(ctx, act); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	// Only runner with zone: b (non-matching but capable).
+	lister := &mockRunnerLister{runners: []RunnerSnapshot{
+		{RunnerID: "r-b", Capacity: 4, Labels: map[string]string{"zone": "b"}, LastHeartbeat: now},
+	}}
+
+	sel := RunnerSelector{LiveTTL: 30 * time.Second, FallbackGrace: 30 * time.Second}
+	r := NewEntryActivationReconciler(EntryActivationReconcilerConfig{
+		Store:    store,
+		Lister:   lister,
+		Selector: &sel,
+		LeaseTTL: 60 * time.Second,
+	})
+
+	// First reconcile: starts grace timer.
+	if err := r.Reconcile(ctx, now); err != nil {
+		t.Fatalf("Reconcile 1: %v", err)
+	}
+	got, _, _ := store.Get(ctx, key)
+	if got.RunnerID != "" {
+		t.Fatalf("within grace: expected unassigned, got %q", got.RunnerID)
+	}
+
+	// Second reconcile at now+10s: still within 30s grace.
+	later := now.Add(10 * time.Second)
+	lister.runners[0].LastHeartbeat = later
+	if err := r.Reconcile(ctx, later); err != nil {
+		t.Fatalf("Reconcile 2: %v", err)
+	}
+	got, _, _ = store.Get(ctx, key)
+	if got.RunnerID != "" {
+		t.Fatalf("within grace (10s < 30s): expected unassigned, got %q", got.RunnerID)
+	}
+}
+
+// TestDefaultSelector_FallbackAfterGrace verifies that once the grace window
+// elapses, the activation is assigned to a capable (but non-matching) runner.
+func TestDefaultSelector_FallbackAfterGrace(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryEntryActivationStore()
+
+	act := testDefaultActivation() // Mode: default, {zone: a}
+	key := keyOfActivation(act)
+	if err := store.Upsert(ctx, act); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	// Only runner with zone: b (non-matching but capable).
+	lister := &mockRunnerLister{runners: []RunnerSnapshot{
+		{RunnerID: "r-b", Capacity: 4, Labels: map[string]string{"zone": "b"}, LastHeartbeat: now},
+	}}
+
+	sel := RunnerSelector{LiveTTL: 30 * time.Second, FallbackGrace: 5 * time.Second}
+	r := NewEntryActivationReconciler(EntryActivationReconcilerConfig{
+		Store:    store,
+		Lister:   lister,
+		Selector: &sel,
+		LeaseTTL: 60 * time.Second,
+	})
+
+	// First reconcile: starts the grace timer.
+	if err := r.Reconcile(ctx, now); err != nil {
+		t.Fatalf("Reconcile 1: %v", err)
+	}
+
+	// Second reconcile: past the grace window.
+	later := now.Add(10 * time.Second) // 10s > 5s grace
+	lister.runners[0].LastHeartbeat = later
+	if err := r.Reconcile(ctx, later); err != nil {
+		t.Fatalf("Reconcile 2: %v", err)
+	}
+
+	got, _, _ := store.Get(ctx, key)
+	if got.RunnerID != "r-b" {
+		t.Fatalf("after grace: expected fallback to r-b, got %q", got.RunnerID)
+	}
+	if got.Generation != 1 {
+		t.Fatalf("expected generation 1, got %d", got.Generation)
+	}
+}
+
+// TestDefaultSelector_FallbackRespectsCapability verifies that fallback never
+// assigns to a runner that cannot satisfy the activation's capability
+// requirements — even after the grace window.
+func TestDefaultSelector_FallbackRespectsCapability(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryEntryActivationStore()
+
+	act := testDefaultActivation() // Mode: default, {zone: a}
+	act.Requirements = []engine.CapabilityRequirement{{NodeType: "http.request"}}
+	key := keyOfActivation(act)
+	if err := store.Upsert(ctx, act); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	// Only runner with zone: b, but wrong capability.
+	lister := &mockRunnerLister{runners: []RunnerSnapshot{
+		{
+			RunnerID:      "r-incapable",
+			Capacity:      4,
+			Labels:        map[string]string{"zone": "b"},
+			Capabilities:  []protocol.Capability{{NodeType: "kafka.consume"}},
+			LastHeartbeat: now,
+		},
+	}}
+
+	sel := RunnerSelector{LiveTTL: 30 * time.Second, FallbackGrace: 5 * time.Second}
+	r := NewEntryActivationReconciler(EntryActivationReconcilerConfig{
+		Store:    store,
+		Lister:   lister,
+		Selector: &sel,
+		LeaseTTL: 60 * time.Second,
+	})
+
+	// First reconcile.
+	if err := r.Reconcile(ctx, now); err != nil {
+		t.Fatalf("Reconcile 1: %v", err)
+	}
+	// Past grace.
+	later := now.Add(10 * time.Second)
+	lister.runners[0].LastHeartbeat = later
+	if err := r.Reconcile(ctx, later); err != nil {
+		t.Fatalf("Reconcile 2: %v", err)
+	}
+
+	got, _, _ := store.Get(ctx, key)
+	if got.RunnerID != "" {
+		t.Fatalf("fallback must not bypass capability check: expected unassigned, got %q", got.RunnerID)
+	}
+}
+
+// TestDefaultSelector_GraceTimerResets verifies that after a matching runner
+// becomes available and assigns, the grace timer is cleared. A subsequent loss
+// of the matching runner starts the timer fresh.
+func TestDefaultSelector_GraceTimerResets(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryEntryActivationStore()
+
+	act := testDefaultActivation() // Mode: default, {zone: a}
+	key := keyOfActivation(act)
+	if err := store.Upsert(ctx, act); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	t0 := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	nonMatching := RunnerSnapshot{
+		RunnerID: "r-b", Capacity: 4,
+		Labels: map[string]string{"zone": "b"}, LastHeartbeat: t0,
+	}
+	lister := &mockRunnerLister{runners: []RunnerSnapshot{nonMatching}}
+
+	sel := RunnerSelector{LiveTTL: 30 * time.Second, FallbackGrace: 20 * time.Second}
+	r := NewEntryActivationReconciler(EntryActivationReconcilerConfig{
+		Store:    store,
+		Lister:   lister,
+		Selector: &sel,
+		LeaseTTL: 60 * time.Second,
+	})
+
+	// t0: no match → timer starts.
+	if err := r.Reconcile(ctx, t0); err != nil {
+		t.Fatalf("Reconcile t0: %v", err)
+	}
+	got, _, _ := store.Get(ctx, key)
+	if got.RunnerID != "" {
+		t.Fatalf("t0: expected unassigned, got %q", got.RunnerID)
+	}
+
+	// t0+10s: matching runner appears → assigns directly, timer clears.
+	t1 := t0.Add(10 * time.Second)
+	matching := RunnerSnapshot{
+		RunnerID: "r-a", Capacity: 4,
+		Labels: map[string]string{"zone": "a"}, LastHeartbeat: t1,
+	}
+	nonMatching.LastHeartbeat = t1
+	lister.runners = []RunnerSnapshot{nonMatching, matching}
+	if err := r.Reconcile(ctx, t1); err != nil {
+		t.Fatalf("Reconcile t1: %v", err)
+	}
+	got, _, _ = store.Get(ctx, key)
+	if got.RunnerID != "r-a" {
+		t.Fatalf("t1: expected r-a assigned, got %q", got.RunnerID)
+	}
+
+	// Expire the lease and remove the matching runner. Non-matching still live.
+	t2 := got.LeaseDeadline.Add(time.Second)
+	nonMatching.LastHeartbeat = t2
+	lister.runners = []RunnerSnapshot{nonMatching}
+	if err := r.Reconcile(ctx, t2); err != nil {
+		t.Fatalf("Reconcile t2: %v", err)
+	}
+	// After fence: now unassigned, grace timer restarts from t2.
+	got, _, _ = store.Get(ctx, key)
+	if got.RunnerID != "" {
+		// The reconciler fenced and now needs a new assignment. With no matching
+		// runner the grace timer should have just started.
+		t.Fatalf("t2: expected unassigned after lease expiry + no match, got %q", got.RunnerID)
+	}
+
+	// t2+10s: still within NEW 20s grace (started at t2) → must not fallback.
+	t3 := t2.Add(10 * time.Second)
+	nonMatching.LastHeartbeat = t3
+	lister.runners = []RunnerSnapshot{nonMatching}
+	if err := r.Reconcile(ctx, t3); err != nil {
+		t.Fatalf("Reconcile t3: %v", err)
+	}
+	got, _, _ = store.Get(ctx, key)
+	if got.RunnerID != "" {
+		t.Fatalf("t3: timer must have reset — 10s < 20s grace, expected unassigned, got %q", got.RunnerID)
+	}
+
+	// t2+25s: past the new grace window → fallback.
+	t4 := t2.Add(25 * time.Second)
+	nonMatching.LastHeartbeat = t4
+	lister.runners = []RunnerSnapshot{nonMatching}
+	if err := r.Reconcile(ctx, t4); err != nil {
+		t.Fatalf("Reconcile t4: %v", err)
+	}
+	got, _, _ = store.Get(ctx, key)
+	if got.RunnerID != "r-b" {
+		t.Fatalf("t4: expected fallback to r-b after new grace elapsed, got %q", got.RunnerID)
+	}
+}
+
+// TestDefaultSelector_EmptyModeIsDefault verifies that an empty Mode string
+// (common with omitempty JSON) behaves identically to RunnerSelectorModeDefault
+// — per engine/graph/compile.go:resolveRunnerSelector which defaults empty to
+// "default".
+func TestDefaultSelector_EmptyModeIsDefault(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryEntryActivationStore()
+
+	// Activation with empty Mode — must behave as "default".
+	act := engine.EntryActivation{
+		Namespace:       namespace.Default,
+		WorkflowID:      "wf-empty-mode",
+		WorkflowVersion: "v1",
+		EntryUnitID:     "tg",
+		PackageHash:     "pkg-em",
+		Selector:        &types.RunnerSelector{Mode: "", MatchLabels: map[string]string{"zone": "a"}},
+		Desired:         true,
+	}
+	key := keyOfActivation(act)
+	if err := store.Upsert(ctx, act); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	lister := &mockRunnerLister{runners: []RunnerSnapshot{
+		{RunnerID: "r-b", Capacity: 4, Labels: map[string]string{"zone": "b"}, LastHeartbeat: now},
+	}}
+
+	sel := RunnerSelector{LiveTTL: 30 * time.Second, FallbackGrace: 5 * time.Second}
+	r := NewEntryActivationReconciler(EntryActivationReconcilerConfig{
+		Store:    store,
+		Lister:   lister,
+		Selector: &sel,
+		LeaseTTL: 60 * time.Second,
+	})
+
+	// First reconcile: starts grace timer.
+	if err := r.Reconcile(ctx, now); err != nil {
+		t.Fatalf("Reconcile 1: %v", err)
+	}
+	got, _, _ := store.Get(ctx, key)
+	if got.RunnerID != "" {
+		t.Fatalf("within grace: expected unassigned, got %q", got.RunnerID)
+	}
+
+	// Past grace → should fallback (proving empty mode = default, not required).
+	later := now.Add(10 * time.Second)
+	lister.runners[0].LastHeartbeat = later
+	if err := r.Reconcile(ctx, later); err != nil {
+		t.Fatalf("Reconcile 2: %v", err)
+	}
+	got, _, _ = store.Get(ctx, key)
+	if got.RunnerID != "r-b" {
+		t.Fatalf("empty mode must behave as default with fallback, got %q", got.RunnerID)
+	}
+}
+
+// removableStore wraps MemoryEntryActivationStore with the ability to drop a
+// record, standing in for a workflow being unregistered. The production store
+// interface has no Delete; removal happens through the manager's desired-state
+// derivation.
+type removableStore struct {
+	*MemoryEntryActivationStore
+	hidden map[engine.EntryActivationKey]bool
+}
+
+func (s *removableStore) hide(key engine.EntryActivationKey) {
+	if s.hidden == nil {
+		s.hidden = make(map[engine.EntryActivationKey]bool)
+	}
+	s.hidden[key] = true
+}
+
+func (s *removableStore) List(ctx context.Context, ns namespace.Namespace) ([]engine.EntryActivation, error) {
+	acts, err := s.MemoryEntryActivationStore.List(ctx, ns)
+	if err != nil {
+		return nil, err
+	}
+	out := acts[:0]
+	for _, a := range acts {
+		if !s.hidden[keyOfActivation(a)] {
+			out = append(out, a)
+		}
+	}
+	return out, nil
+}
+
+// TestDefaultSelector_PrunesTrackingForRemovedActivation verifies the grace-window
+// map does not retain entries for activations that no longer exist in the store.
+func TestDefaultSelector_PrunesTrackingForRemovedActivation(t *testing.T) {
+	ctx := context.Background()
+	store := &removableStore{MemoryEntryActivationStore: NewMemoryEntryActivationStore()}
+
+	act := testDefaultActivation()
+	key := keyOfActivation(act)
+	if err := store.Upsert(ctx, act); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	t0 := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	lister := &mockRunnerLister{runners: []RunnerSnapshot{{
+		RunnerID: "r-b", Capacity: 4,
+		Labels: map[string]string{"zone": "b"}, LastHeartbeat: t0,
+	}}}
+	sel := RunnerSelector{LiveTTL: 30 * time.Second, FallbackGrace: 20 * time.Second}
+	r := NewEntryActivationReconciler(EntryActivationReconcilerConfig{
+		Store:      store,
+		Lister:     lister,
+		Selector:   &sel,
+		Namespaces: []namespace.Namespace{namespace.Default},
+		LeaseTTL:   60 * time.Second,
+	})
+
+	// No matching runner → grace tracking starts for this key.
+	if err := r.Reconcile(ctx, t0); err != nil {
+		t.Fatalf("Reconcile t0: %v", err)
+	}
+	r.mu.Lock()
+	_, tracked := r.noMatchSince[key]
+	r.mu.Unlock()
+	if !tracked {
+		t.Fatal("expected grace tracking after a no-match pass")
+	}
+
+	// Workflow unregistered → the activation disappears from the store.
+	store.hide(key)
+	if err := r.Reconcile(ctx, t0.Add(time.Second)); err != nil {
+		t.Fatalf("Reconcile after removal: %v", err)
+	}
+	r.mu.Lock()
+	_, stillTracked := r.noMatchSince[key]
+	size := len(r.noMatchSince)
+	r.mu.Unlock()
+	if stillTracked {
+		t.Fatal("grace tracking must be pruned once the activation is gone")
+	}
+	if size != 0 {
+		t.Fatalf("expected empty tracking map, got %d entries", size)
 	}
 }

@@ -8,16 +8,22 @@ import (
 )
 
 const (
-	DefaultRunnerLiveTTL      = 30 * time.Second
-	DefaultSelectorFallback   = 5 * time.Second
+	DefaultRunnerLiveTTL = 30 * time.Second
+	// DefaultSelectorFallback is the grace period a "default"-mode activation
+	// waits before falling back to any capable runner when no label-matching
+	// runner is available. 30s ≈ 3 reconcile ticks — long enough for transient
+	// overloads to resolve, short enough to avoid prolonged starvation.
+	// A zero FallbackGrace on RunnerSelector means "use this default" (not
+	// "immediate fallback") — explicit zero is treated as unset.
+	DefaultSelectorFallback = 30 * time.Second
 )
 
 // RunnerSelector decides which runner can serve a given assignment based on
 // liveness, labels, capabilities, policy, and namespace. It is a pure decision
 // function shared by memory and Redis directories.
 type RunnerSelector struct {
-	LiveTTL         time.Duration
-	FallbackGrace   time.Duration
+	LiveTTL       time.Duration
+	FallbackGrace time.Duration
 }
 
 // DefaultRunnerSelector returns a selector with production defaults.
