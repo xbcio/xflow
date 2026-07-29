@@ -188,3 +188,69 @@ Group execution requires the `group.exec.v1` feature capability. Runners that do
 | Backpressure via offset non-commit | Natural flow control; no distributed protocol needed |
 | Signal journal replay on resume | Deterministic re-execution from entry input; no partial member state persisted |
 | Activation directives piggybacked on heartbeat | No extra RPC; runner learns assignments on next heartbeat response |
+
+## 12. Known Limitations & Future Work
+
+Items consciously deferred during Phase 5 (remote-runner trigger hosting). The
+subsystem shipped end-to-end (server workflow registry, `EntryActivationManager`
++ `EntryActivationReconciler`, generation-fenced seeds, runner `ActivationHandler`
++ `ActivationTracker` with reconnect inventory reconciliation); the items below
+were judged non-blocking. Group A are limitations of the shipped feature; Group B
+is future work that was deliberately not started in Phase 5.
+
+### 12.1 Group A — Known limitations of the shipped feature
+
+These describe real behavior of the code as merged. None is a correctness gap.
+
+- **gRPC register does not carry the activation inventory.** Reconnect inventory
+  reconciliation (renew leases for reported activations, revoke unreported ones)
+  runs only over the HTTP register path — `protocol.RegisterRunnerRequest` has an
+  `Activations` field, but the gRPC `RegisterRequest` message
+  (`service/protocol/runnerpb/runner.proto`) does not. The periodic reconcile
+  loop is the backstop, so gRPC-transport runners only forgo the reconnect
+  *optimization* — no correctness loss. Follow-up needed only if gRPC-transport
+  runners must host triggers with zero-orphan reconnect.
+- **Inventory reconciliation keys by `(workflowID, entryUnitID)`, not workflow
+  version.** `ReconcileRunnerInventory` (`service/control/entry_activation_reconciler.go`)
+  indexes the reported inventory by `(workflowID, entryUnitID)`, collapsing
+  multiple versions of the same entry unit to a last-wins entry; the store-side
+  generation gate (`gen == act.Generation`) disambiguates in practice. Fine for
+  the realistic single-version-per-runner case; consider adding `WorkflowVersion`
+  to the key for robustness against a same-runner multi-version edge.
+- **Redis `ListLiveRunners` is O(n)** (`HKeys` + a per-runner `Runner()` /
+  `HGet` fan-out in `service/control/redis_runner_directory.go`). Acceptable at
+  the current reconcile cadence; a pipeline/`MGET` rewrite is a scale follow-up.
+- **Non-Kafka trigger types are fail-closed for entry-seed hosting.**
+  `TriggerActivationHandler` dispatches generically to any registered trigger
+  type, but only the Kafka path consumes the entry-seed runtime
+  (`SeedExecutionFromEntry`). A trigger mis-wired onto the legacy `Emit` path
+  with `HTTPEntrySeedRuntime` hits fail-closed stubs (return an error, never
+  silently drop). This is a phased-rollout limitation: only Kafka has entry-seed
+  hosting today.
+- **`TriggerActivationHandler` uses `http.DefaultClient`** for the seed runtime,
+  so there is no client-level timeout. Each seed request is bounded by a
+  per-request context timeout inside `SeedExecutionFromEntry`
+  (`entrySeedRequestTimeout`, `node/internal/trigger/entry_seed_runtime.go`), so
+  this is defensive-polish only.
+- **The generation-upgrade stale-close branch in the activation handler lacks a
+  dedicated unit test.** It is safe today because `ActivationTracker` serializes
+  directives per tracker (holds its mutex across the handler's `Activate`), but
+  the handler's own invariant is not self-contained; a test plus a comment noting
+  the serialization assumption would harden it.
+
+### 12.2 Group B — Explicitly out-of-scope future work
+
+These were planned but not attempted in Phase 5 (cf. spec §14.1).
+
+- **Aggregate/batch Kafka path P0-1 migration.** `kafkaPartitionAggregator`
+  still uses pre-emit dedup; it is not migrated to the ordered
+  emit-then-commit at-least-once scheme the single-message path uses.
+- **`default`-selector fallback grace period** (spec §11.7 TODO). Only `required`
+  selector semantics are implemented; the reconciler fail-closes when no
+  selector-matching runner exists rather than falling back to any capable runner
+  after a grace window.
+- **Activation replica count > 1 per entry unit** (spec §11.6 explicit-replica
+  scaling). There is one active hosting runner per entry unit today.
+- **Full runner→control activation ACK RPC.** The retired path's ACK was dead
+  code; renewal is now via reconnect inventory + proactive reconcile. A dedicated
+  ACK RPC is future work if tighter delivery confirmation is needed.
