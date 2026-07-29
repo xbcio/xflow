@@ -25,6 +25,13 @@ const (
 	DefaultEntryActivationRenewThreshold = 20 * time.Second
 )
 
+// ActivationRunnerLister provides runner enumeration for the activation
+// reconciler. Implementations should return only runners currently considered
+// live (heartbeated within TTL).
+type ActivationRunnerLister interface {
+	ListLiveRunners(ctx context.Context) []RunnerSnapshot
+}
+
 // EntryActivationReconcilerConfig configures an EntryActivationReconciler.
 type EntryActivationReconcilerConfig struct {
 	// Store is the durable desired-state store of entry activations.

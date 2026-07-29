@@ -10,6 +10,15 @@ import (
 	"github.com/xbcio/xflow/service/protocol"
 )
 
+// mockRunnerLister implements ActivationRunnerLister for tests.
+type mockRunnerLister struct {
+	runners []RunnerSnapshot
+}
+
+func (m *mockRunnerLister) ListLiveRunners(_ context.Context) []RunnerSnapshot {
+	return m.runners
+}
+
 // TestEntryActivationReconciler_AssignsMatchingRunner verifies the reconciler
 // assigns a desired-but-unassigned activation to a capable, selector-matching
 // live runner and never to a non-matching one (fail-closed), and that an
