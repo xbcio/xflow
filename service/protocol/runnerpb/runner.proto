@@ -44,6 +44,17 @@ message RegisterRequest {
   repeated Capability capabilities = 3;
   map<string, string> labels = 4;
   repeated string namespaces = 5;
+  repeated ActivationInventoryItem activations = 6;
+}
+
+// ActivationInventoryItem reports a single trigger activation the runner is
+// currently hosting. Sent during Register so the control plane can reconcile
+// on reconnect.
+message ActivationInventoryItem {
+  string workflow_id = 1;
+  string entry_unit_id = 2;
+  uint64 generation = 3;
+  string workflow_version = 4;
 }
 
 message RegisterResponse {

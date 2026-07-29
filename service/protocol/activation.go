@@ -75,7 +75,8 @@ type HeartbeatActivations struct {
 // ActivationInventoryItem reports a single activation the runner is currently hosting.
 // Sent during Register to allow the controller to reconcile on reconnect.
 type ActivationInventoryItem struct {
-	WorkflowID  string `json:"workflow_id"`
-	EntryUnitID string `json:"entry_unit_id"` // was GroupID
-	Generation  uint64 `json:"generation"`
+	WorkflowID      string `json:"workflow_id"`
+	WorkflowVersion string `json:"workflow_version,omitempty"` // empty for old runners (backward-compat)
+	EntryUnitID     string `json:"entry_unit_id"`              // was GroupID
+	Generation      uint64 `json:"generation"`
 }

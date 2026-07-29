@@ -71,6 +71,7 @@ func RegisterRequestToProto(req RegisterRunnerRequest) *runnerpb.RegisterRequest
 		Capabilities: CapabilitiesToProto(req.Capabilities),
 		Labels:       cloneLabels(req.Labels),
 		Namespaces:   cloneStrings(req.Namespaces),
+		Activations:  ActivationInventoryToProto(req.Activations),
 	}
 }
 
@@ -81,7 +82,40 @@ func RegisterRequestFromProto(req *runnerpb.RegisterRequest) RegisterRunnerReque
 		Capabilities: CapabilitiesFromProto(req.GetCapabilities()),
 		Labels:       cloneLabels(req.GetLabels()),
 		Namespaces:   req.GetNamespaces(),
+		Activations:  ActivationInventoryFromProto(req.GetActivations()),
 	}
+}
+
+func ActivationInventoryToProto(items []ActivationInventoryItem) []*runnerpb.ActivationInventoryItem {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]*runnerpb.ActivationInventoryItem, len(items))
+	for i, item := range items {
+		out[i] = &runnerpb.ActivationInventoryItem{
+			WorkflowId:      item.WorkflowID,
+			EntryUnitId:     item.EntryUnitID,
+			Generation:      item.Generation,
+			WorkflowVersion: item.WorkflowVersion,
+		}
+	}
+	return out
+}
+
+func ActivationInventoryFromProto(items []*runnerpb.ActivationInventoryItem) []ActivationInventoryItem {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]ActivationInventoryItem, len(items))
+	for i, item := range items {
+		out[i] = ActivationInventoryItem{
+			WorkflowID:      item.GetWorkflowId(),
+			WorkflowVersion: item.GetWorkflowVersion(),
+			EntryUnitID:     item.GetEntryUnitId(),
+			Generation:      item.GetGeneration(),
+		}
+	}
+	return out
 }
 
 func RegisterResponseToProto(resp RegisterRunnerResponse) *runnerpb.RegisterResponse {

@@ -225,3 +225,66 @@ func TestReportResultRequestProtoRoundTripEmptyCarrier(t *testing.T) {
 		t.Fatalf("expected no carrier on round-trip, got %v", got.TraceCarrier)
 	}
 }
+
+// TestRegisterRequestProtoRoundTripActivations proves the gRPC RegisterRequest
+// carries ActivationInventoryItems (including WorkflowVersion) through the proto
+// layer in both directions, closing the gRPC inventory gap.
+func TestRegisterRequestProtoRoundTripActivations(t *testing.T) {
+	original := RegisterRunnerRequest{
+		RunnerID:    "runner-1",
+		Concurrency: 4,
+		Capabilities: []Capability{
+			{NodeType: "kafka.source", NodeVersion: 1},
+		},
+		Labels:     map[string]string{"zone": "a"},
+		Namespaces: []string{"default"},
+		Activations: []ActivationInventoryItem{
+			{
+				WorkflowID:      "wf-1",
+				WorkflowVersion: "v2",
+				EntryUnitID:     "tg-1",
+				Generation:      3,
+			},
+			{
+				WorkflowID:      "wf-2",
+				WorkflowVersion: "",
+				EntryUnitID:     "tg-2",
+				Generation:      1,
+			},
+		},
+	}
+
+	pb := RegisterRequestToProto(original)
+	got := RegisterRequestFromProto(pb)
+
+	if got.RunnerID != original.RunnerID {
+		t.Fatalf("RunnerID: got %q, want %q", got.RunnerID, original.RunnerID)
+	}
+	if got.Concurrency != original.Concurrency {
+		t.Fatalf("Concurrency: got %d, want %d", got.Concurrency, original.Concurrency)
+	}
+	if len(got.Activations) != len(original.Activations) {
+		t.Fatalf("Activations len: got %d, want %d", len(got.Activations), len(original.Activations))
+	}
+	for i, want := range original.Activations {
+		g := got.Activations[i]
+		if g.WorkflowID != want.WorkflowID || g.WorkflowVersion != want.WorkflowVersion ||
+			g.EntryUnitID != want.EntryUnitID || g.Generation != want.Generation {
+			t.Fatalf("Activations[%d]: got %+v, want %+v", i, g, want)
+		}
+	}
+}
+
+// TestRegisterRequestProtoRoundTripEmptyActivations proves that a request with
+// no activations (fresh runner) round-trips cleanly.
+func TestRegisterRequestProtoRoundTripEmptyActivations(t *testing.T) {
+	original := RegisterRunnerRequest{
+		RunnerID:    "runner-2",
+		Concurrency: 2,
+	}
+	pb := RegisterRequestToProto(original)
+	got := RegisterRequestFromProto(pb)
+	if len(got.Activations) != 0 {
+		t.Fatalf("expected empty activations, got %v", got.Activations)
+	}
+}
