@@ -11,8 +11,9 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
-// Default reconciler timings. These mirror the retired group-centric
-// ActivationController so behavior is preserved across the migration.
+// Default reconciler timings. These preserve the timing behavior of the
+// previous group-centric activation controller (since retired) across the
+// migration to the node-generic path.
 const (
 	// DefaultEntryActivationReconcilePeriod is how often the reconcile loop runs
 	// when driven by Run (not used by single-pass Reconcile).
