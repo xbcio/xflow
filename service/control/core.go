@@ -559,16 +559,19 @@ func (c *Core) resolveEntrySeedTopology(ctx context.Context, req *engine.SeedExe
 		}
 		return normalizeRunnerError(err, c.logger, "entry_seed_resolve")
 	}
-	// The seed's declared version must match the registered record. A version
-	// skew means the runner is seeding against a graph the control plane does
-	// not host; reject rather than fan out over the wrong topology.
-	if req.WorkflowVersion != "" && rec.Version != "" && req.WorkflowVersion != rec.Version {
+	// The seed's declared version must match the registered record. On the remote
+	// path (registry present), an empty version is treated as a mismatch and
+	// rejected — a remote runner MUST declare the version it seeds against, and a
+	// fail-open empty-vs-registered bypass would let it fan out over the wrong
+	// topology. A non-empty version that disagrees with the record is likewise
+	// rejected.
+	if req.WorkflowVersion == "" || (rec.Version != "" && req.WorkflowVersion != rec.Version) {
 		return ErrEntrySeedWorkflowUnknown
 	}
 	if rec.Graph == nil {
 		return ErrEntrySeedWorkflowUnknown
 	}
-	idx, downstream, err := deriveEntrySeedTopology(rec.Graph, req.EntryUnitID)
+	idx, downstream, err := deriveEntrySeedTopology(rec.Graph, req.EntryUnitID, req.Exits)
 	if err != nil {
 		// deriveEntrySeedTopology only returns ErrEntrySeedWorkflowUnknown-wrapped
 		// errors; surface the sentinel so the transport maps it to 404/409.

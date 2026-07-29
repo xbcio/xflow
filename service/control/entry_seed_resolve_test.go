@@ -180,3 +180,52 @@ func TestCoreEntrySeedUnknownEntryUnitRejected(t *testing.T) {
 		t.Fatalf("unknown-unit seed must not create an execution, inspect err = %v", err)
 	}
 }
+
+// TestCoreEntrySeedEmptyVersionRejected verifies the remote path (registry
+// present) fails closed when the seed omits WorkflowVersion: an empty version
+// must NOT bypass version enforcement (fail-open would let a runner fan out over
+// an unverified topology). It is rejected with ErrEntrySeedWorkflowUnknown and
+// creates no execution.
+func TestCoreEntrySeedEmptyVersionRejected(t *testing.T) {
+	ctx := namespace.WithNamespace(context.Background(), namespace.Default)
+
+	be := local.New()
+	eng := engine.New(be.State(), be.Queue())
+
+	def := entrySeedResolveDef()
+	g, err := graph.Compile(def)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	reg := be.WorkflowRegistry()
+	rec, err := reg.AddWorkflow(ctx, backend.WorkflowRecord{
+		ID:      "wf-empty-version",
+		Key:     "default/trig-down@v1",
+		Version: "v1",
+		Graph:   g,
+	})
+	if err != nil {
+		t.Fatalf("AddWorkflow: %v", err)
+	}
+
+	core := &Core{engine: eng, workflowRegistry: reg}
+
+	outcome := engine.GroupOutcomeSuccess
+	exits := []engine.BoundaryExit{{NodeName: "trig", Port: "main", Data: map[string]any{"x": 1}}}
+	req := engine.SeedExecutionFromEntryRequest{
+		AdmissionKey:    "seed-empty-version-1",
+		WorkflowID:      rec.ID,
+		WorkflowVersion: "", // omitted → must be rejected on the remote path
+		EntryUnitID:     "trig",
+		Outcome:         outcome,
+		Exits:           exits,
+		ResultHash:      engine.ComputeResultHash(outcome, exits),
+	}
+
+	if _, err := core.SeedExecutionFromEntry(ctx, req); !errors.Is(err, ErrEntrySeedWorkflowUnknown) {
+		t.Fatalf("err = %v, want ErrEntrySeedWorkflowUnknown", err)
+	}
+	if _, err := eng.Inspect(ctx, engine.DeterministicExecutionID("seed-empty-version-1")); !errors.Is(err, engine.ErrExecutionNotFound) {
+		t.Fatalf("empty-version seed must not create an execution, inspect err = %v", err)
+	}
+}
