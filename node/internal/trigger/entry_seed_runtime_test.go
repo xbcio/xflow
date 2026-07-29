@@ -135,6 +135,37 @@ func TestHTTPEntrySeed_ConflictState(t *testing.T) {
 	}
 }
 
+// TestHTTPEntrySeed_StaleGeneration409_ReturnsErr verifies that a 409 carrying
+// the fence-rejection body ({"error":"stale_generation"}, i.e. NO
+// state=="conflict") is treated as a transient/retry failure: it must return a
+// NON-NIL error and must NOT report Conflict:true. This is offset-safety
+// critical — a stale-generation fence rejection must leave the Kafka offset
+// UNCOMMITTED so the correctly-generationed new owner eventually processes the
+// message (otherwise: silent message loss during a generation upgrade).
+func TestHTTPEntrySeed_StaleGeneration409_ReturnsErr(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Mimic apiserver writeError(w, 409, "stale_generation").
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":"stale_generation"}`))
+	}))
+	defer srv.Close()
+
+	rt := &HTTPEntrySeedRuntime{BaseURL: srv.URL, Client: srv.Client()}
+	resp, err := rt.SeedExecutionFromEntry(context.Background(), types.EntrySeedRequest{
+		AdmissionKey: "ak-stale", WorkflowID: "wf1", EntryUnitID: "g1", Outcome: "success",
+	})
+	if err == nil {
+		t.Fatal("expected non-nil error on stale-generation 409, got nil")
+	}
+	if resp.Conflict {
+		t.Fatalf("Conflict = true, want false (stale-generation must not be treated as handled conflict)")
+	}
+	if resp.Accepted || resp.Duplicate {
+		t.Fatalf("expected zero-value response on stale-generation 409, got %+v", resp)
+	}
+}
+
 // TestHTTPEntrySeed_ServerError_ReturnsErr verifies a 5xx returns a non-nil
 // error so the caller does NOT commit the Kafka offset.
 func TestHTTPEntrySeed_ServerError_ReturnsErr(t *testing.T) {

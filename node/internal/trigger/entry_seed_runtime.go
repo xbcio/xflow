@@ -26,7 +26,12 @@ const entrySeedRequestTimeout = 15 * time.Second
 //
 // Response mapping:
 //   - body State=="accepted" (HTTP 2xx) → EntrySeedResponse{Accepted:true} (+ Duplicate from body)
-//   - body State=="conflict" or HTTP 409 → EntrySeedResponse{Conflict:true}
+//   - HTTP 409 with body State=="conflict" → EntrySeedResponse{Conflict:true}
+//     (another runner already admitted this key — handled → caller commits)
+//   - HTTP 409 WITHOUT state=="conflict" (fence rejection, e.g.
+//     {"error":"stale_generation"}) → non-nil error, so the caller leaves the
+//     Kafka offset uncommitted and the message is redelivered to the current
+//     generation owner (offset-safety; prevents silent message loss)
 //   - any other non-2xx status or a transport/decode error → non-nil error, so
 //     the caller leaves the Kafka offset uncommitted and Kafka redelivers.
 //
@@ -142,15 +147,47 @@ func (h *HTTPEntrySeedRuntime) SeedExecutionFromEntry(ctx context.Context, req t
 		_ = httpResp.Body.Close()
 	}()
 
-	// HTTP 409 (or a body State=="conflict") means another runner already
-	// admitted a result for this admission key — the admission is handled.
+	// HTTP 409 is overloaded by the control plane for TWO distinct situations
+	// with DIFFERENT bodies, and they MUST be handled differently for offset
+	// safety:
+	//
+	//   1. Genuine admission conflict — another runner already admitted a result
+	//      for this admission key. Body: {"state":"conflict","execution_id":...}.
+	//      This IS handled → return Conflict:true so the caller commits the Kafka
+	//      offset (the message is consumed by the other runner's result).
+	//
+	//   2. Generation fence rejection (e.g. stale_generation) — this runner posted
+	//      a NEW admission key at a superseded generation. Body:
+	//      {"error":"stale_generation"} (errorResponse; NO "state" field, so it
+	//      decodes to State==""). This is NOT handled: the correctly-generationed
+	//      new owner has not processed this message yet. Returning Conflict here
+	//      would make the caller commit the offset (kafka.go), so Kafka would
+	//      never redeliver and the new owner would never see the message — SILENT
+	//      MESSAGE LOSS during a generation upgrade / reassignment. Therefore this
+	//      case must return a NON-NIL error so the caller leaves the offset
+	//      UNCOMMITTED and Kafka redelivers to the new owner.
+	//
+	// We distinguish the two by decoding a struct carrying both the "state" and
+	// "error" json fields: only the genuine-conflict body sets state=="conflict".
 	if httpResp.StatusCode == http.StatusConflict {
-		var wireResp protocol.SeedExecutionResponse
-		_ = json.NewDecoder(httpResp.Body).Decode(&wireResp)
-		return types.EntrySeedResponse{
-			Conflict:    true,
-			ExecutionID: types.ExecutionID(wireResp.ExecutionID),
-		}, nil
+		var body struct {
+			State       string `json:"state"`
+			ExecutionID string `json:"execution_id"`
+			Error       string `json:"error"`
+		}
+		_ = json.NewDecoder(httpResp.Body).Decode(&body)
+		if body.State == "conflict" {
+			// Genuine admission conflict — handled; caller commits the offset.
+			return types.EntrySeedResponse{
+				Conflict:    true,
+				ExecutionID: types.ExecutionID(body.ExecutionID),
+			}, nil
+		}
+		// Fence rejection (stale_generation, etc.) — NOT handled. Return an error
+		// so the caller does NOT commit the offset (offset-safety: Kafka must
+		// redeliver to the current-generation owner). The reason string is a
+		// server-controlled classifier only; it carries no token/URL/params.
+		return types.EntrySeedResponse{}, fmt.Errorf("entry-seed: rejected by generation fence: %s", body.Error)
 	}
 
 	// Any other non-2xx is transient/unexpected → error (no offset commit).

@@ -15,6 +15,7 @@ import (
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/service/apiserver"
 	"github.com/xbcio/xflow/service/control"
+	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/types"
 
 	"github.com/redis/go-redis/v9"
@@ -133,16 +134,23 @@ func runEntryActivationLifecycleE2E(t *testing.T, store engine.EntryActivationSt
 	mgr := control.NewEntryActivationManager(store)
 
 	now := time.Now()
+	// The kafka-in trigger entry unit derives capability Requirements
+	// {NodeType:"kafka.trigger"} (Task 3), and the reconciler fail-closes on
+	// capability match — so the hosting runner must advertise that capability
+	// (plus test.tg.body, the downstream action the group projection pulls in) or
+	// it is correctly skipped and nothing is assigned.
 	matching := control.RunnerSnapshot{
 		RunnerID:      "runner-zone-a",
 		Capacity:      4,
 		Labels:        map[string]string{"zone": "a"},
+		Capabilities:  []protocol.Capability{{NodeType: "kafka.trigger"}, {NodeType: "test.tg.body"}},
 		LastHeartbeat: now,
 	}
 	other := control.RunnerSnapshot{
 		RunnerID:      "runner-zone-b",
 		Capacity:      4,
 		Labels:        map[string]string{"zone": "b"},
+		Capabilities:  []protocol.Capability{{NodeType: "kafka.trigger"}, {NodeType: "test.tg.body"}},
 		LastHeartbeat: now,
 	}
 	lister := &staticRunnerLister{runners: []control.RunnerSnapshot{other, matching}}
@@ -191,11 +199,13 @@ func runEntryActivationLifecycleE2E(t *testing.T, store engine.EntryActivationSt
 	if err := mgr.AddOrUpdateWorkflow(ctx, namespace.Default, wfID, wfV, g2); err != nil {
 		t.Fatalf("AddOrUpdateWorkflow(update): %v", err)
 	}
-	// After the manager fenced on the material change, the record must be
-	// unassigned pending reassignment.
+	// The manager writes desired-state only and never fences (the reconciler is
+	// the single fence+reassign authority). So pre-reconcile the old owner is
+	// still assigned; the reconciler observes the selector mismatch, fences the
+	// old generation, and reassigns in the same pass.
 	act, _, _ = store.Get(ctx, key)
-	if act.RunnerID != "" {
-		t.Fatalf("after update (pre-reconcile): want fenced/unassigned, got %q", act.RunnerID)
+	if act.RunnerID != "runner-zone-a" {
+		t.Fatalf("after update (pre-reconcile): manager must not fence, want runner-zone-a still owner, got %q", act.RunnerID)
 	}
 	if err := reconciler.Reconcile(ctx, time.Now()); err != nil {
 		t.Fatalf("Reconcile(update): %v", err)
@@ -222,15 +232,18 @@ func runEntryActivationLifecycleE2E(t *testing.T, store engine.EntryActivationSt
 	if act.Desired {
 		t.Fatalf("after remove: want desired=false, got %+v", act)
 	}
-	if act.RunnerID != "" {
-		t.Fatalf("after remove: want unassigned, got %q", act.RunnerID)
+	// The manager sets desired=false only; it does not fence, so the owner is
+	// still recorded until the reconciler deactivates it.
+	if act.RunnerID != "runner-zone-b" {
+		t.Fatalf("after remove (pre-reconcile): manager must not fence, want runner-zone-b still owner, got %q", act.RunnerID)
 	}
-	// A reconcile after removal must NOT re-assign a non-desired activation.
+	// A reconcile after removal must deactivate the owner and NOT re-assign a
+	// non-desired activation.
 	if err := reconciler.Reconcile(ctx, time.Now()); err != nil {
 		t.Fatalf("Reconcile(after remove): %v", err)
 	}
 	act, _, _ = store.Get(ctx, key)
 	if act.RunnerID != "" {
-		t.Fatalf("reconcile must not assign a non-desired activation, got %q", act.RunnerID)
+		t.Fatalf("reconcile must deactivate + not assign a non-desired activation, got %q", act.RunnerID)
 	}
 }

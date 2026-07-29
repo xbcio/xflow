@@ -2,6 +2,8 @@ package trigger
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -268,6 +270,47 @@ func TestKafkaEntrySeed_Conflict_CommitsOffset(t *testing.T) {
 	commits := recorder.getCommits()
 	if len(commits) != 1 {
 		t.Fatalf("commit count = %d, want 1 (conflict still commits offset)", len(commits))
+	}
+}
+
+// TestKafkaEntrySeed_StaleGeneration409_NoCommit is the end-to-end offset-safety
+// guard: it wires the REAL HTTPEntrySeedRuntime against a control plane that
+// returns 409 {"error":"stale_generation"} (a generation fence rejection for a
+// NEW admission key), and asserts seedKafkaEntryBatch does NOT commit the Kafka
+// offset. If it committed, Kafka would never redeliver and the current-generation
+// owner would never process the message — silent message loss during a
+// generation upgrade / reassignment.
+func TestKafkaEntrySeed_StaleGeneration409_NoCommit(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Mimic apiserver writeError(w, 409, "stale_generation").
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":"stale_generation"}`))
+	}))
+	defer srv.Close()
+
+	msgs := []KafkaMessage{
+		{Topic: "t", Partition: 0, Offset: 700, Value: []byte("stale")},
+	}
+	consumer := newScriptedConsumer(msgs)
+	recorder := &commitRecordingConsumer{inner: consumer}
+
+	// A superseded runtime at an old generation talking to the real endpoint.
+	rt := &HTTPEntrySeedRuntime{BaseURL: srv.URL, Client: srv.Client(), Generation: 1}
+
+	in := &types.TriggerActivateInput{
+		WorkflowID: "wf1",
+		NodeName:   "trigger",
+		Params:     map[string]any{"entry_unit_id": "g1", "workflow_version": "v1"},
+		Runtime:    rt,
+	}
+
+	ok := seedKafkaEntryBatch(context.Background(), in, recorder, msgs[0])
+	if ok {
+		t.Fatal("seedKafkaEntryBatch returned true, want false (stale-generation fence must not commit)")
+	}
+	if commits := recorder.getCommits(); len(commits) != 0 {
+		t.Fatalf("commit count = %d, want 0 (stale-generation fence must NOT commit offset)", len(commits))
 	}
 }
 
