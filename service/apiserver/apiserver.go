@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"time"
 
 	"google.golang.org/grpc"
 
@@ -173,6 +174,12 @@ func New(cfg Config, opts ...Option) (*APIServer, error) {
 	return s, nil
 }
 
+// entryActivationStoreTTL bounds how long an untouched EntryActivation record
+// survives in the durable (Redis) store. It comfortably exceeds the reconcile
+// period + lease TTL so a live-but-idle activation is never evicted between
+// reconcile passes; every write refreshes it.
+const entryActivationStoreTTL = 24 * time.Hour
+
 // buildControlPlane assembles a *control.ControlPlane from cfg. It mirrors
 // cmd/server's buildControlPlane for backend selection (memory when neither
 // RedisAddr nor RedisConfig is set, distributed otherwise) but does NOT start
@@ -189,6 +196,9 @@ func buildControlPlane(cfg Config) (*control.ControlPlane, error) {
 	useRedis := cfg.RedisConfig != nil || cfg.RedisAddr != ""
 	if !useRedis {
 		ccfg.Backend = backendlocal.New(backendlocal.WithConcurrency(cfg.Concurrency))
+		// In-memory EntryActivation store so the node-generic reconciler runs and
+		// register/deregister derive activations even on the single-node path.
+		ccfg.EntryActivationStore = control.NewMemoryEntryActivationStore()
 	} else {
 		opts := []distributed.Option{
 			distributed.WithConcurrency(cfg.Concurrency),
@@ -213,6 +223,10 @@ func buildControlPlane(cfg Config) (*control.ControlPlane, error) {
 			return nil, err
 		}
 		ccfg.Backend = b
+		// Redis-backed EntryActivation store so the reconciler fences seeds by
+		// generation and delivers directives across replicas. The TTL bounds how
+		// long an untouched activation record survives; every write refreshes it.
+		ccfg.EntryActivationStore = b.NewEntryActivationStore(entryActivationStoreTTL)
 	}
 
 	// Select the workflow registry the same way the backend is selected: reuse

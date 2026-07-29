@@ -141,19 +141,31 @@ type ControlPlane struct {
 	// provided. Used for generation fencing on seeds and lifecycle management.
 	entryActivations engine.EntryActivationStore
 
+	// entryManager translates workflow add/update/remove into desired
+	// EntryActivation records. Non-nil only when Config.EntryActivationStore is
+	// provided. Exposed via EntryActivationManager() for the register path.
+	entryManager *EntryActivationManager
+
+	// entryReconciler drives desired EntryActivations toward a live runner
+	// assignment and produces node-generic activate/deactivate directives. Non-nil
+	// only when Config.EntryActivationStore is provided. Its Run loop is launched
+	// leader-gated in Start.
+	entryReconciler *EntryActivationReconciler
+
 	// workflowRegistry is the optional durable registry of compiled workflow
 	// graphs. Resolved from Config.WorkflowRegistry, else from the backend
 	// provider when it exposes one, else nil. Exposed via WorkflowRegistry().
 	workflowRegistry backend.WorkflowRegistry
 
-	lifecycleMu         sync.Mutex
-	started             bool
-	stopped             bool
-	leaderCancel        context.CancelFunc
-	sweeperCancel       context.CancelFunc
-	claimRecoveryCancel context.CancelFunc
-	activationCancel    context.CancelFunc
-	unbind              func()
+	lifecycleMu           sync.Mutex
+	started               bool
+	stopped               bool
+	leaderCancel          context.CancelFunc
+	sweeperCancel         context.CancelFunc
+	claimRecoveryCancel   context.CancelFunc
+	activationCancel      context.CancelFunc
+	entryReconcilerCancel context.CancelFunc
+	unbind                func()
 	// wg tracks the background goroutines started by Start (leader campaign,
 	// sweeper, claim recovery, activation controller). Shutdown cancels their
 	// contexts and then waits for them to exit, bounded by the Shutdown context
@@ -288,6 +300,35 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 		grpcServer.core.activationCtrl = activationCtrl
 	}
 
+	// Node-generic entry-activation controller: optional, created only when an
+	// EntryActivationStore is provided. The manager writes desired-state on
+	// workflow register/deregister; the reconciler assigns live runners, fences
+	// stale/removed owners, and produces the activate/deactivate directives the
+	// heartbeat handler piggybacks. Both HTTP and gRPC Core instances get the
+	// reconciler so heartbeats on either transport deliver directives. The
+	// reconciler's Run loop is launched leader-gated in Start.
+	var entryManager *EntryActivationManager
+	var entryReconciler *EntryActivationReconciler
+	if cfg.EntryActivationStore != nil {
+		entryManager = NewEntryActivationManager(cfg.EntryActivationStore)
+		entrySelector := DefaultRunnerSelector()
+		recCfg := EntryActivationReconcilerConfig{
+			Store:    cfg.EntryActivationStore,
+			Selector: &entrySelector,
+			Logger:   cfg.Logger,
+		}
+		// The reconciler enumerates live runners via ActivationRunnerLister. The
+		// runner directory supplies it when it implements the capability; a
+		// directory that does not simply yields no live runners (fail-closed: the
+		// reconciler leaves activations unassigned rather than misplacing them).
+		if lister, ok := runners.(ActivationRunnerLister); ok {
+			recCfg.Lister = lister
+		}
+		entryReconciler = NewEntryActivationReconciler(recCfg)
+		httpServer.core.entryReconciler = entryReconciler
+		grpcServer.core.entryReconciler = entryReconciler
+	}
+
 	return &ControlPlane{
 		backend:          cfg.Backend,
 		eng:              eng,
@@ -300,6 +341,8 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 		logger:           cfg.Logger,
 		activationCtrl:   activationCtrl,
 		entryActivations: cfg.EntryActivationStore,
+		entryManager:     entryManager,
+		entryReconciler:  entryReconciler,
 		workflowRegistry: workflowRegistry,
 	}, nil
 }
@@ -338,6 +381,15 @@ func (cp *ControlPlane) SeedExecutionFromEntry(ctx context.Context, req engine.S
 // activations on workflow add/update/remove.
 func (cp *ControlPlane) EntryActivationStore() engine.EntryActivationStore {
 	return cp.entryActivations
+}
+
+// EntryActivationManager returns the node-generic entry-activation manager, or
+// nil when no EntryActivationStore is configured. The apiserver register/
+// deregister handlers use it to derive/clear desired activations on workflow
+// add/update/remove. Callers MUST nil-guard: an embedded/in-process control
+// plane without an activation store returns nil.
+func (cp *ControlPlane) EntryActivationManager() *EntryActivationManager {
+	return cp.entryManager
 }
 
 // WorkflowRegistry returns the durable registry of compiled workflow graphs, or
@@ -427,7 +479,44 @@ func (cp *ControlPlane) Start(ctx context.Context) error {
 		}()
 	}
 
+	// Launch the node-generic entry-activation reconcile loop. It ticks every
+	// ReconcilePeriod and is leader-gated: only the elected leader assigns,
+	// fences, renews, and produces directives (mirrors the retired
+	// activationCtrl gate at Run). A non-leader replica skips the pass entirely.
+	if cp.entryReconciler != nil {
+		recCtx, recCancel := context.WithCancel(context.Background())
+		cp.entryReconcilerCancel = recCancel
+		cp.wg.Add(1)
+		go func() {
+			defer cp.wg.Done()
+			cp.runEntryReconciler(recCtx)
+		}()
+	}
+
 	return nil
+}
+
+// runEntryReconciler drives the node-generic entry-activation reconcile loop
+// until ctx is cancelled. It is leader-gated: a non-leader replica skips the
+// pass so only one replica assigns/fences activations at a time.
+func (cp *ControlPlane) runEntryReconciler(ctx context.Context) {
+	ticker := time.NewTicker(DefaultEntryActivationReconcilePeriod)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if !cp.elector.IsLeader() {
+				continue
+			}
+			if err := cp.entryReconciler.Reconcile(ctx, time.Now()); err != nil && ctx.Err() == nil {
+				if cp.logger != nil {
+					cp.logger.Error("entry activation reconcile failed", "err", err)
+				}
+			}
+		}
+	}
 }
 
 func (cp *ControlPlane) runClaimRecovery(ctx context.Context, reclaimer ClaimReclaimer) {
@@ -509,6 +598,9 @@ func (cp *ControlPlane) Shutdown(ctx context.Context) error {
 	}
 	if cp.activationCancel != nil {
 		cp.activationCancel()
+	}
+	if cp.entryReconcilerCancel != nil {
+		cp.entryReconcilerCancel()
 	}
 	if cp.leaderCancel != nil {
 		cp.leaderCancel()

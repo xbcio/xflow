@@ -356,6 +356,22 @@ func (m *workflowControlModule) handleRegisterWorkflow(w http.ResponseWriter, r 
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
+	// Derive the node-generic entry activations for this workflow version so the
+	// reconciler can assign remote-hosted trigger entry units to runners. The
+	// namespace is the same server-side value used for the registry record. A
+	// derivation failure fails the register (generic 500) rather than leaving a
+	// registered-but-unactivated workflow — the manager is fail-closed on a group
+	// package that cannot be projected. Nil-guarded: an embedded control plane
+	// without an EntryActivationStore exposes no manager and skips this.
+	if mgr := m.entryActivationManager(); mgr != nil {
+		if err := mgr.AddOrUpdateWorkflow(r.Context(), namespace.FromContext(r.Context()), rec.ID, def.Version, g); err != nil {
+			if m.log != nil {
+				m.log.Error("register_workflow_derive_activations_failed", "err", err)
+			}
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+	}
 	writeJSON(w, http.StatusOK, registerWorkflowResponse{WorkflowID: rec.ID})
 }
 
@@ -380,6 +396,26 @@ func (m *workflowControlModule) handleDeregisterWorkflow(w http.ResponseWriter, 
 		writeError(w, http.StatusNotFound, "workflow not found")
 		return
 	}
+	// Fetch the record BEFORE removal so the entry-activation manager can derive
+	// the same trigger entry units (from the persisted compiled graph) to clear.
+	// A not-found record is a 404; any other lookup error is a generic 500. When
+	// no activation manager is wired this lookup is skipped entirely.
+	var toDeactivate *backend.WorkflowRecord
+	if mgr := m.entryActivationManager(); mgr != nil {
+		rec, err := registry.GetWorkflow(r.Context(), types.WorkflowID(id))
+		if err != nil {
+			if errors.Is(err, backend.ErrWorkflowNotFound) {
+				writeError(w, http.StatusNotFound, "workflow not found")
+				return
+			}
+			if m.log != nil {
+				m.log.Error("deregister_workflow_lookup_failed", "err", err)
+			}
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		toDeactivate = &rec
+	}
 	if err := registry.RemoveWorkflow(r.Context(), types.WorkflowID(id)); err != nil {
 		if errors.Is(err, backend.ErrWorkflowNotFound) {
 			writeError(w, http.StatusNotFound, "workflow not found")
@@ -391,6 +427,21 @@ func (m *workflowControlModule) handleDeregisterWorkflow(w http.ResponseWriter, 
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
+	// Clear the desired entry activations (desired-state only; the reconciler
+	// delivers the Deactivate and fences the owner). The namespace is resolved
+	// server-side, never from the body. A derivation failure is a generic 500 —
+	// the registry record is already removed, so the caller can retry the clear
+	// but must not silently leave a dangling desired activation.
+	if toDeactivate != nil {
+		mgr := m.entryActivationManager()
+		if err := mgr.RemoveWorkflow(r.Context(), namespace.FromContext(r.Context()), toDeactivate.ID, toDeactivate.Version, toDeactivate.Graph); err != nil {
+			if m.log != nil {
+				m.log.Error("deregister_workflow_clear_activations_failed", "err", err)
+			}
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]bool{"removed": true})
 }
 
@@ -401,6 +452,18 @@ func (m *workflowControlModule) registry() backend.WorkflowRegistry {
 		return nil
 	}
 	return m.cp.WorkflowRegistry()
+}
+
+// entryActivationManager returns the control plane's node-generic
+// entry-activation manager, or nil when no ControlPlane is wired (unit tests
+// with a fake facade) or no EntryActivationStore is configured (embedded /
+// in-process). Callers nil-guard: registering/deregistering a workflow derives/
+// clears entry activations only when a manager is present.
+func (m *workflowControlModule) entryActivationManager() *control.EntryActivationManager {
+	if m.cp == nil {
+		return nil
+	}
+	return m.cp.EntryActivationManager()
 }
 
 // workflowRegistryKey builds the registry conflict-detection key from the
