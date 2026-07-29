@@ -46,11 +46,6 @@ func TestRedisEntryActivationContract(t *testing.T) {
 	}
 	_ = probe.Close()
 	statestoretest.RunEntryActivationContract(t, func(t *testing.T) engine.EntryActivationStore {
-		rdb := redis.NewClient(&redis.Options{Addr: addr})
-		t.Cleanup(func() {
-			_ = rdb.FlushDB(t.Context()).Err()
-			_ = rdb.Close()
-		})
-		return NewEntryActivationStore(rdb, time.Minute)
+		return NewEntryActivationStore(freshRealRedis(t, addr), time.Minute)
 	})
 }
