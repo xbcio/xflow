@@ -397,9 +397,10 @@ func (m *workflowControlModule) handleDeregisterWorkflow(w http.ResponseWriter, 
 		return
 	}
 	// Fetch the record BEFORE removal so the entry-activation manager can derive
-	// the same trigger entry units (from the persisted compiled graph) to clear.
-	// A not-found record is a 404; any other lookup error is a generic 500. When
-	// no activation manager is wired this lookup is skipped entirely.
+	// the same trigger entry units (from the persisted compiled graph) to clear,
+	// and so an already-removed workflow 404s. A not-found record is a 404; any
+	// other lookup error is a generic 500. When no activation manager is wired
+	// this lookup is skipped entirely.
 	var toDeactivate *backend.WorkflowRecord
 	if mgr := m.entryActivationManager(); mgr != nil {
 		rec, err := registry.GetWorkflow(r.Context(), types.WorkflowID(id))
@@ -416,6 +417,28 @@ func (m *workflowControlModule) handleDeregisterWorkflow(w http.ResponseWriter, 
 		}
 		toDeactivate = &rec
 	}
+	// Clear the desired entry activations BEFORE removing the registry record so
+	// the two steps are independently retryable and no orphaned Desired activation
+	// can survive a partial failure. If this clear fails we return 500 with the
+	// registry record still present, so a retry re-fetches the graph and re-clears;
+	// if we removed the registry record first and then failed here, the retry
+	// would 404 on GetWorkflow and never reach the clear, stranding a Desired
+	// activation the reconciler keeps honoring for entry seeds. The clear is
+	// desired-state only (Desired=false); the reconciler delivers the Deactivate
+	// and fences the owner. The namespace is resolved server-side, never the body.
+	if toDeactivate != nil {
+		mgr := m.entryActivationManager()
+		if err := mgr.RemoveWorkflow(r.Context(), namespace.FromContext(r.Context()), toDeactivate.ID, toDeactivate.Version, toDeactivate.Graph); err != nil {
+			if m.log != nil {
+				m.log.Error("deregister_workflow_clear_activations_failed", "err", err)
+			}
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+	}
+	// Remove the registry record. The manager clear above is idempotent (a repeat
+	// re-marks an already-!Desired record), so a failure here is safely retryable:
+	// the caller retries, re-clears harmlessly, and re-removes.
 	if err := registry.RemoveWorkflow(r.Context(), types.WorkflowID(id)); err != nil {
 		if errors.Is(err, backend.ErrWorkflowNotFound) {
 			writeError(w, http.StatusNotFound, "workflow not found")
@@ -426,21 +449,6 @@ func (m *workflowControlModule) handleDeregisterWorkflow(w http.ResponseWriter, 
 		}
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
-	}
-	// Clear the desired entry activations (desired-state only; the reconciler
-	// delivers the Deactivate and fences the owner). The namespace is resolved
-	// server-side, never from the body. A derivation failure is a generic 500 —
-	// the registry record is already removed, so the caller can retry the clear
-	// but must not silently leave a dangling desired activation.
-	if toDeactivate != nil {
-		mgr := m.entryActivationManager()
-		if err := mgr.RemoveWorkflow(r.Context(), namespace.FromContext(r.Context()), toDeactivate.ID, toDeactivate.Version, toDeactivate.Graph); err != nil {
-			if m.log != nil {
-				m.log.Error("deregister_workflow_clear_activations_failed", "err", err)
-			}
-			writeError(w, http.StatusInternalServerError, "internal server error")
-			return
-		}
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"removed": true})
 }
