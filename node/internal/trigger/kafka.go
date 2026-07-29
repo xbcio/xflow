@@ -176,6 +176,15 @@ func (n *KafkaTriggerNode) Activate(ctx context.Context, in *types.TriggerActiva
 		return nil, err
 	}
 	if cfg.Aggregate.Enabled {
+		// The aggregate path emits batches through the legacy Runtime.Emit and has
+		// no entry-seed admission equivalent (a batch admission key would have to
+		// express an offset range that the control-plane fence accepts as the same
+		// key across retries). Fail closed instead of activating a consumer whose
+		// every flush would error and replay forever.
+		if isEntrySeedActivation(in) {
+			_ = consumer.Close()
+			return nil, fmt.Errorf("kafka trigger: aggregate mode is not supported for entry-seed hosting")
+		}
 		return activateKafkaAggregate(ctx, in, cfg, consumer), nil
 	}
 	return activateKafkaPerMessage(ctx, in, cfg, consumer), nil
@@ -552,14 +561,10 @@ func (a *kafkaPartitionAggregator) run() {
 				}
 			}
 			idleTimer.Reset(a.idleTimeout)
-			ok, err := dedupKafkaMessage(context.Background(), a.rt.in, msg)
-			if err != nil {
-				continue
-			}
-			if !ok {
-				_ = commitKafkaMessages(context.Background(), a.rt.consumer, msg)
-				continue
-			}
+			// No pre-emit dedup: a message must never be marked "seen" before its
+			// side effect is durable, or a crash between the two loses it for good.
+			// At-least-once here rests on flush's emit-then-commit ordering, and the
+			// downstream absorbs duplicates via the host idempotency contract.
 			buffer = append(buffer, msg)
 			if len(buffer) == 1 {
 				resetKafkaAggregateTimer(timer, &timerActive, a.rt.cfg.FlushInterval)
@@ -580,7 +585,9 @@ func (a *kafkaPartitionAggregator) run() {
 		case <-idleTimer.C:
 			// No message for the idle window: assume the partition was revoked
 			// by a rebalance. Flush any pending buffer, then self-terminate so
-			// the goroutine and map entry are reclaimed.
+			// the goroutine and map entry are reclaimed. A failed flush here
+			// drops the in-memory buffer, which is safe: the offsets were never
+			// committed, so Kafka redelivers to whoever owns the partition next.
 			if len(buffer) > 0 {
 				a.flush(context.Background(), buffer)
 			}
@@ -628,12 +635,6 @@ func emitKafkaMessage(ctx context.Context, in *types.TriggerActivateInput, msg K
 		return false
 	}
 	return true
-}
-
-func dedupKafkaMessage(ctx context.Context, in *types.TriggerActivateInput, msg KafkaMessage) (bool, error) {
-	eventID := kafkaMessageID(msg)
-	ok, err := in.Runtime.Dedup(ctx, "trigger:"+string(in.WorkflowID)+":"+in.NodeName+":"+eventID, 24*time.Hour)
-	return ok, err
 }
 
 func commitKafkaMessages(ctx context.Context, consumer KafkaConsumer, messages ...KafkaMessage) error {
