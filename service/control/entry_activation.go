@@ -52,6 +52,7 @@ func (s *MemoryEntryActivationStore) Upsert(_ context.Context, act engine.EntryA
 	// Preserve assignment state; only refresh desired-state fields.
 	existing.PackageHash = act.PackageHash
 	existing.Selector = act.Selector
+	existing.Requirements = act.Requirements
 	existing.Desired = act.Desired
 	return nil
 }

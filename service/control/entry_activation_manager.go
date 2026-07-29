@@ -31,9 +31,10 @@ func NewEntryActivationManager(store engine.EntryActivationStore) *EntryActivati
 // EntryUnitActivation is a derived description of one trigger entry unit that
 // needs a remote-hosted activation.
 type EntryUnitActivation struct {
-	EntryUnitID string
-	PackageHash string
-	Selector    *types.RunnerSelector
+	EntryUnitID  string
+	PackageHash  string
+	Selector     *types.RunnerSelector
+	Requirements []engine.CapabilityRequirement
 }
 
 // DeriveEntryActivations extracts the trigger entry units from a compiled graph
@@ -52,10 +53,18 @@ func DeriveEntryActivations(g *graph.Graph) []EntryUnitActivation {
 			if !gm.Trigger || gm.RunnerSelector == nil {
 				continue
 			}
+			// Derive the group's capability requirements from the projected
+			// package (union of member node requirements + the group exec
+			// feature), reusing engine.RequirementsFromGraphPackage.
+			var reqs []engine.CapabilityRequirement
+			if pkg, _, err := graph.ProjectGroupPackage(g, i); err == nil && pkg != nil {
+				reqs = engine.RequirementsFromGraphPackage(pkg.Requirements)
+			}
 			out = append(out, EntryUnitActivation{
-				EntryUnitID: gm.Name,
-				PackageHash: gm.PackageHash,
-				Selector:    gm.RunnerSelector,
+				EntryUnitID:  gm.Name,
+				PackageHash:  gm.PackageHash,
+				Selector:     gm.RunnerSelector,
+				Requirements: reqs,
 			})
 		case graph.UnitNode:
 			nodeIdx := g.UnitNodeIndex(i)
@@ -66,6 +75,10 @@ func DeriveEntryActivations(g *graph.Graph) []EntryUnitActivation {
 			out = append(out, EntryUnitActivation{
 				EntryUnitID: nm.Name,
 				Selector:    nm.RunnerSelector,
+				Requirements: engine.NormalizeRequirements([]engine.CapabilityRequirement{{
+					NodeType:    nm.Type,
+					NodeVersion: nm.Version,
+				}}),
 			})
 		}
 	}
@@ -112,6 +125,7 @@ func (m *EntryActivationManager) AddOrUpdateWorkflow(ctx context.Context, ns nam
 			EntryUnitID:     eu.EntryUnitID,
 			PackageHash:     eu.PackageHash,
 			Selector:        eu.Selector,
+			Requirements:    eu.Requirements,
 			Desired:         true,
 		}); err != nil {
 			return err
@@ -152,6 +166,7 @@ func (m *EntryActivationManager) RemoveWorkflow(ctx context.Context, ns namespac
 			EntryUnitID:     eu.EntryUnitID,
 			PackageHash:     existing.PackageHash,
 			Selector:        existing.Selector,
+			Requirements:    existing.Requirements,
 			Desired:         false,
 		}); err != nil {
 			return err

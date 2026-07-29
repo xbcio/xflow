@@ -111,6 +111,15 @@ func (s *EntryActivationStore) Upsert(ctx context.Context, act engine.EntryActiv
 		selectorJSON = string(b)
 	}
 
+	var requirementsJSON string
+	if len(act.Requirements) > 0 {
+		b, err := json.Marshal(act.Requirements)
+		if err != nil {
+			return fmt.Errorf("marshal requirements: %w", err)
+		}
+		requirementsJSON = string(b)
+	}
+
 	desired := "0"
 	if act.Desired {
 		desired = "1"
@@ -124,6 +133,7 @@ func (s *EntryActivationStore) Upsert(ctx context.Context, act engine.EntryActiv
 		"entry_unit_id", act.EntryUnitID,
 		"package_hash", act.PackageHash,
 		"selector", selectorJSON,
+		"requirements", requirementsJSON,
 		"desired", desired,
 	)
 	pipe.Expire(ctx, key, s.ttl)
@@ -231,6 +241,15 @@ func decodeEntryActivation(fields map[string]string) (engine.EntryActivation, er
 			return engine.EntryActivation{}, fmt.Errorf("unmarshal selector: %w", err)
 		}
 		act.Selector = &rs
+	}
+	// Requirements is absent on records written before the field existed; decode
+	// tolerates absence (leaves Requirements nil).
+	if reqs := fields["requirements"]; reqs != "" {
+		var rr []engine.CapabilityRequirement
+		if err := json.Unmarshal([]byte(reqs), &rr); err != nil {
+			return engine.EntryActivation{}, fmt.Errorf("unmarshal requirements: %w", err)
+		}
+		act.Requirements = rr
 	}
 	if g := fields["generation"]; g != "" {
 		gen, err := strconv.ParseUint(g, 10, 64)

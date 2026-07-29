@@ -27,6 +27,12 @@ type EntryActivation struct {
 	EntryUnitID     string
 	PackageHash     string
 	Selector        *types.RunnerSelector
+	// Requirements are the capability requirements the hosting runner must
+	// satisfy to drive this entry unit (derived from the entry unit's node
+	// type(s)). The reconciler assigns only a runner whose advertised
+	// capabilities cover these. It is desired-state, owned by Upsert. Absent on
+	// records written before this field existed (decodes to nil).
+	Requirements    []CapabilityRequirement
 	Desired         bool
 	RunnerID        string
 	SessionID       string

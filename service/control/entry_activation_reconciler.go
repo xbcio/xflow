@@ -137,6 +137,11 @@ func (r *EntryActivationReconciler) reconcileOne(ctx context.Context, act *engin
 // selector. It is fail-closed on a required selector: a runner whose labels do
 // not match is never chosen.
 func (r *EntryActivationReconciler) chooseRunner(act *engine.EntryActivation, live []RunnerSnapshot, now time.Time) (RunnerSnapshot, bool) {
+	routing := engine.TaskRouting{Requirements: act.Requirements}
+	if len(act.Requirements) > 0 {
+		routing.NodeType = act.Requirements[0].NodeType
+		routing.NodeVersion = act.Requirements[0].NodeVersion
+	}
 	for _, snap := range live {
 		if !r.selector.IsLive(snap, now) {
 			continue
@@ -145,6 +150,12 @@ func (r *EntryActivationReconciler) chooseRunner(act *engine.EntryActivation, li
 			continue
 		}
 		if !selectorMatches(act.Selector, snap.Labels) {
+			continue
+		}
+		// Fail-closed capability match: skip runners that cannot host the entry
+		// unit's node type(s). Older records / selector-only activations carry no
+		// Requirements and are placed on selector match alone.
+		if len(act.Requirements) > 0 && !MatchCapabilities(snap.Capabilities, routing) {
 			continue
 		}
 		return snap, true
