@@ -1,7 +1,6 @@
 # Node Group Co-location
 
-> Status: Implemented (Milestones A–J complete)
-> Branch: `feat/node-group-milestone-b`
+> Status: Implemented (Milestones A–J + Phase 5 remote-runner trigger hosting)
 > Full spec: `.claude/specs/2026-07-27-node-group-colocation-design.md`
 
 ## 1. Overview
@@ -22,7 +21,7 @@ group as a single vertex in the durable scheduling topology.
 types/group.go           GroupDef contract (Name, Members, RunnerSelector, OnError, Retry, Timeout, Mode)
 engine/graph/            Compile-time IR: GroupMeta, UnitMeta (two-layer scheduling), boundary edges
 engine/                  Runtime types: GroupLease, GroupResult, GroupCommitRequest, scheduling intents
-backend/.../rstate/      Redis atomic state: group_state.go (commit Lua), group_suspend.go, trigger_admission.go
+backend/.../rstate/      Redis atomic state: group_state.go (commit Lua), group_suspend.go, entry_admission.go
 service/control/         Control loop: group dispatch, entry-activation manager + reconciler, runner selector
 service/runner/          Runner-side: group runtime (embedded engine), package cache, backpressure
 service/protocol/        Wire DTOs: GroupLeaseDTO, activation directives, admission RPC
@@ -59,7 +58,7 @@ type GroupDef struct {
 | `GroupStateStore` | Acquire/renew/commit group leases atomically (fenced by token+attempt) |
 | `GroupSuspender` | Transition running → suspended; persist spec + signal journal + entry input |
 | `GroupResumer` | Deliver signal → quorum check → produce resume outbox entry |
-| `TriggerAdmissionStore` | Atomic first-writer-wins admission: create execution + commit trigger-group + downstream outbox |
+| `EntryAdmissionStore` | Atomic first-writer-wins admission: create execution + commit entry unit + downstream outbox |
 | `EntryActivationStore` | Desired/active state for node-generic entry-activation runner assignment (Upsert desired state, Assign/Renew/Fence for generation-fenced ownership). Replaces the retired group-centric `TriggerActivationStore`. |
 | `GroupLeaseExpirer` | Reclaim expired leases back to retry-ready |
 | `GroupSuspendReader` / `GroupCanceler` / `GroupSignalRevoker` / `GroupTimeoutHandler` | Suspend lifecycle helpers |
@@ -191,64 +190,69 @@ Group execution requires the `group.exec.v1` feature capability. Runners that do
 
 ## 12. Known Limitations & Future Work
 
-Items consciously deferred during Phase 5 (remote-runner trigger hosting). The
-subsystem shipped end-to-end (server workflow registry, `EntryActivationManager`
-+ `EntryActivationReconciler`, generation-fenced seeds, runner `ActivationHandler`
-+ `ActivationTracker` with reconnect inventory reconciliation); the items below
-were judged non-blocking. Group A are limitations of the shipped feature; Group B
-is future work that was deliberately not started in Phase 5.
+Phase 5 (remote-runner trigger hosting) shipped the subsystem end-to-end: server
+workflow registry, `EntryActivationManager` + `EntryActivationReconciler`,
+generation-fenced seeds, runner `ActivationHandler` + `ActivationTracker` with
+reconnect inventory reconciliation. A follow-up pass then closed the deferred
+items listed below under §12.1. What remains open is in §12.2.
 
-### 12.1 Group A — Known limitations of the shipped feature
+### 12.1 Closed follow-ups
 
-These describe real behavior of the code as merged. None is a correctness gap.
+- **gRPC register carries the activation inventory.** `RegisterRequest`
+  (`service/protocol/runnerpb/runner.proto`) has a repeated
+  `ActivationInventoryItem`, mapped both ways by `RegisterRequestToProto` /
+  `RegisterRequestFromProto`. gRPC-transport runners now get the same
+  zero-orphan reconnect reconciliation as HTTP ones.
+- **Inventory reconciliation keys by `(workflowID, workflowVersion,
+  entryUnitID)`.** `ReconcileRunnerInventory` no longer collapses multiple
+  versions of the same entry unit. An item reporting an empty version (a runner
+  predating the field) degrades to the versionless two-tuple match so it is
+  renewed rather than falsely revoked; the `gen == act.Generation` gate still
+  applies on both paths.
+- **Redis `ListLiveRunners` is O(1) in round-trips.** `HKeys` followed by one
+  pipelined batch of `HMGet` per runner-attribute hash — two round-trips
+  regardless of runner count, down from `1 + 7N`. `Runner()` and
+  `ListLiveRunners()` share one decoder (`decodeRunnerSnapshot`) so the
+  field-defaulting rules cannot drift apart.
+- **The seed HTTP client is injectable.** `NewTriggerActivationHandler` takes
+  `WithSeedHTTPClient`; the runner entrypoint passes a client whose timeout sits
+  above `entrySeedRequestTimeout` so the per-request context deadline stays the
+  effective bound.
+- **The generation-upgrade stale-close branch is tested.** Two cases cover it:
+  a second `Activate` at a higher generation closes the superseded subscription
+  exactly once, and a failing `Activate` leaves the old subscription open and
+  installed. The branch's reliance on `ActivationTracker` serializing directives
+  per activation identity is now stated in a comment beside it.
+- **Aggregate Kafka offset commits are emit-then-commit.**
+  `kafkaPartitionAggregator` no longer marks a message deduplicated before its
+  side effect is durable, which removes the window where a crash between the
+  dedup write and the emit lost the event permanently. A failed flush retains
+  the buffer and retries; offsets commit only after the whole batch emits.
+- **`default`-selector fallback grace period** (spec §11.7). A `default`-mode
+  activation with no label-matching runner waits out `FallbackGrace`, then falls
+  back to any live runner with headroom whose capabilities satisfy the entry
+  unit. `required` mode still fail-closes. Capability matching is never relaxed
+  by the fallback. An empty `Mode` counts as `default`, matching the compiler's
+  normalization in `engine/graph/compile.go`.
 
-- **gRPC register does not carry the activation inventory.** Reconnect inventory
-  reconciliation (renew leases for reported activations, revoke unreported ones)
-  runs only over the HTTP register path — `protocol.RegisterRunnerRequest` has an
-  `Activations` field, but the gRPC `RegisterRequest` message
-  (`service/protocol/runnerpb/runner.proto`) does not. The periodic reconcile
-  loop is the backstop, so gRPC-transport runners only forgo the reconnect
-  *optimization* — no correctness loss. Follow-up needed only if gRPC-transport
-  runners must host triggers with zero-orphan reconnect.
-- **Inventory reconciliation keys by `(workflowID, entryUnitID)`, not workflow
-  version.** `ReconcileRunnerInventory` (`service/control/entry_activation_reconciler.go`)
-  indexes the reported inventory by `(workflowID, entryUnitID)`, collapsing
-  multiple versions of the same entry unit to a last-wins entry; the store-side
-  generation gate (`gen == act.Generation`) disambiguates in practice. Fine for
-  the realistic single-version-per-runner case; consider adding `WorkflowVersion`
-  to the key for robustness against a same-runner multi-version edge.
-- **Redis `ListLiveRunners` is O(n)** (`HKeys` + a per-runner `Runner()` /
-  `HGet` fan-out in `service/control/redis_runner_directory.go`). Acceptable at
-  the current reconcile cadence; a pipeline/`MGET` rewrite is a scale follow-up.
+### 12.2 Open items
+
 - **Non-Kafka trigger types are fail-closed for entry-seed hosting.**
   `TriggerActivationHandler` dispatches generically to any registered trigger
   type, but only the Kafka path consumes the entry-seed runtime
   (`SeedExecutionFromEntry`). A trigger mis-wired onto the legacy `Emit` path
-  with `HTTPEntrySeedRuntime` hits fail-closed stubs (return an error, never
-  silently drop). This is a phased-rollout limitation: only Kafka has entry-seed
-  hosting today.
-- **`TriggerActivationHandler` uses `http.DefaultClient`** for the seed runtime,
-  so there is no client-level timeout. Each seed request is bounded by a
-  per-request context timeout inside `SeedExecutionFromEntry`
-  (`entrySeedRequestTimeout`, `node/internal/trigger/entry_seed_runtime.go`), so
-  this is defensive-polish only.
-- **The generation-upgrade stale-close branch in the activation handler lacks a
-  dedicated unit test.** It is safe today because `ActivationTracker` serializes
-  directives per tracker (holds its mutex across the handler's `Activate`), but
-  the handler's own invariant is not self-contained; a test plus a comment noting
-  the serialization assumption would harden it.
-
-### 12.2 Group B — Explicitly out-of-scope future work
-
-These were planned but not attempted in Phase 5 (cf. spec §14.1).
-
-- **Aggregate/batch Kafka path P0-1 migration.** `kafkaPartitionAggregator`
-  still uses pre-emit dedup; it is not migrated to the ordered
-  emit-then-commit at-least-once scheme the single-message path uses.
-- **`default`-selector fallback grace period** (spec §11.7 TODO). Only `required`
-  selector semantics are implemented; the reconciler fail-closes when no
-  selector-matching runner exists rather than falling back to any capable runner
-  after a grace window.
+  with `HTTPEntrySeedRuntime` hits fail-closed stubs: `Emit`/`Dedup`/`TryLock`
+  return an error so the offset is never committed and the message is
+  redelivered rather than silently dropped. `State` returns nil — its interface
+  signature has no error return, so a mis-wired caller panics instead, which is
+  still fail-closed but not an error return. This is a phased-rollout
+  limitation: only Kafka has entry-seed hosting today.
+- **Aggregate Kafka mode cannot be hosted via entry-seed admission.** The
+  aggregate path emits batches through the legacy `Runtime.Emit`; a batch
+  admission key would have to express an offset range that the control-plane
+  fence treats as the same key across retries. `Activate` rejects the
+  combination outright rather than starting a consumer whose every flush would
+  fail. Per-message entry-seed hosting is unaffected.
 - **Activation replica count > 1 per entry unit** (spec §11.6 explicit-replica
   scaling). There is one active hosting runner per entry unit today.
 - **Full runner→control activation ACK RPC.** The retired path's ACK was dead
