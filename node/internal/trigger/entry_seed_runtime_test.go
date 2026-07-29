@@ -80,6 +80,32 @@ func TestHTTPEntrySeed_Accepted(t *testing.T) {
 	}
 }
 
+// TestEntrySeedRuntimeGeneration verifies the runtime stamps its per-activation
+// Generation onto every seed request it sends on the wire, so the control-plane
+// fence admits exactly the current-generation seeds (IMPORTANT-1).
+func TestEntrySeedRuntimeGeneration(t *testing.T) {
+	var gotReq protocol.SeedExecutionRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotReq)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(protocol.SeedExecutionResponse{
+			State:       "accepted",
+			ExecutionID: "exec-g",
+		})
+	}))
+	defer srv.Close()
+
+	rt := &HTTPEntrySeedRuntime{BaseURL: srv.URL, Client: srv.Client(), Generation: 7}
+	if _, err := rt.SeedExecutionFromEntry(context.Background(), types.EntrySeedRequest{
+		AdmissionKey: "ak-g", WorkflowID: "wf1", EntryUnitID: "g1", Outcome: "success",
+	}); err != nil {
+		t.Fatalf("SeedExecutionFromEntry returned err: %v", err)
+	}
+	if gotReq.Generation != 7 {
+		t.Fatalf("Generation = %d, want 7", gotReq.Generation)
+	}
+}
+
 // TestHTTPEntrySeed_ConflictState maps a body State=="conflict" to Conflict:true.
 func TestHTTPEntrySeed_ConflictState(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

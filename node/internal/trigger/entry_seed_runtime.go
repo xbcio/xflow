@@ -40,6 +40,12 @@ type HTTPEntrySeedRuntime struct {
 	Client *http.Client
 	// Token, when non-empty, is sent as "Authorization: Bearer <Token>".
 	Token string
+	// Generation is the entry-activation generation this runtime serves. It is
+	// stamped onto every seed request so the control-plane fence admits exactly
+	// the current-generation seeds. The runtime is constructed PER ACTIVATION
+	// with the directive's generation and is the authority for the activation it
+	// serves (IMPORTANT-1).
+	Generation uint64
 }
 
 var _ types.EntrySeedRuntime = (*HTTPEntrySeedRuntime)(nil)
@@ -64,6 +70,7 @@ func (h *HTTPEntrySeedRuntime) SeedExecutionFromEntry(ctx context.Context, req t
 		Outcome:         req.Outcome,
 		Exits:           exits,
 		Error:           req.Error,
+		Generation:      h.Generation,
 	}
 
 	body, err := json.Marshal(wireReq)
