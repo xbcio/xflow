@@ -141,10 +141,10 @@ func (ac *ActivationController) reconcileOne(ctx context.Context, act *engine.Tr
 		}
 		if revoked {
 			ac.enqueueDeactivate(act.RunnerID, protocol.DeactivateDirective{
-				Namespace:  string(act.Namespace),
-				WorkflowID: string(act.WorkflowID),
+				Namespace:   string(act.Namespace),
+				WorkflowID:  string(act.WorkflowID),
 				EntryUnitID: act.GroupID,
-				Generation: act.Generation,
+				Generation:  act.Generation,
 			})
 		}
 		return nil
@@ -158,10 +158,10 @@ func (ac *ActivationController) reconcileOne(ctx context.Context, act *engine.Tr
 		}
 		if revoked {
 			ac.enqueueDeactivate(act.RunnerID, protocol.DeactivateDirective{
-				Namespace:  string(act.Namespace),
-				WorkflowID: string(act.WorkflowID),
+				Namespace:   string(act.Namespace),
+				WorkflowID:  string(act.WorkflowID),
 				EntryUnitID: act.GroupID,
-				Generation: act.Generation,
+				Generation:  act.Generation,
 			})
 		}
 		return nil
@@ -259,10 +259,10 @@ func (ac *ActivationController) ClearDesired(ctx context.Context, key engine.Act
 	// If it was assigned, tell the runner to stop.
 	if existing != nil && existing.RunnerID != "" {
 		ac.enqueueDeactivate(existing.RunnerID, protocol.DeactivateDirective{
-			Namespace:  string(key.Namespace),
-			WorkflowID: string(key.WorkflowID),
+			Namespace:   string(key.Namespace),
+			WorkflowID:  string(key.WorkflowID),
 			EntryUnitID: key.GroupID,
-			Generation: existing.Generation,
+			Generation:  existing.Generation,
 		})
 	}
 	return nil
@@ -322,5 +322,3 @@ func (ac *ActivationController) getOrCreateDirectives(runnerID string) *runnerDi
 	}
 	return rd
 }
-
-

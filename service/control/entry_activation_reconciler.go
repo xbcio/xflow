@@ -149,13 +149,17 @@ func (r *EntryActivationReconciler) reconcileOne(ctx context.Context, act *engin
 		return nil
 	}
 
-	// Already assigned: keep it unless the lease expired or the owner is no
-	// longer live. Otherwise fence the old generation before reassigning so the
-	// stale runner can never keep driving the entry unit.
+	// Already assigned: keep it unless the lease expired, the owner is no longer
+	// live, or the owner no longer satisfies the (possibly updated) desired
+	// selector/capability. Otherwise fence the old generation and deactivate the
+	// old owner before reassigning, so the stale runner can never keep driving the
+	// entry unit and a material change (selector/capability) moves it to a runner
+	// that matches the new desired state.
 	if act.RunnerID != "" {
 		expired := !act.LeaseDeadline.IsZero() && act.LeaseDeadline.Before(now)
 		ownerLive := r.runnerIsLive(act.RunnerID, live, now)
-		if !expired && ownerLive {
+		ownerMatches := ownerLive && r.ownerSatisfiesDesired(act, live, now)
+		if !expired && ownerMatches {
 			// Owner still valid: proactively renew the lease when it is within the
 			// renew threshold of expiry, keeping the generation stable so the
 			// hosting runner is not disrupted.
@@ -172,8 +176,8 @@ func (r *EntryActivationReconciler) reconcileOne(ctx context.Context, act *engin
 		if err := r.cfg.Store.Fence(ctx, key, act.Generation); err != nil {
 			return err
 		}
-		// Tell the stale/dead owner to stop (best-effort; a dead runner simply
-		// never receives it).
+		// Tell the stale/dead/mismatched owner to stop (best-effort; a dead runner
+		// simply never receives it).
 		r.enqueueDeactivate(prevRunner, deactivateDirectiveFor(act, prevGen))
 	}
 
@@ -205,11 +209,6 @@ func (r *EntryActivationReconciler) reconcileOne(ctx context.Context, act *engin
 // selector. It is fail-closed on a required selector: a runner whose labels do
 // not match is never chosen.
 func (r *EntryActivationReconciler) chooseRunner(act *engine.EntryActivation, live []RunnerSnapshot, now time.Time) (RunnerSnapshot, bool) {
-	routing := engine.TaskRouting{Requirements: act.Requirements}
-	if len(act.Requirements) > 0 {
-		routing.NodeType = act.Requirements[0].NodeType
-		routing.NodeVersion = act.Requirements[0].NodeVersion
-	}
 	for _, snap := range live {
 		if !r.selector.IsLive(snap, now) {
 			continue
@@ -223,12 +222,52 @@ func (r *EntryActivationReconciler) chooseRunner(act *engine.EntryActivation, li
 		// Fail-closed capability match: skip runners that cannot host the entry
 		// unit's node type(s). Older records / selector-only activations carry no
 		// Requirements and are placed on selector match alone.
-		if len(act.Requirements) > 0 && !MatchCapabilities(snap.Capabilities, routing) {
+		if !capabilitiesSatisfy(act, snap) {
 			continue
 		}
 		return snap, true
 	}
 	return RunnerSnapshot{}, false
+}
+
+// ownerSatisfiesDesired reports whether the activation's CURRENT owner still
+// satisfies the (possibly updated) desired selector and capability requirements.
+// It is used to detect a material change (selector/capability): when a workflow
+// update narrows the selector or requirements so the current owner no longer
+// qualifies, the reconciler must fence + deactivate the old owner and reassign a
+// matching runner. Capacity is not re-checked here — the owner already holds the
+// assignment. Returns false when the owner is no longer among the live runners
+// (that case is already handled by the liveness check, but treating it as a
+// non-match is safe).
+func (r *EntryActivationReconciler) ownerSatisfiesDesired(act *engine.EntryActivation, live []RunnerSnapshot, now time.Time) bool {
+	for _, snap := range live {
+		if snap.RunnerID != act.RunnerID {
+			continue
+		}
+		if !selectorMatches(act.Selector, snap.Labels) {
+			return false
+		}
+		if !capabilitiesSatisfy(act, snap) {
+			return false
+		}
+		return true
+	}
+	return false
+}
+
+// capabilitiesSatisfy reports whether the runner snapshot can host the entry
+// unit's node type(s). Activations with no Requirements (older / selector-only
+// records) are placed on selector match alone (returns true).
+func capabilitiesSatisfy(act *engine.EntryActivation, snap RunnerSnapshot) bool {
+	if len(act.Requirements) == 0 {
+		return true
+	}
+	routing := engine.TaskRouting{
+		Requirements: act.Requirements,
+		NodeType:     act.Requirements[0].NodeType,
+		NodeVersion:  act.Requirements[0].NodeVersion,
+	}
+	return MatchCapabilities(snap.Capabilities, routing)
 }
 
 func (r *EntryActivationReconciler) runnerIsLive(runnerID string, live []RunnerSnapshot, now time.Time) bool {

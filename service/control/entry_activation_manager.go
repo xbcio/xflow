@@ -106,12 +106,16 @@ func DeriveEntryActivations(g *graph.Graph) ([]EntryUnitActivation, error) {
 }
 
 // AddOrUpdateWorkflow reconciles the desired EntryActivations for a workflow
-// version. For each remote-hosted trigger entry unit it upserts a desired
-// activation; when an existing record's package hash or selector changed it
-// fences the current generation first so the reconciler must issue a strictly
-// higher generation (and the stale runner is fenced off). Entry units that no
-// longer carry a selector, or workflows with none, are left untouched here (a
-// full remove is handled by RemoveWorkflow).
+// version. For each remote-hosted trigger entry unit it upserts the desired
+// state (NodeType/Params/Requirements/Selector/PackageHash). It writes
+// desired-state ONLY: it never touches the assignment fields (RunnerID/
+// SessionID/Generation/LeaseDeadline) and never fences. The
+// EntryActivationReconciler is the single fence+deactivate authority — it
+// observes a stale/mismatched owner (selector/capability/liveness/expiry) or a
+// cleared record, deactivates the previously-hosting runner, and then fences
+// before reassigning. Keeping the fence off this path is what lets the reconciler
+// still see the old owner (RunnerID set) so it can deliver the Deactivate; a
+// pre-fence here would clear RunnerID and orphan the old runner's subscription.
 func (m *EntryActivationManager) AddOrUpdateWorkflow(ctx context.Context, ns namespace.Namespace, workflowID types.WorkflowID, workflowVersion string, g *graph.Graph) error {
 	if m.store == nil {
 		return nil
@@ -124,24 +128,6 @@ func (m *EntryActivationManager) AddOrUpdateWorkflow(ctx context.Context, ns nam
 		return err
 	}
 	for _, eu := range units {
-		key := engine.EntryActivationKey{
-			Namespace:       ns,
-			WorkflowID:      workflowID,
-			WorkflowVersion: workflowVersion,
-			EntryUnitID:     eu.EntryUnitID,
-		}
-		existing, ok, err := m.store.Get(ctx, key)
-		if err != nil {
-			return err
-		}
-		// On a material change (selector or package hash) to an already-assigned
-		// activation, fence the old generation so the currently-hosting runner is
-		// invalidated before the reconciler reassigns the new desired state.
-		if ok && existing.RunnerID != "" && changedActivation(existing, eu) {
-			if err := m.store.Fence(ctx, key, existing.Generation); err != nil {
-				return err
-			}
-		}
 		if err := m.store.Upsert(ctx, engine.EntryActivation{
 			Namespace:       ns,
 			WorkflowID:      workflowID,
@@ -161,9 +147,12 @@ func (m *EntryActivationManager) AddOrUpdateWorkflow(ctx context.Context, ns nam
 }
 
 // RemoveWorkflow deactivates every remote-hosted trigger entry unit of the given
-// workflow version: it marks the activation non-desired and fences the current
-// generation so any hosting runner is told to stop (via a subsequent reconcile /
-// generation bump) and no new runner is assigned.
+// workflow version by marking the activation non-desired. It writes
+// desired-state ONLY (Desired=false) and never fences: the
+// EntryActivationReconciler observes the non-desired record with its owner still
+// set, delivers a Deactivate to the hosting runner, and then fences (clears the
+// owner + advances the generation floor) so no new runner is assigned. Fencing
+// here would clear RunnerID first and orphan the hosting runner's subscription.
 func (m *EntryActivationManager) RemoveWorkflow(ctx context.Context, ns namespace.Namespace, workflowID types.WorkflowID, workflowVersion string, g *graph.Graph) error {
 	if m.store == nil {
 		return nil
@@ -203,36 +192,6 @@ func (m *EntryActivationManager) RemoveWorkflow(ctx context.Context, ns namespac
 		}); err != nil {
 			return err
 		}
-		if err := m.store.Fence(ctx, key, existing.Generation); err != nil {
-			return err
-		}
 	}
 	return nil
-}
-
-// changedActivation reports whether the desired package hash or selector differs
-// from the stored record, requiring a fence + reassignment.
-func changedActivation(existing engine.EntryActivation, eu EntryUnitActivation) bool {
-	if existing.PackageHash != eu.PackageHash {
-		return true
-	}
-	return !selectorsEqual(existing.Selector, eu.Selector)
-}
-
-func selectorsEqual(a, b *types.RunnerSelector) bool {
-	if a == nil || b == nil {
-		return a == b
-	}
-	if a.Mode != b.Mode {
-		return false
-	}
-	if len(a.MatchLabels) != len(b.MatchLabels) {
-		return false
-	}
-	for k, v := range a.MatchLabels {
-		if b.MatchLabels[k] != v {
-			return false
-		}
-	}
-	return true
 }
