@@ -10,26 +10,33 @@ const (
 
 // --- Activate directive (server → runner) ---
 
-// ActivateDirective is sent by the activation controller to a runner,
-// instructing it to start consuming a trigger-group.
+// ActivateDirective is sent by the activation reconciler to a runner,
+// instructing it to start hosting a trigger entry unit (a single trigger node
+// OR a group node, which is externally one node). It is node-generic: the entry
+// unit is identified by EntryUnitID (formerly GroupID) and carries the trigger's
+// NodeType and Params so the runner can construct the trigger without a separate
+// fetch. Params carry the SAME trigger parameters the WorkflowDef already holds —
+// no new secret surface.
 type ActivateDirective struct {
-	Namespace       string `json:"namespace"`
-	WorkflowID      string `json:"workflow_id"`
-	WorkflowVersion string `json:"workflow_version"`
-	GroupID         string `json:"group_id"`
-	Generation      uint64 `json:"generation"`
-	PackageHash     string `json:"package_hash"`
+	Namespace       string         `json:"namespace"`
+	WorkflowID      string         `json:"workflow_id"`
+	WorkflowVersion string         `json:"workflow_version"`
+	EntryUnitID     string         `json:"entry_unit_id"` // was GroupID
+	NodeType        string         `json:"node_type"`     // trigger node type, e.g. "kafka.source"
+	Params          map[string]any `json:"params,omitempty"`
+	Generation      uint64         `json:"generation"`
+	PackageHash     string         `json:"package_hash,omitempty"`
 }
 
 // --- Deactivate directive (server → runner) ---
 
-// DeactivateDirective is sent by the activation controller to a runner,
-// instructing it to stop consuming a trigger-group.
+// DeactivateDirective is sent by the activation reconciler to a runner,
+// instructing it to stop hosting a trigger entry unit.
 type DeactivateDirective struct {
-	Namespace  string `json:"namespace"`
-	WorkflowID string `json:"workflow_id"`
-	GroupID    string `json:"group_id"`
-	Generation uint64 `json:"generation"`
+	Namespace   string `json:"namespace"`
+	WorkflowID  string `json:"workflow_id"`
+	EntryUnitID string `json:"entry_unit_id"` // was GroupID
+	Generation  uint64 `json:"generation"`
 }
 
 // --- Activation acknowledgment (runner → server) ---
@@ -68,7 +75,7 @@ type HeartbeatActivations struct {
 // ActivationInventoryItem reports a single activation the runner is currently hosting.
 // Sent during Register to allow the controller to reconcile on reconnect.
 type ActivationInventoryItem struct {
-	WorkflowID string `json:"workflow_id"`
-	GroupID    string `json:"group_id"`
-	Generation uint64 `json:"generation"`
+	WorkflowID  string `json:"workflow_id"`
+	EntryUnitID string `json:"entry_unit_id"` // was GroupID
+	Generation  uint64 `json:"generation"`
 }

@@ -96,6 +96,31 @@ redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))
 return 1
 `)
 
+// renewEntryActivationLua extends the lease deadline of the current owner
+// WITHOUT advancing the generation. Generation-gated: succeeds (returns 1) only
+// when the supplied generation EQUALS the stored generation and an owner is set.
+// No-op (returns 0) when the activation does not exist, is unowned, or the
+// generation does not match.
+//
+// KEYS: 1=activation hash
+// ARGV: 1=generation 2=leaseDeadlineUnixNano 3=ttl_s
+var renewEntryActivationLua = redis.NewScript(`
+if redis.call('EXISTS', KEYS[1]) == 0 then
+    return 0
+end
+local cur = tonumber(redis.call('HGET', KEYS[1], 'generation') or '0')
+local gen = tonumber(ARGV[1])
+if gen ~= cur then
+    return 0
+end
+if (redis.call('HGET', KEYS[1], 'runner_id') or '') == '' then
+    return 0
+end
+redis.call('HSET', KEYS[1], 'lease_deadline', ARGV[2])
+redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3]))
+return 1
+`)
+
 // Upsert writes the desired-state fields of an activation without touching the
 // assignment fields (runner_id/session_id/generation/lease_deadline) of an
 // existing record — those are owned by Assign/Fence.
@@ -120,6 +145,15 @@ func (s *EntryActivationStore) Upsert(ctx context.Context, act engine.EntryActiv
 		requirementsJSON = string(b)
 	}
 
+	var paramsJSON string
+	if len(act.Params) > 0 {
+		b, err := json.Marshal(act.Params)
+		if err != nil {
+			return fmt.Errorf("marshal params: %w", err)
+		}
+		paramsJSON = string(b)
+	}
+
 	desired := "0"
 	if act.Desired {
 		desired = "1"
@@ -131,6 +165,8 @@ func (s *EntryActivationStore) Upsert(ctx context.Context, act engine.EntryActiv
 		"workflow_id", string(act.WorkflowID),
 		"workflow_version", act.WorkflowVersion,
 		"entry_unit_id", act.EntryUnitID,
+		"node_type", act.NodeType,
+		"params", paramsJSON,
 		"package_hash", act.PackageHash,
 		"selector", selectorJSON,
 		"requirements", requirementsJSON,
@@ -205,6 +241,20 @@ func (s *EntryActivationStore) Assign(ctx context.Context, key engine.EntryActiv
 	return res == 1, nil
 }
 
+// Renew extends the lease deadline of the current owner without advancing the
+// generation, via a single Lua CAS. Generation-gated: succeeds only when gen
+// equals the stored generation and an owner is set.
+func (s *EntryActivationStore) Renew(ctx context.Context, key engine.EntryActivationKey, gen uint64, deadline time.Time) (bool, error) {
+	res, err := renewEntryActivationLua.Run(ctx, s.rdb,
+		[]string{s.keyFor(key)},
+		gen, deadlineToNano(deadline), int(s.ttl.Seconds()),
+	).Int64()
+	if err != nil {
+		return false, fmt.Errorf("renew entry activation: %w", err)
+	}
+	return res == 1, nil
+}
+
 // Fence invalidates the current owner and raises the generation floor via a
 // single Lua CAS. No-op when the activation does not exist.
 func (s *EntryActivationStore) Fence(ctx context.Context, key engine.EntryActivationKey, gen uint64) error {
@@ -230,10 +280,20 @@ func decodeEntryActivation(fields map[string]string) (engine.EntryActivation, er
 		WorkflowID:      types.WorkflowID(fields["workflow_id"]),
 		WorkflowVersion: fields["workflow_version"],
 		EntryUnitID:     fields["entry_unit_id"],
+		NodeType:        fields["node_type"],
 		PackageHash:     fields["package_hash"],
 		Desired:         fields["desired"] == "1",
 		RunnerID:        fields["runner_id"],
 		SessionID:       fields["session_id"],
+	}
+	// Params is absent on records written before the field existed; decode
+	// tolerates absence (leaves Params nil).
+	if p := fields["params"]; p != "" {
+		var pm map[string]any
+		if err := json.Unmarshal([]byte(p), &pm); err != nil {
+			return engine.EntryActivation{}, fmt.Errorf("unmarshal params: %w", err)
+		}
+		act.Params = pm
 	}
 	if sel := fields["selector"]; sel != "" {
 		var rs types.RunnerSelector

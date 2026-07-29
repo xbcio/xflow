@@ -11,10 +11,10 @@ import (
 
 // mockActivationHandler records Activate/Deactivate calls for test assertions.
 type mockActivationHandler struct {
-	mu           sync.Mutex
-	activations  []protocol.ActivateDirective
+	mu            sync.Mutex
+	activations   []protocol.ActivateDirective
 	deactivations []protocol.DeactivateDirective
-	activateErr  error
+	activateErr   error
 }
 
 func (m *mockActivationHandler) Activate(_ context.Context, d protocol.ActivateDirective) error {
@@ -51,9 +51,9 @@ func TestActivationTracker_Activate_StartsSubscription(t *testing.T) {
 	directives := &protocol.HeartbeatActivations{
 		Activate: []protocol.ActivateDirective{
 			{
-				WorkflowID: "wf-1",
-				GroupID:    "grp-a",
-				Generation: 1,
+				WorkflowID:  "wf-1",
+				EntryUnitID: "grp-a",
+				Generation:  1,
 			},
 		},
 	}
@@ -70,7 +70,7 @@ func TestActivationTracker_Activate_StartsSubscription(t *testing.T) {
 	got := handler.activations[0]
 	handler.mu.Unlock()
 
-	if got.WorkflowID != "wf-1" || got.GroupID != "grp-a" || got.Generation != 1 {
+	if got.WorkflowID != "wf-1" || got.EntryUnitID != "grp-a" || got.Generation != 1 {
 		t.Fatalf("unexpected directive passed to handler: %+v", got)
 	}
 }
@@ -81,9 +81,9 @@ func TestActivationTracker_Activate_Idempotent_SameGeneration(t *testing.T) {
 
 	ctx := context.Background()
 	directive := protocol.ActivateDirective{
-		WorkflowID: "wf-1",
-		GroupID:    "grp-a",
-		Generation: 1,
+		WorkflowID:  "wf-1",
+		EntryUnitID: "grp-a",
+		Generation:  1,
 	}
 
 	// Activate once.
@@ -116,7 +116,7 @@ func TestActivationTracker_Activate_UpgradesGeneration(t *testing.T) {
 	// Activate with generation 1.
 	err := tracker.ProcessDirectives(ctx, &protocol.HeartbeatActivations{
 		Activate: []protocol.ActivateDirective{
-			{WorkflowID: "wf-1", GroupID: "grp-a", Generation: 1},
+			{WorkflowID: "wf-1", EntryUnitID: "grp-a", Generation: 1},
 		},
 	})
 	if err != nil {
@@ -126,7 +126,7 @@ func TestActivationTracker_Activate_UpgradesGeneration(t *testing.T) {
 	// Activate with generation 2 — should cancel old and start new.
 	err = tracker.ProcessDirectives(ctx, &protocol.HeartbeatActivations{
 		Activate: []protocol.ActivateDirective{
-			{WorkflowID: "wf-1", GroupID: "grp-a", Generation: 2},
+			{WorkflowID: "wf-1", EntryUnitID: "grp-a", Generation: 2},
 		},
 	})
 	if err != nil {
@@ -156,7 +156,7 @@ func TestActivationTracker_Deactivate_StopsSubscription(t *testing.T) {
 	// Activate first.
 	err := tracker.ProcessDirectives(ctx, &protocol.HeartbeatActivations{
 		Activate: []protocol.ActivateDirective{
-			{WorkflowID: "wf-1", GroupID: "grp-a", Generation: 1},
+			{WorkflowID: "wf-1", EntryUnitID: "grp-a", Generation: 1},
 		},
 	})
 	if err != nil {
@@ -166,7 +166,7 @@ func TestActivationTracker_Deactivate_StopsSubscription(t *testing.T) {
 	// Deactivate with matching generation.
 	err = tracker.ProcessDirectives(ctx, &protocol.HeartbeatActivations{
 		Deactivate: []protocol.DeactivateDirective{
-			{WorkflowID: "wf-1", GroupID: "grp-a", Generation: 1},
+			{WorkflowID: "wf-1", EntryUnitID: "grp-a", Generation: 1},
 		},
 	})
 	if err != nil {
@@ -193,8 +193,8 @@ func TestActivationTracker_Inventory_ReportsActive(t *testing.T) {
 	// Activate two different workflow/group combos.
 	err := tracker.ProcessDirectives(ctx, &protocol.HeartbeatActivations{
 		Activate: []protocol.ActivateDirective{
-			{WorkflowID: "wf-1", GroupID: "grp-a", Generation: 3},
-			{WorkflowID: "wf-2", GroupID: "grp-b", Generation: 7},
+			{WorkflowID: "wf-1", EntryUnitID: "grp-a", Generation: 3},
+			{WorkflowID: "wf-2", EntryUnitID: "grp-b", Generation: 7},
 		},
 	})
 	if err != nil {
@@ -209,7 +209,7 @@ func TestActivationTracker_Inventory_ReportsActive(t *testing.T) {
 	// Build a lookup for assertions (order is map-iteration-dependent).
 	lookup := make(map[string]protocol.ActivationInventoryItem)
 	for _, item := range inv {
-		lookup[item.WorkflowID+"/"+item.GroupID] = item
+		lookup[item.WorkflowID+"/"+item.EntryUnitID] = item
 	}
 
 	item1, ok := lookup["wf-1/grp-a"]

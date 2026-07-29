@@ -33,6 +33,8 @@ func NewEntryActivationManager(store engine.EntryActivationStore) *EntryActivati
 // needs a remote-hosted activation.
 type EntryUnitActivation struct {
 	EntryUnitID  string
+	NodeType     string
+	Params       map[string]any
 	PackageHash  string
 	Selector     *types.RunnerSelector
 	Requirements []engine.CapabilityRequirement
@@ -77,6 +79,7 @@ func DeriveEntryActivations(g *graph.Graph) ([]EntryUnitActivation, error) {
 			reqs := engine.RequirementsFromGraphPackage(pkg.Requirements)
 			out = append(out, EntryUnitActivation{
 				EntryUnitID:  gm.Name,
+				NodeType:     "xflow.group",
 				PackageHash:  gm.PackageHash,
 				Selector:     gm.RunnerSelector,
 				Requirements: reqs,
@@ -89,6 +92,8 @@ func DeriveEntryActivations(g *graph.Graph) ([]EntryUnitActivation, error) {
 			}
 			out = append(out, EntryUnitActivation{
 				EntryUnitID: nm.Name,
+				NodeType:    nm.Type,
+				Params:      nm.Parameters,
 				Selector:    nm.RunnerSelector,
 				Requirements: engine.NormalizeRequirements([]engine.CapabilityRequirement{{
 					NodeType:    nm.Type,
@@ -142,6 +147,8 @@ func (m *EntryActivationManager) AddOrUpdateWorkflow(ctx context.Context, ns nam
 			WorkflowID:      workflowID,
 			WorkflowVersion: workflowVersion,
 			EntryUnitID:     eu.EntryUnitID,
+			NodeType:        eu.NodeType,
+			Params:          eu.Params,
 			PackageHash:     eu.PackageHash,
 			Selector:        eu.Selector,
 			Requirements:    eu.Requirements,
@@ -187,6 +194,8 @@ func (m *EntryActivationManager) RemoveWorkflow(ctx context.Context, ns namespac
 			WorkflowID:      workflowID,
 			WorkflowVersion: workflowVersion,
 			EntryUnitID:     eu.EntryUnitID,
+			NodeType:        existing.NodeType,
+			Params:          existing.Params,
 			PackageHash:     existing.PackageHash,
 			Selector:        existing.Selector,
 			Requirements:    existing.Requirements,

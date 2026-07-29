@@ -63,7 +63,12 @@ type Core struct {
 	tracer tracing.Tracer
 	// activationCtrl, when non-nil, supplies activation directives piggybacked
 	// on heartbeat responses. Optional — nil means no activation directives.
+	// Retired in favor of entryReconciler; kept until Task 6 removes it.
 	activationCtrl *ActivationController
+	// entryReconciler, when non-nil, is the node-generic entry-activation
+	// reconciler. When set it is the preferred source of heartbeat activation
+	// directives (it supersedes activationCtrl). Nil-guarded; Task 5 wires it.
+	entryReconciler *EntryActivationReconciler
 	// entryActivations, when non-nil, is the durable EntryActivation store used
 	// to fence entry seeds by activation generation (spec §11.6). Nil disables
 	// generation fencing — every seed is admitted (legacy / locally-hosted
@@ -199,7 +204,11 @@ func (c *Core) heartbeat(ctx context.Context, req protocol.HeartbeatRequest, inf
 		return protocol.HeartbeatResponse{}, normalizeRunnerError(err, c.logger, "heartbeat")
 	}
 	resp := protocol.HeartbeatResponse{ServerTime: time.Now().Unix()}
-	if c.activationCtrl != nil {
+	// Prefer the node-generic entry reconciler when wired (Task 5). Fall back to
+	// the retired group-centric controller until Task 6 removes it.
+	if c.entryReconciler != nil {
+		resp.Activations = c.entryReconciler.DirectivesForRunner(req.RunnerID)
+	} else if c.activationCtrl != nil {
 		resp.Activations = c.activationCtrl.DirectivesForRunner(req.RunnerID)
 	}
 	return resp, nil

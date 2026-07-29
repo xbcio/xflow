@@ -143,7 +143,7 @@ func (ac *ActivationController) reconcileOne(ctx context.Context, act *engine.Tr
 			ac.enqueueDeactivate(act.RunnerID, protocol.DeactivateDirective{
 				Namespace:  string(act.Namespace),
 				WorkflowID: string(act.WorkflowID),
-				GroupID:    act.GroupID,
+				EntryUnitID: act.GroupID,
 				Generation: act.Generation,
 			})
 		}
@@ -160,7 +160,7 @@ func (ac *ActivationController) reconcileOne(ctx context.Context, act *engine.Tr
 			ac.enqueueDeactivate(act.RunnerID, protocol.DeactivateDirective{
 				Namespace:  string(act.Namespace),
 				WorkflowID: string(act.WorkflowID),
-				GroupID:    act.GroupID,
+				EntryUnitID: act.GroupID,
 				Generation: act.Generation,
 			})
 		}
@@ -214,7 +214,7 @@ func (ac *ActivationController) tryAssign(ctx context.Context, key engine.Activa
 		Namespace:       string(act.Namespace),
 		WorkflowID:      string(act.WorkflowID),
 		WorkflowVersion: act.WorkflowVersion,
-		GroupID:         act.GroupID,
+		EntryUnitID:     act.GroupID,
 		Generation:      gen,
 		PackageHash:     act.PackageHash,
 	})
@@ -261,7 +261,7 @@ func (ac *ActivationController) ClearDesired(ctx context.Context, key engine.Act
 		ac.enqueueDeactivate(existing.RunnerID, protocol.DeactivateDirective{
 			Namespace:  string(key.Namespace),
 			WorkflowID: string(key.WorkflowID),
-			GroupID:    key.GroupID,
+			EntryUnitID: key.GroupID,
 			Generation: existing.Generation,
 		})
 	}

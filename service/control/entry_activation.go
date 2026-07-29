@@ -50,6 +50,8 @@ func (s *MemoryEntryActivationStore) Upsert(_ context.Context, act engine.EntryA
 		return nil
 	}
 	// Preserve assignment state; only refresh desired-state fields.
+	existing.NodeType = act.NodeType
+	existing.Params = act.Params
 	existing.PackageHash = act.PackageHash
 	existing.Selector = act.Selector
 	existing.Requirements = act.Requirements
@@ -100,6 +102,24 @@ func (s *MemoryEntryActivationStore) Assign(_ context.Context, key engine.EntryA
 	rec.RunnerID = runnerID
 	rec.SessionID = sessionID
 	rec.Generation = gen
+	rec.LeaseDeadline = deadline
+	return true, nil
+}
+
+// Renew extends the lease deadline of the current owner without advancing the
+// generation. Generation-gated: succeeds only when gen equals the stored
+// generation. No-op (false) when absent or the generation does not match.
+func (s *MemoryEntryActivationStore) Renew(_ context.Context, key engine.EntryActivationKey, gen uint64, deadline time.Time) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	rec, ok := s.records[key]
+	if !ok {
+		return false, nil
+	}
+	if rec.Generation != gen || rec.RunnerID == "" {
+		return false, nil
+	}
 	rec.LeaseDeadline = deadline
 	return true, nil
 }

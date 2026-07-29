@@ -21,6 +21,8 @@ func sampleEntryActivation(unit string) engine.EntryActivation {
 		WorkflowID:      "wf-1",
 		WorkflowVersion: "v1",
 		EntryUnitID:     unit,
+		NodeType:        "http.request",
+		Params:          map[string]any{"url": "https://example.test", "method": "GET"},
 		PackageHash:     "pkg-abc",
 		Selector:        &types.RunnerSelector{Mode: types.RunnerSelectorModeRequired, MatchLabels: map[string]string{"zone": "a"}},
 		Requirements:    []engine.CapabilityRequirement{{NodeType: "http.request", NodeVersion: 2, Feature: "trigger.v1"}},
@@ -60,6 +62,13 @@ func RunEntryActivationContract(t *testing.T, newStore func(*testing.T) engine.E
 		}
 		if !got.Desired || got.PackageHash != "pkg-abc" || got.EntryUnitID != "u-getlist" {
 			t.Fatalf("Get returned unexpected record: %+v", got)
+		}
+		// Node-generic desired-state fields must round-trip.
+		if got.NodeType != "http.request" {
+			t.Fatalf("NodeType not round-tripped: got %q want http.request", got.NodeType)
+		}
+		if !reflect.DeepEqual(got.Params, act.Params) {
+			t.Fatalf("Params not round-tripped: got %+v want %+v", got.Params, act.Params)
 		}
 		// Requirements must round-trip (set on Upsert, read back on Get).
 		if !reflect.DeepEqual(got.Requirements, act.Requirements) {
@@ -124,6 +133,61 @@ func RunEntryActivationContract(t *testing.T, newStore func(*testing.T) engine.E
 		}
 		if got.RunnerID != "runner-1" || got.SessionID != "sess-1" || got.Generation != 1 {
 			t.Fatalf("stale assign clobbered owner: %+v", got)
+		}
+	})
+
+	t.Run("RenewKeepsGenerationExtendsDeadline", func(t *testing.T) {
+		s := newStore(t)
+		act := sampleEntryActivation("u-renew")
+		key := entryActivationKey(act)
+		if err := s.Upsert(ctx, act); err != nil {
+			t.Fatalf("Upsert: %v", err)
+		}
+		d1 := time.Now().Add(30 * time.Second).Truncate(time.Second)
+		if ok, err := s.Assign(ctx, key, "runner-1", "sess-1", 1, d1); err != nil || !ok {
+			t.Fatalf("Assign gen1: ok=%v err=%v", ok, err)
+		}
+
+		// Renew at the matching generation extends the deadline, keeps generation
+		// and owner stable.
+		d2 := time.Now().Add(90 * time.Second).Truncate(time.Second)
+		ok, err := s.Renew(ctx, key, 1, d2)
+		if err != nil {
+			t.Fatalf("Renew gen1: %v", err)
+		}
+		if !ok {
+			t.Fatal("Renew at matching generation must succeed")
+		}
+		got, _, err := s.Get(ctx, key)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if got.Generation != 1 || got.RunnerID != "runner-1" {
+			t.Fatalf("Renew changed owner/generation: %+v", got)
+		}
+		if !got.LeaseDeadline.Equal(d2) {
+			t.Fatalf("Renew did not extend deadline: got %v want %v", got.LeaseDeadline, d2)
+		}
+
+		// Renew at a non-matching generation is a no-op (false).
+		ok, err = s.Renew(ctx, key, 2, time.Now().Add(5*time.Minute))
+		if err != nil {
+			t.Fatalf("Renew gen2: %v", err)
+		}
+		if ok {
+			t.Fatal("Renew at non-matching generation must fail")
+		}
+	})
+
+	t.Run("RenewAbsentReturnsFalse", func(t *testing.T) {
+		s := newStore(t)
+		key := entryActivationKey(sampleEntryActivation("u-renew-absent"))
+		ok, err := s.Renew(ctx, key, 1, time.Now().Add(time.Minute))
+		if err != nil {
+			t.Fatalf("Renew on absent: %v", err)
+		}
+		if ok {
+			t.Fatal("Renew on a non-existent activation must return false")
 		}
 	})
 
