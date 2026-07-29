@@ -311,6 +311,91 @@ func (r *EntryActivationReconciler) liveRunners(ctx context.Context, now time.Ti
 	return out
 }
 
+// ReconcileRunnerInventory reconciles a runner's freshly-registered activation
+// inventory against the durable desired-state store. It is called from the
+// register handler when a runner reconnects (a new session) and reports the
+// activations it is currently hosting.
+//
+// For every desired activation currently ASSIGNED to runnerID:
+//   - if the runner re-reports it (present in reported at the SAME generation),
+//     the lease is RENEWED (deadline extended) with the generation UNCHANGED —
+//     bumping the generation would fence the runner's own in-flight seeds, so a
+//     reconnect that still hosts the activation must not disrupt it.
+//   - if the runner does NOT report it (a new session that lost the
+//     subscription on reconnect), the assignment is REVOKED (fenced +
+//     unassigned + Deactivate enqueued) so a later reconcile pass reassigns it
+//     to a live runner rather than orphaning it.
+//
+// A reported item at a DIFFERENT generation than the stored one is treated as
+// unreported (revoke): the runner is hosting a superseded generation and must be
+// reassigned at the current desired state. Reported items for activations NOT
+// currently owned by this runner are ignored — the reconciler assigns owners; a
+// runner cannot claim an activation by reporting it.
+func (r *EntryActivationReconciler) ReconcileRunnerInventory(ctx context.Context, runnerID string, reported []protocol.ActivationInventoryItem, now time.Time) error {
+	if runnerID == "" {
+		return nil
+	}
+	// Index the reported inventory by (workflowID, entryUnitID) → generation so
+	// the per-activation lookup is O(1). Identity keys mirror the tracker's
+	// activationID (WorkflowID + EntryUnitID); the durable store is additionally
+	// scoped by namespace + version, so a match also requires the stored
+	// generation to agree (checked below).
+	type invKey struct{ workflowID, entryUnitID string }
+	reportedGen := make(map[invKey]uint64, len(reported))
+	for _, item := range reported {
+		reportedGen[invKey{item.WorkflowID, item.EntryUnitID}] = item.Generation
+	}
+
+	for _, ns := range r.cfg.Namespaces {
+		acts, err := r.cfg.Store.List(ctx, ns)
+		if err != nil {
+			return err
+		}
+		for i := range acts {
+			act := &acts[i]
+			if !act.Desired || act.RunnerID != runnerID {
+				continue
+			}
+			key := engine.EntryActivationKey{
+				Namespace:       act.Namespace,
+				WorkflowID:      act.WorkflowID,
+				WorkflowVersion: act.WorkflowVersion,
+				EntryUnitID:     act.EntryUnitID,
+			}
+			gen, ok := reportedGen[invKey{string(act.WorkflowID), act.EntryUnitID}]
+			if ok && gen == act.Generation {
+				// Runner still hosts this exact generation → renew the lease,
+				// generation UNCHANGED (do NOT fence the runner's in-flight seeds).
+				newDeadline := now.Add(r.cfg.LeaseTTL)
+				if _, err := r.cfg.Store.Renew(ctx, key, act.Generation, newDeadline); err != nil {
+					if r.cfg.Logger != nil {
+						r.cfg.Logger.Warn("entry activation inventory renew failed",
+							"workflow_id", act.WorkflowID,
+							"entry_unit_id", act.EntryUnitID,
+							"err", err)
+					}
+				}
+				continue
+			}
+			// Assigned to this runner but NOT reported (or reported at a stale
+			// generation) → the reconnected session dropped it. Fence + deactivate
+			// so a later reconcile reassigns it to a live runner.
+			prevGen := act.Generation
+			if err := r.cfg.Store.Fence(ctx, key, act.Generation); err != nil {
+				if r.cfg.Logger != nil {
+					r.cfg.Logger.Warn("entry activation inventory revoke failed",
+						"workflow_id", act.WorkflowID,
+						"entry_unit_id", act.EntryUnitID,
+						"err", err)
+				}
+				continue
+			}
+			r.enqueueDeactivate(runnerID, deactivateDirectiveFor(act, prevGen))
+		}
+	}
+	return nil
+}
+
 // selectorMatches applies runner-selector precedence. A nil selector is a
 // default placement (any runner matches). A "required" selector demands the
 // runner's labels satisfy MatchLabels. A "default" selector also currently

@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/rand"
 	"net/http"
 	"os"
@@ -22,6 +23,7 @@ import (
 	"github.com/xbcio/xflow/execution"
 	"github.com/xbcio/xflow/namespace"
 	_ "github.com/xbcio/xflow/node"
+	"github.com/xbcio/xflow/node/registry"
 	"github.com/xbcio/xflow/node/resource"
 	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/service/protocol"
@@ -315,7 +317,51 @@ func runnerServiceConfig(cfg runnerConfig) (runnersvc.Config, error) {
 			return creds[name]
 		}
 	}
+	// Trigger hosting: when the runner advertises at least one registered trigger
+	// node type AND a seed base URL is reachable, construct the ActivationTracker
+	// over the production TriggerActivationHandler (Task 8) so activate/deactivate
+	// directives piggybacked on heartbeats start/stop real trigger subscriptions
+	// whose seeds are stamped with the assigned generation. When the runner hosts
+	// no triggers (no trigger capability) the tracker is left nil (passive runner)
+	// so the existing no-activation behavior is preserved.
+	if seedBaseURL := triggerSeedBaseURL(cfg); seedBaseURL != "" && hostsTriggers(cfg) {
+		lookup := registryTriggerLookup{}
+		handler := runnersvc.NewTriggerActivationHandler(seedBaseURL, cfg.token, lookup)
+		svcCfg.ActivationTracker = runnersvc.NewActivationTracker(handler, slog.Default())
+	}
 	return svcCfg, nil
+}
+
+// registryTriggerLookup adapts the global node registry's LookupTrigger to the
+// runner's TriggerHandlerLookup interface, so the TriggerActivationHandler can
+// resolve any registered trigger node type without hardcoding Kafka. The
+// node package is imported for side effects in this binary, so every built-in
+// trigger (kafka/timer/cron/webhook/redis-hub) is registered by init time.
+type registryTriggerLookup struct{}
+
+func (registryTriggerLookup) Trigger(nodeType string) (types.TriggerHandler, bool) {
+	return registry.LookupTrigger(nodeType)
+}
+
+// triggerSeedBaseURL returns the control-plane origin the hosted trigger's seed
+// runtime posts entry admissions to. The HTTP server URL is the seed endpoint
+// origin (POST <base>/v1/executions). Entry seeding is always an HTTP round-trip
+// even under the gRPC runner-protocol transport, so it requires a configured
+// --server URL; an empty base disables trigger hosting (no reachable seed path).
+func triggerSeedBaseURL(cfg runnerConfig) string {
+	return strings.TrimRight(cfg.serverURL, "/")
+}
+
+// hostsTriggers reports whether the runner advertises any registered trigger
+// node type among its declared capabilities. Only such a runner should host
+// activations; a runner with no trigger capability stays passive.
+func hostsTriggers(cfg runnerConfig) bool {
+	for _, c := range cfg.capabilities {
+		if _, ok := registry.LookupTrigger(c.NodeType); ok {
+			return true
+		}
+	}
+	return false
 }
 
 // shouldConstructPool reports whether the production runner should construct a

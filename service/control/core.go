@@ -175,6 +175,16 @@ func (c *Core) register(ctx context.Context, req protocol.RegisterRunnerRequest,
 	if err != nil {
 		return protocol.RegisterRunnerResponse{}, normalizeRunnerError(err, c.logger, "register")
 	}
+	// Reconnect reconciliation: renew leases for activations the runner still
+	// reports hosting (generation unchanged) and revoke assignments it no longer
+	// hosts so they become reassignable. Best-effort — a reconcile failure must
+	// not fail an otherwise-valid registration; the periodic reconcile loop is a
+	// backstop. Only runs when the node-generic reconciler is wired.
+	if c.entryReconciler != nil {
+		if err := c.entryReconciler.ReconcileRunnerInventory(ctx, req.RunnerID, req.Activations, time.Now()); err != nil && c.logger != nil {
+			c.logger.Warn("register inventory reconcile failed", "runner_id", req.RunnerID, "err", err)
+		}
+	}
 	return protocol.RegisterRunnerResponse{RunnerID: req.RunnerID, SessionID: session.SessionID}, nil
 }
 

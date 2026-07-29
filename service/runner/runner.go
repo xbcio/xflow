@@ -106,12 +106,21 @@ func New(client ProtocolClient, registry engine.HandlerRegistry, config Config) 
 // otherwise let the server's lease sweeper reclaim and re-execute the task).
 // On any transport error Run returns and the caller (cmd/runner) reconnects.
 func (r *Runner) Run(ctx context.Context) error {
+	// Report any activations still hosted from a prior session so a reconnect
+	// renews their leases instead of orphaning them. Empty when no tracker is
+	// configured or nothing is currently hosted. Carries only identity +
+	// generation, never secret params.
+	var inventory []protocol.ActivationInventoryItem
+	if r.activationTracker != nil {
+		inventory = r.activationTracker.Inventory()
+	}
 	registerResp, err := r.client.Register(ctx, protocol.RegisterRunnerRequest{
 		RunnerID:     r.config.RunnerID,
 		Concurrency:  r.config.Concurrency,
 		Capabilities: r.config.Capabilities,
 		Labels:       r.config.Labels,
 		Namespaces:   namespaceStrings(r.config.Namespaces),
+		Activations:  inventory,
 	})
 	if err != nil {
 		return runContextError(ctx, err)

@@ -391,6 +391,15 @@ func (cp *ControlPlane) Backend() backend.Provider { return cp.backend }
 // It mirrors the read-only accessor pattern of RunnerDirectory() and Backend().
 func (cp *ControlPlane) Sweeper() *LeaseSweeper { return cp.sweeper }
 
+// EntryActivationReconciler exposes the node-generic entry-activation reconciler,
+// or nil when no EntryActivationStore is configured. It mirrors Sweeper(): a
+// read-only seam so integration tests can drive a single deterministic reconcile
+// pass (assign/renew/revoke + directive enqueue) without waiting for the
+// leader-gated background loop. Production code uses the internal Run loop.
+func (cp *ControlPlane) EntryActivationReconciler() *EntryActivationReconciler {
+	return cp.entryReconciler
+}
+
 // Start binds the Task Dispatcher onto the backend's queue, begins leader
 // election (if the backend supports it), and starts the LeaseSweeper loop.
 // It does not block.

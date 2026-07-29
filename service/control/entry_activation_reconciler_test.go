@@ -205,6 +205,125 @@ func TestReconcilerCapabilityMatch(t *testing.T) {
 	})
 }
 
+// TestInventoryReconcile_ReportedRenewsLeaseGenerationUnchanged verifies that
+// when a runner re-registers and reports (in its inventory) an activation it
+// already owns, the reconciler RENEWS the lease deadline WITHOUT advancing the
+// generation. Bumping the generation here would fence the runner's own in-flight
+// seeds (see the RENEW SEMANTICS constraint), so it must stay stable.
+func TestInventoryReconcile_ReportedRenewsLeaseGenerationUnchanged(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryEntryActivationStore()
+
+	act := testEntryActivation() // Selector: required, {zone: a}
+	key := keyOfActivation(act)
+	if err := store.Upsert(ctx, act); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	// Assign the activation to runner-match at generation 1 with a soon-to-expire
+	// lease so the renew is observable.
+	shortDeadline := now.Add(5 * time.Second)
+	ok, err := store.Assign(ctx, key, "runner-match", "sess-1", 1, shortDeadline)
+	if err != nil || !ok {
+		t.Fatalf("Assign: ok=%v err=%v", ok, err)
+	}
+
+	sel := DefaultRunnerSelector()
+	r := NewEntryActivationReconciler(EntryActivationReconcilerConfig{
+		Store:      store,
+		Selector:   &sel,
+		Namespaces: []namespace.Namespace{namespace.Default},
+		LeaseTTL:   60 * time.Second,
+	})
+
+	// The runner re-registers, reporting it still hosts this activation at gen 1.
+	reported := []protocol.ActivationInventoryItem{{
+		WorkflowID:  string(act.WorkflowID),
+		EntryUnitID: act.EntryUnitID,
+		Generation:  1,
+	}}
+	if err := r.ReconcileRunnerInventory(ctx, "runner-match", reported, now); err != nil {
+		t.Fatalf("ReconcileRunnerInventory: %v", err)
+	}
+
+	got, _, _ := store.Get(ctx, key)
+	if got.Generation != 1 {
+		t.Fatalf("generation must stay 1 on renew, got %d", got.Generation)
+	}
+	if got.RunnerID != "runner-match" {
+		t.Fatalf("owner must be retained on renew, got %q", got.RunnerID)
+	}
+	wantDeadline := now.Add(60 * time.Second)
+	if !got.LeaseDeadline.Equal(wantDeadline) {
+		t.Fatalf("lease deadline must be renewed to %v, got %v", wantDeadline, got.LeaseDeadline)
+	}
+}
+
+// TestInventoryReconcile_UnreportedRevokesForReassign verifies that when a
+// runner re-registers on a NEW session but does NOT report an activation still
+// assigned to it (it lost the subscription on reconnect), the reconciler REVOKES
+// the assignment (fences + unassigns) so a later reconcile can reassign it to a
+// live runner instead of orphaning it.
+func TestInventoryReconcile_UnreportedRevokesForReassign(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryEntryActivationStore()
+
+	act := testEntryActivation() // Selector: required, {zone: a}
+	key := keyOfActivation(act)
+	if err := store.Upsert(ctx, act); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	ok, err := store.Assign(ctx, key, "runner-match", "sess-1", 1, now.Add(time.Minute))
+	if err != nil || !ok {
+		t.Fatalf("Assign: ok=%v err=%v", ok, err)
+	}
+
+	sel := DefaultRunnerSelector()
+	r := NewEntryActivationReconciler(EntryActivationReconcilerConfig{
+		Store:      store,
+		Selector:   &sel,
+		Namespaces: []namespace.Namespace{namespace.Default},
+		LeaseTTL:   60 * time.Second,
+	})
+
+	// The runner re-registers with an EMPTY inventory: on the new session it is
+	// no longer hosting anything, so the still-assigned activation must be revoked.
+	if err := r.ReconcileRunnerInventory(ctx, "runner-match", nil, now); err != nil {
+		t.Fatalf("ReconcileRunnerInventory: %v", err)
+	}
+
+	got, _, _ := store.Get(ctx, key)
+	if got.RunnerID != "" {
+		t.Fatalf("unreported activation must be revoked/unassigned, got owner %q", got.RunnerID)
+	}
+	if !got.Desired {
+		t.Fatalf("revoked activation must stay desired (reassignable), got %+v", got)
+	}
+
+	// After revoke, a normal reconcile against a matching live runner reassigns it
+	// with a strictly higher generation (proving reassignability).
+	lister := &mockRunnerLister{runners: []RunnerSnapshot{{
+		RunnerID:      "runner-match",
+		Capacity:      4,
+		Labels:        map[string]string{"zone": "a"},
+		LastHeartbeat: now,
+	}}}
+	r.cfg.Lister = lister
+	if err := r.Reconcile(ctx, now); err != nil {
+		t.Fatalf("Reconcile after revoke: %v", err)
+	}
+	got, _, _ = store.Get(ctx, key)
+	if got.RunnerID != "runner-match" {
+		t.Fatalf("revoked activation must be reassignable, got owner %q", got.RunnerID)
+	}
+	if got.Generation <= 1 {
+		t.Fatalf("reassignment must advance generation past 1, got %d", got.Generation)
+	}
+}
+
 // TestEntryActivationReconciler_NoMatchingRunner verifies fail-closed behavior:
 // when no live runner matches a required selector, nothing is assigned.
 func TestEntryActivationReconciler_NoMatchingRunner(t *testing.T) {
