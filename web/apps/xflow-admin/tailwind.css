@@ -1,0 +1,20 @@
+/**
+ * antd reset 与 tailwind 4 的层叠共存方案。
+ *
+ * 背景：antd/dist/reset.css 是裸选择器（h1,h2,...{font-weight:500}），不在任何 CSS
+ * layer 内；tailwind 4 的工具类在 @layer utilities 内。按 CSS 层叠规则，非 layer 样式
+ * 永远胜过 layer 内样式，因此裸 reset 会压过全部 tailwind 工具类
+ * （症状：font-bold 只得到 500 而非 700，text-white 失效）。
+ *
+ * 解法是用 @import ... layer() 把 reset 归入自己的 layer，再让它排在 utilities 之前。
+ *
+ * 关键：必须用 `@import '...' layer(name)` 函数形式。不能写成
+ * `@layer name { @import '...'; }`——后者违反 CSS 规范（@import 必须在所有其他语句之前），
+ * webpack loader 能容忍，但 vite 的 CSS 解析器会报错并丢弃整个 tailwind 引入。
+ *
+ * 若本文件被改动，需重新验证：font-bold 计算值为 700，且 DOM 中裸 reset 规则数为 0。
+ */
+@layer antd-reset, theme, base, components, utilities;
+
+@import 'antd/dist/reset.css' layer(antd-reset);
+@import 'tailwindcss';

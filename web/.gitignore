@@ -10,6 +10,15 @@ dist/
 # Turbo
 .turbo/
 
+# umi 生成物（max setup / max dev / max build 产生，不入库）
+**/src/.umi/
+**/src/.umi-production/
+**/src/.umi-test/
+.umirc.local.ts
+
+# utoopack 构建缓存
+.turbopack/
+
 # Testing
 coverage/
 test-results/
