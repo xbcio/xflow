@@ -296,7 +296,8 @@ func TestIsReadyBecomesTrue_AfterReapplyWithAcceptingConsumer(t *testing.T) {
 
 	// Consumer starts accepting.
 	bad.fail = nil
-	// Re-apply same content: since accepted=false, Apply re-notifies.
+	// Re-apply the same content: the consumer's last outcome for it was a
+	// rejection, so Apply re-notifies rather than skipping.
 	_ = r.Apply(context.Background(), snap("rules", "v1", 1))
 	if !r.IsReady("rules") {
 		t.Fatal("IsReady must become true after consumer accepts on re-apply")
@@ -318,8 +319,8 @@ func TestIsReadyBecomesTrueAfterUnregister(t *testing.T) {
 	}
 }
 
-// Unchanged hash with accepted=true must NOT re-notify (preserving the
-// optimization in TestApplySkipsNotifyOnUnchangedHash).
+// Unchanged hash that every consumer already accepted must NOT re-notify
+// (preserving the optimization in TestApplySkipsNotifyOnUnchangedHash).
 func TestApplySkipsNotifyOnUnchangedHashWhenAccepted(t *testing.T) {
 	r := NewRegistry()
 	c := &recordingConsumer{}
@@ -334,8 +335,8 @@ func TestApplySkipsNotifyOnUnchangedHashWhenAccepted(t *testing.T) {
 	}
 }
 
-// Unchanged hash with accepted=false MUST re-notify (the fix for the rejected
-// content regression).
+// Unchanged hash that a consumer rejected MUST re-notify (the fix for the
+// rejected-content regression).
 func TestApplyRenotifiesOnUnchangedHashWhenRejected(t *testing.T) {
 	r := NewRegistry()
 	bad := &recordingConsumer{fail: errors.New("reject")}
@@ -343,8 +344,8 @@ func TestApplyRenotifiesOnUnchangedHashWhenRejected(t *testing.T) {
 
 	ctx := context.Background()
 	_ = r.Apply(ctx, snap("rules", "v1", 1))
-	// Second apply with same hash: consumer should be re-notified because
-	// accepted is false.
+	// Second apply with the same hash: the consumer must be re-notified because
+	// its last outcome for this content was a rejection.
 	_ = r.Apply(ctx, snap("rules", "v1", 2))
 
 	if bad.count() != 2 {
@@ -359,7 +360,7 @@ func TestApplyRenotifiesOnUnchangedHashWhenRejected(t *testing.T) {
 // consumer registers later). A rejecting consumer's immediate notify must mark
 // the supply unaccepted, and that state must not silently vanish on the next
 // same-hash Apply.
-func TestRegisterConsumerRejectionMarksUnaccepted(t *testing.T) {
+func TestRegisterConsumerRejectionMakesSupplyUnready(t *testing.T) {
 	r := NewRegistry()
 	ctx := context.Background()
 
@@ -377,7 +378,8 @@ func TestRegisterConsumerRejectionMarksUnaccepted(t *testing.T) {
 	}
 
 	// Step 3: a later same-hash Apply must re-notify (not silently skip) because
-	// accepted is false — the error must not become invisible.
+	// the consumer's last outcome was a rejection — the error must not become
+	// invisible.
 	err := r.Apply(ctx, snap("rules", "v1", 2))
 	if bad.count() != 2 {
 		t.Fatalf("step 3: consumer notified %d times, want 2 (re-apply must re-notify when unaccepted)", bad.count())
@@ -550,40 +552,45 @@ func TestUnregisterOnlyRejectorAmongOthersMakesReadyImmediately(t *testing.T) {
 	}
 }
 
-// Same-key replacement of a rejecting consumer with an accepting one must
-// overwrite that key's entry (not add a second one), yielding ready.
+// Same-key replacement must overwrite that key's entry rather than adding a
+// second one — while leaving OTHER keys' entries untouched. The second
+// assertion is what distinguishes a per-key outcome map from any single
+// aggregate flag: under an aggregate, replacing "a" with an accepting consumer
+// would flip readiness even though "b" is still registered and still rejecting.
 func TestRegisterConsumerSameKeyReplacementOverwritesEntry(t *testing.T) {
 	r := NewRegistry()
 	_ = r.Apply(context.Background(), snap("rules", "v1", 1))
 
 	bad := &recordingConsumer{fail: errors.New("reject")}
 	r.RegisterConsumer("rules", "a", bad)
+	stillBad := &recordingConsumer{fail: errors.New("also rejects")}
+	r.RegisterConsumer("rules", "b", stillBad)
 	if r.IsReady("rules") {
 		t.Fatal("precondition: must be not-ready")
 	}
 
-	good := &recordingConsumer{}
-	r.RegisterConsumer("rules", "a", good) // same key
+	r.RegisterConsumer("rules", "a", &recordingConsumer{}) // same key, now accepting
+	if r.IsReady("rules") {
+		t.Fatal("replacing 'a' must not mask 'b', which is still registered and still rejecting")
+	}
+
+	r.RegisterConsumer("rules", "b", &recordingConsumer{}) // now both accept
 	if !r.IsReady("rules") {
-		t.Fatal("same-key replacement with an accepting consumer must make IsReady true")
+		t.Fatal("once every key's consumer accepts, IsReady must be true")
 	}
 }
 
-// Zero consumers must remain ready — the derived conjunction over an empty set
-// is vacuously true, matching the documented "no consumer" case.
-func TestIsReadyZeroConsumersVacuouslyTrue(t *testing.T) {
-	r := NewRegistry()
-	_ = r.Apply(context.Background(), snap("rules", "v1", 1))
-	if !r.IsReady("rules") {
-		t.Fatal("zero consumers must be ready")
-	}
-}
-
-// Concurrency: hammer Apply/RegisterConsumer/UnregisterConsumer on one name
-// from several goroutines, then assert IsReady agrees with a deterministic
-// final state. To make the final assertion deterministic despite concurrent
-// register/unregister churn, the last phase settles the consumer set to a
-// single well-known accepting consumer before the final check.
+// Concurrency smoke test: hammer Apply/RegisterConsumer/UnregisterConsumer on
+// one name from several goroutines under -race, then settle the consumer set to
+// a known state and assert IsReady tracks it.
+//
+// What this covers is narrower than it looks, and deliberately so: the final
+// assertions run AFTER a deterministic settle, so they prove no state survived
+// the churn in a way that breaks a subsequent clean registration — not that
+// IsReady is correct mid-race, which is not deterministically observable this
+// way. Interleaving-specific defects (a superseded notification's outcome
+// overwriting the current one) need the channel-synchronized tests further
+// down; this one is here for the race detector.
 func TestConcurrentMutationsKeepIsReadyConsistent(t *testing.T) {
 	r := NewRegistry()
 	ctx := context.Background()
@@ -637,7 +644,7 @@ func TestConcurrentMutationsKeepIsReadyConsistent(t *testing.T) {
 	wg.Wait()
 
 	// Settle to a single, deterministic, known-good consumer set before the
-	// final assertion: only "steady" (accepting) remains registered.
+	// final assertions: only "steady" (accepting) remains registered.
 	r.UnregisterConsumer("rules", "flaky")
 	r.RegisterConsumer("rules", "steady", &recordingConsumer{})
 
@@ -645,14 +652,166 @@ func TestConcurrentMutationsKeepIsReadyConsistent(t *testing.T) {
 		t.Fatal("after settling to a single accepting consumer, IsReady must be true")
 	}
 
-	// Now register a rejecting consumer as the only one and confirm IsReady
-	// correctly flips — proving the conjunction still reflects the live set
-	// after the concurrent hammering, not some stale cached value.
 	r.RegisterConsumer("rules", "steady", &recordingConsumer{fail: errors.New("final reject")})
 	if r.IsReady("rules") {
 		t.Fatal("after replacing the sole consumer with a rejecting one, IsReady must be false")
 	}
 }
 
+// --- Fix Round 4: an outcome must be attributed to the content it judged ---
 
+// blockingConsumer gates its callback on a per-hash channel so a test can hold
+// one notification in flight while another content generation completes. The
+// verdict per hash is fixed up front, so the interleaving — not the consumer —
+// is what the test varies.
+type blockingConsumer struct {
+	entered map[string]chan struct{} // closed/signalled when that hash's callback starts
+	release map[string]chan struct{} // the callback waits on this before returning
+	verdict map[string]error
+}
 
+func newBlockingConsumer(hashes ...string) *blockingConsumer {
+	c := &blockingConsumer{
+		entered: map[string]chan struct{}{},
+		release: map[string]chan struct{}{},
+		verdict: map[string]error{},
+	}
+	for _, h := range hashes {
+		c.entered[h] = make(chan struct{}, 1)
+		c.release[h] = make(chan struct{})
+	}
+	return c
+}
+
+func (c *blockingConsumer) OnSupplyChanged(_ context.Context, s Snapshot) error {
+	if ch, ok := c.entered[s.Hash]; ok {
+		ch <- struct{}{}
+	}
+	if ch, ok := c.release[s.Hash]; ok {
+		<-ch
+	}
+	return c.verdict[s.Hash]
+}
+
+// A notification for superseded content must not overwrite the outcome for the
+// content that is actually cached. This is the dangerous direction: the stale
+// call ACCEPTS, the current content was REJECTED, and a registry that records
+// outcomes without attributing them to a content generation reports ready for
+// content the consumer has no usable derived state for — exactly what the gate
+// exists to prevent.
+func TestStaleAcceptMustNotMaskCurrentReject(t *testing.T) {
+	r := NewRegistry()
+	ctx := context.Background()
+	c := newBlockingConsumer("h-A", "h-B")
+	c.verdict["h-A"] = nil                      // stale content: accepted
+	c.verdict["h-B"] = errors.New("B rejected") // current content: rejected
+	close(c.release["h-B"])                     // B's callback never blocks
+
+	r.RegisterConsumer("rules", "node/a", c)
+
+	applyA := make(chan error, 1)
+	go func() { applyA <- r.Apply(ctx, snap("rules", "A", 1)) }()
+	<-c.entered["h-A"] // A's callback is in flight, holding its verdict
+
+	if err := r.Apply(ctx, snap("rules", "B", 2)); err == nil {
+		t.Fatal("Apply(B) must surface the consumer's rejection")
+	}
+	if r.IsReady("rules") {
+		t.Fatal("precondition: B is cached and was rejected, so not ready")
+	}
+
+	close(c.release["h-A"]) // A's callback now returns, accepting stale content
+	<-applyA
+
+	if got, _ := r.Get("rules"); got.Hash != "h-B" {
+		t.Fatalf("cached hash = %q, want h-B", got.Hash)
+	}
+	if r.IsReady("rules") {
+		t.Fatal("a stale acceptance of superseded content must not make the rejected current content ready")
+	}
+}
+
+// The symmetric direction: a stale REJECTION must not mask the current
+// content's acceptance. Wrong in the safe direction (traffic is declined rather
+// than mis-served) but still wrong — it strands a runner that has usable
+// content, and the two directions share one root cause.
+func TestStaleRejectMustNotMaskCurrentAccept(t *testing.T) {
+	r := NewRegistry()
+	ctx := context.Background()
+	c := newBlockingConsumer("h-A", "h-B")
+	c.verdict["h-A"] = errors.New("A rejected") // stale content: rejected
+	c.verdict["h-B"] = nil                      // current content: accepted
+	close(c.release["h-B"])
+
+	r.RegisterConsumer("rules", "node/a", c)
+
+	applyA := make(chan error, 1)
+	go func() { applyA <- r.Apply(ctx, snap("rules", "A", 1)) }()
+	<-c.entered["h-A"]
+
+	if err := r.Apply(ctx, snap("rules", "B", 2)); err != nil {
+		t.Fatalf("Apply(B): %v", err)
+	}
+
+	close(c.release["h-A"])
+	<-applyA
+
+	if got, _ := r.Get("rules"); got.Hash != "h-B" {
+		t.Fatalf("cached hash = %q, want h-B", got.Hash)
+	}
+	if !r.IsReady("rules") {
+		t.Fatal("a stale rejection of superseded content must not keep the accepted current content unready")
+	}
+}
+
+// RegisterConsumer's immediate notify runs outside the lock too, so its
+// write-back needs the same attribution as Apply's fan-out.
+func TestRegisterConsumerStaleNotifyMustNotMaskCurrentReject(t *testing.T) {
+	r := NewRegistry()
+	ctx := context.Background()
+	c := newBlockingConsumer("h-A", "h-B")
+	c.verdict["h-A"] = nil
+	c.verdict["h-B"] = errors.New("B rejected")
+	close(c.release["h-B"])
+
+	_ = r.Apply(ctx, snap("rules", "A", 1)) // cache A first, so registering notifies
+
+	registered := make(chan struct{})
+	go func() {
+		r.RegisterConsumer("rules", "node/a", c)
+		close(registered)
+	}()
+	<-c.entered["h-A"] // the immediate notify for A is in flight
+
+	if err := r.Apply(ctx, snap("rules", "B", 2)); err == nil {
+		t.Fatal("Apply(B) must surface the consumer's rejection")
+	}
+
+	close(c.release["h-A"])
+	<-registered
+
+	if r.IsReady("rules") {
+		t.Fatal("a stale registration notify must not mask the current content's rejection")
+	}
+}
+
+// A Consumer implemented on a value type containing a slice is not comparable
+// with ==. Identity tracking must not depend on interface equality, or the
+// registry panics outside safeNotify's recover and takes the caller down.
+type uncomparableConsumer struct{ tags []string }
+
+func (c uncomparableConsumer) OnSupplyChanged(context.Context, Snapshot) error { return nil }
+
+func TestUncomparableConsumerDoesNotPanic(t *testing.T) {
+	r := NewRegistry()
+	ctx := context.Background()
+	_ = r.Apply(ctx, snap("rules", "v1", 1)) // cached, so registering notifies immediately
+
+	r.RegisterConsumer("rules", "node/a", uncomparableConsumer{tags: []string{"x"}})
+	if !r.IsReady("rules") {
+		t.Fatal("an accepting uncomparable consumer must leave the supply ready")
+	}
+	if err := r.Apply(ctx, snap("rules", "v2", 2)); err != nil {
+		t.Fatalf("Apply with an uncomparable consumer registered: %v", err)
+	}
+}

@@ -43,7 +43,12 @@ const (
 //
 // Returning an error means the content was rejected; the consumer must keep its
 // last-good state. The registry still records the new snapshot so nodes that
-// read through $supplies see the current value.
+// read through $supplies see the current value. A rejection makes the supply
+// not-ready (see Registry.IsReady), which is what the activation gate reads.
+//
+// An implementation may be any type — the registry tracks registrations by
+// sequence number, never by comparing Consumer values, so a struct carrying a
+// slice, map, or func field is safe.
 type Consumer interface {
 	OnSupplyChanged(ctx context.Context, snap Snapshot) error
 }

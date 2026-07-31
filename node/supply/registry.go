@@ -15,16 +15,29 @@ import (
 var Default = NewRegistry()
 
 // consumerEntry pairs a registered consumer with the outcome of the last
-// OnSupplyChanged call it was given, if any. This is the actual fact the
-// registry needs to track: readiness is never assigned directly — it is the
-// conjunction of these per-consumer outcomes over the CURRENTLY registered set,
-// recomputed on every read. A zero-value lastErr (nil) means either "never
-// notified yet" or "last notification succeeded"; both are treated as
-// acceptance because a consumer that has not yet been notified has nothing to
-// reject.
+// OnSupplyChanged call it was given, and the content that call judged. This is
+// the actual fact the registry needs to track: readiness is never assigned
+// directly — it is the conjunction of these per-consumer outcomes over the
+// CURRENTLY registered set, recomputed on every read (see IsReady).
 type consumerEntry struct {
 	consumer Consumer
+	// regSeq identifies this registration. Consumer callbacks run outside the
+	// lock, so a write-back must confirm the entry it is about to update is
+	// still the same registration that was notified. A sequence number rather
+	// than comparing the Consumer values directly: Consumer is an interface, and
+	// == on an interface holding an uncomparable dynamic type (a struct with a
+	// slice, map, or func field) panics at runtime — outside safeNotify's
+	// recover, so it would take the caller down. Identity must not depend on
+	// what an implementer happens to put in their struct.
+	regSeq uint64
+	// lastErr is the outcome, and lastHash is the content hash it judged. An
+	// outcome is meaningless without the content it was about: a notification
+	// for content that has since been superseded must not overwrite the outcome
+	// for what is actually cached now (in either direction — a stale acceptance
+	// masking a current rejection would let the gate admit traffic against
+	// content the consumer cannot use).
 	lastErr  error
+	lastHash string
 }
 
 // Registry caches supply snapshots and fans changes out to the consumers that
@@ -48,6 +61,9 @@ type Registry struct {
 	// makes that class of bug structurally impossible — there is no aggregate
 	// value left to race against itself.
 	consumers map[string]map[string]consumerEntry
+
+	// regSeq issues consumerEntry.regSeq values. Guarded by mu.
+	regSeq uint64
 
 	// decoded is the published, READ-ONLY "name → decoded value" map handed to
 	// expression evaluation as $supplies. It is replaced wholesale on every
@@ -76,12 +92,12 @@ func NewRegistry() *Registry {
 // hash changed. It never creates an execution or dispatches a task.
 //
 // A revision bump with an unchanged hash updates the cached revision but skips
-// notification when the supply is already ready: rebuilding a consumer's
-// derived state for identical bytes it already accepted is pure waste. But if
-// any currently-registered consumer's last outcome for this name was a
-// rejection, an unchanged-hash Apply still re-notifies every consumer — a
-// consumer replacement or fix may have happened since, and readiness must
-// reflect the CURRENT consumer set's CURRENT outcome, never a stale one.
+// notification when every registered consumer has already accepted this exact
+// content: rebuilding a consumer's derived state for identical bytes it already
+// accepted is pure waste. It re-notifies when any consumer's readiness for this
+// content is unresolved — it rejected it, or its last verdict was about content
+// that has since been superseded. Readiness must always reflect the CURRENT
+// consumer set's verdict on the CURRENT content, never a stale one.
 //
 // Consumer errors are collected and returned joined; every consumer is called
 // regardless, and the cache is updated either way.
@@ -93,8 +109,13 @@ func (r *Registry) Apply(ctx context.Context, snap Snapshot) error {
 
 	needNotify := changed
 	if !needNotify {
+		// Unchanged content, but re-notify if any registered consumer has not
+		// accepted THIS content: it may have rejected it, or its last verdict
+		// may be about superseded content (a callback that was still in flight
+		// when this content was installed had its outcome dropped). Either way
+		// its readiness is unresolved, and only a fresh notification resolves it.
 		for _, entry := range r.consumers[snap.Name] {
-			if entry.lastErr != nil {
+			if entry.lastErr != nil || (entry.lastHash != "" && entry.lastHash != snap.Hash) {
 				needNotify = true
 				break
 			}
@@ -103,12 +124,13 @@ func (r *Registry) Apply(ctx context.Context, snap Snapshot) error {
 
 	type target struct {
 		key      string
+		regSeq   uint64
 		consumer Consumer
 	}
 	var targets []target
 	if needNotify {
 		for k, entry := range r.consumers[snap.Name] {
-			targets = append(targets, target{key: k, consumer: entry.consumer})
+			targets = append(targets, target{key: k, regSeq: entry.regSeq, consumer: entry.consumer})
 		}
 	}
 
@@ -134,19 +156,42 @@ func (r *Registry) Apply(ctx context.Context, snap Snapshot) error {
 	if needNotify {
 		r.mu.Lock()
 		for _, t := range targets {
-			// Only record the outcome if this consumer is still the one
-			// registered at (name, key): a concurrent RegisterConsumer or
-			// UnregisterConsumer may have superseded it while the callback ran
-			// outside the lock, and that call's own outcome must win instead.
-			if cur, ok := r.consumers[snap.Name][t.key]; ok && cur.consumer == t.consumer {
-				cur.lastErr = results[t.key]
-				r.consumers[snap.Name][t.key] = cur
-			}
+			r.recordOutcomeLocked(snap.Name, t.key, t.regSeq, snap.Hash, results[t.key])
 		}
 		r.mu.Unlock()
 	}
 
 	return errors.Join(errs...)
+}
+
+// recordOutcomeLocked stores one notification's outcome against the entry that
+// was notified. Three guards, all of them because callbacks run outside the
+// lock:
+//
+//   - the entry still exists — it may have been unregistered mid-callback;
+//   - regSeq matches — it may have been REPLACED mid-callback, and the newer
+//     registration's own outcome must win;
+//   - the notified content is still what is cached — content may have been
+//     superseded mid-callback, and an outcome about content that is no longer
+//     current says nothing about what IS current. Recording it anyway is the
+//     stale-write-back bug: a stale acceptance would mask a current rejection
+//     and let the gate admit traffic against unusable content.
+//
+// Dropping a superseded outcome loses nothing: the Apply that installed the
+// newer content notifies every registered consumer itself.
+//
+// Caller must hold r.mu.
+func (r *Registry) recordOutcomeLocked(name, key string, regSeq uint64, hash string, err error) {
+	if cached, ok := r.snapshots[name]; !ok || cached.Hash != hash {
+		return
+	}
+	cur, ok := r.consumers[name][key]
+	if !ok || cur.regSeq != regSeq {
+		return
+	}
+	cur.lastErr = err
+	cur.lastHash = hash
+	r.consumers[name][key] = cur
 }
 
 // Get returns the current snapshot for a name. The returned Content is a copy.
@@ -163,22 +208,38 @@ func (r *Registry) Get(name string) (Snapshot, bool) {
 }
 
 // IsReady reports whether a supply has content AND every CURRENTLY registered
-// consumer's last notification for it succeeded. The gate uses this instead of
-// a bare Get to distinguish "cached but unusable" (some consumer rejected the
-// content) from "ready to serve traffic".
+// consumer has accepted THAT content. The gate uses this instead of a bare Get
+// to distinguish "cached but unusable" (some consumer rejected the content)
+// from "ready to serve traffic".
 //
 // This is computed live as a conjunction over the consumer set on every call —
 // there is no separate stored flag to fall out of sync with that set. A supply
 // with no snapshot is not ready. A supply with a snapshot but no registered
 // consumers is always ready — nothing needs to build derived state from it.
+//
+// A consumer whose last outcome is for SUPERSEDED content counts as not ready,
+// not as ready-by-default. It has said nothing about what is cached now, and
+// the safe direction is the one that does not admit traffic: a runner that
+// declines is visible as consumer-group lag, while one that admits on an
+// unverified assumption mis-serves silently. This state is transient — the
+// Apply that installed the newer content notifies every consumer, and its
+// outcome lands here.
 func (r *Registry) IsReady(name string) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	if _, ok := r.snapshots[name]; !ok {
+	cached, ok := r.snapshots[name]
+	if !ok {
 		return false
 	}
 	for _, entry := range r.consumers[name] {
 		if entry.lastErr != nil {
+			return false
+		}
+		// Never notified (zero lastHash) is acceptance by the rule above: a
+		// consumer registered before any content arrived has nothing to reject,
+		// and Apply will notify it. A non-empty lastHash that does not match the
+		// cached content is a verdict about something else.
+		if entry.lastHash != "" && entry.lastHash != cached.Hash {
 			return false
 		}
 	}
@@ -205,7 +266,9 @@ func (r *Registry) RegisterConsumer(name, key string, c Consumer) {
 	if r.consumers[name] == nil {
 		r.consumers[name] = map[string]consumerEntry{}
 	}
-	r.consumers[name][key] = consumerEntry{consumer: c}
+	r.regSeq++
+	seq := r.regSeq
+	r.consumers[name][key] = consumerEntry{consumer: c, regSeq: seq}
 	snap, has := r.snapshots[name]
 	r.mu.Unlock()
 
@@ -214,15 +277,11 @@ func (r *Registry) RegisterConsumer(name, key string, c Consumer) {
 	}
 	err := safeNotify(context.Background(), c, snap)
 
-	// Record the outcome under a fresh lock acquisition — never held across the
-	// callback above — and only if c is still the consumer registered at
-	// (name, key): a concurrent Register/Unregister may have superseded it
-	// while this callback ran.
+	// Record under a fresh lock acquisition — never held across the callback
+	// above — and only if this registration and this content are both still
+	// current. See recordOutcomeLocked.
 	r.mu.Lock()
-	if cur, ok := r.consumers[name][key]; ok && cur.consumer == c {
-		cur.lastErr = err
-		r.consumers[name][key] = cur
-	}
+	r.recordOutcomeLocked(name, key, seq, snap.Hash, err)
 	r.mu.Unlock()
 }
 
