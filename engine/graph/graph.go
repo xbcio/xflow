@@ -43,6 +43,13 @@ type Graph struct {
 	unitInEdges  [][]UnitEdge
 	unitInDegree []int
 	nodeUnit     []int // nodeIdx → unitIdx mapping
+
+	// supplyIndexes maps a supply node's name to its index in g.nodes. Supply
+	// nodes live in the node layer only — never in g.units.
+	supplyIndexes map[string]int
+	// supplyRefs maps a consumer node index to the sorted names of the supply
+	// nodes it declares a dependency on. Absent key means no dependency.
+	supplyRefs map[int][]string
 }
 
 // Name returns the workflow name.
@@ -230,4 +237,25 @@ type NodeMeta struct {
 type Edge struct {
 	SrcIdx, DstIdx   int
 	SrcPort, DstPort string
+}
+
+// SupplyRefsFor returns the sorted supply node names that the node at nodeIdx
+// depends on, or nil when it declares none. The returned slice is a copy.
+func (g *Graph) SupplyRefsFor(nodeIdx int) []string {
+	names := g.supplyRefs[nodeIdx]
+	if len(names) == 0 {
+		return nil
+	}
+	out := make([]string, len(names))
+	copy(out, names)
+	return out
+}
+
+// SupplyNodeIndexes returns a copy of the supply node name → node index map.
+func (g *Graph) SupplyNodeIndexes() map[string]int {
+	out := make(map[string]int, len(g.supplyIndexes))
+	for k, v := range g.supplyIndexes {
+		out[k] = v
+	}
+	return out
 }

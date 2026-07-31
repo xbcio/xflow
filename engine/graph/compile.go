@@ -122,6 +122,9 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 	if err := buildEdges(def, g); err != nil {
 		return nil, err
 	}
+	if err := buildDependencyEdges(def, g); err != nil {
+		return nil, err
+	}
 	if err := compileGroups(g, def); err != nil {
 		return nil, err
 	}

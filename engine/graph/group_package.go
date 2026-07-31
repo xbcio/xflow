@@ -349,6 +349,9 @@ func compileTrusted(def *types.WorkflowDef) (*Graph, error) {
 	if err := buildEdges(def, g); err != nil {
 		return nil, err
 	}
+	if err := buildDependencyEdges(def, g); err != nil {
+		return nil, err
+	}
 	if err := buildUnits(g); err != nil {
 		return nil, fmt.Errorf("build units: %w", err)
 	}
