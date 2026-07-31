@@ -12,10 +12,10 @@ import (
 // the first two are not an operator's to read from a metric and the third
 // would be unbounded cardinality.
 type Observer interface {
-	// OnPoolSwap reports one config application. result is "applied",
-	// "rejected", or "source_error". ruleCount is the number of rules in the
-	// new content (count only — never the content itself), or -1 if the shape
-	// was not recognized. revision is the SupplyResource revision.
+	// OnPoolSwap reports one config application. result is "applied" or
+	// "rejected". ruleCount is the number of rules in the new content (count
+	// only — never the content itself), or -1 if the shape was not recognized.
+	// revision is the SupplyResource revision.
 	OnPoolSwap(ctx context.Context, result string, ruleCount int, revision uint64, d time.Duration)
 	// OnConfigAge reports how long the active content has been in service.
 	// This is the only signal that exposes a source which stopped updating.

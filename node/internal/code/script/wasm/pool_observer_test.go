@@ -135,6 +135,44 @@ func TestDoomNotifiesObserverEvalError(t *testing.T) {
 	}
 }
 
+// The other side of doom's classification: an instance doomed while its context
+// is already expired is a timeout, not an eval error. The two causes route to
+// different operator responses — "timeout" means the guest was too slow for its
+// deadline (raise it, or fix the guest), "eval_error" means the guest faulted —
+// so conflating them sends an operator down the wrong path.
+//
+// Without this, only the eval_error branch is load-bearing: inverting the
+// condition in doom would leave the suite green.
+func TestDoomClassifiesExpiredContextAsTimeout(t *testing.T) {
+	rec := &recordingObserver{}
+	SetObserver(rec)
+	defer SetObserver(nil)
+
+	ctx := context.Background()
+	h := newReactorHost()
+	e, err := h.engineFor(ctx, reactorWasm)
+	if err != nil {
+		t.Fatalf("engineFor: %v", err)
+	}
+	if err := e.swapConfig(ctx, []byte(`{"rules":[]}`), 1, 1); err != nil {
+		t.Fatalf("swap: %v", err)
+	}
+	inst, pool, err := e.borrow(ctx)
+	if err != nil {
+		t.Fatalf("borrow: %v", err)
+	}
+
+	// An already-cancelled context is what doom sees when
+	// WithCloseOnContextDone closed the module out from under a call.
+	expired, cancel := context.WithCancel(ctx)
+	cancel()
+	e.doom(expired, pool, inst)
+
+	if len(rec.recycled) != 1 || rec.recycled[0] != "timeout" {
+		t.Fatalf("recycled = %#v, want [timeout]", rec.recycled)
+	}
+}
+
 // drainPool tears down every parked instance in a superseded pool and must
 // report each one recycled with cause "pool_swapped".
 func TestDrainPoolNotifiesObserverPoolSwapped(t *testing.T) {
