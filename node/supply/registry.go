@@ -38,6 +38,20 @@ type consumerEntry struct {
 	// content the consumer cannot use).
 	lastErr  error
 	lastHash string
+	// inFlight counts notifications dispatched to this consumer that have not
+	// yet recorded an outcome. A COUNT, not a hash: two notifications can
+	// overlap (Apply for newer content marks its own before the older
+	// callback returns), and a single "which content is in flight" marker
+	// leaves a gap at the handover — the older write-back clears it a moment
+	// before the newer Apply sets it, and IsReady reads ready in between.
+	//
+	// It exists because "no verdict yet" and "no content to judge yet" are
+	// otherwise the same state (lastHash == ""), and they must read
+	// oppositely: a consumer with nothing to judge is ready, one whose verdict
+	// is still in flight is not. Collapsing them resolved to the dangerous
+	// side — the gate admitted traffic during the callback window, against
+	// content the consumer was in the middle of rejecting.
+	inFlight int
 }
 
 // Registry caches supply snapshots and fans changes out to the consumers that
@@ -131,6 +145,11 @@ func (r *Registry) Apply(ctx context.Context, snap Snapshot) error {
 	if needNotify {
 		for k, entry := range r.consumers[snap.Name] {
 			targets = append(targets, target{key: k, regSeq: entry.regSeq, consumer: entry.consumer})
+			// Count in flight BEFORE releasing the lock, so no IsReady between
+			// here and the write-back can read this consumer as ready on a
+			// verdict it has not given yet.
+			entry.inFlight++
+			r.consumers[snap.Name][k] = entry
 		}
 	}
 
@@ -165,8 +184,8 @@ func (r *Registry) Apply(ctx context.Context, snap Snapshot) error {
 }
 
 // recordOutcomeLocked stores one notification's outcome against the entry that
-// was notified. Three guards, all of them because callbacks run outside the
-// lock:
+// was notified, and clears that notification's in-flight marker. The guards are
+// all there because callbacks run outside the lock:
 //
 //   - the entry still exists — it may have been unregistered mid-callback;
 //   - regSeq matches — it may have been REPLACED mid-callback, and the newer
@@ -177,20 +196,31 @@ func (r *Registry) Apply(ctx context.Context, snap Snapshot) error {
 //     stale-write-back bug: a stale acceptance would mask a current rejection
 //     and let the gate admit traffic against unusable content.
 //
+// pendingHash is cleared even when the outcome is dropped as superseded: the
+// callback HAS returned, so nothing is in flight for it any more. The entry then
+// reads as not-ready via the lastHash mismatch instead, which is the same safe
+// direction, and Apply's re-notification resolves it.
+//
 // Dropping a superseded outcome loses nothing: the Apply that installed the
 // newer content notifies every registered consumer itself.
 //
 // Caller must hold r.mu.
 func (r *Registry) recordOutcomeLocked(name, key string, regSeq uint64, hash string, err error) {
-	if cached, ok := r.snapshots[name]; !ok || cached.Hash != hash {
-		return
-	}
 	cur, ok := r.consumers[name][key]
 	if !ok || cur.regSeq != regSeq {
 		return
 	}
-	cur.lastErr = err
-	cur.lastHash = hash
+	// Decrement for THIS notification either way — the callback has returned,
+	// so it is no longer in flight regardless of whether its verdict still
+	// applies to what is cached. Other notifications to the same consumer may
+	// still be outstanding, which is why this is a counter and not a flag.
+	if cur.inFlight > 0 {
+		cur.inFlight--
+	}
+	if cached, cachedOK := r.snapshots[name]; cachedOK && cached.Hash == hash {
+		cur.lastErr = err
+		cur.lastHash = hash
+	}
 	r.consumers[name][key] = cur
 }
 
@@ -235,10 +265,18 @@ func (r *Registry) IsReady(name string) bool {
 		if entry.lastErr != nil {
 			return false
 		}
-		// Never notified (zero lastHash) is acceptance by the rule above: a
-		// consumer registered before any content arrived has nothing to reject,
-		// and Apply will notify it. A non-empty lastHash that does not match the
-		// cached content is a verdict about something else.
+		// A notification in flight is an UNRESOLVED verdict, not an absent one.
+		// This is the state that made "never notified" ambiguous: an entry
+		// inserted by RegisterConsumer, or one about to be notified by Apply,
+		// has no lastHash yet but is not thereby ready — it may be in the middle
+		// of rejecting exactly the content that is cached.
+		if entry.inFlight > 0 {
+			return false
+		}
+		// Never notified AND nothing in flight (zero lastHash) is acceptance by
+		// the rule above: a consumer registered before any content arrived has
+		// nothing to reject, and Apply will notify it. A non-empty lastHash that
+		// does not match the cached content is a verdict about something else.
 		if entry.lastHash != "" && entry.lastHash != cached.Hash {
 			return false
 		}
@@ -268,8 +306,16 @@ func (r *Registry) RegisterConsumer(name, key string, c Consumer) {
 	}
 	r.regSeq++
 	seq := r.regSeq
-	r.consumers[name][key] = consumerEntry{consumer: c, regSeq: seq}
+	entry := consumerEntry{consumer: c, regSeq: seq}
 	snap, has := r.snapshots[name]
+	if has {
+		// Content is already cached, so this registration WILL be notified below.
+		// Count it in flight under the same lock that inserts it: otherwise there
+		// is a window where the entry is registered, the content is cached, and
+		// no verdict exists — and IsReady would read that as ready.
+		entry.inFlight++
+	}
+	r.consumers[name][key] = entry
 	r.mu.Unlock()
 
 	if !has {

@@ -815,3 +815,144 @@ func TestUncomparableConsumerDoesNotPanic(t *testing.T) {
 		t.Fatalf("Apply with an uncomparable consumer registered: %v", err)
 	}
 }
+
+// --- Fix Round 5: a verdict in flight is unresolved, not absent ---
+
+// The gate reads IsReady BEFORE deciding to fetch (supply_gate.go:71), so any
+// window in which content is cached, a consumer is registered, and no verdict
+// exists yet reads as ready and admits traffic. Two paths reach that window;
+// both are covered here. The consumer rejects, so a correct registry never
+// reports ready at any point in either sequence.
+
+// Path 1: register AFTER content is cached — the production gate order, since
+// the gate fetches and Applies before any consumer registers.
+func TestRegisterConsumerInFlightVerdictIsNotReady(t *testing.T) {
+	r := NewRegistry()
+	ctx := context.Background()
+	c := newBlockingConsumer("h-A")
+	c.verdict["h-A"] = errors.New("A rejected")
+
+	if err := r.Apply(ctx, Snapshot{Name: "rules", Content: []byte(`{"a":1}`), Hash: "h-A", Revision: 1}); err != nil {
+		t.Fatalf("Apply with no consumers: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		r.RegisterConsumer("rules", "k", c)
+		close(done)
+	}()
+
+	<-c.entered["h-A"]
+	// Registered, content cached, callback running, verdict not yet given.
+	if r.IsReady("rules") {
+		t.Fatal("a consumer whose verdict is still in flight must not read as ready")
+	}
+	close(c.release["h-A"])
+	<-done
+
+	if r.IsReady("rules") {
+		t.Fatal("after the rejection was recorded, IsReady must be false")
+	}
+}
+
+// Path 2: register BEFORE any content exists, so RegisterConsumer returns
+// without notifying and the entry carries no verdict at all. Apply's fan-out
+// then opens the same window.
+func TestApplyFanOutInFlightVerdictIsNotReady(t *testing.T) {
+	r := NewRegistry()
+	ctx := context.Background()
+	c := newBlockingConsumer("h-A")
+	c.verdict["h-A"] = errors.New("A rejected")
+
+	r.RegisterConsumer("rules", "k", c) // no snapshot yet: returns without notifying
+	if r.IsReady("rules") {
+		t.Fatal("no snapshot cached: IsReady must be false")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		_ = r.Apply(ctx, Snapshot{Name: "rules", Content: []byte(`{"a":1}`), Hash: "h-A", Revision: 1})
+		close(done)
+	}()
+
+	<-c.entered["h-A"]
+	if r.IsReady("rules") {
+		t.Fatal("during Apply's fan-out the verdict is unresolved; IsReady must be false")
+	}
+	close(c.release["h-A"])
+	<-done
+
+	if r.IsReady("rules") {
+		t.Fatal("after the rejection was recorded, IsReady must be false")
+	}
+}
+
+// Two notifications to one consumer can overlap: Apply for newer content counts
+// its own in flight before the older callback returns. When the older one
+// returns, the newer verdict is still outstanding, so the consumer must not read
+// as ready. This is why the in-flight state is a COUNT and not a "which hash is
+// pending" marker — a single marker is cleared by the older write-back a moment
+// before the newer Apply sets it, leaving a gap that reads as ready.
+//
+// Deterministic by construction: receiving on entered["h-B"] proves Apply(h-B)
+// already took the lock, installed the snapshot, and counted its notification.
+func TestOverlappingNotificationsNeverReadReady(t *testing.T) {
+	r := NewRegistry()
+	ctx := context.Background()
+	c := newBlockingConsumer("h-A", "h-B")
+	c.verdict["h-A"] = nil // both accept: readiness must still be withheld
+	c.verdict["h-B"] = nil // while h-B's verdict is outstanding
+	r.RegisterConsumer("rules", "k", c)
+
+	doneA := make(chan struct{})
+	go func() {
+		_ = r.Apply(ctx, Snapshot{Name: "rules", Content: []byte(`{"a":1}`), Hash: "h-A", Revision: 1})
+		close(doneA)
+	}()
+	<-c.entered["h-A"]
+
+	doneB := make(chan struct{})
+	go func() {
+		_ = r.Apply(ctx, Snapshot{Name: "rules", Content: []byte(`{"a":2}`), Hash: "h-B", Revision: 2})
+		close(doneB)
+	}()
+	<-c.entered["h-B"]
+
+	// Let the SUPERSEDED callback finish first. Its outcome is dropped, and its
+	// in-flight count released — but h-B's is not.
+	close(c.release["h-A"])
+	<-doneA
+	if r.IsReady("rules") {
+		t.Fatal("h-B's verdict is still in flight; IsReady must be false")
+	}
+
+	close(c.release["h-B"])
+	<-doneB
+	if !r.IsReady("rules") {
+		t.Fatal("h-B was accepted and is the cached content; IsReady must be true")
+	}
+}
+
+// The in-flight count must be released on every path out of a callback,
+// including a panic — safeNotify recovers and returns an error, so the
+// write-back still runs. A leaked count would strand the supply not-ready
+// forever, and the gate would decline the activation with no way to recover.
+func TestPanickingConsumerDoesNotStrandInFlight(t *testing.T) {
+	r := NewRegistry()
+	ctx := context.Background()
+	r.RegisterConsumer("rules", "boom", panickingConsumer{})
+
+	if err := r.Apply(ctx, snap("rules", "v1", 1)); err == nil {
+		t.Fatal("a panicking consumer must surface as an error")
+	}
+	if r.IsReady("rules") {
+		t.Fatal("the panic is an error outcome: IsReady must be false")
+	}
+	// Removing it must restore readiness with no further Apply. If the in-flight
+	// count had leaked it would survive on no entry at all, but a leak on any
+	// REMAINING entry is what this guards.
+	r.UnregisterConsumer("rules", "boom")
+	if !r.IsReady("rules") {
+		t.Fatal("with no consumers left, IsReady must be true")
+	}
+}
