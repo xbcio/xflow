@@ -25,6 +25,7 @@ import (
 	xnode "github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/node/registry"
 	"github.com/xbcio/xflow/node/resource"
+	"github.com/xbcio/xflow/node/supply"
 	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/service/protocol"
 	runnersvc "github.com/xbcio/xflow/service/runner"
@@ -340,8 +341,18 @@ func runnerServiceConfig(cfg runnerConfig) (runnersvc.Config, error) {
 		// connection setup and full body read, preventing leaked connections if
 		// the context is not propagated correctly.
 		seedClient := &http.Client{Timeout: 30 * time.Second}
+		// The supply fetch client shares the seed origin: both talk to the control
+		// plane's HTTP API. The gate publishes into supply.Default, the same
+		// registry node handlers read through $supplies.
+		supplyFetcher := &runnersvc.HTTPSupplyFetcher{
+			BaseURL: seedBaseURL,
+			Token:   cfg.token,
+			Client:  seedClient,
+		}
+		gate := runnersvc.NewSupplyGate(supplyFetcher, supply.Default, slog.Default())
 		handler := runnersvc.NewTriggerActivationHandler(seedBaseURL, cfg.token, lookup,
-			runnersvc.WithSeedHTTPClient(seedClient))
+			runnersvc.WithSeedHTTPClient(seedClient),
+			runnersvc.WithSupplyGate(gate))
 		svcCfg.ActivationTracker = runnersvc.NewActivationTracker(handler, slog.Default())
 	}
 	return svcCfg, nil

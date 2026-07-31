@@ -37,6 +37,10 @@ type TriggerActivationHandler struct {
 	triggers    TriggerHandlerLookup
 	seedClient  *http.Client // injected via WithSeedHTTPClient; nil uses http.DefaultClient
 
+	// gate, when set, is the activation-time supply readiness gate. nil means no
+	// gating (a runner with no supply-consuming workflows, or an older wiring).
+	gate *SupplyGate
+
 	mu   sync.Mutex
 	subs map[activationID]types.TriggerSubscription
 }
@@ -55,6 +59,13 @@ type TriggerActivationHandlerOption func(*TriggerActivationHandler)
 // Recommended: 30s.
 func WithSeedHTTPClient(c *http.Client) TriggerActivationHandlerOption {
 	return func(h *TriggerActivationHandler) { h.seedClient = c }
+}
+
+// WithSupplyGate installs the activation-time supply readiness gate. Without it
+// a directive's Supplies are ignored — acceptable only where no workflow
+// consumes a supply.
+func WithSupplyGate(g *SupplyGate) TriggerActivationHandlerOption {
+	return func(h *TriggerActivationHandler) { h.gate = g }
 }
 
 var _ ActivationHandler = (*TriggerActivationHandler)(nil)
@@ -81,6 +92,16 @@ func NewTriggerActivationHandler(seedBaseURL string, authToken string, triggers 
 // keyed by activation identity so Deactivate can close it. Returns an error
 // (fail closed) if the NodeType has no registered handler.
 func (h *TriggerActivationHandler) Activate(ctx context.Context, d protocol.ActivateDirective) error {
+	// Readiness gate FIRST: not after the subscription starts, and not inside the
+	// per-message path. Once a Kafka subscription is live it commits offsets, and
+	// a message whose supply is missing then has nowhere safe to go. Declining
+	// here leaves the traffic in Kafka with consumer-group lag as the signal.
+	if h.gate != nil {
+		if err := h.gate.Admit(ctx, d.Supplies); err != nil {
+			return err
+		}
+	}
+
 	handler, ok := h.triggers.Trigger(d.NodeType)
 	if !ok {
 		// Fail closed: unknown trigger type must not silently no-op.
