@@ -43,7 +43,6 @@ func TestCompileSupplyDependencyEdge(t *testing.T) {
 	if g.NodeCount() != 3 {
 		t.Fatalf("NodeCount = %d, want 3", g.NodeCount())
 	}
-	t.Skip("unit exclusion lands in Task 3")
 	if g.UnitCount() != 2 {
 		t.Fatalf("UnitCount = %d, want 2 (supply excluded)", g.UnitCount())
 	}

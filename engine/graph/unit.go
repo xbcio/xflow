@@ -86,6 +86,15 @@ func buildUnits(g *Graph) error {
 		if g.nodes[i].GroupIdx != -1 {
 			continue
 		}
+		// A supply node maintains long-lived shared data and never advances an
+		// execution. Keeping it out of the unit layer is what makes the
+		// remaining-unit denominator (UnitCount) unchanged: if it became a unit,
+		// nothing would ever complete it and every execution would hang forever.
+		// nodeUnit[i] stays -1; buildDependencyEdges has already rejected any
+		// dataflow edge touching it, so no unit edge can dereference that -1.
+		if g.nodes[i].Kind == types.NodeKindSupply {
+			continue
+		}
 		g.nodeUnit[i] = len(g.units)
 		g.units = append(g.units, UnitMeta{Kind: UnitNode, Name: g.nodes[i].Name,
 			NodeIdx: i, GroupIdx: -1, RunnerSelector: g.nodes[i].RunnerSelector, Retry: g.nodes[i].Retry})
@@ -113,6 +122,13 @@ func buildUnits(g *Graph) error {
 // buildUnitEdges traverses original node edges, skips intra-unit edges, and
 // records cross-unit edges with stable sorting.
 func buildUnitEdges(g *Graph) {
+	// BoundaryInputs/BoundaryOutputs are appended to below. buildUnits can run
+	// more than once on the same Graph (snapshot UnmarshalJSON rebuilds the unit
+	// IR), so reset them here or every rebuild doubles the boundary edge set.
+	for gi := range g.groups {
+		g.groups[gi].BoundaryInputs = g.groups[gi].BoundaryInputs[:0]
+		g.groups[gi].BoundaryOutputs = g.groups[gi].BoundaryOutputs[:0]
+	}
 	g.unitOutEdges = make([][]UnitEdge, len(g.units))
 	g.unitInEdges = make([][]UnitEdge, len(g.units))
 	g.unitInDegree = make([]int, len(g.units))
