@@ -351,3 +351,128 @@ func TestApplyRenotifiesOnUnchangedHashWhenRejected(t *testing.T) {
 		t.Fatalf("consumer notified %d times, want 2 (re-notify on rejected)", bad.count())
 	}
 }
+
+// --- Fix Round 2: RegisterConsumer's immediate-notify must feed accepted too ---
+
+// The exact 4-step sequence from the round-2 finding: content is cached BEFORE
+// any consumer registers (the gate's normal order — fetch, then Apply, then a
+// consumer registers later). A rejecting consumer's immediate notify must mark
+// the supply unaccepted, and that state must not silently vanish on the next
+// same-hash Apply.
+func TestRegisterConsumerRejectionMarksUnaccepted(t *testing.T) {
+	r := NewRegistry()
+	ctx := context.Background()
+
+	// Step 1: Apply caches content while no consumer is registered.
+	_ = r.Apply(ctx, snap("rules", "v1", 1))
+	if !r.IsReady("rules") {
+		t.Fatal("step 1: no consumer yet, must be ready")
+	}
+
+	// Step 2: A consumer registers and its immediate-notify rejects.
+	bad := &recordingConsumer{fail: errors.New("configure returned -1")}
+	r.RegisterConsumer("rules", "node/a", bad)
+	if r.IsReady("rules") {
+		t.Fatal("step 2: rejecting consumer's immediate notify must mark the supply NOT ready")
+	}
+
+	// Step 3: a later same-hash Apply must re-notify (not silently skip) because
+	// accepted is false — the error must not become invisible.
+	err := r.Apply(ctx, snap("rules", "v1", 2))
+	if bad.count() != 2 {
+		t.Fatalf("step 3: consumer notified %d times, want 2 (re-apply must re-notify when unaccepted)", bad.count())
+	}
+	if err == nil || !strings.Contains(err.Error(), "configure returned -1") {
+		t.Fatalf("step 3: Apply err = %v, want the consumer's rejection surfaced, not nil", err)
+	}
+	if r.IsReady("rules") {
+		t.Fatal("step 3: must remain NOT ready — the state must not self-heal on its own without an actual acceptance")
+	}
+}
+
+// Recovery: once the rejecting consumer is replaced by (or itself becomes) one
+// that accepts, and a same-hash Apply re-notifies, IsReady becomes true.
+func TestRegisterConsumerRejectionRecoversOnReapply(t *testing.T) {
+	r := NewRegistry()
+	ctx := context.Background()
+
+	_ = r.Apply(ctx, snap("rules", "v1", 1))
+	bad := &recordingConsumer{fail: errors.New("configure returned -1")}
+	r.RegisterConsumer("rules", "node/a", bad)
+	if r.IsReady("rules") {
+		t.Fatal("precondition: must be not-ready after rejecting register")
+	}
+
+	// The consumer starts accepting.
+	bad.fail = nil
+	if err := r.Apply(ctx, snap("rules", "v1", 2)); err != nil {
+		t.Fatalf("Apply after consumer fixed: %v", err)
+	}
+	if !r.IsReady("rules") {
+		t.Fatal("IsReady must become true once the consumer accepts on re-apply")
+	}
+}
+
+// Recovery via replacement: RegisterConsumer under the same key replaces the
+// rejecting consumer with one that accepts; the replacement's own immediate
+// notify marks the supply ready without needing a new Apply.
+func TestRegisterConsumerReplacementAcceptsMarksReady(t *testing.T) {
+	r := NewRegistry()
+	ctx := context.Background()
+
+	_ = r.Apply(ctx, snap("rules", "v1", 1))
+	bad := &recordingConsumer{fail: errors.New("configure returned -1")}
+	r.RegisterConsumer("rules", "node/a", bad)
+	if r.IsReady("rules") {
+		t.Fatal("precondition: must be not-ready")
+	}
+
+	good := &recordingConsumer{}
+	r.RegisterConsumer("rules", "node/a", good) // same key, replaces bad
+	if !r.IsReady("rules") {
+		t.Fatal("IsReady must become true once the replacement consumer accepts on immediate notify")
+	}
+}
+
+// The no-consumer case must remain ready — RegisterConsumer's change must not
+// regress the common case of a supply read only through $supplies expressions.
+func TestRegisterConsumerNoConsumerStaysReady(t *testing.T) {
+	r := NewRegistry()
+	_ = r.Apply(context.Background(), snap("rules", "v1", 1))
+	if !r.IsReady("rules") {
+		t.Fatal("no consumer at all: must stay ready")
+	}
+}
+
+// An accepting consumer that registers after content is cached must leave the
+// supply ready, with no spurious transition to not-ready in between.
+func TestRegisterConsumerAcceptingStaysReady(t *testing.T) {
+	r := NewRegistry()
+	_ = r.Apply(context.Background(), snap("rules", "v1", 1))
+
+	good := &recordingConsumer{}
+	r.RegisterConsumer("rules", "node/a", good)
+	if !r.IsReady("rules") {
+		t.Fatal("an accepting consumer's immediate notify must not mark the supply unready")
+	}
+}
+
+// Ready(names) must agree with IsReady, not merely check snapshot presence:
+// a name with a rejected consumer must be reported missing even though a
+// snapshot is cached.
+func TestReadyAgreesWithIsReady(t *testing.T) {
+	r := NewRegistry()
+	ctx := context.Background()
+	_ = r.Apply(ctx, snap("rules", "v1", 1))
+	_ = r.Apply(ctx, snap("tags", "v1", 1))
+
+	bad := &recordingConsumer{fail: errors.New("reject")}
+	r.RegisterConsumer("rules", "node/a", bad) // rejects -> rules becomes unready
+
+	missing := r.Ready([]string{"rules", "tags", "absent"})
+	if len(missing) != 2 || missing[0] != "absent" || missing[1] != "rules" {
+		t.Fatalf("Ready = %v, want sorted [absent rules] (tags is ready, rules rejected, absent has no snapshot)", missing)
+	}
+}
+
+

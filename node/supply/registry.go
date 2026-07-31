@@ -152,6 +152,19 @@ func (r *Registry) IsReady(name string) bool {
 // at that key. If a snapshot for name is already cached, c is notified
 // immediately — activation order between a supply and its consumer is not
 // guaranteed, so a late-registering consumer must not wait for the next change.
+//
+// The immediate-notify outcome feeds the same acceptance state Apply's fan-out
+// feeds: a consumer that rejects on registration leaves the supply cached but
+// NOT ready (IsReady returns false), exactly as if Apply's own fan-out had
+// rejected it. This is the path a gate reaches most often in practice, because
+// content is usually fetched and cached before any consumer registers. Without
+// this, a rejecting consumer that registers after the cache is warm would leave
+// a stale accepted=true from the no-consumer state, and the gate would admit an
+// activation whose consumer has no usable derived state.
+//
+// The consumer callback itself keeps its documented best-effort semantics: a
+// rejection here leaves the consumer on its last-good state, and does not
+// prevent registration.
 func (r *Registry) RegisterConsumer(name, key string, c Consumer) {
 	r.mu.Lock()
 	if r.consumers[name] == nil {
@@ -161,11 +174,15 @@ func (r *Registry) RegisterConsumer(name, key string, c Consumer) {
 	snap, has := r.snapshots[name]
 	r.mu.Unlock()
 
-	if has {
-		// Best-effort: a rejection here leaves the consumer on its last-good
-		// state, which is exactly the documented behaviour.
-		_ = safeNotify(context.Background(), c, snap)
+	if !has {
+		return
 	}
+	err := safeNotify(context.Background(), c, snap)
+	// Record the outcome under a fresh lock acquisition — never held across the
+	// callback above.
+	r.mu.Lock()
+	r.accepted[name] = err == nil
+	r.mu.Unlock()
 }
 
 // UnregisterConsumer removes the consumer at (name, key). It is idempotent.
@@ -225,18 +242,18 @@ func decodeForExpr(s Snapshot) any {
 	return obj
 }
 
-// Ready returns the sorted subset of names that have no cached snapshot, or nil
-// when all are present. The runner uses it as the activation-time readiness gate:
-// a non-empty result means "do not take over this entry activation".
+// Ready returns the sorted subset of names that are NOT ready (see IsReady): no
+// cached snapshot, or cached content that a registered consumer rejected. Its
+// semantics are defined entirely in terms of IsReady so this type never carries
+// two divergent readiness definitions — Task 19's heartbeat readiness reporting
+// and the activation gate must agree on what "ready" means for the same name.
 func (r *Registry) Ready(names []string) []string {
 	if len(names) == 0 {
 		return nil
 	}
-	r.mu.RLock()
-	defer r.mu.RUnlock()
 	var missing []string
 	for _, n := range names {
-		if _, ok := r.snapshots[n]; !ok {
+		if !r.IsReady(n) {
 			missing = append(missing, n)
 		}
 	}
