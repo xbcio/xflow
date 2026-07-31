@@ -18,6 +18,7 @@ type Provider struct {
 	*nodeRepo
 	*signalRepo
 	*auditRepo
+	*supplyRepo
 }
 
 // compile-time interface checks
@@ -36,6 +37,7 @@ func New(db *gorm.DB) *Provider {
 		nodeRepo:      &nodeRepo{db: db},
 		signalRepo:    &signalRepo{db: db},
 		auditRepo:     &auditRepo{db: db},
+		supplyRepo:    &supplyRepo{db: db},
 	}
 }
 
@@ -65,5 +67,6 @@ func AutoMigrate(db *gorm.DB) error {
 		&dbNode{},
 		&dbSignal{},
 		&dbAuditEvent{},
+		&dbSupply{},
 	)
 }

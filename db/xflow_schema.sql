@@ -63,6 +63,26 @@ CREATE TABLE IF NOT EXISTS xflow_signals (
     INDEX idx_updated_at (updated_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- supply 内容快照（namespace 内具名、可变、带版本）
+-- content 是平台不解释的字节；它不是 secret，禁止存放凭证。
+-- revision 每次写入 +1（即使内容未变）用于写侧 CAS；content_hash 供读侧比较。
+CREATE TABLE IF NOT EXISTS xflow_supplies (
+    id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    namespace     VARCHAR(64)     NOT NULL              COMMENT '租户/命名空间，服务端注入',
+    name          VARCHAR(255)    NOT NULL              COMMENT 'supply 节点名，namespace 内唯一',
+    content       MEDIUMBLOB      NOT NULL              COMMENT '不透明内容字节',
+    content_type  VARCHAR(128)    NOT NULL DEFAULT ''   COMMENT '建议性 MIME，平台不据此解析',
+    revision      BIGINT UNSIGNED NOT NULL DEFAULT 0    COMMENT '单调递增，写侧 CAS',
+    content_hash  VARCHAR(80)     NOT NULL DEFAULT ''   COMMENT 'sha256:<hex>，读侧比较',
+    updated_by    VARCHAR(255)    NOT NULL DEFAULT ''   COMMENT '写入方 principal',
+    last_fetch_at DATETIME(3)     NULL                  COMMENT '最近一次成功采集（pull 模式）',
+    last_error    VARCHAR(512)    NOT NULL DEFAULT ''   COMMENT '最近一次采集失败原因',
+    created_at    DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    updated_at    DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+    UNIQUE INDEX uk_ns_name (namespace, name),
+    INDEX idx_updated_at (updated_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- 授权 / 变更审计事件（append-only，不可变）
 -- B3 durable audit sink 的权威 reconcile 目标。仅记录身份、操作、资源 ID、
 -- 决策、原因、outcome、trace 关联；绝不含 token/payload/凭证等敏感字段。

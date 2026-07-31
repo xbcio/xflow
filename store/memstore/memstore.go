@@ -14,8 +14,9 @@ import (
 type Store struct {
 	mu         sync.Mutex
 	executions map[types.ExecutionID]*store.ExecutionRecord
-	nodes      map[string]*store.NodeRecord // key: "execID/nodeName"
-	signals    map[string]*signalEntry      // key: "execID/signalName"
+	nodes      map[string]*store.NodeRecord    // key: "execID/nodeName"
+	signals    map[string]*signalEntry         // key: "execID/signalName"
+	supplies   map[string]*store.SupplyResource // key: "namespace/name"
 	audit      []*store.AuditRecord
 	nextID     uint64
 }
@@ -27,9 +28,10 @@ type signalEntry struct {
 
 // compile-time interface checks
 var (
-	_ store.Store          = (*Store)(nil)
-	_ store.Transactor     = (*Store)(nil)
+	_ store.Store           = (*Store)(nil)
+	_ store.Transactor      = (*Store)(nil)
 	_ store.AuditReconciler = (*Store)(nil)
+	_ store.Supplies        = (*Store)(nil)
 )
 
 // New creates a new in-memory store.
@@ -38,6 +40,7 @@ func New() *Store {
 		executions: make(map[types.ExecutionID]*store.ExecutionRecord),
 		nodes:      make(map[string]*store.NodeRecord),
 		signals:    make(map[string]*signalEntry),
+		supplies:   make(map[string]*store.SupplyResource),
 	}
 }
 
@@ -50,6 +53,7 @@ func (s *Store) Transaction(_ context.Context, fn func(st store.Set) error) erro
 	snapExec := cloneExecutions(s.executions)
 	snapNodes := cloneNodes(s.nodes)
 	snapSignals := cloneSignals(s.signals)
+	snapSupplies := cloneSupplies(s.supplies)
 	snapAudit := cloneAudit(s.audit)
 	snapID := s.nextID
 	s.mu.Unlock()
@@ -60,6 +64,7 @@ func (s *Store) Transaction(_ context.Context, fn func(st store.Set) error) erro
 		s.executions = snapExec
 		s.nodes = snapNodes
 		s.signals = snapSignals
+		s.supplies = snapSupplies
 		s.audit = snapAudit
 		s.nextID = snapID
 		s.mu.Unlock()

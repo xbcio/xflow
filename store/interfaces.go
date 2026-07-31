@@ -128,6 +128,7 @@ type Store interface {
 	Nodes
 	Signals
 	AuditAppender
+	Supplies
 }
 
 // Set bundles the per-domain stores bound to a single backend or transaction.

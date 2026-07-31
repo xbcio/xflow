@@ -7,6 +7,39 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
+// dbSupply is the GORM persistence type for store.SupplyResource.
+type dbSupply struct {
+	ID          uint64    `gorm:"column:id;primaryKey;autoIncrement"`
+	Namespace   string    `gorm:"column:namespace;type:varchar(64);uniqueIndex:uk_ns_name"`
+	Name        string    `gorm:"column:name;type:varchar(255);uniqueIndex:uk_ns_name"`
+	Content     []byte    `gorm:"column:content;type:mediumblob"`
+	ContentType string    `gorm:"column:content_type;type:varchar(128)"`
+	Revision    uint64    `gorm:"column:revision"`
+	ContentHash string    `gorm:"column:content_hash;type:varchar(80)"`
+	UpdatedBy   string    `gorm:"column:updated_by;type:varchar(255)"`
+	LastFetchAt time.Time `gorm:"column:last_fetch_at"`
+	LastError   string    `gorm:"column:last_error;type:varchar(512)"`
+	CreatedAt   time.Time `gorm:"column:created_at;autoCreateTime:milli"`
+	UpdatedAt   time.Time `gorm:"column:updated_at;autoUpdateTime:milli"`
+}
+
+func (dbSupply) TableName() string { return "xflow_supplies" }
+
+func fromDBSupply(d *dbSupply) *store.SupplyResource {
+	return &store.SupplyResource{
+		Namespace:   d.Namespace,
+		Name:        d.Name,
+		Content:     d.Content,
+		ContentType: d.ContentType,
+		Revision:    d.Revision,
+		ContentHash: d.ContentHash,
+		UpdatedAt:   d.UpdatedAt,
+		UpdatedBy:   d.UpdatedBy,
+		LastFetchAt: d.LastFetchAt,
+		LastError:   d.LastError,
+	}
+}
+
 // dbExecution is the internal GORM persistence type for store.ExecutionRecord.
 // It carries all GORM schema annotations; the domain type store.ExecutionRecord
 // is kept free of ORM concerns.
