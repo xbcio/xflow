@@ -54,26 +54,18 @@ func TestOnSupplyChangedCarriesServerRevision(t *testing.T) {
 	}
 }
 
-// The double-check in engineForCode: a registration racing engine creation must
-// not leave the module on the globals path.
-func TestRegistrationAfterEngineCreationStillMarksSourceDriven(t *testing.T) {
-	// This is the property the post-Add re-check in engineForCode exists for,
-	// tested directly rather than by trying to win a race.
-	//
-	// A random-interleaving test cannot establish it: for the FIRST check to miss
-	// and the re-check to be what saves it, the registration's few-nanosecond map
-	// write must land inside the millisecond-to-seconds window that engineFor
-	// spends compiling. Empirically it never does — a 200-iteration concurrent
-	// version passes identically with the re-check deleted, which makes it
-	// decorative. What matters operationally is the ORDERING it protects:
-	// registration arriving after an engine already exists must still flip it,
-	// because activation registers consumers long after warmup compiled the
+// Registration and engine creation must resolve source-driven config no matter
+// which order they interleave. The two sides are a Dekker-style crossing —
+// each publishes its own state then looks for the other's — so the guarantee is
+// that they resolve under one h.mu hold, not that a double-check narrows the gap.
+func TestRegistrationAndEngineCreationResolveInEitherOrder(t *testing.T) {
+	ctx := context.Background()
+	code := testReactorCode(t)
+
+	// Warmup order: engine first, registration after. This is the production
+	// ordering — activation registers consumers long after warmup compiled the
 	// module.
 	h := newReactorHost()
-	code := testReactorCode(t)
-	ctx := context.Background()
-
-	// Warmup order: the engine exists and is on the globals path.
 	e, err := h.engineForCode(ctx, code)
 	if err != nil {
 		t.Fatalf("engineForCode: %v", err)
@@ -81,15 +73,13 @@ func TestRegistrationAfterEngineCreationStillMarksSourceDriven(t *testing.T) {
 	if e.configFromSource.Load() {
 		t.Fatal("a module with no loader and no supply consumer must start on the globals path")
 	}
-
-	// Activation order: the consumer registers afterwards.
 	h.markConfigFromSourceOrSeed(code)
 	if !e.configFromSource.Load() {
 		t.Fatal("registration after engine creation must flip the existing engine to source-driven")
 	}
 
-	// And an engine created AFTER the registration resolves the flag at birth,
-	// from the sourceDriven set rather than from a mark* call it never saw.
+	// Activation order: registration first, engine created after. The engine
+	// must resolve the flag at birth, from the seeded intent.
 	h2 := newReactorHost()
 	h2.markConfigFromSourceOrSeed(code)
 	e2, err := h2.engineForCode(ctx, code)
@@ -101,8 +91,15 @@ func TestRegistrationAfterEngineCreationStillMarksSourceDriven(t *testing.T) {
 	}
 }
 
-// The concurrent case still runs, but as a race-detector and panic check — not
-// as the guard for the ordering property above, which it cannot establish.
+// Note on what is NOT tested here: the nanosecond crossing where a registration
+// lands between engineForCode's intent read and its codeCache.Add. Two attempts
+// failed to establish it — a 200-iteration concurrent version, and a version
+// that parked the registration on h.mu — and both passed identically against
+// the defective split-lock code. The window is unreachable by any test, which is
+// exactly why the fix is structural: engineForCode resolves the flag and
+// publishes the engine under ONE h.mu hold (host.go:127-146), so the crossing
+// cannot occur rather than being caught after the fact. A test asserting it
+// would assert nothing.
 func TestConcurrentRegisterAndEngineCreateIsRaceFree(t *testing.T) {
 	const iterations = 20
 	for i := 0; i < iterations; i++ {

@@ -124,18 +124,35 @@ func (h *reactorHost) engineForCode(ctx context.Context, code string) (*reactorE
 	if err != nil {
 		return nil, err
 	}
-	// Resolve the config source once, here, so Execute never takes the registry
-	// lock. hasLoader is a locked read, but this runs once per code string.
-	if hasLoader(code) || h.isSourceDriven(code) {
-		e.configFromSource.Store(true)
-	}
+	// Resolve the config source and publish the engine as one atomic step,
+	// under the same lock the mark* registration path holds.
+	//
+	// Registration and engine creation are a Dekker-style crossing: each side
+	// publishes its own state and then looks for the other's. Registration
+	// records the intent (sourceDriven / loaderRegistry) and then flips any
+	// already-cached engine; creation reads the intent and then caches the
+	// engine. Interleaved, both lookups can miss — registration's codeCache.Get
+	// finds nothing because the Add has not happened, and the intent read
+	// already ran before the write landed. The engine then stays on the globals
+	// path forever, evaluating with no rules at all, and nothing later repairs
+	// it.
+	//
+	// A double-check after the Add only narrows that window; it does not close
+	// it, and being nanoseconds wide it is unreachable by any test — untestable
+	// code guarding a real defect is worse than no guard. One mutex covering
+	// both steps closes it by construction: whichever side takes h.mu second
+	// necessarily observes what the first published.
+	h.mu.Lock()
+	fromSource := h.sourceDrivenLocked(code)
 	h.codeCache.Add(code, e)
-	// Re-check after publishing: a concurrent RegisterConfigLoader/
-	// RegisterSupplyConsumer may have run between the first check and the Add,
-	// and its mark* call would have missed an engine that was not in the cache
-	// yet. Without this, activation-time registration would occasionally leave
-	// the module on the globals path with no rules at all.
-	if hasLoader(code) || h.isSourceDriven(code) {
+	h.mu.Unlock()
+
+	// hasLoader takes loaderMu, so it stays outside h.mu — see the lock-order
+	// note on markConfigFromSource. It is safe outside because RegisterConfigLoader
+	// publishes to loaderRegistry BEFORE it calls markConfigFromSource, so a
+	// registration this read misses is one whose flip finds the engine already
+	// cached above.
+	if fromSource || hasLoader(code) {
 		e.configFromSource.Store(true)
 	}
 	return e, nil
@@ -189,7 +206,12 @@ func (e *reactorEngine) ensurePool(ctx context.Context, cfg []byte, size uint64)
 // markConfigFromSource flips an already-created engine to source-driven config.
 // A code with no engine yet is a no-op: engineForCode resolves the flag when it
 // creates one (it also consults isSourceDriven, so the intent is not lost).
+//
+// Lock order: callers hold loaderMu-free state here — this takes h.mu, and
+// hasLoader takes loaderMu, so the two are never nested in this direction.
 func (h *reactorHost) markConfigFromSource(code string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	if e, ok := h.codeCache.Get(code); ok {
 		e.configFromSource.Store(true)
 	}
@@ -199,11 +221,14 @@ func (h *reactorHost) markConfigFromSource(code string) {
 // creating nothing: when the engine does not exist yet the intent is recorded so
 // engineForCode picks it up at creation. Compiling the module here would pay a
 // multi-second cost on the activation path.
+//
+// The seed write and the cache flip happen under ONE h.mu hold, matching
+// engineForCode's single-hold read-and-publish. Splitting them is what let an
+// engine created concurrently miss both the seed and the flip.
 func (h *reactorHost) markConfigFromSourceOrSeed(code string) {
 	h.mu.Lock()
+	defer h.mu.Unlock()
 	h.sourceDriven[code] = struct{}{}
-	h.mu.Unlock()
-
 	if e, ok := h.codeCache.Get(code); ok {
 		e.configFromSource.Store(true)
 	}
@@ -213,6 +238,11 @@ func (h *reactorHost) markConfigFromSourceOrSeed(code string) {
 func (h *reactorHost) isSourceDriven(code string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	return h.sourceDrivenLocked(code)
+}
+
+// sourceDrivenLocked is isSourceDriven for callers already holding h.mu.
+func (h *reactorHost) sourceDrivenLocked(code string) bool {
 	_, ok := h.sourceDriven[code]
 	return ok
 }
