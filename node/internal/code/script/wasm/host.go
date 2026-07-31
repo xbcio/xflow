@@ -168,6 +168,7 @@ func (h *reactorHost) engineFor(ctx context.Context, wasmBytes []byte) (*reactor
 	h.mu.Lock()
 	if e, ok := h.engines[key]; ok {
 		h.mu.Unlock()
+		obs().OnModuleCompile(ctx, "hit")
 		return e, nil
 	}
 	h.mu.Unlock()
@@ -183,11 +184,13 @@ func (h *reactorHost) engineFor(ctx context.Context, wasmBytes []byte) (*reactor
 	// Another goroutine may have won the race; keep the first, drop ours.
 	if e, ok := h.engines[key]; ok {
 		_ = cm.Close(ctx)
+		obs().OnModuleCompile(ctx, "hit")
 		return e, nil
 	}
 	e := &reactorEngine{host: h, cm: cm}
 	e.lastAppliedVersion.Store("") // seed so Load never panics
 	h.engines[key] = e
+	obs().OnModuleCompile(ctx, "miss")
 	return e, nil
 }
 

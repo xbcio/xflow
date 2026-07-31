@@ -4,6 +4,9 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/xbcio/xflow/node/internal/code/script/engine"
+	"github.com/xbcio/xflow/node/supply"
 )
 
 // recordingObserver captures every call made to it, for assertions in tests
@@ -87,3 +90,35 @@ func TestRuleCount(t *testing.T) {
 		})
 	}
 }
+
+// A source-driven Execute call on a Fresh/Stale pool must sample ConfigAge
+// into the observer on every call: this is the only signal that exposes a
+// source that stopped updating, since gen/revision stay frozen while a source
+// keeps failing.
+func TestExecuteSamplesConfigAgeForSourceDrivenModule(t *testing.T) {
+	rec := &recordingObserver{}
+	SetObserver(rec)
+	defer SetObserver(nil)
+
+	code := testReactorCode(t)
+	reg := supply.NewRegistry()
+	if err := RegisterSupplyConsumer(code, "rules", reg); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	ctx := context.Background()
+	if err := reg.Apply(ctx, supply.Snapshot{
+		Name: "rules", Content: []byte(`{"rules":[]}`), Hash: "h1", Revision: 1,
+		FetchedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+
+	if _, err := sharedReactorEngine.Execute(ctx, code, map[string]any{"x": 1.0}, engine.DefaultHelpers()); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	if len(rec.ages) == 0 {
+		t.Fatal("expected at least one OnConfigAge notification")
+	}
+}
+

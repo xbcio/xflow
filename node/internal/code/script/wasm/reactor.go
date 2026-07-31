@@ -82,6 +82,14 @@ func (f *reactorFacade) Execute(ctx context.Context, code string, globals map[st
 		case AvailStale, AvailFresh:
 			// Both serve. Stale is a last-good state, which is correct behaviour —
 			// it is reported via supply_age_seconds, not by refusing traffic.
+			//
+			// Sampled once per call rather than on a separate ticker: this is the
+			// only signal that exposes a source which stopped updating (gen and
+			// revision stay put while a source keeps failing), and a source-driven
+			// module's Execute calls are frequent enough that per-call sampling
+			// costs one atomic load (ConfigAge) plus the same obs() RLock already
+			// paid on the borrow path — no new lock class, no allocation.
+			obs().OnConfigAge(ctx, e.ConfigAge())
 		}
 		input := stripConfig(globals)
 		inputBytes, err := encodeStdin(input)
@@ -130,7 +138,7 @@ func (f *reactorFacade) evalFromPool(ctx context.Context, e *reactorEngine, inpu
 	out, doomed, err := inst.evalOnce(ctx, inputBytes)
 	if err != nil {
 		if doomed {
-			e.doom(pool, inst)
+			e.doom(ctx, pool, inst)
 		} else {
 			e.giveBack(ctx, pool, inst)
 		}

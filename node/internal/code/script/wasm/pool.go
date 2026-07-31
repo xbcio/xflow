@@ -321,8 +321,10 @@ func (e *reactorEngine) borrow(ctx context.Context) (*pooledInstance, *activePoo
 	if p == nil {
 		return nil, nil, fmt.Errorf("wasm reactor: no active pool (unconfigured)")
 	}
+	start := time.Now()
 	select {
 	case inst := <-p.free:
+		obs().OnBorrowWait(ctx, time.Since(start))
 		return inst, p, nil
 	case <-ctx.Done():
 		return nil, nil, fmt.Errorf("wasm reactor: borrow: %w", ctx.Err())
@@ -339,7 +341,11 @@ func (e *reactorEngine) giveBack(ctx context.Context, p *activePool, inst *poole
 	select {
 	case p.free <- inst:
 	default:
-		// Pool full (shouldn't happen: capacity == borrowed set). Drop safely.
+		// Pool full (shouldn't happen: capacity == borrowed set). This is the
+		// pool being torn down around a borrower that outlived it — the
+		// nearest fit among the documented causes is "shutdown", not a normal
+		// swap or eval failure.
+		obs().OnInstanceRecycled(ctx, "shutdown")
 		inst.teardown(ctx)
 	}
 }
@@ -347,7 +353,23 @@ func (e *reactorEngine) giveBack(ctx context.Context, p *activePool, inst *poole
 // doom discards a failed instance and asynchronously rebuilds a replacement in
 // the same pool so the pool returns to full strength. If the pool was swapped
 // out meanwhile, no replacement is added (the pool is being torn down anyway).
-func (e *reactorEngine) doom(p *activePool, inst *pooledInstance) {
+//
+// cause classifies the recycle for OnInstanceRecycled. evalOnce does not
+// distinguish a ctx timeout from a guest trap/panic in its return value (both
+// come back as a Call error with doomed=true), so this uses ctx.Err() as the
+// discriminator: non-nil means the deadline actually expired ("timeout");
+// nil means the instance failed for some other reason while still in its
+// deadline ("eval_error"). This is a real distinction, not a guess: a Call
+// error with ctx.Err() == nil cannot be a timeout because
+// WithCloseOnContextDone only closes the module when the context is done.
+func (e *reactorEngine) doom(ctx context.Context, p *activePool, inst *pooledInstance) {
+	cause := "eval_error"
+	if ctx.Err() != nil {
+		cause = "timeout"
+	}
+	obs().OnInstanceRecycled(ctx, cause)
+	obs().OnInstanceCount(ctx, "doomed", 1)
+
 	// Close the failed instance on a background context — its own ctx may be
 	// the expired deadline that doomed it.
 	bg := context.Background()
@@ -384,9 +406,12 @@ func (e *reactorEngine) swapConfig(ctx context.Context, cfg []byte, size uint64,
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
+	start := time.Now()
+	rules := ruleCount(cfg)
 	newPool, err := e.buildPool(ctx, cfg, size)
 	if err != nil {
 		e.sourceFailures.Add(1)
+		obs().OnPoolSwap(ctx, "rejected", rules, revision, time.Since(start))
 		return err // active unchanged
 	}
 	// Must be set before Swap publishes the pointer: once Swap runs, readers can
@@ -395,6 +420,8 @@ func (e *reactorEngine) swapConfig(ctx context.Context, cfg []byte, size uint64,
 	old := e.active.Swap(newPool)
 	e.lastSwapAt.Store(time.Now().UnixNano())
 	e.sourceFailures.Store(0)
+	obs().OnPoolSwap(ctx, "applied", rules, revision, time.Since(start))
+	obs().OnInstanceCount(ctx, "ready", int(size))
 	if old != nil {
 		go e.drainPool(context.Background(), old)
 	}
@@ -412,6 +439,7 @@ func (e *reactorEngine) drainPool(ctx context.Context, p *activePool) {
 			return
 		}
 		inst.teardown(ctx)
+		obs().OnInstanceRecycled(ctx, "pool_swapped")
 	}
 }
 
