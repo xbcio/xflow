@@ -6,6 +6,7 @@ import (
 
 	"github.com/xbcio/xflow/node/internal/code/script/engine"
 	"github.com/xbcio/xflow/node/internal/code/script/wasm"
+	"github.com/xbcio/xflow/node/supply"
 )
 
 // Warmup absorbs script-engine cold-start cost before traffic arrives. It runs
@@ -32,4 +33,12 @@ func PrewarmWasm(code string, cfg any) { wasm.Prewarm(code, cfg) }
 // background goroutine polls for config changes. See wasm.RegisterConfigLoader.
 func RegisterWasmConfigLoader(code string, loader wasm.ConfigLoader, ttl time.Duration) {
 	wasm.RegisterConfigLoader(code, loader, ttl)
+}
+
+// RegisterWasmSupplyConsumer makes a wasm module consume the named supply, so a
+// content change rebuilds its instance pool. Call it when the workflow arrives
+// (activation time) — NOT before Warmup: at process start the runner does not yet
+// know which workflows it will host.
+func RegisterWasmSupplyConsumer(code string, supplyNode string) error {
+	return wasm.RegisterSupplyConsumer(code, supplyNode, supply.Default)
 }

@@ -154,11 +154,22 @@ func PrewarmWasmModule(code string, cfg any) { scriptpkg.PrewarmWasm(code, cfg) 
 type WasmConfigLoader = wasm.ConfigLoader
 
 // RegisterWasmConfigLoader associates a ConfigLoader with a wasm module code
-// string. During warmup the loader is invoked once to build the initial pool;
-// if ttl > 0 a background goroutine polls for version changes and triggers pool
-// swaps. Call before WarmupScriptEngines.
+// string. During warmup any already-registered loader is invoked once to build
+// the initial pool; if ttl > 0 a background goroutine polls for version changes.
+//
+// It may also be called AFTER warmup: registration flips the module to
+// source-driven config at any time. The production supply path does exactly that,
+// registering when a workflow's activation arrives — at process start a runner
+// does not yet know which workflows it will host.
 func RegisterWasmConfigLoader(code string, loader WasmConfigLoader, ttl time.Duration) {
 	scriptpkg.RegisterWasmConfigLoader(code, loader, ttl)
+}
+
+// RegisterWasmSupplyConsumer makes a wasm module consume the named supply node's
+// content: a change rebuilds its instance pool through the same last-good-preserving
+// swap the loader path uses. Call it at activation time.
+func RegisterWasmSupplyConsumer(code string, supplyNode string) error {
+	return scriptpkg.RegisterWasmSupplyConsumer(code, supplyNode)
 }
 func Set(fields map[string]any) *SetNode {
 	return transform.Set(fields)
