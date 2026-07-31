@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/xbcio/xflow/store"
 )
@@ -106,5 +107,40 @@ func SupplyContract(t *testing.T, s store.Supplies, nsPrefix string) {
 	}
 	if back.Revision != 3 {
 		t.Fatalf("ns2 write clobbered ns1: rev=%d", back.Revision)
+	}
+
+	// LastFetchAt round-trip: zero value must remain zero (DB stores NULL).
+	got, err := s.GetSupply(ctx, ns1, "rules")
+	if err != nil {
+		t.Fatalf("get for LastFetchAt zero check: %v", err)
+	}
+	if !got.LastFetchAt.IsZero() {
+		t.Fatalf("LastFetchAt zero round-trip: got %v, want zero", got.LastFetchAt)
+	}
+
+	// LastFetchAt round-trip: a concrete time must survive (DATETIME(3) has ms
+	// precision, so we truncate to millisecond before comparing).
+	fetchTime := time.Date(2026, 7, 30, 12, 34, 56, 789000000, time.UTC)
+	three := uint64(3)
+	rec4, err := s.PutSupply(ctx, &store.SupplyResource{
+		Namespace: ns1, Name: "rules", Content: []byte(`{"rules":[2]}`),
+		LastFetchAt: fetchTime,
+	}, &three)
+	if err != nil {
+		t.Fatalf("put with LastFetchAt: %v", err)
+	}
+	gotFetch := rec4.LastFetchAt.Truncate(time.Millisecond)
+	wantFetch := fetchTime.Truncate(time.Millisecond)
+	if !gotFetch.Equal(wantFetch) {
+		t.Fatalf("LastFetchAt concrete round-trip: got %v, want %v", gotFetch, wantFetch)
+	}
+	// Also verify via a fresh Get.
+	rec4g, err := s.GetSupply(ctx, ns1, "rules")
+	if err != nil {
+		t.Fatalf("get for LastFetchAt concrete check: %v", err)
+	}
+	gotFetch2 := rec4g.LastFetchAt.Truncate(time.Millisecond)
+	if !gotFetch2.Equal(wantFetch) {
+		t.Fatalf("LastFetchAt concrete round-trip via Get: got %v, want %v", gotFetch2, wantFetch)
 	}
 }

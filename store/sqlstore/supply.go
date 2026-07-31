@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -52,6 +53,13 @@ func (r *supplyRepo) PutSupply(ctx context.Context, rec *store.SupplyResource, i
 			return store.ErrRevisionConflict
 		}
 
+		// Convert domain zero time.Time to DB NULL (*time.Time nil).
+		var lastFetchAt *time.Time
+		if !rec.LastFetchAt.IsZero() {
+			t := rec.LastFetchAt
+			lastFetchAt = &t
+		}
+
 		next := dbSupply{
 			ID:          cur.ID,
 			Namespace:   rec.Namespace,
@@ -61,7 +69,7 @@ func (r *supplyRepo) PutSupply(ctx context.Context, rec *store.SupplyResource, i
 			Revision:    curRev + 1,
 			ContentHash: store.ContentHash(rec.Content),
 			UpdatedBy:   rec.UpdatedBy,
-			LastFetchAt: rec.LastFetchAt,
+			LastFetchAt: lastFetchAt,
 			LastError:   rec.LastError,
 		}
 		if found {
@@ -71,7 +79,7 @@ func (r *supplyRepo) PutSupply(ctx context.Context, rec *store.SupplyResource, i
 				"revision":      next.Revision,
 				"content_hash":  next.ContentHash,
 				"updated_by":    next.UpdatedBy,
-				"last_fetch_at": next.LastFetchAt,
+				"last_fetch_at": lastFetchAt,
 				"last_error":    next.LastError,
 			}).Error; err != nil {
 				return err
