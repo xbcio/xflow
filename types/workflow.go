@@ -25,6 +25,7 @@ type WorkflowDef struct {
 	Connections    Connections               `json:"connections,omitempty"`
 	Outputs        map[string]WorkflowOutput `json:"outputs,omitempty"`
 	PinData        map[string]any            `json:"pin_data,omitempty"`
+	DependencyEdges []DependencyEdge         `json:"dependency_edges,omitempty"`
 }
 
 // WorkflowOptions controls advanced workflow-level runtime behavior.
@@ -103,6 +104,12 @@ type NodeKind string
 const (
 	NodeKindAction  NodeKind = "action"
 	NodeKindTrigger NodeKind = "trigger"
+	// NodeKindSupply marks a node that maintains long-lived shared data for
+	// other nodes to read. A supply node never advances an execution: it is
+	// registered in the graph and referable by dependency edges, but it is
+	// deliberately excluded from the unit layer, so it never counts toward the
+	// remaining-unit denominator.
+	NodeKindSupply NodeKind = "supply"
 )
 
 // Position holds the visual coordinates of a node in the workflow editor.
@@ -125,6 +132,15 @@ type Connection struct {
 
 // Connections maps source_node → output_port → list of target connections.
 type Connections map[string]map[string][]Connection
+
+// DependencyEdge declares that Node reads the shared data maintained by the
+// supply node named Supply. It is deliberately separate from Connections:
+// a dependency edge carries no data and takes no part in unit-edge
+// construction, so it must not pollute the dataflow topology.
+type DependencyEdge struct {
+	Node   string `json:"node"`
+	Supply string `json:"supply"`
+}
 
 // WorkflowContext holds runtime variables and configuration available to all nodes.
 type WorkflowContext struct {
