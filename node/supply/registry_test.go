@@ -475,4 +475,184 @@ func TestReadyAgreesWithIsReady(t *testing.T) {
 	}
 }
 
+// --- Fix Round 3: readiness must be a live conjunction, not an assignable flag ---
+
+// The exact lost-update sequence from the round-3 finding: a second, accepting
+// consumer registering must NOT erase the fact that a first, still-registered
+// consumer is rejecting. Under the old single-bool "accepted" representation,
+// whichever RegisterConsumer call ran last won regardless of what other
+// consumers had done.
+func TestRegisterConsumerLostUpdate_SecondAcceptingDoesNotMaskFirstRejecting(t *testing.T) {
+	r := NewRegistry()
+	_ = r.Apply(context.Background(), snap("rules", "v1", 1))
+
+	bad := &recordingConsumer{fail: errors.New("configure returned -1")}
+	r.RegisterConsumer("rules", "a", bad)
+	if r.IsReady("rules") {
+		t.Fatal("step: after bad 'a' registers, IsReady must be false")
+	}
+
+	good := &recordingConsumer{}
+	r.RegisterConsumer("rules", "b", good)
+	// THE regression: registering an unrelated accepting consumer must not
+	// resurrect readiness while 'a' is still registered and still rejecting.
+	if r.IsReady("rules") {
+		t.Fatal("step: after good 'b' registers, IsReady must STILL be false — 'a' is still rejecting")
+	}
+}
+
+// Order independence: rejecting-then-accepting and accepting-then-rejecting
+// must both end not-ready. The conjunction must not depend on registration
+// order.
+func TestIsReadyOrderIndependent(t *testing.T) {
+	t.Run("accepting_then_rejecting", func(t *testing.T) {
+		r := NewRegistry()
+		_ = r.Apply(context.Background(), snap("rules", "v1", 1))
+		good := &recordingConsumer{}
+		r.RegisterConsumer("rules", "a", good)
+		bad := &recordingConsumer{fail: errors.New("reject")}
+		r.RegisterConsumer("rules", "b", bad)
+		if r.IsReady("rules") {
+			t.Fatal("must be false: b rejects regardless of order")
+		}
+	})
+	t.Run("rejecting_then_accepting", func(t *testing.T) {
+		r := NewRegistry()
+		_ = r.Apply(context.Background(), snap("rules", "v1", 1))
+		bad := &recordingConsumer{fail: errors.New("reject")}
+		r.RegisterConsumer("rules", "a", bad)
+		good := &recordingConsumer{}
+		r.RegisterConsumer("rules", "b", good)
+		if r.IsReady("rules") {
+			t.Fatal("must be false: a rejects regardless of order")
+		}
+	})
+}
+
+// Unregistering the only rejecting consumer (others still accepting) must make
+// IsReady true immediately — no extra Apply needed. This subsumes the round-2
+// "leave it" case: under a derived conjunction it resolves itself for free.
+func TestUnregisterOnlyRejectorAmongOthersMakesReadyImmediately(t *testing.T) {
+	r := NewRegistry()
+	_ = r.Apply(context.Background(), snap("rules", "v1", 1))
+
+	good := &recordingConsumer{}
+	r.RegisterConsumer("rules", "a", good)
+	bad := &recordingConsumer{fail: errors.New("reject")}
+	r.RegisterConsumer("rules", "b", bad)
+	if r.IsReady("rules") {
+		t.Fatal("precondition: b rejects, must be not-ready")
+	}
+
+	r.UnregisterConsumer("rules", "b")
+	if !r.IsReady("rules") {
+		t.Fatal("unregistering the only rejector (others accepting) must make IsReady true immediately")
+	}
+}
+
+// Same-key replacement of a rejecting consumer with an accepting one must
+// overwrite that key's entry (not add a second one), yielding ready.
+func TestRegisterConsumerSameKeyReplacementOverwritesEntry(t *testing.T) {
+	r := NewRegistry()
+	_ = r.Apply(context.Background(), snap("rules", "v1", 1))
+
+	bad := &recordingConsumer{fail: errors.New("reject")}
+	r.RegisterConsumer("rules", "a", bad)
+	if r.IsReady("rules") {
+		t.Fatal("precondition: must be not-ready")
+	}
+
+	good := &recordingConsumer{}
+	r.RegisterConsumer("rules", "a", good) // same key
+	if !r.IsReady("rules") {
+		t.Fatal("same-key replacement with an accepting consumer must make IsReady true")
+	}
+}
+
+// Zero consumers must remain ready — the derived conjunction over an empty set
+// is vacuously true, matching the documented "no consumer" case.
+func TestIsReadyZeroConsumersVacuouslyTrue(t *testing.T) {
+	r := NewRegistry()
+	_ = r.Apply(context.Background(), snap("rules", "v1", 1))
+	if !r.IsReady("rules") {
+		t.Fatal("zero consumers must be ready")
+	}
+}
+
+// Concurrency: hammer Apply/RegisterConsumer/UnregisterConsumer on one name
+// from several goroutines, then assert IsReady agrees with a deterministic
+// final state. To make the final assertion deterministic despite concurrent
+// register/unregister churn, the last phase settles the consumer set to a
+// single well-known accepting consumer before the final check.
+func TestConcurrentMutationsKeepIsReadyConsistent(t *testing.T) {
+	r := NewRegistry()
+	ctx := context.Background()
+	_ = r.Apply(ctx, snap("rules", "v1", 1))
+
+	const iterations = 300
+	var wg sync.WaitGroup
+
+	// Goroutine 1: repeatedly Apply with a changing hash.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			_ = r.Apply(ctx, Snapshot{
+				Name: "rules", Content: []byte(fmt.Sprintf("v%d", i)),
+				Hash: fmt.Sprintf("h%d", i), Revision: uint64(i + 1),
+			})
+		}
+	}()
+
+	// Goroutine 2: repeatedly register/unregister a rejecting consumer at key "flaky".
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			r.RegisterConsumer("rules", "flaky", &recordingConsumer{fail: errors.New("flaky reject")})
+			r.UnregisterConsumer("rules", "flaky")
+		}
+	}()
+
+	// Goroutine 3: repeatedly register/replace an accepting consumer at key "steady".
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			r.RegisterConsumer("rules", "steady", &recordingConsumer{})
+		}
+	}()
+
+	// Goroutine 4: repeatedly read IsReady/Get concurrently — must not race,
+	// value not asserted here (non-deterministic mid-flight).
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			_ = r.IsReady("rules")
+			_, _ = r.Get("rules")
+		}
+	}()
+
+	wg.Wait()
+
+	// Settle to a single, deterministic, known-good consumer set before the
+	// final assertion: only "steady" (accepting) remains registered.
+	r.UnregisterConsumer("rules", "flaky")
+	r.RegisterConsumer("rules", "steady", &recordingConsumer{})
+
+	if !r.IsReady("rules") {
+		t.Fatal("after settling to a single accepting consumer, IsReady must be true")
+	}
+
+	// Now register a rejecting consumer as the only one and confirm IsReady
+	// correctly flips — proving the conjunction still reflects the live set
+	// after the concurrent hammering, not some stale cached value.
+	r.RegisterConsumer("rules", "steady", &recordingConsumer{fail: errors.New("final reject")})
+	if r.IsReady("rules") {
+		t.Fatal("after replacing the sole consumer with a rejecting one, IsReady must be false")
+	}
+}
+
+
 

@@ -14,23 +14,40 @@ import (
 // writes into it; node handlers read from it.
 var Default = NewRegistry()
 
+// consumerEntry pairs a registered consumer with the outcome of the last
+// OnSupplyChanged call it was given, if any. This is the actual fact the
+// registry needs to track: readiness is never assigned directly — it is the
+// conjunction of these per-consumer outcomes over the CURRENTLY registered set,
+// recomputed on every read. A zero-value lastErr (nil) means either "never
+// notified yet" or "last notification succeeded"; both are treated as
+// acceptance because a consumer that has not yet been notified has nothing to
+// reject.
+type consumerEntry struct {
+	consumer Consumer
+	lastErr  error
+}
+
 // Registry caches supply snapshots and fans changes out to the consumers that
 // registered against each name.
 type Registry struct {
 	mu        sync.RWMutex
 	snapshots map[string]Snapshot
-	// consumers maps supply name → consumer key → consumer. The key is the
-	// caller's stable identity (e.g. "workflow/node"), so re-registering after a
-	// re-activation replaces rather than duplicates.
-	consumers map[string]map[string]Consumer
-
-	// accepted tracks whether the most recent Apply for each name completed
-	// without any consumer error. The gate uses this to distinguish "cached but
-	// unusable" from "ready": a snapshot can be in the cache (so $supplies still
-	// sees the latest value) while its derived state was rejected by a consumer
-	// (e.g. wasm configure returned -1). A supply with no registered consumers
-	// is always accepted — nothing needs to build derived state from it.
-	accepted map[string]bool
+	// consumers maps supply name → consumer key → entry (the consumer plus its
+	// last notification outcome). The key is the caller's stable identity (e.g.
+	// "workflow/node"), so re-registering after a re-activation replaces rather
+	// than duplicates — and replacing a key replaces that key's outcome too.
+	//
+	// Readiness is deliberately NOT a separate assigned flag. An earlier
+	// revision of this type tracked a single "accepted" bool per name, written
+	// unconditionally from three different call sites (Apply's fan-out,
+	// RegisterConsumer's immediate notify, UnregisterConsumer's last-consumer
+	// case), each from its own outcome only. That is a lost-update bug by
+	// construction: whichever write ran last won, regardless of what every
+	// OTHER registered consumer had actually done. Keeping the outcome
+	// per-consumer and deriving readiness as a live conjunction (see IsReady)
+	// makes that class of bug structurally impossible — there is no aggregate
+	// value left to race against itself.
+	consumers map[string]map[string]consumerEntry
 
 	// decoded is the published, READ-ONLY "name → decoded value" map handed to
 	// expression evaluation as $supplies. It is replaced wholesale on every
@@ -48,8 +65,7 @@ type Registry struct {
 func NewRegistry() *Registry {
 	r := &Registry{
 		snapshots: map[string]Snapshot{},
-		consumers: map[string]map[string]Consumer{},
-		accepted:  map[string]bool{},
+		consumers: map[string]map[string]consumerEntry{},
 	}
 	empty := map[string]any{}
 	r.decoded.Store(&empty)
@@ -60,8 +76,12 @@ func NewRegistry() *Registry {
 // hash changed. It never creates an execution or dispatches a task.
 //
 // A revision bump with an unchanged hash updates the cached revision but skips
-// notification: rebuilding a consumer's derived state for identical bytes is
-// pure waste.
+// notification when the supply is already ready: rebuilding a consumer's
+// derived state for identical bytes it already accepted is pure waste. But if
+// any currently-registered consumer's last outcome for this name was a
+// rejection, an unchanged-hash Apply still re-notifies every consumer — a
+// consumer replacement or fix may have happened since, and readiness must
+// reflect the CURRENT consumer set's CURRENT outcome, never a stale one.
 //
 // Consumer errors are collected and returned joined; every consumer is called
 // regardless, and the cache is updated either way.
@@ -71,45 +91,58 @@ func (r *Registry) Apply(ctx context.Context, snap Snapshot) error {
 	changed := !had || prev.Hash != snap.Hash
 	r.snapshots[snap.Name] = cloneSnapshot(snap)
 
-	// Determine whether consumers need notification. Content changes always
-	// trigger notification. Additionally, if the supply was previously rejected
-	// (accepted=false) and has the same hash, re-notify: a consumer replacement
-	// or fix may have occurred since the last attempt, and the gate needs to
-	// know whether the supply is now usable.
 	needNotify := changed
-	if !changed && had && !r.accepted[snap.Name] {
-		needNotify = true
-	}
-
-	targets := make([]Consumer, 0, len(r.consumers[snap.Name]))
-	if needNotify {
-		for _, c := range r.consumers[snap.Name] {
-			targets = append(targets, c)
+	if !needNotify {
+		for _, entry := range r.consumers[snap.Name] {
+			if entry.lastErr != nil {
+				needNotify = true
+				break
+			}
 		}
 	}
+
+	type target struct {
+		key      string
+		consumer Consumer
+	}
+	var targets []target
+	if needNotify {
+		for k, entry := range r.consumers[snap.Name] {
+			targets = append(targets, target{key: k, consumer: entry.consumer})
+		}
+	}
+
 	if changed {
 		r.republishDecodedLocked()
 	} else if had && prev.Revision != snap.Revision {
 		// Same bytes, newer server revision: republish so $supplies.<name>.$revision
-		// reflects it, but skip consumer notification (nothing derived changed).
+		// reflects it, but this alone does not force notification above.
 		r.republishDecodedLocked()
 	}
 	r.mu.Unlock()
 
 	var errs []error
-	for _, c := range targets {
-		if err := safeNotify(ctx, c, snap); err != nil {
+	results := make(map[string]error, len(targets))
+	for _, t := range targets {
+		err := safeNotify(ctx, t.consumer, snap)
+		results[t.key] = err
+		if err != nil {
 			errs = append(errs, err)
 		}
 	}
 
-	// Record whether all consumers accepted this content. When no consumers are
-	// registered (len(targets)==0 and needNotify was true), the supply is accepted
-	// by default — nothing needs to build derived state. When needNotify is false,
-	// we preserve the existing accepted state (already true).
 	if needNotify {
 		r.mu.Lock()
-		r.accepted[snap.Name] = len(errs) == 0
+		for _, t := range targets {
+			// Only record the outcome if this consumer is still the one
+			// registered at (name, key): a concurrent RegisterConsumer or
+			// UnregisterConsumer may have superseded it while the callback ran
+			// outside the lock, and that call's own outcome must win instead.
+			if cur, ok := r.consumers[snap.Name][t.key]; ok && cur.consumer == t.consumer {
+				cur.lastErr = results[t.key]
+				r.consumers[snap.Name][t.key] = cur
+			}
+		}
 		r.mu.Unlock()
 	}
 
@@ -129,38 +162,40 @@ func (r *Registry) Get(name string) (Snapshot, bool) {
 	return cloneSnapshot(snap), true
 }
 
-// IsReady reports whether a supply has content that was accepted by all
-// registered consumers (or has no consumers at all). The gate uses this instead
-// of a bare Get to distinguish "cached but unusable" (a consumer rejected the
+// IsReady reports whether a supply has content AND every CURRENTLY registered
+// consumer's last notification for it succeeded. The gate uses this instead of
+// a bare Get to distinguish "cached but unusable" (some consumer rejected the
 // content) from "ready to serve traffic".
 //
-// A supply with no snapshot is not ready. A supply with a snapshot but no
-// consumers is always ready — nothing needs to build derived state. A supply
-// whose last Apply produced a consumer error is NOT ready, even though its
-// snapshot is cached (so $supplies still sees the value for expression reads).
+// This is computed live as a conjunction over the consumer set on every call —
+// there is no separate stored flag to fall out of sync with that set. A supply
+// with no snapshot is not ready. A supply with a snapshot but no registered
+// consumers is always ready — nothing needs to build derived state from it.
 func (r *Registry) IsReady(name string) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	_, hasSnap := r.snapshots[name]
-	if !hasSnap {
+	if _, ok := r.snapshots[name]; !ok {
 		return false
 	}
-	return r.accepted[name]
+	for _, entry := range r.consumers[name] {
+		if entry.lastErr != nil {
+			return false
+		}
+	}
+	return true
 }
 
 // RegisterConsumer registers c under (name, key), replacing any consumer already
-// at that key. If a snapshot for name is already cached, c is notified
-// immediately — activation order between a supply and its consumer is not
-// guaranteed, so a late-registering consumer must not wait for the next change.
-//
-// The immediate-notify outcome feeds the same acceptance state Apply's fan-out
-// feeds: a consumer that rejects on registration leaves the supply cached but
-// NOT ready (IsReady returns false), exactly as if Apply's own fan-out had
-// rejected it. This is the path a gate reaches most often in practice, because
-// content is usually fetched and cached before any consumer registers. Without
-// this, a rejecting consumer that registers after the cache is warm would leave
-// a stale accepted=true from the no-consumer state, and the gate would admit an
-// activation whose consumer has no usable derived state.
+// at that key — including that key's own last-outcome record, so a replacement
+// consumer starts without inheriting its predecessor's rejection. If a snapshot
+// for name is already cached, c is notified immediately — activation order
+// between a supply and its consumer is not guaranteed, so a late-registering
+// consumer must not wait for the next change — and that immediate notify's
+// outcome is recorded under c's own key exactly like Apply's fan-out records
+// each consumer's outcome under its own key. This is what makes IsReady's
+// conjunction correct regardless of registration order: this is the path a
+// gate reaches most often in practice, because content is usually fetched and
+// cached before any consumer registers.
 //
 // The consumer callback itself keeps its documented best-effort semantics: a
 // rejection here leaves the consumer on its last-good state, and does not
@@ -168,9 +203,9 @@ func (r *Registry) IsReady(name string) bool {
 func (r *Registry) RegisterConsumer(name, key string, c Consumer) {
 	r.mu.Lock()
 	if r.consumers[name] == nil {
-		r.consumers[name] = map[string]Consumer{}
+		r.consumers[name] = map[string]consumerEntry{}
 	}
-	r.consumers[name][key] = c
+	r.consumers[name][key] = consumerEntry{consumer: c}
 	snap, has := r.snapshots[name]
 	r.mu.Unlock()
 
@@ -178,17 +213,23 @@ func (r *Registry) RegisterConsumer(name, key string, c Consumer) {
 		return
 	}
 	err := safeNotify(context.Background(), c, snap)
+
 	// Record the outcome under a fresh lock acquisition — never held across the
-	// callback above.
+	// callback above — and only if c is still the consumer registered at
+	// (name, key): a concurrent Register/Unregister may have superseded it
+	// while this callback ran.
 	r.mu.Lock()
-	r.accepted[name] = err == nil
+	if cur, ok := r.consumers[name][key]; ok && cur.consumer == c {
+		cur.lastErr = err
+		r.consumers[name][key] = cur
+	}
 	r.mu.Unlock()
 }
 
 // UnregisterConsumer removes the consumer at (name, key). It is idempotent.
-// If removing this consumer leaves no remaining consumers for the name and a
-// snapshot exists, the supply is marked accepted — there is nothing left that
-// needs to build derived state.
+// Removing a rejecting consumer's entry is enough on its own to make IsReady's
+// conjunction true again (once no other registered consumer is rejecting) —
+// there is no separate aggregate state to update here.
 func (r *Registry) UnregisterConsumer(name, key string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -196,10 +237,6 @@ func (r *Registry) UnregisterConsumer(name, key string) {
 		delete(m, key)
 		if len(m) == 0 {
 			delete(r.consumers, name)
-			// No consumers left: if content is cached, it's accepted by default.
-			if _, hasSnap := r.snapshots[name]; hasSnap {
-				r.accepted[name] = true
-			}
 		}
 	}
 }
@@ -243,10 +280,11 @@ func decodeForExpr(s Snapshot) any {
 }
 
 // Ready returns the sorted subset of names that are NOT ready (see IsReady): no
-// cached snapshot, or cached content that a registered consumer rejected. Its
-// semantics are defined entirely in terms of IsReady so this type never carries
-// two divergent readiness definitions — Task 19's heartbeat readiness reporting
-// and the activation gate must agree on what "ready" means for the same name.
+// cached snapshot, or cached content that a currently-registered consumer
+// rejected. Its semantics are defined entirely in terms of IsReady so this type
+// never carries two divergent readiness definitions — Task 19's heartbeat
+// readiness reporting and the activation gate must agree on what "ready" means
+// for the same name.
 func (r *Registry) Ready(names []string) []string {
 	if len(names) == 0 {
 		return nil
