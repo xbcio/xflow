@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -48,11 +49,15 @@ func (e *Engine) deliverSignalDurable(ctx context.Context, id types.ExecutionID,
 		if !ok {
 			return fmt.Errorf("signal %q targeted unknown node %q", name, resumeNode)
 		}
+		unitIdx := g.UnitIndexForNode(nodeIdx)
+		if unitIdx < 0 {
+			return fmt.Errorf("cannot resume at %q: supply node has no schedulable unit", resumeNode)
+		}
 		// ActivationID is intentionally left zero: the durable backend reads the
 		// live activation_id from node meta inside the atomic Lua transaction,
 		// closing the TOCTOU window where a concurrent re-suspend under a new
 		// activation could make the Go-side snapshot stale.
-		intent = ResumeIntent{NodeName: resumeNode, NodeIdx: nodeIdx, UnitIdx: g.UnitIndexForNode(nodeIdx)}
+		intent = ResumeIntent{NodeName: resumeNode, NodeIdx: nodeIdx, UnitIdx: unitIdx}
 	}
 
 	node, _, committed, err := durable.DeliverSignalWithOutbox(ctx, id, name, data, intent)
@@ -235,4 +240,18 @@ func cloneSignalPayload(payload *types.SignalPayload) *types.SignalPayload {
 		}
 	}
 	return &cp
+}
+
+// resolveResumeIntent resolves a node name into a ResumeIntent, rejecting supply
+// nodes which have no schedulable unit (UnitIndexForNode returns -1).
+func resolveResumeIntent(g *graph.Graph, nodeName string) (ResumeIntent, error) {
+	nodeIdx, ok := g.NodeIndex(nodeName)
+	if !ok {
+		return ResumeIntent{}, fmt.Errorf("cannot resume at %q: unknown node", nodeName)
+	}
+	unitIdx := g.UnitIndexForNode(nodeIdx)
+	if unitIdx < 0 {
+		return ResumeIntent{}, fmt.Errorf("cannot resume at %q: supply node has no schedulable unit", nodeName)
+	}
+	return ResumeIntent{NodeName: nodeName, NodeIdx: nodeIdx, UnitIdx: unitIdx}, nil
 }

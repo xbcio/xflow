@@ -110,7 +110,14 @@ func entryUnitIndex(g *graph.Graph, entryUnitID string) (int, bool) {
 		}
 	}
 	if nodeIdx, ok := g.NodeIndex(entryUnitID); ok {
-		return g.UnitIndexForNode(nodeIdx), true
+		unitIdx := g.UnitIndexForNode(nodeIdx)
+		if unitIdx < 0 {
+			// A supply node is registered in the node layer but deliberately absent
+			// from the unit layer, so UnitIndexForNode yields -1. Returning that as
+			// a valid index would seed an entry topology against unit -1.
+			return -1, false
+		}
+		return unitIdx, true
 	}
 	return 0, false
 }
