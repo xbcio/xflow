@@ -56,27 +56,84 @@ func TestOnSupplyChangedCarriesServerRevision(t *testing.T) {
 
 // The double-check in engineForCode: a registration racing engine creation must
 // not leave the module on the globals path.
-func TestConcurrentRegisterAndEngineCreate(t *testing.T) {
+func TestRegistrationAfterEngineCreationStillMarksSourceDriven(t *testing.T) {
+	// This is the property the post-Add re-check in engineForCode exists for,
+	// tested directly rather than by trying to win a race.
+	//
+	// A random-interleaving test cannot establish it: for the FIRST check to miss
+	// and the re-check to be what saves it, the registration's few-nanosecond map
+	// write must land inside the millisecond-to-seconds window that engineFor
+	// spends compiling. Empirically it never does — a 200-iteration concurrent
+	// version passes identically with the re-check deleted, which makes it
+	// decorative. What matters operationally is the ORDERING it protects:
+	// registration arriving after an engine already exists must still flip it,
+	// because activation registers consumers long after warmup compiled the
+	// module.
+	h := newReactorHost()
 	code := testReactorCode(t)
-	reg := supply.NewRegistry()
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		_ = RegisterSupplyConsumer(code, "rules", reg)
-	}()
-	go func() {
-		defer wg.Done()
-		_, _ = sharedReactorHost.engineForCode(context.Background(), code)
-	}()
-	wg.Wait()
+	ctx := context.Background()
 
-	e, err := sharedReactorHost.engineForCode(context.Background(), code)
+	// Warmup order: the engine exists and is on the globals path.
+	e, err := h.engineForCode(ctx, code)
 	if err != nil {
 		t.Fatalf("engineForCode: %v", err)
 	}
+	if e.configFromSource.Load() {
+		t.Fatal("a module with no loader and no supply consumer must start on the globals path")
+	}
+
+	// Activation order: the consumer registers afterwards.
+	h.markConfigFromSourceOrSeed(code)
 	if !e.configFromSource.Load() {
-		t.Fatal("a registration racing engine creation must still mark the engine source-driven")
+		t.Fatal("registration after engine creation must flip the existing engine to source-driven")
+	}
+
+	// And an engine created AFTER the registration resolves the flag at birth,
+	// from the sourceDriven set rather than from a mark* call it never saw.
+	h2 := newReactorHost()
+	h2.markConfigFromSourceOrSeed(code)
+	e2, err := h2.engineForCode(ctx, code)
+	if err != nil {
+		t.Fatalf("engineForCode (post-registration host): %v", err)
+	}
+	if !e2.configFromSource.Load() {
+		t.Fatal("an engine created after registration must resolve source-driven at creation")
+	}
+}
+
+// The concurrent case still runs, but as a race-detector and panic check — not
+// as the guard for the ordering property above, which it cannot establish.
+func TestConcurrentRegisterAndEngineCreateIsRaceFree(t *testing.T) {
+	const iterations = 20
+	for i := 0; i < iterations; i++ {
+		h := newReactorHost()
+		code := testReactorCode(t)
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(2)
+		var raced *reactorEngine
+		var raceErr error
+		go func() {
+			defer wg.Done()
+			<-start
+			h.markConfigFromSourceOrSeed(code)
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			raced, raceErr = h.engineForCode(context.Background(), code)
+		}()
+		close(start)
+		wg.Wait()
+
+		if raceErr != nil {
+			t.Fatalf("iteration %d: engineForCode: %v", i, raceErr)
+		}
+		// Assert on the engine the RACING goroutine got: a fresh lookup would hit
+		// codeCache and return without re-resolving the flag.
+		if raced != nil && !raced.configFromSource.Load() {
+			t.Fatalf("iteration %d: concurrent registration left the module on the globals path", i)
+		}
 	}
 }
 

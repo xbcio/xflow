@@ -32,9 +32,16 @@ var _ supply.Consumer = (*supplyConsumer)(nil)
 // Content that is already active is a no-op. The registry notifies with content
 // this module may already be serving — RegisterConsumer notifies immediately on
 // every workflow re-activation, and Apply re-notifies whenever any consumer's
-// verdict for the current content is unresolved. Without this check each such
-// notification recompiles a full pool of instances and drains the old one, for
-// bytes that are already active.
+// verdict for the current content is unresolved.
+//
+// The cost of not checking is not just a wasted rebuild. A redundant swap also
+// resets lastSwapAt and sourceFailures, and lastSwapAt is what drives the Stale
+// tier and xflow_supply_age_seconds — the one signal that exposes a source which
+// silently stopped updating (gen stays put when a source keeps failing, so only
+// elapsed time reveals it). Reactivation churn would keep stamping that
+// timestamp fresh, so an operator would read a healthy age for content that had
+// not actually refreshed in hours. The check protects the signal, not just the
+// CPU.
 func (c *supplyConsumer) OnSupplyChanged(ctx context.Context, snap supply.Snapshot) error {
 	e, err := c.host.engineForCode(ctx, c.code)
 	if err != nil {
