@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -151,6 +152,166 @@ func TestAdmitNoRequirementsIsNoop(t *testing.T) {
 	}
 	if f.calls.Load() != 0 {
 		t.Fatal("no requirements must mean no fetch")
+	}
+}
+
+// --- Fix Round 1: rejected content must keep declining ---
+
+// rejectingConsumer rejects OnSupplyChanged until told otherwise.
+type rejectingConsumer struct {
+	mu     sync.Mutex
+	reject bool
+}
+
+func (c *rejectingConsumer) setReject(v bool) {
+	c.mu.Lock()
+	c.reject = v
+	c.mu.Unlock()
+}
+
+func (c *rejectingConsumer) OnSupplyChanged(_ context.Context, _ supply.Snapshot) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.reject {
+		return errors.New("configure returned -1")
+	}
+	return nil
+}
+
+// The core regression: a rejecting consumer must cause Admit to decline on
+// REPEATED calls, not just the first. Before the fix, the second Admit found
+// the cached snapshot and skipped the gate entirely.
+func TestAdmitDeclinesRepeatedlyWhenConsumerRejects(t *testing.T) {
+	rc := &rejectingConsumer{reject: true}
+	reg := supply.NewRegistry()
+	reg.RegisterConsumer("rules", "wasm/clean", rc)
+
+	f := &stubFetcher{content: map[string][]byte{"shared-rules": []byte(`{"rules":[]}`)}}
+	g := NewSupplyGate(f, reg, quietLogger())
+
+	reqs := []engine.SupplyRequirement{
+		{Node: "rules", Resource: "shared-rules", RequireReady: true},
+	}
+
+	// First Admit: fetches, Apply notifies consumer which rejects → decline.
+	err := g.Admit(context.Background(), reqs)
+	var nr *NotReadyError
+	if !errors.As(err, &nr) {
+		t.Fatalf("first Admit: err = %v, want *NotReadyError", err)
+	}
+
+	// Second Admit: must STILL decline (the regression was: it admitted here).
+	err = g.Admit(context.Background(), reqs)
+	if !errors.As(err, &nr) {
+		t.Fatalf("second Admit: err = %v, want *NotReadyError (the regression)", err)
+	}
+
+	// Third Admit for good measure: still declining.
+	err = g.Admit(context.Background(), reqs)
+	if !errors.As(err, &nr) {
+		t.Fatalf("third Admit: err = %v, want *NotReadyError", err)
+	}
+}
+
+// A supply with no registered consumer must admit normally when content is
+// present. This is the common case: content is read only through $supplies
+// expressions, no Consumer interface is registered.
+func TestAdmitPassesWithNoConsumer(t *testing.T) {
+	reg := supply.NewRegistry()
+	f := &stubFetcher{content: map[string][]byte{"shared-rules": []byte(`ok`)}}
+	g := NewSupplyGate(f, reg, quietLogger())
+
+	reqs := []engine.SupplyRequirement{
+		{Node: "rules", Resource: "shared-rules", RequireReady: true},
+	}
+
+	// First call fetches and admits (no consumer to reject).
+	if err := g.Admit(context.Background(), reqs); err != nil {
+		t.Fatalf("Admit with no consumer: %v", err)
+	}
+
+	// Second call: IsReady returns true, no fetch needed.
+	if err := g.Admit(context.Background(), reqs); err != nil {
+		t.Fatalf("second Admit with no consumer: %v", err)
+	}
+	if n := f.calls.Load(); n != 1 {
+		t.Fatalf("fetched %d times, want 1 (second call should skip)", n)
+	}
+}
+
+// Once a consumer starts accepting (after previously rejecting), Admit must
+// admit and stop re-fetching.
+func TestAdmitAdmitsAfterConsumerStartsAccepting(t *testing.T) {
+	rc := &rejectingConsumer{reject: true}
+	reg := supply.NewRegistry()
+	reg.RegisterConsumer("rules", "wasm/clean", rc)
+
+	f := &stubFetcher{content: map[string][]byte{"shared-rules": []byte(`{"rules":[]}`)}}
+	g := NewSupplyGate(f, reg, quietLogger())
+
+	reqs := []engine.SupplyRequirement{
+		{Node: "rules", Resource: "shared-rules", RequireReady: true},
+	}
+
+	// First Admit: consumer rejects → decline.
+	err := g.Admit(context.Background(), reqs)
+	var nr *NotReadyError
+	if !errors.As(err, &nr) {
+		t.Fatalf("first Admit: err = %v, want *NotReadyError", err)
+	}
+
+	// Consumer is now fixed (starts accepting).
+	rc.setReject(false)
+
+	// Second Admit: IsReady is false (still rejected from last round), so it
+	// re-fetches, Apply re-notifies (accepted was false), consumer accepts this
+	// time → admits.
+	if err := g.Admit(context.Background(), reqs); err != nil {
+		t.Fatalf("Admit after consumer fixed: %v", err)
+	}
+
+	// Third Admit: IsReady is now true → no fetch needed.
+	prevCalls := f.calls.Load()
+	if err := g.Admit(context.Background(), reqs); err != nil {
+		t.Fatalf("third Admit: %v", err)
+	}
+	if f.calls.Load() != prevCalls {
+		t.Fatal("third Admit should not re-fetch (supply is now ready)")
+	}
+}
+
+// After a rejecting consumer is unregistered, the supply becomes ready (no
+// consumer left to reject) and Admit must admit without re-fetching.
+func TestAdmitAdmitsAfterRejectingConsumerUnregistered(t *testing.T) {
+	rc := &rejectingConsumer{reject: true}
+	reg := supply.NewRegistry()
+	reg.RegisterConsumer("rules", "wasm/clean", rc)
+
+	f := &stubFetcher{content: map[string][]byte{"shared-rules": []byte(`{"rules":[]}`)}}
+	g := NewSupplyGate(f, reg, quietLogger())
+
+	reqs := []engine.SupplyRequirement{
+		{Node: "rules", Resource: "shared-rules", RequireReady: true},
+	}
+
+	// First Admit: consumer rejects → decline.
+	err := g.Admit(context.Background(), reqs)
+	var nr *NotReadyError
+	if !errors.As(err, &nr) {
+		t.Fatalf("first Admit: err = %v, want *NotReadyError", err)
+	}
+
+	// Unregister the consumer: no consumers left, supply should become ready.
+	reg.UnregisterConsumer("rules", "wasm/clean")
+
+	// Second Admit: IsReady returns true (unregister marked it accepted) → admits
+	// without fetching.
+	prevCalls := f.calls.Load()
+	if err := g.Admit(context.Background(), reqs); err != nil {
+		t.Fatalf("Admit after unregister: %v", err)
+	}
+	if f.calls.Load() != prevCalls {
+		t.Fatal("should not re-fetch after unregister made it ready")
 	}
 }
 

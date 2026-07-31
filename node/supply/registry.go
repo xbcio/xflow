@@ -24,6 +24,14 @@ type Registry struct {
 	// re-activation replaces rather than duplicates.
 	consumers map[string]map[string]Consumer
 
+	// accepted tracks whether the most recent Apply for each name completed
+	// without any consumer error. The gate uses this to distinguish "cached but
+	// unusable" from "ready": a snapshot can be in the cache (so $supplies still
+	// sees the latest value) while its derived state was rejected by a consumer
+	// (e.g. wasm configure returned -1). A supply with no registered consumers
+	// is always accepted — nothing needs to build derived state from it.
+	accepted map[string]bool
+
 	// decoded is the published, READ-ONLY "name → decoded value" map handed to
 	// expression evaluation as $supplies. It is replaced wholesale on every
 	// content change (copy-on-write) and never mutated in place, because readers
@@ -41,6 +49,7 @@ func NewRegistry() *Registry {
 	r := &Registry{
 		snapshots: map[string]Snapshot{},
 		consumers: map[string]map[string]Consumer{},
+		accepted:  map[string]bool{},
 	}
 	empty := map[string]any{}
 	r.decoded.Store(&empty)
@@ -61,8 +70,19 @@ func (r *Registry) Apply(ctx context.Context, snap Snapshot) error {
 	prev, had := r.snapshots[snap.Name]
 	changed := !had || prev.Hash != snap.Hash
 	r.snapshots[snap.Name] = cloneSnapshot(snap)
+
+	// Determine whether consumers need notification. Content changes always
+	// trigger notification. Additionally, if the supply was previously rejected
+	// (accepted=false) and has the same hash, re-notify: a consumer replacement
+	// or fix may have occurred since the last attempt, and the gate needs to
+	// know whether the supply is now usable.
+	needNotify := changed
+	if !changed && had && !r.accepted[snap.Name] {
+		needNotify = true
+	}
+
 	targets := make([]Consumer, 0, len(r.consumers[snap.Name]))
-	if changed {
+	if needNotify {
 		for _, c := range r.consumers[snap.Name] {
 			targets = append(targets, c)
 		}
@@ -82,6 +102,17 @@ func (r *Registry) Apply(ctx context.Context, snap Snapshot) error {
 			errs = append(errs, err)
 		}
 	}
+
+	// Record whether all consumers accepted this content. When no consumers are
+	// registered (len(targets)==0 and needNotify was true), the supply is accepted
+	// by default — nothing needs to build derived state. When needNotify is false,
+	// we preserve the existing accepted state (already true).
+	if needNotify {
+		r.mu.Lock()
+		r.accepted[snap.Name] = len(errs) == 0
+		r.mu.Unlock()
+	}
+
 	return errors.Join(errs...)
 }
 
@@ -96,6 +127,25 @@ func (r *Registry) Get(name string) (Snapshot, bool) {
 		return Snapshot{}, false
 	}
 	return cloneSnapshot(snap), true
+}
+
+// IsReady reports whether a supply has content that was accepted by all
+// registered consumers (or has no consumers at all). The gate uses this instead
+// of a bare Get to distinguish "cached but unusable" (a consumer rejected the
+// content) from "ready to serve traffic".
+//
+// A supply with no snapshot is not ready. A supply with a snapshot but no
+// consumers is always ready — nothing needs to build derived state. A supply
+// whose last Apply produced a consumer error is NOT ready, even though its
+// snapshot is cached (so $supplies still sees the value for expression reads).
+func (r *Registry) IsReady(name string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, hasSnap := r.snapshots[name]
+	if !hasSnap {
+		return false
+	}
+	return r.accepted[name]
 }
 
 // RegisterConsumer registers c under (name, key), replacing any consumer already
@@ -119,6 +169,9 @@ func (r *Registry) RegisterConsumer(name, key string, c Consumer) {
 }
 
 // UnregisterConsumer removes the consumer at (name, key). It is idempotent.
+// If removing this consumer leaves no remaining consumers for the name and a
+// snapshot exists, the supply is marked accepted — there is nothing left that
+// needs to build derived state.
 func (r *Registry) UnregisterConsumer(name, key string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -126,6 +179,10 @@ func (r *Registry) UnregisterConsumer(name, key string) {
 		delete(m, key)
 		if len(m) == 0 {
 			delete(r.consumers, name)
+			// No consumers left: if content is cached, it's accepted by default.
+			if _, hasSnap := r.snapshots[name]; hasSnap {
+				r.accepted[name] = true
+			}
 		}
 	}
 }

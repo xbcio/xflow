@@ -71,7 +71,7 @@ func (g *SupplyGate) Admit(ctx context.Context, reqs []engine.SupplyRequirement)
 	}
 	var missing []string
 	for _, req := range reqs {
-		if _, ok := g.registry.Get(req.Node); ok {
+		if g.registry.IsReady(req.Node) {
 			continue
 		}
 		content, hash, revision, err := g.fetcher.Fetch(ctx, req.Resource)
@@ -101,6 +101,17 @@ func (g *SupplyGate) Admit(ctx context.Context, reqs []engine.SupplyRequirement)
 			// apply it has no usable derived state, so a required supply is not
 			// ready.
 			g.log(ctx, slog.LevelWarn, "supply content rejected by a consumer", req, hash)
+			if req.RequireReady {
+				missing = append(missing, req.Node)
+			}
+			continue
+		}
+		// Apply returned nil, but that can mean either "consumers accepted" or
+		// "content unchanged, no notification happened". Re-check IsReady to catch
+		// the case where the content is cached-but-rejected from a prior Apply
+		// with the same hash (a re-fetch that returned identical bytes).
+		if !g.registry.IsReady(req.Node) {
+			g.log(ctx, slog.LevelWarn, "supply content previously rejected, still not ready", req, hash)
 			if req.RequireReady {
 				missing = append(missing, req.Node)
 			}

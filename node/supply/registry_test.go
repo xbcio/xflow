@@ -256,3 +256,98 @@ func TestConcurrentApplyAndGet(t *testing.T) {
 		t.Fatalf("revision = %d, want %d", got.Revision, iterations)
 	}
 }
+
+// --- IsReady tests ---
+
+func TestIsReadyTrueWhenNoConsumers(t *testing.T) {
+	r := NewRegistry()
+	_ = r.Apply(context.Background(), snap("rules", "v1", 1))
+	if !r.IsReady("rules") {
+		t.Fatal("IsReady must be true when content is cached and no consumers exist")
+	}
+}
+
+func TestIsReadyFalseWhenConsumerRejects(t *testing.T) {
+	r := NewRegistry()
+	bad := &recordingConsumer{fail: errors.New("reject")}
+	r.RegisterConsumer("rules", "node/a", bad)
+
+	_ = r.Apply(context.Background(), snap("rules", "v1", 1))
+	if r.IsReady("rules") {
+		t.Fatal("IsReady must be false when a consumer rejected")
+	}
+}
+
+func TestIsReadyFalseWhenNoSnapshot(t *testing.T) {
+	r := NewRegistry()
+	if r.IsReady("rules") {
+		t.Fatal("IsReady must be false when no snapshot exists")
+	}
+}
+
+func TestIsReadyBecomesTrue_AfterReapplyWithAcceptingConsumer(t *testing.T) {
+	r := NewRegistry()
+	bad := &recordingConsumer{fail: errors.New("reject")}
+	r.RegisterConsumer("rules", "node/a", bad)
+	_ = r.Apply(context.Background(), snap("rules", "v1", 1))
+	if r.IsReady("rules") {
+		t.Fatal("precondition: must be not-ready")
+	}
+
+	// Consumer starts accepting.
+	bad.fail = nil
+	// Re-apply same content: since accepted=false, Apply re-notifies.
+	_ = r.Apply(context.Background(), snap("rules", "v1", 1))
+	if !r.IsReady("rules") {
+		t.Fatal("IsReady must become true after consumer accepts on re-apply")
+	}
+}
+
+func TestIsReadyBecomesTrueAfterUnregister(t *testing.T) {
+	r := NewRegistry()
+	bad := &recordingConsumer{fail: errors.New("reject")}
+	r.RegisterConsumer("rules", "node/a", bad)
+	_ = r.Apply(context.Background(), snap("rules", "v1", 1))
+	if r.IsReady("rules") {
+		t.Fatal("precondition: must be not-ready")
+	}
+
+	r.UnregisterConsumer("rules", "node/a")
+	if !r.IsReady("rules") {
+		t.Fatal("IsReady must become true after the rejecting consumer is unregistered")
+	}
+}
+
+// Unchanged hash with accepted=true must NOT re-notify (preserving the
+// optimization in TestApplySkipsNotifyOnUnchangedHash).
+func TestApplySkipsNotifyOnUnchangedHashWhenAccepted(t *testing.T) {
+	r := NewRegistry()
+	c := &recordingConsumer{}
+	r.RegisterConsumer("rules", "node/clean", c)
+
+	ctx := context.Background()
+	_ = r.Apply(ctx, snap("rules", "v1", 1))
+	_ = r.Apply(ctx, snap("rules", "v1", 2))
+
+	if c.count() != 1 {
+		t.Fatalf("consumer notified %d times, want 1 (unchanged hash, already accepted)", c.count())
+	}
+}
+
+// Unchanged hash with accepted=false MUST re-notify (the fix for the rejected
+// content regression).
+func TestApplyRenotifiesOnUnchangedHashWhenRejected(t *testing.T) {
+	r := NewRegistry()
+	bad := &recordingConsumer{fail: errors.New("reject")}
+	r.RegisterConsumer("rules", "node/a", bad)
+
+	ctx := context.Background()
+	_ = r.Apply(ctx, snap("rules", "v1", 1))
+	// Second apply with same hash: consumer should be re-notified because
+	// accepted is false.
+	_ = r.Apply(ctx, snap("rules", "v1", 2))
+
+	if bad.count() != 2 {
+		t.Fatalf("consumer notified %d times, want 2 (re-notify on rejected)", bad.count())
+	}
+}
