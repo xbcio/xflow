@@ -1,10 +1,14 @@
 package node
 
 import (
+	"context"
+	"time"
+
 	core "github.com/xbcio/xflow/node/internal"
 	"github.com/xbcio/xflow/node/internal/action"
 	codepkg "github.com/xbcio/xflow/node/internal/code"
 	scriptpkg "github.com/xbcio/xflow/node/internal/code/script"
+	"github.com/xbcio/xflow/node/internal/code/script/wasm"
 	"github.com/xbcio/xflow/node/internal/flow"
 	"github.com/xbcio/xflow/node/internal/group"
 	"github.com/xbcio/xflow/node/internal/transform"
@@ -111,6 +115,31 @@ func Script(code string) *ScriptNode { return scriptpkg.Script(code) }
 // SetScriptObserver installs the global observer for xflow.script executions.
 func SetScriptObserver(o scriptpkg.Observer) {
 	scriptpkg.SetObserver(o)
+}
+
+// WarmupScriptEngines absorbs script-engine cold start before traffic arrives:
+// js/qjs's ~330 ms QuickJS-wasm compile and the wasm reactor runtime open
+// (which resolves the on-disk compilation cache). Hosts should call it once at
+// startup. An error means one engine failed to warm — log it and continue, since
+// every engine also warms lazily on its first request.
+func WarmupScriptEngines(ctx context.Context) error { return scriptpkg.Warmup(ctx) }
+
+// PrewarmWasmModule registers a base64 wasm module (as carried by a ScriptNode
+// running on wasm/wazero-reactor) and its config so WarmupScriptEngines
+// compiles it and builds its instance pool at startup instead of under the
+// first request's deadline. Call before WarmupScriptEngines.
+func PrewarmWasmModule(code string, cfg any) { scriptpkg.PrewarmWasm(code, cfg) }
+
+// WasmConfigLoader is the external configuration source interface for a wasm
+// reactor module. Re-exported from the wasm package for external registration.
+type WasmConfigLoader = wasm.ConfigLoader
+
+// RegisterWasmConfigLoader associates a ConfigLoader with a wasm module code
+// string. During warmup the loader is invoked once to build the initial pool;
+// if ttl > 0 a background goroutine polls for version changes and triggers pool
+// swaps. Call before WarmupScriptEngines.
+func RegisterWasmConfigLoader(code string, loader WasmConfigLoader, ttl time.Duration) {
+	scriptpkg.RegisterWasmConfigLoader(code, loader, ttl)
 }
 func Set(fields map[string]any) *SetNode {
 	return transform.Set(fields)

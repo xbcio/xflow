@@ -80,9 +80,14 @@ func (e *wazeroEngine) runtime(ctx context.Context) wazero.Runtime {
 		// configured budget (each page is 64 KiB). Guests that exceed this
 		// via memory.grow trap at the wazero boundary instead of consuming
 		// unbounded host memory.
+		// WithCompilationCache shares compiled machine code with the reactor
+		// runtime and, when a directory is available, across process restarts
+		// (design §1 constraints #5/#6) so a runner redeploy does not pay a
+		// multi-second compile on its first request.
 		e.rt = wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().
 			WithCloseOnContextDone(true).
-			WithMemoryLimitPages(engine.DefaultWasmMemoryPages))
+			WithMemoryLimitPages(engine.DefaultWasmMemoryPages).
+			WithCompilationCache(compilationCacheFor(ctx)))
 		wasi_snapshot_preview1.MustInstantiate(ctx, e.rt)
 	})
 	return e.rt

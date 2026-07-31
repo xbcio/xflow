@@ -13,8 +13,11 @@ import (
 )
 
 var (
-	echoWasm []byte
-	spinWasm []byte
+	echoWasm        []byte
+	spinWasm        []byte
+	reactorWasm     []byte
+	reactorSpinWasm []byte
+	reactorMinWasm  []byte
 )
 
 func TestMain(m *testing.M) {
@@ -24,6 +27,9 @@ func TestMain(m *testing.M) {
 	}
 	echoWasm = buildGuest(dir, "echo")
 	spinWasm = buildGuest(dir, "spin")
+	reactorWasm = buildReactorGuest(dir, "reactor")
+	reactorSpinWasm = buildReactorGuest(dir, "reactorspin")
+	reactorMinWasm = buildReactorGuest(dir, "reactormin")
 	exitCode := m.Run()
 	if err := os.RemoveAll(dir); err != nil {
 		panic(err)
@@ -31,14 +37,31 @@ func TestMain(m *testing.M) {
 	os.Exit(exitCode)
 }
 
-// buildGuest compiles testdata/<name>/main.go to a WASI module and returns its
-// bytes.
+// buildGuest compiles testdata/<name>/main.go to a WASI command module and
+// returns its bytes.
 func buildGuest(dir, name string) []byte {
 	out := filepath.Join(dir, name+".wasm")
 	cmd := exec.Command("go", "build", "-o", out, "./testdata/"+name+"/main.go")
 	cmd.Env = append(os.Environ(), "GOOS=wasip1", "GOARCH=wasm")
 	if b, err := cmd.CombinedOutput(); err != nil {
 		panic("build " + name + " guest: " + string(b))
+	}
+	b, err := os.ReadFile(out)
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
+
+// buildReactorGuest compiles a reactor-model guest. Unlike a command module it
+// needs -buildmode=c-shared so wasip1 emits _initialize plus the //go:wasmexport
+// functions instead of a one-shot _start.
+func buildReactorGuest(dir, name string) []byte {
+	out := filepath.Join(dir, name+".wasm")
+	cmd := exec.Command("go", "build", "-buildmode=c-shared", "-o", out, "./testdata/"+name+"/main.go")
+	cmd.Env = append(os.Environ(), "GOOS=wasip1", "GOARCH=wasm")
+	if b, err := cmd.CombinedOutput(); err != nil {
+		panic("build " + name + " reactor guest: " + string(b))
 	}
 	b, err := os.ReadFile(out)
 	if err != nil {

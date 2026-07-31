@@ -22,7 +22,7 @@ import (
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
 	"github.com/xbcio/xflow/namespace"
-	_ "github.com/xbcio/xflow/node"
+	xnode "github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/node/registry"
 	"github.com/xbcio/xflow/node/resource"
 	"github.com/xbcio/xflow/observability/tracing"
@@ -201,6 +201,13 @@ func runRunner(ctx context.Context, cfg runnerConfig) error {
 		}()
 	}
 	registry := execution.NewRegistry()
+	// Absorb script-engine cold start before the first lease arrives: qjs pays a
+	// ~330 ms QuickJS-wasm compile and the wasm reactor opens its runtime
+	// (resolving the on-disk compilation cache). A failure here is not fatal —
+	// each engine still warms lazily — so log and carry on.
+	if err := xnode.WarmupScriptEngines(ctx); err != nil {
+		slog.Warn("script engine warmup failed; engines will warm on first use", "error", err)
+	}
 	runner := newRunnerService(client, registry, serviceCfg)
 	return runner.Run(ctx)
 }
