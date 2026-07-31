@@ -344,3 +344,12 @@ func (s *latencyStore) ListSignalsByNames(context.Context, types.ExecutionID, []
 func (s *latencyStore) AppendAudit(context.Context, *store.AuditRecord) error {
 	return nil
 }
+
+func (s *latencyStore) GetSupply(context.Context, string, string) (*store.SupplyResource, error) {
+	return nil, nil
+}
+
+func (s *latencyStore) PutSupply(context.Context, *store.SupplyResource, *uint64) (*store.SupplyResource, error) {
+	s.write()
+	return nil, nil
+}

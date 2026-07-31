@@ -91,6 +91,15 @@ func (f *failingStore) AppendAudit(context.Context, *store.AuditRecord) error {
 	return nil
 }
 
+func (f *failingStore) GetSupply(context.Context, string, string) (*store.SupplyResource, error) {
+	return nil, nil
+}
+
+func (f *failingStore) PutSupply(_ context.Context, _ *store.SupplyResource, _ *uint64) (*store.SupplyResource, error) {
+	f.calls["put_supply"]++
+	return nil, f.upsertErr
+}
+
 func (c *countingStore) CreateExecution(context.Context, *store.ExecutionRecord) error {
 	c.createExecutionCalls++
 	return nil
@@ -150,6 +159,14 @@ func (c *countingStore) ListSignalsByNames(context.Context, types.ExecutionID, [
 
 func (c *countingStore) AppendAudit(context.Context, *store.AuditRecord) error {
 	return nil
+}
+
+func (c *countingStore) GetSupply(context.Context, string, string) (*store.SupplyResource, error) {
+	return nil, nil
+}
+
+func (c *countingStore) PutSupply(context.Context, *store.SupplyResource, *uint64) (*store.SupplyResource, error) {
+	return nil, nil
 }
 
 type recordingObserver struct {
