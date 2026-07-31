@@ -3,6 +3,7 @@ package graph
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 
 	"github.com/xbcio/xflow/types"
@@ -35,7 +36,7 @@ func buildDependencyEdges(def *types.WorkflowDef, g *Graph) error {
 	}
 
 	if len(def.DependencyEdges) == 0 {
-		return nil
+		return validateSupplyUsage(g)
 	}
 
 	refs := make(map[int]map[string]struct{}, len(def.DependencyEdges))
@@ -68,6 +69,110 @@ func buildDependencyEdges(def *types.WorkflowDef, g *Graph) error {
 		}
 		sort.Strings(names)
 		g.supplyRefs[consumerIdx] = names
+	}
+	return validateSupplyUsage(g)
+}
+
+// suppliesRefPattern matches a static $supplies.<name> reference. The name is
+// restricted to the identifier characters a node name may use, which is exactly
+// what makes the reference statically derivable.
+var suppliesRefPattern = regexp.MustCompile(`\$supplies\.([A-Za-z_][A-Za-z0-9_-]*)`)
+
+// suppliesDynamicPattern matches any use of $supplies that is NOT a static
+// dotted name: a bracket subscript, or a bare $supplies with no member access.
+// Such a use is rejected at compile time — if the name cannot be derived
+// statically, neither the dependency-edge check nor the server-side reverse
+// index can be built.
+var suppliesDynamicPattern = regexp.MustCompile(`\$supplies\s*\[|\$supplies(?:$|[^.A-Za-z0-9_])`)
+
+// deriveSupplyRefs walks a node's parameter tree and returns the distinct supply
+// names referenced via $supplies.<name>, sorted. It mirrors extractNodeRefs in
+// group_portability.go — same recursion, different pattern.
+func deriveSupplyRefs(params map[string]any) []string {
+	if len(params) == 0 {
+		return nil
+	}
+	seen := map[string]bool{}
+	walkForSupplyRefs(params, seen)
+	if len(seen) == 0 {
+		return nil
+	}
+	refs := make([]string, 0, len(seen))
+	for name := range seen {
+		refs = append(refs, name)
+	}
+	sort.Strings(refs)
+	return refs
+}
+
+func walkForSupplyRefs(v any, seen map[string]bool) {
+	switch val := v.(type) {
+	case string:
+		for _, m := range suppliesRefPattern.FindAllStringSubmatch(val, -1) {
+			seen[m[1]] = true
+		}
+	case map[string]any:
+		for _, child := range val {
+			walkForSupplyRefs(child, seen)
+		}
+	case []any:
+		for _, child := range val {
+			walkForSupplyRefs(child, seen)
+		}
+	}
+}
+
+// hasDynamicSupplyRef reports whether any string in the parameter tree uses
+// $supplies with a non-literal name.
+func hasDynamicSupplyRef(v any) bool {
+	switch val := v.(type) {
+	case string:
+		return suppliesDynamicPattern.MatchString(val)
+	case map[string]any:
+		for _, child := range val {
+			if hasDynamicSupplyRef(child) {
+				return true
+			}
+		}
+	case []any:
+		for _, child := range val {
+			if hasDynamicSupplyRef(child) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// validateSupplyUsage enforces the two compile-time rules for $supplies:
+//   - the name must be a static literal (otherwise the dependency is not
+//     derivable and both the edge check and the reverse index break);
+//   - every referenced supply must be reachable through a declared dependency
+//     edge (the dependency must be visible on the graph, not implicit).
+func validateSupplyUsage(g *Graph) error {
+	for i := range g.nodes {
+		params := g.nodes[i].Parameters
+		if len(params) == 0 {
+			continue
+		}
+		if hasDynamicSupplyRef(params) {
+			return fmt.Errorf("node %q: $supplies must be a static literal name (e.g. $supplies.rules); "+
+				"a computed name cannot be resolved at compile time", g.nodes[i].Name)
+		}
+		refs := deriveSupplyRefs(params)
+		if len(refs) == 0 {
+			continue
+		}
+		declared := map[string]bool{}
+		for _, name := range g.supplyRefs[i] {
+			declared[name] = true
+		}
+		for _, ref := range refs {
+			if !declared[ref] {
+				return fmt.Errorf("node %q references $supplies.%s but has no dependency edge to it",
+					g.nodes[i].Name, ref)
+			}
+		}
 	}
 	return nil
 }
