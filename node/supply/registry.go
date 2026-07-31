@@ -2,10 +2,12 @@ package supply
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
 	"sync"
+	"sync/atomic"
 )
 
 // Default is the process-wide registry. The runner's supply activation handler
@@ -21,13 +23,28 @@ type Registry struct {
 	// caller's stable identity (e.g. "workflow/node"), so re-registering after a
 	// re-activation replaces rather than duplicates.
 	consumers map[string]map[string]Consumer
+
+	// decoded is the published, READ-ONLY "name → decoded value" map handed to
+	// expression evaluation as $supplies. It is replaced wholesale on every
+	// content change (copy-on-write) and never mutated in place, because readers
+	// hold the reference without a lock.
+	//
+	// Decoding happens here — once per content change — rather than per message.
+	// expr's runtime.Fetch offers no lazy hook for a custom type (it only tries
+	// MethodByName and struct fields), so a plain map is the only shape that
+	// resolves a dynamic $supplies.<name>. Publishing a shared reference keeps
+	// per-message cost at one map assignment regardless of content size.
+	decoded atomic.Pointer[map[string]any]
 }
 
 func NewRegistry() *Registry {
-	return &Registry{
+	r := &Registry{
 		snapshots: map[string]Snapshot{},
 		consumers: map[string]map[string]Consumer{},
 	}
+	empty := map[string]any{}
+	r.decoded.Store(&empty)
+	return r
 }
 
 // Apply records a snapshot and notifies this supply's consumers when the content
@@ -49,6 +66,13 @@ func (r *Registry) Apply(ctx context.Context, snap Snapshot) error {
 		for _, c := range r.consumers[snap.Name] {
 			targets = append(targets, c)
 		}
+	}
+	if changed {
+		r.republishDecodedLocked()
+	} else if had && prev.Revision != snap.Revision {
+		// Same bytes, newer server revision: republish so $supplies.<name>.$revision
+		// reflects it, but skip consumer notification (nothing derived changed).
+		r.republishDecodedLocked()
 	}
 	r.mu.Unlock()
 
@@ -104,6 +128,44 @@ func (r *Registry) UnregisterConsumer(name, key string) {
 			delete(r.consumers, name)
 		}
 	}
+}
+
+// republishDecodedLocked rebuilds the published decoded map from the current
+// snapshots and swaps it in. Caller must hold r.mu.
+//
+// A whole-map rebuild is affordable because it runs only on a content change,
+// and the number of supplies in one process is small. The alternative —
+// mutating the live map — would race with lock-free readers.
+func (r *Registry) republishDecodedLocked() {
+	next := make(map[string]any, len(r.snapshots))
+	for name, s := range r.snapshots {
+		next[name] = decodeForExpr(s)
+	}
+	r.decoded.Store(&next)
+}
+
+// Decoded returns the published, read-only "name → decoded value" map. Callers
+// must NOT mutate it or anything reachable from it.
+func (r *Registry) Decoded() map[string]any {
+	return *r.decoded.Load()
+}
+
+// decodeForExpr turns one snapshot into the value expressions see. A JSON object
+// gains $revision/$hash metadata keys ($ prefixed so they cannot collide with a
+// content key). Any other JSON value is returned as decoded. Content that is not
+// JSON at all is returned as raw bytes so a non-JSON supply is still usable.
+func decodeForExpr(s Snapshot) any {
+	var decoded any
+	if err := json.Unmarshal(s.Content, &decoded); err != nil {
+		return append([]byte(nil), s.Content...)
+	}
+	obj, isObj := decoded.(map[string]any)
+	if !isObj {
+		return decoded
+	}
+	obj[SupplyRevisionKey] = s.Revision
+	obj[SupplyHashKey] = s.Hash
+	return obj
 }
 
 // Ready returns the sorted subset of names that have no cached snapshot, or nil

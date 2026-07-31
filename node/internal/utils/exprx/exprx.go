@@ -8,6 +8,7 @@ import (
 
 	"github.com/expr-lang/expr"
 	"github.com/expr-lang/expr/vm"
+	"github.com/xbcio/xflow/node/supply"
 	"github.com/xbcio/xflow/types"
 	lru "github.com/hashicorp/golang-lru/v2"
 )
@@ -84,10 +85,11 @@ func EvalExpr(code string, env map[string]any, asBool bool) (any, error) {
 
 // BuildExprEnv constructs the expression evaluation environment from node input.
 // Available variables: $input (Data), $inputs (multi-port), $vars, $config,
-// $params, and $runtime. The extra map, when non-nil, is merged into the env
-// top level (overwriting same-named keys) so callers can inject additional
-// variables — e.g. xflow.function spreads its "params" and xflow.script adds
-// $credentials/$credential — without re-implementing the base environment.
+// $params, $runtime, and $supplies. The extra map, when non-nil, is merged into
+// the env top level (overwriting same-named keys) so callers can inject
+// additional variables — e.g. xflow.function spreads its "params" and
+// xflow.script adds $credentials/$credential — without re-implementing the base
+// environment.
 func BuildExprEnv(input *types.Input, extra map[string]any) map[string]any {
 	env := make(map[string]any, 16)
 
@@ -103,6 +105,16 @@ func BuildExprEnv(input *types.Input, extra map[string]any) map[string]any {
 	env["$config"] = input.Config
 	env["$params"] = input.Params
 	env["$runtime"] = RuntimeEnv(input)
+	// $supplies is the seventh root. It is deliberately separate from $config:
+	// $config is immutable and travels with the definition version, whereas a
+	// supply is mutable, versioned, and may be stale — and stale is a first-class
+	// state a caller must be able to tell apart. Merging them would also make
+	// name collisions unresolvable and would flatten the failure semantics.
+	//
+	// The value is the registry's published shared map, not a copy: this is one
+	// pointer assignment per message regardless of how large the content is.
+	// Decoding happened once, when the content changed.
+	env["$supplies"] = supply.Default.Decoded()
 
 	for k, v := range extra {
 		env[k] = v

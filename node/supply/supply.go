@@ -31,6 +31,13 @@ type Snapshot struct {
 	FetchedAt time.Time
 }
 
+// Metadata keys added to a JSON-object supply when it is exposed to expressions.
+// The $ prefix keeps them out of the content's own key space.
+const (
+	SupplyRevisionKey = "$revision"
+	SupplyHashKey     = "$hash"
+)
+
 // Consumer is notified when a supply's content changes. It is implemented by
 // node-type authors (wasm ScriptNode is the first), not by DSL users.
 //
