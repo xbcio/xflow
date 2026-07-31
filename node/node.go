@@ -136,6 +136,20 @@ func SetScriptObserver(o scriptpkg.Observer) {
 	scriptpkg.SetObserver(o)
 }
 
+// WasmObserver receives wasm reactor pool observations (config swaps,
+// instance lifecycle, module compilation, borrow wait). Re-exported from the
+// internal wasm package's Observer so a host process can install one without
+// importing an internal package.
+type WasmObserver = wasm.Observer
+
+// SetWasmObserver installs the global observer for wasm reactor pool activity.
+// Call once at startup (or pass nil to remove it). Unlike SetScriptObserver,
+// which is engine-family-wide, this only covers the wasm/wazero-reactor
+// engine — script engines other than wasm have no reactor pool to observe.
+func SetWasmObserver(o WasmObserver) {
+	wasm.SetObserver(o)
+}
+
 // WarmupScriptEngines absorbs script-engine cold start before traffic arrives:
 // js/qjs's ~330 ms QuickJS-wasm compile and the wasm reactor runtime open
 // (which resolves the on-disk compilation cache). Hosts should call it once at
