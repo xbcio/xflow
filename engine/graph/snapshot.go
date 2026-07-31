@@ -352,6 +352,7 @@ func assignGraphHash(g *Graph) error {
 		Units:           g.units,
 		UnitOutEdges:    g.unitOutEdges,
 		UnitInDegree:    g.unitInDegree,
+		SupplyRefs:      g.supplyRefs,
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -381,6 +382,11 @@ type graphHashPayload struct {
 	Units           []UnitMeta
 	UnitOutEdges    [][]UnitEdge
 	UnitInDegree    []int
+	// SupplyRefs must carry an explicit omitempty: this struct's fields have no
+	// json tags, so without it every pre-existing graph's hash payload would
+	// gain a "SupplyRefs":null and its graphHash would change, invalidating the
+	// hash recorded on every persisted execution.
+	SupplyRefs map[int][]string `json:",omitempty"`
 }
 
 // graphSerializedForm is the on-wire / at-rest JSON representation of a Graph.
@@ -424,6 +430,11 @@ type graphSerializedForm struct {
 	StartIdx        int            `json:"start_idx"`
 	MaxAutoDepth    int            `json:"max_auto_depth"`
 	Groups          []GroupMeta    `json:"groups,omitempty"`
+	// SupplyRefs maps a consumer node index to the supply node names it depends
+	// on. Unlike the unit IR it cannot be re-derived on decode: it comes from
+	// WorkflowDef.DependencyEdges, which is not part of the snapshot. The
+	// supplyIndexes map, by contrast, IS re-derived from Nodes[i].Kind.
+	SupplyRefs map[int][]string `json:"supply_refs,omitempty"`
 }
 
 // MarshalJSON implements json.Marshaler so that encoding/json can serialize a
@@ -454,6 +465,7 @@ func (g *Graph) MarshalJSON() ([]byte, error) {
 		StartIdx:        g.startIdx,
 		MaxAutoDepth:    g.maxAutoDepth,
 		Groups:          g.groups,
+		SupplyRefs:      g.supplyRefs,
 	})
 }
 
@@ -519,6 +531,15 @@ func (g *Graph) UnmarshalJSON(data []byte) error {
 	g.startIdx = sf.StartIdx
 	g.maxAutoDepth = sf.MaxAutoDepth
 	g.groups = sf.Groups
+	g.supplyRefs = sf.SupplyRefs
+	// Rebuild supplyIndexes from node kinds — the same deterministic derivation
+	// Compile performs, so a round-tripped graph needs no WorkflowDef.
+	g.supplyIndexes = make(map[string]int)
+	for i := range g.nodes {
+		if g.nodes[i].Kind == types.NodeKindSupply {
+			g.supplyIndexes[g.nodes[i].Name] = i
+		}
+	}
 	if err := buildUnits(g); err != nil {
 		return fmt.Errorf("rebuild units after graph deserialization: %w", err)
 	}
