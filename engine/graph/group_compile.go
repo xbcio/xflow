@@ -64,6 +64,9 @@ func compileOneGroup(g *Graph, gd types.GroupDef, groupIdx int) (GroupMeta, erro
 		if g.nodes[idx].RunnerSelector != nil {
 			return GroupMeta{}, fmt.Errorf("member %q must not set RunnerSelector (placement belongs to the group)", name)
 		}
+		if g.nodes[idx].Kind == types.NodeKindSupply {
+			return GroupMeta{}, fmt.Errorf("member %q is a supply node; supply node may not be a group member", name)
+		}
 		set[idx] = true
 		members = append(members, idx)
 	}

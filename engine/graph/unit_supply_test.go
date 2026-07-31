@@ -2,6 +2,7 @@ package graph
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/xbcio/xflow/types"
@@ -105,5 +106,30 @@ func groupedDefForBoundary() *types.WorkflowDef {
 			"a":     {"main": []types.Connection{{Node: "b", Input: "main"}}},
 			"b":     {"main": []types.Connection{{Node: "tail", Input: "main"}}},
 		},
+	}
+}
+
+// A supply node placed as a group member would enter the unit layer via pass 2.
+// compileOneGroup must reject this.
+func TestSupplyNodeRejectedAsGroupMember(t *testing.T) {
+	def := &types.WorkflowDef{
+		Name: "escape",
+		Nodes: []types.NodeDef{
+			{Name: "trigger", Type: "xflow.start", Kind: types.NodeKindTrigger},
+			{Name: "worker", Type: "xflow.transform.set"},
+			{Name: "cfg", Type: "xflow.supply.static", Kind: types.NodeKindSupply},
+		},
+		Groups: []types.GroupDef{{Name: "g", Members: []string{"cfg"}}},
+		Connections: types.Connections{
+			"trigger": {"main": []types.Connection{{Node: "worker", Input: "main"}}},
+		},
+		DependencyEdges: []types.DependencyEdge{{Node: "worker", Supply: "cfg"}},
+	}
+	_, err := Compile(def)
+	if err == nil {
+		t.Fatal("expected compile error for supply node in group, got nil")
+	}
+	if !strings.Contains(err.Error(), "supply node may not be a group member") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
