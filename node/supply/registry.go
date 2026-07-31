@@ -54,6 +54,17 @@ type consumerEntry struct {
 	inFlight int
 }
 
+// ConsumerCountObserver receives the running per-supply consumer count. It
+// exists so a metrics adapter can publish xflow_supply_consumers without the
+// supply package importing observability/metrics (which would create an
+// import cycle risk and pull Prometheus into every caller of this package).
+type ConsumerCountObserver interface {
+	// OnConsumerCount reports the number of consumers currently registered for
+	// name, immediately after a registration or unregistration. Replacing an
+	// existing key (same name+key) does not change the count.
+	OnConsumerCount(ctx context.Context, name string, n int)
+}
+
 // Registry caches supply snapshots and fans changes out to the consumers that
 // registered against each name.
 type Registry struct {
@@ -90,6 +101,11 @@ type Registry struct {
 	// resolves a dynamic $supplies.<name>. Publishing a shared reference keeps
 	// per-message cost at one map assignment regardless of content size.
 	decoded atomic.Pointer[map[string]any]
+
+	// observer, when set, receives the running per-supply consumer count. nil
+	// (the default) means no observation — most Registry instances in tests
+	// never install one.
+	observer ConsumerCountObserver
 }
 
 func NewRegistry() *Registry {
@@ -100,6 +116,27 @@ func NewRegistry() *Registry {
 	empty := map[string]any{}
 	r.decoded.Store(&empty)
 	return r
+}
+
+// SetObserver installs the registry's consumer-count observer. Pass nil to
+// disable observation.
+func (r *Registry) SetObserver(o ConsumerCountObserver) {
+	r.mu.Lock()
+	r.observer = o
+	r.mu.Unlock()
+}
+
+// notifyConsumerCount reports the current consumer count for name. Caller
+// must NOT hold r.mu — it takes its own read lock, matching the convention
+// that consumer callbacks (safeNotify) also run outside the lock.
+func (r *Registry) notifyConsumerCount(ctx context.Context, name string) {
+	r.mu.RLock()
+	o := r.observer
+	n := len(r.consumers[name])
+	r.mu.RUnlock()
+	if o != nil {
+		o.OnConsumerCount(ctx, name, n)
+	}
 }
 
 // Apply records a snapshot and notifies this supply's consumers when the content
@@ -318,6 +355,11 @@ func (r *Registry) RegisterConsumer(name, key string, c Consumer) {
 	r.consumers[name][key] = entry
 	r.mu.Unlock()
 
+	// Reported on every call, including a same-key replace: replacing does not
+	// change the count (the key already occupied a slot), but the observer
+	// still gets a fresh reading rather than silence.
+	r.notifyConsumerCount(context.Background(), name)
+
 	if !has {
 		return
 	}
@@ -337,13 +379,18 @@ func (r *Registry) RegisterConsumer(name, key string, c Consumer) {
 // there is no separate aggregate state to update here.
 func (r *Registry) UnregisterConsumer(name, key string) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if m := r.consumers[name]; m != nil {
 		delete(m, key)
 		if len(m) == 0 {
 			delete(r.consumers, name)
 		}
 	}
+	r.mu.Unlock()
+
+	// Reported unconditionally, matching RegisterConsumer: a missing key is a
+	// harmless no-op delete, and the observer still gets a fresh reading (0 if
+	// name was never registered or is now empty).
+	r.notifyConsumerCount(context.Background(), name)
 }
 
 // republishDecodedLocked rebuilds the published decoded map from the current
