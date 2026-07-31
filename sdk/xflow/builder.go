@@ -23,6 +23,7 @@ type WorkflowBuilder struct {
 	options        *types.WorkflowOptions
 	runnerSelector *types.RunnerSelector
 	groups         []*groupEntry
+	depEdges       []depEdge
 }
 
 type nodeEntry struct {
@@ -40,6 +41,14 @@ type edge struct {
 	srcPort string
 	dstNode string
 	dstPort string
+}
+
+// depEdge is a dependency edge: consumer reads the shared data maintained by
+// supply. It is deliberately kept out of w.edges so that neither detectCycle
+// nor assembleConnections treats it as a dataflow edge.
+type depEdge struct {
+	consumer string
+	supply   string
 }
 
 // Workflow creates a workflow builder with a concise user-facing name.
@@ -204,6 +213,18 @@ func (w *WorkflowBuilder) Connect(src, dst types.EdgeEndpoint) *WorkflowBuilder 
 	return w
 }
 
+// DependsOn declares that consumer reads the long-lived shared data maintained
+// by the supply node. It creates no dataflow edge: nothing is passed from
+// supply to consumer at execution time, and the supply node never advances the
+// execution. The compiler rejects a supply target that is not a supply node.
+func (w *WorkflowBuilder) DependsOn(consumer, supply *NodeRef) *WorkflowBuilder {
+	if consumer == nil || supply == nil {
+		return w
+	}
+	w.depEdges = append(w.depEdges, depEdge{consumer: consumer.name, supply: supply.name})
+	return w
+}
+
 // build validates the workflow and returns a *types.WorkflowDef.
 func (w *WorkflowBuilder) build() (*types.WorkflowDef, error) {
 	return w.buildInternal(map[*WorkflowBuilder]bool{})
@@ -255,6 +276,7 @@ func (w *WorkflowBuilder) buildInternal(visited map[*WorkflowBuilder]bool) (*typ
 	w.assembleNodes(def)
 	w.assembleConnections(def)
 	w.assembleGroups(def)
+	w.assembleDependencyEdges(def)
 
 	return def, nil
 }
@@ -364,6 +386,14 @@ func (w *WorkflowBuilder) assembleConnections(def *types.WorkflowDef) {
 			def.Connections[e.srcNode][e.srcPort],
 			types.Connection{Node: e.dstNode, Input: e.dstPort},
 		)
+	}
+}
+
+// assembleDependencyEdges fills def.DependencyEdges from w.depEdges.
+func (w *WorkflowBuilder) assembleDependencyEdges(def *types.WorkflowDef) {
+	for _, e := range w.depEdges {
+		def.DependencyEdges = append(def.DependencyEdges,
+			types.DependencyEdge{Node: e.consumer, Supply: e.supply})
 	}
 }
 

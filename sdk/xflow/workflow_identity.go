@@ -76,6 +76,7 @@ func runtimeHash(def *types.WorkflowDef) (string, error) {
 		PinData:        def.PinData,
 		Nodes:          make([]runtimeNodeHashPayload, len(def.Nodes)),
 		Groups:         canonicalizeGroups(def.Groups),
+		DependencyEdges: canonicalizeDependencyEdges(def.DependencyEdges),
 	}
 	for i, n := range def.Nodes {
 		payload.Nodes[i] = runtimeNodeHashPayload{
@@ -125,6 +126,11 @@ type runtimeHashPayload struct {
 	Outputs        map[string]types.WorkflowOutput `json:"outputs,omitempty"`
 	PinData        map[string]any                  `json:"pin_data,omitempty"`
 	Groups         []runtimeHashGroupPayload       `json:"Groups,omitempty"`
+	// DependencyEdges is appended last and carries omitempty on purpose: struct
+	// field order fixes the JSON encoding order, so appending here keeps every
+	// pre-existing definition's runtime hash byte-identical while still making a
+	// changed supply dependency a runtime-semantic change.
+	DependencyEdges []types.DependencyEdge `json:"dependency_edges,omitempty"`
 }
 
 // runtimeNodeHashPayload is the runtime-semantic subset of NodeDef used by
@@ -176,6 +182,24 @@ func canonicalizeGroups(groups []types.GroupDef) []runtimeHashGroupPayload {
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// canonicalizeDependencyEdges sorts dependency edges by (Node, Supply) so that
+// declaration order — which carries no semantics — does not change the runtime
+// hash. Returns nil for an empty input so the omitempty tag takes effect.
+func canonicalizeDependencyEdges(edges []types.DependencyEdge) []types.DependencyEdge {
+	if len(edges) == 0 {
+		return nil
+	}
+	out := make([]types.DependencyEdge, len(edges))
+	copy(out, edges)
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Node != out[j].Node {
+			return out[i].Node < out[j].Node
+		}
+		return out[i].Supply < out[j].Supply
+	})
 	return out
 }
 

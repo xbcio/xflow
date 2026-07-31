@@ -200,6 +200,11 @@ func preCheckHandlerVersions(def *types.WorkflowDef, wf *WorkflowBuilder) error 
 			continue // local-only direct handler, name-scoped
 		}
 		switch nd.Kind {
+		case types.NodeKindSupply:
+			// A supply node's handler lives in the supply registry, not the
+			// action registry. Falling through to default would look it up as an
+			// action, miss, and fail closed with ErrMissingHandlerVersions.
+			continue
 		case types.NodeKindTrigger:
 			if _, ok := bundledTriggers[nd.Type]; ok {
 				continue
