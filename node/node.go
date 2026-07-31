@@ -11,6 +11,7 @@ import (
 	"github.com/xbcio/xflow/node/internal/code/script/wasm"
 	"github.com/xbcio/xflow/node/internal/flow"
 	"github.com/xbcio/xflow/node/internal/group"
+	supplypkg "github.com/xbcio/xflow/node/internal/supply"
 	"github.com/xbcio/xflow/node/internal/transform"
 	nodetrigger "github.com/xbcio/xflow/node/internal/trigger"
 )
@@ -111,6 +112,24 @@ func LookupFunc(name string) (UserFunc, bool) {
 	return codepkg.LookupFunc(name)
 }
 func Script(code string) *ScriptNode { return scriptpkg.Script(code) }
+
+// SupplyExternalNode declares a consumed SupplyResource. Re-exported so callers
+// outside the module can build one.
+type SupplyExternalNode = supplypkg.ExternalNode
+
+// SupplyStaticNode declares supply content carried by the definition itself.
+type SupplyStaticNode = supplypkg.StaticNode
+
+// SupplyExternal declares that this workflow consumes the named SupplyResource.
+// The node never executes; it makes the dependency visible on the graph so the
+// activation-time readiness gate and the server-side reverse index can see it.
+// Pair it with WorkflowBuilder.DependsOn to declare which node consumes it.
+func SupplyExternal(resource string) *SupplyExternalNode { return supplypkg.External(resource) }
+
+// SupplyStatic declares supply content that travels with the definition. Use it
+// when there is genuinely no remote source — NOT as a fallback for one that is
+// merely unavailable (see the readiness gate).
+func SupplyStatic(content []byte) *SupplyStaticNode { return supplypkg.Static(content) }
 
 // SetScriptObserver installs the global observer for xflow.script executions.
 func SetScriptObserver(o scriptpkg.Observer) {
