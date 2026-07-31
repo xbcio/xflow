@@ -28,10 +28,30 @@ var _ supply.Consumer = (*supplyConsumer)(nil)
 // It creates no execution and dispatches no task: a content change is a lookup
 // change, never a trigger. Messages already in flight finish on the old pool;
 // only messages after the swap see the new rules.
+//
+// Content that is already active is a no-op. The registry notifies with content
+// this module may already be serving — RegisterConsumer notifies immediately on
+// every workflow re-activation, and Apply re-notifies whenever any consumer's
+// verdict for the current content is unresolved. Without this check each such
+// notification recompiles a full pool of instances and drains the old one, for
+// bytes that are already active.
 func (c *supplyConsumer) OnSupplyChanged(ctx context.Context, snap supply.Snapshot) error {
 	e, err := c.host.engineForCode(ctx, c.code)
 	if err != nil {
 		return fmt.Errorf("wasm supply consumer: %w", err)
+	}
+	// Compare the CONTENT, not snap.Hash: this compares against the bytes the
+	// pool was actually built from, so a pool built via any other path (legacy
+	// globals, a config loader) is recognised as already-current too.
+	//
+	// A revision bump with identical bytes deliberately does NOT swap. activePool
+	// is published read-only and readers load p.revision without a lock
+	// (pool.go:464), so updating it in place would race them; rebuilding a whole
+	// pool to carry a number is worse. The reported config_generation therefore
+	// stays at the revision whose bytes are actually loaded, which is the honest
+	// answer to "which content produced this row".
+	if p := e.active.Load(); p != nil && configHash(p.cfg) == configHash(snap.Content) {
+		return nil
 	}
 	// The revision travels into the pool so eval results can report which content
 	// version produced them, comparably across runners.

@@ -112,3 +112,57 @@ func TestOnSupplyChangedRejectsBadContentKeepsLastGood(t *testing.T) {
 		t.Fatalf("Generation() = %d after rejected content, want the last-good revision 1", got)
 	}
 }
+
+// The registry notifies with content a module may already be serving:
+// RegisterConsumer notifies immediately on every workflow re-activation, and
+// Apply re-notifies whenever any consumer's verdict for the current content is
+// unresolved. Rebuilding the pool for identical bytes recompiles every instance
+// and drains the old pool for nothing, so the consumer must short-circuit.
+func TestSupplyConsumerIsNoOpForIdenticalContent(t *testing.T) {
+	ctx := context.Background()
+	code := b64(reactorWasm)
+	reg := supply.NewRegistry()
+	if err := RegisterSupplyConsumer(code, "rules", reg); err != nil {
+		t.Fatalf("RegisterSupplyConsumer: %v", err)
+	}
+	t.Cleanup(func() { UnregisterSupplyConsumer(code, "rules", reg) })
+
+	content := []byte(`{"rules":[{"name":"r1","expr":"true","tag":"t1"}]}`)
+	if err := reg.Apply(ctx, supply.Snapshot{Name: "rules", Content: content, Hash: "h1", Revision: 1}); err != nil {
+		t.Fatalf("first Apply: %v", err)
+	}
+	e, err := sharedReactorHost.engineForCode(ctx, code)
+	if err != nil {
+		t.Fatalf("engineForCode: %v", err)
+	}
+	first := e.active.Load()
+	if first == nil {
+		t.Fatal("first Apply did not build a pool")
+	}
+
+	// Re-registering is what a workflow re-activation does; it notifies
+	// immediately with the already-cached content.
+	if err := RegisterSupplyConsumer(code, "rules", reg); err != nil {
+		t.Fatalf("re-register: %v", err)
+	}
+	if got := e.active.Load(); got != first {
+		t.Fatal("re-registration with identical content rebuilt the pool; it must be a no-op")
+	}
+
+	// A revision bump with identical bytes must not swap either.
+	if err := reg.Apply(ctx, supply.Snapshot{Name: "rules", Content: content, Hash: "h1", Revision: 2}); err != nil {
+		t.Fatalf("same-content Apply: %v", err)
+	}
+	if got := e.active.Load(); got != first {
+		t.Fatal("a revision bump with identical bytes rebuilt the pool; it must be a no-op")
+	}
+
+	// Genuinely different content still swaps.
+	next := []byte(`{"rules":[{"name":"r2","expr":"true","tag":"t2"}]}`)
+	if err := reg.Apply(ctx, supply.Snapshot{Name: "rules", Content: next, Hash: "h2", Revision: 3}); err != nil {
+		t.Fatalf("changed-content Apply: %v", err)
+	}
+	if got := e.active.Load(); got == first {
+		t.Fatal("changed content must swap the pool")
+	}
+}
