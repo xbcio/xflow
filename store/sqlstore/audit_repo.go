@@ -123,6 +123,7 @@ func toDBAudit(r *store.AuditRecord) *dbAuditEvent {
 		ActivationID:   r.ActivationID,
 		EntryID:        r.EntryID,
 		ReceiptAuditID: r.ReceiptAuditID,
+		Revision:       r.Revision,
 	}
 }
 
@@ -147,6 +148,7 @@ func fromDBAudit(d *dbAuditEvent) *store.AuditRecord {
 		ActivationID:   d.ActivationID,
 		EntryID:        d.EntryID,
 		ReceiptAuditID: d.ReceiptAuditID,
+		Revision:       d.Revision,
 	}
 }
 

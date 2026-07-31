@@ -43,6 +43,7 @@ type dbAuditEvent struct {
 	ActivationID   string `gorm:"column:activation_id;type:varchar(64);default:''"`
 	EntryID        string `gorm:"column:entry_id;type:varchar(255);default:''"`
 	ReceiptAuditID string `gorm:"column:receipt_audit_id;type:varchar(128);default:'';index:idx_receipt_audit_id"`
+	Revision       uint64 `gorm:"column:revision"`
 }
 
 func (dbAuditEvent) TableName() string { return "xflow_audit_events" }

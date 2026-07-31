@@ -111,9 +111,11 @@ func (h *authzHolder) authzWrap(op string, isMutation bool, fn http.HandlerFunc,
 			// best-effort: a gap here is observable in audit but must not fail
 			// the already-admitted mutation. Crash-safety for a panic between
 			// the mutation success and this append is explicitly T9's scope.
+			slot := &auditRevisionSlot{}
+			r = r.WithContext(context.WithValue(r.Context(), auditRevisionKey{}, slot))
 			rw := &statusRecorder{ResponseWriter: w}
 			fn(rw, r)
-			h.auditReconcile(r, principal, op, resource, wfID, execID, reqID, rw)
+			h.auditReconcileRev(r, principal, op, resource, wfID, execID, reqID, rw, slot.rev)
 			return
 		}
 		fn(w, r)
@@ -195,6 +197,13 @@ func (h *authzHolder) auditDeny(r *http.Request, principal Principal, op, resour
 // reconcile record reuses the admission RequestID so the two rows can be
 // joined during audit reconciliation.
 func (h *authzHolder) auditReconcile(r *http.Request, principal Principal, op, resource, wfID, execID, reqID string, rw *statusRecorder) {
+	h.auditReconcileRev(r, principal, op, resource, wfID, execID, reqID, rw, 0)
+}
+
+// auditReconcileRev is auditReconcile with an explicit resource revision. The
+// revision is the version the mutation produced; zero means "not applicable"
+// (non-versioned resources or failed mutations).
+func (h *authzHolder) auditReconcileRev(r *http.Request, principal Principal, op, resource, wfID, execID, reqID string, rw *statusRecorder, rev uint64) {
 	if h.audit == nil {
 		return
 	}
@@ -218,6 +227,7 @@ func (h *authzHolder) auditReconcile(r *http.Request, principal Principal, op, r
 		Phase:       "outcome",
 		TraceID:     tracing.TraceIDFromContext(r.Context()),
 		Timestamp:   time.Now().UTC(),
+		Revision:    rev,
 	})
 }
 
@@ -249,4 +259,20 @@ func (s *statusRecorder) Write(b []byte) (int, error) {
 // succeeded reports whether the handler returned a 2xx response.
 func (s *statusRecorder) succeeded() bool {
 	return s.status >= 200 && s.status < 300
+}
+
+// auditRevisionSlot is a mutable slot a handler uses to report the resource
+// version its mutation produced. The admission audit row is written before the
+// handler runs, so it cannot know the resulting revision; the outcome row can.
+type auditRevisionSlot struct{ rev uint64 }
+
+type auditRevisionKey struct{}
+
+// noteAuditRevision records the revision a handler's mutation produced so the
+// outcome audit row can carry it. It is a no-op when the request was not wrapped
+// with a slot (non-mutation paths).
+func noteAuditRevision(r *http.Request, rev uint64) {
+	if slot, ok := r.Context().Value(auditRevisionKey{}).(*auditRevisionSlot); ok {
+		slot.rev = rev
+	}
 }

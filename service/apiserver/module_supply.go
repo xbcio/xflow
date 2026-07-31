@@ -123,6 +123,10 @@ func (m *supplyModule) handlePut(w http.ResponseWriter, r *http.Request, ns, nam
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
+	// Hand the resulting revision back to the outcome audit row so the audit log
+	// can answer "who moved these rules to rev N, and when". The content itself
+	// is never audited.
+	noteAuditRevision(r, rec.Revision)
 	w.Header().Set("ETag", rec.ContentHash)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"revision":     rec.Revision,

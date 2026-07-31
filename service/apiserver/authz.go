@@ -361,6 +361,11 @@ type AuditEvent struct {
 	ActivationID   string
 	EntryID        string
 	ReceiptAuditID string
+	// Revision is the resource version a mutation produced. Zero means "not
+	// applicable" (reads, denials) or "not yet known" (admission row written
+	// before the handler). Only the outcome row carries the resulting revision.
+	// The resource CONTENT is never recorded here — only the version number.
+	Revision uint64
 }
 
 // AuditSink is an append-only projection of authorization + mutation events.

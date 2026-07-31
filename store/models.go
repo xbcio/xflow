@@ -101,4 +101,9 @@ type AuditRecord struct {
 	ActivationID  string // receipt correlation: activation id
 	EntryID       string // receipt correlation: dead-letter entry id
 	ReceiptAuditID string // receipt correlation: Redis receipt audit_id (idempotency key)
+	// Revision is the resource version this row refers to — for a supply write,
+	// the revision the content ended up at. Zero means "not applicable" or
+	// "not yet known" (an admission row is written before the handler runs).
+	// The audited CONTENT is never recorded, only its version.
+	Revision uint64
 }

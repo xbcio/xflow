@@ -203,3 +203,25 @@ END$$
 DELIMITER ;
 CALL xflow_add_phase_column();
 DROP PROCEDURE IF EXISTS xflow_add_phase_column;
+
+-- supply 版本溯源列。CREATE TABLE IF NOT EXISTS 对已存在的表是 no-op，
+-- 故用 INFORMATION_SCHEMA 守卫补列（MySQL 无 ADD COLUMN IF NOT EXISTS）。
+-- 只记版本号，绝不记内容。
+DROP PROCEDURE IF EXISTS xflow_add_audit_revision_column;
+DELIMITER $$
+CREATE PROCEDURE xflow_add_audit_revision_column()
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'xflow_audit_events'
+          AND COLUMN_NAME = 'revision'
+    ) THEN
+        ALTER TABLE xflow_audit_events
+            ADD COLUMN revision BIGINT UNSIGNED NOT NULL DEFAULT 0
+                COMMENT '资源版本号（supply 写入后的 revision）；绝不记内容' AFTER phase;
+    END IF;
+END$$
+DELIMITER ;
+CALL xflow_add_audit_revision_column();
+DROP PROCEDURE IF EXISTS xflow_add_audit_revision_column;
