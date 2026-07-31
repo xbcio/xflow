@@ -6,6 +6,14 @@ import "testing"
 // require_ready=true. cast.ToBool(nil) is false, so a naive read flips the
 // default to the dangerous setting (traffic served with no rules at all).
 func TestRequireReadyDefaultsTrue(t *testing.T) {
+	// Typed nil helpers. In Go's interface semantics a typed nil stored in an
+	// any (interface{}) is NOT == nil: the interface holds a non-nil type
+	// descriptor paired with a nil value pointer. cast.ToBoolE treats (*string)(nil)
+	// as (false, nil), which would silently flip the safe default.
+	var nilStringPtr *string
+	var nilMap map[string]any
+	var nilSlice []int
+
 	cases := []struct {
 		name   string
 		params map[string]any
@@ -18,6 +26,10 @@ func TestRequireReadyDefaultsTrue(t *testing.T) {
 		{"string false (YAML)", map[string]any{"require_ready": "false"}, false},
 		{"string true (YAML)", map[string]any{"require_ready": "true"}, true},
 		{"garbage value", map[string]any{"require_ready": "yes-please"}, true},
+		// Typed nils: the interface is non-nil but the value is nil.
+		{"typed nil *string", map[string]any{"require_ready": nilStringPtr}, true},
+		{"typed nil map", map[string]any{"require_ready": nilMap}, true},
+		{"typed nil slice", map[string]any{"require_ready": nilSlice}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

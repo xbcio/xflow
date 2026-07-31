@@ -12,6 +12,9 @@ func TestStaticDescriptorAndParams(t *testing.T) {
 	if d.Type != "xflow.supply.static" || d.Kind != types.NodeKindSupply {
 		t.Fatalf("descriptor = %+v", d)
 	}
+	if len(d.Outputs) != 0 {
+		t.Fatalf("a supply node must declare no output ports, got %d", len(d.Outputs))
+	}
 	m := n.RawParams().(map[string]any)
 	if m["content"] != `{"rules":[]}` {
 		t.Fatalf("content = %#v", m["content"])

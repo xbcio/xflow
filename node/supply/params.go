@@ -2,6 +2,7 @@ package supply
 
 import (
 	"fmt"
+	"reflect"
 
 	"github.com/spf13/cast"
 )
@@ -28,7 +29,7 @@ func RequireReady(params map[string]any) bool {
 		return true
 	}
 	raw, ok := params[ParamRequireReady]
-	if !ok || raw == nil {
+	if !ok || isNilValue(raw) {
 		return true
 	}
 	v, err := cast.ToBoolE(raw)
@@ -37,6 +38,25 @@ func RequireReady(params map[string]any) bool {
 		return true
 	}
 	return v
+}
+
+// isNilValue reports whether v is nil — including typed nils (e.g. (*string)(nil)).
+//
+// In Go's interface semantics, a typed nil stored in an any variable is NOT
+// == nil: the interface holds a non-nil type descriptor paired with a nil value.
+// cast.ToBoolE treats a *string nil pointer as false with no error, which would
+// silently flip the safe default to the dangerous tier. We use reflect to catch
+// all nil-able kinds (Ptr, Map, Slice, Interface, Chan, Func).
+func isNilValue(v any) bool {
+	if v == nil {
+		return true
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Ptr, reflect.Map, reflect.Slice, reflect.Interface, reflect.Chan, reflect.Func:
+		return rv.IsNil()
+	}
+	return false
 }
 
 // ResourceName resolves the SupplyResource name a supply node refers to: the
