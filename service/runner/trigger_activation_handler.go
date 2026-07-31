@@ -97,7 +97,7 @@ func (h *TriggerActivationHandler) Activate(ctx context.Context, d protocol.Acti
 	// a message whose supply is missing then has nowhere safe to go. Declining
 	// here leaves the traffic in Kafka with consumer-group lag as the signal.
 	if h.gate != nil {
-		if err := h.gate.Admit(ctx, d.Supplies); err != nil {
+		if err := h.gate.Admit(ctx, d.WorkflowID, d.Supplies); err != nil {
 			return err
 		}
 	}

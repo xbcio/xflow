@@ -44,7 +44,7 @@ func TestAdmitFetchesMissingContentAndPasses(t *testing.T) {
 	reg := supply.NewRegistry()
 	g := NewSupplyGate(f, reg, quietLogger())
 
-	err := g.Admit(context.Background(), []engine.SupplyRequirement{
+	err := g.Admit(context.Background(), "wf", []engine.SupplyRequirement{
 		{Node: "rules", Resource: "shared-rules", RequireReady: true},
 	})
 	if err != nil {
@@ -72,7 +72,7 @@ func TestAdmitSkipsFetchWhenCached(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 	g := NewSupplyGate(f, reg, quietLogger())
-	if err := g.Admit(context.Background(), []engine.SupplyRequirement{
+	if err := g.Admit(context.Background(), "wf", []engine.SupplyRequirement{
 		{Node: "rules", Resource: "shared-rules", RequireReady: true},
 	}); err != nil {
 		t.Fatalf("Admit: %v", err)
@@ -86,7 +86,7 @@ func TestAdmitSkipsFetchWhenCached(t *testing.T) {
 // registered, so no Kafka offset ever advances.
 func TestAdmitRefusesWhenRequiredContentAbsent(t *testing.T) {
 	g := NewSupplyGate(&stubFetcher{content: map[string][]byte{}}, supply.NewRegistry(), quietLogger())
-	err := g.Admit(context.Background(), []engine.SupplyRequirement{
+	err := g.Admit(context.Background(), "wf", []engine.SupplyRequirement{
 		{Node: "rules", Resource: "shared-rules", RequireReady: true},
 	})
 	var nr *NotReadyError
@@ -103,7 +103,7 @@ func TestAdmitRefusesWhenRequiredContentAbsent(t *testing.T) {
 func TestAdmitRefusesOnFetchError(t *testing.T) {
 	g := NewSupplyGate(&stubFetcher{err: errors.New("connection refused")},
 		supply.NewRegistry(), quietLogger())
-	err := g.Admit(context.Background(), []engine.SupplyRequirement{
+	err := g.Admit(context.Background(), "wf", []engine.SupplyRequirement{
 		{Node: "rules", Resource: "shared-rules", RequireReady: true},
 	})
 	var nr *NotReadyError
@@ -116,7 +116,7 @@ func TestAdmitRefusesOnFetchError(t *testing.T) {
 // (and metric-visible) degraded mode.
 func TestAdmitPassesWhenNotRequired(t *testing.T) {
 	g := NewSupplyGate(&stubFetcher{content: map[string][]byte{}}, supply.NewRegistry(), quietLogger())
-	if err := g.Admit(context.Background(), []engine.SupplyRequirement{
+	if err := g.Admit(context.Background(), "wf", []engine.SupplyRequirement{
 		{Node: "hints", Resource: "hints", RequireReady: false},
 	}); err != nil {
 		t.Fatalf("Admit with require_ready=false must pass: %v", err)
@@ -129,7 +129,7 @@ func TestAdmitPassesWhenNotRequired(t *testing.T) {
 func TestAdmitReportsAllMissingRequired(t *testing.T) {
 	g := NewSupplyGate(&stubFetcher{content: map[string][]byte{"ok": []byte(`1`)}},
 		supply.NewRegistry(), quietLogger())
-	err := g.Admit(context.Background(), []engine.SupplyRequirement{
+	err := g.Admit(context.Background(), "wf", []engine.SupplyRequirement{
 		{Node: "a", Resource: "missing-a", RequireReady: true},
 		{Node: "b", Resource: "ok", RequireReady: true},
 		{Node: "c", Resource: "missing-c", RequireReady: true},
@@ -147,7 +147,7 @@ func TestAdmitReportsAllMissingRequired(t *testing.T) {
 func TestAdmitNoRequirementsIsNoop(t *testing.T) {
 	f := &stubFetcher{}
 	g := NewSupplyGate(f, supply.NewRegistry(), quietLogger())
-	if err := g.Admit(context.Background(), nil); err != nil {
+	if err := g.Admit(context.Background(), "wf", nil); err != nil {
 		t.Fatalf("Admit(nil): %v", err)
 	}
 	if f.calls.Load() != 0 {
@@ -194,20 +194,20 @@ func TestAdmitDeclinesRepeatedlyWhenConsumerRejects(t *testing.T) {
 	}
 
 	// First Admit: fetches, Apply notifies consumer which rejects → decline.
-	err := g.Admit(context.Background(), reqs)
+	err := g.Admit(context.Background(), "wf", reqs)
 	var nr *NotReadyError
 	if !errors.As(err, &nr) {
 		t.Fatalf("first Admit: err = %v, want *NotReadyError", err)
 	}
 
 	// Second Admit: must STILL decline (the regression was: it admitted here).
-	err = g.Admit(context.Background(), reqs)
+	err = g.Admit(context.Background(), "wf", reqs)
 	if !errors.As(err, &nr) {
 		t.Fatalf("second Admit: err = %v, want *NotReadyError (the regression)", err)
 	}
 
 	// Third Admit for good measure: still declining.
-	err = g.Admit(context.Background(), reqs)
+	err = g.Admit(context.Background(), "wf", reqs)
 	if !errors.As(err, &nr) {
 		t.Fatalf("third Admit: err = %v, want *NotReadyError", err)
 	}
@@ -226,12 +226,12 @@ func TestAdmitPassesWithNoConsumer(t *testing.T) {
 	}
 
 	// First call fetches and admits (no consumer to reject).
-	if err := g.Admit(context.Background(), reqs); err != nil {
+	if err := g.Admit(context.Background(), "wf", reqs); err != nil {
 		t.Fatalf("Admit with no consumer: %v", err)
 	}
 
 	// Second call: IsReady returns true, no fetch needed.
-	if err := g.Admit(context.Background(), reqs); err != nil {
+	if err := g.Admit(context.Background(), "wf", reqs); err != nil {
 		t.Fatalf("second Admit with no consumer: %v", err)
 	}
 	if n := f.calls.Load(); n != 1 {
@@ -254,7 +254,7 @@ func TestAdmitAdmitsAfterConsumerStartsAccepting(t *testing.T) {
 	}
 
 	// First Admit: consumer rejects → decline.
-	err := g.Admit(context.Background(), reqs)
+	err := g.Admit(context.Background(), "wf", reqs)
 	var nr *NotReadyError
 	if !errors.As(err, &nr) {
 		t.Fatalf("first Admit: err = %v, want *NotReadyError", err)
@@ -266,13 +266,13 @@ func TestAdmitAdmitsAfterConsumerStartsAccepting(t *testing.T) {
 	// Second Admit: IsReady is false (still rejected from last round), so it
 	// re-fetches, Apply re-notifies (accepted was false), consumer accepts this
 	// time → admits.
-	if err := g.Admit(context.Background(), reqs); err != nil {
+	if err := g.Admit(context.Background(), "wf", reqs); err != nil {
 		t.Fatalf("Admit after consumer fixed: %v", err)
 	}
 
 	// Third Admit: IsReady is now true → no fetch needed.
 	prevCalls := f.calls.Load()
-	if err := g.Admit(context.Background(), reqs); err != nil {
+	if err := g.Admit(context.Background(), "wf", reqs); err != nil {
 		t.Fatalf("third Admit: %v", err)
 	}
 	if f.calls.Load() != prevCalls {
@@ -295,7 +295,7 @@ func TestAdmitAdmitsAfterRejectingConsumerUnregistered(t *testing.T) {
 	}
 
 	// First Admit: consumer rejects → decline.
-	err := g.Admit(context.Background(), reqs)
+	err := g.Admit(context.Background(), "wf", reqs)
 	var nr *NotReadyError
 	if !errors.As(err, &nr) {
 		t.Fatalf("first Admit: err = %v, want *NotReadyError", err)
@@ -307,7 +307,7 @@ func TestAdmitAdmitsAfterRejectingConsumerUnregistered(t *testing.T) {
 	// Second Admit: IsReady returns true (unregister marked it accepted) → admits
 	// without fetching.
 	prevCalls := f.calls.Load()
-	if err := g.Admit(context.Background(), reqs); err != nil {
+	if err := g.Admit(context.Background(), "wf", reqs); err != nil {
 		t.Fatalf("Admit after unregister: %v", err)
 	}
 	if f.calls.Load() != prevCalls {

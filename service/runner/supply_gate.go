@@ -38,6 +38,26 @@ func (e *NotReadyError) Error() string {
 	return fmt.Sprintf("supply not ready: %s", strings.Join(e.Missing, ", "))
 }
 
+// SupplyGateObserver receives activation-time readiness-gate observations.
+// Implementations must be non-blocking and must never use content, hashes, or
+// execution IDs as labels — see the package-level metrics safety note in
+// observability/metrics/supply.go.
+type SupplyGateObserver interface {
+	// OnSupplyFetch records one content fetch attempt. result is "ok" or
+	// "error".
+	OnSupplyFetch(ctx context.Context, name, result string)
+	// OnSupplyNotReady reports whether Admit is currently declining for a
+	// missing required supply. Must be reported for every requirement on
+	// every Admit call — both true and false — so the gauge always reflects
+	// the current state rather than getting stuck at 1 after the condition
+	// clears.
+	OnSupplyNotReady(ctx context.Context, workflow, supplyName string, notReady bool)
+	// OnSupplyServingUnavailable reports that a require_ready:false supply is
+	// currently serving with no content ever fetched. Must also be reported
+	// in both directions.
+	OnSupplyServingUnavailable(ctx context.Context, name string, serving bool)
+}
+
 // SupplyGate is the activation-time readiness gate. It fetches any required
 // supply this process does not have yet, publishes it into the registry, and
 // reports whether the activation may proceed.
@@ -50,6 +70,10 @@ type SupplyGate struct {
 	fetcher  SupplyFetcher
 	registry *supply.Registry
 	logger   *slog.Logger
+
+	// observer, when set, receives metrics-facing notifications. nil means no
+	// observation (existing callers/tests that never call SetObserver).
+	observer SupplyGateObserver
 }
 
 func NewSupplyGate(f SupplyFetcher, reg *supply.Registry, logger *slog.Logger) *SupplyGate {
@@ -59,23 +83,31 @@ func NewSupplyGate(f SupplyFetcher, reg *supply.Registry, logger *slog.Logger) *
 	return &SupplyGate{fetcher: f, registry: reg, logger: logger}
 }
 
+// SetObserver installs the gate's observer. nil disables observation.
+func (g *SupplyGate) SetObserver(o SupplyGateObserver) { g.observer = o }
+
 // Admit reports whether the activation may proceed. It returns *NotReadyError
 // listing every required-but-absent supply — all of them, so an operator does not
 // need one reconcile round per missing supply to discover the next.
 //
 // Content is cached under the supply NODE name, not the resource name: the node
 // name is the identity that $supplies expressions and the consumer registry use.
-func (g *SupplyGate) Admit(ctx context.Context, reqs []engine.SupplyRequirement) error {
+//
+// workflowID identifies the activation for the xflow_supply_not_ready label —
+// it is a workflow ID, not an execution ID, so it stays low-cardinality.
+func (g *SupplyGate) Admit(ctx context.Context, workflowID string, reqs []engine.SupplyRequirement) error {
 	if len(reqs) == 0 {
 		return nil
 	}
 	var missing []string
 	for _, req := range reqs {
 		if g.registry.IsReady(req.Node) {
+			g.notifyNotReady(ctx, workflowID, req.Node, false)
 			continue
 		}
 		content, hash, revision, err := g.fetcher.Fetch(ctx, req.Resource)
 		if err != nil {
+			g.notifyFetch(ctx, req.Resource, "error")
 			// Both "never written" and "cannot reach the server" mean the same
 			// thing for the decision: this runner has no content. They differ only
 			// in what an operator should look at, hence the log level split.
@@ -86,9 +118,14 @@ func (g *SupplyGate) Admit(ctx context.Context, reqs []engine.SupplyRequirement)
 			}
 			if req.RequireReady {
 				missing = append(missing, req.Node)
+				g.notifyNotReady(ctx, workflowID, req.Node, true)
+			} else {
+				g.notifyNotReady(ctx, workflowID, req.Node, false)
+				g.notifyServingUnavailable(ctx, req.Node, true)
 			}
 			continue
 		}
+		g.notifyFetch(ctx, req.Resource, "ok")
 		if err := g.registry.Apply(ctx, supply.Snapshot{
 			Name:      req.Node,
 			Content:   content,
@@ -103,6 +140,9 @@ func (g *SupplyGate) Admit(ctx context.Context, reqs []engine.SupplyRequirement)
 			g.log(ctx, slog.LevelWarn, "supply content rejected by a consumer", req, hash)
 			if req.RequireReady {
 				missing = append(missing, req.Node)
+				g.notifyNotReady(ctx, workflowID, req.Node, true)
+			} else {
+				g.notifyNotReady(ctx, workflowID, req.Node, false)
 			}
 			continue
 		}
@@ -114,9 +154,14 @@ func (g *SupplyGate) Admit(ctx context.Context, reqs []engine.SupplyRequirement)
 			g.log(ctx, slog.LevelWarn, "supply content previously rejected, still not ready", req, hash)
 			if req.RequireReady {
 				missing = append(missing, req.Node)
+				g.notifyNotReady(ctx, workflowID, req.Node, true)
+			} else {
+				g.notifyNotReady(ctx, workflowID, req.Node, false)
 			}
 			continue
 		}
+		g.notifyNotReady(ctx, workflowID, req.Node, false)
+		g.notifyServingUnavailable(ctx, req.Node, false)
 		g.log(ctx, slog.LevelInfo, "supply ready", req, hash)
 	}
 	if len(missing) == 0 {
@@ -124,6 +169,27 @@ func (g *SupplyGate) Admit(ctx context.Context, reqs []engine.SupplyRequirement)
 	}
 	sort.Strings(missing)
 	return &NotReadyError{Missing: missing}
+}
+
+// notifyFetch, notifyNotReady, notifyServingUnavailable are all nil-safe: most
+// callers in this codebase (every pre-existing supply_gate_test.go case) never
+// install an observer.
+func (g *SupplyGate) notifyFetch(ctx context.Context, name, result string) {
+	if g.observer != nil {
+		g.observer.OnSupplyFetch(ctx, name, result)
+	}
+}
+
+func (g *SupplyGate) notifyNotReady(ctx context.Context, workflowID, supplyName string, notReady bool) {
+	if g.observer != nil {
+		g.observer.OnSupplyNotReady(ctx, workflowID, supplyName, notReady)
+	}
+}
+
+func (g *SupplyGate) notifyServingUnavailable(ctx context.Context, name string, serving bool) {
+	if g.observer != nil {
+		g.observer.OnSupplyServingUnavailable(ctx, name, serving)
+	}
 }
 
 // log emits one gate event. It records the supply name and at most a hash
