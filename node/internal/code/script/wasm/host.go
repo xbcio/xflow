@@ -36,6 +36,14 @@ type reactorHost struct {
 	// the warmer at startup. Keyed by base64 code so re-registering the same
 	// module updates its config instead of adding a duplicate. Guarded by mu.
 	prewarm map[string]prewarmEntry
+
+	// sourceDriven records code strings whose module is meant to be
+	// source-driven (a supply consumer or config loader) even when no engine has
+	// been compiled for them yet. Activation-time registration usually precedes
+	// the module's first Execute — the compiled-module cache is empty at that
+	// point — so this is the only place the intent can be recorded until
+	// engineForCode creates the engine and reads it. Guarded by mu.
+	sourceDriven map[string]struct{}
 }
 
 // prewarmEntry is one module queued for startup warm-up.
@@ -60,9 +68,10 @@ func newReactorHost() *reactorHost {
 		panic(err)
 	}
 	return &reactorHost{
-		engines:   map[string]*reactorEngine{},
-		codeCache: c,
-		prewarm:   map[string]prewarmEntry{},
+		engines:      map[string]*reactorEngine{},
+		codeCache:    c,
+		prewarm:      map[string]prewarmEntry{},
+		sourceDriven: map[string]struct{}{},
 	}
 }
 
@@ -115,7 +124,20 @@ func (h *reactorHost) engineForCode(ctx context.Context, code string) (*reactorE
 	if err != nil {
 		return nil, err
 	}
+	// Resolve the config source once, here, so Execute never takes the registry
+	// lock. hasLoader is a locked read, but this runs once per code string.
+	if hasLoader(code) || h.isSourceDriven(code) {
+		e.configFromSource.Store(true)
+	}
 	h.codeCache.Add(code, e)
+	// Re-check after publishing: a concurrent RegisterConfigLoader/
+	// RegisterSupplyConsumer may have run between the first check and the Add,
+	// and its mark* call would have missed an engine that was not in the cache
+	// yet. Without this, activation-time registration would occasionally leave
+	// the module on the globals path with no rules at all.
+	if hasLoader(code) || h.isSourceDriven(code) {
+		e.configFromSource.Store(true)
+	}
 	return e, nil
 }
 
@@ -160,5 +182,37 @@ func (e *reactorEngine) ensurePool(ctx context.Context, cfg []byte, size uint64)
 	if p := e.active.Load(); p != nil && configHash(p.cfg) == configHash(cfg) {
 		return nil
 	}
-	return e.swapConfig(ctx, cfg, size)
+	// Legacy globals path: the content has no SupplyResource revision.
+	return e.swapConfig(ctx, cfg, size, 0)
+}
+
+// markConfigFromSource flips an already-created engine to source-driven config.
+// A code with no engine yet is a no-op: engineForCode resolves the flag when it
+// creates one (it also consults isSourceDriven, so the intent is not lost).
+func (h *reactorHost) markConfigFromSource(code string) {
+	if e, ok := h.codeCache.Get(code); ok {
+		e.configFromSource.Store(true)
+	}
+}
+
+// markConfigFromSourceOrSeed flips the engine for code to source-driven config,
+// creating nothing: when the engine does not exist yet the intent is recorded so
+// engineForCode picks it up at creation. Compiling the module here would pay a
+// multi-second cost on the activation path.
+func (h *reactorHost) markConfigFromSourceOrSeed(code string) {
+	h.mu.Lock()
+	h.sourceDriven[code] = struct{}{}
+	h.mu.Unlock()
+
+	if e, ok := h.codeCache.Get(code); ok {
+		e.configFromSource.Store(true)
+	}
+}
+
+// isSourceDriven reports whether a code string was marked source-driven.
+func (h *reactorHost) isSourceDriven(code string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	_, ok := h.sourceDriven[code]
+	return ok
 }

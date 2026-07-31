@@ -55,20 +55,28 @@ var (
 )
 
 // RegisterConfigLoader associates a ConfigLoader with a wasm module code string.
-// During warmup the loader is invoked once to establish the initial pool; if
-// ttl > 0 a background goroutine polls at that interval for version changes.
+// During warmup any already-registered loader is invoked once to build the
+// initial pool; if ttl > 0 a background goroutine polls for version changes.
 //
 // Re-registering the same code replaces the previous loader (aligns with
-// addPrewarm semantics). Call before WarmupScriptEngines.
+// addPrewarm semantics). It may be called at any time, including after warmup —
+// registration flips the module's engine to source-driven config so Execute
+// needs no lock; when the engine does not exist yet, engineForCode resolves the
+// flag from the registry at creation time.
 func RegisterConfigLoader(code string, loader ConfigLoader, ttl time.Duration) {
 	loaderMu.Lock()
-	defer loaderMu.Unlock()
 	loaderRegistry[code] = loaderEntry{loader: loader, ttl: ttl}
+	loaderMu.Unlock()
+
+	// Flip the already-created engine, if any. A miss is fine: engineForCode
+	// resolves the flag when it creates the engine.
+	sharedReactorHost.markConfigFromSource(code)
 }
 
 // hasLoader reports whether a module's config comes from a loader rather than
-// from globals. On the Execute hot path only this yes/no matters, so it avoids
-// copying the entry out.
+// from globals. It is a locked read, so it must run only at registration and
+// warmup time — NOT on the Execute hot path. reactorEngine.configFromSource is
+// the lock-free flag Execute actually reads; hasLoader exists only to seed it.
 func hasLoader(code string) bool {
 	loaderMu.RLock()
 	defer loaderMu.RUnlock()
@@ -121,8 +129,9 @@ func startWatcher(ctx context.Context, code string, e *reactorEngine, loader Con
 				if version == lastAppliedVersion {
 					continue // zero-cost: version unchanged, don't touch pool
 				}
-				// Version changed — attempt pool swap.
-				if err := e.swapConfig(ctx, cfg, defaultPoolSize()); err != nil {
+				// Version changed — attempt pool swap. The loader path has no
+				// SupplyResource revision, so it passes 0 (legacy globals path).
+				if err := e.swapConfig(ctx, cfg, defaultPoolSize(), 0); err != nil {
 					slog.Warn("wasm config loader: new config rejected",
 						"module", code[:min(len(code), 32)],
 						"version", version,

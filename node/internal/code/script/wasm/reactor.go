@@ -13,6 +13,13 @@ import (
 // config (cleansing/tagging rules) that drives the two-phase init. When present
 // it is applied via ensurePool before eval; when absent the engine reuses the
 // currently-active pool (or errors if never configured).
+//
+// Deprecated: this legacy globals path is kept because embedded/SDK callers and
+// existing tests still use it, but it is unreachable in production — the
+// production path is $supplies + a declared dependency edge + SupplyConsumer
+// (supply_consumer.go), which flips a module to configFromSource instead of
+// reading $config per call. Task 18 adds the ScriptNode.Execute end-to-end
+// regression for the production path.
 const reactorConfigGlobal = "$config"
 
 func init() {
@@ -39,13 +46,16 @@ func (f *reactorFacade) Name() string { return "wasm/wazero-reactor" }
 
 // Execute runs one input through the reactor pool for the given module.
 //
-// When a ConfigLoader is registered for this code, the loader is the authority
-// for config: globals["$config"] is ignored and the active pool (maintained by
-// the background watcher) is used directly. If active is nil (first config
-// failed), a transient error is returned so upstream retries.
+// When a module is source-driven (configFromSource: a registered ConfigLoader
+// or supply consumer), globals["$config"] is ignored and the active pool
+// (maintained by the loader watcher or a supply content change) is used
+// directly. The availability ladder decides whether to serve: Fresh and Stale
+// both serve from last-good, only Unavailable (never successfully configured)
+// fails the call.
 //
-// When no loader is registered, the legacy path applies: rules are passed via
-// globals["$config"] and ensurePool is called with a sha256 equality check.
+// When the module is not source-driven, the legacy path applies: rules are
+// passed via globals["$config"] and ensurePool is called with a sha256
+// equality check.
 func (f *reactorFacade) Execute(ctx context.Context, code string, globals map[string]any, _ engine.Helpers) (any, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -59,11 +69,19 @@ func (f *reactorFacade) Execute(ctx context.Context, code string, globals map[st
 		return nil, err
 	}
 
-	// Loader-driven path: skip the per-call sha256 of config bytes entirely.
-	if hasLoader(code) {
-		if e.active.Load() == nil {
+	// Source-driven path: no lock, no per-call sha256 of config bytes.
+	if e.configFromSource.Load() {
+		switch e.availability() {
+		case AvailUnavailable:
+			// Reachable only under require_ready:false — the readiness gate keeps
+			// traffic away otherwise. Fail rather than eval with no rules: an
+			// unconfigured guest would pass everything through untagged, which is
+			// a silent data-quality incident.
 			return nil, types.NewTransientError("wasm.unconfigured",
-				"wasm reactor: no active pool (config source failed at startup); retryable")
+				"wasm reactor: no active pool (supply content never applied); retryable")
+		case AvailStale, AvailFresh:
+			// Both serve. Stale is a last-good state, which is correct behaviour —
+			// it is reported via supply_age_seconds, not by refusing traffic.
 		}
 		input := stripConfig(globals)
 		inputBytes, err := encodeStdin(input)
@@ -164,7 +182,7 @@ func (f *reactorFacade) warmup(ctx context.Context) error {
 			// §6.5: config source unreachable → active stays nil, Execute
 			// returns transient until a later poll succeeds.
 			errs = append(errs, fmt.Errorf("warmup loader: %w", loadErr))
-		} else if err := e.swapConfig(ctx, cfg, defaultPoolSize()); err != nil {
+		} else if err := e.swapConfig(ctx, cfg, defaultPoolSize(), 0); err != nil {
 			// §6.5: first config bad → active stays nil. Leave
 			// lastAppliedVersion unset so the watcher retries this version.
 			errs = append(errs, fmt.Errorf("warmup loader: %w", err))

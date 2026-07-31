@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
@@ -165,10 +166,17 @@ func (e *reactorEvalError) Error() string {
 // builds a whole new activePool and swaps the pointer (B-plan, docs §6.3), so a
 // single pool never mixes generations.
 type activePool struct {
-	gen  uint64
-	cfg  []byte // config snapshot; replayed when rebuilding a doomed instance
-	free chan *pooledInstance
-	size int
+	gen uint64
+	// revision is the SupplyResource revision the cfg came from. It is the
+	// GLOBALLY comparable content version — unlike gen, which counts swaps in
+	// this process and therefore cannot be compared across runners. It is what a
+	// tagged record's config_generation reports, so a warehouse query can tell
+	// which rule version produced which row during a rollout skew window.
+	// Zero means "config did not come from a SupplyResource" (legacy globals path).
+	revision uint64
+	cfg      []byte // config snapshot; replayed when rebuilding a doomed instance
+	free     chan *pooledInstance
+	size     int
 }
 
 // reactorEngine owns the wazero runtime handle, the compiled module, and the
@@ -185,6 +193,26 @@ type reactorEngine struct {
 	// swapped in successfully by the watcher goroutine. Updated only on
 	// successful swap so a failed version is retried on the next poll (§6.5).
 	lastAppliedVersion atomic.Value // string
+
+	// lastSwapAt is when the active pool was installed. It drives the Stale
+	// determination and xflow_supply_age_seconds: a source that keeps failing
+	// leaves gen untouched, so only elapsed time exposes it.
+	lastSwapAt atomic.Int64 // unix nanos
+
+	// sourceFailures counts consecutive source failures since the last successful
+	// swap. Reset to zero on a successful swap.
+	sourceFailures atomic.Int64
+
+	// configFromSource records whether this module's config comes from a supply
+	// consumer / loader rather than from globals. It is resolved ONCE when the
+	// engine is created or a consumer registers, and read lock-free on every
+	// message.
+	//
+	// The lock had to go: registration used to happen only during warmup (pure
+	// reads, no writer), but the registration window moved to activation time, so
+	// a writer now contends with ~12000 reads/s and shows up as tail-latency
+	// spikes.
+	configFromSource atomic.Bool
 
 	mu sync.Mutex // serializes pool (re)builds (swapConfig)
 }
@@ -350,15 +378,23 @@ func (e *reactorEngine) doom(p *activePool, inst *pooledInstance) {
 // swapConfig builds a new pool for cfg and atomically installs it (B-plan,
 // §6.3). On success the old pool is drained and torn down in the background; on
 // failure the active pool is left untouched (last-good preserved, no shrink).
-func (e *reactorEngine) swapConfig(ctx context.Context, cfg []byte, size uint64) error {
+// revision is the SupplyResource revision the content came from (0 for the
+// legacy globals path).
+func (e *reactorEngine) swapConfig(ctx context.Context, cfg []byte, size uint64, revision uint64) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
 	newPool, err := e.buildPool(ctx, cfg, size)
 	if err != nil {
+		e.sourceFailures.Add(1)
 		return err // active unchanged
 	}
+	// Must be set before Swap publishes the pointer: once Swap runs, readers can
+	// see newPool immediately, and writing the field afterward would race them.
+	newPool.revision = revision
 	old := e.active.Swap(newPool)
+	e.lastSwapAt.Store(time.Now().UnixNano())
+	e.sourceFailures.Store(0)
 	if old != nil {
 		go e.drainPool(context.Background(), old)
 	}
@@ -384,6 +420,62 @@ func (e *reactorEngine) drainPool(ctx context.Context, p *activePool) {
 func configHash(cfg []byte) string {
 	sum := sha256.Sum256(cfg)
 	return hex.EncodeToString(sum[:])
+}
+
+// Availability is the three-tier config availability ladder. It replaces the
+// binary "active == nil" check, which conflated Stale with Fresh: functionally
+// correct but invisible, and invisible staleness is exactly how a config source
+// can silently stop updating for hours.
+type Availability int
+
+const (
+	// AvailUnavailable: never successfully configured. Reachable only under
+	// require_ready:false — with the gate on, the runner never took the
+	// activation, so no traffic arrives here.
+	AvailUnavailable Availability = iota
+	// AvailStale: serving content, but the source has failed repeatedly since.
+	// Serving is correct (last-good beats no service); the point is that
+	// supply_age_seconds keeps climbing so it can be alerted on.
+	AvailStale
+	// AvailFresh: the most recent config application succeeded.
+	AvailFresh
+)
+
+// staleFailureThreshold is how many consecutive source failures mark the active
+// content Stale. One transient blip should not flip a healthy module.
+const staleFailureThreshold = 3
+
+// availability reports the current tier.
+func (e *reactorEngine) availability() Availability {
+	if e.active.Load() == nil {
+		return AvailUnavailable
+	}
+	if e.sourceFailures.Load() >= staleFailureThreshold {
+		return AvailStale
+	}
+	return AvailFresh
+}
+
+// Generation returns the server-side revision of the currently active content,
+// or 0 when there is no active pool or the content came from the legacy globals
+// path. This is what an eval result reports as config_generation.
+func (e *reactorEngine) Generation() uint64 {
+	if p := e.active.Load(); p != nil {
+		return p.revision
+	}
+	return 0
+}
+
+// ConfigAge returns how long the active content has been in service. Zero when
+// nothing was ever installed. It is the only signal that exposes a source which
+// stopped updating: a stuck source leaves gen and revision untouched, so nothing
+// but elapsed time changes.
+func (e *reactorEngine) ConfigAge() time.Duration {
+	ns := e.lastSwapAt.Load()
+	if ns == 0 {
+		return 0
+	}
+	return time.Since(time.Unix(0, ns))
 }
 
 // normalizeConfig produces the canonical JSON config bytes the guest configure
