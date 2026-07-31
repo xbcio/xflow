@@ -87,8 +87,9 @@ func (f *reactorFacade) Execute(ctx context.Context, code string, globals map[st
 			// only signal that exposes a source which stopped updating (gen and
 			// revision stay put while a source keeps failing), and a source-driven
 			// module's Execute calls are frequent enough that per-call sampling
-			// costs one atomic load (ConfigAge) plus the same obs() RLock already
-			// paid on the borrow path — no new lock class, no allocation.
+			// costs two atomic loads — ConfigAge and obs() — with no lock and no
+			// allocation. obs() must stay lock-free for this to hold; see the
+			// measurement in observer.go.
 			obs().OnConfigAge(ctx, e.ConfigAge())
 		}
 		input := stripConfig(globals)

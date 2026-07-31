@@ -121,4 +121,3 @@ func TestExecuteSamplesConfigAgeForSourceDrivenModule(t *testing.T) {
 		t.Fatal("expected at least one OnConfigAge notification")
 	}
 }
-
