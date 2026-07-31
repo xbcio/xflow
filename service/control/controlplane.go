@@ -219,6 +219,7 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 
 	if cfg.Metrics != nil {
 		node.SetScriptObserver(metrics.NewScriptMetrics(cfg.Metrics))
+		node.SetWasmObserver(metrics.NewSupplyMetrics(cfg.Metrics))
 	}
 
 	var serverOpts []ServerOption
