@@ -110,7 +110,15 @@ const (
 	// token can be granted runner read without leader read and vice-versa.
 	OpManagementLeaderRead = "management.leader.read"
 	OpManagementRunnerRead = "management.runner.read"
-	OpManagementWrite      = "management.write"
+	OpManagementWrite = "management.write"
+	// OpSupplyWrite / OpSupplyRead gate the supply content endpoints. Writing a
+	// supply changes production data-processing logic, so its authorization
+	// strength matches writing a workflow definition: its own scope, denied by
+	// default. Both MUST also appear in scopeForOperation — an operation that
+	// falls through to the default "" scope is denied by both ScopeAuthorizer
+	// and NamespaceAwareAuthorizer, making the route silently unreachable.
+	OpSupplyWrite = "supply.write"
+	OpSupplyRead  = "supply.read"
 )
 
 // scopeForOperation maps an operation to the scope it requires. A principal
@@ -137,6 +145,10 @@ func scopeForOperation(op string) string {
 		return "management.runner.read"
 	case OpManagementWrite:
 		return "management.write"
+	case OpSupplyWrite:
+		return "supply.write"
+	case OpSupplyRead:
+		return "supply.read"
 	default:
 		return ""
 	}

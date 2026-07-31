@@ -31,6 +31,9 @@ type Config struct {
 	// distributed.New via WithRedisConfig.
 	RedisConfig *distributed.RedisConfig
 	Store       store.Store
+	// Supplies backs the /v1/supplies endpoints. When nil the supply module is
+	// not registered at all (the routes 404). A *sqlstore.Provider satisfies it.
+	Supplies    store.Supplies
 	Concurrency int
 	Auth        control.Authenticator
 	Logger      engine.Logger
@@ -170,6 +173,17 @@ func New(cfg Config, opts ...Option) (*APIServer, error) {
 			mgmt.audit = cfg.AuditSink
 		}
 		s.modules = append(s.modules, mgmt)
+	}
+	// The supply module registers only when BOTH a PrincipalAuthenticator and a
+	// supply store are configured. There is no unauthenticated fallback: an
+	// endpoint that rewrites production cleansing rules must 404 rather than
+	// serve open. See module_supply.go.
+	if cfg.PrincipalAuth != nil && cfg.Supplies != nil {
+		sup := newSupplyModule(cfg.Supplies)
+		sup.principalAuth = cfg.PrincipalAuth
+		sup.authorizer = cfg.Authorizer
+		sup.audit = cfg.AuditSink
+		s.modules = append(s.modules, sup)
 	}
 	return s, nil
 }
