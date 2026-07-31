@@ -3,6 +3,7 @@ package supply
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"sync"
 )
@@ -53,7 +54,7 @@ func (r *Registry) Apply(ctx context.Context, snap Snapshot) error {
 
 	var errs []error
 	for _, c := range targets {
-		if err := c.OnSupplyChanged(ctx, cloneSnapshot(snap)); err != nil {
+		if err := safeNotify(ctx, c, snap); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -89,7 +90,7 @@ func (r *Registry) RegisterConsumer(name, key string, c Consumer) {
 	if has {
 		// Best-effort: a rejection here leaves the consumer on its last-good
 		// state, which is exactly the documented behaviour.
-		_ = c.OnSupplyChanged(context.Background(), cloneSnapshot(snap))
+		_ = safeNotify(context.Background(), c, snap)
 	}
 }
 
@@ -125,6 +126,23 @@ func (r *Registry) Ready(names []string) []string {
 	}
 	sort.Strings(missing)
 	return missing
+}
+
+// safeNotify calls a consumer's OnSupplyChanged with panic recovery. A panicking
+// consumer is treated identically to one that returns an error — the error is
+// collected and other consumers are not affected. The panic value is not included
+// in the error to avoid leaking content bytes indirectly.
+func safeNotify(ctx context.Context, c Consumer, snap Snapshot) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			hashPrefix := snap.Hash
+			if len(hashPrefix) > 12 {
+				hashPrefix = hashPrefix[:12]
+			}
+			err = fmt.Errorf("supply %q [%s]: consumer panicked", snap.Name, hashPrefix)
+		}
+	}()
+	return c.OnSupplyChanged(ctx, cloneSnapshot(snap))
 }
 
 func cloneSnapshot(s Snapshot) Snapshot {
