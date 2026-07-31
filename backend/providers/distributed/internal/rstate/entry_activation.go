@@ -157,6 +157,15 @@ func (s *EntryActivationStore) Upsert(ctx context.Context, act engine.EntryActiv
 		paramsJSON = string(b)
 	}
 
+	var suppliesJSON string
+	if len(act.Supplies) > 0 {
+		b, err := json.Marshal(act.Supplies)
+		if err != nil {
+			return fmt.Errorf("marshal supplies: %w", err)
+		}
+		suppliesJSON = string(b)
+	}
+
 	desired := "0"
 	if act.Desired {
 		desired = "1"
@@ -173,6 +182,7 @@ func (s *EntryActivationStore) Upsert(ctx context.Context, act engine.EntryActiv
 		"package_hash", act.PackageHash,
 		"selector", selectorJSON,
 		"requirements", requirementsJSON,
+		"supplies", suppliesJSON,
 		"desired", desired,
 	)
 	pipe.Expire(ctx, key, s.ttl)
@@ -314,6 +324,13 @@ func decodeEntryActivation(fields map[string]string) (engine.EntryActivation, er
 			return engine.EntryActivation{}, fmt.Errorf("unmarshal requirements: %w", err)
 		}
 		act.Requirements = rr
+	}
+	// Supplies is absent on records written before the field existed; decode
+	// tolerates absence (leaves Supplies nil).
+	if sup := fields["supplies"]; sup != "" {
+		if err := json.Unmarshal([]byte(sup), &act.Supplies); err != nil {
+			return engine.EntryActivation{}, fmt.Errorf("unmarshal supplies: %w", err)
+		}
 	}
 	if g := fields["generation"]; g != "" {
 		gen, err := strconv.ParseUint(g, 10, 64)

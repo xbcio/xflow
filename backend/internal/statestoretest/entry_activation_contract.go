@@ -26,6 +26,7 @@ func sampleEntryActivation(unit string) engine.EntryActivation {
 		PackageHash:     "pkg-abc",
 		Selector:        &types.RunnerSelector{Mode: types.RunnerSelectorModeRequired, MatchLabels: map[string]string{"zone": "a"}},
 		Requirements:    []engine.CapabilityRequirement{{NodeType: "http.request", NodeVersion: 2, Feature: "trigger.v1"}},
+		Supplies:        []engine.SupplyRequirement{{Node: "rules", Resource: "shared-rules", RequireReady: true}},
 		Desired:         true,
 	}
 }
@@ -73,6 +74,10 @@ func RunEntryActivationContract(t *testing.T, newStore func(*testing.T) engine.E
 		// Requirements must round-trip (set on Upsert, read back on Get).
 		if !reflect.DeepEqual(got.Requirements, act.Requirements) {
 			t.Fatalf("Requirements not round-tripped: got %+v want %+v", got.Requirements, act.Requirements)
+		}
+		// Supplies must round-trip (set on Upsert, read back on Get).
+		if !reflect.DeepEqual(got.Supplies, act.Supplies) {
+			t.Fatalf("Supplies not round-tripped: got %+v want %+v", got.Supplies, act.Supplies)
 		}
 		list, err := s.List(ctx, namespace.Default)
 		if err != nil {

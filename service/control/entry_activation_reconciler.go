@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 
@@ -551,7 +552,19 @@ func activateDirectiveFor(act *engine.EntryActivation, gen uint64) protocol.Acti
 		Params:          act.Params,
 		Generation:      gen,
 		PackageHash:     act.PackageHash,
+		Kind:            activationKindFor(act),
+		Supplies:        act.Supplies,
 	}
+}
+
+// activationKindFor classifies an activation for runner-side dispatch. Today
+// every activation record is a trigger entry unit; the supply collection face
+// (pull mode, P3d) will produce ActivationKindSupply records.
+func activationKindFor(act *engine.EntryActivation) string {
+	if strings.HasPrefix(act.NodeType, "xflow.supply.") {
+		return protocol.ActivationKindSupply
+	}
+	return protocol.ActivationKindTrigger
 }
 
 // deactivateDirectiveFor builds the node-generic deactivate directive for an

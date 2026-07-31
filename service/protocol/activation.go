@@ -1,5 +1,7 @@
 package protocol
 
+import "github.com/xbcio/xflow/engine"
+
 // --- Path constants ---
 const (
 	ActivatePath       = "/v1/runners/activate"
@@ -26,7 +28,23 @@ type ActivateDirective struct {
 	Params          map[string]any `json:"params,omitempty"`
 	Generation      uint64         `json:"generation"`
 	PackageHash     string         `json:"package_hash,omitempty"`
+	// Kind selects the runner-side handler: "" or "trigger" means the trigger
+	// handler (so an old runner that never sees this field behaves as before),
+	// "supply" means the supply handler. Dispatching on an explicit kind rather
+	// than sniffing a NodeType prefix keeps a third source mode from silently
+	// landing on the wrong handler.
+	Kind string `json:"kind,omitempty"`
+	// Supplies are the supply contents the receiving runner must have before it
+	// takes over this entry unit (see engine.SupplyRequirement). Empty means no
+	// gate.
+	Supplies []engine.SupplyRequirement `json:"supplies,omitempty"`
 }
+
+// ActivationKind values for ActivateDirective.Kind.
+const (
+	ActivationKindTrigger = "trigger"
+	ActivationKindSupply  = "supply"
+)
 
 // --- Deactivate directive (server → runner) ---
 

@@ -6,10 +6,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/namespace"
+	"github.com/xbcio/xflow/node/supply"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -69,12 +71,92 @@ type EntryUnitActivation struct {
 	PackageHash  string
 	Selector     *types.RunnerSelector
 	Requirements []engine.CapabilityRequirement
+	Supplies     []engine.SupplyRequirement
 }
 
 // projectGroupPackage indirects graph.ProjectGroupPackage so the derivation's
 // fail-closed error path can be exercised in tests. Production always uses the
 // real projection.
 var projectGroupPackage = graph.ProjectGroupPackage
+
+// SuppliesForEntryUnit collects the supply requirements of one entry unit: for
+// every node reachable from the entry unit in the flow graph, the supplies its
+// dependency edges point at.
+//
+// The result is sorted by supply node name and deduplicated, so two nodes in the
+// same unit depending on one supply yield one requirement. It returns nil (not an
+// empty slice) when the unit depends on nothing — the wire format's omitempty and
+// the byte-for-byte stability of existing directives both depend on that.
+func SuppliesForEntryUnit(g *graph.Graph, unitIdx int) []engine.SupplyRequirement {
+	if g == nil {
+		return nil
+	}
+	byNode := map[string]engine.SupplyRequirement{}
+	collect := func(nodeIdx int) {
+		for _, supplyName := range g.SupplyRefsFor(nodeIdx) {
+			if _, seen := byNode[supplyName]; seen {
+				continue
+			}
+			si, ok := g.NodeIndex(supplyName)
+			if !ok {
+				// buildDependencyEdges already rejected a dangling edge, so this
+				// is unreachable; skip rather than panic if it ever is.
+				continue
+			}
+			params := g.NodeAt(si).Parameters
+			byNode[supplyName] = engine.SupplyRequirement{
+				Node:         supplyName,
+				Resource:     supply.ResourceName(supplyName, params),
+				RequireReady: supply.RequireReady(params),
+			}
+		}
+	}
+
+	// Seed the BFS with the node(s) directly in the entry unit.
+	var seeds []int
+	switch g.UnitKindAt(unitIdx) {
+	case graph.UnitGroup:
+		seeds = g.GroupMetaAt(unitIdx).Members
+	case graph.UnitNode:
+		seeds = []int{g.UnitNodeIndex(unitIdx)}
+	}
+
+	// BFS downstream from the seeds through flow edges to find all reachable
+	// nodes. Supply dependencies on any reachable node belong to this entry unit.
+	visited := make(map[int]bool, len(seeds))
+	queue := make([]int, 0, len(seeds))
+	for _, s := range seeds {
+		if !visited[s] {
+			visited[s] = true
+			queue = append(queue, s)
+		}
+	}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		collect(cur)
+		for _, e := range g.NodeOutEdges(cur) {
+			if !visited[e.DstIdx] {
+				visited[e.DstIdx] = true
+				queue = append(queue, e.DstIdx)
+			}
+		}
+	}
+
+	if len(byNode) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(byNode))
+	for n := range byNode {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	out := make([]engine.SupplyRequirement, 0, len(names))
+	for _, n := range names {
+		out = append(out, byNode[n])
+	}
+	return out
+}
 
 // DeriveEntryActivations extracts the trigger entry units from a compiled graph
 // that carry a RunnerSelector (i.e. are meant to run on a remote runner). A
@@ -114,6 +196,7 @@ func DeriveEntryActivations(g *graph.Graph) ([]EntryUnitActivation, error) {
 				PackageHash:  gm.PackageHash,
 				Selector:     gm.RunnerSelector,
 				Requirements: reqs,
+				Supplies:     SuppliesForEntryUnit(g, i),
 			})
 		case graph.UnitNode:
 			nodeIdx := g.UnitNodeIndex(i)
@@ -131,6 +214,7 @@ func DeriveEntryActivations(g *graph.Graph) ([]EntryUnitActivation, error) {
 					NodeType:    nm.Type,
 					NodeVersion: nm.Version,
 				}}),
+				Supplies: SuppliesForEntryUnit(g, i),
 			})
 		}
 	}
@@ -170,6 +254,7 @@ func (m *EntryActivationManager) AddOrUpdateWorkflow(ctx context.Context, ns nam
 			PackageHash:     eu.PackageHash,
 			Selector:        eu.Selector,
 			Requirements:    eu.Requirements,
+			Supplies:        eu.Supplies,
 			Desired:         true,
 		}); err != nil {
 			return err
@@ -220,6 +305,7 @@ func (m *EntryActivationManager) RemoveWorkflow(ctx context.Context, ns namespac
 			PackageHash:     existing.PackageHash,
 			Selector:        existing.Selector,
 			Requirements:    existing.Requirements,
+			Supplies:        existing.Supplies,
 			Desired:         false,
 		}); err != nil {
 			return err

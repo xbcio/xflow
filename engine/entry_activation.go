@@ -49,8 +49,23 @@ type EntryActivation struct {
 	// type(s)). The reconciler assigns only a runner whose advertised
 	// capabilities cover these. It is desired-state, owned by Upsert. Absent on
 	// records written before this field existed (decodes to nil).
-	Requirements  []CapabilityRequirement
-	Desired       bool
+	Requirements []CapabilityRequirement
+	// Supplies are the supply contents this entry unit's nodes depend on, derived
+	// from the graph's dependency edges. The hosting runner uses them as its
+	// activation-time readiness gate: it fetches each one before taking over, and
+	// with RequireReady it declines the activation rather than serving traffic
+	// with no content.
+	//
+	// This is a DIFFERENT dimension from Requirements: Requirements asks "can this
+	// runner run this node type" and is matched by the reconciler when choosing a
+	// runner; Supplies asks "does this runner have the content yet" and is decided
+	// by the runner itself. Merging them would put a dynamic, per-runner condition
+	// into static placement matching.
+	//
+	// Desired-state, owned by Upsert. Absent on records written before this field
+	// existed (decodes to nil).
+	Supplies []SupplyRequirement
+	Desired  bool
 	RunnerID      string
 	SessionID     string
 	Generation    uint64
@@ -108,4 +123,20 @@ type EntryActivationStore interface {
 	// least gen, so any subsequent Assign must use a strictly higher generation.
 	// It is a no-op when the activation does not exist.
 	Fence(ctx context.Context, key EntryActivationKey, gen uint64) error
+}
+
+// SupplyRequirement is one supply content dependency of an entry unit.
+//
+// Node is the supply NODE's name in the graph (the identity dependency edges and
+// $supplies expressions use). Resource is the SupplyResource name to fetch — it
+// defaults to Node but may differ, so two workflows can consume one shared
+// resource under their own local node names.
+type SupplyRequirement struct {
+	Node     string `json:"node"`
+	Resource string `json:"resource"`
+	// RequireReady false means the runner takes the activation even with no
+	// content and the consumer runs with empty semantics. True (the default in
+	// the DSL) means it declines instead — traffic stays in Kafka, the offset does
+	// not advance, and consumer-group lag is the operator-visible signal.
+	RequireReady bool `json:"require_ready"`
 }
