@@ -3,6 +3,8 @@ package metrics
 import (
 	"context"
 	"time"
+
+	"github.com/xbcio/xflow/node/supply"
 )
 
 // Supply and wasm reactor metric names.
@@ -127,7 +129,11 @@ func (s SupplyMetrics) OnSupplyServingUnavailable(ctx context.Context, name stri
 	s.Metrics.Set(metricSupplyUnavailableServing, withNamespace(ctx, map[string]string{"name": name}), v)
 }
 
-// OnSupplyConsumers reports how many in-process consumers this supply has.
-func (s SupplyMetrics) OnSupplyConsumers(ctx context.Context, name string, n int) {
+// OnConsumerCount reports how many in-process consumers a supply has. Named
+// to satisfy supply.ConsumerCountObserver directly (see var _ assertion
+// below) rather than through a separate adapter type.
+func (s SupplyMetrics) OnConsumerCount(ctx context.Context, name string, n int) {
 	s.Metrics.Set(metricSupplyConsumers, withNamespace(ctx, map[string]string{"name": name}), float64(n))
 }
+
+var _ supply.ConsumerCountObserver = SupplyMetrics{}

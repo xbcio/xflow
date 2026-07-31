@@ -183,12 +183,12 @@ func TestSupplyMetricsOnSupplyServingUnavailableToggles(t *testing.T) {
 	}
 }
 
-func TestSupplyMetricsOnSupplyConsumers(t *testing.T) {
+func TestSupplyMetricsOnConsumerCount(t *testing.T) {
 	m := New()
 	s := NewSupplyMetrics(m)
 	ctx := context.Background()
 
-	s.OnSupplyConsumers(ctx, "rules", 2)
+	s.OnConsumerCount(ctx, "rules", 2)
 
 	body := gatherMetricsBody(t, m)
 	if !strings.Contains(body, `xflow_supply_consumers{name="rules",namespace="default"} 2`) {
