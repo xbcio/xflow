@@ -108,6 +108,19 @@ func (f *reactorFacade) Execute(ctx context.Context, code string, globals map[st
 	return f.evalFromPool(ctx, e, inputBytes)
 }
 
+// ConfigGenerationKey is the output key carrying the content version that
+// produced a result. It is the SupplyResource revision — server-side and
+// monotonic, therefore comparable across runners.
+//
+// Cross-runner pool swaps are not synchronized (worst case a 10-20s skew,
+// which at 12000 msg/s means 120-240k records tagged by a mix of two rule
+// versions). The design does not try to close that window: closing it needs a
+// global barrier that stops the whole stream, and no comparable system does
+// that. It makes the skew TRACEABLE instead — a warehouse can group by
+// (key, config_generation), find rows produced by an older version, and
+// recompute exactly those.
+const ConfigGenerationKey = "config_generation"
+
 // evalFromPool borrows an instance, runs eval, and handles doom/return.
 func (f *reactorFacade) evalFromPool(ctx context.Context, e *reactorEngine, inputBytes []byte) (any, error) {
 	inst, pool, err := e.borrow(ctx)
@@ -125,7 +138,30 @@ func (f *reactorFacade) evalFromPool(ctx context.Context, e *reactorEngine, inpu
 	}
 	e.giveBack(ctx, pool, inst)
 
-	return decodeStdout(out)
+	decoded, err := decodeStdout(out)
+	if err != nil {
+		return nil, err
+	}
+	// Stamp the content version onto the result. pool — not e.active — is the
+	// authority: a swap may have landed while this message was in flight, and
+	// the honest answer is the version that actually produced this output.
+	return annotateGeneration(decoded, pool.revision), nil
+}
+
+// annotateGeneration adds the config generation to a JSON-object result. A
+// non-object result (array, scalar, nil) is returned untouched: adding a key
+// would change its shape, and the guest's output type is part of its
+// contract.
+//
+// A zero revision is still stamped: it distinguishes "produced by the legacy
+// globals path" from "field absent because this host predates the field".
+func annotateGeneration(v any, revision uint64) any {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return v
+	}
+	m[ConfigGenerationKey] = revision
+	return m
 }
 
 // warmup is the engine.Warmer. It opens the wazero runtime — which resolves the
