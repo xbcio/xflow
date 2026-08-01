@@ -247,6 +247,22 @@ items listed below under §12.1. What remains open is in §12.2.
   signature has no error return, so a mis-wired caller panics instead, which is
   still fail-closed but not an error return. This is a phased-rollout
   limitation: only Kafka has entry-seed hosting today.
+- **Supply nodes (see [SUPPLY-NODE.md](./SUPPLY-NODE.md)) reuse the activation
+  record/reconciler layer but not the entry-seed/admission-key layer, and that
+  split is deliberate, not a gap.** `EntryActivationManager.SuppliesForEntryUnit`
+  attaches `Supplies []engine.SupplyRequirement` to the same `EntryActivation`
+  record used for trigger hosting, and `entry_activation_reconciler.go`'s
+  `activationKindFor` now classifies a record as `ActivationKindSupply` when
+  its `NodeType` has the `xflow.supply.` prefix — so the fence/assign/renew/
+  lease machinery this section describes is no longer Kafka-trigger-only. What
+  it does **not** do is create an execution or an admission key for a supply
+  node: `buildUnits` excludes every `NodeKindSupply` node from the unit layer
+  (`nodeUnit` stays `-1`), and `entryUnitIndex` explicitly rejects a supply
+  node used as an entry unit rather than surfacing that `-1` as a real index.
+  A cron (or any other) trigger's entry-seed hosting was never a prerequisite
+  for a supply's content to become available — the supply collection face is
+  gated by `SupplyGate.Admit` at activation time, independent of whether the
+  consuming workflow's own trigger uses entry-seed hosting at all.
 - **Aggregate Kafka mode cannot be hosted via entry-seed admission.** The
   aggregate path emits batches through the legacy `Runtime.Emit`; a batch
   admission key would have to express an offset range that the control-plane

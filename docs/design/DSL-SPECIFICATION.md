@@ -663,7 +663,8 @@ note: "格式参考 {name} 占位符"
 | | `$inputs.port_name` | 多条入边时按端口名区分 | `$inputs.order_data.id` |
 | | `$nodes['name']` | 按节点名引用任意节点输出 | `$nodes['validate_order'].is_valid` |
 | **上下文** | `$vars` | 全局变量（context.vars，只读） | `$vars.max_retry_count` |
-| | `$config` | 环境配置（context.config，只读） | `$config.env` |
+| | `$config` | 环境配置（context.config，只读，随工作流定义版本一起不可变） | `$config.env` |
+| | `$supplies` | 声明了 `dependency_edges` 依赖的 supply 节点内容（见 §6.3），可变、有版本、可能未就绪 | `$supplies.rules.items` |
 | **运行时获取** | `getCredential('name')` | 从凭证管理模块获取凭证（加密存储，运行时解密） | `getCredential('api_auth').token` |
 | **运行时信息** | `$execution` | 执行上下文 | `$execution.id`、`$execution.mode` |
 | | `$workflow` | 工作流信息 | `$workflow.name`、`$workflow.version` |
@@ -1139,6 +1140,8 @@ XFlow 的 connections 仅描述拓扑关系（谁连到谁），条件逻辑由 
 | 截取 | xflow.transform.limit | 截取数组前 N 项（items + max） | main | main | ❌ | 可选 |
 | 去重 | xflow.transform.remove_duplicates | 数组去重（items + fields?） | main | main | ❌ | 可选 |
 | 聚合 | xflow.transform.aggregate | 数组聚合（items + operations） | main | main | ❌ | 可选 |
+| 外部 Supply | xflow.supply.external | 声明消费一个由外部写入的 `SupplyResource`（见 §6.3）；声明式，不执行 | _(无)_ | _(无)_ | ❌ | 不适用 |
+| 静态 Supply | xflow.supply.static | 声明供内容随定义一起携带的 supply（见 §6.3）；声明式，不执行 | _(无)_ | _(无)_ | ❌ | 不适用 |
 
 > **并行执行**：XFlow 不提供 `xflow.parallel` 节点。并行通过 connections 天然实现——一个输出端口连接多个目标节点即为并行分支，用 `xflow.merge` 汇合。
 >
@@ -1273,6 +1276,88 @@ execID, err := eng.Invoke(ctx, workflowID, xflow.Trigger("order_created"), event
 - **节点作者约束**
   - 所有 trigger handler 必须可取消、非阻塞、幂等，并在 `Emit` 前执行 dedup / lock / state 协调。
   - 如需 stronger delivery guarantee，必须由具体 trigger adapter 和业务幂等键一起定义，而不是默认由 DSL 或 engine core 提供。
+
+#### Supply 节点与 `dependency_edges`
+
+Supply 节点（`kind: supply`）声明工作流消费一份**长期存活的共享内容**（当前用于 wasm 节点的规则/配置），与 trigger/action 是完全不同的语义维度：它永不推进 execution，图上只是一个可被依赖引用的声明。详细设计见 [SUPPLY-NODE.md](./SUPPLY-NODE.md)。
+
+两种节点类型：
+
+| 类型 | 标识符 | 内容来源 | `require_ready` 默认 |
+|------|--------|---------|----|
+| 外部 Supply | `xflow.supply.external` | 由外部 `PUT /v1/supplies/{name}` 写入的 `SupplyResource`；pull 模式的 `xflow.supply.http`（runner 主动按计划拉取）**尚未实现**，不要在 DSL 里使用 | `true` |
+| 静态 Supply | `xflow.supply.static` | 字面量内容，随工作流定义一起提交、一起哈希 | `true`（内容随定义存在，天然就绪） |
+
+```yaml
+nodes:
+  - name: rules
+    type: xflow.supply.external
+    kind: supply
+    parameters:
+      resource: clean-rules-v1   # 省略则默认等于节点名
+      require_ready: true        # 见下方两档语义
+
+  - name: cleanse
+    type: xflow.script
+    parameters:
+      engine: wasm
+      code: "${{ ... }}"
+
+dependency_edges:
+  - node: cleanse
+    supply: rules
+
+connections:
+  order_created:
+    main:
+      - node: cleanse
+```
+
+**`dependency_edges` 是独立的顶层字段，不是 `connections` 的扩展**：
+
+```yaml
+dependency_edges:
+  - node: string     # 消费方节点名
+    supply: string    # supply 节点名
+```
+
+不复用 `connections` 的原因：一条依赖边不携带数据，也不参与 unit 层的跨 unit 调度边构建；把它塞进 `connections` 会污染数据流拓扑（supply 节点被排除在 unit 层之外，一旦被当成数据流边处理会索引到不存在的 unit）。该字段 `omitempty`：不使用 supply 的工作流序列化结果与 hash 与引入本特性之前完全一致。
+
+**`require_ready` 两档语义**（没有第三档）：
+
+- `true`（默认）——runner 在该 supply 没有可用内容时**拒绝**接管这个 entry 的 activation；Kafka offset 不前进，consumer-group lag 是可观测信号。
+- `false` ——runner **接管**该 activation，消费者以「空内容」语义运行；此时会有 `xflow_supply_unavailable_serving` 置 1 的告警信号。
+
+规范曾讨论过第三档「`default: <bytes>`」（无内容时退回一份内嵌默认规则），**已被显式否决并未实现**：用过期的内嵌规则处理线上流量会产出「看起来正常但错误」的数据，一旦写入下游数仓不可逆，比直接停止服务更危险。
+
+**`$supplies` 表达式根**（§4.2 变量总览已收录）：一个声明了 `dependency_edges` 的消费节点，可以用 `$supplies.<supply节点名>` 读取该 supply 当前内容。`$supplies` 与 `$config` 分工不同：`$config` 不可变、随工作流定义版本走；`$supplies` 可变、有版本、可能未就绪，因此二者刻意不合并成一个命名空间（合并后名字冲突无解、且会抹平"这份内容可能取不到"的失败语义）。
+
+**标识空间只有一个：supply 节点名。** 没有第二套命名（例如 `config_refs`）——`dependency_edges[].supply`、`$supplies.<name>` 里的 `<name>`、以及心跳/门控日志里报告的名字，三处用的都是同一个 supply 节点在图上的名字。
+
+**两条编译期规则**：
+
+| 情况 | 编译器行为 |
+|------|-----------|
+| 节点使用 `$supplies.<name>`，但没有声明到 `<name>` 的 `dependency_edges` | **编译期报错**：依赖必须在图上显式可见，不能隐式引用 |
+| `$supplies` 的名字不是字面量（如 `$supplies[$vars.key]` 或裸 `$supplies`） | **编译期报错**：名字必须静态可推导，否则依赖边校验和服务端反向索引都无法构建 |
+
+```yaml
+# ❌ 编译期报错：cleanse 引用了 $supplies.rules，但没有对应的 dependency_edges
+nodes:
+  - name: cleanse
+    parameters:
+      code: "${{ $supplies.rules.items }}"
+# dependency_edges 缺失该边
+
+# ❌ 编译期报错：名字不是字面量
+parameters:
+  code: "${{ $supplies[$vars.dynamic_name] }}"
+
+# ✅ 合法：字面量名字 + 显式声明的依赖边
+dependency_edges:
+  - node: cleanse
+    supply: rules
+```
 
 ### 6.2 节点配置
 
