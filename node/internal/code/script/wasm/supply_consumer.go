@@ -53,7 +53,8 @@ func (c *supplyConsumer) OnSupplyChanged(ctx context.Context, snap supply.Snapsh
 	//
 	// A revision bump with identical bytes deliberately does NOT swap. activePool
 	// is published read-only and readers load p.revision without a lock
-	// (pool.go:464), so updating it in place would race them; rebuilding a whole
+	// (Generation, pool.go:492), so updating it in place would race them;
+	// rebuilding a whole
 	// pool to carry a number is worse. The reported config_generation therefore
 	// stays at the revision whose bytes are actually loaded, which is the honest
 	// answer to "which content produced this row".
