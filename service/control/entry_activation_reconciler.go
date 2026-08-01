@@ -708,6 +708,85 @@ func (r *EntryActivationReconciler) clearRetryBackoff(key engine.EntryActivation
 	r.mu.Unlock()
 }
 
+// MarkActivationFailed records that a runner could not take an activation and
+// makes it redispatchable. It deliberately does NOT assign a new owner: Fence
+// clears runner_id, so the next reconcile pass sees an unassigned activation and
+// runs the normal assignment path. Assigning here instead would race the
+// leader's reconcile.
+//
+// Safe on any replica, leader or not: Fence is a single-key Redis CAS and this
+// only ever fences the exact generation the ack names. A stale ack (naming a
+// generation the store has already moved past) is ignored rather than allowed
+// to tear down a healthy newer assignment.
+//
+// NOTE: because this method is intentionally leader-agnostic (to minimise time-
+// to-fence after a decline), the backoff registered via noteActivationFailure is
+// local to this replica. If the processing replica is NOT the current leader,
+// the leader's retryBackoff map will not see this failure. This is accepted:
+// the worst case is the leader attempts one immediate redispatch, which will
+// fail again and register the backoff on the leader itself. One extra attempt is
+// preferable to adding leader-only gating (which would delay fencing until the
+// ack is forwarded or until the leader's next reconcile discovers the problem).
+func (r *EntryActivationReconciler) MarkActivationFailed(ctx context.Context, runnerID string, ack protocol.ActivationAck) error {
+	if ack.Status != protocol.ActivationStatusFailed {
+		return nil
+	}
+
+	ns := namespace.FromContext(ctx)
+
+	// List activations to find the one matching this ack. The ack does not carry
+	// WorkflowVersion (legacy runner compat), so we cannot construct a full
+	// EntryActivationKey directly — iterate as ReconcileRunnerInventory does.
+	acts, err := r.cfg.Store.List(ctx, ns)
+	if err != nil {
+		return err
+	}
+
+	for i := range acts {
+		act := &acts[i]
+		if string(act.WorkflowID) != ack.WorkflowID {
+			continue
+		}
+		if act.EntryUnitID != ack.GroupID {
+			continue
+		}
+		// Generation and owner must both match: a stale ack must never fence a
+		// healthy newer assignment.
+		if act.Generation != ack.Generation || act.RunnerID != runnerID {
+			if r.cfg.Logger != nil {
+				r.cfg.Logger.Info("ignoring stale activation ack",
+					"workflow_id", act.WorkflowID,
+					"entry_unit_id", act.EntryUnitID,
+					"ack_generation", ack.Generation,
+					"store_generation", act.Generation,
+					"ack_runner", runnerID,
+					"store_runner", act.RunnerID)
+			}
+			return nil
+		}
+
+		key := keyOf(act)
+		if err := r.cfg.Store.Fence(ctx, key, act.Generation); err != nil {
+			return err
+		}
+		r.noteActivationFailure(key, time.Now())
+
+		if r.cfg.Logger != nil {
+			r.cfg.Logger.Info("activation fenced after runner decline",
+				"workflow_id", act.WorkflowID,
+				"entry_unit_id", act.EntryUnitID,
+				"runner_id", runnerID,
+				"generation", ack.Generation,
+				"error", ack.Error)
+		}
+		return nil
+	}
+
+	// No matching activation found — the ack is for a workflow that no longer
+	// exists or was moved to another namespace. This is not an error.
+	return nil
+}
+
 // activateDirectiveFor builds the node-generic activate directive for an
 // activation at the given (post-assign) generation. Params carry the same
 // trigger parameters the WorkflowDef already holds — no new secret surface.
