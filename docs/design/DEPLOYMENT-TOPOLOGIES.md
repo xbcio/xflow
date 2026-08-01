@@ -289,12 +289,18 @@ outbox 语义，也不构成 release gate 已满足的证据。Loop/Split 也仍
   保证是 activation 期的同步拉取（`SupplyGate.Admit`）与 loader 的 TTL 轮询；
   hint 丢失（无论是因为网络分区、runner 重启、server 换主，还是像 gRPC 这样
   从不传输）都不会造成永久发散。
+- **ActivationAck（`fix/activation-ack-retry` 引入）**：gRPC proto 没有
+  `ActivationAck` 对应的 RPC 定义，因此 gRPC-only 部署下 runner 的 ack 无处
+  可发、静默丢弃、`MarkActivationFailed` / `Store.Fence` 永不被触发。这意味着
+  gRPC-only 部署**仍退化为「只能重启 runner 恢复一个被 gate decline 的
+  activation」**——与 hint 缺失的纯延迟退化不同，这是**自愈能力的完全缺失**，
+  severity 更高。HTTP 传输下此闭环已完整实现，详见
+  [SUPPLY-NODE.md §9(a)](./SUPPLY-NODE.md#9-known-gaps-and-costs)。
 
-**范围边界**：hint 只影响「已经托管某 supply 消费者的 runner 何时刷新内容」，
-不影响「一个被门控拒绝的 activation 何时被重新托管」——后者是一个独立的、
-仍然存在的缺口（见 R8/Task 18 的验证结论：reconciler 只按 liveness+selector
-续租，从不检查 `Activate` 是否真正成功；`ActivationAck` 类型已定义但没有任何
-生产接线）。两件事在文档与代码注释里必须分清，不能互相掩盖。
+**范围边界**：hint 与 ack 是两个独立缺口。hint 只影响「已经托管某 supply 消费者
+的 runner 何时刷新内容」；ack 影响「一个被门控拒绝的 activation 何时被重新托管」。
+前者是延迟退化，后者是正确性/自愈能力缺失。两件事在文档与代码注释里必须分清，
+不能互相掩盖。
 
 HTTP 是首选传输，gRPC 是实验性的。
 

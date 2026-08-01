@@ -15,6 +15,7 @@ type RunnerHTTPHandler interface {
 	HandlePollTask(http.ResponseWriter, *http.Request)
 	HandleReportResult(http.ResponseWriter, *http.Request)
 	HandleRenewLease(http.ResponseWriter, *http.Request)
+	HandleActivationAck(http.ResponseWriter, *http.Request)
 }
 
 func RegisterRunnerRoutes(mux *http.ServeMux, handler RunnerHTTPHandler) {
@@ -23,4 +24,5 @@ func RegisterRunnerRoutes(mux *http.ServeMux, handler RunnerHTTPHandler) {
 	mux.HandleFunc(PollTaskPath, handler.HandlePollTask)
 	mux.HandleFunc(ReportResultPath, handler.HandleReportResult)
 	mux.HandleFunc(RenewLeasePath, handler.HandleRenewLease)
+	mux.HandleFunc(ActivationAckPath, handler.HandleActivationAck)
 }

@@ -69,13 +69,21 @@ const (
 
 // ActivationAck is sent by a runner to acknowledge an activate/deactivate directive.
 type ActivationAck struct {
-	RunnerID   string           `json:"runner_id"`
-	SessionID  string           `json:"session_id"`
-	WorkflowID string           `json:"workflow_id"`
-	GroupID    string           `json:"group_id"`
-	Generation uint64           `json:"generation"`
-	Status     ActivationStatus `json:"status"`
-	Error      string           `json:"error,omitempty"`
+	RunnerID   string `json:"runner_id"`
+	SessionID  string `json:"session_id"`
+	AuthToken  string `json:"auth_token,omitempty"`
+	WorkflowID string `json:"workflow_id"`
+	// WorkflowVersion is REQUIRED: the server needs it to build the full
+	// EntryActivationKey and Get the record directly instead of scanning the
+	// namespace. An ack that omits it is rejected (ErrMissingWorkflowVersion,
+	// HTTP 400) rather than treated as an old-runner case — the ack send path
+	// and this field ship in the same feature, so no runner that can send an
+	// ack lacks the value.
+	WorkflowVersion string           `json:"workflow_version,omitempty"`
+	GroupID         string           `json:"group_id"`
+	Generation      uint64           `json:"generation"`
+	Status          ActivationStatus `json:"status"`
+	Error           string           `json:"error,omitempty"`
 }
 
 // --- Heartbeat response extension ---

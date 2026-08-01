@@ -7,27 +7,17 @@ P3（`feat/supply-node-p3`，20 tasks，已合入 main）交付后未做的事�
 
 ## P0 — 合并前已知、但影响面最大
 
-### 1. 门控拒绝的 activation 不自愈
+### ~~1. 门控拒绝的 activation 不自愈~~ ✓ 已关闭
 
-见 [SUPPLY-NODE.md §9(a)](./SUPPLY-NODE.md#9-known-gaps-and-costs)。
+分支 `fix/activation-ack-retry` 实现了 ActivationAck → Fence → 退避 → 重派
+闭环。详见 [SUPPLY-NODE.md §9(a)](./SUPPLY-NODE.md#9-known-gaps-and-costs)。
 
-`EntryActivationReconciler.reconcileOne` 的 already-assigned 分支只看
-`!expired && ownerMatches`，从不检查该 runner 的 `Activate`（进而
-`SupplyGate.Admit`）是否真的成功过，因此永远续租、永不重试。今天唯一的恢复
-路径是**重启 runner**。
+测试变更：`TestSupplyGateLosesNoMessages` 与 `TestSupplyGateRecoversOnRestart`
+的 Generation 断言已按预期更新；新增 `TestSupplyGateRetriesWithoutRestart` 证明
+完整自愈闭环。
 
-危险的地方不在行为本身（拒绝并等待是安全方向），而在于它**推翻了一个很自然的
-直觉前提**：「下一轮 reconcile 会重试」。任何基于该前提做的运维预案或后续设计
-都是错的。
-
-- 已定义但零接线：`protocol.ActivationAck` / `ActivationAckPath`
-  （`service/protocol/activation.go:9,71-79`），全仓无 `service/control`、
-  `service/runner` 或路由注册处的生产调用点。
-- 两条路可选：接线 `ActivationAck`，或让 reconciler 感知 admit 结果。
-- 现状已被测试钉死，改动会让它们失败，这是**预期**，不是回归：
-  `test/integration/supply_gating_test.go` 的 `TestSupplyGateLosesNoMessages`
-  断言拒绝期间 `Generation` 不前进；`TestSupplyGateRecoversOnRestart` 单独隔离
-  同一断言。修复时必须同步改这两处断言，并在 §9(a) 记录。
+新引入的已知代价（已写入 §9(a)）：gRPC-only 部署下 ack 无处可发，自愈能力完全
+缺失——此缺口与 P1 §3（gRPC 传输不携带 hint/activation）同源但严重性更高。
 
 ## P1 — 可观测性缺失，出事时会瞎
 

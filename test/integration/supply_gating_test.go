@@ -41,28 +41,18 @@ import (
 // the topic, consumer lag is the visible signal, and a later reconnect picks
 // them all up once content appears.
 //
-// IMPORTANT correction versus the brief's assumed self-heal mechanism: the
-// brief describes "decline and retry next reconcile round" as if periodic
-// background Reconcile alone recovers a declined activation. I verified this
-// experimentally (see the report) and it is FALSE as currently implemented:
-// EntryActivationReconciler.reconcileOne renews an assigned activation's lease
-// indefinitely as long as its runner keeps heartbeating and stays selector-
-// matching — it never checks whether the runner's Activate actually
-// succeeded. A runner whose SupplyGate declines therefore holds the
-// assignment (silently, forever) under continuous heartbeats; nothing in the
-// current wiring re-triggers Activate. The ONLY mechanism that recovers a
-// declined activation today is a runner RESTART: a fresh Register call
-// reports an empty (or non-matching) inventory, which ReconcileRunnerInventory
-// turns into a Fence+Deactivate, and the next Reconcile pass reassigns with a
-// fresh Activate directive. protocol.ActivationAck /
-// protocol.ActivationAckPath exist in the wire types but are never sent by
-// the runner or consumed by the server — there is no per-activation
-// success/failure signal today. This is exactly the gap Task 19 ("两层分发
-// 心跳 hint 与 observed 上报" — heartbeat hint + observed reporting) is
-// scoped to close; it is correctly still pending, not a defect introduced by
-// this task. The tests below assert what production actually does today
-// (restart recovers; continuous background reconcile alone does not), rather
-// than asserting a self-heal path that does not exist yet.
+// Self-heal mechanism: when a runner's SupplyGate declines an activation,
+// the ActivationTracker's onActivateFailed callback fires, which sends an
+// ActivationAck{Status: "failed"} to the server. The server's
+// MarkActivationFailed validates the generation, Fence-clears the RunnerID,
+// and registers exponential backoff (10s initial, 2x, 5min cap, ±20%
+// jitter). On the next Reconcile pass after the backoff elapses, the
+// reconciler sees RunnerID=="" and reassigns with a fresh generation, sending
+// a new ActivateDirective via the runner's next heartbeat. If the supply
+// content has appeared in the interim, the gate admits and the activation
+// succeeds — no restart required. This is the fix for SUPPLY-NODE.md §9(a)'s
+// documented gap (previously the only recovery was a runner restart).
+// TestSupplyGateRetriesWithoutRestart is the proof that this path works.
 //
 // Coverage note (per the task-18 brief addendum §5's fallback instruction):
 // this harness wires real Kafka + real Redis end-to-end through the same
@@ -308,17 +298,16 @@ func assertNoConsumerGroup(t *testing.T, brokers []string, group string) {
 // runner ActivationTracker -> TriggerActivationHandler -> SupplyGate.Admit ->
 // (only if admitted) the real Kafka trigger's Activate.
 //
-// The four assertions, in order (see the file-level comment above for why
-// (c) is proven via a runner restart rather than periodic Reconcile alone):
+// The four assertions, in order:
 //
 //	(a) with require_ready:true and no content, the runner does NOT construct
 //	    the Kafka consumer — proven by an empty ActivationTracker.Inventory()
 //	    and by no consumer group ever appearing on the broker;
-//	(b) messages produced to the topic are NOT consumed while content is
-//	    absent: processed stays 0 across two reconcile rounds;
-//	(c) after the content is PUT and the runner restarts (the verified
-//	    self-heal path today), the fresh session's Activate succeeds and the
-//	    runner takes over;
+//	(b) the ActivationAck path fences and redispatches (generation advances)
+//	    but messages are NOT consumed while content is absent: processed stays
+//	    0 — the gate protects traffic even through retry cycles (§9(a) fix);
+//	(c) after the content is PUT and a restart (one recovery path), the fresh
+//	    session's Activate succeeds and the runner takes over;
 //	(d) every message sent before the takeover is eventually processed:
 //	    sent == processed, zero loss.
 func TestSupplyGateLosesNoMessages(t *testing.T) {
@@ -448,35 +437,55 @@ func TestSupplyGateLosesNoMessages(t *testing.T) {
 	}
 	assertNoConsumerGroup(t, brokers, group)
 
-	// --- (b): across two more reconcile periods with no content, nothing is
-	// consumed — the consumer group never formed, so there is nothing to have
-	// committed an offset, and the processed count stays 0. Also confirm
-	// continuous background reconciliation alone does NOT resend Activate: the
-	// generation must stay exactly gen1 (this is the corrected understanding
-	// documented at the top of this file). ---
-	for i := 0; i < 2; i++ {
-		if err := reconciler.Reconcile(ctx, time.Now()); err != nil {
-			t.Fatalf("Reconcile (still not ready, pass %d): %v", i, err)
+	// --- (b): the ActivationAck path fences the activation and registers
+	// backoff; after the backoff elapses the reconciler redispatches with a
+	// fresh generation — but because the supply is still not ready, no
+	// consumer group is ever constructed and no messages are consumed. This
+	// is the fix for SUPPLY-NODE.md §9(a): generation advances (self-heal
+	// via ack+fence+retry), yet the gate still protects traffic. ---
+
+	// Wait for the ack→Fence to clear RunnerID (confirms the ack path fired).
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		act, _, _ := cp.EntryActivationStore().Get(ctx, key)
+		if act.RunnerID == "" {
+			break
 		}
-		time.Sleep(150 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
+	actFenced, _, _ := cp.EntryActivationStore().Get(ctx, key)
+	if actFenced.RunnerID != "" {
+		t.Fatalf("(b) expected RunnerID cleared by ActivationAck→Fence, got %q", actFenced.RunnerID)
+	}
+
+	// Advance time past the backoff window (10s initial + jitter margin) and
+	// reconcile — the reconciler redispatches with generation+1.
+	futureNow := time.Now().Add(15 * time.Second)
+	if err := reconciler.Reconcile(ctx, futureNow); err != nil {
+		t.Fatalf("Reconcile (past backoff): %v", err)
+	}
+	// Give the runner's heartbeat time to deliver the new directive and for
+	// the (still-failing) Activate to run.
+	time.Sleep(500 * time.Millisecond)
+
 	if got := counter.load(); got != 0 {
 		t.Fatalf("(b) processed count = %d, want 0 while supply is not ready — a message was consumed with no rules applied", got)
 	}
 	assertNoConsumerGroup(t, brokers, group)
-	actStillPending, _, _ := cp.EntryActivationStore().Get(ctx, key)
-	if actStillPending.Generation != gen1 {
-		t.Fatalf("generation changed to %d without a restart — periodic Reconcile alone must not resend Activate (see file header)", actStillPending.Generation)
+	actAfterRetry, _, _ := cp.EntryActivationStore().Get(ctx, key)
+	if actAfterRetry.Generation <= gen1 {
+		t.Fatalf("(b) generation must advance via ack+fence+retry (§9(a) fix), got %d (was %d)", actAfterRetry.Generation, gen1)
 	}
 
 	// --- PUT the supply content: the gate's next Admit will fetch and apply
 	// it. ---
 	putSupplyContent(t, httpSrv.URL, client, supplyRes, []byte(`{"rules":[]}`))
 
-	// --- (c): restart the runner (fresh Register -> ReconcileRunnerInventory
-	// revokes the stale assignment -> next Reconcile reassigns with a fresh
-	// generation and a fresh Activate directive, which now succeeds). This is
-	// the verified self-heal mechanism (see file header). ---
+	// --- (c): restart the runner (fresh Register -> the activation is already
+	// fenced from the ack path, and the restart establishes a new session).
+	// Reconcile with time advanced past any residual backoff reassigns with a
+	// fresh generation and a fresh Activate directive, which now succeeds
+	// because the supply content is present. ---
 	tracker2 := newSupplyGatingRunner(httpSrv.URL, token, reg)
 	_, runnerCancel2, runErr2 := restartRunner(t, ctx, cp, runnerCancel, runErr, httpSrv.URL, token, runnerID, labels, caps, tracker2)
 
@@ -488,7 +497,11 @@ func TestSupplyGateLosesNoMessages(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	if err := reconciler.Reconcile(ctx, time.Now()); err != nil {
+	// Use a time past any residual backoff from the previous ack cycle but
+	// within the runner liveness TTL (30s default). 25s is safely past the
+	// worst-case doubled backoff (20s + 20% jitter = 24s) while keeping the
+	// runner alive from the reconciler's perspective.
+	if err := reconciler.Reconcile(ctx, time.Now().Add(25*time.Second)); err != nil {
 		t.Fatalf("Reconcile (round after restart): %v", err)
 	}
 	act2, _, err := cp.EntryActivationStore().Get(ctx, key)
@@ -528,10 +541,8 @@ func TestSupplyGateLosesNoMessages(t *testing.T) {
 // assertion in TestSupplyGateLosesNoMessages, run standalone so a future
 // regression confined to just the retry path (not Kafka message delivery)
 // fails on its own without also depending on message accounting. It also
-// makes explicit the negative half of the corrected understanding documented
-// at the top of this file: periodic background Reconcile alone, with the
-// runner continuously live and selector-matching, must NOT advance the
-// generation — only a restart does.
+// proves that the ack path advances the generation (§9(a) fix) and that a
+// restart is an additional (not the only) recovery path.
 func TestSupplyGateRecoversOnRestart(t *testing.T) {
 	brokers := requireKafka(t)
 	redisAddr := requireRedis(t)
@@ -622,18 +633,29 @@ func TestSupplyGateRecoversOnRestart(t *testing.T) {
 		t.Fatalf("expected the activation declined (empty inventory) before content appears, got %#v", got)
 	}
 
-	// Negative half: several more reconcile rounds with the SAME session
-	// (still live, still selector-matching) must NOT advance the generation —
-	// there is no per-activation success signal for the reconciler to act on.
-	for i := 0; i < 3; i++ {
-		if err := reconciler.Reconcile(ctx, time.Now()); err != nil {
-			t.Fatalf("Reconcile (pre-restart pass %d): %v", i, err)
+	// The ActivationAck path (§9(a) fix) fences the activation after the
+	// decline. Wait for it, then reconcile past the backoff to prove the
+	// generation advances WITHOUT a restart.
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		act, _, _ := cp.EntryActivationStore().Get(ctx, key)
+		if act.RunnerID == "" {
+			break
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
-	actUnchanged, _, _ := cp.EntryActivationStore().Get(ctx, key)
-	if actUnchanged.Generation != gen1 {
-		t.Fatalf("generation advanced to %d under continuous reconcile with no restart — periodic Reconcile alone must not resend Activate", actUnchanged.Generation)
+	actFenced, _, _ := cp.EntryActivationStore().Get(ctx, key)
+	if actFenced.RunnerID != "" {
+		t.Fatalf("expected RunnerID cleared by ActivationAck→Fence, got %q", actFenced.RunnerID)
+	}
+	// Advance past the backoff window and reconcile: generation advances.
+	if err := reconciler.Reconcile(ctx, time.Now().Add(15*time.Second)); err != nil {
+		t.Fatalf("Reconcile (past backoff, pre-restart): %v", err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	actAdvanced, _, _ := cp.EntryActivationStore().Get(ctx, key)
+	if actAdvanced.Generation <= gen1 {
+		t.Fatalf("generation must advance via ack+fence+retry without restart (§9(a) fix), got %d (was %d)", actAdvanced.Generation, gen1)
 	}
 
 	putSupplyContent(t, httpSrv.URL, client, supplyRes, []byte(`{"rules":[]}`))
@@ -652,7 +674,7 @@ func TestSupplyGateRecoversOnRestart(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	if err := reconciler.Reconcile(ctx, time.Now()); err != nil {
+	if err := reconciler.Reconcile(ctx, time.Now().Add(25*time.Second)); err != nil {
 		t.Fatalf("Reconcile (round after restart): %v", err)
 	}
 
@@ -667,6 +689,196 @@ func TestSupplyGateRecoversOnRestart(t *testing.T) {
 	runnerCancel2()
 	select {
 	case <-runErr2:
+	case <-time.After(3 * time.Second):
+	}
+}
+
+// TestSupplyGateRetriesWithoutRestart proves that a declined activation
+// self-heals without a runner restart. This is the closure of SUPPLY-NODE.md
+// §9(a)'s documented gap: the ActivationAck path (runner reports failure →
+// server Fence + backoff → reconciler redispatches) makes restart unnecessary.
+//
+// Flow:
+//  1. Control plane + runner up, supply NOT ready → gate declines activation.
+//  2. ActivationAck fires → server Fences → registers backoff.
+//  3. Supply content is PUT (gate's next Admit will pass).
+//  4. Time advanced past backoff, Reconcile → redispatches, runner admits.
+//  5. Assert: activation is hosted AND messages are fully processed (zero loss).
+//
+// Delete injection verification: if SetOnActivateFailed is not wired (the ack
+// never fires), this test MUST fail — the activation stays assigned but
+// declined forever and no self-heal occurs.
+func TestSupplyGateRetriesWithoutRestart(t *testing.T) {
+	brokers := requireKafka(t)
+	redisAddr := requireRedis(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	counter := newGatingCounter()
+	registry.Register(gatingBodyHandler{counter: counter})
+
+	topic := uniqueTopic("xflow-supply-gating-norestart")
+	group := topic + "-group"
+	newKafkaTopic(t, brokers, topic, 1)
+
+	// Produce messages BEFORE activation — the production scenario.
+	const n = 5
+	msgs := make([]kafka.Message, 0, n)
+	for i := 0; i < n; i++ {
+		msgs = append(msgs, kafka.Message{Key: []byte(fmt.Sprintf("k%d", i)), Value: []byte(fmt.Sprintf("v%d", i))})
+	}
+	writeKafkaMessages(t, brokers, topic, msgs)
+
+	httpSrv, cp, token := newSupplyGatingControlPlane(t, redisAddr)
+	reconciler := cp.EntryActivationReconciler()
+	if reconciler == nil {
+		t.Fatal("control plane must expose the entry activation reconciler")
+	}
+
+	const (
+		wfVersion   = "1"
+		entryUnitID = "kin3"
+		bodyUnitID  = "body3"
+		supplyNode  = "rules3"
+		supplyRes   = "gating-rules-norestart"
+		zoneLabel   = "gate3"
+		runnerID    = "runner-gate3"
+	)
+
+	def := &types.WorkflowDef{
+		Name:           topic,
+		Version:        wfVersion,
+		RunnerSelector: &types.RunnerSelector{Mode: types.RunnerSelectorModeRequired, MatchLabels: map[string]string{"zone": zoneLabel}},
+		Nodes: []types.NodeDef{
+			{Name: entryUnitID, Kind: types.NodeKindTrigger, Type: "xflow.trigger.kafka", Parameters: map[string]any{
+				"brokers":      brokers,
+				"topic":        topic,
+				"group":        group,
+				"start_offset": "earliest",
+			}},
+			{Name: bodyUnitID, Kind: types.NodeKindAction, Type: gatingTriggerBodyType},
+			{Name: supplyNode, Kind: types.NodeKindSupply, Type: "xflow.supply.external", Parameters: map[string]any{
+				"resource": supplyRes, "require_ready": true,
+			}},
+		},
+		Connections: types.Connections{
+			entryUnitID: {"main": {{Node: bodyUnitID, Input: "main"}}},
+		},
+		DependencyEdges: []types.DependencyEdge{
+			{Node: entryUnitID, Supply: supplyNode},
+		},
+	}
+	client := authedClient(token)
+	wfID := registerWorkflowHTTP(t, httpSrv.URL, client, def)
+
+	key := engine.EntryActivationKey{
+		Namespace: namespace.Default, WorkflowID: wfID, WorkflowVersion: wfVersion, EntryUnitID: entryUnitID,
+	}
+	labels := map[string]string{"zone": zoneLabel}
+	caps := []protocol.Capability{{NodeType: "xflow.trigger.kafka"}, {NodeType: gatingTriggerBodyType}}
+
+	reg := supply.NewRegistry()
+	tracker := newSupplyGatingRunner(httpSrv.URL, token, reg)
+
+	runnerCtx, runnerCancel := context.WithCancel(ctx)
+	defer runnerCancel()
+	runner := runnersvc.New(
+		protocol.NewClient(httpSrv.URL, client),
+		execution.NewRegistry(),
+		runnersvc.Config{
+			RunnerID:          runnerID,
+			Concurrency:       1,
+			Labels:            labels,
+			Capabilities:      caps,
+			HeartbeatInterval: 100 * time.Millisecond,
+			PollWait:          10 * time.Millisecond,
+			ActivationTracker: tracker,
+		},
+	)
+	runErr := make(chan error, 1)
+	go func() { runErr <- runner.Run(runnerCtx) }()
+	waitForE2ERunner(t, cp.RunnerDirectory(), runnerID)
+
+	// --- Step 1: Reconcile assigns. The runner's heartbeat delivers the
+	// directive; SupplyGate declines (no content). ---
+	if err := reconciler.Reconcile(ctx, time.Now()); err != nil {
+		t.Fatalf("Reconcile (round 1): %v", err)
+	}
+	act, _, err := cp.EntryActivationStore().Get(ctx, key)
+	if err != nil {
+		t.Fatalf("Get after round 1: %v", err)
+	}
+	if act.RunnerID != runnerID {
+		t.Fatalf("round 1 must assign %s, got %q", runnerID, act.RunnerID)
+	}
+	gen1 := act.Generation
+
+	// Wait for the decline (tracker inventory stays empty).
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && len(tracker.Inventory()) == 0 {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if got := tracker.Inventory(); len(got) != 0 {
+		t.Fatalf("activation must be declined (empty inventory), got %#v", got)
+	}
+
+	// --- Step 2: Wait for the ack→Fence to clear RunnerID. ---
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		a, _, _ := cp.EntryActivationStore().Get(ctx, key)
+		if a.RunnerID == "" {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	actFenced, _, _ := cp.EntryActivationStore().Get(ctx, key)
+	if actFenced.RunnerID != "" {
+		t.Fatalf("expected RunnerID cleared by ActivationAck→Fence, got %q — the ack path did not fire", actFenced.RunnerID)
+	}
+
+	// Confirm no messages consumed while declined.
+	if got := counter.load(); got != 0 {
+		t.Fatalf("processed = %d during decline, want 0", got)
+	}
+	assertNoConsumerGroup(t, brokers, group)
+
+	// --- Step 3: PUT supply content. The gate's next Admit will pass. ---
+	putSupplyContent(t, httpSrv.URL, client, supplyRes, []byte(`{"rules":[]}`))
+
+	// --- Step 4: Advance time past the backoff and Reconcile. The same runner
+	// (no restart!) is re-chosen, gets a new ActivateDirective, and this time
+	// the gate admits. ---
+	futureNow := time.Now().Add(15 * time.Second)
+	if err := reconciler.Reconcile(ctx, futureNow); err != nil {
+		t.Fatalf("Reconcile (past backoff): %v", err)
+	}
+
+	// Wait for the activation to be hosted.
+	deadline = time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) && len(tracker.Inventory()) == 0 {
+		time.Sleep(100 * time.Millisecond)
+	}
+	if got := tracker.Inventory(); len(got) == 0 {
+		t.Fatal("self-heal failed: the activation was never taken after supply appeared (no restart)")
+	}
+
+	// --- Step 5: Assert generation advanced and ALL messages are consumed. ---
+	actFinal, _, _ := cp.EntryActivationStore().Get(ctx, key)
+	if actFinal.Generation <= gen1 {
+		t.Fatalf("generation must advance via self-heal, got %d (was %d)", actFinal.Generation, gen1)
+	}
+
+	deadline = time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) && counter.load() < n {
+		time.Sleep(100 * time.Millisecond)
+	}
+	if got := counter.load(); got != int64(n) {
+		t.Fatalf("processed = %d, want %d — zero message loss required", got, n)
+	}
+
+	runnerCancel()
+	select {
+	case <-runErr:
 	case <-time.After(3 * time.Second):
 	}
 }

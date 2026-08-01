@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -1050,5 +1051,526 @@ func TestDefaultSelector_PrunesTrackingForRemovedActivation(t *testing.T) {
 	}
 	if size != 0 {
 		t.Fatalf("expected empty tracking map, got %d entries", size)
+	}
+}
+
+// --- Activation retry backoff tests (fix/activation-ack-retry, task 4) ---
+
+// newTestReconciler returns a minimally-configured reconciler suitable for
+// exercising the retry-backoff state machine in isolation (no store/lister
+// interaction is needed for these tests).
+func newTestReconciler(t *testing.T) *EntryActivationReconciler {
+	t.Helper()
+	return NewEntryActivationReconciler(EntryActivationReconcilerConfig{
+		Store:      NewMemoryEntryActivationStore(),
+		Namespaces: []namespace.Namespace{namespace.Default},
+	})
+}
+
+// TestActivationRetryBackoffGrowsAndCaps verifies the backoff must be
+// recomputed each failure, growing until it caps, and be cleared on success —
+// otherwise a supply that recovers would still be held back by a long backoff.
+func TestActivationRetryBackoffGrowsAndCaps(t *testing.T) {
+	r := newTestReconciler(t) // reuses the helper above
+	key := engine.EntryActivationKey{WorkflowID: "w", EntryUnitID: "e"}
+	base := time.Unix(1700000000, 0)
+
+	// After the first failure, the backoff should be ~min (10s), and an
+	// immediate retry must be blocked.
+	r.noteActivationFailure(key, base)
+	if !r.retryBlocked(key, base.Add(time.Second)) {
+		t.Fatal("a retry 1s after failure must be blocked by the 10s minimum")
+	}
+	// Past the maximum possible backoff (10s + 20% jitter = 12s), it must be
+	// allowed.
+	if r.retryBlocked(key, base.Add(13*time.Second)) {
+		t.Fatal("a retry 13s after failure must be allowed (10s + max jitter is 12s)")
+	}
+
+	// Consecutive failures should grow the delay and never exceed max + 20%
+	// jitter.
+	prev := time.Duration(0)
+	for i := 0; i < 20; i++ {
+		r.noteActivationFailure(key, base)
+		d := r.retryDelayFor(key)
+		if d > DefaultActivationRetryBackoffMax*6/5 {
+			t.Fatalf("iteration %d: delay %v exceeds max+jitter", i, d)
+		}
+		if i > 0 && i < 5 && d <= prev {
+			t.Fatalf("iteration %d: delay %v did not grow past %v", i, d, prev)
+		}
+		prev = d
+	}
+
+	// After success, the backoff must be cleared.
+	r.clearRetryBackoff(key)
+	if r.retryBlocked(key, base) {
+		t.Fatal("after clearRetryBackoff a retry must be allowed immediately")
+	}
+}
+
+// TestActivationRetryBackoffIsJittered verifies jitter is applied: it is the
+// key defense against a synchronized retry pulse when a widely-shared supply
+// fails and every activation referencing it retries at once.
+func TestActivationRetryBackoffIsJittered(t *testing.T) {
+	r := newTestReconciler(t)
+	base := time.Unix(1700000000, 0)
+	seen := map[time.Duration]struct{}{}
+	for i := 0; i < 50; i++ {
+		key := engine.EntryActivationKey{WorkflowID: "w", EntryUnitID: fmt.Sprintf("e%d", i)}
+		r.noteActivationFailure(key, base)
+		seen[r.retryDelayFor(key)] = struct{}{}
+	}
+	if len(seen) < 10 {
+		t.Fatalf("only %d distinct delays across 50 keys; jitter is not being applied", len(seen))
+	}
+}
+
+// --- MarkActivationFailed tests (fix/activation-ack-retry, task 5) ---
+
+// TestMarkActivationFailedFencesAndRedispatches verifies the core self-healing
+// property: a runner-reported activation failure fences the assignment, making
+// the activation redispatchable on the next reconcile pass without a restart.
+func TestMarkActivationFailedFencesAndRedispatches(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryEntryActivationStore()
+
+	act := testEntryActivation() // Selector: required, {zone: a}
+	key := keyOfActivation(act)
+	if err := store.Upsert(ctx, act); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	// Use real clock as base so noteActivationFailure (which uses time.Now())
+	// records a backoff consistent with the reconcile clock.
+	now := time.Now().Truncate(time.Second)
+	runner := RunnerSnapshot{
+		RunnerID:      "runner-a",
+		Capacity:      4,
+		Labels:        map[string]string{"zone": "a"},
+		LastHeartbeat: now,
+	}
+	lister := &mockRunnerLister{runners: []RunnerSnapshot{runner}}
+	sel := DefaultRunnerSelector()
+	r := NewEntryActivationReconciler(EntryActivationReconcilerConfig{
+		Store:      store,
+		Lister:     lister,
+		Selector:   &sel,
+		Namespaces: []namespace.Namespace{namespace.Default},
+		LeaseTTL:   60 * time.Second,
+	})
+
+	// Step 1: Reconcile to assign the activation to runner-a at generation N.
+	if err := r.Reconcile(ctx, now); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	got, _, _ := store.Get(ctx, key)
+	if got.RunnerID != "runner-a" {
+		t.Fatalf("expected runner-a assigned, got %q", got.RunnerID)
+	}
+	assignedGen := got.Generation
+
+	// Step 2: The runner declines the activation — call MarkActivationFailed.
+	nsCtx := namespace.WithNamespace(ctx, namespace.Default)
+	ack := protocol.ActivationAck{
+		RunnerID:        "runner-a",
+		WorkflowID:      string(act.WorkflowID),
+		WorkflowVersion: act.WorkflowVersion,
+		GroupID:         act.EntryUnitID,
+		Generation:      assignedGen,
+		Status:          protocol.ActivationStatusFailed,
+		Error:           "supply content unavailable",
+	}
+	if err := r.MarkActivationFailed(nsCtx, "runner-a", ack); err != nil {
+		t.Fatalf("MarkActivationFailed: %v", err)
+	}
+
+	// Step 3: Verify fence cleared RunnerID.
+	got, _, _ = store.Get(ctx, key)
+	if got.RunnerID != "" {
+		t.Fatalf("after MarkActivationFailed: RunnerID must be cleared (fence), got %q", got.RunnerID)
+	}
+
+	// Step 4: Advance time past the max possible backoff (min=10s + 20%=12s) and
+	// reconcile — the activation must be reassigned with a higher generation.
+	later := time.Now().Add(15 * time.Second)
+	runner.LastHeartbeat = later
+	lister.runners = []RunnerSnapshot{runner}
+	if err := r.Reconcile(ctx, later); err != nil {
+		t.Fatalf("Reconcile after backoff: %v", err)
+	}
+	got, _, _ = store.Get(ctx, key)
+	if got.RunnerID != "runner-a" {
+		t.Fatalf("expected re-assignment to runner-a, got %q", got.RunnerID)
+	}
+	if got.Generation <= assignedGen {
+		t.Fatalf("expected generation > %d after redispatch, got %d", assignedGen, got.Generation)
+	}
+}
+
+// TestMarkActivationFailedRespectsBackoff verifies that after a failure, the
+// activation is NOT redispatched until the backoff elapses — otherwise a shared
+// supply failure would cause a retry pulse every reconcile period.
+func TestMarkActivationFailedRespectsBackoff(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryEntryActivationStore()
+
+	act := testEntryActivation()
+	key := keyOfActivation(act)
+	if err := store.Upsert(ctx, act); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	// Use real clock as base so noteActivationFailure (which uses time.Now())
+	// records a backoff consistent with the reconcile clock.
+	now := time.Now().Truncate(time.Second)
+	runner := RunnerSnapshot{
+		RunnerID:      "runner-a",
+		Capacity:      4,
+		Labels:        map[string]string{"zone": "a"},
+		LastHeartbeat: now,
+	}
+	lister := &mockRunnerLister{runners: []RunnerSnapshot{runner}}
+	sel := DefaultRunnerSelector()
+	r := NewEntryActivationReconciler(EntryActivationReconcilerConfig{
+		Store:      store,
+		Lister:     lister,
+		Selector:   &sel,
+		Namespaces: []namespace.Namespace{namespace.Default},
+		LeaseTTL:   60 * time.Second,
+	})
+
+	// Assign via reconcile.
+	if err := r.Reconcile(ctx, now); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	got, _, _ := store.Get(ctx, key)
+	assignedGen := got.Generation
+
+	// Runner declines.
+	nsCtx := namespace.WithNamespace(ctx, namespace.Default)
+	ack := protocol.ActivationAck{
+		RunnerID:        "runner-a",
+		WorkflowID:      string(act.WorkflowID),
+		WorkflowVersion: act.WorkflowVersion,
+		GroupID:         act.EntryUnitID,
+		Generation:      assignedGen,
+		Status:          protocol.ActivationStatusFailed,
+		Error:           "gate denied",
+	}
+	if err := r.MarkActivationFailed(nsCtx, "runner-a", ack); err != nil {
+		t.Fatalf("MarkActivationFailed: %v", err)
+	}
+
+	// Immediately reconcile (time barely advanced) — generation must NOT advance
+	// because backoff blocks redispatch. Use a time just 1s in the future — well
+	// within the 10s minimum backoff.
+	immediate := time.Now().Add(1 * time.Second)
+	runner.LastHeartbeat = immediate
+	lister.runners = []RunnerSnapshot{runner}
+	if err := r.Reconcile(ctx, immediate); err != nil {
+		t.Fatalf("Reconcile (immediate): %v", err)
+	}
+	got, _, _ = store.Get(ctx, key)
+	if got.RunnerID != "" {
+		t.Fatalf("within backoff: RunnerID should still be empty (not redispatched), got %q", got.RunnerID)
+	}
+
+	// Advance well past the maximum backoff (5min + 20% jitter = 6min).
+	much_later := time.Now().Add(7 * time.Minute)
+	runner.LastHeartbeat = much_later
+	lister.runners = []RunnerSnapshot{runner}
+	if err := r.Reconcile(ctx, much_later); err != nil {
+		t.Fatalf("Reconcile (past backoff): %v", err)
+	}
+	got, _, _ = store.Get(ctx, key)
+	if got.RunnerID == "" {
+		t.Fatal("past backoff: activation should have been redispatched")
+	}
+	if got.Generation <= assignedGen {
+		t.Fatalf("expected generation > %d, got %d", assignedGen, got.Generation)
+	}
+}
+
+// TestMarkActivationFailedIgnoresStaleGeneration verifies that a stale ack
+// (naming an older generation) is silently ignored — it must not tear down a
+// healthy newer assignment.
+func TestMarkActivationFailedIgnoresStaleGeneration(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryEntryActivationStore()
+
+	act := testEntryActivation()
+	key := keyOfActivation(act)
+	if err := store.Upsert(ctx, act); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	now := time.Now().Truncate(time.Second)
+	runner := RunnerSnapshot{
+		RunnerID:      "runner-a",
+		Capacity:      4,
+		Labels:        map[string]string{"zone": "a"},
+		LastHeartbeat: now,
+	}
+	lister := &mockRunnerLister{runners: []RunnerSnapshot{runner}}
+	sel := DefaultRunnerSelector()
+	r := NewEntryActivationReconciler(EntryActivationReconcilerConfig{
+		Store:      store,
+		Lister:     lister,
+		Selector:   &sel,
+		Namespaces: []namespace.Namespace{namespace.Default},
+		LeaseTTL:   60 * time.Second,
+	})
+
+	// Assign at generation 1.
+	if err := r.Reconcile(ctx, now); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	got, _, _ := store.Get(ctx, key)
+	if got.Generation != 1 || got.RunnerID != "runner-a" {
+		t.Fatalf("expected gen=1 runner=runner-a, got gen=%d runner=%q", got.Generation, got.RunnerID)
+	}
+
+	// Expire and reassign at generation 2 (simulating a normal lease cycle).
+	later := got.LeaseDeadline.Add(time.Second)
+	runner.LastHeartbeat = later
+	lister.runners = []RunnerSnapshot{runner}
+	if err := r.Reconcile(ctx, later); err != nil {
+		t.Fatalf("Reconcile (expire): %v", err)
+	}
+	got, _, _ = store.Get(ctx, key)
+	if got.Generation != 2 || got.RunnerID != "runner-a" {
+		t.Fatalf("expected gen=2 runner=runner-a, got gen=%d runner=%q", got.Generation, got.RunnerID)
+	}
+
+	// A stale ack arrives for generation 1 (the old assignment).
+	nsCtx := namespace.WithNamespace(ctx, namespace.Default)
+	staleAck := protocol.ActivationAck{
+		RunnerID:        "runner-a",
+		WorkflowID:      string(act.WorkflowID),
+		WorkflowVersion: act.WorkflowVersion,
+		GroupID:         act.EntryUnitID,
+		Generation:      1, // stale
+		Status:          protocol.ActivationStatusFailed,
+		Error:           "late failure",
+	}
+	if err := r.MarkActivationFailed(nsCtx, "runner-a", staleAck); err != nil {
+		t.Fatalf("MarkActivationFailed (stale): %v", err)
+	}
+
+	// The healthy generation-2 assignment must be untouched.
+	got, _, _ = store.Get(ctx, key)
+	if got.RunnerID != "runner-a" {
+		t.Fatalf("stale ack must not clear RunnerID, got %q", got.RunnerID)
+	}
+	if got.Generation != 2 {
+		t.Fatalf("stale ack must not affect generation, got %d", got.Generation)
+	}
+}
+
+// TestMarkActivationFailedMultiVersionCoexistence verifies that when two
+// activations with the same (WorkflowID, EntryUnitID) but different
+// WorkflowVersion coexist (rolling upgrade), an ack for one version only
+// affects that version's record and leaves the other untouched.
+func TestMarkActivationFailedMultiVersionCoexistence(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryEntryActivationStore()
+
+	// Create two activations: same workflow+entry_unit, different versions.
+	actV1 := testEntryActivation() // WorkflowVersion: "v1"
+	actV2 := testEntryActivation()
+	actV2.WorkflowVersion = "v2"
+
+	keyV1 := keyOfActivation(actV1)
+	keyV2 := keyOfActivation(actV2)
+	if err := store.Upsert(ctx, actV1); err != nil {
+		t.Fatalf("Upsert v1: %v", err)
+	}
+	if err := store.Upsert(ctx, actV2); err != nil {
+		t.Fatalf("Upsert v2: %v", err)
+	}
+
+	now := time.Now().Truncate(time.Second)
+	runner := RunnerSnapshot{
+		RunnerID:      "runner-a",
+		Capacity:      4,
+		Labels:        map[string]string{"zone": "a"},
+		LastHeartbeat: now,
+	}
+	lister := &mockRunnerLister{runners: []RunnerSnapshot{runner}}
+	sel := DefaultRunnerSelector()
+	r := NewEntryActivationReconciler(EntryActivationReconcilerConfig{
+		Store:      store,
+		Lister:     lister,
+		Selector:   &sel,
+		Namespaces: []namespace.Namespace{namespace.Default},
+		LeaseTTL:   60 * time.Second,
+	})
+
+	// Assign both via reconcile.
+	if err := r.Reconcile(ctx, now); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	gotV1, _, _ := store.Get(ctx, keyV1)
+	gotV2, _, _ := store.Get(ctx, keyV2)
+	if gotV1.RunnerID != "runner-a" || gotV2.RunnerID != "runner-a" {
+		t.Fatalf("both versions must be assigned: v1=%q v2=%q", gotV1.RunnerID, gotV2.RunnerID)
+	}
+
+	// Send a failed ack for v1 only.
+	nsCtx := namespace.WithNamespace(ctx, namespace.Default)
+	ack := protocol.ActivationAck{
+		RunnerID:        "runner-a",
+		WorkflowID:      string(actV1.WorkflowID),
+		WorkflowVersion: "v1",
+		GroupID:         actV1.EntryUnitID,
+		Generation:      gotV1.Generation,
+		Status:          protocol.ActivationStatusFailed,
+		Error:           "supply unavailable",
+	}
+	if err := r.MarkActivationFailed(nsCtx, "runner-a", ack); err != nil {
+		t.Fatalf("MarkActivationFailed: %v", err)
+	}
+
+	// v1 must be fenced (RunnerID cleared).
+	gotV1, _, _ = store.Get(ctx, keyV1)
+	if gotV1.RunnerID != "" {
+		t.Fatalf("v1 must be fenced after ack, got runner %q", gotV1.RunnerID)
+	}
+
+	// v2 must be completely unaffected.
+	gotV2, _, _ = store.Get(ctx, keyV2)
+	if gotV2.RunnerID != "runner-a" {
+		t.Fatalf("v2 must be unaffected by v1's ack, got runner %q", gotV2.RunnerID)
+	}
+}
+
+// TestMarkActivationFailedRejectsEmptyWorkflowVersion verifies that an ack
+// without WorkflowVersion is rejected with an error (not silently swallowed).
+// This is not a backward-compat concern: the ack path and the WorkflowVersion
+// field are part of the same feature branch — no runner that sends acks can
+// lack this field.
+func TestMarkActivationFailedRejectsEmptyWorkflowVersion(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryEntryActivationStore()
+
+	act := testEntryActivation()
+	key := keyOfActivation(act)
+	if err := store.Upsert(ctx, act); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	now := time.Now().Truncate(time.Second)
+	runner := RunnerSnapshot{
+		RunnerID:      "runner-a",
+		Capacity:      4,
+		Labels:        map[string]string{"zone": "a"},
+		LastHeartbeat: now,
+	}
+	lister := &mockRunnerLister{runners: []RunnerSnapshot{runner}}
+	sel := DefaultRunnerSelector()
+	r := NewEntryActivationReconciler(EntryActivationReconcilerConfig{
+		Store:      store,
+		Lister:     lister,
+		Selector:   &sel,
+		Namespaces: []namespace.Namespace{namespace.Default},
+		LeaseTTL:   60 * time.Second,
+	})
+
+	// Assign via reconcile.
+	if err := r.Reconcile(ctx, now); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	got, _, _ := store.Get(ctx, key)
+	if got.RunnerID != "runner-a" {
+		t.Fatalf("expected runner-a, got %q", got.RunnerID)
+	}
+
+	// Send an ack with empty WorkflowVersion — must return an error.
+	nsCtx := namespace.WithNamespace(ctx, namespace.Default)
+	ack := protocol.ActivationAck{
+		RunnerID:        "runner-a",
+		WorkflowID:      string(act.WorkflowID),
+		WorkflowVersion: "", // missing
+		GroupID:         act.EntryUnitID,
+		Generation:      got.Generation,
+		Status:          protocol.ActivationStatusFailed,
+		Error:           "some failure",
+	}
+	err := r.MarkActivationFailed(nsCtx, "runner-a", ack)
+	if err == nil {
+		t.Fatal("expected error for empty WorkflowVersion, got nil")
+	}
+
+	// The activation must NOT have been fenced.
+	got, _, _ = store.Get(ctx, key)
+	if got.RunnerID != "runner-a" {
+		t.Fatalf("empty-version ack must not fence; RunnerID changed to %q", got.RunnerID)
+	}
+}
+
+// TestPruneRetryBackoffRemovesDeletedKeys verifies that retryBackoff entries for
+// activations no longer in the store are cleaned up, preventing unbounded map growth
+// from deleted workflows.
+func TestPruneRetryBackoffRemovesDeletedKeys(t *testing.T) {
+	ctx := context.Background()
+	store := &removableStore{MemoryEntryActivationStore: NewMemoryEntryActivationStore()}
+
+	act := testEntryActivation()
+	key := keyOfActivation(act)
+	if err := store.Upsert(ctx, act); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	runner := RunnerSnapshot{
+		RunnerID:      "runner-a",
+		Capacity:      4,
+		Labels:        map[string]string{"zone": "a"},
+		LastHeartbeat: now,
+	}
+	lister := &mockRunnerLister{runners: []RunnerSnapshot{runner}}
+	sel := DefaultRunnerSelector()
+	r := NewEntryActivationReconciler(EntryActivationReconcilerConfig{
+		Store:      store,
+		Lister:     lister,
+		Selector:   &sel,
+		Namespaces: []namespace.Namespace{namespace.Default},
+		LeaseTTL:   60 * time.Second,
+	})
+
+	// Assign the activation.
+	if err := r.Reconcile(ctx, now); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	// Simulate a failure to populate the backoff map.
+	r.noteActivationFailure(key, now)
+	r.mu.Lock()
+	_, hasBackoff := r.retryBackoff[key]
+	r.mu.Unlock()
+	if !hasBackoff {
+		t.Fatal("expected retryBackoff entry after noteActivationFailure")
+	}
+
+	// Hide the activation (simulating workflow unregistration) and reconcile.
+	store.hide(key)
+	later := now.Add(time.Second)
+	runner.LastHeartbeat = later
+	lister.runners = []RunnerSnapshot{runner}
+	if err := r.Reconcile(ctx, later); err != nil {
+		t.Fatalf("Reconcile after removal: %v", err)
+	}
+
+	// The backoff entry must have been pruned.
+	r.mu.Lock()
+	_, stillHasBackoff := r.retryBackoff[key]
+	mapSize := len(r.retryBackoff)
+	r.mu.Unlock()
+	if stillHasBackoff {
+		t.Fatal("retryBackoff entry must be pruned once the activation is gone")
+	}
+	if mapSize != 0 {
+		t.Fatalf("expected empty retryBackoff map, got %d entries", mapSize)
 	}
 }

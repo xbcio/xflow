@@ -60,6 +60,14 @@ func (c *Client) ReportResult(ctx context.Context, req ReportResultRequest) (Rep
 	return resp, err
 }
 
+// ActivationAck reports the outcome of an activate directive back to the
+// server, so the activation reconciler learns a directive was not taken and
+// can redispatch it instead of leaving the runner stuck until it restarts.
+// Same shape as Heartbeat: POST the body, no response payload expected.
+func (c *Client) ActivationAck(ctx context.Context, ack ActivationAck) error {
+	return c.post(ctx, ActivationAckPath, ack, nil)
+}
+
 func (c *Client) post(ctx context.Context, path string, body any, out any) error {
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(body); err != nil {
