@@ -83,12 +83,26 @@ func (t *ActivationTracker) activateLocked(ctx context.Context, d protocol.Activ
 	id := activationID{WorkflowID: d.WorkflowID, EntryUnitID: d.EntryUnitID}
 	existing, ok := t.active[id]
 
+	if ok && existing.Generation == d.Generation {
+		// Same generation — idempotent, skip.
+		return nil
+	}
+
+	// Start the new subscription BEFORE cancelling the old one. Cancelling first
+	// means a failed Activate leaves t.active[id] holding an entry whose context
+	// is already dead: the runner then neither processes messages nor stops
+	// claiming the activation in Inventory(), and only a restart clears it. The
+	// two subscriptions briefly coexist when the new one succeeds, which is safe
+	// for the Kafka trigger handler (verified in trigger_activation_handler.go
+	// and node/internal/trigger/kafka.go: duplicate subscriptions within the same
+	// consumer group are arbitrated by the group protocol).
+	subCtx, cancel := context.WithCancel(ctx)
+	if err := t.handler.Activate(subCtx, d); err != nil {
+		cancel()
+		return err // old subscription, if any, is left untouched and alive
+	}
+
 	if ok {
-		if existing.Generation == d.Generation {
-			// Same generation — idempotent, skip.
-			return nil
-		}
-		// Different (older) generation — cancel old subscription before starting new.
 		t.logger.Info("upgrading activation generation",
 			"workflow_id", d.WorkflowID,
 			"group_id", d.EntryUnitID,
@@ -96,12 +110,6 @@ func (t *ActivationTracker) activateLocked(ctx context.Context, d protocol.Activ
 			"new_generation", d.Generation,
 		)
 		existing.cancel()
-	}
-
-	subCtx, cancel := context.WithCancel(ctx)
-	if err := t.handler.Activate(subCtx, d); err != nil {
-		cancel()
-		return err
 	}
 
 	t.active[id] = &activeSubscription{

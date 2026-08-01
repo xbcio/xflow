@@ -2,6 +2,8 @@ package runner
 
 import (
 	"context"
+	"errors"
+	"io"
 	"log/slog"
 	"sync"
 	"testing"
@@ -15,12 +17,20 @@ type mockActivationHandler struct {
 	activations   []protocol.ActivateDirective
 	deactivations []protocol.DeactivateDirective
 	activateErr   error
+	// lastCtx is the context of the most recent successfully established
+	// subscription. It is only updated on a nil return, mirroring the real
+	// ActivationHandler contract (Activate returns once the subscription is
+	// established) so a failed upgrade attempt does not clobber it.
+	lastCtx context.Context
 }
 
-func (m *mockActivationHandler) Activate(_ context.Context, d protocol.ActivateDirective) error {
+func (m *mockActivationHandler) Activate(ctx context.Context, d protocol.ActivateDirective) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.activations = append(m.activations, d)
+	if m.activateErr == nil {
+		m.lastCtx = ctx
+	}
 	return m.activateErr
 }
 
@@ -226,5 +236,47 @@ func TestActivationTracker_Inventory_ReportsActive(t *testing.T) {
 	}
 	if item2.Generation != 7 {
 		t.Fatalf("expected generation 7 for wf-2/grp-b, got %d", item2.Generation)
+	}
+}
+
+// 升级失败必须保留旧订阅：先 cancel 再 Activate 会在失败时留下一个指向已死
+// context 的条目，使 runner 既不处理消息，又在 Inventory() 里声称自己在托管。
+func TestActivateUpgradeFailureKeepsOldSubscriptionAlive(t *testing.T) {
+	h := &mockActivationHandler{}
+	tr := NewActivationTracker(h, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx := context.Background()
+
+	d1 := protocol.ActivateDirective{WorkflowID: "w", EntryUnitID: "e", Generation: 1}
+	if err := tr.ProcessDirectives(ctx, &protocol.HeartbeatActivations{
+		Activate: []protocol.ActivateDirective{d1},
+	}); err != nil {
+		t.Fatalf("first activate: %v", err)
+	}
+
+	// 第二次（升级到 gen 2）失败。
+	h.activateErr = errors.New("supply not ready: rules")
+	d2 := protocol.ActivateDirective{WorkflowID: "w", EntryUnitID: "e", Generation: 2}
+	if err := tr.ProcessDirectives(ctx, &protocol.HeartbeatActivations{
+		Activate: []protocol.ActivateDirective{d2},
+	}); err != nil {
+		t.Fatalf("ProcessDirectives must not propagate per-directive errors: %v", err)
+	}
+
+	inv := tr.Inventory()
+	if len(inv) != 1 {
+		t.Fatalf("inventory = %#v, want exactly the surviving gen-1 entry", inv)
+	}
+	if inv[0].Generation != 1 {
+		t.Fatalf("generation = %d, want 1 (the old subscription must survive)", inv[0].Generation)
+	}
+	// 旧订阅的 context 必须仍然存活。
+	h.mu.Lock()
+	lastCtx := h.lastCtx
+	h.mu.Unlock()
+	if lastCtx == nil {
+		t.Fatal("handler never received a context")
+	}
+	if err := lastCtx.Err(); err != nil {
+		t.Fatalf("old subscription context was cancelled (%v); a failed upgrade must not kill it", err)
 	}
 }
