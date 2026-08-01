@@ -419,42 +419,60 @@ finish against the old pool; only messages *after* the swap see new rules
 This section is mandatory and this document will go stale the moment any of
 these get fixed without an edit here.
 
-**(a) A gate-declined activation does not self-heal. Only a runner restart
-recovers it today.** `EntryActivationReconciler.reconcileOne`'s
-already-assigned branch renews a runner's lease based **only** on
-`!expired && ownerMatches` (lease not expired, runner alive, selector still
-matches) — `service/control/entry_activation_reconciler.go:202-226`. It never
-checks whether that runner's `Activate` call (and therefore
-`SupplyGate.Admit`) actually succeeded:
+**(a) A gate-declined activation now self-heals via ActivationAck + backoff +
+reconcile.** Runner 的 `ActivationTracker.ProcessDirectives` 调用
+`Activate` 失败后，通过 `SetOnActivateFailed` 回调
+（`service/runner/activation_tracker.go:58-60,116`，在 `t.mu` 释放后同步调用）
+将失败逐条交给 `activationAcker.ackFailed`
+（`service/runner/activation_acker.go:98`）。`ackFailed` 按
+`(WorkflowID, WorkflowVersion, EntryUnitID)` 记最高 generation 去重
+（`shouldAck`，`activation_acker.go:83-91`），然后 fire-and-forget POST
+`protocol.ActivationAckPath`（`/v1/runners/activation/ack`），10s 超时是该
+goroutine 唯一的生命周期上界。
 
-```go
-// service/control/entry_activation_reconciler.go:202-206
-if !expired && ownerMatches {
-    if !act.LeaseDeadline.IsZero() && act.LeaseDeadline.Sub(now) < r.cfg.RenewThreshold {
-        // renew lease
-    }
-    return nil
-}
-```
+Server 端 HTTP handler 与 `register` 同形，使用 `AuthenticateOngoing` 鉴权
+（`service/control/core.go:248`）；namespace 取自**服务端权威的 runner 注册记录**
+（`runnerNamespaces`，`core.go:273-279`），绝不取自客户端 body。处理流程
+（`MarkActivationFailed`，`entry_activation_reconciler.go:730`）：
 
-If `Activate` returns an error because `SupplyGate.Admit` declined (missing
-required content), the reconciler has no way to learn that and no reason to
-retry `Activate` — it just keeps renewing the same lease forever. The wire
-type that was meant to close this loop, `protocol.ActivationAck` /
-`ActivationAckPath` (`service/protocol/activation.go:9,71-79`), exists **only
-as a type definition** — grepping the repo turns up zero production callers
-in `service/control`, `service/runner`, or any route registration. **If this
-document ever implies that periodic reconcile alone recovers a declined
-activation, that implication is false.** The only recovery path today is a
-runner restart, which forces `ReconcileRunnerInventory` to revoke the stale
-assignment and the next reconcile pass to reassign at a fresh generation.
-This is proven, not assumed: `test/integration/supply_gating_test.go`'s
-`TestSupplyGateLosesNoMessages` explicitly drives several `Reconcile()` passes
-with the gate still declining and asserts the activation `Generation` does
-**not** advance, then restarts the runner and asserts it does;
-`TestSupplyGateRecoversOnRestart` isolates the same assertion on its own so a
-future regression confined to the retry path fails independently of the
-message-accounting assertions.
+1. `Store.Get` 精确定位（不是 List/扫描）。
+2. 校验 `act.RunnerID == runnerID && act.Generation == ack.Generation`——stale
+   ack 静默忽略，不会破坏更新的健康分配。
+3. `Store.Fence` 清空 `runner_id`。
+4. `noteActivationFailure` 登记退避时间戳。
+5. **不做 `Assign`、不加 leader 门控**——由 leader 的周期 reconcile 看到
+   unassigned activation 后走正常分配路径重派。
+
+退避策略（`noteActivationFailure`，`entry_activation_reconciler.go:630`）：
+per-key、**内存、不持久化**（与 `noMatchSince` 同一把 `r.mu`，每轮
+`pruneRetryBackoff(seen)` 剪枝）；初值 10s
+（`DefaultActivationRetryBackoffMin`）、每次翻倍、上限 5min
+（`DefaultActivationRetryBackoffMax`）、**无重试上限**（封顶后维持 5min 一次，
+永不放弃）、±20% 抖动（`jitter`，`entry_activation_reconciler.go:661`；
+防止共享 supply 挂掉时上千个 activation 齐发的同步脉冲）。清除点在
+**renew 分支**（`clearRetryBackoff`，`entry_activation_reconciler.go:279`）：
+`Assign` 成功不等于被 runner 真正接纳，只有下一轮确认 owner 存活且匹配才算成功；
+再次失败时退避从已有档位继续翻倍。
+
+已知代价（此机制 knowingly 接受的降级）：
+
+- **leader 切换丢失退避状态**，导致一次立即重试——远优于为此引入持久化。
+- ack 路径不经 leader 门控，**非 leader 副本写入的退避时间戳对 leader 不可见**——
+  最坏是 leader 少看到一次失败记录，下一轮 reconcile 仍会重派并重新收到 ack。
+- `protocol.ActivationAck` 新增了 `WorkflowVersion` 与 `AuthToken` 字段
+  （`service/protocol/activation.go:73-76`）。空 `WorkflowVersion` 被当作格式非法
+  请求（`ErrMissingWorkflowVersion` → 400），**不是**向后兼容路径：ack 能力与该
+  字段是同一特性的两半、同批引入，不存在只实现前者的 runner。
+- **gRPC 传输没有 ActivationAck 的 RPC/proto 定义**，因此 gRPC-only 部署下
+  ack 无处可发、静默丢弃、fence 永不发生，退化为「只能重启 runner」——这不是
+  延迟问题，是**自愈能力的完全缺失**。此缺口与 §9(b) 的 hint/directive 缺失
+  同源但**严重性不同**（hint 缺失只是延迟退化，ack 缺失是正确性/自愈能力缺失），
+  在 [DEPLOYMENT-TOPOLOGIES.md §4.5](./DEPLOYMENT-TOPOLOGIES.md#45-传输差异gRPC-心跳不携带控制载荷)
+  已追加记录。
+
+测试支撑：`test/integration/supply_gating_test.go` 的
+`TestSupplyGateRetriesWithoutRestart` 证明完整闭环（gate decline → ack → fence →
+backoff → supply 恢复 → reconcile 重派 → activation 成功接纳）。
 
 **(b) gRPC transport carries no supply hint — and, separately, no activation
 directive at all.** `runnerpb.HeartbeatResponse` has exactly one field:
@@ -513,8 +531,6 @@ retention runs out. This is a genuine trade-off this design makes, not an
 oversight: declining immediately is strictly safer than serving wrong data
 (see §6's discussion of the removed `default:` tier), but it is not free.
 
-None of (a)–(d) are blocking defects in what shipped; they are the costs this
-design knowingly accepted. A future change that closes any of them (a
-`.http` pull-mode collector, a wired `ActivationAck`, a gRPC proto update, or
-a cross-runner swap barrier) must update this section, not just add a new one
-next to it.
+(a) 已关闭（`fix/activation-ack-retry`）。(b)–(d) 仍是 knowingly accepted 的代价，
+不是 blocking defect。未来关闭其中任何一项（`.http` pull-mode collector、gRPC
+proto 更新、cross-runner swap barrier）必须更新本节，不是在旁边加新一节。
