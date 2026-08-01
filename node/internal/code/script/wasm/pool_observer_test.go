@@ -3,6 +3,7 @@ package wasm
 import (
 	"context"
 	"testing"
+	"time"
 )
 
 // swapConfig must report the applied outcome with the RULE COUNT (never
@@ -22,10 +23,11 @@ func TestSwapConfigNotifiesObserverOnApply(t *testing.T) {
 		t.Fatalf("swapConfig: %v", err)
 	}
 
-	if len(rec.swaps) != 1 {
-		t.Fatalf("swap notifications = %d, want 1", len(rec.swaps))
+	swaps := rec.swapCalls()
+	if len(swaps) != 1 {
+		t.Fatalf("swap notifications = %d, want 1", len(swaps))
 	}
-	sw := rec.swaps[0]
+	sw := swaps[0]
 	if sw.result != "applied" {
 		t.Fatalf("result = %q, want applied", sw.result)
 	}
@@ -36,14 +38,15 @@ func TestSwapConfigNotifiesObserverOnApply(t *testing.T) {
 		t.Fatalf("revision = %d, want 5", sw.revision)
 	}
 
+	instances := rec.instanceCalls()
 	found := false
-	for _, ic := range rec.instances {
+	for _, ic := range instances {
 		if ic.state == "ready" && ic.n == 2 {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("instance count notifications = %#v, want a ready/2 entry", rec.instances)
+		t.Fatalf("instance count notifications = %#v, want a ready/2 entry", instances)
 	}
 }
 
@@ -65,11 +68,12 @@ func TestSwapConfigNotifiesObserverOnReject(t *testing.T) {
 		t.Fatal("expected bad-config error")
 	}
 
-	if len(rec.swaps) != 1 {
-		t.Fatalf("swap notifications = %d, want 1", len(rec.swaps))
+	swaps := rec.swapCalls()
+	if len(swaps) != 1 {
+		t.Fatalf("swap notifications = %d, want 1", len(swaps))
 	}
-	if rec.swaps[0].result != "rejected" {
-		t.Fatalf("result = %q, want rejected", rec.swaps[0].result)
+	if swaps[0].result != "rejected" {
+		t.Fatalf("result = %q, want rejected", swaps[0].result)
 	}
 }
 
@@ -93,8 +97,8 @@ func TestBorrowNotifiesObserverWithWaitDuration(t *testing.T) {
 	if _, _, err := e.borrow(ctx); err != nil {
 		t.Fatalf("borrow: %v", err)
 	}
-	if len(rec.borrowWait) != 1 {
-		t.Fatalf("borrow-wait notifications = %d, want 1", len(rec.borrowWait))
+	if waits := rec.borrowWaits(); len(waits) != 1 {
+		t.Fatalf("borrow-wait notifications = %d, want 1", len(waits))
 	}
 }
 
@@ -121,17 +125,19 @@ func TestDoomNotifiesObserverEvalError(t *testing.T) {
 	}
 	e.doom(ctx, pool, inst)
 
-	if len(rec.recycled) != 1 || rec.recycled[0] != "eval_error" {
-		t.Fatalf("recycled = %#v, want [eval_error]", rec.recycled)
+	causes := rec.recycledCauses()
+	if len(causes) != 1 || causes[0] != "eval_error" {
+		t.Fatalf("recycled = %#v, want [eval_error]", causes)
 	}
+	instances := rec.instanceCalls()
 	found := false
-	for _, ic := range rec.instances {
+	for _, ic := range instances {
 		if ic.state == "doomed" {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("instance count notifications = %#v, want a doomed entry", rec.instances)
+		t.Fatalf("instance count notifications = %#v, want a doomed entry", instances)
 	}
 }
 
@@ -168,13 +174,22 @@ func TestDoomClassifiesExpiredContextAsTimeout(t *testing.T) {
 	cancel()
 	e.doom(expired, pool, inst)
 
-	if len(rec.recycled) != 1 || rec.recycled[0] != "timeout" {
-		t.Fatalf("recycled = %#v, want [timeout]", rec.recycled)
+	if causes := rec.recycledCauses(); len(causes) != 1 || causes[0] != "timeout" {
+		t.Fatalf("recycled = %#v, want [timeout]", causes)
 	}
 }
 
 // drainPool tears down every parked instance in a superseded pool and must
 // report each one recycled with cause "pool_swapped".
+//
+// The drain under test is the one swapConfig itself starts — this test must NOT
+// call drainPool on the same pool. Two drainers racing for the same p.free
+// channel each want `size` instances out of a channel that only ever yields
+// `size` total, so the loser blocks forever. An earlier version of this test
+// did exactly that and deadlocked: it passed when run alone (the test goroutine
+// won both instances and the engine's drainer was left as a zombie) and hung
+// for ten minutes under `go test ./...`, where CPU contention let the engine's
+// drainer take one. Assert on the engine's drain, don't stage a competing one.
 func TestDrainPoolNotifiesObserverPoolSwapped(t *testing.T) {
 	rec := &recordingObserver{}
 	SetObserver(rec)
@@ -189,19 +204,31 @@ func TestDrainPoolNotifiesObserverPoolSwapped(t *testing.T) {
 	if err := e.swapConfig(ctx, []byte(`{"rules":[]}`), 2, 1); err != nil {
 		t.Fatalf("swap 1: %v", err)
 	}
-	old := e.active.Load()
-	// A second swap makes `old` unreachable from e.active; drainPool tears it
-	// down directly here rather than via the async path swapConfig triggers,
-	// so the assertion is deterministic.
+	// The second swap supersedes the first pool, and swapConfig hands that pool
+	// to a drain goroutine of its own. Both of its instances must come back
+	// reported as "pool_swapped".
 	if err := e.swapConfig(ctx, []byte(`{"rules":[]}`), 2, 2); err != nil {
 		t.Fatalf("swap 2: %v", err)
 	}
-	e.drainPool(ctx, old)
 
-	if len(rec.recycled) != 2 {
-		t.Fatalf("recycled = %#v, want 2 pool_swapped entries", rec.recycled)
+	// The drain is asynchronous, so poll rather than read once. Polling is safe
+	// here in a way it is not for tests that pin an interleaving: this asserts a
+	// terminal count, so waiting longer can only let MORE recycles land — it
+	// cannot manufacture the expected answer out of a broken drain.
+	deadline := time.Now().Add(10 * time.Second)
+	var causes []string
+	for {
+		causes = rec.recycledCauses()
+		if len(causes) >= 2 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
-	for _, cause := range rec.recycled {
+
+	if len(causes) != 2 {
+		t.Fatalf("recycled = %#v, want 2 pool_swapped entries", causes)
+	}
+	for _, cause := range causes {
 		if cause != "pool_swapped" {
 			t.Fatalf("recycled cause = %q, want pool_swapped", cause)
 		}
@@ -224,13 +251,14 @@ func TestEngineForNotifiesObserverCompileHitMiss(t *testing.T) {
 		t.Fatalf("engineFor #2: %v", err)
 	}
 
-	if len(rec.compiles) != 2 {
-		t.Fatalf("compile notifications = %#v, want 2", rec.compiles)
+	compiles := rec.compileResults()
+	if len(compiles) != 2 {
+		t.Fatalf("compile notifications = %#v, want 2", compiles)
 	}
-	if rec.compiles[0] != "miss" {
-		t.Fatalf("first compile = %q, want miss", rec.compiles[0])
+	if compiles[0] != "miss" {
+		t.Fatalf("first compile = %q, want miss", compiles[0])
 	}
-	if rec.compiles[1] != "hit" {
-		t.Fatalf("second compile = %q, want hit", rec.compiles[1])
+	if compiles[1] != "hit" {
+		t.Fatalf("second compile = %q, want hit", compiles[1])
 	}
 }

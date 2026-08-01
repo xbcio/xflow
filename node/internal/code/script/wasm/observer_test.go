@@ -2,6 +2,7 @@ package wasm
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -11,7 +12,15 @@ import (
 
 // recordingObserver captures every call made to it, for assertions in tests
 // that exercise pool.go's instrumentation points.
+//
+// The mutex is load-bearing, not defensive boilerplate: swapConfig tears the
+// superseded pool down on a goroutine of its own (the `go e.drainPool` at the
+// end of swapConfig), and that goroutine calls OnInstanceRecycled concurrently
+// with the test body. Without the lock this is a data race on the slices.
+// Read the slices through the accessors below, never directly — a bare
+// len(rec.recycled) in a test body is the same race read from the other side.
 type recordingObserver struct {
+	mu         sync.Mutex
 	swaps      []swapCall
 	ages       []time.Duration
 	instances  []instanceCall
@@ -33,22 +42,68 @@ type instanceCall struct {
 }
 
 func (r *recordingObserver) OnPoolSwap(_ context.Context, result string, ruleCount int, revision uint64, d time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.swaps = append(r.swaps, swapCall{result, ruleCount, revision, d})
 }
 func (r *recordingObserver) OnConfigAge(_ context.Context, age time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.ages = append(r.ages, age)
 }
 func (r *recordingObserver) OnInstanceCount(_ context.Context, state string, n int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.instances = append(r.instances, instanceCall{state, n})
 }
 func (r *recordingObserver) OnInstanceRecycled(_ context.Context, cause string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.recycled = append(r.recycled, cause)
 }
 func (r *recordingObserver) OnBorrowWait(_ context.Context, d time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.borrowWait = append(r.borrowWait, d)
 }
 func (r *recordingObserver) OnModuleCompile(_ context.Context, result string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.compiles = append(r.compiles, result)
+}
+
+// Snapshot accessors. Each returns a copy so a caller can range over the
+// result while the drain goroutine keeps appending.
+
+func (r *recordingObserver) swapCalls() []swapCall {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]swapCall(nil), r.swaps...)
+}
+func (r *recordingObserver) ageCalls() []time.Duration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]time.Duration(nil), r.ages...)
+}
+func (r *recordingObserver) instanceCalls() []instanceCall {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]instanceCall(nil), r.instances...)
+}
+func (r *recordingObserver) recycledCauses() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.recycled...)
+}
+func (r *recordingObserver) borrowWaits() []time.Duration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]time.Duration(nil), r.borrowWait...)
+}
+func (r *recordingObserver) compileResults() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.compiles...)
 }
 
 // SetObserver must install and later restore the no-op default: a test that
@@ -117,7 +172,7 @@ func TestExecuteSamplesConfigAgeForSourceDrivenModule(t *testing.T) {
 		t.Fatalf("Execute: %v", err)
 	}
 
-	if len(rec.ages) == 0 {
+	if len(rec.ageCalls()) == 0 {
 		t.Fatal("expected at least one OnConfigAge notification")
 	}
 }
