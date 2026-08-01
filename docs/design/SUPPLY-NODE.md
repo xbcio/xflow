@@ -432,7 +432,8 @@ goroutine 唯一的生命周期上界。
 
 Server 端 HTTP handler 与 `register` 同形，使用 `AuthenticateOngoing` 鉴权
 （`service/control/core.go:248`）；namespace 取自**服务端权威的 runner 注册记录**
-（`runnerNamespaces`，`core.go:273-279`），绝不取自客户端 body。处理流程
+（`runnerNamespaces`，`core.go:259` 调用、`core.go:273-279` 定义），绝不取自
+客户端 body。处理流程
 （`MarkActivationFailed`，`entry_activation_reconciler.go:730`）：
 
 1. `Store.Get` 精确定位（不是 List/扫描）。
@@ -459,10 +460,11 @@ per-key、**内存、不持久化**（与 `noMatchSince` 同一把 `r.mu`，每�
 - **leader 切换丢失退避状态**，导致一次立即重试——远优于为此引入持久化。
 - ack 路径不经 leader 门控，**非 leader 副本写入的退避时间戳对 leader 不可见**——
   最坏是 leader 少看到一次失败记录，下一轮 reconcile 仍会重派并重新收到 ack。
-- `protocol.ActivationAck` 新增了 `WorkflowVersion` 与 `AuthToken` 字段
-  （`service/protocol/activation.go:73-76`）。空 `WorkflowVersion` 被当作格式非法
-  请求（`ErrMissingWorkflowVersion` → 400），**不是**向后兼容路径：ack 能力与该
-  字段是同一特性的两半、同批引入，不存在只实现前者的 runner。
+- `protocol.ActivationAck` 的 `WorkflowVersion`（`activation.go:76`）与
+  `AuthToken`（`activation.go:74`）字段此前已定义但零接线，本次**首次获得生产调用
+  点**。空 `WorkflowVersion` 被当作格式非法请求（`ErrMissingWorkflowVersion` →
+  400），**不是**向后兼容路径：ack 能力与该字段是同一特性的两半、同批引入，不存在
+  只实现前者的 runner。
 - **gRPC 传输没有 ActivationAck 的 RPC/proto 定义**，因此 gRPC-only 部署下
   ack 无处可发、静默丢弃、fence 永不发生，退化为「只能重启 runner」——这不是
   延迟问题，是**自愈能力的完全缺失**。此缺口与 §9(b) 的 hint/directive 缺失
