@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"math/rand"
 	"strings"
 	"sync"
 	"time"
@@ -25,6 +26,14 @@ const (
 	// DefaultEntryActivationRenewThreshold is the remaining-lease window under
 	// which a live owner's lease is proactively renewed.
 	DefaultEntryActivationRenewThreshold = 20 * time.Second
+	// DefaultActivationRetryBackoffMin is the first retry delay after a runner
+	// declines an activation. It matches the reconcile period: retrying sooner
+	// cannot help, since a retry only takes effect on a reconcile pass.
+	DefaultActivationRetryBackoffMin = 10 * time.Second
+	// DefaultActivationRetryBackoffMax caps the retry delay. A supply that is
+	// down for hours therefore costs one redispatch per 5 minutes, and recovery
+	// is noticed within that window.
+	DefaultActivationRetryBackoffMax = 5 * time.Minute
 )
 
 // ActivationRunnerLister provides runner enumeration for the activation
@@ -57,6 +66,12 @@ type EntryActivationReconcilerConfig struct {
 	// lease is proactively renewed. Defaults to
 	// DefaultEntryActivationRenewThreshold.
 	RenewThreshold time.Duration
+	// RetryBackoffMin is the first retry delay applied after a runner declines
+	// an activation. Defaults to DefaultActivationRetryBackoffMin.
+	RetryBackoffMin time.Duration
+	// RetryBackoffMax caps the retry delay for an activation that keeps
+	// failing. Defaults to DefaultActivationRetryBackoffMax.
+	RetryBackoffMax time.Duration
 	// Logger is optional.
 	Logger engine.Logger
 }
@@ -98,6 +113,37 @@ type EntryActivationReconciler struct {
 	// Intentionally not persisted — a restart resets the grace window at most one
 	// period (acceptable: spec §11.7).
 	noMatchSince map[engine.EntryActivationKey]time.Time
+
+	// retryBackoff tracks, per activation key, when a redispatch may next be
+	// attempted and how long the current backoff is. It exists because a runner
+	// that declines an activation (e.g. required supply content unavailable)
+	// would otherwise be redispatched every reconcile period forever.
+	//
+	// Jitter matters more than the backoff itself here: one supply shared by many
+	// workflows means every activation referencing it fails at the same instant,
+	// and without jitter they would retry in a synchronised pulse forever.
+	//
+	// Intentionally not persisted, for the same reason as noMatchSince: the
+	// periodic reconcile is leader-gated, so this map is only ever read and
+	// written on the leader. A leader change loses the backoff and costs at most
+	// one extra immediate retry.
+	retryBackoff map[engine.EntryActivationKey]activationRetryState
+}
+
+// activationRetryState is the per-key retry backoff bookkeeping held in
+// EntryActivationReconciler.retryBackoff.
+type activationRetryState struct {
+	// recordedAt is the wall time of the failure that produced nextAttempt; it
+	// is what retryDelayFor measures nextAttempt against.
+	recordedAt time.Time
+	// nextAttempt is the earliest wall time at which a redispatch may occur.
+	// It is recordedAt plus the jittered delay.
+	nextAttempt time.Time
+	// delay is the un-jittered backoff computed for this failure; it is what
+	// doubles on the next failure. Jitter is applied on top of it to produce
+	// nextAttempt, so it is not itself the interval reported by
+	// retryDelayFor.
+	delay time.Duration
 }
 
 // NewEntryActivationReconciler constructs a reconciler with defaults applied.
@@ -111,6 +157,12 @@ func NewEntryActivationReconciler(cfg EntryActivationReconcilerConfig) *EntryAct
 	if cfg.RenewThreshold <= 0 {
 		cfg.RenewThreshold = DefaultEntryActivationRenewThreshold
 	}
+	if cfg.RetryBackoffMin <= 0 {
+		cfg.RetryBackoffMin = DefaultActivationRetryBackoffMin
+	}
+	if cfg.RetryBackoffMax <= 0 {
+		cfg.RetryBackoffMax = DefaultActivationRetryBackoffMax
+	}
 	if len(cfg.Namespaces) == 0 {
 		cfg.Namespaces = []namespace.Namespace{namespace.Default}
 	}
@@ -123,6 +175,7 @@ func NewEntryActivationReconciler(cfg EntryActivationReconcilerConfig) *EntryAct
 		selector:     sel,
 		directives:   make(map[string]*entryRunnerDirectives),
 		noMatchSince: make(map[engine.EntryActivationKey]time.Time),
+		retryBackoff: make(map[engine.EntryActivationKey]activationRetryState),
 	}
 }
 
@@ -150,6 +203,7 @@ func (r *EntryActivationReconciler) Reconcile(ctx context.Context, now time.Time
 		}
 	}
 	r.pruneNoMatch(seen)
+	r.pruneRetryBackoff(seen)
 	return nil
 }
 
@@ -163,6 +217,20 @@ func (r *EntryActivationReconciler) pruneNoMatch(seen map[engine.EntryActivation
 	for key := range r.noMatchSince {
 		if _, ok := seen[key]; !ok {
 			delete(r.noMatchSince, key)
+		}
+	}
+}
+
+// pruneRetryBackoff drops retry-backoff state for activations that no longer
+// exist in the store, mirroring pruneNoMatch: without this, an unregistered
+// workflow's key would linger in retryBackoff forever. Only safe to call after
+// a full pass over every configured namespace.
+func (r *EntryActivationReconciler) pruneRetryBackoff(seen map[engine.EntryActivationKey]struct{}) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for key := range r.retryBackoff {
+		if _, ok := seen[key]; !ok {
+			delete(r.retryBackoff, key)
 		}
 	}
 }
@@ -204,9 +272,14 @@ func (r *EntryActivationReconciler) reconcileOne(ctx context.Context, act *engin
 		ownerLive := r.runnerIsLive(act.RunnerID, live, now)
 		ownerMatches := ownerLive && r.ownerSatisfiesDesired(act, live, now)
 		if !expired && ownerMatches {
-			// Owner still valid: proactively renew the lease when it is within the
-			// renew threshold of expiry, keeping the generation stable so the
-			// hosting runner is not disrupted.
+			// Owner still valid: the activation is being hosted successfully, so any
+			// backoff from a prior failure on this key no longer applies. (Task 5
+			// wires this to the runner's ActivationAck; until then this is the best
+			// available success signal — the owner still matches desired state.)
+			r.clearRetryBackoff(key)
+			// Proactively renew the lease when it is within the renew threshold of
+			// expiry, keeping the generation stable so the hosting runner is not
+			// disrupted.
 			if !act.LeaseDeadline.IsZero() && act.LeaseDeadline.Sub(now) < r.cfg.RenewThreshold {
 				newDeadline := now.Add(r.cfg.LeaseTTL)
 				if _, err := r.cfg.Store.Renew(ctx, key, act.Generation, newDeadline); err != nil {
@@ -225,7 +298,15 @@ func (r *EntryActivationReconciler) reconcileOne(ctx context.Context, act *engin
 		r.enqueueDeactivate(prevRunner, deactivateDirectiveFor(act, prevGen))
 	}
 
-	// Unassigned (either fresh or just fenced): choose a matching live runner.
+	// Unassigned (either fresh or just fenced): if a prior failure on this key
+	// put it in backoff, withhold redispatch until the backoff elapses. (Task 5
+	// wires runner-reported failures into noteActivationFailure; until then this
+	// is a dormant no-op since nothing populates retryBackoff yet.)
+	if r.retryBlocked(key, now) {
+		return nil
+	}
+
+	// choose a matching live runner.
 	chosen, ok := r.chooseRunner(act, live, now)
 	if !ok {
 		// No selector-matching + capable runner found. Behavior depends on the
@@ -536,6 +617,94 @@ func (r *EntryActivationReconciler) fallbackChooseRunner(act *engine.EntryActiva
 func (r *EntryActivationReconciler) clearNoMatch(key engine.EntryActivationKey) {
 	r.mu.Lock()
 	delete(r.noMatchSince, key)
+	r.mu.Unlock()
+}
+
+// noteActivationFailure records that a redispatch attempt for key failed (the
+// runner declined the activation, e.g. required supply content unavailable)
+// and computes the next backoff. The first failure sets the delay to
+// RetryBackoffMin; each subsequent failure doubles the previous un-jittered
+// delay, capped at RetryBackoffMax. The actual next-attempt time additionally
+// applies +/-20% jitter to the delay, so that many keys failing at the same
+// instant (a shared supply going down) do not all retry in lockstep.
+func (r *EntryActivationReconciler) noteActivationFailure(key engine.EntryActivationKey, now time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	min := r.cfg.RetryBackoffMin
+	if min <= 0 {
+		min = DefaultActivationRetryBackoffMin
+	}
+	max := r.cfg.RetryBackoffMax
+	if max <= 0 {
+		max = DefaultActivationRetryBackoffMax
+	}
+
+	state, ok := r.retryBackoff[key]
+	delay := min
+	if ok {
+		delay = state.delay * 2
+		if delay > max {
+			delay = max
+		}
+	}
+	r.retryBackoff[key] = activationRetryState{
+		recordedAt:  now,
+		nextAttempt: now.Add(jitter(delay)),
+		delay:       delay,
+	}
+}
+
+// jitter applies +/-20% jitter to d using the package-level math/rand source
+// (this is retry timing, not a security-sensitive use, so crypto/rand is not
+// needed; Go 1.20+ auto-seeds the global source).
+func jitter(d time.Duration) time.Duration {
+	if d <= 0 {
+		return d
+	}
+	spread := d / 5 // 20%
+	if spread <= 0 {
+		return d
+	}
+	// rand.Int63n panics on n<=0; spread is > 0 here. Offset is in
+	// [-spread, +spread].
+	offset := rand.Int63n(int64(spread)*2+1) - int64(spread)
+	return d + time.Duration(offset)
+}
+
+// retryDelayFor returns the jittered delay currently recorded for key (0 if
+// none), i.e. nextAttempt minus the wall time of the failure that produced it.
+// Exposed for tests to assert growth/capping/jitter without depending on
+// absolute nextAttempt values.
+func (r *EntryActivationReconciler) retryDelayFor(key engine.EntryActivationKey) time.Duration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	state, ok := r.retryBackoff[key]
+	if !ok {
+		return 0
+	}
+	return state.nextAttempt.Sub(state.recordedAt)
+}
+
+// retryBlocked reports whether a redispatch for key must be withheld at now:
+// false when there is no recorded failure, otherwise whether now is still
+// before the recorded nextAttempt.
+func (r *EntryActivationReconciler) retryBlocked(key engine.EntryActivationKey, now time.Time) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	state, ok := r.retryBackoff[key]
+	if !ok {
+		return false
+	}
+	return now.Before(state.nextAttempt)
+}
+
+// clearRetryBackoff removes the retry-backoff state for key. Called once an
+// activation is successfully accepted by a runner, so a supply's recovery is
+// not masked by a lingering long backoff.
+func (r *EntryActivationReconciler) clearRetryBackoff(key engine.EntryActivationKey) {
+	r.mu.Lock()
+	delete(r.retryBackoff, key)
 	r.mu.Unlock()
 }
 

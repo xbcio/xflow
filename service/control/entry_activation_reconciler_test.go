@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -1050,5 +1051,77 @@ func TestDefaultSelector_PrunesTrackingForRemovedActivation(t *testing.T) {
 	}
 	if size != 0 {
 		t.Fatalf("expected empty tracking map, got %d entries", size)
+	}
+}
+
+// --- Activation retry backoff tests (fix/activation-ack-retry, task 4) ---
+
+// newTestReconciler returns a minimally-configured reconciler suitable for
+// exercising the retry-backoff state machine in isolation (no store/lister
+// interaction is needed for these tests).
+func newTestReconciler(t *testing.T) *EntryActivationReconciler {
+	t.Helper()
+	return NewEntryActivationReconciler(EntryActivationReconcilerConfig{
+		Store:      NewMemoryEntryActivationStore(),
+		Namespaces: []namespace.Namespace{namespace.Default},
+	})
+}
+
+// TestActivationRetryBackoffGrowsAndCaps verifies the backoff must be
+// recomputed each failure, growing until it caps, and be cleared on success —
+// otherwise a supply that recovers would still be held back by a long backoff.
+func TestActivationRetryBackoffGrowsAndCaps(t *testing.T) {
+	r := newTestReconciler(t) // reuses the helper above
+	key := engine.EntryActivationKey{WorkflowID: "w", EntryUnitID: "e"}
+	base := time.Unix(1700000000, 0)
+
+	// After the first failure, the backoff should be ~min (10s), and an
+	// immediate retry must be blocked.
+	r.noteActivationFailure(key, base)
+	if !r.retryBlocked(key, base.Add(time.Second)) {
+		t.Fatal("a retry 1s after failure must be blocked by the 10s minimum")
+	}
+	// Past the maximum possible backoff (10s + 20% jitter = 12s), it must be
+	// allowed.
+	if r.retryBlocked(key, base.Add(13*time.Second)) {
+		t.Fatal("a retry 13s after failure must be allowed (10s + max jitter is 12s)")
+	}
+
+	// Consecutive failures should grow the delay and never exceed max + 20%
+	// jitter.
+	prev := time.Duration(0)
+	for i := 0; i < 20; i++ {
+		r.noteActivationFailure(key, base)
+		d := r.retryDelayFor(key)
+		if d > DefaultActivationRetryBackoffMax*6/5 {
+			t.Fatalf("iteration %d: delay %v exceeds max+jitter", i, d)
+		}
+		if i > 0 && i < 5 && d <= prev {
+			t.Fatalf("iteration %d: delay %v did not grow past %v", i, d, prev)
+		}
+		prev = d
+	}
+
+	// After success, the backoff must be cleared.
+	r.clearRetryBackoff(key)
+	if r.retryBlocked(key, base) {
+		t.Fatal("after clearRetryBackoff a retry must be allowed immediately")
+	}
+}
+
+// TestActivationRetryBackoffIsJittered verifies jitter is applied: it is the
+// key defense against a synchronized retry pulse when a widely-shared supply
+// fails and every activation referencing it retries at once.
+func TestActivationRetryBackoffIsJittered(t *testing.T) {
+	r := newTestReconciler(t)
+	base := time.Unix(1700000000, 0)
+	seen := map[time.Duration]struct{}{}
+	for i := 0; i < 50; i++ {
+		key := engine.EntryActivationKey{WorkflowID: "w", EntryUnitID: fmt.Sprintf("e%d", i)}
+		r.noteActivationFailure(key, base)
+		seen[r.retryDelayFor(key)] = struct{}{}
+	}
+	if len(seen) < 10 {
+		t.Fatalf("only %d distinct delays across 50 keys; jitter is not being applied", len(seen))
 	}
 }
