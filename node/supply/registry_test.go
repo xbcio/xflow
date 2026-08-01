@@ -1050,3 +1050,87 @@ func TestObservedReportsOnlyReadySubset(t *testing.T) {
 		t.Fatalf("Observed() = %#v, want exactly {ready-one: h-v1}", got)
 	}
 }
+
+// epochConsumer distinguishes the Nth dispatch rather than the content hash, so
+// a test can model a rollback A→B→A where the first and third dispatches carry
+// the SAME hash. blockingConsumer keys its gates by hash and cannot express it.
+type epochConsumer struct {
+	mu      sync.Mutex
+	n       int
+	entered chan int
+	gate    map[int]chan struct{}
+	verdict map[int]error
+}
+
+func (c *epochConsumer) OnSupplyChanged(_ context.Context, _ Snapshot) error {
+	c.mu.Lock()
+	c.n++
+	me := c.n
+	g := c.gate[me]
+	v := c.verdict[me]
+	c.mu.Unlock()
+	c.entered <- me
+	if g != nil {
+		<-g
+	}
+	return v
+}
+
+// A hash names CONTENT, not a particular dispatch of it. When content rolls back
+// to a hash it held before — A→B→A, an ordinary rollback — a callback still in
+// flight from the FIRST A dispatch carries a hash matching what is cached now.
+// Guarding the write-back on hash alone accepts that ancient verdict, letting a
+// stale ACCEPTANCE overwrite the current REJECTION and leaving IsReady true for
+// content this very consumer refused; the gate would admit traffic against it.
+//
+// Verified in both directions: this fails against the pre-fix registry (the
+// final IsReady flips back to true) and passes with the epoch guard in
+// recordOutcomeLocked.
+//
+// The sleeps are load-bearing, not padding: they let each dispatch's write-back
+// land before the next Apply, which is what puts dispatch 1's verdict LAST —
+// the whole point. An earlier version of this test replaced them with condition
+// polling, and the reordering made it pass against the defective code.
+func TestStaleAcceptForRecycledHashCannotOverwriteRejection(t *testing.T) {
+	ctx := context.Background()
+	r := NewRegistry()
+	c := &epochConsumer{
+		entered: make(chan int, 8),
+		gate:    map[int]chan struct{}{1: make(chan struct{}), 2: make(chan struct{}), 3: make(chan struct{})},
+		verdict: map[int]error{
+			1: nil,                                  // hash A: accepts — but returns LAST
+			2: nil,                                  // hash B: accepts
+			3: errors.New("rollback to A rejected"), // hash A again: REJECTS
+		},
+	}
+	r.RegisterConsumer("rules", "k", c)
+
+	apply := func(h string, rev uint64, body string) {
+		go func() { _ = r.Apply(ctx, Snapshot{Name: "rules", Content: []byte(body), Hash: h, Revision: rev}) }()
+	}
+
+	apply("hA", 1, "A")
+	<-c.entered // dispatch 1 parked mid-callback, has NOT returned
+
+	apply("hB", 2, "B")
+	<-c.entered
+	close(c.gate[2]) // B's acceptance lands
+	time.Sleep(50 * time.Millisecond)
+
+	apply("hA", 3, "A") // the rollback: same hash as dispatch 1
+	<-c.entered
+	close(c.gate[3]) // A-again's REJECTION lands
+	time.Sleep(50 * time.Millisecond)
+
+	if r.IsReady("rules") {
+		t.Fatal("precondition: the rejection of the rolled-back content must make IsReady false")
+	}
+
+	// Now let the ancient dispatch-1 callback finally return.
+	close(c.gate[1])
+	time.Sleep(100 * time.Millisecond)
+
+	if r.IsReady("rules") {
+		t.Fatal("a stale acceptance from an earlier dispatch of the same hash overwrote the current rejection; the gate would admit traffic the consumer refused")
+	}
+}

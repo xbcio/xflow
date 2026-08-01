@@ -38,6 +38,16 @@ type consumerEntry struct {
 	// content the consumer cannot use).
 	lastErr  error
 	lastHash string
+	// lastEpoch is the dispatch epoch lastErr/lastHash came from. A hash names
+	// CONTENT, not a particular dispatch of it, and content can return to a hash
+	// it held before — a rollback A→B→A is the ordinary case, not a contrived
+	// one. When it does, a callback still in flight from the FIRST A dispatch
+	// carries a hash that matches what is cached now, so a hash-only guard
+	// accepts it and lets a stale acceptance overwrite the current rejection.
+	// That resolves to the dangerous side: the gate admits traffic against
+	// content this very consumer just refused. Only a monotonic epoch tells the
+	// two dispatches of the same hash apart.
+	lastEpoch uint64
 	// inFlight counts notifications dispatched to this consumer that have not
 	// yet recorded an outcome. A COUNT, not a hash: two notifications can
 	// overlap (Apply for newer content marks its own before the older
@@ -89,6 +99,12 @@ type Registry struct {
 
 	// regSeq issues consumerEntry.regSeq values. Guarded by mu.
 	regSeq uint64
+
+	// epoch issues dispatch epochs. Every notification dispatched — from Apply's
+	// fan-out or RegisterConsumer's immediate notify — takes the next value, so
+	// two dispatches of the SAME content hash are still distinguishable when
+	// their write-backs race. Guarded by mu.
+	epoch uint64
 
 	// decoded is the published, READ-ONLY "name → decoded value" map handed to
 	// expression evaluation as $supplies. It is replaced wholesale on every
@@ -176,12 +192,18 @@ func (r *Registry) Apply(ctx context.Context, snap Snapshot) error {
 	type target struct {
 		key      string
 		regSeq   uint64
+		epoch    uint64
 		consumer Consumer
 	}
 	var targets []target
 	if needNotify {
+		// One epoch for this whole fan-out: these notifications all carry the
+		// same content, and what must be distinguishable is THIS dispatch of it
+		// versus an earlier one of the same hash.
+		r.epoch++
+		ep := r.epoch
 		for k, entry := range r.consumers[snap.Name] {
-			targets = append(targets, target{key: k, regSeq: entry.regSeq, consumer: entry.consumer})
+			targets = append(targets, target{key: k, regSeq: entry.regSeq, epoch: ep, consumer: entry.consumer})
 			// Count in flight BEFORE releasing the lock, so no IsReady between
 			// here and the write-back can read this consumer as ready on a
 			// verdict it has not given yet.
@@ -212,7 +234,7 @@ func (r *Registry) Apply(ctx context.Context, snap Snapshot) error {
 	if needNotify {
 		r.mu.Lock()
 		for _, t := range targets {
-			r.recordOutcomeLocked(snap.Name, t.key, t.regSeq, snap.Hash, results[t.key])
+			r.recordOutcomeLocked(snap.Name, t.key, t.regSeq, t.epoch, snap.Hash, results[t.key])
 		}
 		r.mu.Unlock()
 	}
@@ -242,7 +264,7 @@ func (r *Registry) Apply(ctx context.Context, snap Snapshot) error {
 // newer content notifies every registered consumer itself.
 //
 // Caller must hold r.mu.
-func (r *Registry) recordOutcomeLocked(name, key string, regSeq uint64, hash string, err error) {
+func (r *Registry) recordOutcomeLocked(name, key string, regSeq, epoch uint64, hash string, err error) {
 	cur, ok := r.consumers[name][key]
 	if !ok || cur.regSeq != regSeq {
 		return
@@ -254,9 +276,16 @@ func (r *Registry) recordOutcomeLocked(name, key string, regSeq uint64, hash str
 	if cur.inFlight > 0 {
 		cur.inFlight--
 	}
-	if cached, cachedOK := r.snapshots[name]; cachedOK && cached.Hash == hash {
+	// The verdict must match BOTH the cached content and be no older than the
+	// verdict already recorded. The hash check alone is insufficient: content
+	// that rolls back to a hash it held before (A→B→A) makes an ancient
+	// in-flight callback's hash match again, and without the epoch its stale
+	// acceptance overwrites the current rejection — the gate would then admit
+	// traffic against content this consumer refused.
+	if cached, cachedOK := r.snapshots[name]; cachedOK && cached.Hash == hash && epoch >= cur.lastEpoch {
 		cur.lastErr = err
 		cur.lastHash = hash
+		cur.lastEpoch = epoch
 	}
 	r.consumers[name][key] = cur
 }
@@ -358,12 +387,17 @@ func (r *Registry) RegisterConsumer(name, key string, c Consumer) {
 	seq := r.regSeq
 	entry := consumerEntry{consumer: c, regSeq: seq}
 	snap, has := r.snapshots[name]
+	var ep uint64
 	if has {
 		// Content is already cached, so this registration WILL be notified below.
 		// Count it in flight under the same lock that inserts it: otherwise there
 		// is a window where the entry is registered, the content is cached, and
 		// no verdict exists — and IsReady would read that as ready.
 		entry.inFlight++
+		// Take a dispatch epoch under the same lock, so this notification is
+		// ordered against any Apply fan-out for the same hash.
+		r.epoch++
+		ep = r.epoch
 	}
 	r.consumers[name][key] = entry
 	r.mu.Unlock()
@@ -382,7 +416,7 @@ func (r *Registry) RegisterConsumer(name, key string, c Consumer) {
 	// above — and only if this registration and this content are both still
 	// current. See recordOutcomeLocked.
 	r.mu.Lock()
-	r.recordOutcomeLocked(name, key, seq, snap.Hash, err)
+	r.recordOutcomeLocked(name, key, seq, ep, snap.Hash, err)
 	r.mu.Unlock()
 }
 
