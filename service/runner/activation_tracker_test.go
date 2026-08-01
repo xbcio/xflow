@@ -280,3 +280,53 @@ func TestActivateUpgradeFailureKeepsOldSubscriptionAlive(t *testing.T) {
 		t.Fatalf("old subscription context was cancelled (%v); a failed upgrade must not kill it", err)
 	}
 }
+
+// 失败必须可被外部观测：没有这个回调，失败就止步于本地日志，server 永远不知道
+// 该 activation 没被接住。
+func TestProcessDirectivesReportsActivateFailure(t *testing.T) {
+	h := &mockActivationHandler{activateErr: errors.New("supply not ready: rules")}
+	tr := NewActivationTracker(h, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	var gotDirective protocol.ActivateDirective
+	var gotErr error
+	var calls int
+	tr.SetOnActivateFailed(func(d protocol.ActivateDirective, err error) {
+		calls++
+		gotDirective = d
+		gotErr = err
+	})
+
+	d := protocol.ActivateDirective{WorkflowID: "w", EntryUnitID: "e", Generation: 7}
+	if err := tr.ProcessDirectives(context.Background(), &protocol.HeartbeatActivations{
+		Activate: []protocol.ActivateDirective{d},
+	}); err != nil {
+		t.Fatalf("ProcessDirectives: %v", err)
+	}
+
+	if calls != 1 {
+		t.Fatalf("callback calls = %d, want 1", calls)
+	}
+	if gotDirective.Generation != 7 || gotDirective.WorkflowID != "w" {
+		t.Fatalf("callback got %#v, want the failing directive verbatim", gotDirective)
+	}
+	if gotErr == nil {
+		t.Fatal("callback must receive the activation error")
+	}
+}
+
+// 成功不得触发回调——否则 server 会把正常激活误判为失败并重派。
+func TestProcessDirectivesDoesNotReportOnSuccess(t *testing.T) {
+	h := &mockActivationHandler{}
+	tr := NewActivationTracker(h, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	var calls int
+	tr.SetOnActivateFailed(func(protocol.ActivateDirective, error) { calls++ })
+
+	if err := tr.ProcessDirectives(context.Background(), &protocol.HeartbeatActivations{
+		Activate: []protocol.ActivateDirective{{WorkflowID: "w", EntryUnitID: "e", Generation: 1}},
+	}); err != nil {
+		t.Fatalf("ProcessDirectives: %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("callback calls = %d on success, want 0", calls)
+	}
+}

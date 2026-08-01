@@ -16,6 +16,12 @@ type ActivationTracker struct {
 	active  map[activationID]*activeSubscription
 	handler ActivationHandler
 	logger  *slog.Logger
+
+	// onActivateFailed, when set, is called for each directive whose activation
+	// failed. It is how a failure escapes this process: without it the failure
+	// stops at a local log line and the server never learns the activation was
+	// not taken. Called WITHOUT t.mu held — the callback does network I/O.
+	onActivateFailed func(protocol.ActivateDirective, error)
 }
 
 type activationID struct {
@@ -49,6 +55,12 @@ func NewActivationTracker(handler ActivationHandler, logger *slog.Logger) *Activ
 	}
 }
 
+// SetOnActivateFailed installs the failure callback. Not safe to call
+// concurrently with ProcessDirectives; call it once during wiring.
+func (t *ActivationTracker) SetOnActivateFailed(fn func(protocol.ActivateDirective, error)) {
+	t.onActivateFailed = fn
+}
+
 // ProcessDirectives handles activate/deactivate directives from a heartbeat response.
 // Safe for concurrent use.
 func (t *ActivationTracker) ProcessDirectives(ctx context.Context, directives *protocol.HeartbeatActivations) error {
@@ -56,8 +68,16 @@ func (t *ActivationTracker) ProcessDirectives(ctx context.Context, directives *p
 		return nil
 	}
 
+	// failed is collected under the lock and reported after releasing it: the
+	// callback performs network I/O, and holding t.mu across it would block
+	// every other directive batch for the duration of an HTTP round-trip.
+	type failedActivation struct {
+		directive protocol.ActivateDirective
+		err       error
+	}
+	var failed []failedActivation
+
 	t.mu.Lock()
-	defer t.mu.Unlock()
 
 	// Process deactivate directives first so we free resources before activating new ones.
 	for _, d := range directives.Deactivate {
@@ -72,7 +92,15 @@ func (t *ActivationTracker) ProcessDirectives(ctx context.Context, directives *p
 				"generation", d.Generation,
 				"error", err,
 			)
+			failed = append(failed, failedActivation{directive: d, err: err})
 			// Continue processing remaining directives; don't fail the whole batch.
+		}
+	}
+	t.mu.Unlock()
+
+	if t.onActivateFailed != nil {
+		for _, f := range failed {
+			t.onActivateFailed(f.directive, f.err)
 		}
 	}
 
