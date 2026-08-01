@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -116,9 +118,26 @@ func TestActivationAckAllowsNewGenerationAfterOldOneWasAcked(t *testing.T) {
 // I/O path running in a runner process, and an unrecovered panic there would
 // take the whole runner down over an activation failure it was only trying
 // to report.
+//
+// This test must wait for the SPAWNED goroutine to actually enter the client
+// call (and panic) before asserting anything about recovery — not merely for
+// ackFailed to return, which happens synchronously right after the goroutine
+// is dispatched and proves nothing about what that goroutine did. An earlier
+// version of this test only waited on ackFailed's return and was shown (via
+// fault injection: deleting the recover() block) to pass ~15/15 runs anyway,
+// because most runs finished before the spawned goroutine was even
+// scheduled. Fixed by: (1) waiting on a channel the fake client closes
+// immediately before it panics, so we know the panic has happened, and (2)
+// polling captured log output for the exact line recover() emits, so we know
+// the recover() branch itself ran rather than merely "the process didn't
+// crash yet".
 func TestActivationAckerRecoversFromClientPanic(t *testing.T) {
-	client := panicAckClient{}
-	acker := newActivationAcker(client, "runner-1", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	entered := make(chan struct{})
+	client := &panicAckClient{entered: entered}
+
+	logBuf := &syncBuffer{}
+	logger := slog.New(slog.NewTextHandler(logBuf, nil))
+	acker := newActivationAcker(client, "runner-1", logger)
 
 	done := make(chan struct{})
 	go func() {
@@ -131,15 +150,84 @@ func TestActivationAckerRecoversFromClientPanic(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("ackFailed did not return promptly")
 	}
-	// If the panicking goroutine's recover didn't fire, the test binary
-	// itself would have crashed by now (a panic that escapes a goroutine
-	// takes the whole process down) — reaching here is the assertion.
+
+	// Wait for the spawned goroutine to actually reach the client call (and
+	// thus panic). ackFailed's own return above only proves the synchronous
+	// dedup-and-dispatch happened, not that the dispatched goroutine ran.
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("spawned send goroutine never reached the client call")
+	}
+
+	// Confirm the recover() branch itself executed — not just that the test
+	// process is still alive — by polling for the exact log line it emits.
+	// This is a terminal condition: once written, that line does not
+	// disappear, so a positive match is conclusive and continuing to poll
+	// after a negative match cannot manufacture a false pass.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if strings.Contains(logBuf.String(), "activation ack panicked") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("recover() never logged the panic-recovery line within 2s; captured log:\n%s", logBuf.String())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// The panic must not have corrupted the acker: it must still accept and
+	// send a subsequent ack normally (different generation, so dedup doesn't
+	// suppress it).
+	var mu sync.Mutex
+	var sent []protocol.ActivationAck
+	ok := &okAckClient{onAck: func(ack protocol.ActivationAck) {
+		mu.Lock()
+		sent = append(sent, ack)
+		mu.Unlock()
+	}}
+	acker.client = ok
+	acker.ackFailed("session-1", protocol.ActivateDirective{WorkflowID: "wf-1", EntryUnitID: "grp-a", Generation: 2}, errors.New("still failing"))
+	waitForAcks(t, &mu, &sent, 1)
 }
 
-type panicAckClient struct{}
+type panicAckClient struct {
+	entered chan struct{}
+}
 
-func (panicAckClient) ActivationAck(context.Context, protocol.ActivationAck) error {
+func (c *panicAckClient) ActivationAck(context.Context, protocol.ActivationAck) error {
+	close(c.entered)
 	panic("simulated transport panic")
+}
+
+// okAckClient is a non-panicking activationAckClient used to prove the acker
+// remains usable after a previous send's panic was recovered.
+type okAckClient struct {
+	onAck func(protocol.ActivationAck)
+}
+
+func (c *okAckClient) ActivationAck(_ context.Context, ack protocol.ActivationAck) error {
+	c.onAck(ack)
+	return nil
+}
+
+// syncBuffer is a concurrency-safe io.Writer/String() pair, used to capture
+// slog output from a goroutine while the test goroutine polls it.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 // waitForAcks polls until at least want acks have arrived or the deadline

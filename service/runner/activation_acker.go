@@ -105,6 +105,20 @@ func (a *activationAcker) ackFailed(sessionID string, d protocol.ActivateDirecti
 		Error:      err.Error(),
 	}
 
+	// Fire-and-forget by design: this goroutine is never added to a
+	// WaitGroup and is not cancelled by Runner shutdown. activationAckTimeout
+	// (10s) is its ONLY lifecycle bound — nothing joins it, so
+	// Runner.Run can return (and the process can exit) while a send is still
+	// in flight. That is an accepted trade-off, not an oversight: the ack is
+	// a best-effort notification, and losing one in flight during shutdown
+	// has the same effect as losing it on the wire — the reconciler simply
+	// redispatches this activation on its next reconcile cycle regardless.
+	// Joining here would mean plumbing a shutdown signal through
+	// ActivationTracker's onActivateFailed callback boundary (currently
+	// `func(protocol.ActivateDirective, error)`, no context/WaitGroup) and,
+	// worse, could make graceful shutdown wait up to activationAckTimeout
+	// longer than it does today for a signal whose only purpose is to speed
+	// up a redispatch that will happen anyway.
 	go func() {
 		defer func() {
 			if rec := recover(); rec != nil {
