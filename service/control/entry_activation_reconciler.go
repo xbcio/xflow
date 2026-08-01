@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"errors"
 	"math/rand"
 	"strings"
 	"sync"
@@ -12,6 +13,11 @@ import (
 	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/types"
 )
+
+// errMissingWorkflowVersion is returned by MarkActivationFailed when the ack
+// does not carry a workflow version. The message is intentionally generic (no
+// internal key structure exposed) so it can be surfaced to the caller as a 400.
+var errMissingWorkflowVersion = errors.New("activation ack: missing required field workflow_version")
 
 // Default reconciler timings. These preserve the timing behavior of the
 // previous group-centric activation controller (since retired) across the
@@ -734,25 +740,15 @@ func (r *EntryActivationReconciler) MarkActivationFailed(ctx context.Context, ru
 
 	ns := namespace.FromContext(ctx)
 
-	// Backward-compat: an old runner that does not populate WorkflowVersion
-	// produces an empty string here. We cannot construct a complete
-	// EntryActivationKey without it, and falling back to a namespace-wide List
-	// was explicitly ruled out (O(n) SCAN per ack under shared-supply failure is
-	// the load pattern that disqualified approach B). Instead, log a warning and
-	// rely on the lease-expiry path: when the runner never reports this
-	// activation in its heartbeat inventory, the lease expires within one
-	// LeaseTTL (60s default) and the reconciler fences + reassigns on the next
-	// pass. Self-healing is delayed but not broken.
+	// WorkflowVersion is required to construct the store key. An empty value is
+	// treated as a malformed request. This is NOT a backward-compatibility
+	// concern: the ack send path (activation_acker.go) and the WorkflowVersion
+	// field were introduced in the same feature branch — any runner capable of
+	// sending an ActivationAck necessarily has WorkflowVersion available from
+	// the ActivateDirective that triggered the failure. There is no deployed
+	// runner that sends acks without this field.
 	if ack.WorkflowVersion == "" {
-		if r.cfg.Logger != nil {
-			r.cfg.Logger.Warn("activation ack missing workflow_version (old runner); "+
-				"skipping immediate fence, will self-heal on lease expiry",
-				"workflow_id", ack.WorkflowID,
-				"entry_unit_id", ack.GroupID,
-				"runner_id", runnerID,
-				"generation", ack.Generation)
-		}
-		return nil
+		return errMissingWorkflowVersion
 	}
 
 	key := engine.EntryActivationKey{

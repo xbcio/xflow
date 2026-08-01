@@ -252,3 +252,54 @@ func waitForAcks(t *testing.T, mu *sync.Mutex, acks *[]protocol.ActivationAck, w
 		time.Sleep(5 * time.Millisecond)
 	}
 }
+
+// TestActivationAckDedupIncludesVersion verifies that the dedup key includes
+// WorkflowVersion: two activations with the same (WorkflowID, EntryUnitID) but
+// different versions have independent generation sequences, so a high generation
+// on one must not suppress a lower-generation ack for the other.
+func TestActivationAckDedupIncludesVersion(t *testing.T) {
+	var mu sync.Mutex
+	var acks []protocol.ActivationAck
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var a protocol.ActivationAck
+		_ = json.NewDecoder(r.Body).Decode(&a)
+		mu.Lock()
+		acks = append(acks, a)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	client := protocol.NewClient(srv.URL, srv.Client())
+	acker := newActivationAcker(client, "runner-1", slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	activateErr := errors.New("supply not ready: rules")
+
+	// v1 fails at generation 5.
+	acker.ackFailed("session-1", protocol.ActivateDirective{
+		WorkflowID: "wf-1", WorkflowVersion: "v1", EntryUnitID: "grp-a", Generation: 5,
+	}, activateErr)
+	// v2 fails at generation 1 (lower than v1's — independent sequence).
+	acker.ackFailed("session-1", protocol.ActivateDirective{
+		WorkflowID: "wf-1", WorkflowVersion: "v2", EntryUnitID: "grp-a", Generation: 1,
+	}, activateErr)
+
+	waitForAcks(t, &mu, &acks, 2)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(acks) != 2 {
+		t.Fatalf("acks = %d, want 2 (one per version); v1 gen=5 must not suppress v2 gen=1", len(acks))
+	}
+	// Verify both versions are represented.
+	versions := map[string]uint64{}
+	for _, a := range acks {
+		versions[a.WorkflowVersion] = a.Generation
+	}
+	if versions["v1"] != 5 {
+		t.Fatalf("v1 ack generation = %d, want 5", versions["v1"])
+	}
+	if versions["v2"] != 1 {
+		t.Fatalf("v2 ack generation = %d, want 1", versions["v2"])
+	}
+}

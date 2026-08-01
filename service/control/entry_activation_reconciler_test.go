@@ -1445,6 +1445,70 @@ func TestMarkActivationFailedMultiVersionCoexistence(t *testing.T) {
 	}
 }
 
+// TestMarkActivationFailedRejectsEmptyWorkflowVersion verifies that an ack
+// without WorkflowVersion is rejected with an error (not silently swallowed).
+// This is not a backward-compat concern: the ack path and the WorkflowVersion
+// field are part of the same feature branch — no runner that sends acks can
+// lack this field.
+func TestMarkActivationFailedRejectsEmptyWorkflowVersion(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryEntryActivationStore()
+
+	act := testEntryActivation()
+	key := keyOfActivation(act)
+	if err := store.Upsert(ctx, act); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	now := time.Now().Truncate(time.Second)
+	runner := RunnerSnapshot{
+		RunnerID:      "runner-a",
+		Capacity:      4,
+		Labels:        map[string]string{"zone": "a"},
+		LastHeartbeat: now,
+	}
+	lister := &mockRunnerLister{runners: []RunnerSnapshot{runner}}
+	sel := DefaultRunnerSelector()
+	r := NewEntryActivationReconciler(EntryActivationReconcilerConfig{
+		Store:      store,
+		Lister:     lister,
+		Selector:   &sel,
+		Namespaces: []namespace.Namespace{namespace.Default},
+		LeaseTTL:   60 * time.Second,
+	})
+
+	// Assign via reconcile.
+	if err := r.Reconcile(ctx, now); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	got, _, _ := store.Get(ctx, key)
+	if got.RunnerID != "runner-a" {
+		t.Fatalf("expected runner-a, got %q", got.RunnerID)
+	}
+
+	// Send an ack with empty WorkflowVersion — must return an error.
+	nsCtx := namespace.WithNamespace(ctx, namespace.Default)
+	ack := protocol.ActivationAck{
+		RunnerID:        "runner-a",
+		WorkflowID:      string(act.WorkflowID),
+		WorkflowVersion: "", // missing
+		GroupID:         act.EntryUnitID,
+		Generation:      got.Generation,
+		Status:          protocol.ActivationStatusFailed,
+		Error:           "some failure",
+	}
+	err := r.MarkActivationFailed(nsCtx, "runner-a", ack)
+	if err == nil {
+		t.Fatal("expected error for empty WorkflowVersion, got nil")
+	}
+
+	// The activation must NOT have been fenced.
+	got, _, _ = store.Get(ctx, key)
+	if got.RunnerID != "runner-a" {
+		t.Fatalf("empty-version ack must not fence; RunnerID changed to %q", got.RunnerID)
+	}
+}
+
 // TestPruneRetryBackoffRemovesDeletedKeys verifies that retryBackoff entries for
 // activations no longer in the store are cleaned up, preventing unbounded map growth
 // from deleted workflows.

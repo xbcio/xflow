@@ -25,10 +25,15 @@ type activationAckClient interface {
 
 // activationAckKey identifies one hosted activation, independent of
 // generation, so repeated failures of the same activation collapse to a
-// single map entry.
+// single map entry. WorkflowVersion is part of the key because generation
+// sequences are per-EntryActivationKey (which includes version): two records
+// with the same (WorkflowID, EntryUnitID) but different versions have
+// independent generation counters. Without version in the key, a high
+// generation on v1 would suppress a lower-generation ack for v2.
 type activationAckKey struct {
-	WorkflowID  string
-	EntryUnitID string
+	WorkflowID      string
+	WorkflowVersion string
+	EntryUnitID     string
 }
 
 // activationAcker sends ActivationAck for failed activate directives to the
@@ -38,8 +43,9 @@ type activationAckKey struct {
 // call must happen off that goroutine or it would delay every other directive
 // in the batch and push back the runner's next heartbeat tick.
 //
-// acked remembers, per (WorkflowID, EntryUnitID), the highest generation
-// already acked. Generation is monotonic and assigned by the reconciler on
+// acked remembers, per (WorkflowID, WorkflowVersion, EntryUnitID), the highest
+// generation already acked. Generation is monotonic within a single
+// EntryActivationKey (which includes version) and assigned by the reconciler on
 // every redispatch, so a supply that stays unavailable makes the runner
 // re-attempt (and re-fail) the SAME generation on every heartbeat — deduping
 // on it turns that into exactly one ack per redispatch instead of one per
@@ -85,12 +91,12 @@ func (a *activationAcker) shouldAck(key activationAckKey, generation uint64) boo
 }
 
 // ackFailed reports one failed activate directive, deduped per
-// (WorkflowID, EntryUnitID, Generation) and sent asynchronously so the caller
-// (ActivationTracker's callback, invoked from ProcessDirectives) never blocks
-// on network I/O. err.Error() is the only thing that travels in the ack body
-// — never the directive's Params or any supply content.
+// (WorkflowID, WorkflowVersion, EntryUnitID, Generation) and sent asynchronously
+// so the caller (ActivationTracker's callback, invoked from ProcessDirectives)
+// never blocks on network I/O. err.Error() is the only thing that travels in
+// the ack body — never the directive's Params or any supply content.
 func (a *activationAcker) ackFailed(sessionID string, d protocol.ActivateDirective, err error) {
-	key := activationAckKey{WorkflowID: d.WorkflowID, EntryUnitID: d.EntryUnitID}
+	key := activationAckKey{WorkflowID: d.WorkflowID, WorkflowVersion: d.WorkflowVersion, EntryUnitID: d.EntryUnitID}
 	if !a.shouldAck(key, d.Generation) {
 		return
 	}
