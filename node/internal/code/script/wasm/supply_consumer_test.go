@@ -182,7 +182,16 @@ func TestOnSupplyChangedRejectsBadContentKeepsLastGood(t *testing.T) {
 // and drains the old pool for nothing, so the consumer must short-circuit.
 func TestSupplyConsumerIsNoOpForIdenticalContent(t *testing.T) {
 	ctx := context.Background()
-	code := b64(reactorWasm)
+	// testReactorCode, not b64(reactorWasm): RegisterSupplyConsumer flips this
+	// code's engine to source-driven permanently (configFromSource is one-way by
+	// design — a production module never reverts to the legacy $config path), and
+	// the flag lives on the process-wide sharedReactorHost keyed by module
+	// identity. Sharing reactorWasm's bytes therefore leaks this test's
+	// source-driven engine — still holding the r2 pool built below — into every
+	// other test using the same fixture. That surfaced as
+	// TestReactor_EmptyConfigValid seeing "r2" under -count=2: its $config was
+	// stripped on the source-driven branch and the stale pool answered instead.
+	code := testReactorCode(t)
 	reg := supply.NewRegistry()
 	if err := RegisterSupplyConsumer(code, "rules", reg); err != nil {
 		t.Fatalf("RegisterSupplyConsumer: %v", err)

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -114,19 +115,30 @@ func appendSeamULEB128(b []byte, v uint64) []byte {
 	}
 }
 
-// registerWasmSupplyConsumerForTest registers code as a consumer of the named
-// supply against supply.Default (RegisterWasmSupplyConsumer, the script
-// package's forwarding function over Task 16's wasm.RegisterSupplyConsumer,
-// hardcodes supply.Default with no registry parameter — adding one just for
-// this test would be a production-code change for no production benefit). It
-// registers a t.Cleanup that unregisters, so this cannot pollute other tests
-// in the package that also touch supply.Default.
-func registerWasmSupplyConsumerForTest(t *testing.T, code, supplyNode string) {
+// registerWasmSupplyConsumerForTest registers code as a consumer of a supply
+// whose name is unique to the calling test, and returns that name for the
+// caller's Apply. RegisterWasmSupplyConsumer (the script package's forwarding
+// function over wasm.RegisterSupplyConsumer) hardcodes supply.Default with no
+// registry parameter — adding one just for this test would be a production-code
+// change for no production benefit — so isolation has to come from the name.
+//
+// The name MUST be per-test: supply.Default is a process-wide singleton and
+// UnregisterConsumer only drops the consumer, never the applied Snapshot, so a
+// shared name leaves one test's content resident for the next. Two tests here
+// previously both used "rules" with different revisions (11 and 3); under
+// -count=2 the leftover revision 3 was what
+// TestScriptNodeRulesComeFromSupplyNotConfig observed, failing with
+// config_generation = 0x3.
+func registerWasmSupplyConsumerForTest(t *testing.T, code string) string {
 	t.Helper()
+	// t.Name() is unique per test and stable within a run; sanitized because a
+	// supply name stands in for a workflow node name.
+	supplyNode := "rules-" + strings.NewReplacer("/", "-", " ", "_").Replace(t.Name())
 	if err := RegisterWasmSupplyConsumer(code, supplyNode); err != nil {
 		t.Fatalf("RegisterWasmSupplyConsumer: %v", err)
 	}
 	t.Cleanup(func() { wasm.UnregisterSupplyConsumer(code, supplyNode, supply.Default) })
+	return supplyNode
 }
 
 // TestScriptNodeRulesComeFromSupplyNotConfig drives the real node path and
@@ -147,10 +159,10 @@ func registerWasmSupplyConsumerForTest(t *testing.T, code, supplyNode string) {
 // nothing before this test crossed ScriptNode.Execute -> buildScriptGlobals.
 func TestScriptNodeRulesComeFromSupplyNotConfig(t *testing.T) {
 	code := testSeamCode(t)
-	registerWasmSupplyConsumerForTest(t, code, "rules")
+	supplyNode := registerWasmSupplyConsumerForTest(t, code)
 
 	if err := supply.Default.Apply(context.Background(), supply.Snapshot{
-		Name:      "rules",
+		Name:      supplyNode,
 		Content:   []byte(`{"rules":[{"name":"from-supply"}]}`),
 		Hash:      "h1",
 		Revision:  11,
@@ -283,10 +295,10 @@ func matchedRuleNames(t *testing.T, data map[string]any) map[string]bool {
 // bytes the guest evaluated.
 func TestScriptNodeSourceDrivenGuestNeverSeesConfigKey(t *testing.T) {
 	code := testSeamCode(t)
-	registerWasmSupplyConsumerForTest(t, code, "rules")
+	supplyNode := registerWasmSupplyConsumerForTest(t, code)
 
 	if err := supply.Default.Apply(context.Background(), supply.Snapshot{
-		Name:      "rules",
+		Name:      supplyNode,
 		Content:   []byte(`{"rules":[]}`),
 		Hash:      "h1",
 		Revision:  3,

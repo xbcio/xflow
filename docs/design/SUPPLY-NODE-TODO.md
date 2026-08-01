@@ -57,12 +57,40 @@ supply metric 在生产中无处上报。单测里有 observer 打点，**不代
 稳定性测试只查前缀不钉死字面值），修的价值在于**将来加字段时能被检出**，而非
 当下有错。
 
-## 待验证（非缺陷）
+## ~~待验证~~ ✓ 已完成（非缺陷排查）
 
 合并时发现 `TestDrainPoolNotifiesObserverPoolSwapped` 与引擎自身的 drainer 抢同
 一个 channel 而死锁（已修，`79f519a`）。该缺陷**单跑必过、八包并行必挂**，暴露出
 一个流程问题：分支上那次「全绿」里 wasm 包是 `(cached)`，根本没真跑。
 
-- 尚未跑过 `-race -count=3` 的加压验证（合并时起了但主动中止）。
-- 值得排查是否还有同类「只在并行下暴露」的测试。判据不是「跑过绿」，而是
-  「在缓存未命中的情况下跑过绿」。
+加压验证已完成，**确实还有同类缺陷**，且触发条件比预期宽——不需要 `-race`、也不
+需要多包并行，**整包 `-count=2` 即稳定复现**。日常 `-count=1` 永远看不到。
+
+根因同一族：**进程级全局状态在测试间泄漏**。全仓库逐包 `-count=2` 扫描确认只有两处，
+均为单点遗漏（非系统性）：
+
+1. `wasm/supply_consumer_test.go:185` 用了 `b64(reactorWasm)` 而非本包已有的
+   `testReactorCode(t)`（同文件其余 6 处都用对了）。`RegisterSupplyConsumer` 会把该
+   code 的引擎**永久**翻成 source-driven（`configFromSource` 单向不可逆，这是正确的
+   产品设计），于是共享 fixture 的其他测试第二轮走上 source-driven 分支、`$config`
+   被 `stripConfig` 丢弃、拿到上一轮遗留的 `r2` 池 —— 表现为
+   `TestReactor_EmptyConfigValid` 报 `empty config should match nothing, got map[r2:true]`。
+2. `script/wasm_supply_seam_test.go` 两个测试对**同名** supply `rules` Apply 不同
+   revision（11 与 3）。`supply.Default` 是进程级单例，而 `UnregisterConsumer` 只摘
+   consumer、**不清除已 Apply 的 Snapshot**，于是 revision 3 残留 —— 表现为
+   `config_generation = 0x3, want 11`。已改为 helper 内按 `t.Name()` 派生唯一 supply 名，
+   新增测试自动获得隔离。
+
+**修复仅动测试，产品代码零改动**：`configFromSource` 单向不可逆与 `stripConfig` 都是
+有意的生产行为，为测试便利加「翻回 legacy」的路径会在产品里开危险的口子。
+
+两个受影响的守护测试已用删除注入复验**确实承重**（改坏 `stripConfig` / 让 `swapConfig`
+用固定规则集建池，二者立即失败）——此前它们可能靠读到别的测试残留而通过。
+
+`-race -count=3` 全仓库另有两条失败，判定为 **race 假阳性，勿改**：
+`TestDiskCache_SurvivesRuntimeRecreation`（<500ms 门槛）与 `TestP2_ColdStartBudget`
+（<100ms 预算）无 race 单跑仅 1.74s/2.08s，门槛按无 race 性能定，`-race` 给 wazero
+编译的开销让其必然超标。改门槛就是让判据迁就工具开销。
+
+判据仍是：不是「跑过绿」，而是「在缓存未命中的情况下跑过绿」——现在还要加一条
+**`-count=2` 下跑过绿**。
