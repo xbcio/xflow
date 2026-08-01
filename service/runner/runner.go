@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -88,6 +89,13 @@ type Runner struct {
 	activationTracker *ActivationTracker
 	supplyRegistry    *supply.Registry
 	supplyGate        *SupplyGate
+	// acker sends ActivationAck for activations the tracker failed to take.
+	// nil when there is no ActivationTracker configured, or the configured
+	// client's transport does not support acks (e.g. the gRPC transport,
+	// whose HeartbeatResponse does not carry Activations at all yet — see
+	// protocol.HeartbeatResponse). A nil acker leaves failures logged locally
+	// only, same as before this feature existed.
+	acker *activationAcker
 }
 
 func New(client ProtocolClient, registry engine.HandlerRegistry, config Config) *Runner {
@@ -104,7 +112,7 @@ func New(client ProtocolClient, registry engine.HandlerRegistry, config Config) 
 	if tracer == nil {
 		tracer = tracing.NoopTracer{}
 	}
-	return &Runner{
+	r := &Runner{
 		client:            client,
 		executor:          execution.NewRunner(registry, execution.WithResourcePool(config.ResourcePool), execution.WithCredentialResolver(config.CredentialResolver)),
 		config:            config,
@@ -113,6 +121,12 @@ func New(client ProtocolClient, registry engine.HandlerRegistry, config Config) 
 		supplyRegistry:    config.SupplyRegistry,
 		supplyGate:        config.SupplyGate,
 	}
+	if config.ActivationTracker != nil {
+		if ackClient, ok := client.(activationAckClient); ok {
+			r.acker = newActivationAcker(ackClient, config.RunnerID, slog.Default())
+		}
+	}
+	return r
 }
 
 // Run drives register → poll → execute → report with a pool of Concurrency
@@ -141,6 +155,17 @@ func (r *Runner) Run(ctx context.Context) error {
 		return runContextError(ctx, err)
 	}
 	sessionID := registerResp.SessionID
+
+	// Wire the ack callback with this session's ID now that it is known. Safe
+	// to call unconditionally on every (re)connect: SetOnActivateFailed itself
+	// is a plain field assignment, and this happens-before the heartbeatLoop
+	// goroutine below is started, so it can never race a concurrent
+	// ProcessDirectives call.
+	if r.activationTracker != nil && r.acker != nil {
+		r.activationTracker.SetOnActivateFailed(func(d protocol.ActivateDirective, activateErr error) {
+			r.acker.ackFailed(sessionID, d, activateErr)
+		})
+	}
 
 	var inFlight atomic.Int32
 	leaseCh := make(chan *engine.TaskLease, r.config.Concurrency)
