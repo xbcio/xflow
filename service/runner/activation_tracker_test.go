@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/xbcio/xflow/service/protocol"
 )
@@ -328,5 +329,61 @@ func TestProcessDirectivesDoesNotReportOnSuccess(t *testing.T) {
 	}
 	if calls != 0 {
 		t.Fatalf("callback calls = %d on success, want 0", calls)
+	}
+}
+
+// 钉住并发不变量本身，而不是只钉住可观测行为：回调内部反过来调用
+// tr.Inventory()（需要重新 Lock t.mu）。如果 ProcessDirectives 在持锁期间调用
+// 回调，这里会死锁——用超时把死锁转成可见的测试失败，而不是真的把测试进程
+// 挂起。
+func TestProcessDirectivesInvokesCallbackWithLockReleased(t *testing.T) {
+	h := &mockActivationHandler{activateErr: errors.New("supply not ready: rules")}
+	tr := NewActivationTracker(h, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	tr.SetOnActivateFailed(func(protocol.ActivateDirective, error) {
+		// Reentrant call: only returns if t.mu was released before the callback ran.
+		tr.Inventory()
+	})
+
+	d := protocol.ActivateDirective{WorkflowID: "w", EntryUnitID: "e", Generation: 1}
+	done := make(chan error, 1)
+	go func() {
+		done <- tr.ProcessDirectives(context.Background(), &protocol.HeartbeatActivations{
+			Activate: []protocol.ActivateDirective{d},
+		})
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("ProcessDirectives: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ProcessDirectives deadlocked: the callback must run with t.mu released, " +
+			"but Inventory() called from inside the callback never returned")
+	}
+}
+
+// 回调 panic 不得让整批上报中断，也不得让驱动 ProcessDirectives 的 goroutine
+// 崩溃（生产环境中这个 goroutine 是 heartbeatLoop，未恢复的 panic 会带走整个
+// 进程）。
+func TestProcessDirectivesRecoversFromCallbackPanicAndContinues(t *testing.T) {
+	h := &mockActivationHandler{activateErr: errors.New("supply not ready: rules")}
+	tr := NewActivationTracker(h, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	var calls int
+	tr.SetOnActivateFailed(func(protocol.ActivateDirective, error) {
+		calls++
+		panic("simulated callback panic")
+	})
+
+	d1 := protocol.ActivateDirective{WorkflowID: "w1", EntryUnitID: "e1", Generation: 1}
+	d2 := protocol.ActivateDirective{WorkflowID: "w2", EntryUnitID: "e2", Generation: 1}
+	if err := tr.ProcessDirectives(context.Background(), &protocol.HeartbeatActivations{
+		Activate: []protocol.ActivateDirective{d1, d2},
+	}); err != nil {
+		t.Fatalf("ProcessDirectives: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("callback calls = %d, want 2 (a panic in one callback must not stop reporting the rest)", calls)
 	}
 }

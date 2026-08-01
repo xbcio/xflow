@@ -100,11 +100,31 @@ func (t *ActivationTracker) ProcessDirectives(ctx context.Context, directives *p
 
 	if t.onActivateFailed != nil {
 		for _, f := range failed {
-			t.onActivateFailed(f.directive, f.err)
+			t.invokeOnActivateFailed(f.directive, f.err)
 		}
 	}
 
 	return nil
+}
+
+// invokeOnActivateFailed calls the failure callback with a panic guard. The
+// callback does network I/O (an HTTP ack, wired in by the runner), and a
+// single malformed response must not crash the goroutine driving
+// ProcessDirectives — that would turn one directive's failure into the loss
+// of every other in-flight activation on the runner, and in the heartbeat
+// goroutine an unrecovered panic takes the whole process down with it.
+func (t *ActivationTracker) invokeOnActivateFailed(d protocol.ActivateDirective, activateErr error) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.logger.Error("onActivateFailed callback panicked",
+				"workflow_id", d.WorkflowID,
+				"group_id", d.EntryUnitID,
+				"generation", d.Generation,
+				"panic", r,
+			)
+		}
+	}()
+	t.onActivateFailed(d, activateErr)
 }
 
 func (t *ActivationTracker) activateLocked(ctx context.Context, d protocol.ActivateDirective) error {
