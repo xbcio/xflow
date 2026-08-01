@@ -181,3 +181,106 @@ func TestRunnerLabelRequestsRoundTripGRPCConversion(t *testing.T) {
 		t.Fatalf("poll label mode = %q, want local", got)
 	}
 }
+
+// --- Task 19: rolling-upgrade compatibility for the supply hint/observed fields ---
+
+// A HeartbeatRequest with no SupplyObserved set must marshal to EXACTLY the
+// same bytes as before this task's fields existed — this is what
+// "byte-identical for runners with no supplies" means concretely, and it is
+// what makes a rolling upgrade safe: a NEW server parsing an OLD runner's
+// heartbeat body sees a request indistinguishable from one sent by another
+// new runner that simply has no supplies.
+func TestHeartbeatRequestOmitsSupplyObservedWhenNil(t *testing.T) {
+	req := HeartbeatRequest{RunnerID: "runner-1", SessionID: "sess-1", Capacity: 2, InFlight: 1, Timestamp: 100}
+	data, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(data), "supply_observed") {
+		t.Fatalf("heartbeat request JSON = %s, must not contain supply_observed when nil", data)
+	}
+}
+
+// Symmetric assertion for the response side: HeartbeatResponse with no
+// SupplyHints must not carry the field either.
+func TestHeartbeatResponseOmitsSupplyHintsWhenNil(t *testing.T) {
+	resp := HeartbeatResponse{ServerTime: 100}
+	data, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(data), "supply_hints") {
+		t.Fatalf("heartbeat response JSON = %s, must not contain supply_hints when nil", data)
+	}
+}
+
+// An OLD runner's heartbeat body (no supply_observed key at all — literally
+// what a pre-Task-19 binary sends) must unmarshal cleanly on a NEW server:
+// SupplyObserved decodes to nil, not an error and not a zero-length
+// non-nil map that would behave differently downstream.
+func TestOldRunnerHeartbeatRequestDecodesOnNewServer(t *testing.T) {
+	var req HeartbeatRequest
+	oldPeerBody := `{"runner_id":"runner-1","session_id":"sess-1","capacity":2,"in_flight":1,"timestamp":100}`
+	if err := json.Unmarshal([]byte(oldPeerBody), &req); err != nil {
+		t.Fatalf("unmarshal old-peer heartbeat request: %v", err)
+	}
+	if req.SupplyObserved != nil {
+		t.Fatalf("SupplyObserved = %#v, want nil when the peer never sent the field", req.SupplyObserved)
+	}
+	if req.RunnerID != "runner-1" || req.SessionID != "sess-1" {
+		t.Fatalf("other fields lost in decode: %+v", req)
+	}
+}
+
+// Symmetric: an OLD server's heartbeat response body (no supply_hints,
+// literally what a pre-Task-19 binary sends) must unmarshal cleanly on a NEW
+// runner: SupplyHints decodes to nil.
+func TestOldServerHeartbeatResponseDecodesOnNewRunner(t *testing.T) {
+	var resp HeartbeatResponse
+	oldPeerBody := `{"server_time":100}`
+	if err := json.Unmarshal([]byte(oldPeerBody), &resp); err != nil {
+		t.Fatalf("unmarshal old-peer heartbeat response: %v", err)
+	}
+	if resp.SupplyHints != nil {
+		t.Fatalf("SupplyHints = %#v, want nil when the peer never sent the field", resp.SupplyHints)
+	}
+	if resp.ServerTime != 100 {
+		t.Fatalf("ServerTime = %d, want 100", resp.ServerTime)
+	}
+}
+
+// A NEW runner's heartbeat body, when it DOES have supplies, must round-trip
+// SupplyObserved through JSON so a new server can read it back intact.
+func TestHeartbeatRequestRoundTripsSupplyObserved(t *testing.T) {
+	req := HeartbeatRequest{
+		RunnerID: "runner-1", SessionID: "sess-1", Capacity: 1,
+		SupplyObserved: map[string]string{"rules": "sha256:abc"},
+	}
+	data, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got HeartbeatRequest
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.SupplyObserved["rules"] != "sha256:abc" {
+		t.Fatalf("SupplyObserved = %#v, want {rules: sha256:abc}", got.SupplyObserved)
+	}
+}
+
+// Symmetric round-trip for SupplyHints on the response side.
+func TestHeartbeatResponseRoundTripsSupplyHints(t *testing.T) {
+	resp := HeartbeatResponse{ServerTime: 100, SupplyHints: map[string]string{"rules": "sha256:def"}}
+	data, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got HeartbeatResponse
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.SupplyHints["rules"] != "sha256:def" {
+		t.Fatalf("SupplyHints = %#v, want {rules: sha256:def}", got.SupplyHints)
+	}
+}

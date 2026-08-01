@@ -75,6 +75,16 @@ type Core struct {
 	// a graph on the seed path to derive entry activations. Nil means no registry
 	// is configured.
 	workflowRegistry backend.WorkflowRegistry
+	// supplyHinter, when non-nil, computes the per-runner supply hints
+	// piggybacked on the heartbeat response. Nil (the default whenever
+	// Config.Supplies is not provided) means heartbeats never carry
+	// SupplyHints — byte-identical to the pre-Task-19 behavior.
+	supplyHinter *SupplyHinter
+	// supplyObserved, when non-nil, records each runner's reported "applied
+	// content hash per supply" from HeartbeatRequest.SupplyObserved. Nil means
+	// the report is accepted but discarded (no aggregation), which is safe: it
+	// is a diagnostic read, never a gate on anything.
+	supplyObserved SupplyObservedSink
 }
 
 // leaseRecoveryEngine is deliberately optional so custom EngineFacade test
@@ -213,6 +223,17 @@ func (c *Core) heartbeat(ctx context.Context, req protocol.HeartbeatRequest, inf
 	// The node-generic entry reconciler supplies activation directives when wired.
 	if c.entryReconciler != nil {
 		resp.Activations = c.entryReconciler.DirectivesForRunner(req.RunnerID)
+	}
+	// Supply hints/observed reporting: both optional, wired only when
+	// Config.Supplies is provided (see ControlPlane assembly). Nil means this
+	// heartbeat's request/response bodies are unaffected.
+	if c.supplyHinter != nil {
+		resp.SupplyHints = c.supplyHinter.HintsForRunner(ctx, req.RunnerID)
+	}
+	if len(req.SupplyObserved) > 0 && c.supplyObserved != nil {
+		// Record what this runner has actually applied. Best-effort: an observed
+		// report is diagnostic, never a gate on the heartbeat succeeding.
+		c.supplyObserved.Record(req.RunnerID, req.SupplyObserved)
 	}
 	return resp, nil
 }

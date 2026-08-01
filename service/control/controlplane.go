@@ -13,11 +13,13 @@ import (
 
 	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/observability/metrics"
 	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/service/protocol/runnerpb"
+	"github.com/xbcio/xflow/store"
 )
 
 var (
@@ -73,6 +75,15 @@ type Config struct {
 	// the explicit /v1/workflows/register endpoint so later tasks can resolve a
 	// graph on seed and derive entry activations. Optional.
 	WorkflowRegistry backend.WorkflowRegistry
+	// Supplies, when non-nil, backs the heartbeat-piggybacked supply hint
+	// (server→runner) and observed-hash (runner→server) channels: a
+	// SupplyHinter and a MemorySupplyObserved are constructed and wired into
+	// both the HTTP and gRPC Core instances. Nil means neither is constructed
+	// and heartbeat bodies are byte-identical to before this field existed —
+	// this is the "wiring is optional" requirement: a deployment with no
+	// store.Supplies configured (e.g. no PrincipalAuth for the supply HTTP
+	// module) sees no behavior change at all.
+	Supplies store.Supplies
 }
 
 type redisClientProvider interface {
@@ -148,6 +159,12 @@ type ControlPlane struct {
 	// graphs. Resolved from Config.WorkflowRegistry, else from the backend
 	// provider when it exposes one, else nil. Exposed via WorkflowRegistry().
 	workflowRegistry backend.WorkflowRegistry
+
+	// supplyObserved is the optional sink of runner-reported applied supply
+	// hashes. Non-nil only when both Config.EntryActivationStore and
+	// Config.Supplies are provided. Exposed via SupplyObserved() for
+	// diagnostics/management reads.
+	supplyObserved SupplyObservedSink
 
 	lifecycleMu           sync.Mutex
 	started               bool
@@ -284,6 +301,12 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 	// reconciler's Run loop is launched leader-gated in Start.
 	var entryManager *EntryActivationManager
 	var entryReconciler *EntryActivationReconciler
+	// entryNamespaces is the reconciler's namespace list, captured outside the
+	// block below so the supply hinter (assembled after) can enumerate the
+	// SAME namespaces without a second configuration knob. nil here defaults
+	// to {namespace.Default} in both NewEntryActivationReconciler and
+	// NewSupplyHinter identically.
+	var entryNamespaces []namespace.Namespace
 	if cfg.EntryActivationStore != nil {
 		entryManager = NewEntryActivationManager(cfg.EntryActivationStore)
 		entrySelector := DefaultRunnerSelector()
@@ -302,6 +325,24 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 		entryReconciler = NewEntryActivationReconciler(recCfg)
 		httpServer.core.entryReconciler = entryReconciler
 		grpcServer.core.entryReconciler = entryReconciler
+		entryNamespaces = recCfg.Namespaces
+	}
+
+	// Supply hint/observed wiring: optional, and only meaningful once an
+	// EntryActivationStore exists (the hinter reads activations to find "which
+	// runner hosts which supply") AND a store.Supplies is configured (the source
+	// of current content hashes). Either missing means both stay nil, and
+	// heartbeat request/response bodies are exactly as before this field
+	// existed — see the Config.Supplies doc comment.
+	var supplyObserved SupplyObservedSink
+	if cfg.EntryActivationStore != nil && cfg.Supplies != nil {
+		hinter := NewSupplyHinter(cfg.EntryActivationStore, cfg.Supplies, entryNamespaces, cfg.Logger)
+		observed := NewMemorySupplyObserved()
+		httpServer.core.supplyHinter = hinter
+		grpcServer.core.supplyHinter = hinter
+		httpServer.core.supplyObserved = observed
+		grpcServer.core.supplyObserved = observed
+		supplyObserved = observed
 	}
 
 	return &ControlPlane{
@@ -318,8 +359,15 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 		entryManager:     entryManager,
 		entryReconciler:  entryReconciler,
 		workflowRegistry: workflowRegistry,
+		supplyObserved:   supplyObserved,
 	}, nil
 }
+
+// SupplyObserved returns the sink of runner-reported applied supply hashes, or
+// nil when no store.Supplies was configured (Config.Supplies). Read-only;
+// intended for management/diagnostic surfaces that answer "has runner X
+// applied revision Y yet".
+func (cp *ControlPlane) SupplyObserved() SupplyObservedSink { return cp.supplyObserved }
 
 // Handler returns the HTTP Runner Protocol + workflow API mux. Mount it into
 // a host program's own http.ServeMux/http.Server, or serve it directly.

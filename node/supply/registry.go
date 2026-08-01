@@ -294,6 +294,19 @@ func (r *Registry) Get(name string) (Snapshot, bool) {
 func (r *Registry) IsReady(name string) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	return r.isReadyLocked(name)
+}
+
+// isReadyLocked is IsReady's logic without acquiring the lock. Callers that
+// need readiness together with other locked state (e.g. Observed, which needs
+// both "is it ready" and "what hash is cached" for the same name) must call
+// this under a single r.mu.RLock rather than calling IsReady and Get
+// separately — two separate lock acquisitions leave a window where content
+// changes between them, and the pairing (ready, hash) they observed was never
+// simultaneously true.
+//
+// Caller must hold r.mu (read or write).
+func (r *Registry) isReadyLocked(name string) bool {
 	cached, ok := r.snapshots[name]
 	if !ok {
 		return false
@@ -411,6 +424,44 @@ func (r *Registry) republishDecodedLocked() {
 // must NOT mutate it or anything reachable from it.
 func (r *Registry) Decoded() map[string]any {
 	return *r.decoded.Load()
+}
+
+// Observed returns "name → currently in-effect content hash" for every supply
+// this process reports as READY (see IsReady) — not merely cached. The runner
+// reports this on each heartbeat so the server can answer whether a new
+// revision has reached every runner; it is the platform's analogue of
+// Kubernetes' observedGeneration.
+//
+// The distinction matters because content can be cached but REJECTED by a
+// consumer (Task 15's gate exists precisely for this case): reporting a
+// rejected hash as "observed" would tell the server this runner has converged
+// on content it is actually refusing to use, silently masking the divergence
+// observedGeneration exists to surface. Only a name whose IsReady is true has
+// actually taken effect here.
+//
+// Readiness and hash are read together under ONE lock acquisition
+// (isReadyLocked), not via a separate IsReady then Get: two separate
+// acquisitions leave a window where content changes in between, and the pair
+// this method would then report was never simultaneously true.
+//
+// Hashes only: the content itself never leaves this process through this path.
+func (r *Registry) Observed() map[string]string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if len(r.snapshots) == 0 {
+		return nil
+	}
+	var out map[string]string
+	for name, s := range r.snapshots {
+		if !r.isReadyLocked(name) {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]string, len(r.snapshots))
+		}
+		out[name] = s.Hash
+	}
+	return out
 }
 
 // decodeForExpr turns one snapshot into the value expressions see. A JSON object

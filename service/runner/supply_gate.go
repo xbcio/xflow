@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/xbcio/xflow/engine"
@@ -74,6 +75,23 @@ type SupplyGate struct {
 	// observer, when set, receives metrics-facing notifications. nil means no
 	// observation (existing callers/tests that never call SetObserver).
 	observer SupplyGateObserver
+
+	// resources maps supply NODE name → resource name, recorded by Admit for
+	// every requirement it processes. A heartbeat hint carries only the node
+	// name (that is the identity $supplies and the consumer registry use), but
+	// SupplyFetcher.Fetch needs the resource name — they differ whenever a node
+	// overrides `resource`. This is populated at activation time, which is the
+	// only place the mapping is known; ApplyHints has no other way to recover
+	// it later.
+	resources sync.Map // string(node name) -> string(resource name)
+
+	// hintsInFlight marks supply names currently being fetched by ApplyHints.
+	// The caller (Runner.processSupplyHints) runs ApplyHints in its own
+	// goroutine per heartbeat so a slow fetch cannot delay the next heartbeat;
+	// this map is what stops two overlapping heartbeat rounds from firing a
+	// second concurrent fetch for the same name while the first is still in
+	// flight (which would waste a fetch and could apply results out of order).
+	hintsInFlight sync.Map // string(node name) -> struct{}
 }
 
 func NewSupplyGate(f SupplyFetcher, reg *supply.Registry, logger *slog.Logger) *SupplyGate {
@@ -85,6 +103,18 @@ func NewSupplyGate(f SupplyFetcher, reg *supply.Registry, logger *slog.Logger) *
 
 // SetObserver installs the gate's observer. nil disables observation.
 func (g *SupplyGate) SetObserver(o SupplyGateObserver) { g.observer = o }
+
+// resourceFor returns the resource name recorded for a supply NODE name at a
+// prior Admit call, or name itself when never recorded (the common case: node
+// name and resource name are equal unless a workflow overrides `resource`).
+func (g *SupplyGate) resourceFor(name string) string {
+	if v, ok := g.resources.Load(name); ok {
+		if s, ok := v.(string); ok && s != "" {
+			return s
+		}
+	}
+	return name
+}
 
 // Admit reports whether the activation may proceed. It returns *NotReadyError
 // listing every required-but-absent supply — all of them, so an operator does not
@@ -101,6 +131,11 @@ func (g *SupplyGate) Admit(ctx context.Context, workflowID string, reqs []engine
 	}
 	var missing []string
 	for _, req := range reqs {
+		// Record the node→resource mapping regardless of outcome below: a later
+		// heartbeat hint carries only the node name, and this is the only place
+		// the resource name is known. Recording it even when a fetch fails or a
+		// consumer rejects keeps ApplyHints able to retry with the right name.
+		g.resources.Store(req.Node, req.Resource)
 		if g.registry.IsReady(req.Node) {
 			g.notifyNotReady(ctx, workflowID, req.Node, false)
 			continue
@@ -219,4 +254,73 @@ func hashPrefix(hash string) string {
 		body = body[:keep]
 	}
 	return body
+}
+
+// ApplyHints reacts to the server's supply hints: for each name whose hinted
+// hash differs from what this process has, fetch once and publish.
+//
+// A hint is advisory. Losing one is not an error and is not retried here — the
+// activation-time fetch (Admit) and the TTL watcher are the convergence
+// guarantees. That separation is deliberate: a design where the piggybacked
+// notification is the only channel keeps a stale value forever the first time
+// a message is dropped (network partition, runner restart, server failover).
+//
+// Scope note: this affects only WHEN an already-hosted runner refreshes
+// content it already consumes. It has nothing to do with whether an
+// activation gets hosted in the first place — a gate-declined activation
+// staying declined is a separate, currently-open gap (see the Task 18
+// addendum) that ApplyHints neither causes nor fixes; there is no hint for a
+// supply this process has no requirement for at all.
+func (g *SupplyGate) ApplyHints(ctx context.Context, hints map[string]string) {
+	if g == nil || len(hints) == 0 {
+		return
+	}
+	for name, hash := range hints {
+		if cur, ok := g.registry.Get(name); ok && cur.Hash == hash {
+			continue // already on this content: zero cost
+		}
+		// De-dupe: if a fetch for this name is already in flight (from an
+		// overlapping ApplyHints call, e.g. two heartbeat rounds whose fetches
+		// both outlived the heartbeat interval), skip rather than fire a second
+		// concurrent fetch. The in-flight one will land the same content this
+		// hint is asking for.
+		if _, already := g.hintsInFlight.LoadOrStore(name, struct{}{}); already {
+			continue
+		}
+		g.applyOneHint(ctx, name)
+	}
+}
+
+// applyOneHint fetches and applies a single hinted supply, always clearing its
+// in-flight marker on return (including on every early-return path, which is
+// why this is its own function rather than inlined into ApplyHints' loop).
+func (g *SupplyGate) applyOneHint(ctx context.Context, name string) {
+	defer g.hintsInFlight.Delete(name)
+	// The hint keys on the supply NODE name; the fetch needs the RESOURCE
+	// name. They are equal unless the node overrode `resource`, so the gate
+	// remembers the mapping when it admits an activation (see resources).
+	resource := g.resourceFor(name)
+	content, fetchedHash, revision, err := g.fetcher.Fetch(ctx, resource)
+	if err != nil {
+		g.notifyFetch(ctx, resource, "error")
+		g.logHintOutcome(slog.LevelWarn, "supply hint: fetch failed", name, resource, "")
+		return
+	}
+	g.notifyFetch(ctx, resource, "ok")
+	if err := g.registry.Apply(ctx, supply.Snapshot{
+		Name: name, Content: content, Hash: fetchedHash,
+		Revision: revision, FetchedAt: time.Now(),
+	}); err != nil {
+		// A consumer rejected it (e.g. the wasm canary said no). last-good is
+		// preserved by construction; the next hint or TTL poll retries.
+		g.logHintOutcome(slog.LevelWarn, "supply hint: content rejected by a consumer", name, resource, fetchedHash)
+		return
+	}
+	g.logHintOutcome(slog.LevelInfo, "supply hint: applied", name, resource, fetchedHash)
+}
+
+// logHintOutcome logs one ApplyHints outcome via the shared g.log formatter,
+// carrying only the supply name/resource and a hash PREFIX — never content.
+func (g *SupplyGate) logHintOutcome(level slog.Level, msg, node, resource, hash string) {
+	g.log(context.Background(), level, msg, engine.SupplyRequirement{Node: node, Resource: resource}, hash)
 }

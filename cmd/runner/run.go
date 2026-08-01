@@ -354,6 +354,14 @@ func runnerServiceConfig(cfg runnerConfig) (runnersvc.Config, error) {
 			runnersvc.WithSeedHTTPClient(seedClient),
 			runnersvc.WithSupplyGate(gate))
 		svcCfg.ActivationTracker = runnersvc.NewActivationTracker(handler, slog.Default())
+		// Same gate/registry pair feeds the heartbeat's two supply channels: the
+		// registry is what Observed() reads out to report applied hashes, and
+		// the gate is what ApplyHints fetches into on a piggybacked hint. Both
+		// nil whenever this runner hosts no triggers (no supply-consuming
+		// workflow can be activated here either), which keeps heartbeat bodies
+		// byte-identical to before this wiring existed for that runner shape.
+		svcCfg.SupplyRegistry = supply.Default
+		svcCfg.SupplyGate = gate
 	}
 	return svcCfg, nil
 }

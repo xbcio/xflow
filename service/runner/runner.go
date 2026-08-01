@@ -11,6 +11,7 @@ import (
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
 	"github.com/xbcio/xflow/namespace"
+	"github.com/xbcio/xflow/node/supply"
 	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/types"
@@ -67,6 +68,16 @@ type Config struct {
 	// ActivationTracker, when set, processes activation directives piggybacked on
 	// heartbeat responses. nil means activations are ignored (passive runner).
 	ActivationTracker *ActivationTracker
+	// SupplyRegistry, when set, is the process-local supply cache this runner
+	// reports Observed() from on every heartbeat. nil means the heartbeat never
+	// carries SupplyObserved — byte-identical to a runner with no supplies.
+	SupplyRegistry *supply.Registry
+	// SupplyGate, when set, receives heartbeat-piggybacked supply hints
+	// (HeartbeatResponse.SupplyHints) and fetches once per changed hash. nil
+	// means hints are silently ignored — this runner relies solely on the
+	// activation-time fetch and TTL polling for convergence, which is still
+	// correct, just slower for supplies whose activation already happened.
+	SupplyGate *SupplyGate
 }
 
 type Runner struct {
@@ -75,6 +86,8 @@ type Runner struct {
 	config            Config
 	tracer            tracing.Tracer
 	activationTracker *ActivationTracker
+	supplyRegistry    *supply.Registry
+	supplyGate        *SupplyGate
 }
 
 func New(client ProtocolClient, registry engine.HandlerRegistry, config Config) *Runner {
@@ -97,6 +110,8 @@ func New(client ProtocolClient, registry engine.HandlerRegistry, config Config) 
 		config:            config,
 		tracer:            tracer,
 		activationTracker: config.ActivationTracker,
+		supplyRegistry:    config.SupplyRegistry,
+		supplyGate:        config.SupplyGate,
 	}
 }
 
@@ -319,11 +334,11 @@ func (r *Runner) executeAndReport(ctx context.Context, sessionID string, lease *
 	defer cancel()
 
 	req := protocol.ReportResultRequest{
-		RunnerID:     r.config.RunnerID,
-		SessionID:    sessionID,
-		Lease:        lease,
-		Result:       result,
-		GroupResult:  groupResult,
+		RunnerID:    r.config.RunnerID,
+		SessionID:   sessionID,
+		Lease:       lease,
+		Result:      result,
+		GroupResult: groupResult,
 		// Inject the execute span context so the server's report/commit span
 		// is a child of xflow.task.execute rather than a fresh root.
 		TraceCarrier: tracing.InjectCarrier(reportCtx),
@@ -341,7 +356,8 @@ func (r *Runner) executeAndReport(ctx context.Context, sessionID string, lease *
 // heartbeatLoop sends heartbeats on its own ticker, independent of task
 // execution. A heartbeat failure signals the run to exit so the caller can
 // reconnect. Activation directives piggybacked on the heartbeat response are
-// forwarded to the activation tracker when configured.
+// forwarded to the activation tracker when configured; supply hints are
+// forwarded to the supply gate.
 func (r *Runner) heartbeatLoop(ctx context.Context, sessionID string, inFlight *atomic.Int32, signalError func(error)) {
 	resp, err := r.heartbeat(ctx, sessionID, int(inFlight.Load()))
 	if err != nil {
@@ -349,6 +365,7 @@ func (r *Runner) heartbeatLoop(ctx context.Context, sessionID string, inFlight *
 		return
 	}
 	r.processActivations(ctx, resp)
+	r.processSupplyHints(ctx, resp)
 
 	ticker := time.NewTicker(r.config.HeartbeatInterval)
 	defer ticker.Stop()
@@ -363,6 +380,7 @@ func (r *Runner) heartbeatLoop(ctx context.Context, sessionID string, inFlight *
 				return
 			}
 			r.processActivations(ctx, resp)
+			r.processSupplyHints(ctx, resp)
 		}
 	}
 }
@@ -374,14 +392,46 @@ func (r *Runner) processActivations(ctx context.Context, resp protocol.Heartbeat
 	}
 }
 
+// processSupplyHints reacts to piggybacked supply hints. Failures are not
+// propagated: a hint is an optimization and must never take a runner offline.
+//
+// ApplyHints does a synchronous HTTP fetch per changed hash (up to
+// supplyFetchTimeout = 15s in supply_client.go), which can exceed the default
+// 5s heartbeat interval. Running it inline here would delay the NEXT
+// heartbeat send, and a heartbeat that arrives late enough risks the
+// server-side lease/liveness window lapsing and the runner's activations
+// churning for a reason that has nothing to do with the activations
+// themselves. So this is fired into its own goroutine — the heartbeat loop
+// moves on immediately — and SupplyGate.ApplyHints' own hintsInFlight map is
+// what stops two overlapping heartbeat rounds from double-fetching the same
+// name while an earlier fetch is still outstanding.
+func (r *Runner) processSupplyHints(ctx context.Context, resp protocol.HeartbeatResponse) {
+	if len(resp.SupplyHints) == 0 || r.supplyGate == nil {
+		return
+	}
+	hints := resp.SupplyHints
+	go r.supplyGate.ApplyHints(ctx, hints)
+}
+
 func (r *Runner) heartbeat(ctx context.Context, sessionID string, inFlight int) (protocol.HeartbeatResponse, error) {
 	return r.client.Heartbeat(ctx, protocol.HeartbeatRequest{
-		RunnerID:  r.config.RunnerID,
-		SessionID: sessionID,
-		Capacity:  r.config.Concurrency,
-		InFlight:  inFlight,
-		Timestamp: time.Now().Unix(),
+		RunnerID:       r.config.RunnerID,
+		SessionID:      sessionID,
+		Capacity:       r.config.Concurrency,
+		InFlight:       inFlight,
+		Timestamp:      time.Now().Unix(),
+		SupplyObserved: r.observedSupplies(),
 	})
+}
+
+// observedSupplies reports the content hashes currently in effect here. nil
+// when this runner has no SupplyRegistry configured or hosts no supply, so the
+// heartbeat body is unchanged for runners that consume none.
+func (r *Runner) observedSupplies() map[string]string {
+	if r.supplyRegistry == nil {
+		return nil
+	}
+	return r.supplyRegistry.Observed()
 }
 
 func runContextError(ctx context.Context, err error) error {

@@ -411,9 +411,15 @@ func runServer(cfg serverConfig) error {
 	}
 
 	apiCfg := apiserver.Config{
-		RedisAddr:           redisAddr, // legacy single-node path
-		RedisConfig:         redisConfig,
-		Store:               sqlStore,
+		RedisAddr:   redisAddr, // legacy single-node path
+		RedisConfig: redisConfig,
+		Store:       sqlStore,
+		// Supplies backs both the /v1/supplies HTTP endpoints (gated separately
+		// on PrincipalAuth) and the heartbeat hint/observed channel wired into
+		// control.Config.Supplies. sqlStore already satisfies store.Supplies
+		// (store.Store embeds it); nil in the in-memory dev mode (--mysql-dsn
+		// unset), which correctly leaves both features off.
+		Supplies:            sqlStore,
 		Concurrency:         cfg.concurrency,
 		Auth:                auth,
 		Logger:              logger,

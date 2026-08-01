@@ -50,11 +50,32 @@ type HeartbeatRequest struct {
 	InFlight  int    `json:"in_flight"`
 	Timestamp int64  `json:"timestamp"`
 	AuthToken string `json:"auth_token,omitempty"`
+	// SupplyObserved reports the content hash currently in effect for each supply
+	// this runner hosts a consumer for. Aggregated server-side it answers "are all
+	// runners on revision N yet" — the direct analogue of Kubernetes'
+	// observedGeneration, which the platform otherwise has no equivalent of.
+	//
+	// It carries hashes, never content.
+	SupplyObserved map[string]string `json:"supply_observed,omitempty"`
 }
 
 type HeartbeatResponse struct {
-	ServerTime  int64                `json:"server_time"`
+	ServerTime  int64                 `json:"server_time"`
 	Activations *HeartbeatActivations `json:"activations,omitempty"`
+	// SupplyHints carries "supply node name → current content hash" for the
+	// supplies this runner hosts a consumer for. A differing hash tells the runner
+	// to fetch once; an equal hash costs nothing.
+	//
+	// This is a latency optimization, NOT the correctness channel: hints are lost
+	// to partitions, restarts and leader changes. Convergence is guaranteed by the
+	// activation-time fetch plus TTL polling. Only hashes travel here, so the
+	// heartbeat body does not grow with content size.
+	//
+	// NOTE: the gRPC transport does not carry this field (its HeartbeatResponse
+	// proto has only server_time, and does not carry Activations either). Under
+	// gRPC, supply changes converge on the TTL period instead of the heartbeat
+	// period — slower, still correct.
+	SupplyHints map[string]string `json:"supply_hints,omitempty"`
 }
 
 type PollTaskRequest struct {

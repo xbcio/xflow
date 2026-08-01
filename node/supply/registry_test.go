@@ -956,3 +956,97 @@ func TestPanickingConsumerDoesNotStrandInFlight(t *testing.T) {
 		t.Fatal("with no consumers left, IsReady must be true")
 	}
 }
+
+// --- Observed() ---
+
+// With no snapshots at all, Observed must be nil (not an empty map) so a
+// runner hosting no supply sends a heartbeat body unchanged from before this
+// field existed (omitempty drops a nil map but not an empty non-nil one the
+// same way at the Go-value level the brief cares about).
+func TestObservedNilWhenEmpty(t *testing.T) {
+	r := NewRegistry()
+	if got := r.Observed(); got != nil {
+		t.Fatalf("Observed() = %#v, want nil", got)
+	}
+}
+
+// The common case: content cached, no registered consumer to reject it.
+// Observed must report its hash.
+func TestObservedReportsReadyContent(t *testing.T) {
+	r := NewRegistry()
+	ctx := context.Background()
+	if err := r.Apply(ctx, snap("rules", "v1", 1)); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	got := r.Observed()
+	if len(got) != 1 || got["rules"] != "h-v1" {
+		t.Fatalf("Observed() = %#v, want {rules: h-v1}", got)
+	}
+}
+
+// THE core Observed() assertion (per the addendum's ruling): content that is
+// cached but REJECTED by a registered consumer must NOT appear in Observed —
+// reporting it would tell the server this runner has converged on content it
+// is actually refusing to use, which is exactly the divergence
+// observedGeneration exists to catch. This is the same distinction
+// SupplyGate.Admit relies on (IsReady, not bare Get).
+func TestObservedExcludesRejectedContent(t *testing.T) {
+	r := NewRegistry()
+	ctx := context.Background()
+	c := &recordingConsumer{fail: errors.New("configure returned -1")}
+	r.RegisterConsumer("rules", "wasm/clean", c)
+
+	if err := r.Apply(ctx, snap("rules", "v1", 1)); err == nil {
+		t.Fatal("expected the rejecting consumer's error to surface")
+	}
+	if got := r.Observed(); got != nil {
+		t.Fatalf("Observed() = %#v, want nil: content is cached but rejected, must not be reported as applied", got)
+	}
+}
+
+// Once the rejecting consumer starts accepting (a re-Apply with the same
+// content), Observed must start reporting it — the rejection was resolved,
+// not permanent.
+func TestObservedReportsOnceConsumerAccepts(t *testing.T) {
+	r := NewRegistry()
+	ctx := context.Background()
+	c := &recordingConsumer{fail: errors.New("boom")}
+	r.RegisterConsumer("rules", "wasm/clean", c)
+	if err := r.Apply(ctx, snap("rules", "v1", 1)); err == nil {
+		t.Fatal("expected rejection")
+	}
+	if got := r.Observed(); got != nil {
+		t.Fatalf("Observed() = %#v, want nil while rejecting", got)
+	}
+
+	c.mu.Lock()
+	c.fail = nil
+	c.mu.Unlock()
+	// Unregister+re-register is the simplest way to force a fresh notify for
+	// the SAME content without a new Apply call (mirrors
+	// TestRegisterConsumerRejectionRecoversOnReapply's pattern elsewhere in
+	// this file, adapted to avoid a second unrelated snapshot).
+	r.UnregisterConsumer("rules", "wasm/clean")
+	if got := r.Observed(); len(got) != 1 || got["rules"] != "h-v1" {
+		t.Fatalf("Observed() after unregistering the rejector = %#v, want {rules: h-v1}", got)
+	}
+}
+
+// A mix of ready and not-ready supplies: Observed reports only the ready one.
+func TestObservedReportsOnlyReadySubset(t *testing.T) {
+	r := NewRegistry()
+	ctx := context.Background()
+	if err := r.Apply(ctx, snap("ready-one", "v1", 1)); err != nil {
+		t.Fatalf("Apply ready-one: %v", err)
+	}
+	c := &recordingConsumer{fail: errors.New("boom")}
+	r.RegisterConsumer("not-ready", "wasm/clean", c)
+	if err := r.Apply(ctx, snap("not-ready", "v1", 1)); err == nil {
+		t.Fatal("expected rejection for not-ready")
+	}
+
+	got := r.Observed()
+	if len(got) != 1 || got["ready-one"] != "h-v1" {
+		t.Fatalf("Observed() = %#v, want exactly {ready-one: h-v1}", got)
+	}
+}

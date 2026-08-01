@@ -201,10 +201,11 @@ const entryActivationStoreTTL = 24 * time.Hour
 // caller's responsibility to construct.
 func buildControlPlane(cfg Config) (*control.ControlPlane, error) {
 	ccfg := control.Config{
-		Auth:    cfg.Auth,
-		Logger:  cfg.Logger,
-		Metrics: cfg.Metrics,
-		Tracer:  cfg.Tracer,
+		Auth:     cfg.Auth,
+		Logger:   cfg.Logger,
+		Metrics:  cfg.Metrics,
+		Tracer:   cfg.Tracer,
+		Supplies: cfg.Supplies,
 	}
 
 	useRedis := cfg.RedisConfig != nil || cfg.RedisAddr != ""
