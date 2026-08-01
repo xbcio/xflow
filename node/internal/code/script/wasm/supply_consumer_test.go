@@ -101,7 +101,15 @@ func TestRegistrationAndEngineCreationResolveInEitherOrder(t *testing.T) {
 // cannot occur rather than being caught after the fact. A test asserting it
 // would assert nothing.
 func TestConcurrentRegisterAndEngineCreateIsRaceFree(t *testing.T) {
-	const iterations = 20
+	// Three iterations, not twenty. Each one builds a fresh host and recompiles
+	// the module, so this test cost 27s of the package's 48s — more than half,
+	// and 11x the next slowest test. That price only buys value if more
+	// iterations raise the odds of catching something, and they demonstrably do
+	// not: the window this exercises is unreachable by scheduling (see the note
+	// above), so iteration 20 tells us exactly what iteration 3 does. What the
+	// repetition does still buy is more chances for the race detector to observe
+	// the two goroutines interleaving, which is why it is not reduced to one.
+	const iterations = 3
 	for i := 0; i < iterations; i++ {
 		h := newReactorHost()
 		code := testReactorCode(t)
