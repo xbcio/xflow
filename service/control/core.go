@@ -252,7 +252,30 @@ func (c *Core) activationAck(ctx context.Context, req protocol.ActivationAck, in
 	if c.entryReconciler == nil {
 		return nil
 	}
-	return c.entryReconciler.MarkActivationFailed(ctx, req.RunnerID, req)
+	// Resolve the namespace server-side from the runner's registration record
+	// (never from the client body). A runner registers with one or more
+	// namespaces; we probe each with a precise Get to find the matching
+	// activation. This is O(runner namespace count) exact Gets, NOT a scan.
+	namespaces := c.runnerNamespaces(ctx, req.RunnerID)
+	for _, ns := range namespaces {
+		nsCtx := namespace.WithNamespace(ctx, ns)
+		err := c.entryReconciler.MarkActivationFailed(nsCtx, req.RunnerID, req)
+		if err != nil {
+			return normalizeRunnerError(err, c.logger, "activation_ack")
+		}
+	}
+	return nil
+}
+
+// runnerNamespaces returns the namespace set for a runner from the directory's
+// authoritative registration record. Falls back to {namespace.Default} when the
+// runner is not found (e.g. expired) or registered with an empty list.
+func (c *Core) runnerNamespaces(ctx context.Context, runnerID string) []namespace.Namespace {
+	snap, ok := c.runners.Runner(ctx, runnerID)
+	if ok && len(snap.Namespaces) > 0 {
+		return snap.Namespaces
+	}
+	return []namespace.Namespace{namespace.Default}
 }
 
 func (c *Core) pollTask(ctx context.Context, req protocol.PollTaskRequest, info TransportInfo) (protocol.PollTaskResponse, error) {

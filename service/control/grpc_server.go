@@ -180,6 +180,11 @@ func grpcTransportInfo(ctx context.Context) TransportInfo {
 }
 
 // runnerStatus maps transport-agnostic Core sentinel errors to gRPC status codes.
+//
+// NOTE: The gRPC transport does NOT yet expose an ActivationAck RPC. gRPC-only
+// runners cannot send activation acks; the fence path is silent-dead in that
+// deployment mode. The HTTP transport carries it today; a gRPC RPC + proto
+// definition is needed when gRPC-only runners exist. (Task 6 scope: HTTP only.)
 func runnerStatus(err error) error {
 	switch {
 	case errors.Is(err, ErrRunnerIDRequired), errors.Is(err, ErrRunnerSessionRequired), errors.Is(err, ErrConcurrencyRequired), errors.Is(err, ErrInvalidNamespace), errors.Is(err, ErrLeaseRequired), errors.Is(err, ErrMissingWorkflowVersion):
