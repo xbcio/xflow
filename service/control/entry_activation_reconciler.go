@@ -2,7 +2,6 @@ package control
 
 import (
 	"context"
-	"errors"
 	"math/rand"
 	"strings"
 	"sync"
@@ -13,11 +12,6 @@ import (
 	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/types"
 )
-
-// errMissingWorkflowVersion is returned by MarkActivationFailed when the ack
-// does not carry a workflow version. The message is intentionally generic (no
-// internal key structure exposed) so it can be surfaced to the caller as a 400.
-var errMissingWorkflowVersion = errors.New("activation ack: missing required field workflow_version")
 
 // Default reconciler timings. These preserve the timing behavior of the
 // previous group-centric activation controller (since retired) across the
@@ -748,7 +742,7 @@ func (r *EntryActivationReconciler) MarkActivationFailed(ctx context.Context, ru
 	// the ActivateDirective that triggered the failure. There is no deployed
 	// runner that sends acks without this field.
 	if ack.WorkflowVersion == "" {
-		return errMissingWorkflowVersion
+		return ErrMissingWorkflowVersion
 	}
 
 	key := engine.EntryActivationKey{

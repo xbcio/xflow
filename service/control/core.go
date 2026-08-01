@@ -39,6 +39,9 @@ var (
 	// is not found in the compiled graph, must never be admitted with no
 	// downstream fan-out (spec §11.5). Surfaced by the transport as 404/409.
 	ErrEntrySeedWorkflowUnknown = errors.New("entry seed workflow or unit unknown")
+	// ErrMissingWorkflowVersion is returned when an ActivationAck does not carry
+	// the required workflow_version field. Mapped to 400 by the HTTP transport.
+	ErrMissingWorkflowVersion = errors.New("activation ack: missing required field workflow_version")
 	// ErrInternalServer is the generic message returned to clients for any
 	// error that is not a recognised transport-agnostic sentinel. The full
 	// error is logged server-side; clients must never see internal stack
@@ -236,6 +239,20 @@ func (c *Core) heartbeat(ctx context.Context, req protocol.HeartbeatRequest, inf
 		c.supplyObserved.Record(req.RunnerID, req.SupplyObserved)
 	}
 	return resp, nil
+}
+
+func (c *Core) activationAck(ctx context.Context, req protocol.ActivationAck, info TransportInfo) error {
+	if req.RunnerID == "" || req.SessionID == "" {
+		return ErrRunnerSessionRequired
+	}
+	_, authErr := c.authn().AuthenticateOngoing(req.RunnerID, req.AuthToken, info)
+	if err := c.authDeny(ctx, req.RunnerID, req.AuthToken, "activation_ack", info, authErr); err != nil {
+		return err
+	}
+	if c.entryReconciler == nil {
+		return nil
+	}
+	return c.entryReconciler.MarkActivationFailed(ctx, req.RunnerID, req)
 }
 
 func (c *Core) pollTask(ctx context.Context, req protocol.PollTaskRequest, info TransportInfo) (protocol.PollTaskResponse, error) {
@@ -716,6 +733,7 @@ func normalizeRunnerError(err error, logger engine.Logger, op string) error {
 		errors.Is(err, ErrEngineNotConfigured),
 		errors.Is(err, ErrUnauthenticated),
 		errors.Is(err, ErrRunnerSessionStale),
+		errors.Is(err, ErrMissingWorkflowVersion),
 		errors.Is(err, engine.ErrInvalidLeaseToken):
 		return err
 	default:

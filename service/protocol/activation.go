@@ -71,6 +71,7 @@ const (
 type ActivationAck struct {
 	RunnerID        string           `json:"runner_id"`
 	SessionID       string           `json:"session_id"`
+	AuthToken       string           `json:"auth_token,omitempty"`
 	WorkflowID      string           `json:"workflow_id"`
 	WorkflowVersion string           `json:"workflow_version,omitempty"` // empty for old runners (backward-compat)
 	GroupID         string           `json:"group_id"`
