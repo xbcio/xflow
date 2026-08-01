@@ -69,13 +69,14 @@ const (
 
 // ActivationAck is sent by a runner to acknowledge an activate/deactivate directive.
 type ActivationAck struct {
-	RunnerID   string           `json:"runner_id"`
-	SessionID  string           `json:"session_id"`
-	WorkflowID string           `json:"workflow_id"`
-	GroupID    string           `json:"group_id"`
-	Generation uint64           `json:"generation"`
-	Status     ActivationStatus `json:"status"`
-	Error      string           `json:"error,omitempty"`
+	RunnerID        string           `json:"runner_id"`
+	SessionID       string           `json:"session_id"`
+	WorkflowID      string           `json:"workflow_id"`
+	WorkflowVersion string           `json:"workflow_version,omitempty"` // empty for old runners (backward-compat)
+	GroupID         string           `json:"group_id"`
+	Generation      uint64           `json:"generation"`
+	Status          ActivationStatus `json:"status"`
+	Error           string           `json:"error,omitempty"`
 }
 
 // --- Heartbeat response extension ---

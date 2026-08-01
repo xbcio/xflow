@@ -1173,12 +1173,13 @@ func TestMarkActivationFailedFencesAndRedispatches(t *testing.T) {
 	// Step 2: The runner declines the activation — call MarkActivationFailed.
 	nsCtx := namespace.WithNamespace(ctx, namespace.Default)
 	ack := protocol.ActivationAck{
-		RunnerID:   "runner-a",
-		WorkflowID: string(act.WorkflowID),
-		GroupID:    act.EntryUnitID,
-		Generation: assignedGen,
-		Status:     protocol.ActivationStatusFailed,
-		Error:      "supply content unavailable",
+		RunnerID:        "runner-a",
+		WorkflowID:      string(act.WorkflowID),
+		WorkflowVersion: act.WorkflowVersion,
+		GroupID:         act.EntryUnitID,
+		Generation:      assignedGen,
+		Status:          protocol.ActivationStatusFailed,
+		Error:           "supply content unavailable",
 	}
 	if err := r.MarkActivationFailed(nsCtx, "runner-a", ack); err != nil {
 		t.Fatalf("MarkActivationFailed: %v", err)
@@ -1249,12 +1250,13 @@ func TestMarkActivationFailedRespectsBackoff(t *testing.T) {
 	// Runner declines.
 	nsCtx := namespace.WithNamespace(ctx, namespace.Default)
 	ack := protocol.ActivationAck{
-		RunnerID:   "runner-a",
-		WorkflowID: string(act.WorkflowID),
-		GroupID:    act.EntryUnitID,
-		Generation: assignedGen,
-		Status:     protocol.ActivationStatusFailed,
-		Error:      "gate denied",
+		RunnerID:        "runner-a",
+		WorkflowID:      string(act.WorkflowID),
+		WorkflowVersion: act.WorkflowVersion,
+		GroupID:         act.EntryUnitID,
+		Generation:      assignedGen,
+		Status:          protocol.ActivationStatusFailed,
+		Error:           "gate denied",
 	}
 	if err := r.MarkActivationFailed(nsCtx, "runner-a", ack); err != nil {
 		t.Fatalf("MarkActivationFailed: %v", err)
@@ -1344,12 +1346,13 @@ func TestMarkActivationFailedIgnoresStaleGeneration(t *testing.T) {
 	// A stale ack arrives for generation 1 (the old assignment).
 	nsCtx := namespace.WithNamespace(ctx, namespace.Default)
 	staleAck := protocol.ActivationAck{
-		RunnerID:   "runner-a",
-		WorkflowID: string(act.WorkflowID),
-		GroupID:    act.EntryUnitID,
-		Generation: 1, // stale
-		Status:     protocol.ActivationStatusFailed,
-		Error:      "late failure",
+		RunnerID:        "runner-a",
+		WorkflowID:      string(act.WorkflowID),
+		WorkflowVersion: act.WorkflowVersion,
+		GroupID:         act.EntryUnitID,
+		Generation:      1, // stale
+		Status:          protocol.ActivationStatusFailed,
+		Error:           "late failure",
 	}
 	if err := r.MarkActivationFailed(nsCtx, "runner-a", staleAck); err != nil {
 		t.Fatalf("MarkActivationFailed (stale): %v", err)
@@ -1362,6 +1365,83 @@ func TestMarkActivationFailedIgnoresStaleGeneration(t *testing.T) {
 	}
 	if got.Generation != 2 {
 		t.Fatalf("stale ack must not affect generation, got %d", got.Generation)
+	}
+}
+
+// TestMarkActivationFailedMultiVersionCoexistence verifies that when two
+// activations with the same (WorkflowID, EntryUnitID) but different
+// WorkflowVersion coexist (rolling upgrade), an ack for one version only
+// affects that version's record and leaves the other untouched.
+func TestMarkActivationFailedMultiVersionCoexistence(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryEntryActivationStore()
+
+	// Create two activations: same workflow+entry_unit, different versions.
+	actV1 := testEntryActivation() // WorkflowVersion: "v1"
+	actV2 := testEntryActivation()
+	actV2.WorkflowVersion = "v2"
+
+	keyV1 := keyOfActivation(actV1)
+	keyV2 := keyOfActivation(actV2)
+	if err := store.Upsert(ctx, actV1); err != nil {
+		t.Fatalf("Upsert v1: %v", err)
+	}
+	if err := store.Upsert(ctx, actV2); err != nil {
+		t.Fatalf("Upsert v2: %v", err)
+	}
+
+	now := time.Now().Truncate(time.Second)
+	runner := RunnerSnapshot{
+		RunnerID:      "runner-a",
+		Capacity:      4,
+		Labels:        map[string]string{"zone": "a"},
+		LastHeartbeat: now,
+	}
+	lister := &mockRunnerLister{runners: []RunnerSnapshot{runner}}
+	sel := DefaultRunnerSelector()
+	r := NewEntryActivationReconciler(EntryActivationReconcilerConfig{
+		Store:      store,
+		Lister:     lister,
+		Selector:   &sel,
+		Namespaces: []namespace.Namespace{namespace.Default},
+		LeaseTTL:   60 * time.Second,
+	})
+
+	// Assign both via reconcile.
+	if err := r.Reconcile(ctx, now); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	gotV1, _, _ := store.Get(ctx, keyV1)
+	gotV2, _, _ := store.Get(ctx, keyV2)
+	if gotV1.RunnerID != "runner-a" || gotV2.RunnerID != "runner-a" {
+		t.Fatalf("both versions must be assigned: v1=%q v2=%q", gotV1.RunnerID, gotV2.RunnerID)
+	}
+
+	// Send a failed ack for v1 only.
+	nsCtx := namespace.WithNamespace(ctx, namespace.Default)
+	ack := protocol.ActivationAck{
+		RunnerID:        "runner-a",
+		WorkflowID:      string(actV1.WorkflowID),
+		WorkflowVersion: "v1",
+		GroupID:         actV1.EntryUnitID,
+		Generation:      gotV1.Generation,
+		Status:          protocol.ActivationStatusFailed,
+		Error:           "supply unavailable",
+	}
+	if err := r.MarkActivationFailed(nsCtx, "runner-a", ack); err != nil {
+		t.Fatalf("MarkActivationFailed: %v", err)
+	}
+
+	// v1 must be fenced (RunnerID cleared).
+	gotV1, _, _ = store.Get(ctx, keyV1)
+	if gotV1.RunnerID != "" {
+		t.Fatalf("v1 must be fenced after ack, got runner %q", gotV1.RunnerID)
+	}
+
+	// v2 must be completely unaffected.
+	gotV2, _, _ = store.Get(ctx, keyV2)
+	if gotV2.RunnerID != "runner-a" {
+		t.Fatalf("v2 must be unaffected by v1's ack, got runner %q", gotV2.RunnerID)
 	}
 }
 

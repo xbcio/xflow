@@ -734,56 +734,72 @@ func (r *EntryActivationReconciler) MarkActivationFailed(ctx context.Context, ru
 
 	ns := namespace.FromContext(ctx)
 
-	// List activations to find the one matching this ack. The ack does not carry
-	// WorkflowVersion (legacy runner compat), so we cannot construct a full
-	// EntryActivationKey directly — iterate as ReconcileRunnerInventory does.
-	acts, err := r.cfg.Store.List(ctx, ns)
-	if err != nil {
-		return err
-	}
-
-	for i := range acts {
-		act := &acts[i]
-		if string(act.WorkflowID) != ack.WorkflowID {
-			continue
-		}
-		if act.EntryUnitID != ack.GroupID {
-			continue
-		}
-		// Generation and owner must both match: a stale ack must never fence a
-		// healthy newer assignment.
-		if act.Generation != ack.Generation || act.RunnerID != runnerID {
-			if r.cfg.Logger != nil {
-				r.cfg.Logger.Info("ignoring stale activation ack",
-					"workflow_id", act.WorkflowID,
-					"entry_unit_id", act.EntryUnitID,
-					"ack_generation", ack.Generation,
-					"store_generation", act.Generation,
-					"ack_runner", runnerID,
-					"store_runner", act.RunnerID)
-			}
-			return nil
-		}
-
-		key := keyOf(act)
-		if err := r.cfg.Store.Fence(ctx, key, act.Generation); err != nil {
-			return err
-		}
-		r.noteActivationFailure(key, time.Now())
-
+	// Backward-compat: an old runner that does not populate WorkflowVersion
+	// produces an empty string here. We cannot construct a complete
+	// EntryActivationKey without it, and falling back to a namespace-wide List
+	// was explicitly ruled out (O(n) SCAN per ack under shared-supply failure is
+	// the load pattern that disqualified approach B). Instead, log a warning and
+	// rely on the lease-expiry path: when the runner never reports this
+	// activation in its heartbeat inventory, the lease expires within one
+	// LeaseTTL (60s default) and the reconciler fences + reassigns on the next
+	// pass. Self-healing is delayed but not broken.
+	if ack.WorkflowVersion == "" {
 		if r.cfg.Logger != nil {
-			r.cfg.Logger.Info("activation fenced after runner decline",
-				"workflow_id", act.WorkflowID,
-				"entry_unit_id", act.EntryUnitID,
+			r.cfg.Logger.Warn("activation ack missing workflow_version (old runner); "+
+				"skipping immediate fence, will self-heal on lease expiry",
+				"workflow_id", ack.WorkflowID,
+				"entry_unit_id", ack.GroupID,
 				"runner_id", runnerID,
-				"generation", ack.Generation,
-				"error", ack.Error)
+				"generation", ack.Generation)
 		}
 		return nil
 	}
 
-	// No matching activation found — the ack is for a workflow that no longer
-	// exists or was moved to another namespace. This is not an error.
+	key := engine.EntryActivationKey{
+		Namespace:       ns,
+		WorkflowID:      types.WorkflowID(ack.WorkflowID),
+		WorkflowVersion: ack.WorkflowVersion,
+		EntryUnitID:     ack.GroupID,
+	}
+
+	act, ok, err := r.cfg.Store.Get(ctx, key)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		// The activation no longer exists (workflow unregistered or moved to
+		// another namespace). Not an error.
+		return nil
+	}
+
+	// Generation and owner must both match: a stale ack must never fence a
+	// healthy newer assignment.
+	if act.Generation != ack.Generation || act.RunnerID != runnerID {
+		if r.cfg.Logger != nil {
+			r.cfg.Logger.Info("ignoring stale activation ack",
+				"workflow_id", act.WorkflowID,
+				"entry_unit_id", act.EntryUnitID,
+				"ack_generation", ack.Generation,
+				"store_generation", act.Generation,
+				"ack_runner", runnerID,
+				"store_runner", act.RunnerID)
+		}
+		return nil
+	}
+
+	if err := r.cfg.Store.Fence(ctx, key, act.Generation); err != nil {
+		return err
+	}
+	r.noteActivationFailure(key, time.Now())
+
+	if r.cfg.Logger != nil {
+		r.cfg.Logger.Info("activation fenced after runner decline",
+			"workflow_id", act.WorkflowID,
+			"entry_unit_id", act.EntryUnitID,
+			"runner_id", runnerID,
+			"generation", ack.Generation,
+			"error", ack.Error)
+	}
 	return nil
 }
 

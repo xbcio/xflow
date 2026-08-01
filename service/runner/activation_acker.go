@@ -96,13 +96,14 @@ func (a *activationAcker) ackFailed(sessionID string, d protocol.ActivateDirecti
 	}
 
 	ack := protocol.ActivationAck{
-		RunnerID:   a.runnerID,
-		SessionID:  sessionID,
-		WorkflowID: d.WorkflowID,
-		GroupID:    d.EntryUnitID,
-		Generation: d.Generation,
-		Status:     protocol.ActivationStatusFailed,
-		Error:      err.Error(),
+		RunnerID:        a.runnerID,
+		SessionID:       sessionID,
+		WorkflowID:      d.WorkflowID,
+		WorkflowVersion: d.WorkflowVersion,
+		GroupID:         d.EntryUnitID,
+		Generation:      d.Generation,
+		Status:          protocol.ActivationStatusFailed,
+		Error:           err.Error(),
 	}
 
 	// Fire-and-forget by design: this goroutine is never added to a
