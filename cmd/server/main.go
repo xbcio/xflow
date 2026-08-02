@@ -375,6 +375,14 @@ func runServer(cfg serverConfig) error {
 	// G0/prod-preview projection and is NOT authoritative — production must
 	// configure --mysql-dsn. See docs/design/RELEASE-GATES.md §4.
 	var sqlStore store.Store
+	// artifactStore serves GET/HEAD /v1/artifacts/{digest}. It needs the two
+	// concrete artifact repos rather than the store.Store interface (object
+	// storage cannot join a MySQL transaction, so those repos are deliberately
+	// outside store.Store — see store/sqlstore/provider.go), which is why it is
+	// built from the *sqlstore.Provider directly and stays nil in the in-memory
+	// dev mode. A nil store leaves the route unregistered, which is the right
+	// outcome: without MySQL there is nowhere authoritative to serve bytes from.
+	var artifactStore *store.ArtifactStore
 	var audit apiserver.AuditSink
 	durableAudit := false
 	if cfg.mysqlDSN != "" {
@@ -383,6 +391,7 @@ func runServer(cfg serverConfig) error {
 			return fmt.Errorf("open mysql store: %w", err)
 		}
 		sqlStore = p
+		artifactStore = store.NewArtifactStore(p.ArtifactObjects(), p.ArtifactIndex())
 		audit = apiserver.NewSQLAuditSink(p)
 		durableAudit = true
 		log.Println("xflow-server: durable SQL store + audit sink enabled (MySQL)")
@@ -420,6 +429,7 @@ func runServer(cfg serverConfig) error {
 		// (store.Store embeds it); nil in the in-memory dev mode (--mysql-dsn
 		// unset), which correctly leaves both features off.
 		Supplies:            sqlStore,
+		Artifacts:           artifactStore,
 		Concurrency:         cfg.concurrency,
 		Auth:                auth,
 		Logger:              logger,

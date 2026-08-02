@@ -34,6 +34,13 @@ type Config struct {
 	// Supplies backs the /v1/supplies endpoints. When nil the supply module is
 	// not registered at all (the routes 404). A *sqlstore.Provider satisfies it.
 	Supplies    store.Supplies
+	// Artifacts backs GET/HEAD /v1/artifacts/{digest}, the endpoint runners use
+	// to fetch script bytes they have not cached. When nil the artifact module
+	// is not registered at all (the route 404s). Build it with
+	// store.NewArtifactStore(provider.ArtifactObjects(), provider.ArtifactIndex())
+	// — the index is required here, since a nil index makes HasReference answer
+	// false for everything and the route would 404 unconditionally.
+	Artifacts   *store.ArtifactStore
 	Concurrency int
 	Auth        control.Authenticator
 	Logger      engine.Logger
@@ -184,6 +191,17 @@ func New(cfg Config, opts ...Option) (*APIServer, error) {
 		sup.authorizer = cfg.Authorizer
 		sup.audit = cfg.AuditSink
 		s.modules = append(s.modules, sup)
+	}
+	// The artifact module registers under the same conditions and for the same
+	// reason: without a PrincipalAuthenticator there is no namespace, and
+	// without a namespace the per-tenant reference check that is the endpoint's
+	// entire authorization cannot run. See module_artifact.go.
+	if cfg.PrincipalAuth != nil && cfg.Artifacts != nil {
+		art := newArtifactModule(cfg.Artifacts)
+		art.principalAuth = cfg.PrincipalAuth
+		art.authorizer = cfg.Authorizer
+		art.audit = cfg.AuditSink
+		s.modules = append(s.modules, art)
 	}
 	return s, nil
 }

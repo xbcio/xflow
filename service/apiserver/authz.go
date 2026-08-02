@@ -119,6 +119,15 @@ const (
 	// and NamespaceAwareAuthorizer, making the route silently unreachable.
 	OpSupplyWrite = "supply.write"
 	OpSupplyRead  = "supply.read"
+	// OpArtifactRead gates GET/HEAD /v1/artifacts/{digest}. It gets its own
+	// scope rather than riding on supply.read because the two are granted to
+	// different populations: every runner needs artifact read to fetch script
+	// bytes, while supply read reaches tenant cleansing rules. There is no
+	// artifact.write counterpart — uploads happen at publish time through the
+	// store, never over HTTP (design §6.3). Like the supply operations, this
+	// MUST also appear in scopeForOperation or the route is silently
+	// unreachable.
+	OpArtifactRead = "artifact.read"
 )
 
 // scopeForOperation maps an operation to the scope it requires. A principal
@@ -149,6 +158,8 @@ func scopeForOperation(op string) string {
 		return "supply.write"
 	case OpSupplyRead:
 		return "supply.read"
+	case OpArtifactRead:
+		return "artifact.read"
 	default:
 		return ""
 	}
