@@ -37,16 +37,15 @@ var (
 )
 
 // ensureSeamGuestBuilt compiles testdata/reactorseam/main.go once per test
-// binary run. reactorseam (not the package's existing reactor/reactormin
-// fixtures) is required here for a memory reason specific to this seam test:
-// driving the module through ScriptNode.Execute puts the executing module's
-// own multi-MB base64 string into $params.code (buildScriptGlobals mirrors
-// input.Params into $params verbatim), and both existing fixtures copy their
-// whole eval input at least once via encoding/json — which, added to that
-// multi-MB value already resident in the guest's 16 MiB linear memory cap
-// (engine.DefaultWasmMemoryPages), traps on alloc before any assertion runs.
-// reactorseam never imports encoding/json and never copies its input; see the
-// fixture's own doc comment for the measured threshold.
+// binary run. reactorseam was originally required here (rather than the
+// package's existing reactor/reactormin fixtures) for a memory reason that no
+// longer applies: driving a module through ScriptNode.Execute used to put the
+// executing module's own multi-MB base64 string into $params.code, and both
+// existing fixtures copy their whole eval input via encoding/json — which,
+// added to that multi-MB value inside the guest's 16 MiB linear memory cap
+// (engine.DefaultWasmMemoryPages), trapped on alloc before any assertion ran.
+// script.go's paramsWithoutCode fixed that at the source, so this fixture is now
+// only a smaller/faster guest, not a workaround; see its doc comment.
 func ensureSeamGuestBuilt(t *testing.T) {
 	t.Helper()
 	seamBuildOnce.Do(func() {

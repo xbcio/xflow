@@ -235,11 +235,49 @@ func readScriptTimeout(params map[string]any) time.Duration {
 	return engine.DefaultScriptTimeout
 }
 
+// buildScriptGlobals assembles the engine environment for one execution.
+//
+// The "code" entry is removed from the $params view. $params otherwise mirrors
+// input.Params verbatim, and input.Params["code"] IS the script being executed —
+// so leaving it in hands every script its own source as part of its input, on
+// every message. For a base64-encoded wasm module that is several MB per call
+// inside a 16 MiB linear memory (engine.DefaultWasmMemoryPages): the guest's
+// alloc traps in runtime.mallocgcLarge and the failure surfaces as the opaque
+// `wasm reactor: alloc: wasm error: unreachable`.
+//
+// The rest of $params is preserved — scripts legitimately read their own
+// configuration through it, so dropping the whole root would trade a memory
+// defect for a silent behaviour change.
+//
+// The copy is shallow but MUST NOT be skipped: input.Params belongs to the
+// engine's activation record, and deleting the key in place would leave the node
+// unable to run a second time ("code parameter is required" on the retry).
 func buildScriptGlobals(input *types.Input, creds map[string]any, first any) map[string]any {
 	return exprx.BuildExprEnv(input, map[string]any{
 		"$credentials": creds,
 		"$credential":  first,
+		"$params":      paramsWithoutCode(input.Params),
 	})
+}
+
+// paramsWithoutCode returns params minus the "code" key, sharing the remaining
+// values. It returns nil for nil so a caller that passed no params still sees a
+// nil $params rather than an empty map.
+func paramsWithoutCode(params map[string]any) map[string]any {
+	if params == nil {
+		return nil
+	}
+	if _, has := params["code"]; !has {
+		return params
+	}
+	out := make(map[string]any, len(params)-1)
+	for k, v := range params {
+		if k == "code" {
+			continue
+		}
+		out[k] = v
+	}
+	return out
 }
 
 func init() { registry.Register(&ScriptNode{}) }

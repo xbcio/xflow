@@ -3,22 +3,23 @@
 // exprx.go's workflow config and reactor.go's rule-engine config key).
 //
 // It exists as a SEPARATE fixture from testdata/reactor and testdata/reactormin
-// for a memory reason discovered while writing that test, not a functional one:
-// driving the reactor through the real node path (ScriptNode.Execute ->
-// exprx.BuildExprEnv) puts the executing module's own multi-MB base64 string
-// into $params.code, because $params mirrors input.Params verbatim and
-// input.Params["code"] IS that module. Both existing fixtures import
-// encoding/json and either json.Unmarshal the whole eval env (reactor,
-// reactormin) or additionally json.Marshal it straight back out (reactormin's
-// echo) — each of those is a full copy of a multi-MB value inside the guest's
-// 16 MiB linear memory cap (engine.DefaultWasmMemoryPages), and doubling or
-// tripling a several-MB string blows that budget before any test assertion
-// runs at all (confirmed experimentally: a guest with zero further processing
-// still traps once decode+re-encode pushes total live allocation past roughly
-// 5-6 MiB headroom left after the Go runtime, WASI, and the module's own code
-// pages).
+// for a historical memory reason that NO LONGER APPLIES: driving the reactor
+// through the real node path used to put the executing module's own multi-MB
+// base64 string into $params.code, because $params mirrored input.Params
+// verbatim and input.Params["code"] IS that module. Both existing fixtures
+// import encoding/json and copy their whole eval env at least once, and copying
+// a several-MB string inside the guest's 16 MiB linear memory cap
+// (engine.DefaultWasmMemoryPages) trapped on alloc before any assertion ran —
+// measured to exhaust the roughly 5-6 MiB of headroom left after the Go runtime,
+// WASI, and the module's own code pages.
 //
-// reactorseam avoids the whole class of problem by never importing
+// That was the defect, not a constraint: script.go's paramsWithoutCode now drops
+// the "code" key from the $params view, so the eval input no longer carries the
+// module. A future cleanup can retarget the seam test at testdata/reactor and
+// delete this fixture; it is kept for now only to avoid bundling an unrelated
+// change into the fix.
+//
+// reactorseam sidesteps the whole class of problem by never importing
 // encoding/json and never copying its whole input: configure and eval both
 // hand-scan the raw byte buffer for the couple of literal substrings this
 // test needs, in place, with no intermediate map or re-serialization. This is
