@@ -30,26 +30,70 @@ type reactorHost struct {
 	// call. Go's string map hashing uses AES-NI (~µs for a 9 MB key) vs sha256's
 	// 5 ms. A miss falls through to engineFor, whose sha256 dedup is the
 	// correctness backstop. Bounded LRU: module working set is small.
+	//
+	// This is the ONE map that stays keyed by the code string, and deliberately:
+	// it is a pure memo on the per-message hot path, and a stale or duplicated
+	// entry costs at most a recompile that engineFor then dedups. Measured, the
+	// alternative is not viable — re-keying it by module sha256 would put ~1.4 ms
+	// decode + ~1.8 ms hash on every message and cap throughput near 310 msg/s
+	// against the 12508 msg/s this engine sustains. The registries below record
+	// FACTS about a module, where a split identity is silent misbehaviour rather
+	// than a wasted cycle, so they key on moduleKey instead.
 	codeCache *lru.Cache[string, *reactorEngine]
 
 	// prewarm holds modules registered via Prewarm to be compiled and pooled by
-	// the warmer at startup. Keyed by base64 code so re-registering the same
-	// module updates its config instead of adding a duplicate. Guarded by mu.
+	// the warmer at startup. Keyed by moduleKey so re-registering the same module
+	// updates its config instead of adding a duplicate — including when the two
+	// registrations carry different base64 encodings of the same bytes. The entry
+	// retains the original code string because warm-up needs it to reach
+	// engineForCode. Guarded by mu.
 	prewarm map[string]prewarmEntry
 
-	// sourceDriven records code strings whose module is meant to be
-	// source-driven (a supply consumer or config loader) even when no engine has
-	// been compiled for them yet. Activation-time registration usually precedes
-	// the module's first Execute — the compiled-module cache is empty at that
-	// point — so this is the only place the intent can be recorded until
-	// engineForCode creates the engine and reads it. Guarded by mu.
+	// sourceDriven records modules whose config is meant to come from a supply or
+	// loader (rather than globals["$config"]) even when no engine has been
+	// compiled for them yet. Activation-time registration usually precedes the
+	// module's first Execute — the compiled-module cache is empty at that point —
+	// so this is the only place the intent can be recorded until engineForCode
+	// creates the engine and reads it. Keyed by moduleKey: recording this under a
+	// base64 string would make the intent invisible to another encoding of the
+	// same module, which silently drops it back to the globals path and evaluates
+	// every record against no rules at all. Guarded by mu.
 	sourceDriven map[string]struct{}
 }
 
-// prewarmEntry is one module queued for startup warm-up.
+// prewarmEntry is one module queued for startup warm-up. It keeps the original
+// code string because warm-up resolves the engine through engineForCode, which
+// needs the encoding, not the key.
 type prewarmEntry struct {
 	code string
 	cfg  any
+}
+
+// registryKeyOrRaw is the key for registries whose entries are later CONSUMED by
+// warm-up: prewarm and loaderRegistry. On a decodable module it is the canonical
+// moduleKey; on an undecodable one it falls back to the raw string.
+//
+// The fallback is what keeps warm-up's "an unusable module is reported, not
+// silently dropped" contract (see TestPrewarm_BadModuleSurfacesError): warm-up
+// calls engineForCode on the retained code string and surfaces the decode error
+// there. Dropping the entry at registration instead would turn a reported
+// misconfiguration into a module that never warms and nobody is told about.
+// Registration on these paths is a void call with no channel to report on.
+//
+// The fallback cannot collide with a real moduleKey: a moduleKey is 64 hex
+// characters, which is itself valid base64, whereas this branch is reached only
+// for strings base64 REJECTS.
+//
+// sourceDriven deliberately does NOT use this. Nothing ever consumes a
+// sourceDriven entry in a way that would surface an error — it is a pure lookup —
+// so a raw-keyed entry would sit there matching no module forever, which is the
+// silent globals-path fallback this whole change exists to remove. Its writer
+// (RegisterSupplyConsumer) returns an error instead.
+func registryKeyOrRaw(code string) string {
+	if k, err := moduleKey(code); err == nil {
+		return k
+	}
+	return code
 }
 
 // defaultPoolSize is the resident instance count per config generation. One
@@ -77,9 +121,10 @@ func newReactorHost() *reactorHost {
 
 // addPrewarm queues a module for startup warm-up. Safe for concurrent use.
 func (h *reactorHost) addPrewarm(code string, cfg any) {
+	key := registryKeyOrRaw(code)
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.prewarm[code] = prewarmEntry{code: code, cfg: cfg}
+	h.prewarm[key] = prewarmEntry{code: code, cfg: cfg}
 }
 
 // prewarmModules snapshots the queued modules so the warmer can compile them
@@ -120,7 +165,8 @@ func (h *reactorHost) engineForCode(ctx context.Context, code string) (*reactorE
 	if err != nil {
 		return nil, err
 	}
-	e, err := h.engineFor(ctx, wasmBytes)
+	key := moduleKeyOf(wasmBytes)
+	e, err := h.engineForKey(ctx, key, wasmBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -143,28 +189,37 @@ func (h *reactorHost) engineForCode(ctx context.Context, code string) (*reactorE
 	// both steps closes it by construction: whichever side takes h.mu second
 	// necessarily observes what the first published.
 	h.mu.Lock()
-	fromSource := h.sourceDrivenLocked(code)
+	fromSource := h.sourceDrivenLocked(key)
 	h.codeCache.Add(code, e)
 	h.mu.Unlock()
 
-	// hasLoader takes loaderMu, so it stays outside h.mu — see the lock-order
+	// hasLoaderKey takes loaderMu, so it stays outside h.mu — see the lock-order
 	// note on markConfigFromSource. It is safe outside because RegisterConfigLoader
 	// publishes to loaderRegistry BEFORE it calls markConfigFromSource, so a
 	// registration this read misses is one whose flip finds the engine already
 	// cached above.
-	if fromSource || hasLoader(code) {
+	if fromSource || hasLoaderKey(key) {
 		e.configFromSource.Store(true)
 	}
 	return e, nil
+}
+
+// moduleKeyOf is moduleKey for callers that already hold the decoded bytes.
+func moduleKeyOf(wasmBytes []byte) string {
+	sum := sha256.Sum256(wasmBytes)
+	return hex.EncodeToString(sum[:])
 }
 
 // engineFor returns the reactor engine for a module, compiling it once and
 // caching by content hash. The returned engine has no active pool yet — the
 // caller warms it via ensurePool.
 func (h *reactorHost) engineFor(ctx context.Context, wasmBytes []byte) (*reactorEngine, error) {
-	sum := sha256.Sum256(wasmBytes)
-	key := hex.EncodeToString(sum[:])
+	return h.engineForKey(ctx, moduleKeyOf(wasmBytes), wasmBytes)
+}
 
+// engineForKey is engineFor for callers that already computed the module key,
+// so a multi-MB module is hashed once per call rather than twice.
+func (h *reactorHost) engineForKey(ctx context.Context, key string, wasmBytes []byte) (*reactorEngine, error) {
 	h.mu.Lock()
 	if e, ok := h.engines[key]; ok {
 		h.mu.Unlock()
@@ -207,45 +262,80 @@ func (e *reactorEngine) ensurePool(ctx context.Context, cfg []byte, size uint64)
 }
 
 // markConfigFromSource flips an already-created engine to source-driven config.
-// A code with no engine yet is a no-op: engineForCode resolves the flag when it
-// creates one (it also consults isSourceDriven, so the intent is not lost).
+// A module with no engine yet is a no-op: engineForCode resolves the flag when it
+// creates one (it also consults sourceDriven, so the intent is not lost).
+//
+// An undecodable code is also a no-op. There is no engine for it and never will
+// be, so there is nothing to flip; its caller (RegisterConfigLoader) still keeps
+// the registry entry, and warm-up reports the decode failure from there.
 //
 // Lock order: callers hold loaderMu-free state here — this takes h.mu, and
-// hasLoader takes loaderMu, so the two are never nested in this direction.
+// hasLoaderKey takes loaderMu, so the two are never nested in this direction.
 func (h *reactorHost) markConfigFromSource(code string) {
+	key, err := moduleKey(code)
+	if err != nil {
+		return
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if e, ok := h.codeCache.Get(code); ok {
-		e.configFromSource.Store(true)
-	}
+	h.flipEngineLocked(key)
 }
 
-// markConfigFromSourceOrSeed flips the engine for code to source-driven config,
-// creating nothing: when the engine does not exist yet the intent is recorded so
-// engineForCode picks it up at creation. Compiling the module here would pay a
-// multi-second cost on the activation path.
+// seedSourceDrivenByKey records that a module's config comes from a supply or
+// loader, and flips its engine if one already exists. It creates nothing: when
+// the engine does not exist yet the intent is recorded so engineForCode picks it
+// up at creation. Compiling the module here would pay a multi-second cost on the
+// activation path.
 //
-// The seed write and the cache flip happen under ONE h.mu hold, matching
+// The seed write and the engine flip happen under ONE h.mu hold, matching
 // engineForCode's single-hold read-and-publish. Splitting them is what let an
 // engine created concurrently miss both the seed and the flip.
-func (h *reactorHost) markConfigFromSourceOrSeed(code string) {
+//
+// It takes a moduleKey rather than a code string, which is what forces the caller
+// to decode — and therefore to handle an undecodable module explicitly. That is
+// deliberate: nothing ever consumes a source-driven marking in a way that could
+// report a failure later (it is a pure lookup), so an entry seeded under an
+// unmatchable key would leave the module permanently on the legacy globals path,
+// evaluating against no rules, with no diagnostic anywhere. Its one production
+// caller, RegisterSupplyConsumer, returns that error to the activation path.
+func (h *reactorHost) seedSourceDrivenByKey(key string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.sourceDriven[code] = struct{}{}
-	if e, ok := h.codeCache.Get(code); ok {
+	h.sourceDriven[key] = struct{}{}
+	h.flipEngineLocked(key)
+}
+
+// flipEngineLocked marks the engine for key source-driven if one exists.
+// Caller must hold h.mu.
+//
+// It reads h.engines, not codeCache: engines is authoritative and never evicts,
+// whereas codeCache is a bounded LRU. Consulting the LRU would silently drop the
+// flip for a module evicted since its last execution, leaving a live engine on
+// the globals path — evaluating against no rules — with nothing to repair it,
+// since engineForCode only resolves the flag when it CREATES an engine and this
+// one already exists.
+func (h *reactorHost) flipEngineLocked(key string) {
+	if e, ok := h.engines[key]; ok {
 		e.configFromSource.Store(true)
 	}
 }
 
-// isSourceDriven reports whether a code string was marked source-driven.
+// isSourceDriven reports whether a module, named by its base64 code, was marked
+// source-driven. An undecodable code is never source-driven: no engine can exist
+// for it.
 func (h *reactorHost) isSourceDriven(code string) bool {
+	key, err := moduleKey(code)
+	if err != nil {
+		return false
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return h.sourceDrivenLocked(code)
+	return h.sourceDrivenLocked(key)
 }
 
-// sourceDrivenLocked is isSourceDriven for callers already holding h.mu.
-func (h *reactorHost) sourceDrivenLocked(code string) bool {
-	_, ok := h.sourceDriven[code]
+// sourceDrivenLocked reports whether a moduleKey was marked source-driven, for
+// callers already holding h.mu.
+func (h *reactorHost) sourceDrivenLocked(key string) bool {
+	_, ok := h.sourceDriven[key]
 	return ok
 }

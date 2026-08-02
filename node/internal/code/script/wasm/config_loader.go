@@ -40,32 +40,41 @@ func (s *staticLoader) Load(_ context.Context) ([]byte, string, error) {
 	return s.cfg, s.version, nil
 }
 
-// loaderEntry is the registration record for one module's config loader.
+// loaderEntry is the registration record for one module's config loader. It
+// retains the code string because warm-up resolves the engine through
+// engineForCode, which needs the encoding rather than the key.
 type loaderEntry struct {
+	code   string
 	loader ConfigLoader
 	ttl    time.Duration
 }
 
-// loaderRegistry holds all registered config loaders, keyed by code string.
-// It is read on every Execute to pick the config path, so the lock is an
-// RWMutex: registration happens at bootstrap, reads happen per request.
+// loaderRegistry holds all registered config loaders, keyed by module identity
+// (moduleKey) rather than by the base64 code string — see moduleKey for why a
+// code string is not an identity. It is read on every Execute to pick the config
+// path, so the lock is an RWMutex: registration happens at bootstrap, reads
+// happen per request.
 var (
 	loaderMu       sync.RWMutex
 	loaderRegistry = map[string]loaderEntry{}
 )
 
-// RegisterConfigLoader associates a ConfigLoader with a wasm module code string.
+// RegisterConfigLoader associates a ConfigLoader with a wasm module.
 // During warmup any already-registered loader is invoked once to build the
 // initial pool; if ttl > 0 a background goroutine polls for version changes.
 //
-// Re-registering the same code replaces the previous loader (aligns with
+// Re-registering the same module replaces the previous loader (aligns with
 // addPrewarm semantics). It may be called at any time, including after warmup —
 // registration flips the module's engine to source-driven config so Execute
 // needs no lock; when the engine does not exist yet, engineForCode resolves the
 // flag from the registry at creation time.
+//
+// An undecodable code is still registered (under the raw string, see
+// registryKeyOrRaw): this function cannot report an error, so warm-up surfaces
+// the decode failure when it tries to build the module.
 func RegisterConfigLoader(code string, loader ConfigLoader, ttl time.Duration) {
 	loaderMu.Lock()
-	loaderRegistry[code] = loaderEntry{loader: loader, ttl: ttl}
+	loaderRegistry[registryKeyOrRaw(code)] = loaderEntry{code: code, loader: loader, ttl: ttl}
 	loaderMu.Unlock()
 
 	// Flip the already-created engine, if any. A miss is fine: engineForCode
@@ -73,14 +82,17 @@ func RegisterConfigLoader(code string, loader ConfigLoader, ttl time.Duration) {
 	sharedReactorHost.markConfigFromSource(code)
 }
 
-// hasLoader reports whether a module's config comes from a loader rather than
+// hasLoaderKey reports whether a module's config comes from a loader rather than
 // from globals. It is a locked read, so it must run only at registration and
 // warmup time — NOT on the Execute hot path. reactorEngine.configFromSource is
-// the lock-free flag Execute actually reads; hasLoader exists only to seed it.
-func hasLoader(code string) bool {
+// the lock-free flag Execute actually reads; hasLoaderKey exists only to seed it.
+//
+// It takes a moduleKey, not a code string, so that all four registries agree on
+// what identifies a module.
+func hasLoaderKey(key string) bool {
 	loaderMu.RLock()
 	defer loaderMu.RUnlock()
-	_, ok := loaderRegistry[code]
+	_, ok := loaderRegistry[key]
 	return ok
 }
 

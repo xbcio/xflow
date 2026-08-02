@@ -56,14 +56,23 @@ func (m *mockLoader) loadCount() int64 {
 
 // registerLoaderForTest registers a loader and removes it on cleanup, so tests
 // do not leak registrations into the process-wide registry.
+//
+// It writes the registry directly rather than calling RegisterConfigLoader
+// because it must also DELETE the entry on cleanup, and there is no public
+// unregister — the production lifetime of a loader registration is the process.
+// The key must be derived exactly as RegisterConfigLoader derives it: keying a
+// test entry by the raw code string while production keys by module identity
+// would make warm-up skip every entry these tests install, and every assertion
+// about swapping would then pass vacuously against a module that never warmed.
 func registerLoaderForTest(t *testing.T, code string, loader ConfigLoader, ttl time.Duration) {
 	t.Helper()
+	key := registryKeyOrRaw(code)
 	loaderMu.Lock()
-	loaderRegistry[code] = loaderEntry{loader: loader, ttl: ttl}
+	loaderRegistry[key] = loaderEntry{code: code, loader: loader, ttl: ttl}
 	loaderMu.Unlock()
 	t.Cleanup(func() {
 		loaderMu.Lock()
-		delete(loaderRegistry, code)
+		delete(loaderRegistry, key)
 		loaderMu.Unlock()
 	})
 }
@@ -113,14 +122,7 @@ func TestConfigLoader_VersionUnchangedNoSwap(t *testing.T) {
 	loader := newMockLoader(cfg, "v1")
 
 	// Register and warmup.
-	loaderMu.Lock()
-	loaderRegistry[code] = loaderEntry{loader: loader, ttl: 50 * time.Millisecond}
-	loaderMu.Unlock()
-	defer func() {
-		loaderMu.Lock()
-		delete(loaderRegistry, code)
-		loaderMu.Unlock()
-	}()
+	registerLoaderForTest(t, code, loader, 50*time.Millisecond)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -152,14 +154,7 @@ func TestConfigLoader_VersionChangeTriggersSwap(t *testing.T) {
 	cfg := goodConfig("big", "x > 5")
 	loader := newMockLoader(cfg, "v1")
 
-	loaderMu.Lock()
-	loaderRegistry[code] = loaderEntry{loader: loader, ttl: 50 * time.Millisecond}
-	loaderMu.Unlock()
-	defer func() {
-		loaderMu.Lock()
-		delete(loaderRegistry, code)
-		loaderMu.Unlock()
-	}()
+	registerLoaderForTest(t, code, loader, 50*time.Millisecond)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -221,14 +216,7 @@ func TestConfigLoader_LoadErrorPreservesLastGood(t *testing.T) {
 	cfg := goodConfig("big", "x > 5")
 	loader := newMockLoader(cfg, "v1")
 
-	loaderMu.Lock()
-	loaderRegistry[code] = loaderEntry{loader: loader, ttl: 50 * time.Millisecond}
-	loaderMu.Unlock()
-	defer func() {
-		loaderMu.Lock()
-		delete(loaderRegistry, code)
-		loaderMu.Unlock()
-	}()
+	registerLoaderForTest(t, code, loader, 50*time.Millisecond)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -268,14 +256,7 @@ func TestConfigLoader_BadConfigRejectedVersionNotRecorded(t *testing.T) {
 	cfg := goodConfig("big", "x > 5")
 	loader := newMockLoader(cfg, "v1")
 
-	loaderMu.Lock()
-	loaderRegistry[code] = loaderEntry{loader: loader, ttl: 50 * time.Millisecond}
-	loaderMu.Unlock()
-	defer func() {
-		loaderMu.Lock()
-		delete(loaderRegistry, code)
-		loaderMu.Unlock()
-	}()
+	registerLoaderForTest(t, code, loader, 50*time.Millisecond)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -334,14 +315,7 @@ func TestConfigLoader_FirstFailureTransientError(t *testing.T) {
 	loader.cfg.Store([]byte(`{}`)) // won't be used
 	loader.setError(errors.New("dns lookup failed"))
 
-	loaderMu.Lock()
-	loaderRegistry[code] = loaderEntry{loader: loader, ttl: 0}
-	loaderMu.Unlock()
-	defer func() {
-		loaderMu.Lock()
-		delete(loaderRegistry, code)
-		loaderMu.Unlock()
-	}()
+	registerLoaderForTest(t, code, loader, 0)
 
 	ctx := context.Background()
 	err := f.warmup(ctx)
@@ -374,14 +348,7 @@ func TestConfigLoader_FirstBadConfigTransientError(t *testing.T) {
 	code := b64(reactorWasm)
 	loader := newMockLoader(badConfig(), "v1-bad")
 
-	loaderMu.Lock()
-	loaderRegistry[code] = loaderEntry{loader: loader, ttl: 0}
-	loaderMu.Unlock()
-	defer func() {
-		loaderMu.Lock()
-		delete(loaderRegistry, code)
-		loaderMu.Unlock()
-	}()
+	registerLoaderForTest(t, code, loader, 0)
 
 	ctx := context.Background()
 	err := f.warmup(ctx)
@@ -410,14 +377,7 @@ func TestConfigLoader_EmptyRulesetValid(t *testing.T) {
 	code := b64(reactorWasm)
 	loader := newMockLoader(emptyConfig(), "v-empty")
 
-	loaderMu.Lock()
-	loaderRegistry[code] = loaderEntry{loader: loader, ttl: 0}
-	loaderMu.Unlock()
-	defer func() {
-		loaderMu.Lock()
-		delete(loaderRegistry, code)
-		loaderMu.Unlock()
-	}()
+	registerLoaderForTest(t, code, loader, 0)
 
 	ctx := context.Background()
 	if err := f.warmup(ctx); err != nil {
@@ -442,14 +402,7 @@ func TestConfigLoader_TTLZeroNoGoroutine(t *testing.T) {
 	cfg := goodConfig("big", "x > 5")
 	loader := newMockLoader(cfg, "v1")
 
-	loaderMu.Lock()
-	loaderRegistry[code] = loaderEntry{loader: loader, ttl: 0}
-	loaderMu.Unlock()
-	defer func() {
-		loaderMu.Lock()
-		delete(loaderRegistry, code)
-		loaderMu.Unlock()
-	}()
+	registerLoaderForTest(t, code, loader, 0)
 
 	ctx := context.Background()
 	if err := f.warmup(ctx); err != nil {
@@ -477,14 +430,7 @@ func TestConfigLoader_CtxCancelStopsGoroutine(t *testing.T) {
 	cfg := goodConfig("big", "x > 5")
 	loader := newMockLoader(cfg, "v1")
 
-	loaderMu.Lock()
-	loaderRegistry[code] = loaderEntry{loader: loader, ttl: 50 * time.Millisecond}
-	loaderMu.Unlock()
-	defer func() {
-		loaderMu.Lock()
-		delete(loaderRegistry, code)
-		loaderMu.Unlock()
-	}()
+	registerLoaderForTest(t, code, loader, 50*time.Millisecond)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	if err := f.warmup(ctx); err != nil {

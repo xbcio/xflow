@@ -73,7 +73,7 @@ func TestRegistrationAndEngineCreationResolveInEitherOrder(t *testing.T) {
 	if e.configFromSource.Load() {
 		t.Fatal("a module with no loader and no supply consumer must start on the globals path")
 	}
-	h.markConfigFromSourceOrSeed(code)
+	h.seedSourceDrivenByKey(mustModuleKey(t, code))
 	if !e.configFromSource.Load() {
 		t.Fatal("registration after engine creation must flip the existing engine to source-driven")
 	}
@@ -81,7 +81,7 @@ func TestRegistrationAndEngineCreationResolveInEitherOrder(t *testing.T) {
 	// Activation order: registration first, engine created after. The engine
 	// must resolve the flag at birth, from the seeded intent.
 	h2 := newReactorHost()
-	h2.markConfigFromSourceOrSeed(code)
+	h2.seedSourceDrivenByKey(mustModuleKey(t, code))
 	e2, err := h2.engineForCode(ctx, code)
 	if err != nil {
 		t.Fatalf("engineForCode (post-registration host): %v", err)
@@ -113,6 +113,11 @@ func TestConcurrentRegisterAndEngineCreateIsRaceFree(t *testing.T) {
 	for i := 0; i < iterations; i++ {
 		h := newReactorHost()
 		code := testReactorCode(t)
+		// Hashed before the goroutines start, both because t.Fatalf must not be
+		// called from a non-test goroutine and because hashing inside the racing
+		// goroutine would add ~3 ms of work before it reaches the window this test
+		// is trying to hit.
+		key := mustModuleKey(t, code)
 		start := make(chan struct{})
 		var wg sync.WaitGroup
 		wg.Add(2)
@@ -121,7 +126,7 @@ func TestConcurrentRegisterAndEngineCreateIsRaceFree(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			h.markConfigFromSourceOrSeed(code)
+			h.seedSourceDrivenByKey(key)
 		}()
 		go func() {
 			defer wg.Done()

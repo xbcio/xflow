@@ -70,11 +70,23 @@ func (c *supplyConsumer) OnSupplyChanged(ctx context.Context, snap supply.Snapsh
 // so a content change rebuilds its pool. It may be called at any time — the
 // activation path calls it when a workflow arrives, long after warmup.
 //
-// The key is (code, supplyNode) so re-activating the same workflow replaces the
+// The key is (module, supplyNode) so re-activating the same workflow replaces the
 // registration instead of accumulating duplicates.
+//
+// An undecodable code is rejected here rather than registered. Unlike the prewarm
+// and loader registries — whose entries warm-up later consumes, so a decode
+// failure surfaces there — nothing ever consumes a source-driven marking in a way
+// that could report an error. Registering under an unmatchable key would leave the
+// module permanently on the legacy globals path, evaluating against no rules and
+// passing every record through untagged and uncleansed, with no diagnostic
+// anywhere. This function can return an error, so it does.
 func RegisterSupplyConsumer(code string, supplyNode string, reg *supply.Registry) error {
 	if code == "" || supplyNode == "" {
 		return fmt.Errorf("wasm: RegisterSupplyConsumer requires both code and supply node name")
+	}
+	key, err := moduleKey(code)
+	if err != nil {
+		return fmt.Errorf("wasm: RegisterSupplyConsumer: %w", err)
 	}
 	if reg == nil {
 		reg = supply.Default
@@ -84,22 +96,28 @@ func RegisterSupplyConsumer(code string, supplyNode string, reg *supply.Registry
 	// immediately when content is already cached, and that notification builds the
 	// pool. If the flag were set after, a message arriving in between would take
 	// the globals path and eval against no rules.
-	sharedReactorHost.markConfigFromSourceOrSeed(code)
-	reg.RegisterConsumer(supplyNode, consumerKey(code, supplyNode), c)
+	sharedReactorHost.seedSourceDrivenByKey(key)
+	reg.RegisterConsumer(supplyNode, consumerKeyFor(key, supplyNode), c)
 	return nil
 }
 
-// UnregisterSupplyConsumer removes the registration. Idempotent.
+// UnregisterSupplyConsumer removes the registration. Idempotent. An undecodable
+// code is a no-op: RegisterSupplyConsumer rejected it, so nothing is installed.
 func UnregisterSupplyConsumer(code string, supplyNode string, reg *supply.Registry) {
+	key, err := moduleKey(code)
+	if err != nil {
+		return
+	}
 	if reg == nil {
 		reg = supply.Default
 	}
-	reg.UnregisterConsumer(supplyNode, consumerKey(code, supplyNode))
+	reg.UnregisterConsumer(supplyNode, consumerKeyFor(key, supplyNode))
 }
 
-// consumerKey identifies one (module, supply) registration. The code string can
-// be megabytes of base64, so the key uses its content hash — the same identity
-// engineFor dedups on.
-func consumerKey(code, supplyNode string) string {
-	return supplyNode + "@" + configHash([]byte(code))
+// consumerKeyFor builds the registration key from a module identity. Register and
+// unregister must derive it the same way, or an unregister silently leaves the
+// consumer installed and content changes keep rebuilding the pool of a module
+// nothing executes any more.
+func consumerKeyFor(moduleKey, supplyNode string) string {
+	return supplyNode + "@" + moduleKey
 }

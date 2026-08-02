@@ -214,8 +214,8 @@ func (f *reactorFacade) warmup(ctx context.Context) error {
 	// Execute does no lazy load on this path, so the watcher's retry is the only
 	// route back from a source that was down at boot (§6.5).
 	var errs []error
-	for code, entry := range registeredLoaders() {
-		e, err := f.host.engineForCode(ctx, code)
+	for _, entry := range registeredLoaders() {
+		e, err := f.host.engineForCode(ctx, entry.code)
 		if err != nil {
 			// No compiled module means there is nothing for a watcher to
 			// configure, so this one really is terminal for this module.
@@ -235,7 +235,7 @@ func (f *reactorFacade) warmup(ctx context.Context) error {
 			e.lastAppliedVersion.Store(version)
 		}
 
-		startWatcher(ctx, code, e, entry.loader, entry.ttl)
+		startWatcher(ctx, entry.code, e, entry.loader, entry.ttl)
 	}
 	if len(errs) > 0 {
 		return fmt.Errorf("wasm/wazero-reactor: %w", errors.Join(errs...))
