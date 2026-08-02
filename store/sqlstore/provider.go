@@ -6,6 +6,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/xbcio/xflow/store"
+	"github.com/xbcio/xflow/store/objectstore"
 )
 
 // Provider is the GORM-backed implementation of store.Store and
@@ -19,6 +20,8 @@ type Provider struct {
 	*signalRepo
 	*auditRepo
 	*supplyRepo
+	artifactBlobs *artifactBlobRepo
+	artifactIndex *artifactIndexRepo
 }
 
 // compile-time interface checks
@@ -38,7 +41,21 @@ func New(db *gorm.DB) *Provider {
 		signalRepo:    &signalRepo{db: db},
 		auditRepo:     &auditRepo{db: db},
 		supplyRepo:    &supplyRepo{db: db},
+		artifactBlobs: &artifactBlobRepo{db: db},
+		artifactIndex: &artifactIndexRepo{db: db},
 	}
+}
+
+// ArtifactObjects returns the objectstore.Store backed by xflow_artifact_blobs.
+// It is not included in store.Store or store.Set because the object store
+// contract is independent of per-domain transactional boundaries.
+func (p *Provider) ArtifactObjects() objectstore.Store {
+	return p.artifactBlobs
+}
+
+// ArtifactIndex returns the store.ArtifactIndex backed by xflow_artifacts.
+func (p *Provider) ArtifactIndex() store.ArtifactIndex {
+	return p.artifactIndex
 }
 
 // Transaction runs fn within a single DB transaction. Every store in the
@@ -68,5 +85,7 @@ func AutoMigrate(db *gorm.DB) error {
 		&dbSignal{},
 		&dbAuditEvent{},
 		&dbSupply{},
+		&dbArtifactBlob{},
+		&dbArtifact{},
 	)
 }

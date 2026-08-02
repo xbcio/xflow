@@ -211,3 +211,30 @@ func fromDBSignals(ds []*dbSignal) []*store.SignalRecord {
 	}
 	return recs
 }
+
+// dbArtifactBlob is the GORM persistence type for the xflow_artifact_blobs
+// table — the global content-addressed byte store. Primary key is the digest
+// string, not an auto-increment id, because addressing is by content hash.
+type dbArtifactBlob struct {
+	ContentHash string    `gorm:"column:content_hash;type:varchar(80);primaryKey"`
+	Content     []byte    `gorm:"column:content;type:mediumblob"`
+	SizeBytes   uint64    `gorm:"column:size_bytes"`
+	CreatedAt   time.Time `gorm:"column:created_at;autoCreateTime:milli"`
+}
+
+func (dbArtifactBlob) TableName() string { return "xflow_artifact_blobs" }
+
+// dbArtifact is the GORM persistence type for the xflow_artifacts table — the
+// tenant-scoped identity layer that binds (namespace, filename, version) to a
+// content hash. The binding is immutable once created.
+type dbArtifact struct {
+	ID          uint64    `gorm:"column:id;primaryKey;autoIncrement"`
+	Namespace   string    `gorm:"column:namespace;type:varchar(64);uniqueIndex:uk_identity"`
+	Filename    string    `gorm:"column:filename;type:varchar(255);uniqueIndex:uk_identity"`
+	Version     string    `gorm:"column:version;type:varchar(64);uniqueIndex:uk_identity"`
+	ContentHash string    `gorm:"column:content_hash;type:varchar(80);index:idx_content_hash"`
+	ContentType string    `gorm:"column:content_type;type:varchar(128)"`
+	CreatedAt   time.Time `gorm:"column:created_at;autoCreateTime:milli"`
+}
+
+func (dbArtifact) TableName() string { return "xflow_artifacts" }

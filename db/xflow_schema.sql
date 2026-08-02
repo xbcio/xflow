@@ -83,6 +83,28 @@ CREATE TABLE IF NOT EXISTS xflow_supplies (
     INDEX idx_updated_at (updated_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- 字节层：全局按内容寻址，不可变，跨 namespace 去重
+CREATE TABLE IF NOT EXISTS xflow_artifact_blobs (
+    content_hash VARCHAR(80)     NOT NULL              COMMENT 'sha256:<hex>，全局去重键',
+    content      MEDIUMBLOB      NOT NULL              COMMENT '资源原始字节；平台不解释',
+    size_bytes   BIGINT UNSIGNED NOT NULL              COMMENT '字节数，取回后校验完整性',
+    created_at   DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3) COMMENT '首次上传时间',
+    PRIMARY KEY (content_hash)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 身份层：租户内具名版本 → 字节的引用。本表同时即引用索引。
+CREATE TABLE IF NOT EXISTS xflow_artifacts (
+    id           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    namespace    VARCHAR(64)     NOT NULL              COMMENT '租户，参与唯一键与取回鉴权',
+    filename     VARCHAR(255)    NOT NULL              COMMENT '仅基名，不含目录；见 §10',
+    version      VARCHAR(64)     NOT NULL              COMMENT '版本号；缺省 sha256-<前12位>',
+    content_hash VARCHAR(80)     NOT NULL              COMMENT '指向 blobs；绑定一经建立不可变',
+    content_type VARCHAR(128)    NOT NULL DEFAULT ''   COMMENT '建议性 MIME；空则由 filename 后缀推断',
+    created_at   DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    UNIQUE INDEX uk_identity (namespace, filename, version),
+    INDEX idx_content_hash (content_hash)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- 授权 / 变更审计事件（append-only，不可变）
 -- B3 durable audit sink 的权威 reconcile 目标。仅记录身份、操作、资源 ID、
 -- 决策、原因、outcome、trace 关联；绝不含 token/payload/凭证等敏感字段。
