@@ -134,22 +134,60 @@ func RegisterResponseFromProto(resp *runnerpb.RegisterResponse) RegisterRunnerRe
 
 func HeartbeatRequestToProto(req HeartbeatRequest) *runnerpb.HeartbeatRequest {
 	return &runnerpb.HeartbeatRequest{
-		RunnerId:  req.RunnerID,
-		Capacity:  int32(req.Capacity),
-		InFlight:  int32(req.InFlight),
-		Timestamp: req.Timestamp,
-		SessionId: req.SessionID,
+		RunnerId:       req.RunnerID,
+		Capacity:       int32(req.Capacity),
+		InFlight:       int32(req.InFlight),
+		Timestamp:      req.Timestamp,
+		SessionId:      req.SessionID,
+		SupplyObserved: cloneLabels(req.SupplyObserved),
 	}
 }
 
 func HeartbeatRequestFromProto(req *runnerpb.HeartbeatRequest) HeartbeatRequest {
 	return HeartbeatRequest{
-		RunnerID:  req.GetRunnerId(),
-		SessionID: req.GetSessionId(),
-		Capacity:  int(req.GetCapacity()),
-		InFlight:  int(req.GetInFlight()),
-		Timestamp: req.GetTimestamp(),
+		RunnerID:       req.GetRunnerId(),
+		SessionID:      req.GetSessionId(),
+		Capacity:       int(req.GetCapacity()),
+		InFlight:       int(req.GetInFlight()),
+		Timestamp:      req.GetTimestamp(),
+		SupplyObserved: cloneLabels(req.GetSupplyObserved()),
 	}
+}
+
+// HeartbeatResponseToProto converts the Go struct to the proto message.
+// Activations are carried as JSON bytes (same pattern as lease_json) because
+// ActivateDirective.Params is map[string]any which has no clean proto mapping.
+func HeartbeatResponseToProto(resp HeartbeatResponse) (*runnerpb.HeartbeatResponse, error) {
+	out := &runnerpb.HeartbeatResponse{
+		ServerTime:        resp.ServerTime,
+		SupplyHints:       cloneLabels(resp.SupplyHints),
+		SupplyKeyRotation: resp.SupplyKeyRotation,
+	}
+	if resp.Activations != nil {
+		data, err := json.Marshal(resp.Activations)
+		if err != nil {
+			return nil, err
+		}
+		out.ActivationsJson = data
+	}
+	return out, nil
+}
+
+// HeartbeatResponseFromProto converts the proto message to the Go struct.
+func HeartbeatResponseFromProto(resp *runnerpb.HeartbeatResponse) (HeartbeatResponse, error) {
+	out := HeartbeatResponse{
+		ServerTime:        resp.GetServerTime(),
+		SupplyHints:       cloneLabels(resp.GetSupplyHints()),
+		SupplyKeyRotation: resp.GetSupplyKeyRotation(),
+	}
+	if data := resp.GetActivationsJson(); len(data) > 0 {
+		var acts HeartbeatActivations
+		if err := json.Unmarshal(data, &acts); err != nil {
+			return HeartbeatResponse{}, err
+		}
+		out.Activations = &acts
+	}
+	return out, nil
 }
 
 func PollTaskRequestToProto(req PollTaskRequest) *runnerpb.PollTaskRequest {

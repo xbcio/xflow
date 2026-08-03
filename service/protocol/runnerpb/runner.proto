@@ -68,10 +68,17 @@ message HeartbeatRequest {
   int32 in_flight = 3;
   int64 timestamp = 4;
   string session_id = 5;
+  map<string, string> supply_observed = 6;
 }
 
 message HeartbeatResponse {
   int64 server_time = 1;
+  map<string, string> supply_hints = 2;
+  string supply_key_rotation = 3;
+  // activations_json carries the JSON-encoded HeartbeatActivations struct
+  // (activate/deactivate directives). Using JSON bytes avoids modeling
+  // map[string]any params in proto — same pattern as lease_json.
+  bytes activations_json = 4;
 }
 
 message PollTaskRequest {

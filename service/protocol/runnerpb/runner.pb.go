@@ -281,14 +281,15 @@ func (x *RegisterResponse) GetSessionId() string {
 }
 
 type HeartbeatRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	RunnerId      string                 `protobuf:"bytes,1,opt,name=runner_id,json=runnerId,proto3" json:"runner_id,omitempty"`
-	Capacity      int32                  `protobuf:"varint,2,opt,name=capacity,proto3" json:"capacity,omitempty"`
-	InFlight      int32                  `protobuf:"varint,3,opt,name=in_flight,json=inFlight,proto3" json:"in_flight,omitempty"`
-	Timestamp     int64                  `protobuf:"varint,4,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
-	SessionId     string                 `protobuf:"bytes,5,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	RunnerId       string                 `protobuf:"bytes,1,opt,name=runner_id,json=runnerId,proto3" json:"runner_id,omitempty"`
+	Capacity       int32                  `protobuf:"varint,2,opt,name=capacity,proto3" json:"capacity,omitempty"`
+	InFlight       int32                  `protobuf:"varint,3,opt,name=in_flight,json=inFlight,proto3" json:"in_flight,omitempty"`
+	Timestamp      int64                  `protobuf:"varint,4,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
+	SessionId      string                 `protobuf:"bytes,5,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	SupplyObserved map[string]string      `protobuf:"bytes,6,rep,name=supply_observed,json=supplyObserved,proto3" json:"supply_observed,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *HeartbeatRequest) Reset() {
@@ -356,11 +357,24 @@ func (x *HeartbeatRequest) GetSessionId() string {
 	return ""
 }
 
+func (x *HeartbeatRequest) GetSupplyObserved() map[string]string {
+	if x != nil {
+		return x.SupplyObserved
+	}
+	return nil
+}
+
 type HeartbeatResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ServerTime    int64                  `protobuf:"varint,1,opt,name=server_time,json=serverTime,proto3" json:"server_time,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	ServerTime        int64                  `protobuf:"varint,1,opt,name=server_time,json=serverTime,proto3" json:"server_time,omitempty"`
+	SupplyHints       map[string]string      `protobuf:"bytes,2,rep,name=supply_hints,json=supplyHints,proto3" json:"supply_hints,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	SupplyKeyRotation string                 `protobuf:"bytes,3,opt,name=supply_key_rotation,json=supplyKeyRotation,proto3" json:"supply_key_rotation,omitempty"`
+	// activations_json carries the JSON-encoded HeartbeatActivations struct
+	// (activate/deactivate directives). Using JSON bytes avoids modeling
+	// map[string]any params in proto — same pattern as lease_json.
+	ActivationsJson []byte `protobuf:"bytes,4,opt,name=activations_json,json=activationsJson,proto3" json:"activations_json,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *HeartbeatResponse) Reset() {
@@ -398,6 +412,27 @@ func (x *HeartbeatResponse) GetServerTime() int64 {
 		return x.ServerTime
 	}
 	return 0
+}
+
+func (x *HeartbeatResponse) GetSupplyHints() map[string]string {
+	if x != nil {
+		return x.SupplyHints
+	}
+	return nil
+}
+
+func (x *HeartbeatResponse) GetSupplyKeyRotation() string {
+	if x != nil {
+		return x.SupplyKeyRotation
+	}
+	return ""
+}
+
+func (x *HeartbeatResponse) GetActivationsJson() []byte {
+	if x != nil {
+		return x.ActivationsJson
+	}
+	return nil
 }
 
 type PollTaskRequest struct {
@@ -1336,17 +1371,27 @@ const file_service_protocol_runnerpb_runner_proto_rawDesc = "" +
 	"\x10RegisterResponse\x12\x1b\n" +
 	"\trunner_id\x18\x01 \x01(\tR\brunnerId\x12\x1d\n" +
 	"\n" +
-	"session_id\x18\x02 \x01(\tR\tsessionId\"\xa5\x01\n" +
+	"session_id\x18\x02 \x01(\tR\tsessionId\"\xc8\x02\n" +
 	"\x10HeartbeatRequest\x12\x1b\n" +
 	"\trunner_id\x18\x01 \x01(\tR\brunnerId\x12\x1a\n" +
 	"\bcapacity\x18\x02 \x01(\x05R\bcapacity\x12\x1b\n" +
 	"\tin_flight\x18\x03 \x01(\x05R\binFlight\x12\x1c\n" +
 	"\ttimestamp\x18\x04 \x01(\x03R\ttimestamp\x12\x1d\n" +
 	"\n" +
-	"session_id\x18\x05 \x01(\tR\tsessionId\"4\n" +
+	"session_id\x18\x05 \x01(\tR\tsessionId\x12^\n" +
+	"\x0fsupply_observed\x18\x06 \x03(\v25.xflow.runner.v1.HeartbeatRequest.SupplyObservedEntryR\x0esupplyObserved\x1aA\n" +
+	"\x13SupplyObservedEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xa7\x02\n" +
 	"\x11HeartbeatResponse\x12\x1f\n" +
 	"\vserver_time\x18\x01 \x01(\x03R\n" +
-	"serverTime\"\xab\x02\n" +
+	"serverTime\x12V\n" +
+	"\fsupply_hints\x18\x02 \x03(\v23.xflow.runner.v1.HeartbeatResponse.SupplyHintsEntryR\vsupplyHints\x12.\n" +
+	"\x13supply_key_rotation\x18\x03 \x01(\tR\x11supplyKeyRotation\x12)\n" +
+	"\x10activations_json\x18\x04 \x01(\fR\x0factivationsJson\x1a>\n" +
+	"\x10SupplyHintsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xab\x02\n" +
 	"\x0fPollTaskRequest\x12\x1b\n" +
 	"\trunner_id\x18\x01 \x01(\tR\brunnerId\x12\x1a\n" +
 	"\bcapacity\x18\x02 \x01(\x05R\bcapacity\x12?\n" +
@@ -1443,7 +1488,7 @@ func file_service_protocol_runnerpb_runner_proto_rawDescGZIP() []byte {
 	return file_service_protocol_runnerpb_runner_proto_rawDescData
 }
 
-var file_service_protocol_runnerpb_runner_proto_msgTypes = make([]protoimpl.MessageInfo, 24)
+var file_service_protocol_runnerpb_runner_proto_msgTypes = make([]protoimpl.MessageInfo, 26)
 var file_service_protocol_runnerpb_runner_proto_goTypes = []any{
 	(*Capability)(nil),              // 0: xflow.runner.v1.Capability
 	(*RegisterRequest)(nil),         // 1: xflow.runner.v1.RegisterRequest
@@ -1466,42 +1511,46 @@ var file_service_protocol_runnerpb_runner_proto_goTypes = []any{
 	(*BackoffFrame)(nil),            // 18: xflow.runner.v1.BackoffFrame
 	(*KeepaliveFrame)(nil),          // 19: xflow.runner.v1.KeepaliveFrame
 	nil,                             // 20: xflow.runner.v1.RegisterRequest.LabelsEntry
-	nil,                             // 21: xflow.runner.v1.PollTaskRequest.LabelsEntry
-	nil,                             // 22: xflow.runner.v1.ReportResultRequest.TraceCarrierEntry
-	nil,                             // 23: xflow.runner.v1.HelloFrame.LabelsEntry
+	nil,                             // 21: xflow.runner.v1.HeartbeatRequest.SupplyObservedEntry
+	nil,                             // 22: xflow.runner.v1.HeartbeatResponse.SupplyHintsEntry
+	nil,                             // 23: xflow.runner.v1.PollTaskRequest.LabelsEntry
+	nil,                             // 24: xflow.runner.v1.ReportResultRequest.TraceCarrierEntry
+	nil,                             // 25: xflow.runner.v1.HelloFrame.LabelsEntry
 }
 var file_service_protocol_runnerpb_runner_proto_depIdxs = []int32{
 	0,  // 0: xflow.runner.v1.RegisterRequest.capabilities:type_name -> xflow.runner.v1.Capability
 	20, // 1: xflow.runner.v1.RegisterRequest.labels:type_name -> xflow.runner.v1.RegisterRequest.LabelsEntry
 	2,  // 2: xflow.runner.v1.RegisterRequest.activations:type_name -> xflow.runner.v1.ActivationInventoryItem
-	0,  // 3: xflow.runner.v1.PollTaskRequest.capabilities:type_name -> xflow.runner.v1.Capability
-	21, // 4: xflow.runner.v1.PollTaskRequest.labels:type_name -> xflow.runner.v1.PollTaskRequest.LabelsEntry
-	22, // 5: xflow.runner.v1.ReportResultRequest.trace_carrier:type_name -> xflow.runner.v1.ReportResultRequest.TraceCarrierEntry
-	11, // 6: xflow.runner.v1.RunnerFrame.hello:type_name -> xflow.runner.v1.HelloFrame
-	12, // 7: xflow.runner.v1.RunnerFrame.result:type_name -> xflow.runner.v1.ResultFrame
-	13, // 8: xflow.runner.v1.RunnerFrame.bye:type_name -> xflow.runner.v1.ByeFrame
-	0,  // 9: xflow.runner.v1.HelloFrame.capabilities:type_name -> xflow.runner.v1.Capability
-	23, // 10: xflow.runner.v1.HelloFrame.labels:type_name -> xflow.runner.v1.HelloFrame.LabelsEntry
-	15, // 11: xflow.runner.v1.ServerFrame.welcome:type_name -> xflow.runner.v1.WelcomeFrame
-	16, // 12: xflow.runner.v1.ServerFrame.task:type_name -> xflow.runner.v1.TaskFrame
-	17, // 13: xflow.runner.v1.ServerFrame.ack:type_name -> xflow.runner.v1.AckFrame
-	18, // 14: xflow.runner.v1.ServerFrame.backoff:type_name -> xflow.runner.v1.BackoffFrame
-	19, // 15: xflow.runner.v1.ServerFrame.keepalive:type_name -> xflow.runner.v1.KeepaliveFrame
-	10, // 16: xflow.runner.v1.RunnerProtocol.Connect:input_type -> xflow.runner.v1.RunnerFrame
-	1,  // 17: xflow.runner.v1.RunnerProtocol.Register:input_type -> xflow.runner.v1.RegisterRequest
-	4,  // 18: xflow.runner.v1.RunnerProtocol.Heartbeat:input_type -> xflow.runner.v1.HeartbeatRequest
-	6,  // 19: xflow.runner.v1.RunnerProtocol.PollTask:input_type -> xflow.runner.v1.PollTaskRequest
-	8,  // 20: xflow.runner.v1.RunnerProtocol.ReportResult:input_type -> xflow.runner.v1.ReportResultRequest
-	14, // 21: xflow.runner.v1.RunnerProtocol.Connect:output_type -> xflow.runner.v1.ServerFrame
-	3,  // 22: xflow.runner.v1.RunnerProtocol.Register:output_type -> xflow.runner.v1.RegisterResponse
-	5,  // 23: xflow.runner.v1.RunnerProtocol.Heartbeat:output_type -> xflow.runner.v1.HeartbeatResponse
-	7,  // 24: xflow.runner.v1.RunnerProtocol.PollTask:output_type -> xflow.runner.v1.PollTaskResponse
-	9,  // 25: xflow.runner.v1.RunnerProtocol.ReportResult:output_type -> xflow.runner.v1.ReportResultResponse
-	21, // [21:26] is the sub-list for method output_type
-	16, // [16:21] is the sub-list for method input_type
-	16, // [16:16] is the sub-list for extension type_name
-	16, // [16:16] is the sub-list for extension extendee
-	0,  // [0:16] is the sub-list for field type_name
+	21, // 3: xflow.runner.v1.HeartbeatRequest.supply_observed:type_name -> xflow.runner.v1.HeartbeatRequest.SupplyObservedEntry
+	22, // 4: xflow.runner.v1.HeartbeatResponse.supply_hints:type_name -> xflow.runner.v1.HeartbeatResponse.SupplyHintsEntry
+	0,  // 5: xflow.runner.v1.PollTaskRequest.capabilities:type_name -> xflow.runner.v1.Capability
+	23, // 6: xflow.runner.v1.PollTaskRequest.labels:type_name -> xflow.runner.v1.PollTaskRequest.LabelsEntry
+	24, // 7: xflow.runner.v1.ReportResultRequest.trace_carrier:type_name -> xflow.runner.v1.ReportResultRequest.TraceCarrierEntry
+	11, // 8: xflow.runner.v1.RunnerFrame.hello:type_name -> xflow.runner.v1.HelloFrame
+	12, // 9: xflow.runner.v1.RunnerFrame.result:type_name -> xflow.runner.v1.ResultFrame
+	13, // 10: xflow.runner.v1.RunnerFrame.bye:type_name -> xflow.runner.v1.ByeFrame
+	0,  // 11: xflow.runner.v1.HelloFrame.capabilities:type_name -> xflow.runner.v1.Capability
+	25, // 12: xflow.runner.v1.HelloFrame.labels:type_name -> xflow.runner.v1.HelloFrame.LabelsEntry
+	15, // 13: xflow.runner.v1.ServerFrame.welcome:type_name -> xflow.runner.v1.WelcomeFrame
+	16, // 14: xflow.runner.v1.ServerFrame.task:type_name -> xflow.runner.v1.TaskFrame
+	17, // 15: xflow.runner.v1.ServerFrame.ack:type_name -> xflow.runner.v1.AckFrame
+	18, // 16: xflow.runner.v1.ServerFrame.backoff:type_name -> xflow.runner.v1.BackoffFrame
+	19, // 17: xflow.runner.v1.ServerFrame.keepalive:type_name -> xflow.runner.v1.KeepaliveFrame
+	10, // 18: xflow.runner.v1.RunnerProtocol.Connect:input_type -> xflow.runner.v1.RunnerFrame
+	1,  // 19: xflow.runner.v1.RunnerProtocol.Register:input_type -> xflow.runner.v1.RegisterRequest
+	4,  // 20: xflow.runner.v1.RunnerProtocol.Heartbeat:input_type -> xflow.runner.v1.HeartbeatRequest
+	6,  // 21: xflow.runner.v1.RunnerProtocol.PollTask:input_type -> xflow.runner.v1.PollTaskRequest
+	8,  // 22: xflow.runner.v1.RunnerProtocol.ReportResult:input_type -> xflow.runner.v1.ReportResultRequest
+	14, // 23: xflow.runner.v1.RunnerProtocol.Connect:output_type -> xflow.runner.v1.ServerFrame
+	3,  // 24: xflow.runner.v1.RunnerProtocol.Register:output_type -> xflow.runner.v1.RegisterResponse
+	5,  // 25: xflow.runner.v1.RunnerProtocol.Heartbeat:output_type -> xflow.runner.v1.HeartbeatResponse
+	7,  // 26: xflow.runner.v1.RunnerProtocol.PollTask:output_type -> xflow.runner.v1.PollTaskResponse
+	9,  // 27: xflow.runner.v1.RunnerProtocol.ReportResult:output_type -> xflow.runner.v1.ReportResultResponse
+	23, // [23:28] is the sub-list for method output_type
+	18, // [18:23] is the sub-list for method input_type
+	18, // [18:18] is the sub-list for extension type_name
+	18, // [18:18] is the sub-list for extension extendee
+	0,  // [0:18] is the sub-list for field type_name
 }
 
 func init() { file_service_protocol_runnerpb_runner_proto_init() }
@@ -1527,7 +1576,7 @@ func file_service_protocol_runnerpb_runner_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_service_protocol_runnerpb_runner_proto_rawDesc), len(file_service_protocol_runnerpb_runner_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   24,
+			NumMessages:   26,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

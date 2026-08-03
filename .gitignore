@@ -76,3 +76,4 @@ data/
 
 # Agent workspace artifacts
 .agents/
+runner

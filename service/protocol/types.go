@@ -79,11 +79,6 @@ type HeartbeatResponse struct {
 	// to partitions, restarts and leader changes. Convergence is guaranteed by the
 	// activation-time fetch plus TTL polling. Only hashes travel here, so the
 	// heartbeat body does not grow with content size.
-	//
-	// NOTE: the gRPC transport does not carry this field (its HeartbeatResponse
-	// proto has only server_time, and does not carry Activations either). Under
-	// gRPC, supply changes converge on the TTL period instead of the heartbeat
-	// period — slower, still correct.
 	SupplyHints map[string]string `json:"supply_hints,omitempty"`
 	// SupplyKeyRotation carries a base64-encoded new AES-256 key when the server
 	// rotates the supply encryption key. The runner installs it as current and

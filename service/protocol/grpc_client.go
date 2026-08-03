@@ -54,7 +54,7 @@ func (c *GRPCClient) Heartbeat(ctx context.Context, req HeartbeatRequest) (Heart
 	if err != nil {
 		return HeartbeatResponse{}, err
 	}
-	return HeartbeatResponse{ServerTime: resp.GetServerTime()}, nil
+	return HeartbeatResponseFromProto(resp)
 }
 
 func (c *GRPCClient) Poll(ctx context.Context, req PollTaskRequest) (PollTaskResponse, error) {

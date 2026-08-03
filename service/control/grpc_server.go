@@ -107,7 +107,11 @@ func (s *GRPCServer) Heartbeat(ctx context.Context, req *runnerpb.HeartbeatReque
 	if err != nil {
 		return nil, runnerStatus(err)
 	}
-	return &runnerpb.HeartbeatResponse{ServerTime: resp.ServerTime}, nil
+	out, convErr := protocol.HeartbeatResponseToProto(resp)
+	if convErr != nil {
+		return nil, status.Error(codes.Internal, ErrInternalServer.Error())
+	}
+	return out, nil
 }
 
 func (s *GRPCServer) PollTask(ctx context.Context, req *runnerpb.PollTaskRequest) (*runnerpb.PollTaskResponse, error) {
