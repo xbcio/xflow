@@ -1231,6 +1231,34 @@ Kafka trigger 默认仍是"一条消息触发一个 execution"。配置 `paramet
 
 Kafka 聚合只保证同一 partition 内按消费顺序进入 batch 并按 batch 顺序发起 emit；不保证跨 partition 顺序，也不保证后续 workflow execution 的完成顺序。需要端到端严格顺序时，应在调度层引入 partition 维度的串行执行能力，而不是只依赖 trigger 聚合。
 
+##### 消息校验与非法消息处置
+
+可选参数 `message_schema` 声明消息值必须是 JSON 对象且包含指定的顶层字段：
+
+```yaml
+    parameters:
+      message_schema:
+        required_fields: ["user_id", "action"]
+        on_invalid: discard        # discard(默认) | fail | dead_letter
+        dead_letter_topic: ""      # on_invalid: dead_letter 时必填
+```
+
+校验发生在 emit 之前，三种模式（单条、聚合、entry-seed）行为一致。聚合模式下在**入 batch 前**过滤，因此一条非法消息不会让整批作废。
+
+`on_invalid` 的三种取值是**丢弃风险与停滞风险之间的取舍**，没有普遍正确的默认值：
+
+| 取值 | offset | 后果 |
+|---|---|---|
+| `discard`（默认） | 提交 | 消息永久丢失，但会计入 `xflow_trigger_messages_discarded_total` 并限流打日志 |
+| `fail` | 不提交 | 零丢失，但一条永久非法的消息会**永久阻塞该 partition** |
+| `dead_letter` | 仅在转发成功后提交 | 零丢失且不阻塞；转发失败则退回不提交（重投），绝不丢 |
+
+默认是 `discard` 而非更安全的 `dead_letter`，因为 `discard` 是既有行为——升级时静默改变运行中部署的数据路径，比保留这个缺口更糟。对既有配置而言，唯一的变化是丢弃从**不可见**变为**被计数且被记录**。
+
+`on_invalid` 取值无法识别、或 `dead_letter` 未配 `dead_letter_topic`，都会导致 activation 失败而不是回退到 `discard`：一份声明了"不要丢消息"的配置绝不能被静默降级为会丢消息的那一档。
+
+DLQ writer 复用 consumer 的 broker 列表与 SASL 凭证，不接受独立配置——一个 trigger 本来就连不上的集群，会恰好在最需要它的时刻失效，而第二份 SASL 密码就是第二个泄漏面。原始 payload 按字节原样转发，来源信息（`xflow-dlq-source-topic`/`-partition`/`-offset`/`xflow-dlq-reason`）放在 header 里，便于重投时无需拆包。
+
 SDK API：
 
 ```go

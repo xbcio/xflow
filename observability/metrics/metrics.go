@@ -346,6 +346,8 @@ var metricHelp = map[string]string{
 	"xflow_supply_not_ready":                         "Whether an activation is currently being declined for a missing required supply, per workflow and supply.",
 	"xflow_supply_unavailable_serving":               "Whether a supply is serving traffic with content that was never successfully fetched (require_ready:false).",
 	"xflow_supply_consumers":                         "Number of in-process consumers registered for a supply.",
+	"xflow_trigger_messages_discarded_total":         "Trigger messages consumed but never emitted, partitioned by topic and reason (schema/schema_fail). Any nonzero rate is silent data loss unless it is expected.",
+	"xflow_trigger_messages_dead_lettered_total":     "Dead-letter publish attempts for invalid trigger messages, partitioned by topic and result (ok/error). An error rate means the source partition is stalled on redelivery.",
 	"xflow_wasm_config_rule_count":                   "Number of rules in the currently active wasm reactor config.",
 	"xflow_wasm_config_generation":                   "SupplyResource revision of the currently active wasm reactor config.",
 	"xflow_wasm_pool_swap_total":                     "wasm reactor pool config swap attempts, partitioned by result (applied/rejected).",

@@ -161,6 +161,23 @@ func SetWasmObserver(o WasmObserver) {
 	wasm.SetObserver(o)
 }
 
+// TriggerObserver receives trigger observations: currently messages consumed
+// but never emitted (schema validation failures) and dead-letter publishes.
+// Re-exported from the internal trigger package so a host process can install
+// one without importing an internal package.
+type TriggerObserver = nodetrigger.Observer
+
+// SetTriggerObserver installs the global observer for trigger activity. Call
+// once at startup (or pass nil to remove it).
+//
+// Without an observer installed, a schema-invalid message is still logged, but
+// the count is only available as a metric through this seam. A trigger dropping
+// every message is otherwise indistinguishable from an idle topic: offsets keep
+// being committed, so consumer-group lag stays at zero.
+func SetTriggerObserver(o TriggerObserver) {
+	nodetrigger.SetObserver(o)
+}
+
 // WarmupScriptEngines absorbs script-engine cold start before traffic arrives:
 // js/qjs's ~330 ms QuickJS-wasm compile and the wasm reactor runtime open
 // (which resolves the on-disk compilation cache). Hosts should call it once at

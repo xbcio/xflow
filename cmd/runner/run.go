@@ -232,6 +232,8 @@ func runRunner(ctx context.Context, cfg runnerConfig) error {
 		supply.Default.SetObserver(sm)
 		// Wire wasm reactor pool observer.
 		xnode.SetWasmObserver(sm)
+		// Wire trigger observer (discarded / dead-lettered message counters).
+		xnode.SetTriggerObserver(metrics.NewTriggerMetrics(m))
 		// Wire script execution observer.
 		xnode.SetScriptObserver(metrics.NewScriptMetrics(m))
 

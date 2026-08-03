@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -53,8 +55,8 @@ type KafkaConsumerConfig struct {
 	SASLUsername  string
 	SASLPassword  string
 	// MessageSchema optionally validates each message's JSON value before emit.
-	// When non-nil, messages that fail validation are committed (consumed) but
-	// not emitted — they are silently skipped.
+	// When non-nil, messages that fail validation are handled per
+	// MessageSchema.OnInvalid.
 	MessageSchema *KafkaMessageSchema
 }
 
@@ -63,7 +65,36 @@ type KafkaConsumerConfig struct {
 // contains all RequiredFields as top-level keys with non-nil values.
 type KafkaMessageSchema struct {
 	RequiredFields []string
+	// OnInvalid selects what happens to a message that fails validation.
+	// Empty means kafkaOnInvalidDiscard.
+	OnInvalid string
+	// DeadLetterTopic is the topic invalid messages are republished to when
+	// OnInvalid is kafkaOnInvalidDeadLetter. Required in that mode.
+	DeadLetterTopic string
 }
+
+// Invalid-message policies. The default is discard because that is the
+// pre-existing behaviour, and silently changing a running deployment's data
+// path on upgrade would be worse than the gap being closed. What changes for
+// existing configs is that a discard is now counted and logged instead of
+// invisible.
+const (
+	// kafkaOnInvalidDiscard commits the offset without emitting. The message is
+	// gone, but the drop is counted (xflow_trigger_messages_discarded_total)
+	// and logged at a throttled rate.
+	kafkaOnInvalidDiscard = "discard"
+	// kafkaOnInvalidFail declines the commit, so Kafka redelivers. Use only
+	// when invalid messages are expected to be transient (e.g. a producer being
+	// rolled back): a permanently malformed message blocks its partition
+	// forever, which is the correct choice only if silent data loss is worse
+	// than a stall.
+	kafkaOnInvalidFail = "fail"
+	// kafkaOnInvalidDeadLetter republishes the message to DeadLetterTopic and
+	// commits only if the republish succeeded. A failed republish falls back to
+	// no-commit (redelivery) rather than dropping — the whole point of a DLQ is
+	// that nothing vanishes.
+	kafkaOnInvalidDeadLetter = "dead_letter"
+)
 
 type KafkaAggregateConfig struct {
 	Enabled       bool
@@ -77,12 +108,13 @@ var newKafkaConsumer = newKafkaGoConsumer
 
 type KafkaTriggerNode struct {
 	nodeinternal.BaseTrigger
-	BrokersValue     []string
-	TopicValue       string
-	GroupValue       string
-	StartOffsetValue string
-	MaxInflightValue int
-	AggregateValue   KafkaAggregateConfig
+	BrokersValue       []string
+	TopicValue         string
+	GroupValue         string
+	StartOffsetValue   string
+	MaxInflightValue   int
+	AggregateValue     KafkaAggregateConfig
+	MessageSchemaValue *KafkaMessageSchema
 }
 
 func KafkaTrigger() *KafkaTriggerNode {
@@ -130,6 +162,36 @@ func (n *KafkaTriggerNode) Aggregate(cfg KafkaAggregateConfig) *KafkaTriggerNode
 	return n
 }
 
+// MessageSchema requires each message value to be a JSON object carrying all of
+// fields as top-level keys. Invalid messages are discarded (offset committed,
+// message dropped) but counted and logged — see DiscardInvalid/DeadLetterInvalid
+// to choose a different policy.
+func (n *KafkaTriggerNode) MessageSchema(fields ...string) *KafkaTriggerNode {
+	n.MessageSchemaValue = &KafkaMessageSchema{RequiredFields: fields, OnInvalid: kafkaOnInvalidDiscard}
+	return n
+}
+
+// FailOnInvalid switches the invalid-message policy to withholding the offset
+// commit, so Kafka redelivers. Zero data loss, at the cost of a permanently
+// malformed message blocking its partition forever. Requires MessageSchema.
+func (n *KafkaTriggerNode) FailOnInvalid() *KafkaTriggerNode {
+	if n.MessageSchemaValue != nil {
+		n.MessageSchemaValue.OnInvalid = kafkaOnInvalidFail
+	}
+	return n
+}
+
+// DeadLetterInvalid republishes invalid messages to topic and commits only after
+// a successful republish. This is the policy that neither loses messages nor
+// stalls the partition. Requires MessageSchema.
+func (n *KafkaTriggerNode) DeadLetterInvalid(topic string) *KafkaTriggerNode {
+	if n.MessageSchemaValue != nil {
+		n.MessageSchemaValue.OnInvalid = kafkaOnInvalidDeadLetter
+		n.MessageSchemaValue.DeadLetterTopic = topic
+	}
+	return n
+}
+
 func (n *KafkaTriggerNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.trigger.kafka",
@@ -142,7 +204,7 @@ func (n *KafkaTriggerNode) Descriptor() types.Descriptor {
 			{Name: "start_offset", DisplayName: "Start Offset", Type: types.ParamString, Default: "latest"},
 			{Name: "max_inflight", DisplayName: "Max Inflight", Type: types.ParamNumber, Default: float64(defaultTriggerMaxInflight)},
 			{Name: "aggregate", DisplayName: "Aggregate", Type: types.ParamObject, Description: "Optional partition batch aggregation: enabled, by, max_size, flush_interval, dedup"},
-			{Name: "message_schema", DisplayName: "Message Schema", Type: types.ParamObject, Description: "Optional message validation: {required_fields: [\"field1\"]}. Non-conforming messages are skipped."},
+			{Name: "message_schema", DisplayName: "Message Schema", Type: types.ParamObject, Description: "Optional message validation: {required_fields: [\"f\"], on_invalid: \"discard|fail|dead_letter\", dead_letter_topic: \"t-dlq\"}. on_invalid defaults to discard (offset committed, message dropped, drop counted and logged)."},
 		},
 		Outputs: []types.PortSpec{{Name: "main", DisplayName: "Main"}},
 	}
@@ -175,6 +237,16 @@ func (n *KafkaTriggerNode) RawParams() any {
 			"dedup":          aggregate.Dedup,
 		}
 	}
+	if n.MessageSchemaValue != nil && len(n.MessageSchemaValue.RequiredFields) > 0 {
+		schema := map[string]any{
+			"required_fields": n.MessageSchemaValue.RequiredFields,
+			"on_invalid":      n.MessageSchemaValue.OnInvalid,
+		}
+		if n.MessageSchemaValue.DeadLetterTopic != "" {
+			schema["dead_letter_topic"] = n.MessageSchemaValue.DeadLetterTopic
+		}
+		params["message_schema"] = schema
+	}
 	return params
 }
 func (n *KafkaTriggerNode) OnError(s types.OnError) types.Builder {
@@ -192,6 +264,18 @@ func (n *KafkaTriggerNode) Activate(ctx context.Context, in *types.TriggerActiva
 	if err != nil {
 		return nil, err
 	}
+	// The dead-letter publisher is built only when the policy needs it, and
+	// eagerly rather than on first invalid message: a broker-unreachable DLQ
+	// should fail activation (which self-heals via retry) instead of surfacing
+	// as an unbounded redelivery loop the first time a malformed record arrives.
+	var deadLetters KafkaDeadLetterPublisher
+	if cfg.MessageSchema != nil && cfg.MessageSchema.OnInvalid == kafkaOnInvalidDeadLetter {
+		deadLetters, err = newKafkaDeadLetterPublisher(cfg)
+		if err != nil {
+			_ = consumer.Close()
+			return nil, fmt.Errorf("kafka trigger: dead-letter publisher: %w", err)
+		}
+	}
 	if cfg.Aggregate.Enabled {
 		// The aggregate path emits batches through the legacy Runtime.Emit and has
 		// no entry-seed admission equivalent (a batch admission key would have to
@@ -200,23 +284,27 @@ func (n *KafkaTriggerNode) Activate(ctx context.Context, in *types.TriggerActiva
 		// every flush would error and replay forever.
 		if isEntrySeedActivation(in) {
 			_ = consumer.Close()
+			if deadLetters != nil {
+				_ = deadLetters.Close()
+			}
 			return nil, fmt.Errorf("kafka trigger: aggregate mode is not supported for entry-seed hosting")
 		}
-		return activateKafkaAggregate(ctx, in, cfg, consumer), nil
+		return activateKafkaAggregate(ctx, in, cfg, consumer, deadLetters), nil
 	}
-	return activateKafkaPerMessage(ctx, in, cfg, consumer), nil
+	return activateKafkaPerMessage(ctx, in, cfg, consumer, deadLetters), nil
 }
 
-func activateKafkaPerMessage(ctx context.Context, in *types.TriggerActivateInput, cfg KafkaConsumerConfig, consumer KafkaConsumer) types.TriggerSubscription {
+func activateKafkaPerMessage(ctx context.Context, in *types.TriggerActivateInput, cfg KafkaConsumerConfig, consumer KafkaConsumer, deadLetters KafkaDeadLetterPublisher) types.TriggerSubscription {
 	runCtx, cancel := context.WithCancel(ctx)
 	rt := &kafkaPerMessageRuntime{
-		runCtx:        runCtx,
-		in:            in,
-		consumer:      consumer,
-		buffer:        cfg.MaxInflight,
-		workers:       make(map[kafkaPartitionKey]*kafkaPartitionWorker),
-		entrySeed:     isEntrySeedActivation(in),
-		messageSchema: cfg.MessageSchema,
+		runCtx:              runCtx,
+		in:                  in,
+		consumer:            consumer,
+		buffer:              cfg.MaxInflight,
+		workers:             make(map[kafkaPartitionKey]*kafkaPartitionWorker),
+		entrySeed:           isEntrySeedActivation(in),
+		messageSchema:       cfg.MessageSchema,
+		deadLetterPublisher: deadLetters,
 	}
 	done := make(chan struct{})
 	go func() {
@@ -269,8 +357,17 @@ type kafkaPerMessageRuntime struct {
 	// params (see isEntrySeedActivation).
 	entrySeed bool
 	// messageSchema, when non-nil, validates each message before emit. Messages
-	// that fail validation are committed but not emitted (skipped).
+	// that fail validation are handled per messageSchema.OnInvalid.
 	messageSchema *KafkaMessageSchema
+	// deadLetterPublisher is non-nil only when messageSchema.OnInvalid is
+	// dead_letter. Owned by this runtime: closed by close().
+	deadLetterPublisher KafkaDeadLetterPublisher
+}
+
+func (r *kafkaPerMessageRuntime) schema() *KafkaMessageSchema { return r.messageSchema }
+
+func (r *kafkaPerMessageRuntime) deadLetters() KafkaDeadLetterPublisher {
+	return r.deadLetterPublisher
 }
 
 // isEntrySeedActivation reports whether a Kafka trigger should route each
@@ -355,6 +452,15 @@ func (r *kafkaPerMessageRuntime) close(ctx context.Context) {
 		for _, w := range workers {
 			close(w.ch)
 		}
+		// Close the dead-letter publisher only after every worker has drained,
+		// so an in-flight publish is never cut off mid-write. Deferred rather
+		// than placed after the loop because the ctx.Done() path below returns
+		// early.
+		defer func() {
+			if r.deadLetterPublisher != nil {
+				_ = r.deadLetterPublisher.Close()
+			}
+		}()
 		for _, w := range workers {
 			select {
 			case <-w.done:
@@ -397,15 +503,21 @@ func (w *kafkaPartitionWorker) run() {
 			// Serial per-partition processing: emit then commit in offset order so
 			// a rebalance can never skip a lower offset whose higher peer committed
 			// first. Emit failure skips commit, leaving the message redelivered.
-			if w.rt.entrySeed {
+			//
+			// Schema validation runs BEFORE the mode split. An earlier revision
+			// chained it as `else if` after the entry-seed branch, so entry-seed
+			// activations silently ignored a declared schema — the one mode where
+			// invalid content is most expensive, because a seeded execution is
+			// durable.
+			if w.rt.messageSchema != nil && !validateKafkaMessageSchema(msg, w.rt.messageSchema) {
+				if handleInvalidKafkaMessage(w.rt.runCtx, w.rt, msg) {
+					_ = commitKafkaMessages(context.Background(), w.rt.consumer, msg)
+				}
+			} else if w.rt.entrySeed {
 				// Entry-seed mode: admission drives the seed, which commits the
 				// offset internally on accept/duplicate/conflict. Do NOT
 				// double-commit here.
 				_ = seedKafkaEntryBatch(w.rt.runCtx, w.rt.in, w.rt.consumer, msg)
-			} else if w.rt.messageSchema != nil && !validateKafkaMessageSchema(msg, w.rt.messageSchema) {
-				// Message does not conform to the declared schema. Commit the
-				// offset (consume) but do not emit — the message is skipped.
-				_ = commitKafkaMessages(context.Background(), w.rt.consumer, msg)
 			} else if emitKafkaMessage(w.rt.runCtx, w.rt.in, msg) {
 				_ = commitKafkaMessages(context.Background(), w.rt.consumer, msg)
 			}
@@ -430,6 +542,21 @@ type kafkaAggregateRuntime struct {
 	mu          sync.Mutex
 	closeOnce   sync.Once
 	aggregators map[kafkaPartitionKey]*kafkaPartitionAggregator
+	// messageSchema validates each message BEFORE it enters a batch. An earlier
+	// revision omitted this field entirely, so an aggregate-mode trigger that
+	// declared message_schema had it silently ignored — validation existed only
+	// on the per-message path. Filtering pre-batch (rather than post-flush) is
+	// what keeps one malformed record from invalidating a whole batch.
+	messageSchema *KafkaMessageSchema
+	// deadLetterPublisher is non-nil only when messageSchema.OnInvalid is
+	// dead_letter. Owned by this runtime: closed by close().
+	deadLetterPublisher KafkaDeadLetterPublisher
+}
+
+func (r *kafkaAggregateRuntime) schema() *KafkaMessageSchema { return r.messageSchema }
+
+func (r *kafkaAggregateRuntime) deadLetters() KafkaDeadLetterPublisher {
+	return r.deadLetterPublisher
 }
 
 type kafkaPartitionAggregator struct {
@@ -440,14 +567,16 @@ type kafkaPartitionAggregator struct {
 	idleTimeout time.Duration
 }
 
-func activateKafkaAggregate(ctx context.Context, in *types.TriggerActivateInput, cfg KafkaConsumerConfig, consumer KafkaConsumer) types.TriggerSubscription {
+func activateKafkaAggregate(ctx context.Context, in *types.TriggerActivateInput, cfg KafkaConsumerConfig, consumer KafkaConsumer, deadLetters KafkaDeadLetterPublisher) types.TriggerSubscription {
 	runCtx, cancel := context.WithCancel(ctx)
 	rt := &kafkaAggregateRuntime{
-		in:          in,
-		cfg:         cfg.Aggregate,
-		consumer:    consumer,
-		emitSem:     make(chan struct{}, cfg.MaxInflight),
-		aggregators: make(map[kafkaPartitionKey]*kafkaPartitionAggregator),
+		in:                  in,
+		cfg:                 cfg.Aggregate,
+		consumer:            consumer,
+		emitSem:             make(chan struct{}, cfg.MaxInflight),
+		aggregators:         make(map[kafkaPartitionKey]*kafkaPartitionAggregator),
+		messageSchema:       cfg.MessageSchema,
+		deadLetterPublisher: deadLetters,
 	}
 	done := make(chan struct{})
 	go func() {
@@ -548,6 +677,14 @@ func (r *kafkaAggregateRuntime) close(ctx context.Context) {
 		for _, agg := range aggregators {
 			close(agg.ch)
 		}
+		// Close the publisher only after every aggregator has drained, so a
+		// final flush's dead-letter publishes are not cut off. Deferred because
+		// the ctx.Done() path below returns early.
+		defer func() {
+			if r.deadLetterPublisher != nil {
+				_ = r.deadLetterPublisher.Close()
+			}
+		}()
 		for _, agg := range aggregators {
 			select {
 			case <-agg.done:
@@ -562,6 +699,13 @@ func (a *kafkaPartitionAggregator) run() {
 	defer close(a.done)
 	defer a.rt.evictAggregator(a.key, a)
 	var buffer []KafkaMessage
+	// discarded holds offsets of schema-invalid messages that were resolved
+	// (discarded or dead-lettered) but whose offsets must NOT be committed
+	// independently. Committing one immediately would move the group offset past
+	// lower offsets still sitting in buffer, so a rebalance right then would skip
+	// them — the same skip hazard the per-partition serial design exists to
+	// prevent. They ride along with the next successful flush instead.
+	var discarded []KafkaMessage
 	timer := time.NewTimer(time.Hour)
 	timer.Stop()
 	timerActive := false
@@ -574,7 +718,7 @@ func (a *kafkaPartitionAggregator) run() {
 		select {
 		case msg, ok := <-a.ch:
 			if !ok {
-				a.flush(context.Background(), buffer)
+				a.flush(context.Background(), buffer, discarded)
 				return
 			}
 			// A new message arrived: this partition is still assigned — reset
@@ -586,6 +730,20 @@ func (a *kafkaPartitionAggregator) run() {
 				}
 			}
 			idleTimer.Reset(a.idleTimeout)
+			// Schema validation happens here, before the message joins a batch,
+			// so one malformed record cannot invalidate an otherwise good batch.
+			if a.rt.messageSchema != nil && !validateKafkaMessageSchema(msg, a.rt.messageSchema) {
+				if handleInvalidKafkaMessage(context.Background(), a.rt, msg) {
+					discarded = append(discarded, msg)
+					// Start the flush timer even for an all-invalid stream, or
+					// these offsets would sit uncommitted until a valid message
+					// happened to arrive.
+					if len(buffer) == 0 && len(discarded) == 1 {
+						resetKafkaAggregateTimer(timer, &timerActive, a.rt.cfg.FlushInterval)
+					}
+				}
+				continue
+			}
 			// No pre-emit dedup: a message must never be marked "seen" before its
 			// side effect is durable, or a crash between the two loses it for good.
 			// At-least-once here rests on flush's emit-then-commit ordering, and the
@@ -595,16 +753,18 @@ func (a *kafkaPartitionAggregator) run() {
 				resetKafkaAggregateTimer(timer, &timerActive, a.rt.cfg.FlushInterval)
 			}
 			if len(buffer) >= a.rt.cfg.MaxSize {
-				if a.flush(context.Background(), buffer) {
+				if a.flush(context.Background(), buffer, discarded) {
 					buffer = nil
+					discarded = nil
 					stopKafkaAggregateTimer(timer, &timerActive)
 				}
 			}
 		case <-timer.C:
 			timerActive = false
-			if a.flush(context.Background(), buffer) {
+			if a.flush(context.Background(), buffer, discarded) {
 				buffer = nil
-			} else if len(buffer) > 0 {
+				discarded = nil
+			} else if len(buffer) > 0 || len(discarded) > 0 {
 				resetKafkaAggregateTimer(timer, &timerActive, a.rt.cfg.FlushInterval)
 			}
 		case <-idleTimer.C:
@@ -613,16 +773,30 @@ func (a *kafkaPartitionAggregator) run() {
 			// the goroutine and map entry are reclaimed. A failed flush here
 			// drops the in-memory buffer, which is safe: the offsets were never
 			// committed, so Kafka redelivers to whoever owns the partition next.
-			if len(buffer) > 0 {
-				a.flush(context.Background(), buffer)
+			if len(buffer) > 0 || len(discarded) > 0 {
+				a.flush(context.Background(), buffer, discarded)
 			}
 			return
 		}
 	}
 }
 
-func (a *kafkaPartitionAggregator) flush(ctx context.Context, messages []KafkaMessage) bool {
+// flush emits messages as one batch and commits their offsets, plus the offsets
+// of any discarded messages that were withheld from independent commit.
+//
+// discarded offsets are committed only alongside a successful emit, or on their
+// own when there is nothing to emit. They are never committed after a failed
+// emit: the failed batch will be redelivered from the lowest uncommitted offset,
+// and advancing past a discarded offset that sits below it would skip valid
+// messages.
+func (a *kafkaPartitionAggregator) flush(ctx context.Context, messages, discarded []KafkaMessage) bool {
 	if len(messages) == 0 {
+		if len(discarded) == 0 {
+			return true
+		}
+		// Nothing to emit — an all-invalid window. Commit the resolved offsets
+		// so the group does not stall on messages that will never be emitted.
+		_ = commitKafkaMessages(ctx, a.rt.consumer, discarded...)
 		return true
 	}
 	select {
@@ -635,7 +809,12 @@ func (a *kafkaPartitionAggregator) flush(ctx context.Context, messages []KafkaMe
 	if _, err := a.rt.in.Emit(ctx, event); err != nil {
 		return false
 	}
-	_ = commitKafkaMessages(ctx, a.rt.consumer, messages...)
+	// Copy rather than append(messages, discarded...): appending would write
+	// into buffer's spare capacity, aliasing a slice the caller still holds.
+	commits := make([]KafkaMessage, 0, len(messages)+len(discarded))
+	commits = append(commits, messages...)
+	commits = append(commits, discarded...)
+	_ = commitKafkaMessages(ctx, a.rt.consumer, commits...)
 	return true
 }
 
@@ -770,6 +949,10 @@ func kafkaConfigFromParams(params map[string]any, supply map[string]any) (KafkaC
 	if err != nil {
 		return KafkaConsumerConfig{}, err
 	}
+	schema, err := kafkaMessageSchemaFromParams(params)
+	if err != nil {
+		return KafkaConsumerConfig{}, err
+	}
 	cfg := KafkaConsumerConfig{
 		Brokers:       conv.NonEmptyStringSlice(params["brokers"]),
 		Topic:         cast.ToString(params["topic"]),
@@ -777,7 +960,7 @@ func kafkaConfigFromParams(params map[string]any, supply map[string]any) (KafkaC
 		StartOffset:   cast.ToString(params["start_offset"]),
 		MaxInflight:   conv.PositiveInt(params["max_inflight"], defaultTriggerMaxInflight),
 		Aggregate:     aggregate,
-		MessageSchema: kafkaMessageSchemaFromParams(params),
+		MessageSchema: schema,
 	}
 	if cfg.StartOffset == "" {
 		cfg.StartOffset = "latest"
@@ -894,23 +1077,122 @@ func validateKafkaMessageSchema(msg KafkaMessage, schema *KafkaMessageSchema) bo
 	return true
 }
 
+// handleInvalidKafkaMessage applies the schema's OnInvalid policy to a message
+// that failed validation, and reports whether the caller may commit the offset.
+//
+// Every path here counts the outcome. The pre-existing behaviour committed
+// silently, so a producer that started emitting malformed records looked
+// identical to an idle topic: no error, no log, no metric, and consumer-group
+// lag at zero because the offsets were being committed. That is the failure mode
+// this function exists to make visible.
+//
+// Returning false means "do not commit", which leaves the message for
+// redelivery. That is the correct fallback for a failed dead-letter publish:
+// redelivering a message forever is recoverable, dropping it is not.
+func handleInvalidKafkaMessage(ctx context.Context, rt invalidMessageHandler, msg KafkaMessage) (commit bool) {
+	schema := rt.schema()
+	policy := schema.OnInvalid
+	if policy == "" {
+		policy = kafkaOnInvalidDiscard
+	}
+	switch policy {
+	case kafkaOnInvalidFail:
+		obs().OnMessageDiscarded(ctx, msg.Topic, "schema_fail")
+		logInvalidKafkaMessage(msg, "schema_fail", "message withheld from commit for redelivery")
+		return false
+	case kafkaOnInvalidDeadLetter:
+		publisher := rt.deadLetters()
+		if publisher == nil {
+			// Activation validated the config, so a nil publisher here means the
+			// construction seam returned nil without an error. Withhold the
+			// commit rather than fall through to a drop.
+			obs().OnMessageDeadLettered(ctx, msg.Topic, "error")
+			logInvalidKafkaMessage(msg, "dead_letter", "dead-letter publisher unavailable; withholding commit")
+			return false
+		}
+		if err := publisher.Publish(ctx, schema.DeadLetterTopic, msg); err != nil {
+			obs().OnMessageDeadLettered(ctx, msg.Topic, "error")
+			logInvalidKafkaMessage(msg, "dead_letter", "dead-letter publish failed: "+err.Error())
+			return false
+		}
+		obs().OnMessageDeadLettered(ctx, msg.Topic, "ok")
+		return true
+	default:
+		obs().OnMessageDiscarded(ctx, msg.Topic, "schema")
+		logInvalidKafkaMessage(msg, "schema", "message discarded")
+		return true
+	}
+}
+
+// invalidMessageHandler is the narrow view of a runtime that
+// handleInvalidKafkaMessage needs, so the per-message and aggregate runtimes
+// share one policy implementation rather than each growing its own copy.
+type invalidMessageHandler interface {
+	schema() *KafkaMessageSchema
+	deadLetters() KafkaDeadLetterPublisher
+}
+
+// logInvalidKafkaMessage emits a throttled log line. It never logs the message
+// value: a malformed record is still production traffic and may carry
+// credentials or PII. Topic/partition/offset are enough to fetch the record
+// deliberately with a separate tool.
+func logInvalidKafkaMessage(msg KafkaMessage, reason, action string) {
+	emit, count := discardLog.allow(time.Now(), msg.Topic+"\x00"+reason)
+	if !emit {
+		return
+	}
+	slog.Warn("kafka message failed schema validation",
+		"topic", msg.Topic,
+		"partition", msg.Partition,
+		"offset", msg.Offset,
+		"reason", reason,
+		"action", action,
+		"occurrences", count,
+	)
+}
+
 // kafkaMessageSchemaFromParams parses the optional message_schema param into a
 // KafkaMessageSchema. Returns nil when no schema is declared (the common case).
-// The param format is: {"required_fields": ["field1", "field2"]}.
-func kafkaMessageSchemaFromParams(params map[string]any) *KafkaMessageSchema {
+// The param format is:
+//
+//	{"required_fields": ["field1"], "on_invalid": "discard|fail|dead_letter",
+//	 "dead_letter_topic": "events-dlq"}
+//
+// An unrecognized on_invalid, or dead_letter without a topic, is an error
+// rather than a silent fallback to discard: a config that asked not to lose
+// messages must never be quietly downgraded to the policy that loses them.
+func kafkaMessageSchemaFromParams(params map[string]any) (*KafkaMessageSchema, error) {
 	raw, ok := params["message_schema"]
 	if !ok || raw == nil {
-		return nil
+		return nil, nil
 	}
 	m, ok := raw.(map[string]any)
 	if !ok {
-		return nil
+		return nil, nil
 	}
 	fields := conv.NonEmptyStringSlice(m["required_fields"])
 	if len(fields) == 0 {
-		return nil
+		return nil, nil
 	}
-	return &KafkaMessageSchema{RequiredFields: fields}
+	schema := &KafkaMessageSchema{
+		RequiredFields:  fields,
+		OnInvalid:       strings.ToLower(strings.TrimSpace(cast.ToString(m["on_invalid"]))),
+		DeadLetterTopic: strings.TrimSpace(cast.ToString(m["dead_letter_topic"])),
+	}
+	if schema.OnInvalid == "" {
+		schema.OnInvalid = kafkaOnInvalidDiscard
+	}
+	switch schema.OnInvalid {
+	case kafkaOnInvalidDiscard, kafkaOnInvalidFail:
+	case kafkaOnInvalidDeadLetter:
+		if schema.DeadLetterTopic == "" {
+			return nil, fmt.Errorf("kafka message_schema on_invalid %q requires dead_letter_topic", schema.OnInvalid)
+		}
+	default:
+		return nil, fmt.Errorf("kafka message_schema on_invalid %q is not supported (supported: %s, %s, %s)",
+			schema.OnInvalid, kafkaOnInvalidDiscard, kafkaOnInvalidFail, kafkaOnInvalidDeadLetter)
+	}
+	return schema, nil
 }
 
 // ---------------------------------------------------------------------------

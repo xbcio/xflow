@@ -128,10 +128,14 @@ func newFakeTriggerRuntime() *fakeTriggerRuntime {
 
 func (r *fakeTriggerRuntime) Emit(ctx context.Context, workflowID types.WorkflowID, nodeName string, event *types.TriggerEvent) (types.ExecutionID, error) {
 	r.recordEmit(event)
-	if r.emitFunc != nil {
-		r.callbackMu.Lock()
-		defer r.callbackMu.Unlock()
-		return r.emitFunc(ctx, workflowID, nodeName, event)
+	// callbackMu is taken before READING emitFunc, not just before calling it.
+	// The earlier form checked `r.emitFunc != nil` outside the lock, which races
+	// with setEmitFunc installing one from the test goroutine.
+	r.callbackMu.Lock()
+	fn := r.emitFunc
+	r.callbackMu.Unlock()
+	if fn != nil {
+		return fn(ctx, workflowID, nodeName, event)
 	}
 	return "exec-1", nil
 }
@@ -189,6 +193,23 @@ func (r *fakeTriggerRuntime) emitCount() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return len(r.emits)
+}
+
+// events returns a copy of the emitted events. The copy matters: callers inspect
+// event payloads while the trigger goroutine may still be appending.
+func (r *fakeTriggerRuntime) events() []*types.TriggerEvent {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]*types.TriggerEvent(nil), r.emits...)
+}
+
+// setEmitFunc installs an emit callback. It takes callbackMu, which Emit also
+// holds while invoking emitFunc, so installing one concurrently with a delivery
+// is not a data race.
+func (r *fakeTriggerRuntime) setEmitFunc(fn func(context.Context, types.WorkflowID, string, *types.TriggerEvent) (types.ExecutionID, error)) {
+	r.callbackMu.Lock()
+	defer r.callbackMu.Unlock()
+	r.emitFunc = fn
 }
 
 func (r *fakeTriggerRuntime) recordEmit(event *types.TriggerEvent) {

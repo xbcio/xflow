@@ -389,7 +389,7 @@ func TestEntrySeedDispatch_PerMessageWorker(t *testing.T) {
 	}
 
 	cfg := KafkaConsumerConfig{MaxInflight: 4}
-	sub := activateKafkaPerMessage(context.Background(), in, cfg, recorder)
+	sub := activateKafkaPerMessage(context.Background(), in, cfg, recorder, nil)
 	t.Cleanup(func() { _ = sub.Close(context.Background()) })
 
 	// Wait for the message to be admitted + committed.

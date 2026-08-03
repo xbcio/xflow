@@ -687,7 +687,7 @@ func TestValidateKafkaMessageSchema(t *testing.T) {
 		{"not_json", []byte(`hello world`), false},
 		{"json_array", []byte(`[1,2,3]`), false},
 		{"null_value_counts", []byte(`{"user_id":"u1","action":null}`), true}, // key exists
-		{"no_schema", []byte(`{}`), true}, // nil schema always passes
+		{"no_schema", []byte(`{}`), true},                                     // nil schema always passes
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -705,20 +705,57 @@ func TestValidateKafkaMessageSchema(t *testing.T) {
 
 func TestKafkaMessageSchemaFromParams(t *testing.T) {
 	tests := []struct {
-		name   string
-		params map[string]any
-		want   *KafkaMessageSchema
+		name    string
+		params  map[string]any
+		want    *KafkaMessageSchema
+		wantErr bool
 	}{
-		{"nil_params", map[string]any{}, nil},
-		{"empty_schema", map[string]any{"message_schema": map[string]any{}}, nil},
-		{"valid", map[string]any{
+		{name: "nil_params", params: map[string]any{}},
+		{name: "empty_schema", params: map[string]any{"message_schema": map[string]any{}}},
+		{name: "valid", params: map[string]any{
 			"message_schema": map[string]any{"required_fields": []any{"user_id", "ts"}},
-		}, &KafkaMessageSchema{RequiredFields: []string{"user_id", "ts"}}},
-		{"not_a_map", map[string]any{"message_schema": "invalid"}, nil},
+		}, want: &KafkaMessageSchema{RequiredFields: []string{"user_id", "ts"}, OnInvalid: kafkaOnInvalidDiscard}},
+		{name: "not_a_map", params: map[string]any{"message_schema": "invalid"}},
+		// An omitted on_invalid must resolve to discard, matching the behaviour
+		// that shipped before the policy existed.
+		{name: "defaults_to_discard", params: map[string]any{
+			"message_schema": map[string]any{"required_fields": []any{"a"}},
+		}, want: &KafkaMessageSchema{RequiredFields: []string{"a"}, OnInvalid: kafkaOnInvalidDiscard}},
+		{name: "fail_policy", params: map[string]any{
+			"message_schema": map[string]any{"required_fields": []any{"a"}, "on_invalid": "fail"},
+		}, want: &KafkaMessageSchema{RequiredFields: []string{"a"}, OnInvalid: kafkaOnInvalidFail}},
+		{name: "dead_letter_policy", params: map[string]any{
+			"message_schema": map[string]any{
+				"required_fields": []any{"a"}, "on_invalid": "DEAD_LETTER", "dead_letter_topic": "events-dlq",
+			},
+		}, want: &KafkaMessageSchema{
+			RequiredFields: []string{"a"}, OnInvalid: kafkaOnInvalidDeadLetter, DeadLetterTopic: "events-dlq",
+		}},
+		// The two negative cases are the ones that matter: a config that asked
+		// not to lose messages must fail activation rather than silently fall
+		// back to the policy that loses them.
+		{name: "dead_letter_without_topic_errors", params: map[string]any{
+			"message_schema": map[string]any{"required_fields": []any{"a"}, "on_invalid": "dead_letter"},
+		}, wantErr: true},
+		{name: "unknown_policy_errors", params: map[string]any{
+			"message_schema": map[string]any{"required_fields": []any{"a"}, "on_invalid": "ignore"},
+		}, wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := kafkaMessageSchemaFromParams(tt.params)
+			got, err := kafkaMessageSchemaFromParams(tt.params)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("got %+v, want an error", got)
+				}
+				if got != nil {
+					t.Errorf("got schema %+v alongside the error; callers must not receive a usable schema", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
 			if tt.want == nil {
 				if got != nil {
 					t.Fatalf("got %+v, want nil", got)
@@ -727,6 +764,12 @@ func TestKafkaMessageSchemaFromParams(t *testing.T) {
 			}
 			if got == nil {
 				t.Fatalf("got nil, want %+v", tt.want)
+			}
+			if got.OnInvalid != tt.want.OnInvalid {
+				t.Errorf("OnInvalid = %q, want %q", got.OnInvalid, tt.want.OnInvalid)
+			}
+			if got.DeadLetterTopic != tt.want.DeadLetterTopic {
+				t.Errorf("DeadLetterTopic = %q, want %q", got.DeadLetterTopic, tt.want.DeadLetterTopic)
 			}
 			if len(got.RequiredFields) != len(tt.want.RequiredFields) {
 				t.Fatalf("RequiredFields = %v, want %v", got.RequiredFields, tt.want.RequiredFields)
