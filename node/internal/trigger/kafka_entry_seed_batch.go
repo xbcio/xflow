@@ -84,8 +84,18 @@ func seedKafkaEntryBatchMessages(ctx context.Context, in *types.TriggerActivateI
 	}
 
 	resp, err := rt.SeedExecutionFromEntry(ctx, req)
+	topic := messages[0].Topic
 	if err != nil {
+		obs().OnBatchAdmission(ctx, topic, "error")
 		return false
+	}
+	switch {
+	case resp.Duplicate:
+		obs().OnBatchAdmission(ctx, topic, "duplicate")
+	case resp.Conflict:
+		obs().OnBatchAdmission(ctx, topic, "conflict")
+	case resp.Accepted:
+		obs().OnBatchAdmission(ctx, topic, "accepted")
 	}
 	return resp.Accepted || resp.Duplicate || resp.Conflict
 }

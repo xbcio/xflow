@@ -21,12 +21,24 @@ type Observer interface {
 	// OnMessageDeadLettered reports a dead-letter publish attempt. result is
 	// "ok" or "error".
 	OnMessageDeadLettered(ctx context.Context, topic, result string)
+	// OnBatchFlushed reports one batch leaving the aggregator. trigger is a fixed
+	// enum: "size", "timeout", "idle", "close". size is the message count.
+	OnBatchFlushed(ctx context.Context, topic, trigger string, size int)
+	// OnBatchAdmission reports the control-plane response to a batch admission.
+	// state is "accepted", "duplicate", "conflict" or "error".
+	//
+	// The conflict rate is the ONLY signal that shows how often a redelivered
+	// batch actually re-executes. The design accepts that duplicate (delivery is
+	// at-least-once), but accepting it is not the same as not looking at it.
+	OnBatchAdmission(ctx context.Context, topic, state string)
 }
 
 type noopObserver struct{}
 
 func (noopObserver) OnMessageDiscarded(context.Context, string, string)    {}
 func (noopObserver) OnMessageDeadLettered(context.Context, string, string) {}
+func (noopObserver) OnBatchFlushed(context.Context, string, string, int)   {}
+func (noopObserver) OnBatchAdmission(context.Context, string, string)      {}
 
 // observer holds the installed Observer as an atomic pointer rather than a
 // mutex-guarded variable because obs() sits on the per-message path, which runs

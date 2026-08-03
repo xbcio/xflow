@@ -40,6 +40,12 @@ func (o *recordingObserver) OnMessageDeadLettered(_ context.Context, topic, resu
 	o.mu.Unlock()
 }
 
+// OnBatchFlushed and OnBatchAdmission are no-ops here: this fake only asserts
+// on discard/dead-letter behavior (Task 4's batch metrics are covered by
+// recordingBatchObserver in kafka_entry_seed_batch_test.go).
+func (o *recordingObserver) OnBatchFlushed(context.Context, string, string, int) {}
+func (o *recordingObserver) OnBatchAdmission(context.Context, string, string)    {}
+
 func (o *recordingObserver) wakeLocked() {
 	close(o.notify)
 	o.notify = make(chan struct{})

@@ -3,6 +3,7 @@ package trigger
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -328,5 +329,107 @@ func TestKafkaAggregate_EntrySeedFailureWithholdsCommit(t *testing.T) {
 	// 再给提交足够时间发生 —— 反向等待，见 negative-assertion-needs-time。
 	if waitForCommitCountUpTo(consumer, 1, 300*time.Millisecond) {
 		t.Fatal("a failed seed must never commit the offset")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Task 4: batch flush + admission metrics.
+// ---------------------------------------------------------------------------
+
+type recordingBatchObserver struct {
+	noopObserver
+	mu         sync.Mutex
+	flushes    []string // trigger reasons
+	sizes      []int
+	admissions []string
+}
+
+func (o *recordingBatchObserver) OnBatchFlushed(_ context.Context, _, trigger string, size int) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.flushes = append(o.flushes, trigger)
+	o.sizes = append(o.sizes, size)
+}
+
+func (o *recordingBatchObserver) OnBatchAdmission(_ context.Context, _, state string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.admissions = append(o.admissions, state)
+}
+
+func (o *recordingBatchObserver) snapshot() ([]string, []int, []string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return append([]string(nil), o.flushes...),
+		append([]int(nil), o.sizes...),
+		append([]string(nil), o.admissions...)
+}
+
+func TestKafkaAggregate_EntrySeedRecordsMetrics(t *testing.T) {
+	o := &recordingBatchObserver{}
+	SetObserver(o)
+	defer SetObserver(nil)
+
+	admitter := &mockEntrySeedRuntime{response: types.EntrySeedResponse{Accepted: true}}
+	rt := &entrySeedTestRuntime{admitter: admitter}
+	in := entrySeedAggregateInput(t, 2)
+	in.Runtime = rt
+
+	msgs := []KafkaMessage{
+		{Topic: "t", Partition: 0, Offset: 1},
+		{Topic: "t", Partition: 0, Offset: 2},
+	}
+	consumer := &commitRecordingConsumer{inner: newScriptedConsumer(msgs)}
+	restore := stubNewKafkaConsumer(consumer)
+	defer restore()
+
+	sub, err := (&KafkaTriggerNode{}).Activate(context.Background(), in)
+	if err != nil {
+		t.Fatalf("activate: %v", err)
+	}
+	defer func() { _ = sub.Close(context.Background()) }()
+
+	waitForCommitCount(t, consumer, 1)
+
+	flushes, sizes, admissions := o.snapshot()
+	if len(flushes) == 0 || flushes[0] != "size" {
+		t.Fatalf("flush triggers = %v, want first to be \"size\"", flushes)
+	}
+	if len(sizes) == 0 || sizes[0] != 2 {
+		t.Fatalf("flush sizes = %v, want first to be 2", sizes)
+	}
+	if len(admissions) == 0 || admissions[0] != "accepted" {
+		t.Fatalf("admissions = %v, want first to be \"accepted\"", admissions)
+	}
+}
+
+// conflict 率是唯一能看出「重投产生重复」实际频率的信号，必须被记录。
+func TestKafkaAggregate_EntrySeedRecordsConflict(t *testing.T) {
+	o := &recordingBatchObserver{}
+	SetObserver(o)
+	defer SetObserver(nil)
+
+	admitter := &mockEntrySeedRuntime{response: types.EntrySeedResponse{Conflict: true}}
+	rt := &entrySeedTestRuntime{admitter: admitter}
+	in := entrySeedAggregateInput(t, 1)
+	in.Runtime = rt
+
+	consumer := &commitRecordingConsumer{
+		inner: newScriptedConsumer([]KafkaMessage{{Topic: "t", Partition: 0, Offset: 1}}),
+	}
+	restore := stubNewKafkaConsumer(consumer)
+	defer restore()
+
+	sub, err := (&KafkaTriggerNode{}).Activate(context.Background(), in)
+	if err != nil {
+		t.Fatalf("activate: %v", err)
+	}
+	defer func() { _ = sub.Close(context.Background()) }()
+
+	waitForCommitCount(t, consumer, 1)
+
+	_, _, admissions := o.snapshot()
+	if len(admissions) == 0 || admissions[0] != "conflict" {
+		t.Fatalf("admissions = %v, want \"conflict\"", admissions)
 	}
 }

@@ -161,10 +161,11 @@ func SetWasmObserver(o WasmObserver) {
 	wasm.SetObserver(o)
 }
 
-// TriggerObserver receives trigger observations: currently messages consumed
-// but never emitted (schema validation failures) and dead-letter publishes.
-// Re-exported from the internal trigger package so a host process can install
-// one without importing an internal package.
+// TriggerObserver receives trigger observations: messages consumed but never
+// emitted (schema validation failures), dead-letter publishes, and
+// aggregate-batch flush/admission outcomes. Re-exported from the internal
+// trigger package so a host process can install one without importing an
+// internal package.
 type TriggerObserver = nodetrigger.Observer
 
 // SetTriggerObserver installs the global observer for trigger activity. Call

@@ -710,7 +710,7 @@ func (a *kafkaPartitionAggregator) run() {
 		select {
 		case msg, ok := <-a.ch:
 			if !ok {
-				a.flush(context.Background(), buffer, discarded)
+				a.flush(context.Background(), buffer, discarded, "close")
 				return
 			}
 			// A new message arrived: this partition is still assigned — reset
@@ -745,7 +745,7 @@ func (a *kafkaPartitionAggregator) run() {
 				resetKafkaAggregateTimer(timer, &timerActive, a.rt.cfg.FlushInterval)
 			}
 			if len(buffer) >= a.rt.cfg.MaxSize {
-				if a.flush(context.Background(), buffer, discarded) {
+				if a.flush(context.Background(), buffer, discarded, "size") {
 					buffer = nil
 					discarded = nil
 					stopKafkaAggregateTimer(timer, &timerActive)
@@ -753,7 +753,7 @@ func (a *kafkaPartitionAggregator) run() {
 			}
 		case <-timer.C:
 			timerActive = false
-			if a.flush(context.Background(), buffer, discarded) {
+			if a.flush(context.Background(), buffer, discarded, "timeout") {
 				buffer = nil
 				discarded = nil
 			} else if len(buffer) > 0 || len(discarded) > 0 {
@@ -766,7 +766,7 @@ func (a *kafkaPartitionAggregator) run() {
 			// drops the in-memory buffer, which is safe: the offsets were never
 			// committed, so Kafka redelivers to whoever owns the partition next.
 			if len(buffer) > 0 || len(discarded) > 0 {
-				a.flush(context.Background(), buffer, discarded)
+				a.flush(context.Background(), buffer, discarded, "idle")
 			}
 			return
 		}
@@ -781,7 +781,7 @@ func (a *kafkaPartitionAggregator) run() {
 // emit: the failed batch will be redelivered from the lowest uncommitted offset,
 // and advancing past a discarded offset that sits below it would skip valid
 // messages.
-func (a *kafkaPartitionAggregator) flush(ctx context.Context, messages, discarded []KafkaMessage) bool {
+func (a *kafkaPartitionAggregator) flush(ctx context.Context, messages, discarded []KafkaMessage, trigger string) bool {
 	if len(messages) == 0 {
 		if len(discarded) == 0 {
 			return true
@@ -817,6 +817,7 @@ func (a *kafkaPartitionAggregator) flush(ctx context.Context, messages, discarde
 			return false
 		}
 	}
+	obs().OnBatchFlushed(ctx, messages[0].Topic, trigger, len(messages))
 	// Copy rather than append(messages, discarded...): appending would write
 	// into buffer's spare capacity, aliasing a slice the caller still holds.
 	commits := make([]KafkaMessage, 0, len(messages)+len(discarded))
