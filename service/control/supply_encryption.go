@@ -1,7 +1,11 @@
 package control
 
 import (
+	"context"
+	"fmt"
 	"sync"
+
+	"github.com/redis/go-redis/v9"
 
 	"github.com/xbcio/xflow/service/crypto/supplyenc"
 )
@@ -32,6 +36,46 @@ func NewSupplyEncryptor() (*SupplyEncryptor, error) {
 		return nil, err
 	}
 	return &SupplyEncryptor{current: k}, nil
+}
+
+// NewSupplyEncryptorShared resolves the transport key through Redis so every
+// replica encrypts with the same key. Without this, a runner that registers
+// against replica A and fetches supply content from replica B decrypts with
+// the wrong key, the supply gate declines, and the runner hosts no triggers
+// at all -- while heartbeating perfectly healthily.
+//
+// SET NX rather than leader election: election answers "who does the work",
+// while key distribution only needs "everyone converges on one value". SET NX
+// gives that atomically, with no startup window in which non-leader replicas
+// have to wait for a leader to finish generating.
+//
+// The transport key is deliberately the one key kept in Redis: it is
+// short-lived and self-healing (losing it only forces re-registration), which
+// matches Redis' durability characteristics. The at-rest key must never live
+// here -- losing it would make already-stored ciphertext permanently
+// unreadable.
+func NewSupplyEncryptorShared(ctx context.Context, rdb redis.Cmdable, key string) (*SupplyEncryptor, error) {
+	candidate, err := supplyenc.GenerateKey()
+	if err != nil {
+		return nil, err
+	}
+	ok, err := rdb.SetNX(ctx, key, candidate.ToBase64(), 0).Result()
+	if err != nil {
+		return nil, fmt.Errorf("supply encryption key: %w", err)
+	}
+	if ok {
+		return &SupplyEncryptor{current: candidate}, nil
+	}
+	// Another replica won the race (or a previous run stored one): adopt it.
+	stored, err := rdb.Get(ctx, key).Result()
+	if err != nil {
+		return nil, fmt.Errorf("supply encryption key: %w", err)
+	}
+	adopted, err := supplyenc.KeyFromBase64(stored)
+	if err != nil {
+		return nil, fmt.Errorf("supply encryption key: stored value is unusable")
+	}
+	return &SupplyEncryptor{current: adopted}, nil
 }
 
 // Encrypt encrypts plaintext supply content with the current key. Safe for
