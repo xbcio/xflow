@@ -1,6 +1,8 @@
 package trigger
 
 import (
+	"context"
+	"errors"
 	"testing"
 
 	"github.com/xbcio/xflow/types"
@@ -66,3 +68,88 @@ func TestBuildKafkaBatchAdmissionKey_EmptyReturnsEmpty(t *testing.T) {
 }
 
 var _ = types.BoundaryExit{}
+
+func TestSeedKafkaEntryBatchMessages_AcceptedAllowsCommit(t *testing.T) {
+	rt := &mockEntrySeedRuntime{response: types.EntrySeedResponse{Accepted: true}}
+	in := &types.TriggerActivateInput{
+		NodeName:   "kafka-node",
+		WorkflowID: "wf-1",
+		Params:     map[string]any{"entry_unit_id": "unit-a", "workflow_version": "v2"},
+	}
+	msgs := []KafkaMessage{
+		{Topic: "t", Partition: 0, Offset: 5},
+		{Topic: "t", Partition: 0, Offset: 9},
+	}
+	if !seedKafkaEntryBatchMessages(context.Background(), in, rt, msgs) {
+		t.Fatal("accepted admission must allow commit")
+	}
+	calls := rt.getCalls()
+	if len(calls) != 1 {
+		t.Fatalf("seed calls = %d, want 1", len(calls))
+	}
+	if calls[0].AdmissionKey != "/wf-1/v2/unit-a/t/0/5-9" {
+		t.Fatalf("admission key = %q", calls[0].AdmissionKey)
+	}
+	if calls[0].Outcome != "success" {
+		t.Fatalf("outcome = %q, want success", calls[0].Outcome)
+	}
+}
+
+func TestSeedKafkaEntryBatchMessages_DuplicateAllowsCommit(t *testing.T) {
+	rt := &mockEntrySeedRuntime{response: types.EntrySeedResponse{Duplicate: true}}
+	in := &types.TriggerActivateInput{
+		NodeName: "n", WorkflowID: "wf", Params: map[string]any{},
+	}
+	msgs := []KafkaMessage{{Topic: "t", Partition: 0, Offset: 1}}
+	if !seedKafkaEntryBatchMessages(context.Background(), in, rt, msgs) {
+		t.Fatal("duplicate admission must allow commit")
+	}
+}
+
+func TestSeedKafkaEntryBatchMessages_ConflictAllowsCommit(t *testing.T) {
+	rt := &mockEntrySeedRuntime{response: types.EntrySeedResponse{Conflict: true}}
+	in := &types.TriggerActivateInput{
+		NodeName: "n", WorkflowID: "wf", Params: map[string]any{},
+	}
+	msgs := []KafkaMessage{{Topic: "t", Partition: 0, Offset: 1}}
+	if !seedKafkaEntryBatchMessages(context.Background(), in, rt, msgs) {
+		t.Fatal("conflict means another runner admitted it; commit is correct")
+	}
+}
+
+// 这条是 offset 安全的关键：stale_generation 经由 error 返回，绝不能提交。
+func TestSeedKafkaEntryBatchMessages_ErrorWithholdsCommit(t *testing.T) {
+	rt := &mockEntrySeedRuntime{err: errors.New("entry-seed: rejected by generation fence: stale_generation")}
+	in := &types.TriggerActivateInput{
+		NodeName: "n", WorkflowID: "wf", Params: map[string]any{},
+	}
+	msgs := []KafkaMessage{{Topic: "t", Partition: 0, Offset: 1}}
+	if seedKafkaEntryBatchMessages(context.Background(), in, rt, msgs) {
+		t.Fatal("a fence rejection must NOT commit the offset — Kafka must redeliver")
+	}
+}
+
+// 全 false 的响应是未知状态，防御性地不提交。
+func TestSeedKafkaEntryBatchMessages_UnknownStateWithholdsCommit(t *testing.T) {
+	rt := &mockEntrySeedRuntime{response: types.EntrySeedResponse{}}
+	in := &types.TriggerActivateInput{
+		NodeName: "n", WorkflowID: "wf", Params: map[string]any{},
+	}
+	msgs := []KafkaMessage{{Topic: "t", Partition: 0, Offset: 1}}
+	if seedKafkaEntryBatchMessages(context.Background(), in, rt, msgs) {
+		t.Fatal("unknown admission state must not commit")
+	}
+}
+
+func TestSeedKafkaEntryBatchMessages_EmptyBatchIsNoop(t *testing.T) {
+	rt := &mockEntrySeedRuntime{response: types.EntrySeedResponse{Accepted: true}}
+	in := &types.TriggerActivateInput{
+		NodeName: "n", WorkflowID: "wf", Params: map[string]any{},
+	}
+	if !seedKafkaEntryBatchMessages(context.Background(), in, rt, nil) {
+		t.Fatal("empty batch is trivially done")
+	}
+	if len(rt.getCalls()) != 0 {
+		t.Fatal("empty batch must not call the control plane")
+	}
+}

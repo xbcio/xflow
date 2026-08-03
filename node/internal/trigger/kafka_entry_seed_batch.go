@@ -1,6 +1,7 @@
 package trigger
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/xbcio/xflow/types"
@@ -46,4 +47,45 @@ func buildKafkaBatchExits(nodeName string, messages []KafkaMessage) []types.Boun
 			"messages":     kafkaMessageDataList(messages),
 		},
 	}}
+}
+
+// seedKafkaEntryBatchMessages admits a whole batch through the entry-seed path.
+// It returns true when the admission was HANDLED and the caller may commit the
+// batch's offsets.
+//
+// The false cases are what keep messages from vanishing:
+//   - transport error → the control plane may not have the result; redeliver.
+//   - generation fence rejection (surfaced as an error by entrySeedRuntime, NOT
+//     as Conflict) → the current-generation owner has not seen these messages.
+//     Committing here would mean Kafka never redelivers them and the new owner
+//     never processes them: silent message loss.
+//
+// Conflict, by contrast, DOES commit: another runner already admitted a result
+// for this key, so the messages are accounted for.
+func seedKafkaEntryBatchMessages(ctx context.Context, in *types.TriggerActivateInput, rt types.EntrySeedRuntime, messages []KafkaMessage) bool {
+	if len(messages) == 0 {
+		return true
+	}
+
+	entryUnitID, _ := in.Params["entry_unit_id"].(string)
+	if entryUnitID == "" {
+		// Single-node entry unit ID = node name (spec §11.5).
+		entryUnitID = in.NodeName
+	}
+	workflowVersion, _ := in.Params["workflow_version"].(string)
+
+	req := types.EntrySeedRequest{
+		AdmissionKey:    buildKafkaBatchAdmissionKey(in.WorkflowID, workflowVersion, entryUnitID, messages),
+		WorkflowID:      in.WorkflowID,
+		WorkflowVersion: workflowVersion,
+		EntryUnitID:     entryUnitID,
+		Outcome:         "success",
+		Exits:           buildKafkaBatchExits(in.NodeName, messages),
+	}
+
+	resp, err := rt.SeedExecutionFromEntry(ctx, req)
+	if err != nil {
+		return false
+	}
+	return resp.Accepted || resp.Duplicate || resp.Conflict
 }
