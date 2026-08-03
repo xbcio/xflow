@@ -5,6 +5,7 @@ import (
 
 	"gorm.io/gorm"
 
+	"github.com/xbcio/xflow/service/crypto/supplyenc"
 	"github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/store/objectstore"
 )
@@ -30,20 +31,49 @@ var (
 	_ store.Transactor = (*Provider)(nil)
 )
 
+// options holds construction-time settings for New. It stays unexported: the
+// only supported way to configure it is through an Option function, so adding
+// a new option never breaks existing call sites.
+type options struct {
+	supplyAtRest *supplyenc.AtRest
+}
+
+// Option configures a Provider at construction time.
+type Option func(*options)
+
+// WithSupplyEncryption enables at-rest encryption of the supply content
+// column. When omitted (or a nil AtRest is passed), supply content is stored
+// and read back exactly as it was before encryption existed.
+func WithSupplyEncryption(a *supplyenc.AtRest) Option {
+	return func(o *options) { o.supplyAtRest = a }
+}
+
 // New creates a Provider from an already-configured *gorm.DB. The caller owns
 // the connection lifecycle and chooses the dialector (MySQL/Postgres/SQLite)
 // and pool settings.
-func New(db *gorm.DB) *Provider {
+func New(db *gorm.DB, opts ...Option) *Provider {
+	o := &options{}
+	for _, opt := range opts {
+		opt(o)
+	}
 	return &Provider{
 		db:            db,
 		executionRepo: &executionRepo{db: db},
 		nodeRepo:      &nodeRepo{db: db},
 		signalRepo:    &signalRepo{db: db},
 		auditRepo:     &auditRepo{db: db},
-		supplyRepo:    &supplyRepo{db: db},
+		supplyRepo:    &supplyRepo{db: db, atRest: o.supplyAtRest},
 		artifactBlobs: &artifactBlobRepo{db: db},
 		artifactIndex: &artifactIndexRepo{db: db},
 	}
+}
+
+// DB returns the underlying *gorm.DB. It exists for tests that need to
+// observe raw column contents (e.g. verifying the supply content column is
+// ciphertext) without going through a repo's encode/decode path; production
+// code should prefer the per-domain repo methods.
+func (p *Provider) DB() *gorm.DB {
+	return p.db
 }
 
 // ArtifactObjects returns the objectstore.Store backed by xflow_artifact_blobs.

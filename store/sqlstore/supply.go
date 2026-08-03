@@ -9,12 +9,17 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
+	"github.com/xbcio/xflow/service/crypto/supplyenc"
 	"github.com/xbcio/xflow/store"
 )
 
 // supplyRepo implements store.Supplies.
 type supplyRepo struct {
 	db *gorm.DB
+	// atRest, when non-nil, encrypts the content column. Nil keeps the
+	// pre-encryption behaviour byte for byte, so the feature can be rolled out
+	// without changing what an existing deployment stores.
+	atRest *supplyenc.AtRest
 }
 
 var _ store.Supplies = (*supplyRepo)(nil)
@@ -27,7 +32,17 @@ func (r *supplyRepo) GetSupply(ctx context.Context, namespace, name string) (*st
 	if err := wrapDBErr(fmt.Sprintf("get supply %q/%q", namespace, name), err); err != nil {
 		return nil, err
 	}
-	return fromDBSupply(&d), nil
+	out := fromDBSupply(&d)
+	if r.atRest != nil {
+		plaintext, decErr := r.atRest.Open(out.Content)
+		if decErr != nil {
+			// Do not include the stored bytes in the error: they are ciphertext
+			// of a value that may be a credential.
+			return nil, fmt.Errorf("get supply %q/%q: decrypt: %w", namespace, name, decErr)
+		}
+		out.Content = plaintext
+	}
+	return out, nil
 }
 
 // PutSupply performs the compare-and-set inside a transaction with a row lock so
@@ -60,14 +75,29 @@ func (r *supplyRepo) PutSupply(ctx context.Context, rec *store.SupplyResource, i
 			lastFetchAt = &t
 		}
 
+		// The hash is computed on the PLAINTEXT and the ciphertext is stored.
+		// Hashing the ciphertext would defeat both idempotent-write detection
+		// and the consumer-side "hash unchanged, do not rebuild" check, because
+		// AES-GCM's random nonce makes every encryption of the same content a
+		// different byte string.
+		contentHash := store.ContentHash(rec.Content)
+		storedContent := rec.Content
+		if r.atRest != nil {
+			sealed, encErr := r.atRest.Seal(rec.Content)
+			if encErr != nil {
+				return fmt.Errorf("put supply %q/%q: encrypt: %w", rec.Namespace, rec.Name, encErr)
+			}
+			storedContent = sealed
+		}
+
 		next := dbSupply{
 			ID:          cur.ID,
 			Namespace:   rec.Namespace,
 			Name:        rec.Name,
-			Content:     rec.Content,
+			Content:     storedContent,
 			ContentType: rec.ContentType,
 			Revision:    curRev + 1,
-			ContentHash: store.ContentHash(rec.Content),
+			ContentHash: contentHash,
 			UpdatedBy:   rec.UpdatedBy,
 			LastFetchAt: lastFetchAt,
 			LastError:   rec.LastError,
@@ -94,6 +124,15 @@ func (r *supplyRepo) PutSupply(ctx context.Context, rec *store.SupplyResource, i
 			return err
 		}
 		out = fromDBSupply(&stored)
+		if r.atRest != nil {
+			// The row was just read back from the DB, so Content is ciphertext.
+			// Callers (and the store contract tests) expect plaintext.
+			plaintext, decErr := r.atRest.Open(out.Content)
+			if decErr != nil {
+				return fmt.Errorf("put supply %q/%q: decrypt readback: %w", rec.Namespace, rec.Name, decErr)
+			}
+			out.Content = plaintext
+		}
 		return nil
 	})
 	if errors.Is(err, store.ErrRevisionConflict) {

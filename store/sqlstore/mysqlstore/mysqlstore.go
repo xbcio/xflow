@@ -12,6 +12,7 @@ import (
 	gormmysql "gorm.io/driver/mysql"
 	"gorm.io/gorm"
 
+	"github.com/xbcio/xflow/service/crypto/supplyenc"
 	"github.com/xbcio/xflow/store/sqlstore"
 )
 
@@ -23,6 +24,11 @@ type config struct {
 	maxIdleConns    int
 	connMaxLifetime time.Duration
 	gormCfg         *gorm.Config
+	// sqlstoreOpts is forwarded to sqlstore.New verbatim. It exists because
+	// mysqlstore.Option configures the connection pool, a different concern
+	// from sqlstore.Option, which configures the Provider itself (e.g. supply
+	// encryption); mysqlstore.WithSupplyEncryption bridges the two.
+	sqlstoreOpts []sqlstore.Option
 }
 
 func defaultConfig() *config {
@@ -76,6 +82,17 @@ func WithGormConfig(cfg *gorm.Config) Option {
 	}
 }
 
+// WithSupplyEncryption enables at-rest encryption of the supply content
+// column. This is a passthrough: mysqlstore.Option configures the connection
+// pool, which is a different type from sqlstore.Option, so this collects the
+// underlying sqlstore.WithSupplyEncryption option and forwards it to
+// sqlstore.New at the end of New.
+func WithSupplyEncryption(a *supplyenc.AtRest) Option {
+	return func(c *config) {
+		c.sqlstoreOpts = append(c.sqlstoreOpts, sqlstore.WithSupplyEncryption(a))
+	}
+}
+
 // New opens a MySQL connection pool and returns a ready-to-use Provider.
 // The dsn must include parseTime=true for correct time.Time scanning.
 func New(dsn string, opts ...Option) (*sqlstore.Provider, error) {
@@ -101,5 +118,5 @@ func New(dsn string, opts ...Option) (*sqlstore.Provider, error) {
 		return nil, fmt.Errorf("ping mysql: %w", err)
 	}
 
-	return sqlstore.New(db), nil
+	return sqlstore.New(db, c.sqlstoreOpts...), nil
 }
