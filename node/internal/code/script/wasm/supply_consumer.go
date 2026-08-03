@@ -141,9 +141,12 @@ func (c *supplyConsumerByDigest) OnSupplyChanged(ctx context.Context, snap suppl
 	e, ok := c.host.engines[c.moduleKey]
 	c.host.mu.Unlock()
 	if !ok {
-		// Engine not yet compiled — the first Execute will create it and the
-		// registry will re-notify. Return nil rather than erroring to avoid
-		// polluting logs with a transient state that resolves itself.
+		// Engine not yet compiled — the first Execute (or resolveArtifacts
+		// prewarm) will create it. Return nil: the supply registry marks this
+		// content as accepted so IsReady passes, and RegisterConsumer's
+		// immediate re-notify (which fires on every activation) will deliver the
+		// content once the engine exists. Returning an error would block the
+		// readiness gate and prevent traffic entirely.
 		return nil
 	}
 	if p := e.active.Load(); p != nil && configHash(p.cfg) == configHash(snap.Content) {

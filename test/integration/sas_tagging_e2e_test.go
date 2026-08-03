@@ -65,12 +65,6 @@ func TestSASTrafficTaggingE2E(t *testing.T) {
 		t.Fatalf("register supply consumer: %v", err)
 	}
 
-	// Rules v1: strip the auth header from every record, tag admin traffic.
-	applyRules(t, supplyName, ruleSet(
-		cleanRule("authorization", ""),
-		tagRule("admin-api", `path startsWith "/admin"`),
-	))
-
 	topic := uniqueTopic("xflow-sas-tagging")
 	group := topic + "-group"
 	newKafkaTopic(t, brokers, topic, 1)
@@ -105,6 +99,15 @@ func TestSASTrafficTaggingE2E(t *testing.T) {
 	if _, err := eng.AddWorkflow(ctx, wf); err != nil {
 		t.Fatalf("add workflow: %v", err)
 	}
+
+	// Rules v1: strip the auth header from every record, tag admin traffic.
+	// Applied AFTER AddWorkflow: resolveArtifacts pre-compiles the wasm module
+	// so the supply consumer can configure its pool. Before that the engine
+	// doesn't exist and OnSupplyChanged would no-op.
+	applyRules(t, supplyName, ruleSet(
+		cleanRule("authorization", ""),
+		tagRule("admin-api", `path startsWith "/admin"`),
+	))
 
 	// A consumer-group join is not instant; produce until one message lands
 	// rather than racing the first write against the rebalance.

@@ -254,6 +254,15 @@ func Prewarm(code string, cfg any) {
 	sharedReactorHost.addPrewarm(code, cfg)
 }
 
+// CompileModule eagerly compiles a wasm module (base64 code string) so the
+// reactor engine cache is primed. It is used by resolveArtifacts to ensure the
+// engine exists before supply consumers attempt to configure it. Unlike Prewarm,
+// which defers compilation to the next Warmup() call, this compiles immediately.
+func CompileModule(ctx context.Context, code string) error {
+	_, err := sharedReactorHost.engineForCode(ctx, code)
+	return err
+}
+
 // splitConfig separates the reactor config from the eval input globals. The
 // config lives under reactorConfigGlobal; the remaining keys are the input map
 // handed to the guest as the eval environment.

@@ -48,3 +48,10 @@ func RegisterWasmSupplyConsumer(code string, supplyNode string) error {
 func RegisterWasmSupplyConsumerByDigest(digest string, supplyNode string) error {
 	return wasm.RegisterSupplyConsumerByDigest(digest, supplyNode, supply.Default)
 }
+
+// CompileWasmModule eagerly compiles a wasm module (base64 code string) into the
+// reactor engine cache. Used by resolveArtifacts so the engine exists before
+// supply consumers attempt to configure it.
+func CompileWasmModule(ctx context.Context, code string) error {
+	return wasm.CompileModule(ctx, code)
+}
