@@ -42,6 +42,31 @@ func (r *supplyRepo) GetSupply(ctx context.Context, namespace, name string) (*st
 		}
 		out.Content = plaintext
 	}
+	// General integrity check, independent of encryption: content_hash is
+	// written alongside content on every PutSupply (see below), so it must
+	// still match the content just read back, whether or not atRest is set.
+	// A mismatch means the row was damaged after the fact — truncation, a bad
+	// migration, a direct SQL edit — and serving it as if it were fine would
+	// be strictly worse than erroring. PutSupply always sets Content and
+	// ContentHash together from the same rec.Content, in the same write, so a
+	// non-empty content_hash can never be stale for a legitimate row: it is
+	// never left over from a previous value while content moves on without
+	// it. An empty content_hash is treated as "no hash to check" rather than
+	// a mismatch, so this cannot break reads of rows that predate the
+	// content_hash column (schema default is '').
+	//
+	// Encryption is one case this happens to cover, not the reason it exists:
+	// supplyenc.Open decides "this is pre-encryption plaintext" purely from
+	// IsEncrypted's cheap prefix check on the stored bytes, so corruption that
+	// destroys that prefix (front truncation, or a row shorter than 20 bytes)
+	// makes Open return the mangled bytes as "plaintext" with a nil error —
+	// undetectable inside supplyenc, since it has no way to know what the
+	// original content was. This check closes that residual gap as a side
+	// effect, but it applies equally, and for the same reason, when atRest is
+	// nil and no encryption is involved at all.
+	if out.ContentHash != "" && out.ContentHash != store.ContentHash(out.Content) {
+		return nil, fmt.Errorf("get supply %q/%q: content hash mismatch, stored content may be corrupted", namespace, name)
+	}
 	return out, nil
 }
 
