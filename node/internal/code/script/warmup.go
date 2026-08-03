@@ -42,3 +42,9 @@ func RegisterWasmConfigLoader(code string, loader wasm.ConfigLoader, ttl time.Du
 func RegisterWasmSupplyConsumer(code string, supplyNode string) error {
 	return wasm.RegisterSupplyConsumer(code, supplyNode, supply.Default)
 }
+
+// RegisterWasmSupplyConsumerByDigest is the artifact-digest variant: the module
+// is identified by its sha256 digest rather than a base64 code string.
+func RegisterWasmSupplyConsumerByDigest(digest string, supplyNode string) error {
+	return wasm.RegisterSupplyConsumerByDigest(digest, supplyNode, supply.Default)
+}

@@ -113,6 +113,18 @@ func LookupFunc(name string) (UserFunc, bool) {
 }
 func Script(code string) *ScriptNode { return scriptpkg.Script(code) }
 
+// ScriptFile creates a script node whose code comes from a local file. The file
+// is read and stored in the ArtifactStore at AddWorkflow time (resolveArtifacts);
+// at runtime the ScriptNode resolves the content by digest from the artifact
+// store. Use this for large artifacts (wasm modules) to avoid inlining multi-MB
+// blobs in workflow definitions.
+func ScriptFile(path string) *ScriptNode { return scriptpkg.Script("").File(path) }
+
+// ScriptArtifact creates a script node whose code is already stored in the
+// ArtifactStore under the given content-addressable digest. Use this when the
+// caller manages artifact storage externally.
+func ScriptArtifact(digest string) *ScriptNode { return scriptpkg.Script("").Artifact(digest) }
+
 // SupplyExternalNode declares a consumed SupplyResource. Re-exported so callers
 // outside the module can build one.
 type SupplyExternalNode = supplypkg.ExternalNode
@@ -184,6 +196,14 @@ func RegisterWasmConfigLoader(code string, loader WasmConfigLoader, ttl time.Dur
 // swap the loader path uses. Call it at activation time.
 func RegisterWasmSupplyConsumer(code string, supplyNode string) error {
 	return scriptpkg.RegisterWasmSupplyConsumer(code, supplyNode)
+}
+
+// RegisterWasmSupplyConsumerByDigest is RegisterWasmSupplyConsumer for modules
+// identified by their artifact store digest (e.g. "sha256:<64 hex>"). Use this
+// when the module is stored in the ArtifactStore and ScriptNode uses
+// artifact_digest rather than an inline code string.
+func RegisterWasmSupplyConsumerByDigest(digest string, supplyNode string) error {
+	return scriptpkg.RegisterWasmSupplyConsumerByDigest(digest, supplyNode)
 }
 func Set(fields map[string]any) *SetNode {
 	return transform.Set(fields)

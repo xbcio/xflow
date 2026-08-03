@@ -79,6 +79,10 @@ type Config struct {
 	// activation-time fetch and TTL polling for convergence, which is still
 	// correct, just slower for supplies whose activation already happened.
 	SupplyGate *SupplyGate
+	// ArtifactCodeResolver, when set, resolves script artifacts by content-
+	// addressable digest. ScriptNode calls Input.ArtifactCode(ctx, digest) at
+	// Execute time; the runner wires the read-through artifact cache here.
+	ArtifactCodeResolver func(ctx context.Context, digest string) ([]byte, error)
 }
 
 type Runner struct {
@@ -114,7 +118,7 @@ func New(client ProtocolClient, registry engine.HandlerRegistry, config Config) 
 	}
 	r := &Runner{
 		client:            client,
-		executor:          execution.NewRunner(registry, execution.WithResourcePool(config.ResourcePool), execution.WithCredentialResolver(config.CredentialResolver)),
+		executor:          execution.NewRunner(registry, execution.WithResourcePool(config.ResourcePool), execution.WithCredentialResolver(config.CredentialResolver), execution.WithArtifactCodeResolver(config.ArtifactCodeResolver)),
 		config:            config,
 		tracer:            tracer,
 		activationTracker: config.ActivationTracker,

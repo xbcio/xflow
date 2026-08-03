@@ -56,6 +56,14 @@ func (e *Engine) AddWorkflow(ctx context.Context, wf *WorkflowBuilder) (types.Wo
 	if err := preCheckHandlerVersions(def, wf); err != nil {
 		return "", err
 	}
+	// Resolve ScriptFile nodes: read the file, store content in the artifact
+	// store, and rewrite parameters to artifact_digest. This must run before
+	// graph.Compile so the compiled graph carries the final parameter set.
+	if e.artifactStore != nil {
+		if err := resolveArtifacts(ctx, def, e.artifactStore); err != nil {
+			return "", err
+		}
+	}
 	g, err := graph.Compile(def)
 	if err != nil {
 		return "", err

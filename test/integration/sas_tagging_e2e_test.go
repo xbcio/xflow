@@ -4,7 +4,6 @@ package integration
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -22,6 +21,7 @@ import (
 	nodesupply "github.com/xbcio/xflow/node/supply"
 	"github.com/xbcio/xflow/sdk/xflow"
 	"github.com/xbcio/xflow/store"
+	"github.com/xbcio/xflow/store/objectstore"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -46,7 +46,8 @@ func TestSASTrafficTaggingE2E(t *testing.T) {
 	brokers := requireKafka(t)
 	redisAddr := requireRedis(t)
 
-	taggerCode := buildTaggerModule(t)
+	taggerWasmPath := buildTaggerWasm(t)
+	taggerDigest := digestOfFile(t, taggerWasmPath)
 	// A unique supply name per run: supply.Default is process-global and its
 	// content outlives an unregister, so a shared name would leak rules into
 	// whichever test ran next.
@@ -55,7 +56,12 @@ func TestSASTrafficTaggingE2E(t *testing.T) {
 	// The workflow definition carries NO rules — only the module and a
 	// declaration that it consumes the supply. That absence is the point: it is
 	// what proves the rules travelled over the supply channel.
-	if err := node.RegisterWasmSupplyConsumer(taggerCode, supplyName); err != nil {
+	//
+	// RegisterByDigest: the module is identified by its artifact digest, not
+	// a multi-MB base64 string. This is the production path — ScriptFile puts
+	// the artifact into the store at AddWorkflow time, and Execute fetches it
+	// by digest at runtime.
+	if err := node.RegisterWasmSupplyConsumerByDigest(taggerDigest, supplyName); err != nil {
 		t.Fatalf("register supply consumer: %v", err)
 	}
 
@@ -68,6 +74,10 @@ func TestSASTrafficTaggingE2E(t *testing.T) {
 	topic := uniqueTopic("xflow-sas-tagging")
 	group := topic + "-group"
 	newKafkaTopic(t, brokers, topic, 1)
+
+	// Artifact store: local FS store only (embedded mode, no HTTP origin needed).
+	artifactDir := t.TempDir()
+	artifactStore := store.NewArtifactStore(objectstore.NewFSStore(artifactDir), nil)
 
 	// The engine observes the tagger node's completion through a Hooks
 	// receiver rather than through eng.Wait/eng.Inspect: this test runs the
@@ -82,13 +92,14 @@ func TestSASTrafficTaggingE2E(t *testing.T) {
 		xflow.WithExecutionMode(xflow.ExecutionModeTransient),
 		xflow.WithNodes(node.Script("")),
 		xflow.WithHooks(tagged),
+		xflow.WithArtifactStore(artifactStore),
 	)
 	if err != nil {
 		t.Fatalf("new cluster: %v", err)
 	}
 	t.Cleanup(eng.Stop)
 
-	wf := taggingWorkflow(t, taggerCode, supplyName, brokers, topic, group)
+	wf := taggingWorkflow(t, taggerWasmPath, supplyName, brokers, topic, group)
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	if _, err := eng.AddWorkflow(ctx, wf); err != nil {
@@ -250,7 +261,7 @@ func taggingWorkflow(t *testing.T, taggerCode, supplyName string, brokers []stri
 	parse := wf.Node("parse", node.Expr(`fromJSON(trigger.data.value)`))
 	wf.Connect(trigger, parse)
 
-	tagger := wf.Node("tagger", node.Script(taggerCode).Language("wasm").Runtime("wazero-reactor"))
+	tagger := wf.Node("tagger", node.ScriptFile(taggerCode).Language("wasm").Runtime("wazero-reactor"))
 	wf.Connect(parse, tagger)
 
 	supplyDecl := wf.Node("rules", node.SupplyExternal(supplyName))
@@ -330,9 +341,9 @@ func (r *taggedNodeRecorder) OnNodeComplete(_ context.Context, id types.Executio
 	}
 }
 
-// buildTaggerModule compiles the tagger reactor guest and returns it base64
-// encoded, which is how a ScriptNode carries a wasm module.
-func buildTaggerModule(t *testing.T) string {
+// buildTaggerWasm compiles the tagger reactor guest and returns the path to the
+// .wasm file. The file lives in a t.TempDir so cleanup is automatic.
+func buildTaggerWasm(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	out := filepath.Join(dir, "tagger.wasm")
@@ -342,9 +353,16 @@ func buildTaggerModule(t *testing.T) string {
 	if b, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build tagger guest: %v\n%s", err, b)
 	}
-	raw, err := os.ReadFile(out)
+	return out
+}
+
+// digestOfFile computes the content-addressable digest of a file, matching
+// store.ContentHash ("sha256:<64 hex>").
+func digestOfFile(t *testing.T, path string) string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("read tagger wasm: %v", err)
+		t.Fatalf("read file for digest: %v", err)
 	}
-	return base64.StdEncoding.EncodeToString(raw)
+	return store.ContentHash(raw)
 }

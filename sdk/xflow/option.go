@@ -6,6 +6,7 @@ import (
 	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
+	"github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -35,6 +36,12 @@ type engineConfig struct {
 	resourcePool       types.ResourcePool
 	resourcePoolSet    bool
 	resourcePoolConfig *types.ResourcePoolConfig
+
+	// artifactStore holds script artifacts (wasm modules, JS sources) in a
+	// content-addressable store. Used by resolveArtifacts (AddWorkflow) to Put
+	// files from ScriptFile, and by the embedded runner to resolve artifact_digest
+	// at Execute time. nil = feature disabled.
+	artifactStore *store.ArtifactStore
 
 	executionMode             ExecutionMode
 	executionModeSet          bool
@@ -125,6 +132,19 @@ func WithVersionPolicy(p execution.VersionPolicy) Option {
 		c.versionPolicy = p
 		c.versionPolicySet = true
 	}
+}
+
+// WithArtifactStore provides a content-addressable store for script artifacts.
+// When set:
+//   - AddWorkflow resolves ScriptFile nodes: reads the file, stores it, and
+//     rewrites the parameter to artifact_digest.
+//   - The embedded runner resolves artifact_digest at Execute time by reading
+//     from this store.
+//
+// nil (the default) disables both: ScriptFile nodes fail at AddWorkflow, and
+// artifact_digest params fail at Execute with a permanent config error.
+func WithArtifactStore(s *store.ArtifactStore) Option {
+	return func(c *engineConfig) { c.artifactStore = s }
 }
 
 // InvokeOption configures a single workflow invocation.

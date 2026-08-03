@@ -1,6 +1,9 @@
 package xflow
 
 import (
+	"context"
+	"io"
+
 	backendlocal "github.com/xbcio/xflow/backend/providers/local"
 	"github.com/xbcio/xflow/node/resource"
 	"github.com/xbcio/xflow/types"
@@ -38,6 +41,18 @@ func NewLocal(opts ...Option) (*Engine, error) {
 	memOpts := []backendlocal.Option{backendlocal.WithConcurrency(cfg.concurrency)}
 	if pool != nil {
 		memOpts = append(memOpts, backendlocal.WithResourcePool(pool))
+	}
+	if cfg.artifactStore != nil {
+		as := cfg.artifactStore
+		memOpts = append(memOpts, backendlocal.WithArtifactCodeResolver(
+			func(ctx context.Context, digest string) ([]byte, error) {
+				rc, _, err := as.Open(ctx, digest)
+				if err != nil {
+					return nil, err
+				}
+				defer rc.Close()
+				return io.ReadAll(rc)
+			}))
 	}
 	provider := backendlocal.New(memOpts...)
 	return newFromConfig(cfg, provider)

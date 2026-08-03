@@ -76,6 +76,12 @@ type Input struct {
 	credential func(namespace namespace.Namespace, name string) map[string]any
 	// namespace scopes the credential resolver to the execution's namespace.
 	namespace namespace.Namespace
+
+	// artifactCode resolves a script artifact by digest, returning the raw bytes
+	// (e.g. wasm binary). Injected by the runner or embedded dispatcher before
+	// Execute so ScriptNode can load code from the artifact store rather than
+	// requiring it inline in parameters.
+	artifactCode func(ctx context.Context, digest string) ([]byte, error)
 }
 
 // Credential returns the credential values for the given name.
@@ -98,6 +104,22 @@ func (n *Input) SetCredentialResolver(fn func(namespace namespace.Namespace, nam
 // SetNamespace scopes the credential resolver to the given namespace.
 func (n *Input) SetNamespace(t namespace.Namespace) {
 	n.namespace = t
+}
+
+// ArtifactCode resolves a script artifact by its content-addressable digest
+// (e.g. "sha256:<hex>") and returns the raw bytes. Returns nil, nil when no
+// resolver is configured — the caller must treat that as "feature unavailable".
+func (n *Input) ArtifactCode(ctx context.Context, digest string) ([]byte, error) {
+	if n.artifactCode == nil {
+		return nil, nil
+	}
+	return n.artifactCode(ctx, digest)
+}
+
+// SetArtifactCodeResolver sets the function that resolves script artifacts by
+// digest. Called by the runner or embedded dispatcher before Execute.
+func (n *Input) SetArtifactCodeResolver(fn func(ctx context.Context, digest string) ([]byte, error)) {
+	n.artifactCode = fn
 }
 
 // Output is the result produced by a node handler.

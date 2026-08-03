@@ -1,8 +1,10 @@
 package xflow
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
 
 	"github.com/xbcio/xflow/backend/providers/distributed"
 	"github.com/xbcio/xflow/store"
@@ -73,6 +75,18 @@ func NewCluster(clusterCfg ClusterConfig, opts ...Option) (*Engine, error) {
 	if pool := resolveResourcePool(cfg); pool != nil && !clusterCfg.DisableConsumer {
 		// Only worker pods need a pool; API-only pods don't dispatch handlers.
 		asynqOpts = append(asynqOpts, distributed.WithResourcePool(pool))
+	}
+	if cfg.artifactStore != nil && !clusterCfg.DisableConsumer {
+		as := cfg.artifactStore
+		asynqOpts = append(asynqOpts, distributed.WithArtifactCodeResolver(
+			func(ctx context.Context, digest string) ([]byte, error) {
+				rc, _, err := as.Open(ctx, digest)
+				if err != nil {
+					return nil, err
+				}
+				defer rc.Close()
+				return io.ReadAll(rc)
+			}))
 	}
 	a, err := distributed.New(clusterCfg.RedisAddr, clusterCfg.Store, asynqOpts...)
 	if err != nil {

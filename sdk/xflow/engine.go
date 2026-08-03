@@ -12,6 +12,7 @@ import (
 	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
+	"github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -56,6 +57,10 @@ type Engine struct {
 	// when a later step of the same call fails (rollback). Guarded by e.mu.
 	directHandlers map[string]types.ActionHandler
 	globalHandlers map[string]types.ActionHandler
+
+	// artifactStore for ScriptFile resolution (AddWorkflow) and embedded-runner
+	// artifact_digest resolution (Execute). nil = disabled.
+	artifactStore *store.ArtifactStore
 }
 
 // newFromConfig assembles an Engine from a resolved engineConfig and a backend provider.
@@ -109,6 +114,7 @@ func newFromConfig(cfg *engineConfig, provider backend.Provider) (*Engine, error
 		directHandlerNames:  make(map[string]string),
 		directHandlers:      make(map[string]types.ActionHandler),
 		globalHandlers:      make(map[string]types.ActionHandler),
+		artifactStore:       cfg.artifactStore,
 	}
 	e.triggerRuntime = newTriggerRuntime(e, provider.TriggerPrimitives())
 

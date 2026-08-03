@@ -17,6 +17,7 @@ type Option func(*config)
 type config struct {
 	concurrency  int
 	resourcePool types.ResourcePool
+	artifactCode func(ctx context.Context, digest string) ([]byte, error)
 	registry     *execution.Registry
 }
 
@@ -39,6 +40,12 @@ func WithResourcePool(p types.ResourcePool) Option {
 	return func(c *config) { c.resourcePool = p }
 }
 
+// WithArtifactCodeResolver installs a script-artifact resolver for the embedded
+// dispatcher. ScriptNode calls Input.ArtifactCode(ctx, digest) at Execute time.
+func WithArtifactCodeResolver(fn func(ctx context.Context, digest string) ([]byte, error)) Option {
+	return func(c *config) { c.artifactCode = fn }
+}
+
 // WithRegistry injects an external handler registry. Use this when the inner
 // engine must resolve handlers registered outside its own backend (e.g. group
 // runtime injecting the outer runner's member handlers).
@@ -55,6 +62,7 @@ type Backend struct {
 	workflowRegistry *workflowRegistry
 	triggerRuntime   *triggerPrimitives
 	resourcePool     types.ResourcePool
+	artifactCode     func(ctx context.Context, digest string) ([]byte, error)
 }
 
 // New creates a memory backend with its components but does NOT start the queue.
@@ -77,6 +85,7 @@ func New(opts ...Option) *Backend {
 		workflowRegistry: newWorkflowRegistry(),
 		triggerRuntime:   newTriggerPrimitives(),
 		resourcePool:     cfg.resourcePool,
+		artifactCode:     cfg.artifactCode,
 	}
 }
 
@@ -102,6 +111,9 @@ func (b *Backend) Bind(eng *engine.Engine) func() {
 	var opts []execution.RunnerOption
 	if b.resourcePool != nil {
 		opts = append(opts, execution.WithResourcePool(b.resourcePool))
+	}
+	if b.artifactCode != nil {
+		opts = append(opts, execution.WithArtifactCodeResolver(b.artifactCode))
 	}
 	dispatcher := execution.NewEmbeddedDispatcher(eng, b.registry, opts...)
 	queueStop := b.BindHandlerWithEngine(eng, dispatcher.HandleTask)

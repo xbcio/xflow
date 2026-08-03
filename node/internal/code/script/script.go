@@ -2,6 +2,7 @@ package script
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -25,6 +26,18 @@ type ScriptNode struct {
 	Lang        string
 	RuntimeName string
 	Creds       []string
+
+	// ArtifactDigest is the content-addressable digest (e.g. "sha256:<hex>") of
+	// a script artifact stored in the ArtifactStore. When set, Execute resolves
+	// the code bytes via Input.ArtifactCode instead of expecting them inline.
+	ArtifactDigest string
+
+	// FilePath is a local filesystem path to the script artifact. Used by the
+	// ScriptFile DSL constructor; resolveArtifacts in AddWorkflow reads the file,
+	// Puts it to the ArtifactStore, and rewrites this to ArtifactDigest before
+	// the workflow runs. FilePath must never reach Execute — it is resolved at
+	// registration time only.
+	FilePath string
 }
 
 // Script creates a script node. The caller MUST explicitly choose a language
@@ -56,6 +69,23 @@ func (n *ScriptNode) Credentials(names ...string) *ScriptNode {
 	return n
 }
 
+// Artifact sets the content-addressable digest of a pre-stored script artifact.
+// When set, Execute resolves the code from the artifact store at runtime.
+func (n *ScriptNode) Artifact(digest string) *ScriptNode {
+	n.ArtifactDigest = digest
+	n.Code = ""
+	return n
+}
+
+// File sets a local filesystem path to the script source/binary. resolveArtifacts
+// (called by AddWorkflow) reads this file, stores it in the ArtifactStore, and
+// rewrites the parameter to artifact_digest. File must not reach runtime.
+func (n *ScriptNode) File(path string) *ScriptNode {
+	n.FilePath = path
+	n.Code = ""
+	return n
+}
+
 func (n *ScriptNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.script",
@@ -63,7 +93,8 @@ func (n *ScriptNode) Descriptor() types.Descriptor {
 		Params: []types.ParamSpec{
 			{Name: "language", DisplayName: "Language", Type: types.ParamString, Required: true, Description: "Language family: js | wasm (no default — choose explicitly)"},
 			{Name: "runtime", DisplayName: "Runtime", Type: types.ParamString, Required: true, Description: "Engine: js->goja|qjs, wasm->wazero (no default — choose explicitly)"},
-			{Name: "code", DisplayName: "Code", Type: types.ParamString, Required: true, Description: "JS source (js) or base64 wasm module (wasm)"},
+			{Name: "code", DisplayName: "Code", Type: types.ParamString, Required: false, Description: "JS source (js) or base64 wasm module (wasm); omit when artifact_digest is set"},
+			{Name: "artifact_digest", DisplayName: "Artifact Digest", Type: types.ParamString, Required: false, Description: "Content-addressable digest (sha256:<hex>) of the script in the artifact store"},
 			{Name: "credentials", DisplayName: "Credentials", Type: types.ParamArray, Required: false, Description: "Declared credential names injected as $credentials"},
 		},
 		Inputs:  []types.PortSpec{{Name: "main", DisplayName: "Main"}},
@@ -82,9 +113,18 @@ func (n *ScriptNode) RawParams() any {
 	// flow through to Execute which surfaces them as config errors, so the
 	// DSL output stays a faithful mirror of what was set on the builder.
 	params := map[string]any{
-		"code":     n.Code,
 		"language": n.Lang,
 		"runtime":  n.RuntimeName,
+	}
+	switch {
+	case n.FilePath != "":
+		// Marker for resolveArtifacts: AddWorkflow reads the file, Puts to
+		// ArtifactStore, and rewrites to artifact_digest before graph.Compile.
+		params["__artifact_file_path"] = n.FilePath
+	case n.ArtifactDigest != "":
+		params["artifact_digest"] = n.ArtifactDigest
+	default:
+		params["code"] = n.Code
 	}
 	if len(n.Creds) > 0 {
 		params["credentials"] = n.Creds
@@ -99,8 +139,33 @@ func (n *ScriptNode) Execute(ctx context.Context, input *types.Input) (*types.Ou
 
 	code, _ := input.Params["code"].(string)
 	if code == "" {
+		// artifact_digest path: resolve code bytes from the artifact store.
+		if digest, _ := input.Params["artifact_digest"].(string); digest != "" {
+			raw, err := input.ArtifactCode(ctx, digest)
+			if err != nil {
+				observeExecute(ctx, language, runtime, "config", time.Since(start))
+				return nil, types.NewTransientError("script.artifact_fetch",
+					fmt.Sprintf("xflow.script: failed to fetch artifact %s: %v", digest, err))
+			}
+			if raw == nil {
+				observeExecute(ctx, language, runtime, "config", time.Since(start))
+				return nil, types.NewPermanentError("script.artifact_unavailable",
+					"xflow.script: artifact_digest is set but no artifact resolver is configured")
+			}
+			// The engine interface takes a code string. For wasm, that is base64
+			// of the module bytes; for js, the raw source text. Wasm digests are
+			// always binary, so base64 encode. JS artifacts are UTF-8 text and can
+			// be passed directly.
+			if language == "wasm" {
+				code = base64.StdEncoding.EncodeToString(raw)
+			} else {
+				code = string(raw)
+			}
+		}
+	}
+	if code == "" {
 		observeExecute(ctx, language, runtime, "config", time.Since(start))
-		return nil, types.NewPermanentError("script.code_required", "xflow.script: code parameter is required")
+		return nil, types.NewPermanentError("script.code_required", "xflow.script: code parameter is required (or set artifact_digest)")
 	}
 	if language == "" {
 		observeExecute(ctx, language, runtime, "config", time.Since(start))

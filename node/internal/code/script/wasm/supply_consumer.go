@@ -3,6 +3,7 @@ package wasm
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/xbcio/xflow/node/supply"
 )
@@ -120,4 +121,68 @@ func UnregisterSupplyConsumer(code string, supplyNode string, reg *supply.Regist
 // nothing executes any more.
 func consumerKeyFor(moduleKey, supplyNode string) string {
 	return supplyNode + "@" + moduleKey
+}
+
+// supplyConsumerByDigest is a variant of supplyConsumer for modules identified
+// by their artifact digest (sha256 hex) rather than a base64 code string. The
+// digest IS the moduleKey, so no decode is needed. The engine must already exist
+// (compiled on first Execute via the artifact path); if it doesn't,
+// OnSupplyChanged returns an error and the supply registry retries on the next
+// Apply (which is after Execute has created the engine).
+type supplyConsumerByDigest struct {
+	moduleKey string // sha256 hex (= digest without "sha256:" prefix)
+	host      *reactorHost
+}
+
+var _ supply.Consumer = (*supplyConsumerByDigest)(nil)
+
+func (c *supplyConsumerByDigest) OnSupplyChanged(ctx context.Context, snap supply.Snapshot) error {
+	c.host.mu.Lock()
+	e, ok := c.host.engines[c.moduleKey]
+	c.host.mu.Unlock()
+	if !ok {
+		// Engine not yet compiled — the first Execute will create it and the
+		// registry will re-notify. Return nil rather than erroring to avoid
+		// polluting logs with a transient state that resolves itself.
+		return nil
+	}
+	if p := e.active.Load(); p != nil && configHash(p.cfg) == configHash(snap.Content) {
+		return nil
+	}
+	return e.swapConfig(ctx, snap.Content, defaultPoolSize(), snap.Revision)
+}
+
+// RegisterSupplyConsumerByDigest is RegisterSupplyConsumer for modules
+// identified by their artifact store digest (e.g. "sha256:<64 hex>"). The
+// digest hex (without the "sha256:" prefix) is used directly as the moduleKey,
+// avoiding a multi-MB base64 decode + sha256 that the code-string path needs.
+//
+// The function strips the "sha256:" prefix itself; callers pass the full digest.
+func RegisterSupplyConsumerByDigest(digest string, supplyNode string, reg *supply.Registry) error {
+	if digest == "" || supplyNode == "" {
+		return fmt.Errorf("wasm: RegisterSupplyConsumerByDigest requires both digest and supply node name")
+	}
+	key, ok := strings.CutPrefix(digest, "sha256:")
+	if !ok || len(key) != 64 {
+		return fmt.Errorf("wasm: RegisterSupplyConsumerByDigest: invalid digest %q (want sha256:<64 hex>)", digest)
+	}
+	if reg == nil {
+		reg = supply.Default
+	}
+	c := &supplyConsumerByDigest{moduleKey: key, host: sharedReactorHost}
+	sharedReactorHost.seedSourceDrivenByKey(key)
+	reg.RegisterConsumer(supplyNode, consumerKeyFor(key, supplyNode), c)
+	return nil
+}
+
+// UnregisterSupplyConsumerByDigest removes a digest-keyed registration.
+func UnregisterSupplyConsumerByDigest(digest string, supplyNode string, reg *supply.Registry) {
+	key, ok := strings.CutPrefix(digest, "sha256:")
+	if !ok || len(key) != 64 {
+		return
+	}
+	if reg == nil {
+		reg = supply.Default
+	}
+	reg.UnregisterConsumer(supplyNode, consumerKeyFor(key, supplyNode))
 }

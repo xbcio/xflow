@@ -13,6 +13,7 @@ type Runner struct {
 	registry           engine.HandlerRegistry
 	pool               types.ResourcePool
 	credentialResolver func(namespace namespace.Namespace, name string) map[string]any
+	artifactCode       func(ctx context.Context, digest string) ([]byte, error)
 }
 
 // RunnerOption customizes a Runner.
@@ -33,6 +34,14 @@ func WithResourcePool(p types.ResourcePool) RunnerOption {
 // the shared lease.Input in place (same pattern as the parity test wrappers).
 func WithCredentialResolver(fn func(namespace namespace.Namespace, name string) map[string]any) RunnerOption {
 	return func(r *Runner) { r.credentialResolver = fn }
+}
+
+// WithArtifactCodeResolver installs a resolver that fetches script artifact
+// bytes by content-addressable digest. The Runner applies it to each Input
+// before invoking the handler so ScriptNode can load code from the artifact
+// store instead of requiring it inline in parameters.
+func WithArtifactCodeResolver(fn func(ctx context.Context, digest string) ([]byte, error)) RunnerOption {
+	return func(r *Runner) { r.artifactCode = fn }
 }
 
 // NewRunner creates an in-process task runner.
@@ -68,6 +77,9 @@ func (r *Runner) Execute(ctx context.Context, lease *engine.TaskLease) (engine.T
 	if r.credentialResolver != nil && lease.Input != nil {
 		lease.Input.SetNamespace(namespace.FromContext(ctx))
 		lease.Input.SetCredentialResolver(r.credentialResolver)
+	}
+	if r.artifactCode != nil && lease.Input != nil {
+		lease.Input.SetArtifactCodeResolver(r.artifactCode)
 	}
 	if sh, ok := handler.(types.SuspendingHandler); ok {
 		return r.executeSuspending(ctx, lease, sh)

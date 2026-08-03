@@ -6,11 +6,13 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/rand"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -29,6 +31,8 @@ import (
 	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/service/protocol"
 	runnersvc "github.com/xbcio/xflow/service/runner"
+	"github.com/xbcio/xflow/store"
+	"github.com/xbcio/xflow/store/objectstore"
 	"github.com/xbcio/xflow/types"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -325,6 +329,30 @@ func runnerServiceConfig(cfg runnerConfig) (runnersvc.Config, error) {
 			return creds[name]
 		}
 	}
+	// Artifact store: read-through cache for script artifacts (wasm modules).
+	// The runner fetches by digest from the server (GET /v1/artifacts/{digest})
+	// and caches locally on disk. The resolver closure is what ScriptNode.Execute
+	// calls at runtime via Input.ArtifactCode.
+	{
+		cacheDir := artifactCacheDir()
+		fsCache := objectstore.NewFSStore(cacheDir)
+		seedBaseURL := triggerSeedBaseURL(cfg)
+		httpOrigin := &objectstore.HTTPStore{
+			BaseURL: seedBaseURL,
+			Token:   cfg.token,
+			Client:  &http.Client{Timeout: 60 * time.Second},
+		}
+		readThrough := objectstore.NewReadThrough(fsCache, httpOrigin)
+		artifactStore := store.NewArtifactStore(readThrough, nil)
+		svcCfg.ArtifactCodeResolver = func(ctx context.Context, digest string) ([]byte, error) {
+			rc, _, err := artifactStore.Open(ctx, digest)
+			if err != nil {
+				return nil, err
+			}
+			defer rc.Close()
+			return io.ReadAll(rc)
+		}
+	}
 	// Trigger hosting: when the runner advertises at least one registered trigger
 	// node type AND a seed base URL is reachable, construct the ActivationTracker
 	// over the production TriggerActivationHandler (Task 8) so activate/deactivate
@@ -448,4 +476,17 @@ func runWithReconnect(ctx context.Context, fn runFunc) error {
 			backoff = reconnectMaxBackoff
 		}
 	}
+}
+
+// artifactCacheDir returns the local directory for caching artifact blobs.
+// Priority: XFLOW_ARTIFACT_CACHE_DIR env > os.UserCacheDir()/xflow/artifacts.
+func artifactCacheDir() string {
+	if dir := os.Getenv("XFLOW_ARTIFACT_CACHE_DIR"); dir != "" {
+		return dir
+	}
+	base, err := os.UserCacheDir()
+	if err != nil {
+		base = os.TempDir()
+	}
+	return filepath.Join(base, "xflow", "artifacts")
 }

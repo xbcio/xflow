@@ -77,6 +77,7 @@ type config struct {
 	execTTL                time.Duration
 	consumer               bool
 	resourcePool           types.ResourcePool
+	artifactCode           func(ctx context.Context, digest string) ([]byte, error)
 	auditObserver          AuditObserver
 	leaseObserver          LeaseObserver
 	shutdownObserver       ShutdownObserver
@@ -134,6 +135,12 @@ func WithConsumer(enabled bool) Option {
 // See .claude/specs/resource-pool.md.
 func WithResourcePool(p types.ResourcePool) Option {
 	return func(c *config) { c.resourcePool = p }
+}
+
+// WithArtifactCodeResolver installs a script-artifact resolver for the embedded
+// dispatcher. ScriptNode calls Input.ArtifactCode(ctx, digest) at Execute time.
+func WithArtifactCodeResolver(fn func(ctx context.Context, digest string) ([]byte, error)) Option {
+	return func(c *config) { c.artifactCode = fn }
 }
 
 // WithAuditObserver installs an external observer for audit-store dual-write
@@ -232,6 +239,7 @@ type Backend struct {
 	consumer         bool
 	transient        bool
 	resourcePool     types.ResourcePool
+	artifactCode     func(ctx context.Context, digest string) ([]byte, error)
 	leaderElector    backend.LeaderElector
 	shutdownObserver ShutdownObserver
 	logger           engine.Logger
@@ -366,6 +374,7 @@ func New(redisAddr string, db store.Store, opts ...Option) (*Backend, error) {
 		consumer:         cfg.consumer,
 		transient:        cfg.transient,
 		resourcePool:     cfg.resourcePool,
+		artifactCode:     cfg.artifactCode,
 		leaderElector:    leaderElector,
 		shutdownObserver: cfg.shutdownObserver,
 		logger:           cfg.logger,
@@ -386,6 +395,9 @@ func (b *Backend) Bind(eng *engine.Engine) func() {
 	var opts []execution.RunnerOption
 	if b.resourcePool != nil {
 		opts = append(opts, execution.WithResourcePool(b.resourcePool))
+	}
+	if b.artifactCode != nil {
+		opts = append(opts, execution.WithArtifactCodeResolver(b.artifactCode))
 	}
 	dispatcher := execution.NewEmbeddedDispatcher(eng, b.registry, opts...)
 	stop, err := b.bindHandler(eng, dispatcher.HandleTask)
@@ -409,6 +421,9 @@ func (b *Backend) StartBinding(eng *engine.Engine) (func(), error) {
 	var opts []execution.RunnerOption
 	if b.resourcePool != nil {
 		opts = append(opts, execution.WithResourcePool(b.resourcePool))
+	}
+	if b.artifactCode != nil {
+		opts = append(opts, execution.WithArtifactCodeResolver(b.artifactCode))
 	}
 	dispatcher := execution.NewEmbeddedDispatcher(eng, b.registry, opts...)
 	return b.bindHandler(eng, dispatcher.HandleTask)
