@@ -108,8 +108,8 @@ type serverConfig struct {
 	// XFLOW_MASTER_KEY takes precedence when both are set.
 	masterKeyFile string
 	logFormat     string
-	metricsAddr string
-	metricsPath string
+	metricsAddr   string
+	metricsPath   string
 	// traceMode is one of "disabled", "stdout", or "otlp".
 	traceMode     string
 	traceEndpoint string
