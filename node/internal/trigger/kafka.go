@@ -277,18 +277,6 @@ func (n *KafkaTriggerNode) Activate(ctx context.Context, in *types.TriggerActiva
 		}
 	}
 	if cfg.Aggregate.Enabled {
-		// The aggregate path emits batches through the legacy Runtime.Emit and has
-		// no entry-seed admission equivalent (a batch admission key would have to
-		// express an offset range that the control-plane fence accepts as the same
-		// key across retries). Fail closed instead of activating a consumer whose
-		// every flush would error and replay forever.
-		if isEntrySeedActivation(in) {
-			_ = consumer.Close()
-			if deadLetters != nil {
-				_ = deadLetters.Close()
-			}
-			return nil, fmt.Errorf("kafka trigger: aggregate mode is not supported for entry-seed hosting")
-		}
 		return activateKafkaAggregate(ctx, in, cfg, consumer, deadLetters), nil
 	}
 	return activateKafkaPerMessage(ctx, in, cfg, consumer, deadLetters), nil
@@ -548,6 +536,9 @@ type kafkaAggregateRuntime struct {
 	// on the per-message path. Filtering pre-batch (rather than post-flush) is
 	// what keeps one malformed record from invalidating a whole batch.
 	messageSchema *KafkaMessageSchema
+	// entrySeed selects the entry-unit seed admission path over the legacy Emit
+	// path when a batch flushes. Set once at activation (see isEntrySeedActivation).
+	entrySeed bool
 	// deadLetterPublisher is non-nil only when messageSchema.OnInvalid is
 	// dead_letter. Owned by this runtime: closed by close().
 	deadLetterPublisher KafkaDeadLetterPublisher
@@ -576,6 +567,7 @@ func activateKafkaAggregate(ctx context.Context, in *types.TriggerActivateInput,
 		emitSem:             make(chan struct{}, cfg.MaxInflight),
 		aggregators:         make(map[kafkaPartitionKey]*kafkaPartitionAggregator),
 		messageSchema:       cfg.MessageSchema,
+		entrySeed:           isEntrySeedActivation(in),
 		deadLetterPublisher: deadLetters,
 	}
 	done := make(chan struct{})
@@ -805,9 +797,25 @@ func (a *kafkaPartitionAggregator) flush(ctx context.Context, messages, discarde
 	case <-ctx.Done():
 		return false
 	}
-	event := kafkaBatchEvent(a.rt.in.NodeName, messages)
-	if _, err := a.rt.in.Emit(ctx, event); err != nil {
-		return false
+	// Entry-seed mode admits the batch to the control plane instead of emitting
+	// locally. Both paths share the SAME commit rule below: the batch is only
+	// durable-enough-to-commit after the side effect succeeded.
+	if a.rt.entrySeed {
+		rt, ok := a.rt.in.Runtime.(types.EntrySeedRuntime)
+		if !ok {
+			// isEntrySeedActivation already required this capability, so reaching
+			// here means the runtime changed under us. Withhold the commit rather
+			// than silently falling back to Emit with a different key space.
+			return false
+		}
+		if !seedKafkaEntryBatchMessages(ctx, a.rt.in, rt, messages) {
+			return false
+		}
+	} else {
+		event := kafkaBatchEvent(a.rt.in.NodeName, messages)
+		if _, err := a.rt.in.Emit(ctx, event); err != nil {
+			return false
+		}
 	}
 	// Copy rather than append(messages, discarded...): appending would write
 	// into buffer's spare capacity, aliasing a slice the caller still holds.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/xbcio/xflow/types"
 )
@@ -151,5 +152,181 @@ func TestSeedKafkaEntryBatchMessages_EmptyBatchIsNoop(t *testing.T) {
 	}
 	if len(rt.getCalls()) != 0 {
 		t.Fatal("empty batch must not call the control plane")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Aggregate + entry-seed wiring (Task 3): flush routes a flushed batch through
+// seedKafkaEntryBatchMessages instead of the legacy Emit path when the
+// activation is entry-seed. The three tests below drive this through the real
+// KafkaTriggerNode.Activate + aggregator, not by calling flush directly, so
+// they also prove the ban in Activate has been lifted.
+//
+// entrySeedTestRuntime (kafka_entry_seed_test.go) is used as the Runtime
+// rather than a bare mockEntrySeedRuntime: Activate requires a full
+// types.TriggerRuntime (Emit/Dedup/TryLock/State), which mockEntrySeedRuntime
+// alone does not implement. entrySeedTestRuntime implements both TriggerRuntime
+// and types.EntrySeedRuntime by delegating admission calls to an embedded
+// admitter, so the mockEntrySeedRuntime's callCount/getCalls stay available by
+// asserting on the admitter directly.
+// ---------------------------------------------------------------------------
+
+func stubNewKafkaConsumer(c KafkaConsumer) func() {
+	prev := newKafkaConsumer
+	newKafkaConsumer = func(KafkaConsumerConfig) (KafkaConsumer, error) { return c, nil }
+	return func() { newKafkaConsumer = prev }
+}
+
+func entrySeedAggregateInput(t *testing.T, maxSize int) *types.TriggerActivateInput {
+	t.Helper()
+	return &types.TriggerActivateInput{
+		NodeName:   "kafka-node",
+		WorkflowID: "wf-1",
+		Params: map[string]any{
+			"brokers":       []string{"localhost:9092"},
+			"topic":         "t",
+			"group":         "g",
+			"entry_seed":    true,
+			"entry_unit_id": "unit-a",
+			"aggregate": map[string]any{
+				"enabled": true, "by": "partition", "dedup": "message", "max_size": maxSize,
+			},
+		},
+	}
+}
+
+func waitForSeedCalls(t *testing.T, rt *mockEntrySeedRuntime, want int32) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if rt.callCount.Load() >= want {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %d seed calls, got %d", want, rt.callCount.Load())
+}
+
+func waitForCommitCount(t *testing.T, c *commitRecordingConsumer, want int) {
+	t.Helper()
+	if !waitForCommitCountUpTo(c, want, 2*time.Second) {
+		t.Fatalf("timed out waiting for %d commits, got %d", want, len(c.getCommits()))
+	}
+}
+
+// waitForCommitCountUpTo reports whether the commit count reached want within
+// the window. Used for BOTH positive assertions and negative ones — a negative
+// assertion that reads the count immediately is a fake probe, because the
+// commit it claims must not happen simply has not had time to happen yet.
+func waitForCommitCountUpTo(c *commitRecordingConsumer, want int, within time.Duration) bool {
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		if len(c.getCommits()) >= want {
+			return true
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return false
+}
+
+// entry-seed 下 aggregate 不再被拒绝。
+func TestKafkaAggregate_EntrySeedActivates(t *testing.T) {
+	admitter := &mockEntrySeedRuntime{response: types.EntrySeedResponse{Accepted: true}}
+	rt := &entrySeedTestRuntime{admitter: admitter}
+	in := &types.TriggerActivateInput{
+		NodeName:   "kafka-node",
+		WorkflowID: "wf-1",
+		Params: map[string]any{
+			"brokers":       []string{"localhost:9092"},
+			"topic":         "t",
+			"group":         "g",
+			"entry_seed":    true,
+			"entry_unit_id": "unit-a",
+			"aggregate": map[string]any{
+				"enabled": true, "by": "partition", "dedup": "message", "max_size": 2,
+			},
+		},
+		Runtime: rt,
+	}
+
+	msgs := []KafkaMessage{
+		{Topic: "t", Partition: 0, Offset: 1},
+		{Topic: "t", Partition: 0, Offset: 2},
+	}
+	consumer := &commitRecordingConsumer{inner: newScriptedConsumer(msgs)}
+	restore := stubNewKafkaConsumer(consumer)
+	defer restore()
+
+	sub, err := (&KafkaTriggerNode{}).Activate(context.Background(), in)
+	if err != nil {
+		t.Fatalf("entry-seed aggregate activation must succeed, got: %v", err)
+	}
+	defer func() { _ = sub.Close(context.Background()) }()
+
+	waitForSeedCalls(t, admitter, 1)
+
+	calls := admitter.getCalls()
+	if calls[0].AdmissionKey != "/wf-1//unit-a/t/0/1-2" {
+		t.Fatalf("batch admission key = %q, want a 1-2 range", calls[0].AdmissionKey)
+	}
+	exitData := calls[0].Exits[0].Data
+	if exitData["count"] != 2 {
+		t.Fatalf("batch count = %v, want 2", exitData["count"])
+	}
+}
+
+// seed 成功后才提交 offset —— 顺序不能反。
+func TestKafkaAggregate_EntrySeedCommitsAfterSeed(t *testing.T) {
+	admitter := &mockEntrySeedRuntime{response: types.EntrySeedResponse{Accepted: true}}
+	rt := &entrySeedTestRuntime{admitter: admitter}
+	in := entrySeedAggregateInput(t, 2)
+	in.Runtime = rt
+
+	msgs := []KafkaMessage{
+		{Topic: "t", Partition: 0, Offset: 1},
+		{Topic: "t", Partition: 0, Offset: 2},
+	}
+	consumer := &commitRecordingConsumer{inner: newScriptedConsumer(msgs)}
+	restore := stubNewKafkaConsumer(consumer)
+	defer restore()
+
+	sub, err := (&KafkaTriggerNode{}).Activate(context.Background(), in)
+	if err != nil {
+		t.Fatalf("activate: %v", err)
+	}
+	defer func() { _ = sub.Close(context.Background()) }()
+
+	waitForCommitCount(t, consumer, 1)
+	if admitter.callCount.Load() == 0 {
+		t.Fatal("offset committed without any seed call — ordering is inverted")
+	}
+}
+
+// seed 失败绝不提交。这是「不该发生」的断言：必须反向等待，不能立刻读。
+func TestKafkaAggregate_EntrySeedFailureWithholdsCommit(t *testing.T) {
+	admitter := &mockEntrySeedRuntime{err: errors.New("entry-seed: rejected by generation fence: stale_generation")}
+	rt := &entrySeedTestRuntime{admitter: admitter}
+	in := entrySeedAggregateInput(t, 2)
+	in.Runtime = rt
+
+	msgs := []KafkaMessage{
+		{Topic: "t", Partition: 0, Offset: 1},
+		{Topic: "t", Partition: 0, Offset: 2},
+	}
+	consumer := &commitRecordingConsumer{inner: newScriptedConsumer(msgs)}
+	restore := stubNewKafkaConsumer(consumer)
+	defer restore()
+
+	sub, err := (&KafkaTriggerNode{}).Activate(context.Background(), in)
+	if err != nil {
+		t.Fatalf("activate: %v", err)
+	}
+	defer func() { _ = sub.Close(context.Background()) }()
+
+	// 先等 seed 真的发生过，否则下面的「无提交」断言是恒真的假探针。
+	waitForSeedCalls(t, admitter, 1)
+	// 再给提交足够时间发生 —— 反向等待，见 negative-assertion-needs-time。
+	if waitForCommitCountUpTo(consumer, 1, 300*time.Millisecond) {
+		t.Fatal("a failed seed must never commit the offset")
 	}
 }
