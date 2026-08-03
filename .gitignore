@@ -76,4 +76,9 @@ data/
 
 # Agent workspace artifacts
 .agents/
-runner
+
+# Built binaries at the repo root. The leading slash is load-bearing: a bare
+# "runner" pattern matches every path segment containing that name, which
+# silently excluded cmd/runner/*_test.go from the repository.
+/runner
+/server
