@@ -2,6 +2,7 @@ package wasm
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/xbcio/xflow/node/internal/code/script/engine"
@@ -258,4 +259,82 @@ func stripConfig(globals map[string]any) map[string]any {
 		input[k] = v
 	}
 	return input
+}
+
+// isBatchSkippable classifies an Execute error as either skippable (a single
+// record's fault, instance still clean) or batch-fatal (doomed instance, host
+// infrastructure failure, or context cancellation — continuing would produce a
+// silently short result or evaluate against a suspect instance).
+//
+// Only a *reactorEvalError with a non-doom code is skippable. Those codes are
+// guest-classified per-record failures (errDecode, errUnconfigured, errConfig,
+// errOutput) where evalFromPool returned the instance to the pool unharmed.
+// Everything else — bare fmt.Errorf from alloc/write/eval traps (doomed=true in
+// evalOnce but consumed by evalFromPool before we see it), errEval itself, or
+// any error from borrow/config/encode — is batch-fatal.
+func isBatchSkippable(err error) bool {
+	var evalErr *reactorEvalError
+	if !errors.As(err, &evalErr) {
+		// Not a guest-classified error at all: host-side trap, borrow failure,
+		// config error, encode error, etc. All batch-fatal.
+		return false
+	}
+	// errEval is the doom code (pool.go:87). The instance was torn down.
+	return evalErr.code != errEval
+}
+
+// ExecuteBatch evaluates each record through the reactor pool in a host-side
+// loop, one Execute call per record.
+//
+// The guest contract is deliberately unchanged: the guest still sees exactly the
+// expression environment it always saw, so the rules keep working and
+// isEngineRoot's "$"-prefix leak guard keeps holding. The proper abstraction is
+// a body sub-graph with per-item downstream fan-out; engine/expand.go's
+// ExecuteBatch is still a pass-through stub, so this loop stands in for it.
+// TECH DEBT, not the end state.
+//
+// A record whose eval fails is SKIPPED, not fatal: one malformed record must not
+// invalidate the whole batch (the same rule the guest applies internally, see
+// compiledRule.matches). A doomed instance IS fatal — that is a host-level
+// failure, and letting the batch fail means the offsets stay uncommitted and
+// Kafka redelivers, which is clean because nothing downstream has run yet.
+func (f *reactorFacade) ExecuteBatch(ctx context.Context, code string, records []any, globals map[string]any) ([]any, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("wasm/wazero-reactor: batch: %w", err)
+	}
+	if len(records) == 0 {
+		return nil, nil
+	}
+	out := make([]any, 0, len(records))
+	for _, rec := range records {
+		perRecord := make(map[string]any, len(globals)+1)
+		for k, v := range globals {
+			perRecord[k] = v
+		}
+		perRecord["$input"] = rec
+		if m, ok := rec.(map[string]any); ok {
+			for k, v := range m {
+				if len(k) > 0 && k[0] == '$' {
+					// A record field must never shadow an engine root: that is
+					// exactly the collision isEngineRoot relies on being impossible.
+					continue
+				}
+				perRecord[k] = v
+			}
+		}
+		res, err := f.Execute(ctx, code, perRecord, engine.DefaultHelpers())
+		if err != nil {
+			if isBatchSkippable(err) {
+				continue
+			}
+			// Batch-fatal: doomed instance (alloc/write/eval trap or errEval),
+			// context cancellation, borrow failure, config error, etc.
+			return nil, err
+		}
+		out = append(out, res)
+	}
+	return out, nil
 }
