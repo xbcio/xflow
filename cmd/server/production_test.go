@@ -23,6 +23,7 @@ func TestValidateProductionRequiresEachComponent(t *testing.T) {
 		auditSink:     durableAudit,
 		durableAudit:  true,
 		reconciler:    noopReconciler{},
+		masterKey:     true,
 	}
 	if err := validateProduction("production", base); err != nil {
 		t.Fatalf("baseline production = %v, want nil (all components present)", err)

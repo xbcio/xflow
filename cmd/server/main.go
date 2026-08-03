@@ -22,6 +22,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -37,6 +38,8 @@ import (
 	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/service/apiserver"
 	"github.com/xbcio/xflow/service/control"
+	"github.com/xbcio/xflow/service/crypto/masterkey"
+	"github.com/xbcio/xflow/service/crypto/supplyenc"
 	"github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/store/sqlstore/mysqlstore"
 	"go.uber.org/zap"
@@ -101,7 +104,10 @@ type serverConfig struct {
 	tlsCert     string
 	tlsKey      string
 	tlsClientCA string
-	logFormat   string
+	// masterKeyFile is the path to a 0600 file holding the base64 master key.
+	// XFLOW_MASTER_KEY takes precedence when both are set.
+	masterKeyFile string
+	logFormat     string
 	metricsAddr string
 	metricsPath string
 	// traceMode is one of "disabled", "stdout", or "otlp".
@@ -164,6 +170,7 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	fs.StringVar(&cfg.tlsCert, "tls-cert", "", "Path to server TLS certificate (enables TLS)")
 	fs.StringVar(&cfg.tlsKey, "tls-key", "", "Path to server TLS private key (required with --tls-cert)")
 	fs.StringVar(&cfg.tlsClientCA, "tls-client-ca", "", "Path to CA bundle to verify runner certs (enables mTLS)")
+	fs.StringVar(&cfg.masterKeyFile, "master-key-file", "", "Path to a 0600 file holding the base64-encoded 32-byte master encryption key; XFLOW_MASTER_KEY takes precedence. Required in production: without it supply content is stored in plaintext. Generate with: openssl rand -base64 32")
 	fs.StringVar(&cfg.logFormat, "log-format", "text", "Log format: text or json")
 	fs.StringVar(&cfg.metricsAddr, "metrics-addr", "", "Prometheus metrics listen address (empty disables metrics)")
 	fs.StringVar(&cfg.metricsPath, "metrics-path", "/metrics", "Prometheus metrics path")
@@ -369,6 +376,23 @@ func runServer(cfg serverConfig) error {
 		principalAuth = auth
 		singleToken = true
 	}
+	// Master key: env wins over file. ErrNotConfigured is not fatal here —
+	// validateProduction decides, so dev keeps working without a key.
+	var supplyAtRest *supplyenc.AtRest
+	mk, mkErr := masterkey.Load(os.Getenv("XFLOW_MASTER_KEY"), cfg.masterKeyFile)
+	switch {
+	case mkErr == nil:
+		dek := mk.Derive(supplyenc.SupplyContentInfo)
+		supplyAtRest = supplyenc.NewAtRest(dek)
+	case errors.Is(mkErr, masterkey.ErrNotConfigured):
+		// Handled by validateProduction below.
+	default:
+		// A key that was supplied but is unusable is always fatal, in every
+		// mode: continuing would silently write plaintext after the operator
+		// explicitly asked for encryption.
+		return mkErr
+	}
+
 	// G1 audit projection. When --mysql-dsn is set, a durable SQL sink is the
 	// authoritative audit target (admission audit persisted before mutations,
 	// fail-closed on sink error). Without MySQL, the in-memory sink is the
@@ -386,7 +410,7 @@ func runServer(cfg serverConfig) error {
 	var audit apiserver.AuditSink
 	durableAudit := false
 	if cfg.mysqlDSN != "" {
-		p, err := mysqlstore.New(cfg.mysqlDSN)
+		p, err := mysqlstore.New(cfg.mysqlDSN, mysqlstore.WithSupplyEncryption(supplyAtRest))
 		if err != nil {
 			return fmt.Errorf("open mysql store: %w", err)
 		}
@@ -444,6 +468,10 @@ func runServer(cfg serverConfig) error {
 		GRPCAddr:            cfg.grpcAddr,
 		MetricsAddr:         cfg.metricsAddr,
 		MetricsPath:         cfg.metricsPath,
+		// EnableSupplyEncryption is independent of at-rest encryption
+		// (supplyAtRest): it protects the wire between server and runner, which
+		// does not need a KEK to be present.
+		EnableSupplyEncryption: true,
 	}
 	if cfg.tlsCert != "" || cfg.tlsKey != "" || cfg.tlsClientCA != "" {
 		apiCfg.TLS = &apiserver.TLSConfig{Cert: cfg.tlsCert, Key: cfg.tlsKey, ClientCA: cfg.tlsClientCA}
@@ -492,11 +520,15 @@ func runServer(cfg serverConfig) error {
 		durableAudit:  durableAudit,
 		reconciler:    rec,
 		singleToken:   singleToken,
+		masterKey:     supplyAtRest != nil,
 	}); err != nil {
 		return err
 	}
 	if cfg.mode == "dev" {
 		fmt.Fprintln(os.Stderr, "xflow-server: WARNING --mode=dev: in-memory audit / single-token / anonymous auth are non-production; do not run in production")
+	}
+	if cfg.mode == "dev" && supplyAtRest == nil {
+		fmt.Fprintln(os.Stderr, "xflow-server: WARNING no XFLOW_MASTER_KEY: supply content is stored in plaintext")
 	}
 
 	// signal.NotifyContext so SIGINT/SIGTERM trigger graceful shutdown: the
@@ -693,6 +725,8 @@ type productionDeps struct {
 	// forbids this: one static token must not self-grant operator scopes
 	// (Task 8 blocker 4). Production requires --auth-tokens-file.
 	singleToken bool
+	// masterKey reports whether a usable master encryption key was loaded.
+	masterKey bool
 }
 
 // validateProduction enforces the Task 8 blocker 3 production posture. In
@@ -704,6 +738,8 @@ type productionDeps struct {
 //   - durable AuditSink (admission audit persisted before mutations; the
 //     in-memory sink is dev-only and not authoritative),
 //   - Reconciler (the T8 seam; T9 provides the crash-safe worker).
+//   - a master encryption key (XFLOW_MASTER_KEY or --master-key-file); without
+//     it supply content would be stored in plaintext.
 //
 // dev mode allows every combination above (in-memory audit, single-token,
 // anonymous) and is expected to print a stderr warning at startup.
@@ -725,6 +761,9 @@ func validateProduction(mode string, deps productionDeps) error {
 	}
 	if deps.reconciler == nil {
 		return fmt.Errorf("production mode requires a Reconciler (T8 seam; T9 provides the crash-safe worker)")
+	}
+	if !deps.masterKey {
+		return fmt.Errorf("production mode requires a master encryption key (XFLOW_MASTER_KEY or --master-key-file); without it supply content is stored in plaintext. Generate with: openssl rand -base64 32")
 	}
 	return nil
 }
