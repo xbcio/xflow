@@ -355,12 +355,12 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 		supplyObserved = observed
 	}
 
-	// Supply content encryption: when enabled, generate a per-process key and
+	// Supply content encryption: when enabled, resolve the transport key and
 	// wire it into the Core (for key delivery on register/heartbeat) and the
 	// apiserver supply module (for response encryption).
 	var supplyEnc *SupplyEncryptor
 	if cfg.EnableSupplyEncryption {
-		enc, encErr := NewSupplyEncryptor()
+		enc, encErr := resolveSupplyEncryptor(context.Background(), cfg.Backend)
 		if encErr != nil {
 			return nil, fmt.Errorf("supply encryption: %w", encErr)
 		}

@@ -6,7 +6,22 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
+
+	"github.com/xbcio/xflow/backend"
+	backendlocal "github.com/xbcio/xflow/backend/providers/local"
 )
+
+// redisBackendStub wraps a plain backend.Provider and adds a RedisClient
+// method so it satisfies redisClientProvider. Using the local backend plus
+// this stub -- rather than spinning up backend/providers/distributed, which
+// needs a bound queue/transport just to expose a Redis client -- keeps the
+// test focused on resolveSupplyEncryptor's branch selection.
+type redisBackendStub struct {
+	backend.Provider
+	rdb redis.Cmdable
+}
+
+func (s redisBackendStub) RedisClient() redis.Cmdable { return s.rdb }
 
 func newMiniRedis(t *testing.T) redis.Cmdable {
 	t.Helper()
@@ -92,5 +107,46 @@ func TestNoRotationPendingReturnsEmpty(t *testing.T) {
 	}
 	if got := e.ConsumeRotation(); got != "" {
 		t.Errorf("ConsumeRotation = %q with no rotation pending, want empty", got)
+	}
+}
+
+// --memory 模式没有 Redis，且本就是单副本，所以退回进程内生成是正确的 --
+// 但必须真的退回，而不是启动失败。
+func TestResolveSupplyEncryptorFallsBackWithoutRedis(t *testing.T) {
+	enc, err := resolveSupplyEncryptor(context.Background(), backendlocal.New())
+	if err != nil {
+		t.Fatalf("resolveSupplyEncryptor on a backend without Redis: %v", err)
+	}
+	if enc == nil {
+		t.Fatal("no encryptor was built; encryption would silently stay off")
+	}
+	if enc.KeyForRunner() == "" {
+		t.Error("the fallback encryptor has no usable key")
+	}
+}
+
+// 有 Redis 时必须走共享路径，否则多副本各持一把 key 的缺陷原样保留。
+func TestResolveSupplyEncryptorSharesViaRedis(t *testing.T) {
+	rdb := newMiniRedis(t)
+	ctx := context.Background()
+
+	// Seed the shared key directly, simulating a replica that already
+	// registered it in Redis.
+	seeded, err := NewSupplyEncryptorShared(ctx, rdb, supplyEncryptionKeyRedisKey)
+	if err != nil {
+		t.Fatalf("seed the shared key: %v", err)
+	}
+
+	// resolveSupplyEncryptor -- the function under test -- must adopt the
+	// seeded key rather than generate its own. If it silently bypassed Redis
+	// (e.g. always falling back to NewSupplyEncryptor()), KeyForRunner()
+	// would differ from the seeded value and this assertion would fail.
+	provider := redisBackendStub{Provider: backendlocal.New(), rdb: rdb}
+	enc, err := resolveSupplyEncryptor(ctx, provider)
+	if err != nil {
+		t.Fatalf("resolveSupplyEncryptor with a Redis-backed provider: %v", err)
+	}
+	if enc.KeyForRunner() != seeded.KeyForRunner() {
+		t.Fatal("resolveSupplyEncryptor did not adopt the key already stored in Redis")
 	}
 }

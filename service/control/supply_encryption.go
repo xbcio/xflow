@@ -7,6 +7,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/service/crypto/supplyenc"
 )
 
@@ -137,4 +138,23 @@ func (e *SupplyEncryptor) ConsumeRotation() string {
 	out := e.pendingRotation.ToBase64()
 	e.pendingRotation = nil
 	return out
+}
+
+// supplyEncryptionKeyRedisKey is where replicas rendezvous on one transport key.
+const supplyEncryptionKeyRedisKey = "xflow:supply:transport-key"
+
+// resolveSupplyEncryptor picks the key source for the backend in use.
+//
+// With Redis, replicas must share one key: a runner that registers against
+// replica A and fetches supply content from replica B would otherwise hold
+// key A and receive ciphertext under key B. The fetch fails, the supply gate
+// declines, and the runner hosts no triggers -- while heartbeating healthily.
+//
+// Without Redis the backend is the in-memory one, which is single-replica by
+// construction, so a process-local key is consistent by definition.
+func resolveSupplyEncryptor(ctx context.Context, b backend.Provider) (*SupplyEncryptor, error) {
+	if rc, ok := b.(redisClientProvider); ok && rc.RedisClient() != nil {
+		return NewSupplyEncryptorShared(ctx, rc.RedisClient(), supplyEncryptionKeyRedisKey)
+	}
+	return NewSupplyEncryptor()
 }
