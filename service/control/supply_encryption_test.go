@@ -60,3 +60,37 @@ func TestSharedEncryptorSurvivesRestart(t *testing.T) {
 		t.Fatal("the key changed across a restart")
 	}
 }
+
+// ConsumeRotation's doc comment claims it clears the pending state, but the
+// function body contains no assignment clearing it. The consequence: every
+// heartbeat redelivers the same rotation key, and the runner's
+// installSupplyKey calls Keyring.Rotate on each delivery, so the keyring
+// becomes [new, new] -- the previous key gets evicted on the very next
+// heartbeat, and any in-flight ciphertext encrypted before the rotation can
+// no longer be decrypted.
+func TestConsumeRotationClearsPending(t *testing.T) {
+	e, err := NewSupplyEncryptor()
+	if err != nil {
+		t.Fatalf("NewSupplyEncryptor: %v", err)
+	}
+	if err := e.Rotate(); err != nil {
+		t.Fatalf("Rotate: %v", err)
+	}
+	if got := e.ConsumeRotation(); got == "" {
+		t.Fatal("first ConsumeRotation returned nothing after a Rotate")
+	}
+	if got := e.ConsumeRotation(); got != "" {
+		t.Fatal("ConsumeRotation kept returning the rotation; every heartbeat " +
+			"would redeliver it and evict the runner's previous key")
+	}
+}
+
+func TestNoRotationPendingReturnsEmpty(t *testing.T) {
+	e, err := NewSupplyEncryptor()
+	if err != nil {
+		t.Fatalf("NewSupplyEncryptor: %v", err)
+	}
+	if got := e.ConsumeRotation(); got != "" {
+		t.Errorf("ConsumeRotation = %q with no rotation pending, want empty", got)
+	}
+}

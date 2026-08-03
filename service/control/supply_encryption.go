@@ -110,22 +110,31 @@ func (e *SupplyEncryptor) Rotate() error {
 	return nil
 }
 
-// ConsumeRotation returns the pending rotation key (base64-encoded) and clears
-// the pending state for this runner. Returns "" if no rotation is pending. Each
-// runner consumes the rotation independently via its heartbeat; this is
-// stateless — all runners that heartbeat while pendingRotation is non-nil will
-// receive it.
+// ConsumeRotation returns the pending rotation key (base64-encoded) and
+// clears the pending state, so the rotation is delivered once rather than on
+// every heartbeat.
 //
-// In a production deployment with many runners, the pending state should be
-// cleared only after ALL runners have acknowledged (via supply_observed
-// convergence). This simplified implementation clears after a single consume
-// for clarity; the production version would use a per-runner tracking set.
+// Redelivering it would be actively harmful, not merely wasteful: the
+// runner's installSupplyKey calls Keyring.Rotate on each delivery, so a
+// second delivery of the same key demotes the key it just promoted and
+// evicts the previous one. Content encrypted before the rotation then fails
+// to decrypt -- exactly what keeping a previous key exists to prevent.
+//
+// Known limitation: clearing the pending state here means only the next
+// runner to heartbeat after a Rotate() receives the rotation key -- every
+// other runner never gets it. That is different from the goal this type's
+// original doc comment described (clear only after all runners converge via
+// supply_observed). This fix addresses only the "infinite redelivery
+// destroys the keyring" defect, which is the one actively causing harm.
+// Per-runner tracking so every runner receives the rotation exactly once is
+// out of scope here.
 func (e *SupplyEncryptor) ConsumeRotation() string {
-	e.mu.RLock()
-	p := e.pendingRotation
-	e.mu.RUnlock()
-	if p == nil {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.pendingRotation == nil {
 		return ""
 	}
-	return p.ToBase64()
+	out := e.pendingRotation.ToBase64()
+	e.pendingRotation = nil
+	return out
 }
