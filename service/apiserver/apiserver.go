@@ -77,6 +77,10 @@ type Config struct {
 	// content on GET /v1/supplies/{name} for runners that request it via the
 	// Accept: application/x-xflow-encrypted header. Wired from ControlPlane.
 	SupplyEncryptor SupplyContentEncryptor
+	// EnableSupplyEncryption turns on AES-256-GCM encryption of supply content
+	// on the wire. The key is resolved through Redis when a distributed backend
+	// is configured, so every replica encrypts with the same key.
+	EnableSupplyEncryption bool
 
 	// Transport configuration. Stage 1 declares but does not use these.
 	HTTPAddr    string
@@ -224,11 +228,12 @@ const entryActivationStoreTTL = 24 * time.Hour
 // caller's responsibility to construct.
 func buildControlPlane(cfg Config) (*control.ControlPlane, error) {
 	ccfg := control.Config{
-		Auth:     cfg.Auth,
-		Logger:   cfg.Logger,
-		Metrics:  cfg.Metrics,
-		Tracer:   cfg.Tracer,
-		Supplies: cfg.Supplies,
+		Auth:                   cfg.Auth,
+		Logger:                 cfg.Logger,
+		Metrics:                cfg.Metrics,
+		Tracer:                 cfg.Tracer,
+		Supplies:               cfg.Supplies,
+		EnableSupplyEncryption: cfg.EnableSupplyEncryption,
 	}
 
 	useRedis := cfg.RedisConfig != nil || cfg.RedisAddr != ""
