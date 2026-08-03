@@ -57,7 +57,20 @@ version control; follow the existing `.claude/specs/` naming convention:
 
 ## Git Commits
 
-Single-line subject, no body: `type(scope): what changed`. Full convention: **[docs/GIT-COMMITS.md](docs/GIT-COMMITS.md)**.
+`type(scope): what changed` — and nothing else. Four hard rules:
+
+1. **Single-line subject, no body.** Not a short body, not a bullet list, not
+   "just one line of context" — no body.
+2. **Subject ≤ 70 characters**, counting the `type(scope): ` prefix.
+3. **One commit, one change.** If the subject needs " and " or a comma to cover
+   what you did, that is two commits.
+4. **Scope is a Go package**, not a file or a topic: `control`, `runner`,
+   `wasm`, `supply`, `protocol`. Repo-root and tooling changes take no scope.
+
+Reasoning, trade-offs, and alternatives-considered belong in the PR description
+or a `.claude/` doc — never in the commit message. Commits already in history
+that carry a body are grandfathered, not a pattern to copy: `git log` is not the
+convention, **[docs/GIT-COMMITS.md](docs/GIT-COMMITS.md)** is.
 
 ## Detailed Documentation
 
