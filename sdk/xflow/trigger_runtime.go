@@ -10,6 +10,7 @@ import (
 	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/node/registry"
+	"github.com/xbcio/xflow/node/supply"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -125,6 +126,7 @@ func (r *triggerRuntime) ReconcileWorkflow(ctx context.Context, rec backend.Work
 			NodeName:   p.nd.Name,
 			Params:     p.nd.Parameters,
 			Runtime:    r,
+			Supplies:   supply.Default.Decoded(),
 		})
 		if err != nil {
 			activateErr = err

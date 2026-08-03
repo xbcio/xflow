@@ -669,3 +669,114 @@ func (c *commitRecordingKafkaConsumer) committedOffsets() []int64 {
 	}
 	return out
 }
+
+// ---------------------------------------------------------------------------
+// Message schema validation tests
+// ---------------------------------------------------------------------------
+
+func TestValidateKafkaMessageSchema(t *testing.T) {
+	schema := &KafkaMessageSchema{RequiredFields: []string{"user_id", "action"}}
+	tests := []struct {
+		name  string
+		value []byte
+		want  bool
+	}{
+		{"valid", []byte(`{"user_id":"u1","action":"click","extra":true}`), true},
+		{"missing_field", []byte(`{"user_id":"u1"}`), false},
+		{"empty_body", nil, false},
+		{"not_json", []byte(`hello world`), false},
+		{"json_array", []byte(`[1,2,3]`), false},
+		{"null_value_counts", []byte(`{"user_id":"u1","action":null}`), true}, // key exists
+		{"no_schema", []byte(`{}`), true}, // nil schema always passes
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := schema
+			if tt.name == "no_schema" {
+				s = nil
+			}
+			got := validateKafkaMessageSchema(KafkaMessage{Value: tt.value}, s)
+			if got != tt.want {
+				t.Fatalf("validateKafkaMessageSchema() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestKafkaMessageSchemaFromParams(t *testing.T) {
+	tests := []struct {
+		name   string
+		params map[string]any
+		want   *KafkaMessageSchema
+	}{
+		{"nil_params", map[string]any{}, nil},
+		{"empty_schema", map[string]any{"message_schema": map[string]any{}}, nil},
+		{"valid", map[string]any{
+			"message_schema": map[string]any{"required_fields": []any{"user_id", "ts"}},
+		}, &KafkaMessageSchema{RequiredFields: []string{"user_id", "ts"}}},
+		{"not_a_map", map[string]any{"message_schema": "invalid"}, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := kafkaMessageSchemaFromParams(tt.params)
+			if tt.want == nil {
+				if got != nil {
+					t.Fatalf("got %+v, want nil", got)
+				}
+				return
+			}
+			if got == nil {
+				t.Fatalf("got nil, want %+v", tt.want)
+			}
+			if len(got.RequiredFields) != len(tt.want.RequiredFields) {
+				t.Fatalf("RequiredFields = %v, want %v", got.RequiredFields, tt.want.RequiredFields)
+			}
+			for i := range got.RequiredFields {
+				if got.RequiredFields[i] != tt.want.RequiredFields[i] {
+					t.Fatalf("RequiredFields[%d] = %q, want %q", i, got.RequiredFields[i], tt.want.RequiredFields[i])
+				}
+			}
+		})
+	}
+}
+
+func TestKafkaTriggerMessageSchemaSkipsInvalidMessages(t *testing.T) {
+	orig := newKafkaConsumer
+	consumer := newCommitRecordingKafkaConsumer([]KafkaMessage{
+		{Topic: "events", Partition: 0, Offset: 1, Value: []byte(`{"user_id":"u1","action":"click"}`)},  // valid
+		{Topic: "events", Partition: 0, Offset: 2, Value: []byte(`{"user_id":"u2"}`)},                   // missing "action"
+		{Topic: "events", Partition: 0, Offset: 3, Value: []byte(`{"user_id":"u3","action":"scroll"}`)}, // valid
+	})
+	newKafkaConsumer = func(KafkaConsumerConfig) (KafkaConsumer, error) { return consumer, nil }
+	t.Cleanup(func() { newKafkaConsumer = orig })
+
+	rt := newFakeTriggerRuntime()
+	params := map[string]any{
+		"brokers":      []any{"localhost:9092"},
+		"topic":        "events",
+		"group":        "workers",
+		"max_inflight": 1,
+		"message_schema": map[string]any{
+			"required_fields": []any{"user_id", "action"},
+		},
+	}
+	sub, err := KafkaTrigger().Activate(context.Background(), &types.TriggerActivateInput{
+		WorkflowID: "wf-1",
+		NodeName:   "kafka",
+		Params:     params,
+		Runtime:    rt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sub.Close(context.Background()) }()
+
+	// All 3 messages should be committed (consumed from Kafka).
+	if !consumer.waitForCommitCount(3, time.Second) {
+		t.Fatalf("commit count = %d, want 3", consumer.commitCount())
+	}
+	// Only 2 messages should be emitted (offset 1 and 3; offset 2 skipped).
+	if !rt.waitForEmitCount(2, time.Second) {
+		t.Fatalf("emit count = %d, want 2", rt.emitCount())
+	}
+}

@@ -2,6 +2,7 @@ package trigger
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -51,6 +52,17 @@ type KafkaConsumerConfig struct {
 	SASLMechanism string // "plain", "scram-sha-256", "scram-sha-512"
 	SASLUsername  string
 	SASLPassword  string
+	// MessageSchema optionally validates each message's JSON value before emit.
+	// When non-nil, messages that fail validation are committed (consumed) but
+	// not emitted — they are silently skipped.
+	MessageSchema *KafkaMessageSchema
+}
+
+// KafkaMessageSchema defines a simple required-fields schema for Kafka message
+// values. A message is valid when its JSON-decoded value is an object that
+// contains all RequiredFields as top-level keys with non-nil values.
+type KafkaMessageSchema struct {
+	RequiredFields []string
 }
 
 type KafkaAggregateConfig struct {
@@ -130,6 +142,7 @@ func (n *KafkaTriggerNode) Descriptor() types.Descriptor {
 			{Name: "start_offset", DisplayName: "Start Offset", Type: types.ParamString, Default: "latest"},
 			{Name: "max_inflight", DisplayName: "Max Inflight", Type: types.ParamNumber, Default: float64(defaultTriggerMaxInflight)},
 			{Name: "aggregate", DisplayName: "Aggregate", Type: types.ParamObject, Description: "Optional partition batch aggregation: enabled, by, max_size, flush_interval, dedup"},
+			{Name: "message_schema", DisplayName: "Message Schema", Type: types.ParamObject, Description: "Optional message validation: {required_fields: [\"field1\"]}. Non-conforming messages are skipped."},
 		},
 		Outputs: []types.PortSpec{{Name: "main", DisplayName: "Main"}},
 	}
@@ -197,12 +210,13 @@ func (n *KafkaTriggerNode) Activate(ctx context.Context, in *types.TriggerActiva
 func activateKafkaPerMessage(ctx context.Context, in *types.TriggerActivateInput, cfg KafkaConsumerConfig, consumer KafkaConsumer) types.TriggerSubscription {
 	runCtx, cancel := context.WithCancel(ctx)
 	rt := &kafkaPerMessageRuntime{
-		runCtx:    runCtx,
-		in:        in,
-		consumer:  consumer,
-		buffer:    cfg.MaxInflight,
-		workers:   make(map[kafkaPartitionKey]*kafkaPartitionWorker),
-		entrySeed: isEntrySeedActivation(in),
+		runCtx:        runCtx,
+		in:            in,
+		consumer:      consumer,
+		buffer:        cfg.MaxInflight,
+		workers:       make(map[kafkaPartitionKey]*kafkaPartitionWorker),
+		entrySeed:     isEntrySeedActivation(in),
+		messageSchema: cfg.MessageSchema,
 	}
 	done := make(chan struct{})
 	go func() {
@@ -254,6 +268,9 @@ type kafkaPerMessageRuntime struct {
 	// Emit path for each message. Set once at activation from the trigger
 	// params (see isEntrySeedActivation).
 	entrySeed bool
+	// messageSchema, when non-nil, validates each message before emit. Messages
+	// that fail validation are committed but not emitted (skipped).
+	messageSchema *KafkaMessageSchema
 }
 
 // isEntrySeedActivation reports whether a Kafka trigger should route each
@@ -385,6 +402,10 @@ func (w *kafkaPartitionWorker) run() {
 				// offset internally on accept/duplicate/conflict. Do NOT
 				// double-commit here.
 				_ = seedKafkaEntryBatch(w.rt.runCtx, w.rt.in, w.rt.consumer, msg)
+			} else if w.rt.messageSchema != nil && !validateKafkaMessageSchema(msg, w.rt.messageSchema) {
+				// Message does not conform to the declared schema. Commit the
+				// offset (consume) but do not emit — the message is skipped.
+				_ = commitKafkaMessages(context.Background(), w.rt.consumer, msg)
 			} else if emitKafkaMessage(w.rt.runCtx, w.rt.in, msg) {
 				_ = commitKafkaMessages(context.Background(), w.rt.consumer, msg)
 			}
@@ -750,12 +771,13 @@ func kafkaConfigFromParams(params map[string]any, supply map[string]any) (KafkaC
 		return KafkaConsumerConfig{}, err
 	}
 	cfg := KafkaConsumerConfig{
-		Brokers:     conv.NonEmptyStringSlice(params["brokers"]),
-		Topic:       cast.ToString(params["topic"]),
-		Group:       cast.ToString(params["group"]),
-		StartOffset: cast.ToString(params["start_offset"]),
-		MaxInflight: conv.PositiveInt(params["max_inflight"], defaultTriggerMaxInflight),
-		Aggregate:   aggregate,
+		Brokers:       conv.NonEmptyStringSlice(params["brokers"]),
+		Topic:         cast.ToString(params["topic"]),
+		Group:         cast.ToString(params["group"]),
+		StartOffset:   cast.ToString(params["start_offset"]),
+		MaxInflight:   conv.PositiveInt(params["max_inflight"], defaultTriggerMaxInflight),
+		Aggregate:     aggregate,
+		MessageSchema: kafkaMessageSchemaFromParams(params),
 	}
 	if cfg.StartOffset == "" {
 		cfg.StartOffset = "latest"
@@ -845,6 +867,51 @@ func normalizeKafkaAggregateConfig(cfg KafkaAggregateConfig) KafkaAggregateConfi
 }
 
 func init() { registry.RegisterTrigger(&KafkaTriggerNode{}) }
+
+// ---------------------------------------------------------------------------
+// Message schema validation
+// ---------------------------------------------------------------------------
+
+// validateKafkaMessageSchema checks whether a Kafka message's value conforms to
+// the declared schema. The value must be valid JSON and contain all required
+// fields as top-level keys with non-nil values.
+func validateKafkaMessageSchema(msg KafkaMessage, schema *KafkaMessageSchema) bool {
+	if schema == nil || len(schema.RequiredFields) == 0 {
+		return true
+	}
+	if len(msg.Value) == 0 {
+		return false
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(msg.Value, &obj); err != nil {
+		return false
+	}
+	for _, field := range schema.RequiredFields {
+		if _, ok := obj[field]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// kafkaMessageSchemaFromParams parses the optional message_schema param into a
+// KafkaMessageSchema. Returns nil when no schema is declared (the common case).
+// The param format is: {"required_fields": ["field1", "field2"]}.
+func kafkaMessageSchemaFromParams(params map[string]any) *KafkaMessageSchema {
+	raw, ok := params["message_schema"]
+	if !ok || raw == nil {
+		return nil
+	}
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return nil
+	}
+	fields := conv.NonEmptyStringSlice(m["required_fields"])
+	if len(fields) == 0 {
+		return nil
+	}
+	return &KafkaMessageSchema{RequiredFields: fields}
+}
 
 // ---------------------------------------------------------------------------
 // Entry-seed mode: admission-based emit (Milestone G)
