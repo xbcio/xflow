@@ -19,6 +19,18 @@ P3（`feat/supply-node-p3`，20 tasks，已合入 main）交付后未做的事�
 新引入的已知代价（已写入 §9(a)）：gRPC-only 部署下 ack 无处可发，自愈能力完全
 缺失——此缺口与 P1 §3（gRPC 传输不携带 hint/activation）同源但严重性更高。
 
+### ~~4. supply 加密是死代码~~ ✓ 已关闭
+
+KEK/DEK/传输 key 三层已实现并接线。`EnableSupplyEncryption` 现由
+`apiserver.Config` 传递；传输 key 经 Redis `SET NX` 在副本间共享；
+`ConsumeRotation` 不清 pending 的缺陷已修。设计见
+[SUPPLY-NODE.md §10](./SUPPLY-NODE.md#10-supply-内容加密)。
+
+**仍未做**：`Rotate()` 无生产调用点（无自动轮换周期，只能人工触发）；
+`ConsumeRotation` 清除后只有下一个心跳的那个 runner 收到轮换 key，
+「每个 runner 各自收到一次」需要 per-runner 跟踪集合，未实现；
+无 KMS 集成，KEK 由部署方注入。
+
 ## P1 — 可观测性缺失，出事时会瞎
 
 ### 2. runner 侧 supply metrics 无生产落地槽

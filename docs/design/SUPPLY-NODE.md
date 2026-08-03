@@ -536,3 +536,28 @@ oversight: declining immediately is strictly safer than serving wrong data
 (a) 已关闭（`fix/activation-ack-retry`）。(b)–(d) 仍是 knowingly accepted 的代价，
 不是 blocking defect。未来关闭其中任何一项（`.http` pull-mode collector、gRPC
 proto 更新、cross-runner swap barrier）必须更新本节，不是在旁边加新一节。
+
+## 10. Supply 内容加密
+
+三层密钥，各自匹配自己的可靠性等级：
+
+| 层 | 来源 | 保护 | 丢失后果 |
+|---|---|---|---|
+| KEK | `XFLOW_MASTER_KEY` 或 `--master-key-file`（0600） | 派生 DEK | 需重发 + 重包 DEK |
+| DEK | KEK 经 HKDF 派生（info `xflow-supply-content-v1`） | MySQL 中的 content 列 | 随库备份走 |
+| 传输 key | server 生成，经 Redis `SET NX` 共享 | server→runner 响应体 | 重发，自愈 |
+
+**ContentHash 始终基于明文。** 密文只写入 `content` 列。hash 若算在密文上，
+AES-GCM 的随机 nonce 会让同样的内容每次产生不同的 hash，幂等判重与
+consumer 侧「hash 未变不重建」同时失效。守护测试见
+`store/storetest/supply.go:43`。
+
+**KEK 不存 MySQL、不写死在源码里。** 前者让密钥与它保护的数据在同一份 dump
+里；后者进 git 后永久不可撤销、随二进制分发到每个 runner、轮换需要发版加
+全量重新加密。
+
+**加密边界是分层而非端到端**：server 写入时用 DEK 加密落库，发给 runner 时
+解密后用传输 key 重新加密，中间在内存里过一道明文。这是为保留 ContentHash
+语义而接受的取舍。
+
+**production 模式缺 KEK 拒绝启动**；dev 模式允许，落库明文并打 stderr 警告。
