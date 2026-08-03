@@ -16,6 +16,7 @@ import (
 	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/service/protocol"
 	runnersvc "github.com/xbcio/xflow/service/runner"
+	"github.com/xbcio/xflow/store/memstore"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -218,5 +219,75 @@ func waitForExecutionStatus(t *testing.T, baseURL string, execID types.Execution
 			t.Fatalf("timeout waiting for execution %q to reach terminal status, last status %q", execID, detail.Status)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestServerUpdateSupply(t *testing.T) {
+	ms := memstore.New()
+	srv, err := NewServer(ServerConfig{Store: ms})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := srv.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Shutdown(ctx) }()
+
+	content := []byte(`{"sasl_mechanism":"scram-sha-256","sasl_username":"user","sasl_password":"pass"}`)
+	if err := srv.UpdateSupply(ctx, "", "kafka-creds", content); err != nil {
+		t.Fatalf("UpdateSupply() error = %v", err)
+	}
+
+	// Verify content was persisted via the store.
+	rec, err := ms.GetSupply(ctx, "default", "kafka-creds")
+	if err != nil {
+		t.Fatalf("GetSupply() error = %v", err)
+	}
+	if !bytes.Equal(rec.Content, content) {
+		t.Fatalf("stored content = %s, want %s", rec.Content, content)
+	}
+	if rec.ContentHash == "" {
+		t.Fatal("content hash is empty")
+	}
+	if rec.Revision == 0 {
+		t.Fatal("revision not bumped")
+	}
+
+	// Update again — unconditional write, revision bumps.
+	content2 := []byte(`{"sasl_mechanism":"plain","sasl_username":"u2","sasl_password":"p2"}`)
+	if err := srv.UpdateSupply(ctx, "", "kafka-creds", content2); err != nil {
+		t.Fatalf("UpdateSupply() second call error = %v", err)
+	}
+	rec2, err := ms.GetSupply(ctx, "default", "kafka-creds")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec2.Revision <= rec.Revision {
+		t.Fatalf("revision did not bump: %d <= %d", rec2.Revision, rec.Revision)
+	}
+	if !bytes.Equal(rec2.Content, content2) {
+		t.Fatalf("stored content after update = %s, want %s", rec2.Content, content2)
+	}
+}
+
+func TestServerUpdateSupplyNoStore(t *testing.T) {
+	srv, err := NewServer(ServerConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.UpdateSupply(context.Background(), "", "x", []byte("y")); err == nil {
+		t.Fatal("expected error when Store is nil")
+	}
+}
+
+func TestServerUpdateSupplyEmptyName(t *testing.T) {
+	ms := memstore.New()
+	srv, err := NewServer(ServerConfig{Store: ms})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.UpdateSupply(context.Background(), "", "", []byte("y")); err == nil {
+		t.Fatal("expected error for empty name")
 	}
 }

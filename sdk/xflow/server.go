@@ -16,11 +16,14 @@ package xflow
 
 import (
 	"context"
+	"errors"
 	"net/http"
+	"time"
 
 	"google.golang.org/grpc"
 
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/observability/metrics"
 	"github.com/xbcio/xflow/service/apiserver"
 	"github.com/xbcio/xflow/service/control"
@@ -114,7 +117,8 @@ func WithServerTLS(cert, key, clientCA string) ServerOption {
 // serve it directly via Run. Call Start before serving traffic and Shutdown
 // when the host program is stopping.
 type Server struct {
-	api *apiserver.APIServer
+	api      *apiserver.APIServer
+	supplies store.Supplies
 }
 
 // NewServer creates an embeddable control-plane server. RedisAddr empty means
@@ -136,9 +140,16 @@ func NewServer(cfg ServerConfig, opts ...ServerOption) (*Server, error) {
 		o(sc)
 	}
 
+	// Resolve the supply store: cfg.Store satisfies store.Supplies when non-nil.
+	var supplies store.Supplies
+	if cfg.Store != nil {
+		supplies = cfg.Store
+	}
+
 	apiCfg := apiserver.Config{
 		RedisAddr:   cfg.RedisAddr,
 		Store:       cfg.Store,
+		Supplies:    supplies,
 		Auth:        sc.auth,
 		Logger:      sc.logger,
 		Metrics:     sc.metrics,
@@ -152,7 +163,7 @@ func NewServer(cfg ServerConfig, opts ...ServerOption) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Server{api: api}, nil
+	return &Server{api: api, supplies: supplies}, nil
 }
 
 // Handler returns the HTTP Runner Protocol + workflow submission/query API.
@@ -182,3 +193,35 @@ func (s *Server) RegisterGRPC(g *grpc.Server) { s.api.RegisterGRPC(g) }
 // plane. This is the self-hosting mode for callers that do not want to wire
 // Handler() into their own http.Server.
 func (s *Server) Run(ctx context.Context) error { return s.api.Run(ctx) }
+
+// UpdateSupply writes (or replaces) supply content for a named supply node.
+// Connected runners discover the change via heartbeat hints and re-fetch the
+// content automatically. Namespace defaults to "default" when empty.
+//
+// This is the programmatic equivalent of HTTP PUT /v1/supplies/{name} — use it
+// when the server is embedded and a direct method call is simpler than an HTTP
+// round-trip.
+//
+// Example:
+//
+//	srv.UpdateSupply(ctx, "", "kafka-creds", credsJSON)
+func (s *Server) UpdateSupply(ctx context.Context, ns, name string, content []byte) error {
+	if s.supplies == nil {
+		return errors.New("xflow: supply store not configured (ServerConfig.Store is nil)")
+	}
+	if name == "" {
+		return errors.New("xflow: supply name must not be empty")
+	}
+	if ns == "" {
+		ns = string(namespace.Default)
+	}
+	_, err := s.supplies.PutSupply(ctx, &store.SupplyResource{
+		Namespace:   ns,
+		Name:        name,
+		Content:     content,
+		ContentType: "application/json",
+		UpdatedAt:   time.Now(),
+		UpdatedBy:   "sdk",
+	}, nil) // nil ifMatch = unconditional write
+	return err
+}
