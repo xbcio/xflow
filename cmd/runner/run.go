@@ -281,9 +281,9 @@ func newProtocolClient(cfg runnerConfig) (runnersvc.ProtocolClient, func(), erro
 		}
 		return client, func() { _ = conn.Close() }, nil
 	default:
-		httpClient := http.DefaultClient
-		if tlsCfg != nil {
-			httpClient = &http.Client{Transport: &http.Transport{TLSClientConfig: tlsCfg}}
+		httpClient, err := newRunnerHTTPClient(cfg, 0)
+		if err != nil {
+			return nil, nil, err
 		}
 		client := protocol.NewClient(cfg.serverURL, httpClient)
 		if cfg.token != "" {
@@ -324,6 +324,28 @@ func buildRunnerTLSConfig(cfg runnerConfig) (*tls.Config, error) {
 		return nil, fmt.Errorf("--tls-client-cert and --tls-client-key must be provided together")
 	}
 	return tlsCfg, nil
+}
+
+// newRunnerHTTPClient builds an *http.Client that honours the runner's --tls-*
+// flags, with the given absolute timeout.
+//
+// Every HTTP client the runner points at the control plane must go through
+// here. There are three of them (Runner Protocol, artifact fetch, entry-seed +
+// supply fetch) and they all talk to the same origin, so a client that silently
+// used http.DefaultTransport would ignore --tls-server-ca and --tls-client-cert
+// and fail against a private CA or an mTLS-requiring server — the supply fetch
+// failing that way makes the readiness gate decline forever, so the runner never
+// hosts its triggers at all.
+func newRunnerHTTPClient(cfg runnerConfig, timeout time.Duration) (*http.Client, error) {
+	tlsCfg, err := buildRunnerTLSConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	c := &http.Client{Timeout: timeout}
+	if tlsCfg != nil {
+		c.Transport = &http.Transport{TLSClientConfig: tlsCfg}
+	}
+	return c, nil
 }
 
 func runnerServiceConfig(cfg runnerConfig) (runnersvc.Config, error) {
@@ -375,10 +397,14 @@ func runnerServiceConfig(cfg runnerConfig) (runnersvc.Config, error) {
 		cacheDir := artifactCacheDir()
 		fsCache := objectstore.NewFSStore(cacheDir)
 		seedBaseURL := triggerSeedBaseURL(cfg)
+		artifactClient, err := newRunnerHTTPClient(cfg, 60*time.Second)
+		if err != nil {
+			return runnersvc.Config{}, err
+		}
 		httpOrigin := &objectstore.HTTPStore{
 			BaseURL: seedBaseURL,
 			Token:   cfg.token,
-			Client:  &http.Client{Timeout: 60 * time.Second},
+			Client:  artifactClient,
 		}
 		readThrough := objectstore.NewReadThrough(fsCache, httpOrigin)
 		artifactStore := store.NewArtifactStore(readThrough, nil)
@@ -406,7 +432,10 @@ func runnerServiceConfig(cfg runnerConfig) (runnersvc.Config, error) {
 		// cancellation; the client timeout is an absolute safety net covering
 		// connection setup and full body read, preventing leaked connections if
 		// the context is not propagated correctly.
-		seedClient := &http.Client{Timeout: 30 * time.Second}
+		seedClient, err := newRunnerHTTPClient(cfg, 30*time.Second)
+		if err != nil {
+			return runnersvc.Config{}, err
+		}
 		// The supply fetch client shares the seed origin: both talk to the control
 		// plane's HTTP API. The gate publishes into supply.Default, the same
 		// registry node handlers read through $supplies.
