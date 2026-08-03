@@ -33,6 +33,9 @@ type runnerConfigFile struct {
 	Heartbeat struct {
 		Interval *string `yaml:"interval"`
 	} `yaml:"heartbeat"`
+	Metrics struct {
+		Addr *string `yaml:"addr"` // Prometheus scrape listen address
+	} `yaml:"metrics"`
 	// Credentials holds named credential maps (driver/dsn, token/base_url, …)
 	// consumed by resource-aware nodes via input.Credential(name). String leaves
 	// are expanded via os.Expand at load time so secrets are sourced from the
@@ -134,6 +137,9 @@ func loadRunnerConfigFromBytes(data []byte) (runnerConfig, error) {
 	}
 	if file.Heartbeat.Interval != nil {
 		cfg.heartbeatInterval = *file.Heartbeat.Interval
+	}
+	if file.Metrics.Addr != nil {
+		cfg.metricsAddr = *file.Metrics.Addr
 	}
 
 	if len(file.Credentials) > 0 {
@@ -432,6 +438,9 @@ func resolveRunnerConfig(base runnerConfig) (runnerConfig, error) {
 	if base.changed["poll-wait"] {
 		clearRunnerConfigIssue(&cfg, "poll-wait")
 		cfg.pollWait = base.pollWait
+	}
+	if base.changed["metrics-addr"] {
+		cfg.metricsAddr = base.metricsAddr
 	}
 
 	cfg.capabilities = parseCapabilities(cfg.capRaw)

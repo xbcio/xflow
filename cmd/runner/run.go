@@ -28,6 +28,7 @@ import (
 	"github.com/xbcio/xflow/node/registry"
 	"github.com/xbcio/xflow/node/resource"
 	"github.com/xbcio/xflow/node/supply"
+	"github.com/xbcio/xflow/observability/metrics"
 	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/service/protocol"
 	runnersvc "github.com/xbcio/xflow/service/runner"
@@ -86,6 +87,8 @@ type runnerConfig struct {
 	traceRatio    float64
 	traceBaggage  bool
 	tracer        tracing.Tracer
+	// metrics
+	metricsAddr string // Prometheus scrape endpoint (e.g. ":9091")
 	// credentials holds named credential maps (driver/dsn, token/base_url, …)
 	// with string leaves already env-expanded at load time. Passed to the
 	// runner as a CredentialResolver closure. nil/empty means no resolver.
@@ -135,6 +138,7 @@ func bindRunnerFlags(cmd *cobra.Command, cfg *runnerConfig) {
 	cmd.Flags().StringVar(&cfg.traceSampler, "trace-sampler", "parentbased", "OTel sampler: parentbased|always_on|always_off|traceidratio")
 	cmd.Flags().Float64Var(&cfg.traceRatio, "trace-ratio", 1.0, "Sampling ratio for --trace-sampler=traceidratio, in [0,1]")
 	cmd.Flags().BoolVar(&cfg.traceBaggage, "trace-baggage", false, "Propagate W3C baggage in addition to tracecontext (opt-in)")
+	cmd.Flags().StringVar(&cfg.metricsAddr, "metrics-addr", cfg.metricsAddr, "Prometheus metrics listen address (e.g. :9091); empty disables metrics")
 }
 
 func recordChangedFlags(cmd *cobra.Command, cfg *runnerConfig) {
@@ -213,6 +217,40 @@ func runRunner(ctx context.Context, cfg runnerConfig) error {
 	if err := xnode.WarmupScriptEngines(ctx); err != nil {
 		slog.Warn("script engine warmup failed; engines will warm on first use", "error", err)
 	}
+
+	// Metrics: when --metrics-addr is set, create a Prometheus registry, wire
+	// the observer hooks, and start an HTTP server for Prometheus scrape.
+	var metricsServer *http.Server
+	if cfg.metricsAddr != "" {
+		m := metrics.New()
+		sm := metrics.NewSupplyMetrics(m)
+		// Wire supply gate observer (supply fetch, not-ready, serving gauges).
+		if serviceCfg.SupplyGate != nil {
+			serviceCfg.SupplyGate.SetObserver(sm)
+		}
+		// Wire supply registry observer (consumer count gauge).
+		supply.Default.SetObserver(sm)
+		// Wire wasm reactor pool observer.
+		xnode.SetWasmObserver(sm)
+		// Wire script execution observer.
+		xnode.SetScriptObserver(metrics.NewScriptMetrics(m))
+
+		metricsServer = &http.Server{Addr: cfg.metricsAddr, Handler: m.Handler()}
+		go func() {
+			if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				slog.Error("metrics server failed", "error", err)
+			}
+		}()
+		slog.Info("metrics server started", "addr", cfg.metricsAddr)
+	}
+	defer func() {
+		if metricsServer != nil {
+			shutCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			_ = metricsServer.Shutdown(shutCtx)
+		}
+	}()
+
 	runner := newRunnerService(client, registry, serviceCfg)
 	return runner.Run(ctx)
 }
