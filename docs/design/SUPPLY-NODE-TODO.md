@@ -26,10 +26,24 @@ KEK/DEK/传输 key 三层已实现并接线。`EnableSupplyEncryption` 现由
 `ConsumeRotation` 不清 pending 的缺陷已修。设计见
 [SUPPLY-NODE.md §10](./SUPPLY-NODE.md#10-supply-内容加密)。
 
-**仍未做**：`Rotate()` 无生产调用点（无自动轮换周期，只能人工触发）；
-`ConsumeRotation` 清除后只有下一个心跳的那个 runner 收到轮换 key，
-「每个 runner 各自收到一次」需要 per-runner 跟踪集合，未实现；
-无 KMS 集成，KEK 由部署方注入。
+**接线曾断在最后一环**（已修，`fix(apiserver): wire cp SupplyEncryptor into
+supply module`）：`cmd/server` 设的是 `EnableSupplyEncryption`，它只流向
+`control.Config`；而 `module_supply.go` 的 GET 分支检查的是
+`apiserver.Config.SupplyEncryptor`，从没人设过。control plane 建好的
+encryptor 只装进了自己的 core（runner 注册/心跳通道），没到 HTTP 端点。
+症状是 production 对 `Accept: application/x-xflow-encrypted` **静默返回明文**，
+无错误、无告警。
+
+七个 task 的单元测试全绿却漏掉了它：当时的 e2e 探针在 helper 里直接
+`m.encryptor = fixedEncryptor{...}` 给字段赋值，绕过了它本该证明的装配路径。
+真起 server 进程的那条验证（两副本 + 真 Redis）才抓到。现在
+`supply_encryption_wiring_test.go` 走 `apiserver.New` + `WithControlPlane`
+真实装配，不碰任何依赖字段。
+
+**仍未做**：`Rotate()` 无生产调用点（无自动轮换周期，只能人工触发），且轮换后
+不写回 Redis，一个副本的轮换对其他副本不可见、重启即丢；`ConsumeRotation`
+清除后只有下一个心跳的那个 runner 收到轮换 key，「每个 runner 各自收到一次」
+需要 per-runner 跟踪集合，未实现；无 KMS 集成，KEK 由部署方注入。
 
 ## P1 — 可观测性缺失，出事时会瞎
 
