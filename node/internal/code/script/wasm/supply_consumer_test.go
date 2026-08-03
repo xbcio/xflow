@@ -2,11 +2,14 @@ package wasm
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/xbcio/xflow/node/internal/code/script/engine"
 	"github.com/xbcio/xflow/node/supply"
+	"github.com/xbcio/xflow/types"
 )
 
 // Registering a consumer for a module that has NOT been compiled yet must still
@@ -240,5 +243,125 @@ func TestSupplyConsumerIsNoOpForIdenticalContent(t *testing.T) {
 	}
 	if got := e.active.Load(); got == first {
 		t.Fatal("changed content must swap the pool")
+	}
+}
+
+// An empty ruleset is a VALID config, not an error: it means "pass everything
+// through, tag nothing", which is a real business setting. It must build a pool
+// and serve, which is what distinguishes it from "content has not arrived yet"
+// (§6.5). The two were conflated once and the engine would then have had no way
+// to express "the source deliberately sent zero rules".
+func TestSupplyConsumerAcceptsEmptyRuleset(t *testing.T) {
+	ctx := context.Background()
+	code := testReactorCode(t)
+	reg := supply.NewRegistry()
+	if err := RegisterSupplyConsumer(code, "rules", reg); err != nil {
+		t.Fatalf("RegisterSupplyConsumer: %v", err)
+	}
+	t.Cleanup(func() { UnregisterSupplyConsumer(code, "rules", reg) })
+
+	if err := reg.Apply(ctx, supply.Snapshot{
+		Name: "rules", Content: emptyContent(), Hash: "h-empty", Revision: 1,
+	}); err != nil {
+		t.Fatalf("an empty ruleset must be accepted: %v", err)
+	}
+
+	f := &reactorFacade{host: sharedReactorHost}
+	out, err := f.Execute(ctx, code, map[string]any{"x": 8.0}, engine.DefaultHelpers())
+	if err != nil {
+		t.Fatalf("execute against an empty ruleset: %v", err)
+	}
+	if got := matched(t, out); len(got) != 0 {
+		t.Fatalf("an empty ruleset matched %v; it must match nothing", got)
+	}
+}
+
+// A module marked source-driven whose content never arrived must FAIL the call,
+// not evaluate against zero rules. Passing every record through untagged and
+// uncleansed is a silent data-quality incident, so the error is explicit — and it
+// must be transient/retryable so the caller backs off and retries rather than
+// treating the message as permanently bad and dead-lettering it.
+//
+// Reachable only under require_ready:false; the activation gate keeps traffic away
+// otherwise.
+func TestSourceDrivenWithNoContentFailsRetryably(t *testing.T) {
+	ctx := context.Background()
+	code := testReactorCode(t)
+	reg := supply.NewRegistry()
+	if err := RegisterSupplyConsumer(code, "rules", reg); err != nil {
+		t.Fatalf("RegisterSupplyConsumer: %v", err)
+	}
+	t.Cleanup(func() { UnregisterSupplyConsumer(code, "rules", reg) })
+
+	// No Apply: the module is source-driven with nothing ever installed.
+	e, err := sharedReactorHost.engineForCode(ctx, code)
+	if err != nil {
+		t.Fatalf("engineForCode: %v", err)
+	}
+	if e.active.Load() != nil {
+		t.Fatal("precondition failed: a pool exists, so this does not exercise the unconfigured path")
+	}
+
+	f := &reactorFacade{host: sharedReactorHost}
+	_, execErr := f.Execute(ctx, code, map[string]any{"x": 1.0}, engine.DefaultHelpers())
+	if execErr == nil {
+		t.Fatal("Execute with no content succeeded; it must fail rather than evaluate " +
+			"against zero rules and pass every record through untagged")
+	}
+	var ce *types.ClassifiedError
+	if !errors.As(execErr, &ce) {
+		t.Fatalf("error must be classified so the caller can decide to retry, got %T: %v", execErr, execErr)
+	}
+	if !ce.Retryable || ce.Kind != types.ErrorKindTransient {
+		t.Fatalf("error must be transient and retryable, got kind=%v retryable=%v",
+			ce.Kind, ce.Retryable)
+	}
+}
+
+// Content rejected at boot must not be terminal. The engine has no last-good pool
+// to fall back on, so what matters is that a LATER good Apply still lands: nothing
+// about the first rejection may leave the module permanently unable to configure.
+func TestSupplyConsumerRecoversAfterFirstContentRejected(t *testing.T) {
+	ctx := context.Background()
+	code := testReactorCode(t)
+	reg := supply.NewRegistry()
+	if err := RegisterSupplyConsumer(code, "rules", reg); err != nil {
+		t.Fatalf("RegisterSupplyConsumer: %v", err)
+	}
+	t.Cleanup(func() { UnregisterSupplyConsumer(code, "rules", reg) })
+
+	if err := reg.Apply(ctx, supply.Snapshot{
+		Name: "rules", Content: badContent(), Hash: "h-bad", Revision: 1,
+	}); err == nil {
+		t.Fatal("bad first content must be rejected")
+	}
+	e, err := sharedReactorHost.engineForCode(ctx, code)
+	if err != nil {
+		t.Fatalf("engineForCode: %v", err)
+	}
+	if e.active.Load() != nil {
+		t.Fatal("rejected content must not install a pool")
+	}
+	if got := e.availability(); got != AvailUnavailable {
+		t.Fatalf("availability = %v after the only content was rejected, want Unavailable", got)
+	}
+
+	// The source is fixed and re-published. This must configure the module.
+	if err := reg.Apply(ctx, supply.Snapshot{
+		Name: "rules", Content: contentWithRule("small", "x < 3"), Hash: "h-good", Revision: 2,
+	}); err != nil {
+		t.Fatalf("good content after a rejection: %v", err)
+	}
+
+	f := &reactorFacade{host: sharedReactorHost}
+	out, err := f.Execute(ctx, code, map[string]any{"x": 1.0}, engine.DefaultHelpers())
+	if err != nil {
+		t.Fatalf("execute after recovery: %v", err)
+	}
+	if !matched(t, out)["small"] {
+		t.Fatalf("recovered content is not in effect, matched %v", matched(t, out))
+	}
+	if got := e.Generation(); got != 2 {
+		t.Fatalf("Generation() = %d, want the recovered revision 2", got)
 	}
 }

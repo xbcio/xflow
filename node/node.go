@@ -2,7 +2,6 @@ package node
 
 import (
 	"context"
-	"time"
 
 	core "github.com/xbcio/xflow/node/internal"
 	"github.com/xbcio/xflow/node/internal/action"
@@ -175,25 +174,10 @@ func WarmupScriptEngines(ctx context.Context) error { return scriptpkg.Warmup(ct
 // first request's deadline. Call before WarmupScriptEngines.
 func PrewarmWasmModule(code string, cfg any) { scriptpkg.PrewarmWasm(code, cfg) }
 
-// WasmConfigLoader is the external configuration source interface for a wasm
-// reactor module. Re-exported from the wasm package for external registration.
-type WasmConfigLoader = wasm.ConfigLoader
-
-// RegisterWasmConfigLoader associates a ConfigLoader with a wasm module code
-// string. During warmup any already-registered loader is invoked once to build
-// the initial pool; if ttl > 0 a background goroutine polls for version changes.
-//
-// It may also be called AFTER warmup: registration flips the module to
-// source-driven config at any time. The production supply path does exactly that,
-// registering when a workflow's activation arrives — at process start a runner
-// does not yet know which workflows it will host.
-func RegisterWasmConfigLoader(code string, loader WasmConfigLoader, ttl time.Duration) {
-	scriptpkg.RegisterWasmConfigLoader(code, loader, ttl)
-}
-
 // RegisterWasmSupplyConsumer makes a wasm module consume the named supply node's
-// content: a change rebuilds its instance pool through the same last-good-preserving
-// swap the loader path uses. Call it at activation time.
+// content: a change rebuilds its instance pool through a last-good-preserving
+// atomic swap. Call it at activation time — at process start a runner does not
+// yet know which workflows it will host.
 func RegisterWasmSupplyConsumer(code string, supplyNode string) error {
 	return scriptpkg.RegisterWasmSupplyConsumer(code, supplyNode)
 }

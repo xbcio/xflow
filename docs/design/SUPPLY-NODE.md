@@ -330,7 +330,7 @@ recorded directly in the shipped code, not just in a design note:
 
 **This is not to be confused with** the wasm reactor's own three-tier
 `Availability` ladder (`AvailUnavailable`/`AvailStale`/`AvailFresh`,
-`node/internal/code/script/wasm/pool.go:457-470`) — that is a *consumer-side*
+`node/internal/code/script/wasm/pool.go:448-481`) — that is a *consumer-side*
 staleness signal for content already admitted through the gate, orthogonal to
 the DSL-level `require_ready` decision. See
 [WASM-ENGINE-POOLING.md §6.5](./WASM-ENGINE-POOLING.md).

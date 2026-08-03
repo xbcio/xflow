@@ -2,7 +2,6 @@ package script
 
 import (
 	"context"
-	"time"
 
 	"github.com/xbcio/xflow/node/internal/code/script/engine"
 	"github.com/xbcio/xflow/node/internal/code/script/wasm"
@@ -27,13 +26,6 @@ func Warmup(ctx context.Context) error { return engine.Warmup(ctx) }
 // deadline. Call it before Warmup; re-registering the same module replaces its
 // config. Only the wasm/wazero-reactor runtime uses this.
 func PrewarmWasm(code string, cfg any) { wasm.Prewarm(code, cfg) }
-
-// RegisterWasmConfigLoader associates a ConfigLoader with a wasm module. During
-// warmup the loader is invoked once to establish the initial pool; if ttl > 0 a
-// background goroutine polls for config changes. See wasm.RegisterConfigLoader.
-func RegisterWasmConfigLoader(code string, loader wasm.ConfigLoader, ttl time.Duration) {
-	wasm.RegisterConfigLoader(code, loader, ttl)
-}
 
 // RegisterWasmSupplyConsumer makes a wasm module consume the named supply, so a
 // content change rebuilds its instance pool. Call it when the workflow arrives

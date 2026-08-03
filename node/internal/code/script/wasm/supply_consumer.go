@@ -50,7 +50,7 @@ func (c *supplyConsumer) OnSupplyChanged(ctx context.Context, snap supply.Snapsh
 	}
 	// Compare the CONTENT, not snap.Hash: this compares against the bytes the
 	// pool was actually built from, so a pool built via any other path (legacy
-	// globals, a config loader) is recognised as already-current too.
+	// globals) is recognised as already-current too.
 	//
 	// A revision bump with identical bytes deliberately does NOT swap. activePool
 	// is published read-only and readers load p.revision without a lock
@@ -75,8 +75,8 @@ func (c *supplyConsumer) OnSupplyChanged(ctx context.Context, snap supply.Snapsh
 // registration instead of accumulating duplicates.
 //
 // An undecodable code is rejected here rather than registered. Unlike the prewarm
-// and loader registries — whose entries warm-up later consumes, so a decode
-// failure surfaces there — nothing ever consumes a source-driven marking in a way
+// registry — whose entries warm-up later consumes, so a decode failure surfaces
+// there — nothing ever consumes a source-driven marking in a way
 // that could report an error. Registering under an unmatchable key would leave the
 // module permanently on the legacy globals path, evaluating against no rules and
 // passing every record through untagged and uncleansed, with no diagnostic

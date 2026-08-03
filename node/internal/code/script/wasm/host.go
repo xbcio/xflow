@@ -49,8 +49,8 @@ type reactorHost struct {
 	// engineForCode. Guarded by mu.
 	prewarm map[string]prewarmEntry
 
-	// sourceDriven records modules whose config is meant to come from a supply or
-	// loader (rather than globals["$config"]) even when no engine has been
+	// sourceDriven records modules whose config is meant to come from a supply
+	// (rather than globals["$config"]) even when no engine has been
 	// compiled for them yet. Activation-time registration usually precedes the
 	// module's first Execute — the compiled-module cache is empty at that point —
 	// so this is the only place the intent can be recorded until engineForCode
@@ -69,16 +69,16 @@ type prewarmEntry struct {
 	cfg  any
 }
 
-// registryKeyOrRaw is the key for registries whose entries are later CONSUMED by
-// warm-up: prewarm and loaderRegistry. On a decodable module it is the canonical
-// moduleKey; on an undecodable one it falls back to the raw string.
+// registryKeyOrRaw is the key for the prewarm registry, whose entries are later
+// CONSUMED by warm-up. On a decodable module it is the canonical moduleKey; on an
+// undecodable one it falls back to the raw string.
 //
 // The fallback is what keeps warm-up's "an unusable module is reported, not
 // silently dropped" contract (see TestPrewarm_BadModuleSurfacesError): warm-up
 // calls engineForCode on the retained code string and surfaces the decode error
 // there. Dropping the entry at registration instead would turn a reported
 // misconfiguration into a module that never warms and nobody is told about.
-// Registration on these paths is a void call with no channel to report on.
+// Registration on that path is a void call with no channel to report on.
 //
 // The fallback cannot collide with a real moduleKey: a moduleKey is 64 hex
 // characters, which is itself valid base64, whereas this branch is reached only
@@ -171,17 +171,16 @@ func (h *reactorHost) engineForCode(ctx context.Context, code string) (*reactorE
 		return nil, err
 	}
 	// Resolve the config source and publish the engine as one atomic step,
-	// under the same lock the mark* registration path holds.
+	// under the same lock the registration path holds.
 	//
 	// Registration and engine creation are a Dekker-style crossing: each side
 	// publishes its own state and then looks for the other's. Registration
-	// records the intent (sourceDriven / loaderRegistry) and then flips any
-	// already-cached engine; creation reads the intent and then caches the
-	// engine. Interleaved, both lookups can miss — registration's codeCache.Get
-	// finds nothing because the Add has not happened, and the intent read
-	// already ran before the write landed. The engine then stays on the globals
-	// path forever, evaluating with no rules at all, and nothing later repairs
-	// it.
+	// records the intent (sourceDriven) and then flips any already-cached engine;
+	// creation reads the intent and then caches the engine. Interleaved, both
+	// lookups can miss — registration's engines lookup finds nothing because the
+	// engine is not published yet, and the intent read already ran before the
+	// write landed. The engine then stays on the globals path forever, evaluating
+	// with no rules at all, and nothing later repairs it.
 	//
 	// A double-check after the Add only narrows that window; it does not close
 	// it, and being nanoseconds wide it is unreachable by any test — untestable
@@ -193,12 +192,7 @@ func (h *reactorHost) engineForCode(ctx context.Context, code string) (*reactorE
 	h.codeCache.Add(code, e)
 	h.mu.Unlock()
 
-	// hasLoaderKey takes loaderMu, so it stays outside h.mu — see the lock-order
-	// note on markConfigFromSource. It is safe outside because RegisterConfigLoader
-	// publishes to loaderRegistry BEFORE it calls markConfigFromSource, so a
-	// registration this read misses is one whose flip finds the engine already
-	// cached above.
-	if fromSource || hasLoaderKey(key) {
+	if fromSource {
 		e.configFromSource.Store(true)
 	}
 	return e, nil
@@ -243,7 +237,6 @@ func (h *reactorHost) engineForKey(ctx context.Context, key string, wasmBytes []
 		return e, nil
 	}
 	e := &reactorEngine{host: h, cm: cm}
-	e.lastAppliedVersion.Store("") // seed so Load never panics
 	h.engines[key] = e
 	obs().OnModuleCompile(ctx, "miss")
 	return e, nil
@@ -261,28 +254,8 @@ func (e *reactorEngine) ensurePool(ctx context.Context, cfg []byte, size uint64)
 	return e.swapConfig(ctx, cfg, size, 0)
 }
 
-// markConfigFromSource flips an already-created engine to source-driven config.
-// A module with no engine yet is a no-op: engineForCode resolves the flag when it
-// creates one (it also consults sourceDriven, so the intent is not lost).
-//
-// An undecodable code is also a no-op. There is no engine for it and never will
-// be, so there is nothing to flip; its caller (RegisterConfigLoader) still keeps
-// the registry entry, and warm-up reports the decode failure from there.
-//
-// Lock order: callers hold loaderMu-free state here — this takes h.mu, and
-// hasLoaderKey takes loaderMu, so the two are never nested in this direction.
-func (h *reactorHost) markConfigFromSource(code string) {
-	key, err := moduleKey(code)
-	if err != nil {
-		return
-	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.flipEngineLocked(key)
-}
-
-// seedSourceDrivenByKey records that a module's config comes from a supply or
-// loader, and flips its engine if one already exists. It creates nothing: when
+// seedSourceDrivenByKey records that a module's config comes from a supply, and
+// flips its engine if one already exists. It creates nothing: when
 // the engine does not exist yet the intent is recorded so engineForCode picks it
 // up at creation. Compiling the module here would pay a multi-second cost on the
 // activation path.

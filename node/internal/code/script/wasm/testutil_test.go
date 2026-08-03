@@ -53,3 +53,22 @@ func appendULEB128(b []byte, v uint64) []byte {
 		}
 	}
 }
+
+// contentWithRule returns supply content carrying exactly one rule. Supply
+// content is raw bytes (that is what a SupplyResource distributes), which is why
+// these helpers exist alongside ruleConfig — the latter builds the map form the
+// legacy globals path takes.
+func contentWithRule(name, expr string) []byte {
+	return []byte(`{"rules":[{"name":"` + name + `","expr":"` + expr + `"}]}`)
+}
+
+// emptyContent is a valid config carrying zero rules — "pass everything through,
+// tag nothing". It is a legitimate business setting, distinct from "no content
+// has arrived yet" (see WASM-ENGINE-POOLING.md §6.5).
+func emptyContent() []byte { return []byte(`{"rules":[]}`) }
+
+// badContent has an unparseable expression, so configure rejects it and the whole
+// pool build fails.
+func badContent() []byte {
+	return []byte(`{"rules":[{"name":"broken","expr":"this is (not valid expr"}]}`)
+}

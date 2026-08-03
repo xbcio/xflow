@@ -189,11 +189,6 @@ type reactorEngine struct {
 	active atomic.Pointer[activePool]
 	gen    atomic.Uint64 // monotonic generation counter
 
-	// lastAppliedVersion tracks the config version string most recently
-	// swapped in successfully by the watcher goroutine. Updated only on
-	// successful swap so a failed version is retried on the next poll (§6.5).
-	lastAppliedVersion atomic.Value // string
-
 	// lastSwapAt is when the active pool was installed. It drives the Stale
 	// determination and xflow_supply_age_seconds: a source that keeps failing
 	// leaves gen untouched, so only elapsed time exposes it.
@@ -204,7 +199,7 @@ type reactorEngine struct {
 	sourceFailures atomic.Int64
 
 	// configFromSource records whether this module's config comes from a supply
-	// consumer / loader rather than from globals. It is resolved ONCE when the
+	// consumer rather than from globals. It is resolved ONCE when the
 	// engine is created or a consumer registers, and read lock-free on every
 	// message.
 	//

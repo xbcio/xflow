@@ -2,7 +2,6 @@ package wasm
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/xbcio/xflow/node/internal/code/script/engine"
@@ -46,12 +45,11 @@ func (f *reactorFacade) Name() string { return "wasm/wazero-reactor" }
 
 // Execute runs one input through the reactor pool for the given module.
 //
-// When a module is source-driven (configFromSource: a registered ConfigLoader
-// or supply consumer), globals["$config"] is ignored and the active pool
-// (maintained by the loader watcher or a supply content change) is used
-// directly. The availability ladder decides whether to serve: Fresh and Stale
-// both serve from last-good, only Unavailable (never successfully configured)
-// fails the call.
+// When a module is source-driven (configFromSource: a registered supply
+// consumer), globals["$config"] is ignored and the active pool (maintained by a
+// supply content change) is used directly. The availability ladder decides
+// whether to serve: Fresh and Stale both serve from last-good, only Unavailable
+// (never successfully configured) fails the call.
 //
 // When the module is not source-driven, the legacy path applies: rules are
 // passed via globals["$config"] and ensurePool is called with a sha256
@@ -175,14 +173,10 @@ func annotateGeneration(v any, revision uint64) any {
 
 // warmup is the engine.Warmer. It opens the wazero runtime — which resolves the
 // on-disk compilation cache and instantiates WASI — and then compiles and warms
-// a pool for every module registered via Prewarm or RegisterConfigLoader.
+// a pool for every module registered via Prewarm.
 //
-// For loader-registered modules: Load once → build pool → start the background
-// watcher (if ttl > 0), using the ctx passed here as the watcher's lifetime.
-//
-// Warm-up failures are aggregated and returned for the caller to log; they are
-// not fatal. On the Prewarm path Execute warms lazily; on the loader path the
-// watcher retries.
+// Warm-up failures are returned for the caller to log; they are not fatal, since
+// Execute warms lazily on the Prewarm path.
 func (f *reactorFacade) warmup(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -202,43 +196,6 @@ func (f *reactorFacade) warmup(ctx context.Context) error {
 		if err := e.ensurePool(ctx, cfgBytes, defaultPoolSize()); err != nil {
 			return fmt.Errorf("wasm/wazero-reactor: warmup: %w", err)
 		}
-	}
-
-	// Loader-registered modules: Load config from source, build pool, start
-	// background watcher. A loader-registered module that also has a prewarm
-	// entry gets its pool rebuilt from the loader's config (loader is authority).
-	//
-	// A failure here is recorded and warmup carries on to the next module: one
-	// unreachable config source must not deny every other module its warm pool.
-	// Crucially the watcher starts even when the first Load or swap failed —
-	// Execute does no lazy load on this path, so the watcher's retry is the only
-	// route back from a source that was down at boot (§6.5).
-	var errs []error
-	for _, entry := range registeredLoaders() {
-		e, err := f.host.engineForCode(ctx, entry.code)
-		if err != nil {
-			// No compiled module means there is nothing for a watcher to
-			// configure, so this one really is terminal for this module.
-			errs = append(errs, fmt.Errorf("warmup loader: %w", err))
-			continue
-		}
-
-		if cfg, version, loadErr := entry.loader.Load(ctx); loadErr != nil {
-			// §6.5: config source unreachable → active stays nil, Execute
-			// returns transient until a later poll succeeds.
-			errs = append(errs, fmt.Errorf("warmup loader: %w", loadErr))
-		} else if err := e.swapConfig(ctx, cfg, defaultPoolSize(), 0); err != nil {
-			// §6.5: first config bad → active stays nil. Leave
-			// lastAppliedVersion unset so the watcher retries this version.
-			errs = append(errs, fmt.Errorf("warmup loader: %w", err))
-		} else {
-			e.lastAppliedVersion.Store(version)
-		}
-
-		startWatcher(ctx, entry.code, e, entry.loader, entry.ttl)
-	}
-	if len(errs) > 0 {
-		return fmt.Errorf("wasm/wazero-reactor: %w", errors.Join(errs...))
 	}
 	return nil
 }
@@ -284,8 +241,8 @@ func splitConfig(globals map[string]any) (cfg any, input map[string]any) {
 	return cfg, input
 }
 
-// stripConfig removes the $config key from globals for the loader path, where
-// config is not sourced from globals.
+// stripConfig removes the $config key from globals for the source-driven path,
+// where config is not sourced from globals.
 func stripConfig(globals map[string]any) map[string]any {
 	if globals == nil {
 		return map[string]any{}

@@ -2,7 +2,7 @@
 
 > Status: **P1 + P2 + P3 已实现**（reactor 引擎 + 实例池 + 两阶段初始化落地于 `node/internal/code/script/wasm/{pool.go,host.go,reactor.go}`；磁盘 CompilationCache + startup warmup 落地于 `cache.go` 与 `cmd/runner/run.go`；换池协议由 supply 驱动，见 §6.4 与 [SUPPLY-NODE.md](./SUPPLY-NODE.md)，单测全绿含 `-race`）
 > 关联：[NODE-GROUP-COLOCATION.md](./NODE-GROUP-COLOCATION.md)、[HIGH-THROUGHPUT-INGESTION.md](./HIGH-THROUGHPUT-INGESTION.md)、[SUPPLY-NODE.md](./SUPPLY-NODE.md)
-> 现状代码：`node/internal/code/script/wasm/{wasm.go,wazero.go,pool.go,host.go,reactor.go,cache.go,config_loader.go,supply_consumer.go}`、`testdata/{reactor,reactorspin,reactormin}/`、`node/internal/code/script/{engine/warmup.go,warmup.go}`、`node/node.go`（`WarmupScriptEngines`/`PrewarmWasmModule`）、`cmd/runner/run.go`
+> 现状代码：`node/internal/code/script/wasm/{wasm.go,wazero.go,pool.go,host.go,reactor.go,cache.go,supply_consumer.go}`、`testdata/{reactor,reactorspin,reactormin}/`、`node/internal/code/script/{engine/warmup.go,warmup.go}`、`node/node.go`（`WarmupScriptEngines`/`PrewarmWasmModule`）、`cmd/runner/run.go`
 
 ## 0. 背景与目标
 
@@ -318,31 +318,37 @@ host 造新池时,每个新实例在 Fresh 态 `configure(newCfg)`。任一新�
 
 ### 6.4 配置来源与换池驱动
 
-引擎内置一个 `ConfigLoader` 接口（`node/internal/code/script/wasm/config_loader.go`，可插拔），负责把外部配置变化翻译成一次「造新池、原子换入」：
+配置变化只有一条通路：**supply 通道**。`$supplies` + 声明的 `dependency_edges` + `RegisterSupplyConsumer`（`supply_consumer.go:84`）——一个模块注册为某个 supply 节点的消费者后即被标记 `configFromSource`，配置变化经 [SUPPLY-NODE.md](./SUPPLY-NODE.md) 描述的采集/分发机制推送到 `Registry.Apply` → `supplyConsumer.OnSupplyChanged` → `swapConfig`（造新池、原子换入）。
 
 ```go
-// config_loader.go:18-24
-type ConfigLoader interface {
-    // Load returns the current config bytes and a version identifier.
-    Load(ctx context.Context) (cfg []byte, version string, err error)
-}
+// supply_consumer.go — 唯一的换池驱动接口（supply.Consumer 的 wasm 实现）
+func (c *supplyConsumer) OnSupplyChanged(ctx context.Context, snap supply.Snapshot) error
 ```
 
-- **静态内嵌**：`StaticLoader(cfg)`（`config_loader.go:29`）直接返回节点参数，version = cfg 的 sha256，一次 warmup 之后永不再触发换池。
-- **后台 TTL 轮询骨架仍在**：`startWatcher`（`config_loader.go:107`）按 `ttl` 周期性调 `Load`,version 变化才 `swapConfig`；version 不变零开销。但这个骨架**没有、也不会有 HTTP 实现**——曾经设计过在引擎内置一个 HTTP 拉取 loader（后台 goroutine 定期拉 SAS 规则接口），已被否决,原因是三条独立且都站得住的阻塞（不是"暂不做",是**架构上不能做**）：
-  1. **凭证在 warmup 期不可达。** `Input.Credential` 是按请求依赖注入的（resolver + namespace 绑定当前调用的租户上下文）；wasm 引擎的后台 goroutine（`startWatcher`）没有 `Input`，也没有触发它的那次请求的租户上下文。要在引擎内部拉凭证，唯一办法是开一个进程级凭证后门，绕开每次调用的租户边界——这正是 secure-coding 规则明确禁止的「架空多租户隔离」。
+这条路径是 execution-agnostic 的：拉取发生在 activation 期的 `SupplyGate.Admit`（一次显式、可观测、受 `require_ready` 门控的调用），不是引擎内部悄悄发起的网络请求。
+
+**曾经存在过的第二条通路已删除。** 引擎里曾内置一个 `ConfigLoader` 接口 + `StaticLoader` + 后台 TTL 轮询 `startWatcher`（原 `config_loader.go`，公开入口 `node.RegisterWasmConfigLoader`）。删除理由有三条，任一条单独成立：
+
+1. **与 supply 语义完全重合且无仲裁。** 两者最终都落到同一个 `swapConfig`，且都只翻同一个 `configFromSource` 标志位。同一模块上同时挂 loader 与 supply consumer 时谁赢取决于时序——watcher 下一轮 poll 见自己 `version` 未变就什么都不做，或反过来把 supply 刚换入的内容 swap 掉。
+2. **它自己文档承诺的用法是坏的。** 注释与 `node.go` 都写明「可在 warmup 之后调用」，但 `startWatcher` 唯一调用点在 warmup 循环内。warmup 后注册时：`configFromSource` 被置真 → Execute 走 source-driven 分支 → `active` 为 nil → 永久返回 transient error；而 source-driven 路径不做 lazy load，watcher 又没启动，没有任何东西会去建池。`ttl` 被静默忽略，模块彻底砖掉。全部原测试都在 warmup 前注册，覆盖不到。
+3. **生产不可达。** 全仓库只有测试调用它，跨 runner 也无同步（每个 runner 独立 ticker、相位取决于启动时刻）。
+
+原设计里「引擎内置一个 HTTP 拉取 loader（后台 goroutine 定期拉 SAS 规则接口）」的否决理由仍然成立，且现在是结构性的——引擎里已经没有可挂 HTTP loader 的接口了。三条否决理由留档：
+
+  1. **凭证在 warmup 期不可达。** `Input.Credential` 是按请求依赖注入的（resolver + namespace 绑定当前调用的租户上下文）；引擎的后台 goroutine 没有 `Input`，也没有触发它的那次请求的租户上下文。要在引擎内部拉凭证，唯一办法是开一个进程级凭证后门，绕开每次调用的租户边界——这正是 secure-coding 规则明确禁止的「架空多租户隔离」。
   2. **会重造并绕过 `xflow.http` 节点的 `HTTPHostPolicy`。** `xflow.http` 节点对出站 HTTP 有统一的 SSRF 防护策略（allowlist、私有 IP 阻断等，见 `http.go`）。引擎内置一个独立的 HTTP 客户端等于重新实现一遍这套策略，且天然会漏掉它——一个新的、未经审查的出站请求路径，正是 SSRF 防护要防的那类口子。
   3. **架空 workflow 抽象。** 一次引擎内部发起的 HTTP 拉取不产生 execution 记录、不受 `OnError` 策略约束、没有 retry/重试语义——它完全绕过了 workflow 引擎对"一次调用"的全部契约保证，把一个应该可观测、可重试、可审计的操作，变成了引擎内部一段不透明的副作用。
-- **实际生产路径：supply 通道。** 配置变化通过 `$supplies` + 声明的 `dependency_edges` + `RegisterSupplyConsumer`（`supply_consumer.go:74`）流入——一个模块注册为某个 supply 节点的消费者后即被标记 `configFromSource`，配置变化经 [SUPPLY-NODE.md](./SUPPLY-NODE.md) 描述的采集/分发机制推送到 `Registry.Apply` → `supplyConsumer.OnSupplyChanged` → `swapConfig`。这条路径是 execution-agnostic 的：拉取发生在 activation 期的 `SupplyGate.Admit`（一次显式、可观测、受 `require_ready` 门控的调用），不是引擎内部悄悄发起的网络请求。`ConfigLoader`/`startWatcher` 骨架仍保留供旧的内嵌/测试调用者使用，但**不是生产路径**（`reactor.go:12-21` 的 `reactorConfigGlobal` 注释明确标注该 legacy 路径为 Deprecated）。
+
+**剩下的另一条路径是 legacy globals（`$config`），仍标注 Deprecated**（`reactor.go:12-21`）：embedded/SDK 调用者与既有测试还在用，生产不可达。它与 supply 通道互斥——`configFromSource` 为真时 `$config` 被 `stripConfig` 剥掉、不参与求值。
 
 ### 6.5 空配置与边界语义
 
-- **空规则集**（`[]`，`{"rules":[]}`）实测被接受为「0 规则」，`configure` 返回 `0` 而非负数——这是**合法配置**，不是错误。`normalizeConfig(nil)` 的默认值本身就是 `{"rules":[]}`（`pool.go:513-514`）。对清洗打标，空规则集意味着「放行一切/不打标」，是业务上有效的一档，新池正常 warm 换入。
+- **空规则集**（`[]`，`{"rules":[]}`）实测被接受为「0 规则」，`configure` 返回 `0` 而非负数——这是**合法配置**，不是错误。`normalizeConfig(nil)` 的默认值本身就是 `{"rules":[]}`（`pool.go:508-509`）。对清洗打标，空规则集意味着「放行一切/不打标」，是业务上有效的一档，新池正常 warm 换入。
 - **这与「无内容」是两件不同的事，边界必须分清：**
   - **空规则集**——引擎收到了配置字节，字节解出 0 条规则。合法，正常建池服务。
-  - **无内容**——引擎从未收到任何配置字节（`e.active.Load() == nil`，即 `AvailUnavailable`，`pool.go:461-463`）。这不是「配置是空的」，而是「配置还没来」，由 activation 期的门控处理（`require_ready`，见 [SUPPLY-NODE.md §6](./SUPPLY-NODE.md#6-activation-time-gate)），不是引擎自己决定要不要接受。
+  - **无内容**——引擎从未收到任何配置字节（`e.active.Load() == nil`，即 `AvailUnavailable`，`pool.go:472-474`）。这不是「配置是空的」，而是「配置还没来」，由 activation 期的门控处理（`require_ready`，见 [SUPPLY-NODE.md §6](./SUPPLY-NODE.md#6-activation-time-gate)），不是引擎自己决定要不要接受。
   - **两档 `require_ready` 的可观测信号**：`true`（默认）→ 门控拒绝该 activation，Kafka offset 不前进，`xflow_supply_not_ready` 置 1；`false` → 门控放行、`Execute` 面对无池的情形（见下一条 transient error），`xflow_supply_unavailable_serving` 置 1。两档都不会静默用空规则集顶替「没配置」。
-  - **绝不用空内容静默放行**：引擎从未把「没有配置」翻译成「按 0 规则跑」——`newInstance`/`buildPool` 从不在无 cfg 时调用 `configure("")`；未配置就是 `active == nil`，`borrow` 直接报 `"no active pool (unconfigured)"`（`pool.go:322`）。空规则集必须是配置源明确送来的 `{"rules":[]}` 字节，而不是引擎替配置源做的默认判断。
+  - **绝不用空内容静默放行**：引擎从未把「没有配置」翻译成「按 0 规则跑」——`newInstance`/`buildPool` 从不在无 cfg 时调用 `configure("")`；未配置就是 `active == nil`，`borrow` 直接报 `"no active pool (unconfigured)"`（`pool.go:317`）。空规则集必须是配置源明确送来的 `{"rules":[]}` 字节，而不是引擎替配置源做的默认判断。
 - **配置源不可达**（后台 loader/supply 拉取失败）：**保留当前生效池继续服务**，不造新池，记 metric + 告警。绝不因配置源抖动而清空规则。
 - **新配置坏**（拉到了但含坏规则）：造新池时某新实例 `configure<0` → 整批新池丢弃、`active` 不动（§6.3 不变量 1），记 `rejected` metric + 告警。
 - **首次配置就失败**（warmup 时配置源不可达或首份配置坏）：`active` 为 nil、无可用池；`Execute` 返回 transient error 触发上层重试/backpressure，而非用空配置静默放行。
@@ -362,7 +368,7 @@ wasm 侧（`node/internal/code/script/wasm/pool.go`/`host.go` 触发）：
 - `xflow_wasm_instance_total{state=ready|doomed}` gauge（`OnInstanceCount`）。**`state` 没有 `fresh` 档**——`Fresh` 是 `newInstance` 内 instantiate→configure 之间的瞬时态，实例进池时已经是 `Ready`（`buildPool` 的循环里 `configure` 成功才 `pool.free <- inst`），永远观测不到,故不设该标签值。
 - `xflow_wasm_instance_recycled_total{cause=timeout|eval_error|shutdown|pool_swapped}` counter（`OnInstanceRecycled`）。
 - `xflow_wasm_pool_swap_total{result=applied|rejected}` counter + `xflow_wasm_pool_swap_duration_seconds` histogram（`OnPoolSwap`，造新池到换入的耗时）。**只有这两档 result**——没有独立的 `source_error` 档：配置源不可达（loader/gate 拉取失败）不会走到 `swapConfig`，因此也不会产生一次 `pool_swap` 记录，这类失败由 `xflow_supply_fetch_total{result=error}`（下方）承担。
-- `xflow_wasm_config_generation` gauge（`OnPoolSwap` 仅在 `result=applied` 时设置）。**语义是内容的服务端版本号，不是本进程池代次**：值取自 `swapConfig` 的 `revision` 参数——即产出这次换池的 `SupplyResource.Revision`——而不是 `activePool.gen`（`gen` 只是本进程内的换池计数，无法跨 runner 比较）。**字节相同但 revision 变化时不换池，也不更新该值**：`swapConfig` 只在 `buildPool` 成功后才写 `newPool.revision`（`pool.go:419`，必须在 `e.active.Swap(newPool)` 之前完成，因为 `Swap` 一执行,读者立刻能看到新指针,事后再写字段就会跟无锁读者竞态)，字节不变的情况下配置源侧一般不会触发新的 `swapConfig` 调用；即使触发,只要 `cfg` 字节相同,建出来的池仍是同样内容,该值也仍是"实际加载的那份字节对应的 revision"，不会因为 revision 号跳了而单独刷新。
+- `xflow_wasm_config_generation` gauge（`OnPoolSwap` 仅在 `result=applied` 时设置）。**语义是内容的服务端版本号，不是本进程池代次**：值取自 `swapConfig` 的 `revision` 参数——即产出这次换池的 `SupplyResource.Revision`——而不是 `activePool.gen`（`gen` 只是本进程内的换池计数，无法跨 runner 比较）。**字节相同但 revision 变化时不换池，也不更新该值**：`swapConfig` 只在 `buildPool` 成功后才写 `newPool.revision`（`pool.go:414`，必须在 `e.active.Swap(newPool)` 之前完成，因为 `Swap` 一执行,读者立刻能看到新指针,事后再写字段就会跟无锁读者竞态)，字节不变的情况下配置源侧一般不会触发新的 `swapConfig` 调用；即使触发,只要 `cfg` 字节相同,建出来的池仍是同样内容,该值也仍是"实际加载的那份字节对应的 revision"，不会因为 revision 号跳了而单独刷新。
 - `xflow_wasm_config_rule_count` gauge（`OnPoolSwap`，同样只在 `result=applied` 且规则数可辨识时设置）。
 - `xflow_wasm_pool_borrow_wait_seconds` histogram（`OnBorrowWait`，借出等待，判断 poolSize 是否不足）。
 - `xflow_wasm_module_compile_total{result=hit|miss}` counter（`OnModuleCompile`）。**只有这两档**——没有独立的 `disk_hit`：内存 LRU 命中与磁盘 CompilationCache 命中都算 `hit`，wazero 的 `CompilationCacheWithDir` 对调用方是透明的,host 侧看不到"这次是内存缓存还是磁盘缓存命中"的区分。
