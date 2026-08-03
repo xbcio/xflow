@@ -88,6 +88,10 @@ type Core struct {
 	// the report is accepted but discarded (no aggregation), which is safe: it
 	// is a diagnostic read, never a gate on anything.
 	supplyObserved SupplyObservedSink
+	// supplyEncryptor, when non-nil, enables AES-256-GCM encryption of supply
+	// content. The key is delivered to runners on registration and rotated via
+	// heartbeat responses.
+	supplyEncryptor *SupplyEncryptor
 }
 
 // leaseRecoveryEngine is deliberately optional so custom EngineFacade test
@@ -198,7 +202,11 @@ func (c *Core) register(ctx context.Context, req protocol.RegisterRunnerRequest,
 			c.logger.Warn("register inventory reconcile failed", "runner_id", req.RunnerID, "err", err)
 		}
 	}
-	return protocol.RegisterRunnerResponse{RunnerID: req.RunnerID, SessionID: session.SessionID}, nil
+	resp := protocol.RegisterRunnerResponse{RunnerID: req.RunnerID, SessionID: session.SessionID}
+	if req.SupportsEncryption && c.supplyEncryptor != nil {
+		resp.SupplyKey = c.supplyEncryptor.KeyForRunner()
+	}
+	return resp, nil
 }
 
 func (c *Core) heartbeat(ctx context.Context, req protocol.HeartbeatRequest, info TransportInfo) (protocol.HeartbeatResponse, error) {
@@ -237,6 +245,11 @@ func (c *Core) heartbeat(ctx context.Context, req protocol.HeartbeatRequest, inf
 		// Record what this runner has actually applied. Best-effort: an observed
 		// report is diagnostic, never a gate on the heartbeat succeeding.
 		c.supplyObserved.Record(req.RunnerID, req.SupplyObserved)
+	}
+	if c.supplyEncryptor != nil {
+		if rot := c.supplyEncryptor.ConsumeRotation(); rot != "" {
+			resp.SupplyKeyRotation = rot
+		}
 	}
 	return resp, nil
 }

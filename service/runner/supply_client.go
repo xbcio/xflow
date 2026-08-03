@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"strconv"
 	"time"
+
+	"github.com/xbcio/xflow/service/crypto/supplyenc"
 )
 
 // ErrSupplyNotFound reports that the server has no content for a supply name.
@@ -33,6 +35,9 @@ type HTTPSupplyFetcher struct {
 	BaseURL string
 	Token   string
 	Client  *http.Client
+	// Keyring, when non-nil, enables encrypted supply fetching. The fetcher
+	// sends Accept: application/x-xflow-encrypted and decrypts the response.
+	Keyring *supplyenc.Keyring
 }
 
 var _ SupplyFetcher = (*HTTPSupplyFetcher)(nil)
@@ -53,6 +58,9 @@ func (f *HTTPSupplyFetcher) Fetch(ctx context.Context, name string) ([]byte, str
 	}
 	if f.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+f.Token)
+	}
+	if f.Keyring.HasKeys() {
+		req.Header.Set("Accept", "application/x-xflow-encrypted")
 	}
 
 	client := f.Client
@@ -87,5 +95,15 @@ func (f *HTTPSupplyFetcher) Fetch(ctx context.Context, name string) ([]byte, str
 
 	hash := resp.Header.Get("ETag")
 	revision, _ := strconv.ParseUint(resp.Header.Get("X-Supply-Revision"), 10, 64)
+
+	// Decrypt if the response is an encrypted envelope.
+	if f.Keyring.HasKeys() && supplyenc.IsEncrypted(body) {
+		plaintext, decErr := f.Keyring.Decrypt(body)
+		if decErr != nil {
+			return nil, "", 0, fmt.Errorf("supply fetch: decrypt: %w", decErr)
+		}
+		body = plaintext
+	}
+
 	return body, hash, revision, nil
 }

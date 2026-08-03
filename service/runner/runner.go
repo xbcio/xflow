@@ -14,6 +14,7 @@ import (
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/node/supply"
 	"github.com/xbcio/xflow/observability/tracing"
+	"github.com/xbcio/xflow/service/crypto/supplyenc"
 	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/types"
 )
@@ -83,6 +84,10 @@ type Config struct {
 	// addressable digest. ScriptNode calls Input.ArtifactCode(ctx, digest) at
 	// Execute time; the runner wires the read-through artifact cache here.
 	ArtifactCodeResolver func(ctx context.Context, digest string) ([]byte, error)
+	// SupportsEncryption, when true, declares to the server that this runner
+	// can receive and decrypt AES-256-GCM encrypted supply content. The server
+	// responds with a SupplyKey on registration and encrypts supply GET bodies.
+	SupportsEncryption bool
 }
 
 type Runner struct {
@@ -148,17 +153,28 @@ func (r *Runner) Run(ctx context.Context) error {
 		inventory = r.activationTracker.Inventory()
 	}
 	registerResp, err := r.client.Register(ctx, protocol.RegisterRunnerRequest{
-		RunnerID:     r.config.RunnerID,
-		Concurrency:  r.config.Concurrency,
-		Capabilities: r.config.Capabilities,
-		Labels:       r.config.Labels,
-		Namespaces:   namespaceStrings(r.config.Namespaces),
-		Activations:  inventory,
+		RunnerID:           r.config.RunnerID,
+		Concurrency:        r.config.Concurrency,
+		Capabilities:       r.config.Capabilities,
+		Labels:             r.config.Labels,
+		Namespaces:         namespaceStrings(r.config.Namespaces),
+		Activations:        inventory,
+		SupportsEncryption: r.config.SupportsEncryption,
 	})
 	if err != nil {
 		return runContextError(ctx, err)
 	}
 	sessionID := registerResp.SessionID
+
+	// Install the supply encryption keyring if the server provided a key.
+	if registerResp.SupplyKey != "" {
+		key, keyErr := supplyenc.KeyFromBase64(registerResp.SupplyKey)
+		if keyErr != nil {
+			slog.Default().Warn("supply key decode failed, encryption disabled", "err", keyErr)
+		} else {
+			r.installSupplyKey(key)
+		}
+	}
 
 	// Wire the ack callback with this session's ID now that it is known. Safe
 	// to call unconditionally on every (re)connect: SetOnActivateFailed itself
@@ -395,6 +411,7 @@ func (r *Runner) heartbeatLoop(ctx context.Context, sessionID string, inFlight *
 	}
 	r.processActivations(ctx, resp)
 	r.processSupplyHints(ctx, resp)
+	r.processSupplyKeyRotation(resp)
 
 	ticker := time.NewTicker(r.config.HeartbeatInterval)
 	defer ticker.Stop()
@@ -410,6 +427,7 @@ func (r *Runner) heartbeatLoop(ctx context.Context, sessionID string, inFlight *
 			}
 			r.processActivations(ctx, resp)
 			r.processSupplyHints(ctx, resp)
+			r.processSupplyKeyRotation(resp)
 		}
 	}
 }
@@ -493,4 +511,35 @@ func namespaceStrings(namespaces []namespace.Namespace) []string {
 		out[i] = string(t)
 	}
 	return out
+}
+
+// installSupplyKey installs a supply encryption key into the supply fetcher's
+// keyring. Called once on registration when the server provides a key.
+func (r *Runner) installSupplyKey(key *supplyenc.Key) {
+	if r.supplyGate == nil {
+		return
+	}
+	fetcher := r.supplyGate.Fetcher()
+	if f, ok := fetcher.(*HTTPSupplyFetcher); ok {
+		if f.Keyring == nil {
+			f.Keyring = supplyenc.NewKeyring(key)
+		} else {
+			f.Keyring.Rotate(key)
+		}
+	}
+}
+
+// processSupplyKeyRotation installs a rotated supply key delivered via the
+// heartbeat response. The old current key becomes the previous key in the
+// keyring (allowing in-flight encrypted responses to still decrypt).
+func (r *Runner) processSupplyKeyRotation(resp protocol.HeartbeatResponse) {
+	if resp.SupplyKeyRotation == "" {
+		return
+	}
+	key, err := supplyenc.KeyFromBase64(resp.SupplyKeyRotation)
+	if err != nil {
+		slog.Default().Warn("supply key rotation decode failed", "err", err)
+		return
+	}
+	r.installSupplyKey(key)
 }

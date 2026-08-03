@@ -73,6 +73,10 @@ type Config struct {
 	// against the authoritative operation receipts). Mutations fail-closed
 	// when the admission audit cannot be persisted.
 	AuditSink AuditSink
+	// SupplyEncryptor, when set, enables AES-256-GCM encryption of supply
+	// content on GET /v1/supplies/{name} for runners that request it via the
+	// Accept: application/x-xflow-encrypted header. Wired from ControlPlane.
+	SupplyEncryptor SupplyContentEncryptor
 
 	// Transport configuration. Stage 1 declares but does not use these.
 	HTTPAddr    string
@@ -190,6 +194,7 @@ func New(cfg Config, opts ...Option) (*APIServer, error) {
 		sup.principalAuth = cfg.PrincipalAuth
 		sup.authorizer = cfg.Authorizer
 		sup.audit = cfg.AuditSink
+		sup.encryptor = cfg.SupplyEncryptor
 		s.modules = append(s.modules, sup)
 	}
 	// The artifact module registers under the same conditions and for the same

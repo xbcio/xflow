@@ -104,6 +104,10 @@ func NewSupplyGate(f SupplyFetcher, reg *supply.Registry, logger *slog.Logger) *
 // SetObserver installs the gate's observer. nil disables observation.
 func (g *SupplyGate) SetObserver(o SupplyGateObserver) { g.observer = o }
 
+// Fetcher returns the underlying SupplyFetcher. Used by the runner to install
+// supply encryption keys on the HTTP fetcher after registration.
+func (g *SupplyGate) Fetcher() SupplyFetcher { return g.fetcher }
+
 // resourceFor returns the resource name recorded for a supply NODE name at a
 // prior Admit call, or name itself when never recorded (the common case: node
 // name and resource name are equal unless a workflow overrides `resource`).

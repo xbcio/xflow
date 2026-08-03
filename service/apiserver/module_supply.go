@@ -31,8 +31,19 @@ const maxSupplyContentBytes = 1 << 20
 // serve unauthenticated.
 type supplyModule struct {
 	authzHolder
-	supplies store.Supplies
+	supplies  store.Supplies
+	encryptor SupplyContentEncryptor
 }
+
+// SupplyContentEncryptor is the interface the supply module uses to encrypt
+// content for runners that request it. Implemented by control.SupplyEncryptor.
+type SupplyContentEncryptor interface {
+	Encrypt(plaintext []byte) ([]byte, error)
+}
+
+// AcceptEncrypted is the Accept header value a runner sends to request
+// encrypted supply content.
+const AcceptEncrypted = "application/x-xflow-encrypted"
 
 func newSupplyModule(s store.Supplies) *supplyModule {
 	return &supplyModule{supplies: s}
@@ -152,6 +163,20 @@ func (m *supplyModule) handleGet(w http.ResponseWriter, r *http.Request, ns, nam
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
+
+	// Encrypt if the runner requests it and an encryptor is configured.
+	if m.encryptor != nil && r.Header.Get("Accept") == AcceptEncrypted {
+		ciphertext, encErr := m.encryptor.Encrypt(rec.Content)
+		if encErr != nil {
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		w.Header().Set("Content-Type", AcceptEncrypted)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(ciphertext)
+		return
+	}
+
 	ct := rec.ContentType
 	if ct == "" {
 		ct = "application/octet-stream"

@@ -84,6 +84,11 @@ type Config struct {
 	// store.Supplies configured (e.g. no PrincipalAuth for the supply HTTP
 	// module) sees no behavior change at all.
 	Supplies store.Supplies
+	// EnableSupplyEncryption, when true, enables AES-256-GCM encryption of
+	// supply content delivered to runners. The server generates a key at startup
+	// and distributes it to runners on registration. Requires Supplies to be
+	// non-nil for the encryption path to activate on GET /v1/supplies/{name}.
+	EnableSupplyEncryption bool
 }
 
 type redisClientProvider interface {
@@ -165,6 +170,11 @@ type ControlPlane struct {
 	// Config.Supplies are provided. Exposed via SupplyObserved() for
 	// diagnostics/management reads.
 	supplyObserved SupplyObservedSink
+
+	// supplyEncryptor is the optional AES-256-GCM encryptor for supply content.
+	// Non-nil only when Config.EnableSupplyEncryption is true. Exposed via
+	// SupplyEncryptor() so the apiserver can encrypt GET responses.
+	supplyEncryptor *SupplyEncryptor
 
 	lifecycleMu           sync.Mutex
 	started               bool
@@ -345,6 +355,20 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 		supplyObserved = observed
 	}
 
+	// Supply content encryption: when enabled, generate a per-process key and
+	// wire it into the Core (for key delivery on register/heartbeat) and the
+	// apiserver supply module (for response encryption).
+	var supplyEnc *SupplyEncryptor
+	if cfg.EnableSupplyEncryption {
+		enc, encErr := NewSupplyEncryptor()
+		if encErr != nil {
+			return nil, fmt.Errorf("supply encryption: %w", encErr)
+		}
+		httpServer.core.supplyEncryptor = enc
+		grpcServer.core.supplyEncryptor = enc
+		supplyEnc = enc
+	}
+
 	return &ControlPlane{
 		backend:          cfg.Backend,
 		eng:              eng,
@@ -360,6 +384,7 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 		entryReconciler:  entryReconciler,
 		workflowRegistry: workflowRegistry,
 		supplyObserved:   supplyObserved,
+		supplyEncryptor:  supplyEnc,
 	}, nil
 }
 
@@ -368,6 +393,11 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 // intended for management/diagnostic surfaces that answer "has runner X
 // applied revision Y yet".
 func (cp *ControlPlane) SupplyObserved() SupplyObservedSink { return cp.supplyObserved }
+
+// SupplyEncryptor returns the supply content encryptor, or nil when encryption
+// is not enabled. The apiserver uses this to encrypt GET /v1/supplies/{name}
+// responses for runners that request encrypted content.
+func (cp *ControlPlane) SupplyEncryptor() *SupplyEncryptor { return cp.supplyEncryptor }
 
 // Handler returns the HTTP Runner Protocol + workflow API mux. Mount it into
 // a host program's own http.ServeMux/http.Server, or serve it directly.

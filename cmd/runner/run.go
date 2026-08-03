@@ -391,6 +391,7 @@ func runnerServiceConfig(cfg runnerConfig) (runnersvc.Config, error) {
 		svcCfg.SupplyRegistry = supply.Default
 		svcCfg.SupplyGate = gate
 	}
+	svcCfg.SupportsEncryption = true
 	return svcCfg, nil
 }
 

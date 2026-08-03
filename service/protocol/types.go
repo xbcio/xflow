@@ -36,11 +36,20 @@ type RegisterRunnerRequest struct {
 	// on a fresh runner or one that hosts no triggers. Carries no secret values
 	// (only workflow/entry-unit identity + generation).
 	Activations []ActivationInventoryItem `json:"activations,omitempty"`
+	// SupportsEncryption indicates the runner can receive and decrypt $enc
+	// supply envelopes. When true the server includes a SupplyKey in the
+	// registration response and encrypts supply GET responses for this runner.
+	SupportsEncryption bool `json:"supports_encryption,omitempty"`
 }
 
 type RegisterRunnerResponse struct {
 	RunnerID  string `json:"runner_id"`
 	SessionID string `json:"session_id"`
+	// SupplyKey is a base64-encoded 32-byte AES-256 key for decrypting supply
+	// content. Included only when the runner declared supports_encryption=true
+	// and the server has encryption enabled. The runner stores it in its
+	// keyring and sends Accept: application/x-xflow-encrypted on supply fetches.
+	SupplyKey string `json:"supply_key,omitempty"`
 }
 
 type HeartbeatRequest struct {
@@ -76,6 +85,10 @@ type HeartbeatResponse struct {
 	// gRPC, supply changes converge on the TTL period instead of the heartbeat
 	// period — slower, still correct.
 	SupplyHints map[string]string `json:"supply_hints,omitempty"`
+	// SupplyKeyRotation carries a base64-encoded new AES-256 key when the server
+	// rotates the supply encryption key. The runner installs it as current and
+	// demotes the old current to previous. Absent when no rotation is pending.
+	SupplyKeyRotation string `json:"supply_key_rotation,omitempty"`
 }
 
 type PollTaskRequest struct {
