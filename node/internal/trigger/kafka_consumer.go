@@ -10,6 +10,9 @@ import (
 	"time"
 
 	"github.com/segmentio/kafka-go"
+	"github.com/segmentio/kafka-go/sasl"
+	"github.com/segmentio/kafka-go/sasl/plain"
+	"github.com/segmentio/kafka-go/sasl/scram"
 )
 
 const kafkaConsumerRetryDelay = 100 * time.Millisecond
@@ -36,30 +39,46 @@ func newKafkaGoConsumer(cfg KafkaConsumerConfig) (KafkaConsumer, error) {
 	if queueCapacity <= 0 {
 		queueCapacity = defaultTriggerMaxInflight
 	}
+
+	var dialer *kafka.Dialer
+	if cfg.SASLMechanism != "" {
+		mechanism, saslErr := buildSASLMechanism(cfg.SASLMechanism, cfg.SASLUsername, cfg.SASLPassword)
+		if saslErr != nil {
+			return nil, saslErr
+		}
+		dialer = &kafka.Dialer{
+			Timeout:       10 * time.Second,
+			DualStack:     true,
+			SASLMechanism: mechanism,
+		}
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
+	readerCfg := kafka.ReaderConfig{
+		Brokers:                cfg.Brokers,
+		GroupID:                cfg.Group,
+		Topic:                  cfg.Topic,
+		StartOffset:            startOffset,
+		QueueCapacity:          queueCapacity,
+		MinBytes:               1,
+		MaxBytes:               10e6,
+		WatchPartitionChanges:  true,
+		PartitionWatchInterval: 5 * time.Second,
+		ReadLagInterval:        -1,
+		RebalanceTimeout:       30 * time.Second,
+		SessionTimeout:         30 * time.Second,
+		HeartbeatInterval:      3 * time.Second,
+		JoinGroupBackoff:       time.Second,
+		RetentionTime:          24 * time.Hour,
+		OffsetOutOfRangeError:  false,
+		ReadBackoffMin:         100 * time.Millisecond,
+		ReadBackoffMax:         time.Second,
+		CommitInterval:         0,
+		GroupBalancers:         []kafka.GroupBalancer{kafka.RangeGroupBalancer{}, kafka.RoundRobinGroupBalancer{}},
+		Dialer:                 dialer,
+	}
 	consumer := &kafkaGoConsumer{
-		reader: kafka.NewReader(kafka.ReaderConfig{
-			Brokers:                cfg.Brokers,
-			GroupID:                cfg.Group,
-			Topic:                  cfg.Topic,
-			StartOffset:            startOffset,
-			QueueCapacity:          queueCapacity,
-			MinBytes:               1,
-			MaxBytes:               10e6,
-			WatchPartitionChanges:  true,
-			PartitionWatchInterval: 5 * time.Second,
-			ReadLagInterval:        -1,
-			RebalanceTimeout:       30 * time.Second,
-			SessionTimeout:         30 * time.Second,
-			HeartbeatInterval:      3 * time.Second,
-			JoinGroupBackoff:       time.Second,
-			RetentionTime:          24 * time.Hour,
-			OffsetOutOfRangeError:  false,
-			ReadBackoffMin:         100 * time.Millisecond,
-			ReadBackoffMax:         time.Second,
-			CommitInterval:         0,
-			GroupBalancers:         []kafka.GroupBalancer{kafka.RangeGroupBalancer{}, kafka.RoundRobinGroupBalancer{}},
-		}),
+		reader:   kafka.NewReader(readerCfg),
 		ctx:      ctx,
 		cancel:   cancel,
 		messages: make(chan KafkaMessage, queueCapacity),
@@ -67,6 +86,28 @@ func newKafkaGoConsumer(cfg KafkaConsumerConfig) (KafkaConsumer, error) {
 	}
 	go consumer.run()
 	return consumer, nil
+}
+
+// buildSASLMechanism constructs the appropriate kafka-go SASL mechanism.
+func buildSASLMechanism(mechanism, username, password string) (sasl.Mechanism, error) {
+	switch strings.ToLower(mechanism) {
+	case "plain":
+		return &plain.Mechanism{Username: username, Password: password}, nil
+	case "scram-sha-256":
+		m, err := scram.Mechanism(scram.SHA256, username, password)
+		if err != nil {
+			return nil, fmt.Errorf("kafka sasl scram-sha-256: %w", err)
+		}
+		return m, nil
+	case "scram-sha-512":
+		m, err := scram.Mechanism(scram.SHA512, username, password)
+		if err != nil {
+			return nil, fmt.Errorf("kafka sasl scram-sha-512: %w", err)
+		}
+		return m, nil
+	default:
+		return nil, fmt.Errorf("kafka: unsupported sasl_mechanism %q (supported: plain, scram-sha-256, scram-sha-512)", mechanism)
+	}
 }
 
 func kafkaStartOffset(offset string) (int64, error) {

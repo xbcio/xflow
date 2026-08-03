@@ -47,6 +47,10 @@ type KafkaConsumerConfig struct {
 	StartOffset string
 	MaxInflight int
 	Aggregate   KafkaAggregateConfig
+	// SASL authentication. All three must be set for SASL to activate.
+	SASLMechanism string // "plain", "scram-sha-256", "scram-sha-512"
+	SASLUsername  string
+	SASLPassword  string
 }
 
 type KafkaAggregateConfig struct {
@@ -167,7 +171,7 @@ func (n *KafkaTriggerNode) OnError(s types.OnError) types.Builder {
 func (n *KafkaTriggerNode) TriggerHandler() types.TriggerHandler { return n }
 
 func (n *KafkaTriggerNode) Activate(ctx context.Context, in *types.TriggerActivateInput) (types.TriggerSubscription, error) {
-	cfg, err := kafkaConfigFromParams(in.Params)
+	cfg, err := kafkaConfigFromParams(in.Params, mergedSupplyContent(in.Supplies))
 	if err != nil {
 		return nil, err
 	}
@@ -740,7 +744,7 @@ func stopKafkaAggregateTimer(timer *time.Timer, active *bool) {
 	*active = false
 }
 
-func kafkaConfigFromParams(params map[string]any) (KafkaConsumerConfig, error) {
+func kafkaConfigFromParams(params map[string]any, supply map[string]any) (KafkaConsumerConfig, error) {
 	aggregate, err := kafkaAggregateConfigFromParam(params["aggregate"])
 	if err != nil {
 		return KafkaConsumerConfig{}, err
@@ -759,6 +763,26 @@ func kafkaConfigFromParams(params map[string]any) (KafkaConsumerConfig, error) {
 	if len(cfg.Brokers) == 0 || cfg.Topic == "" || cfg.Group == "" {
 		return KafkaConsumerConfig{}, fmt.Errorf("kafka brokers, topic, and group are required")
 	}
+
+	// SASL credentials from supply content (takes precedence over params).
+	if supply != nil {
+		if m := cast.ToString(supply["sasl_mechanism"]); m != "" {
+			cfg.SASLMechanism = m
+		}
+		if u := cast.ToString(supply["sasl_username"]); u != "" {
+			cfg.SASLUsername = u
+		}
+		if p := cast.ToString(supply["sasl_password"]); p != "" {
+			cfg.SASLPassword = p
+		}
+	}
+	// Validate SASL consistency: if mechanism is set, username and password are required.
+	if cfg.SASLMechanism != "" {
+		if cfg.SASLUsername == "" || cfg.SASLPassword == "" {
+			return KafkaConsumerConfig{}, fmt.Errorf("kafka: sasl_mechanism %q requires sasl_username and sasl_password", cfg.SASLMechanism)
+		}
+	}
+
 	return cfg, nil
 }
 
@@ -898,4 +922,29 @@ func seedKafkaEntryBatch(ctx context.Context, in *types.TriggerActivateInput, co
 
 	// Unknown state — defensive: don't commit.
 	return false
+}
+
+// mergedSupplyContent merges all supply entries (keyed by node name) into a
+// single flat map. When a trigger depends on exactly one supply (the typical
+// case), this is a type assertion. When multiple supplies are declared, later
+// entries overwrite earlier ones on key collision — acceptable because multiple
+// supplies for one trigger is uncommon and the caller controls naming.
+func mergedSupplyContent(supplies map[string]any) map[string]any {
+	if len(supplies) == 0 {
+		return nil
+	}
+	merged := map[string]any{}
+	for _, v := range supplies {
+		m, ok := v.(map[string]any)
+		if !ok {
+			continue
+		}
+		for k, val := range m {
+			merged[k] = val
+		}
+	}
+	if len(merged) == 0 {
+		return nil
+	}
+	return merged
 }

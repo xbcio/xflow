@@ -36,6 +36,11 @@ type TriggerActivateInput struct {
 	NodeName   string
 	Params     map[string]any
 	Runtime    TriggerRuntime
+	// Supplies holds decoded supply content for this trigger's declared
+	// dependencies (via DependsOn edges). Keyed by supply node name. Each
+	// value is the JSON-decoded supply content (map[string]any). nil when no
+	// supplies are declared or none have content yet.
+	Supplies map[string]any
 }
 
 func (i *TriggerActivateInput) Emit(ctx context.Context, event *TriggerEvent) (ExecutionID, error) {
@@ -44,6 +49,20 @@ func (i *TriggerActivateInput) Emit(ctx context.Context, event *TriggerEvent) (E
 
 func (i *TriggerActivateInput) GetString(name string) string {
 	return cast.ToString(i.Params[name])
+}
+
+// GetSupply returns the decoded supply content for the named supply node, or
+// nil if not present. The supply node name is the one declared via DependsOn.
+func (i *TriggerActivateInput) GetSupply(name string) map[string]any {
+	if i.Supplies == nil {
+		return nil
+	}
+	v, ok := i.Supplies[name]
+	if !ok {
+		return nil
+	}
+	m, _ := v.(map[string]any)
+	return m
 }
 
 func (i *TriggerActivateInput) Webhooks() (WebhookRuntime, error) {

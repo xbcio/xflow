@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"sync"
 
+	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/node"
+	"github.com/xbcio/xflow/node/supply"
 	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/types"
 )
@@ -118,6 +120,7 @@ func (h *TriggerActivationHandler) Activate(ctx context.Context, d protocol.Acti
 			Token:      h.authToken,
 			Generation: d.Generation,
 		},
+		Supplies: resolveSuppliesForTrigger(d.Supplies),
 	}
 
 	sub, err := handler.Activate(ctx, input)
@@ -190,4 +193,30 @@ func withEntrySeedParams(d protocol.ActivateDirective) map[string]any {
 	merged["entry_unit_id"] = d.EntryUnitID
 	merged["workflow_version"] = d.WorkflowVersion
 	return merged
+}
+
+// resolveSuppliesForTrigger reads decoded supply content from the process-wide
+// registry for each supply requirement the trigger declares. The SupplyGate has
+// already admitted (fetched + applied) these before this call, so
+// supply.Default.Decoded() is guaranteed to contain them when RequireReady was
+// true. nil is returned when there are no supply requirements (the common
+// case for triggers without a DependsOn edge to a supply node).
+func resolveSuppliesForTrigger(reqs []engine.SupplyRequirement) map[string]any {
+	if len(reqs) == 0 {
+		return nil
+	}
+	decoded := supply.Default.Decoded()
+	if len(decoded) == 0 {
+		return nil
+	}
+	supplies := make(map[string]any, len(reqs))
+	for _, req := range reqs {
+		if content, ok := decoded[req.Node]; ok {
+			supplies[req.Node] = content
+		}
+	}
+	if len(supplies) == 0 {
+		return nil
+	}
+	return supplies
 }
