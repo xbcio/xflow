@@ -11,8 +11,7 @@ import (
 
 func TestEngineLoopSplitStaleBatchCannotFinalizeReclaimedParent(t *testing.T) {
 	def := &types.WorkflowDef{
-		Name:    "loop-stale-batch-fence",
-		Options: &types.WorkflowOptions{ExperimentalExpand: true},
+		Name: "loop-stale-batch-fence",
 		Nodes: []types.NodeDef{
 			{Name: "loop", Type: "xflow.map"},
 			{Name: "done", Type: "test.echo"},

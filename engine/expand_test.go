@@ -175,8 +175,7 @@ func (h *loopHandler) Execute(_ context.Context, input *types.Input) (*types.Out
 
 func TestScheduler_LoopExpansion_CreatesSubExecutions(t *testing.T) {
 	def := &types.WorkflowDef{
-		Name:    "loop-test",
-		Options: &types.WorkflowOptions{ExperimentalExpand: true},
+		Name: "loop-test",
 		Nodes: []types.NodeDef{
 			{Name: "loop", Type: "xflow.map"},
 			{Name: "done", Type: "test.echo"},

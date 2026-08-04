@@ -375,74 +375,13 @@ func TestCompile_UnknownConnectionNode(t *testing.T) {
 	}
 }
 
-func TestCompile_BlocksExperimentalExpandByDefault(t *testing.T) {
-	cases := []struct {
-		name     string
-		nodeType string
-	}{
-		{name: "loop", nodeType: "xflow.map"},
-		{name: "split", nodeType: "xflow.split"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			def := &types.WorkflowDef{
-				Name: tc.name,
-				Nodes: []types.NodeDef{
-					{Name: "iter", Type: tc.nodeType},
-					{Name: "next", Type: "test.echo"},
-				},
-				Connections: types.Connections{
-					"iter": {"main": {Targets: []types.Connection{{Node: "next", Input: "main"}}}},
-				},
-			}
-			_, err := Compile(def)
-			if err == nil {
-				t.Fatalf("expected experimental-expand gate error for %s", tc.nodeType)
-			}
-			var gateErr *ErrExperimentalExpandRequired
-			if !errors.As(err, &gateErr) {
-				t.Fatalf("expected *ErrExperimentalExpandRequired, got %T: %v", err, err)
-			}
-			if len(gateErr.Nodes) != 1 || gateErr.Nodes[0] != "iter ("+tc.nodeType+")" {
-				t.Fatalf("unexpected blocked nodes: %v", gateErr.Nodes)
-			}
-		})
-	}
-}
-
-func TestCompile_AllowsExperimentalExpandWhenOptedIn(t *testing.T) {
+func TestCompile_MapNodeCompilesWithoutAnyOptIn(t *testing.T) {
 	def := &types.WorkflowDef{
-		Name:    "loop-opt-in",
-		Options: &types.WorkflowOptions{ExperimentalExpand: true},
-		Nodes: []types.NodeDef{
-			{Name: "iter", Type: "xflow.map"},
-			{Name: "next", Type: "test.echo"},
-		},
-		Connections: types.Connections{
-			"iter": {"main": {Targets: []types.Connection{{Node: "next", Input: "main"}}}},
-		},
+		Name:  "wf",
+		Nodes: []types.NodeDef{{Name: "m", Type: "xflow.map"}},
 	}
 	if _, err := Compile(def); err != nil {
-		t.Fatalf("unexpected compile error with experimental opt-in: %v", err)
-	}
-}
-
-func TestCompile_ExperimentalExpandReportsAllOffendingNodes(t *testing.T) {
-	def := &types.WorkflowDef{
-		Name: "mixed",
-		Nodes: []types.NodeDef{
-			{Name: "fan", Type: "xflow.split"},
-			{Name: "iter", Type: "xflow.map"},
-			{Name: "ok", Type: "test.echo"},
-		},
-	}
-	_, err := Compile(def)
-	var gateErr *ErrExperimentalExpandRequired
-	if !errors.As(err, &gateErr) {
-		t.Fatalf("expected gate error, got %v", err)
-	}
-	if len(gateErr.Nodes) != 2 {
-		t.Fatalf("expected 2 blocked nodes, got %d: %v", len(gateErr.Nodes), gateErr.Nodes)
+		t.Fatalf("xflow.map must compile without an opt-in flag: %v", err)
 	}
 }
 

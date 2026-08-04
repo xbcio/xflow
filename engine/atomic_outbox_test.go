@@ -354,8 +354,7 @@ func TestEngineSuspendPreSignalOutboxSurvivesQueueOutage(t *testing.T) {
 func TestEngineLoopSplitJSONBatchesUseDurableSystemTasks(t *testing.T) {
 	ctx := context.Background()
 	g, err := graph.Compile(&types.WorkflowDef{
-		Name:    "durable-loop-split",
-		Options: &types.WorkflowOptions{ExperimentalExpand: true},
+		Name: "durable-loop-split",
 		Nodes: []types.NodeDef{
 			{Name: "loop", Type: "xflow.map"},
 			{Name: "done", Type: "test.echo"},

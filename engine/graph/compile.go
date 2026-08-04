@@ -9,34 +9,6 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
-// experimentalExpandTypes lists node types that depend on body sub-graph
-// execution, which is not yet implemented (see engine/expand.go and
-// .claude/specs/expand-gate.md). The compiler rejects workflows that
-// reference any of these types unless WorkflowOptions.ExperimentalExpand is
-// true. Capability tags on individual node Descriptors (carrying
-// types.CapBodySubgraphRequired) describe the same requirement but cannot be
-// inspected here without adding a graph → node runtime dependency.
-var experimentalExpandTypes = map[string]struct{}{
-	"xflow.map":   {},
-	"xflow.split": {},
-}
-
-// ErrExperimentalExpandRequired is returned by Compile when a workflow uses a
-// node type that depends on body sub-graph execution but has not opted in via
-// WorkflowOptions.ExperimentalExpand. It carries the offending node identifiers
-// so callers can surface them in editor diagnostics.
-type ErrExperimentalExpandRequired struct {
-	Nodes []string // formatted as "name (type)"
-}
-
-func (e *ErrExperimentalExpandRequired) Error() string {
-	return fmt.Sprintf(
-		"loop/split nodes are experimental and not yet implemented; "+
-			"set options.experimental_expand=true to opt in: %s",
-		strings.Join(e.Nodes, ", "),
-	)
-}
-
 // Compile validates a WorkflowDef and builds an immutable Graph IR.
 // It returns an error if the definition is nil, has no nodes, contains
 // duplicate node names, references unknown nodes, or contains a cycle.
@@ -64,30 +36,12 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 		inDegree:        make([]int, n),
 		startIdx:        -1,
 	}
-	var experimentalExpand bool
 	if def.Options != nil {
 		g.allowCycles = def.Options.AllowCycles
 		g.maxAutoDepth = def.Options.MaxAutoDepth
-		experimentalExpand = def.Options.ExperimentalExpand
 	}
 	if g.allowCycles && g.maxAutoDepth <= 0 {
 		g.maxAutoDepth = DefaultMaxAutoDepth
-	}
-
-	// Compile-time gate: block xflow.map / xflow.split unless the workflow
-	// opts into the unfinished body sub-graph implementation. See
-	// .claude/specs/expand-gate.md.
-	if !experimentalExpand {
-		var blocked []string
-		for _, nd := range def.Nodes {
-			if _, gated := experimentalExpandTypes[nd.Type]; gated {
-				blocked = append(blocked, fmt.Sprintf("%s (%s)", nd.Name, nd.Type))
-			}
-		}
-		if len(blocked) > 0 {
-			sort.Strings(blocked)
-			return nil, &ErrExperimentalExpandRequired{Nodes: blocked}
-		}
 	}
 
 	// Reject reserved "xflow.group_*" types in user-authored workflows. These
