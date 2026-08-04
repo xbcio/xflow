@@ -354,10 +354,11 @@ func compileTrusted(def *types.WorkflowDef) (*Graph, error) {
 	if err := validateGraphValueDomain(g); err != nil {
 		return nil, err
 	}
-	if err := buildEdges(def, g); err != nil {
+	depPorts, err := buildEdges(def, g)
+	if err != nil {
 		return nil, err
 	}
-	if err := buildDependencyEdges(def, g); err != nil {
+	if err := buildDependencyEdges(def, depPorts, g); err != nil {
 		return nil, err
 	}
 	if err := buildUnits(g); err != nil {

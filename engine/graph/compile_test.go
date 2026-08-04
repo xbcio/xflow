@@ -626,3 +626,115 @@ func TestCompileGraphMetadataIsStable(t *testing.T) {
 		}
 	}
 }
+
+// TestCompile_SupplyNodeInDataEdgeIsRejected asserts the compile error, not
+// the compile success -- the latter passes equally well when the guard has
+// silently gone dark.
+func TestCompile_SupplyNodeInDataEdgeIsRejected(t *testing.T) {
+	def := &types.WorkflowDef{
+		Name: "wf",
+		Nodes: []types.NodeDef{
+			{Name: "rules", Type: "xflow.supply.external", Kind: types.NodeKindSupply},
+			{Name: "consume", Type: "xflow.noop"},
+		},
+		Connections: types.Connections{
+			// No type given, so it's data -- a supply node must not emit a data edge.
+			"rules": {"main": {Targets: []types.Connection{{Node: "consume", Input: "main"}}}},
+		},
+	}
+	_, err := Compile(def)
+	if err == nil {
+		t.Fatal("supply node emitting a data edge must be rejected; " +
+			"if this passes, the unitOutEdges[-1] guard is gone")
+	}
+	if !errors.Is(err, ErrSupplyInDataflow) {
+		t.Errorf("err = %v, want ErrSupplyInDataflow", err)
+	}
+}
+
+// TestCompile_DependencyEdgeStaysOutOfTopology asserts the reverse: a
+// correctly-typed dependency edge from a supply must compile, and must not
+// enter outEdges/inDegree/PortOuts.
+func TestCompile_DependencyEdgeStaysOutOfTopology(t *testing.T) {
+	def := &types.WorkflowDef{
+		Name: "wf",
+		Nodes: []types.NodeDef{
+			{Name: "rules", Type: "xflow.supply.external", Kind: types.NodeKindSupply},
+			{Name: "consume", Type: "xflow.noop", Parameters: map[string]any{"r": "$supplies.rules"}},
+		},
+		Connections: types.Connections{
+			"rules": {"supply": {
+				Type:    types.ConnectionTypeDependency,
+				Targets: []types.Connection{{Node: "consume"}},
+			}},
+		},
+	}
+	g, err := Compile(def)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	supplyIdx := g.index["rules"]
+	consumerIdx := g.index["consume"]
+
+	if got := len(g.outEdges[supplyIdx]); got != 0 {
+		t.Errorf("dependency edge leaked into outEdges: %d entries", got)
+	}
+	if got := g.inDegree[consumerIdx]; got != 0 {
+		t.Errorf("dependency edge leaked into inDegree: %d; "+
+			"this would break detectCycle and buildUnits", got)
+	}
+	// PortOuts is "port names that have data outgoing edges" -- a supply port
+	// must not leak in.
+	if got := g.nodes[supplyIdx].PortOuts; len(got) != 0 {
+		t.Errorf("PortOuts = %v, want empty: a dependency port is not a data output port", got)
+	}
+	// Direction check: the consumer must find that it depends on rules.
+	if refs := g.SupplyRefsFor(consumerIdx); len(refs) != 1 || refs[0] != "rules" {
+		t.Errorf("SupplyRefsFor(consumer) = %v, want [rules]; "+
+			"the edge direction is inverted relative to the old DependencyEdge form", refs)
+	}
+}
+
+// TestCompile_ConnectionTypeMustMatchSourceKind checks both directions of the
+// type/Kind cross-validation.
+func TestCompile_ConnectionTypeMustMatchSourceKind(t *testing.T) {
+	t.Run("dependency type on a non-supply source", func(t *testing.T) {
+		def := &types.WorkflowDef{
+			Name: "wf",
+			Nodes: []types.NodeDef{
+				{Name: "a", Type: "xflow.noop"},
+				{Name: "b", Type: "xflow.noop"},
+			},
+			Connections: types.Connections{
+				"a": {"main": {
+					Type:    types.ConnectionTypeDependency,
+					Targets: []types.Connection{{Node: "b"}},
+				}},
+			},
+		}
+		if _, err := Compile(def); err == nil {
+			t.Error("dependency type on a non-supply source must be rejected")
+		}
+	})
+
+	t.Run("dependency target must not declare input", func(t *testing.T) {
+		def := &types.WorkflowDef{
+			Name: "wf",
+			Nodes: []types.NodeDef{
+				{Name: "rules", Type: "xflow.supply.external", Kind: types.NodeKindSupply},
+				{Name: "c", Type: "xflow.noop", Parameters: map[string]any{"r": "$supplies.rules"}},
+			},
+			Connections: types.Connections{
+				"rules": {"supply": {
+					Type: types.ConnectionTypeDependency,
+					// consumer reads via $supplies.x, there is no matching input port
+					Targets: []types.Connection{{Node: "c", Input: "main"}},
+				}},
+			},
+		}
+		if _, err := Compile(def); err == nil {
+			t.Error("a dependency target with a non-empty input must be rejected, not silently ignored")
+		}
+	})
+}

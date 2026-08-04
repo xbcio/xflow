@@ -119,10 +119,11 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 	if err := validateGraphValueDomain(g); err != nil {
 		return nil, err
 	}
-	if err := buildEdges(def, g); err != nil {
+	depPorts, err := buildEdges(def, g)
+	if err != nil {
 		return nil, err
 	}
-	if err := buildDependencyEdges(def, g); err != nil {
+	if err := buildDependencyEdges(def, depPorts, g); err != nil {
 		return nil, err
 	}
 	if err := compileGroups(g, def); err != nil {
@@ -196,18 +197,36 @@ func registerNodes(def *types.WorkflowDef, g *Graph) (int, error) {
 // buildEdges performs the second compile pass: it materializes Connections into
 // g.outEdges/g.inEdges/g.inDegree and records the distinct output port names
 // per source node on g.nodes[i].PortOuts.
-func buildEdges(def *types.WorkflowDef, g *Graph) error {
+//
+// Dependency-typed ports (PortConnections.Type == ConnectionTypeDependency) are
+// routed away from the dataflow topology entirely: they never enter outEdges,
+// inEdges, inDegree, or PortOuts. Mixing them in would corrupt detectCycle's
+// topological sort and buildUnits' in-degree accounting, since a dependency
+// edge carries no data and its source (a supply node) is deliberately excluded
+// from the unit layer (nodeUnit stays -1; see unit.go). They are instead
+// collected into the returned []dependencyPort for buildDependencyEdges to
+// consume.
+//
+// A supply node may never be the source or destination of a data edge: this
+// is what used to be checked by inspecting outEdges/inEdges for supply nodes
+// after compilation, but that check silently stops catching anything once
+// dependency routing (this function) empties those sets for supply nodes.
+// The check is enforced here instead, against the declared type while walking
+// def.Connections, before the dataflow structures are populated.
+func buildEdges(def *types.WorkflowDef, g *Graph) ([]dependencyPort, error) {
 	sources := make([]string, 0, len(def.Connections))
 	for srcName := range def.Connections {
 		sources = append(sources, srcName)
 	}
 	sort.Strings(sources)
 
+	var depPorts []dependencyPort
+
 	for _, srcName := range sources {
 		ports := def.Connections[srcName]
 		srcIdx, ok := g.index[srcName]
 		if !ok {
-			return fmt.Errorf("connection references unknown source node: %s", srcName)
+			return nil, fmt.Errorf("connection references unknown source node: %s", srcName)
 		}
 		portNames := make([]string, 0, len(ports))
 		for port := range ports {
@@ -217,11 +236,42 @@ func buildEdges(def *types.WorkflowDef, g *Graph) error {
 
 		portOuts := make([]string, 0, len(portNames))
 		for _, port := range portNames {
-			conns := ports[port].Targets
+			pc := ports[port]
+
+			if pc.Type == types.ConnectionTypeDependency {
+				// Declared type and node Kind cross-validate each other:
+				// neither side wins silently over the other.
+				if g.nodes[srcIdx].Kind != types.NodeKindSupply {
+					return nil, fmt.Errorf("node %q port %q declares type dependency but the node is not a supply node",
+						srcName, port)
+				}
+				for _, c := range pc.Targets {
+					if c.Input != "" {
+						return nil, fmt.Errorf("dependency edge %s -> %s must not declare an input: "+
+							"the consumer reads $supplies.%s and has no matching input port",
+							srcName, c.Node, srcName)
+					}
+				}
+				depPorts = append(depPorts, dependencyPort{srcName: srcName, targets: pc.Targets})
+				continue
+			}
+
+			// Data edge (Type == ConnectionTypeData, or unset which decodes/
+			// defaults to data): neither endpoint may be a supply node.
+			if g.nodes[srcIdx].Kind == types.NodeKindSupply {
+				return nil, fmt.Errorf("%w: supply node %q emits a data edge from port %q",
+					ErrSupplyInDataflow, srcName, port)
+			}
+
+			conns := pc.Targets
 			for _, c := range conns {
 				dstIdx, ok := g.index[c.Node]
 				if !ok {
-					return fmt.Errorf("connection references unknown destination node: %s", c.Node)
+					return nil, fmt.Errorf("connection references unknown destination node: %s", c.Node)
+				}
+				if g.nodes[dstIdx].Kind == types.NodeKindSupply {
+					return nil, fmt.Errorf("%w: supply node %q is the destination of a data edge from %s:%s",
+						ErrSupplyInDataflow, c.Node, srcName, port)
 				}
 				edge := Edge{
 					SrcIdx:  srcIdx,
@@ -239,7 +289,7 @@ func buildEdges(def *types.WorkflowDef, g *Graph) error {
 		}
 		g.nodes[srcIdx].PortOuts = portOuts
 	}
-	return nil
+	return depPorts, nil
 }
 
 // resolveRetry chooses the effective retry settings for a node: per-node

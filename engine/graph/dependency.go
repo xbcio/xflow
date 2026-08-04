@@ -15,13 +15,30 @@ import (
 // buildUnitEdges index unitOutEdges[-1] and panic.
 var ErrSupplyInDataflow = errors.New("supply node cannot participate in dataflow connections")
 
-// buildDependencyEdges materializes WorkflowDef.DependencyEdges into
-// g.supplyRefs (consumer nodeIdx -> sorted supply node names) and records the
-// supply nodes in g.supplyIndexes.
+// dependencyPort is one dependency-typed port collected by buildEdges: the
+// supply node's name and the consumers declared as its targets. srcName is
+// the supply, targets[].Node are the consumers -- the inverse of the legacy
+// top-level DependencyEdge{Node, Supply} shape, where Node is the consumer
+// declaring what it depends on.
+type dependencyPort struct {
+	srcName string
+	targets []types.Connection
+}
+
+// buildDependencyEdges materializes dependency edges into g.supplyRefs
+// (consumer nodeIdx -> sorted supply node names) and records the supply nodes
+// in g.supplyIndexes. Two sources feed the same internal refs structure so
+// behavior is identical either way:
+//   - depPorts: dependency-typed ports collected by buildEdges from
+//     def.Connections (the current, preferred form). Here the supply node is
+//     the source and its targets are the consumers.
+//   - def.DependencyEdges: the deprecated top-level form, where Node is the
+//     consumer declaring what it depends on (Supply) -- the reverse mapping.
 //
-// It runs after buildEdges so it can reject a supply node that also appears in
-// Connections, and before buildUnits so no invalid graph reaches the unit pass.
-func buildDependencyEdges(def *types.WorkflowDef, g *Graph) error {
+// It runs after buildEdges so buildEdges has already rejected any supply node
+// that also appears as an endpoint of a data edge (see ErrSupplyInDataflow),
+// and before buildUnits so no invalid graph reaches the unit pass.
+func buildDependencyEdges(def *types.WorkflowDef, depPorts []dependencyPort, g *Graph) error {
 	if g.supplyIndexes == nil {
 		g.supplyIndexes = map[string]int{}
 	}
@@ -29,17 +46,43 @@ func buildDependencyEdges(def *types.WorkflowDef, g *Graph) error {
 		if g.nodes[i].Kind != types.NodeKindSupply {
 			continue
 		}
-		if len(g.outEdges[i]) > 0 || len(g.inEdges[i]) > 0 {
-			return fmt.Errorf("%w: %s", ErrSupplyInDataflow, g.nodes[i].Name)
-		}
 		g.supplyIndexes[g.nodes[i].Name] = i
 	}
 
-	if len(def.DependencyEdges) == 0 {
+	if len(depPorts) == 0 && len(def.DependencyEdges) == 0 {
 		return validateSupplyUsage(g)
 	}
 
-	refs := make(map[int]map[string]struct{}, len(def.DependencyEdges))
+	refs := make(map[int]map[string]struct{}, len(depPorts)+len(def.DependencyEdges))
+
+	// New, port-level form: srcName is the supply, targets[].Node are the
+	// consumers -- the inverse of the legacy DependencyEdge{Node, Supply}
+	// mapping below.
+	for _, dp := range depPorts {
+		supplyIdx, ok := g.index[dp.srcName]
+		if !ok {
+			return fmt.Errorf("dependency edge references unknown supply node: %s", dp.srcName)
+		}
+		for _, t := range dp.targets {
+			consumerIdx, ok := g.index[t.Node]
+			if !ok {
+				return fmt.Errorf("dependency edge references unknown consumer node: %s", t.Node)
+			}
+			if g.nodes[consumerIdx].Kind == types.NodeKindSupply {
+				return fmt.Errorf("supply node may not depend on another supply: %s -> %s",
+					t.Node, dp.srcName)
+			}
+			if refs[consumerIdx] == nil {
+				refs[consumerIdx] = map[string]struct{}{}
+			}
+			refs[consumerIdx][dp.srcName] = struct{}{}
+		}
+		_ = supplyIdx
+	}
+
+	// Deprecated top-level form: e.Node is the consumer declaring what it
+	// depends on, e.Supply is the supply node -- normalized into the same
+	// refs structure so behavior matches the port-level form exactly.
 	for _, e := range def.DependencyEdges {
 		consumerIdx, ok := g.index[e.Node]
 		if !ok {
