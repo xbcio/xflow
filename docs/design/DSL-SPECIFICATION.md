@@ -1534,7 +1534,6 @@ connections:
   parameters:
     items: expression        # 数组表达式，每个元素依次绑定到 $item / $index
     batch_size: int          # 每批并发数量，默认 1（顺序执行）
-    max_concurrency: int     # 最大并发批次数
     continue_on_error: bool  # 单项失败是否继续
     body:                    # 循环体子图（自包含，与外层节点命名空间隔离）
       nodes:                 # 子图节点，语法与顶层 nodes 相同
@@ -1555,7 +1554,6 @@ nodes:
     parameters:
       items: "${{ $nodes['fetch'].items }}"
       batch_size: 10
-      max_concurrency: 3
       continue_on_error: true
       body:
         nodes:

@@ -38,9 +38,8 @@ func (n *SplitNode) Descriptor() types.Descriptor {
 			{Name: "batch_size", DisplayName: "Batch Size", Type: types.ParamNumber, Required: false, Description: "Items per batch (omit for one-item-per-execution)"},
 			{Name: "continue_on_error", DisplayName: "Continue On Error", Type: types.ParamBool, Required: false, Default: false, Description: "Continue splitting when a downstream branch fails"},
 		},
-		Inputs:       []types.PortSpec{{Name: "main", DisplayName: "Main"}},
-		Outputs:      []types.PortSpec{{Name: "main", DisplayName: "Main"}},
-		Capabilities: []string{types.CapBodySubgraphRequired},
+		Inputs:  []types.PortSpec{{Name: "main", DisplayName: "Main"}},
+		Outputs: []types.PortSpec{{Name: "main", DisplayName: "Main"}},
 	}
 }
 

@@ -39,13 +39,11 @@ func (n *MapNode) Descriptor() types.Descriptor {
 		Params: []types.ParamSpec{
 			{Name: "items", DisplayName: "Items", Type: types.ParamString, Required: true, Description: "Expression that evaluates to the array to iterate"},
 			{Name: "batch_size", DisplayName: "Batch Size", Type: types.ParamNumber, Required: false, Default: 1, Description: "Number of items processed per batch"},
-			{Name: "max_concurrency", DisplayName: "Max Concurrency", Type: types.ParamNumber, Required: false, Default: 1, Description: "Maximum concurrent executions of the sub-graph"},
 			{Name: "continue_on_error", DisplayName: "Continue On Error", Type: types.ParamBool, Required: false, Default: false, Description: "Continue iteration when a sub-graph execution fails"},
 			{Name: "body", DisplayName: "Body", Type: types.ParamObject, Required: true, Description: "Sub-graph definition executed for each item"},
 		},
-		Inputs:       []types.PortSpec{{Name: "main", DisplayName: "Main"}},
-		Outputs:      []types.PortSpec{{Name: "main", DisplayName: "Main"}, {Name: "error", DisplayName: "Error"}},
-		Capabilities: []string{types.CapBodySubgraphRequired},
+		Inputs:  []types.PortSpec{{Name: "main", DisplayName: "Main"}},
+		Outputs: []types.PortSpec{{Name: "main", DisplayName: "Main"}, {Name: "error", DisplayName: "Error"}},
 	}
 }
 
