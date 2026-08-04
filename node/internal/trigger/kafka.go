@@ -254,10 +254,9 @@ func (n *KafkaTriggerNode) RawParams() any {
 		// time — before we know whether the activation will be entry-seed. The
 		// runtime mode-aware default (1s for entry-seed vs 100ms for legacy) only
 		// takes effect on the YAML/JSON params path where flush_interval is absent
-		// from the map. Go DSL users who want the entry-seed default should pass
-		// defaultKafkaEntrySeedFlushInterval explicitly or omit the interval and let
-		// the params path handle it. Tracked as a known limitation rather than adding
-		// a "was-explicitly-set" flag to KafkaAggregateConfig.
+		// from the map. Go DSL users who want the entry-seed 1s default should pass
+		// time.Second explicitly. Tracked as a known limitation rather than adding a
+		// "was-explicitly-set" flag to KafkaAggregateConfig.
 		params["aggregate"] = map[string]any{
 			"enabled":        aggregate.Enabled,
 			"by":             aggregate.By,
@@ -1029,10 +1028,6 @@ func kafkaConfigFromParams(params map[string]any, supply map[string]any, entrySe
 	return cfg, nil
 }
 
-func kafkaAggregateConfigFromParam(v any) (KafkaAggregateConfig, error) {
-	return kafkaAggregateConfigFromParamForMode(v, false)
-}
-
 func kafkaAggregateConfigFromParamForMode(v any, entrySeed bool) (KafkaAggregateConfig, error) {
 	if v == nil {
 		return KafkaAggregateConfig{}, nil
@@ -1082,6 +1077,11 @@ func normalizeKafkaAggregateConfig(cfg KafkaAggregateConfig) KafkaAggregateConfi
 	if cfg.MaxSize <= 0 {
 		cfg.MaxSize = defaultKafkaAggregateMaxSize
 	}
+	// This fallback only fires on the Go DSL path (Aggregate/AggregateByPartition
+	// at construction time) where the mode is not yet known. The runtime params
+	// path sets mode-aware defaults before calling normalize, so this branch is
+	// unreachable there. Always falls back to the legacy 100ms — entry-seed mode
+	// is handled upstream by kafkaAggregateConfigFromParamForMode.
 	if cfg.FlushInterval <= 0 {
 		cfg.FlushInterval = defaultKafkaAggregateFlushInterval
 	}
