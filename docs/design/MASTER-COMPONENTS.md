@@ -917,7 +917,7 @@ const (
     NodeTypeDatabase     NodeType = "xflow.database"
     NodeTypeIF           NodeType = "xflow.if"
     NodeTypeSwitch       NodeType = "xflow.switch"
-    NodeTypeLoop         NodeType = "xflow.loop"
+    NodeTypeMap          NodeType = "xflow.map"
     NodeTypeWait         NodeType = "xflow.wait"
     NodeTypeMerge        NodeType = "xflow.merge"
     NodeTypeSplit        NodeType = "xflow.split"
