@@ -1662,7 +1662,7 @@ result: "${{ $nodes['final_merge'].status }}"
 
 `xflow.split` 与 `xflow.map` 使用同一个实验开关：未设置 `options.experimental_expand: true` 时会被编译期拒绝。
 
-将数组拆分为独立数据项，每项沿下游 connections 路径独立执行。与 `xflow.map` 的区别：loop 通过内嵌 `body` 子图定义迭代体，split 通过下游 connections 定义扇出路径，用 `xflow.merge` 汇合结果。
+将数组拆分为独立数据项，每项沿下游 connections 路径独立执行。与 `xflow.map` 的区别：map 通过内嵌 `body` 子图定义迭代体，split 通过下游 connections 定义扇出路径，用 `xflow.merge` 汇合结果。
 
 ```yaml
 - name: fan_out
