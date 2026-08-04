@@ -15,21 +15,21 @@ import (
 // group. It is the single source of truth for the group's entry input (not
 // TaskLease.Input which is nil for group tasks).
 type GroupLeasePayload struct {
-	ProtocolVersion int                  `json:"protocol_version"`
-	GroupExecID     string               `json:"group_exec_id"`
-	GroupID         string               `json:"group_id"`
-	GroupUnitIdx    int                   `json:"group_unit_idx"`
-	WorkflowVersion string               `json:"workflow_version"`
-	GraphHash       string               `json:"graph_hash"`
-	PackageHash     string               `json:"package_hash"`
-	Package         *graph.GroupPackage   `json:"package,omitempty"`
-	Input           *types.Input          `json:"input,omitempty"`
-	IdempotencyKey  string               `json:"idempotency_key"`
-	Deadline        time.Time            `json:"deadline,omitempty"`
+	ProtocolVersion int                    `json:"protocol_version"`
+	GroupExecID     string                 `json:"group_exec_id"`
+	GroupID         string                 `json:"group_id"`
+	GroupUnitIdx    int                    `json:"group_unit_idx"`
+	WorkflowVersion string                 `json:"workflow_version"`
+	GraphHash       string                 `json:"graph_hash"`
+	PackageHash     string                 `json:"package_hash"`
+	Package         *graph.SubgraphPackage `json:"package,omitempty"`
+	Input           *types.Input           `json:"input,omitempty"`
+	IdempotencyKey  string                 `json:"idempotency_key"`
+	Deadline        time.Time              `json:"deadline,omitempty"`
 	// SignalJournal carries the full signal history for resume replay.
 	SignalJournal []GroupSignal `json:"signal_journal,omitempty"`
 	// TaskType distinguishes initial group exec from resume.
-	TaskType     TaskType      `json:"task_type,omitempty"`
+	TaskType TaskType `json:"task_type,omitempty"`
 }
 
 // ErrGroupLeaseAlreadyActive is returned when BuildGroupLease cannot acquire
@@ -41,7 +41,7 @@ var ErrGroupLeaseAlreadyActive = errors.New("group lease already active")
 var ErrGroupSuspendNotSupported = errors.New("group suspend not supported in this milestone")
 
 // BuildGroupLease assembles a group lease for a queued group task. Unlike
-// BuildTaskLease, the lease payload carries the full GroupPackage and entry
+// BuildTaskLease, the lease payload carries the full SubgraphPackage and entry
 // input, and TaskLease.Input is nil (the group payload is authoritative).
 func (e *Engine) BuildGroupLease(ctx context.Context, t *Task) (*TaskLease, *GroupLeasePayload, error) {
 	if t == nil {
@@ -63,7 +63,7 @@ func (e *Engine) BuildGroupLease(ctx context.Context, t *Task) (*TaskLease, *Gro
 	gm := g.GroupMetaAt(t.UnitIdx)
 
 	// Project the group package for the runner.
-	pkg, pkgHash, err := graph.ProjectGroupPackage(g, t.UnitIdx)
+	pkg, pkgHash, err := graph.ProjectSubgraphPackage(g, t.UnitIdx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("project group package: %w", err)
 	}
@@ -178,7 +178,7 @@ func (e *Engine) RecoverGroupLease(ctx context.Context, execID types.ExecutionID
 	}
 
 	gm := g.GroupMetaAt(unitIdx)
-	pkg, pkgHash, err := graph.ProjectGroupPackage(g, unitIdx)
+	pkg, pkgHash, err := graph.ProjectSubgraphPackage(g, unitIdx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("project group package for recovery: %w", err)
 	}

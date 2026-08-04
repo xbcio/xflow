@@ -83,7 +83,7 @@ func TestDeriveEntryActivations_ProjectionFailurePropagates(t *testing.T) {
 
 	sentinel := errors.New("boom: cannot project package")
 	orig := projectGroupPackage
-	projectGroupPackage = func(*graph.Graph, int) (*graph.GroupPackage, string, error) {
+	projectGroupPackage = func(*graph.Graph, int) (*graph.SubgraphPackage, string, error) {
 		return nil, "", sentinel
 	}
 	defer func() { projectGroupPackage = orig }()
@@ -111,7 +111,7 @@ func TestAddOrUpdateWorkflow_ProjectionFailureStoresNothing(t *testing.T) {
 
 	sentinel := errors.New("boom: cannot project package")
 	orig := projectGroupPackage
-	projectGroupPackage = func(*graph.Graph, int) (*graph.GroupPackage, string, error) {
+	projectGroupPackage = func(*graph.Graph, int) (*graph.SubgraphPackage, string, error) {
 		return nil, "", sentinel
 	}
 	defer func() { projectGroupPackage = orig }()

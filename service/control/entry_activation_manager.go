@@ -74,10 +74,10 @@ type EntryUnitActivation struct {
 	Supplies     []engine.SupplyRequirement
 }
 
-// projectGroupPackage indirects graph.ProjectGroupPackage so the derivation's
+// projectGroupPackage indirects graph.ProjectSubgraphPackage so the derivation's
 // fail-closed error path can be exercised in tests. Production always uses the
 // real projection.
-var projectGroupPackage = graph.ProjectGroupPackage
+var projectGroupPackage = graph.ProjectSubgraphPackage
 
 // SuppliesForEntryUnit collects the supply requirements of one entry unit: for
 // every node reachable from the entry unit in the flow graph, the supplies its

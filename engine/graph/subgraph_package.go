@@ -13,7 +13,7 @@ import (
 const (
 	NodeTypeGroupExit      = "xflow.group_exit"
 	ReservedNodeTypePrefix = "xflow.group_"
-	GroupPackageVersion    = 1
+	SubgraphPackageVersion = 1
 	packageHashPrefix      = "pkg-sha256:v1:"
 )
 
@@ -37,25 +37,25 @@ type GroupArtifact struct {
 	Size     int    `json:"size,omitempty"`
 }
 
-// GroupPackageExit describes a boundary output edge with a collector node.
-type GroupPackageExit struct {
+// SubgraphPackageExit describes a boundary output edge with a collector node.
+type SubgraphPackageExit struct {
 	CollectorNode string `json:"collector_node"`
 	SrcNode       string `json:"src_node"`
 	Port          string `json:"port"`
 }
 
-// GroupPackage is the deterministic projection of a co-location group into a
+// SubgraphPackage is the deterministic projection of a co-location group into a
 // self-contained package descriptor. It captures the group's member topology,
 // boundary outputs, and requirements so that a runner can compile and execute
 // the internal mini-graph independently.
-type GroupPackage struct {
-	Version      int                `json:"version"`
-	GroupName    string             `json:"group_name"`
-	EntryNode    string             `json:"entry_node"`
-	Def          *types.WorkflowDef `json:"def"`
-	Exits        []GroupPackageExit `json:"exits"`
-	Artifacts    []GroupArtifact    `json:"artifacts,omitempty"`
-	Requirements []Requirement      `json:"requirements"`
+type SubgraphPackage struct {
+	Version      int                   `json:"version"`
+	GroupName    string                `json:"group_name"`
+	EntryNode    string                `json:"entry_node"`
+	Def          *types.WorkflowDef    `json:"def"`
+	Exits        []SubgraphPackageExit `json:"exits"`
+	Artifacts    []GroupArtifact       `json:"artifacts,omitempty"`
+	Requirements []Requirement         `json:"requirements"`
 	// VisibleSupplies is the sorted set of supply node names the members may read
 	// through $supplies.<name>. Only the names travel: the content is fetched by
 	// the runner at activation time and deliberately stays out of the package, so
@@ -63,10 +63,10 @@ type GroupPackage struct {
 	VisibleSupplies []string `json:"visible_supplies,omitempty"`
 }
 
-// ProjectGroupPackage projects a deterministic GroupPackage from a compiled
+// ProjectSubgraphPackage projects a deterministic SubgraphPackage from a compiled
 // Graph at the given unitIdx. The unitIdx must reference a UnitGroup unit.
 // Returns the package, its canonical hash, and any error.
-func ProjectGroupPackage(g *Graph, unitIdx int) (*GroupPackage, string, error) {
+func ProjectSubgraphPackage(g *Graph, unitIdx int) (*SubgraphPackage, string, error) {
 	if unitIdx < 0 || unitIdx >= len(g.units) {
 		return nil, "", fmt.Errorf("unit index %d out of range [0, %d)", unitIdx, len(g.units))
 	}
@@ -112,7 +112,7 @@ func ProjectGroupPackage(g *Graph, unitIdx int) (*GroupPackage, string, error) {
 		nodes = append(nodes, types.NodeDef{
 			Name:    exit.CollectorNode,
 			Type:    NodeTypeGroupExit,
-			Version: GroupPackageVersion,
+			Version: SubgraphPackageVersion,
 		})
 	}
 
@@ -144,8 +144,8 @@ func ProjectGroupPackage(g *Graph, unitIdx int) (*GroupPackage, string, error) {
 	// never enter the package.
 	visibleSupplies := buildVisibleSupplies(g, memberSet)
 
-	pkg := &GroupPackage{
-		Version:         GroupPackageVersion,
+	pkg := &SubgraphPackage{
+		Version:         SubgraphPackageVersion,
 		GroupName:       gm.Name,
 		EntryNode:       g.nodes[gm.EntryIdx].Name,
 		Def:             def,
@@ -162,13 +162,13 @@ func ProjectGroupPackage(g *Graph, unitIdx int) (*GroupPackage, string, error) {
 	return pkg, hash, nil
 }
 
-func buildGroupExits(g *Graph, gm *GroupMeta, _ map[int]bool) []GroupPackageExit {
+func buildGroupExits(g *Graph, gm *GroupMeta, _ map[int]bool) []SubgraphPackageExit {
 	type exitKey struct {
 		srcNode string
 		port    string
 	}
 	seen := map[exitKey]bool{}
-	var exits []GroupPackageExit
+	var exits []SubgraphPackageExit
 
 	for _, be := range gm.BoundaryOutputs {
 		srcName := g.nodes[be.Src.NodeIdx].Name
@@ -178,7 +178,7 @@ func buildGroupExits(g *Graph, gm *GroupMeta, _ map[int]bool) []GroupPackageExit
 		}
 		seen[k] = true
 		collectorName := fmt.Sprintf("__collector_%s_%s", srcName, be.Src.Port)
-		exits = append(exits, GroupPackageExit{
+		exits = append(exits, SubgraphPackageExit{
 			CollectorNode: collectorName,
 			SrcNode:       srcName,
 			Port:          be.Src.Port,
@@ -194,7 +194,7 @@ func buildGroupExits(g *Graph, gm *GroupMeta, _ map[int]bool) []GroupPackageExit
 	return exits
 }
 
-func buildPackageConnections(g *Graph, memberSet map[int]bool, exits []GroupPackageExit) types.Connections {
+func buildPackageConnections(g *Graph, memberSet map[int]bool, exits []SubgraphPackageExit) types.Connections {
 	conns := make(types.Connections)
 
 	// Internal edges between members.
@@ -311,8 +311,8 @@ func buildPackageRequirements(g *Graph, memberSet map[int]bool) []Requirement {
 	return reqs
 }
 
-// ComputePackageHash computes the canonical SHA-256 hash of a GroupPackage.
-func ComputePackageHash(pkg *GroupPackage) (string, error) {
+// ComputePackageHash computes the canonical SHA-256 hash of a SubgraphPackage.
+func ComputePackageHash(pkg *SubgraphPackage) (string, error) {
 	data, err := json.Marshal(pkg)
 	if err != nil {
 		return "", err
@@ -325,7 +325,7 @@ func ComputePackageHash(pkg *GroupPackage) (string, error) {
 // packages. Unlike Compile, it permits reserved "xflow.group_*" node types
 // (e.g. xflow.group_exit collectors). User-authored WorkflowDefs must use
 // Compile which rejects these types.
-func CompileProjectedPackage(pkg *GroupPackage) (*Graph, error) {
+func CompileProjectedPackage(pkg *SubgraphPackage) (*Graph, error) {
 	if pkg == nil {
 		return nil, fmt.Errorf("nil group package")
 	}
@@ -420,7 +420,7 @@ func assignPackageHashes(g *Graph) error {
 		if gm.PackageHash != "" {
 			continue
 		}
-		_, hash, err := ProjectGroupPackage(g, gm.UnitIdx)
+		_, hash, err := ProjectSubgraphPackage(g, gm.UnitIdx)
 		if err != nil {
 			return fmt.Errorf("group %q: %w", gm.Name, err)
 		}

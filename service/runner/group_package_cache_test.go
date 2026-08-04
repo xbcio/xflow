@@ -36,7 +36,7 @@ func validInventory() *fakeInventory {
 
 func testPayload(t *testing.T) *engine.GroupLeasePayload {
 	t.Helper()
-	pkg := &graph.GroupPackage{
+	pkg := &graph.SubgraphPackage{
 		Version:   1,
 		GroupName: "g",
 		EntryNode: "src",
@@ -50,7 +50,7 @@ func testPayload(t *testing.T) *engine.GroupLeasePayload {
 				"src": {"main": types.PortConnections{Targets: []types.Connection{{Node: "__collector_src_main"}}}},
 			},
 		},
-		Exits: []graph.GroupPackageExit{
+		Exits: []graph.SubgraphPackageExit{
 			{CollectorNode: "__collector_src_main", SrcNode: "src", Port: "main"},
 		},
 		Requirements: []graph.Requirement{
