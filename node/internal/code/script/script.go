@@ -206,6 +206,39 @@ func (n *ScriptNode) Execute(ctx context.Context, input *types.Input) (*types.Ou
 		defer cancel()
 	}
 
+	// Batch path: a Kafka batch trigger delivers {messages: [...], count: N}.
+	// Detected by shape rather than a parameter so the same script node works on
+	// both the batch and single-message trigger paths without reconfiguration.
+	if records, ok := batchRecords(input.Data); ok {
+		var results []any
+		var batchErr error
+		if be, hasBatch := eng.(engine.BatchEngine); hasBatch {
+			results, batchErr = be.ExecuteBatch(ctx, code, records, globals)
+		} else {
+			results, batchErr = engine.ExecuteBatchSerial(ctx, eng, code, records, globals)
+		}
+		if batchErr != nil {
+			observeExecute(ctx, language, runtime, "error", time.Since(start))
+			if ctx.Err() != nil {
+				return nil, types.NewTransientError("script.timeout", batchErr.Error())
+			}
+			return &types.Output{Data: map[string]any{"error": batchErr.Error()}, Port: "error"}, nil
+		}
+		data := map[string]any{
+			"results":   results,
+			"count":     len(results),
+			"hit_count": countHits(results),
+		}
+		b, sizeErr := checkResultSize(data)
+		if sizeErr != nil {
+			observeExecute(ctx, language, runtime, "error", time.Since(start))
+			return &types.Output{Data: map[string]any{"error": sizeErr.Error()}, Port: "error"}, nil
+		}
+		observeOutputBytes(ctx, language, runtime, len(b))
+		observeExecute(ctx, language, runtime, "main", time.Since(start))
+		return &types.Output{Data: data, Port: "main"}, nil
+	}
+
 	result, err := eng.Execute(ctx, code, globals, engine.DefaultHelpers())
 	if err != nil {
 		observeExecute(ctx, language, runtime, "error", time.Since(start))
@@ -346,3 +379,52 @@ func paramsWithoutCode(params map[string]any) map[string]any {
 }
 
 func init() { registry.Register(&ScriptNode{}) }
+
+// batchRecords extracts the message list from a Kafka batch trigger's data.
+// Returns ok=false for single-message input so that path is untouched.
+func batchRecords(data map[string]any) ([]any, bool) {
+	if data == nil {
+		return nil, false
+	}
+	raw, has := data["messages"]
+	if !has {
+		return nil, false
+	}
+	switch list := raw.(type) {
+	case []any:
+		return list, true
+	case []map[string]any:
+		out := make([]any, 0, len(list))
+		for _, m := range list {
+			out = append(out, m)
+		}
+		return out, true
+	default:
+		return nil, false
+	}
+}
+
+// countHits counts results whose "tags" is a non-empty list. Only hits travel
+// downstream to SAS, so this is the number that matters for the hit-rate metric:
+// a rule set that stops matching anything is otherwise indistinguishable from an
+// idle topic.
+func countHits(results []any) int {
+	n := 0
+	for _, r := range results {
+		m, ok := r.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch tags := m["tags"].(type) {
+		case []any:
+			if len(tags) > 0 {
+				n++
+			}
+		case []string:
+			if len(tags) > 0 {
+				n++
+			}
+		}
+	}
+	return n
+}

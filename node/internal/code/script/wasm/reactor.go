@@ -310,21 +310,7 @@ func (f *reactorFacade) ExecuteBatch(ctx context.Context, code string, records [
 	}
 	out := make([]any, 0, len(records))
 	for _, rec := range records {
-		perRecord := make(map[string]any, len(globals)+1)
-		for k, v := range globals {
-			perRecord[k] = v
-		}
-		perRecord["$input"] = rec
-		if m, ok := rec.(map[string]any); ok {
-			for k, v := range m {
-				if len(k) > 0 && k[0] == '$' {
-					// A record field must never shadow an engine root: that is
-					// exactly the collision isEngineRoot relies on being impossible.
-					continue
-				}
-				perRecord[k] = v
-			}
-		}
+		perRecord := engine.BuildRecordGlobals(globals, rec)
 		res, err := f.Execute(ctx, code, perRecord, engine.DefaultHelpers())
 		if err != nil {
 			if isBatchSkippable(err) {
