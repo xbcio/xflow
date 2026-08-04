@@ -27,7 +27,7 @@ func singleGroupGraph(t *testing.T) *graph.Graph {
 			{Name: "ingest", Kind: types.NodeKindTrigger},
 			{Name: "analyze", Kind: types.NodeKindAction},
 		},
-		Connections: types.Connections{"ingest": {"main": {{Node: "analyze", Input: "main"}}}},
+		Connections: types.Connections{"ingest": {"main": {Targets: []types.Connection{{Node: "analyze", Input: "main"}}}}},
 		Groups:      []types.GroupDef{{Name: "edge", Members: []string{"ingest", "analyze"}}},
 	})
 	if err != nil {
@@ -47,8 +47,8 @@ func twoUnitGraph(t *testing.T) *graph.Graph {
 			{Name: "store", Kind: types.NodeKindAction},
 		},
 		Connections: types.Connections{
-			"ingest":  {"main": {{Node: "analyze", Input: "main"}}},
-			"analyze": {"main": {{Node: "store", Input: "main"}}},
+			"ingest":  {"main": {Targets: []types.Connection{{Node: "analyze", Input: "main"}}}},
+			"analyze": {"main": {Targets: []types.Connection{{Node: "store", Input: "main"}}}},
 		},
 		Groups: []types.GroupDef{{Name: "edge", Members: []string{"ingest", "analyze"}}},
 	})

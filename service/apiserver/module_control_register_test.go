@@ -172,7 +172,7 @@ func triggerWorkflow() *types.WorkflowDef {
 			},
 			{Name: "work", Type: "http.request", Version: 1, Kind: types.NodeKindAction},
 		},
-		Connections: types.Connections{"trig": {"main": {{Node: "work", Input: "main"}}}},
+		Connections: types.Connections{"trig": {"main": types.PortConnections{Targets: []types.Connection{{Node: "work", Input: "main"}}}}},
 	}
 }
 

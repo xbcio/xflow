@@ -16,7 +16,7 @@ func TestEntryUnitIndexRejectsSupplyNode(t *testing.T) {
 			{Name: "clean", Type: "xflow.code.script"},
 		},
 		Connections: types.Connections{
-			"start": {"main": []types.Connection{{Node: "clean", Input: "main"}}},
+			"start": {"main": types.PortConnections{Targets: []types.Connection{{Node: "clean", Input: "main"}}}},
 		},
 		DependencyEdges: []types.DependencyEdge{{Node: "clean", Supply: "rules"}},
 	})

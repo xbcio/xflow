@@ -16,8 +16,8 @@ func TestCompile_LinearChain(t *testing.T) {
 			{Name: "C", Type: "test.c"},
 		},
 		Connections: types.Connections{
-			"A": {"main": []types.Connection{{Node: "B", Input: "main"}}},
-			"B": {"main": []types.Connection{{Node: "C", Input: "main"}}},
+			"A": {"main": {Targets: []types.Connection{{Node: "B", Input: "main"}}}},
+			"B": {"main": {Targets: []types.Connection{{Node: "C", Input: "main"}}}},
 		},
 	}
 
@@ -48,8 +48,8 @@ func TestCompile_CycleDetection(t *testing.T) {
 			{Name: "B", Type: "test.b"},
 		},
 		Connections: types.Connections{
-			"A": {"main": []types.Connection{{Node: "B", Input: "main"}}},
-			"B": {"main": []types.Connection{{Node: "A", Input: "main"}}},
+			"A": {"main": {Targets: []types.Connection{{Node: "B", Input: "main"}}}},
+			"B": {"main": {Targets: []types.Connection{{Node: "A", Input: "main"}}}},
 		},
 	}
 
@@ -68,8 +68,8 @@ func TestCompile_AllowCyclesAllowsCycleWithStart(t *testing.T) {
 			{Name: "review", Type: "test.review"},
 		},
 		Connections: types.Connections{
-			"start":  {"main": []types.Connection{{Node: "review", Input: "main"}}},
-			"review": {"reject": []types.Connection{{Node: "start", Input: "main"}}},
+			"start":  {"main": {Targets: []types.Connection{{Node: "review", Input: "main"}}}},
+			"review": {"reject": {Targets: []types.Connection{{Node: "start", Input: "main"}}}},
 		},
 	}
 
@@ -97,8 +97,8 @@ func TestCompileCollectsStartAndTriggerEntries(t *testing.T) {
 			{Name: "work", Type: "test.work"},
 		},
 		Connections: types.Connections{
-			"start": {"main": []types.Connection{{Node: "work", Input: "main"}}},
-			"cron":  {"main": []types.Connection{{Node: "work", Input: "main"}}},
+			"start": {"main": {Targets: []types.Connection{{Node: "work", Input: "main"}}}},
+			"cron":  {"main": {Targets: []types.Connection{{Node: "work", Input: "main"}}}},
 		},
 	}
 	g, err := Compile(def)
@@ -131,7 +131,7 @@ func TestCompileResolvesRunnerSelectors(t *testing.T) {
 			},
 		},
 		Connections: types.Connections{
-			"start": {"main": {{Node: "scan", Input: "main"}}},
+			"start": {"main": {Targets: []types.Connection{{Node: "scan", Input: "main"}}}},
 		},
 	}
 
@@ -272,8 +272,8 @@ func TestCompile_AllowCyclesRejectsWaitAllMerge(t *testing.T) {
 			{Name: "join", Type: "xflow.merge", Parameters: map[string]any{"mode": "wait_all"}},
 		},
 		Connections: types.Connections{
-			"start": {"main": []types.Connection{{Node: "join", Input: "main"}}},
-			"join":  {"main": []types.Connection{{Node: "start", Input: "main"}}},
+			"start": {"main": {Targets: []types.Connection{{Node: "join", Input: "main"}}}},
+			"join":  {"main": {Targets: []types.Connection{{Node: "start", Input: "main"}}}},
 		},
 	}
 
@@ -292,12 +292,12 @@ func TestCompile_FanOutFanIn(t *testing.T) {
 			{Name: "join", Type: "test.join"},
 		},
 		Connections: types.Connections{
-			"start": {"main": []types.Connection{
+			"start": {"main": {Targets: []types.Connection{
 				{Node: "left", Input: "main"},
 				{Node: "right", Input: "main"},
-			}},
-			"left":  {"main": []types.Connection{{Node: "join", Input: "main"}}},
-			"right": {"main": []types.Connection{{Node: "join", Input: "main"}}},
+			}}},
+			"left":  {"main": {Targets: []types.Connection{{Node: "join", Input: "main"}}}},
+			"right": {"main": {Targets: []types.Connection{{Node: "join", Input: "main"}}}},
 		},
 	}
 
@@ -322,8 +322,8 @@ func TestCompile_PortRouting(t *testing.T) {
 		},
 		Connections: types.Connections{
 			"check": {
-				"main":  []types.Connection{{Node: "ok", Input: "main"}},
-				"error": []types.Connection{{Node: "fail", Input: "main"}},
+				"main":  {Targets: []types.Connection{{Node: "ok", Input: "main"}}},
+				"error": {Targets: []types.Connection{{Node: "fail", Input: "main"}}},
 			},
 		},
 	}
@@ -366,7 +366,7 @@ func TestCompile_UnknownConnectionNode(t *testing.T) {
 			{Name: "A", Type: "test.a"},
 		},
 		Connections: types.Connections{
-			"A": {"main": []types.Connection{{Node: "Z", Input: "main"}}},
+			"A": {"main": {Targets: []types.Connection{{Node: "Z", Input: "main"}}}},
 		},
 	}
 	_, err := Compile(def)
@@ -392,7 +392,7 @@ func TestCompile_BlocksExperimentalExpandByDefault(t *testing.T) {
 					{Name: "next", Type: "test.echo"},
 				},
 				Connections: types.Connections{
-					"iter": {"main": []types.Connection{{Node: "next", Input: "main"}}},
+					"iter": {"main": {Targets: []types.Connection{{Node: "next", Input: "main"}}}},
 				},
 			}
 			_, err := Compile(def)
@@ -419,7 +419,7 @@ func TestCompile_AllowsExperimentalExpandWhenOptedIn(t *testing.T) {
 			{Name: "next", Type: "test.echo"},
 		},
 		Connections: types.Connections{
-			"iter": {"main": []types.Connection{{Node: "next", Input: "main"}}},
+			"iter": {"main": {Targets: []types.Connection{{Node: "next", Input: "main"}}}},
 		},
 	}
 	if _, err := Compile(def); err != nil {
@@ -488,7 +488,7 @@ func TestCompileSnapshotsMutableDefinition(t *testing.T) {
 			},
 		},
 		Connections: types.Connections{
-			"start": {"main": []types.Connection{{Node: "worker", Input: "main"}}},
+			"start": {"main": {Targets: []types.Connection{{Node: "worker", Input: "main"}}}},
 		},
 	}
 
@@ -594,11 +594,11 @@ func TestCompileGraphMetadataIsStable(t *testing.T) {
 		},
 		Connections: types.Connections{
 			"start": {
-				"second": []types.Connection{{Node: "right", Input: "main"}},
-				"first":  []types.Connection{{Node: "left", Input: "main"}},
+				"second": {Targets: []types.Connection{{Node: "right", Input: "main"}}},
+				"first":  {Targets: []types.Connection{{Node: "left", Input: "main"}}},
 			},
-			"left":  {"main": []types.Connection{{Node: "join", Input: "main"}}},
-			"right": {"main": []types.Connection{{Node: "join", Input: "main"}}},
+			"left":  {"main": {Targets: []types.Connection{{Node: "join", Input: "main"}}}},
+			"right": {"main": {Targets: []types.Connection{{Node: "join", Input: "main"}}}},
 		},
 	}
 

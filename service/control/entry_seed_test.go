@@ -19,7 +19,7 @@ func entrySeedTestGraph(t *testing.T) *graph.Graph {
 			{Name: "entry", Kind: types.NodeKindTrigger},
 			{Name: "body", Kind: types.NodeKindAction},
 		},
-		Connections: types.Connections{"entry": {"main": {{Node: "body", Input: "main"}}}},
+		Connections: types.Connections{"entry": {"main": types.PortConnections{Targets: []types.Connection{{Node: "body", Input: "main"}}}}},
 		Groups:      []types.GroupDef{{Name: "tg", Members: []string{"entry", "body"}}},
 	})
 	if err != nil {

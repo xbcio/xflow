@@ -170,7 +170,7 @@ func workflowRegistryTestRecord(t *testing.T, nameSuffix, hash string) backend.W
 		},
 		Connections: types.Connections{
 			"start": {
-				"main": {{Node: "review", Input: "main"}},
+				"main": types.PortConnections{Targets: []types.Connection{{Node: "review", Input: "main"}}},
 			},
 		},
 	}

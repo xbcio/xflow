@@ -33,7 +33,7 @@ func benchGraph(b *testing.B) *Graph {
 			},
 		},
 		Connections: types.Connections{
-			"start": {"main": []types.Connection{{Node: "worker", Input: "main"}}},
+			"start": {"main": {Targets: []types.Connection{{Node: "worker", Input: "main"}}}},
 		},
 	}
 	g, err := Compile(def)

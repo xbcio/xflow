@@ -24,7 +24,7 @@ func entrySeedResolveDef() *types.WorkflowDef {
 			{Name: "trig", Kind: types.NodeKindTrigger},
 			{Name: "down", Kind: types.NodeKindAction},
 		},
-		Connections: types.Connections{"trig": {"main": {{Node: "down", Input: "main"}}}},
+		Connections: types.Connections{"trig": {"main": types.PortConnections{Targets: []types.Connection{{Node: "down", Input: "main"}}}}},
 	}
 }
 

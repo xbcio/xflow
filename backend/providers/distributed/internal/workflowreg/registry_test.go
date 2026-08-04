@@ -43,7 +43,7 @@ func testRecord(t *testing.T, nameSuffix, hash string) backend.WorkflowRecord {
 			{Name: "review", Type: "xflow.function"},
 		},
 		Connections: types.Connections{
-			"start": {"main": {{Node: "review", Input: "main"}}},
+			"start": {"main": types.PortConnections{Targets: []types.Connection{{Node: "review", Input: "main"}}}},
 		},
 	}
 	g, err := graph.Compile(def)

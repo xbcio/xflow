@@ -27,9 +27,9 @@ func makeGroupedDef() *types.WorkflowDef {
 			{Name: "grp1", Members: []string{"A", "B", "C"}},
 		},
 		Connections: types.Connections{
-			"A": {"main": []types.Connection{{Node: "B", Input: "main"}}},
-			"B": {"main": []types.Connection{{Node: "C", Input: "main"}}},
-			"C": {"result": []types.Connection{{Node: "D", Input: "main"}}},
+			"A": {"main": {Targets: []types.Connection{{Node: "B", Input: "main"}}}},
+			"B": {"main": {Targets: []types.Connection{{Node: "C", Input: "main"}}}},
+			"C": {"result": {Targets: []types.Connection{{Node: "D", Input: "main"}}}},
 		},
 	}
 }
@@ -241,7 +241,7 @@ func TestProjectGroupPackage_ExitSetChangeAffectsHash(t *testing.T) {
 
 	// Add second boundary output: B:extra goes to D.
 	def2 := makeGroupedDef()
-	def2.Connections["B"]["extra"] = []types.Connection{{Node: "D", Input: "aux"}}
+	def2.Connections["B"]["extra"] = types.PortConnections{Targets: []types.Connection{{Node: "D", Input: "aux"}}}
 	g2, err := Compile(def2)
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
@@ -335,7 +335,7 @@ func TestCompile_RejectsReservedTypes(t *testing.T) {
 			{Name: "normal", Type: "http.request", Version: 1},
 		},
 		Connections: types.Connections{
-			"fake": {"main": []types.Connection{{Node: "normal", Input: "main"}}},
+			"fake": {"main": {Targets: []types.Connection{{Node: "normal", Input: "main"}}}},
 		},
 	}
 	_, err := Compile(def)

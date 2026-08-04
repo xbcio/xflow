@@ -20,9 +20,9 @@ func TestScheduler_MergeWaitAny_TriggersOnFirstActive(t *testing.T) {
 			{Name: "done", Type: "test.echo"},
 		},
 		Connections: types.Connections{
-			"A":     {"main": []types.Connection{{Node: "merge", Input: "main"}}},
-			"B":     {"main": []types.Connection{{Node: "merge", Input: "main"}}},
-			"merge": {"main": []types.Connection{{Node: "done", Input: "main"}}},
+			"A":     {"main": {Targets: []types.Connection{{Node: "merge", Input: "main"}}}},
+			"B":     {"main": {Targets: []types.Connection{{Node: "merge", Input: "main"}}}},
+			"merge": {"main": {Targets: []types.Connection{{Node: "done", Input: "main"}}}},
 		},
 	}
 
@@ -91,8 +91,8 @@ func TestScheduler_MergeWaitAll_WaitsForAll(t *testing.T) {
 			{Name: "merge", Type: "xflow.merge", Parameters: map[string]any{"mode": "wait_all"}},
 		},
 		Connections: types.Connections{
-			"A": {"main": []types.Connection{{Node: "merge", Input: "main"}}},
-			"B": {"main": []types.Connection{{Node: "merge", Input: "main"}}},
+			"A": {"main": {Targets: []types.Connection{{Node: "merge", Input: "main"}}}},
+			"B": {"main": {Targets: []types.Connection{{Node: "merge", Input: "main"}}}},
 		},
 	}
 
@@ -182,7 +182,7 @@ func TestScheduler_LoopExpansion_CreatesSubExecutions(t *testing.T) {
 			{Name: "done", Type: "test.echo"},
 		},
 		Connections: types.Connections{
-			"loop": {"main": []types.Connection{{Node: "done", Input: "main"}}},
+			"loop": {"main": {Targets: []types.Connection{{Node: "done", Input: "main"}}}},
 		},
 	}
 

@@ -28,8 +28,8 @@ func buildTriggerGroupGraph(tb testing.TB) *graph.Graph {
 			{Name: "out", Type: "test.action", Kind: types.NodeKindAction},
 		},
 		Connections: types.Connections{
-			"g.source": {"main": {{Node: "g.sink", Input: "main"}}},
-			"g.sink":   {"main": {{Node: "out", Input: "main"}}},
+			"g.source": {"main": types.PortConnections{Targets: []types.Connection{{Node: "g.sink", Input: "main"}}}},
+			"g.sink":   {"main": types.PortConnections{Targets: []types.Connection{{Node: "out", Input: "main"}}}},
 		},
 		Groups: []types.GroupDef{{Name: "g", Members: []string{"g.source", "g.sink"}}},
 	})

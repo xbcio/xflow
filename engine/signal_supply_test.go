@@ -18,7 +18,7 @@ func supplyGraphForSignal(t *testing.T) *graph.Graph {
 			{Name: "clean", Type: "xflow.code.script"},
 		},
 		Connections: types.Connections{
-			"start": {"main": []types.Connection{{Node: "clean", Input: "main"}}},
+			"start": {"main": {Targets: []types.Connection{{Node: "clean", Input: "main"}}}},
 		},
 		DependencyEdges: []types.DependencyEdge{{Node: "clean", Supply: "rules"}},
 	})

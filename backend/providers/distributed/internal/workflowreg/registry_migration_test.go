@@ -30,7 +30,7 @@ func TestUnmarshalWorkflowRecordFallsBackToDefinitionWhenGraphFailsClosed(t *tes
 			{Name: "next", Type: "test.next"},
 		},
 		Connections: types.Connections{
-			"start": {"main": {{Node: "next", Input: "main"}}},
+			"start": {"main": types.PortConnections{Targets: []types.Connection{{Node: "next", Input: "main"}}}},
 		},
 	}
 

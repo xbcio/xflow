@@ -47,7 +47,7 @@ func testPayload(t *testing.T) *engine.GroupLeasePayload {
 				{Name: "__collector_src_main", Type: graph.NodeTypeGroupExit, Version: 1},
 			},
 			Connections: types.Connections{
-				"src": {"main": []types.Connection{{Node: "__collector_src_main"}}},
+				"src": {"main": types.PortConnections{Targets: []types.Connection{{Node: "__collector_src_main"}}}},
 			},
 		},
 		Exits: []graph.GroupPackageExit{

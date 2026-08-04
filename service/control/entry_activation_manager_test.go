@@ -32,8 +32,8 @@ func groupTriggerGraph(t *testing.T) *graph.Graph {
 			},
 		},
 		Connections: types.Connections{
-			"trig":   {"main": {{Node: "worker", Input: "main"}}},
-			"worker": {"main": {{Node: "down", Input: "main"}}},
+			"trig":   {"main": types.PortConnections{Targets: []types.Connection{{Node: "worker", Input: "main"}}}},
+			"worker": {"main": types.PortConnections{Targets: []types.Connection{{Node: "down", Input: "main"}}}},
 		},
 	})
 	if err != nil {

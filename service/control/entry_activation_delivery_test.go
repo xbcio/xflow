@@ -31,7 +31,7 @@ func singleTriggerGraph(t *testing.T, selectorLabels map[string]string) *graph.G
 			},
 			{Name: "work", Type: "http.request", Version: 1, Kind: types.NodeKindAction},
 		},
-		Connections: types.Connections{"trig": {"main": {{Node: "work", Input: "main"}}}},
+		Connections: types.Connections{"trig": {"main": types.PortConnections{Targets: []types.Connection{{Node: "work", Input: "main"}}}}},
 	})
 	if err != nil {
 		t.Fatalf("compile: %v", err)
@@ -490,7 +490,7 @@ func paramTriggerGraph(t *testing.T, params map[string]any) *graph.Graph {
 			},
 			{Name: "work", Type: "http.request", Version: 1, Kind: types.NodeKindAction},
 		},
-		Connections: types.Connections{"trig": {"main": {{Node: "work", Input: "main"}}}},
+		Connections: types.Connections{"trig": {"main": types.PortConnections{Targets: []types.Connection{{Node: "work", Input: "main"}}}}},
 	})
 	if err != nil {
 		t.Fatalf("compile: %v", err)

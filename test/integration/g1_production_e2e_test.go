@@ -426,7 +426,7 @@ func g1SignalWaitDef(name, signalName string) *types.WorkflowDef {
 			{Name: "end", Type: "test.g1.real"},
 		},
 		Connections: types.Connections{
-			"wait": {"main": []types.Connection{{Node: "end", Input: "main"}}},
+			"wait": {"main": {Targets: []types.Connection{{Node: "end", Input: "main"}}}},
 		},
 	}
 }
@@ -444,7 +444,7 @@ func g1MultiSignalWaitDef(name string, signals []string, quorum int) *types.Work
 			{Name: "end", Type: "test.g1.real"},
 		},
 		Connections: types.Connections{
-			"wait": {"main": []types.Connection{{Node: "end", Input: "main"}}},
+			"wait": {"main": {Targets: []types.Connection{{Node: "end", Input: "main"}}}},
 		},
 	}
 }
@@ -461,7 +461,7 @@ func g1TimerWaitDef(name, duration string) *types.WorkflowDef {
 			{Name: "end", Type: "test.g1.real"},
 		},
 		Connections: types.Connections{
-			"wait": {"main": []types.Connection{{Node: "end", Input: "main"}}},
+			"wait": {"main": {Targets: []types.Connection{{Node: "end", Input: "main"}}}},
 		},
 	}
 }
@@ -718,7 +718,7 @@ func g1RunAuthzMatrix(t *testing.T, h *productionServerRunnerHarness) []g1AuthzR
 				{Name: "work", Type: "test.g1.real"},
 			},
 			Connections: types.Connections{
-				"start": {"main": []types.Connection{{Node: "work", Input: "main"}}},
+				"start": {"main": {Targets: []types.Connection{{Node: "work", Input: "main"}}}},
 			},
 		},
 		"entry": "start",
@@ -1316,8 +1316,8 @@ func g1RunCyclicReset(t *testing.T, h *productionServerRunnerHarness, addr strin
 			{Name: "review", Type: "test.review"},
 		},
 		Connections: types.Connections{
-			"start":  {"main": []types.Connection{{Node: "review", Input: "main"}}},
-			"review": {"reject": []types.Connection{{Node: "start", Input: "main"}}},
+			"start":  {"main": {Targets: []types.Connection{{Node: "review", Input: "main"}}}},
+			"review": {"reject": {Targets: []types.Connection{{Node: "start", Input: "main"}}}},
 		},
 	}
 	g, err := graph.Compile(def)
@@ -2033,7 +2033,7 @@ CREATE TABLE IF NOT EXISTS xflow_g1_idempotency_proof (
 			{Name: "end", Type: "test.g1.idempotent"},
 		},
 		Connections: types.Connections{
-			"start": {"main": []types.Connection{{Node: "end", Input: "main"}}},
+			"start": {"main": {Targets: []types.Connection{{Node: "end", Input: "main"}}}},
 		},
 	}
 	g, err := graph.Compile(def)

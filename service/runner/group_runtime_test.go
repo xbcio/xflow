@@ -72,8 +72,8 @@ func TestGroupRuntime_TwoNodeChainSuccess(t *testing.T) {
 				{Name: "__collector_b_main", Type: graph.NodeTypeGroupExit, Version: 1},
 			},
 			Connections: types.Connections{
-				"a": {"main": []types.Connection{{Node: "b"}}},
-				"b": {"main": []types.Connection{{Node: "__collector_b_main"}}},
+				"a": {"main": types.PortConnections{Targets: []types.Connection{{Node: "b"}}}},
+				"b": {"main": types.PortConnections{Targets: []types.Connection{{Node: "__collector_b_main"}}}},
 			},
 		},
 		Exits: []graph.GroupPackageExit{
@@ -124,7 +124,7 @@ func TestGroupRuntime_MemberFailure(t *testing.T) {
 				{Name: "__collector_a_main", Type: graph.NodeTypeGroupExit, Version: 1},
 			},
 			Connections: types.Connections{
-				"a": {"main": []types.Connection{{Node: "__collector_a_main"}}},
+				"a": {"main": types.PortConnections{Targets: []types.Connection{{Node: "__collector_a_main"}}}},
 			},
 		},
 		Exits: []graph.GroupPackageExit{
@@ -169,7 +169,7 @@ func TestGroupRuntime_DeadlineTimeout(t *testing.T) {
 				{Name: "__collector_a_main", Type: graph.NodeTypeGroupExit, Version: 1},
 			},
 			Connections: types.Connections{
-				"a": {"main": []types.Connection{{Node: "__collector_a_main"}}},
+				"a": {"main": types.PortConnections{Targets: []types.Connection{{Node: "__collector_a_main"}}}},
 			},
 		},
 		Exits: []graph.GroupPackageExit{
@@ -229,7 +229,7 @@ func TestGroupRuntime_ExternalCancel(t *testing.T) {
 				{Name: "__collector_a_main", Type: graph.NodeTypeGroupExit, Version: 1},
 			},
 			Connections: types.Connections{
-				"a": {"main": []types.Connection{{Node: "__collector_a_main"}}},
+				"a": {"main": types.PortConnections{Targets: []types.Connection{{Node: "__collector_a_main"}}}},
 			},
 		},
 		Exits: []graph.GroupPackageExit{

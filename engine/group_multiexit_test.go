@@ -731,8 +731,8 @@ func buildGroupThenNodeGraph(t *testing.T) *graph.Graph {
 			{Name: "d", Type: "test.action", Kind: types.NodeKindAction},
 		},
 		Connections: types.Connections{
-			"g.source": {"main": {{Node: "g.sink", Input: "main"}}},
-			"g.sink":   {"main": {{Node: "d", Input: "main"}}},
+			"g.source": {"main": {Targets: []types.Connection{{Node: "g.sink", Input: "main"}}}},
+			"g.sink":   {"main": {Targets: []types.Connection{{Node: "d", Input: "main"}}}},
 		},
 		Groups: []types.GroupDef{{Name: "g", Members: []string{"g.source", "g.sink"}}},
 	})
@@ -760,11 +760,11 @@ func buildGroupFanOutFanIn(t *testing.T, mergeMode string) *graph.Graph {
 			{Name: "z", Type: "xflow.merge", Kind: types.NodeKindAction, Parameters: map[string]any{"mode": mergeMode}},
 		},
 		Connections: types.Connections{
-			"g.source": {"main": {{Node: "g.o1", Input: "main"}, {Node: "g.o2", Input: "main"}}},
-			"g.o1":     {"main": {{Node: "x", Input: "main"}}},
-			"g.o2":     {"alt": {{Node: "y", Input: "main"}}},
-			"x":        {"main": {{Node: "z", Input: "main"}}},
-			"y":        {"main": {{Node: "z", Input: "alt"}}},
+			"g.source": {"main": {Targets: []types.Connection{{Node: "g.o1", Input: "main"}, {Node: "g.o2", Input: "main"}}}},
+			"g.o1":     {"main": {Targets: []types.Connection{{Node: "x", Input: "main"}}}},
+			"g.o2":     {"alt": {Targets: []types.Connection{{Node: "y", Input: "main"}}}},
+			"x":        {"main": {Targets: []types.Connection{{Node: "z", Input: "main"}}}},
+			"y":        {"main": {Targets: []types.Connection{{Node: "z", Input: "alt"}}}},
 		},
 		Groups: []types.GroupDef{{Name: "g", Members: []string{"g.source", "g.o1", "g.o2"}}},
 	})

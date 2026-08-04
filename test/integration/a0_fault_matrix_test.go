@@ -278,7 +278,7 @@ func a0TwoNodeGraph(t *testing.T, name string) *graph.Graph {
 			{Name: "done", Type: "test.fault"},
 		},
 		Connections: types.Connections{
-			"start": {"main": []types.Connection{{Node: "done", Input: "main"}}},
+			"start": {"main": types.PortConnections{Targets: []types.Connection{{Node: "done", Input: "main"}}}},
 		},
 	}
 	g, err := graph.Compile(def)
@@ -653,7 +653,7 @@ func TestA0FaultMatrix(t *testing.T) {
 				{Name: "done", Type: "test.a0.done"},
 			},
 			Connections: types.Connections{
-				"start": {"main": []types.Connection{{Node: "done", Input: "main"}}},
+				"start": {"main": types.PortConnections{Targets: []types.Connection{{Node: "done", Input: "main"}}}},
 			},
 		}
 		execID := submitWorkflowHTTP(t, h.httpSrv.URL, h.httpSrv.Client(), def, map[string]any{"claim_id": "ack-loss"})
@@ -844,7 +844,7 @@ func TestA0FaultMatrix(t *testing.T) {
 				{Name: "done", Type: "test.a0.done"},
 			},
 			Connections: types.Connections{
-				"start": {"main": []types.Connection{{Node: "done", Input: "main"}}},
+				"start": {"main": types.PortConnections{Targets: []types.Connection{{Node: "done", Input: "main"}}}},
 			},
 		}
 		execID := submitWorkflowHTTP(t, h.httpSrv.URL, h.httpSrv.Client(), def, map[string]any{"claim_id": "request-loss"})

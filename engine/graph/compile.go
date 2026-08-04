@@ -217,7 +217,7 @@ func buildEdges(def *types.WorkflowDef, g *Graph) error {
 
 		portOuts := make([]string, 0, len(portNames))
 		for _, port := range portNames {
-			conns := ports[port]
+			conns := ports[port].Targets
 			for _, c := range conns {
 				dstIdx, ok := g.index[c.Node]
 				if !ok {

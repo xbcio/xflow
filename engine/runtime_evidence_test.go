@@ -127,7 +127,7 @@ func triggerAdvanceForTest(t *testing.T, eng *Engine, queue *fakeQueue) {
 			{Name: "end", Type: "test.echo"},
 		},
 		Connections: types.Connections{
-			"start": {"main": []types.Connection{{Node: "end", Input: "main"}}},
+			"start": {"main": {Targets: []types.Connection{{Node: "end", Input: "main"}}}},
 		},
 	}
 	g, err := graph.Compile(def)

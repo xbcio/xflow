@@ -48,7 +48,7 @@ func entryActivationE2EWorkflow(t *testing.T, matchLabels map[string]string) *gr
 			{Name: "body", Kind: types.NodeKindAction, Type: "test.tg.body"},
 		},
 		Connections: types.Connections{
-			"kafka-in": {"main": {{Node: "body", Input: "main"}}},
+			"kafka-in": {"main": {Targets: []types.Connection{{Node: "body", Input: "main"}}}},
 		},
 	}
 	g, err := graph.Compile(def)

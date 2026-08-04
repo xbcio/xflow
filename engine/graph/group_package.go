@@ -198,35 +198,43 @@ func buildPackageConnections(g *Graph, memberSet map[int]bool, exits []GroupPack
 			srcName := g.nodes[e.SrcIdx].Name
 			dstName := g.nodes[e.DstIdx].Name
 			if conns[srcName] == nil {
-				conns[srcName] = make(map[string][]types.Connection)
+				conns[srcName] = make(map[string]types.PortConnections)
 			}
-			conns[srcName][e.SrcPort] = append(conns[srcName][e.SrcPort], types.Connection{
+			// A map index expression yields a non-addressable struct, so the
+			// slice has to be lifted out, appended to, and written back.
+			pc := conns[srcName][e.SrcPort]
+			pc.Targets = append(pc.Targets, types.Connection{
 				Node:  dstName,
 				Input: e.DstPort,
 			})
+			conns[srcName][e.SrcPort] = pc
 		}
 	}
 
 	// Edges from boundary-output source to collector.
 	for _, exit := range exits {
 		if conns[exit.SrcNode] == nil {
-			conns[exit.SrcNode] = make(map[string][]types.Connection)
+			conns[exit.SrcNode] = make(map[string]types.PortConnections)
 		}
-		conns[exit.SrcNode][exit.Port] = append(conns[exit.SrcNode][exit.Port], types.Connection{
+		pc := conns[exit.SrcNode][exit.Port]
+		pc.Targets = append(pc.Targets, types.Connection{
 			Node:  exit.CollectorNode,
 			Input: "main",
 		})
+		conns[exit.SrcNode][exit.Port] = pc
 	}
 
 	// Sort connections for determinism.
 	for src := range conns {
 		for port := range conns[src] {
-			sort.Slice(conns[src][port], func(i, j int) bool {
-				if conns[src][port][i].Node != conns[src][port][j].Node {
-					return conns[src][port][i].Node < conns[src][port][j].Node
+			pc := conns[src][port]
+			sort.Slice(pc.Targets, func(i, j int) bool {
+				if pc.Targets[i].Node != pc.Targets[j].Node {
+					return pc.Targets[i].Node < pc.Targets[j].Node
 				}
-				return conns[src][port][i].Input < conns[src][port][j].Input
+				return pc.Targets[i].Input < pc.Targets[j].Input
 			})
+			conns[src][port] = pc
 		}
 	}
 

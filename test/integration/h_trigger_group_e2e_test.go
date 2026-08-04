@@ -42,8 +42,8 @@ func TestTriggerGroupE2E_LocalBackend(t *testing.T) {
 			{Name: "store", Kind: types.NodeKindAction, Type: "test.tg.store"},
 		},
 		Connections: types.Connections{
-			"entry": {"main": {{Node: "body", Input: "main"}}},
-			"body":  {"main": {{Node: "store", Input: "main"}}},
+			"entry": {"main": {Targets: []types.Connection{{Node: "body", Input: "main"}}}},
+			"body":  {"main": {Targets: []types.Connection{{Node: "store", Input: "main"}}}},
 		},
 		Groups: []types.GroupDef{{Name: "tg", Members: []string{"entry", "body"}}},
 	}
@@ -215,7 +215,7 @@ func TestTriggerGroupE2E_SingleUnit_CompletesExecution(t *testing.T) {
 			{Name: "body", Kind: types.NodeKindAction, Type: "test.tg.body"},
 		},
 		Connections: types.Connections{
-			"entry": {"main": {{Node: "body", Input: "main"}}},
+			"entry": {"main": {Targets: []types.Connection{{Node: "body", Input: "main"}}}},
 		},
 		Groups: []types.GroupDef{{Name: "tg", Members: []string{"entry", "body"}}},
 	}
@@ -293,7 +293,7 @@ func TestTriggerGroupE2E_FailedOutcome(t *testing.T) {
 			{Name: "body", Kind: types.NodeKindAction, Type: "test.tg.body"},
 		},
 		Connections: types.Connections{
-			"entry": {"main": {{Node: "body", Input: "main"}}},
+			"entry": {"main": {Targets: []types.Connection{{Node: "body", Input: "main"}}}},
 		},
 		Groups: []types.GroupDef{{Name: "tg", Members: []string{"entry", "body"}}},
 	}

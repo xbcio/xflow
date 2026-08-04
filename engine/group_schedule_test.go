@@ -18,8 +18,8 @@ func buildLinearGraph(t *testing.T, names ...string) *graph.Graph {
 	}
 	conns := make(types.Connections, len(names)-1)
 	for i := 0; i < len(names)-1; i++ {
-		conns[names[i]] = map[string][]types.Connection{
-			"main": {{Node: names[i+1], Input: "main"}},
+		conns[names[i]] = map[string]types.PortConnections{
+			"main": {Targets: []types.Connection{{Node: names[i+1], Input: "main"}}},
 		}
 	}
 	g, err := graph.Compile(&types.WorkflowDef{
@@ -46,8 +46,8 @@ func buildSingleGroupGraph(t *testing.T) *graph.Graph {
 			{Name: "out", Type: "test.action", Kind: types.NodeKindAction},
 		},
 		Connections: types.Connections{
-			"g.source": {"main": {{Node: "g.sink", Input: "main"}}},
-			"g.sink":   {"main": {{Node: "out", Input: "main"}}},
+			"g.source": {"main": {Targets: []types.Connection{{Node: "g.sink", Input: "main"}}}},
+			"g.sink":   {"main": {Targets: []types.Connection{{Node: "out", Input: "main"}}}},
 		},
 		Groups: []types.GroupDef{{Name: "g", Members: []string{"g.source", "g.sink"}}},
 	})

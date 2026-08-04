@@ -361,7 +361,7 @@ func TestEngineLoopSplitJSONBatchesUseDurableSystemTasks(t *testing.T) {
 			{Name: "done", Type: "test.echo"},
 		},
 		Connections: types.Connections{
-			"loop": {"main": []types.Connection{{Node: "done", Input: "main"}}},
+			"loop": {"main": {Targets: []types.Connection{{Node: "done", Input: "main"}}}},
 		},
 	})
 	if err != nil {

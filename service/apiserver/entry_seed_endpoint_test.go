@@ -62,7 +62,7 @@ func registerSeedWorkflow(t *testing.T, be *local.Backend) {
 			{Name: "kafka-in", Kind: types.NodeKindTrigger},
 			{Name: "store", Kind: types.NodeKindAction},
 		},
-		Connections: types.Connections{"kafka-in": {"main": {{Node: "store", Input: "main"}}}},
+		Connections: types.Connections{"kafka-in": {"main": types.PortConnections{Targets: []types.Connection{{Node: "store", Input: "main"}}}}},
 	}
 	g, err := graph.Compile(def)
 	if err != nil {

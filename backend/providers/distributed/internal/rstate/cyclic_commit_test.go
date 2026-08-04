@@ -27,8 +27,8 @@ func TestRedisCommitLeasedNodeCyclicPersistsDownstreamAtomically(t *testing.T) {
 			{Name: "review", Type: "test.review"},
 		},
 		Connections: types.Connections{
-			"start":  {"main": []types.Connection{{Node: "review", Input: "main"}}},
-			"review": {"reject": []types.Connection{{Node: "start", Input: "main"}}},
+			"start":  {"main": types.PortConnections{Targets: []types.Connection{{Node: "review", Input: "main"}}}},
+			"review": {"reject": types.PortConnections{Targets: []types.Connection{{Node: "start", Input: "main"}}}},
 		},
 	}
 	g, err := graph.Compile(def)
@@ -132,7 +132,7 @@ func TestRedisCommitLeasedNodeCyclicCompletionIsAtomic(t *testing.T) {
 			{Name: "finish", Type: "test.echo"},
 		},
 		Connections: types.Connections{
-			"start": {"main": []types.Connection{{Node: "finish", Input: "main"}}},
+			"start": {"main": types.PortConnections{Targets: []types.Connection{{Node: "finish", Input: "main"}}}},
 		},
 	}
 	g, err := graph.Compile(def)

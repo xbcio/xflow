@@ -191,7 +191,7 @@ func ContractGraph() *graph.Graph {
 			{Name: "finish", Type: "test.finish"},
 		},
 		Connections: types.Connections{
-			"start": {"main": []types.Connection{{Node: "finish", Input: "main"}}},
+			"start": {"main": types.PortConnections{Targets: []types.Connection{{Node: "finish", Input: "main"}}}},
 		},
 	}
 	g, err := graph.Compile(def)

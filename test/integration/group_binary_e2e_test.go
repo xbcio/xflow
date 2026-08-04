@@ -144,8 +144,8 @@ func TestGroupBinaryE2E_NormalHappyPath(t *testing.T) {
 			{Name: "out", Type: "test.group.member", Kind: types.NodeKindAction},
 		},
 		Connections: types.Connections{
-			"g.source": {"main": {{Node: "g.sink", Input: "main"}}},
-			"g.sink":   {"main": {{Node: "out", Input: "main"}}},
+			"g.source": {"main": {Targets: []types.Connection{{Node: "g.sink", Input: "main"}}}},
+			"g.sink":   {"main": {Targets: []types.Connection{{Node: "out", Input: "main"}}}},
 		},
 		Groups: []types.GroupDef{{Name: "g", Members: []string{"g.source", "g.sink"}}},
 	}
@@ -221,9 +221,9 @@ func TestGroupBinaryE2E_MultiExitSwitch(t *testing.T) {
 			{Name: "y", Type: "test.group.member", Kind: types.NodeKindAction},
 		},
 		Connections: types.Connections{
-			"g.source": {"main": {{Node: "g.o1", Input: "main"}, {Node: "g.o2", Input: "main"}}},
-			"g.o1":     {"main": {{Node: "x", Input: "main"}}},
-			"g.o2":     {"main": {{Node: "y", Input: "main"}}},
+			"g.source": {"main": {Targets: []types.Connection{{Node: "g.o1", Input: "main"}, {Node: "g.o2", Input: "main"}}}},
+			"g.o1":     {"main": {Targets: []types.Connection{{Node: "x", Input: "main"}}}},
+			"g.o2":     {"main": {Targets: []types.Connection{{Node: "y", Input: "main"}}}},
 		},
 		Groups: []types.GroupDef{{Name: "g", Members: []string{"g.source", "g.o1", "g.o2"}}},
 	}
@@ -309,7 +309,7 @@ func TestGroupBinaryE2E_LegacyRunnerNeverClaimsGroup(t *testing.T) {
 			{Name: "g.sink", Type: "test.group.member", Kind: types.NodeKindAction},
 		},
 		Connections: types.Connections{
-			"g.source": {"main": {{Node: "g.sink", Input: "main"}}},
+			"g.source": {"main": {Targets: []types.Connection{{Node: "g.sink", Input: "main"}}}},
 		},
 		Groups: []types.GroupDef{{Name: "g", Members: []string{"g.source", "g.sink"}}},
 	}
@@ -384,8 +384,8 @@ func TestGroupBinaryE2E_KillRunnerMidGroupThenRestart(t *testing.T) {
 			{Name: "out", Type: "test.group.member", Kind: types.NodeKindAction},
 		},
 		Connections: types.Connections{
-			"g.source": {"main": {{Node: "g.sink", Input: "main"}}},
-			"g.sink":   {"main": {{Node: "out", Input: "main"}}},
+			"g.source": {"main": {Targets: []types.Connection{{Node: "g.sink", Input: "main"}}}},
+			"g.sink":   {"main": {Targets: []types.Connection{{Node: "out", Input: "main"}}}},
 		},
 		Groups: []types.GroupDef{{Name: "g", Members: []string{"g.source", "g.sink"}}},
 	}
@@ -510,8 +510,8 @@ func TestGroupBinaryE2E_FaultMatrix(t *testing.T) {
 			{Name: "out", Type: "test.group.member", Kind: types.NodeKindAction},
 		},
 		Connections: types.Connections{
-			"g.source": {"main": {{Node: "g.sink", Input: "main"}}},
-			"g.sink":   {"main": {{Node: "out", Input: "main"}}},
+			"g.source": {"main": {Targets: []types.Connection{{Node: "g.sink", Input: "main"}}}},
+			"g.sink":   {"main": {Targets: []types.Connection{{Node: "out", Input: "main"}}}},
 		},
 		Groups: []types.GroupDef{{Name: "g", Members: []string{"g.source", "g.sink"}}},
 	}

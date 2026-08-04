@@ -139,7 +139,7 @@ func validWorkflow() *types.WorkflowDef {
 			{Name: "work", Type: "test.work"},
 		},
 		Connections: types.Connections{
-			"start": {"main": []types.Connection{{Node: "work", Input: "main"}}},
+			"start": {"main": types.PortConnections{Targets: []types.Connection{{Node: "work", Input: "main"}}}},
 		},
 	}
 }
@@ -318,8 +318,8 @@ func TestWorkflowControlInvokeCompileErrorReturns400(t *testing.T) {
 			{Name: "B", Type: "test.b"},
 		},
 		Connections: types.Connections{
-			"A": {"main": []types.Connection{{Node: "B", Input: "main"}}},
-			"B": {"main": []types.Connection{{Node: "A", Input: "main"}}},
+			"A": {"main": types.PortConnections{Targets: []types.Connection{{Node: "B", Input: "main"}}}},
+			"B": {"main": types.PortConnections{Targets: []types.Connection{{Node: "A", Input: "main"}}}},
 		},
 	}
 	resp := doJSON(t, mux, http.MethodPost, "/v1/workflows/invoke", invokeRequest{Workflow: wf, Entry: "A"})

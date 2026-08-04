@@ -380,12 +380,13 @@ func (w *WorkflowBuilder) assembleNodes(def *types.WorkflowDef) {
 func (w *WorkflowBuilder) assembleConnections(def *types.WorkflowDef) {
 	for _, e := range w.edges {
 		if def.Connections[e.srcNode] == nil {
-			def.Connections[e.srcNode] = make(map[string][]types.Connection)
+			def.Connections[e.srcNode] = make(map[string]types.PortConnections)
 		}
-		def.Connections[e.srcNode][e.srcPort] = append(
-			def.Connections[e.srcNode][e.srcPort],
-			types.Connection{Node: e.dstNode, Input: e.dstPort},
-		)
+		// A map index expression yields a non-addressable struct, so the slice
+		// has to be lifted out, appended to, and written back.
+		pc := def.Connections[e.srcNode][e.srcPort]
+		pc.Targets = append(pc.Targets, types.Connection{Node: e.dstNode, Input: e.dstPort})
+		def.Connections[e.srcNode][e.srcPort] = pc
 	}
 }
 

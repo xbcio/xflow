@@ -248,9 +248,9 @@ func setupGroupLeaseTest(t *testing.T) (*Engine, *graph.Graph, types.ExecutionID
 			{Name: "grp1", Members: []string{"A", "B", "C"}},
 		},
 		Connections: types.Connections{
-			"A": {"main": []types.Connection{{Node: "B", Input: "main"}}},
-			"B": {"main": []types.Connection{{Node: "C", Input: "main"}}},
-			"C": {"result": []types.Connection{{Node: "D", Input: "main"}}},
+			"A": {"main": {Targets: []types.Connection{{Node: "B", Input: "main"}}}},
+			"B": {"main": {Targets: []types.Connection{{Node: "C", Input: "main"}}}},
+			"C": {"result": {Targets: []types.Connection{{Node: "D", Input: "main"}}}},
 		},
 	}
 
