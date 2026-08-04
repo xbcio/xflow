@@ -411,10 +411,21 @@ supply 侧（`node/supply/registry.go`/`service/runner/supply_gate.go` 触发，
 - **poolSize 调参**：内存（~5.5 MiB/实例）× 并发度。建议 = runner CPU 核数，与 `local.WithConcurrency` 对齐。配置切换瞬间为双份内存（§6.6），容量规划需留峰值。
 - **（探索项）实验性 `MemoryAllocator` + 手工 CoW 跳过 init**：wazero 无内置 CoW/pooling,但 `experimental.WithMemoryAllocator`(v1.7.1+,API 不稳定)可自建 mmap 池 + memcpy 恢复 post-init 内存镜像(issue #2499:3MB 模块 ~78µs)。这是唯一能真正跳过每实例 ~12ms Go bootstrap 的路子,但复杂度高、依赖实验 API。**仅当 P1/P2 后实例补建率高、bootstrap 成为瓶颈时才评估。**
 - **wazero pin 在 v1.9.0**（`go.mod:19`，因 `fastschema/qjs@v0.0.6` 依赖）。本方案所有 API（`CompilationCache`、`CompilationCacheWithDir`、`WithCloseOnContextDone`、`WithStartFunctions("_initialize")`、`//go:wasmexport` reactor）均在 v1.9.0 核实可用，**不需要升级 wazero**。
+- **批量快路径只在 `wazero-reactor` 上生效。** `reactorFacade` 实现了 `engine.BatchEngine`（host 循环复用池化实例逐条 eval），legacy `wasm/wazero` 没有，会静默回落到 `engine.ExecuteBatchSerial`（N 次独立 `Execute`）—— 结果正确但拿不到池化收益。workflow 的 `runtime` 参数配成 `wazero` 时不会有任何报错或告警，是个无声的性能陷阱。
+
+## 8.1 批处理：host 循环（技术债）
+
+wasm guest 仍逐条 eval，由 host 循环调用 N 次。选这个而不是改 guest 支持批量入参：guest/host 契约不变（`encodeStdin` 仍是 `json.Marshal(globals)`）、规则不变、`isEngineRoot` 的 `$` 前缀泄漏防护不变、实例池语义不变（一个实例串行服务一次调用）。
+
+per-record env 构造是 `engine.BuildRecordGlobals` 一处共享实现，`ExecuteBatch` 与 `ExecuteBatchSerial` 都调它 —— record 自身字段并入时跳过 `$` 前缀键，这条不是风格：它是 `isEngineRoot` 泄漏防护所依赖的「record 字段不可能遮蔽 engine root」这一碰撞不可能性。
+
+批内单条失败的处理：guest 分类的单条求值失败（`errDecode`/`errUnconfigured`/`errConfig`/`errOutput`）**跳过该条**，整批继续；实例 doomed（alloc/write/eval trap、`errEval`）或 host 侧任何错误**整批失败**，offset 不提交、Kafka 重投 —— 重投是干净的，因为下游节点在 wasm 之后，从未被调用。判定集中在纯函数 `isBatchSkippable`：非 `*reactorEvalError` 即整批致命（`evalFromPool` 消费掉了 pool 层的 `doomed` 布尔值，所以只能靠错误类型反推）。
+
+**正确的抽象是 body 子图 + per-item 下游 fan-out，现在不存在**（`engine/expand.go` 的 `ExecuteBatch` 仍是 pass-through 桩）。host 循环是它落地之前的替代，不是终态。
 
 ## 9. 与流量采集迁移的关系
 
 本设计是流量采集迁移的**使能项之一**，但两者可解耦推进：
 
 - wasm 池化让「清洗打标跑在 node group 的 wasm 节点里」性能达标（12508 msg/s 池化实测）。
-- 但迁移仍受三条独立阻塞制约（见 NODE-GROUP-COLOCATION.md §12.2 与本仓 Kafka 现状）：**Kafka SASL/SCRAM 缺失**、**aggregate 模式在远程托管被硬禁用（只能 per-message）**、**每 entry unit 单活跃 runner**。这些与 wasm 引擎无关，需单独做。
+- 迁移原受三条独立阻塞制约，其中两条已关闭：**Kafka SASL/SCRAM** 已实现，**aggregate 模式在远程托管被硬禁用**已解除（entry-seed 批量 admission，交付语义 at-least-once，见 NODE-GROUP-COLOCATION.md §12.1）。仍开放的是**每 entry unit 单活跃 runner**。这些与 wasm 引擎无关。

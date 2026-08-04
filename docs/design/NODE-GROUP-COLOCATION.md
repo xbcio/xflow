@@ -228,6 +228,20 @@ items listed below under §12.1. What remains open is in §12.2.
   side effect is durable, which removes the window where a crash between the
   dedup write and the emit lost the event permanently. A failed flush retains
   the buffer and retries; offsets commit only after the whole batch emits.
+- **Aggregate Kafka mode is hosted via entry-seed admission.** `Activate` no
+  longer rejects the combination. The batch admission key encodes the batch's
+  **actual** offset range (`…/topic/partition/start-end`), so it is not
+  reproducible across a redelivery — batch boundaries are decided by broker
+  fetch timing, not by the aggregation logic, and no alignment scheme can
+  change that. The delivery semantics are therefore **at-least-once**, matching
+  the rest of xflow rather than the per-message entry-seed path's
+  exactly-once: a batch that seeds successfully but whose offsets never commit
+  is reprocessed after the reader is rebuilt. Duplication is bounded at one
+  batch and is what the `admission_state` metric exists to measure. The
+  seed-then-commit rule and the ride-along of schema-discarded offsets are
+  shared verbatim with the legacy `Emit` branch. Consumers must be idempotent
+  on `(topic, partition, offset)` — not on `execution_id`, since the duplicate
+  is by construction a different execution.
 - **`default`-selector fallback grace period** (spec §11.7). A `default`-mode
   activation with no label-matching runner waits out `FallbackGrace`, then falls
   back to any live runner with headroom whose capabilities satisfy the entry
@@ -263,12 +277,6 @@ items listed below under §12.1. What remains open is in §12.2.
   for a supply's content to become available — the supply collection face is
   gated by `SupplyGate.Admit` at activation time, independent of whether the
   consuming workflow's own trigger uses entry-seed hosting at all.
-- **Aggregate Kafka mode cannot be hosted via entry-seed admission.** The
-  aggregate path emits batches through the legacy `Runtime.Emit`; a batch
-  admission key would have to express an offset range that the control-plane
-  fence treats as the same key across retries. `Activate` rejects the
-  combination outright rather than starting a consumer whose every flush would
-  fail. Per-message entry-seed hosting is unaffected.
 - **Activation replica count > 1 per entry unit** (spec §11.6 explicit-replica
   scaling). There is one active hosting runner per entry unit today.
 - **Full runner→control activation ACK RPC.** The retired path's ACK was dead
