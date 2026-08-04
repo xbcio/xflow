@@ -1,6 +1,7 @@
 package graph
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -8,6 +9,22 @@ import (
 
 	"github.com/xbcio/xflow/types"
 )
+
+// subgraphNodeType is the body-only node type: a NodeDef with this Type
+// carries a self-contained {nodes, connections} sub-graph in its Parameters.
+// It has no unit-layer semantics of its own — see the top-level rejection
+// below and validateMapBody's nesting check.
+const subgraphNodeType = "xflow.subgraph"
+
+// bannedBodyMemberTypes are node types a body sub-graph may not itself
+// contain in v1. A body member that is itself a fan-out node (map/split) or
+// another subgraph would make the sub-execution tree unbounded; the durable
+// layer and package hash are not designed for that yet.
+var bannedBodyMemberTypes = map[string]bool{
+	"xflow.map":      true,
+	"xflow.split":    true,
+	subgraphNodeType: true,
+}
 
 // Compile validates a WorkflowDef and builds an immutable Graph IR.
 // It returns an error if the definition is nil, has no nodes, contains
@@ -58,6 +75,28 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 			sort.Strings(reserved)
 			return nil, fmt.Errorf("reserved node type %q is not allowed in user workflows: %s",
 				ReservedNodeTypePrefix+"*", strings.Join(reserved, ", "))
+		}
+	}
+
+	// Reject xflow.subgraph at the top level, the same way reserved
+	// "xflow.group_*" types are rejected above. xflow.subgraph is a body-only
+	// node type: it has no unit-layer semantics, so if it appeared in the
+	// top-level nodes list it would be scheduled as an in-degree-0 root unit
+	// like any other node — a meaningless and unsupported shape. It is only
+	// valid nested inside a map node's "body" parameter (see validateMapBody).
+	{
+		var loose []string
+		for _, nd := range def.Nodes {
+			if nd.Type == subgraphNodeType {
+				loose = append(loose, fmt.Sprintf("%s (%s)", nd.Name, nd.Type))
+			}
+		}
+		if len(loose) > 0 {
+			sort.Strings(loose)
+			return nil, fmt.Errorf("node type %q is not allowed at the top level: %s; "+
+				"it has no unit-layer semantics and would be scheduled as an in-degree-0 "+
+				"root unit — use it only inside a map node's body parameter",
+				subgraphNodeType, strings.Join(loose, ", "))
 		}
 	}
 
@@ -134,6 +173,11 @@ func registerNodes(def *types.WorkflowDef, g *Graph) (int, error) {
 		}
 		if nd.Type == "xflow.start" || nd.Kind == types.NodeKindTrigger {
 			g.entryIndexes[nd.Name] = i
+		}
+		if nd.Type == "xflow.map" {
+			if err := validateMapBody(nd); err != nil {
+				return 0, err
+			}
 		}
 		if g.allowCycles {
 			if nd.Type == "xflow.start" {
@@ -376,6 +420,138 @@ func extractMergeMode(nd types.NodeDef) string {
 		return mode
 	}
 	return ""
+}
+
+// validateMapBody enforces the four body-related compile-time rules for a
+// single xflow.map node:
+//
+//  1. expression and body are mutually exclusive: exactly one must be present.
+//     This is checked here, at compile time, rather than sniffed from the
+//     node's runtime output shape — this repo has already been burned once
+//     by that pattern (a ScriptNode that sniffed a "messages" key and built a
+//     parallel fan-out path in secret).
+//  2. A parameterless map node (nd.Parameters is nil/empty) is left
+//     completely untouched: TestCompile_MapNodeCompilesWithoutAnyOptIn
+//     requires a bare `{Name: "m", Type: "xflow.map"}` to keep compiling with
+//     no opt-in, so this rule only engages once the node actually declares
+//     parameters.
+//  3. A declared body must decode to a NodeDef of type "xflow.subgraph" whose
+//     own members contain no nested xflow.map/xflow.split/xflow.subgraph
+//     (v1 forbids nesting: recursive fan-out makes the sub-execution tree
+//     unbounded).
+//  4. The body's members must have a unique, dominating entry — reusing
+//     resolveGroupEntry/assertEntryDominates exactly as group compilation
+//     does, since a body and a node group are the same structure.
+func validateMapBody(nd types.NodeDef) error {
+	if len(nd.Parameters) == 0 {
+		return nil
+	}
+	_, hasExpr := nd.Parameters["expression"]
+	bodyRaw, hasBody := nd.Parameters["body"]
+	switch {
+	case hasExpr && hasBody:
+		return fmt.Errorf("node %q: expression and body are mutually exclusive", nd.Name)
+	case !hasExpr && !hasBody:
+		return fmt.Errorf("node %q: requires exactly one of expression or body", nd.Name)
+	case !hasBody:
+		return nil
+	}
+
+	bodyDef, err := decodeSubgraphBody(bodyRaw)
+	if err != nil {
+		return fmt.Errorf("node %q: body: %w", nd.Name, err)
+	}
+	if bodyDef.Type != subgraphNodeType {
+		return fmt.Errorf("node %q: body.type must be %q, got %q", nd.Name, subgraphNodeType, bodyDef.Type)
+	}
+	innerNodes, innerConns, err := decodeSubgraphMembers(bodyDef.Parameters)
+	if err != nil {
+		return fmt.Errorf("node %q: body: %w", nd.Name, err)
+	}
+	if len(innerNodes) == 0 {
+		return fmt.Errorf("node %q: body has no nodes", nd.Name)
+	}
+	for _, inner := range innerNodes {
+		if bannedBodyMemberTypes[inner.Type] {
+			return fmt.Errorf("node %q: body member %q has type %q, which is not allowed "+
+				"inside a body in v1 (nesting is rejected: recursive fan-out makes the "+
+				"sub-execution tree unbounded)", nd.Name, inner.Name, inner.Type)
+		}
+	}
+	return validateBodyEntry(nd.Name, innerNodes, innerConns)
+}
+
+// decodeSubgraphBody decodes a map node's "body" parameter value (an
+// opaque map[string]any as authored in JSON/YAML params) into a NodeDef.
+func decodeSubgraphBody(raw any) (*types.NodeDef, error) {
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return nil, fmt.Errorf("encode: %w", err)
+	}
+	var nd types.NodeDef
+	if err := json.Unmarshal(data, &nd); err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
+	return &nd, nil
+}
+
+// decodeSubgraphMembers decodes an xflow.subgraph node's own Parameters
+// (its {nodes, connections} payload) into the shapes the rest of the
+// compiler already understands. Connections goes through
+// types.Connections' own UnmarshalJSON so the array-shorthand/object-form
+// duality (types/connections.go) is handled identically to a top-level
+// workflow definition.
+func decodeSubgraphMembers(params map[string]any) ([]types.NodeDef, types.Connections, error) {
+	data, err := json.Marshal(params)
+	if err != nil {
+		return nil, nil, fmt.Errorf("encode parameters: %w", err)
+	}
+	var shape struct {
+		Nodes       []types.NodeDef   `json:"nodes"`
+		Connections types.Connections `json:"connections,omitempty"`
+	}
+	if err := json.Unmarshal(data, &shape); err != nil {
+		return nil, nil, fmt.Errorf("decode parameters: %w", err)
+	}
+	return shape.Nodes, shape.Connections, nil
+}
+
+// validateBodyEntry checks that a body's members have a unique, dominating
+// entry. It builds the same minimal two-pass graph (registerNodes +
+// buildEdges) that Compile itself builds, treating every body member as
+// part of one implicit group, then reuses resolveGroupEntry and
+// assertEntryDominates unchanged — a body and a node group are the same
+// structure (group_compile.go:99-159), so no new validator is written here.
+func validateBodyEntry(mapNodeName string, nodes []types.NodeDef, conns types.Connections) error {
+	bodyDef := &types.WorkflowDef{Nodes: nodes, Connections: conns}
+	n := len(nodes)
+	bg := &Graph{
+		nodes:        make([]NodeMeta, n),
+		index:        make(map[string]int, n),
+		entryIndexes: make(map[string]int),
+		outEdges:     make([][]Edge, n),
+		inEdges:      make([][]Edge, n),
+		inDegree:     make([]int, n),
+		startIdx:     -1,
+	}
+	if _, err := registerNodes(bodyDef, bg); err != nil {
+		return fmt.Errorf("node %q: body: %w", mapNodeName, err)
+	}
+	if _, err := buildEdges(bodyDef, bg); err != nil {
+		return fmt.Errorf("node %q: body: %w", mapNodeName, err)
+	}
+	members := make(map[int]bool, n)
+	for i := 0; i < n; i++ {
+		members[i] = true
+	}
+	entry, _, err := resolveGroupEntry(bg, members)
+	if err != nil {
+		return fmt.Errorf("node %q: body: %w", mapNodeName, err)
+	}
+	if err := assertEntryDominates(bg, entry, members); err != nil {
+		return fmt.Errorf("node %q: body: %w", mapNodeName, err)
+	}
+	return nil
 }
 
 // detectCycle uses Kahn's algorithm (topological sort) to detect cycles.
