@@ -622,7 +622,7 @@ func TestKafkaTriggerSchemaBuilderRoundTrip(t *testing.T) {
 		DeadLetterInvalid("events-dlq").
 		RawParams().(map[string]any)
 
-	cfg, err := kafkaConfigFromParams(params, nil)
+	cfg, err := kafkaConfigFromParams(params, nil, false)
 	if err != nil {
 		t.Fatalf("kafkaConfigFromParams: %v", err)
 	}

@@ -403,6 +403,54 @@ func TestKafkaAggregate_EntrySeedRecordsMetrics(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Task 8: entry-seed batch flush interval defaults to 1s.
+// ---------------------------------------------------------------------------
+
+func TestKafkaAggregateConfig_EntrySeedDefaultsToOneSecond(t *testing.T) {
+	raw := map[string]any{
+		"enabled": true, "by": "partition", "dedup": "message",
+	}
+	cfg, err := kafkaAggregateConfigFromParamForMode(raw, true /* entrySeed */)
+	if err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	if cfg.FlushInterval != time.Second {
+		t.Fatalf("entry-seed flush interval = %v, want 1s", cfg.FlushInterval)
+	}
+}
+
+// 既有部署的行为不能被静默改变。
+func TestKafkaAggregateConfig_LegacyKeeps100ms(t *testing.T) {
+	raw := map[string]any{
+		"enabled": true, "by": "partition", "dedup": "message",
+	}
+	cfg, err := kafkaAggregateConfigFromParamForMode(raw, false /* entrySeed */)
+	if err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	if cfg.FlushInterval != 100*time.Millisecond {
+		t.Fatalf("legacy flush interval = %v, want 100ms", cfg.FlushInterval)
+	}
+}
+
+// 显式配置在两种模式下都优先于默认。
+func TestKafkaAggregateConfig_ExplicitIntervalWinsInBothModes(t *testing.T) {
+	for _, entrySeed := range []bool{true, false} {
+		raw := map[string]any{
+			"enabled": true, "by": "partition", "dedup": "message",
+			"flush_interval": "250ms",
+		}
+		cfg, err := kafkaAggregateConfigFromParamForMode(raw, entrySeed)
+		if err != nil {
+			t.Fatalf("entrySeed=%v config: %v", entrySeed, err)
+		}
+		if cfg.FlushInterval != 250*time.Millisecond {
+			t.Fatalf("entrySeed=%v flush interval = %v, want 250ms", entrySeed, cfg.FlushInterval)
+		}
+	}
+}
+
 // conflict 率是唯一能看出「重投产生重复」实际频率的信号，必须被记录。
 func TestKafkaAggregate_EntrySeedRecordsConflict(t *testing.T) {
 	o := &recordingBatchObserver{}

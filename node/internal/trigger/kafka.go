@@ -21,8 +21,28 @@ import (
 const defaultTriggerMaxInflight = 64
 const defaultKafkaAggregateMaxSize = 100
 const defaultKafkaAggregateFlushInterval = 100 * time.Millisecond
+
+// defaultKafkaEntrySeedFlushInterval is the flush timeout for the entry-seed
+// batch path. It is 10x the legacy Emit default because entry-seed flushes cross
+// the network to the control plane, and batching exists precisely to cut those
+// round trips — a 100ms window would make 10 of them per second per partition.
+//
+// The legacy default is deliberately left alone: changing it would silently
+// alter the data-path timing of deployments already running.
+const defaultKafkaEntrySeedFlushInterval = time.Second
 const kafkaAggregateByPartition = "partition"
 const kafkaAggregateDedupMessage = "message"
+
+// defaultFlushIntervalFor returns the mode-aware flush interval default.
+// This only takes effect on the YAML/JSON params path; the Go DSL path
+// normalizes at construction time before the mode is known — see the NOTE in
+// RawParams for the documented limitation.
+func defaultFlushIntervalFor(entrySeed bool) time.Duration {
+	if entrySeed {
+		return defaultKafkaEntrySeedFlushInterval
+	}
+	return defaultKafkaAggregateFlushInterval
+}
 
 type KafkaConsumer interface {
 	Messages() <-chan KafkaMessage
@@ -229,6 +249,15 @@ func (n *KafkaTriggerNode) RawParams() any {
 	}
 	if n.AggregateValue.Enabled {
 		aggregate := normalizeKafkaAggregateConfig(n.AggregateValue)
+		// NOTE: flush_interval is always serialized here, which means the Go DSL
+		// path (AggregateByPartition / Aggregate) bakes the interval at construction
+		// time — before we know whether the activation will be entry-seed. The
+		// runtime mode-aware default (1s for entry-seed vs 100ms for legacy) only
+		// takes effect on the YAML/JSON params path where flush_interval is absent
+		// from the map. Go DSL users who want the entry-seed default should pass
+		// defaultKafkaEntrySeedFlushInterval explicitly or omit the interval and let
+		// the params path handle it. Tracked as a known limitation rather than adding
+		// a "was-explicitly-set" flag to KafkaAggregateConfig.
 		params["aggregate"] = map[string]any{
 			"enabled":        aggregate.Enabled,
 			"by":             aggregate.By,
@@ -256,7 +285,7 @@ func (n *KafkaTriggerNode) OnError(s types.OnError) types.Builder {
 func (n *KafkaTriggerNode) TriggerHandler() types.TriggerHandler { return n }
 
 func (n *KafkaTriggerNode) Activate(ctx context.Context, in *types.TriggerActivateInput) (types.TriggerSubscription, error) {
-	cfg, err := kafkaConfigFromParams(in.Params, mergedSupplyContent(in.Supplies))
+	cfg, err := kafkaConfigFromParams(in.Params, mergedSupplyContent(in.Supplies), isEntrySeedActivation(in))
 	if err != nil {
 		return nil, err
 	}
@@ -953,8 +982,8 @@ func stopKafkaAggregateTimer(timer *time.Timer, active *bool) {
 	*active = false
 }
 
-func kafkaConfigFromParams(params map[string]any, supply map[string]any) (KafkaConsumerConfig, error) {
-	aggregate, err := kafkaAggregateConfigFromParam(params["aggregate"])
+func kafkaConfigFromParams(params map[string]any, supply map[string]any, entrySeed bool) (KafkaConsumerConfig, error) {
+	aggregate, err := kafkaAggregateConfigFromParamForMode(params["aggregate"], entrySeed)
 	if err != nil {
 		return KafkaConsumerConfig{}, err
 	}
@@ -1001,6 +1030,10 @@ func kafkaConfigFromParams(params map[string]any, supply map[string]any) (KafkaC
 }
 
 func kafkaAggregateConfigFromParam(v any) (KafkaAggregateConfig, error) {
+	return kafkaAggregateConfigFromParamForMode(v, false)
+}
+
+func kafkaAggregateConfigFromParamForMode(v any, entrySeed bool) (KafkaAggregateConfig, error) {
 	if v == nil {
 		return KafkaAggregateConfig{}, nil
 	}
@@ -1016,7 +1049,7 @@ func kafkaAggregateConfigFromParam(v any) (KafkaAggregateConfig, error) {
 		Enabled:       cast.ToBool(raw["enabled"]),
 		By:            cast.ToString(raw["by"]),
 		MaxSize:       conv.PositiveInt(raw["max_size"], defaultKafkaAggregateMaxSize),
-		FlushInterval: defaultKafkaAggregateFlushInterval,
+		FlushInterval: defaultFlushIntervalFor(entrySeed),
 		Dedup:         cast.ToString(raw["dedup"]),
 	}
 	if !cfg.Enabled {
