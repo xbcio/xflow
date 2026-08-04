@@ -56,6 +56,11 @@ type GroupPackage struct {
 	Exits        []GroupPackageExit `json:"exits"`
 	Artifacts    []GroupArtifact    `json:"artifacts,omitempty"`
 	Requirements []Requirement      `json:"requirements"`
+	// VisibleSupplies is the sorted set of supply node names the members may read
+	// through $supplies.<name>. Only the names travel: the content is fetched by
+	// the runner at activation time and deliberately stays out of the package, so
+	// PackageHash does not move when a supply's content changes.
+	VisibleSupplies []string `json:"visible_supplies,omitempty"`
 }
 
 // ProjectGroupPackage projects a deterministic GroupPackage from a compiled
@@ -134,13 +139,19 @@ func ProjectGroupPackage(g *Graph, unitIdx int) (*GroupPackage, string, error) {
 	// Build requirements from member node types.
 	reqs := buildPackageRequirements(g, memberSet)
 
+	// Build the visible-supply name list from the members' g.supplyRefs.
+	// Names only -- see the VisibleSupplies field doc for why content must
+	// never enter the package.
+	visibleSupplies := buildVisibleSupplies(g, memberSet)
+
 	pkg := &GroupPackage{
-		Version:      GroupPackageVersion,
-		GroupName:    gm.Name,
-		EntryNode:    g.nodes[gm.EntryIdx].Name,
-		Def:          def,
-		Exits:        exits,
-		Requirements: reqs,
+		Version:         GroupPackageVersion,
+		GroupName:       gm.Name,
+		EntryNode:       g.nodes[gm.EntryIdx].Name,
+		Def:             def,
+		Exits:           exits,
+		Requirements:    reqs,
+		VisibleSupplies: visibleSupplies,
 	}
 
 	hash, err := ComputePackageHash(pkg)
@@ -244,6 +255,28 @@ func buildPackageConnections(g *Graph, memberSet map[int]bool, exits []GroupPack
 	return conns
 }
 
+// buildVisibleSupplies collects the sorted, de-duplicated set of supply node
+// names referenced (via g.supplyRefs) by any member of the group. Only the
+// names are sourced here -- g.supplyRefs never carries supply content, so
+// this is inherently content-free.
+func buildVisibleSupplies(g *Graph, memberSet map[int]bool) []string {
+	seen := map[string]bool{}
+	for idx := range memberSet {
+		for _, name := range g.supplyRefs[idx] {
+			seen[name] = true
+		}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 func buildPackageRequirements(g *Graph, memberSet map[int]bool) []Requirement {
 	type reqKey struct {
 		nodeType    string
@@ -299,14 +332,21 @@ func CompileProjectedPackage(pkg *GroupPackage) (*Graph, error) {
 	if pkg.Def == nil {
 		return nil, fmt.Errorf("group package has nil Def")
 	}
-	return compileTrusted(pkg.Def)
+	return compileTrusted(pkg.Def, pkg.VisibleSupplies)
 }
 
 // compileTrusted is the internal compilation path that skips the reserved-type
 // rejection. The trust boundary is expressed by the function call itself: only
 // CompileProjectedPackage (called by the projection pipeline, not user input)
 // reaches here.
-func compileTrusted(def *types.WorkflowDef) (*Graph, error) {
+//
+// visibleSupplies widens validateSupplyUsage's declared set: a projected
+// package's Def carries no dependency edges (they never enter g.outEdges),
+// so the per-node g.supplyRefs computed here would always be empty. The
+// caller-supplied name list -- sourced from the parent graph's g.supplyRefs
+// at projection time -- is what lets a member's $supplies.<name> reference
+// pass validation.
+func compileTrusted(def *types.WorkflowDef, visibleSupplies []string) (*Graph, error) {
 	if def == nil {
 		return nil, fmt.Errorf("workflow definition is nil")
 	}
@@ -358,7 +398,7 @@ func compileTrusted(def *types.WorkflowDef) (*Graph, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := buildDependencyEdges(def, depPorts, g); err != nil {
+	if err := buildDependencyEdges(def, depPorts, g, visibleSupplies); err != nil {
 		return nil, err
 	}
 	if err := buildUnits(g); err != nil {

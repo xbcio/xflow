@@ -38,7 +38,7 @@ type dependencyPort struct {
 // It runs after buildEdges so buildEdges has already rejected any supply node
 // that also appears as an endpoint of a data edge (see ErrSupplyInDataflow),
 // and before buildUnits so no invalid graph reaches the unit pass.
-func buildDependencyEdges(def *types.WorkflowDef, depPorts []dependencyPort, g *Graph) error {
+func buildDependencyEdges(def *types.WorkflowDef, depPorts []dependencyPort, g *Graph, extraAllowedSupplies []string) error {
 	if g.supplyIndexes == nil {
 		g.supplyIndexes = map[string]int{}
 	}
@@ -50,7 +50,7 @@ func buildDependencyEdges(def *types.WorkflowDef, depPorts []dependencyPort, g *
 	}
 
 	if len(depPorts) == 0 && len(def.DependencyEdges) == 0 {
-		return validateSupplyUsage(g)
+		return validateSupplyUsage(g, extraAllowedSupplies)
 	}
 
 	refs := make(map[int]map[string]struct{}, len(depPorts)+len(def.DependencyEdges))
@@ -113,7 +113,7 @@ func buildDependencyEdges(def *types.WorkflowDef, depPorts []dependencyPort, g *
 		sort.Strings(names)
 		g.supplyRefs[consumerIdx] = names
 	}
-	return validateSupplyUsage(g)
+	return validateSupplyUsage(g, extraAllowedSupplies)
 }
 
 // suppliesRefPattern matches a static $supplies.<name> reference. The name is
@@ -192,7 +192,14 @@ func hasDynamicSupplyRef(v any) bool {
 //     derivable and both the edge check and the reverse index break);
 //   - every referenced supply must be reachable through a declared dependency
 //     edge (the dependency must be visible on the graph, not implicit).
-func validateSupplyUsage(g *Graph) error {
+//
+// extraAllowedSupplies widens the declared set for every node with names that
+// are known-visible but do not appear as a per-node dependency edge in this
+// graph -- this is how a projected group package (whose Def carries no
+// dependency edges at all, only the flattened VisibleSupplies name list)
+// re-establishes what validateSupplyUsage needs to see. It is nil for the
+// ordinary Compile path.
+func validateSupplyUsage(g *Graph, extraAllowedSupplies []string) error {
 	for i := range g.nodes {
 		params := g.nodes[i].Parameters
 		if len(params) == 0 {
@@ -208,6 +215,9 @@ func validateSupplyUsage(g *Graph) error {
 		}
 		declared := map[string]bool{}
 		for _, name := range g.supplyRefs[i] {
+			declared[name] = true
+		}
+		for _, name := range extraAllowedSupplies {
 			declared[name] = true
 		}
 		for _, ref := range refs {
