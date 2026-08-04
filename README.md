@@ -98,7 +98,7 @@ $now()                         # Built-in functions
 | Approval | `xflow.approval` | Human approval gates |
 | Merge | `xflow.merge` | Combine multiple branches |
 
-`xflow.loop` and `xflow.split` are currently experimental and should not be
+`xflow.map` and `xflow.split` are currently experimental and should not be
 used for production vulnerability approval flows yet.
 
 ## Design Principles

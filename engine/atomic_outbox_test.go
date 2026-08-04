@@ -357,7 +357,7 @@ func TestEngineLoopSplitJSONBatchesUseDurableSystemTasks(t *testing.T) {
 		Name:    "durable-loop-split",
 		Options: &types.WorkflowOptions{ExperimentalExpand: true},
 		Nodes: []types.NodeDef{
-			{Name: "loop", Type: "xflow.loop"},
+			{Name: "loop", Type: "xflow.map"},
 			{Name: "done", Type: "test.echo"},
 		},
 		Connections: types.Connections{

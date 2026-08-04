@@ -380,7 +380,7 @@ func TestCompile_BlocksExperimentalExpandByDefault(t *testing.T) {
 		name     string
 		nodeType string
 	}{
-		{name: "loop", nodeType: "xflow.loop"},
+		{name: "loop", nodeType: "xflow.map"},
 		{name: "split", nodeType: "xflow.split"},
 	}
 	for _, tc := range cases {
@@ -415,7 +415,7 @@ func TestCompile_AllowsExperimentalExpandWhenOptedIn(t *testing.T) {
 		Name:    "loop-opt-in",
 		Options: &types.WorkflowOptions{ExperimentalExpand: true},
 		Nodes: []types.NodeDef{
-			{Name: "iter", Type: "xflow.loop"},
+			{Name: "iter", Type: "xflow.map"},
 			{Name: "next", Type: "test.echo"},
 		},
 		Connections: types.Connections{
@@ -432,7 +432,7 @@ func TestCompile_ExperimentalExpandReportsAllOffendingNodes(t *testing.T) {
 		Name: "mixed",
 		Nodes: []types.NodeDef{
 			{Name: "fan", Type: "xflow.split"},
-			{Name: "iter", Type: "xflow.loop"},
+			{Name: "iter", Type: "xflow.map"},
 			{Name: "ok", Type: "test.echo"},
 		},
 	}

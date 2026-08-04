@@ -15,27 +15,27 @@ import (
 	"github.com/spf13/cast"
 )
 
-// LoopNode implements xflow.loop — iterates over a collection with an embedded sub-graph.
-type LoopNode struct {
+// MapNode implements xflow.map — runs a body sub-graph once per item.
+type MapNode struct {
 	nodeinternal.BaseNode
 	Items     string
 	BatchSize int
 }
 
-// Loop creates a loop node that iterates over a collection.
+// Map creates a map node that runs a body sub-graph over a collection.
 //
-//	node.Loop("items", 5)
-func Loop(itemsExpr string, batchSize int) *LoopNode {
+//	node.Map("items", 5)
+func Map(itemsExpr string, batchSize int) *MapNode {
 	if batchSize <= 0 {
 		batchSize = 1
 	}
-	return &LoopNode{Items: itemsExpr, BatchSize: batchSize}
+	return &MapNode{Items: itemsExpr, BatchSize: batchSize}
 }
 
-func (n *LoopNode) Descriptor() types.Descriptor {
+func (n *MapNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
-		Type:        "xflow.loop",
-		DisplayName: "Loop",
+		Type:        "xflow.map",
+		DisplayName: "Map",
 		Params: []types.ParamSpec{
 			{Name: "items", DisplayName: "Items", Type: types.ParamString, Required: true, Description: "Expression that evaluates to the array to iterate"},
 			{Name: "batch_size", DisplayName: "Batch Size", Type: types.ParamNumber, Required: false, Default: 1, Description: "Number of items processed per batch"},
@@ -49,34 +49,34 @@ func (n *LoopNode) Descriptor() types.Descriptor {
 	}
 }
 
-func (n *LoopNode) NodeType() string { return "xflow.loop" }
-func (n *LoopNode) OnError(s types.OnError) types.Builder {
+func (n *MapNode) NodeType() string { return "xflow.map" }
+func (n *MapNode) OnError(s types.OnError) types.Builder {
 	n.SetOnError(s)
 	return n
 }
 
-func (n *LoopNode) RawParams() any {
+func (n *MapNode) RawParams() any {
 	return map[string]any{
 		"items":      n.Items,
 		"batch_size": n.BatchSize,
 	}
 }
 
-func (n *LoopNode) Execute(ctx context.Context, input *types.Input) (*types.Output, error) {
+func (n *MapNode) Execute(ctx context.Context, input *types.Input) (*types.Output, error) {
 	itemsExpr, _ := input.Params["items"].(string)
 	if itemsExpr == "" {
-		return nil, fmt.Errorf("xflow.loop: items parameter is required")
+		return nil, fmt.Errorf("xflow.map: items parameter is required")
 	}
 
 	env := exprx.BuildExprEnv(input, nil)
 	result, err := exprx.EvalExpr(itemsExpr, env, false)
 	if err != nil {
-		return nil, fmt.Errorf("xflow.loop: %w", err)
+		return nil, fmt.Errorf("xflow.map: %w", err)
 	}
 
 	items, err := conv.ToSlice(result)
 	if err != nil {
-		return nil, fmt.Errorf("xflow.loop: items must evaluate to an array: %w", err)
+		return nil, fmt.Errorf("xflow.map: items must evaluate to an array: %w", err)
 	}
 
 	batchSize := 1
@@ -98,4 +98,4 @@ func (n *LoopNode) Execute(ctx context.Context, input *types.Input) (*types.Outp
 	}, nil
 }
 
-func init() { registry.Register(&LoopNode{}) }
+func init() { registry.Register(&MapNode{}) }

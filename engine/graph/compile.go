@@ -17,7 +17,7 @@ import (
 // types.CapBodySubgraphRequired) describe the same requirement but cannot be
 // inspected here without adding a graph → node runtime dependency.
 var experimentalExpandTypes = map[string]struct{}{
-	"xflow.loop":  {},
+	"xflow.map":   {},
 	"xflow.split": {},
 }
 
@@ -74,7 +74,7 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 		g.maxAutoDepth = DefaultMaxAutoDepth
 	}
 
-	// Compile-time gate: block xflow.loop / xflow.split unless the workflow
+	// Compile-time gate: block xflow.map / xflow.split unless the workflow
 	// opts into the unfinished body sub-graph implementation. See
 	// .claude/specs/expand-gate.md.
 	if !experimentalExpand {

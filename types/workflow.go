@@ -48,7 +48,7 @@ type WorkflowOptions struct {
 	// Values <= 0 use the engine default.
 	MaxAutoDepth int `json:"max_auto_depth,omitempty"`
 
-	// ExperimentalExpand opts a workflow into using xflow.loop / xflow.split
+	// ExperimentalExpand opts a workflow into using xflow.map / xflow.split
 	// nodes. Body sub-graph execution is not yet implemented: batches are
 	// currently pass-through stubs and the wiring is unstable. The compiler
 	// rejects workflows that reference these node types unless this flag is

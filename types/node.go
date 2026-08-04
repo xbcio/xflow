@@ -159,7 +159,7 @@ type Descriptor struct {
 // incomplete subsystems unless the workflow explicitly opts in.
 const (
 	// CapBodySubgraphRequired marks node types that need a compiled body
-	// sub-graph at runtime. Currently xflow.loop and xflow.split. The
+	// sub-graph at runtime. Currently xflow.map and xflow.split. The
 	// compiler rejects workflows referencing such nodes unless
 	// WorkflowOptions.ExperimentalExpand is true.
 	CapBodySubgraphRequired = "body_subgraph_required"

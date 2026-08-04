@@ -157,7 +157,7 @@ func TestScheduler_MergeWaitAll_WaitsForAll(t *testing.T) {
 type loopHandler struct{}
 
 func (h *loopHandler) Descriptor() types.Descriptor {
-	return types.Descriptor{Type: "xflow.loop"}
+	return types.Descriptor{Type: "xflow.map"}
 }
 
 func (h *loopHandler) Execute(_ context.Context, input *types.Input) (*types.Output, error) {
@@ -178,7 +178,7 @@ func TestScheduler_LoopExpansion_CreatesSubExecutions(t *testing.T) {
 		Name:    "loop-test",
 		Options: &types.WorkflowOptions{ExperimentalExpand: true},
 		Nodes: []types.NodeDef{
-			{Name: "loop", Type: "xflow.loop"},
+			{Name: "loop", Type: "xflow.map"},
 			{Name: "done", Type: "test.echo"},
 		},
 		Connections: types.Connections{
@@ -194,7 +194,7 @@ func TestScheduler_LoopExpansion_CreatesSubExecutions(t *testing.T) {
 	state := newFakeState()
 	queue := &fakeQueue{}
 	reg := &fakeRegistry{handlers: map[string]types.ActionHandler{
-		"xflow.loop": &loopHandler{},
+		"xflow.map": &loopHandler{},
 		"test.echo":  &echoHandler{},
 	}}
 	eng := newTestEngine(t, state, queue, reg)
