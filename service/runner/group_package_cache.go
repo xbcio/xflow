@@ -26,8 +26,8 @@ type PackageCacheConfig struct {
 }
 
 type cacheEntry struct {
-	graph   *graph.Graph
-	pkg     *graph.GroupPackage
+	graph    *graph.Graph
+	pkg      *graph.SubgraphPackage
 	useCount int
 }
 
@@ -56,7 +56,7 @@ var ErrPackageMissing = errors.New("group package not in payload and not cached"
 
 // Resolve validates the group package against the handler inventory and
 // returns the compiled graph. Results are cached by PackageHash.
-func (c *PackageCache) Resolve(payload *engine.GroupLeasePayload, inv HandlerInventory) (*graph.Graph, *graph.GroupPackage, error) {
+func (c *PackageCache) Resolve(payload *engine.GroupLeasePayload, inv HandlerInventory) (*graph.Graph, *graph.SubgraphPackage, error) {
 	if payload == nil {
 		return nil, nil, errors.New("nil group lease payload")
 	}
@@ -112,7 +112,7 @@ func (c *PackageCache) evictIfNeeded() {
 	}
 }
 
-func (c *PackageCache) validatePackage(pkg *graph.GroupPackage, expectedHash string, inv HandlerInventory) error {
+func (c *PackageCache) validatePackage(pkg *graph.SubgraphPackage, expectedHash string, inv HandlerInventory) error {
 	// Verify hash matches by recomputing from the package.
 	computedHash, hashErr := recomputePackageHash(pkg)
 	if hashErr != nil {
@@ -185,7 +185,7 @@ func (e *PackageValidationError) Error() string {
 	return "package validation failed: " + e.Reason
 }
 
-func recomputePackageHash(pkg *graph.GroupPackage) (string, error) {
+func recomputePackageHash(pkg *graph.SubgraphPackage) (string, error) {
 	return graph.ComputePackageHash(pkg)
 }
 

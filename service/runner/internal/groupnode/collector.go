@@ -25,7 +25,7 @@ type Collector struct {
 
 // NewCollector creates a collector that knows which collector nodes to expect
 // based on the group package's exit definitions.
-func NewCollector(pkg *graph.GroupPackage) *Collector {
+func NewCollector(pkg *graph.SubgraphPackage) *Collector {
 	m := make(map[string]exitMapping, len(pkg.Exits))
 	for _, exit := range pkg.Exits {
 		m[exit.CollectorNode] = exitMapping{
