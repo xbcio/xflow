@@ -3,6 +3,8 @@ package supplyenc
 import (
 	"bytes"
 	"crypto/rand"
+	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -182,5 +184,38 @@ func TestKeyFromBase64InvalidLength(t *testing.T) {
 	_, err := KeyFromBase64("dG9vc2hvcnQ=") // "tooshort"
 	if err == nil {
 		t.Fatal("expected error for short key")
+	}
+}
+
+// Raw is an EXPORTED field, so every fmt verb renders all 32 bytes unless
+// String/GoString intercept the call. A *Key travels widely — runner
+// keyrings, the control plane's SupplyEncryptor — so an accidental %+v on a
+// struct carrying one is plausible. This asserts on the ACTUAL key bytes in
+// the forms fmt would otherwise render them in, not on a substring we merely
+// hope is absent.
+func TestKeyRedactedInFmt(t *testing.T) {
+	k, err := GenerateKey()
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	raw := k.Raw[:]
+
+	leakForms := []string{
+		fmt.Sprintf("%v", raw),
+		fmt.Sprintf("%d", raw),
+		fmt.Sprintf("%x", raw),
+		fmt.Sprintf("%#v", raw),
+	}
+	outputs := []string{
+		fmt.Sprintf("%v", k),
+		fmt.Sprintf("%+v", k),
+		fmt.Sprintf("%#v", k),
+	}
+	for _, out := range outputs {
+		for _, leak := range leakForms {
+			if strings.Contains(out, leak) {
+				t.Fatalf("fmt output %q contains the raw key bytes in form %q", out, leak)
+			}
+		}
 	}
 }

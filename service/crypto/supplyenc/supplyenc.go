@@ -35,6 +35,17 @@ type Key struct {
 	Raw [32]byte
 }
 
+// String and GoString guard against key leakage through fmt. Raw is an
+// EXPORTED field, so %v and %+v print all 32 bytes unless an explicit method
+// intercepts them — a wider exposure than the sibling masterkey.Key, whose
+// equivalent redaction this mirrors. A *Key reaches many call sites here
+// (runner keyrings, the control plane's SupplyEncryptor), so an accidental
+// %+v on a struct carrying one is plausible.
+func (k *Key) String() string { return "supplyenc.Key(redacted)" }
+
+// GoString guards the %#v verb the same way String guards %v and %+v.
+func (k *Key) GoString() string { return "supplyenc.Key(redacted)" }
+
 // GenerateKey creates a new random 32-byte key.
 func GenerateKey() (*Key, error) {
 	var raw [32]byte

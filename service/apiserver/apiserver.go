@@ -198,7 +198,7 @@ func New(cfg Config, opts ...Option) (*APIServer, error) {
 		sup.principalAuth = cfg.PrincipalAuth
 		sup.authorizer = cfg.Authorizer
 		sup.audit = cfg.AuditSink
-		sup.encryptor = cfg.SupplyEncryptor
+		sup.encryptor = supplyEncryptorFor(cfg, s.cp)
 		s.modules = append(s.modules, sup)
 	}
 	// The artifact module registers under the same conditions and for the same
@@ -213,6 +213,30 @@ func New(cfg Config, opts ...Option) (*APIServer, error) {
 		s.modules = append(s.modules, art)
 	}
 	return s, nil
+}
+
+// supplyEncryptorFor decides which SupplyContentEncryptor the supply module
+// should use. An explicitly configured cfg.SupplyEncryptor always wins (tests
+// set it directly and must not be overridden). Otherwise it falls back to
+// cp.SupplyEncryptor(), which is populated whether cp was built internally by
+// buildControlPlane or injected via WithControlPlane -- both paths must reach
+// the same wiring, since the e2e harness exercises the latter.
+//
+// cp.SupplyEncryptor() returns a *control.SupplyEncryptor, which is nil when
+// encryption was never enabled on that control plane. That nil must be
+// checked on the concrete pointer type BEFORE any assignment to the
+// SupplyContentEncryptor interface: assigning a nil *control.SupplyEncryptor
+// to an interface variable produces a non-nil interface value (the typed-nil
+// trap), which would make module_supply.go's `m.encryptor != nil` guard pass
+// and then panic calling Encrypt on a nil receiver.
+func supplyEncryptorFor(cfg Config, cp *control.ControlPlane) SupplyContentEncryptor {
+	if cfg.SupplyEncryptor != nil {
+		return cfg.SupplyEncryptor
+	}
+	if enc := cp.SupplyEncryptor(); enc != nil {
+		return enc
+	}
+	return nil
 }
 
 // entryActivationStoreTTL bounds how long an untouched EntryActivation record
