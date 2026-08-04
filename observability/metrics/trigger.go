@@ -53,15 +53,14 @@ func (t TriggerMetrics) OnMessageDeadLettered(ctx context.Context, topic, result
 // batch size distribution. A flush mix dominated by "timeout" means the size
 // threshold is never reached — the batch is configured larger than the traffic.
 //
-// Size goes through ObserveBytes rather than Observe: Observe's value parameter
-// is a time.Duration (metrics.go:92), and a message count is not a duration.
-// ObserveBytes (metrics.go:109) takes an int and backs onto a plain histogram,
-// which is the right shape here even though the unit is records, not bytes.
+// Size goes through ObserveCount, not ObserveBytes: the unit is records, and
+// ObserveBytes' buckets start at 1 KiB, so every batch bounded by max_size=100
+// would land in one bucket and the distribution would be unreadable.
 func (t TriggerMetrics) OnBatchFlushed(ctx context.Context, topic, trigger string, size int) {
 	t.Metrics.Inc(metricTriggerBatchFlushed, withNamespace(ctx, map[string]string{
 		"topic": topic, "trigger": trigger,
 	}))
-	t.Metrics.ObserveBytes(metricTriggerBatchSize, withNamespace(ctx, map[string]string{
+	t.Metrics.ObserveCount(metricTriggerBatchSize, withNamespace(ctx, map[string]string{
 		"topic": topic,
 	}), size)
 }
