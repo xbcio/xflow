@@ -36,6 +36,7 @@ type Metrics struct {
 	counters        map[metricVecKey]*prometheus.CounterVec
 	histograms      map[metricVecKey]*prometheus.HistogramVec
 	bytesHistograms map[metricVecKey]*prometheus.HistogramVec
+	countHistograms map[metricVecKey]*prometheus.HistogramVec
 	gauges          map[metricVecKey]*prometheus.GaugeVec
 }
 
@@ -60,6 +61,7 @@ func NewWithRegistry(registry *prometheus.Registry) *Metrics {
 		counters:        make(map[metricVecKey]*prometheus.CounterVec),
 		histograms:      make(map[metricVecKey]*prometheus.HistogramVec),
 		bytesHistograms: make(map[metricVecKey]*prometheus.HistogramVec),
+		countHistograms: make(map[metricVecKey]*prometheus.HistogramVec),
 		gauges:          make(map[metricVecKey]*prometheus.GaugeVec),
 	}
 }
@@ -119,6 +121,28 @@ func (m *Metrics) ObserveBytes(name string, labels map[string]string, size int) 
 		return
 	}
 	metric.Observe(float64(size))
+}
+
+// ObserveCount records an item-count observation (records per batch, entries per
+// page — anything counted in small integers rather than bytes or seconds).
+//
+// It exists because ObserveBytes' buckets start at 1 KiB: a count bounded by a
+// two-digit maximum lands entirely in the first bucket, which makes the
+// histogram indistinguishable from a plain counter and destroys the very
+// distribution it was added to show.
+func (m *Metrics) ObserveCount(name string, labels map[string]string, count int) {
+	if m == nil || name == "" || count < 0 {
+		return
+	}
+	histogram := m.countHistogram(name, labelNames(labels))
+	if histogram == nil {
+		return
+	}
+	metric, err := histogram.GetMetricWith(prometheus.Labels(labels))
+	if err != nil {
+		return
+	}
+	metric.Observe(float64(count))
 }
 
 // Set records a gauge value.
@@ -208,6 +232,33 @@ func (m *Metrics) bytesHistogram(name string, labels []string) *prometheus.Histo
 		return nil
 	}
 	m.bytesHistograms[key] = histogram
+	m.mu.Unlock()
+	return histogram
+}
+
+// countBuckets spans single-record batches to the default aggregate max_size
+// (100), with headroom above it so a raised max_size still lands in a real
+// bucket rather than +Inf.
+var countBuckets = []float64{1, 2, 5, 10, 25, 50, 75, 100, 250, 500}
+
+func (m *Metrics) countHistogram(name string, labels []string) *prometheus.HistogramVec {
+	key := newMetricVecKey(name, labels)
+	m.mu.Lock()
+	if histogram := m.countHistograms[key]; histogram != nil {
+		m.mu.Unlock()
+		return histogram
+	}
+	histogram := prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    name,
+		Help:    helpText(name),
+		Buckets: countBuckets,
+	}, labels)
+	if err := m.registry.Register(histogram); err != nil {
+		m.mu.Unlock()
+		log.Printf("xflow metrics: register count histogram %q failed: %v", name, err)
+		return nil
+	}
+	m.countHistograms[key] = histogram
 	m.mu.Unlock()
 	return histogram
 }

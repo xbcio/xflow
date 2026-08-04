@@ -21,8 +21,28 @@ import (
 const defaultTriggerMaxInflight = 64
 const defaultKafkaAggregateMaxSize = 100
 const defaultKafkaAggregateFlushInterval = 100 * time.Millisecond
+
+// defaultKafkaEntrySeedFlushInterval is the flush timeout for the entry-seed
+// batch path. It is 10x the legacy Emit default because entry-seed flushes cross
+// the network to the control plane, and batching exists precisely to cut those
+// round trips — a 100ms window would make 10 of them per second per partition.
+//
+// The legacy default is deliberately left alone: changing it would silently
+// alter the data-path timing of deployments already running.
+const defaultKafkaEntrySeedFlushInterval = time.Second
 const kafkaAggregateByPartition = "partition"
 const kafkaAggregateDedupMessage = "message"
+
+// defaultFlushIntervalFor returns the mode-aware flush interval default.
+// This only takes effect on the YAML/JSON params path; the Go DSL path
+// normalizes at construction time before the mode is known — see the NOTE in
+// RawParams for the documented limitation.
+func defaultFlushIntervalFor(entrySeed bool) time.Duration {
+	if entrySeed {
+		return defaultKafkaEntrySeedFlushInterval
+	}
+	return defaultKafkaAggregateFlushInterval
+}
 
 type KafkaConsumer interface {
 	Messages() <-chan KafkaMessage
@@ -203,7 +223,7 @@ func (n *KafkaTriggerNode) Descriptor() types.Descriptor {
 			{Name: "group", DisplayName: "Group", Type: types.ParamString, Required: true},
 			{Name: "start_offset", DisplayName: "Start Offset", Type: types.ParamString, Default: "latest"},
 			{Name: "max_inflight", DisplayName: "Max Inflight", Type: types.ParamNumber, Default: float64(defaultTriggerMaxInflight)},
-			{Name: "aggregate", DisplayName: "Aggregate", Type: types.ParamObject, Description: "Optional partition batch aggregation: enabled, by, max_size, flush_interval, dedup"},
+			{Name: "aggregate", DisplayName: "Aggregate", Type: types.ParamObject, Description: "Optional partition batch aggregation: enabled, by, max_size, flush_interval, dedup. Under entry-seed hosting the batch is admitted to the control plane instead of emitted locally, with an admission key covering the batch's actual offset range; delivery is at-least-once (a batch may be reprocessed once if its offsets fail to commit), so consumers must be idempotent on (topic, partition, offset). flush_interval defaults to 1s in entry-seed mode and 100ms on the legacy emit path."},
 			{Name: "message_schema", DisplayName: "Message Schema", Type: types.ParamObject, Description: "Optional message validation: {required_fields: [\"f\"], on_invalid: \"discard|fail|dead_letter\", dead_letter_topic: \"t-dlq\"}. on_invalid defaults to discard (offset committed, message dropped, drop counted and logged)."},
 		},
 		Outputs: []types.PortSpec{{Name: "main", DisplayName: "Main"}},
@@ -229,6 +249,14 @@ func (n *KafkaTriggerNode) RawParams() any {
 	}
 	if n.AggregateValue.Enabled {
 		aggregate := normalizeKafkaAggregateConfig(n.AggregateValue)
+		// NOTE: flush_interval is always serialized here, which means the Go DSL
+		// path (AggregateByPartition / Aggregate) bakes the interval at construction
+		// time — before we know whether the activation will be entry-seed. The
+		// runtime mode-aware default (1s for entry-seed vs 100ms for legacy) only
+		// takes effect on the YAML/JSON params path where flush_interval is absent
+		// from the map. Go DSL users who want the entry-seed 1s default should pass
+		// time.Second explicitly. Tracked as a known limitation rather than adding a
+		// "was-explicitly-set" flag to KafkaAggregateConfig.
 		params["aggregate"] = map[string]any{
 			"enabled":        aggregate.Enabled,
 			"by":             aggregate.By,
@@ -256,7 +284,7 @@ func (n *KafkaTriggerNode) OnError(s types.OnError) types.Builder {
 func (n *KafkaTriggerNode) TriggerHandler() types.TriggerHandler { return n }
 
 func (n *KafkaTriggerNode) Activate(ctx context.Context, in *types.TriggerActivateInput) (types.TriggerSubscription, error) {
-	cfg, err := kafkaConfigFromParams(in.Params, mergedSupplyContent(in.Supplies))
+	cfg, err := kafkaConfigFromParams(in.Params, mergedSupplyContent(in.Supplies), isEntrySeedActivation(in))
 	if err != nil {
 		return nil, err
 	}
@@ -277,18 +305,6 @@ func (n *KafkaTriggerNode) Activate(ctx context.Context, in *types.TriggerActiva
 		}
 	}
 	if cfg.Aggregate.Enabled {
-		// The aggregate path emits batches through the legacy Runtime.Emit and has
-		// no entry-seed admission equivalent (a batch admission key would have to
-		// express an offset range that the control-plane fence accepts as the same
-		// key across retries). Fail closed instead of activating a consumer whose
-		// every flush would error and replay forever.
-		if isEntrySeedActivation(in) {
-			_ = consumer.Close()
-			if deadLetters != nil {
-				_ = deadLetters.Close()
-			}
-			return nil, fmt.Errorf("kafka trigger: aggregate mode is not supported for entry-seed hosting")
-		}
 		return activateKafkaAggregate(ctx, in, cfg, consumer, deadLetters), nil
 	}
 	return activateKafkaPerMessage(ctx, in, cfg, consumer, deadLetters), nil
@@ -548,6 +564,9 @@ type kafkaAggregateRuntime struct {
 	// on the per-message path. Filtering pre-batch (rather than post-flush) is
 	// what keeps one malformed record from invalidating a whole batch.
 	messageSchema *KafkaMessageSchema
+	// entrySeed selects the entry-unit seed admission path over the legacy Emit
+	// path when a batch flushes. Set once at activation (see isEntrySeedActivation).
+	entrySeed bool
 	// deadLetterPublisher is non-nil only when messageSchema.OnInvalid is
 	// dead_letter. Owned by this runtime: closed by close().
 	deadLetterPublisher KafkaDeadLetterPublisher
@@ -576,6 +595,7 @@ func activateKafkaAggregate(ctx context.Context, in *types.TriggerActivateInput,
 		emitSem:             make(chan struct{}, cfg.MaxInflight),
 		aggregators:         make(map[kafkaPartitionKey]*kafkaPartitionAggregator),
 		messageSchema:       cfg.MessageSchema,
+		entrySeed:           isEntrySeedActivation(in),
 		deadLetterPublisher: deadLetters,
 	}
 	done := make(chan struct{})
@@ -718,7 +738,7 @@ func (a *kafkaPartitionAggregator) run() {
 		select {
 		case msg, ok := <-a.ch:
 			if !ok {
-				a.flush(context.Background(), buffer, discarded)
+				a.flush(context.Background(), buffer, discarded, "close")
 				return
 			}
 			// A new message arrived: this partition is still assigned — reset
@@ -753,7 +773,7 @@ func (a *kafkaPartitionAggregator) run() {
 				resetKafkaAggregateTimer(timer, &timerActive, a.rt.cfg.FlushInterval)
 			}
 			if len(buffer) >= a.rt.cfg.MaxSize {
-				if a.flush(context.Background(), buffer, discarded) {
+				if a.flush(context.Background(), buffer, discarded, "size") {
 					buffer = nil
 					discarded = nil
 					stopKafkaAggregateTimer(timer, &timerActive)
@@ -761,7 +781,7 @@ func (a *kafkaPartitionAggregator) run() {
 			}
 		case <-timer.C:
 			timerActive = false
-			if a.flush(context.Background(), buffer, discarded) {
+			if a.flush(context.Background(), buffer, discarded, "timeout") {
 				buffer = nil
 				discarded = nil
 			} else if len(buffer) > 0 || len(discarded) > 0 {
@@ -774,7 +794,7 @@ func (a *kafkaPartitionAggregator) run() {
 			// drops the in-memory buffer, which is safe: the offsets were never
 			// committed, so Kafka redelivers to whoever owns the partition next.
 			if len(buffer) > 0 || len(discarded) > 0 {
-				a.flush(context.Background(), buffer, discarded)
+				a.flush(context.Background(), buffer, discarded, "idle")
 			}
 			return
 		}
@@ -789,7 +809,7 @@ func (a *kafkaPartitionAggregator) run() {
 // emit: the failed batch will be redelivered from the lowest uncommitted offset,
 // and advancing past a discarded offset that sits below it would skip valid
 // messages.
-func (a *kafkaPartitionAggregator) flush(ctx context.Context, messages, discarded []KafkaMessage) bool {
+func (a *kafkaPartitionAggregator) flush(ctx context.Context, messages, discarded []KafkaMessage, trigger string) bool {
 	if len(messages) == 0 {
 		if len(discarded) == 0 {
 			return true
@@ -805,10 +825,27 @@ func (a *kafkaPartitionAggregator) flush(ctx context.Context, messages, discarde
 	case <-ctx.Done():
 		return false
 	}
-	event := kafkaBatchEvent(a.rt.in.NodeName, messages)
-	if _, err := a.rt.in.Emit(ctx, event); err != nil {
-		return false
+	// Entry-seed mode admits the batch to the control plane instead of emitting
+	// locally. Both paths share the SAME commit rule below: the batch is only
+	// durable-enough-to-commit after the side effect succeeded.
+	if a.rt.entrySeed {
+		rt, ok := a.rt.in.Runtime.(types.EntrySeedRuntime)
+		if !ok {
+			// isEntrySeedActivation already required this capability, so reaching
+			// here means the runtime changed under us. Withhold the commit rather
+			// than silently falling back to Emit with a different key space.
+			return false
+		}
+		if !seedKafkaEntryBatchMessages(ctx, a.rt.in, rt, messages) {
+			return false
+		}
+	} else {
+		event := kafkaBatchEvent(a.rt.in.NodeName, messages)
+		if _, err := a.rt.in.Emit(ctx, event); err != nil {
+			return false
+		}
 	}
+	obs().OnBatchFlushed(ctx, messages[0].Topic, trigger, len(messages))
 	// Copy rather than append(messages, discarded...): appending would write
 	// into buffer's spare capacity, aliasing a slice the caller still holds.
 	commits := make([]KafkaMessage, 0, len(messages)+len(discarded))
@@ -944,8 +981,8 @@ func stopKafkaAggregateTimer(timer *time.Timer, active *bool) {
 	*active = false
 }
 
-func kafkaConfigFromParams(params map[string]any, supply map[string]any) (KafkaConsumerConfig, error) {
-	aggregate, err := kafkaAggregateConfigFromParam(params["aggregate"])
+func kafkaConfigFromParams(params map[string]any, supply map[string]any, entrySeed bool) (KafkaConsumerConfig, error) {
+	aggregate, err := kafkaAggregateConfigFromParamForMode(params["aggregate"], entrySeed)
 	if err != nil {
 		return KafkaConsumerConfig{}, err
 	}
@@ -991,7 +1028,7 @@ func kafkaConfigFromParams(params map[string]any, supply map[string]any) (KafkaC
 	return cfg, nil
 }
 
-func kafkaAggregateConfigFromParam(v any) (KafkaAggregateConfig, error) {
+func kafkaAggregateConfigFromParamForMode(v any, entrySeed bool) (KafkaAggregateConfig, error) {
 	if v == nil {
 		return KafkaAggregateConfig{}, nil
 	}
@@ -1007,7 +1044,7 @@ func kafkaAggregateConfigFromParam(v any) (KafkaAggregateConfig, error) {
 		Enabled:       cast.ToBool(raw["enabled"]),
 		By:            cast.ToString(raw["by"]),
 		MaxSize:       conv.PositiveInt(raw["max_size"], defaultKafkaAggregateMaxSize),
-		FlushInterval: defaultKafkaAggregateFlushInterval,
+		FlushInterval: defaultFlushIntervalFor(entrySeed),
 		Dedup:         cast.ToString(raw["dedup"]),
 	}
 	if !cfg.Enabled {
@@ -1040,6 +1077,11 @@ func normalizeKafkaAggregateConfig(cfg KafkaAggregateConfig) KafkaAggregateConfi
 	if cfg.MaxSize <= 0 {
 		cfg.MaxSize = defaultKafkaAggregateMaxSize
 	}
+	// This fallback only fires on the Go DSL path (Aggregate/AggregateByPartition
+	// at construction time) where the mode is not yet known. The runtime params
+	// path sets mode-aware defaults before calling normalize, so this branch is
+	// unreachable there. Always falls back to the legacy 100ms — entry-seed mode
+	// is handled upstream by kafkaAggregateConfigFromParamForMode.
 	if cfg.FlushInterval <= 0 {
 		cfg.FlushInterval = defaultKafkaAggregateFlushInterval
 	}
