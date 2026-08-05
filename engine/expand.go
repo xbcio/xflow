@@ -55,7 +55,7 @@ func (e *Engine) expandLoopSplit(ctx context.Context, lease *TaskLease, g *graph
 		})
 		entries = append(entries, OutboxEntry{
 			ID:   expansionOutboxID(lease, i),
-			Task: expansionBatchTask(lease, childID, i, batch),
+			Task: expansionBatchTask(lease, childID, i, batch, data),
 		})
 	}
 	started, err := expander.BeginTaskExpansionWithOutbox(ctx, lease, children, entries)
@@ -100,26 +100,43 @@ func loopSplitBatches(data map[string]any) ([][]any, error) {
 	return batches, nil
 }
 
-func expansionBatchTask(lease *TaskLease, childID types.ExecutionID, batchIndex int, items []any) Task {
+// expansionBatchTask builds one batch's durable task. data is the map node's own
+// output, from which the batch carries forward what the body needs but cannot
+// derive: batch_size (to turn a position within a batch into a global item
+// index) and the whole items array (exposed to the body as $items).
+//
+// These travel on every batch rather than being read back from the map node's
+// stored output because at expansion time that output does not exist yet — the
+// map node is still Waiting and only terminalizes once every batch has reported.
+// The cost is one copy of the items array per batch, which the design accepts:
+// $items is a promised DSL root, and making it lazy is a later optimization.
+func expansionBatchTask(lease *TaskLease, childID types.ExecutionID, batchIndex int, items []any, data map[string]any) Task {
+	payload := map[string]any{
+		"_batch_exec":          true,
+		"parent_exec_id":       string(lease.Task.ExecutionID),
+		"parent_node":          lease.Task.NodeName,
+		"parent_node_idx":      lease.Task.NodeIdx,
+		"parent_lease_id":      string(lease.LeaseID),
+		"parent_lease_token":   string(lease.LeaseToken),
+		"parent_attempt":       lease.Attempt,
+		"parent_activation_id": lease.Task.ActivationID,
+		"parent_auto_depth":    lease.Task.AutoDepth,
+		"child_exec_id":        string(childID),
+		"batch_index":          batchIndex,
+		"items":                items,
+	}
+	if size, err := batchPayloadInt(data, "batch_size"); err == nil && size > 0 {
+		payload["batch_size"] = size
+	}
+	if all, ok := data["items"].([]any); ok {
+		payload["all_items"] = all
+	}
 	return Task{
 		ExecutionID: lease.Task.ExecutionID,
 		NodeName:    fmt.Sprintf("%s/_batch/%d", lease.Task.NodeName, batchIndex),
 		NodeIdx:     lease.Task.NodeIdx,
 		Type:        TaskTypeNodeBatch,
-		Payload: &types.SignalPayload{Data: map[string]any{
-			"_batch_exec":          true,
-			"parent_exec_id":       string(lease.Task.ExecutionID),
-			"parent_node":          lease.Task.NodeName,
-			"parent_node_idx":      lease.Task.NodeIdx,
-			"parent_lease_id":      string(lease.LeaseID),
-			"parent_lease_token":   string(lease.LeaseToken),
-			"parent_attempt":       lease.Attempt,
-			"parent_activation_id": lease.Task.ActivationID,
-			"parent_auto_depth":    lease.Task.AutoDepth,
-			"child_exec_id":        string(childID),
-			"batch_index":          batchIndex,
-			"items":                items,
-		}},
+		Payload:     &types.SignalPayload{Data: payload},
 	}
 }
 
@@ -131,34 +148,27 @@ func expansionChildID(lease *TaskLease, batchIndex int) types.ExecutionID {
 	return types.ExecutionID(fmt.Sprintf("%s/sub/%s/%s/%d", lease.Task.ExecutionID, lease.Task.NodeName, lease.LeaseID, batchIndex))
 }
 
-// ExecuteBatch processes a single batch of an experimental loop/split
-// expansion. Its parent lease fence makes delayed or duplicate old batches
+// ExecuteBatch runs one batch of a loop/split expansion in process: it executes
+// the body sub-graph once per item and reports the batch through the expansion
+// barrier. Its parent lease fence makes delayed or duplicate old batches
 // harmless after recovery has issued a newer parent lease.
+//
+// Deployments that route batches to a runner never reach this path (see
+// WithRemoteBatchExecution); the runner's own body runtime does the same work
+// and reports through CommitSubgraphResult.
 func (e *Engine) ExecuteBatch(ctx context.Context, t *Task) error {
 	lease, childExecID, items, err := expansionBatchLease(t)
 	if err != nil {
 		return err
 	}
-
-	// EXPERIMENTAL: pass-through stub. When body sub-graph execution lands,
-	// compile and run the body graph here. See .claude/specs/expand-gate.md.
-	result := map[string]any{
-		"items": items,
-		"count": len(items),
-	}
-
-	expander, ok := e.state.(LeaseExpander)
-	if !ok {
-		return ErrAtomicCommitUnsupported
-	}
-	allDone, accepted, results, err := expander.CompleteExpandedSubExecution(ctx, lease, childExecID, types.ExecutionStatusSuccess, result)
+	batchIndex, err := batchIndexOf(t)
 	if err != nil {
 		return err
 	}
-	if !accepted || !allDone {
-		return nil
-	}
 
+	// The graph and the map node's own output are loaded BEFORE the body runs:
+	// batch_size and the full items array live there, not in the batch payload,
+	// and an inactive execution should not run body side effects at all.
 	g, active, err := e.loadActiveGraph(ctx, lease.Task.ExecutionID)
 	if err != nil {
 		return fmt.Errorf("load graph for loop/split parent %q: %w", lease.Task.ExecutionID, err)
@@ -166,7 +176,175 @@ func (e *Engine) ExecuteBatch(ctx context.Context, t *Task) error {
 	if !active {
 		return ErrExecutionInactive
 	}
+
+	// Check the parent fence BEFORE running the body. CompleteExpandedSubExecution
+	// rejects a stale batch afterwards, which was enough while the batch was a
+	// pass-through with nothing to undo — now the body has side effects, and a
+	// batch from a superseded generation would apply them before being told it no
+	// longer counts.
+	//
+	// This is best-effort, not a claim: there is no atomic "claim this batch"
+	// primitive, so a parent reclaimed in the window between this check and the
+	// body still gets duplicate side effects. That narrows the window rather than
+	// closing it, which is why body nodes with side effects must be idempotent on
+	// a business key from $item.
+	if stale, err := e.batchLeaseIsStale(ctx, lease); err != nil {
+		return err
+	} else if stale {
+		return nil
+	}
+
+	result, err := e.runBatchBody(ctx, g, lease, t, batchIndex, items)
+	if err != nil {
+		return err
+	}
+
+	expander, ok := e.state.(LeaseExpander)
+	if !ok {
+		return ErrAtomicCommitUnsupported
+	}
+	status := types.ExecutionStatusSuccess
+	if _, failed := result[batchErrorKey]; failed {
+		status = types.ExecutionStatusFailed
+	}
+	allDone, accepted, results, err := expander.CompleteExpandedSubExecution(ctx, lease, childExecID, status, result)
+	if err != nil {
+		return err
+	}
+	if !accepted || !allDone {
+		return nil
+	}
 	return e.completeLoopSplit(ctx, lease, g, results)
+}
+
+// batchLeaseIsStale reports whether the parent generation this batch belongs to
+// has already been superseded — the same condition CompleteExpandedSubExecution
+// enforces authoritatively, checked early so the body does not run for a batch
+// whose result will be discarded.
+func (e *Engine) batchLeaseIsStale(ctx context.Context, lease *TaskLease) (bool, error) {
+	node, err := e.state.GetNode(ctx, lease.Task.ExecutionID, lease.Task.NodeName)
+	if err != nil {
+		return false, fmt.Errorf("read loop/split parent %q/%q: %w", lease.Task.ExecutionID, lease.Task.NodeName, err)
+	}
+	if node == nil {
+		return true, nil
+	}
+	return node.Status != types.NodeStatusWaiting ||
+		node.LeaseID != lease.LeaseID ||
+		node.LeaseToken != lease.LeaseToken ||
+		node.Attempt != lease.Attempt ||
+		node.ActivationID != lease.Task.ActivationID, nil
+}
+
+// runBatchBody executes the body once per item and folds the outcomes into the
+// batch result the expansion barrier stores.
+//
+// A batch whose items all failed is itself a failed batch. A batch with SOME
+// failed items under continue_on_error is a successful batch carrying
+// {_error, _index} placeholders: the map node stays successful and downstream
+// filters them out, which is the whole point of the setting.
+func (e *Engine) runBatchBody(ctx context.Context, g *graph.Graph, lease *TaskLease, t *Task, batchIndex int, items []any) (map[string]any, error) {
+	if e.batchBodyExecutor == nil {
+		return nil, batchBodyError(lease.Task.NodeName, batchIndex, ErrNoBatchBodyExecutor)
+	}
+	if lease.Task.NodeIdx < 0 || lease.Task.NodeIdx >= g.NodeCount() {
+		return nil, batchBodyError(lease.Task.NodeName, batchIndex,
+			fmt.Errorf("parent node index %d is out of range", lease.Task.NodeIdx))
+	}
+	meta := g.NodeAt(lease.Task.NodeIdx)
+	body := g.MapBodyAt(lease.Task.NodeIdx)
+	if body == nil {
+		// A map node with no body has nothing to run per item. The pre-body
+		// pass-through silently returned the items unchanged, which made this
+		// indistinguishable from a body that ran; say it instead.
+		return nil, batchBodyError(lease.Task.NodeName, batchIndex, ErrNoMapBody)
+	}
+
+	allItems, batchSize := mapBatchingContext(t, len(items))
+	itemResults, err := e.batchBodyExecutor.ExecuteBatchBody(ctx, BatchBodyRequest{
+		ExecutionID:     string(lease.Task.ExecutionID),
+		ParentNode:      lease.Task.NodeName,
+		Body:            body.Package,
+		BodyHash:        body.Hash,
+		BatchIndex:      batchIndex,
+		BatchSize:       batchSize,
+		Items:           items,
+		AllItems:        allItems,
+		ContinueOnError: mapContinueOnError(meta),
+	})
+	if err != nil {
+		// The body could not be RUN — compile failure, missing handler, backend
+		// construction. Distinct from a body that ran and failed, and the
+		// distinction is why this is a returned error: it is a system fault, so
+		// the task's normal error path decides whether a retry is worth trying.
+		return nil, batchBodyError(lease.Task.NodeName, batchIndex, err)
+	}
+
+	result := batchResultData(itemResults)
+	if failedEveryItem(itemResults) {
+		result[batchErrorKey] = firstItemError(itemResults)
+	}
+	return result, nil
+}
+
+// mapBatchingContext recovers the two things a body needs that its own items
+// slice does not carry: the map node's whole items array (exposed as $items) and
+// its batch_size (needed to turn a position within a batch into a global index).
+//
+// Both are read from the batch task's payload, where expansion stamped them.
+// They cannot be read back from the map node's stored output: at the time a batch
+// runs, the map node is still Waiting and has no output — it terminalizes only
+// once every batch has reported.
+//
+// A payload missing them degrades rather than fails the batch: batch_size falls
+// back to this batch's own length, which is exactly right for a single-batch
+// expansion and merely makes $index batch-relative otherwise. Failing work that
+// would otherwise succeed is the worse trade.
+func mapBatchingContext(t *Task, batchLen int) ([]any, int) {
+	if t == nil || t.Payload == nil || t.Payload.Data == nil {
+		return nil, batchLen
+	}
+	data := t.Payload.Data
+	allItems, _ := data["all_items"].([]any)
+	batchSize, err := batchPayloadInt(data, "batch_size")
+	if err != nil || batchSize <= 0 {
+		batchSize = batchLen
+	}
+	return allItems, batchSize
+}
+
+// mapContinueOnError reads the map node's continue_on_error parameter. Only a
+// literal true enables it: an unevaluated expression is not a promise that
+// failures are tolerable.
+func mapContinueOnError(meta graph.NodeMeta) bool {
+	if meta.Parameters == nil {
+		return false
+	}
+	enabled, _ := meta.Parameters["continue_on_error"].(bool)
+	return enabled
+}
+
+// failedEveryItem reports whether a batch produced nothing usable. An empty
+// batch is not a failure: an expansion can legitimately contain one.
+func failedEveryItem(results []BatchItemResult) bool {
+	if len(results) == 0 {
+		return false
+	}
+	for _, r := range results {
+		if r.Err == nil {
+			return false
+		}
+	}
+	return true
+}
+
+func firstItemError(results []BatchItemResult) string {
+	for _, r := range results {
+		if r.Err != nil {
+			return r.Err.Error()
+		}
+	}
+	return ""
 }
 
 // batchPayloadInt coerces one of the expansion payload's integer fields. A
@@ -273,6 +451,34 @@ func failedBatchErrors(results []map[string]any) []string {
 	return msgs
 }
 
+// flattenBatchResults turns the barrier's per-BATCH results into the per-ITEM
+// array downstream sees. The barrier hands back one entry per batch, in batch
+// order, each carrying its own items array — so concatenating them in order
+// yields the items in their original order.
+//
+// This is what keeps batch_size invisible to semantics: count is the item count,
+// so raising batch_size changes how many sub-executions ran and nothing about
+// the array downstream reads. A failed item keeps its slot as {_error, _index},
+// which is what makes count equal the input length even when items failed.
+func flattenBatchResults(results []map[string]any) []any {
+	flat := make([]any, 0, len(results))
+	for _, batch := range results {
+		if batch == nil {
+			continue
+		}
+		items, ok := batch["items"].([]any)
+		if !ok {
+			// A batch that reports no items array at all — a failed batch whose
+			// body never produced one. Keep the batch result itself so the
+			// failure is visible rather than silently dropping a slot.
+			flat = append(flat, batch)
+			continue
+		}
+		flat = append(flat, items...)
+	}
+	return flat
+}
+
 // completeLoopSplit terminalizes a fully completed child generation through
 // the same token-fenced commit path as other node results. In an acyclic graph
 // that also writes the durable downstream advance intent.
@@ -282,12 +488,13 @@ func failedBatchErrors(results []map[string]any) []string {
 // downstream on silently incomplete data. The map node's own OnError decides
 // what a failure means, exactly as it does for a node that failed directly.
 func (e *Engine) completeLoopSplit(ctx context.Context, lease *TaskLease, g *graph.Graph, results []map[string]any) error {
+	flat := flattenBatchResults(results)
 	output := map[string]any{
-		"results": results,
-		"count":   len(results),
+		"results": flat,
+		"count":   len(flat),
 	}
 	if failures := failedBatchErrors(results); len(failures) > 0 {
-		return e.failLoopSplit(ctx, lease, g, output, failures)
+		return e.failLoopSplit(ctx, lease, g, output, failures, len(results))
 	}
 	outcome, err := e.commitLegacyNode(ctx, lease, types.NodeStatusSuccess, output, "main", "", false)
 	if outcome == CommitOutcomeStaleToken || outcome == CommitOutcomeDuplicateTerminal || outcome == CommitOutcomeExecutionInactive {
@@ -308,8 +515,8 @@ func (e *Engine) completeLoopSplit(ctx context.Context, lease *TaskLease, g *gra
 // itself, re-expanding every batch — including the ones that already succeeded
 // and already had their side effects. Retrying a partially applied expansion is
 // a decision for the workflow author, not a default.
-func (e *Engine) failLoopSplit(ctx context.Context, lease *TaskLease, g *graph.Graph, output map[string]any, failures []string) error {
-	cause := fmt.Errorf("%d of %d batches failed: %s", len(failures), len(output["results"].([]map[string]any)), strings.Join(failures, "; "))
+func (e *Engine) failLoopSplit(ctx context.Context, lease *TaskLease, g *graph.Graph, output map[string]any, failures []string, batchCount int) error {
+	cause := fmt.Errorf("%d of %d batches failed: %s", len(failures), batchCount, strings.Join(failures, "; "))
 	if lease.Task.NodeIdx < 0 || lease.Task.NodeIdx >= g.NodeCount() {
 		return fmt.Errorf("finalize failed loop/split node %q/%q: %w", lease.Task.ExecutionID, lease.Task.NodeName, cause)
 	}

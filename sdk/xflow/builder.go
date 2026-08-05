@@ -282,7 +282,7 @@ func (w *WorkflowBuilder) buildInternal(visited map[*WorkflowBuilder]bool) (*typ
 }
 
 // compileBodies recursively compiles body sub-workflows attached to node refs
-// and injects the resulting *WorkflowDef into the node's normalized params.
+// and injects the resulting body into the node's normalized params.
 // visited carries the cycle-detection set from buildInternal down into each
 // body's own build.
 func (w *WorkflowBuilder) compileBodies(visited map[*WorkflowBuilder]bool) error {
@@ -302,11 +302,53 @@ func (w *WorkflowBuilder) compileBodies(visited map[*WorkflowBuilder]bool) error
 		if err != nil {
 			return fmt.Errorf("node %q: %w", entry.name, err)
 		}
-		params["body"] = bodyDef
+		params["body"], err = subgraphBodyParam(bodyDef)
+		if err != nil {
+			return fmt.Errorf("node %q: body: %w", entry.name, err)
+		}
 		entry.normalizedParams = params
 	}
 	return nil
 }
+
+// subgraphBodyParam reshapes a built sub-workflow into the body shape the
+// compiler requires: a node definition of type xflow.subgraph whose own
+// parameters carry {nodes, connections}.
+//
+// A WorkflowDef cannot be used directly. It carries workflow-level fields
+// (version as a string, namespace, settings) that decode into a NodeDef's
+// same-named int fields and fail, and the compiler asserts body.type
+// (engine/graph/compile.go:479) — which a WorkflowDef has no field for at all.
+// Only the members and their wiring are meaningful for a body: everything else
+// on a workflow describes a deployment, and a body is not deployed.
+//
+// The members round-trip through JSON rather than being embedded as structs.
+// Parameters must hold immutable value types only (the value-domain guard
+// rejects the *Position pointers a NodeDef carries), and the body reaches the
+// compiler as opaque JSON anyway — decodeSubgraphMembers re-marshals whatever
+// is here.
+func subgraphBodyParam(def *types.WorkflowDef) (map[string]any, error) {
+	shape := map[string]any{
+		"nodes":       def.Nodes,
+		"connections": def.Connections,
+	}
+	data, err := json.Marshal(shape)
+	if err != nil {
+		return nil, fmt.Errorf("encode body members: %w", err)
+	}
+	var params map[string]any
+	if err := json.Unmarshal(data, &params); err != nil {
+		return nil, fmt.Errorf("decode body members: %w", err)
+	}
+	return map[string]any{
+		"type":       subgraphBodyNodeType,
+		"parameters": params,
+	}, nil
+}
+
+// subgraphBodyNodeType is the body-only node type. It mirrors
+// engine/graph's subgraphNodeType, which is unexported.
+const subgraphBodyNodeType = "xflow.subgraph"
 
 // validateAndNormalizeParams resolves each Builder-based node's descriptor,
 // sets its kind, and validates/normalizes its params. Direct-handler nodes and
@@ -399,8 +441,33 @@ func (w *WorkflowBuilder) assembleDependencyEdges(def *types.WorkflowDef) {
 }
 
 // directHandlers returns the map of node name → direct ActionHandler.
+// directHandlers returns the name-scoped handlers this workflow declares,
+// including those declared inside a node's body sub-workflow.
+//
+// The recursion matters: a body's members are dispatched by the same registry
+// as the outer graph's, so a body's LocalNode handler must be registered
+// alongside the outer ones. Returning only w.direct left the body's handlers
+// unregistered, and a map body assembled from LocalNode members failed package
+// validation ("handler not available: type=__direct__/<name>") on every batch.
 func (w *WorkflowBuilder) directHandlers() map[string]types.ActionHandler {
-	return w.direct
+	handlers := make(map[string]types.ActionHandler, len(w.direct))
+	w.collectDirectHandlers(handlers, map[*WorkflowBuilder]bool{})
+	return handlers
+}
+
+func (w *WorkflowBuilder) collectDirectHandlers(handlers map[string]types.ActionHandler, visited map[*WorkflowBuilder]bool) {
+	if w == nil || visited[w] {
+		return
+	}
+	visited[w] = true
+	for nodeName, h := range w.direct {
+		handlers[nodeName] = h
+	}
+	for _, ref := range w.refs {
+		if ref.body != nil {
+			ref.body.collectDirectHandlers(handlers, visited)
+		}
+	}
 }
 
 // workflowHandlers returns portable typed handlers declared by this workflow.

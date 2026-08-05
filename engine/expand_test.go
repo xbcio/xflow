@@ -177,7 +177,7 @@ func TestScheduler_LoopExpansion_CreatesSubExecutions(t *testing.T) {
 	def := &types.WorkflowDef{
 		Name: "loop-test",
 		Nodes: []types.NodeDef{
-			{Name: "loop", Type: "xflow.map"},
+			{Name: "loop", Type: "xflow.map", Parameters: mapBodyParamsForTest()},
 			{Name: "done", Type: "test.echo"},
 		},
 		Connections: types.Connections{
@@ -196,7 +196,11 @@ func TestScheduler_LoopExpansion_CreatesSubExecutions(t *testing.T) {
 		"xflow.map": &loopHandler{},
 		"test.echo":  &echoHandler{},
 	}}
-	eng := newTestEngine(t, state, queue, reg)
+	// The body is what a batch runs now, so an expansion test needs an executor
+	// for it. echoBodyExecutor stands in for a real sub-graph execution.
+	eng := New(state, queue, WithBatchBodyExecutor(newEchoBodyExecutor()))
+	testRegistries.Store(eng, reg)
+	t.Cleanup(func() { testRegistries.Delete(eng) })
 	ctx := context.Background()
 
 	id, err := eng.Submit(ctx, g, nil)

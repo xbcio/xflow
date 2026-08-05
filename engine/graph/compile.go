@@ -178,6 +178,21 @@ func registerNodes(def *types.WorkflowDef, g *Graph) (int, error) {
 			if err := validateMapBody(nd); err != nil {
 				return 0, err
 			}
+			// Project the body here, at compile time, so every batch of this map
+			// node shares one package and one hash. Projecting per batch would
+			// recompute the same package N times and — worse — give the
+			// executor's hash-keyed cache N different keys if the projection
+			// were ever non-deterministic.
+			if _, hasBody := nd.Parameters["body"]; hasBody {
+				body, err := ProjectMapBodyPackage(nd.Name, nd.Parameters)
+				if err != nil {
+					return 0, err
+				}
+				if g.mapBodies == nil {
+					g.mapBodies = make(map[int]*MapBodyPackage)
+				}
+				g.mapBodies[i] = body
+			}
 		}
 		if g.allowCycles {
 			if nd.Type == "xflow.start" {
@@ -523,35 +538,8 @@ func decodeSubgraphMembers(params map[string]any) ([]types.NodeDef, types.Connec
 // assertEntryDominates unchanged — a body and a node group are the same
 // structure (group_compile.go:99-159), so no new validator is written here.
 func validateBodyEntry(mapNodeName string, nodes []types.NodeDef, conns types.Connections) error {
-	bodyDef := &types.WorkflowDef{Nodes: nodes, Connections: conns}
-	n := len(nodes)
-	bg := &Graph{
-		nodes:        make([]NodeMeta, n),
-		index:        make(map[string]int, n),
-		entryIndexes: make(map[string]int),
-		outEdges:     make([][]Edge, n),
-		inEdges:      make([][]Edge, n),
-		inDegree:     make([]int, n),
-		startIdx:     -1,
-	}
-	if _, err := registerNodes(bodyDef, bg); err != nil {
-		return fmt.Errorf("node %q: body: %w", mapNodeName, err)
-	}
-	if _, err := buildEdges(bodyDef, bg); err != nil {
-		return fmt.Errorf("node %q: body: %w", mapNodeName, err)
-	}
-	members := make(map[int]bool, n)
-	for i := 0; i < n; i++ {
-		members[i] = true
-	}
-	entry, _, err := resolveGroupEntry(bg, members)
-	if err != nil {
-		return fmt.Errorf("node %q: body: %w", mapNodeName, err)
-	}
-	if err := assertEntryDominates(bg, entry, members); err != nil {
-		return fmt.Errorf("node %q: body: %w", mapNodeName, err)
-	}
-	return nil
+	_, _, err := compileBodyMembers(mapNodeName, nodes, conns)
+	return err
 }
 
 // detectCycle uses Kahn's algorithm (topological sort) to detect cycles.

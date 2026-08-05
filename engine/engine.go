@@ -99,6 +99,7 @@ type Engine struct {
 	suspendDisabled          bool
 	suspendDisabledErr       error
 	groupExecutor            GroupExecutor
+	batchBodyExecutor        BatchBodyExecutor
 	remoteBatchExecution     bool
 
 	mu     sync.RWMutex

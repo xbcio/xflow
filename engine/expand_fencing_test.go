@@ -13,7 +13,7 @@ func TestEngineLoopSplitStaleBatchCannotFinalizeReclaimedParent(t *testing.T) {
 	def := &types.WorkflowDef{
 		Name: "loop-stale-batch-fence",
 		Nodes: []types.NodeDef{
-			{Name: "loop", Type: "xflow.map"},
+			{Name: "loop", Type: "xflow.map", Parameters: mapBodyParamsForTest()},
 			{Name: "done", Type: "test.echo"},
 		},
 		Connections: types.Connections{
@@ -27,7 +27,14 @@ func TestEngineLoopSplitStaleBatchCannotFinalizeReclaimedParent(t *testing.T) {
 
 	state := newFakeState()
 	queue := &fakeQueue{}
-	eng := newTestEngine(t, state, queue, &fakeRegistry{})
+	// A stale batch used to be harmless because it had nothing to do: the batch
+	// was a pass-through. Now it runs a body, so the fence has to stop the body
+	// from running at all, not just discard its result. This executor records
+	// every batch it was asked to run, which is the side-effect evidence.
+	body := newEchoBodyExecutor()
+	eng := New(state, queue, WithBatchBodyExecutor(body))
+	testRegistries.Store(eng, &fakeRegistry{})
+	t.Cleanup(func() { testRegistries.Delete(eng) })
 	ctx := context.Background()
 	id, err := eng.Submit(ctx, g, nil)
 	if err != nil {
@@ -84,6 +91,10 @@ func TestEngineLoopSplitStaleBatchCannotFinalizeReclaimedParent(t *testing.T) {
 
 	if err := eng.ExecuteBatch(ctx, oldBatches[0]); err != nil {
 		t.Fatalf("ExecuteBatch(stale) error = %v", err)
+	}
+	if ran := body.requests(); len(ran) != 0 {
+		t.Errorf("the stale batch ran its body %d time(s): %+v — its side effects landed for a generation "+
+			"that no longer counts, and rejecting the RESULT afterwards cannot undo them", len(ran), ran)
 	}
 	node, err := state.GetNode(ctx, id, "loop")
 	if err != nil {

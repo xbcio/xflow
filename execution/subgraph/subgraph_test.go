@@ -108,3 +108,23 @@ func TestExecutor_RunsAPackageWithNoKnowledgeOfItsCaller(t *testing.T) {
 		t.Error("expected exit results")
 	}
 }
+
+// A name-scoped handler (sdk.LocalNode, execution.Registry.RegisterNodeHandler)
+// carries the synthetic node type "__direct__/<node-name>". Nothing is ever
+// registered under that string as a TYPE, so a type-only inventory reports the
+// handler missing and the package is rejected before it runs — which is what a
+// map body built from LocalNode members hits.
+func TestInventoryResolvesNameScopedHandlers(t *testing.T) {
+	reg := execution.NewRegistry()
+	reg.RegisterNodeHandler("double", echoHandler{})
+	inv := (&Executor{registry: reg}).inventoryFromRegistry()
+
+	if !inv.Has("__direct__/double", 0) {
+		t.Error("inventory reports __direct__/double unavailable, but a handler is registered " +
+			"for node name \"double\"; a body of LocalNode members can never pass validation")
+	}
+	if inv.Has("__direct__/absent", 0) {
+		t.Error("inventory reports __direct__/absent available with no handler registered: " +
+			"the name-scoped path must still fail closed")
+	}
+}

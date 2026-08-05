@@ -192,6 +192,13 @@ type registryInventory struct {
 }
 
 func (ri *registryInventory) Has(nodeType string, version int) bool {
+	// A name-scoped handler (sdk.LocalNode) has no portable node type: its
+	// NodeDef.Type is the synthetic "__direct__/<node name>" and nothing is
+	// registered under that string as a type. Resolve it by the name it encodes
+	// instead, or a body assembled from LocalNode members could never validate.
+	if name, ok := execution.DirectHandlerNodeName(nodeType); ok {
+		return ri.reg.HasNodeHandler(name)
+	}
 	// Try to resolve via the registry — global handlers only.
 	_, err := ri.reg.Get("", "", nodeType, version)
 	return err == nil
