@@ -717,3 +717,83 @@ func TestHTTPGroupPollReturnsGroupPayloadJSON(t *testing.T) {
 		}
 	}
 }
+
+// replayingRunnerDirectory hands back a durable finalized lease as a replay on
+// the FIRST claim and nothing afterwards, which is what RedisRunnerDirectory
+// does via replayLease. MemoryRunnerDirectory has no replay path at all, so a
+// test built on it can never reach pollTask's claim.Lease != nil branch --
+// which is precisely why the whole unit suite stayed green while the group
+// binary e2e went red on this bug.
+type replayingRunnerDirectory struct {
+	RunnerDirectory
+	replay  *engine.TaskLease
+	assign  Assignment
+	served  bool
+	cleared []AssignmentID
+}
+
+func (d *replayingRunnerDirectory) ClaimForRunner(_ context.Context, _ ClaimRequest) (Claim, bool, error) {
+	if d.served {
+		return Claim{}, false, nil
+	}
+	d.served = true
+	return Claim{ClaimID: "claim-replay", Assignment: d.assign, Lease: d.replay}, true, nil
+}
+
+func (d *replayingRunnerDirectory) ClearAssignment(_ context.Context, id AssignmentID) error {
+	d.cleared = append(d.cleared, id)
+	return nil
+}
+
+// TestGroupPollReplayAfterCommitDropsAssignment covers the regression where a
+// durable at-least-once replay arriving AFTER the group already committed took
+// down the whole runner.
+//
+// Sequence: the group task was claimed, finalized, executed and committed, so
+// its group lease is gone from the backend -- and only then does the directory
+// hand the same finalized lease back as a replay (a legitimate at-least-once
+// delivery). RecoverGroupLease therefore finds no live lease.
+//
+// Before the fix that error propagated out of pollTask, which the transport
+// renders as HTTP 500; the runner's pollLoop treats any poll error as fatal
+// and returns, so the runner stopped claiming work entirely and every
+// downstream node of that group stalled until the caller timed out. The replay
+// must instead be recognized as a duplicate of finished work: drop the
+// assignment and keep serving polls.
+func TestGroupPollReplayAfterCommitDropsAssignment(t *testing.T) {
+	ctx := context.Background()
+	assignment := groupTestAssignment()
+	replayLease := &engine.TaskLease{
+		LeaseID:    "lease-grp-done",
+		LeaseToken: "token-grp-done",
+		Task:       assignment.Task,
+		Attempt:    1,
+		NodeType:   "xflow.group",
+	}
+	dir := &replayingRunnerDirectory{
+		RunnerDirectory: NewMemoryRunnerDirectory(),
+		replay:          replayLease,
+		assign:          assignment,
+	}
+	fake := &groupFakeEngine{groupRecoverErr: engine.ErrGroupLeaseNotActive}
+	core := &Core{engine: fake, runners: dir, pollWait: time.Second}
+
+	resp, err := core.pollTask(ctx, protocol.PollTaskRequest{
+		RunnerID:  "runner-grp",
+		SessionID: "session-grp",
+		Capacity:  1,
+	}, TransportInfo{})
+	if err != nil {
+		t.Fatalf("replay pollTask() error = %v, want nil (a post-commit replay "+
+			"is finished work, not a server error -- propagating it returns 500 "+
+			"and the runner's pollLoop stops claiming work)", err)
+	}
+	if resp.Lease != nil {
+		t.Fatalf("replay pollTask() returned lease %+v, want nil", resp.Lease)
+	}
+	if len(dir.cleared) != 1 || dir.cleared[0] != assignment.AssignmentID {
+		t.Errorf("cleared assignments = %v, want [%s] -- a replay of finished "+
+			"work must be dropped, not left to be replayed forever",
+			dir.cleared, assignment.AssignmentID)
+	}
+}

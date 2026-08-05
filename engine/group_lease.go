@@ -40,6 +40,13 @@ var ErrGroupLeaseAlreadyActive = errors.New("group lease already active")
 // suspend (not yet supported).
 var ErrGroupSuspendNotSupported = errors.New("group suspend not supported in this milestone")
 
+// ErrGroupLeaseNotActive is returned by RecoverGroupLease when the unit has no
+// live group lease in the backend. This is NOT an internal failure: a durable
+// at-least-once replay that arrives after the group already committed hits it
+// on every fast group. Callers must treat it as "this assignment is finished,
+// drop it" rather than propagating it as a server error.
+var ErrGroupLeaseNotActive = errors.New("group lease not active")
+
 // BuildGroupLease assembles a group lease for a queued group task. Unlike
 // BuildTaskLease, the lease payload carries the full SubgraphPackage and entry
 // input, and TaskLease.Input is nil (the group payload is authoritative).
@@ -174,7 +181,7 @@ func (e *Engine) RecoverGroupLease(ctx context.Context, execID types.ExecutionID
 		return nil, nil, fmt.Errorf("recover group lease: %w", err)
 	}
 	if lease == nil {
-		return nil, nil, fmt.Errorf("no active group lease for execution %s unit %d", execID, unitIdx)
+		return nil, nil, fmt.Errorf("%w: execution %s unit %d", ErrGroupLeaseNotActive, execID, unitIdx)
 	}
 
 	gm := g.GroupMetaAt(unitIdx)
