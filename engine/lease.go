@@ -40,6 +40,14 @@ func (e *Engine) BuildTaskLease(ctx context.Context, t *Task) (*TaskLease, error
 	} else if handled {
 		return nil, ErrSystemTaskHandled
 	}
+	// A batch task names a synthetic node that the compiled graph never
+	// declared, so the node-lease path below would write live state for a node
+	// that does not exist and commit it as an ordinary node result — firing
+	// downstream on the first batch instead of the last. Batches have their own
+	// lease path; fail closed rather than mint that lease here.
+	if t.Type == TaskTypeNodeBatch {
+		return nil, ErrBatchLeaseRequired
+	}
 
 	g, active, err := e.loadActiveGraph(ctx, t.ExecutionID)
 	if err != nil {
@@ -119,7 +127,16 @@ func (e *Engine) RecoverTaskLease(ctx context.Context, task *Task) (*TaskLease, 
 	if task == nil {
 		return nil, fmt.Errorf("recover task lease: nil task")
 	}
-	if task.Type == TaskTypeNodeAdvance || task.Type == TaskTypeNodeSkip || task.Type == TaskTypeNodeBatch {
+	// A batch is leased to a runner, so a response-loss replay must be able to
+	// rebuild it. BuildSubgraphLease mutates nothing — it derives the lease from
+	// the task payload and the graph — so rebuilding is a replay of the same
+	// lease, not the issue of a second one. NodeAdvance and NodeSkip remain
+	// unrecoverable: they are control-plane-internal and never leave the engine.
+	if task.Type == TaskTypeNodeBatch {
+		lease, _, err := e.BuildSubgraphLease(ctx, task)
+		return lease, err
+	}
+	if task.Type == TaskTypeNodeAdvance || task.Type == TaskTypeNodeSkip {
 		return nil, ErrLeaseNotRecoverable
 	}
 	g, active, err := e.loadActiveGraph(ctx, task.ExecutionID)

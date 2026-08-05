@@ -24,6 +24,47 @@ func isGroupTask(t *engine.Task) bool {
 	return t != nil && t.Type == engine.TaskTypeGroupExec
 }
 
+// isBatchTask returns true when the task is one batch of a map expansion.
+func isBatchTask(t *engine.Task) bool {
+	return t != nil && t.Type == engine.TaskTypeNodeBatch
+}
+
+// subgraphLeaseEngine is the optional interface for engines that support batch
+// lease lifecycle. The concrete *engine.Engine implements both methods.
+type subgraphLeaseEngine interface {
+	BuildSubgraphLease(ctx context.Context, t *engine.Task) (*engine.TaskLease, *engine.SubgraphLeasePayload, error)
+}
+
+// dispatchSubgraphLease handles the BuildSubgraphLease + FinalizeClaim flow for
+// batch tasks, mirroring dispatchGroupLease.
+func (c *Core) dispatchSubgraphLease(ctx context.Context, claim Claim) (protocol.PollTaskResponse, error) {
+	se, ok := c.engine.(subgraphLeaseEngine)
+	if !ok {
+		_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimRequeue)
+		return protocol.PollTaskResponse{}, errors.New("engine does not support batch leases")
+	}
+
+	lease, payload, err := se.BuildSubgraphLease(ctx, &claim.Assignment.Task)
+	switch {
+	case err == nil:
+		lease.SubgraphPayload = payload
+		lease.Namespace = claim.Assignment.Namespace
+		if err := c.runners.FinalizeClaim(ctx, claim.ClaimID, lease); err != nil {
+			_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimRequeue)
+			return protocol.PollTaskResponse{}, normalizeRunnerError(err, c.logger, "poll")
+		}
+		return protocol.PollTaskResponse{Lease: lease}, nil
+
+	case errors.Is(err, engine.ErrExecutionInactive):
+		_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimDrop)
+		return protocol.PollTaskResponse{}, nil
+
+	default:
+		_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimRequeue)
+		return protocol.PollTaskResponse{}, err
+	}
+}
+
 // dispatchGroupLease handles the BuildGroupLease + FinalizeClaim flow for group
 // tasks, mirroring the node BuildTaskLease path but attaching GroupPayload.
 func (c *Core) dispatchGroupLease(ctx context.Context, claim Claim) (protocol.PollTaskResponse, error) {

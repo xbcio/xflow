@@ -385,6 +385,20 @@ func (c *Core) pollTask(ctx context.Context, req protocol.PollTaskRequest, info 
 			continue
 		}
 
+		// Batch tasks likewise dispatch through their own lease path: they name
+		// a synthetic node outside the compiled graph, so BuildTaskLease
+		// refuses them.
+		if isBatchTask(&claim.Assignment.Task) {
+			resp, err := c.dispatchSubgraphLease(ctx, claim)
+			if err != nil {
+				return protocol.PollTaskResponse{}, err
+			}
+			if resp.Lease != nil {
+				return resp, nil
+			}
+			continue
+		}
+
 		tracer := c.tracer
 		if tracer == nil {
 			tracer = tracing.NoopTracer{}

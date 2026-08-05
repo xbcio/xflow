@@ -99,6 +99,7 @@ type Engine struct {
 	suspendDisabled          bool
 	suspendDisabledErr       error
 	groupExecutor            GroupExecutor
+	localBatchExecution      bool
 
 	mu     sync.RWMutex
 	graphs map[types.ExecutionID]*graph.Graph

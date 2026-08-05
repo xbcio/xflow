@@ -362,6 +362,15 @@ func (e *Engine) handleSystemTask(ctx context.Context, task *Task, flush bool) (
 		return true, e.FlushOutbox(ctx, task.ExecutionID)
 
 	case TaskTypeNodeBatch:
+		if !e.localBatchExecution {
+			// Let the Dispatcher route this to a remote runner, the same escape
+			// TaskTypeGroupExec uses below. Consuming the batch here would keep
+			// the map node's runnerSelector from ever reaching the directory
+			// that matches labels, so body work would silently run wherever the
+			// engine runs. Embedded deployments opt back in with
+			// WithLocalBatchExecution.
+			return false, nil
+		}
 		return true, e.ExecuteBatch(ctx, task)
 
 	case TaskTypeNodeSkip:

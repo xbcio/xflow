@@ -28,6 +28,12 @@ func (e *Engine) CommitTaskResultWithOutcome(ctx context.Context, lease *TaskLea
 	if lease == nil {
 		return CommitOutcomeStaleToken, ErrInvalidLeaseToken
 	}
+	// A batch lease commits through the expansion barrier, not the node path:
+	// the node path terminalizes the map node on the first batch and fires
+	// downstream while the rest are still in flight.
+	if lease.SubgraphPayload != nil {
+		return e.CommitSubgraphResult(ctx, lease, result)
+	}
 	t := &lease.Task
 	g, active, err := e.loadActiveGraph(ctx, t.ExecutionID)
 	if err != nil {

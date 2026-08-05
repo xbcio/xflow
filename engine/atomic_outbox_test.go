@@ -407,8 +407,22 @@ func TestEngineLoopSplitJSONBatchesUseDurableSystemTasks(t *testing.T) {
 	if len(batches) != 1 || batches[0].Type != TaskTypeNodeBatch {
 		t.Fatalf("delivered batches = %+v, want one internal batch task", batches)
 	}
-	if _, err := eng.BuildTaskLease(ctx, batches[0]); !errors.Is(err, ErrSystemTaskHandled) {
-		t.Fatalf("BuildTaskLease(batch) error = %v, want ErrSystemTaskHandled", err)
+	// A batch is routable work now, not something the control plane swallows.
+	// BuildTaskLease must refuse it rather than mint an ordinary node lease for
+	// the synthetic "loop/_batch/0" name; the batch goes through
+	// BuildSubgraphLease, and its result through the expansion barrier.
+	if _, err := eng.BuildTaskLease(ctx, batches[0]); !errors.Is(err, ErrBatchLeaseRequired) {
+		t.Fatalf("BuildTaskLease(batch) error = %v, want ErrBatchLeaseRequired", err)
+	}
+	lease, payload, err := eng.BuildSubgraphLease(ctx, batches[0])
+	if err != nil {
+		t.Fatalf("BuildSubgraphLease(batch) error = %v", err)
+	}
+	if _, err := eng.CommitSubgraphResult(ctx, lease, TaskResult{Output: &types.Output{Data: map[string]any{
+		"items": payload.Items,
+		"count": len(payload.Items),
+	}}}); err != nil {
+		t.Fatalf("CommitSubgraphResult(batch) error = %v", err)
 	}
 	downstream := queue.Drain()
 	if len(downstream) != 1 || downstream[0].NodeName != "done" || downstream[0].Type != TaskTypeNodeExec {
