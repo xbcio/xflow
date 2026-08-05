@@ -76,7 +76,7 @@ func (r *SubgraphRuntime) Execute(ctx context.Context, lease *engine.TaskLease) 
 			payload.BatchIndex, payload.ParentNode, err)
 	}
 
-	data, failure := engine.BatchResultForCommit(results)
+	data, failure := engine.BatchResultForCommit(results, payload.ContinueOnError)
 	return engine.TaskResult{
 		Output: &types.Output{Data: data},
 		Error:  failure,

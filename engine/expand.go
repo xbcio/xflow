@@ -261,6 +261,7 @@ func (e *Engine) runBatchBody(ctx context.Context, g *graph.Graph, lease *TaskLe
 	}
 
 	allItems, batchSize := mapBatchingContext(t, len(items))
+	continueOnError := mapContinueOnError(meta)
 	itemResults, err := e.batchBodyExecutor.ExecuteBatchBody(ctx, BatchBodyRequest{
 		ExecutionID:     string(lease.Task.ExecutionID),
 		ParentNode:      lease.Task.NodeName,
@@ -270,7 +271,7 @@ func (e *Engine) runBatchBody(ctx context.Context, g *graph.Graph, lease *TaskLe
 		BatchSize:       batchSize,
 		Items:           items,
 		AllItems:        allItems,
-		ContinueOnError: mapContinueOnError(meta),
+		ContinueOnError: continueOnError,
 	})
 	if err != nil {
 		// The body could not be RUN — compile failure, missing handler, backend
@@ -281,7 +282,7 @@ func (e *Engine) runBatchBody(ctx context.Context, g *graph.Graph, lease *TaskLe
 	}
 
 	e.observeItemFailures(g.Name(), lease.Task.NodeName, itemResults)
-	result, failure := BatchResultForCommit(itemResults)
+	result, failure := BatchResultForCommit(itemResults, continueOnError)
 	if failure != nil {
 		result[batchErrorKey] = failure.Error()
 	}

@@ -12,7 +12,9 @@
 package integration
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -141,6 +143,23 @@ func freeAddr(t *testing.T) string {
 	return addr
 }
 
+// r8MasterKeyFile writes a 0600 file holding a base64 32-byte master key.
+//
+// Production mode refuses to start without one (cmd/server/main.go's
+// requireProduction), so every real-binary e2e needs it. The key is a fixed
+// test-only value rather than a random one so a failing run is reproducible; it
+// protects nothing but this test's own throwaway MySQL rows.
+func r8MasterKeyFile(t *testing.T) string {
+	t.Helper()
+	// 32 bytes of 0x2a, base64-encoded. Deliberately not derived from anything.
+	key := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x2a}, 32))
+	path := filepath.Join(t.TempDir(), "r8-master-key")
+	if err := os.WriteFile(path, []byte(key), 0o600); err != nil {
+		t.Fatalf("write master key file: %v", err)
+	}
+	return path
+}
+
 // startR8Server builds and starts the production server binary, polling
 // /readyz until it is ready (or fails fast). Returns the HTTP base URL, a
 // captured output buffer, and a stop function.
@@ -152,6 +171,7 @@ func startR8Server(t *testing.T, serverBin, addr, redisAddr, dsn, tokensFile str
 		"-redis", redisAddr,
 		"-mysql-dsn", dsn,
 		"-auth-tokens-file", tokensFile,
+		"-master-key-file", r8MasterKeyFile(t),
 		"-require-api-auth",
 		"-management",
 		"-mode", "production",

@@ -106,23 +106,41 @@ func globalItemIndex(batchIndex, batchSize, posInBatch int) int {
 // stamps the result map directly, the other returns it as the lease's error for
 // CommitSubgraphResult to stamp), but deriving it is the same decision.
 //
-// A batch fails only when EVERY item failed. A partial failure is not the
-// batch's failure: the failed items occupy their slots as {_error, _index} and
-// the map node's own OnError decides what a hole in its results means. An empty
-// batch is not a failure either — an expansion can legitimately contain one.
-func BatchResultForCommit(results []BatchItemResult) (map[string]any, error) {
+// continueOnError is what the verdict turns on, because it is what the failure
+// MEANS:
+//
+//   - false: any failed item fails the batch. The body stopped there, so the
+//     remaining items never ran and the results array is short. Calling that a
+//     success would terminalize the map node as Success with a hole in its
+//     results — the opposite of what "stop on error" asked for.
+//   - true: a partially-failed batch SUCCEEDS. The {_error, _index}
+//     placeholders are the deliverable; the map node stays successful and
+//     downstream filters them. Failing the batch here would make the setting a
+//     no-op.
+//
+// A batch whose every item failed is failed under either setting. An empty batch
+// is not a failure — an expansion can legitimately contain one.
+func BatchResultForCommit(results []BatchItemResult, continueOnError bool) (map[string]any, error) {
 	data := batchResultData(results)
 	if len(results) == 0 {
 		return data, nil
 	}
 	var first error
+	succeeded := 0
 	for _, r := range results {
 		if r.Err == nil {
-			return data, nil
+			succeeded++
+			continue
 		}
 		if first == nil {
 			first = r.Err
 		}
+	}
+	if first == nil {
+		return data, nil
+	}
+	if continueOnError && succeeded > 0 {
+		return data, nil
 	}
 	return data, first
 }
