@@ -94,6 +94,7 @@ type Engine struct {
 	commitObserver           CommitObserver
 	outboxObserver           OutboxObserver
 	nodeFailureObserver      NodeFailureObserver
+	itemFailureObserver      ItemFailureObserver
 	outboxMaxDeliveryAttempt int
 	defaultLeaseTTL          time.Duration
 	suspendDisabled          bool

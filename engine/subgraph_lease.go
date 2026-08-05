@@ -166,6 +166,16 @@ func (e *Engine) CommitSubgraphResult(ctx context.Context, lease *TaskLease, res
 		batchResult[batchErrorKey] = result.Error.Error()
 	}
 
+	// Count the batch's failed items. This is the only place a runner's batches
+	// can be counted: the control plane escapes them (WithRemoteBatchExecution),
+	// so its engine never runs a body and never reaches observeItemFailures.
+	//
+	// The count is read back OUT of the reported result rather than taken from a
+	// dedicated field, because the placeholders are what actually reach
+	// downstream — counting anything else would let the metric and the data
+	// disagree.
+	e.observeReportedItemFailures(ctx, lease, batchResult)
+
 	// Reconstruct the parent lease the expansion layer fences against. Its
 	// identity travels on the batch lease itself (BuildSubgraphLease copies it
 	// verbatim), so a batch from a superseded parent generation carries the old
@@ -212,6 +222,45 @@ func (e *Engine) CommitSubgraphResult(ctx context.Context, lease *TaskLease, res
 		return CommitOutcomeTransientError, err
 	}
 	return CommitOutcomeAccepted, nil
+}
+
+// observeReportedItemFailures counts the {_error, _index} placeholders in a
+// batch result a runner reported.
+//
+// The workflow name needs the compiled graph, and this runs on every batch
+// commit, so the lookup is skipped entirely when no observer is installed and
+// when the batch had no failures — the common case for both.
+func (e *Engine) observeReportedItemFailures(ctx context.Context, lease *TaskLease, batchResult map[string]any) {
+	if e.itemFailureObserver == nil {
+		return
+	}
+	items, ok := batchResult["items"].([]any)
+	if !ok {
+		return
+	}
+	failed := 0
+	for _, item := range items {
+		row, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if _, isErr := row[batchErrorKey]; isErr {
+			failed++
+		}
+	}
+	if failed == 0 {
+		return
+	}
+	workflow := ""
+	if g, active, err := e.loadActiveGraph(ctx, lease.Task.ExecutionID); err == nil && active {
+		workflow = g.Name()
+	}
+	e.itemFailureObserver.ObserveItemFailures(ObservedItemFailures{
+		Workflow: workflow,
+		NodeName: lease.SubgraphPayload.ParentNode,
+		Failed:   failed,
+		Total:    len(items),
+	})
 }
 
 // batchIndexOf reads the batch index the expansion layer stamped on the task.

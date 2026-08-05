@@ -233,6 +233,11 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 			engine.WithHooks(metrics.NewMetricsHooks(cfg.Metrics)),
 			engine.WithCommitObserver(metrics.NewCommitMetrics(cfg.Metrics)),
 			engine.WithOutboxObserver(metrics.NewOutboxMetrics(cfg.Metrics)),
+			// Batches escape to runners here, so this engine never runs a body.
+			// The observer still belongs on it: the runners' reported batches
+			// commit through CommitSubgraphResult, which is where their failed
+			// items are counted.
+			engine.WithItemFailureObserver(metrics.NewSubgraphMetrics(cfg.Metrics)),
 		)
 	}
 	eng := engine.New(cfg.Backend.State(), cfg.Backend.Queue(), engOpts...)

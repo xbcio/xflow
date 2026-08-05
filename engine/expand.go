@@ -280,11 +280,39 @@ func (e *Engine) runBatchBody(ctx context.Context, g *graph.Graph, lease *TaskLe
 		return nil, batchBodyError(lease.Task.NodeName, batchIndex, err)
 	}
 
+	e.observeItemFailures(g.Name(), lease.Task.NodeName, itemResults)
 	result, failure := BatchResultForCommit(itemResults)
 	if failure != nil {
 		result[batchErrorKey] = failure.Error()
 	}
 	return result, nil
+}
+
+// observeItemFailures reports this batch's failed-item count.
+//
+// It fires for a partially-failed batch as well as a wholly-failed one — the
+// partial case is the one that needs it, because that batch commits as a success
+// and the execution reports Success. A wholly-failed batch is already visible
+// through the map node's own failure.
+func (e *Engine) observeItemFailures(workflow, nodeName string, results []BatchItemResult) {
+	if e.itemFailureObserver == nil {
+		return
+	}
+	failed := 0
+	for _, r := range results {
+		if r.Err != nil {
+			failed++
+		}
+	}
+	if failed == 0 {
+		return
+	}
+	e.itemFailureObserver.ObserveItemFailures(ObservedItemFailures{
+		Workflow: workflow,
+		NodeName: nodeName,
+		Failed:   failed,
+		Total:    len(results),
+	})
 }
 
 // mapBatchingContext recovers the two things a body needs that its own items
