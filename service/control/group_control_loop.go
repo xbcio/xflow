@@ -29,14 +29,20 @@ func isBatchTask(t *engine.Task) bool {
 	return t != nil && t.Type == engine.TaskTypeNodeBatch
 }
 
-// subgraphLeaseEngine is the optional interface for engines that support batch
-// lease lifecycle. The concrete *engine.Engine implements both methods.
+// subgraphLeaseEngine is the optional interface for engines that can build a
+// batch lease. The concrete *engine.Engine implements it.
 type subgraphLeaseEngine interface {
 	BuildSubgraphLease(ctx context.Context, t *engine.Task) (*engine.TaskLease, *engine.SubgraphLeasePayload, error)
 }
 
 // dispatchSubgraphLease handles the BuildSubgraphLease + FinalizeClaim flow for
 // batch tasks, mirroring dispatchGroupLease.
+//
+// It has no already-active recovery branch, unlike dispatchGroupLease. That is
+// not an omission: BuildSubgraphLease never calls AcquireTaskLease — the batch
+// borrows the parent map node's fence rather than claiming one of its own — so
+// there is no "already active" state for a batch to collide with. A replay
+// rebuilds the same lease from the task payload (see RecoverTaskLease).
 func (c *Core) dispatchSubgraphLease(ctx context.Context, claim Claim) (protocol.PollTaskResponse, error) {
 	se, ok := c.engine.(subgraphLeaseEngine)
 	if !ok {

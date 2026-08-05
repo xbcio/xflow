@@ -189,14 +189,5 @@ func batchIndexOf(t *Task) (int, error) {
 	if t == nil || t.Payload == nil || t.Payload.Data == nil {
 		return 0, fmt.Errorf("batch task missing payload")
 	}
-	switch value := t.Payload.Data["batch_index"].(type) {
-	case int:
-		return value, nil
-	case int64:
-		return int(value), nil
-	case float64:
-		return int(value), nil
-	default:
-		return 0, fmt.Errorf("batch task has invalid batch_index")
-	}
+	return batchPayloadInt(t.Payload.Data, "batch_index")
 }

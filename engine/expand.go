@@ -169,6 +169,22 @@ func (e *Engine) ExecuteBatch(ctx context.Context, t *Task) error {
 	return e.completeLoopSplit(ctx, lease, g, results)
 }
 
+// batchPayloadInt coerces one of the expansion payload's integer fields. A
+// payload that round-tripped through JSON carries float64 where the expansion
+// layer wrote int, so every reader has to accept all three.
+func batchPayloadInt(data map[string]any, name string) (int, error) {
+	switch value := data[name].(type) {
+	case int:
+		return value, nil
+	case int64:
+		return int(value), nil
+	case float64:
+		return int(value), nil
+	default:
+		return 0, fmt.Errorf("batch task has invalid %s", name)
+	}
+}
+
 func expansionBatchLease(t *Task) (*TaskLease, types.ExecutionID, []any, error) {
 	if t == nil || t.Payload == nil || t.Payload.Data == nil {
 		return nil, "", nil, fmt.Errorf("batch task missing payload")
@@ -181,18 +197,7 @@ func expansionBatchLease(t *Task) (*TaskLease, types.ExecutionID, []any, error) 
 		}
 		return value, nil
 	}
-	intField := func(name string) (int, error) {
-		switch value := data[name].(type) {
-		case int:
-			return value, nil
-		case int64:
-			return int(value), nil
-		case float64:
-			return int(value), nil
-		default:
-			return 0, fmt.Errorf("batch task has invalid %s", name)
-		}
-	}
+	intField := func(name string) (int, error) { return batchPayloadInt(data, name) }
 
 	parentExecID, err := stringField("parent_exec_id")
 	if err != nil {
