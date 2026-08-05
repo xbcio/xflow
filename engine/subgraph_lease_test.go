@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/xbcio/xflow/engine/graph"
@@ -154,6 +155,148 @@ func TestCommitSubgraphResultHoldsDownstreamUntilEveryBatchReports(t *testing.T)
 		if !fired && last {
 			t.Fatalf("\"done\" never fired after all %d batches reported", len(batches))
 		}
+	}
+}
+
+// A batch that reports an error must not terminalize the map node as a success.
+// CompleteExpandedSubExecution already records the batch as Failed — the status
+// argument has always been there — but completeLoopSplit committed
+// NodeStatusSuccess unconditionally, so the map node ended up "success" with a
+// failed batch's empty result silently occupying a slot in its results array,
+// and downstream fired on that data.
+//
+// This asserts the node's own OnError decides, exactly as it does for any other
+// failing node: the default "stop" strategy fails the node and aborts.
+func TestCommitSubgraphResultFailsTheMapNodeWhenABatchFails(t *testing.T) {
+	eng, state, queue, execID, _ := batchLeaseWorkflow(t)
+	ctx := context.Background()
+	batches := drainBatchTasks(t, eng, queue)
+
+	// The FIRST batch fails and the rest succeed. Other batches are not
+	// canceled by design (no cross-sub-execution cancellation), so every batch
+	// still reports and the verdict is only reached at the all-done barrier.
+	var downstream []string
+	for i, bt := range batches {
+		lease, _, err := eng.BuildSubgraphLease(ctx, bt)
+		if err != nil {
+			t.Fatalf("BuildSubgraphLease(batch %d) error = %v", i, err)
+		}
+		result := TaskResult{Output: &types.Output{Data: map[string]any{"count": 1}}}
+		if i == 0 {
+			result = TaskResult{Error: errors.New("body item blew up")}
+		}
+		if _, err := eng.CommitSubgraphResult(ctx, lease, result); err != nil {
+			t.Fatalf("CommitSubgraphResult(batch %d) error = %v", i, err)
+		}
+		for _, tk := range queue.Drain() {
+			if tk.NodeName == "done" {
+				downstream = append(downstream, tk.NodeName)
+			}
+		}
+	}
+
+	node, err := state.GetNode(ctx, execID, "loop")
+	if err != nil || node == nil {
+		t.Fatalf("GetNode(loop) = %+v err=%v", node, err)
+	}
+	if node.Status != types.NodeStatusFailed {
+		t.Errorf("map node status = %v, want failed: one of its batches reported an error", node.Status)
+	}
+	if node.Error == "" {
+		t.Error("map node carries no error message, so nothing records why the expansion failed")
+	}
+	if len(downstream) != 0 {
+		t.Errorf("downstream %q fired on a failed expansion's results", downstream)
+	}
+	snap, err := state.GetExecution(ctx, execID)
+	if err != nil || snap == nil {
+		t.Fatalf("GetExecution() = %+v err=%v", snap, err)
+	}
+	if snap.Status != types.ExecutionStatusFailed {
+		t.Errorf("execution status = %v, want failed under the map node's default \"stop\" strategy", snap.Status)
+	}
+}
+
+// The map node's OnError governs a failed generation, so a node that declares
+// error_output routes there instead of aborting. What makes this worth its own
+// test is the results array: ApplyOnError's non-fatal strategies rebuild the
+// output from scratch, which would drop it, and then a downstream error branch
+// would have no way to see which batches DID produce items.
+func TestCommitSubgraphResultRoutesAFailedGenerationThroughOnError(t *testing.T) {
+	ctx := context.Background()
+	def := &types.WorkflowDef{
+		Name: "batch-lease-onerror",
+		Nodes: []types.NodeDef{
+			{Name: "loop", Type: "xflow.map", OnError: string(types.OnErrorOutput)},
+			{Name: "recover", Type: "test.echo"},
+		},
+		Connections: types.Connections{
+			"loop": {"error": {Targets: []types.Connection{{Node: "recover", Input: "main"}}}},
+		},
+	}
+	g, err := graph.Compile(def)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	state := newFakeState()
+	queue := &fakeQueue{}
+	reg := &fakeRegistry{handlers: map[string]types.ActionHandler{
+		"xflow.map": &loopHandler{},
+		"test.echo": &echoHandler{},
+	}}
+	eng := newTestEngine(t, state, queue, reg)
+	execID, err := eng.Submit(ctx, g, nil)
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	batches := drainBatchTasks(t, eng, queue)
+
+	var routed []string
+	for i, bt := range batches {
+		lease, _, err := eng.BuildSubgraphLease(ctx, bt)
+		if err != nil {
+			t.Fatalf("BuildSubgraphLease(batch %d) error = %v", i, err)
+		}
+		result := TaskResult{Output: &types.Output{Data: map[string]any{"count": 1}}}
+		if i == 0 {
+			result = TaskResult{Error: errors.New("body item blew up")}
+		}
+		if _, err := eng.CommitSubgraphResult(ctx, lease, result); err != nil {
+			t.Fatalf("CommitSubgraphResult(batch %d) error = %v", i, err)
+		}
+		for _, tk := range queue.Drain() {
+			routed = append(routed, tk.NodeName)
+		}
+	}
+
+	node, err := state.GetNode(ctx, execID, "loop")
+	if err != nil || node == nil {
+		t.Fatalf("GetNode(loop) = %+v err=%v", node, err)
+	}
+	if node.Status != types.NodeStatusSuccess {
+		t.Errorf("map node status = %v, want success: error_output handles the failure gracefully", node.Status)
+	}
+	if _, ok := node.Output["results"]; !ok {
+		t.Errorf("error_output dropped the results array, so the error branch cannot see which batches produced items: %+v", node.Output)
+	}
+	if node.Output["error"] == nil {
+		t.Errorf("error_output carries no error payload: %+v", node.Output)
+	}
+	found := false
+	for _, name := range routed {
+		if name == "recover" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("nothing routed to the error branch; queued %q", routed)
+	}
+	snap, err := state.GetExecution(ctx, execID)
+	if err != nil || snap == nil {
+		t.Fatalf("GetExecution() = %+v err=%v", snap, err)
+	}
+	if snap.Status == types.ExecutionStatusFailed {
+		t.Error("execution failed despite error_output, which is supposed to keep it running")
 	}
 }
 

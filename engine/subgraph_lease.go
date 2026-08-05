@@ -118,12 +118,22 @@ func (e *Engine) CommitSubgraphResult(ctx context.Context, lease *TaskLease, res
 	payload := lease.SubgraphPayload
 
 	status := types.ExecutionStatusSuccess
-	if result.Error != nil {
-		status = types.ExecutionStatusFailed
-	}
 	batchResult := map[string]any{}
 	if result.Output != nil && result.Output.Data != nil {
 		batchResult = result.Output.Data
+	}
+	if result.Error != nil {
+		status = types.ExecutionStatusFailed
+		// Stamp the failure into the batch's own result. The all-done barrier
+		// hands completeLoopSplit only the results array, and the batch that
+		// reports last is usually not the batch that failed — without this the
+		// verdict would be unrecoverable and the map node would commit success
+		// with a hole in its results.
+		batchResult = cloneMap(batchResult)
+		if batchResult == nil {
+			batchResult = map[string]any{}
+		}
+		batchResult[batchErrorKey] = result.Error.Error()
 	}
 
 	// Reconstruct the parent lease the expansion layer fences against. Its

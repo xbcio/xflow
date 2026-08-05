@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/types"
@@ -245,13 +246,43 @@ func expansionBatchLease(t *Task) (*TaskLease, types.ExecutionID, []any, error) 
 	}, types.ExecutionID(childID), items, nil
 }
 
+// batchErrorKey marks a batch result as a failure. It travels inside the batch's
+// own result map because that map is the only thing CompleteExpandedSubExecution
+// hands back at the all-done barrier: the batch that reports last is usually not
+// the batch that failed, so the verdict cannot be derived from the final
+// commit's own TaskResult.
+const batchErrorKey = "_error"
+
+// failedBatchErrors collects the error messages stamped on failed batches, in
+// batch order. Empty means every batch succeeded.
+func failedBatchErrors(results []map[string]any) []string {
+	var msgs []string
+	for _, result := range results {
+		if result == nil {
+			continue
+		}
+		if msg, ok := result[batchErrorKey].(string); ok {
+			msgs = append(msgs, msg)
+		}
+	}
+	return msgs
+}
+
 // completeLoopSplit terminalizes a fully completed child generation through
 // the same token-fenced commit path as other node results. In an acyclic graph
 // that also writes the durable downstream advance intent.
+//
+// A generation with any failed batch is a failed map node: its results array has
+// a hole where that batch's items should be, and committing success would fire
+// downstream on silently incomplete data. The map node's own OnError decides
+// what a failure means, exactly as it does for a node that failed directly.
 func (e *Engine) completeLoopSplit(ctx context.Context, lease *TaskLease, g *graph.Graph, results []map[string]any) error {
 	output := map[string]any{
 		"results": results,
 		"count":   len(results),
+	}
+	if failures := failedBatchErrors(results); len(failures) > 0 {
+		return e.failLoopSplit(ctx, lease, g, output, failures)
 	}
 	outcome, err := e.commitLegacyNode(ctx, lease, types.NodeStatusSuccess, output, "main", "", false)
 	if outcome == CommitOutcomeStaleToken || outcome == CommitOutcomeDuplicateTerminal || outcome == CommitOutcomeExecutionInactive {
@@ -259,6 +290,37 @@ func (e *Engine) completeLoopSplit(ctx context.Context, lease *TaskLease, g *gra
 	}
 	if err != nil {
 		return fmt.Errorf("finalize loop/split node %q/%q: %w", lease.Task.ExecutionID, lease.Task.NodeName, err)
+	}
+	return nil
+}
+
+// failLoopSplit terminalizes a map node whose generation contained a failed
+// batch. It routes through ApplyOnError so "stop" aborts the execution while
+// error_output/main_output/continue keep it running with the error attached,
+// matching what any other failing node in the graph does.
+//
+// It deliberately does not retry. tryRetryWithAttempt would re-run the map node
+// itself, re-expanding every batch — including the ones that already succeeded
+// and already had their side effects. Retrying a partially applied expansion is
+// a decision for the workflow author, not a default.
+func (e *Engine) failLoopSplit(ctx context.Context, lease *TaskLease, g *graph.Graph, output map[string]any, failures []string) error {
+	cause := fmt.Errorf("%d of %d batches failed: %s", len(failures), len(output["results"].([]map[string]any)), strings.Join(failures, "; "))
+	if lease.Task.NodeIdx < 0 || lease.Task.NodeIdx >= g.NodeCount() {
+		return fmt.Errorf("finalize failed loop/split node %q/%q: %w", lease.Task.ExecutionID, lease.Task.NodeName, cause)
+	}
+	meta := g.NodeAt(lease.Task.NodeIdx)
+	// ApplyOnError's non-fatal strategies copy output.Data before merging the
+	// error in, so the results array survives: a downstream error branch can
+	// still see which batches did produce items.
+	decision := ApplyOnError(meta.OnError, cause, nil, &types.Output{Data: output})
+	outcome, err := e.commitLegacyNodeWithClassification(ctx, lease, decision.NodeStatus, decision.Output,
+		decision.RoutePort, decision.ErrorMessage, decision.ExecFatal,
+		buildEffectiveClassification(cause, nil, false))
+	if outcome == CommitOutcomeStaleToken || outcome == CommitOutcomeDuplicateTerminal || outcome == CommitOutcomeExecutionInactive {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("finalize failed loop/split node %q/%q: %w", lease.Task.ExecutionID, lease.Task.NodeName, err)
 	}
 	return nil
 }
