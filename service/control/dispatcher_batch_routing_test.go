@@ -82,7 +82,11 @@ func TestDispatcherRoutesBatchTaskCarryingTheMapNodeSelector(t *testing.T) {
 		t.Fatalf("compile: %v", err)
 	}
 	backend := local.New()
-	eng := engine.New(backend.State(), backend.Queue())
+	// WithRemoteBatchExecution is what NewControlPlane passes; this test builds
+	// its engine directly, so it has to pass it too. Without it the engine runs
+	// the batch in process, which is correct for an embedded deployment and
+	// wrong here.
+	eng := engine.New(backend.State(), backend.Queue(), engine.WithRemoteBatchExecution())
 	execID, err := eng.Submit(ctx, g, nil)
 	if err != nil {
 		t.Fatalf("submit: %v", err)

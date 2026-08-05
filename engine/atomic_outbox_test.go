@@ -368,7 +368,11 @@ func TestEngineLoopSplitJSONBatchesUseDurableSystemTasks(t *testing.T) {
 	}
 	state := newFakeState()
 	queue := &toggleOutboxQueue{}
-	eng := New(state, queue)
+	// The half of this test after the outbox recovery asserts the routed-batch
+	// path (BuildTaskLease refuses, BuildSubgraphLease/CommitSubgraphResult
+	// take over), which only exists on an engine that routes batches out — the
+	// control plane's configuration. A default engine runs the batch in process.
+	eng := New(state, queue, WithRemoteBatchExecution())
 	id, err := eng.Submit(ctx, g, nil)
 	if err != nil {
 		t.Fatalf("Submit() error = %v", err)
