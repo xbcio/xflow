@@ -280,9 +280,9 @@ func (e *Engine) runBatchBody(ctx context.Context, g *graph.Graph, lease *TaskLe
 		return nil, batchBodyError(lease.Task.NodeName, batchIndex, err)
 	}
 
-	result := batchResultData(itemResults)
-	if failedEveryItem(itemResults) {
-		result[batchErrorKey] = firstItemError(itemResults)
+	result, failure := BatchResultForCommit(itemResults)
+	if failure != nil {
+		result[batchErrorKey] = failure.Error()
 	}
 	return result, nil
 }
@@ -322,29 +322,6 @@ func mapContinueOnError(meta graph.NodeMeta) bool {
 	}
 	enabled, _ := meta.Parameters["continue_on_error"].(bool)
 	return enabled
-}
-
-// failedEveryItem reports whether a batch produced nothing usable. An empty
-// batch is not a failure: an expansion can legitimately contain one.
-func failedEveryItem(results []BatchItemResult) bool {
-	if len(results) == 0 {
-		return false
-	}
-	for _, r := range results {
-		if r.Err == nil {
-			return false
-		}
-	}
-	return true
-}
-
-func firstItemError(results []BatchItemResult) string {
-	for _, r := range results {
-		if r.Err != nil {
-			return r.Err.Error()
-		}
-	}
-	return ""
 }
 
 // batchPayloadInt coerces one of the expansion payload's integer fields. A

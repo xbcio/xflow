@@ -97,6 +97,36 @@ func globalItemIndex(batchIndex, batchSize, posInBatch int) int {
 	return batchIndex*batchSize + posInBatch
 }
 
+// BatchResultForCommit folds per-item results into the batch result map the
+// expansion barrier stores, plus the batch's verdict.
+//
+// Both paths that run a body — in-process ExecuteBatch and the runner's
+// SubgraphRuntime — go through this function so the two cannot disagree about
+// when a batch counts as failed. They report the verdict differently (one
+// stamps the result map directly, the other returns it as the lease's error for
+// CommitSubgraphResult to stamp), but deriving it is the same decision.
+//
+// A batch fails only when EVERY item failed. A partial failure is not the
+// batch's failure: the failed items occupy their slots as {_error, _index} and
+// the map node's own OnError decides what a hole in its results means. An empty
+// batch is not a failure either — an expansion can legitimately contain one.
+func BatchResultForCommit(results []BatchItemResult) (map[string]any, error) {
+	data := batchResultData(results)
+	if len(results) == 0 {
+		return data, nil
+	}
+	var first error
+	for _, r := range results {
+		if r.Err == nil {
+			return data, nil
+		}
+		if first == nil {
+			first = r.Err
+		}
+	}
+	return data, first
+}
+
 // batchResultData converts per-item results into the batch result map the
 // expansion barrier stores. The items array is what completeLoopSplit flattens,
 // so its length — not the batch count — is what the map node reports as count.

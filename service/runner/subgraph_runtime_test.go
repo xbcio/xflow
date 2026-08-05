@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/execution"
 	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/types"
@@ -18,12 +19,18 @@ import (
 // lookup, and either way the map node's items never run. The runner must
 // recognize the payload and route it to the subgraph path.
 //
-// Body sub-graph execution itself lands in a later task; what this asserts is
-// that the runner takes the batch branch at all and reports a result the
-// control plane can commit through the expansion barrier.
+// What this asserts is the ROUTING — that the runner takes the batch branch at
+// all and reports a result the control plane can commit through the expansion
+// barrier. What the batch path then does with the body is asserted in
+// subgraph_body_test.go.
 // batchLeaseForTest builds the lease a control plane hands a runner for one
 // batch of a map expansion: no Input, all the work in SubgraphPayload.
 func batchLeaseForTest(items []any) *engine.TaskLease {
+	pkg := bodyPackageForTest()
+	hash, err := graph.ComputePackageHash(pkg)
+	if err != nil {
+		panic("compute package hash: " + err.Error())
+	}
 	return &engine.TaskLease{
 		LeaseID:    engine.LeaseID("lease-parent"),
 		LeaseToken: engine.LeaseToken("token-parent"),
@@ -42,6 +49,10 @@ func batchLeaseForTest(items []any) *engine.TaskLease {
 			BatchIndex:      0,
 			ChildExecID:     types.ExecutionID("exec-1/sub/m/lease-parent/0"),
 			Items:           items,
+			AllItems:        items,
+			BatchSize:       len(items),
+			Package:         pkg,
+			PackageHash:     hash,
 		},
 	}
 }
@@ -53,9 +64,11 @@ func TestRunnerExecutesABatchLeaseThroughTheSubgraphPath(t *testing.T) {
 	items := []any{map[string]any{"id": 1}, map[string]any{"id": 2}}
 	lease := batchLeaseForTest(items)
 	client := &fakeProtocolClient{lease: lease, cancel: cancel}
-	// Deliberately empty: no handler is registered for the batch's node name or
-	// type, so a runner that fell through to the handler path would fail lookup.
+	// Only the BODY's member type is registered — nothing answers to the batch's
+	// own synthetic node name or to "xflow.map", so a runner that fell through to
+	// the handler path would fail lookup instead of reaching the body.
 	registry := execution.NewRegistry()
+	registry.RegisterGlobal("test.body_item", &bodyItemHandler{})
 
 	r := New(client, registry, Config{
 		RunnerID:          "runner-1",
@@ -63,7 +76,7 @@ func TestRunnerExecutesABatchLeaseThroughTheSubgraphPath(t *testing.T) {
 		Capabilities:      []protocol.Capability{{NodeType: "xflow.map"}},
 		HeartbeatInterval: time.Hour,
 		PollWait:          time.Millisecond,
-		SubgraphRuntime:   NewSubgraphRuntime(registry),
+		SubgraphRuntime:   NewSubgraphRuntime(registry, NewPackageCache(PackageCacheConfig{MaxEntries: 4})),
 	})
 
 	if err := r.Run(ctx); err != nil {

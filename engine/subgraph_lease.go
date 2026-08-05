@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -36,6 +37,24 @@ type SubgraphLeasePayload struct {
 	ChildExecID types.ExecutionID `json:"child_exec_id"`
 	Items       []any             `json:"items,omitempty"`
 	Deadline    time.Time         `json:"deadline,omitempty"`
+	// Package and PackageHash are the map node's projected body and its hash,
+	// both computed once at compile time. A runner has no compiled graph — it
+	// never saw the workflow definition — so the body must travel to it, exactly
+	// as a group's package does on GroupLeasePayload. Every batch of one map node
+	// carries the same pair, which is what lets a hash-keyed package cache
+	// compile the body once however many batches arrive.
+	Package     *graph.SubgraphPackage `json:"package,omitempty"`
+	PackageHash string                 `json:"package_hash,omitempty"`
+	// BatchSize is the map node's declared batch size. The runner needs it to
+	// turn a position within this batch into the item's global index: $index must
+	// not change when batch_size does.
+	BatchSize int `json:"batch_size,omitempty"`
+	// AllItems is the map node's entire items array, exposed to the body as
+	// $items. A full copy per batch — the same trade-off the in-process payload
+	// makes, kept because $items is a promised DSL root.
+	AllItems []any `json:"all_items,omitempty"`
+	// ContinueOnError, when false, stops this batch at its first failed item.
+	ContinueOnError bool `json:"continue_on_error,omitempty"`
 }
 
 // BuildSubgraphLease assembles a runner-facing lease for a queued batch task.
@@ -99,7 +118,18 @@ func (e *Engine) BuildSubgraphLease(ctx context.Context, t *Task) (*TaskLease, *
 		BatchIndex:      batchIndex,
 		ChildExecID:     childExecID,
 		Items:           items,
+		ContinueOnError: mapContinueOnError(meta),
 	}
+	// The body and the batching context are what turn this lease from a
+	// pass-through into runnable work. They come from two different places: the
+	// package from the compiled graph (projected once at compile time), the
+	// batching context from the task payload — at this point the map node is
+	// still Waiting, so its output cannot be read back.
+	if body := g.MapBodyAt(parentLease.Task.NodeIdx); body != nil {
+		payload.Package = body.Package
+		payload.PackageHash = body.Hash
+	}
+	payload.AllItems, payload.BatchSize = mapBatchingContext(t, len(items))
 	lease.SubgraphPayload = payload
 	return lease, payload, nil
 }

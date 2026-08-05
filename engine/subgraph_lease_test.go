@@ -352,3 +352,52 @@ func TestRecoverTaskLeaseRebuildsABatchLease(t *testing.T) {
 			recovered.LeaseID, recovered.LeaseToken, original.LeaseID, original.LeaseToken)
 	}
 }
+
+// A remote runner has no compiled graph: it never saw the workflow definition,
+// so it cannot look up the map node's body, its batch size, or the whole items
+// array. Everything the body needs must travel on the lease, or the runner
+// path can only ever be the pass-through it started as.
+func TestBuildSubgraphLeaseCarriesEverythingTheBodyNeeds(t *testing.T) {
+	def := &types.WorkflowDef{
+		Name: "batch-lease-body",
+		Nodes: []types.NodeDef{
+			{Name: "loop", Type: "xflow.map", Parameters: mapBodyParamsForTest()},
+		},
+	}
+	g, err := graph.Compile(def)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	state := newFakeState()
+	queue := &fakeQueue{}
+	reg := &fakeRegistry{handlers: map[string]types.ActionHandler{"xflow.map": &loopHandler{}}}
+	eng := New(state, queue, WithBatchBodyExecutor(newEchoBodyExecutor()))
+	testRegistries.Store(eng, reg)
+	t.Cleanup(func() { testRegistries.Delete(eng) })
+	ctx := context.Background()
+	if _, err := eng.Submit(ctx, g, nil); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	batches := drainBatchTasks(t, eng, queue)
+
+	_, payload, err := eng.BuildSubgraphLease(ctx, batches[1])
+	if err != nil {
+		t.Fatalf("BuildSubgraphLease() error = %v", err)
+	}
+	if payload.Package == nil {
+		t.Error("payload carries no body package: a runner cannot compile a body it was never sent")
+	}
+	if payload.PackageHash == "" {
+		t.Error("payload carries no package hash: without it the runner's package cache " +
+			"cannot key the body, so it recompiles per batch and cannot verify what it got")
+	}
+	// loopHandler produces three single-item batches, so batch 1 holds the
+	// SECOND item. Its global index is only derivable from batch_size.
+	if payload.BatchSize != 1 {
+		t.Errorf("payload BatchSize = %d, want 1: without it the runner cannot compute a global $index",
+			payload.BatchSize)
+	}
+	if len(payload.AllItems) != 3 {
+		t.Errorf("payload carries %d AllItems, want all 3 for $items", len(payload.AllItems))
+	}
+}
