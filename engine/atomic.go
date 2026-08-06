@@ -362,6 +362,16 @@ func (e *Engine) handleSystemTask(ctx context.Context, task *Task, flush bool) (
 		return true, e.FlushOutbox(ctx, task.ExecutionID)
 
 	case TaskTypeNodeBatch:
+		if e.remoteBatchExecution {
+			// Let the Dispatcher route this to a remote runner, the same escape
+			// TaskTypeGroupExec uses below. Consuming the batch here would keep
+			// the map node's runnerSelector from ever reaching the directory
+			// that matches labels, so body work would silently run wherever the
+			// engine runs. Only a deployment that HAS a directory opts in (see
+			// WithRemoteBatchExecution): an embedded engine has nothing to
+			// escape to, and a batch routed nowhere hangs the map node forever.
+			return false, nil
+		}
 		return true, e.ExecuteBatch(ctx, task)
 
 	case TaskTypeNodeSkip:

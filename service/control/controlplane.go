@@ -214,6 +214,11 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 	}
 
 	var engOpts []engine.Option
+	// The control plane is the one deployment that has a runner directory, so
+	// it is the one that can let a batch escape to the runner the map node's
+	// runnerSelector chose. Embedded engines keep executing batches in process
+	// (see engine.WithRemoteBatchExecution).
+	engOpts = append(engOpts, engine.WithRemoteBatchExecution())
 	if cfg.Logger != nil {
 		engOpts = append(engOpts, engine.WithLogger(cfg.Logger))
 	}
@@ -228,6 +233,11 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 			engine.WithHooks(metrics.NewMetricsHooks(cfg.Metrics)),
 			engine.WithCommitObserver(metrics.NewCommitMetrics(cfg.Metrics)),
 			engine.WithOutboxObserver(metrics.NewOutboxMetrics(cfg.Metrics)),
+			// Batches escape to runners here, so this engine never runs a body.
+			// The observer still belongs on it: the runners' reported batches
+			// commit through CommitSubgraphResult, which is where their failed
+			// items are counted.
+			engine.WithItemFailureObserver(metrics.NewSubgraphMetrics(cfg.Metrics)),
 		)
 	}
 	eng := engine.New(cfg.Backend.State(), cfg.Backend.Queue(), engOpts...)

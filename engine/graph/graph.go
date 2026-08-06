@@ -50,6 +50,22 @@ type Graph struct {
 	// supplyRefs maps a consumer node index to the sorted names of the supply
 	// nodes it declares a dependency on. Absent key means no dependency.
 	supplyRefs map[int][]string
+
+	// mapBodies maps an xflow.map node's index to its projected body package.
+	// Projected once at compile time so N batches of the same map node share one
+	// package and one hash — which is what lets the executor's cache compile the
+	// body exactly once no matter how the items were batched. Absent key means
+	// the node declares no body.
+	mapBodies map[int]*MapBodyPackage
+}
+
+// MapBodyAt returns the projected body package for the node at nodeIdx, or nil
+// when that node declares no body.
+func (g *Graph) MapBodyAt(nodeIdx int) *MapBodyPackage {
+	if g.mapBodies == nil {
+		return nil
+	}
+	return g.mapBodies[nodeIdx]
 }
 
 // Name returns the workflow name.

@@ -67,6 +67,11 @@ type Config struct {
 	// GroupRuntime executes group subgraphs locally. Required when EnableGroupExec
 	// is true.
 	GroupRuntime *GroupRuntime
+	// SubgraphRuntime executes map expansion batches locally. Required to accept
+	// batch leases; nil means a batch lease fails rather than silently running
+	// through the ordinary handler path, which has neither an Input nor a
+	// registered handler for the batch's synthetic node name.
+	SubgraphRuntime *SubgraphRuntime
 	// ActivationTracker, when set, processes activation directives piggybacked on
 	// heartbeat responses. nil means activations are ignored (passive runner).
 	ActivationTracker *ActivationTracker
@@ -359,6 +364,24 @@ func (r *Runner) executeAndReport(ctx context.Context, sessionID string, lease *
 			span.RecordError(err)
 		} else {
 			groupResult = &gr
+		}
+	} else if lease.SubgraphPayload != nil {
+		// Map batch — the work is in the payload, not in an Input, and no
+		// handler is registered for the batch's synthetic node name. Fail
+		// explicitly without a runtime rather than falling through to the
+		// handler path, where the failure would be an opaque lookup error.
+		if r.config.SubgraphRuntime == nil {
+			err := fmt.Errorf("runner has no SubgraphRuntime configured for batch task %q", lease.Task.NodeName)
+			result = engine.TaskResult{Error: err}
+			span.RecordError(err)
+		} else {
+			sr, err := r.config.SubgraphRuntime.Execute(execCtx, lease)
+			if err != nil {
+				result = engine.TaskResult{Error: err}
+				span.RecordError(err)
+			} else {
+				result = sr
+			}
 		}
 	} else {
 		// Normal node task — execute via the handler registry.

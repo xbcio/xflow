@@ -80,9 +80,14 @@ func linearGraph(width int) *graph.Graph {
 	for i := 1; i < width; i++ {
 		name := fmt.Sprintf("n%d", i)
 		defNodes = append(defNodes, types.NodeDef{Name: name, Type: "test.echo"})
-		conns["n0"] = map[string][]types.Connection{
-			"main": append(conns["n0"]["main"], types.Connection{Node: name, Input: "main"}),
+		if conns["n0"] == nil {
+			conns["n0"] = make(map[string]types.PortConnections)
 		}
+		// A map index expression yields a non-addressable struct, so the slice
+		// has to be lifted out, appended to, and written back.
+		pc := conns["n0"]["main"]
+		pc.Targets = append(pc.Targets, types.Connection{Node: name, Input: "main"})
+		conns["n0"]["main"] = pc
 	}
 	g, err := graph.Compile(&types.WorkflowDef{
 		Name:        "concurrency",
@@ -104,9 +109,9 @@ func inDegreeGraph(inDeg int) *graph.Graph {
 		src := fmt.Sprintf("src%d", i)
 		defNodes = append(defNodes, types.NodeDef{Name: src, Type: "test.fanout"})
 		if conns[src] == nil {
-			conns[src] = map[string][]types.Connection{}
+			conns[src] = map[string]types.PortConnections{}
 		}
-		conns[src]["main"] = []types.Connection{{Node: "target", Input: "main"}}
+		conns[src]["main"] = types.PortConnections{Targets: []types.Connection{{Node: "target", Input: "main"}}}
 	}
 	g, err := graph.Compile(&types.WorkflowDef{
 		Name:        "in-degree",

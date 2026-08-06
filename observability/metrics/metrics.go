@@ -90,6 +90,26 @@ func (m *Metrics) Inc(name string, labels map[string]string) {
 	metric.Inc()
 }
 
+// Add increments a counter by delta. Use it when the caller already knows how
+// many events happened — a batch reporting three failed items at once — rather
+// than calling Inc in a loop, which pays the label lookup per event for the same
+// result. delta must be non-negative: a counter that goes down is a broken
+// counter, and Prometheus panics on it, so a negative delta is dropped.
+func (m *Metrics) Add(name string, labels map[string]string, delta float64) {
+	if m == nil || name == "" || delta < 0 {
+		return
+	}
+	counter := m.counter(name, labelNames(labels))
+	if counter == nil {
+		return
+	}
+	metric, err := counter.GetMetricWith(prometheus.Labels(labels))
+	if err != nil {
+		return
+	}
+	metric.Add(delta)
+}
+
 // Observe records a duration in seconds as a Prometheus histogram.
 func (m *Metrics) Observe(name string, labels map[string]string, value time.Duration) {
 	if m == nil || name == "" {

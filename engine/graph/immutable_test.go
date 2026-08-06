@@ -55,7 +55,7 @@ func richMutableDef() *types.WorkflowDef {
 			},
 		},
 		Connections: types.Connections{
-			"start": {"main": []types.Connection{{Node: "worker", Input: "main"}}},
+			"start": {"main": {Targets: []types.Connection{{Node: "worker", Input: "main"}}}},
 		},
 	}
 }
@@ -266,7 +266,7 @@ func TestCompileAcceptsSupportedValueDomain(t *testing.T) {
 			},
 		},
 		Connections: types.Connections{
-			"start": {"main": []types.Connection{{Node: "worker", Input: "main"}}},
+			"start": {"main": {Targets: []types.Connection{{Node: "worker", Input: "main"}}}},
 		},
 	}
 	g, err := Compile(def)

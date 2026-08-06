@@ -1,9 +1,9 @@
-package groupnode
+package subgraph
 
 import (
+	"context"
 	"sync"
 
-	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/execution"
 	"github.com/xbcio/xflow/types"
@@ -16,16 +16,16 @@ type exitMapping struct {
 }
 
 // Collector captures boundary output data from xflow.group_exit nodes
-// during an inner group execution.
+// during an inner sub-graph execution.
 type Collector struct {
 	mu       sync.Mutex
 	mappings map[string]exitMapping
-	captured []engine.GroupExitResult
+	captured []graph.SubgraphExitResult
 }
 
 // NewCollector creates a collector that knows which collector nodes to expect
-// based on the group package's exit definitions.
-func NewCollector(pkg *graph.GroupPackage) *Collector {
+// based on the sub-graph package's exit definitions.
+func NewCollector(pkg *graph.SubgraphPackage) *Collector {
 	m := make(map[string]exitMapping, len(pkg.Exits))
 	for _, exit := range pkg.Exits {
 		m[exit.CollectorNode] = exitMapping{
@@ -37,7 +37,8 @@ func NewCollector(pkg *graph.GroupPackage) *Collector {
 }
 
 // Register installs per-execution handlers for each collector node so the
-// inner engine dispatches to this collector when group exit nodes fire.
+// inner engine dispatches to this collector when the package's exit nodes
+// fire.
 func Register(reg *execution.Registry, id types.ExecutionID, c *Collector) {
 	for nodeName := range c.mappings {
 		reg.RegisterExecutionHandler(id, nodeName, &exitHandler{
@@ -49,10 +50,42 @@ func Register(reg *execution.Registry, id types.ExecutionID, c *Collector) {
 
 // Exits returns the collected boundary outputs after the inner execution
 // completes. Safe to call after the inner engine has finished.
-func (c *Collector) Exits() []engine.GroupExitResult {
+func (c *Collector) Exits() []graph.SubgraphExitResult {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	out := make([]engine.GroupExitResult, len(c.captured))
+	out := make([]graph.SubgraphExitResult, len(c.captured))
 	copy(out, c.captured)
 	return out
+}
+
+// exitHandler implements types.ActionHandler for xflow.group_exit collector
+// nodes.
+type exitHandler struct {
+	collector *Collector
+	nodeName  string
+}
+
+func (h *exitHandler) Descriptor() types.Descriptor {
+	return types.Descriptor{
+		Type: graph.NodeTypeGroupExit,
+	}
+}
+
+func (h *exitHandler) Execute(_ context.Context, input *types.Input) (*types.Output, error) {
+	mapping, ok := h.collector.mappings[h.nodeName]
+	if !ok {
+		return &types.Output{Data: input.Data}, nil
+	}
+
+	result := graph.SubgraphExitResult{
+		NodeName: mapping.srcNode,
+		Port:     mapping.port,
+		Data:     input.Data,
+	}
+
+	h.collector.mu.Lock()
+	h.collector.captured = append(h.collector.captured, result)
+	h.collector.mu.Unlock()
+
+	return &types.Output{Data: input.Data}, nil
 }

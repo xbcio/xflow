@@ -32,7 +32,7 @@ func (f failHandler) Execute(_ context.Context, _ *types.Input) (*types.Output, 
 	return nil, f.err
 }
 
-func buildTestLease(t *testing.T, pkg *graph.GroupPackage, input *types.Input) *engine.TaskLease {
+func buildTestLease(t *testing.T, pkg *graph.SubgraphPackage, input *types.Input) *engine.TaskLease {
 	t.Helper()
 	hash, err := graph.ComputePackageHash(pkg)
 	if err != nil {
@@ -60,7 +60,7 @@ func TestGroupRuntime_TwoNodeChainSuccess(t *testing.T) {
 	cache := NewPackageCache(PackageCacheConfig{MaxEntries: 10})
 	rt := NewGroupRuntime(reg, cache, WithSuspendDisabled())
 
-	pkg := &graph.GroupPackage{
+	pkg := &graph.SubgraphPackage{
 		Version:   1,
 		GroupName: "chain",
 		EntryNode: "a",
@@ -72,11 +72,11 @@ func TestGroupRuntime_TwoNodeChainSuccess(t *testing.T) {
 				{Name: "__collector_b_main", Type: graph.NodeTypeGroupExit, Version: 1},
 			},
 			Connections: types.Connections{
-				"a": {"main": []types.Connection{{Node: "b"}}},
-				"b": {"main": []types.Connection{{Node: "__collector_b_main"}}},
+				"a": {"main": types.PortConnections{Targets: []types.Connection{{Node: "b"}}}},
+				"b": {"main": types.PortConnections{Targets: []types.Connection{{Node: "__collector_b_main"}}}},
 			},
 		},
-		Exits: []graph.GroupPackageExit{
+		Exits: []graph.SubgraphPackageExit{
 			{CollectorNode: "__collector_b_main", SrcNode: "b", Port: "main"},
 		},
 		Requirements: []graph.Requirement{
@@ -113,7 +113,7 @@ func TestGroupRuntime_MemberFailure(t *testing.T) {
 	cache := NewPackageCache(PackageCacheConfig{MaxEntries: 10})
 	rt := NewGroupRuntime(reg, cache, WithSuspendDisabled())
 
-	pkg := &graph.GroupPackage{
+	pkg := &graph.SubgraphPackage{
 		Version:   1,
 		GroupName: "fail-group",
 		EntryNode: "a",
@@ -124,10 +124,10 @@ func TestGroupRuntime_MemberFailure(t *testing.T) {
 				{Name: "__collector_a_main", Type: graph.NodeTypeGroupExit, Version: 1},
 			},
 			Connections: types.Connections{
-				"a": {"main": []types.Connection{{Node: "__collector_a_main"}}},
+				"a": {"main": types.PortConnections{Targets: []types.Connection{{Node: "__collector_a_main"}}}},
 			},
 		},
-		Exits: []graph.GroupPackageExit{
+		Exits: []graph.SubgraphPackageExit{
 			{CollectorNode: "__collector_a_main", SrcNode: "a", Port: "main"},
 		},
 		Requirements: []graph.Requirement{
@@ -158,7 +158,7 @@ func TestGroupRuntime_DeadlineTimeout(t *testing.T) {
 	cache := NewPackageCache(PackageCacheConfig{MaxEntries: 10})
 	rt := NewGroupRuntime(reg, cache, WithSuspendDisabled())
 
-	pkg := &graph.GroupPackage{
+	pkg := &graph.SubgraphPackage{
 		Version:   1,
 		GroupName: "timeout-group",
 		EntryNode: "a",
@@ -169,10 +169,10 @@ func TestGroupRuntime_DeadlineTimeout(t *testing.T) {
 				{Name: "__collector_a_main", Type: graph.NodeTypeGroupExit, Version: 1},
 			},
 			Connections: types.Connections{
-				"a": {"main": []types.Connection{{Node: "__collector_a_main"}}},
+				"a": {"main": types.PortConnections{Targets: []types.Connection{{Node: "__collector_a_main"}}}},
 			},
 		},
-		Exits: []graph.GroupPackageExit{
+		Exits: []graph.SubgraphPackageExit{
 			{CollectorNode: "__collector_a_main", SrcNode: "a", Port: "main"},
 		},
 		Requirements: []graph.Requirement{
@@ -218,7 +218,7 @@ func TestGroupRuntime_ExternalCancel(t *testing.T) {
 	cache := NewPackageCache(PackageCacheConfig{MaxEntries: 10})
 	rt := NewGroupRuntime(reg, cache, WithSuspendDisabled())
 
-	pkg := &graph.GroupPackage{
+	pkg := &graph.SubgraphPackage{
 		Version:   1,
 		GroupName: "cancel-group",
 		EntryNode: "a",
@@ -229,10 +229,10 @@ func TestGroupRuntime_ExternalCancel(t *testing.T) {
 				{Name: "__collector_a_main", Type: graph.NodeTypeGroupExit, Version: 1},
 			},
 			Connections: types.Connections{
-				"a": {"main": []types.Connection{{Node: "__collector_a_main"}}},
+				"a": {"main": types.PortConnections{Targets: []types.Connection{{Node: "__collector_a_main"}}}},
 			},
 		},
-		Exits: []graph.GroupPackageExit{
+		Exits: []graph.SubgraphPackageExit{
 			{CollectorNode: "__collector_a_main", SrcNode: "a", Port: "main"},
 		},
 		Requirements: []graph.Requirement{

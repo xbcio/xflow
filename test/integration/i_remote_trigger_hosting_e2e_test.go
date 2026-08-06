@@ -275,7 +275,7 @@ func runRemoteTriggerHostingE2E(t *testing.T, store engine.EntryActivationStore)
 			{Name: "body", Kind: types.NodeKindAction, Type: remoteHostBodyType},
 		},
 		Connections: types.Connections{
-			entryUnitID: {"main": {{Node: "body", Input: "main"}}},
+			entryUnitID: {"main": {Targets: []types.Connection{{Node: "body", Input: "main"}}}},
 		},
 	}
 	wfID := registerWorkflowHTTP(t, httpSrv.URL, httpSrv.Client(), def)

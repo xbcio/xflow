@@ -371,7 +371,7 @@ func TestSupplyGateLosesNoMessages(t *testing.T) {
 			}},
 		},
 		Connections: types.Connections{
-			entryUnitID: {"main": {{Node: bodyUnitID, Input: "main"}}},
+			entryUnitID: {"main": {Targets: []types.Connection{{Node: bodyUnitID, Input: "main"}}}},
 		},
 		DependencyEdges: []types.DependencyEdge{
 			{Node: entryUnitID, Supply: supplyNode},
@@ -582,7 +582,7 @@ func TestSupplyGateRecoversOnRestart(t *testing.T) {
 			}},
 		},
 		Connections: types.Connections{
-			entryUnitID: {"main": {{Node: bodyUnitID, Input: "main"}}},
+			entryUnitID: {"main": {Targets: []types.Connection{{Node: bodyUnitID, Input: "main"}}}},
 		},
 		DependencyEdges: []types.DependencyEdge{{Node: entryUnitID, Supply: supplyNode}},
 	}
@@ -762,7 +762,7 @@ func TestSupplyGateRetriesWithoutRestart(t *testing.T) {
 			}},
 		},
 		Connections: types.Connections{
-			entryUnitID: {"main": {{Node: bodyUnitID, Input: "main"}}},
+			entryUnitID: {"main": {Targets: []types.Connection{{Node: bodyUnitID, Input: "main"}}}},
 		},
 		DependencyEdges: []types.DependencyEdge{
 			{Node: entryUnitID, Supply: supplyNode},

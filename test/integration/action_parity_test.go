@@ -272,16 +272,16 @@ func ParityWorkflowWithDownstream(source types.NodeDef, retry *types.RetrySettin
 	conns := make(types.Connections)
 	if okNode.Name != "" {
 		nodes = append(nodes, okNode)
-		conns[source.Name] = map[string][]types.Connection{
-			"main": {{Node: okNode.Name}},
+		conns[source.Name] = map[string]types.PortConnections{
+			"main": {Targets: []types.Connection{{Node: okNode.Name}}},
 		}
 	}
 	if errNode.Name != "" {
 		nodes = append(nodes, errNode)
 		if conns[source.Name] == nil {
-			conns[source.Name] = map[string][]types.Connection{}
+			conns[source.Name] = map[string]types.PortConnections{}
 		}
-		conns[source.Name]["error"] = []types.Connection{{Node: errNode.Name}}
+		conns[source.Name]["error"] = types.PortConnections{Targets: []types.Connection{{Node: errNode.Name}}}
 	}
 	return &types.WorkflowDef{
 		Name:        "action-parity-" + source.Name,

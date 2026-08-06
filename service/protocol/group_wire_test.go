@@ -21,7 +21,7 @@ func TestGroupLeaseWire_RoundTrip(t *testing.T) {
 		WorkflowVersion: "v1",
 		GraphHash:       "sha256:abc",
 		PackageHash:     "pkg-sha256:v1:def",
-		Package: &graph.GroupPackage{
+		Package: &graph.SubgraphPackage{
 			Version:   1,
 			GroupName: "grp1",
 			EntryNode: "A",

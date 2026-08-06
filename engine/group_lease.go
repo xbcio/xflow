@@ -15,21 +15,21 @@ import (
 // group. It is the single source of truth for the group's entry input (not
 // TaskLease.Input which is nil for group tasks).
 type GroupLeasePayload struct {
-	ProtocolVersion int                  `json:"protocol_version"`
-	GroupExecID     string               `json:"group_exec_id"`
-	GroupID         string               `json:"group_id"`
-	GroupUnitIdx    int                   `json:"group_unit_idx"`
-	WorkflowVersion string               `json:"workflow_version"`
-	GraphHash       string               `json:"graph_hash"`
-	PackageHash     string               `json:"package_hash"`
-	Package         *graph.GroupPackage   `json:"package,omitempty"`
-	Input           *types.Input          `json:"input,omitempty"`
-	IdempotencyKey  string               `json:"idempotency_key"`
-	Deadline        time.Time            `json:"deadline,omitempty"`
+	ProtocolVersion int                    `json:"protocol_version"`
+	GroupExecID     string                 `json:"group_exec_id"`
+	GroupID         string                 `json:"group_id"`
+	GroupUnitIdx    int                    `json:"group_unit_idx"`
+	WorkflowVersion string                 `json:"workflow_version"`
+	GraphHash       string                 `json:"graph_hash"`
+	PackageHash     string                 `json:"package_hash"`
+	Package         *graph.SubgraphPackage `json:"package,omitempty"`
+	Input           *types.Input           `json:"input,omitempty"`
+	IdempotencyKey  string                 `json:"idempotency_key"`
+	Deadline        time.Time              `json:"deadline,omitempty"`
 	// SignalJournal carries the full signal history for resume replay.
 	SignalJournal []GroupSignal `json:"signal_journal,omitempty"`
 	// TaskType distinguishes initial group exec from resume.
-	TaskType     TaskType      `json:"task_type,omitempty"`
+	TaskType TaskType `json:"task_type,omitempty"`
 }
 
 // ErrGroupLeaseAlreadyActive is returned when BuildGroupLease cannot acquire
@@ -40,8 +40,15 @@ var ErrGroupLeaseAlreadyActive = errors.New("group lease already active")
 // suspend (not yet supported).
 var ErrGroupSuspendNotSupported = errors.New("group suspend not supported in this milestone")
 
+// ErrGroupLeaseNotActive is returned by RecoverGroupLease when the unit has no
+// live group lease in the backend. This is NOT an internal failure: a durable
+// at-least-once replay that arrives after the group already committed hits it
+// on every fast group. Callers must treat it as "this assignment is finished,
+// drop it" rather than propagating it as a server error.
+var ErrGroupLeaseNotActive = errors.New("group lease not active")
+
 // BuildGroupLease assembles a group lease for a queued group task. Unlike
-// BuildTaskLease, the lease payload carries the full GroupPackage and entry
+// BuildTaskLease, the lease payload carries the full SubgraphPackage and entry
 // input, and TaskLease.Input is nil (the group payload is authoritative).
 func (e *Engine) BuildGroupLease(ctx context.Context, t *Task) (*TaskLease, *GroupLeasePayload, error) {
 	if t == nil {
@@ -63,7 +70,7 @@ func (e *Engine) BuildGroupLease(ctx context.Context, t *Task) (*TaskLease, *Gro
 	gm := g.GroupMetaAt(t.UnitIdx)
 
 	// Project the group package for the runner.
-	pkg, pkgHash, err := graph.ProjectGroupPackage(g, t.UnitIdx)
+	pkg, pkgHash, err := graph.ProjectSubgraphPackage(g, t.UnitIdx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("project group package: %w", err)
 	}
@@ -174,11 +181,11 @@ func (e *Engine) RecoverGroupLease(ctx context.Context, execID types.ExecutionID
 		return nil, nil, fmt.Errorf("recover group lease: %w", err)
 	}
 	if lease == nil {
-		return nil, nil, fmt.Errorf("no active group lease for execution %s unit %d", execID, unitIdx)
+		return nil, nil, fmt.Errorf("%w: execution %s unit %d", ErrGroupLeaseNotActive, execID, unitIdx)
 	}
 
 	gm := g.GroupMetaAt(unitIdx)
-	pkg, pkgHash, err := graph.ProjectGroupPackage(g, unitIdx)
+	pkg, pkgHash, err := graph.ProjectSubgraphPackage(g, unitIdx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("project group package for recovery: %w", err)
 	}

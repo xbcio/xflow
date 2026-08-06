@@ -122,7 +122,7 @@ func twoNodeLinearGraph(tb testing.TB) *graph.Graph {
 			{Name: "next", Type: "test.echo"},
 		},
 		Connections: types.Connections{
-			"start": {"main": {{Node: "next", Input: "main"}}},
+			"start": {"main": types.PortConnections{Targets: []types.Connection{{Node: "next", Input: "main"}}}},
 		},
 	})
 	if err != nil {

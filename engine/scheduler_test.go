@@ -113,8 +113,8 @@ func TestScheduler_LinearChain(t *testing.T) {
 			{Name: "C", Type: "test.echo"},
 		},
 		Connections: types.Connections{
-			"A": {"main": []types.Connection{{Node: "B", Input: "main"}}},
-			"B": {"main": []types.Connection{{Node: "C", Input: "main"}}},
+			"A": {"main": {Targets: []types.Connection{{Node: "B", Input: "main"}}}},
+			"B": {"main": {Targets: []types.Connection{{Node: "C", Input: "main"}}}},
 		},
 	}
 
@@ -263,8 +263,8 @@ func TestInvokeStartsOnlyNamedEntryAndDoesNotBlockSharedDownstream(t *testing.T)
 			{Name: "normalize", Type: "test.echo"},
 		},
 		Connections: types.Connections{
-			"kafka":   {"main": []types.Connection{{Node: "normalize", Input: "main"}}},
-			"webhook": {"main": []types.Connection{{Node: "normalize", Input: "main"}}},
+			"kafka":   {"main": {Targets: []types.Connection{{Node: "normalize", Input: "main"}}}},
+			"webhook": {"main": {Targets: []types.Connection{{Node: "normalize", Input: "main"}}}},
 		},
 	}
 	g, err := graph.Compile(def)
@@ -298,12 +298,12 @@ func TestScheduler_FanOutFanIn(t *testing.T) {
 			{Name: "join", Type: "test.echo"},
 		},
 		Connections: types.Connections{
-			"start": {"main": []types.Connection{
+			"start": {"main": {Targets: []types.Connection{
 				{Node: "left", Input: "main"},
 				{Node: "right", Input: "main"},
-			}},
-			"left":  {"main": []types.Connection{{Node: "join", Input: "main"}}},
-			"right": {"main": []types.Connection{{Node: "join", Input: "main"}}},
+			}}},
+			"left":  {"main": {Targets: []types.Connection{{Node: "join", Input: "main"}}}},
+			"right": {"main": {Targets: []types.Connection{{Node: "join", Input: "main"}}}},
 		},
 	}
 
@@ -358,8 +358,8 @@ func TestScheduler_SkipCascade(t *testing.T) {
 		},
 		Connections: types.Connections{
 			"check": {
-				"main":  []types.Connection{{Node: "ok", Input: "main"}},
-				"error": []types.Connection{{Node: "fail", Input: "main"}},
+				"main":  {Targets: []types.Connection{{Node: "ok", Input: "main"}}},
+				"error": {Targets: []types.Connection{{Node: "fail", Input: "main"}}},
 			},
 		},
 	}
@@ -437,8 +437,8 @@ func TestScheduler_CyclicSubmitStartsAtStartNodeWithIncomingEdge(t *testing.T) {
 			{Name: "review", Type: "test.echo"},
 		},
 		Connections: types.Connections{
-			"start":  {"main": []types.Connection{{Node: "review", Input: "main"}}},
-			"review": {"reject": []types.Connection{{Node: "start", Input: "main"}}},
+			"start":  {"main": {Targets: []types.Connection{{Node: "review", Input: "main"}}}},
+			"review": {"reject": {Targets: []types.Connection{{Node: "start", Input: "main"}}}},
 		},
 	}
 	g, err := graph.Compile(def)
@@ -471,8 +471,8 @@ func TestScheduler_CyclicReturnReentersTerminalNodeAndOverwritesLatestOutput(t *
 			{Name: "review", Type: "test.review"},
 		},
 		Connections: types.Connections{
-			"start":  {"main": []types.Connection{{Node: "review", Input: "main"}}},
-			"review": {"reject": []types.Connection{{Node: "start", Input: "main"}}},
+			"start":  {"main": {Targets: []types.Connection{{Node: "review", Input: "main"}}}},
+			"review": {"reject": {Targets: []types.Connection{{Node: "start", Input: "main"}}}},
 		},
 	}
 	g, err := graph.Compile(def)
@@ -539,8 +539,8 @@ func TestScheduler_CyclicAutomaticDepthLimitFailsExecution(t *testing.T) {
 			{Name: "loop", Type: "test.loop"},
 		},
 		Connections: types.Connections{
-			"start": {"main": []types.Connection{{Node: "loop", Input: "main"}}},
-			"loop":  {"main": []types.Connection{{Node: "loop", Input: "main"}}},
+			"start": {"main": {Targets: []types.Connection{{Node: "loop", Input: "main"}}}},
+			"loop":  {"main": {Targets: []types.Connection{{Node: "loop", Input: "main"}}}},
 		},
 	}
 	g, err := graph.Compile(def)
@@ -592,8 +592,8 @@ func TestScheduler_CyclicStaleActivationTaskCannotReacquireNode(t *testing.T) {
 			{Name: "step", Type: "test.step"},
 		},
 		Connections: types.Connections{
-			"start": {"main": []types.Connection{{Node: "step", Input: "main"}}},
-			"step":  {"main": []types.Connection{{Node: "step", Input: "main"}}},
+			"start": {"main": {Targets: []types.Connection{{Node: "step", Input: "main"}}}},
+			"step":  {"main": {Targets: []types.Connection{{Node: "step", Input: "main"}}}},
 		},
 	}
 	g, err := graph.Compile(def)

@@ -41,8 +41,8 @@ func linearChainDef(n int) *types.WorkflowDef {
 	}
 	conns := make(types.Connections, n-1)
 	for i := 0; i < n-1; i++ {
-		conns[nodeName(i)] = map[string][]types.Connection{
-			"main": {{Node: nodeName(i + 1), Input: "main"}},
+		conns[nodeName(i)] = map[string]types.PortConnections{
+			"main": {Targets: []types.Connection{{Node: nodeName(i + 1), Input: "main"}}},
 		}
 	}
 	return &types.WorkflowDef{Name: "linear", Nodes: nodes, Connections: conns}
@@ -61,7 +61,7 @@ func fanOutDef(n int) *types.WorkflowDef {
 		dsts[i-1] = types.Connection{Node: name, Input: "main"}
 	}
 	conns := types.Connections{
-		"hub": {"main": dsts},
+		"hub": {"main": types.PortConnections{Targets: dsts}},
 	}
 	return &types.WorkflowDef{Name: "fanout", Nodes: nodes, Connections: conns}
 }
@@ -90,12 +90,12 @@ func fanInOutDef(n int) *types.WorkflowDef {
 	conns := make(types.Connections, srcCount+1)
 	for i := 0; i < srcCount; i++ {
 		srcN := fmt.Sprintf("src%d", i)
-		conns[srcN] = map[string][]types.Connection{
-			"main": {{Node: "merge", Input: "main"}},
+		conns[srcN] = map[string]types.PortConnections{
+			"main": {Targets: []types.Connection{{Node: "merge", Input: "main"}}},
 		}
 	}
-	conns["merge"] = map[string][]types.Connection{
-		"main": {{Node: "sink", Input: "main"}},
+	conns["merge"] = map[string]types.PortConnections{
+		"main": {Targets: []types.Connection{{Node: "sink", Input: "main"}}},
 	}
 	return &types.WorkflowDef{Name: "faninout", Nodes: nodes, Connections: conns}
 }

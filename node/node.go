@@ -47,7 +47,7 @@ type SwitchRule = flow.SwitchRule
 type SwitchNode = flow.SwitchNode
 type MergeNode = flow.MergeNode
 type SplitNode = flow.SplitNode
-type LoopNode = flow.LoopNode
+type MapNode = flow.MapNode
 type WaitMode = flow.WaitMode
 type WaitNode = flow.WaitNode
 
@@ -254,7 +254,7 @@ func SwitchExpr(expression string, defaultOutput string) *SwitchNode {
 }
 func Merge(mode MergeMode) *MergeNode                { return flow.Merge(mode) }
 func Split(itemsExpr string) *SplitNode              { return flow.Split(itemsExpr) }
-func Loop(itemsExpr string, batchSize int) *LoopNode { return flow.Loop(itemsExpr, batchSize) }
+func Map(itemsExpr string, batchSize int) *MapNode   { return flow.Map(itemsExpr, batchSize) }
 func Wait(signalName string) *WaitNode               { return flow.Wait(signalName) }
 func WaitDuration(duration string) *WaitNode         { return flow.WaitDuration(duration) }
 

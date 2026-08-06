@@ -173,6 +173,15 @@ func TestMemoryRunnerDirectoryClaimHeadroomCountsActiveClaimsAndFinalizedLeases(
 	}
 }
 
+// TestMemoryRunnerDirectoryReleaseClaimSemantics pins what each release reason
+// leaves behind, including whether the assignment can be dispatched again.
+//
+// Re-dispatchability turns on whether the plane still OWNS the assignment
+// (queued, claimed, or leased), not on whether its seen mark survives. Those
+// two agree for requeue and drop, and disagree for keep_seen — which frees the
+// claim without re-queueing, leaving an assignment nobody owns. Rejecting a
+// re-dispatch there would strand the task permanently: Dispatcher.HandleTask
+// treats a duplicate as success and drops it.
 func TestMemoryRunnerDirectoryReleaseClaimSemantics(t *testing.T) {
 	tests := []struct {
 		name              string
@@ -181,6 +190,8 @@ func TestMemoryRunnerDirectoryReleaseClaimSemantics(t *testing.T) {
 		wantReenqueueAOne bool
 	}{
 		{
+			// Back in the queue: the plane still owns it, so a duplicate
+			// dispatch must not queue a second copy.
 			name:              "requeue keeps seen and returns assignment to front",
 			reason:            ReleaseClaimRequeue,
 			wantNext:          AssignmentID("exec-1/node-a/activation-1"),
@@ -193,10 +204,12 @@ func TestMemoryRunnerDirectoryReleaseClaimSemantics(t *testing.T) {
 			wantReenqueueAOne: true,
 		},
 		{
-			name:              "keep seen frees accounting without requeue",
+			// Claim accounting freed, nothing re-queued: the assignment is
+			// unowned. A re-dispatch is the only way it ever runs.
+			name:              "keep seen frees accounting and leaves the assignment re-dispatchable",
 			reason:            ReleaseClaimKeepSeen,
 			wantNext:          AssignmentID("exec-1/node-b/activation-1"),
-			wantReenqueueAOne: false,
+			wantReenqueueAOne: true,
 		},
 	}
 
@@ -236,6 +249,12 @@ func TestMemoryRunnerDirectoryReleaseClaimSemantics(t *testing.T) {
 	}
 }
 
+// TestMemoryRunnerDirectoryReleaseLeasedControlsSeenRemoval pins what
+// RemoveSeen controls. It controls the seen mark — the record that this
+// assignment was dispatched — and NOT re-dispatchability: both released
+// assignments are unowned, so both must be re-queueable. Rejecting the
+// RemoveSeen=false one would strand it, which is what a stale-token commit
+// produces and how a map expansion lost a batch forever.
 func TestMemoryRunnerDirectoryReleaseLeasedControlsSeenRemoval(t *testing.T) {
 	ctx := context.Background()
 	dir := NewMemoryRunnerDirectory()
@@ -274,8 +293,9 @@ func TestMemoryRunnerDirectoryReleaseLeasedControlsSeenRemoval(t *testing.T) {
 
 	if enqueued, err := dir.EnqueueAssignment(ctx, first); err != nil {
 		t.Fatalf("EnqueueAssignment(first) error = %v", err)
-	} else if enqueued {
-		t.Fatal("EnqueueAssignment(first) enqueued=true, want false when seen marker remains")
+	} else if !enqueued {
+		t.Fatal("EnqueueAssignment(first) enqueued=false; a released assignment must " +
+			"stay re-dispatchable regardless of its seen mark, or nothing ever runs it")
 	}
 	if enqueued, err := dir.EnqueueAssignment(ctx, second); err != nil {
 		t.Fatalf("EnqueueAssignment(second) error = %v", err)

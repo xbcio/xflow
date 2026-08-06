@@ -353,6 +353,7 @@ func assignGraphHash(g *Graph) error {
 		UnitOutEdges:    g.unitOutEdges,
 		UnitInDegree:    g.unitInDegree,
 		SupplyRefs:      g.supplyRefs,
+		MapBodies:       g.mapBodies,
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -387,6 +388,14 @@ type graphHashPayload struct {
 	// gain a "SupplyRefs":null and its graphHash would change, invalidating the
 	// hash recorded on every persisted execution.
 	SupplyRefs map[int][]string `json:",omitempty"`
+	// MapBodies must carry the same explicit omitempty, for the same reason:
+	// a graph with no map bodies must hash byte-identically to before this
+	// field existed. Unlike SupplyRefs, a body's content DOES belong in the
+	// hash -- two workflows differing only in what a map node's body does are
+	// different workflows, and the projected package (not just its member
+	// names) is what the runner actually executes, so it must be part of the
+	// graph's identity the same way GroupMeta.PackageHash already is for groups.
+	MapBodies map[int]*MapBodyPackage `json:",omitempty"`
 }
 
 // graphSerializedForm is the on-wire / at-rest JSON representation of a Graph.
@@ -435,6 +444,16 @@ type graphSerializedForm struct {
 	// WorkflowDef.DependencyEdges, which is not part of the snapshot. The
 	// supplyIndexes map, by contrast, IS re-derived from Nodes[i].Kind.
 	SupplyRefs map[int][]string `json:"supply_refs,omitempty"`
+	// MapBodies maps an xflow.map node's index to its projected body package.
+	// This cannot be re-derived on decode either: it comes from the map node's
+	// "body" Parameters, projected once at compile time by projectMapBodies,
+	// and Parameters travel on the snapshot but ProjectMapBodyPackage is never
+	// re-run on load. Without this field a graph reloaded from Redis (a second
+	// server replica, or the same server after its in-memory graph cache is
+	// evicted on terminal state) has MapBodyAt return nil for every map node,
+	// so BuildSubgraphLease ships an empty Package/PackageHash and every batch
+	// fails at the runner with ErrPackageMissing.
+	MapBodies map[int]*MapBodyPackage `json:"map_bodies,omitempty"`
 }
 
 // MarshalJSON implements json.Marshaler so that encoding/json can serialize a
@@ -466,6 +485,7 @@ func (g *Graph) MarshalJSON() ([]byte, error) {
 		MaxAutoDepth:    g.maxAutoDepth,
 		Groups:          g.groups,
 		SupplyRefs:      g.supplyRefs,
+		MapBodies:       g.mapBodies,
 	})
 }
 
@@ -476,6 +496,22 @@ func (g *Graph) MarshalJSON() ([]byte, error) {
 // so would zero out GroupIdx and let the durable remaining/in-degree counters
 // be seeded from the wrong (ungrouped) unit count.
 var ErrGroupedSnapshotMissingUnitIR = errors.New("graph snapshot: grouped nodes present but no group definitions to rebuild unit IR from")
+
+// ErrMapBodySnapshotMissingPackage is returned by UnmarshalJSON when a snapshot
+// has an xflow.map node declaring a "body" parameter but carries no projected
+// package for it — the shape a snapshot written before map bodies travelled on
+// the wire has, since Parameters always travelled and map_bodies did not.
+//
+// This must never decode into a bodyless graph. A body is not re-derivable on
+// load (ProjectMapBodyPackage runs only during Compile), so MapBodyAt would
+// return nil, BuildSubgraphLease would ship an empty Package, and the runner
+// would reject every batch with ErrPackageMissing — identically on every
+// retry, because nothing re-projects it. Failing closed is also what makes the
+// condition self-healing rather than merely loud: workflowreg decodes the
+// Graph separately from the rest of its record so that an UnmarshalJSON error
+// falls through to recompiling from the stored Definition, and that recompile
+// projects the body back.
+var ErrMapBodySnapshotMissingPackage = errors.New("graph snapshot: xflow.map node declares a body but the snapshot carries no projected body package")
 
 // UnmarshalJSON implements json.Unmarshaler, the inverse of MarshalJSON.
 // It populates the Graph's unexported fields from the stable wire format so
@@ -515,6 +551,22 @@ func (g *Graph) UnmarshalJSON(data []byte) error {
 			return ErrGroupedSnapshotMissingUnitIR
 		}
 	}
+	// A map node declaring a body must arrive with its projected package. See
+	// ErrMapBodySnapshotMissingPackage for why a bodyless decode is worse than
+	// a decode error. Keyed off the node's own parameters rather than the node
+	// type alone, so the expression form of xflow.map — which has no body to
+	// lose — still decodes.
+	for i, n := range nodes {
+		if n.Type != "xflow.map" {
+			continue
+		}
+		if _, hasBody := n.Parameters["body"]; !hasBody {
+			continue
+		}
+		if sf.MapBodies[i] == nil {
+			return fmt.Errorf("graph snapshot: map node %q: %w", n.Name, ErrMapBodySnapshotMissingPackage)
+		}
+	}
 	g.graphHash = sf.GraphHash
 	g.name = sf.Name
 	g.workflowVersion = sf.WorkflowVersion
@@ -532,6 +584,7 @@ func (g *Graph) UnmarshalJSON(data []byte) error {
 	g.maxAutoDepth = sf.MaxAutoDepth
 	g.groups = sf.Groups
 	g.supplyRefs = sf.SupplyRefs
+	g.mapBodies = sf.MapBodies
 	// Rebuild supplyIndexes from node kinds — the same deterministic derivation
 	// Compile performs, so a round-tripped graph needs no WorkflowDef.
 	g.supplyIndexes = make(map[string]int)

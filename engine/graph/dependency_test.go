@@ -17,7 +17,7 @@ func supplyDef() *types.WorkflowDef {
 			{Name: "clean", Type: "xflow.code.script"},
 		},
 		Connections: types.Connections{
-			"start": {"main": []types.Connection{{Node: "clean", Input: "main"}}},
+			"start": {"main": {Targets: []types.Connection{{Node: "clean", Input: "main"}}}},
 		},
 		DependencyEdges: []types.DependencyEdge{{Node: "clean", Supply: "rules"}},
 	}
@@ -107,8 +107,8 @@ func TestCompileRejectsSupplyConsumer(t *testing.T) {
 
 func TestCompileRejectsSupplyInDataflow(t *testing.T) {
 	def := supplyDef()
-	def.Connections["rules"] = map[string][]types.Connection{
-		"main": {{Node: "clean", Input: "main"}},
+	def.Connections["rules"] = map[string]types.PortConnections{
+		"main": {Targets: []types.Connection{{Node: "clean", Input: "main"}}},
 	}
 	_, err := Compile(def)
 	if !errors.Is(err, ErrSupplyInDataflow) {
@@ -116,8 +116,11 @@ func TestCompileRejectsSupplyInDataflow(t *testing.T) {
 	}
 
 	def = supplyDef()
-	def.Connections["start"]["main"] = append(def.Connections["start"]["main"],
-		types.Connection{Node: "rules", Input: "main"})
+	// A map index expression yields a non-addressable struct, so the slice
+	// has to be lifted out, appended to, and written back.
+	pc := def.Connections["start"]["main"]
+	pc.Targets = append(pc.Targets, types.Connection{Node: "rules", Input: "main"})
+	def.Connections["start"]["main"] = pc
 	if _, err := Compile(def); !errors.Is(err, ErrSupplyInDataflow) {
 		t.Fatalf("err = %v, want ErrSupplyInDataflow", err)
 	}

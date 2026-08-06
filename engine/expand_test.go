@@ -20,9 +20,9 @@ func TestScheduler_MergeWaitAny_TriggersOnFirstActive(t *testing.T) {
 			{Name: "done", Type: "test.echo"},
 		},
 		Connections: types.Connections{
-			"A":     {"main": []types.Connection{{Node: "merge", Input: "main"}}},
-			"B":     {"main": []types.Connection{{Node: "merge", Input: "main"}}},
-			"merge": {"main": []types.Connection{{Node: "done", Input: "main"}}},
+			"A":     {"main": {Targets: []types.Connection{{Node: "merge", Input: "main"}}}},
+			"B":     {"main": {Targets: []types.Connection{{Node: "merge", Input: "main"}}}},
+			"merge": {"main": {Targets: []types.Connection{{Node: "done", Input: "main"}}}},
 		},
 	}
 
@@ -91,8 +91,8 @@ func TestScheduler_MergeWaitAll_WaitsForAll(t *testing.T) {
 			{Name: "merge", Type: "xflow.merge", Parameters: map[string]any{"mode": "wait_all"}},
 		},
 		Connections: types.Connections{
-			"A": {"main": []types.Connection{{Node: "merge", Input: "main"}}},
-			"B": {"main": []types.Connection{{Node: "merge", Input: "main"}}},
+			"A": {"main": {Targets: []types.Connection{{Node: "merge", Input: "main"}}}},
+			"B": {"main": {Targets: []types.Connection{{Node: "merge", Input: "main"}}}},
 		},
 	}
 
@@ -157,7 +157,7 @@ func TestScheduler_MergeWaitAll_WaitsForAll(t *testing.T) {
 type loopHandler struct{}
 
 func (h *loopHandler) Descriptor() types.Descriptor {
-	return types.Descriptor{Type: "xflow.loop"}
+	return types.Descriptor{Type: "xflow.map"}
 }
 
 func (h *loopHandler) Execute(_ context.Context, input *types.Input) (*types.Output, error) {
@@ -175,14 +175,13 @@ func (h *loopHandler) Execute(_ context.Context, input *types.Input) (*types.Out
 
 func TestScheduler_LoopExpansion_CreatesSubExecutions(t *testing.T) {
 	def := &types.WorkflowDef{
-		Name:    "loop-test",
-		Options: &types.WorkflowOptions{ExperimentalExpand: true},
+		Name: "loop-test",
 		Nodes: []types.NodeDef{
-			{Name: "loop", Type: "xflow.loop"},
+			{Name: "loop", Type: "xflow.map", Parameters: mapBodyParamsForTest()},
 			{Name: "done", Type: "test.echo"},
 		},
 		Connections: types.Connections{
-			"loop": {"main": []types.Connection{{Node: "done", Input: "main"}}},
+			"loop": {"main": {Targets: []types.Connection{{Node: "done", Input: "main"}}}},
 		},
 	}
 
@@ -194,10 +193,14 @@ func TestScheduler_LoopExpansion_CreatesSubExecutions(t *testing.T) {
 	state := newFakeState()
 	queue := &fakeQueue{}
 	reg := &fakeRegistry{handlers: map[string]types.ActionHandler{
-		"xflow.loop": &loopHandler{},
+		"xflow.map": &loopHandler{},
 		"test.echo":  &echoHandler{},
 	}}
-	eng := newTestEngine(t, state, queue, reg)
+	// The body is what a batch runs now, so an expansion test needs an executor
+	// for it. echoBodyExecutor stands in for a real sub-graph execution.
+	eng := New(state, queue, WithBatchBodyExecutor(newEchoBodyExecutor()))
+	testRegistries.Store(eng, reg)
+	t.Cleanup(func() { testRegistries.Delete(eng) })
 	ctx := context.Background()
 
 	id, err := eng.Submit(ctx, g, nil)

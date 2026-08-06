@@ -1,4 +1,4 @@
-package runner
+package subgraph
 
 import (
 	"errors"
@@ -9,8 +9,9 @@ import (
 	"github.com/xbcio/xflow/engine/graph"
 )
 
-// HandlerInventory is the exact capability declaration used to validate group
-// packages before execution. Has() must not fall back to latest version.
+// HandlerInventory is the exact capability declaration used to validate
+// sub-graph packages before execution. Has() must not fall back to latest
+// version.
 type HandlerInventory interface {
 	Has(nodeType string, version int) bool
 	Runtimes() []string
@@ -26,12 +27,12 @@ type PackageCacheConfig struct {
 }
 
 type cacheEntry struct {
-	graph   *graph.Graph
-	pkg     *graph.GroupPackage
+	graph    *graph.Graph
+	pkg      *graph.SubgraphPackage
 	useCount int
 }
 
-// PackageCache validates and caches compiled group packages keyed by hash.
+// PackageCache validates and caches compiled sub-graph packages keyed by hash.
 type PackageCache struct {
 	mu      sync.Mutex
 	entries map[string]*cacheEntry
@@ -54,9 +55,9 @@ func NewPackageCache(cfg PackageCacheConfig) *PackageCache {
 // does not contain the hash. This is retryable (server may resend).
 var ErrPackageMissing = errors.New("group package not in payload and not cached")
 
-// Resolve validates the group package against the handler inventory and
+// Resolve validates the sub-graph package against the handler inventory and
 // returns the compiled graph. Results are cached by PackageHash.
-func (c *PackageCache) Resolve(payload *engine.GroupLeasePayload, inv HandlerInventory) (*graph.Graph, *graph.GroupPackage, error) {
+func (c *PackageCache) Resolve(payload *engine.GroupLeasePayload, inv HandlerInventory) (*graph.Graph, *graph.SubgraphPackage, error) {
 	if payload == nil {
 		return nil, nil, errors.New("nil group lease payload")
 	}
@@ -112,7 +113,7 @@ func (c *PackageCache) evictIfNeeded() {
 	}
 }
 
-func (c *PackageCache) validatePackage(pkg *graph.GroupPackage, expectedHash string, inv HandlerInventory) error {
+func (c *PackageCache) validatePackage(pkg *graph.SubgraphPackage, expectedHash string, inv HandlerInventory) error {
 	// Verify hash matches by recomputing from the package.
 	computedHash, hashErr := recomputePackageHash(pkg)
 	if hashErr != nil {
@@ -185,7 +186,7 @@ func (e *PackageValidationError) Error() string {
 	return "package validation failed: " + e.Reason
 }
 
-func recomputePackageHash(pkg *graph.GroupPackage) (string, error) {
+func recomputePackageHash(pkg *graph.SubgraphPackage) (string, error) {
 	return graph.ComputePackageHash(pkg)
 }
 

@@ -354,14 +354,13 @@ func TestEngineSuspendPreSignalOutboxSurvivesQueueOutage(t *testing.T) {
 func TestEngineLoopSplitJSONBatchesUseDurableSystemTasks(t *testing.T) {
 	ctx := context.Background()
 	g, err := graph.Compile(&types.WorkflowDef{
-		Name:    "durable-loop-split",
-		Options: &types.WorkflowOptions{ExperimentalExpand: true},
+		Name: "durable-loop-split",
 		Nodes: []types.NodeDef{
-			{Name: "loop", Type: "xflow.loop"},
+			{Name: "loop", Type: "xflow.map"},
 			{Name: "done", Type: "test.echo"},
 		},
 		Connections: types.Connections{
-			"loop": {"main": []types.Connection{{Node: "done", Input: "main"}}},
+			"loop": {"main": {Targets: []types.Connection{{Node: "done", Input: "main"}}}},
 		},
 	})
 	if err != nil {
@@ -369,7 +368,11 @@ func TestEngineLoopSplitJSONBatchesUseDurableSystemTasks(t *testing.T) {
 	}
 	state := newFakeState()
 	queue := &toggleOutboxQueue{}
-	eng := New(state, queue)
+	// The half of this test after the outbox recovery asserts the routed-batch
+	// path (BuildTaskLease refuses, BuildSubgraphLease/CommitSubgraphResult
+	// take over), which only exists on an engine that routes batches out — the
+	// control plane's configuration. A default engine runs the batch in process.
+	eng := New(state, queue, WithRemoteBatchExecution())
 	id, err := eng.Submit(ctx, g, nil)
 	if err != nil {
 		t.Fatalf("Submit() error = %v", err)
@@ -408,8 +411,22 @@ func TestEngineLoopSplitJSONBatchesUseDurableSystemTasks(t *testing.T) {
 	if len(batches) != 1 || batches[0].Type != TaskTypeNodeBatch {
 		t.Fatalf("delivered batches = %+v, want one internal batch task", batches)
 	}
-	if _, err := eng.BuildTaskLease(ctx, batches[0]); !errors.Is(err, ErrSystemTaskHandled) {
-		t.Fatalf("BuildTaskLease(batch) error = %v, want ErrSystemTaskHandled", err)
+	// A batch is routable work now, not something the control plane swallows.
+	// BuildTaskLease must refuse it rather than mint an ordinary node lease for
+	// the synthetic "loop/_batch/0" name; the batch goes through
+	// BuildSubgraphLease, and its result through the expansion barrier.
+	if _, err := eng.BuildTaskLease(ctx, batches[0]); !errors.Is(err, ErrBatchLeaseRequired) {
+		t.Fatalf("BuildTaskLease(batch) error = %v, want ErrBatchLeaseRequired", err)
+	}
+	lease, payload, err := eng.BuildSubgraphLease(ctx, batches[0])
+	if err != nil {
+		t.Fatalf("BuildSubgraphLease(batch) error = %v", err)
+	}
+	if _, err := eng.CommitSubgraphResult(ctx, lease, TaskResult{Output: &types.Output{Data: map[string]any{
+		"items": payload.Items,
+		"count": len(payload.Items),
+	}}}); err != nil {
+		t.Fatalf("CommitSubgraphResult(batch) error = %v", err)
 	}
 	downstream := queue.Drain()
 	if len(downstream) != 1 || downstream[0].NodeName != "done" || downstream[0].Type != TaskTypeNodeExec {

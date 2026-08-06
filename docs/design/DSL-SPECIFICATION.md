@@ -125,7 +125,6 @@ settings:
 options:
   allow_cycles: bool      # 是否允许有环图（默认 false；false 时仍按 DAG 校验）
   max_auto_depth: int     # 有环图单次自动推进最大深度（默认 100；信号/人工恢复后重新计数）
-  experimental_expand: bool # 是否允许 xflow.loop / xflow.split 实验能力（默认 false；生产不建议开启）
 
 # 凭证引用
 # 所有敏感信息（API Key、密码、Token、DB 连接等）统一在 credentials 中定义
@@ -280,7 +279,6 @@ settings:
 
 options:
   allow_cycles: false
-  experimental_expand: false
 
 # 凭证（加密存储，表达式中通过 getCredential('name') 获取）
 credentials:
@@ -1144,8 +1142,6 @@ XFlow 的 connections 仅描述拓扑关系（谁连到谁），条件逻辑由 
 | 静态 Supply | xflow.supply.static | 声明供内容随定义一起携带的 supply（见 §6.3）；声明式，不执行 | _(无)_ | _(无)_ | ❌ | 不适用 |
 
 > **并行执行**：XFlow 不提供 `xflow.parallel` 节点。并行通过 connections 天然实现——一个输出端口连接多个目标节点即为并行分支，用 `xflow.merge` 汇合。
->
-> **实验能力**：`xflow.loop` 和 `xflow.split` 默认会被编译期拒绝；只有显式设置 `options.experimental_expand: true` 才允许提交。当前实现仍是实验骨架，暂不作为生产审批流程能力承诺。
 
 #### 有环图模式
 
@@ -1155,7 +1151,6 @@ XFlow 的 connections 仅描述拓扑关系（谁连到谁），条件逻辑由 
 options:
   allow_cycles: true
   max_auto_depth: 100
-  experimental_expand: false
 
 nodes:
   - name: start
@@ -1531,24 +1526,14 @@ connections:
 
 #### Loop 节点
 
-`xflow.loop` 是实验能力。workflow 必须显式开启：
-
-```yaml
-options:
-  experimental_expand: true
-```
-
-未开启时，编译器会返回错误，提示 `xflow.loop` / `xflow.split` 需要 `options.experimental_expand=true`。
-
 循环体通过内嵌 `body` 子图定义，拥有独立的节点命名空间，语法与顶层 `nodes` + `connections` 完全一致，支持条件分支和错误路径：
 
 ```yaml
 - name: process_items
-  type: xflow.loop
+  type: xflow.map
   parameters:
     items: expression        # 数组表达式，每个元素依次绑定到 $item / $index
     batch_size: int          # 每批并发数量，默认 1（顺序执行）
-    max_concurrency: int     # 最大并发批次数
     continue_on_error: bool  # 单项失败是否继续
     body:                    # 循环体子图（自包含，与外层节点命名空间隔离）
       nodes:                 # 子图节点，语法与顶层 nodes 相同
@@ -1565,11 +1550,10 @@ options:
 ```yaml
 nodes:
   - name: batch_processor
-    type: xflow.loop
+    type: xflow.map
     parameters:
       items: "${{ $nodes['fetch'].items }}"
       batch_size: 10
-      max_concurrency: 3
       continue_on_error: true
       body:
         nodes:
@@ -1604,12 +1588,15 @@ nodes:
 > - `body` 内节点可通过 `$nodes['外层节点名']` 读取外层节点输出；外层节点不能反向引用 `body` 内节点
 > - `body.nodes` 中的节点名仅在循环体内有效，与顶层节点命名空间完全隔离（允许同名）
 > - `$nodes['batch_processor'].result` 返回所有迭代结果的数组，每项对应一次迭代中最后执行节点的输出
-> - **`continue_on_error: true` 时的结果结构**（规划语义，当前 body 子图执行未实现）：
->   - 成功项：返回该迭代最后执行节点的正常输出
+> - **`continue_on_error: true` 时的结果结构**（已实现，见 `engine/batch_body.go` 的 `batchResultData`）：
+>   - 成功项：返回该迭代最后执行节点（body 的终止成员，即无 `main` 出边的节点）的正常输出
 >   - 失败项：返回包含 `_error`（错误详情）与 `_index`（迭代下标）的对象
 >   - 下游可通过表达式过滤成功项：`${{ $nodes['batch_processor'].result | filter(!has(#, '_error')) }}`
+>   - `continue_on_error: false` 时，批内第一个失败项会中止该批剩余项（已跑过的项副作用不回滚），并使整批失败；`completeLoopSplit` 因此判定该 map 节点失败，遵循节点自身的 `on_error` 语义
 >
-> **当前实现状态**：`xflow.loop` / `xflow.split` 的 body 子图执行是 pass-through stub（`engine/expand.go` 明确标注 EXPERIMENTAL）——`expandLoopSplit` 为每个 batch 创建 sub-execution，但 `ExecuteBatch` 不运行 body 子图，`completeLoopSplit` 只产 `{results, count}`，不产生 `_error` 失败项结构。编译期未开启 `experimental_expand` 时直接拒绝。以上 body 语法与 `continue_on_error` 结构为规划设计，待 body 子图执行落地后生效。
+> ⚠️ **body 输出应避免 `_` 前缀键**：`_error`/`_index` 是框架为失败项保留的占位符键。若 body 自身的输出恰好带有 `_error` 键（例如 body 的终止节点自己产出了名为 `_error` 的字段），该项在 `results` 数组中会与一次真实的失败在结构上完全无法区分——这是已知、接受的数据质量缺口（不在本设计范围内修复），作者应确保 body 的正常输出不使用 `_` 前缀的键名。
+>
+> **当前实现状态**：`xflow.map` 的 body 子图执行已落地——`expandLoopSplit`（`engine/expand.go`，map/split 共用的批扩展机制）为每个 batch 创建 sub-execution 并调用 `runBatchBody`，后者通过 `BatchBodyExecutor.ExecuteBatchBody` 把 body 投影成的 `SubgraphPackage` 逐项真正执行（每项一次内嵌引擎运行），再用 `BatchResultForCommit` 把逐项结果折叠成该批的结果与批级成败判定。`completeLoopSplit` 把各批的 `items` 数组按批次顺序拼接成扁平的 `results` 数组，失败项以 `{_error, _index}` 占位符落在原本的下标位置，使 `count` 恒等于输入长度。以上 body 语法与 `continue_on_error` 结构均已生效，不再是规划设计。`xflow.split` 没有 `body` 概念（它通过下游 `connections` 扇出，见下文 Split 节点一节），本节的 body 语法与结果结构均只适用于 `xflow.map`。遗留缺口（无 `max_concurrency` 节流、标记键仍叫 `_loop`）见 [SUBGRAPH-ENGINE-TODO.md](./SUBGRAPH-ENGINE-TODO.md)。
 > **跨域引用编译规则**：
 > - `body` 内 `$nodes['x']` 中 `x` 不在 `body.nodes` 中时，编译器视为**跨域引用**
 > - 跨域引用仅允许读取 loop 节点的上游祖先节点（DAG 拓扑序中确定在 loop 之前完成的节点）
@@ -1660,9 +1647,7 @@ result: "${{ $nodes['final_merge'].status }}"
 
 #### Split 节点
 
-`xflow.split` 与 `xflow.loop` 使用同一个实验开关：未设置 `options.experimental_expand: true` 时会被编译期拒绝。
-
-将数组拆分为独立数据项，每项沿下游 connections 路径独立执行。与 `xflow.loop` 的区别：loop 通过内嵌 `body` 子图定义迭代体，split 通过下游 connections 定义扇出路径，用 `xflow.merge` 汇合结果。
+将数组拆分为独立数据项，每项沿下游 connections 路径独立执行。与 `xflow.map` 的区别：map 通过内嵌 `body` 子图定义迭代体，split 通过下游 connections 定义扇出路径，用 `xflow.merge` 汇合结果。
 
 ```yaml
 - name: fan_out

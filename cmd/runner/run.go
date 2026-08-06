@@ -167,6 +167,11 @@ type runnerService interface {
 	Run(context.Context) error
 }
 
+// batchBodyCacheEntries bounds the compiled-body cache. A body compiles once per
+// distinct PackageHash, and every batch of one map node carries the same hash, so
+// the entry count tracks distinct map nodes this runner serves — not batches.
+const batchBodyCacheEntries = 64
+
 var newRunnerService = func(client runnersvc.ProtocolClient, registry engine.HandlerRegistry, cfg runnersvc.Config) runnerService {
 	return runnersvc.New(client, registry, cfg)
 }
@@ -210,6 +215,17 @@ func runRunner(ctx context.Context, cfg runnerConfig) error {
 		}()
 	}
 	registry := execution.NewRegistry()
+	// A batch lease needs a runtime to run: it names a synthetic node
+	// ("m/_batch/0") that carries no Input and has no registered handler, so the
+	// ordinary node path has nothing to execute. The runtime resolves the body's
+	// member handlers out of this same registry, which is why it is built here
+	// rather than in runnerServiceConfig — the registry does not exist yet there.
+	//
+	// This does not widen what the runner claims. Batch routing advertises the map
+	// node's own type (engine.TaskRouting returns meta.Type), so a runner only ever
+	// sees a batch if the operator already listed xflow.map in --cap.
+	serviceCfg.SubgraphRuntime = runnersvc.NewSubgraphRuntime(
+		registry, runnersvc.NewPackageCache(runnersvc.PackageCacheConfig{MaxEntries: batchBodyCacheEntries}))
 	// Absorb script-engine cold start before the first lease arrives: qjs pays a
 	// ~330 ms QuickJS-wasm compile and the wasm reactor opens its runtime
 	// (resolving the on-disk compilation cache). A failure here is not fatal —

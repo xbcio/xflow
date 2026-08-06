@@ -87,8 +87,8 @@ func cyclicReliabilityGraph(t *testing.T, name string, maxDepth int) *graph.Grap
 			{Name: "review", Type: "test.review"},
 		},
 		Connections: types.Connections{
-			"start":  {"main": []types.Connection{{Node: "review", Input: "main"}}},
-			"review": {"reject": []types.Connection{{Node: "start", Input: "main"}}},
+			"start":  {"main": {Targets: []types.Connection{{Node: "review", Input: "main"}}}},
+			"review": {"reject": {Targets: []types.Connection{{Node: "start", Input: "main"}}}},
 		},
 	}
 	g, err := graph.Compile(def)
@@ -409,8 +409,8 @@ func TestCyclicReliabilityRealRedis(t *testing.T) {
 				{Name: "review", Type: "test.review"},
 			},
 			Connections: types.Connections{
-				"start":  {"main": []types.Connection{{Node: "review", Input: "main"}}},
-				"review": {"reject": []types.Connection{{Node: "start", Input: "main"}}},
+				"start":  {"main": {Targets: []types.Connection{{Node: "review", Input: "main"}}}},
+				"review": {"reject": {Targets: []types.Connection{{Node: "start", Input: "main"}}}},
 			},
 		}
 		g, err := graph.Compile(def)

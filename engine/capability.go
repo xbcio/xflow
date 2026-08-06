@@ -111,7 +111,7 @@ func mergeCredentials(a, b []string) []string {
 }
 
 // RequirementsFromGraphPackage converts graph-level requirements from a
-// compiled GroupPackage into engine-level CapabilityRequirements, adding the
+// compiled SubgraphPackage into engine-level CapabilityRequirements, adding the
 // mandatory group execution feature requirement.
 func RequirementsFromGraphPackage(graphReqs []graph.Requirement) []CapabilityRequirement {
 	reqs := make([]CapabilityRequirement, 0, len(graphReqs)+1)

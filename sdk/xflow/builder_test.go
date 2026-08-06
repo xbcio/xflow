@@ -33,13 +33,13 @@ func TestWorkflowBuilderNodeConnectInputOutput(t *testing.T) {
 	if def.Nodes[0].Kind != "action" {
 		t.Fatalf("first node kind = %q, want action", def.Nodes[0].Kind)
 	}
-	if got := def.Connections["start"]["main"][0].Node; got != "fetch-user" {
+	if got := def.Connections["start"]["main"].Targets[0].Node; got != "fetch-user" {
 		t.Fatalf("start main target = %q, want fetch-user", got)
 	}
-	if got := def.Connections["fetch-user"]["main"][0].Input; got != "user" {
+	if got := def.Connections["fetch-user"]["main"].Targets[0].Input; got != "user" {
 		t.Fatalf("fetch-user input = %q, want user", got)
 	}
-	if got := def.Connections["fetch-order"]["main"][0].Input; got != "order" {
+	if got := def.Connections["fetch-order"]["main"].Targets[0].Input; got != "order" {
 		t.Fatalf("fetch-order input = %q, want order", got)
 	}
 }

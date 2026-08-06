@@ -339,6 +339,18 @@ func (c *Core) pollTask(ctx context.Context, req protocol.PollTaskRequest, info 
 				// Group replay: rebuild GroupPayload from backend state.
 				var recoverErr error
 				lease, recoverErr = c.replayGroupLease(ctx, lease)
+				if errors.Is(recoverErr, engine.ErrGroupLeaseNotActive) {
+					// The group already committed and released its lease
+					// between the directory handing back this durable replay
+					// and the recover read. There is nothing left to run: the
+					// replay is a duplicate of finished work, not a failure.
+					// Drop the assignment and keep polling. Propagating this
+					// as an error would return 500 to the runner, whose
+					// pollLoop treats a poll error as fatal and stops claiming
+					// work altogether — one lost race would idle the runner.
+					_ = c.runners.ClearAssignment(ctx, BuildAssignmentID(&claim.Lease.Task))
+					continue
+				}
 				if recoverErr != nil {
 					return protocol.PollTaskResponse{}, recoverErr
 				}
@@ -370,6 +382,20 @@ func (c *Core) pollTask(ctx context.Context, req protocol.PollTaskRequest, info 
 			}
 			// resp.Lease == nil with no error means the execution is inactive
 			// (dropped). Loop to try the next claim.
+			continue
+		}
+
+		// Batch tasks likewise dispatch through their own lease path: they name
+		// a synthetic node outside the compiled graph, so BuildTaskLease
+		// refuses them.
+		if isBatchTask(&claim.Assignment.Task) {
+			resp, err := c.dispatchSubgraphLease(ctx, claim)
+			if err != nil {
+				return protocol.PollTaskResponse{}, err
+			}
+			if resp.Lease != nil {
+				return resp, nil
+			}
 			continue
 		}
 

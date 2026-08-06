@@ -48,13 +48,6 @@ type WorkflowOptions struct {
 	// Values <= 0 use the engine default.
 	MaxAutoDepth int `json:"max_auto_depth,omitempty"`
 
-	// ExperimentalExpand opts a workflow into using xflow.loop / xflow.split
-	// nodes. Body sub-graph execution is not yet implemented: batches are
-	// currently pass-through stubs and the wiring is unstable. The compiler
-	// rejects workflows that reference these node types unless this flag is
-	// true. Do not enable in production.
-	ExperimentalExpand bool `json:"experimental_expand,omitempty"`
-
 	// ExperimentalNodeGroup opts a workflow into the node-group co-location
 	// protocol. When true, the server advertises group-aware scheduling to
 	// runners that report the FeatureGroupProtocolV1 capability, and the
@@ -130,8 +123,32 @@ type Connection struct {
 	Input string `json:"input,omitempty"`
 }
 
-// Connections maps source_node → output_port → list of target connections.
-type Connections map[string]map[string][]Connection
+// ConnectionType is the channel class of a source port. It is declared on the
+// port rather than on each link because the class is a property of what the
+// port emits, not of who listens. n8n puts a type on the link object too, but
+// that one is a redundant echo forced by index-based port location; xflow ports
+// have names, so the port-level declaration is the only load-bearing one.
+type ConnectionType string
+
+const (
+	// ConnectionTypeData carries node output downstream. The zero value is
+	// equivalent, which is what lets the legacy array form decode unchanged.
+	ConnectionTypeData ConnectionType = "data"
+	// ConnectionTypeDependency declares that the targets read the source supply
+	// node's content through $supplies.<name>. It carries no data and does not
+	// participate in topology.
+	ConnectionTypeDependency ConnectionType = "dependency"
+)
+
+// PortConnections is every edge leaving one source port. Type describes the
+// channel class and is uniform across all targets of that port.
+type PortConnections struct {
+	Type    ConnectionType `json:"type,omitempty"`
+	Targets []Connection   `json:"targets"`
+}
+
+// Connections maps source_node → output_port → the edges leaving that port.
+type Connections map[string]map[string]PortConnections
 
 // DependencyEdge declares that Node reads the shared data maintained by the
 // supply node named Supply. It is deliberately separate from Connections:

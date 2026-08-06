@@ -102,9 +102,9 @@ func groupedDefForBoundary() *types.WorkflowDef {
 		},
 		Groups: []types.GroupDef{{Name: "grp", Members: []string{"a", "b"}}},
 		Connections: types.Connections{
-			"start": {"main": []types.Connection{{Node: "a", Input: "main"}}},
-			"a":     {"main": []types.Connection{{Node: "b", Input: "main"}}},
-			"b":     {"main": []types.Connection{{Node: "tail", Input: "main"}}},
+			"start": {"main": {Targets: []types.Connection{{Node: "a", Input: "main"}}}},
+			"a":     {"main": {Targets: []types.Connection{{Node: "b", Input: "main"}}}},
+			"b":     {"main": {Targets: []types.Connection{{Node: "tail", Input: "main"}}}},
 		},
 	}
 }
@@ -121,7 +121,7 @@ func TestSupplyNodeRejectedAsGroupMember(t *testing.T) {
 		},
 		Groups: []types.GroupDef{{Name: "g", Members: []string{"cfg"}}},
 		Connections: types.Connections{
-			"trigger": {"main": []types.Connection{{Node: "worker", Input: "main"}}},
+			"trigger": {"main": {Targets: []types.Connection{{Node: "worker", Input: "main"}}}},
 		},
 		DependencyEdges: []types.DependencyEdge{{Node: "worker", Supply: "cfg"}},
 	}

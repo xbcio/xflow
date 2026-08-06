@@ -46,7 +46,7 @@ func TestUnitGraphMultiExit(t *testing.T) {
 			{Name: "y", Kind: types.NodeKindAction},
 		},
 		Connections: types.Connections{
-			"a": {"ok": {{Node: "x", Input: "main"}}, "err": {{Node: "y", Input: "main"}}},
+			"a": {"ok": {Targets: []types.Connection{{Node: "x", Input: "main"}}}, "err": {Targets: []types.Connection{{Node: "y", Input: "main"}}}},
 		},
 		Groups: []types.GroupDef{{Name: "g", Members: []string{"a"}}},
 	}

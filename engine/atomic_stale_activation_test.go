@@ -73,7 +73,7 @@ func TestEngineHandleSystemTaskDropsStaleActivationAdvance(t *testing.T) {
 			{Name: "end", Type: "test.echo"},
 		},
 		Connections: types.Connections{
-			"start": {"default": []types.Connection{{Node: "end", Input: "default"}}},
+			"start": {"default": {Targets: []types.Connection{{Node: "end", Input: "default"}}}},
 		},
 	}
 

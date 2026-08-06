@@ -13,7 +13,7 @@ func TestUnitGraphNoGroupsMirrorsNodes(t *testing.T) {
 			{Name: "a", Type: "noop", Kind: types.NodeKindAction},
 			{Name: "b", Type: "noop", Kind: types.NodeKindAction},
 		},
-		Connections: types.Connections{"a": {"main": {{Node: "b", Input: "main"}}}},
+		Connections: types.Connections{"a": {"main": {Targets: []types.Connection{{Node: "b", Input: "main"}}}}},
 	}
 	g, err := Compile(def)
 	if err != nil {

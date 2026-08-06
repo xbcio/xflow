@@ -171,7 +171,7 @@ func TestRegistry_Versions(t *testing.T) {
 
 // TestRegistry_BuiltinNodesHaveVersion verifies all builtin nodes have version via BaseNode.
 func TestRegistry_BuiltinNodesHaveVersion(t *testing.T) {
-	types := []string{"xflow.if", "xflow.switch", "xflow.http", "xflow.loop", "xflow.split", "xflow.merge", "xflow.function", "xflow.grpc", "xflow.database", "xflow.wait", "xflow.approval"}
+	types := []string{"xflow.if", "xflow.switch", "xflow.http", "xflow.map", "xflow.split", "xflow.merge", "xflow.function", "xflow.grpc", "xflow.database", "xflow.wait", "xflow.approval"}
 	for _, typ := range types {
 		h, ok := registry.LookupVersion(typ, 1)
 		if !ok {

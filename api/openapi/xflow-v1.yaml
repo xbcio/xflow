@@ -684,8 +684,6 @@ components:
           type: boolean
         max_auto_depth:
           type: integer
-        experimental_expand:
-          type: boolean
 
     CredentialDef:
       type: object

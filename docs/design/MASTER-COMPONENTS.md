@@ -681,7 +681,6 @@ type WorkflowContext struct {
 type WorkflowOptions struct {
     AllowCycles        bool `json:"allow_cycles,omitempty"`        // 是否允许循环执行
     MaxAutoDepth       int  `json:"max_auto_depth,omitempty"`      // 循环模式最大自动调度深度
-    ExperimentalExpand bool `json:"experimental_expand,omitempty"` // 是否启用实验性 loop/split 展开
 }
 
 type RunnerSelector struct {
@@ -917,7 +916,7 @@ const (
     NodeTypeDatabase     NodeType = "xflow.database"
     NodeTypeIF           NodeType = "xflow.if"
     NodeTypeSwitch       NodeType = "xflow.switch"
-    NodeTypeLoop         NodeType = "xflow.loop"
+    NodeTypeMap          NodeType = "xflow.map"
     NodeTypeWait         NodeType = "xflow.wait"
     NodeTypeMerge        NodeType = "xflow.merge"
     NodeTypeSplit        NodeType = "xflow.split"

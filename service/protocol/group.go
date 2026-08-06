@@ -27,28 +27,28 @@ const (
 // to runners. GroupUnitIdx is the live-wire unit authority — after decode the
 // runner MUST validate it against the task's UnitIdx; mismatch = fail closed.
 type GroupLeaseWire struct {
-	ProtocolVersion int                  `json:"protocol_version"`
-	GroupExecID     string               `json:"group_exec_id"`
-	GroupID         string               `json:"group_id"`
-	GroupUnitIdx    int                   `json:"group_unit_idx"`
-	WorkflowVersion string               `json:"workflow_version,omitempty"`
-	GraphHash       string               `json:"graph_hash,omitempty"`
-	PackageHash     string               `json:"package_hash"`
-	Package         *graph.GroupPackage   `json:"package,omitempty"`
-	Input           *types.Input          `json:"input,omitempty"`
-	IdempotencyKey  string               `json:"idempotency_key"`
-	Deadline        *time.Time           `json:"deadline,omitempty"`
+	ProtocolVersion int                    `json:"protocol_version"`
+	GroupExecID     string                 `json:"group_exec_id"`
+	GroupID         string                 `json:"group_id"`
+	GroupUnitIdx    int                    `json:"group_unit_idx"`
+	WorkflowVersion string                 `json:"workflow_version,omitempty"`
+	GraphHash       string                 `json:"graph_hash,omitempty"`
+	PackageHash     string                 `json:"package_hash"`
+	Package         *graph.SubgraphPackage `json:"package,omitempty"`
+	Input           *types.Input           `json:"input,omitempty"`
+	IdempotencyKey  string                 `json:"idempotency_key"`
+	Deadline        *time.Time             `json:"deadline,omitempty"`
 }
 
 // GroupResultWire is the on-wire representation of a group execution result
 // reported by a runner.
 type GroupResultWire struct {
-	ProtocolVersion int                     `json:"protocol_version"`
-	GroupExecID     string                  `json:"group_exec_id"`
-	Attempt         int                     `json:"attempt"`
-	Outcome         engine.GroupOutcome     `json:"outcome"`
-	Exits           []GroupExitResultWire   `json:"exits,omitempty"`
-	Error           string                  `json:"error,omitempty"`
+	ProtocolVersion int                   `json:"protocol_version"`
+	GroupExecID     string                `json:"group_exec_id"`
+	Attempt         int                   `json:"attempt"`
+	Outcome         engine.GroupOutcome   `json:"outcome"`
+	Exits           []GroupExitResultWire `json:"exits,omitempty"`
+	Error           string                `json:"error,omitempty"`
 }
 
 // GroupExitResultWire is a single boundary exit port output on the wire.
@@ -60,12 +60,12 @@ type GroupExitResultWire struct {
 
 // RenewLeaseRequest is the wire request for extending an active lease.
 type RenewLeaseRequest struct {
-	RunnerID  string `json:"runner_id"`
-	SessionID string `json:"session_id"`
-	LeaseID   string `json:"lease_id"`
+	RunnerID   string `json:"runner_id"`
+	SessionID  string `json:"session_id"`
+	LeaseID    string `json:"lease_id"`
 	LeaseToken string `json:"lease_token"`
-	Extend    int64  `json:"extend_ms"`
-	AuthToken string `json:"auth_token,omitempty"`
+	Extend     int64  `json:"extend_ms"`
+	AuthToken  string `json:"auth_token,omitempty"`
 }
 
 // RenewLeaseResponse is the wire response for a lease renewal.

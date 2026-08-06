@@ -123,7 +123,7 @@ func TestEngine_BuildTaskLeaseAndCommitTaskResult_RunnerStyleFlow(t *testing.T) 
 			{Name: "next", Type: "test.echo"},
 		},
 		Connections: types.Connections{
-			"start": {"main": []types.Connection{{Node: "next", Input: "main"}}},
+			"start": {"main": {Targets: []types.Connection{{Node: "next", Input: "main"}}}},
 		},
 	}
 
@@ -234,7 +234,7 @@ func TestEngine_TaskRoutingIncludesEffectiveRunnerSelector(t *testing.T) {
 			},
 		},
 		Connections: types.Connections{
-			"start": {"main": []types.Connection{{Node: "approve", Input: "main"}}},
+			"start": {"main": {Targets: []types.Connection{{Node: "approve", Input: "main"}}}},
 		},
 	}
 
@@ -333,7 +333,7 @@ func TestEngine_CommitTaskResult_IgnoresDuplicateTerminalResult(t *testing.T) {
 			{Name: "next", Type: "test.echo"},
 		},
 		Connections: types.Connections{
-			"start": {"main": []types.Connection{{Node: "next", Input: "main"}}},
+			"start": {"main": {Targets: []types.Connection{{Node: "next", Input: "main"}}}},
 		},
 	}
 
@@ -450,7 +450,7 @@ func TestEngine_CommitTaskResultWithOutcomeClassifiesAcceptedDuplicateAndStale(t
 				{Name: "next", Type: "test.echo"},
 			},
 			Connections: types.Connections{
-				"start": {"main": []types.Connection{{Node: "next", Input: "main"}}},
+				"start": {"main": {Targets: []types.Connection{{Node: "next", Input: "main"}}}},
 			},
 		}
 

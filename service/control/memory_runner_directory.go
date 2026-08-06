@@ -132,8 +132,16 @@ func (d *MemoryRunnerDirectory) Heartbeat(_ context.Context, req HeartbeatReques
 	return nil
 }
 
-// EnqueueAssignment queues a new assignment exactly once until its seen marker
-// is cleared.
+// EnqueueAssignment queues an assignment, deduplicating against the seen set.
+//
+// A seen mark alone is not enough to reject: it says the assignment has been
+// dispatched before, not that it is still live. An assignment released without
+// clearing its mark — ReleaseLeased with RemoveSeen=false, the stale-token path
+// — is exactly that combination, and rejecting it strands the task forever
+// (Dispatcher.HandleTask treats a duplicate as success and drops it). So the
+// guard is liveness, with the mark only deciding which bookkeeping needs
+// creating. This mirrors the state check in redisEnqueueAssignmentLua; the two
+// directories must not disagree about when a task can be re-dispatched.
 func (d *MemoryRunnerDirectory) EnqueueAssignment(_ context.Context, assignment Assignment) (bool, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -141,12 +149,39 @@ func (d *MemoryRunnerDirectory) EnqueueAssignment(_ context.Context, assignment 
 	if assignment.AssignmentID == "" {
 		return false, fmt.Errorf("assignment id is required")
 	}
-	if _, ok := d.seen[assignment.AssignmentID]; ok {
+	if _, ok := d.seen[assignment.AssignmentID]; ok && d.assignmentLiveLocked(assignment.AssignmentID) {
 		return false, nil
 	}
 	d.seen[assignment.AssignmentID] = struct{}{}
+	d.removeQueuedAssignmentLocked(assignment.AssignmentID)
 	d.queue = append(d.queue, assignment)
 	return true, nil
+}
+
+// assignmentLiveLocked reports whether the assignment is still owned by the
+// plane: waiting in the queue, reserved by an unfinalized claim, or held under
+// a finalized lease. This is the in-memory equivalent of the Redis directory's
+// queued/claimed/leased states; anything else is the released state.
+func (d *MemoryRunnerDirectory) assignmentLiveLocked(assignmentID AssignmentID) bool {
+	for _, queued := range d.queue {
+		if queued.AssignmentID == assignmentID {
+			return true
+		}
+	}
+	for _, claim := range d.claims {
+		if claim.assignment.AssignmentID == assignmentID {
+			return true
+		}
+	}
+	for _, state := range d.runners {
+		if state == nil {
+			continue
+		}
+		if _, ok := state.finalizedLease[assignmentID]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // ClaimForRunner reserves the first compatible assignment for the runner's

@@ -18,8 +18,8 @@ func groupedRoundTripDef() *types.WorkflowDef {
 			{Name: "store", Kind: types.NodeKindAction},
 		},
 		Connections: types.Connections{
-			"ingest":  {"main": {{Node: "analyze", Input: "main"}}},
-			"analyze": {"main": {{Node: "store", Input: "main"}}},
+			"ingest":  {"main": {Targets: []types.Connection{{Node: "analyze", Input: "main"}}}},
+			"analyze": {"main": {Targets: []types.Connection{{Node: "store", Input: "main"}}}},
 		},
 		Groups: []types.GroupDef{{Name: "edge", Members: []string{"ingest", "analyze"}}},
 	}
@@ -124,7 +124,7 @@ func TestGraphSnapshotLegacyAllExplicitNegativeOneDegradesToUngrouped(t *testing
 			{Name: "wait", Type: "test.wait"},
 		},
 		Connections: types.Connections{
-			"start": {"main": {{Node: "wait", Input: "main"}}},
+			"start": {"main": {Targets: []types.Connection{{Node: "wait", Input: "main"}}}},
 		},
 	}
 	g, err := Compile(def)

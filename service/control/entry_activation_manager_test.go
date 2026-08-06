@@ -32,8 +32,8 @@ func groupTriggerGraph(t *testing.T) *graph.Graph {
 			},
 		},
 		Connections: types.Connections{
-			"trig":   {"main": {{Node: "worker", Input: "main"}}},
-			"worker": {"main": {{Node: "down", Input: "main"}}},
+			"trig":   {"main": types.PortConnections{Targets: []types.Connection{{Node: "worker", Input: "main"}}}},
+			"worker": {"main": types.PortConnections{Targets: []types.Connection{{Node: "down", Input: "main"}}}},
 		},
 	})
 	if err != nil {
@@ -83,7 +83,7 @@ func TestDeriveEntryActivations_ProjectionFailurePropagates(t *testing.T) {
 
 	sentinel := errors.New("boom: cannot project package")
 	orig := projectGroupPackage
-	projectGroupPackage = func(*graph.Graph, int) (*graph.GroupPackage, string, error) {
+	projectGroupPackage = func(*graph.Graph, int) (*graph.SubgraphPackage, string, error) {
 		return nil, "", sentinel
 	}
 	defer func() { projectGroupPackage = orig }()
@@ -111,7 +111,7 @@ func TestAddOrUpdateWorkflow_ProjectionFailureStoresNothing(t *testing.T) {
 
 	sentinel := errors.New("boom: cannot project package")
 	orig := projectGroupPackage
-	projectGroupPackage = func(*graph.Graph, int) (*graph.GroupPackage, string, error) {
+	projectGroupPackage = func(*graph.Graph, int) (*graph.SubgraphPackage, string, error) {
 		return nil, "", sentinel
 	}
 	defer func() { projectGroupPackage = orig }()

@@ -65,8 +65,8 @@ func TestSuspend_SignalAfterSuspend(t *testing.T) {
 			{Name: "end", Type: "test.echo"},
 		},
 		Connections: types.Connections{
-			"start": {"main": []types.Connection{{Node: "wait", Input: "main"}}},
-			"wait":  {"main": []types.Connection{{Node: "end", Input: "main"}}},
+			"start": {"main": {Targets: []types.Connection{{Node: "wait", Input: "main"}}}},
+			"wait":  {"main": {Targets: []types.Connection{{Node: "end", Input: "main"}}}},
 		},
 	}
 
@@ -135,7 +135,7 @@ func TestSuspend_SignalBeforeSuspend(t *testing.T) {
 			{Name: "end", Type: "test.echo"},
 		},
 		Connections: types.Connections{
-			"wait": {"main": []types.Connection{{Node: "end", Input: "main"}}},
+			"wait": {"main": {Targets: []types.Connection{{Node: "end", Input: "main"}}}},
 		},
 	}
 
@@ -233,7 +233,7 @@ func TestSuspend_MultiSignalWaitsForQuorumAndPassesAllSignals(t *testing.T) {
 			{Name: "end", Type: "test.echo"},
 		},
 		Connections: types.Connections{
-			"wait": {"main": []types.Connection{{Node: "end", Input: "main"}}},
+			"wait": {"main": {Targets: []types.Connection{{Node: "end", Input: "main"}}}},
 		},
 	}
 

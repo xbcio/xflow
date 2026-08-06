@@ -94,11 +94,14 @@ type Engine struct {
 	commitObserver           CommitObserver
 	outboxObserver           OutboxObserver
 	nodeFailureObserver      NodeFailureObserver
+	itemFailureObserver      ItemFailureObserver
 	outboxMaxDeliveryAttempt int
 	defaultLeaseTTL          time.Duration
 	suspendDisabled          bool
 	suspendDisabledErr       error
 	groupExecutor            GroupExecutor
+	batchBodyExecutor        BatchBodyExecutor
+	remoteBatchExecution     bool
 
 	mu     sync.RWMutex
 	graphs map[types.ExecutionID]*graph.Graph

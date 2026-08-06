@@ -112,6 +112,41 @@ func WithNodeFailureObserver(o NodeFailureObserver) Option {
 	}
 }
 
+// ObservedItemFailures reports how many items of one batch had their body
+// execution fail. It carries counts, not identities: the failing items' indices
+// and content stay out because an observer is expected to turn this into a
+// metric, where an index is unbounded cardinality and content is not an
+// operator's to read.
+type ObservedItemFailures struct {
+	Workflow string
+	NodeName string
+	// Failed is the number of items in this batch whose body failed. Always
+	// positive: a batch with no failures is not observed at all.
+	Failed int
+	// Total is the batch's item count, so a rate can be expressed against the
+	// work attempted rather than only in absolute terms.
+	Total int
+}
+
+// ItemFailureObserver receives per-batch counts of failed body items.
+//
+// This is what makes continue_on_error safe to turn on. With it set, a failed
+// item leaves a placeholder the downstream filter drops, the batch commits, and
+// the execution reports Success — so nothing else in the system distinguishes a
+// node steadily losing records from a healthy one.
+type ItemFailureObserver interface {
+	ObserveItemFailures(f ObservedItemFailures)
+}
+
+// WithItemFailureObserver installs an observer for per-item body failures.
+func WithItemFailureObserver(o ItemFailureObserver) Option {
+	return func(e *Engine) {
+		if o != nil {
+			e.itemFailureObserver = o
+		}
+	}
+}
+
 // WithOutboxMaxDeliveryAttempts changes the number of failed queue handoffs
 // allowed before a backend moves an outbox entry to dead-letter storage.
 func WithOutboxMaxDeliveryAttempts(maxAttempts int) Option {

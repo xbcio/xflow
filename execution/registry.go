@@ -2,6 +2,7 @@ package execution
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 
 	nodereg "github.com/xbcio/xflow/node/registry"
@@ -103,6 +104,76 @@ func (r *Registry) RegisterExecutionHandler(id types.ExecutionID, nodeName strin
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.executionHandlers[string(id)+"/"+nodeName] = h
+}
+
+// UnregisterExecution removes every execution-scoped handler registered under
+// id, regardless of node name. There was no such method at all before this:
+// RegisterExecutionHandler had a write side but no way back, so every caller
+// that registers per-execution (execution/subgraph.Register, one call per
+// collector node) leaked its entries for the life of the process once that
+// execution finished. That was survivable for a group, which registers once
+// per group EXECUTION, but a map body registers once per ITEM
+// (MapBodyExecutor.ExecuteBatchBody calls Executor.Execute, and Execute calls
+// Register, once per item in the batch) -- an unbounded-growth leak on any
+// long-running runner serving map workflows with non-trivial item counts.
+//
+// Whole-execution rather than per-node: a caller that registered N collector
+// nodes for one inner execution (subgraph.Register iterates pkg.Exits) has no
+// reason to unregister them one at a time, and Executor.Execute already knows
+// the one execution ID it minted -- a single call at its defer site is the
+// natural cleanup boundary, matching the lifetime the entries were actually
+// created for.
+func (r *Registry) UnregisterExecution(id types.ExecutionID) {
+	prefix := string(id) + "/"
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for key := range r.executionHandlers {
+		if strings.HasPrefix(key, prefix) {
+			delete(r.executionHandlers, key)
+		}
+	}
+}
+
+// ExecutionHandlerCount reports how many execution-scoped handler entries are
+// currently registered, across all executions. It exists so callers outside
+// this package (e.g. execution/subgraph's tests, which cannot see the private
+// executionHandlers map) can assert the leak I1 describes is actually fixed --
+// asserting on the real count, not merely "no panic" or "the map still works".
+func (r *Registry) ExecutionHandlerCount() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.executionHandlers)
+}
+
+// DirectHandlerTypePrefix is the synthetic node type a name-scoped handler
+// carries. A LocalNode has no portable node type — its handler is bound to the
+// node NAME (RegisterNodeHandler) — so the builder stamps its NodeDef.Type as
+// DirectHandlerTypePrefix + <node name> to keep the definition self-describing.
+//
+// The prefix is exported because whoever validates a node type against a
+// registry has to know that this one resolves by name instead: a type-only
+// lookup for "__direct__/double" finds nothing however many name-scoped
+// handlers are registered.
+const DirectHandlerTypePrefix = "__direct__/"
+
+// DirectHandlerNodeName returns the node name encoded in a synthetic direct
+// handler type, and whether nodeType was one.
+func DirectHandlerNodeName(nodeType string) (string, bool) {
+	if !strings.HasPrefix(nodeType, DirectHandlerTypePrefix) {
+		return "", false
+	}
+	return strings.TrimPrefix(nodeType, DirectHandlerTypePrefix), true
+}
+
+// HasNodeHandler reports whether a handler is registered for this node name.
+// It answers the question "can this name-scoped node be dispatched", which
+// Get cannot: Get falls through to type lookups and version policy, so a miss
+// there does not distinguish "no name-scoped handler" from "no handler at all".
+func (r *Registry) HasNodeHandler(nodeName string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, ok := r.nodeHandlers[nodeName]
+	return ok
 }
 
 // RegisterNodeHandler binds a handler to a node name across executions.

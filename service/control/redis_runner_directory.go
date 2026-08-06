@@ -366,6 +366,15 @@ func (d *RedisRunnerDirectory) replayLease(ctx context.Context, runnerID, sessio
 			return Claim{}, false, fmt.Errorf("read lease session %q: %w", assignmentID, err)
 		}
 		rawAssignment, err := d.rdb.HGet(ctx, d.keys.assignmentData, assignmentID).Result()
+		if errors.Is(err, redis.Nil) {
+			// Released between the HGETALL above and this read — by the sweeper
+			// reclaiming a dead runner's lease, or by a report committing. The
+			// assignment is simply not this runner's to replay. Reporting it as
+			// an error would be fatal out of proportion: Runner.pollLoop returns
+			// on a poll error, so the runner stops claiming work altogether and
+			// a queue with waiting tasks goes unserved.
+			continue
+		}
 		if err != nil {
 			return Claim{}, false, fmt.Errorf("read leased assignment %q: %w", assignmentID, err)
 		}
@@ -374,6 +383,11 @@ func (d *RedisRunnerDirectory) replayLease(ctx context.Context, runnerID, sessio
 			return Claim{}, false, err
 		}
 		rawLease, err := d.rdb.HGet(ctx, d.keys.assignmentLeaseMeta, assignmentID).Result()
+		if errors.Is(err, redis.Nil) {
+			// Same race, one field later: the release deleted the lease metadata
+			// while the payload was still readable.
+			continue
+		}
 		if err != nil {
 			return Claim{}, false, fmt.Errorf("read persisted lease %q: %w", assignmentID, err)
 		}
@@ -1058,9 +1072,29 @@ end
 return 'ok'
 `
 
+// redisEnqueueAssignmentLua inserts a durable assignment, deduplicating against
+// the seen set.
+//
+// A seen mark alone is not enough to reject: it says "this assignment has been
+// dispatched before", not "it is still live". The one state where both are true
+// at once is 'released' — ReleaseLeased with RemoveSeen=false, which is what a
+// stale-token commit produces. The plane has given up ownership but kept the
+// mark, so rejecting on the mark alone strands the task forever: the caller
+// (Dispatcher.HandleTask) treats 'duplicate' as success and drops it, and
+// nothing re-queues it. A map expansion that lost one batch this way waits at
+// its barrier for the life of the execution.
+//
+// So the guard is the STATE, with the seen mark only deciding which key needs
+// creating. Every non-released state still rejects: 'queued' (already waiting),
+// 'claimed' (a runner is materializing a lease), 'leased' (a runner is running
+// it) — re-queueing any of those would hand the same task to a second runner.
 const redisEnqueueAssignmentLua = `
-if redis.call('SADD', KEYS[2], ARGV[1]) == 0 then
-  return 'duplicate'
+local seen = redis.call('SADD', KEYS[2], ARGV[1]) == 0
+if seen then
+  local state = redis.call('HGET', KEYS[4], ARGV[1])
+  if state and state ~= 'released' then
+    return 'duplicate'
+  end
 end
 redis.call('HSET', KEYS[3], ARGV[1], ARGV[2])
 redis.call('HSET', KEYS[4], ARGV[1], 'queued')

@@ -371,10 +371,15 @@ func TestHTTPReportResultStaleTokenReleasesMatchingLeaseCapacity(t *testing.T) {
 		t.Fatalf("claimed assignment = %q, want %q", claim.Assignment.AssignmentID, second.AssignmentID)
 	}
 
+	// The stale-token cleanup released the assignment without clearing its seen
+	// mark. That mark records the dispatch; it does not make the work finished.
+	// Nobody owns the assignment now, so it must stay re-dispatchable — a
+	// rejection here is what stranded a map expansion's batch permanently.
 	if enqueued, err := dir.EnqueueAssignment(ctx, first); err != nil {
 		t.Fatalf("EnqueueAssignment(first) error = %v", err)
-	} else if enqueued {
-		t.Fatal("EnqueueAssignment(first) enqueued=true, want seen marker retained after stale cleanup")
+	} else if !enqueued {
+		t.Fatal("EnqueueAssignment(first) enqueued=false after stale cleanup; the " +
+			"assignment is unreachable and its parent would wait forever")
 	}
 }
 

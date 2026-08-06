@@ -90,6 +90,13 @@ func newFromConfig(cfg *engineConfig, provider backend.Provider) (*Engine, error
 	if cfg.executionMode == ExecutionModeTransient {
 		engOpts = append(engOpts, engine.WithSuspendDisabled(ErrTransientSuspendUnsupported))
 	}
+	// A map node's batches run in this process, so this engine needs the
+	// executor that runs their body. A body always forbids suspend: it runs once
+	// per item with no external identity to resume against, so a suspended item
+	// would park a sub-execution nothing can ever signal.
+	if bodies := newBatchBodyExecutor(cfg.registry, true); bodies != nil {
+		engOpts = append(engOpts, engine.WithBatchBodyExecutor(bodies))
+	}
 
 	eng := engine.New(cfg.state, cfg.queue, engOpts...)
 

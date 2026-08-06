@@ -37,7 +37,7 @@ func baseUnexportedDef() *types.WorkflowDef {
 			{Name: "worker", Type: "test.worker"},
 		},
 		Connections: types.Connections{
-			"start": {"main": []types.Connection{{Node: "worker", Input: "main"}}},
+			"start": {"main": {Targets: []types.Connection{{Node: "worker", Input: "main"}}}},
 		},
 	}
 }

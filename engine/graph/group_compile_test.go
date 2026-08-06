@@ -17,8 +17,8 @@ func mkGroupDef(members []string) *types.WorkflowDef {
 			{Name: "store", Type: "db", Kind: types.NodeKindAction},
 		},
 		Connections: types.Connections{
-			"ingest":  {"main": {{Node: "analyze", Input: "main"}}},
-			"analyze": {"main": {{Node: "store", Input: "main"}}},
+			"ingest":  {"main": {Targets: []types.Connection{{Node: "analyze", Input: "main"}}}},
+			"analyze": {"main": {Targets: []types.Connection{{Node: "store", Input: "main"}}}},
 		},
 		Groups: []types.GroupDef{{Name: "edge", Members: members}},
 	}
@@ -60,9 +60,9 @@ func TestCompileGroupRejects(t *testing.T) {
 			{Name: "b", Kind: types.NodeKindAction},
 		},
 		Connections: types.Connections{
-			"src1": {"main": {{Node: "a", Input: "main"}}},
-			"src2": {"main": {{Node: "b", Input: "main"}}},
-			"a":    {"main": {{Node: "b", Input: "main"}}},
+			"src1": {"main": {Targets: []types.Connection{{Node: "a", Input: "main"}}}},
+			"src2": {"main": {Targets: []types.Connection{{Node: "b", Input: "main"}}}},
+			"a":    {"main": {Targets: []types.Connection{{Node: "b", Input: "main"}}}},
 		},
 		Groups: []types.GroupDef{{Name: "g", Members: []string{"a", "b"}}},
 	}
@@ -74,7 +74,7 @@ func TestCompileGroupRejects(t *testing.T) {
 			{Name: "c", Kind: types.NodeKindAction},
 			{Name: "src", Kind: types.NodeKindAction},
 		},
-		Connections: types.Connections{"src": {"main": {{Node: "c", Input: "main"}}}},
+		Connections: types.Connections{"src": {"main": {Targets: []types.Connection{{Node: "c", Input: "main"}}}}},
 		Groups:      []types.GroupDef{{Name: "g", Members: []string{"a", "c"}}},
 	}
 	memberSelector := mkGroupDef([]string{"ingest", "analyze"})

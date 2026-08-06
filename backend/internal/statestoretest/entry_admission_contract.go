@@ -29,7 +29,7 @@ func triggerGroupOnlyGraph(t *testing.T) *graph.Graph {
 			{Name: "entry", Kind: types.NodeKindTrigger},
 			{Name: "body", Kind: types.NodeKindAction},
 		},
-		Connections: types.Connections{"entry": {"main": {{Node: "body", Input: "main"}}}},
+		Connections: types.Connections{"entry": {"main": {Targets: []types.Connection{{Node: "body", Input: "main"}}}}},
 		Groups:      []types.GroupDef{{Name: "tg", Members: []string{"entry", "body"}}},
 	})
 	if err != nil {
@@ -51,8 +51,8 @@ func triggerGroupWithDownstreamGraph(t *testing.T) *graph.Graph {
 			{Name: "store", Kind: types.NodeKindAction},
 		},
 		Connections: types.Connections{
-			"entry": {"main": {{Node: "body", Input: "main"}}},
-			"body":  {"main": {{Node: "store", Input: "main"}}},
+			"entry": {"main": {Targets: []types.Connection{{Node: "body", Input: "main"}}}},
+			"body":  {"main": {Targets: []types.Connection{{Node: "store", Input: "main"}}}},
 		},
 		Groups: []types.GroupDef{{Name: "tg", Members: []string{"entry", "body"}}},
 	})

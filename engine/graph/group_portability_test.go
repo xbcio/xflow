@@ -21,8 +21,8 @@ func TestPortability_ExternalNodeReference(t *testing.T) {
 			{Name: "grp", Members: []string{"A", "B"}},
 		},
 		Connections: types.Connections{
-			"A": {"main": []types.Connection{{Node: "B", Input: "main"}}},
-			"B": {"main": []types.Connection{{Node: "D", Input: "main"}}},
+			"A": {"main": {Targets: []types.Connection{{Node: "B", Input: "main"}}}},
+			"B": {"main": {Targets: []types.Connection{{Node: "D", Input: "main"}}}},
 		},
 	}
 	_, err := Compile(def)
@@ -51,8 +51,8 @@ func TestPortability_IntraGroupReferenceOK(t *testing.T) {
 			{Name: "grp", Members: []string{"A", "B"}},
 		},
 		Connections: types.Connections{
-			"A": {"main": []types.Connection{{Node: "B", Input: "main"}}},
-			"B": {"main": []types.Connection{{Node: "D", Input: "main"}}},
+			"A": {"main": {Targets: []types.Connection{{Node: "B", Input: "main"}}}},
+			"B": {"main": {Targets: []types.Connection{{Node: "D", Input: "main"}}}},
 		},
 	}
 	_, err := Compile(def)
@@ -73,8 +73,8 @@ func TestPortability_LocalNodeRejected(t *testing.T) {
 			{Name: "grp", Members: []string{"A", "B"}},
 		},
 		Connections: types.Connections{
-			"A": {"main": []types.Connection{{Node: "B", Input: "main"}}},
-			"B": {"main": []types.Connection{{Node: "D", Input: "main"}}},
+			"A": {"main": {Targets: []types.Connection{{Node: "B", Input: "main"}}}},
+			"B": {"main": {Targets: []types.Connection{{Node: "D", Input: "main"}}}},
 		},
 	}
 	_, err := Compile(def)
@@ -98,8 +98,8 @@ func TestPortability_ClosureNodeRejected(t *testing.T) {
 			{Name: "grp", Members: []string{"A", "B"}},
 		},
 		Connections: types.Connections{
-			"A": {"main": []types.Connection{{Node: "B", Input: "main"}}},
-			"B": {"main": []types.Connection{{Node: "D", Input: "main"}}},
+			"A": {"main": {Targets: []types.Connection{{Node: "B", Input: "main"}}}},
+			"B": {"main": {Targets: []types.Connection{{Node: "D", Input: "main"}}}},
 		},
 	}
 	_, err := Compile(def)
@@ -126,8 +126,8 @@ func TestPortability_AllowCyclesWithGroupsRejected(t *testing.T) {
 			{Name: "grp", Members: []string{"A", "B"}},
 		},
 		Connections: types.Connections{
-			"start": {"main": []types.Connection{{Node: "A", Input: "main"}}},
-			"A":     {"main": []types.Connection{{Node: "B", Input: "main"}}},
+			"start": {"main": {Targets: []types.Connection{{Node: "A", Input: "main"}}}},
+			"A":     {"main": {Targets: []types.Connection{{Node: "B", Input: "main"}}}},
 		},
 	}
 	_, err := Compile(def)
@@ -151,8 +151,8 @@ func TestPortability_ReservedGroupNameRejected(t *testing.T) {
 			{Name: "xflow.group_evil", Members: []string{"A", "B"}},
 		},
 		Connections: types.Connections{
-			"A": {"main": []types.Connection{{Node: "B", Input: "main"}}},
-			"B": {"main": []types.Connection{{Node: "D", Input: "main"}}},
+			"A": {"main": {Targets: []types.Connection{{Node: "B", Input: "main"}}}},
+			"B": {"main": {Targets: []types.Connection{{Node: "D", Input: "main"}}}},
 		},
 	}
 	_, err := Compile(def)
@@ -176,8 +176,8 @@ func TestPortability_DoubleUnderscoreGroupNameRejected(t *testing.T) {
 			{Name: "__internal", Members: []string{"A", "B"}},
 		},
 		Connections: types.Connections{
-			"A": {"main": []types.Connection{{Node: "B", Input: "main"}}},
-			"B": {"main": []types.Connection{{Node: "D", Input: "main"}}},
+			"A": {"main": {Targets: []types.Connection{{Node: "B", Input: "main"}}}},
+			"B": {"main": {Targets: []types.Connection{{Node: "D", Input: "main"}}}},
 		},
 	}
 	_, err := Compile(def)
@@ -205,8 +205,8 @@ func TestPortability_SecretLiteralRejected(t *testing.T) {
 			{Name: "grp", Members: []string{"A", "B"}},
 		},
 		Connections: types.Connections{
-			"A": {"main": []types.Connection{{Node: "B", Input: "main"}}},
-			"B": {"main": []types.Connection{{Node: "D", Input: "main"}}},
+			"A": {"main": {Targets: []types.Connection{{Node: "B", Input: "main"}}}},
+			"B": {"main": {Targets: []types.Connection{{Node: "D", Input: "main"}}}},
 		},
 	}
 	_, err := Compile(def)
@@ -233,8 +233,8 @@ func TestPortability_SecretLiteralFalsePositive(t *testing.T) {
 			{Name: "grp", Members: []string{"A", "B"}},
 		},
 		Connections: types.Connections{
-			"A": {"main": []types.Connection{{Node: "B", Input: "main"}}},
-			"B": {"main": []types.Connection{{Node: "D", Input: "main"}}},
+			"A": {"main": {Targets: []types.Connection{{Node: "B", Input: "main"}}}},
+			"B": {"main": {Targets: []types.Connection{{Node: "D", Input: "main"}}}},
 		},
 	}
 	_, err := Compile(def)
@@ -257,8 +257,8 @@ func TestPortability_AWSKeyRejected(t *testing.T) {
 			{Name: "grp", Members: []string{"A", "B"}},
 		},
 		Connections: types.Connections{
-			"A": {"main": []types.Connection{{Node: "B", Input: "main"}}},
-			"B": {"main": []types.Connection{{Node: "D", Input: "main"}}},
+			"A": {"main": {Targets: []types.Connection{{Node: "B", Input: "main"}}}},
+			"B": {"main": {Targets: []types.Connection{{Node: "D", Input: "main"}}}},
 		},
 	}
 	_, err := Compile(def)
@@ -287,8 +287,8 @@ func TestPortability_CredentialReferenceOK(t *testing.T) {
 			{Name: "grp", Members: []string{"A", "B"}},
 		},
 		Connections: types.Connections{
-			"A": {"main": []types.Connection{{Node: "B", Input: "main"}}},
-			"B": {"main": []types.Connection{{Node: "D", Input: "main"}}},
+			"A": {"main": {Targets: []types.Connection{{Node: "B", Input: "main"}}}},
+			"B": {"main": {Targets: []types.Connection{{Node: "D", Input: "main"}}}},
 		},
 	}
 	_, err := Compile(def)
@@ -316,8 +316,8 @@ func TestPortability_NestedParameterExternalRef(t *testing.T) {
 			{Name: "grp", Members: []string{"A", "B"}},
 		},
 		Connections: types.Connections{
-			"A": {"main": []types.Connection{{Node: "B", Input: "main"}}},
-			"B": {"main": []types.Connection{{Node: "external", Input: "main"}}},
+			"A": {"main": {Targets: []types.Connection{{Node: "B", Input: "main"}}}},
+			"B": {"main": {Targets: []types.Connection{{Node: "external", Input: "main"}}}},
 		},
 	}
 	_, err := Compile(def)

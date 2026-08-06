@@ -30,8 +30,8 @@ func supplyGatedDef() *types.WorkflowDef {
 			{Name: "hints", Type: "xflow.supply.external", Kind: types.NodeKindSupply,
 				Parameters: map[string]any{"require_ready": false}},
 		},
-		Connections: map[string]map[string][]types.Connection{
-			"src": {"main": {{Node: "clean", Input: "main"}}},
+		Connections: map[string]map[string]types.PortConnections{
+			"src": {"main": types.PortConnections{Targets: []types.Connection{{Node: "clean", Input: "main"}}}},
 		},
 		DependencyEdges: []types.DependencyEdge{
 			{Node: "clean", Supply: "rules"},
@@ -103,8 +103,8 @@ func TestNoSupplyMeansNilSlice(t *testing.T) {
 					"runtime":  "goja",
 				}},
 		},
-		Connections: map[string]map[string][]types.Connection{
-			"src": {"main": {{Node: "clean", Input: "main"}}},
+		Connections: map[string]map[string]types.PortConnections{
+			"src": {"main": types.PortConnections{Targets: []types.Connection{{Node: "clean", Input: "main"}}}},
 		},
 	}
 	g, err := graph.Compile(def)
@@ -157,8 +157,8 @@ func TestSuppliesScopedToTheEntryUnit(t *testing.T) {
 				Parameters: map[string]any{"code": "x", "language": "js", "runtime": "goja"}},
 			{Name: "other", Type: "xflow.supply.external", Kind: types.NodeKindSupply},
 		},
-		Connections: map[string]map[string][]types.Connection{
-			"src2": {"main": {{Node: "clean2", Input: "main"}}},
+		Connections: map[string]map[string]types.PortConnections{
+			"src2": {"main": types.PortConnections{Targets: []types.Connection{{Node: "clean2", Input: "main"}}}},
 		},
 		DependencyEdges: []types.DependencyEdge{
 			{Node: "clean2", Supply: "other"},

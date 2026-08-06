@@ -66,3 +66,30 @@ func stubRunnerServiceFactory(check func(runnersvc.Config) error) func() {
 		newRunnerService = previous
 	}
 }
+
+// A batch lease fails outright when the runner has no SubgraphRuntime: the
+// batch names a synthetic node ("m/_batch/0") with no Input and no registered
+// handler, so the ordinary node path has nothing to run. Only the e2e tests
+// used to wire the runtime themselves — the production binary never did, which
+// made every map node undeployable the moment its batches escaped to a runner.
+func TestRunCommandWiresTheSubgraphRuntime(t *testing.T) {
+	restore := stubRunnerServiceFactory(func(cfg runnersvc.Config) error {
+		if cfg.SubgraphRuntime == nil {
+			t.Error("runner service got no SubgraphRuntime; every batch lease this " +
+				"runner claims will fail with 'no SubgraphRuntime configured'")
+		}
+		return nil
+	})
+	defer restore()
+
+	err := executeRootWithOptions(commandOptions{
+		runFunc: func(cfg runnerConfig) error {
+			return runRunner(context.Background(), cfg)
+		},
+		out: &bytes.Buffer{},
+		err: &bytes.Buffer{},
+	}, "run", "--server", "http://server:8080", "--cap", "xflow.map,xflow.function")
+	if err != nil {
+		t.Fatal(err)
+	}
+}

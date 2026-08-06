@@ -19,7 +19,7 @@ func entrySeedTopologyGraph(t *testing.T) *graph.Graph {
 			{Name: "trig", Kind: types.NodeKindTrigger},
 			{Name: "down", Kind: types.NodeKindAction},
 		},
-		Connections: types.Connections{"trig": {"main": {{Node: "down", Input: "main"}}}},
+		Connections: types.Connections{"trig": {"main": types.PortConnections{Targets: []types.Connection{{Node: "down", Input: "main"}}}}},
 	})
 	if err != nil {
 		t.Fatalf("compile: %v", err)
@@ -91,8 +91,8 @@ func entrySeedMultiPortGraph(t *testing.T) *graph.Graph {
 		},
 		Connections: types.Connections{
 			"route": {
-				"hit":  {{Node: "on_hit", Input: "main"}},
-				"miss": {{Node: "on_miss", Input: "main"}},
+				"hit":  types.PortConnections{Targets: []types.Connection{{Node: "on_hit", Input: "main"}}},
+				"miss": types.PortConnections{Targets: []types.Connection{{Node: "on_miss", Input: "main"}}},
 			},
 		},
 	})

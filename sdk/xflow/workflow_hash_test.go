@@ -36,7 +36,7 @@ func baseRuntimeDef() *types.WorkflowDef {
 			},
 		},
 		Connections: types.Connections{
-			"start": {"main": {{Node: "review", Input: "main"}}},
+			"start": {"main": types.PortConnections{Targets: []types.Connection{{Node: "review", Input: "main"}}}},
 		},
 		PinData: map[string]any{"start": map[string]any{"x": 1}},
 	}
@@ -108,10 +108,10 @@ func TestRuntimeHashIncludesRuntimeFields(t *testing.T) {
 		{"NodeKind", func(d *types.WorkflowDef) { d.Nodes[0].Kind = types.NodeKindTrigger }},
 		{"NodeName", func(d *types.WorkflowDef) {
 			d.Nodes[0].Name = "init"
-			d.Connections = types.Connections{"init": {"main": {{Node: "review", Input: "main"}}}}
+			d.Connections = types.Connections{"init": {"main": types.PortConnections{Targets: []types.Connection{{Node: "review", Input: "main"}}}}}
 		}},
 		{"Connections", func(d *types.WorkflowDef) {
-			d.Connections = types.Connections{"start": {"main": {{Node: "review", Input: "alt"}}}}
+			d.Connections = types.Connections{"start": {"main": types.PortConnections{Targets: []types.Connection{{Node: "review", Input: "alt"}}}}}
 		}},
 		{"PinData", func(d *types.WorkflowDef) { d.PinData = map[string]any{"start": map[string]any{"x": 2}} }},
 	}

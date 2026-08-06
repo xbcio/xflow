@@ -1,5 +1,5 @@
 // Package expr provides the expression evaluation helpers shared by builtin
-// nodes (xflow.if, xflow.switch, xflow.loop, xflow.split, xflow.function,
+// nodes (xflow.if, xflow.switch, xflow.map, xflow.split, xflow.function,
 // xflow.script). These helpers are not part of the public node API.
 package exprx
 
@@ -22,7 +22,7 @@ const DefaultExprCacheSize = 256
 // compile-mode flag). expr.Env is only used for type inference at compile
 // time — the resulting *vm.Program is safe for concurrent reuse across
 // different env values, so caching by code avoids recompiling the same
-// expression on every node execution (e.g. once per xflow.loop iteration).
+// expression on every node execution (e.g. once per xflow.map iteration).
 // Bounded by an LRU so a deployment with high expression churn stays
 // memory-bounded instead of growing without limit.
 var exprCache = newExprCache(DefaultExprCacheSize)

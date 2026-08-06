@@ -136,6 +136,10 @@ type TaskLease struct {
 	// BuildGroupLease/RecoverGroupLease and serializes it on the wire so the
 	// runner has the group package, entry input, and idempotency key.
 	GroupPayload *GroupLeasePayload `json:"group_payload,omitempty"`
+	// SubgraphPayload carries one map batch's execution context for
+	// TaskTypeNodeBatch tasks. Nil for every other task type. Like
+	// GroupPayload it is authoritative: Input is nil on a batch lease.
+	SubgraphPayload *SubgraphLeasePayload `json:"subgraph_payload,omitempty"`
 }
 
 // TaskRouting is the side-effect-free routing metadata for a queued task. It is

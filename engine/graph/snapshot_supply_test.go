@@ -51,7 +51,7 @@ func TestNoSupplyMeansNoWireOrHashChange(t *testing.T) {
 			{Name: "clean", Type: "xflow.code.script"},
 		},
 		Connections: types.Connections{
-			"start": {"main": []types.Connection{{Node: "clean", Input: "main"}}},
+			"start": {"main": {Targets: []types.Connection{{Node: "clean", Input: "main"}}}},
 		},
 	}
 	g, err := Compile(def)
