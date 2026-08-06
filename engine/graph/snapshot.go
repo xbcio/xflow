@@ -446,8 +446,8 @@ type graphSerializedForm struct {
 	SupplyRefs map[int][]string `json:"supply_refs,omitempty"`
 	// MapBodies maps an xflow.map node's index to its projected body package.
 	// This cannot be re-derived on decode either: it comes from the map node's
-	// "body" Parameters, projected once at compile time (registerNodes), and
-	// Parameters travel on the snapshot but ProjectMapBodyPackage is never
+	// "body" Parameters, projected once at compile time by projectMapBodies,
+	// and Parameters travel on the snapshot but ProjectMapBodyPackage is never
 	// re-run on load. Without this field a graph reloaded from Redis (a second
 	// server replica, or the same server after its in-memory graph cache is
 	// evicted on terminal state) has MapBodyAt return nil for every map node,
@@ -497,6 +497,22 @@ func (g *Graph) MarshalJSON() ([]byte, error) {
 // be seeded from the wrong (ungrouped) unit count.
 var ErrGroupedSnapshotMissingUnitIR = errors.New("graph snapshot: grouped nodes present but no group definitions to rebuild unit IR from")
 
+// ErrMapBodySnapshotMissingPackage is returned by UnmarshalJSON when a snapshot
+// has an xflow.map node declaring a "body" parameter but carries no projected
+// package for it — the shape a snapshot written before map bodies travelled on
+// the wire has, since Parameters always travelled and map_bodies did not.
+//
+// This must never decode into a bodyless graph. A body is not re-derivable on
+// load (ProjectMapBodyPackage runs only during Compile), so MapBodyAt would
+// return nil, BuildSubgraphLease would ship an empty Package, and the runner
+// would reject every batch with ErrPackageMissing — identically on every
+// retry, because nothing re-projects it. Failing closed is also what makes the
+// condition self-healing rather than merely loud: workflowreg decodes the
+// Graph separately from the rest of its record so that an UnmarshalJSON error
+// falls through to recompiling from the stored Definition, and that recompile
+// projects the body back.
+var ErrMapBodySnapshotMissingPackage = errors.New("graph snapshot: xflow.map node declares a body but the snapshot carries no projected body package")
+
 // UnmarshalJSON implements json.Unmarshaler, the inverse of MarshalJSON.
 // It populates the Graph's unexported fields from the stable wire format so
 // that a deserialized graph is fully functional without recompilation, then
@@ -533,6 +549,22 @@ func (g *Graph) UnmarshalJSON(data []byte) error {
 		}
 		if hasGrouped && len(sf.Groups) == 0 {
 			return ErrGroupedSnapshotMissingUnitIR
+		}
+	}
+	// A map node declaring a body must arrive with its projected package. See
+	// ErrMapBodySnapshotMissingPackage for why a bodyless decode is worse than
+	// a decode error. Keyed off the node's own parameters rather than the node
+	// type alone, so the expression form of xflow.map — which has no body to
+	// lose — still decodes.
+	for i, n := range nodes {
+		if n.Type != "xflow.map" {
+			continue
+		}
+		if _, hasBody := n.Parameters["body"]; !hasBody {
+			continue
+		}
+		if sf.MapBodies[i] == nil {
+			return fmt.Errorf("graph snapshot: map node %q: %w", n.Name, ErrMapBodySnapshotMissingPackage)
 		}
 	}
 	g.graphHash = sf.GraphHash
