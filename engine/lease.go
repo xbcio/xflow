@@ -201,7 +201,7 @@ func (e *Engine) TaskRouting(ctx context.Context, t *Task) (TaskRouting, error) 
 			return TaskRouting{}, fmt.Errorf("project group package for routing: %w", err)
 		}
 		return TaskRouting{
-			NodeType:       "xflow.group",
+			NodeType:       GroupNodeType,
 			RunnerSelector: cloneRunnerSelector(gm.RunnerSelector),
 			Requirements:   RequirementsFromGraphPackage(pkg.Requirements),
 		}, nil

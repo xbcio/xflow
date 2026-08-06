@@ -8,6 +8,14 @@ import (
 
 const FeatureGroupExecV1 = "group.exec.v1"
 
+// GroupNodeType is the synthetic node type a group unit routes as. It is not a
+// registrable handler type — no runner has a handler for it — but it is the
+// NodeType both sides of the group capability handshake must agree on: the
+// requirement below demands it, and a runner advertises it to become eligible.
+// The match is by exact string, so the two sides share this constant rather
+// than each spelling the literal.
+const GroupNodeType = "xflow.group"
+
 // CapabilityRequirement describes what a task (node or group) requires from a
 // runner in order to be executed. For group tasks, the requirements are the
 // union of all member node requirements plus the group execution feature.
@@ -125,7 +133,7 @@ func RequirementsFromGraphPackage(graphReqs []graph.Requirement) []CapabilityReq
 		})
 	}
 	reqs = append(reqs, CapabilityRequirement{
-		NodeType: "xflow.group",
+		NodeType: GroupNodeType,
 		Feature:  FeatureGroupExecV1,
 	})
 	return NormalizeRequirements(reqs)

@@ -9,24 +9,7 @@
 
 ## P0 — 用之前必须修
 
-### 1. `cmd/runner/run.go` 从未装配 `GroupRuntime`
-
-**这条先于本分支存在，本分支不负责，但现在是唯一已知的同类缺口。**
-
-本分支的终审在 T14 抓到 `SubgraphRuntime` 在生产 runner 二进制里没接线（e2e 自己
-搭了一个运行时，生产二进制从来没有），已于本分支修复。**并列的 group 侧原样未动**：
-
-- `cmd/runner/run.go` 只设 `serviceCfg.SubgraphRuntime`，从没设过 `GroupRuntime`
-  或 `EnableGroupExec`。`git log -S EnableGroupExec` 显示该字段唯一一次改动是
-  `89a3bb0`，早于本分支 base。
-- `runner.Config.EnableGroupExec` **全仓库零读取点**（只有
-  `test/integration/group_binary_e2e_test.go:81` 写过一次）。它注释里承诺的
-  "advertises group.exec.v1 capability" 从来没有实现过。
-- `runner.go:359` 的分发条件是 `lease.GroupPayload != nil && r.config.GroupRuntime != nil`。
-  生产二进制里后半永远为 nil，于是每一个 group lease 都静默走不到 group 分支。
-
-后果：**生产 runner 二进制收到 group lease 必然失败**。group 执行在生产中被启用
-之前必须修掉。集成测试看不到，因为 `group_binary_e2e_test.go` 自己组装配置。
+（本节当前为空。原第 1 条已修复，见下方「已修复」。）
 
 ## P1 — 规模上去会疼
 
@@ -77,6 +60,39 @@ Go 侧的编译门控已在 `52cd7c4` 移除。TS 声明滞后，无运行时影
 ### 7. `engine/graph/dependency.go` 的 `_ = supplyIdx`
 
 从 brief 的伪代码里带进来的空语句。纯装饰。
+
+## 已修复
+
+### `cmd/runner/run.go` 从未装配 `GroupRuntime`（原 P0-1，2026-08-06 修复）
+
+**本文件先前记录的故障机制是错的，实测后更正。** 原记录说「生产 runner 二进制收到
+group lease 必然失败」，理由是 `runner.go:359` 的 `r.config.GroupRuntime != nil`
+永远为假。实测（`service/control` 内的一次性探针）表明**根本走不到那一行**：
+
+- group 单元的路由要求含 `{NodeType: "xflow.group", Feature: "group.exec.v1"}`
+  （`engine.RequirementsFromGraphPackage`）。
+- `parseCapabilities` 只能产出 `{NodeType: <名字>}`——`--cap` 没有任何语法能声明
+  feature。于是 `MatchCapabilities` 恒为 false。
+- 两个 runner 目录（memory / redis）在 claim 时用的都是 `MatchCapabilities`。
+
+真实故障形态因此是**静默饥饿**而非失败：group 任务分配不到任何生产 runner，
+永远排队，两侧都不打日志。比原记录的形态更难排查。
+
+另有一个更阴的形态：运维凭直觉加 `--cap xflow.group` 会造成两条路径分歧——
+`canRunRouting`（不看 Features）返回 true，`MatchCapabilities`（看）返回 false。
+命令行上看起来已经配对，任务照样分配不出去。
+
+修法：`cmd/runner` 无条件装配 `GroupRuntime` 并在能力表中补全
+`{xflow.group, group.exec.v1}`；运维已声明 `xflow.group` 时**补全其 Features 而非
+让位**（让位会保留恰好失败的那个形态，且重复条目会在
+`hasCapabilityForRequirement` 的首个 NodeType 匹配处遮蔽真条目）。
+
+无条件自报不会吸引跑不动的任务：group 的 requirements 同时列出每个成员节点类型，
+缺 handler 的 runner 仍被 `MatchCapabilities` 拒绝（已实测）。
+
+零读取点的死字段 `runner.Config.EnableGroupExec` 一并删除——它注释里承诺的
+"advertises group.exec.v1 capability" 从未实现，留着即是留一条假线索。
+`GroupNodeType` 提为 `engine` 包常量，让握手两侧共享同一字面量。
 
 ## 已知且接受的代价（不打算改）
 

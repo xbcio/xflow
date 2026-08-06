@@ -93,3 +93,108 @@ func TestRunCommandWiresTheSubgraphRuntime(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// The group counterpart of the SubgraphRuntime wiring above, and the reason it
+// went unnoticed far longer: a runner with no GroupRuntime does not FAIL a group
+// lease, it never receives one. A group unit's routing demands the
+// group.exec.v1 feature, so a runner that does not advertise it is filtered out
+// during assignment and the task sits queued — no error, no log, no lease.
+//
+// Both halves are required and neither is sufficient. Advertising without the
+// runtime means runner.go:359 falls through to the handler path, where the
+// group's synthetic node name resolves to nothing. Wiring the runtime without
+// advertising leaves the runner invisible to the selector. So both are asserted
+// here, in one test, on the production command path.
+func TestRunCommandWiresAndAdvertisesGroupExecution(t *testing.T) {
+	restore := stubRunnerServiceFactory(func(cfg runnersvc.Config) error {
+		if cfg.GroupRuntime == nil {
+			t.Error("runner service got no GroupRuntime; a group lease reaching this " +
+				"runner falls through to the handler path, which has no handler " +
+				"registered for the group's synthetic node name")
+		}
+		// parseCapabilities cannot produce a Features list — the --cap flag has no
+		// syntax for one — so this capability can only come from the binary itself.
+		var advertised bool
+		for _, c := range cfg.Capabilities {
+			if c.NodeType != "xflow.group" {
+				continue
+			}
+			for _, f := range c.Features {
+				if f == engine.FeatureGroupExecV1 {
+					advertised = true
+				}
+			}
+		}
+		if !advertised {
+			t.Errorf("capabilities %+v carry no {xflow.group, %s}; MatchCapabilities "+
+				"rejects this runner for every group task, so the task stays queued "+
+				"forever with no error anywhere", cfg.Capabilities, engine.FeatureGroupExecV1)
+		}
+		return nil
+	})
+	defer restore()
+
+	// Deliberately no xflow.group in --cap: the operator is not expected to know
+	// it exists, and could not spell the feature even if they did.
+	err := executeRootWithOptions(commandOptions{
+		runFunc: func(cfg runnerConfig) error {
+			return runRunner(context.Background(), cfg)
+		},
+		out: &bytes.Buffer{},
+		err: &bytes.Buffer{},
+	}, "run", "--server", "http://server:8080", "--cap", "xflow.function")
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// An operator who has heard of group execution reaches for the tool they have:
+// `--cap xflow.group`. That produces a bare {NodeType: "xflow.group"} with no
+// Features, because --cap cannot express one — and a featureless entry is worse
+// than no entry at all. It satisfies canRunRouting (which ignores Features)
+// while failing MatchCapabilities (which does not), so the runner looks
+// correctly configured from the command line and still receives nothing.
+//
+// So a declared group capability must be completed, not deferred to.
+func TestDeclaringTheGroupCapabilityByHandStillGetsTheFeature(t *testing.T) {
+	restore := stubRunnerServiceFactory(func(cfg runnersvc.Config) error {
+		var groupCaps int
+		var advertised bool
+		for _, c := range cfg.Capabilities {
+			if c.NodeType != engine.GroupNodeType {
+				continue
+			}
+			groupCaps++
+			for _, f := range c.Features {
+				if f == engine.FeatureGroupExecV1 {
+					advertised = true
+				}
+			}
+		}
+		if !advertised {
+			t.Errorf("capabilities %+v: an operator-declared xflow.group was left "+
+				"without %s, which is the one shape that passes canRunRouting and "+
+				"fails MatchCapabilities — the runner looks configured and gets nothing",
+				cfg.Capabilities, engine.FeatureGroupExecV1)
+		}
+		// hasCapabilityForRequirement stops at the first NodeType match, so a
+		// featureless duplicate sitting ahead of the real one would mask it.
+		if groupCaps != 1 {
+			t.Errorf("got %d xflow.group capabilities, want exactly 1: a duplicate can "+
+				"shadow the feature-bearing entry during requirement matching", groupCaps)
+		}
+		return nil
+	})
+	defer restore()
+
+	err := executeRootWithOptions(commandOptions{
+		runFunc: func(cfg runnerConfig) error {
+			return runRunner(context.Background(), cfg)
+		},
+		out: &bytes.Buffer{},
+		err: &bytes.Buffer{},
+	}, "run", "--server", "http://server:8080", "--cap", "xflow.function,xflow.group")
+	if err != nil {
+		t.Fatal(err)
+	}
+}

@@ -130,7 +130,7 @@ func (e *Engine) BuildGroupLease(ctx context.Context, t *Task) (*TaskLease, *Gro
 		Attempt:    groupLease.Attempt,
 		IssuedAt:   issuedAt,
 		TTL:        ttl,
-		NodeType:   "xflow.group",
+		NodeType:   GroupNodeType,
 	}
 
 	var deadline time.Time
@@ -208,7 +208,7 @@ func (e *Engine) RecoverGroupLease(ctx context.Context, execID types.ExecutionID
 		Attempt:  lease.Attempt,
 		IssuedAt: lease.IssuedAt,
 		TTL:      lease.TTL,
-		NodeType: "xflow.group",
+		NodeType: GroupNodeType,
 	}
 
 	payload := &GroupLeasePayload{

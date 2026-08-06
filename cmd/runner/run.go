@@ -167,10 +167,72 @@ type runnerService interface {
 	Run(context.Context) error
 }
 
+// withGroupExecCapability returns the operator's declared capabilities with the
+// group execution capability guaranteed present and carrying its feature. It is
+// supplied by the binary rather than typed by the operator for two reasons:
+// --cap has no syntax for a feature list at all (parseCapabilities emits only a
+// NodeType), and omitting it fails silently — a group unit's routing requires
+// group.exec.v1, so a runner without it is filtered out during assignment and
+// the task waits in the queue indefinitely with nothing logged on either side.
+//
+// An operator who does declare `--cap xflow.group` is completed rather than
+// deferred to. A bare entry with no Features is the single worst shape
+// available: canRunRouting ignores Features and accepts it, MatchCapabilities
+// does not and rejects it, so the runner reads as correctly configured on the
+// command line while still receiving nothing. Appending a second entry would
+// not fix it either — hasCapabilityForRequirement stops at the first NodeType
+// match, so the bare one would shadow the real one.
+//
+// This does not make the runner eligible for groups it cannot execute. A group's
+// routing requirements list every member node type alongside this feature (see
+// engine.RequirementsFromGraphPackage), and MatchCapabilities requires all of
+// them, so a runner missing any member's handler is still rejected.
+//
+// The input slice is never mutated: cfg.capabilities is shared with verify.go
+// and the config-resolution tests, and append would write through to its backing
+// array whenever spare capacity happened to exist.
+func withGroupExecCapability(declared []protocol.Capability) []protocol.Capability {
+	out := make([]protocol.Capability, 0, len(declared)+1)
+	found := false
+	for _, c := range declared {
+		if c.NodeType == engine.GroupNodeType {
+			found = true
+			c.Features = withFeature(c.Features, engine.FeatureGroupExecV1)
+		}
+		out = append(out, c)
+	}
+	if found {
+		return out
+	}
+	return append(out, protocol.Capability{
+		NodeType: engine.GroupNodeType,
+		Features: []string{engine.FeatureGroupExecV1},
+	})
+}
+
+// withFeature returns features with name present exactly once, copying rather
+// than appending in place so the caller's slice is never aliased.
+func withFeature(features []string, name string) []string {
+	for _, f := range features {
+		if f == name {
+			return features
+		}
+	}
+	out := make([]string, 0, len(features)+1)
+	out = append(out, features...)
+	return append(out, name)
+}
+
 // batchBodyCacheEntries bounds the compiled-body cache. A body compiles once per
 // distinct PackageHash, and every batch of one map node carries the same hash, so
 // the entry count tracks distinct map nodes this runner serves — not batches.
 const batchBodyCacheEntries = 64
+
+// groupPackageCacheEntries bounds the compiled group-package cache. A group
+// package compiles once per distinct PackageHash, and every execution of one
+// group carries the same hash, so the entry count tracks distinct groups this
+// runner serves — not executions. Same reasoning, same size as the body cache.
+const groupPackageCacheEntries = 64
 
 var newRunnerService = func(client runnersvc.ProtocolClient, registry engine.HandlerRegistry, cfg runnersvc.Config) runnerService {
 	return runnersvc.New(client, registry, cfg)
@@ -226,6 +288,27 @@ func runRunner(ctx context.Context, cfg runnerConfig) error {
 	// sees a batch if the operator already listed xflow.map in --cap.
 	serviceCfg.SubgraphRuntime = runnersvc.NewSubgraphRuntime(
 		registry, runnersvc.NewPackageCache(runnersvc.PackageCacheConfig{MaxEntries: batchBodyCacheEntries}))
+	// The group counterpart, built here for the same reason: the runtime resolves
+	// member handlers out of this registry, which runnerServiceConfig cannot see.
+	//
+	// Unconditional, and paired with an unconditional capability advertisement in
+	// runnerServiceConfig, because the two are only meaningful together: a group
+	// unit's routing requires the group.exec.v1 feature, so a runner that does not
+	// advertise it is never SENT a group lease — the task stays queued with no
+	// error anywhere. Gating this behind a flag would preserve exactly that silent
+	// failure for every operator who did not know to set it.
+	//
+	// Advertising unconditionally does not attract work this runner cannot do.
+	// engine.RequirementsFromGraphPackage puts every member node type in the same
+	// requirement set, so MatchCapabilities still rejects a runner missing any
+	// member's handler. The group capability widens nothing on its own.
+	//
+	// Suspend is disabled inside a group for the same reason as inside a map body:
+	// a suspended member would park a sub-execution the outer lease cannot resume.
+	serviceCfg.GroupRuntime = runnersvc.NewGroupRuntime(
+		registry,
+		runnersvc.NewPackageCache(runnersvc.PackageCacheConfig{MaxEntries: groupPackageCacheEntries}),
+		runnersvc.WithSuspendDisabled())
 	// Absorb script-engine cold start before the first lease arrives: qjs pays a
 	// ~330 ms QuickJS-wasm compile and the wasm reactor opens its runtime
 	// (resolving the on-disk compilation cache). A failure here is not fatal —
@@ -387,7 +470,7 @@ func runnerServiceConfig(cfg runnerConfig) (runnersvc.Config, error) {
 		RunnerID:     cfg.runnerID,
 		Concurrency:  cfg.concurrency,
 		Labels:       cloneStringMap(cfg.labels),
-		Capabilities: cfg.capabilities,
+		Capabilities: withGroupExecCapability(cfg.capabilities),
 		PollWait:     pollWait,
 		Tracer:       cfg.tracer,
 		Namespaces:   cfg.namespaces,

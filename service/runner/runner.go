@@ -61,11 +61,15 @@ type Config struct {
 	// Namespaces lists the namespaces this runner is willing to serve. Empty or nil
 	// means ["default"] for single-namespace compatibility.
 	Namespaces []namespace.Namespace
-	// EnableGroupExec enables group task execution. When true, the runner
-	// advertises group.exec.v1 capability and routes group leases to GroupRuntime.
-	EnableGroupExec bool
-	// GroupRuntime executes group subgraphs locally. Required when EnableGroupExec
-	// is true.
+	// GroupRuntime executes group subgraphs locally. Non-nil is what makes this
+	// runner able to run a group lease; nil means a group lease falls through to
+	// the handler path, which has no handler registered for the group's synthetic
+	// node name.
+	//
+	// Setting it is necessary but not sufficient: the control plane only assigns
+	// a group task to a runner advertising the group.exec.v1 feature on an
+	// engine.GroupNodeType capability, so a runtime without that advertisement is
+	// never reached. cmd/runner sets both together for exactly this reason.
 	GroupRuntime *GroupRuntime
 	// SubgraphRuntime executes map expansion batches locally. Required to accept
 	// batch leases; nil means a batch lease fails rather than silently running
