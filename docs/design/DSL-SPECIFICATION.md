@@ -1596,7 +1596,7 @@ nodes:
 >
 > ⚠️ **body 输出应避免 `_` 前缀键**：`_error`/`_index` 是框架为失败项保留的占位符键。若 body 自身的输出恰好带有 `_error` 键（例如 body 的终止节点自己产出了名为 `_error` 的字段），该项在 `results` 数组中会与一次真实的失败在结构上完全无法区分——这是已知、接受的数据质量缺口（不在本设计范围内修复），作者应确保 body 的正常输出不使用 `_` 前缀的键名。
 >
-> **当前实现状态**：`xflow.map` 的 body 子图执行已落地——`expandLoopSplit`（`engine/expand.go`，map/split 共用的批扩展机制）为每个 batch 创建 sub-execution 并调用 `runBatchBody`，后者通过 `BatchBodyExecutor.ExecuteBatchBody` 把 body 投影成的 `SubgraphPackage` 逐项真正执行（每项一次内嵌引擎运行），再用 `BatchResultForCommit` 把逐项结果折叠成该批的结果与批级成败判定。`completeLoopSplit` 把各批的 `items` 数组按批次顺序拼接成扁平的 `results` 数组，失败项以 `{_error, _index}` 占位符落在原本的下标位置，使 `count` 恒等于输入长度。以上 body 语法与 `continue_on_error` 结构均已生效，不再是规划设计。`xflow.split` 没有 `body` 概念（它通过下游 `connections` 扇出，见下文 Split 节点一节），本节的 body 语法与结果结构均只适用于 `xflow.map`。
+> **当前实现状态**：`xflow.map` 的 body 子图执行已落地——`expandLoopSplit`（`engine/expand.go`，map/split 共用的批扩展机制）为每个 batch 创建 sub-execution 并调用 `runBatchBody`，后者通过 `BatchBodyExecutor.ExecuteBatchBody` 把 body 投影成的 `SubgraphPackage` 逐项真正执行（每项一次内嵌引擎运行），再用 `BatchResultForCommit` 把逐项结果折叠成该批的结果与批级成败判定。`completeLoopSplit` 把各批的 `items` 数组按批次顺序拼接成扁平的 `results` 数组，失败项以 `{_error, _index}` 占位符落在原本的下标位置，使 `count` 恒等于输入长度。以上 body 语法与 `continue_on_error` 结构均已生效，不再是规划设计。`xflow.split` 没有 `body` 概念（它通过下游 `connections` 扇出，见下文 Split 节点一节），本节的 body 语法与结果结构均只适用于 `xflow.map`。遗留缺口（无 `max_concurrency` 节流、标记键仍叫 `_loop`）见 [SUBGRAPH-ENGINE-TODO.md](./SUBGRAPH-ENGINE-TODO.md)。
 > **跨域引用编译规则**：
 > - `body` 内 `$nodes['x']` 中 `x` 不在 `body.nodes` 中时，编译器视为**跨域引用**
 > - 跨域引用仅允许读取 loop 节点的上游祖先节点（DAG 拓扑序中确定在 loop 之前完成的节点）
