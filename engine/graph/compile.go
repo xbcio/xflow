@@ -119,6 +119,9 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 	if err := buildDependencyEdges(def, depPorts, g, nil); err != nil {
 		return nil, err
 	}
+	if err := projectMapBodies(def, g); err != nil {
+		return nil, err
+	}
 	if err := compileGroups(g, def); err != nil {
 		return nil, err
 	}
@@ -178,21 +181,13 @@ func registerNodes(def *types.WorkflowDef, g *Graph) (int, error) {
 			if err := validateMapBody(nd); err != nil {
 				return 0, err
 			}
-			// Project the body here, at compile time, so every batch of this map
-			// node shares one package and one hash. Projecting per batch would
-			// recompute the same package N times and — worse — give the
-			// executor's hash-keyed cache N different keys if the projection
-			// were ever non-deterministic.
-			if _, hasBody := nd.Parameters["body"]; hasBody {
-				body, err := ProjectMapBodyPackage(nd.Name, nd.Parameters)
-				if err != nil {
-					return 0, err
-				}
-				if g.mapBodies == nil {
-					g.mapBodies = make(map[int]*MapBodyPackage)
-				}
-				g.mapBodies[i] = body
-			}
+			// Projection itself is deferred to projectMapBodies, which runs after
+			// buildDependencyEdges: a body needs the parent map node's visible-supply
+			// names (g.SupplyRefsFor(i)), and g.supplyRefs is not populated until that
+			// later pass runs. validateMapBody's shape checks stay here, in the first
+			// pass, so a malformed body is still rejected at the same point it always
+			// was -- only the projection itself moved, not the point of failure for a
+			// bad shape.
 		}
 		if g.allowCycles {
 			if nd.Type == "xflow.start" {
@@ -205,6 +200,38 @@ func registerNodes(def *types.WorkflowDef, g *Graph) (int, error) {
 		}
 	}
 	return startCount, nil
+}
+
+// projectMapBodies is the compile pass that projects every xflow.map node's
+// declared body into a self-contained SubgraphPackage, once per node so N
+// batches of the same map node share one package and one hash. It runs AFTER
+// buildDependencyEdges (not inside registerNodes, where the body's shape is
+// merely validated) because it needs the parent map node's own visible-supply
+// names -- g.SupplyRefsFor(i) -- to widen the body's compile-time supply-usage
+// check. g.supplyRefs does not exist yet during registerNodes; buildDependencyEdges
+// is what populates it. A body member has no dependency edge of its own (it is
+// never a top-level node in the outer graph def.Nodes), so without the parent's
+// list threaded in, CompileProjectedPackage would reject any body member
+// reading $supplies.<name> even when the map node itself declares exactly that
+// dependency.
+func projectMapBodies(def *types.WorkflowDef, g *Graph) error {
+	for i, nd := range def.Nodes {
+		if nd.Type != "xflow.map" {
+			continue
+		}
+		if _, hasBody := nd.Parameters["body"]; !hasBody {
+			continue
+		}
+		body, err := ProjectMapBodyPackage(nd.Name, nd.Parameters, g.SupplyRefsFor(i))
+		if err != nil {
+			return err
+		}
+		if g.mapBodies == nil {
+			g.mapBodies = make(map[int]*MapBodyPackage)
+		}
+		g.mapBodies[i] = body
+	}
+	return nil
 }
 
 // buildEdges performs the second compile pass: it materializes Connections into

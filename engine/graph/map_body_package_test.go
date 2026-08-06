@@ -89,11 +89,11 @@ func TestProjectMapBodyPackageHashIgnoresMemberOrder(t *testing.T) {
 		}}},
 	}
 
-	first, err := ProjectMapBodyPackage("m", mapNodeWithBody(t, members, conns).Parameters)
+	first, err := ProjectMapBodyPackage("m", mapNodeWithBody(t, members, conns).Parameters, nil)
 	if err != nil {
 		t.Fatalf("ProjectMapBodyPackage(ordered) error = %v", err)
 	}
-	second, err := ProjectMapBodyPackage("m", mapNodeWithBody(t, reversed, conns).Parameters)
+	second, err := ProjectMapBodyPackage("m", mapNodeWithBody(t, reversed, conns).Parameters, nil)
 	if err != nil {
 		t.Fatalf("ProjectMapBodyPackage(reversed) error = %v", err)
 	}
@@ -114,7 +114,7 @@ func TestProjectMapBodyPackageCollectsTerminalMembers(t *testing.T) {
 		"a": map[string]any{"main": map[string]any{"targets": []any{
 			map[string]any{"node": "b", "input": "main"},
 		}}},
-	}).Parameters)
+	}).Parameters, nil)
 	if err != nil {
 		t.Fatalf("ProjectMapBodyPackage() error = %v", err)
 	}
@@ -137,7 +137,7 @@ func TestProjectMapBodyPackageCollectsTerminalMembers(t *testing.T) {
 func TestProjectedMapBodyPackageCompiles(t *testing.T) {
 	body, err := ProjectMapBodyPackage("m", mapNodeWithBody(t, []any{
 		map[string]any{"name": "step", "type": "test.echo"},
-	}, nil).Parameters)
+	}, nil).Parameters, nil)
 	if err != nil {
 		t.Fatalf("ProjectMapBodyPackage() error = %v", err)
 	}
@@ -160,7 +160,7 @@ func TestProjectedMapBodyPackageCompiles(t *testing.T) {
 func TestProjectMapBodyPackageRequirementsExcludeCollectors(t *testing.T) {
 	body, err := ProjectMapBodyPackage("m", mapNodeWithBody(t, []any{
 		map[string]any{"name": "step", "type": "test.echo"},
-	}, nil).Parameters)
+	}, nil).Parameters, nil)
 	if err != nil {
 		t.Fatalf("ProjectMapBodyPackage() error = %v", err)
 	}

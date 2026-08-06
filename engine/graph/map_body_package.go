@@ -36,7 +36,19 @@ const bodyExitPort = "main"
 // Called at compile time, so a malformed body is a compile error rather than a
 // runtime surprise — the same reason the body's shape rules are enforced in
 // validateMapBody.
-func ProjectMapBodyPackage(mapNodeName string, params map[string]any) (*MapBodyPackage, error) {
+//
+// visibleSupplies is the parent map node's OWN visible-supply set — the sorted
+// names g.SupplyRefsFor(mapNodeIdx) returns after buildDependencyEdges has run.
+// A body member has no dependency edges of its own (it is never a top-level
+// node in the outer graph), so without this the projected package's Def has no
+// way to tell CompileProjectedPackage's validateSupplyUsage that a body member
+// reading $supplies.<name> is allowed to: the dependency edge lives on the map
+// node, and a body inherits it exactly the way a group member's OWN dependency
+// edge already lets it through (buildVisibleSupplies does the same thing one
+// layer up, from a group's members instead of a body's parent node). Passing
+// nil here still compiles a body with no supply reads, which is the common
+// case and the shape every existing caller of this function needs.
+func ProjectMapBodyPackage(mapNodeName string, params map[string]any, visibleSupplies []string) (*MapBodyPackage, error) {
 	bodyRaw, ok := params["body"]
 	if !ok {
 		return nil, fmt.Errorf("node %q has no body to project", mapNodeName)
@@ -90,12 +102,13 @@ func ProjectMapBodyPackage(mapNodeName string, params map[string]any) (*MapBodyP
 	}
 
 	pkg := &SubgraphPackage{
-		Version:      SubgraphPackageVersion,
-		GroupName:    mapNodeName,
-		EntryNode:    nodes[entryIdx].Name,
-		Def:          &types.WorkflowDef{Name: mapNodeName, Nodes: defNodes, Connections: bodyConnections(conns, exits)},
-		Exits:        exits,
-		Requirements: buildBodyRequirements(defNodes),
+		Version:         SubgraphPackageVersion,
+		GroupName:       mapNodeName,
+		EntryNode:       nodes[entryIdx].Name,
+		Def:             &types.WorkflowDef{Name: mapNodeName, Nodes: defNodes, Connections: bodyConnections(conns, exits)},
+		Exits:           exits,
+		Requirements:    buildBodyRequirements(defNodes),
+		VisibleSupplies: visibleSupplies,
 	}
 	hash, err := ComputePackageHash(pkg)
 	if err != nil {
