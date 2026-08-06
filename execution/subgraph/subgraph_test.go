@@ -109,6 +109,49 @@ func TestExecutor_RunsAPackageWithNoKnowledgeOfItsCaller(t *testing.T) {
 	}
 }
 
+// I1: Executor.Execute registers per-execution collector handlers (Register in
+// collector.go) but, before this fix, never unregistered them -- every call
+// leaked its entries into the outer registry for the life of the process.
+// This matters far more for a map body than for a group: MapBodyExecutor calls
+// Execute once per ITEM (not once per execution), so an unbounded items array
+// means unbounded growth. Assert on the actual registry size, not "no panic":
+// a leak that merely wastes memory would pass a not-panicking assertion just
+// as easily as a correct implementation.
+func TestExecutor_UnregistersCollectorHandlersAfterEachExecution(t *testing.T) {
+	pkg := buildTwoNodeChainPackage(t)
+	reg := testRegistry(t)
+	ex := NewExecutor(reg, NewPackageCache(PackageCacheConfig{
+		MaxEntries: 4, MaxPackageBytes: 1 << 20,
+	}), func() Backend { return local.New(local.WithRegistry(reg), local.WithConcurrency(1)) })
+	hash, err := graph.ComputePackageHash(pkg)
+	if err != nil {
+		t.Fatalf("compute package hash: %v", err)
+	}
+
+	before := reg.ExecutionHandlerCount()
+	const n = 20
+	for i := 0; i < n; i++ {
+		res, err := ex.Execute(context.Background(), Request{
+			Package:     pkg,
+			PackageHash: hash,
+			Input:       &types.Input{Data: map[string]any{"seed": i}},
+		})
+		if err != nil {
+			t.Fatalf("execute %d: %v", i, err)
+		}
+		if res.Outcome != OutcomeSuccess {
+			t.Fatalf("execute %d: outcome = %v, want success (error: %s)", i, res.Outcome, res.Error)
+		}
+	}
+
+	if got := reg.ExecutionHandlerCount(); got != before {
+		t.Fatalf("registry holds %d execution-scoped handler entries after %d executions, want %d "+
+			"(back to the count before any of them ran) -- collector registrations are leaking, "+
+			"which for a map body (one Execute call per ITEM) is unbounded growth on a long-running runner",
+			got, n, before)
+	}
+}
+
 // A name-scoped handler (sdk.LocalNode, execution.Registry.RegisterNodeHandler)
 // carries the synthetic node type "__direct__/<node-name>". Nothing is ever
 // registered under that string as a TYPE, so a type-only inventory reports the
@@ -128,3 +171,4 @@ func TestInventoryResolvesNameScopedHandlers(t *testing.T) {
 			"the name-scoped path must still fail closed")
 	}
 }
+

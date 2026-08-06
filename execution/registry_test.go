@@ -173,3 +173,45 @@ func TestRegistry_LocalOverridesBypassVersionPolicy(t *testing.T) {
 		t.Fatalf("Get() returned %#v, want override v7", got)
 	}
 }
+
+// I1: RegisterExecutionHandler had no corresponding unregister, so every
+// per-item collector registration (execution/subgraph/collector.go, one call
+// per map-body ITEM via MapBodyExecutor.ExecuteBatchBody) accumulated in
+// executionHandlers for the life of the process. This is the actual count
+// assertion the finding requires: not "no panic", but the map back to its
+// prior size after N register+unregister cycles.
+func TestRegistry_UnregisterExecutionRemovesItsHandlers(t *testing.T) {
+	r := NewRegistry()
+	before := len(r.executionHandlers)
+
+	const n = 1000
+	for i := 0; i < n; i++ {
+		id := types.ExecutionID(fmt.Sprintf("exec-%d", i))
+		r.RegisterExecutionHandler(id, "step-a", versionedHandler{typ: "t", version: 1})
+		r.RegisterExecutionHandler(id, "step-b", versionedHandler{typ: "t", version: 1})
+		r.UnregisterExecution(id)
+	}
+
+	if got := len(r.executionHandlers); got != before {
+		t.Fatalf("executionHandlers has %d entries after %d register+unregister cycles, want %d "+
+			"(back to the size before any of them ran) -- entries are leaking", got, n, before)
+	}
+}
+
+// UnregisterExecution must only remove ITS OWN execution's entries, never a
+// different execution's -- a batch body executing concurrently with another
+// must not have its collector torn down by an unrelated cleanup.
+func TestRegistry_UnregisterExecutionLeavesOtherExecutionsIntact(t *testing.T) {
+	r := NewRegistry()
+	r.RegisterExecutionHandler("exec-keep", "node-a", versionedHandler{typ: "t", version: 1})
+	r.RegisterExecutionHandler("exec-drop", "node-a", versionedHandler{typ: "t", version: 1})
+
+	r.UnregisterExecution("exec-drop")
+
+	if _, err := r.Get("exec-keep", "node-a", "t", 0); err != nil {
+		t.Fatalf("Get() for the execution that was NOT unregistered failed: %v", err)
+	}
+	if _, ok := r.executionHandlers["exec-drop/node-a"]; ok {
+		t.Fatal("exec-drop's handler is still registered after UnregisterExecution")
+	}
+}

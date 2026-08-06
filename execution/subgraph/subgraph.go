@@ -102,8 +102,16 @@ func (e *Executor) Execute(ctx context.Context, req Request) (Result, error) {
 	// Build a per-attempt backend via the injected constructor.
 	innerBackend := e.newBackend()
 
-	// Register collector handlers scoped to the inner execution.
+	// Register collector handlers scoped to the inner execution. Deferred
+	// unregister runs on every exit path below, including the two early error
+	// returns (Resolve failure has nothing to unregister yet, so it is placed
+	// after this line): without it, every call here leaks its entries into the
+	// registry for the life of the process. That was survivable for a group
+	// (Register runs once per group EXECUTION), but MapBodyExecutor calls
+	// Execute once per map-body ITEM, turning this into unbounded growth on any
+	// runner serving a map workflow with a non-trivial items array.
 	Register(e.registry, innerExecID, collector)
+	defer e.registry.UnregisterExecution(innerExecID)
 
 	// Build inner engine options.
 	engineOpts := []engine.Option{
