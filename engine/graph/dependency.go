@@ -59,8 +59,12 @@ func buildDependencyEdges(def *types.WorkflowDef, depPorts []dependencyPort, g *
 	// consumers -- the inverse of the legacy DependencyEdge{Node, Supply}
 	// mapping below.
 	for _, dp := range depPorts {
-		supplyIdx, ok := g.index[dp.srcName]
-		if !ok {
+		// Existence only. The node's supply Kind was already enforced where these
+		// ports were collected (compile.go rejects a dependency-typed port on a
+		// non-supply node), which is why this branch has no Kind check of its own
+		// while the deprecated form below does — that form's supply name comes
+		// straight from the definition, unvalidated.
+		if _, ok := g.index[dp.srcName]; !ok {
 			return fmt.Errorf("dependency edge references unknown supply node: %s", dp.srcName)
 		}
 		for _, t := range dp.targets {
@@ -77,7 +81,6 @@ func buildDependencyEdges(def *types.WorkflowDef, depPorts []dependencyPort, g *
 			}
 			refs[consumerIdx][dp.srcName] = struct{}{}
 		}
-		_ = supplyIdx
 	}
 
 	// Deprecated top-level form: e.Node is the consumer declaring what it

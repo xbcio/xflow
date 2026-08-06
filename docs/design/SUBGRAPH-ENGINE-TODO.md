@@ -49,19 +49,36 @@ transform 类节点（filter、reduce）在逻辑超出单个表达式时天然�
 纯命名不对称，无功能后果。**修它要动 wire / 持久化状态格式**——这是它没在本分支
 修掉的原因，也是越晚修越贵的原因。
 
-### 5. `types/transform.go` 的 `TransformSpec` 零消费者
+### 5. `types/transform.go` 的 `TransformSpec` 尚无消费者（保留）
 
-T11 声明它，本打算由 T12 消费，T12 没有消费。当前是分支上的死代码。
+T11 声明它，本打算由 T12 消费，T12 没有消费。**明确保留不删**：它描述的
+`{expression | body}` 二选一形态正是 filter/reduce 落地时要用的，删掉等于丢掉一份
+已写好的设计意图。第 3 条放宽三处 map 专属判断时一并消费它。
 
-### 6. `web/packages/xflow-core/src/index.ts:44` 仍声明 `experimental_expand?`
+### 6. `engine/graph/subgraph_package.go` 的 `ProjectSubgraphPackage` 名字有歧义
 
-Go 侧的编译门控已在 `52cd7c4` 移除。TS 声明滞后，无运行时影响。
+它投影的是 **group** 包（入参是 `unitIdx`，断言 `Kind == UnitGroup`），与
+`xflow.subgraph` 这个节点类型无关——后者的投影入口是 `ProjectNodeBodyPackage`。
 
-### 7. `engine/graph/dependency.go` 的 `_ = supplyIdx`
-
-从 brief 的伪代码里带进来的空语句。纯装饰。
+`xflow.subgraph` 是作者手写的 body 容器节点类型；`xflow.group` 是编译器从顶层
+`groups:` 生成的调度单元对外自称的合成路由类型，没有任何 handler 注册它。两者最终
+汇合在同一个 `execution/subgraph.Executor`（该执行器分不出 group 和 map body），
+但来源与用途不同。改名会动到公开 API，未做。
 
 ## 已修复
+
+### TS 侧 `experimental_expand?` 声明滞后（原 P2-6，2026-08-06 修复）
+
+Go 侧编译门控已在 `52cd7c4` 移除，`web/packages/xflow-core/src/index.ts:44` 的
+`WorkflowOptions.experimental_expand?` 是唯一残留声明（`dist/` 为构建产物，重新
+构建即消失）。已删除。无运行时影响。
+
+### `engine/graph/dependency.go` 的 `_ = supplyIdx`（原 P2-7，2026-08-06 修复）
+
+已验证确为纯装饰而非漏掉的校验：`compile.go:285` 在构造 `depPorts` 之前就强制了
+`Kind == NodeKindSupply`，所以 `buildDependencyEdges` 里那次查找只需存在性。
+改为丢弃返回值并加注释说明「为何此分支无 Kind 校验而下方旧式分支有」——旧式形态的
+supply 名直接来自定义、未经校验，两者不对称是有理由的。
 
 ### `cmd/runner/run.go` 从未装配 `GroupRuntime`（原 P0-1，2026-08-06 修复）
 

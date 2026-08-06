@@ -41,7 +41,6 @@ export interface WorkflowSettings {
 export interface WorkflowOptions {
   allow_cycles?: boolean;
   max_auto_depth?: number;
-  experimental_expand?: boolean;
 }
 
 export interface RunnerSelector {
