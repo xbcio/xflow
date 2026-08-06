@@ -9,11 +9,67 @@
 
 ## P0 — 用之前必须修
 
-（本节当前为空。原第 1 条已修复，见下方「已修复」。）
+### 1. trigger-group 的 runner 侧本地执行不存在
+
+[NODE-GROUP-COLOCATION.md](./NODE-GROUP-COLOCATION.md) §5 第 4 步写着：
+
+> Each batch triggers local group execution (embedded engine, same as normal group)
+
+**该机制没有实现。** `seedKafkaEntryBatchMessages`
+（`node/internal/trigger/kafka_entry_seed_batch.go:83`）把**原始 Kafka 消息**
+构造成 exits 直接提交控制面，成员节点一个都没跑。
+`service/runner/trigger_activation_handler.go` 整个文件不认识 group：
+`Activate` 只做 `gate.Admit` → `triggers.Trigger(d.NodeType)`。控制面为
+trigger-group 派发的 directive 带 `NodeType: "xflow.group"`
+（`entry_activation_manager.go:195`），而该合成类型从无 handler 注册（见 P2-8），
+所以 `trigger_activation_handler.go:107` 必然 fail closed。
+
+后果不只是"功能缺失"：真实用法（每批就地分析、只把结果跨网）退化成"整批原始
+消息跨网进 Redis"。带 body 的流量场景下这会拖垮控制面。
+
+缺的是三处接线，不是三个组件——`GroupRuntime` 已完整且已由 `cmd/runner/run.go`
+无条件装配，控制面 `entry_activation_manager.go:188` 也已经投影出了包，只是把
+`pkg` 丢掉只留了 `Requirements`：
+
+| 缺口 | 位置 |
+|---|---|
+| `ActivateDirective` 不携带 package | `service/protocol/activation.go:22` |
+| 控制面丢弃已投影的包 | `service/control/entry_activation_manager.go:188` |
+| runner 拿 `"xflow.group"` 查 trigger handler | `service/runner/trigger_activation_handler.go:107` |
+
+设计见 [2026-08-07 SAS 流量打标 spec](../superpowers/specs/2026-08-07-sas-traffic-tagging-runner-group-design.md) §3。
+
+### 2. 唯一的 trigger-group e2e 自己伪造 exits
+
+`test/integration/h_trigger_group_e2e_test.go:77` 写着
+`// Simulate the runner path: build admission key, compute result hash.`，
+然后手工构造 `exits` 交给控制面。它验证的是控制面的 admission 语义，**不验证
+成员节点是否被执行**——这正是第 1 条能潜伏至今的原因。
+
+修第 1 条时必须配一个用真实成员节点跑通的 e2e。沿用手工构造的写法等于没测。
 
 ## P1 — 规模上去会疼
 
-### 2. 无 `max_concurrency` 节流
+### 3. `xflow.map` 不能作为 group / subgraph 成员，且错误信息误导
+
+实测（2026-08-06 临时探针）：把 `xflow.map` 放进 `SubgraphPackage` 会在包校验
+阶段被拒，报
+
+```
+package validation failed: handler not available: type=xflow.map version=1
+```
+
+该信息指向"能力表里没有这个 handler"，而真实原因是**内层引擎结构上跑不了 map**：
+`execution/subgraph/subgraph.go:117-128` 构造内层 engine 时只给
+`WithNodeFailureObserver`（+ 可选 suspend/TTL），从不给 `WithBatchBodyExecutor`，
+所以即使注册了 handler，批次任务也会撞上 `ErrNoBatchBodyExecutor`。
+
+编译期放行、运行期失败，且**仓库里没有任何测试覆盖这个组合**，文档里也没写。
+要么加显式的编译期拒绝（附真实原因），要么把 `WithBatchBodyExecutor` 递归接进
+内层引擎。前者便宜得多，且能避开"嵌套 map 的子执行树无界"这个 P2-5 已经在防的
+问题。
+
+### 4. 无 `max_concurrency` 节流
 
 设计时显式排除（见 spec §10.1），当时 body 还是 pass-through stub。**T12/T13 之后
 风险画像变了**：一个很大的 `items` 数组现在会把「全部批次一次性灌进队列」变成
@@ -24,7 +80,7 @@
 
 ## P2 — 命名与死代码
 
-### 3. 给第二种节点类型加 body 时要放宽三处 map 专属判断
+### 5. 给第二种节点类型加 body 时要放宽三处 map 专属判断
 
 body 存储已经是通用的：`NodeMeta.Body` 随节点整体走 wire 与 hash，fail-closed
 守卫只看 `Parameters["body"]` 是否存在、不看节点类型，执行器拿到的
@@ -41,7 +97,7 @@ transform 类节点（filter、reduce）在逻辑超出单个表达式时天然�
 规范当前写的 `condition: expression` 只是最简形态，不是上限。届时是「在一个 pass
 里加 case」，不是重新接一遍线。
 
-### 4. `xflow.map` 仍然对外自称 `"_loop"`
+### 6. `xflow.map` 仍然对外自称 `"_loop"`
 
 `node/internal/flow/map.go:89`、`engine/expand.go:17` 及 5 个测试文件里的标记键仍是 `_loop`。
 设计文档（§「xflow.map 改名后标记键跟着改叫 _map」）把改名派给了扩展工作，实际没做。
@@ -49,13 +105,13 @@ transform 类节点（filter、reduce）在逻辑超出单个表达式时天然�
 纯命名不对称，无功能后果。**修它要动 wire / 持久化状态格式**——这是它没在本分支
 修掉的原因，也是越晚修越贵的原因。
 
-### 5. `types/transform.go` 的 `TransformSpec` 尚无消费者（保留）
+### 7. `types/transform.go` 的 `TransformSpec` 尚无消费者（保留）
 
 T11 声明它，本打算由 T12 消费，T12 没有消费。**明确保留不删**：它描述的
 `{expression | body}` 二选一形态正是 filter/reduce 落地时要用的，删掉等于丢掉一份
-已写好的设计意图。第 3 条放宽三处 map 专属判断时一并消费它。
+已写好的设计意图。第 5 条放宽三处 map 专属判断时一并消费它。
 
-### 6. `engine/graph/subgraph_package.go` 的 `ProjectSubgraphPackage` 名字有歧义
+### 8. `engine/graph/subgraph_package.go` 的 `ProjectSubgraphPackage` 名字有歧义
 
 它投影的是 **group** 包（入参是 `unitIdx`，断言 `Kind == UnitGroup`），与
 `xflow.subgraph` 这个节点类型无关——后者的投影入口是 `ProjectNodeBodyPackage`。
@@ -67,13 +123,13 @@ T11 声明它，本打算由 T12 消费，T12 没有消费。**明确保留不�
 
 ## 已修复
 
-### TS 侧 `experimental_expand?` 声明滞后（原 P2-6，2026-08-06 修复）
+### TS 侧 `experimental_expand?` 声明滞后（原 P2-8，2026-08-06 修复）
 
 Go 侧编译门控已在 `52cd7c4` 移除，`web/packages/xflow-core/src/index.ts:44` 的
 `WorkflowOptions.experimental_expand?` 是唯一残留声明（`dist/` 为构建产物，重新
 构建即消失）。已删除。无运行时影响。
 
-### `engine/graph/dependency.go` 的 `_ = supplyIdx`（原 P2-7，2026-08-06 修复）
+### `engine/graph/dependency.go` 的 `_ = supplyIdx`（原 P2-9，2026-08-06 修复）
 
 已验证确为纯装饰而非漏掉的校验：`compile.go:285` 在构造 `depPorts` 之前就强制了
 `Kind == NodeKindSupply`，所以 `buildDependencyEdges` 里那次查找只需存在性。

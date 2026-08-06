@@ -68,6 +68,27 @@ supply metric 在生产中无处上报。单测里有 observer 打点，**不代
 心跳周期」退化为「一个 TTL 轮询周期」，永远不会退化为「永不刷新」。TTL 轮询才是
 正确性保证，hint 只是优化。
 
+### 4. wasm supply 热更新无生产接线，规则永不到达 guest
+
+`RegisterWasmSupplyConsumer` 与 `RegisterWasmSupplyConsumerByDigest`
+**零非测试调用点**。这不是"少接了一根线"，而是两条路径根本不相交：
+
+生产的依赖边走 `g.supplyRefs` → `graph.SupplyRefsFor` →
+`control.SuppliesForEntryUnit` → runner 的 `SupplyRequirement`，它只驱动
+**准入门控**与 `$supplies` 注入，**从不触达 `supply.Registry.RegisterConsumer`**。
+
+后果：wasm tagger 模块的 `configFromSource` 恒为 false，回落到 legacy
+`globals["$config"]` 路径。而 `$config` 在生产中被 workflow 级 Config 占据，
+于是 reactor 永远拿不到规则。
+
+`test/integration/sas_tagging_e2e_test.go:64` 的手工 `RegisterSupplyConsumer`
+调用正是在**替代缺失的生产接线**——它让 e2e 绿灯，同时让缺口不可见。
+
+走公开 `supply.Default.RegisterConsumer` 的 Go 节点不受影响
+（`node/supply/registry.go:409` 在内容已缓存时会立即回调），所以
+[2026-08-07 SAS 流量打标 spec](../superpowers/specs/2026-08-07-sas-traffic-tagging-runner-group-design.md)
+不依赖这条。修它的时机是下一次真要在生产里用 wasm + 热更新配置时。
+
 ## P2 — 17 条 deferred minor
 
 最终评审逐条判定**无一需在合并前修**，并自查了风险最高的两条：
