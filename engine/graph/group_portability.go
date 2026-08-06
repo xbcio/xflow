@@ -15,24 +15,43 @@ var nodesRefPattern = regexp.MustCompile(`\$nodes\[['"]([^'"]+)['"]\]`)
 // contain patterns that cannot be executed in an isolated runner context.
 // Called during compileGroups after members are resolved.
 func validateGroupPortability(g *Graph, gm *GroupMeta) error {
-	memberSet := make(map[string]bool, len(gm.Members))
+	names := make([]string, 0, len(gm.Members))
 	for _, idx := range gm.Members {
-		memberSet[g.nodes[idx].Name] = true
+		names = append(names, g.nodes[idx].Name)
+	}
+	return validatePortability(g, "group", gm.Name, names)
+}
+
+// validatePortability is the construct-agnostic core validateGroupPortability
+// and the body path (compileBodyMembers) both call, generalized to take a
+// member-name set rather than a *GroupMeta so a body — which has no GroupMeta,
+// only its own compiled *Graph and member names — can reuse it verbatim. kind
+// is "group" or "body": it is what lets the emitted error say WHICH construct
+// failed, since both paths would otherwise raise byte-identical messages and
+// an operator debugging a rejected deploy would have no way to tell them apart.
+func validatePortability(g *Graph, kind, name string, members []string) error {
+	memberSet := make(map[string]bool, len(members))
+	for _, n := range members {
+		memberSet[n] = true
 	}
 
-	for _, idx := range gm.Members {
+	for _, memberName := range members {
+		idx, ok := g.index[memberName]
+		if !ok {
+			continue
+		}
 		n := g.nodes[idx]
 
 		if isNonPortableType(n.Type) {
-			return fmt.Errorf("group %q: non-portable member %q: type %q is not portable (local/closure types cannot be distributed)",
-				gm.Name, n.Name, n.Type)
+			return fmt.Errorf("%s %q: non-portable member %q: type %q is not portable (local/closure types cannot be distributed)",
+				kind, name, n.Name, n.Type)
 		}
 
 		refs := extractNodeRefs(n.Parameters)
 		for _, ref := range refs {
 			if !memberSet[ref] {
-				return fmt.Errorf("group %q: non-portable member %q: references external node %q via $nodes",
-					gm.Name, n.Name, ref)
+				return fmt.Errorf("%s %q: non-portable member %q: references external node %q via $nodes",
+					kind, name, n.Name, ref)
 			}
 		}
 	}

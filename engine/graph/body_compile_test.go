@@ -1,6 +1,7 @@
 package graph
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/xbcio/xflow/types"
@@ -120,3 +121,50 @@ func TestCompile_BodyEntryMustBeUniqueAndDominating(t *testing.T) {
 			"the same way resolveGroupEntry rejects it for groups")
 	}
 }
+
+// I2: a body member of a non-portable type (xflow.local/xflow.closure/
+// xflow.inline) must be rejected exactly the way validateGroupPortability
+// rejects it for a group member — the design's own fact-check listed this as
+// one of three ready-made validators to reuse for bodies, and
+// compileBodyMembers only reused two (resolveGroupEntry, assertEntryDominates).
+// Before this fix a body containing an xflow.closure member compiled cleanly:
+// it cannot actually run on a remote runner (execution/subgraph is engine-
+// agnostic but the xflow.local/xflow.closure node handler genuinely is
+// process-local), so an operator would only discover this gap the same way
+// C1's supply gap surfaced -- at the first batch, not at deploy time.
+func TestCompile_BodyRejectsNonPortableMemberType(t *testing.T) {
+	cases := []string{"xflow.local", "xflow.closure", "xflow.inline"}
+	for _, nonPortable := range cases {
+		t.Run(nonPortable, func(t *testing.T) {
+			body := map[string]any{
+				"type": "xflow.subgraph",
+				"parameters": map[string]any{
+					"nodes": []any{
+						map[string]any{"name": "inner", "type": nonPortable},
+					},
+				},
+			}
+			def := &types.WorkflowDef{Name: "wf", Nodes: []types.NodeDef{
+				mapNode(map[string]any{"items": "$input.rows", "body": body}),
+			}}
+			_, err := Compile(def)
+			if err == nil {
+				t.Fatalf("a body member of type %q must be rejected: it cannot run "+
+					"on a remote runner, the same reason validateGroupPortability "+
+					"rejects it for a group member", nonPortable)
+			}
+			if !strings.Contains(err.Error(), "non-portable") {
+				t.Errorf("error = %v, want mention of \"non-portable\"", err)
+			}
+			// The error must say "body", not "group": an operator debugging a
+			// rejected deploy has no other way to tell which construct failed,
+			// since compileBodyMembers reuses the SAME validator group
+			// compilation uses.
+			if !strings.Contains(err.Error(), "body") {
+				t.Errorf("error = %v, want mention of \"body\" (not \"group\") so an "+
+					"operator can tell which construct failed", err)
+			}
+		})
+	}
+}
+

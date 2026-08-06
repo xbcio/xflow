@@ -149,6 +149,27 @@ func compileBodyMembers(mapNodeName string, nodes []types.NodeDef, conns types.C
 	if err := assertEntryDominates(bg, entry, members); err != nil {
 		return nil, 0, fmt.Errorf("node %q: body: %w", mapNodeName, err)
 	}
+	// I2: reuse the SAME portability validator group compilation uses
+	// (validateGroupPortability's shared core) rather than letting a body
+	// skip it. Without this, a body member of a non-portable type
+	// (xflow.local/xflow.closure/xflow.inline) compiled cleanly even though it
+	// cannot actually run once the body is projected onto a remote runner --
+	// exactly the class of gap C1 fixed for $supplies, just for node types
+	// instead. "body" is passed as kind so the error can never be confused
+	// with a rejected GROUP even though both paths share the same code.
+	memberNames := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		memberNames = append(memberNames, nodes[i].Name)
+	}
+	if err := validatePortability(bg, "body", mapNodeName, memberNames); err != nil {
+		// validatePortability already stamps "body %q: ..." (kind+name), so this
+		// wraps with just "node %q:" rather than the "node %q: body: %w" other
+		// body errors in this function use -- that would double up on the word
+		// "body" (kind is already the outer noun here, unlike
+		// resolveGroupEntry/assertEntryDominates, which say "group" internally
+		// with no equivalent kind parameter to swap).
+		return nil, 0, fmt.Errorf("node %q: %w", mapNodeName, err)
+	}
 	return bg, entry, nil
 }
 
