@@ -48,24 +48,20 @@ type Graph struct {
 	// nodes live in the node layer only — never in g.units.
 	supplyIndexes map[string]int
 	// supplyRefs maps a consumer node index to the sorted names of the supply
-	// nodes it declares a dependency on. Absent key means no dependency.
+	// nodes it declares a dependency on. Absent key means no dependency. This
+	// one is genuinely graph-level: it comes from WorkflowDef.DependencyEdges
+	// and describes a relation BETWEEN nodes, not a property of any one of
+	// them. Contrast NodeMeta.Body, which is a node's own compiled artifact.
 	supplyRefs map[int][]string
-
-	// mapBodies maps an xflow.map node's index to its projected body package.
-	// Projected once at compile time so N batches of the same map node share one
-	// package and one hash — which is what lets the executor's cache compile the
-	// body exactly once no matter how the items were batched. Absent key means
-	// the node declares no body.
-	mapBodies map[int]*MapBodyPackage
 }
 
-// MapBodyAt returns the projected body package for the node at nodeIdx, or nil
+// BodyAt returns the projected body package for the node at nodeIdx, or nil
 // when that node declares no body.
-func (g *Graph) MapBodyAt(nodeIdx int) *MapBodyPackage {
-	if g.mapBodies == nil {
+func (g *Graph) BodyAt(nodeIdx int) *NodeBodyPackage {
+	if nodeIdx < 0 || nodeIdx >= len(g.nodes) {
 		return nil
 	}
-	return g.mapBodies[nodeIdx]
+	return g.nodes[nodeIdx].Body
 }
 
 // Name returns the workflow name.
@@ -247,6 +243,28 @@ type NodeMeta struct {
 	// GroupIdx is the index of the co-location group this node belongs to;
 	// -1 means the node is ungrouped.
 	GroupIdx int
+	// Body is this node's projected body sub-graph, or nil when it declares
+	// none. Today only xflow.map grows one (and not in its expression form),
+	// but nothing here is map-specific: any node type that comes to embed a
+	// "body" sub-graph stores it in this same field, and the wire format, the
+	// graph hash, and the executor all keep working unchanged.
+	//
+	// Projected once at compile time, so N batches of the same node share one
+	// package and one hash — which is what lets the executor's cache compile
+	// the body exactly once no matter how the items were batched.
+	//
+	// It lives on the node rather than in a graph-level map because it is the
+	// node's own compiled artifact, exactly like GroupIdx — and because that
+	// placement is what makes it travel: NodeMeta round-trips through
+	// wireNodeMeta as a unit, so a body cannot be silently dropped from a
+	// snapshot the way a separate graph-level field could be (and was).
+	//
+	// The explicit omitempty is load-bearing: NodeMeta is hashed field-by-field
+	// with no json tags (graphHashPayload.Nodes is []NodeMeta), so without it
+	// every node in every graph would contribute a "Body":null and every
+	// already-persisted graph's hash would move — even for workflows with no
+	// body anywhere. Same reason graphHashPayload.SupplyRefs carries one.
+	Body *NodeBodyPackage `json:",omitempty"`
 }
 
 // Edge represents a directed connection between two nodes.

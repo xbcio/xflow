@@ -41,7 +41,24 @@
 
 ## P2 — 命名与死代码
 
-### 3. `xflow.map` 仍然对外自称 `"_loop"`
+### 3. 给第二种节点类型加 body 时要放宽三处 map 专属判断
+
+body 存储已经是通用的：`NodeMeta.Body` 随节点整体走 wire 与 hash，fail-closed
+守卫只看 `Parameters["body"]` 是否存在、不看节点类型，执行器拿到的
+`NodeBodyPackage` 也与投影者无关。**新增一种带 body 的节点类型不需要碰 wire、
+hash、序列化或反序列化。**
+
+仍然写死 `xflow.map` 的只有三处，都在编译期：
+
+- `projectMapBodies`（`engine/graph/compile.go`）的 `nd.Type != "xflow.map"` 判断
+- `validateMapBody`（同文件）的形态校验
+- `bannedBodyMemberTypes`：禁止 body 内再嵌 map/split/subgraph，防止子执行树无界
+
+transform 类节点（filter、reduce）在逻辑超出单个表达式时天然会需要 body——
+规范当前写的 `condition: expression` 只是最简形态，不是上限。届时是「在一个 pass
+里加 case」，不是重新接一遍线。
+
+### 4. `xflow.map` 仍然对外自称 `"_loop"`
 
 `node/internal/flow/map.go:89`、`engine/expand.go:17` 及 5 个测试文件里的标记键仍是 `_loop`。
 设计文档（§「xflow.map 改名后标记键跟着改叫 _map」）把改名派给了扩展工作，实际没做。
@@ -49,15 +66,15 @@
 纯命名不对称，无功能后果。**修它要动 wire / 持久化状态格式**——这是它没在本分支
 修掉的原因，也是越晚修越贵的原因。
 
-### 4. `types/transform.go` 的 `TransformSpec` 零消费者
+### 5. `types/transform.go` 的 `TransformSpec` 零消费者
 
 T11 声明它，本打算由 T12 消费，T12 没有消费。当前是分支上的死代码。
 
-### 5. `web/packages/xflow-core/src/index.ts:44` 仍声明 `experimental_expand?`
+### 6. `web/packages/xflow-core/src/index.ts:44` 仍声明 `experimental_expand?`
 
 Go 侧的编译门控已在 `52cd7c4` 移除。TS 声明滞后，无运行时影响。
 
-### 6. `engine/graph/dependency.go` 的 `_ = supplyIdx`
+### 7. `engine/graph/dependency.go` 的 `_ = supplyIdx`
 
 从 brief 的伪代码里带进来的空语句。纯装饰。
 
@@ -83,5 +100,5 @@ Go 侧的编译门控已在 `52cd7c4` 移除。TS 声明滞后，无运行时影
 
 它依赖「`ProjectGroupPackage` 只在父图 `Compile()` 成功后才可达」这一不变量，而
 `Compile()` 已跑过逐成员授权检查。C1 的修复为它加了第二个调用方
-（`ProjectMapBodyPackage`），该不变量对新调用方同样成立——**但仍然没有强制手段**。
+（`ProjectNodeBodyPackage`），该不变量对新调用方同样成立——**但仍然没有强制手段**。
 将来若有调用方从未完全校验的图上做投影，会重新引入跨成员 supply 泄漏且无测试拦截。

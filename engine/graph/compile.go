@@ -214,6 +214,10 @@ func registerNodes(def *types.WorkflowDef, g *Graph) (int, error) {
 // list threaded in, CompileProjectedPackage would reject any body member
 // reading $supplies.<name> even when the map node itself declares exactly that
 // dependency.
+//
+// Indexing g.nodes by def.Nodes' index is sound because registerNodes appends
+// one NodeMeta per def.Nodes entry in order and rejects duplicate names, so the
+// two stay 1:1 — the same identity g.SupplyRefsFor(i) already relies on.
 func projectMapBodies(def *types.WorkflowDef, g *Graph) error {
 	for i, nd := range def.Nodes {
 		if nd.Type != "xflow.map" {
@@ -222,14 +226,11 @@ func projectMapBodies(def *types.WorkflowDef, g *Graph) error {
 		if _, hasBody := nd.Parameters["body"]; !hasBody {
 			continue
 		}
-		body, err := ProjectMapBodyPackage(nd.Name, nd.Parameters, g.SupplyRefsFor(i))
+		body, err := ProjectNodeBodyPackage(nd.Name, nd.Parameters, g.SupplyRefsFor(i))
 		if err != nil {
 			return err
 		}
-		if g.mapBodies == nil {
-			g.mapBodies = make(map[int]*MapBodyPackage)
-		}
-		g.mapBodies[i] = body
+		g.nodes[i].Body = body
 	}
 	return nil
 }

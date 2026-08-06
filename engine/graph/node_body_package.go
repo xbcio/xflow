@@ -7,15 +7,17 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
-// MapBodyPackage is the projection of one xflow.map node's body into a
-// self-contained SubgraphPackage, plus its canonical hash.
+// NodeBodyPackage is the projection of one node's declared body sub-graph into
+// a self-contained SubgraphPackage, plus its canonical hash. Today only
+// xflow.map declares a body, but nothing in this type is map-specific: it is
+// the shape any body-bearing node type stores.
 //
 // A body and a node group are the same structure — a set of member nodes with a
 // unique dominating entry and boundary outputs — so a body reuses
 // SubgraphPackage rather than getting a parallel type. What differs is where the
 // members come from: a group's live in the compiled Graph as a GroupMeta, a
-// body's live only in its map node's "body" parameter.
-type MapBodyPackage struct {
+// body's live only in its own node's "body" parameter.
+type NodeBodyPackage struct {
 	Package *SubgraphPackage
 	Hash    string
 }
@@ -25,7 +27,7 @@ type MapBodyPackage struct {
 // computation, and its result is whatever its terminal nodes emit on "main".
 const bodyExitPort = "main"
 
-// ProjectMapBodyPackage projects the body declared on one map node.
+// ProjectNodeBodyPackage projects the body declared on one map node.
 //
 // It is a separate entry point from ProjectSubgraphPackage rather than a widened
 // version of it: that function reads members, boundary outputs, and entry index
@@ -48,7 +50,7 @@ const bodyExitPort = "main"
 // layer up, from a group's members instead of a body's parent node). Passing
 // nil here still compiles a body with no supply reads, which is the common
 // case and the shape every existing caller of this function needs.
-func ProjectMapBodyPackage(mapNodeName string, params map[string]any, visibleSupplies []string) (*MapBodyPackage, error) {
+func ProjectNodeBodyPackage(mapNodeName string, params map[string]any, visibleSupplies []string) (*NodeBodyPackage, error) {
 	bodyRaw, ok := params["body"]
 	if !ok {
 		return nil, fmt.Errorf("node %q has no body to project", mapNodeName)
@@ -114,7 +116,7 @@ func ProjectMapBodyPackage(mapNodeName string, params map[string]any, visibleSup
 	if err != nil {
 		return nil, fmt.Errorf("node %q: compute body package hash: %w", mapNodeName, err)
 	}
-	return &MapBodyPackage{Package: pkg, Hash: hash}, nil
+	return &NodeBodyPackage{Package: pkg, Hash: hash}, nil
 }
 
 // compileBodyMembers builds the minimal two-pass graph the entry rules need and

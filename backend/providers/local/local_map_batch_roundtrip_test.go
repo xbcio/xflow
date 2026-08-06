@@ -16,10 +16,10 @@ import (
 // C0: a compiled graph is what production actually resubmits after a reload
 // from Redis (rstate.Store.LoadGraph unmarshals straight into a fresh
 // *graph.Graph whenever the in-memory per-process cache misses — a second
-// server replica, or the same server after a restart). If MapBodyAt does not
+// server replica, or the same server after a restart). If BodyAt does not
 // survive that round-trip, BuildSubgraphLease ships an empty Package on every
 // batch and the runner rejects it with ErrPackageMissing. This test proves the
-// body still runs after exactly that round-trip, not just that MapBodyAt
+// body still runs after exactly that round-trip, not just that BodyAt
 // returns non-nil in isolation (engine/graph/snapshot_mapbody_test.go covers
 // that unit-level claim already).
 func TestLocalBackendCompletesAMapExpansionAfterGraphRoundTrip(t *testing.T) {
@@ -92,7 +92,7 @@ func TestLocalBackendCompletesAMapExpansionAfterGraphRoundTrip(t *testing.T) {
 	ran := body.items()
 	if len(ran) != 2 {
 		t.Fatalf("body node ran %d time(s) on the reloaded graph, want 2 — "+
-			"MapBodyAt did not survive the JSON round-trip, so the batch had no "+
+			"BodyAt did not survive the JSON round-trip, so the batch had no "+
 			"body to run", len(ran))
 	}
 }

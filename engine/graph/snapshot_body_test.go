@@ -11,7 +11,7 @@ import (
 // reloads a graph from Redis via json.Unmarshal (rstate.Store.LoadGraph) any
 // time the in-memory per-process cache has been evicted (terminal state) or
 // simply does not exist (a second server replica, or the same server after a
-// restart). BuildSubgraphLease reads MapBodyAt straight off the reloaded
+// restart). BuildSubgraphLease reads BodyAt straight off the reloaded
 // Graph, so if the body does not round-trip, every batch of every map-with-
 // body workflow fails the moment it is served from a reloaded graph.
 func TestGraphSnapshotRoundTripsMapBody(t *testing.T) {
@@ -32,7 +32,7 @@ func TestGraphSnapshotRoundTripsMapBody(t *testing.T) {
 	if !ok {
 		t.Fatal("compiled graph has no node \"m\"")
 	}
-	if body := g.MapBodyAt(idx); body == nil {
+	if body := g.BodyAt(idx); body == nil {
 		t.Fatal("compiled graph carries no body package for \"m\" before round-trip")
 	}
 
@@ -49,7 +49,7 @@ func TestGraphSnapshotRoundTripsMapBody(t *testing.T) {
 	if !ok {
 		t.Fatal("round-tripped graph has no node \"m\"")
 	}
-	body := round.MapBodyAt(roundIdx)
+	body := round.BodyAt(roundIdx)
 	if body == nil {
 		t.Fatal("round-tripped graph lost its map body package: " +
 			"BuildSubgraphLease would leave Package/PackageHash empty on every reload, " +

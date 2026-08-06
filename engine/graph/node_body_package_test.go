@@ -31,7 +31,7 @@ func mapNodeWithBody(t *testing.T, members []any, conns map[string]any) types.No
 // node shares one package and one hash. That is the whole benefit: the sub-graph
 // executor's cache is keyed on the hash, so a stable hash means the body compiles
 // once no matter how many batches ran.
-func TestProjectMapBodyPackageIsStoredOnTheCompiledGraph(t *testing.T) {
+func TestProjectNodeBodyPackageIsStoredOnTheCompiledGraph(t *testing.T) {
 	nd := mapNodeWithBody(t, []any{
 		map[string]any{"name": "step", "type": "test.echo"},
 	}, nil)
@@ -43,7 +43,7 @@ func TestProjectMapBodyPackageIsStoredOnTheCompiledGraph(t *testing.T) {
 	if !ok {
 		t.Fatal("compiled graph has no node \"m\"")
 	}
-	body := g.MapBodyAt(idx)
+	body := g.BodyAt(idx)
 	if body == nil {
 		t.Fatal("compiled graph carries no body package for \"m\", so every batch would have to project its own")
 	}
@@ -68,7 +68,7 @@ func TestCompileLeavesABodylessMapNodeWithoutAPackage(t *testing.T) {
 		t.Fatalf("Compile() error = %v", err)
 	}
 	idx, _ := g.NodeIndex("m")
-	if body := g.MapBodyAt(idx); body != nil {
+	if body := g.BodyAt(idx); body != nil {
 		t.Errorf("bodyless map node got a package: %+v", body)
 	}
 }
@@ -77,7 +77,7 @@ func TestCompileLeavesABodylessMapNodeWithoutAPackage(t *testing.T) {
 // changes. Two workflows whose bodies are identical up to node ordering describe
 // the same computation, and a hash that moved would make the executor compile
 // and cache the same body twice.
-func TestProjectMapBodyPackageHashIgnoresMemberOrder(t *testing.T) {
+func TestProjectNodeBodyPackageHashIgnoresMemberOrder(t *testing.T) {
 	members := []any{
 		map[string]any{"name": "a", "type": "test.echo"},
 		map[string]any{"name": "b", "type": "test.echo"},
@@ -89,13 +89,13 @@ func TestProjectMapBodyPackageHashIgnoresMemberOrder(t *testing.T) {
 		}}},
 	}
 
-	first, err := ProjectMapBodyPackage("m", mapNodeWithBody(t, members, conns).Parameters, nil)
+	first, err := ProjectNodeBodyPackage("m", mapNodeWithBody(t, members, conns).Parameters, nil)
 	if err != nil {
-		t.Fatalf("ProjectMapBodyPackage(ordered) error = %v", err)
+		t.Fatalf("ProjectNodeBodyPackage(ordered) error = %v", err)
 	}
-	second, err := ProjectMapBodyPackage("m", mapNodeWithBody(t, reversed, conns).Parameters, nil)
+	second, err := ProjectNodeBodyPackage("m", mapNodeWithBody(t, reversed, conns).Parameters, nil)
 	if err != nil {
-		t.Fatalf("ProjectMapBodyPackage(reversed) error = %v", err)
+		t.Fatalf("ProjectNodeBodyPackage(reversed) error = %v", err)
 	}
 	if first.Hash != second.Hash {
 		t.Errorf("hash moved with member order: %q vs %q — the same body would compile and cache twice",
@@ -106,8 +106,8 @@ func TestProjectMapBodyPackageHashIgnoresMemberOrder(t *testing.T) {
 // A body's terminal nodes are its exits: the body has no boundary declarations
 // to consult, so whichever members have no outgoing "main" edge are what one
 // item's result is made of. Getting this wrong means an item's result is empty.
-func TestProjectMapBodyPackageCollectsTerminalMembers(t *testing.T) {
-	body, err := ProjectMapBodyPackage("m", mapNodeWithBody(t, []any{
+func TestProjectNodeBodyPackageCollectsTerminalMembers(t *testing.T) {
+	body, err := ProjectNodeBodyPackage("m", mapNodeWithBody(t, []any{
 		map[string]any{"name": "a", "type": "test.echo"},
 		map[string]any{"name": "b", "type": "test.echo"},
 	}, map[string]any{
@@ -116,7 +116,7 @@ func TestProjectMapBodyPackageCollectsTerminalMembers(t *testing.T) {
 		}}},
 	}).Parameters, nil)
 	if err != nil {
-		t.Fatalf("ProjectMapBodyPackage() error = %v", err)
+		t.Fatalf("ProjectNodeBodyPackage() error = %v", err)
 	}
 	if len(body.Package.Exits) != 1 {
 		t.Fatalf("exits = %+v, want exactly one (only \"b\" is terminal)", body.Package.Exits)
@@ -134,12 +134,12 @@ func TestProjectMapBodyPackageCollectsTerminalMembers(t *testing.T) {
 // A projected package must compile. The projection and the compiler are separate
 // code paths, so a package that projects cleanly but fails to compile would only
 // surface at runtime, on the first batch.
-func TestProjectedMapBodyPackageCompiles(t *testing.T) {
-	body, err := ProjectMapBodyPackage("m", mapNodeWithBody(t, []any{
+func TestProjectedNodeBodyPackageCompiles(t *testing.T) {
+	body, err := ProjectNodeBodyPackage("m", mapNodeWithBody(t, []any{
 		map[string]any{"name": "step", "type": "test.echo"},
 	}, nil).Parameters, nil)
 	if err != nil {
-		t.Fatalf("ProjectMapBodyPackage() error = %v", err)
+		t.Fatalf("ProjectNodeBodyPackage() error = %v", err)
 	}
 	compiled, err := CompileProjectedPackage(body.Package)
 	if err != nil {
@@ -157,12 +157,12 @@ func TestProjectedMapBodyPackageCompiles(t *testing.T) {
 // Requirements are what a runner's capabilities are matched against. Collector
 // nodes are the framework's own and present in every package, so requiring them
 // would make every runner advertise an internal type it never implements.
-func TestProjectMapBodyPackageRequirementsExcludeCollectors(t *testing.T) {
-	body, err := ProjectMapBodyPackage("m", mapNodeWithBody(t, []any{
+func TestProjectNodeBodyPackageRequirementsExcludeCollectors(t *testing.T) {
+	body, err := ProjectNodeBodyPackage("m", mapNodeWithBody(t, []any{
 		map[string]any{"name": "step", "type": "test.echo"},
 	}, nil).Parameters, nil)
 	if err != nil {
-		t.Fatalf("ProjectMapBodyPackage() error = %v", err)
+		t.Fatalf("ProjectNodeBodyPackage() error = %v", err)
 	}
 	if len(body.Package.Requirements) != 1 || body.Package.Requirements[0].NodeType != "test.echo" {
 		t.Errorf("requirements = %+v, want only test.echo", body.Package.Requirements)

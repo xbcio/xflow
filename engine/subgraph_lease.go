@@ -125,7 +125,7 @@ func (e *Engine) BuildSubgraphLease(ctx context.Context, t *Task) (*TaskLease, *
 	// package from the compiled graph (projected once at compile time), the
 	// batching context from the task payload — at this point the map node is
 	// still Waiting, so its output cannot be read back.
-	if body := g.MapBodyAt(parentLease.Task.NodeIdx); body != nil {
+	if body := g.BodyAt(parentLease.Task.NodeIdx); body != nil {
 		payload.Package = body.Package
 		payload.PackageHash = body.Hash
 	}

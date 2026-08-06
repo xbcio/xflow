@@ -23,7 +23,7 @@ import (
 // the process-wide supply.Default registry, exactly the way node/internal/
 // utils/exprx.BuildExprEnv's default does for xflow.function/xflow.script --
 // this test does not go through the expr engine itself (that machinery is
-// exercised elsewhere) but the plumbing under test (ProjectMapBodyPackage's
+// exercised elsewhere) but the plumbing under test (ProjectNodeBodyPackage's
 // VisibleSupplies, CompileProjectedPackage's validateSupplyUsage) is identical
 // whether the read happens via expr or a direct handler.
 type supplyReaderHandler struct {
@@ -88,7 +88,7 @@ func TestMapBodyMemberReadsSupplyContent(t *testing.T) {
 								// compile-time gate C1 fixes: the handler below reads
 								// supply.Default directly rather than through this
 								// parameter, but the parameter is what makes
-								// ProjectMapBodyPackage's VisibleSupplies matter at all --
+								// ProjectNodeBodyPackage's VisibleSupplies matter at all --
 								// without it CompileProjectedPackage never even looks at
 								// the visible-supply list, and the fix's absence would go
 								// undetected.

@@ -252,7 +252,7 @@ func (e *Engine) runBatchBody(ctx context.Context, g *graph.Graph, lease *TaskLe
 			fmt.Errorf("parent node index %d is out of range", lease.Task.NodeIdx))
 	}
 	meta := g.NodeAt(lease.Task.NodeIdx)
-	body := g.MapBodyAt(lease.Task.NodeIdx)
+	body := g.BodyAt(lease.Task.NodeIdx)
 	if body == nil {
 		// A map node with no body has nothing to run per item. The pre-body
 		// pass-through silently returned the items unchanged, which made this

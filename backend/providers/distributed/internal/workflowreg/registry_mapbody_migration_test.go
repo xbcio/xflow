@@ -12,7 +12,7 @@ import (
 
 // A record persisted before map bodies travelled on the wire has the map
 // node's "body" parameter but no map_bodies entry. Graph.UnmarshalJSON fails
-// closed on that (ErrMapBodySnapshotMissingPackage) rather than handing back a
+// closed on that (ErrBodySnapshotMissingPackage) rather than handing back a
 // graph whose every batch would fail at the runner with ErrPackageMissing.
 //
 // This test is the reason that fail-closed choice is the right one: the record
@@ -41,8 +41,8 @@ func TestUnmarshalWorkflowRecordRecompilesAMapBodyLostFromTheSnapshot(t *testing
 		},
 	}
 
-	// Build the legacy payload from a real compiled graph so every other field
-	// is exactly what this version writes, then drop only map_bodies.
+	// Build the corrupt payload from a real compiled graph so every other field
+	// is exactly what this version writes, then strip only the node's body.
 	compiled, err := graph.Compile(def)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
@@ -55,10 +55,19 @@ func TestUnmarshalWorkflowRecordRecompilesAMapBodyLostFromTheSnapshot(t *testing
 	if err := json.Unmarshal(full, &fields); err != nil {
 		t.Fatalf("unmarshal to fields: %v", err)
 	}
-	if _, ok := fields["map_bodies"]; !ok {
-		t.Fatal("fixture has no map_bodies to drop; this test would prove nothing")
+	var nodes []map[string]json.RawMessage
+	if err := json.Unmarshal(fields["nodes"], &nodes); err != nil {
+		t.Fatalf("unmarshal nodes: %v", err)
 	}
-	delete(fields, "map_bodies")
+	if _, ok := nodes[0]["body"]; !ok {
+		t.Fatal("fixture node has no body to drop; this test would prove nothing")
+	}
+	delete(nodes[0], "body")
+	patchedNodes, err := json.Marshal(nodes)
+	if err != nil {
+		t.Fatalf("re-marshal nodes: %v", err)
+	}
+	fields["nodes"] = patchedNodes
 	legacyGraph, err := json.Marshal(fields)
 	if err != nil {
 		t.Fatalf("re-marshal graph: %v", err)
@@ -92,7 +101,7 @@ func TestUnmarshalWorkflowRecordRecompilesAMapBodyLostFromTheSnapshot(t *testing
 	if !ok {
 		t.Fatal("recompiled graph has no node \"m\"")
 	}
-	body := record.Graph.MapBodyAt(idx)
+	body := record.Graph.BodyAt(idx)
 	if body == nil {
 		t.Fatal("recompiled graph still has no map body; the fallback recompile did not " +
 			"restore it, so every batch would fail at the runner with ErrPackageMissing")

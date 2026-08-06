@@ -8,7 +8,7 @@ import (
 
 // C1: a map body member that reads $supplies.<name> must be able to run.
 //
-// ProjectMapBodyPackage never populated SubgraphPackage.VisibleSupplies, unlike
+// ProjectNodeBodyPackage never populated SubgraphPackage.VisibleSupplies, unlike
 // the group path (ProjectSubgraphPackage / buildVisibleSupplies, fixed for
 // groups by T3). The parent Compile() succeeds -- validateSupplyUsage sees the
 // dependency edge on the OUTER graph -- but CompileProjectedPackage(body.Package)
@@ -17,7 +17,7 @@ import (
 // validateSupplyUsage's declared set. This is worse than the compile-time
 // failure T3 fixed for groups: it passes deploy-time validation entirely and
 // only fails at the first batch of the first execution.
-func TestProjectMapBodyPackage_CarriesVisibleSupplyNames(t *testing.T) {
+func TestProjectNodeBodyPackage_CarriesVisibleSupplyNames(t *testing.T) {
 	def := &types.WorkflowDef{
 		Name: "wf",
 		Nodes: []types.NodeDef{
@@ -54,7 +54,7 @@ func TestProjectMapBodyPackage_CarriesVisibleSupplyNames(t *testing.T) {
 	if !ok {
 		t.Fatal("compiled graph has no node \"m\"")
 	}
-	body := g.MapBodyAt(idx)
+	body := g.BodyAt(idx)
 	if body == nil {
 		t.Fatal("compiled graph carries no body package for \"m\"")
 	}
