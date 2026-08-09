@@ -829,14 +829,28 @@ func (a *kafkaPartitionAggregator) flush(ctx context.Context, messages, discarde
 	// locally. Both paths share the SAME commit rule below: the batch is only
 	// durable-enough-to-commit after the side effect succeeded.
 	if a.rt.entrySeed {
-		rt, ok := a.rt.in.Runtime.(types.EntrySeedRuntime)
-		if !ok {
-			// isEntrySeedActivation already required this capability, so reaching
-			// here means the runtime changed under us. Withhold the commit rather
-			// than silently falling back to Emit with a different key space.
-			return false
-		}
-		if !seedKafkaEntryBatchMessages(ctx, a.rt.in, rt, messages) {
+		// A trigger-group activation's Runtime additionally implements
+		// types.GroupExecRuntime (see groupExecTriggerRuntime in
+		// service/runner) — when present, run the batch through the group's
+		// real member nodes and admit the real resulting exits instead of
+		// the raw-message exits the plain EntrySeedRuntime path would
+		// synthesize.
+		if gr, ok := a.rt.in.Runtime.(interface {
+			types.EntrySeedRuntime
+			types.GroupExecRuntime
+		}); ok {
+			if !seedKafkaEntryBatchViaGroupExec(ctx, a.rt.in, gr, messages) {
+				return false
+			}
+		} else if rt, ok := a.rt.in.Runtime.(types.EntrySeedRuntime); ok {
+			if !seedKafkaEntryBatchMessages(ctx, a.rt.in, rt, messages) {
+				return false
+			}
+		} else {
+			// isEntrySeedActivation already required at least EntrySeedRuntime,
+			// so reaching here means the runtime changed under us. Withhold the
+			// commit rather than silently falling back to Emit with a different
+			// key space.
 			return false
 		}
 	} else {
