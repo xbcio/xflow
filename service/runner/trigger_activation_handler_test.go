@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/xbcio/xflow/engine/graph"
+	"github.com/xbcio/xflow/execution"
 	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/types"
@@ -254,5 +256,116 @@ func TestTriggerActivationHandler_StaleCloseNotCalledOnActivateError(t *testing.
 	h.mu.Unlock()
 	if stored != firstSub {
 		t.Error("handler.subs should still hold the first subscription after failed second Activate")
+	}
+}
+
+// groupExecFakeTriggerHandler is a fake trigger handler used only to capture
+// the TriggerActivateInput a group activation constructs, so the test can
+// assert on NodeName/Params/Runtime capability without a real Kafka
+// consumer.
+type groupExecFakeTriggerHandler struct {
+	gotInput *types.TriggerActivateInput
+}
+
+func (f *groupExecFakeTriggerHandler) Descriptor() types.Descriptor {
+	return types.Descriptor{Type: "test.grouplocal.trigger", Kind: types.NodeKindTrigger}
+}
+func (f *groupExecFakeTriggerHandler) Activate(_ context.Context, input *types.TriggerActivateInput) (types.TriggerSubscription, error) {
+	f.gotInput = input
+	return &fakeTriggerSubscription{}, nil
+}
+
+// TestTriggerActivationHandler_GroupActivationResolvesEntryMemberAndInstallsGroupExecRuntime
+// verifies the group-mode branch: it must (1) look up the trigger handler by
+// the PACKAGE's entry node type, not by the synthetic "xflow.group" NodeType
+// (which has no registered handler — that IS the bug this plan closes), and
+// (2) install a Runtime exposing types.GroupExecRuntime so the trigger can
+// run the group locally per batch.
+func TestTriggerActivationHandler_GroupActivationResolvesEntryMemberAndInstallsGroupExecRuntime(t *testing.T) {
+	fh := &groupExecFakeTriggerHandler{}
+	lookup := fakeLookup{handlers: map[string]types.TriggerHandler{"test.grouplocal.trigger": fh}}
+
+	reg := execution.NewRegistry()
+	reg.RegisterGlobal("test.echo", echoHandler{})
+	cache := NewPackageCache(PackageCacheConfig{MaxEntries: 10})
+	groupRT := NewGroupRuntime(reg, cache, WithSuspendDisabled())
+
+	pkg := &graph.SubgraphPackage{
+		Version:   1,
+		GroupName: "g",
+		EntryNode: "trig",
+		Def: &types.WorkflowDef{
+			Name: "g",
+			Nodes: []types.NodeDef{
+				{Name: "trig", Type: "test.grouplocal.trigger", Version: 1, Parameters: map[string]any{"topic": "t"}},
+				{Name: "__collector_trig_main", Type: graph.NodeTypeGroupExit, Version: 1},
+			},
+			Connections: types.Connections{
+				"trig": {"main": types.PortConnections{Targets: []types.Connection{{Node: "__collector_trig_main"}}}},
+			},
+		},
+		Exits: []graph.SubgraphPackageExit{{CollectorNode: "__collector_trig_main", SrcNode: "trig", Port: "main"}},
+	}
+
+	h := NewTriggerActivationHandler("http://control-plane", "tok", lookup, WithGroupRuntime(groupRT))
+
+	d := protocol.ActivateDirective{
+		WorkflowID: "wf-1", WorkflowVersion: "v1", EntryUnitID: "g",
+		NodeType: "xflow.group", Generation: 3, PackageHash: "pkg-sha256:v1:x", Package: pkg,
+	}
+	if err := h.Activate(context.Background(), d); err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+
+	if fh.gotInput == nil {
+		t.Fatal("group entry's trigger handler Activate was never called — lookup by package entry type failed")
+	}
+	if fh.gotInput.NodeName != "trig" {
+		t.Fatalf("NodeName = %q, want %q (the package's entry node, not the group name)", fh.gotInput.NodeName, "trig")
+	}
+	if fh.gotInput.Params["topic"] != "t" {
+		t.Fatalf("Params = %+v, want the entry node's own Parameters merged in", fh.gotInput.Params)
+	}
+	if fh.gotInput.Params["entry_unit_id"] != "g" {
+		t.Fatalf("Params[entry_unit_id] = %v, want the GROUP name %q (for admission-key construction)", fh.gotInput.Params["entry_unit_id"], "g")
+	}
+	if _, ok := fh.gotInput.Runtime.(types.GroupExecRuntime); !ok {
+		t.Fatalf("Runtime = %T, want an implementation of types.GroupExecRuntime", fh.gotInput.Runtime)
+	}
+	if _, ok := fh.gotInput.Runtime.(types.EntrySeedRuntime); !ok {
+		t.Fatalf("Runtime = %T, want an implementation of types.EntrySeedRuntime", fh.gotInput.Runtime)
+	}
+}
+
+// TestTriggerActivationHandler_GroupActivationFailsClosedWithoutGroupRuntime
+// verifies a runner with no GroupRuntime configured rejects a group
+// activation instead of silently no-op'ing or falling through to the
+// (nonexistent) "xflow.group" handler lookup.
+func TestTriggerActivationHandler_GroupActivationFailsClosedWithoutGroupRuntime(t *testing.T) {
+	lookup := fakeLookup{handlers: map[string]types.TriggerHandler{}}
+	h := NewTriggerActivationHandler("http://control-plane", "tok", lookup) // no WithGroupRuntime
+
+	d := protocol.ActivateDirective{
+		WorkflowID: "wf-1", EntryUnitID: "g", NodeType: "xflow.group",
+		Package: &graph.SubgraphPackage{EntryNode: "trig", Def: &types.WorkflowDef{Nodes: []types.NodeDef{{Name: "trig", Type: "test.x"}}}},
+	}
+	if err := h.Activate(context.Background(), d); err == nil {
+		t.Fatal("expected fail-closed error when GroupRuntime is not configured")
+	}
+}
+
+// TestTriggerActivationHandler_GroupActivationFailsClosedWithoutPackage
+// verifies a group directive with a nil Package (e.g. the control plane could
+// not re-project it) is rejected rather than silently doing nothing.
+func TestTriggerActivationHandler_GroupActivationFailsClosedWithoutPackage(t *testing.T) {
+	reg := execution.NewRegistry()
+	cache := NewPackageCache(PackageCacheConfig{MaxEntries: 10})
+	groupRT := NewGroupRuntime(reg, cache, WithSuspendDisabled())
+	lookup := fakeLookup{handlers: map[string]types.TriggerHandler{}}
+	h := NewTriggerActivationHandler("http://control-plane", "tok", lookup, WithGroupRuntime(groupRT))
+
+	d := protocol.ActivateDirective{WorkflowID: "wf-1", EntryUnitID: "g", NodeType: "xflow.group", Package: nil}
+	if err := h.Activate(context.Background(), d); err == nil {
+		t.Fatal("expected fail-closed error when the directive carries no Package")
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -448,6 +449,171 @@ func TestKafkaAggregateConfig_ExplicitIntervalWinsInBothModes(t *testing.T) {
 		if cfg.FlushInterval != 250*time.Millisecond {
 			t.Fatalf("entrySeed=%v flush interval = %v, want 250ms", entrySeed, cfg.FlushInterval)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Task 7: batch flush routes through GroupExecRuntime when the runtime
+// implements it (trigger-group local execution).
+// ---------------------------------------------------------------------------
+
+// mockGroupExecRuntime is a mockEntrySeedRuntime that ALSO implements
+// types.GroupExecRuntime, simulating a trigger-group's local execution
+// capability (groupExecTriggerRuntime in production).
+type mockGroupExecRuntime struct {
+	mockEntrySeedRuntime
+	execResult types.GroupExecResult
+	execErr    error
+	gotInput   map[string]any
+}
+
+func (m *mockGroupExecRuntime) ExecuteGroup(_ context.Context, input map[string]any) (types.GroupExecResult, error) {
+	m.gotInput = input
+	return m.execResult, m.execErr
+}
+
+// TestSeedKafkaEntryBatchViaGroupExec_UsesRealExitsNotRawMessages proves the
+// group-exec batch path admits the exits ExecuteGroup RETURNED, not exits
+// synthesized from the raw Kafka messages (buildKafkaBatchExits) — the
+// defining difference from seedKafkaEntryBatchMessages and the whole point of
+// this feature.
+func TestSeedKafkaEntryBatchViaGroupExec_UsesRealExitsNotRawMessages(t *testing.T) {
+	realExits := []types.BoundaryExit{{NodeName: "member", Port: "main", Data: map[string]any{"processed": true}}}
+	rt := &mockGroupExecRuntime{
+		mockEntrySeedRuntime: mockEntrySeedRuntime{response: types.EntrySeedResponse{Accepted: true}},
+		execResult:           types.GroupExecResult{Outcome: "success", Exits: realExits},
+	}
+	in := &types.TriggerActivateInput{
+		NodeName: "trig", WorkflowID: "wf-1",
+		Params: map[string]any{"entry_unit_id": "g", "workflow_version": "v2"},
+	}
+	msgs := []KafkaMessage{{Topic: "t", Partition: 0, Offset: 5}, {Topic: "t", Partition: 0, Offset: 9}}
+
+	if !seedKafkaEntryBatchViaGroupExec(context.Background(), in, rt, msgs) {
+		t.Fatal("accepted admission must allow commit")
+	}
+	calls := rt.getCalls()
+	if len(calls) != 1 {
+		t.Fatalf("seed calls = %d, want 1", len(calls))
+	}
+	if len(calls[0].Exits) != 1 || calls[0].Exits[0].NodeName != "member" || calls[0].Exits[0].Data["processed"] != true {
+		t.Fatalf("admitted exits = %+v, want the REAL exits ExecuteGroup returned, not raw-message exits", calls[0].Exits)
+	}
+	if calls[0].AdmissionKey != "/wf-1/v2/g/t/0/5-9" {
+		t.Fatalf("admission key = %q", calls[0].AdmissionKey)
+	}
+	if rt.gotInput["count"] != 2 {
+		t.Fatalf("ExecuteGroup input = %+v, want count=2", rt.gotInput)
+	}
+}
+
+// TestSeedKafkaEntryBatchViaGroupExec_GroupFailureWithholdsCommit verifies a
+// non-success group outcome withholds the offset commit and never calls
+// SeedExecutionFromEntry at all (a failed member execution must not be
+// admitted as if it succeeded).
+func TestSeedKafkaEntryBatchViaGroupExec_GroupFailureWithholdsCommit(t *testing.T) {
+	rt := &mockGroupExecRuntime{
+		mockEntrySeedRuntime: mockEntrySeedRuntime{response: types.EntrySeedResponse{Accepted: true}},
+		execResult:           types.GroupExecResult{Outcome: "failed", Error: "member node error"},
+	}
+	in := &types.TriggerActivateInput{NodeName: "trig", WorkflowID: "wf", Params: map[string]any{}}
+	msgs := []KafkaMessage{{Topic: "t", Partition: 0, Offset: 1}}
+
+	if seedKafkaEntryBatchViaGroupExec(context.Background(), in, rt, msgs) {
+		t.Fatal("a failed group execution must not commit the offset")
+	}
+	if len(rt.getCalls()) != 0 {
+		t.Fatal("a failed group execution must never reach SeedExecutionFromEntry")
+	}
+}
+
+// TestSeedKafkaEntryBatchViaGroupExec_ExecuteGroupErrorWithholdsCommit
+// verifies an infrastructure-level ExecuteGroup error (package resolution
+// failure, etc.) also withholds the commit.
+func TestSeedKafkaEntryBatchViaGroupExec_ExecuteGroupErrorWithholdsCommit(t *testing.T) {
+	rt := &mockGroupExecRuntime{execErr: errors.New("package validation failed")}
+	in := &types.TriggerActivateInput{NodeName: "trig", WorkflowID: "wf", Params: map[string]any{}}
+	msgs := []KafkaMessage{{Topic: "t", Partition: 0, Offset: 1}}
+
+	if seedKafkaEntryBatchViaGroupExec(context.Background(), in, rt, msgs) {
+		t.Fatal("an ExecuteGroup error must not commit the offset")
+	}
+}
+
+// entrySeedGroupExecTestRuntime is entrySeedTestRuntime PLUS ExecuteGroup, so
+// it satisfies types.TriggerRuntime, types.EntrySeedRuntime AND
+// types.GroupExecRuntime all at once — exactly the shape of the production
+// groupExecTriggerRuntime (service/runner). Used to drive a batch through the
+// REAL kafkaPartitionAggregator.flush (via KafkaTriggerNode.Activate) and
+// prove the combined-interface type assertion in flush actually selects the
+// group-exec branch, not just that seedKafkaEntryBatchViaGroupExec works in
+// isolation.
+type entrySeedGroupExecTestRuntime struct {
+	entrySeedTestRuntime
+	execResult types.GroupExecResult
+	execErr    error
+	execCalls  atomic.Int32
+	gotInput   map[string]any
+}
+
+func (r *entrySeedGroupExecTestRuntime) ExecuteGroup(_ context.Context, input map[string]any) (types.GroupExecResult, error) {
+	r.execCalls.Add(1)
+	r.gotInput = input
+	return r.execResult, r.execErr
+}
+
+// TestKafkaAggregate_EntrySeedGroupExec_RoutesThroughFlushGroupBranch drives a
+// batch through the real Activate -> aggregator -> flush path (not calling
+// seedKafkaEntryBatchViaGroupExec directly) with a runtime implementing BOTH
+// types.EntrySeedRuntime and types.GroupExecRuntime, and asserts:
+//  1. ExecuteGroup was actually invoked by flush's combined-interface branch.
+//  2. The exits admitted to the control plane are the REAL exits ExecuteGroup
+//     returned, not the raw-message exits buildKafkaBatchExits would
+//     synthesize on the plain-EntrySeedRuntime branch.
+//
+// This is the load-bearing guard for the type assertion added at
+// kafka.go:838-841 in kafkaPartitionAggregator.flush: if that branch is ever
+// dropped, reordered behind the plain-EntrySeedRuntime check, or the combined
+// interface literal is broken, this test fails because the admitted exits
+// revert to the raw-message shape (no "processed" key) and execCalls stays 0.
+func TestKafkaAggregate_EntrySeedGroupExec_RoutesThroughFlushGroupBranch(t *testing.T) {
+	admitter := &mockEntrySeedRuntime{response: types.EntrySeedResponse{Accepted: true}}
+	realExits := []types.BoundaryExit{{NodeName: "member", Port: "main", Data: map[string]any{"processed": true}}}
+	rt := &entrySeedGroupExecTestRuntime{
+		entrySeedTestRuntime: entrySeedTestRuntime{admitter: admitter},
+		execResult:           types.GroupExecResult{Outcome: "success", Exits: realExits},
+	}
+	in := entrySeedAggregateInput(t, 2)
+	in.Runtime = rt
+
+	msgs := []KafkaMessage{
+		{Topic: "t", Partition: 0, Offset: 1},
+		{Topic: "t", Partition: 0, Offset: 2},
+	}
+	consumer := &commitRecordingConsumer{inner: newScriptedConsumer(msgs)}
+	restore := stubNewKafkaConsumer(consumer)
+	defer restore()
+
+	sub, err := (&KafkaTriggerNode{}).Activate(context.Background(), in)
+	if err != nil {
+		t.Fatalf("activate: %v", err)
+	}
+	defer func() { _ = sub.Close(context.Background()) }()
+
+	waitForSeedCalls(t, admitter, 1)
+
+	if rt.execCalls.Load() != 1 {
+		t.Fatalf("ExecuteGroup calls = %d, want 1 — flush did not take the group-exec branch", rt.execCalls.Load())
+	}
+	calls := admitter.getCalls()
+	if len(calls) != 1 {
+		t.Fatalf("seed calls = %d, want 1", len(calls))
+	}
+	if len(calls[0].Exits) != 1 || calls[0].Exits[0].NodeName != "member" || calls[0].Exits[0].Data["processed"] != true {
+		t.Fatalf("admitted exits = %+v, want the REAL exits ExecuteGroup returned (flush must have taken the group-exec branch, not the raw-message one)", calls[0].Exits)
+	}
+	if rt.gotInput["count"] != 2 {
+		t.Fatalf("ExecuteGroup input = %+v, want count=2", rt.gotInput)
 	}
 }
 

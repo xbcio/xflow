@@ -7,7 +7,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/types"
@@ -49,6 +51,14 @@ type EntryActivationReconcilerConfig struct {
 	Store engine.EntryActivationStore
 	// Lister enumerates currently-live runner sessions.
 	Lister ActivationRunnerLister
+	// WorkflowRegistry resolves a workflow's compiled graph so a GROUP entry
+	// unit's ActivateDirective can carry a freshly re-projected
+	// SubgraphPackage (spec 2026-08-07 §3.3). nil means group Activate
+	// directives never carry a package — the runner-side group dispatch then
+	// fails closed (see service/runner.TriggerActivationHandler), same as
+	// before this feature existed. Standalone (non-group) trigger entry units
+	// are unaffected either way.
+	WorkflowRegistry backend.WorkflowRegistry
 	// Selector supplies liveness policy (LiveTTL). Optional — a default is used
 	// when nil.
 	Selector *RunnerSelector
@@ -340,7 +350,7 @@ func (r *EntryActivationReconciler) reconcileOne(ctx context.Context, act *engin
 		return err
 	}
 	if assigned {
-		r.enqueueActivate(chosen.RunnerID, activateDirectiveFor(act, nextGen))
+		r.enqueueActivate(chosen.RunnerID, r.activateDirectiveFor(ctx, act, nextGen))
 	}
 	return nil
 }
@@ -796,8 +806,8 @@ func (r *EntryActivationReconciler) MarkActivationFailed(ctx context.Context, ru
 // activateDirectiveFor builds the node-generic activate directive for an
 // activation at the given (post-assign) generation. Params carry the same
 // trigger parameters the WorkflowDef already holds — no new secret surface.
-func activateDirectiveFor(act *engine.EntryActivation, gen uint64) protocol.ActivateDirective {
-	return protocol.ActivateDirective{
+func (r *EntryActivationReconciler) activateDirectiveFor(ctx context.Context, act *engine.EntryActivation, gen uint64) protocol.ActivateDirective {
+	d := protocol.ActivateDirective{
 		Namespace:       string(act.Namespace),
 		WorkflowID:      string(act.WorkflowID),
 		WorkflowVersion: act.WorkflowVersion,
@@ -809,6 +819,80 @@ func activateDirectiveFor(act *engine.EntryActivation, gen uint64) protocol.Acti
 		Kind:            activationKindFor(act),
 		Supplies:        act.Supplies,
 	}
+	if act.NodeType == engine.GroupNodeType {
+		d.Package = r.projectPackageForGroup(ctx, act)
+	}
+	return d
+}
+
+// projectPackageForGroup re-projects the SubgraphPackage for a GROUP entry
+// unit at directive-build time (spec 2026-08-07 §3.3: the package is sent
+// fresh on every Activate, never cached against a runner-reported hash).
+//
+// It returns nil — never an error — when the package cannot be resolved: no
+// WorkflowRegistry configured, the workflow/version unknown, or the entry
+// unit not found in the graph. A single activation's projection failure must
+// not abort reconciling every other activation in the same pass (mirrors how
+// resolveEntrySeedTopology fails one seed request, not the whole reconciler).
+// The resulting directive still carries the group's PackageHash from desired
+// state; a runner receiving a nil Package for a group NodeType fails that one
+// activation closed (Task 6), which is the correct degraded behavior.
+//
+// The freshly projected hash is compared against the stored one. The runner's
+// PackageCache.validatePackage (execution/subgraph/cache.go) recomputes the
+// hash and hard-fails with "hash mismatch: got X, want Y" on any divergence.
+// Those are two independently-produced values: act.PackageHash was computed by
+// assignPackageHashes at COMPILE time and persisted, while pkg is projected
+// here and now. They agree today, but nothing enforces that they always will —
+// any future change to ProjectSubgraphPackage's output would make every stored
+// workflow's group activation fail closed on the runner with an error pointing
+// at hashes rather than at the real cause. Catching the drift here keeps the
+// diagnosis on the server, where the two inputs are both visible.
+func (r *EntryActivationReconciler) projectPackageForGroup(ctx context.Context, act *engine.EntryActivation) *graph.SubgraphPackage {
+	if r.cfg.WorkflowRegistry == nil {
+		return nil
+	}
+	rec, err := r.cfg.WorkflowRegistry.GetWorkflow(ctx, act.WorkflowID)
+	if err != nil {
+		if r.cfg.Logger != nil {
+			r.cfg.Logger.Warn("entry activation: resolve workflow for group package projection failed",
+				"workflow_id", act.WorkflowID, "entry_unit_id", act.EntryUnitID, "err", err)
+		}
+		return nil
+	}
+	// Same version-mismatch fail-closed rule as resolveEntrySeedTopology: an
+	// empty declared version, or a declared version that disagrees with the
+	// registered record, must not be admitted.
+	if act.WorkflowVersion == "" || (rec.Version != "" && act.WorkflowVersion != rec.Version) {
+		return nil
+	}
+	if rec.Graph == nil {
+		return nil
+	}
+	unitIdx, ok := entryUnitIndex(rec.Graph, act.EntryUnitID)
+	if !ok {
+		return nil
+	}
+	pkg, hash, err := graph.ProjectSubgraphPackage(rec.Graph, unitIdx)
+	if err != nil {
+		if r.cfg.Logger != nil {
+			r.cfg.Logger.Warn("entry activation: project group package failed",
+				"workflow_id", act.WorkflowID, "entry_unit_id", act.EntryUnitID, "err", err)
+		}
+		return nil
+	}
+	if act.PackageHash != "" && hash != act.PackageHash {
+		// Shipping this package would make the runner reject it with a
+		// "hash mismatch" that names neither side's provenance. Fail the one
+		// activation here instead, with both values recorded.
+		if r.cfg.Logger != nil {
+			r.cfg.Logger.Error("entry activation: group package hash drift; refusing to ship package",
+				"workflow_id", act.WorkflowID, "entry_unit_id", act.EntryUnitID,
+				"stored_hash", act.PackageHash, "projected_hash", hash)
+		}
+		return nil
+	}
+	return pkg
 }
 
 // activationKindFor classifies an activation for runner-side dispatch. Today

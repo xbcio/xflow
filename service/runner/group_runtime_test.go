@@ -9,6 +9,7 @@ import (
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/execution"
+	"github.com/xbcio/xflow/execution/subgraph"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -272,5 +273,61 @@ func (s slowHandler) Execute(ctx context.Context, _ *types.Input) (*types.Output
 		return &types.Output{Data: map[string]any{}}, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
+	}
+}
+
+// TestGroupRuntime_ExecuteRequestRunsDirectly proves ExecuteRequest runs a
+// subgraph.Request without needing an engine.TaskLease wrapper — the shape a
+// trigger-group's per-batch local execution needs (there is no lease/attempt
+// for a Kafka batch that never went through the lease-based task queue).
+func TestGroupRuntime_ExecuteRequestRunsDirectly(t *testing.T) {
+	reg := execution.NewRegistry()
+	reg.RegisterGlobal("test.echo", echoHandler{})
+
+	cache := NewPackageCache(PackageCacheConfig{MaxEntries: 10})
+	rt := NewGroupRuntime(reg, cache, WithSuspendDisabled())
+
+	pkg := &graph.SubgraphPackage{
+		Version:   1,
+		GroupName: "chain",
+		EntryNode: "a",
+		Def: &types.WorkflowDef{
+			Name: "chain",
+			Nodes: []types.NodeDef{
+				{Name: "a", Type: "test.echo", Version: 1},
+				{Name: "__collector_a_main", Type: graph.NodeTypeGroupExit, Version: 1},
+			},
+			Connections: types.Connections{
+				"a": {"main": types.PortConnections{Targets: []types.Connection{{Node: "__collector_a_main"}}}},
+			},
+		},
+		Exits: []graph.SubgraphPackageExit{
+			{CollectorNode: "__collector_a_main", SrcNode: "a", Port: "main"},
+		},
+		Requirements: []graph.Requirement{{NodeType: "test.echo", NodeVersion: 1}},
+	}
+	hash, err := graph.ComputePackageHash(pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := rt.ExecuteRequest(context.Background(), subgraph.Request{
+		Package:     pkg,
+		PackageHash: hash,
+		Input:       &types.Input{Data: map[string]any{"x": 7}},
+		Deadline:    time.Now().Add(10 * time.Second),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome != engine.GroupOutcomeSuccess {
+		t.Fatalf("outcome = %s, want success; error = %s", result.Outcome, result.Error)
+	}
+	if len(result.Exits) != 1 || result.Exits[0].Data["x"] != 7 {
+		t.Fatalf("exits = %+v", result.Exits)
+	}
+	// ExecuteRequest carries no lease identity — those fields stay zero.
+	if result.GroupExecID != "" || result.Attempt != 0 {
+		t.Fatalf("result = %+v, want zero GroupExecID/Attempt (no lease was involved)", result)
 	}
 }

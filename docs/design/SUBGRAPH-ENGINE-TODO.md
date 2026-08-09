@@ -9,45 +9,6 @@
 
 ## P0 — 用之前必须修
 
-### 1. trigger-group 的 runner 侧本地执行不存在
-
-[NODE-GROUP-COLOCATION.md](./NODE-GROUP-COLOCATION.md) §5 第 4 步写着：
-
-> Each batch triggers local group execution (embedded engine, same as normal group)
-
-**该机制没有实现。** `seedKafkaEntryBatchMessages`
-（`node/internal/trigger/kafka_entry_seed_batch.go:83`）把**原始 Kafka 消息**
-构造成 exits 直接提交控制面，成员节点一个都没跑。
-`service/runner/trigger_activation_handler.go` 整个文件不认识 group：
-`Activate` 只做 `gate.Admit` → `triggers.Trigger(d.NodeType)`。控制面为
-trigger-group 派发的 directive 带 `NodeType: "xflow.group"`
-（`entry_activation_manager.go:195`），而该合成类型从无 handler 注册（见 P2-8），
-所以 `trigger_activation_handler.go:107` 必然 fail closed。
-
-后果不只是"功能缺失"：真实用法（每批就地分析、只把结果跨网）退化成"整批原始
-消息跨网进 Redis"。带 body 的流量场景下这会拖垮控制面。
-
-缺的是三处接线，不是三个组件——`GroupRuntime` 已完整且已由 `cmd/runner/run.go`
-无条件装配，控制面 `entry_activation_manager.go:188` 也已经投影出了包，只是把
-`pkg` 丢掉只留了 `Requirements`：
-
-| 缺口 | 位置 |
-|---|---|
-| `ActivateDirective` 不携带 package | `service/protocol/activation.go:22` |
-| 控制面丢弃已投影的包 | `service/control/entry_activation_manager.go:188` |
-| runner 拿 `"xflow.group"` 查 trigger handler | `service/runner/trigger_activation_handler.go:107` |
-
-设计见 [2026-08-07 SAS 流量打标 spec](../superpowers/specs/2026-08-07-sas-traffic-tagging-runner-group-design.md) §3。
-
-### 2. 唯一的 trigger-group e2e 自己伪造 exits
-
-`test/integration/h_trigger_group_e2e_test.go:77` 写着
-`// Simulate the runner path: build admission key, compute result hash.`，
-然后手工构造 `exits` 交给控制面。它验证的是控制面的 admission 语义，**不验证
-成员节点是否被执行**——这正是第 1 条能潜伏至今的原因。
-
-修第 1 条时必须配一个用真实成员节点跑通的 e2e。沿用手工构造的写法等于没测。
-
 ## P1 — 规模上去会疼
 
 ### 3. `xflow.map` 不能作为 group / subgraph 成员，且错误信息误导
@@ -166,6 +127,43 @@ group lease 必然失败」，理由是 `runner.go:359` 的 `r.config.GroupRunti
 零读取点的死字段 `runner.Config.EnableGroupExec` 一并删除——它注释里承诺的
 "advertises group.exec.v1 capability" 从未实现，留着即是留一条假线索。
 `GroupNodeType` 提为 `engine` 包常量，让握手两侧共享同一字面量。
+
+### trigger-group 的 runner 侧本地执行不存在 + 唯一的 e2e 自己伪造 exits（原 P0-1/P0-2，2026-08-09 修复）
+
+[NODE-GROUP-COLOCATION.md](./NODE-GROUP-COLOCATION.md) §5 第 4 步写的
+"Each batch triggers local group execution (embedded engine, same as normal
+group)" 此前没有实现：`seedKafkaEntryBatchMessages` 把原始 Kafka 消息直接构造
+成 exits 提交控制面，成员节点一个都不跑；`service/runner/trigger_activation_handler.go`
+整个文件不认识 group，控制面为 trigger-group 派发的 directive 带
+`NodeType: "xflow.group"`，该合成类型从无 handler 注册，必然 fail closed。
+
+按 [2026-08-07 SAS 流量打标 spec](../superpowers/specs/2026-08-07-sas-traffic-tagging-runner-group-design.md) §3
+与 [2026-08-09 trigger-group-local-execution 计划](../superpowers/plans/2026-08-09-trigger-group-local-execution.md)
+补齐了三处接线：
+
+| 缺口 | 位置 | 修法 |
+|---|---|---|
+| `ActivateDirective` 不携带 package | `service/protocol/activation.go` | 加 `Package *graph.SubgraphPackage` 字段 |
+| 控制面丢弃已投影的包 | `service/control/entry_activation_manager.go` | 重新投影并挂到 directive 上，哈希以 `ProjectSubgraphPackage` 返回值为准 |
+| runner 拿 `"xflow.group"` 查 trigger handler | `service/runner/trigger_activation_handler.go` | 新增 `activateGroup`：定位包内自身的 trigger 入口节点，用 `groupExecTriggerRuntime` 承接 `ExecuteGroup`，走 `GroupRuntime.ExecuteRequest` 真跑内层引擎 |
+
+`cmd/runner/run.go` 的构造顺序缺陷（`runnerServiceConfig` 先建 handler 再建
+`GroupRuntime`，导致 `WithGroupRuntime` 传空）在同一计划的 Task 8 里一并修掉:
+现在先建 `GroupRuntime` 再传给 handler。
+
+原 P0-2 记录的问题——唯一的 trigger-group e2e
+（`test/integration/h_trigger_group_e2e_test.go`）手工构造 exits，只验证控制面
+admission 语义，不验证成员节点是否被执行——同一计划的 Task 9 补了
+`test/integration/j_trigger_group_local_execution_e2e_test.go`：
+`TestTriggerGroupLocalExecution_RealMemberNodeRuns` 起真实的
+apiserver+control plane+runner 三进程路径，用真实成员节点 handler
+（`groupLocalMemberHandler`，非 mock）验证批次真的经
+`ExecuteGroup`→内层引擎→成员节点 Execute→真实 exits→
+`SeedExecutionFromEntry`→下游 fan-out 全程跑通，断言下游节点的输出里带着
+成员节点自己盖的 `seen_by_member=true` 标记，而非任何手工构造的 exits。
+
+范围之外、仍是已知代价：内层 group 引擎不做 supply 注入，成员节点看到的
+`$supplies` 为空；本次修复不改变这一点。
 
 ## 已知且接受的代价（不打算改）
 

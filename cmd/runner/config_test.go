@@ -731,7 +731,7 @@ func TestRunnerServiceConfig_ConstructsPoolAndResolverWhenConfigured(t *testing.
 		t.Fatal(err)
 	}
 
-	svcCfg, err := runnerServiceConfig(cfg)
+	svcCfg, err := runnerServiceConfig(cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -758,7 +758,7 @@ func TestRunnerServiceConfig_ConstructsPoolAndResolverWhenConfigured(t *testing.
 func TestRunnerServiceConfig_NoPoolWhenNotConfigured(t *testing.T) {
 	cfg := defaultRunnerConfig()
 	cfg.capabilities = parseCapabilities("xflow.function")
-	svcCfg, err := runnerServiceConfig(cfg)
+	svcCfg, err := runnerServiceConfig(cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -854,7 +854,7 @@ func TestResolveRunnerConfigRejectsInvalidNamespace(t *testing.T) {
 func TestRunnerServiceConfigPassesNamespaces(t *testing.T) {
 	cfg := defaultRunnerConfig()
 	cfg.namespaces = []namespace.Namespace{"namespace-a", "namespace-b"}
-	svcCfg, err := runnerServiceConfig(cfg)
+	svcCfg, err := runnerServiceConfig(cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

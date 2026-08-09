@@ -99,3 +99,80 @@ func seedKafkaEntryBatchMessages(ctx context.Context, in *types.TriggerActivateI
 	}
 	return resp.Accepted || resp.Duplicate || resp.Conflict
 }
+
+// seedKafkaEntryBatchViaGroupExec is the trigger-group counterpart of
+// seedKafkaEntryBatchMessages: instead of synthesizing exits from the raw
+// batch (buildKafkaBatchExits), it runs the group's real member nodes
+// locally via rt.ExecuteGroup and admits the exits THAT execution actually
+// produced (spec 2026-08-07 §3.3-§3.4). rt must implement both
+// types.EntrySeedRuntime (for the admission round trip) and
+// types.GroupExecRuntime (for the local execution) — the caller
+// (kafkaPartitionAggregator.flush) type-asserts for both together before
+// calling this function.
+//
+// Return value and offset-commit semantics mirror seedKafkaEntryBatchMessages
+// exactly for the transport/fence-rejection cases, PLUS one new case: a group
+// outcome other than "success" (a member node failed, or the batch's internal
+// deadline was exceeded) also withholds the commit — Kafka must redeliver the
+// batch rather than have it silently disappear because a member failed.
+func seedKafkaEntryBatchViaGroupExec(ctx context.Context, in *types.TriggerActivateInput, rt interface {
+	types.EntrySeedRuntime
+	types.GroupExecRuntime
+}, messages []KafkaMessage) bool {
+	if len(messages) == 0 {
+		return true
+	}
+	first := messages[0]
+	last := messages[len(messages)-1]
+	topic := first.Topic
+
+	execRes, err := rt.ExecuteGroup(ctx, map[string]any{
+		"topic":        first.Topic,
+		"partition":    first.Partition,
+		"start_offset": first.Offset,
+		"end_offset":   last.Offset,
+		"count":        len(messages),
+		"messages":     kafkaMessageDataList(messages),
+	})
+	if err != nil {
+		obs().OnBatchAdmission(ctx, topic, "error")
+		return false
+	}
+	if execRes.Outcome != "success" {
+		// The group ran but did not succeed (member failure, timeout, cancel):
+		// do NOT admit — this batch must be redelivered, not silently treated
+		// as a zero-hit success.
+		obs().OnBatchAdmission(ctx, topic, "error")
+		return false
+	}
+
+	entryUnitID, _ := in.Params["entry_unit_id"].(string)
+	if entryUnitID == "" {
+		entryUnitID = in.NodeName
+	}
+	workflowVersion, _ := in.Params["workflow_version"].(string)
+
+	req := types.EntrySeedRequest{
+		AdmissionKey:    buildKafkaBatchAdmissionKey(in.WorkflowID, workflowVersion, entryUnitID, messages),
+		WorkflowID:      in.WorkflowID,
+		WorkflowVersion: workflowVersion,
+		EntryUnitID:     entryUnitID,
+		Outcome:         "success",
+		Exits:           execRes.Exits,
+	}
+
+	resp, err := rt.SeedExecutionFromEntry(ctx, req)
+	if err != nil {
+		obs().OnBatchAdmission(ctx, topic, "error")
+		return false
+	}
+	switch {
+	case resp.Duplicate:
+		obs().OnBatchAdmission(ctx, topic, "duplicate")
+	case resp.Conflict:
+		obs().OnBatchAdmission(ctx, topic, "conflict")
+	case resp.Accepted:
+		obs().OnBatchAdmission(ctx, topic, "accepted")
+	}
+	return resp.Accepted || resp.Duplicate || resp.Conflict
+}
