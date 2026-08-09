@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/node/supply"
 	"github.com/xbcio/xflow/service/protocol"
@@ -43,6 +44,12 @@ type TriggerActivationHandler struct {
 	// gating (a runner with no supply-consuming workflows, or an older wiring).
 	gate *SupplyGate
 
+	// groupRuntime executes trigger-group batches locally. nil means group
+	// activations (NodeType == engine.GroupNodeType) are rejected — a runner
+	// that never wires GroupRuntime cannot host trigger-groups. Set via
+	// WithGroupRuntime.
+	groupRuntime *GroupRuntime
+
 	mu   sync.Mutex
 	subs map[activationID]types.TriggerSubscription
 }
@@ -68,6 +75,13 @@ func WithSeedHTTPClient(c *http.Client) TriggerActivationHandlerOption {
 // consumes a supply.
 func WithSupplyGate(g *SupplyGate) TriggerActivationHandlerOption {
 	return func(h *TriggerActivationHandler) { h.gate = g }
+}
+
+// WithGroupRuntime installs the local group-execution runtime used to host
+// trigger-group activations (NodeType == engine.GroupNodeType). Without it,
+// Activate fails closed for any group directive.
+func WithGroupRuntime(gr *GroupRuntime) TriggerActivationHandlerOption {
+	return func(h *TriggerActivationHandler) { h.groupRuntime = gr }
 }
 
 var _ ActivationHandler = (*TriggerActivationHandler)(nil)
@@ -104,6 +118,10 @@ func (h *TriggerActivationHandler) Activate(ctx context.Context, d protocol.Acti
 		}
 	}
 
+	if d.NodeType == engine.GroupNodeType {
+		return h.activateGroup(ctx, d)
+	}
+
 	handler, ok := h.triggers.Trigger(d.NodeType)
 	if !ok {
 		// Fail closed: unknown trigger type must not silently no-op.
@@ -127,19 +145,100 @@ func (h *TriggerActivationHandler) Activate(ctx context.Context, d protocol.Acti
 	if err != nil {
 		return err
 	}
+	h.storeSubscription(ctx, activationID{WorkflowID: d.WorkflowID, EntryUnitID: d.EntryUnitID}, sub)
+	return nil
+}
 
-	id := activationID{WorkflowID: d.WorkflowID, EntryUnitID: d.EntryUnitID}
+// activateGroup hosts a trigger-group activation: it resolves the real
+// trigger member from the projected package (never "xflow.group" itself —
+// that synthetic type has no registered handler), and installs a Runtime
+// that executes the group locally per batch via GroupRuntime before
+// admitting the real resulting exits (spec 2026-08-07 §3.3-§3.4).
+func (h *TriggerActivationHandler) activateGroup(ctx context.Context, d protocol.ActivateDirective) error {
+	if h.groupRuntime == nil {
+		return fmt.Errorf("trigger-group activation %q: no GroupRuntime configured on this runner", d.EntryUnitID)
+	}
+	if d.Package == nil {
+		return fmt.Errorf("trigger-group activation %q: directive carries no package", d.EntryUnitID)
+	}
+	pkg := d.Package
+	entryNodeDef, ok := findPackageNode(pkg, pkg.EntryNode)
+	if !ok {
+		return fmt.Errorf("trigger-group activation %q: entry node %q not found in package", d.EntryUnitID, pkg.EntryNode)
+	}
+	handler, ok := h.triggers.Trigger(entryNodeDef.Type)
+	if !ok {
+		return fmt.Errorf("no trigger handler registered for node type %q (group %q entry)", entryNodeDef.Type, d.EntryUnitID)
+	}
+
+	input := &types.TriggerActivateInput{
+		WorkflowID: types.WorkflowID(d.WorkflowID),
+		NodeName:   pkg.EntryNode,
+		Params:     withGroupEntrySeedParams(entryNodeDef.Parameters, d),
+		Runtime: &groupExecTriggerRuntime{
+			HTTPEntrySeedRuntime: &node.HTTPEntrySeedRuntime{
+				BaseURL:    h.seedBaseURL,
+				Client:     h.seedHTTPClient(),
+				Token:      h.authToken,
+				Generation: d.Generation,
+			},
+			runtime:     h.groupRuntime,
+			pkg:         pkg,
+			packageHash: d.PackageHash,
+		},
+		Supplies: resolveSuppliesForTrigger(d.Supplies),
+	}
+
+	sub, err := handler.Activate(ctx, input)
+	if err != nil {
+		return err
+	}
+	h.storeSubscription(ctx, activationID{WorkflowID: d.WorkflowID, EntryUnitID: d.EntryUnitID}, sub)
+	return nil
+}
+
+// findPackageNode returns the NodeDef named name within pkg.Def, or false if
+// absent. Used to resolve the entry node's real trigger type + Parameters —
+// the group's own NodeType ("xflow.group") is a synthetic routing label with
+// no registered handler; the entry MEMBER's type is what must be looked up.
+func findPackageNode(pkg *graph.SubgraphPackage, name string) (types.NodeDef, bool) {
+	if pkg == nil || pkg.Def == nil {
+		return types.NodeDef{}, false
+	}
+	for _, n := range pkg.Def.Nodes {
+		if n.Name == name {
+			return n, true
+		}
+	}
+	return types.NodeDef{}, false
+}
+
+// withGroupEntrySeedParams merges the entry node's own Parameters (from the
+// projected package) with the entry-seed selecting keys, using the GROUP's
+// name (d.EntryUnitID) as entry_unit_id — the admission-key and downstream
+// derivation are keyed on the group's entry unit, not the member node's own
+// name. Mirrors withEntrySeedParams's merge shape for the standalone-trigger
+// path, but sourced from the package instead of d.Params (a group's
+// EntryActivation.Params is always empty — see EntryUnitActivation in
+// entry_activation_manager.go).
+func withGroupEntrySeedParams(nodeParams map[string]any, d protocol.ActivateDirective) map[string]any {
+	merged := make(map[string]any, len(nodeParams)+3)
+	for k, v := range nodeParams {
+		merged[k] = v
+	}
+	merged["entry_seed"] = true
+	merged["entry_unit_id"] = d.EntryUnitID
+	merged["workflow_version"] = d.WorkflowVersion
+	return merged
+}
+
+// storeSubscription records sub under id, closing any previously stored
+// subscription for the same identity (stale-close on generation upgrade —
+// see the concurrency-invariant comment this replaces, which still applies:
+// ActivationTracker.ProcessDirectives serializes calls to this handler's
+// Activate per activation identity).
+func (h *TriggerActivationHandler) storeSubscription(ctx context.Context, id activationID, sub types.TriggerSubscription) {
 	h.mu.Lock()
-	// Stale-close on generation upgrade: if a subscription already exists for
-	// this activation identity, close it so it does not leak resources (the
-	// tracker already canceled its context, but Close deterministically releases
-	// the consumer/connection).
-	//
-	// Concurrency invariant: ActivationTracker.ProcessDirectives holds t.mu for
-	// the entire directive batch, serializing calls to this handler's Activate
-	// per activation identity. Therefore concurrent Activate calls for the same
-	// (WorkflowID, EntryUnitID) cannot race here, and no additional lock
-	// ordering or CAS is required.
 	if old, exists := h.subs[id]; exists && old != nil {
 		h.mu.Unlock()
 		_ = old.Close(ctx)
@@ -147,7 +246,6 @@ func (h *TriggerActivationHandler) Activate(ctx context.Context, d protocol.Acti
 	}
 	h.subs[id] = sub
 	h.mu.Unlock()
-	return nil
 }
 
 // seedHTTPClient returns the configured client or http.DefaultClient when none
