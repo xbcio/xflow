@@ -6,7 +6,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xbcio/xflow/backend"
+	"github.com/xbcio/xflow/backend/providers/local"
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/types"
@@ -1572,5 +1575,193 @@ func TestPruneRetryBackoffRemovesDeletedKeys(t *testing.T) {
 	}
 	if mapSize != 0 {
 		t.Fatalf("expected empty retryBackoff map, got %d entries", mapSize)
+	}
+}
+
+// TestEntryActivationReconciler_GroupActivateDirectiveCarriesPackage verifies
+// that when a WorkflowRegistry is configured, a fresh Activate for a GROUP
+// entry unit re-projects and attaches the group's SubgraphPackage — closing
+// the gap where the control plane derived a package (entry_activation_manager.go)
+// but discarded everything except Requirements before it reached the runner.
+func TestEntryActivationReconciler_GroupActivateDirectiveCarriesPackage(t *testing.T) {
+	ctx := namespace.WithNamespace(context.Background(), namespace.Default)
+	be := local.New()
+
+	def := &types.WorkflowDef{
+		Name:    "grp-pkg",
+		Version: "v1",
+		Nodes: []types.NodeDef{
+			{Name: "trig", Kind: types.NodeKindTrigger, Type: "test.trig"},
+			{Name: "member", Kind: types.NodeKindAction, Type: "test.member"},
+		},
+		Connections: types.Connections{
+			"trig": {"main": types.PortConnections{Targets: []types.Connection{{Node: "member", Input: "main"}}}},
+		},
+		Groups: []types.GroupDef{{
+			Name:           "g",
+			Members:        []string{"trig", "member"},
+			RunnerSelector: &types.RunnerSelector{Mode: types.RunnerSelectorModeRequired, MatchLabels: map[string]string{"zone": "a"}},
+		}},
+	}
+	g, err := graph.Compile(def)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	reg := be.WorkflowRegistry()
+	rec, err := reg.AddWorkflow(ctx, backend.WorkflowRecord{
+		ID: "wf-grp-pkg", Key: "default/grp-pkg@v1", Namespace: "default",
+		Name: "grp-pkg", Version: "v1", DefinitionHash: "sha256:test",
+		Definition: def, Graph: g,
+	})
+	if err != nil {
+		t.Fatalf("AddWorkflow: %v", err)
+	}
+
+	store := NewMemoryEntryActivationStore()
+	units, err := DeriveEntryActivations(g)
+	if err != nil || len(units) != 1 {
+		t.Fatalf("DeriveEntryActivations: units=%d err=%v", len(units), err)
+	}
+	act := engine.EntryActivation{
+		Namespace: namespace.Default, WorkflowID: rec.ID, WorkflowVersion: "v1",
+		EntryUnitID: units[0].EntryUnitID, NodeType: units[0].NodeType,
+		PackageHash: units[0].PackageHash, Selector: units[0].Selector,
+		Requirements: units[0].Requirements, Desired: true,
+	}
+	if err := store.Upsert(ctx, act); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+	lister := &mockRunnerLister{runners: []RunnerSnapshot{{
+		RunnerID: "runner-a", Capacity: 4, Labels: map[string]string{"zone": "a"}, LastHeartbeat: now,
+		// The group's derived Requirements (DeriveEntryActivations) union every
+		// member node type with the group.exec.v1 feature (engine.GroupNodeType);
+		// canRunRouting/MatchCapabilities is fail-closed, so the runner must
+		// advertise all three or chooseRunner never selects it — same
+		// requirement production runners must satisfy (see
+		// service/control/entry_activation_manager.go DeriveEntryActivations,
+		// and cmd/runner's capability completion for "xflow.group").
+		Capabilities: []protocol.Capability{
+			{NodeType: "test.trig"},
+			{NodeType: "test.member"},
+			{NodeType: "xflow.group", Features: []string{engine.FeatureGroupExecV1}},
+		},
+	}}}
+	sel := DefaultRunnerSelector()
+	r := NewEntryActivationReconciler(EntryActivationReconcilerConfig{
+		Store: store, Lister: lister, Selector: &sel,
+		Namespaces: []namespace.Namespace{namespace.Default}, LeaseTTL: 60 * time.Second,
+		WorkflowRegistry: reg,
+	})
+	if err := r.Reconcile(ctx, now); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	directives := r.DirectivesForRunner("runner-a")
+	if directives == nil || len(directives.Activate) != 1 {
+		t.Fatalf("directives = %+v, want exactly 1 Activate", directives)
+	}
+	d := directives.Activate[0]
+	if d.Package == nil {
+		t.Fatal("Activate directive carries no Package — the runner cannot execute the group")
+	}
+	if d.Package.EntryNode != "trig" || d.Package.GroupName != "g" {
+		t.Fatalf("Package = %+v, want EntryNode=trig GroupName=g", d.Package)
+	}
+}
+
+// TestEntryActivationReconciler_GroupPackageHashDriftWithholdsPackage verifies
+// that when the stored PackageHash disagrees with a fresh projection, the
+// control plane withholds the package instead of shipping a pair the runner's
+// PackageCache.validatePackage would reject with an opaque "hash mismatch".
+// The activation still gets assigned — only the package is withheld — so the
+// failure surfaces on the server, where both hashes are visible.
+func TestEntryActivationReconciler_GroupPackageHashDriftWithholdsPackage(t *testing.T) {
+	ctx := namespace.WithNamespace(context.Background(), namespace.Default)
+	be := local.New()
+
+	def := &types.WorkflowDef{
+		Name:    "grp-drift",
+		Version: "v1",
+		Nodes: []types.NodeDef{
+			{Name: "trig", Kind: types.NodeKindTrigger, Type: "test.trig"},
+			{Name: "member", Kind: types.NodeKindAction, Type: "test.member"},
+		},
+		Connections: types.Connections{
+			"trig": {"main": types.PortConnections{Targets: []types.Connection{{Node: "member", Input: "main"}}}},
+		},
+		Groups: []types.GroupDef{{
+			Name:           "g",
+			Members:        []string{"trig", "member"},
+			RunnerSelector: &types.RunnerSelector{Mode: types.RunnerSelectorModeRequired, MatchLabels: map[string]string{"zone": "a"}},
+		}},
+	}
+	g, err := graph.Compile(def)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	reg := be.WorkflowRegistry()
+	rec, err := reg.AddWorkflow(ctx, backend.WorkflowRecord{
+		ID: "wf-grp-drift", Key: "default/grp-drift@v1", Namespace: "default",
+		Name: "grp-drift", Version: "v1", DefinitionHash: "sha256:test",
+		Definition: def, Graph: g,
+	})
+	if err != nil {
+		t.Fatalf("AddWorkflow: %v", err)
+	}
+
+	store := NewMemoryEntryActivationStore()
+	units, err := DeriveEntryActivations(g)
+	if err != nil || len(units) != 1 {
+		t.Fatalf("DeriveEntryActivations: units=%d err=%v", len(units), err)
+	}
+	act := engine.EntryActivation{
+		Namespace: namespace.Default, WorkflowID: rec.ID, WorkflowVersion: "v1",
+		EntryUnitID: units[0].EntryUnitID, NodeType: units[0].NodeType,
+		// Deliberately stale: stands in for a persisted hash produced by an
+		// older projection than the one running now.
+		PackageHash: "pkg-sha256:v1:stale-from-an-older-projection",
+		Selector:    units[0].Selector,
+		Requirements: units[0].Requirements, Desired: true,
+	}
+	if err := store.Upsert(ctx, act); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+	lister := &mockRunnerLister{runners: []RunnerSnapshot{{
+		RunnerID: "runner-a", Capacity: 4, Labels: map[string]string{"zone": "a"}, LastHeartbeat: now,
+		// The group's derived Requirements (DeriveEntryActivations) union every
+		// member node type with the group.exec.v1 feature (engine.GroupNodeType);
+		// canRunRouting/MatchCapabilities is fail-closed, so the runner must
+		// advertise all three or chooseRunner never selects it — same
+		// requirement production runners must satisfy (see
+		// service/control/entry_activation_manager.go DeriveEntryActivations,
+		// and cmd/runner's capability completion for "xflow.group").
+		Capabilities: []protocol.Capability{
+			{NodeType: "test.trig"},
+			{NodeType: "test.member"},
+			{NodeType: "xflow.group", Features: []string{engine.FeatureGroupExecV1}},
+		},
+	}}}
+	sel := DefaultRunnerSelector()
+	r := NewEntryActivationReconciler(EntryActivationReconcilerConfig{
+		Store: store, Lister: lister, Selector: &sel,
+		Namespaces: []namespace.Namespace{namespace.Default}, LeaseTTL: 60 * time.Second,
+		WorkflowRegistry: reg,
+	})
+	if err := r.Reconcile(ctx, now); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	directives := r.DirectivesForRunner("runner-a")
+	if directives == nil || len(directives.Activate) != 1 {
+		t.Fatalf("directives = %+v, want exactly 1 Activate", directives)
+	}
+	if pkg := directives.Activate[0].Package; pkg != nil {
+		t.Fatalf("Package = %+v, want nil — a package projected against a "+
+			"different hash than the directive advertises would be rejected "+
+			"by the runner with an error naming neither side's provenance", pkg)
 	}
 }

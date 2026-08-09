@@ -331,9 +331,10 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 		entryManager = NewEntryActivationManager(cfg.EntryActivationStore)
 		entrySelector := DefaultRunnerSelector()
 		recCfg := EntryActivationReconcilerConfig{
-			Store:    cfg.EntryActivationStore,
-			Selector: &entrySelector,
-			Logger:   cfg.Logger,
+			Store:            cfg.EntryActivationStore,
+			Selector:         &entrySelector,
+			Logger:           cfg.Logger,
+			WorkflowRegistry: workflowRegistry,
 		}
 		// The reconciler enumerates live runners via ActivationRunnerLister. The
 		// runner directory supplies it when it implements the capability; a
