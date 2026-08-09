@@ -47,14 +47,29 @@ encryptor 只装进了自己的 core（runner 注册/心跳通道），没到 HT
 
 ## P1 — 可观测性缺失，出事时会瞎
 
-### 2. runner 侧 supply metrics 无生产落地槽
+### 2. runner 指标只能自曝，跨网络域采集不到
 
-`cmd/runner/run.go` 里没有 `*metrics.Metrics` 实例，因此 runner 侧那几个
-supply metric 在生产中无处上报。单测里有 observer 打点，**不代表生产能看到**。
+**本条原表述「`cmd/runner/run.go` 里没有 `*metrics.Metrics` 实例」已过期**
+（2026-08-09 更正）：`run.go:333` 起，`--metrics-addr` 非空时用 `metrics.New()`
+装配 Supply/Trigger/Script/Wasm 全部 observer 并起 Prometheus HTTP server。
+该接线由 `9cc879a` 引入，**早于**写下本条的那次文档提交。
 
-后果：第 1 项那个「拒绝并静默等待」的状态，生产环境目前**没有任何指标能直接
-看出来**，只能靠 Kafka consumer-group lag 间接推断。这两条叠加起来比各自单独
-更糟——先修哪条都行，但不该只修 1 不修 2。
+**真缺口在别处**：那个端点是「自曝、等人来抓」，而 runner 的目标形态是跨网络域
+部署（见 [DEPLOYMENT-TOPOLOGIES.md](./DEPLOYMENT-TOPOLOGIES.md)）。实测同日：
+
+- `protocol.HeartbeatRequest`（`service/protocol/types.go:55`）只有 8 个字段，
+  **不携带任何指标数值**——`SupplyObserved` 只带内容 hash。
+- server 侧**没有** runner 指标代理端点。全仓库 grep 唯一命中的
+  `metrics.NewRunnerClaimMetrics`（`service/control/controlplane.go:247`）是
+  server 自己观测 claim 行为的指标，不是代理 runner 的。
+
+后果分两层。对 supply 而言，第 1 项那个「拒绝并静默等待」的状态，**同网络域内**
+配了 `--metrics-addr` 就能看到，跨域则看不到。对跨环境部署的 runner
+（如 [2026-08-07 SAS 流量打标 spec](../superpowers/specs/2026-08-07-sas-traffic-tagging-runner-group-design.md) §7.4
+的 6 个 `sas_traffic_*` 指标）而言，指标在 runner 进程里正确产出，却**无人可抓**。
+
+出路只有两条：各网络域内各自部署 Prometheus 就地抓取，或补一条上报/代理通道
+（心跳携带、或 runner 主动 push）。前者是部署问题，后者是本条待办。
 
 ### 3. gRPC 传输不携带 hint 与 activation
 
