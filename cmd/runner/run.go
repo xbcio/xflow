@@ -239,7 +239,38 @@ var newRunnerService = func(client runnersvc.ProtocolClient, registry engine.Han
 }
 
 func runRunner(ctx context.Context, cfg runnerConfig) error {
-	serviceCfg, err := runnerServiceConfig(cfg)
+	registry := execution.NewRegistry()
+	// Built before runnerServiceConfig (not after, as before this fix) so the
+	// TriggerActivationHandler it wires can be given WithGroupRuntime — a
+	// runner that both hosts triggers and executes groups needs the SAME
+	// GroupRuntime instance in both places; constructing it after
+	// runnerServiceConfig had already returned meant the handler could never
+	// see it, and every trigger-group activation on a production runner
+	// failed closed (spec 2026-08-07 §3, the gap this whole feature closes).
+	//
+	// Unconditional, and paired with an unconditional capability advertisement
+	// in runnerServiceConfig, because the two are only meaningful together: a
+	// group unit's routing requires the group.exec.v1 feature, so a runner
+	// that does not advertise it is never SENT a group lease — the task stays
+	// queued with no error anywhere. Gating this behind a flag would preserve
+	// exactly that silent failure for every operator who did not know to set
+	// it.
+	//
+	// Advertising unconditionally does not attract work this runner cannot
+	// do. engine.RequirementsFromGraphPackage puts every member node type in
+	// the same requirement set, so MatchCapabilities still rejects a runner
+	// missing any member's handler. The group capability widens nothing on
+	// its own.
+	//
+	// Suspend is disabled inside a group for the same reason as inside a map
+	// body: a suspended member would park a sub-execution the outer lease
+	// cannot resume.
+	groupRuntime := runnersvc.NewGroupRuntime(
+		registry,
+		runnersvc.NewPackageCache(runnersvc.PackageCacheConfig{MaxEntries: groupPackageCacheEntries}),
+		runnersvc.WithSuspendDisabled())
+
+	serviceCfg, err := runnerServiceConfig(cfg, groupRuntime)
 	if err != nil {
 		return err
 	}
@@ -276,39 +307,18 @@ func runRunner(ctx context.Context, cfg runnerConfig) error {
 			_ = serviceCfg.ResourcePool.Close(closeCtx)
 		}()
 	}
-	registry := execution.NewRegistry()
+	// registry is already constructed above.
 	// A batch lease needs a runtime to run: it names a synthetic node
 	// ("m/_batch/0") that carries no Input and has no registered handler, so the
 	// ordinary node path has nothing to execute. The runtime resolves the body's
-	// member handlers out of this same registry, which is why it is built here
-	// rather than in runnerServiceConfig — the registry does not exist yet there.
+	// member handlers out of this same registry.
 	//
 	// This does not widen what the runner claims. Batch routing advertises the map
 	// node's own type (engine.TaskRouting returns meta.Type), so a runner only ever
 	// sees a batch if the operator already listed xflow.map in --cap.
 	serviceCfg.SubgraphRuntime = runnersvc.NewSubgraphRuntime(
 		registry, runnersvc.NewPackageCache(runnersvc.PackageCacheConfig{MaxEntries: batchBodyCacheEntries}))
-	// The group counterpart, built here for the same reason: the runtime resolves
-	// member handlers out of this registry, which runnerServiceConfig cannot see.
-	//
-	// Unconditional, and paired with an unconditional capability advertisement in
-	// runnerServiceConfig, because the two are only meaningful together: a group
-	// unit's routing requires the group.exec.v1 feature, so a runner that does not
-	// advertise it is never SENT a group lease — the task stays queued with no
-	// error anywhere. Gating this behind a flag would preserve exactly that silent
-	// failure for every operator who did not know to set it.
-	//
-	// Advertising unconditionally does not attract work this runner cannot do.
-	// engine.RequirementsFromGraphPackage puts every member node type in the same
-	// requirement set, so MatchCapabilities still rejects a runner missing any
-	// member's handler. The group capability widens nothing on its own.
-	//
-	// Suspend is disabled inside a group for the same reason as inside a map body:
-	// a suspended member would park a sub-execution the outer lease cannot resume.
-	serviceCfg.GroupRuntime = runnersvc.NewGroupRuntime(
-		registry,
-		runnersvc.NewPackageCache(runnersvc.PackageCacheConfig{MaxEntries: groupPackageCacheEntries}),
-		runnersvc.WithSuspendDisabled())
+	serviceCfg.GroupRuntime = groupRuntime
 	// Absorb script-engine cold start before the first lease arrives: qjs pays a
 	// ~330 ms QuickJS-wasm compile and the wasm reactor opens its runtime
 	// (resolving the on-disk compilation cache). A failure here is not fatal —
@@ -449,7 +459,7 @@ func newRunnerHTTPClient(cfg runnerConfig, timeout time.Duration) (*http.Client,
 	return c, nil
 }
 
-func runnerServiceConfig(cfg runnerConfig) (runnersvc.Config, error) {
+func runnerServiceConfig(cfg runnerConfig, groupRuntime *runnersvc.GroupRuntime) (runnersvc.Config, error) {
 	_, err := parsePositiveDuration("heartbeat interval", cfg.heartbeatInterval)
 	if err != nil {
 		return runnersvc.Config{}, err
@@ -548,7 +558,8 @@ func runnerServiceConfig(cfg runnerConfig) (runnersvc.Config, error) {
 		gate := runnersvc.NewSupplyGate(supplyFetcher, supply.Default, slog.Default())
 		handler := runnersvc.NewTriggerActivationHandler(seedBaseURL, cfg.token, lookup,
 			runnersvc.WithSeedHTTPClient(seedClient),
-			runnersvc.WithSupplyGate(gate))
+			runnersvc.WithSupplyGate(gate),
+			runnersvc.WithGroupRuntime(groupRuntime))
 		svcCfg.ActivationTracker = runnersvc.NewActivationTracker(handler, slog.Default())
 		// Same gate/registry pair feeds the heartbeat's two supply channels: the
 		// registry is what Observed() reads out to report applied hashes, and

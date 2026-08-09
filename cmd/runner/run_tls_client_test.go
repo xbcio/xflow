@@ -134,7 +134,7 @@ func TestRunnerServiceConfigSupplyGateHonoursPrivateCA(t *testing.T) {
 		heartbeatInterval: "5s",
 		pollWait:          "1s",
 		capabilities:      parseCapabilities("xflow.trigger.kafka"),
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("runnerServiceConfig: %v", err)
 	}

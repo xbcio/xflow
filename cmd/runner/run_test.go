@@ -5,10 +5,12 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/service/protocol"
 	runnersvc "github.com/xbcio/xflow/service/runner"
 )
 
@@ -194,6 +196,68 @@ func TestDeclaringTheGroupCapabilityByHandStillGetsTheFeature(t *testing.T) {
 		out: &bytes.Buffer{},
 		err: &bytes.Buffer{},
 	}, "run", "--server", "http://server:8080", "--cap", "xflow.function,xflow.group")
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestRunCommandWiresGroupRuntimeIntoTriggerActivationHandler pins the
+// construction-order fix. Before it, runRunner built the registry and
+// GroupRuntime AFTER runnerServiceConfig had already returned, so the
+// TriggerActivationHandler that config wires could never be given one — and
+// every trigger-group activation on the production binary failed closed at
+// activateGroup's first guard (spec 2026-08-07 §3, the gap this feature
+// closes).
+//
+// A group directive is pushed through the real ActivationTracker the config
+// assembled. Package is nil on purpose: the post-fix path must still fail,
+// but at the SECOND guard. Which guard fires is the whole signal.
+func TestRunCommandWiresGroupRuntimeIntoTriggerActivationHandler(t *testing.T) {
+	restore := stubRunnerServiceFactory(func(cfg runnersvc.Config) error {
+		if cfg.GroupRuntime == nil {
+			t.Fatal("cfg.GroupRuntime is nil")
+		}
+		if cfg.ActivationTracker == nil {
+			t.Fatal("cfg.ActivationTracker is nil — hostsTriggers(xflow.trigger.kafka) should have wired it")
+		}
+
+		var activateErr error
+		cfg.ActivationTracker.SetOnActivateFailed(func(_ protocol.ActivateDirective, err error) {
+			activateErr = err
+		})
+		if err := cfg.ActivationTracker.ProcessDirectives(context.Background(), &protocol.HeartbeatActivations{
+			Activate: []protocol.ActivateDirective{{
+				Namespace: "default", WorkflowID: "wf-1", WorkflowVersion: "v1",
+				EntryUnitID: "g", NodeType: engine.GroupNodeType, Generation: 1,
+				PackageHash: "pkg-sha256:v1:x",
+				// Package deliberately omitted — see the doc comment.
+			}},
+		}); err != nil {
+			t.Fatalf("ProcessDirectives: %v", err)
+		}
+
+		if activateErr == nil {
+			t.Fatal("group activation with a nil Package unexpectedly succeeded")
+		}
+		if strings.Contains(activateErr.Error(), "no GroupRuntime configured") {
+			t.Errorf("group activation failed at the missing-runtime guard: %v\n"+
+				"the TriggerActivationHandler was built before the GroupRuntime existed; "+
+				"every trigger-group activation on this runner fails closed", activateErr)
+		}
+		if !strings.Contains(activateErr.Error(), "carries no package") {
+			t.Errorf("activation error = %v, want the nil-package guard", activateErr)
+		}
+		return nil
+	})
+	defer restore()
+
+	err := executeRootWithOptions(commandOptions{
+		runFunc: func(cfg runnerConfig) error {
+			return runRunner(context.Background(), cfg)
+		},
+		out: &bytes.Buffer{},
+		err: &bytes.Buffer{},
+	}, "run", "--server", "http://server:8080", "--cap", "xflow.trigger.kafka")
 	if err != nil {
 		t.Fatal(err)
 	}
