@@ -1,6 +1,9 @@
 package protocol
 
-import "github.com/xbcio/xflow/engine"
+import (
+	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/engine/graph"
+)
 
 // --- Path constants ---
 const (
@@ -28,6 +31,15 @@ type ActivateDirective struct {
 	Params          map[string]any `json:"params,omitempty"`
 	Generation      uint64         `json:"generation"`
 	PackageHash     string         `json:"package_hash,omitempty"`
+	// Package is the projected group SubgraphPackage, present only when
+	// NodeType == engine.GroupNodeType. It is re-projected and attached fresh
+	// on every Activate (never cached server-side against a runner-reported
+	// hash — see spec 2026-08-07 §3.3 for why that "optimization" is not
+	// worth the consistency burden). A runner that does not recognize this
+	// field (old binary) silently ignores it and falls through to the
+	// pre-existing fail-closed behavior for "xflow.group" — no behavior
+	// regression, because that path never worked before this feature.
+	Package *graph.SubgraphPackage `json:"package,omitempty"`
 	// Kind selects the runner-side handler: "" or "trigger" means the trigger
 	// handler (so an old runner that never sees this field behaves as before),
 	// "supply" means the supply handler. Dispatching on an explicit kind rather
