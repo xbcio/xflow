@@ -137,3 +137,35 @@ type EntrySeedResponse struct {
 	Conflict    bool
 	ExecutionID ExecutionID
 }
+
+// GroupExecRuntime is an optional capability of TriggerRuntime that lets a
+// trigger route one batch through LOCAL group execution — running the
+// group's real member nodes on this runner via the embedded engine — instead
+// of synthesizing boundary exits from the raw batch payload. A Kafka trigger
+// operating as a trigger-group entry checks for this via type assertion
+// (alongside EntrySeedRuntime) before flushing a batch; see
+// node/internal/trigger/kafka.go and spec 2026-08-07 §3.3-§3.4.
+//
+// Without this capability (e.g. a single standalone trigger node, not a
+// group), the trigger falls back to the existing raw-exit seed path
+// (seedKafkaEntryBatchMessages) — that path is unaffected by this feature.
+type GroupExecRuntime interface {
+	// ExecuteGroup runs one group execution locally, seeding the group's
+	// entry node with input as its $input data, and returns the REAL boundary
+	// exits the group's member nodes produced. A non-nil error means the
+	// group could not be executed at all (e.g. its package failed to
+	// resolve/compile) — this is a transient/infrastructure failure, distinct
+	// from GroupExecResult.Outcome != "success" which means the group DID run
+	// but a member node failed or the deadline was exceeded.
+	ExecuteGroup(ctx context.Context, input map[string]any) (GroupExecResult, error)
+}
+
+// GroupExecResult is the caller-facing result of one local group execution
+// via GroupExecRuntime.ExecuteGroup. Outcome mirrors engine.GroupOutcome's
+// string values ("success", "failed", "timeout", "canceled") without this
+// package importing the engine package (types must not depend on engine).
+type GroupExecResult struct {
+	Outcome string
+	Exits   []BoundaryExit
+	Error   string
+}
