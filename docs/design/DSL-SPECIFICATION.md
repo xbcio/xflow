@@ -1647,6 +1647,17 @@ result: "${{ $nodes['final_merge'].status }}"
 
 #### Split 节点
 
+> **⚠️ 未实现 — 编译期拒绝。** `xflow.split` 从未实现过。它的 handler
+> (`node/internal/flow/split.go`) 确实会产出扇出结构，引擎的 `isLoopSplitOutput`
+> 也确实把它展开成 batch 任务；但 batch 执行要求一个已投影的 body，而
+> `xflow.split` 根本没有 `body` 参数，`projectMapBodies` 也只为 `xflow.map`
+> 投影。实测结果：提交一个含 split 的工作流不会报错，而是**永远挂起**——每个
+> batch 失败、退避重试，直到执行超时。
+>
+> 因此 `graph.Compile` 现在会在编译期直接拒绝 `xflow.split` 节点，把这个静默挂起
+> 变成定义工作流时的明确报错。**下面这一节描述的是从未落地的设计意图，不是现有
+> 能力。** 需要按项迭代请改用 `xflow.map` + `body`。
+
 将数组拆分为独立数据项，每项沿下游 connections 路径独立执行。与 `xflow.map` 的区别：map 通过内嵌 `body` 子图定义迭代体，split 通过下游 connections 定义扇出路径，用 `xflow.merge` 汇合结果。
 
 ```yaml

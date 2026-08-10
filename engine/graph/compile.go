@@ -177,6 +177,13 @@ func registerNodes(def *types.WorkflowDef, g *Graph) (int, error) {
 		if nd.Type == "xflow.start" || nd.Kind == types.NodeKindTrigger {
 			g.entryIndexes[nd.Name] = i
 		}
+		if nd.Type == "xflow.split" {
+			return 0, fmt.Errorf("node %q: xflow.split is not implemented and cannot run: "+
+				"its handler emits a fan-out shape the engine expands into batch tasks, but a batch "+
+				"has no body to run (xflow.split declares no body parameter and projectMapBodies "+
+				"projects bodies only for xflow.map), so every batch fails and the execution never "+
+				"completes. Use xflow.map with a body instead", nd.Name)
+		}
 		if nd.Type == "xflow.map" {
 			if err := validateMapBody(nd); err != nil {
 				return 0, err
