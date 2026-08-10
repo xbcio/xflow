@@ -84,6 +84,21 @@ type HeartbeatResponse struct {
 	// rotates the supply encryption key. The runner installs it as current and
 	// demotes the old current to previous. Absent when no rotation is pending.
 	SupplyKeyRotation string `json:"supply_key_rotation,omitempty"`
+	// MetricsReportIntervalSeconds, when non-zero, tells the runner how often to
+	// ship its metrics to the server. It is the scrape cadence expressed to the
+	// runner, so raising Prometheus' scrape_interval does not require touching
+	// every runner's flags.
+	//
+	// Three states, with omitempty making an old server land on "no opinion":
+	//   absent / 0 → keep whatever the runner is using (its local default)
+	//   > 0        → adopt this many seconds (the server has already clamped it)
+	//   < 0        → suspend reporting; the reporter stays alive and resumes on
+	//                the next positive value
+	//
+	// The negative state is the operational valve: when the server or Redis is
+	// under pressure, the whole fleet can be told to stop reporting without
+	// restarting a single runner.
+	MetricsReportIntervalSeconds int `json:"metrics_report_interval_seconds,omitempty"`
 }
 
 type PollTaskRequest struct {

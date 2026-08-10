@@ -86,6 +86,10 @@ type Config struct {
 	// Prometheus registry here, and merges what they ship into this server's own
 	// /metrics. Off by default; see control.Config.EnableMetricsProxy.
 	EnableRunnerMetricsProxy bool
+	// RunnerMetricsInterval is the cadence pushed to runners for metrics
+	// reporting. Zero means each runner uses its own default; negative suspends
+	// reporting fleet-wide. See control.Config.MetricsReportInterval.
+	RunnerMetricsInterval time.Duration
 
 	// Transport configuration. Stage 1 declares but does not use these.
 	HTTPAddr    string
@@ -281,6 +285,7 @@ func buildControlPlane(cfg Config) (*control.ControlPlane, error) {
 		Supplies:               cfg.Supplies,
 		EnableSupplyEncryption: cfg.EnableSupplyEncryption,
 		EnableMetricsProxy:     cfg.EnableRunnerMetricsProxy,
+		MetricsReportInterval:  cfg.RunnerMetricsInterval,
 	}
 
 	useRedis := cfg.RedisConfig != nil || cfg.RedisAddr != ""

@@ -99,6 +99,11 @@ type Config struct {
 	// Off by default: a single-domain deployment can scrape runners directly via
 	// their own --metrics-addr and does not need the extra hop.
 	EnableMetricsProxy bool
+	// MetricsReportInterval is the cadence pushed to runners on every heartbeat
+	// response (see protocol.HeartbeatResponse.MetricsReportIntervalSeconds).
+	// Zero leaves every runner on its own default; negative suspends reporting
+	// fleet-wide without restarting anything.
+	MetricsReportInterval time.Duration
 }
 
 type redisClientProvider interface {
@@ -425,6 +430,12 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 		// transport cannot deliver.
 		httpServer.core.metricsInbox = metricsInbox
 	}
+
+	// Metrics report interval: both cores receive it (unlike the inbox, which is
+	// HTTP-only). The field is a pure response annotation — safe on gRPC, and
+	// omitting it there would make gRPC heartbeat responses inconsistent with HTTP.
+	httpServer.core.metricsReportInterval = cfg.MetricsReportInterval
+	grpcServer.core.metricsReportInterval = cfg.MetricsReportInterval
 
 	return &ControlPlane{
 		backend:          cfg.Backend,

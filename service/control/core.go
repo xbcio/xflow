@@ -14,6 +14,17 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
+// Min/MaxMetricsReportInterval bound what the server will ask a runner to use.
+// The floor keeps a mis-typed "1s" from turning the fleet into a load
+// generator; the ceiling keeps a report window from outliving the Redis
+// retention (3 × DefaultRunnerLiveTTL = 90s is shorter than 300s, so a runner
+// at the ceiling relies on IsLive rather than the key surviving — which is why
+// the ceiling is a documented maximum, not a recommendation).
+const (
+	MinMetricsReportInterval = 5 * time.Second
+	MaxMetricsReportInterval = 300 * time.Second
+)
+
 // Transport-agnostic outcome errors. Each transport (HTTP, gRPC) maps these to
 // its own status representation so the core handling logic stays free of
 // net/http and grpc/codes.
@@ -105,6 +116,10 @@ type Core struct {
 	// in another network domain cannot be scraped, but a server that was not
 	// built to proxy should say so rather than silently discard.
 	metricsInbox *MetricsInbox
+	// metricsReportInterval is the cadence this server asks runners to report
+	// metrics at. Zero means "no opinion" — the runner keeps its local default.
+	// Negative suspends reporting fleet-wide.
+	metricsReportInterval time.Duration
 }
 
 // leaseRecoveryEngine is deliberately optional so custom EngineFacade test
@@ -263,6 +278,9 @@ func (c *Core) heartbeat(ctx context.Context, req protocol.HeartbeatRequest, inf
 		if rot := c.supplyEncryptor.ConsumeRotation(); rot != "" {
 			resp.SupplyKeyRotation = rot
 		}
+	}
+	if secs := clampMetricsReportInterval(c.metricsReportInterval); secs != 0 {
+		resp.MetricsReportIntervalSeconds = secs
 	}
 	return resp, nil
 }
@@ -850,6 +868,25 @@ func normalizeRunnerError(err error, logger engine.Logger, op string) error {
 			logger.Error("runner op failed", "op", op, "err", err)
 		}
 		return ErrInternalServer
+	}
+}
+
+// clampMetricsReportInterval converts the configured cadence into the wire's
+// three-state integer. Clamping happens here rather than on the runner so a
+// runner can adopt whatever arrives without re-validating it, and so changing
+// the bounds is a server-side deploy.
+func clampMetricsReportInterval(d time.Duration) int {
+	switch {
+	case d == 0:
+		return 0
+	case d < 0:
+		return -1
+	case d < MinMetricsReportInterval:
+		return int(MinMetricsReportInterval / time.Second)
+	case d > MaxMetricsReportInterval:
+		return int(MaxMetricsReportInterval / time.Second)
+	default:
+		return int(d / time.Second)
 	}
 }
 

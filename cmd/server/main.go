@@ -30,6 +30,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/xbcio/xflow/backend/providers/distributed"
 	"github.com/xbcio/xflow/engine"
@@ -114,6 +115,9 @@ type serverConfig struct {
 	// their registry to this server, which merges it into /metrics. Off by
 	// default because single-domain deployments can scrape runners directly.
 	enableRunnerMetricsProxy bool
+	// runnerMetricsInterval is the cadence pushed to runners for metrics
+	// reporting. 0 = let each runner use its own default; negative suspends.
+	runnerMetricsInterval time.Duration
 	// traceMode is one of "disabled", "stdout", or "otlp".
 	traceMode     string
 	traceEndpoint string
@@ -180,6 +184,8 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	fs.StringVar(&cfg.metricsPath, "metrics-path", "/metrics", "Prometheus metrics path")
 	fs.BoolVar(&cfg.enableRunnerMetricsProxy, "enable-runner-metrics-proxy", false,
 		"Accept metrics reports from runners that cannot be scraped directly, and merge them into /metrics")
+	fs.DurationVar(&cfg.runnerMetricsInterval, "runner-metrics-interval", 0,
+		"Cadence pushed to runners for metrics reporting (0 = let each runner use its own default; negative suspends reporting)")
 	fs.StringVar(&cfg.traceMode, "trace", "disabled", "Tracing mode: disabled|stdout|otlp")
 	fs.StringVar(&cfg.traceEndpoint, "trace-endpoint", "localhost:4317", "OTLP collector gRPC endpoint (--trace=otlp)")
 	fs.BoolVar(&cfg.traceInsecure, "trace-insecure", false, "Disable TLS verification for OTLP connection")
@@ -479,6 +485,7 @@ func runServer(cfg serverConfig) error {
 		// does not need a KEK to be present.
 		EnableSupplyEncryption:   true,
 		EnableRunnerMetricsProxy: cfg.enableRunnerMetricsProxy,
+		RunnerMetricsInterval:    cfg.runnerMetricsInterval,
 	}
 	if cfg.tlsCert != "" || cfg.tlsKey != "" || cfg.tlsClientCA != "" {
 		apiCfg.TLS = &apiserver.TLSConfig{Cert: cfg.tlsCert, Key: cfg.tlsKey, ClientCA: cfg.tlsClientCA}

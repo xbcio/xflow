@@ -97,6 +97,13 @@ type Config struct {
 	// can receive and decrypt AES-256-GCM encrypted supply content. The server
 	// responds with a SupplyKey on registration and encrypts supply GET bodies.
 	SupportsEncryption bool
+	// MetricsReporter, when set, ships this runner's whole Prometheus registry
+	// to the server on a cadence the server can adjust (see
+	// protocol.HeartbeatResponse.MetricsReportIntervalSeconds). nil means the
+	// runner never reports — byte-identical behavior to before this feature, and
+	// what a gRPC-transport runner always gets, since the gRPC client does not
+	// implement MetricsReportClient.
+	MetricsReporter *MetricsReporter
 }
 
 type Runner struct {
@@ -107,6 +114,7 @@ type Runner struct {
 	activationTracker *ActivationTracker
 	supplyRegistry    *supply.Registry
 	supplyGate        *SupplyGate
+	metricsReporter   *MetricsReporter
 	// acker sends ActivationAck for activations the tracker failed to take.
 	// nil when there is no ActivationTracker configured, or the configured
 	// client's transport does not support acks (e.g. the gRPC transport,
@@ -138,6 +146,7 @@ func New(client ProtocolClient, registry engine.HandlerRegistry, config Config) 
 		activationTracker: config.ActivationTracker,
 		supplyRegistry:    config.SupplyRegistry,
 		supplyGate:        config.SupplyGate,
+		metricsReporter:   config.MetricsReporter,
 	}
 	if config.ActivationTracker != nil {
 		if ackClient, ok := client.(activationAckClient); ok {
@@ -213,6 +222,13 @@ func (r *Runner) Run(ctx context.Context) error {
 	// long handlers, reflecting the true in-flight count to the server.
 	heartbeatCtx, hbCancel := context.WithCancel(ctx)
 	go r.heartbeatLoop(heartbeatCtx, sessionID, &inFlight, signalError)
+
+	// Metrics reporting shares heartbeatCtx: both are session-scoped, and a
+	// reconnect must restart the reporter with the new sessionID rather than
+	// keep shipping under a session the server has already replaced.
+	if r.metricsReporter != nil {
+		go r.metricsReporter.Run(heartbeatCtx, sessionID)
+	}
 
 	// Worker pool of Concurrency goroutines executing leases in parallel.
 	var wg sync.WaitGroup
@@ -439,6 +455,7 @@ func (r *Runner) heartbeatLoop(ctx context.Context, sessionID string, inFlight *
 	r.processActivations(ctx, resp)
 	r.processSupplyHints(ctx, resp)
 	r.processSupplyKeyRotation(resp)
+	r.processMetricsInterval(resp)
 
 	ticker := time.NewTicker(r.config.HeartbeatInterval)
 	defer ticker.Stop()
@@ -455,6 +472,7 @@ func (r *Runner) heartbeatLoop(ctx context.Context, sessionID string, inFlight *
 			r.processActivations(ctx, resp)
 			r.processSupplyHints(ctx, resp)
 			r.processSupplyKeyRotation(resp)
+			r.processMetricsInterval(resp)
 		}
 	}
 }
@@ -569,4 +587,18 @@ func (r *Runner) processSupplyKeyRotation(resp protocol.HeartbeatResponse) {
 		return
 	}
 	r.installSupplyKey(key)
+}
+
+// processMetricsInterval adopts the server's reporting cadence. The three
+// states are decided entirely by the sign, and the server has already clamped
+// any positive value into range — so this never validates, it only converts.
+//
+// Zero means "no opinion" and must NOT reach SetInterval: passing 0 would
+// suspend reporting, turning every old server (which never sets the field) into
+// a silent kill switch.
+func (r *Runner) processMetricsInterval(resp protocol.HeartbeatResponse) {
+	if r.metricsReporter == nil || resp.MetricsReportIntervalSeconds == 0 {
+		return
+	}
+	r.metricsReporter.SetInterval(time.Duration(resp.MetricsReportIntervalSeconds) * time.Second)
 }

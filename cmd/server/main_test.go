@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/xbcio/xflow/backend/providers/distributed"
@@ -551,5 +552,25 @@ func TestParseServerConfigEnableRunnerMetricsProxyFlag(t *testing.T) {
 	}
 	if cfg2.enableRunnerMetricsProxy {
 		t.Fatal("enableRunnerMetricsProxy = true, want false when flag is absent")
+	}
+}
+
+func TestParseServerConfigRunnerMetricsIntervalFlag(t *testing.T) {
+	// Positive: flag set to 30s → cfg field must be 30s.
+	cfg, err := parseServerConfig([]string{"-memory", "-runner-metrics-interval", "30s"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.runnerMetricsInterval != 30*time.Second {
+		t.Fatalf("runnerMetricsInterval = %v, want 30s", cfg.runnerMetricsInterval)
+	}
+
+	// Negative: flag absent → cfg field must be 0 (no opinion).
+	cfg2, err := parseServerConfig([]string{"-memory"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg2.runnerMetricsInterval != 0 {
+		t.Fatalf("runnerMetricsInterval = %v, want 0 when flag is absent", cfg2.runnerMetricsInterval)
 	}
 }
