@@ -162,8 +162,45 @@ apiserver+control plane+runner 三进程路径，用真实成员节点 handler
 `SeedExecutionFromEntry`→下游 fan-out 全程跑通，断言下游节点的输出里带着
 成员节点自己盖的 `seen_by_member=true` 标记，而非任何手工构造的 exits。
 
-范围之外、仍是已知代价：内层 group 引擎不做 supply 注入，成员节点看到的
-`$supplies` 为空；本次修复不改变这一点。
+范围之外：该 e2e 的 workflow 定义里没有 supply 节点，所以它不验证 group 成员的
+`$supplies`。这**不代表** group 内的 supply 有问题——见下方「已澄清的误记」。
+
+## 已澄清的误记（2026-08-10 实测更正）
+
+### group 成员的 `$supplies` 并不为空
+
+本文件先前记录「内层 group 引擎不做 supply 注入，成员节点看到的 `$supplies`
+为空」。**实测推翻。** 该结论是从「`j_trigger_group_local_execution_e2e_test.go`
+里看不到 supply 内容」一般化而来，但那个 e2e 的 workflow 定义里**根本没有 supply
+节点，也没有任何依赖边**——`Admit` 的 reqs 天然为空，内容从未被取过。这与
+「注入链路断了」是两类问题，修法完全不同。
+
+真实机制：`$supplies` 读的是**进程全局单例** `supply.Default`
+（`node/internal/utils/exprx/exprx.go:117` 的 `BuildExprEnv`），不经执行上下文传递。
+内层引擎（`execution/subgraph`）对 supply 确实零引用——但这恰恰意味着**不需要引用
+即可工作**，因为消费方不是通过引擎传参读 supply，而是直接读全局单例，跟节点是不是
+group 成员、跑在内层还是外层引擎无关。
+
+链路（每一跳均已实测）：
+
+| 跳 | 位置 |
+|---|---|
+| 成员的 supply 依赖进入 group 激活的 reqs | `service/control/entry_activation_manager.go:90` `SuppliesForEntryUnit`，对 `UnitGroup` 用 `GroupMetaAt(unitIdx).Members` 做 BFS seed |
+| reqs 随 directive 下发 | `service/protocol/activation.go:52` `ActivateDirective.Supplies` |
+| runner 据此 fetch 并 Apply 进全局单例 | `service/runner/supply_gate.go` `Admit`；`NewSupplyGate` 默认 `reg = supply.Default` |
+| 成员求值时读到内容 | `exprx.go:117` |
+
+`buildDependencyEdges` 在 `compile.go` 里排在 `compileGroups` **之前**，是针对父图
+逐节点算的——group 成员与非 group 成员在这一步完全对称，这是链路成立的根因。
+
+唯一会读到空的情形是 workflow 里**从未声明**指向该 supply 的依赖边。而这一情形对
+表达式消费者是**编译期硬失败**，不是无声：
+
+- 静态引用 `$supplies.rules` 却无依赖边 → `validateSupplyUsage`
+  （`engine/graph/dependency.go:205`）报 "references $supplies.x but has no
+  dependency edge to it"
+- 动态引用 `$supplies[x]` → 同一处直接拒绝，因为名字无法在编译期解析
+- 边已声明但内容取不到 + `require_ready: true` → 门控拒绝激活，而不是带着空规则跑
 
 ## 已知且接受的代价（不打算改）
 
