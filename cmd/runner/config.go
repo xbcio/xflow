@@ -34,7 +34,9 @@ type runnerConfigFile struct {
 		Interval *string `yaml:"interval"`
 	} `yaml:"heartbeat"`
 	Metrics struct {
-		Addr *string `yaml:"addr"` // Prometheus scrape listen address
+		Addr           *string `yaml:"addr"`            // Prometheus scrape listen address
+		Report         *bool   `yaml:"report"`          // ship metrics to the server
+		ReportInterval *string `yaml:"report_interval"` // local reporting cadence
 	} `yaml:"metrics"`
 	// Credentials holds named credential maps (driver/dsn, token/base_url, …)
 	// consumed by resource-aware nodes via input.Credential(name). String leaves
@@ -69,15 +71,16 @@ type grpcPoolFile struct {
 
 func defaultRunnerConfig() runnerConfig {
 	return runnerConfig{
-		serverURL:         "http://localhost:8080",
-		transport:         transportGRPC,
-		grpcTarget:        "localhost:9090",
-		runnerID:          fmt.Sprintf("runner-%d", os.Getpid()),
-		concurrency:       1,
-		capRaw:            "xflow.function",
-		capabilities:      parseCapabilities("xflow.function"),
-		heartbeatInterval: "5s",
-		pollWait:          "1s",
+		serverURL:             "http://localhost:8080",
+		transport:             transportGRPC,
+		grpcTarget:            "localhost:9090",
+		runnerID:              fmt.Sprintf("runner-%d", os.Getpid()),
+		concurrency:           1,
+		capRaw:                "xflow.function",
+		capabilities:          parseCapabilities("xflow.function"),
+		heartbeatInterval:     "5s",
+		pollWait:              "1s",
+		reportMetricsInterval: "15s",
 	}
 }
 
@@ -140,6 +143,12 @@ func loadRunnerConfigFromBytes(data []byte) (runnerConfig, error) {
 	}
 	if file.Metrics.Addr != nil {
 		cfg.metricsAddr = *file.Metrics.Addr
+	}
+	if file.Metrics.Report != nil {
+		cfg.reportMetrics = *file.Metrics.Report
+	}
+	if file.Metrics.ReportInterval != nil {
+		cfg.reportMetricsInterval = *file.Metrics.ReportInterval
 	}
 
 	if len(file.Credentials) > 0 {
@@ -441,6 +450,12 @@ func resolveRunnerConfig(base runnerConfig) (runnerConfig, error) {
 	}
 	if base.changed["metrics-addr"] {
 		cfg.metricsAddr = base.metricsAddr
+	}
+	if base.changed["report-metrics"] {
+		cfg.reportMetrics = base.reportMetrics
+	}
+	if base.changed["report-metrics-interval"] {
+		cfg.reportMetricsInterval = base.reportMetricsInterval
 	}
 
 	cfg.capabilities = parseCapabilities(cfg.capRaw)

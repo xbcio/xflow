@@ -89,6 +89,12 @@ type runnerConfig struct {
 	tracer        tracing.Tracer
 	// metrics
 	metricsAddr string // Prometheus scrape endpoint (e.g. ":9091")
+	// reportMetrics ships this runner's whole registry to the server, which
+	// merges it into its own /metrics. Independent of metricsAddr on purpose:
+	// a runner in another network domain cannot be scraped, and is also the
+	// runner least likely to want a listening port. Either, both, or neither.
+	reportMetrics         bool
+	reportMetricsInterval string
 	// credentials holds named credential maps (driver/dsn, token/base_url, …)
 	// with string leaves already env-expanded at load time. Passed to the
 	// runner as a CredentialResolver closure. nil/empty means no resolver.
@@ -139,6 +145,10 @@ func bindRunnerFlags(cmd *cobra.Command, cfg *runnerConfig) {
 	cmd.Flags().Float64Var(&cfg.traceRatio, "trace-ratio", 1.0, "Sampling ratio for --trace-sampler=traceidratio, in [0,1]")
 	cmd.Flags().BoolVar(&cfg.traceBaggage, "trace-baggage", false, "Propagate W3C baggage in addition to tracecontext (opt-in)")
 	cmd.Flags().StringVar(&cfg.metricsAddr, "metrics-addr", cfg.metricsAddr, "Prometheus metrics listen address (e.g. :9091); empty disables metrics")
+	cmd.Flags().BoolVar(&cfg.reportMetrics, "report-metrics", cfg.reportMetrics,
+		"Ship this runner's metrics to the server so they appear on the server's /metrics (for runners that cannot be scraped directly)")
+	cmd.Flags().StringVar(&cfg.reportMetricsInterval, "report-metrics-interval", cfg.reportMetricsInterval,
+		"Local metrics reporting cadence; the server can override it at runtime (--report-metrics)")
 }
 
 func recordChangedFlags(cmd *cobra.Command, cfg *runnerConfig) {
@@ -327,25 +337,26 @@ func runRunner(ctx context.Context, cfg runnerConfig) error {
 		slog.Warn("script engine warmup failed; engines will warm on first use", "error", err)
 	}
 
-	// Metrics: when --metrics-addr is set, create a Prometheus registry, wire
-	// the observer hooks, and start an HTTP server for Prometheus scrape.
+	// Metrics: the registry and the observer wiring are unconditional —
+	// metrics.New() allocates a Prometheus registry and nothing else (no
+	// listener, no goroutine), and an unobserved registry is what makes
+	// reporting return an empty payload. Only the two *exits* are optional:
+	// --metrics-addr opens a scrape port, --report-metrics ships to the server.
+	// Binding the registry to --metrics-addr, as the pre-proxy code did, would
+	// have made the cross-domain runner — the one case that cannot be scraped —
+	// the one case that also cannot report.
+	m := metrics.New()
+	sm := metrics.NewSupplyMetrics(m)
+	if serviceCfg.SupplyGate != nil {
+		serviceCfg.SupplyGate.SetObserver(sm)
+	}
+	supply.Default.SetObserver(sm)
+	xnode.SetWasmObserver(sm)
+	xnode.SetTriggerObserver(metrics.NewTriggerMetrics(m))
+	xnode.SetScriptObserver(metrics.NewScriptMetrics(m))
+
 	var metricsServer *http.Server
 	if cfg.metricsAddr != "" {
-		m := metrics.New()
-		sm := metrics.NewSupplyMetrics(m)
-		// Wire supply gate observer (supply fetch, not-ready, serving gauges).
-		if serviceCfg.SupplyGate != nil {
-			serviceCfg.SupplyGate.SetObserver(sm)
-		}
-		// Wire supply registry observer (consumer count gauge).
-		supply.Default.SetObserver(sm)
-		// Wire wasm reactor pool observer.
-		xnode.SetWasmObserver(sm)
-		// Wire trigger observer (discarded / dead-lettered message counters).
-		xnode.SetTriggerObserver(metrics.NewTriggerMetrics(m))
-		// Wire script execution observer.
-		xnode.SetScriptObserver(metrics.NewScriptMetrics(m))
-
 		metricsServer = &http.Server{Addr: cfg.metricsAddr, Handler: m.Handler()}
 		go func() {
 			if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -361,6 +372,18 @@ func runRunner(ctx context.Context, cfg runnerConfig) error {
 			_ = metricsServer.Shutdown(shutCtx)
 		}
 	}()
+
+	reporter, err := buildMetricsReporter(client, m, cfg)
+	if err != nil {
+		return err
+	}
+	serviceCfg.MetricsReporter = reporter
+	if reporter != nil {
+		slog.Info("metrics reporting to server enabled", "interval", cfg.reportMetricsInterval)
+	} else if cfg.reportMetrics {
+		slog.Warn("--report-metrics set but this transport cannot report metrics; continuing without reporting",
+			"transport", cfg.transport)
+	}
 
 	runner := newRunnerService(client, registry, serviceCfg)
 	return runner.Run(ctx)
@@ -669,4 +692,40 @@ func artifactCacheDir() string {
 		base = os.TempDir()
 	}
 	return filepath.Join(base, "xflow", "artifacts")
+}
+
+// buildMetricsReporter assembles the server-side metrics reporter, or returns
+// nil when this runner should not report.
+//
+// Two paths return (nil, nil) rather than an error:
+//   - reporting was not requested;
+//   - the transport's client does not implement MetricsReportClient. Only the
+//     HTTP client does (see spec §4.3: gRPC is not a target deployment and
+//     crosses clouds via the Relay Gateway). A gRPC runner told to report keeps
+//     running without reporting — refusing to start would turn a config that is
+//     merely ineffective into an outage. The Warn at the call site is the signal.
+func buildMetricsReporter(client runnersvc.ProtocolClient, m *metrics.Metrics, cfg runnerConfig) (*runnersvc.MetricsReporter, error) {
+	if !cfg.reportMetrics {
+		return nil, nil
+	}
+	interval := runnersvc.DefaultMetricsReportInterval
+	if cfg.reportMetricsInterval != "" {
+		d, err := parsePositiveDuration("report metrics interval", cfg.reportMetricsInterval)
+		if err != nil {
+			return nil, err
+		}
+		interval = d
+	}
+	reportClient, ok := client.(runnersvc.MetricsReportClient)
+	if !ok {
+		return nil, nil
+	}
+	return runnersvc.NewMetricsReporter(runnersvc.MetricsReporterConfig{
+		Gatherer: m.Registry(),
+		Client:   reportClient,
+		RunnerID: cfg.runnerID,
+		Interval: interval,
+		Metrics:  m,
+		Logger:   slog.Default(),
+	}), nil
 }
