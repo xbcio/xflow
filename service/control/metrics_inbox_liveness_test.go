@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/xbcio/xflow/observability/metrics"
 )
 
 func TestDirectoryLivenessFollowsHeartbeatTTL(t *testing.T) {
@@ -50,11 +52,13 @@ func TestDeadRunnerSeriesDisappear(t *testing.T) {
 
 	clock := registeredAt
 	reg := prometheus.NewRegistry()
+	m := metrics.New()
 	in := NewMetricsInbox(MetricsInboxConfig{
-		Store: NewMemoryMetricsStore(),
-		Self:  reg,
-		Live:  NewDirectoryLiveness(directory, DefaultRunnerSelector()),
-		Now:   func() time.Time { return clock },
+		Store:   NewMemoryMetricsStore(),
+		Self:    reg,
+		Live:    NewDirectoryLiveness(directory, DefaultRunnerSelector()),
+		Metrics: m,
+		Now:     func() time.Time { return clock },
 	})
 
 	body := encodeFamilies(t, counterFamily("alive_total", "h", 1))
@@ -69,6 +73,11 @@ func TestDeadRunnerSeriesDisappear(t *testing.T) {
 	if code != 200 || !strings.Contains(out, `alive_total{runner_id="runner-a"} 1`) {
 		t.Fatalf("precondition failed: status %d, body:\n%s", code, out)
 	}
+	// The xflow_runner_up gauge must read 1 while the runner is live.
+	upOut := gatherText(t, m.Registry())
+	if !strings.Contains(upOut, `xflow_runner_up{runner_id="runner-a"} 1`) {
+		t.Fatalf("precondition: xflow_runner_up must be 1 while runner is live; got:\n%s", upOut)
+	}
 
 	// Advance the injected clock past the live TTL. No sleeping: the clock is
 	// the injection point that makes this assertion possible at all.
@@ -81,4 +90,19 @@ func TestDeadRunnerSeriesDisappear(t *testing.T) {
 	if strings.Contains(out, "alive_total") {
 		t.Errorf("dead runner's series must disappear:\n%s", out)
 	}
+	// The xflow_runner_up gauge must read 0 after the runner is judged dead.
+	upOut = gatherText(t, m.Registry())
+	if !strings.Contains(upOut, `xflow_runner_up{runner_id="runner-a"} 0`) {
+		t.Errorf("xflow_runner_up must be 0 after runner is dead; got:\n%s", upOut)
+	}
+}
+
+// gatherText renders all families from a registry as exposition text.
+func gatherText(t *testing.T, reg prometheus.Gatherer) string {
+	t.Helper()
+	code, out := scrape(t, prometheus.Gatherers{reg})
+	if code != 200 {
+		t.Fatalf("gatherText: unexpected status %d; body:\n%s", code, out)
+	}
+	return out
 }
