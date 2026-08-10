@@ -114,8 +114,33 @@ func (e *Executor) Execute(ctx context.Context, req Request) (Result, error) {
 	defer e.registry.UnregisterExecution(innerExecID)
 
 	// Build inner engine options.
+	//
+	// WithBatchBodyExecutor wraps THIS SAME Executor: when req.Package is a
+	// projected GROUP package, a member that is an xflow.map node expands into a
+	// batch task on the inner engine constructed below, and that batch needs
+	// something to run its body. Recursing into e.Execute is safe -- req's
+	// SuspendDisabled floor and the enclosing e receiver are both still in scope
+	// -- and it is the ONLY place this can be wired: engineOpts is assembled
+	// fresh per call, so a caller-side WithBatchBodyExecutor (sdk/xflow,
+	// GroupRuntime) never reaches the inner engine THIS call builds. Before this
+	// fix, a group-member map's batch always hit ErrNoBatchBodyExecutor here --
+	// not because no executor existed anywhere in the process, but because none
+	// had been given to this particular inner engine. This does not reopen
+	// nested maps: a map's OWN body may still not contain xflow.map
+	// (bannedBodyMemberTypes in compile.go rejects that at compile time,
+	// independent of whether the map is a group member), so the recursion this
+	// wiring enables never exceeds the one level a group-member map already had.
 	engineOpts := []engine.Option{
 		engine.WithNodeFailureObserver(observer),
+		// req.Deadline (not a fresh one) is what a nested item execution gets: the
+		// nested call must never outlive the outer group/body's own deadline, and
+		// passing the SAME absolute instant through is the tightest bound that is
+		// still correct -- computing a fresh "remaining time" duration here and
+		// converting it back to an absolute deadline one level down would round-trip
+		// through time.Now() twice and could only ever be equal to or later than
+		// req.Deadline, never earlier, so it buys nothing over forwarding req.Deadline
+		// itself.
+		engine.WithBatchBodyExecutor(NewMapBodyExecutor(e, req.SuspendDisabled, req.Deadline)),
 	}
 	if req.SuspendDisabled {
 		engineOpts = append(engineOpts, engine.WithSuspendDisabled(nil))

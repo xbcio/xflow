@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/xbcio/xflow/backend/providers/local"
 	"github.com/xbcio/xflow/engine"
@@ -41,7 +42,12 @@ func NewSubgraphRuntime(reg *execution.Registry, cache *PackageCache) *SubgraphR
 	executor := subgraph.NewExecutor(reg, cache, func() subgraph.Backend {
 		return local.New(local.WithRegistry(reg), local.WithConcurrency(1))
 	})
-	return &SubgraphRuntime{bodies: subgraph.NewMapBodyExecutor(executor, true)}
+	// No outer deadline to forward: this runtime is built once at runner
+	// startup, before any lease (and its payload.Deadline, which
+	// BuildSubgraphLease never populates today -- see SUBGRAPH-ENGINE-TODO.md)
+	// exists. See MapBodyExecutor's deadline field doc in
+	// execution/subgraph/map_body.go.
+	return &SubgraphRuntime{bodies: subgraph.NewMapBodyExecutor(executor, true, time.Time{})}
 }
 
 // Execute runs one batch and returns the result the control plane commits

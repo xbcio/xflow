@@ -1,6 +1,8 @@
 package xflow
 
 import (
+	"time"
+
 	backendlocal "github.com/xbcio/xflow/backend/providers/local"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
@@ -39,5 +41,8 @@ func newBatchBodyExecutor(reg engine.HandlerRegistry, suspendDisabled bool) engi
 	executor := subgraph.NewExecutor(concrete, cache, func() subgraph.Backend {
 		return backendlocal.New(backendlocal.WithRegistry(concrete), backendlocal.WithConcurrency(1))
 	})
-	return subgraph.NewMapBodyExecutor(executor, suspendDisabled)
+	// No outer deadline to forward: this executor is built once at engine
+	// startup, before any per-call Request exists (see MapBodyExecutor's
+	// deadline field doc in execution/subgraph/map_body.go).
+	return subgraph.NewMapBodyExecutor(executor, suspendDisabled, time.Time{})
 }

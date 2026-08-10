@@ -89,7 +89,7 @@ func TestLocalBackendCompletesAMapExpansion(t *testing.T) {
 	bodies := subgraph.NewMapBodyExecutor(
 		subgraph.NewExecutor(reg, subgraph.NewPackageCache(subgraph.PackageCacheConfig{}),
 			func() subgraph.Backend { return New(WithRegistry(reg), WithConcurrency(1)) }),
-		true)
+		true, time.Time{})
 	eng := engine.New(b.State(), b.Queue(), engine.WithBatchBodyExecutor(bodies))
 	stop := b.Bind(eng)
 	defer stop()
