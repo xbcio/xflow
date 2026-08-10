@@ -53,12 +53,15 @@ func TestDeadRunnerSeriesDisappear(t *testing.T) {
 	clock := registeredAt
 	reg := prometheus.NewRegistry()
 	m := metrics.New()
+	// Store and inbox share one clock: the store evicts by the stamp the inbox
+	// writes, and this test advances the clock past the live TTL.
+	now := func() time.Time { return clock }
 	in := NewMetricsInbox(MetricsInboxConfig{
-		Store:   NewMemoryMetricsStore(),
+		Store:   NewMemoryMetricsStoreWith(DefaultMetricsRetention, now),
 		Self:    reg,
 		Live:    NewDirectoryLiveness(directory, DefaultRunnerSelector()),
 		Metrics: m,
-		Now:     func() time.Time { return clock },
+		Now:     now,
 	})
 
 	body := encodeFamilies(t, counterFamily("alive_total", "h", 1))

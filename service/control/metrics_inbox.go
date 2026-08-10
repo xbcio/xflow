@@ -41,13 +41,40 @@ type MetricsStore interface {
 // when the backend exposes no Redis client, mirroring how
 // selectRunnerDirectory falls back to MemoryRunnerDirectory: a single-node or
 // test deployment behaves exactly as before this feature existed.
+//
+// Retention semantics mirror RedisMetricsStore: entries older than the
+// configured retention (based on the protocol stamp embedded in the value) are
+// evicted on Put and List. This prevents unbounded growth when short-lived
+// runners are started and stopped repeatedly.
 type MemoryMetricsStore struct {
-	mu   sync.RWMutex
-	vals map[string][]byte
+	mu        sync.RWMutex
+	vals      map[string][]byte
+	retention time.Duration
+	now       func() time.Time
 }
 
+// NewMemoryMetricsStore creates a MemoryMetricsStore with the same default
+// retention the Redis store uses (DefaultMetricsRetention = 3 × DefaultRunnerLiveTTL).
+// Use NewMemoryMetricsStoreWith for explicit control over retention and clock.
 func NewMemoryMetricsStore() *MemoryMetricsStore {
-	return &MemoryMetricsStore{vals: make(map[string][]byte)}
+	return NewMemoryMetricsStoreWith(DefaultMetricsRetention, nil)
+}
+
+// NewMemoryMetricsStoreWith creates a MemoryMetricsStore with explicit
+// retention and clock. If retention <= 0 it defaults to DefaultMetricsRetention.
+// If now is nil it defaults to time.Now.
+func NewMemoryMetricsStoreWith(retention time.Duration, now func() time.Time) *MemoryMetricsStore {
+	if retention <= 0 {
+		retention = DefaultMetricsRetention
+	}
+	if now == nil {
+		now = time.Now
+	}
+	return &MemoryMetricsStore{
+		vals:      make(map[string][]byte),
+		retention: retention,
+		now:       now,
+	}
 }
 
 func (s *MemoryMetricsStore) Put(_ context.Context, runnerID string, stamped []byte) error {
@@ -59,17 +86,37 @@ func (s *MemoryMetricsStore) Put(_ context.Context, runnerID string, stamped []b
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.vals[runnerID] = cp
+	s.evictLocked()
 	return nil
 }
 
 func (s *MemoryMetricsStore) List(context.Context) (map[string][]byte, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.evictLocked()
 	out := make(map[string][]byte, len(s.vals))
 	for id, v := range s.vals {
 		out[id] = v
 	}
 	return out, nil
+}
+
+// evictLocked removes entries whose protocol stamp is older than the retention
+// window, mirroring the TTL RedisMetricsStore sets on every key. Must be called
+// with s.mu held for writing.
+//
+// A value whose stamp cannot be read is deliberately KEPT: Gather counts it
+// into xflow_runner_metrics_gather_errors_total{reason="decode_error"}, and
+// evicting it here would swallow that signal. Accept always stamps, so such a
+// value means a bug worth seeing rather than a leak worth reclaiming.
+func (s *MemoryMetricsStore) evictLocked() {
+	cutoff := s.now().Add(-s.retention)
+	for id, stamped := range s.vals {
+		receivedAt, _, ok := protocol.MetricsPayloadUnstamp(stamped)
+		if ok && receivedAt.Before(cutoff) {
+			delete(s.vals, id)
+		}
+	}
 }
 
 // RunnerLiveness reports whether a runner is currently live. Satisfied by the

@@ -99,11 +99,15 @@ func scrape(t *testing.T, gatherers prometheus.Gatherers) (int, string) {
 
 func newTestInbox(t *testing.T, self prometheus.Gatherer) *MetricsInbox {
 	t.Helper()
+	// The store's clock must be the inbox's clock: the store evicts by the
+	// stamp the inbox writes, so two clocks that disagree would expire every
+	// payload the instant it lands.
+	now := func() time.Time { return time.Unix(1754000000, 0) }
 	return NewMetricsInbox(MetricsInboxConfig{
-		Store: NewMemoryMetricsStore(),
+		Store: NewMemoryMetricsStoreWith(DefaultMetricsRetention, now),
 		Self:  self,
 		Live:  aliveLiveness{},
-		Now:   func() time.Time { return time.Unix(1754000000, 0) },
+		Now:   now,
 	})
 }
 
@@ -296,10 +300,11 @@ func (failingMetricsStore) List(context.Context) (map[string][]byte, error) {
 
 func TestInboxSkipsUndecodablePayload(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	store := NewMemoryMetricsStore()
+	now := func() time.Time { return time.Unix(1754000000, 0) }
+	store := NewMemoryMetricsStoreWith(DefaultMetricsRetention, now)
 	in := NewMetricsInbox(MetricsInboxConfig{
 		Store: store, Self: reg, Live: aliveLiveness{},
-		Now: func() time.Time { return time.Unix(1754000000, 0) },
+		Now: now,
 	})
 	// Bypass Accept: a value already in Redis can be corrupt, and the read path
 	// must not take the endpoint down over it.

@@ -85,11 +85,13 @@ func TestRunnerMetricsProxyE2E(t *testing.T) {
 	//    family instead: xflow_lease_sweep_candidates is produced by the server's
 	//    LeaseSweeper, never by a runner.
 	if !strings.Contains(body, "xflow_lease_sweep_candidates") {
-		// The lease sweeper metric may also be lazy (only registered after the
-		// first sweep cycle). Use a lighter assertion: the same body already
-		// has xflow_runner_metrics_received_total (server-only counter), which
-		// proves the server's registry was merged. If lease metrics haven't
-		// fired yet, the received_total counter alone proves the merge.
+		// The lease sweeper metric is lazy (registered after the first sweep
+		// cycle) so it is not reliably present this early. The preceding
+		// xflow_runner_metrics_received_total assertion already proves the
+		// server's own registry was merged with the runner inbox — that counter
+		// lives on the server-side registry and would be absent on a 500 or a
+		// merge conflict.
+		t.Log("xflow_lease_sweep_candidates not yet present; received_total suffices to prove merge")
 	}
 }
 

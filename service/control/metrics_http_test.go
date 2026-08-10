@@ -28,11 +28,14 @@ func newMetricsEndpointFixture(t *testing.T) (http.Handler, *MetricsInbox, Runne
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
+	// Store and inbox must share one clock: the store evicts by the stamp the
+	// inbox writes.
+	now := func() time.Time { return at }
 	inbox := NewMetricsInbox(MetricsInboxConfig{
-		Store: NewMemoryMetricsStore(),
+		Store: NewMemoryMetricsStoreWith(DefaultMetricsRetention, now),
 		Self:  prometheus.NewRegistry(),
 		Live:  NewDirectoryLiveness(directory, DefaultRunnerSelector()),
-		Now:   func() time.Time { return at },
+		Now:   now,
 	})
 	return newTestMetricsServer(t, directory, inbox).Handler(), inbox, session
 }
