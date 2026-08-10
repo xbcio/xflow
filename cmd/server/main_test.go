@@ -530,3 +530,26 @@ func TestRunServerMultiNamespaceManagementHTTPAuth(t *testing.T) {
 		t.Fatalf("namespaceB inspect namespaceA exec = %d, want 404 (IDOR, no existence leak)", code)
 	}
 }
+
+func TestParseServerConfigEnableRunnerMetricsProxyFlag(t *testing.T) {
+	// Positive: flag explicitly set → cfg field must be true.
+	// This test fails if the flag is bound on the global flag.CommandLine instead
+	// of the local FlagSet (the exact defect the brief warns about).
+	cfg, err := parseServerConfig([]string{"-memory", "-enable-runner-metrics-proxy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.enableRunnerMetricsProxy {
+		t.Fatal("enableRunnerMetricsProxy = false, want true when flag is set")
+	}
+
+	// Negative: flag absent → cfg field must be false (not accidentally defaulted
+	// to true by a mis-declaration).
+	cfg2, err := parseServerConfig([]string{"-memory"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg2.enableRunnerMetricsProxy {
+		t.Fatal("enableRunnerMetricsProxy = true, want false when flag is absent")
+	}
+}
