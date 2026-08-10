@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc"
 
 	"github.com/xbcio/xflow/backend"
@@ -81,6 +82,10 @@ type Config struct {
 	// on the wire. The key is resolved through Redis when a distributed backend
 	// is configured, so every replica encrypts with the same key.
 	EnableSupplyEncryption bool
+	// EnableRunnerMetricsProxy lets runners in other network domains ship their
+	// Prometheus registry here, and merges what they ship into this server's own
+	// /metrics. Off by default; see control.Config.EnableMetricsProxy.
+	EnableRunnerMetricsProxy bool
 
 	// Transport configuration. Stage 1 declares but does not use these.
 	HTTPAddr    string
@@ -239,6 +244,23 @@ func supplyEncryptorFor(cfg Config, cp *control.ControlPlane) SupplyContentEncry
 	return nil
 }
 
+// metricsInboxFor returns the control plane's proxied-metrics gatherer, or nil.
+//
+// The nil check is on the CONCRETE pointer before it becomes an interface: a
+// typed nil assigned to prometheus.Gatherer yields a non-nil interface whose
+// method calls would then panic inside promhttp on every scrape. Same trap
+// documented at supplyEncryptorFor.
+func metricsInboxFor(cp *control.ControlPlane) prometheus.Gatherer {
+	if cp == nil {
+		return nil
+	}
+	inbox := cp.MetricsInbox()
+	if inbox == nil {
+		return nil
+	}
+	return inbox
+}
+
 // entryActivationStoreTTL bounds how long an untouched EntryActivation record
 // survives in the durable (Redis) store. It comfortably exceeds the reconcile
 // period + lease TTL so a live-but-idle activation is never evicted between
@@ -258,6 +280,7 @@ func buildControlPlane(cfg Config) (*control.ControlPlane, error) {
 		Tracer:                 cfg.Tracer,
 		Supplies:               cfg.Supplies,
 		EnableSupplyEncryption: cfg.EnableSupplyEncryption,
+		EnableMetricsProxy:     cfg.EnableRunnerMetricsProxy,
 	}
 
 	useRedis := cfg.RedisConfig != nil || cfg.RedisAddr != ""

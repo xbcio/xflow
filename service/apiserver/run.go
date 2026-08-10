@@ -12,6 +12,9 @@ import (
 	"os"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
 	"github.com/xbcio/xflow/observability/tracing"
 
 	"google.golang.org/grpc"
@@ -226,7 +229,19 @@ func (s *APIServer) serveMetrics() (func(), error) {
 		path = "/metrics"
 	}
 	mux := http.NewServeMux()
-	mux.Handle(path, s.cfg.Metrics.Handler())
+	// Merge the proxied runner metrics into this server's own scrape endpoint so
+	// Prometheus keeps scraping exactly one target with no configuration change.
+	// The inbox intercepts help/type conflicts itself; if it ever returned a
+	// conflicting family, promhttp's default error handling would 500 the WHOLE
+	// endpoint, taking the server's own metrics down with it.
+	if inbox := metricsInboxFor(s.cp); inbox != nil {
+		mux.Handle(path, promhttp.HandlerFor(
+			prometheus.Gatherers{s.cfg.Metrics.Registry(), inbox},
+			promhttp.HandlerOpts{},
+		))
+	} else {
+		mux.Handle(path, s.cfg.Metrics.Handler())
+	}
 	srv := &http.Server{
 		Addr:              s.cfg.MetricsAddr,
 		Handler:           mux,

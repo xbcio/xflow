@@ -110,6 +110,10 @@ type serverConfig struct {
 	logFormat     string
 	metricsAddr   string
 	metricsPath   string
+	// enableRunnerMetricsProxy turns on the runner metrics proxy: runners push
+	// their registry to this server, which merges it into /metrics. Off by
+	// default because single-domain deployments can scrape runners directly.
+	enableRunnerMetricsProxy bool
 	// traceMode is one of "disabled", "stdout", or "otlp".
 	traceMode     string
 	traceEndpoint string
@@ -174,6 +178,8 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	fs.StringVar(&cfg.logFormat, "log-format", "text", "Log format: text or json")
 	fs.StringVar(&cfg.metricsAddr, "metrics-addr", "", "Prometheus metrics listen address (empty disables metrics)")
 	fs.StringVar(&cfg.metricsPath, "metrics-path", "/metrics", "Prometheus metrics path")
+	fs.BoolVar(&cfg.enableRunnerMetricsProxy, "enable-runner-metrics-proxy", false,
+		"Accept metrics reports from runners that cannot be scraped directly, and merge them into /metrics")
 	fs.StringVar(&cfg.traceMode, "trace", "disabled", "Tracing mode: disabled|stdout|otlp")
 	fs.StringVar(&cfg.traceEndpoint, "trace-endpoint", "localhost:4317", "OTLP collector gRPC endpoint (--trace=otlp)")
 	fs.BoolVar(&cfg.traceInsecure, "trace-insecure", false, "Disable TLS verification for OTLP connection")
@@ -471,7 +477,8 @@ func runServer(cfg serverConfig) error {
 		// EnableSupplyEncryption is independent of at-rest encryption
 		// (supplyAtRest): it protects the wire between server and runner, which
 		// does not need a KEK to be present.
-		EnableSupplyEncryption: true,
+		EnableSupplyEncryption:   true,
+		EnableRunnerMetricsProxy: cfg.enableRunnerMetricsProxy,
 	}
 	if cfg.tlsCert != "" || cfg.tlsKey != "" || cfg.tlsClientCA != "" {
 		apiCfg.TLS = &apiserver.TLSConfig{Cert: cfg.tlsCert, Key: cfg.tlsKey, ClientCA: cfg.tlsClientCA}
