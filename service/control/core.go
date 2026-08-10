@@ -47,6 +47,14 @@ var (
 	// error is logged server-side; clients must never see internal stack
 	// traces, Redis errors, or backend paths.
 	ErrInternalServer = errors.New("internal server error")
+	// ErrMetricsProxyDisabled means this server was built without the runner
+	// metrics proxy, so the endpoint exists but has nowhere to put a report.
+	ErrMetricsProxyDisabled = errors.New("runner metrics proxy is not enabled")
+	// ErrMetricsPayloadTooLarge means the report exceeded
+	// protocol.MaxRunnerMetricsBytes. The body is not decoded.
+	ErrMetricsPayloadTooLarge = errors.New("runner metrics payload too large")
+	// ErrMetricsEncodingUnsupported means the report was not gzip'd.
+	ErrMetricsEncodingUnsupported = errors.New("runner metrics payload must be gzip encoded")
 )
 
 // Core holds the transport-independent Runner Protocol logic shared by the HTTP
@@ -92,6 +100,11 @@ type Core struct {
 	// content. The key is delivered to runners on registration and rotated via
 	// heartbeat responses.
 	supplyEncryptor *SupplyEncryptor
+	// metricsInbox, when set, retains proxied runner metrics so the server's
+	// own /metrics can expose them. Nil disables the report endpoint: a runner
+	// in another network domain cannot be scraped, but a server that was not
+	// built to proxy should say so rather than silently discard.
+	metricsInbox *MetricsInbox
 }
 
 // leaseRecoveryEngine is deliberately optional so custom EngineFacade test
@@ -278,6 +291,40 @@ func (c *Core) activationAck(ctx context.Context, req protocol.ActivationAck, in
 		}
 	}
 	return nil
+}
+
+// reportMetrics retains one runner's Prometheus snapshot.
+//
+// Authentication runs on every call for the same reason the other four runner
+// endpoints do it (core.go heartbeat/pollTask/reportResult/activationAck): HTTP
+// connections carry no identity, so the only thing the server can rely on is
+// what arrived inside THIS request. sessionID is an identifier, not an
+// authenticator — it does not rotate and can be read off a log — so accepting
+// it alone would downgrade this endpoint to "anyone who knows the session id
+// can write". ValidateSession is the separate, additional check that a zombie
+// process holding a still-valid token cannot keep overwriting the live
+// session's data.
+//
+// The token is never logged, quoted, or returned: per the organization's
+// security policy it is on the absolute log blacklist. authDeny logs
+// TokenFingerprint(token) instead, and nothing here dumps request headers.
+func (c *Core) reportMetrics(ctx context.Context, runnerID, sessionID, token string, body []byte, info TransportInfo) error {
+	if c.metricsInbox == nil {
+		return ErrMetricsProxyDisabled
+	}
+	if runnerID == "" || sessionID == "" {
+		return ErrRunnerSessionRequired
+	}
+	_, authErr := c.authn().AuthenticateOngoing(runnerID, token, info)
+	if err := c.authDeny(ctx, runnerID, token, "report_metrics", info, authErr); err != nil {
+		return err
+	}
+	if err := c.runners.ValidateSession(ctx, runnerID, sessionID); err != nil {
+		return err
+	}
+	// runnerID here is the authenticated identity. Everything downstream keys
+	// on it, so a payload that names a different runner_id cannot forge series.
+	return c.metricsInbox.Accept(ctx, runnerID, body)
 }
 
 // runnerNamespaces returns the namespace set for a runner from the directory's
