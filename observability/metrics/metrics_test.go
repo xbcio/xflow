@@ -192,6 +192,29 @@ func TestMetricsHooksCarryNamespaceLabel(t *testing.T) {
 	}
 }
 
+func TestRunnerMetricsProxyHelpTextsRegistered(t *testing.T) {
+	names := []string{
+		"xflow_runner_up",
+		"xflow_runner_metrics_last_report_age_seconds",
+		"xflow_runner_metrics_received_total",
+		"xflow_runner_metrics_rejected_total",
+		"xflow_runner_metrics_inbox_size",
+		"xflow_runner_metrics_gather_errors_total",
+		"xflow_runner_metrics_reports_total",
+		"xflow_runner_metrics_report_bytes",
+	}
+	for _, name := range names {
+		help, ok := metricHelp[name]
+		if !ok {
+			t.Errorf("metricHelp missing %q; it would fall back to the generic description", name)
+			continue
+		}
+		if help == "" {
+			t.Errorf("metricHelp[%q] is empty", name)
+		}
+	}
+}
+
 type assertErr struct{}
 
 func (assertErr) Error() string { return "boom" }

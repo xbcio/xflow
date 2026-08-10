@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/xbcio/xflow/backend"
@@ -89,6 +90,20 @@ type Config struct {
 	// and distributes it to runners on registration. Requires Supplies to be
 	// non-nil for the encryption path to activate on GET /v1/supplies/{name}.
 	EnableSupplyEncryption bool
+	// EnableMetricsProxy turns on the runner metrics proxy: the
+	// /v1/runners/metrics endpoint starts accepting reports and MetricsInbox()
+	// returns a gatherer the host can merge into its own /metrics. It exists
+	// because a runner deployed in another network domain cannot be scraped —
+	// Prometheus pulls, and that direction of connectivity does not exist.
+	//
+	// Off by default: a single-domain deployment can scrape runners directly via
+	// their own --metrics-addr and does not need the extra hop.
+	EnableMetricsProxy bool
+	// MetricsReportInterval is the cadence pushed to runners on every heartbeat
+	// response (see protocol.HeartbeatResponse.MetricsReportIntervalSeconds).
+	// Zero leaves every runner on its own default; negative suspends reporting
+	// fleet-wide without restarting anything.
+	MetricsReportInterval time.Duration
 }
 
 type redisClientProvider interface {
@@ -175,6 +190,11 @@ type ControlPlane struct {
 	// Non-nil only when Config.EnableSupplyEncryption is true. Exposed via
 	// SupplyEncryptor() so the apiserver can encrypt GET responses.
 	supplyEncryptor *SupplyEncryptor
+
+	// metricsInbox retains proxied runner metrics. Non-nil only when
+	// Config.EnableMetricsProxy is set. Exposed via MetricsInbox() so the
+	// apiserver can merge it into the scrape endpoint.
+	metricsInbox *MetricsInbox
 
 	lifecycleMu           sync.Mutex
 	started               bool
@@ -380,6 +400,43 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 		supplyEnc = enc
 	}
 
+	// Runner metrics proxy: store selection mirrors selectRunnerDirectory —
+	// Redis when the backend offers it (so a report that lands on replica A is
+	// visible when Prometheus scrapes replica B), process memory otherwise (so
+	// single-node and test deployments behave exactly as before).
+	var metricsInbox *MetricsInbox
+	if cfg.EnableMetricsProxy {
+		var store MetricsStore = NewMemoryMetricsStore()
+		if provider, ok := cfg.Backend.(redisClientProvider); ok {
+			if client := provider.RedisClient(); client != nil {
+				store = NewRedisMetricsStore(client, DefaultMetricsRetention)
+			}
+		}
+		var self prometheus.Gatherer
+		if cfg.Metrics != nil {
+			self = cfg.Metrics.Registry()
+		}
+		metricsInbox = NewMetricsInbox(MetricsInboxConfig{
+			Store:   store,
+			Self:    self,
+			Live:    NewDirectoryLiveness(runners, DefaultRunnerSelector()),
+			Metrics: cfg.Metrics,
+			Logger:  cfg.Logger,
+		})
+		// HTTP only: the gRPC core deliberately does NOT get the inbox, because
+		// protocol.RunnerHTTPHandler is the only transport that carries this
+		// call (gRPC is not a target shape; cross-cloud goes through the Relay
+		// Gateway). Assigning it there would advertise a capability the
+		// transport cannot deliver.
+		httpServer.core.metricsInbox = metricsInbox
+	}
+
+	// Metrics report interval: both cores receive it (unlike the inbox, which is
+	// HTTP-only). The field is a pure response annotation — safe on gRPC, and
+	// omitting it there would make gRPC heartbeat responses inconsistent with HTTP.
+	httpServer.core.metricsReportInterval = cfg.MetricsReportInterval
+	grpcServer.core.metricsReportInterval = cfg.MetricsReportInterval
+
 	return &ControlPlane{
 		backend:          cfg.Backend,
 		eng:              eng,
@@ -396,6 +453,7 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 		workflowRegistry: workflowRegistry,
 		supplyObserved:   supplyObserved,
 		supplyEncryptor:  supplyEnc,
+		metricsInbox:     metricsInbox,
 	}, nil
 }
 
@@ -409,6 +467,12 @@ func (cp *ControlPlane) SupplyObserved() SupplyObservedSink { return cp.supplyOb
 // is not enabled. The apiserver uses this to encrypt GET /v1/supplies/{name}
 // responses for runners that request encrypted content.
 func (cp *ControlPlane) SupplyEncryptor() *SupplyEncryptor { return cp.supplyEncryptor }
+
+// MetricsInbox returns the proxied-runner-metrics gatherer, or nil when
+// Config.EnableMetricsProxy was not set. The apiserver merges it into its own
+// /metrics via prometheus.Gatherers so Prometheus scrapes one endpoint and
+// needs no configuration change.
+func (cp *ControlPlane) MetricsInbox() *MetricsInbox { return cp.metricsInbox }
 
 // Handler returns the HTTP Runner Protocol + workflow API mux. Mount it into
 // a host program's own http.ServeMux/http.Server, or serve it directly.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -261,6 +262,51 @@ func (s *Server) HandleActivationAck(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, struct{}{})
 }
 
+// HandleReportMetrics receives a gzip'd delimited-protobuf metrics snapshot.
+//
+// It does not use decodeJSON: the body is an opaque binary stream. It also does
+// not log or echo any request header — the Authorization header is on the
+// organization's absolute log blacklist, so there is no wholesale header dump
+// even on a malformed request.
+func (s *Server) HandleReportMetrics(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+	defer func() { _ = r.Body.Close() }()
+
+	if !strings.EqualFold(r.Header.Get("Content-Encoding"), "gzip") {
+		writeRunnerError(w, ErrMetricsEncodingUnsupported)
+		return
+	}
+
+	var token string
+	overrideTokenFromHeader(r, &token)
+
+	// MaxBytesReader caps the COMPRESSED size before anything is retained. The
+	// decompressed size is bounded separately on the read path, so a gzip bomb
+	// cannot turn 1 MiB accepted into unbounded memory at scrape time.
+	limited := http.MaxBytesReader(w, r.Body, int64(protocol.MaxRunnerMetricsBytes))
+	body, err := io.ReadAll(limited)
+	if err != nil {
+		// Any read failure at this point is either the cap tripping or a broken
+		// connection; treat both as too-large rather than guessing, and never
+		// include err (which can quote request state) in the response.
+		writeRunnerError(w, ErrMetricsPayloadTooLarge)
+		return
+	}
+
+	if err := s.core.reportMetrics(r.Context(),
+		r.Header.Get(protocol.RunnerIDHeader),
+		r.Header.Get(protocol.SessionIDHeader),
+		token, body, httpTransportInfo(r)); err != nil {
+		writeRunnerError(w, err)
+		return
+	}
+	// 204: the runner has nothing to read back, and an empty JSON object would
+	// only cost a round trip's worth of bytes 4 times a minute per runner.
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // overrideTokenFromHeader gives Authorization: Bearer priority over the body
 // AuthToken field. Header transport is preferred per the spec.
 func overrideTokenFromHeader(r *http.Request, dst *string) {
@@ -313,6 +359,12 @@ func writeRunnerError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "runner not found")
 	case errors.Is(err, ErrUnauthenticated):
 		writeError(w, http.StatusUnauthorized, err.Error())
+	case errors.Is(err, ErrMetricsProxyDisabled):
+		writeError(w, http.StatusServiceUnavailable, err.Error())
+	case errors.Is(err, ErrMetricsPayloadTooLarge):
+		writeError(w, http.StatusRequestEntityTooLarge, err.Error())
+	case errors.Is(err, ErrMetricsEncodingUnsupported):
+		writeError(w, http.StatusUnsupportedMediaType, err.Error())
 	default:
 		writeError(w, http.StatusInternalServerError, ErrInternalServer.Error())
 	}

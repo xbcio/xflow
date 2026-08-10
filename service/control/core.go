@@ -14,6 +14,17 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
+// Min/MaxMetricsReportInterval bound what the server will ask a runner to use.
+// The floor keeps a mis-typed "1s" from turning the fleet into a load
+// generator; the ceiling keeps a report window from outliving the Redis
+// retention (3 × DefaultRunnerLiveTTL = 90s is shorter than 300s, so a runner
+// at the ceiling relies on IsLive rather than the key surviving — which is why
+// the ceiling is a documented maximum, not a recommendation).
+const (
+	MinMetricsReportInterval = 5 * time.Second
+	MaxMetricsReportInterval = 300 * time.Second
+)
+
 // Transport-agnostic outcome errors. Each transport (HTTP, gRPC) maps these to
 // its own status representation so the core handling logic stays free of
 // net/http and grpc/codes.
@@ -47,6 +58,14 @@ var (
 	// error is logged server-side; clients must never see internal stack
 	// traces, Redis errors, or backend paths.
 	ErrInternalServer = errors.New("internal server error")
+	// ErrMetricsProxyDisabled means this server was built without the runner
+	// metrics proxy, so the endpoint exists but has nowhere to put a report.
+	ErrMetricsProxyDisabled = errors.New("runner metrics proxy is not enabled")
+	// ErrMetricsPayloadTooLarge means the report exceeded
+	// protocol.MaxRunnerMetricsBytes. The body is not decoded.
+	ErrMetricsPayloadTooLarge = errors.New("runner metrics payload too large")
+	// ErrMetricsEncodingUnsupported means the report was not gzip'd.
+	ErrMetricsEncodingUnsupported = errors.New("runner metrics payload must be gzip encoded")
 )
 
 // Core holds the transport-independent Runner Protocol logic shared by the HTTP
@@ -92,6 +111,15 @@ type Core struct {
 	// content. The key is delivered to runners on registration and rotated via
 	// heartbeat responses.
 	supplyEncryptor *SupplyEncryptor
+	// metricsInbox, when set, retains proxied runner metrics so the server's
+	// own /metrics can expose them. Nil disables the report endpoint: a runner
+	// in another network domain cannot be scraped, but a server that was not
+	// built to proxy should say so rather than silently discard.
+	metricsInbox *MetricsInbox
+	// metricsReportInterval is the cadence this server asks runners to report
+	// metrics at. Zero means "no opinion" — the runner keeps its local default.
+	// Negative suspends reporting fleet-wide.
+	metricsReportInterval time.Duration
 }
 
 // leaseRecoveryEngine is deliberately optional so custom EngineFacade test
@@ -251,6 +279,9 @@ func (c *Core) heartbeat(ctx context.Context, req protocol.HeartbeatRequest, inf
 			resp.SupplyKeyRotation = rot
 		}
 	}
+	if secs := clampMetricsReportInterval(c.metricsReportInterval); secs != 0 {
+		resp.MetricsReportIntervalSeconds = secs
+	}
 	return resp, nil
 }
 
@@ -278,6 +309,40 @@ func (c *Core) activationAck(ctx context.Context, req protocol.ActivationAck, in
 		}
 	}
 	return nil
+}
+
+// reportMetrics retains one runner's Prometheus snapshot.
+//
+// Authentication runs on every call for the same reason the other four runner
+// endpoints do it (core.go heartbeat/pollTask/reportResult/activationAck): HTTP
+// connections carry no identity, so the only thing the server can rely on is
+// what arrived inside THIS request. sessionID is an identifier, not an
+// authenticator — it does not rotate and can be read off a log — so accepting
+// it alone would downgrade this endpoint to "anyone who knows the session id
+// can write". ValidateSession is the separate, additional check that a zombie
+// process holding a still-valid token cannot keep overwriting the live
+// session's data.
+//
+// The token is never logged, quoted, or returned: per the organization's
+// security policy it is on the absolute log blacklist. authDeny logs
+// TokenFingerprint(token) instead, and nothing here dumps request headers.
+func (c *Core) reportMetrics(ctx context.Context, runnerID, sessionID, token string, body []byte, info TransportInfo) error {
+	if c.metricsInbox == nil {
+		return ErrMetricsProxyDisabled
+	}
+	if runnerID == "" || sessionID == "" {
+		return ErrRunnerSessionRequired
+	}
+	_, authErr := c.authn().AuthenticateOngoing(runnerID, token, info)
+	if err := c.authDeny(ctx, runnerID, token, "report_metrics", info, authErr); err != nil {
+		return err
+	}
+	if err := c.runners.ValidateSession(ctx, runnerID, sessionID); err != nil {
+		return err
+	}
+	// runnerID here is the authenticated identity. Everything downstream keys
+	// on it, so a payload that names a different runner_id cannot forge series.
+	return c.metricsInbox.Accept(ctx, runnerID, body)
 }
 
 // runnerNamespaces returns the namespace set for a runner from the directory's
@@ -803,6 +868,25 @@ func normalizeRunnerError(err error, logger engine.Logger, op string) error {
 			logger.Error("runner op failed", "op", op, "err", err)
 		}
 		return ErrInternalServer
+	}
+}
+
+// clampMetricsReportInterval converts the configured cadence into the wire's
+// three-state integer. Clamping happens here rather than on the runner so a
+// runner can adopt whatever arrives without re-validating it, and so changing
+// the bounds is a server-side deploy.
+func clampMetricsReportInterval(d time.Duration) int {
+	switch {
+	case d == 0:
+		return 0
+	case d < 0:
+		return -1
+	case d < MinMetricsReportInterval:
+		return int(MinMetricsReportInterval / time.Second)
+	case d > MaxMetricsReportInterval:
+		return int(MaxMetricsReportInterval / time.Second)
+	default:
+		return int(d / time.Second)
 	}
 }
 

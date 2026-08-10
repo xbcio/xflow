@@ -304,6 +304,53 @@ outbox 语义，也不构成 release gate 已满足的证据。Loop/Split 也仍
 
 HTTP 是首选传输，gRPC 是实验性的。
 
+### 4.6 跨网络域的指标采集：runner 上报 + server 代理
+
+Prometheus 是拉模型：采集端必须能主动连到被采集端。runner 的目标形态是跨网络域
+部署（§5），这个方向的连通性不存在，于是 runner 进程里正确产出的指标无人可抓。
+
+现已实现上报通道（设计见
+[runner 指标代理通道 spec](../superpowers/specs/2026-08-09-runner-metrics-proxy-design.md)）：
+
+```
+runner: Gather() → 注入 runner_id → protobuf(delimited)+gzip
+        │ POST /v1/runners/metrics  (Bearer token, 与注册同一凭证)
+        ▼
+server: MetricsInbox → Redis xflow:runner:metrics:{control}:payload:<id> (TTL 90s)
+        │ prometheus.Gatherers{自身 registry, inbox}，按 IsLive 过滤
+        ▼
+        /metrics ──────────► Prometheus scrape
+```
+
+两个 flag 各控一条出口，**互不绑定**：
+
+| flag | 侧 | 作用 |
+|---|---|---|
+| `--metrics-addr` | runner | 开自曝 Prometheus 端口（同域可直抓） |
+| `--report-metrics` | runner | 上报给 server（跨域唯一出路） |
+| `--report-metrics-interval` | runner | 本地上报节奏，默认 15s |
+| `--enable-runner-metrics-proxy` | server | 开 `/v1/runners/metrics` 端点并把代收指标并入自己的 `/metrics` |
+| `--runner-metrics-interval` | server | 经心跳响应下发给全体 runner；0=不干预，负值=暂停上报 |
+
+关键性质：
+
+- **runner_id 由 server 覆盖**，取自 `AuthenticateOngoing` 的认证身份，不采信请求体
+  自述值。持有合法 token 的 runner 无法伪造他人指标。
+- **过期判据复用调度口径**：`RunnerSelector.IsLive`（`DefaultRunnerLiveTTL = 30s`）。
+  runner 死后 30s 序列消失，与「调度器不再给它派活」是同一时刻，不会出现「调度已放弃
+  但监控仍显示健康」的分裂。server 另出 `xflow_runner_up{runner_id}`，使
+  「序列消失 + up=0」的语义与原生抓取一致。
+- **多副本共享**：inbox 存 Redis（无 Redis 时退进程内存）。runner 经 LB 上报落到任一
+  副本，从任一副本抓取都可见——否则序列会随抓取相位在副本间闪烁。
+- **gRPC 传输无此能力**：HTTP client 实现 `MetricsReportClient`，gRPC client 不实现，
+  runner 侧断言失败即静默不上报（与 §4.5 的其他 gRPC 缺口同源，取舍相同）。
+- **上报失败不重试不排队**：指标是当前状态快照，重发旧快照无价值；counter 单调累加，
+  丢几轮后下一轮报的仍是正确累计值，`rate()` 只损失中间分辨率。
+
+代价（详见 spec §10）：所有 runner 指标经 server 暴露，server `/metrics` 抓取耗时随
+runner 数线性增长（几百 runner × 10 KB 量级无碍，上千需重新评估）；指标最坏延迟约为
+上报间隔 + 抓取周期之和，秒级排障仍应在 runner 所在域内直抓 `--metrics-addr`。
+
 ---
 
 ## 5. 网络隔离 Relay Gateway 拓扑（规划）
@@ -409,6 +456,7 @@ Relay Gateway 用于 runner 无法直连 server、不能互相直连或需要本
 | Runner Protocol | **MVP 已实现（传输）** | `service/protocol` 提供 HTTP+JSON DTO、路由常量和 client，另有 gRPC 通道（`grpc_client.go`、`runnerpb/`）；streaming / credit-flow control 仍为实验性 |
 | Loop/Split | **实验性** | 扩展/子执行路径未进入静态 DAG completion 与 server/runner production-ready 保证 |
 | Relay Gateway | **规划** | 网络隔离中继拓扑已定义，尚无独立进程实现 |
+| 跨域 runner 指标采集 | **已实现** | runner `--report-metrics` → server `/v1/runners/metrics` → 并入 server `/metrics`（§4.6）；Redis 共享 inbox 支持多副本，`IsLive` 过期，`runner_id` 由 server 覆盖 |
 
 一句话：**local / cluster 已可用；server / runner 的 durable handoff MVP 已落地；remote SDK、Relay Gateway、Loop/Split 正式版与 streaming / credit-flow control 仍在规划或实验阶段。完整 control-plane HA 仍需独立验证与设计。**
 

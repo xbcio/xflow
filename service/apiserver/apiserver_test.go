@@ -214,3 +214,32 @@ func TestBuildControlPlaneKeepsLegacyRedisAddrPath(t *testing.T) {
 		t.Fatalf("error = %v, want redis ping / connection refused error", err)
 	}
 }
+
+// TestNewAPIServerPropagatesEnableRunnerMetricsProxy verifies the outer wiring
+// hop: Config.EnableRunnerMetricsProxy flows through buildControlPlane into
+// control.Config.EnableMetricsProxy, and the resulting ControlPlane has a
+// non-nil MetricsInbox. This test fails if:
+//   - EnableRunnerMetricsProxy is not propagated to buildControlPlane
+//   - buildControlPlane omits EnableMetricsProxy in control.Config
+//
+// The mirror case asserts nil when the flag is false — catching an accidental
+// always-on default.
+func TestNewAPIServerPropagatesEnableRunnerMetricsProxy(t *testing.T) {
+	// Enabled: inbox must be non-nil.
+	srv, err := New(Config{Concurrency: 1, EnableRunnerMetricsProxy: true})
+	if err != nil {
+		t.Fatalf("New(EnableRunnerMetricsProxy=true): %v", err)
+	}
+	if srv.cp.MetricsInbox() == nil {
+		t.Fatal("MetricsInbox() = nil; EnableRunnerMetricsProxy did not propagate through buildControlPlane")
+	}
+
+	// Disabled: inbox must be nil — no behavior change when the flag is off.
+	srv2, err := New(Config{Concurrency: 1, EnableRunnerMetricsProxy: false})
+	if err != nil {
+		t.Fatalf("New(EnableRunnerMetricsProxy=false): %v", err)
+	}
+	if srv2.cp.MetricsInbox() != nil {
+		t.Fatal("MetricsInbox() != nil; inbox should stay nil when the proxy is disabled")
+	}
+}
