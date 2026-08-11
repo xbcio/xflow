@@ -23,7 +23,7 @@ import (
 // registry decodes the Graph separately from the rest of its record precisely
 // so an UnmarshalJSON error falls through to recompiling from the stored
 // Definition (workflowreg.unmarshalWorkflowRecord), and that recompile runs
-// projectMapBodies and restores the body. Returning a bodyless graph instead
+// projectNodeBodies and restores the body. Returning a bodyless graph instead
 // would skip that fallback and strand the workflow.
 func TestSnapshotWithABodylessMapNodeFailsClosed(t *testing.T) {
 	def := &types.WorkflowDef{

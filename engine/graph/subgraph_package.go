@@ -403,13 +403,13 @@ func compileTrusted(def *types.WorkflowDef, visibleSupplies []string) (*Graph, e
 	}
 	// A group member that is itself an xflow.map node needs its body projected
 	// here too, exactly as Compile's own pass ordering does (buildDependencyEdges
-	// -> projectMapBodies -> buildUnits): without this, a map compiled through
+	// -> projectNodeBodies -> buildUnits): without this, a map compiled through
 	// this trusted path keeps g.nodes[i].Body == nil, and the batch that expands
 	// from it hits ErrNoMapBody at runtime instead of running its body. There is
 	// no compileGroups call here (a projected package's Def carries only member
 	// NodeDefs, never nested Groups), so the pass slots in right where Compile
 	// would otherwise call compileGroups.
-	if err := projectMapBodies(def, g); err != nil {
+	if err := projectNodeBodies(def, g); err != nil {
 		return nil, err
 	}
 	if err := buildUnits(g); err != nil {

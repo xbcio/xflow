@@ -13,8 +13,9 @@ import (
 // a fan-out shape carrying "_split", and isLoopSplitOutput (engine/expand.go)
 // accepts _split exactly as it accepts _loop -- so a split node DOES expand
 // into batch tasks. But runBatchBody unconditionally requires a projected body,
-// xflow.split declares no body parameter, and projectMapBodies projects bodies
-// only for xflow.map. Measured end to end before this rejection was added: a
+// xflow.split declares no body parameter, and it is not in
+// bodyCarryingNodeTypes, so projectNodeBodies never projects one for it.
+// Measured end to end before this rejection was added: a
 // submitted split workflow produced no error at all, it simply never completed
 // -- every batch failed, retried with backoff, and the execution hung until its
 // deadline.

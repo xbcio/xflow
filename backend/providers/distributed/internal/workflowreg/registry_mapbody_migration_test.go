@@ -17,7 +17,7 @@ import (
 //
 // This test is the reason that fail-closed choice is the right one: the record
 // decoder treats a Graph decode failure as "recompile from the stored
-// Definition", and the recompile runs projectMapBodies, so the body comes
+// Definition", and the recompile runs projectNodeBodies, so the body comes
 // back. The condition is self-healing, not merely loud. Had UnmarshalJSON
 // returned a bodyless graph instead, this fallback would never engage and the
 // workflow would be permanently broken with no signal.

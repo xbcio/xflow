@@ -117,7 +117,7 @@ func buildGroupWithMapMemberPackage(t *testing.T) *graph.SubgraphPackage {
 //     WithBatchBodyExecutor cannot reach it -- engineOpts is assembled fresh
 //     inside Execute.
 //  2. compileTrusted (the path CompileProjectedPackage uses for group packages)
-//     never ran projectMapBodies, so even with an executor wired the member's
+//     never ran projectNodeBodies, so even with an executor wired the member's
 //     NodeMeta.Body stayed nil and the batch died with ErrNoMapBody instead.
 func TestExecutor_RunsAMapMemberBodyInsideAGroup(t *testing.T) {
 	pkg := buildGroupWithMapMemberPackage(t)

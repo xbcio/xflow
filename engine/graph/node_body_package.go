@@ -37,7 +37,7 @@ const bodyExitPort = "main"
 //
 // Called at compile time, so a malformed body is a compile error rather than a
 // runtime surprise — the same reason the body's shape rules are enforced in
-// validateMapBody.
+// validateNodeBody.
 //
 // visibleSupplies is the parent map node's OWN visible-supply set — the sorted
 // names g.SupplyRefsFor(mapNodeIdx) returns after buildDependencyEdges has run.
@@ -120,7 +120,7 @@ func ProjectNodeBodyPackage(mapNodeName string, params map[string]any, visibleSu
 }
 
 // compileBodyMembers builds the minimal two-pass graph the entry rules need and
-// returns it with the resolved entry index. Shared with validateMapBody so the
+// returns it with the resolved entry index. Shared with validateNodeBody so the
 // validation and the projection cannot disagree about what a valid body is.
 func compileBodyMembers(mapNodeName string, nodes []types.NodeDef, conns types.Connections) (*Graph, int, error) {
 	bodyDef := &types.WorkflowDef{Nodes: nodes, Connections: conns}

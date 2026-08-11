@@ -9,11 +9,11 @@ import (
 // TestCompileProjectedPackage_ProjectsAMapMemberBody covers the second of the
 // two defects that kept an xflow.map node from running as a group member.
 //
-// Compile (the top-level path) runs projectMapBodies, so a top-level map ends
+// Compile (the top-level path) runs projectNodeBodies, so a top-level map ends
 // up with NodeMeta.Body populated. compileTrusted -- the path
 // CompileProjectedPackage uses for projected GROUP packages -- was a hand-rolled
 // parallel pass list that had drifted: it ran buildEdges and
-// buildDependencyEdges but never projectMapBodies. A map member therefore
+// buildDependencyEdges but never projectNodeBodies. A map member therefore
 // compiled cleanly with Body == nil, and the batch it expanded into died at
 // runtime with ErrNoMapBody (engine/expand.go) rather than at compile time --
 // the failure surfaced far from its cause, as a batch retry loop.

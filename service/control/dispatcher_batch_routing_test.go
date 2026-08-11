@@ -15,7 +15,7 @@ import (
 // batchRoutingWorkflow is a single xflow.map node carrying a required
 // runnerSelector. Mode is workflow-level (compile rejects it on a node), the
 // match labels are the map node's own. The body is the minimum shape
-// validateMapBody accepts: the selector, not the body, is what this file is
+// validateNodeBody accepts: the selector, not the body, is what this file is
 // about.
 func batchRoutingWorkflow() *types.WorkflowDef {
 	return &types.WorkflowDef{
