@@ -157,6 +157,13 @@ func (q *memoryQueue) Enqueue(ctx context.Context, t *engine.Task) error {
 	env := queueEnvelope{task: t}
 	// Respect the caller's ctx: block until space is available, the queue is
 	// stopped, or the context is canceled. No unbounded goroutines.
+	//
+	// Blocking is right for callers that hold no durable retry: Submit's
+	// initial tasks and the legacy lease-revoke redelivery both have no outbox
+	// behind them, and lease.go documents that a failed enqueue there strands
+	// the node where the sweeper cannot see it. Only FlushOutbox — which does
+	// have a durable intent to fall back on, and which runs on a worker
+	// goroutine where blocking deadlocks — takes the non-blocking path below.
 	select {
 	case q.ch <- env:
 		return nil
@@ -164,6 +171,26 @@ func (q *memoryQueue) Enqueue(ctx context.Context, t *engine.Task) error {
 		return ctx.Err()
 	case <-q.stopCh:
 		return errors.New("local: queue stopped")
+	}
+}
+
+// TryEnqueue offers a task without blocking, reporting engine.ErrQueueFull
+// when the buffer has no room.
+//
+// This exists because FlushOutbox runs on a queue worker goroutine: a fan-out
+// wider than the channel's capacity would park every worker inside the send it
+// needs those same workers to make room for. The deadlock is permanent and
+// emits nothing — no error, no log, no metric beyond a backlog that stops
+// moving. Reporting fullness instead lets the engine leave the intent durable
+// and redeliver once the workers drain.
+func (q *memoryQueue) TryEnqueue(_ context.Context, t *engine.Task) error {
+	select {
+	case q.ch <- queueEnvelope{task: t}:
+		return nil
+	case <-q.stopCh:
+		return errors.New("local: queue stopped")
+	default:
+		return engine.ErrQueueFull
 	}
 }
 

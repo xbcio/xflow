@@ -208,6 +208,11 @@ func (e *Engine) commitNode(ctx context.Context, req CommitNodeRequest) (CommitN
 // FlushOutbox delivers ready task intents for one execution. An enqueue that
 // succeeds before AckOutbox fails is deliberately retried later; lease fencing
 // makes that duplicate delivery safe.
+//
+// A nil return does not mean the outbox is empty. When the queue reports
+// ErrQueueFull the flush stops early and returns nil, leaving the remaining
+// intents durable and un-attempted; the OutboxDispatcher's next tick and any
+// subsequent commit both re-enter here to finish the delivery.
 func (e *Engine) FlushOutbox(ctx context.Context, id types.ExecutionID) error {
 	ctx, span := outboxTracer().Start(ctx, "xflow.outbox.flush", "execution_id", string(id))
 	defer span.End()
@@ -249,8 +254,22 @@ func (e *Engine) FlushOutbox(ctx context.Context, id types.ExecutionID) error {
 				var enqueueErr error
 				if entry.AvailableAt.After(time.Now()) {
 					enqueueErr = e.queue.EnqueueDelayed(ctx, &entry.Task, time.Until(entry.AvailableAt))
+				} else if nb, ok := e.queue.(NonBlockingTaskQueue); ok {
+					enqueueErr = nb.TryEnqueue(ctx, &entry.Task)
 				} else {
 					enqueueErr = e.queue.Enqueue(ctx, &entry.Task)
+				}
+				if errors.Is(enqueueErr, ErrQueueFull) {
+					// Backpressure, not failure. Leave this entry and every
+					// entry behind it unacknowledged, and do not touch the
+					// delivery-attempt counter — recording an attempt here
+					// would dead-letter a perfectly good intent after enough
+					// full queues. The OutboxDispatcher and the next commit
+					// both re-enter FlushOutbox, so delivery resumes once the
+					// workers have drained the queue. An outbox that stops
+					// draining still surfaces: the dispatcher's OnOutboxPending
+					// reports the backlog and its oldest entry's age.
+					return nil
 				}
 				if enqueueErr != nil {
 					e.recordOutboxDeliveryFailure(ctx, state, id, entry, enqueueErr)

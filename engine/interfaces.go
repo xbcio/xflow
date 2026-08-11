@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/xbcio/xflow/engine/graph"
@@ -104,6 +105,33 @@ type TaskQueue interface {
 	Enqueue(ctx context.Context, t *Task) error
 	EnqueueDelayed(ctx context.Context, t *Task, delay time.Duration) error
 }
+
+// NonBlockingTaskQueue is an optional TaskQueue capability: offer a task and
+// report ErrQueueFull rather than waiting for room.
+//
+// Only FlushOutbox uses it, and only because it must. FlushOutbox runs on a
+// queue worker goroutine, so a bounded queue whose Enqueue blocks turns a
+// fan-out wider than the queue's capacity into a permanent deadlock: every
+// worker parks inside the send, and the only goroutines that could drain the
+// queue are those same workers. Nothing is logged and no error is returned —
+// the execution simply stops.
+//
+// Other callers keep blocking Enqueue on purpose. Submit's initial tasks and
+// the legacy lease-revoke redelivery have no durable intent behind them, so
+// failing them on a transient full queue would strand work that no sweeper can
+// recover. FlushOutbox is safe precisely because the intent stays in the outbox.
+//
+// A queue whose Enqueue never blocks — one writing to an external broker, say
+// — has no reason to implement this.
+type NonBlockingTaskQueue interface {
+	TryEnqueue(ctx context.Context, t *Task) error
+}
+
+// ErrQueueFull reports that a bounded queue has no room right now. It is
+// backpressure, not a delivery failure: the intent stays in the outbox
+// unacknowledged and its delivery-attempt counter is left alone, so repeated
+// backpressure can never push an entry into the dead-letter store.
+var ErrQueueFull = errors.New("task queue full")
 
 // LegacyNodeCommitter is the fenced terminal-transition capability used by
 // cyclic and experimental loop/split paths. It deliberately does not apply
