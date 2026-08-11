@@ -196,7 +196,7 @@ func (e *Engine) TaskRouting(ctx context.Context, t *Task) (TaskRouting, error) 
 	unitIdx := t.UnitIdx
 	if unitIdx >= 0 && unitIdx < g.UnitCount() && g.UnitKindAt(unitIdx) == graph.UnitGroup {
 		gm := g.GroupMetaAt(unitIdx)
-		pkg, _, err := graph.ProjectSubgraphPackage(g, unitIdx)
+		pkg, _, err := graph.ProjectGroupPackage(g, unitIdx)
 		if err != nil {
 			return TaskRouting{}, fmt.Errorf("project group package for routing: %w", err)
 		}

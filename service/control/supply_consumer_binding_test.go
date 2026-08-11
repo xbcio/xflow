@@ -176,7 +176,7 @@ func TestNoWasmConsumerMeansNilSlice(t *testing.T) {
 }
 
 // The group path must derive bindings too, and it is the path that NEEDS the
-// server-side derivation most: graph.ProjectSubgraphPackage flattens every
+// server-side derivation most: graph.ProjectGroupPackage flattens every
 // member's supply refs into one deduplicated name list, so by the time the
 // package reaches a runner the consumer-to-supply pairing is gone for good.
 func TestSupplyConsumerBindingsForGroupEntryUnit(t *testing.T) {

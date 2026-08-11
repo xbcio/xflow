@@ -845,7 +845,7 @@ func (r *EntryActivationReconciler) activateDirectiveFor(ctx context.Context, ac
 // Those are two independently-produced values: act.PackageHash was computed by
 // assignPackageHashes at COMPILE time and persisted, while pkg is projected
 // here and now. They agree today, but nothing enforces that they always will —
-// any future change to ProjectSubgraphPackage's output would make every stored
+// any future change to ProjectGroupPackage's output would make every stored
 // workflow's group activation fail closed on the runner with an error pointing
 // at hashes rather than at the real cause. Catching the drift here keeps the
 // diagnosis on the server, where the two inputs are both visible.
@@ -874,7 +874,7 @@ func (r *EntryActivationReconciler) projectPackageForGroup(ctx context.Context, 
 	if !ok {
 		return nil
 	}
-	pkg, hash, err := graph.ProjectSubgraphPackage(rec.Graph, unitIdx)
+	pkg, hash, err := graph.ProjectGroupPackage(rec.Graph, unitIdx)
 	if err != nil {
 		if r.cfg.Logger != nil {
 			r.cfg.Logger.Warn("entry activation: project group package failed",

@@ -34,7 +34,7 @@ func makeGroupedDef() *types.WorkflowDef {
 	}
 }
 
-func TestProjectSubgraphPackage_MembersAndCollectors(t *testing.T) {
+func TestProjectGroupPackage_MembersAndCollectors(t *testing.T) {
 	def := makeGroupedDef()
 	g, err := Compile(def)
 	if err != nil {
@@ -53,9 +53,9 @@ func TestProjectSubgraphPackage_MembersAndCollectors(t *testing.T) {
 		t.Fatal("no group unit found")
 	}
 
-	pkg, hash, err := ProjectSubgraphPackage(g, groupUnitIdx)
+	pkg, hash, err := ProjectGroupPackage(g, groupUnitIdx)
 	if err != nil {
-		t.Fatalf("ProjectSubgraphPackage: %v", err)
+		t.Fatalf("ProjectGroupPackage: %v", err)
 	}
 
 	// Members A, B, C + 1 collector for C:result boundary output.
@@ -94,7 +94,7 @@ func TestProjectSubgraphPackage_MembersAndCollectors(t *testing.T) {
 	}
 }
 
-func TestProjectSubgraphPackage_Deterministic(t *testing.T) {
+func TestProjectGroupPackage_Deterministic(t *testing.T) {
 	def := makeGroupedDef()
 	g, err := Compile(def)
 	if err != nil {
@@ -109,10 +109,10 @@ func TestProjectSubgraphPackage_Deterministic(t *testing.T) {
 		}
 	}
 
-	_, firstHash, _ := ProjectSubgraphPackage(g, groupUnitIdx)
+	_, firstHash, _ := ProjectGroupPackage(g, groupUnitIdx)
 
 	for i := 0; i < 100; i++ {
-		_, h, err := ProjectSubgraphPackage(g, groupUnitIdx)
+		_, h, err := ProjectGroupPackage(g, groupUnitIdx)
 		if err != nil {
 			t.Fatalf("iteration %d: %v", i, err)
 		}
@@ -122,7 +122,7 @@ func TestProjectSubgraphPackage_Deterministic(t *testing.T) {
 	}
 }
 
-func TestProjectSubgraphPackage_NodeOrderDoesNotAffectHash(t *testing.T) {
+func TestProjectGroupPackage_NodeOrderDoesNotAffectHash(t *testing.T) {
 	// Compile with nodes in order A, B, C, D.
 	def1 := makeGroupedDef()
 	g1, err := Compile(def1)
@@ -159,15 +159,15 @@ func TestProjectSubgraphPackage_NodeOrderDoesNotAffectHash(t *testing.T) {
 		return -1
 	}
 
-	_, h1, _ := ProjectSubgraphPackage(g1, findGroup(g1))
-	_, h2, _ := ProjectSubgraphPackage(g2, findGroup(g2))
+	_, h1, _ := ProjectGroupPackage(g1, findGroup(g1))
+	_, h2, _ := ProjectGroupPackage(g2, findGroup(g2))
 
 	if h1 != h2 {
 		t.Errorf("hash differs when Nodes reordered:\n  h1=%s\n  h2=%s", h1, h2)
 	}
 }
 
-func TestProjectSubgraphPackage_ParameterChangeAffectsHash(t *testing.T) {
+func TestProjectGroupPackage_ParameterChangeAffectsHash(t *testing.T) {
 	def1 := makeGroupedDef()
 	g1, err := Compile(def1)
 	if err != nil {
@@ -191,15 +191,15 @@ func TestProjectSubgraphPackage_ParameterChangeAffectsHash(t *testing.T) {
 		return -1
 	}
 
-	_, h1, _ := ProjectSubgraphPackage(g1, findGroup(g1))
-	_, h2, _ := ProjectSubgraphPackage(g2, findGroup(g2))
+	_, h1, _ := ProjectGroupPackage(g1, findGroup(g1))
+	_, h2, _ := ProjectGroupPackage(g2, findGroup(g2))
 
 	if h1 == h2 {
 		t.Error("hash unchanged after parameter change")
 	}
 }
 
-func TestProjectSubgraphPackage_VersionChangeAffectsHash(t *testing.T) {
+func TestProjectGroupPackage_VersionChangeAffectsHash(t *testing.T) {
 	def1 := makeGroupedDef()
 	g1, err := Compile(def1)
 	if err != nil {
@@ -223,15 +223,15 @@ func TestProjectSubgraphPackage_VersionChangeAffectsHash(t *testing.T) {
 		return -1
 	}
 
-	_, h1, _ := ProjectSubgraphPackage(g1, findGroup(g1))
-	_, h2, _ := ProjectSubgraphPackage(g2, findGroup(g2))
+	_, h1, _ := ProjectGroupPackage(g1, findGroup(g1))
+	_, h2, _ := ProjectGroupPackage(g2, findGroup(g2))
 
 	if h1 == h2 {
 		t.Error("hash unchanged after version change")
 	}
 }
 
-func TestProjectSubgraphPackage_ExitSetChangeAffectsHash(t *testing.T) {
+func TestProjectGroupPackage_ExitSetChangeAffectsHash(t *testing.T) {
 	// Original: C:result goes to D.
 	def1 := makeGroupedDef()
 	g1, err := Compile(def1)
@@ -257,15 +257,15 @@ func TestProjectSubgraphPackage_ExitSetChangeAffectsHash(t *testing.T) {
 		return -1
 	}
 
-	_, h1, _ := ProjectSubgraphPackage(g1, findGroup(g1))
-	_, h2, _ := ProjectSubgraphPackage(g2, findGroup(g2))
+	_, h1, _ := ProjectGroupPackage(g1, findGroup(g1))
+	_, h2, _ := ProjectGroupPackage(g2, findGroup(g2))
 
 	if h1 == h2 {
 		t.Error("hash unchanged after exit set change")
 	}
 }
 
-func TestProjectSubgraphPackage_NonGroupUnitError(t *testing.T) {
+func TestProjectGroupPackage_NonGroupUnitError(t *testing.T) {
 	def := makeGroupedDef()
 	g, err := Compile(def)
 	if err != nil {
@@ -275,7 +275,7 @@ func TestProjectSubgraphPackage_NonGroupUnitError(t *testing.T) {
 	// Unit 0 should be a node unit (D is ungrouped).
 	for i := 0; i < g.UnitCount(); i++ {
 		if g.UnitKindAt(i) == UnitNode {
-			_, _, err := ProjectSubgraphPackage(g, i)
+			_, _, err := ProjectGroupPackage(g, i)
 			if err == nil {
 				t.Error("expected error for non-group unit")
 			}
@@ -300,9 +300,9 @@ func TestCompileProjectedPackage_AcceptsReservedTypes(t *testing.T) {
 		}
 	}
 
-	pkg, _, err := ProjectSubgraphPackage(g, groupUnitIdx)
+	pkg, _, err := ProjectGroupPackage(g, groupUnitIdx)
 	if err != nil {
-		t.Fatalf("ProjectSubgraphPackage: %v", err)
+		t.Fatalf("ProjectGroupPackage: %v", err)
 	}
 
 	// The package should contain xflow.group_exit nodes.
@@ -347,7 +347,7 @@ func TestCompile_RejectsReservedTypes(t *testing.T) {
 	}
 }
 
-func TestProjectSubgraphPackage_GraphHashIncludesPackageHash(t *testing.T) {
+func TestProjectGroupPackage_GraphHashIncludesPackageHash(t *testing.T) {
 	def := makeGroupedDef()
 	g, err := Compile(def)
 	if err != nil {
@@ -367,7 +367,7 @@ func TestProjectSubgraphPackage_GraphHashIncludesPackageHash(t *testing.T) {
 	}
 }
 
-func TestProjectSubgraphPackage_VarsConfigChangeAffectsHash(t *testing.T) {
+func TestProjectGroupPackage_VarsConfigChangeAffectsHash(t *testing.T) {
 	def1 := makeGroupedDef()
 	g1, err := Compile(def1)
 	if err != nil {
@@ -391,8 +391,8 @@ func TestProjectSubgraphPackage_VarsConfigChangeAffectsHash(t *testing.T) {
 		return -1
 	}
 
-	_, h1, _ := ProjectSubgraphPackage(g1, findGroup(g1))
-	_, h2, _ := ProjectSubgraphPackage(g2, findGroup(g2))
+	_, h1, _ := ProjectGroupPackage(g1, findGroup(g1))
+	_, h2, _ := ProjectGroupPackage(g2, findGroup(g2))
 
 	if h1 == h2 {
 		t.Error("hash unchanged after vars change")
@@ -402,9 +402,9 @@ func TestProjectSubgraphPackage_VarsConfigChangeAffectsHash(t *testing.T) {
 // 组成员引用 $supplies 时，投影出的包必须能编译。
 //
 // 这个用例在修复前就是红的 —— 它不是新功能的测试，是一个既有缺陷的回归测试。
-// 根因：ProjectSubgraphPackage 构造 Def 时不带任何 supply 信息，而
+// 根因：ProjectGroupPackage 构造 Def 时不带任何 supply 信息，而
 // buildPackageConnections 只读 g.outEdges，依赖边编译后进的是 g.supplyRefs。
-func TestProjectSubgraphPackage_CarriesVisibleSupplyNames(t *testing.T) {
+func TestProjectGroupPackage_CarriesVisibleSupplyNames(t *testing.T) {
 	def := &types.WorkflowDef{
 		Name: "wf",
 		Nodes: []types.NodeDef{
@@ -427,7 +427,7 @@ func TestProjectSubgraphPackage_CarriesVisibleSupplyNames(t *testing.T) {
 		t.Fatalf("parent compile: %v", err)
 	}
 
-	pkg, _, err := ProjectSubgraphPackage(g, groupUnitOf(t, g))
+	pkg, _, err := ProjectGroupPackage(g, groupUnitOf(t, g))
 	if err != nil {
 		t.Fatalf("projection: %v", err)
 	}
@@ -442,7 +442,7 @@ func TestProjectSubgraphPackage_CarriesVisibleSupplyNames(t *testing.T) {
 // 名单是名字不是内容 —— 内容由 runner 在激活时取，不进包。
 // 若把内容也投影进去，PackageHash 会随 supply 内容变化，编译期投影的全部收益
 // （N 批共享一次编译）就没了。
-func TestProjectSubgraphPackage_HashStableAcrossSupplyContentChanges(t *testing.T) {
+func TestProjectGroupPackage_HashStableAcrossSupplyContentChanges(t *testing.T) {
 	build := func() *Graph {
 		def := &types.WorkflowDef{
 			Name: "wf",
@@ -469,7 +469,7 @@ func TestProjectSubgraphPackage_HashStableAcrossSupplyContentChanges(t *testing.
 
 	hashOf := func(g *Graph) string {
 		t.Helper()
-		_, h, err := ProjectSubgraphPackage(g, groupUnitOf(t, g))
+		_, h, err := ProjectGroupPackage(g, groupUnitOf(t, g))
 		if err != nil {
 			t.Fatalf("projection: %v", err)
 		}
@@ -487,7 +487,7 @@ func TestProjectSubgraphPackage_HashStableAcrossSupplyContentChanges(t *testing.
 
 	// 反向：名单本身必须真的在包里，否则上面那条用一个空字段也能通过。
 	g := build()
-	pkg, _, err := ProjectSubgraphPackage(g, groupUnitOf(t, g))
+	pkg, _, err := ProjectGroupPackage(g, groupUnitOf(t, g))
 	if err != nil {
 		t.Fatalf("projection: %v", err)
 	}

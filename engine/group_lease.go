@@ -70,7 +70,7 @@ func (e *Engine) BuildGroupLease(ctx context.Context, t *Task) (*TaskLease, *Gro
 	gm := g.GroupMetaAt(t.UnitIdx)
 
 	// Project the group package for the runner.
-	pkg, pkgHash, err := graph.ProjectSubgraphPackage(g, t.UnitIdx)
+	pkg, pkgHash, err := graph.ProjectGroupPackage(g, t.UnitIdx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("project group package: %w", err)
 	}
@@ -185,7 +185,7 @@ func (e *Engine) RecoverGroupLease(ctx context.Context, execID types.ExecutionID
 	}
 
 	gm := g.GroupMetaAt(unitIdx)
-	pkg, pkgHash, err := graph.ProjectSubgraphPackage(g, unitIdx)
+	pkg, pkgHash, err := graph.ProjectGroupPackage(g, unitIdx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("project group package for recovery: %w", err)
 	}

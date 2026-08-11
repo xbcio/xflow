@@ -63,10 +63,18 @@ type SubgraphPackage struct {
 	VisibleSupplies []string `json:"visible_supplies,omitempty"`
 }
 
-// ProjectSubgraphPackage projects a deterministic SubgraphPackage from a compiled
+// ProjectGroupPackage projects a deterministic SubgraphPackage from a compiled
 // Graph at the given unitIdx. The unitIdx must reference a UnitGroup unit.
 // Returns the package, its canonical hash, and any error.
-func ProjectSubgraphPackage(g *Graph, unitIdx int) (*SubgraphPackage, string, error) {
+//
+// The name says GROUP, not subgraph, even though the returned type says
+// SubgraphPackage: the type is shared (a body projects into the same shape via
+// ProjectNodeBodyPackage), but this entry point is not. It reads a GroupMeta out
+// of the compiled Graph and rejects any unit that is not a UnitGroup, so it has
+// nothing to do with the xflow.subgraph node type an author can write. Naming it
+// after the shared output type once made it read as xflow.subgraph's projection
+// entry, which is ProjectNodeBodyPackage.
+func ProjectGroupPackage(g *Graph, unitIdx int) (*SubgraphPackage, string, error) {
 	if unitIdx < 0 || unitIdx >= len(g.units) {
 		return nil, "", fmt.Errorf("unit index %d out of range [0, %d)", unitIdx, len(g.units))
 	}
@@ -431,7 +439,7 @@ func assignPackageHashes(g *Graph) error {
 		if gm.PackageHash != "" {
 			continue
 		}
-		_, hash, err := ProjectSubgraphPackage(g, gm.UnitIdx)
+		_, hash, err := ProjectGroupPackage(g, gm.UnitIdx)
 		if err != nil {
 			return fmt.Errorf("group %q: %w", gm.Name, err)
 		}

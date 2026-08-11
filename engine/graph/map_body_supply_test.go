@@ -9,7 +9,7 @@ import (
 // C1: a map body member that reads $supplies.<name> must be able to run.
 //
 // ProjectNodeBodyPackage never populated SubgraphPackage.VisibleSupplies, unlike
-// the group path (ProjectSubgraphPackage / buildVisibleSupplies, fixed for
+// the group path (ProjectGroupPackage / buildVisibleSupplies, fixed for
 // groups by T3). The parent Compile() succeeds -- validateSupplyUsage sees the
 // dependency edge on the OUTER graph -- but CompileProjectedPackage(body.Package)
 // is what execution/subgraph.PackageCache.Resolve calls on the first batch, and

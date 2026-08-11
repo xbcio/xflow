@@ -29,7 +29,7 @@ const bodyExitPort = "main"
 
 // ProjectNodeBodyPackage projects the body declared on one map node.
 //
-// It is a separate entry point from ProjectSubgraphPackage rather than a widened
+// It is a separate entry point from ProjectGroupPackage rather than a widened
 // version of it: that function reads members, boundary outputs, and entry index
 // out of a GroupMeta stored in the compiled Graph, none of which a body has. The
 // two converge on the same output type, which is what lets the executor stay
