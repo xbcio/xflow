@@ -39,9 +39,12 @@ import (
 //	rule swap  -> new supply content re-tags subsequent traffic, and the
 //	              result carries the config generation that produced it
 //
-// Kafka runs without authentication here: SASL is a separate, independent gap
-// (the trigger exposes no auth params at all), and folding it in would make a
-// failure here ambiguous between "pipeline broken" and "auth misconfigured".
+// Kafka runs without authentication here. SASL is not a gap — the trigger
+// takes sasl_mechanism/sasl_username/sasl_password, and in production reads
+// them from supply content rather than from params (node/internal/trigger/
+// kafka.go). It is left off here because turning it on would make a failure
+// ambiguous between "pipeline broken" and "auth misconfigured", and because
+// SAS's own cluster (the upstream cluster, internal network) runs SASL_PLAINTEXT.
 func TestSASTrafficTaggingE2E(t *testing.T) {
 	brokers := requireKafka(t)
 	redisAddr := requireRedis(t)

@@ -11,25 +11,6 @@
 
 ## P1 — 规模上去会疼
 
-### 3. `xflow.map` 不能作为 group / subgraph 成员，且错误信息误导
-
-实测（2026-08-06 临时探针）：把 `xflow.map` 放进 `SubgraphPackage` 会在包校验
-阶段被拒，报
-
-```
-package validation failed: handler not available: type=xflow.map version=1
-```
-
-该信息指向"能力表里没有这个 handler"，而真实原因是**内层引擎结构上跑不了 map**：
-`execution/subgraph/subgraph.go:117-128` 构造内层 engine 时只给
-`WithNodeFailureObserver`（+ 可选 suspend/TTL），从不给 `WithBatchBodyExecutor`，
-所以即使注册了 handler，批次任务也会撞上 `ErrNoBatchBodyExecutor`。
-
-编译期放行、运行期失败，且**仓库里没有任何测试覆盖这个组合**，文档里也没写。
-要么加显式的编译期拒绝（附真实原因），要么把 `WithBatchBodyExecutor` 递归接进
-内层引擎。前者便宜得多，且能避开"嵌套 map 的子执行树无界"这个 P2-5 已经在防的
-问题。
-
 ### 4. 无 `max_concurrency` 节流
 
 设计时显式排除（见 spec §10.1），当时 body 还是 pass-through stub。**T12/T13 之后
@@ -164,6 +145,35 @@ apiserver+control plane+runner 三进程路径，用真实成员节点 handler
 
 范围之外：该 e2e 的 workflow 定义里没有 supply 节点，所以它不验证 group 成员的
 `$supplies`。这**不代表** group 内的 supply 有问题——见下方「已澄清的误记」。
+
+### `xflow.map` 不能作为 group 成员（原 P1-3，2026-08-10 修复）
+
+原记录说「把 `xflow.map` 放进 `SubgraphPackage` 会在包校验阶段被拒，报
+`handler not available: type=xflow.map version=1`」，并建议「加显式的编译期拒绝
+比递归接线便宜得多」。**该建议未被采纳，实际走了递归接线那条路**（`20fa9c6`），
+因为实测发现挡路的是两个各自独立、单独一个就足以让 group 挂住的缺陷，而非
+一个能力表问题：
+
+1. `execution/subgraph/subgraph.go` 的 `Executor.Execute` **每次调用现场组装**
+   内层引擎的 option 列表，那份列表里没有 batch body executor。调用方侧的
+   `WithBatchBodyExecutor`（sdk/xflow、`GroupRuntime`）永远到不了这次调用新建
+   的引擎，成员 map 的批次必然撞上 `ErrNoBatchBodyExecutor`。修法是把同一个
+   `Executor` 递归接回去——这是唯一可接线的位置——并转发 `req.Deadline`，
+   使嵌套的逐项执行不会超出外层 group 自身的 deadline。
+2. `compileTrusted`（`CompileProjectedPackage` 对投影出的 group 包所走的路径）
+   是 `Compile` pass 列表的手写平行实现，已经漂移：它跑了 `buildEdges` 与
+   `buildDependencyEdges`，却从不跑 `projectMapBodies`。于是成员 map 编译干净
+   通过但 `NodeMeta.Body == nil`，运行期才失败。
+
+递归**不会**重新打开「嵌套 map 子执行树无界」那个 P2-5 在防的问题：map 自己的
+body 里仍然不允许出现 `xflow.map`（`compile.go` 的 `bannedBodyMemberTypes` 在
+编译期拒绝，与该 map 是否为 group 成员无关），所以这条接线启用的递归深度不会
+超过「成员 map」本来就有的那一层。
+
+覆盖：`execution/subgraph/map_in_group_test.go` 的
+`TestExecutor_RunsAMapMemberBodyInsideAGroup`（运行期）与
+`engine/graph/map_member_body_test.go` 的
+`TestCompileProjectedPackage_ProjectsAMapMemberBody`（编译期）各钉一个缺陷。
 
 ## 已澄清的误记（2026-08-10 实测更正）
 
