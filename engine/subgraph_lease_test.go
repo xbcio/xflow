@@ -17,7 +17,7 @@ func batchLeaseWorkflow(t *testing.T) (*Engine, *fakeState, *fakeQueue, types.Ex
 	def := &types.WorkflowDef{
 		Name: "batch-lease",
 		Nodes: []types.NodeDef{
-			{Name: "loop", Type: "xflow.map"},
+			{Name: "loop", Type: "xflow.map", Parameters: mapBodyParamsForTest()},
 			{Name: "done", Type: "test.echo"},
 		},
 		Connections: types.Connections{
@@ -227,7 +227,8 @@ func TestCommitSubgraphResultRoutesAFailedGenerationThroughOnError(t *testing.T)
 	def := &types.WorkflowDef{
 		Name: "batch-lease-onerror",
 		Nodes: []types.NodeDef{
-			{Name: "loop", Type: "xflow.map", OnError: string(types.OnErrorOutput)},
+			{Name: "loop", Type: "xflow.map", OnError: string(types.OnErrorOutput),
+				Parameters: mapBodyParamsForTest()},
 			{Name: "recover", Type: "test.echo"},
 		},
 		Connections: types.Connections{

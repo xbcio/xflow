@@ -39,8 +39,9 @@ func (n *MapNode) Descriptor() types.Descriptor {
 		Params: []types.ParamSpec{
 			{Name: "items", DisplayName: "Items", Type: types.ParamString, Required: true, Description: "Expression that evaluates to the array to iterate"},
 			{Name: "batch_size", DisplayName: "Batch Size", Type: types.ParamNumber, Required: false, Default: 1, Description: "Number of items processed per batch"},
-			{Name: "continue_on_error", DisplayName: "Continue On Error", Type: types.ParamBool, Required: false, Default: false, Description: "Continue iteration when a sub-graph execution fails"},
-			{Name: "body", DisplayName: "Body", Type: types.ParamObject, Required: true, Description: "Sub-graph definition executed for each item"},
+			{Name: "continue_on_error", DisplayName: "Continue On Error", Type: types.ParamBool, Required: false, Default: false, Description: "Continue iteration when an item fails"},
+			{Name: "body", DisplayName: "Body", Type: types.ParamObject, Required: false, Description: "Sub-graph executed once per item; mutually exclusive with expression, and exactly one of the two is required"},
+			{Name: "expression", DisplayName: "Expression", Type: types.ParamString, Required: false, Description: "Expression evaluated once per item over $item/$index/$items; mutually exclusive with body, and exactly one of the two is required"},
 		},
 		Inputs:  []types.PortSpec{{Name: "main", DisplayName: "Main"}},
 		Outputs: []types.PortSpec{{Name: "main", DisplayName: "Main"}, {Name: "error", DisplayName: "Error"}},
@@ -66,6 +67,13 @@ func (n *MapNode) Execute(ctx context.Context, input *types.Input) (*types.Outpu
 		return nil, fmt.Errorf("xflow.map: items parameter is required")
 	}
 
+	expression, _ := input.Params["expression"].(string)
+	_, hasBody := input.Params["body"]
+	if expression != "" && hasBody {
+		return nil, fmt.Errorf("xflow.map: body and expression are mutually exclusive; " +
+			"declare exactly one")
+	}
+
 	env := exprx.BuildExprEnv(input, nil)
 	result, err := exprx.EvalExpr(itemsExpr, env, false)
 	if err != nil {
@@ -75,6 +83,10 @@ func (n *MapNode) Execute(ctx context.Context, input *types.Input) (*types.Outpu
 	items, err := conv.ToSlice(result)
 	if err != nil {
 		return nil, fmt.Errorf("xflow.map: items must evaluate to an array: %w", err)
+	}
+
+	if expression != "" {
+		return evalItemsInline(expression, env, items, continueOnError(input.Params))
 	}
 
 	batchSize := 1
@@ -94,6 +106,80 @@ func (n *MapNode) Execute(ctx context.Context, input *types.Input) (*types.Outpu
 			"batch_count": len(batches),
 		},
 	}, nil
+}
+
+func continueOnError(params map[string]any) bool {
+	v, _ := params["continue_on_error"].(bool)
+	return v
+}
+
+// evalItemsInline runs the expression form: one evaluation per item, right here,
+// producing the finished result rather than a fan-out descriptor.
+//
+// The engine decides whether to expand a map node from whether the compiler
+// projected a body for it, and this form projects none — so whatever this
+// returns is committed verbatim as the node's output. That is why the shape must
+// match what the body form's completeLoopSplit emits ({results, count}) and why
+// the failure accounting must match BatchResultForCommit: an author who switches
+// a node between the two forms must not have to rewrite everything downstream.
+//
+// It does not batch. batch_size is a durability policy for the body form — it
+// decides how many items share a sub-execution and therefore a retry unit —
+// and there is no sub-execution here to size.
+func evalItemsInline(expression string, baseEnv map[string]any, items []any, keepGoing bool) (*types.Output, error) {
+	results := make([]any, 0, len(items))
+	var firstErr error
+	succeeded := 0
+
+	for index, item := range items {
+		value, err := exprx.EvalExpr(expression, itemEnv(baseEnv, item, index, items), false)
+		if err != nil {
+			err = fmt.Errorf("xflow.map: item %d: %w", index, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+			// The failed item occupies its slot rather than being dropped, which is
+			// what makes "count equals the input length" true and lets a downstream
+			// filter tell a failure apart from data. Same contract as
+			// engine.batchResultData — see the warning in DSL-SPECIFICATION.md about
+			// a result that fabricates its own _error.
+			results = append(results, map[string]any{"_error": err.Error(), "_index": index})
+			if !keepGoing {
+				return nil, firstErr
+			}
+			continue
+		}
+		succeeded++
+		results = append(results, value)
+	}
+
+	// continue_on_error means "tolerate a partial failure", not "never fail": a run
+	// where every item failed is a failure under either setting.
+	if firstErr != nil && succeeded == 0 {
+		return nil, firstErr
+	}
+
+	return &types.Output{Data: map[string]any{
+		"results": results,
+		"count":   len(results),
+	}}, nil
+}
+
+// itemEnv layers one item's three roots over the node's base environment.
+//
+// The "$" prefix is not cosmetic and must match execution/subgraph's
+// bodyItemInput exactly: the filter node binds the unprefixed "item"/"index" for
+// its own per-element condition, so a filter reachable from a map would
+// otherwise shadow the map's iteration variables silently.
+func itemEnv(baseEnv map[string]any, item any, index int, items []any) map[string]any {
+	env := make(map[string]any, len(baseEnv)+3)
+	for key, value := range baseEnv {
+		env[key] = value
+	}
+	env["$item"] = item
+	env["$index"] = index
+	env["$items"] = items
+	return env
 }
 
 func init() { registry.Register(&MapNode{}) }

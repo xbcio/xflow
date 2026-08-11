@@ -55,21 +55,27 @@ func TestProjectNodeBodyPackageIsStoredOnTheCompiledGraph(t *testing.T) {
 	}
 }
 
-// A map node without a body must not get a package. It is a legal shape — a bare
-// {Name, Type} map node still compiles — and inventing an empty package for it
-// would make the runtime unable to tell "no body declared" from "body that does
-// nothing".
-func TestCompileLeavesABodylessMapNodeWithoutAPackage(t *testing.T) {
+// expression 形态的 map 节点不能拿到包。引擎正是靠 BodyAt 为 nil 判定「这个节点
+// 不扩展、handler 的返回值原样提交」——而 expression 形态的 handler 返回的是算完
+// 的 results/count，不是扩展所需的批次描述符。凭空造一个空包会让引擎去扩展它，
+// 把那份最终结果当成描述符。
+//
+// 两者皆无的 map 节点不在这里测，因为它已经在编译期被拒（见
+// expansion_requires_body_test.go）。
+func TestCompileLeavesAnExpressionMapNodeWithoutAPackage(t *testing.T) {
 	g, err := Compile(&types.WorkflowDef{
-		Name:  "map-no-body",
-		Nodes: []types.NodeDef{{Name: "m", Type: "xflow.map"}},
+		Name: "map-expression",
+		Nodes: []types.NodeDef{{Name: "m", Type: "xflow.map", Parameters: map[string]any{
+			"items":      "$input.rows",
+			"expression": "$item.id",
+		}}},
 	})
 	if err != nil {
 		t.Fatalf("Compile() error = %v", err)
 	}
 	idx, _ := g.NodeIndex("m")
 	if body := g.BodyAt(idx); body != nil {
-		t.Errorf("bodyless map node got a package: %+v", body)
+		t.Errorf("expression-form map node got a package: %+v", body)
 	}
 }
 

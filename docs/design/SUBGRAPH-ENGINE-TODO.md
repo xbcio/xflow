@@ -38,9 +38,11 @@ T11 声明它，本打算由 T12 消费，T12 没有消费。**明确保留不�
 
 P2-5 修完后，编译期已经按这个形状执行了：`transformNodeTypes` 就是它说的
 「transform-style node」集合，`validateNodeBody` 对集合里每个类型执行同两条规则
-（二选一 + 声明了的 body 必须是子图）。缺的只是**结构体本身仍无人反序列化到**
-——各节点仍从 `Parameters` 里逐键取 `expression`/`body`。落地 filter/reduce 时把
-取参改走 `TransformSpec` 即可闭合。
+（二选一 + 声明了的 body 必须是子图）。2026-08-11 之后 `xflow.map` 的
+**两种形态也都真的能跑**（expression 形态见下方「已修复」一节），所以这个形状
+不再只是编译期的形式约束。缺的只是**结构体本身仍无人反序列化到**——各节点仍从
+`Parameters` 里逐键取 `expression`/`body`。落地 filter/reduce 时把取参改走
+`TransformSpec` 即可闭合。
 
 ### 8. `engine/graph/subgraph_package.go` 的 `ProjectSubgraphPackage` 名字有歧义
 
@@ -53,6 +55,39 @@ P2-5 修完后，编译期已经按这个形状执行了：`transformNodeTypes` 
 但来源与用途不同。改名会动到公开 API，未做。
 
 ## 已修复
+
+### `xflow.map` 的 expression 形态从未实现 + 无 body 的 map 编译通过（2026-08-11 修复）
+
+**实测的修复前下场**：`{items, expression}` 的 map 编译通过、`BodyAt == nil`，
+提交后 `WaitDone` 以 `context deadline exceeded` 挂死——handler 完全无视
+`expression` 参数，无条件发出扇出描述符，于是每个批次撞 `ErrNoMapBody`。
+参数无 body 也无 expression 的 map（含裸 `{Name, Type}`）同样如此。
+
+修复分两半，缺一不可：
+
+1. **实现 expression 形态**（`node/internal/flow/map.go` 的 `evalItemsInline`）：
+   逐项求值、就地产出 `{results, count}`，不发描述符。它必须与 body 形态给下游
+   同一份契约，否则同一个节点的两种写法会有两套下游语义——`count` 恒等于输入长度、
+   失败项以 `{_error, _index}` 占位、`continue_on_error` 只在「至少一项成功」时
+   放行（全失败两种设置都失败），逐项根用带 `$` 前缀的 `$item`/`$index`/`$items`
+   与 `execution/subgraph` 的 `bodyItemInput` 对齐（无前缀的 `item`/`index` 归
+   filter 节点，会静默遮蔽）。`batch_size` 对它无意义且**不**影响 `$index`。
+2. **编译期拒绝两者皆无**（`validateNodeBody` 的 fan-out 规则 + `fanOutNodeTypes`）。
+   这一半是**判据下沉的前提**而不只是整洁：判据一旦改成 `BodyAt != nil`，无 body
+   的 map 会被判「不扩展」，扇出描述符被当成节点的普通输出提交下去——比修复前的
+   挂死更糟，是静默的错答案。
+
+覆盖：`node/internal/flow/map_expression_test.go`（六条，含 continue_on_error
+的两种设置与全失败）、`engine/graph/expansion_requires_body_test.go`
+（四种被拒形状 + 两条正对照）。反向探针五处各自实测变红：编译规则去掉 expression
+豁免 / handler 不走 inline 分支 / `continue_on_error` 恒 true / 失败项被丢弃 /
+逐项根去掉 `$` 前缀。
+
+`ErrNoMapBody` 因此只剩一条可达路径——`compileTrusted`（投影包走的受信路径，
+不跑 `validateNodeBody`）。该路径正是本文件下方记录过漂移的那条，值得继续守，
+`TestExecuteBatchWithoutABodyFailsInsteadOfPassingItemsThrough` 已改为经
+`CompileProjectedPackage` 构造这个形状，并先断言 `BodyAt == nil` 以防哪天受信路径
+补上投影后这条测试变成空断言。
 
 ### 三处 map 专属判断写死 `xflow.map` + 带请求体的 HTTP 节点存下去读不回来（原 P2-5，2026-08-11 修复）
 
@@ -106,10 +141,10 @@ object 与 string 两种请求体都会触发，走的内部路径还不一样�
 #### `bannedBodyMemberTypes` 退回字面量，但禁令的可扩展那半移到了成员判定
 
 先前它「从 transform 集派生」，那是错的：`xflow.map` 的 expression 形态**根本没有
-body 给值判据看**，而它的 handler 在两种形态下都无条件发扩展标记
-（`node/internal/flow/map.go:96-106`），照样在 body 里 fan-out。所以这张表是三个
-字面量，各有一条值看不见的理由：`xflow.subgraph` 是容器本身，`xflow.split` 到处
-被拒，`xflow.map` 无条件扩展。
+body 给值判据看**。所以这张表是三个字面量，各有一条值看不见的理由：
+`xflow.subgraph` 是容器本身，`xflow.split` 到处被拒，`xflow.map` 在 body 形态下
+无条件扩展（expression 形态不扩展、本可豁免，但禁令刻意停在类型一级：成员的形态
+只差一次参数改动，一条改个参数就能悄悄解除的禁令不算禁令）。
 
 **真正需要可扩展的那半在 `validateNodeBody` 里**：逐个成员用
 `declaresSubgraphBody(inner.Parameters)` 检查。这才是「将来某个类型长出了 body」时

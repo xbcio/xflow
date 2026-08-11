@@ -258,6 +258,13 @@ func expandOneBatch(t *testing.T, nd types.NodeDef, opts ...Option) (*Engine, *T
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
+	return expandOneBatchOf(t, g, opts...)
+}
+
+// expandOneBatchOf is expandOneBatch for a graph the caller compiled itself —
+// the only way to reach the runtime with a shape graph.Compile rejects.
+func expandOneBatchOf(t *testing.T, g *graph.Graph, opts ...Option) (*Engine, *Task) {
+	t.Helper()
 	state := newFakeState()
 	queue := &fakeQueue{}
 	reg := &fakeRegistry{handlers: map[string]types.ActionHandler{
@@ -295,16 +302,37 @@ func TestExecuteBatchWithoutABodyExecutorFailsInsteadOfPassingItemsThrough(t *te
 	}
 }
 
-// A bare {Name, Type} map node compiles — the compile-time body rules exempt a
-// parameterless node so an existing workflow keeps compiling. That exemption has
-// to be answered somewhere, and it is here: at runtime there is nothing to run
-// per item, and the pass-through that used to hide it is gone.
+// ErrNoMapBody 现在只在**受信编译路径**上可达，而它恰好是本仓库出现过的那类
+// 缺陷所在：compileTrusted（投影出的 group 包走的路径）是 Compile 的 pass 列表
+// 的手写平行实现，已经漂移过一次——它曾不跑 projectNodeBodies，于是成员 map
+// 编译干净通过但 Body == nil，运行期才失败。
+//
+// 顶层 graph.Compile 已经把无 body 无 expression 的 map 挡在编译期（见
+// engine/graph/expansion_requires_body_test.go）。这条测试因此刻意**不**走
+// Compile，而是用 CompileProjectedPackage 造出那个形状：受信路径不跑
+// validateNodeBody，所以这个形状仍然到得了运行期。到达时必须报
+// ErrNoMapBody，而不是把批次里的 items 原样报回去——后者会让「body 从没跑过」
+// 与「body 跑了」在下游完全无法区分。
 func TestExecuteBatchWithoutABodyFailsInsteadOfPassingItemsThrough(t *testing.T) {
-	eng, batch := expandOneBatch(t,
-		types.NodeDef{Name: "m", Type: "xflow.map"},
-		WithBatchBodyExecutor(newEchoBodyExecutor()))
+	g, err := graph.CompileProjectedPackage(&graph.SubgraphPackage{
+		Def: &types.WorkflowDef{
+			Name:  "map-one-batch",
+			Nodes: []types.NodeDef{{Name: "m", Type: "xflow.map"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("compile projected package: %v", err)
+	}
+	idx, _ := g.NodeIndex("m")
+	if g.BodyAt(idx) != nil {
+		t.Fatal("the trusted path now projects a body for a bodyless map node, so this test " +
+			"no longer reaches the runtime path it exists to pin — ErrNoMapBody would be " +
+			"unreachable and this assertion vacuous")
+	}
 
-	err := eng.ExecuteBatch(context.Background(), batch)
+	eng, batch := expandOneBatchOf(t, g, WithBatchBodyExecutor(newEchoBodyExecutor()))
+
+	err = eng.ExecuteBatch(context.Background(), batch)
 	if err == nil {
 		t.Fatal("ExecuteBatch succeeded for a map node with no body, reporting items it never processed")
 	}

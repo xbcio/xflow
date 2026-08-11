@@ -376,9 +376,15 @@ func TestCompile_UnknownConnectionNode(t *testing.T) {
 }
 
 func TestCompile_MapNodeCompilesWithoutAnyOptIn(t *testing.T) {
+	// The shape under test is the absence of an opt-in flag, not the bare
+	// {Name, Type} node this used to use: a map node now needs a body or an
+	// expression regardless of any flag (see expansion_requires_body_test.go).
 	def := &types.WorkflowDef{
-		Name:  "wf",
-		Nodes: []types.NodeDef{{Name: "m", Type: "xflow.map"}},
+		Name: "wf",
+		Nodes: []types.NodeDef{{Name: "m", Type: "xflow.map", Parameters: map[string]any{
+			"items": "$input.rows",
+			"body":  subgraphBody(),
+		}}},
 	}
 	if _, err := Compile(def); err != nil {
 		t.Fatalf("xflow.map must compile without an opt-in flag: %v", err)

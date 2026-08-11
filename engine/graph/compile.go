@@ -40,15 +40,45 @@ var transformNodeTypes = map[string]bool{
 	"xflow.map": true,
 }
 
+// fanOutNodeTypes are the node types that fan out — whose successful output is
+// a set of batches the engine expands into sub-executions rather than a value to
+// commit — WHEN they are written in their body form.
+//
+// This set is what makes that runtime decision compile-time knowable. The engine
+// no longer sniffs an output key to decide whether to expand; it reads the
+// node's projected body (graph.BodyAt). For that to be sound, a node of one of
+// these types must never compile in a shape where its handler would emit a
+// fan-out descriptor with no body projected — the engine would treat the
+// descriptor as an ordinary value and commit {items, batches, ...} as the node's
+// result, with the body never run. validateNodeBody rule 3 is what forbids that
+// shape.
+//
+// The expression form is the other side of the same contract: it projects no
+// body, so the engine commits its output verbatim — which is why its handler
+// must return the finished {results, count} rather than a descriptor.
+//
+// It is a literal list rather than a value check because the property is about
+// what the HANDLER does, which no parameter can show.
+//
+// xflow.split is not here. It is rejected outright in registerNodes: it fans
+// out through downstream connections rather than a body, so there is nothing
+// for the engine to expand and every batch fails.
+var fanOutNodeTypes = map[string]bool{
+	"xflow.map": true,
+}
+
 // bannedBodyMemberTypes are the node types a body sub-graph may never contain,
 // named literally because each is banned for a reason a value cannot show:
 //
 //   - xflow.subgraph is the body container itself. It has no unit-layer
 //     semantics and is already rejected at the top level.
 //   - xflow.split is rejected everywhere (see registerNodes).
-//   - xflow.map fans out unconditionally: its handler emits the expansion
-//     marker in BOTH forms, so even the expression form — which carries no body
-//     for a value check to see — expands into batches inside the body.
+//   - xflow.map is a fan-out node (see fanOutNodeTypes). In its body form it
+//     expands, so nesting one inside a body is exactly the recursion this ban
+//     exists for. Its expression form does not expand and would be harmless,
+//     but the ban stays type-level rather than form-level: a member's form is
+//     one edit away from changing, and a ban that a parameter tweak can lift
+//     silently is not a ban.
 //
 // The recursion ban that must stay extensible — a member that itself carries a
 // sub-graph body, making the sub-execution tree unbounded — is NOT expressed
@@ -569,27 +599,46 @@ func extractMergeMode(nd types.NodeDef) string {
 //     "body" belongs to that node (xflow.http's is a request payload). The
 //     compiler must not have an opinion about its shape.
 //
+// Fan-out-only (fanOutNodeTypes):
+//
+//  3. A fan-out node MUST declare exactly one of a sub-graph body or an
+//     expression. See fanOutNodeTypes for why this one is load-bearing rather
+//     than tidy: the engine decides "is this output a fan-out descriptor or a
+//     value?" from the compiled body, so a fan-out node that compiles with
+//     neither gets its descriptor committed as an ordinary output and its body
+//     never runs. For a transform node this overlaps rule 1 — the difference is
+//     that rule 1 lets a parameterless node through and this one does not.
+//
 // Every node:
 //
-//  3. A parameterless node (nd.Parameters is nil/empty) is left completely
-//     untouched: TestCompile_MapNodeCompilesWithoutAnyOptIn requires a bare
-//     `{Name: "m", Type: "xflow.map"}` to keep compiling with no opt-in, so
-//     these rules only engage once the node actually declares parameters.
-//  4. A node whose body IS a sub-graph (declaresSubgraphBody — the value's
+//  4. A parameterless node (nd.Parameters is nil/empty) is left untouched by
+//     the remaining rules: they only engage once the node declares parameters.
+//     Rule 3 is deliberately checked BEFORE this, because a bare
+//     `{Name: "m", Type: "xflow.map"}` is exactly one of the shapes it exists
+//     to reject.
+//  5. A node whose body IS a sub-graph (declaresSubgraphBody — the value's
 //     shape, not the node's type) has that sub-graph validated: its members may
 //     not be xflow.split / xflow.subgraph / xflow.map, and may not themselves
 //     declare a sub-graph body. v1 forbids nesting because recursive fan-out
 //     makes the sub-execution tree unbounded, and checking each member's own
 //     parameters is what makes that ban hold for a node type that grows a body
 //     after this code was written.
-//  5. The body's members must have a unique, dominating entry — reusing
+//  6. The body's members must have a unique, dominating entry — reusing
 //     resolveGroupEntry/assertEntryDominates exactly as group compilation
 //     does, since a body and a node group are the same structure.
 //
 // Nothing here is xflow.map-specific, and a new body-bearing node type needs no
-// entry anywhere: rules 3-5 recognize its body by shape. Only a new TRANSFORM
-// needs one line in transformNodeTypes, for rules 1-2.
+// entry anywhere: rules 4-6 recognize its body by shape. Only a new TRANSFORM
+// needs a line in transformNodeTypes (rules 1-2), and only a new FAN-OUT needs
+// one in fanOutNodeTypes (rule 3).
 func validateNodeBody(nd types.NodeDef) error {
+	if fanOutNodeTypes[nd.Type] && !declaresSubgraphBody(nd.Parameters) {
+		if expr, _ := nd.Parameters["expression"].(string); expr == "" {
+			return fmt.Errorf("node %q: %s requires exactly one of a body sub-graph "+
+				`(parameters.body with type %q) or parameters.expression`,
+				nd.Name, nd.Type, subgraphNodeType)
+		}
+	}
 	if len(nd.Parameters) == 0 {
 		return nil
 	}
