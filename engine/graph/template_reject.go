@@ -69,6 +69,20 @@ var evaluableParams = map[string]map[string]bool{
 	"xflow.trigger.webhook":   {},
 	"xflow.trigger.kafka":     {},
 	"xflow.trigger.redis_hub": {},
+	// Action and group nodes whose handlers never call exprx: database uses
+	// params as column/table names, grpc uses them as host/service/method
+	// literals, notification sends to/subject/message verbatim, approval and
+	// wait use approvers/signal_name as config, supply nodes use resource/content
+	// as identifiers, and pick/rename use field lists as mapping keys.
+	"xflow.database":         {},
+	"xflow.grpc":             {},
+	"xflow.notification":     {},
+	"xflow.approval":         {},
+	"xflow.wait":             {},
+	"xflow.supply.external":  {},
+	"xflow.supply.static":    {},
+	"xflow.transform.pick":   {},
+	"xflow.transform.rename": {},
 }
 
 // evaluableSubFields exempts a path INSIDE a parameter for node types whose
@@ -80,6 +94,19 @@ var evaluableSubFields = map[string]map[string][]string{
 	// evaluated. "output" and any other key are literal.
 	"xflow.switch": {"rules": {"condition"}},
 }
+
+// EvaluableParams reports, per node type, which parameters that type's
+// handler evaluates. The returned map must be treated as read-only.
+//
+// Exported for two consumers that must never keep a second copy of this
+// data: the boundary evaluation layer, which derives its exemption set by
+// negating this table, and the registry-coverage test, which asserts every
+// registered node type has an entry here.
+//
+// The map is returned directly (no deep copy) because both consumers are
+// read-only by contract and this is called on hot paths (graph compilation).
+// Mutating the returned map is a programming error.
+func EvaluableParams() map[string]map[string]bool { return evaluableParams }
 
 // containsTemplate reports whether s carries either template form. It keys off
 // "{{" alone: "${{" contains it, and a value with braces but no "{{" -- an
