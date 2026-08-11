@@ -34,10 +34,12 @@
 
 T11 声明它，本打算由 T12 消费，T12 没有消费。**明确保留不删**：它描述的
 `{expression | body}` 二选一形态正是 filter/reduce 落地时要用的，删掉等于丢掉一份
-已写好的设计意图。落地 filter/reduce 时一并消费它——注意 `validateNodeBody` 的
-「expression 与 body 二选一」是按 `xflow.map` 的字面参数名写的（`xflow.http` 有
-body 而无 expression，所以那条规则不能一般化），换个替代参数名的新类型要在那里
-补一行。
+已写好的设计意图。
+
+P2-5 修完后，编译期已经按这个形状执行了：`transformNodeTypes` 就是它说的
+「transform-style node」集合，`validateNodeBody` 对集合里每个类型执行同一条二选一。
+缺的只是**结构体本身仍无人反序列化到**——各节点仍从 `Parameters` 里逐键取
+`expression`/`body`。落地 filter/reduce 时把取参改走 `TransformSpec` 即可闭合。
 
 ### 8. `engine/graph/subgraph_package.go` 的 `ProjectSubgraphPackage` 名字有歧义
 
@@ -57,18 +59,32 @@ body 存储本来就是通用的：`NodeMeta.Body` 随节点整体走 wire 与 h
 守卫只看 `Parameters["body"]` 是否存在、不看节点类型，执行器拿到的
 `NodeBodyPackage` 也与投影者无关。卡住的只有编译期那三处字面量。
 
-现在由 `bodyCarryingNodeTypes`（`engine/graph/compile.go`）一处集合同时驱动校验与
-投影，新增一种带 body 的节点类型是**加一行**。判据是显式类型集而非「声明了 body
-参数」——`xflow.http` 也有一个叫 `body` 的参数，那是请求体，嗅参数名会把每个 HTTP
-请求体送进子图编译。`bannedBodyMemberTypes` 改为**从前者派生**：能带 body 的类型
-按定义就是 fan-out 节点，派生使得将来新增的类型自动被禁止嵌套，而不是因为只更新了
-一张表就悄悄变得可嵌套。
+现在由 `transformNodeTypes`（`engine/graph/compile.go`）一处集合同时驱动校验与
+投影。**这个集合就是 transform 节点集**——逐项算一个值、因而取 expression（内联、
+确定性、无 IO）与 body（逐项跑子图，带自己的耐久子执行）二选一的那类节点，正是
+`types/transform.go` 的 `TransformSpec` 描述的形状。map 是目前唯一的成员，filter、
+reduce 的累加器、sort 的 key 落地时各加一行。
 
-两条回归测试（`engine/graph/body_carrying_types_test.go`）各自实测过「去掉对应实现
-就会红」：`TestEveryBodyCarryingTypeIsBannedFromBodies` 钉派生关系，
-`TestHTTPBodyParameterIsNotProjectedAsASubgraph` 钉判据不得退化成嗅参数名。
+判据是显式的 transform 类型集，而非「声明了 body 参数」：`xflow.http` 也有一个叫
+`body` 的参数，但它不是 transform 节点、那是请求体，嗅参数名会把每个 HTTP 请求体
+送进子图编译。`bannedBodyMemberTypes` 改为**从前者派生**：transform 节点逐项跑
+body，把一个嵌进另一个的 body 正是这条禁令要防的递归，派生使得将来新增的 transform
+自动被禁止嵌套，而不是因为只更新了一张表就悄悄变得可嵌套。
 
-未一般化的是 `validateNodeBody` 里「expression 与 body 二选一」那条——见第 7 条。
+`validateNodeBody` 里的四条规则**全部**按类执行，一条都不是 map 特例——包括
+「expression 与 body 二选一」，它就是 transform 这个类的定义性契约。
+
+三条回归测试（`engine/graph/transform_node_types_test.go`）各自实测过反向探针：
+
+| 测试 | 反向探针 | 结果 |
+|---|---|---|
+| `TestEveryTransformTypeIsBannedFromBodies` | 删掉派生循环、退回字面量 | 红 |
+| `TestHTTPBodyParameterIsNotProjectedAsASubgraph` | 判据换成嗅 `Parameters["body"]` | 红 |
+| `TestEveryTransformTypeEnforcesExpressionXorBody` | 给某个类型开后门跳过 XOR | 红 |
+
+第三条对集合里的**每个**类型跑一遍，所以将来加 filter/reduce/sort 时它们各自的
+「二选一」自动被覆盖，不必再写一遍测试。已用「临时把 `xflow.filter` 加进集合」
+实测确认：新类型无需改任何生产代码即被三条规则覆盖。
 
 ### TS 侧 `experimental_expand?` 声明滞后（原 P2-8，2026-08-06 修复）
 
