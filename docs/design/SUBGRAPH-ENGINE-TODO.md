@@ -22,23 +22,6 @@
 
 ## P2 — 命名与死代码
 
-### 5. 给第二种节点类型加 body 时要放宽三处 map 专属判断
-
-body 存储已经是通用的：`NodeMeta.Body` 随节点整体走 wire 与 hash，fail-closed
-守卫只看 `Parameters["body"]` 是否存在、不看节点类型，执行器拿到的
-`NodeBodyPackage` 也与投影者无关。**新增一种带 body 的节点类型不需要碰 wire、
-hash、序列化或反序列化。**
-
-仍然写死 `xflow.map` 的只有三处，都在编译期：
-
-- `projectMapBodies`（`engine/graph/compile.go`）的 `nd.Type != "xflow.map"` 判断
-- `validateMapBody`（同文件）的形态校验
-- `bannedBodyMemberTypes`：禁止 body 内再嵌 map/split/subgraph，防止子执行树无界
-
-transform 类节点（filter、reduce）在逻辑超出单个表达式时天然会需要 body——
-规范当前写的 `condition: expression` 只是最简形态，不是上限。届时是「在一个 pass
-里加 case」，不是重新接一遍线。
-
 ### 6. `xflow.map` 仍然对外自称 `"_loop"`
 
 `node/internal/flow/map.go:89`、`engine/expand.go:17` 及 5 个测试文件里的标记键仍是 `_loop`。
@@ -51,7 +34,10 @@ transform 类节点（filter、reduce）在逻辑超出单个表达式时天然�
 
 T11 声明它，本打算由 T12 消费，T12 没有消费。**明确保留不删**：它描述的
 `{expression | body}` 二选一形态正是 filter/reduce 落地时要用的，删掉等于丢掉一份
-已写好的设计意图。第 5 条放宽三处 map 专属判断时一并消费它。
+已写好的设计意图。落地 filter/reduce 时一并消费它——注意 `validateNodeBody` 的
+「expression 与 body 二选一」是按 `xflow.map` 的字面参数名写的（`xflow.http` 有
+body 而无 expression，所以那条规则不能一般化），换个替代参数名的新类型要在那里
+补一行。
 
 ### 8. `engine/graph/subgraph_package.go` 的 `ProjectSubgraphPackage` 名字有歧义
 
@@ -64,6 +50,25 @@ T11 声明它，本打算由 T12 消费，T12 没有消费。**明确保留不�
 但来源与用途不同。改名会动到公开 API，未做。
 
 ## 已修复
+
+### 三处 map 专属判断写死 `xflow.map`（原 P2-5，2026-08-11 修复）
+
+body 存储本来就是通用的：`NodeMeta.Body` 随节点整体走 wire 与 hash，fail-closed
+守卫只看 `Parameters["body"]` 是否存在、不看节点类型，执行器拿到的
+`NodeBodyPackage` 也与投影者无关。卡住的只有编译期那三处字面量。
+
+现在由 `bodyCarryingNodeTypes`（`engine/graph/compile.go`）一处集合同时驱动校验与
+投影，新增一种带 body 的节点类型是**加一行**。判据是显式类型集而非「声明了 body
+参数」——`xflow.http` 也有一个叫 `body` 的参数，那是请求体，嗅参数名会把每个 HTTP
+请求体送进子图编译。`bannedBodyMemberTypes` 改为**从前者派生**：能带 body 的类型
+按定义就是 fan-out 节点，派生使得将来新增的类型自动被禁止嵌套，而不是因为只更新了
+一张表就悄悄变得可嵌套。
+
+两条回归测试（`engine/graph/body_carrying_types_test.go`）各自实测过「去掉对应实现
+就会红」：`TestEveryBodyCarryingTypeIsBannedFromBodies` 钉派生关系，
+`TestHTTPBodyParameterIsNotProjectedAsASubgraph` 钉判据不得退化成嗅参数名。
+
+未一般化的是 `validateNodeBody` 里「expression 与 body 二选一」那条——见第 7 条。
 
 ### TS 侧 `experimental_expand?` 声明滞后（原 P2-8，2026-08-06 修复）
 
@@ -162,7 +167,8 @@ apiserver+control plane+runner 三进程路径，用真实成员节点 handler
    使嵌套的逐项执行不会超出外层 group 自身的 deadline。
 2. `compileTrusted`（`CompileProjectedPackage` 对投影出的 group 包所走的路径）
    是 `Compile` pass 列表的手写平行实现，已经漂移：它跑了 `buildEdges` 与
-   `buildDependencyEdges`，却从不跑 `projectMapBodies`。于是成员 map 编译干净
+   `buildDependencyEdges`，却从不跑 `projectMapBodies`（该 pass 已于 2026-08-11
+   随 P2-5 更名为 `projectNodeBodies`）。于是成员 map 编译干净
    通过但 `NodeMeta.Body == nil`，运行期才失败。
 
 递归**不会**重新打开「嵌套 map 子执行树无界」那个 P2-5 在防的问题：map 自己的
