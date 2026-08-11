@@ -46,7 +46,6 @@ func TestEngineLoopSplitStaleBatchCannotFinalizeReclaimedParent(t *testing.T) {
 	}
 
 	loopOutput := TaskResult{Output: &types.Output{Data: map[string]any{
-		"_loop":   true,
 		"batches": [][]any{{"old"}},
 	}}}
 	firstLease, err := eng.BuildTaskLease(ctx, roots[0])

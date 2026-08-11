@@ -22,14 +22,6 @@
 
 ## P2 — 命名与死代码
 
-### 6. `xflow.map` 仍然对外自称 `"_loop"`
-
-`node/internal/flow/map.go:89`、`engine/expand.go:17` 及 5 个测试文件里的标记键仍是 `_loop`。
-设计文档（§「xflow.map 改名后标记键跟着改叫 _map」）把改名派给了扩展工作，实际没做。
-
-纯命名不对称，无功能后果。**修它要动 wire / 持久化状态格式**——这是它没在本分支
-修掉的原因，也是越晚修越贵的原因。
-
 ### 7. `types/transform.go` 的 `TransformSpec` 尚无消费者（保留）
 
 T11 声明它，本打算由 T12 消费，T12 没有消费。**明确保留不删**：它描述的
@@ -84,10 +76,46 @@ P2-5 修完后，编译期已经按这个形状执行了：`transformNodeTypes` 
 逐项根去掉 `$` 前缀。
 
 `ErrNoMapBody` 因此只剩一条可达路径——`compileTrusted`（投影包走的受信路径，
-不跑 `validateNodeBody`）。该路径正是本文件下方记录过漂移的那条，值得继续守，
-`TestExecuteBatchWithoutABodyFailsInsteadOfPassingItemsThrough` 已改为经
-`CompileProjectedPackage` 构造这个形状，并先断言 `BodyAt == nil` 以防哪天受信路径
-补上投影后这条测试变成空断言。
+不跑 `validateNodeBody`）。判据下沉之后这条路径连「可达」都不再成立，守卫随之
+上移到编译期（见下一节），`ErrNoMapBody` 本身已删除。
+
+### 扩展判据从嗅 payload 改为读编译期投影的 body + 标记键彻底移除（原 P2-6，2026-08-11 修复）
+
+原条目说这是「纯命名不对称，无功能后果」，且「修它要动 wire / 持久化状态格式」。
+两句都不对：`_loop`/`_split` 从来不只是名字，它是**运行期的扩展判据**
+（`isLoopSplitOutput` 嗅 `result.Output.Data` 里有没有这两个键）；而正因为它是
+判据而不是数据，删掉它不动任何持久化格式——判据换源即可。
+
+**功能后果**：任何 handler 只要在输出里用了 `_loop` 这个字段名，就把自己变成了
+扇出节点。它没有 body，扩展出的每个批次撞 `ErrNoMapBody`、重试、整条执行挂到
+deadline。`xflow.split` 的编译期拒绝（`split_rejection_test.go`）实测过这个下场。
+
+判据改为 `g.BodyAt(nodeIdx) != nil`：一个节点扩展，当且仅当编译器给它投影了子图
+body。这是图的结构性质，payload 无权回答。`BodyAt` 的权威性由快照守卫兜底——
+声明了 body 却没带投影包的节点解码不出来。
+
+**判据下沉把一个已知缺陷的症状从响亮改成了静默**，这是本次最容易漏的一环：
+`compileTrusted` 是 `Compile` 的 pass 列表的手写平行实现，本文件上方记录过它漂移
+（曾不跑 `projectNodeBodies`）。旧判据下这次漂移每个批次以 `ErrNoMapBody` 响亮
+失败；新判据下没有 body 就不扩展，批次根本不产生，handler 发的扇出描述符会被当成
+节点的普通输出提交下去，body 跑零次且无任何诊断。所以守卫必须同时上移到编译期，
+且必须落在 `projectNodeBodies` 这个**两条编译路径共用**的 pass 上
+（`assertFanOutNodesResolved`），而不是只在 `Compile` 侧的 `validateNodeBody` 里。
+
+标记键随之从 `node/internal/flow/map.go` 与 `split.go` 移除，不改名。一个「必须存在
+才正确、却没有任何东西能校验它存在」的键，叫什么名字都是负债。
+
+覆盖：`engine/expansion_criterion_test.go`（无 body 的节点带满标记键也不扩展 /
+expression 形态不扩展 / 有 body 的 map 无标记键也扩展 / 失败的 map 走普通错误路径）、
+`engine/batch_body_test.go` 的 `TestTheTrustedCompilePathAlsoRejectsAFanOutNodeWithNoBody`。
+反向探针实测：判据退回嗅 payload → 前两条红；判据退成裸 `Type == "xflow.map"` →
+expression 那条红；摘掉 `assertFanOutNodesResolved` → 受信路径那条红。
+
+**一条负结果如实记录**：`taskResultExpands` 里「只有成功才扩展」的收窄摘掉后，
+全仓一条测试都不红。原因是失败此时改走 `commitLegacyTaskResult`，其错误分支跑同一
+套重试与 OnError，提交时又在 `!AllowCycles` 处折回 `commitAcyclicNode`——两条路在
+失败处理上是收敛的。收窄予以保留（失败不该进扩展路径），但它防的是将来两条路分叉，
+不是今天的缺陷。
 
 ### 三处 map 专属判断写死 `xflow.map` + 带请求体的 HTTP 节点存下去读不回来（原 P2-5，2026-08-11 修复）
 

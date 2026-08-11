@@ -96,9 +96,13 @@ func (n *MapNode) Execute(ctx context.Context, input *types.Input) (*types.Outpu
 
 	batches := slices.Collect(slices.Chunk(items, batchSize))
 
+	// No marker key. The engine reads "does this node expand?" off the compiled
+	// graph (a projected body), not off this map — a payload cannot answer a
+	// structural question, and while it was asked to, any handler that happened
+	// to name a field "_loop" turned itself into a fan-out node with no body to
+	// run.
 	return &types.Output{
 		Data: map[string]any{
-			"_loop":       true,
 			"items":       items,
 			"batches":     batches,
 			"batch_size":  batchSize,

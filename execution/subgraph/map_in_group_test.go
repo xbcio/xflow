@@ -14,10 +14,10 @@ import (
 )
 
 // groupMapFanoutHandler is the xflow.map node's own handler: it emits the
-// fan-out shape the engine's expand pass recognizes (_loop + batches), exactly
-// as the production xflow.map node does. It deliberately does NOT run the body
-// itself -- running the body is the engine's job, via the batch body executor
-// this test is about.
+// batches descriptor, exactly as the production xflow.map node does. Whether
+// those batches expand is not its call -- the engine reads that off the node's
+// compiled body. It deliberately does NOT run the body itself; running the body
+// is the engine's job, via the batch body executor this test is about.
 type groupMapFanoutHandler struct{}
 
 func (groupMapFanoutHandler) Descriptor() types.Descriptor {
@@ -27,7 +27,6 @@ func (groupMapFanoutHandler) Descriptor() types.Descriptor {
 func (groupMapFanoutHandler) Execute(_ context.Context, _ *types.Input) (*types.Output, error) {
 	items := []any{1, 2, 3}
 	return &types.Output{Data: map[string]any{
-		"_loop":       true,
 		"items":       items,
 		"batches":     [][]any{{items[0]}, {items[1]}, {items[2]}},
 		"batch_size":  1,

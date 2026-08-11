@@ -44,10 +44,13 @@ func (e *Engine) commitAcyclicTaskResult(ctx context.Context, lease *TaskLease, 
 	if result.Output != nil && result.Output.Data != nil {
 		data = result.Output.Data
 	}
-	// Loop/Split expansion has a separate sub-execution protocol and must not
-	// be counted as an ordinary static DAG terminal node.
-	if isLoopSplitOutput(data) {
-		return CommitOutcomeTransientError, fmt.Errorf("atomic commit is not available for loop/split output from %q", task.NodeName)
+	// Expansion has a separate sub-execution protocol and must not be counted as
+	// an ordinary static DAG terminal node. CommitTaskResultWithOutcome routes
+	// an expanding success away from this path before it gets here, so this is a
+	// backstop against a future caller reaching commitAcyclicTaskResult
+	// directly — not a second, independent decision about what expands.
+	if expandsIntoSubExecutions(g, task.NodeIdx) {
+		return CommitOutcomeTransientError, fmt.Errorf("atomic commit is not available for the expansion output of %q", task.NodeName)
 	}
 
 	port := "main"

@@ -388,7 +388,6 @@ func TestEngineLoopSplitJSONBatchesUseDurableSystemTasks(t *testing.T) {
 
 	queue.err = errOutboxQueueUnavailable
 	result := TaskResult{Output: &types.Output{Data: map[string]any{
-		"_loop":   true,
 		"batches": []any{[]any{"from-json"}},
 	}}}
 	if err := eng.CommitTaskResult(ctx, lease, result); !errors.Is(err, errOutboxQueueUnavailable) {

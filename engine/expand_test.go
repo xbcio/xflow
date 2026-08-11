@@ -163,8 +163,7 @@ func (h *loopHandler) Descriptor() types.Descriptor {
 func (h *loopHandler) Execute(_ context.Context, input *types.Input) (*types.Output, error) {
 	return &types.Output{
 		Data: map[string]any{
-			"_loop":       true,
-			"items":       []any{"a", "b", "c"},
+				"items":       []any{"a", "b", "c"},
 			"batches":     [][]any{{"a"}, {"b"}, {"c"}},
 			"batch_size":  1,
 			"total":       3,

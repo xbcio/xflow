@@ -79,7 +79,6 @@ func (n *SplitNode) Execute(ctx context.Context, input *types.Input) (*types.Out
 
 	return &types.Output{
 		Data: map[string]any{
-			"_split":      true,
 			"items":       items,
 			"batches":     batches,
 			"batch_size":  batchSize,

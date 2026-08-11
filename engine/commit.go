@@ -50,7 +50,7 @@ func (e *Engine) CommitTaskResultWithOutcome(ctx context.Context, lease *TaskLea
 		return CommitOutcomeAccepted, nil
 	}
 
-	if !g.AllowCycles() && result.Suspend == nil && (result.Output == nil || !isLoopSplitOutput(result.Output.Data)) {
+	if !g.AllowCycles() && result.Suspend == nil && !taskResultExpands(g, lease, result) {
 		return e.commitAcyclicTaskResult(ctx, lease, g, result)
 	}
 	if result.Suspend != nil {
@@ -126,7 +126,7 @@ func (e *Engine) commitLegacyTaskResult(ctx context.Context, lease *TaskLease, g
 	if result.Output != nil && result.Output.Data != nil {
 		data = result.Output.Data
 	}
-	if isLoopSplitOutput(data) {
+	if expandsIntoSubExecutions(g, task.NodeIdx) {
 		node, claimed, err := e.state.ClaimTaskLease(ctx, lease)
 		if err != nil {
 			return CommitOutcomeTransientError, err

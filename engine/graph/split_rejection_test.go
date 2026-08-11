@@ -10,18 +10,20 @@ import (
 // TestCompile_RejectsSplitNode pins the compile-time rejection of xflow.split.
 //
 // split was never implemented. Its handler (node/internal/flow/split.go) emits
-// a fan-out shape carrying "_split", and isLoopSplitOutput (engine/expand.go)
-// accepts _split exactly as it accepts _loop -- so a split node DOES expand
-// into batch tasks. But runBatchBody unconditionally requires a projected body,
-// xflow.split declares no body parameter, and it is not in
-// transformNodeTypes, so projectNodeBodies never projects one for it.
-// Measured end to end before this rejection was added: a
-// submitted split workflow produced no error at all, it simply never completed
-// -- every batch failed, retried with backoff, and the execution hung until its
-// deadline.
+// a batches descriptor, but xflow.split declares no body parameter and is not
+// in transformNodeTypes, so projectNodeBodies never projects one for it.
 //
-// Rejecting at compile time turns that silent hang into an immediate, named
-// error at the point the workflow is defined.
+// Measured end to end before this rejection was added, under the criterion of
+// the time (the engine sniffed the output for a "_split" marker key): a
+// submitted split workflow produced no error at all, it simply never completed
+// -- every batch failed for want of a body, retried with backoff, and the
+// execution hung until its deadline. The criterion has since moved to the
+// compiled body, which changes the failure but does not remove it: a split node
+// would now not expand at all, and its descriptor would be committed as the
+// node's ordinary output -- a silent wrong answer in place of a hang.
+//
+// Rejecting at compile time turns either outcome into an immediate, named error
+// at the point the workflow is defined.
 func TestCompile_RejectsSplitNode(t *testing.T) {
 	def := &types.WorkflowDef{
 		Name: "uses-split",

@@ -15,15 +15,6 @@ import (
 // body look like it ran while nothing in the body executed.
 var ErrNoBatchBodyExecutor = errors.New("no batch body executor configured")
 
-// ErrNoMapBody reports that a map node's batch reached execution but the node
-// declares no body. Top-level compilation now rejects that shape outright — a
-// map node must declare a body or an expression — so this is reachable only
-// through compileTrusted, the projection pipeline's path, which skips
-// validateNodeBody. That path is worth guarding: it is a hand-written parallel
-// of Compile's pass list and has drifted from it before, once omitting the body
-// projection entirely so that every member map compiled cleanly with a nil body.
-var ErrNoMapBody = errors.New("map node declares no body to run")
-
 // BatchItemResult is one item's body outcome. It is what ends up in the map
 // node's flattened results array, one entry per item regardless of how the
 // items were batched.

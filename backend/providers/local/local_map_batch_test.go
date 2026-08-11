@@ -28,7 +28,6 @@ func (h *mapFanoutHandler) Descriptor() types.Descriptor {
 func (h *mapFanoutHandler) Execute(_ context.Context, _ *types.Input) (*types.Output, error) {
 	items := []any{map[string]any{"id": 1}, map[string]any{"id": 2}}
 	return &types.Output{Data: map[string]any{
-		"_loop":       true,
 		"items":       items,
 		"batches":     [][]any{{items[0]}, {items[1]}},
 		"batch_size":  1,

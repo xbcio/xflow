@@ -9,18 +9,48 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
-// isLoopSplitOutput detects if a node output signals loop/split expansion.
-func isLoopSplitOutput(data map[string]any) bool {
-	if data == nil {
+// expandsIntoSubExecutions reports whether this node's successful output is a
+// fan-out descriptor to expand rather than a value to commit.
+//
+// The answer is a structural property of the graph, not of the payload: a node
+// expands exactly when the compiler projected a sub-graph body for it. That is
+// decidable at compile time, so it is decided there —
+// engine/graph.projectNodeBodies puts the body on the node, and the snapshot
+// decoder refuses to load a node that declares a body without one, which is
+// what makes BodyAt authoritative here.
+//
+// The previous criterion sniffed the payload for "_loop"/"_split" marker keys.
+// Payloads cannot answer this question: any handler can name a field "_loop",
+// and doing so turned it into a fan-out node whose batches then had no body to
+// run — every batch failed, retried, and the execution hung until its deadline.
+// The markers were removed rather than renamed, because a key that must be
+// present for correctness but that nothing can validate is a liability whatever
+// it is called.
+func expandsIntoSubExecutions(g *graph.Graph, nodeIdx int) bool {
+	return g != nil && g.BodyAt(nodeIdx) != nil
+}
+
+// taskResultExpands narrows expandsIntoSubExecutions to the results that
+// actually fan out. Only a success does: a map node that failed, or that routed
+// to its error port, is an ordinary node failure. The payload-sniffing criterion
+// got this for free, because a failed task carries no output to sniff; a
+// criterion read off the graph has to say it.
+//
+// Measured: dropping the narrowing changes no observable behaviour today. A
+// failing map then reaches commitLegacyTaskResult instead, whose error branch
+// runs the same retry budget and OnError strategy and whose commit redirects
+// back to commitAcyclicNode for any acyclic graph — the two paths converge. The
+// narrowing is kept because that convergence is incidental: it holds only as
+// long as the legacy path keeps mirroring the acyclic one, and a failure has no
+// business entering an expansion path to begin with.
+func taskResultExpands(g *graph.Graph, lease *TaskLease, result TaskResult) bool {
+	if result.Error != nil || result.Output == nil || result.Output.Error != nil {
 		return false
 	}
-	if _, ok := data["_loop"]; ok {
-		return true
+	if outputPortRetryError(result.Output) != nil {
+		return false
 	}
-	if _, ok := data["_split"]; ok {
-		return true
-	}
-	return false
+	return expandsIntoSubExecutions(g, lease.Task.NodeIdx)
 }
 
 // expandLoopSplit starts one lease-fenced child generation. The parent stays
@@ -254,10 +284,11 @@ func (e *Engine) runBatchBody(ctx context.Context, g *graph.Graph, lease *TaskLe
 	meta := g.NodeAt(lease.Task.NodeIdx)
 	body := g.BodyAt(lease.Task.NodeIdx)
 	if body == nil {
-		// A map node with no body has nothing to run per item. The pre-body
-		// pass-through silently returned the items unchanged, which made this
-		// indistinguishable from a body that ran; say it instead.
-		return nil, batchBodyError(lease.Task.NodeName, batchIndex, ErrNoMapBody)
+		// Unreachable by construction: a batch exists only because this node
+		// expanded, and expandsIntoSubExecutions expands only what has a body.
+		// Kept as an assertion rather than a nil dereference two lines down.
+		return nil, batchBodyError(lease.Task.NodeName, batchIndex,
+			fmt.Errorf("node %q expanded into batches without a projected body", meta.Name))
 	}
 
 	allItems, batchSize := mapBatchingContext(t, len(items))

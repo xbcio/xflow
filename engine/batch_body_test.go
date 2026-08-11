@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 
@@ -80,7 +81,6 @@ func (h *sizedMapHandler) Execute(_ context.Context, _ *types.Input) (*types.Out
 		batches = append(batches, items[i:end])
 	}
 	return &types.Output{Data: map[string]any{
-		"_loop":       true,
 		"items":       items,
 		"batches":     batches,
 		"batch_size":  h.batchSize,
@@ -302,41 +302,31 @@ func TestExecuteBatchWithoutABodyExecutorFailsInsteadOfPassingItemsThrough(t *te
 	}
 }
 
-// ErrNoMapBody 现在只在**受信编译路径**上可达，而它恰好是本仓库出现过的那类
-// 缺陷所在：compileTrusted（投影出的 group 包走的路径）是 Compile 的 pass 列表
-// 的手写平行实现，已经漂移过一次——它曾不跑 projectNodeBodies，于是成员 map
-// 编译干净通过但 Body == nil，运行期才失败。
+// 无 body 无 expression 的 map 现在**两条**编译路径都拒绝，包括受信的那条。
 //
-// 顶层 graph.Compile 已经把无 body 无 expression 的 map 挡在编译期（见
-// engine/graph/expansion_requires_body_test.go）。这条测试因此刻意**不**走
-// Compile，而是用 CompileProjectedPackage 造出那个形状：受信路径不跑
-// validateNodeBody，所以这个形状仍然到得了运行期。到达时必须报
-// ErrNoMapBody，而不是把批次里的 items 原样报回去——后者会让「body 从没跑过」
-// 与「body 跑了」在下游完全无法区分。
-func TestExecuteBatchWithoutABodyFailsInsteadOfPassingItemsThrough(t *testing.T) {
-	g, err := graph.CompileProjectedPackage(&graph.SubgraphPackage{
+// 这条测试守的缺陷仍是本仓库真实出现过的那个：compileTrusted（投影出的 group
+// 包走的路径）是 Compile 的 pass 列表的手写平行实现，已经漂移过一次——它曾不跑
+// projectNodeBodies，于是成员 map 编译干净通过但 Body == nil。变的是拦截点。
+//
+// 扩展判据下沉到 `BodyAt != nil` 之前，那次漂移在运行期以 ErrNoMapBody 响亮
+// 失败（每批次一次）。判据下沉后它不会再失败了：没有 body 就不扩展，批次根本
+// 不产生，handler 发的扇出描述符会被当成节点的普通输出提交下去，body 跑零次
+// 且无任何诊断——比原先的失败更糟。所以守卫必须上移到编译期，且必须落在
+// projectNodeBodies 这个**两条路径共用**的 pass 上（assertFanOutNodesResolved），
+// 而不是只在 Compile 侧的 validateNodeBody 里。
+func TestTheTrustedCompilePathAlsoRejectsAFanOutNodeWithNoBody(t *testing.T) {
+	_, err := graph.CompileProjectedPackage(&graph.SubgraphPackage{
 		Def: &types.WorkflowDef{
 			Name:  "map-one-batch",
 			Nodes: []types.NodeDef{{Name: "m", Type: "xflow.map"}},
 		},
 	})
-	if err != nil {
-		t.Fatalf("compile projected package: %v", err)
-	}
-	idx, _ := g.NodeIndex("m")
-	if g.BodyAt(idx) != nil {
-		t.Fatal("the trusted path now projects a body for a bodyless map node, so this test " +
-			"no longer reaches the runtime path it exists to pin — ErrNoMapBody would be " +
-			"unreachable and this assertion vacuous")
-	}
-
-	eng, batch := expandOneBatchOf(t, g, WithBatchBodyExecutor(newEchoBodyExecutor()))
-
-	err = eng.ExecuteBatch(context.Background(), batch)
 	if err == nil {
-		t.Fatal("ExecuteBatch succeeded for a map node with no body, reporting items it never processed")
+		t.Fatal("the trusted path compiled a map node with neither a body nor an expression; " +
+			"at run time it does not fail — it commits the handler's fan-out descriptor as " +
+			"the node's output and never runs a body")
 	}
-	if !errors.Is(err, ErrNoMapBody) {
-		t.Errorf("ExecuteBatch error = %v, want ErrNoMapBody", err)
+	if !strings.Contains(err.Error(), `"m"`) || !strings.Contains(err.Error(), "xflow.map") {
+		t.Errorf("rejection %q does not name both the offending node and its type", err)
 	}
 }

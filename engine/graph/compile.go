@@ -338,6 +338,36 @@ func projectNodeBodies(def *types.WorkflowDef, g *Graph) error {
 		}
 		g.nodes[i].Body = body
 	}
+	return assertFanOutNodesResolved(def, g)
+}
+
+// assertFanOutNodesResolved is projectNodeBodies' post-condition: every fan-out
+// node has come out of the pass either with a projected body (it expands) or
+// with an expression (it computes inline). Nothing else is runnable.
+//
+// This is the same rule validateNodeBody rule 3 states, checked again at a
+// different place, and the duplication is the point. Rule 3 runs in
+// registerNodes, which compileTrusted does not call — compileTrusted is a
+// hand-written parallel of Compile's pass list and has drifted from it before,
+// once omitting this very pass so that every group-member map compiled cleanly
+// with a nil body. Before the expansion criterion moved to the graph, that
+// drift surfaced loudly at run time as ErrNoMapBody, once per batch. It no
+// longer can: a node with no body does not expand, so the same drift would now
+// commit the handler's fan-out descriptor as the node's ordinary output and run
+// the body zero times, silently. A post-condition on the pass itself is the
+// only check both compilation paths are forced through.
+func assertFanOutNodesResolved(def *types.WorkflowDef, g *Graph) error {
+	for i, nd := range def.Nodes {
+		if !fanOutNodeTypes[nd.Type] || g.nodes[i].Body != nil {
+			continue
+		}
+		if expr, _ := nd.Parameters["expression"].(string); expr != "" {
+			continue
+		}
+		return fmt.Errorf("node %q: %s compiled with neither a projected body nor an "+
+			"expression, so it would neither expand nor compute; its handler's output "+
+			"would be committed verbatim and its body never run", nd.Name, nd.Type)
+	}
 	return nil
 }
 
