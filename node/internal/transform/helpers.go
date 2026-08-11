@@ -3,7 +3,7 @@ package transform
 import (
 	"fmt"
 
-	"github.com/xbcio/xflow/node/internal/utils/exprx"
+	"github.com/xbcio/xflow/exprx"
 	"github.com/xbcio/xflow/types"
 	"github.com/spf13/cast"
 )

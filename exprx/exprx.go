@@ -1,6 +1,11 @@
-// Package expr provides the expression evaluation helpers shared by builtin
-// nodes (xflow.if, xflow.switch, xflow.map, xflow.split, xflow.function,
-// xflow.script). These helpers are not part of the public node API.
+// Package exprx provides expression evaluation helpers originally used only by
+// builtin nodes (xflow.if, xflow.switch, xflow.map, xflow.split,
+// xflow.function, xflow.script).
+//
+// It was promoted from node/internal/utils/exprx to a top-level package because
+// the execution layer needs to perform template evaluation at the handler
+// boundary — the single common entry point — and Go's internal-package rule
+// forbids execution/ from importing node/internal/.
 package exprx
 
 import (

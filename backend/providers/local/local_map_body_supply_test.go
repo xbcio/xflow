@@ -20,8 +20,8 @@ import (
 // unit-level claim).
 //
 // supplyReaderHandler is the body's only node. It reads $supplies.rules off
-// the process-wide supply.Default registry, exactly the way node/internal/
-// utils/exprx.BuildExprEnv's default does for xflow.function/xflow.script --
+// the process-wide supply.Default registry, exactly the way
+// exprx.BuildExprEnv's default does for xflow.function/xflow.script --
 // this test does not go through the expr engine itself (that machinery is
 // exercised elsewhere) but the plumbing under test (ProjectNodeBodyPackage's
 // VisibleSupplies, CompileProjectedPackage's validateSupplyUsage) is identical

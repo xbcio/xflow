@@ -7,7 +7,7 @@ import (
 	"github.com/xbcio/xflow/types"
 
 	nodeinternal "github.com/xbcio/xflow/node/internal"
-	"github.com/xbcio/xflow/node/internal/utils/exprx"
+	"github.com/xbcio/xflow/exprx"
 	"github.com/xbcio/xflow/node/registry"
 	"github.com/spf13/cast"
 )
