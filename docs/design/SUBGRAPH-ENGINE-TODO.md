@@ -13,12 +13,41 @@
 
 ### 4. 无 `max_concurrency` 节流
 
-设计时显式排除（见 spec §10.1），当时 body 还是 pass-through stub。**T12/T13 之后
-风险画像变了**：一个很大的 `items` 数组现在会把「全部批次一次性灌进队列」变成
-「全部批次一次性对下游发起真实 I/O」（HTTP 调用、脚本执行）。爆炸半径从队列深度
-升级为对下游系统的并发外呼。
+设计时显式排除（见 spec §10.1），当时 body 还是 pass-through stub。
+
+**本条原先写的理由是错的，2026-08-11 实测推翻。** 原文说风险是「全部批次一次性对
+下游发起真实 I/O」，把爆炸半径描述成对下游系统的并发外呼。实际不成立：并发度由
+worker 池上限决定，与批次数无关——local 后端是 `memoryQueue` 的 `concurrency` 个
+worker，分布式后端是 runner 侧的池。批次多只让队列变深，不让并发变宽。
+
+真实的故障是另一回事，而且比这严重得多：`FlushOutbox` 跑在 queue worker 协程上
+（`engine/atomic.go` 把 `TaskTypeNodeBatch` 直接派进 `ExecuteBatch`），而
+`memoryQueue.Enqueue` 满了会阻塞。于是**扇出宽过队列缓冲就是永久死锁**——每个
+worker 都停在一次只有它们自己能腾出空间的 send 上。默认 `concurrency=4` 下四个
+400 批次的并行 map 就够（1600 > 1024 缓冲）。已在 8180d58 修复：`FlushOutbox`
+改走可选的 `TryEnqueue`，满了就把剩余意图留在 outbox 里等下一轮，且**不消耗投递
+预算**（走失败路径会 `Attempts++` 并最终进死信，等于静默丢活）。回归测试见
+`backend/providers/local/fanout_backpressure_test.go`。
+
+所以 `max_concurrency` 现在纯粹是**吞吐整形**需求（限制单个 map 占用队列的份额，
+避免一个大 map 饿死同执行内的其他分支），不再是正确性缺口。优先级相应下调。
 
 无测试、无告警。合并时无证据表明造成过真实事故。
+
+### 9. 并发 `FlushOutbox` 会重复投递同一条意图
+
+多个 worker 可以同时对同一 execution 调 `FlushOutbox`，各自 `ListOutbox` 到同一条
+未 ack 的条目、各自 enqueue、各自 ack。body 因此被多跑。实测：800 项的 map 在
+`concurrency=4` 下 body 跑了 826～1110 次，`concurrency=1` 下精确 800 次。
+
+**这在契约内**，不是缺陷：`engine.OutboxEntry` 的注释写明投递是 at-least-once，
+`engine/expand.go` 也要求「有副作用的 body 节点必须按 `$item` 里的业务键幂等」。
+`fanout_backpressure_test.go` 的多 worker 用例因此断言「≥ 期望数」而非精确相等。
+
+记在这里是因为**扇出死锁修复（8180d58）测量上放大了这个窗口**——每次 flush 变短，
+两个 worker 撞上同一批条目的机会变多（同样 800 项从 826 涨到 1004～1110）。要收窄
+的话，路子是给 `ListOutbox` 加投递租约（列出即标记 in-flight，超时才可再列），
+但这会把 outbox 从「无状态列表」变成「有租约的队列」，成本不小。当前无需求驱动。
 
 ## P2 — 命名与死代码
 
