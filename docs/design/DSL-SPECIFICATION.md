@@ -1650,8 +1650,9 @@ result: "${{ $nodes['final_merge'].status }}"
 > **⚠️ 未实现 — 编译期拒绝。** `xflow.split` 从未实现过。它的 handler
 > (`node/internal/flow/split.go`) 确实会产出扇出结构，引擎的 `isLoopSplitOutput`
 > 也确实把它展开成 batch 任务；但 batch 执行要求一个已投影的 body，而
-> `xflow.split` 根本没有 `body` 参数、也不是 transform 节点（不在
-> `transformNodeTypes` 里），`projectNodeBodies` 因此不会给它投影。实测结果：提交一个含 split 的工作流不会报错，而是**永远挂起**——每个
+> `xflow.split` 根本没有 `body` 参数，`projectNodeBodies` 因此不会给它投影
+> （投影的判据是「`body` 参数的值解得出一个 `type: xflow.subgraph` 的节点」，
+> 见 `engine/graph/compile.go` 的 `declaresSubgraphBody`）。实测结果：提交一个含 split 的工作流不会报错，而是**永远挂起**——每个
 > batch 失败、退避重试，直到执行超时。
 >
 > 因此 `graph.Compile` 现在会在编译期直接拒绝 `xflow.split` 节点，把这个静默挂起

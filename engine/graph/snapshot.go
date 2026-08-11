@@ -545,14 +545,24 @@ func (g *Graph) UnmarshalJSON(data []byte) error {
 			return ErrGroupedSnapshotMissingUnitIR
 		}
 	}
-	// A node declaring a "body" must arrive with its projected package. See
-	// ErrBodySnapshotMissingPackage for why a bodyless decode is worse than a
-	// decode error. Keyed off the node's own parameters rather than its type,
-	// so this keeps holding for whatever node type grows a body next, and so
-	// the expression form of xflow.map — which has no body to lose — still
-	// decodes.
+	// A node whose body IS a sub-graph must arrive with its projected package.
+	// See ErrBodySnapshotMissingPackage for why a bodyless decode is worse than
+	// a decode error.
+	//
+	// The criterion is declaresSubgraphBody — the same one Compile projects on,
+	// called from the same package — so the two cannot disagree about which
+	// nodes have a body. They did disagree: this guard used to fire on the mere
+	// PRESENCE of a "body" parameter while the compiler keyed off the node's
+	// type, so an xflow.http node with a JSON request body compiled fine, was
+	// persisted, and then failed every decode with "declares a body but carries
+	// no projected package". Sharing the criterion is what closes that, and is
+	// why it must not be re-expressed here even in a form that looks equivalent.
+	//
+	// It still keys off the node's own parameters rather than its type, so it
+	// keeps holding for whatever node type grows a body next, and the expression
+	// form of xflow.map — which has no body to lose — still decodes.
 	for _, n := range nodes {
-		if _, hasBody := n.Parameters["body"]; !hasBody {
+		if !declaresSubgraphBody(n.Parameters) {
 			continue
 		}
 		if n.Body == nil {

@@ -37,9 +37,10 @@ T11 声明它，本打算由 T12 消费，T12 没有消费。**明确保留不�
 已写好的设计意图。
 
 P2-5 修完后，编译期已经按这个形状执行了：`transformNodeTypes` 就是它说的
-「transform-style node」集合，`validateNodeBody` 对集合里每个类型执行同一条二选一。
-缺的只是**结构体本身仍无人反序列化到**——各节点仍从 `Parameters` 里逐键取
-`expression`/`body`。落地 filter/reduce 时把取参改走 `TransformSpec` 即可闭合。
+「transform-style node」集合，`validateNodeBody` 对集合里每个类型执行同两条规则
+（二选一 + 声明了的 body 必须是子图）。缺的只是**结构体本身仍无人反序列化到**
+——各节点仍从 `Parameters` 里逐键取 `expression`/`body`。落地 filter/reduce 时把
+取参改走 `TransformSpec` 即可闭合。
 
 ### 8. `engine/graph/subgraph_package.go` 的 `ProjectSubgraphPackage` 名字有歧义
 
@@ -53,38 +54,83 @@ P2-5 修完后，编译期已经按这个形状执行了：`transformNodeTypes` 
 
 ## 已修复
 
-### 三处 map 专属判断写死 `xflow.map`（原 P2-5，2026-08-11 修复）
+### 三处 map 专属判断写死 `xflow.map` + 带请求体的 HTTP 节点存下去读不回来（原 P2-5，2026-08-11 修复）
 
-body 存储本来就是通用的：`NodeMeta.Body` 随节点整体走 wire 与 hash，fail-closed
-守卫只看 `Parameters["body"]` 是否存在、不看节点类型，执行器拿到的
-`NodeBodyPackage` 也与投影者无关。卡住的只有编译期那三处字面量。
+body 存储本来就是通用的：`NodeMeta.Body` 随节点整体走 wire 与 hash，执行器拿到的
+`NodeBodyPackage` 也与投影者无关。卡住的只有编译期那几处字面量。
 
-现在由 `transformNodeTypes`（`engine/graph/compile.go`）一处集合同时驱动校验与
-投影。**这个集合就是 transform 节点集**——逐项算一个值、因而取 expression（内联、
-确定性、无 IO）与 body（逐项跑子图，带自己的耐久子执行）二选一的那类节点，正是
-`types/transform.go` 的 `TransformSpec` 描述的形状。map 是目前唯一的成员，filter、
-reduce 的累加器、sort 的 key 落地时各加一行。
+#### 判据：看值的形状，不看节点类型
 
-判据是显式的 transform 类型集，而非「声明了 body 参数」：`xflow.http` 也有一个叫
-`body` 的参数，但它不是 transform 节点、那是请求体，嗅参数名会把每个 HTTP 请求体
-送进子图编译。`bannedBodyMemberTypes` 改为**从前者派生**：transform 节点逐项跑
-body，把一个嵌进另一个的 body 正是这条禁令要防的递归，派生使得将来新增的 transform
-自动被禁止嵌套，而不是因为只更新了一张表就悄悄变得可嵌套。
+**「这个 body 是不是子图」这个问题现在由 `declaresSubgraphBody`
+（`engine/graph/compile.go`）一处回答，判据是值的形状**：`params["body"]` 能解成
+一个 `types.NodeDef` 且其 `Type == "xflow.subgraph"`。编译期的投影、快照解码期的
+fail-closed 守卫、嵌套禁令的递归检查，三处调的是同一个函数。
 
-`validateNodeBody` 里的四条规则**全部**按类执行，一条都不是 map 特例——包括
-「expression 与 body 二选一」，它就是 transform 这个类的定义性契约。
+先前的两个候选都不对：
 
-三条回归测试（`engine/graph/transform_node_types_test.go`）各自实测过反向探针：
+- **嗅参数名**（`params["body"]` 存在与否）不行——`xflow.http` 也有一个叫 `body`
+  的参数，那是请求体。
+- **类型白名单**也不行——它让每个新的带 body 节点类型都要回来改这个包，而且它会
+  与别处的判据漂移。
 
-| 测试 | 反向探针 | 结果 |
-|---|---|---|
-| `TestEveryTransformTypeIsBannedFromBodies` | 删掉派生循环、退回字面量 | 红 |
-| `TestHTTPBodyParameterIsNotProjectedAsASubgraph` | 判据换成嗅 `Parameters["body"]` | 红 |
-| `TestEveryTransformTypeEnforcesExpressionXorBody` | 给某个类型开后门跳过 XOR | 红 |
+值判据对本仓库出现过的每一种 body 取值都能区分（已实测）：http 的 object body
+解出空 `Type`，string / array body 根本解不动，只有真 body 到得了 `"xflow.subgraph"`。
+而 `xflow.subgraph` 在顶层是被拒绝的（`compile.go:144`），作者不刻意写在 body 里
+就产不出这个形状。
 
-第三条对集合里的**每个**类型跑一遍，所以将来加 filter/reduce/sort 时它们各自的
-「二选一」自动被覆盖，不必再写一遍测试。已用「临时把 `xflow.filter` 加进集合」
-实测确认：新类型无需改任何生产代码即被三条规则覆盖。
+#### 顺手关掉的 P0：`xflow.http` 带 JSON 请求体的图存下去读不回来
+
+判据漂移不是假想的。修复前 `snapshot.go` 的 fail-closed 守卫嗅
+`Parameters["body"]` **是否存在**，而 `compile.go` 按**节点类型集**判断。于是任何
+带 JSON 请求体的 `xflow.http` 节点：编译通过（不在类型集里 → 不投影 body）、
+持久化成功，然后每一次 `Graph.UnmarshalJSON` 都以
+「declares a body but carries no projected package」失败。
+
+两条解码路径的爆炸半径不同：`workflowreg` 那条捕获错误后回落到
+`graph.Compile(record.Definition)`（自愈）；**`rstate.LoadGraph`
+（`state_node.go:36-39`）没有回落**——错误一路传到 `backend.go:666`，任务就地失败。
+object 与 string 两种请求体都会触发，走的内部路径还不一样。
+
+让守卫改调 `declaresSubgraphBody` 即闭合：两侧不可能再对「哪些节点有 body」有分歧。
+
+#### `transformNodeTypes` 的职责收窄为两条规则
+
+它不再决定什么被投影为子图，只界定 transform 契约（`types/transform.go` 的
+`TransformSpec` 描述的形状）本身的两条：expression 与 body 二选一；声明了的 body
+**必须**是子图（于是畸形 body 在编译期报错，而不是当成不透明参数带给 handler，
+运行期每个批次以 `ErrNoMapBody` 失败）。
+
+这两条对 wrapper 式 body 节点（retry / timeout / try-catch，body 是被守护的东西）
+都是错的。那类节点无需在这里加条目——它的 body 凭自身形状被投影。
+
+#### `bannedBodyMemberTypes` 退回字面量，但禁令的可扩展那半移到了成员判定
+
+先前它「从 transform 集派生」，那是错的：`xflow.map` 的 expression 形态**根本没有
+body 给值判据看**，而它的 handler 在两种形态下都无条件发扩展标记
+（`node/internal/flow/map.go:96-106`），照样在 body 里 fan-out。所以这张表是三个
+字面量，各有一条值看不见的理由：`xflow.subgraph` 是容器本身，`xflow.split` 到处
+被拒，`xflow.map` 无条件扩展。
+
+**真正需要可扩展的那半在 `validateNodeBody` 里**：逐个成员用
+`declaresSubgraphBody(inner.Parameters)` 检查。这才是「将来某个类型长出了 body」时
+仍然成立的那条——类型表对它一无所知。
+
+#### 回归测试与反向探针
+
+六条测试在 `engine/graph/subgraph_body_criterion_test.go`，五处反向探针各自实测过：
+
+| 反向探针 | 变红的测试 |
+|---|---|
+| 快照守卫退回嗅 `Parameters["body"]` 存在性（修复前形态） | `TestSubgraphBodyCriterionIsSharedByCompileAndSnapshot`（object / string 两例） |
+| `declaresSubgraphBody` 退化成 `_, ok := params["body"]` | `TestDeclaresSubgraphBody_KeysOffTheValueNotTheName` + 上一条 |
+| 删掉成员级 `declaresSubgraphBody` 递归检查 | `TestBodyMemberDeclaringItsOwnSubgraphBodyIsRejected` |
+| transform 的「body 必须是子图」检查短路 | `TestEveryTransformTypeEnforcesExpressionXorBody/*/body_that_is_not_a_sub-graph` |
+| 从 `bannedBodyMemberTypes` 去掉 `xflow.map` | `TestReservedTypesAreRejectedAsBodyMembers/xflow.map` |
+
+`TestSubgraphBodyIsProjectedAndSurvivesSnapshot` 是正对照——没有它，一个恒 `false`
+的判据能让上面每一条「不该投影」的断言全绿。
+`TestEveryTransformTypeEnforcesExpressionXorBody` 对集合里的**每个**类型跑一遍，
+将来加 filter / reduce / sort 时它们各自的「二选一」自动被覆盖。
 
 ### TS 侧 `experimental_expand?` 声明滞后（原 P2-8，2026-08-06 修复）
 

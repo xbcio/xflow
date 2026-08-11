@@ -17,49 +17,83 @@ import (
 const subgraphNodeType = "xflow.subgraph"
 
 // transformNodeTypes are the transform-style node types: the ones that compute
-// something per item and therefore take exactly one of an "expression" (inline,
+// a value per item and therefore take exactly one of an "expression" (inline,
 // deterministic, no IO, no sub-execution) or a "body" (a sub-graph executed per
-// item through the engine's expansion path, with its own durable
-// sub-executions). types.TransformSpec is the declared shape of that choice.
+// item, with its own durable sub-executions). types.TransformSpec is the
+// declared shape of that choice, and it names the family that belongs here: map
+// today, filter / reduce's accumulator / sort's key as they land.
 //
-// Membership here is what makes the compiler validate the {expression | body}
-// pair and project the body into a package. It is deliberately an explicit set
-// of transform node types rather than a "declares a body parameter" test:
-// xflow.http also has a "body" parameter, but it is not a transform node and
-// that body is a request payload, so sniffing the parameter name would send
-// every HTTP request body through subgraph compilation.
+// This set does NOT decide what gets projected as a sub-graph — declaresSubgraphBody
+// does, from the value. It scopes exactly two rules that are the transform
+// contract and nothing else:
 //
-// The set is expected to grow to the rest of the transform family — filter,
-// reduce's accumulator, sort's key — which is one line each. Everything
-// downstream is already generic: NodeMeta.Body travels with the node through
-// wire and hash, the fail-closed guards look only at Parameters["body"], and
-// the executor's NodeBodyPackage says nothing about who projected it. A
-// transform node added here needs no wire, hash, or serialization change.
+//   - expression and body are mutually exclusive, exactly one present;
+//   - a declared body MUST be a sub-graph, so a malformed one is an error here
+//     rather than an opaque parameter carried to the handler.
+//
+// Both are wrong for a wrapper-style body node — a retry, timeout, or try/catch
+// whose body is the thing being guarded rather than a value computed per item.
+// Such a node has no inline alternative to be exclusive with, so applying the
+// XOR rule would reject every valid instance. It needs no entry here: its body
+// is projected on the strength of its own shape.
 var transformNodeTypes = map[string]bool{
 	"xflow.map": true,
 }
 
-// bannedBodyMemberTypes are node types a body sub-graph may not itself
-// contain in v1. A body member that is itself a fan-out node (map/split) or
-// another subgraph would make the sub-execution tree unbounded; the durable
-// layer and package hash are not designed for that yet.
+// bannedBodyMemberTypes are the node types a body sub-graph may never contain,
+// named literally because each is banned for a reason a value cannot show:
 //
-// It is DERIVED from transformNodeTypes rather than listed independently:
-// a transform node runs its body once per item, so nesting one inside another
-// body is exactly the recursion this rule exists to prevent. Deriving means a
-// future transform node is banned from nesting automatically instead of
-// silently becoming nestable because someone updated one list and not the
-// other.
-var bannedBodyMemberTypes = func() map[string]bool {
-	banned := map[string]bool{
-		"xflow.split":    true,
-		subgraphNodeType: true,
+//   - xflow.subgraph is the body container itself. It has no unit-layer
+//     semantics and is already rejected at the top level.
+//   - xflow.split is rejected everywhere (see registerNodes).
+//   - xflow.map fans out unconditionally: its handler emits the expansion
+//     marker in BOTH forms, so even the expression form — which carries no body
+//     for a value check to see — expands into batches inside the body.
+//
+// The recursion ban that must stay extensible — a member that itself carries a
+// sub-graph body, making the sub-execution tree unbounded — is NOT expressed
+// here, because a type list cannot see it. validateNodeBody checks each
+// member's own parameters with declaresSubgraphBody as well, so a node type
+// that grows a body tomorrow is banned from nesting the day it lands, with no
+// list to update.
+var bannedBodyMemberTypes = map[string]bool{
+	"xflow.split":    true,
+	"xflow.map":      true,
+	subgraphNodeType: true,
+}
+
+// declaresSubgraphBody reports whether a node's parameters carry a "body" that
+// is a sub-graph — the criterion the compiler projects on, the snapshot guard
+// fails closed on, and the nesting ban recurses on.
+//
+// The criterion is the VALUE's shape, not the node's type. A type whitelist was
+// the obvious alternative and is the wrong one twice over: it makes every new
+// body-bearing node type an edit to this package, and it drifts against the
+// other places that must agree on the same question. That drift was real, not
+// hypothetical — the snapshot guard (snapshot.go) has always keyed off the
+// parameter's presence while the compiler keyed off the node's type, so an
+// xflow.http node with a JSON request body compiled fine and then failed to
+// decode, taking down every execution that reached LoadGraph.
+//
+// Sniffing the parameter NAME is what cannot work: xflow.http's "body" is a
+// request payload. Sniffing the value can, because a sub-graph body is a
+// NodeDef whose type is the reserved xflow.subgraph — a shape no request
+// payload takes by accident, and one an author cannot write except deliberately
+// (xflow.subgraph is rejected at the top level, so its only legal home is a
+// body). Measured against every body value in this repo: an http object body
+// decodes to an empty Type, an http string or array body fails to decode at
+// all, and only a real body reaches "xflow.subgraph".
+func declaresSubgraphBody(params map[string]any) bool {
+	raw, ok := params["body"]
+	if !ok {
+		return false
 	}
-	for t := range transformNodeTypes {
-		banned[t] = true
+	bodyDef, err := decodeSubgraphBody(raw)
+	if err != nil {
+		return false
 	}
-	return banned
-}()
+	return bodyDef.Type == subgraphNodeType
+}
 
 // Compile validates a WorkflowDef and builds an immutable Graph IR.
 // It returns an error if the definition is nil, has no nodes, contains
@@ -216,22 +250,20 @@ func registerNodes(def *types.WorkflowDef, g *Graph) (int, error) {
 		if nd.Type == "xflow.split" {
 			return 0, fmt.Errorf("node %q: xflow.split is not implemented and cannot run: "+
 				"its handler emits a fan-out shape the engine expands into batch tasks, but a batch "+
-				"has no body to run (xflow.split declares no body parameter and is not in "+
-				"transformNodeTypes, so projectNodeBodies never projects one), so every batch "+
-				"fails and the execution never completes. Use xflow.map with a body instead", nd.Name)
+				"has no body to run (xflow.split declares no body parameter, so projectNodeBodies "+
+				"never projects one), so every batch fails and the execution never completes. "+
+				"Use xflow.map with a body instead", nd.Name)
 		}
-		if transformNodeTypes[nd.Type] {
-			if err := validateNodeBody(nd); err != nil {
-				return 0, err
-			}
-			// Projection itself is deferred to projectNodeBodies, which runs after
-			// buildDependencyEdges: a body needs the parent node's visible-supply
-			// names (g.SupplyRefsFor(i)), and g.supplyRefs is not populated until that
-			// later pass runs. validateNodeBody's shape checks stay here, in the first
-			// pass, so a malformed body is still rejected at the same point it always
-			// was -- only the projection itself moved, not the point of failure for a
-			// bad shape.
+		if err := validateNodeBody(nd); err != nil {
+			return 0, err
 		}
+		// Projection itself is deferred to projectNodeBodies, which runs after
+		// buildDependencyEdges: a body needs the parent node's visible-supply
+		// names (g.SupplyRefsFor(i)), and g.supplyRefs is not populated until that
+		// later pass runs. validateNodeBody's shape checks stay here, in the first
+		// pass, so a malformed body is still rejected at the same point it always
+		// was -- only the projection itself moved, not the point of failure for a
+		// bad shape.
 		if g.allowCycles {
 			if nd.Type == "xflow.start" {
 				startCount++
@@ -245,28 +277,29 @@ func registerNodes(def *types.WorkflowDef, g *Graph) (int, error) {
 	return startCount, nil
 }
 
-// projectNodeBodies is the compile pass that projects every transform node's
-// declared body into a self-contained SubgraphPackage, once per node so
-// N batches of the same node share one package and one hash. It runs AFTER
-// buildDependencyEdges (not inside registerNodes, where the body's shape is
-// merely validated) because it needs the parent node's own visible-supply
-// names -- g.SupplyRefsFor(i) -- to widen the body's compile-time supply-usage
-// check. g.supplyRefs does not exist yet during registerNodes; buildDependencyEdges
-// is what populates it. A body member has no dependency edge of its own (it is
-// never a top-level node in the outer graph def.Nodes), so without the parent's
-// list threaded in, CompileProjectedPackage would reject any body member
-// reading $supplies.<name> even when the parent node itself declares exactly
-// that dependency.
+// projectNodeBodies is the compile pass that projects every declared sub-graph
+// body into a self-contained SubgraphPackage, once per node so N batches of the
+// same node share one package and one hash. Which nodes have one is decided by
+// declaresSubgraphBody — the value's shape, not the node's type — so this pass
+// needs no edit when a new body-bearing node type lands, and it agrees by
+// construction with the snapshot guard that fails closed on the same criterion.
+//
+// It runs AFTER buildDependencyEdges (not inside registerNodes, where the
+// body's shape is merely validated) because it needs the parent node's own
+// visible-supply names -- g.SupplyRefsFor(i) -- to widen the body's compile-time
+// supply-usage check. g.supplyRefs does not exist yet during registerNodes;
+// buildDependencyEdges is what populates it. A body member has no dependency
+// edge of its own (it is never a top-level node in the outer graph def.Nodes),
+// so without the parent's list threaded in, CompileProjectedPackage would
+// reject any body member reading $supplies.<name> even when the parent node
+// itself declares exactly that dependency.
 //
 // Indexing g.nodes by def.Nodes' index is sound because registerNodes appends
 // one NodeMeta per def.Nodes entry in order and rejects duplicate names, so the
 // two stay 1:1 — the same identity g.SupplyRefsFor(i) already relies on.
 func projectNodeBodies(def *types.WorkflowDef, g *Graph) error {
 	for i, nd := range def.Nodes {
-		if !transformNodeTypes[nd.Type] {
-			continue
-		}
-		if _, hasBody := nd.Parameters["body"]; !hasBody {
+		if !declaresSubgraphBody(nd.Parameters) {
 			continue
 		}
 		body, err := ProjectNodeBodyPackage(nd.Name, nd.Parameters, g.SupplyRefsFor(i))
@@ -508,55 +541,84 @@ func extractMergeMode(nd types.NodeDef) string {
 	return ""
 }
 
-// validateNodeBody enforces the four body-related compile-time rules for a
-// single transform node (transformNodeTypes):
+// validateNodeBody enforces the compile-time rules for one node's parameters.
+// It runs for EVERY node, and splits into two groups by what each rule is
+// actually about:
+//
+// Transform-only (transformNodeTypes):
 //
 //  1. expression and body are mutually exclusive: exactly one must be present.
-//     This is the defining contract of a transform node — types.TransformSpec
-//     declares the same {expression | body} shape — so it holds for every
-//     member of transformNodeTypes, not just xflow.map. It is checked here, at
-//     compile time, rather than sniffed from the node's runtime output shape:
-//     this repo has already been burned once by that pattern (a ScriptNode
-//     that sniffed a "messages" key and built a parallel fan-out path in
-//     secret).
-//  2. A parameterless node (nd.Parameters is nil/empty) is left
-//     completely untouched: TestCompile_MapNodeCompilesWithoutAnyOptIn
-//     requires a bare `{Name: "m", Type: "xflow.map"}` to keep compiling with
-//     no opt-in, so this rule only engages once the node actually declares
-//     parameters.
-//  3. A declared body must decode to a NodeDef of type "xflow.subgraph" whose
-//     own members contain no nested transform node, xflow.split, or
-//     xflow.subgraph (v1 forbids nesting: recursive fan-out makes the
-//     sub-execution tree unbounded).
-//  4. The body's members must have a unique, dominating entry — reusing
+//     This is the transform contract — types.TransformSpec declares the same
+//     {expression | body} shape — and it applies to every transform node, not
+//     just xflow.map. It is checked here, at compile time, rather than sniffed
+//     from the node's runtime output shape: this repo has already been burned
+//     once by that pattern (a ScriptNode that sniffed a "messages" key and
+//     built a parallel fan-out path in secret).
+//
+//     A wrapper-style body node — retry, timeout, try/catch, whose body is the
+//     thing being guarded rather than a value computed per item — has no
+//     inline alternative to be exclusive with. Applying this rule to it would
+//     reject every valid instance, so it is scoped to the transform subset.
+//
+//  2. A declared body must BE a sub-graph. For a transform node the body is the
+//     per-item computation, so a body that is not a sub-graph is a typo, not a
+//     payload — and left unrejected it would compile into a node the engine
+//     later fails on with ErrNoMapBody, once per batch, at run time.
+//
+//     This too is transform-scoped, and deliberately: a non-transform node's
+//     "body" belongs to that node (xflow.http's is a request payload). The
+//     compiler must not have an opinion about its shape.
+//
+// Every node:
+//
+//  3. A parameterless node (nd.Parameters is nil/empty) is left completely
+//     untouched: TestCompile_MapNodeCompilesWithoutAnyOptIn requires a bare
+//     `{Name: "m", Type: "xflow.map"}` to keep compiling with no opt-in, so
+//     these rules only engage once the node actually declares parameters.
+//  4. A node whose body IS a sub-graph (declaresSubgraphBody — the value's
+//     shape, not the node's type) has that sub-graph validated: its members may
+//     not be xflow.split / xflow.subgraph / xflow.map, and may not themselves
+//     declare a sub-graph body. v1 forbids nesting because recursive fan-out
+//     makes the sub-execution tree unbounded, and checking each member's own
+//     parameters is what makes that ban hold for a node type that grows a body
+//     after this code was written.
+//  5. The body's members must have a unique, dominating entry — reusing
 //     resolveGroupEntry/assertEntryDominates exactly as group compilation
 //     does, since a body and a node group are the same structure.
 //
-// Nothing here is xflow.map-specific. A new transform node — filter, reduce's
-// accumulator, sort's key — is a one-line addition to transformNodeTypes and
-// needs no change to this function, provided it names its inline alternative
-// "expression" as types.TransformSpec does.
+// Nothing here is xflow.map-specific, and a new body-bearing node type needs no
+// entry anywhere: rules 3-5 recognize its body by shape. Only a new TRANSFORM
+// needs one line in transformNodeTypes, for rules 1-2.
 func validateNodeBody(nd types.NodeDef) error {
 	if len(nd.Parameters) == 0 {
 		return nil
 	}
-	_, hasExpr := nd.Parameters["expression"]
 	bodyRaw, hasBody := nd.Parameters["body"]
-	switch {
-	case hasExpr && hasBody:
-		return fmt.Errorf("node %q: expression and body are mutually exclusive", nd.Name)
-	case !hasExpr && !hasBody:
-		return fmt.Errorf("node %q: requires exactly one of expression or body", nd.Name)
-	case !hasBody:
+	if transformNodeTypes[nd.Type] {
+		_, hasExpr := nd.Parameters["expression"]
+		switch {
+		case hasExpr && hasBody:
+			return fmt.Errorf("node %q: expression and body are mutually exclusive", nd.Name)
+		case !hasExpr && !hasBody:
+			return fmt.Errorf("node %q: requires exactly one of expression or body", nd.Name)
+		}
+		if hasBody && !declaresSubgraphBody(nd.Parameters) {
+			// Name the type we found where possible: a body that decodes but has
+			// the wrong type is the common typo, and the value is the author's own.
+			got := ""
+			if bodyDef, err := decodeSubgraphBody(bodyRaw); err == nil {
+				got = bodyDef.Type
+			}
+			return fmt.Errorf("node %q: body.type must be %q, got %q", nd.Name, subgraphNodeType, got)
+		}
+	}
+	if !declaresSubgraphBody(nd.Parameters) {
 		return nil
 	}
 
 	bodyDef, err := decodeSubgraphBody(bodyRaw)
 	if err != nil {
 		return fmt.Errorf("node %q: body: %w", nd.Name, err)
-	}
-	if bodyDef.Type != subgraphNodeType {
-		return fmt.Errorf("node %q: body.type must be %q, got %q", nd.Name, subgraphNodeType, bodyDef.Type)
 	}
 	innerNodes, innerConns, err := decodeSubgraphMembers(bodyDef.Parameters)
 	if err != nil {
@@ -570,6 +632,11 @@ func validateNodeBody(nd types.NodeDef) error {
 			return fmt.Errorf("node %q: body member %q has type %q, which is not allowed "+
 				"inside a body in v1 (nesting is rejected: recursive fan-out makes the "+
 				"sub-execution tree unbounded)", nd.Name, inner.Name, inner.Type)
+		}
+		if declaresSubgraphBody(inner.Parameters) {
+			return fmt.Errorf("node %q: body member %q declares a sub-graph body of its "+
+				"own, which is not allowed inside a body in v1 (nesting is rejected: "+
+				"recursive fan-out makes the sub-execution tree unbounded)", nd.Name, inner.Name)
 		}
 	}
 	return validateBodyEntry(nd.Name, innerNodes, innerConns)
