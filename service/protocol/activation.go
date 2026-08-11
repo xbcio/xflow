@@ -50,6 +50,13 @@ type ActivateDirective struct {
 	// takes over this entry unit (see engine.SupplyRequirement). Empty means no
 	// gate.
 	Supplies []engine.SupplyRequirement `json:"supplies,omitempty"`
+	// SupplyConsumers pair each wasm module in this entry unit with the supply
+	// nodes it consumes, so the runner can register the module as a supply
+	// consumer and have a content change rebuild its instance pool. Supplies is
+	// the readiness gate; this is the delivery route. A runner that does not
+	// recognize this field (old binary) registers nothing — byte-identical to
+	// the behavior before this field existed, where nothing registered either.
+	SupplyConsumers []engine.SupplyConsumerBinding `json:"supply_consumers,omitempty"`
 }
 
 // ActivationKind values for ActivateDirective.Kind.

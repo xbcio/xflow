@@ -65,7 +65,18 @@ type EntryActivation struct {
 	// Desired-state, owned by Upsert. Absent on records written before this field
 	// existed (decodes to nil).
 	Supplies []SupplyRequirement
-	Desired  bool
+	// SupplyConsumers pair each wasm module in this entry unit with the supply
+	// nodes it consumes. Supplies answers "must this runner have the content
+	// before taking over"; SupplyConsumers answers "once it has the content, who
+	// receives it". The runner needs both because neither the Supplies list nor a
+	// projected group package retains which member consumes which supply — the
+	// pairing exists only in the graph's dependency edges, so it is derived here.
+	//
+	// Desired-state, owned by Upsert. Absent on records written before this field
+	// existed (decodes to nil), which leaves the runner registering no consumers —
+	// exactly the behaviour that preceded this field.
+	SupplyConsumers []SupplyConsumerBinding
+	Desired         bool
 	RunnerID      string
 	SessionID     string
 	Generation    uint64
@@ -139,4 +150,18 @@ type SupplyRequirement struct {
 	// the DSL) means it declines instead — traffic stays in Kafka, the offset does
 	// not advance, and consumer-group lag is the operator-visible signal.
 	RequireReady bool `json:"require_ready"`
+}
+
+// SupplyConsumerBinding pairs one wasm module with one supply node whose content
+// it consumes. The runner uses it to register the module as a supply consumer at
+// activation time, so a content change rebuilds that module's instance pool.
+//
+// ModuleDigest is the artifact digest ("sha256:<64 hex>") the script node carries
+// as artifact_digest — never the module bytes, which run to several MB. A wasm
+// node with only inline code produces no binding: adding a server-side digest
+// computation would create a second module-identity source that could drift from
+// the runtime's own, and inline multi-MB wasm is already an anti-pattern.
+type SupplyConsumerBinding struct {
+	ModuleDigest string `json:"module_digest"`
+	SupplyNode   string `json:"supply_node"`
 }

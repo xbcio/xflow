@@ -56,6 +56,7 @@ func (s *MemoryEntryActivationStore) Upsert(_ context.Context, act engine.EntryA
 	existing.Selector = act.Selector
 	existing.Requirements = act.Requirements
 	existing.Supplies = act.Supplies
+	existing.SupplyConsumers = act.SupplyConsumers
 	existing.Desired = act.Desired
 	return nil
 }

@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"net/http"
 	"sync"
@@ -50,8 +51,23 @@ type TriggerActivationHandler struct {
 	// WithGroupRuntime.
 	groupRuntime *GroupRuntime
 
+	// artifactCode resolves a wasm module's bytes by artifact digest. Activation
+	// needs it to compile a module BEFORE registering its supply consumer; see
+	// registerSupplyConsumers for why the order is load-bearing. nil means a
+	// directive carrying SupplyConsumers is rejected (fail closed).
+	artifactCode func(ctx context.Context, digest string) ([]byte, error)
+
 	mu   sync.Mutex
-	subs map[activationID]types.TriggerSubscription
+	subs map[activationID]activationState
+}
+
+// activationState is what the handler retains per live activation: the trigger
+// subscription to close, and the supply-consumer bindings it registered.
+// DeactivateDirective carries only the activation identity, so the bindings must
+// be remembered here to be undone.
+type activationState struct {
+	sub      types.TriggerSubscription
+	bindings []engine.SupplyConsumerBinding
 }
 
 // TriggerActivationHandlerOption configures a TriggerActivationHandler.
@@ -84,6 +100,17 @@ func WithGroupRuntime(gr *GroupRuntime) TriggerActivationHandlerOption {
 	return func(h *TriggerActivationHandler) { h.groupRuntime = gr }
 }
 
+// WithArtifactCodeResolver installs the digest -> module bytes resolver used to
+// compile a wasm module at activation time, before its supply consumer registers.
+// Pass the same closure the runner installs as Config.ArtifactCodeResolver: it
+// already fronts the local artifact cache, so a repeat activation costs no fetch.
+//
+// Without it, a directive carrying SupplyConsumers is rejected rather than
+// registered against an uncompiled module — see registerSupplyConsumers.
+func WithArtifactCodeResolver(fn func(ctx context.Context, digest string) ([]byte, error)) TriggerActivationHandlerOption {
+	return func(h *TriggerActivationHandler) { h.artifactCode = fn }
+}
+
 var _ ActivationHandler = (*TriggerActivationHandler)(nil)
 
 // NewTriggerActivationHandler constructs a TriggerActivationHandler. seedBaseURL
@@ -95,7 +122,7 @@ func NewTriggerActivationHandler(seedBaseURL string, authToken string, triggers 
 		seedBaseURL: seedBaseURL,
 		authToken:   authToken,
 		triggers:    triggers,
-		subs:        make(map[activationID]types.TriggerSubscription),
+		subs:        make(map[activationID]activationState),
 	}
 	for _, o := range opts {
 		o(h)
@@ -116,6 +143,15 @@ func (h *TriggerActivationHandler) Activate(ctx context.Context, d protocol.Acti
 		if err := h.gate.Admit(ctx, d.WorkflowID, d.Supplies); err != nil {
 			return err
 		}
+	}
+
+	// Supply consumers register AFTER Admit and BEFORE the subscription starts.
+	// After Admit, because RegisterConsumer notifies immediately when the content
+	// is already cached — registering first would deliver nothing and never
+	// retry. Before the subscription, because a live subscription is already
+	// committing offsets while an unregistered module passes traffic untagged.
+	if err := h.registerSupplyConsumers(ctx, d.SupplyConsumers); err != nil {
+		return err
 	}
 
 	if d.NodeType == engine.GroupNodeType {
@@ -145,7 +181,7 @@ func (h *TriggerActivationHandler) Activate(ctx context.Context, d protocol.Acti
 	if err != nil {
 		return err
 	}
-	h.storeSubscription(ctx, activationID{WorkflowID: d.WorkflowID, EntryUnitID: d.EntryUnitID}, sub)
+	h.storeSubscription(ctx, activationID{WorkflowID: d.WorkflowID, EntryUnitID: d.EntryUnitID}, sub, d.SupplyConsumers)
 	return nil
 }
 
@@ -193,7 +229,7 @@ func (h *TriggerActivationHandler) activateGroup(ctx context.Context, d protocol
 	if err != nil {
 		return err
 	}
-	h.storeSubscription(ctx, activationID{WorkflowID: d.WorkflowID, EntryUnitID: d.EntryUnitID}, sub)
+	h.storeSubscription(ctx, activationID{WorkflowID: d.WorkflowID, EntryUnitID: d.EntryUnitID}, sub, d.SupplyConsumers)
 	return nil
 }
 
@@ -232,20 +268,102 @@ func withGroupEntrySeedParams(nodeParams map[string]any, d protocol.ActivateDire
 	return merged
 }
 
+// registerSupplyConsumers compiles each bound wasm module and then registers it
+// as a consumer of its supply node, so a content change rebuilds that module's
+// instance pool.
+//
+// The compile is not an optimization — it is what makes the registration take
+// effect. RegisterConsumer notifies immediately when the supply content is
+// already cached (which Admit just made true), and the wasm host's notify
+// handler silently succeeds when the module has not been compiled yet. The
+// registry records that as "this content was accepted", so its re-notify
+// condition never fires again. Meanwhile registration marks the module
+// source-driven, and a source-driven module with no configured pool refuses
+// every message. Compiling first is what closes that window; the module bytes
+// come from the artifact cache, so the cost is paid here instead of inside the
+// first message's deadline.
+//
+// Fail closed throughout: a module that cannot be compiled or registered would
+// otherwise host traffic with no rules and no diagnostic, which is the exact
+// failure this wiring exists to remove. Errors carry only the digest and the
+// supply node name — never directive params.
+func (h *TriggerActivationHandler) registerSupplyConsumers(ctx context.Context, bindings []engine.SupplyConsumerBinding) error {
+	if len(bindings) == 0 {
+		return nil
+	}
+	if h.artifactCode == nil {
+		return fmt.Errorf("supply consumer registration requires an artifact code resolver (%d binding(s), first: module %s -> supply %q)",
+			len(bindings), bindings[0].ModuleDigest, bindings[0].SupplyNode)
+	}
+	compiled := make(map[string]bool, len(bindings))
+	for _, b := range bindings {
+		if !compiled[b.ModuleDigest] {
+			raw, err := h.artifactCode(ctx, b.ModuleDigest)
+			if err != nil {
+				return fmt.Errorf("fetch wasm module %s for supply %q: %w", b.ModuleDigest, b.SupplyNode, err)
+			}
+			if err := node.CompileWasmModule(ctx, base64.StdEncoding.EncodeToString(raw)); err != nil {
+				return fmt.Errorf("compile wasm module %s for supply %q: %w", b.ModuleDigest, b.SupplyNode, err)
+			}
+			compiled[b.ModuleDigest] = true
+		}
+		if err := node.RegisterWasmSupplyConsumerByDigest(b.ModuleDigest, b.SupplyNode); err != nil {
+			return fmt.Errorf("register wasm module %s as consumer of supply %q: %w", b.ModuleDigest, b.SupplyNode, err)
+		}
+	}
+	return nil
+}
+
 // storeSubscription records sub under id, closing any previously stored
 // subscription for the same identity (stale-close on generation upgrade —
 // see the concurrency-invariant comment this replaces, which still applies:
 // ActivationTracker.ProcessDirectives serializes calls to this handler's
 // Activate per activation identity).
-func (h *TriggerActivationHandler) storeSubscription(ctx context.Context, id activationID, sub types.TriggerSubscription) {
+//
+// It also reconciles the supply-consumer registrations by DIFFERENCE: only
+// bindings the old activation had and the new one does not are unregistered. A
+// generation upgrade normally re-sends identical bindings, and a registration
+// key is derived from (module digest, supply node) alone — so "unregister
+// everything old, then register everything new" would remove the registration
+// the caller just made.
+func (h *TriggerActivationHandler) storeSubscription(ctx context.Context, id activationID, sub types.TriggerSubscription, bindings []engine.SupplyConsumerBinding) {
 	h.mu.Lock()
-	if old, exists := h.subs[id]; exists && old != nil {
-		h.mu.Unlock()
-		_ = old.Close(ctx)
-		h.mu.Lock()
-	}
-	h.subs[id] = sub
+	old, exists := h.subs[id]
+	h.subs[id] = activationState{sub: sub, bindings: bindings}
 	h.mu.Unlock()
+
+	if exists {
+		unregisterSupplyConsumers(removedBindings(old.bindings, bindings))
+		if old.sub != nil {
+			_ = old.sub.Close(ctx)
+		}
+	}
+}
+
+// removedBindings returns the bindings present in old but not in next.
+func removedBindings(old, next []engine.SupplyConsumerBinding) []engine.SupplyConsumerBinding {
+	if len(old) == 0 {
+		return nil
+	}
+	keep := make(map[engine.SupplyConsumerBinding]bool, len(next))
+	for _, b := range next {
+		keep[b] = true
+	}
+	var out []engine.SupplyConsumerBinding
+	for _, b := range old {
+		if !keep[b] {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
+// unregisterSupplyConsumers drops each binding's consumer registration. It is a
+// no-op for a pair that was never registered, so it is safe on any subset.
+func unregisterSupplyConsumers(bindings []engine.SupplyConsumerBinding) {
+	for _, b := range bindings {
+		node.UnregisterWasmSupplyConsumerByDigest(b.ModuleDigest, b.SupplyNode)
+	}
 }
 
 // seedHTTPClient returns the configured client or http.DefaultClient when none
@@ -259,22 +377,27 @@ func (h *TriggerActivationHandler) seedHTTPClient() *http.Client {
 }
 
 // Deactivate closes and removes the stored subscription for the directive's
-// identity. Deactivating an unknown or already-closed activation is a safe
-// no-op (idempotent).
+// identity, and unregisters the supply consumers that activation registered.
+// Deactivating an unknown or already-closed activation is a safe no-op
+// (idempotent).
 func (h *TriggerActivationHandler) Deactivate(d protocol.DeactivateDirective) error {
 	id := activationID{WorkflowID: d.WorkflowID, EntryUnitID: d.EntryUnitID}
 	h.mu.Lock()
-	sub, ok := h.subs[id]
+	st, ok := h.subs[id]
 	if ok {
 		delete(h.subs, id)
 	}
 	h.mu.Unlock()
 
-	if !ok || sub == nil {
+	if !ok {
 		// Unknown / already removed — idempotent no-op.
 		return nil
 	}
-	return sub.Close(context.Background())
+	unregisterSupplyConsumers(st.bindings)
+	if st.sub == nil {
+		return nil
+	}
+	return st.sub.Close(context.Background())
 }
 
 // withEntrySeedParams returns a copy of d.Params merged with the entry-seed

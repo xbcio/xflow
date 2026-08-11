@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sort"
 
 	"github.com/xbcio/xflow/engine"
@@ -18,6 +19,14 @@ import (
 // nodeTriggerPackageHashPrefix namespaces the single-trigger-node content
 // fingerprint so it never collides with a group package hash.
 const nodeTriggerPackageHashPrefix = "node-sha256:v1:"
+
+// scriptNodeType and wasmScriptLanguage identify a wasm script node in a compiled
+// graph. Only such a node can consume a supply through the reactor's pool-rebuild
+// path, so only it produces a SupplyConsumerBinding.
+const (
+	scriptNodeType     = "xflow.script"
+	wasmScriptLanguage = "wasm"
+)
 
 // nodeTriggerPackageHash computes a deterministic content fingerprint of a single
 // trigger node's hostable identity: its node type, version, and params. A change
@@ -72,6 +81,9 @@ type EntryUnitActivation struct {
 	Selector     *types.RunnerSelector
 	Requirements []engine.CapabilityRequirement
 	Supplies     []engine.SupplyRequirement
+	// SupplyConsumers routes fetched supply content to the wasm modules that
+	// consume it; Supplies only says which content the unit needs.
+	SupplyConsumers []engine.SupplyConsumerBinding
 }
 
 // projectGroupPackage indirects graph.ProjectSubgraphPackage so the derivation's
@@ -92,7 +104,7 @@ func SuppliesForEntryUnit(g *graph.Graph, unitIdx int) []engine.SupplyRequiremen
 		return nil
 	}
 	byNode := map[string]engine.SupplyRequirement{}
-	collect := func(nodeIdx int) {
+	walkEntryUnitNodes(g, unitIdx, func(nodeIdx int) {
 		for _, supplyName := range g.SupplyRefsFor(nodeIdx) {
 			if _, seen := byNode[supplyName]; seen {
 				continue
@@ -110,8 +122,28 @@ func SuppliesForEntryUnit(g *graph.Graph, unitIdx int) []engine.SupplyRequiremen
 				RequireReady: supply.RequireReady(params),
 			}
 		}
-	}
+	})
 
+	if len(byNode) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(byNode))
+	for n := range byNode {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	out := make([]engine.SupplyRequirement, 0, len(names))
+	for _, n := range names {
+		out = append(out, byNode[n])
+	}
+	return out
+}
+
+// walkEntryUnitNodes calls visit once for every node reachable from entry unit
+// unitIdx through flow edges, seeded with the unit's own node(s). Both supply
+// derivations share it so they can never disagree about which nodes an entry
+// unit owns.
+func walkEntryUnitNodes(g *graph.Graph, unitIdx int, visit func(nodeIdx int)) {
 	// Seed the BFS with the node(s) directly in the entry unit.
 	var seeds []int
 	switch g.UnitKindAt(unitIdx) {
@@ -134,7 +166,7 @@ func SuppliesForEntryUnit(g *graph.Graph, unitIdx int) []engine.SupplyRequiremen
 	for len(queue) > 0 {
 		cur := queue[0]
 		queue = queue[1:]
-		collect(cur)
+		visit(cur)
 		for _, e := range g.NodeOutEdges(cur) {
 			if !visited[e.DstIdx] {
 				visited[e.DstIdx] = true
@@ -142,19 +174,69 @@ func SuppliesForEntryUnit(g *graph.Graph, unitIdx int) []engine.SupplyRequiremen
 			}
 		}
 	}
+}
 
-	if len(byNode) == 0 {
+// SupplyConsumerBindingsForEntryUnit pairs each wasm script node in an entry unit
+// with the supply nodes it depends on. It is the routing half of what
+// SuppliesForEntryUnit collects: the same dependency edges, but keeping the
+// CONSUMER's identity rather than only the supply's.
+//
+// The pairing must be derived here because nothing downstream retains it — the
+// activation directive carries a flat supply list, and a projected group package
+// flattens every member's supply refs into one deduplicated name set.
+//
+// A wasm node carrying inline code instead of artifact_digest yields no binding.
+// Computing a digest server-side would create a second module-identity source
+// that could drift from the runtime's own; ScriptFile-built nodes always have
+// artifact_digest by the time the graph compiles (see sdk/xflow.resolveArtifacts).
+//
+// The result is sorted and deduplicated, and nil (not empty) when there is
+// nothing to bind, so the wire format's omitempty keeps existing directives
+// byte-for-byte stable.
+func SupplyConsumerBindingsForEntryUnit(g *graph.Graph, unitIdx int) []engine.SupplyConsumerBinding {
+	if g == nil {
 		return nil
 	}
-	names := make([]string, 0, len(byNode))
-	for n := range byNode {
-		names = append(names, n)
+	seen := map[engine.SupplyConsumerBinding]bool{}
+	walkEntryUnitNodes(g, unitIdx, func(nodeIdx int) {
+		nm := g.NodeAt(nodeIdx)
+		if nm.Type != scriptNodeType {
+			return
+		}
+		if lang, _ := nm.Parameters["language"].(string); lang != wasmScriptLanguage {
+			return
+		}
+		refs := g.SupplyRefsFor(nodeIdx)
+		if len(refs) == 0 {
+			return
+		}
+		digest, _ := nm.Parameters["artifact_digest"].(string)
+		if digest == "" {
+			// Inline-code wasm node: no stable module identity to bind against.
+			// The node name is safe to log; params are not (they may carry
+			// credential references), so only the name appears here.
+			slog.Warn("supply consumer binding skipped: wasm node has no artifact_digest",
+				"node", nm.Name, "supplies", refs)
+			return
+		}
+		for _, supplyName := range refs {
+			seen[engine.SupplyConsumerBinding{ModuleDigest: digest, SupplyNode: supplyName}] = true
+		}
+	})
+
+	if len(seen) == 0 {
+		return nil
 	}
-	sort.Strings(names)
-	out := make([]engine.SupplyRequirement, 0, len(names))
-	for _, n := range names {
-		out = append(out, byNode[n])
+	out := make([]engine.SupplyConsumerBinding, 0, len(seen))
+	for b := range seen {
+		out = append(out, b)
 	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ModuleDigest != out[j].ModuleDigest {
+			return out[i].ModuleDigest < out[j].ModuleDigest
+		}
+		return out[i].SupplyNode < out[j].SupplyNode
+	})
 	return out
 }
 
@@ -191,12 +273,13 @@ func DeriveEntryActivations(g *graph.Graph) ([]EntryUnitActivation, error) {
 			}
 			reqs := engine.RequirementsFromGraphPackage(pkg.Requirements)
 			out = append(out, EntryUnitActivation{
-				EntryUnitID:  gm.Name,
-				NodeType:     "xflow.group",
-				PackageHash:  gm.PackageHash,
-				Selector:     gm.RunnerSelector,
-				Requirements: reqs,
-				Supplies:     SuppliesForEntryUnit(g, i),
+				EntryUnitID:     gm.Name,
+				NodeType:        "xflow.group",
+				PackageHash:     gm.PackageHash,
+				Selector:        gm.RunnerSelector,
+				Requirements:    reqs,
+				Supplies:        SuppliesForEntryUnit(g, i),
+				SupplyConsumers: SupplyConsumerBindingsForEntryUnit(g, i),
 			})
 		case graph.UnitNode:
 			nodeIdx := g.UnitNodeIndex(i)
@@ -214,7 +297,8 @@ func DeriveEntryActivations(g *graph.Graph) ([]EntryUnitActivation, error) {
 					NodeType:    nm.Type,
 					NodeVersion: nm.Version,
 				}}),
-				Supplies: SuppliesForEntryUnit(g, i),
+				Supplies:        SuppliesForEntryUnit(g, i),
+				SupplyConsumers: SupplyConsumerBindingsForEntryUnit(g, i),
 			})
 		}
 	}
@@ -255,6 +339,7 @@ func (m *EntryActivationManager) AddOrUpdateWorkflow(ctx context.Context, ns nam
 			Selector:        eu.Selector,
 			Requirements:    eu.Requirements,
 			Supplies:        eu.Supplies,
+			SupplyConsumers: eu.SupplyConsumers,
 			Desired:         true,
 		}); err != nil {
 			return err
@@ -306,6 +391,7 @@ func (m *EntryActivationManager) RemoveWorkflow(ctx context.Context, ns namespac
 			Selector:        existing.Selector,
 			Requirements:    existing.Requirements,
 			Supplies:        existing.Supplies,
+			SupplyConsumers: existing.SupplyConsumers,
 			Desired:         false,
 		}); err != nil {
 			return err

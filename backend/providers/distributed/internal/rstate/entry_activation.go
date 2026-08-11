@@ -166,6 +166,15 @@ func (s *EntryActivationStore) Upsert(ctx context.Context, act engine.EntryActiv
 		suppliesJSON = string(b)
 	}
 
+	var supplyConsumersJSON string
+	if len(act.SupplyConsumers) > 0 {
+		b, err := json.Marshal(act.SupplyConsumers)
+		if err != nil {
+			return fmt.Errorf("marshal supply consumers: %w", err)
+		}
+		supplyConsumersJSON = string(b)
+	}
+
 	desired := "0"
 	if act.Desired {
 		desired = "1"
@@ -183,6 +192,7 @@ func (s *EntryActivationStore) Upsert(ctx context.Context, act engine.EntryActiv
 		"selector", selectorJSON,
 		"requirements", requirementsJSON,
 		"supplies", suppliesJSON,
+		"supply_consumers", supplyConsumersJSON,
 		"desired", desired,
 	)
 	pipe.Expire(ctx, key, s.ttl)
@@ -330,6 +340,14 @@ func decodeEntryActivation(fields map[string]string) (engine.EntryActivation, er
 	if sup := fields["supplies"]; sup != "" {
 		if err := json.Unmarshal([]byte(sup), &act.Supplies); err != nil {
 			return engine.EntryActivation{}, fmt.Errorf("unmarshal supplies: %w", err)
+		}
+	}
+	// SupplyConsumers is absent on records written before the field existed;
+	// decode tolerates absence (leaves SupplyConsumers nil), which leaves the
+	// hosting runner registering no consumers — the behaviour that preceded it.
+	if sc := fields["supply_consumers"]; sc != "" {
+		if err := json.Unmarshal([]byte(sc), &act.SupplyConsumers); err != nil {
+			return engine.EntryActivation{}, fmt.Errorf("unmarshal supply consumers: %w", err)
 		}
 	}
 	if g := fields["generation"]; g != "" {

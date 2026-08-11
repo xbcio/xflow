@@ -41,6 +41,15 @@ func RegisterWasmSupplyConsumerByDigest(digest string, supplyNode string) error 
 	return wasm.RegisterSupplyConsumerByDigest(digest, supplyNode, supply.Default)
 }
 
+// UnregisterWasmSupplyConsumerByDigest removes a registration made by
+// RegisterWasmSupplyConsumerByDigest. Call it when the workflow leaves this
+// process (deactivation), so a module that is no longer hosted here stops
+// rebuilding its pool on every content change. It is a no-op when the pair was
+// never registered.
+func UnregisterWasmSupplyConsumerByDigest(digest string, supplyNode string) {
+	wasm.UnregisterSupplyConsumerByDigest(digest, supplyNode, supply.Default)
+}
+
 // CompileWasmModule eagerly compiles a wasm module (base64 code string) into the
 // reactor engine cache. Used by resolveArtifacts so the engine exists before
 // supply consumers attempt to configure it.

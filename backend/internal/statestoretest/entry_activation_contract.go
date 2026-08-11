@@ -27,7 +27,11 @@ func sampleEntryActivation(unit string) engine.EntryActivation {
 		Selector:        &types.RunnerSelector{Mode: types.RunnerSelectorModeRequired, MatchLabels: map[string]string{"zone": "a"}},
 		Requirements:    []engine.CapabilityRequirement{{NodeType: "http.request", NodeVersion: 2, Feature: "trigger.v1"}},
 		Supplies:        []engine.SupplyRequirement{{Node: "rules", Resource: "shared-rules", RequireReady: true}},
-		Desired:         true,
+		SupplyConsumers: []engine.SupplyConsumerBinding{{
+			ModuleDigest: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+			SupplyNode:   "rules",
+		}},
+		Desired: true,
 	}
 }
 
@@ -79,6 +83,13 @@ func RunEntryActivationContract(t *testing.T, newStore func(*testing.T) engine.E
 		if !reflect.DeepEqual(got.Supplies, act.Supplies) {
 			t.Fatalf("Supplies not round-tripped: got %+v want %+v", got.Supplies, act.Supplies)
 		}
+		// SupplyConsumers must round-trip too. Supplies alone only says which
+		// content this unit needs; without the consumer bindings the hosting
+		// runner fetches the content and hands it to nobody, and the wasm module
+		// silently evaluates against no rules.
+		if !reflect.DeepEqual(got.SupplyConsumers, act.SupplyConsumers) {
+			t.Fatalf("SupplyConsumers not round-tripped: got %+v want %+v", got.SupplyConsumers, act.SupplyConsumers)
+		}
 		list, err := s.List(ctx, namespace.Default)
 		if err != nil {
 			t.Fatalf("List: %v", err)
@@ -93,6 +104,55 @@ func RunEntryActivationContract(t *testing.T, newStore func(*testing.T) engine.E
 		}
 		if !found {
 			t.Fatalf("List %+v does not contain u-getlist", list)
+		}
+	})
+
+	// Re-upserting an EXISTING record must refresh the consumer bindings. This
+	// is a separate case from the first Upsert on purpose: a store that copies
+	// the whole record on create but refreshes desired-state field by field on
+	// update (the memory store does exactly that) passes the create path while
+	// silently dropping the field on every subsequent workflow update.
+	t.Run("UpsertRefreshesSupplyConsumers", func(t *testing.T) {
+		s := newStore(t)
+		act := sampleEntryActivation("u-rebind")
+		act.SupplyConsumers = nil
+		if err := s.Upsert(ctx, act); err != nil {
+			t.Fatalf("Upsert (first): %v", err)
+		}
+		want := []engine.SupplyConsumerBinding{{
+			ModuleDigest: "sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+			SupplyNode:   "rules",
+		}}
+		act.SupplyConsumers = want
+		if err := s.Upsert(ctx, act); err != nil {
+			t.Fatalf("Upsert (second): %v", err)
+		}
+		got, ok, err := s.Get(ctx, entryActivationKey(act))
+		if err != nil || !ok {
+			t.Fatalf("Get: ok=%v err=%v", ok, err)
+		}
+		if !reflect.DeepEqual(got.SupplyConsumers, want) {
+			t.Fatalf("SupplyConsumers after re-upsert = %+v, want %+v", got.SupplyConsumers, want)
+		}
+	})
+
+	// A record with no consumer bindings must read back nil, not an empty
+	// slice: the directive's wire format relies on omitempty, and a backend
+	// that materializes an empty slice would change every existing directive's
+	// JSON.
+	t.Run("UpsertWithoutSupplyConsumers", func(t *testing.T) {
+		s := newStore(t)
+		act := sampleEntryActivation("u-nobindings")
+		act.SupplyConsumers = nil
+		if err := s.Upsert(ctx, act); err != nil {
+			t.Fatalf("Upsert: %v", err)
+		}
+		got, ok, err := s.Get(ctx, entryActivationKey(act))
+		if err != nil || !ok {
+			t.Fatalf("Get: ok=%v err=%v", ok, err)
+		}
+		if got.SupplyConsumers != nil {
+			t.Fatalf("SupplyConsumers = %#v, want nil", got.SupplyConsumers)
 		}
 	})
 

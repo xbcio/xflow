@@ -210,7 +210,7 @@ func TestTriggerActivationHandler_StaleCloseOnGenerationUpgrade(t *testing.T) {
 	h.mu.Lock()
 	stored := h.subs[id]
 	h.mu.Unlock()
-	if stored != secondSub {
+	if stored.sub != secondSub {
 		t.Error("handler.subs stores stale subscription instead of the new one")
 	}
 	// Second sub must not have been closed.
@@ -254,7 +254,7 @@ func TestTriggerActivationHandler_StaleCloseNotCalledOnActivateError(t *testing.
 	h.mu.Lock()
 	stored := h.subs[id]
 	h.mu.Unlock()
-	if stored != firstSub {
+	if stored.sub != firstSub {
 		t.Error("handler.subs should still hold the first subscription after failed second Activate")
 	}
 }

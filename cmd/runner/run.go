@@ -582,7 +582,11 @@ func runnerServiceConfig(cfg runnerConfig, groupRuntime *runnersvc.GroupRuntime)
 		handler := runnersvc.NewTriggerActivationHandler(seedBaseURL, cfg.token, lookup,
 			runnersvc.WithSeedHTTPClient(seedClient),
 			runnersvc.WithSupplyGate(gate),
-			runnersvc.WithGroupRuntime(groupRuntime))
+			runnersvc.WithGroupRuntime(groupRuntime),
+			// Same resolver the executor uses (installed unconditionally above),
+			// so activation can compile a wasm module before registering its
+			// supply consumer without a second client or cache.
+			runnersvc.WithArtifactCodeResolver(svcCfg.ArtifactCodeResolver))
 		svcCfg.ActivationTracker = runnersvc.NewActivationTracker(handler, slog.Default())
 		// Same gate/registry pair feeds the heartbeat's two supply channels: the
 		// registry is what Observed() reads out to report applied hashes, and

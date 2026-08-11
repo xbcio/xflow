@@ -208,6 +208,14 @@ func RegisterWasmSupplyConsumerByDigest(digest string, supplyNode string) error 
 	return scriptpkg.RegisterWasmSupplyConsumerByDigest(digest, supplyNode)
 }
 
+// UnregisterWasmSupplyConsumerByDigest undoes RegisterWasmSupplyConsumerByDigest.
+// Call it when the workflow is deactivated on this runner, so a module it no
+// longer hosts stops rebuilding its pool on every supply change. Unregistering a
+// pair that was never registered is a no-op.
+func UnregisterWasmSupplyConsumerByDigest(digest string, supplyNode string) {
+	scriptpkg.UnregisterWasmSupplyConsumerByDigest(digest, supplyNode)
+}
+
 // CompileWasmModule eagerly compiles a wasm module (base64 code string) into the
 // reactor engine cache. Used by resolveArtifacts so the engine exists before
 // supply consumers attempt to configure its pool.

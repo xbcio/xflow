@@ -818,6 +818,7 @@ func (r *EntryActivationReconciler) activateDirectiveFor(ctx context.Context, ac
 		PackageHash:     act.PackageHash,
 		Kind:            activationKindFor(act),
 		Supplies:        act.Supplies,
+		SupplyConsumers: act.SupplyConsumers,
 	}
 	if act.NodeType == engine.GroupNodeType {
 		d.Package = r.projectPackageForGroup(ctx, act)
