@@ -271,16 +271,20 @@ func TestPortability_AWSKeyRejected(t *testing.T) {
 }
 
 func TestPortability_CredentialReferenceOK(t *testing.T) {
-	// Using {{ $credentials.my_api_key }} is fine — it's a reference, not a literal.
+	// Credentials must go through the "authentication" parameter's declarative
+	// reference (input.Credential in action/http.go:212). "{{ $credentials }}"
+	// in xflow.http headers has NEVER been evaluated -- it ships verbatim to the
+	// remote endpoint today. The compile-time template reachability pass rejects
+	// this form so the failure is loud rather than silent.
 	def := &types.WorkflowDef{
 		Name: "cred-ref",
 		Nodes: []types.NodeDef{
-			{Name: "A", Type: "http.request", Version: 1, Parameters: map[string]any{
+			{Name: "A", Type: "xflow.http", Version: 1, Parameters: map[string]any{
 				"headers": map[string]any{
 					"Authorization": "Bearer {{ $credentials.my_api_key }}",
 				},
 			}},
-			{Name: "B", Type: "http.request", Version: 1},
+			{Name: "B", Type: "xflow.http", Version: 1},
 			{Name: "D", Type: "db.query", Version: 1},
 		},
 		Groups: []types.GroupDef{
@@ -292,8 +296,11 @@ func TestPortability_CredentialReferenceOK(t *testing.T) {
 		},
 	}
 	_, err := Compile(def)
-	if err != nil {
-		t.Fatalf("Compile should succeed for credential reference: %v", err)
+	if err == nil {
+		t.Fatal("expected compile to reject: {{ $credentials }} in xflow.http headers is never evaluated")
+	}
+	if !strings.Contains(err.Error(), "headers") {
+		t.Errorf("error must name the parameter; got %q", err.Error())
 	}
 }
 

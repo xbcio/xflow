@@ -212,6 +212,9 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 	if err := validateGraphValueDomain(g); err != nil {
 		return nil, err
 	}
+	if err := validateTemplateReachability(g); err != nil {
+		return nil, err
+	}
 	depPorts, err := buildEdges(def, g)
 	if err != nil {
 		return nil, err

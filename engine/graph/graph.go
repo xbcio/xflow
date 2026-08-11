@@ -44,6 +44,11 @@ type Graph struct {
 	unitInDegree []int
 	nodeUnit     []int // nodeIdx → unitIdx mapping
 
+	// warnings holds non-fatal compile diagnostics. It is deliberately NOT part of
+	// MarshalJSON: a warning is a property of one compilation, not of the graph, and
+	// putting it on the wire would shift every persisted graph's hash.
+	warnings []string
+
 	// supplyIndexes maps a supply node's name to its index in g.nodes. Supply
 	// nodes live in the node layer only — never in g.units.
 	supplyIndexes map[string]int
@@ -293,3 +298,8 @@ func (g *Graph) SupplyNodeIndexes() map[string]int {
 	}
 	return out
 }
+
+// Warnings returns the non-fatal diagnostics collected during compilation.
+func (g *Graph) Warnings() []string { return g.warnings }
+
+func (g *Graph) addWarning(msg string) { g.warnings = append(g.warnings, msg) }
