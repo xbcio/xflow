@@ -565,6 +565,37 @@ outputs:
 
 ## 4. 表达式引擎
 
+> ### ⚠️ 本章大部分内容尚未实现（2026-08-11 实测）
+>
+> 本章描述的是目标形态。照本章写出的工作流**现在跑不出预期结果**，且失败方式
+> 多为静默。缺口分三层，详见
+> [EXPRESSION-LAYER-TODO.md](./EXPRESSION-LAYER-TODO.md)：
+>
+> 1. **`${{ }}` / `{{ }}` 两种模板语法零实现。** 全仓库没有任何代码剥离
+>    `${{`/`}}` 或识别插值模式。求值的节点直接把参数当裸表达式编译，所以
+>    `"${{ $params.x }}"` 在 expr-lang 里是语法错误（实测：
+>    `unexpected token Bracket("{") (1:2)`）。**本章下方的每个示例都属此列。**
+> 2. **多数节点根本不求值任何参数。** 没有统一的参数模板求值层——
+>    `engine/input.go` 把 `Parameters` 原样拷进 `Input.Params`，是否求值由各
+>    节点自己决定。`xflow.if`/`switch`/`map`/`split`/`function`/`transform.*`
+>    会求值（但只认裸表达式）；`xflow.http`/`grpc`/`database`/`notification`/
+>    `approval`/`wait` 与全部 trigger **一律字面透传**。
+> 3. **`$nodes` / `$execution` / `$workflow` / `$env` 四个根不存在。**
+>    `exprx.BuildExprEnv` 只提供 `$input`/`$inputs`/`$vars`/`$config`/
+>    `$params`/`$runtime`/`$supplies`。`$nodes` 在生产代码里唯一的出现处是
+>    `engine/graph/group_portability.go` 的编译期正则——它用来**拒绝**跨组
+>    引用，从不作为运行期值提供。
+>
+> **最危险的是失败不对称**（实测）：`xflow.http` 的 `url` 里写模板会响亮失败
+> （`unsupported protocol scheme ""`），但写在 `headers` / `body` 里**请求照发、
+> HTTP 200、执行状态成功**，对端收到的是字面串 `${{ $params.order_id }}`。
+> 没有任何日志或指标。
+>
+> 少数 spec 提到的函数其实可用，因为它们是 expr-lang 内置：`upper`/`lower`/
+> `trim`/`now`/`date`/`fromJSON`、`??`、三元。而 `dateFormat`/`parseJson`/
+> `sprintf`/`getCredential` 未注册（注意 spec §4.3 写的是 `parseJson`，内置的
+> 名字是 `fromJSON`）。
+
 ### 4.1 表达式语法
 
 XFlow 使用 **Expr** (expr-lang/expr) 作为表达式引擎，提供两种动态值语法：
