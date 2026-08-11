@@ -148,10 +148,15 @@ func nodeIdxOf(g *graph.Graph, name string) int {
 // continues); everything else (OnErrorStop, OnErrorOutput, OnErrorMainOutput,
 // or empty/default) => fatal.
 //
-// TODO(milestone-b): OnErrorOutput/OnErrorMainOutput should route the group
-// failure to the error boundary port's downstream, rather than terminating the
-// entire execution. Once error-port routing is implemented, this function
-// should only return true for OnErrorStop.
+// TODO(milestone-b): OnErrorOutput/OnErrorMainOutput are accepted by the
+// contract but behave as OnErrorStop here. Routing them requires a group-level
+// error output edge that does not exist yet — GroupMeta.BoundaryOutputs is
+// derived solely from real member edges crossing the boundary, compileOneGroup
+// never reads OnError to synthesize one, and CommitGroupResult rejects any exit
+// whose (nodeIdx, port) is absent from BoundaryOutputs. Narrowing this function
+// to OnErrorStop alone would therefore strand the failure rather than route it:
+// the non-fatal branch would reach downstreamUnitArrivals with no legal exit.
+// See NODE-GROUP-COLOCATION.md §12.2 for the full scope.
 func groupOnErrorFatal(onErr string) bool {
 	return onErr != string(types.OnErrorContinue)
 }

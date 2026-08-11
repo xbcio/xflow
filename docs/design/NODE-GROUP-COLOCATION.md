@@ -277,6 +277,49 @@ items listed below under §12.1. What remains open is in §12.2.
   for a supply's content to become available — the supply collection face is
   gated by `SupplyGate.Admit` at activation time, independent of whether the
   consuming workflow's own trigger uses entry-seed hosting at all.
+- **Group-level `on_error: error_output` / `main_output` is unbuilt, and the
+  in-code TODO understates it.** `engine/group_exec.go`'s `groupOnErrorFatal`
+  carries a TODO saying the two output policies "should route the group failure
+  to the error boundary port's downstream ... once error-port routing is
+  implemented." That phrasing suggests a wiring gap. Two independent
+  investigations (2026-08-11) found there is **no group-level error port to
+  wire to** — this is a new mechanism, not a blank to fill:
+
+  - `GroupMeta.BoundaryOutputs` (`engine/graph/unit.go`, built by
+    `buildUnitEdges`) is derived purely from real member-level edges that cross
+    the group boundary. Nothing ever synthesizes an entry into it.
+  - `compileOneGroup` (`engine/graph/group_compile.go`) stores `GroupDef.OnError`
+    as a plain string and never reads it to manufacture an edge or port.
+  - `CommitGroupResult` (`engine/group_lease.go`) validates every exit against
+    `(nodeIdx, port)` pairs in `BoundaryOutputs`. A fabricated "group failed"
+    exit is rejected today as an invalid boundary output.
+
+  So narrowing `groupOnErrorFatal` to `OnErrorStop` alone does not enable
+  routing — it **strands the failure**: the non-fatal branch reaches
+  `downstreamUnitArrivals` with no legal exit to compute arrivals from, leaving
+  a group that is neither fatal nor advancing.
+
+  The node-level analogue is not reusable as-is. `ApplyOnError`
+  (`engine/errorpolicy.go`) only *selects* which already-compiled port's edges
+  to activate; `downstreamArrivals` then filters `NodeOutEdges` by
+  `SrcPort == activePort`. Both presuppose the author drew that edge. Only the
+  "select edges by active port" algorithm carries over — groups already have
+  their own (`downstreamUnitArrivals`). The missing input is the compiled edge.
+
+  Building it means: new compile-time IR expressing a group-level error/main
+  output edge, a matching `validateGroupPortability` rule, graph-hash and
+  snapshot round-trip implications, synthesis logic duplicated across both
+  commit paths (`commitGroup` and the production remote `CommitGroupResult`),
+  a decision on what output payload a group-level failure carries (a group has
+  no single member output to copy), and new branch coverage in both the local
+  and Redis backends. The milestone-B plan anticipated this as a "synthetic
+  boundary outcome" and specified the fallback — when no legal endpoint exists
+  to map onto, it stays a group failure rather than fabricating an endpoint.
+
+  Coverage today is zero: no test in the repository constructs a
+  `GroupDef{OnError: "error_output"}` or `"main_output"`, and the group
+  executor fixtures always return success, so the `execErr != nil` branch is
+  never driven at the engine layer.
 - **Activation replica count > 1 per entry unit** (spec §11.6 explicit-replica
   scaling). There is one active hosting runner per entry unit today.
 - **Full runner→control activation ACK RPC.** The retired path's ACK was dead
