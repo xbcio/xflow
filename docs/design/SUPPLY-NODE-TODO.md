@@ -76,26 +76,40 @@ bucket 由同一份代码决定故可聚合，但若某 runner 装了 bucket 不
 心跳周期」退化为「一个 TTL 轮询周期」，永远不会退化为「永不刷新」。TTL 轮询才是
 正确性保证，hint 只是优化。
 
-### 4. wasm supply 热更新无生产接线，规则永不到达 guest
+### ~~4. wasm supply 热更新无生产接线，规则永不到达 guest~~ ✓ 已关闭
 
-`RegisterWasmSupplyConsumer` 与 `RegisterWasmSupplyConsumerByDigest`
-**零非测试调用点**。这不是"少接了一根线"，而是两条路径根本不相交：
+分支 `fix/wasm-supply-wiring` 补上了消费者注册这一环。原缺口是两条路径根本不
+相交：依赖边只走到 `control.SuppliesForEntryUnit` → runner 的
+`SupplyRequirement`，驱动**准入门控**与 `$supplies` 注入，从不触达
+`supply.Registry.RegisterConsumer`；于是 `configFromSource` 恒为 false，回落
+到 legacy `globals["$config"]` 路径，而 `$config` 在生产中被 workflow 级
+Config 占据，reactor 永远拿不到规则——且空规则集不报错，流量原样放行。
 
-生产的依赖边走 `g.supplyRefs` → `graph.SupplyRefsFor` →
-`control.SuppliesForEntryUnit` → runner 的 `SupplyRequirement`，它只驱动
-**准入门控**与 `$supplies` 注入，**从不触达 `supply.Registry.RegisterConsumer`**。
+「谁消费谁」这个配对必须在**服务端**推导：指令只带扁平的 supply 名字列表，
+group 包投影更是把每个成员的 `supplyRefs` 压平成一个去重名字集合，内容抵达
+runner 时配对早已丢失。`DeriveEntryActivations` 现在沿同一批依赖边多保留消费
+者身份，产出 `SupplyConsumerBinding{ModuleDigest, SupplyNode}` 随激活指令下发，
+由 runner 注册。只传 digest 不传 inline code（多 MB base64 上激活链路是已知禁
+忌；服务端另算 digest 会造出与 host 侧 `moduleKeyOf` 可能漂移的第二身份来源），
+内联代码节点不产生 binding 并记 Warn。
 
-后果：wasm tagger 模块的 `configFromSource` 恒为 false，回落到 legacy
-`globals["$config"]` 路径。而 `$config` 在生产中被 workflow 级 Config 占据，
-于是 reactor 永远拿不到规则。
+**注册前必须先编译**：runner 上引擎只在首次 Execute 时建。若对着不存在的引擎
+注册，通知回调返回 nil → registry 记为「内容已接受」→ 补投条件永不成立；而注
+册本身已把模块标记为 source-driven，无池即**拒绝所有消息**——比原缺陷更糟（从
+静默放行变成永久卡死）。激活期取件并编译关掉了这个空窗，顺带把 ~7MB 模块的编译
+挪出首条消息的 deadline。
 
-`test/integration/sas_tagging_e2e_test.go:64` 的手工 `RegisterSupplyConsumer`
-调用正是在**替代缺失的生产接线**——它让 e2e 绿灯，同时让缺口不可见。
+Generation 升级用差集而非「清空再注册」：注册键由 (digest, supply node) 决定，
+重发相同 binding 时后者会删掉刚建立的注册，症状是热更新静默失效。
 
-走公开 `supply.Default.RegisterConsumer` 的 Go 节点不受影响
-（`node/supply/registry.go:409` 在内容已缓存时会立即回调），所以
-[2026-08-07 SAS 流量打标 spec](../superpowers/specs/2026-08-07-sas-traffic-tagging-runner-group-design.md)
-不依赖这条。修它的时机是下一次真要在生产里用 wasm + 热更新配置时。
+全链路 fail closed：无 resolver、取件失败、digest 畸形都让激活失败，而不是让
+一个拿不到规则的模块上线。错误只带 digest 与 supply 名，不带 Params/token
+（组织策略 §7）。
+
+`test/integration/sas_tagging_e2e_test.go` 的手工注册**保留**：该 workflow 不设
+`RunnerSelector`，走 in-process 内联路径，根本不经过激活链路。注释已改为说明它
+是内联模式的等价物，并指向 `TestSupplyConsumerBindingReachesRunner`（分布式模式
+的端到端覆盖）。
 
 ## P2 — 17 条 deferred minor
 
