@@ -358,7 +358,7 @@ func projectNodeBodies(def *types.WorkflowDef, g *Graph) error {
 		if !declaresSubgraphBody(nd.Parameters) {
 			continue
 		}
-		body, err := ProjectNodeBodyPackage(nd.Name, nd.Parameters, g.SupplyRefsFor(i))
+		body, err := ProjectNodeBodyPackage(nd.Name, nd.Parameters, g.SupplyRefsFor(i), projectedWorkflowContext(g))
 		if err != nil {
 			return err
 		}

@@ -141,3 +141,112 @@ func TestMapBodyMemberTemplateEvaluatedByInnerExecution(t *testing.T) {
 			"renders against its OWN item)", got)
 	}
 }
+
+// TestMapBodyMemberSeesWorkflowVarsAndConfig guards the two independent ways a
+// body member used to lose $vars and $config.
+//
+// The DSL promises both roots to a body -- DSL-SPECIFICATION.md's own map-body
+// example writes `url: "{{ $vars.api_base_url }}/process"`, which under the
+// pre-fix code rendered to "/process": a URL with its host silently removed.
+//
+// Measured before the fix, both roots were empty in a body member:
+//
+//	Context{Vars,Config}      -> "NOVAR/NOCFG"
+//	Submit(..., &Runtime{Vars}) -> "MISSING"
+//
+// The two halves fail for different reasons and must both be asserted here:
+//
+//   - STATIC (Context.Vars / Context.Config): ProjectNodeBodyPackage built the
+//     body package's Def with only Nodes and Connections. ProjectGroupPackage
+//     has always carried Context, so the two projection paths disagreed.
+//   - RUNTIME (Runtime.Vars, e.g. per-submission tenant): the inner
+//     Engine.Submit call passed no runtime variadic, so the sub-execution's
+//     snapshot had a nil Runtime and buildInput merged nothing into Vars.
+//
+// A test asserting only one of them would stay green with the other half
+// broken -- they share no code.
+func TestMapBodyMemberSeesWorkflowVarsAndConfig(t *testing.T) {
+	reg := execution.NewRegistry()
+	reg.RegisterGlobal("xflow.map", &mapFanoutHandler{})
+	reg.RegisterGlobal("test.echo", &batchEchoHandler{})
+	body := &bodyTemplateHandler{}
+	reg.RegisterGlobal("test.body_template", body)
+
+	b := New(WithConcurrency(2), WithRegistry(reg))
+	bodies := subgraph.NewMapBodyExecutor(
+		subgraph.NewExecutor(reg, subgraph.NewPackageCache(subgraph.PackageCacheConfig{}),
+			func() subgraph.Backend { return New(WithRegistry(reg), WithConcurrency(1)) }),
+		true, time.Time{})
+	eng := engine.New(b.State(), b.Queue(), engine.WithBatchBodyExecutor(bodies))
+	stop := b.Bind(eng)
+	defer stop()
+
+	def := &types.WorkflowDef{
+		Name: "map-body-context",
+		Context: &types.WorkflowContext{
+			Vars:   map[string]any{"greeting": "hello"},
+			Config: map[string]any{"region": "cn-north"},
+		},
+		Nodes: []types.NodeDef{
+			{Name: "m", Type: "xflow.map", Parameters: map[string]any{
+				"items": "$input.items",
+				"body": map[string]any{
+					"type": "xflow.subgraph",
+					"parameters": map[string]any{
+						"nodes": []any{
+							map[string]any{
+								"name": "member", "type": "test.body_template",
+								"parameters": map[string]any{
+									// The ?? defaults turn an absent root into a
+									// self-describing value rather than an
+									// evaluation error, so a failure reports WHICH
+									// root went missing.
+									"greeting": "${{ ($vars.greeting ?? 'NOVAR') + '/' + " +
+										"($config.region ?? 'NOCFG') + '/' + ($vars.tenant ?? 'NORUNTIME') }}",
+								},
+							},
+						},
+					},
+				},
+			}},
+			{Name: "done", Type: "test.echo"},
+		},
+		Connections: types.Connections{
+			"m": {"main": {Targets: []types.Connection{{Node: "done", Input: "main"}}}},
+		},
+	}
+	g, err := graph.Compile(def)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	// Runtime vars are per-submission, unlike Context.Vars which is per
+	// definition. A tenant id is the canonical example and is the half the
+	// seeded-input path was silently dropping.
+	id, err := eng.Submit(ctx, g, nil, &types.Runtime{Vars: map[string]any{"tenant": "acme"}})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	res, err := b.WaitDone(ctx, id)
+	if err != nil {
+		t.Fatalf("WaitDone: %v", err)
+	}
+	if res.Status != types.ExecutionStatusSuccess {
+		t.Fatalf("execution status = %v, want success", res.Status)
+	}
+
+	const want = "hello/cn-north/acme"
+	got := body.greetings()
+	if len(got) != 2 {
+		t.Fatalf("body member ran %d times with %#v, want 2", len(got), got)
+	}
+	for _, g := range got {
+		if g != want {
+			t.Errorf("body member saw %#v, want %q -- NOVAR means Context.Vars did not "+
+				"reach the projected body package, NOCFG the same for Context.Config, "+
+				"NORUNTIME means the inner Submit dropped the outer Runtime", g, want)
+		}
+	}
+}

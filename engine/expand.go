@@ -293,6 +293,14 @@ func (e *Engine) runBatchBody(ctx context.Context, g *graph.Graph, lease *TaskLe
 
 	allItems, batchSize := mapBatchingContext(t, len(items))
 	continueOnError := mapContinueOnError(meta)
+	// The outer submission's Runtime.Vars are the half of $vars that does not
+	// travel inside the projected body package (Context.Vars does). Read from
+	// the execution snapshot -- the same source buildInput uses for a regular
+	// node -- because a batch task carries no input of its own.
+	runtime, err := e.executionRuntime(ctx, lease.Task.ExecutionID)
+	if err != nil {
+		return nil, batchBodyError(lease.Task.NodeName, batchIndex, err)
+	}
 	itemResults, err := e.batchBodyExecutor.ExecuteBatchBody(ctx, BatchBodyRequest{
 		ExecutionID:     string(lease.Task.ExecutionID),
 		ParentNode:      lease.Task.NodeName,
@@ -303,6 +311,7 @@ func (e *Engine) runBatchBody(ctx context.Context, g *graph.Graph, lease *TaskLe
 		Items:           items,
 		AllItems:        allItems,
 		ContinueOnError: continueOnError,
+		Runtime:         runtime,
 	})
 	if err != nil {
 		// The body could not be RUN — compile failure, missing handler, backend
@@ -572,4 +581,21 @@ func (e *Engine) failLoopSplit(ctx context.Context, lease *TaskLease, g *graph.G
 		return fmt.Errorf("finalize failed loop/split node %q/%q: %w", lease.Task.ExecutionID, lease.Task.NodeName, err)
 	}
 	return nil
+}
+
+// executionRuntime reads an execution's submission Runtime from the snapshot.
+// A batch task is dispatched from the parent's expansion, not from the
+// submission, so it is the only way the runtime half of $vars reaches a body.
+// A missing snapshot is not an error here: the caller has already established
+// the execution is active via loadActiveGraph, and an execution that finished
+// in the window between simply has no runtime to forward.
+func (e *Engine) executionRuntime(ctx context.Context, id types.ExecutionID) (*types.Runtime, error) {
+	snap, err := e.state.GetExecution(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("get execution %q: %w", id, err)
+	}
+	if snap == nil {
+		return nil, nil
+	}
+	return cloneRuntime(snap.Runtime), nil
 }

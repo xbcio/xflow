@@ -50,7 +50,14 @@ const bodyExitPort = "main"
 // layer up, from a group's members instead of a body's parent node). Passing
 // nil here still compiles a body with no supply reads, which is the common
 // case and the shape every existing caller of this function needs.
-func ProjectNodeBodyPackage(mapNodeName string, params map[string]any, visibleSupplies []string) (*NodeBodyPackage, error) {
+//
+// wfCtx is the workflow-level Vars/Config the body's members must keep seeing —
+// build it with projectedWorkflowContext(g). It is threaded in rather than read
+// off a *Graph because a body has no Graph of its own; its members are compiled
+// from the "body" parameter alone. Passing nil produces a body whose members
+// see empty $vars and $config, which is what this function used to do
+// unconditionally.
+func ProjectNodeBodyPackage(mapNodeName string, params map[string]any, visibleSupplies []string, wfCtx *types.WorkflowContext) (*NodeBodyPackage, error) {
 	bodyRaw, ok := params["body"]
 	if !ok {
 		return nil, fmt.Errorf("node %q has no body to project", mapNodeName)
@@ -107,7 +114,7 @@ func ProjectNodeBodyPackage(mapNodeName string, params map[string]any, visibleSu
 		Version:         SubgraphPackageVersion,
 		GroupName:       mapNodeName,
 		EntryNode:       nodes[entryIdx].Name,
-		Def:             &types.WorkflowDef{Name: mapNodeName, Nodes: defNodes, Connections: bodyConnections(conns, exits)},
+		Def:             &types.WorkflowDef{Name: mapNodeName, Context: wfCtx, Nodes: defNodes, Connections: bodyConnections(conns, exits)},
 		Exits:           exits,
 		Requirements:    buildBodyRequirements(defNodes),
 		VisibleSupplies: visibleSupplies,

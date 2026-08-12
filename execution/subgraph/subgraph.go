@@ -164,14 +164,17 @@ func (e *Executor) Execute(ctx context.Context, req Request) (Result, error) {
 		defer cancel()
 	}
 
-	// Submit with seeded input for the entry node and pre-allocated ID.
+	// Submit with the pre-allocated inner execution ID.
 	entryInput := req.Input
 	submitCtx := engine.WithExecutionID(execCtx, innerExecID)
-	submitCtx = engine.WithSeededInputs(submitCtx, map[string]engine.SeededInput{
-		pkg.EntryNode: buildSeed(entryInput),
-	})
 
-	_, err = innerEngine.Submit(submitCtx, compiled, inputDataAsParams(entryInput))
+	// entryInput.Runtime is passed as the inner submission's runtime, not left
+	// behind: $vars is the union of the workflow's static Context.Vars (which
+	// travel in the package's Def) and the submission's Runtime.Vars (which do
+	// not). Dropping the second half made a member see only half of $vars --
+	// a per-submission tenant/namespace read as nil inside a group or a map
+	// body while resolving fine one level up.
+	_, err = innerEngine.Submit(submitCtx, compiled, inputDataAsParams(entryInput), inputRuntime(entryInput))
 	if err != nil {
 		return Result{
 			Outcome: OutcomeFailed,
@@ -273,14 +276,13 @@ func inputDataAsParams(input *types.Input) map[string]any {
 	return input.Data
 }
 
-// buildSeed converts a types.Input into a SeededInput.
-func buildSeed(input *types.Input) engine.SeededInput {
+// inputRuntime extracts Runtime from the entry input, tolerating a nil input
+// the same way inputDataAsParams does. Submit's variadic accepts a nil
+// *types.Runtime (cloneRuntime returns nil for it), so a caller with no
+// runtime stays exactly as it was.
+func inputRuntime(input *types.Input) *types.Runtime {
 	if input == nil {
-		return engine.SeededInput{}
+		return nil
 	}
-	return engine.SeededInput{
-		Data:    input.Data,
-		Inputs:  input.Inputs,
-		Runtime: input.Runtime,
-	}
+	return input.Runtime
 }

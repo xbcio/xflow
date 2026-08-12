@@ -74,6 +74,28 @@ type SubgraphPackage struct {
 // nothing to do with the xflow.subgraph node type an author can write. Naming it
 // after the shared output type once made it read as xflow.subgraph's projection
 // entry, which is ProjectNodeBodyPackage.
+// projectedWorkflowContext builds the Context a projected package carries so
+// its members keep $vars and $config, the two workflow-level roots the DSL
+// promises every node regardless of how deeply it is nested.
+//
+// Both projection entry points call this. They used to differ -- the group path
+// carried a Context, the body path did not -- which made a map body's members
+// see empty $vars and $config while the same members inside a group saw them.
+// The spec's own map-body example writes `url: "{{ $vars.api_base_url }}/process"`,
+// so the body path's omission rendered that URL without its host.
+//
+// Returns nil when the workflow declares neither, which keeps a bodiless
+// workflow's package bytes -- and therefore its hash -- unchanged.
+func projectedWorkflowContext(g *Graph) *types.WorkflowContext {
+	if g == nil || (g.vars == nil && g.config == nil) {
+		return nil
+	}
+	return &types.WorkflowContext{
+		Vars:   cloneStringAnyMap(g.vars),
+		Config: cloneStringAnyMap(g.config),
+	}
+}
+
 func ProjectGroupPackage(g *Graph, unitIdx int) (*SubgraphPackage, string, error) {
 	if unitIdx < 0 || unitIdx >= len(g.units) {
 		return nil, "", fmt.Errorf("unit index %d out of range [0, %d)", unitIdx, len(g.units))
@@ -129,13 +151,7 @@ func ProjectGroupPackage(g *Graph, unitIdx int) (*SubgraphPackage, string, error
 	conns := buildPackageConnections(g, memberSet, exits)
 
 	// Workflow-level Vars/Config (stripped of secrets).
-	var ctx *types.WorkflowContext
-	if g.vars != nil || g.config != nil {
-		ctx = &types.WorkflowContext{
-			Vars:   cloneStringAnyMap(g.vars),
-			Config: cloneStringAnyMap(g.config),
-		}
-	}
+	ctx := projectedWorkflowContext(g)
 
 	def := &types.WorkflowDef{
 		Name:        gm.Name,

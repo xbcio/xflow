@@ -170,7 +170,6 @@ func (e *Engine) Submit(ctx context.Context, g *graph.Graph, params map[string]a
 		Graph:        g,
 		Status:       types.ExecutionStatusRunning,
 		Params:       cloneMap(params),
-		SeededInputs: CloneSeededInputs(SeededInputsFromContext(ctx)),
 	}
 	attachTraceMetadata(ctx, snap)
 	if len(runtime) > 0 {

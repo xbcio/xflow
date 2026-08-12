@@ -95,11 +95,11 @@ func TestProjectNodeBodyPackageHashIgnoresMemberOrder(t *testing.T) {
 		}}},
 	}
 
-	first, err := ProjectNodeBodyPackage("m", mapNodeWithBody(t, members, conns).Parameters, nil)
+	first, err := ProjectNodeBodyPackage("m", mapNodeWithBody(t, members, conns).Parameters, nil, nil)
 	if err != nil {
 		t.Fatalf("ProjectNodeBodyPackage(ordered) error = %v", err)
 	}
-	second, err := ProjectNodeBodyPackage("m", mapNodeWithBody(t, reversed, conns).Parameters, nil)
+	second, err := ProjectNodeBodyPackage("m", mapNodeWithBody(t, reversed, conns).Parameters, nil, nil)
 	if err != nil {
 		t.Fatalf("ProjectNodeBodyPackage(reversed) error = %v", err)
 	}
@@ -120,7 +120,7 @@ func TestProjectNodeBodyPackageCollectsTerminalMembers(t *testing.T) {
 		"a": map[string]any{"main": map[string]any{"targets": []any{
 			map[string]any{"node": "b", "input": "main"},
 		}}},
-	}).Parameters, nil)
+	}).Parameters, nil, nil)
 	if err != nil {
 		t.Fatalf("ProjectNodeBodyPackage() error = %v", err)
 	}
@@ -143,7 +143,7 @@ func TestProjectNodeBodyPackageCollectsTerminalMembers(t *testing.T) {
 func TestProjectedNodeBodyPackageCompiles(t *testing.T) {
 	body, err := ProjectNodeBodyPackage("m", mapNodeWithBody(t, []any{
 		map[string]any{"name": "step", "type": "test.echo"},
-	}, nil).Parameters, nil)
+	}, nil).Parameters, nil, nil)
 	if err != nil {
 		t.Fatalf("ProjectNodeBodyPackage() error = %v", err)
 	}
@@ -166,7 +166,7 @@ func TestProjectedNodeBodyPackageCompiles(t *testing.T) {
 func TestProjectNodeBodyPackageRequirementsExcludeCollectors(t *testing.T) {
 	body, err := ProjectNodeBodyPackage("m", mapNodeWithBody(t, []any{
 		map[string]any{"name": "step", "type": "test.echo"},
-	}, nil).Parameters, nil)
+	}, nil).Parameters, nil, nil)
 	if err != nil {
 		t.Fatalf("ProjectNodeBodyPackage() error = %v", err)
 	}

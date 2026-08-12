@@ -125,6 +125,11 @@ func globalIndex(req engine.BatchBodyRequest, pos int) int {
 // unprefixed "item"/"index" for its own per-element condition (see
 // node/internal/transform/filter.go), and a filter nested in a body would
 // otherwise shadow the map's iteration variables silently.
+//
+// Runtime is forwarded rather than left nil so a body member's $vars carries the
+// per-submission half too -- Executor reads it off this Input and passes it to
+// the inner Submit. The static half already arrives inside the projected
+// package's Def.Context.
 func bodyItemInput(req engine.BatchBodyRequest, item any, index int) *types.Input {
 	return &types.Input{
 		Data: map[string]any{
@@ -132,6 +137,7 @@ func bodyItemInput(req engine.BatchBodyRequest, item any, index int) *types.Inpu
 			"$index": index,
 			"$items": req.AllItems,
 		},
+		Runtime: req.Runtime,
 	}
 }
 

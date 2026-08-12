@@ -402,3 +402,87 @@ func TestBuildSubgraphLeaseCarriesEverythingTheBodyNeeds(t *testing.T) {
 		t.Errorf("payload carries %d AllItems, want all 3 for $items", len(payload.AllItems))
 	}
 }
+
+// A batch lease is the only route the submission's Runtime.Vars have to a
+// runner. $vars is the union of the workflow's static Context.Vars -- which
+// travel inside the projected body package -- and the submission's
+// Runtime.Vars, which do not: a runner never saw the submission, and a batch
+// task carries no input of its own. Without this field a body member reading
+// $vars.<per-submission key> got nil on a runner while the same expression
+// resolved fine one level up, in the outer graph.
+//
+// Asserted on the payload rather than end-to-end because this is the wire
+// boundary: service/runner/subgraph_runtime.go copies the field straight into
+// BatchBodyRequest, and the in-process half is covered by
+// TestMapBodyMemberSeesWorkflowVarsAndConfig.
+func TestBuildSubgraphLeaseCarriesTheSubmissionRuntime(t *testing.T) {
+	def := &types.WorkflowDef{
+		Name: "batch-lease-runtime",
+		Nodes: []types.NodeDef{
+			{Name: "loop", Type: "xflow.map", Parameters: mapBodyParamsForTest()},
+		},
+	}
+	g, err := graph.Compile(def)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	state := newFakeState()
+	queue := &fakeQueue{}
+	reg := &fakeRegistry{handlers: map[string]types.ActionHandler{
+		"xflow.map": &loopHandler{},
+	}}
+	eng := newTestEngine(t, state, queue, reg)
+	ctx := context.Background()
+	if _, err := eng.Submit(ctx, g, nil, &types.Runtime{Vars: map[string]any{"tenant": "acme"}}); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	batches := drainBatchTasks(t, eng, queue)
+
+	_, payload, err := eng.BuildSubgraphLease(ctx, batches[0])
+	if err != nil {
+		t.Fatalf("BuildSubgraphLease() error = %v", err)
+	}
+	if payload.Runtime == nil {
+		t.Fatalf("batch payload dropped the submission runtime; a body member's $vars would be missing its per-submission half")
+	}
+	if got := payload.Runtime.Vars["tenant"]; got != "acme" {
+		t.Errorf("payload.Runtime.Vars[\"tenant\"] = %v, want \"acme\"", got)
+	}
+}
+
+// The clone must be a copy, not an alias: a runner-facing payload that shares
+// the snapshot's map lets any mutation on either side show up on the other,
+// across every batch of the expansion.
+func TestBuildSubgraphLeaseClonesTheSubmissionRuntime(t *testing.T) {
+	def := &types.WorkflowDef{
+		Name:  "batch-lease-runtime-clone",
+		Nodes: []types.NodeDef{{Name: "loop", Type: "xflow.map", Parameters: mapBodyParamsForTest()}},
+	}
+	g, err := graph.Compile(def)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	state := newFakeState()
+	queue := &fakeQueue{}
+	reg := &fakeRegistry{handlers: map[string]types.ActionHandler{"xflow.map": &loopHandler{}}}
+	eng := newTestEngine(t, state, queue, reg)
+	ctx := context.Background()
+	execID, err := eng.Submit(ctx, g, nil, &types.Runtime{Vars: map[string]any{"tenant": "acme"}})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	batches := drainBatchTasks(t, eng, queue)
+	_, payload, err := eng.BuildSubgraphLease(ctx, batches[0])
+	if err != nil {
+		t.Fatalf("BuildSubgraphLease() error = %v", err)
+	}
+
+	payload.Runtime.Vars["tenant"] = "mutated"
+	snap, err := state.GetExecution(ctx, execID)
+	if err != nil || snap == nil {
+		t.Fatalf("GetExecution() = %+v err=%v", snap, err)
+	}
+	if got := snap.Runtime.Vars["tenant"]; got != "acme" {
+		t.Errorf("mutating the payload changed the stored snapshot: tenant = %v, want \"acme\"", got)
+	}
+}

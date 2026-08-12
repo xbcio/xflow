@@ -74,7 +74,7 @@ func TestBodyIsEncodedInsideItsNodeNotBesideIt(t *testing.T) {
 // BodyAt returned nil, because the body also had to be written into a separate
 // container that the node knew nothing about.
 func TestABodySetOnANodeNeedsNoSeparatePlumbing(t *testing.T) {
-	body, err := ProjectNodeBodyPackage("t", map[string]any{"body": subgraphBody()}, nil)
+	body, err := ProjectNodeBodyPackage("t", map[string]any{"body": subgraphBody()}, nil, nil)
 	if err != nil {
 		t.Fatalf("project body: %v", err)
 	}

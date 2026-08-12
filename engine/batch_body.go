@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/xbcio/xflow/engine/graph"
+	"github.com/xbcio/xflow/types"
 )
 
 // ErrNoBatchBodyExecutor reports that a batch reached this engine to be executed
@@ -73,6 +74,14 @@ type BatchBodyRequest struct {
 	// ContinueOnError, when false, stops the batch at its first failed item.
 	// The already-executed items keep their side effects: there is no rollback.
 	ContinueOnError bool
+	// Runtime is the OUTER submission's runtime, forwarded so a body member's
+	// $vars sees the per-submission half too. $vars is the union of the
+	// workflow's static Context.Vars -- which travel inside Body.Def -- and
+	// Runtime.Vars, which have no other way in: a batch is dispatched from a
+	// task, not from the submission, so without this field the runtime half
+	// stops at the map node. A group member already gets both, because a group
+	// lease carries a whole *types.Input; a batch lease carries items.
+	Runtime *types.Runtime
 }
 
 // WithBatchBodyExecutor supplies the body sub-graph executor used by

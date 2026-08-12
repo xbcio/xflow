@@ -55,6 +55,17 @@ type SubgraphLeasePayload struct {
 	AllItems []any `json:"all_items,omitempty"`
 	// ContinueOnError, when false, stops this batch at its first failed item.
 	ContinueOnError bool `json:"continue_on_error,omitempty"`
+	// Runtime is the outer submission's runtime, carried so a body member's
+	// $vars sees the per-submission half. The static half already travels
+	// inside Package.Def.Context; Runtime.Vars have no other route to a runner,
+	// which never saw the submission. A group lease carries the equivalent
+	// inside its whole *types.Input — a batch lease carries items instead, so
+	// this field is where the same information goes.
+	//
+	// Contains only what the submitter put in Runtime.Vars (tenant, namespace,
+	// and the like). It is NOT a credential channel: credentials reach a runner
+	// through declarative injection, never through $vars.
+	Runtime *types.Runtime `json:"runtime,omitempty"`
 }
 
 // BuildSubgraphLease assembles a runner-facing lease for a queued batch task.
@@ -130,6 +141,13 @@ func (e *Engine) BuildSubgraphLease(ctx context.Context, t *Task) (*TaskLease, *
 		payload.PackageHash = body.Hash
 	}
 	payload.AllItems, payload.BatchSize = mapBatchingContext(t, len(items))
+	// The runtime half of $vars: see the field's doc comment. Read from the
+	// execution snapshot because a batch task carries no input of its own.
+	runtime, err := e.executionRuntime(ctx, parentLease.Task.ExecutionID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("build subgraph lease: %w", err)
+	}
+	payload.Runtime = runtime
 	lease.SubgraphPayload = payload
 	return lease, payload, nil
 }

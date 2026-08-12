@@ -194,7 +194,6 @@ type ExecutionSnapshot struct {
 	// tracestate and the sampled flag.
 	TraceCarrier map[string]string    `json:"trace_carrier,omitempty"`
 	ParentID     types.ExecutionID   // non-empty for sub-executions
-	SeededInputs map[string]SeededInput `json:"seeded_inputs,omitempty"`
 }
 
 // NodeSnapshot is the engine's view of a single node's latest state stored in
