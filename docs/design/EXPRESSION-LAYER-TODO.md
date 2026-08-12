@@ -150,3 +150,29 @@ spec 用到但 env 里没有的：`$nodes`、`$execution`、`$workflow`、`$env`
 编译期保证组内 `$nodes` 只指向同组成员，所以内层引擎的惰性访问器只需要看内层
 state。两者本来是一套设计的两半，至今只落地了否定那半。
 
+## 编译期可达性闸的定向撤销（2026-08-12）
+
+Task 0（commit `3680159`）建了一条编译期规则：参数含 `{{` 但"不会被求值"→ 编译
+拒绝。Task 1（commit `7173668`、`a142dcf`）在 `execution/runner.go` 的 handler
+边界建了求值层：**所有非豁免参数都会被求值**。
+
+两者共存时互相抵消：`execution/params_test.go:31` 断言
+`{{ $params.order_id }}` 在 `xflow.http` headers 中被正确求值，但同一形态被
+编译期以"parameter is never evaluated"拒绝。DSL-SPECIFICATION.md 的文档示例
+(:354, :427, :447) 把模板写在正是这些参数上——spec 的目标形态部署不上去。
+
+**裁决：拆掉可达性闸，保留畸形形态闸。**
+
+理由：Task 0 注释自己写明它存在的意义是 "xflow.http ships the literal template
+in a header and still reports HTTP 200, 零诊断"。Task 1 消灭了这个静默；闸门保护
+的故障消失后，闸门本身变成对正确用法的误拒。
+
+保留的两条规则：
+
+1. **畸形形态闸**（`rejectMalformedTemplate`）——承重于 `exprx.RenderTemplate`
+   规则 1 分支："${{ }} 前后有文本"在编译期排除，render 不再处理该形态。
+2. **两张表**（`evaluableParams` / `evaluableSubFields`）——承重于边界豁免集
+   (`execution/params.go`)：handler 自己求值的参数由边界跳过，否则双求值
+   把条件求成 bool → `"true"` → switch 恒走第一条规则。
+
+

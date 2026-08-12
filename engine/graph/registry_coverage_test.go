@@ -12,9 +12,13 @@ import (
 
 // TestEvaluableParamsCoversAllRegisteredTypes verifies that every node type
 // known to the global registry has an entry in evaluableParams. A missing
-// entry means a template in that type's parameters silently degrades to a
-// warning instead of being rejected -- the exact gap this test exists to
-// prevent from reopening.
+// entry means the boundary evaluation layer (execution/params.go) has no
+// exemption data for that type: it would evaluate EVERY parameter, including
+// ones the handler itself evaluates -- causing silent double-evaluation. The
+// worst form of that is xflow.switch's condition: the boundary resolves it to
+// a boolean, cast.ToString makes it "true", the handler evaluates "true" as an
+// expr (always truthy), and the switch permanently takes its first rule with
+// zero diagnostics. This test exists to prevent that gap from reopening.
 //
 // The test imports package node (blank import above) to trigger every init()
 // that registers handlers. Without it the registry is empty and this test is
