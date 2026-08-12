@@ -8,45 +8,26 @@ import (
 // deriveNodesRefs extracts node references ($nodes['name']) from a node's
 // parameters, SKIPPING the body sub-graph if present.
 //
-// This is intentionally separate from extractNodeRefs (group_portability.go),
-// which walks the entire parameter tree including bodies. That function has an
-// existing consumer (validatePortability) whose behavior must not change: it
-// rejects group members that reference nodes outside the group, and it must
-// continue to see body-internal references so that a body referencing an
-// external node is still caught.
-//
-// This function serves a different purpose: it determines which nodes the
-// OUTER graph must prefetch at runtime. A reference inside a body sub-graph
-// resolves against the INNER graph's state, not the outer one, so attributing
-// it to the outer node causes two bugs:
+// It determines which nodes the OUTER graph must prefetch at runtime. A
+// reference inside a body sub-graph resolves against the INNER graph's state,
+// not the outer one, so attributing it to the outer node causes two bugs:
 //   - Compile-time: the outer graph's index may not contain the inner node
 //     name, falsely rejecting a legitimate workflow.
 //   - Runtime: buildInput would call GetOutput for a name that only exists in
 //     the sub-execution's state, getting nil and silently corrupting $nodes.
 //
-// The existing portability path already suffers from the first bug (it rejects
-// a map node in a group whose body references an inner member as "external
-// reference") — that is a known defect, not something this function introduced
-// or is responsible for fixing.
-//
-// Body detection uses declaresSubgraphBody (compile.go), which keys off the
-// VALUE's shape (a map with Type == "xflow.subgraph"), not the parameter name
-// or the node type. This means xflow.http's "body" parameter (a request
-// payload) is never skipped, because it never satisfies the subgraph shape.
+// The body-skipping itself lives in walkParamsForRefs (group_portability.go),
+// shared with extractNodeRefs. This function differs from that one only in what
+// it does with the result -- prefetch set versus portability check -- not in
+// which references it sees. They used to differ in both, and the divergence was
+// the compile-time bug above, reached through the group path: a map node in a
+// group was rejected for "referencing" its own body's members.
 func deriveNodesRefs(params map[string]any) []string {
 	if len(params) == 0 {
 		return nil
 	}
 	seen := map[string]bool{}
-	hasBody := declaresSubgraphBody(params)
-	for key, val := range params {
-		if hasBody && key == "body" {
-			// Skip the body sub-tree: its $nodes references resolve against the
-			// inner graph, not the outer one.
-			continue
-		}
-		walkForRefs(val, seen)
-	}
+	walkParamsForRefs(params, seen)
 	if len(seen) == 0 {
 		return nil
 	}

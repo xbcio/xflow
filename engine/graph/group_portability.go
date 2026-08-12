@@ -69,13 +69,26 @@ func isNonPortableType(nodeType string) bool {
 }
 
 // extractNodeRefs recursively walks a parameters value tree and returns all
-// distinct node names referenced via $nodes['name'] patterns.
+// distinct node names referenced via $nodes['name'] patterns, SKIPPING a
+// sub-graph body.
+//
+// The body is skipped because its names belong to the INNER graph. Attributing
+// them to the outer node made a map node inside a group fail as "references
+// external node <body member>" while the byte-identical map compiled fine
+// outside a group -- the two paths disagreed about the same definition.
+//
+// Skipping does not leave a body unchecked. ProjectNodeBodyPackage runs
+// validatePortability a second time over the body's own compiled graph
+// (node_body_package.go), with the body's members as the member set, so a body
+// member reaching outside the body is still rejected -- only the message's
+// stamp changes, from the group naming the map node to the body naming the
+// member.
 func extractNodeRefs(params map[string]any) []string {
 	if len(params) == 0 {
 		return nil
 	}
 	seen := map[string]bool{}
-	walkForRefs(params, seen)
+	walkParamsForRefs(params, seen)
 	if len(seen) == 0 {
 		return nil
 	}
@@ -86,6 +99,32 @@ func extractNodeRefs(params map[string]any) []string {
 	sort.Strings(refs)
 	return refs
 }
+
+// walkParamsForRefs walks a node's top-level parameter map, skipping the
+// sub-graph body. It is the one place the "skip the body" rule lives for both
+// consumers of this file's walker (extractNodeRefs here, deriveNodesRefs in
+// nodes_refs.go), which previously carried two copies of it -- and did not
+// carry the same one, which is exactly how the group path came to reject what
+// the solo path accepted.
+//
+// Body detection is delegated to declaresSubgraphBody, which keys on the
+// VALUE's shape (a map whose type is xflow.subgraph), never on the parameter
+// name: xflow.http's "body" is a request payload whose $nodes references are
+// real outer-graph references and must keep being seen.
+func walkParamsForRefs(params map[string]any, seen map[string]bool) {
+	hasBody := declaresSubgraphBody(params)
+	for key, val := range params {
+		if hasBody && key == subgraphBodyKey {
+			continue
+		}
+		walkForRefs(val, seen)
+	}
+}
+
+// subgraphBodyKey is the parameter name a sub-graph body lives under. It is
+// only ever consulted together with declaresSubgraphBody -- the name alone
+// means nothing.
+const subgraphBodyKey = "body"
 
 func walkForRefs(v any, seen map[string]bool) {
 	switch val := v.(type) {
