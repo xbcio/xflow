@@ -60,12 +60,12 @@ type ActionHandler interface {
 
 // Input holds the execution context passed to a node handler.
 type Input struct {
-	Params      map[string]any // evaluated node parameters
-	Data        map[string]any // upstream data from the main input port ($input)
-	Inputs      map[string]any // multi-port inputs keyed by port name ($inputs)
-	Vars        map[string]any // workflow-level variables ($vars)
-	Config      map[string]any // workflow-level config ($config)
-	Runtime     *Runtime       // per-execution runtime context ($runtime)
+	Params  map[string]any // evaluated node parameters
+	Data    map[string]any // upstream data from the main input port ($input)
+	Inputs  map[string]any // multi-port inputs keyed by port name ($inputs)
+	Vars    map[string]any // workflow-level variables ($vars)
+	Config  map[string]any // workflow-level config ($config)
+	Runtime *Runtime       // per-execution runtime context ($runtime)
 	// Nodes holds the outputs of nodes referenced via $nodes['name'] in the
 	// node's parameters. Populated at input assembly from the compile-time
 	// reference set (Graph.NodesRefsFor).
@@ -84,7 +84,7 @@ type Input struct {
 	//
 	// Spec §4.2 recommends $nodes['optional'].field ?? 'default' — only the
 	// typed-nil form makes .field access succeed (returning nil) so ?? can fire.
-	Nodes map[string]any
+	Nodes       map[string]any
 	ExecutionID string
 	NodeName    string
 	TraceID     string

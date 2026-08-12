@@ -74,7 +74,9 @@ func TestInputNodes_ExecutedUpstream(t *testing.T) {
 // typed nil map value — NOT as an absent key and NOT as an untyped nil.
 //
 // This distinction is load-bearing: spec §4.2 recommends
-//   ${{ $nodes['optional_step'].name ?? 'default' }}
+//
+//	${{ $nodes['optional_step'].name ?? 'default' }}
+//
 // which requires member access on the value. The ?? operator rescues a typed
 // nil map (.name returns nil → ?? fires) but CANNOT rescue:
 //   - absent key: the $nodes['optional_step'] expression itself errors
@@ -103,7 +105,7 @@ func TestInputNodes_UnexecutedIsTypedNilMap(t *testing.T) {
 			}},
 		},
 		Connections: types.Connections{
-			"start":  {"main": {Targets: []types.Connection{{Node: "router", Input: "main"}}}},
+			"start": {"main": {Targets: []types.Connection{{Node: "router", Input: "main"}}}},
 			"router": {
 				"left":  {Targets: []types.Connection{{Node: "B", Input: "main"}}},
 				"right": {Targets: []types.Connection{{Node: "C", Input: "main"}}},

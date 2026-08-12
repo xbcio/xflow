@@ -87,7 +87,7 @@ func TestNodesRef_CrossBranchWarning(t *testing.T) {
 			}},
 		},
 		Connections: types.Connections{
-			"start":  {"main": {Targets: []types.Connection{{Node: "router", Input: "main"}}}},
+			"start": {"main": {Targets: []types.Connection{{Node: "router", Input: "main"}}}},
 			"router": {
 				"left":  {Targets: []types.Connection{{Node: "branch_a", Input: "main"}}},
 				"right": {Targets: []types.Connection{{Node: "branch_b", Input: "main"}}},
