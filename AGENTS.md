@@ -15,7 +15,9 @@ golangci-lint run        # Lint
 ## Project Structure
 
 - **engine/** — Pure scheduling algorithm (zero business IO deps): Graph IR, Scheduler, ErrorPolicy, Suspend, lease/result semantics
-- **node/** — Public node DSL and builtin implementations (`node.HTTP`, `node.Function`, `node.KafkaTrigger`, etc.)
+- **node/** — Public node DSL and builtin implementations (`node.HTTP`, `node.Function`, `node.Script`, etc.)
+  - `trigger/` — trigger factories (`trigger.Timer()` … `trigger.Kafka()`); each kind in its own subpackage (`timer/`, `cron/`, `webhook/`, `kafka/`, `redishub/`), each self-registering via `init()`
+  - `trigger/triggertest/` — shared fakes for `types.TriggerRuntime` / `types.TriggerLock` (a normal package, not `_test`, so all five subpackages can import it)
 - **types/** — Public DSL/runtime contracts: `WorkflowDef`, handler interfaces (`ActionHandler`, `SuspendingHandler`), handler IO, descriptors, statuses, `Result` (json-tagged, zero impl deps)
 - **store/** — Public persistence interfaces + domain models
   - `memstore/` — in-memory implementation (test / local)
@@ -31,7 +33,7 @@ golangci-lint run        # Lint
 - **service/** — Server/runner process-level implementation boundary (cluster topology)
   - `runner/` — cluster task runner process (holds `ProtocolClient` + embedded `execution.Runner`)
   - `control/` — control plane: controlplane, dispatcher, auth, core connect
-  - `protocol/` — wire protocol + `protocol/runnerpb/` generated gRPC
+  - `protocol/` — wire protocol + `protocol/runnerpb/` generated gRPC + `HTTPEntrySeedRuntime` (the entry-seed admission client for the DTOs in `entry_seed.go`)
 - **cmd/server/** — Management server (Master node) entrypoint
 - **cmd/runner/** — Task runner (Execution node) entrypoint
 - **db/** — SQL schema
@@ -42,7 +44,7 @@ golangci-lint run        # Lint
 - `engine/` must NOT import redis/asynq/mysql/sql/network transports. It may depend on public contracts (`types`, `namespace`, `engine/graph`) and the narrow observability tracing facade only for engine-owned spans; it must not depend on concrete metrics/logging exporters or provider packages.
 - Graph IR is immutable after compile, shared lock-free at runtime
 - Engine Core depends on exactly 2 constructor interfaces: `StateStore` + `TaskQueue`. `StateStore` is intentionally a broad facade; optional capabilities (`AtomicStateStore`, durable suspend/signal, dead-letter, observers) must be explicitly documented and contract-tested by each backend.
-- `service/` is the server/runner process-level implementation boundary (`runner/` / `control/` / `protocol/`). Core packages (`engine`, `node`, `types`, `store`) must NEVER import `service/` or `cmd/`. `sdk/xflow` is the only allowed exception: it may import `service/apiserver` and `service/control` solely to expose the supported `xflow.NewServer` embedded control-plane facade; reusable backend behavior must still live under `backend/`.
+- `service/` is the server/runner process-level implementation boundary (`runner/` / `control/` / `protocol/`). Core packages (`engine`, `node`, `types`, `store`) must NEVER import `service/` or `cmd/`. `sdk/xflow` is the only allowed exception: it may import `service/apiserver` and `service/control` solely to expose the supported `xflow.NewServer` embedded control-plane facade; reusable backend behavior must still live under `backend/`. Enforced by `node/layering_test.go` (node subtree only; `store/sqlstore` still violates this via `service/crypto/supplyenc` and is tracked separately).
 - `backend/providers/distributed/internal/rstate` is the Redis authority sub-system. Keep Redis state-machine changes grouped by contract area (execution/node, lease, outbox/dead-letter, suspend/signal, audit/projection, namespace) and extend the relevant backend contract tests when changing one.
 
 ## AI-Generated Documentation Placement

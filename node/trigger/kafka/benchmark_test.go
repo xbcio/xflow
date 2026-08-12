@@ -1,20 +1,21 @@
-package trigger
+package kafka
 
 import (
 	"context"
 	"testing"
 	"time"
 
+	"github.com/xbcio/xflow/node/trigger/triggertest"
 	"github.com/xbcio/xflow/types"
 )
 
 func BenchmarkKafkaTriggerAggregate4000Messages(b *testing.B) {
-	orig := newKafkaConsumer
-	defer func() { newKafkaConsumer = orig }()
+	orig := newConsumer
+	defer func() { newConsumer = orig }()
 
-	messages := make([]KafkaMessage, 4000)
+	messages := make([]Message, 4000)
 	for i := range messages {
-		messages[i] = KafkaMessage{
+		messages[i] = Message{
 			Topic:     "orders",
 			Partition: 0,
 			Offset:    int64(i + 1),
@@ -22,7 +23,7 @@ func BenchmarkKafkaTriggerAggregate4000Messages(b *testing.B) {
 		}
 	}
 
-	trigger := KafkaTrigger().
+	trigger := New().
 		Brokers("localhost:9092").
 		Topic("orders").
 		Group("workers").
@@ -34,9 +35,9 @@ func BenchmarkKafkaTriggerAggregate4000Messages(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		consumer := newScriptedKafkaConsumer(messages)
-		newKafkaConsumer = func(KafkaConsumerConfig) (KafkaConsumer, error) { return consumer, nil }
+		newConsumer = func(ConsumerConfig) (Consumer, error) { return consumer, nil }
 
-		rt := newFakeTriggerRuntime()
+		rt := triggertest.NewFakeRuntime()
 		sub, err := trigger.Activate(context.Background(), &types.TriggerActivateInput{
 			WorkflowID: "wf-1",
 			NodeName:   "kafka",
@@ -53,18 +54,18 @@ func BenchmarkKafkaTriggerAggregate4000Messages(b *testing.B) {
 			}
 		}()
 
-		if !rt.waitForEmitCount(40, time.Second) {
-			b.Fatalf("emit count = %d, want 40", rt.emitCount())
+		if !rt.WaitForEmitCount(40, time.Second) {
+			b.Fatalf("emit count = %d, want 40", rt.EmitCount())
 		}
 		if err := sub.Close(context.Background()); err != nil {
 			b.Fatal(err)
 		}
 		closed = true
-		if got := rt.emitCount(); got != 40 {
+		if got := rt.EmitCount(); got != 40 {
 			b.Fatalf("emit count = %d, want 40", got)
 		}
 
-		events := emittedKafkaEvents(rt)
+		events := rt.Events()
 		if len(events) != 40 {
 			b.Fatalf("events len = %d, want 40", len(events))
 		}

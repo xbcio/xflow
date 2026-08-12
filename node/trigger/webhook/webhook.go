@@ -1,4 +1,4 @@
-package trigger
+package webhook
 
 import (
 	"context"
@@ -19,7 +19,9 @@ import (
 
 const defaultWebhookMaxBodyBytes = int64(1 << 20)
 
-type WebhookTriggerNode struct {
+// Node is the xflow.trigger.webhook trigger: it registers an HTTP route on the
+// host's WebhookRuntime and emits one TriggerEvent per accepted request.
+type Node struct {
 	nodeinternal.BaseTrigger
 	MethodValue        string
 	PathValue          string
@@ -27,31 +29,32 @@ type WebhookTriggerNode struct {
 	MaxBodyBytesValue  int64
 }
 
-func WebhookTrigger() *WebhookTriggerNode {
-	return &WebhookTriggerNode{MaxBodyBytesValue: defaultWebhookMaxBodyBytes}
+// New returns a webhook trigger with the default 1 MiB body cap.
+func New() *Node {
+	return &Node{MaxBodyBytesValue: defaultWebhookMaxBodyBytes}
 }
 
-func (n *WebhookTriggerNode) Method(method string) *WebhookTriggerNode {
+func (n *Node) Method(method string) *Node {
 	n.MethodValue = method
 	return n
 }
 
-func (n *WebhookTriggerNode) Path(path string) *WebhookTriggerNode {
+func (n *Node) Path(path string) *Node {
 	n.PathValue = path
 	return n
 }
 
-func (n *WebhookTriggerNode) EventIDHeader(header string) *WebhookTriggerNode {
+func (n *Node) EventIDHeader(header string) *Node {
 	n.EventIDHeaderValue = header
 	return n
 }
 
-func (n *WebhookTriggerNode) MaxBodyBytes(max int64) *WebhookTriggerNode {
+func (n *Node) MaxBodyBytes(max int64) *Node {
 	n.MaxBodyBytesValue = max
 	return n
 }
 
-func (n *WebhookTriggerNode) Descriptor() types.Descriptor {
+func (n *Node) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.trigger.webhook",
 		Kind:        types.NodeKindTrigger,
@@ -66,8 +69,8 @@ func (n *WebhookTriggerNode) Descriptor() types.Descriptor {
 	}
 }
 
-func (n *WebhookTriggerNode) NodeType() string { return "xflow.trigger.webhook" }
-func (n *WebhookTriggerNode) RawParams() any {
+func (n *Node) NodeType() string { return "xflow.trigger.webhook" }
+func (n *Node) RawParams() any {
 	max := n.MaxBodyBytesValue
 	if max <= 0 {
 		max = defaultWebhookMaxBodyBytes
@@ -79,13 +82,15 @@ func (n *WebhookTriggerNode) RawParams() any {
 		"max_body_bytes":  max,
 	}
 }
-func (n *WebhookTriggerNode) OnError(s types.OnError) types.Builder {
+func (n *Node) OnError(s types.OnError) types.Builder {
 	n.SetOnError(s)
 	return n
 }
-func (n *WebhookTriggerNode) TriggerHandler() types.TriggerHandler { return n }
+func (n *Node) TriggerHandler() types.TriggerHandler { return n }
 
-func (n *WebhookTriggerNode) Activate(ctx context.Context, in *types.TriggerActivateInput) (types.TriggerSubscription, error) {
+func init() { registry.RegisterTrigger(&Node{}) }
+
+func (n *Node) Activate(ctx context.Context, in *types.TriggerActivateInput) (types.TriggerSubscription, error) {
 	method := strings.ToUpper(in.GetString("method"))
 	path := in.GetString("path")
 	if method == "" || path == "" {
@@ -160,5 +165,3 @@ func readWebhookBody(r io.Reader, max int64) ([]byte, error) {
 	}
 	return body, nil
 }
-
-func init() { registry.RegisterTrigger(&WebhookTriggerNode{}) }

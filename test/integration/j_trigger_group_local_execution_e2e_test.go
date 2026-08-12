@@ -12,8 +12,8 @@ import (
 
 	"github.com/xbcio/xflow/backend/providers/local"
 	"github.com/xbcio/xflow/execution"
-	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/node/registry"
+	"github.com/xbcio/xflow/node/trigger"
 	"github.com/xbcio/xflow/service/apiserver"
 	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/service/protocol"
@@ -47,14 +47,14 @@ func (groupLocalMemberHandler) Execute(_ context.Context, input *types.Input) (*
 
 // groupLocalFakeTrigger simulates a Kafka-style trigger's per-batch flush: on
 // Activate it drives ONE batch through input.Runtime.(types.GroupExecRuntime)
-// — the SAME capability node/internal/trigger/kafka.go's real flush() uses —
+// — the SAME capability node/trigger/kafka/kafka.go's real flush() uses —
 // so the group's REAL member node executes, and forwards the REAL resulting
 // exits (never hand-constructed) to SeedExecutionFromEntry. Only the Kafka
 // broker/consumer subscription is faked; the group execution and admission
 // are genuine production code paths.
 //
 // The embedded types.TriggerHandler is filled by newGroupLocalFakeTrigger with
-// a node.DefineTrigger definition — whose Execute *is* the production
+// a trigger.Define definition — whose Execute *is* the production
 // ExecuteTriggerEntry (node/internal/node.go:186), reached through the public
 // node package rather than reimplemented.
 //
@@ -80,7 +80,7 @@ func (groupLocalMemberHandler) Execute(_ context.Context, input *types.Input) (*
 // needs no modification" rests on exactly that method. A hand-written
 // pass-through fake would diverge on the injected key and on Port, leaving the
 // claim untested — so the real one is used. (node/internal is not importable
-// from test/integration; node.DefineTrigger is the sanctioned route to the
+// from test/integration; trigger.Define is the sanctioned route to the
 // same code.)
 type groupLocalFakeTrigger struct {
 	types.TriggerHandler
@@ -98,11 +98,11 @@ func newGroupLocalFakeTrigger() *groupLocalFakeTrigger {
 	h := &groupLocalFakeTrigger{done: make(chan struct{})}
 	// The definition supplies Descriptor (Type, Kind=trigger, Outputs=[main])
 	// and the production Execute; activate below supplies the subscribe path.
-	h.TriggerHandler = node.DefineTrigger(groupLocalTriggerType, h.activate)
+	h.TriggerHandler = trigger.Define(groupLocalTriggerType, h.activate)
 	return h
 }
 
-// Execute forwards to the embedded node.DefineTrigger definition's own
+// Execute forwards to the embedded trigger.Define definition's own
 // Execute (the production ExecuteTriggerEntry). See the type-level doc
 // comment above: this cannot be left to interface-embedding promotion, since
 // types.TriggerHandler's method set does not include Execute.
@@ -110,7 +110,7 @@ func (h *groupLocalFakeTrigger) Execute(ctx context.Context, input *types.Input)
 	return h.TriggerHandler.(types.ActionHandler).Execute(ctx, input)
 }
 
-// activate is the TriggerActivateFunc handed to node.DefineTrigger above; the
+// activate is the TriggerActivateFunc handed to trigger.Define above; the
 // definition promotes it as this handler's Activate method.
 func (h *groupLocalFakeTrigger) activate(ctx context.Context, input *types.TriggerActivateInput) (types.TriggerSubscription, error) {
 	gr, ok := input.Runtime.(types.GroupExecRuntime)

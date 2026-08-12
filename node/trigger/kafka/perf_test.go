@@ -1,4 +1,4 @@
-package trigger
+package kafka
 
 import (
 	"context"
@@ -6,17 +6,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xbcio/xflow/node/trigger/triggertest"
 	"github.com/xbcio/xflow/types"
 )
 
 func TestKafkaTriggerBackpressureAndClose(t *testing.T) {
-	orig := newKafkaConsumer
+	orig := newConsumer
 	consumer := newFakeKafkaConsumer(1000)
-	newKafkaConsumer = func(KafkaConsumerConfig) (KafkaConsumer, error) { return consumer, nil }
-	t.Cleanup(func() { newKafkaConsumer = orig })
+	newConsumer = func(ConsumerConfig) (Consumer, error) { return consumer, nil }
+	t.Cleanup(func() { newConsumer = orig })
 
 	rt := &slowEmitRuntime{}
-	tr := KafkaTrigger().Brokers("localhost:9092").Topic("orders").Group("workers").MaxInflight(4)
+	tr := New().Brokers("localhost:9092").Topic("orders").Group("workers").MaxInflight(4)
 
 	started := time.Now()
 	sub, err := tr.Activate(context.Background(), &types.TriggerActivateInput{
@@ -45,18 +46,18 @@ func TestKafkaTriggerBackpressureAndClose(t *testing.T) {
 }
 
 type fakeKafkaConsumer struct {
-	ch chan KafkaMessage
+	ch chan Message
 }
 
 func newFakeKafkaConsumer(n int) *fakeKafkaConsumer {
-	ch := make(chan KafkaMessage, n)
+	ch := make(chan Message, n)
 	for i := 0; i < n; i++ {
-		ch <- KafkaMessage{Topic: "orders", Partition: 0, Offset: int64(i), Value: []byte("payload")}
+		ch <- Message{Topic: "orders", Partition: 0, Offset: int64(i), Value: []byte("payload")}
 	}
 	return &fakeKafkaConsumer{ch: ch}
 }
 
-func (c *fakeKafkaConsumer) Messages() <-chan KafkaMessage { return c.ch }
+func (c *fakeKafkaConsumer) Messages() <-chan Message { return c.ch }
 func (c *fakeKafkaConsumer) Close() error {
 	close(c.ch)
 	return nil
@@ -85,7 +86,7 @@ func (r *slowEmitRuntime) Dedup(context.Context, string, time.Duration) (bool, e
 }
 
 func (r *slowEmitRuntime) TryLock(context.Context, string, time.Duration) (types.TriggerLock, bool, error) {
-	return fakeTriggerLock{}, true, nil
+	return triggertest.FakeLock{}, true, nil
 }
 
 func (r *slowEmitRuntime) State(context.Context, string) types.TriggerState { return nil }

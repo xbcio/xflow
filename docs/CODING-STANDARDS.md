@@ -17,11 +17,11 @@ full path under the root module.
 |---|---|
 | `engine/` | Pure scheduling algorithm (zero business IO deps): Graph IR, Scheduler, ErrorPolicy, Suspend, lease/result semantics |
 | `types/` | Public DSL/runtime contracts: `WorkflowDef`, handler interfaces, descriptors, statuses, `Result` — zero impl deps |
-| `node/` | Public node DSL and builtin implementations (`node.HTTP`, `node.Function`, `node.KafkaTrigger`, etc.) |
+| `node/` | Public node DSL and builtin implementations (`node.HTTP`, `node.Function`, `node.Script`, etc.); trigger nodes live in `node/trigger/<kind>/` with factories in `node/trigger` (`trigger.Kafka()`) |
 | `execution/` | Reusable embedded task execution boundary: Dispatcher, Runner, Registry |
 | `backend/` | Reusable backend providers: `backend.go` (`Provider` + optional capabilities), `providers/local/` (in-memory StateStore + goroutine pool TaskQueue), `providers/distributed/` (Redis StateStore + Asynq TaskQueue) |
 | `store/` | Public persistence interfaces + domain models; `memstore/` (in-memory), `sqlstore/` (dialect-agnostic GORM; `sqlstore/mysqlstore/` for MySQL) |
-| `service/` | Server/runner control-plane and execution-plane code: `service/control` (dispatcher, lease sweeper, HTTP/gRPC server), `service/protocol` (Runner Protocol DTOs/client), `service/runner` (runner-side execution) |
+| `service/` | Server/runner control-plane and execution-plane code: `service/control` (dispatcher, lease sweeper, HTTP/gRPC server), `service/protocol` (Runner Protocol DTOs/client, incl. `HTTPEntrySeedRuntime` — the entry-seed admission client), `service/runner` (runner-side execution) |
 | `sdk/` | Public SDK grouping: `sdk/xflow` (`package xflow`, `NewLocal`/`NewCluster` factories, `NewServer` embedded control-plane facade, WorkflowBuilder), `sdk/examples` (runnable `.go` usage examples) |
 | `cmd/server/` | Management server binary (Control Plane) |
 | `cmd/runner/` | Task runner binary (Execution Plane) |

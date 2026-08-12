@@ -142,7 +142,7 @@ func (t *ActivationTracker) activateLocked(ctx context.Context, d protocol.Activ
 	// claiming the activation in Inventory(), and only a restart clears it. The
 	// two subscriptions briefly coexist when the new one succeeds, which is safe
 	// for the Kafka trigger handler (verified in trigger_activation_handler.go
-	// and node/internal/trigger/kafka.go: duplicate subscriptions within the same
+	// and node/trigger/kafka/kafka.go: duplicate subscriptions within the same
 	// consumer group are arbitrated by the group protocol).
 	subCtx, cancel := context.WithCancel(ctx)
 	if err := t.handler.Activate(subCtx, d); err != nil {

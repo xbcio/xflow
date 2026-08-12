@@ -12,7 +12,7 @@ import (
 
 	"github.com/segmentio/kafka-go"
 
-	"github.com/xbcio/xflow/node"
+	"github.com/xbcio/xflow/node/trigger"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -109,7 +109,7 @@ func BenchmarkKafkaTriggerAggregateReal(b *testing.B) {
 			group := topic + "-g"
 			createTopic(b, brokers[0], topic, 1)
 
-			tr := node.KafkaTrigger().
+			tr := trigger.Kafka().
 				Brokers(brokers...).
 				Topic(topic).
 				Group(group).

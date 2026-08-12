@@ -1,4 +1,7 @@
-package trigger
+// Package redishub implements the xflow.trigger.redis_hub trigger: it consumes
+// a Redis Stream consumer group or a Pub/Sub channel and emits one TriggerEvent
+// per message.
+package redishub
 
 import (
 	"context"
@@ -16,12 +19,21 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
-type RedisHubConsumer interface {
-	Messages() <-chan RedisHubMessage
+// defaultTriggerMaxInflight bounds the concurrent emit goroutines this trigger
+// runs. The kafka trigger declares its own constant of the same value; the two
+// are independent per-trigger backpressure windows that happen to coincide, NOT
+// a contract that must stay in sync. Change one without changing the other.
+const defaultTriggerMaxInflight = 64
+
+// Consumer delivers Redis Stream / Pub/Sub messages. The host process supplies
+// the implementation; see newConsumer.
+type Consumer interface {
+	Messages() <-chan Message
 	Close() error
 }
 
-type RedisHubMessage struct {
+// Message is one Redis Stream entry or Pub/Sub delivery.
+type Message struct {
 	ID      string
 	Stream  string
 	Channel string
@@ -30,7 +42,8 @@ type RedisHubMessage struct {
 	Time    time.Time
 }
 
-type RedisHubConsumerConfig struct {
+// ConsumerConfig is the resolved subscription shape handed to newConsumer.
+type ConsumerConfig struct {
 	Mode        string
 	Stream      string
 	Group       string
@@ -38,13 +51,17 @@ type RedisHubConsumerConfig struct {
 	MaxInflight int
 }
 
-var newRedisHubConsumer = func(RedisHubConsumerConfig) (RedisHubConsumer, error) {
+// newConsumer is the consumer factory seam. It stays UNEXPORTED on purpose:
+// tests in this package swap it, but the production builder offers no injection
+// point (see the spec's decision 3 — test reachability must not shape the API).
+var newConsumer = func(ConsumerConfig) (Consumer, error) {
 	return nil, errors.New("redis hub consumer factory is not configured")
 }
 
-var redisHubPubSubLockTTL = time.Minute
+var pubSubLockTTL = time.Minute
 
-type RedisHubTriggerNode struct {
+// Node is the xflow.trigger.redis_hub trigger node.
+type Node struct {
 	nodeinternal.BaseTrigger
 	ModeValue        string
 	StreamValue      string
@@ -53,36 +70,39 @@ type RedisHubTriggerNode struct {
 	MaxInflightValue int
 }
 
-func RedisHubTrigger() *RedisHubTriggerNode {
-	return &RedisHubTriggerNode{ModeValue: "stream", MaxInflightValue: defaultTriggerMaxInflight}
+// New returns a redis-hub trigger defaulting to stream mode.
+func New() *Node {
+	return &Node{ModeValue: "stream", MaxInflightValue: defaultTriggerMaxInflight}
 }
 
-func (n *RedisHubTriggerNode) Mode(mode string) *RedisHubTriggerNode {
+func (n *Node) Mode(mode string) *Node {
 	n.ModeValue = mode
 	return n
 }
 
-func (n *RedisHubTriggerNode) Stream(stream string) *RedisHubTriggerNode {
+func (n *Node) Stream(stream string) *Node {
 	n.StreamValue = stream
 	return n
 }
 
-func (n *RedisHubTriggerNode) Group(group string) *RedisHubTriggerNode {
+func (n *Node) Group(group string) *Node {
 	n.GroupValue = group
 	return n
 }
 
-func (n *RedisHubTriggerNode) Channel(channel string) *RedisHubTriggerNode {
+func (n *Node) Channel(channel string) *Node {
 	n.ChannelValue = channel
 	return n
 }
 
-func (n *RedisHubTriggerNode) MaxInflight(max int) *RedisHubTriggerNode {
+func (n *Node) MaxInflight(max int) *Node {
 	n.MaxInflightValue = max
 	return n
 }
 
-func (n *RedisHubTriggerNode) Descriptor() types.Descriptor {
+func init() { registry.RegisterTrigger(&Node{}) }
+
+func (n *Node) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.trigger.redis_hub",
 		Kind:        types.NodeKindTrigger,
@@ -98,8 +118,8 @@ func (n *RedisHubTriggerNode) Descriptor() types.Descriptor {
 	}
 }
 
-func (n *RedisHubTriggerNode) NodeType() string { return "xflow.trigger.redis_hub" }
-func (n *RedisHubTriggerNode) RawParams() any {
+func (n *Node) NodeType() string { return "xflow.trigger.redis_hub" }
+func (n *Node) RawParams() any {
 	mode := n.ModeValue
 	if mode == "" {
 		mode = "stream"
@@ -116,14 +136,14 @@ func (n *RedisHubTriggerNode) RawParams() any {
 		"max_inflight": maxInflight,
 	}
 }
-func (n *RedisHubTriggerNode) OnError(s types.OnError) types.Builder {
+func (n *Node) OnError(s types.OnError) types.Builder {
 	n.SetOnError(s)
 	return n
 }
-func (n *RedisHubTriggerNode) TriggerHandler() types.TriggerHandler { return n }
+func (n *Node) TriggerHandler() types.TriggerHandler { return n }
 
-func (n *RedisHubTriggerNode) Activate(ctx context.Context, in *types.TriggerActivateInput) (types.TriggerSubscription, error) {
-	cfg, err := redisHubConfigFromParams(in.Params)
+func (n *Node) Activate(ctx context.Context, in *types.TriggerActivateInput) (types.TriggerSubscription, error) {
+	cfg, err := configFromParams(in.Params)
 	if err != nil {
 		return nil, err
 	}
@@ -132,7 +152,7 @@ func (n *RedisHubTriggerNode) Activate(ctx context.Context, in *types.TriggerAct
 		renewable types.RenewableTriggerLock
 	)
 	if cfg.Mode == "pubsub" {
-		l, ok, err := in.Runtime.TryLock(ctx, "trigger:"+string(in.WorkflowID)+":"+in.NodeName+":pubsub", redisHubPubSubLockTTL)
+		l, ok, err := in.Runtime.TryLock(ctx, "trigger:"+string(in.WorkflowID)+":"+in.NodeName+":pubsub", pubSubLockTTL)
 		if err != nil || !ok {
 			return nil, err
 		}
@@ -144,7 +164,7 @@ func (n *RedisHubTriggerNode) Activate(ctx context.Context, in *types.TriggerAct
 		lock = l
 		renewable = r
 	}
-	consumer, err := newRedisHubConsumer(cfg)
+	consumer, err := newConsumer(cfg)
 	if err != nil {
 		if lock != nil {
 			_ = lock.Release(ctx)
@@ -189,16 +209,16 @@ func (n *RedisHubTriggerNode) Activate(ctx context.Context, in *types.TriggerAct
 					return
 				}
 				emitWG.Add(1)
-				go func(msg RedisHubMessage) {
+				go func(msg Message) {
 					defer emitWG.Done()
 					defer func() { <-sem }()
-					emitRedisHubMessage(runCtx, in, cfg.Mode, msg)
+					emitMessage(runCtx, in, cfg.Mode, msg)
 				}(msg)
 			}
 		}
 	}()
 	if renewable != nil {
-		renewEvery := redisHubPubSubLockTTL / 2
+		renewEvery := pubSubLockTTL / 2
 		if renewEvery <= 0 {
 			renewEvery = time.Millisecond
 		}
@@ -210,7 +230,7 @@ func (n *RedisHubTriggerNode) Activate(ctx context.Context, in *types.TriggerAct
 				case <-runCtx.Done():
 					return
 				case <-ticker.C:
-					renewed, err := renewable.Renew(runCtx, redisHubPubSubLockTTL)
+					renewed, err := renewable.Renew(runCtx, pubSubLockTTL)
 					if err != nil || !renewed {
 						_ = stop(context.Background())
 						return
@@ -231,7 +251,7 @@ func (n *RedisHubTriggerNode) Activate(ctx context.Context, in *types.TriggerAct
 	}), nil
 }
 
-func emitRedisHubMessage(ctx context.Context, in *types.TriggerActivateInput, mode string, msg RedisHubMessage) {
+func emitMessage(ctx context.Context, in *types.TriggerActivateInput, mode string, msg Message) {
 	eventID := msg.ID
 	if mode == "stream" {
 		eventID = msg.Stream + "/" + msg.ID
@@ -261,8 +281,8 @@ func emitRedisHubMessage(ctx context.Context, in *types.TriggerActivateInput, mo
 	}
 }
 
-func redisHubConfigFromParams(params map[string]any) (RedisHubConsumerConfig, error) {
-	cfg := RedisHubConsumerConfig{
+func configFromParams(params map[string]any) (ConsumerConfig, error) {
+	cfg := ConsumerConfig{
 		Mode:        cast.ToString(params["mode"]),
 		Stream:      cast.ToString(params["stream"]),
 		Group:       cast.ToString(params["group"]),
@@ -275,16 +295,14 @@ func redisHubConfigFromParams(params map[string]any) (RedisHubConsumerConfig, er
 	switch cfg.Mode {
 	case "stream":
 		if cfg.Stream == "" || cfg.Group == "" {
-			return RedisHubConsumerConfig{}, fmt.Errorf("redis stream and group are required")
+			return ConsumerConfig{}, fmt.Errorf("redis stream and group are required")
 		}
 	case "pubsub":
 		if cfg.Channel == "" {
-			return RedisHubConsumerConfig{}, fmt.Errorf("redis pubsub channel is required")
+			return ConsumerConfig{}, fmt.Errorf("redis pubsub channel is required")
 		}
 	default:
-		return RedisHubConsumerConfig{}, fmt.Errorf("unsupported redis hub mode %q", cfg.Mode)
+		return ConsumerConfig{}, fmt.Errorf("unsupported redis hub mode %q", cfg.Mode)
 	}
 	return cfg, nil
 }
-
-func init() { registry.RegisterTrigger(&RedisHubTriggerNode{}) }

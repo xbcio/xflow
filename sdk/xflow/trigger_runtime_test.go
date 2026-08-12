@@ -5,13 +5,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xbcio/xflow/node"
+	"github.com/xbcio/xflow/node/trigger"
 	"github.com/xbcio/xflow/types"
 )
 
 func TestAddWorkflowActivatesTriggerHandler(t *testing.T) {
 	activated := make(chan struct{}, 1)
-	tr := node.DefineTrigger("test.trigger", func(ctx context.Context, in *types.TriggerActivateInput) (types.TriggerSubscription, error) {
+	tr := trigger.Define("test.trigger", func(ctx context.Context, in *types.TriggerActivateInput) (types.TriggerSubscription, error) {
 		activated <- struct{}{}
 		return types.CloseFunc(func(context.Context) error { return nil }), nil
 	})

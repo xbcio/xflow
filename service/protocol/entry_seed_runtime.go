@@ -1,4 +1,4 @@
-package trigger
+package protocol
 
 import (
 	"bytes"
@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -93,16 +92,16 @@ func (h *HTTPEntrySeedRuntime) State(context.Context, string) types.TriggerState
 // SeedExecutionFromEntry maps the caller-facing request to the wire DTO, POSTs
 // it, and maps the wire response back. See the type doc for the state mapping.
 func (h *HTTPEntrySeedRuntime) SeedExecutionFromEntry(ctx context.Context, req types.EntrySeedRequest) (types.EntrySeedResponse, error) {
-	exits := make([]protocol.BoundaryExit, 0, len(req.Exits))
+	exits := make([]BoundaryExit, 0, len(req.Exits))
 	for _, ex := range req.Exits {
-		exits = append(exits, protocol.BoundaryExit{
+		exits = append(exits, BoundaryExit{
 			NodeName: ex.NodeName,
 			Port:     ex.Port,
 			Data:     ex.Data,
 		})
 	}
-	wireReq := protocol.SeedExecutionRequest{
-		ProtocolVersion: protocol.EntrySeedProtocolVersion,
+	wireReq := SeedExecutionRequest{
+		ProtocolVersion: EntrySeedProtocolVersion,
 		WorkflowID:      string(req.WorkflowID),
 		WorkflowVersion: req.WorkflowVersion,
 		EntryUnitID:     req.EntryUnitID,
@@ -195,7 +194,7 @@ func (h *HTTPEntrySeedRuntime) SeedExecutionFromEntry(ctx context.Context, req t
 		return types.EntrySeedResponse{}, fmt.Errorf("entry-seed: unexpected status %d", httpResp.StatusCode)
 	}
 
-	var wireResp protocol.SeedExecutionResponse
+	var wireResp SeedExecutionResponse
 	if err := json.NewDecoder(httpResp.Body).Decode(&wireResp); err != nil {
 		return types.EntrySeedResponse{}, fmt.Errorf("entry-seed: decode response: %w", err)
 	}

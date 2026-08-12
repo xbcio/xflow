@@ -1,4 +1,4 @@
-package trigger
+package timer
 
 import (
 	"context"
@@ -12,21 +12,23 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
-type TimerTriggerNode struct {
+// Node is the xflow.trigger.timer trigger: it emits one event per tick of a
+// fixed interval.
+type Node struct {
 	nodeinternal.BaseTrigger
 	Interval time.Duration
 }
 
-func TimerTrigger() *TimerTriggerNode {
-	return &TimerTriggerNode{Interval: time.Minute}
+func New() *Node {
+	return &Node{Interval: time.Minute}
 }
 
-func (n *TimerTriggerNode) Every(interval time.Duration) *TimerTriggerNode {
+func (n *Node) Every(interval time.Duration) *Node {
 	n.Interval = interval
 	return n
 }
 
-func (n *TimerTriggerNode) Descriptor() types.Descriptor {
+func (n *Node) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.trigger.timer",
 		Kind:        types.NodeKindTrigger,
@@ -38,17 +40,17 @@ func (n *TimerTriggerNode) Descriptor() types.Descriptor {
 	}
 }
 
-func (n *TimerTriggerNode) NodeType() string { return "xflow.trigger.timer" }
-func (n *TimerTriggerNode) RawParams() any {
+func (n *Node) NodeType() string { return "xflow.trigger.timer" }
+func (n *Node) RawParams() any {
 	return map[string]any{"interval": n.Interval.String()}
 }
-func (n *TimerTriggerNode) OnError(s types.OnError) types.Builder {
+func (n *Node) OnError(s types.OnError) types.Builder {
 	n.SetOnError(s)
 	return n
 }
-func (n *TimerTriggerNode) TriggerHandler() types.TriggerHandler { return n }
+func (n *Node) TriggerHandler() types.TriggerHandler { return n }
 
-func (n *TimerTriggerNode) Activate(ctx context.Context, in *types.TriggerActivateInput) (types.TriggerSubscription, error) {
+func (n *Node) Activate(ctx context.Context, in *types.TriggerActivateInput) (types.TriggerSubscription, error) {
 	interval, err := conv.PositiveDuration(in.Params["interval"])
 	if err != nil {
 		return nil, err
@@ -89,4 +91,4 @@ func newTimerTriggerEvent(workflowID types.WorkflowID, nodeName string, interval
 	}
 }
 
-func init() { registry.RegisterTrigger(&TimerTriggerNode{}) }
+func init() { registry.RegisterTrigger(&Node{}) }

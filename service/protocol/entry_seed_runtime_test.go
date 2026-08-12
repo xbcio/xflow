@@ -1,4 +1,4 @@
-package trigger
+package protocol
 
 import (
 	"context"
@@ -7,7 +7,6 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -17,14 +16,14 @@ import (
 // well-formed SeedExecutionRequest body.
 func TestHTTPEntrySeed_Accepted(t *testing.T) {
 	var gotAuth, gotMethod, gotPath string
-	var gotReq protocol.SeedExecutionRequest
+	var gotReq SeedExecutionRequest
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
 		gotMethod = r.Method
 		gotPath = r.URL.Path
 		_ = json.NewDecoder(r.Body).Decode(&gotReq)
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(protocol.SeedExecutionResponse{
+		_ = json.NewEncoder(w).Encode(SeedExecutionResponse{
 			State:       "accepted",
 			ExecutionID: "exec-x",
 			Duplicate:   true,
@@ -72,8 +71,8 @@ func TestHTTPEntrySeed_Accepted(t *testing.T) {
 	if gotReq.AdmissionKey != "ak-1" || gotReq.WorkflowID != "wf1" || gotReq.EntryUnitID != "g1" || gotReq.Outcome != "success" {
 		t.Fatalf("request body not mapped correctly: %+v", gotReq)
 	}
-	if gotReq.ProtocolVersion != protocol.EntrySeedProtocolVersion {
-		t.Fatalf("ProtocolVersion = %d, want %d", gotReq.ProtocolVersion, protocol.EntrySeedProtocolVersion)
+	if gotReq.ProtocolVersion != EntrySeedProtocolVersion {
+		t.Fatalf("ProtocolVersion = %d, want %d", gotReq.ProtocolVersion, EntrySeedProtocolVersion)
 	}
 	if len(gotReq.Exits) != 1 || gotReq.Exits[0].NodeName != "trigger" || gotReq.Exits[0].Port != "main" {
 		t.Fatalf("exits not mapped correctly: %+v", gotReq.Exits)
@@ -84,11 +83,11 @@ func TestHTTPEntrySeed_Accepted(t *testing.T) {
 // Generation onto every seed request it sends on the wire, so the control-plane
 // fence admits exactly the current-generation seeds (IMPORTANT-1).
 func TestEntrySeedRuntimeGeneration(t *testing.T) {
-	var gotReq protocol.SeedExecutionRequest
+	var gotReq SeedExecutionRequest
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&gotReq)
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(protocol.SeedExecutionResponse{
+		_ = json.NewEncoder(w).Encode(SeedExecutionResponse{
 			State:       "accepted",
 			ExecutionID: "exec-g",
 		})
@@ -110,7 +109,7 @@ func TestEntrySeedRuntimeGeneration(t *testing.T) {
 func TestHTTPEntrySeed_ConflictState(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusConflict)
-		_ = json.NewEncoder(w).Encode(protocol.SeedExecutionResponse{
+		_ = json.NewEncoder(w).Encode(SeedExecutionResponse{
 			State:       "conflict",
 			ExecutionID: "exec-other",
 		})
@@ -193,7 +192,7 @@ func TestHTTPEntrySeed_NoToken_OmitsAuthHeader(t *testing.T) {
 	var hadAuth bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, hadAuth = r.Header["Authorization"]
-		_ = json.NewEncoder(w).Encode(protocol.SeedExecutionResponse{State: "accepted", ExecutionID: "e"})
+		_ = json.NewEncoder(w).Encode(SeedExecutionResponse{State: "accepted", ExecutionID: "e"})
 	}))
 	defer srv.Close()
 

@@ -1,4 +1,4 @@
-package trigger
+package kafka
 
 import (
 	"context"
@@ -10,13 +10,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/segmentio/kafka-go"
+	kafkago "github.com/segmentio/kafka-go"
 
+	"github.com/xbcio/xflow/node/trigger/triggertest"
 	"github.com/xbcio/xflow/types"
 )
 
 func TestKafkaTriggerDescriptor(t *testing.T) {
-	n := KafkaTrigger()
+	n := New()
 	desc := n.Descriptor()
 	if desc.Type != "xflow.trigger.kafka" || desc.Kind != types.NodeKindTrigger {
 		t.Fatalf("descriptor = %+v", desc)
@@ -24,11 +25,11 @@ func TestKafkaTriggerDescriptor(t *testing.T) {
 }
 
 func TestKafkaTriggerRequiresBrokersTopicAndGroup(t *testing.T) {
-	_, err := KafkaTrigger().Activate(context.Background(), &types.TriggerActivateInput{
+	_, err := New().Activate(context.Background(), &types.TriggerActivateInput{
 		WorkflowID: "wf-1",
 		NodeName:   "kafka",
 		Params:     map[string]any{},
-		Runtime:    newFakeTriggerRuntime(),
+		Runtime:    triggertest.NewFakeRuntime(),
 	})
 	if err == nil {
 		t.Fatal("expected missing brokers/topic/group error")
@@ -36,14 +37,14 @@ func TestKafkaTriggerRequiresBrokersTopicAndGroup(t *testing.T) {
 }
 
 func TestKafkaTriggerDefaultsStartOffsetLatest(t *testing.T) {
-	params := KafkaTrigger().Brokers("localhost:9092").Topic("orders").Group("workers").RawParams().(map[string]any)
+	params := New().Brokers("localhost:9092").Topic("orders").Group("workers").RawParams().(map[string]any)
 	if got := params["start_offset"]; got != "latest" {
 		t.Fatalf("start_offset = %v, want latest", got)
 	}
 }
 
 func TestKafkaConsumerFactoryBuildsDefaultConsumer(t *testing.T) {
-	consumer, err := newKafkaConsumer(KafkaConsumerConfig{
+	consumer, err := newConsumer(ConsumerConfig{
 		Brokers:     []string{"127.0.0.1:1"},
 		Topic:       "orders",
 		Group:       "workers",
@@ -62,7 +63,7 @@ func TestKafkaConsumerFactoryBuildsDefaultConsumer(t *testing.T) {
 }
 
 func TestKafkaTriggerAggregateRawParams(t *testing.T) {
-	params := KafkaTrigger().
+	params := New().
 		Brokers("localhost:9092").
 		Topic("orders").
 		Group("workers").
@@ -88,18 +89,18 @@ func TestKafkaTriggerAggregateRawParams(t *testing.T) {
 }
 
 func TestKafkaTriggerLegacyPathEmitsWithoutPreEmitDedup(t *testing.T) {
-	orig := newKafkaConsumer
-	consumer := newScriptedKafkaConsumer([]KafkaMessage{{Topic: "orders", Partition: 0, Offset: 1, Value: []byte("one")}})
-	newKafkaConsumer = func(KafkaConsumerConfig) (KafkaConsumer, error) { return consumer, nil }
-	t.Cleanup(func() { newKafkaConsumer = orig })
+	orig := newConsumer
+	consumer := newScriptedKafkaConsumer([]Message{{Topic: "orders", Partition: 0, Offset: 1, Value: []byte("one")}})
+	newConsumer = func(ConsumerConfig) (Consumer, error) { return consumer, nil }
+	t.Cleanup(func() { newConsumer = orig })
 
-	rt := newFakeTriggerRuntime()
+	rt := triggertest.NewFakeRuntime()
 	// P0-1: the legacy single-message path must NOT run a pre-emit Dedup SETNX.
 	// A dedup error must never suppress the emit — that was the data-loss bug.
-	rt.dedupFunc = func(context.Context, string, time.Duration) (bool, error) {
+	rt.SetDedupFunc(func(context.Context, string, time.Duration) (bool, error) {
 		return true, errors.New("boom")
-	}
-	tr := KafkaTrigger().Brokers("localhost:9092").Topic("orders").Group("workers")
+	})
+	tr := New().Brokers("localhost:9092").Topic("orders").Group("workers")
 	sub, err := tr.Activate(context.Background(), &types.TriggerActivateInput{
 		WorkflowID: "wf-1",
 		NodeName:   "kafka",
@@ -113,34 +114,34 @@ func TestKafkaTriggerLegacyPathEmitsWithoutPreEmitDedup(t *testing.T) {
 
 	// The message is emitted despite the dedup callback erroring, because the
 	// legacy path no longer calls Dedup before Emit.
-	if !rt.waitForEmitCount(1, time.Second) {
-		t.Fatalf("emit count = %d, want 1 (emit must not depend on pre-emit dedup)", rt.emitCount())
+	if !rt.WaitForEmitCount(1, time.Second) {
+		t.Fatalf("emit count = %d, want 1 (emit must not depend on pre-emit dedup)", rt.EmitCount())
 	}
 	// And Dedup must not have been consulted at all on the emit path.
-	if rt.waitDedup(50 * time.Millisecond) {
+	if rt.WaitDedup(50 * time.Millisecond) {
 		t.Fatal("legacy path called Dedup; pre-emit dedup SETNX must be removed (P0-1)")
 	}
 }
 
 func TestKafkaTriggerContinuesAfterEmitError(t *testing.T) {
-	orig := newKafkaConsumer
-	consumer := newScriptedKafkaConsumer([]KafkaMessage{
+	orig := newConsumer
+	consumer := newScriptedKafkaConsumer([]Message{
 		{Topic: "orders", Partition: 0, Offset: 1, Value: []byte("one")},
 		{Topic: "orders", Partition: 0, Offset: 2, Value: []byte("two")},
 	})
-	newKafkaConsumer = func(KafkaConsumerConfig) (KafkaConsumer, error) { return consumer, nil }
-	t.Cleanup(func() { newKafkaConsumer = orig })
+	newConsumer = func(ConsumerConfig) (Consumer, error) { return consumer, nil }
+	t.Cleanup(func() { newConsumer = orig })
 
-	rt := newFakeTriggerRuntime()
+	rt := triggertest.NewFakeRuntime()
 	var calls int
-	rt.emitFunc = func(context.Context, types.WorkflowID, string, *types.TriggerEvent) (types.ExecutionID, error) {
+	rt.SetEmitFunc(func(context.Context, types.WorkflowID, string, *types.TriggerEvent) (types.ExecutionID, error) {
 		calls++
 		if calls == 1 {
 			return "", errors.New("boom")
 		}
 		return "exec-2", nil
-	}
-	tr := KafkaTrigger().Brokers("localhost:9092").Topic("orders").Group("workers").MaxInflight(1)
+	})
+	tr := New().Brokers("localhost:9092").Topic("orders").Group("workers").MaxInflight(1)
 	sub, err := tr.Activate(context.Background(), &types.TriggerActivateInput{
 		WorkflowID: "wf-1",
 		NodeName:   "kafka",
@@ -152,21 +153,21 @@ func TestKafkaTriggerContinuesAfterEmitError(t *testing.T) {
 	}
 	defer func() { _ = sub.Close(context.Background()) }()
 
-	if !rt.waitForEmitCount(2, time.Second) {
-		t.Fatalf("emit count = %d, want at least 2", rt.emitCount())
+	if !rt.WaitForEmitCount(2, time.Second) {
+		t.Fatalf("emit count = %d, want at least 2", rt.EmitCount())
 	}
 }
 
 func TestKafkaTriggerCommitsMessageAfterEmit(t *testing.T) {
-	orig := newKafkaConsumer
-	consumer := newCommitRecordingKafkaConsumer([]KafkaMessage{
+	orig := newConsumer
+	consumer := newCommitRecordingKafkaConsumer([]Message{
 		{Topic: "orders", Partition: 0, Offset: 1, Value: []byte("one")},
 	})
-	newKafkaConsumer = func(KafkaConsumerConfig) (KafkaConsumer, error) { return consumer, nil }
-	t.Cleanup(func() { newKafkaConsumer = orig })
+	newConsumer = func(ConsumerConfig) (Consumer, error) { return consumer, nil }
+	t.Cleanup(func() { newConsumer = orig })
 
-	rt := newFakeTriggerRuntime()
-	tr := KafkaTrigger().Brokers("localhost:9092").Topic("orders").Group("workers")
+	rt := triggertest.NewFakeRuntime()
+	tr := New().Brokers("localhost:9092").Topic("orders").Group("workers")
 	sub, err := tr.Activate(context.Background(), &types.TriggerActivateInput{
 		WorkflowID: "wf-1",
 		NodeName:   "kafka",
@@ -187,18 +188,18 @@ func TestKafkaTriggerCommitsMessageAfterEmit(t *testing.T) {
 }
 
 func TestKafkaTriggerDoesNotCommitMessageWhenEmitErrors(t *testing.T) {
-	orig := newKafkaConsumer
-	consumer := newCommitRecordingKafkaConsumer([]KafkaMessage{
+	orig := newConsumer
+	consumer := newCommitRecordingKafkaConsumer([]Message{
 		{Topic: "orders", Partition: 0, Offset: 1, Value: []byte("one")},
 	})
-	newKafkaConsumer = func(KafkaConsumerConfig) (KafkaConsumer, error) { return consumer, nil }
-	t.Cleanup(func() { newKafkaConsumer = orig })
+	newConsumer = func(ConsumerConfig) (Consumer, error) { return consumer, nil }
+	t.Cleanup(func() { newConsumer = orig })
 
-	rt := newFakeTriggerRuntime()
-	rt.emitFunc = func(context.Context, types.WorkflowID, string, *types.TriggerEvent) (types.ExecutionID, error) {
+	rt := triggertest.NewFakeRuntime()
+	rt.SetEmitFunc(func(context.Context, types.WorkflowID, string, *types.TriggerEvent) (types.ExecutionID, error) {
 		return "", errors.New("boom")
-	}
-	tr := KafkaTrigger().Brokers("localhost:9092").Topic("orders").Group("workers")
+	})
+	tr := New().Brokers("localhost:9092").Topic("orders").Group("workers")
 	sub, err := tr.Activate(context.Background(), &types.TriggerActivateInput{
 		WorkflowID: "wf-1",
 		NodeName:   "kafka",
@@ -210,8 +211,8 @@ func TestKafkaTriggerDoesNotCommitMessageWhenEmitErrors(t *testing.T) {
 	}
 	defer func() { _ = sub.Close(context.Background()) }()
 
-	if !rt.waitForEmitCount(1, time.Second) {
-		t.Fatalf("emit count = %d, want 1", rt.emitCount())
+	if !rt.WaitForEmitCount(1, time.Second) {
+		t.Fatalf("emit count = %d, want 1", rt.EmitCount())
 	}
 	time.Sleep(20 * time.Millisecond)
 	if got := consumer.commitCount(); got != 0 {
@@ -220,16 +221,16 @@ func TestKafkaTriggerDoesNotCommitMessageWhenEmitErrors(t *testing.T) {
 }
 
 func TestKafkaTriggerCommitsBatchAfterEmit(t *testing.T) {
-	orig := newKafkaConsumer
-	consumer := newCommitRecordingKafkaConsumer([]KafkaMessage{
+	orig := newConsumer
+	consumer := newCommitRecordingKafkaConsumer([]Message{
 		{Topic: "orders", Partition: 0, Offset: 1, Value: []byte("one")},
 		{Topic: "orders", Partition: 0, Offset: 2, Value: []byte("two")},
 	})
-	newKafkaConsumer = func(KafkaConsumerConfig) (KafkaConsumer, error) { return consumer, nil }
-	t.Cleanup(func() { newKafkaConsumer = orig })
+	newConsumer = func(ConsumerConfig) (Consumer, error) { return consumer, nil }
+	t.Cleanup(func() { newConsumer = orig })
 
-	rt := newFakeTriggerRuntime()
-	tr := KafkaTrigger().
+	rt := triggertest.NewFakeRuntime()
+	tr := New().
 		Brokers("localhost:9092").
 		Topic("orders").
 		Group("workers").
@@ -254,19 +255,19 @@ func TestKafkaTriggerCommitsBatchAfterEmit(t *testing.T) {
 }
 
 func TestKafkaTriggerDoesNotCommitBatchWhenEmitErrors(t *testing.T) {
-	orig := newKafkaConsumer
-	consumer := newCommitRecordingKafkaConsumer([]KafkaMessage{
+	orig := newConsumer
+	consumer := newCommitRecordingKafkaConsumer([]Message{
 		{Topic: "orders", Partition: 0, Offset: 1, Value: []byte("one")},
 		{Topic: "orders", Partition: 0, Offset: 2, Value: []byte("two")},
 	})
-	newKafkaConsumer = func(KafkaConsumerConfig) (KafkaConsumer, error) { return consumer, nil }
-	t.Cleanup(func() { newKafkaConsumer = orig })
+	newConsumer = func(ConsumerConfig) (Consumer, error) { return consumer, nil }
+	t.Cleanup(func() { newConsumer = orig })
 
-	rt := newFakeTriggerRuntime()
-	rt.emitFunc = func(context.Context, types.WorkflowID, string, *types.TriggerEvent) (types.ExecutionID, error) {
+	rt := triggertest.NewFakeRuntime()
+	rt.SetEmitFunc(func(context.Context, types.WorkflowID, string, *types.TriggerEvent) (types.ExecutionID, error) {
 		return "", errors.New("boom")
-	}
-	tr := KafkaTrigger().
+	})
+	tr := New().
 		Brokers("localhost:9092").
 		Topic("orders").
 		Group("workers").
@@ -282,8 +283,8 @@ func TestKafkaTriggerDoesNotCommitBatchWhenEmitErrors(t *testing.T) {
 	}
 	defer func() { _ = sub.Close(context.Background()) }()
 
-	if !rt.waitForEmitCount(1, time.Second) {
-		t.Fatalf("emit count = %d, want 1", rt.emitCount())
+	if !rt.WaitForEmitCount(1, time.Second) {
+		t.Fatalf("emit count = %d, want 1", rt.EmitCount())
 	}
 	time.Sleep(20 * time.Millisecond)
 	if got := consumer.commitCount(); got != 0 {
@@ -296,13 +297,13 @@ func TestKafkaTriggerConsumesRealKafka(t *testing.T) {
 	topic := fmt.Sprintf("xflow-kafka-trigger-%d", time.Now().UnixNano())
 	group := topic + "-group"
 	createKafkaIntegrationTopic(t, brokers[0], topic, 2)
-	writeKafkaIntegrationMessages(t, brokers, topic, []kafka.Message{
-		{Key: []byte("order-1"), Value: []byte("one"), Headers: []kafka.Header{{Key: "source", Value: []byte("test")}}},
+	writeKafkaIntegrationMessages(t, brokers, topic, []kafkago.Message{
+		{Key: []byte("order-1"), Value: []byte("one"), Headers: []kafkago.Header{{Key: "source", Value: []byte("test")}}},
 		{Key: []byte("order-1"), Value: []byte("two")},
 	})
 
-	rt := newFakeTriggerRuntime()
-	tr := KafkaTrigger().Brokers(brokers...).Topic(topic).Group(group).StartOffset("earliest")
+	rt := triggertest.NewFakeRuntime()
+	tr := New().Brokers(brokers...).Topic(topic).Group(group).StartOffset("earliest")
 	sub, err := tr.Activate(context.Background(), &types.TriggerActivateInput{
 		WorkflowID: "wf-1",
 		NodeName:   "kafka",
@@ -314,10 +315,10 @@ func TestKafkaTriggerConsumesRealKafka(t *testing.T) {
 	}
 	defer func() { _ = sub.Close(context.Background()) }()
 
-	if !rt.waitForEmitCount(2, 10*time.Second) {
-		t.Fatalf("emit count = %d, want 2", rt.emitCount())
+	if !rt.WaitForEmitCount(2, 10*time.Second) {
+		t.Fatalf("emit count = %d, want 2", rt.EmitCount())
 	}
-	events := emittedKafkaEvents(rt)
+	events := rt.Events()
 	values := map[string]bool{}
 	for _, event := range events {
 		if event.Kind != "kafka" {
@@ -334,15 +335,15 @@ func TestKafkaTriggerConsumesRealKafka(t *testing.T) {
 }
 
 func TestKafkaTriggerSingleEventIncludesMessagesArray(t *testing.T) {
-	orig := newKafkaConsumer
-	consumer := newScriptedKafkaConsumer([]KafkaMessage{
+	orig := newConsumer
+	consumer := newScriptedKafkaConsumer([]Message{
 		{Topic: "orders", Partition: 3, Offset: 1200, Key: []byte("k1"), Value: []byte("one")},
 	})
-	newKafkaConsumer = func(KafkaConsumerConfig) (KafkaConsumer, error) { return consumer, nil }
-	t.Cleanup(func() { newKafkaConsumer = orig })
+	newConsumer = func(ConsumerConfig) (Consumer, error) { return consumer, nil }
+	t.Cleanup(func() { newConsumer = orig })
 
-	rt := newFakeTriggerRuntime()
-	tr := KafkaTrigger().Brokers("localhost:9092").Topic("orders").Group("workers")
+	rt := triggertest.NewFakeRuntime()
+	tr := New().Brokers("localhost:9092").Topic("orders").Group("workers")
 	sub, err := tr.Activate(context.Background(), &types.TriggerActivateInput{
 		WorkflowID: "wf-1",
 		NodeName:   "kafka",
@@ -354,10 +355,10 @@ func TestKafkaTriggerSingleEventIncludesMessagesArray(t *testing.T) {
 	}
 	defer func() { _ = sub.Close(context.Background()) }()
 
-	if !rt.waitForEmitCount(1, time.Second) {
-		t.Fatalf("emit count = %d, want 1", rt.emitCount())
+	if !rt.WaitForEmitCount(1, time.Second) {
+		t.Fatalf("emit count = %d, want 1", rt.EmitCount())
 	}
-	events := emittedKafkaEvents(rt)
+	events := rt.Events()
 	messages := kafkaMessagesFromEvent(t, events[0])
 	if len(messages) != 1 {
 		t.Fatalf("messages len = %d, want 1", len(messages))
@@ -371,18 +372,18 @@ func TestKafkaTriggerSingleEventIncludesMessagesArray(t *testing.T) {
 }
 
 func TestKafkaTriggerAggregatesMessagesByPartition(t *testing.T) {
-	orig := newKafkaConsumer
-	consumer := newScriptedKafkaConsumer([]KafkaMessage{
+	orig := newConsumer
+	consumer := newScriptedKafkaConsumer([]Message{
 		{Topic: "orders", Partition: 0, Offset: 1, Value: []byte("p0-1")},
 		{Topic: "orders", Partition: 1, Offset: 10, Value: []byte("p1-10")},
 		{Topic: "orders", Partition: 0, Offset: 2, Value: []byte("p0-2")},
 		{Topic: "orders", Partition: 1, Offset: 11, Value: []byte("p1-11")},
 	})
-	newKafkaConsumer = func(KafkaConsumerConfig) (KafkaConsumer, error) { return consumer, nil }
-	t.Cleanup(func() { newKafkaConsumer = orig })
+	newConsumer = func(ConsumerConfig) (Consumer, error) { return consumer, nil }
+	t.Cleanup(func() { newConsumer = orig })
 
-	rt := newFakeTriggerRuntime()
-	tr := KafkaTrigger().
+	rt := triggertest.NewFakeRuntime()
+	tr := New().
 		Brokers("localhost:9092").
 		Topic("orders").
 		Group("workers").
@@ -398,10 +399,10 @@ func TestKafkaTriggerAggregatesMessagesByPartition(t *testing.T) {
 	}
 	defer func() { _ = sub.Close(context.Background()) }()
 
-	if !rt.waitForEmitCount(2, time.Second) {
-		t.Fatalf("emit count = %d, want 2", rt.emitCount())
+	if !rt.WaitForEmitCount(2, time.Second) {
+		t.Fatalf("emit count = %d, want 2", rt.EmitCount())
 	}
-	for _, event := range emittedKafkaEvents(rt) {
+	for _, event := range rt.Events() {
 		if event.Kind != "kafka.batch" {
 			t.Fatalf("event kind = %q, want kafka.batch", event.Kind)
 		}
@@ -422,17 +423,17 @@ func TestKafkaTriggerAggregatesMessagesByPartition(t *testing.T) {
 }
 
 func TestKafkaTriggerAggregateFlushesRemainderOnClose(t *testing.T) {
-	orig := newKafkaConsumer
-	consumer := newScriptedKafkaConsumer([]KafkaMessage{
+	orig := newConsumer
+	consumer := newScriptedKafkaConsumer([]Message{
 		{Topic: "orders", Partition: 0, Offset: 1, Value: []byte("one")},
 		{Topic: "orders", Partition: 0, Offset: 2, Value: []byte("two")},
 		{Topic: "orders", Partition: 0, Offset: 3, Value: []byte("three")},
 	})
-	newKafkaConsumer = func(KafkaConsumerConfig) (KafkaConsumer, error) { return consumer, nil }
-	t.Cleanup(func() { newKafkaConsumer = orig })
+	newConsumer = func(ConsumerConfig) (Consumer, error) { return consumer, nil }
+	t.Cleanup(func() { newConsumer = orig })
 
-	rt := newFakeTriggerRuntime()
-	tr := KafkaTrigger().
+	rt := triggertest.NewFakeRuntime()
+	tr := New().
 		Brokers("localhost:9092").
 		Topic("orders").
 		Group("workers").
@@ -447,17 +448,17 @@ func TestKafkaTriggerAggregateFlushesRemainderOnClose(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if !rt.waitForEmitCount(1, time.Second) {
-		t.Fatalf("emit count = %d, want 1 before close", rt.emitCount())
+	if !rt.WaitForEmitCount(1, time.Second) {
+		t.Fatalf("emit count = %d, want 1 before close", rt.EmitCount())
 	}
 	if err := sub.Close(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if !rt.waitForEmitCount(2, time.Second) {
-		t.Fatalf("emit count = %d, want 2 after close", rt.emitCount())
+	if !rt.WaitForEmitCount(2, time.Second) {
+		t.Fatalf("emit count = %d, want 2 after close", rt.EmitCount())
 	}
 
-	events := emittedKafkaEvents(rt)
+	events := rt.Events()
 	messages := kafkaMessagesFromEvent(t, events[1])
 	if len(messages) != 1 {
 		t.Fatalf("remainder messages len = %d, want 1", len(messages))
@@ -468,15 +469,15 @@ func TestKafkaTriggerAggregateFlushesRemainderOnClose(t *testing.T) {
 }
 
 func TestKafkaTriggerAggregateFlushesByInterval(t *testing.T) {
-	orig := newKafkaConsumer
-	consumer := newScriptedKafkaConsumer([]KafkaMessage{
+	orig := newConsumer
+	consumer := newScriptedKafkaConsumer([]Message{
 		{Topic: "orders", Partition: 0, Offset: 1, Value: []byte("one")},
 	})
-	newKafkaConsumer = func(KafkaConsumerConfig) (KafkaConsumer, error) { return consumer, nil }
-	t.Cleanup(func() { newKafkaConsumer = orig })
+	newConsumer = func(ConsumerConfig) (Consumer, error) { return consumer, nil }
+	t.Cleanup(func() { newConsumer = orig })
 
-	rt := newFakeTriggerRuntime()
-	tr := KafkaTrigger().
+	rt := triggertest.NewFakeRuntime()
+	tr := New().
 		Brokers("localhost:9092").
 		Topic("orders").
 		Group("workers").
@@ -492,10 +493,10 @@ func TestKafkaTriggerAggregateFlushesByInterval(t *testing.T) {
 	}
 	defer func() { _ = sub.Close(context.Background()) }()
 
-	if !rt.waitForEmitCount(1, time.Second) {
-		t.Fatalf("emit count = %d, want 1", rt.emitCount())
+	if !rt.WaitForEmitCount(1, time.Second) {
+		t.Fatalf("emit count = %d, want 1", rt.EmitCount())
 	}
-	events := emittedKafkaEvents(rt)
+	events := rt.Events()
 	if events[0].Kind != "kafka.batch" {
 		t.Fatalf("event kind = %q, want kafka.batch", events[0].Kind)
 	}
@@ -503,14 +504,6 @@ func TestKafkaTriggerAggregateFlushesByInterval(t *testing.T) {
 	if len(messages) != 1 {
 		t.Fatalf("messages len = %d, want 1", len(messages))
 	}
-}
-
-func emittedKafkaEvents(rt *fakeTriggerRuntime) []*types.TriggerEvent {
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	out := make([]*types.TriggerEvent, len(rt.emits))
-	copy(out, rt.emits)
-	return out
 }
 
 func kafkaMessagesFromEvent(t *testing.T, event *types.TriggerEvent) []map[string]any {
@@ -543,7 +536,7 @@ func kafkaIntegrationBrokers(t *testing.T) []string {
 
 func createKafkaIntegrationTopic(t *testing.T, broker, topic string, partitions int) {
 	t.Helper()
-	conn, err := kafka.Dial("tcp", broker)
+	conn, err := kafkago.Dial("tcp", broker)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -552,12 +545,12 @@ func createKafkaIntegrationTopic(t *testing.T, broker, topic string, partitions 
 	if err != nil {
 		t.Fatal(err)
 	}
-	controllerConn, err := kafka.Dial("tcp", fmt.Sprintf("%s:%d", controller.Host, controller.Port))
+	controllerConn, err := kafkago.Dial("tcp", fmt.Sprintf("%s:%d", controller.Host, controller.Port))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = controllerConn.Close() }()
-	if err := controllerConn.CreateTopics(kafka.TopicConfig{
+	if err := controllerConn.CreateTopics(kafkago.TopicConfig{
 		Topic:             topic,
 		NumPartitions:     partitions,
 		ReplicationFactor: 1,
@@ -566,14 +559,14 @@ func createKafkaIntegrationTopic(t *testing.T, broker, topic string, partitions 
 	}
 }
 
-func writeKafkaIntegrationMessages(t *testing.T, brokers []string, topic string, messages []kafka.Message) {
+func writeKafkaIntegrationMessages(t *testing.T, brokers []string, topic string, messages []kafkago.Message) {
 	t.Helper()
-	writer := &kafka.Writer{
-		Addr:                   kafka.TCP(brokers...),
+	writer := &kafkago.Writer{
+		Addr:                   kafkago.TCP(brokers...),
 		Topic:                  topic,
-		Balancer:               &kafka.Hash{},
+		Balancer:               &kafkago.Hash{},
 		AllowAutoTopicCreation: false,
-		RequiredAcks:           kafka.RequireAll,
+		RequiredAcks:           kafkago.RequireAll,
 	}
 	defer func() { _ = writer.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -584,18 +577,18 @@ func writeKafkaIntegrationMessages(t *testing.T, brokers []string, topic string,
 }
 
 type scriptedKafkaConsumer struct {
-	ch chan KafkaMessage
+	ch chan Message
 }
 
-func newScriptedKafkaConsumer(messages []KafkaMessage) *scriptedKafkaConsumer {
-	ch := make(chan KafkaMessage, len(messages))
+func newScriptedKafkaConsumer(messages []Message) *scriptedKafkaConsumer {
+	ch := make(chan Message, len(messages))
 	for _, msg := range messages {
 		ch <- msg
 	}
 	return &scriptedKafkaConsumer{ch: ch}
 }
 
-func (c *scriptedKafkaConsumer) Messages() <-chan KafkaMessage { return c.ch }
+func (c *scriptedKafkaConsumer) Messages() <-chan Message { return c.ch }
 
 func (c *scriptedKafkaConsumer) Close() error {
 	close(c.ch)
@@ -603,29 +596,29 @@ func (c *scriptedKafkaConsumer) Close() error {
 }
 
 type commitRecordingKafkaConsumer struct {
-	ch chan KafkaMessage
+	ch chan Message
 
 	mu      sync.Mutex
-	commits []KafkaMessage
+	commits []Message
 	notify  chan struct{}
 }
 
-func newCommitRecordingKafkaConsumer(messages []KafkaMessage) *commitRecordingKafkaConsumer {
-	ch := make(chan KafkaMessage, len(messages))
+func newCommitRecordingKafkaConsumer(messages []Message) *commitRecordingKafkaConsumer {
+	ch := make(chan Message, len(messages))
 	for _, msg := range messages {
 		ch <- msg
 	}
 	return &commitRecordingKafkaConsumer{ch: ch, notify: make(chan struct{})}
 }
 
-func (c *commitRecordingKafkaConsumer) Messages() <-chan KafkaMessage { return c.ch }
+func (c *commitRecordingKafkaConsumer) Messages() <-chan Message { return c.ch }
 
 func (c *commitRecordingKafkaConsumer) Close() error {
 	close(c.ch)
 	return nil
 }
 
-func (c *commitRecordingKafkaConsumer) CommitMessages(_ context.Context, messages ...KafkaMessage) error {
+func (c *commitRecordingKafkaConsumer) CommitMessages(_ context.Context, messages ...Message) error {
 	c.mu.Lock()
 	c.commits = append(c.commits, messages...)
 	close(c.notify)
@@ -675,7 +668,7 @@ func (c *commitRecordingKafkaConsumer) committedOffsets() []int64 {
 // ---------------------------------------------------------------------------
 
 func TestValidateKafkaMessageSchema(t *testing.T) {
-	schema := &KafkaMessageSchema{RequiredFields: []string{"user_id", "action"}}
+	schema := &MessageSchema{RequiredFields: []string{"user_id", "action"}}
 	tests := []struct {
 		name  string
 		value []byte
@@ -695,9 +688,9 @@ func TestValidateKafkaMessageSchema(t *testing.T) {
 			if tt.name == "no_schema" {
 				s = nil
 			}
-			got := validateKafkaMessageSchema(KafkaMessage{Value: tt.value}, s)
+			got := validateMessageSchema(Message{Value: tt.value}, s)
 			if got != tt.want {
-				t.Fatalf("validateKafkaMessageSchema() = %v, want %v", got, tt.want)
+				t.Fatalf("validateMessageSchema() = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -707,29 +700,29 @@ func TestKafkaMessageSchemaFromParams(t *testing.T) {
 	tests := []struct {
 		name    string
 		params  map[string]any
-		want    *KafkaMessageSchema
+		want    *MessageSchema
 		wantErr bool
 	}{
 		{name: "nil_params", params: map[string]any{}},
 		{name: "empty_schema", params: map[string]any{"message_schema": map[string]any{}}},
 		{name: "valid", params: map[string]any{
 			"message_schema": map[string]any{"required_fields": []any{"user_id", "ts"}},
-		}, want: &KafkaMessageSchema{RequiredFields: []string{"user_id", "ts"}, OnInvalid: kafkaOnInvalidDiscard}},
+		}, want: &MessageSchema{RequiredFields: []string{"user_id", "ts"}, OnInvalid: onInvalidDiscard}},
 		{name: "not_a_map", params: map[string]any{"message_schema": "invalid"}},
 		// An omitted on_invalid must resolve to discard, matching the behaviour
 		// that shipped before the policy existed.
 		{name: "defaults_to_discard", params: map[string]any{
 			"message_schema": map[string]any{"required_fields": []any{"a"}},
-		}, want: &KafkaMessageSchema{RequiredFields: []string{"a"}, OnInvalid: kafkaOnInvalidDiscard}},
+		}, want: &MessageSchema{RequiredFields: []string{"a"}, OnInvalid: onInvalidDiscard}},
 		{name: "fail_policy", params: map[string]any{
 			"message_schema": map[string]any{"required_fields": []any{"a"}, "on_invalid": "fail"},
-		}, want: &KafkaMessageSchema{RequiredFields: []string{"a"}, OnInvalid: kafkaOnInvalidFail}},
+		}, want: &MessageSchema{RequiredFields: []string{"a"}, OnInvalid: onInvalidFail}},
 		{name: "dead_letter_policy", params: map[string]any{
 			"message_schema": map[string]any{
 				"required_fields": []any{"a"}, "on_invalid": "DEAD_LETTER", "dead_letter_topic": "events-dlq",
 			},
-		}, want: &KafkaMessageSchema{
-			RequiredFields: []string{"a"}, OnInvalid: kafkaOnInvalidDeadLetter, DeadLetterTopic: "events-dlq",
+		}, want: &MessageSchema{
+			RequiredFields: []string{"a"}, OnInvalid: onInvalidDeadLetter, DeadLetterTopic: "events-dlq",
 		}},
 		// The two negative cases are the ones that matter: a config that asked
 		// not to lose messages must fail activation rather than silently fall
@@ -743,7 +736,7 @@ func TestKafkaMessageSchemaFromParams(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := kafkaMessageSchemaFromParams(tt.params)
+			got, err := messageSchemaFromParams(tt.params)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("got %+v, want an error", got)
@@ -784,16 +777,16 @@ func TestKafkaMessageSchemaFromParams(t *testing.T) {
 }
 
 func TestKafkaTriggerMessageSchemaSkipsInvalidMessages(t *testing.T) {
-	orig := newKafkaConsumer
-	consumer := newCommitRecordingKafkaConsumer([]KafkaMessage{
+	orig := newConsumer
+	consumer := newCommitRecordingKafkaConsumer([]Message{
 		{Topic: "events", Partition: 0, Offset: 1, Value: []byte(`{"user_id":"u1","action":"click"}`)},  // valid
 		{Topic: "events", Partition: 0, Offset: 2, Value: []byte(`{"user_id":"u2"}`)},                   // missing "action"
 		{Topic: "events", Partition: 0, Offset: 3, Value: []byte(`{"user_id":"u3","action":"scroll"}`)}, // valid
 	})
-	newKafkaConsumer = func(KafkaConsumerConfig) (KafkaConsumer, error) { return consumer, nil }
-	t.Cleanup(func() { newKafkaConsumer = orig })
+	newConsumer = func(ConsumerConfig) (Consumer, error) { return consumer, nil }
+	t.Cleanup(func() { newConsumer = orig })
 
-	rt := newFakeTriggerRuntime()
+	rt := triggertest.NewFakeRuntime()
 	params := map[string]any{
 		"brokers":      []any{"localhost:9092"},
 		"topic":        "events",
@@ -803,7 +796,7 @@ func TestKafkaTriggerMessageSchemaSkipsInvalidMessages(t *testing.T) {
 			"required_fields": []any{"user_id", "action"},
 		},
 	}
-	sub, err := KafkaTrigger().Activate(context.Background(), &types.TriggerActivateInput{
+	sub, err := New().Activate(context.Background(), &types.TriggerActivateInput{
 		WorkflowID: "wf-1",
 		NodeName:   "kafka",
 		Params:     params,
@@ -819,7 +812,7 @@ func TestKafkaTriggerMessageSchemaSkipsInvalidMessages(t *testing.T) {
 		t.Fatalf("commit count = %d, want 3", consumer.commitCount())
 	}
 	// Only 2 messages should be emitted (offset 1 and 3; offset 2 skipped).
-	if !rt.waitForEmitCount(2, time.Second) {
-		t.Fatalf("emit count = %d, want 2", rt.emitCount())
+	if !rt.WaitForEmitCount(2, time.Second) {
+		t.Fatalf("emit count = %d, want 2", rt.EmitCount())
 	}
 }

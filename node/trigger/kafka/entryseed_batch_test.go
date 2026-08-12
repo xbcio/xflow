@@ -1,4 +1,4 @@
-package trigger
+package kafka
 
 import (
 	"context"
@@ -12,12 +12,12 @@ import (
 )
 
 func TestBuildKafkaBatchAdmissionKey_UsesActualRange(t *testing.T) {
-	msgs := []KafkaMessage{
+	msgs := []Message{
 		{Topic: "t", Partition: 3, Offset: 100},
 		{Topic: "t", Partition: 3, Offset: 101},
 		{Topic: "t", Partition: 3, Offset: 147},
 	}
-	got := buildKafkaBatchAdmissionKey("wf-1", "v2", "unit-a", msgs)
+	got := buildBatchAdmissionKey("wf-1", "v2", "unit-a", msgs)
 	want := "/wf-1/v2/unit-a/t/3/100-147"
 	if got != want {
 		t.Fatalf("admission key = %q, want %q", got, want)
@@ -25,8 +25,8 @@ func TestBuildKafkaBatchAdmissionKey_UsesActualRange(t *testing.T) {
 }
 
 func TestBuildKafkaBatchAdmissionKey_SingleMessage(t *testing.T) {
-	msgs := []KafkaMessage{{Topic: "t", Partition: 0, Offset: 7}}
-	got := buildKafkaBatchAdmissionKey("wf-1", "v1", "unit-a", msgs)
+	msgs := []Message{{Topic: "t", Partition: 0, Offset: 7}}
+	got := buildBatchAdmissionKey("wf-1", "v1", "unit-a", msgs)
 	want := "/wf-1/v1/unit-a/t/0/7-7"
 	if got != want {
 		t.Fatalf("admission key = %q, want %q", got, want)
@@ -34,11 +34,11 @@ func TestBuildKafkaBatchAdmissionKey_SingleMessage(t *testing.T) {
 }
 
 func TestBuildKafkaBatchExits_CarriesAllMessages(t *testing.T) {
-	msgs := []KafkaMessage{
+	msgs := []Message{
 		{Topic: "t", Partition: 1, Offset: 10, Key: []byte("k1"), Value: []byte(`{"a":1}`)},
 		{Topic: "t", Partition: 1, Offset: 11, Key: []byte("k2"), Value: []byte(`{"a":2}`)},
 	}
-	exits := buildKafkaBatchExits("kafka-node", msgs)
+	exits := buildBatchExits("kafka-node", msgs)
 	if len(exits) != 1 {
 		t.Fatalf("exits len = %d, want 1", len(exits))
 	}
@@ -65,7 +65,7 @@ func TestBuildKafkaBatchExits_CarriesAllMessages(t *testing.T) {
 
 // 空批不该产生 key —— 调用方永远不该传空，但静默返回一个畸形 key 比 panic 更难查。
 func TestBuildKafkaBatchAdmissionKey_EmptyReturnsEmpty(t *testing.T) {
-	if got := buildKafkaBatchAdmissionKey("wf", "v1", "u", nil); got != "" {
+	if got := buildBatchAdmissionKey("wf", "v1", "u", nil); got != "" {
 		t.Fatalf("empty batch key = %q, want empty", got)
 	}
 }
@@ -79,11 +79,11 @@ func TestSeedKafkaEntryBatchMessages_AcceptedAllowsCommit(t *testing.T) {
 		WorkflowID: "wf-1",
 		Params:     map[string]any{"entry_unit_id": "unit-a", "workflow_version": "v2"},
 	}
-	msgs := []KafkaMessage{
+	msgs := []Message{
 		{Topic: "t", Partition: 0, Offset: 5},
 		{Topic: "t", Partition: 0, Offset: 9},
 	}
-	if !seedKafkaEntryBatchMessages(context.Background(), in, rt, msgs) {
+	if !seedEntryBatchMessages(context.Background(), in, rt, msgs) {
 		t.Fatal("accepted admission must allow commit")
 	}
 	calls := rt.getCalls()
@@ -103,8 +103,8 @@ func TestSeedKafkaEntryBatchMessages_DuplicateAllowsCommit(t *testing.T) {
 	in := &types.TriggerActivateInput{
 		NodeName: "n", WorkflowID: "wf", Params: map[string]any{},
 	}
-	msgs := []KafkaMessage{{Topic: "t", Partition: 0, Offset: 1}}
-	if !seedKafkaEntryBatchMessages(context.Background(), in, rt, msgs) {
+	msgs := []Message{{Topic: "t", Partition: 0, Offset: 1}}
+	if !seedEntryBatchMessages(context.Background(), in, rt, msgs) {
 		t.Fatal("duplicate admission must allow commit")
 	}
 }
@@ -114,8 +114,8 @@ func TestSeedKafkaEntryBatchMessages_ConflictAllowsCommit(t *testing.T) {
 	in := &types.TriggerActivateInput{
 		NodeName: "n", WorkflowID: "wf", Params: map[string]any{},
 	}
-	msgs := []KafkaMessage{{Topic: "t", Partition: 0, Offset: 1}}
-	if !seedKafkaEntryBatchMessages(context.Background(), in, rt, msgs) {
+	msgs := []Message{{Topic: "t", Partition: 0, Offset: 1}}
+	if !seedEntryBatchMessages(context.Background(), in, rt, msgs) {
 		t.Fatal("conflict means another runner admitted it; commit is correct")
 	}
 }
@@ -126,8 +126,8 @@ func TestSeedKafkaEntryBatchMessages_ErrorWithholdsCommit(t *testing.T) {
 	in := &types.TriggerActivateInput{
 		NodeName: "n", WorkflowID: "wf", Params: map[string]any{},
 	}
-	msgs := []KafkaMessage{{Topic: "t", Partition: 0, Offset: 1}}
-	if seedKafkaEntryBatchMessages(context.Background(), in, rt, msgs) {
+	msgs := []Message{{Topic: "t", Partition: 0, Offset: 1}}
+	if seedEntryBatchMessages(context.Background(), in, rt, msgs) {
 		t.Fatal("a fence rejection must NOT commit the offset — Kafka must redeliver")
 	}
 }
@@ -138,8 +138,8 @@ func TestSeedKafkaEntryBatchMessages_UnknownStateWithholdsCommit(t *testing.T) {
 	in := &types.TriggerActivateInput{
 		NodeName: "n", WorkflowID: "wf", Params: map[string]any{},
 	}
-	msgs := []KafkaMessage{{Topic: "t", Partition: 0, Offset: 1}}
-	if seedKafkaEntryBatchMessages(context.Background(), in, rt, msgs) {
+	msgs := []Message{{Topic: "t", Partition: 0, Offset: 1}}
+	if seedEntryBatchMessages(context.Background(), in, rt, msgs) {
 		t.Fatal("unknown admission state must not commit")
 	}
 }
@@ -149,7 +149,7 @@ func TestSeedKafkaEntryBatchMessages_EmptyBatchIsNoop(t *testing.T) {
 	in := &types.TriggerActivateInput{
 		NodeName: "n", WorkflowID: "wf", Params: map[string]any{},
 	}
-	if !seedKafkaEntryBatchMessages(context.Background(), in, rt, nil) {
+	if !seedEntryBatchMessages(context.Background(), in, rt, nil) {
 		t.Fatal("empty batch is trivially done")
 	}
 	if len(rt.getCalls()) != 0 {
@@ -159,7 +159,7 @@ func TestSeedKafkaEntryBatchMessages_EmptyBatchIsNoop(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // Aggregate + entry-seed wiring (Task 3): flush routes a flushed batch through
-// seedKafkaEntryBatchMessages instead of the legacy Emit path when the
+// seedEntryBatchMessages instead of the legacy Emit path when the
 // activation is entry-seed. The three tests below drive this through the real
 // KafkaTriggerNode.Activate + aggregator, not by calling flush directly, so
 // they also prove the ban in Activate has been lifted.
@@ -173,10 +173,10 @@ func TestSeedKafkaEntryBatchMessages_EmptyBatchIsNoop(t *testing.T) {
 // asserting on the admitter directly.
 // ---------------------------------------------------------------------------
 
-func stubNewKafkaConsumer(c KafkaConsumer) func() {
-	prev := newKafkaConsumer
-	newKafkaConsumer = func(KafkaConsumerConfig) (KafkaConsumer, error) { return c, nil }
-	return func() { newKafkaConsumer = prev }
+func stubNewConsumer(c Consumer) func() {
+	prev := newConsumer
+	newConsumer = func(ConsumerConfig) (Consumer, error) { return c, nil }
+	return func() { newConsumer = prev }
 }
 
 func entrySeedAggregateInput(t *testing.T, maxSize int) *types.TriggerActivateInput {
@@ -251,15 +251,15 @@ func TestKafkaAggregate_EntrySeedActivates(t *testing.T) {
 		Runtime: rt,
 	}
 
-	msgs := []KafkaMessage{
+	msgs := []Message{
 		{Topic: "t", Partition: 0, Offset: 1},
 		{Topic: "t", Partition: 0, Offset: 2},
 	}
 	consumer := &commitRecordingConsumer{inner: newScriptedConsumer(msgs)}
-	restore := stubNewKafkaConsumer(consumer)
+	restore := stubNewConsumer(consumer)
 	defer restore()
 
-	sub, err := (&KafkaTriggerNode{}).Activate(context.Background(), in)
+	sub, err := (&Node{}).Activate(context.Background(), in)
 	if err != nil {
 		t.Fatalf("entry-seed aggregate activation must succeed, got: %v", err)
 	}
@@ -284,15 +284,15 @@ func TestKafkaAggregate_EntrySeedCommitsAfterSeed(t *testing.T) {
 	in := entrySeedAggregateInput(t, 2)
 	in.Runtime = rt
 
-	msgs := []KafkaMessage{
+	msgs := []Message{
 		{Topic: "t", Partition: 0, Offset: 1},
 		{Topic: "t", Partition: 0, Offset: 2},
 	}
 	consumer := &commitRecordingConsumer{inner: newScriptedConsumer(msgs)}
-	restore := stubNewKafkaConsumer(consumer)
+	restore := stubNewConsumer(consumer)
 	defer restore()
 
-	sub, err := (&KafkaTriggerNode{}).Activate(context.Background(), in)
+	sub, err := (&Node{}).Activate(context.Background(), in)
 	if err != nil {
 		t.Fatalf("activate: %v", err)
 	}
@@ -311,15 +311,15 @@ func TestKafkaAggregate_EntrySeedFailureWithholdsCommit(t *testing.T) {
 	in := entrySeedAggregateInput(t, 2)
 	in.Runtime = rt
 
-	msgs := []KafkaMessage{
+	msgs := []Message{
 		{Topic: "t", Partition: 0, Offset: 1},
 		{Topic: "t", Partition: 0, Offset: 2},
 	}
 	consumer := &commitRecordingConsumer{inner: newScriptedConsumer(msgs)}
-	restore := stubNewKafkaConsumer(consumer)
+	restore := stubNewConsumer(consumer)
 	defer restore()
 
-	sub, err := (&KafkaTriggerNode{}).Activate(context.Background(), in)
+	sub, err := (&Node{}).Activate(context.Background(), in)
 	if err != nil {
 		t.Fatalf("activate: %v", err)
 	}
@@ -376,15 +376,15 @@ func TestKafkaAggregate_EntrySeedRecordsMetrics(t *testing.T) {
 	in := entrySeedAggregateInput(t, 2)
 	in.Runtime = rt
 
-	msgs := []KafkaMessage{
+	msgs := []Message{
 		{Topic: "t", Partition: 0, Offset: 1},
 		{Topic: "t", Partition: 0, Offset: 2},
 	}
 	consumer := &commitRecordingConsumer{inner: newScriptedConsumer(msgs)}
-	restore := stubNewKafkaConsumer(consumer)
+	restore := stubNewConsumer(consumer)
 	defer restore()
 
-	sub, err := (&KafkaTriggerNode{}).Activate(context.Background(), in)
+	sub, err := (&Node{}).Activate(context.Background(), in)
 	if err != nil {
 		t.Fatalf("activate: %v", err)
 	}
@@ -412,7 +412,7 @@ func TestKafkaAggregateConfig_EntrySeedDefaultsToOneSecond(t *testing.T) {
 	raw := map[string]any{
 		"enabled": true, "by": "partition", "dedup": "message",
 	}
-	cfg, err := kafkaAggregateConfigFromParamForMode(raw, true /* entrySeed */)
+	cfg, err := aggregateConfigFromParamForMode(raw, true /* entrySeed */)
 	if err != nil {
 		t.Fatalf("config: %v", err)
 	}
@@ -426,7 +426,7 @@ func TestKafkaAggregateConfig_LegacyKeeps100ms(t *testing.T) {
 	raw := map[string]any{
 		"enabled": true, "by": "partition", "dedup": "message",
 	}
-	cfg, err := kafkaAggregateConfigFromParamForMode(raw, false /* entrySeed */)
+	cfg, err := aggregateConfigFromParamForMode(raw, false /* entrySeed */)
 	if err != nil {
 		t.Fatalf("config: %v", err)
 	}
@@ -442,7 +442,7 @@ func TestKafkaAggregateConfig_ExplicitIntervalWinsInBothModes(t *testing.T) {
 			"enabled": true, "by": "partition", "dedup": "message",
 			"flush_interval": "250ms",
 		}
-		cfg, err := kafkaAggregateConfigFromParamForMode(raw, entrySeed)
+		cfg, err := aggregateConfigFromParamForMode(raw, entrySeed)
 		if err != nil {
 			t.Fatalf("entrySeed=%v config: %v", entrySeed, err)
 		}
@@ -474,8 +474,8 @@ func (m *mockGroupExecRuntime) ExecuteGroup(_ context.Context, input map[string]
 
 // TestSeedKafkaEntryBatchViaGroupExec_UsesRealExitsNotRawMessages proves the
 // group-exec batch path admits the exits ExecuteGroup RETURNED, not exits
-// synthesized from the raw Kafka messages (buildKafkaBatchExits) — the
-// defining difference from seedKafkaEntryBatchMessages and the whole point of
+// synthesized from the raw Kafka messages (buildBatchExits) — the
+// defining difference from seedEntryBatchMessages and the whole point of
 // this feature.
 func TestSeedKafkaEntryBatchViaGroupExec_UsesRealExitsNotRawMessages(t *testing.T) {
 	realExits := []types.BoundaryExit{{NodeName: "member", Port: "main", Data: map[string]any{"processed": true}}}
@@ -487,9 +487,9 @@ func TestSeedKafkaEntryBatchViaGroupExec_UsesRealExitsNotRawMessages(t *testing.
 		NodeName: "trig", WorkflowID: "wf-1",
 		Params: map[string]any{"entry_unit_id": "g", "workflow_version": "v2"},
 	}
-	msgs := []KafkaMessage{{Topic: "t", Partition: 0, Offset: 5}, {Topic: "t", Partition: 0, Offset: 9}}
+	msgs := []Message{{Topic: "t", Partition: 0, Offset: 5}, {Topic: "t", Partition: 0, Offset: 9}}
 
-	if !seedKafkaEntryBatchViaGroupExec(context.Background(), in, rt, msgs) {
+	if !seedEntryBatchViaGroupExec(context.Background(), in, rt, msgs) {
 		t.Fatal("accepted admission must allow commit")
 	}
 	calls := rt.getCalls()
@@ -517,9 +517,9 @@ func TestSeedKafkaEntryBatchViaGroupExec_GroupFailureWithholdsCommit(t *testing.
 		execResult:           types.GroupExecResult{Outcome: "failed", Error: "member node error"},
 	}
 	in := &types.TriggerActivateInput{NodeName: "trig", WorkflowID: "wf", Params: map[string]any{}}
-	msgs := []KafkaMessage{{Topic: "t", Partition: 0, Offset: 1}}
+	msgs := []Message{{Topic: "t", Partition: 0, Offset: 1}}
 
-	if seedKafkaEntryBatchViaGroupExec(context.Background(), in, rt, msgs) {
+	if seedEntryBatchViaGroupExec(context.Background(), in, rt, msgs) {
 		t.Fatal("a failed group execution must not commit the offset")
 	}
 	if len(rt.getCalls()) != 0 {
@@ -533,9 +533,9 @@ func TestSeedKafkaEntryBatchViaGroupExec_GroupFailureWithholdsCommit(t *testing.
 func TestSeedKafkaEntryBatchViaGroupExec_ExecuteGroupErrorWithholdsCommit(t *testing.T) {
 	rt := &mockGroupExecRuntime{execErr: errors.New("package validation failed")}
 	in := &types.TriggerActivateInput{NodeName: "trig", WorkflowID: "wf", Params: map[string]any{}}
-	msgs := []KafkaMessage{{Topic: "t", Partition: 0, Offset: 1}}
+	msgs := []Message{{Topic: "t", Partition: 0, Offset: 1}}
 
-	if seedKafkaEntryBatchViaGroupExec(context.Background(), in, rt, msgs) {
+	if seedEntryBatchViaGroupExec(context.Background(), in, rt, msgs) {
 		t.Fatal("an ExecuteGroup error must not commit the offset")
 	}
 }
@@ -546,7 +546,7 @@ func TestSeedKafkaEntryBatchViaGroupExec_ExecuteGroupErrorWithholdsCommit(t *tes
 // groupExecTriggerRuntime (service/runner). Used to drive a batch through the
 // REAL kafkaPartitionAggregator.flush (via KafkaTriggerNode.Activate) and
 // prove the combined-interface type assertion in flush actually selects the
-// group-exec branch, not just that seedKafkaEntryBatchViaGroupExec works in
+// group-exec branch, not just that seedEntryBatchViaGroupExec works in
 // isolation.
 type entrySeedGroupExecTestRuntime struct {
 	entrySeedTestRuntime
@@ -564,11 +564,11 @@ func (r *entrySeedGroupExecTestRuntime) ExecuteGroup(_ context.Context, input ma
 
 // TestKafkaAggregate_EntrySeedGroupExec_RoutesThroughFlushGroupBranch drives a
 // batch through the real Activate -> aggregator -> flush path (not calling
-// seedKafkaEntryBatchViaGroupExec directly) with a runtime implementing BOTH
+// seedEntryBatchViaGroupExec directly) with a runtime implementing BOTH
 // types.EntrySeedRuntime and types.GroupExecRuntime, and asserts:
 //  1. ExecuteGroup was actually invoked by flush's combined-interface branch.
 //  2. The exits admitted to the control plane are the REAL exits ExecuteGroup
-//     returned, not the raw-message exits buildKafkaBatchExits would
+//     returned, not the raw-message exits buildBatchExits would
 //     synthesize on the plain-EntrySeedRuntime branch.
 //
 // This is the load-bearing guard for the type assertion added at
@@ -586,15 +586,15 @@ func TestKafkaAggregate_EntrySeedGroupExec_RoutesThroughFlushGroupBranch(t *test
 	in := entrySeedAggregateInput(t, 2)
 	in.Runtime = rt
 
-	msgs := []KafkaMessage{
+	msgs := []Message{
 		{Topic: "t", Partition: 0, Offset: 1},
 		{Topic: "t", Partition: 0, Offset: 2},
 	}
 	consumer := &commitRecordingConsumer{inner: newScriptedConsumer(msgs)}
-	restore := stubNewKafkaConsumer(consumer)
+	restore := stubNewConsumer(consumer)
 	defer restore()
 
-	sub, err := (&KafkaTriggerNode{}).Activate(context.Background(), in)
+	sub, err := (&Node{}).Activate(context.Background(), in)
 	if err != nil {
 		t.Fatalf("activate: %v", err)
 	}
@@ -629,12 +629,12 @@ func TestKafkaAggregate_EntrySeedRecordsConflict(t *testing.T) {
 	in.Runtime = rt
 
 	consumer := &commitRecordingConsumer{
-		inner: newScriptedConsumer([]KafkaMessage{{Topic: "t", Partition: 0, Offset: 1}}),
+		inner: newScriptedConsumer([]Message{{Topic: "t", Partition: 0, Offset: 1}}),
 	}
-	restore := stubNewKafkaConsumer(consumer)
+	restore := stubNewConsumer(consumer)
 	defer restore()
 
-	sub, err := (&KafkaTriggerNode{}).Activate(context.Background(), in)
+	sub, err := (&Node{}).Activate(context.Background(), in)
 	if err != nil {
 		t.Fatalf("activate: %v", err)
 	}

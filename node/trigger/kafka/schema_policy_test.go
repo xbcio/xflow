@@ -1,4 +1,4 @@
-package trigger
+package kafka
 
 import (
 	"context"
@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xbcio/xflow/node/trigger/triggertest"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -93,7 +94,7 @@ func installRecordingObserver(t *testing.T) *recordingObserver {
 
 type fakePublisher struct {
 	mu        sync.Mutex
-	published []KafkaMessage
+	published []Message
 	topics    []string
 	err       error
 	closed    bool
@@ -104,7 +105,7 @@ func newFakePublisher() *fakePublisher {
 	return &fakePublisher{notify: make(chan struct{})}
 }
 
-func (p *fakePublisher) Publish(_ context.Context, topic string, msg KafkaMessage) error {
+func (p *fakePublisher) Publish(_ context.Context, topic string, msg Message) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.err != nil {
@@ -148,23 +149,23 @@ func (p *fakePublisher) isClosed() bool {
 // this closes the observability gap without changing which messages are dropped.
 func TestKafkaSchemaDiscardIsObserved(t *testing.T) {
 	o := installRecordingObserver(t)
-	orig := newKafkaConsumer
-	consumer := newCommitRecordingKafkaConsumer([]KafkaMessage{
+	orig := newConsumer
+	consumer := newCommitRecordingKafkaConsumer([]Message{
 		{Topic: "events", Partition: 0, Offset: 1, Value: []byte(`{"user_id":"u1","action":"click"}`)},
 		{Topic: "events", Partition: 0, Offset: 2, Value: []byte(`{"user_id":"u2"}`)},
 	})
-	newKafkaConsumer = func(KafkaConsumerConfig) (KafkaConsumer, error) { return consumer, nil }
-	t.Cleanup(func() { newKafkaConsumer = orig })
+	newConsumer = func(ConsumerConfig) (Consumer, error) { return consumer, nil }
+	t.Cleanup(func() { newConsumer = orig })
 
-	rt := newFakeTriggerRuntime()
+	rt := triggertest.NewFakeRuntime()
 	sub := activateSchemaTrigger(t, rt, map[string]any{"required_fields": []any{"user_id", "action"}})
 	defer func() { _ = sub.Close(context.Background()) }()
 
 	if !consumer.waitForCommitCount(2, 2*time.Second) {
 		t.Fatalf("commit count = %d, want 2", consumer.commitCount())
 	}
-	if !rt.waitForEmitCount(1, time.Second) {
-		t.Fatalf("emit count = %d, want 1", rt.emitCount())
+	if !rt.WaitForEmitCount(1, time.Second) {
+		t.Fatalf("emit count = %d, want 1", rt.EmitCount())
 	}
 	ok := o.waitFor(2*time.Second, func(discarded, _ []string) bool { return len(discarded) == 1 })
 	discarded, _ := o.snapshot()
@@ -189,7 +190,7 @@ func TestKafkaSchemaDiscardIsObserved(t *testing.T) {
 // message and this test fails on admission calls = 2.
 func TestKafkaSchemaAppliesToEntrySeedMode(t *testing.T) {
 	o := installRecordingObserver(t)
-	msgs := []KafkaMessage{
+	msgs := []Message{
 		{Topic: "t", Partition: 0, Offset: 700, Value: []byte(`{"user_id":"u1","action":"click"}`)},
 		{Topic: "t", Partition: 0, Offset: 701, Value: []byte(`{"user_id":"u2"}`)}, // invalid
 	}
@@ -209,11 +210,11 @@ func TestKafkaSchemaAppliesToEntrySeedMode(t *testing.T) {
 		Params:     map[string]any{"entry_seed": true, "entry_unit_id": "g1", "workflow_version": "v1"},
 		Runtime:    rt,
 	}
-	cfg := KafkaConsumerConfig{
+	cfg := ConsumerConfig{
 		MaxInflight:   4,
-		MessageSchema: &KafkaMessageSchema{RequiredFields: []string{"user_id", "action"}},
+		MessageSchema: &MessageSchema{RequiredFields: []string{"user_id", "action"}},
 	}
-	sub := activateKafkaPerMessage(context.Background(), in, cfg, recorder, nil)
+	sub := activatePerMessage(context.Background(), in, cfg, recorder, nil)
 	t.Cleanup(func() { _ = sub.Close(context.Background()) })
 
 	if !o.waitFor(2*time.Second, func(discarded, _ []string) bool { return len(discarded) == 1 }) {
@@ -238,36 +239,36 @@ func TestKafkaSchemaAppliesToEntrySeedMode(t *testing.T) {
 // not contaminate an otherwise valid batch.
 func TestKafkaSchemaAppliesToAggregateMode(t *testing.T) {
 	o := installRecordingObserver(t)
-	msgs := []KafkaMessage{
+	msgs := []Message{
 		{Topic: "t", Partition: 0, Offset: 1, Value: []byte(`{"user_id":"u1","action":"click"}`)},
 		{Topic: "t", Partition: 0, Offset: 2, Value: []byte(`{"user_id":"u2"}`)}, // invalid
 		{Topic: "t", Partition: 0, Offset: 3, Value: []byte(`{"user_id":"u3","action":"scroll"}`)},
 	}
 	consumer := newCommitRecordingKafkaConsumer(msgs)
-	rt := newFakeTriggerRuntime()
+	rt := triggertest.NewFakeRuntime()
 	in := &types.TriggerActivateInput{WorkflowID: "wf1", NodeName: "trigger", Runtime: rt}
-	cfg := KafkaConsumerConfig{
+	cfg := ConsumerConfig{
 		MaxInflight: 4,
-		Aggregate: KafkaAggregateConfig{
-			Enabled: true, By: kafkaAggregateByPartition,
+		Aggregate: AggregateConfig{
+			Enabled: true, By: aggregateByPartition,
 			MaxSize: 2, FlushInterval: 50 * time.Millisecond,
-			Dedup: kafkaAggregateDedupMessage,
+			Dedup: aggregateDedupMessage,
 		},
-		MessageSchema: &KafkaMessageSchema{RequiredFields: []string{"user_id", "action"}},
+		MessageSchema: &MessageSchema{RequiredFields: []string{"user_id", "action"}},
 	}
-	sub := activateKafkaAggregate(context.Background(), in, cfg, consumer, nil)
+	sub := activateAggregate(context.Background(), in, cfg, consumer, nil)
 	t.Cleanup(func() { _ = sub.Close(context.Background()) })
 
 	if !o.waitFor(2*time.Second, func(discarded, _ []string) bool { return len(discarded) == 1 }) {
 		discarded, _ := o.snapshot()
 		t.Fatalf("discarded = %v, want one; aggregate mode is not applying the schema", discarded)
 	}
-	if !rt.waitForEmitCount(1, 2*time.Second) {
-		t.Fatalf("emit count = %d, want at least 1", rt.emitCount())
+	if !rt.WaitForEmitCount(1, 2*time.Second) {
+		t.Fatalf("emit count = %d, want at least 1", rt.EmitCount())
 	}
 	// The batch must contain only the two valid messages. A count of 3 means the
 	// invalid record was emitted downstream.
-	events := rt.events()
+	events := rt.Events()
 	if len(events) == 0 {
 		t.Fatal("no events emitted")
 	}
@@ -294,30 +295,30 @@ func TestKafkaAggregateDiscardedOffsetNotCommittedBeforeBatch(t *testing.T) {
 	// Offset 1 is valid (buffered, below MaxSize so no flush yet); offset 2 is
 	// invalid. If offset 2 committed on its own, the group would sit at 2 with
 	// offset 1 never emitted.
-	consumer := newCommitRecordingKafkaConsumer([]KafkaMessage{
+	consumer := newCommitRecordingKafkaConsumer([]Message{
 		{Topic: "t", Partition: 0, Offset: 1, Value: []byte(`{"user_id":"u1","action":"click"}`)},
 		{Topic: "t", Partition: 0, Offset: 2, Value: []byte(`{"user_id":"u2"}`)},
 	})
-	rt := newFakeTriggerRuntime()
+	rt := triggertest.NewFakeRuntime()
 	// Block emit so the buffer cannot flush while we inspect commits.
 	release := make(chan struct{})
-	rt.setEmitFunc(func(context.Context, types.WorkflowID, string, *types.TriggerEvent) (types.ExecutionID, error) {
+	rt.SetEmitFunc(func(context.Context, types.WorkflowID, string, *types.TriggerEvent) (types.ExecutionID, error) {
 		<-release
 		return "exec-1", nil
 	})
 	in := &types.TriggerActivateInput{WorkflowID: "wf1", NodeName: "trigger", Runtime: rt}
-	cfg := KafkaConsumerConfig{
+	cfg := ConsumerConfig{
 		MaxInflight: 4,
-		Aggregate: KafkaAggregateConfig{
-			Enabled: true, By: kafkaAggregateByPartition,
+		Aggregate: AggregateConfig{
+			Enabled: true, By: aggregateByPartition,
 			// MaxSize 3 so two messages never trigger a size flush; the interval
 			// is long enough that nothing flushes during the window below.
 			MaxSize: 3, FlushInterval: 10 * time.Second,
-			Dedup: kafkaAggregateDedupMessage,
+			Dedup: aggregateDedupMessage,
 		},
-		MessageSchema: &KafkaMessageSchema{RequiredFields: []string{"user_id", "action"}},
+		MessageSchema: &MessageSchema{RequiredFields: []string{"user_id", "action"}},
 	}
-	sub := activateKafkaAggregate(context.Background(), in, cfg, consumer, nil)
+	sub := activateAggregate(context.Background(), in, cfg, consumer, nil)
 	t.Cleanup(func() {
 		close(release)
 		_ = sub.Close(context.Background())
@@ -338,20 +339,20 @@ func TestKafkaAggregateDiscardedOffsetNotCommittedBeforeBatch(t *testing.T) {
 func TestKafkaSchemaDeadLetterPublishesAndCommits(t *testing.T) {
 	o := installRecordingObserver(t)
 	publisher := newFakePublisher()
-	consumer := newCommitRecordingKafkaConsumer([]KafkaMessage{
+	consumer := newCommitRecordingKafkaConsumer([]Message{
 		{Topic: "events", Partition: 0, Offset: 5, Value: []byte(`{"user_id":"u2"}`)},
 	})
-	rt := newFakeTriggerRuntime()
+	rt := triggertest.NewFakeRuntime()
 	in := &types.TriggerActivateInput{WorkflowID: "wf1", NodeName: "trigger", Runtime: rt}
-	cfg := KafkaConsumerConfig{
+	cfg := ConsumerConfig{
 		MaxInflight: 4,
-		MessageSchema: &KafkaMessageSchema{
+		MessageSchema: &MessageSchema{
 			RequiredFields:  []string{"user_id", "action"},
-			OnInvalid:       kafkaOnInvalidDeadLetter,
+			OnInvalid:       onInvalidDeadLetter,
 			DeadLetterTopic: "events-dlq",
 		},
 	}
-	sub := activateKafkaPerMessage(context.Background(), in, cfg, consumer, publisher)
+	sub := activatePerMessage(context.Background(), in, cfg, consumer, publisher)
 	defer func() { _ = sub.Close(context.Background()) }()
 
 	if !consumer.waitForCommitCount(1, 2*time.Second) {
@@ -375,7 +376,7 @@ func TestKafkaSchemaDeadLetterPublishesAndCommits(t *testing.T) {
 		t.Errorf("deadLettered[0] = %q, want %q", dl[0], "events/ok")
 	}
 	// No emit: the message never entered the workflow.
-	if got := rt.emitCount(); got != 0 {
+	if got := rt.EmitCount(); got != 0 {
 		t.Errorf("emit count = %d, want 0", got)
 	}
 }
@@ -389,20 +390,20 @@ func TestKafkaSchemaDeadLetterFailureWithholdsCommit(t *testing.T) {
 	o := installRecordingObserver(t)
 	publisher := newFakePublisher()
 	publisher.err = errors.New("broker unreachable")
-	consumer := newCommitRecordingKafkaConsumer([]KafkaMessage{
+	consumer := newCommitRecordingKafkaConsumer([]Message{
 		{Topic: "events", Partition: 0, Offset: 5, Value: []byte(`{"user_id":"u2"}`)},
 	})
-	rt := newFakeTriggerRuntime()
+	rt := triggertest.NewFakeRuntime()
 	in := &types.TriggerActivateInput{WorkflowID: "wf1", NodeName: "trigger", Runtime: rt}
-	cfg := KafkaConsumerConfig{
+	cfg := ConsumerConfig{
 		MaxInflight: 4,
-		MessageSchema: &KafkaMessageSchema{
+		MessageSchema: &MessageSchema{
 			RequiredFields:  []string{"user_id", "action"},
-			OnInvalid:       kafkaOnInvalidDeadLetter,
+			OnInvalid:       onInvalidDeadLetter,
 			DeadLetterTopic: "events-dlq",
 		},
 	}
-	sub := activateKafkaPerMessage(context.Background(), in, cfg, consumer, publisher)
+	sub := activatePerMessage(context.Background(), in, cfg, consumer, publisher)
 	defer func() { _ = sub.Close(context.Background()) }()
 
 	if !o.waitFor(2*time.Second, func(_, deadLettered []string) bool { return len(deadLettered) == 1 }) {
@@ -428,19 +429,19 @@ func TestKafkaSchemaDeadLetterFailureWithholdsCommit(t *testing.T) {
 // partition for zero data loss, which is the point of offering the policy.
 func TestKafkaSchemaFailPolicyWithholdsCommit(t *testing.T) {
 	o := installRecordingObserver(t)
-	consumer := newCommitRecordingKafkaConsumer([]KafkaMessage{
+	consumer := newCommitRecordingKafkaConsumer([]Message{
 		{Topic: "events", Partition: 0, Offset: 9, Value: []byte(`{"user_id":"u2"}`)},
 	})
-	rt := newFakeTriggerRuntime()
+	rt := triggertest.NewFakeRuntime()
 	in := &types.TriggerActivateInput{WorkflowID: "wf1", NodeName: "trigger", Runtime: rt}
-	cfg := KafkaConsumerConfig{
+	cfg := ConsumerConfig{
 		MaxInflight: 4,
-		MessageSchema: &KafkaMessageSchema{
+		MessageSchema: &MessageSchema{
 			RequiredFields: []string{"user_id", "action"},
-			OnInvalid:      kafkaOnInvalidFail,
+			OnInvalid:      onInvalidFail,
 		},
 	}
-	sub := activateKafkaPerMessage(context.Background(), in, cfg, consumer, nil)
+	sub := activatePerMessage(context.Background(), in, cfg, consumer, nil)
 	defer func() { _ = sub.Close(context.Background()) }()
 
 	if !o.waitFor(2*time.Second, func(discarded, _ []string) bool { return len(discarded) == 1 }) {
@@ -464,24 +465,24 @@ func TestKafkaSchemaFailPolicyWithholdsCommit(t *testing.T) {
 // into a failed activation, which the runner self-heals by retrying, instead of
 // an unbounded redelivery loop the first time a malformed record shows up.
 func TestKafkaActivateBuildsDeadLetterPublisher(t *testing.T) {
-	origConsumer := newKafkaConsumer
-	origPublisher := newKafkaDeadLetterPublisher
+	origConsumer := newConsumer
+	origPublisher := newDeadLetterPublisher
 	t.Cleanup(func() {
-		newKafkaConsumer = origConsumer
-		newKafkaDeadLetterPublisher = origPublisher
+		newConsumer = origConsumer
+		newDeadLetterPublisher = origPublisher
 	})
 
 	consumer := newCommitRecordingKafkaConsumer(nil)
-	newKafkaConsumer = func(KafkaConsumerConfig) (KafkaConsumer, error) { return consumer, nil }
+	newConsumer = func(ConsumerConfig) (Consumer, error) { return consumer, nil }
 	publisher := newFakePublisher()
 	var built int
-	newKafkaDeadLetterPublisher = func(KafkaConsumerConfig) (KafkaDeadLetterPublisher, error) {
+	newDeadLetterPublisher = func(ConsumerConfig) (DeadLetterPublisher, error) {
 		built++
 		return publisher, nil
 	}
 
-	rt := newFakeTriggerRuntime()
-	sub, err := KafkaTrigger().Activate(context.Background(), &types.TriggerActivateInput{
+	rt := triggertest.NewFakeRuntime()
+	sub, err := New().Activate(context.Background(), &types.TriggerActivateInput{
 		WorkflowID: "wf-1",
 		NodeName:   "kafka",
 		Params: map[string]any{
@@ -511,20 +512,20 @@ func TestKafkaActivateBuildsDeadLetterPublisher(t *testing.T) {
 // TestKafkaActivateFailsWhenDeadLetterPublisherFails checks activation fails
 // closed, and that the consumer it already opened is not leaked.
 func TestKafkaActivateFailsWhenDeadLetterPublisherFails(t *testing.T) {
-	origConsumer := newKafkaConsumer
-	origPublisher := newKafkaDeadLetterPublisher
+	origConsumer := newConsumer
+	origPublisher := newDeadLetterPublisher
 	t.Cleanup(func() {
-		newKafkaConsumer = origConsumer
-		newKafkaDeadLetterPublisher = origPublisher
+		newConsumer = origConsumer
+		newDeadLetterPublisher = origPublisher
 	})
 
 	consumer := newCommitRecordingKafkaConsumer(nil)
-	newKafkaConsumer = func(KafkaConsumerConfig) (KafkaConsumer, error) { return consumer, nil }
-	newKafkaDeadLetterPublisher = func(KafkaConsumerConfig) (KafkaDeadLetterPublisher, error) {
+	newConsumer = func(ConsumerConfig) (Consumer, error) { return consumer, nil }
+	newDeadLetterPublisher = func(ConsumerConfig) (DeadLetterPublisher, error) {
 		return nil, errors.New("dlq broker unreachable")
 	}
 
-	_, err := KafkaTrigger().Activate(context.Background(), &types.TriggerActivateInput{
+	_, err := New().Activate(context.Background(), &types.TriggerActivateInput{
 		WorkflowID: "wf-1",
 		NodeName:   "kafka",
 		Params: map[string]any{
@@ -535,7 +536,7 @@ func TestKafkaActivateFailsWhenDeadLetterPublisherFails(t *testing.T) {
 				"dead_letter_topic": "events-dlq",
 			},
 		},
-		Runtime: newFakeTriggerRuntime(),
+		Runtime: triggertest.NewFakeRuntime(),
 	})
 	if err == nil {
 		t.Fatal("Activate succeeded with an unreachable dead-letter broker; want an error so the runner retries")
@@ -546,29 +547,29 @@ func TestKafkaActivateFailsWhenDeadLetterPublisherFails(t *testing.T) {
 // opens no writer. A Kafka producer connection per trigger that never uses it is
 // a real resource cost on a runner hosting many triggers.
 func TestKafkaActivateSkipsPublisherForDiscardPolicy(t *testing.T) {
-	origConsumer := newKafkaConsumer
-	origPublisher := newKafkaDeadLetterPublisher
+	origConsumer := newConsumer
+	origPublisher := newDeadLetterPublisher
 	t.Cleanup(func() {
-		newKafkaConsumer = origConsumer
-		newKafkaDeadLetterPublisher = origPublisher
+		newConsumer = origConsumer
+		newDeadLetterPublisher = origPublisher
 	})
 
 	consumer := newCommitRecordingKafkaConsumer(nil)
-	newKafkaConsumer = func(KafkaConsumerConfig) (KafkaConsumer, error) { return consumer, nil }
+	newConsumer = func(ConsumerConfig) (Consumer, error) { return consumer, nil }
 	var built int
-	newKafkaDeadLetterPublisher = func(KafkaConsumerConfig) (KafkaDeadLetterPublisher, error) {
+	newDeadLetterPublisher = func(ConsumerConfig) (DeadLetterPublisher, error) {
 		built++
 		return newFakePublisher(), nil
 	}
 
-	sub, err := KafkaTrigger().Activate(context.Background(), &types.TriggerActivateInput{
+	sub, err := New().Activate(context.Background(), &types.TriggerActivateInput{
 		WorkflowID: "wf-1",
 		NodeName:   "kafka",
 		Params: map[string]any{
 			"brokers": []any{"localhost:9092"}, "topic": "events", "group": "workers",
 			"message_schema": map[string]any{"required_fields": []any{"user_id"}},
 		},
-		Runtime: newFakeTriggerRuntime(),
+		Runtime: triggertest.NewFakeRuntime(),
 	})
 	if err != nil {
 		t.Fatalf("Activate: %v", err)
@@ -616,21 +617,21 @@ func TestDiscardLogThrottleReportsSuppressedCount(t *testing.T) {
 // so a parser that only handled one would silently drop the schema on the other
 // path — and a dropped schema means no validation at all.
 func TestKafkaTriggerSchemaBuilderRoundTrip(t *testing.T) {
-	params := KafkaTrigger().
+	params := New().
 		Brokers("localhost:9092").Topic("events").Group("workers").
 		MessageSchema("user_id", "action").
 		DeadLetterInvalid("events-dlq").
 		RawParams().(map[string]any)
 
-	cfg, err := kafkaConfigFromParams(params, nil, false)
+	cfg, err := configFromParams(params, nil, false)
 	if err != nil {
-		t.Fatalf("kafkaConfigFromParams: %v", err)
+		t.Fatalf("configFromParams: %v", err)
 	}
 	if cfg.MessageSchema == nil {
 		t.Fatal("MessageSchema is nil after a builder round-trip; the schema was silently dropped")
 	}
-	if got := cfg.MessageSchema.OnInvalid; got != kafkaOnInvalidDeadLetter {
-		t.Errorf("OnInvalid = %q, want %q", got, kafkaOnInvalidDeadLetter)
+	if got := cfg.MessageSchema.OnInvalid; got != onInvalidDeadLetter {
+		t.Errorf("OnInvalid = %q, want %q", got, onInvalidDeadLetter)
 	}
 	if got := cfg.MessageSchema.DeadLetterTopic; got != "events-dlq" {
 		t.Errorf("DeadLetterTopic = %q, want %q", got, "events-dlq")
@@ -644,7 +645,7 @@ func TestKafkaTriggerSchemaBuilderRoundTrip(t *testing.T) {
 
 func activateSchemaTrigger(t *testing.T, rt types.TriggerRuntime, schema map[string]any) types.TriggerSubscription {
 	t.Helper()
-	sub, err := KafkaTrigger().Activate(context.Background(), &types.TriggerActivateInput{
+	sub, err := New().Activate(context.Background(), &types.TriggerActivateInput{
 		WorkflowID: "wf-1",
 		NodeName:   "kafka",
 		Params: map[string]any{

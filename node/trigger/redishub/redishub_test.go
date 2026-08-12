@@ -1,4 +1,4 @@
-package trigger
+package redishub
 
 import (
 	"context"
@@ -7,11 +7,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xbcio/xflow/node/trigger/triggertest"
 	"github.com/xbcio/xflow/types"
 )
 
 func TestRedisHubTriggerDescriptor(t *testing.T) {
-	n := RedisHubTrigger()
+	n := New()
 	desc := n.Descriptor()
 	if desc.Type != "xflow.trigger.redis_hub" || desc.Kind != types.NodeKindTrigger {
 		t.Fatalf("descriptor = %+v", desc)
@@ -19,11 +20,11 @@ func TestRedisHubTriggerDescriptor(t *testing.T) {
 }
 
 func TestRedisHubTriggerStreamRequiresStreamAndGroup(t *testing.T) {
-	_, err := RedisHubTrigger().Mode("stream").Activate(context.Background(), &types.TriggerActivateInput{
+	_, err := New().Mode("stream").Activate(context.Background(), &types.TriggerActivateInput{
 		WorkflowID: "wf-1",
 		NodeName:   "redis",
 		Params:     map[string]any{"mode": "stream"},
-		Runtime:    newFakeTriggerRuntime(),
+		Runtime:    triggertest.NewFakeRuntime(),
 	})
 	if err == nil {
 		t.Fatal("expected missing stream/group error")
@@ -31,11 +32,11 @@ func TestRedisHubTriggerStreamRequiresStreamAndGroup(t *testing.T) {
 }
 
 func TestRedisHubTriggerPubSubRequiresChannel(t *testing.T) {
-	_, err := RedisHubTrigger().Mode("pubsub").Activate(context.Background(), &types.TriggerActivateInput{
+	_, err := New().Mode("pubsub").Activate(context.Background(), &types.TriggerActivateInput{
 		WorkflowID: "wf-1",
 		NodeName:   "redis",
 		Params:     map[string]any{"mode": "pubsub"},
-		Runtime:    newFakeTriggerRuntime(),
+		Runtime:    triggertest.NewFakeRuntime(),
 	})
 	if err == nil {
 		t.Fatal("expected missing channel error")
@@ -43,16 +44,16 @@ func TestRedisHubTriggerPubSubRequiresChannel(t *testing.T) {
 }
 
 func TestRedisHubTriggerSkipsEmitWhenDedupErrors(t *testing.T) {
-	orig := newRedisHubConsumer
-	consumer := newScriptedRedisHubConsumer([]RedisHubMessage{{ID: "1", Stream: "orders", Payload: []byte("one")}})
-	newRedisHubConsumer = func(RedisHubConsumerConfig) (RedisHubConsumer, error) { return consumer, nil }
-	t.Cleanup(func() { newRedisHubConsumer = orig })
+	orig := newConsumer
+	consumer := newScriptedConsumer([]Message{{ID: "1", Stream: "orders", Payload: []byte("one")}})
+	newConsumer = func(ConsumerConfig) (Consumer, error) { return consumer, nil }
+	t.Cleanup(func() { newConsumer = orig })
 
-	rt := newFakeTriggerRuntime()
-	rt.dedupFunc = func(context.Context, string, time.Duration) (bool, error) {
+	rt := triggertest.NewFakeRuntime()
+	rt.SetDedupFunc(func(context.Context, string, time.Duration) (bool, error) {
 		return true, errors.New("boom")
-	}
-	tr := RedisHubTrigger().Mode("stream").Stream("orders").Group("workers")
+	})
+	tr := New().Mode("stream").Stream("orders").Group("workers")
 	sub, err := tr.Activate(context.Background(), &types.TriggerActivateInput{
 		WorkflowID: "wf-1",
 		NodeName:   "redis",
@@ -64,33 +65,35 @@ func TestRedisHubTriggerSkipsEmitWhenDedupErrors(t *testing.T) {
 	}
 	defer func() { _ = sub.Close(context.Background()) }()
 
-	if !rt.waitDedup(time.Second) {
+	if !rt.WaitDedup(time.Second) {
 		t.Fatal("redis hub trigger did not attempt dedup")
 	}
-	if got := rt.emitCount(); got != 0 {
+	if got := rt.EmitCount(); got != 0 {
 		t.Fatalf("emit count = %d, want 0", got)
 	}
 }
 
 func TestRedisHubTriggerContinuesAfterEmitError(t *testing.T) {
-	orig := newRedisHubConsumer
-	consumer := newScriptedRedisHubConsumer([]RedisHubMessage{
+	orig := newConsumer
+	consumer := newScriptedConsumer([]Message{
 		{ID: "1", Stream: "orders", Payload: []byte("one")},
 		{ID: "2", Stream: "orders", Payload: []byte("two")},
 	})
-	newRedisHubConsumer = func(RedisHubConsumerConfig) (RedisHubConsumer, error) { return consumer, nil }
-	t.Cleanup(func() { newRedisHubConsumer = orig })
+	newConsumer = func(ConsumerConfig) (Consumer, error) { return consumer, nil }
+	t.Cleanup(func() { newConsumer = orig })
 
-	rt := newFakeTriggerRuntime()
+	rt := triggertest.NewFakeRuntime()
+	// MaxInflight(1) is load-bearing here: the semaphore serializes the emit
+	// goroutines, which is what makes this unsynchronized counter safe.
 	var calls int
-	rt.emitFunc = func(context.Context, types.WorkflowID, string, *types.TriggerEvent) (types.ExecutionID, error) {
+	rt.SetEmitFunc(func(context.Context, types.WorkflowID, string, *types.TriggerEvent) (types.ExecutionID, error) {
 		calls++
 		if calls == 1 {
 			return "", errors.New("boom")
 		}
 		return "exec-2", nil
-	}
-	tr := RedisHubTrigger().Mode("stream").Stream("orders").Group("workers").MaxInflight(1)
+	})
+	tr := New().Mode("stream").Stream("orders").Group("workers").MaxInflight(1)
 	sub, err := tr.Activate(context.Background(), &types.TriggerActivateInput{
 		WorkflowID: "wf-1",
 		NodeName:   "redis",
@@ -102,28 +105,28 @@ func TestRedisHubTriggerContinuesAfterEmitError(t *testing.T) {
 	}
 	defer func() { _ = sub.Close(context.Background()) }()
 
-	if !rt.waitForEmitCount(2, time.Second) {
-		t.Fatalf("emit count = %d, want at least 2", rt.emitCount())
+	if !rt.WaitForEmitCount(2, time.Second) {
+		t.Fatalf("emit count = %d, want at least 2", rt.EmitCount())
 	}
 }
 
 func TestRedisHubTriggerPubSubStopsWhenLockRenewalFails(t *testing.T) {
-	origConsumer := newRedisHubConsumer
-	consumer := newBlockingRedisHubConsumer()
-	newRedisHubConsumer = func(RedisHubConsumerConfig) (RedisHubConsumer, error) { return consumer, nil }
-	t.Cleanup(func() { newRedisHubConsumer = origConsumer })
+	origConsumer := newConsumer
+	consumer := newBlockingConsumer()
+	newConsumer = func(ConsumerConfig) (Consumer, error) { return consumer, nil }
+	t.Cleanup(func() { newConsumer = origConsumer })
 
-	origTTL := redisHubPubSubLockTTL
-	redisHubPubSubLockTTL = 20 * time.Millisecond
-	t.Cleanup(func() { redisHubPubSubLockTTL = origTTL })
+	origTTL := pubSubLockTTL
+	pubSubLockTTL = 20 * time.Millisecond
+	t.Cleanup(func() { pubSubLockTTL = origTTL })
 
 	lock := newScriptedRenewableTriggerLock(renewResult{ok: false})
 	rt := &renewableLockRuntime{
-		fakeTriggerRuntime: newFakeTriggerRuntime(),
-		lock:               lock,
+		FakeRuntime: triggertest.NewFakeRuntime(),
+		lock:        lock,
 	}
 
-	sub, err := RedisHubTrigger().Mode("pubsub").Channel("orders").Activate(context.Background(), &types.TriggerActivateInput{
+	sub, err := New().Mode("pubsub").Channel("orders").Activate(context.Background(), &types.TriggerActivateInput{
 		WorkflowID: "wf-1",
 		NodeName:   "redis",
 		Params:     map[string]any{"mode": "pubsub", "channel": "orders", "max_inflight": 1},
@@ -153,20 +156,20 @@ func TestRedisHubTriggerPubSubStopsWhenLockRenewalFails(t *testing.T) {
 }
 
 func TestRedisHubTriggerPubSubRequiresRenewableLock(t *testing.T) {
-	origConsumer := newRedisHubConsumer
-	newRedisHubConsumer = func(RedisHubConsumerConfig) (RedisHubConsumer, error) {
+	origConsumer := newConsumer
+	newConsumer = func(ConsumerConfig) (Consumer, error) {
 		t.Fatal("consumer factory should not be called for non-renewable pub/sub lock")
 		return nil, nil
 	}
-	t.Cleanup(func() { newRedisHubConsumer = origConsumer })
+	t.Cleanup(func() { newConsumer = origConsumer })
 
 	lock := &scriptedTriggerLock{}
 	rt := &renewableLockRuntime{
-		fakeTriggerRuntime: newFakeTriggerRuntime(),
-		lock:               lock,
+		FakeRuntime: triggertest.NewFakeRuntime(),
+		lock:        lock,
 	}
 
-	sub, err := RedisHubTrigger().Mode("pubsub").Channel("orders").Activate(context.Background(), &types.TriggerActivateInput{
+	sub, err := New().Mode("pubsub").Channel("orders").Activate(context.Background(), &types.TriggerActivateInput{
 		WorkflowID: "wf-1",
 		NodeName:   "redis",
 		Params:     map[string]any{"mode": "pubsub", "channel": "orders", "max_inflight": 1},
@@ -183,27 +186,29 @@ func TestRedisHubTriggerPubSubRequiresRenewableLock(t *testing.T) {
 	}
 }
 
-type scriptedRedisHubConsumer struct {
-	ch chan RedisHubMessage
+type scriptedConsumer struct {
+	ch chan Message
 }
 
-func newScriptedRedisHubConsumer(messages []RedisHubMessage) *scriptedRedisHubConsumer {
-	ch := make(chan RedisHubMessage, len(messages))
+func newScriptedConsumer(messages []Message) *scriptedConsumer {
+	ch := make(chan Message, len(messages))
 	for _, msg := range messages {
 		ch <- msg
 	}
-	return &scriptedRedisHubConsumer{ch: ch}
+	return &scriptedConsumer{ch: ch}
 }
 
-func (c *scriptedRedisHubConsumer) Messages() <-chan RedisHubMessage { return c.ch }
+func (c *scriptedConsumer) Messages() <-chan Message { return c.ch }
 
-func (c *scriptedRedisHubConsumer) Close() error {
+func (c *scriptedConsumer) Close() error {
 	close(c.ch)
 	return nil
 }
 
+// renewableLockRuntime overrides only TryLock; everything else (Emit, Dedup,
+// State, the emit bookkeeping the assertions read) comes from the embedded fake.
 type renewableLockRuntime struct {
-	*fakeTriggerRuntime
+	*triggertest.FakeRuntime
 	lock types.TriggerLock
 }
 
@@ -211,22 +216,22 @@ func (r *renewableLockRuntime) TryLock(context.Context, string, time.Duration) (
 	return r.lock, true, nil
 }
 
-type blockingRedisHubConsumer struct {
-	ch     chan RedisHubMessage
+type blockingConsumer struct {
+	ch     chan Message
 	closed chan struct{}
 	once   sync.Once
 }
 
-func newBlockingRedisHubConsumer() *blockingRedisHubConsumer {
-	return &blockingRedisHubConsumer{
-		ch:     make(chan RedisHubMessage),
+func newBlockingConsumer() *blockingConsumer {
+	return &blockingConsumer{
+		ch:     make(chan Message),
 		closed: make(chan struct{}),
 	}
 }
 
-func (c *blockingRedisHubConsumer) Messages() <-chan RedisHubMessage { return c.ch }
+func (c *blockingConsumer) Messages() <-chan Message { return c.ch }
 
-func (c *blockingRedisHubConsumer) Close() error {
+func (c *blockingConsumer) Close() error {
 	c.once.Do(func() {
 		close(c.closed)
 		close(c.ch)
@@ -234,7 +239,7 @@ func (c *blockingRedisHubConsumer) Close() error {
 	return nil
 }
 
-func (c *blockingRedisHubConsumer) waitClosed(timeout time.Duration) bool {
+func (c *blockingConsumer) waitClosed(timeout time.Duration) bool {
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
@@ -332,4 +337,46 @@ func (l *scriptedRenewableTriggerLock) releaseCount() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.releases
+}
+
+func TestRedisHubNodeTypeAndParamsAreFrozen(t *testing.T) {
+	n := New().Mode("stream").Stream("orders").Group("workers").Channel("c")
+	if n.NodeType() != "xflow.trigger.redis_hub" {
+		t.Fatalf("NodeType = %q, want xflow.trigger.redis_hub", n.NodeType())
+	}
+	params := n.RawParams().(map[string]any)
+	want := map[string]any{
+		"mode":         "stream",
+		"stream":       "orders",
+		"group":        "workers",
+		"channel":      "c",
+		"max_inflight": 64,
+	}
+	if len(params) != len(want) {
+		t.Fatalf("RawParams keys = %v, want exactly %v", params, want)
+	}
+	for k, v := range want {
+		if params[k] != v {
+			t.Fatalf("RawParams[%q] = %#v, want %#v", k, params[k], v)
+		}
+	}
+}
+
+func TestRedisHubRawParamsNormalizesEmptyModeAndBadInflight(t *testing.T) {
+	// A zero-valued node (the YAML path's shape) must still serialize a usable
+	// mode and a positive inflight window, otherwise the semaphore in Activate
+	// would be unbuffered and the trigger would deadlock on its first message.
+	params := (&Node{}).RawParams().(map[string]any)
+	if params["mode"] != "stream" {
+		t.Fatalf("mode = %#v, want stream", params["mode"])
+	}
+	if params["max_inflight"] != 64 {
+		t.Fatalf("max_inflight = %#v, want 64", params["max_inflight"])
+	}
+}
+
+func TestRedisHubConfigFromParamsRejectsUnknownMode(t *testing.T) {
+	if _, err := configFromParams(map[string]any{"mode": "queue"}); err == nil {
+		t.Fatal("expected an unsupported-mode error")
+	}
 }

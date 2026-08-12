@@ -28,6 +28,7 @@ import (
 	"github.com/xbcio/xflow/node/registry"
 	"github.com/xbcio/xflow/node/resource"
 	"github.com/xbcio/xflow/node/supply"
+	kafkatrigger "github.com/xbcio/xflow/node/trigger/kafka"
 	"github.com/xbcio/xflow/observability/metrics"
 	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/service/protocol"
@@ -352,7 +353,7 @@ func runRunner(ctx context.Context, cfg runnerConfig) error {
 	}
 	supply.Default.SetObserver(sm)
 	xnode.SetWasmObserver(sm)
-	xnode.SetTriggerObserver(metrics.NewTriggerMetrics(m))
+	kafkatrigger.SetObserver(metrics.NewTriggerMetrics(m))
 	xnode.SetScriptObserver(metrics.NewScriptMetrics(m))
 
 	var metricsServer *http.Server

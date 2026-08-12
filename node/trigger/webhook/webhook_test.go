@@ -1,18 +1,20 @@
-package trigger
+package webhook
 
 import (
 	"bytes"
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/xbcio/xflow/node/trigger/triggertest"
 	"github.com/xbcio/xflow/types"
 )
 
 func TestWebhookTriggerDescriptor(t *testing.T) {
-	n := WebhookTrigger()
+	n := New()
 	desc := n.Descriptor()
 	if desc.Type != "xflow.trigger.webhook" || desc.Kind != types.NodeKindTrigger {
 		t.Fatalf("descriptor = %+v", desc)
@@ -20,7 +22,7 @@ func TestWebhookTriggerDescriptor(t *testing.T) {
 }
 
 func TestWebhookTriggerRequiresMethodAndPath(t *testing.T) {
-	_, err := WebhookTrigger().Activate(context.Background(), &types.TriggerActivateInput{
+	_, err := New().Activate(context.Background(), &types.TriggerActivateInput{
 		WorkflowID: "wf-1",
 		NodeName:   "webhook",
 		Params:     map[string]any{},
@@ -33,7 +35,7 @@ func TestWebhookTriggerRequiresMethodAndPath(t *testing.T) {
 
 func TestWebhookTriggerRequestEmitsEventAndDedupsByHeader(t *testing.T) {
 	rt := newFakeWebhookTriggerRuntime()
-	tr := WebhookTrigger().Method(http.MethodPost).Path("/hooks/orders").EventIDHeader("X-Event-ID")
+	tr := New().Method(http.MethodPost).Path("/hooks/orders").EventIDHeader("X-Event-ID")
 	sub, err := tr.Activate(context.Background(), &types.TriggerActivateInput{
 		WorkflowID: "wf-1",
 		NodeName:   "webhook",
@@ -84,7 +86,7 @@ func (r *fakeWebhookTriggerRuntime) Dedup(_ context.Context, key string, _ time.
 }
 
 func (r *fakeWebhookTriggerRuntime) TryLock(context.Context, string, time.Duration) (types.TriggerLock, bool, error) {
-	return fakeTriggerLock{}, true, nil
+	return triggertest.FakeLock{}, true, nil
 }
 
 func (r *fakeWebhookTriggerRuntime) State(context.Context, string) types.TriggerState { return nil }
@@ -110,4 +112,55 @@ func (r *fakeWebhookRuntime) Handle(method string, path string, handler types.We
 
 func (r *fakeWebhookRuntime) invoke(req *http.Request) (*types.TriggerEvent, error) {
 	return r.handler(req.Context(), req)
+}
+
+func TestWebhookNodeTypeAndParamsAreFrozen(t *testing.T) {
+	n := New().Method("POST").Path("/hooks/x").EventIDHeader("X-Id")
+	if n.NodeType() != "xflow.trigger.webhook" {
+		t.Fatalf("NodeType = %q, want xflow.trigger.webhook", n.NodeType())
+	}
+	params := n.RawParams().(map[string]any)
+	want := map[string]any{
+		"method":          "POST",
+		"path":            "/hooks/x",
+		"event_id_header": "X-Id",
+		"max_body_bytes":  int64(1 << 20),
+	}
+	if len(params) != len(want) {
+		t.Fatalf("RawParams keys = %v, want exactly %v", params, want)
+	}
+	for k, v := range want {
+		if params[k] != v {
+			t.Fatalf("RawParams[%q] = %#v, want %#v", k, params[k], v)
+		}
+	}
+}
+
+func TestWebhookMaxBodyBytesFallsBackToDefault(t *testing.T) {
+	// A non-positive cap must not disable the limit — RawParams normalizes it
+	// back to the 1 MiB default, and webhookMaxBodyBytes does the same for the
+	// YAML path where the key is absent or garbage.
+	params := New().MaxBodyBytes(0).RawParams().(map[string]any)
+	if params["max_body_bytes"] != int64(1<<20) {
+		t.Fatalf("max_body_bytes = %#v, want %d", params["max_body_bytes"], int64(1<<20))
+	}
+	if got := webhookMaxBodyBytes(nil); got != int64(1<<20) {
+		t.Fatalf("webhookMaxBodyBytes(nil) = %d, want %d", got, int64(1<<20))
+	}
+	if got := webhookMaxBodyBytes("not-a-number"); got != int64(1<<20) {
+		t.Fatalf("webhookMaxBodyBytes(garbage) = %d, want %d", got, int64(1<<20))
+	}
+}
+
+func TestReadWebhookBodyRejectsOversizedBody(t *testing.T) {
+	if _, err := readWebhookBody(strings.NewReader("abcd"), 3); err == nil {
+		t.Fatal("expected an oversized-body error")
+	}
+	body, err := readWebhookBody(strings.NewReader("abc"), 3)
+	if err != nil {
+		t.Fatalf("exactly-at-cap body rejected: %v", err)
+	}
+	if string(body) != "abc" {
+		t.Fatalf("body = %q, want abc", body)
+	}
 }

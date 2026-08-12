@@ -94,11 +94,11 @@ func (r *triggerRef) Descriptor() types.Descriptor         { return r.handler.De
 
 func newTriggerBuilder(h types.TriggerHandler, params any) types.Builder {
 	if h == nil {
-		panic("node.TriggerDefinition.New: handler must not be nil")
+		panic("trigger.Definition.New: handler must not be nil")
 	}
 	t := h.Descriptor().Type
 	if t == "" {
-		panic(fmt.Sprintf("node.TriggerDefinition.New: handler %T has empty Descriptor().Type", h))
+		panic(fmt.Sprintf("trigger.Definition.New: handler %T has empty Descriptor().Type", h))
 	}
 	return &triggerRef{nodeType: t, params: params, handler: h}
 }
@@ -198,10 +198,10 @@ func ExecuteTriggerEntry(input *types.Input) (*types.Output, error) {
 
 func DefineTrigger(nodeType string, activate TriggerActivateFunc) *TriggerDefinition {
 	if nodeType == "" {
-		panic("node.DefineTrigger: nodeType must not be empty")
+		panic("trigger.Define: nodeType must not be empty")
 	}
 	if activate == nil {
-		panic("node.DefineTrigger: activate must not be nil")
+		panic("trigger.Define: activate must not be nil")
 	}
 	return &TriggerDefinition{
 		descriptor: types.Descriptor{

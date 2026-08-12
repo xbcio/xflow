@@ -1,4 +1,4 @@
-package trigger
+package kafka
 
 import (
 	"context"
@@ -8,21 +8,22 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xbcio/xflow/node/trigger/triggertest"
 	"github.com/xbcio/xflow/types"
 )
 
 // replayableKafkaConsumer sends a scripted batch, then optionally replays it to
 // simulate Kafka redelivery after an uncommitted flush failure.
 type replayableKafkaConsumer struct {
-	ch        chan KafkaMessage
+	ch        chan Message
 	mu        sync.Mutex
-	commits   []KafkaMessage
+	commits   []Message
 	notify    chan struct{}
 	commitErr error // if non-nil, CommitMessages returns this
 }
 
-func newReplayableKafkaConsumer(initial []KafkaMessage, replay []KafkaMessage) *replayableKafkaConsumer {
-	ch := make(chan KafkaMessage, len(initial)+len(replay))
+func newReplayableKafkaConsumer(initial []Message, replay []Message) *replayableKafkaConsumer {
+	ch := make(chan Message, len(initial)+len(replay))
 	for _, m := range initial {
 		ch <- m
 	}
@@ -32,13 +33,13 @@ func newReplayableKafkaConsumer(initial []KafkaMessage, replay []KafkaMessage) *
 	return &replayableKafkaConsumer{ch: ch, notify: make(chan struct{})}
 }
 
-func (c *replayableKafkaConsumer) Messages() <-chan KafkaMessage { return c.ch }
+func (c *replayableKafkaConsumer) Messages() <-chan Message { return c.ch }
 func (c *replayableKafkaConsumer) Close() error {
 	close(c.ch)
 	return nil
 }
 
-func (c *replayableKafkaConsumer) CommitMessages(_ context.Context, msgs ...KafkaMessage) error {
+func (c *replayableKafkaConsumer) CommitMessages(_ context.Context, msgs ...Message) error {
 	if c.commitErr != nil {
 		return c.commitErr
 	}
@@ -97,28 +98,28 @@ func (c *replayableKafkaConsumer) committedOffsets() []int64 {
 // dedup would have eaten them — permanent event loss. The fix removes pre-emit
 // dedup: the aggregator simply retries flush until Emit succeeds.
 func TestKafkaAggregateP01Regression_EmitFailThenReplay(t *testing.T) {
-	orig := newKafkaConsumer
-	msgs := []KafkaMessage{
+	orig := newConsumer
+	msgs := []Message{
 		{Topic: "orders", Partition: 0, Offset: 10, Value: []byte("a")},
 		{Topic: "orders", Partition: 0, Offset: 11, Value: []byte("b")},
 	}
 	consumer := newReplayableKafkaConsumer(msgs, nil)
-	newKafkaConsumer = func(KafkaConsumerConfig) (KafkaConsumer, error) { return consumer, nil }
-	t.Cleanup(func() { newKafkaConsumer = orig })
+	newConsumer = func(ConsumerConfig) (Consumer, error) { return consumer, nil }
+	t.Cleanup(func() { newConsumer = orig })
 
 	var emitCalls atomic.Int32
-	rt := newFakeTriggerRuntime()
-	rt.emitFunc = func(_ context.Context, _ types.WorkflowID, _ string, _ *types.TriggerEvent) (types.ExecutionID, error) {
+	rt := triggertest.NewFakeRuntime()
+	rt.SetEmitFunc(func(_ context.Context, _ types.WorkflowID, _ string, _ *types.TriggerEvent) (types.ExecutionID, error) {
 		n := emitCalls.Add(1)
 		if n == 1 {
 			return "", errors.New("transient network error")
 		}
 		return "exec-ok", nil
-	}
+	})
 
 	// MaxSize=2 so the batch flushes immediately when both messages arrive.
 	// FlushInterval=20ms so retry happens quickly after the first failure.
-	tr := KafkaTrigger().
+	tr := New().
 		Brokers("localhost:9092").
 		Topic("orders").
 		Group("workers").
@@ -155,18 +156,18 @@ func TestKafkaAggregateP01Regression_EmitFailThenReplay(t *testing.T) {
 // TestKafkaAggregateBatchEmitSuccess_CommitsAllOffsets verifies that when Emit
 // succeeds for a full batch, all offsets are committed in a single call.
 func TestKafkaAggregateBatchEmitSuccess_CommitsAllOffsets(t *testing.T) {
-	orig := newKafkaConsumer
-	msgs := []KafkaMessage{
+	orig := newConsumer
+	msgs := []Message{
 		{Topic: "t", Partition: 0, Offset: 100, Value: []byte("x")},
 		{Topic: "t", Partition: 0, Offset: 101, Value: []byte("y")},
 		{Topic: "t", Partition: 0, Offset: 102, Value: []byte("z")},
 	}
 	consumer := newReplayableKafkaConsumer(msgs, nil)
-	newKafkaConsumer = func(KafkaConsumerConfig) (KafkaConsumer, error) { return consumer, nil }
-	t.Cleanup(func() { newKafkaConsumer = orig })
+	newConsumer = func(ConsumerConfig) (Consumer, error) { return consumer, nil }
+	t.Cleanup(func() { newConsumer = orig })
 
-	rt := newFakeTriggerRuntime()
-	tr := KafkaTrigger().
+	rt := triggertest.NewFakeRuntime()
+	tr := New().
 		Brokers("localhost:9092").
 		Topic("t").
 		Group("g").
@@ -194,20 +195,20 @@ func TestKafkaAggregateBatchEmitSuccess_CommitsAllOffsets(t *testing.T) {
 // TestKafkaAggregateBatchEmitFail_NoCommit verifies that when Emit fails, no
 // offset is committed — the messages remain uncommitted for Kafka redelivery.
 func TestKafkaAggregateBatchEmitFail_NoCommit(t *testing.T) {
-	orig := newKafkaConsumer
-	msgs := []KafkaMessage{
+	orig := newConsumer
+	msgs := []Message{
 		{Topic: "t", Partition: 0, Offset: 200, Value: []byte("a")},
 		{Topic: "t", Partition: 0, Offset: 201, Value: []byte("b")},
 	}
 	consumer := newReplayableKafkaConsumer(msgs, nil)
-	newKafkaConsumer = func(KafkaConsumerConfig) (KafkaConsumer, error) { return consumer, nil }
-	t.Cleanup(func() { newKafkaConsumer = orig })
+	newConsumer = func(ConsumerConfig) (Consumer, error) { return consumer, nil }
+	t.Cleanup(func() { newConsumer = orig })
 
-	rt := newFakeTriggerRuntime()
-	rt.emitFunc = func(context.Context, types.WorkflowID, string, *types.TriggerEvent) (types.ExecutionID, error) {
+	rt := triggertest.NewFakeRuntime()
+	rt.SetEmitFunc(func(context.Context, types.WorkflowID, string, *types.TriggerEvent) (types.ExecutionID, error) {
 		return "", errors.New("permanent failure")
-	}
-	tr := KafkaTrigger().
+	})
+	tr := New().
 		Brokers("localhost:9092").
 		Topic("t").
 		Group("g").
@@ -223,8 +224,8 @@ func TestKafkaAggregateBatchEmitFail_NoCommit(t *testing.T) {
 	}
 
 	// Wait for at least one emit attempt.
-	if !rt.waitForEmitCount(1, time.Second) {
-		t.Fatalf("emit count = %d, want >= 1", rt.emitCount())
+	if !rt.WaitForEmitCount(1, time.Second) {
+		t.Fatalf("emit count = %d, want >= 1", rt.EmitCount())
 	}
 	// Give a brief window for any erroneous commits.
 	time.Sleep(30 * time.Millisecond)
@@ -239,18 +240,18 @@ func TestKafkaAggregateBatchEmitFail_NoCommit(t *testing.T) {
 // the subsequent commit fails, the aggregator does not panic and the offset
 // remains uncommitted (safe degradation: Kafka redelivery will occur).
 func TestKafkaAggregateCommitFails_NoPanic(t *testing.T) {
-	orig := newKafkaConsumer
-	msgs := []KafkaMessage{
+	orig := newConsumer
+	msgs := []Message{
 		{Topic: "t", Partition: 0, Offset: 300, Value: []byte("c")},
 		{Topic: "t", Partition: 0, Offset: 301, Value: []byte("d")},
 	}
 	consumer := newReplayableKafkaConsumer(msgs, nil)
 	consumer.commitErr = errors.New("commit broker unavailable")
-	newKafkaConsumer = func(KafkaConsumerConfig) (KafkaConsumer, error) { return consumer, nil }
-	t.Cleanup(func() { newKafkaConsumer = orig })
+	newConsumer = func(ConsumerConfig) (Consumer, error) { return consumer, nil }
+	t.Cleanup(func() { newConsumer = orig })
 
-	rt := newFakeTriggerRuntime()
-	tr := KafkaTrigger().
+	rt := triggertest.NewFakeRuntime()
+	tr := New().
 		Brokers("localhost:9092").
 		Topic("t").
 		Group("g").
@@ -266,8 +267,8 @@ func TestKafkaAggregateCommitFails_NoPanic(t *testing.T) {
 	}
 
 	// Emit succeeds — wait for at least one emit.
-	if !rt.waitForEmitCount(1, time.Second) {
-		t.Fatalf("emit count = %d, want >= 1", rt.emitCount())
+	if !rt.WaitForEmitCount(1, time.Second) {
+		t.Fatalf("emit count = %d, want >= 1", rt.EmitCount())
 	}
 	// Should not panic. Close cleanly.
 	if err := sub.Close(context.Background()); err != nil {
@@ -285,22 +286,22 @@ func TestKafkaAggregateCommitFails_NoPanic(t *testing.T) {
 // have suppressed the message under the old scheme), the message is still
 // buffered and emitted.
 func TestKafkaAggregateNoPreEmitDedup(t *testing.T) {
-	orig := newKafkaConsumer
-	msgs := []KafkaMessage{
+	orig := newConsumer
+	msgs := []Message{
 		{Topic: "t", Partition: 0, Offset: 50, Value: []byte("nodedup")},
 	}
 	consumer := newReplayableKafkaConsumer(msgs, nil)
-	newKafkaConsumer = func(KafkaConsumerConfig) (KafkaConsumer, error) { return consumer, nil }
-	t.Cleanup(func() { newKafkaConsumer = orig })
+	newConsumer = func(ConsumerConfig) (Consumer, error) { return consumer, nil }
+	t.Cleanup(func() { newConsumer = orig })
 
-	rt := newFakeTriggerRuntime()
+	rt := triggertest.NewFakeRuntime()
 	// If dedup were still called, it would return false (suppress the message).
-	rt.dedupFunc = func(context.Context, string, time.Duration) (bool, error) {
+	rt.SetDedupFunc(func(context.Context, string, time.Duration) (bool, error) {
 		return false, nil
-	}
+	})
 
 	// FlushInterval short so the single message is flushed quickly.
-	tr := KafkaTrigger().
+	tr := New().
 		Brokers("localhost:9092").
 		Topic("t").
 		Group("g").
@@ -317,11 +318,11 @@ func TestKafkaAggregateNoPreEmitDedup(t *testing.T) {
 	defer func() { _ = sub.Close(context.Background()) }()
 
 	// The message must be emitted despite dedup returning false.
-	if !rt.waitForEmitCount(1, time.Second) {
-		t.Fatalf("emit count = %d, want 1 (pre-emit dedup must not suppress messages)", rt.emitCount())
+	if !rt.WaitForEmitCount(1, time.Second) {
+		t.Fatalf("emit count = %d, want 1 (pre-emit dedup must not suppress messages)", rt.EmitCount())
 	}
 	// And Dedup must not have been consulted at all.
-	if rt.waitDedup(50 * time.Millisecond) {
+	if rt.WaitDedup(50 * time.Millisecond) {
 		t.Fatal("aggregator called Dedup; pre-emit dedup must be removed (P0-1)")
 	}
 }

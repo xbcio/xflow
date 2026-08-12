@@ -13,7 +13,7 @@ import (
 
 	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/backend/providers/local"
-	"github.com/xbcio/xflow/node"
+	"github.com/xbcio/xflow/node/trigger"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -23,7 +23,7 @@ func TestTriggerReconcileWorkflow(t *testing.T) {
 		closed := make(chan struct{}, 1)
 		missingType := "test.trigger.reconcile.rollback.unregistered.missing"
 
-		first := node.DefineTrigger("test.trigger.reconcile.rollback.unregistered.first", func(context.Context, *types.TriggerActivateInput) (types.TriggerSubscription, error) {
+		first := trigger.Define("test.trigger.reconcile.rollback.unregistered.first", func(context.Context, *types.TriggerActivateInput) (types.TriggerSubscription, error) {
 			activateCount++
 			return types.CloseFunc(func(context.Context) error {
 				closed <- struct{}{}
@@ -65,14 +65,14 @@ func TestTriggerReconcileWorkflow(t *testing.T) {
 		closed := make(chan struct{}, 1)
 		wantErr := errors.New("activate second trigger")
 
-		first := node.DefineTrigger("test.trigger.reconcile.rollback.first", func(context.Context, *types.TriggerActivateInput) (types.TriggerSubscription, error) {
+		first := trigger.Define("test.trigger.reconcile.rollback.first", func(context.Context, *types.TriggerActivateInput) (types.TriggerSubscription, error) {
 			activateCount++
 			return types.CloseFunc(func(context.Context) error {
 				closed <- struct{}{}
 				return nil
 			}), nil
 		})
-		second := node.DefineTrigger("test.trigger.reconcile.rollback.second", func(context.Context, *types.TriggerActivateInput) (types.TriggerSubscription, error) {
+		second := trigger.Define("test.trigger.reconcile.rollback.second", func(context.Context, *types.TriggerActivateInput) (types.TriggerSubscription, error) {
 			activateCount++
 			return nil, wantErr
 		})
@@ -109,17 +109,17 @@ func TestTriggerReconcileWorkflow(t *testing.T) {
 	t.Run("does not duplicate subscriptions on repeated reconcile", func(t *testing.T) {
 		var activateCount int
 
-		trigger := node.DefineTrigger("test.trigger.reconcile.idempotent", func(context.Context, *types.TriggerActivateInput) (types.TriggerSubscription, error) {
+		trg := trigger.Define("test.trigger.reconcile.idempotent", func(context.Context, *types.TriggerActivateInput) (types.TriggerSubscription, error) {
 			activateCount++
 			return types.CloseFunc(func(context.Context) error { return nil }), nil
 		})
-		registry.RegisterTrigger(trigger)
+		registry.RegisterTrigger(trg)
 		runtime := newTriggerRuntime(nil, local.New().TriggerPrimitives())
 		rec := backend.WorkflowRecord{
 			ID: "wf-idempotent",
 			Definition: &types.WorkflowDef{
 				Nodes: []types.NodeDef{
-					{Name: "trigger", Kind: types.NodeKindTrigger, Type: trigger.Descriptor().Type},
+					{Name: "trigger", Kind: types.NodeKindTrigger, Type: trg.Descriptor().Type},
 				},
 			},
 		}
@@ -143,7 +143,7 @@ func TestTriggerReconcileWorkflow(t *testing.T) {
 		firstActivated := make(chan struct{})
 		releaseFirst := make(chan struct{})
 
-		trigger := node.DefineTrigger("test.trigger.reconcile.concurrent", func(context.Context, *types.TriggerActivateInput) (types.TriggerSubscription, error) {
+		trg := trigger.Define("test.trigger.reconcile.concurrent", func(context.Context, *types.TriggerActivateInput) (types.TriggerSubscription, error) {
 			call := activateCount.Add(1)
 			if call == 1 {
 				close(firstActivated)
@@ -151,13 +151,13 @@ func TestTriggerReconcileWorkflow(t *testing.T) {
 			}
 			return types.CloseFunc(func(context.Context) error { return nil }), nil
 		})
-		registry.RegisterTrigger(trigger)
+		registry.RegisterTrigger(trg)
 		runtime := newTriggerRuntime(nil, local.New().TriggerPrimitives())
 		rec := backend.WorkflowRecord{
 			ID: "wf-concurrent-idempotent",
 			Definition: &types.WorkflowDef{
 				Nodes: []types.NodeDef{
-					{Name: "trigger", Kind: types.NodeKindTrigger, Type: trigger.Descriptor().Type},
+					{Name: "trigger", Kind: types.NodeKindTrigger, Type: trg.Descriptor().Type},
 				},
 			},
 		}

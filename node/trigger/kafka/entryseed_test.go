@@ -1,9 +1,7 @@
-package trigger
+package kafka
 
 import (
 	"context"
-	"net/http"
-	"net/http/httptest"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -59,19 +57,19 @@ func (m *mockEntrySeedRuntime) getCalls() []types.EntrySeedRequest {
 	return cp
 }
 
-// commitRecordingConsumer wraps a KafkaConsumer and records all commits.
+// commitRecordingConsumer wraps a Consumer and records all commits.
 type commitRecordingConsumer struct {
-	inner      KafkaConsumer
-	commits    [][]KafkaMessage
+	inner      Consumer
+	commits    [][]Message
 	mu         sync.Mutex
 	commitErr  error // if set, CommitMessages returns this
 	commitOnce sync.Once
 	failFirst  error // first commit fails, rest succeed
 }
 
-func (c *commitRecordingConsumer) Messages() <-chan KafkaMessage { return c.inner.Messages() }
-func (c *commitRecordingConsumer) Close() error                  { return c.inner.Close() }
-func (c *commitRecordingConsumer) CommitMessages(_ context.Context, msgs ...KafkaMessage) error {
+func (c *commitRecordingConsumer) Messages() <-chan Message { return c.inner.Messages() }
+func (c *commitRecordingConsumer) Close() error             { return c.inner.Close() }
+func (c *commitRecordingConsumer) CommitMessages(_ context.Context, msgs ...Message) error {
 	if c.failFirst != nil {
 		var shouldFail bool
 		c.commitOnce.Do(func() { shouldFail = true })
@@ -88,29 +86,29 @@ func (c *commitRecordingConsumer) CommitMessages(_ context.Context, msgs ...Kafk
 	return nil
 }
 
-func (c *commitRecordingConsumer) getCommits() [][]KafkaMessage {
+func (c *commitRecordingConsumer) getCommits() [][]Message {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	cp := make([][]KafkaMessage, len(c.commits))
+	cp := make([][]Message, len(c.commits))
 	copy(cp, c.commits)
 	return cp
 }
 
 // scriptedConsumer sends messages from a pre-defined slice, one at a time.
 type scriptedConsumer struct {
-	ch     chan KafkaMessage
+	ch     chan Message
 	closed atomic.Bool
 }
 
-func newScriptedConsumer(msgs []KafkaMessage) *scriptedConsumer {
-	ch := make(chan KafkaMessage, len(msgs))
+func newScriptedConsumer(msgs []Message) *scriptedConsumer {
+	ch := make(chan Message, len(msgs))
 	for _, m := range msgs {
 		ch <- m
 	}
 	return &scriptedConsumer{ch: ch}
 }
 
-func (s *scriptedConsumer) Messages() <-chan KafkaMessage { return s.ch }
+func (s *scriptedConsumer) Messages() <-chan Message { return s.ch }
 func (s *scriptedConsumer) Close() error {
 	if s.closed.CompareAndSwap(false, true) {
 		close(s.ch)
@@ -123,7 +121,7 @@ func (s *scriptedConsumer) Close() error {
 // TestKafkaEntrySeed_AdmissionAccepted_CommitsOffset verifies that when
 // SeedExecutionFromEntry returns accepted, the Kafka offset is committed.
 func TestKafkaEntrySeed_AdmissionAccepted_CommitsOffset(t *testing.T) {
-	msgs := []KafkaMessage{
+	msgs := []Message{
 		{Topic: "t", Partition: 0, Offset: 100, Value: []byte("hello")},
 	}
 	consumer := newScriptedConsumer(msgs)
@@ -145,9 +143,9 @@ func TestKafkaEntrySeed_AdmissionAccepted_CommitsOffset(t *testing.T) {
 		Runtime:    rt,
 	}
 
-	ok := seedKafkaEntryBatch(context.Background(), in, recorder, msgs[0])
+	ok := seedEntryBatch(context.Background(), in, recorder, msgs[0])
 	if !ok {
-		t.Fatal("seedKafkaEntryBatch returned false, want true")
+		t.Fatal("seedEntryBatch returned false, want true")
 	}
 
 	commits := recorder.getCommits()
@@ -162,11 +160,18 @@ func TestKafkaEntrySeed_AdmissionAccepted_CommitsOffset(t *testing.T) {
 	}
 }
 
+// NOTE: the companion case that drives a REAL HTTPEntrySeedRuntime against a
+// 409 {"error":"stale_generation"} control plane lives in
+// test/integration/kafka_entry_seed_fence_real_test.go — it cannot live here
+// because HTTPEntrySeedRuntime is in service/protocol and node must not import
+// service/. This test covers only the withhold half (admission error -> no
+// commit); the integration case covers that a stale-generation 409 maps to an
+// error rather than to Conflict.
 // TestKafkaEntrySeed_AdmissionError_NoCommit verifies that when
 // SeedExecutionFromEntry returns a transient error, the offset is NOT
 // committed — allowing Kafka redelivery.
 func TestKafkaEntrySeed_AdmissionError_NoCommit(t *testing.T) {
-	msgs := []KafkaMessage{
+	msgs := []Message{
 		{Topic: "t", Partition: 0, Offset: 200, Value: []byte("world")},
 	}
 	consumer := newScriptedConsumer(msgs)
@@ -188,9 +193,9 @@ func TestKafkaEntrySeed_AdmissionError_NoCommit(t *testing.T) {
 		Runtime:    rt,
 	}
 
-	ok := seedKafkaEntryBatch(context.Background(), in, recorder, msgs[0])
+	ok := seedEntryBatch(context.Background(), in, recorder, msgs[0])
 	if ok {
-		t.Fatal("seedKafkaEntryBatch returned true, want false (transient error)")
+		t.Fatal("seedEntryBatch returned true, want false (transient error)")
 	}
 
 	commits := recorder.getCommits()
@@ -203,7 +208,7 @@ func TestKafkaEntrySeed_AdmissionError_NoCommit(t *testing.T) {
 // duplicate-accepted response (same key, same hash replayed) still commits the
 // Kafka offset — this is the idempotent recovery path.
 func TestKafkaEntrySeed_DuplicateAccepted_CommitsOffset(t *testing.T) {
-	msgs := []KafkaMessage{
+	msgs := []Message{
 		{Topic: "t", Partition: 0, Offset: 300, Value: []byte("dup")},
 	}
 	consumer := newScriptedConsumer(msgs)
@@ -225,9 +230,9 @@ func TestKafkaEntrySeed_DuplicateAccepted_CommitsOffset(t *testing.T) {
 		Runtime:    rt,
 	}
 
-	ok := seedKafkaEntryBatch(context.Background(), in, recorder, msgs[0])
+	ok := seedEntryBatch(context.Background(), in, recorder, msgs[0])
 	if !ok {
-		t.Fatal("seedKafkaEntryBatch returned false, want true (duplicate accepted)")
+		t.Fatal("seedEntryBatch returned false, want true (duplicate accepted)")
 	}
 
 	commits := recorder.getCommits()
@@ -240,7 +245,7 @@ func TestKafkaEntrySeed_DuplicateAccepted_CommitsOffset(t *testing.T) {
 // (same key, different hash — another runner won) still commits the Kafka offset
 // since the admission was already handled by the winning runner.
 func TestKafkaEntrySeed_Conflict_CommitsOffset(t *testing.T) {
-	msgs := []KafkaMessage{
+	msgs := []Message{
 		{Topic: "t", Partition: 0, Offset: 400, Value: []byte("conflict")},
 	}
 	consumer := newScriptedConsumer(msgs)
@@ -262,9 +267,9 @@ func TestKafkaEntrySeed_Conflict_CommitsOffset(t *testing.T) {
 		Runtime:    rt,
 	}
 
-	ok := seedKafkaEntryBatch(context.Background(), in, recorder, msgs[0])
+	ok := seedEntryBatch(context.Background(), in, recorder, msgs[0])
 	if !ok {
-		t.Fatal("seedKafkaEntryBatch returned false, want true (conflict = admission handled)")
+		t.Fatal("seedEntryBatch returned false, want true (conflict = admission handled)")
 	}
 
 	commits := recorder.getCommits()
@@ -273,52 +278,11 @@ func TestKafkaEntrySeed_Conflict_CommitsOffset(t *testing.T) {
 	}
 }
 
-// TestKafkaEntrySeed_StaleGeneration409_NoCommit is the end-to-end offset-safety
-// guard: it wires the REAL HTTPEntrySeedRuntime against a control plane that
-// returns 409 {"error":"stale_generation"} (a generation fence rejection for a
-// NEW admission key), and asserts seedKafkaEntryBatch does NOT commit the Kafka
-// offset. If it committed, Kafka would never redeliver and the current-generation
-// owner would never process the message — silent message loss during a
-// generation upgrade / reassignment.
-func TestKafkaEntrySeed_StaleGeneration409_NoCommit(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Mimic apiserver writeError(w, 409, "stale_generation").
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusConflict)
-		_, _ = w.Write([]byte(`{"error":"stale_generation"}`))
-	}))
-	defer srv.Close()
-
-	msgs := []KafkaMessage{
-		{Topic: "t", Partition: 0, Offset: 700, Value: []byte("stale")},
-	}
-	consumer := newScriptedConsumer(msgs)
-	recorder := &commitRecordingConsumer{inner: consumer}
-
-	// A superseded runtime at an old generation talking to the real endpoint.
-	rt := &HTTPEntrySeedRuntime{BaseURL: srv.URL, Client: srv.Client(), Generation: 1}
-
-	in := &types.TriggerActivateInput{
-		WorkflowID: "wf1",
-		NodeName:   "trigger",
-		Params:     map[string]any{"entry_unit_id": "g1", "workflow_version": "v1"},
-		Runtime:    rt,
-	}
-
-	ok := seedKafkaEntryBatch(context.Background(), in, recorder, msgs[0])
-	if ok {
-		t.Fatal("seedKafkaEntryBatch returned true, want false (stale-generation fence must not commit)")
-	}
-	if commits := recorder.getCommits(); len(commits) != 0 {
-		t.Fatalf("commit count = %d, want 0 (stale-generation fence must NOT commit offset)", len(commits))
-	}
-}
-
 // TestKafkaEntrySeed_CommitFailure_Safe verifies that when admission
 // succeeds but the Kafka commit fails, the message will be redelivered and
 // the admission returns duplicate-accepted (safe, no data loss).
 func TestKafkaEntrySeed_CommitFailure_Safe(t *testing.T) {
-	msgs := []KafkaMessage{
+	msgs := []Message{
 		{Topic: "t", Partition: 0, Offset: 500, Value: []byte("commit-fail")},
 	}
 	consumer := newScriptedConsumer(msgs)
@@ -344,14 +308,14 @@ func TestKafkaEntrySeed_CommitFailure_Safe(t *testing.T) {
 	}
 
 	// First call: admission succeeds, commit fails → returns false (message redelivered).
-	ok := seedKafkaEntryBatch(context.Background(), in, recorder, msgs[0])
+	ok := seedEntryBatch(context.Background(), in, recorder, msgs[0])
 	if ok {
 		t.Fatal("first call should return false when commit fails")
 	}
 
 	// Simulate redelivery: admission returns duplicate, commit succeeds.
 	admitter.response = types.EntrySeedResponse{Accepted: true, Duplicate: true, ExecutionID: "exec-cf"}
-	ok = seedKafkaEntryBatch(context.Background(), in, recorder, msgs[0])
+	ok = seedEntryBatch(context.Background(), in, recorder, msgs[0])
 	if !ok {
 		t.Fatal("second call should succeed (duplicate accepted + commit succeeds)")
 	}
@@ -367,7 +331,7 @@ func TestKafkaEntrySeed_CommitFailure_Safe(t *testing.T) {
 // delivered message drives SeedExecutionFromEntry (not Emit) and the offset is
 // committed only after an accepted response.
 func TestEntrySeedDispatch_PerMessageWorker(t *testing.T) {
-	msgs := []KafkaMessage{
+	msgs := []Message{
 		{Topic: "t", Partition: 0, Offset: 700, Value: []byte("seed-me")},
 	}
 	consumer := newScriptedConsumer(msgs)
@@ -388,8 +352,8 @@ func TestEntrySeedDispatch_PerMessageWorker(t *testing.T) {
 		Runtime:    rt,
 	}
 
-	cfg := KafkaConsumerConfig{MaxInflight: 4}
-	sub := activateKafkaPerMessage(context.Background(), in, cfg, recorder, nil)
+	cfg := ConsumerConfig{MaxInflight: 4}
+	sub := activatePerMessage(context.Background(), in, cfg, recorder, nil)
 	t.Cleanup(func() { _ = sub.Close(context.Background()) })
 
 	// Wait for the message to be admitted + committed.
@@ -463,7 +427,7 @@ func (d *durableSeedAdmitter) last() types.EntrySeedRequest {
 // TestKafkaSingleNodeSeedNoLoss proves the P0-1 fix for a single-node trigger:
 // a crash between a durable accept and the Kafka commit does NOT lose the event.
 // First delivery: admission accepts (durable seed) but the committer errors →
-// seedKafkaEntryBatch returns false and the offset is NOT committed, so Kafka
+// seedEntryBatch returns false and the offset is NOT committed, so Kafka
 // redelivers. Redelivery of the same offset returns Duplicate (no new seed) and
 // commits. Exactly one durable execution seed exists; no event is lost.
 //
@@ -472,8 +436,8 @@ func (d *durableSeedAdmitter) last() types.EntrySeedRequest {
 // message data on port "main", and the admission key is derived from
 // topic/partition/offset (BuildAdmissionKeySingle semantics).
 func TestKafkaSingleNodeSeedNoLoss(t *testing.T) {
-	msg := KafkaMessage{Topic: "orders", Partition: 2, Offset: 900, Key: []byte("k9"), Value: []byte("payload")}
-	consumer := newScriptedConsumer([]KafkaMessage{msg})
+	msg := Message{Topic: "orders", Partition: 2, Offset: 900, Key: []byte("k9"), Value: []byte("payload")}
+	consumer := newScriptedConsumer([]Message{msg})
 	// First commit fails (crash between accept and commit); redelivery commit succeeds.
 	recorder := &commitRecordingConsumer{inner: consumer, failFirst: context.DeadlineExceeded}
 
@@ -489,16 +453,16 @@ func TestKafkaSingleNodeSeedNoLoss(t *testing.T) {
 	}
 
 	// First delivery: accept durable, commit fails → false, offset NOT committed.
-	if ok := seedKafkaEntryBatch(context.Background(), in, recorder, msg); ok {
-		t.Fatal("first delivery: seedKafkaEntryBatch returned true, want false (commit failed → redeliver)")
+	if ok := seedEntryBatch(context.Background(), in, recorder, msg); ok {
+		t.Fatal("first delivery: seedEntryBatch returned true, want false (commit failed → redeliver)")
 	}
 	if got := len(recorder.getCommits()); got != 0 {
 		t.Fatalf("first delivery: commits = %d, want 0 (offset must NOT be committed)", got)
 	}
 
 	// Redelivery of the SAME offset: admission is Duplicate, commit succeeds → true.
-	if ok := seedKafkaEntryBatch(context.Background(), in, recorder, msg); !ok {
-		t.Fatal("redelivery: seedKafkaEntryBatch returned false, want true (duplicate accepted + commit)")
+	if ok := seedEntryBatch(context.Background(), in, recorder, msg); !ok {
+		t.Fatal("redelivery: seedEntryBatch returned false, want true (duplicate accepted + commit)")
 	}
 
 	// Exactly one durable execution seed — no loss, no double-seed.

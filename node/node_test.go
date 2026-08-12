@@ -8,15 +8,12 @@ import (
 	"github.com/xbcio/xflow/node"
 )
 
-func TestFacadeExposesBuiltInNodesAndTriggers(t *testing.T) {
+func TestFacadeExposesBuiltInNodes(t *testing.T) {
 	if got := node.HTTP("GET", "https://example.com").NodeType(); got != "xflow.http" {
 		t.Fatalf("HTTP().NodeType() = %q, want xflow.http", got)
 	}
 	if got := node.End().NodeType(); got != "xflow.end" {
 		t.Fatalf("End().NodeType() = %q, want xflow.end", got)
-	}
-	if got := node.KafkaTrigger().NodeType(); got != "xflow.trigger.kafka" {
-		t.Fatalf("KafkaTrigger().NodeType() = %q, want xflow.trigger.kafka", got)
 	}
 	if got := node.Set(map[string]any{"status": "ok"}).NodeType(); got != "xflow.transform.set" {
 		t.Fatalf("Set().NodeType() = %q, want xflow.transform.set", got)

@@ -1,4 +1,4 @@
-package trigger
+package cron
 
 import (
 	"context"
@@ -13,27 +13,29 @@ import (
 	"github.com/spf13/cast"
 )
 
-type CronTriggerNode struct {
+// Node is the xflow.trigger.cron trigger: it emits one event per cron
+// expression firing, in a configurable timezone.
+type Node struct {
 	nodeinternal.BaseTrigger
 	Expression string
 	Timezone   string
 }
 
-func CronTrigger() *CronTriggerNode {
-	return &CronTriggerNode{Expression: "* * * * *", Timezone: "UTC"}
+func New() *Node {
+	return &Node{Expression: "* * * * *", Timezone: "UTC"}
 }
 
-func (n *CronTriggerNode) Cron(expression string) *CronTriggerNode {
+func (n *Node) Cron(expression string) *Node {
 	n.Expression = expression
 	return n
 }
 
-func (n *CronTriggerNode) InTimezone(timezone string) *CronTriggerNode {
+func (n *Node) InTimezone(timezone string) *Node {
 	n.Timezone = timezone
 	return n
 }
 
-func (n *CronTriggerNode) Descriptor() types.Descriptor {
+func (n *Node) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.trigger.cron",
 		Kind:        types.NodeKindTrigger,
@@ -46,17 +48,17 @@ func (n *CronTriggerNode) Descriptor() types.Descriptor {
 	}
 }
 
-func (n *CronTriggerNode) NodeType() string { return "xflow.trigger.cron" }
-func (n *CronTriggerNode) RawParams() any {
+func (n *Node) NodeType() string { return "xflow.trigger.cron" }
+func (n *Node) RawParams() any {
 	return map[string]any{"expression": n.Expression, "timezone": n.Timezone}
 }
-func (n *CronTriggerNode) OnError(s types.OnError) types.Builder {
+func (n *Node) OnError(s types.OnError) types.Builder {
 	n.SetOnError(s)
 	return n
 }
-func (n *CronTriggerNode) TriggerHandler() types.TriggerHandler { return n }
+func (n *Node) TriggerHandler() types.TriggerHandler { return n }
 
-func (n *CronTriggerNode) Activate(ctx context.Context, in *types.TriggerActivateInput) (types.TriggerSubscription, error) {
+func (n *Node) Activate(ctx context.Context, in *types.TriggerActivateInput) (types.TriggerSubscription, error) {
 	expr := cast.ToString(in.Params["expression"])
 	if expr == "" {
 		return nil, fmt.Errorf("cron expression is required")
@@ -100,4 +102,4 @@ func (n *CronTriggerNode) Activate(ctx context.Context, in *types.TriggerActivat
 	}), nil
 }
 
-func init() { registry.RegisterTrigger(&CronTriggerNode{}) }
+func init() { registry.RegisterTrigger(&Node{}) }

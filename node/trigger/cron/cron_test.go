@@ -1,4 +1,4 @@
-package trigger
+package cron
 
 import (
 	"context"
@@ -6,11 +6,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xbcio/xflow/node/trigger/triggertest"
 	"github.com/xbcio/xflow/types"
 )
 
 func TestCronTriggerDescriptor(t *testing.T) {
-	n := CronTrigger()
+	n := New()
 	desc := n.Descriptor()
 	if desc.Type != "xflow.trigger.cron" || desc.Kind != types.NodeKindTrigger {
 		t.Fatalf("descriptor = %+v", desc)
@@ -22,7 +23,7 @@ func TestCronTriggerCloseCancelsInFlightDedup(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	tr := CronTrigger().Cron("@every 1s")
+	tr := New().Cron("@every 1s")
 	sub, err := tr.Activate(ctx, &types.TriggerActivateInput{
 		WorkflowID: "wf-1",
 		NodeName:   "cron",
@@ -84,7 +85,7 @@ func (r *blockingDedupRuntime) Dedup(ctx context.Context, key string, ttl time.D
 }
 
 func (r *blockingDedupRuntime) TryLock(context.Context, string, time.Duration) (types.TriggerLock, bool, error) {
-	return fakeTriggerLock{}, true, nil
+	return triggertest.FakeLock{}, true, nil
 }
 
 func (r *blockingDedupRuntime) State(context.Context, string) types.TriggerState { return nil }
@@ -105,5 +106,28 @@ func (r *blockingDedupRuntime) release() {
 	case <-r.releaseCh:
 	default:
 		close(r.releaseCh)
+	}
+}
+
+// TestCronNodeTypeAndParamsAreFrozen — same rationale as the timer guard: the
+// node type string is persisted and the RawParams keys are the YAML DSL
+// contract.
+func TestCronNodeTypeAndParamsAreFrozen(t *testing.T) {
+	n := New().Cron("0 * * * *").InTimezone("Asia/Shanghai")
+	if got := n.NodeType(); got != "xflow.trigger.cron" {
+		t.Fatalf("NodeType() = %q, want xflow.trigger.cron", got)
+	}
+	params, ok := n.RawParams().(map[string]any)
+	if !ok {
+		t.Fatalf("RawParams() = %T, want map[string]any", n.RawParams())
+	}
+	if got := params["expression"]; got != "0 * * * *" {
+		t.Fatalf("RawParams()[\"expression\"] = %#v, want \"0 * * * *\"", got)
+	}
+	if got := params["timezone"]; got != "Asia/Shanghai" {
+		t.Fatalf("RawParams()[\"timezone\"] = %#v, want \"Asia/Shanghai\"", got)
+	}
+	if len(params) != 2 {
+		t.Fatalf("RawParams() has %d keys, want exactly 2", len(params))
 	}
 }

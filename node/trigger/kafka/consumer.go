@@ -1,4 +1,4 @@
-package trigger
+package kafka
 
 import (
 	"context"
@@ -9,29 +9,29 @@ import (
 	"sync"
 	"time"
 
-	"github.com/segmentio/kafka-go"
+	kafkago "github.com/segmentio/kafka-go"
 	"github.com/segmentio/kafka-go/sasl"
 	"github.com/segmentio/kafka-go/sasl/plain"
 	"github.com/segmentio/kafka-go/sasl/scram"
 )
 
-const kafkaConsumerRetryDelay = 100 * time.Millisecond
+const consumerRetryDelay = 100 * time.Millisecond
 
 type kafkaGoConsumer struct {
-	reader *kafka.Reader
+	reader *kafkago.Reader
 
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	messages chan KafkaMessage
+	messages chan Message
 	done     chan struct{}
 
 	closeOnce sync.Once
 	closeErr  error
 }
 
-func newKafkaGoConsumer(cfg KafkaConsumerConfig) (KafkaConsumer, error) {
-	startOffset, err := kafkaStartOffset(cfg.StartOffset)
+func newKafkaGoConsumer(cfg ConsumerConfig) (Consumer, error) {
+	startOffset, err := startOffsetFor(cfg.StartOffset)
 	if err != nil {
 		return nil, err
 	}
@@ -40,13 +40,13 @@ func newKafkaGoConsumer(cfg KafkaConsumerConfig) (KafkaConsumer, error) {
 		queueCapacity = defaultTriggerMaxInflight
 	}
 
-	var dialer *kafka.Dialer
+	var dialer *kafkago.Dialer
 	if cfg.SASLMechanism != "" {
 		mechanism, saslErr := buildSASLMechanism(cfg.SASLMechanism, cfg.SASLUsername, cfg.SASLPassword)
 		if saslErr != nil {
 			return nil, saslErr
 		}
-		dialer = &kafka.Dialer{
+		dialer = &kafkago.Dialer{
 			Timeout:       10 * time.Second,
 			DualStack:     true,
 			SASLMechanism: mechanism,
@@ -54,7 +54,7 @@ func newKafkaGoConsumer(cfg KafkaConsumerConfig) (KafkaConsumer, error) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	readerCfg := kafka.ReaderConfig{
+	readerCfg := kafkago.ReaderConfig{
 		Brokers:                cfg.Brokers,
 		GroupID:                cfg.Group,
 		Topic:                  cfg.Topic,
@@ -74,14 +74,14 @@ func newKafkaGoConsumer(cfg KafkaConsumerConfig) (KafkaConsumer, error) {
 		ReadBackoffMin:         100 * time.Millisecond,
 		ReadBackoffMax:         time.Second,
 		CommitInterval:         0,
-		GroupBalancers:         []kafka.GroupBalancer{kafka.RangeGroupBalancer{}, kafka.RoundRobinGroupBalancer{}},
+		GroupBalancers:         []kafkago.GroupBalancer{kafkago.RangeGroupBalancer{}, kafkago.RoundRobinGroupBalancer{}},
 		Dialer:                 dialer,
 	}
 	consumer := &kafkaGoConsumer{
-		reader:   kafka.NewReader(readerCfg),
+		reader:   kafkago.NewReader(readerCfg),
 		ctx:      ctx,
 		cancel:   cancel,
-		messages: make(chan KafkaMessage, queueCapacity),
+		messages: make(chan Message, queueCapacity),
 		done:     make(chan struct{}),
 	}
 	go consumer.run()
@@ -110,18 +110,18 @@ func buildSASLMechanism(mechanism, username, password string) (sasl.Mechanism, e
 	}
 }
 
-func kafkaStartOffset(offset string) (int64, error) {
+func startOffsetFor(offset string) (int64, error) {
 	switch strings.ToLower(strings.TrimSpace(offset)) {
 	case "", "latest", "last", "newest":
-		return kafka.LastOffset, nil
+		return kafkago.LastOffset, nil
 	case "earliest", "first", "oldest", "beginning":
-		return kafka.FirstOffset, nil
+		return kafkago.FirstOffset, nil
 	default:
 		return 0, fmt.Errorf("kafka start_offset %q is not supported", offset)
 	}
 }
 
-func (c *kafkaGoConsumer) Messages() <-chan KafkaMessage { return c.messages }
+func (c *kafkaGoConsumer) Messages() <-chan Message { return c.messages }
 
 func (c *kafkaGoConsumer) Close() error {
 	c.closeOnce.Do(func() {
@@ -132,10 +132,10 @@ func (c *kafkaGoConsumer) Close() error {
 	return c.closeErr
 }
 
-func (c *kafkaGoConsumer) CommitMessages(ctx context.Context, messages ...KafkaMessage) error {
-	commits := make([]kafka.Message, 0, len(messages))
+func (c *kafkaGoConsumer) CommitMessages(ctx context.Context, messages ...Message) error {
+	commits := make([]kafkago.Message, 0, len(messages))
 	for _, msg := range messages {
-		commits = append(commits, kafka.Message{
+		commits = append(commits, kafkago.Message{
 			Topic:     msg.Topic,
 			Partition: msg.Partition,
 			Offset:    msg.Offset,
@@ -153,21 +153,21 @@ func (c *kafkaGoConsumer) run() {
 			if c.ctx.Err() != nil || errors.Is(err, io.EOF) {
 				return
 			}
-			if !sleepKafkaConsumerRetry(c.ctx) {
+			if !sleepConsumerRetry(c.ctx) {
 				return
 			}
 			continue
 		}
 		select {
-		case c.messages <- kafkaMessageFromReader(msg):
+		case c.messages <- messageFromReader(msg):
 		case <-c.ctx.Done():
 			return
 		}
 	}
 }
 
-func sleepKafkaConsumerRetry(ctx context.Context) bool {
-	timer := time.NewTimer(kafkaConsumerRetryDelay)
+func sleepConsumerRetry(ctx context.Context) bool {
+	timer := time.NewTimer(consumerRetryDelay)
 	defer timer.Stop()
 	select {
 	case <-timer.C:
@@ -177,12 +177,12 @@ func sleepKafkaConsumerRetry(ctx context.Context) bool {
 	}
 }
 
-func kafkaMessageFromReader(msg kafka.Message) KafkaMessage {
+func messageFromReader(msg kafkago.Message) Message {
 	headers := make(map[string]string, len(msg.Headers))
 	for _, header := range msg.Headers {
 		headers[header.Key] = string(header.Value)
 	}
-	return KafkaMessage{
+	return Message{
 		Topic:     msg.Topic,
 		Partition: msg.Partition,
 		Offset:    msg.Offset,
