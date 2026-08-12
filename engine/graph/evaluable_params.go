@@ -87,6 +87,27 @@ var evaluableParams = map[string]map[string]bool{
 	"xflow.transform.rename": {},
 }
 
+// hostSourceParams lists parameters holding source code in a language OTHER than
+// expr. The §4.1 "${{ }} must wrap the whole value" form rule does not apply to
+// them, because "${{" there is the host language's own syntax, not a template:
+// inside a JS template literal `${{a:1}.a}` interpolates an object literal, which
+// trips both the text-before-and-after clause and the second-"{{" clause.
+//
+// This is a strict subset of evaluableParams -- every entry here must also be
+// exempt there, which is what makes skipping the compile-time check safe:
+// execution/params.go skips exempt parameters entirely, so RenderTemplate never
+// sees these values and its rule-1 precondition is not weakened. The
+// TestHostSourceParamsAreExemptAtTheBoundary guard pins that subset relation.
+//
+// The key is (nodeType, paramName), never paramName alone: xflow.function also
+// has a parameter called "code", but function.go hands it to EvalExpr
+// (executeExpr), so it IS an expr and a malformed template in it is a real error
+// the author can fix. Only xflow.script's code is host source -- script.go
+// passes it to a script engine verbatim (base64-decoding first for wasm).
+var hostSourceParams = map[string]map[string]bool{
+	"xflow.script": {"code": true},
+}
+
 // evaluableSubFields exempts a path INSIDE a parameter for node types whose
 // handler evaluates only part of a structured parameter. Only xflow.switch
 // needs it today; the shape generalizes because "the whole parameter is
