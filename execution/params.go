@@ -34,12 +34,14 @@ var perItemExemptParams = map[string]map[string]bool{
 
 // evaluateParams renders all ${{ }} and {{ }} templates in lease.Input.Params
 // for parameters that are NOT exempt. Exempt parameters are those that:
-//   1. appear in graph.EvaluableParams() for this nodeType (the handler
-//      evaluates them itself — code, condition, expression, items, etc.)
-//   2. appear in perItemExemptParams (per-item env roots don't exist here)
-//   3. appear as sub-field paths in graph.EvaluableSubFields() — the boundary
-//      evaluates the parameter's OTHER fields but preserves these sub-fields
-//      verbatim for the handler (e.g. xflow.switch rules[].condition)
+//  1. appear in graph.EvaluableParams() for this nodeType (the handler
+//     evaluates them itself — code, condition, expression, items, etc.)
+//  2. appear in perItemExemptParams (per-item env roots don't exist here)
+//  3. appear as sub-field paths in graph.EvaluableSubFields() — the boundary
+//     evaluates the parameter's OTHER fields but preserves these sub-fields
+//     verbatim for the handler (e.g. xflow.switch rules[].condition)
+//  4. hold a sub-graph body — the inner execution's source text, which must
+//     reach the inner compile verbatim (see skipSubgraphBody)
 //
 // The exemption set is derived from graph.EvaluableParams() and
 // graph.EvaluableSubFields() — the same data the compiler uses. There is
@@ -76,11 +78,20 @@ func evaluateParams(input *types.Input, nodeType string) error {
 	// special traversal that skips the named paths.
 	subFieldExempt := graph.EvaluableSubFields()[nodeType]
 
+	// (d) A sub-graph body is the INNER execution's source text. It must reach
+	// the inner compile verbatim, so the whole sub-tree is exempt. See
+	// skipSubgraphBody for why this is keyed on the value's shape rather than on
+	// the node's type or the parameter's name.
+	skipBody := skipSubgraphBody(input.Params)
+
 	// Build the expression environment once for all parameters.
 	env := exprx.BuildExprEnv(input, nil)
 
 	for param, value := range input.Params {
 		if exempt[param] {
+			continue
+		}
+		if skipBody && param == subgraphBodyParam {
 			continue
 		}
 		var (
@@ -105,8 +116,50 @@ func evaluateParams(input *types.Input, nodeType string) error {
 	return nil
 }
 
+// subgraphBodyParam is the parameter name a sub-graph body lives under. It is
+// only ever consulted together with skipSubgraphBody -- the name alone means
+// nothing (xflow.http's "body" is a request payload).
+const subgraphBodyParam = "body"
+
+// skipSubgraphBody reports whether this node's "body" parameter holds a
+// sub-graph body, which the boundary must leave completely untouched.
+//
+// A body is the INNER execution's source text, not a value for this node. Its
+// members' parameters are evaluated later, by the inner execution, against the
+// per-item environment the map adapter injects (execution/subgraph/map_body.go's
+// bodyItemInput supplies $item/$index/$items) and against the inner graph's own
+// $nodes state (engine/graph/nodes_refs.go's deriveNodesRefs skips the body for
+// exactly this reason). None of those roots exist in the OUTER node's env.
+//
+// Evaluating a body here breaks in both directions:
+//
+//   - A body member using its promised roots fails the outer node with "unknown
+//     name $item". Because a boundary failure is a system error and the engine
+//     classifies those as retriable transient failures, the outer xflow.map task
+//     retries forever: the execution parks at status=running and the map handler
+//     is never called once. Measured on backend/providers/local.
+//   - A body member template that HAPPENS to resolve in the outer env is
+//     silently rewritten, handing an inner node a value from a scope it never
+//     declared a dependency on.
+//
+// The question is delegated to graph.DeclaresSubgraphBody so there is exactly
+// one definition of "is this a sub-graph body" in the tree. It keys on the
+// VALUE's shape, never on the parameter name or the node type -- xflow.http's
+// "body" is a request payload whose templates MUST still be evaluated, which is
+// the shape this whole layer exists to support.
+//
+// Malformed templates inside a body are not lost by skipping: they are already a
+// compile error, because engine/graph's validateTemplateForm walks the entire
+// parameter tree including the body.
+func skipSubgraphBody(params map[string]any) bool {
+	return graph.DeclaresSubgraphBody(params)
+}
+
 // buildExemptSet returns the set of parameter names that should NOT be
 // evaluated at the boundary for the given node type.
+//
+// Note this is keyed on node type alone, so it cannot express the sub-graph
+// body exemption, which depends on the parameter VALUE -- see skipSubgraphBody.
 func buildExemptSet(nodeType string) map[string]bool {
 	evaluable := graph.EvaluableParams()
 	result := make(map[string]bool)
