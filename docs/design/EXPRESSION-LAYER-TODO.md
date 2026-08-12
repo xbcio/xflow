@@ -221,3 +221,30 @@ Compile err = node "M": $nodes reference "innerA" does not exist in the workflow
 
 分组路径（`validatePortability`）上的同类误拒是既有缺陷（map 节点在 group 里
 且 body 成员引用另一成员→报 "non-portable"），本 task 不修。
+
+## spec 收窄已完成（Task 3，2026-08-12）
+
+`docs/design/DSL-SPECIFICATION.md` §4 已改写至与实现一致（commit `72b1561`）。
+删除的不是「未实现」而是**不该实现**的两项：`$env`（用户可提交的工作流定义上开
+「读任意环境变量」的口子，而 runner 持有凭证与云密钥）、`getCredential()`（与已
+落地的声明式凭证注入冲突，且其自带示例把 token 拼进参数串，参数会随执行记录落库
+进日志）。另删 `$workflow.id`（`WorkflowDef.ID` 无生产写入点，且被
+`runtimeHash` 当作 runtime 实例指针排除）与 `$execution.mode`（从未存在）。
+
+写进 spec 的每个表达式示例都先经真实 `EvalExpr` 跑过。由此查出两处 spec 自己在
+推荐的**静默错误写法**：`sortBy(arr, 'field')` 原样返回**未排序**数组且不报错
+（expr-lang 把 string 参数当逐项常量键，所有项比较相等，稳定排序保序）；
+`#{...}` 是语法错误，管道谓词里的对象字面量必须整体加括号
+`map(({id: .id}))`。
+
+### 遗留：trigger 激活参数不求值（实测 2026-08-12）
+
+`graph.Compile` **接受** `xflow.trigger.kafka` 上的 `topic: "{{ $config.topic }}"`，
+而下游没有任何环节求值它——`service/control/entry_activation_manager.go:293` 把
+`nm.Parameters` 原样拷进 `EntryActivation.Params`，
+`service/runner/trigger_activation_handler.go` 交给 `handler.Activate`，
+consumer 订阅的是字面主题名。`grep exprx service/` 无命中。
+
+语义上说得通（激活期尚无执行，`$input`/`$execution`/`$nodes` 无意义），但这是
+一个既不被编译拒绝也不被运行求值的**静默字面量陷阱**。是否给激活期建一套只含
+`$config`/`$vars` 的受限求值环境，是一个未决设计问题，不在本分支范围内。
