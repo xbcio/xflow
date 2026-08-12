@@ -89,7 +89,7 @@ node_templates:
       detail:
         applicant: "${{ $params.applicant_id }}"
         amount: "${{ $params.amount }}"
-        items: "${{ $params.items }}"
+        items: "$params.items"
       actions:
         - key: approved
           label: "同意"
@@ -162,9 +162,9 @@ nodes:
     parameters:
       outputs: [level_1, level_2, level_3]
       rules:
-        - condition: "${{ $params.amount < $vars.approval_levels.level_1_max }}"
+        - condition: "$params.amount < $vars.approval_levels.level_1_max"
           output: level_1
-        - condition: "${{ $params.amount < $vars.approval_levels.level_2_max }}"
+        - condition: "$params.amount < $vars.approval_levels.level_2_max"
           output: level_2
       default_output: level_3
 
@@ -181,7 +181,7 @@ nodes:
     template: approval_check
     parameters:
       rules:
-        - condition: "${{ $nodes['l1_manager'].action == 'approved' }}"
+        - condition: "$nodes['l1_manager'].action == 'approved'"
           output: approved
       default_output: rejected
 
@@ -200,7 +200,7 @@ nodes:
     template: approval_check
     parameters:
       rules:
-        - condition: "${{ $nodes['l2_manager'].action == 'approved' }}"
+        - condition: "$nodes['l2_manager'].action == 'approved'"
           output: approved
       default_output: rejected
 
@@ -216,7 +216,7 @@ nodes:
     template: approval_check
     parameters:
       rules:
-        - condition: "${{ $nodes['l2_director'].action == 'approved' }}"
+        - condition: "$nodes['l2_director'].action == 'approved'"
           output: approved
       default_output: rejected
 
@@ -235,7 +235,7 @@ nodes:
     template: approval_check
     parameters:
       rules:
-        - condition: "${{ $nodes['l3_manager'].action == 'approved' }}"
+        - condition: "$nodes['l3_manager'].action == 'approved'"
           output: approved
       default_output: rejected
 
@@ -251,7 +251,7 @@ nodes:
     template: approval_check
     parameters:
       rules:
-        - condition: "${{ $nodes['l3_director'].action == 'approved' }}"
+        - condition: "$nodes['l3_director'].action == 'approved'"
           output: approved
       default_output: rejected
 
@@ -279,7 +279,7 @@ nodes:
     parameters:
       outputs: [approved, rejected]
       rules:
-        - condition: "${{ $nodes['l3_parallel_merge'].vp.action == 'approved' && $nodes['l3_parallel_merge'].finance.action == 'approved' }}"
+        - condition: "$nodes['l3_parallel_merge'].vp.action == 'approved' && $nodes['l3_parallel_merge'].finance.action == 'approved'"
           output: approved
       default_output: rejected
 

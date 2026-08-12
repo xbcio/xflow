@@ -81,13 +81,13 @@ nodes:
       method: POST
       url: "{{ $config.inventory_service }}/check"
       body:
-        items: "${{ $nodes['fetch_order'].items }}"
+        items: "$nodes['fetch_order'].items"
 
   # 3. 计算价格（纯计算，无需 pin）
   - name: calculate_price
     type: xflow.function
     parameters:
-      code: "${{ $nodes['fetch_order'].items | map(#.price * #.quantity) | sum() }}"
+      code: "$nodes['fetch_order'].items | map(#.price * #.quantity) | sum()"
 
   # 4. 合并并行结果
   - name: merge_checks
@@ -104,7 +104,7 @@ nodes:
   - name: check_stock_ok
     type: xflow.if
     parameters:
-      condition: "${{ $inputs.inventory.in_stock == true }}"
+      condition: "$inputs.inventory.in_stock == true"
 
   # 6. 支付处理
   - name: process_payment
