@@ -7,7 +7,6 @@ import (
 
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/execution"
-	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/types"
 )
@@ -117,9 +116,9 @@ func TestTriggerActivationHandler_ActivateStampsSeedRuntimeAndParams(t *testing.
 	}
 
 	// Runtime must be a generation-stamped HTTPEntrySeedRuntime.
-	rt, ok := fh.gotInput.Runtime.(*node.HTTPEntrySeedRuntime)
+	rt, ok := fh.gotInput.Runtime.(*protocol.HTTPEntrySeedRuntime)
 	if !ok {
-		t.Fatalf("Runtime type = %T, want *node.HTTPEntrySeedRuntime", fh.gotInput.Runtime)
+		t.Fatalf("Runtime type = %T, want *protocol.HTTPEntrySeedRuntime", fh.gotInput.Runtime)
 	}
 	if rt.Generation != 9 {
 		t.Errorf("Runtime.Generation = %d, want 9", rt.Generation)

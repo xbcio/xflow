@@ -75,7 +75,7 @@ type TriggerActivationHandlerOption func(*TriggerActivationHandler)
 
 // WithSeedHTTPClient sets the *http.Client used for entry-seed admission
 // requests. When nil (the default), http.DefaultClient is used — matching
-// the fallback in node.HTTPEntrySeedRuntime.
+// the fallback in protocol.HTTPEntrySeedRuntime.
 //
 // The client's Timeout should be set larger than the per-request context
 // timeout (entrySeedRequestTimeout = 15s in entry_seed_runtime.go) so that
@@ -168,7 +168,7 @@ func (h *TriggerActivationHandler) Activate(ctx context.Context, d protocol.Acti
 		WorkflowID: types.WorkflowID(d.WorkflowID),
 		NodeName:   d.EntryUnitID,
 		Params:     withEntrySeedParams(d),
-		Runtime: &node.HTTPEntrySeedRuntime{
+		Runtime: &protocol.HTTPEntrySeedRuntime{
 			BaseURL:    h.seedBaseURL,
 			Client:     h.seedHTTPClient(),
 			Token:      h.authToken,
@@ -212,7 +212,7 @@ func (h *TriggerActivationHandler) activateGroup(ctx context.Context, d protocol
 		NodeName:   pkg.EntryNode,
 		Params:     withGroupEntrySeedParams(entryNodeDef.Parameters, d),
 		Runtime: &groupExecTriggerRuntime{
-			HTTPEntrySeedRuntime: &node.HTTPEntrySeedRuntime{
+			HTTPEntrySeedRuntime: &protocol.HTTPEntrySeedRuntime{
 				BaseURL:    h.seedBaseURL,
 				Client:     h.seedHTTPClient(),
 				Token:      h.authToken,
@@ -368,7 +368,7 @@ func unregisterSupplyConsumers(bindings []engine.SupplyConsumerBinding) {
 
 // seedHTTPClient returns the configured client or http.DefaultClient when none
 // was injected. This matches the nil-fallback semantics of
-// node.HTTPEntrySeedRuntime.Client.
+// protocol.HTTPEntrySeedRuntime.Client.
 func (h *TriggerActivationHandler) seedHTTPClient() *http.Client {
 	if h.seedClient != nil {
 		return h.seedClient
@@ -402,8 +402,8 @@ func (h *TriggerActivationHandler) Deactivate(d protocol.DeactivateDirective) er
 
 // withEntrySeedParams returns a copy of d.Params merged with the entry-seed
 // selecting keys so the trigger routes messages through the entry-unit seed
-// admission path (see node/internal/trigger.isEntrySeedActivation and
-// seedKafkaEntryBatch). The original directive params are never mutated. Params
+// admission path (see node/trigger/kafka.isEntrySeedActivation and
+// seedEntryBatch). The original directive params are never mutated. Params
 // are treated as opaque and never logged.
 func withEntrySeedParams(d protocol.ActivateDirective) map[string]any {
 	merged := make(map[string]any, len(d.Params)+3)

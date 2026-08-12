@@ -6,7 +6,7 @@ import (
 
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/execution"
-	"github.com/xbcio/xflow/node"
+	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -47,7 +47,7 @@ func TestGroupExecTriggerRuntime_ExecuteGroupRunsRealMembers(t *testing.T) {
 	}
 
 	adapter := &groupExecTriggerRuntime{
-		HTTPEntrySeedRuntime: &node.HTTPEntrySeedRuntime{},
+		HTTPEntrySeedRuntime: &protocol.HTTPEntrySeedRuntime{},
 		runtime:              groupRT,
 		pkg:                  pkg,
 		packageHash:          hash,
