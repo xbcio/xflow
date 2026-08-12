@@ -1,6 +1,11 @@
-// Package expr provides the expression evaluation helpers shared by builtin
-// nodes (xflow.if, xflow.switch, xflow.map, xflow.split, xflow.function,
-// xflow.script). These helpers are not part of the public node API.
+// Package exprx provides expression evaluation helpers originally used only by
+// builtin nodes (xflow.if, xflow.switch, xflow.map, xflow.split,
+// xflow.function, xflow.script).
+//
+// It was promoted from node/internal/utils/exprx to a top-level package because
+// the execution layer needs to perform template evaluation at the handler
+// boundary — the single common entry point — and Go's internal-package rule
+// forbids execution/ from importing node/internal/.
 package exprx
 
 import (
@@ -52,7 +57,14 @@ func CompileExpr(code string, env map[string]any, asBool bool) (*vm.Program, err
 		return cached, nil
 	}
 
-	opts := []expr.Option{expr.Env(env)}
+	// exprFunctions must be included on EVERY compile, not just the ones whose
+	// source appears to use them: a program is cached by (code, asBool), so a
+	// program compiled without them would be reused for later evaluations of
+	// the same code and fail with "unknown name". See functions.go for why
+	// they are compile options rather than env entries.
+	opts := make([]expr.Option, 0, len(exprFunctions)+2)
+	opts = append(opts, expr.Env(env))
+	opts = append(opts, exprFunctions...)
 	if asBool {
 		opts = append(opts, expr.AsBool())
 	}
@@ -85,11 +97,11 @@ func EvalExpr(code string, env map[string]any, asBool bool) (any, error) {
 
 // BuildExprEnv constructs the expression evaluation environment from node input.
 // Available variables: $input (Data), $inputs (multi-port), $vars, $config,
-// $params, $runtime, and $supplies. The extra map, when non-nil, is merged into
-// the env top level (overwriting same-named keys) so callers can inject
-// additional variables — e.g. xflow.function spreads its "params" and
-// xflow.script adds $credentials/$credential — without re-implementing the base
-// environment.
+// $params, $runtime, $supplies, $nodes, $execution, and $workflow. The extra
+// map, when non-nil, is merged into the env top level (overwriting same-named
+// keys) so callers can inject additional variables — e.g. xflow.function
+// spreads its "params" and xflow.script adds $credentials/$credential — without
+// re-implementing the base environment.
 func BuildExprEnv(input *types.Input, extra map[string]any) map[string]any {
 	env := make(map[string]any, 16)
 
@@ -105,16 +117,33 @@ func BuildExprEnv(input *types.Input, extra map[string]any) map[string]any {
 	env["$config"] = input.Config
 	env["$params"] = input.Params
 	env["$runtime"] = RuntimeEnv(input)
-	// $supplies is the seventh root. It is deliberately separate from $config:
-	// $config is immutable and travels with the definition version, whereas a
-	// supply is mutable, versioned, and may be stale — and stale is a first-class
-	// state a caller must be able to tell apart. Merging them would also make
-	// name collisions unresolvable and would flatten the failure semantics.
+	// $supplies is deliberately separate from $config: $config is immutable and
+	// travels with the definition version, whereas a supply is mutable, versioned,
+	// and may be stale — and stale is a first-class state a caller must be able to
+	// tell apart. Merging them would also make name collisions unresolvable and
+	// would flatten the failure semantics.
 	//
 	// The value is the registry's published shared map, not a copy: this is one
 	// pointer assignment per message regardless of how large the content is.
 	// Decoding happened once, when the content changed.
 	env["$supplies"] = supply.Default.Decoded()
+	// $nodes holds the outputs of nodes referenced via $nodes['name'] in this
+	// node's parameters. Populated by buildInput from the compile-time reference
+	// set. nil when the node declares no $nodes references.
+	env["$nodes"] = input.Nodes
+	// $execution and $workflow are UNCONDITIONAL: both roots exist on every
+	// call, holding empty strings when the underlying fields are unset. An
+	// absent root is a compile error ("unknown name $execution") that fails the
+	// whole node, so making them conditional would mean an expression that
+	// compiles in one execution fails in another. $nodes can be nil because it
+	// is a map value, not a missing key.
+	env["$execution"] = map[string]any{
+		"id": input.ExecutionID,
+	}
+	env["$workflow"] = map[string]any{
+		"name":    input.WorkflowName,
+		"version": input.WorkflowVersion,
+	}
 
 	for k, v := range extra {
 		env[k] = v

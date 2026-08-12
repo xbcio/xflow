@@ -271,16 +271,25 @@ func TestPortability_AWSKeyRejected(t *testing.T) {
 }
 
 func TestPortability_CredentialReferenceOK(t *testing.T) {
-	// Using {{ $credentials.my_api_key }} is fine — it's a reference, not a literal.
+	// {{ $credentials.my_api_key }} in xflow.http headers now compiles
+	// successfully: the boundary evaluation layer (execution/params.go) evaluates
+	// every non-exempt parameter at runtime, so the template is not shipped
+	// verbatim. However, exprx.BuildExprEnv does NOT inject a $credentials root
+	// (only xflow.script injects it via extra env); at runtime this form fails
+	// with "unknown name $credentials" -- a loud failure, not a silent one.
+	//
+	// The correct channel for credentials remains the "authentication" parameter's
+	// declarative reference (input.Credential in action/http.go:212). This test
+	// only asserts compile-time acceptance; it does not test runtime behavior.
 	def := &types.WorkflowDef{
 		Name: "cred-ref",
 		Nodes: []types.NodeDef{
-			{Name: "A", Type: "http.request", Version: 1, Parameters: map[string]any{
+			{Name: "A", Type: "xflow.http", Version: 1, Parameters: map[string]any{
 				"headers": map[string]any{
 					"Authorization": "Bearer {{ $credentials.my_api_key }}",
 				},
 			}},
-			{Name: "B", Type: "http.request", Version: 1},
+			{Name: "B", Type: "xflow.http", Version: 1},
 			{Name: "D", Type: "db.query", Version: 1},
 		},
 		Groups: []types.GroupDef{
@@ -293,7 +302,8 @@ func TestPortability_CredentialReferenceOK(t *testing.T) {
 	}
 	_, err := Compile(def)
 	if err != nil {
-		t.Fatalf("Compile should succeed for credential reference: %v", err)
+		t.Fatalf("a template in xflow.http headers must compile -- the boundary "+
+			"evaluation layer evaluates it at runtime: %v", err)
 	}
 }
 

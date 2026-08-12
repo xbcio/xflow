@@ -81,6 +81,42 @@ func (r *Runner) Execute(ctx context.Context, lease *engine.TaskLease) (engine.T
 	if r.artifactCode != nil && lease.Input != nil {
 		lease.Input.SetArtifactCodeResolver(r.artifactCode)
 	}
+	// Evaluate ${{ }} and {{ }} templates in non-exempt parameters. This runs
+	// BEFORE the SuspendingHandler branch so both the normal Execute path and
+	// the suspending path (PrepareSuspend / OnResume, which consume the same
+	// lease.Input) see evaluated values. Credentials and supplies are already
+	// resolved at this point (SetCredentialResolver above), so expressions
+	// referencing $supplies resolve correctly.
+	//
+	// On failure: return the error wrapped in NodeFailure, so the dispatcher
+	// commits it through the engine and the node's retry / on_error policy
+	// applies. A plain (unclassified) error is NOT usable here: the dispatcher
+	// reads one as ExecutorFailureUnknown and deliberately leaves the lease
+	// fenced for its expiry path, because an unclassified failure might have
+	// started the handler and releasing it could double-execute a side effect.
+	// The boundary runs before the handler, so nothing started -- but the
+	// dispatcher cannot know that from a bare error, and the execution simply
+	// stalls. Measured with a syntactically invalid "${{ $params.x + }}" on a
+	// local backend: handler invocations 0, status stuck at "running", no
+	// terminal state (the LeaseSweeper that would eventually reclaim it is only
+	// wired in the control plane, not in the local backend).
+	//
+	// NodeFailure is the honest-enough classification: it means "this task
+	// failed and the engine owns the outcome". It does slightly overstate
+	// things -- the handler never ran -- but every alternative is worse.
+	// Marking the failure permanent would require deciding that an expression
+	// can NEVER succeed, and no such discriminator exists here: compilation
+	// sees env KEYS, and both the $input Data spread and the mutable $supplies
+	// root change between attempts, so the same expression genuinely compiles
+	// on a later attempt (measured: "bare_upstream_key + 1" fails to compile
+	// before the upstream commits and compiles after). Retry policy gives the
+	// bound instead -- a real typo exhausts its attempts and terminates, a
+	// not-yet-available value gets the retries it needs.
+	if lease.Input != nil {
+		if err := evaluateParams(lease.Input, lease.NodeType); err != nil {
+			return engine.TaskResult{}, NodeFailure(err)
+		}
+	}
 	if sh, ok := handler.(types.SuspendingHandler); ok {
 		return r.executeSuspending(ctx, lease, sh)
 	}

@@ -179,6 +179,19 @@ func Types() []string {
 	return result
 }
 
+// TriggerTypes returns all registered trigger node types in the global registry.
+// Trigger-only types (those registered via RegisterTrigger that do not also
+// implement ActionHandler) appear here but not in Types().
+func TriggerTypes() []string {
+	globalRegistry.mu.RLock()
+	defer globalRegistry.mu.RUnlock()
+	result := make([]string, 0, len(globalRegistry.triggerVer))
+	for t := range globalRegistry.triggerVer {
+		result = append(result, t)
+	}
+	return result
+}
+
 // HasExact returns true when the global registry has a handler for the exact
 // (nodeType, version) pair. It does NOT fall back to latest version.
 func HasExact(nodeType string, version int) bool {

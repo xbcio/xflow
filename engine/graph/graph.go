@@ -44,6 +44,11 @@ type Graph struct {
 	unitInDegree []int
 	nodeUnit     []int // nodeIdx → unitIdx mapping
 
+	// warnings holds non-fatal compile diagnostics. It is deliberately NOT part of
+	// MarshalJSON: a warning is a property of one compilation, not of the graph, and
+	// putting it on the wire would shift every persisted graph's hash.
+	warnings []string
+
 	// supplyIndexes maps a supply node's name to its index in g.nodes. Supply
 	// nodes live in the node layer only — never in g.units.
 	supplyIndexes map[string]int
@@ -53,6 +58,16 @@ type Graph struct {
 	// and describes a relation BETWEEN nodes, not a property of any one of
 	// them. Contrast NodeMeta.Body, which is a node's own compiled artifact.
 	supplyRefs map[int][]string
+
+	// nodesRefs maps a node index to the sorted, deduplicated names of other
+	// nodes it references via $nodes['name'] in its parameters. Unlike
+	// supplyRefs (which comes from explicitly declared DependencyEdges),
+	// nodesRefs is DERIVED from parameter text during compilation. It must
+	// still be persisted on the graph and enter the hash because buildInput
+	// (in another process / another load) uses it to prefetch $nodes outputs,
+	// and re-extracting from parameters would be maintaining a second
+	// implementation of the extraction logic.
+	nodesRefs map[int][]string
 }
 
 // BodyAt returns the projected body package for the node at nodeIdx, or nil
@@ -285,6 +300,19 @@ func (g *Graph) SupplyRefsFor(nodeIdx int) []string {
 	return out
 }
 
+// NodesRefsFor returns the sorted, deduplicated names of nodes referenced via
+// $nodes['name'] in the parameters of the node at nodeIdx, or nil when it
+// references none. The returned slice is a defensive copy.
+func (g *Graph) NodesRefsFor(nodeIdx int) []string {
+	names := g.nodesRefs[nodeIdx]
+	if len(names) == 0 {
+		return nil
+	}
+	out := make([]string, len(names))
+	copy(out, names)
+	return out
+}
+
 // SupplyNodeIndexes returns a copy of the supply node name → node index map.
 func (g *Graph) SupplyNodeIndexes() map[string]int {
 	out := make(map[string]int, len(g.supplyIndexes))
@@ -293,3 +321,8 @@ func (g *Graph) SupplyNodeIndexes() map[string]int {
 	}
 	return out
 }
+
+// Warnings returns the non-fatal diagnostics collected during compilation.
+func (g *Graph) Warnings() []string { return g.warnings }
+
+func (g *Graph) addWarning(msg string) { g.warnings = append(g.warnings, msg) }

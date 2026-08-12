@@ -125,6 +125,22 @@ func declaresSubgraphBody(params map[string]any) bool {
 	return bodyDef.Type == subgraphNodeType
 }
 
+// DeclaresSubgraphBody reports whether a node's parameters carry a sub-graph
+// body. Exported for the same reason as EvaluableParams: a consumer outside
+// this package must ask this question and there must be no second copy of the
+// answer.
+//
+// That consumer is execution/params.go's boundary evaluation layer, which must
+// NOT evaluate a body's contents. A body is the inner execution's source text,
+// evaluated later against the per-item environment the map adapter injects
+// ($item/$index/$items). Evaluating it here fails the OUTER node with "unknown
+// name $item" -- and because a boundary failure is classified transient, the
+// outer task retries forever and the execution hangs with its handler never
+// called once.
+func DeclaresSubgraphBody(params map[string]any) bool {
+	return declaresSubgraphBody(params)
+}
+
 // Compile validates a WorkflowDef and builds an immutable Graph IR.
 // It returns an error if the definition is nil, has no nodes, contains
 // duplicate node names, references unknown nodes, or contains a cycle.
@@ -212,6 +228,9 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 	if err := validateGraphValueDomain(g); err != nil {
 		return nil, err
 	}
+	if err := validateTemplateForm(g); err != nil {
+		return nil, err
+	}
 	depPorts, err := buildEdges(def, g)
 	if err != nil {
 		return nil, err
@@ -234,6 +253,13 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 		if err := detectCycle(g); err != nil {
 			return nil, err
 		}
+	}
+	// buildNodesRefs extracts $nodes references from parameters and validates
+	// them. Placed after detectCycle so the DAG guarantee is already established
+	// in non-cyclic mode. The pass itself carries a visited-set, so cyclic
+	// graphs (allowCycles=true) are also safe.
+	if err := buildNodesRefs(g, false); err != nil {
+		return nil, err
 	}
 	if err := buildUnits(g); err != nil {
 		return nil, fmt.Errorf("build units: %w", err)

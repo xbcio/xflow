@@ -280,7 +280,7 @@ settings:
 options:
   allow_cycles: false
 
-# 凭证（加密存储，表达式中通过 getCredential('name') 获取）
+# 凭证（加密存储，按名声明后由 Handler / 脚本节点注入，表达式取不到值）
 credentials:
   api_auth:
     name: "api_credentials"
@@ -334,13 +334,13 @@ nodes:
       authentication: api_auth        # 声明式引用：Handler 自动设置 Authorization header
       headers:
         X-Environment: "{{ $config.env }}"
-        X-Tenant-ID: "${{ getCredential('api_auth').tenant_id }}"  # 表达式引用：获取声明式无法自动注入的额外字段
+        X-Tenant-ID: "{{ $config.tenant_id }}"  # 非凭证的环境相关值走 $config
 
       body:
         order_id: "${{ $params.order_id }}"
         user_id: "${{ $params.user_id }}"
         amount: "${{ $params.amount }}"
-        timestamp: "${{ dateFormat(now(), '2006-01-02') }}"
+        timestamp: "${{ now().Format('2006-01-02') }}"
 
       options:
         timeout: "${{ $vars.default_timeout * 1000 }}"
@@ -351,7 +351,7 @@ nodes:
     position: [450, 300]
 
     parameters:
-      condition: "${{ $nodes['validate_order'].is_valid == true }}"
+      condition: "$nodes['validate_order'].is_valid == true"
 
   # 3. 检查库存
   - name: check_inventory
@@ -365,7 +365,7 @@ nodes:
 
       request:
         order_id: "${{ $params.order_id }}"
-        items: "${{ $nodes['validate_order'].items }}"
+        items: "$nodes['validate_order'].items"
 
   # 4. 计算价格
   - name: calculate_price
@@ -373,7 +373,7 @@ nodes:
     position: [650, 300]
 
     parameters:
-      code: "${{ $nodes['validate_order'].items | map(#.price * #.quantity * 0.9) | sum() }}"
+      code: "$nodes['validate_order'].items | map(#.price * #.quantity * 0.9) | sum()"
 
   # 5. 合并并行结果（声明式输入端口）
   - name: merge_checks
@@ -413,7 +413,7 @@ nodes:
     parameters:
       outputs: [success, failed]
       rules:
-        - condition: "${{ $nodes['process_payment'].status == 'success' }}"
+        - condition: "$nodes['process_payment'].status == 'success'"
           output: success
       default_output: failed
 
@@ -482,7 +482,7 @@ nodes:
       operation: insert
       table: workflow_logs
       data:
-        workflow_id: "${{ $workflow.id }}"
+        workflow_name: "${{ $workflow.name }}"
         execution_id: "${{ $execution.id }}"
         order_id: "${{ $params.order_id }}"
         completed_at: "${{ now() }}"
@@ -565,36 +565,28 @@ outputs:
 
 ## 4. 表达式引擎
 
-> ### ⚠️ 本章大部分内容尚未实现（2026-08-11 实测）
+> ### 实现状态（2026-08-12 实测）
 >
-> 本章描述的是目标形态。照本章写出的工作流**现在跑不出预期结果**，且失败方式
-> 多为静默。缺口分三层，详见
-> [EXPRESSION-LAYER-TODO.md](./EXPRESSION-LAYER-TODO.md)：
+> 本章描述的语法、变量根与函数**均已实现并有测试覆盖**，一处例外见下。
+> 历史缺口（模板语法零实现、多数节点不求值参数、`$nodes`/`$execution`/
+> `$workflow` 三个根不存在）已全部关闭，过程记录在
+> [EXPRESSION-LAYER-TODO.md](./EXPRESSION-LAYER-TODO.md)。
 >
-> 1. **`${{ }}` / `{{ }}` 两种模板语法零实现。** 全仓库没有任何代码剥离
->    `${{`/`}}` 或识别插值模式。求值的节点直接把参数当裸表达式编译，所以
->    `"${{ $params.x }}"` 在 expr-lang 里是语法错误（实测：
->    `unexpected token Bracket("{") (1:2)`）。**本章下方的每个示例都属此列。**
-> 2. **多数节点根本不求值任何参数。** 没有统一的参数模板求值层——
->    `engine/input.go` 把 `Parameters` 原样拷进 `Input.Params`，是否求值由各
->    节点自己决定。`xflow.if`/`switch`/`map`/`split`/`function`/`transform.*`
->    会求值（但只认裸表达式）；`xflow.http`/`grpc`/`database`/`notification`/
->    `approval`/`wait` 与全部 trigger **一律字面透传**。
-> 3. **`$nodes` / `$execution` / `$workflow` / `$env` 四个根不存在。**
->    `exprx.BuildExprEnv` 只提供 `$input`/`$inputs`/`$vars`/`$config`/
->    `$params`/`$runtime`/`$supplies`。`$nodes` 在生产代码里唯一的出现处是
->    `engine/graph/group_portability.go` 的编译期正则——它用来**拒绝**跨组
->    引用，从不作为运行期值提供。
+> **求值发生在一个地方**：`execution/runner.go` 的 handler 边界
+> （`execution/params.go` 的 `evaluateParams`）。它在 handler 拿到
+> `Input.Params` 之前渲染完所有模板，所以 `xflow.http` 的 headers/body、
+> `xflow.database` 的 where/data、`xflow.notification` 的 to 等**全部**支持
+> 模板——不需要各节点自己接线。豁免的只有那些 handler 自己当表达式求值的参数
+> （`condition` / `expression` / `items` / `code`）与子图 body，见 §4.1 末尾。
 >
-> **最危险的是失败不对称**（实测）：`xflow.http` 的 `url` 里写模板会响亮失败
-> （`unsupported protocol scheme ""`），但写在 `headers` / `body` 里**请求照发、
-> HTTP 200、执行状态成功**，对端收到的是字面串 `${{ $params.order_id }}`。
-> 没有任何日志或指标。
->
-> 少数 spec 提到的函数其实可用，因为它们是 expr-lang 内置：`upper`/`lower`/
-> `trim`/`now`/`date`/`fromJSON`、`??`、三元。而 `dateFormat`/`parseJson`/
-> `sprintf`/`getCredential` 未注册（注意 spec §4.3 写的是 `parseJson`，内置的
-> 名字是 `fromJSON`）。
+> **唯一例外：trigger 的激活参数不求值。** Kafka 的 `topic`/`brokers`、
+> cron 的 `expression`、webhook 的 `path` 这些参数在**激活期**被消费，那时
+> 还没有任何一次执行——`$input`、`$execution`、`$nodes` 都不存在，只有
+> `$config`/`$vars` 在语义上说得通。当前实现把它们原样交给 trigger handler
+> （`service/control` 从图上取 `nm.Parameters` → `ActivateDirective.Params` →
+> `handler.Activate`），编译期也不拒绝，所以**写在这里的模板会以字面串生效**
+> （实测：`topic: "{{ $config.topic }}"` 编译通过，consumer 订阅字面主题名）。
+> 在这层建求值需要先定义激活期环境，属于未决设计，不要在 trigger 参数里写模板。
 
 ### 4.1 表达式语法
 
@@ -638,7 +630,7 @@ timeout: "${{ $vars.default_timeout * 1000 }}"
 is_vip: "${{ $params.amount > 1000 }}"
 
 # 数组操作 → 返回 array
-items: "${{ $nodes['fetch'].data | filter(#.active) }}"
+active_items: "${{ $nodes['fetch'].data | filter(#.active) }}"
 ```
 
 **插值模式** `{{ expr }}`：
@@ -651,7 +643,7 @@ url: "{{ $config.api_base_url }}/api/v1/users"
 subject: "订单 {{ $params.order_id }} 共 {{ $params.amount }} 元"
 
 # 拼接 Header
-auth: "Bearer {{ getCredential('api_auth').token }}"
+x_request_id: "{{ $execution.id }}-{{ $params.order_id }}"
 
 # 拼接日志
 log_msg: "[{{ $config.env }}] user={{ $params.user_id }} action={{ $params.action }}"
@@ -677,11 +669,49 @@ bad: "前面有文本 ${{ $params.x }}"    # 编译报错
 note: "格式参考 {name} 占位符"
 ```
 
+**什么时候要写 `${{ }}`、什么时候写裸表达式**：
+
+参数分两类，取决于**参数自身的契约**，与节点类型无关：
+
+| 参数契约 | 写法 | 例子 |
+|---------|------|------|
+| 声明为**字面值**（URL、header、表名、消息体……） | 必须用 `${{ }}` / `{{ }}` 包裹 | `url: "{{ $config.base }}/v1"` |
+| 声明为**表达式**（`condition`、`expression`、`items`、`code`） | 写**裸表达式**，不加包裹 | `condition: "$params.amount > 1000"` |
+
+字面值参数由 handler 边界统一求值（`execution/params.go`）：不包裹就是纯文本，
+包裹了才求值。表达式参数由 handler 自己求值，边界会跳过它们——在这类参数上写
+`${{ }}` 是多余的，`${{` 会被 expr-lang 当成语法错误。
+
+```yaml
+# ✅ 字面值参数 — 包裹
+- name: notify
+  type: xflow.http
+  parameters:
+    url: "{{ $config.api_base }}/notify"
+    body:
+      amount: "${{ $params.amount * 100 }}"
+
+# ✅ 表达式参数 — 裸写
+- name: check
+  type: xflow.if
+  parameters:
+    condition: "$params.amount > $vars.threshold"
+
+- name: fanout
+  type: xflow.map
+  parameters:
+    items: "$input.orders"
+```
+
+> **子图 body 是第三类**：`xflow.map` 的 `body` 内是**内层图的源文本**，边界
+> 完整跳过，其中的模板由内层执行按内层环境求值（`$item`/`$index` 等只在那里
+> 存在）。
+
 ### 4.2 数据访问
 
-所有系统变量统一使用 `$` 前缀。分为两种访问模式：
-- **属性访问**（`$xxx.field` / `$xxx['key']`）— 读取已有数据
-- **方法调用**（`getXxx('name')`）— 运行时操作（涉及外部系统调用）
+所有系统变量统一使用 `$` 前缀，一律是**属性访问**（`$xxx.field` /
+`$xxx['key']`）。表达式里没有任何能触达外部系统的函数——凭证、环境变量这类值
+只能按名声明后由运行时注入，理由见本节末尾。
 
 #### 变量全览
 
@@ -694,24 +724,43 @@ note: "格式参考 {name} 占位符"
 | **上下文** | `$vars` | 全局变量（context.vars，只读） | `$vars.max_retry_count` |
 | | `$config` | 环境配置（context.config，只读，随工作流定义版本一起不可变） | `$config.env` |
 | | `$supplies` | 声明了 `dependency_edges` 依赖的 supply 节点内容（见 §6.3），可变、有版本、可能未就绪 | `$supplies.rules.items` |
-| **运行时获取** | `getCredential('name')` | 从凭证管理模块获取凭证（加密存储，运行时解密） | `getCredential('api_auth').token` |
-| **运行时信息** | `$execution` | 执行上下文 | `$execution.id`、`$execution.mode` |
-| | `$workflow` | 工作流信息 | `$workflow.name`、`$workflow.version` |
-| | `$env` | 系统环境变量 | `$env.API_URL` |
+| | `$credentials` | **仅脚本节点代码内**：节点 `credentials` 参数声明的凭证（见下方「凭证引用」），参数模板里不可用 | `$credentials.api_auth.token` |
+| **运行时信息** | `$execution.id` | 当前执行 ID | `$execution.id` |
+| | `$workflow.name` | 当前图的名称 | `$workflow.name` |
+| | `$workflow.version` | 当前图的版本 | `$workflow.version` |
 | **循环** | `$item` | 循环当前项 | `$item.id` |
 | | `$items` | 循环全量数据 | `$items` |
 | | `$index` | 循环下标 | `$index` |
+
+> **`$execution` / `$workflow` 在子图内的取值**：两者描述的都是**节点实际
+> 运行其中的那张图**，不是最外层工作流。
+>
+> | 位置 | `$execution.id` | `$workflow.name` | `$workflow.version` |
+> |------|-----------------|------------------|---------------------|
+> | 普通节点 | 本次执行 ID | 工作流名 | 工作流版本 |
+> | map body 成员 | **内层**执行 ID | map 节点名 | 空串 |
+> | group 成员 | 本次执行 ID | **组名** | **空串**（投影包不带版本） |
+>
+> group 成员的空版本是刻意的：给投影包加上版本会改变 package hash，而它是
+> 组调度的缓存键与幂等键。
+
+> **没有 `$env`**。运行 runner 的进程持有凭证、AK/SK 与数据库口令，而工作流
+> 定义是用户可提交的内容——一个能读任意环境变量的表达式根等于把这些凭证暴露
+> 给任何能提交工作流的人。需要环境相关的值请用 `$config`（部署时替换）或
+> `$credentials`（加密存储、按名声明、可审计）。
+>
+> **没有 `$workflow.id`**。`WorkflowDef.ID` 是运行期实例标识符，不属于工作流
+> 定义身份（见 `sdk/xflow/workflow_identity.go`），生产代码中无写入点，暴露出
+> 来只会得到一个恒为空串的字段。要标识一次执行请用 `$execution.id`。
 
 #### 命名规则
 
 | 规则 | 示例 | 说明 |
 |------|------|------|
-| 集合 → 复数 | `$nodes`、`$inputs`、`$items` | 包含多个命名条目的对象 |
+| 集合 → 复数 | `$nodes`、`$inputs`、`$items`、`$credentials` | 包含多个命名条目的对象 |
 | 单一对象 → 单数 | `$input`、`$item`、`$config` | 单个实体 |
-| 行业惯例 → 从俗 | `$env`（非 `$envs`） | 尊重开发者肌肉记忆 |
 | 全称 → 无缩写 | `$vars`（对应 `context.vars`，非 `$ctx`）、`$params`（非 `$p`） | 可读性优先 |
 | `$xxx` → 数据引用 | `$nodes['x'].field` | 读取已有数据 |
-| `getXxx()` → 运行时操作 | `getCredential('name')` | 涉及外部系统调用 |
 
 #### 数据访问路径
 
@@ -789,8 +838,8 @@ timeout: "${{ $vars.default_timeout * 1000 }}"
 endpoint: "${{ $config.service_endpoints.payment }}"
 is_production: "${{ $config.env == 'production' }}"
 
-# 获取凭证（运行时从加密存储解密）
-auth_header: "Bearer {{ getCredential('api_auth').token }}"
+# 标识本次执行与所在图
+trace_tag: "{{ $workflow.name }}@{{ $workflow.version }}/{{ $execution.id }}"
 
 # 组合使用
 validation_rule: "${{ $params.amount >= $vars.business_rules.min_order_amount && $params.amount <= $vars.business_rules.max_order_amount }}"
@@ -798,9 +847,10 @@ validation_rule: "${{ $params.amount >= $vars.business_rules.min_order_amount &&
 
 #### 凭证引用
 
-凭证有两种引用方式，适用场景不同：
+凭证只能**按名声明**后由运行时注入，**任何表达式都无法直接取到凭证值**。
+两种声明方式对应两类节点：
 
-**方式 1：声明式引用（节点参数）**
+**方式 1：Handler 声明式引用（内置节点参数）**
 
 节点通过特定参数字段按名称引用凭证，Handler 内部负责读取凭证并正确应用（如设置 Authorization header、建立数据库连接等）。参数名因节点类型而异：
 
@@ -818,100 +868,135 @@ validation_rule: "${{ $params.amount >= $vars.business_rules.min_order_amount &&
     credential: db_conn          # Handler 读取凭证并建立数据库连接
 ```
 
-**方式 2：表达式引用（`getCredential()`）**
+**方式 2：脚本节点声明式注入（`credentials` 参数 → `$credentials`）**
 
-在表达式中显式获取凭证对象的特定字段，用于需要精细控制的场景：
+脚本节点在 `credentials` 参数里列出要用的凭证名，运行时把解析结果注入脚本
+**代码内**的 `$credentials` / `$credential` 全局变量。它不是表达式环境的一部分——
+参数模板 `${{ }}` / `{{ }}` 里写 `$credentials` 取不到值。
 
 ```yaml
-headers:
-  X-Custom-Auth: "Bearer {{ getCredential('api_auth').token }}"
-  X-API-Key: "${{ getCredential('api_auth').api_key }}"
+- name: sign_request
+  type: xflow.script
+  parameters:
+    credentials: [api_auth]      # 只有列出的名字会被解析和注入
+    language: javascript
+    code: |
+      const token = $credentials.api_auth.token;  // 仅脚本代码内可见
+      return { signature: sign(token, $input.payload) };
 ```
 
 **选择决策**：
 
 | 判断条件 | 使用方式 |
 |---------|---------|
-| 节点类型已内置该凭证的标准用法（认证、连接） | 声明式（`authentication` / `credential`） |
-| 需要在自定义 header、body 或表达式中使用凭证的特定字段 | 表达式（`getCredential('name').field`） |
-| 同一节点中两种方式都需要 | 可共存——声明式用于主认证，表达式用于额外字段 |
+| 节点类型已内置该凭证的标准用法（认证、连接） | Handler 声明式（`authentication` / `credential`） |
+| 需要用凭证的特定字段做自定义计算 | 脚本节点 `credentials` 参数 + 代码内 `$credentials` |
 
+> **为什么没有 `getCredential()` 这类表达式函数**：让表达式能按任意名字取凭证，
+> 等于给一份用户可提交的工作流定义开了「读任意凭证」的口子，且凭证会被拼进参数
+> 字符串——参数会随执行记录落库、进日志、进错误信息。按名声明的两种方式则让
+> 「哪个节点用了哪个凭证」在编译期就是确定的、可审计的，凭证值只存在于 Handler
+> 内部或脚本沙箱内。
+>
 > **约束**：两种方式都要求凭证名必须在顶层 `credentials` 块中预先声明，未声明的凭证名编译期报错。各节点类型支持的声明式参数名见 §6.2 节点配置。
 
 ### 4.3 内置函数
 
+表达式引擎是 expr-lang，本节列出的函数**均已实测可用**（2026-08-12）。
+expr-lang 自带约 140 个内置函数，本节只覆盖工作流常用的一部分；完整清单见
+[expr-lang 语言定义](https://expr-lang.org/docs/language-definition)。
+
 **日期时间**：
-- `now()` - 当前时间
-- `today()` - 今天日期
-- `dateFormat(t, layout)` - 格式化时间
+- `now()` - 当前时间（返回 `time.Time`）
+- `date(s)` - 解析日期字符串
+- `duration(s)` - 解析时长字符串，如 `duration("24h")`
+- 格式化用 `time.Time` 的方法：`now().Format("2006-01-02")`
 
 **字符串**：
-- `upper(s)` - 转大写
-- `lower(s)` - 转小写
-- `trim(s)` - 去空格
+- `upper(s)` / `lower(s)` / `trim(s)` - 大小写与去空格
 - `replace(s, old, new)` - 替换
-- `substr(s, start, length)` - 子串
-- `split(s, sep)` - 分割
-- `join(arr, sep)` - 连接
+- `split(s, sep)` / `join(arr, sep)` - 分割与连接
+- `hasPrefix(s, p)` / `trimPrefix(s, p)` - 前缀判断与剥离
+- `repeat(s, n)` - 重复
 - `sprintf(format, args...)` - 格式化字符串（同 Go `fmt.Sprintf`）
+- 取子串用切片：`s[0:5]`、`s[6:]`
 
-**数组**：
-- `len(v)` - 长度
-- `first(arr)` - 首元素
-- `last(arr)` - 尾元素
+**数组与对象**：
+- `len(v)` - 长度（字符串、数组、对象通用）
+- `first(arr)` / `last(arr)` - 首尾元素
+- `keys(m)` / `get(m, k)` - 对象的键与取值
+- `filter(arr, pred)` / `map(arr, f)` / `sortBy(arr, k)` / `sum(arr)` - 见 §4.4 管道
 
 **JSON**：
-- `parseJson(s)` - 解析JSON
-- `toJson(v)` - 转JSON字符串
+- `fromJSON(s)` - 解析 JSON 字符串
+- `toJSON(v)` - 序列化为 JSON 字符串
 
-**编码**：
-- `base64Encode(s)` - Base64编码
-- `base64Decode(s)` - Base64解码
-- `urlEncode(s)` - URL编码
-- `md5(s)` - MD5哈希
-- `sha256(s)` - SHA256哈希
+**数值**：
+- `abs(x)` / `ceil(x)` / `floor(x)` / `round(x)`
+- `int(v)` / `float(v)` / `string(v)` - 类型转换
 
-**其他**：
-- `uuid()` - 生成UUID
-- `abs(x)` - 绝对值
-- `ceil(x)` - 向上取整
-- `floor(x)` - 向下取整
-- `round(x)` - 四舍五入
-- `if(cond, t, f)` - 三元表达式
-- `isEmpty(v)` - 是否为空
+**条件与空值**：
+- 三元表达式：`cond ? a : b`
+- 空值合并：`v ?? default`
+- 判空按类型写：字符串 `s == ""`、数组/对象 `len(v) == 0`
+
+> **不提供的函数**：`today()`、`dateFormat()`、`substr()`、`isEmpty()`、
+> `if(c,t,f)`、`urlEncode()`、`md5()`、`sha256()`、`uuid()`、
+> `base64Encode()`、`base64Decode()`。前五个有上文列出的原生写法；后六个尚无
+> 工作流用到，需要时再按需注册（注册点在 `exprx/functions.go`）。
+>
+> `base64Encode` / `base64Decode` 在**脚本节点**里以 `$helpers.base64Encode`
+> 的形式可用（见 §6.x 脚本节点），那是 guest 运行时的命名空间，与表达式函数
+> 是两套东西。
+>
+> 注册新函数的前提：函数必须**确定性且无 I/O**。表达式在参数边界上每次任务
+> 尝试都会重新求值，读时钟、读文件、发网络请求的函数会让重试后的任务观察到
+> 与首次不同的参数值。
 
 ### 4.4 管道操作
 
-Expr 支持强大的管道操作：
+管道 `|` 把左侧的值作为**最后一个参数**传给右侧的函数调用。以下写法均已实测
+（2026-08-12）。
 
 ```yaml
 # 过滤并映射
 "${{ $nodes['items'].data | filter(#.price > 100) | map(#.name) }}"
 
-# 排序
-"${{ $nodes['items'].data | sortBy('price') }}"
+# 排序 —— 排序键必须写成 .field（谓词），不能写成 'field'（字符串）
+"${{ $nodes['items'].data | sortBy(.price) }}"
+"${{ $nodes['items'].data | sortBy(.price, 'desc') }}"
 
 # 聚合
 "${{ $nodes['items'].data | map(#.price) | sum() }}"
 
-# 复杂处理
+# 复杂处理 —— 构造对象的 map 谓词必须整体加一层小括号
 "${{ $nodes['items'].data
-     | filter(#.active == true)
-     | map(#{id: #.id, total: #.price * #.quantity})
-     | sortBy('total')
+     | filter(.active)
+     | map(({id: .id, total: .price * .quantity}))
+     | sortBy(.total)
 }}"
 
-# 字符串链式
-"${{ $params.text | trim() | upper() | substr(0, 10) }}"
+# 字符串链式（切片取前 10 个字符，见 §4.3「没有 substr」）
+"${{ upper(trim($params.text))[0:10] }}"
 ```
 
 **管道操作符**：
-- `|` - 管道符
-- `#` - 当前项占位符
-- `filter(#.price > 100)` - 过滤
-- `map(#.name)` - 映射
-- `sortBy('field')` - 排序
-- `sum()` - 求和
+- `|` - 管道符（左值作为右侧函数的最后一个参数）
+- `#` - 当前项占位符；管道内也可省略写成 `.field`
+- `filter(.price > 100)` - 过滤
+- `map(.name)` - 映射
+- `sortBy(.field)` / `sortBy(.field, 'desc')` - 排序
+- `sum()` / `count()` / `len()` - 聚合
+
+> **两处会静默出错的写法**（实测）：
+>
+> 1. **`sortBy('field')` 不排序。** 传字符串时 expr-lang 把它当作**每一项都
+>    求值为同一个常量字符串**的排序键，于是所有项相等、原序返回——不报错，
+>    不告警。连 `sortBy(arr, 'nonexistent_field_xyz')` 也照样"成功"。排序键
+>    必须写谓词 `.price` 或 `#.price`。
+> 2. **`#{...}` 是语法错误。** 在 `map()` 里构造对象要写
+>    `map(({id: .id}))`——整体套一层小括号，否则 `{` 被当成块的起始：
+>    `unexpected token Bracket("{")`。
 
 ### 4.5 表达式示例
 
@@ -928,15 +1013,15 @@ isVip: "${{ $params.amount > 1000 && $nodes['user'].level == 'vip' }}"
 # 函数调用
 userName: "${{ upper(trim($params.name)) }}"
 
-# 日期格式化
-createdAt: "${{ dateFormat(now(), '2006-01-02T15:04:05Z07:00') }}"
+# 日期格式化（没有 dateFormat，直接用 time.Time 的 Format）
+createdAt: "${{ now().Format('2006-01-02T15:04:05Z07:00') }}"
 
-# 数据转换
-items: "${{ $nodes['fetch'].items | map(#{
-  id: #.id,
-  name: upper(#.name),
-  price: #.price * 0.9
-}) }}"
+# 数据转换（构造对象的 map 谓词要整体加小括号，见 §4.4）
+normalizedItems: "${{ $nodes['fetch'].items | map(({
+  id: .id,
+  name: upper(.name),
+  price: .price * 0.9
+})) }}"
 ```
 
 ## 5. Connections 机制
@@ -993,7 +1078,7 @@ nodes:
   - name: is_valid
     type: xflow.if
     parameters:
-      condition: "${{ $nodes['validate'].is_valid }}"
+      condition: "$nodes['validate'].is_valid"
 
 connections:
   is_valid:
@@ -1355,7 +1440,7 @@ nodes:
     type: xflow.script
     parameters:
       engine: wasm
-      code: "${{ ... }}"
+      code: "..."
 
 dependency_edges:
   - node: cleanse
@@ -1400,12 +1485,12 @@ dependency_edges:
 nodes:
   - name: cleanse
     parameters:
-      code: "${{ $supplies.rules.items }}"
+      code: "$supplies.rules.items"
 # dependency_edges 缺失该边
 
 # ❌ 编译期报错：名字不是字面量
 parameters:
-  code: "${{ $supplies[$vars.dynamic_name] }}"
+  code: "$supplies[$vars.dynamic_name]"
 
 # ✅ 合法：字面量名字 + 显式声明的依赖边
 dependency_edges:
@@ -1471,10 +1556,10 @@ dependency_edges:
 内联 `code` 示例：
 ```yaml
 # 简单计算
-code: "${{ $params.price * $params.quantity * 0.9 }}"
+code: "$params.price * $params.quantity * 0.9"
 
 # 数组聚合（使用 Expr 管道）
-code: "${{ $nodes['fetch'].items | map(#.price * #.qty) | sum() }}"
+code: "$nodes['fetch'].items | map(#.price * #.qty) | sum()"
 ```
 
 > **注意**：`code` 使用 Expr 表达式引擎执行，不支持 JavaScript/Python 语法。
@@ -1508,7 +1593,7 @@ code: "${{ $nodes['fetch'].items | map(#.price * #.qty) | sum() }}"
 - name: check_amount
   type: xflow.if
   parameters:
-    condition: "${{ $params.amount > 0 && $nodes['validate_order'].is_valid }}"
+    condition: "$params.amount > 0 && $nodes['validate_order'].is_valid"
 
 # connections 中使用具名端口
 connections:
@@ -1548,7 +1633,7 @@ connections:
   parameters:
     mode: expression
     outputs: [email, sms, webhook]
-    expression: "${{ $nodes['parse_message'].type }}"   # 返回值必须是 outputs 中的某个端口名
+    expression: "$nodes['parse_message'].type"   # 返回值必须是 outputs 中的某个端口名
     default_output: webhook                              # 返回值不在 outputs 中时走此端口
 ```
 
@@ -1583,7 +1668,7 @@ expression 形态示例：
 - name: extract_ids
   type: xflow.map
   parameters:
-    items: "${{ $nodes['fetch'].rows }}"
+    items: "$nodes['fetch'].rows"
     expression: "$item.id"
     continue_on_error: false   # 可选，语义与 body 形态一致
 ```
@@ -1615,7 +1700,7 @@ nodes:
   - name: batch_processor
     type: xflow.map
     parameters:
-      items: "${{ $nodes['fetch'].items }}"
+      items: "$nodes['fetch'].items"
       batch_size: 10
       continue_on_error: true
       body:
@@ -1623,7 +1708,7 @@ nodes:
           - name: validate_item
             type: xflow.function
             parameters:
-              code: "${{ $item.amount > 0 }}"
+              code: "$item.amount > 0"
 
           - name: call_api
             type: xflow.http
@@ -1636,7 +1721,7 @@ nodes:
           - name: skip_log
             type: xflow.function
             parameters:
-              code: "${{ 'skip: ' + $item.id }}"
+              code: "'skip: ' + $item.id"
 
         connections:
           validate_item:
@@ -1747,7 +1832,7 @@ nodes:
   - name: split_orders
     type: xflow.split
     parameters:
-      items: "${{ $nodes['fetch'].orders }}"
+      items: "$nodes['fetch'].orders"
       batch_size: 5
 
   - name: process_order
@@ -1983,7 +2068,7 @@ nodes:
     type: xflow.if
     parameters:
       # 编译器校验 vip_level 是否在 fetch_user 的 output_schema.properties 中 → 合法
-      condition: "${{ $nodes['fetch_user'].vip_level > 3 }}"
+      condition: "$nodes['fetch_user'].vip_level > 3"
 
   - name: send_notify
     type: xflow.http
@@ -2125,7 +2210,7 @@ nodes:
   - name: process_result
     type: xflow.function
     parameters:
-      code: "${{ $nodes['fetch_order'].amount > 100 ? 'large' : 'small' }}"
+      code: "$nodes['fetch_order'].amount > 100 ? 'large' : 'small'"
 
 connections:
   fetch_order:
@@ -2195,7 +2280,7 @@ nodes:
   - name: check_valid
     type: xflow.if
     parameters:
-      condition: "${{ $nodes['validate'].is_valid }}"
+      condition: "$nodes['validate'].is_valid"
 
   # Load
   - name: load_to_warehouse
@@ -2256,7 +2341,7 @@ nodes:
   - name: parse_message
     type: xflow.function
     parameters:
-      code: "${{ parseJson($params.message) }}"
+      code: "fromJSON($params.message)"
 
   - name: validate_task
     type: xflow.function
@@ -2270,9 +2355,9 @@ nodes:
     parameters:
       outputs: [email, sms, webhook]
       rules:
-        - condition: "${{ $nodes['parse_message'].type == 'email' }}"
+        - condition: "$nodes['parse_message'].type == 'email'"
           output: email
-        - condition: "${{ $nodes['parse_message'].type == 'sms' }}"
+        - condition: "$nodes['parse_message'].type == 'sms'"
           output: sms
       default_output: webhook
 

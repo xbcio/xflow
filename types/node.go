@@ -60,17 +60,52 @@ type ActionHandler interface {
 
 // Input holds the execution context passed to a node handler.
 type Input struct {
-	Params      map[string]any // evaluated node parameters
-	Data        map[string]any // upstream data from the main input port ($input)
-	Inputs      map[string]any // multi-port inputs keyed by port name ($inputs)
-	Vars        map[string]any // workflow-level variables ($vars)
-	Config      map[string]any // workflow-level config ($config)
-	Runtime     *Runtime       // per-execution runtime context ($runtime)
+	Params  map[string]any // evaluated node parameters
+	Data    map[string]any // upstream data from the main input port ($input)
+	Inputs  map[string]any // multi-port inputs keyed by port name ($inputs)
+	Vars    map[string]any // workflow-level variables ($vars)
+	Config  map[string]any // workflow-level config ($config)
+	Runtime *Runtime       // per-execution runtime context ($runtime)
+	// Nodes holds the outputs of nodes referenced via $nodes['name'] in the
+	// node's parameters. Populated at input assembly from the compile-time
+	// reference set (Graph.NodesRefsFor).
+	//
+	// Typed-nil contract for unexecuted nodes:
+	//   - A node that HAS executed: Nodes["x"] = its output (map[string]any).
+	//   - A node that has NOT executed: Nodes["x"] = map[string]any(nil).
+	//     The key MUST exist and the value MUST be a typed nil map.
+	//
+	// Why typed nil and not absent key or untyped nil:
+	//   | value form          | $nodes['x'] ?? 'D' | $nodes['x'].f ?? 'D' |
+	//   |---------------------|--------------------|-----------------------|
+	//   | key absent          | "D"                | ERROR                 |
+	//   | untyped nil         | "D"                | ERROR "cannot fetch"  |
+	//   | map[string]any(nil) | "D"                | "D" ✓                 |
+	//
+	// Spec §4.2 recommends $nodes['optional'].field ?? 'default' — only the
+	// typed-nil form makes .field access succeed (returning nil) so ?? can fire.
+	Nodes       map[string]any
 	ExecutionID string
 	NodeName    string
 	TraceID     string
 	SpanID      string
-	Timeout     time.Duration // zero means no limit
+	// WorkflowName and WorkflowVersion carry the compiled graph's identity so
+	// expressions can read $workflow.name / $workflow.version. Populated at
+	// input assembly from Graph.Name() / Graph.WorkflowVersion().
+	//
+	// There is deliberately no WorkflowID. WorkflowDef.ID is an instance
+	// identifier with no production writer, and sdk/xflow/workflow_identity.go
+	// excludes it from workflow identity as "a runtime instance pointer, not
+	// part of the workflow definition" -- exposing it would put a permanently
+	// empty field into the DSL.
+	//
+	// Inside a sub-graph body these hold the INNER graph's identity, which for
+	// a map body is the map node's name (ProjectNodeBodyPackage builds the
+	// inner def with Name = the map node's name). A body member asking for
+	// $workflow.name gets the body it belongs to, not the outer workflow.
+	WorkflowName    string
+	WorkflowVersion string
+	Timeout         time.Duration // zero means no limit
 
 	// credential resolver injected by the engine; accessed via Credential().
 	credential func(namespace namespace.Namespace, name string) map[string]any
