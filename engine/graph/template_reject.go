@@ -108,6 +108,16 @@ var evaluableSubFields = map[string]map[string][]string{
 // Mutating the returned map is a programming error.
 func EvaluableParams() map[string]map[string]bool { return evaluableParams }
 
+// EvaluableSubFields reports, per node type and parameter, which sub-field
+// paths inside that parameter the handler evaluates itself. The boundary
+// evaluation layer must preserve these sub-fields verbatim (not evaluate them)
+// while still evaluating sibling fields in the same parameter.
+//
+// Exported for the same reason as EvaluableParams: the boundary layer derives
+// its sub-field exemption set from this table. There must be no second copy.
+// The returned map is read-only by contract.
+func EvaluableSubFields() map[string]map[string][]string { return evaluableSubFields }
+
 // containsTemplate reports whether s carries either template form. It keys off
 // "{{" alone: "${{" contains it, and a value with braces but no "{{" -- an
 // xflow.http JSON body like {"a":1} -- is a static literal by spec rule 3.

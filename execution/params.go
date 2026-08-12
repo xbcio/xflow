@@ -37,12 +37,25 @@ var perItemExemptParams = map[string]map[string]bool{
 //   1. appear in graph.EvaluableParams() for this nodeType (the handler
 //      evaluates them itself — code, condition, expression, items, etc.)
 //   2. appear in perItemExemptParams (per-item env roots don't exist here)
+//   3. appear as sub-field paths in graph.EvaluableSubFields() — the boundary
+//      evaluates the parameter's OTHER fields but preserves these sub-fields
+//      verbatim for the handler (e.g. xflow.switch rules[].condition)
 //
-// The exemption set is derived from graph.EvaluableParams() — the same data
-// the compiler uses to reject unreachable templates. There is deliberately NO
-// second copy of that table here; two tables would inevitably drift, and drift
-// is silent: a parameter missing from both is neither compile-rejected nor
-// runtime-evaluated, so the template ships verbatim with zero diagnostics.
+// The exemption set is derived from graph.EvaluableParams() and
+// graph.EvaluableSubFields() — the same data the compiler uses. There is
+// deliberately NO second copy of either table here; two tables would inevitably
+// drift, and drift is silent: a parameter missing from both is neither
+// compile-rejected nor runtime-evaluated, so the template ships verbatim with
+// zero diagnostics.
+//
+// In-place mutation safety: evaluateParams mutates input.Params[param] in place.
+// This is safe because each call to runner.Execute receives a freshly built
+// TaskLease from engine.BuildTaskLease (which calls buildInput, constructing a
+// new types.Input from stored state). The same lease is never passed to Execute
+// twice. Within a single Execute call, evaluateParams runs exactly once (before
+// the SuspendingHandler branch); executeSuspending's OnResume/PrepareSuspend
+// consume the same already-evaluated lease.Input without re-entering Execute.
+// Retries produce a new TaskLease via a new BuildTaskLease call.
 //
 // On error the function returns a wrapped error naming the node and parameter
 // (for diagnostics) but NEVER the parameter value or evaluation result — the
@@ -57,6 +70,12 @@ func evaluateParams(input *types.Input, nodeType string) error {
 	// (b) perItemExemptParams (boundary cannot evaluate these)
 	exempt := buildExemptSet(nodeType)
 
+	// (c) Sub-field exemptions: parameters where only SOME sub-fields are
+	// handler-evaluated. These parameters are NOT in the exempt set (the
+	// boundary must still evaluate their non-exempt sub-fields), but need
+	// special traversal that skips the named paths.
+	subFieldExempt := graph.EvaluableSubFields()[nodeType]
+
 	// Build the expression environment once for all parameters.
 	env := exprx.BuildExprEnv(input, nil)
 
@@ -64,7 +83,17 @@ func evaluateParams(input *types.Input, nodeType string) error {
 		if exempt[param] {
 			continue
 		}
-		evaluated, err := evaluateParamValue(value, env)
+		var (
+			evaluated any
+			err       error
+		)
+		if exemptKeys, hasSubFields := subFieldExempt[param]; hasSubFields {
+			// This parameter has sub-field exemptions: traverse the array
+			// elements, skipping the named keys in each element map.
+			evaluated, err = evaluateParamWithSubFieldExemptions(value, env, exemptKeys)
+		} else {
+			evaluated, err = evaluateParamValue(value, env)
+		}
 		if err != nil {
 			// Error message: node name, node type, parameter name, expression
 			// source (authored config). NEVER the value or the result.
@@ -97,6 +126,56 @@ func buildExemptSet(nodeType string) map[string]bool {
 	}
 
 	return result
+}
+
+// evaluateParamWithSubFieldExemptions handles parameters where only specific
+// sub-fields within each array element are handler-evaluated (e.g.
+// xflow.switch's "rules" parameter: rules[].condition is evaluated by the
+// handler, but rules[].output is a literal port name). The parameter is
+// expected to be []any of map[string]any; exempt keys within each element map
+// are preserved verbatim while other keys are recursively evaluated.
+func evaluateParamWithSubFieldExemptions(value any, env map[string]any, exemptKeys []string) (any, error) {
+	elems, ok := value.([]any)
+	if !ok {
+		// Not the expected array shape — fall back to full evaluation.
+		// The compile-time validator (checkSubFields) already rejects templates
+		// in unexpected shapes, so this path is a no-op in practice.
+		return evaluateParamValue(value, env)
+	}
+
+	exempt := make(map[string]bool, len(exemptKeys))
+	for _, k := range exemptKeys {
+		exempt[k] = true
+	}
+
+	result := make([]any, len(elems))
+	for i, elem := range elems {
+		m, ok := elem.(map[string]any)
+		if !ok {
+			// Non-map element — evaluate normally.
+			evaluated, err := evaluateParamValue(elem, env)
+			if err != nil {
+				return nil, err
+			}
+			result[i] = evaluated
+			continue
+		}
+		newMap := make(map[string]any, len(m))
+		for k, child := range m {
+			if exempt[k] {
+				// Preserve verbatim — the handler evaluates this sub-field.
+				newMap[k] = child
+			} else {
+				evaluated, err := evaluateParamValue(child, env)
+				if err != nil {
+					return nil, err
+				}
+				newMap[k] = evaluated
+			}
+		}
+		result[i] = newMap
+	}
+	return result, nil
 }
 
 // evaluateParamValue recursively renders templates in a parameter value tree.

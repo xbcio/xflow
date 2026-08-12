@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -255,4 +256,128 @@ func (h *mapTypeHandler) Descriptor() types.Descriptor {
 func (h *mapTypeHandler) Execute(_ context.Context, input *types.Input) (*types.Output, error) {
 	h.lastInput = input
 	return &types.Output{Data: map[string]any{"ok": true}}, nil
+}
+
+// switchTypeHandler records the input for xflow.switch, so we can inspect
+// what the boundary did to rules[].condition vs rules[].output.
+type switchTypeHandler struct {
+	lastInput *types.Input
+}
+
+func (h *switchTypeHandler) Descriptor() types.Descriptor {
+	return types.Descriptor{Type: "xflow.switch"}
+}
+
+func (h *switchTypeHandler) Execute(_ context.Context, input *types.Input) (*types.Output, error) {
+	h.lastInput = input
+	return &types.Output{Data: map[string]any{"port": "high"}}, nil
+}
+
+// TestEvaluateParams_SwitchRulesConditionPreservedVerbatim confirms that
+// xflow.switch's rules[].condition is NOT evaluated at the boundary — the
+// handler evaluates it itself (switch.go:119). Without sub-field exemption
+// the boundary would turn "${{ $params.threshold > 10 }}" into bool true,
+// and the handler would then cast.ToString(true) = "true" and evaluate that
+// as an expr — always true, silent misrouting.
+func TestEvaluateParams_SwitchRulesConditionPreservedVerbatim(t *testing.T) {
+	rec := &switchTypeHandler{}
+	runner := NewRunner(singleHandlerRegistry{handler: rec})
+
+	condExpr := "${{ $params.threshold > 10 }}"
+	lease := &engine.TaskLease{
+		Task:     engine.Task{ExecutionID: "exec-switch", NodeName: "switch-node"},
+		NodeType: "xflow.switch",
+		Input: &types.Input{
+			ExecutionID: "exec-switch",
+			NodeName:    "switch-node",
+			Params: map[string]any{
+				"mode": "rules",
+				"rules": []any{
+					map[string]any{
+						"condition": condExpr,
+						"output":    "high",
+					},
+				},
+				"default_output": "low",
+				"threshold":      50,
+			},
+		},
+	}
+
+	_, err := runner.Execute(context.Background(), lease)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	rules, ok := rec.lastInput.Params["rules"].([]any)
+	if !ok || len(rules) == 0 {
+		t.Fatal("rules param missing or empty after boundary evaluation")
+	}
+	rule0, ok := rules[0].(map[string]any)
+	if !ok {
+		t.Fatalf("rules[0] = %T, want map[string]any", rules[0])
+	}
+
+	// condition MUST be the original template string — NOT a bool.
+	if rule0["condition"] != condExpr {
+		t.Errorf("rules[0].condition = %#v (%T), want original template %q preserved verbatim\n"+
+			"(sub-field exemption failed: boundary evaluated a condition the handler will re-evaluate)",
+			rule0["condition"], rule0["condition"], condExpr)
+	}
+
+	// output is a literal port name — not evaluable, but also has no template
+	// so the boundary passes it through unchanged.
+	if rule0["output"] != "high" {
+		t.Errorf("rules[0].output = %#v, want %q", rule0["output"], "high")
+	}
+}
+
+// TestEvaluateParams_SubFieldExemptionCoverage is a mechanical guard that
+// asserts every (nodeType, param) pair in EvaluableSubFields is actually
+// handled by the boundary's sub-field traversal logic. If someone adds a new
+// entry to evaluableSubFields without wiring it here, this test fails —
+// preventing silent double evaluation for the new entry.
+func TestEvaluateParams_SubFieldExemptionCoverage(t *testing.T) {
+	subFields := graph.EvaluableSubFields()
+	evaluable := graph.EvaluableParams()
+
+	for nodeType, params := range subFields {
+		for param := range params {
+			// A sub-field param must NOT be in the full-exempt set (otherwise
+			// the boundary skips it entirely and never reaches the sub-field
+			// traversal code).
+			if handlerEvals, ok := evaluable[nodeType]; ok && handlerEvals[param] {
+				t.Errorf("EvaluableSubFields[%q][%q] is also in EvaluableParams — "+
+					"the boundary will skip it entirely (full exempt) and never "+
+					"apply sub-field exemption", nodeType, param)
+			}
+			// Verify the boundary actually uses this entry. We can't easily
+			// introspect the code path, but we CAN verify the entry exists and
+			// is consumed: call evaluateParams with a matching input and confirm
+			// the exempt sub-field is preserved.
+			condTemplate := "${{ 1 + 1 }}"
+			input := &types.Input{
+				NodeName: "coverage-probe",
+				Params: map[string]any{
+					param: []any{
+						map[string]any{
+							params[param][0]: condTemplate,
+							"other_field":    "literal",
+						},
+					},
+				},
+			}
+			if err := evaluateParams(input, nodeType); err != nil {
+				t.Errorf("evaluateParams(%q, %q) error = %v", nodeType, param, err)
+				continue
+			}
+			elems := input.Params[param].([]any)
+			elem := elems[0].(map[string]any)
+			if elem[params[param][0]] != condTemplate {
+				t.Errorf("evaluateParams(%q, %q): sub-field %q was evaluated "+
+					"(got %#v), should be exempt",
+					nodeType, param, params[param][0], elem[params[param][0]])
+			}
+		}
+	}
 }
