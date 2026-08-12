@@ -34,6 +34,11 @@ func (e *Engine) buildInput(ctx context.Context, t *Task, g *graph.Graph) (*type
 		NodeName:    t.NodeName,
 		TraceID:     snap.TraceID,
 		SpanID:      snap.SpanID,
+		// Graph identity, exposed to expressions as $workflow. Read from the
+		// graph being executed, so inside a sub-graph these are the INNER
+		// graph's values -- see the Input.WorkflowName field comment.
+		WorkflowName:    g.Name(),
+		WorkflowVersion: g.WorkflowVersion(),
 	}
 
 	if t.Type == TaskTypeNodeResume {

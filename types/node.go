@@ -89,7 +89,23 @@ type Input struct {
 	NodeName    string
 	TraceID     string
 	SpanID      string
-	Timeout     time.Duration // zero means no limit
+	// WorkflowName and WorkflowVersion carry the compiled graph's identity so
+	// expressions can read $workflow.name / $workflow.version. Populated at
+	// input assembly from Graph.Name() / Graph.WorkflowVersion().
+	//
+	// There is deliberately no WorkflowID. WorkflowDef.ID is an instance
+	// identifier with no production writer, and sdk/xflow/workflow_identity.go
+	// excludes it from workflow identity as "a runtime instance pointer, not
+	// part of the workflow definition" -- exposing it would put a permanently
+	// empty field into the DSL.
+	//
+	// Inside a sub-graph body these hold the INNER graph's identity, which for
+	// a map body is the map node's name (ProjectNodeBodyPackage builds the
+	// inner def with Name = the map node's name). A body member asking for
+	// $workflow.name gets the body it belongs to, not the outer workflow.
+	WorkflowName    string
+	WorkflowVersion string
+	Timeout         time.Duration // zero means no limit
 
 	// credential resolver injected by the engine; accessed via Credential().
 	credential func(namespace namespace.Namespace, name string) map[string]any

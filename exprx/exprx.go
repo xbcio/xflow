@@ -97,11 +97,11 @@ func EvalExpr(code string, env map[string]any, asBool bool) (any, error) {
 
 // BuildExprEnv constructs the expression evaluation environment from node input.
 // Available variables: $input (Data), $inputs (multi-port), $vars, $config,
-// $params, $runtime, $supplies, and $nodes. The extra map, when non-nil, is
-// merged into the env top level (overwriting same-named keys) so callers can
-// inject additional variables — e.g. xflow.function spreads its "params" and
-// xflow.script adds $credentials/$credential — without re-implementing the base
-// environment.
+// $params, $runtime, $supplies, $nodes, $execution, and $workflow. The extra
+// map, when non-nil, is merged into the env top level (overwriting same-named
+// keys) so callers can inject additional variables — e.g. xflow.function
+// spreads its "params" and xflow.script adds $credentials/$credential — without
+// re-implementing the base environment.
 func BuildExprEnv(input *types.Input, extra map[string]any) map[string]any {
 	env := make(map[string]any, 16)
 
@@ -131,6 +131,19 @@ func BuildExprEnv(input *types.Input, extra map[string]any) map[string]any {
 	// node's parameters. Populated by buildInput from the compile-time reference
 	// set. nil when the node declares no $nodes references.
 	env["$nodes"] = input.Nodes
+	// $execution and $workflow are UNCONDITIONAL: both roots exist on every
+	// call, holding empty strings when the underlying fields are unset. An
+	// absent root is a compile error ("unknown name $execution") that fails the
+	// whole node, so making them conditional would mean an expression that
+	// compiles in one execution fails in another. $nodes can be nil because it
+	// is a map value, not a missing key.
+	env["$execution"] = map[string]any{
+		"id": input.ExecutionID,
+	}
+	env["$workflow"] = map[string]any{
+		"name":    input.WorkflowName,
+		"version": input.WorkflowVersion,
+	}
 
 	for k, v := range extra {
 		env[k] = v
