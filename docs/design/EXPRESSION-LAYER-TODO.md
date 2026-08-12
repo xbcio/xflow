@@ -61,7 +61,7 @@ spec §4.1 用 80 行描述了两种模式与三条解析规则，还规定「`$
 
 ### 第 3 层：四个根不存在
 
-`exprx.BuildExprEnv`（`node/internal/utils/exprx/exprx.go:93-124`）提供七个根：
+`exprx.BuildExprEnv`（`exprx/exprx.go:105-153`）提供七个根：
 `$input`、`$inputs`、`$vars`、`$config`、`$params`、`$runtime`、`$supplies`
 （外加 `Data` 顶层键的展开，以及 map 逐项的 `$item`/`$index`/`$items`）。
 

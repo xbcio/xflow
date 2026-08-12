@@ -34,6 +34,7 @@ func RunStateStoreContract(t *testing.T, state engine.StateStore) {
 		Status:  types.ExecutionStatusRunning,
 		Params:  map[string]any{"claim_id": "c-1"},
 		Runtime: &types.Runtime{Vars: map[string]any{"namespace_id": "namespace-a"}},
+		Scope:   map[string]any{"$index": float64(3)},
 	}); err != nil {
 		t.Fatalf("CreateExecution() error = %v", err)
 	}
@@ -43,6 +44,15 @@ func RunStateStoreContract(t *testing.T, state engine.StateStore) {
 	}
 	if snap.Runtime == nil || snap.Runtime.Vars["namespace_id"] != "namespace-a" {
 		t.Fatalf("Runtime = %#v, want namespace_id namespace-a", snap.Runtime)
+	}
+	// Scope holds the execution-wide expression roots (a map body's
+	// $item/$index/$items). buildInput merges them into EVERY node's Data, so a
+	// backend that drops them on the round trip silently un-fixes the
+	// non-entry-member defect. float64 is the value asserted because a JSON
+	// backend decodes any number as one; asserting an int would pass on the
+	// memory backend and fail on Redis for a reason unrelated to the contract.
+	if snap.Scope["$index"] != float64(3) {
+		t.Fatalf("Scope = %#v, want $index 3", snap.Scope)
 	}
 
 	loaded, err := state.LoadGraph(ctx, id)

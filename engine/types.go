@@ -182,6 +182,17 @@ type ExecutionSnapshot struct {
 	Status  types.ExecutionStatus
 	Params  map[string]any
 	Runtime *types.Runtime
+	// Scope holds expression roots that belong to the EXECUTION rather than to
+	// any one node: every node of this execution sees them, whatever its
+	// position in the graph. Today its only producer is a map body, which puts
+	// $item/$index/$items here.
+	//
+	// Params cannot carry them. engine/input.go reads snap.Params only for a
+	// node with zero in-edges, so roots shipped as submission params reached the
+	// body's ENTRY member and nothing else -- a two-member body failed at
+	// "unknown name $index" and took the whole map node down with it. The DSL
+	// promises these roots "body 内", not "body 入口".
+	Scope   map[string]any
 	TraceID string
 	SpanID  string
 	// TraceCarrier holds the W3C traceparent/tracestate headers captured at

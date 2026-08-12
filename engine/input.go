@@ -47,6 +47,7 @@ func (e *Engine) buildInput(ctx context.Context, t *Task, g *graph.Graph) (*type
 			return nil, fmt.Errorf("get resumed node output %q/%q: %w", t.ExecutionID, t.NodeName, err)
 		}
 		input.Data = cloneMap(data)
+		applyExecutionScope(input, snap.Scope)
 		// A resumed node's parameters may also contain $nodes references that
 		// need resolving — the resume re-enters handler Execute with the same
 		// parameters, so $nodes must be available for template evaluation.
@@ -70,6 +71,7 @@ func (e *Engine) buildInput(ctx context.Context, t *Task, g *graph.Graph) (*type
 	// could not fire and the whole node failed to evaluate its parameters.
 	if g.AllowCycles() && t.NodeIdx == g.StartIndex() && t.ActivationID == 1 {
 		input.Data = cloneMap(snap.Params)
+		applyExecutionScope(input, snap.Scope)
 		if err := prefetchNodesRefs(ctx, e, t, g, input); err != nil {
 			return nil, err
 		}
@@ -100,10 +102,37 @@ func (e *Engine) buildInput(ctx context.Context, t *Task, g *graph.Graph) (*type
 		}
 		input.Inputs = inputs
 	}
+	applyExecutionScope(input, snap.Scope)
 	if err := prefetchNodesRefs(ctx, e, t, g, input); err != nil {
 		return nil, err
 	}
 	return input, nil
+}
+
+// applyExecutionScope merges the execution-wide expression roots (a map body's
+// $item/$index/$items) into this node's Data, which is what BuildExprEnv
+// spreads into the expression environment's top level.
+//
+// It runs on EVERY node of the execution, after Data was assembled from
+// whichever source that node's position dictates. Shipping the roots as
+// submission params instead reached only nodes with zero in-edges -- the body's
+// entry member -- and every other member failed to compile its parameters.
+//
+// The scope wins over a same-named upstream key. The three roots are "$"-
+// prefixed and the "$" prefix is reserved (a node output cannot introduce one
+// through the DSL), so the collision this resolves is not reachable today; the
+// rule is stated because the alternative -- letting an upstream output shadow a
+// promised loop root -- would be silent and item-dependent.
+func applyExecutionScope(input *types.Input, scope map[string]any) {
+	if len(scope) == 0 {
+		return
+	}
+	if input.Data == nil {
+		input.Data = make(map[string]any, len(scope))
+	}
+	for k, v := range scope {
+		input.Data[k] = v
+	}
 }
 
 // prefetchNodesRefs populates input.Nodes from the compile-time reference set.

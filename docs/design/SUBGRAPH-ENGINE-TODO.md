@@ -91,7 +91,7 @@ P2-5 修完后，编译期已经按这个形状执行了：`transformNodeTypes` 
    同一份契约，否则同一个节点的两种写法会有两套下游语义——`count` 恒等于输入长度、
    失败项以 `{_error, _index}` 占位、`continue_on_error` 只在「至少一项成功」时
    放行（全失败两种设置都失败），逐项根用带 `$` 前缀的 `$item`/`$index`/`$items`
-   与 `execution/subgraph` 的 `bodyItemInput` 对齐（无前缀的 `item`/`index` 归
+   与 `execution/subgraph` 的 `bodyItemScope` 对齐（无前缀的 `item`/`index` 归
    filter 节点，会静默遮蔽）。`batch_size` 对它无意义且**不**影响 `$index`。
 2. **编译期拒绝两者皆无**（`validateNodeBody` 的 fan-out 规则 + `fanOutNodeTypes`）。
    这一半是**判据下沉的前提**而不只是整洁：判据一旦改成 `BodyAt != nil`，无 body
@@ -346,7 +346,7 @@ body 里仍然不允许出现 `xflow.map`（`compile.go` 的 `bannedBodyMemberTy
 「注入链路断了」是两类问题，修法完全不同。
 
 真实机制：`$supplies` 读的是**进程全局单例** `supply.Default`
-（`node/internal/utils/exprx/exprx.go:117` 的 `BuildExprEnv`），不经执行上下文传递。
+（`exprx/exprx.go:105` 的 `BuildExprEnv`），不经执行上下文传递。
 内层引擎（`execution/subgraph`）对 supply 确实零引用——但这恰恰意味着**不需要引用
 即可工作**，因为消费方不是通过引擎传参读 supply，而是直接读全局单例，跟节点是不是
 group 成员、跑在内层还是外层引擎无关。

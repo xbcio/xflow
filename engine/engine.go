@@ -171,7 +171,7 @@ func (e *Engine) Submit(ctx context.Context, g *graph.Graph, params map[string]a
 		Status:       types.ExecutionStatusRunning,
 		Params:       cloneMap(params),
 	}
-	attachTraceMetadata(ctx, snap)
+	attachSubmissionMetadata(ctx, snap)
 	if len(runtime) > 0 {
 		snap.Runtime = cloneRuntime(runtime[0])
 	}
@@ -192,7 +192,7 @@ func (e *Engine) Invoke(ctx context.Context, g *graph.Graph, entryName string, p
 		Status: types.ExecutionStatusRunning,
 		Params: cloneMap(params),
 	}
-	attachTraceMetadata(ctx, snap)
+	attachSubmissionMetadata(ctx, snap)
 	if len(runtime) > 0 {
 		snap.Runtime = cloneRuntime(runtime[0])
 	}
@@ -264,7 +264,7 @@ func (e *Engine) loadActiveGraph(ctx context.Context, id types.ExecutionID) (*gr
 	return g, true, nil
 }
 
-func attachTraceMetadata(ctx context.Context, snap *ExecutionSnapshot) {
+func attachSubmissionMetadata(ctx context.Context, snap *ExecutionSnapshot) {
 	if traceID, ok := TraceIDFromContext(ctx); ok {
 		snap.TraceID = traceID
 	}
@@ -273,5 +273,10 @@ func attachTraceMetadata(ctx context.Context, snap *ExecutionSnapshot) {
 	}
 	if carrier := TraceCarrierFromContext(ctx); len(carrier) > 0 {
 		snap.TraceCarrier = carrier
+	}
+	// Cloned rather than aliased: the caller's map (a map body's per-item roots)
+	// is rebuilt for the next item, and the snapshot outlives this call.
+	if scope := ExecutionScopeFromContext(ctx); len(scope) > 0 {
+		snap.Scope = cloneMap(scope)
 	}
 }

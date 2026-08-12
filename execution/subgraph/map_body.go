@@ -69,7 +69,8 @@ func (x *MapBodyExecutor) ExecuteBatchBody(ctx context.Context, req engine.Batch
 		res, err := x.executor.Execute(ctx, Request{
 			Package:         req.Body,
 			PackageHash:     req.BodyHash,
-			Input:           bodyItemInput(req, item, index),
+			Input:           bodyItemInput(req),
+			Scope:           bodyItemScope(req, item, index),
 			SuspendDisabled: x.suspendDisabled,
 			// Zero when this MapBodyExecutor was built with no outer deadline (the
 			// sdk/xflow and SubgraphRuntime constructors both do this today, since
@@ -117,28 +118,39 @@ func globalIndex(req engine.BatchBodyRequest, pos int) int {
 	return req.BatchIndex*req.BatchSize + pos
 }
 
-// bodyItemInput builds the entry input for one item. The three roots the DSL
-// promises a body are injected here, in the map adapter, for the reason in this
-// type's doc comment.
+// bodyItemScope builds the execution-wide roots the DSL promises a body. They
+// are injected here, in the map adapter, for the reason in this type's doc
+// comment.
+//
+// They travel as a Request.Scope rather than inside the entry Input because the
+// spec scopes them to the body ("$item、$index、$items 仅在 body 内可用"), not to
+// the body's entry node. As submission params they reached only members with no
+// in-edges, so a two-member body failed at "unknown name $index" before its
+// second member ever ran.
 //
 // $item and $index deliberately keep their "$" prefix: the filter node uses the
 // unprefixed "item"/"index" for its own per-element condition (see
 // node/internal/transform/filter.go), and a filter nested in a body would
 // otherwise shadow the map's iteration variables silently.
+func bodyItemScope(req engine.BatchBodyRequest, item any, index int) map[string]any {
+	return map[string]any{
+		"$item":  item,
+		"$index": index,
+		"$items": req.AllItems,
+	}
+}
+
+// bodyItemInput builds the entry input for one item.
 //
 // Runtime is forwarded rather than left nil so a body member's $vars carries the
 // per-submission half too -- Executor reads it off this Input and passes it to
 // the inner Submit. The static half already arrives inside the projected
 // package's Def.Context.
-func bodyItemInput(req engine.BatchBodyRequest, item any, index int) *types.Input {
-	return &types.Input{
-		Data: map[string]any{
-			"$item":  item,
-			"$index": index,
-			"$items": req.AllItems,
-		},
-		Runtime: req.Runtime,
-	}
+//
+// Data is deliberately empty: the body's entry member has no upstream output to
+// inherit, and the loop roots travel on Request.Scope instead (bodyItemScope).
+func bodyItemInput(req engine.BatchBodyRequest) *types.Input {
+	return &types.Input{Runtime: req.Runtime}
 }
 
 // exitsAsItemResult folds a body's fired boundary outputs into one item's result.

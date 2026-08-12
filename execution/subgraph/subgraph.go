@@ -47,9 +47,19 @@ type Backend interface {
 // Input is everything a sub-graph execution needs, regardless of who is
 // asking for it.
 type Request struct {
-	Package         *graph.SubgraphPackage
-	PackageHash     string
-	Input           *types.Input
+	Package     *graph.SubgraphPackage
+	PackageHash string
+	Input       *types.Input
+	// Scope carries expression roots that belong to the whole sub-execution
+	// rather than to its entry node -- a map body's $item/$index/$items. It is
+	// separate from Input.Data because Data becomes the entry node's submission
+	// params, and submission params reach only nodes with no in-edges: a body
+	// with two chained members had its second member fail at "unknown name
+	// $index" while the first saw all three roots.
+	//
+	// Empty for a group or a subflow, which execute once and have no notion of
+	// a current item.
+	Scope           map[string]any
 	Deadline        time.Time
 	SuspendDisabled bool
 }
@@ -167,6 +177,10 @@ func (e *Executor) Execute(ctx context.Context, req Request) (Result, error) {
 	// Submit with the pre-allocated inner execution ID.
 	entryInput := req.Input
 	submitCtx := engine.WithExecutionID(execCtx, innerExecID)
+	// req.Scope becomes an execution-level property of the sub-execution, so
+	// every member sees it -- not just the entry node the submission params
+	// reach. Empty for a group or a subflow, in which case this is a no-op.
+	submitCtx = engine.WithExecutionScope(submitCtx, req.Scope)
 
 	// entryInput.Runtime is passed as the inner submission's runtime, not left
 	// behind: $vars is the union of the workflow's static Context.Vars (which

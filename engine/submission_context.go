@@ -13,6 +13,7 @@ type executionIDCtxKey struct{}
 type traceIDCtxKey struct{}
 type spanIDCtxKey struct{}
 type traceCarrierCtxKey struct{}
+type executionScopeCtxKey struct{}
 
 // WithExecutionTTL attaches a retention TTL hint for a single execution
 // submission. StateStore implementations may use it to choose key or record
@@ -116,5 +117,30 @@ func WithTraceCarrier(ctx context.Context, carrier map[string]string) context.Co
 func TraceCarrierFromContext(ctx context.Context) map[string]string {
 	carrier, _ := ctx.Value(traceCarrierCtxKey{}).(map[string]string)
 	return carrier
+}
+
+// WithExecutionScope attaches expression roots that belong to the whole
+// execution rather than to one node -- today, a map body's $item/$index/$items.
+// The engine persists them on the ExecutionSnapshot, and buildInput merges them
+// into every node's Data, so a body member sees them wherever it sits in the
+// body's graph.
+//
+// This exists as a submission-context value rather than a Submit parameter for
+// the same reason WithExecutionID does: Submit's signature is on the public SDK
+// surface and every caller would have to grow a parameter it has nothing to put
+// in. Callers that attach nothing are unaffected -- an absent scope leaves the
+// snapshot's field nil, which is what every non-body submission has always had.
+func WithExecutionScope(ctx context.Context, scope map[string]any) context.Context {
+	if len(scope) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, executionScopeCtxKey{}, scope)
+}
+
+// ExecutionScopeFromContext extracts the execution-wide expression roots
+// attached to the submission context. Returns nil when none were attached.
+func ExecutionScopeFromContext(ctx context.Context) map[string]any {
+	scope, _ := ctx.Value(executionScopeCtxKey{}).(map[string]any)
+	return scope
 }
 

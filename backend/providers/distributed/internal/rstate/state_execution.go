@@ -99,6 +99,19 @@ func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot
 		pipe.Set(ctx, execKey(t, e.ID, "runtime"), string(runtimeJSON), ttl)
 		keys = append(keys, execKey(t, e.ID, "runtime"))
 	}
+	// Scope round-trips alongside Params and Runtime. No production path writes
+	// it against this backend today -- a map body's sub-execution runs on an
+	// embedded in-memory backend -- but a snapshot field that persists in one
+	// backend and evaporates in the other is exactly the kind of divergence the
+	// statestore contract suite exists to catch.
+	if len(e.Scope) > 0 {
+		scopeJSON, err := json.Marshal(e.Scope)
+		if err != nil {
+			return fmt.Errorf("marshal execution scope for %q: %w", e.ID, err)
+		}
+		pipe.Set(ctx, execKey(t, e.ID, "scope"), string(scopeJSON), ttl)
+		keys = append(keys, execKey(t, e.ID, "scope"))
+	}
 	if e.TraceID != "" {
 		pipe.Set(ctx, execKey(t, e.ID, "trace_id"), e.TraceID, ttl)
 		keys = append(keys, execKey(t, e.ID, "trace_id"))
@@ -338,6 +351,14 @@ func (s *Store) GetExecution(ctx context.Context, id types.ExecutionID) (*engine
 	} else if err != redis.Nil {
 		return nil, fmt.Errorf("get execution runtime %q: %w", id, err)
 	}
+	var scope map[string]any
+	if raw, err := s.rdb.Get(ctx, execKey(t, id, "scope")).Bytes(); err == nil {
+		if err := json.Unmarshal(raw, &scope); err != nil {
+			return nil, fmt.Errorf("unmarshal execution scope %q: %w", id, err)
+		}
+	} else if err != redis.Nil {
+		return nil, fmt.Errorf("get execution scope %q: %w", id, err)
+	}
 	var traceID string
 	if raw, err := s.rdb.Get(ctx, execKey(t, id, "trace_id")).Result(); err == nil {
 		traceID = raw
@@ -364,6 +385,7 @@ func (s *Store) GetExecution(ctx context.Context, id types.ExecutionID) (*engine
 		Status:       types.ExecutionStatus(val),
 		Params:       params,
 		Runtime:      runtime,
+		Scope:        scope,
 		TraceID:      traceID,
 		SpanID:       spanID,
 		TraceCarrier: traceCarrier,

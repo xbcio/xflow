@@ -13,7 +13,7 @@
 > `node/internal/supply/{external.go,static.go}`, `service/runner/supply_gate.go`,
 > `service/control/{entry_activation_manager.go,entry_activation_reconciler.go,
 > supply_hints.go}`, `service/apiserver/module_supply.go`,
-> `node/internal/utils/exprx/exprx.go`.
+> `exprx/exprx.go`.
 
 ## 1. What `NodeKindSupply` is, and is not
 
@@ -337,7 +337,7 @@ the DSL-level `require_ready` decision. See
 
 ## 7. `$supplies` vs `$config`
 
-Both are expression roots built by `BuildExprEnv` (`node/internal/utils/exprx/exprx.go:93-124`):
+Both are expression roots built by `BuildExprEnv` (`exprx/exprx.go:105-153`):
 
 ```go
 env["$config"]   = input.Config     // line 105
