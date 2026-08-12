@@ -54,11 +54,14 @@ var evaluableParams = map[string]map[string]bool{
 	"xflow.transform.limit":             {"items": true},
 	"xflow.transform.aggregate":         {"items": true},
 	"xflow.transform.remove_duplicates": {"items": true},
-	// The following types have NO evaluable parameters. A template in any of
-	// their parameters is always a mistake -- the handler uses the value
-	// verbatim (xflow.http ships it as a header/body, xflow.start ignores
-	// params entirely, triggers use them as configuration specs). They are
-	// registered explicitly so the compiler rejects rather than warns.
+	// The following types evaluate NO parameter themselves -- their handlers
+	// use every value verbatim (xflow.http ships it as a header/body,
+	// xflow.start ignores params entirely, triggers use them as configuration
+	// specs). An empty entry is therefore the strongest one: it tells the
+	// boundary to evaluate every parameter of that type, which is what makes a
+	// template in xflow.http headers work. The entry must exist all the same --
+	// a MISSING type yields an empty exemption set too, but by accident, and
+	// the registry-coverage test exists to keep the two apart.
 	"xflow.http":              {},
 	"xflow.start":             {},
 	"xflow.end":               {},

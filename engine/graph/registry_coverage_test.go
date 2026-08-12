@@ -52,7 +52,7 @@ func TestEvaluableParamsCoversAllRegisteredTypes(t *testing.T) {
 	if len(missing) > 0 {
 		sort.Strings(missing)
 		t.Errorf("evaluableParams is missing entries for %d registered type(s):\n  %s\n\n"+
-			"Each registered node type must have an entry in evaluableParams (engine/graph/template_reject.go). "+
+			"Each registered node type must have an entry in evaluableParams (engine/graph/evaluable_params.go). "+
 			"Types with no evaluable parameters should map to an empty map {}.",
 			len(missing), strings.Join(missing, "\n  "))
 	}
