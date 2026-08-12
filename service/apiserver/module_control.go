@@ -303,9 +303,16 @@ func (m *workflowControlModule) handleInvoke(w http.ResponseWriter, r *http.Requ
 }
 
 // registerWorkflowResponse echoes the persisted workflow ID (server-assigned
-// when the request did not carry one).
+// when the request did not carry one) along with the non-fatal diagnostics
+// graph.Compile collected.
+//
+// Warnings are surfaced here rather than on submit because register is the
+// design-time step: the author is holding the definition and can still change
+// it. A warning names only nodes and referenced node names -- never a node's
+// output or a parameter value, which routinely carry credentials.
 type registerWorkflowResponse struct {
 	WorkflowID types.WorkflowID `json:"workflow_id"`
+	Warnings   []string         `json:"warnings,omitempty"`
 }
 
 // handleRegisterWorkflow serves POST /v1/workflows/register. It is a NEW,
@@ -372,7 +379,7 @@ func (m *workflowControlModule) handleRegisterWorkflow(w http.ResponseWriter, r 
 			return
 		}
 	}
-	writeJSON(w, http.StatusOK, registerWorkflowResponse{WorkflowID: rec.ID})
+	writeJSON(w, http.StatusOK, registerWorkflowResponse{WorkflowID: rec.ID, Warnings: g.Warnings()})
 }
 
 // handleDeregisterWorkflow serves DELETE /v1/workflows/register/{id}. It removes

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/xbcio/xflow/backend/providers/local"
@@ -249,5 +250,97 @@ func TestDeregisterClearsActivationsBeforeRemovingRecord(t *testing.T) {
 	}
 	if !act.Desired {
 		t.Fatal("activation must remain Desired after a failed clear (retryable, not orphaned)")
+	}
+}
+
+// TestRegisterWorkflowSurfacesCompileWarnings pins that graph.Compile's
+// non-fatal diagnostics reach the caller.
+//
+// Without this, Graph.Warnings() is a value nothing in production ever reads:
+// the cross-branch $nodes warning ("this may be nil, use ??") is computed at
+// compile time and then discarded, so the author who could still fix the
+// definition never learns it exists.
+//
+// The fixture is the same shape as engine/graph's cross-branch case: branch_b
+// references branch_a, which is on the switch's other branch and therefore not
+// a deterministic ancestor.
+func TestRegisterWorkflowSurfacesCompileWarnings(t *testing.T) {
+	srv, _ := newRegisterTestServer(t)
+
+	def := &types.WorkflowDef{
+		Name:    "cross-branch-warn",
+		Version: "v1",
+		Nodes: []types.NodeDef{
+			{Name: "start", Type: "xflow.start"},
+			{Name: "router", Type: "xflow.switch", Parameters: map[string]any{
+				"mode": "rules",
+				"rules": []any{
+					map[string]any{"condition": "true", "output": "left"},
+					map[string]any{"condition": "false", "output": "right"},
+				},
+				"default_output": "right",
+			}},
+			{Name: "branch_a", Type: "test.work"},
+			{Name: "branch_b", Type: "test.work", Parameters: map[string]any{
+				"msg": "${{ $nodes['branch_a'].result }}",
+			}},
+		},
+		Connections: types.Connections{
+			"start": {"main": types.PortConnections{Targets: []types.Connection{{Node: "router", Input: "main"}}}},
+			"router": {
+				"left":  types.PortConnections{Targets: []types.Connection{{Node: "branch_a", Input: "main"}}},
+				"right": types.PortConnections{Targets: []types.Connection{{Node: "branch_b", Input: "main"}}},
+			},
+		},
+	}
+
+	resp := postRegister(t, srv.URL, "tok-full", def)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200 (a warning must not fail the register): %s",
+			resp.StatusCode, body)
+	}
+	var out registerWorkflowResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(out.Warnings) == 0 {
+		t.Fatal("register returned no warnings; the compile-time cross-branch " +
+			"$nodes diagnostic must reach the caller, or Warnings() is dead code")
+	}
+	found := false
+	for _, w := range out.Warnings {
+		if strings.Contains(w, "branch_a") && strings.Contains(w, "??") {
+			found = true
+		}
+		// A warning must stay within the branch's disclosure rule: node names
+		// and referenced node names only, never a value.
+		if strings.Contains(w, "${{") {
+			t.Errorf("warning echoes the expression source: %q", w)
+		}
+	}
+	if !found {
+		t.Fatalf("no warning named branch_a and ??; got %v", out.Warnings)
+	}
+}
+
+// TestRegisterWorkflowOmitsWarningsWhenClean pins that a clean definition does
+// not carry an empty warnings key, so a caller can treat the field's presence
+// as "there is something to read".
+func TestRegisterWorkflowOmitsWarningsWhenClean(t *testing.T) {
+	srv, _ := newRegisterTestServer(t)
+
+	resp := postRegister(t, srv.URL, "tok-full", validWorkflow())
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if strings.Contains(string(body), "warnings") {
+		t.Errorf("clean register response carries a warnings key: %s", body)
 	}
 }

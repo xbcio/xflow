@@ -190,9 +190,21 @@ func buildExemptSet(nodeType string) map[string]bool {
 func evaluateParamWithSubFieldExemptions(value any, env map[string]any, exemptKeys []string) (any, error) {
 	elems, ok := value.([]any)
 	if !ok {
-		// Not the expected array shape — fall back to full evaluation.
-		// The compile-time validator (checkSubFields) already rejects templates
-		// in unexpected shapes, so this path is a no-op in practice.
+		// Not the expected array shape. Nothing rejects this earlier -- measured:
+		// graph.Compile accepts xflow.switch with "rules" given as a single map
+		// rather than an array. So this branch is reachable, and the sub-field
+		// exemption cannot be honored on a shape that has no elements to look
+		// inside: full evaluation here also evaluates what would have been the
+		// exempt key (measured: a map-shaped rules has its "condition"
+		// evaluated, which the array shape would have preserved verbatim).
+		//
+		// That is acceptable only because the shape is already broken for the
+		// handler -- xflow.switch's executeRules does
+		// `input.Params["rules"].([]any)` with the comma-ok discarded, so a map
+		// yields nil, no rule is ever considered, and the node takes its default
+		// output no matter what the boundary did to the value. Do not extend
+		// this branch to a shape a handler can actually consume without giving
+		// it real sub-field handling.
 		return evaluateParamValue(value, env)
 	}
 
