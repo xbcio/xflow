@@ -176,3 +176,48 @@ in a header and still reports HTTP 200, 零诊断"。Task 1 消灭了这个静�
    把条件求成 bool → `"true"` → switch 恒走第一条规则。
 
 
+## `$nodes` 引用已建（Task 2，2026-08-12）
+
+### 为什么这么做
+
+runner 侧**无 state 访问**——`GetOutput` 只在 control plane 的 `Engine` 上。
+handler 拿到的只有 `types.Input`，没有回头读上游的能力。所以 `$nodes['x']`
+不能做成惰性访问器，必须**编译期抽引用集 + 运行期预取**。
+
+做法与 `$supplies` 完全同构：
+
+1. 编译期从参数文本抽出每个节点的 `$nodes` 引用集（`buildNodesRefs` pass），
+   存到 `g.nodesRefs[i]`。
+2. `buildInput` 按引用集逐个 `GetOutput` 预取，填进 `Input.Nodes`。
+3. `exprx.BuildExprEnv` 注入 `env["$nodes"] = input.Nodes`。
+
+### 未执行节点必须是 typed nil map
+
+| `$nodes["x"]` 的值 | `$nodes['x'] ?? 'D'` | `$nodes['x'].f ?? 'D'` |
+|---|---|---|
+| 键不存在 | `"D"` | **ERROR** |
+| untyped nil | `"D"` | **ERROR** `cannot fetch f from <nil>` |
+| `map[string]any(nil)` | `"D"` | `"D"` ✓ |
+
+spec §4.2 推荐 `$nodes['optional_step'].name ?? 'default'`——带成员访问的 `??`。
+只有第三行能让它工作。`GetOutput` miss 返回 `nil, nil`，静态类型已经是
+`map[string]any`，直接赋值就是 typed nil。
+
+### body 子树必须跳过
+
+`extractNodeRefs`（`group_portability.go`）递归扫全树包括 body。body 内层的
+`$nodes['innerA']` 解析的是**内层图**的节点，不是外层的。若把它记到外层：
+
+```
+Compile err = node "M": $nodes reference "innerA" does not exist in the workflow definition
+```
+
+实测：S→M(xflow.map, body 里 innerB ref innerA)→T，顶层无 innerA。用
+`extractNodeRefs` 扫 M 的参数会把 innerA 记到 M 头上 → 外层图 index 查不到
+→ 误拒合法工作流。
+
+新建 `deriveNodesRefs`（`nodes_refs.go`）跳过 body 子树（用
+`declaresSubgraphBody` 判定，按值不按名，xflow.http 的 body 不会被误跳）。
+
+分组路径（`validatePortability`）上的同类误拒是既有缺陷（map 节点在 group 里
+且 body 成员引用另一成员→报 "non-portable"），本 task 不修。

@@ -361,6 +361,7 @@ func assignGraphHash(g *Graph) error {
 		UnitOutEdges:    g.unitOutEdges,
 		UnitInDegree:    g.unitInDegree,
 		SupplyRefs:      g.supplyRefs,
+		NodesRefs:       g.nodesRefs,
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -401,6 +402,10 @@ type graphHashPayload struct {
 	// does hash differently, the same way GroupMeta.PackageHash works for
 	// groups.
 	SupplyRefs map[int][]string `json:",omitempty"`
+	// NodesRefs carries the same omitempty rationale as SupplyRefs: without it,
+	// every pre-existing graph's hash payload would gain "NodesRefs":null and
+	// its graphHash would change, breaking all persisted execution hashes.
+	NodesRefs map[int][]string `json:",omitempty"`
 }
 
 // graphSerializedForm is the on-wire / at-rest JSON representation of a Graph.
@@ -449,6 +454,10 @@ type graphSerializedForm struct {
 	// WorkflowDef.DependencyEdges, which is not part of the snapshot. The
 	// supplyIndexes map, by contrast, IS re-derived from Nodes[i].Kind.
 	SupplyRefs map[int][]string `json:"supply_refs,omitempty"`
+	// NodesRefs maps a node index to the node names it references via
+	// $nodes['name'] in its parameters. Cannot be re-derived on decode because
+	// the extraction is a compile-time pass that UnmarshalJSON does not run.
+	NodesRefs map[int][]string `json:"nodes_refs,omitempty"`
 }
 
 // MarshalJSON implements json.Marshaler so that encoding/json can serialize a
@@ -480,6 +489,7 @@ func (g *Graph) MarshalJSON() ([]byte, error) {
 		MaxAutoDepth:    g.maxAutoDepth,
 		Groups:          g.groups,
 		SupplyRefs:      g.supplyRefs,
+		NodesRefs:       g.nodesRefs,
 	})
 }
 
@@ -586,6 +596,7 @@ func (g *Graph) UnmarshalJSON(data []byte) error {
 	g.maxAutoDepth = sf.MaxAutoDepth
 	g.groups = sf.Groups
 	g.supplyRefs = sf.SupplyRefs
+	g.nodesRefs = sf.NodesRefs
 	// Bodies need no line here: they travel inside Nodes as NodeMeta.Body.
 	// Rebuild supplyIndexes from node kinds — the same deterministic derivation
 	// Compile performs, so a round-tripped graph needs no WorkflowDef.

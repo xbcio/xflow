@@ -42,6 +42,12 @@ func (e *Engine) buildInput(ctx context.Context, t *Task, g *graph.Graph) (*type
 			return nil, fmt.Errorf("get resumed node output %q/%q: %w", t.ExecutionID, t.NodeName, err)
 		}
 		input.Data = cloneMap(data)
+		// A resumed node's parameters may also contain $nodes references that
+		// need resolving — the resume re-enters handler Execute with the same
+		// parameters, so $nodes must be available for template evaluation.
+		if err := prefetchNodesRefs(ctx, e, t, g, input); err != nil {
+			return nil, err
+		}
 		return input, nil
 	}
 
@@ -75,7 +81,32 @@ func (e *Engine) buildInput(ctx context.Context, t *Task, g *graph.Graph) (*type
 		}
 		input.Inputs = inputs
 	}
+	if err := prefetchNodesRefs(ctx, e, t, g, input); err != nil {
+		return nil, err
+	}
 	return input, nil
+}
+
+// prefetchNodesRefs populates input.Nodes from the compile-time reference set.
+func prefetchNodesRefs(ctx context.Context, e *Engine, t *Task, g *graph.Graph, input *types.Input) error {
+	refs := g.NodesRefsFor(t.NodeIdx)
+	if len(refs) == 0 {
+		return nil
+	}
+	nodes := make(map[string]any, len(refs))
+	for _, name := range refs {
+		data, err := e.state.GetOutput(ctx, t.ExecutionID, name)
+		if err != nil {
+			return fmt.Errorf("get $nodes output %q/%q: %w", t.ExecutionID, name, err)
+		}
+		// data is map[string]any. On miss (node not executed) both backends
+		// return nil, nil — the static type is map[string]any so this assignment
+		// produces a typed nil map, which is the required form (see Input.Nodes
+		// field comment for why).
+		nodes[name] = data
+	}
+	input.Nodes = nodes
+	return nil
 }
 
 func cloneRuntime(runtime *types.Runtime) *types.Runtime {

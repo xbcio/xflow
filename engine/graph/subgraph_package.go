@@ -420,6 +420,15 @@ func compileTrusted(def *types.WorkflowDef, visibleSupplies []string) (*Graph, e
 	if err := projectNodeBodies(def, g); err != nil {
 		return nil, err
 	}
+	// buildNodesRefs with skipCrossBranchWarning=true: projected packages are
+	// sub-graphs of the outer graph; a reference that appears cross-branch in
+	// the projection may be a deterministic ancestor in the outer topology.
+	// Warning here would produce noise. Existence and forward-ref checks still
+	// run — validatePortability guarantees members only reference each other,
+	// so existence always passes, but forward-ref is still meaningful.
+	if err := buildNodesRefs(g, true); err != nil {
+		return nil, err
+	}
 	if err := buildUnits(g); err != nil {
 		return nil, fmt.Errorf("build units: %w", err)
 	}

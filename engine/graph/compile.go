@@ -238,6 +238,13 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 			return nil, err
 		}
 	}
+	// buildNodesRefs extracts $nodes references from parameters and validates
+	// them. Placed after detectCycle so the DAG guarantee is already established
+	// in non-cyclic mode. The pass itself carries a visited-set, so cyclic
+	// graphs (allowCycles=true) are also safe.
+	if err := buildNodesRefs(g, false); err != nil {
+		return nil, err
+	}
 	if err := buildUnits(g); err != nil {
 		return nil, fmt.Errorf("build units: %w", err)
 	}

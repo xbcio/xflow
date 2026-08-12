@@ -58,6 +58,16 @@ type Graph struct {
 	// and describes a relation BETWEEN nodes, not a property of any one of
 	// them. Contrast NodeMeta.Body, which is a node's own compiled artifact.
 	supplyRefs map[int][]string
+
+	// nodesRefs maps a node index to the sorted, deduplicated names of other
+	// nodes it references via $nodes['name'] in its parameters. Unlike
+	// supplyRefs (which comes from explicitly declared DependencyEdges),
+	// nodesRefs is DERIVED from parameter text during compilation. It must
+	// still be persisted on the graph and enter the hash because buildInput
+	// (in another process / another load) uses it to prefetch $nodes outputs,
+	// and re-extracting from parameters would be maintaining a second
+	// implementation of the extraction logic.
+	nodesRefs map[int][]string
 }
 
 // BodyAt returns the projected body package for the node at nodeIdx, or nil
@@ -282,6 +292,19 @@ type Edge struct {
 // depends on, or nil when it declares none. The returned slice is a copy.
 func (g *Graph) SupplyRefsFor(nodeIdx int) []string {
 	names := g.supplyRefs[nodeIdx]
+	if len(names) == 0 {
+		return nil
+	}
+	out := make([]string, len(names))
+	copy(out, names)
+	return out
+}
+
+// NodesRefsFor returns the sorted, deduplicated names of nodes referenced via
+// $nodes['name'] in the parameters of the node at nodeIdx, or nil when it
+// references none. The returned slice is a defensive copy.
+func (g *Graph) NodesRefsFor(nodeIdx int) []string {
+	names := g.nodesRefs[nodeIdx]
 	if len(names) == 0 {
 		return nil
 	}
