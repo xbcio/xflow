@@ -88,7 +88,7 @@ make env-up                       # 起 Redis + Kafka + MySQL（或用等价受�
 # 路径 A（server+runner durable）
 make perf-sample                  # 产出 perf-sample-results.txt（含 perf.metric 行）
 # 路径 B（SDK cluster transient）：使用 cluster transient benchmark，
-#   见 test/perf/ 与 node/internal/trigger/kafka_benchmark_test.go
+#   见 test/perf/ 与 node/trigger/kafka/benchmark_test.go
 
 # 多样本：重复 ≥5 次，每次前 flush asynq:* 并重启 server+runner
 ./scripts/perf-sample.sh -v       # verbose 查看单次结果

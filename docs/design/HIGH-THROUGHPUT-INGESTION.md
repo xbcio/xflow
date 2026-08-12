@@ -19,7 +19,7 @@
   （server 不激活 SDK trigger runtime）
 
 路径 B — SDK cluster transient（短生命周期采集编排）
-  node.KafkaTrigger + NewCluster(..., ExecutionModeTransient)
+  trigger.Kafka() + NewCluster(..., ExecutionModeTransient)
   进程内消费 Kafka → emit Invoke → 短 TTL runtime state
   （禁止 signal/suspend/inspect，受限可观测性）
 ```
@@ -100,7 +100,7 @@ server 启动按 [deployment-examples.md](../references/deployment-examples.md)�
 | transient 禁用 | `sdk/xflow/engine_control.go:68/80/101`、`engine.go:62` | signal/revoke/inspect/suspend 全部拒绝 |
 | `NewLocal` 拒绝 transient | `sdk/xflow/local.go:31` | transient 要求 cluster，返回 `ErrTransientRequiresCluster` |
 | backend transient | `backend/providers/distributed/backend.go:84/250/315/326` | transient 不启动 TimeoutMonitor，短 TTL 状态 |
-| `KafkaTrigger` | `node/internal/trigger/kafka.go` | per-message 与 aggregate 两种运行时 |
+| `trigger.Kafka()` | `node/trigger/kafka/kafka.go`（per-message）、`aggregate.go`（aggregate 运行时） | 两种运行时 |
 | trigger runtime 激活 | `sdk/xflow/engine.go:88`、`workflow_registry.go:81` | `AddWorkflow` 时 `ReconcileWorkflow` 激活 trigger |
 
 ### 4.3 配置示例
@@ -115,14 +115,14 @@ eng, err := xflow.NewCluster(
 )
 // 注册带 Kafka trigger 的工作流
 eng.AddWorkflow(ctx, &types.WorkflowRecord{
-    WorkflowDef: kafkaIngestWorkflow,  // 含 node.KafkaTrigger 节点
+    WorkflowDef: kafkaIngestWorkflow,  // 含 trigger.Kafka() 节点
 })
 ```
 
-KafkaTrigger 节点配置（aggregate 模式，高吞吐）：
+trigger.Kafka() 节点配置（aggregate 模式，高吞吐）：
 
 ```go
-node.KafkaTrigger().
+trigger.Kafka().
     Brokers(brokers...).
     Topic("ingest-events").
     Group("xflow-collect").
@@ -170,7 +170,7 @@ node.KafkaTrigger().
 | 基准 | 文件 | 覆盖 |
 |---|---|---|
 | KafkaTrigger aggregate | `test/perf/kafka_trigger_bench_test.go` | MaxSize=1/10/100，真实 Kafka，aggregate 稳态延迟 |
-| KafkaTrigger 4000 msg | `node/internal/trigger/kafka_benchmark_test.go` | 4000 消息聚合 |
+| KafkaTrigger 4000 msg | `node/trigger/kafka/benchmark_test.go` | 4000 消息聚合 |
 | scheduler / statestore / asynq queue / e2e load | `test/perf/*_bench_test.go` | 调度、状态存储、队列、端到端负载 |
 | 可靠性（队列故障注入） | `test/perf/reliability_bench_test.go` | `perfSwitchableQueue` 注入队列不可用 |
 

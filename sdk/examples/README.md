@@ -103,13 +103,15 @@ eng, err := xflow.NewCluster(cfg,
 	xflow.WithTransientCompletionTTL(30*time.Second),
 )
 
-kafka := node.KafkaTrigger().
+kafka := trigger.Kafka().
 	Brokers("broker-1:9092", "broker-2:9092").
 	Topic("orders").
 	Group("xflow-orders").
 	MaxInflight(256).
 	AggregateByPartition(100, 50*time.Millisecond)
 ```
+
+(`trigger` is `github.com/xbcio/xflow/node/trigger`.)
 
 The Kafka trigger commits offsets after `Emit` accepts the batch. Workloads
 that need offset commit only after workflow success need a separate ack
