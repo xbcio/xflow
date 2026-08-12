@@ -57,7 +57,14 @@ func CompileExpr(code string, env map[string]any, asBool bool) (*vm.Program, err
 		return cached, nil
 	}
 
-	opts := []expr.Option{expr.Env(env)}
+	// exprFunctions must be included on EVERY compile, not just the ones whose
+	// source appears to use them: a program is cached by (code, asBool), so a
+	// program compiled without them would be reused for later evaluations of
+	// the same code and fail with "unknown name". See functions.go for why
+	// they are compile options rather than env entries.
+	opts := make([]expr.Option, 0, len(exprFunctions)+2)
+	opts = append(opts, expr.Env(env))
+	opts = append(opts, exprFunctions...)
 	if asBool {
 		opts = append(opts, expr.AsBool())
 	}
