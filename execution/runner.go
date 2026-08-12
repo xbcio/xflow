@@ -81,6 +81,27 @@ func (r *Runner) Execute(ctx context.Context, lease *engine.TaskLease) (engine.T
 	if r.artifactCode != nil && lease.Input != nil {
 		lease.Input.SetArtifactCodeResolver(r.artifactCode)
 	}
+	// Evaluate ${{ }} and {{ }} templates in non-exempt parameters. This runs
+	// BEFORE the SuspendingHandler branch so both the normal Execute path and
+	// the suspending path (PrepareSuspend / OnResume, which consume the same
+	// lease.Input) see evaluated values. Credentials and supplies are already
+	// resolved at this point (SetCredentialResolver above), so expressions
+	// referencing $supplies resolve correctly.
+	//
+	// On failure: return the error as a system-level error (the second return
+	// value), not as TaskResult.Error. Rationale: TaskResult.Error is a
+	// BUSINESS error produced by the handler — it means "the node ran and
+	// decided to fail". Template evaluation failure is an infrastructure
+	// problem (misconfigured parameter, missing variable) that prevented the
+	// node from running at all. The engine treats a returned error as
+	// retriable transient failure, which is the correct disposition: a deploy
+	// fix should clear it, and the task should not be marked as a business
+	// failure that an error-policy might swallow silently.
+	if lease.Input != nil {
+		if err := evaluateParams(lease.Input, lease.NodeType); err != nil {
+			return engine.TaskResult{}, err
+		}
+	}
 	if sh, ok := handler.(types.SuspendingHandler); ok {
 		return r.executeSuspending(ctx, lease, sh)
 	}
