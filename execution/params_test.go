@@ -146,6 +146,49 @@ func TestEvaluateParams_ErrorDoesNotLeakValue(t *testing.T) {
 	}
 }
 
+// TestEvaluateParams_FailureClassifiesAsNodeFailure pins the classification the
+// boundary attaches to an evaluation failure.
+//
+// The classification is load-bearing, not cosmetic. HandleTask reads it: only
+// ExecutorFailureNode is committed through the engine, where the node's retry /
+// on_error policy can drive the task to a terminal outcome. An unclassified
+// error reads as ExecutorFailureUnknown, whose branch deliberately leaves the
+// lease fenced -- correct for a failure that might have started the handler,
+// fatal here, because the boundary runs before the handler and nothing ever
+// reclaims the lease on a backend without a lease sweeper.
+//
+// The end-to-end consequence is pinned separately, in the local backend's
+// TestBoundaryEvaluationFailureReachesATerminalState. This test pins the
+// mechanism so the two fail with different, self-explaining messages.
+func TestEvaluateParams_FailureClassifiesAsNodeFailure(t *testing.T) {
+	rec := &templateRecordingHandler{}
+	runner := NewRunner(singleHandlerRegistry{handler: rec})
+
+	lease := &engine.TaskLease{
+		Task:     engine.Task{ExecutionID: "exec-classify", NodeName: "http-node"},
+		NodeType: "xflow.http",
+		Input: &types.Input{
+			ExecutionID: "exec-classify",
+			NodeName:    "http-node",
+			// A syntax error, so no later attempt could ever succeed.
+			Params: map[string]any{"url": "${{ $params.x + }}"},
+		},
+	}
+
+	_, err := runner.Execute(context.Background(), lease)
+	if err == nil {
+		t.Fatal("Execute() should return an error for an unevaluable template")
+	}
+	if got := ClassifyExecutorFailure(err); got != ExecutorFailureNode {
+		t.Fatalf("classification = %q, want %q; anything else (in particular the "+
+			"unknown default of a bare error) leaves the lease fenced and the "+
+			"execution non-terminal", got, ExecutorFailureNode)
+	}
+	if rec.lastInput != nil {
+		t.Error("handler was invoked; the boundary must fail before it")
+	}
+}
+
 // suspendingTemplateHandler is a SuspendingHandler that records its input,
 // proving the boundary evaluated templates before the suspending path.
 type suspendingTemplateHandler struct {
