@@ -49,7 +49,7 @@ func NewGroupRuntime(reg *execution.Registry, cache *PackageCache, opts ...Group
 // and maps the result to engine.GroupResult, without unwrapping an
 // engine.TaskLease. This is the entry point for callers that have no lease at
 // all — a trigger-group's per-Kafka-batch local execution (see
-// node/internal/trigger/kafka.go's group-exec path) runs once per flushed
+// node/trigger/kafka/kafka.go's group-exec path) runs once per flushed
 // batch, never through the lease-based task queue, so there is no
 // LeaseID/Attempt/GroupExecID to unwrap. Execute (below) is now a thin
 // wrapper over this for the lease-bearing callers (the batch task-queue

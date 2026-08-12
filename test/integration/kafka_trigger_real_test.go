@@ -10,7 +10,7 @@ import (
 
 	"github.com/segmentio/kafka-go"
 
-	"github.com/xbcio/xflow/node"
+	"github.com/xbcio/xflow/node/trigger"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -96,7 +96,7 @@ func TestKafkaTriggerRealConsume(t *testing.T) {
 	}
 	writeKafkaMessages(t, brokers, topic, messages)
 
-	tr := node.KafkaTrigger().
+	tr := trigger.Kafka().
 		Brokers(brokers...).
 		Topic(topic).
 		Group(group).
@@ -159,7 +159,7 @@ func TestKafkaTriggerRealAggregateByPartition(t *testing.T) {
 	}
 	writeKafkaMessages(t, brokers, topic, msgs)
 
-	tr := node.KafkaTrigger().
+	tr := trigger.Kafka().
 		Brokers(brokers...).
 		Topic(topic).
 		Group(group).

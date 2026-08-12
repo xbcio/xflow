@@ -11,7 +11,7 @@ import (
 
 	"github.com/segmentio/kafka-go"
 
-	"github.com/xbcio/xflow/node"
+	"github.com/xbcio/xflow/node/trigger"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -176,7 +176,7 @@ func TestKafkaBatchEntrySeed_RedeliveryLosesNothing(t *testing.T) {
 	// --- Pass 1: consume with seed that fails after 3 batches. ---
 	recorder1 := &batchSeedRecorder{failAfter: failAfterBatches}
 
-	tr1 := node.KafkaTrigger().
+	tr1 := trigger.Kafka().
 		Brokers(brokers...).
 		Topic(topic).
 		Group(group).
@@ -264,7 +264,7 @@ func TestKafkaBatchEntrySeed_RedeliveryLosesNothing(t *testing.T) {
 	// `committed` onward must be redelivered and successfully processed. ---
 	recorder2 := &batchSeedRecorder{} // no failAfter — all seeds succeed
 
-	tr2 := node.KafkaTrigger().
+	tr2 := trigger.Kafka().
 		Brokers(brokers...).
 		Topic(topic).
 		Group(group).
@@ -402,7 +402,7 @@ func TestKafkaBatchEntrySeed_PerPartitionSerialCommit(t *testing.T) {
 	// spreading 10 batches over ~800ms for observable intermediate commits.
 	recorder := &batchSeedRecorder{seedDelay: 80 * time.Millisecond}
 
-	tr := node.KafkaTrigger().
+	tr := trigger.Kafka().
 		Brokers(brokers...).
 		Topic(topic).
 		Group(group).

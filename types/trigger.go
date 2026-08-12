@@ -144,7 +144,7 @@ type EntrySeedResponse struct {
 // of synthesizing boundary exits from the raw batch payload. A Kafka trigger
 // operating as a trigger-group entry checks for this via type assertion
 // (alongside EntrySeedRuntime) before flushing a batch; see
-// node/internal/trigger/kafka.go and spec 2026-08-07 §3.3-§3.4.
+// node/trigger/kafka/kafka.go and spec 2026-08-07 §3.3-§3.4.
 //
 // Without this capability (e.g. a single standalone trigger node, not a
 // group), the trigger falls back to the existing raw-exit seed path

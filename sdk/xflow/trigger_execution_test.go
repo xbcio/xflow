@@ -6,12 +6,13 @@ import (
 	"time"
 
 	"github.com/xbcio/xflow/node"
+	"github.com/xbcio/xflow/node/trigger"
 	"github.com/xbcio/xflow/types"
 )
 
 func TestTriggerEmitRunsDownstreamNodes(t *testing.T) {
 	var capturedRuntime types.TriggerRuntime
-	tr := node.DefineTrigger("test.trigger.e2e", func(_ context.Context, in *types.TriggerActivateInput) (types.TriggerSubscription, error) {
+	tr := trigger.Define("test.trigger.e2e", func(_ context.Context, in *types.TriggerActivateInput) (types.TriggerSubscription, error) {
 		capturedRuntime = in.Runtime
 		return types.CloseFunc(func(context.Context) error { return nil }), nil
 	})

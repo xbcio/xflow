@@ -11,6 +11,7 @@ import (
 	"github.com/xbcio/xflow/backend/providers/local"
 	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/node/registry"
+	"github.com/xbcio/xflow/node/trigger"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -87,17 +88,17 @@ func TestConcurrentAddWorkflow_DifferentWorkflows(t *testing.T) {
 // TestTriggerRuntimeClose_NoRace verifies that Close does not race on
 // len(r.subs) access. Run with -race.
 func TestTriggerRuntimeClose_NoRace(t *testing.T) {
-	trigger := node.DefineTrigger("test.trigger.close.race", func(ctx context.Context, in *types.TriggerActivateInput) (types.TriggerSubscription, error) {
+	trg := trigger.Define("test.trigger.close.race", func(ctx context.Context, in *types.TriggerActivateInput) (types.TriggerSubscription, error) {
 		return types.CloseFunc(func(context.Context) error { return nil }), nil
 	})
-	registry.RegisterTrigger(trigger)
+	registry.RegisterTrigger(trg)
 
 	rt := newTriggerRuntime(nil, local.New().TriggerPrimitives())
 	rec := backend.WorkflowRecord{
 		ID: "wf-close-race",
 		Definition: &types.WorkflowDef{
 			Nodes: []types.NodeDef{
-				{Name: "t1", Kind: types.NodeKindTrigger, Type: trigger.Descriptor().Type},
+				{Name: "t1", Kind: types.NodeKindTrigger, Type: trg.Descriptor().Type},
 			},
 		},
 	}

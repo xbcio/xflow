@@ -12,7 +12,7 @@ import (
 )
 
 // maxSupplyContentBytes bounds one supply snapshot. It matches the webhook body
-// limit (node/internal/trigger/webhook.go). Larger rule sets belong in object
+// limit (node/trigger/webhook/webhook.go). Larger rule sets belong in object
 // storage referenced by a small descriptor, not in this endpoint.
 const maxSupplyContentBytes = 1 << 20
 

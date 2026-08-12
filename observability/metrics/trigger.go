@@ -3,7 +3,7 @@ package metrics
 import (
 	"context"
 
-	xnode "github.com/xbcio/xflow/node"
+	kafkatrigger "github.com/xbcio/xflow/node/trigger/kafka"
 )
 
 // Trigger metric names.
@@ -75,4 +75,4 @@ func (t TriggerMetrics) OnBatchAdmission(ctx context.Context, topic, state strin
 	}))
 }
 
-var _ xnode.TriggerObserver = TriggerMetrics{}
+var _ kafkatrigger.Observer = TriggerMetrics{}

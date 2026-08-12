@@ -19,6 +19,7 @@ import (
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/node"
 	nodesupply "github.com/xbcio/xflow/node/supply"
+	"github.com/xbcio/xflow/node/trigger"
 	"github.com/xbcio/xflow/sdk/xflow"
 	"github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/store/objectstore"
@@ -41,7 +42,7 @@ import (
 //
 // Kafka runs without authentication here. SASL is not a gap — the trigger
 // takes sasl_mechanism/sasl_username/sasl_password, and in production reads
-// them from supply content rather than from params (node/internal/trigger/
+// them from supply content rather than from params (node/trigger/kafka/
 // kafka.go). It is left off here because turning it on would make a failure
 // ambiguous between "pipeline broken" and "auth misconfigured", and because
 // SAS's own cluster (the upstream cluster, internal network) runs SASL_PLAINTEXT.
@@ -265,7 +266,7 @@ func taggingWorkflow(t *testing.T, taggerCode, supplyName string, brokers []stri
 
 	wf := xflow.Workflow(topic)
 
-	trigger := wf.Node("kafka", node.KafkaTrigger().
+	kafkaEntry := wf.Node("kafka", trigger.Kafka().
 		Brokers(brokers...).
 		Topic(topic).
 		Group(group).
@@ -275,7 +276,7 @@ func taggingWorkflow(t *testing.T, taggerCode, supplyName string, brokers []stri
 	// decode it into the record map the tagger guest expects as its eval
 	// input. fromJSON is an expr-lang builtin, not custom production code.
 	parse := wf.Node("parse", node.Expr(`fromJSON(trigger.data.value)`))
-	wf.Connect(trigger, parse)
+	wf.Connect(kafkaEntry, parse)
 
 	tagger := wf.Node("tagger", node.ScriptFile(taggerCode).Language("wasm").Runtime("wazero-reactor"))
 	wf.Connect(parse, tagger)
