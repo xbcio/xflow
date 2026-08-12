@@ -12,13 +12,19 @@ import (
 	"github.com/xbcio/xflow/node/internal/group"
 	supplypkg "github.com/xbcio/xflow/node/internal/supply"
 	"github.com/xbcio/xflow/node/internal/transform"
-	nodetrigger "github.com/xbcio/xflow/node/internal/trigger"
+
+	// Blank import: linking node/trigger runs the five trigger subpackages'
+	// init() self-registration against node/registry. Without this line the
+	// build still succeeds and every trigger unit test still passes (they
+	// construct nodes directly), but registry.LookupTrigger("xflow.trigger.kafka")
+	// returns not-found and a runner cannot activate any trigger. See
+	// node/trigger_registry_test.go, which exists to fail loudly if this
+	// import is ever removed.
+	_ "github.com/xbcio/xflow/node/trigger"
 )
 
 type ExecuteFunc = core.ExecuteFunc
 type Definition = core.Definition
-type TriggerActivateFunc = core.TriggerActivateFunc
-type TriggerDefinition = core.TriggerDefinition
 
 type HTTPMethod = core.HTTPMethod
 type HTTPNode = action.HTTPNode
@@ -56,18 +62,6 @@ type ApprovalParams = group.ApprovalParams
 type ApprovalNode = group.ApprovalNode
 type NotificationNode = group.NotificationNode
 
-type TimerTriggerNode = nodetrigger.TimerTriggerNode
-type CronTriggerNode = nodetrigger.CronTriggerNode
-type WebhookTriggerNode = nodetrigger.WebhookTriggerNode
-type KafkaTriggerNode = nodetrigger.KafkaTriggerNode
-type RedisHubTriggerNode = nodetrigger.RedisHubTriggerNode
-
-// HTTPEntrySeedRuntime is the production types.EntrySeedRuntime that posts
-// entry-unit seed admissions to the control plane. It is re-exported here so
-// callers outside node/internal (e.g. the runner's ActivationHandler) can
-// construct a per-activation, generation-stamped seed runtime.
-type HTTPEntrySeedRuntime = nodetrigger.HTTPEntrySeedRuntime
-
 const (
 	HTTPGet    = core.HTTPGet
 	HTTPPost   = core.HTTPPost
@@ -90,10 +84,6 @@ const (
 
 func Define(nodeType string, execute ExecuteFunc) *Definition {
 	return core.Define(nodeType, execute)
-}
-
-func DefineTrigger(nodeType string, activate TriggerActivateFunc) *TriggerDefinition {
-	return core.DefineTrigger(nodeType, activate)
 }
 
 func HTTP(method, rawURL string) *HTTPNode { return action.HTTP(method, rawURL) }
@@ -159,24 +149,6 @@ type WasmObserver = wasm.Observer
 // engine — script engines other than wasm have no reactor pool to observe.
 func SetWasmObserver(o WasmObserver) {
 	wasm.SetObserver(o)
-}
-
-// TriggerObserver receives trigger observations: messages consumed but never
-// emitted (schema validation failures), dead-letter publishes, and
-// aggregate-batch flush/admission outcomes. Re-exported from the internal
-// trigger package so a host process can install one without importing an
-// internal package.
-type TriggerObserver = nodetrigger.Observer
-
-// SetTriggerObserver installs the global observer for trigger activity. Call
-// once at startup (or pass nil to remove it).
-//
-// Without an observer installed, a schema-invalid message is still logged, but
-// the count is only available as a metric through this seam. A trigger dropping
-// every message is otherwise indistinguishable from an idle topic: offsets keep
-// being committed, so consumer-group lag stays at zero.
-func SetTriggerObserver(o TriggerObserver) {
-	nodetrigger.SetObserver(o)
 }
 
 // WarmupScriptEngines absorbs script-engine cold start before traffic arrives:
@@ -279,9 +251,3 @@ func Approval(approvers []string, mode ApprovalMode) *ApprovalNode {
 func Notification(channel string, to any) *NotificationNode {
 	return group.Notification(channel, to)
 }
-
-func TimerTrigger() *TimerTriggerNode       { return nodetrigger.TimerTrigger() }
-func CronTrigger() *CronTriggerNode         { return nodetrigger.CronTrigger() }
-func WebhookTrigger() *WebhookTriggerNode   { return nodetrigger.WebhookTrigger() }
-func KafkaTrigger() *KafkaTriggerNode       { return nodetrigger.KafkaTrigger() }
-func RedisHubTrigger() *RedisHubTriggerNode { return nodetrigger.RedisHubTrigger() }
