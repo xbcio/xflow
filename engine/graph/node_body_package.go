@@ -20,6 +20,36 @@ import (
 type NodeBodyPackage struct {
 	Package *SubgraphPackage
 	Hash    string
+	// OuterNodeRefs records every $nodes['name'] a body member aims at a node
+	// that is NOT a body member -- i.e. at the outer graph. A body member has no
+	// edge to such a node, so the reference is invisible in the topology and this
+	// is the only record of the dependency: it is what validateBodyOuterRefs
+	// checks and what the scheduler snapshots into the sub-execution.
+	//
+	// The referencing MEMBER travels alongside the referenced name because both
+	// consumers need it. Compile-time: an error that says only "this body
+	// references x" leaves an author with a multi-member body no way to find the
+	// line. Run time: a snapshot fetch that fails must name who wanted the value.
+	//
+	// Only NAMES live here, following SubgraphPackage.VisibleSupplies. The
+	// OUTPUTS are read per execution and must never enter a compile-time
+	// artifact -- they are execution-scoped, and an upstream node's output is
+	// routinely an HTTP response body carrying credentials.
+	//
+	// The explicit omitempty matters: this struct's other fields carry no json
+	// tags, so a nil slice must serialize to nothing, or every already-persisted
+	// graph containing a body would gain an "OuterNodeRefs":null and its
+	// graphHash would move -- invalidating the hash recorded on every persisted
+	// execution.
+	OuterNodeRefs []BodyOuterRef `json:",omitempty"`
+}
+
+// BodyOuterRef is one body member's reference to one outer-graph node.
+type BodyOuterRef struct {
+	// Member is the body member that wrote the reference.
+	Member string `json:"member"`
+	// Node is the outer-graph node name it reads.
+	Node string `json:"node"`
 }
 
 // bodyExitPort is the port a body member's output is collected from. A body has
@@ -74,7 +104,7 @@ func ProjectNodeBodyPackage(mapNodeName string, params map[string]any, visibleSu
 		return nil, fmt.Errorf("node %q: body has no nodes", mapNodeName)
 	}
 
-	bg, entryIdx, err := compileBodyMembers(mapNodeName, nodes, conns)
+	bg, entryIdx, outerRefs, err := compileBodyMembers(mapNodeName, nodes, conns)
 	if err != nil {
 		return nil, err
 	}
@@ -123,13 +153,14 @@ func ProjectNodeBodyPackage(mapNodeName string, params map[string]any, visibleSu
 	if err != nil {
 		return nil, fmt.Errorf("node %q: compute body package hash: %w", mapNodeName, err)
 	}
-	return &NodeBodyPackage{Package: pkg, Hash: hash}, nil
+	return &NodeBodyPackage{Package: pkg, Hash: hash, OuterNodeRefs: outerRefs}, nil
 }
 
 // compileBodyMembers builds the minimal two-pass graph the entry rules need and
-// returns it with the resolved entry index. Shared with validateNodeBody so the
-// validation and the projection cannot disagree about what a valid body is.
-func compileBodyMembers(mapNodeName string, nodes []types.NodeDef, conns types.Connections) (*Graph, int, error) {
+// returns it with the resolved entry index and the body's outer-graph $nodes
+// references. Shared with validateNodeBody so the validation and the projection
+// cannot disagree about what a valid body is.
+func compileBodyMembers(mapNodeName string, nodes []types.NodeDef, conns types.Connections) (*Graph, int, []BodyOuterRef, error) {
 	bodyDef := &types.WorkflowDef{Nodes: nodes, Connections: conns}
 	n := len(nodes)
 	bg := &Graph{
@@ -142,10 +173,10 @@ func compileBodyMembers(mapNodeName string, nodes []types.NodeDef, conns types.C
 		startIdx:     -1,
 	}
 	if _, err := registerNodes(bodyDef, bg); err != nil {
-		return nil, 0, fmt.Errorf("node %q: body: %w", mapNodeName, err)
+		return nil, 0, nil, fmt.Errorf("node %q: body: %w", mapNodeName, err)
 	}
 	if _, err := buildEdges(bodyDef, bg); err != nil {
-		return nil, 0, fmt.Errorf("node %q: body: %w", mapNodeName, err)
+		return nil, 0, nil, fmt.Errorf("node %q: body: %w", mapNodeName, err)
 	}
 	members := make(map[int]bool, n)
 	for i := 0; i < n; i++ {
@@ -153,10 +184,10 @@ func compileBodyMembers(mapNodeName string, nodes []types.NodeDef, conns types.C
 	}
 	entry, _, err := resolveGroupEntry(bg, members)
 	if err != nil {
-		return nil, 0, fmt.Errorf("node %q: body: %w", mapNodeName, err)
+		return nil, 0, nil, fmt.Errorf("node %q: body: %w", mapNodeName, err)
 	}
 	if err := assertEntryDominates(bg, entry, members); err != nil {
-		return nil, 0, fmt.Errorf("node %q: body: %w", mapNodeName, err)
+		return nil, 0, nil, fmt.Errorf("node %q: body: %w", mapNodeName, err)
 	}
 	// I2: reuse the SAME portability validator group compilation uses
 	// (validateGroupPortability's shared core) rather than letting a body
@@ -166,20 +197,30 @@ func compileBodyMembers(mapNodeName string, nodes []types.NodeDef, conns types.C
 	// exactly the class of gap C1 fixed for $supplies, just for node types
 	// instead. "body" is passed as kind so the error can never be confused
 	// with a rejected GROUP even though both paths share the same code.
+	//
+	// collectExternal=true is where a body diverges from a group: an external
+	// $nodes reference is COLLECTED rather than rejected, because whether it is
+	// legal is a question about the outer graph (does the map node's ancestry
+	// contain it?) that bg cannot answer -- bg holds only the body's own
+	// members. validateBodyOuterRefs, a later pass that does hold the outer
+	// graph, adjudicates every name collected here. Nothing reaches a compiled
+	// graph unadjudicated: projectNodeBodies is the only production caller and
+	// Compile runs that pass unconditionally.
 	memberNames := make([]string, 0, n)
 	for i := 0; i < n; i++ {
 		memberNames = append(memberNames, nodes[i].Name)
 	}
-	if err := validatePortability(bg, "body", mapNodeName, memberNames); err != nil {
-		// validatePortability already stamps "body %q: ..." (kind+name), so this
+	outerRefs, err := checkPortability(bg, "body", mapNodeName, memberNames, true)
+	if err != nil {
+		// checkPortability already stamps "body %q: ..." (kind+name), so this
 		// wraps with just "node %q:" rather than the "node %q: body: %w" other
 		// body errors in this function use -- that would double up on the word
 		// "body" (kind is already the outer noun here, unlike
 		// resolveGroupEntry/assertEntryDominates, which say "group" internally
 		// with no equivalent kind parameter to swap).
-		return nil, 0, fmt.Errorf("node %q: %w", mapNodeName, err)
+		return nil, 0, nil, fmt.Errorf("node %q: %w", mapNodeName, err)
 	}
-	return bg, entry, nil
+	return bg, entry, outerRefs, nil
 }
 
 // buildBodyExits attaches a collector to every member with no outgoing "main"

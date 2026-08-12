@@ -261,6 +261,15 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 	if err := buildNodesRefs(g, false); err != nil {
 		return nil, err
 	}
+	// validateBodyOuterRefs adjudicates the cross-domain $nodes references
+	// projectNodeBodies collected. It runs here, and NOT inside that pass, for
+	// two independent reasons spelled out on the function itself: GroupIdx is
+	// not assigned until compileGroups, and projectNodeBodies is shared with
+	// compileTrusted, where the enclosing graph is a projected package rather
+	// than the real outer workflow.
+	if err := validateBodyOuterRefs(g); err != nil {
+		return nil, err
+	}
 	if err := buildUnits(g); err != nil {
 		return nil, fmt.Errorf("build units: %w", err)
 	}
@@ -789,7 +798,7 @@ func decodeSubgraphMembers(params map[string]any) ([]types.NodeDef, types.Connec
 // assertEntryDominates unchanged — a body and a node group are the same
 // structure (group_compile.go:99-159), so no new validator is written here.
 func validateBodyEntry(mapNodeName string, nodes []types.NodeDef, conns types.Connections) error {
-	_, _, err := compileBodyMembers(mapNodeName, nodes, conns)
+	_, _, _, err := compileBodyMembers(mapNodeName, nodes, conns)
 	return err
 }
 

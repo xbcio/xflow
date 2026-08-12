@@ -398,10 +398,18 @@ func TestPortability_GroupMemberMapBodyInternalRefOK(t *testing.T) {
 
 // TestPortability_GroupMemberMapBodyExternalRefStillRejected is the other half
 // of the pair: skipping the body in the GROUP walk must not make a body that
-// reaches outside its own scope compile silently. The body's own portability
-// pass catches it, so the rejection survives -- only its wording changes (it is
-// now stamped by the body path, naming the body member, rather than by the
-// group path naming the map node).
+// reaches outside its own scope compile silently.
+//
+// The rejection survived a change in who issues it. It used to come from the
+// body's own portability pass, which rejected every outer $nodes reference
+// indiscriminately. That pass now COLLECTS them instead, because an ungrouped
+// map's body is allowed to read the map node's upstream ancestors -- and "src"
+// here is exactly such an ancestor. What still rejects this fixture is that "m"
+// is a GROUP MEMBER: its body runs inside the group's own execution, whose
+// state store holds only the group's members, so the outer snapshot that makes
+// the ungrouped case work is never assembled. Move "m" out of the group and the
+// same definition compiles, which is the point of asserting on the group
+// clause rather than on the old "non-portable" wording.
 func TestPortability_GroupMemberMapBodyExternalRefStillRejected(t *testing.T) {
 	def := &types.WorkflowDef{
 		Name:    "group-map-body-ext",
@@ -433,7 +441,9 @@ func TestPortability_GroupMemberMapBodyExternalRefStillRejected(t *testing.T) {
 	if err == nil {
 		t.Fatal("a body member referencing a node outside the body must still be rejected")
 	}
-	if !strings.Contains(err.Error(), "non-portable") || !strings.Contains(err.Error(), "src") {
-		t.Errorf("error = %v, want 'non-portable' naming 'src'", err)
+	if !strings.Contains(err.Error(), "group member") || !strings.Contains(err.Error(), "src") ||
+		!strings.Contains(err.Error(), `"a"`) {
+		t.Errorf("error = %v, want the group-member clause naming both the referenced node "+
+			"'src' and the body member 'a' that wrote the reference", err)
 	}
 }

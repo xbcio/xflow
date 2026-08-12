@@ -313,6 +313,26 @@ func (g *Graph) NodesRefsFor(nodeIdx int) []string {
 	return out
 }
 
+// BodyOuterRefsFor returns the OUTER-graph $nodes references the body declared
+// on nodeIdx makes, or nil when it declares no body or reads none. The returned
+// slice is a defensive copy (BodyOuterRef itself is all-string, so a shallow
+// copy fully isolates it).
+//
+// It is deliberately a SEPARATE set from NodesRefsFor. That one drives
+// buildInput's prefetch for the node's OWN parameters; this one drives the
+// snapshot shipped into the body's sub-execution. Merging them would make the
+// map node prefetch names it never mentions and would let a body's reference
+// silently satisfy the map node's own $nodes lookups.
+func (g *Graph) BodyOuterRefsFor(nodeIdx int) []BodyOuterRef {
+	body := g.BodyAt(nodeIdx)
+	if body == nil || len(body.OuterNodeRefs) == 0 {
+		return nil
+	}
+	out := make([]BodyOuterRef, len(body.OuterNodeRefs))
+	copy(out, body.OuterNodeRefs)
+	return out
+}
+
 // SupplyNodeIndexes returns a copy of the supply node name → node index map.
 func (g *Graph) SupplyNodeIndexes() map[string]int {
 	out := make(map[string]int, len(g.supplyIndexes))

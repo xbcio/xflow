@@ -76,11 +76,36 @@ func validateGroupPortability(g *Graph, gm *GroupMeta) error {
 // failed, since both paths would otherwise raise byte-identical messages and
 // an operator debugging a rejected deploy would have no way to tell them apart.
 func validatePortability(g *Graph, kind, name string, members []string) error {
+	_, err := checkPortability(g, kind, name, members, false)
+	return err
+}
+
+// checkPortability is validatePortability with the external-reference verdict
+// made a parameter. collectExternal=false rejects any $nodes reference leaving
+// the member set; true collects those references and returns them instead.
+//
+// The two answers are both correct, for different constructs. A GROUP is
+// co-located and scheduled as one unit, so a member pointing outside it has no
+// ordering that guarantees the target ran, and there is no later pass that
+// could give it one -- reject. A BODY runs as a sub-execution of a node whose
+// own ancestors have already completed, and the DSL spec grants it read access
+// to exactly those (docs/design/DSL-SPECIFICATION.md, 跨域引用): whether a
+// given reference is one of them is a question about the OUTER graph's
+// topology, which this function cannot see -- bg here is the body's own
+// two-pass graph, in which no outer node exists at all. So the body path
+// collects and validateBodyOuterRefs adjudicates.
+//
+// Collecting is not the same as permitting. Every collected reference is
+// checked by validateBodyOuterRefs before compilation succeeds; relaxing here
+// WITHOUT that pass would turn a compile error into a runtime nil silently
+// absorbed by the spec's ?? guard, which is strictly worse than rejecting.
+func checkPortability(g *Graph, kind, name string, members []string, collectExternal bool) ([]BodyOuterRef, error) {
 	memberSet := make(map[string]bool, len(members))
 	for _, n := range members {
 		memberSet[n] = true
 	}
 
+	var external []BodyOuterRef
 	for _, memberName := range members {
 		idx, ok := g.index[memberName]
 		if !ok {
@@ -89,19 +114,34 @@ func validatePortability(g *Graph, kind, name string, members []string) error {
 		n := g.nodes[idx]
 
 		if isNonPortableType(n.Type) {
-			return fmt.Errorf("%s %q: non-portable member %q: type %q is not portable (local/closure types cannot be distributed)",
+			return nil, fmt.Errorf("%s %q: non-portable member %q: type %q is not portable (local/closure types cannot be distributed)",
 				kind, name, n.Name, n.Type)
 		}
 
 		refs := extractNodeRefs(n.Parameters)
 		for _, ref := range refs {
-			if !memberSet[ref] {
-				return fmt.Errorf("%s %q: non-portable member %q: references external node %q via $nodes",
+			if memberSet[ref] {
+				continue
+			}
+			if !collectExternal {
+				return nil, fmt.Errorf("%s %q: non-portable member %q: references external node %q via $nodes",
 					kind, name, n.Name, ref)
 			}
+			external = append(external, BodyOuterRef{Member: n.Name, Node: ref})
 		}
 	}
-	return nil
+	// members is iterated in the caller's order and extractNodeRefs already
+	// sorts each member's refs, but the member order itself is the body's
+	// authoring order at one call site. Sort so the set that lands in
+	// NodeBodyPackage -- and therefore in the graph hash -- does not depend on
+	// how the author listed the members.
+	sort.Slice(external, func(i, j int) bool {
+		if external[i].Member != external[j].Member {
+			return external[i].Member < external[j].Member
+		}
+		return external[i].Node < external[j].Node
+	})
+	return external, nil
 }
 
 // isNonPortableType returns true for node types that are inherently local and
