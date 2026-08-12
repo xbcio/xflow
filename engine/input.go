@@ -57,8 +57,22 @@ func (e *Engine) buildInput(ctx context.Context, t *Task, g *graph.Graph) (*type
 	}
 
 	inEdges := g.NodeInEdges(t.NodeIdx)
+	// A cyclic workflow's start node on its first activation takes the
+	// submission params directly rather than reading its in-edges: the only
+	// edges into it come from around the cycle, and none of them have fired yet.
+	//
+	// The $nodes prefetch still runs. A start node CAN carry a $nodes reference
+	// that compiles: buildNodesRefs rejects only references reachable FROM the
+	// node, so a reference to a peer root passes. Returning without prefetching
+	// left input.Nodes nil, which is the "key absent" row of the Input.Nodes
+	// contract -- $nodes['x'].field then fails outright instead of yielding nil
+	// for ?? to catch, so the guard the spec recommends for an unexecuted node
+	// could not fire and the whole node failed to evaluate its parameters.
 	if g.AllowCycles() && t.NodeIdx == g.StartIndex() && t.ActivationID == 1 {
 		input.Data = cloneMap(snap.Params)
+		if err := prefetchNodesRefs(ctx, e, t, g, input); err != nil {
+			return nil, err
+		}
 		return input, nil
 	}
 	switch len(inEdges) {

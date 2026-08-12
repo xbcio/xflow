@@ -262,3 +262,45 @@ func TestNodesRef_RoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// TestDynamicNodesSubscriptWarns covers a $nodes reference whose name is not a
+// literal: $nodes[$vars.which]. nodesRefPattern only matches a quoted literal, so
+// such a reference contributes nothing to the prefetch set and the node's
+// input.Nodes stays empty -- at runtime the lookup finds nothing and the
+// expression reads nil, silently, with no diagnostic anywhere.
+//
+// A warning rather than an error, unlike the $supplies equivalent: a $supplies
+// miss fails the node (the content is load-bearing and may be unavailable),
+// while a $nodes miss returns nil, which the DSL's ?? guard is designed to
+// absorb. Rejecting outright would break workflows that are merely reading an
+// optional upstream by a computed name.
+func TestDynamicNodesSubscriptWarns(t *testing.T) {
+	def := &types.WorkflowDef{
+		Name: "dyn-nodes",
+		Nodes: []types.NodeDef{
+			{Name: "a", Type: "test.echo"},
+			{Name: "b", Type: "test.echo", Parameters: map[string]any{
+				"v": "${{ $nodes[$vars.which].x }}",
+			}},
+		},
+		Connections: types.Connections{
+			"a": {"main": {Targets: []types.Connection{{Node: "b", Input: "main"}}}},
+		},
+	}
+	g, err := Compile(def)
+	if err != nil {
+		t.Fatalf("compile: %v (a computed $nodes name must warn, not fail)", err)
+	}
+	if len(g.NodesRefsFor(1)) != 0 {
+		t.Fatalf("computed subscript unexpectedly produced refs: %v", g.NodesRefsFor(1))
+	}
+	found := false
+	for _, w := range g.Warnings() {
+		if strings.Contains(w, `node "b"`) && strings.Contains(w, "$nodes") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no warning for the computed $nodes subscript; warnings = %v", g.Warnings())
+	}
+}

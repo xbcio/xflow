@@ -79,6 +79,18 @@ func buildNodesRefs(g *Graph, skipCrossBranchWarning bool) error {
 		if g.nodes[i].GroupIdx >= 0 {
 			continue
 		}
+		// A computed subscript ($nodes[$vars.which]) matches no literal, so it
+		// contributes nothing to the prefetch set and reads nil at runtime with
+		// no diagnostic. Warn rather than reject, unlike the $supplies rule in
+		// dependency.go: a missing supply fails the node, but a $nodes miss
+		// returns nil, which the spec's ?? guard is meant to absorb.
+		//
+		// Placed after the grouped-node skip so a group member warns once, in
+		// its own projected package's compileTrusted pass, rather than twice.
+		if hasDynamicNodesRef(g.nodes[i].Parameters) {
+			g.addWarning(fmt.Sprintf("node %q: $nodes 下标不是字面量，该引用不会被预取，运行期恒为 nil",
+				g.nodes[i].Name))
+		}
 		refs := deriveNodesRefs(g.nodes[i].Parameters)
 		if len(refs) == 0 {
 			continue
@@ -106,7 +118,7 @@ func buildNodesRefs(g *Graph, skipCrossBranchWarning bool) error {
 				continue
 			}
 			if !isDeterministicAncestor(g, targetIdx, i) {
-				g.addWarning(fmt.Sprintf("node %q: $nodes['%s'] 可能为 nil,建议使用 ?? 提供默认值",
+				g.addWarning(fmt.Sprintf("node %q: $nodes['%s'] 可能为 nil，建议使用 ?? 提供默认值",
 					g.nodes[i].Name, ref))
 			}
 		}

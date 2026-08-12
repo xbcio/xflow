@@ -10,6 +10,52 @@ import (
 // nodesRefPattern matches $nodes['name'] or $nodes["name"] in expression strings.
 var nodesRefPattern = regexp.MustCompile(`\$nodes\[['"]([^'"]+)['"]\]`)
 
+// nodesDynamicPattern matches a $nodes subscript whose first non-space character
+// is not a quote — i.e. a computed name such as $nodes[$vars.which]. Only the
+// quoted form is statically derivable, and only the derivable form reaches the
+// prefetch set, so this pattern is what the compile-time warning keys on.
+var nodesDynamicPattern = regexp.MustCompile(`\$nodes\s*\[\s*[^'"\s]`)
+
+// hasDynamicNodesRef reports whether a node's parameters use $nodes with a
+// computed name. It walks through walkParams so a sub-graph body is skipped for
+// the same reason extractNodeRefs skips it: the body's references belong to the
+// inner graph and are diagnosed when the body itself compiles.
+func hasDynamicNodesRef(params map[string]any) bool {
+	if len(params) == 0 {
+		return false
+	}
+	hasBody := declaresSubgraphBody(params)
+	for key, val := range params {
+		if hasBody && key == subgraphBodyKey {
+			continue
+		}
+		if walkForDynamicNodesRef(val) {
+			return true
+		}
+	}
+	return false
+}
+
+func walkForDynamicNodesRef(v any) bool {
+	switch val := v.(type) {
+	case string:
+		return nodesDynamicPattern.MatchString(val)
+	case map[string]any:
+		for _, child := range val {
+			if walkForDynamicNodesRef(child) {
+				return true
+			}
+		}
+	case []any:
+		for _, child := range val {
+			if walkForDynamicNodesRef(child) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // validateGroupPortability checks that all members of a group are portable:
 // they must not reference nodes outside the group, use reserved types, or
 // contain patterns that cannot be executed in an isolated runner context.
