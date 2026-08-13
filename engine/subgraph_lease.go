@@ -80,6 +80,15 @@ type SubgraphLeasePayload struct {
 	// a given runner is the same one that would have run the referencing node
 	// there, so it crosses no boundary the workflow author did not already draw.
 	OuterNodes map[string]any `json:"outer_nodes,omitempty"`
+	// TraceID and SpanID are the outer execution's trace identity, carried so
+	// the body's sub-execution on the runner continues the same trace. A group
+	// lease needs no equivalent: it carries a whole *types.Input, which already
+	// has both on it.
+	//
+	// Neither is business data -- they are correlation identifiers a tracing
+	// backend mints -- so unlike OuterNodes above, they are safe in a log line.
+	TraceID string `json:"trace_id,omitempty"`
+	SpanID  string `json:"span_id,omitempty"`
 }
 
 // BuildSubgraphLease assembles a runner-facing lease for a queued batch task.
@@ -155,13 +164,16 @@ func (e *Engine) BuildSubgraphLease(ctx context.Context, t *Task) (*TaskLease, *
 		payload.PackageHash = body.Hash
 	}
 	payload.AllItems, payload.BatchSize = mapBatchingContext(t, len(items))
-	// The runtime half of $vars: see the field's doc comment. Read from the
-	// execution snapshot because a batch task carries no input of its own.
-	runtime, err := e.executionRuntime(ctx, parentLease.Task.ExecutionID)
+	// The runtime half of $vars and the outer trace identity: see the fields'
+	// doc comments. Read from the execution snapshot because a batch task
+	// carries no input of its own.
+	submission, err := e.executionSubmissionContext(ctx, parentLease.Task.ExecutionID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("build subgraph lease: %w", err)
 	}
-	payload.Runtime = runtime
+	payload.Runtime = submission.Runtime
+	payload.TraceID = submission.TraceID
+	payload.SpanID = submission.SpanID
 	// Snapshotted here rather than on the runner for the reason in the method's
 	// doc: a runner cannot read the outer execution's state store, and the
 	// spec's semantics are a snapshot as of entering the map node anyway.

@@ -294,10 +294,11 @@ func (e *Engine) runBatchBody(ctx context.Context, g *graph.Graph, lease *TaskLe
 	allItems, batchSize := mapBatchingContext(t, len(items))
 	continueOnError := mapContinueOnError(meta)
 	// The outer submission's Runtime.Vars are the half of $vars that does not
-	// travel inside the projected body package (Context.Vars does). Read from
-	// the execution snapshot -- the same source buildInput uses for a regular
-	// node -- because a batch task carries no input of its own.
-	runtime, err := e.executionRuntime(ctx, lease.Task.ExecutionID)
+	// travel inside the projected body package (Context.Vars does), and its trace
+	// identity is what keeps the body's sub-execution on the outer trace. Read
+	// from the execution snapshot -- the same source buildInput uses for a
+	// regular node -- because a batch task carries no input of its own.
+	submission, err := e.executionSubmissionContext(ctx, lease.Task.ExecutionID)
 	if err != nil {
 		return nil, batchBodyError(lease.Task.NodeName, batchIndex, err)
 	}
@@ -316,8 +317,10 @@ func (e *Engine) runBatchBody(ctx context.Context, g *graph.Graph, lease *TaskLe
 		Items:           items,
 		AllItems:        allItems,
 		ContinueOnError: continueOnError,
-		Runtime:         runtime,
+		Runtime:         submission.Runtime,
 		OuterNodes:      outerNodes,
+		TraceID:         submission.TraceID,
+		SpanID:          submission.SpanID,
 	})
 	if err != nil {
 		// The body could not be RUN — compile failure, missing handler, backend
@@ -589,21 +592,40 @@ func (e *Engine) failLoopSplit(ctx context.Context, lease *TaskLease, g *graph.G
 	return nil
 }
 
-// executionRuntime reads an execution's submission Runtime from the snapshot.
-// A batch task is dispatched from the parent's expansion, not from the
-// submission, so it is the only way the runtime half of $vars reaches a body.
+// batchExecutionContext is the slice of an execution's snapshot a batch task
+// cannot read for itself. A batch is dispatched from the parent's expansion
+// rather than from a submission, so everything a submission would have carried
+// has to be re-read from the snapshot here and forwarded on the body request.
+type batchExecutionContext struct {
+	// Runtime is the submission's runtime, the half of $vars that does not
+	// travel inside the projected body package (Context.Vars does).
+	Runtime *types.Runtime
+	// TraceID and SpanID keep the body's sub-execution on the outer trace. The
+	// sub-execution is submitted fresh, so without them its snapshot has no
+	// trace identity at all and every span the body emits is detached.
+	TraceID string
+	SpanID  string
+}
+
+// executionSubmissionContext reads the submission-scoped values a body needs
+// from the parent execution's snapshot.
+//
 // A missing snapshot is not an error here: the caller has already established
-// the execution is active via loadActiveGraph, and an execution that finished
-// in the window between simply has no runtime to forward.
-func (e *Engine) executionRuntime(ctx context.Context, id types.ExecutionID) (*types.Runtime, error) {
+// the execution is active via loadActiveGraph, and an execution that finished in
+// the window between simply has nothing left to forward.
+func (e *Engine) executionSubmissionContext(ctx context.Context, id types.ExecutionID) (batchExecutionContext, error) {
 	snap, err := e.state.GetExecution(ctx, id)
 	if err != nil {
-		return nil, fmt.Errorf("get execution %q: %w", id, err)
+		return batchExecutionContext{}, fmt.Errorf("get execution %q: %w", id, err)
 	}
 	if snap == nil {
-		return nil, nil
+		return batchExecutionContext{}, nil
 	}
-	return cloneRuntime(snap.Runtime), nil
+	return batchExecutionContext{
+		Runtime: cloneRuntime(snap.Runtime),
+		TraceID: snap.TraceID,
+		SpanID:  snap.SpanID,
+	}, nil
 }
 
 // bodyOuterNodesSnapshot reads the outputs of the outer-graph nodes a map node's

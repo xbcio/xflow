@@ -77,6 +77,46 @@ P2-5 修完后，编译期已经按这个形状执行了：`transformNodeTypes` 
 
 ## 已修复
 
+### body / group 成员的 trace 身份在子执行处断掉（2026-08-13 修复）
+
+**实测的修复前下场**：两条路径各写一个探针，成员节点收到的 `Input.TraceID`
+与 `SpanID` 都是空串——外层 execution 带着 `trace-outer`/`span-outer` 提交，
+成员一个都没看见。原因是子执行是**以自己的 execution ID 全新提交**的：
+`execution/subgraph.Executor` 往 `submitCtx` 上只挂了 execution ID 和 scope，
+于是内层 snapshot 的 trace 字段为空，`buildInput` 给每个成员发的都是空对。
+链路正好断在 map / group 节点上——恰恰是最需要它接下去的地方，因为逐项与逐成员
+的活都发生在那之后。
+
+修复让两条路径**汇合而不是分叉**：
+
+- **group**：租约本来就带一整个 `*types.Input`，`TraceID`/`SpanID` 已在上面，
+  什么都不用新传，只缺 submit 时的交接。
+- **map body**：批次租约带的是 items 不是 Input，所以 `BatchBodyRequest` 与
+  `SubgraphLeasePayload` 各加一对字段（与 `Runtime` 同构——都是批次任务自己读不到、
+  只能由父节点展开时从 snapshot 转发的提交期值）。`bodyItemInput` 把这对值落到
+  **group 租约已经在用的同两个字段**上，于是 `Executor.Execute` 只有一个读取点，
+  没有 map 专属分支。
+
+`executionRuntime` 相应扩宽成 `executionSubmissionContext`（两个调用点都要
+runtime + trace，再加一个读取者等于把同一份 snapshot 读两遍）。
+
+安全上两者性质不同，代码注释里写明了：`OuterNodes` 带的是真实业务输出（上游常常
+是含凭证的 HTTP 响应体），绝不可入日志；`TraceID`/`SpanID` 是 tracing 后端铸的
+关联标识，**可以**出现在日志行里。
+
+覆盖：`backend/providers/local/local_subgraph_trace_test.go`（map body 与 group
+各一条端到端）、`engine/subgraph_lease_test.go` 的 payload 断言（保证新线上字段
+不是死重量）。三处反向探针各自实测变红：去掉 submitCtx 交接 / 还原
+`bodyItemInput` / 去掉 payload 赋值。
+
+**未闭合的部分（不要写成已闭合）**：本次只转发 `TraceID`/`SpanID`，**没有**转发
+`ExecutionSnapshot.TraceCarrier`。按 [RELEASE-GATES.md §4](./RELEASE-GATES.md)
+的反声明，这两个字段只是审计/检索字段，不是可跨进程恢复的 OTel `SpanContext`。
+所以现在的状态是：内层成员与外层 execution **在审计与检索上关联得起来**，但远端
+body 的 span 仍然没有真正的 OTel parent——那需要把 W3C `traceparent` carrier
+一并带下去（runner 侧已有 `tracing.ExtractCarrier`，`service/runner/runner.go:367`
+就是这么从租约恢复远端 parent 的）。属遗留缺口。
+
 ### `xflow.map` 的 expression 形态从未实现 + 无 body 的 map 编译通过（2026-08-11 修复）
 
 **实测的修复前下场**：`{items, expression}` 的 map 编译通过、`BodyAt == nil`，

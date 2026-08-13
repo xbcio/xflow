@@ -95,6 +95,20 @@ type BatchBodyRequest struct {
 	// nil when the body reads no outer node, which is every body written before
 	// cross-domain reads existed.
 	OuterNodes map[string]any
+	// TraceID and SpanID are the OUTER execution's trace identity, forwarded so
+	// the body's sub-execution continues the same trace instead of starting a
+	// detached one.
+	//
+	// They are isomorphic to Runtime: both are execution-scoped values a batch
+	// task cannot read for itself, because a batch is dispatched from the
+	// parent's expansion rather than from a submission. A group needs no
+	// equivalent field -- its lease carries a whole *types.Input, which already
+	// has TraceID/SpanID on it.
+	//
+	// Empty when the outer submission carried no trace, which is every
+	// non-instrumented caller.
+	TraceID string
+	SpanID  string
 }
 
 // WithBatchBodyExecutor supplies the body sub-graph executor used by

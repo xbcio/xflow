@@ -158,10 +158,15 @@ func bodyItemScope(req engine.BatchBodyRequest, item any, index int) map[string]
 // the inner Submit. The static half already arrives inside the projected
 // package's Def.Context.
 //
+// TraceID/SpanID ride the same Input for the same reason, and deliberately land
+// on the field a GROUP lease's Input already populates: Executor then has one
+// place to read the trace identity from, whoever the caller is, instead of a
+// map-only branch.
+//
 // Data is deliberately empty: the body's entry member has no upstream output to
 // inherit, and the loop roots travel on Request.Scope instead (bodyItemScope).
 func bodyItemInput(req engine.BatchBodyRequest) *types.Input {
-	return &types.Input{Runtime: req.Runtime}
+	return &types.Input{Runtime: req.Runtime, TraceID: req.TraceID, SpanID: req.SpanID}
 }
 
 // exitsAsItemResult folds a body's fired boundary outputs into one item's result.

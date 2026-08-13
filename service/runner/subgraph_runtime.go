@@ -74,6 +74,8 @@ func (r *SubgraphRuntime) Execute(ctx context.Context, lease *engine.TaskLease) 
 		ContinueOnError: payload.ContinueOnError,
 		Runtime:         payload.Runtime,
 		OuterNodes:      payload.OuterNodes,
+		TraceID:         payload.TraceID,
+		SpanID:          payload.SpanID,
 	})
 	if err != nil {
 		// The body could not be RUN at all — package validation, compile,

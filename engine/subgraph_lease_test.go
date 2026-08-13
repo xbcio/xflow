@@ -563,6 +563,50 @@ func TestBuildSubgraphLeaseOmitsTheSnapshotWhenTheBodyReadsNoOuterNode(t *testin
 	}
 }
 
+// TestBuildSubgraphLeaseCarriesTheOuterTraceIdentity guards the wire half of the
+// body's trace continuation. A runner's body runs on its own inner engine
+// against its own execution ID; the outer execution's snapshot -- the only place
+// the trace identity lives -- is on the control plane, which the runner never
+// reads. Without these fields every span a remote body emits is detached and the
+// trace ends at the map node.
+//
+// Asserted on the payload rather than end-to-end for the same reason the two
+// tests above are: this is the wire boundary, and
+// service/runner/subgraph_runtime.go copies the pair straight into
+// BatchBodyRequest. The in-process half is
+// TestMapBodyMemberInheritsTheOuterTraceIdentity.
+func TestBuildSubgraphLeaseCarriesTheOuterTraceIdentity(t *testing.T) {
+	def := &types.WorkflowDef{
+		Name:  "batch-lease-trace",
+		Nodes: []types.NodeDef{{Name: "loop", Type: "xflow.map", Parameters: mapBodyParamsForTest()}},
+	}
+	g, err := graph.Compile(def)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	state := newFakeState()
+	queue := &fakeQueue{}
+	reg := &fakeRegistry{handlers: map[string]types.ActionHandler{"xflow.map": &loopHandler{}}}
+	eng := newTestEngine(t, state, queue, reg)
+	ctx := WithSpanID(WithTraceID(context.Background(), "trace-outer"), "span-outer")
+	if _, err := eng.Submit(ctx, g, nil); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	batches := drainBatchTasks(t, eng, queue)
+
+	_, payload, err := eng.BuildSubgraphLease(context.Background(), batches[0])
+	if err != nil {
+		t.Fatalf("BuildSubgraphLease() error = %v", err)
+	}
+	if payload.TraceID != "trace-outer" {
+		t.Errorf("payload.TraceID = %q, want %q -- a remote body's spans would have no parent",
+			payload.TraceID, "trace-outer")
+	}
+	if payload.SpanID != "span-outer" {
+		t.Errorf("payload.SpanID = %q, want %q", payload.SpanID, "span-outer")
+	}
+}
+
 // The clone must be a copy, not an alias: a runner-facing payload that shares
 // the snapshot's map lets any mutation on either side show up on the other,
 // across every batch of the expansion.

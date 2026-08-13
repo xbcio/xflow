@@ -181,6 +181,19 @@ func (e *Executor) Execute(ctx context.Context, req Request) (Result, error) {
 	// every member sees it -- not just the entry node the submission params
 	// reach. Empty for a group or a subflow, in which case this is a no-op.
 	submitCtx = engine.WithExecutionScope(submitCtx, req.Scope)
+	// The sub-execution is submitted fresh, so it starts with no trace identity
+	// of its own: without this, its snapshot's TraceID/SpanID are empty and
+	// buildInput hands every member a detached trace. The trace then ends at the
+	// group or map node -- precisely where a workflow most needs it to continue,
+	// since that is where the per-item and per-member work happens.
+	//
+	// Both callers converge on entryInput: a group lease carries a whole
+	// *types.Input that already has them, and MapBodyExecutor puts the batch
+	// request's forwarded pair on the same fields. Empty values are no-ops
+	// (WithTraceID/WithSpanID ignore ""), so an uninstrumented caller is
+	// unchanged.
+	submitCtx = engine.WithTraceID(submitCtx, inputTraceID(entryInput))
+	submitCtx = engine.WithSpanID(submitCtx, inputSpanID(entryInput))
 
 	// entryInput.Runtime is passed as the inner submission's runtime, not left
 	// behind: $vars is the union of the workflow's static Context.Vars (which
@@ -299,4 +312,21 @@ func inputRuntime(input *types.Input) *types.Runtime {
 		return nil
 	}
 	return input.Runtime
+}
+
+// inputTraceID and inputSpanID extract the outer trace identity from the entry
+// input, tolerating a nil input like the two accessors above. An empty result
+// makes the corresponding With… call a no-op.
+func inputTraceID(input *types.Input) string {
+	if input == nil {
+		return ""
+	}
+	return input.TraceID
+}
+
+func inputSpanID(input *types.Input) string {
+	if input == nil {
+		return ""
+	}
+	return input.SpanID
 }
