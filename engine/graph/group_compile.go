@@ -29,6 +29,9 @@ func compileGroups(g *Graph, def *types.WorkflowDef) error {
 			return err
 		}
 		seen[gd.Name] = true
+		if err := validateGroupOnError(gd.Name, gd.OnError); err != nil {
+			return err
+		}
 		meta, err := compileOneGroup(g, gd, len(g.groups))
 		if err != nil {
 			return fmt.Errorf("group %q: %w", gd.Name, err)
@@ -42,6 +45,39 @@ func compileGroups(g *Graph, def *types.WorkflowDef) error {
 		g.groups = append(g.groups, meta)
 	}
 	return nil
+}
+
+// validateGroupOnError restricts a group's on_error to the policies the group
+// executor actually implements.
+//
+// groupOnErrorFatal (engine/group_exec.go) maps continue => non-fatal and
+// everything else => fatal. So error_output and main_output are *accepted* by
+// the type but run as stop: the author asks for the failure to be routed to a
+// downstream branch and gets the whole execution failed instead, with no
+// diagnostic on the path least likely to be exercised before production.
+//
+// Routing them is a new mechanism, not a wiring gap. GroupMeta.BoundaryOutputs
+// is derived purely from member edges that cross the boundary, compileOneGroup
+// never synthesizes one from OnError, and CommitGroupResult rejects any exit
+// whose (nodeIdx, port) is absent from BoundaryOutputs — so a fabricated
+// "group failed" exit is rejected today. See NODE-GROUP-COLOCATION.md §12.2.
+//
+// Unknown values are rejected for the same reason: OnError was a plain string
+// with no validation, so `fail` (which types/group.go's own doc comment warns
+// does not exist) or `error-output` also compiled clean and ran as fatal.
+func validateGroupOnError(name, onErr string) error {
+	switch onErr {
+	case "", string(types.OnErrorStop), string(types.OnErrorContinue):
+		return nil
+	case string(types.OnErrorOutput), string(types.OnErrorMainOutput):
+		return fmt.Errorf("group %q: on_error=%q is not supported on a group: "+
+			"a group has no error output port to route to (only %q, %q, %q are supported)",
+			name, onErr, "", types.OnErrorStop, types.OnErrorContinue)
+	default:
+		return fmt.Errorf("group %q: on_error=%q is not a known policy "+
+			"(only %q, %q, %q are supported on a group)",
+			name, onErr, "", types.OnErrorStop, types.OnErrorContinue)
+	}
 }
 
 func compileOneGroup(g *Graph, gd types.GroupDef, groupIdx int) (GroupMeta, error) {

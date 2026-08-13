@@ -277,11 +277,8 @@ items listed below under §12.1. What remains open is in §12.2.
   for a supply's content to become available — the supply collection face is
   gated by `SupplyGate.Admit` at activation time, independent of whether the
   consuming workflow's own trigger uses entry-seed hosting at all.
-- **Group-level `on_error: error_output` / `main_output` is unbuilt, and the
-  in-code TODO understates it.** `engine/group_exec.go`'s `groupOnErrorFatal`
-  carries a TODO saying the two output policies "should route the group failure
-  to the error boundary port's downstream ... once error-port routing is
-  implemented." That phrasing suggests a wiring gap. Two independent
+- **Group-level `on_error: error_output` / `main_output` is unbuilt, and is now
+  rejected at compile time rather than silently degraded.** Two independent
   investigations (2026-08-11) found there is **no group-level error port to
   wire to** — this is a new mechanism, not a blank to fill:
 
@@ -299,27 +296,42 @@ items listed below under §12.1. What remains open is in §12.2.
   `downstreamUnitArrivals` with no legal exit to compute arrivals from, leaving
   a group that is neither fatal nor advancing.
 
-  The node-level analogue is not reusable as-is. `ApplyOnError`
-  (`engine/errorpolicy.go`) only *selects* which already-compiled port's edges
-  to activate; `downstreamArrivals` then filters `NodeOutEdges` by
-  `SrcPort == activePort`. Both presuppose the author drew that edge. Only the
-  "select edges by active port" algorithm carries over — groups already have
-  their own (`downstreamUnitArrivals`). The missing input is the compiled edge.
+  **What changed (2026-08-14): `validateGroupOnError` now rejects the two
+  output policies — and any unknown value — in `compileGroups`.** The value was
+  previously accepted and run as `stop`, so an author who asked for the failure
+  to be routed to a downstream branch got the whole execution failed instead,
+  with no diagnostic, on the path least likely to be exercised before
+  production. `OnError` had no validation at all, so a typo (`fail`, which
+  `types/group.go`'s own doc comment warns does not exist, or `error-output`)
+  degraded the same way. A group now accepts only `""`, `"stop"`, `"continue"`.
 
-  Building it means: new compile-time IR expressing a group-level error/main
-  output edge, a matching `validateGroupPortability` rule, graph-hash and
-  snapshot round-trip implications, synthesis logic duplicated across both
-  commit paths (`commitGroup` and the production remote `CommitGroupResult`),
-  a decision on what output payload a group-level failure carries (a group has
-  no single member output to copy), and new branch coverage in both the local
-  and Redis backends. The milestone-B plan anticipated this as a "synthetic
-  boundary outcome" and specified the fallback — when no legal endpoint exists
-  to map onto, it stays a group failure rather than fabricating an endpoint.
+  The gate lives in `graph.Compile`, not in the builder: `GroupRef.OnError`
+  takes a `types.OnError`, so `types.OnErrorOutput` is a type-legal argument
+  and nothing in the SDK's assembly half can refuse it. `AddWorkflow` is the
+  only production path to a compiled graph, so that is where it is caught, and
+  `TestBuilderGroupOnErrorOutputRejected` pins the SDK-reachability of the gate
+  separately from the graph-package unit test.
 
-  Coverage today is zero: no test in the repository constructs a
-  `GroupDef{OnError: "error_output"}` or `"main_output"`, and the group
-  executor fixtures always return success, so the `execErr != nil` branch is
-  never driven at the engine layer.
+  Snapshot decode (`Graph.UnmarshalJSON`) deliberately does **not** apply the
+  validation. A graph persisted by a writer predating the gate would otherwise
+  become undecodable mid-rolling-upgrade; `groupOnErrorFatal`'s catch-all is
+  fatal, which is the safe reading of a value it cannot honor.
+
+  Building the real mechanism still means: new compile-time IR expressing a
+  group-level error/main output edge, a matching `validateGroupPortability`
+  rule, graph-hash and snapshot round-trip implications, synthesis logic
+  duplicated across both commit paths (`commitGroup` and the production remote
+  `CommitGroupResult`), a decision on what output payload a group-level failure
+  carries (a group has no single member output to copy), and new branch coverage
+  in both the local and Redis backends. The milestone-B plan anticipated this as
+  a "synthetic boundary outcome" and specified the fallback — when no legal
+  endpoint exists to map onto, it stays a group failure rather than fabricating
+  an endpoint.
+
+  Runtime coverage of the routing itself remains zero, and now cannot be
+  written without first building the mechanism: the group executor fixtures
+  always return success, so the `execErr != nil` branch is never driven at the
+  engine layer.
 - **Activation replica count > 1 per entry unit** (spec §11.6 explicit-replica
   scaling). There is one active hosting runner per entry unit today.
 - **Full runner→control activation ACK RPC.** The retired path's ACK was dead

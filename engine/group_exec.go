@@ -144,19 +144,22 @@ func nodeIdxOf(g *graph.Graph, name string) int {
 
 // groupOnErrorFatal maps the group's OnError strategy to whether a group
 // failure fails the whole execution. Uses the node OnError constants
-// (types/node.go). Milestone A: OnErrorContinue => non-fatal (execution
-// continues); everything else (OnErrorStop, OnErrorOutput, OnErrorMainOutput,
-// or empty/default) => fatal.
+// (types/node.go): OnErrorContinue => non-fatal (execution continues);
+// OnErrorStop or empty/default => fatal.
 //
-// TODO(milestone-b): OnErrorOutput/OnErrorMainOutput are accepted by the
-// contract but behave as OnErrorStop here. Routing them requires a group-level
-// error output edge that does not exist yet — GroupMeta.BoundaryOutputs is
-// derived solely from real member edges crossing the boundary, compileOneGroup
-// never reads OnError to synthesize one, and CommitGroupResult rejects any exit
-// whose (nodeIdx, port) is absent from BoundaryOutputs. Narrowing this function
-// to OnErrorStop alone would therefore strand the failure rather than route it:
-// the non-fatal branch would reach downstreamUnitArrivals with no legal exit.
-// See NODE-GROUP-COLOCATION.md §12.2 for the full scope.
+// error_output and main_output never reach here: validateGroupOnError
+// (engine/graph/group_compile.go) rejects them at compile time, because routing
+// a group-level failure requires a group error output port that does not exist
+// — GroupMeta.BoundaryOutputs is derived solely from real member edges crossing
+// the boundary, compileOneGroup never reads OnError to synthesize one, and
+// CommitGroupResult rejects any exit whose (nodeIdx, port) is absent from
+// BoundaryOutputs. Building it is a new mechanism, scoped in
+// NODE-GROUP-COLOCATION.md §12.2.
+//
+// The catch-all is deliberate rather than a switch: an unknown value cannot
+// arrive (compile rejects it), and fatal is the safe reading if one somehow did
+// — a graph snapshot decoded from an older writer that predates the validation
+// would fail the execution rather than silently continue past a failed group.
 func groupOnErrorFatal(onErr string) bool {
 	return onErr != string(types.OnErrorContinue)
 }

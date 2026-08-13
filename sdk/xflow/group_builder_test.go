@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -39,5 +40,38 @@ func TestBuilderGroupAssembly(t *testing.T) {
 	}
 	if g.OnError != string(types.OnErrorStop) || g.Timeout != 30*time.Second {
 		t.Fatalf("onError/timeout: %q %v", g.OnError, g.Timeout)
+	}
+}
+
+// TestBuilderGroupOnErrorOutputRejected proves the compile-time rejection of
+// group-level error_output is reachable from the SDK, not just from a direct
+// graph.Compile call.
+//
+// GroupRef.OnError takes a types.OnError, so types.OnErrorOutput is a
+// type-legal argument — nothing in the builder can refuse it. The gate has to
+// live in graph.Compile (validateGroupOnError), and AddWorkflow is the only
+// production path that reaches it. Without this test, "the graph package
+// rejects it" is true while the surface every author actually uses still
+// silently degrades the policy to `stop`.
+func TestBuilderGroupOnErrorOutputRejected(t *testing.T) {
+	for _, policy := range []types.OnError{types.OnErrorOutput, types.OnErrorMainOutput} {
+		wf := Workflow("traffic-analyze")
+		edge := wf.Group("edge").OnError(policy)
+		ingest := wf.LocalNode("ingest", nil)
+		analyze := wf.LocalNode("analyze", nil)
+		ingest.Group(edge)
+		analyze.Group(edge)
+		wf.Connect(ingest, analyze)
+
+		// build() is the pure-assembly half and must stay permissive: the
+		// value is type-legal and the builder does no graph analysis.
+		def, err := wf.build()
+		if err != nil {
+			t.Fatalf("on_error=%q: build must not reject a type-legal value: %v", policy, err)
+		}
+		if _, err := graph.Compile(def); err == nil {
+			t.Fatalf("on_error=%q reached a compiled graph from the SDK; "+
+				"it would run as `stop` and fail the whole execution", policy)
+		}
 	}
 }
