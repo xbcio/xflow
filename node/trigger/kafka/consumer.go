@@ -31,61 +31,88 @@ type kafkaGoConsumer struct {
 }
 
 func newKafkaGoConsumer(cfg ConsumerConfig) (Consumer, error) {
-	startOffset, err := startOffsetFor(cfg.StartOffset)
+	readerCfg, err := readerConfigFor(cfg)
 	if err != nil {
 		return nil, err
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	consumer := &kafkaGoConsumer{
+		reader:   kafkago.NewReader(readerCfg),
+		ctx:      ctx,
+		cancel:   cancel,
+		messages: make(chan Message, readerCfg.QueueCapacity),
+		done:     make(chan struct{}),
+	}
+	go consumer.run()
+	return consumer, nil
+}
+
+// readerConfigFor builds the kafka-go reader config, applying cfg.Tuning over
+// the values that used to be inlined literals here.
+//
+// It returns an error rather than letting kafka-go decide: NewReader panics on
+// a config its Validate rejects, and these values now come from operator-edited
+// params, so a typo must fail this trigger's activation instead of taking the
+// whole runner process down.
+func readerConfigFor(cfg ConsumerConfig) (kafkago.ReaderConfig, error) {
+	startOffset, err := startOffsetFor(cfg.StartOffset)
+	if err != nil {
+		return kafkago.ReaderConfig{}, err
+	}
+	tuning := cfg.Tuning
+	if tuning.isZero() {
+		tuning = defaultTuning()
+	}
+	if err := tuning.validate(); err != nil {
+		return kafkago.ReaderConfig{}, err
 	}
 	queueCapacity := cfg.MaxInflight
 	if queueCapacity <= 0 {
 		queueCapacity = defaultTriggerMaxInflight
 	}
 
-	var dialer *kafkago.Dialer
+	// The dialer is built unconditionally. It used to exist only on the SASL
+	// path, which left dial_timeout with nowhere to land: kafka-go substituted
+	// DefaultDialer and the configured value vanished with no diagnostic.
+	dialer := &kafkago.Dialer{
+		Timeout:   tuning.DialTimeout,
+		DualStack: true,
+	}
 	if cfg.SASLMechanism != "" {
 		mechanism, saslErr := buildSASLMechanism(cfg.SASLMechanism, cfg.SASLUsername, cfg.SASLPassword)
 		if saslErr != nil {
-			return nil, saslErr
+			return kafkago.ReaderConfig{}, saslErr
 		}
-		dialer = &kafkago.Dialer{
-			Timeout:       10 * time.Second,
-			DualStack:     true,
-			SASLMechanism: mechanism,
-		}
+		dialer.SASLMechanism = mechanism
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	readerCfg := kafkago.ReaderConfig{
+	return kafkago.ReaderConfig{
 		Brokers:                cfg.Brokers,
 		GroupID:                cfg.Group,
 		Topic:                  cfg.Topic,
 		StartOffset:            startOffset,
 		QueueCapacity:          queueCapacity,
-		MinBytes:               1,
-		MaxBytes:               10e6,
+		MinBytes:               tuning.FetchMinBytes,
+		MaxBytes:               tuning.FetchMaxBytes,
+		MaxWait:                tuning.MaxWait,
 		WatchPartitionChanges:  true,
 		PartitionWatchInterval: 5 * time.Second,
 		ReadLagInterval:        -1,
-		RebalanceTimeout:       30 * time.Second,
-		SessionTimeout:         30 * time.Second,
-		HeartbeatInterval:      3 * time.Second,
+		RebalanceTimeout:       tuning.RebalanceTimeout,
+		SessionTimeout:         tuning.SessionTimeout,
+		HeartbeatInterval:      tuning.HeartbeatInterval,
 		JoinGroupBackoff:       time.Second,
 		RetentionTime:          24 * time.Hour,
 		OffsetOutOfRangeError:  false,
 		ReadBackoffMin:         100 * time.Millisecond,
 		ReadBackoffMax:         time.Second,
-		CommitInterval:         0,
-		GroupBalancers:         []kafkago.GroupBalancer{kafkago.RangeGroupBalancer{}, kafkago.RoundRobinGroupBalancer{}},
-		Dialer:                 dialer,
-	}
-	consumer := &kafkaGoConsumer{
-		reader:   kafkago.NewReader(readerCfg),
-		ctx:      ctx,
-		cancel:   cancel,
-		messages: make(chan Message, queueCapacity),
-		done:     make(chan struct{}),
-	}
-	go consumer.run()
-	return consumer, nil
+		// Synchronous commit. A periodic commit would let an offset land before
+		// the side effect it belongs to succeeded, which is exactly the loss the
+		// per-partition emit-then-commit worker exists to prevent. Not a knob.
+		CommitInterval: 0,
+		GroupBalancers: []kafkago.GroupBalancer{kafkago.RangeGroupBalancer{}, kafkago.RoundRobinGroupBalancer{}},
+		Dialer:         dialer,
+	}, nil
 }
 
 // buildSASLMechanism constructs the appropriate kafka-go SASL mechanism.

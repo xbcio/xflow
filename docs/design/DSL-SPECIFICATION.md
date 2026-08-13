@@ -1381,6 +1381,32 @@ Kafka 聚合只保证同一 partition 内按消费顺序进入 batch 并按 batc
 
 DLQ writer 复用 consumer 的 broker 列表与 SASL 凭证，不接受独立配置——一个 trigger 本来就连不上的集群，会恰好在最需要它的时刻失效，而第二份 SASL 密码就是第二个泄漏面。原始 payload 按字节原样转发，来源信息（`xflow-dlq-source-topic`/`-partition`/`-offset`/`xflow-dlq-reason`）放在 header 里，便于重投时无需拆包。
 
+##### consumer 调优参数
+
+可选参数 `tuning` 暴露此前内联在 consumer 构造里的字面量。整个对象可省略；省略时的取值与外露之前逐字节一致，因此既有部署不受影响，`RawParams()` 也不会给已存的 workflow 定义多写一个键。
+
+```yaml
+    parameters:
+      tuning:
+        fetch_min_bytes: 1          # 默认 1
+        fetch_max_bytes: 10000000   # 默认 10e6
+        max_wait: 10s               # 默认 10s
+        dial_timeout: 10s           # 默认 10s
+        session_timeout: 30s        # 默认 30s
+        heartbeat_interval: 3s      # 默认 3s
+        rebalance_timeout: 30s      # 默认 30s
+```
+
+时长一律写成字符串（与 `aggregate.flush_interval` 同一约定），使 YAML 路径与 Go DSL 路径的线上形态一致。
+
+取值由 xflow 自己校验，**不是转交给 kafka-go 判断**：`kafkago.NewReader` 在配置非法时 panic 而不是返回错误，于是一个 YAML 里的手误会带走整个 runner 进程，而不是让这一个 trigger 激活失败。校验因此发生在建 reader 之前，失败即激活失败。
+
+除 kafka-go 自身会拒绝的取值外，另有一条它不管、但后果更隐蔽的规则：`heartbeat_interval` 必须**小于** `session_timeout`。取值不满足时，成员在两次心跳之间就被 coordinator 判定失联，consumer group 永久 rebalance——trigger 看着是健康的，却一条消息也消费不到。
+
+`dial_timeout` 能生效的前提是 dialer 无条件构造。此前 dialer 只在配了 SASL 时才建，非 SASL 路径下 kafka-go 会静默替换成它自己的 `DefaultDialer`，配置值无声消失。
+
+**刻意不外露**：`CommitInterval` 恒为 0（同步提交）。整条 at-least-once 契约就是「按 offset 顺序先 emit 后 commit」，周期性异步提交会让 offset 先于它对应的副作用落地，正是 per-partition 串行 worker 要消灭的丢失模式。`ReadLagInterval` 恒为 -1，lag 由 trigger 自己的指标承担。`GroupBalancers`、`ReadBackoff*`、`RetentionTime`、`OffsetOutOfRangeError` 无实际运维诉求——每多一个旋钮就多一个能被设错的值。
+
 SDK API：
 
 ```go

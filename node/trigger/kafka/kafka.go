@@ -59,6 +59,9 @@ type ConsumerConfig struct {
 	// When non-nil, messages that fail validation are handled per
 	// MessageSchema.OnInvalid.
 	MessageSchema *MessageSchema
+	// Tuning holds the consumer knobs (fetch sizing, dial timeout, group
+	// liveness windows). The zero value selects defaultTuning.
+	Tuning TuningConfig
 }
 
 var newConsumer = newKafkaGoConsumer
@@ -72,6 +75,7 @@ type Node struct {
 	MaxInflightValue   int
 	AggregateValue     AggregateConfig
 	MessageSchemaValue *MessageSchema
+	TuningValue        TuningConfig
 }
 
 func New() *Node {
@@ -100,6 +104,13 @@ func (n *Node) StartOffset(offset string) *Node {
 
 func (n *Node) MaxInflight(max int) *Node {
 	n.MaxInflightValue = max
+	return n
+}
+
+// Tuning overrides the consumer knobs. Unset fields keep their defaults, so
+// setting only SessionTimeout leaves everything else exactly as before.
+func (n *Node) Tuning(cfg TuningConfig) *Node {
+	n.TuningValue = cfg
 	return n
 }
 
@@ -162,6 +173,7 @@ func (n *Node) Descriptor() types.Descriptor {
 			{Name: "max_inflight", DisplayName: "Max Inflight", Type: types.ParamNumber, Default: float64(defaultTriggerMaxInflight)},
 			{Name: "aggregate", DisplayName: "Aggregate", Type: types.ParamObject, Description: "Optional partition batch aggregation: enabled, by, max_size, flush_interval, dedup. Under entry-seed hosting the batch is admitted to the control plane instead of emitted locally, with an admission key covering the batch's actual offset range; delivery is at-least-once (a batch may be reprocessed once if its offsets fail to commit), so consumers must be idempotent on (topic, partition, offset). flush_interval defaults to 1s in entry-seed mode and 100ms on the legacy emit path."},
 			{Name: "message_schema", DisplayName: "Message Schema", Type: types.ParamObject, Description: "Optional message validation: {required_fields: [\"f\"], on_invalid: \"discard|fail|dead_letter\", dead_letter_topic: \"t-dlq\"}. on_invalid defaults to discard (offset committed, message dropped, drop counted and logged)."},
+			{Name: "tuning", DisplayName: "Tuning", Type: types.ParamObject, Description: "Optional consumer tuning: fetch_min_bytes (1), fetch_max_bytes (10000000), max_wait (10s), dial_timeout (10s), session_timeout (30s), heartbeat_interval (3s), rebalance_timeout (30s). Durations are strings (\"45s\"). heartbeat_interval must stay below session_timeout or the group rebalances continuously. Offsets always commit synchronously after the side effect; that is not tunable."},
 		},
 		Outputs: []types.PortSpec{{Name: "main", DisplayName: "Main"}},
 	}
@@ -211,6 +223,11 @@ func (n *Node) RawParams() any {
 			schema["dead_letter_topic"] = n.MessageSchemaValue.DeadLetterTopic
 		}
 		params["message_schema"] = schema
+	}
+	// Omitted entirely when unset, so definitions stored before tuning existed
+	// keep the same shape.
+	if !n.TuningValue.isZero() {
+		params["tuning"] = n.TuningValue.rawParams()
 	}
 	return params
 }
@@ -601,6 +618,10 @@ func configFromParams(params map[string]any, supply map[string]any, entrySeed bo
 	if err != nil {
 		return ConsumerConfig{}, err
 	}
+	tuning, err := tuningFromParams(params["tuning"])
+	if err != nil {
+		return ConsumerConfig{}, err
+	}
 	cfg := ConsumerConfig{
 		Brokers:       conv.NonEmptyStringSlice(params["brokers"]),
 		Topic:         cast.ToString(params["topic"]),
@@ -609,6 +630,7 @@ func configFromParams(params map[string]any, supply map[string]any, entrySeed bo
 		MaxInflight:   conv.PositiveInt(params["max_inflight"], defaultTriggerMaxInflight),
 		Aggregate:     aggregate,
 		MessageSchema: schema,
+		Tuning:        tuning,
 	}
 	if cfg.StartOffset == "" {
 		cfg.StartOffset = "latest"
