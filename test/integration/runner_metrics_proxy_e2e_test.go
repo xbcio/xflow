@@ -34,41 +34,46 @@ func TestRunnerMetricsProxyE2E(t *testing.T) {
 		serverBin, serverAddr, serverMetricsAddr, redisAddr, dsn, tokensFile)
 	defer stopServer()
 
-	runner := mpStartReportingRunner(t, runnerBin, httpURL, "runner-metrics-e2e")
+	runnerID := mpUniqueRunnerID(t, "runner-metrics-e2e")
+	runner := mpStartReportingRunner(t, runnerBin, httpURL, runnerID)
 	defer runner.stop(t)
 
+	// Pinned to runnerID, not to the bare family: the inbox is shared Redis with
+	// a 90s key TTL, so another test's runner is routinely still in there and a
+	// bare `xflow_runner_up{` would be satisfied by its series instead.
 	metricsURL := "http://" + serverMetricsAddr + "/metrics"
-	mpWaitForServerMetric(t, metricsURL, `xflow_runner_up{`, 60*time.Second)
+	mpWaitForServerMetric(t, metricsURL, `xflow_runner_up{runner_id="`+runnerID+`"}`, 60*time.Second)
 
 	// reports_total is incremented AFTER a send completes, so it is absent from
 	// the first payload and present from the second. Wait for it explicitly.
-	body := mpWaitForServerMetric(t, metricsURL, "xflow_runner_metrics_reports_total", 60*time.Second)
-
-	// 1. The runner is known to be live.
-	if !strings.Contains(body, `runner_id="runner-metrics-e2e"`) {
-		t.Fatalf("server /metrics has no series for the reporting runner:\n%s",
-			mpHeadOf(body, 4000))
-	}
-
-	// 2. A metric the RUNNER produces (not the server) is present, carrying the
-	//    runner_id.
 	const runnerOwn = "xflow_runner_metrics_reports_total"
-	if !strings.Contains(body, runnerOwn) {
-		t.Fatalf("no runner-side metric family on the server's /metrics:\n%s",
-			mpHeadOf(body, 4000))
+	var body string
+	for deadline := time.Now().Add(60 * time.Second); ; {
+		body = mpFetchBody(t, metricsURL)
+		if mpHasSeriesForRunner(body, runnerOwn, runnerID) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no %s series for %s within 60s:\n%s",
+				runnerOwn, runnerID, mpHeadOf(body, 4000))
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
-	sawLabeled := false
+
+	// 1+2. A metric the RUNNER produces (not the server) is present, carrying
+	//      this runner's id. mpHasSeriesForRunner already required the family
+	//      and the id on the same line, which is the real invariant: separate
+	//      Contains checks pass when the family belongs to another runner.
+	//      What remains to check is that no series of this family carries an
+	//      empty or missing runner_id — a server that forgot to label would
+	//      still satisfy the check above via some other runner's line.
 	for _, line := range strings.Split(body, "\n") {
 		if !strings.HasPrefix(line, runnerOwn+"{") {
 			continue
 		}
-		if !strings.Contains(line, `runner_id="runner-metrics-e2e"`) {
+		if !strings.Contains(line, `runner_id="`) {
 			t.Fatalf("runner-side series is missing runner_id: %q", line)
 		}
-		sawLabeled = true
-	}
-	if !sawLabeled {
-		t.Fatalf("%s present but no labeled series:\n%s", runnerOwn, mpHeadOf(body, 4000))
 	}
 
 	// 3. The server counted the report and the endpoint did not 500.
@@ -133,7 +138,10 @@ func TestRunnerMetricsProxyDisabledByDefault(t *testing.T) {
 	httpURL := "http://" + serverAddr
 	mpWaitForReadyz(t, httpURL, 30*time.Second)
 
-	runner := mpStartReportingRunner(t, runnerBin, httpURL, "runner-noproxy")
+	// Unique even though this test only scrapes its own server: the id it asserts
+	// the ABSENCE of must not be an id some other test could have written.
+	runnerID := mpUniqueRunnerID(t, "runner-noproxy")
+	runner := mpStartReportingRunner(t, runnerBin, httpURL, runnerID)
 	defer runner.stop(t)
 
 	// The report endpoint must 404: not registered when the proxy is off.
@@ -143,7 +151,7 @@ func TestRunnerMetricsProxyDisabledByDefault(t *testing.T) {
 	deadline := time.Now().Add(8 * time.Second)
 	for time.Now().Before(deadline) {
 		body := mpFetchBody(t, "http://"+serverMetricsAddr+"/metrics")
-		if strings.Contains(body, `runner_id="runner-noproxy"`) {
+		if strings.Contains(body, `runner_id="`+runnerID+`"`) {
 			t.Fatalf("runner series present with the proxy disabled:\n%s", mpHeadOf(body, 4000))
 		}
 		if strings.Contains(body, "xflow_runner_metrics_received_total") {
