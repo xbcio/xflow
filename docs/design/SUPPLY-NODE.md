@@ -6,7 +6,7 @@
 > Related: [WASM-ENGINE-POOLING.md](./WASM-ENGINE-POOLING.md) (the primary
 > consumer today), [NODE-GROUP-COLOCATION.md](./NODE-GROUP-COLOCATION.md)
 > (the activation/reconciler machinery supply reuses), [DEPLOYMENT-TOPOLOGIES.md
-> §4.5](./DEPLOYMENT-TOPOLOGIES.md) (the gRPC heartbeat transport gap).
+> §4.6](./DEPLOYMENT-TOPOLOGIES.md) (the gRPC heartbeat transport gap).
 > Code: `types/workflow.go` (`NodeKindSupply`, `DependencyEdge`),
 > `engine/graph/dependency.go`, `engine/graph/unit.go`, `store/supply.go`,
 > `node/supply/{supply.go,registry.go,params.go}`,
@@ -469,7 +469,7 @@ per-key、**内存、不持久化**（与 `noMatchSince` 同一把 `r.mu`，每�
   ack 无处可发、静默丢弃、fence 永不发生，退化为「只能重启 runner」——这不是
   延迟问题，是**自愈能力的完全缺失**。此缺口与 §9(b) 的 hint/directive 缺失
   同源但**严重性不同**（hint 缺失只是延迟退化，ack 缺失是正确性/自愈能力缺失），
-  在 [DEPLOYMENT-TOPOLOGIES.md §4.5](./DEPLOYMENT-TOPOLOGIES.md#45-传输差异gRPC-心跳不携带控制载荷)
+  在 [DEPLOYMENT-TOPOLOGIES.md §4.6](./DEPLOYMENT-TOPOLOGIES.md#46-传输差异gRPC-心跳不携带控制载荷)
   已追加记录。
 
 测试支撑：`test/integration/supply_gating_test.go` 的
@@ -491,7 +491,7 @@ message HeartbeatResponse {
 `protocol.HeartbeatResponse` carries both `Activations` and `SupplyHints`.
 This is documented in detail, including the gRPC-activation gap that predates
 supply entirely, in
-[DEPLOYMENT-TOPOLOGIES.md §4.5](./DEPLOYMENT-TOPOLOGIES.md#45-传输差异gRPC-心跳不携带控制载荷) —
+[DEPLOYMENT-TOPOLOGIES.md §4.6](./DEPLOYMENT-TOPOLOGIES.md#46-传输差异gRPC-心跳不携带控制载荷) —
 this document defers to that section rather than repeating it. The
 correctness-relevant point for supply specifically: losing a hint is never a
 correctness problem, only a latency one. Hints are computed by

@@ -243,7 +243,28 @@ ready intent；恢复后 dispatcher 重新 handoff。lease expiry discovery 和
 repair、runner claim expiry recovery，以及 outbox replay 都是独立的恢复
 循环，且均以 Redis 中的权威状态为准。
 
-### 4.3 重试与责任分层
+### 4.3 队列通道：批次任务独立成队
+
+批次续作（展开后的 map 各项，`engine.TaskTypeNodeBatch`）走独立队列，与
+普通节点任务分离。共用一条 FIFO 时，一个宽 map 会占满全部 slot，排在另一
+条不相关执行的首个节点之前：local 后端实测 200 批次 × 20ms 下，投进饱和
+队列的小执行等了 **854ms** 才跑上首个节点；分离后降到 **10ms**，map 自身
+总耗时不变。
+
+| 后端 | 队列 | 权重 |
+|---|---|---|
+| distributed（asynq） | `default` / `xflow:batch` | 8 : 1 |
+| local（内存） | 交互 lane / 批次 lane | 每 8 个交互任务让出 1 次 |
+
+**加权而非严格优先级**：严格优先级实测同样把队头等待压到 10ms，但会让持续
+的普通任务流把进行中的 map 无限期饿死，且 asynq 与本地队列都不会为此报告
+任何信号。
+
+> **滚动升级顺序：consumer 必须先于 producer 上线。** 未配置 `Queues` 的
+> asynq server 只轮询 `default`；旧版 consumer 面对新版 producer 投到
+> `xflow:batch` 的任务是一个**静默黑洞**——入队成功、永不投递、无任何报错。
+
+### 4.4 重试与责任分层
 
 | 阶段 | 负责方 | 重试/恢复含义 |
 |---|---|---|
@@ -257,7 +278,7 @@ Task Dispatcher 不会等待 runner 执行完成；它只完成 durable handoff�
 node/execution 状态仍由 server 的 `CommitTaskResult` 推进，runner 不直接
 访问 Redis 或 Asynq。
 
-### 4.4 当前 HA 与传输边界
+### 4.5 当前 HA 与传输边界
 
 Redis 的 durable state 允许任一 control-plane 进程在恢复后继续 claim、
 replay 或 sweep 既有工作；这不等同于完整的 control-plane HA。当前 leader
@@ -272,7 +293,7 @@ outbox 语义，也不构成 release gate 已满足的证据。Loop/Split 也仍
 扩展路径，未纳入静态 DAG completion 与 server/runner production-ready
 保证。
 
-### 4.5 传输差异：gRPC 心跳不携带控制载荷
+### 4.6 传输差异：gRPC 心跳不携带控制载荷
 
 `HeartbeatResponse` 在 HTTP 传输下携带 `activations` 与 `supply_hints`；
 **gRPC 传输下两者都不携带** —— `runnerpb.HeartbeatResponse` 只有 `server_time`
@@ -304,7 +325,7 @@ outbox 语义，也不构成 release gate 已满足的证据。Loop/Split 也仍
 
 HTTP 是首选传输，gRPC 是实验性的。
 
-### 4.6 跨网络域的指标采集：runner 上报 + server 代理
+### 4.7 跨网络域的指标采集：runner 上报 + server 代理
 
 Prometheus 是拉模型：采集端必须能主动连到被采集端。runner 的目标形态是跨网络域
 部署（§5），这个方向的连通性不存在，于是 runner 进程里正确产出的指标无人可抓。
@@ -343,7 +364,7 @@ server: MetricsInbox → Redis xflow:runner:metrics:{control}:payload:<id> (TTL 
 - **多副本共享**：inbox 存 Redis（无 Redis 时退进程内存）。runner 经 LB 上报落到任一
   副本，从任一副本抓取都可见——否则序列会随抓取相位在副本间闪烁。
 - **gRPC 传输无此能力**：HTTP client 实现 `MetricsReportClient`，gRPC client 不实现，
-  runner 侧断言失败即静默不上报（与 §4.5 的其他 gRPC 缺口同源，取舍相同）。
+  runner 侧断言失败即静默不上报（与 §4.6 的其他 gRPC 缺口同源，取舍相同）。
 - **上报失败不重试不排队**：指标是当前状态快照，重发旧快照无价值；counter 单调累加，
   丢几轮后下一轮报的仍是正确累计值，`rate()` 只损失中间分辨率。
 
@@ -456,7 +477,8 @@ Relay Gateway 用于 runner 无法直连 server、不能互相直连或需要本
 | Runner Protocol | **MVP 已实现（传输）** | `service/protocol` 提供 HTTP+JSON DTO、路由常量和 client，另有 gRPC 通道（`grpc_client.go`、`runnerpb/`）；streaming / credit-flow control 仍为实验性 |
 | Loop/Split | **实验性** | 扩展/子执行路径未进入静态 DAG completion 与 server/runner production-ready 保证 |
 | Relay Gateway | **规划** | 网络隔离中继拓扑已定义，尚无独立进程实现 |
-| 跨域 runner 指标采集 | **已实现** | runner `--report-metrics` → server `/v1/runners/metrics` → 并入 server `/metrics`（§4.6）；Redis 共享 inbox 支持多副本，`IsLive` 过期，`runner_id` 由 server 覆盖 |
+| 跨域 runner 指标采集 | **已实现** | runner `--report-metrics` → server `/v1/runners/metrics` → 并入 server `/metrics`（§4.7）；Redis 共享 inbox 支持多副本，`IsLive` 过期，`runner_id` 由 server 覆盖 |
+| 批次任务队列隔离 | **已实现** | 两个后端各自分离批次通道并加权调度（§4.3）；升级须 consumer 先于 producer |
 
 一句话：**local / cluster 已可用；server / runner 的 durable handoff MVP 已落地；remote SDK、Relay Gateway、Loop/Split 正式版与 streaming / credit-flow control 仍在规划或实验阶段。完整 control-plane HA 仍需独立验证与设计。**
 

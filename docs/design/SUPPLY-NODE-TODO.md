@@ -58,7 +58,7 @@ server 的 `RotationForHolder` 只在 ID 不同时下发——「每个 runner �
 上报/代理通道已实现：runner `--report-metrics` 把整个 registry 上报到
 `POST /v1/runners/metrics`，server 经 `prometheus.Gatherers` 并入自己的 `/metrics`。
 设计见 [runner 指标代理通道 spec](../superpowers/specs/2026-08-09-runner-metrics-proxy-design.md)，
-拓扑见 [DEPLOYMENT-TOPOLOGIES.md §4.6](./DEPLOYMENT-TOPOLOGIES.md#46-跨网络域的指标采集runner-上报--server-代理)。
+拓扑见 [DEPLOYMENT-TOPOLOGIES.md §4.7](./DEPLOYMENT-TOPOLOGIES.md#47-跨网络域的指标采集runner-上报--server-代理)。
 
 本条原表述「`cmd/runner/run.go` 里没有 `*metrics.Metrics` 实例」在 2026-08-09 已更正
 为过期——实例早已存在（`9cc879a`），真缺口是「自曝、等人来抓」。实现时顺带解开了
@@ -68,12 +68,12 @@ server 的 `RotationForHolder` 只在 ID 不同时下发——「每个 runner �
 **仍未做**：`xflow_runner_up` 之外没有跨 runner 的聚合视图（各 runner 的 histogram
 bucket 由同一份代码决定故可聚合，但若某 runner 装了 bucket 不同的第三方 collector，
 `histogram_quantile` 跨 runner 求和会失真，本设计不做检测）；gRPC 传输仍无此能力
-（见 [DEPLOYMENT-TOPOLOGIES.md §4.5](./DEPLOYMENT-TOPOLOGIES.md)，既有取舍）。
+（见 [DEPLOYMENT-TOPOLOGIES.md §4.6](./DEPLOYMENT-TOPOLOGIES.md)，既有取舍）。
 
 ### 3. gRPC 传输不携带 hint 与 activation
 
 见 [SUPPLY-NODE.md §9(b)](./SUPPLY-NODE.md#9-known-gaps-and-costs) 与
-[DEPLOYMENT-TOPOLOGIES.md §4.5](./DEPLOYMENT-TOPOLOGIES.md#45-传输差异gRPC-心跳不携带控制载荷)。
+[DEPLOYMENT-TOPOLOGIES.md §4.6](./DEPLOYMENT-TOPOLOGIES.md#46-传输差异gRPC-心跳不携带控制载荷)。
 
 `runnerpb.HeartbeatResponse` 只有 `server_time` 一个字段。**这个缺口先于本分支
 存在**（gRPC 连 activation directive 都不带），不是 supply 引入的。

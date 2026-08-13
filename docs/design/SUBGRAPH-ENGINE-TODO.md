@@ -11,47 +11,6 @@
 
 ## P1 — 规模上去会疼
 
-### 4. 无 `max_concurrency` 节流
-
-设计时显式排除（见 spec §10.1），当时 body 还是 pass-through stub。
-
-**本条原先写的理由是错的，2026-08-11 实测推翻。** 原文说风险是「全部批次一次性对
-下游发起真实 I/O」，把爆炸半径描述成对下游系统的并发外呼。实际不成立：并发度由
-worker 池上限决定，与批次数无关——local 后端是 `memoryQueue` 的 `concurrency` 个
-worker，分布式后端是 runner 侧的池。批次多只让队列变深，不让并发变宽。
-
-真实的故障是另一回事，而且比这严重得多：`FlushOutbox` 跑在 queue worker 协程上
-（`engine/atomic.go` 把 `TaskTypeNodeBatch` 直接派进 `ExecuteBatch`），而
-`memoryQueue.Enqueue` 满了会阻塞。于是**扇出宽过队列缓冲就是永久死锁**——每个
-worker 都停在一次只有它们自己能腾出空间的 send 上。默认 `concurrency=4` 下四个
-400 批次的并行 map 就够（1600 > 1024 缓冲）。已在 8180d58 修复：`FlushOutbox`
-改走可选的 `TryEnqueue`，满了就把剩余意图留在 outbox 里等下一轮，且**不消耗投递
-预算**（走失败路径会 `Attempts++` 并最终进死信，等于静默丢活）。回归测试见
-`backend/providers/local/fanout_backpressure_test.go`。
-
-所以 `max_concurrency` 现在纯粹是**吞吐整形**需求，不再是正确性缺口。优先级相应下调。
-
-**2026-08-13 再测，把「饿死谁」也修正了。** 上一段说的是「饿死同执行内的其他分支」，
-实测**不成立**：`start` 同时扇到一个 200 批次的 map（body 每项 sleep 20ms）和一条
-5 级旁路链，旁路五个节点全部在 **430～518µs** 内跑完，而整个执行耗时 1.08s。原因是
-批次任务是 `start` **提交之后**才由 `xflow.map` 的 commit 展开进 outbox 的，旁路节点
-的任务早已在队列里排在它们前面。
-
-真正被饿死的是**另一条 execution**。同一队列同一 worker 池，FIFO：
-
-| 事件 | 时刻 |
-|---|---|
-| 提交大 map | 0 |
-| 队列堆满后提交一条单节点执行 | 200ms |
-| 该单节点**第一次真正跑** | **1.091s** |
-| 大 map 跑完 | 1.091s |
-
-小执行等了 890ms，等的正好是大 map 排干。这是**队头阻塞**，不是并发外呼。所以
-`max_concurrency` 要限的是「单个 map 在共享队列里的在途份额」，收益是多租户下的
-延迟隔离，而非保护下游系统——后者由 worker 池上限决定，与批次数无关。
-
-无测试、无告警。合并时无证据表明造成过真实事故。
-
 ### 9. 并发 `FlushOutbox` 会重复投递同一条意图
 
 多个 worker 可以同时对同一 execution 调 `FlushOutbox`，各自 `ListOutbox` 到同一条
@@ -87,6 +46,79 @@ P2-5 修完后，编译期已经按这个形状执行了：`transformNodeTypes` 
 （已于 2026-08-11 `93277e7` 改名，见下方「已修复」一节）
 
 ## 已修复
+
+### 队头阻塞：批次任务与普通节点任务共用一条队列（原 P1-4，2026-08-13 修复）
+
+本条原先叫「无 `max_concurrency` 节流」，**三次实测把它的理由改了三遍，最后一次
+把方案本身也推翻了**。三次更正如实记在这里，因为每一次的错法都可能重犯。
+
+**第一次更正（2026-08-11）：不是「保护下游」。** 原文说风险是「全部批次一次性对
+下游发起真实 I/O」。不成立：并发度由 worker 池上限决定，与批次数无关——local 是
+`memoryQueue` 的 `concurrency` 个 worker，分布式是 runner 侧的池。批次多只让队列
+变深，不让并发变宽。
+
+同期发现了一个真缺陷但与节流无关：`FlushOutbox` 跑在 queue worker 协程上，而
+`memoryQueue.Enqueue` 满了会阻塞，于是**扇出宽过队列缓冲就是永久死锁**（默认
+`concurrency=4` 下四个 400 批次的并行 map 就够）。已在 `8180d58` 单独修复：
+`FlushOutbox` 改走可选的 `TryEnqueue`，满了把剩余意图留在 outbox 等下一轮且
+**不消耗投递预算**。回归测试 `backend/providers/local/fanout_backpressure_test.go`。
+
+**第二次更正（2026-08-13）：不是「饿死同执行内的其他分支」。** 实测：`start` 同时
+扇到一个 200 批次的 map（body 每项 sleep 20ms）和一条 5 级旁路链，旁路五个节点全部
+在 **430～518µs** 内跑完，而整个执行耗时 1.08s。批次任务是 `start` **提交之后**才由
+`xflow.map` 的 commit 展开进 outbox 的，旁路节点的任务早已排在它们前面。
+
+真正被饿死的是**另一条 execution**：同队列同 worker 池，FIFO。
+
+**第三次更正（2026-08-13，方案本身）：`max_concurrency` 是错的杠杆。** 前两次更正
+把症结定位到队头阻塞后，本条仍写着「限制单个 map 在共享队列里的在途份额」。实测
+对照推翻了它：
+
+| 配置 | 小执行等待首个节点 | 大 map 总耗时 | body 执行数 |
+|---|---|---|---|
+| 单 FIFO（修复前） | **854～884ms** | 1.054s | 200 |
+| 批次独立通道 | **10～12ms** | 1.079s | 200 |
+
+场景：200 批次的 map 跑满队列后（+200ms）提交一条单节点执行。**延迟隔离的收益
+全部来自通道分离，吞吐零代价。** 而 `max_concurrency`：
+
+- 要给父节点加「已发射到第几批」的游标状态，并在 `CompleteExpandedSubExecution`
+  里逐批补发，**需改 local + Redis 两个后端的原子语义**（子图计划里明确警告过
+  不要顺手做）；
+- 它限的是**单个 map** 的在途份额，两个并发 map 照样把队列占满——通道分离对任意
+  批次负载都成立；
+- 分布式侧无对应物，而 asynq 原生就有多队列加权（`Config.Queues`）。
+
+所以改法是**按任务类型分通道**，两个后端各自用原生手段，不动任何原子语义、不动
+outbox、不动 Lua：
+
+| 后端 | 实现 |
+|---|---|
+| local | `memoryQueue` 加 `batchCh`，`laneFor` 按 `TaskTypeNodeBatch` 路由；worker 加权轮询 |
+| 分布式 | asynq 的 `Queues: {default: 8, xflow:batch: 1}`，producer 侧 `asynq.Queue(queueFor(task))` |
+
+**加权而非严格优先级**，两侧一致。严格优先级在队头阻塞这项指标上一样快（实测同为
+10ms），但会让持续的普通任务流把在途的 map 无限期挂起，且**没有任何东西报告这个
+停顿**。local 侧 `interactiveBurst = 8`，分布式侧权重 8:1，批次通道至少保有约 1/9
+的吞吐。
+
+**两处易漏**（各自有测试钉着）：
+
+1. **延迟与重投路径**。只在两个 `Enqueue` 入口做路由的话，`EnqueueDelayed` 与
+   瞬时失败重投仍写死 `q.ch`，于是**恰好撞上重试的那些批次**重新回到交互通道，
+   悄悄重开队头阻塞。
+2. **分布式侧的灰度顺序**。asynq server 不配 `Queues` 时**只轮询 `default`**，
+   所以老 consumer 对新队列是黑洞：任务 enqueue 成功、永不投递、无任何报错。
+   **consumer 必须先于 producer 上线。**
+
+覆盖：`backend/providers/local/batch_lane_test.go`（队头阻塞回归 + 反向的饿死守卫 +
+延迟/重投两条路径）、`backend/providers/distributed/internal/queue/asynq/batch_queue_test.go`
+（直接断言 asynq 的 per-queue pending 键 + 两条都被消费 + 权重不得严格）。
+
+反向探针四处各自实测变红：`laneFor` 恒返回交互通道 → 等待回到 884ms 且延迟/重投
+两条同时红；worker 退回严格优先级 → 5 个批次任务全部落在第 100 个交互任务之后；
+consumer 的 `Queues` 置 nil → 批次任务 10s 内一条都收不到；`queueFor` 恒返回
+`default` → pending 键断言红。
 
 ### `ProjectSubgraphPackage` → `ProjectGroupPackage`（2026-08-11 `93277e7`）
 

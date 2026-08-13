@@ -22,7 +22,12 @@ import (
 func (t *Transport) StartConsumer(cfg queue.ConsumerConfig, handler queue.TaskHandler) (func(), error) {
 	srv := asynqlib.NewServer(
 		t.connOpt,
-		asynqlib.Config{Concurrency: cfg.Concurrency},
+		asynqlib.Config{
+			Concurrency: cfg.Concurrency,
+			// Without Queues, asynq polls only "default" and every batch task
+			// enqueued to the batch queue sits unprocessed forever.
+			Queues: queueWeights(),
+		},
 	)
 	mux := asynqlib.NewServeMux()
 	mux.HandleFunc(taskType, func(ctx context.Context, at *asynqlib.Task) error {
