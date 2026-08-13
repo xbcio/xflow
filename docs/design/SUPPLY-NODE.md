@@ -467,39 +467,47 @@ per-key、**内存、不持久化**（与 `noMatchSince` 同一把 `r.mu`，每�
   只实现前者的 runner。
 - **gRPC 传输没有 ActivationAck 的 RPC/proto 定义**，因此 gRPC-only 部署下
   ack 无处可发、静默丢弃、fence 永不发生，退化为「只能重启 runner」——这不是
-  延迟问题，是**自愈能力的完全缺失**。此缺口与 §9(b) 的 hint/directive 缺失
-  同源但**严重性不同**（hint 缺失只是延迟退化，ack 缺失是正确性/自愈能力缺失），
-  在 [DEPLOYMENT-TOPOLOGIES.md §4.6](./DEPLOYMENT-TOPOLOGIES.md#46-传输差异gRPC-心跳不携带控制载荷)
+  延迟问题，是**自愈能力的完全缺失**。这是 gRPC 目前**唯一**的控制面缺口
+  （心跳载荷已补齐，见 §9(b)），
+  在 [DEPLOYMENT-TOPOLOGIES.md §4.6](./DEPLOYMENT-TOPOLOGIES.md#46-传输差异gRPC-缺-ActivationAck)
   已追加记录。
 
 测试支撑：`test/integration/supply_gating_test.go` 的
 `TestSupplyGateRetriesWithoutRestart` 证明完整闭环（gate decline → ack → fence →
 backoff → supply 恢复 → reconcile 重派 → activation 成功接纳）。
 
-**(b) gRPC transport carries no supply hint — and, separately, no activation
-directive at all.** `runnerpb.HeartbeatResponse` has exactly one field:
+**(b) gRPC transport now carries both supply hints and activation directives.**
+`runnerpb.HeartbeatResponse` has four fields:
 
 ```protobuf
-// service/protocol/runnerpb/runner.proto:73-75
+// service/protocol/runnerpb/runner.proto:78-86
 message HeartbeatResponse {
   int64 server_time = 1;
+  map<string, string> supply_hints = 2;
+  string supply_key_rotation = 3;
+  bytes activations_json = 4;
 }
 ```
 
-`service/control/grpc_server.go`'s `Heartbeat` handler only fills
-`ServerTime` on the proto response, even though the HTTP-transport
-`protocol.HeartbeatResponse` carries both `Activations` and `SupplyHints`.
-This is documented in detail, including the gRPC-activation gap that predates
-supply entirely, in
-[DEPLOYMENT-TOPOLOGIES.md §4.6](./DEPLOYMENT-TOPOLOGIES.md#46-传输差异gRPC-心跳不携带控制载荷) —
-this document defers to that section rather than repeating it. The
-correctness-relevant point for supply specifically: losing a hint is never a
-correctness problem, only a latency one. Hints are computed by
+`service/protocol/grpc_conv.go:159-193` round-trips all four (activations, like
+leases, travel as JSON bytes to avoid modeling `map[string]any` params in
+proto), `service/control/grpc_server.go:110` fills them on the response, and
+`grpc_client.go:57` decodes them back on the runner. An earlier revision of
+this document described the proto as having "exactly one field"; that is no
+longer true.
+
+The remaining gRPC gap is `ActivationAck` — see (a) above and
+[DEPLOYMENT-TOPOLOGIES.md §4.6](./DEPLOYMENT-TOPOLOGIES.md#46-传输差异gRPC-缺-ActivationAck).
+It is a self-healing gap, not a supply-latency one.
+
+Supply-specific note that stands regardless of transport: losing a hint is
+never a correctness problem, only a latency one. Hints are computed by
 `SupplyHinter.HintsForRunner` (`service/control/supply_hints.go`) purely as an
 optimization; the real convergence guarantee is `SupplyGate.Admit` at
-activation time plus the TTL-based re-check. Under gRPC, an already-hosted
-consumer's content-refresh latency degrades from "one heartbeat interval" to
-"one TTL poll interval" — never to "never."
+activation time plus the TTL-based re-check. If hints are lost — partition,
+runner restart, server leadership change — an already-hosted consumer's
+content-refresh latency degrades from "one heartbeat interval" to "one TTL poll
+interval," never to "never."
 
 **(c) Cross-runner pool swaps are not synchronized; the skew is observable,
 not eliminated.** When a supply's content changes, each runner hosting a

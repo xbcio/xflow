@@ -293,37 +293,28 @@ outbox 语义，也不构成 release gate 已满足的证据。Loop/Split 也仍
 扩展路径，未纳入静态 DAG completion 与 server/runner production-ready
 保证。
 
-### 4.6 传输差异：gRPC 心跳不携带控制载荷
+### 4.6 传输差异：gRPC 缺 ActivationAck
 
-`HeartbeatResponse` 在 HTTP 传输下携带 `activations` 与 `supply_hints`；
-**gRPC 传输下两者都不携带** —— `runnerpb.HeartbeatResponse` 只有 `server_time`
-一个字段（`service/protocol/runnerpb/runner.proto:73`），`grpc_server.go`
-构造响应时也只回填该字段。这个缺口先于 supply hint 存在（既有的 activation
-下发在 gRPC 下就已经不通），不是本节新引入的。
+`HeartbeatResponse` 的控制载荷在**两种传输下都已完整**：
+`runnerpb.HeartbeatResponse` 有 `server_time`、`supply_hints`、
+`supply_key_rotation`、`activations_json` 四个字段
+（`service/protocol/runnerpb/runner.proto:78-86`），
+`grpc_conv.go:159-193` 两个方向都往返（activation 与 lease 同样走 JSON bytes，
+避免在 proto 里建模 `map[string]any` params），`control/grpc_server.go:110`
+回填全部字段。**activation 下发与 supply hint 在 gRPC 下不再是缺口**——
+早期版本的 proto 确实只有 `server_time`，本节此前的描述已过期。
 
-后果与处置：
+仍存在的传输差异只有一处：
 
-- **activation 下发**：gRPC 传输下 trigger activation 不通。这是既有缺口，
-  与 supply 无关，需单独立项（补 proto + 重新生成 + 两边转换函数 + 契约测试）。
-- **supply hint**：gRPC 传输下 supply 变更的收敛延迟从一个心跳周期退化为
-  一个 TTL 周期。**功能不缺失** —— 心跳捎带 hint 只是延迟优化，真正的正确性
-  保证是 activation 期的同步拉取（`SupplyGate.Admit`）与 loader 的 TTL 轮询；
-  hint 丢失（无论是因为网络分区、runner 重启、server 换主，还是像 gRPC 这样
-  从不传输）都不会造成永久发散。
-- **ActivationAck（`fix/activation-ack-retry` 引入）**：gRPC proto 没有
-  `ActivationAck` 对应的 RPC 定义，因此 gRPC-only 部署下 runner 的 ack 无处
-  可发、静默丢弃、`MarkActivationFailed` / `Store.Fence` 永不被触发。这意味着
-  gRPC-only 部署**仍退化为「只能重启 runner 恢复一个被 gate decline 的
-  activation」**——与 hint 缺失的纯延迟退化不同，这是**自愈能力的完全缺失**，
-  severity 更高。HTTP 传输下此闭环已完整实现，详见
+- **ActivationAck**：gRPC proto 没有 `ActivationAck` 对应的 RPC 定义
+  （`runner.proto` 只有 `Connect`/`Register`/`Heartbeat`/`PollTask`/
+  `ReportResult`），因此 gRPC-only 部署下 runner 的 ack 无处可发、静默丢弃、
+  `MarkActivationFailed` / `Store.Fence` 永不被触发。这意味着 gRPC-only 部署
+  **仍退化为「只能重启 runner 恢复一个被 gate decline 的 activation」**——
+  这是**自愈能力的完全缺失**，不是延迟退化。HTTP 传输下此闭环已完整实现，详见
   [SUPPLY-NODE.md §9(a)](./SUPPLY-NODE.md#9-known-gaps-and-costs)。
 
-**范围边界**：hint 与 ack 是两个独立缺口。hint 只影响「已经托管某 supply 消费者
-的 runner 何时刷新内容」；ack 影响「一个被门控拒绝的 activation 何时被重新托管」。
-前者是延迟退化，后者是正确性/自愈能力缺失。两件事在文档与代码注释里必须分清，
-不能互相掩盖。
-
-HTTP 是首选传输，gRPC 是实验性的。
+HTTP 是首选传输，gRPC 是实验性的；跨网络域走 Relay Gateway 而非 gRPC。
 
 ### 4.7 跨网络域的指标采集：runner 上报 + server 代理
 

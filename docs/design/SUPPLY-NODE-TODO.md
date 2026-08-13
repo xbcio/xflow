@@ -67,20 +67,23 @@ server 的 `RotationForHolder` 只在 ID 不同时下发——「每个 runner �
 
 **仍未做**：`xflow_runner_up` 之外没有跨 runner 的聚合视图（各 runner 的 histogram
 bucket 由同一份代码决定故可聚合，但若某 runner 装了 bucket 不同的第三方 collector，
-`histogram_quantile` 跨 runner 求和会失真，本设计不做检测）；gRPC 传输仍无此能力
-（见 [DEPLOYMENT-TOPOLOGIES.md §4.6](./DEPLOYMENT-TOPOLOGIES.md)，既有取舍）。
+`histogram_quantile` 跨 runner 求和会失真，本设计不做检测）；上报只走 HTTP
+`POST /v1/runners/metrics`，**gRPC 传输没有对应 RPC**，gRPC-only 的 runner 无法
+上报指标（既有取舍，gRPC 非目标形态）。
 
-### 3. gRPC 传输不携带 hint 与 activation
+### ~~3. gRPC 传输不携带 hint 与 activation~~ ✓ 已关闭
 
-见 [SUPPLY-NODE.md §9(b)](./SUPPLY-NODE.md#9-known-gaps-and-costs) 与
-[DEPLOYMENT-TOPOLOGIES.md §4.6](./DEPLOYMENT-TOPOLOGIES.md#46-传输差异gRPC-心跳不携带控制载荷)。
+`runnerpb.HeartbeatResponse` 现在有 `server_time`、`supply_hints`、
+`supply_key_rotation`、`activations_json` 四个字段
+（`service/protocol/runnerpb/runner.proto:78-86`），`grpc_conv.go:159-193`
+两个方向都往返，`service/control/grpc_server.go:110` 回填全部字段，runner 侧
+`grpc_client.go:57` 解回 Go 结构。原描述（「只有 `server_time` 一个字段」）
+已过期。
 
-`runnerpb.HeartbeatResponse` 只有 `server_time` 一个字段。**这个缺口先于本分支
-存在**（gRPC 连 activation directive 都不带），不是 supply 引入的。
-
-对 supply 而言只是延迟退化，不是正确性问题：丢 hint 只会让内容刷新延迟从「一个
-心跳周期」退化为「一个 TTL 轮询周期」，永远不会退化为「永不刷新」。TTL 轮询才是
-正确性保证，hint 只是优化。
+gRPC 仍缺的是 `ActivationAck` 的 RPC 定义，那是**自愈能力**缺口而非 supply
+延迟问题，见
+[DEPLOYMENT-TOPOLOGIES.md §4.6](./DEPLOYMENT-TOPOLOGIES.md#46-传输差异gRPC-缺-ActivationAck)。
+注意 gRPC 不是目标形态（跨网络域走 Relay Gateway），该缺口不单独立项。
 
 ### ~~4. wasm supply 热更新无生产接线，规则永不到达 guest~~ ✓ 已关闭
 
