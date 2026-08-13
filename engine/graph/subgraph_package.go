@@ -142,13 +142,20 @@ func ProjectGroupPackage(g *Graph, unitIdx int) (*SubgraphPackage, string, error
 	for _, name := range memberNames {
 		idx := g.index[name]
 		n := g.nodes[idx]
+		// The entry trigger's parameters are rendered here; every other member
+		// keeps its source text for execution/params.go. See
+		// evaluateEntryTriggerParams for why the split is at the entry.
+		params, err := evaluateEntryTriggerParams(g, &gm, idx, n)
+		if err != nil {
+			return nil, "", err
+		}
 		nodes = append(nodes, types.NodeDef{
 			Name:       n.Name,
 			Type:       n.Type,
 			Kind:       n.Kind,
 			Version:    n.Version,
 			OnError:    n.OnError,
-			Parameters: cloneStringAnyMap(n.Parameters),
+			Parameters: params,
 		})
 	}
 

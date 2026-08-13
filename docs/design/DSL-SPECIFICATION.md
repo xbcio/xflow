@@ -565,28 +565,39 @@ outputs:
 
 ## 4. 表达式引擎
 
-> ### 实现状态（2026-08-12 实测）
+> ### 实现状态（2026-08-13 实测）
 >
-> 本章描述的语法、变量根与函数**均已实现并有测试覆盖**，一处例外见下。
-> 历史缺口（模板语法零实现、多数节点不求值参数、`$nodes`/`$execution`/
-> `$workflow` 三个根不存在）已全部关闭，过程记录在
+> 本章描述的语法、变量根与函数**均已实现并有测试覆盖**。历史缺口（模板语法零
+> 实现、多数节点不求值参数、`$nodes`/`$execution`/`$workflow` 三个根不存在、
+> trigger 激活参数不求值）已全部关闭，过程记录在
 > [EXPRESSION-LAYER-TODO.md](./EXPRESSION-LAYER-TODO.md)。
 >
-> **求值发生在一个地方**：`execution/runner.go` 的 handler 边界
-> （`execution/params.go` 的 `evaluateParams`）。它在 handler 拿到
-> `Input.Params` 之前渲染完所有模板，所以 `xflow.http` 的 headers/body、
-> `xflow.database` 的 where/data、`xflow.notification` 的 to 等**全部**支持
-> 模板——不需要各节点自己接线。豁免的只有那些 handler 自己当表达式求值的参数
-> （`condition` / `expression` / `items` / `code`）与子图 body，见 §4.1 末尾。
+> **求值发生在两个地方**，因为一个 trigger 从来不是被调度的任务，而是一个入口
+> 索引，它的参数永远不会经过任务边界：
 >
-> **唯一例外：trigger 的激活参数不求值。** Kafka 的 `topic`/`brokers`、
-> cron 的 `expression`、webhook 的 `path` 这些参数在**激活期**被消费，那时
-> 还没有任何一次执行——`$input`、`$execution`、`$nodes` 都不存在，只有
-> `$config`/`$vars` 在语义上说得通。当前实现把它们原样交给 trigger handler
-> （`service/control` 从图上取 `nm.Parameters` → `ActivateDirective.Params` →
-> `handler.Activate`），编译期也不拒绝，所以**写在这里的模板会以字面串生效**
-> （实测：`topic: "{{ $config.topic }}"` 编译通过，consumer 订阅字面主题名）。
-> 在这层建求值需要先定义激活期环境，属于未决设计，不要在 trigger 参数里写模板。
+> | 层 | 位置 | 环境 | 覆盖 |
+> |----|------|------|------|
+> | 任务边界 | `execution/params.go` 的 `evaluateParams`，由 `execution/runner.go` 在 handler 拿到 `Input.Params` 之前调用 | 完整运行期环境（`$input`/`$nodes`/`$execution`/…） | 所有被执行的节点 |
+> | 激活边界 | `engine/graph/activation_params.go` 的 `EvaluateActivationParams` | **只有 `$config` 和 `$vars`** | trigger 的激活参数 |
+>
+> 任务边界这一层意味着 `xflow.http` 的 headers/body、`xflow.database` 的
+> where/data、`xflow.notification` 的 to 等**全部**支持模板——不需要各节点自己
+> 接线。豁免的只有那些 handler 自己当表达式求值的参数（`condition` /
+> `expression` / `items` / `code`）与子图 body，见 §4.1 末尾。
+>
+> **激活边界只给两个根**：激活发生在任何一次执行之前，`$input`、`$execution`、
+> `$nodes` 都不存在，只有随定义版本一起走的 `$config`/`$vars` 说得通。引用其他
+> 根**在激活时报错**而不是渲染成 `<nil>`——这道守卫不能交给 expr，因为
+> `exprx.CompileExpr` 按 `(code, asBool)` 缓存程序、命中时忽略 env：实测同一段
+> `topic-{{ $execution }}` 在冷缓存下报 `unknown name $execution`，在任何一次
+> 节点执行编译过该源码之后就**不报错了，直接渲染成 `"topic-<nil>"`**。
+>
+> `$supplies` 也被拒绝，尽管它在控制面能解析出值：supply 内容由 runner 的门控
+> 在指令下发**之后**取回，在这里渲染出的值会被冻结进激活参数，永不刷新。
+>
+> 三条激活路径共用这一层，所以独立 trigger、trigger group 与进程内内联三种部署
+> 形态对同一份工作流的理解一致。group 只渲染入口成员——其余成员都会被内层引擎
+> 当作任务执行，走任务边界那一层。
 
 ### 4.1 表达式语法
 

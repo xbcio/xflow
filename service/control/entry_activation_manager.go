@@ -287,11 +287,23 @@ func DeriveEntryActivations(g *graph.Graph) ([]EntryUnitActivation, error) {
 			if nm.Kind != types.NodeKindTrigger || nm.RunnerSelector == nil {
 				continue
 			}
+			// A trigger is an entry index, never a scheduled task, so its
+			// parameters never reach execution/params.go. Render them here or
+			// the runner subscribes to the literal "${{ $config.topic }}".
+			//
+			// The hash is computed over the RENDERED params on purpose: a
+			// $config change that moves a rendered value must move the hash so
+			// the reconciler re-delivers, and two workflow versions whose
+			// templates differ but render identically must NOT.
+			params, err := graph.EvaluateActivationParams(g, nm.Name, nm.Type, nm.Parameters)
+			if err != nil {
+				return nil, err
+			}
 			out = append(out, EntryUnitActivation{
 				EntryUnitID: nm.Name,
 				NodeType:    nm.Type,
-				Params:      nm.Parameters,
-				PackageHash: nodeTriggerPackageHash(nm.Type, nm.Version, nm.Parameters),
+				Params:      params,
+				PackageHash: nodeTriggerPackageHash(nm.Type, nm.Version, params),
 				Selector:    nm.RunnerSelector,
 				Requirements: engine.NormalizeRequirements([]engine.CapabilityRequirement{{
 					NodeType:    nm.Type,

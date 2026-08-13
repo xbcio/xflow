@@ -9,6 +9,7 @@ import (
 
 	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/node/registry"
 	"github.com/xbcio/xflow/node/supply"
 	"github.com/xbcio/xflow/types"
@@ -121,10 +122,20 @@ func (r *triggerRuntime) ReconcileWorkflow(ctx context.Context, rec backend.Work
 			activateErr = fmt.Errorf("trigger handler %q not registered", p.nd.Type)
 			break
 		}
+		// Render $config/$vars templates exactly as the control plane does for
+		// a remote-hosted trigger. This path reads the raw WorkflowDef rather
+		// than the compiled Graph, so without this call the two deployment
+		// modes disagree on what the same workflow means: distributed
+		// subscribes to the rendered topic, in-process to the template text.
+		params, err := graph.EvaluateActivationParams(rec.Graph, p.nd.Name, p.nd.Type, p.nd.Parameters)
+		if err != nil {
+			activateErr = err
+			break
+		}
 		sub, err := h.Activate(ctx, &types.TriggerActivateInput{
 			WorkflowID: rec.ID,
 			NodeName:   p.nd.Name,
-			Params:     p.nd.Parameters,
+			Params:     params,
 			Runtime:    r,
 			Supplies:   supply.Default.Decoded(),
 		})

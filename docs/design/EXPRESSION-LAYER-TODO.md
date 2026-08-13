@@ -10,8 +10,8 @@
 ## 一句话
 
 `${{ }}` / `{{ }}` 两种模式都已实现并有边界求值层兜底，`$nodes`/`$execution`/
-`$workflow` 三个根已建（`$env` 是**刻意不建**）。**唯一仍开着的口子是 trigger
-激活期参数不求值**——既不被编译拒绝，也不被运行求值。
+`$workflow` 三个根已建（`$env` 是**刻意不建**）。**三层缺口与 trigger 激活期
+参数不求值均已关闭**，本文件现在只是实测记录，无仍开的口子。
 
 ## 现状（2026-08-13 复验）
 
@@ -43,32 +43,40 @@
 的声明式凭证注入冲突，且 spec 自带示例把 token 拼进参数串，参数会随执行记录落库。
 详见下方「spec 收窄已完成」。
 
-## 仍未关闭
-
-### trigger 激活参数不求值（2026-08-12 实测，2026-08-13 复验仍成立）
-
-`graph.Compile` **接受** `xflow.trigger.kafka` 上的 `topic: "{{ $config.topic }}"`，
-而下游没有任何环节求值它——`service/control/entry_activation_manager.go:293` 把
-`nm.Parameters` 原样拷进 `EntryActivation.Params`，
-`service/runner/trigger_activation_handler.go` 交给 `handler.Activate`，
-consumer 订阅的是字面主题名。`grep exprx service/`（非测试）无命中，复验时仍无。
-
-注意这条**不会**被 `execution/params.go` 的边界层兜住：trigger 参数走的是激活
-链路，根本不经过 `Runner.Execute`。`evaluable_params.go` 里几个 trigger 的空条目
-只对执行期有意义，对激活期是空头支票。
-
-语义上说得通（激活期尚无执行，`$input`/`$execution`/`$nodes` 无意义），但这是
-一个既不被编译拒绝也不被运行求值的**静默字面量陷阱**。是否给激活期建一套只含
-`$config`/`$vars` 的受限求值环境，是一个未决设计问题：
-
-- **A（推荐）**：服务端在 `DeriveEntryActivations` 里用受限 env 求值后再下发。
-  求值发生在有 `$config`/`$vars` 的一侧，runner 不必新建求值能力。
-- **C**：spec 明令 trigger 参数只能写字面量，编译期拒绝含 `{{` 的 trigger 参数。
-  最便宜，把静默降为响亮，但堵死了「同一 workflow 按环境切 topic」的写法。
-
-等 SAS 侧给出是否需要该能力的判断。
-
 ## 已关闭
+
+### trigger 激活参数不求值（2026-08-12 实测发现，2026-08-13 按方案 A 关闭）
+
+原状：`graph.Compile` **接受** `xflow.trigger.kafka` 上的
+`topic: "{{ $config.topic }}"`，而下游没有任何环节求值它，consumer 订阅的是字面
+主题名。这条不会被 `execution/params.go` 的边界层兜住——trigger 参数走激活链路，
+根本不经过 `Runner.Execute`；`evaluable_params.go` 里几个 trigger 的空条目只对
+执行期有意义，对激活期是空头支票。
+
+现在：`engine/graph/activation_params.go` 的 `EvaluateActivationParams` 用只含
+`$config`/`$vars` 的受限环境渲染，三条激活路径共用它——独立 trigger
+（`service/control/entry_activation_manager.go` 的 `UnitNode` 分支）、trigger
+group（`engine/graph/subgraph_package.go` 的 `ProjectGroupPackage`）、进程内内联
+（`sdk/xflow/trigger_runtime.go`）。
+
+四处**改动前必读**的约束，都是实测撞出来的：
+
+1. **求值必须落在 `engine/graph`，不能只写在控制面。** `assignPackageHashes` 在
+   `graph.Compile` 里算包哈希，`projectPackageForGroup` 在指令构建期**重算**并
+   在不一致时拒发。只在两个调用点之一渲染，会让每一次 group 激活都 fail closed。
+2. **独立路径的哈希算在渲染后的参数上。** `$config` 改动导致渲染值变化时哈希必须
+   变（触发重投），而模板不同但渲染结果相同的两个版本必须**不**变。
+3. **根可用性守卫不能交给 expr。** `exprx.CompileExpr` 按 `(code, asBool)` 缓存并
+   在命中时忽略 env。实测：`topic-{{ $execution }}` 冷缓存报
+   `unknown name $execution`，任何一次节点执行编译过该源码之后就不报错了，直接
+   渲染成 `"topic-<nil>"`。测这一层的用例**必须先预热缓存**，否则打到的是 expr
+   自己的冷缓存拒绝，守卫删掉了测试照样绿。
+4. **group 只渲染入口成员。** 其余成员都会被内层引擎当作任务执行，走
+   `execution/params.go`；在这里渲染既是双求值，又会因为成员引用 `$input` 而中止
+   整个投影——由于 `assignPackageHashes` 在 `Compile` 内，那等于中止整个编译。
+
+`$supplies` 被拒绝，尽管 `BuildExprEnv` 无条件提供它且在控制面能解析出值：supply
+内容由 runner 门控在指令下发**之后**取回，这里渲染出的值会被冻结、永不刷新。
 
 ### 三层缺口（Task 0～3，2026-08-11 ~ 08-12）
 
