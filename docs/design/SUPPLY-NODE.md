@@ -561,3 +561,38 @@ consumer 侧「hash 未变不重建」同时失效。守护测试见
 语义而接受的取舍。
 
 **production 模式缺 KEK 拒绝启动**；dev 模式允许，落库明文并打 stderr 警告。
+
+### 10.1 传输 key 轮换
+
+**调度**：`ControlPlane.Start` 起一条轮换协程（仅在启用 supply 加密时），每
+30s 一跳（`supplyKeyRefreshPeriod`）。每跳先 `Refresh` 采纳别的副本已轮换到
+的 key，再尝试 `SET NX` 抢一个 TTL 恰等于轮换周期的槽位
+（`xflow:supply:transport-key:rotation-slot`），抢到才 `Rotate`。用租约而不是
+leader 门控，是因为这里要的语义是「整个集群每周期至多一次」，而 leader 回答的
+是「谁来做」——TTL 即周期的租约直接给出前者。周期默认 24h
+（`DefaultSupplyKeyRotationPeriod`），经 `--supply-key-rotation` 配置，负值关闭
+轮换，正值下限 1 分钟。启动时先播一次种，使第一次轮换落在启动后一个完整周期。
+
+**副本间可见**：`Rotate` 先把新 key 写回 Redis，再换本地 `current`。顺序不能
+反——反了就是「用一个同伴拿不到的 key 加密」；这个顺序下最坏是「同伴已经有了
+但本副本还没换」。Redis 写失败则整个轮换是空操作，本地 key 不动。`Refresh` 在
+Redis 上没有该 key 时返回错误而不是重新生成：两个副本各自补一把就会分叉，正是
+共享 key 要消除的故障。
+
+**投递是收敛式的，不是推送式的**：runner 每次心跳带上它当前持有的 key ID
+（`HeartbeatRequest.SupplyKeyID`，即 SHA-256 前 4 字节的十六进制指纹，不是密钥
+材料），server 的 `RotationForHolder` 只在这个 ID 与自己的 current 不同时才回
+一把 key。因此服务端不需要 per-runner 状态；当时宕机的、重启的、后加入的
+runner 都在下一次心跳自愈。
+
+这个方向不能反过来。`Keyring` 只有两格 `[new, old]`，重复投递同一把 key 会把
+刚提升的那把降级、把上一把挤掉，于是轮换前加密的内容全部解不开。收敛式投递让
+重复投递在结构上不可能发生：已收敛的 runner 报的 ID 与 current 相同。
+
+`SupplyKeyID` 为空是**刻意的空操作**——不带该字段的旧 runner 与已收敛的 runner
+无法区分，对空值推送轮换就正是上面那种毁 keyring 的重复投递。
+
+日志只带 `key_id`，绝不带 key 本身；`supplyenc.Key` 的 `String()`/`GoString()`
+都返回 `supplyenc.Key(redacted)`。
+
+**未做**：无 KMS 集成，KEK 由部署方注入。

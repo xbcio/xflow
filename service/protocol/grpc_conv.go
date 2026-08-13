@@ -140,6 +140,7 @@ func HeartbeatRequestToProto(req HeartbeatRequest) *runnerpb.HeartbeatRequest {
 		Timestamp:      req.Timestamp,
 		SessionId:      req.SessionID,
 		SupplyObserved: cloneLabels(req.SupplyObserved),
+		SupplyKeyId:    req.SupplyKeyID,
 	}
 }
 
@@ -151,6 +152,7 @@ func HeartbeatRequestFromProto(req *runnerpb.HeartbeatRequest) HeartbeatRequest 
 		InFlight:       int(req.GetInFlight()),
 		Timestamp:      req.GetTimestamp(),
 		SupplyObserved: cloneLabels(req.GetSupplyObserved()),
+		SupplyKeyID:    req.GetSupplyKeyId(),
 	}
 }
 

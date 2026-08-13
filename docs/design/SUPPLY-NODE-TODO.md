@@ -22,9 +22,10 @@ P3（`feat/supply-node-p3`，20 tasks，已合入 main）交付后未做的事�
 ### ~~4. supply 加密是死代码~~ ✓ 已关闭
 
 KEK/DEK/传输 key 三层已实现并接线。`EnableSupplyEncryption` 现由
-`apiserver.Config` 传递；传输 key 经 Redis `SET NX` 在副本间共享；
-`ConsumeRotation` 不清 pending 的缺陷已修。设计见
-[SUPPLY-NODE.md §10](./SUPPLY-NODE.md#10-supply-内容加密)。
+`apiserver.Config` 传递；传输 key 经 Redis `SET NX` 在副本间共享；轮换的调度、
+跨副本传播与投递已补齐。设计见
+[SUPPLY-NODE.md §10](./SUPPLY-NODE.md#10-supply-内容加密) 与
+[§10.1 传输 key 轮换](./SUPPLY-NODE.md#101-传输-key-轮换)。
 
 **接线曾断在最后一环**（已修，`fix(apiserver): wire cp SupplyEncryptor into
 supply module`）：`cmd/server` 设的是 `EnableSupplyEncryption`，它只流向
@@ -40,10 +41,15 @@ encryptor 只装进了自己的 core（runner 注册/心跳通道），没到 HT
 `supply_encryption_wiring_test.go` 走 `apiserver.New` + `WithControlPlane`
 真实装配，不碰任何依赖字段。
 
-**仍未做**：`Rotate()` 无生产调用点（无自动轮换周期，只能人工触发），且轮换后
-不写回 Redis，一个副本的轮换对其他副本不可见、重启即丢；`ConsumeRotation`
-清除后只有下一个心跳的那个 runner 收到轮换 key，「每个 runner 各自收到一次」
-需要 per-runner 跟踪集合，未实现；无 KMS 集成，KEK 由部署方注入。
+**轮换的三个缺口已一并关闭**（原表述「仍未做」已过期）：`Rotate()` 现由
+`ControlPlane.Start` 起的轮换协程按 `SET NX` 租约周期性调用（`--supply-key-rotation`
+配置，负值关闭）；`Rotate` 先写回 Redis 再换本地 key，别的副本经 `Refresh`
+采纳，重启不丢；`ConsumeRotation` 已删除，改为 runner 心跳上报持有的 key ID、
+server 的 `RotationForHolder` 只在 ID 不同时下发——「每个 runner 各自收到一次」
+由此在结构上成立，不需要 per-runner 跟踪集合。宕机/重启/后加入的 runner 在下次
+心跳自愈。
+
+**仍未做**：无 KMS 集成，KEK 由部署方注入。
 
 ## P1 — 可观测性缺失，出事时会瞎
 

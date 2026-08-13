@@ -275,7 +275,7 @@ func (c *Core) heartbeat(ctx context.Context, req protocol.HeartbeatRequest, inf
 		c.supplyObserved.Record(req.RunnerID, req.SupplyObserved)
 	}
 	if c.supplyEncryptor != nil {
-		if rot := c.supplyEncryptor.ConsumeRotation(); rot != "" {
+		if rot := c.supplyEncryptor.RotationForHolder(req.SupplyKeyID); rot != "" {
 			resp.SupplyKeyRotation = rot
 		}
 	}

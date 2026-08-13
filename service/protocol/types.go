@@ -66,6 +66,16 @@ type HeartbeatRequest struct {
 	//
 	// It carries hashes, never content.
 	SupplyObserved map[string]string `json:"supply_observed,omitempty"`
+	// SupplyKeyID is the ID of the supply encryption key this runner currently
+	// holds. The server compares it against its own and returns the key in
+	// SupplyKeyRotation only when they differ, which makes rotation delivery
+	// convergent: a runner that was down during a rotation, restarted, or
+	// joined afterwards all catch up on their next heartbeat, with no
+	// per-runner bookkeeping on the server.
+	//
+	// The ID is a 4-byte fingerprint of the key, not key material. Empty when
+	// this runner holds no key or does not use supply encryption.
+	SupplyKeyID string `json:"supply_key_id,omitempty"`
 }
 
 type HeartbeatResponse struct {
@@ -82,7 +92,13 @@ type HeartbeatResponse struct {
 	SupplyHints map[string]string `json:"supply_hints,omitempty"`
 	// SupplyKeyRotation carries a base64-encoded new AES-256 key when the server
 	// rotates the supply encryption key. The runner installs it as current and
-	// demotes the old current to previous. Absent when no rotation is pending.
+	// demotes the old current to previous. Absent when the runner's reported
+	// SupplyKeyID already matches the server's current key — so this is sent
+	// once per rotation per runner, never repeatedly. Redelivery would be
+	// actively harmful: installSupplyKey calls Keyring.Rotate on each delivery,
+	// so a second delivery of the same key demotes the key it just promoted and
+	// evicts the previous one, breaking decryption of content encrypted before
+	// the rotation.
 	SupplyKeyRotation string `json:"supply_key_rotation,omitempty"`
 	// MetricsReportIntervalSeconds, when non-zero, tells the runner how often to
 	// ship its metrics to the server. It is the scrape cadence expressed to the

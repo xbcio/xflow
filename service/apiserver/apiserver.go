@@ -34,7 +34,7 @@ type Config struct {
 	Store       store.Store
 	// Supplies backs the /v1/supplies endpoints. When nil the supply module is
 	// not registered at all (the routes 404). A *sqlstore.Provider satisfies it.
-	Supplies    store.Supplies
+	Supplies store.Supplies
 	// Artifacts backs GET/HEAD /v1/artifacts/{digest}, the endpoint runners use
 	// to fetch script bytes they have not cached. When nil the artifact module
 	// is not registered at all (the route 404s). Build it with
@@ -82,6 +82,10 @@ type Config struct {
 	// on the wire. The key is resolved through Redis when a distributed backend
 	// is configured, so every replica encrypts with the same key.
 	EnableSupplyEncryption bool
+	// SupplyKeyRotationPeriod is how often the supply transport key rotates.
+	// Zero adopts control.DefaultSupplyKeyRotationPeriod; negative disables
+	// rotation. Ignored unless EnableSupplyEncryption is set.
+	SupplyKeyRotationPeriod time.Duration
 	// EnableRunnerMetricsProxy lets runners in other network domains ship their
 	// Prometheus registry here, and merges what they ship into this server's own
 	// /metrics. Off by default; see control.Config.EnableMetricsProxy.
@@ -278,14 +282,15 @@ const entryActivationStoreTTL = 24 * time.Hour
 // caller's responsibility to construct.
 func buildControlPlane(cfg Config) (*control.ControlPlane, error) {
 	ccfg := control.Config{
-		Auth:                   cfg.Auth,
-		Logger:                 cfg.Logger,
-		Metrics:                cfg.Metrics,
-		Tracer:                 cfg.Tracer,
-		Supplies:               cfg.Supplies,
-		EnableSupplyEncryption: cfg.EnableSupplyEncryption,
-		EnableMetricsProxy:     cfg.EnableRunnerMetricsProxy,
-		MetricsReportInterval:  cfg.RunnerMetricsInterval,
+		Auth:                    cfg.Auth,
+		Logger:                  cfg.Logger,
+		Metrics:                 cfg.Metrics,
+		Tracer:                  cfg.Tracer,
+		Supplies:                cfg.Supplies,
+		EnableSupplyEncryption:  cfg.EnableSupplyEncryption,
+		SupplyKeyRotationPeriod: cfg.SupplyKeyRotationPeriod,
+		EnableMetricsProxy:      cfg.EnableRunnerMetricsProxy,
+		MetricsReportInterval:   cfg.RunnerMetricsInterval,
 	}
 
 	useRedis := cfg.RedisConfig != nil || cfg.RedisAddr != ""

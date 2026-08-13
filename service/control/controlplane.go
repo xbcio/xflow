@@ -90,6 +90,13 @@ type Config struct {
 	// and distributes it to runners on registration. Requires Supplies to be
 	// non-nil for the encryption path to activate on GET /v1/supplies/{name}.
 	EnableSupplyEncryption bool
+	// SupplyKeyRotationPeriod is how often the supply transport key rotates.
+	// Zero adopts DefaultSupplyKeyRotationPeriod; negative disables rotation.
+	// Ignored unless EnableSupplyEncryption is set.
+	//
+	// Rotation is fleet-wide-at-most-once per period via a Redis lease, not
+	// per-replica, so raising the replica count does not raise the key churn.
+	SupplyKeyRotationPeriod time.Duration
 	// EnableMetricsProxy turns on the runner metrics proxy: the
 	// /v1/runners/metrics endpoint starts accepting reports and MetricsInbox()
 	// returns a gatherer the host can merge into its own /metrics. It exists
@@ -190,6 +197,9 @@ type ControlPlane struct {
 	// Non-nil only when Config.EnableSupplyEncryption is true. Exposed via
 	// SupplyEncryptor() so the apiserver can encrypt GET responses.
 	supplyEncryptor *SupplyEncryptor
+	// supplyKeyRotationPeriod carries Config.SupplyKeyRotationPeriod through to
+	// Start, which resolves it via clampSupplyKeyRotationPeriod.
+	supplyKeyRotationPeriod time.Duration
 
 	// metricsInbox retains proxied runner metrics. Non-nil only when
 	// Config.EnableMetricsProxy is set. Exposed via MetricsInbox() so the
@@ -203,6 +213,7 @@ type ControlPlane struct {
 	sweeperCancel         context.CancelFunc
 	claimRecoveryCancel   context.CancelFunc
 	entryReconcilerCancel context.CancelFunc
+	supplyKeyCancel       context.CancelFunc
 	unbind                func()
 	// wg tracks the background goroutines started by Start (leader campaign,
 	// sweeper, claim recovery, activation controller). Shutdown cancels their
@@ -438,22 +449,23 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 	grpcServer.core.metricsReportInterval = cfg.MetricsReportInterval
 
 	return &ControlPlane{
-		backend:          cfg.Backend,
-		eng:              eng,
-		runners:          runners,
-		dispatcher:       dispatcher,
-		httpServer:       httpServer,
-		grpcServer:       grpcServer,
-		sweeper:          sweeper,
-		elector:          elector,
-		logger:           cfg.Logger,
-		entryActivations: cfg.EntryActivationStore,
-		entryManager:     entryManager,
-		entryReconciler:  entryReconciler,
-		workflowRegistry: workflowRegistry,
-		supplyObserved:   supplyObserved,
-		supplyEncryptor:  supplyEnc,
-		metricsInbox:     metricsInbox,
+		backend:                 cfg.Backend,
+		eng:                     eng,
+		runners:                 runners,
+		dispatcher:              dispatcher,
+		httpServer:              httpServer,
+		grpcServer:              grpcServer,
+		sweeper:                 sweeper,
+		elector:                 elector,
+		logger:                  cfg.Logger,
+		entryActivations:        cfg.EntryActivationStore,
+		entryManager:            entryManager,
+		entryReconciler:         entryReconciler,
+		workflowRegistry:        workflowRegistry,
+		supplyObserved:          supplyObserved,
+		supplyEncryptor:         supplyEnc,
+		supplyKeyRotationPeriod: cfg.SupplyKeyRotationPeriod,
+		metricsInbox:            metricsInbox,
 	}, nil
 }
 
@@ -619,6 +631,21 @@ func (cp *ControlPlane) Start(ctx context.Context) error {
 		}()
 	}
 
+	// Rotate the supply transport key on a schedule, and keep this replica's
+	// copy current when a peer rotates instead. Only when encryption is on and
+	// rotation is not disabled.
+	if cp.supplyEncryptor != nil {
+		if period := clampSupplyKeyRotationPeriod(cp.supplyKeyRotationPeriod); period > 0 {
+			keyCtx, keyCancel := context.WithCancel(context.Background())
+			cp.supplyKeyCancel = keyCancel
+			cp.wg.Add(1)
+			go func() {
+				defer cp.wg.Done()
+				cp.runSupplyKeyRotation(keyCtx, period)
+			}()
+		}
+	}
+
 	return nil
 }
 
@@ -724,6 +751,9 @@ func (cp *ControlPlane) Shutdown(ctx context.Context) error {
 	}
 	if cp.entryReconcilerCancel != nil {
 		cp.entryReconcilerCancel()
+	}
+	if cp.supplyKeyCancel != nil {
+		cp.supplyKeyCancel()
 	}
 	if cp.leaderCancel != nil {
 		cp.leaderCancel()

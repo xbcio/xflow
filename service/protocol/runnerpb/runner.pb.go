@@ -288,8 +288,12 @@ type HeartbeatRequest struct {
 	Timestamp      int64                  `protobuf:"varint,4,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
 	SessionId      string                 `protobuf:"bytes,5,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
 	SupplyObserved map[string]string      `protobuf:"bytes,6,rep,name=supply_observed,json=supplyObserved,proto3" json:"supply_observed,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// supply_key_id is the 4-byte fingerprint (not key material) of the supply
+	// encryption key this runner holds. The server returns supply_key_rotation
+	// only when it differs from its own, making rotation delivery convergent.
+	SupplyKeyId   string `protobuf:"bytes,7,opt,name=supply_key_id,json=supplyKeyId,proto3" json:"supply_key_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *HeartbeatRequest) Reset() {
@@ -362,6 +366,13 @@ func (x *HeartbeatRequest) GetSupplyObserved() map[string]string {
 		return x.SupplyObserved
 	}
 	return nil
+}
+
+func (x *HeartbeatRequest) GetSupplyKeyId() string {
+	if x != nil {
+		return x.SupplyKeyId
+	}
+	return ""
 }
 
 type HeartbeatResponse struct {
@@ -1371,7 +1382,7 @@ const file_service_protocol_runnerpb_runner_proto_rawDesc = "" +
 	"\x10RegisterResponse\x12\x1b\n" +
 	"\trunner_id\x18\x01 \x01(\tR\brunnerId\x12\x1d\n" +
 	"\n" +
-	"session_id\x18\x02 \x01(\tR\tsessionId\"\xc8\x02\n" +
+	"session_id\x18\x02 \x01(\tR\tsessionId\"\xec\x02\n" +
 	"\x10HeartbeatRequest\x12\x1b\n" +
 	"\trunner_id\x18\x01 \x01(\tR\brunnerId\x12\x1a\n" +
 	"\bcapacity\x18\x02 \x01(\x05R\bcapacity\x12\x1b\n" +
@@ -1379,7 +1390,8 @@ const file_service_protocol_runnerpb_runner_proto_rawDesc = "" +
 	"\ttimestamp\x18\x04 \x01(\x03R\ttimestamp\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x05 \x01(\tR\tsessionId\x12^\n" +
-	"\x0fsupply_observed\x18\x06 \x03(\v25.xflow.runner.v1.HeartbeatRequest.SupplyObservedEntryR\x0esupplyObserved\x1aA\n" +
+	"\x0fsupply_observed\x18\x06 \x03(\v25.xflow.runner.v1.HeartbeatRequest.SupplyObservedEntryR\x0esupplyObserved\x12\"\n" +
+	"\rsupply_key_id\x18\a \x01(\tR\vsupplyKeyId\x1aA\n" +
 	"\x13SupplyObservedEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xa7\x02\n" +

@@ -69,6 +69,10 @@ message HeartbeatRequest {
   int64 timestamp = 4;
   string session_id = 5;
   map<string, string> supply_observed = 6;
+  // supply_key_id is the 4-byte fingerprint (not key material) of the supply
+  // encryption key this runner holds. The server returns supply_key_rotation
+  // only when it differs from its own, making rotation delivery convergent.
+  string supply_key_id = 7;
 }
 
 message HeartbeatResponse {

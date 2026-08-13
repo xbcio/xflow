@@ -118,6 +118,9 @@ type serverConfig struct {
 	// runnerMetricsInterval is the cadence pushed to runners for metrics
 	// reporting. 0 = let each runner use its own default; negative suspends.
 	runnerMetricsInterval time.Duration
+	// supplyKeyRotation is how often the supply transport key rotates. 0 =
+	// the built-in default (24h); negative disables rotation entirely.
+	supplyKeyRotation time.Duration
 	// traceMode is one of "disabled", "stdout", or "otlp".
 	traceMode     string
 	traceEndpoint string
@@ -186,6 +189,8 @@ func parseServerConfig(args []string) (serverConfig, error) {
 		"Accept metrics reports from runners that cannot be scraped directly, and merge them into /metrics")
 	fs.DurationVar(&cfg.runnerMetricsInterval, "runner-metrics-interval", 0,
 		"Cadence pushed to runners for metrics reporting (0 = let each runner use its own default; negative suspends reporting)")
+	fs.DurationVar(&cfg.supplyKeyRotation, "supply-key-rotation", 0,
+		"How often the supply transport key rotates (0 = 24h default; negative disables rotation)")
 	fs.StringVar(&cfg.traceMode, "trace", "disabled", "Tracing mode: disabled|stdout|otlp")
 	fs.StringVar(&cfg.traceEndpoint, "trace-endpoint", "localhost:4317", "OTLP collector gRPC endpoint (--trace=otlp)")
 	fs.BoolVar(&cfg.traceInsecure, "trace-insecure", false, "Disable TLS verification for OTLP connection")
@@ -484,6 +489,7 @@ func runServer(cfg serverConfig) error {
 		// (supplyAtRest): it protects the wire between server and runner, which
 		// does not need a KEK to be present.
 		EnableSupplyEncryption:   true,
+		SupplyKeyRotationPeriod:  cfg.supplyKeyRotation,
 		EnableRunnerMetricsProxy: cfg.enableRunnerMetricsProxy,
 		RunnerMetricsInterval:    cfg.runnerMetricsInterval,
 	}

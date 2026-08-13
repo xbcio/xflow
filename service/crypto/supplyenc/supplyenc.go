@@ -163,6 +163,22 @@ func (kr *Keyring) HasKeys() bool {
 	return len(kr.keys) > 0
 }
 
+// CurrentKeyID returns the ID of the key that is current in this keyring, or
+// "" when it holds none. The ID is a 4-byte fingerprint of the key, so it is
+// safe to put on the wire — which is what the runner does on each heartbeat so
+// the server can tell whether this runner still needs a rotation.
+func (kr *Keyring) CurrentKeyID() string {
+	if kr == nil {
+		return ""
+	}
+	kr.mu.RLock()
+	defer kr.mu.RUnlock()
+	if len(kr.keys) == 0 {
+		return ""
+	}
+	return kr.keys[0].ID
+}
+
 // Decrypt decrypts a $enc envelope using the key identified by the kid field.
 // Returns ErrNotEncrypted if data is not a valid envelope.
 func (kr *Keyring) Decrypt(data []byte) ([]byte, error) {

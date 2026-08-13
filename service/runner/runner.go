@@ -513,7 +513,23 @@ func (r *Runner) heartbeat(ctx context.Context, sessionID string, inFlight int) 
 		InFlight:       inFlight,
 		Timestamp:      time.Now().Unix(),
 		SupplyObserved: r.observedSupplies(),
+		SupplyKeyID:    r.supplyKeyID(),
 	})
+}
+
+// supplyKeyID reports which supply encryption key this runner currently holds,
+// so the server can hand back a rotation only when it differs. Empty when this
+// runner has no keyring — which is the plaintext path, and also what keeps the
+// heartbeat body byte-identical for runners that use no supply encryption.
+func (r *Runner) supplyKeyID() string {
+	if r.supplyGate == nil {
+		return ""
+	}
+	f, ok := r.supplyGate.Fetcher().(*HTTPSupplyFetcher)
+	if !ok {
+		return ""
+	}
+	return f.Keyring.CurrentKeyID()
 }
 
 // observedSupplies reports the content hashes currently in effect here. nil

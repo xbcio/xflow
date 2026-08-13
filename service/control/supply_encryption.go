@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -12,21 +13,31 @@ import (
 )
 
 // SupplyEncryptor manages the AES-256-GCM key used to encrypt supply content
-// for runners. It generates a key at construction and supports rotation: the
-// old key is kept long enough for in-flight heartbeat responses to deliver the
-// new key before runners discard the old one.
+// for runners. It generates a key at construction and supports rotation.
+//
+// Delivery is convergent, not bookkept: a runner reports the key ID it holds on
+// every heartbeat and the server hands back the full key only when that ID does
+// not match the current one (see RotationForHolder). Nothing per-runner is
+// tracked, so a runner that was down during a rotation, one that restarted, and
+// one that joined afterwards all converge on their next heartbeat. The earlier
+// design — stage a rotation, deliver it once, clear it — reached exactly one
+// runner per rotation and stranded every other runner on a key that no longer
+// decrypts anything.
 //
 // The encryptor is optional: when nil, the control plane returns plaintext
 // supply content (backward-compatible path).
 type SupplyEncryptor struct {
 	mu      sync.RWMutex
 	current *supplyenc.Key
-	// pendingRotation is non-nil between a Rotate() call and the next time the
-	// server has confirmed (via supply_observed convergence) that all runners
-	// received the new key. For simplicity in this implementation, it is set on
-	// Rotate and cleared by ConsumeRotation — once each runner's next heartbeat
-	// picks it up.
-	pendingRotation *supplyenc.Key
+
+	// rdb and redisKey are set only for the shared (multi-replica) encryptor.
+	// They make a rotation visible to the other replicas: Rotate writes the new
+	// key back, and Refresh adopts whatever another replica rotated to. Without
+	// them a rotation would live and die inside one process — lost on restart,
+	// invisible to every peer, and actively harmful because that process hands
+	// runners a key its peers do not encrypt with.
+	rdb      redis.Cmdable
+	redisKey string
 }
 
 // NewSupplyEncryptor creates an encryptor with a fresh random key. Returns an
@@ -43,7 +54,7 @@ func NewSupplyEncryptor() (*SupplyEncryptor, error) {
 // replica encrypts with the same key. Without this, a runner that registers
 // against replica A and fetches supply content from replica B decrypts with
 // the wrong key, the supply gate declines, and the runner hosts no triggers
-// at all -- while heartbeating perfectly healthily.
+// at all — while heartbeating perfectly healthily.
 //
 // SET NX rather than leader election: election answers "who does the work",
 // while key distribution only needs "everyone converges on one value". SET NX
@@ -53,7 +64,7 @@ func NewSupplyEncryptor() (*SupplyEncryptor, error) {
 // The transport key is deliberately the one key kept in Redis: it is
 // short-lived and self-healing (losing it only forces re-registration), which
 // matches Redis' durability characteristics. The at-rest key must never live
-// here -- losing it would make already-stored ciphertext permanently
+// here — losing it would make already-stored ciphertext permanently
 // unreadable.
 func NewSupplyEncryptorShared(ctx context.Context, rdb redis.Cmdable, key string) (*SupplyEncryptor, error) {
 	candidate, err := supplyenc.GenerateKey()
@@ -65,7 +76,7 @@ func NewSupplyEncryptorShared(ctx context.Context, rdb redis.Cmdable, key string
 		return nil, fmt.Errorf("supply encryption key: %w", err)
 	}
 	if ok {
-		return &SupplyEncryptor{current: candidate}, nil
+		return &SupplyEncryptor{current: candidate, rdb: rdb, redisKey: key}, nil
 	}
 	// Another replica won the race (or a previous run stored one): adopt it.
 	stored, err := rdb.Get(ctx, key).Result()
@@ -76,7 +87,7 @@ func NewSupplyEncryptorShared(ctx context.Context, rdb redis.Cmdable, key string
 	if err != nil {
 		return nil, fmt.Errorf("supply encryption key: stored value is unusable")
 	}
-	return &SupplyEncryptor{current: adopted}, nil
+	return &SupplyEncryptor{current: adopted, rdb: rdb, redisKey: key}, nil
 }
 
 // Encrypt encrypts plaintext supply content with the current key. Safe for
@@ -96,48 +107,96 @@ func (e *SupplyEncryptor) KeyForRunner() string {
 	return e.current.ToBase64()
 }
 
-// Rotate generates a new key and stages it for delivery to runners on their
-// next heartbeat. The old current key remains valid for decryption (runners
-// keep it as previous in their keyring).
-func (e *SupplyEncryptor) Rotate() error {
+// CurrentKeyID returns the ID of the key currently used for encryption. It is
+// the value a runner echoes back on each heartbeat so the server can tell
+// whether that runner still needs the rotation.
+//
+// The ID is the first 4 bytes of SHA-256(key) — a fingerprint, not key
+// material. It is safe on the wire and in logs; the raw key never is.
+func (e *SupplyEncryptor) CurrentKeyID() string {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.current.ID
+}
+
+// RotationForHolder returns the current key base64-encoded when the caller
+// holds a different one, and "" when the caller is already current.
+//
+// heldKeyID == "" means the runner did not report one: either an old runner
+// that predates the field, or one that has no key at all. Returning "" for
+// that case is deliberate — an old runner cannot be told apart from a
+// converged one, and pushing a rotation at every heartbeat would be the
+// keyring-destroying redelivery this design exists to avoid. Old runners keep
+// the key they received at registration, exactly as before.
+func (e *SupplyEncryptor) RotationForHolder(heldKeyID string) string {
+	if heldKeyID == "" {
+		return ""
+	}
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if heldKeyID == e.current.ID {
+		return ""
+	}
+	return e.current.ToBase64()
+}
+
+// Rotate generates a new key, installs it as current, and — for the shared
+// encryptor — publishes it so every other replica adopts it too.
+//
+// The Redis write happens BEFORE the local swap. Publishing first means the
+// worst case is a replica encrypting with a key its peers already have;
+// swapping first would mean encrypting with a key no peer can obtain, which no
+// runner could ever decrypt. On a Redis failure the local key is left
+// untouched and the error is returned, so a failed rotation is a no-op rather
+// than a partial one.
+func (e *SupplyEncryptor) Rotate(ctx context.Context) error {
 	newKey, err := supplyenc.GenerateKey()
 	if err != nil {
 		return err
 	}
+	if e.rdb != nil {
+		if err := e.rdb.Set(ctx, e.redisKey, newKey.ToBase64(), 0).Err(); err != nil {
+			return fmt.Errorf("supply encryption key: publish rotation: %w", err)
+		}
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.pendingRotation = newKey
 	e.current = newKey
 	return nil
 }
 
-// ConsumeRotation returns the pending rotation key (base64-encoded) and
-// clears the pending state, so the rotation is delivered once rather than on
-// every heartbeat.
+// Refresh adopts the transport key currently stored in Redis, so a replica
+// that did not perform the rotation stops encrypting with the superseded key.
+// It reports whether the key changed.
 //
-// Redelivering it would be actively harmful, not merely wasteful: the
-// runner's installSupplyKey calls Keyring.Rotate on each delivery, so a
-// second delivery of the same key demotes the key it just promoted and
-// evicts the previous one. Content encrypted before the rotation then fails
-// to decrypt -- exactly what keeping a previous key exists to prevent.
+// A no-op (false, nil) for the process-local encryptor, which has no peers.
 //
-// Known limitation: clearing the pending state here means only the next
-// runner to heartbeat after a Rotate() receives the rotation key -- every
-// other runner never gets it. That is different from the goal this type's
-// original doc comment described (clear only after all runners converge via
-// supply_observed). This fix addresses only the "infinite redelivery
-// destroys the keyring" defect, which is the one actively causing harm.
-// Per-runner tracking so every runner receives the rotation exactly once is
-// out of scope here.
-func (e *SupplyEncryptor) ConsumeRotation() string {
+// A missing Redis key is treated as an error rather than a reason to generate
+// a replacement: two replicas each generating one after an eviction would
+// diverge, which is the exact failure the shared key exists to prevent. The
+// caller logs and retries on the next tick.
+func (e *SupplyEncryptor) Refresh(ctx context.Context) (bool, error) {
+	if e.rdb == nil {
+		return false, nil
+	}
+	stored, err := e.rdb.Get(ctx, e.redisKey).Result()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return false, fmt.Errorf("supply encryption key: not present in Redis")
+		}
+		return false, fmt.Errorf("supply encryption key: %w", err)
+	}
+	adopted, err := supplyenc.KeyFromBase64(stored)
+	if err != nil {
+		return false, fmt.Errorf("supply encryption key: stored value is unusable")
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.pendingRotation == nil {
-		return ""
+	if e.current != nil && e.current.ID == adopted.ID {
+		return false, nil
 	}
-	out := e.pendingRotation.ToBase64()
-	e.pendingRotation = nil
-	return out
+	e.current = adopted
+	return true, nil
 }
 
 // supplyEncryptionKeyRedisKey is where replicas rendezvous on one transport key.
@@ -148,7 +207,7 @@ const supplyEncryptionKeyRedisKey = "xflow:supply:transport-key"
 // With Redis, replicas must share one key: a runner that registers against
 // replica A and fetches supply content from replica B would otherwise hold
 // key A and receive ciphertext under key B. The fetch fails, the supply gate
-// declines, and the runner hosts no triggers -- while heartbeating healthily.
+// declines, and the runner hosts no triggers — while heartbeating healthily.
 //
 // Without Redis the backend is the in-memory one, which is single-replica by
 // construction, so a process-local key is consistent by definition.
