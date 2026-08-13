@@ -29,8 +29,26 @@ worker 都停在一次只有它们自己能腾出空间的 send 上。默认 `co
 预算**（走失败路径会 `Attempts++` 并最终进死信，等于静默丢活）。回归测试见
 `backend/providers/local/fanout_backpressure_test.go`。
 
-所以 `max_concurrency` 现在纯粹是**吞吐整形**需求（限制单个 map 占用队列的份额，
-避免一个大 map 饿死同执行内的其他分支），不再是正确性缺口。优先级相应下调。
+所以 `max_concurrency` 现在纯粹是**吞吐整形**需求，不再是正确性缺口。优先级相应下调。
+
+**2026-08-13 再测，把「饿死谁」也修正了。** 上一段说的是「饿死同执行内的其他分支」，
+实测**不成立**：`start` 同时扇到一个 200 批次的 map（body 每项 sleep 20ms）和一条
+5 级旁路链，旁路五个节点全部在 **430～518µs** 内跑完，而整个执行耗时 1.08s。原因是
+批次任务是 `start` **提交之后**才由 `xflow.map` 的 commit 展开进 outbox 的，旁路节点
+的任务早已在队列里排在它们前面。
+
+真正被饿死的是**另一条 execution**。同一队列同一 worker 池，FIFO：
+
+| 事件 | 时刻 |
+|---|---|
+| 提交大 map | 0 |
+| 队列堆满后提交一条单节点执行 | 200ms |
+| 该单节点**第一次真正跑** | **1.091s** |
+| 大 map 跑完 | 1.091s |
+
+小执行等了 890ms，等的正好是大 map 排干。这是**队头阻塞**，不是并发外呼。所以
+`max_concurrency` 要限的是「单个 map 在共享队列里的在途份额」，收益是多租户下的
+延迟隔离，而非保护下游系统——后者由 worker 池上限决定，与批次数无关。
 
 无测试、无告警。合并时无证据表明造成过真实事故。
 
@@ -49,7 +67,7 @@ worker 都停在一次只有它们自己能腾出空间的 send 上。默认 `co
 的话，路子是给 `ListOutbox` 加投递租约（列出即标记 in-flight，超时才可再列），
 但这会把 outbox 从「无状态列表」变成「有租约的队列」，成本不小。当前无需求驱动。
 
-## P2 — 命名与死代码
+## P2 — 死代码
 
 ### 7. `types/transform.go` 的 `TransformSpec` 尚无消费者（保留）
 
@@ -66,6 +84,11 @@ P2-5 修完后，编译期已经按这个形状执行了：`transformNodeTypes` 
 `TransformSpec` 即可闭合。
 
 ### 8. `engine/graph/subgraph_package.go` 的 `ProjectSubgraphPackage` 名字有歧义
+（已于 2026-08-11 `93277e7` 改名，见下方「已修复」一节）
+
+## 已修复
+
+### `ProjectSubgraphPackage` → `ProjectGroupPackage`（2026-08-11 `93277e7`）
 
 它投影的是 **group** 包（入参是 `unitIdx`，断言 `Kind == UnitGroup`），与
 `xflow.subgraph` 这个节点类型无关——后者的投影入口是 `ProjectNodeBodyPackage`。
@@ -73,9 +96,10 @@ P2-5 修完后，编译期已经按这个形状执行了：`transformNodeTypes` 
 `xflow.subgraph` 是作者手写的 body 容器节点类型；`xflow.group` 是编译器从顶层
 `groups:` 生成的调度单元对外自称的合成路由类型，没有任何 handler 注册它。两者最终
 汇合在同一个 `execution/subgraph.Executor`（该执行器分不出 group 和 map body），
-但来源与用途不同。改名会动到公开 API，未做。
+但来源与用途不同。
 
-## 已修复
+本条曾以「改名会动到公开 API，未做」挂在 P2。`93277e7` 跨 9 个文件一次改完，
+**未留别名**——`ProjectSubgraphPackage` 现在全树零引用。
 
 ### group / batch 租约根本不带 W3C TraceCarrier（2026-08-13 修复）
 
