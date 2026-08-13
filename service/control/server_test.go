@@ -516,6 +516,10 @@ type fakeControlEngine struct {
 	signalName         string
 	signalData         map[string]any
 	canceledID         types.ExecutionID
+	// traceCarrier is the W3C carrier a real engine persisted on the execution
+	// snapshot at submit time. Set it to give a dispatch a remote parent to
+	// inherit; see ExecutionTraceCarrier in lease_trace_carrier_test.go.
+	traceCarrier map[string]string
 }
 
 func (f *fakeControlEngine) Submit(context.Context, *graph.Graph, map[string]any, ...*types.Runtime) (types.ExecutionID, error) {

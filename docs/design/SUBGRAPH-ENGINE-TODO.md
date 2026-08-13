@@ -77,6 +77,44 @@ P2-5 修完后，编译期已经按这个形状执行了：`transformNodeTypes` 
 
 ## 已修复
 
+### group / batch 租约根本不带 W3C TraceCarrier（2026-08-13 修复）
+
+上一节收尾时以为缺的只是「把 `ExecutionSnapshot.TraceCarrier` 也转发给内层子执行」。
+查证发现缺口在更上游一层：**group 与 batch 的租约压根就没有 carrier**。
+
+`service/control/core.go` 的轮询路径上，注入点
+（`lease.TraceCarrier = tracing.InjectCarrier(dispatchCtx)`）位于 `xflow.task.dispatch`
+span 块内，而 `isGroupTask` / `isBatchTask` 两个分支在到达该块**之前就 return 了**——
+它们各自走 `dispatchGroupLease` / `dispatchSubgraphLease`，两处都不开 span、不注入。
+
+于是 runner 侧 `service/runner/runner.go:367` 的
+`execCtx := tracing.ExtractCarrier(ctx, lease.TraceCarrier)` 拿到空 map，
+`xflow.task.execute` 以**根 span** 起头。所以修复前的真实状态不是「内层成员断链、
+外层 group span 还在」，而是**整个远端 group / map 批次任务从工作流 trace 上整体脱落**。
+
+修法是把三条路径的取 carrier + 开 span 收敛成一个 `Core.startDispatchSpan`，
+两个 dispatch 函数各自改用它并在成功分支注入 carrier。`dispatchGroupLease` 的
+`ErrGroupLeaseAlreadyActive` 恢复分支同样注入：恢复出来的租约原本那份 carrier
+随着建它的进程一起没了，而即将收到它的 runner 无论如何都要新起一个 execute span。
+
+**实测**（`service/control/lease_trace_carrier_test.go`，三条）：每条给 fake 引擎
+配一个**各不相同**的 submit 侧 trace id，断言租约 carrier 里的 trace id 等于它——
+不是断言「非空」。这个区别是承重的：`startDispatchSpan` 取不到 submit carrier 时会
+回落到轮询上下文起一个新根，**照样产出非空 carrier**，只是挂在一棵自己的树上。
+node 那条是正对照（修复前即绿），保证 group/batch 两条不是在拿两个空 map 比相等。
+
+反向探针三处各自实测变红：去掉 batch 注入 / 去掉 group 注入 / 去掉
+`startDispatchSpan` 里的 submit carrier 提取（第三处让三条同时变红，且报的是
+「trace id 是另一棵树的」而非「空」）。
+
+**遗留**：`SubgraphLeasePayload.TraceID`/`SpanID`（上一节加的）与本次的 carrier
+现在是两条并行通道。前者供审计/检索，后者供 OTel 父子关系，按
+[RELEASE-GATES.md §4](./RELEASE-GATES.md) 两者不可互相顶替，所以并存是对的；但
+runner 收到 carrier 后**只用它起 `xflow.task.execute`**，没有再往内层子执行的
+submit 上下文里转发。也就是说 group / batch 任务本身现在挂回了工作流 trace，
+而 body 内每个成员节点的 span 仍是 execute span 的本地子孙、不是跨进程 parent 链。
+对当前部署形态（内层引擎在 runner 进程内跑）这已经够用，记在此处备将来内层再跨进程时查。
+
 ### body / group 成员的 trace 身份在子执行处断掉（2026-08-13 修复）
 
 **实测的修复前下场**：两条路径各写一个探针，成员节点收到的 `Input.TraceID`
@@ -109,13 +147,9 @@ runtime + trace，再加一个读取者等于把同一份 snapshot 读两遍）�
 不是死重量）。三处反向探针各自实测变红：去掉 submitCtx 交接 / 还原
 `bodyItemInput` / 去掉 payload 赋值。
 
-**未闭合的部分（不要写成已闭合）**：本次只转发 `TraceID`/`SpanID`，**没有**转发
-`ExecutionSnapshot.TraceCarrier`。按 [RELEASE-GATES.md §4](./RELEASE-GATES.md)
-的反声明，这两个字段只是审计/检索字段，不是可跨进程恢复的 OTel `SpanContext`。
-所以现在的状态是：内层成员与外层 execution **在审计与检索上关联得起来**，但远端
-body 的 span 仍然没有真正的 OTel parent——那需要把 W3C `traceparent` carrier
-一并带下去（runner 侧已有 `tracing.ExtractCarrier`，`service/runner/runner.go:367`
-就是这么从租约恢复远端 parent 的）。属遗留缺口。
+**后续闭合（2026-08-13 同日）**：上一段原先记录「没有转发 `TraceCarrier`，远端
+body 的 span 仍没有真正的 OTel parent」——查证时发现缺口比记的还大一层，且已一并
+修掉，见下一节。
 
 ### `xflow.map` 的 expression 形态从未实现 + 无 body 的 map 编译通过（2026-08-11 修复）
 

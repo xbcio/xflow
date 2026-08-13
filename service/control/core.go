@@ -464,30 +464,9 @@ func (c *Core) pollTask(ctx context.Context, req protocol.PollTaskRequest, info 
 			continue
 		}
 
-		tracer := c.tracer
-		if tracer == nil {
-			tracer = tracing.NoopTracer{}
-		}
-		// Inherit the workflow submit/invoke causality: extract the W3C carrier
-		// persisted on the execution snapshot at submission. This is a real W3C
-		// remote-parent round-trip (preserves tracestate + sampled flag), NOT a
-		// trace_id/span_id string reconstruction (RELEASE-GATES §4 forbids that).
-		// Falls back to the poll context (no submit parent) when the engine does
-		// not expose the carrier or tracing was disabled at submission.
-		dispatchCtx := ctx
-		if fetcher, ok := c.engine.(traceCarrierFetcher); ok {
-			if carrier, ferr := fetcher.ExecutionTraceCarrier(ctx, claim.Assignment.Task.ExecutionID); ferr == nil && len(carrier) > 0 {
-				dispatchCtx = tracing.ExtractCarrier(ctx, carrier)
-			}
-		}
-		// xflow.task.dispatch spans BuildTaskLease + FinalizeClaim (not started
-		// after Build) and is parented to the submit/invoke carrier above. It
-		// injects the W3C carrier the runner extracts to start its execute span
-		// as a remote child of dispatch.
-		dispatchCtx, dispatchSpan := tracer.Start(dispatchCtx, "xflow.task.dispatch",
-			"execution_id", string(claim.Assignment.Task.ExecutionID),
-			"node_name", claim.Assignment.Task.NodeName,
-		)
+		// The span deliberately opens BEFORE BuildTaskLease and closes after
+		// FinalizeClaim, so a lease built but never finalized is visible as such.
+		dispatchCtx, dispatchSpan := c.startDispatchSpan(ctx, &claim.Assignment.Task)
 		lease, err := c.engine.BuildTaskLease(dispatchCtx, &claim.Assignment.Task)
 		switch {
 		case err == nil:
@@ -531,6 +510,37 @@ func (c *Core) pollTask(ctx context.Context, req protocol.PollTaskRequest, info 
 			return protocol.PollTaskResponse{}, err
 		}
 	}
+}
+
+// startDispatchSpan opens the xflow.task.dispatch span for one claim, parented
+// to the workflow's submit/invoke causality.
+//
+// The parent comes from the W3C carrier persisted on the execution snapshot at
+// submission: a real remote-parent round-trip that preserves tracestate and the
+// sampled flag, NOT a trace_id/span_id string reconstruction (RELEASE-GATES §4
+// forbids that). Falls back to the poll context — no submit parent — when the
+// engine does not expose the carrier or tracing was disabled at submission.
+//
+// It is shared by all three dispatch paths (node, group, batch) rather than
+// living inline in the node path, because the carrier injected from the returned
+// context is the ONLY thing that gives a runner's execute span a remote parent:
+// a lease dispatched without one produces a span with no parent at all, and the
+// whole remote execution detaches from the workflow trace.
+func (c *Core) startDispatchSpan(ctx context.Context, task *engine.Task) (context.Context, tracing.Span) {
+	tracer := c.tracer
+	if tracer == nil {
+		tracer = tracing.NoopTracer{}
+	}
+	dispatchCtx := ctx
+	if fetcher, ok := c.engine.(traceCarrierFetcher); ok {
+		if carrier, ferr := fetcher.ExecutionTraceCarrier(ctx, task.ExecutionID); ferr == nil && len(carrier) > 0 {
+			dispatchCtx = tracing.ExtractCarrier(ctx, carrier)
+		}
+	}
+	return tracer.Start(dispatchCtx, "xflow.task.dispatch",
+		"execution_id", string(task.ExecutionID),
+		"node_name", task.NodeName,
+	)
 }
 
 func (c *Core) recoverTaskLease(ctx context.Context, task *engine.Task) (*engine.TaskLease, error) {

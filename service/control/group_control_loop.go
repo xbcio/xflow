@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/types"
 )
@@ -50,22 +51,33 @@ func (c *Core) dispatchSubgraphLease(ctx context.Context, claim Claim) (protocol
 		return protocol.PollTaskResponse{}, errors.New("engine does not support batch leases")
 	}
 
-	lease, payload, err := se.BuildSubgraphLease(ctx, &claim.Assignment.Task)
+	// A batch's lease needs a dispatch span for the same reason a node's does:
+	// the runner starts xflow.task.execute from the carrier injected here, so
+	// without it the whole remote body execution has no remote parent.
+	dispatchCtx, dispatchSpan := c.startDispatchSpan(ctx, &claim.Assignment.Task)
+	lease, payload, err := se.BuildSubgraphLease(dispatchCtx, &claim.Assignment.Task)
 	switch {
 	case err == nil:
 		lease.SubgraphPayload = payload
+		lease.TraceCarrier = tracing.InjectCarrier(dispatchCtx)
 		lease.Namespace = claim.Assignment.Namespace
-		if err := c.runners.FinalizeClaim(ctx, claim.ClaimID, lease); err != nil {
+		if err := c.runners.FinalizeClaim(dispatchCtx, claim.ClaimID, lease); err != nil {
+			dispatchSpan.RecordError(err)
+			dispatchSpan.End()
 			_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimRequeue)
 			return protocol.PollTaskResponse{}, normalizeRunnerError(err, c.logger, "poll")
 		}
+		dispatchSpan.End()
 		return protocol.PollTaskResponse{Lease: lease}, nil
 
 	case errors.Is(err, engine.ErrExecutionInactive):
+		dispatchSpan.End()
 		_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimDrop)
 		return protocol.PollTaskResponse{}, nil
 
 	default:
+		dispatchSpan.RecordError(err)
+		dispatchSpan.End()
 		_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimRequeue)
 		return protocol.PollTaskResponse{}, err
 	}
@@ -80,27 +92,42 @@ func (c *Core) dispatchGroupLease(ctx context.Context, claim Claim) (protocol.Po
 		return protocol.PollTaskResponse{}, errors.New("engine does not support group leases")
 	}
 
-	lease, payload, err := ge.BuildGroupLease(ctx, &claim.Assignment.Task)
+	// See dispatchSubgraphLease: the carrier injected from this span's context is
+	// what parents the runner's whole group execution to the workflow trace.
+	dispatchCtx, dispatchSpan := c.startDispatchSpan(ctx, &claim.Assignment.Task)
+	lease, payload, err := ge.BuildGroupLease(dispatchCtx, &claim.Assignment.Task)
 	switch {
 	case err == nil:
 		lease.GroupPayload = payload
+		lease.TraceCarrier = tracing.InjectCarrier(dispatchCtx)
 		lease.Namespace = claim.Assignment.Namespace
-		if err := c.runners.FinalizeClaim(ctx, claim.ClaimID, lease); err != nil {
+		if err := c.runners.FinalizeClaim(dispatchCtx, claim.ClaimID, lease); err != nil {
+			dispatchSpan.RecordError(err)
+			dispatchSpan.End()
 			_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimRequeue)
 			return protocol.PollTaskResponse{}, normalizeRunnerError(err, c.logger, "poll")
 		}
+		dispatchSpan.End()
 		return protocol.PollTaskResponse{Lease: lease}, nil
 
 	case errors.Is(err, engine.ErrGroupLeaseAlreadyActive):
-		recovered, recoverErr := c.recoverGroupLease(ctx, ge, &claim.Assignment.Task)
+		recovered, recoverErr := c.recoverGroupLease(dispatchCtx, ge, &claim.Assignment.Task)
 		if recoverErr == nil {
+			// The recovered lease's original carrier died with the process that
+			// built it, so it gets this dispatch's instead: the runner about to
+			// receive it is starting a fresh execute span either way.
+			recovered.TraceCarrier = tracing.InjectCarrier(dispatchCtx)
 			recovered.Namespace = claim.Assignment.Namespace
-			if finalizeErr := c.runners.FinalizeClaim(ctx, claim.ClaimID, recovered); finalizeErr != nil {
+			if finalizeErr := c.runners.FinalizeClaim(dispatchCtx, claim.ClaimID, recovered); finalizeErr != nil {
+				dispatchSpan.RecordError(finalizeErr)
+				dispatchSpan.End()
 				_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimRequeue)
 				return protocol.PollTaskResponse{}, normalizeRunnerError(finalizeErr, c.logger, "poll")
 			}
+			dispatchSpan.End()
 			return protocol.PollTaskResponse{Lease: recovered}, nil
 		}
+		dispatchSpan.End()
 		if errors.Is(recoverErr, engine.ErrExecutionInactive) {
 			_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimDrop)
 			return protocol.PollTaskResponse{}, nil
@@ -109,10 +136,13 @@ func (c *Core) dispatchGroupLease(ctx context.Context, claim Claim) (protocol.Po
 		return protocol.PollTaskResponse{}, recoverErr
 
 	case errors.Is(err, engine.ErrExecutionInactive):
+		dispatchSpan.End()
 		_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimDrop)
 		return protocol.PollTaskResponse{}, nil
 
 	default:
+		dispatchSpan.RecordError(err)
+		dispatchSpan.End()
 		_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimRequeue)
 		return protocol.PollTaskResponse{}, err
 	}
