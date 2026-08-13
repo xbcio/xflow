@@ -1,197 +1,110 @@
 # 表达式与模板求值层遗留项
 
-`docs/design/DSL-SPECIFICATION.md` §4 描述的表达式引擎与实现有系统性分歧。
-本文件记录**实测状态**，不含修复方案——方案要先走 brainstorm。
+`docs/design/DSL-SPECIFICATION.md` §4 描述的表达式引擎曾与实现有系统性分歧。
+本文件记录**实测状态**。
 
-调查日期 2026-08-11，两次独立调查 + 四组实测探针（探针为一次性，未留仓库）。
-基线 `8556fd8`。
+原始调查 2026-08-11（基线 `8556fd8`），三层缺口在 Task 0～3 与后续几个分支里
+陆续关闭；**2026-08-13 在 `d0236f9` 上逐条复验**，原「三层缺口」六条断言全部
+不再成立，已改写为下方的现状描述，历史结论移入「已关闭」一节。
 
 ## 一句话
 
-`${{ }}` 模板语法零实现；`$nodes` 等四个根不存在；多数节点根本不求值参数。
-照 spec 写出的工作流跑不出预期结果，且 **`xflow.http` 的 header/body 会静默
-把模板字面量发给对端**。
+`${{ }}` / `{{ }}` 两种模式都已实现并有边界求值层兜底，`$nodes`/`$execution`/
+`$workflow` 三个根已建（`$env` 是**刻意不建**）。**唯一仍开着的口子是 trigger
+激活期参数不求值**——既不被编译拒绝，也不被运行求值。
 
-## 三层缺口
+## 现状（2026-08-13 复验）
 
-### 第 1 层：`${{ }}` / `{{ }}` 语法零实现
-
-spec §4.1 用 80 行描述了两种模式与三条解析规则，还规定「`${{ }}` 前后有文本要
-编译报错」。全仓库**没有任何代码**剥离 `${{`/`}}`、检测插值模式，或实现那条
-编译期校验。
-
-`exprx.EvalExpr` 直接把参数值交给 expr-lang 编译，所以 spec 的写法是语法错误：
-
-| 写法 | 实测结果 |
-|---|---|
-| `${{ $params.amount > 1000 }}` | `compile expression: unexpected token Bracket("{") (1:2)` |
-| `{{ $params.order_id }}` | `compile expression: a map key must be a quoted string…` |
-| `$params.amount > 1000`（实现期望的裸形态） | `true` |
-
-即会求值的节点也只认裸表达式。spec 通篇 110 处 `${{ }}`，无一可用。
-
-### 第 2 层：多数节点不求值任何参数
-
-**没有统一的参数模板求值层。** `engine/input.go:29` 把 `g.NodeAt(...).Parameters`
-原样拷进 `Input.Params`，引擎不做任何预处理；是否求值由每个节点各自决定。
-
-| 求值 | 节点 | 求值的参数 |
+| 曾经的缺口 | 现在 | 证据 |
 |---|---|---|
-| 是 | `xflow.if` | `condition` |
-| 是 | `xflow.switch` | `rules[].condition`、`expression` |
-| 是 | `xflow.map` | `items`、`expression` |
-| 是 | `xflow.split` | `items` |
-| 是 | `xflow.function` | `code`（expr 模式） |
-| 是 | `xflow.script` | code 跑在 exprx env 上 |
-| 是 | `xflow.transform.set` | `expressions` 各值 |
-| 是 | `xflow.transform.filter` | `items`、逐项 `condition` |
-| 是 | `xflow.transform.{sort,limit,aggregate,remove_duplicates}` | `items` |
-| **否** | `xflow.http` | url / headers / body / query 全字面 |
-| **否** | `xflow.grpc` | host / service / method / request / metadata |
-| **否** | `xflow.database` | operation / table / credential / where / data |
-| **否** | `xflow.notification` | channel / to / subject / message |
-| **否** | `xflow.approval` | approvers / mode / timeout |
-| **否** | `xflow.wait` | signal_name / duration / timeout |
-| **否** | `xflow.transform.{pick,rename}` | — |
-| **否** | 全部 trigger（webhook/cron/kafka/timer） | — |
+| `${{ }}` 语法零实现 | 已实现三条渲染规则 | `exprx/template.go:28-75` |
+| 「`${{ }}` 前后有文本」无编译校验 | 编译期拒绝 | `engine/graph/template_reject.go:23-70` |
+| 无统一参数求值层 | handler 边界统一求值 | `execution/params.go:65-117`，接线于 `execution/runner.go:115-119` |
+| `xflow.http` 等节点不求值 | 全部求值 | `engine/graph/evaluable_params.go:65,79-87`（空条目＝全部求值） |
+| 四个根不存在 | 三个已建 | `exprx/exprx.go:133,140-146` |
+| `sprintf` 不存在 | 已注册 | `exprx/functions.go:44-56` |
+| 无任何测试断言 `${{ }}` 产出计算结果 | 有，含端到端 | `exprx/template_test.go`、`execution/params_test.go:31-69` |
 
-`xflow.if` 与 `xflow.http` 的差别就是一行：前者把 `Params["condition"]` 交给
-`exprx.EvalExpr`（`flow/if.go:54-55`），后者把 `Params["url"]` 直接交给
-`url.Parse`（`action/http.go:169-174`）。
+注：`engine/input.go` 仍然把 `Parameters` 原样拷进 `Input.Params`——这一句
+描述本身没过时，但求值挪到了上一层（`execution/runner.go` 的 handler 边界），
+所以「无统一层」的结论不再成立。
 
-### 第 3 层：四个根不存在
+求值层的两条承重约束（改动前必读，注释写在 `evaluable_params.go` 里）：
 
-`exprx.BuildExprEnv`（`exprx/exprx.go:105-153`）提供七个根：
-`$input`、`$inputs`、`$vars`、`$config`、`$params`、`$runtime`、`$supplies`
-（外加 `Data` 顶层键的展开，以及 map 逐项的 `$item`/`$index`/`$items`）。
+1. **豁免集是 `evaluableParams` 取反**。handler 自己求值的参数边界必须跳过，
+   否则双求值把条件求成 bool → `cast.ToString` → `"true"` → switch 恒走第一条
+   规则，零诊断。
+2. **键必须是 `(nodeType, paramName)`，不能只用 paramName**。
+   `xflow.trigger.cron` 有个叫 `expression` 的参数装的是 cron 式子
+   （`0 */5 * * *`），只按名字建表会把它误判成可求值。
 
-spec 用到但 env 里没有的：`$nodes`、`$execution`、`$workflow`、`$env`。
-所以**即便剥离了 `${{ }}`**，`$nodes['validate_order'].is_valid` 仍会以
-`unknown name $nodes` 失败（实测）。
+`$env` 与 `getCredential()` 是**刻意不实现**，不是遗留：前者等于在用户可提交的
+工作流定义上开「读任意环境变量」的口子，而 runner 持有凭证与云密钥；后者与已落地
+的声明式凭证注入冲突，且 spec 自带示例把 token 拼进参数串，参数会随执行记录落库。
+详见下方「spec 收窄已完成」。
 
-`$nodes` 在生产代码里唯一的出现处是 `engine/graph/group_portability.go:11` 的
-正则 `\$nodes\[['"]([^'"]+)['"]\]`——它扫描参数字符串以**拒绝**跨组引用，
-从不把 `$nodes` 作为运行期值提供。这是一个只有否定语义的实现。
+## 仍未关闭
 
-内置函数的情况比想象的好，但 spec 有两处名字错：
+### trigger 激活参数不求值（2026-08-12 实测，2026-08-13 复验仍成立）
 
-| spec 写法 | 实测 |
-|---|---|
-| `upper` / `lower` / `trim` / `now` / `date` | 可用（expr-lang 内置） |
-| `??`、三元 `? :` | 可用 |
-| `parseJson` | **不存在**，内置名是 `fromJSON` |
-| `dateFormat` | 不存在 |
-| `sprintf` | 不存在 |
-| `getCredential` | 不存在（凭证走声明式注入 `$credentials`） |
+`graph.Compile` **接受** `xflow.trigger.kafka` 上的 `topic: "{{ $config.topic }}"`，
+而下游没有任何环节求值它——`service/control/entry_activation_manager.go:293` 把
+`nm.Parameters` 原样拷进 `EntryActivation.Params`，
+`service/runner/trigger_activation_handler.go` 交给 `handler.Activate`，
+consumer 订阅的是字面主题名。`grep exprx service/`（非测试）无命中，复验时仍无。
 
-## 为什么这比看起来严重：失败不对称
+注意这条**不会**被 `execution/params.go` 的边界层兜住：trigger 参数走的是激活
+链路，根本不经过 `Runner.Execute`。`evaluable_params.go` 里几个 trigger 的空条目
+只对执行期有意义，对激活期是空头支票。
 
-同一个节点的不同参数，失败响亮程度完全不同（`xflow.http` 实测）：
+语义上说得通（激活期尚无执行，`$input`/`$execution`/`$nodes` 无意义），但这是
+一个既不被编译拒绝也不被运行求值的**静默字面量陷阱**。是否给激活期建一套只含
+`$config`/`$vars` 的受限求值环境，是一个未决设计问题：
 
-| 模板位置 | 结果 |
-|---|---|
-| `url` | 响亮失败：`unsupported protocol scheme ""` |
-| `headers` | **请求照发，HTTP 200，执行成功**，对端收到 `X-Order: ${{ $params.order_id }}` |
-| `body` | **同上**，对端收到 `{"order_id":"${{ $params.order_id }}"}` |
+- **A（推荐）**：服务端在 `DeriveEntryActivations` 里用受限 env 求值后再下发。
+  求值发生在有 `$config`/`$vars` 的一侧，runner 不必新建求值能力。
+- **C**：spec 明令 trigger 参数只能写字面量，编译期拒绝含 `{{` 的 trigger 参数。
+  最便宜，把静默降为响亮，但堵死了「同一 workflow 按环境切 topic」的写法。
 
-零日志、零指标、无任何诊断。作者本地测通了（url 是字面量所以没报错），生产上
-每一条请求都在发字面模板。`xflow.database` 的 `where`/`data` 与
-`xflow.notification` 的 `to` 同类——前者把模板字面量写进 SQL 条件，后者往字面
-地址发通知。
+等 SAS 侧给出是否需要该能力的判断。
 
-## 测试覆盖：零
+## 已关闭
 
-全仓库用到 `${{ }}` 的测试只有五处，全部是**结构性**测试（编译/图/可移植性）：
+### 三层缺口（Task 0～3，2026-08-11 ~ 08-12）
 
-- `engine/graph/body_compile_test.go:37`
-- `engine/graph/snapshot_body_failclosed_test.go:87`
-- `engine/graph/subgraph_body_criterion_test.go:235,252`
-- `engine/graph/group_portability_test.go:15,45,308`
+原始调查记录的三层：`${{ }}` 语法零实现 / 多数节点不求值任何参数 / 四个根不存在。
+当时最严重的表现是**失败不对称**——`xflow.http` 的 `url` 写模板会响亮失败
+（`unsupported protocol scheme ""`），而 `headers`/`body` 写模板则**请求照发、
+HTTP 200、执行成功**，对端收到字面量 `X-Order: ${{ $params.order_id }}`，零日志
+零指标。`xflow.database` 的 `where`/`data` 与 `xflow.notification` 的 `to` 同类。
 
-它们验证的是图能编译、`$nodes` 正则能扫出跨组引用，从不真正求值。
-**没有任何测试断言 `${{ }}` 形态的参数产出了计算结果。** 这就是这个缺口能存在
-到今天的原因——`group_portability_test.go` 甚至把
-`"url": "${{ $nodes['D'].json.result }}"` 当作合法夹具用，而那个值在运行期是
-纯字面量。
+这正是边界求值层要消灭的故障，现已消灭（见上表）。
 
-## 决定这件事时要先回答的问题
+### 编译期可达性闸的定向撤销（2026-08-12）
 
-不写方案，但下面几点不定就没法动手：
+Task 0（`3680159`）建过一条编译期规则：参数含 `{{` 但「不会被求值」→ 编译拒绝。
+Task 1（`7173668`、`a142dcf`）建了边界求值层：**所有非豁免参数都会被求值**。
 
-1. **求值发生在哪一层。** 引擎统一预处理 `Params`（所有节点一次性获得能力，
-   但要处理「哪些参数不该求值」——`xflow.function` 的 `code`、`xflow.script`
-   的脚本本体、`xflow.http` 的 `body` 里合法的花括号文本），还是各节点显式声
-   明可求值参数（工作量线性于节点数，但语义精确）。
-2. **~~`$nodes` 要不要建。~~ 已答：建，且比预想便宜。** 见下方「已推翻的判断」。
-3. **spec 是收窄还是实现追平。** 110 处示例里有多少是真实需求，多少是照抄
-   n8n 表达式风格。收窄 spec 比实现三层缺口便宜一个数量级。
-4. **静默失败先止血。** 无论最终选哪条路，「参数里含 `${{` 却不会被求值」在
-   编译期是可判定的——这一条独立于上面三问，且能把最坏形态从静默降为响亮。
+两者共存时互相抵消：`execution/params_test.go` 断言 `{{ $params.order_id }}` 在
+`xflow.http` headers 中被正确求值，而同一形态被编译期以「parameter is never
+evaluated」拒绝，spec 的目标形态部署不上去。
 
-## 已推翻的判断（2026-08-11 实测更正）
+**裁决：拆掉可达性闸，保留畸形形态闸。** 理由是 Task 0 注释自己写明它存在的意义
+是防「ships the literal template in a header and still reports HTTP 200」——
+Task 1 消灭了这个静默，闸门保护的故障消失后，闸门本身变成对正确用法的误拒。
 
-### `$nodes` 不需要扩张数据流模型
+### `$nodes` 引用（Task 2，2026-08-12）
 
-本文件先前把 `$nodes` 记为「一次数据流模型的扩张」，理由是「当前 `Input` 只带
-上游直连数据」。**该理由不成立。**
+runner 侧**无 state 访问**——`GetOutput` 只在 control plane 的 `Engine` 上，
+handler 拿到的只有 `types.Input`。所以 `$nodes['x']` 不能做成惰性访问器，必须
+**编译期抽引用集 + 运行期预取**，与 `$supplies` 完全同构：编译期
+`buildNodesRefs` 抽引用集存进 `g.nodesRefs[i]` → `buildInput` 逐个 `GetOutput`
+预取填进 `Input.Nodes` → `BuildExprEnv` 注入 `env["$nodes"]`。
 
-`CommitNodeRequest.StoreOutput` 在生产代码里只有三个赋值点，**全部是 `true`**
-（`engine/commit.go:237`、`engine/atomic_commit.go:106,177`）——每个节点的输出
-本来就全量持久化。`StateStore.GetOutput(ctx, execID, nodeName)` 早已是接口方法
-（`engine/interfaces.go:82`），`buildInput` 自己就在用它读上游。
+两处容易写错、都由测试钉住：
 
-所以 `$nodes['x']` 要的数据已经躺在 state 里，缺的只是一个按名字惰性取的访问器，
-不是新的数据通路。这把 `$nodes` 从架构级决策降为一个 accessor 加一层缓存。
-
-**它也不该被砍。** `$nodes` 在 spec 里出现 85 次，高于 `$params`（45）与
-`$input`（45）——是 spec 表达能力的主干，不是照抄 n8n 的装饰。
-
-与 group 隔离的交互也不是障碍，而是配套：`group_portability.go` 那条正则已经在
-编译期保证组内 `$nodes` 只指向同组成员，所以内层引擎的惰性访问器只需要看内层
-state。两者本来是一套设计的两半，至今只落地了否定那半。
-
-## 编译期可达性闸的定向撤销（2026-08-12）
-
-Task 0（commit `3680159`）建了一条编译期规则：参数含 `{{` 但"不会被求值"→ 编译
-拒绝。Task 1（commit `7173668`、`a142dcf`）在 `execution/runner.go` 的 handler
-边界建了求值层：**所有非豁免参数都会被求值**。
-
-两者共存时互相抵消：`execution/params_test.go:31` 断言
-`{{ $params.order_id }}` 在 `xflow.http` headers 中被正确求值，但同一形态被
-编译期以"parameter is never evaluated"拒绝。DSL-SPECIFICATION.md 的文档示例
-(:354, :427, :447) 把模板写在正是这些参数上——spec 的目标形态部署不上去。
-
-**裁决：拆掉可达性闸，保留畸形形态闸。**
-
-理由：Task 0 注释自己写明它存在的意义是 "xflow.http ships the literal template
-in a header and still reports HTTP 200, 零诊断"。Task 1 消灭了这个静默；闸门保护
-的故障消失后，闸门本身变成对正确用法的误拒。
-
-保留的两条规则：
-
-1. **畸形形态闸**（`rejectMalformedTemplate`）——承重于 `exprx.RenderTemplate`
-   规则 1 分支："${{ }} 前后有文本"在编译期排除，render 不再处理该形态。
-2. **两张表**（`evaluableParams` / `evaluableSubFields`）——承重于边界豁免集
-   (`execution/params.go`)：handler 自己求值的参数由边界跳过，否则双求值
-   把条件求成 bool → `"true"` → switch 恒走第一条规则。
-
-
-## `$nodes` 引用已建（Task 2，2026-08-12）
-
-### 为什么这么做
-
-runner 侧**无 state 访问**——`GetOutput` 只在 control plane 的 `Engine` 上。
-handler 拿到的只有 `types.Input`，没有回头读上游的能力。所以 `$nodes['x']`
-不能做成惰性访问器，必须**编译期抽引用集 + 运行期预取**。
-
-做法与 `$supplies` 完全同构：
-
-1. 编译期从参数文本抽出每个节点的 `$nodes` 引用集（`buildNodesRefs` pass），
-   存到 `g.nodesRefs[i]`。
-2. `buildInput` 按引用集逐个 `GetOutput` 预取，填进 `Input.Nodes`。
-3. `exprx.BuildExprEnv` 注入 `env["$nodes"] = input.Nodes`。
-
-### 未执行节点必须是 typed nil map
+**未执行节点必须是 typed nil map。** spec §4.2 推荐
+`$nodes['optional_step'].name ?? 'default'`——带成员访问的 `??`：
 
 | `$nodes["x"]` 的值 | `$nodes['x'] ?? 'D'` | `$nodes['x'].f ?? 'D'` |
 |---|---|---|
@@ -199,52 +112,42 @@ handler 拿到的只有 `types.Input`，没有回头读上游的能力。所以 
 | untyped nil | `"D"` | **ERROR** `cannot fetch f from <nil>` |
 | `map[string]any(nil)` | `"D"` | `"D"` ✓ |
 
-spec §4.2 推荐 `$nodes['optional_step'].name ?? 'default'`——带成员访问的 `??`。
-只有第三行能让它工作。`GetOutput` miss 返回 `nil, nil`，静态类型已经是
-`map[string]any`，直接赋值就是 typed nil。
+只有第三行能让 spec 的推荐写法工作。`GetOutput` miss 返回 `nil, nil`，静态类型
+已是 `map[string]any`，直接赋值就是 typed nil。
 
-### body 子树必须跳过
+**body 子树必须跳过。** `extractNodeRefs`（`group_portability.go`）递归扫全树
+包括 body，而 body 内的 `$nodes['innerA']` 解析的是**内层图**。记到外层会误拒
+合法工作流（实测：S→M(map, body 内 innerB 引用 innerA)→T，顶层无 innerA →
+`$nodes reference "innerA" does not exist`）。`deriveNodesRefs`
+（`nodes_refs.go`）用 `declaresSubgraphBody` 按值判定跳过 body 子树，
+`xflow.http` 的 `body` 参数不会被误跳。
 
-`extractNodeRefs`（`group_portability.go`）递归扫全树包括 body。body 内层的
-`$nodes['innerA']` 解析的是**内层图**的节点，不是外层的。若把它记到外层：
+body **跨域**引用外层节点是后来单独建的通道（`VisibleOuterNodes` + 随批下发的
+快照），见 SUBGRAPH-ENGINE-TODO.md 与 DSL-SPECIFICATION.md 的跨域引用两节。
 
-```
-Compile err = node "M": $nodes reference "innerA" does not exist in the workflow definition
-```
+### spec 收窄已完成（Task 3，2026-08-12）
 
-实测：S→M(xflow.map, body 里 innerB ref innerA)→T，顶层无 innerA。用
-`extractNodeRefs` 扫 M 的参数会把 innerA 记到 M 头上 → 外层图 index 查不到
-→ 误拒合法工作流。
-
-新建 `deriveNodesRefs`（`nodes_refs.go`）跳过 body 子树（用
-`declaresSubgraphBody` 判定，按值不按名，xflow.http 的 body 不会被误跳）。
-
-分组路径（`validatePortability`）上的同类误拒是既有缺陷（map 节点在 group 里
-且 body 成员引用另一成员→报 "non-portable"），本 task 不修。
-
-## spec 收窄已完成（Task 3，2026-08-12）
-
-`docs/design/DSL-SPECIFICATION.md` §4 已改写至与实现一致（commit `72b1561`）。
-删除的不是「未实现」而是**不该实现**的两项：`$env`（用户可提交的工作流定义上开
-「读任意环境变量」的口子，而 runner 持有凭证与云密钥）、`getCredential()`（与已
-落地的声明式凭证注入冲突，且其自带示例把 token 拼进参数串，参数会随执行记录落库
-进日志）。另删 `$workflow.id`（`WorkflowDef.ID` 无生产写入点，且被
-`runtimeHash` 当作 runtime 实例指针排除）与 `$execution.mode`（从未存在）。
+`DSL-SPECIFICATION.md` §4 已改写至与实现一致（`72b1561`）。删除的不是「未实现」
+而是**不该实现**的两项：`$env` 与 `getCredential()`（理由见上）。另删
+`$workflow.id`（`WorkflowDef.ID` 无生产写入点，且被 `runtimeHash` 当作 runtime
+实例指针排除）与 `$execution.mode`（从未存在）。
 
 写进 spec 的每个表达式示例都先经真实 `EvalExpr` 跑过。由此查出两处 spec 自己在
 推荐的**静默错误写法**：`sortBy(arr, 'field')` 原样返回**未排序**数组且不报错
 （expr-lang 把 string 参数当逐项常量键，所有项比较相等，稳定排序保序）；
-`#{...}` 是语法错误，管道谓词里的对象字面量必须整体加括号
-`map(({id: .id}))`。
+`#{...}` 是语法错误，管道谓词里的对象字面量必须整体加括号 `map(({id: .id}))`。
 
-### 遗留：trigger 激活参数不求值（实测 2026-08-12）
+spec 仍有两处函数名与实现不符属**实现侧没有**、spec 也已不再推荐：`parseJson`
+（内置名是 `fromJSON`）、`dateFormat`（spec §「不提供的函数」已明列不提供）。
 
-`graph.Compile` **接受** `xflow.trigger.kafka` 上的 `topic: "{{ $config.topic }}"`，
-而下游没有任何环节求值它——`service/control/entry_activation_manager.go:293` 把
-`nm.Parameters` 原样拷进 `EntryActivation.Params`，
-`service/runner/trigger_activation_handler.go` 交给 `handler.Activate`，
-consumer 订阅的是字面主题名。`grep exprx service/` 无命中。
+### 已推翻的判断：`$nodes` 需要扩张数据流模型（2026-08-11 更正）
 
-语义上说得通（激活期尚无执行，`$input`/`$execution`/`$nodes` 无意义），但这是
-一个既不被编译拒绝也不被运行求值的**静默字面量陷阱**。是否给激活期建一套只含
-`$config`/`$vars` 的受限求值环境，是一个未决设计问题，不在本分支范围内。
+本文件先前把 `$nodes` 记为「一次数据流模型的扩张」，理由是「当前 `Input` 只带
+上游直连数据」。**该理由不成立。** `CommitNodeRequest.StoreOutput` 在生产代码里
+三个赋值点全是 `true`（`engine/commit.go`、`engine/atomic_commit.go`）——每个
+节点的输出本来就全量持久化，`StateStore.GetOutput` 早已是接口方法且 `buildInput`
+自己就在用它读上游。所以 `$nodes['x']` 要的数据已经躺在 state 里，缺的只是取用
+方式，不是新的数据通路。
+
+它也不该被砍：`$nodes` 在 spec 里出现 85 次，高于 `$params`（45）与 `$input`
+（45），是表达能力的主干。
