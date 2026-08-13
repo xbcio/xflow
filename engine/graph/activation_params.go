@@ -98,7 +98,16 @@ func evaluateActivationValue(value any, env map[string]any) (any, error) {
 		if err := checkActivationRoots(v); err != nil {
 			return nil, err
 		}
-		return exprx.RenderTemplate(v, env)
+		rendered, err := exprx.RenderTemplate(v, env)
+		if err != nil {
+			return nil, err
+		}
+		if strings.Contains(v, "{{") {
+			if err := checkRenderedForDeferredMarkers(rendered, v); err != nil {
+				return nil, err
+			}
+		}
+		return rendered, nil
 	case map[string]any:
 		result := make(map[string]any, len(v))
 		for k, child := range v {
@@ -151,6 +160,71 @@ func checkActivationRoots(s string) error {
 		}
 	}
 	return nil
+}
+
+// checkRenderedForDeferredMarkers rejects a rendered value that carries syntax a
+// LATER layer would interpret. Rendering is one-pass, so whatever a $config or
+// $vars value holds is substituted verbatim -- and both of the following escape
+// every check that runs on the authored source, where the only root is the
+// permitted $config:
+//
+//	$config.x = "{{ $input.y }}"      -> ships the literal "{{ $input.y }}"
+//	$config.x = "$supplies.rules"     -> ships a supply reference nothing declared
+//
+// The first is the same silent wrong answer this whole layer exists to remove,
+// one indirection deeper: the consumer subscribes to a topic literally named
+// "{{ $input.y }}". The second is a fail-closed-at-the-wrong-layer bug --
+// authoring "$supplies.rules" directly makes validateSupplyUsage reject the
+// workflow at submit, but arriving at the same string through $config passes
+// submit and fails later in CompileProjectedPackage, on the runner, at
+// activation. Rejecting here puts both diagnostics back at submit time.
+//
+// The check runs only when the authored value contained a template, so a
+// parameter whose literal text legitimately holds braces or a "$" (never
+// rendered, never re-fed to expr) is untouched.
+//
+// The error names the parameter's authored source and the offending marker, not
+// the surrounding rendered value: a rendered trigger parameter routinely holds
+// broker addresses and, through $config, credentials.
+func checkRenderedForDeferredMarkers(rendered any, source string) error {
+	switch v := rendered.(type) {
+	case string:
+		if marker := deferredMarkerIn(v); marker != "" {
+			return fmt.Errorf("expression %q rendered to a value containing %s: "+
+				"$config and $vars values are substituted verbatim, never re-evaluated, so the "+
+				"reference would reach the handler as literal text", source, marker)
+		}
+	case map[string]any:
+		for _, child := range v {
+			if err := checkRenderedForDeferredMarkers(child, source); err != nil {
+				return err
+			}
+		}
+	case []any:
+		for _, child := range v {
+			if err := checkRenderedForDeferredMarkers(child, source); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// deferredMarkerIn names the first deferred-evaluation marker in s, or "" if
+// there is none. The reference patterns are the same ones Compile scans the
+// authored parameters with, so a value that arrives through $config is judged by
+// exactly the rule a directly authored value is judged by.
+func deferredMarkerIn(s string) string {
+	if strings.Contains(s, "{{") {
+		return `a "{{" template`
+	}
+	if suppliesRefPattern.MatchString(s) || suppliesDynamicPattern.MatchString(s) {
+		return "a $supplies reference"
+	}
+	if nodesRefPattern.MatchString(s) {
+		return "a $nodes reference"
+	}
+	return ""
 }
 
 // templateSegments returns the expression source of each {{ }} segment in s,

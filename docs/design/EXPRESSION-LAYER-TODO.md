@@ -78,6 +78,24 @@ group（`engine/graph/subgraph_package.go` 的 `ProjectGroupPackage`）、进程
 `$supplies` 被拒绝，尽管 `BuildExprEnv` 无条件提供它且在控制面能解析出值：supply
 内容由 runner 门控在指令下发**之后**取回，这里渲染出的值会被冻结、永不刷新。
 
+**渲染结果也要查（2026-08-13 补）。** 上面四条约束都作用于**授权的源模板**，
+而 `$config`/`$vars` 的值是**原样代入、不再求值**的（渲染一趟）。所以守卫扫源模板
+时只看见被许可的 `$config`，而代入进来的东西照样下发：
+
+| `$config.x` | 参数写 `{{ $config.x }}` | 补检查之前 |
+|---|---|---|
+| `"{{ $input.y }}"` | 下发字面量 `{{ $input.y }}` | 端到端 ACCEPT，consumer 订阅该字面主题名 |
+| `"$supplies.nope"` | 下发 `$supplies.nope` | 外层 `Compile` ACCEPT，**runner 侧** `CompileProjectedPackage` 才拒 |
+
+两条直接写在参数里都会在提交期被拒（前者 `checkActivationRoots`，后者
+`validateSupplyUsage`），绕一层 `$config` 就不拒了。`checkRenderedForDeferredMarkers`
+在渲染后复扫 `{{`、`$supplies.*`、`$nodes[...]` 三类标记，把两条诊断都拉回提交期。
+仅当源模板含 `{{` 时才查——纯字面量参数从不渲染、也不会被再喂给 expr。
+
+一趟渲染同时是**安全上的兜底**：实测 `$config.x = "$supplies.rules"` 渲染出的是
+字符串 `"$supplies.rules"` 而不是 supply 内容，所以任何 supply 值都不会被冻进
+激活参数或包里。上面那条 `$supplies` 拒绝理由因此仍然成立。
+
 ### 三层缺口（Task 0～3，2026-08-11 ~ 08-12）
 
 原始调查记录的三层：`${{ }}` 语法零实现 / 多数节点不求值任何参数 / 四个根不存在。

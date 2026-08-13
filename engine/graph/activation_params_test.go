@@ -197,8 +197,119 @@ func TestEvaluateActivationParams_LeavesTheSourceMapAlone(t *testing.T) {
 	}
 }
 
-// TestProjectGroupPackage_LeavesNonEntryMembersAlone pins the other half of the
-// group split. Every member except the entry IS executed as a task by the inner
+// TestEvaluateActivationParams_RejectsDeferredMarkersInRenderedValues pins the
+// gap $config opens in the root guard above. Rendering is ONE-PASS -- measured:
+// with $config.x = "$supplies.rules" and $supplies.rules = "SECRET",
+// RenderTemplate("{{ $config.x }}") returns the string "$supplies.rules", not
+// the content -- so nothing here leaks a supply's value. What it does do is ship
+// a reference that a LATER layer interprets, while every check that runs on the
+// authored source sees only "$config", which is permitted.
+//
+// Both shapes below are ACCEPTED end to end without the rendered-value check:
+//
+//	"{{ $input.y }}"  -> the Kafka consumer subscribes to that literal topic
+//	"$supplies.rules" -> outer Compile accepts; CompileProjectedPackage rejects
+//	                     it on the RUNNER at activation, not at submit
+//
+// Authoring either string directly in the parameter is rejected at submit today
+// (checkActivationRoots for the first, validateSupplyUsage for the second).
+// Routing it through $config must not be a way around that.
+func TestEvaluateActivationParams_RejectsDeferredMarkersInRenderedValues(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		cfg     any
+		param   any
+		marker  string
+		wantErr bool
+	}{
+		{
+			name:   "config holds template text",
+			cfg:    "{{ $input.y }}",
+			param:  "{{ $config.x }}",
+			marker: `a "{{" template`, wantErr: true,
+		},
+		{
+			// Expression mode returns the object itself, so the marker hides one
+			// level down -- the recursion is what catches it.
+			name:   "config holds an object with template text",
+			cfg:    map[string]any{"topic": "{{ $input.z }}"},
+			param:  "${{ $config.x }}",
+			marker: `a "{{" template`, wantErr: true,
+		},
+		{
+			name:   "config expands to a declared supply reference",
+			cfg:    "$supplies.rules",
+			param:  "{{ $config.x }}",
+			marker: "a $supplies reference", wantErr: true,
+		},
+		{
+			// Undeclared is the shape that reaches the runner: outer Compile has
+			// no supply name to check against until the value is rendered.
+			name:   "config expands to an undeclared supply reference",
+			cfg:    "$supplies.nope",
+			param:  "{{ $config.x }}",
+			marker: "a $supplies reference", wantErr: true,
+		},
+		{
+			name:   "config expands to a node reference",
+			cfg:    `$nodes['upstream']`,
+			param:  "{{ $config.x }}",
+			marker: "a $nodes reference", wantErr: true,
+		},
+		{
+			// The check is gated on the authored value containing a template, so
+			// a literal that merely looks like a reference passes through: it is
+			// never rendered and never re-fed to expr.
+			name: "a literal that is never rendered passes through",
+			cfg:  "unused", param: "$supplies.rules", wantErr: false,
+		},
+		{
+			name: "an ordinary rendered value passes through",
+			cfg:  "sas-traffic", param: "{{ $config.x }}", wantErr: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g, err := Compile(&types.WorkflowDef{
+				Name:    "deferred",
+				Context: &types.WorkflowContext{Config: map[string]any{"x": tc.cfg}},
+				Nodes: []types.NodeDef{
+					{Name: "k", Type: "xflow.trigger.kafka", Version: 1, Kind: types.NodeKindTrigger},
+					{Name: "sink", Type: "xflow.http", Version: 1, Kind: types.NodeKindAction},
+				},
+				Connections: types.Connections{
+					"k": {"main": types.PortConnections{Targets: []types.Connection{{Node: "sink", Input: "main"}}}},
+				},
+			})
+			if err != nil {
+				t.Fatalf("compile: %v", err)
+			}
+
+			out, err := EvaluateActivationParams(g, "k", "xflow.trigger.kafka",
+				map[string]any{"topic": tc.param})
+			if !tc.wantErr {
+				if err != nil {
+					t.Fatalf("EvaluateActivationParams: unexpected rejection: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("EvaluateActivationParams = %#v, nil error -- the reference ships "+
+					"to the handler as literal text", out)
+			}
+			if !strings.Contains(err.Error(), tc.marker) {
+				t.Errorf("error %q does not name the marker %q", err, tc.marker)
+			}
+			// §7: the error carries the AUTHORED source and the marker kind. It
+			// must not carry the rendered value, which came from $config and can
+			// hold a credential.
+			if !strings.Contains(err.Error(), `parameter "topic"`) {
+				t.Errorf("error %q does not name the parameter", err)
+			}
+		})
+	}
+}
+
+// TestProjectGroupPackage_LeavesNonEntryMembersAlone pins the other half of the// group split. Every member except the entry IS executed as a task by the inner
 // engine, so its parameters must reach execution/params.go as source text --
 // rendering them here would double-evaluate, and a member reading $input would
 // abort the projection and, since assignPackageHashes runs inside Compile, the
