@@ -150,9 +150,13 @@ func TestBackpressure_PauseCount(t *testing.T) {
 		t.Fatalf("expected pauseCount=0 initially, got %d", bp.PauseCount())
 	}
 
-	// Two goroutines will block.
+	// Two goroutines will block. Each hands its release function back over a
+	// channel rather than writing into a shared slice: with a window of 1 only
+	// one of them can be unblocked at a time, so the main goroutine must read a
+	// release function while the other is still running -- an unsynchronized
+	// slice makes that read a data race, which -race reported on this test.
 	var wg sync.WaitGroup
-	releases := make([]func(), 2)
+	releases := make(chan func(), 2)
 	for i := 0; i < 2; i++ {
 		wg.Add(1)
 		go func(idx int) {
@@ -162,7 +166,7 @@ func TestBackpressure_PauseCount(t *testing.T) {
 				t.Errorf("Acquire %d: %v", idx, err)
 				return
 			}
-			releases[idx] = rel
+			releases <- rel
 		}(i)
 	}
 
@@ -173,15 +177,14 @@ func TestBackpressure_PauseCount(t *testing.T) {
 		t.Fatalf("expected pauseCount=2, got %d", bp.PauseCount())
 	}
 
-	// Release slots one by one.
+	// Release slots one by one. Receiving from the channel also replaces the
+	// sleep that used to stand in for "a waiter has been unblocked by now".
 	r1()
-	time.Sleep(20 * time.Millisecond)
-	// One waiter unblocked; release its slot to unblock the second.
-	for i := 0; i < 2; i++ {
-		if releases[i] != nil {
-			releases[i]()
-			break
-		}
+	select {
+	case rel := <-releases:
+		rel()
+	case <-time.After(time.Second):
+		t.Fatal("no waiter was unblocked after releasing the only slot")
 	}
 
 	wg.Wait()
