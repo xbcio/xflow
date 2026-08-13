@@ -27,6 +27,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/types"
 	"github.com/redis/go-redis/v9"
 )
@@ -296,8 +297,20 @@ func r8Workflow(name, code string) *types.WorkflowDef {
 }
 
 // r8ScriptWorkflow builds a single-node xflow.script workflow with a CPU-bound
-// busy loop and a generous timeout, used to guarantee the kill lands while the
-// node is executing (Running) rather than queued.
+// busy loop, used to guarantee the kill lands while the node is executing
+// (Running) rather than queued.
+//
+// The two constants matter and are not interchangeable:
+//
+//   - 20M goja iterations measure ~2.5s on this hardware — long enough that the
+//     50ms g1WaitForNodeStatus poll plus the SIGKILL always land mid-execution,
+//     short enough that the post-recovery re-execution finishes well inside the
+//     node timeout.
+//   - The 30s timeout must comfortably exceed one full run. An earlier revision
+//     used 150M iterations (~18.3s measured) under a 10s timeout, so the node
+//     could never succeed on any attempt: the recovered re-run always died with
+//     script.timeout, and the recovery assertion below silently accepted that
+//     failure as "converged". Keep the loop well under the timeout.
 func r8ScriptWorkflow(name string) *types.WorkflowDef {
 	return &types.WorkflowDef{
 		Name: name,
@@ -305,8 +318,8 @@ func r8ScriptWorkflow(name string) *types.WorkflowDef {
 			{Name: "busy", Type: "xflow.script", Parameters: map[string]any{
 				"language": "js",
 				"runtime":  "goja",
-				"code":     "var i=0;while(i<150000000){i++}",
-				"timeout":  "10s",
+				"code":     "var i=0;while(i<20000000){i++}",
+				"timeout":  "30s",
 			}},
 		},
 	}
@@ -448,14 +461,19 @@ func r8KillPendingRestart(t *testing.T, serverBin, runnerBin, addr, dsn string) 
 }
 
 // r8KillMidFlightRestart proves at-least-once recovery when the runner is
-// SIGKILLed *while* a node is executing. The unacked asynq task is redelivered
-// after asynq's recovery window; the new runner re-executes (at-least-once)
-// and the execution converges. This is the strong cross-process-death evidence.
+// SIGKILLed *while* a node is executing. The node's lease expires with no owner
+// alive to renew it; xflow's own LeaseSweeper reclaims it and re-enqueues the
+// task; the restarted runner re-executes it (at-least-once) and the execution
+// succeeds. This is the strong cross-process-death evidence.
 //
-// The asynq active-task recovery latency is not directly controlled here, so a
-// generous timeout is used. On environments where recovery is slow/flaky the
-// subtest degrades to a t.Log skip rather than blocking the R8 gate; the
-// deterministic evidence lives in HappyPath + KillRunnerWhilePendingThenRestart.
+// Recovery latency comes from xflow's LeaseSweeper, NOT asynq's recoverer:
+// engine.DefaultLeaseTTL is 60s (engine/engine.go) and
+// control.DefaultSweepPeriod is 10s (service/control/lease_sweeper.go), so
+// convergence lands around 60-70s; measured runs converge at ~79s. Neither
+// binary exposes a lease-TTL flag, so this floor cannot be shortened from a
+// real-binary test — hence the wide window below. An earlier revision waited
+// only 30s, which is under the lease TTL itself, so the subtest could never
+// pass and always degraded to a skip.
 func r8KillMidFlightRestart(t *testing.T, serverBin, runnerBin, addr, dsn string) {
 	srv := newR8Server(t, serverBin, freeAddr(t), addr, dsn)
 	runner := startR8Runner(t, runnerBin, srv.httpURL, "r8-runner-mid-1")
@@ -469,29 +487,34 @@ func r8KillMidFlightRestart(t *testing.T, serverBin, runnerBin, addr, dsn string
 	t.Logf("R8: node busy reached Running; SIGKILL runner mid-execution")
 	runner.kill(t)
 
-	// Restart a fresh runner. Poll for terminal convergence. asynq's
-	// active-task recovery (redelivery of a task whose consumer died mid-flight)
-	// is governed by asynq's internal recoverer/lease sweep, not directly
-	// controlled here; a bounded window is used. On environments where recovery
-	// exceeds the window, the subtest degrades to a t.Log skip rather than
-	// blocking the R8 gate — the deterministic evidence lives in HappyPath +
-	// KillRunnerWhilePendingThenRestart.
+	// Restart a fresh runner and wait out the lease-sweep window.
 	runner2 := startR8Runner(t, runnerBin, srv.httpURL, "r8-runner-mid-2")
 	t.Cleanup(func() { runner2.stop(t) })
 
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		_, detail := g1InspectAuth(t, srv.httpURL, r8Token, id)
-		if types.IsTerminalExecutionStatus(detail.Status) {
-			t.Logf("R8 mid-flight recovery: execution %s converged to %s after runner SIGKILL+restart", id, detail.Status)
-			return
-		}
-		time.Sleep(500 * time.Millisecond)
+	start := time.Now()
+	detail := g1WaitForTerminal(t, srv.httpURL, r8Token, id, 150*time.Second)
+	if detail.Status != types.ExecutionStatusSuccess {
+		t.Fatalf("R8 mid-flight: execution %s converged to %s in %v, want %s; nodes=%+v (runner2 out=%s)",
+			id, detail.Status, time.Since(start), types.ExecutionStatusSuccess, detail.Nodes, runner2.out.String())
 	}
-	// Degrade: asynq active-task recovery did not redeliver within the window.
-	_, detail := g1InspectAuth(t, srv.httpURL, r8Token, id)
-	t.Skipf("R8 mid-flight: execution %s did not converge within 30s (last status=%s); "+
-		"asynq active-task recovery latency exceeds the window — degrading to skip. "+
-		"Deterministic R8 evidence is in HappyPath + KillRunnerWhilePendingThenRestart. (runner2 out=%s)",
-		id, detail.Status, runner2.out.String())
+	// Attempt >= 2 is the recovery proof: attempt 1 died with the SIGKILLed
+	// runner, so a success on attempt 1 would mean the kill never landed
+	// mid-flight and the test verified nothing.
+	var busy *engine.NodeDetail
+	for i := range detail.Nodes {
+		if detail.Nodes[i].Name == "busy" {
+			busy = &detail.Nodes[i]
+			break
+		}
+	}
+	if busy == nil {
+		t.Fatalf("R8 mid-flight: execution %s has no node named busy; nodes=%+v", id, detail.Nodes)
+	}
+	if busy.Attempt < 2 {
+		t.Fatalf("R8 mid-flight: node busy succeeded on attempt %d, want >= 2 — the SIGKILL did not "+
+			"interrupt an in-flight execution, so lease-sweep recovery was never exercised; node=%+v",
+			busy.Attempt, *busy)
+	}
+	t.Logf("R8 mid-flight recovery: execution %s -> Success on attempt %d in %v after runner SIGKILL+restart",
+		id, busy.Attempt, time.Since(start))
 }

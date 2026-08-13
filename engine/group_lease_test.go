@@ -202,9 +202,13 @@ func TestCommitGroupResult_ValidExitAccepted(t *testing.T) {
 		t.Fatalf("BuildGroupLease: %v", err)
 	}
 
+	// The fixture's crossing member edge is what makes this test meaningful: a
+	// group with no boundary outputs has no valid exit to accept, so an empty
+	// list means the fixture regressed, not that there is nothing to check.
+	// Fail rather than skip — a silent skip here would hide the regression.
 	boundaryOutputs := gm.BoundaryOutputs
 	if len(boundaryOutputs) == 0 {
-		t.Skip("no boundary outputs in test fixture")
+		t.Fatalf("fixture regressed: group %q has no boundary outputs, so no exit can be accepted", gm.Name)
 	}
 	bo := boundaryOutputs[0]
 	srcName := g.NodeName(bo.Src.NodeIdx)
