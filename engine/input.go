@@ -8,6 +8,22 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
+// ExecutionScopeNodesKey is the execution-scope key carrying a map body's
+// snapshot of the OUTER graph's node outputs.
+//
+// $nodes rides the scope alongside $item/$index/$items because it is the same
+// kind of thing -- a root that belongs to the whole sub-execution rather than to
+// one node -- and reusing that channel means it inherits an already-tested
+// round trip (snapshot field, Redis codec, statestore contract) instead of
+// growing a parallel one.
+//
+// What it does NOT share is the destination. BuildExprEnv assigns env["$nodes"]
+// from Input.Nodes AFTER spreading Input.Data, so a "$nodes" key left in Data is
+// overwritten by the node's own (empty) Nodes and reads as absent.
+// applyExecutionScope therefore routes this one key to Input.Nodes and every
+// other key to Input.Data.
+const ExecutionScopeNodesKey = "$nodes"
+
 // buildInput assembles the types.Input from graph metadata and upstream outputs.
 // Backend read failures are authoritative failures: they must never be treated
 // as an empty execution or absent upstream business data.
@@ -110,38 +126,67 @@ func (e *Engine) buildInput(ctx context.Context, t *Task, g *graph.Graph) (*type
 }
 
 // applyExecutionScope merges the execution-wide expression roots (a map body's
-// $item/$index/$items) into this node's Data, which is what BuildExprEnv
-// spreads into the expression environment's top level.
+// $item/$index/$items, and its $nodes snapshot of the outer graph) into this
+// node's input.
 //
 // It runs on EVERY node of the execution, after Data was assembled from
 // whichever source that node's position dictates. Shipping the roots as
 // submission params instead reached only nodes with zero in-edges -- the body's
 // entry member -- and every other member failed to compile its parameters.
 //
-// The scope wins over a same-named upstream key. The three roots are "$"-
-// prefixed and the "$" prefix is reserved (a node output cannot introduce one
-// through the DSL), so the collision this resolves is not reachable today; the
-// rule is stated because the alternative -- letting an upstream output shadow a
-// promised loop root -- would be silent and item-dependent.
+// Most roots land in Data, which is what BuildExprEnv spreads into the
+// expression environment's top level. ExecutionScopeNodesKey is the exception
+// and lands in Nodes -- see that constant's doc for why Data cannot work for it.
+//
+// The scope wins over a same-named upstream key. The roots are "$"-prefixed and
+// the "$" prefix is reserved (a node output cannot introduce one through the
+// DSL), so the collision this resolves is not reachable today; the rule is
+// stated because the alternative -- letting an upstream output shadow a promised
+// loop root -- would be silent and item-dependent.
 func applyExecutionScope(input *types.Input, scope map[string]any) {
 	if len(scope) == 0 {
 		return
 	}
-	if input.Data == nil {
-		input.Data = make(map[string]any, len(scope))
-	}
 	for k, v := range scope {
+		if k == ExecutionScopeNodesKey {
+			outer, ok := v.(map[string]any)
+			if !ok || len(outer) == 0 {
+				continue
+			}
+			if input.Nodes == nil {
+				input.Nodes = make(map[string]any, len(outer))
+			}
+			for name, data := range outer {
+				input.Nodes[name] = data
+			}
+			continue
+		}
+		if input.Data == nil {
+			input.Data = make(map[string]any, len(scope))
+		}
 		input.Data[k] = v
 	}
 }
 
 // prefetchNodesRefs populates input.Nodes from the compile-time reference set.
+//
+// It MERGES rather than assigns, because applyExecutionScope may already have
+// put a map body's outer-graph snapshot there. Assigning dropped it for exactly
+// the members that had a local $nodes reference too -- a two-member body whose
+// second member read both a sibling and an outer ancestor saw only the sibling.
+//
+// A local name always wins over a snapshotted outer one: these are read from
+// THIS execution's state store, and the compile-time sets are disjoint anyway
+// (buildNodesRefs excludes the outer names from g.nodesRefs precisely so the
+// inner prefetch never chases them against the inner store).
 func prefetchNodesRefs(ctx context.Context, e *Engine, t *Task, g *graph.Graph, input *types.Input) error {
 	refs := g.NodesRefsFor(t.NodeIdx)
 	if len(refs) == 0 {
 		return nil
 	}
-	nodes := make(map[string]any, len(refs))
+	if input.Nodes == nil {
+		input.Nodes = make(map[string]any, len(refs))
+	}
 	for _, name := range refs {
 		data, err := e.state.GetOutput(ctx, t.ExecutionID, name)
 		if err != nil {
@@ -151,9 +196,8 @@ func prefetchNodesRefs(ctx context.Context, e *Engine, t *Task, g *graph.Graph, 
 		// return nil, nil — the static type is map[string]any so this assignment
 		// produces a typed nil map, which is the required form (see Input.Nodes
 		// field comment for why).
-		nodes[name] = data
+		input.Nodes[name] = data
 	}
-	input.Nodes = nodes
 	return nil
 }
 

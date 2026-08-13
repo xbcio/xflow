@@ -148,12 +148,41 @@ func ProjectNodeBodyPackage(mapNodeName string, params map[string]any, visibleSu
 		Exits:           exits,
 		Requirements:    buildBodyRequirements(defNodes),
 		VisibleSupplies: visibleSupplies,
+		// The same names as OuterNodeRefs, flattened and deduplicated: that field
+		// records who referenced what (needed for diagnostics), this one records
+		// only what may be referenced (needed by the inner compile's existence
+		// check). Deriving it here rather than making the inner compile walk
+		// OuterNodeRefs keeps the package self-contained -- it is what travels to
+		// a runner, and NodeBodyPackage does not.
+		VisibleOuterNodes: outerRefNames(outerRefs),
 	}
 	hash, err := ComputePackageHash(pkg)
 	if err != nil {
 		return nil, fmt.Errorf("node %q: compute body package hash: %w", mapNodeName, err)
 	}
 	return &NodeBodyPackage{Package: pkg, Hash: hash, OuterNodeRefs: outerRefs}, nil
+}
+
+// outerRefNames flattens per-member outer references into the sorted,
+// deduplicated name set the projected package carries. Two members reading the
+// same outer node produce one name, and the order is the sorted order rather
+// than authoring order so the package hash does not move when a body's members
+// are relisted.
+func outerRefNames(refs []BodyOuterRef) []string {
+	if len(refs) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(refs))
+	names := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		if seen[ref.Node] {
+			continue
+		}
+		seen[ref.Node] = true
+		names = append(names, ref.Node)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // compileBodyMembers builds the minimal two-pass graph the entry rules need and

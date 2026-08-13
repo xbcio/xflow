@@ -450,6 +450,119 @@ func TestBuildSubgraphLeaseCarriesTheSubmissionRuntime(t *testing.T) {
 	}
 }
 
+// A batch lease is also the only route an OUTER node's output has to a runner
+// whose body reads it through $nodes['<name>']. The projected package carries
+// the permitted NAMES (VisibleOuterNodes, so the inner compile accepts them);
+// the values exist only in the outer execution's state store, which a runner
+// never sees. Without this field a body member reading an upstream ancestor got
+// nil on a runner while the same expression resolved fine in process.
+//
+// Asserted on the payload rather than end-to-end because this is the wire
+// boundary: service/runner/subgraph_runtime.go copies the field straight into
+// BatchBodyRequest, and the in-process half is covered by
+// TestMapBodyMemberReadsAnOuterNodeSnapshot.
+func TestBuildSubgraphLeaseCarriesTheOuterNodeSnapshot(t *testing.T) {
+	body := map[string]any{
+		"type": "xflow.subgraph",
+		"parameters": map[string]any{
+			"nodes": []any{
+				map[string]any{"name": "echo", "type": "test.echo", "parameters": map[string]any{
+					"saw": "${{ $nodes['src'].region }}",
+				}},
+			},
+		},
+	}
+	def := &types.WorkflowDef{
+		Name: "batch-lease-outer-nodes",
+		Nodes: []types.NodeDef{
+			{Name: "src", Type: "test.echo"},
+			{Name: "loop", Type: "xflow.map", Parameters: map[string]any{
+				"items": "$input.items",
+				"body":  body,
+			}},
+		},
+		Connections: types.Connections{
+			"src": {"main": {Targets: []types.Connection{{Node: "loop", Input: "main"}}}},
+		},
+	}
+	g, err := graph.Compile(def)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	state := newFakeState()
+	queue := &fakeQueue{}
+	reg := &fakeRegistry{handlers: map[string]types.ActionHandler{
+		"xflow.map": &loopHandler{},
+		"test.echo": &echoHandler{},
+	}}
+	eng := newTestEngine(t, state, queue, reg)
+	ctx := context.Background()
+	// echoHandler returns its input as its output, so the submission params ARE
+	// src's output -- which is what the snapshot must carry to the runner.
+	if _, err := eng.Submit(ctx, g, map[string]any{"region": "eu-west-1"}); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	// Driven by hand rather than through drainBatchTasks: that helper assumes the
+	// map is the only root, and this workflow deliberately has an upstream node
+	// for the body to read across the domain boundary.
+	roots := queue.Drain()
+	if len(roots) != 1 || roots[0].NodeName != "src" {
+		t.Fatalf("root tasks = %v, want one \"src\"", taskNames(roots))
+	}
+	executeTask(t, eng, roots[0])
+	loops := queue.Drain()
+	if len(loops) != 1 || loops[0].NodeName != "loop" {
+		t.Fatalf("tasks after src = %v, want one \"loop\"", taskNames(loops))
+	}
+	executeTask(t, eng, loops[0])
+	batches := queue.Drain()
+	if len(batches) == 0 {
+		t.Fatalf("map produced no batches")
+	}
+
+	_, payload, err := eng.BuildSubgraphLease(ctx, batches[0])
+	if err != nil {
+		t.Fatalf("BuildSubgraphLease() error = %v", err)
+	}
+	outer, ok := payload.OuterNodes["src"].(map[string]any)
+	if !ok {
+		t.Fatalf("payload.OuterNodes[\"src\"] = %#v, want src's output; a body member's "+
+			"$nodes['src'] would read nil on a runner", payload.OuterNodes["src"])
+	}
+	if got := outer["region"]; got != "eu-west-1" {
+		t.Errorf("payload.OuterNodes[\"src\"][\"region\"] = %v, want \"eu-west-1\"", got)
+	}
+}
+
+// A body that reads no outer node must leave the field nil, so an existing
+// expansion's payload bytes -- and everything keyed off them -- do not move.
+func TestBuildSubgraphLeaseOmitsTheSnapshotWhenTheBodyReadsNoOuterNode(t *testing.T) {
+	def := &types.WorkflowDef{
+		Name:  "batch-lease-no-outer-nodes",
+		Nodes: []types.NodeDef{{Name: "loop", Type: "xflow.map", Parameters: mapBodyParamsForTest()}},
+	}
+	g, err := graph.Compile(def)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	state := newFakeState()
+	queue := &fakeQueue{}
+	reg := &fakeRegistry{handlers: map[string]types.ActionHandler{"xflow.map": &loopHandler{}}}
+	eng := newTestEngine(t, state, queue, reg)
+	ctx := context.Background()
+	if _, err := eng.Submit(ctx, g, nil); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	batches := drainBatchTasks(t, eng, queue)
+	_, payload, err := eng.BuildSubgraphLease(ctx, batches[0])
+	if err != nil {
+		t.Fatalf("BuildSubgraphLease() error = %v", err)
+	}
+	if payload.OuterNodes != nil {
+		t.Errorf("payload.OuterNodes = %#v, want nil for a body with no outer reference", payload.OuterNodes)
+	}
+}
+
 // The clone must be a copy, not an alias: a runner-facing payload that shares
 // the snapshot's map lets any mutation on either side show up on the other,
 // across every batch of the expansion.

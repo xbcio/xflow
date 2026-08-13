@@ -301,6 +301,11 @@ func (e *Engine) runBatchBody(ctx context.Context, g *graph.Graph, lease *TaskLe
 	if err != nil {
 		return nil, batchBodyError(lease.Task.NodeName, batchIndex, err)
 	}
+	// Snapshotted here, at scheduling time, for the reason in the method's doc.
+	outerNodes, err := e.bodyOuterNodesSnapshot(ctx, lease.Task.ExecutionID, g, lease.Task.NodeIdx)
+	if err != nil {
+		return nil, batchBodyError(lease.Task.NodeName, batchIndex, err)
+	}
 	itemResults, err := e.batchBodyExecutor.ExecuteBatchBody(ctx, BatchBodyRequest{
 		ExecutionID:     string(lease.Task.ExecutionID),
 		ParentNode:      lease.Task.NodeName,
@@ -312,6 +317,7 @@ func (e *Engine) runBatchBody(ctx context.Context, g *graph.Graph, lease *TaskLe
 		AllItems:        allItems,
 		ContinueOnError: continueOnError,
 		Runtime:         runtime,
+		OuterNodes:      outerNodes,
 	})
 	if err != nil {
 		// The body could not be RUN — compile failure, missing handler, backend
@@ -598,4 +604,43 @@ func (e *Engine) executionRuntime(ctx context.Context, id types.ExecutionID) (*t
 		return nil, nil
 	}
 	return cloneRuntime(snap.Runtime), nil
+}
+
+// bodyOuterNodesSnapshot reads the outputs of the outer-graph nodes a map node's
+// body references through $nodes, so the body's members can be handed them.
+//
+// It is taken ONCE, here, when the batch is scheduled -- not per item and not
+// re-read inside the sub-execution. The spec's semantics are a snapshot as of
+// entering the map node: every item of every batch sees the same values, and an
+// outer node that somehow changed mid-loop cannot make two items disagree.
+//
+// A miss is not an error. GetOutput returns (nil, nil) for a node that has not
+// run, and validateBodyOuterRefs has already rejected the references that could
+// never run (downstream, unrelated branch); what remains is a conditional
+// ancestor a branch may legitimately have skipped, which the spec's ?? guard is
+// meant to absorb. The typed-nil map that lands in the result is the same shape
+// prefetchNodesRefs stores for the same case.
+//
+// A read FAILURE is an error, and it carries the execution ID, the map node, and
+// the referenced node name -- never the output. An upstream node's output is
+// routinely an HTTP response body carrying credentials, so it must not reach a
+// log line or a wrapped error.
+func (e *Engine) bodyOuterNodesSnapshot(ctx context.Context, id types.ExecutionID, g *graph.Graph, nodeIdx int) (map[string]any, error) {
+	refs := g.BodyOuterRefsFor(nodeIdx)
+	if len(refs) == 0 {
+		return nil, nil
+	}
+	nodes := make(map[string]any, len(refs))
+	for _, ref := range refs {
+		if _, done := nodes[ref.Node]; done {
+			continue
+		}
+		data, err := e.state.GetOutput(ctx, id, ref.Node)
+		if err != nil {
+			return nil, fmt.Errorf("get body $nodes output %q/%q referenced by body of %q: %w",
+				id, ref.Node, g.NodeName(nodeIdx), err)
+		}
+		nodes[ref.Node] = data
+	}
+	return nodes, nil
 }

@@ -132,12 +132,23 @@ func globalIndex(req engine.BatchBodyRequest, pos int) int {
 // unprefixed "item"/"index" for its own per-element condition (see
 // node/internal/transform/filter.go), and a filter nested in a body would
 // otherwise shadow the map's iteration variables silently.
+//
+// req.OuterNodes joins them under engine.ExecutionScopeNodesKey when the body
+// reads an outer-graph ancestor. It belongs here for the same reason the loop
+// roots do -- it is scoped to the whole body, not to its entry -- and the engine
+// routes that one key to Input.Nodes instead of Input.Data (see the constant's
+// doc). Omitted entirely when empty so a body that reads no outer node produces
+// the same scope map it always did.
 func bodyItemScope(req engine.BatchBodyRequest, item any, index int) map[string]any {
-	return map[string]any{
+	scope := map[string]any{
 		"$item":  item,
 		"$index": index,
 		"$items": req.AllItems,
 	}
+	if len(req.OuterNodes) > 0 {
+		scope[engine.ExecutionScopeNodesKey] = req.OuterNodes
+	}
+	return scope
 }
 
 // bodyItemInput builds the entry input for one item.

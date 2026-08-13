@@ -61,6 +61,24 @@ type SubgraphPackage struct {
 	// the runner at activation time and deliberately stays out of the package, so
 	// PackageHash does not move when a supply's content changes.
 	VisibleSupplies []string `json:"visible_supplies,omitempty"`
+	// VisibleOuterNodes is the sorted set of OUTER-graph node names the members
+	// may read through $nodes['<name>']. It exists for the same reason
+	// VisibleSupplies does, one root over: this package is compiled on its own by
+	// CompileProjectedPackage, whose graph contains only the members, so
+	// buildNodesRefs would reject every outer name with "does not exist in the
+	// workflow definition" -- which is what stalled a map node whose body read an
+	// upstream ancestor.
+	//
+	// Populated only on a BODY package. A group member's outer references are
+	// rejected outright (checkPortability with collectExternal=false), so a group
+	// package leaves this nil and its bytes -- and hash -- do not move.
+	//
+	// Names only, and for the stronger of the two reasons VisibleSupplies gives:
+	// a supply's content merely changes often, whereas an upstream node's output
+	// is execution-scoped and routinely an HTTP response body carrying
+	// credentials. It must never enter a compile-time artifact. The outputs are
+	// snapshotted per execution and travel on the lease.
+	VisibleOuterNodes []string `json:"visible_outer_nodes,omitempty"`
 }
 
 // ProjectGroupPackage projects a deterministic SubgraphPackage from a compiled
@@ -356,7 +374,7 @@ func CompileProjectedPackage(pkg *SubgraphPackage) (*Graph, error) {
 	if pkg.Def == nil {
 		return nil, fmt.Errorf("group package has nil Def")
 	}
-	return compileTrusted(pkg.Def, pkg.VisibleSupplies)
+	return compileTrusted(pkg.Def, pkg.VisibleSupplies, pkg.VisibleOuterNodes)
 }
 
 // compileTrusted is the internal compilation path that skips the reserved-type
@@ -370,7 +388,12 @@ func CompileProjectedPackage(pkg *SubgraphPackage) (*Graph, error) {
 // caller-supplied name list -- sourced from the parent graph's g.supplyRefs
 // at projection time -- is what lets a member's $supplies.<name> reference
 // pass validation.
-func compileTrusted(def *types.WorkflowDef, visibleSupplies []string) (*Graph, error) {
+//
+// visibleOuterNodes does the same for $nodes: a body member may read the map
+// node's upstream ancestors, and those names exist in the OUTER graph only.
+// Without the list, buildNodesRefs rejects them as nonexistent. Both lists are
+// widenings of a validation set, never sources of data.
+func compileTrusted(def *types.WorkflowDef, visibleSupplies, visibleOuterNodes []string) (*Graph, error) {
 	if def == nil {
 		return nil, fmt.Errorf("workflow definition is nil")
 	}
@@ -442,7 +465,7 @@ func compileTrusted(def *types.WorkflowDef, visibleSupplies []string) (*Graph, e
 	// Warning here would produce noise. Existence and forward-ref checks still
 	// run — validatePortability guarantees members only reference each other,
 	// so existence always passes, but forward-ref is still meaningful.
-	if err := buildNodesRefs(g, true); err != nil {
+	if err := buildNodesRefs(g, true, visibleOuterNodes); err != nil {
 		return nil, err
 	}
 	if err := buildUnits(g); err != nil {

@@ -63,7 +63,22 @@ func deriveNodesRefs(params map[string]any) []string {
 // in the projection would produce noise that confuses the workflow author (they
 // didn't write a cross-branch reference; the projection created the appearance
 // of one).
-func buildNodesRefs(g *Graph, skipCrossBranchWarning bool) error {
+//
+// visibleOuterNodes is non-empty only for a BODY package, where the same
+// "references point only to members" guarantee does NOT hold: a body member may
+// read the map node's upstream ancestors, whose names live in the outer graph
+// alone. Those names are exempted from the existence check and from every
+// topology check below -- the projected graph has no opinion about a node it
+// does not contain, and the outer compilation already adjudicated them in
+// validateBodyOuterRefs against the topology that can answer. They are also
+// left OUT of g.nodesRefs: that set drives the inner engine's prefetch, which
+// reads the inner execution's state store, where an outer node has no output.
+// The outer snapshot reaches the members through the execution scope instead.
+func buildNodesRefs(g *Graph, skipCrossBranchWarning bool, visibleOuterNodes []string) error {
+	outer := make(map[string]bool, len(visibleOuterNodes))
+	for _, name := range visibleOuterNodes {
+		outer[name] = true
+	}
 	if g.nodesRefs == nil {
 		g.nodesRefs = make(map[int][]string)
 	}
@@ -95,8 +110,20 @@ func buildNodesRefs(g *Graph, skipCrossBranchWarning bool) error {
 		if len(refs) == 0 {
 			continue
 		}
-		g.nodesRefs[i] = refs
-		for _, ref := range refs {
+		local := refs
+		if len(outer) > 0 {
+			local = make([]string, 0, len(refs))
+			for _, ref := range refs {
+				if !outer[ref] {
+					local = append(local, ref)
+				}
+			}
+		}
+		if len(local) == 0 {
+			continue
+		}
+		g.nodesRefs[i] = local
+		for _, ref := range local {
 			targetIdx, ok := g.index[ref]
 			if !ok {
 				return fmt.Errorf("node %q: $nodes reference %q does not exist in the workflow definition",

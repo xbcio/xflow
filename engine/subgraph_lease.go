@@ -66,6 +66,20 @@ type SubgraphLeasePayload struct {
 	// and the like). It is NOT a credential channel: credentials reach a runner
 	// through declarative injection, never through $vars.
 	Runtime *types.Runtime `json:"runtime,omitempty"`
+	// OuterNodes holds the outputs of the outer-graph nodes this body reads
+	// through $nodes['name'], snapshotted once when the batch was scheduled.
+	// A runner never saw the outer execution's state store, so this is the only
+	// route: the projected package carries the permitted NAMES
+	// (VisibleOuterNodes), this carries the values for one batch.
+	//
+	// Unlike every other field here, this one carries real business OUTPUT, and
+	// an upstream node's output is routinely an HTTP response body. It is
+	// therefore scoped as tightly as the feature allows -- only the names a body
+	// member actually wrote, adjudicated at compile time -- and must never be
+	// logged or echoed into an error. The routing decision that put this batch on
+	// a given runner is the same one that would have run the referencing node
+	// there, so it crosses no boundary the workflow author did not already draw.
+	OuterNodes map[string]any `json:"outer_nodes,omitempty"`
 }
 
 // BuildSubgraphLease assembles a runner-facing lease for a queued batch task.
@@ -148,6 +162,14 @@ func (e *Engine) BuildSubgraphLease(ctx context.Context, t *Task) (*TaskLease, *
 		return nil, nil, fmt.Errorf("build subgraph lease: %w", err)
 	}
 	payload.Runtime = runtime
+	// Snapshotted here rather than on the runner for the reason in the method's
+	// doc: a runner cannot read the outer execution's state store, and the
+	// spec's semantics are a snapshot as of entering the map node anyway.
+	outerNodes, err := e.bodyOuterNodesSnapshot(ctx, parentLease.Task.ExecutionID, g, parentLease.Task.NodeIdx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("build subgraph lease: %w", err)
+	}
+	payload.OuterNodes = outerNodes
 	lease.SubgraphPayload = payload
 	return lease, payload, nil
 }

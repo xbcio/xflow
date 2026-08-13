@@ -258,7 +258,7 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 	// them. Placed after detectCycle so the DAG guarantee is already established
 	// in non-cyclic mode. The pass itself carries a visited-set, so cyclic
 	// graphs (allowCycles=true) are also safe.
-	if err := buildNodesRefs(g, false); err != nil {
+	if err := buildNodesRefs(g, false, nil); err != nil {
 		return nil, err
 	}
 	// validateBodyOuterRefs adjudicates the cross-domain $nodes references

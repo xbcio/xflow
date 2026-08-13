@@ -82,6 +82,19 @@ type BatchBodyRequest struct {
 	// stops at the map node. A group member already gets both, because a group
 	// lease carries a whole *types.Input; a batch lease carries items.
 	Runtime *types.Runtime
+	// OuterNodes holds the outputs of the outer-graph nodes this body reads
+	// through $nodes['name'], snapshotted once when the batch was scheduled.
+	// Every item of the batch sees the same values -- the spec's semantics are a
+	// snapshot as of entering the map node, not a live read.
+	//
+	// It cannot ride Scope alongside $item/$index/$items: BuildExprEnv assigns
+	// env["$nodes"] AFTER spreading Input.Data, so a "$nodes" key arriving
+	// through the scope is overwritten by the inner node's own (empty) Nodes.
+	// This travels to types.Input.Nodes instead, the field $nodes actually reads.
+	//
+	// nil when the body reads no outer node, which is every body written before
+	// cross-domain reads existed.
+	OuterNodes map[string]any
 }
 
 // WithBatchBodyExecutor supplies the body sub-graph executor used by
