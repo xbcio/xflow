@@ -61,26 +61,57 @@ if !g.AllowCycles() {
 
 ## 待决问题（重构前必须先答）
 
-1. **cyclic 图的终局该由 `Fatal` 承载，还是保持 `CyclicComplete`？** 决定合并往哪个
-   方向收，且会动后端接口。
-2. **分布式 × cyclic 的实际成色未验证。** 已知 `rstate/state_commit.go:146-148` 每次
-   提交都要 `LoadGraph` 一次来判 `allowCycles`——无环侧不需要的额外读。而
-   `rstate/cyclic_commit_test.go`、`test/integration/cyclic_reliability_{process,real}_test.go`、
-   `g1_production_e2e_test.go` 覆盖到哪一步尚未查。**先重构就意味着正确性由这些测试
-   兜底**，动手前必须先跑一遍（Redis 在 6380）确认哪些真跑了、哪些静默 skip。
-3. **审批流用到的是 cyclic × suspend 的组合，不是 cyclic 本身**——返工环里挂着待审批
-   节点。suspend 已从两条路径拆出，这个组合在分布式下有没有被测到，比重构本身更值得
-   先确认。
+1. **cyclic 图的终局该由 `Fatal` 承载，还是保持 `CyclicComplete`？**（**仍开**）决定
+   合并往哪个方向收，且会动后端接口。
+2. ~~**分布式 × cyclic 的实际成色未验证。**~~ **2026-08-13 已实测。** 两个集成测试在
+   真 Redis（6380）下真跑真绿，无静默 skip：`TestCyclicReliabilityProcessRecovery`
+   7.66s、`TestCyclicReliabilityRealRedis` 5.18s（5 个子测试）。**重构可以由这些测试
+   兜底。** 遗留的性能观察不变：`rstate/state_commit.go:146-148` 每次提交都要
+   `LoadGraph` 一次来判 `allowCycles`——无环侧不需要的额外读。
+3. ~~**审批流用到的是 cyclic × suspend 的组合，不是 cyclic 本身。**~~
+   **2026-08-13 已实测：缺口是真的，现已补上。** 见下节。
 
-## 现有 cyclic 覆盖（2026-08-11 清点，未验证其中多少真跑）
+## cyclic × suspend：曾经零覆盖（2026-08-13 实测并关闭）
+
+这个组合在本次之前**分布式下一条测试都没有**：
+
+- 所有分布式 cyclic 用例（`g1RunCyclicReset`、`cyclic_reliability_*`）驱动的图**没有
+  suspend 节点**。
+- 所有审批/等待用例（`g1RunApprovalMultiSignal`、`g1RunApprovalTimer`）驱动的图
+  **无环**。
+- 唯一同时具备两种形状的样例 `sdk/examples/cyclic_vulnerability_approval_test.go`
+  走 `xflow.NewLocal`，**在进程内**。
+
+缺口不是理论上的。反向探针实测（把 `rstate/state_lua.go` 里 `stampActivation` 改成
+直接返回原 body，使 resume outbox 条目不再带活的 `activation_id`）：
+
+| 用例 | 注入下的表现 |
+|---|---|
+| 新增 `TestCyclicWithSuspendDistributed` | **红** — 执行卡在 running，24.19s 超时 |
+| 既有 `TestG1ProductionE2E/ApprovalMultiSignal` | 绿（4.038s）——抓不到 |
+| 既有单测 `TestRedisDeliverSignalWithOutboxStampsLiveActivation` | 红 |
+
+即：单测层有钉子，**分布式 e2e 层没有**。只有「环里的 suspend」才会走到这段 stamping
+——只有那里，resume 任务的 activation 必须匹配一个 `activation_id` 会递增的节点
+（`engine/lease.go:243-256` 的 `classifyNodeForTask`：`AllowCycles() &&
+t.ActivationID <= 0` 直接判 `ErrExecutionInactive`）。
+
+已补 `test/integration/cyclic_suspend_distributed_test.go`：`start → review`，
+`review --reject→ wait(signal) --main→ start`（返工环里挂审批），`review --main→ end`。
+除终态成功外还断言 `review` 被调用 ≥2 次——否则「收到信号就直接结束、从不回环」的实现
+也能过。
+
+## 现有 cyclic 覆盖（2026-08-13 复核）
 
 - `sdk/examples/cyclic_vulnerability_approval_test.go` — 恰好就是漏洞审批返工环：
   `AllowCycles(20)`、多方审批（security-lead / app-owner / change-manager / sre-owner）、
   驳回后重来。走 `xflow.NewLocal`，**不是分布式**。
 - `backend/providers/distributed/internal/rstate/cyclic_commit_test.go`
-- `test/integration/cyclic_reliability_process_test.go`
-- `test/integration/cyclic_reliability_real_test.go`
-- `test/integration/g1_production_e2e_test.go`
+- `test/integration/cyclic_reliability_process_test.go` — 实测真跑，7.66s
+- `test/integration/cyclic_reliability_real_test.go` — 实测真跑，5.18s
+- `test/integration/g1_production_e2e_test.go` — cyclic 侧只有 `g1RunCyclicReset`，无 suspend
+- `test/integration/cyclic_suspend_distributed_test.go` — 本次新增，唯一覆盖
+  cyclic × suspend 的分布式用例
 
 ## 可能的收敛形状（未决，仅备忘）
 
