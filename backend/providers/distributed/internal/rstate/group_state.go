@@ -352,6 +352,10 @@ func (s *Store) CommitGroup(ctx context.Context, req engine.GroupCommitRequest) 
 	}
 	if out.ExecutionDone {
 		s.evictExecutionCaches(req.ExecutionID)
+		// commitGroupLua finalizes the execution itself, so this is the only
+		// place the terminal state can reach the SQL audit trail.
+		s.projectExecutionStatus(ctx, req.ExecutionID, out.ExecutionStatus,
+			terminalExecutionError(out.ExecutionStatus, req.Error, ""))
 	}
 	return out, nil
 }

@@ -113,6 +113,40 @@ t.ActivationID <= 0` 直接判 `ErrExecutionInactive`）。
 - `test/integration/cyclic_suspend_distributed_test.go` — 本次新增，唯一覆盖
   cyclic × suspend 的分布式用例
 
+## 失败原因的读回面：只有 SQL 审计行（2026-08-13 实测）
+
+与「`Fatal` 一字段两义」同源的一个可观测性缺口。cyclic 深度超限失败时，**触限的那个
+节点是 success 的**（下游激活被 `engine/scheduler.go:43-45` 拒绝），所以没有任何失败
+节点携带原因，`CyclicFinalError` 是唯一载体。
+
+实测（`backend/providers/local`，`AllowCycles(true)` + `MaxAutoDepth: 2` 的自环图，
+与无环 fatal 失败做正对照）：
+
+| 观察点 | cyclic 深度超限 | 无环 fatal 失败（对照） |
+|---|---|---|
+| `types.Result.Error` | `""` | `""` |
+| `ExecutionDetail.Error` | `""` | `""` |
+| `ExecutionSnapshot` | 无 Error 字段 | 无 Error 字段 |
+| 节点级 `NodeSnapshot.Error` | `start`/`loop` 均 success、均 `""` | `boom`: failed、`"boom from the business node"` |
+
+即：**执行级的原因读回在两种情况下都缺**（`Result`/`Inspect` 全域问题，非 cyclic 特有），
+而 cyclic 深度超限因为没有失败节点，原因**彻底丢失**。
+
+Redis 侧同样：`commitNodeLua` 会把 `CyclicFinalError` 写进 `execKey(..,"error")`，但
+全仓只有写者没有读者——`GetExecution` 只加载 status/params/runtime/scope/trace，
+`engine.ExecutionSnapshot` 根本没有 `Error` 字段。
+
+**2026-08-13 已部分关闭**：三处 Lua 内终态转换现在都投影到 SQL（见
+[STORAGE-CONTRACT.md](./STORAGE-CONTRACT.md) 的「Terminal transitions inside a Lua
+script」），且 `terminalExecutionError` 让 `CyclicFinalError` 优先于节点错误。所以
+**SQL 审计行 `executions.error_msg` 是目前唯一能读回该原因的地方**，回归测试见
+`rstate/sql_execution_projection_test.go:TestCommitLeasedNodeProjectsCyclicFinalErrorToSQL`。
+
+**仍开**：在线读回面（`ExecutionSnapshot.Error` 字段、`GetExecution` 读 error 键、
+`Inspect` 在执行级赋 `detail.Error`、local 的 `finishExecutionLocked` 收 errMsg 参数）
+四处都没做。这是一次跨 engine + 两个后端的接口改动，与上面问题 1 的答案耦合，未单独
+立项。
+
 ## 可能的收敛形状（未决，仅备忘）
 
 三层：入口合一，扩展分支用 `taskResultExpands` 分流（判据已在 2026-08-11 下沉为编译期

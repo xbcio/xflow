@@ -321,6 +321,38 @@ func (s *Store) UpdateExecutionStatus(ctx context.Context, id types.ExecutionID,
 	return nil
 }
 
+// projectExecutionStatus mirrors an execution's terminal state onto the SQL
+// audit trail. The atomic commit paths (commitNodeLua, commitGroupLua,
+// seedExecutionFromEntryLua) finalize an execution inside their Lua script, so
+// they never pass through UpdateExecutionStatus and this is their only route to
+// the audit store. Best effort by contract (STORAGE-CONTRACT.md): Redis stays
+// authoritative and a failed projection never fails the commit.
+//
+// errMsg carries only a reason string produced by the engine — never node
+// output, which routinely contains credentials from upstream HTTP responses.
+func (s *Store) projectExecutionStatus(ctx context.Context, id types.ExecutionID, status types.ExecutionStatus, errMsg string) {
+	if s.db == nil || s.transient || status == "" {
+		return
+	}
+	s.auditWrite(ctx, "update_execution_status", func(ctx context.Context) error {
+		return s.db.UpdateExecutionStatus(ctx, id, status, errMsg)
+	})
+}
+
+// terminalExecutionError picks the reason to project for a terminal execution.
+// A successful execution has no reason; a failed one prefers the cyclic final
+// error (the only carrier when the depth limit trips, because the node that
+// tripped it SUCCEEDED) and falls back to the failing node's error.
+func terminalExecutionError(status types.ExecutionStatus, nodeErr, cyclicErr string) string {
+	if status != types.ExecutionStatusFailed {
+		return ""
+	}
+	if cyclicErr != "" {
+		return cyclicErr
+	}
+	return nodeErr
+}
+
 func (s *Store) GetExecution(ctx context.Context, id types.ExecutionID) (*engine.ExecutionSnapshot, error) {
 	t := namespace.FromContext(ctx)
 	val, err := s.rdb.Get(ctx, execKey(t, id, "status")).Result()

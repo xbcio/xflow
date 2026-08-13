@@ -106,6 +106,28 @@ Each Redis-to-SQL projection is one of:
   A failure increments counters and invokes `AuditObserver.OnAuditFailed`
   without changing already-accepted Redis scheduling state.
 
+### Terminal transitions inside a Lua script
+
+Three paths finalize an execution **inside** their Redis script rather than
+through `UpdateExecutionStatus`: node commit (`commitNodeLua`), group commit
+(`commitGroupLua`) and entry admission (`seedExecutionFromEntryLua`). They do
+not pass through the `UpdateExecutionStatus` wrapper, so each one projects the
+terminal state itself:
+
+- node and group commit call `projectExecutionStatus` when the commit result
+  reports `ExecutionDone`, projecting the status the Lua landed on plus the
+  failure reason (`CyclicFinalError` takes precedence over the node error: on a
+  depth-limit overrun the node that tripped the limit succeeded and carries no
+  message);
+- entry admission calls `projectSeededExecution`, which **creates** the row —
+  that path never calls `CreateExecution`, so without it a trigger-group-seeded
+  execution has no SQL row at all. It is best effort like the others: an
+  admission Redis already accepted is never failed by a projection error.
+
+The projected error text is an engine-supplied reason only. Node output and
+boundary-exit data never enter it: upstream output routinely contains
+credentials from HTTP responses.
+
 ## Observability and reconciliation
 
 `distributed.Backend` exposes `AuditObserver`

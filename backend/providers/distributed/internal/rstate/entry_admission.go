@@ -10,6 +10,7 @@ import (
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/namespace"
+	"github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -256,8 +257,22 @@ func (s *Store) SeedExecutionFromEntry(ctx context.Context, req engine.SeedExecu
 	}
 
 	code := redisResultInt(res[0])
+	// finalStatus is non-empty only when the seed itself completed the whole
+	// execution (remaining hit 0 inside the Lua). Otherwise the execution is
+	// still running and later commits carry it to a terminal state.
+	finalStatus := types.ExecutionStatusRunning
+	if len(res) >= 2 {
+		if fs := redisResultString(res[1]); fs != "" {
+			finalStatus = types.ExecutionStatus(fs)
+		}
+	}
 	switch code {
 	case 1: // accepted
+		// The execution is created INSIDE seedExecutionFromEntryLua — this path
+		// never calls CreateExecution, so without this projection a
+		// trigger-group-seeded execution has no SQL row at all and is invisible
+		// to the audit trail once its Redis keys expire.
+		s.projectSeededExecution(ctx, execID, finalStatus, req)
 		return engine.SeedExecutionFromEntryResponse{
 			State:       engine.AdmissionStateAccepted,
 			ExecutionID: execID,
@@ -278,6 +293,67 @@ func (s *Store) SeedExecutionFromEntry(ctx context.Context, req engine.SeedExecu
 	default:
 		return engine.SeedExecutionFromEntryResponse{}, fmt.Errorf("seed triggered group %q: unknown code %d", req.AdmissionKey, code)
 	}
+}
+
+// emptyJSONObject satisfies the schema's NOT NULL JSON columns for records that
+// genuinely have no such data.
+var emptyJSONObject = []byte(`{}`)
+
+// projectSeededExecution creates the SQL audit row for an execution that was
+// created inside seedExecutionFromEntryLua. Best effort by contract
+// (STORAGE-CONTRACT.md): Redis is authoritative and a failed projection must
+// never fail an admission that Redis already accepted.
+//
+// The row is created with the status the Lua landed on, so an execution the
+// seed already completed is not first written as running and then left there.
+// The error text is the engine-supplied reason only — never boundary-exit data,
+// which is node output and routinely carries credentials.
+func (s *Store) projectSeededExecution(ctx context.Context, execID types.ExecutionID, status types.ExecutionStatus, req engine.SeedExecutionFromEntryRequest) {
+	if s.db == nil || s.transient {
+		return
+	}
+	now := time.Now()
+	rec := &store.ExecutionRecord{
+		ExecutionID: execID,
+		Status:      status,
+		TraceID:     req.TraceID,
+		SpanID:      req.SpanID,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+		// workflow_def is NOT NULL in the schema (db/xflow_schema.sql) and a
+		// seed carries no WorkflowDef — only a compiled graph. Empty JSON keeps
+		// the insert valid instead of failing the whole projection.
+		WorkflowDef: emptyJSONObject,
+	}
+	if status == types.ExecutionStatusFailed {
+		rec.Error = req.Error
+	}
+	if req.Graph != nil {
+		rec.WorkflowName = req.Graph.Name()
+	}
+	if req.Params != nil {
+		paramsJSON, err := json.Marshal(req.Params)
+		if err != nil {
+			s.auditWrite(ctx, "create_seeded_execution", func(context.Context) error {
+				return fmt.Errorf("marshal execution params for %q: %w", execID, err)
+			})
+			return
+		}
+		rec.Params = paramsJSON
+	}
+	if req.Runtime != nil {
+		runtimeJSON, err := json.Marshal(req.Runtime)
+		if err != nil {
+			s.auditWrite(ctx, "create_seeded_execution", func(context.Context) error {
+				return fmt.Errorf("marshal execution runtime for %q: %w", execID, err)
+			})
+			return
+		}
+		rec.Runtime = runtimeJSON
+	}
+	s.auditWrite(ctx, "create_seeded_execution", func(ctx context.Context) error {
+		return s.db.CreateExecution(ctx, rec)
+	})
 }
 
 // admissionKey stores the result hash for a given deterministic execution ID.

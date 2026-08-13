@@ -233,6 +233,14 @@ func (s *Store) CommitNode(ctx context.Context, req engine.CommitNodeRequest) (e
 			UpdatedAt:   time.Now(),
 		}
 		s.auditWrite(ctx, "commit_node", func(ctx context.Context) error { return s.db.UpsertNode(ctx, rec) })
+		// The execution's terminal transition happens INSIDE commitNodeLua, so
+		// this is the only place it can reach the audit trail. Without it the
+		// SQL row stays "running" forever, and once the Redis keys expire
+		// (DefaultExecTTL) that row is the only surviving record.
+		if out.ExecutionDone {
+			s.projectExecutionStatus(ctx, req.ExecutionID, out.ExecutionStatus,
+				terminalExecutionError(out.ExecutionStatus, req.Error, req.CyclicFinalError))
+		}
 	}
 	return out, nil
 }
