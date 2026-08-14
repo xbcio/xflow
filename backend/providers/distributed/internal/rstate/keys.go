@@ -43,6 +43,14 @@ func execKey(t namespace.Namespace, id types.ExecutionID, suffix string) string 
 	return fmt.Sprintf("xflow:ns:%s:exec:{%s}:%s", t, id, suffix)
 }
 
+// transientMarkKey holds the per-execution transient marker. It shares the
+// {id} hash tag with the rest of the execution's keys so a replica can read it
+// in the same slot, and it is written inside CreateExecution's transaction so
+// no replica can observe the execution before its transient decision.
+func transientMarkKey(t namespace.Namespace, id types.ExecutionID) string {
+	return execKey(t, id, "transient")
+}
+
 func remainingNodesKey(t namespace.Namespace, id types.ExecutionID) string {
 	return execKey(t, id, "remaining_nodes")
 }

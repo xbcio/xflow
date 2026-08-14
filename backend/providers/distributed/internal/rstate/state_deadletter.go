@@ -184,7 +184,7 @@ func (s *Store) ReplayDeadLetter(ctx context.Context, req engine.ReplayDeadLette
 	if requestID == "" {
 		requestID = req.EntryID
 	}
-	ttl := s.getExecTTL(req.ExecutionID)
+	ttl := s.getExecTTL(ctx, req.ExecutionID)
 	t := namespace.FromContext(ctx)
 	result, err := replayDeadLetterLua.Run(ctx, s.rdb, []string{
 		outboxDeadKey(t, req.ExecutionID),

@@ -13,7 +13,7 @@ func (s *Store) DecrementInDegree(ctx context.Context, id types.ExecutionID, nod
 	if portActive {
 		activeFlag = 1
 	}
-	ttl := int(s.getExecTTL(id).Seconds())
+	ttl := int(s.getExecTTL(ctx, id).Seconds())
 	t := namespace.FromContext(ctx)
 	vals, err := propagateLua.Run(ctx, s.rdb,
 		[]string{inDegreeKey(t, id, nodeIdx), activeInputsKey(t, id, nodeIdx)},

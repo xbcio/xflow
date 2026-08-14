@@ -294,7 +294,7 @@ func (s *Store) RecordOutboxFailure(ctx context.Context, id types.ExecutionID, e
 	if maxAttempts <= 0 {
 		maxAttempts = engine.DefaultOutboxMaxDeliveryAttempts
 	}
-	ttl := s.getExecTTL(id)
+	ttl := s.getExecTTL(ctx, id)
 	t := namespace.FromContext(ctx)
 	result, err := recordOutboxFailureLua.Run(ctx, s.rdb, []string{
 		outboxReadyKey(t, id),

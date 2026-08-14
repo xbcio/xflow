@@ -14,7 +14,7 @@ import (
 func (s *Store) PutOutput(ctx context.Context, id types.ExecutionID, name string, data map[string]any) error {
 	t := namespace.FromContext(ctx)
 	b, _ := json.Marshal(data) // json.Marshal of map[string]any cannot fail
-	if err := s.rdb.Set(ctx, outputKey(t, id, name), string(b), s.getExecTTL(id)).Err(); err != nil {
+	if err := s.rdb.Set(ctx, outputKey(t, id, name), string(b), s.getExecTTL(ctx, id)).Err(); err != nil {
 		return err
 	}
 	return s.refreshTransientTTL(ctx, id, outputKey(t, id, name))
@@ -100,14 +100,15 @@ func (s *Store) extendExecTTL(ctx context.Context, id types.ExecutionID, nodeNam
 
 // suspendTTL returns the TTL to use when a node is suspended.
 // It picks the larger of the execution's base TTL and spec.Timeout + 1 hour.
-func (s *Store) suspendTTL(id types.ExecutionID, spec *types.SuspendSpec) time.Duration {
-	// Start with the per-execution override if set, otherwise use the adapter default.
-	s.ttlMu.RLock()
-	ttl := s.execTTLs[id]
-	s.ttlMu.RUnlock()
-	if ttl == 0 {
-		ttl = s.execTTL
-	}
+//
+// The base TTL comes from getExecTTL, which resolves the explicit per-execution
+// override first, then the per-workflow transient TTL, then the adapter default.
+// Reading s.execTTLs directly would miss the transient case: a per-workflow
+// transient execution never writes that map, so its suspended keys would be
+// EXPIREd to the durable retention window -- hours of extra life for an
+// execution that declared itself ephemeral.
+func (s *Store) suspendTTL(ctx context.Context, id types.ExecutionID, spec *types.SuspendSpec) time.Duration {
+	ttl := s.getExecTTL(ctx, id)
 
 	if spec != nil && spec.Timeout > 0 {
 		candidate := spec.Timeout + 1*time.Hour

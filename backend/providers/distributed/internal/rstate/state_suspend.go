@@ -15,10 +15,26 @@ import (
 
 func (s *Store) SuspendOrConsume(ctx context.Context, id types.ExecutionID, name string, spec *types.SuspendSpec) (*types.SignalPayload, error) {
 	if s.transient {
-		// Transient mode disables suspend at the engine layer (WithSuspendDisabled);
-		// this guard is defense-in-depth so a direct StateStore caller cannot park a
-		// transient node that would never be resumed and whose TTL bookkeeping is
-		// not designed for suspended waiters.
+		// Store-wide transient mode disables suspend at the engine layer
+		// (WithSuspendDisabled); this guard is defense-in-depth so a direct
+		// StateStore caller cannot park a node the control plane has no way to
+		// signal -- that mode rejects signal/revoke/inspect too.
+		//
+		// s.transient, not isTransient: this is a capability gate paired with the
+		// engine option, and both are set from the same store-wide configuration.
+		// The per-execution resolver fails closed to transient on a Redis read
+		// error, which is the right call for a SQL projection (one lost audit row)
+		// and the wrong one here (a Redis blip would turn a legitimate suspend
+		// into ErrSuspendUnsupported).
+		//
+		// Per-workflow transient executions deliberately do NOT hit this branch.
+		// They run on an otherwise durable store whose signal/revoke/inspect
+		// endpoints all work, so parking a waiter is legitimate; the mode only
+		// promises "no SQL projection, short TTL". engine.WithSuspendDisabled is
+		// set solely from the store-wide mode (sdk/xflow/engine.go), and
+		// attachTransientHint does not touch it, so such a suspend reaches the
+		// code below. suspendTTL therefore has to resolve the per-execution
+		// transient TTL rather than the store default.
 		return nil, engine.ErrSuspendUnsupported
 	}
 	if spec != nil && spec.Mode == types.ModeMultiSignal {
@@ -86,14 +102,14 @@ func (s *Store) SuspendOrConsume(ctx context.Context, id types.ExecutionID, name
 		registeredWaiters = append(registeredWaiters, waiterKey(t, id, sigName))
 	}
 	// Extend TTL to prevent key expiry during suspension.
-	if err := s.extendExecTTL(ctx, id, name, spec, s.suspendTTL(id, spec)); err != nil {
+	if err := s.extendExecTTL(ctx, id, name, spec, s.suspendTTL(ctx, id, spec)); err != nil {
 		return nil, err
 	}
 	return nil, nil
 }
 
 func (s *Store) suspendOrConsumeMulti(ctx context.Context, id types.ExecutionID, name string, spec *types.SuspendSpec) (*types.SignalPayload, error) {
-	ttl := s.suspendTTL(id, spec)
+	ttl := s.suspendTTL(ctx, id, spec)
 	t := namespace.FromContext(ctx)
 	batchKey := signalBatchKey(t, id, name)
 
@@ -179,7 +195,7 @@ func (s *Store) addMultiSignal(ctx context.Context, id types.ExecutionID, nodeNa
 	if err := s.rdb.HSet(ctx, signalBatchKey(t, id, nodeName), signalName, dataJSON).Err(); err != nil {
 		return nil, false, fmt.Errorf("add multi-signal %q/%q/%q: %w", id, nodeName, signalName, err)
 	}
-	_ = s.rdb.Expire(ctx, signalBatchKey(t, id, nodeName), s.suspendTTL(id, spec)).Err()
+	_ = s.rdb.Expire(ctx, signalBatchKey(t, id, nodeName), s.suspendTTL(ctx, id, spec)).Err()
 	return s.multiSignalPayload(ctx, id, nodeName, signalName, dataJSON, spec)
 }
 
@@ -279,7 +295,7 @@ func (s *Store) DeliverSignal(ctx context.Context, id types.ExecutionID, signalN
 		}
 	}
 
-	if s.db != nil && !s.transient {
+	if s.db != nil && !s.isTransient(ctx, id) {
 		rec := &store.SignalRecord{
 			ExecutionID: id,
 			SignalName:  signalName,
@@ -433,7 +449,7 @@ func (s *Store) RevokeSignal(ctx context.Context, id types.ExecutionID, signalNa
 	if err != nil {
 		return false, fmt.Errorf("revoke signal lua: %w", err)
 	}
-	if result == 1 && s.db != nil && !s.transient {
+	if result == 1 && s.db != nil && !s.isTransient(ctx, id) {
 		s.auditWrite(ctx, "revoke_signal", func(ctx context.Context) error {
 			_, err := s.db.RevokeSignal(ctx, id, signalName)
 			return err
@@ -485,7 +501,7 @@ func (s *Store) ResuspendAtomic(ctx context.Context, id types.ExecutionID, nodeN
 		}
 	}
 	// Extend TTL to prevent key expiry during suspension.
-	if err := s.extendExecTTL(ctx, id, nodeName, spec, s.suspendTTL(id, spec)); err != nil {
+	if err := s.extendExecTTL(ctx, id, nodeName, spec, s.suspendTTL(ctx, id, spec)); err != nil {
 		return nil, err
 	}
 	return nil, nil
@@ -525,7 +541,7 @@ return 1
 // indexes are wiped later by cleanupOnCancel when the execution goes Canceled.
 func (s *Store) CancelSuspendedNode(ctx context.Context, id types.ExecutionID, name string) (bool, error) {
 	t := namespace.FromContext(ctx)
-	ttl := s.getExecTTL(id)
+	ttl := s.getExecTTL(ctx, id)
 	res, err := cancelSuspendedNodeLua.Run(ctx, s.rdb,
 		[]string{
 			nodeStatusKey(t, id, name),
@@ -538,7 +554,7 @@ func (s *Store) CancelSuspendedNode(ctx context.Context, id types.ExecutionID, n
 		return false, fmt.Errorf("cancel suspended node %q/%q: %w", id, name, err)
 	}
 	canceled := res == 1
-	if canceled && s.db != nil && !s.transient {
+	if canceled && s.db != nil && !s.isTransient(ctx, id) {
 		rec := &store.NodeRecord{
 			ExecutionID: id,
 			NodeName:    name,

@@ -37,7 +37,7 @@ func (s *Store) ResetNodeForRetryWithOutbox(ctx context.Context, id types.Execut
 	if !entry.AvailableAt.IsZero() {
 		availableAt = entry.AvailableAt.UTC().UnixMilli()
 	}
-	ttl := s.getExecTTL(id)
+	ttl := s.getExecTTL(ctx, id)
 	t := namespace.FromContext(ctx)
 	result, err := resetNodeForRetryWithOutboxLua.Run(ctx, s.rdb, []string{
 		nodeStatusKey(t, id, nodeName),
@@ -81,7 +81,7 @@ func (s *Store) RevokeLeaseWithOutbox(ctx context.Context, id types.ExecutionID,
 	if !entry.AvailableAt.IsZero() {
 		availableAt = entry.AvailableAt.UTC().UnixMilli()
 	}
-	ttl := s.getExecTTL(id)
+	ttl := s.getExecTTL(ctx, id)
 	t := namespace.FromContext(ctx)
 	result, err := revokeLeaseWithOutboxLua.Run(ctx, s.rdb, []string{
 		nodeStatusKey(t, id, nodeName),
@@ -115,7 +115,7 @@ func (s *Store) CommitNode(ctx context.Context, req engine.CommitNodeRequest) (e
 	if err := req.Validate(); err != nil {
 		return engine.CommitNodeResult{}, err
 	}
-	ttl := s.getExecTTL(req.ExecutionID)
+	ttl := s.getExecTTL(ctx, req.ExecutionID)
 	outputJSON := ""
 	if req.StoreOutput {
 		encoded, err := json.Marshal(req.Output)
@@ -222,7 +222,10 @@ func (s *Store) CommitNode(ctx context.Context, req engine.CommitNodeRequest) (e
 	if out.ExecutionDone {
 		s.evictExecutionCaches(req.ExecutionID)
 	}
-	if out.Applied && s.db != nil && !s.transient {
+	// isTransient, not s.transient: req.Output is the node's payload, so a
+	// per-workflow transient execution must skip this even when the control
+	// plane's global transient mode is off. Same reason as UpsertNode.
+	if out.Applied && s.db != nil && !s.isTransient(ctx, req.ExecutionID) {
 		output, _ := json.Marshal(req.Output)
 		rec := &store.NodeRecord{
 			ExecutionID: req.ExecutionID,
@@ -254,7 +257,7 @@ func (s *Store) AdvanceNode(ctx context.Context, req engine.AdvanceNodeRequest) 
 	if len(req.Arrivals) == 0 {
 		return engine.AdvanceNodeResult{Applied: true}, nil
 	}
-	ttl := s.getExecTTL(req.ExecutionID)
+	ttl := s.getExecTTL(ctx, req.ExecutionID)
 	t := namespace.FromContext(ctx)
 	keys := []string{
 		execKey(t, req.ExecutionID, "status"),

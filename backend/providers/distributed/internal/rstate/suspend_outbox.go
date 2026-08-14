@@ -221,7 +221,7 @@ func (s *Store) SuspendTaskLeaseWithOutbox(ctx context.Context, lease *engine.Ta
 	}
 	args := []any{
 		string(lease.LeaseID), string(lease.LeaseToken), lease.Attempt, lease.Task.ActivationID,
-		int(s.getExecTTL(lease.Task.ExecutionID).Seconds()), leaseExpiryMember(lease.Task.ExecutionID, lease.Task.NodeName),
+		int(s.getExecTTL(ctx, lease.Task.ExecutionID).Seconds()), leaseExpiryMember(lease.Task.ExecutionID, lease.Task.NodeName),
 		store, outputJSON, lease.Task.NodeName, multi, signalQuorum(spec), len(spec.Signals), string(specJSON),
 		signalEntry.ID, signalBody, now.UnixMilli(), len(delayedEntries),
 	}
@@ -249,7 +249,7 @@ func (s *Store) SuspendTaskLeaseWithOutbox(ctx context.Context, lease *engine.Ta
 	if err := s.refreshTransientTTL(ctx, lease.Task.ExecutionID, keys...); err != nil {
 		return false, err
 	}
-	if err := s.extendExecTTL(ctx, lease.Task.ExecutionID, lease.Task.NodeName, spec, s.suspendTTL(lease.Task.ExecutionID, spec)); err != nil {
+	if err := s.extendExecTTL(ctx, lease.Task.ExecutionID, lease.Task.NodeName, spec, s.suspendTTL(ctx, lease.Task.ExecutionID, spec)); err != nil {
 		return false, err
 	}
 	return true, nil

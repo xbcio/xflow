@@ -25,7 +25,7 @@ func (s *Store) AcquireTaskLease(ctx context.Context, lease *engine.TaskLease) (
 		s.observeLeaseAcquire(ctx, result, time.Since(started))
 	}()
 
-	ttl := s.getExecTTL(lease.Task.ExecutionID)
+	ttl := s.getExecTTL(ctx, lease.Task.ExecutionID)
 	t := namespace.FromContext(ctx)
 	payloadJSON := ""
 	if lease.Task.Payload != nil {
@@ -288,7 +288,7 @@ func (s *Store) RevokeLease(ctx context.Context, id types.ExecutionID, name stri
 	if token == "" {
 		return false, nil
 	}
-	ttl := s.getExecTTL(id)
+	ttl := s.getExecTTL(ctx, id)
 	t := namespace.FromContext(ctx)
 	result, err := revokeLeaseLua.Run(ctx, s.rdb,
 		[]string{nodeStatusKey(t, id, name), nodeMetaKey(t, id, name), leaseExpiryZSetKey(t, id)},
@@ -337,7 +337,7 @@ func (s *Store) ClaimTaskLease(ctx context.Context, lease *engine.TaskLease) (*e
 		}
 	}
 
-	ttl := s.getExecTTL(lease.Task.ExecutionID)
+	ttl := s.getExecTTL(ctx, lease.Task.ExecutionID)
 	result, err := claimTaskLeaseLua.Run(ctx, s.rdb,
 		[]string{
 			nodeStatusKey(t, lease.Task.ExecutionID, lease.Task.NodeName),
@@ -433,7 +433,7 @@ func (s *Store) SuspendTaskLease(ctx context.Context, lease *engine.TaskLease, o
 	}
 	args := []any{
 		string(lease.LeaseID), string(lease.LeaseToken), lease.Attempt, lease.Task.ActivationID,
-		int(s.getExecTTL(lease.Task.ExecutionID).Seconds()), leaseExpiryMember(lease.Task.ExecutionID, lease.Task.NodeName),
+		int(s.getExecTTL(ctx, lease.Task.ExecutionID).Seconds()), leaseExpiryMember(lease.Task.ExecutionID, lease.Task.NodeName),
 		store, outputJSON, lease.Task.NodeName, multi, signalQuorum(spec), len(spec.Signals), string(specJSON),
 	}
 	for _, signalName := range spec.Signals {
@@ -452,7 +452,7 @@ func (s *Store) SuspendTaskLease(ctx context.Context, lease *engine.TaskLease, o
 	if err := s.refreshTransientTTL(ctx, lease.Task.ExecutionID, keys...); err != nil {
 		return nil, false, err
 	}
-	if err := s.extendExecTTL(ctx, lease.Task.ExecutionID, lease.Task.NodeName, spec, s.suspendTTL(lease.Task.ExecutionID, spec)); err != nil {
+	if err := s.extendExecTTL(ctx, lease.Task.ExecutionID, lease.Task.NodeName, spec, s.suspendTTL(ctx, lease.Task.ExecutionID, spec)); err != nil {
 		return nil, false, err
 	}
 	name := redisResultString(result[1])

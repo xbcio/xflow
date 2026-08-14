@@ -109,7 +109,7 @@ func (s *Store) repairLeaseIndexForNamespace(ctx context.Context, t namespace.Na
 			statusKey,
 			nodeMetaKey(t, executionID, nodeName),
 			leaseExpiryZSetKey(t, executionID),
-		}, int(s.getExecTTL(executionID).Seconds()), leaseExpiryMember(executionID, nodeName)).Int64()
+		}, int(s.getExecTTL(ctx, executionID).Seconds()), leaseExpiryMember(executionID, nodeName)).Int64()
 		if err != nil && err != redis.Nil {
 			return reconciled, fmt.Errorf("reconcile lease index %q/%q: %w", executionID, nodeName, err)
 		}

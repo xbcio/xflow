@@ -39,10 +39,8 @@ func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot
 	// Per-execution transient hint from workflow options (via submission context).
 	// This must be checked before the global transient fallback so a per-workflow
 	// transient execution gets the correct TTL even when the global mode is off.
-	perExecTransient := false
-	if hint, ok := engine.ExecutionTransientFromContext(ctx); ok {
-		perExecTransient = true
-		s.MarkExecutionTransient(e.ID, hint.TTL, hint.CompletionTTL)
+	hint, perExecTransient := engine.ExecutionTransientFromContext(ctx)
+	if perExecTransient {
 		if hint.TTL > 0 {
 			ttl = hint.TTL
 		} else if s.transientTTL > 0 {
@@ -71,8 +69,18 @@ func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot
 		return fmt.Errorf("marshal graph for %q: %w", e.ID, err)
 	}
 
+	pipe := s.rdb.TxPipeline()
+	t := namespace.FromContext(ctx)
+	// The transient marker joins the same transaction as the structural keys.
+	// Written afterwards, it would leave a window in which another replica sees
+	// a running execution with no marker and resolves it as durable -- long
+	// enough for the first node commit to project its payload into SQL.
+	if perExecTransient {
+		s.markExecutionTransient(ctx, pipe, e.ID, hint.TTL, hint.CompletionTTL, ttl)
+	}
+
 	var rec *store.ExecutionRecord
-	if s.db != nil && !s.isTransient(e.ID) {
+	if s.db != nil && !s.isTransient(ctx, e.ID) {
 		now := time.Now()
 		var recErr error
 		rec, recErr = buildExecutionRecord(ctx, e, now)
@@ -81,13 +89,11 @@ func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot
 		}
 	}
 
-	pipe := s.rdb.TxPipeline()
-	t := namespace.FromContext(ctx)
 	// Register the namespace in the discovery registry so maintenance loops
 	// (sweeper, lease repair, outbox dispatcher, timeout monitor) SCAN its
 	// namespace. Skipped in transient mode to preserve the fire-and-forget
 	// no-bookkeeping invariant; the default namespace is always scanned anyway.
-	if !s.isTransient(e.ID) {
+	if !s.isTransient(ctx, e.ID) {
 		// Non-fatal: the namespace is re-registered on the next durable write
 		// and listNamespaces always includes the default namespace, so a
 		// transient SADD failure cannot strand a namespace's keys outside the
@@ -224,6 +230,7 @@ func (s *Store) cleanupCreatedExecution(ctx context.Context, e *engine.Execution
 		execKey(t, e.ID, "trace_id"),
 		execKey(t, e.ID, "span_id"),
 		execKey(t, e.ID, "trace_carrier"),
+		transientMarkKey(t, e.ID),
 		remainingNodesKey(t, e.ID),
 		failedNodesKey(t, e.ID),
 		leaseExpiryZSetKey(t, e.ID),
@@ -289,7 +296,7 @@ func buildExecutionRecord(ctx context.Context, e *engine.ExecutionSnapshot, now 
 }
 
 func (s *Store) UpdateExecutionStatus(ctx context.Context, id types.ExecutionID, status types.ExecutionStatus, errMsg string) error {
-	ttl := s.getExecTTL(id)
+	ttl := s.getExecTTL(ctx, id)
 	t := namespace.FromContext(ctx)
 	// Compare-and-set with cancel-aware fencing: a terminal or canceling status
 	// blocks non-canceled overwrites, so a concurrent cyclic completeExecution
@@ -326,7 +333,7 @@ func (s *Store) UpdateExecutionStatus(ctx context.Context, id types.ExecutionID,
 			return err
 		}
 	}
-	if applied == 1 && s.db != nil && !s.transient {
+	if applied == 1 && s.db != nil && !s.isTransient(ctx, id) {
 		s.auditWrite(ctx, "update_execution_status", func(ctx context.Context) error {
 			return s.db.UpdateExecutionStatus(ctx, id, status, errMsg)
 		})
@@ -345,7 +352,7 @@ func (s *Store) UpdateExecutionStatus(ctx context.Context, id types.ExecutionID,
 // errMsg carries only a reason string produced by the engine — never node
 // output, which routinely contains credentials from upstream HTTP responses.
 func (s *Store) projectExecutionStatus(ctx context.Context, id types.ExecutionID, status types.ExecutionStatus, errMsg string) {
-	if s.db == nil || s.transient || status == "" {
+	if s.db == nil || s.isTransient(ctx, id) || status == "" {
 		return
 	}
 	s.auditWrite(ctx, "update_execution_status", func(ctx context.Context) error {

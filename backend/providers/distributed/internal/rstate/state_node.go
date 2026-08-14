@@ -78,7 +78,7 @@ func (s *Store) UpsertNode(ctx context.Context, n *engine.NodeSnapshot) error {
 		leasePayloadJSON = string(encoded)
 	}
 
-	ttl := s.getExecTTL(n.ExecutionID)
+	ttl := s.getExecTTL(ctx, n.ExecutionID)
 	_, err := upsertNodeLua.Run(ctx, s.rdb,
 		[]string{key, outKey, metaKey},
 		string(n.Status), outputJSON, int(ttl.Seconds()), n.ActivationID,
@@ -149,7 +149,10 @@ func (s *Store) UpsertNode(ctx context.Context, n *engine.NodeSnapshot) error {
 		return err
 	}
 
-	if s.db != nil && !s.transient {
+	// isTransient, not s.transient: this row carries n.Output, the node's actual
+	// payload. A per-workflow transient execution running on a control plane
+	// whose global mode is off would otherwise persist it in full.
+	if s.db != nil && !s.isTransient(ctx, n.ExecutionID) {
 		var outBytes []byte
 		if n.Output != nil {
 			outBytes, _ = json.Marshal(n.Output) // json.Marshal of map[string]any cannot fail

@@ -30,11 +30,11 @@ type Store struct {
 	ttlMu    sync.RWMutex
 	execTTLs map[types.ExecutionID]time.Duration
 
-	// per-execution transient overrides (set via per-workflow transient context)
-	transientMu    sync.RWMutex
-	execTransient  map[types.ExecutionID]bool
-	execTransientTTL           map[types.ExecutionID]time.Duration
-	execTransientCompletionTTL map[types.ExecutionID]time.Duration
+	// per-execution transient overrides (set via per-workflow transient context).
+	// This is a read-through cache over the Redis marker, not the source of
+	// truth -- see lookupTransient. Negative entries are cached too.
+	transientMu   sync.RWMutex
+	execTransient map[types.ExecutionID]transientMark
 
 	// leaseRepairCursor advances a bounded reconciliation scan across node
 	// status keys, one cursor per namespace so a multi-namespace store never lets
@@ -66,18 +66,16 @@ type Store struct {
 
 func New(rdb redis.UniversalClient, db store.Store, execTTL time.Duration) *Store {
 	s := &Store{
-		rdb:                        rdb,
-		db:                         db,
-		execTTL:                    execTTL,
-		graphs:                     make(map[types.ExecutionID]*graph.Graph),
-		execTTLs:                   make(map[types.ExecutionID]time.Duration),
-		execTransient:              make(map[types.ExecutionID]bool),
-		execTransientTTL:           make(map[types.ExecutionID]time.Duration),
-		execTransientCompletionTTL: make(map[types.ExecutionID]time.Duration),
-		leaseRepairCursor:          make(map[namespace.Namespace]uint64),
-		audit:                      noopAuditObserver{},
-		auditCounters:              &auditCounters{},
-		cursorKey:                  newCursorSigningKey(),
+		rdb:               rdb,
+		db:                db,
+		execTTL:           execTTL,
+		graphs:            make(map[types.ExecutionID]*graph.Graph),
+		execTTLs:          make(map[types.ExecutionID]time.Duration),
+		execTransient:     make(map[types.ExecutionID]transientMark),
+		leaseRepairCursor: make(map[namespace.Namespace]uint64),
+		audit:             noopAuditObserver{},
+		auditCounters:     &auditCounters{},
+		cursorKey:         newCursorSigningKey(),
 	}
 	// The default namespace is registered lazily on the first durable execution
 	// create, and listNamespaces also defensively includes the default namespace, so
@@ -97,9 +95,9 @@ func (s *Store) ttlSec() int {
 
 // ttlSecForExec returns the TTL in seconds for a specific execution,
 // considering per-execution transient overrides.
-func (s *Store) ttlSecForExec(id types.ExecutionID) int {
-	if s.isTransient(id) {
-		if t := s.getTransientTTL(id); t > 0 {
+func (s *Store) ttlSecForExec(ctx context.Context, id types.ExecutionID) int {
+	if mark := s.lookupTransient(ctx, id); mark.transient {
+		if t := s.transientTTLOr(mark); t > 0 {
 			return int(t.Seconds())
 		}
 	}
@@ -107,15 +105,15 @@ func (s *Store) ttlSecForExec(id types.ExecutionID) int {
 }
 
 // getExecTTL returns the per-execution TTL override if set, otherwise the adapter default.
-func (s *Store) getExecTTL(id types.ExecutionID) time.Duration {
+func (s *Store) getExecTTL(ctx context.Context, id types.ExecutionID) time.Duration {
 	s.ttlMu.RLock()
 	ttl := s.execTTLs[id]
 	s.ttlMu.RUnlock()
 	if ttl > 0 {
 		return ttl
 	}
-	if s.isTransient(id) {
-		if t := s.getTransientTTL(id); t > 0 {
+	if mark := s.lookupTransient(ctx, id); mark.transient {
+		if t := s.transientTTLOr(mark); t > 0 {
 			return t
 		}
 	}
@@ -124,52 +122,132 @@ func (s *Store) getExecTTL(id types.ExecutionID) time.Duration {
 
 // isTransient reports whether the given execution should use transient mode.
 // Per-execution override takes priority; falls back to the global setting.
-func (s *Store) isTransient(id types.ExecutionID) bool {
-	s.transientMu.RLock()
-	perExec, ok := s.execTransient[id]
-	s.transientMu.RUnlock()
-	if ok {
-		return perExec
-	}
-	return s.transient
+func (s *Store) isTransient(ctx context.Context, id types.ExecutionID) bool {
+	return s.lookupTransient(ctx, id).transient
 }
 
 // getTransientTTL returns the transient active TTL for the given execution.
 // Per-execution override takes priority; falls back to the global setting.
-func (s *Store) getTransientTTL(id types.ExecutionID) time.Duration {
-	s.transientMu.RLock()
-	ttl := s.execTransientTTL[id]
-	s.transientMu.RUnlock()
-	if ttl > 0 {
-		return ttl
-	}
-	return s.transientTTL
+func (s *Store) getTransientTTL(ctx context.Context, id types.ExecutionID) time.Duration {
+	return s.transientTTLOr(s.lookupTransient(ctx, id))
 }
 
 // getTransientCompletionTTL returns the completion TTL for the given execution.
 // Per-execution override takes priority; falls back to the global setting.
-func (s *Store) getTransientCompletionTTL(id types.ExecutionID) time.Duration {
-	s.transientMu.RLock()
-	ttl := s.execTransientCompletionTTL[id]
-	s.transientMu.RUnlock()
-	if ttl > 0 {
+func (s *Store) getTransientCompletionTTL(ctx context.Context, id types.ExecutionID) time.Duration {
+	if ttl := s.lookupTransient(ctx, id).completionTTL; ttl > 0 {
 		return ttl
 	}
 	return s.transientCompletionTTL
 }
 
-// MarkExecutionTransient marks a single execution as transient with explicit
-// TTL overrides. Called by createExecution when the submission context carries
-// a per-workflow transient hint.
-func (s *Store) MarkExecutionTransient(id types.ExecutionID, ttl, completionTTL time.Duration) {
+func (s *Store) transientTTLOr(mark transientMark) time.Duration {
+	if mark.ttl > 0 {
+		return mark.ttl
+	}
+	return s.transientTTL
+}
+
+// transientMark is one execution's transient decision, whether it came from the
+// per-execution marker or from the store-wide setting.
+type transientMark struct {
+	transient     bool
+	ttl           time.Duration
+	completionTTL time.Duration
+}
+
+// lookupTransient resolves an execution's transient mode, consulting the
+// process-local cache first and Redis second.
+//
+// The Redis read is what makes this correct across control-plane replicas. The
+// replica that admits a per-workflow transient execution is not the one that
+// runs every later mutation: the outbox dispatcher, lease sweeper, and timeout
+// monitor claim work by scanning Redis from whichever replica holds the loop.
+// A marker kept only on the admitting replica's heap would leave every other
+// replica reading the store-wide flag -- OFF on a control plane that also hosts
+// durable workflows -- and projecting the node payload into SQL. Redis is the
+// only place all replicas can see.
+//
+// The cache holds negative entries too, so a durable execution pays the Redis
+// round-trip once per replica rather than once per state mutation. Entries are
+// dropped by evictExecutionCaches when the execution reaches a terminal state,
+// giving them the same lifetime as the graph and TTL caches beside them.
+//
+// A Redis read failure resolves to transient. Losing an audit row is a
+// best-effort miss the storage contract already permits; persisting the payload
+// of an execution that asked not to be persisted is the leak this mode exists
+// to prevent, and it is not recoverable after the fact.
+func (s *Store) lookupTransient(ctx context.Context, id types.ExecutionID) transientMark {
+	s.transientMu.RLock()
+	mark, ok := s.execTransient[id]
+	s.transientMu.RUnlock()
+	if ok {
+		return mark
+	}
+	if s.transient {
+		// Store-wide transient mode never writes a per-execution marker, so
+		// there is nothing in Redis to find and the answer cannot change.
+		return transientMark{transient: true, ttl: s.transientTTL, completionTTL: s.transientCompletionTTL}
+	}
+
+	t := namespace.FromContext(ctx)
+	fields, err := s.rdb.HGetAll(ctx, transientMarkKey(t, id)).Result()
+	if err != nil && err != redis.Nil {
+		if s.logger != nil {
+			s.logger.Error("transient_marker_read_failed", "execution_id", string(id), "err", err)
+		}
+		// Fail closed; do not cache, so a transient Redis fault does not pin
+		// every later read of this execution to the pessimistic answer.
+		return transientMark{transient: true, ttl: s.transientTTL, completionTTL: s.transientCompletionTTL}
+	}
+	resolved := transientMark{}
+	if len(fields) > 0 {
+		resolved.transient = true
+		resolved.ttl = parseDurationMillis(fields["ttl_ms"])
+		resolved.completionTTL = parseDurationMillis(fields["completion_ttl_ms"])
+	}
 	s.transientMu.Lock()
-	s.execTransient[id] = true
+	s.execTransient[id] = resolved
+	s.transientMu.Unlock()
+	return resolved
+}
+
+func parseDurationMillis(raw string) time.Duration {
+	if raw == "" {
+		return 0
+	}
+	var ms int64
+	if _, err := fmt.Sscanf(raw, "%d", &ms); err != nil || ms <= 0 {
+		return 0
+	}
+	return time.Duration(ms) * time.Millisecond
+}
+
+// markExecutionTransient records the per-execution transient marker in Redis so
+// every replica resolves the same answer, and primes the local cache. The write
+// is issued on the caller's pipeline: the marker must land in the same
+// transaction as the execution's structural keys, or a replica could observe an
+// execution that exists but is not yet known to be transient and project its
+// first node output.
+func (s *Store) markExecutionTransient(ctx context.Context, pipe redis.Pipeliner, id types.ExecutionID, ttl, completionTTL, keyTTL time.Duration) {
+	fields := map[string]any{}
 	if ttl > 0 {
-		s.execTransientTTL[id] = ttl
+		fields["ttl_ms"] = ttl.Milliseconds()
 	}
 	if completionTTL > 0 {
-		s.execTransientCompletionTTL[id] = completionTTL
+		fields["completion_ttl_ms"] = completionTTL.Milliseconds()
 	}
+	// HSET with no fields is an error, and an empty hash does not exist in
+	// Redis, so a marker carrying no TTL overrides still needs one field to be
+	// findable. Its presence is the signal; the value is not read.
+	fields["transient"] = 1
+
+	key := transientMarkKey(namespace.FromContext(ctx), id)
+	pipe.HSet(ctx, key, fields)
+	pipe.Expire(ctx, key, keyTTL)
+
+	s.transientMu.Lock()
+	s.execTransient[id] = transientMark{transient: true, ttl: ttl, completionTTL: completionTTL}
 	s.transientMu.Unlock()
 }
 
@@ -210,6 +288,10 @@ func transientExecutionKeys(t namespace.Namespace, id types.ExecutionID, g *grap
 		execKey(t, id, "trace_id"),
 		execKey(t, id, "span_id"),
 		execKey(t, id, "trace_carrier"),
+		// The transient marker expires with the execution it describes. It is
+		// listed here so completion-time shortening covers it too: a marker that
+		// outlived its execution would answer for a recycled ID.
+		transientMarkKey(t, id),
 		remainingNodesKey(t, id),
 		failedNodesKey(t, id),
 		leaseExpiryZSetKey(t, id),
@@ -243,10 +325,10 @@ func transientExecutionKeys(t namespace.Namespace, id types.ExecutionID, g *grap
 }
 
 func (s *Store) shortenTransientCompletionTTL(ctx context.Context, id types.ExecutionID, newKeys ...string) error {
-	if !s.isTransient(id) {
+	if !s.isTransient(ctx, id) {
 		return nil
 	}
-	ttl := s.getTransientCompletionTTL(id)
+	ttl := s.getTransientCompletionTTL(ctx, id)
 	if ttl <= 0 {
 		return nil
 	}
@@ -309,7 +391,5 @@ func (s *Store) evictExecutionCaches(id types.ExecutionID) {
 	s.ttlMu.Unlock()
 	s.transientMu.Lock()
 	delete(s.execTransient, id)
-	delete(s.execTransientTTL, id)
-	delete(s.execTransientCompletionTTL, id)
 	s.transientMu.Unlock()
 }

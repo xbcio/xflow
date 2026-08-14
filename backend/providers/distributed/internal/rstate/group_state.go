@@ -212,7 +212,7 @@ return {1, done, finalStatus}
 
 func (s *Store) AcquireGroupLease(ctx context.Context, lease *engine.GroupLease) (bool, error) {
 	t := namespace.FromContext(ctx)
-	ttl := s.getExecTTL(lease.ExecutionID)
+	ttl := s.getExecTTL(ctx, lease.ExecutionID)
 	deadlineMs := lease.IssuedAt.Add(lease.TTL).UnixMilli()
 	res, err := acquireGroupLeaseLua.Run(ctx, s.rdb, []string{
 		groupUnitStatusKey(t, lease.ExecutionID, lease.GroupUnitIdx),
@@ -235,7 +235,7 @@ func (s *Store) AcquireGroupLease(ctx context.Context, lease *engine.GroupLease)
 
 func (s *Store) RenewGroupLease(ctx context.Context, id types.ExecutionID, unitIdx int, token engine.LeaseToken, deadline time.Time) (bool, error) {
 	t := namespace.FromContext(ctx)
-	ttl := s.getExecTTL(id)
+	ttl := s.getExecTTL(ctx, id)
 	res, err := renewGroupLeaseLua.Run(ctx, s.rdb, []string{
 		groupUnitMetaKey(t, id, unitIdx),
 		leaseExpiryZSetKey(t, id),
@@ -248,7 +248,7 @@ func (s *Store) RenewGroupLease(ctx context.Context, id types.ExecutionID, unitI
 
 func (s *Store) CommitGroup(ctx context.Context, req engine.GroupCommitRequest) (engine.GroupCommitResult, error) {
 	t := namespace.FromContext(ctx)
-	ttl := s.getExecTTL(req.ExecutionID)
+	ttl := s.getExecTTL(ctx, req.ExecutionID)
 	allowCycles := 0 // Milestone A: group is never cyclic (AllowCycles and group are mutually exclusive)
 	fatal := 0
 	if req.Fatal {
@@ -427,7 +427,7 @@ return {1}
 
 func (s *Store) ExpireGroupLease(ctx context.Context, id types.ExecutionID, unitIdx int, token engine.LeaseToken) (bool, error) {
 	t := namespace.FromContext(ctx)
-	ttl := s.getExecTTL(id)
+	ttl := s.getExecTTL(ctx, id)
 	res, err := expireGroupLeaseLua.Run(ctx, s.rdb, []string{
 		groupUnitStatusKey(t, id, unitIdx),
 		groupUnitMetaKey(t, id, unitIdx),

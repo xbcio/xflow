@@ -106,7 +106,7 @@ func (s *Store) auditWrite(ctx context.Context, op string, fn func(context.Conte
 // transient mode. Call sites that have an execution ID should prefer this over
 // auditWrite so per-workflow transient executions skip audit writes.
 func (s *Store) auditWriteForExec(ctx context.Context, id types.ExecutionID, op string, fn func(context.Context) error) {
-	if s.isTransient(id) {
+	if s.isTransient(ctx, id) {
 		return
 	}
 	s.auditWrite(ctx, op, fn)

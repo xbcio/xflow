@@ -220,24 +220,36 @@ func TestPerWorkflowTransient_GlobalTransientOffPerWorkflowStillWorks(t *testing
 	state := New(rdb, nil, time.Hour)
 	state.transient = false // explicitly OFF
 
+	ctx := context.Background()
 	id := types.ExecutionID("exec-per-wf-override")
 
-	// isTransient should be false before marking.
-	if state.isTransient(id) {
+	// isTransient should be false before the execution is admitted.
+	if state.isTransient(ctx, id) {
 		t.Fatal("expected isTransient=false before marking")
 	}
 
-	// Mark execution transient.
-	state.MarkExecutionTransient(id, 5*time.Minute, time.Minute)
+	// Admit through the real submission path -- the marker is written by
+	// createExecution from the context hint, not by a setter a test can call.
+	tctx := engine.WithExecutionTransient(ctx, engine.TransientHint{
+		TTL:           5 * time.Minute,
+		CompletionTTL: time.Minute,
+	})
+	if err := state.CreateExecution(tctx, &engine.ExecutionSnapshot{
+		ID:     id,
+		Status: types.ExecutionStatusRunning,
+		Graph:  testDurableGraph(),
+	}); err != nil {
+		t.Fatalf("CreateExecution: %v", err)
+	}
 
-	if !state.isTransient(id) {
+	if !state.isTransient(ctx, id) {
 		t.Fatal("expected isTransient=true after marking")
 	}
-	if state.getTransientTTL(id) != 5*time.Minute {
-		t.Fatalf("getTransientTTL = %v, want 5m", state.getTransientTTL(id))
+	if state.getTransientTTL(ctx, id) != 5*time.Minute {
+		t.Fatalf("getTransientTTL = %v, want 5m", state.getTransientTTL(ctx, id))
 	}
-	if state.getTransientCompletionTTL(id) != time.Minute {
-		t.Fatalf("getTransientCompletionTTL = %v, want 1m", state.getTransientCompletionTTL(id))
+	if state.getTransientCompletionTTL(ctx, id) != time.Minute {
+		t.Fatalf("getTransientCompletionTTL = %v, want 1m", state.getTransientCompletionTTL(ctx, id))
 	}
 }
 

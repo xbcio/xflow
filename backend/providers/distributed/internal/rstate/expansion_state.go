@@ -152,7 +152,7 @@ func (s *Store) BeginTaskExpansionWithOutbox(ctx context.Context, lease *engine.
 	if lease == nil || len(children) != len(entries) {
 		return false, engine.ErrInvalidLeaseToken
 	}
-	ttl := s.getExecTTL(lease.Task.ExecutionID)
+	ttl := s.getExecTTL(ctx, lease.Task.ExecutionID)
 	t := namespace.FromContext(ctx)
 	args := make([]any, 0, 6+len(children)*5)
 	args = append(args, string(lease.LeaseID), string(lease.LeaseToken), lease.Attempt, lease.Task.ActivationID, int(ttl.Seconds()), len(children))
@@ -205,7 +205,7 @@ func (s *Store) BeginTaskExpansion(ctx context.Context, lease *engine.TaskLease)
 	if lease == nil {
 		return false, engine.ErrInvalidLeaseToken
 	}
-	ttl := s.getExecTTL(lease.Task.ExecutionID)
+	ttl := s.getExecTTL(ctx, lease.Task.ExecutionID)
 	t := namespace.FromContext(ctx)
 	result, err := beginTaskExpansionLua.Run(ctx, s.rdb, []string{
 		nodeStatusKey(t, lease.Task.ExecutionID, lease.Task.NodeName),
@@ -235,7 +235,7 @@ func (s *Store) CreateExpandedSubExecution(ctx context.Context, lease *engine.Ta
 	if err != nil {
 		return false, fmt.Errorf("marshal expansion sub-execution: %w", err)
 	}
-	ttl := s.getExecTTL(lease.Task.ExecutionID)
+	ttl := s.getExecTTL(ctx, lease.Task.ExecutionID)
 	t := namespace.FromContext(ctx)
 	key := expansionSubExecutionKey(t, lease.Task.ExecutionID, lease.Task.NodeName, lease.LeaseID)
 	result, err := createExpandedSubExecutionLua.Run(ctx, s.rdb, []string{
@@ -263,7 +263,7 @@ func (s *Store) CompleteExpandedSubExecution(ctx context.Context, lease *engine.
 	if err != nil {
 		return false, false, nil, fmt.Errorf("marshal expansion result: %w", err)
 	}
-	ttl := s.getExecTTL(lease.Task.ExecutionID)
+	ttl := s.getExecTTL(ctx, lease.Task.ExecutionID)
 	t := namespace.FromContext(ctx)
 	key := expansionSubExecutionKey(t, lease.Task.ExecutionID, lease.Task.NodeName, lease.LeaseID)
 	response, err := completeExpandedSubExecutionLua.Run(ctx, s.rdb, []string{

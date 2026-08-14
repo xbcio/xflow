@@ -309,7 +309,7 @@ var emptyJSONObject = []byte(`{}`)
 // The error text is the engine-supplied reason only — never boundary-exit data,
 // which is node output and routinely carries credentials.
 func (s *Store) projectSeededExecution(ctx context.Context, execID types.ExecutionID, status types.ExecutionStatus, req engine.SeedExecutionFromEntryRequest) {
-	if s.db == nil || s.transient {
+	if s.db == nil || s.isTransient(ctx, execID) {
 		return
 	}
 	now := time.Now()

@@ -24,7 +24,7 @@ func (s *Store) CreateSubExecution(ctx context.Context, sub *engine.SubExecution
 	// structural-key TTL set at CreateExecution and refreshTransientTTL is a
 	// no-op. Set an explicit TTL here or the key leaks permanently after the
 	// parent execution's other keys expire.
-	if err := s.rdb.Expire(ctx, key, s.getExecTTL(sub.ParentExecID)).Err(); err != nil {
+	if err := s.rdb.Expire(ctx, key, s.getExecTTL(ctx, sub.ParentExecID)).Err(); err != nil {
 		return fmt.Errorf("set sub-execution ttl %q/%q: %w", sub.ParentExecID, sub.ParentNode, err)
 	}
 	return s.refreshTransientTTL(ctx, sub.ParentExecID, key)
@@ -50,7 +50,7 @@ func (s *Store) CompleteSubExecution(ctx context.Context, parentExecID types.Exe
 	}
 	// Renew the subs hash TTL (see CreateSubExecution): the key is not covered
 	// by the structural-key TTL and refreshTransientTTL is a no-op.
-	if err := s.rdb.Expire(ctx, key, s.getExecTTL(parentExecID)).Err(); err != nil {
+	if err := s.rdb.Expire(ctx, key, s.getExecTTL(ctx, parentExecID)).Err(); err != nil {
 		return false, fmt.Errorf("set sub-execution ttl %q/%q: %w", parentExecID, parentNode, err)
 	}
 	if err := s.refreshTransientTTL(ctx, parentExecID, key); err != nil {
