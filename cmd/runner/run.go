@@ -276,12 +276,23 @@ func runRunner(ctx context.Context, cfg runnerConfig) error {
 	// Suspend is disabled inside a group for the same reason as inside a map
 	// body: a suspended member would park a sub-execution the outer lease
 	// cannot resume.
+	// One artifact resolver, three consumers: the group runtime below, the
+	// subgraph runtime further down, and the top-level dispatcher inside
+	// runnerServiceConfig. Built here because the two runtimes are constructed
+	// before that function is called — see newArtifactCodeResolver for why a
+	// resolver on the dispatcher alone leaves nested scripts unable to fetch.
+	artifactCode, err := newArtifactCodeResolver(cfg)
+	if err != nil {
+		return err
+	}
+
 	groupRuntime := runnersvc.NewGroupRuntime(
 		registry,
 		runnersvc.NewPackageCache(runnersvc.PackageCacheConfig{MaxEntries: groupPackageCacheEntries}),
-		runnersvc.WithSuspendDisabled())
+		runnersvc.WithSuspendDisabled(),
+		runnersvc.WithGroupArtifactCodeResolver(artifactCode))
 
-	serviceCfg, err := runnerServiceConfig(cfg, groupRuntime)
+	serviceCfg, err := runnerServiceConfig(cfg, groupRuntime, artifactCode)
 	if err != nil {
 		return err
 	}
@@ -328,7 +339,8 @@ func runRunner(ctx context.Context, cfg runnerConfig) error {
 	// node's own type (engine.TaskRouting returns meta.Type), so a runner only ever
 	// sees a batch if the operator already listed xflow.map in --cap.
 	serviceCfg.SubgraphRuntime = runnersvc.NewSubgraphRuntime(
-		registry, runnersvc.NewPackageCache(runnersvc.PackageCacheConfig{MaxEntries: batchBodyCacheEntries}))
+		registry, runnersvc.NewPackageCache(runnersvc.PackageCacheConfig{MaxEntries: batchBodyCacheEntries}),
+		runnersvc.WithSubgraphArtifactCodeResolver(artifactCode))
 	serviceCfg.GroupRuntime = groupRuntime
 	// Absorb script-engine cold start before the first lease arrives: qjs pays a
 	// ~330 ms QuickJS-wasm compile and the wasm reactor opens its runtime
@@ -483,7 +495,40 @@ func newRunnerHTTPClient(cfg runnerConfig, timeout time.Duration) (*http.Client,
 	return c, nil
 }
 
-func runnerServiceConfig(cfg runnerConfig, groupRuntime *runnersvc.GroupRuntime) (runnersvc.Config, error) {
+// newArtifactCodeResolver builds the digest -> script bytes resolver every
+// script execution path in this runner shares: a read-through cache that serves
+// from local disk and falls back to GET /v1/artifacts/{digest} on the server.
+//
+// One instance, three consumers — the top-level dispatcher (Config.
+// ArtifactCodeResolver), the group runtime, and the subgraph (map body)
+// runtime. The latter two build their own inner backends per attempt, so a
+// resolver installed only on the dispatcher never reaches a script nested
+// inside a group or a map body; that node then reads a nil resolver and fails
+// permanently with script.artifact_unavailable. Sharing one instance also keeps
+// a single on-disk cache rather than one per runtime.
+func newArtifactCodeResolver(cfg runnerConfig) (func(ctx context.Context, digest string) ([]byte, error), error) {
+	artifactClient, err := newRunnerHTTPClient(cfg, 60*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	httpOrigin := &objectstore.HTTPStore{
+		BaseURL: triggerSeedBaseURL(cfg),
+		Token:   cfg.token,
+		Client:  artifactClient,
+	}
+	readThrough := objectstore.NewReadThrough(objectstore.NewFSStore(artifactCacheDir()), httpOrigin)
+	artifactStore := store.NewArtifactStore(readThrough, nil)
+	return func(ctx context.Context, digest string) ([]byte, error) {
+		rc, _, err := artifactStore.Open(ctx, digest)
+		if err != nil {
+			return nil, err
+		}
+		defer rc.Close()
+		return io.ReadAll(rc)
+	}, nil
+}
+
+func runnerServiceConfig(cfg runnerConfig, groupRuntime *runnersvc.GroupRuntime, artifactCode func(ctx context.Context, digest string) ([]byte, error)) (runnersvc.Config, error) {
 	_, err := parsePositiveDuration("heartbeat interval", cfg.heartbeatInterval)
 	if err != nil {
 		return runnersvc.Config{}, err
@@ -528,30 +573,11 @@ func runnerServiceConfig(cfg runnerConfig, groupRuntime *runnersvc.GroupRuntime)
 	// The runner fetches by digest from the server (GET /v1/artifacts/{digest})
 	// and caches locally on disk. The resolver closure is what ScriptNode.Execute
 	// calls at runtime via Input.ArtifactCode.
-	{
-		cacheDir := artifactCacheDir()
-		fsCache := objectstore.NewFSStore(cacheDir)
-		seedBaseURL := triggerSeedBaseURL(cfg)
-		artifactClient, err := newRunnerHTTPClient(cfg, 60*time.Second)
-		if err != nil {
-			return runnersvc.Config{}, err
-		}
-		httpOrigin := &objectstore.HTTPStore{
-			BaseURL: seedBaseURL,
-			Token:   cfg.token,
-			Client:  artifactClient,
-		}
-		readThrough := objectstore.NewReadThrough(fsCache, httpOrigin)
-		artifactStore := store.NewArtifactStore(readThrough, nil)
-		svcCfg.ArtifactCodeResolver = func(ctx context.Context, digest string) ([]byte, error) {
-			rc, _, err := artifactStore.Open(ctx, digest)
-			if err != nil {
-				return nil, err
-			}
-			defer rc.Close()
-			return io.ReadAll(rc)
-		}
-	}
+	//
+	// Built once in Run and passed in, not constructed here: the group and
+	// subgraph runtimes need the SAME resolver, and they are constructed before
+	// this function is called. See newArtifactCodeResolver.
+	svcCfg.ArtifactCodeResolver = artifactCode
 	// Trigger hosting: when the runner advertises at least one registered trigger
 	// node type AND a seed base URL is reachable, construct the ActivationTracker
 	// over the production TriggerActivationHandler (Task 8) so activate/deactivate

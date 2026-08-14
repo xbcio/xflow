@@ -17,6 +17,21 @@ func WithSuspendDisabled() GroupRuntimeOption {
 	return func(r *GroupRuntime) { r.suspendDisabled = true }
 }
 
+// WithGroupArtifactCodeResolver installs the digest -> script bytes resolver on
+// every per-attempt inner backend, so a member node that is an xflow.script
+// referencing an artifact_digest can fetch its code.
+//
+// Without it the resolver chain ends at the group boundary: Config.
+// ArtifactCodeResolver reaches only the runner's top-level dispatcher
+// (runner.go, execution.WithArtifactCodeResolver), never the embedded backend
+// this runtime builds per attempt. A member script then reads a nil resolver
+// (types.Input.ArtifactCode returns nil, nil) and fails permanently with
+// script.artifact_unavailable — which is exactly the shape a node group whose
+// members are wasm scripts takes.
+func WithGroupArtifactCodeResolver(fn func(ctx context.Context, digest string) ([]byte, error)) GroupRuntimeOption {
+	return func(r *GroupRuntime) { r.artifactCode = fn }
+}
+
 // GroupRuntime adapts execution/subgraph.Executor -- the caller-agnostic
 // sub-graph execution layer -- to the runner's group-lease shape: it unpacks
 // engine.TaskLease.GroupPayload into a subgraph.Request, and maps the
@@ -26,6 +41,7 @@ func WithSuspendDisabled() GroupRuntimeOption {
 // execution/subgraph).
 type GroupRuntime struct {
 	suspendDisabled bool
+	artifactCode    func(ctx context.Context, digest string) ([]byte, error)
 	executor        *subgraph.Executor
 }
 
@@ -40,7 +56,14 @@ func NewGroupRuntime(reg *execution.Registry, cache *PackageCache, opts ...Group
 		o(r)
 	}
 	r.executor = subgraph.NewExecutor(reg, cache, func() subgraph.Backend {
-		return local.New(local.WithRegistry(reg), local.WithConcurrency(1))
+		backendOpts := []local.Option{local.WithRegistry(reg), local.WithConcurrency(1)}
+		// Read r.artifactCode inside the closure, not at construction: the
+		// closure is what every attempt (and every nested map body, which reuses
+		// this same executor) calls, so the resolver must travel with it.
+		if r.artifactCode != nil {
+			backendOpts = append(backendOpts, local.WithArtifactCodeResolver(r.artifactCode))
+		}
+		return local.New(backendOpts...)
 	})
 	return r
 }

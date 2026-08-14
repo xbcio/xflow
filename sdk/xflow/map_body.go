@@ -1,6 +1,7 @@
 package xflow
 
 import (
+	"context"
 	"time"
 
 	backendlocal "github.com/xbcio/xflow/backend/providers/local"
@@ -18,6 +19,13 @@ const bodyPackageCacheEntries = 64
 // item, or nil when the registry cannot supply the handler inventory a body
 // package must be validated against.
 //
+// artifactCode is the digest -> script bytes resolver (nil when the engine has
+// no artifact store). It must be threaded in explicitly: the body runs on the
+// FRESH backend built below, not on the engine's own, so the resolver the
+// engine's backend received via NewLocal/NewCluster does not reach a body
+// member. A ScriptFile node inside a map body then read a nil resolver and
+// failed permanently with script.artifact_unavailable.
+//
 // Both modes get one. A batch escapes to a runner only where the control plane
 // opts into it (engine.WithBatchEscape); everywhere else — every sdk engine,
 // every inner sub-graph execution — the batch runs in this process and needs a
@@ -28,7 +36,7 @@ const bodyPackageCacheEntries = 64
 // the inner execution's tasks must not land on the outer queue, where the outer
 // scheduler would drain them as if they belonged to the outer graph. This
 // mirrors service/runner's group runtime, which does the same for group units.
-func newBatchBodyExecutor(reg engine.HandlerRegistry, suspendDisabled bool) engine.BatchBodyExecutor {
+func newBatchBodyExecutor(reg engine.HandlerRegistry, suspendDisabled bool, artifactCode func(ctx context.Context, digest string) ([]byte, error)) engine.BatchBodyExecutor {
 	concrete, ok := reg.(*execution.Registry)
 	if !ok {
 		// A body package is validated against the registry's handler inventory
@@ -39,7 +47,11 @@ func newBatchBodyExecutor(reg engine.HandlerRegistry, suspendDisabled bool) engi
 	}
 	cache := subgraph.NewPackageCache(subgraph.PackageCacheConfig{MaxEntries: bodyPackageCacheEntries})
 	executor := subgraph.NewExecutor(concrete, cache, func() subgraph.Backend {
-		return backendlocal.New(backendlocal.WithRegistry(concrete), backendlocal.WithConcurrency(1))
+		opts := []backendlocal.Option{backendlocal.WithRegistry(concrete), backendlocal.WithConcurrency(1)}
+		if artifactCode != nil {
+			opts = append(opts, backendlocal.WithArtifactCodeResolver(artifactCode))
+		}
+		return backendlocal.New(opts...)
 	})
 	// No outer deadline to forward: this executor is built once at engine
 	// startup, before any per-call Request exists (see MapBodyExecutor's

@@ -94,7 +94,12 @@ func newFromConfig(cfg *engineConfig, provider backend.Provider) (*Engine, error
 	// executor that runs their body. A body always forbids suspend: it runs once
 	// per item with no external identity to resume against, so a suspended item
 	// would park a sub-execution nothing can ever signal.
-	if bodies := newBatchBodyExecutor(cfg.registry, true); bodies != nil {
+	//
+	// The artifact resolver is threaded in explicitly: a body member is executed
+	// by a fresh backend the body executor builds, not by the engine's own, so
+	// the resolver NewLocal/NewCluster installed does not reach a ScriptFile
+	// node nested inside a map body.
+	if bodies := newBatchBodyExecutor(cfg.registry, true, artifactCodeResolverFor(cfg.artifactStore)); bodies != nil {
 		engOpts = append(engOpts, engine.WithBatchBodyExecutor(bodies))
 	}
 

@@ -19,6 +19,22 @@ import (
 // look like a successful iteration.
 var ErrBatchWithoutABody = errors.New("batch lease carries no body package")
 
+// SubgraphRuntimeOption configures a SubgraphRuntime.
+type SubgraphRuntimeOption func(*subgraphRuntimeConfig)
+
+type subgraphRuntimeConfig struct {
+	artifactCode func(ctx context.Context, digest string) ([]byte, error)
+}
+
+// WithSubgraphArtifactCodeResolver installs the digest -> script bytes resolver
+// on every per-item inner backend. See WithGroupArtifactCodeResolver for why
+// the outer runner's Config.ArtifactCodeResolver does not reach here on its own:
+// a map body's xflow.script member resolves its code through the backend this
+// runtime builds, not through the runner's top-level dispatcher.
+func WithSubgraphArtifactCodeResolver(fn func(ctx context.Context, digest string) ([]byte, error)) SubgraphRuntimeOption {
+	return func(c *subgraphRuntimeConfig) { c.artifactCode = fn }
+}
+
 // SubgraphRuntime adapts a batch lease to the runner's execution surface. It is
 // the map counterpart of GroupRuntime: the control plane hands it one batch of
 // a map expansion, it runs the body once per item, and the result commits
@@ -38,9 +54,17 @@ type SubgraphRuntime struct {
 // Suspend is disabled inside a body unconditionally: a body runs once per item
 // with no external identity to resume against, so a suspended item would park a
 // sub-execution nothing can ever signal.
-func NewSubgraphRuntime(reg *execution.Registry, cache *PackageCache) *SubgraphRuntime {
+func NewSubgraphRuntime(reg *execution.Registry, cache *PackageCache, opts ...SubgraphRuntimeOption) *SubgraphRuntime {
+	cfg := &subgraphRuntimeConfig{}
+	for _, o := range opts {
+		o(cfg)
+	}
 	executor := subgraph.NewExecutor(reg, cache, func() subgraph.Backend {
-		return local.New(local.WithRegistry(reg), local.WithConcurrency(1))
+		backendOpts := []local.Option{local.WithRegistry(reg), local.WithConcurrency(1)}
+		if cfg.artifactCode != nil {
+			backendOpts = append(backendOpts, local.WithArtifactCodeResolver(cfg.artifactCode))
+		}
+		return local.New(backendOpts...)
 	})
 	// No outer deadline to forward: this runtime is built once at runner
 	// startup, before any lease (and its payload.Deadline, which
