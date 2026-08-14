@@ -7,20 +7,15 @@
 与 [NODE-GROUP-COLOCATION.md](./NODE-GROUP-COLOCATION.md)（group 侧的同族机制）。
 本文件只列**待办**。
 
-## P0 — 用之前必须修
+## 待办
 
-## P1 — 规模上去会疼
+**空。** 本文件登记过的 P0/P1/P2 已于 2026-08-14 全部闭合：最后三条是并发
+`FlushOutbox` 重复投递（原 P1-9）、`TransformSpec` 无消费者（原 P2-7）、
+`ProjectSubgraphPackage` 名字有歧义（原 P2-8）。逐条经过见下。
 
-### 9. 并发 `FlushOutbox` 会重复投递同一条意图
-（已于 2026-08-14 修复，见下方「已修复」一节）
-
-## P2 — 死代码
-
-### 7. `types/transform.go` 的 `TransformSpec` 尚无消费者
-（已于 2026-08-14 接线，见下方「已修复」一节）
-
-### 8. `engine/graph/subgraph_package.go` 的 `ProjectSubgraphPackage` 名字有歧义
-（已于 2026-08-11 `93277e7` 改名，见下方「已修复」一节）
+下方两节仍然承重，不要当成历史记录跳过：「已澄清的误记」记的是被实测推翻的
+错误结论，「已知且接受的代价」记的是**明知而不改**的选择——重新「发现」它们
+并去修，是在推翻已经做过的判断。
 
 ## 已修复
 
