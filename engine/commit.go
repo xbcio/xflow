@@ -237,10 +237,13 @@ func (e *Engine) commitLegacyNodeWithClassification(ctx context.Context, lease *
 		StoreOutput:  true,
 		Port:         port,
 		Error:        errMsg,
+		// The graph is cyclic by construction here — line 189 above redirected
+		// every acyclic graph to commitAcyclicNode. Stating it explicitly is what
+		// keeps the backend from having to reload the graph and guess.
+		AllowCycles: true,
 		// Fatal is intentionally NOT set for the cyclic path: the backend cyclic
 		// finalization is driven by CyclicComplete (above), and the Fatal flag is
-		// the acyclic-path finalization signal (it is also the guard the backend
-		// uses to skip cyclic downstream). Carrying the fatal intent via
+		// the acyclic-path finalization signal. Carrying the fatal intent via
 		// CyclicComplete keeps the whole transition inside one fenced commit.
 		Fatal:             false,
 		CyclicOutbox:      plan.entries,

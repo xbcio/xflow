@@ -44,6 +44,9 @@ func (s *memoryState) CommitLeasedNode(ctx context.Context, req engine.CommitNod
 // CommitNode atomically applies a fenced terminal node transition, updates
 // execution completion counters, and records the follow-up advance task.
 func (s *memoryState) CommitNode(_ context.Context, req engine.CommitNodeRequest) (engine.CommitNodeResult, error) {
+	if err := req.Validate(); err != nil {
+		return engine.CommitNodeResult{}, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -100,7 +103,7 @@ func (s *memoryState) CommitNode(_ context.Context, req engine.CommitNodeRequest
 	}
 
 	result := engine.CommitNodeResult{Outcome: engine.CommitOutcomeAccepted, Applied: true}
-	if entry.snap.Graph != nil && !entry.snap.Graph.AllowCycles() {
+	if !req.AllowCycles {
 		s.remaining[req.ExecutionID]--
 		if req.Status == types.NodeStatusFailed {
 			s.failed[req.ExecutionID]++
@@ -128,7 +131,7 @@ func (s *memoryState) CommitNode(_ context.Context, req engine.CommitNodeRequest
 	// skipped for AllowCycles). Persist the engine-computed downstream intents,
 	// or finalize the execution when the branch terminated, in this same locked
 	// transition so a crash cannot lose them (#7).
-	if entry.snap.Graph != nil && entry.snap.Graph.AllowCycles() && !req.Fatal && !result.ExecutionDone {
+	if req.AllowCycles && !req.Fatal && !result.ExecutionDone {
 		if len(req.CyclicOutbox) > 0 {
 			for _, oe := range req.CyclicOutbox {
 				if s.putOutboxEntryLocked(req.ExecutionID, oe) {

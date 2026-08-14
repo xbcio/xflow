@@ -81,6 +81,7 @@ func TestRedisCommitLeasedNodeCyclicPersistsDownstreamAtomically(t *testing.T) {
 		Status:       types.NodeStatusSuccess,
 		StoreOutput:  true,
 		Port:         "reject",
+		AllowCycles:  true,
 		CyclicOutbox: []engine.OutboxEntry{downstream},
 	}
 	res, err := state.CommitLeasedNode(ctx, req)
@@ -174,6 +175,7 @@ func TestRedisCommitLeasedNodeCyclicCompletionIsAtomic(t *testing.T) {
 		Status:            types.NodeStatusSuccess,
 		StoreOutput:       true,
 		Port:              "main",
+		AllowCycles:       true,
 		CyclicComplete:    true,
 		CyclicFinalStatus: types.ExecutionStatusSuccess,
 	})

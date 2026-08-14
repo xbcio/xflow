@@ -48,8 +48,30 @@ type CommitNodeRequest struct {
 	Port         string
 	Error        string
 	System       bool
-	Fatal        bool
-	AdvanceTask  *Task
+	// Fatal short-circuits the ACYCLIC completion protocol: the backend finalizes
+	// the execution immediately instead of waiting for the remaining-unit counter
+	// to reach zero. It is meaningless on a cyclic graph, which has no such
+	// counter — a cyclic node that must end the execution says so via
+	// CyclicComplete instead. Setting both is rejected (see Validate).
+	Fatal bool
+	// AdvanceTask is the acyclic downstream scheduling task. Cyclic downstream
+	// travels in CyclicOutbox; setting this on a cyclic commit is rejected.
+	AdvanceTask *Task
+	// AllowCycles is the graph type of the execution being committed. It selects
+	// which of the two mutually exclusive completion protocols the backend runs,
+	// so it must describe the compiled graph — never a backend guess.
+	//
+	// The backends used to re-derive it by loading the graph at commit time, and
+	// an unavailable graph (in-memory cache lost to a restart, Redis key aged out
+	// under a long-lived execution) read as "acyclic". That silently dropped the
+	// CyclicOutbox intents, whose persistence is gated on this flag, and ran the
+	// acyclic branch against a completion counter that is only ever seeded for
+	// acyclic graphs. Both losses are unrecoverable and produce no error.
+	//
+	// The engine knows the type from the graph it is already holding, so it states
+	// it here. Validate cross-checks it against the cyclic-only payload fields to
+	// keep a forgotten field from re-defaulting to "acyclic".
+	AllowCycles bool
 	// CyclicOutbox carries downstream delivery intents for a cyclic-graph node
 	// commit. Cyclic downstream is dynamic and is not static in-degree counted
 	// like the acyclic AdvanceTask, so the engine computes it deterministically
@@ -67,6 +89,37 @@ type CommitNodeRequest struct {
 	CyclicComplete    bool
 	CyclicFinalStatus types.ExecutionStatus
 	CyclicFinalError  string
+}
+
+// Validate rejects a request whose graph type contradicts its payload.
+//
+// AllowCycles selects between two completion protocols that share no state, and
+// a bool defaults to the acyclic one. Without this cross-check a caller that
+// forgot the field would reintroduce the exact silent loss the field exists to
+// prevent: cyclic intents dropped, an unseeded counter decremented. Every field
+// below belongs to exactly one protocol, so a mismatch is a programming error
+// and is worth failing the commit over rather than guessing which half is right.
+func (r CommitNodeRequest) Validate() error {
+	if r.AllowCycles {
+		if r.Fatal {
+			return fmt.Errorf("commit %s/%s: Fatal is the acyclic finalization signal and is "+
+				"meaningless on a cyclic graph; use CyclicComplete", r.ExecutionID, r.NodeName)
+		}
+		if r.AdvanceTask != nil {
+			return fmt.Errorf("commit %s/%s: AdvanceTask is acyclic downstream scheduling; "+
+				"cyclic downstream travels in CyclicOutbox", r.ExecutionID, r.NodeName)
+		}
+		return nil
+	}
+	if len(r.CyclicOutbox) > 0 {
+		return fmt.Errorf("commit %s/%s: CyclicOutbox set on an acyclic commit; the backend "+
+			"would drop these delivery intents", r.ExecutionID, r.NodeName)
+	}
+	if r.CyclicComplete {
+		return fmt.Errorf("commit %s/%s: CyclicComplete set on an acyclic commit; acyclic "+
+			"finalization is driven by the remaining-unit counter", r.ExecutionID, r.NodeName)
+	}
+	return nil
 }
 
 // CommitNodeResult is the stable result of an atomic node commit.

@@ -150,10 +150,9 @@ func TestCommitLeasedNodeProjectsFailureReasonToSQL(t *testing.T) {
 // was refused. CyclicFinalError is therefore the only carrier of the reason, and
 // terminalExecutionError must prefer it over the (empty) node error.
 //
-// Note what this does NOT prove: the Redis exec `error` key the Lua also writes
-// still has no reader — GetExecution does not load it and ExecutionSnapshot has
-// no Error field. The SQL audit row is currently the only place the reason can
-// be read back.
+// This test pins the SQL audit row specifically. The online read-back path for
+// the same reason — GetExecution loading exec:<id>:error into
+// ExecutionSnapshot.Error — is pinned by the shared state-store contract.
 func TestCommitLeasedNodeProjectsCyclicFinalErrorToSQL(t *testing.T) {
 	state, db := newStateWithAuditStore(t)
 	ctx := context.Background()
@@ -198,6 +197,7 @@ func TestCommitLeasedNodeProjectsCyclicFinalErrorToSQL(t *testing.T) {
 		// The node itself SUCCEEDED and carries no error — this is the whole
 		// point: without CyclicFinalError the failure would have no reason at all.
 		Status: types.NodeStatusSuccess, StoreOutput: true, Port: "main",
+		AllowCycles:       true,
 		CyclicComplete:    true,
 		CyclicFinalStatus: types.ExecutionStatusFailed,
 		CyclicFinalError:  reason,

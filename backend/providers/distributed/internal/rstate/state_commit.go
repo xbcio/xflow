@@ -112,6 +112,9 @@ func (s *Store) RevokeLeaseWithOutbox(ctx context.Context, id types.ExecutionID,
 // transition. SQL projection remains best-effort and runs only after Redis has
 // accepted the authoritative state.
 func (s *Store) CommitNode(ctx context.Context, req engine.CommitNodeRequest) (engine.CommitNodeResult, error) {
+	if err := req.Validate(); err != nil {
+		return engine.CommitNodeResult{}, err
+	}
 	ttl := s.getExecTTL(req.ExecutionID)
 	outputJSON := ""
 	if req.StoreOutput {
@@ -144,7 +147,7 @@ func (s *Store) CommitNode(ctx context.Context, req engine.CommitNodeRequest) (e
 		fatal = 1
 	}
 	allowCycles := 0
-	if g, err := s.LoadGraph(ctx, req.ExecutionID); err == nil && g != nil && g.AllowCycles() {
+	if req.AllowCycles {
 		allowCycles = 1
 	}
 	cyclicComplete := 0

@@ -45,7 +45,7 @@ if !g.AllowCycles() {
 摘掉，全仓一条测试都不红——失败改走 legacy 后跑的是同一套重试与 OnError，提交时又
 折回 acyclic，两条路在失败上收敛。收敛是这个结构的产物，不是设计意图。
 
-## 真正的分叉：`CommitNodeRequest.Fatal` 一字段两义
+## ~~真正的分叉：`CommitNodeRequest.Fatal` 一字段两义~~ ✓ 2026-08-14 已关闭
 
 `...WithClassification` 那一对是唯一真有分歧的：
 
@@ -55,21 +55,69 @@ if !g.AllowCycles() {
   终局改由 `CyclicComplete` + `CyclicFinalStatus` 承载。`Fatal` 在这一侧的含义变成
   「后端跳过 cyclic 下游」的守卫。
 
-同一个字段两种含义。这是合并的核心障碍，也是将来给审批流加分支时最容易踩的地方。
-`CommitNodeRequest` 是跨 `backend/providers/local` 与 `.../distributed/internal/rstate`
-两个实现的契约，所以这个决定不是 engine 内部的。
+第二义（跳过 cyclic 下游的守卫）之所以存在，是因为**后端不知道图的类型**，只能拿
+`Fatal` 当代理信号。`CommitNodeRequest` 现在带 `AllowCycles`，两个协议由它选择，
+`Fatal` 因此只剩第一义（无环终局），并已在 `engine/atomic.go` 上写明。
+
+`CommitNodeRequest.Validate()` 交叉校验四组字段（`Fatal`/`AdvanceTask` 属无环侧，
+`CyclicOutbox`/`CyclicComplete` 属有环侧），使 bool 的零值不能悄悄把有环提交退回
+无环协议——那正是下面第 2 条修掉的缺陷形态。两个后端在 `CommitNode` 入口各调一次。
 
 ## 待决问题（重构前必须先答）
 
-1. **cyclic 图的终局该由 `Fatal` 承载，还是保持 `CyclicComplete`？**（**仍开**）决定
-   合并往哪个方向收，且会动后端接口。
+1. ~~**cyclic 图的终局该由 `Fatal` 承载，还是保持 `CyclicComplete`？**~~
+   **2026-08-14 已答：保持 `CyclicComplete`，并把图类型显式放进请求。** 两个协议不共享
+   任何状态（无环靠 `remaining` 计数器，有环靠 `CyclicOutbox`/`CyclicComplete`），合并
+   到一个字段上只会让「哪一半在生效」再次取决于后端猜测。
 2. ~~**分布式 × cyclic 的实际成色未验证。**~~ **2026-08-13 已实测。** 两个集成测试在
    真 Redis（6380）下真跑真绿，无静默 skip：`TestCyclicReliabilityProcessRecovery`
    7.66s、`TestCyclicReliabilityRealRedis` 5.18s（5 个子测试）。**重构可以由这些测试
-   兜底。** 遗留的性能观察不变：`rstate/state_commit.go:146-148` 每次提交都要
-   `LoadGraph` 一次来判 `allowCycles`——无环侧不需要的额外读。
+   兜底。** 遗留的那条「每次提交都 `LoadGraph` 判 `allowCycles`」的观察，**性能定性
+   写错了**（`LoadGraph` 先查 `s.graphs` 内存缓存，命中时只是一次 RLock，不是 Redis
+   往返），但它藏着一个真缺陷，已于 2026-08-14 修掉，见下节。
 3. ~~**审批流用到的是 cyclic × suspend 的组合，不是 cyclic 本身。**~~
    **2026-08-13 已实测：缺口是真的，现已补上。** 见下节。
+
+## 后端猜图类型：图不可用时静默丢下游（2026-08-14 实测并修复）
+
+原代码两个后端各自重新推导图类型，都会在图拿不到时**默默落到「无环」**：
+
+```go
+// rstate/state_commit.go，修复前
+allowCycles := 0
+if g, err := s.LoadGraph(ctx, req.ExecutionID); err == nil && g != nil && g.AllowCycles() {
+    allowCycles = 1
+}
+```
+
+任何失败——Redis 报错、反序列化失败、key 不存在——都被 `err == nil` 吞掉判成无环。
+local 侧同形：`entry.snap.Graph != nil && !entry.snap.Graph.AllowCycles()`，快照没带
+图时两个分支**双双落空**（既不计数也不落 outbox）。
+
+图确实会拿不到：`exec:<id>:graph` 带执行的 TTL，而内存缓存不跨进程重启。一条长命的
+有环执行（**返工审批环挂在信号上等几天**正是这个形状）重启后提交，就落进这个窗口。
+
+后果两条，都是静默且不可恢复的：
+
+- `CyclicOutbox` 里的下游投递意图**被丢弃**——Lua 里持久化它们的分支由
+  `ARGV[16]`（allowCycles）门控。没有任何东西会重新推导一份丢掉的投递意图。
+- 走了无环分支，去 `DECR` 一个**从未播种**的完成计数器。`remaining`/`failed` 只在无环
+  图上播种（local `memory_state.go:117-120`；rstate `state_execution.go:151` 与
+  `entry_admission.go:162`），Redis 于是把它建成 -1 → `remaining <= 0` → **误判执行完成**。
+
+修法：`engine` 本来就握着图（`commit.go:53`/`:80`/`:189` 三处路由都在读
+`g.AllowCycles()`），把它直接放进请求，后端不再推导。承重测试各后端一条，均已反向复验
+（改回旧推导即红，失败形态正是「OutboxIDs 为空」）：
+
+- `rstate/commit_graph_type_test.go:TestCommitLeasedNodeDoesNotGuessTheGraphType`
+  ——把图从**内存缓存与 Redis 双双删除**后提交，仍要求 cyclic 意图落库。
+- `local/commit_graph_type_test.go:TestMemoryCommitNodeUsesTheRequestGraphType`
+  ——用**不带 Graph 的快照**驱动，即原先让两个分支同时落空的那个形状。
+
+顺带对齐了 group 提交：rstate 早就硬编码 `allowCycles = 0`（groups 与 AllowCycles
+由 `validateGroupsAllowCyclesExclusion` 编译期互斥），local 却在读快照的图——同一个
+「快照无图则不计数」的洞。现改为无条件走无环协议，与 rstate 一致。
+
 
 ## cyclic × suspend：曾经零覆盖（2026-08-13 实测并关闭）
 
@@ -113,7 +161,7 @@ t.ActivationID <= 0` 直接判 `ErrExecutionInactive`）。
 - `test/integration/cyclic_suspend_distributed_test.go` — 本次新增，唯一覆盖
   cyclic × suspend 的分布式用例
 
-## 失败原因的读回面：只有 SQL 审计行（2026-08-13 实测）
+## ~~失败原因的读回面：只有 SQL 审计行~~ ✓ 2026-08-14 已关闭（本节按时间顺序记录）
 
 与「`Fatal` 一字段两义」同源的一个可观测性缺口。cyclic 深度超限失败时，**触限的那个
 节点是 success 的**（下游激活被 `engine/scheduler.go:43-45` 拒绝），所以没有任何失败
@@ -187,4 +235,6 @@ group unit，没有任何成员节点提交失败。两个后端共用新常量 
 可答，前提具备）；错误分支删掉零差异的那一份；`...WithClassification` 保留两个实现，
 因为 `Fatal` 语义确实分叉。
 
-这只是一个候选，问题 1 的答案可能推翻它。
+问题 1 已于 2026-08-14 答出且**没有推翻这个形状**：`Fatal` 的第二义消失后，
+`...WithClassification` 那一对的分歧收窄成「两个完成协议各一套字段」，`Validate` 把
+边界钉住了。也就是说这个候选现在可以直接做，不再被待决问题挡住。

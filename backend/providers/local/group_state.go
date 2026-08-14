@@ -125,22 +125,25 @@ func (s *memoryState) CommitGroup(_ context.Context, req engine.GroupCommitReque
 	st.committedToken = req.LeaseToken
 	st.leaseID, st.leaseToken = "", ""
 	// 3. Decrement remaining by unit (same completion logic as CommitNode).
+	// A group unit is never cyclic — graph.validateGroupsAllowCyclesExclusion
+	// rejects AllowCycles at compile time — so the acyclic completion protocol
+	// always applies. This mirrors the Redis store, which passes a hardcoded
+	// allowCycles=0 for the same reason; reading it off the snapshot's graph
+	// instead would silently skip the counting for a graph-less snapshot.
 	result := engine.GroupCommitResult{Applied: true, Outcome: engine.CommitOutcomeAccepted}
-	if entry.snap.Graph != nil && !entry.snap.Graph.AllowCycles() {
-		s.remaining[req.ExecutionID]--
-		if req.Outcome == engine.GroupOutcomeFailed {
-			s.failed[req.ExecutionID]++
+	s.remaining[req.ExecutionID]--
+	if req.Outcome == engine.GroupOutcomeFailed {
+		s.failed[req.ExecutionID]++
+	}
+	if req.Fatal || s.remaining[req.ExecutionID] == 0 {
+		status := types.ExecutionStatusSuccess
+		if req.Fatal || s.failed[req.ExecutionID] > 0 {
+			status = types.ExecutionStatusFailed
 		}
-		if req.Fatal || s.remaining[req.ExecutionID] == 0 {
-			status := types.ExecutionStatusSuccess
-			if req.Fatal || s.failed[req.ExecutionID] > 0 {
-				status = types.ExecutionStatusFailed
-			}
-			s.finishExecutionLocked(req.ExecutionID, entry, status,
-				engine.TerminalExecutionError(status, req.Error, ""))
-			result.ExecutionDone = true
-			result.ExecutionStatus = status
-		}
+		s.finishExecutionLocked(req.ExecutionID, entry, status,
+			engine.TerminalExecutionError(status, req.Error, ""))
+		result.ExecutionDone = true
+		result.ExecutionStatus = status
 	}
 	// 4. Downstream unit arrival counting (same unit-keyed counting as AdvanceNode).
 	result.OutboxIDs = append(result.OutboxIDs, s.applyGroupDownstreamLocked(req.ExecutionID, req.Downstream)...)
