@@ -35,10 +35,9 @@ type memoryState struct {
 	suspended      map[string]*types.SuspendSpec // key: execID+"/"+nodeName
 	signals        map[string]map[string]any     // pre-delivered: key: execID+"/"+signalName
 	signalSets     map[string]map[string]map[string]any
-	resumed        map[string]bool                   // resume lock: key: execID+"/"+nodeName
-	subExecs       map[string][]*engine.SubExecution // key: execID+"/"+nodeName
-	groupUnits     map[string]*groupUnitState        // key: "<execID>/<unitIdx>"
-	suspendedGroups map[suspendedGroupKey]*engine.GroupSuspendState
+	resumed        map[string]bool                         // resume lock: key: execID+"/"+nodeName
+	subExecs       map[string][]*engine.SubExecution       // key: execID+"/"+nodeName
+	groupUnits     map[string]*groupUnitState              // key: "<execID>/<unitIdx>"
 	admissions     map[engine.AdmissionKey]*admissionEntry // trigger admission keys
 
 	// done channels allow Wait() callers to block until execution completes.
@@ -72,7 +71,6 @@ func newMemoryState() *memoryState {
 		resumed:        make(map[string]bool),
 		subExecs:       make(map[string][]*engine.SubExecution),
 		groupUnits:     make(map[string]*groupUnitState),
-		suspendedGroups: make(map[suspendedGroupKey]*engine.GroupSuspendState),
 		doneCh:         make(map[types.ExecutionID]chan struct{}),
 		eventWatchers:  make(map[types.ExecutionID][]chan engine.ExecutionEvent),
 	}

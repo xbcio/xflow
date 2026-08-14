@@ -8,9 +8,8 @@ func TestTaskTypeAppendOnly(t *testing.T) {
 		TaskTypeNodeSkip != 3 || TaskTypeNodeBatch != 4 {
 		t.Fatal("existing TaskType values must not shift")
 	}
-	if TaskTypeGroupExec != 5 || TaskTypeGroupResume != 6 {
-		t.Fatalf("group task types must append at end: exec=%d resume=%d",
-			TaskTypeGroupExec, TaskTypeGroupResume)
+	if TaskTypeGroupExec != 5 {
+		t.Fatalf("group task types must append at end: exec=%d", TaskTypeGroupExec)
 	}
 }
 

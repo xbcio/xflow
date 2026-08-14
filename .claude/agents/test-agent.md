@@ -41,7 +41,7 @@ Measured: with only `XFLOW_TEST_REDIS_ADDR` set, these tests skip silently and r
 
 ## Pitfalls (each one hit for real — follow these)
 
-**1. Flush the database first, or you get phantom failures.** The rstate contract tests use deterministic keys (e.g. `entryact:{wf-1|v1|u-fence}`, `e-TestRedisGroupStateContract/...`). With leftovers from an earlier run in the database, the `EntryActivation`, `GroupState`, `EntryAdmission`, and `GroupSuspend` contracts fail broadly, and the symptom is a first `Assign` returning `ok=false` — **it reads like broken CAS logic but it is just a dirty database**. The contract tests now flush at construction, but other packages make no such guarantee. Before every real-Redis run:
+**1. Flush the database first, or you get phantom failures.** The rstate contract tests use deterministic keys (e.g. `entryact:{wf-1|v1|u-fence}`, `e-TestRedisGroupStateContract/...`). With leftovers from an earlier run in the database, the `EntryActivation`, `GroupState`, and `EntryAdmission` contracts fail broadly, and the symptom is a first `Assign` returning `ok=false` — **it reads like broken CAS logic but it is just a dirty database**. The contract tests now flush at construction, but other packages make no such guarantee. Before every real-Redis run:
 
 ```bash
 redis-cli -p 6380 FLUSHDB

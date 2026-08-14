@@ -11,11 +11,10 @@ import (
 type GroupOutcome string
 
 const (
-	GroupOutcomeSuccess   GroupOutcome = "success"
-	GroupOutcomeFailed    GroupOutcome = "failed"
-	GroupOutcomeTimeout   GroupOutcome = "timeout"
-	GroupOutcomeCanceled  GroupOutcome = "canceled"
-	GroupOutcomeSuspended GroupOutcome = "suspended" // 里程碑 D 实现
+	GroupOutcomeSuccess  GroupOutcome = "success"
+	GroupOutcomeFailed   GroupOutcome = "failed"
+	GroupOutcomeTimeout  GroupOutcome = "timeout"
+	GroupOutcomeCanceled GroupOutcome = "canceled"
 )
 
 // GroupExitResult 是一个实际 fire 的出口端口输出。
@@ -39,10 +38,6 @@ type GroupResult struct {
 	Outcome         GroupOutcome
 	Exits           []GroupExitResult
 	Error           string
-	// Suspend is set when the group outcome is GroupOutcomeSuspended.
-	Suspend *GroupSuspendSpec `json:"suspend,omitempty"`
-	// SignalJournal is the accumulated signal journal from prior resumes.
-	SignalJournal []GroupSignal `json:"signal_journal,omitempty"`
 }
 
 // GroupLease 是整组的所有权租约，语义对齐既有 TaskLease。

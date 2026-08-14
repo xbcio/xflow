@@ -32,10 +32,6 @@ const (
 	GroupAuditAdmissionAccepted GroupAuditOperation = "admission_accepted"
 	GroupAuditAdmissionConflict GroupAuditOperation = "admission_conflict"
 	GroupAuditActivationChanged GroupAuditOperation = "activation_changed"
-	GroupAuditSuspended         GroupAuditOperation = "suspended"
-	GroupAuditResumed           GroupAuditOperation = "resumed"
-	GroupAuditCanceled          GroupAuditOperation = "canceled"
-	GroupAuditTimeout           GroupAuditOperation = "timeout"
 )
 
 // GroupAuditObserver receives group lifecycle audit events.

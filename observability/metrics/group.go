@@ -109,14 +109,6 @@ func (g *GroupMetrics) SetGroupEmitInflight(value float64) {
 	g.m.Set("xflow_group_emit_inflight", nil, value)
 }
 
-// --- Suspend/resume metrics ---
-
-// OnGroupSuspend increments the suspend/resume counter with the action label.
-// Action values: suspended, resumed, canceled, timeout.
-func (g *GroupMetrics) OnGroupSuspend(action string) {
-	g.m.Inc("xflow_group_suspend_total", map[string]string{"action": action})
-}
-
 // --- Backpressure metrics ---
 
 // OnGroupBackpressurePaused increments the backpressure paused counter.

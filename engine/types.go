@@ -26,8 +26,9 @@ const (
 	TaskTypeNodeBatch
 	// TaskTypeGroupExec 把一整个 co-location 组作为单元派发给 runner 执行。
 	TaskTypeGroupExec
-	// TaskTypeGroupResume 恢复一个 durable-suspended 组（里程碑 A 预留，暂不消费）。
-	TaskTypeGroupResume
+	// 6 曾是 TaskTypeGroupResume（durable group suspend，已随该子系统一并移除）。
+	// TaskType 是落进 outbox 的持久化数值，契约是 append-only：下一个新类型从 7
+	// 起，不要回收 6。生产从未产生过值为 6 的任务，所以存量数据里没有它。
 )
 
 // Task is the unit of work dispatched to the queue.
