@@ -30,10 +30,24 @@ type OutboxEntry struct {
 	CreatedAt   time.Time
 	Attempts    int
 	// LeasedFromScoreMs carries the entry's availability time as it stood when
-	// ListOutbox leased it, so ReleaseOutbox can restore it exactly. It is set
+	// LeaseOutbox leased it, so ReleaseOutbox can restore it exactly. It is set
 	// by the store on the way out and is meaningless on an entry the caller
 	// constructs.
 	LeasedFromScoreMs int64
+	// LeaseDeadlineMs is when the lease this caller holds expires, and doubles
+	// as the fencing token that identifies the holder.
+	//
+	// The lease is otherwise anonymous — there is no process identity to hang it
+	// on — so RenewOutbox proves ownership by presenting the deadline it expects
+	// to still be in force. A deliverer that stalled past its own deadline finds
+	// the entry has moved on, and its renewal is refused rather than yanking the
+	// entry back from whoever legitimately claimed it. Without that check
+	// renewal would reintroduce the duplicate delivery the lease exists to
+	// prevent, in the one case the lease is there for: a deliverer that stops
+	// responding and then comes back.
+	//
+	// Set by the store on the way out of LeaseOutbox and RenewOutbox.
+	LeaseDeadlineMs int64
 }
 
 // CommitNodeRequest describes one fenced terminal node transition. A normal
@@ -189,27 +203,36 @@ type AtomicStateStore interface {
 	RevokeLeaseWithOutbox(ctx context.Context, id types.ExecutionID, nodeName string, token LeaseToken, entry OutboxEntry) (revoked bool, err error)
 	CommitNode(ctx context.Context, req CommitNodeRequest) (CommitNodeResult, error)
 	AdvanceNode(ctx context.Context, req AdvanceNodeRequest) (AdvanceNodeResult, error)
-	// ListOutbox returns ready delivery intents AND takes a delivery lease on
-	// each one it returns: for OutboxDeliveryLeaseTTL the same entry is not
-	// returned to another caller. Ack remains the only removal path, so an
-	// entry whose deliverer dies becomes listable again when the lease lapses.
+	// ListOutbox reports ready delivery intents without changing any state.
+	//
+	// It is deliberately a pure read. The delivery lease lives on LeaseOutbox
+	// instead, because a read that also claims is a trap for every observer:
+	// a probe, a metric, or an admin query that merely wants to see the backlog
+	// would hide those entries from the flush path that has to deliver them.
 	//
 	// before is the availability cutoff — entries scheduled later than it are
-	// not yet due — and is also the clock the lease is taken against, so a
-	// caller can drive lease expiry deterministically in tests.
+	// not yet due. An entry another caller currently holds a delivery lease on
+	// is not ready, so it is not returned.
 	ListOutbox(ctx context.Context, id types.ExecutionID, before time.Time, limit int) ([]OutboxEntry, error)
 	AckOutbox(ctx context.Context, id types.ExecutionID, entryID string) error
 	ListOutboxExecutions(ctx context.Context, limit int) ([]types.ExecutionID, error)
 }
 
-// OutboxDeliveryLeaseTTL is how long ListOutbox hides an entry it handed out.
+// OutboxDeliveryLeaseTTL is how long a delivery lease survives without renewal.
 //
-// It bounds wasted work rather than correctness: delivery is at-least-once and
-// FlushOutbox acks within milliseconds of listing, so the only entries that
-// reach the timeout are ones whose deliverer crashed, lost its response, or hit
-// a full queue. It must stay well above a normal flush and well below an
-// operator's patience for a crashed worker's backlog.
-const OutboxDeliveryLeaseTTL = 30 * time.Second
+// It is deliberately short. A live deliverer renews its leases every
+// OutboxLeaseRenewInterval for as long as it holds them, so the TTL is not a
+// budget for how long delivery may take — it is how long a DEAD deliverer's
+// entries stay stranded. Making it long only delays crash recovery; making it
+// shorter than a couple of renewal intervals lets a slow network reclaim a
+// lease from a deliverer that is still alive and about to enqueue.
+const OutboxDeliveryLeaseTTL = 5 * time.Second
+
+// OutboxLeaseRenewInterval is how often a deliverer renews the leases it holds.
+//
+// It must stay well under OutboxDeliveryLeaseTTL so a renewal that is merely
+// slow does not read as a death.
+const OutboxLeaseRenewInterval = OutboxDeliveryLeaseTTL / 3
 
 func initialOutboxID(id types.ExecutionID, nodeName string, activationID int) string {
 	return fmt.Sprintf("root/%s/%s/%d", id, nodeName, activationID)
@@ -299,7 +322,7 @@ func (e *Engine) FlushOutbox(ctx context.Context, id types.ExecutionID) error {
 
 	const batchSize = 256
 	for {
-		entries, err := state.ListOutbox(ctx, id, time.Now().UTC(), batchSize)
+		entries, err := e.claimOutbox(ctx, state, id, batchSize)
 		if err != nil {
 			e.notifyOutboxError(ctx, "list", err)
 			return fmt.Errorf("list outbox for %q: %w", id, err)
@@ -307,12 +330,17 @@ func (e *Engine) FlushOutbox(ctx context.Context, id types.ExecutionID) error {
 		if len(entries) == 0 {
 			return nil
 		}
+		// Prove this deliverer is alive for as long as it holds the batch, so
+		// OutboxDeliveryLeaseTTL can stay short enough to recover from a crash
+		// promptly without stealing work from a slow-but-live flush.
+		keeper := e.startOutboxLeaseKeeper(ctx, state, id, entries)
 		var firstErr error
 		for i, entry := range entries {
 			if entry.Task.Type == TaskTypeNodeAdvance || entry.Task.Type == TaskTypeNodeSkip {
 				handled, err := e.handleSystemTask(ctx, &entry.Task, false)
 				if err != nil {
 					e.recordOutboxDeliveryFailure(ctx, state, id, entry, err)
+					keeper.forget(entry.ID)
 					if firstErr == nil {
 						firstErr = fmt.Errorf("handle outbox system task %q for %q: %w", entry.ID, id, err)
 					}
@@ -321,6 +349,7 @@ func (e *Engine) FlushOutbox(ctx context.Context, id types.ExecutionID) error {
 				if !handled {
 					err := fmt.Errorf("outbox task %q for %q was not handled", entry.ID, id)
 					e.recordOutboxDeliveryFailure(ctx, state, id, entry, err)
+					keeper.forget(entry.ID)
 					if firstErr == nil {
 						firstErr = err
 					}
@@ -356,11 +385,14 @@ func (e *Engine) FlushOutbox(ctx context.Context, id types.ExecutionID) error {
 					// full queue, so release from here to the end.
 					for _, held := range entries[i:] {
 						e.releaseOutboxLease(ctx, state, id, held)
+						keeper.forget(held.ID)
 					}
+					keeper.stop()
 					return nil
 				}
 				if enqueueErr != nil {
 					e.recordOutboxDeliveryFailure(ctx, state, id, entry, enqueueErr)
+					keeper.forget(entry.ID)
 					if firstErr == nil {
 						firstErr = fmt.Errorf("enqueue outbox %q for %q: %w", entry.ID, id, enqueueErr)
 					}
@@ -369,9 +401,12 @@ func (e *Engine) FlushOutbox(ctx context.Context, id types.ExecutionID) error {
 			}
 			if err := state.AckOutbox(ctx, id, entry.ID); err != nil {
 				e.notifyOutboxError(ctx, "ack", err)
+				keeper.stop()
 				return fmt.Errorf("ack outbox %q for %q: %w", entry.ID, id, err)
 			}
+			keeper.forget(entry.ID)
 		}
+		keeper.stop()
 		if firstErr != nil {
 			return firstErr
 		}

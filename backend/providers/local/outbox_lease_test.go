@@ -63,7 +63,7 @@ func TestConcurrentFlushDoesNotRedeliverTheSameIntent(t *testing.T) {
 	}
 }
 
-// A leased entry must become listable again once its visibility timeout
+// A leased entry must become claimable again once its visibility timeout
 // elapses: the lease narrows ordinary concurrency, it must not turn a crashed
 // worker's in-flight entry into a permanently stuck one.
 //
@@ -73,6 +73,10 @@ func TestConcurrentFlushDoesNotRedeliverTheSameIntent(t *testing.T) {
 func TestOutboxDeliveryLeaseExpires(t *testing.T) {
 	b := New(WithConcurrency(1))
 	state := b.State().(engine.AtomicStateStore)
+	leaser, ok := state.(engine.OutboxLeaser)
+	if !ok {
+		t.Fatal("memory state store does not implement engine.OutboxLeaser")
+	}
 	ctx := context.Background()
 
 	g, err := graph.Compile(&types.WorkflowDef{
@@ -98,29 +102,29 @@ func TestOutboxDeliveryLeaseExpires(t *testing.T) {
 	}
 
 	now := time.Now().UTC()
-	first, err := state.ListOutbox(ctx, id, now, 16)
+	first, err := leaser.LeaseOutbox(ctx, id, now, 16)
 	if err != nil {
-		t.Fatalf("ListOutbox: %v", err)
+		t.Fatalf("LeaseOutbox: %v", err)
 	}
 	if len(first) == 0 {
 		t.Fatal("no outbox entries to lease")
 	}
 
-	// Immediately re-listing must see nothing: the entries are leased.
-	again, err := state.ListOutbox(ctx, id, now, 16)
+	// Immediately re-claiming must see nothing: the entries are leased.
+	again, err := leaser.LeaseOutbox(ctx, id, now, 16)
 	if err != nil {
-		t.Fatalf("ListOutbox (leased): %v", err)
+		t.Fatalf("LeaseOutbox (leased): %v", err)
 	}
 	if len(again) != 0 {
-		t.Fatalf("re-list returned %d leased entries, want 0", len(again))
+		t.Fatalf("re-claim returned %d leased entries, want 0", len(again))
 	}
 
 	// Past the visibility timeout they must reappear, un-acked, so a crashed
 	// worker's work is not lost.
 	future := now.Add(engine.OutboxDeliveryLeaseTTL + time.Second)
-	recovered, err := state.ListOutbox(ctx, id, future, 16)
+	recovered, err := leaser.LeaseOutbox(ctx, id, future, 16)
 	if err != nil {
-		t.Fatalf("ListOutbox (expired): %v", err)
+		t.Fatalf("LeaseOutbox (expired): %v", err)
 	}
 	if len(recovered) != len(first) {
 		t.Fatalf("after the visibility timeout got %d entries, want %d", len(recovered), len(first))

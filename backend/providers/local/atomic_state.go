@@ -37,6 +37,7 @@ var _ engine.AtomicStateStore = (*memoryState)(nil)
 var _ engine.LegacyNodeCommitter = (*memoryState)(nil)
 var _ engine.DurableLeaseSuspender = (*memoryState)(nil)
 var _ engine.OutboxFailureRecorder = (*memoryState)(nil)
+var _ engine.OutboxLeaser = (*memoryState)(nil)
 var _ engine.OutboxReleaser = (*memoryState)(nil)
 var _ engine.OutboxMetricsReader = (*memoryState)(nil)
 var _ engine.DeadLetterStore = (*memoryState)(nil)
@@ -229,15 +230,85 @@ func (s *memoryState) AdvanceNode(_ context.Context, req engine.AdvanceNodeReque
 	return result, nil
 }
 
-// ListOutbox returns ready delivery intents for a single execution and takes a
-// delivery lease on each one, so a concurrent caller does not redeliver work
-// that is already in flight. See engine.OutboxDeliveryLeaseTTL.
+// ListOutbox reports ready delivery intents without changing any state. An
+// entry another deliverer currently holds a lease on is not ready, so it is
+// omitted. Claiming for delivery is LeaseOutbox's job.
 func (s *memoryState) ListOutbox(_ context.Context, id types.ExecutionID, before time.Time, limit int) ([]engine.OutboxEntry, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	ids := s.readyOutboxIDsLocked(id, before, limit)
+	entries := s.outbox[id]
+	out := make([]engine.OutboxEntry, 0, len(ids))
+	for _, entryID := range ids {
+		out = append(out, cloneOutboxEntry(entries[entryID].entry))
+	}
+	return out, nil
+}
+
+// LeaseOutbox claims ready delivery intents for exclusive delivery, so a
+// concurrent caller does not redeliver work that is already in flight. See
+// engine.OutboxDeliveryLeaseTTL.
+func (s *memoryState) LeaseOutbox(_ context.Context, id types.ExecutionID, now time.Time, limit int) ([]engine.OutboxEntry, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ids := s.readyOutboxIDsLocked(id, now, limit)
+	entries := s.outbox[id]
+	out := make([]engine.OutboxEntry, 0, len(ids))
+	for _, entryID := range ids {
+		held := entries[entryID]
+		held.leasedUntil = now.Add(engine.OutboxDeliveryLeaseTTL)
+		entries[entryID] = held
+		leased := cloneOutboxEntry(held.entry)
+		leased.LeaseDeadlineMs = held.leasedUntil.UnixMilli()
+		out = append(out, leased)
+	}
+	return out, nil
+}
+
+// RenewOutbox extends the leases this deliverer still holds, proving it is
+// alive so engine.OutboxDeliveryLeaseTTL can stay short. It returns the entries
+// whose renewal was granted, each carrying the new deadline the next renewal
+// must present.
+//
+// The caller proves ownership by presenting the deadline it believes it holds,
+// because the lease has no other identity. An entry whose lease already lapsed
+// may have been legitimately claimed by another deliverer, and extending it
+// again would yank it back mid-flight and deliver it twice — the exact
+// duplication the lease exists to prevent, in precisely the case it exists for.
+func (s *memoryState) RenewOutbox(_ context.Context, id types.ExecutionID, renew []engine.OutboxEntry, now time.Time) ([]engine.OutboxEntry, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entries := s.outbox[id]
+	deadline := now.Add(engine.OutboxDeliveryLeaseTTL)
+	out := make([]engine.OutboxEntry, 0, len(renew))
+	for _, entry := range renew {
+		held, ok := entries[entry.ID]
+		if !ok || !held.leasedUntil.After(now) {
+			continue
+		}
+		if held.leasedUntil.UnixMilli() != entry.LeaseDeadlineMs {
+			continue
+		}
+		held.leasedUntil = deadline
+		entries[entry.ID] = held
+		renewed := cloneOutboxEntry(held.entry)
+		renewed.LeasedFromScoreMs = entry.LeasedFromScoreMs
+		renewed.LeaseDeadlineMs = deadline.UnixMilli()
+		out = append(out, renewed)
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
+}
+
+// readyOutboxIDsLocked returns the sorted IDs of entries that are due and not
+// currently leased. Shared by the read and claim paths so the two can never
+// disagree about what "ready" means.
+func (s *memoryState) readyOutboxIDsLocked(id types.ExecutionID, before time.Time, limit int) []string {
 	entries := s.outbox[id]
 	if len(entries) == 0 || limit == 0 {
-		return nil, nil
+		return nil
 	}
 	ids := make([]string, 0, len(entries))
 	for entryID, entry := range entries {
@@ -252,14 +323,7 @@ func (s *memoryState) ListOutbox(_ context.Context, id types.ExecutionID, before
 	if limit > 0 && len(ids) > limit {
 		ids = ids[:limit]
 	}
-	out := make([]engine.OutboxEntry, 0, len(ids))
-	for _, entryID := range ids {
-		held := entries[entryID]
-		held.leasedUntil = before.Add(engine.OutboxDeliveryLeaseTTL)
-		entries[entryID] = held
-		out = append(out, cloneOutboxEntry(held.entry))
-	}
-	return out, nil
+	return ids
 }
 
 // AckOutbox removes one successfully handed-off delivery intent. It is

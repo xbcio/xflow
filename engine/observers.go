@@ -57,6 +57,42 @@ type OutboxMetricsReader interface {
 	OutboxMetrics(ctx context.Context) (OutboxMetricsSnapshot, error)
 }
 
+// OutboxLeaser is an optional StateStore capability that claims ready delivery
+// intents for exclusive delivery.
+//
+// It exists because multiple processes flush the same execution concurrently —
+// every server runs its own OutboxDispatcher, ungated by leader election — and
+// without a claim each of them delivers the same entry. An 800-item map at
+// concurrency 4 ran its body 826-1110 times against 800 at concurrency 1.
+//
+// The claim is a lease rather than a removal so at-least-once survives: a
+// deliverer that dies mid-flight must have its entries become deliverable again.
+// RenewOutbox is what keeps that recovery prompt without stranding a live
+// deliverer — see OutboxDeliveryLeaseTTL.
+//
+// A store that leases must also implement OutboxReleaser. A store that
+// implements neither is delivered from without claiming, which is correct but
+// duplicates under concurrency.
+type OutboxLeaser interface {
+	// LeaseOutbox claims up to limit ready entries and hides them from other
+	// callers — including ListOutbox — until their leases lapse or are released.
+	//
+	// now is both the availability cutoff and the clock the lease is taken
+	// against, so a test can drive lease expiry deterministically.
+	LeaseOutbox(ctx context.Context, id types.ExecutionID, now time.Time, limit int) ([]OutboxEntry, error)
+	// RenewOutbox extends the leases the caller holds, proving the deliverer is
+	// still alive, and returns the entries whose renewal was granted — each
+	// carrying the new deadline the next renewal must present.
+	//
+	// A caller renews by presenting the deadline it believes it holds, because
+	// the lease has no other identity. An entry whose lease already lapsed and
+	// was claimed elsewhere is refused rather than renewed, so a deliverer that
+	// stalls and comes back cannot steal work another deliverer legitimately
+	// took over. An entry absent from the result is one the caller no longer
+	// holds and must stop renewing.
+	RenewOutbox(ctx context.Context, id types.ExecutionID, entries []OutboxEntry, now time.Time) ([]OutboxEntry, error)
+}
+
 // OutboxReleaser is an optional StateStore capability that hands a leased
 // delivery intent back before its visibility timeout elapses.
 //

@@ -16,6 +16,7 @@ import (
 )
 
 var _ engine.OutboxFailureRecorder = (*Store)(nil)
+var _ engine.OutboxLeaser = (*Store)(nil)
 var _ engine.OutboxReleaser = (*Store)(nil)
 var _ engine.OutboxMetricsReader = (*Store)(nil)
 
@@ -67,6 +68,39 @@ end
 return out
 `)
 
+// renewOutboxLua extends the leases a live deliverer still holds.
+//
+// Renewal is fenced on the deadline the caller believes it holds, because the
+// lease has no other identity. Presenting a deadline that no longer matches the
+// entry's score means this caller's lease already lapsed and someone else
+// claimed the entry; pushing the score forward then would yank it back
+// mid-flight and deliver it twice — the exact duplication the lease exists to
+// prevent, in precisely the case it exists for (a deliverer that stalls and
+// then comes back). Such a renewal is refused.
+//
+// A caller that lost its lease learns so from the renewed count, which is why
+// the script returns it rather than a bare OK.
+//
+// KEYS: 1=outbox:ready 2=outbox:body
+// ARGV: 1=now_ms 2=visibility_ms 3..N=entryID,expectedDeadlineMs pairs
+var renewOutboxLua = redis.NewScript(`
+local now = tonumber(ARGV[1])
+local visibility = tonumber(ARGV[2])
+local renewed = 0
+for i = 3, #ARGV, 2 do
+    local entryID = ARGV[i]
+    local expected = tonumber(ARGV[i + 1])
+    if redis.call('HGET', KEYS[2], entryID) then
+        local score = redis.call('ZSCORE', KEYS[1], entryID)
+        if score and tonumber(score) == expected and expected > now then
+            redis.call('ZADD', KEYS[1], now + visibility, entryID)
+            renewed = renewed + 1
+        end
+    end
+end
+return renewed
+`)
+
 // releaseOutboxLua hands a leased entry back for immediate redelivery by
 // restoring its original availability score.
 //
@@ -84,21 +118,80 @@ redis.call('ZADD', KEYS[1], tonumber(ARGV[2]), ARGV[1])
 return 1
 `)
 
-// ListOutbox returns ready entries for one execution and leases each one for
-// engine.OutboxDeliveryLeaseTTL, so concurrent flushes of the same execution do
-// not both deliver the same intent. Entries stay in Redis until AckOutbox, so
-// enqueue/ack response loss is still retried — once the lease lapses.
+// readOutboxLua reports ready entries without claiming any of them.
+//
+// The cutoff filters out both entries that are not due yet and entries another
+// deliverer currently holds a lease on — both express themselves as a score in
+// the future, which is precisely what "not ready" means.
+//
+// It self-heals a body-less ready member the same way leaseOutboxLua does: such
+// a member is the residue of an ack, and leaving it would break the
+// body-presence ⇔ ready-membership equivalence the dead-letter guard relies on.
+//
+// KEYS: 1=outbox:ready 2=outbox:body
+// ARGV: 1=cutoff_ms 2=limit
+var readOutboxLua = redis.NewScript(`
+local cutoff = tonumber(ARGV[1])
+local ids = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', cutoff, 'LIMIT', 0, tonumber(ARGV[2]))
+local out = {}
+for i = 1, #ids do
+    local entryID = ids[i]
+    local body = redis.call('HGET', KEYS[2], entryID)
+    if body then
+        out[#out + 1] = entryID
+        out[#out + 1] = body
+    else
+        redis.call('ZREM', KEYS[1], entryID)
+        redis.call('HDEL', KEYS[2], entryID)
+    end
+end
+return out
+`)
+
+// ListOutbox reports ready delivery intents without changing any state. Entries
+// another deliverer currently holds a lease on are not ready and are omitted.
+// Claiming for delivery is LeaseOutbox's job.
 func (s *Store) ListOutbox(ctx context.Context, id types.ExecutionID, before time.Time, limit int) ([]engine.OutboxEntry, error) {
 	if limit <= 0 {
 		return nil, nil
 	}
 	t := namespace.FromContext(ctx)
-	raw, err := leaseOutboxLua.Run(ctx, s.rdb,
+	raw, err := readOutboxLua.Run(ctx, s.rdb,
 		[]string{outboxReadyKey(t, id), outboxBodyKey(t, id)},
-		before.UnixMilli(), limit, engine.OutboxDeliveryLeaseTTL.Milliseconds(),
+		before.UnixMilli(), limit,
 	).Slice()
 	if err != nil {
 		return nil, fmt.Errorf("list outbox %q: %w", id, err)
+	}
+	out := make([]engine.OutboxEntry, 0, len(raw)/2)
+	for i := 0; i+1 < len(raw); i += 2 {
+		entryID, _ := raw[i].(string)
+		body, _ := raw[i+1].(string)
+		entry, err := unmarshalRedisOutboxEntry(body)
+		if err != nil {
+			return out, fmt.Errorf("decode outbox %q/%q: %w", id, entryID, err)
+		}
+		out = append(out, entry)
+	}
+	return out, nil
+}
+
+// LeaseOutbox claims ready entries for exclusive delivery, hiding each from
+// other callers for engine.OutboxDeliveryLeaseTTL. Entries stay in Redis until
+// AckOutbox, so enqueue/ack response loss is still retried — once the lease
+// lapses or is released.
+func (s *Store) LeaseOutbox(ctx context.Context, id types.ExecutionID, now time.Time, limit int) ([]engine.OutboxEntry, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	t := namespace.FromContext(ctx)
+	deadline := now.UnixMilli() + engine.OutboxDeliveryLeaseTTL.Milliseconds()
+	raw, err := leaseOutboxLua.Run(ctx, s.rdb,
+		[]string{outboxReadyKey(t, id), outboxBodyKey(t, id)},
+		now.UnixMilli(), limit, engine.OutboxDeliveryLeaseTTL.Milliseconds(),
+	).Slice()
+	if err != nil {
+		return nil, fmt.Errorf("lease outbox %q: %w", id, err)
 	}
 	out := make([]engine.OutboxEntry, 0, len(raw)/3)
 	for i := 0; i+2 < len(raw); i += 3 {
@@ -109,6 +202,45 @@ func (s *Store) ListOutbox(ctx context.Context, id types.ExecutionID, before tim
 			return out, fmt.Errorf("decode outbox %q/%q: %w", id, entryID, err)
 		}
 		entry.LeasedFromScoreMs = leasedScoreOf(raw[i+2])
+		entry.LeaseDeadlineMs = deadline
+		out = append(out, entry)
+	}
+	return out, nil
+}
+
+// RenewOutbox extends the leases this deliverer still holds, proving it is
+// alive so engine.OutboxDeliveryLeaseTTL can stay short.
+//
+// It reports back the entries whose renewal was granted, each carrying its new
+// deadline for the next renewal to fence on. An entry missing from the result
+// is one this caller no longer holds — see renewOutboxLua. Because the script
+// returns only a count, the grant is all-or-nothing per batch: a partial renewal
+// cannot be attributed to specific entries, so the caller must treat the whole
+// batch as lost and let those leases lapse, which redelivers rather than loses.
+func (s *Store) RenewOutbox(ctx context.Context, id types.ExecutionID, entries []engine.OutboxEntry, now time.Time) ([]engine.OutboxEntry, error) {
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	t := namespace.FromContext(ctx)
+	deadline := now.UnixMilli() + engine.OutboxDeliveryLeaseTTL.Milliseconds()
+	argv := make([]any, 0, 2*len(entries)+2)
+	argv = append(argv, now.UnixMilli(), engine.OutboxDeliveryLeaseTTL.Milliseconds())
+	for _, entry := range entries {
+		argv = append(argv, entry.ID, entry.LeaseDeadlineMs)
+	}
+	renewed, err := renewOutboxLua.Run(ctx, s.rdb,
+		[]string{outboxReadyKey(t, id), outboxBodyKey(t, id)},
+		argv...,
+	).Int64()
+	if err != nil {
+		return nil, fmt.Errorf("renew outbox %q: %w", id, err)
+	}
+	if int(renewed) != len(entries) {
+		return nil, nil
+	}
+	out := make([]engine.OutboxEntry, 0, len(entries))
+	for _, entry := range entries {
+		entry.LeaseDeadlineMs = deadline
 		out = append(out, entry)
 	}
 	return out, nil

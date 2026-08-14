@@ -195,7 +195,7 @@ func RunStateStoreContract(t *testing.T, state engine.StateStore) {
 	runOutboxDeliveryLease(t, state)
 }
 
-// runOutboxDeliveryLease pins the ListOutbox delivery lease on both backends.
+// runOutboxDeliveryLease pins the delivery lease on both backends.
 //
 // Without it every worker that flushes the same execution lists the same
 // un-acked entries and delivers them again: a 800-item map at concurrency 4 ran
@@ -230,23 +230,79 @@ func runOutboxDeliveryLease(t *testing.T, state engine.StateStore) {
 		t.Fatalf("CreateExecutionWithOutbox() error = %v", err)
 	}
 
+	leaser, ok := atomic.(engine.OutboxLeaser)
+	if !ok {
+		t.Fatal("state store does not implement engine.OutboxLeaser")
+	}
+
 	now := time.Now().UTC()
-	first, err := atomic.ListOutbox(ctx, id, now, 16)
+
+	// Reading must not claim. Every probe, metric, and admin query goes through
+	// ListOutbox; if reading took a lease, any of them would hide the entry from
+	// the flush that has to deliver it.
+	for i := 0; i < 3; i++ {
+		read, err := atomic.ListOutbox(ctx, id, now, 16)
+		if err != nil {
+			t.Fatalf("ListOutbox(read %d) error = %v", i, err)
+		}
+		if len(read) != 1 || read[0].ID != entry.ID {
+			t.Fatalf("ListOutbox(read %d) = %+v, want the seeded entry every time — "+
+				"a read that claims starves the flush path", i, read)
+		}
+	}
+
+	first, err := leaser.LeaseOutbox(ctx, id, now, 16)
 	if err != nil {
-		t.Fatalf("ListOutbox() error = %v", err)
+		t.Fatalf("LeaseOutbox() error = %v", err)
 	}
 	if len(first) != 1 || first[0].ID != entry.ID {
-		t.Fatalf("ListOutbox() = %+v, want the single seeded entry", first)
+		t.Fatalf("LeaseOutbox() = %+v, want the single seeded entry", first)
 	}
 
 	// A second flush of the same execution must not see the in-flight entry.
-	leased, err := atomic.ListOutbox(ctx, id, now, 16)
+	leased, err := leaser.LeaseOutbox(ctx, id, now, 16)
+	if err != nil {
+		t.Fatalf("LeaseOutbox(leased) error = %v", err)
+	}
+	if len(leased) != 0 {
+		t.Fatalf("LeaseOutbox(leased) returned %d entries, want 0 — a concurrent "+
+			"flush would redeliver work already in flight", len(leased))
+	}
+
+	// A leased entry is not ready, so the read path must not report it either.
+	readLeased, err := atomic.ListOutbox(ctx, id, now, 16)
 	if err != nil {
 		t.Fatalf("ListOutbox(leased) error = %v", err)
 	}
-	if len(leased) != 0 {
-		t.Fatalf("ListOutbox(leased) returned %d entries, want 0 — a concurrent "+
-			"flush would redeliver work already in flight", len(leased))
+	if len(readLeased) != 0 {
+		t.Fatalf("ListOutbox(leased) returned %d entries, want 0 — an entry in "+
+			"flight is not ready", len(readLeased))
+	}
+
+	// Renewal keeps a live deliverer's claim alive past the TTL, which is what
+	// lets the TTL be short enough to recover from a crash quickly.
+	renewAt := now.Add(engine.OutboxDeliveryLeaseTTL - time.Second)
+	renewed, err := leaser.RenewOutbox(ctx, id, first, renewAt)
+	if err != nil {
+		t.Fatalf("RenewOutbox() error = %v", err)
+	}
+	if len(renewed) != 1 {
+		t.Fatalf("RenewOutbox() granted %d entries, want 1 — a live deliverer "+
+			"could not extend its own lease", len(renewed))
+	}
+	if renewed[0].LeaseDeadlineMs <= first[0].LeaseDeadlineMs {
+		t.Fatalf("RenewOutbox() deadline = %d, want later than %d — without a "+
+			"fresh deadline the next renewal presents a stale token and is refused",
+			renewed[0].LeaseDeadlineMs, first[0].LeaseDeadlineMs)
+	}
+	stillHeld, err := leaser.LeaseOutbox(ctx, id, now.Add(engine.OutboxDeliveryLeaseTTL+time.Second), 16)
+	if err != nil {
+		t.Fatalf("LeaseOutbox(renewed) error = %v", err)
+	}
+	if len(stillHeld) != 0 {
+		t.Fatalf("LeaseOutbox(renewed) returned %d entries, want 0 — a renewed "+
+			"lease was stolen from a live deliverer, which redelivers its work",
+			len(stillHeld))
 	}
 
 	// Releasing hands it straight back: backpressure and a failed handoff are
@@ -258,36 +314,68 @@ func runOutboxDeliveryLease(t *testing.T, state engine.StateStore) {
 	if err := releaser.ReleaseOutbox(ctx, id, first[0]); err != nil {
 		t.Fatalf("ReleaseOutbox() error = %v", err)
 	}
-	released, err := atomic.ListOutbox(ctx, id, now, 16)
+	released, err := leaser.LeaseOutbox(ctx, id, now, 16)
 	if err != nil {
-		t.Fatalf("ListOutbox(released) error = %v", err)
+		t.Fatalf("LeaseOutbox(released) error = %v", err)
 	}
 	if len(released) != 1 {
-		t.Fatalf("ListOutbox(released) returned %d entries, want 1 — a released "+
+		t.Fatalf("LeaseOutbox(released) returned %d entries, want 1 — a released "+
 			"entry must be deliverable immediately", len(released))
+	}
+
+	// Renewing a lapsed lease must NOT reclaim it. Once the lease lapses another
+	// deliverer may legitimately claim the entry, and pulling it back would
+	// deliver it twice — the duplication the lease exists to prevent. This is
+	// the case the lease exists for: a deliverer that stalls, then comes back.
+	lapsed := now.Add(2 * engine.OutboxDeliveryLeaseTTL)
+	takenOver, err := leaser.LeaseOutbox(ctx, id, lapsed, 16)
+	if err != nil {
+		t.Fatalf("LeaseOutbox(takeover) error = %v", err)
+	}
+	if len(takenOver) != 1 {
+		t.Fatalf("LeaseOutbox(takeover) returned %d entries, want 1 — a lapsed "+
+			"lease must be claimable by the next deliverer", len(takenOver))
+	}
+	staleRenew, err := leaser.RenewOutbox(ctx, id, released, now)
+	if err != nil {
+		t.Fatalf("RenewOutbox(lapsed) error = %v", err)
+	}
+	if len(staleRenew) != 0 {
+		t.Fatalf("RenewOutbox(lapsed) granted %d entries, want 0 — the previous "+
+			"holder was told it still owns an entry another deliverer took over",
+			len(staleRenew))
+	}
+	afterStaleRenew, err := leaser.LeaseOutbox(ctx, id, lapsed.Add(time.Second), 16)
+	if err != nil {
+		t.Fatalf("LeaseOutbox(after stale renew) error = %v", err)
+	}
+	if len(afterStaleRenew) != 0 {
+		t.Fatalf("LeaseOutbox(after stale renew) returned %d entries, want 0 — a "+
+			"renewal from the previous holder pulled back an entry the current "+
+			"deliverer owns", len(afterStaleRenew))
 	}
 
 	// And the lease lapses on its own, so a deliverer that dies mid-flight
 	// does not strand its entries.
-	expired, err := atomic.ListOutbox(ctx, id, now.Add(engine.OutboxDeliveryLeaseTTL+time.Second), 16)
+	expired, err := leaser.LeaseOutbox(ctx, id, lapsed.Add(2*engine.OutboxDeliveryLeaseTTL), 16)
 	if err != nil {
-		t.Fatalf("ListOutbox(expired) error = %v", err)
+		t.Fatalf("LeaseOutbox(expired) error = %v", err)
 	}
 	if len(expired) != 1 {
-		t.Fatalf("ListOutbox(expired) returned %d entries, want 1 — a lapsed "+
-			"lease must make the entry listable again", len(expired))
+		t.Fatalf("LeaseOutbox(expired) returned %d entries, want 1 — a lapsed "+
+			"lease must make the entry claimable again", len(expired))
 	}
 
 	// Ack is still the only removal path.
 	if err := atomic.AckOutbox(ctx, id, entry.ID); err != nil {
 		t.Fatalf("AckOutbox() error = %v", err)
 	}
-	acked, err := atomic.ListOutbox(ctx, id, now.Add(2*engine.OutboxDeliveryLeaseTTL), 16)
+	acked, err := leaser.LeaseOutbox(ctx, id, lapsed.Add(4*engine.OutboxDeliveryLeaseTTL), 16)
 	if err != nil {
-		t.Fatalf("ListOutbox(acked) error = %v", err)
+		t.Fatalf("LeaseOutbox(acked) error = %v", err)
 	}
 	if len(acked) != 0 {
-		t.Fatalf("ListOutbox(acked) returned %d entries, want 0", len(acked))
+		t.Fatalf("LeaseOutbox(acked) returned %d entries, want 0", len(acked))
 	}
 	// Releasing an already-acked entry must not make it deliverable again.
 	// This is the idempotence half only: a store may also self-heal a ready
@@ -297,13 +385,25 @@ func runOutboxDeliveryLease(t *testing.T, state engine.StateStore) {
 	if err := releaser.ReleaseOutbox(ctx, id, first[0]); err != nil {
 		t.Fatalf("ReleaseOutbox(acked) error = %v", err)
 	}
-	ghost, err := atomic.ListOutbox(ctx, id, now.Add(2*engine.OutboxDeliveryLeaseTTL), 16)
+	ghost, err := leaser.LeaseOutbox(ctx, id, lapsed.Add(4*engine.OutboxDeliveryLeaseTTL), 16)
 	if err != nil {
-		t.Fatalf("ListOutbox(ghost) error = %v", err)
+		t.Fatalf("LeaseOutbox(ghost) error = %v", err)
 	}
 	if len(ghost) != 0 {
-		t.Fatalf("ListOutbox(ghost) returned %d entries, want 0 — releasing an "+
+		t.Fatalf("LeaseOutbox(ghost) returned %d entries, want 0 — releasing an "+
 			"acked entry redelivered it", len(ghost))
+	}
+	// Renewing an acked entry must not resurrect it either.
+	if _, err := leaser.RenewOutbox(ctx, id, first, lapsed.Add(4*engine.OutboxDeliveryLeaseTTL)); err != nil {
+		t.Fatalf("RenewOutbox(acked) error = %v", err)
+	}
+	renewGhost, err := leaser.LeaseOutbox(ctx, id, lapsed.Add(8*engine.OutboxDeliveryLeaseTTL), 16)
+	if err != nil {
+		t.Fatalf("LeaseOutbox(renew ghost) error = %v", err)
+	}
+	if len(renewGhost) != 0 {
+		t.Fatalf("LeaseOutbox(renew ghost) returned %d entries, want 0 — renewing "+
+			"an acked entry resurrected it", len(renewGhost))
 	}
 }
 

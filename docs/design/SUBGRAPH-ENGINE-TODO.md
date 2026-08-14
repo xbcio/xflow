@@ -74,14 +74,36 @@ expression + 真 body 读作 body 形态、二选一两侧、非子图 body、ex
 「在契约内」不等于「该留着」：at-least-once 存在是为了兜住崩溃与响应丢失，不是为了
 给日常并发发牌照。
 
-**修法：`ListOutbox` 列出即租约。** 没有引入第二个索引——ready ZSET 的 score 本来
-就表示「此刻之前不可投递」，租约就是把它推到 `now + OutboxDeliveryLeaseTTL`（30s）。
-成员**不移除**，所以 ack 仍是 `recordOutboxFailureLua` 之外唯一的移除路径，该脚本的
-幽灵死信守卫依赖的「body 存在 ⇔ ready 成员存在」等价关系不受影响。死掉的投递方
-留下的条目在租约失效后自然重新可列，at-least-once 因此完好。
+**修法：租约与读取分成两条路径。** 取件走 `engine.OutboxLeaser.LeaseOutbox`，读取走
+`ListOutbox`。没有引入第二个索引——ready ZSET 的 score 本来就表示「此刻之前不可投递」，
+租约就是把它推到 `now + OutboxDeliveryLeaseTTL`。成员**不移除**，所以 ack 仍是
+`recordOutboxFailureLua` 之外唯一的移除路径，该脚本的幽灵死信守卫依赖的
+「body 存在 ⇔ ready 成员存在」等价关系不受影响。死掉的投递方留下的条目在租约失效后
+自然重新可取，at-least-once 因此完好。
+
+**「列出即租约」曾是这里的方案，实测有害，已推翻（0eaa89c → 本次）。** 让读取顺手取
+租约，等于让每一个只想看一眼的调用方都把条目从投递路径上藏走：`test/integration/` 里
+20 处只读探针传的是 `time.Now().Add(time.Second)`，而租约钟就是调用方传进来的 `before`,
+于是条目对生产的 `FlushOutbox` 也隐身 31 秒。四个集成回归由此而来（提交后队列中断不被
+观察、后台 dispatcher 零重投、SIGKILL 后 stranded=0、outbox entries=0）。教训是接口层面
+的：**一个既读又占的读取方法，对探针、指标、运维查询都是陷阱**，因为它们没有理由知道
+自己在夺取投递权。
+
+**续约把 TTL 的两难拆开了。** TTL 既要够长以覆盖最慢的合法投递（否则活着的投递方被抢，
+条目被投两次），又要够短以让崩溃的投递方尽快被接管——单靠一个常数无解。持有者在持有
+期间按 `OutboxLeaseRenewInterval`（TTL/3）持续续约，于是 TTL 只衡量「**死掉的**投递方
+的条目隐身多久」，可以降到 5s（原 30s）。实测 `ProcessRebuild_BackgroundDispatcherAutoReplays`
+从 20.5s 降到 5.8s。
+
+**续约必须带围栏令牌，否则它自己就是重复投递的来源。** 租约是匿名的——进程侧没有可挂
+靠的身份（runner ID 由运维给定、leader token 每轮随机、runner session ID 由 server 现发）
+——所以续约改为出示「我认为自己持有的到期时刻」（`OutboxEntry.LeaseDeadlineMs`），
+store 端比对 score 相等才续。少了这一步，一个卡住超过 TTL、随后恢复的投递方会把条目从
+已经合法接管它的投递方手里拽回来，正好制造出租约要消灭的那种重复——而且是在租约唯一
+真正存在的场景里。两个 backend 各自的守卫都经反向探针确认承重。
 
 **释放是必需的，不是优化。** 背压（`ErrQueueFull`）和 handoff 失败都是「立刻该重试」
-的状态，毫秒级就恢复；扣着 30s 租约会把普通背压变成停顿。两条路径都经
+的状态，毫秒级就恢复；扣着整个 TTL 会把普通背压变成停顿。两条路径都经
 `engine.OutboxReleaser` 归还，且 Redis 侧的释放脚本必须先查 body——否则与 ack 竞态时
 会 ZADD 一个 body 已消失的成员，正好造出上面那个守卫认定不可能存在的幽灵。
 
@@ -90,10 +112,12 @@ expression + 真 body 读作 body 形态、二选一两侧、非子图 body、ex
 所以能收窄的层只有投递本身。
 
 覆盖：`backend/internal/statestoretest` 的共享契约（memory / miniredis / 真 Redis
-三处运行）、`backend/providers/local/outbox_lease_test.go`、
-`rstate/outbox_lease_test.go`（白盒查 ready 索引，因为 `ListOutbox` 会自愈掉无 body
-的成员，黑盒看不见幽灵）。`fanout_backpressure_test.go` 的多 worker 用例已从
-「≥ 期望数」收紧为精确相等。
+三处运行，读不取租约 / 取租约互斥 / 续约延期 / 过期续约被拒 / ack 后不复活）、
+`engine/outbox_lease_keeper_test.go`（flush 阻塞在 Enqueue 里跨过原到期时刻仍持有租约，
+以及续约被拒时投递不卡死）、`backend/providers/local/outbox_lease_test.go`、
+`rstate/outbox_lease_test.go`（白盒查 ready 索引，因为取件会自愈掉无 body 的成员，
+黑盒看不见幽灵）。`fanout_backpressure_test.go` 的多 worker 用例已从「≥ 期望数」收紧
+为精确相等。
 
 ### 队头阻塞：批次任务与普通节点任务共用一条队列（原 P1-4，2026-08-13 修复）
 
