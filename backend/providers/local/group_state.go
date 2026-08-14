@@ -136,7 +136,8 @@ func (s *memoryState) CommitGroup(_ context.Context, req engine.GroupCommitReque
 			if req.Fatal || s.failed[req.ExecutionID] > 0 {
 				status = types.ExecutionStatusFailed
 			}
-			s.finishExecutionLocked(req.ExecutionID, entry, status)
+			s.finishExecutionLocked(req.ExecutionID, entry, status,
+				engine.TerminalExecutionError(status, req.Error, ""))
 			result.ExecutionDone = true
 			result.ExecutionStatus = status
 		}

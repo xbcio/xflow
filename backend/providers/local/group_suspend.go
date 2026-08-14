@@ -183,7 +183,8 @@ func (s *memoryState) CancelSuspendedGroup(_ context.Context, execID types.Execu
 		s.remaining[execID]--
 		s.failed[execID]++
 		if s.remaining[execID] == 0 {
-			s.finishExecutionLocked(execID, entry, types.ExecutionStatusFailed)
+			s.finishExecutionLocked(execID, entry, types.ExecutionStatusFailed,
+				engine.CanceledSuspendedGroupError)
 		}
 	}
 

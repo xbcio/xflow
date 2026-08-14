@@ -92,6 +92,16 @@ type GroupCanceler interface {
 	CancelSuspendedGroup(ctx context.Context, execID types.ExecutionID, unitIdx int) error
 }
 
+// CanceledSuspendedGroupError is the execution-level failure reason recorded
+// when canceling a suspended group unit finalizes the execution as failed.
+//
+// This path is the one place a terminal failure has no node-level carrier at
+// all: cancellation terminalizes the group unit itself, so no member node ever
+// commits a failure and neither the caller nor the store has a reason string to
+// pass along. Both backends record this same constant so the readback does not
+// depend on which one is in use.
+const CanceledSuspendedGroupError = "suspended group canceled"
+
 // GroupSignalRevoker revokes a previously-delivered signal from a suspended group's waiter.
 type GroupSignalRevoker interface {
 	RevokeGroupSignal(ctx context.Context, execID types.ExecutionID, unitIdx int, signalName string) error

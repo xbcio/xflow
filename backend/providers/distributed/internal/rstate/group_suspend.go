@@ -120,10 +120,15 @@ return {0, quorum - delivered}
 
 // cancelSuspendedGroupLua transitions a suspended group unit to done and
 // decrements the execution remaining counter. If remaining reaches zero the
-// execution is finalized as failed.
+// execution is finalized as failed, recording ARGV[2] as the execution-level
+// reason: cancellation terminalizes the group unit itself, so no member node
+// ever commits a failure and this is the only carrier for the reason.
 //
 // KEYS: 1=group:status 2=group:suspend 3=remaining 4=failed 5=exec:status
-// ARGV: 1=ttl_s
+//
+//	6=exec:error
+//
+// ARGV: 1=ttl_s 2=exec_error
 //
 // Returns 1=success, 0=not suspended.
 var cancelSuspendedGroupLua = redis.NewScript(`
@@ -142,6 +147,9 @@ if remaining <= 0 then
     local curExec = redis.call('GET', KEYS[5])
     if curExec ~= 'success' and curExec ~= 'failed' and curExec ~= 'canceled' and curExec ~= 'timeout' then
         redis.call('SET', KEYS[5], 'failed', 'EX', ttl)
+        if ARGV[2] ~= '' then
+            redis.call('SET', KEYS[6], ARGV[2], 'EX', ttl)
+        end
     end
 end
 return 1
@@ -258,7 +266,9 @@ func (s *Store) GetGroupSuspendState(ctx context.Context, execID types.Execution
 
 // CancelSuspendedGroup transitions a suspended group unit to done and cleans
 // up suspend state. It decrements the execution's remaining counter which may
-// finalize the execution as failed.
+// finalize the execution as failed, in which case the Lua records
+// engine.CanceledSuspendedGroupError as the execution-level reason so the
+// readback matches the local backend.
 func (s *Store) CancelSuspendedGroup(ctx context.Context, execID types.ExecutionID, unitIdx int) error {
 	t := namespace.FromContext(ctx)
 	ttl := s.getExecTTL(execID)
@@ -269,7 +279,8 @@ func (s *Store) CancelSuspendedGroup(ctx context.Context, execID types.Execution
 		remainingNodesKey(t, execID),
 		failedNodesKey(t, execID),
 		execKey(t, execID, "status"),
-	}, int(ttl.Seconds())).Int64()
+		execKey(t, execID, "error"),
+	}, int(ttl.Seconds()), engine.CanceledSuspendedGroupError).Int64()
 	if err != nil {
 		return fmt.Errorf("cancel suspended group %q/#%d: %w", execID, unitIdx, err)
 	}

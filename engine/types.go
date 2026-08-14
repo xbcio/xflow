@@ -203,8 +203,35 @@ type ExecutionSnapshot struct {
 	// (RELEASE-GATES §4 forbids faking a parent from raw id strings). The
 	// carrier round-trips through the W3C propagator, which preserves
 	// tracestate and the sampled flag.
-	TraceCarrier map[string]string    `json:"trace_carrier,omitempty"`
-	ParentID     types.ExecutionID   // non-empty for sub-executions
+	TraceCarrier map[string]string `json:"trace_carrier,omitempty"`
+	ParentID     types.ExecutionID // non-empty for sub-executions
+	// Error is the execution-level failure reason recorded by
+	// UpdateExecutionStatus. It is the ONLY carrier when no node holds the
+	// reason: a cyclic execution that trips MaxAutoDepth fails with every node
+	// at success, because scheduler.go rejects the downstream activation rather
+	// than failing the node that tripped it. Without this field the reason was
+	// write-only — both backends persisted it, but nothing read it back, so the
+	// sole readback was the SQL audit row (executions.error_msg), invisible to
+	// callers of the inspect API.
+	Error string `json:"error,omitempty"`
+}
+
+// TerminalExecutionError picks the execution-level failure reason to persist
+// for a terminal execution.
+//
+// Both backends must agree on this, so it lives here rather than in either one:
+// a cyclic reason wins over a node reason because the cyclic terminal path can
+// carry a reason no node holds (MaxAutoDepth trips with the tripping node at
+// success), and a non-failed status carries no reason at all so a success can
+// never inherit a stale one.
+func TerminalExecutionError(status types.ExecutionStatus, nodeErr, cyclicErr string) string {
+	if status != types.ExecutionStatusFailed {
+		return ""
+	}
+	if cyclicErr != "" {
+		return cyclicErr
+	}
+	return nodeErr
 }
 
 // NodeSnapshot is the engine's view of a single node's latest state stored in

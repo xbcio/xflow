@@ -71,13 +71,17 @@ func (f *fakeState) createExecutionLocked(e *ExecutionSnapshot) {
 	}
 }
 
-func (f *fakeState) UpdateExecutionStatus(_ context.Context, id types.ExecutionID, status types.ExecutionStatus, _ string) error {
+func (f *fakeState) UpdateExecutionStatus(_ context.Context, id types.ExecutionID, status types.ExecutionStatus, errMsg string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if e, ok := f.executions[id]; ok {
 		e.Status = status
+		// Recording the reason mirrors both real backends: a failed execution
+		// keeps it, and any other status clears it so a success can never
+		// inherit a stale reason.
+		e.Error = TerminalExecutionError(status, errMsg, "")
 	}
-	f.publishLocked(ExecutionEvent{ExecutionID: id, Status: status})
+	f.publishLocked(ExecutionEvent{ExecutionID: id, Status: status, Error: errMsg})
 	return nil
 }
 

@@ -225,6 +225,59 @@ func RunGroupStateContract(t *testing.T, newStore func(*testing.T) GroupStore) {
 		}
 	})
 
+	// A fatal group commit finalizes the execution as failed. The reason travels
+	// on the commit request, not through UpdateExecutionStatus, so it is the
+	// commit path's own readback that has to work: the group unit is terminalized
+	// as a whole and no member node ever writes a node-level error, leaving the
+	// execution-level reason as the only carrier.
+	t.Run("FatalGroupCommitStoresExecutionError", func(t *testing.T) {
+		s, id, gu := seed(t, twoUnitGraph(t))
+		if ok, _ := s.AcquireGroupLease(ctx, lease(id, gu, "T1")); !ok {
+			t.Fatal("acquire must succeed")
+		}
+		const reason = "group member analyze failed fatally"
+		req := commit(id, gu, "T1")
+		req.Outcome = engine.GroupOutcomeFailed
+		req.Fatal = true
+		req.Error = reason
+		res, err := s.CommitGroup(ctx, req)
+		if err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+		if !res.ExecutionDone || res.ExecutionStatus != types.ExecutionStatusFailed {
+			t.Fatalf("fatal commit must fail the execution: done=%v status=%v", res.ExecutionDone, res.ExecutionStatus)
+		}
+		snap, err := s.GetExecution(ctx, id)
+		if err != nil || snap == nil {
+			t.Fatalf("GetExecution: snap=%v err=%v", snap, err)
+		}
+		if snap.Error != reason {
+			t.Fatalf("ExecutionSnapshot.Error = %q, want %q — the commit path's failure reason is not readable online", snap.Error, reason)
+		}
+	})
+
+	// Negative half: a successful commit must leave no reason behind, or a
+	// backend that echoes the request's Error field unconditionally would pass
+	// the assertion above.
+	t.Run("SuccessfulGroupCommitLeavesExecutionErrorEmpty", func(t *testing.T) {
+		s, id, gu := seed(t, singleGroupGraph(t))
+		if ok, _ := s.AcquireGroupLease(ctx, lease(id, gu, "T1")); !ok {
+			t.Fatal("acquire must succeed")
+		}
+		req := commit(id, gu, "T1")
+		req.Error = "must not be recorded on a success"
+		if _, err := s.CommitGroup(ctx, req); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+		snap, err := s.GetExecution(ctx, id)
+		if err != nil || snap == nil {
+			t.Fatalf("GetExecution: snap=%v err=%v", snap, err)
+		}
+		if snap.Error != "" {
+			t.Fatalf("ExecutionSnapshot.Error = %q on a successful commit, want empty", snap.Error)
+		}
+	})
+
 	// Fan-in minimal coverage: group commit lights up downstream unit's wait_any first arrival.
 	t.Run("CommitSchedulesWaitAnyDownstream", func(t *testing.T) {
 		g := twoUnitGraph(t)

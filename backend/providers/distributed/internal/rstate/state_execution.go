@@ -340,17 +340,10 @@ func (s *Store) projectExecutionStatus(ctx context.Context, id types.ExecutionID
 }
 
 // terminalExecutionError picks the reason to project for a terminal execution.
-// A successful execution has no reason; a failed one prefers the cyclic final
-// error (the only carrier when the depth limit trips, because the node that
-// tripped it SUCCEEDED) and falls back to the failing node's error.
+// The rule is shared with the local backend, so it lives in engine; this is a
+// thin alias kept for call-site brevity.
 func terminalExecutionError(status types.ExecutionStatus, nodeErr, cyclicErr string) string {
-	if status != types.ExecutionStatusFailed {
-		return ""
-	}
-	if cyclicErr != "" {
-		return cyclicErr
-	}
-	return nodeErr
+	return engine.TerminalExecutionError(status, nodeErr, cyclicErr)
 }
 
 func (s *Store) GetExecution(ctx context.Context, id types.ExecutionID) (*engine.ExecutionSnapshot, error) {
@@ -411,6 +404,15 @@ func (s *Store) GetExecution(ctx context.Context, id types.ExecutionID) (*engine
 	} else if err != redis.Nil {
 		return nil, fmt.Errorf("get execution trace carrier %q: %w", id, err)
 	}
+	// The error key is written by UpdateExecutionStatus and by commitNodeLua's
+	// CyclicFinalError branch, but was never read back until now. Absent is the
+	// normal case (every non-failed execution), hence the redis.Nil tolerance.
+	var execErr string
+	if raw, err := s.rdb.Get(ctx, execKey(t, id, "error")).Result(); err == nil {
+		execErr = raw
+	} else if err != redis.Nil {
+		return nil, fmt.Errorf("get execution error %q: %w", id, err)
+	}
 	return &engine.ExecutionSnapshot{
 		ID:           id,
 		Graph:        g,
@@ -421,5 +423,6 @@ func (s *Store) GetExecution(ctx context.Context, id types.ExecutionID) (*engine
 		TraceID:      traceID,
 		SpanID:       spanID,
 		TraceCarrier: traceCarrier,
+		Error:        execErr,
 	}, nil
 }

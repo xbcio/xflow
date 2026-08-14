@@ -39,6 +39,7 @@ func (e *Engine) Inspect(ctx context.Context, id types.ExecutionID, nodeNames ..
 	detail := ExecutionDetail{
 		ExecutionID: id,
 		Status:      snap.Status,
+		Error:       snap.Error,
 	}
 
 	names := nodeNames

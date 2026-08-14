@@ -110,7 +110,8 @@ func (s *memoryState) CommitNode(_ context.Context, req engine.CommitNodeRequest
 			if req.Fatal || s.failed[req.ExecutionID] > 0 {
 				status = types.ExecutionStatusFailed
 			}
-			s.finishExecutionLocked(req.ExecutionID, entry, status)
+			s.finishExecutionLocked(req.ExecutionID, entry, status,
+				engine.TerminalExecutionError(status, req.Error, ""))
 			result.ExecutionDone = true
 			result.ExecutionStatus = status
 		}
@@ -135,7 +136,8 @@ func (s *memoryState) CommitNode(_ context.Context, req engine.CommitNodeRequest
 				}
 			}
 		} else if req.CyclicComplete {
-			s.finishExecutionLocked(req.ExecutionID, entry, req.CyclicFinalStatus)
+			s.finishExecutionLocked(req.ExecutionID, entry, req.CyclicFinalStatus,
+				engine.TerminalExecutionError(req.CyclicFinalStatus, req.Error, req.CyclicFinalError))
 			result.ExecutionDone = true
 			result.ExecutionStatus = req.CyclicFinalStatus
 		}
@@ -502,18 +504,34 @@ func (s *memoryState) putOutboxEntryLocked(id types.ExecutionID, entry engine.Ou
 	return true
 }
 
-func (s *memoryState) finishExecutionLocked(id types.ExecutionID, entry *execEntry, status types.ExecutionStatus) {
+// finishExecutionLocked drives an execution to a terminal status, recording
+// errMsg as the execution-level failure reason.
+//
+// The two guards mirror the distributed backend's commit Lua verbatim
+// (`finalStatus == 'failed'` AND a non-empty reason argument): a non-failed
+// status carries no reason, and an empty reason never overwrites a stored one.
+// Diverging here would make the reason readable in one backend and not the
+// other.
+//
+// The reason matters most where no node carries it: a cyclic execution that
+// trips MaxAutoDepth finishes with every node at success, because the engine
+// rejects the downstream activation instead of failing the node that tripped
+// the limit.
+func (s *memoryState) finishExecutionLocked(id types.ExecutionID, entry *execEntry, status types.ExecutionStatus, errMsg string) {
 	if types.IsTerminalExecutionStatus(entry.snap.Status) {
 		return
 	}
 	entry.snap.Status = status
+	if status == types.ExecutionStatusFailed && errMsg != "" {
+		entry.snap.Error = errMsg
+	}
 	if !entry.closed {
 		entry.closed = true
 		if done := s.doneCh[id]; done != nil {
 			close(done)
 		}
 	}
-	s.publishLocked(engine.ExecutionEvent{ExecutionID: id, Status: status})
+	s.publishLocked(engine.ExecutionEvent{ExecutionID: id, Status: status, Error: entry.snap.Error})
 }
 
 func memoryNodeKey(id types.ExecutionID, name string) string {

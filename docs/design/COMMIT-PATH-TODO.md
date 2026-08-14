@@ -120,7 +120,8 @@ t.ActivationID <= 0` 直接判 `ErrExecutionInactive`）。
 节点携带原因，`CyclicFinalError` 是唯一载体。
 
 实测（`backend/providers/local`，`AllowCycles(true)` + `MaxAutoDepth: 2` 的自环图，
-与无环 fatal 失败做正对照）：
+与无环 fatal 失败做正对照）。**下表是 2026-08-13 修复前的观测，已全部作废**，保留是为了
+记录缺口的形状；当前行为见本节末尾的「已完全关闭」：
 
 | 观察点 | cyclic 深度超限 | 无环 fatal 失败（对照） |
 |---|---|---|
@@ -133,7 +134,7 @@ t.ActivationID <= 0` 直接判 `ErrExecutionInactive`）。
 而 cyclic 深度超限因为没有失败节点，原因**彻底丢失**。
 
 Redis 侧同样：`commitNodeLua` 会把 `CyclicFinalError` 写进 `execKey(..,"error")`，但
-全仓只有写者没有读者——`GetExecution` 只加载 status/params/runtime/scope/trace，
+当时只有写者没有读者——`GetExecution` 只加载 status/params/runtime/scope/trace，
 `engine.ExecutionSnapshot` 根本没有 `Error` 字段。
 
 **2026-08-13 已部分关闭**：三处 Lua 内终态转换现在都投影到 SQL（见
@@ -142,10 +143,43 @@ script」），且 `terminalExecutionError` 让 `CyclicFinalError` 优先于节�
 **SQL 审计行 `executions.error_msg` 是目前唯一能读回该原因的地方**，回归测试见
 `rstate/sql_execution_projection_test.go:TestCommitLeasedNodeProjectsCyclicFinalErrorToSQL`。
 
-**仍开**：在线读回面（`ExecutionSnapshot.Error` 字段、`GetExecution` 读 error 键、
-`Inspect` 在执行级赋 `detail.Error`、local 的 `finishExecutionLocked` 收 errMsg 参数）
-四处都没做。这是一次跨 engine + 两个后端的接口改动，与上面问题 1 的答案耦合，未单独
-立项。
+**2026-08-14 已完全关闭**：在线读回面四处全部接上，两个后端各自镜像自己对应的 Lua 规则。
+
+- `engine.ExecutionSnapshot.Error` 新增字段；`Inspect` 在执行级赋 `detail.Error`。
+- `types.Result.Error` 两条读回路径都通：SDK 的 `resultFromDetail` 经 `Inspect` 透传（分布式
+  走这条），local 的 `Backend.WaitDone` 直读快照（**绕过 `Inspect`**，需单独接）。只接一边会
+  造成「内嵌模式看得见、分布式看不见」或反之。
+- `rstate.GetExecution` 读回 `execKey(..,"error")`（不存在是常态，容忍 `redis.Nil`）。
+- local 的 `finishExecutionLocked` 收 errMsg 参数，五处调用点（`atomic_state.go` 两处、
+  `group_state.go`、`entry_admission.go`、`group_suspend.go`）各自传入。
+- 新增 `engine.TerminalExecutionError(status, nodeErr, cyclicErr)`：非 failed 一律为空；
+  cyclic 错误优先于节点错误，因为深度超限时**没有失败节点**（`engine/scheduler.go:43-45`
+  拒绝的是下游激活，触发限制的节点本身是 success）。
+
+**两条 Lua 规则不同，local 必须分别对齐，不能统一**：
+
+| Lua | 条件 | local 对应处 |
+|---|---|---|
+| `updateExecutionStatusLua`（`state_lua.go:276`） | `ARGV[2] ~= ''`，**不看 status**，从不删除 | `memory_state.go` 的 `UpdateExecutionStatus`：`if errMsg != ""` |
+| `commitGroupLua`（`group_state.go:146`） | `finalStatus == 'failed' and ARGV[8] ~= ''` 双条件 | `finishExecutionLocked`：`status == failed && errMsg != ""` |
+
+把前者也加上 status 门会让 local 清掉 Redis 保留的原因——这个分歧曾被写进代码，靠反向
+探针**返回绿**才暴露出来（探针无区分力 = 规则本身写错了）。
+
+`CancelSuspendedGroup` 是唯一连调用方都拿不到原因的终态失败路径：取消动作直接终结整个
+group unit，没有任何成员节点提交失败。两个后端共用新常量 `engine.CanceledSuspendedGroupError`
+（`engine/group_suspend.go`），`cancelSuspendedGroupLua` 为此加了第 6 个 KEY 和第 2 个 ARGV。
+
+回归覆盖落在共享契约里（唯一同时约束两个后端的地方），且都带真 Redis 运行器：
+`statestoretest.runExecutionErrorRoundTrip`（`UpdateExecutionStatus` 路径，含成功不留原因的
+反面半边）与 `RunGroupStateContract` 的 `FatalGroupCommitStoresExecutionError` /
+`SuccessfulGroupCommitLeavesExecutionErrorEmpty`（commit 路径，`finishExecutionLocked` 实际
+所在处）。`TestRedisStateStoreContract` 此前只跑 miniredis，本次补了真 Redis 运行器——
+断言落在 Lua 内部，而 miniredis 的 Lua 不是 Redis 的 Lua。
+
+端到端一例：`local/cyclic_depth_error_readback_test.go` 真跑一次深度超限，同时断言
+`WaitDone` 与 `Inspect` 两条路径给出**相同**原因，并反向断言没有任何节点携带 error
+（那正是本场景成立的前提）。
 
 ## 可能的收敛形状（未决，仅备忘）
 

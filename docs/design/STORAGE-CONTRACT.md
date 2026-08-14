@@ -128,6 +128,17 @@ The projected error text is an engine-supplied reason only. Node output and
 boundary-exit data never enter it: upstream output routinely contains
 credentials from HTTP responses.
 
+The same reason is also readable online, independently of this projection:
+`exec:<id>:error` is loaded back by `GetExecution` into
+`engine.ExecutionSnapshot.Error`, surfaced by `Inspect` as
+`ExecutionDetail.Error`, and reaches callers as `types.Result.Error`. The SQL
+row is the audit trail, not the only readback. Both backends derive the value
+through `engine.TerminalExecutionError`, and each mirrors its own counterpart
+Lua's write rule — `updateExecutionStatusLua` writes on any non-empty reason
+regardless of status, while `commitGroupLua` requires a failed status as well.
+See [COMMIT-PATH-TODO.md](./COMMIT-PATH-TODO.md) for why those two rules must
+not be unified.
+
 ## Observability and reconciliation
 
 `distributed.Backend` exposes `AuditObserver`

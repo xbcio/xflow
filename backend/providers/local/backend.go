@@ -210,7 +210,10 @@ func (b *Backend) WaitDone(ctx context.Context, id types.ExecutionID) (types.Res
 	if err != nil || snap == nil {
 		return types.Result{ExecutionID: id, Status: types.ExecutionStatusFailed}, err
 	}
-	result := types.Result{ExecutionID: id, Status: snap.Status}
+	// Error travels alongside Status: this fast path bypasses Inspect (it reads
+	// the snapshot directly), so without this the reason would be readable via
+	// the SDK's polling fallback but not via the local backend's own Waiter.
+	result := types.Result{ExecutionID: id, Status: snap.Status, Error: snap.Error}
 	if snap.Status == types.ExecutionStatusSuccess {
 		result.Output = b.state.GetAllOutputs(id)
 	}

@@ -87,7 +87,8 @@ func (s *memoryState) SeedExecutionFromEntry(_ context.Context, req engine.SeedE
 				status = types.ExecutionStatusFailed
 			}
 			entry := s.executions[execID]
-			s.finishExecutionLocked(execID, entry, status)
+			s.finishExecutionLocked(execID, entry, status,
+				engine.TerminalExecutionError(status, req.Error, ""))
 		}
 	}
 

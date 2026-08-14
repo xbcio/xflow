@@ -190,6 +190,69 @@ func RunStateStoreContract(t *testing.T, state engine.StateStore) {
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for execution event")
 	}
+
+	runExecutionErrorRoundTrip(t, state)
+}
+
+// runExecutionErrorRoundTrip pins the execution-level failure reason on the
+// snapshot round trip. It uses a fresh execution because the contract's main
+// one is already driven through a success event above.
+//
+// This is the only carrier when no node holds the reason: a cyclic execution
+// that trips MaxAutoDepth fails with every node at success, because the engine
+// rejects the downstream activation rather than failing the node that tripped
+// it. A backend that persists the reason but never loads it back leaves the SQL
+// audit row as the sole readback, invisible to callers of the inspect API.
+func runExecutionErrorRoundTrip(t *testing.T, state engine.StateStore) {
+	t.Helper()
+	ctx := context.Background()
+
+	const reason = "max auto execution depth exceeded"
+	failed := types.ExecutionID("exec-contract-error")
+	if err := state.CreateExecution(ctx, &engine.ExecutionSnapshot{
+		ID:     failed,
+		Graph:  ContractGraph(),
+		Status: types.ExecutionStatusRunning,
+	}); err != nil {
+		t.Fatalf("CreateExecution(error round trip) error = %v", err)
+	}
+	if err := state.UpdateExecutionStatus(ctx, failed, types.ExecutionStatusFailed, reason); err != nil {
+		t.Fatalf("UpdateExecutionStatus(failed) error = %v", err)
+	}
+	snap, err := state.GetExecution(ctx, failed)
+	if err != nil {
+		t.Fatalf("GetExecution(failed) error = %v", err)
+	}
+	if snap == nil {
+		t.Fatal("GetExecution(failed) = nil")
+	}
+	if snap.Error != reason {
+		t.Fatalf("ExecutionSnapshot.Error = %q, want %q — the stored failure reason is not readable online", snap.Error, reason)
+	}
+
+	// Negative half: a success must carry no reason, or a backend that
+	// unconditionally echoes the argument would pass the assertion above.
+	ok := types.ExecutionID("exec-contract-error-ok")
+	if err := state.CreateExecution(ctx, &engine.ExecutionSnapshot{
+		ID:     ok,
+		Graph:  ContractGraph(),
+		Status: types.ExecutionStatusRunning,
+	}); err != nil {
+		t.Fatalf("CreateExecution(success round trip) error = %v", err)
+	}
+	if err := state.UpdateExecutionStatus(ctx, ok, types.ExecutionStatusSuccess, ""); err != nil {
+		t.Fatalf("UpdateExecutionStatus(success) error = %v", err)
+	}
+	snap, err = state.GetExecution(ctx, ok)
+	if err != nil {
+		t.Fatalf("GetExecution(success) error = %v", err)
+	}
+	if snap == nil {
+		t.Fatal("GetExecution(success) = nil")
+	}
+	if snap.Error != "" {
+		t.Fatalf("ExecutionSnapshot.Error = %q on a successful execution, want empty", snap.Error)
+	}
 }
 
 // ContractGraph returns the two-node graph used by RunStateStoreContract.

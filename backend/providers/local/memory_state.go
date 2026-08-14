@@ -123,7 +123,7 @@ func (s *memoryState) createExecutionLocked(e *engine.ExecutionSnapshot) {
 	}
 }
 
-func (s *memoryState) UpdateExecutionStatus(_ context.Context, id types.ExecutionID, status types.ExecutionStatus, _ string) error {
+func (s *memoryState) UpdateExecutionStatus(_ context.Context, id types.ExecutionID, status types.ExecutionStatus, errMsg string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	entry, ok := s.executions[id]
@@ -141,6 +141,14 @@ func (s *memoryState) UpdateExecutionStatus(_ context.Context, id types.Executio
 		return nil
 	}
 	entry.snap.Status = status
+	// Record the execution-level reason alongside the status, using the
+	// distributed backend's exact rule: updateExecutionStatusLua writes
+	// exec:<id>:error only when the reason argument is non-empty, and
+	// never deletes it. Gating on the status instead would diverge from Redis —
+	// local would clear a reason that Redis keeps.
+	if errMsg != "" {
+		entry.snap.Error = errMsg
+	}
 	// Close the done channel on terminal status so Wait() unblocks.
 	if isTerminalStatus(status) && !entry.closed {
 		entry.closed = true
@@ -148,7 +156,7 @@ func (s *memoryState) UpdateExecutionStatus(_ context.Context, id types.Executio
 			close(ch)
 		}
 	}
-	s.publishLocked(engine.ExecutionEvent{ExecutionID: id, Status: status})
+	s.publishLocked(engine.ExecutionEvent{ExecutionID: id, Status: status, Error: errMsg})
 	return nil
 }
 
