@@ -171,6 +171,9 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 	if def.Options != nil {
 		g.allowCycles = def.Options.AllowCycles
 		g.maxAutoDepth = def.Options.MaxAutoDepth
+		g.transient = def.Options.Transient
+		g.transientTTL = def.Options.TransientTTL
+		g.transientCompletionTTL = def.Options.TransientCompletionTTL
 	}
 	if g.allowCycles && g.maxAutoDepth <= 0 {
 		g.maxAutoDepth = DefaultMaxAutoDepth

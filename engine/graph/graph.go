@@ -1,6 +1,10 @@
 package graph
 
-import "github.com/xbcio/xflow/types"
+import (
+	"time"
+
+	"github.com/xbcio/xflow/types"
+)
 
 // DefaultMaxAutoDepth is used for cyclic workflows when max_auto_depth is not
 // set or is non-positive.
@@ -34,6 +38,13 @@ type Graph struct {
 	startIdx int
 	// maxAutoDepth limits one uninterrupted automatic scheduling chain.
 	maxAutoDepth int
+
+	// transient opts a single workflow into fire-and-forget execution mode.
+	// When true, executions of this workflow skip SQL audit and use TTL-bounded
+	// Redis state, regardless of the engine-wide transient setting.
+	transient              bool
+	transientTTL           time.Duration
+	transientCompletionTTL time.Duration
 
 	// Two-layer IR: durable scheduling topology (P0-2). When no groups are
 	// defined the unit graph mirrors the node graph 1:1.
@@ -170,6 +181,17 @@ func (g *Graph) StartIndex() int { return g.startIdx }
 
 // MaxAutoDepth returns the maximum uninterrupted automatic scheduling depth.
 func (g *Graph) MaxAutoDepth() int { return g.maxAutoDepth }
+
+// Transient reports whether this graph opts into per-workflow transient mode.
+func (g *Graph) Transient() bool { return g.transient }
+
+// TransientTTL returns the per-workflow transient active TTL override.
+// Zero means use the engine-wide default.
+func (g *Graph) TransientTTL() time.Duration { return g.transientTTL }
+
+// TransientCompletionTTL returns the per-workflow transient completion TTL override.
+// Zero means use the engine-wide default.
+func (g *Graph) TransientCompletionTTL() time.Duration { return g.transientCompletionTTL }
 
 // UnitCount returns the number of scheduling units in the two-layer IR.
 func (g *Graph) UnitCount() int { return len(g.units) }

@@ -175,6 +175,7 @@ func (e *Engine) Submit(ctx context.Context, g *graph.Graph, params map[string]a
 	if len(runtime) > 0 {
 		snap.Runtime = cloneRuntime(runtime[0])
 	}
+	ctx = attachTransientHint(ctx, g)
 	return e.startExecution(ctx, snap, submitInitialTasks(id, g))
 }
 
@@ -196,6 +197,7 @@ func (e *Engine) Invoke(ctx context.Context, g *graph.Graph, entryName string, p
 	if len(runtime) > 0 {
 		snap.Runtime = cloneRuntime(runtime[0])
 	}
+	ctx = attachTransientHint(ctx, g)
 	entry := g.NodeAt(entryIdx)
 	return e.startExecution(ctx, snap, []initialTask{{
 		task: Task{
@@ -279,4 +281,18 @@ func attachSubmissionMetadata(ctx context.Context, snap *ExecutionSnapshot) {
 	if scope := ExecutionScopeFromContext(ctx); len(scope) > 0 {
 		snap.Scope = cloneMap(scope)
 	}
+}
+
+// attachTransientHint enriches the submission context with the per-workflow
+// transient hint when the compiled graph declares Transient=true. This lets
+// the StateStore apply per-execution transient behavior without coupling to
+// the graph package.
+func attachTransientHint(ctx context.Context, g *graph.Graph) context.Context {
+	if g == nil || !g.Transient() {
+		return ctx
+	}
+	return WithExecutionTransient(ctx, TransientHint{
+		TTL:           g.TransientTTL(),
+		CompletionTTL: g.TransientCompletionTTL(),
+	})
 }

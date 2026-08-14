@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"time"
 
 	"github.com/xbcio/xflow/types"
 )
@@ -342,26 +343,29 @@ func validateGraphValueDomain(g *Graph) error {
 
 func assignGraphHash(g *Graph) error {
 	payload := graphHashPayload{
-		Name:            g.name,
-		WorkflowVersion: g.workflowVersion,
-		CompilerVersion: g.compilerVersion,
-		Nodes:           g.nodes,
-		Index:           g.index,
-		EntryIndexes:    g.entryIndexes,
-		OutEdges:        g.outEdges,
-		InEdges:         g.inEdges,
-		InDegree:        g.inDegree,
-		Vars:            g.vars,
-		Config:          g.config,
-		AllowCycles:     g.allowCycles,
-		StartIdx:        g.startIdx,
-		MaxAutoDepth:    g.maxAutoDepth,
-		Groups:          g.groups,
-		Units:           g.units,
-		UnitOutEdges:    g.unitOutEdges,
-		UnitInDegree:    g.unitInDegree,
-		SupplyRefs:      g.supplyRefs,
-		NodesRefs:       g.nodesRefs,
+		Name:                   g.name,
+		WorkflowVersion:        g.workflowVersion,
+		CompilerVersion:        g.compilerVersion,
+		Nodes:                  g.nodes,
+		Index:                  g.index,
+		EntryIndexes:           g.entryIndexes,
+		OutEdges:               g.outEdges,
+		InEdges:                g.inEdges,
+		InDegree:               g.inDegree,
+		Vars:                   g.vars,
+		Config:                 g.config,
+		AllowCycles:            g.allowCycles,
+		StartIdx:               g.startIdx,
+		MaxAutoDepth:           g.maxAutoDepth,
+		Transient:              g.transient,
+		TransientTTL:           g.transientTTL,
+		TransientCompletionTTL: g.transientCompletionTTL,
+		Groups:                 g.groups,
+		Units:                  g.units,
+		UnitOutEdges:           g.unitOutEdges,
+		UnitInDegree:           g.unitInDegree,
+		SupplyRefs:             g.supplyRefs,
+		NodesRefs:              g.nodesRefs,
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -387,10 +391,15 @@ type graphHashPayload struct {
 	AllowCycles     bool
 	StartIdx        int
 	MaxAutoDepth    int
-	Groups          []GroupMeta
-	Units           []UnitMeta
-	UnitOutEdges    [][]UnitEdge
-	UnitInDegree    []int
+	// Transient fields use omitempty so pre-existing graphs that never set them
+	// hash identically to before.
+	Transient              bool          `json:",omitempty"`
+	TransientTTL           time.Duration `json:",omitempty"`
+	TransientCompletionTTL time.Duration `json:",omitempty"`
+	Groups                 []GroupMeta
+	Units                  []UnitMeta
+	UnitOutEdges           [][]UnitEdge
+	UnitInDegree           []int
 	// SupplyRefs must carry an explicit omitempty: this struct's fields have no
 	// json tags, so without it every pre-existing graph's hash payload would
 	// gain a "SupplyRefs":null and its graphHash would change, invalidating the
@@ -448,7 +457,12 @@ type graphSerializedForm struct {
 	AllowCycles     bool           `json:"allow_cycles"`
 	StartIdx        int            `json:"start_idx"`
 	MaxAutoDepth    int            `json:"max_auto_depth"`
-	Groups          []GroupMeta    `json:"groups,omitempty"`
+	// Transient fields are omitempty so legacy snapshots without them decode
+	// with zero values (= not transient), preserving backward compatibility.
+	Transient              bool          `json:"transient,omitempty"`
+	TransientTTL           time.Duration `json:"transient_ttl,omitempty"`
+	TransientCompletionTTL time.Duration `json:"transient_completion_ttl,omitempty"`
+	Groups                 []GroupMeta   `json:"groups,omitempty"`
 	// SupplyRefs maps a consumer node index to the supply node names it depends
 	// on. Unlike the unit IR it cannot be re-derived on decode: it comes from
 	// WorkflowDef.DependencyEdges, which is not part of the snapshot. The
@@ -472,24 +486,27 @@ func (g *Graph) MarshalJSON() ([]byte, error) {
 		wireNodes[i] = toWireNodeMeta(n)
 	}
 	return json.Marshal(graphSerializedForm{
-		GraphHash:       g.graphHash,
-		Name:            g.name,
-		WorkflowVersion: g.workflowVersion,
-		CompilerVersion: g.compilerVersion,
-		Nodes:           wireNodes,
-		Index:           g.index,
-		EntryIndexes:    g.entryIndexes,
-		OutEdges:        g.outEdges,
-		InEdges:         g.inEdges,
-		InDegree:        g.inDegree,
-		Vars:            g.vars,
-		Config:          g.config,
-		AllowCycles:     g.allowCycles,
-		StartIdx:        g.startIdx,
-		MaxAutoDepth:    g.maxAutoDepth,
-		Groups:          g.groups,
-		SupplyRefs:      g.supplyRefs,
-		NodesRefs:       g.nodesRefs,
+		GraphHash:              g.graphHash,
+		Name:                   g.name,
+		WorkflowVersion:        g.workflowVersion,
+		CompilerVersion:        g.compilerVersion,
+		Nodes:                  wireNodes,
+		Index:                  g.index,
+		EntryIndexes:           g.entryIndexes,
+		OutEdges:               g.outEdges,
+		InEdges:                g.inEdges,
+		InDegree:               g.inDegree,
+		Vars:                   g.vars,
+		Config:                 g.config,
+		AllowCycles:            g.allowCycles,
+		StartIdx:               g.startIdx,
+		MaxAutoDepth:           g.maxAutoDepth,
+		Transient:              g.transient,
+		TransientTTL:           g.transientTTL,
+		TransientCompletionTTL: g.transientCompletionTTL,
+		Groups:                 g.groups,
+		SupplyRefs:             g.supplyRefs,
+		NodesRefs:              g.nodesRefs,
 	})
 }
 
@@ -594,6 +611,9 @@ func (g *Graph) UnmarshalJSON(data []byte) error {
 	g.allowCycles = sf.AllowCycles
 	g.startIdx = sf.StartIdx
 	g.maxAutoDepth = sf.MaxAutoDepth
+	g.transient = sf.Transient
+	g.transientTTL = sf.TransientTTL
+	g.transientCompletionTTL = sf.TransientCompletionTTL
 	g.groups = sf.Groups
 	g.supplyRefs = sf.SupplyRefs
 	g.nodesRefs = sf.NodesRefs

@@ -1,5 +1,7 @@
 package types
 
+import "time"
+
 type WorkflowID string
 
 // WorkflowDef is the top-level DSL data structure representing a workflow definition.
@@ -55,6 +57,22 @@ type WorkflowOptions struct {
 	// contains groups is currently allowed (groups compile normally) but the
 	// scheduler will not co-locate them — individual nodes dispatch as before.
 	ExperimentalNodeGroup bool `json:"experimental_node_group,omitempty"`
+
+	// Transient opts a single workflow into transient (fire-and-forget) execution
+	// mode. When true, executions of this workflow skip the SQL audit projection
+	// and use TTL-bounded Redis state, regardless of the engine-wide transient
+	// setting. This allows mixing transient and durable workflows in the same
+	// engine instance.
+	Transient bool `json:"transient,omitempty"`
+
+	// TransientTTL is the sliding active TTL for transient execution keys.
+	// When zero, the engine-wide transient TTL (or the default exec TTL) is used.
+	TransientTTL time.Duration `json:"transient_ttl,omitempty"`
+
+	// TransientCompletionTTL is the shortened TTL applied to all execution keys
+	// once the execution reaches a terminal state. When zero, the engine-wide
+	// transient completion TTL is used.
+	TransientCompletionTTL time.Duration `json:"transient_completion_ttl,omitempty"`
 }
 
 // NodeDef describes a single node in the workflow graph.

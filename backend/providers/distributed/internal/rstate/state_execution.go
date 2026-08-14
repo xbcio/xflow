@@ -36,13 +36,27 @@ func (s *Store) CreateExecutionWithOutbox(ctx context.Context, e *engine.Executi
 func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot, entries []engine.OutboxEntry) error {
 	ttl := s.execTTL
 
+	// Per-execution transient hint from workflow options (via submission context).
+	// This must be checked before the global transient fallback so a per-workflow
+	// transient execution gets the correct TTL even when the global mode is off.
+	perExecTransient := false
+	if hint, ok := engine.ExecutionTransientFromContext(ctx); ok {
+		perExecTransient = true
+		s.MarkExecutionTransient(e.ID, hint.TTL, hint.CompletionTTL)
+		if hint.TTL > 0 {
+			ttl = hint.TTL
+		} else if s.transientTTL > 0 {
+			ttl = s.transientTTL
+		}
+	}
+
 	// Check for per-execution TTL override from context.
 	if override, ok := engine.ExecutionTTLFromContext(ctx); ok {
 		ttl = override
 		s.ttlMu.Lock()
 		s.execTTLs[e.ID] = override
 		s.ttlMu.Unlock()
-	} else if s.transient && s.transientTTL > 0 {
+	} else if !perExecTransient && s.transient && s.transientTTL > 0 {
 		// In transient mode the structural exec keys (:params/:runtime/:trace_id/
 		// :span_id/:graph) are written once here and never re-EXPIREd by per-node
 		// Lua. Set them to transientTTL directly so they outlive the run under the
@@ -58,7 +72,7 @@ func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot
 	}
 
 	var rec *store.ExecutionRecord
-	if s.db != nil && !s.transient {
+	if s.db != nil && !s.isTransient(e.ID) {
 		now := time.Now()
 		var recErr error
 		rec, recErr = buildExecutionRecord(ctx, e, now)
@@ -73,7 +87,7 @@ func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot
 	// (sweeper, lease repair, outbox dispatcher, timeout monitor) SCAN its
 	// namespace. Skipped in transient mode to preserve the fire-and-forget
 	// no-bookkeeping invariant; the default namespace is always scanned anyway.
-	if !s.transient {
+	if !s.isTransient(e.ID) {
 		// Non-fatal: the namespace is re-registered on the next durable write
 		// and listNamespaces always includes the default namespace, so a
 		// transient SADD failure cannot strand a namespace's keys outside the

@@ -30,6 +30,12 @@ type Store struct {
 	ttlMu    sync.RWMutex
 	execTTLs map[types.ExecutionID]time.Duration
 
+	// per-execution transient overrides (set via per-workflow transient context)
+	transientMu    sync.RWMutex
+	execTransient  map[types.ExecutionID]bool
+	execTransientTTL           map[types.ExecutionID]time.Duration
+	execTransientCompletionTTL map[types.ExecutionID]time.Duration
+
 	// leaseRepairCursor advances a bounded reconciliation scan across node
 	// status keys, one cursor per namespace so a multi-namespace store never lets
 	// one namespace's scan progress starve another. The mutex prevents
@@ -60,15 +66,18 @@ type Store struct {
 
 func New(rdb redis.UniversalClient, db store.Store, execTTL time.Duration) *Store {
 	s := &Store{
-		rdb:               rdb,
-		db:                db,
-		execTTL:           execTTL,
-		graphs:            make(map[types.ExecutionID]*graph.Graph),
-		execTTLs:          make(map[types.ExecutionID]time.Duration),
-		leaseRepairCursor: make(map[namespace.Namespace]uint64),
-		audit:             noopAuditObserver{},
-		auditCounters:     &auditCounters{},
-		cursorKey:         newCursorSigningKey(),
+		rdb:                        rdb,
+		db:                         db,
+		execTTL:                    execTTL,
+		graphs:                     make(map[types.ExecutionID]*graph.Graph),
+		execTTLs:                   make(map[types.ExecutionID]time.Duration),
+		execTransient:              make(map[types.ExecutionID]bool),
+		execTransientTTL:           make(map[types.ExecutionID]time.Duration),
+		execTransientCompletionTTL: make(map[types.ExecutionID]time.Duration),
+		leaseRepairCursor:          make(map[namespace.Namespace]uint64),
+		audit:                      noopAuditObserver{},
+		auditCounters:              &auditCounters{},
+		cursorKey:                  newCursorSigningKey(),
 	}
 	// The default namespace is registered lazily on the first durable execution
 	// create, and listNamespaces also defensively includes the default namespace, so
@@ -86,6 +95,17 @@ func (s *Store) ttlSec() int {
 	return int(s.execTTL.Seconds())
 }
 
+// ttlSecForExec returns the TTL in seconds for a specific execution,
+// considering per-execution transient overrides.
+func (s *Store) ttlSecForExec(id types.ExecutionID) int {
+	if s.isTransient(id) {
+		if t := s.getTransientTTL(id); t > 0 {
+			return int(t.Seconds())
+		}
+	}
+	return int(s.execTTL.Seconds())
+}
+
 // getExecTTL returns the per-execution TTL override if set, otherwise the adapter default.
 func (s *Store) getExecTTL(id types.ExecutionID) time.Duration {
 	s.ttlMu.RLock()
@@ -94,10 +114,63 @@ func (s *Store) getExecTTL(id types.ExecutionID) time.Duration {
 	if ttl > 0 {
 		return ttl
 	}
-	if s.transient && s.transientTTL > 0 {
-		return s.transientTTL
+	if s.isTransient(id) {
+		if t := s.getTransientTTL(id); t > 0 {
+			return t
+		}
 	}
 	return s.execTTL
+}
+
+// isTransient reports whether the given execution should use transient mode.
+// Per-execution override takes priority; falls back to the global setting.
+func (s *Store) isTransient(id types.ExecutionID) bool {
+	s.transientMu.RLock()
+	perExec, ok := s.execTransient[id]
+	s.transientMu.RUnlock()
+	if ok {
+		return perExec
+	}
+	return s.transient
+}
+
+// getTransientTTL returns the transient active TTL for the given execution.
+// Per-execution override takes priority; falls back to the global setting.
+func (s *Store) getTransientTTL(id types.ExecutionID) time.Duration {
+	s.transientMu.RLock()
+	ttl := s.execTransientTTL[id]
+	s.transientMu.RUnlock()
+	if ttl > 0 {
+		return ttl
+	}
+	return s.transientTTL
+}
+
+// getTransientCompletionTTL returns the completion TTL for the given execution.
+// Per-execution override takes priority; falls back to the global setting.
+func (s *Store) getTransientCompletionTTL(id types.ExecutionID) time.Duration {
+	s.transientMu.RLock()
+	ttl := s.execTransientCompletionTTL[id]
+	s.transientMu.RUnlock()
+	if ttl > 0 {
+		return ttl
+	}
+	return s.transientCompletionTTL
+}
+
+// MarkExecutionTransient marks a single execution as transient with explicit
+// TTL overrides. Called by createExecution when the submission context carries
+// a per-workflow transient hint.
+func (s *Store) MarkExecutionTransient(id types.ExecutionID, ttl, completionTTL time.Duration) {
+	s.transientMu.Lock()
+	s.execTransient[id] = true
+	if ttl > 0 {
+		s.execTransientTTL[id] = ttl
+	}
+	if completionTTL > 0 {
+		s.execTransientCompletionTTL[id] = completionTTL
+	}
+	s.transientMu.Unlock()
 }
 
 func executionKeySetKey(t namespace.Namespace, id types.ExecutionID) string {
@@ -170,10 +243,10 @@ func transientExecutionKeys(t namespace.Namespace, id types.ExecutionID, g *grap
 }
 
 func (s *Store) shortenTransientCompletionTTL(ctx context.Context, id types.ExecutionID, newKeys ...string) error {
-	if !s.transient {
+	if !s.isTransient(id) {
 		return nil
 	}
-	ttl := s.transientCompletionTTL
+	ttl := s.getTransientCompletionTTL(id)
 	if ttl <= 0 {
 		return nil
 	}
@@ -234,4 +307,9 @@ func (s *Store) evictExecutionCaches(id types.ExecutionID) {
 	s.ttlMu.Lock()
 	delete(s.execTTLs, id)
 	s.ttlMu.Unlock()
+	s.transientMu.Lock()
+	delete(s.execTransient, id)
+	delete(s.execTransientTTL, id)
+	delete(s.execTransientCompletionTTL, id)
+	s.transientMu.Unlock()
 }

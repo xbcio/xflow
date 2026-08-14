@@ -14,6 +14,7 @@ type traceIDCtxKey struct{}
 type spanIDCtxKey struct{}
 type traceCarrierCtxKey struct{}
 type executionScopeCtxKey struct{}
+type executionTransientCtxKey struct{}
 
 // WithExecutionTTL attaches a retention TTL hint for a single execution
 // submission. StateStore implementations may use it to choose key or record
@@ -142,5 +143,28 @@ func WithExecutionScope(ctx context.Context, scope map[string]any) context.Conte
 func ExecutionScopeFromContext(ctx context.Context) map[string]any {
 	scope, _ := ctx.Value(executionScopeCtxKey{}).(map[string]any)
 	return scope
+}
+
+// TransientHint carries per-execution transient mode settings through the
+// submission context. It is set by the engine when the compiled graph declares
+// WorkflowOptions.Transient=true, and read by the StateStore to apply
+// per-execution transient behavior.
+type TransientHint struct {
+	TTL           time.Duration
+	CompletionTTL time.Duration
+}
+
+// WithExecutionTransient attaches a per-execution transient hint to the
+// submission context. The StateStore reads it at CreateExecution time to
+// apply per-execution transient behavior (skip SQL audit, apply TTL).
+func WithExecutionTransient(ctx context.Context, hint TransientHint) context.Context {
+	return context.WithValue(ctx, executionTransientCtxKey{}, hint)
+}
+
+// ExecutionTransientFromContext extracts the per-execution transient hint.
+// Returns the hint and true when the execution should be transient.
+func ExecutionTransientFromContext(ctx context.Context) (TransientHint, bool) {
+	hint, ok := ctx.Value(executionTransientCtxKey{}).(TransientHint)
+	return hint, ok
 }
 
