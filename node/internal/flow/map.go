@@ -8,9 +8,9 @@ import (
 
 	"slices"
 
+	"github.com/xbcio/xflow/exprx"
 	nodeinternal "github.com/xbcio/xflow/node/internal"
 	"github.com/xbcio/xflow/node/internal/utils/conv"
-	"github.com/xbcio/xflow/exprx"
 	"github.com/xbcio/xflow/node/registry"
 	"github.com/spf13/cast"
 )
@@ -20,6 +20,7 @@ type MapNode struct {
 	nodeinternal.BaseNode
 	Items     string
 	BatchSize int
+	KeepGoing bool
 }
 
 // Map creates a map node that runs a body sub-graph over a collection.
@@ -30,6 +31,20 @@ func Map(itemsExpr string, batchSize int) *MapNode {
 		batchSize = 1
 	}
 	return &MapNode{Items: itemsExpr, BatchSize: batchSize}
+}
+
+// ContinueOnError tolerates a failed item instead of abandoning the rest of
+// its batch. Failed items keep their slot in results as {_error, _index}, so
+// a downstream consumer must filter them out.
+//
+//	node.Map("$input.messages", 20).ContinueOnError()
+//
+// Off by default, matching the descriptor. Without it, the first failed item
+// stops its batch at execution/subgraph.MapBodyExecutor — which makes one
+// malformed item cost every later item in the same batch.
+func (n *MapNode) ContinueOnError() *MapNode {
+	n.KeepGoing = true
+	return n
 }
 
 func (n *MapNode) Descriptor() types.Descriptor {
@@ -56,8 +71,9 @@ func (n *MapNode) OnError(s types.OnError) types.Builder {
 
 func (n *MapNode) RawParams() any {
 	return map[string]any{
-		"items":      n.Items,
-		"batch_size": n.BatchSize,
+		"items":             n.Items,
+		"batch_size":        n.BatchSize,
+		"continue_on_error": n.KeepGoing,
 	}
 }
 

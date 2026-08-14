@@ -8,9 +8,9 @@ import (
 
 	"slices"
 
+	"github.com/xbcio/xflow/exprx"
 	nodeinternal "github.com/xbcio/xflow/node/internal"
 	"github.com/xbcio/xflow/node/internal/utils/conv"
-	"github.com/xbcio/xflow/exprx"
 	"github.com/xbcio/xflow/node/registry"
 	"github.com/spf13/cast"
 )
@@ -20,6 +20,7 @@ type SplitNode struct {
 	nodeinternal.BaseNode
 	Items     string
 	BatchSize int
+	KeepGoing bool
 }
 
 // Split creates a fan-out node that emits one execution per item.
@@ -27,6 +28,14 @@ type SplitNode struct {
 //	node.Split("orders")
 func Split(itemsExpr string) *SplitNode {
 	return &SplitNode{Items: itemsExpr, BatchSize: 1}
+}
+
+// ContinueOnError keeps splitting when a downstream branch fails, instead of
+// abandoning the rest of the batch. Same trade-off as MapNode.ContinueOnError:
+// failed items keep their slot as {_error, _index} for a downstream filter.
+func (n *SplitNode) ContinueOnError() *SplitNode {
+	n.KeepGoing = true
+	return n
 }
 
 func (n *SplitNode) Descriptor() types.Descriptor {
@@ -50,7 +59,11 @@ func (n *SplitNode) OnError(s types.OnError) types.Builder {
 }
 
 func (n *SplitNode) RawParams() any {
-	return map[string]any{"items": n.Items, "batch_size": n.BatchSize}
+	return map[string]any{
+		"items":             n.Items,
+		"batch_size":        n.BatchSize,
+		"continue_on_error": n.KeepGoing,
+	}
 }
 
 func (n *SplitNode) Execute(ctx context.Context, input *types.Input) (*types.Output, error) {
