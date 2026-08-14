@@ -17,9 +17,3 @@ func TestLocalEntryAdmissionContract(t *testing.T) {
 		return New().State().(statestoretest.EntryAdmissionTestStore)
 	})
 }
-
-func TestLocalGroupSuspendContract(t *testing.T) {
-	statestoretest.RunGroupSuspendContract(t, func(t *testing.T) statestoretest.GroupSuspendTestStore {
-		return New().State().(statestoretest.GroupSuspendTestStore)
-	})
-}

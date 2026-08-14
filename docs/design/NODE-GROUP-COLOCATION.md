@@ -21,7 +21,7 @@ group as a single vertex in the durable scheduling topology.
 types/group.go           GroupDef contract (Name, Members, RunnerSelector, OnError, Retry, Timeout, Mode)
 engine/graph/            Compile-time IR: GroupMeta, UnitMeta (two-layer scheduling), boundary edges
 engine/                  Runtime types: GroupLease, GroupResult, GroupCommitRequest, scheduling intents
-backend/.../rstate/      Redis atomic state: group_state.go (commit Lua), group_suspend.go, entry_admission.go
+backend/.../rstate/      Redis atomic state: group_state.go (commit Lua), entry_admission.go
 service/control/         Control loop: group dispatch, entry-activation manager + reconciler, runner selector
 service/runner/          Runner-side: group runtime (embedded engine), package cache, backpressure
 service/protocol/        Wire DTOs: GroupLeaseDTO, activation directives, admission RPC
@@ -56,12 +56,9 @@ type GroupDef struct {
 | Interface | Responsibility |
 |-----------|---------------|
 | `GroupStateStore` | Acquire/renew/commit group leases atomically (fenced by token+attempt) |
-| `GroupSuspender` | Transition running → suspended; persist spec + signal journal + entry input |
-| `GroupResumer` | Deliver signal → quorum check → produce resume outbox entry |
 | `EntryAdmissionStore` | Atomic first-writer-wins admission: create execution + commit entry unit + downstream outbox |
 | `EntryActivationStore` | Desired/active state for node-generic entry-activation runner assignment (Upsert desired state, Assign/Renew/Fence for generation-fenced ownership). Replaces the retired group-centric `TriggerActivationStore`. |
 | `GroupLeaseExpirer` | Reclaim expired leases back to retry-ready |
-| `GroupSuspendReader` / `GroupCanceler` / `GroupSignalRevoker` / `GroupTimeoutHandler` | Suspend lifecycle helpers |
 
 ### 3.4 Audit (`engine/group_audit.go`)
 
@@ -71,7 +68,7 @@ type GroupAuditObserver interface {
 }
 ```
 
-Operations: `lease_acquired`, `lease_expired`, `committed`, `admission_accepted`, `admission_conflict`, `activation_changed`, `suspended`, `resumed`, `canceled`, `timeout`.
+Operations: `lease_acquired`, `lease_expired`, `committed`, `admission_accepted`, `admission_conflict`, `activation_changed`.
 
 ## 4. Lifecycle: Normal Group (Lease-Based)
 
@@ -118,38 +115,40 @@ Operations: `lease_acquired`, `lease_expired`, `committed`, `admission_accepted`
 
 **Backpressure:** Runner limits in-flight unconfirmed emits (`EmitBackpressure` semaphore). Window full → consumer pauses. Kafka offset is the single truth for flow control.
 
-## 6. Suspend/Resume (Signal Journal) — 预留，生产禁用
+## 6. Suspend/Resume (Signal Journal) — 已移除
 
-> **本节描述的是已实现但未接线的存储层，不是在跑的流程。** 两个后端
-> （`backend/providers/local/group_suspend.go`、
-> `backend/providers/distributed/internal/rstate/group_suspend.go`）实现完整，
-> 共享契约测试也齐备，但**没有任何生产调用点**：`SuspendGroup` / `ResumeGroup` /
-> `CancelSuspendedGroup` / `TimeoutSuspendedGroup` / `RevokeGroupSignal` 五个方法
-> 只被接口声明、两处实现和测试引用。`GroupSuspendRequest` / `GroupResumeRequest`
-> 只在 `test/stress` 和契约测试里构造，`TaskTypeGroupResume` 没有消费者
-> （`engine/types.go:29` 标注「里程碑 A 预留，暂不消费」）。
+> **组级持久化挂起已从代码库中删除。** 完整实现保留在提交
+> `15ecb6d feat(engine): implement durable group suspend/resume (Milestone I)`
+> 里（含 `ea5cc9a` 那个只有真 Redis 才暴露的 `cjson.null` 修复），要恢复是
+> `git show`，不是重写。
 >
-> 更进一步，生产**刻意关闭**了组内挂起：唯一的生产 `GroupRuntime` 由
-> `cmd/runner/run.go` 带 `runnersvc.WithSuspendDisabled()` 构造，
-> `service/runner/group_exec_trigger_runtime.go` 也硬设 `SuspendDisabled: true`。
-> 理由与 map body 内禁止挂起相同——**挂起的成员会停住一个外层租约无法恢复的
-> 子执行**。于是成员节点发出的 wait 在 `engine/commit.go:46` 就被判失败，走不到
-> 下面第 1 步。
+> 删除的理由不是「没写完」，而是**写完的那部分不是难的那部分**。两个后端的
+> 状态层（Lua / 内存 map）和共享契约测试都完整，但它们只回答「挂起状态怎么
+> 存」。真正挡住这个特性的是两件一行代码都没有的事：
 >
-> 还缺一块：**没有「列出挂起中的组」这个原语**。`Engine.Cancel` 只遍历
-> `ListSuspendedNodes`，即便想接线也没有可枚举挂起组的入口。
+> 1. **挂起的成员会停住一个外层租约无法恢复的子执行**——与 map body 内禁止挂起
+>    同源。生产因此刻意关闭组内挂起（`cmd/runner/run.go` 的
+>    `runnersvc.WithSuspendDisabled()`、`group_exec_trigger_runtime.go` 硬设
+>    `SuspendDisabled: true`），成员发出的 wait 在 `engine/commit.go` 就被判失败。
+>    这条**保留不变**，删除不影响它。
+> 2. **没有「列出挂起中的组」原语**。`Engine.Cancel` 只遍历 `ListSuspendedNodes`，
+>    两个后端都没有可枚举挂起组的入口。
 >
-> 下面的编号流程是里程碑 A 的**设计意图**，按它读代码会读到一条不存在的运行路径。
+> 真要做，这两件都得重新设计，状态层大概率跟着改——留着并不能缩短将来的路。
+>
+> 而它不是零成本的死代码：`resumeGroupLua` 在配额满足时会往**现役 outbox** 写一条
+> `TaskTypeGroupResume`，而 `handleSystemTask` 的 `default` 分支语义是「交给
+> Dispatcher 投给远端 runner」，runner 不认这个类型。任何一次调用都会往队列里投
+> 一条没有消费者的毒条目，契约测试对这条边零覆盖。
+>
+> **顺带修掉的一个真洞**：原先 `CommitGroupResult` 的致命性 switch 没有 default
+> 分支，只挡 `"suspended"` 一个值。`Outcome` 是从远端 runner 过来的裸 JSON
+> 字符串，任何其他未知值都会落进 `fatal=false`，被当成非致命失败提交并放行下游。
+> 删除时把挡板收紧成通用的未知 outcome 拒绝，比删除前更严
+> （`TestCommitGroupResult_UnknownOutcomeRejected`）。
 
-设计意图（未接线）：
-
-1. Runner sends `GroupSuspendRequest` with `SuspendSpec` (wait signals, quorum, timeout) + accumulated `SignalJournal` + entry input checkpoint.
-2. Backend atomically clears lease, persists suspend state.
-3. External signal delivered via `GroupResumer.ResumeGroup` — if quorum satisfied, produces `TaskTypeGroupResume` outbox entry.
-4. On resume, runner replays from entry input with full signal journal for deterministic re-execution.
-5. Timeout/cancel transitions handled by `GroupTimeoutHandler` / `GroupCanceler`.
-
-Multi-signal quorum: `Quorum` field specifies how many distinct signals are needed before resume.
+节点级挂起（`xflow.wait`）不受影响：它走的是另一套 `types.SuspendSpec` +
+`SuspendTaskLeaseWithOutbox` + `ListSuspendedNodes`，与被删的组级类型零共享。
 
 ## 7. Compile-Time Validation (`engine/graph/group_compile.go`)
 
@@ -177,14 +176,13 @@ Multi-signal quorum: `Quorum` field specifies how many distinct signals are need
 - Admission: `xflow_group_admission_total{outcome}`, `_duration_seconds`
 - Activation: `xflow_group_activation_total{action}`, `_generation_fenced_total`, `_active` gauge
 - Emit: `xflow_group_emit_total{result}`, `_duration_seconds`, `_batch_size`, `_inflight` gauge
-- Suspend: `xflow_group_suspend_total{action}`
 - Backpressure: `xflow_group_backpressure_paused_total`
 - Execution: `xflow_group_exec_duration_seconds`
 - Package cache: `xflow_group_package_cache_total{result}`, selector fallback
 
 **Tracing** (`observability/tracing/group_spans.go`):
-- Spans: `xflow.group.{dispatch,execute,member,emit,admission,commit,activate,renew,suspend,resume}`
-- Attributes: group ID, workflow ID, execution ID, runner ID, generation, outcome, batch size, admission key, package hash, signal name
+- Spans: `xflow.group.{dispatch,execute,member,emit,admission,commit,activate,renew}`
+- Attributes: group ID, workflow ID, execution ID, runner ID, generation, outcome, member count, batch size, admission key, package hash
 
 **Audit** (`engine/group_audit.go`):
 - `GroupAuditObserver` interface receives structured `GroupAuditEvent` for all lifecycle transitions.

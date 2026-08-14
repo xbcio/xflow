@@ -26,8 +26,6 @@ type GroupLeasePayload struct {
 	Input           *types.Input           `json:"input,omitempty"`
 	IdempotencyKey  string                 `json:"idempotency_key"`
 	Deadline        time.Time              `json:"deadline,omitempty"`
-	// SignalJournal carries the full signal history for resume replay.
-	SignalJournal []GroupSignal `json:"signal_journal,omitempty"`
 	// TaskType distinguishes initial group exec from resume.
 	TaskType TaskType `json:"task_type,omitempty"`
 }
@@ -35,10 +33,6 @@ type GroupLeasePayload struct {
 // ErrGroupLeaseAlreadyActive is returned when BuildGroupLease cannot acquire
 // because the unit is already running under an active lease.
 var ErrGroupLeaseAlreadyActive = errors.New("group lease already active")
-
-// ErrGroupSuspendNotSupported is returned when a group result tries to
-// suspend (not yet supported).
-var ErrGroupSuspendNotSupported = errors.New("group suspend not supported in this milestone")
 
 // ErrGroupLeaseNotActive is returned by RecoverGroupLease when the unit has no
 // live group lease in the backend. This is NOT an internal failure: a durable
@@ -256,10 +250,6 @@ func (e *Engine) CommitGroupResult(ctx context.Context, lease *TaskLease, res Gr
 		return "", fmt.Errorf("invalid group unit %d", unitIdx)
 	}
 
-	if res.Outcome == GroupOutcomeSuspended {
-		return "", ErrGroupSuspendNotSupported
-	}
-
 	gm := g.GroupMetaAt(unitIdx)
 
 	// Validate exits against compiled boundary outputs.
@@ -287,12 +277,23 @@ func (e *Engine) CommitGroupResult(ctx context.Context, lease *TaskLease, res Gr
 	}
 
 	// Determine fatality based on outcome and OnError strategy.
+	//
+	// The default arm is load-bearing, not defensive boilerplate: Outcome
+	// crosses the wire as a bare JSON string from a remote runner, so an
+	// unrecognized value is reachable input, not an impossible state. Without
+	// it such a value falls through to fatal=false and commits as a non-fatal
+	// failure, releasing downstream on a result nothing understood. This used
+	// to guard only "suspended" (durable group suspend, since removed); the
+	// rest of the space was silently accepted.
 	fatal := false
 	switch res.Outcome {
+	case GroupOutcomeSuccess:
 	case GroupOutcomeFailed:
 		fatal = groupOnErrorFatal(gm.OnError)
 	case GroupOutcomeTimeout, GroupOutcomeCanceled:
 		fatal = true
+	default:
+		return "", fmt.Errorf("unknown group outcome %q", res.Outcome)
 	}
 
 	// Delegate to the existing commitGroup path.

@@ -11,8 +11,6 @@ const (
 	SpanGroupCommit    = "xflow.group.commit"
 	SpanGroupActivate  = "xflow.group.activate"
 	SpanGroupRenew     = "xflow.group.renew"
-	SpanGroupSuspend   = "xflow.group.suspend"
-	SpanGroupResume    = "xflow.group.resume"
 )
 
 // Standard attribute keys for group spans.
@@ -27,5 +25,4 @@ const (
 	AttrGroupBatchSize    = "xflow.group.batch_size"
 	AttrGroupAdmissionKey = "xflow.group.admission_key"
 	AttrGroupPackageHash  = "xflow.group.package_hash"
-	AttrGroupSignalName   = "xflow.group.signal_name"
 )

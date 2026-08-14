@@ -198,8 +198,8 @@ script」），且 `terminalExecutionError` 让 `CyclicFinalError` 优先于节�
   走这条），local 的 `Backend.WaitDone` 直读快照（**绕过 `Inspect`**，需单独接）。只接一边会
   造成「内嵌模式看得见、分布式看不见」或反之。
 - `rstate.GetExecution` 读回 `execKey(..,"error")`（不存在是常态，容忍 `redis.Nil`）。
-- local 的 `finishExecutionLocked` 收 errMsg 参数，五处调用点（`atomic_state.go` 两处、
-  `group_state.go`、`entry_admission.go`、`group_suspend.go`）各自传入。
+- local 的 `finishExecutionLocked` 收 errMsg 参数，四处调用点（`atomic_state.go` 两处、
+  `group_state.go`、`entry_admission.go`）各自传入。
 - 新增 `engine.TerminalExecutionError(status, nodeErr, cyclicErr)`：非 failed 一律为空；
   cyclic 错误优先于节点错误，因为深度超限时**没有失败节点**（`engine/scheduler.go:43-45`
   拒绝的是下游激活，触发限制的节点本身是 success）。
@@ -214,9 +214,10 @@ script」），且 `terminalExecutionError` 让 `CyclicFinalError` 优先于节�
 把前者也加上 status 门会让 local 清掉 Redis 保留的原因——这个分歧曾被写进代码，靠反向
 探针**返回绿**才暴露出来（探针无区分力 = 规则本身写错了）。
 
-`CancelSuspendedGroup` 是唯一连调用方都拿不到原因的终态失败路径：取消动作直接终结整个
-group unit，没有任何成员节点提交失败。两个后端共用新常量 `engine.CanceledSuspendedGroupError`
-（`engine/group_suspend.go`），`cancelSuspendedGroupLua` 为此加了第 6 个 KEY 和第 2 个 ARGV。
+曾有第三条路径 `CancelSuspendedGroup`：取消动作直接终结整个 group unit，没有任何成员节点
+提交失败，所以连调用方都拿不到原因，两个后端为此共用常量 `engine.CanceledSuspendedGroupError`，
+`cancelSuspendedGroupLua` 也为此加了第 6 个 KEY 和第 2 个 ARGV。durable group suspend 子系统
+整体移除后这条路径不复存在（详见 `NODE-GROUP-COLOCATION.md` §6），常量与 Lua 一并删除。
 
 回归覆盖落在共享契约里（唯一同时约束两个后端的地方），且都带真 Redis 运行器：
 `statestoretest.runExecutionErrorRoundTrip`（`UpdateExecutionStatus` 路径，含成功不留原因的

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -128,7 +129,16 @@ func TestCommitGroupResult_InvalidExitPort(t *testing.T) {
 	}
 }
 
-func TestCommitGroupResult_SuspendRejected(t *testing.T) {
+// An outcome the engine does not recognize must be rejected, not committed.
+// GroupResult.Outcome arrives as a bare JSON string from a remote runner, so an
+// unknown value is reachable input rather than an impossible state.
+//
+// Before the fatality switch grew a default arm, such a value fell through to
+// fatal=false and committed as a non-fatal failure, releasing downstream on a
+// result nothing understood. Only "suspended" was guarded, and only because
+// durable group suspend was unimplemented; removing that subsystem is what
+// surfaced the wider hole.
+func TestCommitGroupResult_UnknownOutcomeRejected(t *testing.T) {
 	eng, g, execID := setupGroupLeaseTest(t)
 	ctx := context.Background()
 
@@ -148,10 +158,15 @@ func TestCommitGroupResult_SuspendRejected(t *testing.T) {
 	}
 
 	_, err = eng.CommitGroupResult(ctx, lease, GroupResult{
-		Outcome: GroupOutcomeSuspended,
+		Outcome: GroupOutcome("garbage"),
 	})
-	if err != ErrGroupSuspendNotSupported {
-		t.Errorf("error = %v, want ErrGroupSuspendNotSupported", err)
+	if err == nil {
+		t.Fatal("CommitGroupResult accepted an unknown outcome")
+	}
+	// Name the reason: without this the test would also pass if the commit
+	// failed for an unrelated cause (bad lease, missing graph).
+	if !strings.Contains(err.Error(), "unknown group outcome") {
+		t.Fatalf("failed for the wrong reason: %v", err)
 	}
 }
 
