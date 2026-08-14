@@ -129,22 +129,6 @@ func TestRegisterConsumerReceivesCurrentSnapshot(t *testing.T) {
 	}
 }
 
-func TestReadyReportsMissingNames(t *testing.T) {
-	r := NewRegistry()
-	_ = r.Apply(context.Background(), snap("rules", "v1", 1))
-
-	if missing := r.Ready([]string{"rules"}); missing != nil {
-		t.Fatalf("Ready = %v, want nil", missing)
-	}
-	missing := r.Ready([]string{"rules", "tags", "aaa"})
-	if len(missing) != 2 || missing[0] != "aaa" || missing[1] != "tags" {
-		t.Fatalf("Ready = %v, want sorted [aaa tags]", missing)
-	}
-	if missing := r.Ready(nil); missing != nil {
-		t.Fatalf("Ready(nil) = %v, want nil", missing)
-	}
-}
-
 func TestGetReturnsCopiedContent(t *testing.T) {
 	r := NewRegistry()
 	_ = r.Apply(context.Background(), snap("rules", "v1", 1))
@@ -459,10 +443,17 @@ func TestRegisterConsumerAcceptingStaysReady(t *testing.T) {
 	}
 }
 
-// Ready(names) must agree with IsReady, not merely check snapshot presence:
-// a name with a rejected consumer must be reported missing even though a
-// snapshot is cached.
-func TestReadyAgreesWithIsReady(t *testing.T) {
+// A rejected consumer must make the supply not-ready even though a snapshot is
+// cached — the distinction the gate relies on ("cached but unusable" is not
+// "ready to serve traffic"), and the reason readiness is not a bare Get.
+//
+// This used to be phrased against Registry.Ready, a batch wrapper over IsReady
+// that was deleted for having no caller: the heartbeat reporting it named as
+// its consumer landed as Observed() instead, which reads isReadyLocked under a
+// single lock, and the activation gate calls IsReady per requirement because it
+// also fetches and filters on RequireReady. The SEMANTICS were real, so they
+// are pinned here directly.
+func TestRejectedConsumerMakesSupplyNotReady(t *testing.T) {
 	r := NewRegistry()
 	ctx := context.Background()
 	_ = r.Apply(ctx, snap("rules", "v1", 1))
@@ -471,9 +462,14 @@ func TestReadyAgreesWithIsReady(t *testing.T) {
 	bad := &recordingConsumer{fail: errors.New("reject")}
 	r.RegisterConsumer("rules", "node/a", bad) // rejects -> rules becomes unready
 
-	missing := r.Ready([]string{"rules", "tags", "absent"})
-	if len(missing) != 2 || missing[0] != "absent" || missing[1] != "rules" {
-		t.Fatalf("Ready = %v, want sorted [absent rules] (tags is ready, rules rejected, absent has no snapshot)", missing)
+	if r.IsReady("rules") {
+		t.Fatal("a supply whose consumer rejected the cached content must not be ready")
+	}
+	if !r.IsReady("tags") {
+		t.Fatal("an untouched supply with content and no consumer must stay ready")
+	}
+	if r.IsReady("absent") {
+		t.Fatal("a supply with no snapshot at all must not be ready")
 	}
 }
 

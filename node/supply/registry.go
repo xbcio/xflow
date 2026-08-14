@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
 	"sync"
 	"sync/atomic"
 )
@@ -514,29 +513,6 @@ func decodeForExpr(s Snapshot) any {
 	obj[SupplyRevisionKey] = s.Revision
 	obj[SupplyHashKey] = s.Hash
 	return obj
-}
-
-// Ready returns the sorted subset of names that are NOT ready (see IsReady): no
-// cached snapshot, or cached content that a currently-registered consumer
-// rejected. Its semantics are defined entirely in terms of IsReady so this type
-// never carries two divergent readiness definitions — Task 19's heartbeat
-// readiness reporting and the activation gate must agree on what "ready" means
-// for the same name.
-func (r *Registry) Ready(names []string) []string {
-	if len(names) == 0 {
-		return nil
-	}
-	var missing []string
-	for _, n := range names {
-		if !r.IsReady(n) {
-			missing = append(missing, n)
-		}
-	}
-	if len(missing) == 0 {
-		return nil
-	}
-	sort.Strings(missing)
-	return missing
 }
 
 // safeNotify calls a consumer's OnSupplyChanged with panic recovery. A panicking
