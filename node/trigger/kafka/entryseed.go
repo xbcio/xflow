@@ -139,9 +139,16 @@ func seedEntryBatchViaGroupExec(ctx context.Context, in *types.TriggerActivateIn
 		return false
 	}
 	if execRes.Outcome != "success" {
-		// The group ran but did not succeed (member failure, timeout, cancel):
-		// do NOT admit — this batch must be redelivered, not silently treated
-		// as a zero-hit success.
+		// The group ran but did not succeed. Retry semantics depend on whether
+		// the failure is deterministic (retrying won't help) or transient.
+		if execRes.Deterministic {
+			// Permanent failure (compile error, schema validation, etc.):
+			// commit offset to skip this batch — redelivery would fail identically.
+			obs().OnBatchAdmission(ctx, topic, "deterministic_skip")
+			return true
+		}
+		// Transient failure (timeout, member I/O error, etc.): do NOT admit —
+		// this batch must be redelivered.
 		obs().OnBatchAdmission(ctx, topic, "error")
 		return false
 	}

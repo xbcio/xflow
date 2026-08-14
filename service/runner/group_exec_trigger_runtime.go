@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/xbcio/xflow/engine/graph"
@@ -62,8 +63,34 @@ func (g *groupExecTriggerRuntime) ExecuteGroup(ctx context.Context, input map[st
 		exits[i] = types.BoundaryExit{NodeName: ex.NodeName, Port: ex.Port, Data: ex.Data}
 	}
 	return types.GroupExecResult{
-		Outcome: string(res.Outcome),
-		Exits:   exits,
-		Error:   res.Error,
+		Outcome:       string(res.Outcome),
+		Exits:         exits,
+		Error:         res.Error,
+		Deterministic: isDeterministicGroupFailure(string(res.Outcome), res.Error),
 	}, nil
+}
+
+// isDeterministicGroupFailure returns true when a group execution failure is
+// permanent — retrying the same input will produce the same result. This
+// covers compile/validation errors from inner submission and explicit
+// deterministic error markers from member nodes. Timeout and cancel are
+// always transient (environmental).
+func isDeterministicGroupFailure(outcome, errMsg string) bool {
+	if outcome == "success" || outcome == "timeout" || outcome == "canceled" {
+		return false
+	}
+	// "inner submit: ..." means the package or parameters could not be
+	// compiled/validated — the workflow definition itself is broken.
+	if strings.HasPrefix(errMsg, "inner submit:") {
+		return true
+	}
+	// Member nodes may signal deterministic failures via error message
+	// conventions (compile, validation, schema, syntax errors).
+	lower := strings.ToLower(errMsg)
+	for _, keyword := range []string{"compile", "validation", "schema", "syntax", "deterministic"} {
+		if strings.Contains(lower, keyword) {
+			return true
+		}
+	}
+	return false
 }

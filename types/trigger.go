@@ -168,4 +168,11 @@ type GroupExecResult struct {
 	Outcome string
 	Exits   []BoundaryExit
 	Error   string
+
+	// Deterministic indicates the failure is permanent — retrying the same
+	// input will produce the same failure (e.g. rule compilation error,
+	// schema validation failure). Consumers use this to decide whether to
+	// commit offset (skip) or withhold it (redeliver). Only meaningful when
+	// Outcome != "success".
+	Deterministic bool
 }
