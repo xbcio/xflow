@@ -2,7 +2,6 @@ package runner
 
 import (
 	"context"
-	"strings"
 	"time"
 
 	"github.com/xbcio/xflow/engine/graph"
@@ -42,13 +41,19 @@ var _ types.GroupExecRuntime = (*groupExecTriggerRuntime)(nil)
 var _ types.TriggerRuntime = (*groupExecTriggerRuntime)(nil)
 
 // ExecuteGroup runs g.pkg with input as the entry node's seed data and
-// converts the resulting engine.GroupResult to the caller-facing
+// converts the resulting subgraph.Result to the caller-facing
 // types.GroupExecResult. A non-nil error means the group could not be
 // executed at all (e.g. package compile/validation failure via PackageCache);
 // GroupExecResult.Outcome carries the group's own success/failed/timeout/
 // canceled verdict once it did run.
 func (g *groupExecTriggerRuntime) ExecuteGroup(ctx context.Context, input map[string]any) (types.GroupExecResult, error) {
-	res, err := g.runtime.ExecuteRequest(ctx, subgraph.Request{
+	// ExecuteSubgraph, not ExecuteRequest: the latter maps onto
+	// engine.GroupResult, the control plane's wire shape, which carries no
+	// failure classification (protocol.GroupResultWire has no such field). This
+	// path never crosses the wire — the group runs in this process, for this
+	// Kafka batch — so it reads the executor's own result and keeps the
+	// classification the failing member set.
+	res, err := g.runtime.ExecuteSubgraph(ctx, subgraph.Request{
 		Package:         g.pkg,
 		PackageHash:     g.packageHash,
 		Input:           &types.Input{Data: input},
@@ -63,34 +68,17 @@ func (g *groupExecTriggerRuntime) ExecuteGroup(ctx context.Context, input map[st
 		exits[i] = types.BoundaryExit{NodeName: ex.NodeName, Port: ex.Port, Data: ex.Data}
 	}
 	return types.GroupExecResult{
-		Outcome:       string(res.Outcome),
-		Exits:         exits,
-		Error:         res.Error,
-		Deterministic: isDeterministicGroupFailure(string(res.Outcome), res.Error),
+		Outcome: string(res.Outcome),
+		Exits:   exits,
+		Error:   res.Error,
+		// "Deterministic" here and "Permanent" upstream name the same property
+		// from the two ends: the producer says the failure will not change on a
+		// retry, the consumer reads that as "redelivering this batch is
+		// pointless". The flag is set by the member node that failed, so it
+		// survives whatever text that member's error happens to have.
+		//
+		// A timeout or a cancel is environmental, so it is never deterministic
+		// and subgraph.Result never marks it — no filtering is needed here.
+		Deterministic: res.Permanent,
 	}, nil
-}
-
-// isDeterministicGroupFailure returns true when a group execution failure is
-// permanent — retrying the same input will produce the same result. This
-// covers compile/validation errors from inner submission and explicit
-// deterministic error markers from member nodes. Timeout and cancel are
-// always transient (environmental).
-func isDeterministicGroupFailure(outcome, errMsg string) bool {
-	if outcome == "success" || outcome == "timeout" || outcome == "canceled" {
-		return false
-	}
-	// "inner submit: ..." means the package or parameters could not be
-	// compiled/validated — the workflow definition itself is broken.
-	if strings.HasPrefix(errMsg, "inner submit:") {
-		return true
-	}
-	// Member nodes may signal deterministic failures via error message
-	// conventions (compile, validation, schema, syntax errors).
-	lower := strings.ToLower(errMsg)
-	for _, keyword := range []string{"compile", "validation", "schema", "syntax", "deterministic"} {
-		if strings.Contains(lower, keyword) {
-			return true
-		}
-	}
-	return false
 }

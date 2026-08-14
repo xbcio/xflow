@@ -45,23 +45,31 @@ func NewGroupRuntime(reg *execution.Registry, cache *PackageCache, opts ...Group
 	return r
 }
 
-// ExecuteRequest runs req directly against the underlying subgraph executor
-// and maps the result to engine.GroupResult, without unwrapping an
-// engine.TaskLease. This is the entry point for callers that have no lease at
-// all — a trigger-group's per-Kafka-batch local execution (see
-// node/trigger/kafka/kafka.go's group-exec path) runs once per flushed
-// batch, never through the lease-based task queue, so there is no
-// LeaseID/Attempt/GroupExecID to unwrap. Execute (below) is now a thin
-// wrapper over this for the lease-bearing callers (the batch task-queue
-// path, runner.go:363).
-func (r *GroupRuntime) ExecuteRequest(ctx context.Context, req subgraph.Request) (engine.GroupResult, error) {
+// ExecuteSubgraph runs req against the underlying executor and returns the
+// executor's OWN result, undegraded.
+//
+// ExecuteRequest below is this plus a mapping onto engine.GroupResult, which is
+// the control plane's wire shape and therefore carries only what the wire
+// carries. A caller that stays in this process — the trigger-group's per-Kafka-
+// batch path — reads this instead, so a member's failure classification
+// (subgraph.Result.Permanent) reaches it rather than being dropped at a
+// conversion it never needed.
+func (r *GroupRuntime) ExecuteSubgraph(ctx context.Context, req subgraph.Request) (subgraph.Result, error) {
 	// r.suspendDisabled is a floor, not an override: a caller that already
 	// wants suspend disabled (e.g. the group-exec trigger adapter, which
 	// always sets this true) keeps that; a caller relying on the runtime's
 	// own construction-time setting inherits it too.
 	req.SuspendDisabled = req.SuspendDisabled || r.suspendDisabled
+	return r.executor.Execute(ctx, req)
+}
 
-	res, err := r.executor.Execute(ctx, req)
+// ExecuteRequest runs req directly against the underlying subgraph executor
+// and maps the result to engine.GroupResult, without unwrapping an
+// engine.TaskLease. This is the entry point for callers that have no lease at
+// all. Execute (below) is now a thin wrapper over this for the lease-bearing
+// callers (the batch task-queue path, runner.go:363).
+func (r *GroupRuntime) ExecuteRequest(ctx context.Context, req subgraph.Request) (engine.GroupResult, error) {
+	res, err := r.ExecuteSubgraph(ctx, req)
 	if err != nil {
 		return engine.GroupResult{}, err
 	}

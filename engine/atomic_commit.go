@@ -119,6 +119,13 @@ func (e *Engine) commitAcyclicNodeWithClassification(ctx context.Context, lease 
 			Err:      errors.New(errMsg),
 			Attempt:  lease.Attempt,
 			Fatal:    true,
+			// Taken from cls, not from the error handed to the observer: that
+			// error is rebuilt from the committed MESSAGE, so both the
+			// ErrPermanent sentinel and the *ClassifiedError type are already
+			// gone by this line. cls was derived one frame up from the original
+			// error (buildEffectiveClassification), which is the last place the
+			// classification still exists.
+			Permanent: cls.Permanent != nil && *cls.Permanent,
 		})
 	}
 	e.publishCommitReceipt(ctx, req, result, cls)

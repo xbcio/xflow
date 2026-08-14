@@ -69,6 +69,19 @@ type Result struct {
 	Outcome Outcome
 	Exits   []graph.SubgraphExitResult
 	Error   string
+	// Permanent reports that re-running this sub-graph with the same input
+	// produces the same failure: the package could not be submitted at all, or
+	// the member node that failed it classified its own error as permanent
+	// (types.ClassifiedError / types.ErrPermanent).
+	//
+	// It exists so a caller can decide retry-vs-skip from a flag the failing
+	// node set, rather than by matching keywords against Error. A member's Error
+	// is whatever text that member produced — a wasm trap message, a driver
+	// error — and no keyword list survives contact with that.
+	//
+	// Meaningful only when Outcome is OutcomeFailed. A timeout or a cancel is
+	// environmental and never permanent; a success has nothing to classify.
+	Permanent bool
 }
 
 // Executor runs sub-graph packages on a fresh embedded backend per execution.
@@ -206,6 +219,10 @@ func (e *Executor) Execute(ctx context.Context, req Request) (Result, error) {
 		return Result{
 			Outcome: OutcomeFailed,
 			Error:   fmt.Sprintf("inner submit: %v", err),
+			// The submission never started, so nothing environmental has been
+			// touched: Submit rejects on the package, the graph, or the params,
+			// and re-submitting the identical request fails identically.
+			Permanent: true,
 		}, nil
 	}
 
@@ -227,6 +244,10 @@ func (e *Executor) Execute(ctx context.Context, req Request) (Result, error) {
 		result.Outcome = OutcomeFailed
 		if f := observer.fatal(); f != nil {
 			result.Error = f.Err.Error()
+			// The failing member classified itself. Carried through rather than
+			// re-derived from result.Error, which by this point is that member's
+			// own free-form message.
+			result.Permanent = f.Permanent
 		} else {
 			result.Error = "inner execution failed"
 		}

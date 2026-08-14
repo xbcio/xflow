@@ -105,6 +105,20 @@ type ObservedNodeFailure struct {
 	Err      error
 	Attempt  int
 	Fatal    bool
+	// Permanent reports that retrying this node with the same input produces
+	// the same failure — the node returned a types.ClassifiedError marked
+	// permanent, or an error wrapping types.ErrPermanent.
+	//
+	// It is a separate field rather than something a consumer derives from Err
+	// because Err does not survive the commit path: the observation is built
+	// from the committed error MESSAGE (errors.New of it), so the sentinel and
+	// the ClassifiedError type are both gone by the time an observer sees it.
+	// The classification is recovered at the commit boundary instead, where the
+	// original error is still in hand.
+	//
+	// False for an unclassified failure, which is the conservative reading: a
+	// consumer that skips work on Permanent must not skip on a maybe.
+	Permanent bool
 }
 
 // NodeFailureObserver receives per-node failure observations from the engine.
