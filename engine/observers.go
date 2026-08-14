@@ -57,6 +57,17 @@ type OutboxMetricsReader interface {
 	OutboxMetrics(ctx context.Context) (OutboxMetricsSnapshot, error)
 }
 
+// OutboxReleaser is an optional StateStore capability that hands a leased
+// delivery intent back before its visibility timeout elapses.
+//
+// Without it, an entry the flush could not hand off — a full queue, a failed
+// enqueue — stays invisible for the whole OutboxDeliveryLeaseTTL even though
+// both conditions clear in milliseconds. A store that leases must implement it;
+// one that does not lease has nothing to release.
+type OutboxReleaser interface {
+	ReleaseOutbox(ctx context.Context, id types.ExecutionID, entry OutboxEntry) error
+}
+
 // WithCommitObserver installs an observer for structured result-commit
 // outcomes. A nil observer leaves commit observation disabled.
 func WithCommitObserver(observer CommitObserver) Option {
@@ -213,6 +224,11 @@ func (e *Engine) notifyOutboxError(ctx context.Context, operation string, err er
 
 func (e *Engine) recordOutboxDeliveryFailure(ctx context.Context, state AtomicStateStore, id types.ExecutionID, entry OutboxEntry, deliveryErr error) {
 	e.notifyOutboxError(ctx, "delivery", deliveryErr)
+	// A failed handoff is a retry-now condition, so give the delivery lease
+	// back rather than making the next attempt wait out the visibility timeout.
+	// Release before recording the failure: once the attempt counter reaches
+	// the limit the entry is dead-lettered and there is nothing left to release.
+	e.releaseOutboxLease(ctx, state, id, entry)
 
 	recorder, ok := state.(OutboxFailureRecorder)
 	if !ok {
@@ -228,6 +244,18 @@ func (e *Engine) recordOutboxDeliveryFailure(ctx context.Context, state AtomicSt
 		return
 	}
 	e.notifyOutboxRetry(ctx, result.Attempts)
+}
+
+// releaseOutboxLease returns one leased entry to the ready set. A store without
+// the capability never leased it in the first place, so there is nothing to do.
+func (e *Engine) releaseOutboxLease(ctx context.Context, state AtomicStateStore, id types.ExecutionID, entry OutboxEntry) {
+	releaser, ok := state.(OutboxReleaser)
+	if !ok {
+		return
+	}
+	if err := releaser.ReleaseOutbox(ctx, id, entry); err != nil {
+		e.notifyOutboxError(ctx, "release", err)
+	}
 }
 
 func (e *Engine) observeOutboxMetrics(ctx context.Context, state AtomicStateStore) {

@@ -12,6 +12,11 @@ import (
 
 type memoryOutboxEntry struct {
 	entry engine.OutboxEntry
+	// leasedUntil mirrors the Redis store's ready-ZSET score bump: while it is
+	// in the future ListOutbox skips the entry, so two concurrent flushes do
+	// not both deliver it. Ack stays the only removal path, so a deliverer that
+	// dies leaves the entry to become listable again on its own.
+	leasedUntil time.Time
 }
 
 // memoryReplayReceipt is the authoritative in-memory record of one replay,
@@ -32,6 +37,7 @@ var _ engine.AtomicStateStore = (*memoryState)(nil)
 var _ engine.LegacyNodeCommitter = (*memoryState)(nil)
 var _ engine.DurableLeaseSuspender = (*memoryState)(nil)
 var _ engine.OutboxFailureRecorder = (*memoryState)(nil)
+var _ engine.OutboxReleaser = (*memoryState)(nil)
 var _ engine.OutboxMetricsReader = (*memoryState)(nil)
 var _ engine.DeadLetterStore = (*memoryState)(nil)
 
@@ -223,7 +229,9 @@ func (s *memoryState) AdvanceNode(_ context.Context, req engine.AdvanceNodeReque
 	return result, nil
 }
 
-// ListOutbox returns ready delivery intents for a single execution.
+// ListOutbox returns ready delivery intents for a single execution and takes a
+// delivery lease on each one, so a concurrent caller does not redeliver work
+// that is already in flight. See engine.OutboxDeliveryLeaseTTL.
 func (s *memoryState) ListOutbox(_ context.Context, id types.ExecutionID, before time.Time, limit int) ([]engine.OutboxEntry, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -233,6 +241,9 @@ func (s *memoryState) ListOutbox(_ context.Context, id types.ExecutionID, before
 	}
 	ids := make([]string, 0, len(entries))
 	for entryID, entry := range entries {
+		if entry.leasedUntil.After(before) {
+			continue
+		}
 		if entry.entry.AvailableAt.IsZero() || !entry.entry.AvailableAt.After(before) {
 			ids = append(ids, entryID)
 		}
@@ -243,7 +254,10 @@ func (s *memoryState) ListOutbox(_ context.Context, id types.ExecutionID, before
 	}
 	out := make([]engine.OutboxEntry, 0, len(ids))
 	for _, entryID := range ids {
-		out = append(out, cloneOutboxEntry(entries[entryID].entry))
+		held := entries[entryID]
+		held.leasedUntil = before.Add(engine.OutboxDeliveryLeaseTTL)
+		entries[entryID] = held
+		out = append(out, cloneOutboxEntry(held.entry))
 	}
 	return out, nil
 }
@@ -260,6 +274,23 @@ func (s *memoryState) AckOutbox(_ context.Context, id types.ExecutionID, entryID
 			delete(s.outbox, id)
 		}
 	}
+	return nil
+}
+
+// ReleaseOutbox hands a leased entry back for immediate redelivery instead of
+// making the next flush wait out the visibility timeout. Like AckOutbox it is
+// idempotent, and it must not resurrect an entry that was acked or
+// dead-lettered in the meantime — hence the presence check.
+func (s *memoryState) ReleaseOutbox(_ context.Context, id types.ExecutionID, entry engine.OutboxEntry) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entries := s.outbox[id]
+	held, ok := entries[entry.ID]
+	if !ok {
+		return nil
+	}
+	held.leasedUntil = time.Time{}
+	entries[entry.ID] = held
 	return nil
 }
 

@@ -21,13 +21,19 @@ var ErrSystemTaskHandled = errors.New("system task handled")
 
 // OutboxEntry is a durable task-delivery intent created together with a
 // scheduling state transition. Delivery is at-least-once: callers may observe
-// the same task again when enqueue succeeds but acknowledgment is lost.
+// the same task again when enqueue succeeds but acknowledgment is lost, or when
+// a deliverer dies while holding the entry's delivery lease.
 type OutboxEntry struct {
 	ID          string
 	Task        Task
 	AvailableAt time.Time
 	CreatedAt   time.Time
 	Attempts    int
+	// LeasedFromScoreMs carries the entry's availability time as it stood when
+	// ListOutbox leased it, so ReleaseOutbox can restore it exactly. It is set
+	// by the store on the way out and is meaningless on an entry the caller
+	// constructs.
+	LeasedFromScoreMs int64
 }
 
 // CommitNodeRequest describes one fenced terminal node transition. A normal
@@ -183,10 +189,27 @@ type AtomicStateStore interface {
 	RevokeLeaseWithOutbox(ctx context.Context, id types.ExecutionID, nodeName string, token LeaseToken, entry OutboxEntry) (revoked bool, err error)
 	CommitNode(ctx context.Context, req CommitNodeRequest) (CommitNodeResult, error)
 	AdvanceNode(ctx context.Context, req AdvanceNodeRequest) (AdvanceNodeResult, error)
+	// ListOutbox returns ready delivery intents AND takes a delivery lease on
+	// each one it returns: for OutboxDeliveryLeaseTTL the same entry is not
+	// returned to another caller. Ack remains the only removal path, so an
+	// entry whose deliverer dies becomes listable again when the lease lapses.
+	//
+	// before is the availability cutoff — entries scheduled later than it are
+	// not yet due — and is also the clock the lease is taken against, so a
+	// caller can drive lease expiry deterministically in tests.
 	ListOutbox(ctx context.Context, id types.ExecutionID, before time.Time, limit int) ([]OutboxEntry, error)
 	AckOutbox(ctx context.Context, id types.ExecutionID, entryID string) error
 	ListOutboxExecutions(ctx context.Context, limit int) ([]types.ExecutionID, error)
 }
+
+// OutboxDeliveryLeaseTTL is how long ListOutbox hides an entry it handed out.
+//
+// It bounds wasted work rather than correctness: delivery is at-least-once and
+// FlushOutbox acks within milliseconds of listing, so the only entries that
+// reach the timeout are ones whose deliverer crashed, lost its response, or hit
+// a full queue. It must stay well above a normal flush and well below an
+// operator's patience for a crashed worker's backlog.
+const OutboxDeliveryLeaseTTL = 30 * time.Second
 
 func initialOutboxID(id types.ExecutionID, nodeName string, activationID int) string {
 	return fmt.Sprintf("root/%s/%s/%d", id, nodeName, activationID)
@@ -285,7 +308,7 @@ func (e *Engine) FlushOutbox(ctx context.Context, id types.ExecutionID) error {
 			return nil
 		}
 		var firstErr error
-		for _, entry := range entries {
+		for i, entry := range entries {
 			if entry.Task.Type == TaskTypeNodeAdvance || entry.Task.Type == TaskTypeNodeSkip {
 				handled, err := e.handleSystemTask(ctx, &entry.Task, false)
 				if err != nil {
@@ -322,6 +345,18 @@ func (e *Engine) FlushOutbox(ctx context.Context, id types.ExecutionID) error {
 					// workers have drained the queue. An outbox that stops
 					// draining still surfaces: the dispatcher's OnOutboxPending
 					// reports the backlog and its oldest entry's age.
+					//
+					// Give the delivery leases back first. A full queue drains
+					// in milliseconds while a lease hides its entry for
+					// OutboxDeliveryLeaseTTL, so holding them would convert
+					// ordinary backpressure into a stall — on a fan-out wide
+					// enough to fill the queue, one that outlives the flush
+					// itself. Every entry from this batch that has not been
+					// acked is still leased, not just the one that hit the
+					// full queue, so release from here to the end.
+					for _, held := range entries[i:] {
+						e.releaseOutboxLease(ctx, state, id, held)
+					}
 					return nil
 				}
 				if enqueueErr != nil {

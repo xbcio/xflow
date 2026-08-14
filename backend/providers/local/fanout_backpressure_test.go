@@ -133,8 +133,8 @@ func TestFanOutWiderThanTheQueueBufferCompletesOnOneWorker(t *testing.T) {
 	if res.Status != types.ExecutionStatusSuccess {
 		t.Fatalf("status = %v, want success", res.Status)
 	}
-	// Exactly n on a single worker: no concurrent FlushOutbox means no
-	// duplicate delivery. See the multi-worker test for why that differs.
+	// Exactly n: one worker means no concurrent FlushOutbox, and the delivery
+	// lease covers the concurrent case. See the multi-worker test.
 	if got := body.count(); got != n {
 		t.Errorf("body ran %d times, want exactly %d", got, n)
 	}
@@ -179,12 +179,14 @@ func TestParallelFanOutsCompleteOnTheDefaultWorkerPool(t *testing.T) {
 		t.Fatalf("WaitDone: %v (body ran %d/%d) — all four workers wedged inside "+
 			"FlushOutbox", err, body.count(), perMap*maps)
 	}
-	// At-least-once, not exactly-once: concurrent workers can each list and
-	// deliver the same un-acked intent (engine.OutboxEntry documents this, and
-	// engine/expand.go states body nodes with side effects must be idempotent
-	// on a business key). Assert coverage, not an exact count.
-	if got := body.count(); got < perMap*maps {
-		t.Errorf("body ran %d times, want at least %d", got, perMap*maps)
+	// Exactly n even with four workers: ListOutbox leases every entry it hands
+	// out, so a concurrent flush of the same execution no longer lists work
+	// that is already in flight. Delivery is still at-least-once — a deliverer
+	// that dies leaves its entries to be relisted once the lease lapses — but
+	// ordinary concurrency is no longer a source of duplicates.
+	// TestConcurrentFlushDoesNotRedeliverTheSameIntent pins that directly.
+	if got := body.count(); got != perMap*maps {
+		t.Errorf("body ran %d times, want exactly %d", got, perMap*maps)
 	}
 }
 

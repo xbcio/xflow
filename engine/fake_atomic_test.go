@@ -346,6 +346,10 @@ func (f *fakeState) AdvanceNode(_ context.Context, req AdvanceNodeRequest) (Adva
 	return result, nil
 }
 
+// ListOutbox deliberately does not take the delivery lease a real store takes.
+// These tests drive one flush at a time, so leasing would only add a clock the
+// assertions would have to wind forward. Lease behaviour is pinned on the
+// backends themselves, in the shared state-store contract.
 func (f *fakeState) ListOutbox(_ context.Context, id types.ExecutionID, before time.Time, limit int) ([]OutboxEntry, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

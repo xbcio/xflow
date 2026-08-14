@@ -394,6 +394,8 @@ func (s *drivingState) AdvanceNode(_ context.Context, req AdvanceNodeRequest) (A
 	return result, nil
 }
 
+// ListOutbox does not lease, for the same reason fakeState's does not: this
+// driver flushes serially. See the comment there.
 func (s *drivingState) ListOutbox(_ context.Context, id types.ExecutionID, _ time.Time, limit int) ([]OutboxEntry, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

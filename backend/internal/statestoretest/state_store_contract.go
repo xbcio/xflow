@@ -192,6 +192,119 @@ func RunStateStoreContract(t *testing.T, state engine.StateStore) {
 	}
 
 	runExecutionErrorRoundTrip(t, state)
+	runOutboxDeliveryLease(t, state)
+}
+
+// runOutboxDeliveryLease pins the ListOutbox delivery lease on both backends.
+//
+// Without it every worker that flushes the same execution lists the same
+// un-acked entries and delivers them again: a 800-item map at concurrency 4 ran
+// its body 826–1110 times. The lease is what makes ordinary concurrency stop
+// producing duplicates, while leaving the at-least-once contract intact for the
+// cases it exists for — a deliverer that dies still has its entries relisted
+// once the lease lapses.
+//
+// It drives the store directly because an end-to-end fan-out cannot distinguish
+// "leased, then redelivered on expiry" from "never leased at all".
+func runOutboxDeliveryLease(t *testing.T, state engine.StateStore) {
+	t.Helper()
+	atomic, ok := state.(engine.AtomicStateStore)
+	if !ok {
+		t.Fatal("state store does not implement AtomicStateStore")
+	}
+	ctx := context.Background()
+
+	id := types.ExecutionID("exec-contract-outbox-lease")
+	g := ContractGraph()
+	idx, _ := g.NodeIndex("start")
+	entry := engine.OutboxEntry{
+		ID: "root/exec-contract-outbox-lease/start/1",
+		Task: engine.Task{
+			ExecutionID: id, NodeName: "start", NodeIdx: idx,
+			Type: engine.TaskTypeNodeExec, ActivationID: 1,
+		},
+	}
+	if err := atomic.CreateExecutionWithOutbox(ctx, &engine.ExecutionSnapshot{
+		ID: id, Graph: g, Status: types.ExecutionStatusRunning,
+	}, []engine.OutboxEntry{entry}); err != nil {
+		t.Fatalf("CreateExecutionWithOutbox() error = %v", err)
+	}
+
+	now := time.Now().UTC()
+	first, err := atomic.ListOutbox(ctx, id, now, 16)
+	if err != nil {
+		t.Fatalf("ListOutbox() error = %v", err)
+	}
+	if len(first) != 1 || first[0].ID != entry.ID {
+		t.Fatalf("ListOutbox() = %+v, want the single seeded entry", first)
+	}
+
+	// A second flush of the same execution must not see the in-flight entry.
+	leased, err := atomic.ListOutbox(ctx, id, now, 16)
+	if err != nil {
+		t.Fatalf("ListOutbox(leased) error = %v", err)
+	}
+	if len(leased) != 0 {
+		t.Fatalf("ListOutbox(leased) returned %d entries, want 0 — a concurrent "+
+			"flush would redeliver work already in flight", len(leased))
+	}
+
+	// Releasing hands it straight back: backpressure and a failed handoff are
+	// both retry-now conditions and must not wait out the visibility timeout.
+	releaser, ok := atomic.(engine.OutboxReleaser)
+	if !ok {
+		t.Fatal("a store that leases must implement engine.OutboxReleaser")
+	}
+	if err := releaser.ReleaseOutbox(ctx, id, first[0]); err != nil {
+		t.Fatalf("ReleaseOutbox() error = %v", err)
+	}
+	released, err := atomic.ListOutbox(ctx, id, now, 16)
+	if err != nil {
+		t.Fatalf("ListOutbox(released) error = %v", err)
+	}
+	if len(released) != 1 {
+		t.Fatalf("ListOutbox(released) returned %d entries, want 1 — a released "+
+			"entry must be deliverable immediately", len(released))
+	}
+
+	// And the lease lapses on its own, so a deliverer that dies mid-flight
+	// does not strand its entries.
+	expired, err := atomic.ListOutbox(ctx, id, now.Add(engine.OutboxDeliveryLeaseTTL+time.Second), 16)
+	if err != nil {
+		t.Fatalf("ListOutbox(expired) error = %v", err)
+	}
+	if len(expired) != 1 {
+		t.Fatalf("ListOutbox(expired) returned %d entries, want 1 — a lapsed "+
+			"lease must make the entry listable again", len(expired))
+	}
+
+	// Ack is still the only removal path.
+	if err := atomic.AckOutbox(ctx, id, entry.ID); err != nil {
+		t.Fatalf("AckOutbox() error = %v", err)
+	}
+	acked, err := atomic.ListOutbox(ctx, id, now.Add(2*engine.OutboxDeliveryLeaseTTL), 16)
+	if err != nil {
+		t.Fatalf("ListOutbox(acked) error = %v", err)
+	}
+	if len(acked) != 0 {
+		t.Fatalf("ListOutbox(acked) returned %d entries, want 0", len(acked))
+	}
+	// Releasing an already-acked entry must not make it deliverable again.
+	// This is the idempotence half only: a store may also self-heal a ready
+	// entry whose body is gone, which would hide a missing guard from here.
+	// TestRedisReleaseOutboxDoesNotResurrectAnAckedEntry inspects the index
+	// directly for that.
+	if err := releaser.ReleaseOutbox(ctx, id, first[0]); err != nil {
+		t.Fatalf("ReleaseOutbox(acked) error = %v", err)
+	}
+	ghost, err := atomic.ListOutbox(ctx, id, now.Add(2*engine.OutboxDeliveryLeaseTTL), 16)
+	if err != nil {
+		t.Fatalf("ListOutbox(ghost) error = %v", err)
+	}
+	if len(ghost) != 0 {
+		t.Fatalf("ListOutbox(ghost) returned %d entries, want 0 — releasing an "+
+			"acked entry redelivered it", len(ghost))
+	}
 }
 
 // runExecutionErrorRoundTrip pins the execution-level failure reason on the

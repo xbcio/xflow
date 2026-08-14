@@ -109,7 +109,10 @@ func TestRedisCommitLeasedNodeCyclicPersistsDownstreamAtomically(t *testing.T) {
 	if res2.Outcome != engine.CommitOutcomeDuplicateTerminal {
 		t.Fatalf("duplicate commit outcome = %v, want duplicate_terminal", res2.Outcome)
 	}
-	entries2, err := state.ListOutbox(ctx, id, time.Now().Add(time.Hour), 8)
+	// Past the first list's delivery lease, so this re-lists the same entry
+	// rather than observing it hidden. The point here is that the duplicate
+	// commit created no SECOND intent, which a leased-out list cannot show.
+	entries2, err := state.ListOutbox(ctx, id, time.Now().Add(time.Hour+engine.OutboxDeliveryLeaseTTL+time.Second), 8)
 	if err != nil {
 		t.Fatal(err)
 	}

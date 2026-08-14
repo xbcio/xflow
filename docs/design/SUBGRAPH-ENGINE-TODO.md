@@ -12,19 +12,7 @@
 ## P1 — 规模上去会疼
 
 ### 9. 并发 `FlushOutbox` 会重复投递同一条意图
-
-多个 worker 可以同时对同一 execution 调 `FlushOutbox`，各自 `ListOutbox` 到同一条
-未 ack 的条目、各自 enqueue、各自 ack。body 因此被多跑。实测：800 项的 map 在
-`concurrency=4` 下 body 跑了 826～1110 次，`concurrency=1` 下精确 800 次。
-
-**这在契约内**，不是缺陷：`engine.OutboxEntry` 的注释写明投递是 at-least-once，
-`engine/expand.go` 也要求「有副作用的 body 节点必须按 `$item` 里的业务键幂等」。
-`fanout_backpressure_test.go` 的多 worker 用例因此断言「≥ 期望数」而非精确相等。
-
-记在这里是因为**扇出死锁修复（8180d58）测量上放大了这个窗口**——每次 flush 变短，
-两个 worker 撞上同一批条目的机会变多（同样 800 项从 826 涨到 1004～1110）。要收窄
-的话，路子是给 `ListOutbox` 加投递租约（列出即标记 in-flight，超时才可再列），
-但这会把 outbox 从「无状态列表」变成「有租约的队列」，成本不小。当前无需求驱动。
+（已于 2026-08-14 修复，见下方「已修复」一节）
 
 ## P2 — 死代码
 
@@ -46,6 +34,40 @@ P2-5 修完后，编译期已经按这个形状执行了：`transformNodeTypes` 
 （已于 2026-08-11 `93277e7` 改名，见下方「已修复」一节）
 
 ## 已修复
+
+### 并发 `FlushOutbox` 重复投递同一条意图（原 P1-9，2026-08-14 修复）
+
+多个 worker 可以同时对同一 execution 调 `FlushOutbox`，各自 `ListOutbox` 到同一条
+未 ack 的条目、各自 enqueue、各自 ack，body 因此被多跑。修复前实测：800 项的 map 在
+`concurrency=4` 下 body 跑了 826～1110 次，`concurrency=1` 下精确 800 次。扇出死锁
+修复（8180d58）把这个窗口放大过——每次 flush 变短，两个 worker 撞上同一批条目的
+机会变多（同样 800 项从 826 涨到 1004～1110）。
+
+本条原先记着「**这在契约内**，不是缺陷，当前无需求驱动」。契约那半仍然对——投递
+是 at-least-once，`engine/expand.go` 要求有副作用的 body 按 `$item` 业务键幂等——但
+「在契约内」不等于「该留着」：at-least-once 存在是为了兜住崩溃与响应丢失，不是为了
+给日常并发发牌照。
+
+**修法：`ListOutbox` 列出即租约。** 没有引入第二个索引——ready ZSET 的 score 本来
+就表示「此刻之前不可投递」，租约就是把它推到 `now + OutboxDeliveryLeaseTTL`（30s）。
+成员**不移除**，所以 ack 仍是 `recordOutboxFailureLua` 之外唯一的移除路径，该脚本的
+幽灵死信守卫依赖的「body 存在 ⇔ ready 成员存在」等价关系不受影响。死掉的投递方
+留下的条目在租约失效后自然重新可列，at-least-once 因此完好。
+
+**释放是必需的，不是优化。** 背压（`ErrQueueFull`）和 handoff 失败都是「立刻该重试」
+的状态，毫秒级就恢复；扣着 30s 租约会把普通背压变成停顿。两条路径都经
+`engine.OutboxReleaser` 归还，且 Redis 侧的释放脚本必须先查 body——否则与 ack 竞态时
+会 ZADD 一个 body 已消失的成员，正好造出上面那个守卫认定不可能存在的幽灵。
+
+批次提交本身早就幂等（`completeExpandedSubExecutionLua` 只在 `child.status == 'running'`
+时应用结果），批次任务也刻意不取节点租约（`engine/lease.go` 对批次 fail closed），
+所以能收窄的层只有投递本身。
+
+覆盖：`backend/internal/statestoretest` 的共享契约（memory / miniredis / 真 Redis
+三处运行）、`backend/providers/local/outbox_lease_test.go`、
+`rstate/outbox_lease_test.go`（白盒查 ready 索引，因为 `ListOutbox` 会自愈掉无 body
+的成员，黑盒看不见幽灵）。`fanout_backpressure_test.go` 的多 worker 用例已从
+「≥ 期望数」收紧为精确相等。
 
 ### 队头阻塞：批次任务与普通节点任务共用一条队列（原 P1-4，2026-08-13 修复）
 
