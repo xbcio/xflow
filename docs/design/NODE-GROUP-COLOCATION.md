@@ -118,9 +118,30 @@ Operations: `lease_acquired`, `lease_expired`, `committed`, `admission_accepted`
 
 **Backpressure:** Runner limits in-flight unconfirmed emits (`EmitBackpressure` semaphore). Window full → consumer pauses. Kafka offset is the single truth for flow control.
 
-## 6. Suspend/Resume (Signal Journal)
+## 6. Suspend/Resume (Signal Journal) — 预留，生产禁用
 
-Groups support durable suspend when a member node issues a wait:
+> **本节描述的是已实现但未接线的存储层，不是在跑的流程。** 两个后端
+> （`backend/providers/local/group_suspend.go`、
+> `backend/providers/distributed/internal/rstate/group_suspend.go`）实现完整，
+> 共享契约测试也齐备，但**没有任何生产调用点**：`SuspendGroup` / `ResumeGroup` /
+> `CancelSuspendedGroup` / `TimeoutSuspendedGroup` / `RevokeGroupSignal` 五个方法
+> 只被接口声明、两处实现和测试引用。`GroupSuspendRequest` / `GroupResumeRequest`
+> 只在 `test/stress` 和契约测试里构造，`TaskTypeGroupResume` 没有消费者
+> （`engine/types.go:29` 标注「里程碑 A 预留，暂不消费」）。
+>
+> 更进一步，生产**刻意关闭**了组内挂起：唯一的生产 `GroupRuntime` 由
+> `cmd/runner/run.go` 带 `runnersvc.WithSuspendDisabled()` 构造，
+> `service/runner/group_exec_trigger_runtime.go` 也硬设 `SuspendDisabled: true`。
+> 理由与 map body 内禁止挂起相同——**挂起的成员会停住一个外层租约无法恢复的
+> 子执行**。于是成员节点发出的 wait 在 `engine/commit.go:46` 就被判失败，走不到
+> 下面第 1 步。
+>
+> 还缺一块：**没有「列出挂起中的组」这个原语**。`Engine.Cancel` 只遍历
+> `ListSuspendedNodes`，即便想接线也没有可枚举挂起组的入口。
+>
+> 下面的编号流程是里程碑 A 的**设计意图**，按它读代码会读到一条不存在的运行路径。
+
+设计意图（未接线）：
 
 1. Runner sends `GroupSuspendRequest` with `SuspendSpec` (wait signals, quorum, timeout) + accumulated `SignalJournal` + entry input checkpoint.
 2. Backend atomically clears lease, persists suspend state.

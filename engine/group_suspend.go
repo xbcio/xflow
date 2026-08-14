@@ -68,6 +68,22 @@ type GroupSuspendState struct {
 }
 
 // --- Interfaces ---
+//
+// NOTE: none of the interfaces below has a production caller. Both backends
+// implement them and the shared contract test covers them, but nothing in
+// cmd/ or service/ calls SuspendGroup, ResumeGroup, CancelSuspendedGroup,
+// TimeoutSuspendedGroup or RevokeGroupSignal, and TaskTypeGroupResume has no
+// consumer (engine/types.go: "里程碑 A 预留，暂不消费").
+//
+// Production disables group suspend on purpose: the only production
+// GroupRuntime is built with runnersvc.WithSuspendDisabled(), because a
+// suspended member would park a sub-execution the outer lease cannot resume.
+// A member's wait therefore fails the task in commit.go before reaching here.
+//
+// Wiring this up needs a piece that does not exist on either backend: there is
+// no "list suspended groups" primitive, so Engine.Cancel walks only
+// ListSuspendedNodes and could not reach a suspended group even if it wanted
+// to. See docs/design/NODE-GROUP-COLOCATION.md §6.
 
 // GroupSuspender atomically transitions a running group unit to suspended state.
 // It persists the suspend spec, signal journal, and entry input; clears the lease;
