@@ -1,6 +1,7 @@
 package apiserver
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -326,60 +327,90 @@ func (m *workflowControlModule) handleRegisterWorkflow(w http.ResponseWriter, r 
 	if !requireMethod(w, r, http.MethodPost) {
 		return
 	}
+	var def types.WorkflowDef
+	if !decodeJSON(w, r, &def) {
+		return
+	}
+	// Namespace is authoritative from the context, never the body.
+	ns := namespace.FromContext(r.Context())
+
+	id, warnings, err := m.registerWorkflow(r.Context(), ns, &def)
+	if err != nil {
+		var compileErr *WorkflowCompileError
+		if errors.As(err, &compileErr) {
+			writeError(w, http.StatusBadRequest, compileErr.Unwrap().Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	writeJSON(w, http.StatusOK, registerWorkflowResponse{WorkflowID: id, Warnings: warnings})
+}
+
+// WorkflowCompileError marks a registration failure that the caller can fix by
+// changing the definition, as opposed to a server-side failure. The HTTP
+// handler maps it to 400 and surfaces the compiler's message; every other error
+// collapses to a generic 500, since it may name internal state.
+type WorkflowCompileError struct{ err error }
+
+func (e *WorkflowCompileError) Error() string { return e.err.Error() }
+func (e *WorkflowCompileError) Unwrap() error { return e.err }
+
+// registerWorkflow is the definition -> persisted graph path both entry points
+// share: the HTTP handler above and APIServer.RegisterWorkflow, which an
+// embedded server calls in-process.
+//
+// Sharing it is the point. Registration identity is three coupled choices --
+// workflowRegistryKey, definitionHash, and the entry-activation derivation --
+// and a second implementation that picked any of them differently would
+// register a workflow the dispatcher then failed to resolve. ns is supplied by
+// the caller and written onto def; it is never read from def itself, so an
+// in-process caller cannot register into another namespace either.
+func (m *workflowControlModule) registerWorkflow(ctx context.Context, ns namespace.Namespace, def *types.WorkflowDef) (types.WorkflowID, []string, error) {
 	registry := m.registry()
 	if registry == nil {
 		if m.log != nil {
 			m.log.Error("register_workflow_no_registry")
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
-		return
+		return "", nil, errors.New("apiserver: no workflow registry configured")
 	}
-	var def types.WorkflowDef
-	if !decodeJSON(w, r, &def) {
-		return
-	}
-	g, err := graph.Compile(&def)
+	g, err := graph.Compile(def)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
+		return "", nil, &WorkflowCompileError{err: err}
 	}
-	// Namespace is authoritative from the context, never the body.
-	ns := string(namespace.FromContext(r.Context()))
-	def.Namespace = ns
+	def.Namespace = string(ns)
 
-	rec, err := registry.AddWorkflow(r.Context(), backend.WorkflowRecord{
-		Key:            workflowRegistryKey(ns, def.Name, def.Version),
-		Namespace:      ns,
+	rec, err := registry.AddWorkflow(ctx, backend.WorkflowRecord{
+		Key:            workflowRegistryKey(string(ns), def.Name, def.Version),
+		Namespace:      string(ns),
 		Name:           def.Name,
 		Version:        def.Version,
-		DefinitionHash: definitionHash(&def),
-		Definition:     &def,
+		DefinitionHash: definitionHash(def),
+		Definition:     def,
 		Graph:          g,
 	})
 	if err != nil {
 		if m.log != nil {
 			m.log.Error("register_workflow_failed", "err", err)
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
-		return
+		return "", nil, err
 	}
 	// Derive the node-generic entry activations for this workflow version so the
 	// reconciler can assign remote-hosted trigger entry units to runners. The
 	// namespace is the same server-side value used for the registry record. A
-	// derivation failure fails the register (generic 500) rather than leaving a
+	// derivation failure fails the register rather than leaving a
 	// registered-but-unactivated workflow — the manager is fail-closed on a group
 	// package that cannot be projected. Nil-guarded: an embedded control plane
 	// without an EntryActivationStore exposes no manager and skips this.
 	if mgr := m.entryActivationManager(); mgr != nil {
-		if err := mgr.AddOrUpdateWorkflow(r.Context(), namespace.FromContext(r.Context()), rec.ID, def.Version, g); err != nil {
+		if err := mgr.AddOrUpdateWorkflow(ctx, ns, rec.ID, def.Version, g); err != nil {
 			if m.log != nil {
 				m.log.Error("register_workflow_derive_activations_failed", "err", err)
 			}
-			writeError(w, http.StatusInternalServerError, "internal server error")
-			return
+			return "", nil, err
 		}
 	}
-	writeJSON(w, http.StatusOK, registerWorkflowResponse{WorkflowID: rec.ID, Warnings: g.Warnings()})
+	return rec.ID, g.Warnings(), nil
 }
 
 // handleDeregisterWorkflow serves DELETE /v1/workflows/register/{id}. It removes

@@ -13,11 +13,13 @@ import (
 	"github.com/xbcio/xflow/backend/providers/distributed"
 	backendlocal "github.com/xbcio/xflow/backend/providers/local"
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/observability/metrics"
 	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/service/protocol/runnerpb"
 	"github.com/xbcio/xflow/store"
+	"github.com/xbcio/xflow/types"
 )
 
 // Config configures an APIServer. Transport-facing fields (HTTPAddr, etc.)
@@ -124,6 +126,12 @@ type APIServer struct {
 	cfg        Config
 	timeouts   HTTPTimeouts
 
+	// ctrl is the workflow-control module New always registers. Held here so
+	// RegisterWorkflow can reach the same registration path the HTTP handler
+	// takes, rather than a parallel one that could disagree on the registry key
+	// or definition hash.
+	ctrl *workflowControlModule
+
 	// enableManagement gates registration of the ops read-only management
 	// module. It is set by WithManagement and consumed at the end of New (after
 	// s.cp is guaranteed to be non-nil) so the module always receives a ready
@@ -188,6 +196,7 @@ func New(cfg Config, opts ...Option) (*APIServer, error) {
 		newRunnerProtocolModule(s.cp),
 		ctrlModule,
 	}, s.modules...)
+	s.ctrl = ctrlModule
 	// The management module is opt-in (R5): it is only registered when
 	// WithManagement was passed. Registration happens here, after s.cp is
 	// guaranteed non-nil, so the module never sees a nil ControlPlane even
@@ -405,6 +414,32 @@ func (s *APIServer) IsLeader() bool { return s.cp.IsLeader() }
 // gate. Returns the backend even when the APIServer does not own the control
 // plane (an injected one); callers type-assert the capabilities they need.
 func (s *APIServer) Backend() backend.Provider { return s.cp.Backend() }
+
+// RegisterWorkflow compiles def and persists the compiled graph in the workflow
+// registry, exactly as POST /v1/workflows/register does — same registry key,
+// same definition hash, same entry-activation derivation. It returns the
+// server-assigned workflow ID and the compiler's non-fatal warnings.
+//
+// This is the in-process entry point for an embedded control plane, whose host
+// holds the definition as a Go value and has no HTTP client pointed at itself.
+// ns is authoritative and is written onto def; whatever namespace def carried is
+// overwritten, so an in-process caller has no more say over namespace than an
+// HTTP one. Note that this bypasses the authz wrapper by construction: the
+// caller is the host process, which already has full control of the server.
+//
+// A definition the compiler rejects comes back wrapped in *WorkflowCompileError.
+func (s *APIServer) RegisterWorkflow(ctx context.Context, ns namespace.Namespace, def *types.WorkflowDef) (types.WorkflowID, []string, error) {
+	if s.ctrl == nil {
+		return "", nil, errors.New("apiserver: workflow control module not initialized")
+	}
+	if def == nil {
+		return "", nil, errors.New("apiserver: workflow definition must not be nil")
+	}
+	if ns == "" {
+		ns = namespace.Default
+	}
+	return s.ctrl.registerWorkflow(ctx, ns, def)
+}
 
 // hasHTTPModule reports whether any registered module implements HTTPModule.
 func hasHTTPModule(modules []Module) bool {
