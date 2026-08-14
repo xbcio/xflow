@@ -114,6 +114,16 @@ func TestDiskCache_SurvivesRuntimeRecreation(t *testing.T) {
 	// The design's acceptance bar. Generous vs the measured 82 ms so the test
 	// does not flake on a loaded CI box, but tight enough to catch the cache
 	// being silently bypassed (a cold compile is seconds).
+	//
+	// Not judged when the cold sample says this machine is instrumented or busy
+	// (see maxCalibrationCold): the same warm compile measures ~82ms alone and
+	// ~519ms under -race. The relative assertion above is NOT gated — it is the
+	// one that catches a bypassed cache, and it survives contamination with room
+	// to spare (23.2s cold vs 519ms warm under -race).
+	if reason := budgetNotMeasurable(cold); reason != "" {
+		t.Logf("not judging the <500ms warm-compile bar: %s (warm was %v)", reason, warm)
+		return
+	}
 	if warm > 500*time.Millisecond {
 		t.Fatalf("warm compile %v exceeds the <500ms bar; disk cache likely bypassed", warm)
 	}
