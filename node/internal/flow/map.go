@@ -67,11 +67,12 @@ func (n *MapNode) Execute(ctx context.Context, input *types.Input) (*types.Outpu
 		return nil, fmt.Errorf("xflow.map: items parameter is required")
 	}
 
-	expression, _ := input.Params["expression"].(string)
-	_, hasBody := input.Params["body"]
-	if expression != "" && hasBody {
-		return nil, fmt.Errorf("xflow.map: body and expression are mutually exclusive; " +
-			"declare exactly one")
+	// The {expression | body} choice is types.TransformSpec's, not this
+	// handler's: reading it by hand here is what let this node and the compiler
+	// disagree about `expression: ""`.
+	spec, err := types.ParseTransformSpec(input.Params)
+	if err != nil {
+		return nil, fmt.Errorf("xflow.map: %w", err)
 	}
 
 	env := exprx.BuildExprEnv(input, nil)
@@ -85,8 +86,8 @@ func (n *MapNode) Execute(ctx context.Context, input *types.Input) (*types.Outpu
 		return nil, fmt.Errorf("xflow.map: items must evaluate to an array: %w", err)
 	}
 
-	if expression != "" {
-		return evalItemsInline(expression, env, items, continueOnError(input.Params))
+	if spec.Expression != "" {
+		return evalItemsInline(spec.Expression, env, items, continueOnError(input.Params))
 	}
 
 	batchSize := 1

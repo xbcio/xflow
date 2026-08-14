@@ -2,9 +2,11 @@ package flow_test
 
 import (
 	"context"
+	"strings"
+	"testing"
+
 	"github.com/xbcio/xflow/node/registry"
 	"github.com/xbcio/xflow/types"
-	"testing"
 
 	"github.com/xbcio/xflow/node"
 )
@@ -20,11 +22,27 @@ func TestMap_Factory(t *testing.T) {
 	}
 }
 
+// mapParams builds the parameters a body-form xflow.map actually reaches this
+// handler with. The body matters even though the handler never looks inside it:
+// a map node carrying neither a body nor an expression is rejected at compile
+// time (validateNodeBody rule 3), so calling Execute with bare RawParams() was
+// exercising a shape no execution can produce.
+func mapParams(b *node.MapNode) map[string]any {
+	params := b.RawParams().(map[string]any)
+	params["body"] = map[string]any{
+		"type": "xflow.subgraph",
+		"parameters": map[string]any{
+			"nodes": []any{map[string]any{"name": "echo", "type": "xflow.function"}},
+		},
+	}
+	return params
+}
+
 func TestMap_BasicIteration(t *testing.T) {
 	h, _ := registry.Lookup("xflow.map")
 	b := node.Map("items", 2)
 	input := &types.Input{
-		Params: b.RawParams().(map[string]any),
+		Params: mapParams(b),
 		Data:   map[string]any{"items": []any{1, 2, 3, 4, 5}},
 	}
 	out, err := h.Execute(context.Background(), input)
@@ -43,7 +61,7 @@ func TestMap_SingleBatch(t *testing.T) {
 	h, _ := registry.Lookup("xflow.map")
 	b := node.Map("items", 1)
 	input := &types.Input{
-		Params: b.RawParams().(map[string]any),
+		Params: mapParams(b),
 		Data:   map[string]any{"items": []any{"a", "b", "c"}},
 	}
 	out, err := h.Execute(context.Background(), input)
@@ -71,12 +89,17 @@ func TestMap_ItemsNotArray(t *testing.T) {
 	h, _ := registry.Lookup("xflow.map")
 	b := node.Map("items", 1)
 	input := &types.Input{
-		Params: b.RawParams().(map[string]any),
+		Params: mapParams(b),
 		Data:   map[string]any{"items": "not_an_array"},
 	}
 	_, err := h.Execute(context.Background(), input)
 	if err == nil {
 		t.Fatal("expected error for non-array items")
+	}
+	// Name the reason: with a bare RawParams() this test also went red, but for
+	// the missing body rather than the items type — passing for the wrong reason.
+	if !strings.Contains(err.Error(), "must evaluate to an array") {
+		t.Fatalf("failed for the wrong reason: %v", err)
 	}
 }
 
@@ -84,7 +107,7 @@ func TestMap_EmptyArray(t *testing.T) {
 	h, _ := registry.Lookup("xflow.map")
 	b := node.Map("items", 1)
 	input := &types.Input{
-		Params: b.RawParams().(map[string]any),
+		Params: mapParams(b),
 		Data:   map[string]any{"items": []any{}},
 	}
 	out, err := h.Execute(context.Background(), input)

@@ -14,7 +14,11 @@ import (
 // carries a self-contained {nodes, connections} sub-graph in its Parameters.
 // It has no unit-layer semantics of its own — see the top-level rejection
 // below and validateNodeBody's nesting check.
-const subgraphNodeType = "xflow.subgraph"
+//
+// It aliases types.SubgraphNodeType rather than restating the literal:
+// ParseTransformSpec checks the same type, and two copies of a type name that
+// must agree is exactly the drift this package keeps closing elsewhere.
+const subgraphNodeType = types.SubgraphNodeType
 
 // transformNodeTypes are the transform-style node types: the ones that compute
 // a value per item and therefore take exactly one of an "expression" (inline,
@@ -710,23 +714,14 @@ func validateNodeBody(nd types.NodeDef) error {
 	if len(nd.Parameters) == 0 {
 		return nil
 	}
-	bodyRaw, hasBody := nd.Parameters["body"]
+	bodyRaw := nd.Parameters["body"]
 	if transformNodeTypes[nd.Type] {
-		_, hasExpr := nd.Parameters["expression"]
-		switch {
-		case hasExpr && hasBody:
-			return fmt.Errorf("node %q: expression and body are mutually exclusive", nd.Name)
-		case !hasExpr && !hasBody:
-			return fmt.Errorf("node %q: requires exactly one of expression or body", nd.Name)
-		}
-		if hasBody && !declaresSubgraphBody(nd.Parameters) {
-			// Name the type we found where possible: a body that decodes but has
-			// the wrong type is the common typo, and the value is the author's own.
-			got := ""
-			if bodyDef, err := decodeSubgraphBody(bodyRaw); err == nil {
-				got = bodyDef.Type
-			}
-			return fmt.Errorf("node %q: body.type must be %q, got %q", nd.Name, subgraphNodeType, got)
+		// Rules 1-2 are types.TransformSpec's own contract, so they are read
+		// from it rather than restated here. Doing it by hand is what let the
+		// compiler and xflow.map's handler disagree about `expression: ""` —
+		// see ParseTransformSpec.
+		if _, err := types.ParseTransformSpec(nd.Parameters); err != nil {
+			return fmt.Errorf("node %q: %w", nd.Name, err)
 		}
 	}
 	if !declaresSubgraphBody(nd.Parameters) {

@@ -16,24 +16,50 @@
 
 ## P2 — 死代码
 
-### 7. `types/transform.go` 的 `TransformSpec` 尚无消费者（保留）
-
-T11 声明它，本打算由 T12 消费，T12 没有消费。**明确保留不删**：它描述的
-`{expression | body}` 二选一形态正是 filter/reduce 落地时要用的，删掉等于丢掉一份
-已写好的设计意图。
-
-P2-5 修完后，编译期已经按这个形状执行了：`transformNodeTypes` 就是它说的
-「transform-style node」集合，`validateNodeBody` 对集合里每个类型执行同两条规则
-（二选一 + 声明了的 body 必须是子图）。2026-08-11 之后 `xflow.map` 的
-**两种形态也都真的能跑**（expression 形态见下方「已修复」一节），所以这个形状
-不再只是编译期的形式约束。缺的只是**结构体本身仍无人反序列化到**——各节点仍从
-`Parameters` 里逐键取 `expression`/`body`。落地 filter/reduce 时把取参改走
-`TransformSpec` 即可闭合。
+### 7. `types/transform.go` 的 `TransformSpec` 尚无消费者
+（已于 2026-08-14 接线，见下方「已修复」一节）
 
 ### 8. `engine/graph/subgraph_package.go` 的 `ProjectSubgraphPackage` 名字有歧义
 （已于 2026-08-11 `93277e7` 改名，见下方「已修复」一节）
 
 ## 已修复
+
+### `TransformSpec` 无人反序列化，两侧对空 expression 判定不一致（原 P2-7，2026-08-14 接线）
+
+本条原先记着「**明确保留不删**，落地 filter/reduce 时把取参改走 `TransformSpec`
+即可闭合」。保留那半是对的——`{expression | body}` 二选一正是 filter/reduce 要用的
+形态。但「等 filter 落地再接」把一处**当下就已经存在的分歧**留在了原地。
+
+**分歧**：编译期 `validateNodeBody` 判的是 `"expression"` **键是否存在**，
+`xflow.map` 的 handler（`map.go:70`）判的是**值是否非空**。于是
+`expression: ""` 两侧读法相反。
+
+对 `xflow.map` 这个分歧被**掩盖**了：它同时在 `fanOutNodeTypes` 里，规则 3 按**值**
+拒绝无 body 的节点，所以 `expression: ""` 从未通过编译。但规则 3 只覆盖 fan-out 类型。
+**不 fan-out 的 transform**（filter、reduce 的累加器、sort 的 key）没有这第二道网：
+`expression: ""` 且无 body 会编译通过，handler 随后走 body 分支，而 body 不存在。
+即：这个缺陷会在 filter 落地的那一刻生效，而不是被它修掉。
+
+**修法：`types.ParseTransformSpec(params)`**，两侧唯一的读法。**值**说了算——空
+expression 不算声明了 expression，于是 `expression: ""` 配一个真 body 读作 body 形态
+（handler 一直接受的形状）而非冲突。它不校验 body 内容：成员规则、嵌套禁令、入口
+支配仍归编译器，它只裁决「声明的是哪一种形态」。
+
+`engine/graph` 的 `subgraphNodeType` 改为 `types.SubgraphNodeType` 的别名——
+`ParseTransformSpec` 要判同一个类型名，两份必须一致的字面量正是本文档别处反复在
+关掉的漂移。
+
+覆盖：`types/transform_test.go` 六条钉住裁决本身（空 expression 不算声明、空
+expression + 真 body 读作 body 形态、二选一两侧、非子图 body、expression 回读）。
+两侧接线各自反向验证过：把编译期的 `ParseTransformSpec` 判定短路，
+`TestCompile_MapRequiresExactlyOneOfExpressionOrBody/both` 与
+`TestEveryTransformTypeEnforcesExpressionXorBody/xflow.map/both` 转红；把 handler 侧
+短路，`TestMapExpression_BodyAndExpressionTogetherIsRejected` 转红。
+
+`node/internal/flow/map_test.go` 三条曾用裸 `RawParams()` 调 Execute——那个形状
+（既无 body 也无 expression）编译期规则 3 就拒绝，执行链路到不了 handler。改为
+`mapParams()` 带上 body。`TestMap_ItemsNotArray` 另加了一条错误原因断言：它此前
+按「缺 body」而不是「items 非数组」变红，**为错误的原因通过**。
 
 ### 并发 `FlushOutbox` 重复投递同一条意图（原 P1-9，2026-08-14 修复）
 
