@@ -120,7 +120,7 @@ Generation 升级用差集而非「清空再注册」：注册键由 (digest, su
 是内联模式的等价物，并指向 `TestSupplyConsumerBindingReachesRunner`（分布式模式
 的端到端覆盖）。
 
-## P2 — 17 条 deferred minor
+## P2 — 17 条 deferred minor（清单已不可完整恢复，7 条已定位）
 
 最终评审逐条判定**无一需在合并前修**，并自查了风险最高的两条：
 
@@ -130,10 +130,41 @@ Generation 升级用差集而非「清空再注册」：注册键由 (digest, su
   `IsReady` 语义分叉）→ 均偏保守方向。其中 `Registry.Ready` 当前**无生产调用
   点**，但若将来心跳上报改用它，会与门控口径不一致——那时才是必须修的时刻。
 
-完整清单见 ledger（已随 worktree 清理删除，可从 git 历史或本文件的提交记录回溯）。
-其余多为测试覆盖窄于其欲保护的不变量（如断言只查两个字段而非整个结构体、hash
-稳定性测试只查前缀不钉死字面值），修的价值在于**将来加字段时能被检出**，而非
-当下有错。
+### 清单恢复的结论：**7/17，剩余 10 条永久丢失**
+
+完整 ledger 只存在于已删除的 `feat/supply-node-p3` worktree 里，**从未进入 git**。
+已穷尽检索并确认无法恢复：`SUPPLY-NODE-TODO.md` 的全部 12 个历史版本、全部 1029 个
+dangling blob 与 10 个 dangling commit、磁盘上所有 `.superpowers/` 目录、62 条
+supply 相关提交、7094 行的 plan 文件、`git reflog` / `stash` / `fsck`。
+
+已定位并**已修**的：
+
+| # | 内容 | 处置 |
+|---|---|---|
+| 1 | Task 6 `DependsOn` 不去重 | 编译期 map 兜住，不改（见上） |
+| 2 | Task 15 `UnregisterConsumer` 不翻转 accepted | 已由 `5996efb` 把 readiness 改成派生合取而消除 |
+| 3 | Task 15 `Registry.Ready` 与 `IsReady` 分叉 | 已由 `89cb470` 把 `Ready` 重写为基于 `IsReady` |
+| 4 | Task 17 doom 的 timeout 分类无承重测试 | 已修（`6cc4673`） |
+| 5 | Task 17 `OnPoolSwap` 注释列了不存在的 `source_error` | 已修（`6cc4673`） |
+| 6 | Task 17 `node/wasm_observer_test.go` gofmt | 已修（`6cc4673`） |
+| 7 | hash 稳定性测试只查前缀不钉死字面值 | **本次已修**（见下） |
+
+第 7 条是唯一还开着的，且它的注释自相矛盾——写着「pin the hash so any future
+payload change … fails here loudly」，断言却只查 `sha256:` 前缀，对任何 sha256
+输出都成立，根本检不出 payload 变化。两处均已改为钉死字面值：
+
+- `engine/graph/snapshot_supply_test.go` — `graphHashPayload`（每条持久化 execution
+  都带这个 hash）
+- `sdk/xflow/supply_identity_test.go` — `runtimeHashPayload`（决定已注册 workflow
+  是否算变更）
+
+各自用「给 payload struct 加一个字段」反向复验确认能红，探针已手工摘除
+（`git diff --stat` 在两个产品文件上为空）。
+
+剩余 10 条按 TODO 自身的描述属同一类型：**测试断言的字段少于其欲保护的不变量**
+（如只查结构体两个字段而非全部），价值在「将来加字段时能被检出」而非当下有错。
+具体文件与函数无从确定。后续若在 supply 相关测试里遇到窄断言，就地补齐即可，不必
+再尝试恢复清单。
 
 ## ~~待验证~~ ✓ 已完成（非缺陷排查）
 
@@ -165,10 +196,35 @@ Generation 升级用差集而非「清空再注册」：注册键由 (digest, su
 两个受影响的守护测试已用删除注入复验**确实承重**（改坏 `stripConfig` / 让 `swapConfig`
 用固定规则集建池，二者立即失败）——此前它们可能靠读到别的测试残留而通过。
 
-`-race -count=3` 全仓库另有两条失败，判定为 **race 假阳性，勿改**：
-`TestDiskCache_SurvivesRuntimeRecreation`（<500ms 门槛）与 `TestP2_ColdStartBudget`
-（<100ms 预算）无 race 单跑仅 1.74s/2.08s，门槛按无 race 性能定，`-race` 给 wazero
-编译的开销让其必然超标。改门槛就是让判据迁就工具开销。
+`-race -count=3` 全仓库另有两条失败——`TestDiskCache_SurvivesRuntimeRecreation`
+（<500ms 门槛）与 `TestP2_ColdStartBudget`（<100ms 预算）——**已修**：
+
+原判定「race 假阳性，勿改」只说对了一半。让一条测试在 `-race` 下必然红，等于让全
+仓库 `-race` 跑不出可信结论——这本身就是缺陷。
+
+**第一版修法（按 `-race` 构建标签门控）已被证据推翻**：同两条测试在**不带 `-race`**
+的全量 `go test ./...` 里同样红（实测 105ms、131ms），说明 `-race` 只是两个污染源
+之一，另一个是**并发负载**——其他包的测试二进制争抢同一块磁盘和 CPU（实测 cold
+5.9s / 15.8s，而单跑该包约 1.7s）。构建标签对后者完全无效。
+
+也不是靠多采样能解决的：负载会抬高**每一个**样本，最小值永不回到静态机器的数字
+（best-of-5 实测 80/84/100ms，best-of-10 实测 79/91/97ms，对比静态 62ms）。
+
+最终修法是**检测污染并拒绝判定**，见 `wasm/latency_budget_test.go`：
+`budgetNotMeasurable(cold)` 用两条测试本来就要测的 **cold（空缓存）样本**做标定
+——同一进程、同一块磁盘、就在被判样本前一刻取得，一次测量同时捕获两个污染源，
+不需要任何构建标签。`maxCalibrationCold = 3s` 约为静态机器 cold 编译（~1.7s）的
+1.75 倍：单包运行必定判定，而观测到的每一次污染运行（5.9s / 15.8s / 22.6s /
+23.2s / 24.8s / 2m7s）都会拒判。
+
+**拒判 ≠ `t.Skip`**：相对断言（`warm < cold` / `restart < cold`）一律不门控，它们
+才是抓「磁盘缓存被静默绕过」的那一条。instrumentation 与负载会同时抬高两个样本，
+实测 `-race` 下 22.6s cold vs 550ms warm、2m7s cold vs 926ms restart，45× 的差距
+完好，所以它们在任何污染下都保有区分力。
+
+已双向复验：无污染时把门槛临时改成 `1*time.Nanosecond`，两条绝对断言仍会红
+（证明门控没把它们变成死代码）；`-race` 时同样的紧门槛被拒判吞掉并打出实测值与
+拒判理由。
 
 判据仍是：不是「跑过绿」，而是「在缓存未命中的情况下跑过绿」——现在还要加一条
 **`-count=2` 下跑过绿**。

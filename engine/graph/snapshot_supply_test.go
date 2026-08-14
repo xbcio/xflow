@@ -65,11 +65,14 @@ func TestNoSupplyMeansNoWireOrHashChange(t *testing.T) {
 	if strings.Contains(string(b), "supply_refs") {
 		t.Fatalf("supply_refs must be omitted for supply-free graphs: %s", b)
 	}
-	// Pin the hash so any future payload change to graphHashPayload that would
-	// invalidate persisted executions fails here loudly.
-	const wantPrefix = "sha256:"
-	if !strings.HasPrefix(g.Hash(), wantPrefix) {
-		t.Fatalf("hash = %q", g.Hash())
+	// Pin the hash LITERALLY. A prefix check would pass for any sha256 output at
+	// all, so it could not detect a graphHashPayload change — which is the whole
+	// point: the hash is persisted with every execution, and a silent payload
+	// change invalidates those records. If this fails after a deliberate payload
+	// change, update the constant in the same commit that changes the payload.
+	const wantHash = "sha256:4dc4775e3c3deee2a745a7951255de9176128030059e62a45f75b368bc888e71"
+	if got := g.Hash(); got != wantHash {
+		t.Fatalf("supply-free graph hash = %q, want %q; graphHashPayload changed and every "+
+			"persisted execution's graph hash is now invalid", got, wantHash)
 	}
-	t.Logf("supply-free graph hash: %s", g.Hash())
 }

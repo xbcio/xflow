@@ -21,7 +21,17 @@ func TestRuntimeHashUnchangedWithoutDependencyEdges(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runtimeHash: %v", err)
 	}
-	t.Logf("baseline runtime hash: %s", h)
+	// Pinned literally, not merely logged: the runtime hash gates whether an
+	// already-registered workflow is considered changed, so a silent payload
+	// change would either re-register every workflow or stop detecting real
+	// edits. Logging the value cannot detect that; only an equality check can.
+	// If this fails after a deliberate payload change, update the constant in
+	// the same commit that changes the payload.
+	const wantHash = "runtime-sha256:v1:ed9b25378112181dff504e0e587e980b4e3dd30581ad6a251481626c523b822a"
+	if h != wantHash {
+		t.Fatalf("baseline runtime hash = %q, want %q; runtimeHashPayload changed for a "+
+			"dependency-edge-free workflow", h, wantHash)
+	}
 
 	payload := runtimeHashPayload{}
 	b, err := json.Marshal(payload)
