@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/xbcio/xflow/node"
+	"github.com/xbcio/xflow/types"
 )
 
 // TestWorkflowBuilderTransientEmitsOptions pins the builder-side entry point for
@@ -52,6 +53,55 @@ func TestWorkflowBuilderTransientZeroTTLsLeaveEngineDefaults(t *testing.T) {
 	if def.Options.TransientTTL != 0 || def.Options.TransientCompletionTTL != 0 {
 		t.Errorf("TTLs = (%v, %v), want both zero so the engine defaults apply",
 			def.Options.TransientTTL, def.Options.TransientCompletionTTL)
+	}
+}
+
+// TestWorkflowBuilderOptionsAreCopiedIntoDef checks that a built definition
+// does not alias the builder's option block.
+//
+// The builder used to hand its own *types.WorkflowOptions straight to the def.
+// A setter called after build() then reached into a definition that may already
+// have been hashed and registered -- and for Transient, the two would disagree
+// about whether the workflow's payloads reach SQL.
+func TestWorkflowBuilderOptionsAreCopiedIntoDef(t *testing.T) {
+	wf := Workflow("alias-check").Transient(time.Minute, time.Second)
+	wf.Node("start", node.Start())
+
+	def, err := wf.build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wf.Transient(time.Hour, time.Hour)
+
+	if def.Options.TransientTTL != time.Minute {
+		t.Errorf("built def TransientTTL = %v, want 1m: the def aliases the "+
+			"builder's option block, so a post-build setter rewrote it",
+			def.Options.TransientTTL)
+	}
+}
+
+// TestWorkflowBuilderOptionsAccessorCopies checks the same for the read-only
+// accessor: a caller inspecting the options must not be able to flip a flag.
+func TestWorkflowBuilderOptionsAccessorCopies(t *testing.T) {
+	wf := Workflow("accessor-check").Transient(time.Minute, time.Second)
+
+	got := wf.Options()
+	if !got.Transient {
+		t.Fatalf("Options() = %+v, want transient", got)
+	}
+	got.Transient = false
+
+	if !wf.Options().Transient {
+		t.Error("mutating the returned copy cleared the builder's Transient flag")
+	}
+}
+
+// TestWorkflowBuilderOptionsZeroWhenUnset pins the accessor's behavior for a
+// builder that set no option at all, so callers can assert on it without a nil
+// check.
+func TestWorkflowBuilderOptionsZeroWhenUnset(t *testing.T) {
+	if got := Workflow("no-options").Options(); got != (types.WorkflowOptions{}) {
+		t.Errorf("Options() = %+v, want zero value", got)
 	}
 }
 

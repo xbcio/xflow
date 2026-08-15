@@ -126,6 +126,20 @@ func (w *WorkflowBuilder) ensureOptions() *types.WorkflowOptions {
 	return w.options
 }
 
+// Options returns a copy of the workflow's option block, or the zero value when
+// no option has been set.
+//
+// This is a read-only view for callers that need to assert on what a builder
+// function produced -- most importantly, that a workflow handling sensitive
+// payloads really did opt into Transient. It returns a copy so a caller cannot
+// reach in and flip a flag the builder's author chose deliberately.
+func (w *WorkflowBuilder) Options() types.WorkflowOptions {
+	if w.options == nil {
+		return types.WorkflowOptions{}
+	}
+	return *w.options
+}
+
 func (w *WorkflowBuilder) Namespace(namespace string) *WorkflowBuilder {
 	w.namespace = namespace
 	return w
@@ -308,7 +322,7 @@ func (w *WorkflowBuilder) buildInternal(visited map[*WorkflowBuilder]bool) (*typ
 		Version:        version,
 		Spec:           "1.0",
 		RunnerSelector: cloneRunnerSelector(w.runnerSelector),
-		Options:        w.options,
+		Options:        cloneWorkflowOptions(w.options),
 		Connections:    make(types.Connections),
 	}
 	w.assembleNodes(def)
@@ -588,6 +602,18 @@ func normalizeParams(raw any) (map[string]any, error) {
 		return nil, fmt.Errorf("unmarshal params: %w", err)
 	}
 	return result, nil
+}
+
+// cloneWorkflowOptions copies the option block so the returned WorkflowDef does
+// not alias the builder's own field. Without the copy, a later option setter on
+// the builder would mutate an already-built definition -- including one already
+// hashed and registered.
+func cloneWorkflowOptions(opts *types.WorkflowOptions) *types.WorkflowOptions {
+	if opts == nil {
+		return nil
+	}
+	out := *opts
+	return &out
 }
 
 func cloneRunnerSelector(selector *types.RunnerSelector) *types.RunnerSelector {
