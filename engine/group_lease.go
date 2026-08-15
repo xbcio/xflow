@@ -100,6 +100,9 @@ func (e *Engine) BuildGroupLease(ctx context.Context, t *Task) (*TaskLease, *Gro
 		Input:          entryInput,
 		IssuedAt:       issuedAt,
 		TTL:            ttl,
+		GroupName:      gm.Name,
+		EntryNodeIdx:   gm.EntryIdx,
+		ActivationID:   t.ActivationID,
 	}
 
 	gs, ok := e.state.(GroupStateStore)

@@ -27,6 +27,13 @@ var _ engine.GroupStateStore = (*Store)(nil)
 // {1} on acquire, {0} when the unit is already running/done or fenced.
 // KEYS: 1=group:status 2=group:meta 3=leases(zset)
 // ARGV: 1=lease_id 2=lease_token 3=attempt 4=ttl_s 5=deadline_ms 6=lease_member
+//
+//	7=group_name 8=entry_node_idx 9=activation_id 10=issued_at_ms 11=lease_ttl_ms
+//
+// ARGV 7..11 are recorded so the lease sweeper can rebuild the queued group
+// task from backend state alone (it has no compiled graph in hand), and so the
+// runner directory's assignment ID — keyed on node name / node idx /
+// activation id — matches the one the dispatcher created.
 var acquireGroupLeaseLua = redis.NewScript(`
 local status = redis.call('GET', KEYS[1])
 if status == 'running' or status == 'done' then
@@ -39,7 +46,9 @@ if prevAttempt >= attempt then
     attempt = prevAttempt + 1
 end
 redis.call('SET', KEYS[1], 'running', 'EX', ttl)
-redis.call('HSET', KEYS[2], 'lease_id', ARGV[1], 'lease_token', ARGV[2], 'attempt', tostring(attempt))
+redis.call('HSET', KEYS[2], 'lease_id', ARGV[1], 'lease_token', ARGV[2], 'attempt', tostring(attempt),
+    'group_name', ARGV[7], 'entry_node_idx', ARGV[8], 'activation_id', ARGV[9],
+    'lease_issued_at_ms', ARGV[10], 'lease_ttl_ms', ARGV[11])
 redis.call('EXPIRE', KEYS[2], ttl)
 redis.call('ZADD', KEYS[3], tonumber(ARGV[5]), ARGV[6])
 redis.call('EXPIRE', KEYS[3], ttl)
@@ -220,7 +229,9 @@ func (s *Store) AcquireGroupLease(ctx context.Context, lease *engine.GroupLease)
 		leaseExpiryZSetKey(t, lease.ExecutionID),
 	}, string(lease.LeaseID), string(lease.LeaseToken), lease.Attempt,
 		int(ttl.Seconds()), deadlineMs,
-		groupLeaseMember(lease.ExecutionID, lease.GroupUnitIdx)).Slice()
+		groupLeaseMember(lease.ExecutionID, lease.GroupUnitIdx),
+		lease.GroupName, lease.EntryNodeIdx, lease.ActivationID,
+		lease.IssuedAt.UnixMilli(), lease.TTL.Milliseconds()).Slice()
 	if err != nil {
 		return false, fmt.Errorf("acquire group lease %q/#%d: %w", lease.ExecutionID, lease.GroupUnitIdx, err)
 	}
@@ -366,6 +377,7 @@ func (s *Store) CommitGroup(ctx context.Context, req engine.GroupCommitRequest) 
 
 var _ engine.GroupLeaseReader = (*Store)(nil)
 var _ engine.GroupLeaseExpirer = (*Store)(nil)
+var _ engine.GroupLeaseReclaimer = (*Store)(nil)
 
 func (s *Store) GetGroupLease(ctx context.Context, id types.ExecutionID, unitIdx int) (*engine.GroupLease, error) {
 	t := namespace.FromContext(ctx)
@@ -393,13 +405,19 @@ func (s *Store) GetGroupLease(ctx context.Context, id types.ExecutionID, unitIdx
 		fmt.Sscanf(v, "%d", &attempt)
 	}
 
-	return &engine.GroupLease{
+	lease := &engine.GroupLease{
 		LeaseID:      engine.LeaseID(meta["lease_id"]),
 		LeaseToken:   engine.LeaseToken(meta["lease_token"]),
 		Attempt:      attempt,
 		ExecutionID:  id,
 		GroupUnitIdx: unitIdx,
-	}, nil
+		GroupName:    meta["group_name"],
+	}
+	parseInt64(meta["entry_node_idx"], func(v int64) { lease.EntryNodeIdx = int(v) })
+	parseInt64(meta["activation_id"], func(v int64) { lease.ActivationID = int(v) })
+	parseInt64(meta["lease_issued_at_ms"], func(v int64) { lease.IssuedAt = time.UnixMilli(v).UTC() })
+	parseInt64(meta["lease_ttl_ms"], func(v int64) { lease.TTL = time.Duration(v) * time.Millisecond })
+	return lease, nil
 }
 
 // expireGroupLeaseLua transitions a running group unit back to pending (retry-ready)
@@ -437,4 +455,76 @@ func (s *Store) ExpireGroupLease(ctx context.Context, id types.ExecutionID, unit
 		return false, fmt.Errorf("expire group lease %q/#%d: %w", id, unitIdx, err)
 	}
 	return len(res) == 1 && redisResultInt(res[0]) == 1, nil
+}
+
+// revokeGroupLeaseWithOutboxLua is expireGroupLeaseLua plus the durable
+// redelivery write, in one transition. Splitting the two would leave a window
+// where the unit is pending, unleased and unqueued — invisible to the sweeper,
+// which only reports units that still hold a lease.
+// KEYS: 1=group:status 2=group:meta 3=leases(zset) 4=outbox:ready 5=outbox:body
+// ARGV: 1=token 2=ttl_s 3=lease_member 4=entry_id 5=entry_body 6=available_at_ms
+var revokeGroupLeaseWithOutboxLua = redis.NewScript(`
+local status = redis.call('GET', KEYS[1])
+if status ~= 'running' then
+    return 0
+end
+local token = redis.call('HGET', KEYS[2], 'lease_token') or ''
+if token ~= ARGV[1] then
+    return 0
+end
+local attempt = tonumber(redis.call('HGET', KEYS[2], 'attempt') or '1')
+local ttl = tonumber(ARGV[2])
+redis.call('SET', KEYS[1], 'pending', 'EX', ttl)
+redis.call('HSET', KEYS[2], 'lease_id', '', 'lease_token', '', 'attempt', tostring(attempt + 1))
+redis.call('EXPIRE', KEYS[2], ttl)
+redis.call('ZREM', KEYS[3], ARGV[3])
+redis.call('HSETNX', KEYS[5], ARGV[4], ARGV[5])
+redis.call('ZADD', KEYS[4], tonumber(ARGV[6]), ARGV[4])
+redis.call('EXPIRE', KEYS[4], ttl)
+redis.call('EXPIRE', KEYS[5], ttl)
+return 1
+`)
+
+// RevokeGroupLeaseWithOutbox implements engine.GroupLeaseReclaimer.
+func (s *Store) RevokeGroupLeaseWithOutbox(ctx context.Context, id types.ExecutionID, unitIdx int, token engine.LeaseToken, entry engine.OutboxEntry) (bool, error) {
+	if token == "" {
+		return false, nil
+	}
+	if entry.ID == "" {
+		return false, fmt.Errorf("requeue outbox for %q/#%d has empty ID", id, unitIdx)
+	}
+	encoded, err := marshalRedisOutboxEntry(entry.ID, entry.Task, entry.AvailableAt)
+	if err != nil {
+		return false, err
+	}
+	availableAt := time.Now().UTC().UnixMilli()
+	if !entry.AvailableAt.IsZero() {
+		availableAt = entry.AvailableAt.UTC().UnixMilli()
+	}
+	t := namespace.FromContext(ctx)
+	ttl := s.getExecTTL(ctx, id)
+	result, err := revokeGroupLeaseWithOutboxLua.Run(ctx, s.rdb, []string{
+		groupUnitStatusKey(t, id, unitIdx),
+		groupUnitMetaKey(t, id, unitIdx),
+		leaseExpiryZSetKey(t, id),
+		outboxReadyKey(t, id),
+		outboxBodyKey(t, id),
+	}, string(token), int(ttl.Seconds()), groupLeaseMember(id, unitIdx),
+		entry.ID, encoded, availableAt).Int64()
+	if err != nil && err != redis.Nil {
+		return false, fmt.Errorf("revoke group lease with outbox %q/#%d: %w", id, unitIdx, err)
+	}
+	if result != 1 {
+		return false, nil
+	}
+	if err := s.refreshTransientTTL(ctx, id,
+		groupUnitStatusKey(t, id, unitIdx),
+		groupUnitMetaKey(t, id, unitIdx),
+		leaseExpiryZSetKey(t, id),
+		outboxReadyKey(t, id),
+		outboxBodyKey(t, id),
+	); err != nil {
+		return false, err
+	}
+	return true, nil
 }

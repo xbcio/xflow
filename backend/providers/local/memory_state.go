@@ -364,6 +364,30 @@ func (s *memoryState) ListExpiredLeases(_ context.Context, before time.Time) ([]
 			Payload:      cloneLeasePayload(ns.LeasePayload),
 		})
 	}
+	// Group units lease through their own state map, not s.nodes. A sweeper
+	// that only walked s.nodes would leave a runner that died holding a group
+	// lease stranding its unit in "running" forever — AcquireGroupLease
+	// refuses to re-acquire a running unit, so nothing else revives it.
+	for _, gs := range s.groupUnits {
+		if gs.status != groupUnitRunning || gs.leaseToken == "" {
+			continue
+		}
+		if gs.deadline.IsZero() || gs.deadline.After(before) {
+			continue
+		}
+		out = append(out, engine.ExpiredLease{
+			ExecutionID:  gs.execID,
+			NodeName:     gs.groupName,
+			NodeIdx:      gs.entryNodeIdx,
+			UnitIdx:      gs.unitIdx,
+			LeaseID:      gs.leaseID,
+			LeaseToken:   gs.leaseToken,
+			IssuedAt:     gs.issuedAt,
+			TTL:          gs.ttl,
+			ActivationID: gs.activationID,
+			TaskType:     engine.TaskTypeGroupExec,
+		})
+	}
 	return out, nil
 }
 

@@ -23,11 +23,23 @@ type groupUnitState struct {
 	attempt        int
 	deadline       time.Time
 	committedToken engine.LeaseToken
+
+	// Identity of the queued group task this unit was leased for. Recorded so
+	// ListExpiredLeases can rebuild the task without a compiled graph, exactly
+	// as the Redis store does from its group meta hash.
+	execID       types.ExecutionID
+	unitIdx      int
+	groupName    string
+	entryNodeIdx int
+	activationID int
+	issuedAt     time.Time
+	ttl          time.Duration
 }
 
 var _ engine.GroupStateStore = (*memoryState)(nil)
 var _ engine.GroupLeaseReader = (*memoryState)(nil)
 var _ engine.GroupLeaseExpirer = (*memoryState)(nil)
+var _ engine.GroupLeaseReclaimer = (*memoryState)(nil)
 
 func groupKey(id types.ExecutionID, unitIdx int) string {
 	return fmt.Sprintf("%s/%d", id, unitIdx)
@@ -52,6 +64,9 @@ func (s *memoryState) AcquireGroupLease(_ context.Context, lease *engine.GroupLe
 	}
 	st.leaseID, st.leaseToken, st.attempt = lease.LeaseID, lease.LeaseToken, attempt
 	st.deadline = lease.IssuedAt.Add(lease.TTL)
+	st.execID, st.unitIdx = lease.ExecutionID, lease.GroupUnitIdx
+	st.groupName, st.entryNodeIdx, st.activationID = lease.GroupName, lease.EntryNodeIdx, lease.ActivationID
+	st.issuedAt, st.ttl = lease.IssuedAt, lease.TTL
 	lease.Attempt = attempt
 	return true, nil
 }
@@ -80,24 +95,52 @@ func (s *memoryState) GetGroupLease(_ context.Context, id types.ExecutionID, uni
 		Attempt:      st.attempt,
 		ExecutionID:  id,
 		GroupUnitIdx: unitIdx,
-		IssuedAt:     st.deadline.Add(-time.Minute),
-		TTL:          time.Minute,
+		GroupName:    st.groupName,
+		EntryNodeIdx: st.entryNodeIdx,
+		ActivationID: st.activationID,
+		IssuedAt:     st.issuedAt,
+		TTL:          st.ttl,
 	}, nil
 }
 
 func (s *memoryState) ExpireGroupLease(_ context.Context, id types.ExecutionID, unitIdx int, token engine.LeaseToken) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.expireGroupLeaseLocked(id, unitIdx, token), nil
+}
+
+// RevokeGroupLeaseWithOutbox pairs the fenced expiry with the redelivery task
+// under one lock, so no observer can see a unit that is pending, unleased, and
+// unqueued — the state the sweeper cannot rediscover.
+func (s *memoryState) RevokeGroupLeaseWithOutbox(_ context.Context, id types.ExecutionID, unitIdx int, token engine.LeaseToken, entry engine.OutboxEntry) (bool, error) {
+	if token == "" {
+		return false, nil
+	}
+	if entry.ID == "" {
+		return false, fmt.Errorf("requeue outbox for %q/#%d has empty ID", id, unitIdx)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.expireGroupLeaseLocked(id, unitIdx, token) {
+		return false, nil
+	}
+	s.putOutboxLocked(id, entry.ID, entry.Task, entry.AvailableAt)
+	return true, nil
+}
+
+// expireGroupLeaseLocked transitions a running group unit back to retry-ready
+// under a token fence. Caller must hold s.mu.
+func (s *memoryState) expireGroupLeaseLocked(id types.ExecutionID, unitIdx int, token engine.LeaseToken) bool {
 	st := s.groupUnits[groupKey(id, unitIdx)]
 	if st == nil || st.status != groupUnitRunning || st.leaseToken != token {
-		return false, nil
+		return false
 	}
 	st.status = groupUnitPending
 	st.leaseID = ""
 	st.leaseToken = ""
 	st.attempt++
 	st.deadline = time.Time{}
-	return true, nil
+	return true
 }
 
 func (s *memoryState) CommitGroup(_ context.Context, req engine.GroupCommitRequest) (engine.GroupCommitResult, error) {

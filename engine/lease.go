@@ -363,6 +363,14 @@ func (e *Engine) ReclaimLease(ctx context.Context, lease ExpiredLease) (bool, er
 		ActivationID: lease.ActivationID,
 		AutoDepth:    lease.AutoDepth,
 	}
+	// A group unit leases through its own state (group:<unitIdx>:status/meta),
+	// not through the entry node's. Sending it down the node path below would
+	// fence against a node that never entered "running", so the revoke returns
+	// false and the sweeper records the unit as already handled — leaving it
+	// "running" forever, since AcquireGroupLease refuses a running unit.
+	if lease.TaskType == TaskTypeGroupExec {
+		return e.reclaimGroupLease(ctx, lease, task)
+	}
 	if state, ok := e.state.(AtomicStateStore); ok {
 		revoked, err := state.RevokeLeaseWithOutbox(ctx, lease.ExecutionID, lease.NodeName, lease.LeaseToken, OutboxEntry{
 			ID:   requeueOutboxID(lease.ExecutionID, lease.NodeName, lease.ActivationID, lease.LeaseID),
@@ -395,6 +403,50 @@ func (e *Engine) ReclaimLease(ctx context.Context, lease ExpiredLease) (bool, er
 		// above avoids the window via the durable requeue outbox. Surface the
 		// error rather than implying the node self-heals.
 		return true, fmt.Errorf("re-enqueue reclaimed task %q/%q (node left pending, not auto-recoverable): %w", lease.ExecutionID, lease.NodeName, err)
+	}
+	return true, nil
+}
+
+// reclaimGroupLease is ReclaimLease's group-unit path. It mirrors the node path
+// exactly: the preferred backend persists the token-fenced expiry and the
+// redelivery intent in one transition, and legacy backends fall back to
+// expire-then-enqueue with the same non-recoverable window the node path
+// documents.
+func (e *Engine) reclaimGroupLease(ctx context.Context, lease ExpiredLease, task Task) (bool, error) {
+	entry := OutboxEntry{
+		ID:   requeueGroupOutboxID(lease.ExecutionID, lease.UnitIdx, lease.LeaseID),
+		Task: task,
+	}
+	if state, ok := e.state.(GroupLeaseReclaimer); ok {
+		revoked, err := state.RevokeGroupLeaseWithOutbox(ctx, lease.ExecutionID, lease.UnitIdx, lease.LeaseToken, entry)
+		if err != nil {
+			return false, fmt.Errorf("revoke group lease %q/#%d: %w", lease.ExecutionID, lease.UnitIdx, err)
+		}
+		if !revoked {
+			return false, nil
+		}
+		if err := e.FlushOutbox(ctx, lease.ExecutionID); err != nil {
+			return true, fmt.Errorf("deliver reclaimed group task %q/#%d: %w", lease.ExecutionID, lease.UnitIdx, err)
+		}
+		return true, nil
+	}
+
+	expirer, ok := e.state.(GroupLeaseExpirer)
+	if !ok {
+		return false, fmt.Errorf("reclaim group lease %q/#%d: state store does not support group lease expiry", lease.ExecutionID, lease.UnitIdx)
+	}
+	expired, err := expirer.ExpireGroupLease(ctx, lease.ExecutionID, lease.UnitIdx, lease.LeaseToken)
+	if err != nil {
+		return false, fmt.Errorf("expire group lease %q/#%d: %w", lease.ExecutionID, lease.UnitIdx, err)
+	}
+	if !expired {
+		return false, nil
+	}
+	if err := e.queue.Enqueue(ctx, &task); err != nil {
+		// Same window the node path documents: the unit is now pending with no
+		// queued task and no lease, so ListExpiredLeases can no longer see it.
+		// Backends implementing GroupLeaseReclaimer avoid the window entirely.
+		return true, fmt.Errorf("re-enqueue reclaimed group task %q/#%d (unit left pending, not auto-recoverable): %w", lease.ExecutionID, lease.UnitIdx, err)
 	}
 	return true, nil
 }

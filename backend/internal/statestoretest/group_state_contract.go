@@ -388,6 +388,141 @@ func RunGroupStateContract(t *testing.T, newStore func(*testing.T) GroupStore) {
 		}
 	})
 
+	// A group lease whose deadline has passed must be discoverable by the lease
+	// sweeper, exactly like a node lease. Without this, a runner that dies while
+	// holding a group lease strands its unit in "running" forever: nothing
+	// expires the lease, AcquireGroupLease refuses to re-acquire a running unit,
+	// and the execution never completes.
+	//
+	// The Redis store additionally used to PRUNE the entry: group and node
+	// leases share one expiry ZSET, but group members are encoded as
+	// "<execID>|group:<idx>" while the scan split them as "<execID>|<nodeName>"
+	// and looked up a node key that never exists. Reading redis.Nil there means
+	// "terminal node, stale index entry" — so the scan deleted the only record
+	// that the group lease had ever been leased.
+	t.Run("ExpiredGroupLeaseIsVisibleToSweeper", func(t *testing.T) {
+		s, id, gu := seed(t, twoUnitGraph(t))
+		l := lease(id, gu, "T1")
+		l.IssuedAt = time.Now().Add(-2 * time.Minute)
+		l.TTL = time.Minute
+		if ok, err := s.AcquireGroupLease(ctx, l); err != nil || !ok {
+			t.Fatalf("acquire: ok=%v err=%v", ok, err)
+		}
+
+		expired, err := s.ListExpiredLeases(ctx, time.Now())
+		if err != nil {
+			t.Fatalf("ListExpiredLeases: %v", err)
+		}
+		var found *engine.ExpiredLease
+		for i := range expired {
+			if expired[i].ExecutionID == id && expired[i].UnitIdx == gu {
+				found = &expired[i]
+				break
+			}
+		}
+		if found == nil {
+			t.Fatalf("expired group lease %q/#%d not returned by ListExpiredLeases (got %+v) — "+
+				"a runner that dies holding this lease strands the unit forever", id, gu, expired)
+		}
+		if found.LeaseToken != "T1" {
+			t.Errorf("token = %q, want T1", found.LeaseToken)
+		}
+		if found.TaskType != engine.TaskTypeGroupExec {
+			t.Errorf("task type = %v, want TaskTypeGroupExec — reclaim needs it to rebuild the group task",
+				found.TaskType)
+		}
+
+		// The lease must still be leased after the scan: a scan that silently
+		// dropped it would make this the last sweep that could ever see it.
+		still, err := s.GetGroupLease(ctx, id, gu)
+		if err != nil {
+			t.Fatalf("GetGroupLease after scan: %v", err)
+		}
+		if still == nil {
+			t.Fatal("group lease disappeared during the expiry scan")
+		}
+
+		// A second scan must still see it — proves the first scan did not
+		// consume the only index entry.
+		again, err := s.ListExpiredLeases(ctx, time.Now())
+		if err != nil {
+			t.Fatalf("second ListExpiredLeases: %v", err)
+		}
+		for i := range again {
+			if again[i].ExecutionID == id && again[i].UnitIdx == gu {
+				return
+			}
+		}
+		t.Fatalf("expired group lease vanished after one scan (got %+v) — the sweeper pruned its own work item", again)
+	})
+
+	// A group unit whose lease is revoked must be redelivered in the SAME
+	// transition. Revoking alone would leave it pending, unleased and unqueued —
+	// a state ListExpiredLeases cannot see (it only reports leased units), so a
+	// crash in the gap would strand the unit permanently.
+	t.Run("RevokeGroupLeaseWithOutboxIsAtomic", func(t *testing.T) {
+		s, id, gu := seed(t, twoUnitGraph(t))
+		reclaimer, ok := s.(engine.GroupLeaseReclaimer)
+		if !ok {
+			t.Skip("backend does not implement GroupLeaseReclaimer")
+		}
+		atomic, ok := s.(engine.AtomicStateStore)
+		if !ok {
+			t.Skip("backend does not implement AtomicStateStore")
+		}
+		if ok, err := s.AcquireGroupLease(ctx, lease(id, gu, "T1")); err != nil || !ok {
+			t.Fatalf("acquire: ok=%v err=%v", ok, err)
+		}
+
+		entry := engine.OutboxEntry{
+			ID: "requeue-group/" + string(id),
+			Task: engine.Task{ExecutionID: id, NodeName: "edge", UnitIdx: gu,
+				Type: engine.TaskTypeGroupExec},
+		}
+		revoked, err := reclaimer.RevokeGroupLeaseWithOutbox(ctx, id, gu, "T1", entry)
+		if err != nil {
+			t.Fatalf("RevokeGroupLeaseWithOutbox: %v", err)
+		}
+		if !revoked {
+			t.Fatal("revoke returned false for the live token")
+		}
+
+		entries, err := atomic.ListOutbox(ctx, id, time.Now().Add(time.Minute), 16)
+		if err != nil {
+			t.Fatalf("ListOutbox: %v", err)
+		}
+		var got *engine.OutboxEntry
+		for i := range entries {
+			if entries[i].ID == entry.ID {
+				got = &entries[i]
+				break
+			}
+		}
+		if got == nil {
+			t.Fatalf("redelivery intent %q missing from outbox (got %+v) — the unit is pending "+
+				"with nothing queued and no lease, so no sweep can ever find it again", entry.ID, entries)
+		}
+		if got.Task.Type != engine.TaskTypeGroupExec || got.Task.UnitIdx != gu {
+			t.Errorf("queued task = {type:%v unit:%d}, want {%v %d}",
+				got.Task.Type, got.Task.UnitIdx, engine.TaskTypeGroupExec, gu)
+		}
+
+		// The unit must be re-acquirable: that is the whole point of the revoke.
+		if ok, err := s.AcquireGroupLease(ctx, lease(id, gu, "T2")); err != nil || !ok {
+			t.Fatalf("re-acquire after revoke: ok=%v err=%v", ok, err)
+		}
+
+		// Fence: the stale token must not revoke the new owner's lease.
+		stale, err := reclaimer.RevokeGroupLeaseWithOutbox(ctx, id, gu, "T1",
+			engine.OutboxEntry{ID: "requeue-group/stale/" + string(id), Task: entry.Task})
+		if err != nil {
+			t.Fatalf("stale RevokeGroupLeaseWithOutbox: %v", err)
+		}
+		if stale {
+			t.Error("stale token revoked the new owner's lease")
+		}
+	})
+
 	t.Run("CommitAfterExpiryStaleTokenRejected", func(t *testing.T) {
 		s, id, gu := seed(t, twoUnitGraph(t))
 		s.AcquireGroupLease(ctx, lease(id, gu, "T1"))

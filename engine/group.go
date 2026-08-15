@@ -53,6 +53,16 @@ type GroupLease struct {
 	IssuedAt       time.Time
 	TTL            time.Duration
 	Namespace      namespace.Namespace
+
+	// GroupName, EntryNodeIdx and ActivationID identify the queued task this
+	// lease was acquired for. They are redundant with the compiled graph, but
+	// the lease sweeper reconstructs an ExpiredLease straight from backend
+	// state without a graph in hand — and the runner directory keys its
+	// assignments on (node name, node idx, activation id), so a reclaim that
+	// guessed them would fail to release the stranded assignment.
+	GroupName    string
+	EntryNodeIdx int
+	ActivationID int
 }
 
 // GroupCommitRequest 携带一次 group 级原子 commit 所需信息。
@@ -114,4 +124,16 @@ type GroupCommitter interface {
 // have already been committed or renewed).
 type GroupLeaseExpirer interface {
 	ExpireGroupLease(ctx context.Context, id types.ExecutionID, unitIdx int, token LeaseToken) (expired bool, err error)
+}
+
+// GroupLeaseReclaimer is the group-unit analogue of
+// AtomicStateStore.RevokeLeaseWithOutbox: it persists the token-fenced
+// expiry AND the exact redelivery task in one transition.
+//
+// Expiring without redelivering in the same transition is not an option here.
+// A group unit that goes back to "pending" with no queued task is invisible to
+// the sweeper — ListExpiredLeases only reports units that still hold a lease —
+// so a crash in the gap between the two writes would strand the unit forever.
+type GroupLeaseReclaimer interface {
+	RevokeGroupLeaseWithOutbox(ctx context.Context, id types.ExecutionID, unitIdx int, token LeaseToken, entry OutboxEntry) (revoked bool, err error)
 }

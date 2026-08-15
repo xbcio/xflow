@@ -205,6 +205,24 @@ func (s *Store) scanExpiredLeasesForTenant(ctx context.Context, t namespace.Name
 					continue
 				}
 
+				// Group leases share this ZSET with node leases but encode
+				// their member as "<execID>|group:<unitIdx>". They must be
+				// recognized BEFORE the node lookup below: a group member has
+				// no node status key, so the redis.Nil branch would classify
+				// it as a terminal node with a stale index entry and ZREM the
+				// only record that the unit was ever leased — stranding the
+				// unit in "running" forever, since AcquireGroupLease refuses
+				// to re-acquire a running unit.
+				if unitIdx, isGroup := parseGroupLeaseMember(nodeName); isGroup {
+					if err := s.appendExpiredGroupLease(ctx, t, execID, unitIdx, indexKey, member, out); err != nil {
+						return err
+					}
+					if len(*out) == leaseIndexBatchLimit {
+						break
+					}
+					continue
+				}
+
 				status, err := s.rdb.Get(ctx, nodeStatusKey(t, execID, nodeName)).Result()
 				if err == redis.Nil || (err == nil && status != string(types.NodeStatusRunning) && status != string(types.NodeStatusCommitting) && status != string(types.NodeStatusWaiting)) {
 					if removeErr := s.rdb.ZRem(ctx, indexKey, member).Err(); removeErr != nil {
@@ -293,6 +311,62 @@ func (s *Store) scanExpiredLeasesForTenant(ctx context.Context, t namespace.Name
 			break
 		}
 	}
+	return nil
+}
+
+// appendExpiredGroupLease resolves one expired group-unit member of the lease
+// expiry index into an ExpiredLease the sweeper can reclaim.
+//
+// Unlike the node path there is no index repair here: a group lease's deadline
+// lives ONLY in the ZSET score (RenewGroupLease rewrites it), so the score the
+// range query already filtered on is authoritative. The meta hash's
+// lease_issued_at_ms / lease_ttl_ms are the acquire-time values, carried for
+// reporting only.
+func (s *Store) appendExpiredGroupLease(
+	ctx context.Context,
+	t namespace.Namespace,
+	execID types.ExecutionID,
+	unitIdx int,
+	indexKey string,
+	member string,
+	out *[]engine.ExpiredLease,
+) error {
+	status, err := s.rdb.Get(ctx, groupUnitStatusKey(t, execID, unitIdx)).Result()
+	if err == redis.Nil || (err == nil && status != "running") {
+		if removeErr := s.rdb.ZRem(ctx, indexKey, member).Err(); removeErr != nil {
+			return fmt.Errorf("prune stale group lease %q/#%d: %w", execID, unitIdx, removeErr)
+		}
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read group unit status %q/#%d: %w", execID, unitIdx, err)
+	}
+
+	meta, err := s.rdb.HGetAll(ctx, groupUnitMetaKey(t, execID, unitIdx)).Result()
+	if err != nil {
+		return fmt.Errorf("read group unit meta %q/#%d: %w", execID, unitIdx, err)
+	}
+	if meta["lease_token"] == "" {
+		if removeErr := s.rdb.ZRem(ctx, indexKey, member).Err(); removeErr != nil {
+			return fmt.Errorf("prune tokenless group lease %q/#%d: %w", execID, unitIdx, removeErr)
+		}
+		return nil
+	}
+
+	lease := engine.ExpiredLease{
+		ExecutionID: execID,
+		NodeName:    meta["group_name"],
+		UnitIdx:     unitIdx,
+		LeaseID:     engine.LeaseID(meta["lease_id"]),
+		LeaseToken:  engine.LeaseToken(meta["lease_token"]),
+		Namespace:   t,
+		TaskType:    engine.TaskTypeGroupExec,
+	}
+	parseInt64(meta["entry_node_idx"], func(v int64) { lease.NodeIdx = int(v) })
+	parseInt64(meta["activation_id"], func(v int64) { lease.ActivationID = int(v) })
+	parseInt64(meta["lease_issued_at_ms"], func(v int64) { lease.IssuedAt = time.UnixMilli(v).UTC() })
+	parseInt64(meta["lease_ttl_ms"], func(v int64) { lease.TTL = time.Duration(v) * time.Millisecond })
+	*out = append(*out, lease)
 	return nil
 }
 

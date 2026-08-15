@@ -662,3 +662,10 @@ func (d *OutboxDispatcher) drain(ctx context.Context) {
 	}
 	d.engine.observeOutboxMetrics(ctx, state)
 }
+
+// requeueGroupOutboxID is the group-unit analogue of requeueOutboxID. It keys
+// on the unit index rather than the node name because a group's entry node name
+// is shared by every unit the group expands into.
+func requeueGroupOutboxID(id types.ExecutionID, unitIdx int, leaseID LeaseID) string {
+	return fmt.Sprintf("requeue-group/%s/%d/%s", id, unitIdx, leaseID)
+}

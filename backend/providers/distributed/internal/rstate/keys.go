@@ -251,3 +251,20 @@ func groupUnitMetaKey(t namespace.Namespace, id types.ExecutionID, unitIdx int) 
 func groupLeaseMember(id types.ExecutionID, unitIdx int) string {
 	return string(id) + "|group:" + strconv.Itoa(unitIdx)
 }
+
+// parseGroupLeaseMember recognizes the group encoding produced by
+// groupLeaseMember from the remainder splitLeaseMember returns. Node names
+// cannot collide: a graph node named "group:0" would still resolve to a
+// different Redis key space, and the expiry scan needs the unit index either
+// way to read the group unit's own status/meta keys.
+func parseGroupLeaseMember(remainder string) (int, bool) {
+	const prefix = "group:"
+	if !strings.HasPrefix(remainder, prefix) {
+		return 0, false
+	}
+	idx, err := strconv.Atoi(remainder[len(prefix):])
+	if err != nil || idx < 0 {
+		return 0, false
+	}
+	return idx, true
+}
