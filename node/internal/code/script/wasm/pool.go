@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/xbcio/xflow/types"
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
 )
@@ -65,17 +66,22 @@ func (in *pooledInstance) evalOnce(ctx context.Context, input []byte) (out []byt
 	ptr, err := in.alloc.Call(ctx, uint64(len(input)))
 	if err != nil {
 		// A failed alloc means the module was closed (timeout) or trapped.
-		return nil, true, fmt.Errorf("wasm reactor: alloc: %w", err)
+		return nil, true, classifyHostFault(ctx, fmt.Errorf("wasm reactor: alloc: %w", err))
 	}
 	if len(input) > 0 && !in.mem.Write(uint32(ptr[0]), input) {
-		return nil, true, fmt.Errorf("wasm reactor: write input out of range")
+		// Not a context-dependent failure: the input does not fit the pointer
+		// the guest just handed out. The same input hits the same wall on every
+		// retry, so mark it permanent unconditionally.
+		return nil, true, &permanentHostFault{
+			err: fmt.Errorf("wasm reactor: write input out of range"),
+		}
 	}
 
 	r, err := in.eval.Call(ctx, uint64(len(input)))
 	if err != nil {
 		// Timeout (WithCloseOnContextDone) or trap → instance permanently
 		// closed (constraint #4). Doom it.
-		return nil, true, fmt.Errorf("wasm reactor: eval: %w", err)
+		return nil, true, classifyHostFault(ctx, fmt.Errorf("wasm reactor: eval: %w", err))
 	}
 
 	n := int32(r[0])
@@ -90,6 +96,50 @@ func (in *pooledInstance) evalOnce(ctx context.Context, input []byte) (out []byt
 
 	return in.readOut(ctx, n), false, nil
 }
+
+// classifyHostFault stamps a doomed-instance error as permanent unless the
+// context is what killed it.
+//
+// Both outcomes look identical at this layer: WithCloseOnContextDone tears the
+// module down on a deadline exactly the way a trap does, and both surface as a
+// wazero call error on a now-closed module. But they need opposite retry
+// answers, and "the instance was doomed" cannot tell them apart.
+//
+//   - A trap is a property of the input. A malformed message that drives the
+//     guest into an out-of-bounds access or an unreachable will do it again on
+//     every redelivery. Left unmarked, the Kafka batch path reads the failure
+//     as transient (GroupExecResult.Deterministic is false), refuses to admit
+//     the batch, and the broker redelivers the same bytes forever -- the
+//     partition stops advancing and every message queued behind it stalls with
+//     it.
+//   - A timeout is a property of the environment: a loaded host, a deadline set
+//     too tight. Retrying can well succeed, and marking it permanent would
+//     commit the offset and silently discard real messages.
+//
+// ctx.Err() is the signal, not the error text: it is set precisely when the
+// context is the cause, and it does not depend on wazero's wording.
+//
+// The sentinel is joined rather than wrapped so err's own text stays the head
+// of the message: a wasm trap carries the guest stack trace, which is the whole
+// diagnostic value of the error, and burying it under "permanent error" would
+// cost more than the marker is worth in a log line.
+func classifyHostFault(ctx context.Context, err error) error {
+	if ctx != nil && ctx.Err() != nil {
+		return err
+	}
+	return &permanentHostFault{err: err}
+}
+
+// permanentHostFault marks a host-side wasm fault as non-retryable while
+// keeping the underlying error's text and unwrap chain intact.
+type permanentHostFault struct{ err error }
+
+func (e *permanentHostFault) Error() string { return e.err.Error() }
+
+// Unwrap returns both the wrapped error and the sentinel so errors.Is finds
+// types.ErrPermanent and errors.As still reaches anything the wasm layer
+// wrapped underneath.
+func (e *permanentHostFault) Unwrap() []error { return []error{e.err, types.ErrPermanent} }
 
 // readOut copies the guest's output buffer. n<0 asks the guest for the length
 // via out_len (used for error detail, where the failing call's return value was
