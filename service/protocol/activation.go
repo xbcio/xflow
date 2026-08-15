@@ -6,11 +6,18 @@ import (
 )
 
 // --- Path constants ---
+//
+// Activation is NOT driven over its own HTTP routes. The reconciler attaches
+// ActivateDirective/DeactivateDirective to the heartbeat RESPONSE, and the
+// runner acts on them locally through TriggerActivationHandler. The only
+// activation route that exists is the ack the runner posts back.
+//
+// There were once ActivatePath, DeactivatePath and ActivationListPath
+// constants here. Nothing ever registered a handler for them or called them —
+// they described a protocol that was never built, and anyone coding against
+// them got a 404. Do not reintroduce a path constant before its route.
 const (
-	ActivatePath       = "/v1/runners/activate"
-	DeactivatePath     = "/v1/runners/deactivate"
-	ActivationAckPath  = "/v1/runners/activation/ack"
-	ActivationListPath = "/v1/activations"
+	ActivationAckPath = "/v1/runners/activation/ack"
 )
 
 // --- Activate directive (server → runner) ---
