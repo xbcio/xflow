@@ -222,6 +222,11 @@ func (n *ScriptNode) Execute(ctx context.Context, input *types.Input) (*types.Ou
 			if ctx.Err() != nil {
 				return nil, types.NewTransientError("script.timeout", batchErr.Error())
 			}
+			if types.IsPermanent(batchErr) {
+				// Same split as the single-record path below, and this is the
+				// path that motivates it: the Kafka trigger delivers batches.
+				return nil, batchErr
+			}
 			return &types.Output{Data: map[string]any{"error": batchErr.Error()}, Port: "error"}, nil
 		}
 		data := map[string]any{
@@ -252,6 +257,25 @@ func (n *ScriptNode) Execute(ctx context.Context, input *types.Input) (*types.Ou
 		// (engine/outputPortRetryError), preserving existing OnError routing.
 		if ctx.Err() != nil {
 			return nil, types.NewTransientError("script.timeout", err.Error())
+		}
+		// ...unless the engine classified the failure as permanent itself. A
+		// wasm host trap does: the guest hit an unreachable or an out-of-bounds
+		// access on these exact bytes, and redelivering them traps identically.
+		//
+		// That classification only reaches the engine if it travels AS an error.
+		// The error port flattens a failure into Output.Data["error"], and
+		// engine/outputPortRetryError rebuilds it with errors.New(msg) -- a
+		// fresh error with an empty unwrap chain. buildEffectiveClassification
+		// then reports Classified:false, GroupExecResult.Deterministic stays
+		// false, and the Kafka batch path refuses to admit the batch: the broker
+		// redelivers the same bytes forever, the partition stops advancing, and
+		// every message queued behind it stalls with it.
+		//
+		// Only permanence changes lanes. An unclassified throw and a
+		// self-declared transient failure both keep the error port, so workflows
+		// that branch on it are unaffected.
+		if types.IsPermanent(err) {
+			return nil, err
 		}
 		return &types.Output{Data: map[string]any{"error": err.Error()}, Port: "error"}, nil
 	}
