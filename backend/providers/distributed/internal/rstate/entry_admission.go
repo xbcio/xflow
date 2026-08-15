@@ -154,6 +154,46 @@ func (s *Store) SeedExecutionFromEntry(ctx context.Context, req engine.SeedExecu
 	}
 	ttl := s.execTTL
 
+	// A transient workflow admitted here declares that its payloads must not be
+	// projected to SQL. The seed path is where that promise is easiest to lose:
+	// it never calls CreateExecution, which is the only other place a
+	// per-execution transient marker is written, so without this the marker
+	// simply does not exist and every isTransient() guard downstream --
+	// projectSeededExecution's included -- resolves "durable" and writes the
+	// row. The exposure is not hypothetical: a Kafka trigger group is admitted
+	// exclusively through this path, and a workflow is marked transient
+	// precisely when it carries raw third-party traffic.
+	//
+	// The graph is the source of truth here, not a context hint. Submit and
+	// Invoke derive the hint from the compiled graph (engine.attachTransientHint)
+	// but a trigger group's admission does not pass through either, so there is
+	// no hint on this context to read.
+	//
+	// Written BEFORE the Lua, in its own transaction: the Lua creates the
+	// execution, and from that instant another replica can lease a node and
+	// commit its output. A marker written afterwards leaves exactly that window
+	// open, which is long enough to project a payload.
+	if req.Graph != nil && req.Graph.Transient() {
+		markTTL := req.Graph.TransientTTL()
+		if markTTL <= 0 {
+			markTTL = s.transientTTL
+		}
+		if markTTL <= 0 {
+			markTTL = ttl
+		}
+		ttl = markTTL
+		pipe := s.rdb.TxPipeline()
+		s.markExecutionTransient(ctx, pipe, execID,
+			req.Graph.TransientTTL(), req.Graph.TransientCompletionTTL(), markTTL)
+		if _, err := pipe.Exec(ctx); err != nil {
+			// Fail the admission rather than proceeding unmarked. Redis is
+			// authoritative and this write is cheap; admitting the batch anyway
+			// would persist the very payloads the workflow declared ephemeral,
+			// and the broker will redeliver it once the error propagates.
+			return engine.SeedExecutionFromEntryResponse{}, fmt.Errorf("mark transient execution %q: %w", execID, err)
+		}
+	}
+
 	// Phase 1: Pre-seed structural keys (idempotent SET NX patterns won't
 	// overwrite). This uses a pipeline for the keys the Lua script reads but
 	// does not create itself (remaining, failed, in-degree).

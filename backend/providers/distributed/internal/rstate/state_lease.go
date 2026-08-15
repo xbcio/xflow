@@ -103,7 +103,19 @@ func (s *Store) AcquireTaskLease(ctx context.Context, lease *engine.TaskLease) (
 		return nil, false, err
 	}
 
-	if s.db != nil {
+	// isTransient, not just s.db != nil: the three other UpsertNode sites
+	// (state_node, state_commit, state_suspend) all gate on it, and a row this
+	// one creates is the row they later update in place -- xflow_nodes is keyed
+	// (execution_id, node_name). So an unguarded insert here does not merely add
+	// a metadata-only row: it opens the record that a subsequent commit's
+	// UpsertNode fills with the node's output, and the commit-side guard cannot
+	// undo what this side already created.
+	//
+	// The row is not harmless on its own either. lease_id, lease_token, attempt
+	// and the node name of an execution the workflow declared ephemeral all
+	// survive here past the Redis TTL, which is the opposite of what transient
+	// mode promises.
+	if s.db != nil && !s.isTransient(ctx, lease.Task.ExecutionID) {
 		attempt := 1
 		if prev != nil {
 			attempt = prev.Attempt + 1

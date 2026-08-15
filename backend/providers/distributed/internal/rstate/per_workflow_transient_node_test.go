@@ -124,3 +124,90 @@ func TestPerWorkflowTransient_SkipsNodeOutputProjection(t *testing.T) {
 			"execution persisted node output to SQL", transientRows)
 	}
 }
+
+// TestPerWorkflowTransient_SkipsLeaseNodeProjection covers the lease path,
+// which the test above does not reach.
+//
+// Four sites project into xflow_nodes (state_node, state_commit, state_suspend
+// and this one), and each carries its own isTransient guard -- an invariant
+// maintained by repetition, so a single omission disables it silently. This one
+// was omitted: AcquireTaskLease gated only on `s.db != nil`.
+//
+// The row it writes carries no Output, but calling it harmless misses how the
+// table works. xflow_nodes is unique on (execution_id, node_name), so the row
+// created here is the row a later commit updates in place -- the commit-side
+// guard cannot withdraw a record this side already opened. And lease_id,
+// lease_token, attempt and the node name of an execution declared ephemeral
+// outliving the Redis TTL is itself the opposite of what transient promises.
+func TestPerWorkflowTransient_SkipsLeaseNodeProjection(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mr.Close()
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer func() { _ = rdb.Close() }()
+
+	fakeDB := &fakeNodeStore{}
+	state := New(rdb, fakeDB, time.Hour)
+	state.transient = false // global transient off; only the workflow declares it
+
+	ctx := context.Background()
+
+	transientID := types.ExecutionID("exec-transient-lease")
+	tg := testTransientGraph()
+	tctx := engine.WithExecutionTransient(ctx, engine.TransientHint{
+		TTL:           tg.TransientTTL(),
+		CompletionTTL: tg.TransientCompletionTTL(),
+	})
+	if err := state.CreateExecution(tctx, &engine.ExecutionSnapshot{
+		ID: transientID, Status: types.ExecutionStatusRunning, Graph: tg,
+	}); err != nil {
+		t.Fatalf("CreateExecution (transient): %v", err)
+	}
+
+	durableID := types.ExecutionID("exec-durable-lease")
+	if err := state.CreateExecution(ctx, &engine.ExecutionSnapshot{
+		ID: durableID, Status: types.ExecutionStatusRunning, Graph: testDurableGraph(),
+	}); err != nil {
+		t.Fatalf("CreateExecution (durable): %v", err)
+	}
+
+	for i, id := range []types.ExecutionID{transientID, durableID} {
+		lease := &engine.TaskLease{
+			LeaseID:    engine.LeaseID("L" + string(rune('0'+i))),
+			LeaseToken: engine.LeaseToken("T" + string(rune('0'+i))),
+			IssuedAt:   time.Now().UTC(),
+			TTL:        time.Minute,
+			Task: engine.Task{
+				ExecutionID: id, NodeName: "start", NodeIdx: 0,
+				Type: engine.TaskTypeNodeExec, ActivationID: 1,
+			},
+		}
+		_, acquired, err := state.AcquireTaskLease(ctx, lease)
+		if err != nil || !acquired {
+			t.Fatalf("AcquireTaskLease (%s): acquired=%v err=%v", id, acquired, err)
+		}
+	}
+
+	var transientRows, durableRows int
+	for _, rec := range fakeDB.nodes {
+		switch rec.ExecutionID {
+		case transientID:
+			transientRows++
+		case durableID:
+			durableRows++
+		}
+	}
+	if durableRows != 1 {
+		t.Fatalf("durable lease rows = %d, want 1 -- the positive control never "+
+			"reached the projection, so the transient assertion below would pass "+
+			"even with the projection deleted entirely", durableRows)
+	}
+	if transientRows != 0 {
+		t.Fatalf("transient lease rows = %d, want 0 -- AcquireTaskLease projected "+
+			"a node row for an execution the workflow declared ephemeral, opening "+
+			"the (execution_id, node_name) record that a later commit fills with "+
+			"the node's payload", transientRows)
+	}
+}
