@@ -471,22 +471,34 @@ type NodeLeaseRenewer interface {
 // nothing clamps a node's own timeout against it: an action whose timeout
 // exceeds the TTL would otherwise be swept and redelivered to a second runner
 // while the first is still executing it.
+//
+// A batch lease renews its parent, for the same reason CommitTaskResult routes
+// a batch through the expansion barrier: the batch's node name is synthetic
+// ("loop/_batch/0"), BuildSubgraphLease deliberately never writes it to state,
+// and the lease it carries is the parent's. Renewing under the synthetic name
+// would address a node that does not exist — the store refuses, the runner
+// reads the refusal as "you lost the lease" and cancels a healthy batch, and
+// the parent whose deadline is actually ticking down never gets extended.
 func (e *Engine) RenewTaskLease(ctx context.Context, lease *TaskLease, extend time.Duration) (bool, error) {
 	if lease == nil || lease.LeaseToken == "" {
 		return false, ErrInvalidLeaseToken
 	}
+	name := lease.Task.NodeName
+	if lease.SubgraphPayload != nil && lease.SubgraphPayload.ParentNode != "" {
+		name = lease.SubgraphPayload.ParentNode
+	}
 	if extend <= 0 {
-		return false, fmt.Errorf("renew node lease %q/%q: extend must be positive", lease.Task.ExecutionID, lease.Task.NodeName)
+		return false, fmt.Errorf("renew node lease %q/%q: extend must be positive", lease.Task.ExecutionID, name)
 	}
 	renewer, ok := e.state.(NodeLeaseRenewer)
 	if !ok {
 		return false, fmt.Errorf("renew node lease %q/%q: state store does not support node lease renewal",
-			lease.Task.ExecutionID, lease.Task.NodeName)
+			lease.Task.ExecutionID, name)
 	}
 	deadline := time.Now().UTC().Add(extend)
-	renewed, err := renewer.RenewTaskLease(ctx, lease.Task.ExecutionID, lease.Task.NodeName, lease.LeaseToken, deadline)
+	renewed, err := renewer.RenewTaskLease(ctx, lease.Task.ExecutionID, name, lease.LeaseToken, deadline)
 	if err != nil {
-		return false, fmt.Errorf("renew node lease %q/%q: %w", lease.Task.ExecutionID, lease.Task.NodeName, err)
+		return false, fmt.Errorf("renew node lease %q/%q: %w", lease.Task.ExecutionID, name, err)
 	}
 	return renewed, nil
 }
