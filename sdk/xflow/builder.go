@@ -3,6 +3,7 @@ package xflow
 import (
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/xbcio/xflow/node/registry"
 	"github.com/xbcio/xflow/types"
@@ -81,11 +82,48 @@ func Workflow(name string) *WorkflowBuilder {
 //     loops; values <= 0 use the engine default; signal/timeout resumes reset
 //     the counter.
 func (w *WorkflowBuilder) AllowCycles(maxAutoDepth int) *WorkflowBuilder {
-	w.options = &types.WorkflowOptions{
-		AllowCycles:  true,
-		MaxAutoDepth: maxAutoDepth,
-	}
+	opts := w.ensureOptions()
+	opts.AllowCycles = true
+	opts.MaxAutoDepth = maxAutoDepth
 	return w
+}
+
+// Transient opts this single workflow into transient (fire-and-forget)
+// execution mode, independently of the engine-wide setting.
+//
+// Executions of a transient workflow skip the SQL audit projection entirely:
+// no execution row, no node rows, no payloads. This is the switch to reach for
+// when a workflow carries data that must not be persisted -- raw third-party
+// traffic, credentials in flight, anything a durable audit trail would turn
+// into a disclosure. Redis state is TTL-bounded rather than retained for the
+// durable window.
+//
+// ttl slides while the execution is active; completionTTL replaces it once the
+// execution reaches a terminal state. Zero for either means "use the
+// engine-wide transient TTL", per types.WorkflowOptions.
+//
+// Unlike the store-wide transient mode this does NOT disable suspend: the
+// control plane stays fully durable, so signal/revoke/inspect all still work
+// and a parked waiter can be woken. The mode promises only "no SQL projection,
+// short TTL".
+func (w *WorkflowBuilder) Transient(ttl, completionTTL time.Duration) *WorkflowBuilder {
+	opts := w.ensureOptions()
+	opts.Transient = true
+	opts.TransientTTL = ttl
+	opts.TransientCompletionTTL = completionTTL
+	return w
+}
+
+// ensureOptions returns the workflow's option block, allocating it on first
+// use. Every option setter must go through here: assigning w.options wholesale
+// makes the last setter win and silently discards the earlier ones -- which for
+// Transient would turn the SQL projection back on for a workflow that declared
+// itself ephemeral.
+func (w *WorkflowBuilder) ensureOptions() *types.WorkflowOptions {
+	if w.options == nil {
+		w.options = &types.WorkflowOptions{}
+	}
+	return w.options
 }
 
 func (w *WorkflowBuilder) Namespace(namespace string) *WorkflowBuilder {
