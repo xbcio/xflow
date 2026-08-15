@@ -112,6 +112,23 @@ func (c *Client) ReportMetrics(ctx context.Context, runnerID, sessionID string, 
 	return nil
 }
 
+// RenewLease extends the deadline of a lease this runner already holds, so a
+// handler that legitimately runs longer than the engine's default lease TTL is
+// not reclaimed and redelivered to a second runner mid-flight.
+//
+// A refusal (stale token, node no longer running) comes back as
+// Renewed=false with a reason, NOT as an error: the caller has to be able to
+// tell "you lost the lease, stop working" from "the network is down, retry".
+//
+// Only the HTTP client implements this. The gRPC client does not, so a
+// gRPC-transport runner never renews — the same explicit gap as
+// MetricsReportClient and activationAckClient.
+func (c *Client) RenewLease(ctx context.Context, req RenewLeaseRequest) (RenewLeaseResponse, error) {
+	var resp RenewLeaseResponse
+	err := c.post(ctx, RenewLeasePath, req, &resp)
+	return resp, err
+}
+
 func (c *Client) post(ctx context.Context, path string, body any, out any) error {
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(body); err != nil {
