@@ -199,28 +199,26 @@ func SupplyConsumerBindingsForEntryUnit(g *graph.Graph, unitIdx int) []engine.Su
 	}
 	seen := map[engine.SupplyConsumerBinding]bool{}
 	walkEntryUnitNodes(g, unitIdx, func(nodeIdx int) {
-		nm := g.NodeAt(nodeIdx)
-		if nm.Type != scriptNodeType {
-			return
-		}
-		if lang, _ := nm.Parameters["language"].(string); lang != wasmScriptLanguage {
-			return
-		}
 		refs := g.SupplyRefsFor(nodeIdx)
 		if len(refs) == 0 {
 			return
 		}
-		digest, _ := nm.Parameters["artifact_digest"].(string)
-		if digest == "" {
-			// Inline-code wasm node: no stable module identity to bind against.
-			// The node name is safe to log; params are not (they may carry
-			// credential references), so only the name appears here.
-			slog.Warn("supply consumer binding skipped: wasm node has no artifact_digest",
-				"node", nm.Name, "supplies", refs)
+		nm := g.NodeAt(nodeIdx)
+		collectWasmBindings(nm.Name, nm.Type, nm.Parameters, refs, seen)
+
+		// A body-bearing node (xflow.map) is walked one level deeper. Its members
+		// are not graph nodes, so the BFS above can never reach them, and they
+		// carry no dependency edges of their own — a body inherits its parent's
+		// visible supplies (ProjectNodeBodyPackage's visibleSupplies). Skipping
+		// this is not a missing optimisation: the module would be fetched-for but
+		// never registered as a consumer, so it would stay on the legacy globals
+		// path and evaluate every record against an empty rule set, silently.
+		body := g.BodyAt(nodeIdx)
+		if body == nil || body.Package == nil || body.Package.Def == nil {
 			return
 		}
-		for _, supplyName := range refs {
-			seen[engine.SupplyConsumerBinding{ModuleDigest: digest, SupplyNode: supplyName}] = true
+		for _, member := range body.Package.Def.Nodes {
+			collectWasmBindings(member.Name, member.Type, member.Parameters, refs, seen)
 		}
 	})
 
@@ -238,6 +236,32 @@ func SupplyConsumerBindingsForEntryUnit(g *graph.Graph, unitIdx int) []engine.Su
 		return out[i].SupplyNode < out[j].SupplyNode
 	})
 	return out
+}
+
+// collectWasmBindings adds one binding per supply name for a node that is an
+// artifact-backed wasm script, and does nothing for anything else. It is shared
+// by the outer-graph walk and the body walk so a body member is judged bindable
+// by exactly the same rules as a top-level node — a second copy of these three
+// checks is how the two layers would drift.
+func collectWasmBindings(name, nodeType string, params map[string]any, refs []string, seen map[engine.SupplyConsumerBinding]bool) {
+	if nodeType != scriptNodeType {
+		return
+	}
+	if lang, _ := params["language"].(string); lang != wasmScriptLanguage {
+		return
+	}
+	digest, _ := params["artifact_digest"].(string)
+	if digest == "" {
+		// Inline-code wasm node: no stable module identity to bind against.
+		// The node name is safe to log; params are not (they may carry
+		// credential references), so only the name appears here.
+		slog.Warn("supply consumer binding skipped: wasm node has no artifact_digest",
+			"node", name, "supplies", refs)
+		return
+	}
+	for _, supplyName := range refs {
+		seen[engine.SupplyConsumerBinding{ModuleDigest: digest, SupplyNode: supplyName}] = true
+	}
 }
 
 // DeriveEntryActivations extracts the trigger entry units from a compiled graph
