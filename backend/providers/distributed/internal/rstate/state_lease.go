@@ -593,15 +593,23 @@ func (s *Store) SuspendTaskLease(ctx context.Context, lease *engine.TaskLease, o
 // lease_ttl_ms is recomputed from the same deadline so the snapshot's LeaseTTL
 // and reconcileLeaseIndexLua's pre-deadline fallback do not disagree with it.
 //
-// Status must still be running: a lease that has been revoked, committed, or
-// suspended has had its work requeued or finalized, and reviving its deadline
-// would fence out whoever owns the node now.
+// The node must still be running or waiting — the two states in which a runner
+// is actively working the lease. Waiting is not an edge case: it is what a map
+// node holds while its batches execute remotely, and ListExpiredLeases reclaims
+// Waiting nodes exactly like Running ones, so a gate that accepted only
+// "running" would refuse renewal for the longest-running work in the system.
+//
+// Committing is deliberately excluded even though the sweeper reclaims it too:
+// the runner has already reported its result by then, so renewal is no longer
+// its business, and the commit path owns that transition. Revoked, suspended,
+// and terminal leases have had their work requeued or finalized, and reviving
+// their deadline would fence out whoever owns the node now.
 //
 // KEYS: 1=node status 2=node meta 3=lease expiry ZSET
 // ARGV: 1=token 2=deadline_ms 3=exec_ttl_s 4=zset member 5=issued_at_ms
 var renewTaskLeaseLua = redis.NewScript(`
 local status = redis.call('GET', KEYS[1])
-if status ~= 'running' then return {0} end
+if status ~= 'running' and status ~= 'waiting' then return {0} end
 local token = redis.call('HGET', KEYS[2], 'lease_token') or ''
 if token == '' or token ~= ARGV[1] then return {0} end
 local deadlineMs = tonumber(ARGV[2])

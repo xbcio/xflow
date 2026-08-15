@@ -171,11 +171,45 @@ func RunNodeLeaseRenewContract(t *testing.T, newStore func(*testing.T) NodeLease
 		}
 	})
 
+	// A map node holding a Waiting lease while its batches run on remote runners
+	// is exactly the case where renewal matters most: the batches can legitimately
+	// take far longer than one node's TTL, and ListExpiredLeases reclaims Waiting
+	// nodes just like Running ones. A renewal gate that accepted only "running"
+	// would answer Renewed=false here — and the runner reads that as "you lost the
+	// lease", cancelling a healthy fan-out instead of extending it.
+	t.Run("RenewExtendsAWaitingExpansionParent", func(t *testing.T) {
+		s, id, lease := seed(t)
+		node, err := s.GetNode(ctx, id, "start")
+		if err != nil || node == nil {
+			t.Fatalf("GetNode: %v", err)
+		}
+		node.Status = types.NodeStatusWaiting
+		if err := s.UpsertNode(ctx, node); err != nil {
+			t.Fatalf("move node to waiting: %v", err)
+		}
+		if !isExpired(t, s, id) {
+			t.Fatal("a Waiting node past its deadline must be reclaimable before renewal — " +
+				"otherwise this subtest proves nothing")
+		}
+
+		renewed, err := s.RenewTaskLease(ctx, id, "start", lease.LeaseToken, time.Now().UTC().Add(5*time.Minute))
+		if err != nil {
+			t.Fatalf("RenewTaskLease on a waiting parent: %v", err)
+		}
+		if !renewed {
+			t.Fatal("renewal refused a Waiting expansion parent — its batches are still " +
+				"executing, and the sweeper reclaims Waiting leases, so refusing here " +
+				"means the fan-out is reclaimed mid-flight or cancelled by its own runner")
+		}
+		if isExpired(t, s, id) {
+			t.Fatal("the waiting parent is still reported as expired after renewal")
+		}
+	})
+
 	// Once the lease is gone, renewal must not resurrect it. Otherwise a
 	// renewal racing a reclaim would restore a deadline for a lease whose work
 	// item has already been requeued to another runner.
-	t.Run("RenewRejectedAfterLeaseRevoked", func(t *testing.T) {
-		s, id, lease := seed(t)
+	t.Run("RenewRejectedAfterLeaseRevoked", func(t *testing.T) {		s, id, lease := seed(t)
 		atomic, ok := s.(engine.AtomicStateStore)
 		if !ok {
 			t.Skip("backend does not implement AtomicStateStore")

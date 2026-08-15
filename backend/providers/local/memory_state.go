@@ -1037,6 +1037,11 @@ func (s *memoryState) GetSubExecutionResults(_ context.Context, parentExecID typ
 // deadline. The token fence and the running check mirror the Redis store: a
 // revoked, committed, or suspended lease has had its work requeued or
 // finalized, and reviving its deadline would fence out the current owner.
+//
+// Waiting is accepted alongside Running for the same reason the Redis store
+// accepts it: an expansion parent sits in Waiting while its batches execute on
+// remote runners, and ListExpiredLeases reclaims Waiting nodes just like
+// Running ones, so that is precisely when renewal has to work.
 func (s *memoryState) RenewTaskLease(_ context.Context, id types.ExecutionID, name string, token engine.LeaseToken, deadline time.Time) (bool, error) {
 	if token == "" {
 		return false, nil
@@ -1044,7 +1049,10 @@ func (s *memoryState) RenewTaskLease(_ context.Context, id types.ExecutionID, na
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	ns := s.nodes[string(id)+"/"+name]
-	if ns == nil || ns.Status != types.NodeStatusRunning || ns.LeaseToken != token {
+	if ns == nil || ns.LeaseToken != token {
+		return false, nil
+	}
+	if ns.Status != types.NodeStatusRunning && ns.Status != types.NodeStatusWaiting {
 		return false, nil
 	}
 	issuedAt := ns.LeaseIssuedAt
