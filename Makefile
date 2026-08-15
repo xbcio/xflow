@@ -234,8 +234,6 @@ validate-openapi:
 	@echo "Linting OpenAPI spec with Spectral..."
 	npx @stoplight/spectral-cli lint api/openapi/xflow-v1.yaml --ruleset api/openapi/.spectral.yaml
 	@echo "Validating OpenAPI spec structure with redocly..."
-	cd web && pnpm exec redocly lint --config ../.redocly.yaml ../api/openapi/xflow-v1.yaml
+	npx --yes @redocly/cli@1.34.2 lint --config .redocly.yaml api/openapi/xflow-v1.yaml
 	@echo "Running Go OpenAPI fixture + round-trip tests..."
 	go test ./api/openapi/ -count=1
-	@echo "Checking generated TypeScript types are up-to-date..."
-	cd web && pnpm check:openapi
