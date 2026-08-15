@@ -27,7 +27,7 @@ func (f *fakeRenewer) RenewLease(_ context.Context, _, _ string, _ time.Duration
 	return true, nil
 }
 
-func TestRenewGroupLease_RenewsSuccessfully(t *testing.T) {
+func TestRenewLeaseLoop_RenewsSuccessfully(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -37,7 +37,7 @@ func TestRenewGroupLease_RenewsSuccessfully(t *testing.T) {
 	// Use a very short interval for testing.
 	cfg := RenewalConfig{Interval: 10 * time.Millisecond, MaxRetries: 3}
 
-	go renewGroupLease(ctx, renewer, lease, time.Second, cfg, cancel)
+	go renewLeaseLoop(ctx, renewer, lease, time.Second, cfg, cancel)
 
 	time.Sleep(50 * time.Millisecond)
 	cancel()
@@ -47,7 +47,7 @@ func TestRenewGroupLease_RenewsSuccessfully(t *testing.T) {
 	}
 }
 
-func TestRenewGroupLease_CancelsOnRejection(t *testing.T) {
+func TestRenewLeaseLoop_CancelsOnRejection(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -58,7 +58,7 @@ func TestRenewGroupLease_CancelsOnRejection(t *testing.T) {
 	cfg := RenewalConfig{Interval: 5 * time.Millisecond, MaxRetries: 3}
 	done := make(chan struct{})
 	go func() {
-		renewGroupLease(ctx, renewer, lease, time.Second, cfg, cancel)
+		renewLeaseLoop(ctx, renewer, lease, time.Second, cfg, cancel)
 		close(done)
 	}()
 
@@ -75,7 +75,7 @@ func TestRenewGroupLease_CancelsOnRejection(t *testing.T) {
 	}
 }
 
-func TestRenewGroupLease_CancelsAfterMaxRetries(t *testing.T) {
+func TestRenewLeaseLoop_CancelsAfterMaxRetries(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -86,7 +86,7 @@ func TestRenewGroupLease_CancelsAfterMaxRetries(t *testing.T) {
 	cfg := RenewalConfig{Interval: 5 * time.Millisecond, MaxRetries: 2}
 	done := make(chan struct{})
 	go func() {
-		renewGroupLease(ctx, renewer, lease, time.Second, cfg, cancel)
+		renewLeaseLoop(ctx, renewer, lease, time.Second, cfg, cancel)
 		close(done)
 	}()
 
@@ -102,7 +102,7 @@ func TestRenewGroupLease_CancelsAfterMaxRetries(t *testing.T) {
 	}
 }
 
-func TestRenewGroupLease_ExitsOnContextDone(t *testing.T) {
+func TestRenewLeaseLoop_ExitsOnContextDone(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	renewer := &fakeRenewer{}
@@ -111,7 +111,7 @@ func TestRenewGroupLease_ExitsOnContextDone(t *testing.T) {
 	cfg := RenewalConfig{Interval: 5 * time.Millisecond, MaxRetries: 3}
 	done := make(chan struct{})
 	go func() {
-		renewGroupLease(ctx, renewer, lease, time.Second, cfg, cancel)
+		renewLeaseLoop(ctx, renewer, lease, time.Second, cfg, cancel)
 		close(done)
 	}()
 

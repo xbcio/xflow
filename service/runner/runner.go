@@ -104,6 +104,11 @@ type Config struct {
 	// what a gRPC-transport runner always gets, since the gRPC client does not
 	// implement MetricsReportClient.
 	MetricsReporter *MetricsReporter
+	// Renewal tunes the per-task lease renewal loop. Zero values take the
+	// defaults (interval min(TTL/3, 10s), 3 consecutive transport failures
+	// before the handler is cancelled). Renewal only happens when the protocol
+	// client implements leaseRenewClient — the gRPC client does not.
+	Renewal RenewalConfig
 }
 
 type Runner struct {
@@ -358,6 +363,15 @@ func (r *Runner) workerLoop(ctx context.Context, sessionID string, leaseCh <-cha
 // SIGTERM) does not discard a computed result the server still needs — but
 // the detached context PRESERVES the SpanContext, so the report/commit trace
 // is not broken. A bare context.Background() would lose the SpanContext.
+//
+// While the work runs, a background loop extends the lease. The engine stamps
+// every lease with its default TTL and nothing clamps a node's own timeout
+// (xflow.http's options.timeout, xflow.script's params.timeout) against it, so
+// without renewal a legitimately slow handler is reclaimed by the sweeper and
+// redelivered to a second runner while the first is still executing it. The
+// loop cancels the execute context on refusal or on repeated transport
+// failure: once the server says this runner no longer owns the node, finishing
+// the work would produce a second, unfenced result.
 func (r *Runner) executeAndReport(ctx context.Context, sessionID string, lease *engine.TaskLease, inFlight *atomic.Int32, signalError func(error)) {
 	defer inFlight.Add(-1)
 
@@ -372,6 +386,19 @@ func (r *Runner) executeAndReport(ctx context.Context, sessionID string, lease *
 		"attempt", lease.Attempt,
 	)
 	defer span.End()
+
+	// The renewal loop needs its own cancel handle over the execute context so
+	// a lost lease stops the handler. It is stopped unconditionally when the
+	// work returns, so a finished task's lease stops being extended and the
+	// sweeper can still reclaim it if the report never lands.
+	if renewer, ok := r.client.(leaseRenewClient); ok && lease.LeaseToken != "" {
+		var stopRenewal context.CancelFunc
+		execCtx, stopRenewal = context.WithCancel(execCtx)
+		defer stopRenewal()
+		go renewLeaseLoop(execCtx,
+			protocolLeaseRenewer{client: renewer, runnerID: r.config.RunnerID, sessionID: sessionID},
+			lease, renewalExtendFor(lease), r.config.Renewal, stopRenewal)
+	}
 
 	var result engine.TaskResult
 	var groupResult *engine.GroupResult
