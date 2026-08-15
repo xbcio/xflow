@@ -14,6 +14,16 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
+// The renewal branches are selected by type assertion on c.engine, so a fake
+// satisfying them proves nothing about production: if *engine.Engine ever stops
+// matching, every renewal silently falls through to "engine does not support",
+// the runner stops renewing, and the sweeper hands live work to a second runner.
+// Pin both interfaces against the real type.
+var (
+	_ groupLeaseEngine = (*engine.Engine)(nil)
+	_ nodeLeaseEngine  = (*engine.Engine)(nil)
+)
+
 // groupFakeEngine extends fakeControlEngine with group lease capabilities.
 type groupFakeEngine struct {
 	fakeControlEngine
@@ -33,6 +43,11 @@ type groupFakeEngine struct {
 	groupRenewResult bool
 	groupRenewErr    error
 	groupRenewedLease *engine.TaskLease
+
+	nodeRenewResult  bool
+	nodeRenewErr     error
+	nodeRenewedLease *engine.TaskLease
+	nodeRenewExtend  time.Duration
 }
 
 func (g *groupFakeEngine) BuildGroupLease(_ context.Context, t *engine.Task) (*engine.TaskLease, *engine.GroupLeasePayload, error) {
@@ -74,6 +89,15 @@ func (g *groupFakeEngine) RenewGroupLease(_ context.Context, lease *engine.TaskL
 		return false, g.groupRenewErr
 	}
 	return g.groupRenewResult, nil
+}
+
+func (g *groupFakeEngine) RenewTaskLease(_ context.Context, lease *engine.TaskLease, extend time.Duration) (bool, error) {
+	g.nodeRenewedLease = lease
+	g.nodeRenewExtend = extend
+	if g.nodeRenewErr != nil {
+		return false, g.nodeRenewErr
+	}
+	return g.nodeRenewResult, nil
 }
 
 func groupTestAssignment() Assignment {
@@ -586,7 +610,7 @@ func TestNodeRenewLeaseDelegatesToEngine(t *testing.T) {
 		t.Fatalf("FinalizeClaim() error = %v", err)
 	}
 
-	fake := &groupFakeEngine{groupRenewResult: true}
+	fake := &groupFakeEngine{groupRenewResult: true, nodeRenewResult: true}
 	core := &Core{engine: fake, runners: dir, pollWait: time.Second}
 
 	resp, err := core.renewLease(ctx, protocol.RenewLeaseRequest{
@@ -599,10 +623,77 @@ func TestNodeRenewLeaseDelegatesToEngine(t *testing.T) {
 	if err != nil {
 		t.Fatalf("renewLease() error = %v", err)
 	}
-	// For node tasks, the renewal should succeed through the node renew path.
-	// Here we just verify it doesn't error — the exact delegation path is
-	// covered by the implementation (T15).
-	_ = resp
+	if !resp.Renewed {
+		t.Fatalf("renewLease() renewed=false err=%q — a node lease that the engine renewed "+
+			"must be reported as renewed, or the runner stops renewing and the sweeper "+
+			"hands its work to a second runner", resp.Error)
+	}
+	if resp.Deadline.IsZero() {
+		t.Error("renewLease() returned no deadline for a renewed node lease")
+	}
+	if fake.groupRenewedLease != nil {
+		t.Error("a node task went down the group renewal path")
+	}
+	if fake.nodeRenewedLease == nil {
+		t.Fatal("renewLease() never called the engine's node renewal")
+	}
+	if fake.nodeRenewedLease.LeaseToken != lease.LeaseToken {
+		t.Errorf("engine renewed token %q, want %q — the fence must be the caller's own lease",
+			fake.nodeRenewedLease.LeaseToken, lease.LeaseToken)
+	}
+	if fake.nodeRenewExtend != 30*time.Second {
+		t.Errorf("engine renewed with extend %v, want 30s (the request's Extend in ms)", fake.nodeRenewExtend)
+	}
+}
+
+// TestNodeRenewLeaseReportsEngineRefusal verifies a refused renewal (stale
+// token, node no longer running) surfaces as Renewed=false rather than as an
+// error, so the runner can cancel its handler instead of retrying forever.
+func TestNodeRenewLeaseReportsEngineRefusal(t *testing.T) {
+	ctx := context.Background()
+	dir := NewMemoryRunnerDirectory()
+	session, err := dir.Register(ctx, RegisterRunnerRequest{
+		RunnerID:     "runner-node-refuse",
+		Capacity:     2,
+		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
+		Policy:       RunnerPolicy{AllowedNodeTypes: []string{"*"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assignment := stableTestAssignment("node-renew-refuse")
+	mustEnqueueAssignment(t, ctx, dir, assignment)
+	claim := mustClaimAssignment(t, ctx, dir, session)
+	lease := &engine.TaskLease{
+		LeaseID:    "lease-node-refuse",
+		LeaseToken: "token-node-refuse",
+		Task:       assignment.Task,
+		Attempt:    1,
+		NodeType:   "xflow.function",
+	}
+	if err := dir.FinalizeClaim(ctx, claim.ClaimID, lease); err != nil {
+		t.Fatalf("FinalizeClaim() error = %v", err)
+	}
+
+	fake := &groupFakeEngine{nodeRenewResult: false}
+	core := &Core{engine: fake, runners: dir, pollWait: time.Second}
+
+	resp, err := core.renewLease(ctx, protocol.RenewLeaseRequest{
+		RunnerID:   session.RunnerID,
+		SessionID:  session.SessionID,
+		LeaseID:    string(lease.LeaseID),
+		LeaseToken: string(lease.LeaseToken),
+	}, TransportInfo{})
+	if err != nil {
+		t.Fatalf("renewLease() error = %v, want a Renewed=false response", err)
+	}
+	if resp.Renewed {
+		t.Fatal("renewLease() reported renewed for a lease the engine refused")
+	}
+	if !resp.Deadline.IsZero() {
+		t.Error("renewLease() returned a deadline for a refused renewal")
+	}
 }
 
 // TestRenewLeaseRejectsWithoutValidSession verifies auth enforcement on renew.

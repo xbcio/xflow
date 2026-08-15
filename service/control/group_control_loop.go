@@ -20,6 +20,14 @@ type groupLeaseEngine interface {
 	RenewGroupLease(ctx context.Context, lease *engine.TaskLease, extend time.Duration) (bool, error)
 }
 
+// nodeLeaseEngine is the optional interface for engines that can extend a live
+// node lease. It is separate from groupLeaseEngine because the two renew
+// different state machines: a group renews its unit lease, a node renews its
+// own. The concrete *engine.Engine implements both.
+type nodeLeaseEngine interface {
+	RenewTaskLease(ctx context.Context, lease *engine.TaskLease, extend time.Duration) (bool, error)
+}
+
 // isGroupTask returns true when the task type is a group execution type.
 func isGroupTask(t *engine.Task) bool {
 	return t != nil && t.Type == engine.TaskTypeGroupExec
@@ -197,7 +205,7 @@ func (c *Core) commitGroupResult(ctx context.Context, lease *engine.TaskLease, r
 
 // renewLease handles the /v1/runners/lease/renew endpoint. It resolves the
 // finalized lease from the directory, validates session, then delegates to
-// either RenewGroupLease or (future) RenewNodeLease based on task type.
+// either RenewGroupLease or RenewTaskLease based on task type.
 func (c *Core) renewLease(ctx context.Context, req protocol.RenewLeaseRequest, info TransportInfo) (protocol.RenewLeaseResponse, error) {
 	if req.RunnerID == "" || req.SessionID == "" {
 		return protocol.RenewLeaseResponse{}, ErrRunnerSessionRequired
@@ -239,6 +247,22 @@ func (c *Core) renewLease(ctx context.Context, req protocol.RenewLeaseRequest, i
 		return resp, nil
 	}
 
-	// Node lease renewal is a future capability (T15). For now, report not renewed.
-	return protocol.RenewLeaseResponse{Renewed: false, Error: "node lease renewal not yet supported"}, nil
+	// Node leases need renewal for the same reason group leases do: the engine
+	// stamps every lease with its default TTL, and nothing clamps a node's own
+	// timeout (xflow.http's options.timeout, xflow.script's params.timeout)
+	// against it. Without this branch a handler configured to run longer than the
+	// TTL gets swept and redelivered while its runner is still executing it.
+	ne, hasNode := c.engine.(nodeLeaseEngine)
+	if !hasNode {
+		return protocol.RenewLeaseResponse{Renewed: false, Error: "engine does not support node lease renewal"}, nil
+	}
+	renewed, err := ne.RenewTaskLease(ctx, resolved, extend)
+	if err != nil {
+		return protocol.RenewLeaseResponse{}, normalizeRunnerError(err, c.logger, "renew_lease")
+	}
+	resp := protocol.RenewLeaseResponse{Renewed: renewed}
+	if renewed {
+		resp.Deadline = time.Now().UTC().Add(extend)
+	}
+	return resp, nil
 }
