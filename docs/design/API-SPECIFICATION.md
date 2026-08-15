@@ -28,6 +28,26 @@ xflow 的 HTTP 端点服务于两类性质不同的调用方，用同一套规�
 **server↔server 归入用户面**，不设第三族。未来的对端 xflow 通过 Relay Gateway
 或 SDK 调用，其身份是「另一个调用方」而非「runner 进程」，走对外契约正好。
 
+### 0.1 「面」由响应契约决定，不由挂载模块决定
+
+一条端点属于哪一族，判据是**它的响应形状对谁负责**，不是它注册在哪个 module 下，
+也不是它用哪套认证。
+
+现存唯一需要这条判据的端点是 `POST /v1/executions`（entry-seed）：它注册在
+apiserver 的用户面模块里、走 principal/authz 认证，但它的响应类型是
+`protocol.SeedExecutionResponse`、请求带 `ProtocolVersion` 字段、消费者是
+`service/protocol/entry_seed_runtime.go` 里的 runner 客户端。
+
+**判定：entry-seed 属于 runner 协议面，不包信封。** 三条理由：
+
+1. 它的响应类型定义在 `service/protocol` 而非 apiserver，与其余 runner RPC 同源
+2. 它自带 `ProtocolVersion`，用的是 runner 面的版本机制（§0 表格）而非 URL 版本
+3. 它的 409 判别是 Kafka offset 安全的承重契约（§8.2）；信封化会同时改变两种
+   409 body 的形状，而这个判别写错的后果是**滚动升级期间静默丢消息**
+
+认证与「面」正交：entry-seed 用 principal/authz 是因为它需要 namespace 防伪造
+（§6.3），这不影响它的响应契约归属。
+
 ---
 
 ## 1. 路径语法（用户面）
@@ -167,6 +187,17 @@ GET /v1/workflows?page=1&page_size=20
 
 **但失败时仍返回 JSON 信封。** 这是唯一自洽的分法——否则错误信息无处安放。
 
+这一条落地时**不得改变现有客户端的判据**。`service/runner/supply_client.go` 与
+`store/objectstore/httpstore.go` 目前只看状态码（200 / 404 / 其他），**刻意不解析
+错误 body**——注释写明了理由：响应体可能携带不属于本层的服务端细节。给失败分支加
+信封不影响它们，但反过来说，这两个客户端也不会因为信封落地而变得更能诊断。若要让
+它们读 `code`，那是独立的改动，须单独评估「读服务端错误文本」与 §3.5 的关系。
+
+按 §0.1 的判据，这两条端点的消费者同样是 runner 客户端。它们之所以留在用户面而非
+划归 runner 协议面，是因为**未来 xflow-admin 也要读它们**（查看某个 supply 的当前
+内容、下载某个产物），而 entry-seed 永远只有 runner 会调。裸流 + 失败信封这个组合
+同时满足两类调用方：runner 看状态码，页面读 `message`。
+
 ### 3.5 安全约束（org policy §7 + 本分支特化）
 
 `message` 与 `data` **绝不**包含：节点输出内容、凭证、token、`ulp-token`、
@@ -298,10 +329,21 @@ entry-seed 端点（`handleSeedExecution`）目前做对了这一点，本规范
 | 用户面 / 管理面 | apiserver 的 principal/authz 体系，Bearer token，Op + scope |
 | runner 协议面 | `Core.authn()` 的 runner directory 认证，`AuthToken` 字段 + SessionID |
 
-**跨界端点必须显式记录选了哪套及理由。** 现存唯一的跨界端点是
-`POST /v1/executions`（entry-seed）：它由 runner 调用，却挂在 principal/authz 下
-（`OpExecutionSeed`）。理由是它需要 namespace 从认证主体注入这道防伪造机制，而
-runner directory 认证不提供。这个选择本规范予以保留（§7 说明）。
+**跨界端点必须显式记录选了哪套及理由。** 现存三条跨界端点——runner 用同一个
+`--token` 走 principal/authz 打它们：
+
+| 端点 | 调用方 | 选 principal/authz 的理由 |
+| --- | --- | --- |
+| `POST /v1/executions`（entry-seed） | runner 的 Kafka trigger | 需要 namespace 从认证主体注入这道防伪造机制，runner directory 认证不提供 |
+| `GET /v1/supplies/{name}` | runner 的 supply fetcher | 内容按 namespace 隔离，且加密分支依赖 principal 解析出的租户 |
+| `GET`/`HEAD` `/v1/artifacts/{digest}` | runner 的 objectstore HTTP origin | 取件前须校验 `HasReference(callerNamespace, digest)`，同样依赖 principal |
+
+三者共同的理由是一个：**它们都需要「调用方属于哪个 namespace」这个事实**，而
+runner directory 认证只回答「这是不是一台已注册的 runner」。这不是历史包袱，是正
+确的划分——因此本规范予以保留。
+
+推论：runner 进程同时持有两种身份（runner session + principal token），这是设计
+使然，不是配置错误。任何简化认证的提案必须先解释这三条端点的 namespace 从哪来。
 
 ---
 
@@ -399,9 +441,9 @@ entry-seed 的 409 响应有**两种不同 body**，客户端据此决定是否�
 
 判错方向会导致 **generation 升级期间静默丢消息**。
 
-这个判别目前依赖「`state` 字段存不存在」这一隐式契约。若该端点将来信封化，判别
-必须改为**看 `code` 值**（`"stale_generation"` vs 冲突码）——这比现状更可靠。在
-迁移发生前，本约定不得改动。
+这个判别目前依赖「`state` 字段存不存在」这一隐式契约。**本规范明确该端点不信封化**
+（理由见 §0.1），因此这个判别保持原样。任何要给它加信封的提案，必须同时把判别改为
+看 `code` 值，并在真实的 generation 升级场景下验证——不能只跑单测。
 
 ### 8.3 纪律要求
 
