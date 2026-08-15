@@ -23,6 +23,7 @@ import (
 
 	"google.golang.org/grpc"
 
+	"github.com/xbcio/xflow/backend/providers/distributed"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/observability/metrics"
@@ -38,6 +39,14 @@ type ServerConfig struct {
 	// an in-memory backend: single-process use, no external dependency, no
 	// leader election (there is only ever one replica).
 	RedisAddr string
+	// RedisConfig connects to a password-protected, sentinel or cluster Redis.
+	// When non-nil it takes precedence over RedisAddr.
+	//
+	// RedisAddr alone carries no credentials, so an embedded host whose Redis
+	// requires AUTH — which is every managed Redis — has no way to reach it
+	// through RedisAddr. Set Mode to distributed.RedisModeSingle for the
+	// ordinary "one address plus a password" case.
+	RedisConfig *distributed.RedisConfig
 	// Store is an optional durable metadata store (see ClusterConfig.Store).
 	Store store.Store
 }
@@ -190,6 +199,7 @@ func NewServer(cfg ServerConfig, opts ...ServerOption) (*Server, error) {
 
 	apiCfg := apiserver.Config{
 		RedisAddr:     cfg.RedisAddr,
+		RedisConfig:   cfg.RedisConfig,
 		Store:         cfg.Store,
 		Supplies:      supplies,
 		Artifacts:     sc.artifacts,
