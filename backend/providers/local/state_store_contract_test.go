@@ -14,3 +14,9 @@ func TestMemoryStateStoreContract(t *testing.T) {
 	state := New().State()
 	statestoretest.RunStateStoreContract(t, state)
 }
+
+func TestMemoryNodeLeaseRenewContract(t *testing.T) {
+	statestoretest.RunNodeLeaseRenewContract(t, func(t *testing.T) statestoretest.NodeLeaseRenewStore {
+		return New().State().(statestoretest.NodeLeaseRenewStore)
+	})
+}

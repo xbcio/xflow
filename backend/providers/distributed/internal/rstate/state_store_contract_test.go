@@ -42,3 +42,30 @@ func TestRedisStateStoreContract(t *testing.T) {
 	}
 	statestoretest.RunStateStoreContract(t, New(freshRealRedis(t, addr), nil, time.Minute))
 }
+
+// Node lease renewal is what keeps a handler that legitimately outruns the
+// engine's default lease TTL from being reclaimed mid-flight. On this backend
+// the expiry scan reads a separate ZSET, so renewal has to move the index and
+// not just the metadata hash — a distinction the memory backend cannot expose.
+func TestMiniredisNodeLeaseRenewContract(t *testing.T) {
+	statestoretest.RunNodeLeaseRenewContract(t, func(t *testing.T) statestoretest.NodeLeaseRenewStore {
+		srv, err := miniredis.Run()
+		if err != nil {
+			t.Fatalf("miniredis.Run() error = %v", err)
+		}
+		t.Cleanup(srv.Close)
+		rdb := redis.NewClient(&redis.Options{Addr: srv.Addr()})
+		t.Cleanup(func() { _ = rdb.Close() })
+		return New(rdb, nil, time.Minute)
+	})
+}
+
+func TestRedisNodeLeaseRenewContract(t *testing.T) {
+	addr := os.Getenv("XFLOW_TEST_REDIS_ADDR")
+	if addr == "" {
+		t.Skip("XFLOW_TEST_REDIS_ADDR unset; set 127.0.0.1:6380 for the podman env")
+	}
+	statestoretest.RunNodeLeaseRenewContract(t, func(t *testing.T) statestoretest.NodeLeaseRenewStore {
+		return New(freshRealRedis(t, addr), nil, time.Minute)
+	})
+}

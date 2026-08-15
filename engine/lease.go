@@ -450,3 +450,43 @@ func (e *Engine) reclaimGroupLease(ctx context.Context, lease ExpiredLease, task
 	}
 	return true, nil
 }
+
+// NodeLeaseRenewer is the node-level analogue of
+// GroupStateStore.RenewGroupLease: it extends a live lease's deadline under a
+// token fence, without touching the token, attempt counter, or status.
+//
+// Implementations MUST move whatever the expired-lease scan reads, not just the
+// stored metadata. On backends that keep a separate expiry index, a renewal
+// that updates only the metadata leaves the sweeper reclaiming a node whose
+// runner is healthily working.
+type NodeLeaseRenewer interface {
+	RenewTaskLease(ctx context.Context, id types.ExecutionID, name string, token LeaseToken, deadline time.Time) (renewed bool, err error)
+}
+
+// RenewTaskLease extends the deadline of a live node lease so a handler that
+// legitimately runs longer than the engine's default lease TTL is not reclaimed
+// mid-flight.
+//
+// It exists because BuildTaskLease stamps every lease with defaultLeaseTTL and
+// nothing clamps a node's own timeout against it: an action whose timeout
+// exceeds the TTL would otherwise be swept and redelivered to a second runner
+// while the first is still executing it.
+func (e *Engine) RenewTaskLease(ctx context.Context, lease *TaskLease, extend time.Duration) (bool, error) {
+	if lease == nil || lease.LeaseToken == "" {
+		return false, ErrInvalidLeaseToken
+	}
+	if extend <= 0 {
+		return false, fmt.Errorf("renew node lease %q/%q: extend must be positive", lease.Task.ExecutionID, lease.Task.NodeName)
+	}
+	renewer, ok := e.state.(NodeLeaseRenewer)
+	if !ok {
+		return false, fmt.Errorf("renew node lease %q/%q: state store does not support node lease renewal",
+			lease.Task.ExecutionID, lease.Task.NodeName)
+	}
+	deadline := time.Now().UTC().Add(extend)
+	renewed, err := renewer.RenewTaskLease(ctx, lease.Task.ExecutionID, lease.Task.NodeName, lease.LeaseToken, deadline)
+	if err != nil {
+		return false, fmt.Errorf("renew node lease %q/%q: %w", lease.Task.ExecutionID, lease.Task.NodeName, err)
+	}
+	return renewed, nil
+}

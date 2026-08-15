@@ -571,3 +571,67 @@ func (s *Store) SuspendTaskLease(ctx context.Context, lease *engine.TaskLease, o
 // ---------------------------------------------------------------------------
 // Scheduling counters
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Node lease renewal
+// ---------------------------------------------------------------------------
+
+// renewTaskLeaseLua extends a live node lease's deadline under a token fence.
+//
+// It rewrites both the metadata deadline and the expiry ZSET score. The two are
+// partly redundant for the sweeper — ListExpiredLeases treats the ZSET as a
+// candidate filter and re-judges each hit against lease_deadline_ms, repairing
+// the score when they disagree — so either write alone keeps the sweeper off a
+// renewed lease. They are kept together anyway because each is load-bearing
+// somewhere the other is not:
+//   - lease_deadline_ms is what acquireTaskLeaseLua fences a competing acquire
+//     against. Skipping it lets a rival take the node straight from metadata,
+//     with no sweeper involved.
+//   - the ZSET score is what keeps the scan from re-reading and repairing this
+//     member on every sweep for the rest of the lease.
+//
+// lease_ttl_ms is recomputed from the same deadline so the snapshot's LeaseTTL
+// and reconcileLeaseIndexLua's pre-deadline fallback do not disagree with it.
+//
+// Status must still be running: a lease that has been revoked, committed, or
+// suspended has had its work requeued or finalized, and reviving its deadline
+// would fence out whoever owns the node now.
+//
+// KEYS: 1=node status 2=node meta 3=lease expiry ZSET
+// ARGV: 1=token 2=deadline_ms 3=exec_ttl_s 4=zset member 5=issued_at_ms
+var renewTaskLeaseLua = redis.NewScript(`
+local status = redis.call('GET', KEYS[1])
+if status ~= 'running' then return {0} end
+local token = redis.call('HGET', KEYS[2], 'lease_token') or ''
+if token == '' or token ~= ARGV[1] then return {0} end
+local deadlineMs = tonumber(ARGV[2])
+local issuedAtMs = tonumber(redis.call('HGET', KEYS[2], 'lease_issued_at_ms') or '0')
+if issuedAtMs <= 0 then issuedAtMs = tonumber(ARGV[5]) end
+local ttlMs = deadlineMs - issuedAtMs
+if ttlMs < 0 then ttlMs = 0 end
+redis.call('HSET', KEYS[2], 'lease_deadline_ms', deadlineMs, 'lease_ttl_ms', ttlMs)
+redis.call('EXPIRE', KEYS[2], tonumber(ARGV[3]))
+redis.call('ZADD', KEYS[3], deadlineMs, ARGV[4])
+redis.call('EXPIRE', KEYS[3], tonumber(ARGV[3]))
+return {1}
+`)
+
+// RenewTaskLease implements engine.NodeLeaseRenewer.
+func (s *Store) RenewTaskLease(ctx context.Context, id types.ExecutionID, name string, token engine.LeaseToken, deadline time.Time) (bool, error) {
+	if token == "" {
+		return false, nil
+	}
+	t := namespace.FromContext(ctx)
+	ttl := s.getExecTTL(ctx, id)
+	res, err := renewTaskLeaseLua.Run(ctx, s.rdb, []string{
+		nodeStatusKey(t, id, name),
+		nodeMetaKey(t, id, name),
+		leaseExpiryZSetKey(t, id),
+	}, string(token), deadline.UnixMilli(), int(ttl.Seconds()), leaseExpiryMember(id, name), time.Now().UTC().UnixMilli()).Slice()
+	if err != nil {
+		return false, fmt.Errorf("renew task lease %q/%q: %w", id, name, err)
+	}
+	return len(res) == 1 && redisResultInt(res[0]) == 1, nil
+}
+
+var _ engine.NodeLeaseRenewer = (*Store)(nil)

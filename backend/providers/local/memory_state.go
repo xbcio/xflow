@@ -1028,3 +1028,36 @@ func (s *memoryState) GetSubExecutionResults(_ context.Context, parentExecID typ
 	}
 	return results, nil
 }
+
+// RenewTaskLease implements engine.NodeLeaseRenewer.
+//
+// This backend derives lease expiry from LeaseIssuedAt+LeaseTTL rather than
+// from a separate index, so extending the deadline means widening the TTL and
+// leaving IssuedAt alone — moving IssuedAt instead would keep the same
+// deadline. The token fence and the running check mirror the Redis store: a
+// revoked, committed, or suspended lease has had its work requeued or
+// finalized, and reviving its deadline would fence out the current owner.
+func (s *memoryState) RenewTaskLease(_ context.Context, id types.ExecutionID, name string, token engine.LeaseToken, deadline time.Time) (bool, error) {
+	if token == "" {
+		return false, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ns := s.nodes[string(id)+"/"+name]
+	if ns == nil || ns.Status != types.NodeStatusRunning || ns.LeaseToken != token {
+		return false, nil
+	}
+	issuedAt := ns.LeaseIssuedAt
+	if issuedAt.IsZero() {
+		issuedAt = time.Now().UTC()
+		ns.LeaseIssuedAt = issuedAt
+	}
+	ttl := deadline.Sub(issuedAt)
+	if ttl < 0 {
+		ttl = 0
+	}
+	ns.LeaseTTL = ttl
+	return true, nil
+}
+
+var _ engine.NodeLeaseRenewer = (*memoryState)(nil)
