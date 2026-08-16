@@ -138,7 +138,7 @@ runner 可横向扩缩容：跑多个 runner 实例即可线性扩展执行吞�
 - 没有 remote SDK；提交、查询、信号 API 先由 `cmd/server` 或 `xflow.NewServer` 暴露的 server HTTP handler 提供。
 - **已实现** runner bearer token、mTLS、runner policy allowlist 与 dry-run rollout；workflow-level authorization、租户隔离和生产级审计仍需单独设计。
 - **已实现** runner matching 的 `node_type` / `node_version` 精确匹配、runner policy 过滤与容量 gating；tags / env / region / 权重调度仍在规划。
-- **已实现** Redis-backed durable assignment / claim / leased handoff、claim expiry 回收、重连 lease replay，以及 lease TTL + sweeper 回收与 re-enqueue。handler 与协议响应仍是 at-least-once，必须使用业务幂等键。
+- **已实现** Redis-backed durable assignment / claim / leased handoff、claim expiry 回收、重连 lease replay（按 runner 上报的 `active_lease_ids` 排除在执行中的 lease），以及 lease TTL + sweeper 回收与 re-enqueue。handler 与协议响应仍是 at-least-once，必须使用业务幂等键。
 - 当前 leader election 只协调 leader-only maintenance；它不是完整 control-plane HA 或 failover SLO 的替代品。生产就绪仍依赖 Redis 高可用部署和 kill/restart/failover 验证。
 - Loop/Split 仍是实验性扩展路径，未纳入静态 DAG completion 或 server/runner production-ready 保证。
 - **已实现** Redis 作为权威状态、store/sqlstore 作为 best-effort audit trail 的 dual-write contract；审计 reconciliation CLI 仍在规划。
@@ -236,6 +236,13 @@ running lease、但 server 在 `FinalizeClaim` 前崩溃，重试会恢复该精
 fenced lease 并完成 finalization，而不是签发第二个 owner。若 finalization
 已完成但响应尚未到 runner，runner reconnect 或同 runner ID 的重新注册会
 replay 同一完整 lease；因此 runner 必须把 handler 执行视为 at-least-once。
+
+replay 的作用域由 runner 自己界定：每次 poll 的 `active_lease_ids` 列出该
+runner 正在执行的 lease，目录只 replay 不在其中的。服务端无法区分「poll
+响应丢失」与「worker 正在跑」——两者在 Redis 里都只是 leased 给该
+(runner, session)。没有这条上报时，`Concurrency > 1` 的 runner 每个空闲
+worker 都会被递回忙碌同伴的 lease，节点按并发度重复执行；有了它，稳态下
+不再发生这种重复。老 runner 不带该字段，读作「无在执行」，行为与之前相同。
 
 节点 terminal commit、下游计数和后续调度 intent 由 Engine 的 atomic
 `CommitNode` 与 durable outbox 处理。TaskQueue 暂时不可用时，outbox 保留

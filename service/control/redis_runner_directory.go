@@ -230,10 +230,12 @@ func (d *RedisRunnerDirectory) EnqueueAssignment(ctx context.Context, assignment
 }
 
 // ClaimForRunner first replays one unfinished lease owned by the current
-// session, then reserves the first compatible queued assignment with available
-// runner headroom. Replaying the same lease is intentional at-least-once
-// delivery: a control-plane crash after finalization or response loss cannot
-// make the assignment unreachable.
+// session and not already executing on the runner, then reserves the first
+// compatible queued assignment with available runner headroom. Replaying is
+// intentional at-least-once delivery: a control-plane crash after finalization
+// or a lost poll response cannot make the assignment unreachable. Skipping the
+// leases the runner reports in flight is what keeps that from also handing a
+// live task to the same runner's other workers.
 func (d *RedisRunnerDirectory) ClaimForRunner(ctx context.Context, req ClaimRequest) (Claim, bool, error) {
 	if err := d.ReclaimExpiredClaims(ctx); err != nil {
 		return Claim{}, false, err
@@ -250,7 +252,7 @@ func (d *RedisRunnerDirectory) ClaimForRunner(ctx context.Context, req ClaimRequ
 		return Claim{}, false, ErrRunnerSessionStale
 	}
 
-	if replay, ok, err := d.replayLease(ctx, req.RunnerID, req.SessionID); err != nil {
+	if replay, ok, err := d.replayLease(ctx, req.RunnerID, req.SessionID, req.ActiveLeaseIDs); err != nil {
 		return Claim{}, false, err
 	} else if ok {
 		return replay, true, nil
@@ -338,7 +340,14 @@ func (d *RedisRunnerDirectory) ClaimForRunner(ctx context.Context, req ClaimRequ
 	}
 }
 
-func (d *RedisRunnerDirectory) replayLease(ctx context.Context, runnerID, sessionID string) (Claim, bool, error) {
+func (d *RedisRunnerDirectory) replayLease(ctx context.Context, runnerID, sessionID string, activeLeaseIDs []string) (Claim, bool, error) {
+	var active map[string]struct{}
+	if len(activeLeaseIDs) > 0 {
+		active = make(map[string]struct{}, len(activeLeaseIDs))
+		for _, id := range activeLeaseIDs {
+			active[id] = struct{}{}
+		}
+	}
 	states, err := d.rdb.HGetAll(ctx, d.keys.assignmentState).Result()
 	if err != nil {
 		return Claim{}, false, fmt.Errorf("read leased assignment states: %w", err)
@@ -394,6 +403,11 @@ func (d *RedisRunnerDirectory) replayLease(ctx context.Context, runnerID, sessio
 		lease, err := unmarshalRedisLeaseMeta(rawLease, assignment.Task)
 		if err != nil {
 			return Claim{}, false, fmt.Errorf("decode persisted lease %q: %w", assignmentID, err)
+		}
+		if _, executing := active[string(lease.LeaseID)]; executing {
+			// The runner is running this one. Handing it back would start a
+			// second execution of a node the first worker has not finished.
+			continue
 		}
 		d.observeLeaseReplay(ctx)
 		return Claim{Assignment: assignment, Lease: lease}, true, nil

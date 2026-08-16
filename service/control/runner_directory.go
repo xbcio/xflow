@@ -110,6 +110,15 @@ type ClaimRequest struct {
 	Labels       map[string]string
 	Capabilities []protocol.Capability
 	Now          time.Time
+	// ActiveLeaseIDs are the leases this runner is executing right now. Lease
+	// replay matches on (runner, session, state==leased), which is equally true
+	// of a lease the runner is mid-handler on — so without this a runner with
+	// Concurrency > 1 had every idle worker handed the same live lease, and each
+	// node executed once per unit of concurrency. Only the runner knows what it
+	// is actually running, so it says, and the directory replays everything
+	// else. Empty means "nothing in flight", which is what a freshly restarted
+	// process reports and is exactly when replay must fire.
+	ActiveLeaseIDs []string
 }
 
 // Claim is either a temporary reservation for an assignment or a durable

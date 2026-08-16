@@ -91,6 +91,10 @@ message PollTaskRequest {
   repeated Capability capabilities = 3;
   map<string, string> labels = 4;
   string session_id = 5;
+  // Leases this runner's workers are executing right now, so the server
+  // replays only leases that never reached it rather than also handing a live
+  // task to the same runner's idle workers.
+  repeated string active_lease_ids = 6;
 }
 
 message PollTaskResponse {

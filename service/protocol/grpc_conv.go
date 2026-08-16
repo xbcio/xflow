@@ -194,21 +194,23 @@ func HeartbeatResponseFromProto(resp *runnerpb.HeartbeatResponse) (HeartbeatResp
 
 func PollTaskRequestToProto(req PollTaskRequest) *runnerpb.PollTaskRequest {
 	return &runnerpb.PollTaskRequest{
-		RunnerId:     req.RunnerID,
-		SessionId:    req.SessionID,
-		Capacity:     int32(req.Capacity),
-		Capabilities: CapabilitiesToProto(req.Capabilities),
-		Labels:       cloneLabels(req.Labels),
+		RunnerId:       req.RunnerID,
+		SessionId:      req.SessionID,
+		Capacity:       int32(req.Capacity),
+		Capabilities:   CapabilitiesToProto(req.Capabilities),
+		Labels:         cloneLabels(req.Labels),
+		ActiveLeaseIds: append([]string(nil), req.ActiveLeaseIDs...),
 	}
 }
 
 func PollTaskRequestFromProto(req *runnerpb.PollTaskRequest) PollTaskRequest {
 	return PollTaskRequest{
-		RunnerID:     req.GetRunnerId(),
-		SessionID:    req.GetSessionId(),
-		Capacity:     int(req.GetCapacity()),
-		Capabilities: CapabilitiesFromProto(req.GetCapabilities()),
-		Labels:       cloneLabels(req.GetLabels()),
+		RunnerID:       req.GetRunnerId(),
+		SessionID:      req.GetSessionId(),
+		Capacity:       int(req.GetCapacity()),
+		Capabilities:   CapabilitiesFromProto(req.GetCapabilities()),
+		Labels:         cloneLabels(req.GetLabels()),
+		ActiveLeaseIDs: append([]string(nil), req.GetActiveLeaseIds()...),
 	}
 }
 

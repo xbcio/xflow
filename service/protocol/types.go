@@ -124,6 +124,21 @@ type PollTaskRequest struct {
 	Labels       map[string]string `json:"labels,omitempty"`
 	Capabilities []Capability      `json:"capabilities"`
 	AuthToken    string            `json:"auth_token,omitempty"`
+	// ActiveLeaseIDs lists the leases this runner's workers are executing at
+	// the moment of the poll. The control plane replays a finalized lease that
+	// never reached its runner (lost response, restarted process), and it
+	// cannot tell that case apart from a lease the runner is mid-handler on —
+	// both are "leased to this runner, this session". Only the runner knows,
+	// so it says, and the server replays everything it does not name.
+	//
+	// Without this a runner with Concurrency > 1 had each of its idle workers
+	// handed the lease its busy sibling was running, so every node executed
+	// once per unit of concurrency.
+	//
+	// Lease IDs are opaque server-issued identifiers, not secrets, and carry no
+	// task input. An old runner omits the field, which reads as "nothing in
+	// flight" and restores the previous behaviour for it alone.
+	ActiveLeaseIDs []string `json:"active_lease_ids,omitempty"`
 }
 
 type PollTaskResponse struct {

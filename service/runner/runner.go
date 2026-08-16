@@ -211,6 +211,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 
 	var inFlight atomic.Int32
+	active := newActiveLeases()
 	leaseCh := make(chan *engine.TaskLease, r.config.Concurrency)
 	var errOnce sync.Once
 	errCh := make(chan error, 1)
@@ -241,11 +242,11 @@ func (r *Runner) Run(ctx context.Context) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			r.workerLoop(ctx, sessionID, leaseCh, &inFlight, signalError)
+			r.workerLoop(ctx, sessionID, leaseCh, &inFlight, active, signalError)
 		}()
 	}
 
-	pollErr := r.pollLoop(ctx, sessionID, leaseCh, &inFlight)
+	pollErr := r.pollLoop(ctx, sessionID, leaseCh, &inFlight, active)
 	hbCancel()
 
 	// Graceful shutdown: stop polling, then wait (bounded) for workers to
@@ -292,7 +293,7 @@ func (r *Runner) Run(ctx context.Context) error {
 // effective concurrency. The local in-flight gate below is a complementary
 // safety valve that stops the runner from claiming more leases than its worker
 // pool can execute in parallel; it does not change the advertised capacity.
-func (r *Runner) pollLoop(ctx context.Context, sessionID string, leaseCh chan<- *engine.TaskLease, inFlight *atomic.Int32) error {
+func (r *Runner) pollLoop(ctx context.Context, sessionID string, leaseCh chan<- *engine.TaskLease, inFlight *atomic.Int32, active *activeLeases) error {
 	for {
 		select {
 		case <-ctx.Done():
@@ -313,6 +314,11 @@ func (r *Runner) pollLoop(ctx context.Context, sessionID string, leaseCh chan<- 
 			Capacity:     r.config.Concurrency,
 			Labels:       r.config.Labels,
 			Capabilities: r.config.Capabilities,
+			// Reported every poll rather than tracked server-side: the server
+			// has no way to distinguish a lease this runner is executing from
+			// one it never received, and replaying the former runs the node a
+			// second time while the first worker is still on it.
+			ActiveLeaseIDs: active.snapshot(),
 		})
 		if err != nil {
 			return runContextError(ctx, err)
@@ -328,9 +334,14 @@ func (r *Runner) pollLoop(ctx context.Context, sessionID string, leaseCh chan<- 
 			continue
 		}
 		inFlight.Add(1)
+		// Marked here, not in the worker: the lease is this runner's the moment
+		// the poll returns it, and the next poll can otherwise be issued while
+		// it is still in leaseCh.
+		active.add(string(resp.Lease.LeaseID))
 		select {
 		case leaseCh <- resp.Lease:
 		case <-ctx.Done():
+			active.remove(string(resp.Lease.LeaseID))
 			inFlight.Add(-1)
 			return nil
 		}
@@ -338,7 +349,7 @@ func (r *Runner) pollLoop(ctx context.Context, sessionID string, leaseCh chan<- 
 }
 
 // workerLoop drains leaseCh and executes one lease at a time per worker.
-func (r *Runner) workerLoop(ctx context.Context, sessionID string, leaseCh <-chan *engine.TaskLease, inFlight *atomic.Int32, signalError func(error)) {
+func (r *Runner) workerLoop(ctx context.Context, sessionID string, leaseCh <-chan *engine.TaskLease, inFlight *atomic.Int32, active *activeLeases, signalError func(error)) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -347,7 +358,7 @@ func (r *Runner) workerLoop(ctx context.Context, sessionID string, leaseCh <-cha
 			if lease == nil {
 				return
 			}
-			r.executeAndReport(ctx, sessionID, lease, inFlight, signalError)
+			r.executeAndReport(ctx, sessionID, lease, inFlight, active, signalError)
 		}
 	}
 }
@@ -372,8 +383,13 @@ func (r *Runner) workerLoop(ctx context.Context, sessionID string, leaseCh <-cha
 // loop cancels the execute context on refusal or on repeated transport
 // failure: once the server says this runner no longer owns the node, finishing
 // the work would produce a second, unfenced result.
-func (r *Runner) executeAndReport(ctx context.Context, sessionID string, lease *engine.TaskLease, inFlight *atomic.Int32, signalError func(error)) {
+func (r *Runner) executeAndReport(ctx context.Context, sessionID string, lease *engine.TaskLease, inFlight *atomic.Int32, active *activeLeases, signalError func(error)) {
 	defer inFlight.Add(-1)
+	// Held until the report attempt is over, not merely until the handler
+	// returns: a lease whose report never landed is genuinely unreported work
+	// the server should replay, and one whose report landed is already
+	// released server-side, so neither case needs it marked any longer.
+	defer active.remove(string(lease.LeaseID))
 
 	// Extract the remote parent from the lease carrier (injected by the
 	// control plane at dispatch). Creates an xflow.task.execute span as a

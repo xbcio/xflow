@@ -447,14 +447,18 @@ func (x *HeartbeatResponse) GetActivationsJson() []byte {
 }
 
 type PollTaskRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	RunnerId      string                 `protobuf:"bytes,1,opt,name=runner_id,json=runnerId,proto3" json:"runner_id,omitempty"`
-	Capacity      int32                  `protobuf:"varint,2,opt,name=capacity,proto3" json:"capacity,omitempty"`
-	Capabilities  []*Capability          `protobuf:"bytes,3,rep,name=capabilities,proto3" json:"capabilities,omitempty"`
-	Labels        map[string]string      `protobuf:"bytes,4,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	SessionId     string                 `protobuf:"bytes,5,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	RunnerId     string                 `protobuf:"bytes,1,opt,name=runner_id,json=runnerId,proto3" json:"runner_id,omitempty"`
+	Capacity     int32                  `protobuf:"varint,2,opt,name=capacity,proto3" json:"capacity,omitempty"`
+	Capabilities []*Capability          `protobuf:"bytes,3,rep,name=capabilities,proto3" json:"capabilities,omitempty"`
+	Labels       map[string]string      `protobuf:"bytes,4,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	SessionId    string                 `protobuf:"bytes,5,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	// Leases this runner's workers are executing right now, so the server
+	// replays only leases that never reached it rather than also handing a live
+	// task to the same runner's idle workers.
+	ActiveLeaseIds []string `protobuf:"bytes,6,rep,name=active_lease_ids,json=activeLeaseIds,proto3" json:"active_lease_ids,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *PollTaskRequest) Reset() {
@@ -520,6 +524,13 @@ func (x *PollTaskRequest) GetSessionId() string {
 		return x.SessionId
 	}
 	return ""
+}
+
+func (x *PollTaskRequest) GetActiveLeaseIds() []string {
+	if x != nil {
+		return x.ActiveLeaseIds
+	}
+	return nil
 }
 
 type PollTaskResponse struct {
@@ -1403,14 +1414,15 @@ const file_service_protocol_runnerpb_runner_proto_rawDesc = "" +
 	"\x10activations_json\x18\x04 \x01(\fR\x0factivationsJson\x1a>\n" +
 	"\x10SupplyHintsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xab\x02\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xd5\x02\n" +
 	"\x0fPollTaskRequest\x12\x1b\n" +
 	"\trunner_id\x18\x01 \x01(\tR\brunnerId\x12\x1a\n" +
 	"\bcapacity\x18\x02 \x01(\x05R\bcapacity\x12?\n" +
 	"\fcapabilities\x18\x03 \x03(\v2\x1b.xflow.runner.v1.CapabilityR\fcapabilities\x12D\n" +
 	"\x06labels\x18\x04 \x03(\v2,.xflow.runner.v1.PollTaskRequest.LabelsEntryR\x06labels\x12\x1d\n" +
 	"\n" +
-	"session_id\x18\x05 \x01(\tR\tsessionId\x1a9\n" +
+	"session_id\x18\x05 \x01(\tR\tsessionId\x12(\n" +
+	"\x10active_lease_ids\x18\x06 \x03(\tR\x0eactiveLeaseIds\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"P\n" +

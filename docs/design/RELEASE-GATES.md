@@ -97,7 +97,7 @@ xflow 采用分层发布门槛，不再用单个测试替代完整 release gate�
 
 G2 control-plane HA 的承诺范围与限制（映射 §4 反声明，在 G2 整体达成前不得对外宣称）：
 
-- **承诺 at-least-once，不承诺 exactly-once**：handler 与 Runner Protocol 保持 at-least-once；failover 或 lease replay 可能重复 invocation，业务副作用只产生一次依赖宿主幂等键兜底（映射 §4「failover 不重执行」反声明）。
+- **承诺 at-least-once，不承诺 exactly-once**：handler 与 Runner Protocol 保持 at-least-once；failover 或 lease replay 可能重复 invocation，业务副作用只产生一次依赖宿主幂等键兜底（映射 §4「failover 不重执行」反声明）。lease replay 的作用域已按 runner 每次 poll 上报的 `active_lease_ids` 收窄——目录不再 replay runner 声明正在执行的 lease，因此 `Concurrency > 1` 的 runner 在无 failover 的稳态下不再出现「每个空闲 worker 各跑一遍」的确定性重复；at-least-once 契约本身不变，宿主幂等键仍是必需。
 - **leader election 仅协调 leader-only maintenance**：`RedisLeaderElector` SETNX + Lua 续约/释放只用于 gate `lease_sweeper` 等维护任务，不提供完整 HA SLO；「leader election 等于 control-plane HA」是反声明（§4）。
 - **Redis HA 客户端代码就绪 ≠ control-plane HA 已验收**：`UniversalClient` 宽化与 sentinel/cluster 构造代码落地（Task 1.1–4.1）只保证"可配置 sentinel/cluster 模式"，真实多副本 soak + SLO 量化是 ENV-GATED；未填实 [ha-soak-report-template](../references/ha-soak-report-template.md) 前 G2 不得标完成。
 - **hash tag / namespace / leader election 单独存在 ≠ HA 或多租户隔离**：hash tag 只保证 Redis Cluster 下 key 共置同 slot（不触发 CROSSSLOT），不是 HA 承诺；namespace 是命名空间隔离，不是安全边界；leader election 不等于 control-plane HA。三者均映射 §4 反声明。

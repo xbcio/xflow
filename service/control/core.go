@@ -366,12 +366,13 @@ func (c *Core) pollTask(ctx context.Context, req protocol.PollTaskRequest, info 
 	}
 	for {
 		claim, ok, err := c.runners.ClaimForRunner(ctx, ClaimRequest{
-			RunnerID:     req.RunnerID,
-			SessionID:    req.SessionID,
-			Capacity:     req.Capacity,
-			Labels:       req.Labels,
-			Capabilities: req.Capabilities,
-			Now:          time.Now(),
+			RunnerID:       req.RunnerID,
+			SessionID:      req.SessionID,
+			Capacity:       req.Capacity,
+			Labels:         req.Labels,
+			Capabilities:   req.Capabilities,
+			ActiveLeaseIDs: req.ActiveLeaseIDs,
+			Now:            time.Now(),
 		})
 		if err != nil {
 			return protocol.PollTaskResponse{}, normalizeRunnerError(err, c.logger, "poll")
