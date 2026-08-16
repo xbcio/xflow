@@ -441,6 +441,35 @@ func (s *APIServer) RegisterWorkflow(ctx context.Context, ns namespace.Namespace
 	return s.ctrl.registerWorkflow(ctx, ns, def)
 }
 
+// ReplaceWorkflow is RegisterWorkflow, except that a DIFFERENT definition
+// already registered under the same (namespace, name, version) key is
+// deregistered first instead of rejected as a conflict. An identical definition
+// still registers idempotently and nothing is removed.
+//
+// It exists for the embedded host whose workflow definition is derived from its
+// own configuration — a topic name, a rebuilt wasm artifact — and which
+// therefore presents a changed definition under an unchanged key on some
+// restart. RegisterWorkflow answers that with a conflict the host cannot
+// resolve: it has no way to remove the old record in-process, so it fails on
+// that boot and every boot after it, while the previous definition stays
+// registered and running.
+//
+// Use it only where the caller genuinely owns the key. Two hosts publishing
+// DIFFERENT definitions under one key will replace each other in turn, tearing
+// down and re-deriving the entry activations on each pass.
+func (s *APIServer) ReplaceWorkflow(ctx context.Context, ns namespace.Namespace, def *types.WorkflowDef) (types.WorkflowID, []string, error) {
+	if s.ctrl == nil {
+		return "", nil, errors.New("apiserver: workflow control module not initialized")
+	}
+	if def == nil {
+		return "", nil, errors.New("apiserver: workflow definition must not be nil")
+	}
+	if ns == "" {
+		ns = namespace.Default
+	}
+	return s.ctrl.replaceWorkflow(ctx, ns, def)
+}
+
 // hasHTTPModule reports whether any registered module implements HTTPModule.
 func hasHTTPModule(modules []Module) bool {
 	for _, m := range modules {

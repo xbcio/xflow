@@ -421,74 +421,125 @@ func (m *workflowControlModule) handleDeregisterWorkflow(w http.ResponseWriter, 
 	if !requireMethod(w, r, http.MethodDelete) {
 		return
 	}
-	registry := m.registry()
-	if registry == nil {
-		if m.log != nil {
-			m.log.Error("deregister_workflow_no_registry")
-		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
-		return
-	}
 	id := strings.Trim(strings.TrimPrefix(r.URL.Path, "/v1/workflows/register/"), "/")
 	if id == "" || strings.Contains(id, "/") {
 		writeError(w, http.StatusNotFound, "workflow not found")
 		return
 	}
-	// Fetch the record BEFORE removal so the entry-activation manager can derive
-	// the same trigger entry units (from the persisted compiled graph) to clear,
-	// and so an already-removed workflow 404s. A not-found record is a 404; any
-	// other lookup error is a generic 500. When no activation manager is wired
-	// this lookup is skipped entirely.
-	var toDeactivate *backend.WorkflowRecord
-	if mgr := m.entryActivationManager(); mgr != nil {
-		rec, err := registry.GetWorkflow(r.Context(), types.WorkflowID(id))
-		if err != nil {
-			if errors.Is(err, backend.ErrWorkflowNotFound) {
-				writeError(w, http.StatusNotFound, "workflow not found")
-				return
-			}
-			if m.log != nil {
-				m.log.Error("deregister_workflow_lookup_failed", "err", err)
-			}
-			writeError(w, http.StatusInternalServerError, "internal server error")
-			return
-		}
-		toDeactivate = &rec
-	}
-	// Clear the desired entry activations BEFORE removing the registry record so
-	// the two steps are independently retryable and no orphaned Desired activation
-	// can survive a partial failure. If this clear fails we return 500 with the
-	// registry record still present, so a retry re-fetches the graph and re-clears;
-	// if we removed the registry record first and then failed here, the retry
-	// would 404 on GetWorkflow and never reach the clear, stranding a Desired
-	// activation the reconciler keeps honoring for entry seeds. The clear is
-	// desired-state only (Desired=false); the reconciler delivers the Deactivate
-	// and fences the owner. The namespace is resolved server-side, never the body.
-	if toDeactivate != nil {
-		mgr := m.entryActivationManager()
-		if err := mgr.RemoveWorkflow(r.Context(), namespace.FromContext(r.Context()), toDeactivate.ID, toDeactivate.Version, toDeactivate.Graph); err != nil {
-			if m.log != nil {
-				m.log.Error("deregister_workflow_clear_activations_failed", "err", err)
-			}
-			writeError(w, http.StatusInternalServerError, "internal server error")
-			return
-		}
-	}
-	// Remove the registry record. The manager clear above is idempotent (a repeat
-	// re-marks an already-!Desired record), so a failure here is safely retryable:
-	// the caller retries, re-clears harmlessly, and re-removes.
-	if err := registry.RemoveWorkflow(r.Context(), types.WorkflowID(id)); err != nil {
+	// The namespace is resolved server-side, never from the body or the path.
+	err := m.deregisterWorkflow(r.Context(), namespace.FromContext(r.Context()), types.WorkflowID(id))
+	if err != nil {
 		if errors.Is(err, backend.ErrWorkflowNotFound) {
 			writeError(w, http.StatusNotFound, "workflow not found")
 			return
-		}
-		if m.log != nil {
-			m.log.Error("deregister_workflow_failed", "err", err)
 		}
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"removed": true})
+}
+
+// deregisterWorkflow is the clear-activations -> remove-record path both entry
+// points share: the HTTP handler above and APIServer.ReplaceWorkflow, which an
+// embedded server reaches in-process.
+//
+// It is shared for the same reason registerWorkflow is: removal has an ordering
+// contract that a second implementation would be free to get wrong, and getting
+// it wrong strands a Desired activation whose workflow no longer exists.
+func (m *workflowControlModule) deregisterWorkflow(ctx context.Context, ns namespace.Namespace, id types.WorkflowID) error {
+	registry := m.registry()
+	if registry == nil {
+		if m.log != nil {
+			m.log.Error("deregister_workflow_no_registry")
+		}
+		return errors.New("apiserver: no workflow registry configured")
+	}
+	// Fetch the record BEFORE removal so the entry-activation manager can derive
+	// the same trigger entry units (from the persisted compiled graph) to clear,
+	// and so an already-removed workflow reports not-found. When no activation
+	// manager is wired this lookup is skipped entirely.
+	var toDeactivate *backend.WorkflowRecord
+	if mgr := m.entryActivationManager(); mgr != nil {
+		rec, err := registry.GetWorkflow(ctx, id)
+		if err != nil {
+			if !errors.Is(err, backend.ErrWorkflowNotFound) && m.log != nil {
+				m.log.Error("deregister_workflow_lookup_failed", "err", err)
+			}
+			return err
+		}
+		toDeactivate = &rec
+	}
+	// Clear the desired entry activations BEFORE removing the registry record so
+	// the two steps are independently retryable and no orphaned Desired activation
+	// can survive a partial failure. If this clear fails we return with the
+	// registry record still present, so a retry re-fetches the graph and re-clears;
+	// if we removed the registry record first and then failed here, the retry
+	// would report not-found on GetWorkflow and never reach the clear, stranding a
+	// Desired activation the reconciler keeps honoring for entry seeds. The clear
+	// is desired-state only (Desired=false); the reconciler delivers the
+	// Deactivate and fences the owner.
+	if toDeactivate != nil {
+		mgr := m.entryActivationManager()
+		if err := mgr.RemoveWorkflow(ctx, ns, toDeactivate.ID, toDeactivate.Version, toDeactivate.Graph); err != nil {
+			if m.log != nil {
+				m.log.Error("deregister_workflow_clear_activations_failed", "err", err)
+			}
+			return err
+		}
+	}
+	// Remove the registry record. The manager clear above is idempotent (a repeat
+	// re-marks an already-!Desired record), so a failure here is safely retryable:
+	// the caller retries, re-clears harmlessly, and re-removes.
+	if err := registry.RemoveWorkflow(ctx, id); err != nil {
+		if !errors.Is(err, backend.ErrWorkflowNotFound) && m.log != nil {
+			m.log.Error("deregister_workflow_failed", "err", err)
+		}
+		return err
+	}
+	return nil
+}
+
+// replaceWorkflow registers def, and if a DIFFERENT definition already occupies
+// its (namespace, name, version) key, deregisters that one first and registers
+// again.
+//
+// It exists for the deployment that owns its workflow key outright: an embedded
+// control plane whose workflow definition is built from the host's own
+// configuration. Such a definition changes whenever the configuration does — a
+// new topic, a rebuilt wasm artifact — and the registry rejects a changed
+// definition under an existing key as a conflict. With only registerWorkflow to
+// call, that host can never start again: it fails on every boot, with the old
+// definition still registered and running.
+//
+// The removal is deliberate and destructive, which is why it is not the
+// behaviour of registerWorkflow. Two hosts sharing one key with DIFFERENT
+// definitions — a rolling deploy mid-flight — will each replace the other until
+// the rollout settles, deactivating and re-deriving the entry activations each
+// time. Identical definitions never reach the removal at all: they match on
+// hash and register idempotently.
+func (m *workflowControlModule) replaceWorkflow(ctx context.Context, ns namespace.Namespace, def *types.WorkflowDef) (types.WorkflowID, []string, error) {
+	id, warnings, err := m.registerWorkflow(ctx, ns, def)
+	if err == nil || !errors.Is(err, backend.ErrWorkflowConflict) {
+		return id, warnings, err
+	}
+	registry := m.registry()
+	if registry == nil {
+		return "", nil, err
+	}
+	// The key carries the namespace, so this lookup cannot reach another
+	// namespace's record even though the registry is not otherwise scoped.
+	existing, lookupErr := registry.GetWorkflowByKey(ctx, workflowRegistryKey(string(ns), def.Name, def.Version))
+	if lookupErr != nil {
+		// The caller's contract is "conflict", not "lookup failed".
+		return "", nil, err
+	}
+	if delErr := m.deregisterWorkflow(ctx, ns, existing.ID); delErr != nil {
+		return "", nil, delErr
+	}
+	if m.log != nil {
+		m.log.Info("replace_workflow_removed_conflicting", "workflow_id", string(existing.ID), "name", def.Name, "version", def.Version)
+	}
+	return m.registerWorkflow(ctx, ns, def)
 }
 
 // registry returns the control plane's workflow registry, or nil when no

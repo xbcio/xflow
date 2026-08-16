@@ -269,6 +269,30 @@ func (s *Server) Run(ctx context.Context) error { return s.api.Run(ctx) }
 // register a workflow whose local nodes have no executor anywhere — it would
 // register cleanly and then stall at the first such node.
 func (s *Server) AddWorkflow(ctx context.Context, wf *WorkflowBuilder) (types.WorkflowID, error) {
+	return s.addWorkflow(ctx, wf, false)
+}
+
+// ReplaceWorkflow is AddWorkflow, except that a DIFFERENT definition already
+// registered under the same name and version is removed first rather than
+// rejected as a conflict. Re-registering an unchanged workflow is still
+// idempotent and removes nothing.
+//
+// It is the call an embedded host makes when its workflow is built from its own
+// configuration. Such a definition changes whenever the configuration does — a
+// different Kafka topic, a rebuilt wasm guest, a new batch size — while its name
+// and version stay put, and AddWorkflow answers that with a conflict the host
+// cannot clear from inside its own process. The result is a host that fails to
+// start on that boot and every boot after it, with the superseded definition
+// still registered and its triggers still consuming.
+//
+// The replacement deactivates the old definition's entry units before removing
+// it, so its triggers stop. Do not use it where several independent publishers
+// share one workflow name: each would evict the others in turn.
+func (s *Server) ReplaceWorkflow(ctx context.Context, wf *WorkflowBuilder) (types.WorkflowID, error) {
+	return s.addWorkflow(ctx, wf, true)
+}
+
+func (s *Server) addWorkflow(ctx context.Context, wf *WorkflowBuilder, replace bool) (types.WorkflowID, error) {
 	if wf == nil {
 		return "", errors.New("xflow: workflow must not be nil")
 	}
@@ -286,7 +310,11 @@ func (s *Server) AddWorkflow(ctx context.Context, wf *WorkflowBuilder) (types.Wo
 			return "", err
 		}
 	}
-	id, _, err := s.api.RegisterWorkflow(ctx, namespace.Namespace(def.Namespace), def)
+	register := s.api.RegisterWorkflow
+	if replace {
+		register = s.api.ReplaceWorkflow
+	}
+	id, _, err := register(ctx, namespace.Namespace(def.Namespace), def)
 	if err != nil {
 		return "", err
 	}
