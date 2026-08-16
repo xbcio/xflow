@@ -264,10 +264,19 @@ func collectWasmBindings(name, nodeType string, params map[string]any, refs []st
 	}
 }
 
-// DeriveEntryActivations extracts the trigger entry units from a compiled graph
-// that carry a RunnerSelector (i.e. are meant to run on a remote runner). A
-// single trigger node and a group node whose entry is a trigger both qualify.
-// Units without a selector are skipped — they run inline and need no activation.
+// DeriveEntryActivations extracts every trigger entry unit from a compiled
+// graph. A single trigger node and a group node whose entry is a trigger both
+// qualify.
+//
+// A unit without a RunnerSelector is derived like any other, with its nil
+// selector preserved. nil means the deployment expressed no placement
+// constraint, and that is what the reconciler already reads it as —
+// selectorMatches returns true for a nil selector, so the activation is placed
+// on any capable live runner. Skipping these instead (as this did until
+// 2026-08-16) was a silent total failure: this function's only production
+// caller is apiserver's registerWorkflow, which hosts nothing inline, so a
+// dropped trigger had no executor at all — registration returned success with
+// no warning and the workflow simply never fired.
 //
 // It returns an error when a group entry unit's capability requirements cannot
 // be derived (its package fails to project). Propagating rather than swallowing
@@ -284,7 +293,7 @@ func DeriveEntryActivations(g *graph.Graph) ([]EntryUnitActivation, error) {
 		switch g.UnitKindAt(i) {
 		case graph.UnitGroup:
 			gm := g.GroupMetaAt(i)
-			if !gm.Trigger || gm.RunnerSelector == nil {
+			if !gm.Trigger {
 				continue
 			}
 			// Derive the group's capability requirements from the projected
@@ -308,7 +317,7 @@ func DeriveEntryActivations(g *graph.Graph) ([]EntryUnitActivation, error) {
 		case graph.UnitNode:
 			nodeIdx := g.UnitNodeIndex(i)
 			nm := g.NodeAt(nodeIdx)
-			if nm.Kind != types.NodeKindTrigger || nm.RunnerSelector == nil {
+			if nm.Kind != types.NodeKindTrigger {
 				continue
 			}
 			// A trigger is an entry index, never a scheduled task, so its

@@ -62,11 +62,12 @@ func TestSASTrafficTaggingE2E(t *testing.T) {
 	// what proves the rules travelled over the supply channel.
 	//
 	// This manual registration is the INLINE-MODE equivalent of what a
-	// distributed deployment derives automatically. This workflow's nodes carry
-	// no RunnerSelector, so DeriveEntryActivations skips them entirely and no
-	// activation directive is ever produced — there is nothing here to derive
-	// the binding from. In distributed mode the control plane walks the graph's
-	// dependency edges, puts a SupplyConsumerBinding on the ActivateDirective,
+	// distributed deployment derives automatically. Inline mode activates its
+	// triggers through triggerRuntime.ReconcileWorkflow, which never consults
+	// the control plane's activation derivation, so no ActivateDirective — and
+	// therefore no SupplyConsumerBinding — is ever produced here; there is
+	// nothing to derive the binding from. In distributed mode the control plane
+	// walks the graph's dependency edges, puts a SupplyConsumerBinding on the ActivateDirective,
 	// and the receiving runner registers exactly this pairing at activation
 	// time (service/runner/wasm_supply_wiring_test.go covers that path;
 	// TestSupplyConsumerBindingReachesRunner covers it end to end).
