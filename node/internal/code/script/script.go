@@ -2,7 +2,6 @@ package script
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -140,27 +139,31 @@ func (n *ScriptNode) Execute(ctx context.Context, input *types.Input) (*types.Ou
 	code, _ := input.Params["code"].(string)
 	if code == "" {
 		// artifact_digest path: resolve code bytes from the artifact store.
+		// Resolution is memoised by (namespace, digest, language) — a digest names
+		// one immutable byte sequence, so re-reading and re-encoding it on every
+		// message is pure waste on the hottest path in the node.
 		if digest, _ := input.Params["artifact_digest"].(string); digest != "" {
-			raw, err := input.ArtifactCode(ctx, digest)
+			// Checked before the cache, not through it. A cache hit would let an
+			// execution whose dispatch path never wired a resolver run code that
+			// another execution fetched, so a wiring defect would surface only on
+			// a cold process — see Input.HasArtifactResolver.
+			if !input.HasArtifactResolver() {
+				observeExecute(ctx, language, runtime, "config", time.Since(start))
+				return nil, types.NewPermanentError("script.artifact_unavailable",
+					"xflow.script: artifact_digest is set but no artifact resolver is configured")
+			}
+			resolved, ok, err := sharedArtifactCode.get(ctx, input.Namespace(), digest, language, input.ArtifactCode)
 			if err != nil {
 				observeExecute(ctx, language, runtime, "config", time.Since(start))
 				return nil, types.NewTransientError("script.artifact_fetch",
 					fmt.Sprintf("xflow.script: failed to fetch artifact %s: %v", digest, err))
 			}
-			if raw == nil {
+			if !ok {
 				observeExecute(ctx, language, runtime, "config", time.Since(start))
 				return nil, types.NewPermanentError("script.artifact_unavailable",
 					"xflow.script: artifact_digest is set but no artifact resolver is configured")
 			}
-			// The engine interface takes a code string. For wasm, that is base64
-			// of the module bytes; for js, the raw source text. Wasm digests are
-			// always binary, so base64 encode. JS artifacts are UTF-8 text and can
-			// be passed directly.
-			if language == "wasm" {
-				code = base64.StdEncoding.EncodeToString(raw)
-			} else {
-				code = string(raw)
-			}
+			code = resolved
 		}
 	}
 	if code == "" {

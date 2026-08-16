@@ -141,6 +141,15 @@ func (n *Input) SetNamespace(t namespace.Namespace) {
 	n.namespace = t
 }
 
+// Namespace returns the namespace this execution is scoped to. Node handlers
+// that cache anything resolved through a namespace-scoped resolver must key
+// that cache by this value: a digest is content-addressable, but the right to
+// read it is not, and a cache shared across namespaces would let one tenant
+// serve another's artifact without the store's reference check.
+func (n *Input) Namespace() namespace.Namespace {
+	return n.namespace
+}
+
 // ArtifactCode resolves a script artifact by its content-addressable digest
 // (e.g. "sha256:<hex>") and returns the raw bytes. Returns nil, nil when no
 // resolver is configured — the caller must treat that as "feature unavailable".
@@ -149,6 +158,18 @@ func (n *Input) ArtifactCode(ctx context.Context, digest string) ([]byte, error)
 		return nil, nil
 	}
 	return n.artifactCode(ctx, digest)
+}
+
+// HasArtifactResolver reports whether an artifact resolver was injected.
+//
+// Handlers that cache resolved artifacts must consult this BEFORE their cache:
+// a cache hit would otherwise let an execution with no resolver run code that
+// some other execution happened to fetch first. That turns a wiring defect —
+// a dispatch path that never calls SetArtifactCodeResolver — into a failure
+// that depends on process history and execution order, which is strictly worse
+// than failing outright every time.
+func (n *Input) HasArtifactResolver() bool {
+	return n.artifactCode != nil
 }
 
 // SetArtifactCodeResolver sets the function that resolves script artifacts by
