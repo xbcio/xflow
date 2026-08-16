@@ -11,42 +11,40 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
-// BenchmarkReactorEval_AllItemsScope measures the FULL per-item cost a map body
-// pays, not just the Go-side encode.
+// BenchmarkReactorEval_AllItemsScope guards the property that a wasm guest's
+// per-item cost does NOT scale with the size of the map node's items array.
 //
-// The body's scope carries $items -- the map node's ENTIRE items array
-// (execution/subgraph/map_body.go bodyItemScope) -- and every item's eval
-// re-encodes it (encodeStdin json.Marshals the whole globals map), copies the
-// bytes into the guest's linear memory, and makes the guest parse them again.
-// A batch of n items with two guests therefore pays 2n times for the whole
-// array: the per-item cost grows with the batch the item belongs to.
+// It measures the FULL per-item cost, not just the Go-side encode. Run every
+// case together and compare them: items=0 is the control (no $items in scope at
+// all), and the 10/20/40/80 cases must stay FLAT relative to each other. A curve
+// that climbs with n means something started carrying the whole array across the
+// sandbox boundary again -- which is the defect stripItems (wasm.go) exists to
+// prevent, and which TestGuestPayloadDropsItems pins at the byte level.
 //
-// BenchmarkEncodeStdin_AllItems isolates the Go-side marshal alone and shows it
-// is only ~33 us at n=40 -- far too small to explain the pipeline numbers. This
-// benchmark exists because that made the marshal a tempting but wrong answer:
-// the question is what the host->guest crossing costs END TO END as $items
-// grows, which is where the copy and the guest-side parse land.
+// What the numbers looked like when the array DID cross, per item, twice
+// (exprx.BuildExprEnv publishes Input.Data both flattened and as $input):
 //
-// Measured against the live SAS pipeline (local Kafka, 4 partitions, 1000
-// messages), where end-to-end per-item cost ROSE with batch size instead of
-// amortising -- the signature of a per-item cost that scales with n:
+//	items:      0        10       20       40        80
+//	before:  0.058ms   0.94ms   1.76ms   3.53ms    6.87ms   <- 61x control at n=40
+//	after:   0.053ms   0.147ms  0.149ms  0.154ms   0.150ms  <- flat
+//
+// End-to-end against a live Kafka pipeline (4 partitions, 1000 messages), the
+// same defect made bigger batches SLOWER per item, which is backwards -- a batch
+// is supposed to amortise:
 //
 //	batch=10 -> 80 msg/s (12.5 ms/item)
 //	batch=20 -> 62 msg/s (16.1 ms/item)
 //	batch=40 -> 38 msg/s (26.3 ms/item)
 //
-// Dropping $items from bodyItemScope entirely (a throwaway local edit, to
-// measure the ceiling) turned that into 220 msg/s at batch=20 and 233 at
-// batch=40 -- ~3.5x, with the superlinearity gone: bigger batches got FASTER
-// again, which is what amortisation is supposed to look like.
+// After the fix that became ~220 msg/s at batch=20 and 233 at batch=40: bigger
+// batches got faster again.
 //
-// Read this benchmark as: how much of that is the $items crossing? Run the
-// items=0 case beside the others -- it is the same eval with $items dropped, so
-// the difference is the whole cost of carrying the array.
-//
-// Note the array crosses TWICE per item, not once: exprx.BuildExprEnv flattens
-// Input.Data's keys to the env top level AND publishes Input.Data itself as
-// $input, so encodeStdin marshals $items once as a root and once inside $input.
+// BenchmarkEncodeStdin_AllItems below isolates the Go-side marshal and shows it
+// was only ~33us at n=40 -- 1% of the 3531us above, and the reason this
+// full-eval benchmark exists: the marshal was a tempting but wrong answer. The
+// remaining 99% was the guest rebuilding objects from those bytes inside the
+// sandbox, which no transport change can avoid (see stripItems for the
+// three-stage measurement).
 func BenchmarkReactorEval_AllItemsScope(b *testing.B) {
 	e, ok := engine.Lookup("wasm", "wazero-reactor")
 	if !ok {
@@ -101,11 +99,15 @@ func BenchmarkReactorEval_AllItemsScope(b *testing.B) {
 	}
 }
 
-// BenchmarkEncodeStdin_AllItems isolates the Go-side half of the same crossing:
-// json.Marshal of the globals map, with no guest involved. Kept beside the
-// full-eval benchmark above because the two together separate "Go re-encodes the
-// array" from "the guest re-parses it", and only the pair identifies which half
-// is worth fixing.
+// BenchmarkEncodeStdin_AllItems is the historical record of the Go-side half of
+// the crossing: json.Marshal of the globals map, no guest involved.
+//
+// It now measures encodeStdin WITH stripItems in place, so the array never
+// reaches json.Marshal and the numbers are flat. That is the point: kept beside
+// the full-eval benchmark above because the pair is what separated "Go
+// re-encodes the array" (~33us at n=40, 1%) from "the guest re-parses it"
+// (the other 99%), and only that split ruled out fixing this with a cheaper
+// encoding instead of by not sending the value.
 func BenchmarkEncodeStdin_AllItems(b *testing.B) {
 	for _, n := range []int{10, 20, 40, 80} {
 		items := make([]any, 0, n)
@@ -133,29 +135,46 @@ func BenchmarkEncodeStdin_AllItems(b *testing.B) {
 	}
 }
 
-// TestGuestPayloadCarriesItemsTwice pins the duplication the benchmarks above
-// describe, so the claim is a checked assertion rather than a comment.
+// TestGuestPayloadDropsItems pins that $items reaches a wasm guest ZERO times,
+// counting VALUES rather than keys.
 //
-// exprx.BuildExprEnv flattens Input.Data's keys to the env top level AND
-// publishes Input.Data itself as $input. A map body's $items therefore reaches
-// encodeStdin under two paths and is serialised into the guest payload twice --
-// per item, per guest. Same shape as the second copy that let cleansed
-// credentials reach storage through $input/$supplies: a key appearing once at
-// the root does not mean the value crosses once.
+// The array reached the payload by two independent routes: exprx.BuildExprEnv
+// flattens Input.Data's keys to the env top level AND publishes Input.Data itself
+// as $input, so a map body's $items was serialised twice per item. Asserting the
+// "$items" KEY is absent would pass while the second copy still crossed — the
+// same shape as the cleansed credentials that reached storage through their
+// $input copy. Hence the marker: it is scanned for in the encoded bytes, so any
+// route that still carries the value fails this test regardless of the key it
+// arrives under.
 //
-// If a future change makes $items cross only once, this test fails loudly and
-// the benchmark's cost model above needs revisiting -- that is the point.
-func TestGuestPayloadCarriesItemsTwice(t *testing.T) {
+// $items stays a live DSL root for js and expression bodies; see stripItems for
+// why only wasm drops it, and BenchmarkReactorEval_AllItemsScope for the cost.
+func TestGuestPayloadDropsItems(t *testing.T) {
 	const marker = "UNIQUE_ITEMS_MARKER_9f3a"
-	in := &types.Input{Data: map[string]any{"$items": []any{marker}}}
+	in := &types.Input{Data: map[string]any{"$items": []any{marker}, "keep": "kept"}}
 
-	payload, err := encodeStdin(exprx.BuildExprEnv(in, nil))
+	env := exprx.BuildExprEnv(in, nil)
+	payload, err := encodeStdin(env)
 	if err != nil {
 		t.Fatalf("encode guest payload: %v", err)
 	}
-	got := strings.Count(string(payload), marker)
-	if got != 2 {
-		t.Fatalf("items array serialised %d time(s) into the guest payload, want 2\n"+
+	if got := strings.Count(string(payload), marker); got != 0 {
+		t.Fatalf("items array serialised %d time(s) into the guest payload, want 0\n"+
 			"payload: %s", got, payload)
+	}
+	// Dropping $items must not drop anything else: the rest of Data still has to
+	// reach the guest, both flattened and under $input.
+	if got := strings.Count(string(payload), "kept"); got != 2 {
+		t.Fatalf("sibling key crossed %d time(s), want 2 (root + $input)\npayload: %s", got, payload)
+	}
+
+	// The engine's activation record must survive: deleting in place would leave
+	// the node unable to run a second time, and would strip $items from the js
+	// and expression bodies that still promise it.
+	if _, ok := env["$items"]; !ok {
+		t.Fatal("encodeStdin mutated the caller's globals map")
+	}
+	if _, ok := in.Data["$items"]; !ok {
+		t.Fatal("encodeStdin mutated Input.Data")
 	}
 }
