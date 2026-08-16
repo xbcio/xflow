@@ -156,6 +156,13 @@ func ProjectGroupPackage(g *Graph, unitIdx int) (*SubgraphPackage, string, error
 			Version:    n.Version,
 			OnError:    n.OnError,
 			Parameters: params,
+			// Timeout crosses the projection boundary even though Retry and
+			// RunnerSelector deliberately do not (see the mini-def comment above).
+			// Those two are dimensions the GROUP takes over from its members;
+			// timeout is not -- a group bound and a member bound NEST, and the
+			// executor takes the min of the two. Dropping it here would silently
+			// downgrade every member to the global default with no diagnostic.
+			Timeout: n.Timeout,
 		})
 	}
 
@@ -439,6 +446,7 @@ func compileTrusted(def *types.WorkflowDef, visibleSupplies, visibleOuterNodes [
 			OnError:    nd.OnError,
 			Parameters: cloneStringAnyMap(nd.Parameters),
 			GroupIdx:   -1,
+			Timeout:    nd.Timeout,
 		}
 		if nd.Type == "xflow.start" || nd.Kind == types.NodeKindTrigger {
 			g.entryIndexes[nd.Name] = i

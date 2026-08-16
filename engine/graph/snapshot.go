@@ -40,6 +40,12 @@ type wireNodeMeta struct {
 	Retry          *types.RetrySettings  `json:"Retry"`
 	GroupIdx       *int                  `json:"group_idx,omitempty"`
 	GroupIdxAlt    *int                  `json:"GroupIdx,omitempty"`
+	// Timeout carries NodeMeta.Timeout across the wire. omitempty is
+	// load-bearing for the same reason Body's is: an unset timeout must not
+	// appear in the snapshot, and (because NodeMeta is also hashed directly by
+	// graphHashPayload) must not appear in the hash payload either. A zero
+	// value here means "not configured" and stays absent.
+	Timeout time.Duration `json:"Timeout,omitempty"`
 	// Body is the node's projected body package, present only on a node that
 	// declares a "body" (today: xflow.map's body form). Carrying it here
 	// rather than in a graph-level field is what makes it impossible to
@@ -62,7 +68,8 @@ func toWireNodeMeta(n NodeMeta) wireNodeMeta {
 		PortOuts:       n.PortOuts,
 		Retry:          n.Retry,
 		GroupIdx:       &idx,
-		Body:        n.Body,
+		Timeout:        n.Timeout,
+		Body:           n.Body,
 	}
 }
 
@@ -122,7 +129,8 @@ func decodeWireNodes(raw []wireNodeMeta) ([]NodeMeta, bool, error) {
 			PortOuts:       w.PortOuts,
 			Retry:          w.Retry,
 			GroupIdx:       p.value,
-			Body:        w.Body,
+			Timeout:        w.Timeout,
+			Body:           w.Body,
 		}
 		if !p.present {
 			nodes[i].GroupIdx = -1

@@ -277,6 +277,15 @@ type NodeMeta struct {
 	// re-enqueue this node with an exponential backoff after a transient
 	// handler failure. Nil means no retries.
 	Retry *types.RetrySettings
+	// Timeout is the node's declared execution bound, carried verbatim from
+	// NodeDef.Timeout: zero means "not configured", negative means "no limit".
+	// It is deliberately NOT normalized here. Normalization lives in the engine
+	// (Engine.resolveNodeTimeout) for two reasons: the engine's
+	// WithDefaultNodeTimeout option is invisible from this package, and storing
+	// a resolved default would change graphHash for every graph that never
+	// configured a timeout -- graphHash is recorded on every persisted
+	// execution.
+	Timeout time.Duration `json:",omitempty"`
 	// GroupIdx is the index of the co-location group this node belongs to;
 	// -1 means the node is ungrouped.
 	GroupIdx int
