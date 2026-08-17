@@ -850,21 +850,21 @@ func g1RunGRPCRunnerConnectReport(t *testing.T, h *productionServerRunnerHarness
 	byName := map[string]sdktrace.ReadOnlySpan{}
 	for _, s := range spans {
 		switch s.Name() {
-		case "xflow.workflow.submit", "xflow.task.dispatch", "xflow.task.execute", "xflow.task.report", "xflow.task.commit":
+		case "xflow.workflow.execute", "xflow.task.dispatch", "xflow.task.execute", "xflow.task.report", "xflow.task.commit":
 			if _, ok := byName[s.Name()]; !ok {
 				byName[s.Name()] = s
 			}
 		}
 	}
 	tg := g1TraceGraph{SpansPresent: []string{}}
-	for _, name := range []string{"xflow.workflow.submit", "xflow.task.dispatch", "xflow.task.execute", "xflow.task.report", "xflow.task.commit"} {
+	for _, name := range []string{"xflow.workflow.execute", "xflow.task.dispatch", "xflow.task.execute", "xflow.task.report", "xflow.task.commit"} {
 		if byName[name] == nil {
 			t.Fatalf("missing span %q; got %v", name, spanNamesIntegration(spans))
 		}
 		tg.SpansPresent = append(tg.SpansPresent, name)
 	}
 
-	submit := byName["xflow.workflow.submit"]
+	submit := byName["xflow.workflow.execute"]
 	dispatch := byName["xflow.task.dispatch"]
 	report := byName["xflow.task.report"]
 	commit := byName["xflow.task.commit"]
@@ -970,11 +970,11 @@ func g1RunGRPCRunnerConnectReportForNamespace(t *testing.T, h *productionServerR
 
 	spans := h.spanRecorder.Ended()
 	// Locate the submit span for this run by finding the most recent
-	// xflow.workflow.submit span. Filter downstream spans by its TraceID
+	// xflow.workflow.execute span. Filter downstream spans by its TraceID
 	// to exclude orphaned spans from earlier subtests.
 	var submit sdktrace.ReadOnlySpan
 	for i := len(spans) - 1; i >= 0; i-- {
-		if spans[i].Name() == "xflow.workflow.submit" {
+		if spans[i].Name() == "xflow.workflow.execute" {
 			submit = spans[i]
 			break
 		}
@@ -995,7 +995,7 @@ func g1RunGRPCRunnerConnectReportForNamespace(t *testing.T, h *productionServerR
 			}
 		}
 	}
-	tg := g1TraceGraph{SpansPresent: []string{"xflow.workflow.submit"}}
+	tg := g1TraceGraph{SpansPresent: []string{"xflow.workflow.execute"}}
 	for _, name := range []string{"xflow.task.dispatch", "xflow.task.execute", "xflow.task.report", "xflow.task.commit"} {
 		if byName[name] == nil {
 			t.Fatalf("[%s] missing span %q for trace %s; got %v", wfName, name, root, spanNamesIntegration(spans))
@@ -1124,7 +1124,7 @@ func g1RunCrossNamespaceCarrierIsolation(t *testing.T, h *productionServerRunner
 	// Find the two most recent submit spans (namespaceA + namespaceB).
 	var submits []sdktrace.ReadOnlySpan
 	for i := len(spans) - 1; i >= 0 && len(submits) < 2; i-- {
-		if spans[i].Name() == "xflow.workflow.submit" {
+		if spans[i].Name() == "xflow.workflow.execute" {
 			submits = append(submits, spans[i])
 		}
 	}

@@ -159,19 +159,19 @@ func TestServerRunnerE2ETraceGraphRealRedis(t *testing.T) {
 	for _, s := range spans {
 		// Keep the first occurrence per name within our xflow span set.
 		switch s.Name() {
-		case "xflow.workflow.submit", "xflow.task.dispatch", "xflow.task.execute", "xflow.task.report", "xflow.task.commit":
+		case "xflow.workflow.execute", "xflow.task.dispatch", "xflow.task.execute", "xflow.task.report", "xflow.task.commit":
 			if _, ok := byName[s.Name()]; !ok {
 				byName[s.Name()] = s
 			}
 		}
 	}
-	for _, name := range []string{"xflow.workflow.submit", "xflow.task.dispatch", "xflow.task.execute", "xflow.task.report", "xflow.task.commit"} {
+	for _, name := range []string{"xflow.workflow.execute", "xflow.task.dispatch", "xflow.task.execute", "xflow.task.report", "xflow.task.commit"} {
 		if byName[name] == nil {
 			t.Fatalf("missing span %q; got %v", name, spanNamesIntegration(spans))
 		}
 	}
 
-	submit := byName["xflow.workflow.submit"]
+	submit := byName["xflow.workflow.execute"]
 	dispatch := byName["xflow.task.dispatch"]
 	execute := byName["xflow.task.execute"]
 	report := byName["xflow.task.report"]
