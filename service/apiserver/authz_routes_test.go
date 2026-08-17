@@ -137,7 +137,7 @@ func TestExecutionRouteOperationMatrix(t *testing.T) {
 		{"inspect", http.MethodGet, "/v1/executions/" + string(f.execID), nil, http.StatusOK, http.StatusForbidden, OpExecutionRead, false},
 		{"signal", http.MethodPost, "/v1/executions/" + string(f.execID) + "/signals", signalRequest{Name: "s1"}, http.StatusOK, http.StatusForbidden, OpExecutionSignal, true},
 		{"cancel", http.MethodPost, "/v1/executions/" + string(f.execID) + "/cancel", nil, http.StatusOK, http.StatusForbidden, OpExecutionCancel, true},
-		{"revoke", http.MethodPost, "/v1/executions/" + string(f.execID) + "/revoke-signal", signalRequest{Name: "s1"}, http.StatusOK, http.StatusForbidden, OpExecutionRevoke, true},
+		{"revoke", http.MethodDelete, "/v1/executions/" + string(f.execID) + "/signals/s1", nil, http.StatusOK, http.StatusForbidden, OpExecutionRevoke, true},
 	}
 	// wait is a long-poll, so it is exercised deny-only (authz fails before the
 	// handler, returning 403 immediately) to avoid the poll timeout in the

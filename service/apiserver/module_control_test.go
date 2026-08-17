@@ -120,6 +120,15 @@ func newControlMux(f *fakeControlFacade) http.Handler {
 
 func doJSON(t *testing.T, mux http.Handler, method, path string, body any) *http.Response {
 	t.Helper()
+	return doJSONWithRequestID(t, mux, method, path, body, "")
+}
+
+// doJSONWithRequestID is doJSON with an X-Request-Id header. The echoed value
+// is the migration tell: writeEnvelope echoes it only when the handler passed
+// *http.Request; the writeError shim (nil request) drops it. An empty echo on a
+// failure response means the site is still on the shim.
+func doJSONWithRequestID(t *testing.T, mux http.Handler, method, path string, body any, requestID string) *http.Response {
+	t.Helper()
 	var buf bytes.Buffer
 	if body != nil {
 		if err := json.NewEncoder(&buf).Encode(body); err != nil {
@@ -128,6 +137,9 @@ func doJSON(t *testing.T, mux http.Handler, method, path string, body any) *http
 	}
 	req := httptest.NewRequest(method, path, &buf)
 	req.Header.Set("Content-Type", "application/json")
+	if requestID != "" {
+		req.Header.Set("X-Request-Id", requestID)
+	}
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 	return rec.Result()
@@ -193,8 +205,9 @@ func TestWorkflowControlInspect(t *testing.T) {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 	var detail engine.ExecutionDetail
-	if err := json.NewDecoder(resp.Body).Decode(&detail); err != nil {
-		t.Fatal(err)
+	env := decodeEnvelope(t, resp, &detail)
+	if !env.Success || env.Code != "200" {
+		t.Fatalf("envelope = %+v, want success/code=200", env)
 	}
 	if detail.ExecutionID != "exec-1" || detail.Status != types.ExecutionStatusRunning {
 		t.Fatalf("detail = %+v, want exec-1 running", detail)
@@ -205,10 +218,20 @@ func TestWorkflowControlInspectNotFound(t *testing.T) {
 	f := &fakeControlFacade{inspectErr: engine.ErrExecutionNotFound}
 	mux := newControlMux(f)
 
-	resp := doJSON(t, mux, http.MethodGet, "/v1/executions/missing", nil)
+	resp := doJSONWithRequestID(t, mux, http.MethodGet, "/v1/executions/missing", nil, "req-inspect-1")
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", resp.StatusCode)
+	}
+	env := decodeEnvelope(t, resp, nil)
+	if env.Code != "execution_not_found" {
+		t.Fatalf("code = %q, want execution_not_found", env.Code)
+	}
+	// The X-Request-Id echo is the migration tell: writeEnvelope echoes it only
+	// when the handler passed *http.Request; the writeError shim (nil request)
+	// drops it. An empty echo here means the failure site is still on the shim.
+	if got := resp.Header.Get("X-Request-Id"); got != "req-inspect-1" {
+		t.Fatalf("X-Request-Id = %q, want %q (failure site must pass *http.Request)", got, "req-inspect-1")
 	}
 }
 
@@ -220,6 +243,10 @@ func TestWorkflowControlInspectGenericNotFoundTextReturns500(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500 for unclassified error text", resp.StatusCode)
+	}
+	env := decodeEnvelope(t, resp, nil)
+	if env.Code != "internal_error" {
+		t.Fatalf("code = %q, want internal_error", env.Code)
 	}
 }
 
@@ -235,6 +262,10 @@ func TestWorkflowControlSignalAndCancel(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("signal status = %d, want 200", resp.StatusCode)
 	}
+	env := decodeEnvelope(t, resp, nil)
+	if !env.Success || env.Code != "200" {
+		t.Fatalf("signal envelope = %+v, want success/code=200", env)
+	}
 	if f.signalName != "approve" || f.signalData["ok"] != true {
 		t.Fatalf("signal = %q %v, want approve ok=true", f.signalName, f.signalData)
 	}
@@ -243,6 +274,10 @@ func TestWorkflowControlSignalAndCancel(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("cancel status = %d, want 200", resp.StatusCode)
+	}
+	env = decodeEnvelope(t, resp, nil)
+	if !env.Success || env.Code != "200" {
+		t.Fatalf("cancel envelope = %+v, want success/code=200", env)
 	}
 	if f.canceledID != "exec-1" {
 		t.Fatalf("canceled id = %q, want exec-1", f.canceledID)
@@ -331,57 +366,97 @@ func TestWorkflowControlExecuteCompileErrorReturns400(t *testing.T) {
 	}
 }
 
+// TestWorkflowControlRevokeSignal exercises the spec §7 target shape
+// DELETE /v1/executions/{id}/signals/{name}: the signal name moves from the
+// request body into the path segment, so the handler reads it via
+// r.PathValue("name") and the body is unused. This test would fail (404 via
+// the /v1/executions/{id}/ catch) if the DELETE route were removed.
 func TestWorkflowControlRevokeSignal(t *testing.T) {
 	f := &fakeControlFacade{}
 	mux := newControlMux(f)
 
-	resp := doJSON(t, mux, http.MethodPost, "/v1/executions/exec-1/revoke-signal", signalRequest{Name: "approve"})
+	resp := doJSON(t, mux, http.MethodDelete, "/v1/executions/exec-1/signals/approve", nil)
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	env := decodeEnvelope(t, resp, nil)
+	if !env.Success || env.Code != "200" {
+		t.Fatalf("envelope = %+v, want success/code=200", env)
 	}
 	if f.revokedSig != "approve" {
 		t.Fatalf("revoked signal = %q, want approve", f.revokedSig)
 	}
 }
 
+// TestWorkflowControlRevokeSignalConsumedReturns409 asserts the consumed-or-
+// not-found case maps to 409 with a stable snake_case code per spec §3.2.
 func TestWorkflowControlRevokeSignalConsumedReturns409(t *testing.T) {
 	f := &fakeControlFacade{revokeErr: engine.ErrSignalConsumed}
 	mux := newControlMux(f)
 
-	resp := doJSON(t, mux, http.MethodPost, "/v1/executions/exec-1/revoke-signal", signalRequest{Name: "approve"})
+	resp := doJSONWithRequestID(t, mux, http.MethodDelete, "/v1/executions/exec-1/signals/approve", nil, "req-revoke-409")
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("status = %d, want 409", resp.StatusCode)
 	}
-}
-
-func TestWorkflowControlRevokeSignalMissingNameReturns400(t *testing.T) {
-	f := &fakeControlFacade{}
-	mux := newControlMux(f)
-
-	resp := doJSON(t, mux, http.MethodPost, "/v1/executions/exec-1/revoke-signal", signalRequest{})
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	env := decodeEnvelope(t, resp, nil)
+	if env.Code != "signal_consumed" {
+		t.Fatalf("code = %q, want signal_consumed", env.Code)
+	}
+	if got := resp.Header.Get("X-Request-Id"); got != "req-revoke-409" {
+		t.Fatalf("X-Request-Id = %q, want %q (failure site must pass *http.Request)", got, "req-revoke-409")
 	}
 }
 
-func TestWorkflowControlRevokeSignalAcceptsQueryName(t *testing.T) {
+// TestWorkflowControlRevokeSignalOldPostRouteRemoved proves the §9.1 migration
+// removed POST /v1/executions/{id}/revoke-signal: a POST to that path now falls
+// to the /v1/executions/{id}/ 404 catch (no existence leak, no 405). This guards
+// against a regression that re-registers the old verb-stuck path.
+func TestWorkflowControlRevokeSignalOldPostRouteRemoved(t *testing.T) {
 	f := &fakeControlFacade{}
 	mux := newControlMux(f)
 
-	// Empty body, name supplied via query parameter.
-	req := httptest.NewRequest(http.MethodPost, "/v1/executions/exec-1/revoke-signal?name=approve", nil)
-	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
-	resp := rec.Result()
+	resp := doJSON(t, mux, http.MethodPost, "/v1/executions/exec-1/revoke-signal", signalRequest{Name: "approve"})
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("old POST revoke-signal status = %d, want 404 (route removed)", resp.StatusCode)
 	}
-	if f.revokedSig != "approve" {
-		t.Fatalf("revoked signal = %q, want approve", f.revokedSig)
+	if f.revokedSig != "" {
+		t.Fatalf("old POST revoke-signal reached the engine (revokedSig=%q); the removed route must not invoke RevokeSignal", f.revokedSig)
+	}
+}
+
+// TestWorkflowControlRevokeSignalShapeMismatches404 verifies the §4.2 status
+// table for the new route's wrong-method / wrong-shape neighbours. With both
+// POST /v1/executions/{id}/signals and DELETE /v1/executions/{id}/signals/{name}
+// registered, the /v1/executions/{id}/ subtree catch must answer method/shape
+// mismatches with 404 (not 405) so the authorization boundary does not leak
+// that the route exists. spec §4.2 has no 405 row.
+func TestWorkflowControlRevokeSignalShapeMismatches404(t *testing.T) {
+	f := &fakeControlFacade{}
+	mux := newControlMux(f)
+
+	cases := []struct {
+		name   string
+		method string
+		path   string
+	}{
+		// DELETE without the {name} segment: the POST .../signals exact pattern
+		// matches the path but the method mismatches; the subtree catch wins → 404.
+		{"delete_signals_no_name", http.MethodDelete, "/v1/executions/exec-1/signals"},
+		// POST to the DELETE route's path: method mismatch on the DELETE exact
+		// pattern; the subtree catch wins → 404.
+		{"post_signals_named", http.MethodPost, "/v1/executions/exec-1/signals/approve"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			resp := doJSON(t, mux, c.method, c.path, nil)
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusNotFound {
+				t.Fatalf("%s %s: status = %d, want 404 (no 405 leak; §4.2 has no 405 row)", c.method, c.path, resp.StatusCode)
+			}
+		})
 	}
 }
 
@@ -398,8 +473,9 @@ func TestWorkflowControlWaitTerminal(t *testing.T) {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 	var detail engine.ExecutionDetail
-	if err := json.NewDecoder(resp.Body).Decode(&detail); err != nil {
-		t.Fatal(err)
+	env := decodeEnvelope(t, resp, &detail)
+	if !env.Success || env.Code != "200" {
+		t.Fatalf("envelope = %+v, want success/code=200", env)
 	}
 	if detail.Status != types.ExecutionStatusSuccess {
 		t.Fatalf("status = %s, want success", detail.Status)
@@ -421,8 +497,9 @@ func TestWorkflowControlWaitTimeoutReturns202(t *testing.T) {
 		t.Fatalf("status = %d, want 202", resp.StatusCode)
 	}
 	var out waitTimeoutResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		t.Fatal(err)
+	env := decodeEnvelope(t, resp, &out)
+	if !env.Success || env.Code != "200" {
+		t.Fatalf("envelope = %+v, want success/code=200", env)
 	}
 	if !out.TimedOut {
 		t.Fatal("timed_out = false, want true")

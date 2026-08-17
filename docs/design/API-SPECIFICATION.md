@@ -465,9 +465,11 @@ entry-seed 的 409 响应有**两种不同 body**，客户端据此决定是否�
 
 | 现状 | 目标 | 依据 |
 | --- | --- | --- |
-| `POST /v1/executions/{id}/signal` | `POST /v1/executions/{id}/signals` | §1.1 复数资源 |
-| `POST /v1/executions/{id}/revoke-signal` | `DELETE /v1/executions/{id}/signals/{name}` | §1.2 动词粘在路径段里 |
-| 全仓手工 `TrimPrefix` 路径解析 | Go 1.22 mux pattern | §1.3（workflows 面已迁移，executions 面待迁移） |
+| 全仓手工 `TrimPrefix` 路径解析 | Go 1.22 mux pattern | §1.3（workflows 面与 executions 面已迁移；management dead-letters 面待 Task 5 迁移） |
+
+`POST /v1/executions/{id}/signal` → `POST /v1/executions/{id}/signals`（§1.1 复数资源）
+与 `POST /v1/executions/{id}/revoke-signal` → `DELETE /v1/executions/{id}/signals/{name}`（§1.2
+动词粘在路径段里）已完成迁移，从本表移除。
 
 ### 9.2 缺失的端点
 
@@ -482,9 +484,10 @@ entry-seed 的 409 响应有**两种不同 body**，客户端据此决定是否�
 ### 9.3 响应形状
 
 - workflows 族（register/deregister/execute/read/replace）已迁移到信封
-  `writeData`/`writeFail` 并带稳定 snake_case code（§3.2）。剩余 `writeError`
-  调用（executions/management/supply 族）仍产出 `{"error": "..."}`，与 §3.1
-  信封不符，待 Tasks 4/5 迁移
+  `writeData`/`writeFail` 并带稳定 snake_case code（§3.2）。executions 族
+  （inspect/signal/cancel/revoke/wait）亦已迁移完成。剩余 `writeError`
+  调用（management/supply/artifact 族）仍产出 `{"error": "..."}`，与 §3.1
+  信封不符，待 Tasks 5+ 迁移
 - `writeJSON`/`writeError` 在 `service/apiserver` 与 `service/control` 各有一份实
   现，必须合并为一份
 - 前端 `web/packages/xflow-api/src/index.ts` 读 `body.message`，服务端发

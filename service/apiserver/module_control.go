@@ -99,7 +99,10 @@ func (m *workflowControlModule) RegisterHTTP(mux *http.ServeMux) {
 	mux.HandleFunc("GET "+PathExecutionWait, wrap("execution.read", m.handleWaitByID))
 	mux.HandleFunc("POST "+PathExecutionSignals, wrap("execution.signal", m.handleSignalByID))
 	mux.HandleFunc("POST "+PathExecutionCancel, wrap("execution.cancel", m.handleCancelByID))
-	mux.HandleFunc("POST /v1/executions/{id}/revoke-signal", wrap("execution.revoke", m.handleRevokeSignalByID))
+	// §9.1: revoke-signal moved from POST /v1/executions/{id}/revoke-signal
+	// (verb stuck in a path segment) to DELETE /v1/executions/{id}/signals/{name}
+	// — the signal name travels in the path, not the body (spec §7 route table).
+	mux.HandleFunc("DELETE "+PathExecutionSignalByID, wrap("execution.revoke", m.handleRevokeSignalByID))
 	// 404 catch: a path-only subtree that refuses any unrecognized execution
 	// verb with 404. Under Go 1.22 ServeMux a method-qualified pattern answers
 	// a method mismatch (e.g. POST /wait, GET /cancel) with 405, which leaks
@@ -136,7 +139,7 @@ func (m *workflowControlModule) RegisterHTTP(mux *http.ServeMux) {
 //   - GET  /v1/executions/{id}            → execution.read      (non-mutation)
 //   - GET  /v1/executions/{id}/wait       → execution.read      (non-mutation)
 //   - POST /v1/executions/{id}/signals    → execution.signal    (mutation)
-//   - POST /v1/executions/{id}/revoke-signal → execution.revoke (mutation)
+//   - DELETE /v1/executions/{id}/signals/{name} → execution.revoke (mutation)
 //   - POST /v1/executions/{id}/cancel     → execution.cancel    (mutation)
 func (m *workflowControlModule) registerAuthzRoutes(mux *http.ServeMux) {
 	authz := m.authzWrap
@@ -160,7 +163,12 @@ func (m *workflowControlModule) registerAuthzRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET "+PathExecutionByID, authz(OpExecutionRead, false, m.handleInspectByID, execIDResolver("")))
 	mux.HandleFunc("GET "+PathExecutionWait, authz(OpExecutionRead, false, m.handleWaitByID, execIDResolver("wait")))
 	mux.HandleFunc("POST "+PathExecutionSignals, authz(OpExecutionSignal, true, m.handleSignalByID, execIDResolver("signals")))
-	mux.HandleFunc("POST /v1/executions/{id}/revoke-signal", authz(OpExecutionRevoke, true, m.handleRevokeSignalByID, execIDResolver("revoke-signal")))
+	// §9.1: revoke-signal → DELETE /v1/executions/{id}/signals/{name}. The Op
+	// (execution.revoke) is unchanged; the audit-target resource string now
+	// mirrors the new path (execution/{id}/signals/{name}) so the audit row is
+	// coherent with the route the caller hit (spec §6). The resolver reads both
+	// {id} and {name} from the path the mux matched.
+	mux.HandleFunc("DELETE "+PathExecutionSignalByID, authz(OpExecutionRevoke, true, m.handleRevokeSignalByID, execSignalResolver()))
 	mux.HandleFunc("POST "+PathExecutionCancel, authz(OpExecutionCancel, true, m.handleCancelByID, execIDResolver("cancel")))
 	// 404 catch for unrecognized execution verbs. Unwrapped (no authz): the old
 	// resolver's ok=false path returned 404 before authz ran and wrote no audit
@@ -189,6 +197,20 @@ func execIDResolver(suffix string) func(*http.Request) (string, string, string, 
 	}
 }
 
+// execSignalResolver is the resource resolver for
+// DELETE /v1/executions/{id}/signals/{name} (spec §9.1 revoke migration). The
+// audit-target resource string mirrors the new path so the audit row is
+// coherent with the route the caller hit: execution/{id}/signals/{name}. It
+// reads both {id} and {name} from the path the mux matched. ResourceNamespace
+// is left empty for the same IDOR reason as execIDResolver.
+func execSignalResolver() func(*http.Request) (string, string, string, string) {
+	return func(r *http.Request) (string, string, string, string) {
+		id := r.PathValue("id")
+		name := r.PathValue("name")
+		return "execution/" + id + "/signals/" + name, "", id, ""
+	}
+}
+
 // workflowIDResolver builds the resource resolver for a /v1/workflows/{id}
 // route: it reads the {id} the mux matched and returns the workflow-scoped
 // resource string the audit row carries. ResourceNamespace is left empty —
@@ -206,8 +228,10 @@ func workflowIDResolver() func(*http.Request) (string, string, string, string) {
 // subtree: any execution sub-shape no method-qualified pattern serves lands
 // here and is refused with 404 "route not found" — no existence leak. It
 // replaces the default branch of the old hand-rolled handleExecution parser.
+// Enveloped (spec §3) with a stable code so a caller can distinguish a
+// shape-mismatch 404 from an execution_not_found 404.
 func (m *workflowControlModule) handleExecutionNotFound(w http.ResponseWriter, r *http.Request) {
-	writeError(w, http.StatusNotFound, "route not found")
+	writeFail(w, r, http.StatusNotFound, "route_not_found", "route not found")
 }
 
 // handleInspectByID / handleWaitByID / handleSignalByID / handleCancelByID /
@@ -215,7 +239,8 @@ func (m *workflowControlModule) handleExecutionNotFound(w http.ResponseWriter, r
 // value the mux matched and delegate to the per-execution handler. They exist
 // so each execution sub-shape is registered as its own method-qualified
 // pattern (spec §1.3) and the mux — not a hand-rolled parser — selects the
-// operation.
+// operation. handleRevokeSignalByID also pulls {name} (the signal moved from
+// the request body into the path under the §9.1 migration).
 func (m *workflowControlModule) handleInspectByID(w http.ResponseWriter, r *http.Request) {
 	m.handleInspect(w, r, types.ExecutionID(r.PathValue("id")))
 }
@@ -913,15 +938,26 @@ func (m *workflowControlModule) handleSeedExecution(w http.ResponseWriter, r *ht
 	})
 }
 
+// handleInspect serves GET /v1/executions/{id} (spec §7). The execution detail
+// is returned in the response envelope (spec §3) via writeData. A not-found
+// engine error maps to 404 execution_not_found (writeExecEngineFail); an
+// unclassified error collapses to 500 internal_error — never leaking Redis
+// text, internal paths, or node output (spec §3.5).
 func (m *workflowControlModule) handleInspect(w http.ResponseWriter, r *http.Request, id types.ExecutionID) {
 	detail, err := m.eng.Inspect(r.Context(), id)
 	if err != nil {
-		writeEngineError(w, err)
+		writeExecEngineFail(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, detail)
+	writeData(w, r, http.StatusOK, detail)
 }
 
+// handleSignal serves POST /v1/executions/{id}/signals (spec §7). A request
+// without a name is 400 signal_invalid (spec §3.2); a not-found execution is
+// 404 execution_not_found; everything else is 500 internal_error. Success is
+// enveloped via writeData. The signal payload is delivered to the engine, but
+// never appears in message/data — message carries only the stable code's text
+// (spec §3.5).
 func (m *workflowControlModule) handleSignal(w http.ResponseWriter, r *http.Request, id types.ExecutionID) {
 	if !requireMethod(w, r, http.MethodPost) {
 		return
@@ -931,63 +967,73 @@ func (m *workflowControlModule) handleSignal(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if req.Name == "" {
-		writeError(w, http.StatusBadRequest, "name is required")
+		writeFail(w, r, http.StatusBadRequest, "signal_invalid", "signal name is required")
 		return
 	}
 	if err := m.eng.DeliverSignal(r.Context(), id, req.Name, req.Data); err != nil {
-		writeEngineError(w, err)
+		writeExecEngineFail(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"accepted": true})
+	writeData(w, r, http.StatusOK, map[string]bool{"accepted": true})
 }
 
+// handleCancel serves POST /v1/executions/{id}/cancel (spec §7). A not-found
+// execution is 404 execution_not_found; unclassified failures collapse to 500
+// internal_error. Success is enveloped via writeData.
 func (m *workflowControlModule) handleCancel(w http.ResponseWriter, r *http.Request, id types.ExecutionID) {
 	if !requireMethod(w, r, http.MethodPost) {
 		return
 	}
 	if err := m.eng.Cancel(r.Context(), id); err != nil {
-		writeEngineError(w, err)
+		writeExecEngineFail(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"accepted": true})
+	writeData(w, r, http.StatusOK, map[string]bool{"accepted": true})
 }
 
+// handleRevokeSignal serves DELETE /v1/executions/{id}/signals/{name}
+// (spec §7 + §9.1). The §9.1 migration moved the signal name from the request
+// body into the path segment, so the handler reads it via r.PathValue("name")
+// and the body is unused — the old body carried a signalRequest whose Data
+// field RevokeSignal never consumed, so nothing is silently lost. The authz
+// resolver (execSignalResolver) reads the same {name} so the audit-target
+// resource string mirrors the path (spec §6).
+//
+// A consumed-or-not-found signal is 409 signal_consumed (stable snake_case,
+// spec §3.2); a not-found execution is 404 execution_not_found; unclassified
+// failures collapse to 500 internal_error. Success is enveloped via
+// writeData.
 func (m *workflowControlModule) handleRevokeSignal(w http.ResponseWriter, r *http.Request, id types.ExecutionID) {
-	if !requireMethod(w, r, http.MethodPost) {
+	if !requireMethod(w, r, http.MethodDelete) {
 		return
 	}
-	// Body is optional; a JSON {"name":...} overrides the query parameter.
-	name := r.URL.Query().Get("name")
-	if r.ContentLength != 0 {
-		var req signalRequest
-		if !decodeJSON(w, r, &req) {
-			return
-		}
-		if req.Name != "" {
-			name = req.Name
-		}
-	} else {
-		_ = r.Body.Close()
-	}
+	// The {name} segment is read from the path the mux matched. A path with an
+	// empty name (/signals/) does not match this method-qualified pattern and
+	// falls to the /v1/executions/{id}/ 404 catch, so name is non-empty here;
+	// the guard is defensive against a future registration change.
+	name := r.PathValue("name")
 	if name == "" {
-		writeError(w, http.StatusBadRequest, "name is required")
+		writeFail(w, r, http.StatusBadRequest, "signal_invalid", "signal name is required")
 		return
 	}
 	if err := m.eng.RevokeSignal(r.Context(), id, name); err != nil {
 		if errors.Is(err, engine.ErrSignalConsumed) {
-			writeError(w, http.StatusConflict, "signal already consumed or not found")
+			writeFail(w, r, http.StatusConflict, "signal_consumed", "signal already consumed or not found")
 			return
 		}
-		writeEngineError(w, err)
+		writeExecEngineFail(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"revoked": true})
+	writeData(w, r, http.StatusOK, map[string]bool{"revoked": true})
 }
 
 // handleWait long-polls an execution until it reaches a terminal state or the
 // timeout elapses. It uses http.ResponseController to extend the connection's
 // write deadline beyond the server's default WriteTimeout so a long poll does
-// not get cut off mid-flight. The poll timeout is capped at 10 minutes.
+// not get cut off mid-flight. The poll timeout is capped at 10 minutes. Both
+// the terminal-detail success (200) and the timeout response (202) are
+// enveloped via writeData (spec §3); a not-found execution is 404
+// execution_not_found, unclassified failures 500 internal_error.
 func (m *workflowControlModule) handleWait(w http.ResponseWriter, r *http.Request, id types.ExecutionID) {
 	timeout := parseWaitTimeout(r)
 	rc := http.NewResponseController(w)
@@ -1000,16 +1046,16 @@ func (m *workflowControlModule) handleWait(w http.ResponseWriter, r *http.Reques
 	for {
 		detail, err := m.eng.Inspect(ctx, id)
 		if err != nil {
-			writeEngineError(w, err)
+			writeExecEngineFail(w, r, err)
 			return
 		}
 		if types.IsTerminalExecutionStatus(detail.Status) {
-			writeJSON(w, http.StatusOK, detail)
+			writeData(w, r, http.StatusOK, detail)
 			return
 		}
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			writeJSON(w, http.StatusAccepted, waitTimeoutResponse{
+			writeData(w, r, http.StatusAccepted, waitTimeoutResponse{
 				ExecutionID: id,
 				Status:      detail.Status,
 				TimedOut:    true,
@@ -1022,7 +1068,7 @@ func (m *workflowControlModule) handleWait(w http.ResponseWriter, r *http.Reques
 		}
 		select {
 		case <-ctx.Done():
-			writeJSON(w, http.StatusAccepted, waitTimeoutResponse{
+			writeData(w, r, http.StatusAccepted, waitTimeoutResponse{
 				ExecutionID: id,
 				Status:      detail.Status,
 				TimedOut:    true,
@@ -1074,6 +1120,12 @@ func requireMethod(w http.ResponseWriter, r *http.Request, method string) bool {
 // writeEngineError maps typed engine/store errors to HTTP responses. Every
 // unclassified failure is collapsed to a generic 500 message — the underlying
 // error (Redis text, internal paths, backend details) must never reach a client.
+//
+// NOTE: this is the shim-based mapper (writeError → empty trace_id, no
+// X-Request-Id echo). It remains in use by the management family
+// (module_management.go) pending Task 5's envelope migration. The executions
+// family uses writeExecEngineFail below, which is the enveloped twin with
+// stable snake_case codes per spec §3.2.
 func writeEngineError(w http.ResponseWriter, err error) {
 	if errors.Is(err, engine.ErrExecutionInactive) ||
 		errors.Is(err, engine.ErrExecutionNotFound) ||
@@ -1082,6 +1134,21 @@ func writeEngineError(w http.ResponseWriter, err error) {
 		return
 	}
 	writeError(w, http.StatusInternalServerError, "internal server error")
+}
+
+// writeExecEngineFail is the enveloped engine-error mapper for the executions
+// family: it maps typed not-found errors to 404 execution_not_found and
+// everything else to 500 internal_error, via writeFail (so trace_id is stamped
+// and X-Request-Id is echoed — spec §3/§5.2). It carries only execution ID /
+// node names in messages, never node output or credentials (spec §3.5).
+func writeExecEngineFail(w http.ResponseWriter, r *http.Request, err error) {
+	if errors.Is(err, engine.ErrExecutionInactive) ||
+		errors.Is(err, engine.ErrExecutionNotFound) ||
+		errors.Is(err, store.ErrNotFound) {
+		writeFail(w, r, http.StatusNotFound, "execution_not_found", "execution not found")
+		return
+	}
+	writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 }
 
 // writeJSON writes a bare JSON body (no envelope). entry-seed (POST
