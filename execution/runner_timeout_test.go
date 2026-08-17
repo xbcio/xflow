@@ -71,12 +71,7 @@ func TestExecuteEnforcesDeadline(t *testing.T) {
 	if res.Error == nil {
 		t.Fatal("TaskResult.Error = nil, want a permanent node.timeout error")
 	}
-	if !types.IsPermanent(res.Error) {
-		t.Fatalf("TaskResult.Error is not permanent: %v", res.Error)
-	}
-	if !strings.Contains(res.Error.Error(), "node.timeout") && !strings.Contains(res.Error.Error(), "timeout") {
-		t.Fatalf("TaskResult.Error message = %q, want it to mention timeout", res.Error.Error())
-	}
+	assertClassifiedError(t, res.Error, "node.timeout", true, false)
 	// Execute should return within ~200ms of the budget, not 5s (the backstop).
 	if elapsed > 2*time.Second {
 		t.Fatalf("Execute took %v, want ≤ ~200ms of the %v budget", elapsed, budget)
@@ -110,9 +105,7 @@ func TestExpiredDeadlineDoesNotRunHandler(t *testing.T) {
 	if res.Error == nil {
 		t.Fatal("TaskResult.Error = nil, want a permanent node.timeout error")
 	}
-	if !types.IsPermanent(res.Error) {
-		t.Fatalf("TaskResult.Error is not permanent: %v", res.Error)
-	}
+	assertClassifiedError(t, res.Error, "node.timeout", true, false)
 }
 
 // TestZeroDeadlineIsUnbounded: an unconfigured-and-default-disabled node still
@@ -162,12 +155,7 @@ func TestCooperativeHandlerTimeoutIsPermanent(t *testing.T) {
 	if got == nil {
 		t.Fatal("reclassifyTimeout returned nil, want a permanent node.timeout error")
 	}
-	if !types.IsPermanent(got) {
-		t.Fatalf("reclassifyTimeout result is not permanent: %v (reclassification missing?)", got)
-	}
-	if !strings.Contains(got.Error(), "timeout") {
-		t.Fatalf("reclassifyTimeout result = %q, want mention of timeout", got.Error())
-	}
+	assertClassifiedError(t, got, "node.timeout", true, false)
 }
 
 // TestReclassifyNoOpWhenNoDeadline ensures reclassifyTimeout is a no-op when
@@ -221,9 +209,7 @@ func TestExecuteReclassifyWiring(t *testing.T) {
 		if res.Error == nil {
 			t.Fatalf("iteration %d: TaskResult.Error = nil, want permanent node.timeout", i)
 		}
-		if !types.IsPermanent(res.Error) {
-			t.Fatalf("iteration %d: TaskResult.Error is not permanent: %v (reclassify wiring broken on ch branch?)", i, res.Error)
-		}
+		assertClassifiedError(t, res.Error, "node.timeout", true, false)
 	}
 }
 
@@ -254,9 +240,7 @@ func TestOnResumeReclassifyWiring(t *testing.T) {
 		if res.Error == nil {
 			t.Fatalf("iteration %d: TaskResult.Error = nil, want permanent node.timeout", i)
 		}
-		if !types.IsPermanent(res.Error) {
-			t.Fatalf("iteration %d: TaskResult.Error is not permanent: %v (reclassify wiring broken on callOnResume ch branch?)", i, res.Error)
-		}
+		assertClassifiedError(t, res.Error, "node.timeout", true, false)
 	}
 }
 
@@ -302,9 +286,7 @@ func TestSuspendingPathsAreBounded(t *testing.T) {
 	if res.Error == nil {
 		t.Fatal("TaskResult.Error = nil, want a permanent node.timeout error on the suspending path")
 	}
-	if !types.IsPermanent(res.Error) {
-		t.Fatalf("TaskResult.Error is not permanent: %v", res.Error)
-	}
+	assertClassifiedError(t, res.Error, "node.timeout", true, false)
 	if elapsed > 2*time.Second {
 		t.Fatalf("Execute took %v on suspending path, want ≤ ~200ms of the %v budget", elapsed, budget)
 	}
@@ -408,12 +390,11 @@ func TestParentCancelCooperativeNotPermanentTimeout(t *testing.T) {
 	if res.Error == nil {
 		t.Fatal("TaskResult.Error = nil, want a non-nil cancellation error")
 	}
-	if types.IsPermanent(res.Error) {
-		t.Errorf("PROBE RED: parent cancellation reported as PERMANENT node timeout: %v", res.Error)
-	}
-	if !errors.Is(res.Error, context.Canceled) && !strings.Contains(res.Error.Error(), "node.cancelled") {
-		t.Errorf("TaskResult.Error = %v, want a transient node.cancelled (or wrapped context.Canceled), not a permanent timeout", res.Error)
-	}
+	// Pin the wire contract: a cooperative ctx.Err() echo under parent-cancel
+	// must be reclassified to a transient node.cancelled ClassifiedError — not
+	// a bare context.Canceled pass-through (which the commit path would report
+	// as ErrorSourceUnclassified) and not a permanent node.timeout.
+	assertClassifiedError(t, res.Error, "node.cancelled", false, true)
 	if strings.Contains(res.Error.Error(), "10m0s timeout") {
 		t.Errorf("TaskResult.Error message lies about a timeout that never happened: %q", res.Error.Error())
 	}
@@ -468,12 +449,7 @@ func TestParentCancelAbandonBranchNotPermanentTimeout(t *testing.T) {
 	if res.Error == nil {
 		t.Fatal("TaskResult.Error = nil, want a non-nil cancellation error")
 	}
-	if types.IsPermanent(res.Error) {
-		t.Errorf("abandon branch reported a PERMANENT node timeout for a parent cancellation: %v", res.Error)
-	}
-	if !strings.Contains(res.Error.Error(), "node.cancelled") {
-		t.Errorf("TaskResult.Error = %v, want a transient node.cancelled from the abandon branch", res.Error)
-	}
+	assertClassifiedError(t, res.Error, "node.cancelled", false, true)
 	// The timeout metric must NOT increment for a non-timeout cancellation,
 	// even on the abandon branch.
 	if n := obs.timeoutCount(); n != 0 {
@@ -526,12 +502,7 @@ func TestParentCancelOnResumeAbandonNotPermanentTimeout(t *testing.T) {
 	if res.Error == nil {
 		t.Fatal("TaskResult.Error = nil, want a non-nil cancellation error")
 	}
-	if types.IsPermanent(res.Error) {
-		t.Errorf("callOnResume abandon branch reported a PERMANENT node timeout for a parent cancellation: %v", res.Error)
-	}
-	if !strings.Contains(res.Error.Error(), "node.cancelled") {
-		t.Errorf("TaskResult.Error = %v, want a transient node.cancelled from the callOnResume abandon branch", res.Error)
-	}
+	assertClassifiedError(t, res.Error, "node.cancelled", false, true)
 	if n := obs.timeoutCount(); n != 0 {
 		t.Errorf("OnNodeExecutionTimeout fired %d time(s) on callOnResume abandon for a parent cancellation, want 0", n)
 	}
@@ -561,12 +532,7 @@ func TestGenuineDeadlineCooperativeIsPermanentTimeout(t *testing.T) {
 	if res.Error == nil {
 		t.Fatal("TaskResult.Error = nil, want a permanent node.timeout")
 	}
-	if !types.IsPermanent(res.Error) {
-		t.Fatalf("TaskResult.Error is not permanent for a genuine deadline: %v", res.Error)
-	}
-	if !strings.Contains(res.Error.Error(), "node.timeout") && !strings.Contains(res.Error.Error(), "timeout") {
-		t.Fatalf("TaskResult.Error = %q, want it to mention timeout", res.Error.Error())
-	}
+	assertClassifiedError(t, res.Error, "node.timeout", true, false)
 	if n := obs.timeoutCount(); n == 0 {
 		t.Errorf("OnNodeExecutionTimeout did not fire for a genuine deadline, want >= 1")
 	}
@@ -584,9 +550,10 @@ func TestReclassifyCancelCauseRules(t *testing.T) {
 	ctxDL, cancelDL := context.WithDeadline(context.Background(), dlPast)
 	defer cancelDL()
 	got := reclassifyTimeout(ctxDL, context.DeadlineExceeded, budget, dlPast)
-	if got == nil || !types.IsPermanent(got) {
-		t.Fatalf("DeadlineExceeded -> got %v, want permanent node.timeout", got)
+	if got == nil {
+		t.Fatal("DeadlineExceeded -> nil, want permanent node.timeout")
 	}
+	assertClassifiedError(t, got, "node.timeout", true, false)
 
 	// Parent cancel, deadline far in the future -> transient node.cancelled.
 	dlFuture := time.Now().Add(10 * time.Minute)
@@ -596,12 +563,7 @@ func TestReclassifyCancelCauseRules(t *testing.T) {
 	if got == nil {
 		t.Fatal("Canceled (deadline future) -> nil, want transient node.cancelled")
 	}
-	if types.IsPermanent(got) {
-		t.Fatalf("Canceled (deadline future) -> %v, want NOT permanent", got)
-	}
-	if !strings.Contains(got.Error(), "node.cancelled") {
-		t.Fatalf("Canceled (deadline future) -> %q, want node.cancelled", got.Error())
-	}
+	assertClassifiedError(t, got, "node.cancelled", false, true)
 
 	// Both causes present, deadline elapsed: parent cancelled first so
 	// ctx.Err() == Canceled, but the deadline instant has passed. Must
@@ -610,9 +572,10 @@ func TestReclassifyCancelCauseRules(t *testing.T) {
 	ctxBoth, cancelBoth := context.WithCancel(context.Background())
 	cancelBoth()
 	got = reclassifyTimeout(ctxBoth, context.Canceled, budget, dlElapsed)
-	if got == nil || !types.IsPermanent(got) {
-		t.Fatalf("Canceled+deadline-elapsed -> %v, want permanent node.timeout (deadline won the race to the budget)", got)
+	if got == nil {
+		t.Fatal("Canceled+deadline-elapsed -> nil, want permanent node.timeout")
 	}
+	assertClassifiedError(t, got, "node.timeout", true, false)
 
 	// nil err is a no-op even when the context is done (success preserved,
 	// no timeout metric fires). This pins the minor fix: a handler that
@@ -620,6 +583,137 @@ func TestReclassifyCancelCauseRules(t *testing.T) {
 	got = reclassifyTimeout(ctxDL, nil, budget, dlPast)
 	if got != nil {
 		t.Fatalf("nil err with done ctx -> %v, want nil (success preserved)", got)
+	}
+}
+
+// --- Finding 1 regression: verdict preservation vs cancellation echo ---
+//
+// reclassifyTimeout exists to normalize a bare ctx.Err() echo (returned by a
+// cooperative handler that does `<-ctx.Done(); return ctx.Err()`) into a
+// stable *ClassifiedError. The bug was that it normalized UNCONDITIONALLY —
+// clobbering a handler's OWN permanent business verdict that had nothing to
+// do with the cancellation. These tests pin the discriminator: reclassify
+// only when the error IS the cancellation echo (errors.Is ctx), and preserve
+// the handler's own verdict otherwise.
+//
+// They call reclassifyTimeout directly because the Execute-level goroutine+
+// select path is racy between the ch branch (reclassify) and the abandon
+// branch (no handler error to preserve). The call-site wiring is covered by
+// TestExecuteReclassifyWiring / TestOnResumeReclassifyWiring; these pin the
+// classification contract directly.
+
+// TestReclassifyPreservesBusinessVerdictOnParentCancel is the core Finding-1
+// regression: the parent context is cancelled (deadline 10 minutes away ->
+// cancelCancelled), but the handler computed its OWN permanent business
+// verdict (not an echo of ctx.Err()). reclassifyTimeout must PRESERVE it.
+// Swallowing it into a transient node.cancelled makes a permanent "account is
+// closed" verdict retryable, and retrying will never make the account open.
+// In the transport-failure case (renewLeaseLoop cancels after MaxRetries
+// consecutive renewal errors — service/runner/lease_renew.go:111-116) the
+// lease token is still valid and the commit lands, so the swallowed verdict
+// is committed and the node is re-run.
+func TestReclassifyPreservesBusinessVerdictOnParentCancel(t *testing.T) {
+	budget := 5 * time.Second
+	dlFuture := time.Now().Add(10 * time.Minute) // deadline far away -> cancelCancelled
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	bizErr := types.NewPermanentError("biz.invalid_account", "account is closed")
+	got := reclassifyTimeout(ctx, bizErr, budget, dlFuture)
+	if got == nil {
+		t.Fatal("reclassifyTimeout returned nil, want the preserved business verdict")
+	}
+	assertClassifiedError(t, got, "biz.invalid_account", true, false)
+}
+
+// TestReclassifyStillReclassifiesCooperativeEchoOnParentCancel pins the case
+// reclassifyTimeout exists for: a cooperative handler does
+// `<-ctx.Done(); return ctx.Err()` and surfaces a bare context.Canceled, which
+// is neither Permanent nor a stable ClassifiedError. reclassifyTimeout MUST
+// still turn it into a transient node.cancelled. This guards against the
+// Finding-1 fix over-preserving (e.g. preserving every error and breaking the
+// cooperative-echo normalization path that the commit/queue layers depend on).
+func TestReclassifyStillReclassifiesCooperativeEchoOnParentCancel(t *testing.T) {
+	budget := 5 * time.Second
+	dlFuture := time.Now().Add(10 * time.Minute) // deadline far away -> cancelCancelled
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	got := reclassifyTimeout(ctx, context.Canceled, budget, dlFuture)
+	if got == nil {
+		t.Fatal("reclassifyTimeout returned nil for a cooperative ctx.Err() echo")
+	}
+	assertClassifiedError(t, got, "node.cancelled", false, true)
+}
+
+// TestReclassifyPreservesBusinessVerdictOnGenuineTimeout rules on the
+// symmetric question: a handler returns its own permanent business verdict
+// while its execution deadline HAS fired. Ruling: the business verdict wins.
+// The timeout verdict exists to normalize a bare ctx.Err() echo (neither
+// Permanent nor a stable ClassifiedError) into a terminal classification; a
+// handler that already produced a stable *ClassifiedError verdict needs no
+// normalization. The business verdict ("account is closed") is more truthful
+// and actionable for operators than the generic budget message ("exceeded its
+// 5s timeout"), and a handler that returned a verdict is not hung, so retry
+// policy is unaffected. This holds symmetrically with the parent-cancel case:
+// the discriminator is "is the error the cancellation echo?" regardless of
+// which cause fired.
+func TestReclassifyPreservesBusinessVerdictOnGenuineTimeout(t *testing.T) {
+	budget := 5 * time.Second
+	dlPast := time.Now().Add(-time.Second) // deadline elapsed -> cancelTimeout
+	ctx, cancel := context.WithDeadline(context.Background(), dlPast)
+	defer cancel()
+
+	bizErr := types.NewPermanentError("biz.invalid_account", "account is closed")
+	got := reclassifyTimeout(ctx, bizErr, budget, dlPast)
+	if got == nil {
+		t.Fatal("reclassifyTimeout returned nil, want the preserved business verdict")
+	}
+	assertClassifiedError(t, got, "biz.invalid_account", true, false)
+}
+
+// TestReclassifyStillReclassifiesCooperativeEchoOnGenuineTimeout pins the
+// symmetric echo case: a cooperative handler returns context.DeadlineExceeded
+// after the deadline fired. It MUST be reclassified to a permanent
+// node.timeout (a timeout is a verdict; the retry short-circuit declines and
+// the queue layers decline to redeliver). This guards the genuine-deadline
+// path against the Finding-1 fix over-preserving a bare ctx.Err() echo.
+func TestReclassifyStillReclassifiesCooperativeEchoOnGenuineTimeout(t *testing.T) {
+	budget := 5 * time.Second
+	dlPast := time.Now().Add(-time.Second) // deadline elapsed -> cancelTimeout
+	ctx, cancel := context.WithDeadline(context.Background(), dlPast)
+	defer cancel()
+
+	got := reclassifyTimeout(ctx, context.DeadlineExceeded, budget, dlPast)
+	if got == nil {
+		t.Fatal("reclassifyTimeout returned nil for a cooperative DeadlineExceeded echo")
+	}
+	assertClassifiedError(t, got, "node.timeout", true, false)
+}
+
+// assertClassifiedError pins the *types.ClassifiedError wire contract via
+// errors.As — NOT substring matching on the message. A classification contract
+// is about Code / Permanent / Retryable, which a message string is only a weak
+// proxy for (a bare context.Canceled pass-through would satisfy
+// strings.Contains(..., "cancelled")). This helper is the load-bearing
+// assertion shape for the timeout/cancel classification fix.
+func assertClassifiedError(t *testing.T, err error, wantCode string, wantPermanent, wantRetryable bool) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("error is nil, want a *types.ClassifiedError with Code=%q", wantCode)
+	}
+	var ce *types.ClassifiedError
+	if !errors.As(err, &ce) {
+		t.Fatalf("error is not a *types.ClassifiedError: %v (type %T)", err, err)
+	}
+	if ce.Code != wantCode {
+		t.Errorf("Code = %q, want %q", ce.Code, wantCode)
+	}
+	if ce.Permanent != wantPermanent {
+		t.Errorf("Permanent = %v, want %v (Code=%s)", ce.Permanent, wantPermanent, ce.Code)
+	}
+	if ce.Retryable != wantRetryable {
+		t.Errorf("Retryable = %v, want %v (Code=%s)", ce.Retryable, wantRetryable, ce.Code)
 	}
 }
 

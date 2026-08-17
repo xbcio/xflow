@@ -579,15 +579,52 @@ func newCancelError(cause cancelCause, budget time.Duration) error {
 }
 
 // reclassifyTimeout replaces err with the appropriate terminal error when the
-// handler's context is done. A cooperative handler surfaces ctx.Err() as its
-// own error — which is neither Permanent nor a stable ClassifiedError, so the
-// retry/queue layers would mishandle it. This reclassifies it based on the
-// cancel cause:
+// handler's error IS the cancellation itself, merely echoed back by a
+// cooperative handler. A cooperative handler that does
+// `<-ctx.Done(); return ctx.Err()` surfaces a bare context.Canceled /
+// context.DeadlineExceeded, which is neither Permanent nor a stable
+// ClassifiedError, so the retry/queue/commit layers mishandle it (the commit
+// path reports it as ErrorSourceUnclassified and fences the lease for its
+// expiry path). Reclassifying it to a stable node.timeout / node.cancelled
+// ClassifiedError fixes that.
 //
-//   - cancelTimeout   -> permanent node.timeout (retry short-circuit declines;
-//     queue layers decline to redeliver). A timeout is a verdict.
-//   - cancelCancelled -> transient node.cancelled (retry applies; the server
-//     redelivers to the runner that won the lease).
+// Discriminator (a) vs (b):
+//
+//   - (a) the handler's error IS the cancellation, merely echoed -> reclassify.
+//     Detected by errors.Is(err, context.Canceled) || errors.Is(err,
+//     context.DeadlineExceeded). This matches:
+//       * the bare sentinel (ctx.Err() returned directly)
+//       * a %w-wrapped form (fmt.Errorf("node X: %w", ctx.Err()))
+//   - (b) the handler's error is its OWN verdict, produced while the ctx was
+//     cancelled -> PRESERVED verbatim. A *types.ClassifiedError never matches
+//     the errors.Is probe: its Is() only returns true for ErrPermanent. So a
+//     handler that computed types.NewPermanentError("biz.invalid_account",
+//     "account is closed") keeps its verdict. A permanent business verdict
+//     must not become a retryable node.cancelled, and retrying will never make
+//     the account open. This holds symmetrically for cancelTimeout: a genuine
+//     business verdict produced at/after the deadline instant is more truthful
+//     and actionable for operators than the generic budget message, and a
+//     handler that returned a verdict is not hung, so retry policy is
+//     unaffected. The budget verdict is the platform's; the business verdict
+//     is the node's, and the node's is more specific.
+//
+// Edge case: a handler that formats ctx.Err() with %v instead of %w
+// (fmt.Errorf("...: %v", ctx.Err())) breaks the errors.Is chain and is NOT
+// detected as an echo, so it is preserved as-is. This is acceptable: such a
+// handler violates Go's error-wrapping convention, and the preserved error is
+// treated the same as any other unclassified error the handler might return
+// on the no-deadline path (cancelNone -> pass-through). The reclassify safety
+// net is best-effort for cooperative handlers that follow the convention.
+//
+// Note on the preserved error string: when (b) preserves the handler's error,
+// it preserves a string the runner did not author. This is the SAME behaviour
+// as the no-deadline path (cancelNone returns err verbatim) and the pre-fix
+// code; it is not introduced by this change. A handler that embeds node
+// output / credentials in its error message violates security policy §7
+// (handlers must not leak tokens/output into error strings) regardless of
+// reclassification — the runner cannot sanitise an arbitrary handler string,
+// and the budget-only node.timeout/node.cancelled messages it DOES author
+// carry no runtime data.
 //
 // No-ops: err == nil (the handler succeeded — even if the deadline fired at
 // the same instant, success is preserved and no timeout metric fires), or no
@@ -600,5 +637,11 @@ func reclassifyTimeout(ctx context.Context, err error, budget time.Duration, dea
 	if cause == cancelNone {
 		return err
 	}
-	return newCancelError(cause, budget)
+	// Only reclassify when the handler's error IS the cancellation echo. A
+	// handler's own verdict (any non-echo error, including a
+	// *types.ClassifiedError business verdict) is preserved verbatim.
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return newCancelError(cause, budget)
+	}
+	return err
 }
