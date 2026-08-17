@@ -178,10 +178,12 @@ func TestAPIDeadLetterClientReplaySuccessEnvelope(t *testing.T) {
 // not on a compile error — because the regression is precisely "decode
 // succeeded with zero values".
 //
-// A bare {entries,next_cursor} body has no success field, so envelope.Success
-// decodes to its zero value (false) and do() surfaces it via the §4.1
-// success:false@2xx branch as an httpStatusError{status:200} — still a hard
-// error, never a silent zero-value success. That is the guard this test pins.
+// A bare {entries,next_cursor} body has no success key. do() must distinguish
+// "success field absent" (response was never enveloped — notEnvelopeError)
+// from "success:false present" (a §4.1 violation — httpStatusError). The two
+// need different operator diagnostics: collapsing them would hide a missing
+// envelope behind a phantom failure report. The success:false@2xx path is
+// pinned by TestAPIDeadLetterClient2xxSuccessFalseIsError.
 func TestAPIDeadLetterClientBareBodyMustError(t *testing.T) {
 	// A bare {entries:[...],next_cursor:""} body with no success/code wrapper.
 	bareList := deadLetterListResponse{
@@ -202,16 +204,17 @@ func TestAPIDeadLetterClientBareBodyMustError(t *testing.T) {
 	if err == nil {
 		t.Fatal("List against a bare (non-envelope) 2xx body: err = nil, want error — silent degradation is exactly what decision (A) forbids")
 	}
-	// The error must be an httpStatusError (the §4.1 path), proving do()
-	// did NOT fall through to decode the bare body as the typed list. A plain
-	// json.Unmarshal of {entries,...} into the envelope struct leaves Success
-	// at its false zero value, so the success:false@2xx branch fires.
-	var httpErr httpStatusError
-	if !errors.As(err, &httpErr) {
-		t.Fatalf("error = %v (%T), want httpStatusError (bare body must not decode to a zero-value success)", err, err)
+	// The bare body has no success key, so do() must surface notEnvelopeError —
+	// the "response was never enveloped" diagnosis — NOT httpStatusError,
+	// which is reserved for a present success:false at 2xx (a §4.1 violation).
+	// Collapsing the two would point the operator at a phantom failure report.
+	var notEnvErr notEnvelopeError
+	if !errors.As(err, &notEnvErr) {
+		t.Fatalf("error = %v (%T), want notEnvelopeError (bare body must be reported as a missing envelope, not a success:false@2xx violation)", err, err)
 	}
-	if httpErr.status != http.StatusOK {
-		t.Fatalf("httpStatusError.status = %d, want 200 (the bare body came back 2xx)", httpErr.status)
+	var httpErr httpStatusError
+	if errors.As(err, &httpErr) {
+		t.Fatalf("error = %v (%T), must NOT be httpStatusError (bare body is a missing envelope, not a §4.1 success:false@2xx violation)", err, err)
 	}
 }
 
@@ -265,27 +268,56 @@ func TestAPIDeadLetterClient2xxSuccessFalseIsError(t *testing.T) {
 	}
 }
 
-// TestAPIDeadLetterClientNullDataIsNoPayload covers the data:null branch:
-// a success envelope with no payload returns no error and leaves the target
-// at its zero value (replay's not_found shape that the server envelopes as
-// success:true data:null is NOT exercised here — that path returns a 404 —
-// but a genuine empty success must not be misread as a decode failure).
-func TestAPIDeadLetterClientNullDataIsNoPayload(t *testing.T) {
-	_, c := newEnvelopeTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		writeTestEnvelope(w, http.StatusOK, testEnvelope{
-			Success: true,
-			Code:    "200",
-			Data:    json.RawMessage("null"),
+// TestAPIDeadLetterClientMissingDataMustError covers the data-missing branch:
+// a success envelope whose data field is null OR absent must surface as an
+// error, not silently decode into a zero-value typed target. Both do() call
+// sites (List, Replay) pass a non-nil out and expect a payload — there is no
+// legitimate payload-less 2xx — so a missing data field is a field-name drift
+// or a server omission, exactly the silent-degradation form decision (A)
+// requires this test to prevent.
+//
+// The previous form of this test (TestAPIDeadLetterClientNullDataIsNoPayload)
+// asserted that data:null returned no error and left the target at zero — it
+// pinned the silent degradation as legitimate behavior. It is now inverted.
+func TestAPIDeadLetterClientMissingDataMustError(t *testing.T) {
+	t.Run("data null", func(t *testing.T) {
+		// data is explicitly null. A success envelope with no payload is a
+		// server omission, not a valid empty success — the §3.1 envelope puts
+		// the payload in data; success without data is malformed.
+		_, c := newEnvelopeTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+			writeTestEnvelope(w, http.StatusOK, testEnvelope{
+				Success: true,
+				Code:    "200",
+				Data:    json.RawMessage("null"),
+			})
 		})
+		_, err := c.List(context.Background(), "exec-env", "ns1", engine.DeadLetterPage{Limit: 100})
+		if err == nil {
+			t.Fatal("List against data:null: err = nil, want error — a success envelope with no payload is a field drift, not a valid empty success")
+		}
+		var missingErr missingDataError
+		if !errors.As(err, &missingErr) {
+			t.Fatalf("error = %v (%T), want missingDataError", err, err)
+		}
 	})
-	list, err := c.List(context.Background(), "exec-env", "ns1", engine.DeadLetterPage{Limit: 100})
-	if err != nil {
-		t.Fatalf("List against data:null: err = %v, want nil (no payload is valid)", err)
-	}
-	if len(list.Entries) != 0 {
-		t.Fatalf("Entries = %d, want 0 (no payload)", len(list.Entries))
-	}
-	if list.NextCursor != "" {
-		t.Fatalf("NextCursor = %q, want empty", list.NextCursor)
-	}
+
+	t.Run("data absent", func(t *testing.T) {
+		// The data key is entirely absent (field-name drift / server
+		// omission), not null. This is the real silent-degradation shape: a
+		// JSON decode leaves env.Data at zero length with no error, and a naive
+		// do() would return nil and a zero-value typed target.
+		_, c := newEnvelopeTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"success":true,"code":"200","message":"","trace_id":"trace-absent"}`))
+		})
+		_, err := c.List(context.Background(), "exec-env", "ns1", engine.DeadLetterPage{Limit: 100})
+		if err == nil {
+			t.Fatal("List against absent data: err = nil, want error — a success envelope without a data key is a field drift, not a valid empty success")
+		}
+		var missingErr missingDataError
+		if !errors.As(err, &missingErr) {
+			t.Fatalf("error = %v (%T), want missingDataError", err, err)
+		}
+	})
 }

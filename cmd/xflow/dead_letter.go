@@ -345,6 +345,18 @@ func (c *apiDeadLetterClient) setAuth(req *http.Request) {
 // the body directly into out; enveloping would have decoded zero values
 // silently (no error) — the exact failure mode the envelope rollout must not
 // produce. This helper is the CLI's half of the (A) decision.
+//
+// envelope.Success is *bool (not bool) on purpose: Go's zero value makes a
+// missing success key indistinguishable from success:false, and the two need
+// different diagnostics. A missing key means the response was never enveloped
+// (notEnvelopeError) — the server did not adopt §3.1; a present success:false
+// at 2xx is a §4.1 violation (httpStatusError). Collapsing them would point the
+// operator at a phantom failure report for a missing envelope.
+//
+// Both call sites (List, Replay) pass a non-nil out and expect a payload; there
+// is no legitimate payload-less 2xx. A success envelope whose data is absent or
+// null is a field-name drift or a server omission — surfaced as missingDataError
+// rather than a silent zero-value typed target.
 func (c *apiDeadLetterClient) do(req *http.Request, out any) error {
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -372,7 +384,7 @@ func (c *apiDeadLetterClient) do(req *http.Request, out any) error {
 	// data is read as json.RawMessage because envelope.Data is `any` — a direct
 	// unmarshal yields map[string]any, which cannot be re-decoded into a struct.
 	var env struct {
-		Success bool            `json:"success"`
+		Success *bool           `json:"success"`
 		Code    string          `json:"code"`
 		Message string          `json:"message"`
 		Data    json.RawMessage `json:"data"`
@@ -381,13 +393,24 @@ func (c *apiDeadLetterClient) do(req *http.Request, out any) error {
 	if err := json.Unmarshal(raw, &env); err != nil {
 		return fmt.Errorf("decode envelope from %s %s: %w", req.Method, redactURL(req.URL.String()), err)
 	}
-	if !env.Success {
-		// A 2xx with success:false is a spec violation; surface the status code
-		// without the body so the operator gets a stable, non-leaking error.
+	if env.Success == nil {
+		// The success key is absent: the response was never enveloped. This is
+		// NOT a §4.1 success:false@2xx violation — surface it as a distinct,
+		// semantically correct error so the operator does not chase a phantom
+		// failure report. The body is not included (§3.5 discipline).
+		return notEnvelopeError{method: req.Method, path: redactURL(req.URL.String())}
+	}
+	if !*env.Success {
+		// A 2xx with success:false present is a spec §4.1 violation; surface the
+		// status code without the body so the operator gets a stable, non-leaking
+		// error.
 		return httpStatusError{status: resp.StatusCode, path: redactURL(req.URL.String())}
 	}
+	// A success envelope with no data field (absent or null) is a field-name
+	// drift or a server omission. Both call sites expect a payload, so this must
+	// not silently yield a zero-value typed target — return missingDataError.
 	if len(env.Data) == 0 || string(env.Data) == "null" {
-		return nil
+		return missingDataError{method: req.Method, path: redactURL(req.URL.String())}
 	}
 	if err := json.Unmarshal(env.Data, out); err != nil {
 		return fmt.Errorf("decode data from %s %s: %w", req.Method, redactURL(req.URL.String()), err)
@@ -421,6 +444,36 @@ func (e httpStatusError) Error() string {
 	default:
 		return fmt.Sprintf("management API %s: status %d", e.path, e.status)
 	}
+}
+
+// notEnvelopeError signals that a 2xx management API response was not the spec
+// §3.1 envelope — the success field was absent. It is distinct from a
+// success:false envelope (httpStatusError): a missing success key means the
+// server never enveloped the response, not that it reported failure. The body
+// is not carried (§3.5); only the method and redacted path surface so an
+// operator can locate the offending route. errors.As distinguishes it from
+// httpStatusError so tests and callers do not collapse the two diagnoses.
+type notEnvelopeError struct {
+	method string
+	path   string
+}
+
+func (e notEnvelopeError) Error() string {
+	return fmt.Sprintf("%s %s: response is not the spec §3.1 envelope (success field missing)", e.method, e.path)
+}
+
+// missingDataError signals that a 2xx success envelope carried no data field
+// (either absent or null). Every do() call site passes a non-nil out and
+// expects a payload, so a success envelope without data is a field-name drift
+// or a server omission — never a silent zero-value success. The body is not
+// carried (§3.5); only the method and redacted path surface.
+type missingDataError struct {
+	method string
+	path   string
+}
+
+func (e missingDataError) Error() string {
+	return fmt.Sprintf("%s %s: success envelope missing data field", e.method, e.path)
 }
 
 // redactURL returns the URL path without the query. The query may carry the
