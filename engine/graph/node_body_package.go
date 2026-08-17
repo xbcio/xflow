@@ -128,6 +128,11 @@ func ProjectNodeBodyPackage(mapNodeName string, params map[string]any, visibleSu
 			Version:    nd.Version,
 			OnError:    nd.OnError,
 			Parameters: cloneStringAnyMap(nd.Parameters),
+			// Timeout crosses the body projection boundary so a map body member
+			// keeps its own bound. A group's bound and a member's bound nest;
+			// dropping this silently downgrades every map body member to the
+			// global default.
+			Timeout: nd.Timeout,
 		})
 	}
 

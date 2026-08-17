@@ -27,6 +27,15 @@ const (
 	metricOutboxPending             = "xflow_outbox_pending"
 	metricOutboxOldestPendingAge    = "xflow_outbox_oldest_pending_age_seconds"
 	metricOutboxErrors              = "xflow_outbox_errors_total"
+	// Node execution timeout / duration metrics. Distinct from
+	// metricNodeTimedOut (xflow_node_timed_out_total): that one counts
+	// SUSPENDED nodes whose park timer fired and which wake normally; the
+	// three below count handler invocations that exceeded their execution
+	// deadline and terminated. Reusing the suspend metric would conflate a
+	// normal wake with a terminal failure.
+	metricNodeTimeouts         = "xflow_node_timeouts_total"
+	metricNodeTimeoutAbandoned = "xflow_node_timeout_abandoned"
+	metricNodeExecDuration     = "xflow_node_execution_duration_seconds"
 )
 
 // MetricsHooks turns engine lifecycle hooks into xflow_ Prometheus counters.

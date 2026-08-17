@@ -35,6 +35,7 @@ type nodeEntry struct {
 	onError          types.OnError
 	normalizedParams map[string]any
 	runnerSelector   *types.RunnerSelector
+	timeout          time.Duration
 }
 
 type edge struct {
@@ -226,6 +227,16 @@ func (n *NodeRef) Body(body *WorkflowBuilder) *NodeRef {
 func (n *NodeRef) RunnerSelector(selector types.RunnerSelector) *NodeRef {
 	if n.entry != nil {
 		n.entry.runnerSelector = cloneRunnerSelector(&selector)
+	}
+	return n
+}
+
+// Timeout bounds a single execution of this node. Zero inherits the engine's
+// default; a negative value declares no limit. It bounds one attempt, not the
+// sum of retries.
+func (n *NodeRef) Timeout(d time.Duration) *NodeRef {
+	if n.entry != nil {
+		n.entry.timeout = d
 	}
 	return n
 }
@@ -488,6 +499,7 @@ func (w *WorkflowBuilder) assembleNodes(def *types.WorkflowDef) {
 			Parameters:     params,
 			OnError:        string(entry.onError),
 			RunnerSelector: cloneRunnerSelector(entry.runnerSelector),
+			Timeout:        entry.timeout,
 		})
 	}
 }

@@ -573,6 +573,12 @@ func wireRunnerMetrics(svcCfg *runnersvc.Config, o *runnerOptions) {
 	// malformed records looks exactly like an idle topic — offsets keep being
 	// committed, so consumer-group lag stays at zero.
 	kafkatrigger.SetObserver(metrics.NewTriggerMetrics(o.metrics))
+	// The node execution timeout observer reports runner-detected timeouts, the
+	// abandoned-goroutine gauge, and per-invocation duration. Without it a
+	// runner that is shedding work on deadline looks identical to one that is
+	// simply idle — the tasks end as failures on the server with nothing here
+	// to say the deadline is what ended them.
+	svcCfg.TimeoutObserver = metrics.NewNodeTimeoutMetrics(o.metrics)
 }
 
 // runnerCapabilities converts declared node types and guarantees the group

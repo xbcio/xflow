@@ -298,7 +298,10 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 		serverOpts = append(serverOpts, WithControlLogger(cfg.Logger))
 	}
 	if cfg.Metrics != nil {
-		serverOpts = append(serverOpts, WithAuthObserver(metrics.NewAuthMetrics(cfg.Metrics)))
+		serverOpts = append(serverOpts,
+			WithAuthObserver(metrics.NewAuthMetrics(cfg.Metrics)),
+			WithNodeTimeoutObserver(metrics.NewNodeTimeoutMetrics(cfg.Metrics)),
+		)
 	}
 	if cfg.Tracer != nil {
 		serverOpts = append(serverOpts, WithTracer(cfg.Tracer))

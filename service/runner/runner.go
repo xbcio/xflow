@@ -109,6 +109,11 @@ type Config struct {
 	// before the handler is cancelled). Renewal only happens when the protocol
 	// client implements leaseRenewClient — the gRPC client does not.
 	Renewal RenewalConfig
+	// TimeoutObserver, when set, records node execution timeout/duration
+	// events from the in-process executor (handler deadline fired, abandoned
+	// goroutine gauge, per-invocation duration). nil leaves the executor with
+	// a no-op observer so behavior is byte-identical to before this feature.
+	TimeoutObserver execution.TimeoutObserver
 }
 
 type Runner struct {
@@ -145,7 +150,7 @@ func New(client ProtocolClient, registry engine.HandlerRegistry, config Config) 
 	}
 	r := &Runner{
 		client:            client,
-		executor:          execution.NewRunner(registry, execution.WithResourcePool(config.ResourcePool), execution.WithCredentialResolver(config.CredentialResolver), execution.WithArtifactCodeResolver(config.ArtifactCodeResolver)),
+		executor:          execution.NewRunner(registry, execution.WithResourcePool(config.ResourcePool), execution.WithCredentialResolver(config.CredentialResolver), execution.WithArtifactCodeResolver(config.ArtifactCodeResolver), execution.WithTimeoutObserver(config.TimeoutObserver)),
 		config:            config,
 		tracer:            tracer,
 		activationTracker: config.ActivationTracker,

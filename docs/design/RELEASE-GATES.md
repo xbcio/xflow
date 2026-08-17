@@ -129,6 +129,29 @@ G2 control-plane HA 的承诺范围与限制（映射 §4 反声明，在 G2 整
 - handler exactly-once。
 - 多租户隔离（G1 是单租户边界）。
 
+## 3.1 节点执行超时（Node Execution Timeout）
+
+> 节点级执行超时是 node-timeout 特性引入的新终态来源。本节阐明其与 at-least-once 契约的关系与已知覆盖边界，供部署与值班对照。
+
+**契约关系（at-least-once）**：
+- 超时是一次 handler 调用的终态裁决，不是 transient 失败：引擎以 `types.NewPermanentError("node.timeout", ...)` 标记，`engine/atomic_commit.go` 的重试短路拒绝重跑，队列层（`memory_queue` / asynq retry）拒绝重投。**超时节点不再重投**。
+- 但**宿主幂等键仍是必需**：超时发生前 handler 可能已产生副作用（例如已发出 HTTP 请求、已写库），且 runner 在 ctx 触发后可能已放弃该 goroutine（Go 无法 kill）。重放 / 下游重观测仍可能重复触达该副作用，必须由宿主幂等键（`execution_id` + `node_name`）兜底——这与既有 at-least-once 契约一致，超时不放宽该要求。
+- 服务端 backstop（`service/control/group_control_loop.go` `renewLease`）在续约时发现 `ExecutionDeadline` 已过，则提交终态并拒绝续约。这避免「拒绝续约 → 一个 TTL 后 sweeper 当作崩溃 runner 重投」的回路，正是超时必须规避的路径。
+
+**终态来源**：超时有两个来源，由 `source` 标签区分：
+- `source="runner"`：runner 自检（`execution/runner.go` 的 goroutine+select 超时分支）。生产应以此为主。
+- `source="server"`：控制面 backstop（`renewLease`）。`source=server` 长期非零说明有 runner 未实现或未升级 deadline——是该升级的信号。
+
+**可观测性指标**（`observability/metrics/node_timeout.go`）：
+- `xflow_node_timeouts_total{node_type,source}`：终态超时计数。**注意与既有 `xflow_node_timed_out_total` 区分**——后者是 SUSPEND 泊车到期后正常唤醒的节点计数，由 `backend/.../timeout/monitor.go` 唯一产生，不复用。
+- `xflow_node_timeout_abandoned{node_type}`：被放弃（deadline 触发但 handler 未返回）的 handler 计数，**gauge 而非 counter**，应回落到零；长期非零说明某节点类型不响应 ctx、泄漏 goroutine（Task 4 接受的泄漏在此变得可见）。
+- `xflow_node_execution_duration_seconds{node_type}`：单次 handler 调用墙钟时长，用于为 timeout 预算设定提供基线。
+
+**已知限制（诚实声明，非承诺覆盖）**：
+- (i) 服务端 backstop 仅 HTTP runner 覆盖：`service/runner/runner.go` 将续约限制在 `leaseRenewClient` 类型断言之后，gRPC client 不满足，故 gRPC runner 不续约、无服务端超时兜底。与项目方向一致（HTTP 是主要 runner 传输）。
+- (ii) group lease 不被 backstop 覆盖：`engine.ErrGroupLeaseNotSupported`，`CommitTaskTimeout` 拒绝 group lease。group 的 deadline 在 `GroupLeasePayload.Deadline`，不在 `TaskLease.ExecutionDeadline`。
+- (iii) 在有环图上，服务端路径退化为不应用 `OnError` 的 fatal commit，与 runner 上报路径不同（runner 上报经 `CommitTaskResultWithOutcome`，应用 `on_error`）。
+
 ## 4. 文档反声明（Release Check）
 
 以下声明**禁止**出现在任何 release 文档中，均已证伪：

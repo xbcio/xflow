@@ -121,6 +121,16 @@ type TaskLease struct {
 	NodeVersion int           `json:"node_version,omitempty"`
 	IssuedAt    time.Time     `json:"issued_at"`
 	TTL         time.Duration `json:"ttl,omitempty"`
+	// ExecutionDeadline is the absolute instant past which this node's single
+	// execution is over. Stamped at lease build time from the compiled node
+	// timeout. Zero means no limit.
+	//
+	// It is NOT the lease TTL. TTL is the renewal clock (60s by default); this
+	// is the business deadline the renewal loop is not allowed to push past,
+	// and the server refuses to renew beyond it (service/control renewLease).
+	// Group leases already carry an equivalent absolute instant in
+	// GroupLeasePayload -- this is the same idea for node leases.
+	ExecutionDeadline time.Time `json:"execution_deadline,omitempty"`
 	// Namespace is the authoritative namespace recorded on the assignment at
 	// submit time. It is set by the control plane when building/recovering the
 	// lease so the report/commit path (which has no principal resolver) can

@@ -176,6 +176,57 @@ func TestNewRunnerObservesTheSupplyGate(t *testing.T) {
 	}
 }
 
+// TestNewRunnerObservesNodeExecutionTimeouts drives the observer and reads the
+// resulting family out of the Prometheus registry, so it fails if the observer
+// is missing OR is wired to a different registry than the caller's. Asserting
+// only that cfg.TimeoutObserver is non-nil would pass on an observer bound to
+// some other registry, which reports nothing the caller can scrape.
+func TestNewRunnerObservesNodeExecutionTimeouts(t *testing.T) {
+	m := metrics.New()
+	cfg, err := buildRunnerServiceConfig(RunnerConfig{
+		ServerURL: "http://server:8080",
+	}, WithRunnerMetrics(m))
+	if err != nil {
+		t.Fatalf("buildRunnerServiceConfig: %v", err)
+	}
+	if cfg.TimeoutObserver == nil {
+		t.Fatal("cfg.TimeoutObserver is nil — every node this runner kills on " +
+			"deadline is indistinguishable from an idle runner")
+	}
+
+	cfg.TimeoutObserver.OnNodeExecutionTimeout(context.Background(), "xflow.http", "runner")
+
+	families, err := m.Registry().Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	var found bool
+	for _, f := range families {
+		if f.GetName() == "xflow_node_timeouts_total" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("no xflow_node_timeouts_total in the caller's registry " +
+			"after a recorded timeout; the observer is bound to a different registry")
+	}
+}
+
+// TestNewRunnerLeavesTheTimeoutObserverUnsetWithoutMetrics pins the one case
+// that must NOT wire it: with no registry there is nowhere to record, and
+// execution.WithTimeoutObserver treats nil as "keep the no-op", so behaviour is
+// byte-identical to a runner built before this observer existed.
+func TestNewRunnerLeavesTheTimeoutObserverUnsetWithoutMetrics(t *testing.T) {
+	cfg, err := buildRunnerServiceConfig(RunnerConfig{ServerURL: "http://server:8080"})
+	if err != nil {
+		t.Fatalf("buildRunnerServiceConfig: %v", err)
+	}
+	if cfg.TimeoutObserver != nil {
+		t.Error("cfg.TimeoutObserver set without WithRunnerMetrics; it would record " +
+			"into a registry nobody can read")
+	}
+}
+
 // Not covered here: the Kafka trigger observer (kafkatrigger.SetObserver in
 // wireRunnerMetrics). Its only read-back is the package-private obs(), and its
 // only driver is the package-private newConsumer seam, so asserting it from

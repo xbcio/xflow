@@ -315,6 +315,7 @@ func registerNodes(def *types.WorkflowDef, g *Graph) (int, error) {
 			Parameters:     cloneStringAnyMap(nd.Parameters),
 			Retry:          resolveRetry(nd.Retry, def.Settings),
 			GroupIdx:       -1,
+			Timeout:        nd.Timeout,
 		}
 		if nd.Type == "xflow.start" || nd.Kind == types.NodeKindTrigger {
 			g.entryIndexes[nd.Name] = i

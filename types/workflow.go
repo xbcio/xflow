@@ -95,6 +95,11 @@ type NodeDef struct {
 	// Retry overrides WorkflowSettings.Retry for this node. Nil means inherit
 	// the workflow default; the workflow default of nil means no retries.
 	Retry *RetrySettings `json:"retry,omitempty"`
+	// Timeout bounds a single execution of this node. Zero inherits the
+	// engine's default (engine.DefaultNodeTimeout); a negative value means no
+	// limit and must be written explicitly. It bounds one attempt, not the sum
+	// of retries -- each retry attempt gets the full budget.
+	Timeout time.Duration `json:"timeout,omitempty"`
 }
 
 type RunnerSelectorMode string
@@ -185,7 +190,6 @@ type WorkflowContext struct {
 
 // WorkflowSettings controls execution behaviour of the workflow.
 type WorkflowSettings struct {
-	Timeout     int            `json:"timeout,omitempty"`
 	Concurrency int            `json:"concurrency,omitempty"`
 	Timezone    string         `json:"timezone,omitempty"`
 	OnError     string         `json:"on_error,omitempty"`

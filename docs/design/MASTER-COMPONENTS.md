@@ -592,7 +592,7 @@ type LocalReconciler struct {
 
 ### 9.4 Leader-only 辅助组件
 
-**TimeoutMonitor**：定期扫描 `running` 状态的 Execution，检查是否超过 `Settings.Timeout`，标记为 `timeout`。
+**TimeoutMonitor**：定期扫描 `running` 状态的 Execution，检查是否超过节点级 `timeout` 配置（见 DSL `nodes[].timeout` 三态语义），标记为 `timeout`。工作流级的 `settings.timeout` 字段已在 node-timeout 特性中移除——超时是节点级语义，按单次 handler 调用计时。
 
 **Archiver**：Execution 到达终态后，从 Redis 异步归档到 DB，归档完成后设置 Redis TTL（默认 24h）。
 
@@ -665,7 +665,6 @@ type WorkflowDef struct {
 }
 
 type WorkflowSettings struct {
-    Timeout     int            `json:"timeout,omitempty"`
     Concurrency int            `json:"concurrency,omitempty"`
     Timezone    string         `json:"timezone,omitempty"`
     OnError     string         `json:"on_error,omitempty"`
@@ -735,6 +734,13 @@ type NodeDef struct {
     Parameters     map[string]any  `json:"parameters,omitempty"`
     UI             map[string]any  `json:"ui,omitempty"` // 编辑器专属，不参与运行时 hash
     Retry          *RetrySettings  `json:"retry,omitempty"`
+    // Timeout bounds a single execution of this node. Zero inherits the engine
+    // default (engine.DefaultNodeTimeout); negative means no limit and must be
+    // written explicitly. Bounds one attempt, not the sum of retries. A timeout
+    // is a terminal verdict (PermanentError): not redelivered, but the host
+    // idempotency key is still required because the handler may have produced
+    // side effects before the deadline fired.
+    Timeout        time.Duration   `json:"timeout,omitempty"`
 }
 
 type NodeKind string

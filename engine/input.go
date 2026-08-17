@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/types"
@@ -24,6 +25,22 @@ import (
 // other key to Input.Data.
 const ExecutionScopeNodesKey = "$nodes"
 
+// resolveNodeTimeout normalizes NodeDef's three-state timeout into the single
+// convention the rest of the system reads: a positive duration is a bound, and
+// zero means unbounded. That matches the two pre-existing readers
+// (input.Timeout > 0 in action/http.go, gm.Timeout > 0 in group_lease.go), so
+// no second convention enters the codebase.
+func (e *Engine) resolveNodeTimeout(raw time.Duration) time.Duration {
+	switch {
+	case raw < 0:
+		return 0 // explicit opt-out
+	case raw == 0:
+		return e.defaultNodeTimeout // may itself be 0, i.e. default disabled
+	default:
+		return raw
+	}
+}
+
 // buildInput assembles the types.Input from graph metadata and upstream outputs.
 // Backend read failures are authoritative failures: they must never be treated
 // as an empty execution or absent upstream business data.
@@ -37,12 +54,16 @@ func (e *Engine) buildInput(ctx context.Context, t *Task, g *graph.Graph) (*type
 	}
 
 	runtime := snap.Runtime
+	// NodeAt returns a defensive deep copy of NodeMeta, so the engine owns this
+	// copy. Call it once and reuse it for both Parameters and Timeout -- calling
+	// twice would mint a second independent copy whose Timeout we would then
+	// throw away.
+	meta := g.NodeAt(t.NodeIdx)
 	input := &types.Input{
-		// NodeAt returns a defensive deep copy of Parameters; the engine owns
-		// that copy, so no further clone is needed before handing it to the
-		// handler. (The handler is untrusted; the Graph stays isolated because
-		// the copy is independent.)
-		Params:      g.NodeAt(t.NodeIdx).Parameters,
+		// NodeAt's copy is independent, so no further clone is needed before
+		// handing Params to the handler. (The handler is untrusted; the Graph
+		// stays isolated because the copy is independent.)
+		Params:      meta.Parameters,
 		Vars:        mergeVars(g.Vars(), runtimeVars(runtime)),
 		Config:      g.Config(),
 		Runtime:     cloneRuntime(runtime),
@@ -55,6 +76,11 @@ func (e *Engine) buildInput(ctx context.Context, t *Task, g *graph.Graph) (*type
 		// graph's values -- see the Input.WorkflowName field comment.
 		WorkflowName:    g.Name(),
 		WorkflowVersion: g.WorkflowVersion(),
+		// Resolved here (not at graph compile time) so the engine's
+		// WithDefaultNodeTimeout option is honoured; the graph package cannot
+		// see that option. > 0 means bounded, 0 means unbounded, matching the
+		// two pre-existing readers (action/http.go, group_lease.go).
+		Timeout: e.resolveNodeTimeout(meta.Timeout),
 	}
 
 	if t.Type == TaskTypeNodeResume {

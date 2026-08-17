@@ -85,6 +85,19 @@ func WithAuthObserver(observer AuthObserver) ServerOption {
 	return func(s *Server) { s.core.authObserver = observer }
 }
 
+// WithNodeTimeoutObserver installs the observer for node execution timeout
+// events emitted from the server side (the renewLease backstop). nil or unset
+// leaves the Core with a nil observer, which renewLease nil-guards so legacy
+// behavior is byte-identical. The observer must avoid high-cardinality labels
+// (see execution.TimeoutObserver).
+func WithNodeTimeoutObserver(observer execution.TimeoutObserver) ServerOption {
+	return func(s *Server) {
+		if observer != nil {
+			s.core.timeoutObserver = observer
+		}
+	}
+}
+
 // WithEntryActivationStore installs the durable EntryActivation store used to
 // fence entry seeds by activation generation (spec §11.6). When set, a seed
 // carrying a generation older than the currently-assigned generation is
