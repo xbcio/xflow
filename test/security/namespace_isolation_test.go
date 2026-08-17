@@ -214,8 +214,36 @@ func (f *namespaceIsolationFixture) getExecution(token string, execID types.Exec
 	resp := f.do(req)
 	defer func() { _ = resp.Body.Close() }()
 	var detail engine.ExecutionDetail
-	_ = json.NewDecoder(resp.Body).Decode(&detail)
+	decodeEnvelopeData(f.t, resp, &detail)
 	return resp.StatusCode, detail
+}
+
+// decodeEnvelopeData unwraps the spec §3.1 envelope and decodes its data field
+// into out. Every user-face route in this fixture returns the envelope, so a
+// direct decode into the typed target would silently yield a zero value — the
+// field names live one level down under "data". A failure envelope carries
+// data:null, which leaves out at its zero value without an error; the caller
+// asserts on the status code in that case.
+//
+// The decode errors are asserted rather than discarded: these helpers back
+// IDOR assertions, and a helper that swallows a decode failure turns a real
+// cross-namespace leak into a passing test.
+func decodeEnvelopeData(t *testing.T, resp *http.Response, out any) {
+	t.Helper()
+	var env struct {
+		Success bool            `json:"success"`
+		Code    string          `json:"code"`
+		Data    json.RawMessage `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+		t.Fatalf("decode envelope: %v", err)
+	}
+	if len(env.Data) == 0 || string(env.Data) == "null" {
+		return
+	}
+	if err := json.Unmarshal(env.Data, out); err != nil {
+		t.Fatalf("decode envelope data: %v (data=%s)", err, env.Data)
+	}
 }
 
 func (f *namespaceIsolationFixture) getManagementExecution(token string, execID types.ExecutionID) int {
@@ -250,7 +278,7 @@ func (f *namespaceIsolationFixture) listDeadLetters(token string, execID types.E
 	resp := f.do(req)
 	defer func() { _ = resp.Body.Close() }()
 	var list deadLetterListResponse
-	_ = json.NewDecoder(resp.Body).Decode(&list)
+	decodeEnvelopeData(f.t, resp, &list)
 	return resp.StatusCode, list.Entries
 }
 
@@ -260,7 +288,7 @@ func (f *namespaceIsolationFixture) replayDeadLetter(token string, execID types.
 	resp := f.do(req)
 	defer func() { _ = resp.Body.Close() }()
 	var out deadLetterReplayResponse
-	_ = json.NewDecoder(resp.Body).Decode(&out)
+	decodeEnvelopeData(f.t, resp, &out)
 	return resp.StatusCode, out
 }
 
