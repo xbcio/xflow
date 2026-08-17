@@ -190,13 +190,15 @@ func TestReclassifyNoOpWhenNoError(t *testing.T) {
 }
 
 // TestExecuteReclassifyWiring pins that reclassifyTimeout is actually CALLED
-// on the goroutine+select ch branch in Execute. A cooperative handler that
-// waits on ctx.Done() then returns ctx.Err() makes both select branches ready
-// simultaneously. Go picks randomly, but BOTH branches must produce a Permanent
-// node.timeout error — the ctx.Done() branch returns newNodeTimeoutError
-// directly, the ch branch relies on reclassifyTimeout. Running 50 iterations
-// ensures both branches are exercised (probability of never hitting ch across
-// 50 fair coin flips: ~1e-15).
+// on the ch branch in Execute's select. A cooperative handler waits on
+// ctx.Done() then returns context.DeadlineExceeded. The outer select nearly
+// always picks ctx.Done() (the two branches are NOT a fair coin flip — the main
+// goroutine is already blocked in select when ctx fires, while the handler
+// goroutine still needs scheduling to write ch). The reclassify coverage comes
+// from the INNER non-blocking select after runtime.Gosched(): the yield lets
+// the handler goroutine run and write to ch (~56% hit rate per iteration).
+// Removing reclassify from that inner path reddens the test on the first
+// iteration that hits it (measured: iteration 0 fails immediately).
 func TestExecuteReclassifyWiring(t *testing.T) {
 	const iterations = 50
 	h := ctxWaitHandler{}
@@ -347,22 +349,16 @@ func (h *blockingSuspendHandler) PrepareSuspend(_ context.Context, _ *types.Inpu
 	return &types.SuspendSpec{Mode: types.ModeSignal, Signals: []string{"approval"}}, nil
 }
 
-// ctxWaitHandler sleeps for slightly less than the budget then returns
-// context.DeadlineExceeded. The handler finishes 1-2ms before the context
-// deadline fires, so the ch branch in the select is ready first. This ensures
-// the ch branch (where reclassifyTimeout is wired) gets exercised deterministically.
-// reclassifyTimeout sees ctx.Err() != nil because by the time the select
-// evaluates, the deadline has already fired (the main goroutine was also
-// sleeping, giving the timer a chance to fire).
-//
-// The test uses a 50ms budget. The handler sleeps 48ms and returns. The ctx
-// deadline fires at 50ms. Between 48ms and 50ms the channel has a value but
-// ctx.Done() hasn't fired yet, so the select MUST pick ch. reclassifyTimeout
-// then checks ctx.Err(): if the deadline has fired (50ms elapsed), it
-// reclassifies; if not yet, it returns the original error. To ensure ctx IS
-// expired when reclassify runs, we use a 50ms budget with an extra 5ms of
-// scheduling slack — but the invariant we actually need is weaker: across N
-// iterations, at least SOME must hit the ch branch with ctx expired.
+// ctxWaitHandler waits for ctx cancellation then returns
+// context.DeadlineExceeded. The outer select nearly always picks ctx.Done()
+// (measured 0/100 taking the outer ch branch) because the main goroutine is
+// already blocked in select when ctx fires, while the handler goroutine still
+// needs to be scheduled to write to ch. The reclassify coverage comes from the
+// INNER non-blocking select in the ctx.Done() branch: after runtime.Gosched()
+// yields, the handler goroutine writes to ch, and the inner select catches it
+// (~56% hit rate measured over 200 iterations). Removing reclassify from that
+// inner path surfaces a bare context.DeadlineExceeded on the first iteration
+// that hits it (empirically iteration 0 or 1).
 type ctxWaitHandler struct{}
 
 func (ctxWaitHandler) Descriptor() types.Descriptor {
@@ -374,9 +370,10 @@ func (ctxWaitHandler) Execute(ctx context.Context, _ *types.Input) (*types.Outpu
 	return nil, context.DeadlineExceeded
 }
 
-// ctxWaitSuspendHandler is a SuspendingHandler whose OnResume sleeps for the
-// full budget then returns ctx.Err(). Used by the loop test for callOnResume
-// reclassify wiring.
+// ctxWaitSuspendHandler is a SuspendingHandler whose OnResume waits for ctx
+// cancellation then returns context.DeadlineExceeded. Same mechanism as
+// ctxWaitHandler: reclassify coverage comes from the inner fallback select
+// after Gosched in callOnResume's ctx.Done() branch.
 type ctxWaitSuspendHandler struct{}
 
 func (*ctxWaitSuspendHandler) Descriptor() types.Descriptor {

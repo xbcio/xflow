@@ -171,7 +171,12 @@ func (r *Runner) Execute(ctx context.Context, lease *engine.TaskLease) (engine.T
 			// Deadline fired before handler returned. Check once more: the
 			// handler may have raced to completion at the same instant.
 			// Gosched yields to give a cooperative handler that just unblocked
-			// from <-ctx.Done() a chance to write its result to ch.
+			// from <-ctx.Done() a chance to write its result to ch. Beyond
+			// testability, this has independent correctness value: when the
+			// handler and deadline complete at the same instant, using the
+			// handler's real result (with reclassification) is preferable to
+			// a synthetic timeout error — it preserves any partial output the
+			// handler produced.
 			runtime.Gosched()
 			select {
 			case hr := <-ch:
