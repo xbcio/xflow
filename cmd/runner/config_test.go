@@ -2,14 +2,13 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/xbcio/xflow/namespace"
+	xflowsdk "github.com/xbcio/xflow/sdk/xflow"
 )
 
 func TestLoadRunnerConfigFromYAML(t *testing.T) {
@@ -698,76 +697,42 @@ resource_pool:
 	}
 }
 
-func TestShouldConstructPool(t *testing.T) {
-	tests := []struct {
-		name string
-		cfg  runnerConfig
-		want bool
-	}{
-		{name: "no credentials, no db/grpc cap", cfg: runnerConfig{capabilities: parseCapabilities("xflow.function")}, want: false},
-		{name: "credentials present", cfg: runnerConfig{capabilities: parseCapabilities("xflow.function"), credentials: map[string]map[string]any{"db": {"dsn": "x"}}}, want: true},
-		{name: "xflow.database capability", cfg: runnerConfig{capabilities: parseCapabilities("xflow.function,xflow.database")}, want: true},
-		{name: "xflow.grpc capability", cfg: runnerConfig{capabilities: parseCapabilities("xflow.function,xflow.grpc")}, want: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := shouldConstructPool(tt.cfg); got != tt.want {
-				t.Fatalf("shouldConstructPool = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestRunnerServiceConfig_ConstructsPoolAndResolverWhenConfigured(t *testing.T) {
+// Credential values carry ${ENV} references so a DSN password never sits in the
+// YAML. Expansion happens at load time, in this package; the SDK receives
+// already-resolved leaves and has no env knowledge of its own. A config that
+// reached the SDK unexpanded would hand handlers a literal "${XFLOW_DB_PASSWORD}"
+// as the password and fail at connect time with a message that names no cause.
+func TestRunCommandPropagatesExpandedCredentialsToTheSDK(t *testing.T) {
 	t.Setenv("XFLOW_DB_PASSWORD", "s3cret")
-	cfg := defaultRunnerConfig()
-	cfg.capabilities = parseCapabilities("xflow.database")
-	cfg.credentials = map[string]map[string]any{
-		"db": {"dsn": "user:${XFLOW_DB_PASSWORD}@tcp(db:3306)/xflow", "driver": "mysql"},
-	}
-	// Expand env leaves (loadRunnerConfigFromBytes does this; emulate here so
-	// the unit test exercises the resolver closure directly).
-	if err := expandEnvCredentialValues(cfg.credentials); err != nil {
+	path := filepath.Join(t.TempDir(), "runner.yaml")
+	data := []byte(`
+server:
+  url: http://server:8080
+runner:
+  capabilities:
+    - xflow.database
+credentials:
+  db:
+    driver: mysql
+    dsn: "user:${XFLOW_DB_PASSWORD}@tcp(db:3306)/xflow"
+`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	svcCfg, err := runnerServiceConfig(cfg, nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if svcCfg.ResourcePool == nil {
-		t.Fatal("ResourcePool = nil, want a constructed pool")
-	}
-	if svcCfg.CredentialResolver == nil {
-		t.Fatal("CredentialResolver = nil, want a resolver closure")
-	}
-	got := svcCfg.CredentialResolver(namespace.Default, "db")
-	if got["dsn"] != "user:s3cret@tcp(db:3306)/xflow" {
-		t.Fatalf("resolver returned dsn = %v, want env-expanded dsn", got["dsn"])
-	}
-	if svcCfg.CredentialResolver(namespace.Default, "missing") != nil {
-		t.Fatal("resolver returned non-nil for unknown credential name")
-	}
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = svcCfg.ResourcePool.Close(ctx)
+	restore := stubRunnerServiceFactory(func(cfg xflowsdk.RunnerConfig) error {
+		db, ok := cfg.Credentials["db"]
+		if !ok {
+			t.Fatalf("Credentials = %v, want a \"db\" entry", cfg.Credentials)
+		}
+		if db["dsn"] != "user:s3cret@tcp(db:3306)/xflow" {
+			t.Errorf("dsn = %v, want the env-expanded value", db["dsn"])
+		}
+		return nil
 	})
-}
+	defer restore()
 
-func TestRunnerServiceConfig_NoPoolWhenNotConfigured(t *testing.T) {
-	cfg := defaultRunnerConfig()
-	cfg.capabilities = parseCapabilities("xflow.function")
-	svcCfg, err := runnerServiceConfig(cfg, nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if svcCfg.ResourcePool != nil {
-		t.Fatalf("ResourcePool = %T, want nil (no credentials and no db/grpc capability)", svcCfg.ResourcePool)
-	}
-	if svcCfg.CredentialResolver != nil {
-		t.Fatal("CredentialResolver = non-nil, want nil (no credentials)")
-	}
+	runCommand(t, "run", "--config", path)
 }
 
 func TestLoadRunnerConfigNamespaces(t *testing.T) {
@@ -851,14 +816,17 @@ func TestResolveRunnerConfigRejectsInvalidNamespace(t *testing.T) {
 	}
 }
 
-func TestRunnerServiceConfigPassesNamespaces(t *testing.T) {
-	cfg := defaultRunnerConfig()
-	cfg.namespaces = []namespace.Namespace{"namespace-a", "namespace-b"}
-	svcCfg, err := runnerServiceConfig(cfg, nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(svcCfg.Namespaces) != 2 || svcCfg.Namespaces[0] != "namespace-a" || svcCfg.Namespaces[1] != "namespace-b" {
-		t.Fatalf("Namespaces = %v, want [namespace-a namespace-b]", svcCfg.Namespaces)
-	}
+func TestRunCommandPropagatesNamespacesToTheSDK(t *testing.T) {
+	restore := stubRunnerServiceFactory(func(cfg xflowsdk.RunnerConfig) error {
+		if len(cfg.Namespaces) != 2 || cfg.Namespaces[0] != "namespace-a" || cfg.Namespaces[1] != "namespace-b" {
+			t.Errorf("Namespaces = %v, want [namespace-a namespace-b]; a runner that "+
+				"loses them claims assignments outside the namespaces it was scoped to",
+				cfg.Namespaces)
+		}
+		return nil
+	})
+	defer restore()
+
+	runCommand(t, "run", "--server", "http://server:8080",
+		"--namespace", "namespace-a", "--namespace", "namespace-b")
 }

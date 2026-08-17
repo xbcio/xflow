@@ -2,12 +2,8 @@ package main
 
 import (
 	"bytes"
-	"context"
-	"errors"
 	"strings"
-	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -258,24 +254,9 @@ func TestRunHelpDoesNotRunRunner(t *testing.T) {
 	}
 }
 
-func TestRunnerReconnectsAfterStreamEnds(t *testing.T) {
-	var calls atomic.Int32
-	var fn runFunc = func(ctx context.Context) error {
-		n := calls.Add(1)
-		if n >= 3 {
-			return errStop
-		}
-		return errors.New("stream ended")
-	}
-	oldMin, oldMax := reconnectMinBackoff, reconnectMaxBackoff
-	reconnectMinBackoff = 5 * time.Millisecond
-	reconnectMaxBackoff = 20 * time.Millisecond
-	defer func() { reconnectMinBackoff, reconnectMaxBackoff = oldMin, oldMax }()
-	err := runWithReconnect(context.Background(), fn)
-	if !errors.Is(err, errStop) {
-		t.Fatalf("want errStop, got %v", err)
-	}
-	if calls.Load() < 3 {
-		t.Fatalf("expected >=3 attempts, got %d", calls.Load())
-	}
-}
+// The reconnect loop this file used to test now lives in sdk/xflow, where
+// Runner.Run owns it, and is covered by
+// sdk/xflow.TestRunnerReconnectsAfterATransportError. That test is the stronger
+// one: it drives a real HTTP control plane that starts returning 500 and proves
+// recovery by a SECOND Register, where the test here fed the loop an errStop
+// sentinel that no production path ever produced.

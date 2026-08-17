@@ -5,92 +5,12 @@ import (
 	"context"
 	"testing"
 
-	"github.com/xbcio/xflow/observability/metrics"
-	"github.com/xbcio/xflow/service/protocol"
-	runnersvc "github.com/xbcio/xflow/service/runner"
+	xflowsdk "github.com/xbcio/xflow/sdk/xflow"
 )
 
-// The reporter must be buildable without --metrics-addr. A cross-domain runner
-// is exactly the deployment that does not want to open a scrape port, so tying
-// reporting to the self-exposure flag would exclude the only case this feature
-// exists for.
-func TestReporterBuiltWithoutMetricsAddr(t *testing.T) {
-	client := protocol.NewClient("http://example.invalid", nil)
-	rep, err := buildMetricsReporter(client, metrics.New(), runnerConfig{
-		runnerID:              "runner-a",
-		reportMetrics:         true,
-		reportMetricsInterval: "15s",
-		metricsAddr:           "", // deliberately empty
-	})
-	if err != nil {
-		t.Fatalf("buildMetricsReporter: %v", err)
-	}
-	if rep == nil {
-		t.Fatal("reporter is nil with --report-metrics set and no --metrics-addr")
-	}
-}
-
-// Not asking for reporting must produce no reporter at all — nil is what
-// Config.MetricsReporter treats as "never report".
-func TestNoReporterWhenNotRequested(t *testing.T) {
-	client := protocol.NewClient("http://example.invalid", nil)
-	rep, err := buildMetricsReporter(client, metrics.New(), runnerConfig{
-		runnerID:      "runner-a",
-		reportMetrics: false,
-		metricsAddr:   ":9091", // scraping on, reporting off
-	})
-	if err != nil {
-		t.Fatalf("buildMetricsReporter: %v", err)
-	}
-	if rep != nil {
-		t.Fatal("reporter built without --report-metrics")
-	}
-}
-
-// A transport whose client cannot report must degrade to nil rather than error:
-// the gRPC client does not implement MetricsReportClient (see spec §4.3), and a
-// gRPC runner asked to report should keep running, not refuse to start.
-func TestNoReporterWhenClientCannotReport(t *testing.T) {
-	rep, err := buildMetricsReporter(nonReportingClient{}, metrics.New(), runnerConfig{
-		runnerID:              "runner-a",
-		reportMetrics:         true,
-		reportMetricsInterval: "15s",
-	})
-	if err != nil {
-		t.Fatalf("buildMetricsReporter: %v", err)
-	}
-	if rep != nil {
-		t.Fatal("reporter built for a client that cannot report")
-	}
-}
-
-func TestReporterRejectsBadInterval(t *testing.T) {
-	client := protocol.NewClient("http://example.invalid", nil)
-	if _, err := buildMetricsReporter(client, metrics.New(), runnerConfig{
-		runnerID:              "runner-a",
-		reportMetrics:         true,
-		reportMetricsInterval: "not-a-duration",
-	}); err == nil {
-		t.Fatal("bad --report-metrics-interval accepted")
-	}
-}
-
-// nonReportingClient satisfies ProtocolClient without MetricsReportClient,
-// standing in for the gRPC client.
-type nonReportingClient struct{}
-
-func (nonReportingClient) Register(context.Context, protocol.RegisterRunnerRequest) (protocol.RegisterRunnerResponse, error) {
-	return protocol.RegisterRunnerResponse{}, nil
-}
-func (nonReportingClient) Heartbeat(context.Context, protocol.HeartbeatRequest) (protocol.HeartbeatResponse, error) {
-	return protocol.HeartbeatResponse{}, nil
-}
-func (nonReportingClient) Poll(context.Context, protocol.PollTaskRequest) (protocol.PollTaskResponse, error) {
-	return protocol.PollTaskResponse{}, nil
-}
-func (nonReportingClient) ReportResult(context.Context, protocol.ReportResultRequest) (protocol.ReportResultResponse, error) {
-	return protocol.ReportResultResponse{}, nil
-}
+// The reporter itself is assembled and tested in sdk/xflow (including the gRPC
+// degrade-to-nil path and the bad-interval rejection). What is left here is the
+// translation: whether --report-metrics and --report-metrics-interval reach it.
 
 // yaml must be able to turn reporting on, and a changed flag must beat the file
 // — the same precedence every other runner setting already follows.
@@ -131,40 +51,46 @@ func TestReportMetricsDefaultsOff(t *testing.T) {
 	}
 }
 
-// TestReportMetricsFlagWiresReporter exercises the full production command path:
-// parseFlags → resolveConfig → runRunner → buildMetricsReporter → Config.MetricsReporter.
-// It uses the same stubRunnerServiceFactory pattern as the SubgraphRuntime and
-// GroupRuntime wiring tests to inspect the Config the runner service receives.
-func TestReportMetricsFlagWiresReporter(t *testing.T) {
-	restore := stubRunnerServiceFactory(func(cfg runnersvc.Config) error {
-		if cfg.MetricsReporter == nil {
-			t.Error("runner service got no MetricsReporter; --report-metrics was set " +
-				"with an HTTP transport, so reporting should be enabled")
+// The full command path: flags → resolveConfig → runRunner → SDK. A
+// cross-domain runner cannot be scraped, so reporting is the only way its
+// metrics are ever seen — losing the flag here loses them silently.
+func TestReportMetricsFlagReachesTheSDK(t *testing.T) {
+	restore := stubRunnerServiceFactory(func(cfg xflowsdk.RunnerConfig) error {
+		if !cfg.ReportMetrics {
+			t.Error("ReportMetrics is false; --report-metrics was set, so this runner's " +
+				"metrics never reach the server and it cannot be scraped either")
+		}
+		if cfg.ReportMetricsInterval.String() != "20s" {
+			t.Errorf("ReportMetricsInterval = %v, want 20s", cfg.ReportMetricsInterval)
 		}
 		return nil
 	})
 	defer restore()
 
-	err := executeRootWithOptions(commandOptions{
-		runFunc: func(cfg runnerConfig) error {
-			return runRunner(context.Background(), cfg)
-		},
-		out: &bytes.Buffer{},
-		err: &bytes.Buffer{},
-	}, "run", "--server", "http://server:8080", "--transport", "http", "--report-metrics", "--report-metrics-interval", "20s")
-	if err != nil {
-		t.Fatal(err)
-	}
+	runCommand(t, "run", "--server", "http://server:8080", "--transport", "http",
+		"--report-metrics", "--report-metrics-interval", "20s")
 }
 
-// TestNoReportMetricsFlagLeavesReporterNil ensures that when --report-metrics is
-// not set, the runner service receives a nil MetricsReporter — byte-identical
-// behavior to before this feature.
-func TestNoReportMetricsFlagLeavesReporterNil(t *testing.T) {
-	restore := stubRunnerServiceFactory(func(cfg runnersvc.Config) error {
-		if cfg.MetricsReporter != nil {
-			t.Error("runner service got a MetricsReporter without --report-metrics")
+// Without the flag the SDK must see reporting off — byte-identical behaviour to
+// before the feature existed.
+func TestNoReportMetricsFlagLeavesReportingOff(t *testing.T) {
+	restore := stubRunnerServiceFactory(func(cfg xflowsdk.RunnerConfig) error {
+		if cfg.ReportMetrics {
+			t.Error("ReportMetrics is true without --report-metrics")
 		}
+		return nil
+	})
+	defer restore()
+
+	runCommand(t, "run", "--server", "http://server:8080")
+}
+
+// A bad interval must be rejected before the runner starts, not silently
+// ignored: a runner reporting on a different cadence than configured is worse
+// than one that refuses the config outright.
+func TestRunCommandRejectsABadReportInterval(t *testing.T) {
+	restore := stubRunnerServiceFactory(func(xflowsdk.RunnerConfig) error {
+		t.Error("the runner was constructed despite an unparseable --report-metrics-interval")
 		return nil
 	})
 	defer restore()
@@ -175,8 +101,9 @@ func TestNoReportMetricsFlagLeavesReporterNil(t *testing.T) {
 		},
 		out: &bytes.Buffer{},
 		err: &bytes.Buffer{},
-	}, "run", "--server", "http://server:8080")
-	if err != nil {
-		t.Fatal(err)
+	}, "run", "--server", "http://server:8080", "--report-metrics",
+		"--report-metrics-interval", "not-a-duration")
+	if err == nil {
+		t.Fatal("an unparseable --report-metrics-interval was accepted")
 	}
 }

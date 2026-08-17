@@ -5,16 +5,62 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/xbcio/xflow/engine"
-	"github.com/xbcio/xflow/service/protocol"
-	runnersvc "github.com/xbcio/xflow/service/runner"
+	xflowsdk "github.com/xbcio/xflow/sdk/xflow"
 )
 
-func TestRunCommandPropagatesResolvedDurationsToRunnerService(t *testing.T) {
+// These tests assert the one thing cmd/runner still owns after the assembly
+// moved to sdk/xflow: that the resolved CLI/YAML config reaches the SDK intact.
+// The assembly's own invariants — GroupRuntime, SubgraphRuntime, the group
+// capability's feature, the supply gate's TLS material — are asserted in
+// sdk/xflow, against the same code this command now calls.
+
+type runnerServiceFunc func(context.Context) error
+
+func (f runnerServiceFunc) Run(ctx context.Context) error { return f(ctx) }
+func (runnerServiceFunc) Close() error                    { return nil }
+
+// stubRunnerServiceFactory intercepts the config handed to the SDK. The command
+// still runs end to end — flags, YAML, env, precedence, validation — only the
+// runner itself is replaced, since starting one needs a live control plane.
+func stubRunnerServiceFactory(check func(xflowsdk.RunnerConfig) error) func() {
+	previous := newRunnerService
+	newRunnerService = func(cfg xflowsdk.RunnerConfig, _ ...xflowsdk.RunnerOption) (runnerService, error) {
+		return runnerServiceFunc(func(context.Context) error {
+			return check(cfg)
+		}), nil
+	}
+	return func() { newRunnerService = previous }
+}
+
+func runCommand(t *testing.T, args ...string) {
+	t.Helper()
+	err := executeRootWithOptions(commandOptions{
+		runFunc: func(cfg runnerConfig) error {
+			return runRunner(context.Background(), cfg)
+		},
+		out: &bytes.Buffer{},
+		err: &bytes.Buffer{},
+	}, args...)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The durations survive the full precedence chain — file, then env, then a
+// changed flag — and arrive as time.Duration rather than being validated and
+// dropped.
+//
+// The heartbeat half is a regression pin. It was parsed, merged with correct
+// precedence, validated as positive, and then discarded (`_, err := parse...`),
+// so every runner heartbeated at the runner service's hardcoded 5s regardless.
+// That is worse than an ignored flag: the heartbeat interval is what the control
+// plane's liveness window derives from, so widening it for a slow link or
+// narrowing it for faster failure detection had no effect — with a config that
+// verifies clean and a log that says nothing.
+func TestRunCommandPropagatesResolvedDurationsToTheSDK(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "runner.yaml")
 	data := []byte(`
 server:
@@ -31,234 +77,159 @@ poll:
 	t.Setenv("XFLOW_RUNNER_HEARTBEAT_INTERVAL", "9s")
 	t.Setenv("XFLOW_RUNNER_POLL_WAIT", "3s")
 
-	restore := stubRunnerServiceFactory(func(cfg runnersvc.Config) error {
+	restore := stubRunnerServiceFactory(func(cfg xflowsdk.RunnerConfig) error {
 		if cfg.PollWait != 4*time.Second {
-			t.Fatalf("PollWait = %s, want 4s", cfg.PollWait)
+			t.Errorf("PollWait = %s, want 4s (the changed flag)", cfg.PollWait)
+		}
+		if cfg.HeartbeatInterval != 11*time.Second {
+			t.Errorf("HeartbeatInterval = %v, want 11s — the resolved value never "+
+				"reached the SDK, which then defaults to 5s", cfg.HeartbeatInterval)
 		}
 		return nil
 	})
 	defer restore()
 
-	err := executeRootWithOptions(commandOptions{
-		runFunc: func(cfg runnerConfig) error {
-			return runRunner(context.Background(), cfg)
-		},
-		out: &bytes.Buffer{},
-		err: &bytes.Buffer{},
-	}, "run", "--config", path, "--heartbeat-interval", "11s", "--poll-wait", "4s")
-	if err != nil {
-		t.Fatal(err)
-	}
+	runCommand(t, "run", "--config", path, "--heartbeat-interval", "11s", "--poll-wait", "4s")
 }
 
-type runnerServiceFunc func(context.Context) error
-
-func (f runnerServiceFunc) Run(ctx context.Context) error {
-	return f(ctx)
-}
-
-func stubRunnerServiceFactory(check func(runnersvc.Config) error) func() {
-	previous := newRunnerService
-	newRunnerService = func(_ runnersvc.ProtocolClient, _ engine.HandlerRegistry, cfg runnersvc.Config) runnerService {
-		return runnerServiceFunc(func(context.Context) error {
-			return check(cfg)
-		})
-	}
-	return func() {
-		newRunnerService = previous
-	}
-}
-
-// A batch lease fails outright when the runner has no SubgraphRuntime: the
-// batch names a synthetic node ("m/_batch/0") with no Input and no registered
-// handler, so the ordinary node path has nothing to run. Only the e2e tests
-// used to wire the runtime themselves — the production binary never did, which
-// made every map node undeployable the moment its batches escaped to a runner.
-func TestRunCommandWiresTheSubgraphRuntime(t *testing.T) {
-	restore := stubRunnerServiceFactory(func(cfg runnersvc.Config) error {
-		if cfg.SubgraphRuntime == nil {
-			t.Error("runner service got no SubgraphRuntime; every batch lease this " +
-				"runner claims will fail with 'no SubgraphRuntime configured'")
-		}
-		return nil
-	})
-	defer restore()
-
-	err := executeRootWithOptions(commandOptions{
-		runFunc: func(cfg runnerConfig) error {
-			return runRunner(context.Background(), cfg)
-		},
-		out: &bytes.Buffer{},
-		err: &bytes.Buffer{},
-	}, "run", "--server", "http://server:8080", "--cap", "xflow.map,xflow.function")
-	if err != nil {
-		t.Fatal(err)
-	}
-}
-
-// The group counterpart of the SubgraphRuntime wiring above, and the reason it
-// went unnoticed far longer: a runner with no GroupRuntime does not FAIL a group
-// lease, it never receives one. A group unit's routing demands the
-// group.exec.v1 feature, so a runner that does not advertise it is filtered out
-// during assignment and the task sits queued — no error, no log, no lease.
-//
-// Both halves are required and neither is sufficient. Advertising without the
-// runtime means runner.go:359 falls through to the handler path, where the
-// group's synthetic node name resolves to nothing. Wiring the runtime without
-// advertising leaves the runner invisible to the selector. So both are asserted
-// here, in one test, on the production command path.
-func TestRunCommandWiresAndAdvertisesGroupExecution(t *testing.T) {
-	restore := stubRunnerServiceFactory(func(cfg runnersvc.Config) error {
-		if cfg.GroupRuntime == nil {
-			t.Error("runner service got no GroupRuntime; a group lease reaching this " +
-				"runner falls through to the handler path, which has no handler " +
-				"registered for the group's synthetic node name")
-		}
-		// parseCapabilities cannot produce a Features list — the --cap flag has no
-		// syntax for one — so this capability can only come from the binary itself.
-		var advertised bool
+// --cap is the only way an operator names the node types this runner claims,
+// and the SDK matches on that list rather than on the process's node registry.
+// A dropped capability is a runner that registers successfully and is then
+// never sent work.
+func TestRunCommandPropagatesCapabilitiesToTheSDK(t *testing.T) {
+	restore := stubRunnerServiceFactory(func(cfg xflowsdk.RunnerConfig) error {
+		want := map[string]bool{"xflow.map": false, "xflow.function": false}
 		for _, c := range cfg.Capabilities {
-			if c.NodeType != "xflow.group" {
-				continue
-			}
-			for _, f := range c.Features {
-				if f == engine.FeatureGroupExecV1 {
-					advertised = true
-				}
+			if _, ok := want[c]; ok {
+				want[c] = true
 			}
 		}
-		if !advertised {
-			t.Errorf("capabilities %+v carry no {xflow.group, %s}; MatchCapabilities "+
-				"rejects this runner for every group task, so the task stays queued "+
-				"forever with no error anywhere", cfg.Capabilities, engine.FeatureGroupExecV1)
+		for nodeType, seen := range want {
+			if !seen {
+				t.Errorf("capability %q missing from %v; the runner claims no leases for it",
+					nodeType, cfg.Capabilities)
+			}
 		}
 		return nil
 	})
 	defer restore()
 
-	// Deliberately no xflow.group in --cap: the operator is not expected to know
-	// it exists, and could not spell the feature even if they did.
-	err := executeRootWithOptions(commandOptions{
-		runFunc: func(cfg runnerConfig) error {
-			return runRunner(context.Background(), cfg)
-		},
-		out: &bytes.Buffer{},
-		err: &bytes.Buffer{},
-	}, "run", "--server", "http://server:8080", "--cap", "xflow.function")
-	if err != nil {
-		t.Fatal(err)
-	}
+	runCommand(t, "run", "--server", "http://server:8080", "--cap", "xflow.map,xflow.function")
 }
 
-// An operator who has heard of group execution reaches for the tool they have:
-// `--cap xflow.group`. That produces a bare {NodeType: "xflow.group"} with no
-// Features, because --cap cannot express one — and a featureless entry is worse
-// than no entry at all. It satisfies canRunRouting (which ignores Features)
-// while failing MatchCapabilities (which does not), so the runner looks
-// correctly configured from the command line and still receives nothing.
-//
-// So a declared group capability must be completed, not deferred to.
-func TestDeclaringTheGroupCapabilityByHandStillGetsTheFeature(t *testing.T) {
-	restore := stubRunnerServiceFactory(func(cfg runnersvc.Config) error {
-		var groupCaps int
-		var advertised bool
-		for _, c := range cfg.Capabilities {
-			if c.NodeType != engine.GroupNodeType {
-				continue
-			}
-			groupCaps++
-			for _, f := range c.Features {
-				if f == engine.FeatureGroupExecV1 {
-					advertised = true
-				}
-			}
-		}
-		if !advertised {
-			t.Errorf("capabilities %+v: an operator-declared xflow.group was left "+
-				"without %s, which is the one shape that passes canRunRouting and "+
-				"fails MatchCapabilities — the runner looks configured and gets nothing",
-				cfg.Capabilities, engine.FeatureGroupExecV1)
-		}
-		// hasCapabilityForRequirement stops at the first NodeType match, so a
-		// featureless duplicate sitting ahead of the real one would mask it.
-		if groupCaps != 1 {
-			t.Errorf("got %d xflow.group capabilities, want exactly 1: a duplicate can "+
-				"shadow the feature-bearing entry during requirement matching", groupCaps)
+// Labels are what a node-level RunnerSelector matches against, so a runner that
+// drops them is invisible to every selector-pinned workflow.
+func TestRunCommandPropagatesLabelsToTheSDK(t *testing.T) {
+	restore := stubRunnerServiceFactory(func(cfg xflowsdk.RunnerConfig) error {
+		if cfg.Labels["env"] != "test" || cfg.Labels["app"] != "sas" {
+			t.Errorf("Labels = %v, want env=test app=sas", cfg.Labels)
 		}
 		return nil
 	})
 	defer restore()
 
-	err := executeRootWithOptions(commandOptions{
-		runFunc: func(cfg runnerConfig) error {
-			return runRunner(context.Background(), cfg)
-		},
-		out: &bytes.Buffer{},
-		err: &bytes.Buffer{},
-	}, "run", "--server", "http://server:8080", "--cap", "xflow.function,xflow.group")
-	if err != nil {
-		t.Fatal(err)
-	}
+	runCommand(t, "run", "--server", "http://server:8080", "--label", "env=test", "--label", "app=sas")
 }
 
-// TestRunCommandWiresGroupRuntimeIntoTriggerActivationHandler pins the
-// construction-order fix. Before it, runRunner built the registry and
-// GroupRuntime AFTER runnerServiceConfig had already returned, so the
-// TriggerActivationHandler that config wires could never be given one — and
-// every trigger-group activation on the production binary failed closed at
-// activateGroup's first guard (spec 2026-08-07 §3, the gap this feature
-// closes).
-//
-// A group directive is pushed through the real ActivationTracker the config
-// assembled. Package is nil on purpose: the post-fix path must still fail,
-// but at the SECOND guard. Which guard fires is the whole signal.
-func TestRunCommandWiresGroupRuntimeIntoTriggerActivationHandler(t *testing.T) {
-	restore := stubRunnerServiceFactory(func(cfg runnersvc.Config) error {
-		if cfg.GroupRuntime == nil {
-			t.Fatal("cfg.GroupRuntime is nil")
-		}
-		if cfg.ActivationTracker == nil {
-			t.Fatal("cfg.ActivationTracker is nil — hostsTriggers(xflow.trigger.kafka) should have wired it")
-		}
-
-		var activateErr error
-		cfg.ActivationTracker.SetOnActivateFailed(func(_ protocol.ActivateDirective, err error) {
-			activateErr = err
-		})
-		if err := cfg.ActivationTracker.ProcessDirectives(context.Background(), &protocol.HeartbeatActivations{
-			Activate: []protocol.ActivateDirective{{
-				Namespace: "default", WorkflowID: "wf-1", WorkflowVersion: "v1",
-				EntryUnitID: "g", NodeType: engine.GroupNodeType, Generation: 1,
-				PackageHash: "pkg-sha256:v1:x",
-				// Package deliberately omitted — see the doc comment.
-			}},
-		}); err != nil {
-			t.Fatalf("ProcessDirectives: %v", err)
-		}
-
-		if activateErr == nil {
-			t.Fatal("group activation with a nil Package unexpectedly succeeded")
-		}
-		if strings.Contains(activateErr.Error(), "no GroupRuntime configured") {
-			t.Errorf("group activation failed at the missing-runtime guard: %v\n"+
-				"the TriggerActivationHandler was built before the GroupRuntime existed; "+
-				"every trigger-group activation on this runner fails closed", activateErr)
-		}
-		if !strings.Contains(activateErr.Error(), "carries no package") {
-			t.Errorf("activation error = %v, want the nil-package guard", activateErr)
+// The transport fields decide which protocol client the SDK builds; sending the
+// gRPC target under an http transport (or the reverse) connects to the wrong
+// port and fails at first poll, far from the cause.
+func TestRunCommandPropagatesTransportToTheSDK(t *testing.T) {
+	restore := stubRunnerServiceFactory(func(cfg xflowsdk.RunnerConfig) error {
+		if cfg.Transport != transportGRPC || cfg.GRPCTarget != "server:9090" {
+			t.Errorf("Transport/GRPCTarget = %q/%q, want grpc/server:9090", cfg.Transport, cfg.GRPCTarget)
 		}
 		return nil
 	})
 	defer restore()
 
-	err := executeRootWithOptions(commandOptions{
-		runFunc: func(cfg runnerConfig) error {
-			return runRunner(context.Background(), cfg)
-		},
-		out: &bytes.Buffer{},
-		err: &bytes.Buffer{},
-	}, "run", "--server", "http://server:8080", "--cap", "xflow.trigger.kafka")
-	if err != nil {
-		t.Fatal(err)
-	}
+	runCommand(t, "run", "--server", "http://server:8080",
+		"--transport", "grpc", "--grpc-target", "server:9090")
+}
+
+// resolveRunnerConfig re-loads the config from disk and then copies each changed
+// flag over it. Four flags were never copied: --token and the three --tls-*
+// paths. They bind, they parse, they validate, and then resolveRunnerConfig
+// returns a config where they are empty — only the XFLOW_RUNNER_TLS_* and
+// XFLOW_RUNNER_TOKEN environment variables ever took effect.
+//
+// Both halves fail closed in a way that names no cause. Without the CA every
+// client falls back to DefaultTransport, so supply fetch fails, SupplyGate.Admit
+// declines every activation, and the runner never hosts its triggers. Without
+// the token the server rejects registration outright. In both cases the operator
+// passed the flag, `verify` reported success, and nothing logged that the value
+// had been dropped.
+func TestRunCommandPropagatesTLSAndTokenFlagsToTheSDK(t *testing.T) {
+	restore := stubRunnerServiceFactory(func(cfg xflowsdk.RunnerConfig) error {
+		if cfg.TLSServerCA != "/etc/xflow/ca.pem" {
+			t.Errorf("TLSServerCA = %q, want /etc/xflow/ca.pem — without it every "+
+				"client falls back to DefaultTransport and the supply gate declines forever",
+				cfg.TLSServerCA)
+		}
+		if cfg.TLSClientCert != "/etc/xflow/client.pem" || cfg.TLSClientKey != "/etc/xflow/client.key" {
+			t.Errorf("TLSClientCert/Key = %q/%q, want the flag values; an mTLS server "+
+				"rejects the handshake without them", cfg.TLSClientCert, cfg.TLSClientKey)
+		}
+		if cfg.Token != "s3cret-token" {
+			t.Errorf("Token = %q, want the flag value; the server rejects registration without it", cfg.Token)
+		}
+		return nil
+	})
+	defer restore()
+
+	runCommand(t, "run", "--server", "http://server:8080",
+		"--tls-server-ca", "/etc/xflow/ca.pem",
+		"--tls-client-cert", "/etc/xflow/client.pem",
+		"--tls-client-key", "/etc/xflow/client.key",
+		"--token", "s3cret-token")
+}
+
+// The environment must still work, and a changed flag must still beat it — the
+// same precedence every other runner setting follows. Pinned because the fix
+// adds the flag branch to a resolve path where the env override already ran.
+func TestRunCommandTLSFlagBeatsTheEnvironment(t *testing.T) {
+	t.Setenv("XFLOW_RUNNER_TLS_SERVER_CA", "/from/env.pem")
+
+	restore := stubRunnerServiceFactory(func(cfg xflowsdk.RunnerConfig) error {
+		if cfg.TLSServerCA != "/from/flag.pem" {
+			t.Errorf("TLSServerCA = %q, want the flag to win over XFLOW_RUNNER_TLS_SERVER_CA", cfg.TLSServerCA)
+		}
+		return nil
+	})
+	defer restore()
+
+	runCommand(t, "run", "--server", "http://server:8080", "--tls-server-ca", "/from/flag.pem")
+}
+
+// And with no flag the environment still applies.
+func TestRunCommandTLSEnvAppliesWithoutAFlag(t *testing.T) {
+	t.Setenv("XFLOW_RUNNER_TLS_SERVER_CA", "/from/env.pem")
+
+	restore := stubRunnerServiceFactory(func(cfg xflowsdk.RunnerConfig) error {
+		if cfg.TLSServerCA != "/from/env.pem" {
+			t.Errorf("TLSServerCA = %q, want /from/env.pem", cfg.TLSServerCA)
+		}
+		return nil
+	})
+	defer restore()
+
+	runCommand(t, "run", "--server", "http://server:8080")
+}
+
+// XFLOW_ARTIFACT_CACHE_DIR is the operator's only control over where fetched
+// wasm modules land — a read-only or full default cache dir is otherwise a
+// per-execution refetch of a multi-megabyte module.
+func TestRunCommandPropagatesTheArtifactCacheDirToTheSDK(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XFLOW_ARTIFACT_CACHE_DIR", dir)
+
+	restore := stubRunnerServiceFactory(func(cfg xflowsdk.RunnerConfig) error {
+		if cfg.ArtifactCacheDir != dir {
+			t.Errorf("ArtifactCacheDir = %q, want %q", cfg.ArtifactCacheDir, dir)
+		}
+		return nil
+	})
+	defer restore()
+
+	runCommand(t, "run", "--server", "http://server:8080")
 }

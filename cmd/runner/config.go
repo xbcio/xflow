@@ -448,6 +448,24 @@ func resolveRunnerConfig(base runnerConfig) (runnerConfig, error) {
 		clearRunnerConfigIssue(&cfg, "poll-wait")
 		cfg.pollWait = base.pollWait
 	}
+	// The credential-bearing flags. They were missing from this list, so they
+	// bound, parsed and validated and were then dropped here — only
+	// XFLOW_RUNNER_TOKEN and XFLOW_RUNNER_TLS_* ever took effect. Both halves
+	// fail closed without naming a cause: no CA means every client falls back to
+	// DefaultTransport, so supply fetch fails and the readiness gate declines
+	// every activation; no token means the server rejects registration outright.
+	if base.changed["token"] {
+		cfg.token = base.token
+	}
+	if base.changed["tls-server-ca"] {
+		cfg.tlsServerCA = base.tlsServerCA
+	}
+	if base.changed["tls-client-cert"] {
+		cfg.tlsClientCert = base.tlsClientCert
+	}
+	if base.changed["tls-client-key"] {
+		cfg.tlsClientKey = base.tlsClientKey
+	}
 	if base.changed["metrics-addr"] {
 		cfg.metricsAddr = base.metricsAddr
 	}
