@@ -108,7 +108,6 @@ context:
 
 # 全局配置
 settings:
-  timeout: duration       # 超时时间
   concurrency: int        # 最大并发数
   timezone: string        # 时区
   on_error: string        # 全局默认错误策略（可选，stop|error_output|main_output|continue，默认 stop）
@@ -168,6 +167,7 @@ nodes:
     position: [x, y]      # UI 位置坐标（可选）
     disabled: bool        # 是否禁用（可选，见下方「禁用行为」）
     on_error: string      # 错误处理策略（可选，stop|error_output|main_output|continue，覆盖全局 settings.on_error）
+    timeout: duration     # 单次执行超时（可选，三态：>0 = 该预算；0 = 继承引擎默认 engine.DefaultNodeTimeout；<0 = 显式无上限。仅约束单次尝试，不含重试累计；超时为终态，不重投，见下方「节点超时语义」）
     notes: string         # 节点备注（可选）
     inputs:               # 声明式输入端口（可选）
       - name: string      #   端口名称
@@ -207,6 +207,25 @@ nodes:
 # handler 返回 errors.Is(err, types.ErrPermanent) 为 true 的错误时不重试；
 # 未标记错误按 transient 处理，重试耗尽后再进入 on_error 路径。
 # 引擎提供 at-least-once 执行语义，带外副作用必须由 handler / 业务侧保证幂等。
+
+# 节点超时语义
+# nodes[].timeout 约束一次 handler 调用的墙钟时长。三态：
+#   >0：该次尝试的预算（如 30s）。
+#   0（缺省）：继承引擎默认 engine.DefaultNodeTimeout（30m）。可通过
+#      engine.WithDefaultNodeTimeout(d) 调整；d==0 显式关闭默认（节点不设 timeout 即无上限）。
+#   <0：显式声明无上限（例如长轮询/等待外部信号的节点）。必须显式写出，不可依赖缺省。
+# 超时是一次尝试的终态，不是 transient 失败：引擎以 PermanentError 标记，重试短路、
+# 队列层（memory_queue / asynq）不再重投。每次重试 attempt 各自带满额预算，不累计。
+# 与 at-least-once 契约的关系：超时节点不再重投，但宿主幂等键仍为必需——超时前 handler
+# 可能已产生副作用（如已发出 HTTP 请求），下游/重放仍可能重复观测该副作用，须靠幂等键兜底。
+# 已知限制（诚实声明，非承诺覆盖）：
+#   (1) 服务端 backstop 仅 HTTP runner 覆盖：gRPC runner 不续约（service/runner/runner.go
+#       将续约限制在 leaseRenewClient 类型断言之后，gRPC client 不满足），故 gRPC 路径
+#       无服务端超时兜底。
+#   (2) group lease 不被 backstop 覆盖：engine.ErrGroupLeaseNotSupported，CommitTaskTimeout
+#       拒绝 group lease。group 的 deadline 在 GroupLeasePayload.Deadline，不在
+#       TaskLease.ExecutionDeadline。
+#   (3) 在有环图上，服务端路径退化为不应用 OnError 的 fatal commit（与 runner 上报路径不同）。
 
 # 连接定义
 connections:

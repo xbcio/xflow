@@ -270,6 +270,13 @@ func (c *Core) renewLease(ctx context.Context, req protocol.RenewLeaseRequest, i
 	// in the future, the branch is skipped and the group renewal path below
 	// handles it (or a future group-aware timeout commit does).
 	if !isGroupTask(&resolved.Task) && !resolved.ExecutionDeadline.IsZero() && !resolved.ExecutionDeadline.After(time.Now()) {
+		// Record the server-detected timeout before committing: the source label
+		// distinguishes runner-detected (well-behaved runner reports its own
+		// terminal result before renewal) from server-detected (this branch).
+		// A persistently non-zero server count means some runner has not
+		// implemented or upgraded the deadline. node_type only -- never node
+		// name, execution ID, params, or output.
+		c.observeNodeTimeout(ctx, resolved.NodeType)
 		if committer, ok := c.engine.(nodeTimeoutCommitter); ok {
 			cause := types.NewPermanentError("node.timeout", "node execution exceeded its deadline")
 			if err := committer.CommitTaskTimeout(ctx, resolved, cause); err != nil {

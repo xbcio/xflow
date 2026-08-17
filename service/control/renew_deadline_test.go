@@ -3,10 +3,13 @@ package control
 import (
 	"context"
 	"errors"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/observability/metrics"
 	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/types"
 )
@@ -400,5 +403,173 @@ func (d *deadlineTestEngine) CommitTaskTimeout(_ context.Context, lease *engine.
 	d.commitTimeoutCalled = true
 	d.commitTimeoutLease = lease
 	return d.commitTimeoutErr
+}
+
+// TestRenewCommitsTimeoutEmitsServerMetric proves the server-side backstop
+// production path (renewLease) EMITS xflow_node_timeouts_total with
+// source="server". This is the only origin of a source=server timeout; the
+// source label is the direct measure of whether runners honour the deadline.
+// It must go red if the observeNodeTimeout call site in group_control_loop.go
+// is deleted.
+func TestRenewCommitsTimeoutEmitsServerMetric(t *testing.T) {
+	ctx := context.Background()
+	dir := NewMemoryRunnerDirectory()
+	session, err := dir.Register(ctx, RegisterRunnerRequest{
+		RunnerID:     "runner-server-metric",
+		Capacity:     2,
+		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
+		Policy:       RunnerPolicy{AllowedNodeTypes: []string{"*"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	task := engine.Task{
+		ExecutionID: "exec-server-metric-1",
+		NodeName:    "sensitive-node-name", // must never appear as a metric label
+		NodeIdx:     0,
+		Type:        engine.TaskTypeNodeExec,
+	}
+	assignment := Assignment{
+		AssignmentID: BuildAssignmentID(&task),
+		Task:         task,
+		Routing:      engine.TaskRouting{NodeType: "xflow.function"},
+	}
+	mustEnqueueAssignment(t, ctx, dir, assignment)
+	claim := mustClaimAssignment(t, ctx, dir, session)
+	pastDeadline := time.Now().Add(-5 * time.Minute)
+	lease := &engine.TaskLease{
+		LeaseID:           "lease-srv-metric-1",
+		LeaseToken:        "token-srv-metric-1",
+		Task:              task,
+		Attempt:           1,
+		NodeType:          "xflow.function",
+		IssuedAt:          time.Now().Add(-10 * time.Minute),
+		TTL:               60 * time.Second,
+		ExecutionDeadline: pastDeadline,
+	}
+	if err := dir.FinalizeClaim(ctx, claim.ClaimID, lease); err != nil {
+		t.Fatal(err)
+	}
+
+	m := metrics.New()
+	fake := &deadlineTestEngine{}
+	core := &Core{
+		engine:           fake,
+		runners:          dir,
+		pollWait:         time.Second,
+		timeoutObserver:  metrics.NewNodeTimeoutMetrics(m),
+	}
+
+	resp, err := core.renewLease(ctx, protocol.RenewLeaseRequest{
+		RunnerID:   session.RunnerID,
+		SessionID:  session.SessionID,
+		LeaseID:    "lease-srv-metric-1",
+		LeaseToken: "token-srv-metric-1",
+		Extend:     30000,
+	}, TransportInfo{})
+	if err != nil {
+		t.Fatalf("renewLease() error = %v, want nil", err)
+	}
+	if resp.Renewed {
+		t.Fatal("renewLease() Renewed=true, want false for expired deadline")
+	}
+	if !fake.commitTimeoutCalled {
+		t.Fatal("CommitTaskTimeout was NOT called; the backstop must commit the terminal")
+	}
+
+	// Scrape the registry exactly as the server's /metrics would expose it.
+	req := httptest.NewRequest("GET", "/metrics", nil)
+	rec := httptest.NewRecorder()
+	m.Handler().ServeHTTP(rec, req)
+	body := rec.Body.String()
+
+	want := `xflow_node_timeouts_total{node_type="xflow.function",source="server"} 1`
+	if !strings.Contains(body, want) {
+		t.Fatalf("metrics body missing %q:\n%s", want, body)
+	}
+	// source=runner must NOT have been incremented by the server path.
+	if strings.Contains(body, `source="runner"`) {
+		t.Fatalf("server path emitted a runner-source timeout; the source label is wrong:\n%s", body)
+	}
+	// No sensitive label leakage.
+	if strings.Contains(body, "sensitive-node-name") || strings.Contains(body, "exec-server-metric-1") {
+		t.Fatalf("metrics body leaked a node name or execution id:\n%s", body)
+	}
+}
+
+// TestRenewUnaffectedBeforeDeadlineEmitsNoTimeoutMetric is the negative probe:
+// a lease still within its deadline renews normally and must NOT emit a
+// timeout metric. This guards against a wiring that fires on every renewal.
+func TestRenewUnaffectedBeforeDeadlineEmitsNoTimeoutMetric(t *testing.T) {
+	ctx := context.Background()
+	dir := NewMemoryRunnerDirectory()
+	session, err := dir.Register(ctx, RegisterRunnerRequest{
+		RunnerID:     "runner-no-metric",
+		Capacity:     2,
+		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
+		Policy:       RunnerPolicy{AllowedNodeTypes: []string{"*"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	task := engine.Task{
+		ExecutionID: "exec-no-metric-1",
+		NodeName:    "step1",
+		NodeIdx:     0,
+		Type:        engine.TaskTypeNodeExec,
+	}
+	assignment := Assignment{
+		AssignmentID: BuildAssignmentID(&task),
+		Task:         task,
+		Routing:      engine.TaskRouting{NodeType: "xflow.function"},
+	}
+	mustEnqueueAssignment(t, ctx, dir, assignment)
+	claim := mustClaimAssignment(t, ctx, dir, session)
+	futureDeadline := time.Now().Add(30 * time.Minute)
+	lease := &engine.TaskLease{
+		LeaseID:           "lease-no-metric-1",
+		LeaseToken:        "token-no-metric-1",
+		Task:              task,
+		Attempt:           1,
+		NodeType:          "xflow.function",
+		IssuedAt:          time.Now().Add(-1 * time.Minute),
+		TTL:               60 * time.Second,
+		ExecutionDeadline: futureDeadline,
+	}
+	if err := dir.FinalizeClaim(ctx, claim.ClaimID, lease); err != nil {
+		t.Fatal(err)
+	}
+
+	m := metrics.New()
+	fake := &deadlineTestEngine{nodeRenewResult: true}
+	core := &Core{
+		engine:          fake,
+		runners:         dir,
+		pollWait:        time.Second,
+		timeoutObserver: metrics.NewNodeTimeoutMetrics(m),
+	}
+
+	resp, err := core.renewLease(ctx, protocol.RenewLeaseRequest{
+		RunnerID:   session.RunnerID,
+		SessionID:  session.SessionID,
+		LeaseID:    "lease-no-metric-1",
+		LeaseToken: "token-no-metric-1",
+		Extend:     30000,
+	}, TransportInfo{})
+	if err != nil {
+		t.Fatalf("renewLease() error = %v", err)
+	}
+	if !resp.Renewed {
+		t.Fatal("renewLease() Renewed=false, want true for future deadline")
+	}
+
+	req := httptest.NewRequest("GET", "/metrics", nil)
+	rec := httptest.NewRecorder()
+	m.Handler().ServeHTTP(rec, req)
+	if strings.Contains(rec.Body.String(), "xflow_node_timeouts_total") {
+		t.Fatalf("a future-deadline renewal emitted a timeout metric:\n%s", rec.Body.String())
+	}
 }
 

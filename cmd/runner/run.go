@@ -367,6 +367,12 @@ func runRunner(ctx context.Context, cfg runnerConfig) error {
 	xnode.SetWasmObserver(sm)
 	kafkatrigger.SetObserver(metrics.NewTriggerMetrics(m))
 	xnode.SetScriptObserver(metrics.NewScriptMetrics(m))
+	// Wire the node execution timeout/duration observer into the in-process
+	// executor so runner-detected timeouts, the abandoned-goroutine gauge, and
+	// per-invocation duration are emitted into this runner's registry (which
+	// is then either scraped directly via --metrics-addr or proxied to the
+	// server via the MetricsReporter below).
+	serviceCfg.TimeoutObserver = metrics.NewNodeTimeoutMetrics(m)
 
 	var metricsServer *http.Server
 	if cfg.metricsAddr != "" {

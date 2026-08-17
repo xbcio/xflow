@@ -8,6 +8,7 @@ import (
 
 	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/execution"
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/service/protocol"
@@ -80,6 +81,12 @@ type Core struct {
 	auth         Authenticator
 	logger       engine.Logger
 	authObserver AuthObserver
+	// timeoutObserver, when set, records node execution timeout events emitted
+	// from the server side. The only server-side origin is the renewLease
+	// backstop that commits a terminal timeout when a lease's ExecutionDeadline
+	// has passed (see group_control_loop.go). Nil is safe: observeNodeTimeout
+	// nil-guards, so a Core with no metrics wired is byte-identical to before.
+	timeoutObserver execution.TimeoutObserver
 	// tracer instruments the runner protocol dispatch and commit path.
 	// NoopTracer when tracing is disabled.
 	tracer tracing.Tracer
@@ -179,6 +186,17 @@ func (c *Core) observeAuth(ctx context.Context, op, result string) {
 		return
 	}
 	c.authObserver.OnAuthDecision(ctx, op, result, authMode(c.authn()))
+}
+
+// observeNodeTimeout records a server-detected node execution timeout. The
+// label set is exactly {node_type, source="server"} -- never node name,
+// execution ID, params, or output. nil-guarded so a Core without a metrics
+// observer is byte-identical to before this feature.
+func (c *Core) observeNodeTimeout(ctx context.Context, nodeType string) {
+	if c.timeoutObserver == nil {
+		return
+	}
+	c.timeoutObserver.OnNodeExecutionTimeout(ctx, nodeType, "server")
 }
 
 func authMode(auth Authenticator) string {
