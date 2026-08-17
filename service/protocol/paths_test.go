@@ -13,18 +13,19 @@ import (
 type stubRunnerHandler struct{}
 
 func (stubRunnerHandler) HandleRegisterRunner(http.ResponseWriter, *http.Request) {}
-func (stubRunnerHandler) HandleHeartbeat(http.ResponseWriter, *http.Request)       {}
-func (stubRunnerHandler) HandlePollTask(http.ResponseWriter, *http.Request)         {}
-func (stubRunnerHandler) HandleReportResult(http.ResponseWriter, *http.Request)     {}
-func (stubRunnerHandler) HandleRenewLease(http.ResponseWriter, *http.Request)      {}
-func (stubRunnerHandler) HandleActivationAck(http.ResponseWriter, *http.Request)   {}
-func (stubRunnerHandler) HandleReportMetrics(http.ResponseWriter, *http.Request)   {}
+func (stubRunnerHandler) HandleHeartbeat(http.ResponseWriter, *http.Request)      {}
+func (stubRunnerHandler) HandlePollTask(http.ResponseWriter, *http.Request)       {}
+func (stubRunnerHandler) HandleReportResult(http.ResponseWriter, *http.Request)   {}
+func (stubRunnerHandler) HandleRenewLease(http.ResponseWriter, *http.Request)     {}
+func (stubRunnerHandler) HandleActivationAck(http.ResponseWriter, *http.Request)  {}
+func (stubRunnerHandler) HandleReportMetrics(http.ResponseWriter, *http.Request)  {}
 
 // runnerPathSamples maps every exported runner-protocol path constant to a
 // concrete sample path (placeholders are not used in this protocol face — every
 // route is an exact path). The table is hand-written and must cover every
-// constant; step 2 of the guard asserts that lockstep so a constant added
-// without a row here cannot silently escape coverage.
+// constant in the production-side RunnerFacingPaths enumerable; step 2 of the
+// guard asserts that lockstep against RunnerFacingPaths, so a constant added
+// to the production list without a row here cannot silently escape coverage.
 var runnerPathSamples = []struct {
 	constName string
 	pathConst string
@@ -40,21 +41,6 @@ var runnerPathSamples = []struct {
 	{"ReportMetricsPath", ReportMetricsPath, http.MethodPost, ReportMetricsPath},
 }
 
-// allRunnerPathConsts is the enumerable form of the runner-protocol path
-// vocabulary. Go cannot reflect over constants, so this list is the source the
-// guard reads to prove the sample table covers every constant. Adding a path
-// constant without adding it here (and to runnerPathSamples) is the drift
-// defect the guard exists to catch.
-var allRunnerPathConsts = []string{
-	RegisterRunnerPath,
-	HeartbeatPath,
-	PollTaskPath,
-	ReportResultPath,
-	RenewLeasePath,
-	ActivationAckPath,
-	ReportMetricsPath,
-}
-
 // TestRunnerPathsHaveMuxRegistration is the protocol-face twin of the apiserver
 // dead-constant guard: every exported runner-protocol path constant must
 // resolve to a route registered by RegisterRunnerRoutes. A constant with no
@@ -67,9 +53,11 @@ func TestRunnerPathsHaveMuxRegistration(t *testing.T) {
 	mux := http.NewServeMux()
 	RegisterRunnerRoutes(mux, stubRunnerHandler{})
 
-	// Step 2: the hand-written sample table must cover every constant in
-	// allRunnerPathConsts, or adding a constant without a row would silently
-	// escape the guard (field-by-field-copy-drops-new-fields shape).
+	// Step 2: the hand-written sample table must cover every constant in the
+	// production-side RunnerFacingPaths enumerable, or adding a constant to
+	// RunnerFacingPaths without a row here would silently escape the guard
+	// (field-by-field-copy-drops-new-fields shape). This is the protocol-face
+	// twin of the apiserver guard's step-3 self-check against UserFacingPaths.
 	tablePaths := make(map[string]string, len(runnerPathSamples))
 	for _, s := range runnerPathSamples {
 		if prev, dup := tablePaths[s.pathConst]; dup {
@@ -78,13 +66,13 @@ func TestRunnerPathsHaveMuxRegistration(t *testing.T) {
 		tablePaths[s.pathConst] = s.constName
 	}
 	var missing []string
-	for _, p := range allRunnerPathConsts {
+	for _, p := range RunnerFacingPaths {
 		if _, ok := tablePaths[p]; !ok {
 			missing = append(missing, p)
 		}
 	}
 	if len(missing) > 0 {
-		t.Fatalf("runnerPathSamples is missing path constants (add them or the guard silently skips them): %v", missing)
+		t.Fatalf("runnerPathSamples is missing RunnerFacingPaths entries (add them or the guard silently skips them): %v", missing)
 	}
 
 	for _, s := range runnerPathSamples {

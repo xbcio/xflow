@@ -31,3 +31,24 @@ func RegisterRunnerRoutes(mux *http.ServeMux, handler RunnerHTTPHandler) {
 	mux.HandleFunc(ActivationAckPath, handler.HandleActivationAck)
 	mux.HandleFunc(ReportMetricsPath, handler.HandleReportMetrics)
 }
+
+// RunnerFacingPaths enumerates every runner-facing HTTP path constant this
+// package exposes. The constants are declared across server.go, group.go,
+// activation.go and metrics.go; Go cannot reflect over constants, so this
+// enumerable form is what the dead-constant guard in paths_test.go reads. The
+// guard asserts the hand-written sample table covers every entry here, so
+// adding a path constant anywhere above without adding it to this list is the
+// same drift defect the guard exists to catch — keep the constants and this
+// list in lockstep.
+//
+// These are runner-protocol-face paths (spec §0.1), distinct from the
+// user-facing paths enumerated by service/apiserver.UserFacingPaths.
+var RunnerFacingPaths = []string{
+	RegisterRunnerPath,
+	HeartbeatPath,
+	PollTaskPath,
+	ReportResultPath,
+	RenewLeasePath,
+	ActivationAckPath,
+	ReportMetricsPath,
+}
