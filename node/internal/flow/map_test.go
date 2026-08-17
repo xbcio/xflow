@@ -118,3 +118,59 @@ func TestMap_EmptyArray(t *testing.T) {
 		t.Fatalf("expected total=0, got %v", out.Data["total"])
 	}
 }
+
+// The DSL setter is the only entry a Go caller has to the parameter. A field
+// that exists but has no setter is a field that cannot be set -- the exact shape
+// of the transient-mode gap, where the compiler read a value nothing could
+// write.
+func TestMap_BodyConcurrencySetter(t *testing.T) {
+	params := node.Map("items", 10).Concurrency(8).RawParams().(map[string]any)
+	if params["body_concurrency"] != 8 {
+		t.Fatalf("body_concurrency = %v, want 8", params["body_concurrency"])
+	}
+}
+
+// Absent by default. RawParams is what the SDK serialises into a workflow
+// definition, so emitting a non-1 default here would parallelise every existing
+// map node built through the builder.
+func TestMap_BodyConcurrencyDefaultsToSerial(t *testing.T) {
+	params := node.Map("items", 10).RawParams().(map[string]any)
+	if got, ok := params["body_concurrency"]; ok {
+		if n, _ := got.(int); n > 1 {
+			t.Fatalf("body_concurrency = %v by default, want <= 1: concurrency must be opt-in", got)
+		}
+	}
+}
+
+// A cap of zero or below is not a cap. Clamping in the setter -- rather than
+// trusting every reader downstream to re-check -- keeps the invalid value out of
+// the definition entirely.
+func TestMap_BodyConcurrencyRejectsNonPositive(t *testing.T) {
+	for _, in := range []int{0, -1, -100} {
+		params := node.Map("items", 10).Concurrency(in).RawParams().(map[string]any)
+		n, _ := params["body_concurrency"].(int)
+		if n > 1 {
+			t.Fatalf("Concurrency(%d) produced body_concurrency=%d, want <= 1", in, n)
+		}
+	}
+}
+
+// The descriptor is what an editor, a validator, and the docs read. A parameter
+// the handler honours but the descriptor omits is invisible to all three, and
+// api-level parameter validation rejects what it does not know.
+func TestMap_DescriptorDeclaresBodyConcurrency(t *testing.T) {
+	h, _ := registry.Lookup("xflow.map")
+	for _, p := range h.Descriptor().Params {
+		if p.Name != "body_concurrency" {
+			continue
+		}
+		if p.Type != types.ParamNumber {
+			t.Fatalf("body_concurrency declared as %v, want %v", p.Type, types.ParamNumber)
+		}
+		if p.Required {
+			t.Fatal("body_concurrency must not be required: it is opt-in")
+		}
+		return
+	}
+	t.Fatal("xflow.map descriptor declares no body_concurrency parameter")
+}

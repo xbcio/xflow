@@ -1718,8 +1718,9 @@ body 形态的循环体拥有独立的节点命名空间，语法与顶层 `node
   type: xflow.map
   parameters:
     items: expression        # 数组表达式，每个元素依次绑定到 $item / $index
-    batch_size: int          # 每批并发数量，默认 1（顺序执行）
+    batch_size: int          # 每批的项数，默认 1；这是耐久单元大小，不是并发度
     continue_on_error: bool  # 单项失败是否继续
+    body_concurrency: int    # 单批内最多同时跑几项，默认 1（批内串行）
     body:                    # 循环体子图（自包含，与外层节点命名空间隔离）
       nodes:                 # 子图节点，语法与顶层 nodes 相同
         - name: string
@@ -1779,9 +1780,16 @@ nodes:
 >   - 下游可通过表达式过滤成功项：`${{ $nodes['batch_processor'].result | filter(!has(#, '_error')) }}`
 >   - `continue_on_error: false` 时，批内第一个失败项会中止该批剩余项（已跑过的项副作用不回滚），并使整批失败；`completeLoopSplit` 因此判定该 map 节点失败，遵循节点自身的 `on_error` 语义
 >
+> **`body_concurrency`（单批内并发，默认 1 = 串行）**（已实现，见 `execution/subgraph/map_body.go` 的 `executeConcurrently`）：
+>   - `batch_size` 与 `body_concurrency` 是两个正交的量：前者决定**一批多少项**（耐久与重试单元的大小），后者决定**一批之内同时跑几项**。`batch_size: 40` 从不意味着 40 项并发——批与批之间的并发来自它们是各自独立的引擎任务
+>   - 因此默认串行，且必须显式开启：一批是作者刻意定的尺寸，把它整批同时跑会把该批的峰值资源占用乘以批长——body 内含 wasm guest 时，40 项并发意味着 40 份活的线性内存而非 4 份
+>   - 开启后 `continue_on_error: false` 的保证会**减弱**：串行时保证「失败项之后的项一个都不跑」，并发时只能保证「观测到失败后不再**启动**新项」。已在途的项会跑完并保留副作用（无回滚），所以有副作用的 body 成员必须以 `$item` 里的业务键做幂等
+>   - 适用场景是「这一批就是唯一在途的批」——例如 Kafka trigger group 每次 flush 同步跑一个批，此时「并发来自批」不成立，项是唯一剩下的并发轴
+>   - 值 ≤ 1、非数字（含未求值的表达式字符串）、缺省一律按串行处理：参数在调度期读取，那时还不存在可用于求值的逐项环境；而非正数不是上限，把它当「无上限」会让一个笔误变成成千上万个并发子执行
+>
 > ⚠️ **body 输出应避免 `_` 前缀键**：`_error`/`_index` 是框架为失败项保留的占位符键。若 body 自身的输出恰好带有 `_error` 键（例如 body 的终止节点自己产出了名为 `_error` 的字段），该项在 `results` 数组中会与一次真实的失败在结构上完全无法区分——这是已知、接受的数据质量缺口（不在本设计范围内修复），作者应确保 body 的正常输出不使用 `_` 前缀的键名。
 >
-> **当前实现状态**：`xflow.map` 的两种形态均已落地。**body 形态**——`expandLoopSplit`（`engine/expand.go`，map/split 共用的批扩展机制）为每个 batch 创建 sub-execution 并调用 `runBatchBody`，后者通过 `BatchBodyExecutor.ExecuteBatchBody` 把 body 投影成的 `SubgraphPackage` 逐项真正执行（每项一次内嵌引擎运行），再用 `BatchResultForCommit` 把逐项结果折叠成该批的结果与批级成败判定。`completeLoopSplit` 把各批的 `items` 数组按批次顺序拼接成扁平的 `results` 数组，失败项以 `{_error, _index}` 占位符落在原本的下标位置，使 `count` 恒等于输入长度。**expression 形态**——`MapNode.Execute`（`node/internal/flow/map.go` 的 `evalItemsInline`）就地逐项求值，直接返回同一份 `{results, count}` 契约，不发扇出描述符、不创建 sub-execution。上述 body 语法与 `continue_on_error` 结构均已生效，不再是规划设计。`xflow.split` 没有 `body` 概念（它通过下游 `connections` 扇出，见下文 Split 节点一节），本节的 body 语法与结果结构均只适用于 `xflow.map`。两种形态都不发任何标记键：引擎从编译期投影的 body 判定扩展与否，`_loop`/`_split` 已移除。遗留缺口（无 `max_concurrency` 节流）见 [SUBGRAPH-ENGINE-TODO.md](./SUBGRAPH-ENGINE-TODO.md)。
+> **当前实现状态**：`xflow.map` 的两种形态均已落地。**body 形态**——`expandLoopSplit`（`engine/expand.go`，map/split 共用的批扩展机制）为每个 batch 创建 sub-execution 并调用 `runBatchBody`，后者通过 `BatchBodyExecutor.ExecuteBatchBody` 把 body 投影成的 `SubgraphPackage` 逐项真正执行（每项一次内嵌引擎运行），再用 `BatchResultForCommit` 把逐项结果折叠成该批的结果与批级成败判定。`completeLoopSplit` 把各批的 `items` 数组按批次顺序拼接成扁平的 `results` 数组，失败项以 `{_error, _index}` 占位符落在原本的下标位置，使 `count` 恒等于输入长度。**expression 形态**——`MapNode.Execute`（`node/internal/flow/map.go` 的 `evalItemsInline`）就地逐项求值，直接返回同一份 `{results, count}` 契约，不发扇出描述符、不创建 sub-execution。上述 body 语法与 `continue_on_error` 结构均已生效，不再是规划设计。`body_concurrency` 只对 body 形态有意义：expression 形态没有子执行可并发，`evalItemsInline` 恒为就地串行求值。`xflow.split` 没有 `body` 概念（它通过下游 `connections` 扇出，见下文 Split 节点一节），本节的 body 语法与结果结构均只适用于 `xflow.map`。两种形态都不发任何标记键：引擎从编译期投影的 body 判定扩展与否，`_loop`/`_split` 已移除。遗留缺口（无 `max_concurrency` 节流）见 [SUBGRAPH-ENGINE-TODO.md](./SUBGRAPH-ENGINE-TODO.md)。
 > **跨域引用编译规则**：
 > - `body` 内 `$nodes['x']` 中 `x` 不在 `body.nodes` 中时，编译器视为**跨域引用**
 > - 跨域引用仅允许读取 loop 节点的上游祖先节点（DAG 拓扑序中确定在 loop 之前完成的节点）

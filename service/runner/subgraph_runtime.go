@@ -96,6 +96,7 @@ func (r *SubgraphRuntime) Execute(ctx context.Context, lease *engine.TaskLease) 
 		Items:           payload.Items,
 		AllItems:        payload.AllItems,
 		ContinueOnError: payload.ContinueOnError,
+		BodyConcurrency: payload.BodyConcurrency,
 		Runtime:         payload.Runtime,
 		OuterNodes:      payload.OuterNodes,
 		TraceID:         payload.TraceID,

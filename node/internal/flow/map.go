@@ -21,6 +21,9 @@ type MapNode struct {
 	Items     string
 	BatchSize int
 	KeepGoing bool
+	// BodyConcurrency caps how many of a batch's items run at the same time.
+	// Zero (the default) and one both mean serial. See Concurrency.
+	BodyConcurrency int
 }
 
 // Map creates a map node that runs a body sub-graph over a collection.
@@ -47,6 +50,36 @@ func (n *MapNode) ContinueOnError() *MapNode {
 	return n
 }
 
+// Concurrency runs up to max of a batch's items at the same time instead of one
+// after another.
+//
+//	node.Map("$input.messages", 40).Concurrency(8)
+//
+// Serial by default, and deliberately opt-in. A batch is a durability unit sized
+// by the author, so running all of its items at once multiplies that batch's
+// peak resource use by its length -- for a body holding a wasm guest, 40
+// concurrent items means 40 live linear memories rather than 4.
+//
+// It also weakens fail-fast: without ContinueOnError the serial loop guarantees
+// that no item AFTER a failure runs, while a parallel batch can only guarantee
+// that no item is STARTED after the failure is observed. In-flight items run to
+// completion and keep their side effects, so a body with side effects must be
+// idempotent on a business key from $item.
+//
+// The case this exists for is a batch that is the only batch in flight -- a
+// Kafka trigger group seeding one batch synchronously per flush, where
+// "concurrency comes from the batches" is false and the items are the only axis
+// left. Values at or below one are clamped to serial: a non-positive cap is not
+// a cap, and treating it as unbounded turns a typo into thousands of concurrent
+// sub-executions.
+func (n *MapNode) Concurrency(max int) *MapNode {
+	if max < 1 {
+		max = 1
+	}
+	n.BodyConcurrency = max
+	return n
+}
+
 func (n *MapNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.map",
@@ -55,6 +88,7 @@ func (n *MapNode) Descriptor() types.Descriptor {
 			{Name: "items", DisplayName: "Items", Type: types.ParamString, Required: true, Description: "Expression that evaluates to the array to iterate"},
 			{Name: "batch_size", DisplayName: "Batch Size", Type: types.ParamNumber, Required: false, Default: 1, Description: "Number of items processed per batch"},
 			{Name: "continue_on_error", DisplayName: "Continue On Error", Type: types.ParamBool, Required: false, Default: false, Description: "Continue iteration when an item fails"},
+			{Name: "body_concurrency", DisplayName: "Body Concurrency", Type: types.ParamNumber, Required: false, Default: 1, Description: "Maximum items of one batch running at the same time; 1 (the default) runs them serially"},
 			{Name: "body", DisplayName: "Body", Type: types.ParamObject, Required: false, Description: "Sub-graph executed once per item; mutually exclusive with expression, and exactly one of the two is required"},
 			{Name: "expression", DisplayName: "Expression", Type: types.ParamString, Required: false, Description: "Expression evaluated once per item over $item/$index/$items; mutually exclusive with body, and exactly one of the two is required"},
 		},
@@ -70,11 +104,19 @@ func (n *MapNode) OnError(s types.OnError) types.Builder {
 }
 
 func (n *MapNode) RawParams() any {
-	return map[string]any{
+	params := map[string]any{
 		"items":             n.Items,
 		"batch_size":        n.BatchSize,
 		"continue_on_error": n.KeepGoing,
 	}
+	// Emitted only when it changes something. Serial is both the default and
+	// what every map node built before Concurrency existed means, so writing
+	// "body_concurrency": 1 into those definitions would churn every stored
+	// definition hash for no behavioural difference.
+	if n.BodyConcurrency > 1 {
+		params["body_concurrency"] = n.BodyConcurrency
+	}
+	return params
 }
 
 func (n *MapNode) Execute(ctx context.Context, input *types.Input) (*types.Output, error) {

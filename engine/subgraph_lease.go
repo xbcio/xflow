@@ -55,6 +55,15 @@ type SubgraphLeasePayload struct {
 	AllItems []any `json:"all_items,omitempty"`
 	// ContinueOnError, when false, stops this batch at its first failed item.
 	ContinueOnError bool `json:"continue_on_error,omitempty"`
+	// BodyConcurrency caps how many of this batch's items the runner may run at
+	// the same time. Zero or one means serial, which is what every lease built
+	// before this field existed carries.
+	//
+	// It travels on the lease because a runner cannot derive it: the map node's
+	// parameters live in the compiled graph, which only the control plane has.
+	// Dropping it here would make body_concurrency work in process and silently
+	// do nothing on every distributed deployment.
+	BodyConcurrency int `json:"body_concurrency,omitempty"`
 	// Runtime is the outer submission's runtime, carried so a body member's
 	// $vars sees the per-submission half. The static half already travels
 	// inside Package.Def.Context; Runtime.Vars have no other route to a runner,
@@ -153,6 +162,7 @@ func (e *Engine) BuildSubgraphLease(ctx context.Context, t *Task) (*TaskLease, *
 		ChildExecID:     childExecID,
 		Items:           items,
 		ContinueOnError: mapContinueOnError(meta),
+		BodyConcurrency: mapBodyConcurrency(meta),
 	}
 	// The body and the batching context are what turn this lease from a
 	// pass-through into runnable work. They come from two different places: the

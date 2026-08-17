@@ -140,6 +140,28 @@ func (w *WorkflowBuilder) Options() types.WorkflowOptions {
 	return *w.options
 }
 
+// Definition builds the workflow and returns the resulting definition, without
+// registering it anywhere.
+//
+// It is the definition-level counterpart of Options: a read-only view for
+// callers outside this package that need to assert on what a builder function
+// produced. Options answers "did this workflow opt into Transient"; this
+// answers the same class of question one level down, about a node's parameters
+// -- whether the batch size, the concurrency cap, or the guest path a config
+// field is supposed to control actually reached the node.
+//
+// A builder field having a value is not the same as the value reaching the
+// definition, and nothing else exported can tell the two apart: every other
+// route runs through AddWorkflow, which needs a backend, a registry, and (for
+// ScriptFile nodes) an artifact store.
+//
+// It returns the same *types.WorkflowDef the registration path builds, so it
+// reports build errors -- an unregistered node type, an invalid parameter, a
+// cyclic body -- exactly as registration would.
+func (w *WorkflowBuilder) Definition() (*types.WorkflowDef, error) {
+	return w.build()
+}
+
 func (w *WorkflowBuilder) Namespace(namespace string) *WorkflowBuilder {
 	w.namespace = namespace
 	return w

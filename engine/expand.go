@@ -317,6 +317,7 @@ func (e *Engine) runBatchBody(ctx context.Context, g *graph.Graph, lease *TaskLe
 		Items:           items,
 		AllItems:        allItems,
 		ContinueOnError: continueOnError,
+		BodyConcurrency: mapBodyConcurrency(meta),
 		Runtime:         submission.Runtime,
 		OuterNodes:      outerNodes,
 		TraceID:         submission.TraceID,
@@ -400,6 +401,40 @@ func mapContinueOnError(meta graph.NodeMeta) bool {
 	}
 	enabled, _ := meta.Parameters["continue_on_error"].(bool)
 	return enabled
+}
+
+// mapBodyConcurrency reads the map node's body_concurrency parameter: how many
+// of a batch's items may run at the same time.
+//
+// Only a literal number counts, for mapContinueOnError's reason -- parameters
+// are read here, at scheduling time, where no per-item environment exists to
+// evaluate an expression against. int and float64 are both accepted because a
+// definition that round-tripped through JSON carries float64 where an SDK caller
+// wrote int, and honouring only one of those would make the parameter work from
+// Go and silently do nothing from every registered workflow.
+//
+// Anything else -- absent, a string, a non-positive number -- yields 1, which is
+// serial. A non-positive cap is not a cap: reading it as "unbounded" would turn
+// one typo into as many concurrent sub-executions as the batch is long.
+func mapBodyConcurrency(meta graph.NodeMeta) int {
+	if meta.Parameters == nil {
+		return 1
+	}
+	var value int
+	switch raw := meta.Parameters["body_concurrency"].(type) {
+	case int:
+		value = raw
+	case int64:
+		value = int(raw)
+	case float64:
+		value = int(raw)
+	default:
+		return 1
+	}
+	if value < 1 {
+		return 1
+	}
+	return value
 }
 
 // batchPayloadInt coerces one of the expansion payload's integer fields. A

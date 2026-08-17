@@ -74,6 +74,22 @@ type BatchBodyRequest struct {
 	// ContinueOnError, when false, stops the batch at its first failed item.
 	// The already-executed items keep their side effects: there is no rollback.
 	ContinueOnError bool
+	// BodyConcurrency is the maximum number of this batch's items that may run
+	// at the same time. Zero or one means serial, which is the default and the
+	// behaviour of every map node written before this field existed.
+	//
+	// It is a cap rather than a bool because the cap is the point. A batch is a
+	// deliberately-sized durability unit, and running all of its items at once
+	// multiplies that batch's peak resource use by its length -- for the wasm
+	// bodies this exists for, 40 concurrent items means 40 live guest instances
+	// with their own linear memories, not 4.
+	//
+	// It also weakens fail-fast, which is why it must be opt-in: under
+	// ContinueOnError=false the serial loop promises that no item AFTER the
+	// failure runs, and with items already in flight only the weaker "no item is
+	// STARTED after the failure is observed" survives. There is no rollback for
+	// the ones that did start.
+	BodyConcurrency int
 	// Runtime is the OUTER submission's runtime, forwarded so a body member's
 	// $vars sees the per-submission half too. $vars is the union of the
 	// workflow's static Context.Vars -- which travel inside Body.Def -- and

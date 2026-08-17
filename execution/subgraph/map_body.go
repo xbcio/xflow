@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/xbcio/xflow/engine"
@@ -52,49 +53,36 @@ func NewMapBodyExecutor(executor *Executor, suspendDisabled bool, deadline time.
 	return &MapBodyExecutor{executor: executor, suspendDisabled: suspendDisabled, deadline: deadline}
 }
 
-// ExecuteBatchBody runs the body once per item, in order, and reports one result
-// per item.
+// ExecuteBatchBody runs the body once per item and reports one result per item,
+// always in item order.
 //
-// Items run serially rather than concurrently: a batch is the durability unit, and
-// running its items in parallel would multiply the peak resource use of a
-// deliberately-sized batch without changing throughput — concurrency across the
-// expansion already comes from the batches themselves being separate tasks.
+// Items run serially by default: a batch is the durability unit, and running its
+// items in parallel multiplies the peak resource use of a deliberately-sized
+// batch — concurrency across the expansion already comes from the batches
+// themselves being separate tasks.
+//
+// req.BodyConcurrency > 1 opts out of that default, for the case the default
+// does not cover: a batch that is the ONLY batch in flight. The trigger-group
+// entry-seed path (node/trigger/kafka's flush) runs one batch synchronously per
+// Kafka flush, so "concurrency comes from the batches" is false there and the
+// items are the only axis left. Measured on that path, the body loop accounted
+// for effectively all of a batch's wall clock.
 func (x *MapBodyExecutor) ExecuteBatchBody(ctx context.Context, req engine.BatchBodyRequest) ([]engine.BatchItemResult, error) {
 	if req.Body == nil {
 		return nil, errors.New("batch body request carries no package")
 	}
+	if req.BodyConcurrency > 1 && len(req.Items) > 1 {
+		return x.executeConcurrently(ctx, req)
+	}
 	results := make([]engine.BatchItemResult, 0, len(req.Items))
 	for pos, item := range req.Items {
-		index := globalIndex(req, pos)
-		res, err := x.executor.Execute(ctx, Request{
-			Package:         req.Body,
-			PackageHash:     req.BodyHash,
-			Input:           bodyItemInput(req),
-			Scope:           bodyItemScope(req, item, index),
-			SuspendDisabled: x.suspendDisabled,
-			// Zero when this MapBodyExecutor was built with no outer deadline (the
-			// sdk/xflow and SubgraphRuntime constructors both do this today, since
-			// neither has one to give -- see the deadline field's doc on why that is
-			// fine). Forwarding it here rather than dropping it is what closes the
-			// gap for the one caller that DOES have one: a group-member map's item
-			// must not be able to keep running after the enclosing group execution's
-			// own deadline has passed.
-			Deadline: x.deadline,
-		})
+		itemResult, err := x.runItem(ctx, req, item, globalIndex(req, pos))
 		if err != nil {
 			// The body could not be RUN — compile failure, package validation,
 			// backend construction. That is a fault of the whole batch, not of
 			// this item, so it aborts rather than being recorded per item: every
 			// remaining item would fail identically.
 			return nil, err
-		}
-
-		itemResult := engine.BatchItemResult{Index: index}
-		switch res.Outcome {
-		case OutcomeSuccess:
-			itemResult.Data = exitsAsItemResult(res.Exits)
-		default:
-			itemResult.Err = fmt.Errorf("%s: %s", res.Outcome, res.Error)
 		}
 		results = append(results, itemResult)
 
@@ -108,8 +96,145 @@ func (x *MapBodyExecutor) ExecuteBatchBody(ctx context.Context, req engine.Batch
 	return results, nil
 }
 
-// globalIndex turns a position within this batch into the item's position in the
-// map node's whole items array. batch_size is a durability policy, so $index must
+// runItem runs the body once for one item and folds the sub-execution's outcome
+// into that item's result. Shared by the serial loop and executeConcurrently so
+// the two cannot drift on what an item's result means — a second copy of this
+// mapping is how a parallel path ends up classifying a failure differently from
+// the serial one.
+//
+// A returned error means the body could not be RUN at all, which is the batch's
+// failure rather than the item's; a failed run is reported in the result's Err.
+func (x *MapBodyExecutor) runItem(ctx context.Context, req engine.BatchBodyRequest, item any, index int) (engine.BatchItemResult, error) {
+	res, err := x.executor.Execute(ctx, Request{
+		Package:         req.Body,
+		PackageHash:     req.BodyHash,
+		Input:           bodyItemInput(req),
+		Scope:           bodyItemScope(req, item, index),
+		SuspendDisabled: x.suspendDisabled,
+		// Zero when this MapBodyExecutor was built with no outer deadline (the
+		// sdk/xflow and SubgraphRuntime constructors both do this today, since
+		// neither has one to give -- see the deadline field's doc on why that is
+		// fine). Forwarding it here rather than dropping it is what closes the
+		// gap for the one caller that DOES have one: a group-member map's item
+		// must not be able to keep running after the enclosing group execution's
+		// own deadline has passed.
+		Deadline: x.deadline,
+	})
+	if err != nil {
+		return engine.BatchItemResult{}, err
+	}
+
+	itemResult := engine.BatchItemResult{Index: index}
+	switch res.Outcome {
+	case OutcomeSuccess:
+		itemResult.Data = exitsAsItemResult(res.Exits)
+	default:
+		itemResult.Err = fmt.Errorf("%s: %s", res.Outcome, res.Error)
+	}
+	return itemResult, nil
+}
+
+// executeConcurrently runs up to req.BodyConcurrency of the batch's items at
+// once, writing each result into its own slot so the returned slice stays in
+// ITEM order regardless of completion order. Every downstream reader indexes it
+// positionally (engine.BatchResultForCommit, completeLoopSplit's flatten, a
+// user's results[i]), so appending on completion would silently shuffle a map
+// node's output.
+//
+// Fail-fast is honoured as far as it can be. Under ContinueOnError=false the
+// serial loop guarantees no item after the failure runs at all; here the
+// guarantee is that no item is STARTED after a failure is observed. The items
+// already in flight run to completion and keep their side effects, which is why
+// a body with side effects must be idempotent on a business key from $item —
+// the same constraint the serial path already carries, just reachable by more
+// items at once.
+//
+// A "the body could not be RUN" error (compile failure, package validation) is
+// the whole batch's failure, so the first one wins and cancels the rest rather
+// than being recorded per item: every remaining item would fail identically.
+func (x *MapBodyExecutor) executeConcurrently(ctx context.Context, req engine.BatchBodyRequest) ([]engine.BatchItemResult, error) {
+	limit := min(req.BodyConcurrency, len(req.Items))
+
+	results := make([]engine.BatchItemResult, len(req.Items))
+	// started marks which slots actually ran. A fail-fast stop leaves the tail
+	// untouched, and those slots must be dropped rather than reported as
+	// zero-valued successes — an empty result is indistinguishable from a real
+	// one downstream.
+	started := make([]bool, len(req.Items))
+
+	// runCtx cancels the in-flight items when the batch aborts. It is the only
+	// mechanism that can shorten work already inside a body; the admission check
+	// below is what stops NEW items.
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var (
+		mu      sync.Mutex
+		stop    bool  // a failure was observed and ContinueOnError is false
+		runErr  error // first "could not run" error; the batch's own failure
+		wg      sync.WaitGroup
+		tickets = make(chan struct{}, limit)
+	)
+
+	for pos, item := range req.Items {
+		// Admission gate: acquire a ticket first, then re-check under the lock.
+		// Checking before acquiring would admit every item at once.
+		select {
+		case tickets <- struct{}{}:
+		case <-runCtx.Done():
+			// The batch aborted while this item waited for a ticket. It was never
+			// started, so its slot stays unset.
+		}
+		mu.Lock()
+		aborted := stop || runErr != nil
+		mu.Unlock()
+		if aborted || runCtx.Err() != nil {
+			break
+		}
+
+		started[pos] = true
+		wg.Add(1)
+		go func(pos int, item any) {
+			defer wg.Done()
+			defer func() { <-tickets }()
+
+			itemResult, err := x.runItem(runCtx, req, item, globalIndex(req, pos))
+
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				if runErr == nil {
+					runErr = err
+					cancel()
+				}
+				// This slot has no meaningful result: the batch is failing whole.
+				started[pos] = false
+				return
+			}
+			results[pos] = itemResult
+			if itemResult.Err != nil && !req.ContinueOnError {
+				stop = true
+				cancel()
+			}
+		}(pos, item)
+	}
+	wg.Wait()
+
+	if runErr != nil {
+		return nil, runErr
+	}
+
+	out := make([]engine.BatchItemResult, 0, len(results))
+	for pos := range results {
+		if !started[pos] {
+			continue
+		}
+		out = append(out, results[pos])
+	}
+	return out, nil
+}
+
+// globalIndex turns a position within this batch into the item's position in the// map node's whole items array. batch_size is a durability policy, so $index must
 // not change when it does.
 func globalIndex(req engine.BatchBodyRequest, pos int) int {
 	if req.BatchSize <= 0 {
