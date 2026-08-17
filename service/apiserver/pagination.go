@@ -38,7 +38,7 @@ const (
 //
 // This function only parses parameters; it makes no claims about whether the
 // list endpoint it serves is registered. As of this writing no list endpoint
-// is registered (see docs/design/API-SPECIFICATION.md §9).
+// is registered (see docs/design/API-SPECIFICATION.md §9.6).
 func pageParams(r *http.Request) (page, pageSize int) {
 	page = defaultPage
 	pageSize = defaultPageSize
@@ -60,7 +60,6 @@ func pageParams(r *http.Request) (page, pageSize int) {
 
 	// Clamp the upper bound. pageSize could legitimately be larger than max
 	// only via a client request; we never produce a larger value ourselves.
-	// The check is `>` not `>=` so that exactly maxPageSize passes through.
 	if pageSize > maxPageSize {
 		pageSize = maxPageSize
 	}

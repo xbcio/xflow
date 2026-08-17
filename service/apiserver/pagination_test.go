@@ -51,6 +51,25 @@ func TestPageSizeZeroNegativeFallsBackToDefault(t *testing.T) {
 	}
 }
 
+// TestPageSizeExactlyAtCapPassesThrough pins the boundary itself: 200 is a
+// legal client request, not something to clamp down. A `>=` clamp would send
+// it to 20 (or 199, depending on how the clamp was written) and silently
+// shrink every caller that asks for the documented maximum. The cap and the
+// largest legal page size are the same number, so only an explicit test tells
+// the two apart.
+func TestPageSizeExactlyAtCapPassesThrough(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/v1/workflows?page_size=200", nil)
+	if _, size := pageParams(req); size != 200 {
+		t.Fatalf("page_size=200 → %d, want 200 (the cap is inclusive)", size)
+	}
+	// One below the cap must also pass through untouched — proving the clamp
+	// is not rewriting every value to a constant.
+	req = httptest.NewRequest(http.MethodGet, "/v1/workflows?page_size=199", nil)
+	if _, size := pageParams(req); size != 199 {
+		t.Fatalf("page_size=199 → %d, want 199 (below the cap, untouched)", size)
+	}
+}
+
 // TestPageBeyondIntRangeFallsBack guards against a client sending
 // page=99999999999999999999. strconv.Atoi on such a value errors (out of int
 // range), and the fallback is the respective default — NOT a 500. An
