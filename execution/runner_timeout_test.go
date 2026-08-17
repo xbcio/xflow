@@ -185,10 +185,10 @@ func TestReclassifyNoOpWhenNoError(t *testing.T) {
 // always picks ctx.Done() (the two branches are NOT a fair coin flip — the main
 // goroutine is already blocked in select when ctx fires, while the handler
 // goroutine still needs scheduling to write ch). The reclassify coverage comes
-// from the INNER non-blocking select after runtime.Gosched(): the yield lets
-// the handler goroutine run and write to ch (~56% hit rate per iteration).
-// Removing reclassify from that inner path reddens the test on the first
-// iteration that hits it (measured: iteration 0 fails immediately).
+// from the INNER bounded select in the ctx.Done() branch: the abandonGrace
+// wait gives the handler goroutine time to unblock and write to ch, and the
+// inner select catches that write. Removing reclassify from that inner path
+// surfaces a bare context.DeadlineExceeded on the first iteration that hits it.
 func TestExecuteReclassifyWiring(t *testing.T) {
 	const iterations = 50
 	h := ctxWaitHandler{}
@@ -769,6 +769,141 @@ func TestExecuteAbandonPreservesBusinessVerdict(t *testing.T) {
 	t.Logf("verdict preserved = %d / %d", preserved, iterations)
 }
 
+// TestOnResumeAbandonPreservesBusinessVerdict is the suspending-path mirror of
+// TestExecuteAbandonPreservesBusinessVerdict. It drives the real Execute path
+// with a SuspendingHandler whose OnResume returns a permanent business verdict
+// after unblocking from ctx.Done(), via a lease with Task.Type ==
+// engine.TaskTypeNodeResume (so executeSuspending takes the callOnResume
+// branch). The same race exists in callOnResume's ctx.Done() branch: without
+// the abandonGrace bounded wait, the synthesized newCancelError is returned and
+// the handler's real verdict is discarded by the watcher.
+type bizErrUnblockSuspendHandler struct{}
+
+func (*bizErrUnblockSuspendHandler) Descriptor() types.Descriptor {
+	return types.Descriptor{Type: "test.bizerr-unblock-suspend"}
+}
+
+func (*bizErrUnblockSuspendHandler) Execute(context.Context, *types.Input) (*types.Output, error) {
+	return nil, nil
+}
+
+func (*bizErrUnblockSuspendHandler) OnResume(ctx context.Context, _ *types.Input, _ *types.SignalPayload) (*types.Output, error) {
+	<-ctx.Done()
+	return nil, types.NewPermanentError("biz.invalid_account", "account is closed")
+}
+
+func (*bizErrUnblockSuspendHandler) PrepareSuspend(_ context.Context, _ *types.Input) (*types.SuspendSpec, error) {
+	return &types.SuspendSpec{Mode: types.ModeSignal, Signals: []string{"signal"}}, nil
+}
+
+func TestOnResumeAbandonPreservesBusinessVerdict(t *testing.T) {
+	const iterations = 200
+	preserved := 0
+	runner := NewRunner(singleHandlerRegistry{handler: &bizErrUnblockSuspendHandler{}})
+	for i := range iterations {
+		lease := &engine.TaskLease{
+			Task: engine.Task{
+				ExecutionID: "exec-abandon-resume-verdict",
+				NodeName:    "probe",
+				Type:        engine.TaskTypeNodeResume,
+				Payload:     &types.SignalPayload{Name: "signal"},
+			},
+			Input:             &types.Input{ExecutionID: "exec-abandon-resume-verdict", NodeName: "probe", Timeout: 10 * time.Minute},
+			NodeType:          "test.bizerr-unblock-suspend",
+			ExecutionDeadline: time.Now().Add(10 * time.Minute),
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() { time.Sleep(50 * time.Millisecond); cancel() }()
+
+		res, err := runner.Execute(ctx, lease)
+		if err != nil {
+			t.Fatalf("iteration %d: Execute() transport error = %v, want nil", i, err)
+		}
+		if res.Error == nil {
+			t.Fatalf("iteration %d: TaskResult.Error = nil, want the preserved business verdict", i)
+		}
+		var ce *types.ClassifiedError
+		if !errors.As(res.Error, &ce) {
+			t.Fatalf("iteration %d: error is not a *types.ClassifiedError: %v (type %T)", i, res.Error, res.Error)
+		}
+		if ce.Code != "biz.invalid_account" {
+			t.Errorf("iteration %d: Code = %q, want %q (the handler's own verdict was replaced by the abandon branch)", i, ce.Code, "biz.invalid_account")
+		}
+		if !types.IsPermanent(res.Error) {
+			t.Errorf("iteration %d: verdict is not permanent, want permanent biz.invalid_account (got %v)", i, res.Error)
+		}
+		if ce.Code == "biz.invalid_account" && types.IsPermanent(res.Error) {
+			preserved++
+		}
+	}
+	t.Logf("verdict preserved = %d / %d", preserved, iterations)
+}
+
+// TestPrepareSuspendAbandonPreservesBusinessVerdict drives callPrepareSuspend
+// (the non-resume suspending path: a lease WITHOUT TaskTypeNodeResume takes
+// this branch in executeSuspending). The handler's PrepareSuspend returns a
+// permanent business verdict after unblocking from ctx.Done(). The same race
+// exists in callPrepareSuspend's ctx.Done() branch and the same abandonGrace
+// bounded wait guards it.
+type bizErrUnblockPrepareHandler struct{}
+
+func (*bizErrUnblockPrepareHandler) Descriptor() types.Descriptor {
+	return types.Descriptor{Type: "test.bizerr-unblock-prepare"}
+}
+
+func (*bizErrUnblockPrepareHandler) Execute(context.Context, *types.Input) (*types.Output, error) {
+	return nil, nil
+}
+
+func (*bizErrUnblockPrepareHandler) OnResume(_ context.Context, _ *types.Input, _ *types.SignalPayload) (*types.Output, error) {
+	return nil, nil
+}
+
+func (*bizErrUnblockPrepareHandler) PrepareSuspend(ctx context.Context, _ *types.Input) (*types.SuspendSpec, error) {
+	<-ctx.Done()
+	return nil, types.NewPermanentError("biz.invalid_account", "account is closed")
+}
+
+func TestPrepareSuspendAbandonPreservesBusinessVerdict(t *testing.T) {
+	const iterations = 200
+	preserved := 0
+	runner := NewRunner(singleHandlerRegistry{handler: &bizErrUnblockPrepareHandler{}})
+	for i := range iterations {
+		lease := &engine.TaskLease{
+			// No TaskTypeNodeResume: executeSuspending takes the
+			// callPrepareSuspend branch.
+			Task:              engine.Task{ExecutionID: "exec-abandon-prepare-verdict", NodeName: "probe"},
+			Input:             &types.Input{ExecutionID: "exec-abandon-prepare-verdict", NodeName: "probe", Timeout: 10 * time.Minute},
+			NodeType:          "test.bizerr-unblock-prepare",
+			ExecutionDeadline: time.Now().Add(10 * time.Minute),
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() { time.Sleep(50 * time.Millisecond); cancel() }()
+
+		res, err := runner.Execute(ctx, lease)
+		if err != nil {
+			t.Fatalf("iteration %d: Execute() transport error = %v, want nil", i, err)
+		}
+		if res.Error == nil {
+			t.Fatalf("iteration %d: TaskResult.Error = nil, want the preserved business verdict", i)
+		}
+		var ce *types.ClassifiedError
+		if !errors.As(res.Error, &ce) {
+			t.Fatalf("iteration %d: error is not a *types.ClassifiedError: %v (type %T)", i, res.Error, res.Error)
+		}
+		if ce.Code != "biz.invalid_account" {
+			t.Errorf("iteration %d: Code = %q, want %q (the handler's own verdict was replaced by the abandon branch)", i, ce.Code, "biz.invalid_account")
+		}
+		if !types.IsPermanent(res.Error) {
+			t.Errorf("iteration %d: verdict is not permanent, want permanent biz.invalid_account (got %v)", i, res.Error)
+		}
+		if ce.Code == "biz.invalid_account" && types.IsPermanent(res.Error) {
+			preserved++
+		}
+	}
+	t.Logf("verdict preserved = %d / %d", preserved, iterations)
+}
+
 // assertClassifiedError pins the *types.ClassifiedError wire contract via
 // errors.As — NOT substring matching on the message. A classification contract
 // is about Code / Permanent / Retryable, which a message string is only a weak
@@ -841,11 +976,10 @@ func (h *blockingSuspendHandler) PrepareSuspend(_ context.Context, _ *types.Inpu
 // (measured 0/100 taking the outer ch branch) because the main goroutine is
 // already blocked in select when ctx fires, while the handler goroutine still
 // needs to be scheduled to write to ch. The reclassify coverage comes from the
-// INNER non-blocking select in the ctx.Done() branch: after runtime.Gosched()
-// yields, the handler goroutine writes to ch, and the inner select catches it
-// (~56% hit rate measured over 200 iterations). Removing reclassify from that
-// inner path surfaces a bare context.DeadlineExceeded on the first iteration
-// that hits it (empirically iteration 0 or 1).
+// INNER bounded select in the ctx.Done() branch: the abandonGrace wait gives
+// the handler goroutine time to unblock and write to ch, and the inner select
+// catches that write. Removing reclassify from that inner path surfaces a bare
+// context.DeadlineExceeded on the first iteration that hits it.
 type ctxWaitHandler struct{}
 
 func (ctxWaitHandler) Descriptor() types.Descriptor {
@@ -859,8 +993,8 @@ func (ctxWaitHandler) Execute(ctx context.Context, _ *types.Input) (*types.Outpu
 
 // ctxWaitSuspendHandler is a SuspendingHandler whose OnResume waits for ctx
 // cancellation then returns context.DeadlineExceeded. Same mechanism as
-// ctxWaitHandler: reclassify coverage comes from the inner fallback select
-// after Gosched in callOnResume's ctx.Done() branch.
+// ctxWaitHandler: reclassify coverage comes from the inner bounded select on
+// the abandonGrace wait in callOnResume's ctx.Done() branch.
 type ctxWaitSuspendHandler struct{}
 
 func (*ctxWaitSuspendHandler) Descriptor() types.Descriptor {
