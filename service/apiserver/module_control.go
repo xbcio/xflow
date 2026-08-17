@@ -938,13 +938,27 @@ func (m *workflowControlModule) handleSeedExecution(w http.ResponseWriter, r *ht
 	})
 }
 
-// handleInspect serves GET /v1/executions/{id} (spec §7). The execution detail
-// is returned in the response envelope (spec §3) via writeData. A not-found
-// engine error maps to 404 execution_not_found (writeExecEngineFail); an
-// unclassified error collapses to 500 internal_error — never leaking Redis
-// text, internal paths, or node output (spec §3.5).
+// handleInspect serves GET /v1/executions/{id} (spec §7). It delegates to
+// inspectExecution — the single shared inspect implementation also used by the
+// management route (spec §7.2) — so the two routes return byte-identical bodies
+// for the same execution. Two implementations were a drift source and had
+// already diverged once.
 func (m *workflowControlModule) handleInspect(w http.ResponseWriter, r *http.Request, id types.ExecutionID) {
-	detail, err := m.eng.Inspect(r.Context(), id)
+	inspectExecution(w, r, m.eng, id)
+}
+
+// inspectExecution is the single inspect implementation shared by the
+// executions-family route (GET /v1/executions/{id}, OpExecutionRead) and the
+// management route (GET /v1/management/executions/{id}, OpManagementRead) per
+// spec §7.2. Both Ops stay distinct so an ops token and a business token can be
+// granted separately; only the implementation is merged.
+//
+// The detail is returned in the response envelope (spec §3) via writeData. A
+// not-found engine error maps to 404 execution_not_found (writeExecEngineFail);
+// an unclassified error collapses to 500 internal_error — never leaking Redis
+// text, internal paths, or node output (spec §3.5).
+func inspectExecution(w http.ResponseWriter, r *http.Request, eng control.EngineFacade, id types.ExecutionID) {
+	detail, err := eng.Inspect(r.Context(), id)
 	if err != nil {
 		writeExecEngineFail(w, r, err)
 		return

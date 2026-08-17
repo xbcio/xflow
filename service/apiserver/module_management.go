@@ -127,24 +127,23 @@ func (m *managementModule) handleRunner(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, snap)
 }
 
-// handleExecution inspects a single execution by id. It reuses the engine
-// facade so the response shape matches the workflow-control inspect endpoint.
-// The id is the {id} path value the mux matched.
+// handleExecution inspects a single execution by id. It delegates to
+// inspectExecution — the single shared inspect implementation also used by the
+// executions-family route (spec §7.2) — so GET /v1/management/executions/{id}
+// (OpManagementRead) and GET /v1/executions/{id} (OpExecutionRead) return
+// byte-identical bodies for the same execution. The two Ops stay distinct so
+// an ops token and a business token may be granted separately; only the
+// implementation is merged. The id is the {id} path value the mux matched.
 func (m *managementModule) handleExecution(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodGet) {
 		return
 	}
 	id := r.PathValue("id")
 	if id == "" {
-		writeError(w, http.StatusNotFound, "execution not found")
+		writeFail(w, r, http.StatusNotFound, "execution_not_found", "execution not found")
 		return
 	}
-	detail, err := m.eng.Inspect(r.Context(), types.ExecutionID(id))
-	if err != nil {
-		writeEngineError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, detail)
+	inspectExecution(w, r, m.eng, types.ExecutionID(id))
 }
 
 // handleHealthz is a liveness probe. It only confirms the process is serving
