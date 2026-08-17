@@ -330,25 +330,27 @@ func TestManagementAuthMiddleware401ReturnsEnvelope(t *testing.T) {
 
 // ---- dead-letter success-body envelope (Step 1 decision A) -----------------
 
-// TestDeadLetterListSuccessIsEnvelope pins the Step 1 decision (A): the
-// management dead-letter list success body is enveloped as
-// {success,code,data:{entries,next_cursor},trace_id}. The CLI's apiDeadLetterClient
-// decodes the envelope and extracts data, so it keeps working. The cursor
-// pagination shape (§3.3 exception) is preserved INSIDE data — the envelope
-// wraps it, it does not replace it.
-func TestDeadLetterListSuccessIsEnvelope(t *testing.T) {
+// TestDeadLetterListNoAuthzGateReturns404Envelope pins the spec §3.1 envelope
+// on the dead-letter route's fail-closed gate: when no PrincipalAuthenticator
+// is configured (a dev/preview server) the route returns a 404 failure envelope
+// (route_not_found) rather than exposing the privileged dead-letter list. The
+// list success-path envelope is covered at unit level by
+// TestNamespaceORDeadLetterCrossNamespace (namespaceA lists its own dead-
+// letter entry → 200, entries populated) and at integration level by the g1
+// e2e; this test deliberately does NOT cover the success path despite its
+// earlier name (TestDeadLetterListSuccessIsEnvelope) implying it did.
+func TestDeadLetterListNoAuthzGateReturns404Envelope(t *testing.T) {
 	mux, m := newMgmtModuleMux(t)
-	// Force a backend that does NOT implement DeadLetterStore so the list path
-	// returns 503 — but assert the 503 IS enveloped (failure path). A real list
-	// happy-path is covered by the integration suite (g1 e2e) against Redis.
+	// newMgmtModuleMux builds a management module WITHOUT a PrincipalAuthenticator,
+	// so handleDeadLetters' fail-closed gate returns the 404 envelope before any
+	// store is consulted. m is unused but kept to make the no-authz setup explicit.
 	_ = m
 	req := httptest.NewRequest(http.MethodGet, "/v1/management/dead-letters/exec-1?limit=10", nil)
-	req.Header.Set("X-Request-Id", "req-dl-503")
+	req.Header.Set("X-Request-Id", "req-dl-gate")
 	rec := httptest.NewRecorder()
-	// No principalAuth → 404 from the gate; assert THAT is enveloped.
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404 (no authz configured)", rec.Code)
+		t.Fatalf("status = %d, want 404 (no authz configured → fail-closed gate)", rec.Code)
 	}
 	var env envelope
 	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
@@ -360,7 +362,7 @@ func TestDeadLetterListSuccessIsEnvelope(t *testing.T) {
 	if env.Code != "route_not_found" {
 		t.Fatalf("code = %q, want route_not_found", env.Code)
 	}
-	if got := rec.Header().Get("X-Request-Id"); got != "req-dl-503" {
-		t.Fatalf("X-Request-Id = %q, want req-dl-503", got)
+	if got := rec.Header().Get("X-Request-Id"); got != "req-dl-gate" {
+		t.Fatalf("X-Request-Id = %q, want req-dl-gate", got)
 	}
 }

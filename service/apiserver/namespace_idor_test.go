@@ -172,16 +172,12 @@ func (f *namespaceIDORFixture) listDeadLetters(token string, execID types.Execut
 	}
 	defer func() { _ = resp.Body.Close() }()
 	// The list success body is enveloped (spec §3.1, Step 1 decision A): the
-	// {entries,next_cursor} payload rides inside envelope.data.
-	var env struct {
-		Success bool            `json:"success"`
-		Code    string          `json:"code"`
-		Data    json.RawMessage `json:"data"`
-	}
+	// {entries,next_cursor} payload rides inside envelope.data. A decode
+	// failure must be fatal — these helpers back IDOR assertions, and a
+	// helper that swallows a decode failure turns a real cross-namespace
+	// leak into a passing test.
 	var list deadLetterListResponse
-	if err := json.NewDecoder(resp.Body).Decode(&env); err == nil && len(env.Data) > 0 {
-		_ = json.Unmarshal(env.Data, &list)
-	}
+	decodeEnvelopeData(f.t, resp, &list)
 	return resp.StatusCode, list
 }
 
@@ -199,16 +195,36 @@ func (f *namespaceIDORFixture) replayDeadLetter(token string, execID types.Execu
 	defer func() { _ = resp.Body.Close() }()
 	// The replay result is enveloped (spec §3.1): unwrap data before decoding
 	// the typed replay response, including on the 404 not_found outcome path.
+	// A decode failure must be fatal rather than swallowed — see the note on
+	// listDeadLetters.
+	var out deadLetterReplayResponse
+	decodeEnvelopeData(f.t, resp, &out)
+	return resp.StatusCode, out
+}
+
+// decodeEnvelopeData unrwaps the spec §3.1 envelope and decodes its data field
+// into out. Mirrors test/security/namespace_isolation_test.go's helper: the
+// decode errors here are asserted rather than discarded, because these helpers
+// back IDOR assertions and a helper that swallows a decode failure turns a real
+// cross-namespace leak into a passing test. A failure envelope carries
+// data:null, which leaves out at its zero value without an error; the caller
+// asserts on the status code in that case.
+func decodeEnvelopeData(t *testing.T, resp *http.Response, out any) {
+	t.Helper()
 	var env struct {
 		Success bool            `json:"success"`
 		Code    string          `json:"code"`
 		Data    json.RawMessage `json:"data"`
 	}
-	var out deadLetterReplayResponse
-	if err := json.NewDecoder(resp.Body).Decode(&env); err == nil && len(env.Data) > 0 {
-		_ = json.Unmarshal(env.Data, &out)
+	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+		t.Fatalf("decode envelope: %v", err)
 	}
-	return resp.StatusCode, out
+	if len(env.Data) == 0 || string(env.Data) == "null" {
+		return
+	}
+	if err := json.Unmarshal(env.Data, out); err != nil {
+		t.Fatalf("decode envelope data: %v (data=%s)", err, env.Data)
+	}
 }
 
 // TestNamespaceORExecutionInspectCrossNamespace proves the core IDOR matrix:
