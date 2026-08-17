@@ -366,6 +366,17 @@ func writeRunnerError(w http.ResponseWriter, err error) {
 	case errors.Is(err, ErrMetricsEncodingUnsupported):
 		writeError(w, http.StatusUnsupportedMediaType, err.Error())
 	default:
+		// Logged before it is generalized away, because the response cannot carry
+		// it and nothing else will: an unrecognised error reaches the runner as a
+		// bare 500, and a runner's pollLoop treats a poll error as fatal (see
+		// core.go's claim-race comment) -- so this branch can permanently idle a
+		// runner while leaving no record anywhere of what the cause was. Observed:
+		// a SAS runner died on a 500 from this branch and the reason was
+		// unrecoverable after the fact.
+		//
+		// The log goes to the server's own stderr, never to the response. The
+		// generic body is unchanged: §7 forbids exposing internals to the caller.
+		log.Printf("control: unmapped runner error, returning 500: %v", err)
 		writeError(w, http.StatusInternalServerError, ErrInternalServer.Error())
 	}
 }
