@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -264,9 +265,19 @@ func waitTraceExecution(t *testing.T, baseURL string, id types.ExecutionID, time
 		t.Fatalf("wait: %v", err)
 	}
 	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read wait body: %v", err)
+	}
+	// The wait response is enveloped (spec §3); unwrap data before decoding
+	// the typed ExecutionDetail.
+	var env e2eEnvelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("decode wait envelope: %v (raw=%q)", err, string(body))
+	}
 	var detail engine.ExecutionDetail
-	if err := json.NewDecoder(resp.Body).Decode(&detail); err != nil {
-		t.Fatalf("decode: %v", err)
+	if err := json.Unmarshal(env.Data, &detail); err != nil {
+		t.Fatalf("decode wait data: %v (data=%q)", err, string(env.Data))
 	}
 	return detail
 }

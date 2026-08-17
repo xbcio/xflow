@@ -261,16 +261,21 @@ func g1InspectAuth(t *testing.T, baseURL, token string, id types.ExecutionID) (i
 	resp, raw := g1DoAuth(t, http.MethodGet, baseURL, "/v1/executions/"+string(id), token, nil)
 	var detail engine.ExecutionDetail
 	if resp.StatusCode == http.StatusOK {
-		_ = json.Unmarshal(raw, &detail)
+		// The inspect response is enveloped (spec §3); unwrap data before
+		// decoding the typed ExecutionDetail.
+		var env e2eEnvelope
+		_ = json.Unmarshal(raw, &env)
+		_ = json.Unmarshal(env.Data, &detail)
 	}
 	return resp.StatusCode, detail
 }
 
-// g1SignalAuth POSTs /v1/executions/{id}/signal with the given name+data.
+// g1SignalAuth POSTs /v1/executions/{id}/signals (plural, spec §1.1) with the
+// given name+data.
 func g1SignalAuth(t *testing.T, baseURL, token string, id types.ExecutionID, name string, data map[string]any) (int, []byte) {
 	t.Helper()
 	body := map[string]any{"name": name, "data": data}
-	resp, raw := g1DoAuth(t, http.MethodPost, baseURL, "/v1/executions/"+string(id)+"/signal", token, body)
+	resp, raw := g1DoAuth(t, http.MethodPost, baseURL, "/v1/executions/"+string(id)+"/signals", token, body)
 	return resp.StatusCode, raw
 }
 
@@ -281,11 +286,12 @@ func g1CancelAuth(t *testing.T, baseURL, token string, id types.ExecutionID) (in
 	return resp.StatusCode, raw
 }
 
-// g1RevokeSignalAuth POSTs /v1/executions/{id}/revoke-signal.
+// g1RevokeSignalAuth DELETEs /v1/executions/{id}/signals/{name} (spec §9.1:
+// the §9.1 migration moved the signal name from the request body into the path
+// segment and the verb from POST /revoke-signal to DELETE /signals/{name}).
 func g1RevokeSignalAuth(t *testing.T, baseURL, token string, id types.ExecutionID, name string) (int, []byte) {
 	t.Helper()
-	body := map[string]any{"name": name}
-	resp, raw := g1DoAuth(t, http.MethodPost, baseURL, "/v1/executions/"+string(id)+"/revoke-signal", token, body)
+	resp, raw := g1DoAuth(t, http.MethodDelete, baseURL, "/v1/executions/"+string(id)+"/signals/"+name, token, nil)
 	return resp.StatusCode, raw
 }
 
@@ -750,16 +756,16 @@ func g1RunAuthzMatrix(t *testing.T, h *productionServerRunnerHarness) []g1AuthzR
 
 	// Signal deny (noexec-A lacks execution scope) → 403.
 	statusSigDeny, _ := g1SignalAuth(t, h.httpSrv.URL, g1TokNoExA, idA, "noop", nil)
-	rows = append(rows, g1AuthzRow{Route: "POST /v1/executions/{id}/signal", Token: "noexec-A", Scope: "", Expected: 403, Got: statusSigDeny, Decision: "deny"})
+	rows = append(rows, g1AuthzRow{Route: "POST /v1/executions/{id}/signals", Token: "noexec-A", Scope: "", Expected: 403, Got: statusSigDeny, Decision: "deny"})
 	if statusSigDeny != 403 {
 		t.Fatalf("signal deny: status=%d, want 403", statusSigDeny)
 	}
 
-	// Revoke-signal deny (noexec-A) → 403.
+	// Revoke deny (noexec-A) → 403.
 	statusRevDeny, _ := g1RevokeSignalAuth(t, h.httpSrv.URL, g1TokNoExA, idA, "noop")
-	rows = append(rows, g1AuthzRow{Route: "POST /v1/executions/{id}/revoke-signal", Token: "noexec-A", Scope: "", Expected: 403, Got: statusRevDeny, Decision: "deny"})
+	rows = append(rows, g1AuthzRow{Route: "DELETE /v1/executions/{id}/signals/{name}", Token: "noexec-A", Scope: "", Expected: 403, Got: statusRevDeny, Decision: "deny"})
 	if statusRevDeny != 403 {
-		t.Fatalf("revoke-signal deny: status=%d, want 403", statusRevDeny)
+		t.Fatalf("revoke deny: status=%d, want 403", statusRevDeny)
 	}
 
 	// Cancel deny (noexec-A lacks execution scope) → 403.

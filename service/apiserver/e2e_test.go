@@ -109,8 +109,9 @@ func waitExecutionE2E(t *testing.T, baseURL string, id types.ExecutionID, timeou
 		t.Fatal(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	bodyBytes, _ := io.ReadAll(resp.Body)
 	var detail engine.ExecutionDetail
-	if err := json.NewDecoder(resp.Body).Decode(&detail); err != nil {
+	if err := json.Unmarshal(extractData(t, bodyBytes), &detail); err != nil {
 		t.Fatal(err)
 	}
 	return detail
