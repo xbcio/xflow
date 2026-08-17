@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -143,5 +144,61 @@ func TestBuildTaskLeaseUnsetTimeoutInheritsDefault(t *testing.T) {
 	if lease.ExecutionDeadline.Before(lo) || lease.ExecutionDeadline.After(hi) {
 		t.Fatalf("ExecutionDeadline = %v, want within [%v, %v]",
 			lease.ExecutionDeadline, lo, hi)
+	}
+}
+
+// TestRecoverTaskLeaseDeadlineAnchoredToOriginalIssuedAt pins the recovery
+// path's deadline anchor to the PERSISTED LeaseIssuedAt, not to time.Now().
+// A tolerance window cannot discriminate this: in-process the two instants are
+// microseconds apart. By backdating LeaseIssuedAt 10 minutes, the correct
+// deadline lands ~9m15s in the PAST while a now-anchored bug would land ~45s in
+// the FUTURE. Exact equality against the persisted instant is the only assertion
+// that catches the drift.
+//
+// If the anchor silently moves to time.Now(), a recovered lease gets a full
+// fresh budget — the timeout bound degenerates into a no-op on every crash
+// recovery.
+func TestRecoverTaskLeaseDeadlineAnchoredToOriginalIssuedAt(t *testing.T) {
+	eng, state, _, task := leaseTimeoutDef(t, 45*time.Second)
+	ctx := context.Background()
+
+	// Issue the lease so the node transitions to Running with a persisted
+	// LeaseIssuedAt and LeaseTTL.
+	lease, err := eng.BuildTaskLease(ctx, task)
+	if err != nil {
+		t.Fatalf("BuildTaskLease: %v", err)
+	}
+
+	// Push the persisted LeaseIssuedAt 10 minutes into the past. Widen LeaseTTL
+	// to 1 hour so the TTL expiry guard (lease.go:169) does not reject the
+	// recovery with ErrLeaseNotRecoverable before we reach the assertion.
+	pastIssuedAt := time.Now().UTC().Add(-10 * time.Minute)
+	key := string(task.ExecutionID) + "/" + task.NodeName
+	state.mu.Lock()
+	state.nodes[key].LeaseIssuedAt = pastIssuedAt
+	state.nodes[key].LeaseTTL = time.Hour
+	state.mu.Unlock()
+
+	recovered, err := eng.RecoverTaskLease(ctx, &lease.Task)
+	if errors.Is(err, ErrLeaseNotRecoverable) {
+		t.Fatalf("RecoverTaskLease returned ErrLeaseNotRecoverable; the TTL guard rejected "+
+			"before reaching the deadline stamp — widen LeaseTTL or check LeaseIssuedAt (%v)", err)
+	}
+	if err != nil {
+		t.Fatalf("RecoverTaskLease: %v", err)
+	}
+
+	// The recovered lease must carry the ORIGINAL persisted IssuedAt, not a
+	// fresh time.Now().
+	if !recovered.IssuedAt.Equal(pastIssuedAt) {
+		t.Fatalf("recovered.IssuedAt = %v, want %v (persisted original)", recovered.IssuedAt, pastIssuedAt)
+	}
+
+	// ExecutionDeadline must be pastIssuedAt + 45s — a point ~9m15s in the past.
+	wantDeadline := pastIssuedAt.Add(45 * time.Second)
+	if !recovered.ExecutionDeadline.Equal(wantDeadline) {
+		t.Fatalf("recovered.ExecutionDeadline = %v, want %v (original IssuedAt + timeout); "+
+			"if the deadline is near now+45s the anchor drifted to time.Now()",
+			recovered.ExecutionDeadline, wantDeadline)
 	}
 }
