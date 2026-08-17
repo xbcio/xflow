@@ -79,6 +79,21 @@ func WithDefaultNodeTimeout(d time.Duration) Option {
 	return func(e *Engine) { e.defaultNodeTimeout = d }
 }
 
+// WithOuterDeadline sets an absolute upper bound on every lease this engine
+// issues. BuildTaskLease and RecoverTaskLease clamp ExecutionDeadline to the
+// earlier of the member's own stamped deadline and this bound. Used by the
+// sub-graph executor to propagate the group's deadline to its members: the
+// member handler's context starts from context.Background() (memory_queue.go
+// worker goroutines must not inherit the submitter's cancellation), so the
+// deadline cannot travel as context lineage -- it travels as data through the
+// lease.
+//
+// A zero value (the default) means no outer bound; member deadlines apply
+// unchanged.
+func WithOuterDeadline(t time.Time) Option {
+	return func(e *Engine) { e.outerDeadline = t }
+}
+
 // WithSuspendDisabled makes runtime suspend requests fail the leased task
 // instead of parking it. If err is nil, ErrSuspendUnsupported is used.
 func WithSuspendDisabled(err error) Option {
@@ -128,6 +143,7 @@ type Engine struct {
 	groupExecutor            GroupExecutor
 	batchBodyExecutor        BatchBodyExecutor
 	remoteBatchExecution     bool
+	outerDeadline            time.Time
 
 	mu     sync.RWMutex
 	graphs map[types.ExecutionID]*graph.Graph

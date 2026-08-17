@@ -114,6 +114,16 @@ func (e *Engine) BuildTaskLease(ctx context.Context, t *Task) (*TaskLease, error
 	if input.Timeout > 0 {
 		lease.ExecutionDeadline = issuedAt.Add(input.Timeout)
 	}
+	// Clamp to the outer deadline when one is set. The effective member
+	// deadline is the EARLIER of (member's own stamped deadline, the group's
+	// absolute deadline). This is how a group's timeout reaches its members:
+	// context.Background() in the local queue's worker goroutine prevents ctx
+	// lineage from carrying the deadline, so it travels as data in the lease.
+	if !e.outerDeadline.IsZero() {
+		if lease.ExecutionDeadline.IsZero() || e.outerDeadline.Before(lease.ExecutionDeadline) {
+			lease.ExecutionDeadline = e.outerDeadline
+		}
+	}
 
 	started := prev == nil || prev.Status != types.NodeStatusRunning
 	if started && e.hooks != nil {
@@ -193,6 +203,12 @@ func (e *Engine) RecoverTaskLease(ctx context.Context, task *Task) (*TaskLease, 
 	}
 	if input.Timeout > 0 {
 		recovered.ExecutionDeadline = node.LeaseIssuedAt.Add(input.Timeout)
+	}
+	// Clamp to the outer deadline, same as BuildTaskLease.
+	if !e.outerDeadline.IsZero() {
+		if recovered.ExecutionDeadline.IsZero() || e.outerDeadline.Before(recovered.ExecutionDeadline) {
+			recovered.ExecutionDeadline = e.outerDeadline
+		}
 	}
 	return recovered, nil
 }

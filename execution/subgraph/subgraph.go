@@ -164,6 +164,13 @@ func (e *Executor) Execute(ctx context.Context, req Request) (Result, error) {
 		// req.Deadline, never earlier, so it buys nothing over forwarding req.Deadline
 		// itself.
 		engine.WithBatchBodyExecutor(NewMapBodyExecutor(e, req.SuspendDisabled, req.Deadline)),
+		// The group's deadline must reach its MEMBERS, not just Submit and WaitDone.
+		// Member handlers run on a worker goroutine that starts from
+		// context.Background() (memory_queue.go:157) -- a worker must not inherit
+		// the submitter's cancellation. What has to travel is the deadline VALUE,
+		// not the context lineage, so it rides as an engine option that clamps every
+		// lease the inner engine issues.
+		engine.WithOuterDeadline(req.Deadline),
 	}
 	if req.SuspendDisabled {
 		engineOpts = append(engineOpts, engine.WithSuspendDisabled(nil))
