@@ -148,7 +148,7 @@ func (f *namespaceIDORFixture) getExecution(token string, execID types.Execution
 	}
 	defer func() { _ = resp.Body.Close() }()
 	var detail engine.ExecutionDetail
-	_ = json.NewDecoder(resp.Body).Decode(&detail)
+	decodeEnvelopeData(f.t, resp, &detail)
 	return resp.StatusCode, detail
 }
 
