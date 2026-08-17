@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/xbcio/xflow/engine/graph"
@@ -181,3 +182,58 @@ func TestCommitTaskTimeoutIsIdempotent(t *testing.T) {
 		t.Fatalf("node not terminal after double commit: %+v", node)
 	}
 }
+
+// TestCommitTaskTimeoutRejectsGroupLease: CommitTaskTimeout is a node-only
+// commit path (g.NodeAt(t.NodeIdx) → commitAcyclicNodeError). A group unit
+// leases through its own state (group:<unitIdx>:status/meta), not through the
+// entry node's — sending it down the node path fences against a node that
+// never entered "running" and returns a misleading stale-token error. The
+// guard refuses group leases explicitly so the backstop cannot strand a group
+// unit on the node path.
+//
+// This guard is defense in depth. Today no group lease carries
+// ExecutionDeadline (BuildGroupLease and RecoverGroupLease never set it), so
+// the renewLease backstop cannot reach this method with one — measured: the
+// field is set only by BuildTaskLease/RecoverTaskLease (the node paths). The
+// guard makes that invariant a deliberate refusal rather than a load-bearing
+// accident.
+//
+// Without the guard, CommitTaskTimeout falls through to the node path and
+// returns ErrInvalidLeaseToken (accidental, because the entry node never
+// entered running with the group lease's token). The test pins the deliberate
+// guard error, not the accidental one, so deleting the guard turns this red.
+func TestCommitTaskTimeoutRejectsGroupLease(t *testing.T) {
+	eng, g, execID := setupGroupLeaseTest(t)
+	ctx := context.Background()
+
+	gm := g.Groups()[0]
+	task := &Task{
+		ExecutionID:  execID,
+		NodeName:     gm.Name,
+		NodeIdx:      gm.EntryIdx,
+		UnitIdx:      gm.UnitIdx,
+		Type:         TaskTypeGroupExec,
+		ActivationID: 0,
+	}
+
+	lease, _, err := eng.BuildGroupLease(ctx, task)
+	if err != nil {
+		t.Fatalf("BuildGroupLease: %v", err)
+	}
+
+	cause := types.NewPermanentError("node.timeout", "node execution exceeded its deadline")
+	err = eng.CommitTaskTimeout(ctx, lease, cause)
+	if !errors.Is(err, ErrGroupLeaseNotSupported) {
+		t.Fatalf("CommitTaskTimeout() error = %v, want ErrGroupLeaseNotSupported "+
+			"(group leases must be refused by the guard, not the accidental stale-token path)", err)
+	}
+
+	// The entry node must NOT have been written terminal by a failed commit.
+	// A silent no-op commit here is the exact corruption the guard prevents.
+	node, _ := eng.state.GetNode(ctx, execID, gm.Name)
+	if node != nil && types.IsTerminalNodeStatus(node.Status) {
+		t.Fatalf("entry node %q was written terminal by a group-lease CommitTaskTimeout; "+
+			"the guard must reject before any state mutation", gm.Name)
+	}
+}
+

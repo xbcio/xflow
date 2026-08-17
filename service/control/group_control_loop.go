@@ -242,11 +242,13 @@ func (c *Core) renewLease(ctx context.Context, req protocol.RenewLeaseRequest, i
 	// spot. Both halves are required.
 	//
 	// Refusing alone is not enough: one TTL later the sweeper treats the lease
-	// as a crashed runner and puts the task back to pending (reclaimGroupLease),
-	// which is the retry a timeout must never get. A well-behaved runner never
-	// reaches this branch -- it reports its own terminal result -- but a runner
-	// that ignores the deadline is exactly the case this backstop exists for,
-	// and that is the case the sweeper would otherwise pick up.
+	// as a crashed runner and puts the task back to pending (ReclaimLease, the
+	// node branch at engine/lease.go:408-441 — RevokeLeaseWithOutbox → Enqueue,
+	// or the legacy RevokeLease → Enqueue fallback), which is the retry a
+	// timeout must never get. A well-behaved runner never reaches this branch
+	// -- it reports its own terminal result -- but a runner that ignores the
+	// deadline is exactly the case this backstop exists for, and that is the
+	// case the sweeper would otherwise pick up.
 	//
 	// This does mean the server commits a node it is not executing. That was the
 	// path this design tried to avoid, but "no retry on timeout" forces it. The
@@ -259,7 +261,15 @@ func (c *Core) renewLease(ctx context.Context, req protocol.RenewLeaseRequest, i
 	// assertion the gRPC client does not satisfy. So this backstop is HTTP-only.
 	// That matches the project's stated direction (HTTP is the primary runner
 	// transport); fixing gRPC is out of scope.
-	if !resolved.ExecutionDeadline.IsZero() && !resolved.ExecutionDeadline.After(time.Now()) {
+	//
+	// The branch is node-only: CommitTaskTimeout is a node commit path and
+	// refuses group leases (ErrGroupLeaseNotSupported). A group's deadline lives
+	// in GroupLeasePayload.Deadline, not on TaskLease.ExecutionDeadline, so today
+	// no group lease reaches this branch. The isGroupTask guard makes that
+	// invariant explicit: if someone stamps ExecutionDeadline on a group lease
+	// in the future, the branch is skipped and the group renewal path below
+	// handles it (or a future group-aware timeout commit does).
+	if !isGroupTask(&resolved.Task) && !resolved.ExecutionDeadline.IsZero() && !resolved.ExecutionDeadline.After(time.Now()) {
 		if committer, ok := c.engine.(nodeTimeoutCommitter); ok {
 			cause := types.NewPermanentError("node.timeout", "node execution exceeded its deadline")
 			if err := committer.CommitTaskTimeout(ctx, resolved, cause); err != nil {

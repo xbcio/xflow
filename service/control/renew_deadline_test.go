@@ -2,11 +2,13 @@ package control
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/service/protocol"
+	"github.com/xbcio/xflow/types"
 )
 
 // TestRenewRefusedPastDeadline: a lease whose ExecutionDeadline has passed gets
@@ -269,16 +271,105 @@ func TestRenewUnaffectedWithZeroDeadline(t *testing.T) {
 	}
 }
 
-// deadlineTestEngine is a fake that satisfies both EngineFacade (via
-// embedding fakeControlEngine) and the nodeLeaseEngine + commitTaskTimeout
-// interfaces needed by the deadline backstop.
+// TestRenewSkipsDeadlineBranchForGroupLease: the deadline branch is node-only.
+// A group lease with a past ExecutionDeadline (a future scenario: today no
+// group lease carries ExecutionDeadline) must NOT be handed to
+// CommitTaskTimeout. The isGroupTask guard skips the branch and lets the
+// group renewal path handle it. This test pins the outer guard: deleting
+// !isGroupTask from the branch predicate makes this red because
+// CommitTaskTimeout would be called.
+func TestRenewSkipsDeadlineBranchForGroupLease(t *testing.T) {
+	ctx := context.Background()
+	dir := NewMemoryRunnerDirectory()
+	session, err := dir.Register(ctx, RegisterRunnerRequest{
+		RunnerID:     "runner-group-deadline",
+		Capacity:     2,
+		Capabilities: []protocol.Capability{{NodeType: "xflow.group", Features: []string{"group.exec.v1"}}},
+		Policy:       RunnerPolicy{AllowedNodeTypes: []string{"*"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	task := engine.Task{
+		ExecutionID: "exec-group-deadline-1",
+		NodeName:    "grp1",
+		NodeIdx:     0,
+		UnitIdx:     1,
+		Type:        engine.TaskTypeGroupExec,
+	}
+	assignment := Assignment{
+		AssignmentID: BuildAssignmentID(&task),
+		Task:         task,
+		Routing:      engine.TaskRouting{NodeType: "xflow.group"},
+	}
+	mustEnqueueAssignment(t, ctx, dir, assignment)
+	claim, ok, err := dir.ClaimForRunner(ctx, ClaimRequest{
+		RunnerID:     session.RunnerID,
+		SessionID:    session.SessionID,
+		Capacity:     4,
+		Capabilities: []protocol.Capability{{NodeType: "xflow.group", Features: []string{"group.exec.v1"}}},
+		Now:          time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("ClaimForRunner() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("ClaimForRunner() ok=false, want claim")
+	}
+	// Hypothetical future: a group lease stamped with ExecutionDeadline. Today
+	// BuildGroupLease never sets it; this test forces it to verify the guard.
+	pastDeadline := time.Now().Add(-5 * time.Minute)
+	lease := &engine.TaskLease{
+		LeaseID:           "lease-grp-dl-1",
+		LeaseToken:        "token-grp-dl-1",
+		Task:              task,
+		Attempt:           1,
+		NodeType:          "xflow.group",
+		IssuedAt:          time.Now().Add(-10 * time.Minute),
+		TTL:               60 * time.Second,
+		ExecutionDeadline: pastDeadline,
+	}
+	if err := dir.FinalizeClaim(ctx, claim.ClaimID, lease); err != nil {
+		t.Fatal(err)
+	}
+
+	fake := &deadlineTestEngine{groupRenewResult: true}
+	core := &Core{engine: fake, runners: dir, pollWait: time.Second}
+
+	resp, err := core.renewLease(ctx, protocol.RenewLeaseRequest{
+		RunnerID:   session.RunnerID,
+		SessionID:  session.SessionID,
+		LeaseID:    "lease-grp-dl-1",
+		LeaseToken: "token-grp-dl-1",
+		Extend:     30000,
+	}, TransportInfo{})
+	if err != nil {
+		t.Fatalf("renewLease() error = %v", err)
+	}
+	// The group lease should have been renewed via the group path (the branch
+	// was skipped), NOT refused or committed via the node timeout path.
+	if !resp.Renewed {
+		t.Fatal("renewLease() Renewed=false for a group lease; the deadline branch " +
+			"must be skipped for group tasks so the group renewal path handles it")
+	}
+	if fake.commitTimeoutCalled {
+		t.Fatal("CommitTaskTimeout was called for a group lease; the isGroupTask guard " +
+			"must skip the deadline branch for group tasks")
+	}
+}
+
+// deadlineTestEngine is a fake that satisfies EngineFacade (via
+// embedding fakeControlEngine) and the nodeLeaseEngine + nodeTimeoutCommitter
+// + groupLeaseEngine interfaces needed by the deadline backstop tests.
 type deadlineTestEngine struct {
 	fakeControlEngine
-	nodeRenewResult      bool
-	nodeRenewErr         error
-	commitTimeoutCalled  bool
-	commitTimeoutLease   *engine.TaskLease
-	commitTimeoutErr     error
+	nodeRenewResult     bool
+	nodeRenewErr        error
+	groupRenewResult    bool
+	commitTimeoutCalled bool
+	commitTimeoutLease  *engine.TaskLease
+	commitTimeoutErr    error
 }
 
 func (d *deadlineTestEngine) RenewTaskLease(_ context.Context, lease *engine.TaskLease, _ time.Duration) (bool, error) {
@@ -286,6 +377,23 @@ func (d *deadlineTestEngine) RenewTaskLease(_ context.Context, lease *engine.Tas
 		return false, d.nodeRenewErr
 	}
 	return d.nodeRenewResult, nil
+}
+
+func (d *deadlineTestEngine) RenewGroupLease(_ context.Context, lease *engine.TaskLease, _ time.Duration) (bool, error) {
+	return d.groupRenewResult, nil
+}
+
+func (d *deadlineTestEngine) BuildGroupLease(_ context.Context, t *engine.Task) (*engine.TaskLease, *engine.GroupLeasePayload, error) {
+	lease := &engine.TaskLease{Task: *t, NodeType: "xflow.group"}
+	return lease, &engine.GroupLeasePayload{}, nil
+}
+
+func (d *deadlineTestEngine) RecoverGroupLease(_ context.Context, _ types.ExecutionID, _ int) (*engine.TaskLease, *engine.GroupLeasePayload, error) {
+	return nil, nil, errors.New("not implemented")
+}
+
+func (d *deadlineTestEngine) CommitGroupResult(_ context.Context, lease *engine.TaskLease, res engine.GroupResult) (engine.CommitOutcome, error) {
+	return engine.CommitOutcomeAccepted, nil
 }
 
 func (d *deadlineTestEngine) CommitTaskTimeout(_ context.Context, lease *engine.TaskLease, _ error) error {

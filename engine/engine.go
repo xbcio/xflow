@@ -32,6 +32,16 @@ var ErrEntryNotFound = errors.New("entry not found")
 // unknown lease token.
 var ErrInvalidLeaseToken = errors.New("invalid lease token")
 
+// ErrGroupLeaseNotSupported is returned when a node-only operation is handed a
+// group lease. A group unit leases through its own state
+// (group:<unitIdx>:status/meta), not through the entry node's; sending it down
+// the node path fences against a node that never entered "running". Today this
+// is a deliberate refusal, not the accidental stale-token rejection the node
+// path would produce — the difference matters because a stale-token error
+// tells the caller to retry, while a group lease must not be retried on the
+// node path.
+var ErrGroupLeaseNotSupported = errors.New("operation does not support group leases")
+
 // ErrSuspendUnsupported is returned when a runtime mode disables suspend nodes.
 var ErrSuspendUnsupported = errors.New("xflow: suspend nodes are unsupported in transient execution mode")
 

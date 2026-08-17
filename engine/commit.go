@@ -77,9 +77,22 @@ func (e *Engine) CommitTaskResultWithOutcome(ctx context.Context, lease *TaskLea
 // KNOWN ASYMMETRY: on a cyclic graph this falls back to an unconditional fatal
 // commit. commitAcyclicNodeError serves acyclic graphs only, and the cyclic
 // path has no ApplyOnError equivalent. Cyclic execution is experimental.
+//
+// KNOWN LIMIT: group leases are NOT covered. A group unit leases through its
+// own state (group:<unitIdx>:status/meta), not through the entry node's; the
+// node commit path fences against a node that never entered "running" and
+// would return a misleading stale-token error. This guard refuses group leases
+// explicitly so the backstop cannot strand a group unit on the node path. A
+// group-aware timeout commit would be a separate path; today no group lease
+// carries ExecutionDeadline, so the renewLease backstop never reaches this
+// method with one. The guard makes that invariant a deliberate refusal rather
+// than a load-bearing accident.
 func (e *Engine) CommitTaskTimeout(ctx context.Context, lease *TaskLease, cause error) error {
 	if lease == nil {
 		return ErrInvalidLeaseToken
+	}
+	if lease.Task.Type == TaskTypeGroupExec {
+		return ErrGroupLeaseNotSupported
 	}
 	if cause == nil {
 		cause = types.NewPermanentError("node.timeout", "node execution exceeded its deadline")
