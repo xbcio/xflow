@@ -2,6 +2,8 @@ package execution
 
 import (
 	"context"
+	"fmt"
+	"time"
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/namespace"
@@ -117,17 +119,66 @@ func (r *Runner) Execute(ctx context.Context, lease *engine.TaskLease) (engine.T
 			return engine.TaskResult{}, NodeFailure(err)
 		}
 	}
+
+	// --- node-level deadline enforcement ---
+	deadline := nodeExecutionDeadline(lease, time.Now())
+	var budget time.Duration
+	if lease.Input != nil {
+		budget = lease.Input.Timeout
+	}
+	if !deadline.IsZero() {
+		// An ALREADY-EXPIRED deadline must terminate the task, not wave it
+		// through. Do NOT copy subgraph.go's `!IsZero() && After(now)` guard:
+		// its second half means an expired deadline builds no context at all,
+		// i.e. runs unbounded. A lease can legitimately arrive expired --
+		// queueing, poll interval, and redelivery all sit between issue and
+		// execution -- and running it unbounded is precisely the hole this
+		// feature closes.
+		if !deadline.After(time.Now()) {
+			return engine.TaskResult{Error: newNodeTimeoutError(budget)}, nil
+		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, deadline)
+		defer cancel()
+	}
+
 	if sh, ok := handler.(types.SuspendingHandler); ok {
-		return r.executeSuspending(ctx, lease, sh)
+		return r.executeSuspending(ctx, lease, sh, budget, deadline)
+	}
+
+	if !deadline.IsZero() {
+		// Run handler in a goroutine so a non-cooperative handler that ignores
+		// ctx does not hold the slot indefinitely. If the deadline fires, we
+		// return the timeout error and the goroutine leaks (Go cannot kill a
+		// goroutine; the alternative -- waiting -- is the permanent slot
+		// occupancy this exists to end).
+		type handlerResult struct {
+			output *types.Output
+			err    error
+		}
+		ch := make(chan handlerResult, 1)
+		go func() {
+			output, sysErr := handler.Execute(ctx, lease.Input)
+			ch <- handlerResult{output, sysErr}
+		}()
+
+		select {
+		case hr := <-ch:
+			hr.err = reclassifyTimeout(ctx, hr.err, budget, deadline)
+			return engine.TaskResult{Output: hr.output, Error: hr.err}, nil
+		case <-ctx.Done():
+			// Deadline fired before handler returned.
+			return engine.TaskResult{Error: newNodeTimeoutError(budget)}, nil
+		}
 	}
 
 	output, sysErr := handler.Execute(ctx, lease.Input)
 	return engine.TaskResult{Output: output, Error: sysErr}, nil
 }
 
-func (r *Runner) executeSuspending(ctx context.Context, lease *engine.TaskLease, sh types.SuspendingHandler) (engine.TaskResult, error) {
+func (r *Runner) executeSuspending(ctx context.Context, lease *engine.TaskLease, sh types.SuspendingHandler, budget time.Duration, deadline time.Time) (engine.TaskResult, error) {
 	if lease.Task.Type == engine.TaskTypeNodeResume {
-		output, err := sh.OnResume(ctx, lease.Input, lease.Task.Payload)
+		output, err := r.callOnResume(ctx, sh, lease, budget, deadline)
 		if err != nil {
 			return engine.TaskResult{Output: output, Error: err}, nil
 		}
@@ -136,20 +187,69 @@ func (r *Runner) executeSuspending(ctx context.Context, lease *engine.TaskLease,
 			if output.Data != nil {
 				input = cloneInputWithData(lease.Input, output.Data)
 			}
-			spec, err := sh.PrepareSuspend(ctx, input)
-			if err != nil {
-				return engine.TaskResult{Output: output, Error: err}, nil
+			spec, prepErr := r.callPrepareSuspend(ctx, sh, input, budget, deadline)
+			if prepErr != nil {
+				return engine.TaskResult{Output: output, Error: prepErr}, nil
 			}
 			return engine.TaskResult{Output: output, Suspend: spec}, nil
 		}
 		return engine.TaskResult{Output: output}, nil
 	}
 
-	spec, err := sh.PrepareSuspend(ctx, lease.Input)
+	spec, err := r.callPrepareSuspend(ctx, sh, lease.Input, budget, deadline)
 	if err != nil {
 		return engine.TaskResult{Error: err}, nil
 	}
 	return engine.TaskResult{Suspend: spec}, nil
+}
+
+// callOnResume wraps sh.OnResume in a goroutine+select when a deadline is set,
+// so a non-cooperative handler does not hold the slot.
+func (r *Runner) callOnResume(ctx context.Context, sh types.SuspendingHandler, lease *engine.TaskLease, budget time.Duration, deadline time.Time) (*types.Output, error) {
+	if !deadline.IsZero() {
+		type result struct {
+			output *types.Output
+			err    error
+		}
+		ch := make(chan result, 1)
+		go func() {
+			o, e := sh.OnResume(ctx, lease.Input, lease.Task.Payload)
+			ch <- result{o, e}
+		}()
+		select {
+		case r := <-ch:
+			r.err = reclassifyTimeout(ctx, r.err, budget, deadline)
+			return r.output, r.err
+		case <-ctx.Done():
+			return nil, newNodeTimeoutError(budget)
+		}
+	}
+	output, err := sh.OnResume(ctx, lease.Input, lease.Task.Payload)
+	return output, err
+}
+
+// callPrepareSuspend wraps sh.PrepareSuspend in a goroutine+select when a
+// deadline is set.
+func (r *Runner) callPrepareSuspend(ctx context.Context, sh types.SuspendingHandler, input *types.Input, budget time.Duration, deadline time.Time) (*types.SuspendSpec, error) {
+	if !deadline.IsZero() {
+		type result struct {
+			spec *types.SuspendSpec
+			err  error
+		}
+		ch := make(chan result, 1)
+		go func() {
+			s, e := sh.PrepareSuspend(ctx, input)
+			ch <- result{s, e}
+		}()
+		select {
+		case r := <-ch:
+			r.err = reclassifyTimeout(ctx, r.err, budget, deadline)
+			return r.spec, r.err
+		case <-ctx.Done():
+			return nil, newNodeTimeoutError(budget)
+		}
+	}
+	return sh.PrepareSuspend(ctx, input)
 }
 
 func cloneInputWithData(input *types.Input, data map[string]any) *types.Input {
@@ -159,4 +259,56 @@ func cloneInputWithData(input *types.Input, data map[string]any) *types.Input {
 	cp := *input
 	cp.Data = data
 	return &cp
+}
+
+// nodeExecutionDeadline picks the effective absolute deadline for one handler
+// invocation. The lease's stamped deadline wins: it is anchored at issue time,
+// so dispatch latency counts against the budget rather than resetting it. Input
+// .Timeout is the fallback for a lease built by an older control plane that
+// does not stamp one.
+func nodeExecutionDeadline(lease *engine.TaskLease, now time.Time) time.Time {
+	if !lease.ExecutionDeadline.IsZero() {
+		return lease.ExecutionDeadline
+	}
+	if lease.Input != nil && lease.Input.Timeout > 0 {
+		return now.Add(lease.Input.Timeout)
+	}
+	return time.Time{}
+}
+
+// newNodeTimeoutError builds the terminal error for an execution that ran past
+// its deadline. It is Permanent so the retry short-circuit in
+// engine/atomic_commit.go declines to re-run it and the queue layers
+// (memory_queue, asynq/retry) decline to redeliver it: a timeout is not a
+// transient failure to be retried, it is a verdict.
+//
+// The message carries the CONFIGURED budget and nothing else. Not the absolute
+// deadline (runtime data), and never node output, Input, or params: an upstream
+// node's output is routinely an HTTP response body carrying a token.
+func newNodeTimeoutError(budget time.Duration) error {
+	if budget <= 0 {
+		return types.NewPermanentError("node.timeout",
+			"node execution exceeded its deadline")
+	}
+	return types.NewPermanentError("node.timeout",
+		fmt.Sprintf("node execution exceeded its %s timeout", budget))
+}
+
+// reclassifyTimeout replaces err with a permanent timeout error when the
+// context's deadline fired. A cooperative handler surfaces ctx.Err() as its own
+// error -- which is not Permanent and would be retried. This reclassifies it so
+// the queue layers decline to redeliver.
+//
+// No-ops: err == nil, ctx has no error, deadline was never set (zero).
+func reclassifyTimeout(ctx context.Context, err error, budget time.Duration, deadline time.Time) error {
+	if err == nil {
+		return nil
+	}
+	if deadline.IsZero() {
+		return err
+	}
+	if ctx.Err() == nil {
+		return err
+	}
+	return newNodeTimeoutError(budget)
 }
