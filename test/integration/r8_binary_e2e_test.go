@@ -246,8 +246,23 @@ func startR8Runner(t *testing.T, runnerBin, httpURL, id string) *r8Process {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start runner: %v", err)
 	}
+	return trackR8Process(t, cmd, out, id)
+}
+
+// trackR8Process registers an already-started child so the test framework owns
+// its lifetime.
+//
+// The cleanup terminates the child, it does not merely log it. Several subtests
+// reclaim their runner with an explicit kill/stop placed *after* a wait helper
+// that can t.Fatal; on that path the runner would outlive `go test` entirely and
+// keep polling the shared Redis for tasks, stealing work from later runs and
+// making a healthy tree read as a regression. stop and kill are both nil-safe
+// and tolerate an already-reaped child, so the explicit calls stay harmless.
+func trackR8Process(t *testing.T, cmd *exec.Cmd, out *safeBuffer, id string) *r8Process {
+	t.Helper()
 	p := &r8Process{cmd: cmd, out: out}
 	t.Cleanup(func() {
+		p.stop(t)
 		if t.Failed() {
 			t.Logf("runner %s logs:\n%s", id, out.String())
 		}
