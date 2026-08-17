@@ -99,7 +99,7 @@ func (m *managementModule) handleLeader(w http.ResponseWriter, r *http.Request) 
 	if !requireMethod(w, r, http.MethodGet) {
 		return
 	}
-	writeJSON(w, http.StatusOK, leaderResponse{IsLeader: m.cp.IsLeader()})
+	writeData(w, r, http.StatusOK, leaderResponse{IsLeader: m.cp.IsLeader()})
 }
 
 // handleRunner looks up a single runner snapshot by id. The runner directory
@@ -111,20 +111,20 @@ func (m *managementModule) handleRunner(w http.ResponseWriter, r *http.Request) 
 	}
 	id := r.PathValue("id")
 	if id == "" {
-		writeError(w, http.StatusNotFound, "runner not found")
+		writeFail(w, r, http.StatusNotFound, "runner_not_found", "runner not found")
 		return
 	}
 	dir := m.cp.RunnerDirectory()
 	if dir == nil {
-		writeError(w, http.StatusNotFound, "runner not found")
+		writeFail(w, r, http.StatusNotFound, "runner_not_found", "runner not found")
 		return
 	}
 	snap, ok := dir.Runner(r.Context(), id)
 	if !ok {
-		writeError(w, http.StatusNotFound, "runner not found")
+		writeFail(w, r, http.StatusNotFound, "runner_not_found", "runner not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, snap)
+	writeData(w, r, http.StatusOK, snap)
 }
 
 // handleExecution inspects a single execution by id. It delegates to
@@ -196,13 +196,13 @@ type deadLetterReplayResponse struct {
 // dev/preview server without authz never exposes the privileged replay path.
 func (m *managementModule) handleDeadLetters(w http.ResponseWriter, r *http.Request) {
 	if m.principalAuth == nil {
-		writeError(w, http.StatusNotFound, "route not found")
+		writeFail(w, r, http.StatusNotFound, "route_not_found", "route not found")
 		return
 	}
 	rest := strings.TrimPrefix(r.URL.Path, "/v1/management/dead-letters/")
 	rest = strings.Trim(rest, "/")
 	if rest == "" {
-		writeError(w, http.StatusNotFound, "execution id required")
+		writeFail(w, r, http.StatusNotFound, "route_not_found", "execution id required")
 		return
 	}
 	parts := strings.Split(rest, "/")
@@ -219,7 +219,7 @@ func (m *managementModule) handleDeadLetters(w http.ResponseWriter, r *http.Requ
 			return resource, "", execID, ""
 		})(w, r)
 	default:
-		writeError(w, http.StatusNotFound, "route not found")
+		writeFail(w, r, http.StatusNotFound, "route_not_found", "route not found")
 	}
 }
 
@@ -227,7 +227,7 @@ func (m *managementModule) handleDeadLetterList(w http.ResponseWriter, r *http.R
 	execID := m.deadLetterExecID(r)
 	mgr, err := m.deadLetterManager()
 	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, "dead-letter backend unavailable")
+		writeFail(w, r, http.StatusServiceUnavailable, "dead_letter_unavailable", "dead-letter backend unavailable")
 		return
 	}
 	// IDOR defense (Task 7.3): confirm the execution belongs to the caller's
@@ -237,7 +237,7 @@ func (m *managementModule) handleDeadLetterList(w http.ResponseWriter, r *http.R
 	// execution exists in another namespace. This matches the executions/ endpoint
 	// behavior and the design §5.1 requirement (404, not 403).
 	if _, err := m.eng.Inspect(r.Context(), types.ExecutionID(execID)); err != nil {
-		writeEngineError(w, err)
+		writeExecEngineFail(w, r, err)
 		return
 	}
 	q := r.URL.Query()
@@ -255,10 +255,14 @@ func (m *managementModule) handleDeadLetterList(w http.ResponseWriter, r *http.R
 		Limit:  limit,
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
-	writeJSON(w, http.StatusOK, deadLetterListResponse{
+	// §3.3 cursor exception: the cursor-paginated payload {entries,next_cursor}
+	// stays as-is, but per §3.1 the user-face success body is enveloped — the
+	// payload rides inside data, the cursor pagination shape is preserved. The
+	// CLI's apiDeadLetterClient decodes the envelope and extracts data.
+	writeData(w, r, http.StatusOK, deadLetterListResponse{
 		Entries:    list.Entries,
 		NextCursor: list.NextCursor,
 	})
@@ -268,7 +272,7 @@ func (m *managementModule) handleDeadLetterReplay(w http.ResponseWriter, r *http
 	execID := m.deadLetterExecID(r)
 	mgr, err := m.deadLetterManager()
 	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, "dead-letter backend unavailable")
+		writeFail(w, r, http.StatusServiceUnavailable, "dead_letter_unavailable", "dead-letter backend unavailable")
 		return
 	}
 	var req deadLetterReplayRequest
@@ -276,21 +280,21 @@ func (m *managementModule) handleDeadLetterReplay(w http.ResponseWriter, r *http
 		return
 	}
 	if req.EntryID == "" || req.Reason == "" {
-		writeError(w, http.StatusBadRequest, "entry_id and reason are required")
+		writeFail(w, r, http.StatusBadRequest, "bad_request", "entry_id and reason are required")
 		return
 	}
 	// IDOR defense (Task 7.3): confirm the execution belongs to the caller's
 	// namespace before replaying one of its dead-letters. Namespace-scoped via the
 	// authz-injected context; cross-namespace execID → 404 (no existence leak).
 	if _, err := m.eng.Inspect(r.Context(), types.ExecutionID(execID)); err != nil {
-		writeEngineError(w, err)
+		writeExecEngineFail(w, r, err)
 		return
 	}
 	// Principal is server-injected by the authz wrapper; the operator is taken
 	// from it, never self-reported. The manager re-checks the scope.
 	p, ok := principalFromRequest(r)
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
+		writeFail(w, r, http.StatusUnauthorized, "unauthorized", "unauthorized")
 		return
 	}
 	res, derr := mgr.Replay(r.Context(), control.DeadLetterReplayPrincipal{
@@ -305,17 +309,23 @@ func (m *managementModule) handleDeadLetterReplay(w http.ResponseWriter, r *http
 	})
 	if derr != nil {
 		if res.Outcome == engine.ReplayInvalidRequest {
-			writeError(w, http.StatusBadRequest, derr.Error())
+			// Generic: the underlying error text may echo caller-supplied
+			// entry-id / reason fragments; keep the message generic and rely
+			// on the stable code. §3.5 forbids surfacing internals.
+			writeFail(w, r, http.StatusBadRequest, "bad_request", "invalid replay request")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
 	status := http.StatusOK
 	if res.Outcome == engine.ReplayNotFound {
 		status = http.StatusNotFound
 	}
-	writeJSON(w, status, deadLetterReplayResponse{
+	// The replay result is enveloped even on the 404 outcome path: a not-found
+	// replay still carries a structured outcome (not_found) the CLI surfaces, so
+	// it is a success-shape body at a failure status, not a failure envelope.
+	writeData(w, r, status, deadLetterReplayResponse{
 		Outcome:      string(res.Outcome),
 		AuditID:      res.AuditID,
 		ExecutionID:  string(res.ExecutionID),

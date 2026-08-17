@@ -334,29 +334,85 @@ func (c *apiDeadLetterClient) setAuth(req *http.Request) {
 	}
 }
 
-// do executes an HTTP request and decodes the JSON body into out. A non-2xx
-// response is decoded (when possible) and surfaced as an error carrying only
-// the status code and outcome — never the Authorization header value.
+// do executes an HTTP request and decodes the spec §3.1 envelope's data field
+// into out on success. A non-2xx response (or success:false) is surfaced as an
+// error carrying only the status code — the body is NOT propagated, matching
+// the CLI's long-standing discipline of never echoing response internals.
+//
+// The management API envelopes its success bodies (Step 1 decision A of the
+// api-specification rollout): the cursor-paginated {entries,next_cursor} and
+// the replay-result shapes ride inside envelope.data. Before this, do() decoded
+// the body directly into out; enveloping would have decoded zero values
+// silently (no error) — the exact failure mode the envelope rollout must not
+// produce. This helper is the CLI's half of the (A) decision.
 func (c *apiDeadLetterClient) do(req *http.Request, out any) error {
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("call %s %s: %w", req.Method, redactURL(req.URL.String()), err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	raw, rerr := io.ReadAll(io.LimitReader(resp.Body, maxManagementResponseBytes+1))
+	if rerr != nil {
+		return fmt.Errorf("read response from %s %s: %w", req.Method, redactURL(req.URL.String()), rerr)
+	}
+	if len(raw) > maxManagementResponseBytes {
+		return fmt.Errorf("response from %s %s exceeds %d bytes", req.Method, redactURL(req.URL.String()), maxManagementResponseBytes)
+	}
+	// A non-2xx is a failure envelope (or, on the entry-seed face, a bare body —
+	// but this client only talks to the management face, which envelopes). The
+	// CLI maps outcome from the status code alone; it never reads the error body
+	// (§3.4 discipline: the body may carry server internals).
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		// Best-effort decode the body so callers can map outcome to status.
-		if out != nil {
-			_ = json.NewDecoder(resp.Body).Decode(out)
-		}
 		return httpStatusError{status: resp.StatusCode, path: redactURL(req.URL.String())}
 	}
-	if out == nil {
+	if out == nil || len(raw) == 0 {
 		return nil
 	}
-	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
-		return fmt.Errorf("decode response from %s %s: %w", req.Method, redactURL(req.URL.String()), err)
+	// Decode the §3.1 envelope, then unmarshal data into the typed target.
+	// data is read as json.RawMessage because envelope.Data is `any` — a direct
+	// unmarshal yields map[string]any, which cannot be re-decoded into a struct.
+	var env struct {
+		Success bool            `json:"success"`
+		Code    string          `json:"code"`
+		Message string          `json:"message"`
+		Data    json.RawMessage `json:"data"`
+		TraceID string          `json:"trace_id"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return fmt.Errorf("decode envelope from %s %s: %w (body=%s)", req.Method, redactURL(req.URL.String()), err, redactBody(raw))
+	}
+	if !env.Success {
+		// A 2xx with success:false is a spec violation; surface the status code
+		// without the body so the operator gets a stable, non-leaking error.
+		return httpStatusError{status: resp.StatusCode, path: redactURL(req.URL.String())}
+	}
+	if len(env.Data) == 0 || string(env.Data) == "null" {
+		return nil
+	}
+	if err := json.Unmarshal(env.Data, out); err != nil {
+		return fmt.Errorf("decode data from %s %s: %w (data=%s)", req.Method, redactURL(req.URL.String()), err, redactBody(raw))
 	}
 	return nil
+}
+
+// maxManagementResponseBytes bounds a management API response read. The dead-
+// letter list is the largest body; a single page is bounded server-side by the
+// list limit, and replay results are small. This is a defense against a
+// misbehaving server, not a functional limit.
+const maxManagementResponseBytes = 4 << 20
+
+// redactBody returns a truncated, sanitized preview of a response body for
+// error messages. It is length-bounded so a server that returned a large body
+// does not blow up the error string, and it is only used in decode-failure
+// messages (not on the success path). It never carries credentials — the
+// management API body never contains them, and the Authorization header lives
+// only in the request, never the response.
+func redactBody(raw []byte) string {
+	const max = 256
+	if len(raw) <= max {
+		return string(raw)
+	}
+	return string(raw[:max]) + "...(truncated)"
 }
 
 // httpStatusError carries the HTTP status of a non-2xx management API

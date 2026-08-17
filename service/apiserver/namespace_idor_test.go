@@ -171,8 +171,17 @@ func (f *namespaceIDORFixture) listDeadLetters(token string, execID types.Execut
 		f.t.Fatalf("list dead letters: %v", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	// The list success body is enveloped (spec §3.1, Step 1 decision A): the
+	// {entries,next_cursor} payload rides inside envelope.data.
+	var env struct {
+		Success bool            `json:"success"`
+		Code    string          `json:"code"`
+		Data    json.RawMessage `json:"data"`
+	}
 	var list deadLetterListResponse
-	_ = json.NewDecoder(resp.Body).Decode(&list)
+	if err := json.NewDecoder(resp.Body).Decode(&env); err == nil && len(env.Data) > 0 {
+		_ = json.Unmarshal(env.Data, &list)
+	}
 	return resp.StatusCode, list
 }
 
@@ -188,8 +197,17 @@ func (f *namespaceIDORFixture) replayDeadLetter(token string, execID types.Execu
 		f.t.Fatalf("replay dead letter: %v", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	// The replay result is enveloped (spec §3.1): unwrap data before decoding
+	// the typed replay response, including on the 404 not_found outcome path.
+	var env struct {
+		Success bool            `json:"success"`
+		Code    string          `json:"code"`
+		Data    json.RawMessage `json:"data"`
+	}
 	var out deadLetterReplayResponse
-	_ = json.NewDecoder(resp.Body).Decode(&out)
+	if err := json.NewDecoder(resp.Body).Decode(&env); err == nil && len(env.Data) > 0 {
+		_ = json.Unmarshal(env.Data, &out)
+	}
 	return resp.StatusCode, out
 }
 

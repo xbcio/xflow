@@ -1539,12 +1539,19 @@ func g1RunDeadLetterReplay(t *testing.T, h *productionServerRunnerHarness, addr 
 	if listResp.StatusCode != 200 {
 		t.Fatalf("dead-letter list: status=%d body=%s", listResp.StatusCode, string(listBody))
 	}
+	// The management dead-letter list success body is enveloped (spec §3.1,
+	// Step 1 decision A of the api-specification rollout): the cursor-paginated
+	// {entries,next_cursor} payload rides inside envelope.data. Unwrap data
+	// before decoding the typed list shape — the cursor pagination shape itself
+	// (§3.3 exception) is preserved inside data, not replaced.
+	var listEnvelope e2eEnvelope
+	_ = json.Unmarshal(listBody, &listEnvelope)
 	var listParsed struct {
 		Entries []struct {
 			ID string `json:"id"`
 		} `json:"entries"`
 	}
-	_ = json.Unmarshal(listBody, &listParsed)
+	_ = json.Unmarshal(listEnvelope.Data, &listParsed)
 	if len(listParsed.Entries) == 0 {
 		t.Fatalf("dead-letter list returned 0 entries, want >=1 with entry %q", entryID)
 	}
@@ -1568,6 +1575,10 @@ func g1RunDeadLetterReplay(t *testing.T, h *productionServerRunnerHarness, addr 
 	}
 	replayResp, replayRaw := g1DoAuth(t, http.MethodPost, h.httpSrv.URL,
 		"/v1/management/dead-letters/"+string(execID)+"/replay", g1TokDefault, replayBody)
+	// The replay result is enveloped (spec §3.1): unwrap data before decoding
+	// the typed replay response.
+	var replayEnvelope e2eEnvelope
+	_ = json.Unmarshal(replayRaw, &replayEnvelope)
 	var replayRespParsed struct {
 		Outcome      string `json:"outcome"`
 		AuditID      string `json:"audit_id,omitempty"`
@@ -1575,7 +1586,7 @@ func g1RunDeadLetterReplay(t *testing.T, h *productionServerRunnerHarness, addr 
 		NodeID       string `json:"node_id,omitempty"`
 		ActivationID string `json:"activation_id,omitempty"`
 	}
-	_ = json.Unmarshal(replayRaw, &replayRespParsed)
+	_ = json.Unmarshal(replayEnvelope.Data, &replayRespParsed)
 	if replayResp.StatusCode != 200 {
 		t.Fatalf("dead-letter replay: status=%d body=%s", replayResp.StatusCode, string(replayRaw))
 	}
