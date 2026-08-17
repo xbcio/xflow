@@ -2,6 +2,7 @@ package subgraph
 
 import (
 	"context"
+	"strings"
 	"sync"
 
 	"github.com/xbcio/xflow/engine/graph"
@@ -72,20 +73,67 @@ func (h *exitHandler) Descriptor() types.Descriptor {
 }
 
 func (h *exitHandler) Execute(_ context.Context, input *types.Input) (*types.Output, error) {
+	data := withoutExecutionRoots(input.Data)
+
 	mapping, ok := h.collector.mappings[h.nodeName]
 	if !ok {
-		return &types.Output{Data: input.Data}, nil
+		return &types.Output{Data: data}, nil
 	}
 
 	result := graph.SubgraphExitResult{
 		NodeName: mapping.srcNode,
 		Port:     mapping.port,
-		Data:     input.Data,
+		Data:     data,
 	}
 
 	h.collector.mu.Lock()
 	h.collector.captured = append(h.collector.captured, result)
 	h.collector.mu.Unlock()
 
-	return &types.Output{Data: input.Data}, nil
+	return &types.Output{Data: data}, nil
+}
+
+// withoutExecutionRoots strips the execution-scope expression roots from a
+// boundary output.
+//
+// engine's applyExecutionScope merges the scope into EVERY node's Input.Data,
+// which is what makes $item/$index/$items reachable from any body member rather
+// than only from its entry. A collector node is a member too, so its Data
+// arrives carrying them — and it echoes its Data out as both the exit result and
+// its own stored output. That echo is not the body's product, and for $items it
+// is quadratic: $items is the map node's WHOLE items array, so every item's
+// result carries a copy of every item. Measured on 2.7 KB items, one batch's
+// collected results totalled 1.2 MB at 20 items, 27.7 MB at 100, and 681 MB at
+// 500 — the last of which lands in one Redis string, and Redis is
+// single-threaded, so writing it stalls every other command on the instance
+// (lease lookups, claim finalization) and the pipeline stops draining.
+//
+// Matched by the "$" prefix rather than an enumerated list. The prefix is
+// reserved — a node output cannot introduce one through the DSL (see
+// engine/input.go's applyExecutionScope) — so nothing a handler legitimately
+// produces is at risk, and a root added later is excluded without a second
+// table to keep in sync.
+//
+// A nil or root-free map is returned as-is: the common case is a body whose
+// members produce no "$" key at all, and the map it already holds is not shared
+// with the engine (buildInput's cloneMap made it per-node).
+func withoutExecutionRoots(data map[string]any) map[string]any {
+	rooted := false
+	for k := range data {
+		if strings.HasPrefix(k, "$") {
+			rooted = true
+			break
+		}
+	}
+	if !rooted {
+		return data
+	}
+	out := make(map[string]any, len(data))
+	for k, v := range data {
+		if strings.HasPrefix(k, "$") {
+			continue
+		}
+		out[k] = v
+	}
+	return out
 }
