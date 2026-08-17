@@ -307,11 +307,12 @@ runner 协议**不加 `trace_id` 字段**，链路透传走 OTel `traceparent` �
 配守卫测试：**所有已注册路由都有对应 Op，且所有 Op 都有路由消费**。
 
 反向的死代码同样要防：`OpWorkflowDefinitionCreate`、`OpWorkflowDefinitionRead`、
-`OpWorkflowDefinitionUpdate`、`OpWorkflowDefinitionValidate`、
-`OpWorkflowDefinitionPublish`、`OpWorkflowExecutionInvoke`、`OpWorkflowRead` 这 7
-个 Op 常量除 `authz.go` 自身外**没有任何路由消费**——它们是为一份从未实现的契约
-准备的（§9）。`OpManagementWrite` 同样零引用。唯一的例外是
-`OpWorkflowRead` 在 `sqlaudit_test.go` 里被当作任意占位值使用，那不是消费点。
+`OpWorkflowDefinitionValidate`、`OpWorkflowDefinitionPublish`、
+`OpWorkflowExecutionInvoke` 这 5 个 Op 常量除 `authz.go` 自身外**没有任何路由
+消费**——它们是为一份从未实现的契约准备的（§9）。`OpManagementWrite` 同样零
+引用。（`OpWorkflowDefinitionUpdate` 被 PUT `/v1/workflows/{id}` 消费，
+`OpWorkflowRead` 被 GET `/v1/workflows/{id}` 消费——这两个是活的，不要删。
+`OpWorkflowRead` 在 `sqlaudit_test.go` 里还被当作任意占位值使用，那不是消费点。）
 
 ### 6.2 namespace 只能从认证主体取
 
@@ -524,8 +525,6 @@ runtime hash 已通过 hash-local 镜像（`runtimeSelectorHashPayload`）与 wi
 | --- | --- |
 | `protocol.ActivatePath` / `DeactivatePath` / `ActivationListPath` | 零注册零调用 |
 | `OpWorkflowDefinition{Create,Read,Validate,Publish}`、`OpWorkflowExecutionInvoke`、`OpManagementWrite` | 无路由消费（`OpWorkflowRead` 与 `OpWorkflowDefinitionUpdate` 已被 GET/PUT `/v1/workflows/{id}` 消费） |
-| `api/openapi/xflow-v1.yaml` 的 `/workflow-definitions` 全套（8 条路径） | 零实现，且名称已被否决（过长） |
-| `types/workflow_management.go`（61 行） | 零引用 |
 | `/v1/runners/lease/renew` 的生产调用链 | 半接线，见 §8.3 |
 
 ### 9.6 列表端点未接线（分页参数层已落地，数据源缺失）
@@ -573,5 +572,8 @@ workflow_registry.go:26-41`）。唯一实现 `workflowreg.Registry` 是纯 Redi
 - **CI 校验：契约声明的路径 ⊆ 已注册路由。** 「契约里有、实现里没有」不允许存在
   ——`/workflow-definitions` 全套就是这个状态的产物：一份 CI 校验通过、还生成过 TS
   类型（`web/.../openapi-types.ts`，已随 `605c4bb` 删除）、却零实现的契约，与真实
-  实现和前端客户端三方互不相认
+  实现和前端客户端三方互不相认。该校验已落地为
+  `api/openapi/openapi_test.go` 的 `TestContractPathsAreAllRegistered`：契约每条
+  path 必须出现在 `service/apiserver.UserFacingPaths` 集合中（前半，子集关系）；
+  「`UserFacingPaths` 每条都有 mux 注册」是后半守卫，合起来才是 §10 的完整链条
 - `docs/design/` 必须与实现一致（既有约束）
