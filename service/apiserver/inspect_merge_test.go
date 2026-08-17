@@ -44,7 +44,7 @@ func TestManagementAndExecutionInspectAgree(t *testing.T) {
 	// Found case: both 200, identical envelopes carrying the detail.
 	execBody := inspectRoute(t, mux, "/v1/executions/exec-1", http.StatusOK)
 	mgmtBody := inspectRoute(t, mux, "/v1/management/executions/exec-1", http.StatusOK)
-	if !bytes.Equal(execBody, mgmtBody) {
+	if !bytes.Equal(stripTraceID(execBody), stripTraceID(mgmtBody)) {
 		t.Fatalf("found-case bodies differ (drift):\n  executions:  %s\n  management:  %s", execBody, mgmtBody)
 	}
 	var found envelope
@@ -62,7 +62,7 @@ func TestManagementAndExecutionInspectAgree(t *testing.T) {
 	f.inspectErr = engine.ErrExecutionNotFound
 	execNF := inspectRoute(t, mux, "/v1/executions/missing", http.StatusNotFound)
 	mgmtNF := inspectRoute(t, mux, "/v1/management/executions/missing", http.StatusNotFound)
-	if !bytes.Equal(execNF, mgmtNF) {
+	if !bytes.Equal(stripTraceID(execNF), stripTraceID(mgmtNF)) {
 		t.Fatalf("not-found-case bodies differ (drift):\n  executions:  %s\n  management:  %s", execNF, mgmtNF)
 	}
 	var nfEnv envelope
@@ -88,4 +88,22 @@ func inspectRoute(t *testing.T, mux http.Handler, path string, wantStatus int) [
 		t.Fatalf("%s: status = %d, want %d, body=%s", path, rec.Code, wantStatus, rec.Body.String())
 	}
 	return bytes.TrimRight(rec.Body.Bytes(), "\n")
+}
+
+// stripTraceID blanks the trace_id before a byte comparison. The two routes are
+// separate requests, so once tracing middleware is attached they get different
+// span contexts and different trace_ids — a difference that says nothing about
+// the drift this test guards. Without this, the test would go red for a reason
+// unrelated to its assertion. trace_id itself is covered by envelope_test.go.
+func stripTraceID(body []byte) []byte {
+	var m map[string]any
+	if err := json.Unmarshal(body, &m); err != nil {
+		return body
+	}
+	m["trace_id"] = ""
+	out, err := json.Marshal(m)
+	if err != nil {
+		return body
+	}
+	return out
 }
