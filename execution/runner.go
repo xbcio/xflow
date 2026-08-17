@@ -3,6 +3,7 @@ package execution
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"time"
 
 	"github.com/xbcio/xflow/engine"
@@ -167,7 +168,17 @@ func (r *Runner) Execute(ctx context.Context, lease *engine.TaskLease) (engine.T
 			hr.err = reclassifyTimeout(ctx, hr.err, budget, deadline)
 			return engine.TaskResult{Output: hr.output, Error: hr.err}, nil
 		case <-ctx.Done():
-			// Deadline fired before handler returned.
+			// Deadline fired before handler returned. Check once more: the
+			// handler may have raced to completion at the same instant.
+			// Gosched yields to give a cooperative handler that just unblocked
+			// from <-ctx.Done() a chance to write its result to ch.
+			runtime.Gosched()
+			select {
+			case hr := <-ch:
+				hr.err = reclassifyTimeout(ctx, hr.err, budget, deadline)
+				return engine.TaskResult{Output: hr.output, Error: hr.err}, nil
+			default:
+			}
 			return engine.TaskResult{Error: newNodeTimeoutError(budget)}, nil
 		}
 	}
@@ -221,6 +232,13 @@ func (r *Runner) callOnResume(ctx context.Context, sh types.SuspendingHandler, l
 			r.err = reclassifyTimeout(ctx, r.err, budget, deadline)
 			return r.output, r.err
 		case <-ctx.Done():
+			runtime.Gosched()
+			select {
+			case r := <-ch:
+				r.err = reclassifyTimeout(ctx, r.err, budget, deadline)
+				return r.output, r.err
+			default:
+			}
 			return nil, newNodeTimeoutError(budget)
 		}
 	}
@@ -246,6 +264,13 @@ func (r *Runner) callPrepareSuspend(ctx context.Context, sh types.SuspendingHand
 			r.err = reclassifyTimeout(ctx, r.err, budget, deadline)
 			return r.spec, r.err
 		case <-ctx.Done():
+			runtime.Gosched()
+			select {
+			case r := <-ch:
+				r.err = reclassifyTimeout(ctx, r.err, budget, deadline)
+				return r.spec, r.err
+			default:
+			}
 			return nil, newNodeTimeoutError(budget)
 		}
 	}

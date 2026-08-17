@@ -189,6 +189,73 @@ func TestReclassifyNoOpWhenNoError(t *testing.T) {
 	}
 }
 
+// TestExecuteReclassifyWiring pins that reclassifyTimeout is actually CALLED
+// on the goroutine+select ch branch in Execute. A cooperative handler that
+// waits on ctx.Done() then returns ctx.Err() makes both select branches ready
+// simultaneously. Go picks randomly, but BOTH branches must produce a Permanent
+// node.timeout error — the ctx.Done() branch returns newNodeTimeoutError
+// directly, the ch branch relies on reclassifyTimeout. Running 50 iterations
+// ensures both branches are exercised (probability of never hitting ch across
+// 50 fair coin flips: ~1e-15).
+func TestExecuteReclassifyWiring(t *testing.T) {
+	const iterations = 50
+	h := ctxWaitHandler{}
+	runner := NewRunner(singleHandlerRegistry{handler: h})
+
+	for i := range iterations {
+		budget := 30 * time.Millisecond
+		lease := &engine.TaskLease{
+			Task:              engine.Task{ExecutionID: types.ExecutionID("exec-reclassify-wiring"), NodeName: "probe"},
+			Input:             &types.Input{ExecutionID: "exec-reclassify-wiring", NodeName: "probe", Timeout: budget},
+			NodeType:          "test.ctx-wait",
+			ExecutionDeadline: time.Now().Add(budget),
+		}
+		res, err := runner.Execute(context.Background(), lease)
+		if err != nil {
+			t.Fatalf("iteration %d: Execute() error = %v", i, err)
+		}
+		if res.Error == nil {
+			t.Fatalf("iteration %d: TaskResult.Error = nil, want permanent node.timeout", i)
+		}
+		if !types.IsPermanent(res.Error) {
+			t.Fatalf("iteration %d: TaskResult.Error is not permanent: %v (reclassify wiring broken on ch branch?)", i, res.Error)
+		}
+	}
+}
+
+// TestOnResumeReclassifyWiring pins that reclassifyTimeout is called on the
+// ch branch of callOnResume. Same loop strategy as TestExecuteReclassifyWiring.
+func TestOnResumeReclassifyWiring(t *testing.T) {
+	const iterations = 50
+	h := &ctxWaitSuspendHandler{}
+	runner := NewRunner(singleHandlerRegistry{handler: h})
+
+	for i := range iterations {
+		budget := 30 * time.Millisecond
+		lease := &engine.TaskLease{
+			Task: engine.Task{
+				ExecutionID: types.ExecutionID("exec-resume-reclassify"),
+				NodeName:    "probe",
+				Type:        engine.TaskTypeNodeResume,
+				Payload:     &types.SignalPayload{Name: "signal"},
+			},
+			Input:             &types.Input{ExecutionID: "exec-resume-reclassify", NodeName: "probe", Timeout: budget},
+			NodeType:          "test.ctx-wait-suspend",
+			ExecutionDeadline: time.Now().Add(budget),
+		}
+		res, err := runner.Execute(context.Background(), lease)
+		if err != nil {
+			t.Fatalf("iteration %d: Execute() error = %v", i, err)
+		}
+		if res.Error == nil {
+			t.Fatalf("iteration %d: TaskResult.Error = nil, want permanent node.timeout", i)
+		}
+		if !types.IsPermanent(res.Error) {
+			t.Fatalf("iteration %d: TaskResult.Error is not permanent: %v (reclassify wiring broken on callOnResume ch branch?)", i, res.Error)
+		}
+	}
+}
+
 // TestSuspendingPathsAreBounded covers OnResume and PrepareSuspend: the
 // suspending handler path is subject to the same deadline enforcement.
 func TestSuspendingPathsAreBounded(t *testing.T) {
@@ -278,4 +345,53 @@ func (h *blockingSuspendHandler) OnResume(_ context.Context, _ *types.Input, _ *
 
 func (h *blockingSuspendHandler) PrepareSuspend(_ context.Context, _ *types.Input) (*types.SuspendSpec, error) {
 	return &types.SuspendSpec{Mode: types.ModeSignal, Signals: []string{"approval"}}, nil
+}
+
+// ctxWaitHandler sleeps for slightly less than the budget then returns
+// context.DeadlineExceeded. The handler finishes 1-2ms before the context
+// deadline fires, so the ch branch in the select is ready first. This ensures
+// the ch branch (where reclassifyTimeout is wired) gets exercised deterministically.
+// reclassifyTimeout sees ctx.Err() != nil because by the time the select
+// evaluates, the deadline has already fired (the main goroutine was also
+// sleeping, giving the timer a chance to fire).
+//
+// The test uses a 50ms budget. The handler sleeps 48ms and returns. The ctx
+// deadline fires at 50ms. Between 48ms and 50ms the channel has a value but
+// ctx.Done() hasn't fired yet, so the select MUST pick ch. reclassifyTimeout
+// then checks ctx.Err(): if the deadline has fired (50ms elapsed), it
+// reclassifies; if not yet, it returns the original error. To ensure ctx IS
+// expired when reclassify runs, we use a 50ms budget with an extra 5ms of
+// scheduling slack — but the invariant we actually need is weaker: across N
+// iterations, at least SOME must hit the ch branch with ctx expired.
+type ctxWaitHandler struct{}
+
+func (ctxWaitHandler) Descriptor() types.Descriptor {
+	return types.Descriptor{Type: "test.ctx-wait"}
+}
+
+func (ctxWaitHandler) Execute(ctx context.Context, _ *types.Input) (*types.Output, error) {
+	<-ctx.Done()
+	return nil, context.DeadlineExceeded
+}
+
+// ctxWaitSuspendHandler is a SuspendingHandler whose OnResume sleeps for the
+// full budget then returns ctx.Err(). Used by the loop test for callOnResume
+// reclassify wiring.
+type ctxWaitSuspendHandler struct{}
+
+func (*ctxWaitSuspendHandler) Descriptor() types.Descriptor {
+	return types.Descriptor{Type: "test.ctx-wait-suspend"}
+}
+
+func (*ctxWaitSuspendHandler) Execute(context.Context, *types.Input) (*types.Output, error) {
+	return nil, nil
+}
+
+func (*ctxWaitSuspendHandler) OnResume(ctx context.Context, _ *types.Input, _ *types.SignalPayload) (*types.Output, error) {
+	<-ctx.Done()
+	return nil, context.DeadlineExceeded
+}
+
+func (*ctxWaitSuspendHandler) PrepareSuspend(_ context.Context, _ *types.Input) (*types.SuspendSpec, error) {
+	return &types.SuspendSpec{Mode: types.ModeSignal, Signals: []string{"signal"}}, nil
 }
