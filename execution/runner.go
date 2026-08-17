@@ -4,13 +4,24 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"runtime"
 	"time"
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/types"
 )
+
+// abandonGrace bounds how long the ctx.Done() path waits for a handler that
+// has already unblocked to deliver its result before abandoning it. A handler
+// blocked on a ctx-aware final IO unblocks on cancellation and returns a
+// verdict it computed earlier; without a wait, that verdict lands in the
+// buffered channel after Execute has already returned a synthesized error, and
+// is discarded -- measured at 2.5% of runs on one machine, up to ~49% on a
+// loaded one. This cannot be closed completely: a bounded wait cannot
+// distinguish a handler that returns in a microsecond from one that never
+// returns. It is bounded by a constant, never by the handler, so the
+// slot-release guarantee this mechanism exists to provide still holds.
+const abandonGrace = 2 * time.Millisecond
 
 // TimeoutObserver receives node execution timeout and duration events from the
 // bounded-handler path. Implementations MUST be non-blocking and MUST avoid
@@ -228,15 +239,15 @@ func (r *Runner) Execute(ctx context.Context, lease *engine.TaskLease) (engine.T
 			return engine.TaskResult{Output: hr.output, Error: hr.err}, nil
 		case <-ctx.Done():
 			// Deadline fired before handler returned. Check once more: the
-			// handler may have raced to completion at the same instant.
-			// Gosched yields to give a cooperative handler that just unblocked
-			// from <-ctx.Done() a chance to write its result to ch. Beyond
-			// testability, this has independent correctness value: when the
-			// handler and deadline complete at the same instant, using the
-			// handler's real result (with reclassification) is preferable to
-			// a synthetic timeout error — it preserves any partial output the
-			// handler produced.
-			runtime.Gosched()
+			// handler may have raced to completion at the same instant. A
+			// handler blocked on a ctx-aware final IO unblocks on cancellation
+			// and returns a verdict it computed earlier; abandonGrace bounds
+			// how long we wait for that verdict before abandoning the goroutine.
+			// Beyond testability, this has independent correctness value:
+			// when the handler and deadline complete at the same instant,
+			// using the handler's real result (with reclassification) is
+			// preferable to a synthetic timeout error — it preserves any
+			// partial output the handler produced.
 			select {
 			case hr := <-ch:
 				hr.err = reclassifyTimeout(ctx, hr.err, budget, deadline)
@@ -244,7 +255,7 @@ func (r *Runner) Execute(ctx context.Context, lease *engine.TaskLease) (engine.T
 					r.observeTimeout(ctx, lease.NodeType)
 				}
 				return engine.TaskResult{Output: hr.output, Error: hr.err}, nil
-			default:
+			case <-time.After(abandonGrace):
 			}
 			// Abandon: the handler goroutine is still running and Go cannot kill
 			// it. The slot is released (Execute returns), the terminal error is
@@ -325,7 +336,6 @@ func (r *Runner) callOnResume(ctx context.Context, sh types.SuspendingHandler, l
 			}
 			return res.output, res.err
 		case <-ctx.Done():
-			runtime.Gosched()
 			select {
 			case res := <-ch:
 				res.err = reclassifyTimeout(ctx, res.err, budget, deadline)
@@ -333,7 +343,7 @@ func (r *Runner) callOnResume(ctx context.Context, sh types.SuspendingHandler, l
 					r.observeTimeout(ctx, lease.NodeType)
 				}
 				return res.output, res.err
-			default:
+			case <-time.After(abandonGrace):
 			}
 			cause := classifyCancelCause(ctx, deadline)
 			if cause == cancelTimeout {
@@ -373,7 +383,6 @@ func (r *Runner) callPrepareSuspend(ctx context.Context, sh types.SuspendingHand
 			}
 			return res.spec, res.err
 		case <-ctx.Done():
-			runtime.Gosched()
 			select {
 			case res := <-ch:
 				res.err = reclassifyTimeout(ctx, res.err, budget, deadline)
@@ -381,7 +390,7 @@ func (r *Runner) callPrepareSuspend(ctx context.Context, sh types.SuspendingHand
 					r.observeTimeout(ctx, nodeType)
 				}
 				return res.spec, res.err
-			default:
+			case <-time.After(abandonGrace):
 			}
 			cause := classifyCancelCause(ctx, deadline)
 			if cause == cancelTimeout {
@@ -431,18 +440,6 @@ func (r *Runner) observeDuration(ctx context.Context, nodeType string, elapsed t
 		return
 	}
 	r.timeoutObserver.OnHandlerDuration(ctx, nodeType, elapsed)
-}
-
-// isRunnerTimeout is retained for backward-compatibility references; the
-// production paths now use classifyCancelCause + isNodeTimeoutError so the
-// metric fires exactly when a terminal node.timeout error is produced.
-//
-// Deprecated: do not add new call sites. It returns true when the context is
-// done for ANY reason (deadline OR parent cancellation), which over-counts the
-// timeout metric for cancellations and for handlers that succeeded at the
-// deadline instant.
-func isRunnerTimeout(ctx context.Context, deadline time.Time) bool {
-	return classifyCancelCause(ctx, deadline) == cancelTimeout
 }
 
 // cancelCause classifies why a handler's context is done, distinguishing a

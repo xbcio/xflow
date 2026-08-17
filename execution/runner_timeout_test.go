@@ -294,8 +294,8 @@ func TestSuspendingPathsAreBounded(t *testing.T) {
 
 // --- parent-cancellation classification regression tests ---
 //
-// These pin the fix for the regression where isRunnerTimeout/reclassifyTimeout
-// tested only ctx.Err() != nil, conflating context.DeadlineExceeded (a verdict
+// These pin the fix for the regression where reclassifyTimeout tested only
+// ctx.Err() != nil, conflating context.DeadlineExceeded (a verdict
 // -> permanent node.timeout) with context.Canceled (the lease-renewal loop
 // cancelling execCtx when the lease is fenced or renewal fails MaxRetries
 // times). A fenced/lost lease must NOT be committed as a terminal permanent
@@ -689,6 +689,84 @@ func TestReclassifyStillReclassifiesCooperativeEchoOnGenuineTimeout(t *testing.T
 		t.Fatal("reclassifyTimeout returned nil for a cooperative DeadlineExceeded echo")
 	}
 	assertClassifiedError(t, got, "node.timeout", true, false)
+}
+
+// --- abandon-branch verdict preservation regression test ---
+//
+// reclassifyTimeout (called on the ch branch) already preserves a handler's
+// own business verdict — that is pinned by the Finding-1 tests above. But the
+// real Execute path has a SECOND branch: when ctx.Done() fires before the
+// handler writes ch, Execute abandons the goroutine and returns a SYNTHESIZED
+// newCancelError(cause, budget). A handler that unblocks FROM ctx.Done() and
+// then returns an already-computed verdict races this branch: the verdict lands
+// in the buffered channel after Execute has already returned the synthesized
+// error, and is discarded by the watcher. This is exactly the shape of a
+// handler blocked on a ctx-aware final IO. The reclassifyTimeout unit tests are
+// green while this path loses verdicts — only a test that goes through Execute
+// can see it.
+//
+// The abandonGrace bounded wait collapses the window: Execute now waits up to
+// abandonGrace for a handler that has unblocked to deliver its verdict before
+// abandoning it.
+
+// A handler that returns a genuine permanent business verdict after unblocking
+// from ctx.Done(). The verdict is the handler's own -- it is not derived from
+// ctx.Err() -- so nothing in the cancellation path may replace it.
+type bizErrUnblockHandler struct{}
+
+func (bizErrUnblockHandler) Descriptor() types.Descriptor {
+	return types.Descriptor{Type: "test.bizerr-unblock"}
+}
+
+func (bizErrUnblockHandler) Execute(ctx context.Context, _ *types.Input) (*types.Output, error) {
+	<-ctx.Done()
+	return nil, types.NewPermanentError("biz.invalid_account", "account is closed")
+}
+
+// TestExecuteAbandonPreservesBusinessVerdict drives the real Execute path over
+// 200 iterations. Each iteration cancels the parent context at 50ms with the
+// deadline 10 minutes away, so classifyCancelCause reports cancelCancelled. The
+// handler returns a permanent biz.invalid_account verdict the moment ctx unblocks.
+// Before the abandonGrace fix, Execute's ctx.Done() branch raced the handler's
+// verdict write and, on the race, returned a synthesized transient node.cancelled
+// — discarding the permanent business verdict. The fix bounds the wait so the
+// verdict is observed. Every iteration must preserve biz.invalid_account.
+func TestExecuteAbandonPreservesBusinessVerdict(t *testing.T) {
+	const iterations = 200
+	preserved := 0
+	runner := NewRunner(singleHandlerRegistry{handler: bizErrUnblockHandler{}})
+	for i := range iterations {
+		lease := &engine.TaskLease{
+			Task:              engine.Task{ExecutionID: "exec-abandon-verdict", NodeName: "probe"},
+			Input:             &types.Input{ExecutionID: "exec-abandon-verdict", NodeName: "probe", Timeout: 10 * time.Minute},
+			NodeType:          "test.bizerr-unblock",
+			ExecutionDeadline: time.Now().Add(10 * time.Minute),
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() { time.Sleep(50 * time.Millisecond); cancel() }()
+
+		res, err := runner.Execute(ctx, lease)
+		if err != nil {
+			t.Fatalf("iteration %d: Execute() transport error = %v, want nil", i, err)
+		}
+		if res.Error == nil {
+			t.Fatalf("iteration %d: TaskResult.Error = nil, want the preserved business verdict", i)
+		}
+		var ce *types.ClassifiedError
+		if !errors.As(res.Error, &ce) {
+			t.Fatalf("iteration %d: error is not a *types.ClassifiedError: %v (type %T)", i, res.Error, res.Error)
+		}
+		if ce.Code != "biz.invalid_account" {
+			t.Errorf("iteration %d: Code = %q, want %q (the handler's own verdict was replaced by the abandon branch)", i, ce.Code, "biz.invalid_account")
+		}
+		if !types.IsPermanent(res.Error) {
+			t.Errorf("iteration %d: verdict is not permanent, want permanent biz.invalid_account (got %v)", i, res.Error)
+		}
+		if ce.Code == "biz.invalid_account" && types.IsPermanent(res.Error) {
+			preserved++
+		}
+	}
+	t.Logf("verdict preserved = %d / %d", preserved, iterations)
 }
 
 // assertClassifiedError pins the *types.ClassifiedError wire contract via
