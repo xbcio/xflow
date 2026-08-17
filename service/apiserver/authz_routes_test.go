@@ -238,7 +238,7 @@ func TestExecutionMutationFailClosedHandlerNotReached(t *testing.T) {
 			})
 
 			rec := httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodPost, "/v1/executions/x/signal", nil)
+			req := httptest.NewRequest(http.MethodPost, "/v1/executions/x/signals", nil)
 			wrapped.ServeHTTP(rec, req)
 
 			if rec.Code != http.StatusServiceUnavailable {

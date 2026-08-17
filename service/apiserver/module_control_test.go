@@ -456,6 +456,22 @@ func TestWorkflowControlRevokeSignalShapeMismatches404(t *testing.T) {
 			if resp.StatusCode != http.StatusNotFound {
 				t.Fatalf("%s %s: status = %d, want 404 (no 405 leak; §4.2 has no 405 row)", c.method, c.path, resp.StatusCode)
 			}
+			// Pin the body to the catch handler specifically. Status alone
+			// cannot tell the subtree catch apart from any other 404 the mux
+			// might grow later; the business code can.
+			var body struct {
+				Success bool   `json:"success"`
+				Code    string `json:"code"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+				t.Fatalf("%s %s: decode body: %v", c.method, c.path, err)
+			}
+			if body.Success {
+				t.Fatalf("%s %s: success = true, want false on a 404", c.method, c.path)
+			}
+			if body.Code != "route_not_found" {
+				t.Fatalf("%s %s: code = %q, want %q (must come from the subtree catch)", c.method, c.path, body.Code, "route_not_found")
+			}
 		})
 	}
 }
