@@ -19,13 +19,16 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
-// SubmitWorkflowPath is the HTTP path of the workflow submit endpoint.
+// SubmitWorkflowPath is the HTTP path of the inline workflow execute endpoint
+// (POST /v1/workflows/execute after the §9.1 semantic inversion moved the old
+// compile-and-execute POST /v1/workflows to /v1/workflows/execute, and the
+// register semantics onto POST /v1/workflows).
 // Stage 3 moved the workflow/control routes out of Server.Handler (which now
 // serves only the runner protocol) and into the apiserver workflow-control
 // module. The constant is retained so external callers (sdk, integration and
 // perf tests) that build URLs against this path keep compiling; the route
 // itself is hosted by service/apiserver.
-const SubmitWorkflowPath = "/v1/workflows"
+const SubmitWorkflowPath = "/v1/workflows/execute"
 
 // EngineFacade is the subset of *engine.Engine the runner-protocol Server and
 // the apiserver control modules need. *engine.Engine implements every method

@@ -156,17 +156,19 @@ func testWorkflow(name string) *types.WorkflowDef {
 
 func (f *namespaceIsolationFixture) submitWorkflow(token, name string) types.ExecutionID {
 	body := submitWorkflowRequest{Workflow: testWorkflow(name)}
-	req := f.newRequest(http.MethodPost, token, "/v1/workflows", body)
+	req := f.newRequest(http.MethodPost, token, "/v1/workflows/execute", body)
 	resp := f.do(req)
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		f.t.Fatalf("submitWorkflow status = %d, want 200", resp.StatusCode)
 	}
-	var out submitWorkflowResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	var env struct {
+		Data submitWorkflowResponse `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
 		f.t.Fatalf("decode submit response: %v", err)
 	}
-	return out.ExecutionID
+	return env.Data.ExecutionID
 }
 
 func (f *namespaceIsolationFixture) submitWorkflowForgedNamespace(token, name, forgedNamespace string) types.ExecutionID {
@@ -177,17 +179,19 @@ func (f *namespaceIsolationFixture) submitWorkflowForgedNamespace(token, name, f
 		},
 		"namespace": forgedNamespace,
 	}
-	req := f.newRequest(http.MethodPost, token, "/v1/workflows", raw)
+	req := f.newRequest(http.MethodPost, token, "/v1/workflows/execute", raw)
 	resp := f.do(req)
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		f.t.Fatalf("submitWorkflowForgedNamespace status = %d, want 200", resp.StatusCode)
 	}
-	var out submitWorkflowResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	var env struct {
+		Data submitWorkflowResponse `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
 		f.t.Fatalf("decode submit response: %v", err)
 	}
-	return out.ExecutionID
+	return env.Data.ExecutionID
 }
 
 func (f *namespaceIsolationFixture) do(req *http.Request) *http.Response {

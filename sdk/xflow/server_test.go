@@ -187,16 +187,18 @@ func submitSDKWorkflow(t *testing.T, baseURL string, wf *types.WorkflowDef, para
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("submit status = %d, want 200", resp.StatusCode)
 	}
-	var out struct {
-		ExecutionID types.ExecutionID `json:"execution_id"`
+	var env struct {
+		Data struct {
+			ExecutionID types.ExecutionID `json:"execution_id"`
+		} `json:"data"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
 		t.Fatal(err)
 	}
-	if out.ExecutionID == "" {
+	if env.Data.ExecutionID == "" {
 		t.Fatal("empty execution_id")
 	}
-	return out.ExecutionID
+	return env.Data.ExecutionID
 }
 
 func waitForExecutionStatus(t *testing.T, baseURL string, execID types.ExecutionID, timeout time.Duration) types.ExecutionStatus {

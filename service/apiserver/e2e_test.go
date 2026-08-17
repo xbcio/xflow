@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -73,21 +74,22 @@ func TestAPIServerRunnerE2ECompletesSimpleWorkflow(t *testing.T) {
 
 func submitWorkflowE2E(t *testing.T, baseURL string, wf *types.WorkflowDef, params map[string]any) types.ExecutionID {
 	t.Helper()
-	body := submitWorkflowRequest{Workflow: wf, Params: params}
+	body := executeWorkflowRequest{Workflow: wf, Params: params}
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(body); err != nil {
 		t.Fatal(err)
 	}
-	resp, err := http.Post(baseURL+"/v1/workflows", "application/json", &buf)
+	resp, err := http.Post(baseURL+"/v1/workflows/execute", "application/json", &buf)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("submit status = %d, want 200", resp.StatusCode)
+		t.Fatalf("execute status = %d, want 200", resp.StatusCode)
 	}
-	var out submitWorkflowResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	var out executeWorkflowResponse
+	if err := json.Unmarshal(extractData(t, bodyBytes), &out); err != nil {
 		t.Fatal(err)
 	}
 	if out.ExecutionID == "" {

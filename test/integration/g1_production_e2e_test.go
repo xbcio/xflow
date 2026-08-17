@@ -233,14 +233,11 @@ func g1SubmitAuth(t *testing.T, baseURL, token string, wf *types.WorkflowDef, pa
 	if params != nil {
 		body["params"] = params
 	}
-	resp, raw := g1DoAuth(t, http.MethodPost, baseURL, "/v1/workflows", token, body)
+	resp, raw := g1DoAuth(t, http.MethodPost, baseURL, "/v1/workflows/execute", token, body)
 	if resp.StatusCode != http.StatusOK {
 		return "", resp.StatusCode
 	}
-	var out e2eSubmitResp
-	if err := json.Unmarshal(raw, &out); err != nil {
-		t.Fatalf("decode submit response: %v (raw=%q)", err, string(raw))
-	}
+	out := decodeSubmitEnvelope(t, raw)
 	return out.ExecutionID, resp.StatusCode
 }
 
@@ -696,14 +693,14 @@ func g1RunAuthzMatrix(t *testing.T, h *productionServerRunnerHarness) []g1AuthzR
 
 	// Submit allow with full-A.
 	idA, statusSubmit := g1SubmitAuth(t, h.httpSrv.URL, g1TokFullA, g1StartWorkflowDef("g1-authz-submit-allow"), nil)
-	rows = append(rows, g1AuthzRow{Route: "POST /v1/workflows", Token: "full-A", Scope: "workflow", Expected: 200, Got: statusSubmit, Decision: "allow"})
+	rows = append(rows, g1AuthzRow{Route: "POST /v1/workflows/execute", Token: "full-A", Scope: "workflow", Expected: 200, Got: statusSubmit, Decision: "allow"})
 	if statusSubmit != 200 {
 		t.Fatalf("submit allow: status=%d, want 200", statusSubmit)
 	}
 
 	// Submit allow with noexec-A (workflow scope present).
 	_, statusSubmitNoEx := g1SubmitAuth(t, h.httpSrv.URL, g1TokNoExA, g1StartWorkflowDef("g1-authz-submit-noex"), nil)
-	rows = append(rows, g1AuthzRow{Route: "POST /v1/workflows", Token: "noexec-A", Scope: "workflow", Expected: 200, Got: statusSubmitNoEx, Decision: "allow"})
+	rows = append(rows, g1AuthzRow{Route: "POST /v1/workflows/execute", Token: "noexec-A", Scope: "workflow", Expected: 200, Got: statusSubmitNoEx, Decision: "allow"})
 	if statusSubmitNoEx != 200 {
 		t.Fatalf("submit noexec allow: status=%d, want 200", statusSubmitNoEx)
 	}
@@ -724,8 +721,8 @@ func g1RunAuthzMatrix(t *testing.T, h *productionServerRunnerHarness) []g1AuthzR
 		"entry": "start",
 		"input": map[string]any{"claim_id": "invoke-allow"},
 	}
-	resp, _ := g1DoAuth(t, http.MethodPost, h.httpSrv.URL, "/v1/workflows/invoke", g1TokFullA, invBody)
-	rows = append(rows, g1AuthzRow{Route: "POST /v1/workflows/invoke", Token: "full-A", Scope: "workflow", Expected: 200, Got: resp.StatusCode, Decision: "allow"})
+	resp, _ := g1DoAuth(t, http.MethodPost, h.httpSrv.URL, "/v1/workflows/execute", g1TokFullA, invBody)
+	rows = append(rows, g1AuthzRow{Route: "POST /v1/workflows/execute", Token: "full-A", Scope: "workflow", Expected: 200, Got: resp.StatusCode, Decision: "allow"})
 	if resp.StatusCode != 200 {
 		t.Fatalf("invoke allow: status=%d, want 200", resp.StatusCode)
 	}
@@ -1193,7 +1190,7 @@ func g1SubmitConcurrent(baseURL, token string, wf *types.WorkflowDef) (types.Exe
 	if err != nil {
 		return "", -1
 	}
-	req, err := http.NewRequest(http.MethodPost, baseURL+"/v1/workflows", bytes.NewReader(raw))
+	req, err := http.NewRequest(http.MethodPost, baseURL+"/v1/workflows/execute", bytes.NewReader(raw))
 	if err != nil {
 		return "", -1
 	}
@@ -1208,8 +1205,12 @@ func g1SubmitConcurrent(baseURL, token string, wf *types.WorkflowDef) (types.Exe
 	if resp.StatusCode != http.StatusOK {
 		return "", resp.StatusCode
 	}
+	var env e2eEnvelope
+	if err := json.Unmarshal(payload, &env); err != nil {
+		return "", resp.StatusCode
+	}
 	var out e2eSubmitResp
-	if err := json.Unmarshal(payload, &out); err != nil {
+	if err := json.Unmarshal(env.Data, &out); err != nil {
 		return "", resp.StatusCode
 	}
 	return out.ExecutionID, resp.StatusCode

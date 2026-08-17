@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/xbcio/xflow/backend"
@@ -76,18 +75,21 @@ func (m *workflowControlModule) RegisterHTTP(mux *http.ServeMux) {
 			h(w, r)
 		}
 	}
-	// Routes are registered as Go 1.22 mux patterns (spec §1.3): every
-	// execution sub-shape is its own method-qualified pattern, so the mux —
-	// not a hand-rolled TrimPrefix parser — selects the handler. The
-	// per-execution handlers read {id} via r.PathValue.
-	mux.HandleFunc("POST "+PathWorkflows, wrap("submit_workflow", m.handleSubmitWorkflow))
-	mux.HandleFunc("/v1/workflows/invoke", wrap("invoke_workflow", m.handleInvoke))
-	// Registration is a separate, explicit step from submit-and-execute: it
-	// persists the compiled workflow graph so the control plane can resolve it on
-	// seed. /v1/workflows/register (exact) is the POST target; the
-	// /v1/workflows/register/ subtree carries the DELETE {id} path.
-	mux.HandleFunc("/v1/workflows/register", wrap("register_workflow", m.handleRegisterWorkflow))
-	mux.HandleFunc("/v1/workflows/register/", wrap("deregister_workflow", m.handleDeregisterWorkflow))
+	// Routes are Go 1.22 method-qualified mux patterns (spec §1.3): the mux —
+	// not a hand-rolled TrimPrefix parser — selects the handler, and every
+	// {id} is read via r.PathValue. The literal "execute" segment
+	// (PathWorkflowExecute) wins over a hypothetical {id} at the same depth,
+	// so POST /v1/workflows/execute is never captured as a workflow id.
+	//
+	// §9.1 semantic inversion: POST /v1/workflows now REGISTERS a definition
+	// (was compile-and-execute). The compile-and-execute semantics moved to
+	// POST /v1/workflows/execute, which merges the old submit + invoke shapes.
+	mux.HandleFunc("POST "+PathWorkflows, wrap("register_workflow", m.handleRegisterWorkflow))
+	mux.HandleFunc("GET "+PathWorkflowByID, wrap("read_workflow", m.handleGetWorkflow))
+	mux.HandleFunc("PUT "+PathWorkflowByID, wrap("replace_workflow", m.handleReplaceWorkflow))
+	mux.HandleFunc("DELETE "+PathWorkflowByID, wrap("deregister_workflow", m.handleDeregisterWorkflow))
+	mux.HandleFunc("POST "+PathWorkflowExecute, wrap("execute_workflow", m.handleExecuteWorkflow))
+	mux.HandleFunc("POST "+PathWorkflowExecuteByID, wrap("execute_workflow_by_id", m.handleExecuteWorkflowByID))
 	// POST /v1/executions is the entry-seed endpoint (runner protocol face,
 	// spec §0.1); the per-execution GET/signal/cancel/wait surface is the
 	// method-qualified patterns below. ServeMux treats exact and {id} patterns
@@ -138,14 +140,19 @@ func (m *workflowControlModule) RegisterHTTP(mux *http.ServeMux) {
 //   - POST /v1/executions/{id}/cancel     → execution.cancel    (mutation)
 func (m *workflowControlModule) registerAuthzRoutes(mux *http.ServeMux) {
 	authz := m.authzWrap
-	mux.HandleFunc("POST "+PathWorkflows, authz(OpWorkflowCreate, true, m.handleSubmitWorkflow, newExecutionIDResolver()))
-	mux.HandleFunc("/v1/workflows/invoke", authz(OpWorkflowInvoke, true, m.handleInvoke, newExecutionIDResolver()))
-	// Register/deregister persist and remove the compiled workflow graph. Both
-	// are mutations under the workflow scope. The authz wrapper injects the
-	// principal's namespace into the request context; the handlers resolve it via
-	// namespace.FromContext — never from the client body.
-	mux.HandleFunc("/v1/workflows/register", authz(OpWorkflowRegister, true, m.handleRegisterWorkflow, nil))
-	mux.HandleFunc("/v1/workflows/register/", authz(OpWorkflowRegister, true, m.handleDeregisterWorkflow, nil))
+	// §9.1 semantic inversion: POST /v1/workflows now REGISTERS. The
+	// compile-and-execute route moved to POST /v1/workflows/execute (merging
+	// submit+invoke). Each route is its own method-qualified pattern bound to a
+	// stable Op so the authz wrapper resolves the operation from the pattern
+	// itself (spec §1.3). The authz wrapper injects the principal's namespace
+	// into the request context; handlers resolve it via namespace.FromContext —
+	// never from the client body (spec §6.2).
+	mux.HandleFunc("POST "+PathWorkflows, authz(OpWorkflowRegister, true, m.handleRegisterWorkflow, nil))
+	mux.HandleFunc("GET "+PathWorkflowByID, authz(OpWorkflowRead, false, m.handleGetWorkflow, workflowIDResolver()))
+	mux.HandleFunc("PUT "+PathWorkflowByID, authz(OpWorkflowDefinitionUpdate, true, m.handleReplaceWorkflow, workflowIDResolver()))
+	mux.HandleFunc("DELETE "+PathWorkflowByID, authz(OpWorkflowRegister, true, m.handleDeregisterWorkflow, workflowIDResolver()))
+	mux.HandleFunc("POST "+PathWorkflowExecute, authz(OpWorkflowCreate, true, m.handleExecuteWorkflow, newExecutionIDResolver()))
+	mux.HandleFunc("POST "+PathWorkflowExecuteByID, authz(OpWorkflowInvoke, true, m.handleExecuteWorkflowByID, workflowIDResolver()))
 	// Entry-seed endpoint (exact path, POST only). The authz wrapper injects
 	// the principal's namespace into the request context; handleSeedExecution
 	// reads it via namespace.FromContext — never from the client body.
@@ -179,6 +186,19 @@ func execIDResolver(suffix string) func(*http.Request) (string, string, string, 
 			resource += "/" + suffix
 		}
 		return resource, "", id, ""
+	}
+}
+
+// workflowIDResolver builds the resource resolver for a /v1/workflows/{id}
+// route: it reads the {id} the mux matched and returns the workflow-scoped
+// resource string the audit row carries. ResourceNamespace is left empty —
+// the authoritative IDOR defense is the namespace-scoped registry read (the
+// authz wrapper injects the principal's namespace so a cross-namespace id
+// resolves to not-found → 404).
+func workflowIDResolver() func(*http.Request) (string, string, string, string) {
+	return func(r *http.Request) (string, string, string, string) {
+		id := r.PathValue("id")
+		return "workflow/" + id, "", id, ""
 	}
 }
 
@@ -250,23 +270,32 @@ type errorResponse struct {
 	Error string `json:"error"`
 }
 
-type submitWorkflowRequest struct {
+// executeWorkflowRequest is the inline-definition direct-run body for
+// POST /v1/workflows/execute (spec §7 + §9.1). It merges the old submit
+// ({workflow, params}) and invoke ({workflow, entry, input}) shapes: when
+// Entry is empty the graph's default start node is used (Submit); when set,
+// that entry node drives the explicit-entry path (Invoke). A single route
+// serves both so the verb-layer collapse in §1.2 does not split them back
+// across two paths.
+type executeWorkflowRequest struct {
 	Workflow *types.WorkflowDef `json:"workflow"`
-	Params   map[string]any     `json:"params,omitempty"`
+	Entry    string            `json:"entry,omitempty"`
+	Input    map[string]any    `json:"input,omitempty"`
+	Params   map[string]any    `json:"params,omitempty"`
 }
 
-type submitWorkflowResponse struct {
+type executeWorkflowResponse struct {
 	ExecutionID types.ExecutionID `json:"execution_id"`
 }
 
-type invokeRequest struct {
-	Workflow *types.WorkflowDef `json:"workflow"`
-	Entry    string             `json:"entry"`
-	Input    map[string]any     `json:"input,omitempty"`
-}
-
-type invokeResponse struct {
-	ExecutionID types.ExecutionID `json:"execution_id"`
+// executeRegisteredRequest is the body for POST /v1/workflows/{id}/execute
+// (spec §7): run an already-registered workflow by id. Entry/Input/Params are
+// optional; when Entry is empty the registered graph's default start node is
+// used.
+type executeRegisteredRequest struct {
+	Entry  string         `json:"entry,omitempty"`
+	Input  map[string]any `json:"input,omitempty"`
+	Params map[string]any `json:"params,omitempty"`
 }
 
 type signalRequest struct {
@@ -280,24 +309,40 @@ type waitTimeoutResponse struct {
 	TimedOut    bool                  `json:"timed_out"`
 }
 
-func (m *workflowControlModule) handleSubmitWorkflow(w http.ResponseWriter, r *http.Request) {
+// handleExecuteWorkflow serves POST /v1/workflows/execute (spec §7 + §9.1): it
+// compiles an INLINE definition and immediately starts an execution. It merges
+// the old submit ({workflow, params}) and invoke ({workflow, entry, input})
+// shapes — when Entry is empty the graph's default start node is used (Submit);
+// when set, that entry node drives the explicit-entry path (Invoke).
+//
+// This is the compile-and-execute semantics that USED to live on
+// POST /v1/workflows before the §9.1 semantic inversion moved that path to
+// register. A caller on the old POST /v1/workflows semantics gets silently
+// different behavior now (register, not execute); this route is where the
+// execute behavior moved.
+//
+// Failure codes are stable snake_case per spec §3.2. A compile error's message
+// carries only node names / referenced node names / parameter names — never a
+// node's output or a parameter value, which routinely carry credentials
+// (spec §3.5 / branch specialization).
+func (m *workflowControlModule) handleExecuteWorkflow(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodPost) {
 		return
 	}
-	var req submitWorkflowRequest
+	var req executeWorkflowRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
 	if req.Workflow == nil {
-		writeError(w, http.StatusBadRequest, "workflow is required")
+		writeFail(w, r, http.StatusBadRequest, "workflow_invalid", "workflow is required")
 		return
 	}
 	g, err := graph.Compile(req.Workflow)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeFail(w, r, http.StatusBadRequest, "workflow_compile_failed", err.Error())
 		return
 	}
-	// xflow.workflow.submit starts the inbound trace for a workflow execution.
+	// xflow.workflow.execute starts the inbound trace for a workflow execution.
 	// Its SpanContext is persisted on the execution snapshot (via
 	// engine.WithTraceCarrier) so the later, asynchronous dispatch span can
 	// inherit it as a real W3C remote parent — closing the submit→dispatch
@@ -306,7 +351,11 @@ func (m *workflowControlModule) handleSubmitWorkflow(w http.ResponseWriter, r *h
 	if tracer == nil {
 		tracer = tracing.NoopTracer{}
 	}
-	ctx, span := tracer.Start(r.Context(), "xflow.workflow.submit")
+	spanName := "xflow.workflow.execute"
+	if req.Entry != "" {
+		spanName = "xflow.workflow.execute"
+	}
+	ctx, span := tracer.Start(r.Context(), spanName, "entry", req.Entry)
 	defer span.End()
 	ctx = engine.WithTraceCarrier(ctx, tracing.InjectCarrier(ctx))
 	// Attach the original workflow definition so the durable SQL execution
@@ -314,60 +363,27 @@ func (m *workflowControlModule) handleSubmitWorkflow(w http.ResponseWriter, r *h
 	// Without this, production mode with a SQL store fails submit with a
 	// NOT-NULL violation on xflow_executions.workflow_def.
 	ctx = engine.WithWorkflowDef(ctx, req.Workflow)
-	id, err := m.eng.Submit(ctx, g, req.Params)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
-		return
-	}
-	writeJSON(w, http.StatusOK, submitWorkflowResponse{ExecutionID: id})
-}
-
-func (m *workflowControlModule) handleInvoke(w http.ResponseWriter, r *http.Request) {
-	if !requireMethod(w, r, http.MethodPost) {
-		return
-	}
-	var req invokeRequest
-	if !decodeJSON(w, r, &req) {
-		return
-	}
-	if req.Workflow == nil {
-		writeError(w, http.StatusBadRequest, "workflow is required")
-		return
-	}
-	if req.Entry == "" {
-		writeError(w, http.StatusBadRequest, "entry is required")
-		return
-	}
-	g, err := graph.Compile(req.Workflow)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	// xflow.workflow.invoke mirrors submit for the explicit-entry path. Its
-	// SpanContext is persisted for asynchronous dispatch causality.
-	tracer := m.tracer
-	if tracer == nil {
-		tracer = tracing.NoopTracer{}
-	}
-	ctx, span := tracer.Start(r.Context(), "xflow.workflow.invoke", "entry", req.Entry)
-	defer span.End()
-	ctx = engine.WithTraceCarrier(ctx, tracing.InjectCarrier(ctx))
-	// Attach the original workflow definition so the durable SQL execution
-	// projection can persist workflow_def (see handleSubmitWorkflow).
-	ctx = engine.WithWorkflowDef(ctx, req.Workflow)
-	id, err := m.eng.Invoke(ctx, g, req.Entry, req.Input)
-	if err != nil {
-		// An unknown entry node is a client error (400), not a 404: the
-		// missing resource is the entry in the submitted graph, not an
-		// execution in the store.
-		if errors.Is(err, engine.ErrEntryNotFound) {
-			writeError(w, http.StatusBadRequest, err.Error())
+	var id types.ExecutionID
+	if req.Entry != "" {
+		id, err = m.eng.Invoke(ctx, g, req.Entry, req.Input)
+		// An unknown entry node is a client error (400): the missing resource is
+		// the entry in the submitted graph, not an execution in the store.
+		if err != nil {
+			if errors.Is(err, engine.ErrEntryNotFound) {
+				writeFail(w, r, http.StatusBadRequest, "workflow_entry_not_found", err.Error())
+				return
+			}
+			writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
-		return
+	} else {
+		id, err = m.eng.Submit(ctx, g, req.Params)
+		if err != nil {
+			writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+			return
+		}
 	}
-	writeJSON(w, http.StatusOK, invokeResponse{ExecutionID: id})
+	writeData(w, r, http.StatusOK, executeWorkflowResponse{ExecutionID: id})
 }
 
 // registerWorkflowResponse echoes the persisted workflow ID (server-assigned
@@ -383,13 +399,20 @@ type registerWorkflowResponse struct {
 	Warnings   []string         `json:"warnings,omitempty"`
 }
 
-// handleRegisterWorkflow serves POST /v1/workflows/register. It is a NEW,
-// explicit step distinct from submit-and-execute (/v1/workflows): it compiles
-// the submitted definition and persists the compiled graph in the server-side
-// workflow registry so later tasks can resolve the graph on seed and derive
-// entry activations. The authoritative namespace is resolved server-side from
-// namespace.FromContext (injected by the authz wrapper), NEVER from the request
-// body, so a caller cannot register into another namespace.
+// handleRegisterWorkflow serves POST /v1/workflows (spec §7). After the §9.1
+// semantic inversion this is the REGISTER route — it compiles the submitted
+// definition and persists the compiled graph in the server-side workflow
+// registry so later tasks can resolve the graph on seed and derive entry
+// activations. (The old compile-and-execute semantics that lived here moved to
+// POST /v1/workflows/execute.)
+//
+// The authoritative namespace is resolved server-side from
+// namespace.FromContext (injected by the authz wrapper), NEVER from the
+// request body, so a caller cannot register into another namespace (spec §6.2).
+//
+// 201 + Location: register creates a workflow resource (spec §4.2). Failure
+// codes are stable snake_case per spec §3.2; a compile error's message carries
+// only node names / referenced node names / parameter names (spec §3.5).
 func (m *workflowControlModule) handleRegisterWorkflow(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodPost) {
 		return
@@ -405,13 +428,18 @@ func (m *workflowControlModule) handleRegisterWorkflow(w http.ResponseWriter, r 
 	if err != nil {
 		var compileErr *WorkflowCompileError
 		if errors.As(err, &compileErr) {
-			writeError(w, http.StatusBadRequest, compileErr.Unwrap().Error())
+			writeFail(w, r, http.StatusBadRequest, "workflow_compile_failed", compileErr.Unwrap().Error())
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		if errors.Is(err, backend.ErrWorkflowConflict) {
+			writeFail(w, r, http.StatusConflict, "workflow_conflict", "workflow definition conflicts with an existing registration")
+			return
+		}
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
-	writeJSON(w, http.StatusOK, registerWorkflowResponse{WorkflowID: id, Warnings: warnings})
+	w.Header().Set("Location", "/v1/workflows/"+string(id))
+	writeData(w, r, http.StatusCreated, registerWorkflowResponse{WorkflowID: id, Warnings: warnings})
 }
 
 // WorkflowCompileError marks a registration failure that the caller can fix by
@@ -480,30 +508,168 @@ func (m *workflowControlModule) registerWorkflow(ctx context.Context, ns namespa
 	return rec.ID, g.Warnings(), nil
 }
 
-// handleDeregisterWorkflow serves DELETE /v1/workflows/register/{id}. It removes
-// the persisted record for the given workflow id. The id is a server-assigned
-// opaque identifier taken from the path; namespace isolation is enforced by the
-// registry record (a later task may add per-namespace scoping on removal).
+// handleDeregisterWorkflow serves DELETE /v1/workflows/{id} (spec §7 +
+// §9.1). It removes the persisted record for the given workflow id. The id is
+// read via the mux {id} pattern (spec §1.3 — no hand-rolled TrimPrefix); the
+// literal "execute" segment is registered as POST only, so a DELETE to
+// /v1/workflows/execute cannot be misread as an id here. Namespace isolation
+// is enforced by the registry record (a cross-namespace id resolves to
+// not-found → 404).
+//
+// The clear-activations→remove ordering contract lives in deregisterWorkflow
+// (shared with ReplaceWorkflow); this handler only parses the path and maps
+// failures. Failure codes are stable snake_case per spec §3.2.
 func (m *workflowControlModule) handleDeregisterWorkflow(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodDelete) {
 		return
 	}
-	id := strings.Trim(strings.TrimPrefix(r.URL.Path, "/v1/workflows/register/"), "/")
-	if id == "" || strings.Contains(id, "/") {
-		writeError(w, http.StatusNotFound, "workflow not found")
+	id := r.PathValue("id")
+	if id == "" {
+		writeFail(w, r, http.StatusNotFound, "workflow_not_found", "workflow not found")
 		return
 	}
 	// The namespace is resolved server-side, never from the body or the path.
 	err := m.deregisterWorkflow(r.Context(), namespace.FromContext(r.Context()), types.WorkflowID(id))
 	if err != nil {
 		if errors.Is(err, backend.ErrWorkflowNotFound) {
-			writeError(w, http.StatusNotFound, "workflow not found")
+			writeFail(w, r, http.StatusNotFound, "workflow_not_found", "workflow not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"removed": true})
+	writeData(w, r, http.StatusOK, map[string]bool{"removed": true})
+}
+
+// handleGetWorkflow serves GET /v1/workflows/{id} (spec §7 + Addition 1): it
+// returns the stored record's definition. The namespace comes from the
+// authenticated principal via namespace.FromContext (injected by the authz
+// wrapper), never from the request body (spec §6.2); a cross-namespace id
+// resolves to not-found → 404, never leaking existence.
+func (m *workflowControlModule) handleGetWorkflow(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodGet) {
+		return
+	}
+	id := types.WorkflowID(r.PathValue("id"))
+	registry := m.registry()
+	if registry == nil {
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	rec, err := registry.GetWorkflow(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, backend.ErrWorkflowNotFound) {
+			writeFail(w, r, http.StatusNotFound, "workflow_not_found", "workflow not found")
+			return
+		}
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	// The namespace-scoped read is the authoritative IDOR defense: a
+	// cross-namespace id resolves to a record whose Namespace does not match
+	// the principal's, so it is reported as not-found rather than returned.
+	ns := namespace.FromContext(r.Context())
+	if rec.Namespace != "" && ns != "" && rec.Namespace != string(ns) {
+		writeFail(w, r, http.StatusNotFound, "workflow_not_found", "workflow not found")
+		return
+	}
+	writeData(w, r, http.StatusOK, rec.Definition)
+}
+
+// handleReplaceWorkflow serves PUT /v1/workflows/{id} (spec §7 + Addition 1):
+// a full update. It maps onto APIServer.ReplaceWorkflow — deregister a
+// conflicting definition under the same (namespace, name, version) key and
+// re-register. The id in the path identifies the record being replaced; the
+// replacement definition's name/version form the key (with the principal's
+// namespace, never the body's — spec §6.2).
+//
+// ReplaceWorkflow's semantics are the host-owns-its-key contract documented on
+// APIServer.ReplaceWorkflow; this handler does not invent replace semantics —
+// it delegates. An identical definition registers idempotently and nothing is
+// removed.
+func (m *workflowControlModule) handleReplaceWorkflow(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPut) {
+		return
+	}
+	var def types.WorkflowDef
+	if !decodeJSON(w, r, &def) {
+		return
+	}
+	ns := namespace.FromContext(r.Context())
+	id, warnings, err := m.replaceWorkflow(r.Context(), ns, &def)
+	if err != nil {
+		var compileErr *WorkflowCompileError
+		if errors.As(err, &compileErr) {
+			writeFail(w, r, http.StatusBadRequest, "workflow_compile_failed", compileErr.Unwrap().Error())
+			return
+		}
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	writeData(w, r, http.StatusOK, registerWorkflowResponse{WorkflowID: id, Warnings: warnings})
+}
+
+// handleExecuteWorkflowByID serves POST /v1/workflows/{id}/execute (spec §7):
+// run an already-registered workflow by id. It resolves the stored compiled
+// graph from the registry and submits it. The id is read via the mux {id}
+// pattern; the namespace comes from the authenticated principal (spec §6.2),
+// and a cross-namespace id resolves to not-found → 404.
+func (m *workflowControlModule) handleExecuteWorkflowByID(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+	id := types.WorkflowID(r.PathValue("id"))
+	// Body is optional: Entry/Input/Params may all be absent.
+	var req executeRegisteredRequest
+	if r.ContentLength != 0 {
+		if !decodeJSON(w, r, &req) {
+			return
+		}
+	} else {
+		_ = r.Body.Close()
+	}
+	registry := m.registry()
+	if registry == nil {
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	rec, err := registry.GetWorkflow(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, backend.ErrWorkflowNotFound) {
+			writeFail(w, r, http.StatusNotFound, "workflow_not_found", "workflow not found")
+			return
+		}
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	ns := namespace.FromContext(r.Context())
+	if rec.Namespace != "" && ns != "" && rec.Namespace != string(ns) {
+		writeFail(w, r, http.StatusNotFound, "workflow_not_found", "workflow not found")
+		return
+	}
+	// Attach the stored definition so the durable SQL execution projection can
+	// persist workflow_def (NOT NULL) — mirroring the inline-execute path.
+	ctx := engine.WithWorkflowDef(r.Context(), rec.Definition)
+	ctx = engine.WithTraceCarrier(ctx, tracing.InjectCarrier(ctx))
+	var execID types.ExecutionID
+	if req.Entry != "" {
+		execID, err = m.eng.Invoke(ctx, rec.Graph, req.Entry, req.Input)
+		if err != nil {
+			if errors.Is(err, engine.ErrEntryNotFound) {
+				writeFail(w, r, http.StatusBadRequest, "workflow_entry_not_found", err.Error())
+				return
+			}
+			writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+			return
+		}
+	} else {
+		execID, err = m.eng.Submit(ctx, rec.Graph, req.Params)
+		if err != nil {
+			writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+			return
+		}
+	}
+	writeData(w, r, http.StatusOK, executeWorkflowResponse{ExecutionID: execID})
 }
 
 // deregisterWorkflow is the clear-activations -> remove-record path both entry

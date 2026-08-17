@@ -146,32 +146,37 @@ func validWorkflow() *types.WorkflowDef {
 	}
 }
 
-func TestWorkflowControlSubmit(t *testing.T) {
+func TestWorkflowControlExecute(t *testing.T) {
 	f := &fakeControlFacade{submitID: "exec-1"}
 	mux := newControlMux(f)
 
-	resp := doJSON(t, mux, http.MethodPost, "/v1/workflows", submitWorkflowRequest{Workflow: validWorkflow()})
+	resp := doJSON(t, mux, http.MethodPost, "/v1/workflows/execute", executeWorkflowRequest{Workflow: validWorkflow()})
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
-	var out submitWorkflowResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		t.Fatal(err)
+	var out executeWorkflowResponse
+	env := decodeEnvelope(t, resp, &out)
+	if !env.Success {
+		t.Fatalf("envelope not success: %+v", env)
 	}
 	if out.ExecutionID != "exec-1" {
 		t.Fatalf("execution_id = %q, want exec-1", out.ExecutionID)
 	}
 }
 
-func TestWorkflowControlSubmitRejectsNilWorkflow(t *testing.T) {
+func TestWorkflowControlExecuteRejectsNilWorkflow(t *testing.T) {
 	f := &fakeControlFacade{}
 	mux := newControlMux(f)
 
-	resp := doJSON(t, mux, http.MethodPost, "/v1/workflows", submitWorkflowRequest{})
+	resp := doJSON(t, mux, http.MethodPost, "/v1/workflows/execute", executeWorkflowRequest{})
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+	env := decodeEnvelope(t, resp, nil)
+	if env.Code != "workflow_invalid" {
+		t.Fatalf("code = %q, want workflow_invalid", env.Code)
 	}
 }
 
@@ -244,11 +249,11 @@ func TestWorkflowControlSignalAndCancel(t *testing.T) {
 	}
 }
 
-func TestWorkflowControlInvoke(t *testing.T) {
+func TestWorkflowControlExecuteWithEntryInvokes(t *testing.T) {
 	f := &fakeControlFacade{invokeID: "exec-invoke"}
 	mux := newControlMux(f)
 
-	resp := doJSON(t, mux, http.MethodPost, "/v1/workflows/invoke", invokeRequest{
+	resp := doJSON(t, mux, http.MethodPost, "/v1/workflows/execute", executeWorkflowRequest{
 		Workflow: validWorkflow(),
 		Entry:    "start",
 		Input:    map[string]any{"k": "v"},
@@ -257,10 +262,8 @@ func TestWorkflowControlInvoke(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
-	var out invokeResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		t.Fatal(err)
-	}
+	var out executeWorkflowResponse
+	decodeEnvelope(t, resp, &out)
 	if out.ExecutionID != "exec-invoke" {
 		t.Fatalf("execution_id = %q, want exec-invoke", out.ExecutionID)
 	}
@@ -269,11 +272,11 @@ func TestWorkflowControlInvoke(t *testing.T) {
 	}
 }
 
-func TestWorkflowControlInvokeMissingEntryReturns400(t *testing.T) {
+func TestWorkflowControlExecuteMissingEntryReturns400(t *testing.T) {
 	f := &fakeControlFacade{invokeErr: engine.ErrEntryNotFound}
 	mux := newControlMux(f)
 
-	resp := doJSON(t, mux, http.MethodPost, "/v1/workflows/invoke", invokeRequest{
+	resp := doJSON(t, mux, http.MethodPost, "/v1/workflows/execute", executeWorkflowRequest{
 		Workflow: validWorkflow(),
 		Entry:    "missing",
 	})
@@ -281,13 +284,17 @@ func TestWorkflowControlInvokeMissingEntryReturns400(t *testing.T) {
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 for unknown entry", resp.StatusCode)
 	}
+	env := decodeEnvelope(t, resp, nil)
+	if env.Code != "workflow_entry_not_found" {
+		t.Fatalf("code = %q, want workflow_entry_not_found", env.Code)
+	}
 }
 
-func TestWorkflowControlInvokeGenericNotFoundTextReturns500(t *testing.T) {
+func TestWorkflowControlExecuteGenericNotFoundTextReturns500(t *testing.T) {
 	f := &fakeControlFacade{invokeErr: errors.New("registry not found while compiling runtime metadata")}
 	mux := newControlMux(f)
 
-	resp := doJSON(t, mux, http.MethodPost, "/v1/workflows/invoke", invokeRequest{
+	resp := doJSON(t, mux, http.MethodPost, "/v1/workflows/execute", executeWorkflowRequest{
 		Workflow: validWorkflow(),
 		Entry:    "start",
 	})
@@ -297,18 +304,7 @@ func TestWorkflowControlInvokeGenericNotFoundTextReturns500(t *testing.T) {
 	}
 }
 
-func TestWorkflowControlInvokeRejectsMissingEntryField(t *testing.T) {
-	f := &fakeControlFacade{}
-	mux := newControlMux(f)
-
-	resp := doJSON(t, mux, http.MethodPost, "/v1/workflows/invoke", invokeRequest{Workflow: validWorkflow()})
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400 for empty entry", resp.StatusCode)
-	}
-}
-
-func TestWorkflowControlInvokeCompileErrorReturns400(t *testing.T) {
+func TestWorkflowControlExecuteCompileErrorReturns400(t *testing.T) {
 	f := &fakeControlFacade{}
 	mux := newControlMux(f)
 
@@ -324,10 +320,14 @@ func TestWorkflowControlInvokeCompileErrorReturns400(t *testing.T) {
 			"B": {"main": types.PortConnections{Targets: []types.Connection{{Node: "A", Input: "main"}}}},
 		},
 	}
-	resp := doJSON(t, mux, http.MethodPost, "/v1/workflows/invoke", invokeRequest{Workflow: wf, Entry: "A"})
+	resp := doJSON(t, mux, http.MethodPost, "/v1/workflows/execute", executeWorkflowRequest{Workflow: wf, Entry: "A"})
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 for compile error", resp.StatusCode)
+	}
+	env := decodeEnvelope(t, resp, nil)
+	if env.Code != "workflow_compile_failed" {
+		t.Fatalf("code = %q, want workflow_compile_failed", env.Code)
 	}
 }
 

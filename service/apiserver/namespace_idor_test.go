@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -86,13 +87,13 @@ func newNamespaceORFixture(t *testing.T) *namespaceIDORFixture {
 }
 
 func (f *namespaceIDORFixture) submitWorkflow(token string) types.ExecutionID {
-	body := submitWorkflowRequest{Workflow: &types.WorkflowDef{
+	body := executeWorkflowRequest{Workflow: &types.WorkflowDef{
 		Name:  "idor-wf",
 		Nodes: []types.NodeDef{{Name: "start", Type: "test.echo"}},
 	}}
 	var buf bytes.Buffer
 	_ = json.NewEncoder(&buf).Encode(body)
-	req, _ := http.NewRequest(http.MethodPost, f.httpSrv.URL+"/v1/workflows", &buf)
+	req, _ := http.NewRequest(http.MethodPost, f.httpSrv.URL+"/v1/workflows/execute", &buf)
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
@@ -103,8 +104,9 @@ func (f *namespaceIDORFixture) submitWorkflow(token string) types.ExecutionID {
 	if resp.StatusCode != http.StatusOK {
 		f.t.Fatalf("submit status = %d, want 200", resp.StatusCode)
 	}
-	var out submitWorkflowResponse
-	_ = json.NewDecoder(resp.Body).Decode(&out)
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	var out executeWorkflowResponse
+	_ = json.Unmarshal(extractData(f.t, bodyBytes), &out)
 	return out.ExecutionID
 }
 
@@ -112,15 +114,15 @@ func (f *namespaceIDORFixture) submitWorkflow(token string) types.ExecutionID {
 // a forged namespace field. The server must ignore it and create the execution
 // under the principal's namespace.
 func (f *namespaceIDORFixture) submitWorkflowWithNamespaceField(token, forgedNamespace string) types.ExecutionID {
-	// submitWorkflowRequest has no Namespace field, so submit a raw JSON object
-	// with an extra namespace field to prove it is ignored.
+	// The execute request body has no Namespace field, so submit a raw JSON
+	// object with an extra namespace field to prove it is ignored.
 	raw := map[string]any{
 		"workflow":  map[string]any{"name": "idor-wf", "nodes": []map[string]any{{"name": "start", "type": "test.echo"}}},
 		"namespace": forgedNamespace,
 	}
 	var buf bytes.Buffer
 	_ = json.NewEncoder(&buf).Encode(raw)
-	req, _ := http.NewRequest(http.MethodPost, f.httpSrv.URL+"/v1/workflows", &buf)
+	req, _ := http.NewRequest(http.MethodPost, f.httpSrv.URL+"/v1/workflows/execute", &buf)
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
@@ -131,8 +133,9 @@ func (f *namespaceIDORFixture) submitWorkflowWithNamespaceField(token, forgedNam
 	if resp.StatusCode != http.StatusOK {
 		f.t.Fatalf("submit status = %d, want 200 (forged namespace field must be ignored)", resp.StatusCode)
 	}
-	var out submitWorkflowResponse
-	_ = json.NewDecoder(resp.Body).Decode(&out)
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	var out executeWorkflowResponse
+	_ = json.Unmarshal(extractData(f.t, bodyBytes), &out)
 	return out.ExecutionID
 }
 

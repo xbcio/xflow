@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -146,27 +147,36 @@ func (fakeRemoteHostBody) Execute(_ context.Context, input *types.Input) (*types
 	return &types.Output{Data: map[string]any{"handled": true}}, nil
 }
 
-// registerWorkflowHTTP posts a workflow definition to /v1/workflows/register so
-// the control plane persists the compiled graph AND derives the entry activation.
+// registerWorkflowHTTP posts a workflow definition to POST /v1/workflows (the
+// register route after the §9.1 semantic inversion) so the control plane
+// persists the compiled graph AND derives the entry activation.
 func registerWorkflowHTTP(t *testing.T, baseURL string, client *http.Client, def *types.WorkflowDef) types.WorkflowID {
 	t.Helper()
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(def); err != nil {
 		t.Fatalf("encode: %v", err)
 	}
-	resp, err := client.Post(baseURL+"/v1/workflows/register", "application/json", &buf)
+	resp, err := client.Post(baseURL+"/v1/workflows", "application/json", &buf)
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("register status = %d, want 200", resp.StatusCode)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("register status = %d, want 201", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read register body: %v", err)
+	}
+	var env e2eEnvelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("decode register envelope: %v", err)
 	}
 	var out struct {
 		WorkflowID types.WorkflowID `json:"workflow_id"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		t.Fatalf("decode register response: %v", err)
+	if err := json.Unmarshal(env.Data, &out); err != nil {
+		t.Fatalf("decode register data: %v", err)
 	}
 	if out.WorkflowID == "" {
 		t.Fatal("empty workflow_id from register")

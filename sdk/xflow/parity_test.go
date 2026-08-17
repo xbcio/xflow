@@ -39,7 +39,10 @@ func TestSDKServerParityWithAPIServer(t *testing.T) {
 		routeMustExist bool
 	}{
 		{"submit workflow", http.MethodPost, control.SubmitWorkflowPath, true},
-		{"invoke workflow", http.MethodPost, "/v1/workflows/invoke", true},
+		// invoke merged into POST /v1/workflows/execute (§9.1); the registered
+		// execute route is exercised with a nonexistent id, which both handlers
+		// answer with 404 (resource not found), so routeMustExist stays false.
+		{"execute registered workflow", http.MethodPost, "/v1/workflows/nonexistent/execute", false},
 		// inspect/wait/cancel return 404 for a nonexistent id because the engine
 		// lookup itself reports not-found; a 404 here is not proof the route is
 		// missing, so routeMustExist stays false. They assert parity only.

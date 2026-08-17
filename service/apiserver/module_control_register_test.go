@@ -47,6 +47,10 @@ func newRegisterTestServer(t *testing.T) (*httptest.Server, *control.ControlPlan
 	return httpSrv, cp
 }
 
+// postRegister posts a workflow definition to POST /v1/workflows (the register
+// route after the §9.1 semantic inversion) and decodes the enveloped
+// registerWorkflowResponse data. It returns the raw response so callers can
+// assert status codes.
 func postRegister(t *testing.T, base, token string, body any) *http.Response {
 	t.Helper()
 	var r io.Reader
@@ -57,16 +61,25 @@ func postRegister(t *testing.T, base, token string, body any) *http.Response {
 		}
 		r = &buf
 	}
-	req, _ := http.NewRequest(http.MethodPost, base+"/v1/workflows/register", r)
+	req, _ := http.NewRequest(http.MethodPost, base+"/v1/workflows", r)
 	req.Header.Set("Content-Type", "application/json")
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		t.Fatalf("POST /v1/workflows/register: %v", err)
+		t.Fatalf("POST /v1/workflows: %v", err)
 	}
 	return resp
+}
+
+// decodeRegisterData reads an enveloped response body into the typed data.
+func decodeRegisterData(t *testing.T, resp *http.Response, out *registerWorkflowResponse) {
+	t.Helper()
+	env := decodeEnvelope(t, resp, out)
+	if !env.Success {
+		t.Fatalf("register envelope not success: %+v", env)
+	}
 }
 
 func TestRegisterWorkflowPersistsCompiledGraph(t *testing.T) {
@@ -74,13 +87,11 @@ func TestRegisterWorkflowPersistsCompiledGraph(t *testing.T) {
 
 	resp := postRegister(t, srv.URL, "tok-full", validWorkflow())
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d, want 201", resp.StatusCode)
 	}
 	var out registerWorkflowResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		t.Fatal(err)
-	}
+	decodeRegisterData(t, resp, &out)
 	if out.WorkflowID == "" {
 		t.Fatal("workflow_id must be non-empty")
 	}
@@ -113,21 +124,19 @@ func TestRegisterWorkflowRequiresAuth(t *testing.T) {
 }
 
 // TestDeregisterWorkflowRemovesRecord registers a workflow then deletes it via
-// DELETE /v1/workflows/register/{id} and asserts the registry no longer holds it.
+// DELETE /v1/workflows/{id} and asserts the registry no longer holds it.
 func TestDeregisterWorkflowRemovesRecord(t *testing.T) {
 	srv, cp := newRegisterTestServer(t)
 
 	resp := postRegister(t, srv.URL, "tok-full", validWorkflow())
 	defer func() { _ = resp.Body.Close() }()
 	var out registerWorkflowResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		t.Fatal(err)
-	}
+	decodeRegisterData(t, resp, &out)
 	if out.WorkflowID == "" {
 		t.Fatal("workflow_id must be non-empty")
 	}
 
-	req, _ := http.NewRequest(http.MethodDelete, srv.URL+"/v1/workflows/register/"+string(out.WorkflowID), nil)
+	req, _ := http.NewRequest(http.MethodDelete, srv.URL+"/v1/workflows/"+string(out.WorkflowID), nil)
 	req.Header.Set("Authorization", "Bearer tok-full")
 	delResp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -211,17 +220,15 @@ func TestDeregisterClearsActivationsBeforeRemovingRecord(t *testing.T) {
 	// Register the trigger workflow (derivation writes a Desired activation).
 	resp := postRegister(t, httpSrv.URL, "tok-full", triggerWorkflow())
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("register status = %d, want 200", resp.StatusCode)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("register status = %d, want 201", resp.StatusCode)
 	}
 	var out registerWorkflowResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		t.Fatal(err)
-	}
+	decodeRegisterData(t, resp, &out)
 
 	// Deregister: the clear fails → 500, and the registry record MUST survive so
 	// a retry can re-clear.
-	req, _ := http.NewRequest(http.MethodDelete, httpSrv.URL+"/v1/workflows/register/"+string(out.WorkflowID), nil)
+	req, _ := http.NewRequest(http.MethodDelete, httpSrv.URL+"/v1/workflows/"+string(out.WorkflowID), nil)
 	req.Header.Set("Authorization", "Bearer tok-full")
 	delResp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -296,15 +303,13 @@ func TestRegisterWorkflowSurfacesCompileWarnings(t *testing.T) {
 
 	resp := postRegister(t, srv.URL, "tok-full", def)
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("status = %d, want 200 (a warning must not fail the register): %s",
+		t.Fatalf("status = %d, want 201 (a warning must not fail the register): %s",
 			resp.StatusCode, body)
 	}
 	var out registerWorkflowResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+	decodeRegisterData(t, resp, &out)
 	if len(out.Warnings) == 0 {
 		t.Fatal("register returned no warnings; the compile-time cross-branch " +
 			"$nodes diagnostic must reach the caller, or Warnings() is dead code")
@@ -333,8 +338,8 @@ func TestRegisterWorkflowOmitsWarningsWhenClean(t *testing.T) {
 
 	resp := postRegister(t, srv.URL, "tok-full", validWorkflow())
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d, want 201", resp.StatusCode)
 	}
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {

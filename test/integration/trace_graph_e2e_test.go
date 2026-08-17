@@ -249,10 +249,7 @@ func submitTraceWorkflow(t *testing.T, baseURL string, wf *types.WorkflowDef, pa
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("submit status = %d, want 200", resp.StatusCode)
 	}
-	var out e2eSubmitResp
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+	out := decodeSubmitResponse(t, resp)
 	return out.ExecutionID
 }
 
