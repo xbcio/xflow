@@ -329,3 +329,61 @@ func TestNamespaceORDeadLetterCrossNamespace(t *testing.T) {
 		t.Fatalf("namespaceB replay namespaceA dead letter = %d, want 404 (IDOR)", code)
 	}
 }
+
+// TestDeadLetterReplayNotFoundIsAFailureEnvelope pins the spec §4.1 rule that
+// success tracks 2xx strictly. The replay handler once returned the outcome
+// payload with writeData at a 404 — success:true at a failure status — because
+// the not_found outcome looked like a structured result worth surfacing.
+//
+// This is the only replay path that reaches ReplayNotFound: the execution
+// exists in the caller's namespace (so the IDOR check passes) but the entry id
+// does not. Every other 404 short-circuits earlier.
+func TestDeadLetterReplayNotFoundIsAFailureEnvelope(t *testing.T) {
+	f := newNamespaceORFixture(t)
+
+	ctxA := namespace.WithNamespace(context.Background(), namespace.Namespace("namespaceA"))
+	g, err := graph.Compile(&types.WorkflowDef{
+		Name:  "idor-dead-missing-entry",
+		Nodes: []types.NodeDef{{Name: "start", Type: "test.echo"}},
+	})
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	execID, err := f.seedEng.Submit(ctxA, g, nil)
+	if err != nil {
+		t.Fatalf("seed Submit: %v", err)
+	}
+
+	body := deadLetterReplayRequest{EntryID: "no-such-entry", Reason: "spec-4.1-guard", RequestID: "req-missing"}
+	var buf bytes.Buffer
+	_ = json.NewEncoder(&buf).Encode(body)
+	req, _ := http.NewRequest(http.MethodPost, f.httpSrv.URL+"/v1/management/dead-letters/"+string(execID)+"/replay", &buf)
+	req.Header.Set("Authorization", "Bearer tok-a")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 (missing entry), body=%s", resp.StatusCode, raw)
+	}
+	// Decoded as a map, not the envelope struct: a struct with a bool field
+	// cannot distinguish success:false from an absent success key, and the
+	// point of this assertion is that the field is present and false.
+	var env map[string]any
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("body is not JSON: %v (%s)", err, raw)
+	}
+	if env["success"] != false {
+		t.Fatalf("success = %v, want false (§4.1: success tracks 2xx strictly), body=%s", env["success"], raw)
+	}
+	if env["data"] != nil {
+		t.Fatalf("data = %v, want null on a failure envelope, body=%s", env["data"], raw)
+	}
+	if env["code"] != "dead_letter_not_found" {
+		t.Fatalf("code = %v, want dead_letter_not_found, body=%s", env["code"], raw)
+	}
+}

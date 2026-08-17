@@ -318,14 +318,16 @@ func (m *managementModule) handleDeadLetterReplay(w http.ResponseWriter, r *http
 		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
-	status := http.StatusOK
 	if res.Outcome == engine.ReplayNotFound {
-		status = http.StatusNotFound
+		// §4.1 binds success to 2xx strictly, so a 404 must carry a failure
+		// envelope -- data:null, no outcome field. Nothing reads the outcome on
+		// this path: the CLI's do() returns on any non-2xx before decoding, and
+		// both HTTP tests discard the body. The outcome survives in the stable
+		// code so a client can still branch on it.
+		writeFail(w, r, http.StatusNotFound, "dead_letter_not_found", "dead-letter entry not found")
+		return
 	}
-	// The replay result is enveloped even on the 404 outcome path: a not-found
-	// replay still carries a structured outcome (not_found) the CLI surfaces, so
-	// it is a success-shape body at a failure status, not a failure envelope.
-	writeData(w, r, status, deadLetterReplayResponse{
+	writeData(w, r, http.StatusOK, deadLetterReplayResponse{
 		Outcome:      string(res.Outcome),
 		AuditID:      res.AuditID,
 		ExecutionID:  string(res.ExecutionID),
