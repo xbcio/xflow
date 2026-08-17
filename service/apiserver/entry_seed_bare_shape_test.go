@@ -177,3 +177,42 @@ func TestHandleSeedExecution_MissingFields_BareErrorShapeNotEnveloped(t *testing
 }
 
 var errBoomed = errors.New("boom from facade")
+
+// TestHandleSeedExecution_MalformedJSON_BareErrorShapeNotEnveloped pins that the
+// seed route decodes its body through a DEDICATED bare decoder, NOT the shared
+// decodeJSON helper. This is the trap the API-SPECIFICATION.md §0.1 hard
+// constraint warns about: decodeJSON was converted to writeFail (Part 2.2) to
+// give the user-face families trace_id + X-Request-Id echo on malformed JSON.
+// If the seed route shared that helper, its 400 body would carry
+// success/code/trace_id envelope keys — a §0.1 violation next to the seed's
+// other bare errorResponse bodies, and a shape change to a runner-protocol-face
+// endpoint that the spec says stays untouched and un-enveloped. (The
+// load-bearing 409 offset-safety discriminator only reads 409 bodies, so this
+// 400 shape is not itself offset-safety-critical — but the seed route must not
+// reach the shared envelope writer at all, which is the point.)
+func TestHandleSeedExecution_MalformedJSON_BareErrorShapeNotEnveloped(t *testing.T) {
+	f := &fakeControlFacade{}
+	mux := newControlMux(f)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/executions", bytes.NewBufferString("{not json"))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	got := bytes.TrimRight(rec.Body.Bytes(), "\n")
+	if string(got) != `{"error":"invalid JSON"}` {
+		t.Fatalf("400 body = %s, want exact {\"error\":\"invalid JSON\"} (entry-seed must NOT be enveloped)", got)
+	}
+	var decoded map[string]json.RawMessage
+	if err := json.Unmarshal(got, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, banned := range []string{"success", "code", "message", "data", "trace_id"} {
+		if _, present := decoded[banned]; present {
+			t.Errorf("envelope key %q is present in the seed 400 body — the seed must use a bare decoder, not the shared writeFail helper", banned)
+		}
+	}
+}

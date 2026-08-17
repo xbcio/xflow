@@ -69,7 +69,8 @@ func (m *workflowControlModule) RegisterHTTP(mux *http.ServeMux) {
 					m.log.Error("workflow_api_auth_denied",
 						"op", op, "remote_addr", r.RemoteAddr, "err", err)
 				}
-				writeError(w, http.StatusUnauthorized, "unauthorized")
+				// §7: the presented credential is never echoed; the message is generic.
+				writeFail(w, r, http.StatusUnauthorized, "unauthorized", "unauthorized")
 				return
 			}
 			h(w, r)
@@ -854,7 +855,7 @@ func (m *workflowControlModule) handleSeedExecution(w http.ResponseWriter, r *ht
 		return
 	}
 	var req protocol.SeedExecutionRequest
-	if !decodeJSON(w, r, &req) {
+	if !decodeSeedJSON(w, r, &req) {
 		return
 	}
 	if req.AdmissionKey == "" || req.WorkflowID == "" || req.EntryUnitID == "" || req.Outcome == "" {
@@ -1114,10 +1115,30 @@ func parseWaitTimeout(r *http.Request) time.Duration {
 	return d
 }
 
+// decodeSeedJSON decodes the request body for the entry-seed route
+// (POST /v1/executions). It is a DEDICATED bare decoder, deliberately NOT the
+// shared decodeJSON helper: entry-seed is a runner-protocol-face endpoint whose
+// response shape must stay un-enveloped (spec §0.1 + §8.2), and the shared
+// helper now writes the user-face envelope via writeFail. Routing the seed
+// through the shared helper would slip envelope keys (success/code/trace_id)
+// into the seed's 400 body — harmless to the 409 offset-safety discriminator
+// (which only reads 409 bodies) but a violation of §0.1 and an inconsistent
+// shape next to the seed's other bare errorResponse bodies
+// (stale_generation / workflow_unknown / internal server error). A malformed
+// seed body yields the same bare errorResponse shape as those, via writeJSON.
+func decodeSeedJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
+	defer func() { _ = r.Body.Close() }()
+	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid JSON"})
+		return false
+	}
+	return true
+}
+
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 	defer func() { _ = r.Body.Close() }()
 	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON")
+		writeFail(w, r, http.StatusBadRequest, "bad_request", "invalid JSON")
 		return false
 	}
 	return true
@@ -1127,7 +1148,7 @@ func requireMethod(w http.ResponseWriter, r *http.Request, method string) bool {
 	if r.Method == method {
 		return true
 	}
-	writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	writeFail(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 	return false
 }
 
@@ -1136,10 +1157,11 @@ func requireMethod(w http.ResponseWriter, r *http.Request, method string) bool {
 // error (Redis text, internal paths, backend details) must never reach a client.
 //
 // NOTE: this is the shim-based mapper (writeError → empty trace_id, no
-// X-Request-Id echo). It remains in use by the management family
-// (module_management.go) pending Task 5's envelope migration. The executions
-// family uses writeExecEngineFail below, which is the enveloped twin with
-// stable snake_case codes per spec §3.2.
+// X-Request-Id echo). It remains in use ONLY by the management dead-letter
+// subtree (module_management.go), which is explicitly out of scope for the
+// envelope migration (spec §9.1). The executions-family inspect path now uses
+// writeExecEngineFail, the enveloped twin with stable snake_case codes per
+// spec §3.2.
 func writeEngineError(w http.ResponseWriter, err error) {
 	if errors.Is(err, engine.ErrExecutionInactive) ||
 		errors.Is(err, engine.ErrExecutionNotFound) ||

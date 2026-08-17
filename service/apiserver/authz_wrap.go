@@ -36,7 +36,7 @@ func (h *authzHolder) authzWrap(op string, isMutation bool, fn http.HandlerFunc,
 		principal, err := h.principalAuth.Authenticate(r)
 		if err != nil {
 			h.auditDeny(r, principal, op, "", "", "", "unauthenticated")
-			writeError(w, http.StatusUnauthorized, "unauthorized")
+			writeFail(w, r, http.StatusUnauthorized, "unauthenticated", "unauthorized")
 			return
 		}
 		resource, wfID, execID, resNamespace := "", "", "", ""
@@ -53,7 +53,10 @@ func (h *authzHolder) authzWrap(op string, isMutation bool, fn http.HandlerFunc,
 				reason = "error"
 			}
 			h.auditDeny(r, principal, op, resource, wfID, execID, reason)
-			writeError(w, http.StatusForbidden, "forbidden")
+			// §7 / §3.5: the message is generic — a 403 must not explain which scope
+			// was missing (that maps out the permission model), and the presented
+			// credential is never echoed.
+			writeFail(w, r, http.StatusForbidden, "forbidden", "forbidden")
 			return
 		}
 		// Namespace boundary (Task 7.3/7.4): inject the verified principal's namespace
@@ -88,7 +91,9 @@ func (h *authzHolder) authzWrap(op string, isMutation bool, fn http.HandlerFunc,
 				Timestamp: time.Now().UTC(),
 			}); err != nil {
 				h.auditDeny(r, principal, op, resource, wfID, execID, "audit_unavailable")
-				writeError(w, http.StatusServiceUnavailable, "audit unavailable")
+				// §7: generic message — "audit unavailable" would surface an internal
+				// dependency; the caller only needs to know the service is unavailable.
+				writeFail(w, r, http.StatusServiceUnavailable, "service_unavailable", "service unavailable")
 				return
 			}
 		} else {
@@ -159,7 +164,7 @@ func (h *authzHolder) authzWrapResolved(fn http.HandlerFunc, resolver func(*http
 			// about which verbs exist; the authz audit sink records nothing for a
 			// non-existent operation (there is no principal yet for an unmounted
 			// route, and an unknown op would be denied anyway).
-			writeError(w, http.StatusNotFound, "route not found")
+			writeFail(w, r, http.StatusNotFound, "route_not_found", "route not found")
 			return
 		}
 		h.authzWrap(rt.operation, rt.isMutation, fn, func(*http.Request) (string, string, string, string) {
