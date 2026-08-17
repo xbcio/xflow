@@ -36,6 +36,8 @@ type fakeControlFacade struct {
 	canceledID types.ExecutionID
 	revokedSig string
 	invokedEnt string
+
+	seedErr error
 }
 
 func (f *fakeControlFacade) Submit(ctx context.Context, _ *graph.Graph, _ map[string]any, _ ...*types.Runtime) (types.ExecutionID, error) {
@@ -103,7 +105,7 @@ func (f *fakeControlFacade) ReclaimLease(context.Context, engine.ExpiredLease) (
 }
 
 func (f *fakeControlFacade) SeedExecutionFromEntry(context.Context, engine.SeedExecutionFromEntryRequest) (engine.SeedExecutionFromEntryResponse, error) {
-	return engine.SeedExecutionFromEntryResponse{}, nil
+	return engine.SeedExecutionFromEntryResponse{}, f.seedErr
 }
 
 // compile-time assertion that fakeControlFacade satisfies the widened facade.

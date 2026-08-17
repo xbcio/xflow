@@ -179,6 +179,15 @@ func resolveExecutionRoute(r *http.Request) (resolvedRoute, bool) {
 // auditDeny / auditReconcile / statusRecorder live in authz_wrap.go, shared
 // with managementModule via the embedded authzHolder.
 
+// errorResponse is the BARE (non-enveloped) failure shape used ONLY by the
+// runner-protocol-face endpoints that must not be enveloped — chiefly the
+// entry-seed route POST /v1/executions (see API-SPECIFICATION.md §0.1 + §8.2).
+// Its 409 stale_generation body {"error":"stale_generation"} is a load-bearing
+// contract: service/protocol/entry_seed_runtime.go distinguishes a genuine
+// admission conflict (body has state=="conflict") from a generation-fence
+// rejection (no state field) and commits or withholds a Kafka offset based on
+// that. Enveloping it would risk silent message loss during a generation
+// upgrade. User-facing handlers use writeFail/writeData, never this type.
 type errorResponse struct {
 	Error string `json:"error"`
 }
@@ -600,7 +609,7 @@ func (m *workflowControlModule) handleSeedExecution(w http.ResponseWriter, r *ht
 		return
 	}
 	if req.AdmissionKey == "" || req.WorkflowID == "" || req.EntryUnitID == "" || req.Outcome == "" {
-		writeError(w, http.StatusBadRequest, "admission_key, workflow_id, entry_unit_id and outcome are required")
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "admission_key, workflow_id, entry_unit_id and outcome are required"})
 		return
 	}
 
@@ -643,23 +652,27 @@ func (m *workflowControlModule) handleSeedExecution(w http.ResponseWriter, r *ht
 		// A stale activation generation for a not-yet-accepted admission key is a
 		// fencing rejection, not an internal fault — map it to 409 so the runner
 		// can distinguish "you lost the activation" from a transient server error.
+		// The body is the BARE errorResponse (not enveloped): entry-seed is a
+		// runner-protocol-face endpoint (spec §0.1) and its 409 body shape is a
+		// load-bearing offset-safety contract (spec §8.2). Enveloping it would
+		// risk silent message loss during a generation upgrade.
 		if errors.Is(err, control.ErrStaleGeneration) {
-			writeError(w, http.StatusConflict, "stale_generation")
+			writeJSON(w, http.StatusConflict, errorResponse{Error: "stale_generation"})
 			return
 		}
 		// The seed references a workflow/entry unit the control plane cannot
 		// resolve (not registered, version mismatch, or unknown entry unit). This
 		// is a fail-closed rejection, not an internal fault — map it to 404 so the
 		// runner can distinguish it from a transient server error. The generic
-		// reason string leaks no internal detail.
+		// reason string leaks no internal detail. Bare errorResponse per §0.1/§8.2.
 		if errors.Is(err, control.ErrEntrySeedWorkflowUnknown) {
-			writeError(w, http.StatusNotFound, "workflow_unknown")
+			writeJSON(w, http.StatusNotFound, errorResponse{Error: "workflow_unknown"})
 			return
 		}
 		if m.log != nil {
 			m.log.Error("seed_execution_failed", "err", err)
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "internal server error"})
 		return
 	}
 	if resp.State == engine.AdmissionStateConflict {
@@ -878,12 +891,22 @@ func writeEngineError(w http.ResponseWriter, err error) {
 	writeError(w, http.StatusInternalServerError, "internal server error")
 }
 
+// writeJSON writes a bare JSON body. Retained ONLY for the runner-face
+// endpoints that must not be enveloped (entry-seed — see
+// API-SPECIFICATION.md §0.1). User-facing handlers use writeData/writeFail.
 func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
 }
 
+// writeError is the transitional shim: it envelopes the failure and derives a
+// code from the status. Call sites migrate to writeFail with an explicit,
+// stable code as their route is converted.
+//
+// It takes no *http.Request, so responses from it carry an empty trace_id and
+// no echoed X-Request-Id. That is the tell for a call site that still needs
+// migrating.
 func writeError(w http.ResponseWriter, status int, message string) {
-	writeJSON(w, status, errorResponse{Error: message})
+	writeFail(w, nil, status, codeForStatus(status), message)
 }
