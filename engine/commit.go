@@ -59,6 +59,53 @@ func (e *Engine) CommitTaskResultWithOutcome(ctx context.Context, lease *TaskLea
 	return e.commitLegacyTaskResult(ctx, lease, g, result)
 }
 
+// CommitTaskTimeout terminates a leased task that ran past its execution
+// deadline, applying the node's OnError strategy exactly as a runner-reported
+// timeout would.
+//
+// It deliberately does NOT reuse CommitTaskFailure. That path exists to fail an
+// execution outright without consulting OnError, which is right for its one
+// caller (a workflow that declares suspend on a deployment that disables it is
+// a configuration error and must not be swallowed by on_error: continue). Using
+// it here would mean the same timeout produced a different workflow outcome
+// depending on whether the runner or the server noticed first.
+//
+// The cause must be Permanent (types.NewPermanentError) so the retry
+// short-circuit in tryRetryWithAttempt declines to re-run it. A timeout is a
+// verdict, not a transient failure.
+//
+// KNOWN ASYMMETRY: on a cyclic graph this falls back to an unconditional fatal
+// commit. commitAcyclicNodeError serves acyclic graphs only, and the cyclic
+// path has no ApplyOnError equivalent. Cyclic execution is experimental.
+func (e *Engine) CommitTaskTimeout(ctx context.Context, lease *TaskLease, cause error) error {
+	if lease == nil {
+		return ErrInvalidLeaseToken
+	}
+	if cause == nil {
+		cause = types.NewPermanentError("node.timeout", "node execution exceeded its deadline")
+	}
+	t := &lease.Task
+	g, active, err := e.loadActiveGraph(ctx, t.ExecutionID)
+	if err != nil {
+		return err
+	}
+	if !active {
+		return nil
+	}
+	if g.AllowCycles() {
+		return e.CommitTaskFailure(ctx, lease, cause)
+	}
+	meta := g.NodeAt(t.NodeIdx)
+	outcome, err := e.commitAcyclicNodeError(ctx, lease, meta, cause, nil, nil)
+	if err != nil {
+		return err
+	}
+	if outcome == CommitOutcomeStaleToken {
+		return ErrInvalidLeaseToken
+	}
+	return nil
+}
+
 // CommitTaskFailure forces a leased task to fail the whole execution without
 // applying the node's OnError strategy. Backend adapters use this for runtime
 // failures that make the execution mode itself incompatible with the task.

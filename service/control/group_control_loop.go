@@ -28,6 +28,15 @@ type nodeLeaseEngine interface {
 	RenewTaskLease(ctx context.Context, lease *engine.TaskLease, extend time.Duration) (bool, error)
 }
 
+// nodeTimeoutCommitter is the optional interface for engines that can commit a
+// node timeout from the server side. The concrete *engine.Engine implements it.
+// It is tested separately from nodeLeaseEngine because the backstop is a new
+// code path — forcing every existing fake to implement it would be churn with
+// no verification value.
+type nodeTimeoutCommitter interface {
+	CommitTaskTimeout(ctx context.Context, lease *engine.TaskLease, cause error) error
+}
+
 // isGroupTask returns true when the task type is a group execution type.
 func isGroupTask(t *engine.Task) bool {
 	return t != nil && t.Type == engine.TaskTypeGroupExec
@@ -227,6 +236,37 @@ func (c *Core) renewLease(ctx context.Context, req protocol.RenewLeaseRequest, i
 	}
 	if !found {
 		return protocol.RenewLeaseResponse{Renewed: false, Error: "lease not found"}, nil
+	}
+
+	// Refuse to renew past the execution deadline, and terminate the task on the
+	// spot. Both halves are required.
+	//
+	// Refusing alone is not enough: one TTL later the sweeper treats the lease
+	// as a crashed runner and puts the task back to pending (reclaimGroupLease),
+	// which is the retry a timeout must never get. A well-behaved runner never
+	// reaches this branch -- it reports its own terminal result -- but a runner
+	// that ignores the deadline is exactly the case this backstop exists for,
+	// and that is the case the sweeper would otherwise pick up.
+	//
+	// This does mean the server commits a node it is not executing. That was the
+	// path this design tried to avoid, but "no retry on timeout" forces it. The
+	// trade is that the failover recovery chain (ListExpiredLeases -> reclaim*)
+	// is untouched: the risk is confined to one new branch here rather than a
+	// fork in crash recovery.
+	//
+	// KNOWN LIMIT: gRPC runners never renew at all because
+	// service/runner/runner.go:110 gates renewal behind a leaseRenewClient type
+	// assertion the gRPC client does not satisfy. So this backstop is HTTP-only.
+	// That matches the project's stated direction (HTTP is the primary runner
+	// transport); fixing gRPC is out of scope.
+	if !resolved.ExecutionDeadline.IsZero() && !resolved.ExecutionDeadline.After(time.Now()) {
+		if committer, ok := c.engine.(nodeTimeoutCommitter); ok {
+			cause := types.NewPermanentError("node.timeout", "node execution exceeded its deadline")
+			if err := committer.CommitTaskTimeout(ctx, resolved, cause); err != nil {
+				return protocol.RenewLeaseResponse{}, normalizeRunnerError(err, c.logger, "renew_lease")
+			}
+		}
+		return protocol.RenewLeaseResponse{Renewed: false, Error: "execution deadline exceeded"}, nil
 	}
 
 	extend := time.Duration(req.Extend) * time.Millisecond
