@@ -379,7 +379,7 @@ func (c *apiDeadLetterClient) do(req *http.Request, out any) error {
 		TraceID string          `json:"trace_id"`
 	}
 	if err := json.Unmarshal(raw, &env); err != nil {
-		return fmt.Errorf("decode envelope from %s %s: %w (body=%s)", req.Method, redactURL(req.URL.String()), err, redactBody(raw))
+		return fmt.Errorf("decode envelope from %s %s: %w", req.Method, redactURL(req.URL.String()), err)
 	}
 	if !env.Success {
 		// A 2xx with success:false is a spec violation; surface the status code
@@ -390,7 +390,7 @@ func (c *apiDeadLetterClient) do(req *http.Request, out any) error {
 		return nil
 	}
 	if err := json.Unmarshal(env.Data, out); err != nil {
-		return fmt.Errorf("decode data from %s %s: %w (data=%s)", req.Method, redactURL(req.URL.String()), err, redactBody(raw))
+		return fmt.Errorf("decode data from %s %s: %w", req.Method, redactURL(req.URL.String()), err)
 	}
 	return nil
 }
@@ -400,20 +400,6 @@ func (c *apiDeadLetterClient) do(req *http.Request, out any) error {
 // list limit, and replay results are small. This is a defense against a
 // misbehaving server, not a functional limit.
 const maxManagementResponseBytes = 4 << 20
-
-// redactBody returns a truncated, sanitized preview of a response body for
-// error messages. It is length-bounded so a server that returned a large body
-// does not blow up the error string, and it is only used in decode-failure
-// messages (not on the success path). It never carries credentials — the
-// management API body never contains them, and the Authorization header lives
-// only in the request, never the response.
-func redactBody(raw []byte) string {
-	const max = 256
-	if len(raw) <= max {
-		return string(raw)
-	}
-	return string(raw[:max]) + "...(truncated)"
-}
 
 // httpStatusError carries the HTTP status of a non-2xx management API
 // response. It is the CLI's signal to map replay outcomes (404 → cross-namespace
