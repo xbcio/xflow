@@ -493,9 +493,13 @@ entry-seed 的 409 响应有**两种不同 body**，客户端据此决定是否�
   解信封再取 `data` 以保持对齐。§3.4 的裸流例外（supply GET、artifact
   GET/HEAD）只对**成功流**有效，失败分支仍返回 JSON 信封。`/healthz` 与
   `/readyz` 不信封化（§7）。`service/apiserver` 中的 `writeError`/
-  `writeEngineError` 过渡 shim 已删除
-- `writeJSON`/`writeError` 在 `service/apiserver` 与 `service/control` 各有一份实
-  现，必须合并为一份
+  `writeEngineError` 过渡 shim 已删除，apiserver 现仅留 `writeJSON`
+  （`module_control.go`，用于 entry-seed 的 §0 例外裸 body 与
+  `/healthz`、`/readyz`）；用户面成功/失败均走 `writeData`/`writeFail`。
+  `service/control/server.go` 仍各自实现 `writeJSON` 与 `writeError`
+  （runner 面，§0 第二列），是另一份 `writeJSON` 的所在；两份 `writeJSON`
+  （apiserver 与 control）签名一致但服务于不同面，合并为一份共享 helper
+  仍是后续待办
 - 前端 `web/packages/xflow-api/src/index.ts` 读 `body.message`，服务端发
   `body.error`——**当前前端拿到的每一条服务端错误消息都被丢弃**，一律降级为
   `statusText`。信封落地后自然修复（workflows 族已修复）
