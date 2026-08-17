@@ -108,11 +108,11 @@ async function readJson<T>(response: Response): Promise<T> {
  * from the envelope `code`/`message`/`trace_id` and the `X-Request-Id`
  * response header — never from the raw body.
  *
- * Exported so collection-style envelope unwrapping (e.g. `data.list`) can be
- * exercised directly while the server has no registered list endpoint
- * (spec §9.6).
+ * Internal: the transport signature is not part of this package's public API.
+ * Tests reach it through the client methods, which is the only way production
+ * code reaches it too.
  */
-export async function request<T>(fetcher: typeof fetch, url: string, init?: RequestInit): Promise<T> {
+async function request<T>(fetcher: typeof fetch, url: string, init?: RequestInit): Promise<T> {
   const response = await fetcher(url, init);
   const body = await readJson<Envelope<T>>(response);
   if (!response.ok) {
@@ -159,7 +159,11 @@ export function createXFlowApiClient(options: XFlowApiClientOptions): XFlowApiCl
     },
     saveWorkflow(workflow) {
       if (!workflow.id) {
-        throw new XFlowApiError(400, "workflow id is required before saving");
+        // A plain Error, not XFlowApiError: no request was ever sent, so there
+        // is no HTTP status to report. Fabricating status:400 would make a
+        // caller branching on `e.status` believe the server rejected this —
+        // the same field-as-costume defect the listWorkflows gap avoids.
+        return Promise.reject(new Error("workflow id is required before saving"));
       }
       return request<RegisterWorkflowWire>(
         fetcher,

@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   createXFlowApiClient,
-  request,
   XFlowApiError,
   type RegisterWorkflowResult,
   type ExecuteWorkflowResult
@@ -62,6 +61,12 @@ describe("createXFlowApiClient", () => {
     expect(error?.requestId).toBeUndefined();
   });
 
+  // Spec §3.3: a collection's data is object-wrapped as {list, total}. No list
+  // endpoint is registered server-side yet (§9.6), so this rides on getWorkflow
+  // — the transport is shared, and what is under test is that the envelope's
+  // `data` is returned whole rather than the envelope itself. Going through a
+  // client method keeps the transport un-exported: a test-only export would be
+  // public API that no production caller uses.
   it("unwraps data.list for collections", async () => {
     const fetcher = vi.fn().mockResolvedValue(
       new Response(
@@ -75,11 +80,12 @@ describe("createXFlowApiClient", () => {
         { status: 200, headers: { "content-type": "application/json" } }
       )
     );
+    const client = createXFlowApiClient({ baseUrl: "/v1", fetcher });
 
-    const payload = await request<{ list: Array<{ id: string; name: string }>; total: number }>(
-      fetcher,
-      "/v1/workflows"
-    );
+    const payload = (await client.getWorkflow("wf-1")) as unknown as {
+      list: Array<{ id: string; name: string }>;
+      total: number;
+    };
 
     expect(payload).toEqual({ list: [{ id: "wf-1", name: "Payment flow" }], total: 1 });
     expect(payload.list).toHaveLength(1);
@@ -178,6 +184,26 @@ describe("createXFlowApiClient", () => {
       }
     ]);
     expect(result).toEqual({ workflowId: "wf-1" } satisfies RegisterWorkflowResult);
+  });
+
+  // The missing-id guard fires before any request is sent, so it must NOT be an
+  // XFlowApiError: that type's `status` would claim the server answered 400
+  // when nothing was ever asked. Asserting the negative (not an XFlowApiError)
+  // is the point — asserting only the message would pass under either type.
+  it("rejects a save without an id without inventing an HTTP status", async () => {
+    const fetcher = vi.fn();
+    const client = createXFlowApiClient({ baseUrl: "/api", fetcher });
+
+    const error = await client.saveWorkflow({ name: "No id", nodes: [] }).then(
+      () => undefined,
+      (err: unknown) => err
+    );
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(XFlowApiError);
+    expect((error as Error).message).toContain("workflow id is required");
+    // Nothing was sent: no status exists to report.
+    expect(fetcher).not.toHaveBeenCalled();
   });
 
   it("runs workflow definitions through the configured base URL", async () => {
