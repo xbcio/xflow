@@ -91,7 +91,7 @@ func (m *supplyModule) handleSupply(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		m.handleGet(w, r, ns, name)
 	default:
-		writeError(w, http.StatusNotFound, "route not found")
+		writeFail(w, r, http.StatusNotFound, "route_not_found", "route not found")
 	}
 }
 
@@ -100,11 +100,11 @@ func (m *supplyModule) handlePut(w http.ResponseWriter, r *http.Request, ns, nam
 	// buffering an unbounded request.
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxSupplyContentBytes+1))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "cannot read request body")
+		writeFail(w, r, http.StatusBadRequest, "bad_request", "cannot read request body")
 		return
 	}
 	if len(body) > maxSupplyContentBytes {
-		writeError(w, http.StatusRequestEntityTooLarge, "supply content exceeds limit")
+		writeFail(w, r, http.StatusRequestEntityTooLarge, "payload_too_large", "supply content exceeds limit")
 		return
 	}
 
@@ -112,7 +112,7 @@ func (m *supplyModule) handlePut(w http.ResponseWriter, r *http.Request, ns, nam
 	if raw := r.Header.Get("If-Match"); raw != "" {
 		rev, perr := strconv.ParseUint(strings.Trim(raw, `"`), 10, 64)
 		if perr != nil {
-			writeError(w, http.StatusBadRequest, "malformed If-Match")
+			writeFail(w, r, http.StatusBadRequest, "bad_request", "malformed If-Match")
 			return
 		}
 		ifMatch = &rev
@@ -126,12 +126,14 @@ func (m *supplyModule) handlePut(w http.ResponseWriter, r *http.Request, ns, nam
 		UpdatedBy:   supplyPrincipalSubject(r),
 	}, ifMatch)
 	if errors.Is(err, store.ErrRevisionConflict) {
-		writeError(w, http.StatusConflict, "revision_conflict")
+		// §3.2: the stable snake_case code is load-bearing for optimistic-
+		// concurrency clients; keep the literal. The message is generic.
+		writeFail(w, r, http.StatusConflict, "revision_conflict", "revision_conflict")
 		return
 	}
 	if err != nil {
 		// Never surface the driver error: it can carry SQL and server paths.
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
 	// Hand the resulting revision back to the outcome audit row so the audit log
@@ -139,7 +141,7 @@ func (m *supplyModule) handlePut(w http.ResponseWriter, r *http.Request, ns, nam
 	// is never audited.
 	noteAuditRevision(r, rec.Revision)
 	w.Header().Set("ETag", rec.ContentHash)
-	writeJSON(w, http.StatusOK, map[string]any{
+	writeData(w, r, http.StatusOK, map[string]any{
 		"revision":     rec.Revision,
 		"content_hash": rec.ContentHash,
 	})
@@ -150,11 +152,11 @@ func (m *supplyModule) handleGet(w http.ResponseWriter, r *http.Request, ns, nam
 	if errors.Is(err, store.ErrNotFound) {
 		// 404 for a name owned by another namespace too: the read is
 		// namespace-scoped, so existence in another tenant never leaks.
-		writeError(w, http.StatusNotFound, "supply not found")
+		writeFail(w, r, http.StatusNotFound, "supply_not_found", "supply not found")
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
 	w.Header().Set("ETag", rec.ContentHash)
@@ -168,7 +170,7 @@ func (m *supplyModule) handleGet(w http.ResponseWriter, r *http.Request, ns, nam
 	if m.encryptor != nil && r.Header.Get("Accept") == AcceptEncrypted {
 		ciphertext, encErr := m.encryptor.Encrypt(rec.Content)
 		if encErr != nil {
-			writeError(w, http.StatusInternalServerError, "internal server error")
+			writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 			return
 		}
 		w.Header().Set("Content-Type", AcceptEncrypted)
