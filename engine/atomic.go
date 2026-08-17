@@ -24,16 +24,16 @@ var ErrSystemTaskHandled = errors.New("system task handled")
 // the same task again when enqueue succeeds but acknowledgment is lost, or when
 // a deliverer dies while holding the entry's delivery lease.
 type OutboxEntry struct {
-	ID          string
-	Task        Task
-	AvailableAt time.Time
-	CreatedAt   time.Time
-	Attempts    int
+	ID          string    `json:"id"`
+	Task        Task      `json:"task"`
+	AvailableAt time.Time `json:"available_at"`
+	CreatedAt   time.Time `json:"created_at"`
+	Attempts    int       `json:"attempts"`
 	// LeasedFromScoreMs carries the entry's availability time as it stood when
 	// LeaseOutbox leased it, so ReleaseOutbox can restore it exactly. It is set
 	// by the store on the way out and is meaningless on an entry the caller
 	// constructs.
-	LeasedFromScoreMs int64
+	LeasedFromScoreMs int64 `json:"leased_from_score_ms,omitempty"`
 	// LeaseDeadlineMs is when the lease this caller holds expires, and doubles
 	// as the fencing token that identifies the holder.
 	//
@@ -47,7 +47,7 @@ type OutboxEntry struct {
 	// responding and then comes back.
 	//
 	// Set by the store on the way out of LeaseOutbox and RenewOutbox.
-	LeaseDeadlineMs int64
+	LeaseDeadlineMs int64 `json:"lease_deadline_ms,omitempty"`
 }
 
 // CommitNodeRequest describes one fenced terminal node transition. A normal
