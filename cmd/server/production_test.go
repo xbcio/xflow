@@ -5,7 +5,14 @@ import (
 	"testing"
 
 	"github.com/xbcio/xflow/service/apiserver"
+	"github.com/xbcio/xflow/service/control"
 )
+
+// realReconciler is the same worker type the SDK hands back, so "present" in
+// these tests means the thing production actually gets.
+func realReconciler() reconciler {
+	return reconcilerOrNil(control.NewAuditReconcileWorker(nil, nil, control.AuditReconcileConfig{}))
+}
 
 // TestValidateProductionRequiresEachComponent proves Task 8 blocker 3:
 // production mode fails closed when any one of PrincipalAuthenticator,
@@ -22,7 +29,7 @@ func TestValidateProductionRequiresEachComponent(t *testing.T) {
 		authorizer:    apiserver.NamespaceAwareAuthorizer{},
 		auditSink:     durableAudit,
 		durableAudit:  true,
-		reconciler:    noopReconciler{},
+		reconciler:    realReconciler(),
 		masterKey:     true,
 	}
 	if err := validateProduction("production", base); err != nil {
@@ -81,7 +88,7 @@ func TestValidateProductionRejectsSingleToken(t *testing.T) {
 		authorizer:    apiserver.NamespaceAwareAuthorizer{},
 		auditSink:     apiserver.NewSQLAuditSink(nil),
 		durableAudit:  true,
-		reconciler:    noopReconciler{},
+		reconciler:    realReconciler(),
 		singleToken:   true,
 	}
 	if err := validateProduction("production", deps); err == nil {

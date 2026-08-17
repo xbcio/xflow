@@ -5,18 +5,19 @@ import (
 	"testing"
 
 	"github.com/xbcio/xflow/service/apiserver"
+	"github.com/xbcio/xflow/service/control"
 )
 
 // baseProductionDeps mirrors the all-present baseline in production_test.go.
-// Real types, not fakes: that file uses apiserver.NewBearerPrincipalAuth and
-// noopReconciler directly, and reusing them keeps the two tests from drifting.
+// Real types, not fakes: the reconciler is the same worker type the SDK builds,
+// so the "present" case here is the one production actually gets.
 func baseProductionDeps() productionDeps {
 	return productionDeps{
 		principalAuth: apiserver.NewBearerPrincipalAuth("tok", "op", []string{"workflow"}),
 		authorizer:    apiserver.NamespaceAwareAuthorizer{},
 		auditSink:     apiserver.NewSQLAuditSink(nil),
 		durableAudit:  true,
-		reconciler:    noopReconciler{},
+		reconciler:    reconcilerOrNil(control.NewAuditReconcileWorker(nil, nil, control.AuditReconcileConfig{})),
 		masterKey:     true,
 	}
 }

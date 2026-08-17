@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"google.golang.org/grpc"
@@ -27,6 +28,7 @@ import (
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/observability/metrics"
+	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/service/apiserver"
 	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/store"
@@ -52,18 +54,28 @@ type ServerConfig struct {
 }
 
 type serverConfig struct {
-	auth          control.Authenticator
-	logger        engine.Logger
-	metrics       *metrics.Metrics
-	httpAddr      string
-	grpcAddr      string
-	metricsAddr   string
-	metricsPath   string
-	tls           *apiserver.TLSConfig
-	artifacts     *store.ArtifactStore
-	principalAuth apiserver.PrincipalAuthenticator
-	authorizer    apiserver.Authorizer
-	auditSink     apiserver.AuditSink
+	auth                control.Authenticator
+	logger              engine.Logger
+	metrics             *metrics.Metrics
+	httpAddr            string
+	grpcAddr            string
+	metricsAddr         string
+	metricsPath         string
+	tls                 *apiserver.TLSConfig
+	artifacts           *store.ArtifactStore
+	principalAuth       apiserver.PrincipalAuthenticator
+	authorizer          apiserver.Authorizer
+	auditSink           apiserver.AuditSink
+	workflowAuth        apiserver.WorkflowAuthenticator
+	requireWorkflowAuth bool
+
+	tracer                   tracing.Tracer
+	concurrency              int
+	enableRunnerMetricsProxy bool
+	runnerMetricsInterval    time.Duration
+	enableManagement         bool
+	supplyKeyRotation        time.Duration
+	middleware               []func(http.Handler) http.Handler
 }
 
 // ServerOption configures a Server.
@@ -159,6 +171,100 @@ func WithServerPrincipalAuth(auth apiserver.PrincipalAuthenticator, authz apiser
 	}
 }
 
+// WithServerWorkflowAuth guards the workflow/control API (/v1/workflows,
+// /v1/executions/*) behind a bearer authenticator. Without it those routes
+// accept every caller, and that API registers definitions and seeds
+// executions — an unauthenticated remote code-execution surface, since a
+// submitted workflow runs on every connected runner.
+//
+// require makes a nil authenticator a construction error rather than an open
+// API. Pass it whenever the token is sourced from configuration: an env var
+// that resolves to empty otherwise yields a silently open server from a config
+// that reads as authenticated.
+//
+// WithServerPrincipalAuth supersedes this for callers that want per-operation
+// authorization with audit; this is the bearer-only path, and the one to use
+// when the host program already authenticates its callers upstream.
+func WithServerWorkflowAuth(auth apiserver.WorkflowAuthenticator, require bool) ServerOption {
+	return func(c *serverConfig) {
+		c.workflowAuth = auth
+		c.requireWorkflowAuth = require
+	}
+}
+
+// WithServerTracer installs the OTel tracer used for HTTP middleware and
+// distributed trace propagation into dispatched tasks. Without one the
+// embedded server is a gap in the trace: the caller's span ends at the request
+// and the runner's begins with no parent.
+//
+// The tracer provider's lifecycle stays with the host program — it owns a
+// process-global exporter and a shutdown that must outlive the server's
+// context, which is why this takes a tracer rather than provider config.
+func WithServerTracer(t tracing.Tracer) ServerOption {
+	return func(c *serverConfig) { c.tracer = t }
+}
+
+// WithServerConcurrency bounds how many tasks the backend dispatches at once.
+// Zero (the default) leaves the backend's own default in place.
+func WithServerConcurrency(n int) ServerOption {
+	return func(c *serverConfig) { c.concurrency = n }
+}
+
+// WithServerRunnerMetricsProxy accepts metrics pushed by runners and merges
+// them into this server's /metrics.
+//
+// This is for runners that cannot be scraped — a runner in another network
+// domain, which is also the runner least likely to be listening on a metrics
+// port. Without it their metrics are simply absent rather than reported as
+// missing. Only the HTTP transport can report; a gRPC runner ignores it.
+//
+// The reporting cadence is a separate option: see
+// WithServerRunnerMetricsInterval.
+func WithServerRunnerMetricsProxy() ServerOption {
+	return func(c *serverConfig) {
+		c.enableRunnerMetricsProxy = true
+	}
+}
+
+// WithServerRunnerMetricsInterval pushes a reporting cadence to runners on
+// every heartbeat response. Zero leaves each runner on its own default;
+// negative suspends reporting fleet-wide without restarting anything.
+//
+// Independent of WithServerRunnerMetricsProxy, because the control plane
+// annotates heartbeat responses whether or not the inbox is enabled — the
+// suspend case is precisely the one an operator reaches for when the proxy is
+// off, and binding the two would make it unreachable.
+func WithServerRunnerMetricsInterval(d time.Duration) ServerOption {
+	return func(c *serverConfig) { c.runnerMetricsInterval = d }
+}
+
+// WithServerManagement registers the read-only ops API (/v1/management/*:
+// leader identity, runner status, execution lookup). Opt-in, because it is an
+// operator surface rather than part of the workflow API.
+func WithServerManagement() ServerOption {
+	return func(c *serverConfig) { c.enableManagement = true }
+}
+
+// WithServerSupplyKeyRotation sets how often the supply transport key rotates.
+// Zero (the default) adopts the apiserver's own default; negative disables
+// rotation.
+func WithServerSupplyKeyRotation(d time.Duration) ServerOption {
+	return func(c *serverConfig) { c.supplyKeyRotation = d }
+}
+
+// WithServerHTTPMiddleware wraps the server's HTTP handler, outermost first.
+//
+// The management API is the case that needs it: /v1/management/* is registered
+// by its own module and does not consult the workflow authenticator, so
+// enabling management without wrapping it in
+// apiserver.ManagementAuthMiddleware exposes leader identity, runner status and
+// execution lookup to every caller that can reach the port. Liveness probes
+// (/healthz, /readyz) stay open — the middleware only guards the management
+// paths.
+func WithServerHTTPMiddleware(mw ...func(http.Handler) http.Handler) ServerOption {
+	return func(c *serverConfig) { c.middleware = append(c.middleware, mw...) }
+}
+
 // Server is the embeddable xflow control-plane server: it accepts workflow
 // submissions and dispatches node execution to remote runners over the
 // Runner Protocol. It does not execute node handlers itself.
@@ -167,9 +273,13 @@ func WithServerPrincipalAuth(auth apiserver.PrincipalAuthenticator, authz apiser
 // serve it directly via Run. Call Start before serving traffic and Shutdown
 // when the host program is stopping.
 type Server struct {
-	api       *apiserver.APIServer
-	supplies  store.Supplies
-	artifacts *store.ArtifactStore
+	api        *apiserver.APIServer
+	supplies   store.Supplies
+	artifacts  *store.ArtifactStore
+	reconciler *control.AuditReconcileWorker
+	// reconcileOnce keeps the worker to a single goroutine when a caller uses
+	// both Start and Run, or calls either twice.
+	reconcileOnce sync.Once
 }
 
 // NewServer creates an embeddable control-plane server. RedisAddr empty means
@@ -191,43 +301,152 @@ func NewServer(cfg ServerConfig, opts ...ServerOption) (*Server, error) {
 		o(sc)
 	}
 
+	apiCfg := buildServerAPIConfig(cfg, sc)
+	// The management module is registered through an apiserver Option rather
+	// than a Config field, so it is forwarded here instead of in
+	// buildServerAPIConfig.
+	var apiOpts []apiserver.Option
+	if sc.enableManagement {
+		apiOpts = append(apiOpts, apiserver.WithManagement())
+	}
+	if len(sc.middleware) > 0 {
+		apiOpts = append(apiOpts, apiserver.WithHTTPMiddleware(sc.middleware...))
+	}
+	api, err := apiserver.New(apiCfg, apiOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return &Server{
+		api:        api,
+		supplies:   apiCfg.Supplies,
+		artifacts:  sc.artifacts,
+		reconciler: newAuditReconciler(cfg.Store, api, sc),
+	}, nil
+}
+
+// newAuditReconciler builds the crash-safe audit reconcile worker, or returns
+// nil when there is nothing to reconcile against.
+//
+// The worker settles admissions that were audited before execution and then
+// lost their outcome row to a process exit — a crash between a successful
+// mutation and its outcome append. It never re-executes anything: it probes
+// authoritative state (the control-plane backend's StateStore) and appends the
+// outcome that state implies, idempotently.
+//
+// It is built here rather than left to the caller because its three
+// dependencies are all internal to the server: the store's reconcile
+// capability, the backend's StateStore, and the leader gate. A caller who
+// passed a durable audit sink and no reconciler got pending rows that nothing
+// would ever settle, which is visible only by querying the audit table.
+//
+// nil is returned when the store is absent or does not implement the reconcile
+// scans — in both cases there are no durable admissions to settle, so a worker
+// would scan nothing. Callers that require one (production) should check.
+func newAuditReconciler(st store.Store, api *apiserver.APIServer, sc *serverConfig) *control.AuditReconcileWorker {
+	if st == nil {
+		return nil
+	}
+	ar, ok := st.(store.AuditReconciler)
+	if !ok {
+		return nil
+	}
+	cfg := control.AuditReconcileConfig{
+		Logger: sc.logger,
+		// Leader-gated so only one replica scans. Idempotent appends make a
+		// leader switch safe; the gate is about not doing the work N times.
+		Elector: leaderGate(api.IsLeader),
+	}
+	if sc.metrics != nil {
+		cfg.Observer = metrics.NewReconcileMetrics(sc.metrics)
+	}
+	return control.NewAuditReconcileWorker(ar, control.NewExecutionAuthority(api.Backend().State()), cfg)
+}
+
+// leaderGate adapts APIServer.IsLeader to control.LeaderGate without requiring
+// the apiserver to implement the full elector surface.
+type leaderGate func() bool
+
+func (g leaderGate) IsLeader() bool {
+	if g == nil {
+		return false
+	}
+	return g()
+}
+
+// buildServerAPIConfig translates the SDK's config plus options into the
+// apiserver config. It is separate from NewServer so the resulting posture can
+// be asserted directly: several of its fields have no observable effect until a
+// runner fetches a supply or an unauthenticated caller reaches a route, and a
+// test that has to stand up both halves to notice a downgrade is a test that
+// will not be written for the next field.
+func buildServerAPIConfig(cfg ServerConfig, sc *serverConfig) apiserver.Config {
 	// Resolve the supply store: cfg.Store satisfies store.Supplies when non-nil.
 	var supplies store.Supplies
 	if cfg.Store != nil {
 		supplies = cfg.Store
 	}
 
-	apiCfg := apiserver.Config{
-		RedisAddr:     cfg.RedisAddr,
-		RedisConfig:   cfg.RedisConfig,
-		Store:         cfg.Store,
-		Supplies:      supplies,
-		Artifacts:     sc.artifacts,
-		Auth:          sc.auth,
-		PrincipalAuth: sc.principalAuth,
-		Authorizer:    sc.authorizer,
-		AuditSink:     sc.auditSink,
-		Logger:        sc.logger,
-		Metrics:       sc.metrics,
-		HTTPAddr:      sc.httpAddr,
-		GRPCAddr:      sc.grpcAddr,
-		MetricsAddr:   sc.metricsAddr,
-		MetricsPath:   sc.metricsPath,
-		TLS:           sc.tls,
+	return apiserver.Config{
+		RedisAddr:           cfg.RedisAddr,
+		RedisConfig:         cfg.RedisConfig,
+		Store:               cfg.Store,
+		Supplies:            supplies,
+		Artifacts:           sc.artifacts,
+		Auth:                sc.auth,
+		WorkflowAuth:        sc.workflowAuth,
+		RequireWorkflowAuth: sc.requireWorkflowAuth,
+		PrincipalAuth:       sc.principalAuth,
+		Authorizer:          sc.authorizer,
+		AuditSink:           sc.auditSink,
+		Logger:              sc.logger,
+		Metrics:             sc.metrics,
+		HTTPAddr:            sc.httpAddr,
+		GRPCAddr:            sc.grpcAddr,
+		MetricsAddr:         sc.metricsAddr,
+		MetricsPath:         sc.metricsPath,
+		TLS:                 sc.tls,
+		Tracer:              sc.tracer,
+		Concurrency:         sc.concurrency,
+
+		EnableRunnerMetricsProxy: sc.enableRunnerMetricsProxy,
+		RunnerMetricsInterval:    sc.runnerMetricsInterval,
+		// Unconditional, and deliberately not an option. This encrypts supply
+		// content on the server→runner hop, which is the hop that crosses a
+		// network boundary and the content that carries credentials. It is
+		// independent of at-rest encryption: at-rest needs a master key, this
+		// does not, so there is no configuration a caller could be missing that
+		// would justify leaving it off — only the chance of forgetting to turn
+		// it on. cmd/server sets it the same way for the same reason.
+		EnableSupplyEncryption:  true,
+		SupplyKeyRotationPeriod: sc.supplyKeyRotation,
 	}
-	api, err := apiserver.New(apiCfg)
-	if err != nil {
-		return nil, err
-	}
-	return &Server{api: api, supplies: supplies, artifacts: sc.artifacts}, nil
 }
+
+// Reconciler returns the crash-safe audit reconcile worker, or nil when no
+// durable audit store is configured (nothing to reconcile against).
+//
+// Start already runs it in the background, so a caller needs this only to
+// assert its presence — production must not run with a durable audit sink and
+// no reconciler — or to drive a sweep explicitly via ReconcileOnce.
+func (s *Server) Reconciler() *control.AuditReconcileWorker { return s.reconciler }
 
 // Handler returns the HTTP Runner Protocol + workflow submission/query API.
 func (s *Server) Handler() http.Handler { return s.api.Handler() }
 
 // Start begins dispatching queued tasks to runners and starts background
-// maintenance (lease sweeping, leader election). Does not block.
-func (s *Server) Start(ctx context.Context) error { return s.api.Start(ctx) }
+// maintenance (lease sweeping, leader election, audit reconciliation). Does not
+// block.
+//
+// The audit reconcile worker runs here rather than being left to the caller: a
+// worker that is constructed and never driven settles nothing while reading as
+// wired from every angle a caller can check. It stops when ctx is cancelled.
+func (s *Server) Start(ctx context.Context) error {
+	if err := s.api.Start(ctx); err != nil {
+		return err
+	}
+	s.startReconciler(ctx)
+	return nil
+}
 
 // Shutdown stops background maintenance and releases backend resources.
 func (s *Server) Shutdown(ctx context.Context) error { return s.api.Shutdown(ctx) }
@@ -248,7 +467,26 @@ func (s *Server) RegisterGRPC(g *grpc.Server) { s.api.RegisterGRPC(g) }
 // fails. On exit it drains in-flight requests and tears down the control
 // plane. This is the self-hosting mode for callers that do not want to wire
 // Handler() into their own http.Server.
-func (s *Server) Run(ctx context.Context) error { return s.api.Run(ctx) }
+func (s *Server) Run(ctx context.Context) error {
+	// apiserver.Run calls the apiserver's own Start, not this type's, so the
+	// reconciler is started here too. Both entry points must drive it: the
+	// self-hosting caller is the one that most resembles cmd/server, and it
+	// would otherwise accumulate the same silent audit backlog.
+	s.startReconciler(ctx)
+	return s.api.Run(ctx)
+}
+
+// startReconciler runs the audit reconcile worker in the background, at most
+// once per Server. Both Start and Run call it because neither is a superset of
+// the other; Run reaches the apiserver's Start directly.
+func (s *Server) startReconciler(ctx context.Context) {
+	if s.reconciler == nil {
+		return
+	}
+	s.reconcileOnce.Do(func() {
+		go func() { _ = s.reconciler.Run(ctx) }()
+	})
+}
 
 // AddWorkflow registers a workflow built with Workflow(...) on this server, the
 // in-process equivalent of POST /v1/workflows/register. It returns the

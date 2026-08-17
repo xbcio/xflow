@@ -37,6 +37,7 @@ import (
 	obslogger "github.com/xbcio/xflow/observability/logger"
 	"github.com/xbcio/xflow/observability/metrics"
 	"github.com/xbcio/xflow/observability/tracing"
+	xflowsdk "github.com/xbcio/xflow/sdk/xflow"
 	"github.com/xbcio/xflow/service/apiserver"
 	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/service/crypto/masterkey"
@@ -460,74 +461,75 @@ func runServer(cfg serverConfig) error {
 		log.Printf("xflow-server: using distributed backend (redis=%s)", cfg.redis)
 	}
 
-	apiCfg := apiserver.Config{
-		RedisAddr:   redisAddr, // legacy single-node path
-		RedisConfig: redisConfig,
-		Store:       sqlStore,
-		// Supplies backs both the /v1/supplies HTTP endpoints (gated separately
-		// on PrincipalAuth) and the heartbeat hint/observed channel wired into
-		// control.Config.Supplies. sqlStore already satisfies store.Supplies
-		// (store.Store embeds it); nil in the in-memory dev mode (--mysql-dsn
-		// unset), which correctly leaves both features off.
-		Supplies:            sqlStore,
-		Artifacts:           artifactStore,
-		Concurrency:         cfg.concurrency,
-		Auth:                auth,
-		Logger:              logger,
-		Metrics:             m,
-		Tracer:              tracer,
-		WorkflowAuth:        workflowAuth,
-		RequireWorkflowAuth: cfg.requireAPIAuth,
-		PrincipalAuth:       principalAuth,
-		Authorizer:          apiserver.NamespaceAwareAuthorizer{},
-		AuditSink:           audit,
-		HTTPAddr:            cfg.addr,
-		GRPCAddr:            cfg.grpcAddr,
-		MetricsAddr:         cfg.metricsAddr,
-		MetricsPath:         cfg.metricsPath,
-		// EnableSupplyEncryption is independent of at-rest encryption
-		// (supplyAtRest): it protects the wire between server and runner, which
-		// does not need a KEK to be present.
-		EnableSupplyEncryption:   true,
-		SupplyKeyRotationPeriod:  cfg.supplyKeyRotation,
-		EnableRunnerMetricsProxy: cfg.enableRunnerMetricsProxy,
-		RunnerMetricsInterval:    cfg.runnerMetricsInterval,
+	// The assembly lives in sdk/xflow, not here. Every option below is a
+	// translation of a flag; the wiring those options drive — supply wire
+	// encryption, the audit reconcile worker and its leader gate, the module
+	// set — is the SDK's, so an embedded host and this binary cannot end up
+	// with different postures. Before this, they did: an SDK server had no
+	// workflow-API authenticator at all, left supply content unencrypted on the
+	// runner hop, and built no reconciler.
+	//
+	// Options are passed unconditionally wherever the zero value already means
+	// "off" — a nil metrics registry, an empty artifact store, an unset address.
+	// The conditionals below are only the ones a flag genuinely gates. Wrapping
+	// the rest in nil checks would reintroduce, one `if` at a time, the same
+	// per-field transcription this refactor removes.
+	serverOpts := []xflowsdk.ServerOption{
+		xflowsdk.WithServerAuth(auth),
+		xflowsdk.WithServerLogger(logger),
+		xflowsdk.WithServerMetrics(m),
+		xflowsdk.WithServerMetricsAddr(cfg.metricsAddr, cfg.metricsPath),
+		xflowsdk.WithServerTracer(tracer),
+		xflowsdk.WithServerConcurrency(cfg.concurrency),
+		xflowsdk.WithServerWorkflowAuth(workflowAuth, cfg.requireAPIAuth),
+		xflowsdk.WithServerPrincipalAuth(principalAuth, apiserver.NamespaceAwareAuthorizer{}, audit),
+		xflowsdk.WithServerArtifacts(artifactStore),
+		xflowsdk.WithServerHTTPAddr(cfg.addr),
+		xflowsdk.WithServerGRPCAddr(cfg.grpcAddr),
+		xflowsdk.WithServerTLS(cfg.tlsCert, cfg.tlsKey, cfg.tlsClientCA),
+		xflowsdk.WithServerSupplyKeyRotation(cfg.supplyKeyRotation),
+		// The two runner-metrics flags are deliberately unbound:
+		// --enable-runner-metrics-proxy opens the inbox, --runner-metrics-interval
+		// annotates every heartbeat response. A negative interval suspends
+		// reporting fleet-wide, which is exactly the case an operator reaches
+		// for while the inbox is off.
+		xflowsdk.WithServerRunnerMetricsInterval(cfg.runnerMetricsInterval),
 	}
-	if cfg.tlsCert != "" || cfg.tlsKey != "" || cfg.tlsClientCA != "" {
-		apiCfg.TLS = &apiserver.TLSConfig{Cert: cfg.tlsCert, Key: cfg.tlsKey, ClientCA: cfg.tlsClientCA}
+	if cfg.enableRunnerMetricsProxy {
+		serverOpts = append(serverOpts, xflowsdk.WithServerRunnerMetricsProxy())
 	}
-
-	var apiOpts []apiserver.Option
 	if cfg.management {
-		apiOpts = append(apiOpts, apiserver.WithManagement())
+		serverOpts = append(serverOpts, xflowsdk.WithServerManagement())
 		// Gate /v1/management/* with the workflow API authenticator when
 		// configured; /healthz and /readyz stay open for probes. When no
 		// token is set the management surface is open (dev / behind an
 		// external gateway) — log a warning so production mis-config is loud.
 		if workflowAuth != nil {
-			apiOpts = append(apiOpts, apiserver.WithHTTPMiddleware(apiserver.ManagementAuthMiddleware(workflowAuth)))
+			serverOpts = append(serverOpts,
+				xflowsdk.WithServerHTTPMiddleware(apiserver.ManagementAuthMiddleware(workflowAuth)))
 			log.Println("xflow-server: management module enabled; /v1/management/* gated by --api-auth-token")
 		} else {
 			log.Println("xflow-server: WARNING management module enabled without --api-auth-token; /v1/management/* is open (dev only)")
 		}
 	}
 
-	srv, err := apiserver.New(apiCfg, apiOpts...)
+	srv, err := xflowsdk.NewServer(xflowsdk.ServerConfig{
+		RedisAddr:   redisAddr, // legacy single-node path
+		RedisConfig: redisConfig,
+		Store:       sqlStore,
+	}, serverOpts...)
 	if err != nil {
 		return err
 	}
 
-	// Reconciler (T9): the crash-safe audit reconcile worker. It scans
-	// admitted mutations that never received a post-handler outcome (e.g. a
-	// crash between a successful mutation and its outcome audit append),
-	// consults authoritative state (the control-plane backend's StateStore)
-	// WITHOUT re-executing the mutation, and appends the missing outcome
-	// idempotently (namespace+RequestID+phase). Leader-gated via the control-
-	// plane elector (IsLeader); backoff is the per-sweep period — a probe or
-	// append error leaves the admission pending for the next sweep. Nil (dev)
-	// when no durable audit sink is configured; production requires a non-nil
-	// reconciler so a mis-config fails closed.
-	rec := newReconciler(sqlStore, srv, m, logger)
+	// Reconciler (T9): the crash-safe audit reconcile worker, built and run by
+	// the SDK. It scans admitted mutations that never received a post-handler
+	// outcome (e.g. a crash between a successful mutation and its outcome audit
+	// append), consults authoritative state WITHOUT re-executing the mutation,
+	// and appends the missing outcome idempotently. Nil (dev) when no durable
+	// audit store is configured; production requires a non-nil one so a
+	// mis-config fails closed.
+	rec := reconcilerOrNil(srv.Reconciler())
 
 	// Task 8 blocker 3: production posture enforcement. Production fails
 	// closed when any of PrincipalAuthenticator, Authorizer, durable AuditSink,
@@ -558,11 +560,7 @@ func runServer(cfg serverConfig) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Start the reconcile worker in the background. It runs until ctx is
-	// cancelled; a nil (dev) reconciler is a no-op. The worker's leader gate
-	// is the control-plane elector, so only the leader replica scans.
-	go func() { _ = rec.Run(ctx) }()
-
+	// Run starts the reconcile worker along with the transports.
 	return srv.Run(ctx)
 }
 
@@ -658,78 +656,12 @@ func loadAuthTokenMappings(cfg serverConfig) ([]apiserver.TokenPrincipalMapping,
 // reconciler is a leader-gated background loop that durably settles
 // admission/outcome audit for mutations that did not reconcile before a
 // process exit (e.g. a crash between a successful mutation and its outcome
-// audit append). T9 provides the real crash-safe worker
-// (service/control.AuditReconcileWorker); production requires a non-nil
-// reconciler so the dependency is explicit and a mis-config fails closed.
+// audit append). The real crash-safe worker
+// (service/control.AuditReconcileWorker) is built and run by the SDK; this
+// interface exists so validateProduction can require its presence — production
+// fails closed on a nil reconciler.
 type reconciler interface {
 	Run(ctx context.Context) error
-}
-
-// noopReconciler is the dev fallback: when no durable audit sink is
-// configured (--mysql-dsn unset) there is nothing to reconcile against, so
-// Run blocks until ctx is cancelled. Production configures --mysql-dsn and
-// gets the real AuditReconcileWorker via newReconciler instead.
-type noopReconciler struct{}
-
-func (noopReconciler) Run(ctx context.Context) error {
-	<-ctx.Done()
-	return nil
-}
-
-// newReconciler builds the T9 crash-safe audit reconcile worker. The worker
-// is wired with: the durable audit store (as store.AuditReconciler) for
-// pending-admission scans + idempotent outcome appends; the control-plane
-// backend's StateStore (engine.StateStore) as the AdmissionAuthority —
-// consulted WITHOUT re-executing mutations; the control-plane elector
-// (srv.IsLeader) as the leader gate so only the leader replica scans; and a
-// metrics observer when --metrics-addr is set. Returns nil (dev) when no
-// durable audit sink is configured.
-func newReconciler(sqlStore store.Store, srv *apiserver.APIServer, m *metrics.Metrics, logger engine.Logger) reconciler {
-	if sqlStore == nil {
-		return noopReconciler{}
-	}
-	ar, ok := sqlStore.(store.AuditReconciler)
-	if !ok {
-		// The configured store does not support reconcile scans (e.g. a
-		// custom store without the AuditReconciler capability). Production
-		// would fail-closed at validateProduction via a nil reconciler, but
-		// the sqlstore.Provider implements it, so this branch is defensive.
-		return noopReconciler{}
-	}
-	var authority control.AdmissionAuthority
-	var elector control.LeaderGate
-	if srv == nil {
-		// No authority source (no StateStore / no elector). Without srv we
-		// cannot consult authoritative state, so the worker would panic on the
-		// first settle. Return the dev no-op instead; production validation
-		// will fail closed if this path is reached with durable audit.
-		return noopReconciler{}
-	}
-	authority = control.NewExecutionAuthority(srv.Backend().State())
-	elector = leaderGateAdapter{isLeader: srv.IsLeader}
-	cfg := control.AuditReconcileConfig{
-		Logger:  logger,
-		Elector: elector,
-	}
-	if m != nil {
-		cfg.Observer = metrics.NewReconcileMetrics(m)
-	}
-	return control.NewAuditReconcileWorker(ar, authority, cfg)
-}
-
-// leaderGateAdapter adapts *apiserver.APIServer.IsLeader to the worker's
-// LeaderGate interface without forcing the apiserver type to implement the
-// full backend.LeaderElector surface (Campaign/Resign/Notify are owned by
-// the control plane's leader campaign, not the worker).
-type leaderGateAdapter struct {
-	isLeader func() bool
-}
-
-func (g leaderGateAdapter) IsLeader() bool {
-	if g.isLeader == nil {
-		return false
-	}
-	return g.isLeader()
 }
 
 // productionDeps bundles the production-required components so validateProduction
@@ -786,4 +718,19 @@ func validateProduction(mode string, deps productionDeps) error {
 		return fmt.Errorf("production mode requires a master encryption key (XFLOW_MASTER_KEY or --master-key-file); without it supply content is stored in plaintext. Generate with: openssl rand -base64 32")
 	}
 	return nil
+}
+
+// reconcilerOrNil converts the SDK's concrete worker into the productionDeps
+// interface field, mapping a nil pointer to a nil interface.
+//
+// Assigning the pointer directly would defeat the production check: a nil
+// *AuditReconcileWorker stored in an interface is not a nil interface, so
+// `deps.reconciler != nil` would be true for an absent worker and a production
+// server with a durable audit sink and nothing to settle its crash-orphaned
+// admissions would start clean.
+func reconcilerOrNil(w *control.AuditReconcileWorker) reconciler {
+	if w == nil {
+		return nil
+	}
+	return w
 }
