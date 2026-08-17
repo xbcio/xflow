@@ -2,7 +2,9 @@ package execution
 
 import (
 	"context"
+	"errors"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -305,6 +307,319 @@ func TestSuspendingPathsAreBounded(t *testing.T) {
 	}
 	if elapsed > 2*time.Second {
 		t.Fatalf("Execute took %v on suspending path, want ≤ ~200ms of the %v budget", elapsed, budget)
+	}
+}
+
+// --- parent-cancellation classification regression tests ---
+//
+// These pin the fix for the regression where isRunnerTimeout/reclassifyTimeout
+// tested only ctx.Err() != nil, conflating context.DeadlineExceeded (a verdict
+// -> permanent node.timeout) with context.Canceled (the lease-renewal loop
+// cancelling execCtx when the lease is fenced or renewal fails MaxRetries
+// times). A fenced/lost lease must NOT be committed as a terminal permanent
+// failure by the runner that just lost it: the server redelivers, and a
+// permanent error suppresses the retry the redelivery depends on.
+
+// cancelCoopHandler waits for ctx cancellation then returns ctx.Err(). It is
+// the cooperative mirror of blockingHandler: it respects ctx, so it surfaces
+// whatever cancellation cause fired (DeadlineExceeded or Canceled) as its own
+// error, which reclassifyTimeout must then classify.
+type cancelCoopHandler struct{}
+
+func (cancelCoopHandler) Descriptor() types.Descriptor {
+	return types.Descriptor{Type: "test.cancel-coop"}
+}
+
+func (cancelCoopHandler) Execute(ctx context.Context, _ *types.Input) (*types.Output, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// cancelCoopSuspendHandler is the SuspendingHandler form of cancelCoopHandler:
+// OnResume waits for ctx cancellation then returns ctx.Err().
+type cancelCoopSuspendHandler struct{}
+
+func (*cancelCoopSuspendHandler) Descriptor() types.Descriptor {
+	return types.Descriptor{Type: "test.cancel-coop-suspend"}
+}
+
+func (*cancelCoopSuspendHandler) Execute(context.Context, *types.Input) (*types.Output, error) {
+	return nil, nil
+}
+
+func (*cancelCoopSuspendHandler) OnResume(ctx context.Context, _ *types.Input, _ *types.SignalPayload) (*types.Output, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (*cancelCoopSuspendHandler) PrepareSuspend(_ context.Context, _ *types.Input) (*types.SuspendSpec, error) {
+	return &types.SuspendSpec{Mode: types.ModeSignal, Signals: []string{"signal"}}, nil
+}
+
+// recordingTimeoutObserver captures OnNodeExecutionTimeout calls so a test can
+// assert the timeout metric emission call site did NOT fire for a non-timeout
+// cancellation. It is the in-package recording counterpart of the real adapter
+// in observability/metrics; the end-to-end metric assertion lives in
+// observability/metrics/node_timeout_test.go.
+type recordingTimeoutObserver struct {
+	mu       sync.Mutex
+	timeouts int
+}
+
+func (o *recordingTimeoutObserver) OnNodeExecutionTimeout(context.Context, string, string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.timeouts++
+}
+
+func (o *recordingTimeoutObserver) OnHandlerAbandoned(context.Context, string, float64)     {}
+func (o *recordingTimeoutObserver) OnHandlerDuration(context.Context, string, time.Duration) {}
+
+func (o *recordingTimeoutObserver) timeoutCount() int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.timeouts
+}
+
+// TestParentCancelCooperativeNotPermanentTimeout: the lease deadline is 10
+// minutes away (nowhere near firing). The PARENT ctx is cancelled — exactly
+// what renewLeaseLoop does when the lease is fenced or renewal fails MaxRetries
+// times. A cooperative handler returns ctx.Err() (context.Canceled). This MUST
+// NOT be reclassified to a permanent node.timeout; it must be a transient
+// node.cancelled so the server can redeliver.
+func TestParentCancelCooperativeNotPermanentTimeout(t *testing.T) {
+	obs := &recordingTimeoutObserver{}
+	runner := NewRunner(singleHandlerRegistry{handler: cancelCoopHandler{}}, WithTimeoutObserver(obs))
+
+	lease := &engine.TaskLease{
+		Task:              engine.Task{ExecutionID: "exec-cancel-coop", NodeName: "probe"},
+		Input:             &types.Input{ExecutionID: "exec-cancel-coop", NodeName: "probe", Timeout: 10 * time.Minute},
+		NodeType:          "test.cancel-coop",
+		ExecutionDeadline: time.Now().Add(10 * time.Minute),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(50 * time.Millisecond); cancel() }()
+
+	res, err := runner.Execute(ctx, lease)
+	if err != nil {
+		t.Fatalf("Execute() transport error = %v, want nil", err)
+	}
+	if res.Error == nil {
+		t.Fatal("TaskResult.Error = nil, want a non-nil cancellation error")
+	}
+	if types.IsPermanent(res.Error) {
+		t.Errorf("PROBE RED: parent cancellation reported as PERMANENT node timeout: %v", res.Error)
+	}
+	if !errors.Is(res.Error, context.Canceled) && !strings.Contains(res.Error.Error(), "node.cancelled") {
+		t.Errorf("TaskResult.Error = %v, want a transient node.cancelled (or wrapped context.Canceled), not a permanent timeout", res.Error)
+	}
+	if strings.Contains(res.Error.Error(), "10m0s timeout") {
+		t.Errorf("TaskResult.Error message lies about a timeout that never happened: %q", res.Error.Error())
+	}
+	// The timeout metric must NOT increment for a non-timeout cancellation.
+	if n := obs.timeoutCount(); n != 0 {
+		t.Errorf("OnNodeExecutionTimeout fired %d time(s) for a parent cancellation, want 0 (metric labels are permanent time series)", n)
+	}
+}
+
+// TestParentCancelAbandonBranchNotPermanentTimeout: a handler that IGNORES ctx
+// (blockingHandler) is abandoned when the parent cancels (deadline 10 minutes
+// away). The abandon branch must still produce a transient node.cancelled, not a
+// permanent node.timeout. The abandoned gauge still increments — a handler that
+// ignores ctx leaks a goroutine regardless of why its context was done.
+func TestParentCancelAbandonBranchNotPermanentTimeout(t *testing.T) {
+	obs := &recordingTimeoutObserver{}
+	released := make(chan struct{})
+	blocked := make(chan struct{})
+	h := blockingHandler{blocked: blocked, released: released}
+	runner := NewRunner(singleHandlerRegistry{handler: h}, WithTimeoutObserver(obs))
+
+	lease := &engine.TaskLease{
+		Task:              engine.Task{ExecutionID: "exec-cancel-abandon", NodeName: "probe"},
+		Input:             &types.Input{ExecutionID: "exec-cancel-abandon", NodeName: "probe", Timeout: 10 * time.Minute},
+		NodeType:          "test.blocking",
+		ExecutionDeadline: time.Now().Add(10 * time.Minute),
+	}
+
+	// Safety backstop: never let the test hang.
+	go func() {
+		time.Sleep(5 * time.Second)
+		select {
+		case <-released:
+		default:
+			close(released)
+		}
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(50 * time.Millisecond); cancel() }()
+
+	res, err := runner.Execute(ctx, lease)
+	// Unblock the leaked handler goroutine so it can exit.
+	select {
+	case <-released:
+	default:
+		close(released)
+	}
+	if err != nil {
+		t.Fatalf("Execute() transport error = %v, want nil", err)
+	}
+	if res.Error == nil {
+		t.Fatal("TaskResult.Error = nil, want a non-nil cancellation error")
+	}
+	if types.IsPermanent(res.Error) {
+		t.Errorf("abandon branch reported a PERMANENT node timeout for a parent cancellation: %v", res.Error)
+	}
+	if !strings.Contains(res.Error.Error(), "node.cancelled") {
+		t.Errorf("TaskResult.Error = %v, want a transient node.cancelled from the abandon branch", res.Error)
+	}
+	// The timeout metric must NOT increment for a non-timeout cancellation,
+	// even on the abandon branch.
+	if n := obs.timeoutCount(); n != 0 {
+		t.Errorf("OnNodeExecutionTimeout fired %d time(s) on the abandon branch for a parent cancellation, want 0", n)
+	}
+}
+
+// TestParentCancelOnResumeAbandonNotPermanentTimeout covers the callOnResume
+// abandon branch under parent cancellation (deadline far away).
+func TestParentCancelOnResumeAbandonNotPermanentTimeout(t *testing.T) {
+	obs := &recordingTimeoutObserver{}
+	released := make(chan struct{})
+	blocked := make(chan struct{})
+	h := &blockingSuspendHandler{blocked: blocked, released: released}
+	runner := NewRunner(singleHandlerRegistry{handler: h}, WithTimeoutObserver(obs))
+
+	lease := &engine.TaskLease{
+		Task: engine.Task{
+			ExecutionID: "exec-cancel-resume",
+			NodeName:    "probe",
+			Type:        engine.TaskTypeNodeResume,
+			Payload:     &types.SignalPayload{Name: "signal"},
+		},
+		Input:             &types.Input{ExecutionID: "exec-cancel-resume", NodeName: "probe", Timeout: 10 * time.Minute},
+		NodeType:          "test.blocking-suspend",
+		ExecutionDeadline: time.Now().Add(10 * time.Minute),
+	}
+
+	go func() {
+		time.Sleep(5 * time.Second)
+		select {
+		case <-released:
+		default:
+			close(released)
+		}
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(50 * time.Millisecond); cancel() }()
+
+	res, err := runner.Execute(ctx, lease)
+	select {
+	case <-released:
+	default:
+		close(released)
+	}
+	if err != nil {
+		t.Fatalf("Execute() transport error = %v, want nil", err)
+	}
+	if res.Error == nil {
+		t.Fatal("TaskResult.Error = nil, want a non-nil cancellation error")
+	}
+	if types.IsPermanent(res.Error) {
+		t.Errorf("callOnResume abandon branch reported a PERMANENT node timeout for a parent cancellation: %v", res.Error)
+	}
+	if !strings.Contains(res.Error.Error(), "node.cancelled") {
+		t.Errorf("TaskResult.Error = %v, want a transient node.cancelled from the callOnResume abandon branch", res.Error)
+	}
+	if n := obs.timeoutCount(); n != 0 {
+		t.Errorf("OnNodeExecutionTimeout fired %d time(s) on callOnResume abandon for a parent cancellation, want 0", n)
+	}
+}
+
+// TestGenuineDeadlineCooperativeIsPermanentTimeout guards the other side of the
+// fix: a genuine deadline firing must STILL produce a permanent node.timeout.
+// This is a single clean Execute-level assertion (distinct from the loop-based
+// TestExecuteReclassifyWiring) so a regression that collapses the two causes
+// back into one reddens it directly.
+func TestGenuineDeadlineCooperativeIsPermanentTimeout(t *testing.T) {
+	obs := &recordingTimeoutObserver{}
+	runner := NewRunner(singleHandlerRegistry{handler: ctxWaitHandler{}}, WithTimeoutObserver(obs))
+
+	budget := 40 * time.Millisecond
+	lease := &engine.TaskLease{
+		Task:              engine.Task{ExecutionID: "exec-genuine-coop", NodeName: "probe"},
+		Input:             &types.Input{ExecutionID: "exec-genuine-coop", NodeName: "probe", Timeout: budget},
+		NodeType:          "test.ctx-wait",
+		ExecutionDeadline: time.Now().Add(budget),
+	}
+
+	res, err := runner.Execute(context.Background(), lease)
+	if err != nil {
+		t.Fatalf("Execute() transport error = %v, want nil", err)
+	}
+	if res.Error == nil {
+		t.Fatal("TaskResult.Error = nil, want a permanent node.timeout")
+	}
+	if !types.IsPermanent(res.Error) {
+		t.Fatalf("TaskResult.Error is not permanent for a genuine deadline: %v", res.Error)
+	}
+	if !strings.Contains(res.Error.Error(), "node.timeout") && !strings.Contains(res.Error.Error(), "timeout") {
+		t.Fatalf("TaskResult.Error = %q, want it to mention timeout", res.Error.Error())
+	}
+	if n := obs.timeoutCount(); n == 0 {
+		t.Errorf("OnNodeExecutionTimeout did not fire for a genuine deadline, want >= 1")
+	}
+}
+
+// TestReclassifyCancelCauseRules exercises classifyCancelCause directly for the
+// racy "both causes present" case (req 3): a Canceled context whose deadline
+// instant has elapsed must still classify as a timeout, while a Canceled
+// context whose deadline is in the future classifies as cancelled.
+func TestReclassifyCancelCauseRules(t *testing.T) {
+	budget := 5 * time.Second
+
+	// Genuine deadline: ctx.Err() == DeadlineExceeded -> permanent node.timeout.
+	dlPast := time.Now().Add(-time.Second)
+	ctxDL, cancelDL := context.WithDeadline(context.Background(), dlPast)
+	defer cancelDL()
+	got := reclassifyTimeout(ctxDL, context.DeadlineExceeded, budget, dlPast)
+	if got == nil || !types.IsPermanent(got) {
+		t.Fatalf("DeadlineExceeded -> got %v, want permanent node.timeout", got)
+	}
+
+	// Parent cancel, deadline far in the future -> transient node.cancelled.
+	dlFuture := time.Now().Add(10 * time.Minute)
+	ctxCancel, cancelCancel := context.WithCancel(context.Background())
+	cancelCancel()
+	got = reclassifyTimeout(ctxCancel, context.Canceled, budget, dlFuture)
+	if got == nil {
+		t.Fatal("Canceled (deadline future) -> nil, want transient node.cancelled")
+	}
+	if types.IsPermanent(got) {
+		t.Fatalf("Canceled (deadline future) -> %v, want NOT permanent", got)
+	}
+	if !strings.Contains(got.Error(), "node.cancelled") {
+		t.Fatalf("Canceled (deadline future) -> %q, want node.cancelled", got.Error())
+	}
+
+	// Both causes present, deadline elapsed: parent cancelled first so
+	// ctx.Err() == Canceled, but the deadline instant has passed. Must
+	// classify as a timeout (the budget was genuinely exhausted).
+	dlElapsed := time.Now().Add(-time.Second)
+	ctxBoth, cancelBoth := context.WithCancel(context.Background())
+	cancelBoth()
+	got = reclassifyTimeout(ctxBoth, context.Canceled, budget, dlElapsed)
+	if got == nil || !types.IsPermanent(got) {
+		t.Fatalf("Canceled+deadline-elapsed -> %v, want permanent node.timeout (deadline won the race to the budget)", got)
+	}
+
+	// nil err is a no-op even when the context is done (success preserved,
+	// no timeout metric fires). This pins the minor fix: a handler that
+	// succeeded at the deadline instant must not be reclassified.
+	got = reclassifyTimeout(ctxDL, nil, budget, dlPast)
+	if got != nil {
+		t.Fatalf("nil err with done ctx -> %v, want nil (success preserved)", got)
 	}
 }
 

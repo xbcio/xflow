@@ -287,6 +287,61 @@ func TestNodeTimeoutMetricsConcurrentAbandonedGauge(t *testing.T) {
 	}
 }
 
+// TestNodeTimeoutMetricNotIncrementedOnParentCancel proves the runner does NOT
+// emit xflow_node_timeouts_total when a handler's context is cancelled by its
+// parent before the deadline elapsed (lease fenced/lost, renewal failed
+// MaxRetries times, execution cancelled, runner shutdown). Metric labels are
+// permanent time series: counting a cancellation as a timeout would inflate the
+// counter for an event that was never a timeout. It must go red if
+// observeTimeout is gated on ctx.Err() != nil instead of on a genuine deadline
+// expiry.
+func TestNodeTimeoutMetricNotIncrementedOnParentCancel(t *testing.T) {
+	m := metrics.New()
+	obs := metrics.NewNodeTimeoutMetrics(m)
+	runner := execution.NewRunner(metricHandlerRegistry{handler: cancelWaitMetricHandler{}}, execution.WithTimeoutObserver(obs))
+
+	budget := 10 * time.Minute
+	lease := &engine.TaskLease{
+		Task:              engine.Task{ExecutionID: "exec-cancel-metric", NodeName: "probe"},
+		Input:             &types.Input{ExecutionID: "exec-cancel-metric", NodeName: "probe", Timeout: budget},
+		NodeType:          "test.cancel-metric",
+		ExecutionDeadline: time.Now().Add(budget),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(50 * time.Millisecond); cancel() }()
+
+	res, err := runner.Execute(ctx, lease)
+	if err != nil {
+		t.Fatalf("Execute() error = %v, want nil", err)
+	}
+	if res.Error == nil {
+		t.Fatal("TaskResult.Error = nil, want a non-nil cancellation error")
+	}
+	if types.IsPermanent(res.Error) {
+		t.Fatalf("TaskResult.Error = %v, want NOT permanent (a cancellation must not be a terminal timeout)", res.Error)
+	}
+
+	body := metricsBody(t, m)
+	if strings.Contains(body, `xflow_node_timeouts_total{node_type="test.cancel-metric",source="runner"}`) {
+		t.Fatalf("metrics body incremented xflow_node_timeouts_total for a parent cancellation (not a timeout):\n%s", body)
+	}
+}
+
+// cancelWaitMetricHandler waits for ctx cancellation then returns ctx.Err(). It
+// is the cooperative handler for the parent-cancel metric test: when the parent
+// cancels (deadline 10 minutes away) it surfaces context.Canceled.
+type cancelWaitMetricHandler struct{}
+
+func (cancelWaitMetricHandler) Descriptor() types.Descriptor {
+	return types.Descriptor{Type: "test.cancel-metric"}
+}
+
+func (cancelWaitMetricHandler) Execute(ctx context.Context, _ *types.Input) (*types.Output, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
 // --- helpers and cooperative handlers ---
 
 // cooperativeQuickHandler returns immediately without touching ctx, exercising

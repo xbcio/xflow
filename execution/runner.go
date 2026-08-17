@@ -2,6 +2,7 @@ package execution
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime"
 	"time"
@@ -220,11 +221,10 @@ func (r *Runner) Execute(ctx context.Context, lease *engine.TaskLease) (engine.T
 
 		select {
 		case hr := <-ch:
-			runnerTimeout := isRunnerTimeout(ctx, deadline)
-			if runnerTimeout {
+			hr.err = reclassifyTimeout(ctx, hr.err, budget, deadline)
+			if isNodeTimeoutError(hr.err) {
 				r.observeTimeout(ctx, lease.NodeType)
 			}
-			hr.err = reclassifyTimeout(ctx, hr.err, budget, deadline)
 			return engine.TaskResult{Output: hr.output, Error: hr.err}, nil
 		case <-ctx.Done():
 			// Deadline fired before handler returned. Check once more: the
@@ -239,25 +239,33 @@ func (r *Runner) Execute(ctx context.Context, lease *engine.TaskLease) (engine.T
 			runtime.Gosched()
 			select {
 			case hr := <-ch:
-				runnerTimeout := isRunnerTimeout(ctx, deadline)
-				if runnerTimeout {
+				hr.err = reclassifyTimeout(ctx, hr.err, budget, deadline)
+				if isNodeTimeoutError(hr.err) {
 					r.observeTimeout(ctx, lease.NodeType)
 				}
-				hr.err = reclassifyTimeout(ctx, hr.err, budget, deadline)
 				return engine.TaskResult{Output: hr.output, Error: hr.err}, nil
 			default:
 			}
 			// Abandon: the handler goroutine is still running and Go cannot kill
-			// it. The slot is released (Execute returns), the terminal timeout
-			// is recorded, and the abandoned gauge is incremented. A watcher
+			// it. The slot is released (Execute returns), the terminal error is
+			// recorded, and the abandoned gauge is incremented. A watcher
 			// goroutine waits on ch (buffered, size 1) so that when the leaked
 			// handler finally writes its result and exits, the gauge decrements
 			// back toward zero. A persistently non-zero gauge is the operational
 			// signal that some node type ignores ctx and is leaking goroutines.
-			r.observeTimeout(ctx, lease.NodeType)
+			//
+			// The cause distinguishes a genuine deadline expiry (permanent
+			// node.timeout, metric fires) from a parent cancellation (transient
+			// node.cancelled, metric does NOT fire). The abandoned gauge
+			// increments either way: a handler that ignores ctx leaks a
+			// goroutine regardless of why its context was done.
+			cause := classifyCancelCause(ctx, deadline)
+			if cause == cancelTimeout {
+				r.observeTimeout(ctx, lease.NodeType)
+			}
 			r.observeAbandoned(ctx, lease.NodeType, 1)
 			go func() { <-ch; r.observeAbandoned(ctx, lease.NodeType, -1) }()
-			return engine.TaskResult{Error: newNodeTimeoutError(budget)}, nil
+			return engine.TaskResult{Error: newCancelError(cause, budget)}, nil
 		}
 	}
 
@@ -311,26 +319,29 @@ func (r *Runner) callOnResume(ctx context.Context, sh types.SuspendingHandler, l
 		}()
 		select {
 		case res := <-ch:
-			if isRunnerTimeout(ctx, deadline) {
+			res.err = reclassifyTimeout(ctx, res.err, budget, deadline)
+			if isNodeTimeoutError(res.err) {
 				r.observeTimeout(ctx, lease.NodeType)
 			}
-			res.err = reclassifyTimeout(ctx, res.err, budget, deadline)
 			return res.output, res.err
 		case <-ctx.Done():
 			runtime.Gosched()
 			select {
 			case res := <-ch:
-				if isRunnerTimeout(ctx, deadline) {
+				res.err = reclassifyTimeout(ctx, res.err, budget, deadline)
+				if isNodeTimeoutError(res.err) {
 					r.observeTimeout(ctx, lease.NodeType)
 				}
-				res.err = reclassifyTimeout(ctx, res.err, budget, deadline)
 				return res.output, res.err
 			default:
 			}
-			r.observeTimeout(ctx, lease.NodeType)
+			cause := classifyCancelCause(ctx, deadline)
+			if cause == cancelTimeout {
+				r.observeTimeout(ctx, lease.NodeType)
+			}
 			r.observeAbandoned(ctx, lease.NodeType, 1)
 			go func() { <-ch; r.observeAbandoned(ctx, lease.NodeType, -1) }()
-			return nil, newNodeTimeoutError(budget)
+			return nil, newCancelError(cause, budget)
 		}
 	}
 	output, err := sh.OnResume(ctx, lease.Input, lease.Task.Payload)
@@ -356,26 +367,29 @@ func (r *Runner) callPrepareSuspend(ctx context.Context, sh types.SuspendingHand
 		}()
 		select {
 		case res := <-ch:
-			if isRunnerTimeout(ctx, deadline) {
+			res.err = reclassifyTimeout(ctx, res.err, budget, deadline)
+			if isNodeTimeoutError(res.err) {
 				r.observeTimeout(ctx, nodeType)
 			}
-			res.err = reclassifyTimeout(ctx, res.err, budget, deadline)
 			return res.spec, res.err
 		case <-ctx.Done():
 			runtime.Gosched()
 			select {
 			case res := <-ch:
-				if isRunnerTimeout(ctx, deadline) {
+				res.err = reclassifyTimeout(ctx, res.err, budget, deadline)
+				if isNodeTimeoutError(res.err) {
 					r.observeTimeout(ctx, nodeType)
 				}
-				res.err = reclassifyTimeout(ctx, res.err, budget, deadline)
 				return res.spec, res.err
 			default:
 			}
-			r.observeTimeout(ctx, nodeType)
+			cause := classifyCancelCause(ctx, deadline)
+			if cause == cancelTimeout {
+				r.observeTimeout(ctx, nodeType)
+			}
 			r.observeAbandoned(ctx, nodeType, 1)
 			go func() { <-ch; r.observeAbandoned(ctx, nodeType, -1) }()
-			return nil, newNodeTimeoutError(budget)
+			return nil, newCancelError(cause, budget)
 		}
 	}
 	return sh.PrepareSuspend(ctx, input)
@@ -419,11 +433,78 @@ func (r *Runner) observeDuration(ctx context.Context, nodeType string, elapsed t
 	r.timeoutObserver.OnHandlerDuration(ctx, nodeType, elapsed)
 }
 
-// isRunnerTimeout is true when the context's deadline has fired. It mirrors
-// reclassifyTimeout's trigger condition so the timeout metric fires exactly
-// when reclassify produces (or would have produced) a permanent node.timeout.
+// isRunnerTimeout is retained for backward-compatibility references; the
+// production paths now use classifyCancelCause + isNodeTimeoutError so the
+// metric fires exactly when a terminal node.timeout error is produced.
+//
+// Deprecated: do not add new call sites. It returns true when the context is
+// done for ANY reason (deadline OR parent cancellation), which over-counts the
+// timeout metric for cancellations and for handlers that succeeded at the
+// deadline instant.
 func isRunnerTimeout(ctx context.Context, deadline time.Time) bool {
-	return !deadline.IsZero() && ctx.Err() != nil
+	return classifyCancelCause(ctx, deadline) == cancelTimeout
+}
+
+// cancelCause classifies why a handler's context is done, distinguishing a
+// genuine execution-deadline expiry from a parent cancellation (lease fenced,
+// renewal exhausted, execution cancelled, runner shutdown). The distinction is
+// load-bearing: a deadline that fired is a verdict (permanent, do not retry);
+// a parent cancellation is a preemption (the server will redeliver, so a
+// permanent error would suppress the retry the redelivery depends on).
+type cancelCause int
+
+const (
+	cancelNone cancelCause = iota
+	// cancelTimeout means the node's own execution deadline elapsed. This is a
+	// terminal verdict: the task consumed its full budget and must not retry.
+	cancelTimeout
+	// cancelCancelled means the parent context was cancelled before the deadline
+	// elapsed (lease fenced/lost, renewal failed MaxRetries times, execution
+	// cancelled, or runner shutting down). The work was interrupted, not
+	// over-budget — the server redelivers, so this is transient.
+	cancelCancelled
+)
+
+// classifyCancelCause inspects ctx.Err() against the configured deadline. The
+// deadline argument is a second signal that resolves the racy case where both
+// causes are present.
+//
+// context.WithDeadline(parent, d) reports ctx.Err() == context.Canceled when
+// the parent is cancelled, even if the deadline instant d has since passed —
+// whichever canceller fires first wins the Err() value. So when ctx.Err() is
+// Canceled we consult the clock: if the deadline instant has already elapsed,
+// the node WAS over budget and the parent cancellation merely won the race to
+// set Err(); we treat it as a genuine timeout (the honest verdict). Only a
+// cancellation that arrives while the deadline is still in the future is a
+// true preemption.
+func classifyCancelCause(ctx context.Context, deadline time.Time) cancelCause {
+	if deadline.IsZero() {
+		return cancelNone
+	}
+	err := ctx.Err()
+	if err == nil {
+		return cancelNone
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return cancelTimeout
+	}
+	// ctx.Err() is context.Canceled (or a wrapped form). If the deadline has
+	// elapsed, the budget was genuinely exhausted — classify as a timeout.
+	if !time.Now().Before(deadline) {
+		return cancelTimeout
+	}
+	return cancelCancelled
+}
+
+// isNodeTimeoutError reports whether err is the permanent node.timeout error
+// produced by reclassifyTimeout / the abandon path. It gates the
+// xflow_node_timeouts_total metric so the counter fires exactly when a terminal
+// timeout error is produced — not when the deadline fired but the handler
+// succeeded (reclassify is a no-op on nil err), and not when a parent
+// cancellation produced a transient node.cancelled error.
+func isNodeTimeoutError(err error) bool {
+	var ce *types.ClassifiedError
+	return errors.As(err, &ce) && ce.Code == "node.timeout"
 }
 
 // nodeExecutionDeadline picks the effective absolute deadline for one handler
@@ -459,21 +540,65 @@ func newNodeTimeoutError(budget time.Duration) error {
 		fmt.Sprintf("node execution exceeded its %s timeout", budget))
 }
 
-// reclassifyTimeout replaces err with a permanent timeout error when the
-// context's deadline fired. A cooperative handler surfaces ctx.Err() as its own
-// error -- which is not Permanent and would be retried. This reclassifies it so
-// the queue layers decline to redeliver.
+// newNodeCancelledError builds a transient error for a handler whose context
+// was cancelled by its parent before the execution deadline elapsed — i.e. the
+// runner lost the lease (fenced, or renewal failed MaxRetries times), the
+// execution was cancelled, or the runner is shutting down.
 //
-// No-ops: err == nil, ctx has no error, deadline was never set (zero).
+// It is transient (NOT permanent) on purpose: a permanent error would make the
+// retry short-circuit in engine/atomic_commit.go decline to re-run the node and
+// the queue layers decline to redeliver it. But a fenced/lost lease is exactly
+// the case the redelivery path exists for — the server hands the lease to
+// another runner, which produces the authoritative result. Marking the losing
+// runner's interruption permanent would kill the retry the redelivery depends
+// on, which is the regression this fixes.
+//
+// A transient ClassifiedError (rather than passing the bare ctx.Err() through)
+// carries a stable code across the wire so the protocol and the commit
+// classification (buildEffectiveClassification) see a retryable system error
+// instead of an unclassified cancellation that the commit path reports as
+// ErrorSourceUnclassified.
+//
+// The message carries no budget: a cancellation is not a timeout and the
+// configured budget is irrelevant. It also carries no runtime data (absolute
+// deadline, node output, params) — an upstream node's output is routinely an
+// HTTP response body carrying a token.
+func newNodeCancelledError() error {
+	return types.NewTransientError("node.cancelled",
+		"node execution cancelled before its deadline (lease lost or parent context cancelled)")
+}
+
+// newCancelError returns the terminal error for a handler whose context is
+// done, keyed on the cancel cause: a permanent node.timeout when the deadline
+// elapsed, a transient node.cancelled when the parent cancelled first.
+func newCancelError(cause cancelCause, budget time.Duration) error {
+	if cause == cancelTimeout {
+		return newNodeTimeoutError(budget)
+	}
+	return newNodeCancelledError()
+}
+
+// reclassifyTimeout replaces err with the appropriate terminal error when the
+// handler's context is done. A cooperative handler surfaces ctx.Err() as its
+// own error — which is neither Permanent nor a stable ClassifiedError, so the
+// retry/queue layers would mishandle it. This reclassifies it based on the
+// cancel cause:
+//
+//   - cancelTimeout   -> permanent node.timeout (retry short-circuit declines;
+//     queue layers decline to redeliver). A timeout is a verdict.
+//   - cancelCancelled -> transient node.cancelled (retry applies; the server
+//     redelivers to the runner that won the lease).
+//
+// No-ops: err == nil (the handler succeeded — even if the deadline fired at
+// the same instant, success is preserved and no timeout metric fires), or no
+// deadline was set (zero deadline -> cancelNone -> err passes through).
 func reclassifyTimeout(ctx context.Context, err error, budget time.Duration, deadline time.Time) error {
 	if err == nil {
 		return nil
 	}
-	if deadline.IsZero() {
+	cause := classifyCancelCause(ctx, deadline)
+	if cause == cancelNone {
 		return err
 	}
-	if ctx.Err() == nil {
-		return err
-	}
-	return newNodeTimeoutError(budget)
+	return newCancelError(cause, budget)
 }
