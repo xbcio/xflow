@@ -29,6 +29,7 @@ var (
 type capturedGlobals struct {
 	globals map[string]any
 	code    string
+	digest  string
 	calls   int
 }
 
@@ -36,12 +37,13 @@ type captureEngine struct{}
 
 func (captureEngine) Name() string { return "js/" + captureRuntime }
 
-func (captureEngine) Execute(_ context.Context, code string, globals map[string]any, _ engine.Helpers) (any, error) {
+func (captureEngine) Execute(_ context.Context, src engine.Source, globals map[string]any, _ engine.Helpers) (any, error) {
 	captureMu.Lock()
 	defer captureMu.Unlock()
 	if captureSlot != nil {
 		captureSlot.globals = globals
-		captureSlot.code = code
+		captureSlot.code = src.Code
+		captureSlot.digest = src.Digest
 		captureSlot.calls++
 	}
 	return map[string]any{"ok": true}, nil

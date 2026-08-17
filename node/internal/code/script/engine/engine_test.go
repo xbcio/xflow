@@ -8,7 +8,7 @@ import (
 type fakeEngine struct{ name string }
 
 func (e *fakeEngine) Name() string { return e.name }
-func (e *fakeEngine) Execute(_ context.Context, _ string, _ map[string]any, _ Helpers) (any, error) {
+func (e *fakeEngine) Execute(_ context.Context, _ Source, _ map[string]any, _ Helpers) (any, error) {
 	return map[string]any{"ok": true}, nil
 }
 

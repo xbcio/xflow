@@ -89,7 +89,7 @@ func b64(b []byte) string {
 
 func TestWasm_IORoundTrip(t *testing.T) {
 	out, err := newWasm(t).Execute(context.Background(),
-		b64(echoWasm),
+		engine.Code(b64(echoWasm)),
 		map[string]any{"$input": map[string]any{"x": 7.0}},
 		engine.DefaultHelpers())
 	if err != nil {
@@ -104,7 +104,7 @@ func TestWasm_IORoundTrip(t *testing.T) {
 
 func TestWasm_CredentialsViaStdin(t *testing.T) {
 	out, err := newWasm(t).Execute(context.Background(),
-		b64(echoWasm),
+		engine.Code(b64(echoWasm)),
 		map[string]any{
 			"$credentials": map[string]any{"aes_key": map[string]any{"key": "kk"}},
 			"$credential":  map[string]any{"token": "t-1"},
@@ -124,7 +124,7 @@ func TestWasm_CredentialsViaStdin(t *testing.T) {
 
 func TestWasm_SandboxNoFS(t *testing.T) {
 	out, err := newWasm(t).Execute(context.Background(),
-		b64(echoWasm), nil, engine.DefaultHelpers())
+		engine.Code(b64(echoWasm)), nil, engine.DefaultHelpers())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestWasm_Timeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Nanosecond)
 	defer cancel()
 	time.Sleep(1 * time.Millisecond)
-	_, err := newWasm(t).Execute(ctx, b64(echoWasm), nil, engine.DefaultHelpers())
+	_, err := newWasm(t).Execute(ctx, engine.Code(b64(echoWasm)), nil, engine.DefaultHelpers())
 	if err == nil {
 		t.Fatal("expected error from cancelled context")
 	}
@@ -150,7 +150,7 @@ func TestWasm_InFlightTimeout(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		_, err := newWasm(t).Execute(ctx, b64(spinWasm), nil, engine.DefaultHelpers())
+		_, err := newWasm(t).Execute(ctx, engine.Code(b64(spinWasm)), nil, engine.DefaultHelpers())
 		done <- err
 	}()
 	select {
@@ -172,7 +172,7 @@ func TestWasm_ModuleCacheHit(t *testing.T) {
 	e := newWasm(t)
 	code := b64(echoWasm)
 	for i := range 3 {
-		if _, err := e.Execute(context.Background(), code, map[string]any{"$input": map[string]any{"n": float64(i)}}, engine.DefaultHelpers()); err != nil {
+		if _, err := e.Execute(context.Background(), engine.Code(code), map[string]any{"$input": map[string]any{"n": float64(i)}}, engine.DefaultHelpers()); err != nil {
 			t.Fatalf("iteration %d: %v", i, err)
 		}
 	}
@@ -185,7 +185,7 @@ func TestWasm_CredentialParityWithJS(t *testing.T) {
 	}
 
 	// wasm path: echo guest extracts credKey and firstToken
-	wOut, err := newWasm(t).Execute(context.Background(), b64(echoWasm), globals, engine.DefaultHelpers())
+	wOut, err := newWasm(t).Execute(context.Background(), engine.Code(b64(echoWasm)), globals, engine.DefaultHelpers())
 	if err != nil {
 		t.Fatalf("wasm exec: %v", err)
 	}
@@ -199,7 +199,7 @@ func TestWasm_CredentialParityWithJS(t *testing.T) {
 		t.Fatal("goja engine not registered")
 	}
 	jOut, err := jsEngine.Execute(context.Background(),
-		`({credKey: $credentials.aes_key.key, firstToken: $credential.token})`,
+		engine.Code(`({credKey: $credentials.aes_key.key, firstToken: $credential.token})`),
 		globals, engine.DefaultHelpers())
 	if err != nil {
 		t.Fatalf("js exec: %v", err)

@@ -137,12 +137,17 @@ func (n *ScriptNode) Execute(ctx context.Context, input *types.Input) (*types.Ou
 	runtime, _ := input.Params["runtime"].(string)
 
 	code, _ := input.Params["code"].(string)
+	// The digest travels with the code into the engine. It is what lets the wasm
+	// reactor find its compiled module by a 64-byte key instead of comparing the
+	// ~9 MB base64 string on every message; see engine.Source. It stays empty on
+	// the inline-code path, where there is no digest to carry.
+	digest, _ := input.Params["artifact_digest"].(string)
 	if code == "" {
 		// artifact_digest path: resolve code bytes from the artifact store.
 		// Resolution is memoised by (namespace, digest, language) — a digest names
 		// one immutable byte sequence, so re-reading and re-encoding it on every
 		// message is pure waste on the hottest path in the node.
-		if digest, _ := input.Params["artifact_digest"].(string); digest != "" {
+		if digest != "" {
 			// Checked before the cache, not through it. A cache hit would let an
 			// execution whose dispatch path never wired a resolver run code that
 			// another execution fetched, so a wiring defect would surface only on
@@ -209,6 +214,8 @@ func (n *ScriptNode) Execute(ctx context.Context, input *types.Input) (*types.Ou
 		defer cancel()
 	}
 
+	src := engine.Source{Code: code, Digest: digest}
+
 	// Batch path: a Kafka batch trigger delivers {messages: [...], count: N}.
 	// Detected by shape rather than a parameter so the same script node works on
 	// both the batch and single-message trigger paths without reconfiguration.
@@ -216,9 +223,9 @@ func (n *ScriptNode) Execute(ctx context.Context, input *types.Input) (*types.Ou
 		var results []any
 		var batchErr error
 		if be, hasBatch := eng.(engine.BatchEngine); hasBatch {
-			results, batchErr = be.ExecuteBatch(ctx, code, records, globals)
+			results, batchErr = be.ExecuteBatch(ctx, src, records, globals)
 		} else {
-			results, batchErr = engine.ExecuteBatchSerial(ctx, eng, code, records, globals)
+			results, batchErr = engine.ExecuteBatchSerial(ctx, eng, src, records, globals)
 		}
 		if batchErr != nil {
 			observeExecute(ctx, language, runtime, "error", time.Since(start))
@@ -247,7 +254,7 @@ func (n *ScriptNode) Execute(ctx context.Context, input *types.Input) (*types.Ou
 		return &types.Output{Data: data, Port: "main"}, nil
 	}
 
-	result, err := eng.Execute(ctx, code, globals, engine.DefaultHelpers())
+	result, err := eng.Execute(ctx, src, globals, engine.DefaultHelpers())
 	if err != nil {
 		observeExecute(ctx, language, runtime, "error", time.Since(start))
 		// If the per-execution context expired (deadline or cancellation), the

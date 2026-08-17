@@ -124,7 +124,7 @@ func (p *pooledVM) cleanup() bool {
 	return true
 }
 
-func (e *gojaEngine) Execute(ctx context.Context, code string, globals map[string]any, h engine.Helpers) (any, error) {
+func (e *gojaEngine) Execute(ctx context.Context, src engine.Source, globals map[string]any, h engine.Helpers) (any, error) {
 	// TODO(metrics): emit before/after counters and timers when the project
 	// metrics middleware lands:
 	//   - script_goja_compile_total{result=hit|miss} (e.programs LRU)
@@ -132,7 +132,11 @@ func (e *gojaEngine) Execute(ctx context.Context, code string, globals map[strin
 	//   - script_goja_pool_get_total{result=hit|miss} (warm vs cold VM)
 	//   - script_goja_execute_duration_seconds       (RunProgram window)
 	//   - script_goja_interrupt_total                (ctx-cancelled path)
-	prog, err := e.compile(code)
+	//
+	// src.Digest is ignored: JS sources are kilobytes, so keying the program
+	// cache by content costs a comparison this engine cannot measure. The digest
+	// exists for wasm, where the same key is ~9 MB.
+	prog, err := e.compile(src.Code)
 	if err != nil {
 		return nil, fmt.Errorf("js/goja: compile: %w", err)
 	}

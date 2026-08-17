@@ -61,7 +61,7 @@ func TestPrewarm_BuildsPoolBeforeFirstRequest(t *testing.T) {
 
 	// A subsequent Execute with the same config must reuse that pool, not swap.
 	gen := p.gen
-	out, err := f.Execute(context.Background(), code, map[string]any{
+	out, err := f.Execute(context.Background(), engine.Code(code), map[string]any{
 		"$config": cfg,
 		"x":       9.0,
 	}, engine.DefaultHelpers())

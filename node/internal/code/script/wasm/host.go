@@ -25,20 +25,28 @@ type reactorHost struct {
 	mu      sync.Mutex
 	engines map[string]*reactorEngine // keyed by module sha256
 
-	// codeCache fronts engines with the base64 code string as key so the hot
-	// path skips the 5 ms base64-decode + sha256 of a multi-MB module on every
-	// call. Go's string map hashing uses AES-NI (~µs for a 9 MB key) vs sha256's
-	// 5 ms. A miss falls through to engineFor, whose sha256 dedup is the
-	// correctness backstop. Bounded LRU: module working set is small.
+	// codeCache fronts engines for callers that supply no digest, keyed by the
+	// base64 code string so the hot path skips a multi-MB base64-decode +
+	// sha256 on every call. A miss falls through to engineForKey, whose sha256
+	// dedup is the correctness backstop. Bounded LRU: module working set is
+	// small.
 	//
-	// This is the ONE map that stays keyed by the code string, and deliberately:
-	// it is a pure memo on the per-message hot path, and a stale or duplicated
-	// entry costs at most a recompile that engineFor then dedups. Measured, the
-	// alternative is not viable — re-keying it by module sha256 would put ~1.4 ms
-	// decode + ~1.8 ms hash on every message and cap throughput near 310 msg/s
-	// against the 12508 msg/s this engine sustains. The registries below record
-	// FACTS about a module, where a split identity is silent misbehaviour rather
-	// than a wasted cycle, so they key on moduleKey instead.
+	// It is a memo only, and a poor one for a multi-MB module: a Go map hit must
+	// confirm the stored key EQUALS the lookup key, and runtime.memequal walks
+	// the full 9 MB unless the two strings share a backing array. Measured on an
+	// M3, 198 µs per lookup against 22 ns when the headers coincide (see
+	// module_resolution_bench_test.go). Production never shares a header — the
+	// activation path encodes its own copy of the module and the artifact cache
+	// may produce several more — so this path is the expensive one every time.
+	//
+	// engineForSource therefore prefers the digest a caller already holds and
+	// reaches engines directly, comparing ~64 bytes instead of 9 MB. This cache
+	// remains for the digest-less callers (inline `node.Script(b64)`, tests,
+	// prewarm), where the alternative is a ~3 ms decode+hash per call.
+	//
+	// The registries below record FACTS about a module, where a split identity
+	// is silent misbehaviour rather than a wasted cycle, so they key on
+	// moduleKey instead.
 	codeCache *lru.Cache[string, *reactorEngine]
 
 	// prewarm holds modules registered via Prewarm to be compiled and pooled by
@@ -153,10 +161,56 @@ func (h *reactorHost) runtime(ctx context.Context) wazero.Runtime {
 	return h.rt
 }
 
-// engineForCode is the hot-path entry: it resolves the reactor engine straight
-// from the base64 code string, skipping the multi-MB base64-decode + sha256 on
-// a cache hit. On a miss it decodes once, delegates to engineFor (sha256
-// dedup), and memoizes by code string.
+// engineForSource is the hot-path entry: it resolves the reactor engine for one
+// script source.
+//
+// When the caller knows the module's digest, the lookup is a 64-byte map probe
+// against h.engines and nothing else — no decode, no hash, and no comparison
+// against the multi-MB code string. That is the whole point of carrying a
+// digest: see engine.Source and codeCache's comment for what the content-keyed
+// lookup costs (198 µs per call, 32% of wasm time in a production profile).
+//
+// A digest that names no compiled engine yet falls through to the content path,
+// which compiles it and publishes it under the same key — so the next call for
+// the same digest hits. A malformed digest falls through the same way rather
+// than failing: it is a naming defect in the caller, and refusing to run code
+// the artifact store already handed us would turn it into an outage.
+func (h *reactorHost) engineForSource(ctx context.Context, src engine.Source) (*reactorEngine, error) {
+	if src.Digest != "" {
+		if key, ok := moduleKeyFromDigest(src.Digest); ok {
+			// engines and sourceDriven are read under ONE hold, for the reason
+			// engineForCode spells out: the two sides cross, and a lookup split
+			// across two holds can miss both. The creating goroutine publishes
+			// its engine into h.engines BEFORE it resolves the flag, so an engine
+			// found here may be one whose creator has not reached that step yet —
+			// and a seed that landed before the engine existed found nothing to
+			// flip. Resolving the flag here as well is what keeps a module from
+			// serving a message on the legacy globals path, evaluating against no
+			// rules and passing every record through untagged.
+			h.mu.Lock()
+			e, hit := h.engines[key]
+			fromSource := hit && h.sourceDrivenLocked(key)
+			h.mu.Unlock()
+			if hit {
+				// Load before Store: this runs on every message across every
+				// worker, and an unconditional store to a shared atomic would
+				// bounce its cache line between cores for a value that changes
+				// once in a module's lifetime.
+				if fromSource && !e.configFromSource.Load() {
+					e.configFromSource.Store(true)
+				}
+				obs().OnModuleCompile(ctx, "hit")
+				return e, nil
+			}
+		}
+	}
+	return h.engineForCode(ctx, src.Code)
+}
+
+// engineForCode resolves the reactor engine from the base64 code string alone,
+// skipping the multi-MB base64-decode + sha256 on a codeCache hit. On a miss it
+// decodes once, delegates to engineForKey (sha256 dedup), and memoizes by code
+// string.
 func (h *reactorHost) engineForCode(ctx context.Context, code string) (*reactorEngine, error) {
 	if e, ok := h.codeCache.Get(code); ok {
 		return e, nil

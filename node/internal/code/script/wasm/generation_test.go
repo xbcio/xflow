@@ -25,7 +25,7 @@ func TestEvalResultCarriesConfigGeneration(t *testing.T) {
 		t.Fatalf("apply v6: %v", err)
 	}
 
-	out, err := sharedReactorEngine.Execute(ctx, code, map[string]any{"x": 1.0}, engine.DefaultHelpers())
+	out, err := sharedReactorEngine.Execute(ctx, engine.Code(code), map[string]any{"x": 1.0}, engine.DefaultHelpers())
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -45,7 +45,7 @@ func TestEvalResultCarriesConfigGeneration(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("apply v7: %v", err)
 	}
-	out2, err := sharedReactorEngine.Execute(ctx, code, map[string]any{"x": 1.0}, engine.DefaultHelpers())
+	out2, err := sharedReactorEngine.Execute(ctx, engine.Code(code), map[string]any{"x": 1.0}, engine.DefaultHelpers())
 	if err != nil {
 		t.Fatalf("Execute after swap: %v", err)
 	}

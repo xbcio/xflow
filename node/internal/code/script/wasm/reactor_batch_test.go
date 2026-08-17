@@ -24,7 +24,7 @@ func TestExecuteBatch_SkipsFailingRecord(t *testing.T) {
 		),
 	}
 
-	out, err := f.ExecuteBatch(context.Background(), code, records, globals)
+	out, err := f.ExecuteBatch(context.Background(), engine.Code(code), records, globals)
 	if err != nil {
 		t.Fatalf("ExecuteBatch: %v", err)
 	}
@@ -47,7 +47,7 @@ func TestExecuteBatch_SkipsFailingRecord(t *testing.T) {
 
 func TestExecuteBatch_EmptyInput(t *testing.T) {
 	f := &reactorFacade{host: newReactorHost()}
-	out, err := f.ExecuteBatch(context.Background(), b64(taggerWasm), nil, map[string]any{})
+	out, err := f.ExecuteBatch(context.Background(), engine.Code(b64(taggerWasm)), nil, map[string]any{})
 	if err != nil {
 		t.Fatalf("empty batch must not error: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestExecuteBatch_CancelledContextFails(t *testing.T) {
 	f := &reactorFacade{host: newReactorHost()}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := f.ExecuteBatch(ctx, b64(taggerWasm), []any{map[string]any{"x": 1}}, map[string]any{})
+	_, err := f.ExecuteBatch(ctx, engine.Code(b64(taggerWasm)), []any{map[string]any{"x": 1}}, map[string]any{})
 	if err == nil {
 		t.Fatal("cancelled context must fail the batch")
 	}

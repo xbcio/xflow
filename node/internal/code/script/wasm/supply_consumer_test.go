@@ -267,7 +267,7 @@ func TestSupplyConsumerAcceptsEmptyRuleset(t *testing.T) {
 	}
 
 	f := &reactorFacade{host: sharedReactorHost}
-	out, err := f.Execute(ctx, code, map[string]any{"x": 8.0}, engine.DefaultHelpers())
+	out, err := f.Execute(ctx, engine.Code(code), map[string]any{"x": 8.0}, engine.DefaultHelpers())
 	if err != nil {
 		t.Fatalf("execute against an empty ruleset: %v", err)
 	}
@@ -303,7 +303,7 @@ func TestSourceDrivenWithNoContentFailsRetryably(t *testing.T) {
 	}
 
 	f := &reactorFacade{host: sharedReactorHost}
-	_, execErr := f.Execute(ctx, code, map[string]any{"x": 1.0}, engine.DefaultHelpers())
+	_, execErr := f.Execute(ctx, engine.Code(code), map[string]any{"x": 1.0}, engine.DefaultHelpers())
 	if execErr == nil {
 		t.Fatal("Execute with no content succeeded; it must fail rather than evaluate " +
 			"against zero rules and pass every record through untagged")
@@ -354,7 +354,7 @@ func TestSupplyConsumerRecoversAfterFirstContentRejected(t *testing.T) {
 	}
 
 	f := &reactorFacade{host: sharedReactorHost}
-	out, err := f.Execute(ctx, code, map[string]any{"x": 1.0}, engine.DefaultHelpers())
+	out, err := f.Execute(ctx, engine.Code(code), map[string]any{"x": 1.0}, engine.DefaultHelpers())
 	if err != nil {
 		t.Fatalf("execute after recovery: %v", err)
 	}

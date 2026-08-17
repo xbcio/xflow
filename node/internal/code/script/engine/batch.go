@@ -6,7 +6,7 @@ import "context"
 // records in one call. ScriptNode type-asserts for it and falls back to
 // ExecuteBatchSerial when absent.
 type BatchEngine interface {
-	ExecuteBatch(ctx context.Context, code string, records []any, globals map[string]any) ([]any, error)
+	ExecuteBatch(ctx context.Context, src Source, records []any, globals map[string]any) ([]any, error)
 }
 
 // BuildRecordGlobals constructs the per-record expression environment by
@@ -43,11 +43,11 @@ func BuildRecordGlobals(globals map[string]any, rec any) map[string]any {
 // malformed record must not invalidate the batch. A cancelled context fails the
 // whole batch — it will hit every remaining record anyway, and returning a short
 // result would misrepresent a timeout as "these records didn't match".
-func ExecuteBatchSerial(ctx context.Context, e Engine, code string, records []any, globals map[string]any) ([]any, error) {
+func ExecuteBatchSerial(ctx context.Context, e Engine, src Source, records []any, globals map[string]any) ([]any, error) {
 	out := make([]any, 0, len(records))
 	for _, rec := range records {
 		perRecord := BuildRecordGlobals(globals, rec)
-		res, err := e.Execute(ctx, code, perRecord, DefaultHelpers())
+		res, err := e.Execute(ctx, src, perRecord, DefaultHelpers())
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil, err

@@ -45,7 +45,7 @@ func matched(t *testing.T, out any) map[string]bool {
 
 func TestReactor_ConfigureThenEval(t *testing.T) {
 	e := newReactor(t)
-	out, err := e.Execute(context.Background(), b64(reactorWasm), map[string]any{
+	out, err := e.Execute(context.Background(), engine.Code(b64(reactorWasm)), map[string]any{
 		"$config": ruleConfig([2]string{"big", "x > 5"}, [2]string{"small", "x < 5"}),
 		"x":       8.0,
 	}, engine.DefaultHelpers())
@@ -66,7 +66,7 @@ func TestReactor_StatePersistsAcrossCalls(t *testing.T) {
 	e := newReactor(t)
 	cfg := ruleConfig([2]string{"pos", "x > 0"})
 	for i, x := range []float64{3, -1, 7} {
-		out, err := e.Execute(context.Background(), b64(reactorWasm), map[string]any{
+		out, err := e.Execute(context.Background(), engine.Code(b64(reactorWasm)), map[string]any{
 			"$config": cfg, "x": x,
 		}, engine.DefaultHelpers())
 		if err != nil {
@@ -86,7 +86,7 @@ func TestReactor_StatePersistsAcrossCalls(t *testing.T) {
 func TestReactor_ConfigSwap(t *testing.T) {
 	e := newReactor(t)
 	// First generation: rule "big".
-	out, err := e.Execute(context.Background(), b64(reactorWasm), map[string]any{
+	out, err := e.Execute(context.Background(), engine.Code(b64(reactorWasm)), map[string]any{
 		"$config": ruleConfig([2]string{"big", "x > 5"}), "x": 8.0,
 	}, engine.DefaultHelpers())
 	if err != nil {
@@ -96,7 +96,7 @@ func TestReactor_ConfigSwap(t *testing.T) {
 		t.Fatal("gen1: expected big to match x=8")
 	}
 	// Second generation: different rule set — "big" no longer exists.
-	out, err = e.Execute(context.Background(), b64(reactorWasm), map[string]any{
+	out, err = e.Execute(context.Background(), engine.Code(b64(reactorWasm)), map[string]any{
 		"$config": ruleConfig([2]string{"neg", "x < 0"}), "x": 8.0,
 	}, engine.DefaultHelpers())
 	if err != nil {
@@ -117,20 +117,20 @@ func TestReactor_ConfigSwap(t *testing.T) {
 func TestReactor_BadConfigRejected(t *testing.T) {
 	e := newReactor(t)
 	// Warm a good pool first.
-	if _, err := e.Execute(context.Background(), b64(reactorWasm), map[string]any{
+	if _, err := e.Execute(context.Background(), engine.Code(b64(reactorWasm)), map[string]any{
 		"$config": ruleConfig([2]string{"ok", "x > 0"}), "x": 1.0,
 	}, engine.DefaultHelpers()); err != nil {
 		t.Fatalf("warm: %v", err)
 	}
 	// Now submit a broken rule — must error, not silently accept.
-	_, err := e.Execute(context.Background(), b64(reactorWasm), map[string]any{
+	_, err := e.Execute(context.Background(), engine.Code(b64(reactorWasm)), map[string]any{
 		"$config": ruleConfig([2]string{"broken", "this is (not valid expr"}), "x": 1.0,
 	}, engine.DefaultHelpers())
 	if err == nil {
 		t.Fatal("expected bad-config error, got nil")
 	}
 	// Last-good preserved: the original pool still serves correctly.
-	out, err := e.Execute(context.Background(), b64(reactorWasm), map[string]any{
+	out, err := e.Execute(context.Background(), engine.Code(b64(reactorWasm)), map[string]any{
 		"$config": ruleConfig([2]string{"ok", "x > 0"}), "x": 1.0,
 	}, engine.DefaultHelpers())
 	if err != nil {
@@ -149,7 +149,7 @@ func TestReactor_Concurrent(t *testing.T) {
 	e := newReactor(t)
 	cfg := ruleConfig([2]string{"big", "x > 5"})
 	// Warm once so the pool exists before the storm.
-	if _, err := e.Execute(context.Background(), b64(reactorWasm), map[string]any{
+	if _, err := e.Execute(context.Background(), engine.Code(b64(reactorWasm)), map[string]any{
 		"$config": cfg, "x": 9.0,
 	}, engine.DefaultHelpers()); err != nil {
 		t.Fatalf("warm: %v", err)
@@ -164,7 +164,7 @@ func TestReactor_Concurrent(t *testing.T) {
 			defer wg.Done()
 			for i := range iters {
 				x := float64((g*iters + i) % 12) // deterministic mix around threshold 5
-				out, err := e.Execute(context.Background(), b64(reactorWasm), map[string]any{
+				out, err := e.Execute(context.Background(), engine.Code(b64(reactorWasm)), map[string]any{
 					"$config": cfg, "x": x,
 				}, engine.DefaultHelpers())
 				if err != nil {
@@ -201,7 +201,7 @@ func TestReactor_TimeoutDoomsAndRebuilds(t *testing.T) {
 	// First, a timed-out call.
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
-	_, err := e.Execute(ctx, code, cfg, engine.DefaultHelpers())
+	_, err := e.Execute(ctx, engine.Code(code), cfg, engine.DefaultHelpers())
 	if err == nil {
 		t.Fatal("expected timeout error from spinning eval")
 	}
@@ -219,7 +219,7 @@ func TestReactor_TimeoutDoomsAndRebuilds(t *testing.T) {
 	defer cancel2()
 	done := make(chan error, 1)
 	go func() {
-		_, err := e.Execute(ctx2, code, cfg, engine.DefaultHelpers())
+		_, err := e.Execute(ctx2, engine.Code(code), cfg, engine.DefaultHelpers())
 		done <- err
 	}()
 	select {
@@ -237,7 +237,7 @@ func TestReactor_TimeoutDoomsAndRebuilds(t *testing.T) {
 // produces zero rules is valid (§6.5 empty-config semantics).
 func TestReactor_EmptyConfigValid(t *testing.T) {
 	e := newReactor(t)
-	out, err := e.Execute(context.Background(), b64(reactorWasm), map[string]any{
+	out, err := e.Execute(context.Background(), engine.Code(b64(reactorWasm)), map[string]any{
 		"$config": map[string]any{"rules": []any{}},
 		"x":       8.0,
 	}, engine.DefaultHelpers())
@@ -258,14 +258,14 @@ func BenchmarkReactor_Eval(b *testing.B) {
 		[2]string{"r1", "x > 5"}, [2]string{"r2", "x < 100"}, [2]string{"r3", "x > 0"},
 	)
 	// Warm.
-	if _, err := e.Execute(context.Background(), code, map[string]any{"$config": cfg, "x": 8.0}, engine.DefaultHelpers()); err != nil {
+	if _, err := e.Execute(context.Background(), engine.Code(code), map[string]any{"$config": cfg, "x": 8.0}, engine.DefaultHelpers()); err != nil {
 		b.Fatalf("warm: %v", err)
 	}
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		i := 0
 		for pb.Next() {
-			if _, err := e.Execute(context.Background(), code, map[string]any{"$config": cfg, "x": float64(i % 20)}, engine.DefaultHelpers()); err != nil {
+			if _, err := e.Execute(context.Background(), engine.Code(code), map[string]any{"$config": cfg, "x": float64(i % 20)}, engine.DefaultHelpers()); err != nil {
 				b.Fatalf("eval: %v", err)
 			}
 			i++
@@ -281,7 +281,7 @@ func BenchmarkCommand_Execute(b *testing.B) {
 	code := b64(echoWasm)
 	b.ResetTimer()
 	for range b.N {
-		if _, err := e.Execute(context.Background(), code, map[string]any{"$input": map[string]any{"x": 8.0}}, engine.DefaultHelpers()); err != nil {
+		if _, err := e.Execute(context.Background(), engine.Code(code), map[string]any{"$input": map[string]any{"x": 8.0}}, engine.DefaultHelpers()); err != nil {
 			b.Fatalf("exec: %v", err)
 		}
 	}

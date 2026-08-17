@@ -18,7 +18,7 @@ func newGoja() engine.Engine {
 
 func TestGoja_ObjectCompletion(t *testing.T) {
 	out, err := newGoja().Execute(context.Background(),
-		`({status: 'ok', len: $input.name.length})`,
+		engine.Code(`({status: 'ok', len: $input.name.length})`),
 		map[string]any{"$input": map[string]any{"name": "abcd"}},
 		engine.DefaultHelpers())
 	if err != nil {
@@ -32,7 +32,7 @@ func TestGoja_ObjectCompletion(t *testing.T) {
 
 func TestGoja_ReadsCredential(t *testing.T) {
 	out, err := newGoja().Execute(context.Background(),
-		`({t: $credential.token, k: $credentials.aes_key.key})`,
+		engine.Code(`({t: $credential.token, k: $credentials.aes_key.key})`),
 		map[string]any{
 			"$credential":  map[string]any{"token": "t-1"},
 			"$credentials": map[string]any{"aes_key": map[string]any{"key": "kk"}},
@@ -49,7 +49,7 @@ func TestGoja_ReadsCredential(t *testing.T) {
 
 func TestGoja_HelpersBase64(t *testing.T) {
 	out, err := newGoja().Execute(context.Background(),
-		`({enc: $helpers.base64Encode('hi')})`,
+		engine.Code(`({enc: $helpers.base64Encode('hi')})`),
 		nil, engine.DefaultHelpers())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -61,7 +61,7 @@ func TestGoja_HelpersBase64(t *testing.T) {
 
 func TestGoja_SandboxNoIO(t *testing.T) {
 	out, err := newGoja().Execute(context.Background(),
-		`({hasRequire: typeof require, hasFetch: typeof fetch, hasProcess: typeof process, hasXHR: typeof XMLHttpRequest})`,
+		engine.Code(`({hasRequire: typeof require, hasFetch: typeof fetch, hasProcess: typeof process, hasXHR: typeof XMLHttpRequest})`),
 		nil, engine.DefaultHelpers())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -77,7 +77,7 @@ func TestGoja_SandboxNoIO(t *testing.T) {
 func TestGoja_Timeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	_, err := newGoja().Execute(ctx, `while(true){}`, nil, engine.DefaultHelpers())
+	_, err := newGoja().Execute(ctx, engine.Code(`while(true){}`), nil, engine.DefaultHelpers())
 	if err == nil {
 		t.Fatal("expected timeout interrupt error")
 	}
@@ -85,11 +85,11 @@ func TestGoja_Timeout(t *testing.T) {
 
 func TestGoja_PoolIsolation(t *testing.T) {
 	e := newGoja()
-	_, err := e.Execute(context.Background(), `leaked = 99; ({})`, nil, engine.DefaultHelpers())
+	_, err := e.Execute(context.Background(), engine.Code(`leaked = 99; ({})`), nil, engine.DefaultHelpers())
 	if err != nil {
 		t.Fatalf("first exec error: %v", err)
 	}
-	out, err := e.Execute(context.Background(), `({seen: typeof leaked})`, nil, engine.DefaultHelpers())
+	out, err := e.Execute(context.Background(), engine.Code(`({seen: typeof leaked})`), nil, engine.DefaultHelpers())
 	if err != nil {
 		t.Fatalf("second exec error: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestGoja_PoolIsolation(t *testing.T) {
 }
 
 func TestGoja_RuntimeError(t *testing.T) {
-	_, err := newGoja().Execute(context.Background(), `throw new Error('boom')`, nil, engine.DefaultHelpers())
+	_, err := newGoja().Execute(context.Background(), engine.Code(`throw new Error('boom')`), nil, engine.DefaultHelpers())
 	if err == nil || !strings.Contains(err.Error(), "boom") {
 		t.Fatalf("expected boom error, got %v", err)
 	}
@@ -110,13 +110,13 @@ func TestGoja_TimeoutThenReuse(t *testing.T) {
 	// First exec times out under a tight deadline.
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	if _, err := e.Execute(ctx, `while(true){}`, nil, engine.DefaultHelpers()); err == nil {
+	if _, err := e.Execute(ctx, engine.Code(`while(true){}`), nil, engine.DefaultHelpers()); err == nil {
 		t.Fatal("expected timeout error")
 	}
 	// A subsequent clean exec on the same engine must succeed (no stale interrupt,
 	// no poisoned pooled VM).
 	for i := 0; i < 20; i++ {
-		out, err := e.Execute(context.Background(), `({ok: 1 + 1})`, nil, engine.DefaultHelpers())
+		out, err := e.Execute(context.Background(), engine.Code(`({ok: 1 + 1})`), nil, engine.DefaultHelpers())
 		if err != nil {
 			t.Fatalf("iteration %d: clean exec failed after a timeout: %v", i, err)
 		}
@@ -131,7 +131,7 @@ func TestGoja_TimeoutThenReuse(t *testing.T) {
 // host. goja returns *goja.StackOverflowError unwrapped under our %w wrap.
 func TestGoja_StackOverflow(t *testing.T) {
 	_, err := newGoja().Execute(context.Background(),
-		`(function f(){ return f(); })()`,
+		engine.Code(`(function f(){ return f(); })()`),
 		nil, engine.DefaultHelpers())
 	if err == nil {
 		t.Fatal("expected stack overflow error")
@@ -147,10 +147,10 @@ func TestGoja_StackOverflow(t *testing.T) {
 // tainted VM is discarded instead of returned to the pool.
 func TestGoja_PrototypePollutionDiscarded(t *testing.T) {
 	e := &gojaEngine{programs: newProgramCache(engine.DefaultProgramCacheSize)}
-	if _, err := e.Execute(context.Background(), `Object.prototype.__xflow_poll = 42; ({})`, nil, engine.DefaultHelpers()); err != nil {
+	if _, err := e.Execute(context.Background(), engine.Code(`Object.prototype.__xflow_poll = 42; ({})`), nil, engine.DefaultHelpers()); err != nil {
 		t.Fatalf("polluting exec error: %v", err)
 	}
-	out, err := e.Execute(context.Background(), `({seen: typeof ({}).__xflow_poll})`, nil, engine.DefaultHelpers())
+	out, err := e.Execute(context.Background(), engine.Code(`({seen: typeof ({}).__xflow_poll})`), nil, engine.DefaultHelpers())
 	if err != nil {
 		t.Fatalf("post-pollution exec error: %v", err)
 	}

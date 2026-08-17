@@ -35,7 +35,7 @@ func TestReactorHostTrapClassification(t *testing.T) {
 	}
 	code := b64(reactorTrapWasm)
 
-	_, err := e.Execute(context.Background(), code,
+	_, err := e.Execute(context.Background(), engine.Code(code),
 		map[string]any{"$input": map[string]any{"x": 1}}, engine.DefaultHelpers())
 	if err == nil {
 		t.Fatal("expected the guest to trap")
@@ -93,7 +93,7 @@ func TestReactorTimeoutIsNotPermanent(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, err := e.Execute(ctx, b64(reactorSpinWasm),
+	_, err := e.Execute(ctx, engine.Code(b64(reactorSpinWasm)),
 		map[string]any{"$input": map[string]any{"x": 1}}, engine.DefaultHelpers())
 	if err == nil {
 		t.Fatal("expected the spin guest to fail on a canceled context")

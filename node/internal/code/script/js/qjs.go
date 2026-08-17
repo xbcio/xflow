@@ -43,7 +43,7 @@ const stripGlobals = `(function(){
 
 func (qjsEngine) Name() string { return "js/qjs" }
 
-func (qjsEngine) Execute(ctx context.Context, code string, globals map[string]any, h engine.Helpers) (result any, err error) {
+func (qjsEngine) Execute(ctx context.Context, src engine.Source, globals map[string]any, h engine.Helpers) (result any, err error) {
 	// TODO(metrics): emit before/after counters and timers when the project
 	// metrics middleware lands:
 	//   - script_qjs_runtime_new_duration_seconds (qjs.New cost; cold-start indicator)
@@ -125,7 +125,10 @@ func (qjsEngine) Execute(ctx context.Context, code string, globals map[string]an
 	}))
 	g.SetProperty(c.NewString("$helpers"), helpers)
 
-	val, eerr := rt.Eval("script.js", qjs.Code(code))
+	// src.Digest is unused: qjs instantiates a fresh module per call and caches
+	// nothing by script identity, so there is no lookup for a short key to make
+	// cheaper.
+	val, eerr := rt.Eval("script.js", qjs.Code(src.Code))
 	if eerr != nil {
 		return nil, fmt.Errorf("js/qjs: %w", eerr)
 	}

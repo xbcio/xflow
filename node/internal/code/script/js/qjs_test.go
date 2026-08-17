@@ -19,7 +19,7 @@ func newQJS(t *testing.T) engine.Engine {
 
 func TestQJS_ObjectCompletion(t *testing.T) {
 	out, err := newQJS(t).Execute(context.Background(),
-		`({status: 'ok', len: $input.name.length})`,
+		engine.Code(`({status: 'ok', len: $input.name.length})`),
 		map[string]any{"$input": map[string]any{"name": "abcd"}},
 		engine.DefaultHelpers())
 	if err != nil {
@@ -32,7 +32,7 @@ func TestQJS_ObjectCompletion(t *testing.T) {
 
 func TestQJS_ReadsCredential(t *testing.T) {
 	out, err := newQJS(t).Execute(context.Background(),
-		`({t: $credential.token, k: $credentials.aes_key.key})`,
+		engine.Code(`({t: $credential.token, k: $credentials.aes_key.key})`),
 		map[string]any{
 			"$credential":  map[string]any{"token": "t-1"},
 			"$credentials": map[string]any{"aes_key": map[string]any{"key": "kk"}},
@@ -49,7 +49,7 @@ func TestQJS_ReadsCredential(t *testing.T) {
 
 func TestQJS_HelpersBase64(t *testing.T) {
 	out, err := newQJS(t).Execute(context.Background(),
-		`({enc: $helpers.base64Encode('hi')})`,
+		engine.Code(`({enc: $helpers.base64Encode('hi')})`),
 		nil, engine.DefaultHelpers())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -61,12 +61,12 @@ func TestQJS_HelpersBase64(t *testing.T) {
 
 func TestQJS_SandboxNoIO(t *testing.T) {
 	out, err := newQJS(t).Execute(context.Background(),
-		`({hasRequire: typeof require, hasFetch: typeof fetch, hasProcess: typeof process,
+		engine.Code(`({hasRequire: typeof require, hasFetch: typeof fetch, hasProcess: typeof process,
 		   hasStd: typeof std, hasOs: typeof os, hasPrint: typeof print, hasScriptArgs: typeof scriptArgs,
 		   hasConsole: typeof console, hasBjson: typeof bjson, hasPerformance: typeof performance,
 		   hasNavigator: typeof navigator, hasGc: typeof gc, hasQueueMicrotask: typeof queueMicrotask,
 		   hasSetTimeout: typeof setTimeout, hasSetInterval: typeof setInterval,
-		   hasClearTimeout: typeof clearTimeout, hasClearInterval: typeof clearInterval})`,
+		   hasClearTimeout: typeof clearTimeout, hasClearInterval: typeof clearInterval})`),
 		nil, engine.DefaultHelpers())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -90,8 +90,8 @@ func TestQJS_SandboxNoIO(t *testing.T) {
 // be reached at all from a user script.
 func TestQJS_SandboxFileIOUnreachable(t *testing.T) {
 	out, err := newQJS(t).Execute(context.Background(),
-		`({osType: typeof os, readdir: (typeof os !== 'undefined' && typeof os.readdir),
-		   stdType: typeof std, open: (typeof std !== 'undefined' && typeof std.open)})`,
+		engine.Code(`({osType: typeof os, readdir: (typeof os !== 'undefined' && typeof os.readdir),
+		   stdType: typeof std, open: (typeof std !== 'undefined' && typeof std.open)})`),
 		nil, engine.DefaultHelpers())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -114,7 +114,7 @@ func TestQJS_SandboxFileIOUnreachable(t *testing.T) {
 func TestQJS_Timeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	_, err := newQJS(t).Execute(ctx, `while(true){}`, nil, engine.DefaultHelpers())
+	_, err := newQJS(t).Execute(ctx, engine.Code(`while(true){}`), nil, engine.DefaultHelpers())
 	if err == nil {
 		t.Fatal("expected timeout error")
 	}
@@ -130,7 +130,7 @@ func TestQJS_Warmup(t *testing.T) {
 	}
 	// After warmup, normal execution must still succeed.
 	out, err := newQJS(t).Execute(context.Background(),
-		`({ok: 1+1})`, nil, engine.DefaultHelpers())
+		engine.Code(`({ok: 1+1})`), nil, engine.DefaultHelpers())
 	if err != nil {
 		t.Fatalf("post-warmup execute: %v", err)
 	}

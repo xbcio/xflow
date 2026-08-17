@@ -111,7 +111,7 @@ func (e *wazeroEngine) compile(ctx context.Context, wasmBytes []byte) (wazero.Co
 	return cm, nil
 }
 
-func (e *wazeroEngine) Execute(ctx context.Context, code string, globals map[string]any, _ engine.Helpers) (any, error) {
+func (e *wazeroEngine) Execute(ctx context.Context, src engine.Source, globals map[string]any, _ engine.Helpers) (any, error) {
 	// TODO(metrics): emit before/after counters and timers when the project
 	// metrics middleware lands:
 	//   - script_wasm_compile_total{result=hit|miss} (sha256 LRU)
@@ -128,7 +128,19 @@ func (e *wazeroEngine) Execute(ctx context.Context, code string, globals map[str
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("wasm/wazero: run module: %w", err)
 	}
-	wasmBytes, err := decodeCode(code)
+	// A known digest names the compiled module directly, so a warm call skips
+	// the multi-MB base64 decode and sha256 entirely. On a miss the bytes are
+	// needed anyway to compile, and compile() re-derives the key from them
+	// rather than trusting the caller's — the cache key must always be the hash
+	// of what was actually compiled.
+	if src.Digest != "" {
+		if key, ok := moduleKeyFromDigest(src.Digest); ok {
+			if cm, hit := e.compiled.c.Get(key); hit {
+				return e.run(ctx, cm, globals)
+			}
+		}
+	}
+	wasmBytes, err := decodeCode(src.Code)
 	if err != nil {
 		return nil, err
 	}
@@ -136,7 +148,13 @@ func (e *wazeroEngine) Execute(ctx context.Context, code string, globals map[str
 	if err != nil {
 		return nil, err
 	}
+	return e.run(ctx, cm, globals)
+}
 
+// run instantiates one compiled module against globals and returns its decoded
+// stdout. Split out of Execute so the digest and content paths share exactly one
+// copy of the sandbox configuration and exit handling.
+func (e *wazeroEngine) run(ctx context.Context, cm wazero.CompiledModule, globals map[string]any) (any, error) {
 	stdin, err := encodeStdin(globals)
 	if err != nil {
 		return nil, err

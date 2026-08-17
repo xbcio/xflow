@@ -29,7 +29,7 @@ func TestJSFamily_HelpersConsistent(t *testing.T) {
 		if !ok {
 			t.Fatalf("%s not registered", rt)
 		}
-		out, err := e.Execute(context.Background(), code, nil, engine.DefaultHelpers())
+		out, err := e.Execute(context.Background(), engine.Code(code), nil, engine.DefaultHelpers())
 		if err != nil {
 			t.Fatalf("%s exec error: %v", rt, err)
 		}

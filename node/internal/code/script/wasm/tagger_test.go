@@ -46,7 +46,7 @@ func taggerResult(t *testing.T, out any) (map[string]any, map[string]bool) {
 // unconditional clean strips a field, and both happen in one eval.
 func TestTagger_CleansAndTags(t *testing.T) {
 	e := newReactor(t)
-	out, err := e.Execute(context.Background(), b64(taggerWasm), map[string]any{
+	out, err := e.Execute(context.Background(), engine.Code(b64(taggerWasm)), map[string]any{
 		"$config": taggerConfig(
 			cleanRule("authorization", ""),
 			tagRule("admin-api", `path startsWith "/admin"`),
@@ -96,7 +96,7 @@ func TestTagger_CleanedFieldDoesNotSurviveUnderEnvRoots(t *testing.T) {
 		"latency_ms":    42.0,
 		"authorization": "Bearer super-secret",
 	}
-	out, err := e.Execute(context.Background(), b64(taggerWasm), map[string]any{
+	out, err := e.Execute(context.Background(), engine.Code(b64(taggerWasm)), map[string]any{
 		"$config":       taggerConfig(cleanRule("authorization", "")),
 		"path":          record["path"],
 		"latency_ms":    record["latency_ms"],
@@ -153,7 +153,7 @@ func findValue(v any, want string) string {
 // depend on rule order in a way the rule author cannot see.
 func TestTagger_CleanDoesNotHideFieldFromTagRules(t *testing.T) {
 	e := newReactor(t)
-	out, err := e.Execute(context.Background(), b64(taggerWasm), map[string]any{
+	out, err := e.Execute(context.Background(), engine.Code(b64(taggerWasm)), map[string]any{
 		"$config": taggerConfig(
 			cleanRule("token", ""),
 			tagRule("had-token", `token != nil`),
@@ -180,7 +180,7 @@ func TestTagger_ConditionalClean(t *testing.T) {
 	e := newReactor(t)
 	cfg := taggerConfig(cleanRule("body", `path startsWith "/internal"`))
 
-	stripped, err := e.Execute(context.Background(), b64(taggerWasm), map[string]any{
+	stripped, err := e.Execute(context.Background(), engine.Code(b64(taggerWasm)), map[string]any{
 		"$config": cfg,
 		"path":    "/internal/dump",
 		"body":    "sensitive",
@@ -193,7 +193,7 @@ func TestTagger_ConditionalClean(t *testing.T) {
 		t.Fatalf("body survived a matching clean rule: %v", rec)
 	}
 
-	kept, err := e.Execute(context.Background(), b64(taggerWasm), map[string]any{
+	kept, err := e.Execute(context.Background(), engine.Code(b64(taggerWasm)), map[string]any{
 		"$config": cfg,
 		"path":    "/public/info",
 		"body":    "harmless",
@@ -211,7 +211,7 @@ func TestTagger_ConditionalClean(t *testing.T) {
 // rather than partially applied — the host keeps its last-good pool (docs §6.3).
 func TestTagger_BadRuleRejected(t *testing.T) {
 	e := newReactor(t)
-	_, err := e.Execute(context.Background(), b64(taggerWasm), map[string]any{
+	_, err := e.Execute(context.Background(), engine.Code(b64(taggerWasm)), map[string]any{
 		"$config": taggerConfig(map[string]any{"kind": "nonsense", "tag": "x"}),
 		"path":    "/v1/x",
 	}, engine.DefaultHelpers())
@@ -224,7 +224,7 @@ func TestTagger_BadRuleRejected(t *testing.T) {
 // (docs §6: an empty rule set means pass-through, not an error).
 func TestTagger_EmptyRuleSetIsValid(t *testing.T) {
 	e := newReactor(t)
-	out, err := e.Execute(context.Background(), b64(taggerWasm), map[string]any{
+	out, err := e.Execute(context.Background(), engine.Code(b64(taggerWasm)), map[string]any{
 		"$config": taggerConfig(),
 		"path":    "/v1/x",
 	}, engine.DefaultHelpers())

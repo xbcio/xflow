@@ -28,7 +28,7 @@ type failEngine struct{}
 
 func (failEngine) Name() string { return "js/" + failRuntime }
 
-func (failEngine) Execute(_ context.Context, _ string, _ map[string]any, _ engine.Helpers) (any, error) {
+func (failEngine) Execute(_ context.Context, _ engine.Source, _ map[string]any, _ engine.Helpers) (any, error) {
 	failMu.Lock()
 	defer failMu.Unlock()
 	return nil, failSlot
@@ -36,7 +36,7 @@ func (failEngine) Execute(_ context.Context, _ string, _ map[string]any, _ engin
 
 // ExecuteBatch makes the same installed error drive the batch path, which the
 // Kafka trigger uses and which has its own copy of the error handling.
-func (failEngine) ExecuteBatch(_ context.Context, _ string, records []any, _ map[string]any) ([]any, error) {
+func (failEngine) ExecuteBatch(_ context.Context, _ engine.Source, records []any, _ map[string]any) ([]any, error) {
 	failMu.Lock()
 	defer failMu.Unlock()
 	return nil, failSlot

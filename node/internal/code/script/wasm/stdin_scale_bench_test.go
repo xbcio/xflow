@@ -86,12 +86,12 @@ func BenchmarkReactorEval_AllItemsScope(b *testing.B) {
 			}
 			// Warm: compile the module and fill the instance pool so neither is
 			// charged to the measured loop.
-			if _, err := e.Execute(context.Background(), code, globals(0), engine.DefaultHelpers()); err != nil {
+			if _, err := e.Execute(context.Background(), engine.Code(code), globals(0), engine.DefaultHelpers()); err != nil {
 				b.Fatalf("warm: %v", err)
 			}
 			b.ResetTimer()
 			for i := range b.N {
-				if _, err := e.Execute(context.Background(), code, globals(i), engine.DefaultHelpers()); err != nil {
+				if _, err := e.Execute(context.Background(), engine.Code(code), globals(i), engine.DefaultHelpers()); err != nil {
 					b.Fatalf("eval: %v", err)
 				}
 			}

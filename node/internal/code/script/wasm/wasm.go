@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // decodeCode turns the base64 node param into raw wasm bytes.
@@ -18,6 +19,33 @@ func decodeCode(code string) ([]byte, error) {
 		return nil, fmt.Errorf("wasm: decode base64 module: %w", err)
 	}
 	return b, nil
+}
+
+// moduleKeyFromDigest converts an artifact digest ("sha256:<64 hex>") into the
+// moduleKey reactorHost.engines uses, reporting whether the digest was
+// well-formed.
+//
+// The two are the same value by construction, not by coincidence: the artifact
+// store digests the module's raw bytes (store.ContentHash), and moduleKey
+// hashes those same bytes after base64-decoding them. That is what lets a
+// caller who fetched a module BY digest name the compiled engine without
+// touching the multi-MB string again.
+//
+// It returns ok=false rather than an error because every caller's response is
+// the same — fall back to the content-keyed path — and none of them can repair
+// a malformed digest.
+func moduleKeyFromDigest(digest string) (string, bool) {
+	key, ok := strings.CutPrefix(digest, "sha256:")
+	if !ok || len(key) != 64 {
+		return "", false
+	}
+	for i := 0; i < len(key); i++ {
+		c := key[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return "", false
+		}
+	}
+	return key, true
 }
 
 // moduleKey returns the canonical identity of a module carried as a base64 code
@@ -37,10 +65,11 @@ func decodeCode(code string) ([]byte, error) {
 // passing every record through untagged and uncleansed.
 //
 // Cost is ~3 ms for a 3 MB module (~1.4 ms decode + ~1.8 ms hash), so this
-// belongs on registration and warm-up paths ONLY. The per-message hot path keeps
-// its base64-keyed codeCache memo in front of it: re-keying that cache would put
-// these 3 ms on every message and cap throughput near 310 msg/s against the
-// 12508 msg/s this engine actually sustains.
+// belongs on registration and warm-up paths ONLY. A per-message caller that
+// already knows the module's digest passes it through engine.Source and reaches
+// the engine via moduleKeyFromDigest, which costs a 64-byte comparison; one that
+// does not falls back to reactorHost.codeCache's base64-keyed memo, which avoids
+// these 3 ms at the price of a full-length key compare.
 func moduleKey(code string) (string, error) {
 	b, err := decodeCode(code)
 	if err != nil {

@@ -55,7 +55,7 @@ func (f *reactorFacade) Name() string { return "wasm/wazero-reactor" }
 // When the module is not source-driven, the legacy path applies: rules are
 // passed via globals["$config"] and ensurePool is called with a sha256
 // equality check.
-func (f *reactorFacade) Execute(ctx context.Context, code string, globals map[string]any, _ engine.Helpers) (any, error) {
+func (f *reactorFacade) Execute(ctx context.Context, src engine.Source, globals map[string]any, _ engine.Helpers) (any, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -63,7 +63,7 @@ func (f *reactorFacade) Execute(ctx context.Context, code string, globals map[st
 		return nil, fmt.Errorf("wasm/wazero-reactor: %w", err)
 	}
 
-	e, err := f.host.engineForCode(ctx, code)
+	e, err := f.host.engineForSource(ctx, src)
 	if err != nil {
 		return nil, err
 	}
@@ -298,7 +298,7 @@ func isBatchSkippable(err error) bool {
 // compiledRule.matches). A doomed instance IS fatal — that is a host-level
 // failure, and letting the batch fail means the offsets stay uncommitted and
 // Kafka redelivers, which is clean because nothing downstream has run yet.
-func (f *reactorFacade) ExecuteBatch(ctx context.Context, code string, records []any, globals map[string]any) ([]any, error) {
+func (f *reactorFacade) ExecuteBatch(ctx context.Context, src engine.Source, records []any, globals map[string]any) ([]any, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -311,7 +311,7 @@ func (f *reactorFacade) ExecuteBatch(ctx context.Context, code string, records [
 	out := make([]any, 0, len(records))
 	for _, rec := range records {
 		perRecord := engine.BuildRecordGlobals(globals, rec)
-		res, err := f.Execute(ctx, code, perRecord, engine.DefaultHelpers())
+		res, err := f.Execute(ctx, src, perRecord, engine.DefaultHelpers())
 		if err != nil {
 			if isBatchSkippable(err) {
 				continue

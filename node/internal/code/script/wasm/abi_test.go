@@ -13,7 +13,7 @@ import (
 // ever starts assuming either is present.
 func TestABI_MinimalGuestWorks(t *testing.T) {
 	e := newReactor(t)
-	out, err := e.Execute(context.Background(), b64(reactorMinWasm), map[string]any{
+	out, err := e.Execute(context.Background(), engine.Code(b64(reactorMinWasm)), map[string]any{
 		"$config": map[string]any{},
 		"x":       7.0,
 	}, engine.DefaultHelpers())

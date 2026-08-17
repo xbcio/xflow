@@ -168,7 +168,7 @@ func TestExecuteSamplesConfigAgeForSourceDrivenModule(t *testing.T) {
 		t.Fatalf("apply: %v", err)
 	}
 
-	if _, err := sharedReactorEngine.Execute(ctx, code, map[string]any{"x": 1.0}, engine.DefaultHelpers()); err != nil {
+	if _, err := sharedReactorEngine.Execute(ctx, engine.Code(code), map[string]any{"x": 1.0}, engine.DefaultHelpers()); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
 
