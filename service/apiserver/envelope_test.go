@@ -56,8 +56,18 @@ func TestEnvelopeFailureCarriesNoDataAndAStableCode(t *testing.T) {
 	if got["code"] != "workflow_not_found" {
 		t.Errorf("code = %v, want the stable business code", got["code"])
 	}
+	// The contract (spec §3 / xflow-v1.yaml Envelope) says data is OMITTED on
+	// failure — not `data: null`. Asserting key absence (not "value == nil",
+	// which passes for both null and absent) is what gives this teeth: a future
+	// loss of `omitempty` on envelope.Data would re-emit `data: null` and turn
+	// this red.
+	if _, ok := got["data"]; ok {
+		t.Errorf("data key present (= %v) on a failure envelope — want the key omitted entirely (spec §3)", got["data"])
+	}
+	// Belt-and-suspenders: also assert no `null` sneaks in via a different code
+	// path that re-adds the key without a payload.
 	if got["data"] != nil {
-		t.Errorf("data = %v, want null on failure", got["data"])
+		t.Errorf("data = %v, want absent/null on failure", got["data"])
 	}
 }
 

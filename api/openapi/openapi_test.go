@@ -70,6 +70,11 @@ func TestSchemasMatchHandlerTypes(t *testing.T) {
 			value:  apiserver.ExampleEnvelope(),
 		},
 		{
+			name:   "error envelope",
+			schema: "ErrorEnvelope",
+			value:  apiserver.ExampleErrorEnvelope(),
+		},
+		{
 			name:   "execution detail",
 			schema: "ExecutionDetail",
 			value: engine.ExecutionDetail{
@@ -196,6 +201,29 @@ func TestSchemasMatchHandlerTypes(t *testing.T) {
 				Nodes:       []types.NodeDef{{ID: "n1", Name: "Start", Type: "http.request", Kind: types.NodeKindAction, Version: 1}},
 				Connections: types.Connections{"Start": {"default": types.PortConnections{Type: types.ConnectionTypeData, Targets: []types.Connection{{Node: "n1"}}}}},
 				Outputs:     map[string]types.WorkflowOutput{"out": {Value: "ok", DisplayName: "Result"}},
+			},
+		},
+		{
+			// Covers the oneOf OBJECT branch of Connections/PortConnections:
+			// a dependency port marshals as {"type":"dependency","targets":[...]}
+			// via portConnectionsAlias, NOT the array shorthand the data-port
+			// case above exercises. Without this, a broken PortConnections
+			// schema (renamed/missing field, wrong enum) would never surface in
+			// CI — oneOf's permissive matching would let the object fall through
+			// to the array branch and still pass.
+			name:   "workflow def (dependency port)",
+			schema: "WorkflowDef",
+			value: &types.WorkflowDef{
+				ID:        "wf-dependency-01H8XG",
+				Namespace: "default",
+				Name:      "supply-consumer",
+				Version:   "v1",
+				Spec:      "1",
+				Nodes:     []types.NodeDef{{ID: "rules", Name: "Rules", Type: "wasm.rules", Kind: types.NodeKindAction, Version: 1}},
+				Connections: types.Connections{"supply-src": {"supply": types.PortConnections{
+					Type:    types.ConnectionTypeDependency,
+					Targets: []types.Connection{{Node: "rules", Input: "main"}},
+				}}},
 			},
 		},
 	}

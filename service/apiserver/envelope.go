@@ -13,13 +13,16 @@ import (
 // See docs/design/API-SPECIFICATION.md §3.
 //
 // Data is deliberately `any` rather than json.RawMessage: handlers pass their
-// own typed payloads and the encoder handles the rest. It is omitted entirely
-// on failure so a client cannot mistake a zero value for real data.
+// own typed payloads and the encoder handles the rest. It carries `omitempty`
+// so a failure response (writeFail leaves Data as the zero `any`) omits the
+// `data` key entirely rather than emitting `data: null` — a client cannot
+// mistake an absent key for a zero value. Because every writeData call site
+// passes a concrete non-nil payload, `omitempty` never drops `data` on success.
 type envelope struct {
 	Success bool   `json:"success"`
 	Code    string `json:"code"`
 	Message string `json:"message"`
-	Data    any    `json:"data"`
+	Data    any    `json:"data,omitempty"`
 	TraceID string `json:"trace_id"`
 }
 

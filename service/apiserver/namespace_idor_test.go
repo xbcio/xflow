@@ -396,8 +396,10 @@ func TestDeadLetterReplayNotFoundIsAFailureEnvelope(t *testing.T) {
 	if env["success"] != false {
 		t.Fatalf("success = %v, want false (§4.1: success tracks 2xx strictly), body=%s", env["success"], raw)
 	}
-	if env["data"] != nil {
-		t.Fatalf("data = %v, want null on a failure envelope, body=%s", env["data"], raw)
+	// Spec §3: data is omitted on failure (not null). Assert key absence so a
+	// future loss of omitempty on envelope.Data surfaces here too.
+	if _, ok := env["data"]; ok {
+		t.Fatalf("data key present (= %v) on a failure envelope — want omitted (spec §3), body=%s", env["data"], raw)
 	}
 	if env["code"] != "dead_letter_not_found" {
 		t.Fatalf("code = %v, want dead_letter_not_found, body=%s", env["code"], raw)

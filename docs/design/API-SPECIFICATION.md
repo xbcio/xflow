@@ -127,7 +127,7 @@ pattern，导致 `/v1/executions/` 与 `/v1/management/dead-letters/` 的路径�
 | `success` | bool | 与 HTTP 状态码 2xx **严格一致**，不得出现 200 + `success:false` |
 | `code` | string | 成功固定 `"200"`；失败为**稳定的业务错误码**，snake_case |
 | `message` | string | 人读文案，可变更、可本地化。成功时为 `""` |
-| `data` | any | 成功时的载荷；失败时为 `null` |
+| `data` | any | 成功时的载荷；失败时**省略该键**（不是 `data: null`，见 `envelope.Data` 的 `omitempty`） |
 | `trace_id` | string | 见 §5 |
 
 ### 3.2 `code` 的稳定性契约

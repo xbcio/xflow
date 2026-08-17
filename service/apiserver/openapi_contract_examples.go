@@ -29,6 +29,22 @@ func ExampleEnvelope() any {
 	}
 }
 
+// ExampleErrorEnvelope builds a real failure envelope (writeFail's shape) so
+// the contract's ErrorEnvelope schema is validated against the actual failure
+// wire shape. Data is left as the zero `any`; with `omitempty` on envelope.Data
+// the marshaled body omits the `data` key entirely. ErrorEnvelope sets
+// `additionalProperties: false`, so a future loss of `omitempty` (which would
+// re-emit `data: null`) turns the contract test red — the success-only
+// ExampleEnvelope could not catch that regression.
+func ExampleErrorEnvelope() any {
+	return envelope{
+		Success: false,
+		Code:    "workflow_not_found",
+		Message: "workflow not found",
+		TraceID: "4bf92f3577b34da6a3ce929d0e0e4736",
+	}
+}
+
 // ExampleRegisterWorkflowResponse builds a registerWorkflowResponse (POST/PUT
 // /v1/workflows, /v1/workflows/{id}).
 func ExampleRegisterWorkflowResponse(id string, warnings []string) any {

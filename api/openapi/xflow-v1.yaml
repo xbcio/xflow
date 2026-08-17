@@ -870,6 +870,7 @@ components:
     ErrorEnvelope:
       type: object
       description: The failure shape of the Envelope — data is absent on failure.
+      additionalProperties: false
       required: [success, code, message, trace_id]
       properties:
         success:
@@ -1353,6 +1354,14 @@ components:
 
     PortConnections:
       type: object
+      description: |
+        The object form a dependency-port connection marshals to
+        ({type, targets}). Data ports use the array shorthand ([]Connection)
+        and never reach this schema. required + additionalProperties: false
+        bind the object form tightly so a renamed field or a stray extra key
+        is caught by the contract test instead of silently validating.
+      additionalProperties: false
+      required: [type, targets]
       properties:
         type:
           type: string

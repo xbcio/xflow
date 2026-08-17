@@ -91,8 +91,12 @@ func TestDeadLetterCLIListAndReplay(t *testing.T) {
 	if len(listed) != 1 {
 		t.Fatalf("listed %d entries, want 1: %s", len(listed), listOut.String())
 	}
-	if listed[0]["ID"] != entryID {
-		t.Fatalf("listed id = %v, want %q", listed[0]["ID"], entryID)
+	// The CLI marshals engine.OutboxEntry verbatim into stdout JSONL, so field
+	// names follow that type's wire shape (snake_case since 0dd985a, which added
+	// json tags). Keep this assertion on the snake_case key — do not regress to
+	// PascalCase, the wire shape is what the management API and this CLI share.
+	if listed[0]["id"] != entryID {
+		t.Fatalf("listed id = %v, want %q", listed[0]["id"], entryID)
 	}
 
 	// replay
