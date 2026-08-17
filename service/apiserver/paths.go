@@ -37,3 +37,38 @@ const (
 	PathHealthz = "/healthz"
 	PathReadyz  = "/readyz"
 )
+
+// UserFacingPaths enumerates every user-facing HTTP path this server exposes.
+// Go cannot reflect over constants, so the enumerable form is what both the
+// §2.2 dead-constant guard and the §10 contract guard read. Adding a constant
+// above without adding it here is the same defect class the guards exist to
+// catch, so keep the two in lockstep.
+//
+// runner-face paths are deliberately absent: per spec §10 the OpenAPI contract
+// describes only the user face. POST /v1/executions (entry-seed) is a runner
+// protocol-face endpoint (§0.1) and is likewise absent — its bare 409 body
+// shape is a load-bearing offset-safety contract, not an OpenAPI schema.
+var UserFacingPaths = []string{
+	PathWorkflows,
+	PathWorkflowByID,
+	PathWorkflowExecute,
+	PathWorkflowExecuteByID,
+
+	PathExecutionByID,
+	PathExecutionCancel,
+	PathExecutionSignals,
+	PathExecutionSignalByID,
+	PathExecutionWait,
+
+	PathSupplyByName,
+	PathArtifactByDigest,
+
+	PathManagementLeader,
+	PathManagementRunnerByID,
+	PathManagementExecByID,
+	PathManagementDeadLetters,
+	PathManagementDLReplay,
+
+	PathHealthz,
+	PathReadyz,
+}
