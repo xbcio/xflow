@@ -105,6 +105,15 @@ func (e *Engine) BuildTaskLease(ctx context.Context, t *Task) (*TaskLease, error
 	lease.Input = input
 	lease.NodeType = meta.Type
 	lease.NodeVersion = meta.Version
+	// Stamp the absolute deadline from the resolved input timeout. Deriving it
+	// here rather than letting the runner compute now+Timeout is what makes the
+	// bound independent of dispatch latency: a lease that queued for 40s does
+	// not get a fresh full budget when it finally starts. The original
+	// IssuedAt (this lease's issue time) is the anchor, not time.Now() at
+	// dispatch.
+	if input.Timeout > 0 {
+		lease.ExecutionDeadline = issuedAt.Add(input.Timeout)
+	}
 
 	started := prev == nil || prev.Status != types.NodeStatusRunning
 	if started && e.hooks != nil {
@@ -166,7 +175,12 @@ func (e *Engine) RecoverTaskLease(ctx context.Context, task *Task) (*TaskLease, 
 		return nil, fmt.Errorf("recover task lease %q/%q: build input: %w", task.ExecutionID, task.NodeName, err)
 	}
 	meta := g.NodeAt(task.NodeIdx)
-	return &TaskLease{
+	// ExecutionDeadline is derived from the ORIGINAL LeaseIssuedAt, not
+	// time.Now(): recovery replays the same lease rather than issuing a fresh
+	// one, and an unconfigured budget anchor would silently give a recovered
+	// lease a full fresh budget -- the bound would stop being a bound. This
+	// mirrors what BuildTaskLease does with its own issuedAt.
+	recovered := &TaskLease{
 		LeaseID:     node.LeaseID,
 		LeaseToken:  node.LeaseToken,
 		Attempt:     node.Attempt,
@@ -176,7 +190,11 @@ func (e *Engine) RecoverTaskLease(ctx context.Context, task *Task) (*TaskLease, 
 		NodeVersion: meta.Version,
 		IssuedAt:    node.LeaseIssuedAt,
 		TTL:         node.LeaseTTL,
-	}, nil
+	}
+	if input.Timeout > 0 {
+		recovered.ExecutionDeadline = node.LeaseIssuedAt.Add(input.Timeout)
+	}
+	return recovered, nil
 }
 
 // TaskRouting returns runner placement metadata for a queued task without

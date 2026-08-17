@@ -66,6 +66,19 @@ func WithDefaultLeaseTTL(ttl time.Duration) Option {
 	return func(e *Engine) { e.defaultLeaseTTL = ttl }
 }
 
+// WithDefaultNodeTimeout overrides the bound applied to a node that declares no
+// Timeout of its own.
+//
+// d == 0 DISABLES the default entirely: unconfigured nodes become unbounded,
+// which is exactly the pre-timeout behaviour this feature exists to end. That
+// inverts NodeDef.Timeout's own zero ("not configured") on purpose -- an option
+// caller is stating an intent, not leaving a field blank. It exists so a
+// deployment that cannot accept the behaviour change can roll back without
+// first rewriting workflow data; reach for a larger d before reaching for 0.
+func WithDefaultNodeTimeout(d time.Duration) Option {
+	return func(e *Engine) { e.defaultNodeTimeout = d }
+}
+
 // WithSuspendDisabled makes runtime suspend requests fail the leased task
 // instead of parking it. If err is nil, ErrSuspendUnsupported is used.
 func WithSuspendDisabled(err error) Option {
@@ -84,6 +97,18 @@ func WithSuspendDisabled(err error) Option {
 // HTTP timeouts) headroom.
 const DefaultLeaseTTL = 60 * time.Second
 
+// DefaultNodeTimeout bounds one execution of a node whose NodeDef.Timeout is
+// unset. It is not "how long a node should take" -- each node type keeps its
+// own default for that (xflow.http's 30s, DefaultScriptTimeout). This is the
+// point past which a running node is presumed stuck rather than slow, which is
+// an order of magnitude coarser: 30 seconds on an HTTP call may still be a slow
+// upstream; 30 minutes has no innocent explanation.
+//
+// DefaultLeaseTTL is deliberately NOT a reference point here. That is the
+// renewal clock, and the whole purpose of renewal is to let a node run longer
+// than it.
+const DefaultNodeTimeout = 30 * time.Minute
+
 // Engine is the pure-algorithm workflow execution engine.
 // It has zero IO dependencies — all persistence and queuing are injected via interfaces.
 type Engine struct {
@@ -97,6 +122,7 @@ type Engine struct {
 	itemFailureObserver      ItemFailureObserver
 	outboxMaxDeliveryAttempt int
 	defaultLeaseTTL          time.Duration
+	defaultNodeTimeout       time.Duration
 	suspendDisabled          bool
 	suspendDisabledErr       error
 	groupExecutor            GroupExecutor
@@ -117,6 +143,7 @@ func New(state StateStore, queue TaskQueue, opts ...Option) *Engine {
 		graphs:                   make(map[types.ExecutionID]*graph.Graph),
 		outboxMaxDeliveryAttempt: DefaultOutboxMaxDeliveryAttempts,
 		defaultLeaseTTL:          DefaultLeaseTTL,
+		defaultNodeTimeout:       DefaultNodeTimeout,
 	}
 	for _, opt := range opts {
 		opt(e)
