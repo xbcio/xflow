@@ -891,9 +891,13 @@ func writeEngineError(w http.ResponseWriter, err error) {
 	writeError(w, http.StatusInternalServerError, "internal server error")
 }
 
-// writeJSON writes a bare JSON body. Retained ONLY for the runner-face
-// endpoints that must not be enveloped (entry-seed — see
-// API-SPECIFICATION.md §0.1). User-facing handlers use writeData/writeFail.
+// writeJSON writes a bare JSON body (no envelope). entry-seed (POST
+// /v1/executions) is the one caller that must keep using it permanently — it
+// is a runner-protocol-face endpoint whose 409 body shape is a load-bearing
+// offset-safety contract (spec §0.1 + §8.2). The remaining user-face callers
+// (submit/invoke/register/inspect/management/supply success paths) still use
+// it today and are pending conversion to writeData/writeFail in the
+// route-migration tasks (§9.3); they are neither converted nor bugs.
 func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)

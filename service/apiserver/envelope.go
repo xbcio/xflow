@@ -69,6 +69,12 @@ func writeList(w http.ResponseWriter, r *http.Request, list any, total int) {
 
 // emptySliceIfNil turns a nil slice into an empty one of the same element type
 // so it encodes as [] instead of null. Non-slice values pass through.
+//
+// Two cases are distinct: an untyped nil (the literal `nil` passed as `any`) is
+// caught by the `v == nil` branch; a TYPED nil slice (`var list []Workflow`
+// returned by a store that found nothing) is a non-nil `any` wrapping a nil
+// slice, so `v == nil` is false and the reflect.MakeSlice branch is what turns
+// it into [] — without it the wire body is null and a frontend's .map() throws.
 func emptySliceIfNil(v any) any {
 	if v == nil {
 		return []any{}

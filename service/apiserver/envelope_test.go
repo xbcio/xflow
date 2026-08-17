@@ -84,9 +84,11 @@ func TestEnvelopeListShape(t *testing.T) {
 	}
 }
 
-// TestEnvelope_NilListSerializesAsEmptyArrayNotNull guards the frontend's
-// .map(): a nil slice passed to writeList must become [] in the wire body.
-func TestEnvelope_NilListSerializesAsEmptyArrayNotNull(t *testing.T) {
+// TestEnvelope_UntypedNilListSerializesAsEmptyArrayNotNull guards the
+// frontend's .map() for the untyped-nil branch of emptySliceIfNil
+// (`if v == nil { return []any{} }`). This is the easy case — a literal nil
+// passed as `any`.
+func TestEnvelope_UntypedNilListSerializesAsEmptyArrayNotNull(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/workflows", nil)
 	writeList(rec, req, nil, 0)
@@ -100,7 +102,38 @@ func TestEnvelope_NilListSerializesAsEmptyArrayNotNull(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if string(got.Data.List) != "[]" {
-		t.Fatalf("data.list = %s, want [] (never null) for a nil slice", got.Data.List)
+		t.Fatalf("data.list = %s, want [] (never null) for an untyped nil", got.Data.List)
+	}
+}
+
+// TestEnvelope_TypedNilListSerializesAsEmptyArrayNotNull is the load-bearing
+// assertion: a TYPED nil slice — `var list []string` (or `[]Workflow`, etc.)
+// returned by a store that found nothing — must encode as [], never null.
+// This is the reflect.MakeSlice branch of emptySliceIfNil, NOT the trivial
+// `v == nil` branch: a typed nil is a non-nil `any` wrapping a nil slice, so
+// `v == nil` is false and without the reflect branch it would pass straight
+// through and encode as null (making the frontend's .map() throw).
+//
+// Teeth verified: deleting the reflect branch (leaving `if v == nil { ... };
+// return v`) makes this test go RED with:
+//   data.list = null, want [] (never null) for a typed nil []string
+// while the untyped-nil test above stays green.
+func TestEnvelope_TypedNilListSerializesAsEmptyArrayNotNull(t *testing.T) {
+	var list []string // declared, not literal nil — typed nil
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/workflows", nil)
+	writeList(rec, req, list, 0)
+
+	var got struct {
+		Data struct {
+			List json.RawMessage `json:"list"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if string(got.Data.List) != "[]" {
+		t.Fatalf("data.list = %s, want [] (never null) for a typed nil []string", got.Data.List)
 	}
 }
 
