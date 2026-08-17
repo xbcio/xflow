@@ -1,7 +1,11 @@
 package apiserver
 
-// User-facing HTTP paths. Every constant here MUST be registered on the mux —
-// see paths_test.go, which fails on any that is not.
+// User-facing HTTP path constants. These are the spec §7 target shapes;
+// some are not yet registered — they are pending §9 route-migration targets,
+// not dead constants in the ActivatePath sense. The §2.2 dead-constant guard
+// (every exported constant must have a matching mux registration) lands in a
+// later task; until then, treat a constant here as a contract, not proof of
+// registration.
 //
 // runner-face paths live in service/protocol, not here.
 const (

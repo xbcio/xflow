@@ -42,7 +42,7 @@ func TestSDKServerParityWithAPIServer(t *testing.T) {
 		{"invoke workflow", http.MethodPost, "/v1/workflows/invoke", true},
 		{"inspect execution", http.MethodGet, "/v1/executions/nonexistent", false},
 		{"wait execution", http.MethodGet, "/v1/executions/nonexistent/wait", false},
-		{"deliver signal", http.MethodPost, "/v1/executions/nonexistent/signal", false},
+		{"deliver signal", http.MethodPost, "/v1/executions/nonexistent/signals", false},
 		{"revoke signal", http.MethodPost, "/v1/executions/nonexistent/revoke-signal", false},
 		{"cancel execution", http.MethodPost, "/v1/executions/nonexistent/cancel", false},
 		{"runner register", http.MethodPost, "/v1/runners/register", true},

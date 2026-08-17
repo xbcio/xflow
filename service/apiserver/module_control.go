@@ -105,6 +105,18 @@ func (m *workflowControlModule) RegisterHTTP(mux *http.ServeMux) {
 	// the authorization boundary does not leak existence. It does no parsing —
 	// the method-qualified patterns above are more specific and win for valid
 	// shapes, so the catch only fires for shapes no handler should serve.
+	//
+	// Inherited policy: registering this catch makes 404-on-method-mismatch the
+	// policy for the ENTIRE /v1/executions/{id}/ subtree, including routes
+	// later tasks add under it (e.g. DELETE /v1/executions/{id}/signals/{name}
+	// per spec §7). A wrong-method request to any execution sub-route lands here
+	// and gets 404, not 405 — a behavior choice that must be revisited only by a
+	// task that owns the API-SPECIFICATION.md §4.2 status-code table (which
+	// currently has no 405 row). The /v1/management/* subtree DELIBERATELY
+	// differs: its handlers return 405 via requireMethod, as they did before
+	// this task. Anyone adding a route under /v1/executions/{id}/ inherits the
+	// 404 policy without opting in; do not add a method-qualified pattern there
+	// expecting 405 for a mismatch.
 	mux.HandleFunc("/v1/executions/{id}/", wrap("execution", m.handleExecutionNotFound))
 }
 
@@ -147,7 +159,9 @@ func (m *workflowControlModule) registerAuthzRoutes(mux *http.ServeMux) {
 	// resolver's ok=false path returned 404 before authz ran and wrote no audit
 	// row, and the catch preserves that. A method-qualified pattern alone would
 	// 405 a method mismatch (existence leak); the path-only catch wins for any
-	// {id}/verb shape no method-qualified pattern serves and returns 404.
+	// {id}/verb shape no method-qualified pattern serves and returns 404. This
+	// is the authz-mode twin of the bare-mode catch in RegisterHTTP; the
+	// inherited 404-on-method-mismatch policy documented there applies here too.
 	mux.HandleFunc("/v1/executions/{id}/", m.handleExecutionNotFound)
 }
 
