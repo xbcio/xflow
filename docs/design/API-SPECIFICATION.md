@@ -351,14 +351,14 @@ runner directory 认证只回答「这是不是一台已注册的 runner」。�
 
 ```
 POST   /v1/workflows                        注册定义 → workflow_id
-GET    /v1/workflows                        列表（分页）
+GET    /v1/workflows                        列表（分页）——未实现，见 §9.6
 GET    /v1/workflows/{id}                   读取
 PUT    /v1/workflows/{id}                   全量更新
 DELETE /v1/workflows/{id}                   注销
 POST   /v1/workflows/{id}/execute           执行已注册的工作流
 POST   /v1/workflows/execute                内联定义直跑
 
-GET    /v1/executions                       列表（分页）
+GET    /v1/executions                       列表（分页）——未实现，见 §9.6
 GET    /v1/executions/{id}                  查询
 POST   /v1/executions/{id}/cancel           取消
 POST   /v1/executions/{id}/signals          发信号
@@ -503,7 +503,10 @@ entry-seed 的 409 响应有**两种不同 body**，客户端据此决定是否�
 - 前端 `web/packages/xflow-api/src/index.ts` 读 `body.message`，服务端发
   `body.error`——**当前前端拿到的每一条服务端错误消息都被丢弃**，一律降级为
   `statusText`。信封落地后自然修复（workflows 族已修复）
-- 无任何端点实现分页（§3.3）
+- 无任何列表端点实现分页（§3.3）。**参数层已落地**：`pageParams`
+  （`service/apiserver/pagination.go`，1-based、默认 20、服务端强制上限 200）
+  与 `writeList`（`service/apiserver/envelope.go`，`{list,total}` 载荷形状）
+  已实现并有单测，**但生产调用点为零**——阻塞在两处缺失的数据源，见 §9.6
 
 ### 9.4 字段命名
 
@@ -524,6 +527,42 @@ runtime hash 已通过 hash-local 镜像（`runtimeSelectorHashPayload`）与 wi
 | `api/openapi/xflow-v1.yaml` 的 `/workflow-definitions` 全套（8 条路径） | 零实现，且名称已被否决（过长） |
 | `types/workflow_management.go`（61 行） | 零引用 |
 | `/v1/runners/lease/renew` 的生产调用链 | 半接线，见 §8.3 |
+
+### 9.6 列表端点未接线（分页参数层已落地，数据源缺失）
+
+`GET /v1/workflows` 与 `GET /v1/executions` 在 §7 路由表中标注为「未实现」。
+**不是分页没做，是列举能力本身不存在**。分页参数层已就位（见 §9.3 末段），
+但两个端点的数据源都不具备列举条件，注册一个返回空列表的 handler 只会复刻
+`/workflow-definitions` 的老毛病——契约描述一个不存在的端点。两条阻塞如下：
+
+**1. `GET /v1/workflows`：`workflowreg` 无 per-namespace 索引。**
+
+`backend.WorkflowRegistry` 接口只有 `AddWorkflow`/`GetWorkflow`/
+`GetWorkflowByKey`/`UpdateDefinitionHash`/`RemoveWorkflow`（`backend/
+workflow_registry.go:26-41`）。唯一实现 `workflowreg.Registry` 是纯 Redis KV，
+**零索引**（无 `SAdd`/`ZAdd`/`SCAN`），无法按 namespace 枚举。补这条端点需要：
+
+- 在 `workflowreg` 加一个 per-namespace 索引（`xflow:ns:<ns>:workflow:index`
+  之类的 ZSET），并处理与 `AddWorkflow`/`RemoveWorkflow` 的原子性
+- registry 现在的 Lua 脚本按 `{<key>}` 打 hash tag，**索引键不在同一 slot**，
+  Redis Cluster 下无法与记录同事务写，需要单独设计补偿（两阶段 + 校验，或
+  hash tag 扩展到索引键）
+
+不先做索引直接 `SCAN xflow:workflow:*` 是全表遍历，违反 org policy §2
+「敏感数据枚举端点不得全表遍历」，也跨租户泄漏键名。
+
+**2. `GET /v1/executions`：`store.ExecutionRecord` 无 namespace 字段。**
+
+`store.Executions` 接口只有 `CreateExecution`/`UpdateExecutionStatus`/
+`GetExecution`（`store/interfaces.go:11-15`）。全仓 `ListExecutions`/
+`CountExecutions` 零命中。更根本地，`store.ExecutionRecord` 与其 DB 投影
+`dbExecution` **没有 namespace 列**（只有 `dbSupply`/`dbArtifact` 带 namespace）。
+即便加了 `ListExecutions`，也**无法按 namespace 过滤**——那是一个跨租户
+列举端点，违反 org policy §1a 与 §2。补这条端点需要一次 schema 迁移：
+给 `xflow_executions` 加 namespace 列、回填历史行、再加索引与查询。
+
+两条都不在本次 rollout 范围内。完成本节列出的两件事后，从本节删除对应条目并
+解除 §7 路由表的「未实现」标注。
 
 ---
 
