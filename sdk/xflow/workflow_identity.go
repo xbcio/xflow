@@ -64,7 +64,7 @@ func runtimeHash(def *types.WorkflowDef) (string, error) {
 		Name:           def.Name,
 		Version:        def.Version,
 		Spec:           def.Spec,
-		RunnerSelector: def.RunnerSelector,
+		RunnerSelector: toHashSelector(def.RunnerSelector),
 		Context:        def.Context,
 		Settings:       def.Settings,
 		Options:        def.Options,
@@ -87,7 +87,7 @@ func runtimeHash(def *types.WorkflowDef) (string, error) {
 			Template:       n.Template,
 			Disabled:       n.Disabled,
 			OnError:        n.OnError,
-			RunnerSelector: n.RunnerSelector,
+			RunnerSelector: toHashSelector(n.RunnerSelector),
 			Inputs:         n.Inputs,
 			OutputSchema:   n.OutputSchema,
 			Parameters:     n.Parameters,
@@ -114,10 +114,15 @@ type runtimeHashPayload struct {
 	Name           string                          `json:"name,omitempty"`
 	Version        string                          `json:"version,omitempty"`
 	Spec           string                          `json:"spec,omitempty"`
-	RunnerSelector *types.RunnerSelector           `json:"runnerSelector,omitempty"`
-	Context        *types.WorkflowContext          `json:"context,omitempty"`
-	Settings       *types.WorkflowSettings         `json:"settings,omitempty"`
-	Options        *types.WorkflowOptions          `json:"options,omitempty"`
+	// RunnerSelector is converted to runtimeSelectorHashPayload at the payload
+	// boundary (see toHashSelector). The hash-local mirror's tags are FROZEN at
+	// the pre-§9.4 wire bytes ("runnerSelector"/"matchLabels"/"mode") so the
+	// snake_case wire rename on types.RunnerSelector cannot move the hash. Do
+	// NOT "tidy" these to match the wire tags — see runtimeSelectorHashPayload.
+	RunnerSelector *runtimeSelectorHashPayload `json:"runnerSelector,omitempty"`
+	Context        *types.WorkflowContext      `json:"context,omitempty"`
+	Settings       *types.WorkflowSettings     `json:"settings,omitempty"`
+	Options        *types.WorkflowOptions      `json:"options,omitempty"`
 	Credentials    map[string]types.CredentialDef  `json:"credentials,omitempty"`
 	Params         map[string]types.ParamDef       `json:"params,omitempty"`
 	NodeTemplates  map[string]types.NodeTemplate   `json:"node_templates,omitempty"`
@@ -142,28 +147,67 @@ type runtimeHashPayload struct {
 //     different stable ID this time. NodeDef.Name carries the runtime
 //     identity used by connections and pin_data, and IS included.
 type runtimeNodeHashPayload struct {
-	Name           string                `json:"name,omitempty"`
-	Type           string                `json:"type,omitempty"`
-	Kind           types.NodeKind        `json:"kind,omitempty"`
-	Version        int                   `json:"version,omitempty"`
-	Template       string                `json:"template,omitempty"`
-	Disabled       bool                  `json:"disabled,omitempty"`
-	OnError        string                `json:"on_error,omitempty"`
-	RunnerSelector *types.RunnerSelector `json:"runnerSelector,omitempty"`
-	Inputs         []types.PortDecl      `json:"inputs,omitempty"`
-	OutputSchema   map[string]any        `json:"output_schema,omitempty"`
-	Parameters     map[string]any        `json:"parameters,omitempty"`
-	Retry          *types.RetrySettings  `json:"retry,omitempty"`
+	Name           string                       `json:"name,omitempty"`
+	Type           string                       `json:"type,omitempty"`
+	Kind           types.NodeKind               `json:"kind,omitempty"`
+	Version        int                          `json:"version,omitempty"`
+	Template       string                       `json:"template,omitempty"`
+	Disabled       bool                         `json:"disabled,omitempty"`
+	OnError        string                       `json:"on_error,omitempty"`
+	RunnerSelector *runtimeSelectorHashPayload  `json:"runnerSelector,omitempty"`
+	Inputs         []types.PortDecl             `json:"inputs,omitempty"`
+	OutputSchema   map[string]any               `json:"output_schema,omitempty"`
+	Parameters     map[string]any               `json:"parameters,omitempty"`
+	Retry          *types.RetrySettings         `json:"retry,omitempty"`
+}
+
+// runtimeSelectorHashPayload is the hash-local mirror of types.RunnerSelector.
+// Its JSON tags are FROZEN at the pre-§9.4 wire bytes — "runnerSelector",
+// "matchLabels", "mode" — and MUST NOT be updated to match the snake_case wire
+// tags on types.RunnerSelector.
+//
+// The runtime hash is computed by marshalling runtimeHashPayload, which (before
+// this mirror) held *types.RunnerSelector directly in three places: workflow-
+// level, per-node, and per-group. A nested struct marshals with its OWN tags,
+// so renaming the wire tags on types.RunnerSelector would change the marshalled
+// bytes and therefore the hash of every definition carrying a selector. The
+// registry compares the fresh hash against the stored one (AddWorkflow) and
+// returns ErrWorkflowConflict; the legacy-hash recovery path returns early for
+// any hash already in runtime-sha256:v1: format, so a pre-rename record would
+// surface a permanent, un-resolvable conflict on every re-registration.
+//
+// This mirror is the same pattern runtimeNodeHashPayload already establishes:
+// it exists precisely so editor-facing type churn (here, a wire-tag rename for
+// API-SPECIFICATION.md §9.4) cannot move the hash. toHashSelector is the single
+// conversion point at the payload boundary.
+type runtimeSelectorHashPayload struct {
+	Mode        string            `json:"mode,omitempty"`
+	MatchLabels map[string]string `json:"matchLabels,omitempty"`
+}
+
+// toHashSelector converts a wire-facing *types.RunnerSelector to its hash-local
+// mirror. nil passes through as nil so the omitempty tag takes effect and a
+// selector-free definition produces an identical hash.
+func toHashSelector(s *types.RunnerSelector) *runtimeSelectorHashPayload {
+	if s == nil {
+		return nil
+	}
+	return &runtimeSelectorHashPayload{
+		Mode:        string(s.Mode),
+		MatchLabels: s.MatchLabels,
+	}
 }
 
 type runtimeHashGroupPayload struct {
-	Name           string                `json:"name,omitempty"`
-	Members        []string              `json:"members,omitempty"`
-	RunnerSelector *types.RunnerSelector `json:"runnerSelector,omitempty"`
-	OnError        string                `json:"on_error,omitempty"`
-	Retry          *types.RetrySettings  `json:"retry,omitempty"`
-	Timeout        time.Duration         `json:"timeout,omitempty"`
-	Mode           string                `json:"mode,omitempty"`
+	Name    string `json:"name,omitempty"`
+	Members []string `json:"members,omitempty"`
+	// RunnerSelector is converted to the hash-local mirror (see
+	// runtimeSelectorHashPayload). Tags frozen at pre-§9.4 bytes.
+	RunnerSelector *runtimeSelectorHashPayload `json:"runnerSelector,omitempty"`
+	OnError        string                       `json:"on_error,omitempty"`
+	Retry          *types.RetrySettings         `json:"retry,omitempty"`
+	Timeout        time.Duration                `json:"timeout,omitempty"`
+	Mode           string                       `json:"mode,omitempty"`
 }
 
 // canonicalizeGroups returns a sorted, stable group payload; empty input returns
@@ -177,7 +221,7 @@ func canonicalizeGroups(groups []types.GroupDef) []runtimeHashGroupPayload {
 		members := append([]string(nil), g.Members...)
 		sort.Strings(members)
 		out = append(out, runtimeHashGroupPayload{
-			Name: g.Name, Members: members, RunnerSelector: g.RunnerSelector,
+			Name: g.Name, Members: members, RunnerSelector: toHashSelector(g.RunnerSelector),
 			OnError: g.OnError, Retry: g.Retry, Timeout: g.Timeout, Mode: g.Mode,
 		})
 	}
