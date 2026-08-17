@@ -465,49 +465,49 @@ entry-seed 的 409 响应有**两种不同 body**，客户端据此决定是否�
 
 | 现状 | 目标 | 依据 |
 | --- | --- | --- |
-| `POST /v1/workflows`（编译并立即执行） | `POST /v1/workflows/execute` | §1.2 语义倒置：POST 集合应当是创建 |
-| `POST /v1/workflows/invoke` | 并入 `POST /v1/workflows/execute` | §1.2 动词层级 |
-| `POST /v1/workflows/register` | `POST /v1/workflows` | §1.2 动词层级 |
-| `DELETE /v1/workflows/register/{id}` | `DELETE /v1/workflows/{id}` | §1.2 中间段当资源 |
 | `POST /v1/executions/{id}/signal` | `POST /v1/executions/{id}/signals` | §1.1 复数资源 |
 | `POST /v1/executions/{id}/revoke-signal` | `DELETE /v1/executions/{id}/signals/{name}` | §1.2 动词粘在路径段里 |
-| 全仓手工 `TrimPrefix` 路径解析 | Go 1.22 mux pattern | §1.3 |
+| 全仓手工 `TrimPrefix` 路径解析 | Go 1.22 mux pattern | §1.3（workflows 面已迁移，executions 面待迁移） |
 
 ### 9.2 缺失的端点
 
 前端 `web/packages/xflow-api/src/index.ts` 已在调用、服务端**不存在**的路由：
 
 - `GET /workflows`（列表）
-- `GET /workflows/{id}`（读取）
-- `PUT /workflows/{id}`（保存）
-- `POST /workflows/{id}/runs` → 目标为 `POST /v1/workflows/{id}/execute`
 - `GET /workflows/{id}/runtime` → **废除**，无服务端对应概念
+
+（`GET /workflows/{id}`、`PUT /workflows/{id}`、`POST /workflows/{id}/runs`→`POST /v1/workflows/{id}/execute`
+已在 workflows 路由迁移中实现。）
 
 ### 9.3 响应形状
 
-- 65 处 `writeError` 调用产出 `{"error": "..."}`，与 §3.1 信封不符
+- workflows 族（register/deregister/execute/read/replace）已迁移到信封
+  `writeData`/`writeFail` 并带稳定 snake_case code（§3.2）。剩余 `writeError`
+  调用（executions/management/supply 族）仍产出 `{"error": "..."}`，与 §3.1
+  信封不符，待 Tasks 4/5 迁移
 - `writeJSON`/`writeError` 在 `service/apiserver` 与 `service/control` 各有一份实
   现，必须合并为一份
 - 前端 `web/packages/xflow-api/src/index.ts` 读 `body.message`，服务端发
   `body.error`——**当前前端拿到的每一条服务端错误消息都被丢弃**，一律降级为
-  `statusText`。信封落地后自然修复
+  `statusText`。信封落地后自然修复（workflows 族已修复）
 - 无任何端点实现分页（§3.3）
 
 ### 9.4 字段命名
 
 全面 **snake_case**（与 Go wire 主流 112:10、YAML DSL 规范 `on_error` /
-`allow_cycles` / `node_templates` 一致）。需修正的越界：
+`allow_cycles` / `node_templates` 一致）。
 
-- `types/workflow.go`：`runnerSelector` → `runner_selector`
-- `types/workflow.go`：`matchLabels` → `match_labels`
+`types.RunnerSelector` 的 `runnerSelector` → `runner_selector`、`matchLabels` →
+`match_labels` 已完成（含 TS mirror `web/packages/xflow-core/src/index.ts`）。
+runtime hash 已通过 hash-local 镜像（`runtimeSelectorHashPayload`）与 wire 标签解耦，
+标签冻结在前重命名字节，详见 `sdk/xflow/workflow_identity.go`。
 
 ### 9.5 死代码
 
 | 对象 | 状态 |
 | --- | --- |
 | `protocol.ActivatePath` / `DeactivatePath` / `ActivationListPath` | 零注册零调用 |
-| `OpWorkflowDefinition{Create,Read,Update,Validate,Publish}`、`OpWorkflowExecutionInvoke`、`OpWorkflowRead` | 无路由消费（`OpWorkflowRead` 仅被一处测试当占位值） |
-| `OpManagementWrite` | 零引用 |
+| `OpWorkflowDefinition{Create,Read,Validate,Publish}`、`OpWorkflowExecutionInvoke`、`OpManagementWrite` | 无路由消费（`OpWorkflowRead` 与 `OpWorkflowDefinitionUpdate` 已被 GET/PUT `/v1/workflows/{id}` 消费） |
 | `api/openapi/xflow-v1.yaml` 的 `/workflow-definitions` 全套（8 条路径） | 零实现，且名称已被否决（过长） |
 | `types/workflow_management.go`（61 行） | 零引用 |
 | `/v1/runners/lease/renew` 的生产调用链 | 半接线，见 §8.3 |
