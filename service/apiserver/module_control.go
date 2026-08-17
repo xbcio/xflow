@@ -1152,26 +1152,6 @@ func requireMethod(w http.ResponseWriter, r *http.Request, method string) bool {
 	return false
 }
 
-// writeEngineError maps typed engine/store errors to HTTP responses. Every
-// unclassified failure is collapsed to a generic 500 message — the underlying
-// error (Redis text, internal paths, backend details) must never reach a client.
-//
-// NOTE: this is the shim-based mapper (writeError → empty trace_id, no
-// X-Request-Id echo). It remains in use ONLY by the management dead-letter
-// subtree (module_management.go), which is explicitly out of scope for the
-// envelope migration (spec §9.1). The executions-family inspect path now uses
-// writeExecEngineFail, the enveloped twin with stable snake_case codes per
-// spec §3.2.
-func writeEngineError(w http.ResponseWriter, err error) {
-	if errors.Is(err, engine.ErrExecutionInactive) ||
-		errors.Is(err, engine.ErrExecutionNotFound) ||
-		errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusNotFound, err.Error())
-		return
-	}
-	writeError(w, http.StatusInternalServerError, "internal server error")
-}
-
 // writeExecEngineFail is the enveloped engine-error mapper for the executions
 // family: it maps typed not-found errors to 404 execution_not_found and
 // everything else to 500 internal_error, via writeFail (so trace_id is stamped
@@ -1190,23 +1170,12 @@ func writeExecEngineFail(w http.ResponseWriter, r *http.Request, err error) {
 // writeJSON writes a bare JSON body (no envelope). entry-seed (POST
 // /v1/executions) is the one caller that must keep using it permanently — it
 // is a runner-protocol-face endpoint whose 409 body shape is a load-bearing
-// offset-safety contract (spec §0.1 + §8.2). The remaining user-face callers
-// (submit/invoke/register/inspect/management/supply success paths) still use
-// it today and are pending conversion to writeData/writeFail in the
-// route-migration tasks (§9.3); they are neither converted nor bugs.
+// offset-safety contract (spec §0.1 + §8.2). The other remaining callers are
+// /healthz and /readyz (spec §7: not enveloped, load-balancer contract) and
+// the entry-seed errorResponse bodies (§0.1). User-face success/failure
+// surfaces use writeData/writeFail via the envelope (§3).
 func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
-}
-
-// writeError is the transitional shim: it envelopes the failure and derives a
-// code from the status. Call sites migrate to writeFail with an explicit,
-// stable code as their route is converted.
-//
-// It takes no *http.Request, so responses from it carry an empty trace_id and
-// no echoed X-Request-Id. That is the tell for a call site that still needs
-// migrating.
-func writeError(w http.ResponseWriter, status int, message string) {
-	writeFail(w, nil, status, codeForStatus(status), message)
 }

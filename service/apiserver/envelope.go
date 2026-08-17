@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"reflect"
 	"regexp"
-	"strconv"
 
 	"github.com/xbcio/xflow/observability/tracing"
 )
@@ -117,33 +116,4 @@ func sanitizeRequestID(v string) string {
 		return ""
 	}
 	return v
-}
-
-// codeForStatus derives a business code from an HTTP status, for call sites
-// that have not yet been given an explicit one. Transitional: every user-facing
-// handler should eventually pass its own stable code to writeFail.
-func codeForStatus(status int) string {
-	switch status {
-	case http.StatusBadRequest:
-		return "bad_request"
-	case http.StatusUnauthorized:
-		return "unauthorized"
-	case http.StatusForbidden:
-		return "forbidden"
-	case http.StatusNotFound:
-		return "not_found"
-	case http.StatusConflict:
-		return "conflict"
-	case http.StatusRequestEntityTooLarge:
-		return "payload_too_large"
-	case http.StatusTooManyRequests:
-		return "rate_limited"
-	case http.StatusServiceUnavailable:
-		return "service_unavailable"
-	default:
-		if status >= 500 {
-			return "internal_error"
-		}
-		return "error_" + strconv.Itoa(status)
-	}
 }

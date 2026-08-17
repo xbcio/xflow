@@ -485,9 +485,15 @@ entry-seed 的 409 响应有**两种不同 body**，客户端据此决定是否�
 
 - workflows 族（register/deregister/execute/read/replace）已迁移到信封
   `writeData`/`writeFail` 并带稳定 snake_case code（§3.2）。executions 族
-  （inspect/signal/cancel/revoke/wait）亦已迁移完成。剩余 `writeError`
-  调用（management/supply/artifact 族）仍产出 `{"error": "..."}`，与 §3.1
-  信封不符，待 Tasks 5+ 迁移
+  （inspect/signal/cancel/revoke/wait）亦已迁移完成。management / supply /
+  artifact 三族（Task 5b）已迁移：所有失败站点改走 `writeFail`（带稳定
+  snake_case code + `trace_id` + `X-Request-Id` 回显），management 的成功
+  body 一并信封化（leader / runner / dead-letters list / dead-letters
+  replay），supply PUT 的成功描述符信封化；CLI `apiDeadLetterClient.do()`
+  解信封再取 `data` 以保持对齐。§3.4 的裸流例外（supply GET、artifact
+  GET/HEAD）只对**成功流**有效，失败分支仍返回 JSON 信封。`/healthz` 与
+  `/readyz` 不信封化（§7）。`service/apiserver` 中的 `writeError`/
+  `writeEngineError` 过渡 shim 已删除
 - `writeJSON`/`writeError` 在 `service/apiserver` 与 `service/control` 各有一份实
   现，必须合并为一份
 - 前端 `web/packages/xflow-api/src/index.ts` 读 `body.message`，服务端发

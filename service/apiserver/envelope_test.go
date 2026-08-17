@@ -137,38 +137,6 @@ func TestEnvelope_TypedNilListSerializesAsEmptyArrayNotNull(t *testing.T) {
 	}
 }
 
-// TestEnvelope_WriteErrorShimEnvelopesWithDerivedCode pins the transitional
-// shim: writeError wraps the message in the full envelope and derives a stable
-// code from the HTTP status. The empty trace_id is the tell that a call site
-// still needs migrating to writeFail with an explicit *http.Request.
-func TestEnvelope_WriteErrorShimEnvelopesWithDerivedCode(t *testing.T) {
-	rec := httptest.NewRecorder()
-	writeError(rec, http.StatusNotFound, "workflow not found")
-
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404", rec.Code)
-	}
-	var got map[string]any
-	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if got["success"] != false {
-		t.Errorf("success = %v, want false", got["success"])
-	}
-	if got["code"] != "not_found" {
-		t.Errorf("code = %v, want not_found (derived from 404)", got["code"])
-	}
-	if got["message"] != "workflow not found" {
-		t.Errorf("message = %v, want the original string", got["message"])
-	}
-	if got["data"] != nil {
-		t.Errorf("data = %v, want null on failure", got["data"])
-	}
-	if got["trace_id"] != "" {
-		t.Errorf("trace_id = %v, want empty — writeError has no request", got["trace_id"])
-	}
-}
-
 // --- X-Request-Id (spec §5.2) ---
 
 // TestXRequestID_ValidValueRoundTrips verifies that a valid client-supplied
