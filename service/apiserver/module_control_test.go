@@ -222,7 +222,7 @@ func TestWorkflowControlSignalAndCancel(t *testing.T) {
 	f := &fakeControlFacade{}
 	mux := newControlMux(f)
 
-	resp := doJSON(t, mux, http.MethodPost, "/v1/executions/exec-1/signal", signalRequest{
+	resp := doJSON(t, mux, http.MethodPost, "/v1/executions/exec-1/signals", signalRequest{
 		Name: "approve",
 		Data: map[string]any{"ok": true},
 	})

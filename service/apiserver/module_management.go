@@ -58,12 +58,11 @@ func (m *managementModule) RegisterHTTP(mux *http.ServeMux) {
 	// When PrincipalAuth is nil (dev / behind an external gateway) the routes
 	// are served directly and the namespace defaults to namespace.Default.
 	if m.principalAuth != nil {
-		mux.HandleFunc("/v1/management/leader", m.authzWrap(OpManagementLeaderRead, false, m.handleLeader, func(*http.Request) (string, string, string, string) {
+		mux.HandleFunc("GET "+PathManagementLeader, m.authzWrap(OpManagementLeaderRead, false, m.handleLeader, func(*http.Request) (string, string, string, string) {
 			return "management/leader", "", "", ""
 		}))
-		mux.HandleFunc("/v1/management/runners/", m.authzWrap(OpManagementRunnerRead, false, m.handleRunner, func(r *http.Request) (string, string, string, string) {
-			id := strings.TrimPrefix(r.URL.Path, "/v1/management/runners/")
-			id = strings.Trim(id, "/")
+		mux.HandleFunc("GET "+PathManagementRunnerByID, m.authzWrap(OpManagementRunnerRead, false, m.handleRunner, func(r *http.Request) (string, string, string, string) {
+			id := r.PathValue("id")
 			return "management/runner/" + id, "", "", ""
 		}))
 		// Namespace boundary (Task 7.3): the execution-inspect route injects the
@@ -71,19 +70,18 @@ func (m *managementModule) RegisterHTTP(mux *http.ServeMux) {
 		// from the principal's namespace namespace; a cross-namespace execID resolves
 		// to not-found → 404, which is the IDOR defense and does not leak
 		// existence.
-		mux.HandleFunc("/v1/management/executions/", m.authzWrap(OpManagementRead, false, m.handleExecution, func(r *http.Request) (string, string, string, string) {
-			id := strings.TrimPrefix(r.URL.Path, "/v1/management/executions/")
-			id = strings.Trim(id, "/")
+		mux.HandleFunc("GET "+PathManagementExecByID, m.authzWrap(OpManagementRead, false, m.handleExecution, func(r *http.Request) (string, string, string, string) {
+			id := r.PathValue("id")
 			return "management/execution/" + id, "", id, ""
 		}))
 	} else {
-		mux.HandleFunc("/v1/management/leader", m.handleLeader)
-		mux.HandleFunc("/v1/management/runners/", m.handleRunner)
-		mux.HandleFunc("/v1/management/executions/", m.handleExecution)
+		mux.HandleFunc("GET "+PathManagementLeader, m.handleLeader)
+		mux.HandleFunc("GET "+PathManagementRunnerByID, m.handleRunner)
+		mux.HandleFunc("GET "+PathManagementExecByID, m.handleExecution)
 	}
 	mux.HandleFunc("/v1/management/dead-letters/", m.handleDeadLetters)
-	mux.HandleFunc("/healthz", m.handleHealthz)
-	mux.HandleFunc("/readyz", m.handleReadyz)
+	mux.HandleFunc("GET "+PathHealthz, m.handleHealthz)
+	mux.HandleFunc("GET "+PathReadyz, m.handleReadyz)
 }
 
 type leaderResponse struct {
@@ -105,13 +103,13 @@ func (m *managementModule) handleLeader(w http.ResponseWriter, r *http.Request) 
 }
 
 // handleRunner looks up a single runner snapshot by id. The runner directory
-// has no list API, so listing is intentionally unsupported.
+// has no list API, so listing is intentionally unsupported. The id is the {id}
+// path value the mux matched.
 func (m *managementModule) handleRunner(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodGet) {
 		return
 	}
-	id := strings.TrimPrefix(r.URL.Path, "/v1/management/runners/")
-	id = strings.Trim(id, "/")
+	id := r.PathValue("id")
 	if id == "" {
 		writeError(w, http.StatusNotFound, "runner not found")
 		return
@@ -131,12 +129,12 @@ func (m *managementModule) handleRunner(w http.ResponseWriter, r *http.Request) 
 
 // handleExecution inspects a single execution by id. It reuses the engine
 // facade so the response shape matches the workflow-control inspect endpoint.
+// The id is the {id} path value the mux matched.
 func (m *managementModule) handleExecution(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodGet) {
 		return
 	}
-	id := strings.TrimPrefix(r.URL.Path, "/v1/management/executions/")
-	id = strings.Trim(id, "/")
+	id := r.PathValue("id")
 	if id == "" {
 		writeError(w, http.StatusNotFound, "execution not found")
 		return

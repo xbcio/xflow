@@ -135,7 +135,7 @@ func TestExecutionRouteOperationMatrix(t *testing.T) {
 		isMutation bool
 	}{
 		{"inspect", http.MethodGet, "/v1/executions/" + string(f.execID), nil, http.StatusOK, http.StatusForbidden, OpExecutionRead, false},
-		{"signal", http.MethodPost, "/v1/executions/" + string(f.execID) + "/signal", signalRequest{Name: "s1"}, http.StatusOK, http.StatusForbidden, OpExecutionSignal, true},
+		{"signal", http.MethodPost, "/v1/executions/" + string(f.execID) + "/signals", signalRequest{Name: "s1"}, http.StatusOK, http.StatusForbidden, OpExecutionSignal, true},
 		{"cancel", http.MethodPost, "/v1/executions/" + string(f.execID) + "/cancel", nil, http.StatusOK, http.StatusForbidden, OpExecutionCancel, true},
 		{"revoke", http.MethodPost, "/v1/executions/" + string(f.execID) + "/revoke-signal", signalRequest{Name: "s1"}, http.StatusOK, http.StatusForbidden, OpExecutionRevoke, true},
 	}

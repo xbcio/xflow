@@ -76,7 +76,11 @@ func (m *workflowControlModule) RegisterHTTP(mux *http.ServeMux) {
 			h(w, r)
 		}
 	}
-	mux.HandleFunc("/v1/workflows", wrap("submit_workflow", m.handleSubmitWorkflow))
+	// Routes are registered as Go 1.22 mux patterns (spec §1.3): every
+	// execution sub-shape is its own method-qualified pattern, so the mux —
+	// not a hand-rolled TrimPrefix parser — selects the handler. The
+	// per-execution handlers read {id} via r.PathValue.
+	mux.HandleFunc("POST "+PathWorkflows, wrap("submit_workflow", m.handleSubmitWorkflow))
 	mux.HandleFunc("/v1/workflows/invoke", wrap("invoke_workflow", m.handleInvoke))
 	// Registration is a separate, explicit step from submit-and-execute: it
 	// persists the compiled workflow graph so the control plane can resolve it on
@@ -84,11 +88,24 @@ func (m *workflowControlModule) RegisterHTTP(mux *http.ServeMux) {
 	// /v1/workflows/register/ subtree carries the DELETE {id} path.
 	mux.HandleFunc("/v1/workflows/register", wrap("register_workflow", m.handleRegisterWorkflow))
 	mux.HandleFunc("/v1/workflows/register/", wrap("deregister_workflow", m.handleDeregisterWorkflow))
-	// /v1/executions (no trailing slash) is the entry-seed endpoint; the
-	// /v1/executions/ subtree below is the per-execution GET/signal/cancel/wait
-	// surface. ServeMux treats the two patterns as distinct.
-	mux.HandleFunc("/v1/executions", wrap("seed_execution", m.handleSeedExecution))
-	mux.HandleFunc("/v1/executions/", wrap("execution", m.handleExecution))
+	// POST /v1/executions is the entry-seed endpoint (runner protocol face,
+	// spec §0.1); the per-execution GET/signal/cancel/wait surface is the
+	// method-qualified patterns below. ServeMux treats exact and {id} patterns
+	// as distinct from the /v1/executions/{id}/ 404 catch.
+	mux.HandleFunc("POST "+PathExecutions, wrap("seed_execution", m.handleSeedExecution))
+	mux.HandleFunc("GET "+PathExecutionByID, wrap("execution.read", m.handleInspectByID))
+	mux.HandleFunc("GET "+PathExecutionWait, wrap("execution.read", m.handleWaitByID))
+	mux.HandleFunc("POST "+PathExecutionSignals, wrap("execution.signal", m.handleSignalByID))
+	mux.HandleFunc("POST "+PathExecutionCancel, wrap("execution.cancel", m.handleCancelByID))
+	mux.HandleFunc("POST /v1/executions/{id}/revoke-signal", wrap("execution.revoke", m.handleRevokeSignalByID))
+	// 404 catch: a path-only subtree that refuses any unrecognized execution
+	// verb with 404. Under Go 1.22 ServeMux a method-qualified pattern answers
+	// a method mismatch (e.g. POST /wait, GET /cancel) with 405, which leaks
+	// that the route exists; this catch restores the old default-branch 404 so
+	// the authorization boundary does not leak existence. It does no parsing —
+	// the method-qualified patterns above are more specific and win for valid
+	// shapes, so the catch only fires for shapes no handler should serve.
+	mux.HandleFunc("/v1/executions/{id}/", wrap("execution", m.handleExecutionNotFound))
 }
 
 // registerAuthzRoutes mounts the control routes behind the B3 authz wrapper:
@@ -96,20 +113,20 @@ func (m *workflowControlModule) RegisterHTTP(mux *http.ServeMux) {
 // admission → handler → audit outcome. Mutations fail-closed if the admission
 // audit cannot be persisted.
 //
-// Task 8 blocker 1: the /v1/executions/ subtree is NOT blanket-wrapped as
-// execution.read. The sub-path + verb are resolved to the correct (operation,
-// isMutation) BEFORE the authz wrapper runs, so signal/revoke/cancel each get
-// their own operation + mutation admission audit (fail-closed) + outcome audit:
+// Each execution sub-shape is its own method-qualified mux pattern bound to its
+// stable operation (spec §1.3), so the operation is known from the pattern
+// itself rather than a hand-rolled resolver. An unknown shape falls to the
+// /v1/executions/{id}/ 404 catch below, which denies with 404 "route not
+// found" BEFORE authz runs — no existence leak, no audit row for a
+// non-existent operation (mirrors the old resolveExecutionRoute ok=false path):
 //   - GET  /v1/executions/{id}            → execution.read      (non-mutation)
 //   - GET  /v1/executions/{id}/wait       → execution.read      (non-mutation)
-//   - POST /v1/executions/{id}/signal     → execution.signal    (mutation)
+//   - POST /v1/executions/{id}/signals    → execution.signal    (mutation)
 //   - POST /v1/executions/{id}/revoke-signal → execution.revoke (mutation)
 //   - POST /v1/executions/{id}/cancel     → execution.cancel    (mutation)
-//
-// An unknown verb resolves to ok=false → 404 (default-deny, no existence leak).
 func (m *workflowControlModule) registerAuthzRoutes(mux *http.ServeMux) {
 	authz := m.authzWrap
-	mux.HandleFunc("/v1/workflows", authz(OpWorkflowCreate, true, m.handleSubmitWorkflow, newExecutionIDResolver()))
+	mux.HandleFunc("POST "+PathWorkflows, authz(OpWorkflowCreate, true, m.handleSubmitWorkflow, newExecutionIDResolver()))
 	mux.HandleFunc("/v1/workflows/invoke", authz(OpWorkflowInvoke, true, m.handleInvoke, newExecutionIDResolver()))
 	// Register/deregister persist and remove the compiled workflow graph. Both
 	// are mutations under the workflow scope. The authz wrapper injects the
@@ -117,12 +134,72 @@ func (m *workflowControlModule) registerAuthzRoutes(mux *http.ServeMux) {
 	// namespace.FromContext — never from the client body.
 	mux.HandleFunc("/v1/workflows/register", authz(OpWorkflowRegister, true, m.handleRegisterWorkflow, nil))
 	mux.HandleFunc("/v1/workflows/register/", authz(OpWorkflowRegister, true, m.handleDeregisterWorkflow, nil))
-	// Entry-seed endpoint (exact path, no trailing slash). Distinct from the
-	// /v1/executions/ subtree. The authz wrapper injects the principal's
-	// namespace into the request context; handleSeedExecution reads it via
-	// namespace.FromContext — never from the client body.
-	mux.HandleFunc("/v1/executions", authz(OpExecutionSeed, true, m.handleSeedExecution, newExecutionIDResolver()))
-	mux.HandleFunc("/v1/executions/", m.authzWrapResolved(m.handleExecution, resolveExecutionRoute))
+	// Entry-seed endpoint (exact path, POST only). The authz wrapper injects
+	// the principal's namespace into the request context; handleSeedExecution
+	// reads it via namespace.FromContext — never from the client body.
+	mux.HandleFunc("POST "+PathExecutions, authz(OpExecutionSeed, true, m.handleSeedExecution, newExecutionIDResolver()))
+	mux.HandleFunc("GET "+PathExecutionByID, authz(OpExecutionRead, false, m.handleInspectByID, execIDResolver("")))
+	mux.HandleFunc("GET "+PathExecutionWait, authz(OpExecutionRead, false, m.handleWaitByID, execIDResolver("wait")))
+	mux.HandleFunc("POST "+PathExecutionSignals, authz(OpExecutionSignal, true, m.handleSignalByID, execIDResolver("signals")))
+	mux.HandleFunc("POST /v1/executions/{id}/revoke-signal", authz(OpExecutionRevoke, true, m.handleRevokeSignalByID, execIDResolver("revoke-signal")))
+	mux.HandleFunc("POST "+PathExecutionCancel, authz(OpExecutionCancel, true, m.handleCancelByID, execIDResolver("cancel")))
+	// 404 catch for unrecognized execution verbs. Unwrapped (no authz): the old
+	// resolver's ok=false path returned 404 before authz ran and wrote no audit
+	// row, and the catch preserves that. A method-qualified pattern alone would
+	// 405 a method mismatch (existence leak); the path-only catch wins for any
+	// {id}/verb shape no method-qualified pattern serves and returns 404.
+	mux.HandleFunc("/v1/executions/{id}/", m.handleExecutionNotFound)
+}
+
+// execIDResolver builds the resource resolver for an execution sub-route: it
+// reads the {id} the mux matched and returns the execution-scoped resource
+// string the audit row carries (suffix is the sub-route verb, "" for inspect).
+// ResourceNamespace is left empty — the authoritative IDOR defense is the
+// namespace-scoped store read (the authz wrapper injects the principal's
+// namespace so a cross-namespace execID resolves to not-found → 404).
+func execIDResolver(suffix string) func(*http.Request) (string, string, string, string) {
+	return func(r *http.Request) (string, string, string, string) {
+		id := r.PathValue("id")
+		resource := "execution/" + id
+		if suffix != "" {
+			resource += "/" + suffix
+		}
+		return resource, "", id, ""
+	}
+}
+
+// handleExecutionNotFound is the 404 catch for the /v1/executions/{id}/
+// subtree: any execution sub-shape no method-qualified pattern serves lands
+// here and is refused with 404 "route not found" — no existence leak. It
+// replaces the default branch of the old hand-rolled handleExecution parser.
+func (m *workflowControlModule) handleExecutionNotFound(w http.ResponseWriter, r *http.Request) {
+	writeError(w, http.StatusNotFound, "route not found")
+}
+
+// handleInspectByID / handleWaitByID / handleSignalByID / handleCancelByID /
+// handleRevokeSignalByID are mux-pattern adapters: they pull the {id} path
+// value the mux matched and delegate to the per-execution handler. They exist
+// so each execution sub-shape is registered as its own method-qualified
+// pattern (spec §1.3) and the mux — not a hand-rolled parser — selects the
+// operation.
+func (m *workflowControlModule) handleInspectByID(w http.ResponseWriter, r *http.Request) {
+	m.handleInspect(w, r, types.ExecutionID(r.PathValue("id")))
+}
+
+func (m *workflowControlModule) handleWaitByID(w http.ResponseWriter, r *http.Request) {
+	m.handleWait(w, r, types.ExecutionID(r.PathValue("id")))
+}
+
+func (m *workflowControlModule) handleSignalByID(w http.ResponseWriter, r *http.Request) {
+	m.handleSignal(w, r, types.ExecutionID(r.PathValue("id")))
+}
+
+func (m *workflowControlModule) handleCancelByID(w http.ResponseWriter, r *http.Request) {
+	m.handleCancel(w, r, types.ExecutionID(r.PathValue("id")))
+}
+
+func (m *workflowControlModule) handleRevokeSignalByID(w http.ResponseWriter, r *http.Request) {
+	m.handleRevokeSignal(w, r, types.ExecutionID(r.PathValue("id")))
 }
 
 // newExecutionIDResolver is the resource resolver for the workflow create/invoke
@@ -140,39 +217,6 @@ func (m *workflowControlModule) registerAuthzRoutes(mux *http.ServeMux) {
 func newExecutionIDResolver() func(*http.Request) (string, string, string, string) {
 	return func(*http.Request) (string, string, string, string) {
 		return "", "", string(engine.NewExecutionID()), ""
-	}
-}
-
-// resolveExecutionRoute parses /v1/executions/<id>[/verb] + method and returns
-// the stable operation + mutation flag for the authz wrapper. ok=false for an
-// unknown verb or missing id (the wrapper answers 404, default-deny). The
-// resource is execution-scoped so the audit row carries the targeted execution
-// id; ResourceNamespace is left empty — the authoritative IDOR defense is the
-// namespace-scoped store read (the authz wrapper injects the principal's namespace
-// into the request context so handleInspect/handleSignal read from the
-// principal's namespace namespace; a cross-namespace execID resolves to not-found →
-// 404, never leaking existence).
-func resolveExecutionRoute(r *http.Request) (resolvedRoute, bool) {
-	rest := strings.TrimPrefix(r.URL.Path, "/v1/executions/")
-	parts := strings.Split(strings.Trim(rest, "/"), "/")
-	if len(parts) == 0 || parts[0] == "" {
-		return resolvedRoute{}, false
-	}
-	execID := parts[0]
-	resource := "execution/" + execID
-	switch {
-	case len(parts) == 1 && r.Method == http.MethodGet:
-		return resolvedRoute{operation: OpExecutionRead, resource: resource, executionID: execID, isMutation: false}, true
-	case len(parts) == 2 && parts[1] == "wait" && r.Method == http.MethodGet:
-		return resolvedRoute{operation: OpExecutionRead, resource: resource + "/wait", executionID: execID, isMutation: false}, true
-	case len(parts) == 2 && parts[1] == "signal" && r.Method == http.MethodPost:
-		return resolvedRoute{operation: OpExecutionSignal, resource: resource + "/signal", executionID: execID, isMutation: true}, true
-	case len(parts) == 2 && parts[1] == "revoke-signal" && r.Method == http.MethodPost:
-		return resolvedRoute{operation: OpExecutionRevoke, resource: resource + "/revoke-signal", executionID: execID, isMutation: true}, true
-	case len(parts) == 2 && parts[1] == "cancel" && r.Method == http.MethodPost:
-		return resolvedRoute{operation: OpExecutionCancel, resource: resource + "/cancel", executionID: execID, isMutation: true}, true
-	default:
-		return resolvedRoute{}, false
 	}
 }
 
@@ -687,37 +731,6 @@ func (m *workflowControlModule) handleSeedExecution(w http.ResponseWriter, r *ht
 		ExecutionID: string(resp.ExecutionID),
 		Duplicate:   resp.Duplicate,
 	})
-}
-
-func (m *workflowControlModule) handleExecution(w http.ResponseWriter, r *http.Request) {
-	path := strings.TrimPrefix(r.URL.Path, "/v1/executions/")
-	parts := strings.Split(strings.Trim(path, "/"), "/")
-	if len(parts) == 0 || parts[0] == "" {
-		writeError(w, http.StatusNotFound, "execution not found")
-		return
-	}
-	id := types.ExecutionID(parts[0])
-	if len(parts) == 1 && r.Method == http.MethodGet {
-		m.handleInspect(w, r, id)
-		return
-	}
-	if len(parts) == 2 && parts[1] == "signal" {
-		m.handleSignal(w, r, id)
-		return
-	}
-	if len(parts) == 2 && parts[1] == "cancel" {
-		m.handleCancel(w, r, id)
-		return
-	}
-	if len(parts) == 2 && parts[1] == "revoke-signal" {
-		m.handleRevokeSignal(w, r, id)
-		return
-	}
-	if len(parts) == 2 && parts[1] == "wait" && r.Method == http.MethodGet {
-		m.handleWait(w, r, id)
-		return
-	}
-	writeError(w, http.StatusNotFound, "route not found")
 }
 
 func (m *workflowControlModule) handleInspect(w http.ResponseWriter, r *http.Request, id types.ExecutionID) {
