@@ -98,21 +98,70 @@ SDK 作为**瘦客户端**：自己不执行节点、不需要 Redis，通过网
 
 `xflow.NewServer(ServerConfig, opts...)` 是 SDK 支持的嵌入式控制面入口：
 调用方可以把 server 的 HTTP handler 挂到自己的 `http.ServeMux`，或者让
-`Server.Run` 自行监听 HTTP/gRPC/metrics 地址。它与 `cmd/server` 共享
-`service/apiserver` / `service/control` 的模块表面。
+`Server.Run` 自行监听 HTTP/gRPC/metrics 地址。
+
+`cmd/server` **就是** `xflow.NewServer` 的调用方：它只做 flag/文件解析、
+master key 加载、mysqlstore/artifactStore 构造、tracing provider 生命周期、
+生产姿态校验（`validateProduction`）和信号处理，装配本身全部经 SDK。这条
+约束是有代价换来的 —— 此前两条路径各自组 `apiserver.Config`，SDK 那条漏掉了
+workflow API 认证器（`/v1/workflows` 对所有可达调用方开放，而提交的
+workflow 会在每个已连接 runner 上执行）、supply 传输层加密和 audit
+reconciler。三处都不报错，只是静默降级。新增 `apiserver.Config` 字段时必须
+同时给出 `WithServer*` 选项，否则嵌入式宿主拿不到。
 
 | 维度 | 说明 |
 |---|---|
-| 工厂 | `xflow.NewServer(xflow.ServerConfig{RedisAddr, Store}, opts...)` |
+| 工厂 | `xflow.NewServer(xflow.ServerConfig{RedisAddr, RedisConfig, Store}, opts...)` |
 | Backend | RedisAddr 为空时使用 `backend/providers/local`；非空时使用 `backend/providers/distributed` |
 | 执行者 | 不执行 handler；通过 Runner Protocol 分配给 runner |
-| API | `Handler()` / `Start()` / `Shutdown()` / `Run()` / `RegisterGRPC()` / `IsLeader()` |
+| API | `Handler()` / `Start()` / `Shutdown()` / `Run()` / `RegisterGRPC()` / `IsLeader()` / `Reconciler()` |
+| 默认姿态 | supply 传输层加密**无条件开启**（不需要 KEK，故不设开关）；management 面、runner metrics 代理默认关 |
+| 后台 worker | audit reconcile worker 由 `Start` 与 `Run` 两条路径各自启动（`apiserver.Run` 走的是 apiserver 自己的 `Start`，不经 `Server.Start`） |
 | 典型场景 | 宿主应用希望内嵌控制面、复用自身 HTTP/gRPC 生命周期，但仍采用 server/runner 执行拆分 |
 
 **边界**：`NewServer` 是 `sdk/xflow` 允许导入 `service/apiserver` 与
 `service/control` 的唯一原因。SDK 只暴露 facade；control-plane 状态机、
 runner matching、Runner Protocol、lease handoff 和 auth 逻辑仍归
 `service/` 所有，不能复制到 SDK 包内。
+
+### 2.5 embedded runner
+
+`xflow.NewRunner(RunnerConfig, opts...)` 是 §2.4 的执行面对应物：宿主进程注册
+自己的节点类型（`node.Define` + `registry.Register`），调用 `NewRunner`，再
+`Run`；runner 通过 Runner Protocol 连上控制面，领取它声明的节点类型的 lease，
+在本进程内执行。
+
+| 维度 | 说明 |
+|---|---|
+| 工厂 | `xflow.NewRunner(xflow.RunnerConfig{ServerURL, ...}, opts...)` |
+| 必填 | 仅 `ServerURL`（gRPC 传输下也必填：entry seeding 与 artifact fetch 恒走 HTTP） |
+| API | `Run(ctx)` / `Close()` / `MetricsHandler()` |
+| 选项 | `WithRunnerLogger` / `WithRunnerTracer` / `WithRunnerMetrics` / `WithRunnerArtifactResolver` / `WithRunnerNodeRegistry` |
+| 重连 | `Run` 内置重连循环（2s 起、30s 封顶、指数退避 + 抖动），只在 ctx 取消时返回 |
+| 外部依赖 | 网络可达的控制面；不需要 Redis |
+
+**这不是便利封装**。它做的装配里有四步在漏掉时**不报错、只静默降级**——
+正因如此才收进 SDK，而不是让每个宿主各写一遍：
+
+- **GroupRuntime 缺失不会让 group lease 失败，而是永远收不到它**：group unit
+  的路由要求 `group.exec.v1` feature，没声明的 runner 在分配阶段就被过滤掉，
+  任务留在队列里，两端都无日志。
+- **GroupRuntime 必须先于 TriggerActivationHandler 构造**：既托管 trigger 又
+  执行 group 的 runner 需要两处拿到同一个实例。
+- **artifact resolver 必须触达三个消费者**（dispatcher、group runtime、subgraph
+  runtime）：后两者每次尝试都新建自己的 inner backend；只装在 dispatcher 上，
+  嵌在 group 或 map body 里的 script 会以 `script.artifact_unavailable` 永久失败。
+- **每个指向控制面的 HTTP client 都必须带上 runner 的 TLS 材料**：静默用
+  `http.DefaultTransport` 的那个会忽略私有 CA，而 supply fetch 一失败，就绪门控
+  就永远拒绝，runner 根本不会托管它的 trigger。
+
+`Capabilities` 匹配的是这个列表、不是进程的节点注册表：注册了但没列进来的
+handler 永远收不到工作。group 执行能力会自动补上。
+
+**cmd/runner 就是这套装配的 CLI/YAML 前端**，与 §2.4 的 `cmd/server` 同构。
+SAS 是第一个宿主：它此前手工装配，配置里漏了 `SupportsEncryption`，于是向一个
+已开启加密的 server 明文取回 Kafka 凭证——两端都不报错，因为 server 只对
+「主动要求」的 runner 加密。这正是上面「静默降级」的实例。
 
 ---
 
@@ -469,6 +518,8 @@ Relay Gateway 用于 runner 无法直连 server、不能互相直连或需要本
 | local 模式 | **已实现** | `backend/providers/local/` 完整：内存 state/queue + reusable `execution.Registry` + Waiter |
 | cluster 模式 | **已实现** | `backend/providers/distributed/` 完整：Redis state + Asynq queue + reusable `execution.Dispatcher` / `execution.Runner` / `execution.Registry` + TimeoutMonitor |
 | remote 模式 | **规划** | 无 remote SDK client/backend，无 remote 工厂 |
+| embedded server | **已实现** | `xflow.NewServer`（§2.4）；`cmd/server` 即其调用方，装配单一路径 |
+| embedded runner | **已实现** | `xflow.NewRunner`（§2.5）；`cmd/runner` 即其调用方；`Run` 自带重连 |
 | server 管理面 | **MVP 已实现** | `cmd/server` 可启动 HTTP 控制面，支持 workflow invoke、inspect、signal、cancel、runner register/heartbeat/poll/result |
 | runner 执行面 | **MVP 已实现** | `cmd/runner` 可连接 server，注册 capability，通过 Runner Protocol 执行 lease 并上报 result |
 | Task Dispatcher + durable handoff | **MVP 已实现** | `service/control.Dispatcher` 将 queued task 持久化为 `RedisRunnerDirectory` assignment；claim TTL、finalize、reconnect replay 与 fenced release 支持跨 server 进程恢复 |
