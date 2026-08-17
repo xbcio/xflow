@@ -351,11 +351,11 @@ func (m *workflowControlModule) handleExecuteWorkflow(w http.ResponseWriter, r *
 	if tracer == nil {
 		tracer = tracing.NoopTracer{}
 	}
-	spanName := "xflow.workflow.execute"
-	if req.Entry != "" {
-		spanName = "xflow.workflow.execute"
-	}
-	ctx, span := tracer.Start(r.Context(), spanName, "entry", req.Entry)
+	// The old submit/invoke endpoints had distinct span names
+	// (xflow.workflow.submit / xflow.workflow.invoke); the §9.1 merge collapsed
+	// them into one route, so the span name is now uniform. The entry attribute
+	// (empty for Submit, set for Invoke) carries the submit/invoke distinction.
+	ctx, span := tracer.Start(r.Context(), "xflow.workflow.execute", "entry", req.Entry)
 	defer span.End()
 	ctx = engine.WithTraceCarrier(ctx, tracing.InjectCarrier(ctx))
 	// Attach the original workflow definition so the durable SQL execution

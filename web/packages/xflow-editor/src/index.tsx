@@ -316,7 +316,7 @@ function validateWorkflow(
       message: `节点类型不在 DSL 节点库中: ${unsupportedTypes.join(", ")}`
     });
   }
-  if (workflow.runnerSelector?.mode === "required" && Object.keys(workflow.runnerSelector.matchLabels ?? {}).length === 0) {
+  if (workflow.runner_selector?.mode === "required" && Object.keys(workflow.runner_selector.match_labels ?? {}).length === 0) {
     diagnostics.push({
       status: "error",
       area: "runner",
@@ -324,7 +324,7 @@ function validateWorkflow(
     });
   }
   const nodeRequiredSelectors = nodes
-    .filter((node) => node.runnerSelector?.mode === "required")
+    .filter((node) => node.runner_selector?.mode === "required")
     .map((node, index) => nodeName(node, index));
   if (nodeRequiredSelectors.length > 0) {
     diagnostics.push({
@@ -853,13 +853,13 @@ function Inspector({
   React.useEffect(() => {
     setParametersText(serializeJson(selectedNode?.parameters ?? {}));
     setParametersError(undefined);
-    setNodeRunnerSelectorText(serializeJson(selectedNode?.runnerSelector ?? {}));
+    setNodeRunnerSelectorText(serializeJson(selectedNode?.runner_selector ?? {}));
     setNodeRunnerSelectorError(undefined);
-  }, [selectedNodeIdentity, selectedNode?.parameters, selectedNode?.runnerSelector]);
+  }, [selectedNodeIdentity, selectedNode?.parameters, selectedNode?.runner_selector]);
 
   React.useEffect(() => {
     setWorkflowJsonText({
-      runnerSelector: serializeJson(workflow.runnerSelector ?? { mode: "default", matchLabels: {} }),
+      runner_selector: serializeJson(workflow.runner_selector ?? { mode: "default", match_labels: {} }),
       params: serializeJson(workflow.params ?? {}),
       context: serializeJson(workflow.context ?? { vars: {}, config: {} }),
       settings: serializeJson(workflow.settings ?? {}),
@@ -867,7 +867,7 @@ function Inspector({
       pin_data: serializeJson(workflow.pin_data ?? {})
     });
     setWorkflowJsonErrors({});
-  }, [workflow.runnerSelector, workflow.params, workflow.context, workflow.settings, workflow.credentials, workflow.pin_data]);
+  }, [workflow.runner_selector, workflow.params, workflow.context, workflow.settings, workflow.credentials, workflow.pin_data]);
 
   const updateWorkflowMeta = React.useCallback(
     (patch: Partial<WorkflowDef>) => {
@@ -877,7 +877,7 @@ function Inspector({
   );
   const updateWorkflowJson = React.useCallback(
     (
-      field: "runnerSelector" | "params" | "context" | "settings" | "credentials" | "pin_data",
+      field: "runner_selector" | "params" | "context" | "settings" | "credentials" | "pin_data",
       nextText: string
     ) => {
       setWorkflowJsonText((current) => ({ ...current, [field]: nextText }));
@@ -952,7 +952,7 @@ function Inspector({
           return;
         }
         setNodeRunnerSelectorError(undefined);
-        updateSelectedNode({ runnerSelector: nextRunnerSelector as WorkflowNode["runnerSelector"] });
+        updateSelectedNode({ runner_selector: nextRunnerSelector as WorkflowNode["runner_selector"] });
       } catch {
         setNodeRunnerSelectorError("Runner JSON 格式错误");
       }
@@ -1003,11 +1003,11 @@ function Inspector({
               aria-label="工作流 Runner 选择 JSON"
               autoSize={{ minRows: 2, maxRows: 5 }}
               className="!font-mono !text-[10.5px]"
-              status={workflowJsonErrors.runnerSelector ? "error" : undefined}
-              value={workflowJsonText.runnerSelector ?? "{}"}
-              onChange={(event) => updateWorkflowJson("runnerSelector", event.target.value)}
+              status={workflowJsonErrors.runner_selector ? "error" : undefined}
+              value={workflowJsonText.runner_selector ?? "{}"}
+              onChange={(event) => updateWorkflowJson("runner_selector", event.target.value)}
             />
-            {workflowJsonErrors.runnerSelector ? <span>{workflowJsonErrors.runnerSelector}</span> : null}
+            {workflowJsonErrors.runner_selector ? <span>{workflowJsonErrors.runner_selector}</span> : null}
           </div>
         </label>
         <label className="!grid-cols-[64px_minmax(0,1fr)] !gap-2">
