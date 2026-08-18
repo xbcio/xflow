@@ -36,7 +36,7 @@ type runnerPathConst struct {
 }
 
 // runnerPathConsts parses every non-test .go file in this package directory and
-// returns every string constant whose value starts with "/v1/runners/" — the
+// returns every string constant whose value starts with "/v1/" — the
 // runner-protocol path vocabulary declared across server.go, group.go,
 // activation.go and metrics.go. Go cannot reflect over constants, so the guard
 // reads them from source; the parser is the single source of truth, so a path
@@ -44,12 +44,23 @@ type runnerPathConst struct {
 // hand-written list to drift. This mirrors the apiserver authz guard's
 // opConsts helper (service/apiserver/authz_coverage_test.go).
 //
-// The "/v1/runners/" prefix is load-bearing: it scopes the parser to the
-// runner-protocol face and excludes the entry-seed "/v1/executions" literal,
-// which lives in a function body (not a const declaration) and is deliberately
-// not a runner-facing path (spec §0.1). Were it ever promoted to a const, the
-// prefix filter would still skip it — and that skip would be the correct
-// signal to review whether it belongs in RunnerFacingPaths.
+// Reach, stated honestly, because a filter that skips silently is exactly how
+// the earlier shapes of this guard stayed green through real drift:
+//
+//   - Covered: const and var declarations in this package directory whose value
+//     is a plain string literal.
+//   - Covered loudly, not silently: any declaration whose name ends in "Path"
+//     but whose value the parser cannot resolve to a "/v1/" literal — a
+//     concatenation, a reference to another constant, or a different prefix.
+//     Those fail the guard with an explicit message instead of slipping through
+//     a `continue`, so the next author gets told to either make it a literal or
+//     justify the new vocabulary. This package's whole path vocabulary already
+//     follows the "…Path" naming convention, so the hook is the existing
+//     convention rather than a new rule.
+//   - NOT covered: path constants declared in a sub-package (runnerpb/). The
+//     parser reads this directory only and does not recurse; runnerpb holds
+//     generated protobuf code and no path constants today. Moving a path
+//     constant down there would escape this guard.
 func runnerPathConsts(t *testing.T) []runnerPathConst {
 	t.Helper()
 	entries, err := os.ReadDir(".")
@@ -58,6 +69,7 @@ func runnerPathConsts(t *testing.T) []runnerPathConst {
 	}
 	fset := token.NewFileSet()
 	var out []runnerPathConst
+	var unresolvable []string
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
@@ -76,7 +88,9 @@ func runnerPathConsts(t *testing.T) []runnerPathConst {
 		}
 		for _, decl := range file.Decls {
 			gd, ok := decl.(*ast.GenDecl)
-			if !ok || gd.Tok != token.CONST {
+			// var is scanned alongside const: declaring a path with var
+			// instead of const would otherwise be a silent way out.
+			if !ok || (gd.Tok != token.CONST && gd.Tok != token.VAR) {
 				continue
 			}
 			for _, spec := range gd.Specs {
@@ -85,15 +99,27 @@ func runnerPathConsts(t *testing.T) []runnerPathConst {
 					continue
 				}
 				for i, cn := range vs.Names {
+					// A "…Path" name with no value at all (e.g. a typed
+					// declaration filled in elsewhere) is unresolvable too.
+					named := strings.HasSuffix(cn.Name, "Path")
 					if i >= len(vs.Values) {
+						if named {
+							unresolvable = append(unresolvable, fmt.Sprintf("%s (%s: no literal value)", cn.Name, name))
+						}
 						continue
 					}
 					lit, ok := vs.Values[i].(*ast.BasicLit)
 					if !ok || lit.Kind != token.STRING {
+						if named {
+							unresolvable = append(unresolvable, fmt.Sprintf("%s (%s: value is not a plain string literal)", cn.Name, name))
+						}
 						continue
 					}
 					val, err := strconv.Unquote(lit.Value)
 					if err != nil {
+						if named {
+							unresolvable = append(unresolvable, fmt.Sprintf("%s (%s: unquotable literal)", cn.Name, name))
+						}
 						continue
 					}
 					// Filter on "/v1/" rather than "/v1/runners/": the runner
@@ -108,12 +134,24 @@ func runnerPathConsts(t *testing.T) []runnerPathConst {
 					// construction, so a false positive here is a loud test
 					// failure, never a silent pass.
 					if !strings.HasPrefix(val, "/v1/") {
+						if named {
+							unresolvable = append(unresolvable, fmt.Sprintf("%s = %q (%s: not under /v1/)", cn.Name, val, name))
+						}
 						continue
 					}
 					out = append(out, runnerPathConst{name: cn.Name, value: val})
 				}
 			}
 		}
+	}
+	// A "…Path" declaration the parser could not reduce to a "/v1/" literal is
+	// reported, not skipped. Skipping is how a concatenated, aliased, or
+	// re-prefixed path would leave the vocabulary without anything going red --
+	// the same silent-continue shape that let earlier versions of this guard
+	// stay green while real drift walked past them.
+	if len(unresolvable) > 0 {
+		sort.Strings(unresolvable)
+		t.Errorf("path-named declarations the guard cannot resolve to a \"/v1/\" string literal (make the value a plain literal, or rename it if it is not a protocol path): %v", unresolvable)
 	}
 	if len(out) == 0 {
 		t.Fatal("no runner-facing path constants parsed from package sources — the guard cannot see the vocabulary; check the parser")
