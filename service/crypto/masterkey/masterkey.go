@@ -6,6 +6,15 @@
 // stored alongside the data it protects (in MySQL, in the image, in git)
 // offers no protection against the threat that motivates encrypting at rest
 // in the first place — an attacker holding a database dump or the source.
+//
+// Position in the main line: masterkey is the root of the server's key
+// hierarchy. cmd/server loads it at startup and passes it to
+// service/control.ControlPlane, which calls Derive("supply.transport") to
+// produce the AES-256 key managed by service/crypto/supplyenc. No other
+// package receives the raw Key; all downstream packages receive only the
+// purpose-scoped derived bytes, so a compromise of one derived key cannot
+// expose keys derived for other purposes. ErrNotConfigured is the expected
+// signal on a dev deployment that deliberately runs without encryption.
 package masterkey
 
 import (

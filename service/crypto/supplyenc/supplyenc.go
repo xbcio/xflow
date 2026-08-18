@@ -4,6 +4,17 @@
 // tag, algorithm identifier, key ID, and base64-encoded ciphertext. The key ID
 // allows the receiver to select the correct key from a keyring without trial
 // decryption.
+//
+// Position in the main line: supplyenc sits on the supply delivery path between
+// service/control and service/runner. The control plane's SupplyEncryptor wraps
+// Encrypt when a runner requests encrypted content via the
+// "Accept: application/x-xflow-encrypted" header on GET /v1/supplies/{name}.
+// The runner receives the AES-256 key on Register (RegisterRunnerResponse.SupplyKey)
+// and key rotations on Heartbeat (HeartbeatResponse.SupplyKeyRotation); it
+// stores both in a Keyring held by HTTPSupplyFetcher and calls Keyring.Decrypt
+// on every supply response. Fleet-wide key rotation is coordinated through a
+// Redis lease in service/control so all replicas rotate to the same key at
+// most once per period without per-replica churn.
 package supplyenc
 
 import (

@@ -1,6 +1,15 @@
 // Package namespace provides the security namespace type and context
 // propagation primitives used throughout xflow. Namespace is server-issued and
 // must never be trusted when supplied by an untrusted client request body.
+//
+// Position in the main line: namespace is the horizontal isolation primitive
+// wired through every layer of the stack. service/apiserver injects the
+// authenticated namespace into the request context (namespace.WithNamespace);
+// service/control, engine, and backend/providers/distributed/rstate read it
+// back (namespace.FromContext) to scope Redis key prefixes, EntryActivation
+// records, and audit rows. The Validate function guards every inbound namespace
+// string before it is embedded in a Redis key, keeping the key schema free of
+// delimiter characters that would corrupt slot assignments or SCAN patterns.
 package namespace
 
 import (
