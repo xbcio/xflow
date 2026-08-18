@@ -127,7 +127,7 @@ pattern，导致 `/v1/executions/` 与 `/v1/management/dead-letters/` 的路径�
 | `success` | bool | 与 HTTP 状态码 2xx **严格一致**，不得出现 200 + `success:false` |
 | `code` | string | 成功固定 `"200"`；失败为**稳定的业务错误码**，snake_case |
 | `message` | string | 人读文案，可变更、可本地化。成功时为 `""` |
-| `data` | any | 成功时的载荷；失败时为 `null` |
+| `data` | any | 成功时的载荷；失败时**省略该键**（不是 `data: null`，见 `envelope.Data` 的 `omitempty`） |
 | `trace_id` | string | 见 §5 |
 
 ### 3.2 `code` 的稳定性契约
@@ -307,11 +307,12 @@ runner 协议**不加 `trace_id` 字段**，链路透传走 OTel `traceparent` �
 配守卫测试：**所有已注册路由都有对应 Op，且所有 Op 都有路由消费**。
 
 反向的死代码同样要防：`OpWorkflowDefinitionCreate`、`OpWorkflowDefinitionRead`、
-`OpWorkflowDefinitionUpdate`、`OpWorkflowDefinitionValidate`、
-`OpWorkflowDefinitionPublish`、`OpWorkflowExecutionInvoke`、`OpWorkflowRead` 这 7
-个 Op 常量除 `authz.go` 自身外**没有任何路由消费**——它们是为一份从未实现的契约
-准备的（§9）。`OpManagementWrite` 同样零引用。唯一的例外是
-`OpWorkflowRead` 在 `sqlaudit_test.go` 里被当作任意占位值使用，那不是消费点。
+`OpWorkflowDefinitionValidate`、`OpWorkflowDefinitionPublish`、
+`OpWorkflowExecutionInvoke` 这 5 个 Op 常量除 `authz.go` 自身外**没有任何路由
+消费**——它们是为一份从未实现的契约准备的（§9）。`OpManagementWrite` 同样零
+引用。（`OpWorkflowDefinitionUpdate` 被 PUT `/v1/workflows/{id}` 消费，
+`OpWorkflowRead` 被 GET `/v1/workflows/{id}` 消费——这两个是活的，不要删。
+`OpWorkflowRead` 在 `sqlaudit_test.go` 里还被当作任意占位值使用，那不是消费点。）
 
 ### 6.2 namespace 只能从认证主体取
 
@@ -351,14 +352,14 @@ runner directory 认证只回答「这是不是一台已注册的 runner」。�
 
 ```
 POST   /v1/workflows                        注册定义 → workflow_id
-GET    /v1/workflows                        列表（分页）
+GET    /v1/workflows                        列表（分页）——未实现，见 §9.6
 GET    /v1/workflows/{id}                   读取
 PUT    /v1/workflows/{id}                   全量更新
 DELETE /v1/workflows/{id}                   注销
 POST   /v1/workflows/{id}/execute           执行已注册的工作流
 POST   /v1/workflows/execute                内联定义直跑
 
-GET    /v1/executions                       列表（分页）
+GET    /v1/executions                       列表（分页）——未实现，见 §9.6
 GET    /v1/executions/{id}                  查询
 POST   /v1/executions/{id}/cancel           取消
 POST   /v1/executions/{id}/signals          发信号
@@ -465,52 +466,102 @@ entry-seed 的 409 响应有**两种不同 body**，客户端据此决定是否�
 
 | 现状 | 目标 | 依据 |
 | --- | --- | --- |
-| `POST /v1/workflows`（编译并立即执行） | `POST /v1/workflows/execute` | §1.2 语义倒置：POST 集合应当是创建 |
-| `POST /v1/workflows/invoke` | 并入 `POST /v1/workflows/execute` | §1.2 动词层级 |
-| `POST /v1/workflows/register` | `POST /v1/workflows` | §1.2 动词层级 |
-| `DELETE /v1/workflows/register/{id}` | `DELETE /v1/workflows/{id}` | §1.2 中间段当资源 |
-| `POST /v1/executions/{id}/signal` | `POST /v1/executions/{id}/signals` | §1.1 复数资源 |
-| `POST /v1/executions/{id}/revoke-signal` | `DELETE /v1/executions/{id}/signals/{name}` | §1.2 动词粘在路径段里 |
-| 全仓手工 `TrimPrefix` 路径解析 | Go 1.22 mux pattern | §1.3 |
+| 全仓手工 `TrimPrefix` 路径解析 | Go 1.22 mux pattern | §1.3（workflows 面与 executions 面已迁移；management dead-letters 面待 Task 5 迁移） |
+
+`POST /v1/executions/{id}/signal` → `POST /v1/executions/{id}/signals`（§1.1 复数资源）
+与 `POST /v1/executions/{id}/revoke-signal` → `DELETE /v1/executions/{id}/signals/{name}`（§1.2
+动词粘在路径段里）已完成迁移，从本表移除。
 
 ### 9.2 缺失的端点
 
 前端 `web/packages/xflow-api/src/index.ts` 已在调用、服务端**不存在**的路由：
 
 - `GET /workflows`（列表）
-- `GET /workflows/{id}`（读取）
-- `PUT /workflows/{id}`（保存）
-- `POST /workflows/{id}/runs` → 目标为 `POST /v1/workflows/{id}/execute`
 - `GET /workflows/{id}/runtime` → **废除**，无服务端对应概念
+
+（`GET /workflows/{id}`、`PUT /workflows/{id}`、`POST /workflows/{id}/runs`→`POST /v1/workflows/{id}/execute`
+已在 workflows 路由迁移中实现。）
 
 ### 9.3 响应形状
 
-- 65 处 `writeError` 调用产出 `{"error": "..."}`，与 §3.1 信封不符
-- `writeJSON`/`writeError` 在 `service/apiserver` 与 `service/control` 各有一份实
-  现，必须合并为一份
+- workflows 族（register/deregister/execute/read/replace）已迁移到信封
+  `writeData`/`writeFail` 并带稳定 snake_case code（§3.2）。executions 族
+  （inspect/signal/cancel/revoke/wait）亦已迁移完成。management / supply /
+  artifact 三族（Task 5b）已迁移：所有失败站点改走 `writeFail`（带稳定
+  snake_case code + `trace_id` + `X-Request-Id` 回显），management 的成功
+  body 一并信封化（leader / runner / dead-letters list / dead-letters
+  replay），supply PUT 的成功描述符信封化；CLI `apiDeadLetterClient.do()`
+  解信封再取 `data` 以保持对齐。§3.4 的裸流例外（supply GET、artifact
+  GET/HEAD）只对**成功流**有效，失败分支仍返回 JSON 信封。`/healthz` 与
+  `/readyz` 不信封化（§7）。`service/apiserver` 中的 `writeError`/
+  `writeEngineError` 过渡 shim 已删除，apiserver 现仅留 `writeJSON`
+  （`module_control.go`，用于 entry-seed 的 §0 例外裸 body 与
+  `/healthz`、`/readyz`）；用户面成功/失败均走 `writeData`/`writeFail`。
+  `service/control/server.go` 仍各自实现 `writeJSON` 与 `writeError`
+  （runner 面，§0 第二列），是另一份 `writeJSON` 的所在；两份 `writeJSON`
+  （apiserver 与 control）签名一致但服务于不同面，合并为一份共享 helper
+  仍是后续待办
 - 前端 `web/packages/xflow-api/src/index.ts` 读 `body.message`，服务端发
   `body.error`——**当前前端拿到的每一条服务端错误消息都被丢弃**，一律降级为
-  `statusText`。信封落地后自然修复
-- 无任何端点实现分页（§3.3）
+  `statusText`。信封落地后自然修复（workflows 族已修复）
+- 无任何列表端点实现分页（§3.3）。**参数层已落地**：`pageParams`
+  （`service/apiserver/pagination.go`，1-based、默认 20、服务端强制上限 200）
+  与 `writeList`（`service/apiserver/envelope.go`，`{list,total}` 载荷形状）
+  已实现并有单测，**但生产调用点为零**——阻塞在两处缺失的数据源，见 §9.6
 
 ### 9.4 字段命名
 
 全面 **snake_case**（与 Go wire 主流 112:10、YAML DSL 规范 `on_error` /
-`allow_cycles` / `node_templates` 一致）。需修正的越界：
+`allow_cycles` / `node_templates` 一致）。
 
-- `types/workflow.go`：`runnerSelector` → `runner_selector`
-- `types/workflow.go`：`matchLabels` → `match_labels`
+`types.RunnerSelector` 的 `runnerSelector` → `runner_selector`、`matchLabels` →
+`match_labels` 已完成（含 TS mirror `web/packages/xflow-core/src/index.ts`）。
+runtime hash 已通过 hash-local 镜像（`runtimeSelectorHashPayload`）与 wire 标签解耦，
+标签冻结在前重命名字节，详见 `sdk/xflow/workflow_identity.go`。
 
 ### 9.5 死代码
 
 | 对象 | 状态 |
 | --- | --- |
 | `protocol.ActivatePath` / `DeactivatePath` / `ActivationListPath` | 零注册零调用 |
-| `OpWorkflowDefinition{Create,Read,Update,Validate,Publish}`、`OpWorkflowExecutionInvoke`、`OpWorkflowRead` | 无路由消费（`OpWorkflowRead` 仅被一处测试当占位值） |
-| `OpManagementWrite` | 零引用 |
-| `api/openapi/xflow-v1.yaml` 的 `/workflow-definitions` 全套（8 条路径） | 零实现，且名称已被否决（过长） |
-| `types/workflow_management.go`（61 行） | 零引用 |
+| `OpWorkflowDefinition{Create,Read,Validate,Publish}`、`OpWorkflowExecutionInvoke`、`OpManagementWrite` | 无路由消费（`OpWorkflowRead` 与 `OpWorkflowDefinitionUpdate` 已被 GET/PUT `/v1/workflows/{id}` 消费） |
 | `/v1/runners/lease/renew` 的生产调用链 | 半接线，见 §8.3 |
+
+### 9.6 列表端点未接线（分页参数层已落地，数据源缺失）
+
+`GET /v1/workflows` 与 `GET /v1/executions` 在 §7 路由表中标注为「未实现」。
+**不是分页没做，是列举能力本身不存在**。分页参数层已就位（见 §9.3 末段），
+但两个端点的数据源都不具备列举条件，注册一个返回空列表的 handler 只会复刻
+`/workflow-definitions` 的老毛病——契约描述一个不存在的端点。两条阻塞如下：
+
+**1. `GET /v1/workflows`：`workflowreg` 无 per-namespace 索引。**
+
+`backend.WorkflowRegistry` 接口只有 `AddWorkflow`/`GetWorkflow`/
+`GetWorkflowByKey`/`UpdateDefinitionHash`/`RemoveWorkflow`（`backend/
+workflow_registry.go:26-41`）。唯一实现 `workflowreg.Registry` 是纯 Redis KV，
+**零索引**（无 `SAdd`/`ZAdd`/`SCAN`），无法按 namespace 枚举。补这条端点需要：
+
+- 在 `workflowreg` 加一个 per-namespace 索引（`xflow:ns:<ns>:workflow:index`
+  之类的 ZSET），并处理与 `AddWorkflow`/`RemoveWorkflow` 的原子性
+- registry 现在的 Lua 脚本按 `{<key>}` 打 hash tag，**索引键不在同一 slot**，
+  Redis Cluster 下无法与记录同事务写，需要单独设计补偿（两阶段 + 校验，或
+  hash tag 扩展到索引键）
+
+不先做索引直接 `SCAN xflow:workflow:*` 是全表遍历，违反 org policy §2
+「敏感数据枚举端点不得全表遍历」，也跨租户泄漏键名。
+
+**2. `GET /v1/executions`：`store.ExecutionRecord` 无 namespace 字段。**
+
+`store.Executions` 接口只有 `CreateExecution`/`UpdateExecutionStatus`/
+`GetExecution`（`store/interfaces.go:11-15`）。全仓 `ListExecutions`/
+`CountExecutions` 零命中。更根本地，`store.ExecutionRecord` 与其 DB 投影
+`dbExecution` **没有 namespace 列**（只有 `dbSupply`/`dbArtifact` 带 namespace）。
+即便加了 `ListExecutions`，也**无法按 namespace 过滤**——那是一个跨租户
+列举端点，违反 org policy §1a 与 §2。补这条端点需要一次 schema 迁移：
+给 `xflow_executions` 加 namespace 列、回填历史行、再加索引与查询。
+
+两条都不在本次 rollout 范围内。完成本节列出的两件事后，从本节删除对应条目并
+解除 §7 路由表的「未实现」标注。
 
 ---
 
@@ -521,5 +572,8 @@ entry-seed 的 409 响应有**两种不同 body**，客户端据此决定是否�
 - **CI 校验：契约声明的路径 ⊆ 已注册路由。** 「契约里有、实现里没有」不允许存在
   ——`/workflow-definitions` 全套就是这个状态的产物：一份 CI 校验通过、还生成过 TS
   类型（`web/.../openapi-types.ts`，已随 `605c4bb` 删除）、却零实现的契约，与真实
-  实现和前端客户端三方互不相认
+  实现和前端客户端三方互不相认。该校验已落地为
+  `api/openapi/openapi_test.go` 的 `TestContractPathsAreAllRegistered`：契约每条
+  path 必须出现在 `service/apiserver.UserFacingPaths` 集合中（前半，子集关系）；
+  「`UserFacingPaths` 每条都有 mux 注册」是后半守卫，合起来才是 §10 的完整链条
 - `docs/design/` 必须与实现一致（既有约束）

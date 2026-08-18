@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -19,6 +20,15 @@ import (
 	"github.com/xbcio/xflow/store/memstore"
 	"github.com/xbcio/xflow/types"
 )
+
+// sdkEnvelope is the wire envelope (API-SPECIFICATION.md §3) the user-facing
+// executions endpoints return. The SDK tests unwrap the data field to decode
+// the typed payload, mirroring the integration package's e2eEnvelope.
+type sdkEnvelope struct {
+	Success bool            `json:"success"`
+	Code    string          `json:"code"`
+	Data    json.RawMessage `json:"data"`
+}
 
 func TestNewServerMemoryBackendServesHandler(t *testing.T) {
 	srv, err := NewServer(ServerConfig{})
@@ -187,16 +197,18 @@ func submitSDKWorkflow(t *testing.T, baseURL string, wf *types.WorkflowDef, para
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("submit status = %d, want 200", resp.StatusCode)
 	}
-	var out struct {
-		ExecutionID types.ExecutionID `json:"execution_id"`
+	var env struct {
+		Data struct {
+			ExecutionID types.ExecutionID `json:"execution_id"`
+		} `json:"data"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
 		t.Fatal(err)
 	}
-	if out.ExecutionID == "" {
+	if env.Data.ExecutionID == "" {
 		t.Fatal("empty execution_id")
 	}
-	return out.ExecutionID
+	return env.Data.ExecutionID
 }
 
 func waitForExecutionStatus(t *testing.T, baseURL string, execID types.ExecutionID, timeout time.Duration) types.ExecutionStatus {
@@ -207,11 +219,12 @@ func waitForExecutionStatus(t *testing.T, baseURL string, execID types.Execution
 		if err != nil {
 			t.Fatal(err)
 		}
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		// The inspect response is enveloped (spec §3); unwrap data before
+		// decoding the typed ExecutionDetail.
 		var detail engine.ExecutionDetail
-		decodeErr := json.NewDecoder(resp.Body).Decode(&detail)
-		if err := resp.Body.Close(); err != nil {
-			t.Fatal(err)
-		}
+		decodeErr := json.Unmarshal(extractSDKData(t, body), &detail)
 		if resp.StatusCode == http.StatusOK && decodeErr == nil && types.IsTerminalExecutionStatus(detail.Status) {
 			return detail.Status
 		}
@@ -220,6 +233,18 @@ func waitForExecutionStatus(t *testing.T, baseURL string, execID types.Execution
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+// extractSDKData unwraps an enveloped response body and returns the raw data
+// field. The user-facing endpoints return the §3 envelope; the SDK tests decode
+// the typed payload from data.
+func extractSDKData(t *testing.T, body []byte) []byte {
+	t.Helper()
+	var env sdkEnvelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("decode envelope: %v (raw=%q)", err, string(body))
+	}
+	return env.Data
 }
 
 func TestServerUpdateSupply(t *testing.T) {

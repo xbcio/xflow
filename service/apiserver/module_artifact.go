@@ -95,11 +95,11 @@ func (m *artifactModule) handleArtifact(w http.ResponseWriter, r *http.Request) 
 	allowed, err := m.artifacts.HasReference(r.Context(), ns, digest)
 	if err != nil {
 		// Never surface the driver error: it can carry SQL and server paths.
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
 	if !allowed {
-		writeError(w, http.StatusNotFound, "artifact not found")
+		writeFail(w, r, http.StatusNotFound, "artifact_not_found", "artifact not found")
 		return
 	}
 
@@ -115,10 +115,10 @@ func (m *artifactModule) handleArtifact(w http.ResponseWriter, r *http.Request) 
 			// An identity row exists but the bytes do not. This is the orphan
 			// direction §6.1 rules out by ordering, so reaching it means the
 			// blob was removed out of band. 404 is still the honest answer.
-			writeError(w, http.StatusNotFound, "artifact not found")
+			writeFail(w, r, http.StatusNotFound, "artifact_not_found", "artifact not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
 
@@ -139,10 +139,10 @@ func (m *artifactModule) handleArtifact(w http.ResponseWriter, r *http.Request) 
 	body, _, err := m.artifacts.Open(r.Context(), digest)
 	if err != nil {
 		if errors.Is(err, objectstore.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "artifact not found")
+			writeFail(w, r, http.StatusNotFound, "artifact_not_found", "artifact not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
 	defer func() { _ = body.Close() }()

@@ -484,7 +484,7 @@ func TestRunServerMultiNamespaceManagementHTTPAuth(t *testing.T) {
 		}
 		var buf bytes.Buffer
 		_ = json.NewEncoder(&buf).Encode(body)
-		req, _ := http.NewRequest(http.MethodPost, httpSrv.URL+"/v1/workflows", &buf)
+		req, _ := http.NewRequest(http.MethodPost, httpSrv.URL+"/v1/workflows/execute", &buf)
 		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("Content-Type", "application/json")
 		resp, err := http.DefaultClient.Do(req)
@@ -495,14 +495,16 @@ func TestRunServerMultiNamespaceManagementHTTPAuth(t *testing.T) {
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("submit %s status = %d, want 200", token, resp.StatusCode)
 		}
-		var out struct {
-			ExecutionID string `json:"execution_id"`
+		var env struct {
+			Data struct {
+				ExecutionID string `json:"execution_id"`
+			} `json:"data"`
 		}
-		_ = json.NewDecoder(resp.Body).Decode(&out)
-		if out.ExecutionID == "" {
+		_ = json.NewDecoder(resp.Body).Decode(&env)
+		if env.Data.ExecutionID == "" {
 			t.Fatalf("submit %s returned empty execution_id", token)
 		}
-		return out.ExecutionID
+		return env.Data.ExecutionID
 	}
 
 	managementExecStatus := func(token, execID string) int {

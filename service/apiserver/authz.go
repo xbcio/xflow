@@ -82,14 +82,9 @@ const (
 	// into the server-side registry via POST /v1/workflows/register, and its
 	// deregister counterpart via DELETE /v1/workflows/register/{id}. It maps to
 	// the "workflow" scope like the other workflow operations.
-	OpWorkflowRegister           = "workflow.register"
-	OpWorkflowDefinitionCreate   = "workflowdefinition.create"
-	OpWorkflowDefinitionRead     = "workflowdefinition.read"
-	OpWorkflowDefinitionUpdate   = "workflowdefinition.update" // draft
-	OpWorkflowDefinitionValidate = "workflowdefinition.validate"
-	OpWorkflowDefinitionPublish  = "workflowdefinition.publish"
-	OpWorkflowExecutionInvoke    = "workflowexecution.invoke"
-	OpExecutionRead              = "execution.read"
+	OpWorkflowRegister         = "workflow.register"
+	OpWorkflowDefinitionUpdate = "workflowdefinition.update" // draft; consumed by PUT /v1/workflows/{id}
+	OpExecutionRead            = "execution.read"
 	OpExecutionSignal            = "execution.signal"
 	OpExecutionRevoke            = "execution.revoke"
 	OpExecutionCancel            = "execution.cancel"
@@ -110,7 +105,6 @@ const (
 	// token can be granted runner read without leader read and vice-versa.
 	OpManagementLeaderRead = "management.leader.read"
 	OpManagementRunnerRead = "management.runner.read"
-	OpManagementWrite = "management.write"
 	// OpSupplyWrite / OpSupplyRead gate the supply content endpoints. Writing a
 	// supply changes production data-processing logic, so its authorization
 	// strength matches writing a workflow definition: its own scope, denied by
@@ -136,9 +130,7 @@ const (
 func scopeForOperation(op string) string {
 	switch op {
 	case OpWorkflowCreate, OpWorkflowInvoke, OpWorkflowRead,
-		OpWorkflowRegister,
-		OpWorkflowDefinitionCreate, OpWorkflowDefinitionRead, OpWorkflowDefinitionUpdate,
-		OpWorkflowDefinitionValidate, OpWorkflowDefinitionPublish, OpWorkflowExecutionInvoke:
+		OpWorkflowRegister, OpWorkflowDefinitionUpdate:
 		return "workflow"
 	case OpExecutionRead, OpExecutionSignal, OpExecutionRevoke, OpExecutionCancel, OpExecutionSeed:
 		return "execution"
@@ -152,8 +144,6 @@ func scopeForOperation(op string) string {
 		return "management.leader.read"
 	case OpManagementRunnerRead:
 		return "management.runner.read"
-	case OpManagementWrite:
-		return "management.write"
 	case OpSupplyWrite:
 		return "supply.write"
 	case OpSupplyRead:

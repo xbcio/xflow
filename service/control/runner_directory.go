@@ -60,15 +60,16 @@ type RunnerSession struct {
 }
 
 // RunnerSnapshot is the read-only registration and liveness view returned by
-// a RunnerDirectory.
+// a RunnerDirectory. JSON tags are snake_case so the GET /v1/management/runners/{id}
+// user-face response (spec §9.4) matches the rest of the wire contract.
 type RunnerSnapshot struct {
-	RunnerID      string
-	Capacity      int
-	InFlight      int
-	Labels        map[string]string
-	Capabilities  []protocol.Capability
-	Namespaces    []namespace.Namespace
-	LastHeartbeat time.Time
+	RunnerID      string                `json:"runner_id"`
+	Capacity      int                   `json:"capacity"`
+	InFlight      int                   `json:"in_flight"`
+	Labels        map[string]string     `json:"labels,omitempty"`
+	Capabilities  []protocol.Capability `json:"capabilities,omitempty"`
+	Namespaces    []namespace.Namespace `json:"namespaces,omitempty"`
+	LastHeartbeat time.Time             `json:"last_heartbeat"`
 }
 
 func cloneCapabilities(capabilities []protocol.Capability) []protocol.Capability {

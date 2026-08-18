@@ -344,14 +344,11 @@ func r8ScriptWorkflow(name string) *types.WorkflowDef {
 func r8Submit(t *testing.T, baseURL string, wf *types.WorkflowDef) types.ExecutionID {
 	t.Helper()
 	body := map[string]any{"workflow": wf}
-	resp, raw := g1DoAuth(t, http.MethodPost, baseURL, "/v1/workflows", r8Token, body)
+	resp, raw := g1DoAuth(t, http.MethodPost, baseURL, "/v1/workflows/execute", r8Token, body)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("r8 submit: status=%d, want 200 (body=%s)", resp.StatusCode, string(raw))
 	}
-	var out e2eSubmitResp
-	if err := json.Unmarshal(raw, &out); err != nil {
-		t.Fatalf("decode submit response: %v (raw=%q)", err, string(raw))
-	}
+	out := decodeSubmitEnvelope(t, raw)
 	return out.ExecutionID
 }
 

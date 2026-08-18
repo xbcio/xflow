@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"sync/atomic"
@@ -30,6 +31,41 @@ type e2eSubmitResp struct {
 	ExecutionID types.ExecutionID `json:"execution_id"`
 }
 
+// e2eEnvelope is the wire envelope (API-SPECIFICATION.md §3) the user-facing
+// execute/register endpoints now return. The integration tests unwrap the
+// data field to decode the typed payload.
+type e2eEnvelope struct {
+	Success bool            `json:"success"`
+	Code    string          `json:"code"`
+	Data    json.RawMessage `json:"data"`
+}
+
+// decodeSubmitEnvelope unwraps an enveloped execute response body and returns
+// the execution_id. The envelope lands with the §9.1 route migration.
+func decodeSubmitEnvelope(t *testing.T, body []byte) e2eSubmitResp {
+	t.Helper()
+	var env e2eEnvelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("decode submit envelope: %v (raw=%q)", err, string(body))
+	}
+	var out e2eSubmitResp
+	if err := json.Unmarshal(env.Data, &out); err != nil {
+		t.Fatalf("decode submit data: %v (data=%s)", err, string(env.Data))
+	}
+	return out
+}
+
+// decodeSubmitResponse reads an enveloped execute response from an open body
+// and returns the execution_id.
+func decodeSubmitResponse(t *testing.T, resp *http.Response) e2eSubmitResp {
+	t.Helper()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read submit body: %v", err)
+	}
+	return decodeSubmitEnvelope(t, body)
+}
+
 // Finding 1: accept *http.Client so server.Close() cleans up idle connections.
 func submitWorkflowHTTP(t *testing.T, baseURL string, client *http.Client, wf *types.WorkflowDef, params map[string]any) types.ExecutionID {
 	t.Helper()
@@ -46,10 +82,7 @@ func submitWorkflowHTTP(t *testing.T, baseURL string, client *http.Client, wf *t
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("submit status = %d, want 200", resp.StatusCode)
 	}
-	var out e2eSubmitResp
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
+	out := decodeSubmitResponse(t, resp)
 	if out.ExecutionID == "" {
 		t.Fatal("empty execution_id")
 	}

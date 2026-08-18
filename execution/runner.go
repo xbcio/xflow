@@ -223,10 +223,18 @@ func (r *Runner) Execute(ctx context.Context, lease *engine.TaskLease) (engine.T
 			// ctx.Err, and an abandoned-but-eventually-returning handler all
 			// land here. The abandon case records asynchronously (after Execute
 			// returns), which is honest -- the handler's true duration is only
-			// known once it finishes. The closure captures started so
-			// time.Since runs at defer execution, not at registration.
-			defer func() { r.observeDuration(ctx, lease.NodeType, time.Since(started)) }()
+			// known once it finishes.
+			//
+			// Observe BEFORE the send, not in a defer: a defer runs after the
+			// send, so Execute can return -- and a caller can scrape /metrics --
+			// while this goroutine is still between the send and the deferred
+			// observation. Measured at ~1% of invocations, which made the
+			// metric's own guard test flaky. Observing first makes "Execute
+			// returned" imply "the duration is recorded". A panicking handler
+			// loses the sample, but nothing here recovers panics, so the
+			// process is going down with it either way.
 			output, sysErr := handler.Execute(ctx, lease.Input)
+			r.observeDuration(ctx, lease.NodeType, time.Since(started))
 			ch <- handlerResult{output, sysErr}
 		}()
 
@@ -324,8 +332,10 @@ func (r *Runner) callOnResume(ctx context.Context, sh types.SuspendingHandler, l
 		ch := make(chan result, 1)
 		started := time.Now()
 		go func() {
-			defer func() { r.observeDuration(ctx, lease.NodeType, time.Since(started)) }()
+			// Observe before the send so Execute's return implies the sample is
+			// recorded; see the note at the plain-handler site above.
 			o, e := sh.OnResume(ctx, lease.Input, lease.Task.Payload)
+			r.observeDuration(ctx, lease.NodeType, time.Since(started))
 			ch <- result{o, e}
 		}()
 		select {
@@ -371,8 +381,10 @@ func (r *Runner) callPrepareSuspend(ctx context.Context, sh types.SuspendingHand
 		ch := make(chan result, 1)
 		started := time.Now()
 		go func() {
-			defer func() { r.observeDuration(ctx, nodeType, time.Since(started)) }()
+			// Observe before the send so Execute's return implies the sample is
+			// recorded; see the note at the plain-handler site above.
 			s, e := sh.PrepareSuspend(ctx, input)
+			r.observeDuration(ctx, nodeType, time.Since(started))
 			ch <- result{s, e}
 		}()
 		select {

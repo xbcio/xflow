@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/xbcio/xflow/backend"
@@ -70,25 +69,61 @@ func (m *workflowControlModule) RegisterHTTP(mux *http.ServeMux) {
 					m.log.Error("workflow_api_auth_denied",
 						"op", op, "remote_addr", r.RemoteAddr, "err", err)
 				}
-				writeError(w, http.StatusUnauthorized, "unauthorized")
+				// §7: the presented credential is never echoed; the message is generic.
+				writeFail(w, r, http.StatusUnauthorized, "unauthorized", "unauthorized")
 				return
 			}
 			h(w, r)
 		}
 	}
-	mux.HandleFunc("/v1/workflows", wrap("submit_workflow", m.handleSubmitWorkflow))
-	mux.HandleFunc("/v1/workflows/invoke", wrap("invoke_workflow", m.handleInvoke))
-	// Registration is a separate, explicit step from submit-and-execute: it
-	// persists the compiled workflow graph so the control plane can resolve it on
-	// seed. /v1/workflows/register (exact) is the POST target; the
-	// /v1/workflows/register/ subtree carries the DELETE {id} path.
-	mux.HandleFunc("/v1/workflows/register", wrap("register_workflow", m.handleRegisterWorkflow))
-	mux.HandleFunc("/v1/workflows/register/", wrap("deregister_workflow", m.handleDeregisterWorkflow))
-	// /v1/executions (no trailing slash) is the entry-seed endpoint; the
-	// /v1/executions/ subtree below is the per-execution GET/signal/cancel/wait
-	// surface. ServeMux treats the two patterns as distinct.
-	mux.HandleFunc("/v1/executions", wrap("seed_execution", m.handleSeedExecution))
-	mux.HandleFunc("/v1/executions/", wrap("execution", m.handleExecution))
+	// Routes are Go 1.22 method-qualified mux patterns (spec §1.3): the mux —
+	// not a hand-rolled TrimPrefix parser — selects the handler, and every
+	// {id} is read via r.PathValue. The literal "execute" segment
+	// (PathWorkflowExecute) wins over a hypothetical {id} at the same depth,
+	// so POST /v1/workflows/execute is never captured as a workflow id.
+	//
+	// §9.1 semantic inversion: POST /v1/workflows now REGISTERS a definition
+	// (was compile-and-execute). The compile-and-execute semantics moved to
+	// POST /v1/workflows/execute, which merges the old submit + invoke shapes.
+	mux.HandleFunc("POST "+PathWorkflows, wrap("register_workflow", m.handleRegisterWorkflow))
+	mux.HandleFunc("GET "+PathWorkflowByID, wrap("read_workflow", m.handleGetWorkflow))
+	mux.HandleFunc("PUT "+PathWorkflowByID, wrap("replace_workflow", m.handleReplaceWorkflow))
+	mux.HandleFunc("DELETE "+PathWorkflowByID, wrap("deregister_workflow", m.handleDeregisterWorkflow))
+	mux.HandleFunc("POST "+PathWorkflowExecute, wrap("execute_workflow", m.handleExecuteWorkflow))
+	mux.HandleFunc("POST "+PathWorkflowExecuteByID, wrap("execute_workflow_by_id", m.handleExecuteWorkflowByID))
+	// POST /v1/executions is the entry-seed endpoint (runner protocol face,
+	// spec §0.1); the per-execution GET/signal/cancel/wait surface is the
+	// method-qualified patterns below. ServeMux treats exact and {id} patterns
+	// as distinct from the /v1/executions/{id}/ 404 catch.
+	mux.HandleFunc("POST "+PathExecutions, wrap("seed_execution", m.handleSeedExecution))
+	mux.HandleFunc("GET "+PathExecutionByID, wrap("execution.read", m.handleInspectByID))
+	mux.HandleFunc("GET "+PathExecutionWait, wrap("execution.read", m.handleWaitByID))
+	mux.HandleFunc("POST "+PathExecutionSignals, wrap("execution.signal", m.handleSignalByID))
+	mux.HandleFunc("POST "+PathExecutionCancel, wrap("execution.cancel", m.handleCancelByID))
+	// §9.1: revoke-signal moved from POST /v1/executions/{id}/revoke-signal
+	// (verb stuck in a path segment) to DELETE /v1/executions/{id}/signals/{name}
+	// — the signal name travels in the path, not the body (spec §7 route table).
+	mux.HandleFunc("DELETE "+PathExecutionSignalByID, wrap("execution.revoke", m.handleRevokeSignalByID))
+	// 404 catch: a path-only subtree that refuses any unrecognized execution
+	// verb with 404. Under Go 1.22 ServeMux a method-qualified pattern answers
+	// a method mismatch (e.g. POST /wait, GET /cancel) with 405, which leaks
+	// that the route exists; this catch restores the old default-branch 404 so
+	// the authorization boundary does not leak existence. It does no parsing —
+	// the method-qualified patterns above are more specific and win for valid
+	// shapes, so the catch only fires for shapes no handler should serve.
+	//
+	// Inherited policy: registering this catch makes 404-on-method-mismatch the
+	// policy for the ENTIRE /v1/executions/{id}/ subtree, including routes
+	// later tasks add under it (e.g. DELETE /v1/executions/{id}/signals/{name}
+	// per spec §7). A wrong-method request to any execution sub-route lands here
+	// and gets 404, not 405 — a behavior choice that must be revisited only by a
+	// task that owns the API-SPECIFICATION.md §4.2 status-code table (which
+	// currently has no 405 row). The /v1/management/* subtree DELIBERATELY
+	// differs: its handlers return 405 via requireMethod, as they did before
+	// this task. Anyone adding a route under /v1/executions/{id}/ inherits the
+	// 404 policy without opting in; do not add a method-qualified pattern there
+	// expecting 405 for a mismatch.
+	mux.HandleFunc("/v1/executions/{id}/", wrap("execution", m.handleExecutionNotFound))
 }
 
 // registerAuthzRoutes mounts the control routes behind the B3 authz wrapper:
@@ -96,33 +131,135 @@ func (m *workflowControlModule) RegisterHTTP(mux *http.ServeMux) {
 // admission → handler → audit outcome. Mutations fail-closed if the admission
 // audit cannot be persisted.
 //
-// Task 8 blocker 1: the /v1/executions/ subtree is NOT blanket-wrapped as
-// execution.read. The sub-path + verb are resolved to the correct (operation,
-// isMutation) BEFORE the authz wrapper runs, so signal/revoke/cancel each get
-// their own operation + mutation admission audit (fail-closed) + outcome audit:
+// Each execution sub-shape is its own method-qualified mux pattern bound to its
+// stable operation (spec §1.3), so the operation is known from the pattern
+// itself rather than a hand-rolled resolver. An unknown shape falls to the
+// /v1/executions/{id}/ 404 catch below, which denies with 404 "route not
+// found" BEFORE authz runs — no existence leak, no audit row for a
+// non-existent operation (mirrors the old resolveExecutionRoute ok=false path):
 //   - GET  /v1/executions/{id}            → execution.read      (non-mutation)
 //   - GET  /v1/executions/{id}/wait       → execution.read      (non-mutation)
-//   - POST /v1/executions/{id}/signal     → execution.signal    (mutation)
-//   - POST /v1/executions/{id}/revoke-signal → execution.revoke (mutation)
+//   - POST /v1/executions/{id}/signals    → execution.signal    (mutation)
+//   - DELETE /v1/executions/{id}/signals/{name} → execution.revoke (mutation)
 //   - POST /v1/executions/{id}/cancel     → execution.cancel    (mutation)
-//
-// An unknown verb resolves to ok=false → 404 (default-deny, no existence leak).
 func (m *workflowControlModule) registerAuthzRoutes(mux *http.ServeMux) {
 	authz := m.authzWrap
-	mux.HandleFunc("/v1/workflows", authz(OpWorkflowCreate, true, m.handleSubmitWorkflow, newExecutionIDResolver()))
-	mux.HandleFunc("/v1/workflows/invoke", authz(OpWorkflowInvoke, true, m.handleInvoke, newExecutionIDResolver()))
-	// Register/deregister persist and remove the compiled workflow graph. Both
-	// are mutations under the workflow scope. The authz wrapper injects the
-	// principal's namespace into the request context; the handlers resolve it via
-	// namespace.FromContext — never from the client body.
-	mux.HandleFunc("/v1/workflows/register", authz(OpWorkflowRegister, true, m.handleRegisterWorkflow, nil))
-	mux.HandleFunc("/v1/workflows/register/", authz(OpWorkflowRegister, true, m.handleDeregisterWorkflow, nil))
-	// Entry-seed endpoint (exact path, no trailing slash). Distinct from the
-	// /v1/executions/ subtree. The authz wrapper injects the principal's
-	// namespace into the request context; handleSeedExecution reads it via
-	// namespace.FromContext — never from the client body.
-	mux.HandleFunc("/v1/executions", authz(OpExecutionSeed, true, m.handleSeedExecution, newExecutionIDResolver()))
-	mux.HandleFunc("/v1/executions/", m.authzWrapResolved(m.handleExecution, resolveExecutionRoute))
+	// §9.1 semantic inversion: POST /v1/workflows now REGISTERS. The
+	// compile-and-execute route moved to POST /v1/workflows/execute (merging
+	// submit+invoke). Each route is its own method-qualified pattern bound to a
+	// stable Op so the authz wrapper resolves the operation from the pattern
+	// itself (spec §1.3). The authz wrapper injects the principal's namespace
+	// into the request context; handlers resolve it via namespace.FromContext —
+	// never from the client body (spec §6.2).
+	mux.HandleFunc("POST "+PathWorkflows, authz(OpWorkflowRegister, true, m.handleRegisterWorkflow, nil))
+	mux.HandleFunc("GET "+PathWorkflowByID, authz(OpWorkflowRead, false, m.handleGetWorkflow, workflowIDResolver()))
+	mux.HandleFunc("PUT "+PathWorkflowByID, authz(OpWorkflowDefinitionUpdate, true, m.handleReplaceWorkflow, workflowIDResolver()))
+	mux.HandleFunc("DELETE "+PathWorkflowByID, authz(OpWorkflowRegister, true, m.handleDeregisterWorkflow, workflowIDResolver()))
+	mux.HandleFunc("POST "+PathWorkflowExecute, authz(OpWorkflowCreate, true, m.handleExecuteWorkflow, newExecutionIDResolver()))
+	mux.HandleFunc("POST "+PathWorkflowExecuteByID, authz(OpWorkflowInvoke, true, m.handleExecuteWorkflowByID, workflowIDResolver()))
+	// Entry-seed endpoint (exact path, POST only). The authz wrapper injects
+	// the principal's namespace into the request context; handleSeedExecution
+	// reads it via namespace.FromContext — never from the client body.
+	mux.HandleFunc("POST "+PathExecutions, authz(OpExecutionSeed, true, m.handleSeedExecution, newExecutionIDResolver()))
+	mux.HandleFunc("GET "+PathExecutionByID, authz(OpExecutionRead, false, m.handleInspectByID, execIDResolver("")))
+	mux.HandleFunc("GET "+PathExecutionWait, authz(OpExecutionRead, false, m.handleWaitByID, execIDResolver("wait")))
+	mux.HandleFunc("POST "+PathExecutionSignals, authz(OpExecutionSignal, true, m.handleSignalByID, execIDResolver("signals")))
+	// §9.1: revoke-signal → DELETE /v1/executions/{id}/signals/{name}. The Op
+	// (execution.revoke) is unchanged; the audit-target resource string now
+	// mirrors the new path (execution/{id}/signals/{name}) so the audit row is
+	// coherent with the route the caller hit (spec §6). The resolver reads both
+	// {id} and {name} from the path the mux matched.
+	mux.HandleFunc("DELETE "+PathExecutionSignalByID, authz(OpExecutionRevoke, true, m.handleRevokeSignalByID, execSignalResolver()))
+	mux.HandleFunc("POST "+PathExecutionCancel, authz(OpExecutionCancel, true, m.handleCancelByID, execIDResolver("cancel")))
+	// 404 catch for unrecognized execution verbs. Unwrapped (no authz): the old
+	// resolver's ok=false path returned 404 before authz ran and wrote no audit
+	// row, and the catch preserves that. A method-qualified pattern alone would
+	// 405 a method mismatch (existence leak); the path-only catch wins for any
+	// {id}/verb shape no method-qualified pattern serves and returns 404. This
+	// is the authz-mode twin of the bare-mode catch in RegisterHTTP; the
+	// inherited 404-on-method-mismatch policy documented there applies here too.
+	mux.HandleFunc("/v1/executions/{id}/", m.handleExecutionNotFound)
+}
+
+// execIDResolver builds the resource resolver for an execution sub-route: it
+// reads the {id} the mux matched and returns the execution-scoped resource
+// string the audit row carries (suffix is the sub-route verb, "" for inspect).
+// ResourceNamespace is left empty — the authoritative IDOR defense is the
+// namespace-scoped store read (the authz wrapper injects the principal's
+// namespace so a cross-namespace execID resolves to not-found → 404).
+func execIDResolver(suffix string) func(*http.Request) (string, string, string, string) {
+	return func(r *http.Request) (string, string, string, string) {
+		id := r.PathValue("id")
+		resource := "execution/" + id
+		if suffix != "" {
+			resource += "/" + suffix
+		}
+		return resource, "", id, ""
+	}
+}
+
+// execSignalResolver is the resource resolver for
+// DELETE /v1/executions/{id}/signals/{name} (spec §9.1 revoke migration). The
+// audit-target resource string mirrors the new path so the audit row is
+// coherent with the route the caller hit: execution/{id}/signals/{name}. It
+// reads both {id} and {name} from the path the mux matched. ResourceNamespace
+// is left empty for the same IDOR reason as execIDResolver.
+func execSignalResolver() func(*http.Request) (string, string, string, string) {
+	return func(r *http.Request) (string, string, string, string) {
+		id := r.PathValue("id")
+		name := r.PathValue("name")
+		return "execution/" + id + "/signals/" + name, "", id, ""
+	}
+}
+
+// workflowIDResolver builds the resource resolver for a /v1/workflows/{id}
+// route: it reads the {id} the mux matched and returns the workflow-scoped
+// resource string the audit row carries. ResourceNamespace is left empty —
+// the authoritative IDOR defense is the namespace-scoped registry read (the
+// authz wrapper injects the principal's namespace so a cross-namespace id
+// resolves to not-found → 404).
+func workflowIDResolver() func(*http.Request) (string, string, string, string) {
+	return func(r *http.Request) (string, string, string, string) {
+		id := r.PathValue("id")
+		return "workflow/" + id, "", id, ""
+	}
+}
+
+// handleExecutionNotFound is the 404 catch for the /v1/executions/{id}/
+// subtree: any execution sub-shape no method-qualified pattern serves lands
+// here and is refused with 404 "route not found" — no existence leak. It
+// replaces the default branch of the old hand-rolled handleExecution parser.
+// Enveloped (spec §3) with a stable code so a caller can distinguish a
+// shape-mismatch 404 from an execution_not_found 404.
+func (m *workflowControlModule) handleExecutionNotFound(w http.ResponseWriter, r *http.Request) {
+	writeFail(w, r, http.StatusNotFound, "route_not_found", "route not found")
+}
+
+// handleInspectByID / handleWaitByID / handleSignalByID / handleCancelByID /
+// handleRevokeSignalByID are mux-pattern adapters: they pull the {id} path
+// value the mux matched and delegate to the per-execution handler. They exist
+// so each execution sub-shape is registered as its own method-qualified
+// pattern (spec §1.3) and the mux — not a hand-rolled parser — selects the
+// operation. handleRevokeSignalByID also pulls {name} (the signal moved from
+// the request body into the path under the §9.1 migration).
+func (m *workflowControlModule) handleInspectByID(w http.ResponseWriter, r *http.Request) {
+	m.handleInspect(w, r, types.ExecutionID(r.PathValue("id")))
+}
+
+func (m *workflowControlModule) handleWaitByID(w http.ResponseWriter, r *http.Request) {
+	m.handleWait(w, r, types.ExecutionID(r.PathValue("id")))
+}
+
+func (m *workflowControlModule) handleSignalByID(w http.ResponseWriter, r *http.Request) {
+	m.handleSignal(w, r, types.ExecutionID(r.PathValue("id")))
+}
+
+func (m *workflowControlModule) handleCancelByID(w http.ResponseWriter, r *http.Request) {
+	m.handleCancel(w, r, types.ExecutionID(r.PathValue("id")))
+}
+
+func (m *workflowControlModule) handleRevokeSignalByID(w http.ResponseWriter, r *http.Request) {
+	m.handleRevokeSignal(w, r, types.ExecutionID(r.PathValue("id")))
 }
 
 // newExecutionIDResolver is the resource resolver for the workflow create/invoke
@@ -143,63 +280,48 @@ func newExecutionIDResolver() func(*http.Request) (string, string, string, strin
 	}
 }
 
-// resolveExecutionRoute parses /v1/executions/<id>[/verb] + method and returns
-// the stable operation + mutation flag for the authz wrapper. ok=false for an
-// unknown verb or missing id (the wrapper answers 404, default-deny). The
-// resource is execution-scoped so the audit row carries the targeted execution
-// id; ResourceNamespace is left empty — the authoritative IDOR defense is the
-// namespace-scoped store read (the authz wrapper injects the principal's namespace
-// into the request context so handleInspect/handleSignal read from the
-// principal's namespace namespace; a cross-namespace execID resolves to not-found →
-// 404, never leaking existence).
-func resolveExecutionRoute(r *http.Request) (resolvedRoute, bool) {
-	rest := strings.TrimPrefix(r.URL.Path, "/v1/executions/")
-	parts := strings.Split(strings.Trim(rest, "/"), "/")
-	if len(parts) == 0 || parts[0] == "" {
-		return resolvedRoute{}, false
-	}
-	execID := parts[0]
-	resource := "execution/" + execID
-	switch {
-	case len(parts) == 1 && r.Method == http.MethodGet:
-		return resolvedRoute{operation: OpExecutionRead, resource: resource, executionID: execID, isMutation: false}, true
-	case len(parts) == 2 && parts[1] == "wait" && r.Method == http.MethodGet:
-		return resolvedRoute{operation: OpExecutionRead, resource: resource + "/wait", executionID: execID, isMutation: false}, true
-	case len(parts) == 2 && parts[1] == "signal" && r.Method == http.MethodPost:
-		return resolvedRoute{operation: OpExecutionSignal, resource: resource + "/signal", executionID: execID, isMutation: true}, true
-	case len(parts) == 2 && parts[1] == "revoke-signal" && r.Method == http.MethodPost:
-		return resolvedRoute{operation: OpExecutionRevoke, resource: resource + "/revoke-signal", executionID: execID, isMutation: true}, true
-	case len(parts) == 2 && parts[1] == "cancel" && r.Method == http.MethodPost:
-		return resolvedRoute{operation: OpExecutionCancel, resource: resource + "/cancel", executionID: execID, isMutation: true}, true
-	default:
-		return resolvedRoute{}, false
-	}
-}
-
 // auditDeny / auditReconcile / statusRecorder live in authz_wrap.go, shared
 // with managementModule via the embedded authzHolder.
 
+// errorResponse is the BARE (non-enveloped) failure shape used ONLY by the
+// runner-protocol-face endpoints that must not be enveloped — chiefly the
+// entry-seed route POST /v1/executions (see API-SPECIFICATION.md §0.1 + §8.2).
+// Its 409 stale_generation body {"error":"stale_generation"} is a load-bearing
+// contract: service/protocol/entry_seed_runtime.go distinguishes a genuine
+// admission conflict (body has state=="conflict") from a generation-fence
+// rejection (no state field) and commits or withholds a Kafka offset based on
+// that. Enveloping it would risk silent message loss during a generation
+// upgrade. User-facing handlers use writeFail/writeData, never this type.
 type errorResponse struct {
 	Error string `json:"error"`
 }
 
-type submitWorkflowRequest struct {
+// executeWorkflowRequest is the inline-definition direct-run body for
+// POST /v1/workflows/execute (spec §7 + §9.1). It merges the old submit
+// ({workflow, params}) and invoke ({workflow, entry, input}) shapes: when
+// Entry is empty the graph's default start node is used (Submit); when set,
+// that entry node drives the explicit-entry path (Invoke). A single route
+// serves both so the verb-layer collapse in §1.2 does not split them back
+// across two paths.
+type executeWorkflowRequest struct {
 	Workflow *types.WorkflowDef `json:"workflow"`
-	Params   map[string]any     `json:"params,omitempty"`
+	Entry    string            `json:"entry,omitempty"`
+	Input    map[string]any    `json:"input,omitempty"`
+	Params   map[string]any    `json:"params,omitempty"`
 }
 
-type submitWorkflowResponse struct {
+type executeWorkflowResponse struct {
 	ExecutionID types.ExecutionID `json:"execution_id"`
 }
 
-type invokeRequest struct {
-	Workflow *types.WorkflowDef `json:"workflow"`
-	Entry    string             `json:"entry"`
-	Input    map[string]any     `json:"input,omitempty"`
-}
-
-type invokeResponse struct {
-	ExecutionID types.ExecutionID `json:"execution_id"`
+// executeRegisteredRequest is the body for POST /v1/workflows/{id}/execute
+// (spec §7): run an already-registered workflow by id. Entry/Input/Params are
+// optional; when Entry is empty the registered graph's default start node is
+// used.
+type executeRegisteredRequest struct {
+	Entry  string         `json:"entry,omitempty"`
+	Input  map[string]any `json:"input,omitempty"`
+	Params map[string]any `json:"params,omitempty"`
 }
 
 type signalRequest struct {
@@ -213,24 +335,40 @@ type waitTimeoutResponse struct {
 	TimedOut    bool                  `json:"timed_out"`
 }
 
-func (m *workflowControlModule) handleSubmitWorkflow(w http.ResponseWriter, r *http.Request) {
+// handleExecuteWorkflow serves POST /v1/workflows/execute (spec §7 + §9.1): it
+// compiles an INLINE definition and immediately starts an execution. It merges
+// the old submit ({workflow, params}) and invoke ({workflow, entry, input})
+// shapes — when Entry is empty the graph's default start node is used (Submit);
+// when set, that entry node drives the explicit-entry path (Invoke).
+//
+// This is the compile-and-execute semantics that USED to live on
+// POST /v1/workflows before the §9.1 semantic inversion moved that path to
+// register. A caller on the old POST /v1/workflows semantics gets silently
+// different behavior now (register, not execute); this route is where the
+// execute behavior moved.
+//
+// Failure codes are stable snake_case per spec §3.2. A compile error's message
+// carries only node names / referenced node names / parameter names — never a
+// node's output or a parameter value, which routinely carry credentials
+// (spec §3.5 / branch specialization).
+func (m *workflowControlModule) handleExecuteWorkflow(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodPost) {
 		return
 	}
-	var req submitWorkflowRequest
+	var req executeWorkflowRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
 	if req.Workflow == nil {
-		writeError(w, http.StatusBadRequest, "workflow is required")
+		writeFail(w, r, http.StatusBadRequest, "workflow_invalid", "workflow is required")
 		return
 	}
 	g, err := graph.Compile(req.Workflow)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeFail(w, r, http.StatusBadRequest, "workflow_compile_failed", err.Error())
 		return
 	}
-	// xflow.workflow.submit starts the inbound trace for a workflow execution.
+	// xflow.workflow.execute starts the inbound trace for a workflow execution.
 	// Its SpanContext is persisted on the execution snapshot (via
 	// engine.WithTraceCarrier) so the later, asynchronous dispatch span can
 	// inherit it as a real W3C remote parent — closing the submit→dispatch
@@ -239,7 +377,11 @@ func (m *workflowControlModule) handleSubmitWorkflow(w http.ResponseWriter, r *h
 	if tracer == nil {
 		tracer = tracing.NoopTracer{}
 	}
-	ctx, span := tracer.Start(r.Context(), "xflow.workflow.submit")
+	// The old submit/invoke endpoints had distinct span names
+	// (xflow.workflow.submit / xflow.workflow.invoke); the §9.1 merge collapsed
+	// them into one route, so the span name is now uniform. The entry attribute
+	// (empty for Submit, set for Invoke) carries the submit/invoke distinction.
+	ctx, span := tracer.Start(r.Context(), "xflow.workflow.execute", "entry", req.Entry)
 	defer span.End()
 	ctx = engine.WithTraceCarrier(ctx, tracing.InjectCarrier(ctx))
 	// Attach the original workflow definition so the durable SQL execution
@@ -247,60 +389,27 @@ func (m *workflowControlModule) handleSubmitWorkflow(w http.ResponseWriter, r *h
 	// Without this, production mode with a SQL store fails submit with a
 	// NOT-NULL violation on xflow_executions.workflow_def.
 	ctx = engine.WithWorkflowDef(ctx, req.Workflow)
-	id, err := m.eng.Submit(ctx, g, req.Params)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
-		return
-	}
-	writeJSON(w, http.StatusOK, submitWorkflowResponse{ExecutionID: id})
-}
-
-func (m *workflowControlModule) handleInvoke(w http.ResponseWriter, r *http.Request) {
-	if !requireMethod(w, r, http.MethodPost) {
-		return
-	}
-	var req invokeRequest
-	if !decodeJSON(w, r, &req) {
-		return
-	}
-	if req.Workflow == nil {
-		writeError(w, http.StatusBadRequest, "workflow is required")
-		return
-	}
-	if req.Entry == "" {
-		writeError(w, http.StatusBadRequest, "entry is required")
-		return
-	}
-	g, err := graph.Compile(req.Workflow)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	// xflow.workflow.invoke mirrors submit for the explicit-entry path. Its
-	// SpanContext is persisted for asynchronous dispatch causality.
-	tracer := m.tracer
-	if tracer == nil {
-		tracer = tracing.NoopTracer{}
-	}
-	ctx, span := tracer.Start(r.Context(), "xflow.workflow.invoke", "entry", req.Entry)
-	defer span.End()
-	ctx = engine.WithTraceCarrier(ctx, tracing.InjectCarrier(ctx))
-	// Attach the original workflow definition so the durable SQL execution
-	// projection can persist workflow_def (see handleSubmitWorkflow).
-	ctx = engine.WithWorkflowDef(ctx, req.Workflow)
-	id, err := m.eng.Invoke(ctx, g, req.Entry, req.Input)
-	if err != nil {
-		// An unknown entry node is a client error (400), not a 404: the
-		// missing resource is the entry in the submitted graph, not an
-		// execution in the store.
-		if errors.Is(err, engine.ErrEntryNotFound) {
-			writeError(w, http.StatusBadRequest, err.Error())
+	var id types.ExecutionID
+	if req.Entry != "" {
+		id, err = m.eng.Invoke(ctx, g, req.Entry, req.Input)
+		// An unknown entry node is a client error (400): the missing resource is
+		// the entry in the submitted graph, not an execution in the store.
+		if err != nil {
+			if errors.Is(err, engine.ErrEntryNotFound) {
+				writeFail(w, r, http.StatusBadRequest, "workflow_entry_not_found", err.Error())
+				return
+			}
+			writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
-		return
+	} else {
+		id, err = m.eng.Submit(ctx, g, req.Params)
+		if err != nil {
+			writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+			return
+		}
 	}
-	writeJSON(w, http.StatusOK, invokeResponse{ExecutionID: id})
+	writeData(w, r, http.StatusOK, executeWorkflowResponse{ExecutionID: id})
 }
 
 // registerWorkflowResponse echoes the persisted workflow ID (server-assigned
@@ -316,13 +425,20 @@ type registerWorkflowResponse struct {
 	Warnings   []string         `json:"warnings,omitempty"`
 }
 
-// handleRegisterWorkflow serves POST /v1/workflows/register. It is a NEW,
-// explicit step distinct from submit-and-execute (/v1/workflows): it compiles
-// the submitted definition and persists the compiled graph in the server-side
-// workflow registry so later tasks can resolve the graph on seed and derive
-// entry activations. The authoritative namespace is resolved server-side from
-// namespace.FromContext (injected by the authz wrapper), NEVER from the request
-// body, so a caller cannot register into another namespace.
+// handleRegisterWorkflow serves POST /v1/workflows (spec §7). After the §9.1
+// semantic inversion this is the REGISTER route — it compiles the submitted
+// definition and persists the compiled graph in the server-side workflow
+// registry so later tasks can resolve the graph on seed and derive entry
+// activations. (The old compile-and-execute semantics that lived here moved to
+// POST /v1/workflows/execute.)
+//
+// The authoritative namespace is resolved server-side from
+// namespace.FromContext (injected by the authz wrapper), NEVER from the
+// request body, so a caller cannot register into another namespace (spec §6.2).
+//
+// 201 + Location: register creates a workflow resource (spec §4.2). Failure
+// codes are stable snake_case per spec §3.2; a compile error's message carries
+// only node names / referenced node names / parameter names (spec §3.5).
 func (m *workflowControlModule) handleRegisterWorkflow(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodPost) {
 		return
@@ -338,13 +454,18 @@ func (m *workflowControlModule) handleRegisterWorkflow(w http.ResponseWriter, r 
 	if err != nil {
 		var compileErr *WorkflowCompileError
 		if errors.As(err, &compileErr) {
-			writeError(w, http.StatusBadRequest, compileErr.Unwrap().Error())
+			writeFail(w, r, http.StatusBadRequest, "workflow_compile_failed", compileErr.Unwrap().Error())
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		if errors.Is(err, backend.ErrWorkflowConflict) {
+			writeFail(w, r, http.StatusConflict, "workflow_conflict", "workflow definition conflicts with an existing registration")
+			return
+		}
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
-	writeJSON(w, http.StatusOK, registerWorkflowResponse{WorkflowID: id, Warnings: warnings})
+	w.Header().Set("Location", "/v1/workflows/"+string(id))
+	writeData(w, r, http.StatusCreated, registerWorkflowResponse{WorkflowID: id, Warnings: warnings})
 }
 
 // WorkflowCompileError marks a registration failure that the caller can fix by
@@ -413,30 +534,168 @@ func (m *workflowControlModule) registerWorkflow(ctx context.Context, ns namespa
 	return rec.ID, g.Warnings(), nil
 }
 
-// handleDeregisterWorkflow serves DELETE /v1/workflows/register/{id}. It removes
-// the persisted record for the given workflow id. The id is a server-assigned
-// opaque identifier taken from the path; namespace isolation is enforced by the
-// registry record (a later task may add per-namespace scoping on removal).
+// handleDeregisterWorkflow serves DELETE /v1/workflows/{id} (spec §7 +
+// §9.1). It removes the persisted record for the given workflow id. The id is
+// read via the mux {id} pattern (spec §1.3 — no hand-rolled TrimPrefix); the
+// literal "execute" segment is registered as POST only, so a DELETE to
+// /v1/workflows/execute cannot be misread as an id here. Namespace isolation
+// is enforced by the registry record (a cross-namespace id resolves to
+// not-found → 404).
+//
+// The clear-activations→remove ordering contract lives in deregisterWorkflow
+// (shared with ReplaceWorkflow); this handler only parses the path and maps
+// failures. Failure codes are stable snake_case per spec §3.2.
 func (m *workflowControlModule) handleDeregisterWorkflow(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodDelete) {
 		return
 	}
-	id := strings.Trim(strings.TrimPrefix(r.URL.Path, "/v1/workflows/register/"), "/")
-	if id == "" || strings.Contains(id, "/") {
-		writeError(w, http.StatusNotFound, "workflow not found")
+	id := r.PathValue("id")
+	if id == "" {
+		writeFail(w, r, http.StatusNotFound, "workflow_not_found", "workflow not found")
 		return
 	}
 	// The namespace is resolved server-side, never from the body or the path.
 	err := m.deregisterWorkflow(r.Context(), namespace.FromContext(r.Context()), types.WorkflowID(id))
 	if err != nil {
 		if errors.Is(err, backend.ErrWorkflowNotFound) {
-			writeError(w, http.StatusNotFound, "workflow not found")
+			writeFail(w, r, http.StatusNotFound, "workflow_not_found", "workflow not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"removed": true})
+	writeData(w, r, http.StatusOK, map[string]bool{"removed": true})
+}
+
+// handleGetWorkflow serves GET /v1/workflows/{id} (spec §7 + Addition 1): it
+// returns the stored record's definition. The namespace comes from the
+// authenticated principal via namespace.FromContext (injected by the authz
+// wrapper), never from the request body (spec §6.2); a cross-namespace id
+// resolves to not-found → 404, never leaking existence.
+func (m *workflowControlModule) handleGetWorkflow(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodGet) {
+		return
+	}
+	id := types.WorkflowID(r.PathValue("id"))
+	registry := m.registry()
+	if registry == nil {
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	rec, err := registry.GetWorkflow(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, backend.ErrWorkflowNotFound) {
+			writeFail(w, r, http.StatusNotFound, "workflow_not_found", "workflow not found")
+			return
+		}
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	// The namespace-scoped read is the authoritative IDOR defense: a
+	// cross-namespace id resolves to a record whose Namespace does not match
+	// the principal's, so it is reported as not-found rather than returned.
+	ns := namespace.FromContext(r.Context())
+	if rec.Namespace != "" && ns != "" && rec.Namespace != string(ns) {
+		writeFail(w, r, http.StatusNotFound, "workflow_not_found", "workflow not found")
+		return
+	}
+	writeData(w, r, http.StatusOK, rec.Definition)
+}
+
+// handleReplaceWorkflow serves PUT /v1/workflows/{id} (spec §7 + Addition 1):
+// a full update. It maps onto APIServer.ReplaceWorkflow — deregister a
+// conflicting definition under the same (namespace, name, version) key and
+// re-register. The id in the path identifies the record being replaced; the
+// replacement definition's name/version form the key (with the principal's
+// namespace, never the body's — spec §6.2).
+//
+// ReplaceWorkflow's semantics are the host-owns-its-key contract documented on
+// APIServer.ReplaceWorkflow; this handler does not invent replace semantics —
+// it delegates. An identical definition registers idempotently and nothing is
+// removed.
+func (m *workflowControlModule) handleReplaceWorkflow(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPut) {
+		return
+	}
+	var def types.WorkflowDef
+	if !decodeJSON(w, r, &def) {
+		return
+	}
+	ns := namespace.FromContext(r.Context())
+	id, warnings, err := m.replaceWorkflow(r.Context(), ns, &def)
+	if err != nil {
+		var compileErr *WorkflowCompileError
+		if errors.As(err, &compileErr) {
+			writeFail(w, r, http.StatusBadRequest, "workflow_compile_failed", compileErr.Unwrap().Error())
+			return
+		}
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	writeData(w, r, http.StatusOK, registerWorkflowResponse{WorkflowID: id, Warnings: warnings})
+}
+
+// handleExecuteWorkflowByID serves POST /v1/workflows/{id}/execute (spec §7):
+// run an already-registered workflow by id. It resolves the stored compiled
+// graph from the registry and submits it. The id is read via the mux {id}
+// pattern; the namespace comes from the authenticated principal (spec §6.2),
+// and a cross-namespace id resolves to not-found → 404.
+func (m *workflowControlModule) handleExecuteWorkflowByID(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+	id := types.WorkflowID(r.PathValue("id"))
+	// Body is optional: Entry/Input/Params may all be absent.
+	var req executeRegisteredRequest
+	if r.ContentLength != 0 {
+		if !decodeJSON(w, r, &req) {
+			return
+		}
+	} else {
+		_ = r.Body.Close()
+	}
+	registry := m.registry()
+	if registry == nil {
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	rec, err := registry.GetWorkflow(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, backend.ErrWorkflowNotFound) {
+			writeFail(w, r, http.StatusNotFound, "workflow_not_found", "workflow not found")
+			return
+		}
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	ns := namespace.FromContext(r.Context())
+	if rec.Namespace != "" && ns != "" && rec.Namespace != string(ns) {
+		writeFail(w, r, http.StatusNotFound, "workflow_not_found", "workflow not found")
+		return
+	}
+	// Attach the stored definition so the durable SQL execution projection can
+	// persist workflow_def (NOT NULL) — mirroring the inline-execute path.
+	ctx := engine.WithWorkflowDef(r.Context(), rec.Definition)
+	ctx = engine.WithTraceCarrier(ctx, tracing.InjectCarrier(ctx))
+	var execID types.ExecutionID
+	if req.Entry != "" {
+		execID, err = m.eng.Invoke(ctx, rec.Graph, req.Entry, req.Input)
+		if err != nil {
+			if errors.Is(err, engine.ErrEntryNotFound) {
+				writeFail(w, r, http.StatusBadRequest, "workflow_entry_not_found", err.Error())
+				return
+			}
+			writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+			return
+		}
+	} else {
+		execID, err = m.eng.Submit(ctx, rec.Graph, req.Params)
+		if err != nil {
+			writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+			return
+		}
+	}
+	writeData(w, r, http.StatusOK, executeWorkflowResponse{ExecutionID: execID})
 }
 
 // deregisterWorkflow is the clear-activations -> remove-record path both entry
@@ -596,11 +855,11 @@ func (m *workflowControlModule) handleSeedExecution(w http.ResponseWriter, r *ht
 		return
 	}
 	var req protocol.SeedExecutionRequest
-	if !decodeJSON(w, r, &req) {
+	if !decodeSeedJSON(w, r, &req) {
 		return
 	}
 	if req.AdmissionKey == "" || req.WorkflowID == "" || req.EntryUnitID == "" || req.Outcome == "" {
-		writeError(w, http.StatusBadRequest, "admission_key, workflow_id, entry_unit_id and outcome are required")
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "admission_key, workflow_id, entry_unit_id and outcome are required"})
 		return
 	}
 
@@ -643,23 +902,27 @@ func (m *workflowControlModule) handleSeedExecution(w http.ResponseWriter, r *ht
 		// A stale activation generation for a not-yet-accepted admission key is a
 		// fencing rejection, not an internal fault — map it to 409 so the runner
 		// can distinguish "you lost the activation" from a transient server error.
+		// The body is the BARE errorResponse (not enveloped): entry-seed is a
+		// runner-protocol-face endpoint (spec §0.1) and its 409 body shape is a
+		// load-bearing offset-safety contract (spec §8.2). Enveloping it would
+		// risk silent message loss during a generation upgrade.
 		if errors.Is(err, control.ErrStaleGeneration) {
-			writeError(w, http.StatusConflict, "stale_generation")
+			writeJSON(w, http.StatusConflict, errorResponse{Error: "stale_generation"})
 			return
 		}
 		// The seed references a workflow/entry unit the control plane cannot
 		// resolve (not registered, version mismatch, or unknown entry unit). This
 		// is a fail-closed rejection, not an internal fault — map it to 404 so the
 		// runner can distinguish it from a transient server error. The generic
-		// reason string leaks no internal detail.
+		// reason string leaks no internal detail. Bare errorResponse per §0.1/§8.2.
 		if errors.Is(err, control.ErrEntrySeedWorkflowUnknown) {
-			writeError(w, http.StatusNotFound, "workflow_unknown")
+			writeJSON(w, http.StatusNotFound, errorResponse{Error: "workflow_unknown"})
 			return
 		}
 		if m.log != nil {
 			m.log.Error("seed_execution_failed", "err", err)
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "internal server error"})
 		return
 	}
 	if resp.State == engine.AdmissionStateConflict {
@@ -676,46 +939,40 @@ func (m *workflowControlModule) handleSeedExecution(w http.ResponseWriter, r *ht
 	})
 }
 
-func (m *workflowControlModule) handleExecution(w http.ResponseWriter, r *http.Request) {
-	path := strings.TrimPrefix(r.URL.Path, "/v1/executions/")
-	parts := strings.Split(strings.Trim(path, "/"), "/")
-	if len(parts) == 0 || parts[0] == "" {
-		writeError(w, http.StatusNotFound, "execution not found")
-		return
-	}
-	id := types.ExecutionID(parts[0])
-	if len(parts) == 1 && r.Method == http.MethodGet {
-		m.handleInspect(w, r, id)
-		return
-	}
-	if len(parts) == 2 && parts[1] == "signal" {
-		m.handleSignal(w, r, id)
-		return
-	}
-	if len(parts) == 2 && parts[1] == "cancel" {
-		m.handleCancel(w, r, id)
-		return
-	}
-	if len(parts) == 2 && parts[1] == "revoke-signal" {
-		m.handleRevokeSignal(w, r, id)
-		return
-	}
-	if len(parts) == 2 && parts[1] == "wait" && r.Method == http.MethodGet {
-		m.handleWait(w, r, id)
-		return
-	}
-	writeError(w, http.StatusNotFound, "route not found")
-}
-
+// handleInspect serves GET /v1/executions/{id} (spec §7). It delegates to
+// inspectExecution — the single shared inspect implementation also used by the
+// management route (spec §7.2) — so the two routes return byte-identical bodies
+// for the same execution. Two implementations were a drift source and had
+// already diverged once.
 func (m *workflowControlModule) handleInspect(w http.ResponseWriter, r *http.Request, id types.ExecutionID) {
-	detail, err := m.eng.Inspect(r.Context(), id)
-	if err != nil {
-		writeEngineError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, detail)
+	inspectExecution(w, r, m.eng, id)
 }
 
+// inspectExecution is the single inspect implementation shared by the
+// executions-family route (GET /v1/executions/{id}, OpExecutionRead) and the
+// management route (GET /v1/management/executions/{id}, OpManagementRead) per
+// spec §7.2. Both Ops stay distinct so an ops token and a business token can be
+// granted separately; only the implementation is merged.
+//
+// The detail is returned in the response envelope (spec §3) via writeData. A
+// not-found engine error maps to 404 execution_not_found (writeExecEngineFail);
+// an unclassified error collapses to 500 internal_error — never leaking Redis
+// text, internal paths, or node output (spec §3.5).
+func inspectExecution(w http.ResponseWriter, r *http.Request, eng control.EngineFacade, id types.ExecutionID) {
+	detail, err := eng.Inspect(r.Context(), id)
+	if err != nil {
+		writeExecEngineFail(w, r, err)
+		return
+	}
+	writeData(w, r, http.StatusOK, detail)
+}
+
+// handleSignal serves POST /v1/executions/{id}/signals (spec §7). A request
+// without a name is 400 signal_invalid (spec §3.2); a not-found execution is
+// 404 execution_not_found; everything else is 500 internal_error. Success is
+// enveloped via writeData. The signal payload is delivered to the engine, but
+// never appears in message/data — message carries only the stable code's text
+// (spec §3.5).
 func (m *workflowControlModule) handleSignal(w http.ResponseWriter, r *http.Request, id types.ExecutionID) {
 	if !requireMethod(w, r, http.MethodPost) {
 		return
@@ -725,63 +982,73 @@ func (m *workflowControlModule) handleSignal(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if req.Name == "" {
-		writeError(w, http.StatusBadRequest, "name is required")
+		writeFail(w, r, http.StatusBadRequest, "signal_invalid", "signal name is required")
 		return
 	}
 	if err := m.eng.DeliverSignal(r.Context(), id, req.Name, req.Data); err != nil {
-		writeEngineError(w, err)
+		writeExecEngineFail(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"accepted": true})
+	writeData(w, r, http.StatusOK, map[string]bool{"accepted": true})
 }
 
+// handleCancel serves POST /v1/executions/{id}/cancel (spec §7). A not-found
+// execution is 404 execution_not_found; unclassified failures collapse to 500
+// internal_error. Success is enveloped via writeData.
 func (m *workflowControlModule) handleCancel(w http.ResponseWriter, r *http.Request, id types.ExecutionID) {
 	if !requireMethod(w, r, http.MethodPost) {
 		return
 	}
 	if err := m.eng.Cancel(r.Context(), id); err != nil {
-		writeEngineError(w, err)
+		writeExecEngineFail(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"accepted": true})
+	writeData(w, r, http.StatusOK, map[string]bool{"accepted": true})
 }
 
+// handleRevokeSignal serves DELETE /v1/executions/{id}/signals/{name}
+// (spec §7 + §9.1). The §9.1 migration moved the signal name from the request
+// body into the path segment, so the handler reads it via r.PathValue("name")
+// and the body is unused — the old body carried a signalRequest whose Data
+// field RevokeSignal never consumed, so nothing is silently lost. The authz
+// resolver (execSignalResolver) reads the same {name} so the audit-target
+// resource string mirrors the path (spec §6).
+//
+// A consumed-or-not-found signal is 409 signal_consumed (stable snake_case,
+// spec §3.2); a not-found execution is 404 execution_not_found; unclassified
+// failures collapse to 500 internal_error. Success is enveloped via
+// writeData.
 func (m *workflowControlModule) handleRevokeSignal(w http.ResponseWriter, r *http.Request, id types.ExecutionID) {
-	if !requireMethod(w, r, http.MethodPost) {
+	if !requireMethod(w, r, http.MethodDelete) {
 		return
 	}
-	// Body is optional; a JSON {"name":...} overrides the query parameter.
-	name := r.URL.Query().Get("name")
-	if r.ContentLength != 0 {
-		var req signalRequest
-		if !decodeJSON(w, r, &req) {
-			return
-		}
-		if req.Name != "" {
-			name = req.Name
-		}
-	} else {
-		_ = r.Body.Close()
-	}
+	// The {name} segment is read from the path the mux matched. A path with an
+	// empty name (/signals/) does not match this method-qualified pattern and
+	// falls to the /v1/executions/{id}/ 404 catch, so name is non-empty here;
+	// the guard is defensive against a future registration change.
+	name := r.PathValue("name")
 	if name == "" {
-		writeError(w, http.StatusBadRequest, "name is required")
+		writeFail(w, r, http.StatusBadRequest, "signal_invalid", "signal name is required")
 		return
 	}
 	if err := m.eng.RevokeSignal(r.Context(), id, name); err != nil {
 		if errors.Is(err, engine.ErrSignalConsumed) {
-			writeError(w, http.StatusConflict, "signal already consumed or not found")
+			writeFail(w, r, http.StatusConflict, "signal_consumed", "signal already consumed or not found")
 			return
 		}
-		writeEngineError(w, err)
+		writeExecEngineFail(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"revoked": true})
+	writeData(w, r, http.StatusOK, map[string]bool{"revoked": true})
 }
 
 // handleWait long-polls an execution until it reaches a terminal state or the
 // timeout elapses. It uses http.ResponseController to extend the connection's
 // write deadline beyond the server's default WriteTimeout so a long poll does
-// not get cut off mid-flight. The poll timeout is capped at 10 minutes.
+// not get cut off mid-flight. The poll timeout is capped at 10 minutes. Both
+// the terminal-detail success (200) and the timeout response (202) are
+// enveloped via writeData (spec §3); a not-found execution is 404
+// execution_not_found, unclassified failures 500 internal_error.
 func (m *workflowControlModule) handleWait(w http.ResponseWriter, r *http.Request, id types.ExecutionID) {
 	timeout := parseWaitTimeout(r)
 	rc := http.NewResponseController(w)
@@ -794,16 +1061,16 @@ func (m *workflowControlModule) handleWait(w http.ResponseWriter, r *http.Reques
 	for {
 		detail, err := m.eng.Inspect(ctx, id)
 		if err != nil {
-			writeEngineError(w, err)
+			writeExecEngineFail(w, r, err)
 			return
 		}
 		if types.IsTerminalExecutionStatus(detail.Status) {
-			writeJSON(w, http.StatusOK, detail)
+			writeData(w, r, http.StatusOK, detail)
 			return
 		}
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			writeJSON(w, http.StatusAccepted, waitTimeoutResponse{
+			writeData(w, r, http.StatusAccepted, waitTimeoutResponse{
 				ExecutionID: id,
 				Status:      detail.Status,
 				TimedOut:    true,
@@ -816,7 +1083,7 @@ func (m *workflowControlModule) handleWait(w http.ResponseWriter, r *http.Reques
 		}
 		select {
 		case <-ctx.Done():
-			writeJSON(w, http.StatusAccepted, waitTimeoutResponse{
+			writeData(w, r, http.StatusAccepted, waitTimeoutResponse{
 				ExecutionID: id,
 				Status:      detail.Status,
 				TimedOut:    true,
@@ -848,10 +1115,30 @@ func parseWaitTimeout(r *http.Request) time.Duration {
 	return d
 }
 
+// decodeSeedJSON decodes the request body for the entry-seed route
+// (POST /v1/executions). It is a DEDICATED bare decoder, deliberately NOT the
+// shared decodeJSON helper: entry-seed is a runner-protocol-face endpoint whose
+// response shape must stay un-enveloped (spec §0.1 + §8.2), and the shared
+// helper now writes the user-face envelope via writeFail. Routing the seed
+// through the shared helper would slip envelope keys (success/code/trace_id)
+// into the seed's 400 body — harmless to the 409 offset-safety discriminator
+// (which only reads 409 bodies) but a violation of §0.1 and an inconsistent
+// shape next to the seed's other bare errorResponse bodies
+// (stale_generation / workflow_unknown / internal server error). A malformed
+// seed body yields the same bare errorResponse shape as those, via writeJSON.
+func decodeSeedJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
+	defer func() { _ = r.Body.Close() }()
+	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid JSON"})
+		return false
+	}
+	return true
+}
+
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 	defer func() { _ = r.Body.Close() }()
 	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON")
+		writeFail(w, r, http.StatusBadRequest, "bad_request", "invalid JSON")
 		return false
 	}
 	return true
@@ -861,29 +1148,34 @@ func requireMethod(w http.ResponseWriter, r *http.Request, method string) bool {
 	if r.Method == method {
 		return true
 	}
-	writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	writeFail(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 	return false
 }
 
-// writeEngineError maps typed engine/store errors to HTTP responses. Every
-// unclassified failure is collapsed to a generic 500 message — the underlying
-// error (Redis text, internal paths, backend details) must never reach a client.
-func writeEngineError(w http.ResponseWriter, err error) {
+// writeExecEngineFail is the enveloped engine-error mapper for the executions
+// family: it maps typed not-found errors to 404 execution_not_found and
+// everything else to 500 internal_error, via writeFail (so trace_id is stamped
+// and X-Request-Id is echoed — spec §3/§5.2). It carries only execution ID /
+// node names in messages, never node output or credentials (spec §3.5).
+func writeExecEngineFail(w http.ResponseWriter, r *http.Request, err error) {
 	if errors.Is(err, engine.ErrExecutionInactive) ||
 		errors.Is(err, engine.ErrExecutionNotFound) ||
 		errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusNotFound, err.Error())
+		writeFail(w, r, http.StatusNotFound, "execution_not_found", "execution not found")
 		return
 	}
-	writeError(w, http.StatusInternalServerError, "internal server error")
+	writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 }
 
+// writeJSON writes a bare JSON body (no envelope). entry-seed (POST
+// /v1/executions) is the one caller that must keep using it permanently — it
+// is a runner-protocol-face endpoint whose 409 body shape is a load-bearing
+// offset-safety contract (spec §0.1 + §8.2). The other remaining callers are
+// /healthz and /readyz (spec §7: not enveloped, load-balancer contract) and
+// the entry-seed errorResponse bodies (§0.1). User-face success/failure
+// surfaces use writeData/writeFail via the envelope (§3).
 func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
-}
-
-func writeError(w http.ResponseWriter, status int, message string) {
-	writeJSON(w, status, errorResponse{Error: message})
 }

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -158,19 +159,19 @@ func TestServerRunnerE2ETraceGraphRealRedis(t *testing.T) {
 	for _, s := range spans {
 		// Keep the first occurrence per name within our xflow span set.
 		switch s.Name() {
-		case "xflow.workflow.submit", "xflow.task.dispatch", "xflow.task.execute", "xflow.task.report", "xflow.task.commit":
+		case "xflow.workflow.execute", "xflow.task.dispatch", "xflow.task.execute", "xflow.task.report", "xflow.task.commit":
 			if _, ok := byName[s.Name()]; !ok {
 				byName[s.Name()] = s
 			}
 		}
 	}
-	for _, name := range []string{"xflow.workflow.submit", "xflow.task.dispatch", "xflow.task.execute", "xflow.task.report", "xflow.task.commit"} {
+	for _, name := range []string{"xflow.workflow.execute", "xflow.task.dispatch", "xflow.task.execute", "xflow.task.report", "xflow.task.commit"} {
 		if byName[name] == nil {
 			t.Fatalf("missing span %q; got %v", name, spanNamesIntegration(spans))
 		}
 	}
 
-	submit := byName["xflow.workflow.submit"]
+	submit := byName["xflow.workflow.execute"]
 	dispatch := byName["xflow.task.dispatch"]
 	execute := byName["xflow.task.execute"]
 	report := byName["xflow.task.report"]
@@ -249,10 +250,7 @@ func submitTraceWorkflow(t *testing.T, baseURL string, wf *types.WorkflowDef, pa
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("submit status = %d, want 200", resp.StatusCode)
 	}
-	var out e2eSubmitResp
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+	out := decodeSubmitResponse(t, resp)
 	return out.ExecutionID
 }
 
@@ -267,9 +265,19 @@ func waitTraceExecution(t *testing.T, baseURL string, id types.ExecutionID, time
 		t.Fatalf("wait: %v", err)
 	}
 	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read wait body: %v", err)
+	}
+	// The wait response is enveloped (spec §3); unwrap data before decoding
+	// the typed ExecutionDetail.
+	var env e2eEnvelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("decode wait envelope: %v (raw=%q)", err, string(body))
+	}
 	var detail engine.ExecutionDetail
-	if err := json.NewDecoder(resp.Body).Decode(&detail); err != nil {
-		t.Fatalf("decode: %v", err)
+	if err := json.Unmarshal(env.Data, &detail); err != nil {
+		t.Fatalf("decode wait data: %v (data=%q)", err, string(env.Data))
 	}
 	return detail
 }

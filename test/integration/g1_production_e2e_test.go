@@ -233,14 +233,11 @@ func g1SubmitAuth(t *testing.T, baseURL, token string, wf *types.WorkflowDef, pa
 	if params != nil {
 		body["params"] = params
 	}
-	resp, raw := g1DoAuth(t, http.MethodPost, baseURL, "/v1/workflows", token, body)
+	resp, raw := g1DoAuth(t, http.MethodPost, baseURL, "/v1/workflows/execute", token, body)
 	if resp.StatusCode != http.StatusOK {
 		return "", resp.StatusCode
 	}
-	var out e2eSubmitResp
-	if err := json.Unmarshal(raw, &out); err != nil {
-		t.Fatalf("decode submit response: %v (raw=%q)", err, string(raw))
-	}
+	out := decodeSubmitEnvelope(t, raw)
 	return out.ExecutionID, resp.StatusCode
 }
 
@@ -264,16 +261,21 @@ func g1InspectAuth(t *testing.T, baseURL, token string, id types.ExecutionID) (i
 	resp, raw := g1DoAuth(t, http.MethodGet, baseURL, "/v1/executions/"+string(id), token, nil)
 	var detail engine.ExecutionDetail
 	if resp.StatusCode == http.StatusOK {
-		_ = json.Unmarshal(raw, &detail)
+		// The inspect response is enveloped (spec §3); unwrap data before
+		// decoding the typed ExecutionDetail.
+		var env e2eEnvelope
+		_ = json.Unmarshal(raw, &env)
+		_ = json.Unmarshal(env.Data, &detail)
 	}
 	return resp.StatusCode, detail
 }
 
-// g1SignalAuth POSTs /v1/executions/{id}/signal with the given name+data.
+// g1SignalAuth POSTs /v1/executions/{id}/signals (plural, spec §1.1) with the
+// given name+data.
 func g1SignalAuth(t *testing.T, baseURL, token string, id types.ExecutionID, name string, data map[string]any) (int, []byte) {
 	t.Helper()
 	body := map[string]any{"name": name, "data": data}
-	resp, raw := g1DoAuth(t, http.MethodPost, baseURL, "/v1/executions/"+string(id)+"/signal", token, body)
+	resp, raw := g1DoAuth(t, http.MethodPost, baseURL, "/v1/executions/"+string(id)+"/signals", token, body)
 	return resp.StatusCode, raw
 }
 
@@ -284,11 +286,12 @@ func g1CancelAuth(t *testing.T, baseURL, token string, id types.ExecutionID) (in
 	return resp.StatusCode, raw
 }
 
-// g1RevokeSignalAuth POSTs /v1/executions/{id}/revoke-signal.
+// g1RevokeSignalAuth DELETEs /v1/executions/{id}/signals/{name} (spec §9.1:
+// the §9.1 migration moved the signal name from the request body into the path
+// segment and the verb from POST /revoke-signal to DELETE /signals/{name}).
 func g1RevokeSignalAuth(t *testing.T, baseURL, token string, id types.ExecutionID, name string) (int, []byte) {
 	t.Helper()
-	body := map[string]any{"name": name}
-	resp, raw := g1DoAuth(t, http.MethodPost, baseURL, "/v1/executions/"+string(id)+"/revoke-signal", token, body)
+	resp, raw := g1DoAuth(t, http.MethodDelete, baseURL, "/v1/executions/"+string(id)+"/signals/"+name, token, nil)
 	return resp.StatusCode, raw
 }
 
@@ -696,14 +699,14 @@ func g1RunAuthzMatrix(t *testing.T, h *productionServerRunnerHarness) []g1AuthzR
 
 	// Submit allow with full-A.
 	idA, statusSubmit := g1SubmitAuth(t, h.httpSrv.URL, g1TokFullA, g1StartWorkflowDef("g1-authz-submit-allow"), nil)
-	rows = append(rows, g1AuthzRow{Route: "POST /v1/workflows", Token: "full-A", Scope: "workflow", Expected: 200, Got: statusSubmit, Decision: "allow"})
+	rows = append(rows, g1AuthzRow{Route: "POST /v1/workflows/execute", Token: "full-A", Scope: "workflow", Expected: 200, Got: statusSubmit, Decision: "allow"})
 	if statusSubmit != 200 {
 		t.Fatalf("submit allow: status=%d, want 200", statusSubmit)
 	}
 
 	// Submit allow with noexec-A (workflow scope present).
 	_, statusSubmitNoEx := g1SubmitAuth(t, h.httpSrv.URL, g1TokNoExA, g1StartWorkflowDef("g1-authz-submit-noex"), nil)
-	rows = append(rows, g1AuthzRow{Route: "POST /v1/workflows", Token: "noexec-A", Scope: "workflow", Expected: 200, Got: statusSubmitNoEx, Decision: "allow"})
+	rows = append(rows, g1AuthzRow{Route: "POST /v1/workflows/execute", Token: "noexec-A", Scope: "workflow", Expected: 200, Got: statusSubmitNoEx, Decision: "allow"})
 	if statusSubmitNoEx != 200 {
 		t.Fatalf("submit noexec allow: status=%d, want 200", statusSubmitNoEx)
 	}
@@ -724,8 +727,8 @@ func g1RunAuthzMatrix(t *testing.T, h *productionServerRunnerHarness) []g1AuthzR
 		"entry": "start",
 		"input": map[string]any{"claim_id": "invoke-allow"},
 	}
-	resp, _ := g1DoAuth(t, http.MethodPost, h.httpSrv.URL, "/v1/workflows/invoke", g1TokFullA, invBody)
-	rows = append(rows, g1AuthzRow{Route: "POST /v1/workflows/invoke", Token: "full-A", Scope: "workflow", Expected: 200, Got: resp.StatusCode, Decision: "allow"})
+	resp, _ := g1DoAuth(t, http.MethodPost, h.httpSrv.URL, "/v1/workflows/execute", g1TokFullA, invBody)
+	rows = append(rows, g1AuthzRow{Route: "POST /v1/workflows/execute", Token: "full-A", Scope: "workflow", Expected: 200, Got: resp.StatusCode, Decision: "allow"})
 	if resp.StatusCode != 200 {
 		t.Fatalf("invoke allow: status=%d, want 200", resp.StatusCode)
 	}
@@ -753,16 +756,16 @@ func g1RunAuthzMatrix(t *testing.T, h *productionServerRunnerHarness) []g1AuthzR
 
 	// Signal deny (noexec-A lacks execution scope) → 403.
 	statusSigDeny, _ := g1SignalAuth(t, h.httpSrv.URL, g1TokNoExA, idA, "noop", nil)
-	rows = append(rows, g1AuthzRow{Route: "POST /v1/executions/{id}/signal", Token: "noexec-A", Scope: "", Expected: 403, Got: statusSigDeny, Decision: "deny"})
+	rows = append(rows, g1AuthzRow{Route: "POST /v1/executions/{id}/signals", Token: "noexec-A", Scope: "", Expected: 403, Got: statusSigDeny, Decision: "deny"})
 	if statusSigDeny != 403 {
 		t.Fatalf("signal deny: status=%d, want 403", statusSigDeny)
 	}
 
-	// Revoke-signal deny (noexec-A) → 403.
+	// Revoke deny (noexec-A) → 403.
 	statusRevDeny, _ := g1RevokeSignalAuth(t, h.httpSrv.URL, g1TokNoExA, idA, "noop")
-	rows = append(rows, g1AuthzRow{Route: "POST /v1/executions/{id}/revoke-signal", Token: "noexec-A", Scope: "", Expected: 403, Got: statusRevDeny, Decision: "deny"})
+	rows = append(rows, g1AuthzRow{Route: "DELETE /v1/executions/{id}/signals/{name}", Token: "noexec-A", Scope: "", Expected: 403, Got: statusRevDeny, Decision: "deny"})
 	if statusRevDeny != 403 {
-		t.Fatalf("revoke-signal deny: status=%d, want 403", statusRevDeny)
+		t.Fatalf("revoke deny: status=%d, want 403", statusRevDeny)
 	}
 
 	// Cancel deny (noexec-A lacks execution scope) → 403.
@@ -847,21 +850,21 @@ func g1RunGRPCRunnerConnectReport(t *testing.T, h *productionServerRunnerHarness
 	byName := map[string]sdktrace.ReadOnlySpan{}
 	for _, s := range spans {
 		switch s.Name() {
-		case "xflow.workflow.submit", "xflow.task.dispatch", "xflow.task.execute", "xflow.task.report", "xflow.task.commit":
+		case "xflow.workflow.execute", "xflow.task.dispatch", "xflow.task.execute", "xflow.task.report", "xflow.task.commit":
 			if _, ok := byName[s.Name()]; !ok {
 				byName[s.Name()] = s
 			}
 		}
 	}
 	tg := g1TraceGraph{SpansPresent: []string{}}
-	for _, name := range []string{"xflow.workflow.submit", "xflow.task.dispatch", "xflow.task.execute", "xflow.task.report", "xflow.task.commit"} {
+	for _, name := range []string{"xflow.workflow.execute", "xflow.task.dispatch", "xflow.task.execute", "xflow.task.report", "xflow.task.commit"} {
 		if byName[name] == nil {
 			t.Fatalf("missing span %q; got %v", name, spanNamesIntegration(spans))
 		}
 		tg.SpansPresent = append(tg.SpansPresent, name)
 	}
 
-	submit := byName["xflow.workflow.submit"]
+	submit := byName["xflow.workflow.execute"]
 	dispatch := byName["xflow.task.dispatch"]
 	report := byName["xflow.task.report"]
 	commit := byName["xflow.task.commit"]
@@ -967,11 +970,11 @@ func g1RunGRPCRunnerConnectReportForNamespace(t *testing.T, h *productionServerR
 
 	spans := h.spanRecorder.Ended()
 	// Locate the submit span for this run by finding the most recent
-	// xflow.workflow.submit span. Filter downstream spans by its TraceID
+	// xflow.workflow.execute span. Filter downstream spans by its TraceID
 	// to exclude orphaned spans from earlier subtests.
 	var submit sdktrace.ReadOnlySpan
 	for i := len(spans) - 1; i >= 0; i-- {
-		if spans[i].Name() == "xflow.workflow.submit" {
+		if spans[i].Name() == "xflow.workflow.execute" {
 			submit = spans[i]
 			break
 		}
@@ -992,7 +995,7 @@ func g1RunGRPCRunnerConnectReportForNamespace(t *testing.T, h *productionServerR
 			}
 		}
 	}
-	tg := g1TraceGraph{SpansPresent: []string{"xflow.workflow.submit"}}
+	tg := g1TraceGraph{SpansPresent: []string{"xflow.workflow.execute"}}
 	for _, name := range []string{"xflow.task.dispatch", "xflow.task.execute", "xflow.task.report", "xflow.task.commit"} {
 		if byName[name] == nil {
 			t.Fatalf("[%s] missing span %q for trace %s; got %v", wfName, name, root, spanNamesIntegration(spans))
@@ -1121,7 +1124,7 @@ func g1RunCrossNamespaceCarrierIsolation(t *testing.T, h *productionServerRunner
 	// Find the two most recent submit spans (namespaceA + namespaceB).
 	var submits []sdktrace.ReadOnlySpan
 	for i := len(spans) - 1; i >= 0 && len(submits) < 2; i-- {
-		if spans[i].Name() == "xflow.workflow.submit" {
+		if spans[i].Name() == "xflow.workflow.execute" {
 			submits = append(submits, spans[i])
 		}
 	}
@@ -1193,7 +1196,7 @@ func g1SubmitConcurrent(baseURL, token string, wf *types.WorkflowDef) (types.Exe
 	if err != nil {
 		return "", -1
 	}
-	req, err := http.NewRequest(http.MethodPost, baseURL+"/v1/workflows", bytes.NewReader(raw))
+	req, err := http.NewRequest(http.MethodPost, baseURL+"/v1/workflows/execute", bytes.NewReader(raw))
 	if err != nil {
 		return "", -1
 	}
@@ -1208,8 +1211,12 @@ func g1SubmitConcurrent(baseURL, token string, wf *types.WorkflowDef) (types.Exe
 	if resp.StatusCode != http.StatusOK {
 		return "", resp.StatusCode
 	}
+	var env e2eEnvelope
+	if err := json.Unmarshal(payload, &env); err != nil {
+		return "", resp.StatusCode
+	}
 	var out e2eSubmitResp
-	if err := json.Unmarshal(payload, &out); err != nil {
+	if err := json.Unmarshal(env.Data, &out); err != nil {
 		return "", resp.StatusCode
 	}
 	return out.ExecutionID, resp.StatusCode
@@ -1532,12 +1539,19 @@ func g1RunDeadLetterReplay(t *testing.T, h *productionServerRunnerHarness, addr 
 	if listResp.StatusCode != 200 {
 		t.Fatalf("dead-letter list: status=%d body=%s", listResp.StatusCode, string(listBody))
 	}
+	// The management dead-letter list success body is enveloped (spec §3.1,
+	// Step 1 decision A of the api-specification rollout): the cursor-paginated
+	// {entries,next_cursor} payload rides inside envelope.data. Unwrap data
+	// before decoding the typed list shape — the cursor pagination shape itself
+	// (§3.3 exception) is preserved inside data, not replaced.
+	var listEnvelope e2eEnvelope
+	_ = json.Unmarshal(listBody, &listEnvelope)
 	var listParsed struct {
 		Entries []struct {
 			ID string `json:"id"`
 		} `json:"entries"`
 	}
-	_ = json.Unmarshal(listBody, &listParsed)
+	_ = json.Unmarshal(listEnvelope.Data, &listParsed)
 	if len(listParsed.Entries) == 0 {
 		t.Fatalf("dead-letter list returned 0 entries, want >=1 with entry %q", entryID)
 	}
@@ -1561,6 +1575,10 @@ func g1RunDeadLetterReplay(t *testing.T, h *productionServerRunnerHarness, addr 
 	}
 	replayResp, replayRaw := g1DoAuth(t, http.MethodPost, h.httpSrv.URL,
 		"/v1/management/dead-letters/"+string(execID)+"/replay", g1TokDefault, replayBody)
+	// The replay result is enveloped (spec §3.1): unwrap data before decoding
+	// the typed replay response.
+	var replayEnvelope e2eEnvelope
+	_ = json.Unmarshal(replayRaw, &replayEnvelope)
 	var replayRespParsed struct {
 		Outcome      string `json:"outcome"`
 		AuditID      string `json:"audit_id,omitempty"`
@@ -1568,7 +1586,7 @@ func g1RunDeadLetterReplay(t *testing.T, h *productionServerRunnerHarness, addr 
 		NodeID       string `json:"node_id,omitempty"`
 		ActivationID string `json:"activation_id,omitempty"`
 	}
-	_ = json.Unmarshal(replayRaw, &replayRespParsed)
+	_ = json.Unmarshal(replayEnvelope.Data, &replayRespParsed)
 	if replayResp.StatusCode != 200 {
 		t.Fatalf("dead-letter replay: status=%d body=%s", replayResp.StatusCode, string(replayRaw))
 	}

@@ -334,30 +334,95 @@ func (c *apiDeadLetterClient) setAuth(req *http.Request) {
 	}
 }
 
-// do executes an HTTP request and decodes the JSON body into out. A non-2xx
-// response is decoded (when possible) and surfaced as an error carrying only
-// the status code and outcome — never the Authorization header value.
+// do executes an HTTP request and decodes the spec §3.1 envelope's data field
+// into out on success. A non-2xx response (or success:false) is surfaced as an
+// error carrying only the status code — the body is NOT propagated, matching
+// the CLI's long-standing discipline of never echoing response internals.
+//
+// The management API envelopes its success bodies (Step 1 decision A of the
+// api-specification rollout): the cursor-paginated {entries,next_cursor} and
+// the replay-result shapes ride inside envelope.data. Before this, do() decoded
+// the body directly into out; enveloping would have decoded zero values
+// silently (no error) — the exact failure mode the envelope rollout must not
+// produce. This helper is the CLI's half of the (A) decision.
+//
+// envelope.Success is *bool (not bool) on purpose: Go's zero value makes a
+// missing success key indistinguishable from success:false, and the two need
+// different diagnostics. A missing key means the response was never enveloped
+// (notEnvelopeError) — the server did not adopt §3.1; a present success:false
+// at 2xx is a §4.1 violation (httpStatusError). Collapsing them would point the
+// operator at a phantom failure report for a missing envelope.
+//
+// Both call sites (List, Replay) pass a non-nil out and expect a payload; there
+// is no legitimate payload-less 2xx. A success envelope whose data is absent or
+// null is a field-name drift or a server omission — surfaced as missingDataError
+// rather than a silent zero-value typed target.
 func (c *apiDeadLetterClient) do(req *http.Request, out any) error {
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("call %s %s: %w", req.Method, redactURL(req.URL.String()), err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	raw, rerr := io.ReadAll(io.LimitReader(resp.Body, maxManagementResponseBytes+1))
+	if rerr != nil {
+		return fmt.Errorf("read response from %s %s: %w", req.Method, redactURL(req.URL.String()), rerr)
+	}
+	if len(raw) > maxManagementResponseBytes {
+		return fmt.Errorf("response from %s %s exceeds %d bytes", req.Method, redactURL(req.URL.String()), maxManagementResponseBytes)
+	}
+	// A non-2xx is a failure envelope (or, on the entry-seed face, a bare body —
+	// but this client only talks to the management face, which envelopes). The
+	// CLI maps outcome from the status code alone; it never reads the error body
+	// (§3.4 discipline: the body may carry server internals).
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		// Best-effort decode the body so callers can map outcome to status.
-		if out != nil {
-			_ = json.NewDecoder(resp.Body).Decode(out)
-		}
 		return httpStatusError{status: resp.StatusCode, path: redactURL(req.URL.String())}
 	}
-	if out == nil {
+	if out == nil || len(raw) == 0 {
 		return nil
 	}
-	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
-		return fmt.Errorf("decode response from %s %s: %w", req.Method, redactURL(req.URL.String()), err)
+	// Decode the §3.1 envelope, then unmarshal data into the typed target.
+	// data is read as json.RawMessage because envelope.Data is `any` — a direct
+	// unmarshal yields map[string]any, which cannot be re-decoded into a struct.
+	var env struct {
+		Success *bool           `json:"success"`
+		Code    string          `json:"code"`
+		Message string          `json:"message"`
+		Data    json.RawMessage `json:"data"`
+		TraceID string          `json:"trace_id"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return fmt.Errorf("decode envelope from %s %s: %w", req.Method, redactURL(req.URL.String()), err)
+	}
+	if env.Success == nil {
+		// The success key is absent: the response was never enveloped. This is
+		// NOT a §4.1 success:false@2xx violation — surface it as a distinct,
+		// semantically correct error so the operator does not chase a phantom
+		// failure report. The body is not included (§3.5 discipline).
+		return notEnvelopeError{method: req.Method, path: redactURL(req.URL.String())}
+	}
+	if !*env.Success {
+		// A 2xx with success:false present is a spec §4.1 violation; surface the
+		// status code without the body so the operator gets a stable, non-leaking
+		// error.
+		return httpStatusError{status: resp.StatusCode, path: redactURL(req.URL.String())}
+	}
+	// A success envelope with no data field (absent or null) is a field-name
+	// drift or a server omission. Both call sites expect a payload, so this must
+	// not silently yield a zero-value typed target — return missingDataError.
+	if len(env.Data) == 0 || string(env.Data) == "null" {
+		return missingDataError{method: req.Method, path: redactURL(req.URL.String())}
+	}
+	if err := json.Unmarshal(env.Data, out); err != nil {
+		return fmt.Errorf("decode data from %s %s: %w", req.Method, redactURL(req.URL.String()), err)
 	}
 	return nil
 }
+
+// maxManagementResponseBytes bounds a management API response read. The dead-
+// letter list is the largest body; a single page is bounded server-side by the
+// list limit, and replay results are small. This is a defense against a
+// misbehaving server, not a functional limit.
+const maxManagementResponseBytes = 4 << 20
 
 // httpStatusError carries the HTTP status of a non-2xx management API
 // response. It is the CLI's signal to map replay outcomes (404 → cross-namespace
@@ -379,6 +444,36 @@ func (e httpStatusError) Error() string {
 	default:
 		return fmt.Sprintf("management API %s: status %d", e.path, e.status)
 	}
+}
+
+// notEnvelopeError signals that a 2xx management API response was not the spec
+// §3.1 envelope — the success field was absent. It is distinct from a
+// success:false envelope (httpStatusError): a missing success key means the
+// server never enveloped the response, not that it reported failure. The body
+// is not carried (§3.5); only the method and redacted path surface so an
+// operator can locate the offending route. errors.As distinguishes it from
+// httpStatusError so tests and callers do not collapse the two diagnoses.
+type notEnvelopeError struct {
+	method string
+	path   string
+}
+
+func (e notEnvelopeError) Error() string {
+	return fmt.Sprintf("%s %s: response is not the spec §3.1 envelope (success field missing)", e.method, e.path)
+}
+
+// missingDataError signals that a 2xx success envelope carried no data field
+// (either absent or null). Every do() call site passes a non-nil out and
+// expects a payload, so a success envelope without data is a field-name drift
+// or a server omission — never a silent zero-value success. The body is not
+// carried (§3.5); only the method and redacted path surface.
+type missingDataError struct {
+	method string
+	path   string
+}
+
+func (e missingDataError) Error() string {
+	return fmt.Sprintf("%s %s: success envelope missing data field", e.method, e.path)
 }
 
 // redactURL returns the URL path without the query. The query may carry the
@@ -454,6 +549,11 @@ func writeJSONLines(w io.Writer, value any) error {
 }
 
 // deadLetterListResponse mirrors the management API's list JSON shape.
+// Entries is []engine.OutboxEntry, the SAME type the management endpoint
+// GET /v1/management/dead-letters/{execID} serializes, so the CLI's stdout
+// JSONL field names follow engine.OutboxEntry's wire shape (snake_case json
+// tags). A change to that type's tags — like 0dd985a adding snake_case —
+// shifts the CLI output in lockstep; CLI tests assert on the snake_case keys.
 type deadLetterListResponse struct {
 	Entries    []engine.OutboxEntry `json:"entries"`
 	NextCursor string               `json:"next_cursor,omitempty"`

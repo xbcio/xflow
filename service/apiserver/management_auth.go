@@ -33,7 +33,7 @@ func ManagementAuthMiddleware(auth WorkflowAuthenticator) func(http.Handler) htt
 				a = DisabledWorkflowAuth{}
 			}
 			if err := a.AuthenticateRequest(r); err != nil {
-				writeError(w, http.StatusUnauthorized, "unauthorized")
+				writeFail(w, r, http.StatusUnauthorized, "unauthorized", "unauthorized")
 				return
 			}
 			next.ServeHTTP(w, r)

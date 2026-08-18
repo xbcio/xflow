@@ -8,7 +8,7 @@ type GroupDef struct {
 	Name    string   `json:"name,omitempty"`
 	Members []string `json:"members,omitempty"`
 	// RunnerSelector 决定整组放置；成员不得再单独设置 selector。
-	RunnerSelector *RunnerSelector `json:"runnerSelector,omitempty"`
+	RunnerSelector *RunnerSelector `json:"runner_selector,omitempty"`
 	// OnError 是组级失败策略。空值等价于 OnErrorStop。
 	//
 	// 组级只支持 OnErrorStop 与 OnErrorContinue（以及等价的空值）；

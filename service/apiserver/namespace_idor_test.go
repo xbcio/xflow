@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -86,13 +87,13 @@ func newNamespaceORFixture(t *testing.T) *namespaceIDORFixture {
 }
 
 func (f *namespaceIDORFixture) submitWorkflow(token string) types.ExecutionID {
-	body := submitWorkflowRequest{Workflow: &types.WorkflowDef{
+	body := executeWorkflowRequest{Workflow: &types.WorkflowDef{
 		Name:  "idor-wf",
 		Nodes: []types.NodeDef{{Name: "start", Type: "test.echo"}},
 	}}
 	var buf bytes.Buffer
 	_ = json.NewEncoder(&buf).Encode(body)
-	req, _ := http.NewRequest(http.MethodPost, f.httpSrv.URL+"/v1/workflows", &buf)
+	req, _ := http.NewRequest(http.MethodPost, f.httpSrv.URL+"/v1/workflows/execute", &buf)
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
@@ -103,8 +104,9 @@ func (f *namespaceIDORFixture) submitWorkflow(token string) types.ExecutionID {
 	if resp.StatusCode != http.StatusOK {
 		f.t.Fatalf("submit status = %d, want 200", resp.StatusCode)
 	}
-	var out submitWorkflowResponse
-	_ = json.NewDecoder(resp.Body).Decode(&out)
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	var out executeWorkflowResponse
+	_ = json.Unmarshal(extractData(f.t, bodyBytes), &out)
 	return out.ExecutionID
 }
 
@@ -112,15 +114,15 @@ func (f *namespaceIDORFixture) submitWorkflow(token string) types.ExecutionID {
 // a forged namespace field. The server must ignore it and create the execution
 // under the principal's namespace.
 func (f *namespaceIDORFixture) submitWorkflowWithNamespaceField(token, forgedNamespace string) types.ExecutionID {
-	// submitWorkflowRequest has no Namespace field, so submit a raw JSON object
-	// with an extra namespace field to prove it is ignored.
+	// The execute request body has no Namespace field, so submit a raw JSON
+	// object with an extra namespace field to prove it is ignored.
 	raw := map[string]any{
 		"workflow":  map[string]any{"name": "idor-wf", "nodes": []map[string]any{{"name": "start", "type": "test.echo"}}},
 		"namespace": forgedNamespace,
 	}
 	var buf bytes.Buffer
 	_ = json.NewEncoder(&buf).Encode(raw)
-	req, _ := http.NewRequest(http.MethodPost, f.httpSrv.URL+"/v1/workflows", &buf)
+	req, _ := http.NewRequest(http.MethodPost, f.httpSrv.URL+"/v1/workflows/execute", &buf)
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
@@ -131,8 +133,9 @@ func (f *namespaceIDORFixture) submitWorkflowWithNamespaceField(token, forgedNam
 	if resp.StatusCode != http.StatusOK {
 		f.t.Fatalf("submit status = %d, want 200 (forged namespace field must be ignored)", resp.StatusCode)
 	}
-	var out submitWorkflowResponse
-	_ = json.NewDecoder(resp.Body).Decode(&out)
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	var out executeWorkflowResponse
+	_ = json.Unmarshal(extractData(f.t, bodyBytes), &out)
 	return out.ExecutionID
 }
 
@@ -145,7 +148,7 @@ func (f *namespaceIDORFixture) getExecution(token string, execID types.Execution
 	}
 	defer func() { _ = resp.Body.Close() }()
 	var detail engine.ExecutionDetail
-	_ = json.NewDecoder(resp.Body).Decode(&detail)
+	decodeEnvelopeData(f.t, resp, &detail)
 	return resp.StatusCode, detail
 }
 
@@ -168,8 +171,13 @@ func (f *namespaceIDORFixture) listDeadLetters(token string, execID types.Execut
 		f.t.Fatalf("list dead letters: %v", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	// The list success body is enveloped (spec §3.1, Step 1 decision A): the
+	// {entries,next_cursor} payload rides inside envelope.data. A decode
+	// failure must be fatal — these helpers back IDOR assertions, and a
+	// helper that swallows a decode failure turns a real cross-namespace
+	// leak into a passing test.
 	var list deadLetterListResponse
-	_ = json.NewDecoder(resp.Body).Decode(&list)
+	decodeEnvelopeData(f.t, resp, &list)
 	return resp.StatusCode, list
 }
 
@@ -185,9 +193,38 @@ func (f *namespaceIDORFixture) replayDeadLetter(token string, execID types.Execu
 		f.t.Fatalf("replay dead letter: %v", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	// The replay result is enveloped (spec §3.1): unwrap data before decoding
+	// the typed replay response, including on the 404 not_found outcome path.
+	// A decode failure must be fatal rather than swallowed — see the note on
+	// listDeadLetters.
 	var out deadLetterReplayResponse
-	_ = json.NewDecoder(resp.Body).Decode(&out)
+	decodeEnvelopeData(f.t, resp, &out)
 	return resp.StatusCode, out
+}
+
+// decodeEnvelopeData unrwaps the spec §3.1 envelope and decodes its data field
+// into out. Mirrors test/security/namespace_isolation_test.go's helper: the
+// decode errors here are asserted rather than discarded, because these helpers
+// back IDOR assertions and a helper that swallows a decode failure turns a real
+// cross-namespace leak into a passing test. A failure envelope carries
+// data:null, which leaves out at its zero value without an error; the caller
+// asserts on the status code in that case.
+func decodeEnvelopeData(t *testing.T, resp *http.Response, out any) {
+	t.Helper()
+	var env struct {
+		Success bool            `json:"success"`
+		Code    string          `json:"code"`
+		Data    json.RawMessage `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+		t.Fatalf("decode envelope: %v", err)
+	}
+	if len(env.Data) == 0 || string(env.Data) == "null" {
+		return
+	}
+	if err := json.Unmarshal(env.Data, out); err != nil {
+		t.Fatalf("decode envelope data: %v (data=%s)", err, env.Data)
+	}
 }
 
 // TestNamespaceORExecutionInspectCrossNamespace proves the core IDOR matrix:
@@ -306,5 +343,65 @@ func TestNamespaceORDeadLetterCrossNamespace(t *testing.T) {
 	// namespaceB replay of namespaceA's entry → 404 (exec existence check fails first).
 	if code, _ := f.replayDeadLetter("tok-b", execID, entryID); code != http.StatusNotFound {
 		t.Fatalf("namespaceB replay namespaceA dead letter = %d, want 404 (IDOR)", code)
+	}
+}
+
+// TestDeadLetterReplayNotFoundIsAFailureEnvelope pins the spec §4.1 rule that
+// success tracks 2xx strictly. The replay handler once returned the outcome
+// payload with writeData at a 404 — success:true at a failure status — because
+// the not_found outcome looked like a structured result worth surfacing.
+//
+// This is the only replay path that reaches ReplayNotFound: the execution
+// exists in the caller's namespace (so the IDOR check passes) but the entry id
+// does not. Every other 404 short-circuits earlier.
+func TestDeadLetterReplayNotFoundIsAFailureEnvelope(t *testing.T) {
+	f := newNamespaceORFixture(t)
+
+	ctxA := namespace.WithNamespace(context.Background(), namespace.Namespace("namespaceA"))
+	g, err := graph.Compile(&types.WorkflowDef{
+		Name:  "idor-dead-missing-entry",
+		Nodes: []types.NodeDef{{Name: "start", Type: "test.echo"}},
+	})
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	execID, err := f.seedEng.Submit(ctxA, g, nil)
+	if err != nil {
+		t.Fatalf("seed Submit: %v", err)
+	}
+
+	body := deadLetterReplayRequest{EntryID: "no-such-entry", Reason: "spec-4.1-guard", RequestID: "req-missing"}
+	var buf bytes.Buffer
+	_ = json.NewEncoder(&buf).Encode(body)
+	req, _ := http.NewRequest(http.MethodPost, f.httpSrv.URL+"/v1/management/dead-letters/"+string(execID)+"/replay", &buf)
+	req.Header.Set("Authorization", "Bearer tok-a")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 (missing entry), body=%s", resp.StatusCode, raw)
+	}
+	// Decoded as a map, not the envelope struct: a struct with a bool field
+	// cannot distinguish success:false from an absent success key, and the
+	// point of this assertion is that the field is present and false.
+	var env map[string]any
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("body is not JSON: %v (%s)", err, raw)
+	}
+	if env["success"] != false {
+		t.Fatalf("success = %v, want false (§4.1: success tracks 2xx strictly), body=%s", env["success"], raw)
+	}
+	// Spec §3: data is omitted on failure (not null). Assert key absence so a
+	// future loss of omitempty on envelope.Data surfaces here too.
+	if _, ok := env["data"]; ok {
+		t.Fatalf("data key present (= %v) on a failure envelope — want omitted (spec §3), body=%s", env["data"], raw)
+	}
+	if env["code"] != "dead_letter_not_found" {
+		t.Fatalf("code = %v, want dead_letter_not_found, body=%s", env["code"], raw)
 	}
 }

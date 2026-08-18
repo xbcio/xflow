@@ -99,7 +99,7 @@ func TestAPIServerHandlerServesWorkflowRoutes(t *testing.T) {
 		notWant int
 	}{
 		{name: "submit workflow empty body", req: httptest.NewRequest(http.MethodPost, "/v1/workflows", nil), notWant: http.StatusNotFound},
-		{name: "execution signal empty body", req: httptest.NewRequest(http.MethodPost, "/v1/executions/exec-1/signal", nil), notWant: http.StatusNotFound},
+		{name: "execution signal empty body", req: httptest.NewRequest(http.MethodPost, "/v1/executions/exec-1/signals", nil), notWant: http.StatusNotFound},
 	}
 
 	for _, tc := range cases {

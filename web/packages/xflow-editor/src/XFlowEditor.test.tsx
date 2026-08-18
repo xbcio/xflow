@@ -159,15 +159,15 @@ describe("XFlowEditor", () => {
     const inspector = screen.getByRole("region", { name: "属性配置" });
     fireEvent.change(within(inspector).getByLabelText("工作流 Runner 选择 JSON"), {
       target: {
-        value: '{ "mode": "required", "matchLabels": { "env": "prod", "region": "cn" } }'
+        value: '{ "mode": "required", "match_labels": { "env": "prod", "region": "cn" } }'
       }
     });
 
     expect(handleChange).toHaveBeenCalledWith({
       ...workflow,
-      runnerSelector: {
+      runner_selector: {
         mode: "required",
-        matchLabels: {
+        match_labels: {
           env: "prod",
           region: "cn"
         }
@@ -182,9 +182,9 @@ describe("XFlowEditor", () => {
 
     expect(handleChange).toHaveBeenCalledWith({
       ...workflow,
-      runnerSelector: {
+      runner_selector: {
         mode: "required",
-        matchLabels: {
+        match_labels: {
           env: "prod",
           region: "cn"
         }
@@ -208,7 +208,7 @@ describe("XFlowEditor", () => {
     const inspector = screen.getByRole("region", { name: "属性配置" });
     fireEvent.change(within(inspector).getByLabelText("节点 Runner 选择 JSON"), {
       target: {
-        value: '{ "mode": "default", "matchLabels": { "mode": "local", "env": "prod" } }'
+        value: '{ "mode": "default", "match_labels": { "mode": "local", "env": "prod" } }'
       }
     });
 
@@ -219,9 +219,9 @@ describe("XFlowEditor", () => {
         workflow.nodes[1],
         {
           ...workflow.nodes[2],
-          runnerSelector: {
+          runner_selector: {
             mode: "default",
-            matchLabels: {
+            match_labels: {
               mode: "local",
               env: "prod"
             }

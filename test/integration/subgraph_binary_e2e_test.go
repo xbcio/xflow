@@ -13,7 +13,6 @@
 package integration
 
 import (
-	"encoding/json"
 	"net/http"
 	"os/exec"
 	"testing"
@@ -91,14 +90,11 @@ func subgraphRows(n int) []any {
 func subgraphSubmit(t *testing.T, baseURL string, wf *types.WorkflowDef, params map[string]any) types.ExecutionID {
 	t.Helper()
 	body := map[string]any{"workflow": wf, "params": params}
-	resp, raw := g1DoAuth(t, http.MethodPost, baseURL, "/v1/workflows", r8Token, body)
+	resp, raw := g1DoAuth(t, http.MethodPost, baseURL, "/v1/workflows/execute", r8Token, body)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("submit map workflow: status=%d, want 200 (body=%s)", resp.StatusCode, string(raw))
 	}
-	var out e2eSubmitResp
-	if err := json.Unmarshal(raw, &out); err != nil {
-		t.Fatalf("decode submit response: %v (raw=%q)", err, string(raw))
-	}
+	out := decodeSubmitEnvelope(t, raw)
 	return out.ExecutionID
 }
 

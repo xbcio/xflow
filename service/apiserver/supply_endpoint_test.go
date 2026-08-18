@@ -36,15 +36,31 @@ func TestSupplyPutThenGet(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("PUT = %d, body=%s", rec.Code, rec.Body)
 	}
+	// The PUT success body is enveloped (spec §3.1). §3.4's bare-stream
+	// exception is for GET /v1/supplies/... only; the PUT response is a small
+	// descriptor and rides inside envelope.data.
+	var putEnv envelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &putEnv); err != nil {
+		t.Fatalf("decode PUT envelope: %v (body=%s)", err, rec.Body)
+	}
+	if !putEnv.Success || putEnv.Code != "200" {
+		t.Fatalf("PUT envelope = %+v, want success=true code=200", putEnv)
+	}
+	var putData struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &putData); err != nil {
+		t.Fatalf("re-decode PUT envelope: %v", err)
+	}
 	var put struct {
 		Revision    uint64 `json:"revision"`
 		ContentHash string `json:"content_hash"`
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &put); err != nil {
-		t.Fatalf("decode PUT response: %v", err)
+	if err := json.Unmarshal(putData.Data, &put); err != nil {
+		t.Fatalf("decode PUT data: %v (data=%s)", err, putData.Data)
 	}
 	if put.Revision != 1 || !strings.HasPrefix(put.ContentHash, "sha256:") {
-		t.Fatalf("PUT response = %+v", put)
+		t.Fatalf("PUT response data = %+v", put)
 	}
 
 	get := httptest.NewRecorder()

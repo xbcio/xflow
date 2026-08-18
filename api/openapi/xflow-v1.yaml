@@ -3,9 +3,18 @@ info:
   title: xflow Workflow Management API
   version: 1.0.0
   description: |
-    Contract for managing workflow definitions, drafts, versions, and executions.
-    This spec freezes the resource semantics and wire shapes for the B1 vertical
-    slice: draft → validate → publish → invoke → inspect.
+    User-facing HTTP contract for xflow. This spec mirrors the routes that are
+    actually registered on the apiserver mux (docs/design/API-SPECIFICATION.md
+    §7, §10). The runner protocol face — including POST /v1/executions
+    (entry-seed) and the entire /v1/runners/* family — is intentionally absent:
+    per spec §0.1 / §10 the OpenAPI contract describes only the user face.
+
+    Every user-face JSON response is wrapped in the Envelope (§3). The only
+    exceptions are the raw-byte streams (GET /v1/supplies/{name},
+    GET|HEAD /v1/artifacts/{digest}) whose 2xx bodies are octet-streams (their
+    failure bodies are still JSON Envelopes — spec §3.4) and the /healthz and
+    /readyz probes, which load balancers parse directly and must not be
+    enveloped (§7).
   contact:
     name: xflow maintainers
     url: https://github.com/xbcio/xflow
@@ -14,277 +23,735 @@ info:
     url: https://opensource.org/licenses/MIT
 
 servers:
-  - url: /v1
+  - url: /
+    description: Paths are absolute so the contract compares cleanly against the server path constants.
 
 tags:
-  - name: Workflow Definitions
-    description: Manage workflow definitions, drafts, and published versions.
-  - name: Workflow Executions
-    description: Invoke and inspect workflow executions.
+  - name: Workflows
+    description: Register, read, replace, deregister, and execute workflow definitions.
+  - name: Executions
+    description: Inspect, signal, cancel, and wait for executions.
+  - name: Supplies
+    description: Push and read supply content (raw-byte stream on success).
+  - name: Artifacts
+    description: Fetch script artifact bytes (raw-byte stream on success).
+  - name: Management
+    description: "Ops surface: leader status, runner/execution inspect, dead-letter list/replay."
+  - name: Probes
+    description: Liveness and readiness probes (not enveloped, not authenticated).
 
 security:
   - bearerAuth: []
 
 paths:
-  /workflow-definitions:
-    get:
-      operationId: listWorkflowDefinitions
-      summary: List workflow definitions
-      description: Returns a paginated list of workflow definitions scoped to the caller's tenant.
-      tags:
-        - Workflow Definitions
-      parameters:
-        - name: pageToken
-          in: query
-          schema:
-            type: string
-        - name: pageSize
-          in: query
-          schema:
-            type: integer
-            minimum: 1
-            maximum: 100
-            default: 20
-      responses:
-        "200":
-          description: Paginated list of workflow definitions.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/WorkflowDefinitionList"
-        default:
-          $ref: "#/components/responses/DefaultError"
+  /v1/workflows:
     post:
-      operationId: createWorkflowDefinition
-      summary: Create a workflow definition
-      description: Creates a new workflow definition with an empty draft.
-      tags:
-        - Workflow Definitions
+      operationId: registerWorkflow
+      summary: Register a workflow definition
+      description: |
+        Compiles the submitted definition and persists the compiled graph in the
+        server-side registry (spec §7). Namespace is resolved server-side from
+        the authenticated principal — never from the request body (§6.2).
+        Returns 201 with a Location header pointing at the new resource.
+      tags: [Workflows]
+      parameters:
+        - $ref: "#/components/parameters/XRequestId"
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/CreateWorkflowDefinitionRequest"
+              $ref: "#/components/schemas/WorkflowDef"
       responses:
         "201":
-          description: Workflow definition created.
+          description: Workflow registered.
+          headers:
+            Location:
+              description: Absolute path of the newly registered workflow.
+              schema:
+                type: string
+                example: /v1/workflows/wf-01H8XG...
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/WorkflowDefinition"
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/RegisterWorkflowResponse"
         default:
           $ref: "#/components/responses/DefaultError"
 
-  /workflow-definitions/{id}:
+  /v1/workflows/{id}:
     get:
-      operationId: getWorkflowDefinition
-      summary: Get a workflow definition
-      description: Returns the management resource for a single workflow definition.
-      tags:
-        - Workflow Definitions
+      operationId: getWorkflow
+      summary: Read a workflow definition
+      description: Returns the stored definition for one workflow id. A cross-namespace id resolves to not-found → 404.
+      tags: [Workflows]
       parameters:
-        - $ref: "#/components/parameters/WorkflowDefinitionId"
+        - $ref: "#/components/parameters/WorkflowId"
+        - $ref: "#/components/parameters/XRequestId"
       responses:
         "200":
-          description: Workflow definition resource.
+          description: The workflow definition.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/WorkflowDefinition"
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/WorkflowDef"
         default:
           $ref: "#/components/responses/DefaultError"
-
-  /workflow-definitions/{id}/draft:
     put:
-      operationId: updateWorkflowDraft
-      summary: Update the draft
+      operationId: replaceWorkflow
+      summary: Replace a workflow definition
       description: |
-        Replaces the mutable draft for a workflow definition. The request body
-        carries the runtime definition and editor metadata separately. Clients
-        should send `If-Match: "rev-<n>"` for optimistic concurrency.
-      tags:
-        - Workflow Definitions
+        Full update: deregisters a conflicting definition under the same
+        (namespace, name, version) key and re-registers. An identical
+        definition registers idempotently. Namespace comes from the principal
+        (§6.2).
+      tags: [Workflows]
       parameters:
-        - $ref: "#/components/parameters/WorkflowDefinitionId"
-        - name: If-Match
-          in: header
-          required: false
-          schema:
-            type: string
+        - $ref: "#/components/parameters/WorkflowId"
+        - $ref: "#/components/parameters/XRequestId"
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/WorkflowDraft"
+              $ref: "#/components/schemas/WorkflowDef"
       responses:
         "200":
-          description: Updated draft.
+          description: Workflow replaced.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/WorkflowDraft"
-        "412":
-          $ref: "#/components/responses/DefaultError"
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/RegisterWorkflowResponse"
         default:
           $ref: "#/components/responses/DefaultError"
-
-  /workflow-definitions/{id}/validate:
-    post:
-      operationId: validateWorkflowDraft
-      summary: Validate the current draft
-      description: |
-        Validates the current draft against the server-side node registry and
-        returns diagnostics plus the canonical runtime hash.
-      tags:
-        - Workflow Definitions
+    delete:
+      operationId: deregisterWorkflow
+      summary: Deregister a workflow definition
+      description: Removes the persisted record for the given workflow id.
+      tags: [Workflows]
       parameters:
-        - $ref: "#/components/parameters/WorkflowDefinitionId"
+        - $ref: "#/components/parameters/WorkflowId"
+        - $ref: "#/components/parameters/XRequestId"
       responses:
         "200":
-          description: Validation result.
+          description: Workflow removed.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ValidationResult"
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/RemovedResponse"
         default:
           $ref: "#/components/responses/DefaultError"
 
-  /workflow-definitions/{id}/publish:
+  /v1/workflows/execute:
     post:
-      operationId: publishWorkflowVersion
-      summary: Publish a new version
+      operationId: executeInlineWorkflow
+      summary: Compile and execute an inline workflow definition
       description: |
-        Copies the current draft into an immutable version. Clients should send
-        `If-Match: "rev-<n>"` to ensure they publish the draft they validated.
-      tags:
-        - Workflow Definitions
+        Merges the old submit/invoke shapes: when entry is empty the graph's
+        default start node is used; when set, that entry node drives the
+        explicit-entry path (spec §7, §9.1).
+      tags: [Workflows]
       parameters:
-        - $ref: "#/components/parameters/WorkflowDefinitionId"
-        - name: If-Match
-          in: header
-          required: false
-          schema:
-            type: string
+        - $ref: "#/components/parameters/XRequestId"
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/PublishWorkflowVersionRequest"
+              $ref: "#/components/schemas/ExecuteWorkflowRequest"
       responses:
-        "201":
-          description: Published version.
+        "200":
+          description: Execution started.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/WorkflowDefinitionVersion"
-        "412":
-          $ref: "#/components/responses/DefaultError"
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/ExecuteWorkflowResponse"
         default:
           $ref: "#/components/responses/DefaultError"
 
-  /workflow-definitions/{id}/versions:
+  /v1/workflows/{id}/execute:
+    post:
+      operationId: executeRegisteredWorkflow
+      summary: Execute an already-registered workflow by id
+      description: Resolves the stored compiled graph and submits it. The body is optional.
+      tags: [Workflows]
+      parameters:
+        - $ref: "#/components/parameters/WorkflowId"
+        - $ref: "#/components/parameters/XRequestId"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExecuteRegisteredRequest"
+      responses:
+        "200":
+          description: Execution started.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/ExecuteWorkflowResponse"
+        default:
+          $ref: "#/components/responses/DefaultError"
+
+  /v1/executions/{id}:
     get:
-      operationId: listWorkflowDefinitionVersions
-      summary: List published versions
-      description: Returns a paginated list of published versions for a workflow definition.
-      tags:
-        - Workflow Definitions
+      operationId: getExecution
+      summary: Inspect an execution
+      description: Returns the current execution detail (audit snapshot of status + per-node state).
+      tags: [Executions]
       parameters:
-        - $ref: "#/components/parameters/WorkflowDefinitionId"
-        - name: pageToken
+        - $ref: "#/components/parameters/ExecutionId"
+        - $ref: "#/components/parameters/XRequestId"
+      responses:
+        "200":
+          description: Execution detail.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/ExecutionDetail"
+        default:
+          $ref: "#/components/responses/DefaultError"
+
+  /v1/executions/{id}/cancel:
+    post:
+      operationId: cancelExecution
+      summary: Cancel an execution
+      description: Requests cancellation of the named execution.
+      tags: [Executions]
+      parameters:
+        - $ref: "#/components/parameters/ExecutionId"
+        - $ref: "#/components/parameters/XRequestId"
+      responses:
+        "200":
+          description: Cancel accepted.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/AcceptedResponse"
+        default:
+          $ref: "#/components/responses/DefaultError"
+
+  /v1/executions/{id}/signals:
+    post:
+      operationId: deliverSignal
+      summary: Deliver a signal to an execution
+      description: Delivers a named signal with an optional data payload.
+      tags: [Executions]
+      parameters:
+        - $ref: "#/components/parameters/ExecutionId"
+        - $ref: "#/components/parameters/XRequestId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SignalRequest"
+      responses:
+        "200":
+          description: Signal accepted.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/AcceptedResponse"
+        default:
+          $ref: "#/components/responses/DefaultError"
+
+  /v1/executions/{id}/signals/{name}:
+    delete:
+      operationId: revokeSignal
+      summary: Revoke a signal
+      description: Revokes a not-yet-consumed signal by name. The name travels in the path (§9.1).
+      tags: [Executions]
+      parameters:
+        - $ref: "#/components/parameters/ExecutionId"
+        - $ref: "#/components/parameters/SignalName"
+        - $ref: "#/components/parameters/XRequestId"
+      responses:
+        "200":
+          description: Signal revoked.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/RevokedResponse"
+        default:
+          $ref: "#/components/responses/DefaultError"
+
+  /v1/executions/{id}/wait:
+    get:
+      operationId: waitExecution
+      summary: Long-poll an execution until terminal
+      description: |
+        Long-polls until the execution reaches a terminal state or the timeout
+        elapses. On terminal returns the ExecutionDetail (200); on timeout
+        returns 202 with a timeout descriptor. The optional ?timeout= query
+        parameter is a Go duration (default 5s, capped at 10m).
+      tags: [Executions]
+      parameters:
+        - $ref: "#/components/parameters/ExecutionId"
+        - name: timeout
           in: query
+          description: Go duration string (default 5s, max 10m).
           schema:
             type: string
-        - name: pageSize
+            example: 30s
+        - $ref: "#/components/parameters/XRequestId"
+      responses:
+        "200":
+          description: Terminal execution detail.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/ExecutionDetail"
+        "202":
+          description: Timed out before reaching a terminal state.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/WaitTimeoutResponse"
+        default:
+          $ref: "#/components/responses/DefaultError"
+
+  /v1/supplies/{name}:
+    get:
+      operationId: getSupply
+      summary: Read supply content
+      description: |
+        Returns the raw supply bytes (§3.4). Success is application/octet-stream
+        (or the stored content type, or application/x-xflow-encrypted when the
+        runner requests it). Failure is a JSON Envelope. ETag carries the
+        content hash; X-Supply-Revision carries the revision.
+      tags: [Supplies]
+      parameters:
+        - $ref: "#/components/parameters/SupplyName"
+        - name: If-None-Match
+          in: header
+          required: false
+          schema:
+            type: string
+        - name: Accept
+          in: header
+          required: false
+          description: Send application/x-xflow-encrypted to request encrypted content.
+          schema:
+            type: string
+        - $ref: "#/components/parameters/XRequestId"
+      responses:
+        "200":
+          description: Supply bytes.
+          headers:
+            ETag:
+              schema:
+                type: string
+            X-Supply-Revision:
+              schema:
+                type: string
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+            application/x-xflow-encrypted:
+              schema:
+                type: string
+                format: binary
+        "304":
+          description: Not modified (If-None-Match matched).
+        default:
+          $ref: "#/components/responses/DefaultError"
+    put:
+      operationId: putSupply
+      summary: Write supply content
+      description: |
+        Pushes supply content. Returns the resulting revision and content hash
+        inside an Envelope (success is JSON; only GET is a raw stream).
+        If-Match optionally carries the expected revision for optimistic
+        concurrency; a mismatch yields 409 revision_conflict.
+      tags: [Supplies]
+      parameters:
+        - $ref: "#/components/parameters/SupplyName"
+        - name: If-Match
+          in: header
+          required: false
+          schema:
+            type: string
+        - $ref: "#/components/parameters/XRequestId"
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "200":
+          description: Supply written.
+          headers:
+            ETag:
+              schema:
+                type: string
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/SupplyPutResponse"
+        default:
+          $ref: "#/components/responses/DefaultError"
+
+  /v1/artifacts/{digest}:
+    get:
+      operationId: getArtifact
+      summary: Fetch artifact bytes
+      description: |
+        Returns the raw bytes for a digest the caller's namespace references
+        (§3.4). Authorization is an identity-table lookup, so an unreferenced or
+        cross-namespace digest answers 404 (not 403) to avoid leaking existence.
+      tags: [Artifacts]
+      parameters:
+        - $ref: "#/components/parameters/ArtifactDigest"
+        - $ref: "#/components/parameters/XRequestId"
+      responses:
+        "200":
+          description: Artifact bytes.
+          headers:
+            ETag:
+              schema:
+                type: string
+            Content-Length:
+              schema:
+                type: string
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        default:
+          $ref: "#/components/responses/DefaultError"
+    head:
+      operationId: statArtifact
+      summary: Stat an artifact
+      description: Returns headers only (size, ETag) without the body.
+      tags: [Artifacts]
+      parameters:
+        - $ref: "#/components/parameters/ArtifactDigest"
+        - $ref: "#/components/parameters/XRequestId"
+      responses:
+        "200":
+          description: Artifact stat.
+          headers:
+            ETag:
+              schema:
+                type: string
+            Content-Length:
+              schema:
+                type: string
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+        default:
+          $ref: "#/components/responses/DefaultError"
+
+  /v1/management/leader:
+    get:
+      operationId: getLeader
+      summary: Report leadership status
+      description: Returns whether this replica currently holds leadership.
+      tags: [Management]
+      parameters:
+        - $ref: "#/components/parameters/XRequestId"
+      responses:
+        "200":
+          description: Leader status.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/LeaderResponse"
+        default:
+          $ref: "#/components/responses/DefaultError"
+
+  /v1/management/runners/{id}:
+    get:
+      operationId: getRunner
+      summary: Inspect a single runner
+      description: Returns the registration and liveness snapshot for one runner id. No list API exists.
+      tags: [Management]
+      parameters:
+        - $ref: "#/components/parameters/RunnerId"
+        - $ref: "#/components/parameters/XRequestId"
+      responses:
+        "200":
+          description: Runner snapshot.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/RunnerSnapshot"
+        default:
+          $ref: "#/components/responses/DefaultError"
+
+  /v1/management/executions/{id}:
+    get:
+      operationId: inspectExecutionManagement
+      summary: Inspect an execution (management view)
+      description: |
+        Ops view of a single execution. Returns byte-identical body to
+        GET /v1/executions/{id} (spec §7.2); the two Ops stay distinct so an
+        ops token and a business token may be granted separately.
+      tags: [Management]
+      parameters:
+        - $ref: "#/components/parameters/ExecutionId"
+        - $ref: "#/components/parameters/XRequestId"
+      responses:
+        "200":
+          description: Execution detail.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/ExecutionDetail"
+        default:
+          $ref: "#/components/responses/DefaultError"
+
+  /v1/management/dead-letters/{execID}:
+    get:
+      operationId: listDeadLetters
+      summary: List dead-lettered outbox entries
+      description: |
+        Cursor-paginated list of dead-lettered durable outbox entries for one
+        execution (spec §3.3 cursor exception — this is the machine-scan
+        endpoint, not a page list). An empty cursor starts from the oldest
+        entry.
+      tags: [Management]
+      parameters:
+        - $ref: "#/components/parameters/DeadLetterExecId"
+        - name: cursor
           in: query
+          required: false
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
           schema:
             type: integer
             minimum: 1
-            maximum: 100
-            default: 20
+        - $ref: "#/components/parameters/XRequestId"
       responses:
         "200":
-          description: Paginated list of versions.
+          description: Dead-letter page.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/WorkflowDefinitionVersionList"
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/DeadLetterListResponse"
         default:
           $ref: "#/components/responses/DefaultError"
 
-  /workflow-definitions/{id}/versions/{version}:
-    get:
-      operationId: getWorkflowDefinitionVersion
-      summary: Get a published version
-      description: Returns a single immutable published version.
-      tags:
-        - Workflow Definitions
-      parameters:
-        - $ref: "#/components/parameters/WorkflowDefinitionId"
-        - $ref: "#/components/parameters/Version"
-      responses:
-        "200":
-          description: Published version.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/WorkflowDefinitionVersion"
-        default:
-          $ref: "#/components/responses/DefaultError"
-
-  /workflow-definitions/{id}/versions/{version}/invoke:
+  /v1/management/dead-letters/{execID}/replay:
     post:
-      operationId: invokeWorkflowVersion
-      summary: Invoke a published version
-      description: Starts an execution of the published version and returns the execution id.
-      tags:
-        - Workflow Executions
+      operationId: replayDeadLetter
+      summary: Replay a dead-lettered entry
+      description: |
+        Moves a dead-lettered entry atomically back to the ready set for
+        redelivery. Activation-safe: rejects entries whose node is terminal or
+        whose activation no longer matches. Idempotent under request_id.
+      tags: [Management]
       parameters:
-        - $ref: "#/components/parameters/WorkflowDefinitionId"
-        - $ref: "#/components/parameters/Version"
+        - $ref: "#/components/parameters/DeadLetterExecId"
+        - $ref: "#/components/parameters/XRequestId"
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/InvokeWorkflowRequest"
+              $ref: "#/components/schemas/DeadLetterReplayRequest"
       responses:
-        "202":
-          description: Execution accepted.
+        "200":
+          description: Replay result.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/InvokeWorkflowResponse"
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/DeadLetterReplayResponse"
         default:
           $ref: "#/components/responses/DefaultError"
 
-  /executions/{executionId}:
+  /healthz:
     get:
-      operationId: getExecutionSnapshot
-      summary: Inspect an execution
-      description: Returns the current execution snapshot, including node statuses.
-      tags:
-        - Workflow Executions
-      parameters:
-        - name: executionId
-          in: path
-          required: true
-          description: Stable execution UUID.
-          schema:
-            type: string
-            format: uuid
+      operationId: healthz
+      summary: Liveness probe
+      description: |
+        Kubernetes liveness probe. NOT enveloped (§7) — load balancers parse it
+        directly. Not authenticated. Returns {"status":"ok"}.
+      tags: [Probes]
+      security: []
       responses:
         "200":
-          description: Execution snapshot.
+          description: Process is live.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ExecutionSnapshot"
-        default:
-          $ref: "#/components/responses/DefaultError"
+                $ref: "#/components/schemas/HealthzResponse"
+
+  /readyz:
+    get:
+      operationId: readyz
+      summary: Readiness probe
+      description: |
+        Kubernetes readiness probe. NOT enveloped (§7) — load balancers parse it
+        directly. Not authenticated. Returns ready + leader status; non-leader
+        replicas remain ready for the read-only management surface. A not-ready
+        replica returns 503.
+      tags: [Probes]
+      security: []
+      responses:
+        "200":
+          description: Process is ready.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadyResponse"
+        "503":
+          description: Process is not ready.
 
 components:
   securitySchemes:
@@ -292,185 +759,469 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
+      description: Server-issued bearer token bound to a (subject, namespace, scopes) principal.
 
   parameters:
-    WorkflowDefinitionId:
+    WorkflowId:
       name: id
       in: path
       required: true
-      description: Stable workflow definition UUID.
+      description: Server-assigned workflow id.
       schema:
         type: string
-        format: uuid
-    Version:
-      name: version
+    ExecutionId:
+      name: id
       in: path
       required: true
-      description: Client-supplied version string.
+      description: Execution id.
+      schema:
+        type: string
+    SignalName:
+      name: name
+      in: path
+      required: true
+      description: Signal name.
+      schema:
+        type: string
+    SupplyName:
+      name: name
+      in: path
+      required: true
+      description: Supply name (single path segment, no namespace).
+      schema:
+        type: string
+    ArtifactDigest:
+      name: digest
+      in: path
+      required: true
+      description: Content digest (the store validates the format).
+      schema:
+        type: string
+    RunnerId:
+      name: id
+      in: path
+      required: true
+      description: Runner id.
+      schema:
+        type: string
+    DeadLetterExecId:
+      name: execID
+      in: path
+      required: true
+      description: Execution id whose dead-letters to list/replay.
+      schema:
+        type: string
+    XRequestId:
+      name: X-Request-Id
+      in: header
+      required: false
+      description: |
+        Optional client-supplied request id (charset [A-Za-z0-9._-], length
+        1..128). When valid it is echoed verbatim in the response header for
+        client-side retry correlation (spec §5.2). Never appears in the body.
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9._-]{1,128}$'
+
+  headers:
+    XRequestId:
+      description: Echoed X-Request-Id (only when the inbound value was valid).
       schema:
         type: string
 
   responses:
     DefaultError:
-      description: Error response.
+      description: Error response — a failure Envelope with success=false and no data field.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/XRequestId"
       content:
         application/json:
           schema:
-            $ref: "#/components/schemas/Error"
+            $ref: "#/components/schemas/ErrorEnvelope"
 
   schemas:
-    WorkflowDefinition:
+    Envelope:
       type: object
-      required:
-        - id
-        - namespace
-        - name
-        - createdAt
-        - updatedAt
+      description: |
+        The user-face response envelope (spec §3). On success success=true,
+        code="200" (string), and data carries the payload. On failure
+        success=false, data is omitted (not null), and code carries a stable
+        snake_case business identifier. trace_id is server-authoritative
+        (W3C 32-hex).
+      required: [success, code, message, trace_id]
+      properties:
+        success:
+          type: boolean
+          description: Strictly consistent with the HTTP status (2xx → true).
+        code:
+          type: string
+          description: Machine-readable identifier. "200" on success; stable snake_case business code on failure.
+        message:
+          type: string
+          description: Human-readable text. "" on success. Never carries credentials, node output, SQL, or stack traces (§3.5).
+        data:
+          description: Payload on success. Omitted on failure (writeFail never writes data).
+        trace_id:
+          type: string
+          description: Server-authoritative W3C trace id (32 hex).
+          pattern: '^[0-9a-f]{32}$'
+
+    ErrorEnvelope:
+      type: object
+      description: The failure shape of the Envelope — data is absent on failure.
+      additionalProperties: false
+      required: [success, code, message, trace_id]
+      properties:
+        success:
+          type: boolean
+          description: Always false on this shape.
+          example: false
+        code:
+          type: string
+          description: Stable snake_case business error code.
+          example: workflow_not_found
+        message:
+          type: string
+          description: Human-readable text. May change; clients must branch on code.
+          example: workflow not found
+        trace_id:
+          type: string
+          description: Server-authoritative W3C trace id (32 hex).
+          pattern: '^[0-9a-f]{32}$'
+
+    RegisterWorkflowResponse:
+      type: object
+      description: Echoes the persisted workflow id and non-fatal compile warnings.
+      required: [workflow_id]
+      properties:
+        workflow_id:
+          type: string
+        warnings:
+          type: array
+          items:
+            type: string
+          description: Non-fatal compile diagnostics (node/referenced-node names only — never output or parameter values, §3.5).
+
+    ExecuteWorkflowRequest:
+      type: object
+      required: [workflow]
+      properties:
+        workflow:
+          $ref: "#/components/schemas/WorkflowDef"
+        entry:
+          type: string
+          description: Explicit entry node; empty uses the graph default start node.
+        input:
+          type: object
+          additionalProperties: true
+        params:
+          type: object
+          additionalProperties: true
+
+    ExecuteRegisteredRequest:
+      type: object
+      description: Optional body for executing a registered workflow by id.
+      properties:
+        entry:
+          type: string
+        input:
+          type: object
+          additionalProperties: true
+        params:
+          type: object
+          additionalProperties: true
+
+    ExecuteWorkflowResponse:
+      type: object
+      required: [execution_id]
+      properties:
+        execution_id:
+          type: string
+
+    SignalRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        data:
+          type: object
+          additionalProperties: true
+
+    AcceptedResponse:
+      type: object
+      required: [accepted]
+      properties:
+        accepted:
+          type: boolean
+          example: true
+
+    RevokedResponse:
+      type: object
+      required: [revoked]
+      properties:
+        revoked:
+          type: boolean
+          example: true
+
+    RemovedResponse:
+      type: object
+      required: [removed]
+      properties:
+        removed:
+          type: boolean
+          example: true
+
+    SupplyPutResponse:
+      type: object
+      required: [revision, content_hash]
+      properties:
+        revision:
+          type: integer
+          format: uint64
+        content_hash:
+          type: string
+
+    WaitTimeoutResponse:
+      type: object
+      required: [execution_id, status, timed_out]
+      properties:
+        execution_id:
+          type: string
+        status:
+          $ref: "#/components/schemas/ExecutionStatus"
+        timed_out:
+          type: boolean
+          example: true
+
+    LeaderResponse:
+      type: object
+      required: [is_leader]
+      properties:
+        is_leader:
+          type: boolean
+
+    HealthzResponse:
+      type: object
+      description: Bare (non-enveloped) liveness body — load balancers parse it directly.
+      required: [status]
+      properties:
+        status:
+          type: string
+          example: ok
+
+    ReadyResponse:
+      type: object
+      description: Bare (non-enveloped) readiness body — load balancers parse it directly.
+      required: [ready, leader]
+      properties:
+        ready:
+          type: boolean
+        leader:
+          type: boolean
+
+    ExecutionDetail:
+      type: object
+      description: Audit snapshot of an execution (engine.ExecutionDetail).
+      required: [execution_id, status]
+      properties:
+        execution_id:
+          type: string
+        status:
+          $ref: "#/components/schemas/ExecutionStatus"
+        error:
+          type: string
+        nodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/NodeDetail"
+
+    NodeDetail:
+      type: object
+      required: [name, status]
+      properties:
+        name:
+          type: string
+        status:
+          $ref: "#/components/schemas/NodeStatus"
+        attempt:
+          type: integer
+        port:
+          type: string
+        error:
+          type: string
+        output:
+          type: object
+          additionalProperties: true
+
+    ExecutionStatus:
+      type: string
+      enum: [pending, running, success, failed, canceling, canceled, timeout]
+
+    NodeStatus:
+      type: string
+      enum: [pending, running, committing, success, failed, skipped, suspended, continued, canceled, waiting]
+
+    RunnerSnapshot:
+      type: object
+      description: Read-only registration and liveness view of one runner.
+      required: [runner_id, capacity, in_flight, last_heartbeat]
+      properties:
+        runner_id:
+          type: string
+        capacity:
+          type: integer
+        in_flight:
+          type: integer
+        labels:
+          type: object
+          additionalProperties:
+            type: string
+        capabilities:
+          type: array
+          items:
+            $ref: "#/components/schemas/Capability"
+        namespaces:
+          type: array
+          items:
+            type: string
+        last_heartbeat:
+          type: string
+          format: date-time
+
+    Capability:
+      type: object
+      required: [node_type]
+      properties:
+        node_type:
+          type: string
+        node_version:
+          type: integer
+        runtimes:
+          type: array
+          items:
+            type: string
+        features:
+          type: array
+          items:
+            type: string
+        resources:
+          type: array
+          items:
+            type: string
+        credentials:
+          type: array
+          items:
+            type: string
+
+    DeadLetterListResponse:
+      type: object
+      description: One cursor-paginated page of dead-lettered outbox entries.
+      required: [entries]
+      properties:
+        entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/OutboxEntry"
+        next_cursor:
+          type: string
+          description: Omitted (or empty) when the page is the last.
+
+    OutboxEntry:
+      type: object
+      description: A durable task-delivery intent (engine.OutboxEntry).
+      required: [id, task]
       properties:
         id:
           type: string
-          format: uuid
+        task:
+          $ref: "#/components/schemas/Task"
+        available_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        attempts:
+          type: integer
+        leased_from_score_ms:
+          type: integer
+          description: Internal lease bookkeeping; present only on leased entries.
+        lease_deadline_ms:
+          type: integer
+          description: Internal lease bookkeeping; present only on leased entries.
+
+    Task:
+      type: object
+      required: [execution_id, node_name, node_idx, type]
+      properties:
+        execution_id:
+          type: string
+        node_name:
+          type: string
+        node_idx:
+          type: integer
+        type:
+          type: integer
+          description: Task type discriminator (engine.TaskType; 0 = node exec, 1 = node resume).
+        payload:
+          type: object
+          additionalProperties: true
+          description: Present only for node-resume tasks.
+
+    DeadLetterReplayRequest:
+      type: object
+      required: [entry_id, reason]
+      properties:
+        entry_id:
+          type: string
+        request_id:
+          type: string
+          description: Caller-supplied idempotency key; empty means the store mints one.
+        reason:
+          type: string
+          description: Required, length-bounded operator rationale.
+
+    DeadLetterReplayResponse:
+      type: object
+      required: [outcome]
+      properties:
+        outcome:
+          type: string
+          description: |
+            Stable replay outcome (replayed, already_replayed, not_found,
+            rejected_terminal, rejected_inactive, rejected_node_terminal,
+            rejected_activation_mismatch, rejected_metadata_missing,
+            invalid_request, unauthorized).
+        audit_id:
+          type: string
+        execution_id:
+          type: string
+        node_id:
+          type: string
+        activation_id:
+          type: string
+
+    WorkflowDef:
+      type: object
+      description: The top-level DSL workflow definition (types.WorkflowDef).
+      required: [namespace, name]
+      properties:
+        id:
+          type: string
         namespace:
           type: string
+          description: Server-authoritative isolation scope; injected by the handler, never trusted from the client body.
         name:
           type: string
-        description:
-          type: string
-        createdAt:
-          type: string
-          format: date-time
-        updatedAt:
-          type: string
-          format: date-time
-        createdBy:
-          type: string
-        tenantId:
-          type: string
-        latestVersion:
-          type: string
-        draftRevision:
-          type: integer
-
-    WorkflowDefinitionList:
-      type: object
-      required:
-        - items
-      properties:
-        items:
-          type: array
-          items:
-            $ref: "#/components/schemas/WorkflowDefinition"
-        nextPageToken:
-          type: string
-
-    CreateWorkflowDefinitionRequest:
-      type: object
-      required:
-        - namespace
-        - name
-      properties:
-        namespace:
-          type: string
-        name:
-          type: string
-        description:
-          type: string
-
-    WorkflowDraft:
-      type: object
-      required:
-        - definition
-        - revision
-      properties:
-        definition:
-          $ref: "#/components/schemas/WorkflowDefinitionRuntime"
-        editorMetadata:
-          $ref: "#/components/schemas/WorkflowEditorMetadata"
-        revision:
-          type: integer
-          description: Per-definition monotonic integer for optimistic concurrency.
-        definitionHash:
-          type: string
-          description: Canonical runtime hash (runtime-sha256:v1:...).
-        auditFingerprint:
-          type: string
-          description: Full-definition audit hash (sha256:audit:v1:...).
-        updatedAt:
-          type: string
-          format: date-time
-
-    WorkflowDefinitionVersion:
-      type: object
-      required:
-        - definition
-        - version
-        - revision
-        - immutable
-      properties:
-        definition:
-          $ref: "#/components/schemas/WorkflowDefinitionRuntime"
-        editorMetadata:
-          $ref: "#/components/schemas/WorkflowEditorMetadata"
-        revision:
-          type: integer
-        definitionHash:
-          type: string
-        auditFingerprint:
-          type: string
-        updatedAt:
-          type: string
-          format: date-time
         version:
           type: string
-          description: Client-supplied version string.
-        publishedAt:
-          type: string
-          format: date-time
-        publishedBy:
-          type: string
-        immutable:
-          type: boolean
-
-    WorkflowDefinitionVersionList:
-      type: object
-      required:
-        - items
-      properties:
-        items:
-          type: array
-          items:
-            $ref: "#/components/schemas/WorkflowDefinitionVersion"
-        nextPageToken:
-          type: string
-
-    PublishWorkflowVersionRequest:
-      type: object
-      required:
-        - version
-      properties:
-        version:
-          type: string
-
-    WorkflowDefinitionRuntime:
-      type: object
-      required:
-        - namespace
-        - name
-      properties:
-        namespace:
-          type: string
-        name:
-          type: string
-        versionTag:
-          type: string
-          description: Optional runtime version tag (maps to WorkflowDef.Version).
         description:
           type: string
-          description: Human documentation; excluded from the runtime hash.
         spec:
           type: string
-        runnerSelector:
+        runner_selector:
           $ref: "#/components/schemas/RunnerSelector"
         context:
           $ref: "#/components/schemas/WorkflowContext"
@@ -493,7 +1244,11 @@ components:
         nodes:
           type: array
           items:
-            $ref: "#/components/schemas/RuntimeNodeDef"
+            $ref: "#/components/schemas/NodeDef"
+        groups:
+          type: array
+          items:
+            type: object
         connections:
           $ref: "#/components/schemas/Connections"
         outputs:
@@ -503,48 +1258,17 @@ components:
         pin_data:
           type: object
           additionalProperties: true
-          description: Runtime-semantic pinned node inputs.
+        dependency_edges:
+          type: array
+          items:
+            $ref: "#/components/schemas/DependencyEdge"
 
-    WorkflowEditorMetadata:
+    NodeDef:
       type: object
+      required: [name, type]
       properties:
-        positions:
-          type: object
-          description: Map of node id/name to visual position.
-          additionalProperties:
-            $ref: "#/components/schemas/Position"
-        viewport:
-          type: object
-          properties:
-            x:
-              type: number
-            y:
-              type: number
-            zoom:
-              type: number
-        ui:
-          type: object
-          description: Map of node id/name to UI overrides.
-          additionalProperties:
-            type: object
-            additionalProperties: true
-        notes:
-          type: object
-          description: Map of node id/name to author notes.
-          additionalProperties:
-            type: string
-        pinData:
-          type: object
-          additionalProperties: true
-          readOnly: true
-          description: Read-only derived cache of WorkflowDefinitionRuntime.pin_data.
-
-    RuntimeNodeDef:
-      type: object
-      required:
-        - name
-        - type
-      properties:
+        id:
+          type: string
         name:
           type: string
         type:
@@ -555,12 +1279,16 @@ components:
           type: integer
         template:
           type: string
+        position:
+          $ref: "#/components/schemas/Position"
         disabled:
           type: boolean
         on_error:
           type: string
-        runnerSelector:
+        runner_selector:
           $ref: "#/components/schemas/RunnerSelector"
+        notes:
+          type: string
         inputs:
           type: array
           items:
@@ -571,14 +1299,18 @@ components:
         parameters:
           type: object
           additionalProperties: true
+        ui:
+          type: object
+          additionalProperties: true
         retry:
           $ref: "#/components/schemas/RetrySettings"
+        timeout:
+          type: integer
+          description: Go duration (nanoseconds) for one node attempt.
 
     NodeKind:
       type: string
-      enum:
-        - action
-        - trigger
+      enum: [action, trigger, supply]
 
     Position:
       type: object
@@ -590,8 +1322,6 @@ components:
 
     PortDecl:
       type: object
-      required:
-        - name
       properties:
         name:
           type: string
@@ -600,9 +1330,6 @@ components:
 
     Connection:
       type: object
-      required:
-        - node
-        - input
       properties:
         node:
           type: string
@@ -611,13 +1338,47 @@ components:
 
     Connections:
       type: object
-      description: Map[source_node]map[output_port][]Connection(target).
+      description: |
+        Map[source_node]map[output_port]edges. Data ports marshal as the array
+        shorthand ([]Connection) for a byte-identical runtime hash; dependency
+        ports marshal as the object form ({type, targets}). Both forms decode
+        on read (types.PortConnections custom marshal/unmarshal).
       additionalProperties:
         type: object
         additionalProperties:
+          oneOf:
+            - type: array
+              items:
+                $ref: "#/components/schemas/Connection"
+            - $ref: "#/components/schemas/PortConnections"
+
+    PortConnections:
+      type: object
+      description: |
+        The object form a dependency-port connection marshals to
+        ({type, targets}). Data ports use the array shorthand ([]Connection)
+        and never reach this schema. required + additionalProperties: false
+        bind the object form tightly so a renamed field or a stray extra key
+        is caught by the contract test instead of silently validating.
+      additionalProperties: false
+      required: [type, targets]
+      properties:
+        type:
+          type: string
+          enum: [data, dependency]
+        targets:
           type: array
           items:
             $ref: "#/components/schemas/Connection"
+
+    DependencyEdge:
+      type: object
+      required: [node, supply]
+      properties:
+        node:
+          type: string
+        supply:
+          type: string
 
     WorkflowContext:
       type: object
@@ -632,8 +1393,6 @@ components:
     WorkflowSettings:
       type: object
       properties:
-        timeout:
-          type: integer
         concurrency:
           type: integer
         timezone:
@@ -644,6 +1403,22 @@ components:
           type: string
         retry:
           $ref: "#/components/schemas/RetrySettings"
+
+    WorkflowOptions:
+      type: object
+      properties:
+        allow_cycles:
+          type: boolean
+        max_auto_depth:
+          type: integer
+        experimental_node_group:
+          type: boolean
+        transient:
+          type: boolean
+        transient_ttl:
+          type: integer
+        transient_completion_ttl:
+          type: integer
 
     RetrySettings:
       type: object
@@ -665,25 +1440,12 @@ components:
       type: object
       properties:
         mode:
-          $ref: "#/components/schemas/RunnerSelectorMode"
-        matchLabels:
+          type: string
+          enum: [default, required]
+        match_labels:
           type: object
           additionalProperties:
             type: string
-
-    RunnerSelectorMode:
-      type: string
-      enum:
-        - default
-        - required
-
-    WorkflowOptions:
-      type: object
-      properties:
-        allow_cycles:
-          type: boolean
-        max_auto_depth:
-          type: integer
 
     CredentialDef:
       type: object
@@ -695,8 +1457,6 @@ components:
 
     ParamDef:
       type: object
-      required:
-        - type
       properties:
         type:
           type: string
@@ -724,131 +1484,3 @@ components:
         value: {}
         display_name:
           type: string
-
-    Diagnostic:
-      type: object
-      required:
-        - code
-        - severity
-        - message
-      properties:
-        code:
-          type: string
-        severity:
-          type: string
-          enum:
-            - error
-            - warning
-            - info
-        message:
-          type: string
-        path:
-          type: string
-        nodeId:
-          type: string
-        connectionRef:
-          type: object
-          properties:
-            node:
-              type: string
-            input:
-              type: string
-
-    ValidationResult:
-      type: object
-      required:
-        - valid
-      properties:
-        valid:
-          type: boolean
-        definitionHash:
-          type: string
-        diagnostics:
-          type: array
-          items:
-            $ref: "#/components/schemas/Diagnostic"
-
-    InvokeWorkflowRequest:
-      type: object
-      required:
-        - entry
-      properties:
-        entry:
-          type: string
-        input:
-          type: object
-          additionalProperties: true
-
-    InvokeWorkflowResponse:
-      type: object
-      required:
-        - executionId
-      properties:
-        executionId:
-          type: string
-
-    ExecutionSnapshot:
-      type: object
-      required:
-        - id
-        - status
-      properties:
-        id:
-          type: string
-        status:
-          $ref: "#/components/schemas/ExecutionStatus"
-        params:
-          type: object
-        nodeStatuses:
-          type: object
-          additionalProperties:
-            $ref: "#/components/schemas/NodeStatus"
-        parentId:
-          type: string
-        traceId:
-          type: string
-        startedAt:
-          type: string
-          format: date-time
-        finishedAt:
-          type: string
-          format: date-time
-
-    ExecutionStatus:
-      type: string
-      enum:
-        - pending
-        - running
-        - success
-        - failed
-        - canceling
-        - canceled
-        - timeout
-
-    NodeStatus:
-      type: string
-      enum:
-        - pending
-        - running
-        - committing
-        - success
-        - failed
-        - skipped
-        - suspended
-        - continued
-        - canceled
-        - waiting
-
-    Error:
-      type: object
-      required:
-        - code
-        - message
-      properties:
-        code:
-          type: string
-        message:
-          type: string
-        details:
-          type: object
-          additionalProperties: true

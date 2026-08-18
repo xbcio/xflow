@@ -27,24 +27,24 @@ func TestAuthzPreallocatedExecutionIDCorrelatesAudit(t *testing.T) {
 		decode func(t *testing.T, b []byte) string
 	}{
 		{
-			name: "submit",
-			path: "/v1/workflows",
-			body: submitWorkflowRequest{Workflow: validWorkflow()},
+			name: "execute",
+			path: "/v1/workflows/execute",
+			body: executeWorkflowRequest{Workflow: validWorkflow()},
 			decode: func(t *testing.T, b []byte) string {
-				var out submitWorkflowResponse
-				if err := json.Unmarshal(b, &out); err != nil {
+				var out executeWorkflowResponse
+				if err := json.Unmarshal(extractData(t, b), &out); err != nil {
 					t.Fatal(err)
 				}
 				return string(out.ExecutionID)
 			},
 		},
 		{
-			name: "invoke",
-			path: "/v1/workflows/invoke",
-			body: invokeRequest{Workflow: validWorkflow(), Entry: "start"},
+			name: "execute_with_entry",
+			path: "/v1/workflows/execute",
+			body: executeWorkflowRequest{Workflow: validWorkflow(), Entry: "start"},
 			decode: func(t *testing.T, b []byte) string {
-				var out invokeResponse
-				if err := json.Unmarshal(b, &out); err != nil {
+				var out executeWorkflowResponse
+				if err := json.Unmarshal(extractData(t, b), &out); err != nil {
 					t.Fatal(err)
 				}
 				return string(out.ExecutionID)
@@ -101,4 +101,17 @@ func readBody(t *testing.T, r io.Reader) []byte {
 		t.Fatalf("read body: %v", err)
 	}
 	return b
+}
+
+// extractData unmarshals an enveloped response body and returns the raw JSON
+// of its data field, so a per-route type can be decoded from it.
+func extractData(t *testing.T, b []byte) []byte {
+	t.Helper()
+	var env struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(b, &env); err != nil {
+		t.Fatalf("decode envelope: %v (body=%s)", err, b)
+	}
+	return env.Data
 }

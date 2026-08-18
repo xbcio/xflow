@@ -15,7 +15,7 @@ type WorkflowDef struct {
 	Version        string                    `json:"version,omitempty"`
 	Description    string                    `json:"description,omitempty"`
 	Spec           string                    `json:"spec,omitempty"`
-	RunnerSelector *RunnerSelector           `json:"runnerSelector,omitempty"`
+	RunnerSelector *RunnerSelector           `json:"runner_selector,omitempty"`
 	Context        *WorkflowContext          `json:"context,omitempty"`
 	Settings       *WorkflowSettings         `json:"settings,omitempty"`
 	Options        *WorkflowOptions          `json:"options,omitempty"`
@@ -86,7 +86,7 @@ type NodeDef struct {
 	Position       *Position       `json:"position,omitempty"`
 	Disabled       bool            `json:"disabled,omitempty"`
 	OnError        string          `json:"on_error,omitempty"`
-	RunnerSelector *RunnerSelector `json:"runnerSelector,omitempty"`
+	RunnerSelector *RunnerSelector `json:"runner_selector,omitempty"`
 	Notes          string          `json:"notes,omitempty"`
 	Inputs         []PortDecl      `json:"inputs,omitempty"`
 	OutputSchema   map[string]any  `json:"output_schema,omitempty"`
@@ -111,7 +111,7 @@ const (
 
 type RunnerSelector struct {
 	Mode        RunnerSelectorMode `json:"mode,omitempty"`
-	MatchLabels map[string]string  `json:"matchLabels,omitempty"`
+	MatchLabels map[string]string  `json:"match_labels,omitempty"`
 }
 
 // NodeKind describes a node's runtime role.

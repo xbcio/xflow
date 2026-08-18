@@ -68,11 +68,24 @@ func TestManagementLeader(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
-	var out leaderResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	// /v1/management/leader is a user-face endpoint and is enveloped (spec §3.1);
+	// only /healthz and /readyz are excluded (spec §7). data carries the body.
+	var env struct {
+		Success bool            `json:"success"`
+		Code    string          `json:"code"`
+		Data    json.RawMessage `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
 		t.Fatal(err)
 	}
-	if !out.IsLeader {
+	if !env.Success || env.Code != "200" {
+		t.Fatalf("envelope = {success:%v code:%q}, want success=true code=200", env.Success, env.Code)
+	}
+	var leader leaderResponse
+	if err := json.Unmarshal(env.Data, &leader); err != nil {
+		t.Fatalf("decode data: %v", err)
+	}
+	if !leader.IsLeader {
 		t.Fatal("is_leader = false, want true for memory backend")
 	}
 }

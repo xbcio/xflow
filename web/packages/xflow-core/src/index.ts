@@ -45,7 +45,7 @@ export interface WorkflowOptions {
 
 export interface RunnerSelector {
   mode?: RunnerSelectorMode;
-  matchLabels?: Record<string, string>;
+  match_labels?: Record<string, string>;
 }
 
 export interface WorkflowCredential {
@@ -81,7 +81,7 @@ export interface WorkflowNode {
   position?: Position;
   disabled?: boolean;
   on_error?: ErrorPolicy;
-  runnerSelector?: RunnerSelector;
+  runner_selector?: RunnerSelector;
   notes?: string;
   inputs?: PortDecl[];
   output_schema?: Record<string, unknown>;
@@ -97,7 +97,7 @@ export interface WorkflowDef {
   name?: string;
   version?: string;
   description?: string;
-  runnerSelector?: RunnerSelector;
+  runner_selector?: RunnerSelector;
   context?: {
     vars?: Record<string, unknown>;
     config?: Record<string, unknown>;
