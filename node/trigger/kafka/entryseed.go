@@ -3,9 +3,46 @@ package kafka
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"time"
 
 	"github.com/xbcio/xflow/types"
 )
+
+// admissionCauseLimit bounds how much of a failure cause reaches the log.
+const admissionCauseLimit = 512
+
+// logBatchAdmission emits a throttled log line for a batch admission that did
+// not succeed. It exists because OnBatchAdmission carries only a state enum:
+// an error string cannot be a metric label (unbounded cardinality), so without
+// this the counter says 599 batches failed and nothing says why. A withheld
+// commit is correct behaviour, but a correct behaviour with no diagnosis is an
+// outage no one can shorten.
+//
+// Message content is never logged (see logInvalidMessage). The cause is the
+// engine's own error text, not the record — but a guest that quotes its input
+// in an error message will put that fragment here, so treat this line with the
+// same trust as a stack trace and keep it bounded.
+func logBatchAdmission(topic string, partition int, first, last int64, count int, state, cause string) {
+	emit, occurrences := discardLog.allow(time.Now(), topic+"\x00admission_"+state)
+	if !emit {
+		return
+	}
+	if len(cause) > admissionCauseLimit {
+		cause = cause[:admissionCauseLimit] + "…(truncated)"
+	}
+	slog.Warn("kafka batch admission did not succeed",
+		"topic", topic,
+		"partition", partition,
+		"start_offset", first,
+		"end_offset", last,
+		"count", count,
+		"state", state,
+		"cause", cause,
+		"committed", state == "deterministic_skip",
+		"occurrences", occurrences,
+	)
+}
 
 // buildBatchAdmissionKey builds the admission key for a batch of messages
 // from one partition. The range is the ACTUAL first..last offset of the batch,
@@ -87,6 +124,8 @@ func seedEntryBatchMessages(ctx context.Context, in *types.TriggerActivateInput,
 	topic := messages[0].Topic
 	if err != nil {
 		obs().OnBatchAdmission(ctx, topic, "error")
+		logBatchAdmission(topic, messages[0].Partition, messages[0].Offset,
+			messages[len(messages)-1].Offset, len(messages), "error", err.Error())
 		return false
 	}
 	switch {
@@ -136,20 +175,27 @@ func seedEntryBatchViaGroupExec(ctx context.Context, in *types.TriggerActivateIn
 	})
 	if err != nil {
 		obs().OnBatchAdmission(ctx, topic, "error")
+		logBatchAdmission(topic, first.Partition, first.Offset, last.Offset,
+			len(messages), "error", "ExecuteGroup: "+err.Error())
 		return false
 	}
 	if execRes.Outcome != "success" {
 		// The group ran but did not succeed. Retry semantics depend on whether
 		// the failure is deterministic (retrying won't help) or transient.
+		cause := fmt.Sprintf("group outcome=%s: %s", execRes.Outcome, execRes.Error)
 		if execRes.Deterministic {
 			// Permanent failure (compile error, schema validation, etc.):
 			// commit offset to skip this batch — redelivery would fail identically.
 			obs().OnBatchAdmission(ctx, topic, "deterministic_skip")
+			logBatchAdmission(topic, first.Partition, first.Offset, last.Offset,
+				len(messages), "deterministic_skip", cause)
 			return true
 		}
 		// Transient failure (timeout, member I/O error, etc.): do NOT admit —
 		// this batch must be redelivered.
 		obs().OnBatchAdmission(ctx, topic, "error")
+		logBatchAdmission(topic, first.Partition, first.Offset, last.Offset,
+			len(messages), "error", cause)
 		return false
 	}
 
@@ -171,6 +217,8 @@ func seedEntryBatchViaGroupExec(ctx context.Context, in *types.TriggerActivateIn
 	resp, err := rt.SeedExecutionFromEntry(ctx, req)
 	if err != nil {
 		obs().OnBatchAdmission(ctx, topic, "error")
+		logBatchAdmission(topic, first.Partition, first.Offset, last.Offset,
+			len(messages), "error", "SeedExecutionFromEntry: "+err.Error())
 		return false
 	}
 	switch {

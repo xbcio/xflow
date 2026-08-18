@@ -3,6 +3,8 @@ package kafka
 import (
 	"context"
 	"errors"
+	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -537,6 +539,114 @@ func TestSeedKafkaEntryBatchViaGroupExec_ExecuteGroupErrorWithholdsCommit(t *tes
 
 	if seedEntryBatchViaGroupExec(context.Background(), in, rt, msgs) {
 		t.Fatal("an ExecuteGroup error must not commit the offset")
+	}
+}
+
+// captureAdmissionLog redirects the default slog logger into a buffer for the
+// duration of the test and returns it. It also gives the test a fresh
+// discardLogger: the throttle is a package global keyed by topic+state, so a
+// second test using the same key within 30s would find its line suppressed and
+// fail for a reason that has nothing to do with the code under test.
+func captureAdmissionLog(t *testing.T) *strings.Builder {
+	t.Helper()
+	buf := &strings.Builder{}
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, nil)))
+	prevThrottle := discardLog
+	discardLog = &discardLogger{last: map[string]time.Time{}, suppressed: map[string]int{}}
+	t.Cleanup(func() {
+		slog.SetDefault(prevLogger)
+		discardLog = prevThrottle
+	})
+	return buf
+}
+
+// TestSeedKafkaEntryBatchViaGroupExec_FailureCauseIsLogged is the regression
+// test for a real production blind spot: a scenario-A run showed 599 of 634
+// batch admissions failing, and the cause was unavailable anywhere. The
+// OnBatchAdmission observer takes only a state enum — an error string cannot be
+// a metric label — so unless the cause reaches a log it is destroyed at the
+// point of failure and the only way to learn it is to reproduce the run.
+//
+// Asserted on the transient branch AND the deterministic branch, because
+// deterministic_skip COMMITS: it discards a whole batch of production traffic,
+// which is the case that most needs a diagnosis in the log.
+func TestSeedKafkaEntryBatchViaGroupExec_FailureCauseIsLogged(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		deterministic bool
+		wantState     string
+		wantCommitted string
+	}{
+		{"transient", false, "error", "committed=false"},
+		{"deterministic", true, "deterministic_skip", "committed=true"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := captureAdmissionLog(t)
+			rt := &mockGroupExecRuntime{execResult: types.GroupExecResult{
+				Outcome:       "failed",
+				Error:         "wasm trap: unreachable in clean guest",
+				Deterministic: tc.deterministic,
+			}}
+			in := &types.TriggerActivateInput{NodeName: "trig", WorkflowID: "wf", Params: map[string]any{}}
+			msgs := []Message{
+				{Topic: "cause-" + tc.name, Partition: 4, Offset: 100},
+				{Topic: "cause-" + tc.name, Partition: 4, Offset: 137},
+			}
+
+			seedEntryBatchViaGroupExec(context.Background(), in, rt, msgs)
+
+			got := buf.String()
+			for _, want := range []string{
+				"wasm trap: unreachable in clean guest", // the cause itself
+				"outcome=failed",                        // and what the group reported
+				"state=" + tc.wantState,
+				tc.wantCommitted,
+				"partition=4", "start_offset=100", "end_offset=137", "count=2",
+			} {
+				if !strings.Contains(got, want) {
+					t.Errorf("admission failure log is missing %q; without it an "+
+						"operator sees only a counter increment.\nlog: %s", want, got)
+				}
+			}
+		})
+	}
+}
+
+// TestSeedKafkaEntryBatchViaGroupExec_AdmissionErrorCauseIsLogged covers the
+// second failure surface: the group succeeded but the admission round trip to
+// the control plane failed. Same blind spot, different call site — a fix that
+// only covered ExecuteGroup would leave transport failures mute.
+func TestSeedKafkaEntryBatchViaGroupExec_AdmissionErrorCauseIsLogged(t *testing.T) {
+	buf := captureAdmissionLog(t)
+	rt := &mockGroupExecRuntime{
+		mockEntrySeedRuntime: mockEntrySeedRuntime{err: errors.New("dial control plane: i/o timeout")},
+		execResult:           types.GroupExecResult{Outcome: "success"},
+	}
+	in := &types.TriggerActivateInput{NodeName: "trig", WorkflowID: "wf", Params: map[string]any{}}
+	msgs := []Message{{Topic: "admit-err", Partition: 1, Offset: 7}}
+
+	if seedEntryBatchViaGroupExec(context.Background(), in, rt, msgs) {
+		t.Fatal("a failed admission must not commit the offset")
+	}
+	if got := buf.String(); !strings.Contains(got, "dial control plane: i/o timeout") ||
+		!strings.Contains(got, "SeedExecutionFromEntry") {
+		t.Errorf("admission transport failure did not name its cause in the log: %s", got)
+	}
+}
+
+// TestLogBatchAdmission_TruncatesCause bounds the log line. The cause is the
+// engine's error text, and a guest that quotes its input into an error message
+// would otherwise put an unbounded fragment of production traffic into the log.
+func TestLogBatchAdmission_TruncatesCause(t *testing.T) {
+	buf := captureAdmissionLog(t)
+	logBatchAdmission("trunc", 0, 1, 2, 1, "error", strings.Repeat("x", admissionCauseLimit*3))
+	got := buf.String()
+	if !strings.Contains(got, "(truncated)") {
+		t.Errorf("an oversized cause was not truncated: %d bytes logged", len(got))
+	}
+	if strings.Count(got, "x") > admissionCauseLimit {
+		t.Errorf("logged %d cause bytes, want at most %d", strings.Count(got, "x"), admissionCauseLimit)
 	}
 }
 
