@@ -96,7 +96,18 @@ func runnerPathConsts(t *testing.T) []runnerPathConst {
 					if err != nil {
 						continue
 					}
-					if !strings.HasPrefix(val, "/v1/runners/") {
+					// Filter on "/v1/" rather than "/v1/runners/": the runner
+					// face is not confined to that subtree. Spec §0.1 puts
+					// POST /v1/executions (entry-seed) on the runner face too,
+					// and it lives in this package. Narrowing to
+					// "/v1/runners/" would make the guard silently skip any
+					// runner-facing constant declared outside that subtree --
+					// reintroducing, one prefix down, the blind spot this
+					// guard exists to close. Every string constant in this
+					// package that names a "/v1/" path is a protocol path by
+					// construction, so a false positive here is a loud test
+					// failure, never a silent pass.
+					if !strings.HasPrefix(val, "/v1/") {
 						continue
 					}
 					out = append(out, runnerPathConst{name: cn.Name, value: val})
