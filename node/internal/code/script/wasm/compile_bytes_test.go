@@ -39,28 +39,34 @@ func TestCompileModuleBytesResolvesSourceDriven(t *testing.T) {
 	}
 }
 
-// CompileModuleBytes and CompileModule must produce the SAME engine for the same
-// module. Two engines for one module means two instance pools, and a supply
-// change would reconfigure only one of them -- the other keeps serving traffic
-// under the old rules.
+// The engine the bytes path PRODUCES must be the one the code path resolves.
+// Two engines for one module means two instance pools, and a supply change
+// would reconfigure only one of them -- the other keeps serving traffic under
+// the old rules.
+//
+// The comparison takes engineForBytes' own return value, not a fresh lookup by
+// key. An earlier version of this test re-fetched through engineForKey and
+// compared that against engineForCode, which reduces to h.engines[key] ==
+// h.engines[key]: it asserts engineForKey's sha256 dedup, which was never in
+// question, and stays green even when engineForBytes returns an engine it
+// never published (verified: that injection left the old form passing).
 func TestCompileModuleBytesSharesEngineWithCodePath(t *testing.T) {
 	ctx := context.Background()
 	code := testReactorCode(t)
 	raw := decodeForTest(t, code)
 
-	if err := CompileModuleBytes(ctx, raw); err != nil {
-		t.Fatalf("CompileModuleBytes: %v", err)
-	}
-	viaBytes, err := sharedReactorHost.engineForKey(ctx, moduleKeyOf(raw), raw)
+	viaBytes, err := sharedReactorHost.engineForBytes(ctx, raw)
 	if err != nil {
-		t.Fatalf("engineForKey: %v", err)
+		t.Fatalf("engineForBytes: %v", err)
 	}
 	viaCode, err := sharedReactorHost.engineForCode(ctx, code)
 	if err != nil {
 		t.Fatalf("engineForCode: %v", err)
 	}
 	if viaBytes != viaCode {
-		t.Fatal("bytes and code entry points resolved to different engines for one module")
+		t.Fatal("bytes and code entry points resolved to different engines for one module; " +
+			"a supply change would reconfigure only one pool and the other would keep " +
+			"serving traffic under the old rules")
 	}
 }
 

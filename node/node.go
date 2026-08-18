@@ -203,6 +203,7 @@ func CompileWasmModule(ctx context.Context, code string) error {
 func CompileWasmModuleBytes(ctx context.Context, wasmBytes []byte) error {
 	return scriptpkg.CompileWasmModuleBytes(ctx, wasmBytes)
 }
+
 func Set(fields map[string]any) *SetNode {
 	return transform.Set(fields)
 }

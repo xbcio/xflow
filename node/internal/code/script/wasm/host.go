@@ -271,6 +271,12 @@ func (h *reactorHost) engineForBytes(ctx context.Context, wasmBytes []byte) (*re
 // themselves. A second copy of this sequence is how the bytes path would
 // silently regress to the globals path: the omission compiles, runs, and
 // produces correct-looking traffic that matches no rules.
+//
+// It also runs when engineForKey returned an engine that already existed, not
+// one it just created. That is deliberate and idempotent: re-reading the flag
+// costs one map probe, and the alternative -- resolving it only on creation --
+// would drop the flip for an engine whose registration arrived between its
+// creation and this call.
 func (h *reactorHost) publishEngine(key string, e *reactorEngine, code string) {
 	h.mu.Lock()
 	fromSource := h.sourceDrivenLocked(key)
