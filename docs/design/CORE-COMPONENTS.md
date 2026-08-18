@@ -1,6 +1,8 @@
 # XFlow 核心组件设计
 
-> **Status: 目标设计（非当前实现）。** 本文档及其三个子文档描述 server 集群化的目标架构（Raft HA、Relay Gateway 等），用于指导后续演进方向。当前已实现的架构见 [ARCHITECTURE.md](./ARCHITECTURE.md)（engine/execution/backend 分层）；当前 server/runner MVP 的现状与规划边界见 [DEPLOYMENT-TOPOLOGIES.md](./DEPLOYMENT-TOPOLOGIES.md) §7。
+> **Status: 目标设计（非当前实现）。** 本文档及其三个子文档描述 server 集群化的目标架构（多节点控制面、Relay Gateway 等），用于指导后续演进方向。当前已实现的架构见 [ARCHITECTURE.md](./ARCHITECTURE.md)（engine/execution/backend 分层）；当前 server/runner MVP 的现状与规划边界见 [DEPLOYMENT-TOPOLOGIES.md](./DEPLOYMENT-TOPOLOGIES.md) §7。
+>
+> **注意：早期版本曾把 HA 写成 Raft 方案，这是错的。** 实际选主是 `backend/providers/distributed/leader.go` 的 `RedisLeaderElector`（Redis 租约，TTL 15s），代码中没有、也不计划引入 Raft。
 
 > 本文档已拆分为三个子文档，请按角色查阅对应文档。
 
@@ -40,11 +42,12 @@ protocol 实现复制进 SDK 包。
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│              XFlow Server Control Plane (Raft)               │
+│   XFlow Server Control Plane（Redis 租约选主，非 Raft）        │
 │                                                             │
 │   WorkflowEngine · Scheduler · StateManager · Monitor       │  ← 共享基础设施
-│   GlobalReconciler · TimeoutMonitor · Archiver              │  ← Leader-only
-│   API Server · RunnerProtocol · TaskDispatcher · Reconciler │  ← Follower-only
+│   EntryActivationReconciler · LeaseSweeper                  │  ← Leader-only
+│   AuditReconcileWorker · timeout.Monitor                    │  ← Leader-only
+│   API Server · RunnerProtocol · TaskDispatcher              │  ← 全节点
 └─────────────────────────┬───────────────────────────────────┘
                           │
                  ┌────────┴────────┐
@@ -53,7 +56,7 @@ protocol 实现复制进 SDK 包。
           ┌───────────────┴────────────────┐
           │                               │
 ┌─────────▼──────────┐      ┌─────────────▼──────────────────┐
-│  Task Dispatcher   │      │  Relay Gateway                  │
+│  Task Dispatcher   │      │  Relay Gateway （planned）      │
 │  （server 内部）    │      │  ┌──────────────────────────┐  │
 │                    │      │  │ System Runner             │  │
 └────────────────────┘      │  │ User Runner               │  │
@@ -67,5 +70,5 @@ protocol 实现复制进 SDK 包。
 | 类型 | 接入方式 | 作用域 | 典型场景 |
 |------|---------|--------|---------|
 | Direct Runner | Runner Protocol（直连 server） | 系统级 | server 与 runner 网络可达 |
-| System Relay Runner | Runner Protocol via Relay Gateway | 系统级 | 跨 DC、跨云、受限网络域 |
-| User Relay Runner | Runner Protocol via Relay Gateway | 用户私有 | 用户本机、浏览器 WASM |
+| System Relay Runner | Runner Protocol via Relay Gateway（planned） | 系统级 | 跨 DC、跨云、受限网络域 |
+| User Relay Runner | Runner Protocol via Relay Gateway（planned） | 用户私有 | 用户本机、浏览器 WASM |

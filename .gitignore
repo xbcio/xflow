@@ -62,6 +62,8 @@ data/
 .claude/mockups/
 .claude/settings.local.json
 .claude/specs/
+.claude/archive-*.tar.gz
+.claude/.delete-list.txt
 
 # Superpowers internal reports (local-only; some historical files remain tracked
 # but new reports should not enter the repo).

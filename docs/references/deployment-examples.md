@@ -9,7 +9,8 @@
 xflow-server \
   --addr :8080 \
   --grpc-addr :8090 \
-  --redis redis://:password@redis.internal:6379/0 \
+  --redis redis.internal:6379 \
+  --redis-password <password> \
   --concurrency 10 \
   --auth-policy /etc/xflow/runners.yaml \
   --api-auth-token "$WORKFLOW_API_TOKEN" \
@@ -31,7 +32,7 @@ xflow-server \
 | Flag | 默认值 | G1 生产要求 | 说明 |
 |---|---|---|---|
 | `--addr` | `:8080` | 必设 | HTTP 控制面监听地址 |
-| `--grpc-addr` | `""`（禁用） | 推荐启用 | gRPC Runner Protocol 监听地址；空则禁用 gRPC |
+| `--grpc-addr` | `""`（禁用） | 可选（实验性；HTTP 是主要传输，跨云走 Relay Gateway） | gRPC Runner Protocol 监听地址；空则禁用 gRPC |
 | `--redis` | `""` | **必设**（非 memory） | Redis 地址；空时回退 `--memory`（仅 dev） |
 | `--memory` | `false` | **禁止**生产使用 | 进程内存 backend，进程退出即丢失 |
 | `--concurrency` | `10` | 按容量调 | 队列消费者并发 |
@@ -49,6 +50,9 @@ xflow-server \
 | `--trace-endpoint` | `localhost:4317` | OTLP collector | OTLP gRPC endpoint（`--trace=otlp` 时） |
 | `--trace-insecure` | `false` | `false` | 是否禁用 OTLP TLS 验证 |
 | `--management` | `false` | **必设** | 启用 ops management 模块（`/healthz` `/readyz` `/v1/management/*`）；`/v1/management/*` 由 `--api-auth-token` 门控 |
+| `--mysql-dsn` | `""` | **必设**（production） | MySQL DSN（`parseTime=true` 必须）；启用持久化执行状态 + 持久化 SQL 审计 sink。空=进程内存 store + 内存审计（仅 dev） |
+| `--mode` | `production` | `production` | 运行时姿态：`dev`\|`production`。`production`（默认，fail-closed）要求 `--auth-tokens-file` + `--mysql-dsn` + Reconciler；`dev` 允许内存审计 + 单 token，打印告警 |
+| `--auth-tokens-file` | `""` | **必设**（多租户） | JSON 数组 `[{token,subject,namespace,scopes}]`；多命名空间场景必用（`--api-auth-token` 单 token 不允许在 production 模式使用）。文件须 `0600`，不得记录日志 |
 
 ## 1.1. Redis HA 模式启动示例（sentinel / cluster）
 
@@ -223,6 +227,9 @@ groups:
 启动 G1 生产前逐项确认：
 
 - [ ] `--redis` 指向可恢复 Redis（持久化开启，RDB/AOF），非 `--memory`；若用 HA 模式，见下方额外检查项
+- [ ] `--mysql-dsn` 配置，指向生产 MySQL（`parseTime=true`）；启用持久化执行状态与 SQL 审计 sink
+- [ ] `--mode=production`（默认值，确认未改为 `dev`）；production 模式要求 `--auth-tokens-file`、`--mysql-dsn` 与 Reconciler，否则启动失败
+- [ ] `--auth-tokens-file` 配置（多租户/production 必设）；`--api-auth-token` 单 token 在 production 模式下被拒绝启动
 - [ ] `--auth-policy` 配置 runners.yaml，token 为高熵随机值，未硬编码
 - [ ] `--api-auth-token` 配置，`--require-api-auth` 启用（无 token 启动失败）
 - [ ] `--tls-cert`/`--tls-key` 配置；runner 连接走 TLS，推荐 mTLS（`--tls-client-ca`）

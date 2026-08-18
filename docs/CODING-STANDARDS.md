@@ -122,7 +122,7 @@ case "signal":
 
 - Initialisms are all-caps: `ExecutionID` not `ExecutionId`, `TraceID` not `TraceId`, `URL` not `Url`.
 - Receivers: 1-2 letter abbreviation, consistent across all methods of a type.
-  - `AsynqRunner` → `r`, `MemoryRunner` → `r`, `Engine` → `e`, `WorkflowBuilder` → `w`.
+  - `execution.Runner` → `r`, `service/runner.Runner` → `r`, `Engine` → `e`, `WorkflowBuilder` → `w`.
 - No `Get` prefix on accessors: `Status()` not `GetStatus()`.
 - Constructor returns concrete type: `func NewEngine(...) *Engine`, never `EngineInterface`.
 - No generic package names: `util`, `helper`, `common`.
@@ -166,7 +166,6 @@ fmt.Errorf("节点入队失败: %w", err)
 
 - Define interfaces at the consumer, not the provider.
 - Keep interfaces minimal; prefer single-method or two-method interfaces.
-- `EngineRunner` is the internal runner contract — do not expose it outside `internal/runner/`.
 - `types.ActionHandler` is the primary interface action node authors implement; keep it stable.
 
 ---
@@ -244,10 +243,12 @@ Handler types used only in tests must use a `test.` prefix (e.g., `test.engine.e
 
 ### `sdk/xflow` module (embedded engine)
 
-- `EngineRunner` stays in `internal/runner/` — not part of the public API.
-- Redis key helpers (`execKey`, `nodeKey`, `outputKey`, `signalKey`, `inDegreeKey`) are the single source of truth for key layout; never inline the format string elsewhere.
 - `completedResults` is the retention store for post-completion queries; keep `executions` and `completedResults` always updated under the same `r.mu.Lock()`.
-- AsynqRunner's `handleWaitNodeSignal` polling loop must be interruptible: use `select { case <-time.After(...): case <-ctx.Done(): }`.
+
+### `backend/providers/distributed/` module
+
+- Redis key helpers (`execKey`, `nodeKey`, `outputKey`, `signalKey`, `inDegreeKey`) in `internal/rstate/keys.go` are the single source of truth for key layout; never inline the format string elsewhere.
+- Polling loops that wait on Redis (e.g., the timeout monitor in `internal/timeout/monitor.go`) must be interruptible: use `select { case <-time.After(...): case <-ctx.Done(): }`.
 
 ### `types/` module
 

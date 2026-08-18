@@ -1,7 +1,14 @@
 # 提交路径遗留项：acyclic 与 legacy 两条路的重复与分叉
 
 2026-08-11 在移除扩展标记键（见 [SUBGRAPH-ENGINE-TODO.md](./SUBGRAPH-ENGINE-TODO.md)）时
-顺带查实的结构问题。**未修**，本文件只记录事实与待决问题。
+顺带查实的结构问题。
+
+**仍开放的条目**：「可能的收敛形状」节描述的去重重构（删掉 `commitAcyclicNodeError`/
+`commitLegacyNodeError` 的逐字重复）。所有阻塞问题（待决问题 1-3）已于 2026-08-14
+全部答出；重构现在可以直接做，无需再等任何前提条件。
+
+**已关闭的条目**（本文件其余各节均为已关闭）：`CommitNodeRequest.Fatal` 一字段两义、
+后端猜图类型静默丢下游、cyclic × suspend 零覆盖、失败原因读回面只有 SQL 审计行。
 
 触发它变重要的外部事件：**漏洞审批流将对接 cyclic 模式，且走分布式部署**。在此之前
 cyclic 是有测试无生产流量的路径；对接之后它承重。
@@ -230,7 +237,7 @@ script」），且 `terminalExecutionError` 让 `CyclicFinalError` 优先于节�
 `WaitDone` 与 `Inspect` 两条路径给出**相同**原因，并反向断言没有任何节点携带 error
 （那正是本场景成立的前提）。
 
-## 可能的收敛形状（未决，仅备忘）
+## 可能的收敛形状（仍开放，现已无阻塞）
 
 三层：入口合一，扩展分支用 `taskResultExpands` 分流（判据已在 2026-08-11 下沉为编译期
 可答，前提具备）；错误分支删掉零差异的那一份；`...WithClassification` 保留两个实现，
@@ -239,3 +246,26 @@ script」），且 `terminalExecutionError` 让 `CyclicFinalError` 优先于节�
 问题 1 已于 2026-08-14 答出且**没有推翻这个形状**：`Fatal` 的第二义消失后，
 `...WithClassification` 那一对的分歧收窄成「两个完成协议各一套字段」，`Validate` 把
 边界钉住了。也就是说这个候选现在可以直接做，不再被待决问题挡住。
+
+**当前重复代码位置（2026-08-18 核实）**：
+
+- `engine/atomic_commit.go:63`：`commitAcyclicNodeError`
+- `engine/commit.go:213`：`commitLegacyNodeError`
+
+两函数逐字相同（签名一致、体一致），唯一差异是最后一行分别调用
+`commitAcyclicNodeWithClassification` 与 `commitLegacyNodeWithClassification`。
+合并方式：提取公共前置逻辑（retry 尝试 + ApplyOnError + classification 计算），
+保留两个 `...WithClassification` 实现（它们真的不同：`AdvanceTask` 机制 vs
+`CyclicOutbox` 机制）。
+
+## 已关闭（保留索引）
+
+| 条目 | 关闭时间 | 关闭位置 |
+|---|---|---|
+| `CommitNodeRequest.Fatal` 一字段两义 | 2026-08-14 | `engine/atomic.go`（协议文档）；`CommitNodeRequest.Validate()` 交叉校验；`rstate/commit_graph_type_test.go`，`local/commit_graph_type_test.go` |
+| 待决问题 1：cyclic 终局 `Fatal` vs `CyclicComplete` | 2026-08-14 | 保持 `CyclicComplete`；`engine/atomic.go` 写明 `Fatal` 仅剩无环终局义 |
+| 待决问题 2：分布式 × cyclic 成色 | 2026-08-13 | `test/integration/cyclic_reliability_process_test.go`，`test/integration/cyclic_reliability_real_test.go` |
+| 待决问题 3：cyclic × suspend 覆盖 | 2026-08-13 | `test/integration/cyclic_suspend_distributed_test.go`（新增） |
+| 后端猜图类型静默丢下游（AllowCycles） | 2026-08-14 | `rstate/state_commit.go`（不再推导，从请求读 `AllowCycles`）；`rstate/commit_graph_type_test.go`，`local/commit_graph_type_test.go` |
+| 失败原因读回面只有 SQL 审计行 | 2026-08-14 | `engine.ExecutionSnapshot.Error`；`rstate.GetExecution`（读 `execKey(..,\"error\")`）；`local/cyclic_depth_error_readback_test.go` |
+| `commitGroupLua` vs `updateExecutionStatusLua` 两条错误写入规则为何不能统一 | 设计决策，不修 | 见 [STORAGE-CONTRACT.md §Terminal transitions](./STORAGE-CONTRACT.md) 与本文件「失败原因」节末尾的规则对照表 |

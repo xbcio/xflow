@@ -47,6 +47,7 @@ operator review. This runbook covers detection, inspection, and safe replay.
 | `rejected_inactive` | Execution status key is gone (expired/missing). |
 | `rejected_node_terminal` | The entry's node is already terminal; replaying would advance a node that has moved on. Does NOT apply to `advance` intents — an advance entry's source is always terminal (required precondition, idempotent via the advance marker). |
 | `rejected_activation_mismatch` | The entry's activation no longer matches the node's current activation (stale cyclic re-entry). |
+| `rejected_metadata_missing` | The entry's per-entry dead-letter metadata (node name or activation) is absent (legacy entry written before the meta hash existed), or the node-level guard state is missing or unrecognisable — the activation-staleness guard cannot be safely evaluated, so the entry is not moved. Fail-closed; a recoverable receipt is written so a retry with the same `--request-id` returns the same outcome. |
 | `unauthorized` | The principal lacks `deadletter.replay` scope (G1 authorizer). Never reaches Redis. |
 | `invalid_request` | Missing required fields or over-length reason (manager layer). Never reaches Redis. |
 
@@ -78,18 +79,58 @@ operator review. This runbook covers detection, inspection, and safe replay.
 The `xflow` admin CLI goes through the `DeadLetterManager` (request validation,
 the metric outlet, and the audit projection), which wraps the backend
 `DeadLetterStore` capability (the Redis atomic contract and the authoritative
-receipt). The CLI never constructs Redis keys directly.
+receipt). On the default API path the CLI does not construct Redis keys directly;
+the break-glass path is the exception (see below).
+
+### Default API path
+
+The default path calls the protected management HTTP API
+(`/v1/management/dead-letters/*`). Both `--server` and `--token` are required;
+`XFLOW_API_ADDR` and `XFLOW_API_TOKEN` are the corresponding environment
+variables.
 
 ```bash
 # List dead-lettered entries for an execution (read-only, JSON lines, paginated)
-xflow dead-letter list --redis-addr $REDIS_ADDR --execution <execID> --limit 50
+xflow dead-letter list \
+  --server $XFLOW_API_ADDR \
+  --token $TOKEN \
+  --execution <execID> \
+  --limit 50
 # A non-empty next_cursor means more pages exist:
-# xflow dead-letter list ... --cursor <next_cursor>
+# xflow dead-letter list --server ... --token ... --cursor <next_cursor>
 
 # Replay one entry back to the ready set (privileged write).
 # --request-id makes the replay recoverable: retry with the same value after a
 # lost response returns already_replayed + the original audit_id.
 xflow dead-letter replay \
+  --server $XFLOW_API_ADDR \
+  --token $TOKEN \
+  --execution <execID> \
+  --entry <entryID> \
+  --reason "queue outage resolved, redeliver" \
+  --request-id "$(uuidgen)"
+```
+
+### Break-glass path (emergency Redis-direct maintenance)
+
+`--break-glass` bypasses the management API and connects directly to Redis.
+Use only when the API is unavailable. A prominent stderr warning is emitted and
+the operator identity recorded as `cli:breakglass:<user>` so break-glass use is
+distinguishable in audit. Authorization, the server-side metric outlet, and the
+durable SQL receipt projection are all bypassed; the Redis receipt + stderr
+projection are the record.
+
+```bash
+# List (break-glass)
+xflow dead-letter list \
+  --break-glass \
+  --redis-addr $REDIS_ADDR \
+  --execution <execID> \
+  --limit 50
+
+# Replay (break-glass)
+xflow dead-letter replay \
+  --break-glass \
   --redis-addr $REDIS_ADDR \
   --execution <execID> \
   --entry <entryID> \

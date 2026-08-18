@@ -1,10 +1,12 @@
 # Architecture — Current Implementation
 
 > Status: **implemented**. This describes the architecture as built today.
-> For target/future service-layer design (server clustering, Relay Gateway,
-> Raft HA), see [CORE-COMPONENTS.md](./CORE-COMPONENTS.md) and its
+> For target/future service-layer design (server clustering, Relay Gateway),
+> see [CORE-COMPONENTS.md](./CORE-COMPONENTS.md) and its
 > MASTER/GATEWAY/WORKER-COMPONENTS sub-docs, which are explicitly marked as
-> target design. For SDK deployment modes (local/cluster/remote) and the
+> target design. Leader election is already implemented as a Redis lease
+> (`backend/providers/distributed/leader.go`); there is no Raft anywhere in
+> this codebase. For SDK deployment modes (local/cluster/remote) and the
 > server/runner cluster's current-vs-planned status, see
 > [DEPLOYMENT-TOPOLOGIES.md](./DEPLOYMENT-TOPOLOGIES.md).
 
@@ -160,11 +162,11 @@ type SuspendingHandler interface {
 
 Engine Core checks suspend capability: `if h, ok := handler.(SuspendingHandler); ok` — no string hardcoding, no Capability index.
 
-`xflow.wait` degrades to a ~60-line builtin handler implementing `SuspendingHandler`. Any user node can also implement this interface (manual approval, sub-workflow callback, async-callback).
+`xflow.wait` degrades to a builtin handler implementing `SuspendingHandler`. Any user node can also implement this interface (manual approval, sub-workflow callback, async-callback).
 
 ## ErrorPolicy
 
-Four strategies: stop / errorOutput / mainOutput / continueOnError
+Four strategies: `stop` / `error_output` / `main_output` / `continue`
 
 Consolidated in a single `ApplyOnError` function; both Adapters consume the same outcome.
 

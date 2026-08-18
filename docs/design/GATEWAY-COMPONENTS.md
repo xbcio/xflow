@@ -2,6 +2,10 @@
 
 > **Status: 目标设计（非当前实现）。** Relay Gateway 作为独立进程尚未实现；当前 runner 必须直连 server，见 [DEPLOYMENT-TOPOLOGIES.md](./DEPLOYMENT-TOPOLOGIES.md) §5、§7。
 
+> **与既有实现的对齐约定（实现时必读）：**
+> - 本文档 §4 的核心数据结构与 §7 的 Relay 缓冲结构均为**目标状态**，其 Redis key 形态是示意；实现时必须与 `backend/providers/distributed/internal/rstate/keys.go` 的实际 key scheme（含 `xflow:ns:<namespace>:` 前缀与 hash tag）对齐，不得另起一套命名空间。
+> - 本文档使用的 `/gateway/*` 路径前缀仅用于**区分 Gateway 自身暴露的中继端点**。runner 与 server 之间已实现的 Runner Protocol 路径常量定义在 `service/protocol/`（`/v1/runners/register`、`/v1/runners/heartbeat`、`/v1/runners/poll`、`/v1/runners/result`、`/v1/runners/lease/renew`、`/v1/runners/activation/ack`、`/v1/runners/metrics`），是唯一权威来源。Gateway 落地时应优先**复用同一组 `/v1/runners/*` 路径**做透明中继，而不是让 runner 侧再实现一套 `/gateway/*` 客户端；`/gateway/*` 仅保留给 Gateway 独有、server 上不存在的端点（如 §5.2 的 server-facing 面）。
+
 > Relay Gateway 是 Runner Protocol 的可选中继层。默认路径是 runner 直接连接 server 暴露的 Runner Protocol；当 runner 无法直连 server、需要网络域延伸或本地连接聚合时，才部署 Relay Gateway。Gateway 不执行 handler，不直连 server 内部 Redis / DB / Asynq，也不成为 Execution / Task 的最终状态源。
 
 ## 目录

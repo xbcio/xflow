@@ -6,7 +6,9 @@
 - [核心概念](./core-concepts.md) - 详细的核心概念说明
 - [使用指南](./usage-guide.md) - 完整的使用教程和代码示例
 - [最佳实践](./best-practices.md) - 生产环境最佳实践和性能优化
-- **[xflow 集成方案](./xflow-integration.md) - 在 xflow 工作流引擎中集成 Asynq** ⭐
+
+> 本目录是 Asynq 上游库的学习笔记。xflow 中的实际集成位于
+> `backend/providers/distributed/internal/queue/asynq/`，以代码为准。
 
 ## 什么是 Asynq
 

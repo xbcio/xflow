@@ -97,9 +97,15 @@ Context 用于管理工作流的全局信息，包括：
 # 元信息
 spec: string              # DSL schema 版本（必填，如 "1.0"）
 id: string                # 工作流 ID（可选，UUID v4；UI 创建时必带，YAML 手写时可省略由系统生成）
+namespace: string         # 工作流命名空间（服务端权威注入，客户端不可跨命名空间自报）
 name: string              # 工作流名称（必填）
 version: string           # 工作流业务版本号（必填，语义化版本）
 description: string       # 描述（可选）
+
+# runner 选择器（顶层，可选；节点级 runner_selector 同结构，优先级高于顶层）
+runner_selector:
+  mode: string            # default | required；required 时 runner 必须满足 match_labels
+  match_labels: object    # 标签选择器，key/value 均为 string
 
 # 上下文（全局变量、配置）
 context:
@@ -158,15 +164,17 @@ node_templates:
 
 # 节点定义
 nodes:
-  - id: string            # 节点 ID（可选，UUID v4；UI 创建时必带，YAML 手写时可省略由系统生成）
-    name: string          # 节点名称
+  - id: string            # 节点 ID（可选，UUID v4；UI 创建时必带，YAML 手写时可省略由系统生成）    name: string          # 节点名称
     type: string          # 节点类型（xflow.http/xflow.grpc/xflow.if等）
-    kind: string          # 节点角色（可选，action|trigger；普通节点默认 action）
+    kind: string          # 节点角色（可选，action|trigger|supply；普通节点默认 action）
     version: int          # Handler 主版本（可选；review 中的 handler_version 即此字段）
     template: string      # 引用 node_templates 中的模板名（可选，与 type 互斥：template 提供 type）
     position: [x, y]      # UI 位置坐标（可选）
     disabled: bool        # 是否禁用（可选，见下方「禁用行为」）
     on_error: string      # 错误处理策略（可选，stop|error_output|main_output|continue，覆盖全局 settings.on_error）
+    runner_selector:      # 节点级 runner 选择器（可选；覆盖顶层 runner_selector）
+      mode: string        #   default | required
+      match_labels: object
     timeout: duration     # 单次执行超时（可选，三态：>0 = 该预算；0 = 继承引擎默认 engine.DefaultNodeTimeout；<0 = 显式无上限。仅约束单次尝试，不含重试累计；超时为终态，不重投，见下方「节点超时语义」）
     notes: string         # 节点备注（可选）
     inputs:               # 声明式输入端口（可选）
@@ -227,6 +235,30 @@ nodes:
 #       TaskLease.ExecutionDeadline。
 #   (3) 在有环图上，服务端路径退化为不应用 OnError 的 fatal commit（与 runner 上报路径不同）。
 
+# 节点组（可选，co-location 调度单元；详见 NODE-GROUP-COLOCATION.md）
+groups:
+  - name: string          # 组名（必填）
+    members: [string]     # 成员节点名列表（必填，所有节点须在 nodes 中声明）
+    runner_selector:      # 组级 runner 选择器（可选；成员节点不得再单独设 selector）
+      mode: string
+      match_labels: object
+    on_error: string      # 组级错误策略（可选，仅支持 stop|continue）
+    retry:                # 组级重试（整组重跑，可选）
+      enabled: bool
+      max_attempts: int
+      strategy: string
+      initial_interval: int
+      max_interval: int
+      multiplier: number
+    timeout: duration     # 组业务 deadline（可选）
+    mode: string          # "" (durable，默认) | "transient"
+
+# 依赖边（可选，supply 节点消费声明；详见 §6.3 Supply 节点）
+# 不与 connections 合并：dependency_edges 不携带数据，不参与 unit 层拓扑
+dependency_edges:
+  - node: string          # 消费方节点名
+    supply: string        # supply 节点名
+
 # 连接定义
 connections:
   source_node:
@@ -243,7 +275,7 @@ outputs:
 # 测试数据钉住（可选，调试用途）
 # 钉住的节点跳过实际执行，直接使用 mock 输出
 # 下游节点通过 $nodes['xxx'] / $input 正常访问钉住数据
-# 详见 §8「Pin Data」
+# 详见 §7「Pin Data」
 pin_data:
   node_name: object       # key = 节点名，value = mock 输出数据
 ```
@@ -588,8 +620,9 @@ outputs:
 >
 > 本章描述的语法、变量根与函数**均已实现并有测试覆盖**。历史缺口（模板语法零
 > 实现、多数节点不求值参数、`$nodes`/`$execution`/`$workflow` 三个根不存在、
-> trigger 激活参数不求值）已全部关闭，过程记录在
-> [EXPRESSION-LAYER-TODO.md](./EXPRESSION-LAYER-TODO.md)。
+> trigger 激活参数不求值）已全部关闭。实现位于 `exprx/`（模板与求值）、
+> `execution/params.go`（统一求值层）、`engine/graph/activation_params.go`
+> （trigger 激活参数）。
 >
 > **求值发生在两个地方**，因为一个 trigger 从来不是被调度的任务，而是一个入口
 > 索引，它的参数永远不会经过任务边界：
@@ -2171,7 +2204,7 @@ nodes:
 
 ## 7. Pin Data（测试数据钉住）
 
-### 8.1 概述
+### 7.1 概述
 
 Pin Data 允许在工作流级别为指定节点提供静态模拟输出数据。钉住的节点跳过实际执行（不入队 Asynq），直接使用 mock 数据作为节点输出，下游节点通过 `$nodes['xxx']` / `$input` 正常访问。
 
@@ -2180,7 +2213,7 @@ Pin Data 允许在工作流级别为指定节点提供静态模拟输出数据�
 - 前端开发时无需真实后端服务即可测试完整流程
 - 复现特定场景（如支付失败、库存不足），无需模拟真实外部状态
 
-### 8.2 DSL 语法
+### 7.2 DSL 语法
 
 在工作流顶层声明 `pin_data` 块，与 `nodes`、`connections` 同级：
 
@@ -2204,7 +2237,7 @@ settings:
 | `always` | 所有执行模式都生效（慎用，调试专用场景） |
 | `disabled` | 完全忽略 pin_data（等同于没写） |
 
-### 8.3 与 `disabled` 的区别
+### 7.3 与 `disabled` 的区别
 
 | 维度 | `disabled: true` | `pin_data` |
 |------|-----------------|------------|
@@ -2214,7 +2247,7 @@ settings:
 | 用途 | 临时移除节点 | 跳过慢节点，加速调试 |
 | 优先级 | — | `disabled: true` 的节点如果在 pin_data 中也有数据，`disabled` 优先（状态为 `skipped`，pin_data 被忽略） |
 
-### 8.4 运行时行为
+### 7.4 运行时行为
 
 ```
 Executor 调度节点前检查：
@@ -2234,7 +2267,7 @@ Executor 调度节点前检查：
 - 下游节点通过 `$nodes['xxx']`、`$input`、`$inputs.port` 正常访问 mock 数据
 - 执行日志中标记为 `pinned`，便于区分真实执行结果
 
-### 8.5 编译器校验规则
+### 7.5 编译器校验规则
 
 | 规则 | 级别 | 说明 |
 |------|------|------|
@@ -2242,7 +2275,7 @@ Executor 调度节点前检查：
 | pin_data 数据不满足节点 output_schema 的 required 字段 | **warning** | mock 数据不完整，下游可能拿到 nil |
 | production 工作流配置 pin_data_mode: always | **warning** | 生产环境使用 pin_data 存在风险 |
 
-### 8.6 示例
+### 7.6 示例
 
 ```yaml
 spec: "1.0"
@@ -2305,7 +2338,7 @@ pin_data:
 
 ## 8. 完整示例
 
-### 9.1 ETL 数据处理
+### 8.1 ETL 数据处理
 
 ```yaml
 spec: "1.0"
@@ -2401,7 +2434,7 @@ connections:
       - node: log_error
 ```
 
-### 9.2 异步任务处理
+### 8.2 异步任务处理
 
 ```yaml
 spec: "1.0"

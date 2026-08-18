@@ -6,7 +6,9 @@
 - [核心组件](./core-components.md) - 详细的核心组件说明
 - [工作流执行](./workflow-execution.md) - 工作流执行机制和生命周期
 - [节点系统](./nodes-system.md) - 节点类型、开发和扩展
-- [实现指南](./implementation-guide.md) - 基于 n8n 理念的实现建议
+
+> 本目录是 n8n 的外部学习笔记，用于设计对标，不描述 xflow 的实现。
+> xflow 自身的节点系统见 [DSL-SPECIFICATION.md](../../design/DSL-SPECIFICATION.md)。
 
 ## 什么是 n8n
 

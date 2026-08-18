@@ -17,7 +17,7 @@ One of: `feat` | `fix` | `refactor` | `test` | `docs` | `chore` | `style` | `ci`
 A package or module name, not a file name and not a topic. Use the top-level
 or sub-package name the change lives in: `control`, `runner`, `protocol`,
 `wasm`, `supply`, `trigger`, `script`, `node`, `graph`, `types`, `store`,
-`sdk`, `server`, `test`.
+`sdk`, `server`, `test`, `api`, `cli`.
 
 A change to repo-root or tooling files that belong to no package — `.gitignore`,
 `Makefile`, CI workflows — takes no scope at all: `chore: ...`, `ci: ...`.

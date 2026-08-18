@@ -585,11 +585,38 @@ group 成员、跑在内层还是外层引擎无关。
 `ErrGroupLeaseNotActive` 重新传播
 
 仅在 `BuildGroupLease` 报告 lease 存活时才可达，当前测试覆盖不到。先于本分支存在
-（`8570bf4`）。group 重试落地时再处理。
+（`8570bf4`）。**group 重试（Milestone B）落地时再处理。**
+
+当前代码位置：`service/control/group_control_loop.go:130-153`
+（`ErrGroupLeaseAlreadyActive` 分支；`recoverGroupLease` 失败时若返回
+`ErrGroupLeaseNotActive` 会走 line 152-153 requeue 而非 drop）。
+Milestone B 的占位符在 `engine/group_exec.go:59`（`Attempt: 1` 注释明确标注
+「attempt increment belongs to Milestone B」）。
 
 ### `buildVisibleSupplies` 自身不做授权检查
 
 它依赖「`ProjectGroupPackage` 只在父图 `Compile()` 成功后才可达」这一不变量，而
 `Compile()` 已跑过逐成员授权检查。C1 的修复为它加了第二个调用方
-（`ProjectNodeBodyPackage`），该不变量对新调用方同样成立——**但仍然没有强制手段**。
-将来若有调用方从未完全校验的图上做投影，会重新引入跨成员 supply 泄漏且无测试拦截。
+（`ProjectNodeBodyPackage`，`engine/graph/compile.go:378`），该不变量对新调用方同样
+成立——**但仍然没有强制手段**。将来若有调用方从未完全校验的图上做投影，会重新引入
+跨成员 supply 泄漏且无测试拦截。函数定义：`engine/graph/subgraph_package.go:318`。
+
+## 已关闭（保留索引）
+
+所有 P0/P1/P2 条目均已关闭，详细修复经过见上方「已修复」节。
+
+| 原编号 | 条目 | 关闭位置 |
+|---|---|---|
+| P0-1 | `cmd/runner/run.go` 未装配 `GroupRuntime` | `engine/group_exec.go`，`cmd/runner/run.go`（无条件装配） |
+| P0-1/P0-2 | trigger-group runner 侧本地执行不存在；e2e 伪造 exits | `test/integration/j_trigger_group_local_execution_e2e_test.go` |
+| P1-3 | `xflow.map` 不能作为 group 成员 | `execution/subgraph/map_in_group_test.go`，`engine/graph/map_member_body_test.go` |
+| P1-4 | 队头阻塞：批次与普通节点任务共用队列 | `backend/providers/local/memory_queue.go:44`（`batchCh`），`backend/providers/distributed/internal/queue/asynq/transport.go:35` |
+| P1-9 | 并发 `FlushOutbox` 重复投递 | `engine/outbox_lease.go`，`engine/outbox_lease_keeper_test.go` |
+| P2-5 | map 专属判断写死 `xflow.map`；`xflow.http` 带请求体读不回来 | `engine/graph/compile.go`（`declaresSubgraphBody`），`engine/graph/subgraph_body_criterion_test.go` |
+| P2-6 | 扩展判据嗅 payload；标记键 `_loop`/`_split` 未移除 | `engine/expansion_criterion_test.go`，`engine/expand.go`（`g.BodyAt` 判据） |
+| P2-7 | `TransformSpec` 无消费者；两侧空 expression 判定不一致 | `types/transform.go`（`ParseTransformSpec`），`types/transform_test.go` |
+| P2-8 | `ProjectSubgraphPackage` 名字有歧义 | `93277e7`（重命名为 `ProjectGroupPackage`） |
+| P2-9 | `dependency.go` 的 `_ = supplyIdx` | `engine/graph/dependency.go`（已改为丢弃并加注释） |
+| group/batch carrier 缺失 | 租约不带 W3C TraceCarrier | `service/control/lease_trace_carrier_test.go`，`service/control/core.go`（`startDispatchSpan`） |
+| trace 断链 | body/group 成员 trace 身份在子执行处断 | `backend/providers/local/local_subgraph_trace_test.go`，`engine/subgraph_lease_test.go` |
+| TS 声明滞后 | `experimental_expand?` 残留 | `web/packages/xflow-core/src/index.ts:44`（已删除） |

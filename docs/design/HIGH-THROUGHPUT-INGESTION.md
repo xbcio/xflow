@@ -93,15 +93,15 @@ server 启动按 [deployment-examples.md](../references/deployment-examples.md)�
 
 | 能力 | 位置 | 说明 |
 |---|---|---|
-| `ExecutionModeTransient` | `sdk/xflow/execution_mode.go:18` | 常量，禁用 signal/suspend/inspect |
-| `NewCluster` 接受 mode | `sdk/xflow/cluster.go:70-72` | transient 时传 `distributed.WithTransientMode(ttl, completionTTL)` |
-| `WithTransientTTL` | `sdk/xflow/execution_mode.go:57` | 活跃 runtime state TTL，默认 10min |
-| `WithTransientCompletionTTL` | `sdk/xflow/execution_mode.go:65` | 完成后结果 TTL，默认 30s |
-| transient 禁用 | `sdk/xflow/engine_control.go:68/80/101`、`engine.go:62` | signal/revoke/inspect/suspend 全部拒绝 |
-| `NewLocal` 拒绝 transient | `sdk/xflow/local.go:31` | transient 要求 cluster，返回 `ErrTransientRequiresCluster` |
-| backend transient | `backend/providers/distributed/backend.go:84/250/315/326` | transient 不启动 TimeoutMonitor，短 TTL 状态 |
+| `ExecutionModeTransient` | `sdk/xflow/execution_mode.go` (`ExecutionModeTransient`) | 常量，禁用 signal/suspend/inspect |
+| `NewCluster` 接受 mode | `sdk/xflow/cluster.go` (`NewCluster`) | transient 时传 `distributed.WithTransientMode(ttl, completionTTL)` |
+| `WithTransientTTL` | `sdk/xflow/execution_mode.go` (`WithTransientTTL`) | 活跃 runtime state TTL，默认 10min |
+| `WithTransientCompletionTTL` | `sdk/xflow/execution_mode.go` (`WithTransientCompletionTTL`) | 完成后结果 TTL，默认 30s |
+| transient 禁用 | `sdk/xflow/engine_control.go`、`engine.go` | signal/revoke/inspect/suspend 全部拒绝 |
+| `NewLocal` 拒绝 transient | `sdk/xflow/local.go` (`NewLocal`) | transient 要求 cluster，返回 `ErrTransientRequiresCluster` |
+| backend transient | `backend/providers/distributed/backend.go` | transient 不启动 TimeoutMonitor，短 TTL 状态 |
 | `trigger.Kafka()` | `node/trigger/kafka/kafka.go`（per-message）、`aggregate.go`（aggregate 运行时） | 两种运行时 |
-| trigger runtime 激活 | `sdk/xflow/engine.go:88`、`workflow_registry.go:81` | `AddWorkflow` 时 `ReconcileWorkflow` 激活 trigger |
+| trigger runtime 激活 | `sdk/xflow/engine.go`、`workflow_registry.go` (`AddWorkflow`/`ReconcileWorkflow`) | `AddWorkflow` 时 `ReconcileWorkflow` 激活 trigger |
 
 ### 4.3 配置示例
 

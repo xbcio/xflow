@@ -1,6 +1,6 @@
 # WASM 引擎池化与两阶段初始化设计（D5）
 
-> Status: **P1 + P2 + P3 已实现**（reactor 引擎 + 实例池 + 两阶段初始化落地于 `node/internal/code/script/wasm/{pool.go,host.go,reactor.go}`；磁盘 CompilationCache + startup warmup 落地于 `cache.go` 与 `cmd/runner/run.go`；换池协议由 supply 驱动，见 §6.4 与 [SUPPLY-NODE.md](./SUPPLY-NODE.md)，单测全绿含 `-race`）
+> Status: **P1 + P2 + P3 已实现**（reactor 引擎 + 实例池 + 两阶段初始化落地于 `node/internal/code/script/wasm/{pool.go,host.go,reactor.go}`；磁盘 CompilationCache + startup warmup 落地于 `cache.go` 与 `sdk/xflow/runner.go`（`Runner.Run`）；换池协议由 supply 驱动，见 §6.4 与 [SUPPLY-NODE.md](./SUPPLY-NODE.md)，单测全绿含 `-race`）
 > 关联：[NODE-GROUP-COLOCATION.md](./NODE-GROUP-COLOCATION.md)、[HIGH-THROUGHPUT-INGESTION.md](./HIGH-THROUGHPUT-INGESTION.md)、[SUPPLY-NODE.md](./SUPPLY-NODE.md)
 > 现状代码：`node/internal/code/script/wasm/{wasm.go,wazero.go,pool.go,host.go,reactor.go,cache.go,supply_consumer.go}`、`testdata/{reactor,reactorspin,reactormin}/`、`node/internal/code/script/{engine/warmup.go,warmup.go}`、`node/node.go`（`WarmupScriptEngines`/`PrewarmWasmModule`）、`cmd/runner/run.go`
 
@@ -23,6 +23,7 @@
 | 模块编译（冷） | 2.23 s | 一次性，可磁盘缓存 |
 
 > 数字为一次性环境基线，**不能外推为容量承诺**（遵循 HIGH-THROUGHPUT-INGESTION.md §1 口径）。
+> **注**：本表数字来自 20 条规则测试环境；§7 P1 验收的 18.5× 与 205 µs/op 来自 3 条规则的较轻 guest。两组数字测试条件（规则数、guest 复杂度）不同，不可直接对比。
 
 ## 1. 已实测确立的约束（决定架构的硬事实）
 
@@ -201,14 +202,14 @@ type pooledInstance struct {
 
 ### 5.2 两阶段初始化与配置来源
 
-**关键设计：配置加载与 wasm 引擎解耦。** 引擎只认「一段 config bytes」，不关心来自哪。三种喂法：
+**关键设计：配置加载与 wasm 引擎解耦。** 引擎只认「一段 config bytes」，不关心来自哪。当前生产支持的两种喂法：
 
 | 来源 | 适用 | 热更新 |
 |---|---|---|
-| 静态内嵌（节点参数 `config`） | 规则随工作流发布 | 重新注册工作流 |
-| HTTP 拉取（前置 `xflow.http` 节点或引擎内 loader） | 规则在外部服务 | TTL 轮询 → 重放 configure |
+| 静态内嵌（节点参数 `$config`）— **Deprecated** | 嵌入/SDK 调用者与既有测试；生产不可达 | 重新注册工作流 |
+| supply 通道（`$supplies` + `dependency_edges` + `RegisterSupplyConsumer`） | 生产路径：规则经 `SupplyResource` 推送到 runner | supply 内容变化 → `Registry.Apply` → `OnSupplyChanged` → 造新池原子换入（B 案，§6.3） |
 
-对流量采集场景：走 HTTP 拉 SAS 的 `clean-rule/list` + `tagrule/list`，引擎持有 TTL 缓存，到期重拉；version 变化才触发一次「造新池、原子换入」（代次 +1，B 案）。这解决了之前「规则集跨消息放哪」的问题——**放在常驻实例的 guest 内存里**。配置会变，其变更语义与实例生命周期深度耦合，单列为 §6。
+`$config` 路径与 supply 通道互斥——`configFromSource` 为真时 `$config` 被 `stripConfig` 剥掉（`reactor.go` 注释明标 Deprecated，生产不可达）。配置会变，其变更语义与实例生命周期深度耦合，单列为 §6。
 
 ### 5.3 超时隔离（约束 #3/#4）
 
@@ -225,11 +226,13 @@ type pooledInstance struct {
 
 ### 5.5 预热钩子（复用现有 `engine.Warmup`）
 
-**发现：`engine.Warmup` 已定义但无任何生产调用点**（`cmd/runner`、`cmd/server`、`service/` 均未调用；qjs 的 330ms 冷启动因此落在首个请求上）。本方案：
+**当时背景：`engine.Warmup` 已定义但无任何生产调用点**（`cmd/runner`、`cmd/server`、`service/` 均未调用；qjs 的 330ms 冷启动因此落在首个请求上）。本方案：
 
 1. wasm 引擎 `init()` 里 `engine.RegisterWarmer(warmupPool)`。
 2. `warmupPool` 编译模块 + 预建 poolSize 个实例 + 初次 configure。
-3. **在 `cmd/runner` 启动路径补上 `engine.Warmup(ctx)` 调用**（顺带修掉 qjs 的既有问题）。
+3. **在 runner 启动路径补上 `engine.Warmup(ctx)` 调用**（顺带修掉 qjs 的既有问题）。
+
+**实际落地位置**：`xnode.WarmupScriptEngines(ctx)` 在 `sdk/xflow/runner.go` 的 `Runner.Run()` 内（约第 336 行）调用；`cmd/runner/run.go` 通过 `runner.Run(ctx)` 间接触发，不直接持有 Warmup 调用。
 
 ### 5.6 状态污染防护（约束 #7 的另一面）
 
@@ -396,6 +399,7 @@ supply 侧（`node/supply/registry.go`/`service/runner/supply_gate.go` 触发，
 > - command model 基线（同机、echo guest）：**3.8 ms/op、11 MB/op、2320 allocs**。→ **18.5× 提速、每调用分配从 11 MB 降到 7.7 KB**。
 > - **关键实现修正（原设计未预见）**：`Execute` 的 `code` 是多 MB 模块的 base64，**每次调用 base64-decode + sha256 花 ~5 ms**，会淹没池化收益。P1 在 host 侧加了一层 **base64-code-string 为 key 的 LRU**（`host.go` `engineForCode`）跳过解码/哈希，命中走 Go map 的 AES-NI 字符串哈希（µs 级）。未加此层时 reactor 为 952 µs/op、7 MB/op；加了之后降到 205 µs/op、7.7 KB/op。sha256 dedup 仍是 miss 路径的正确性兜底。
 > - 数字为一次性环境基线，不作容量承诺（遵循 HIGH-THROUGHPUT-INGESTION.md §1 口径）。
+> - **注**：本节数字（3 条规则）与 §0.1 表格（20 条规则，12508 msg/s 池化）来自不同测试条件（规则数不同、guest 复杂度不同），不可直接对比。
 
 > **P2 实测（同机）**：
 > - **冷启动**：首次部署（空 cache 目录）建满整池 **1.37 s** → 模拟进程重启（暖 cache 目录）**62 ms**，达成 <100 ms 验收。单看 `CompileModule` 是 1.46 s → **41.5 ms**。测量走的是 runner 真实调用的 `warmup` 路径，**含实例化 + configure 建满整池**，不是孤立的编译调用。
@@ -421,7 +425,7 @@ per-record env 构造是 `engine.BuildRecordGlobals` 一处共享实现，`Execu
 
 批内单条失败的处理：guest 分类的单条求值失败（`errDecode`/`errUnconfigured`/`errConfig`/`errOutput`）**跳过该条**，整批继续；实例 doomed（alloc/write/eval trap、`errEval`）或 host 侧任何错误**整批失败**，offset 不提交、Kafka 重投 —— 重投是干净的，因为下游节点在 wasm 之后，从未被调用。判定集中在纯函数 `isBatchSkippable`：非 `*reactorEvalError` 即整批致命（`evalFromPool` 消费掉了 pool 层的 `doomed` 布尔值，所以只能靠错误类型反推）。
 
-**正确的抽象是 body 子图 + per-item 下游 fan-out，现在不存在**（`engine/expand.go` 的 `ExecuteBatch` 仍是 pass-through 桩）。host 循环是它落地之前的替代，不是终态。
+**body 子图 + per-item 下游 fan-out 已实现**（`engine/expand.go` 的 `ExecuteBatch` 调用 `e.batchBodyExecutor.ExecuteBatchBody`，真实实现在 `execution/subgraph/map_body.go`，含并发/规模/顺序测试）。host 循环是当前 wasm 批处理的实际路径，body 子图是 map/expand 节点使用的另一套机制；两者在设计上独立，host 循环不依赖 body 子图落地。
 
 ## 9. 与流量采集迁移的关系
 

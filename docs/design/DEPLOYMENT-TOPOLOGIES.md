@@ -115,7 +115,7 @@ reconciler。三处都不报错，只是静默降级。新增 `apiserver.Config`
 | Backend | RedisAddr 为空时使用 `backend/providers/local`；非空时使用 `backend/providers/distributed` |
 | 执行者 | 不执行 handler；通过 Runner Protocol 分配给 runner |
 | API | `Handler()` / `Start()` / `Shutdown()` / `Run()` / `RegisterGRPC()` / `IsLeader()` / `Reconciler()` |
-| 默认姿态 | supply 传输层加密**无条件开启**（不需要 KEK，故不设开关）；management 面、runner metrics 代理默认关 |
+| 默认姿态 | supply 传输层加密由 `NewServer` **无条件开启**（不需要 KEK，SDK 层不暴露开关；直接构造 `control.ControlPlane` / `apiserver.Config` 的路径可通过 `EnableSupplyEncryption` 覆盖）；management 面、runner metrics 代理默认关 |
 | 后台 worker | audit reconcile worker 由 `Start` 与 `Run` 两条路径各自启动（`apiserver.Run` 走的是 apiserver 自己的 `Start`，不经 `Server.Start`） |
 | 典型场景 | 宿主应用希望内嵌控制面、复用自身 HTTP/gRPC 生命周期，但仍采用 server/runner 执行拆分 |
 
@@ -173,7 +173,7 @@ SAS 是第一个宿主：它此前手工装配，配置里漏了 `SupportsEncryp
 
 | 角色 | 职责 | 不做什么 |
 |---|---|---|
-| **server**（Control Plane） | 接受工作流提交（HTTP/gRPC）、把 `WorkflowDef` 编译成 Graph IR、把节点任务派发到 Asynq、跟踪执行生命周期、提供查询 API、投递信号、超时清扫（TimeoutSweep） | **不执行节点 handler**，不暴露 Redis 给 runner |
+| **server**（Control Plane） | 接受工作流提交（HTTP/gRPC）、把 `WorkflowDef` 编译成 Graph IR、把节点任务派发到 Asynq、跟踪执行生命周期、提供查询 API、投递信号、租约清扫（`LeaseSweeper`）与超时监控（`timeout.Monitor`） | **不执行节点 handler**，不暴露 Redis 给 runner |
 | **Task Dispatcher**（server 内部组件） | 作为 Asynq worker 消费 server 内部任务，持久化为 runner assignment；由 Core 在 runner claim 后签发/恢复 lease，并管理结果回收 | 不执行 handler，不把 Redis / Asynq 细节泄漏给 runner |
 | **Runner Protocol**（控制面-执行面协议） | 定义 runner 注册、心跳、容量、lease、result、cancel 的网络协议 | 不保存最终状态，不决定 DAG 调度 |
 | **runner**（执行面） | 连接 server 的 Runner Protocol，通过 registry 解析 handler、执行、回报结果 | 不接受外部 API 请求，不连接 Redis / Asynq |

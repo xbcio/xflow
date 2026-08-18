@@ -13,7 +13,7 @@ Redis/Asynq-backed execution.
 - **Monitoring**: Prometheus + Grafana
 - **Tracing**: OpenTelemetry
 - **API**: gRPC + HTTP
-- **Logging**: Structured logging (logrus/zap)
+- **Logging**: Structured logging (zap)
 
 ## SDK API
 
@@ -91,15 +91,20 @@ $now()                         # Built-in functions
 | HTTP Request | `xflow.http` | REST API calls |
 | gRPC Call | `xflow.grpc` | Microservice communication |
 | Function | `xflow.function` | Go function execution |
+| Script | `xflow.script` | WASM/JS script execution |
 | Database | `xflow.database` | CRUD operations |
 | IF | `xflow.if` | Boolean branching |
 | Switch | `xflow.switch` | Conditional branching |
 | Wait | `xflow.wait` | External signals and timers |
 | Approval | `xflow.approval` | Human approval gates |
 | Merge | `xflow.merge` | Combine multiple branches |
+| Notification | `xflow.notification` | Send notifications |
+| Supply (static) | `xflow.supply.static` | Inject static supply values |
+| Supply (external) | `xflow.supply.external` | Fetch supply values from external source |
+| Transform | `xflow.transform.*` | Data transforms: `aggregate`, `filter`, `limit`, `pick`, `remove_duplicates`, `rename`, `set`, `sort` |
+| Trigger | `xflow.trigger.*` | Entry triggers: `timer`, `cron`, `webhook`, `kafka`, `redis_hub` |
 
-`xflow.map` and `xflow.split` are currently experimental and should not be
-used for production vulnerability approval flows yet.
+For the complete node type reference including parameters and connection ports, see [docs/design/DSL-SPECIFICATION.md](docs/design/DSL-SPECIFICATION.md).
 
 ## Design Principles
 

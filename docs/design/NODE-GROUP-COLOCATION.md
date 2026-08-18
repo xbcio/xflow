@@ -1,7 +1,6 @@
 # Node Group Co-location
 
 > Status: Implemented (Milestones A–J + Phase 5 remote-runner trigger hosting)
-> Full spec: `.claude/specs/2026-07-27-node-group-colocation-design.md`
 
 ## 1. Overview
 
@@ -204,7 +203,7 @@ Group execution requires the `group.exec.v1` feature capability. Runners that do
 | Trigger admission via first-writer-wins | No lease lifecycle for trigger-groups; Kafka offset is the durability checkpoint |
 | Deterministic execution ID from admission key | All Redis keys share hash slot for single-script atomicity |
 | Backpressure via offset non-commit | Natural flow control; no distributed protocol needed |
-| Signal journal replay on resume | Deterministic re-execution from entry input; no partial member state persisted |
+| Signal journal replay on resume — **已移除**（见 §6：组级持久化挂起已从代码库删除；`cmd/runner/run.go` 用 `runnersvc.WithSuspendDisabled()`，`group_exec_trigger_runtime.go` 硬设 `SuspendDisabled: true`） | Deterministic re-execution from entry input; no partial member state persisted |
 | Activation directives piggybacked on heartbeat | No extra RPC; runner learns assignments on next heartbeat response |
 
 ## 12. Known Limitations & Future Work

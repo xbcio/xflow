@@ -97,14 +97,15 @@ pattern，导致 `/v1/executions/` 与 `/v1/management/dead-letters/` 的路径�
 
 **每个导出的路径常量必须能在 mux 路由表中找到对应注册。** 配守卫测试。
 
-这条规则针对已发生的事故：`service/protocol/activation.go` 声明了
+这条规则针对已发生的事故：`service/protocol/activation.go` 曾声明
 `ActivatePath = "/v1/runners/activate"`、`DeactivatePath`、`ActivationListPath =
-"/v1/activations"` 三个常量，三者**零注册、零 handler、零调用**。真实的激活机制
+"/v1/activations"` 三个常量，三者**零注册、零 handler、零调用**，现已删除（`activation.go:15`
+留有墓碑注释）。真实的激活机制
 是 heartbeat 响应携带 `Activations` 指令，runner 收到后本地调用
-`TriggerActivationHandler.Activate/Deactivate`，根本不经过 HTTP。照着这三个常量
-去调的人得到 404，且会误以为存在一套 HTTP 激活协议。
+`TriggerActivationHandler.Activate/Deactivate`，根本不经过 HTTP。守卫测试
+（`TestDeadConstantsGuard`）防止同类死常量重现。
 
-同类问题也存在于 Op 常量（§6.1）。
+同类问题也曾存在于 Op 常量（§6.1），已随 §9.5 一并关闭。
 
 ---
 
@@ -448,11 +449,12 @@ entry-seed 的 409 响应有**两种不同 body**，客户端据此决定是否�
 
 ### 8.3 纪律要求
 
-- **零死常量**：删除 `ActivatePath`、`DeactivatePath`、`ActivationListPath`
-- **零半接线**：`/v1/runners/lease/renew` 服务端 handler 齐全，但生产 runner 客户
-  端从未接入——`protocol.Client` 没有 `RenewLease` 方法，`service/runner/
-  group_renew.go` 的续约循环只被测试驱动，`runner.go` 主循环未接。**要么补齐调用
-  链，要么连同 handler 一并删除**，不允许停在半成品状态
+- **零死常量**：`ActivatePath`、`DeactivatePath`、`ActivationListPath` 已删除
+  （`service/protocol/activation.go:15` 留有墓碑注释；守卫测试已覆盖）
+- **零半接线**：`/v1/runners/lease/renew` 生产调用链已接线——`protocol.Client.RenewLease`
+  （`service/protocol/client.go:126`）、`leaseRenewClient` 接口与 `protocolLeaseRenewer`
+  适配器（`service/runner/lease_renew.go`），`runner.go:415` 运行时类型断言后在
+  `runner.go:419` 启动 `renewLeaseLoop` goroutine
 - 常量表与守卫测试要求同 §2
 
 ---
@@ -521,11 +523,13 @@ runtime hash 已通过 hash-local 镜像（`runtimeSelectorHashPayload`）与 wi
 
 ### 9.5 死代码
 
-| 对象 | 状态 |
+以下三项已全部关闭：
+
+| 对象 | 结论 |
 | --- | --- |
-| `protocol.ActivatePath` / `DeactivatePath` / `ActivationListPath` | 零注册零调用 |
-| `OpWorkflowDefinition{Create,Read,Validate,Publish}`、`OpWorkflowExecutionInvoke`、`OpManagementWrite` | 无路由消费（`OpWorkflowRead` 与 `OpWorkflowDefinitionUpdate` 已被 GET/PUT `/v1/workflows/{id}` 消费） |
-| `/v1/runners/lease/renew` 的生产调用链 | 半接线，见 §8.3 |
+| `protocol.ActivatePath` / `DeactivatePath` / `ActivationListPath` | 已删除（`activation.go:15` 留墓碑注释，守卫测试覆盖） |
+| `OpWorkflowDefinition{Create,Read,Validate,Publish}`、`OpWorkflowExecutionInvoke`、`OpManagementWrite` | 已删除，零残留（`authz.go` 只保留 `OpWorkflowDefinitionUpdate`，由 PUT `/v1/workflows/{id}` 消费） |
+| `/v1/runners/lease/renew` 的生产调用链 | 已接线（`runner.go:415-420`，见 §8.3） |
 
 ### 9.6 列表端点未接线（分页参数层已落地，数据源缺失）
 

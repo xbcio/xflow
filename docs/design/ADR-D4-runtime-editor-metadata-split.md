@@ -2,9 +2,23 @@
 
 | Item | Value |
 |------|-------|
-| Status | Accepted / Implemented (F0-A2) |
+| Status | Accepted / Partially Implemented — Go side complete; TypeScript conversion layer and server storage not yet implemented |
 | Owner | xflow team |
-| Related | `types/workflow.go`, `types/workflow_management.go`, `sdk/xflow/workflow_identity.go`, `web/packages/workflow-core/src/metadata.ts`, `web/packages/workflow-core/src/types.ts` |
+| Related | `types/workflow.go`, `sdk/xflow/workflow_identity.go` |
+
+## Implementation Status
+
+**Go side (implemented):**
+- `runtimeHash` / `runtimeHashPayload` / `runtimeNodeHashPayload` / `runtimeSelectorHashPayload` / `runtimeHashGroupPayload` — `sdk/xflow/workflow_identity.go:61-104`
+- Editor fields (`NodeDef.Position`, `NodeDef.UI`, `NodeDef.Notes`, `NodeDef.ID`) excluded from runtime hash per §2.1–§2.2
+- `Groups` and `DependencyEdges` included in runtime hash via `canonicalizeGroups`/`canonicalizeDependencyEdges` — `sdk/xflow/workflow_identity.go:213-248`
+- Separate audit fingerprint (`legacyDefinitionHash`) — `sdk/xflow/workflow_identity.go:255`
+- Hash-local `runtimeSelectorHashPayload` mirror with frozen pre-§9.4 tags to decouple wire rename from hash — `sdk/xflow/workflow_identity.go:183`
+
+**Not yet implemented:**
+- `WorkflowEditorMetadata` Go struct (§2.3) — zero hits in codebase
+- TypeScript `splitEditorMetadata` / `mergeEditorMetadata` (§2.5) — not in `web/packages/xflow-core/`; `web/packages/workflow-core/` referenced in the Related table does not exist (package is `xflow-core`)
+- Go server storage types `WorkflowDraft` / `WorkflowDefinitionVersion` (§4) — zero hits in codebase
 
 ## 1. Context
 
@@ -76,7 +90,7 @@ The TypeScript implementation provides two inverses:
 The canonical runtime hash is computed over the runtime-semantic subset only:
 
 - Prefix: `runtime-sha256:v1:`.
-- Excludes: `WorkflowDef.ID`, `WorkflowDef.TenantID`, `WorkflowDef.Description`, `NodeDef.ID`, `NodeDef.Position`, `NodeDef.UI`, `NodeDef.Notes`.
+- Excludes: `WorkflowDef.ID`, `WorkflowDef.Description`, `NodeDef.ID`, `NodeDef.Position`, `NodeDef.UI`, `NodeDef.Notes`.
 - Includes: everything else, including `WorkflowDef.PinData` and the runtime subset of each node.
 
 A separate audit fingerprint (`sha256:audit:v1:`) is computed over the full `WorkflowDef` JSON (including editor metadata) for export/audit traceability. It must NOT be used for conflict detection.
@@ -85,5 +99,5 @@ A separate audit fingerprint (`sha256:audit:v1:`) is computed over the full `Wor
 
 - Moving or restyling a node no longer changes the runtime hash or triggers a version conflict.
 - Re-importing a workflow with newly generated `NodeDef.ID` values keeps the same runtime identity.
-- The server stores `WorkflowDraft`/`WorkflowDefinitionVersion` as `{ definition, editorMetadata }`, so editor state survives server-side round-trips without polluting the runtime contract.
+- The server stores `WorkflowDraft`/`WorkflowDefinitionVersion` as `{ definition, editorMetadata }`, so editor state survives server-side round-trips without polluting the runtime contract. **（planned — not yet implemented）**
 - Callers must not rely on `WorkflowEditorMetadata.pinData` as authoritative; `WorkflowDef.pin_data` is always the source of truth.

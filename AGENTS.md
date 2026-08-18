@@ -22,20 +22,28 @@ golangci-lint run        # Lint
 - **store/** — Public persistence interfaces + domain models
   - `memstore/` — in-memory implementation (test / local)
   - `sqlstore/` — dialect-agnostic GORM implementation; `sqlstore/mysqlstore/` — MySQL dialect entry (`mysqlstore.New`)
+  - `objectstore/` — generic S3-shaped object storage contract (artifact/script blob store)
+  - `storetest/` — cross-backend behavioural contract tests shared by `memstore` and `sqlstore`
 - **backend/** — Reusable backend provider abstractions
   - `providers/local/` — In-memory StateStore + goroutine pool TaskQueue
   - `providers/distributed/` — Redis StateStore + Asynq TaskQueue
 - **namespace/** — Server-issued permission namespace type and context propagation primitives
-- **execution/** — Reusable embedded task execution boundary: Dispatcher, Runner, Registry
+- **execution/** — Reusable embedded task execution boundary: Dispatcher, Runner, Registry; `subgraph/` handles nested graph execution
+- **exprx/** — Expression evaluation helpers shared by builtin nodes (`xflow.if`, `xflow.switch`, `xflow.map`, `xflow.function`, `xflow.script`, etc.)
+- **observability/** — Structured logging, Prometheus metrics, and OTLP tracing adapters shared across engine, dispatcher, and runner (`logger/`, `metrics/`, `tracing/`)
 - **sdk/**
   - `xflow/` — `package xflow`: `NewLocal` / `NewCluster` factories, `NewServer` embedded control-plane facade, WorkflowBuilder, and production control APIs (`AddWorkflow`, `Invoke`, `Wait`, `Signal`, `RevokeSignal`, `Cancel`, `Inspect`)
   - `examples/` — runnable `.go` usage examples
 - **service/** — Server/runner process-level implementation boundary (cluster topology)
+  - `apiserver/` — HTTP API server (the `/v1` face served to external callers; `sdk/xflow.NewServer` assembles it)
   - `runner/` — cluster task runner process (holds `ProtocolClient` + embedded `execution.Runner`)
   - `control/` — control plane: controlplane, dispatcher, auth, core connect
+  - `crypto/` — cryptography support: `masterkey/` (key management) and `supplyenc/` (supply value encryption)
   - `protocol/` — wire protocol + `protocol/runnerpb/` generated gRPC + `HTTPEntrySeedRuntime` (the entry-seed admission client for the DTOs in `entry_seed.go`)
+- **api/openapi/** — OpenAPI specification for the `/v1` HTTP surface (`xflow-v1.yaml`; validated by `make validate-openapi`)
 - **cmd/server/** — Management server (Master node) entrypoint
 - **cmd/runner/** — Task runner (Execution node) entrypoint
+- **cmd/xflow/** — CLI binary entry point (dead-letter inspection and other operator commands)
 - **db/** — SQL schema
 - **docs/** — `design/` specs, `dsl-samples/` (`.yaml` DSL samples), `references/`
 
@@ -90,7 +98,7 @@ Read before implementing core features:
 <!-- antd-cli setup start -->
 ## Ant Design CLI Skill
 
-Use the shared Ant Design skill at `.agents/skills/antd/SKILL.md` before working on Ant Design code in this repository.
+Use the shared Ant Design skill at `.claude/skills/antd/SKILL.md` before working on Ant Design code in this repository.
 
 The skill teaches agents when and how to call `@ant-design/cli` commands such as `antd info`, `antd doc`, `antd demo`, `antd token`, `antd semantic`, and `antd changelog`.
 

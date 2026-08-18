@@ -13,6 +13,69 @@ go test ./engine/... -race -count=1
 go test ./backend/... ./sdk/... -race -count=1
 ```
 
+## Integration Tests
+
+Integration tests live in `test/integration/` and are gated behind the `integration` build tag. They require a running Redis, MySQL, and Kafka instance.
+
+### Test environment (podman)
+
+```bash
+make env-up       # Start Redis, MySQL, Kafka containers
+make env-ready    # Wait until Redis and MySQL are healthy
+make env-migrate  # Apply the SQL schema to the test MySQL instance
+make env-down     # Stop and remove containers
+```
+
+### Redis port — critical
+
+The podman environment maps Redis to **host port 6380** (not 6379). This is set in `test/env/.env`:
+
+```
+REDIS_PORT=6380
+```
+
+Integration tests read `XFLOW_TEST_REDIS_ADDR` to locate Redis. If this variable is not set, the tests will silently skip rather than fail — a real footgun if you are debugging a CI failure or verifying a fix locally.
+
+**Always set this before running integration tests:**
+
+```bash
+export XFLOW_TEST_REDIS_ADDR=127.0.0.1:6380
+```
+
+### Running integration tests
+
+```bash
+# Silently skips if Redis / MySQL / Kafka are unavailable (safe for local dev
+# without the containers running)
+make test-integration
+
+# Fails loudly if any required dependency is missing — use in CI so a skipped
+# gate cannot masquerade as a pass
+make test-integration-required
+```
+
+`test-integration-required` sets `XFLOW_REQUIRE_REDIS_INTEGRATION=1`, `XFLOW_REQUIRE_MYSQL_INTEGRATION=1`, and `XFLOW_REQUIRE_KAFKA_INTEGRATION=1`. With those flags set, any unavailable dependency causes the test binary to exit non-zero immediately rather than skipping.
+
+### G0 evidence gate
+
+```bash
+make test-g0-evidence-required
+```
+
+Builds a fixed test binary, runs the A0/A3 required manifest (real Redis + MySQL; Kafka not required), records raw evidence fragments, runs the independent verifier, and publishes the artifact. Use this for the P0-G0 gate — not for everyday development.
+
+### Other test suites
+
+| Target | Directory | Notes |
+|---|---|---|
+| `make test-perf` | `test/perf/` | Benchmarks, needs `make env-up` (Redis + Kafka) |
+| `make test-soak` | `test/soak/` | HA soak smoke, runs on in-process miniredis; no real Redis required |
+| `make test-concurrency` | `backend/providers/...` | Concurrency stress, gated by `concurrency` build tag |
+
+`test/stress/` and `test/security/` contain additional scenario files but do not have dedicated top-level Makefile targets; run them directly with `go test`.
+
+
+
 ## Engine Core Unit Tests (zero IO deps)
 
 Uses fake StateStore + fake TaskQueue:

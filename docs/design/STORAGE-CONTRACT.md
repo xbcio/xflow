@@ -3,8 +3,13 @@
 > Status: **implemented**.
 
 This contract defines the durable scheduling boundary for Redis-backed
-executions. It also resolves the dual-write asymmetry described in
-[`.claude/specs/dual-write-contract.md`](../../.claude/specs/dual-write-contract.md).
+executions. It resolves the dual-write asymmetry by designating Redis as
+the sole scheduling source of record: every dual-write site either uses the
+`auditWrite` best-effort wrapper (routing `UpdateExecutionStatus`, `UpsertNode`,
+`DeliverSignal`, `RevokeSignal` through `distributed.Backend.auditWrite`) or
+retains the explicit `cleanupCreatedExecution` rollback for the `CreateExecution`
+critical path. See `backend/providers/distributed/internal/rstate/state.go` for
+the full dual-write site inventory.
 
 ## Authority and projections
 
@@ -129,7 +134,7 @@ boundary-exit data never enter it: upstream output routinely contains
 credentials from HTTP responses.
 
 The same reason is also readable online, independently of this projection:
-`exec:<id>:error` is loaded back by `GetExecution` into
+`xflow:ns:<namespace>:exec:{<id>}:error` is loaded back by `GetExecution` into
 `engine.ExecutionSnapshot.Error`, surfaced by `Inspect` as
 `ExecutionDetail.Error`, and reaches callers as `types.Result.Error`. The SQL
 row is the audit trail, not the only readback. Both backends derive the value
@@ -150,7 +155,10 @@ interfaces and can be adapted to Prometheus outside `engine/`. Engine-owned
 spans may use the narrow tracing facade, but concrete metrics, logging, and
 exporter setup must stay outside `engine/`.
 
-A `xflow-server audit reconcile` CLI that produces a Redis-versus-sqlstore
-diff remains **planned**. Until it exists, audit failure counters and observers
-are the operational signal that a projection needs investigation; they do not
-alter Redis authority.
+Two reconciliation paths already exist: the in-process
+`control.AuditReconcileWorker` (leader-gated, reconciles admission/outcome
+phases) and the one-shot `xflow dead-letter reconcile` command. What remains
+**planned** is a standalone Redis-versus-sqlstore *execution state* diff tool.
+Until it exists, audit failure counters and observers are the operational
+signal that a projection needs investigation; they do not alter Redis
+authority.

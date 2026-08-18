@@ -18,7 +18,7 @@
 ## 1. What `NodeKindSupply` is, and is not
 
 ```go
-// types/workflow.go:104-113
+// types/workflow.go — NodeKindSupply constant block
 const (
 	NodeKindAction  NodeKind = "action"
 	NodeKindTrigger NodeKind = "trigger"
@@ -37,16 +37,16 @@ wasm reactor, but the mechanism is content-agnostic. There are exactly two
 supply node types today, and both are **declaration-only**: neither has an
 `Execute` method nor a registered handler.
 
-- `xflow.supply.external` (`node/internal/supply/external.go:48`) — content
+- `xflow.supply.external` (`node/internal/supply/external.go`, `External` 函数) — content
   lives in a `SupplyResource` outside the workflow definition, written by an
   HTTP `PUT` to `/v1/supplies/{name}`.
-- `xflow.supply.static` (`node/internal/supply/static.go:29`) — content is
+- `xflow.supply.static` (`node/internal/supply/static.go`, `Static` 函数) — content is
   literal bytes carried in the node's parameters, part of the workflow
   definition itself.
 
 Public constructors: `node.SupplyExternal(resource string)` and
-`node.SupplyStatic(content []byte)` (`node/node.go:118-132`), paired with
-`WorkflowBuilder.DependsOn(consumer, supply *NodeRef)` (`sdk/xflow/builder.go:220`)
+`node.SupplyStatic(content []byte)` (`node/node.go`, `SupplyExternal`/`SupplyStatic`), paired with
+`WorkflowBuilder.DependsOn(consumer, supply *NodeRef)` (`sdk/xflow/builder.go`, `DependsOn`)
 to declare which node reads which supply.
 
 **What it is not:**
@@ -61,7 +61,7 @@ to declare which node reads which supply.
   through:
 
   ```go
-  // sdk/xflow/workflow_registry.go:198-203
+  // sdk/xflow/workflow_registry.go — NodeKindSupply case
   case types.NodeKindSupply:
       // A supply node's handler lives in the supply registry, not the
       // action registry. Falling through to default would look it up as an
@@ -75,26 +75,25 @@ branch that could be bypassed.
 
 ## 2. The two-layer graph — the single highest-risk invariant in this design
 
-The compiled `Graph` (`engine/graph/graph.go:12-53`) has two layers:
+The compiled `Graph` (`engine/graph/graph.go`, `Graph` struct) has two layers:
 
 - **Node layer**: `nodes []NodeMeta`, `index map[string]int`. Every node,
   including supply nodes, lives here. Supply nodes additionally get an entry
   in `supplyIndexes map[string]int` and (if referenced) `supplyRefs map[int][]string`
-  (`graph.go:47-51`, both explicitly commented "Supply nodes live in the node
+  (`graph.go`, fields `supplyIndexes`/`supplyRefs`, both explicitly commented "Supply nodes live in the node
   layer only — never in g.units").
 - **Unit layer**: `units []UnitMeta`, `nodeUnit []int`. This is the durable
   scheduling topology — the thing whose size drives execution completion.
 
 ```go
-// engine/graph/graph.go:148
+// engine/graph/graph.go — UnitCount
 func (g *Graph) UnitCount() int { return len(g.units) }
 ```
 
 `UnitCount()` seeds the completion counter on every execution — in-process
-(`backend/providers/local/memory_state.go:113-123`,
-`s.remaining[e.ID] = e.Graph.UnitCount()`) and Redis-backed
-(`backend/providers/distributed/internal/rstate/state_execution.go:122-130`,
-same seed). Every unit that finishes decrements it (`atomic_state.go:104` and
+(`backend/providers/local/memory_state.go`, `s.remaining[e.ID] = e.Graph.UnitCount()`) and Redis-backed
+(`backend/providers/distributed/internal/rstate/state_execution.go`,
+same seed). Every unit that finishes decrements it (`engine/atomic_state.go` and
 the equivalent Lua `DECR` scripts); the execution completes when it reaches
 zero.
 
@@ -108,7 +107,7 @@ exactly the failure mode the unit-layer exclusion exists to prevent.
 The exclusion itself:
 
 ```go
-// engine/graph/unit.go:88-96 (buildUnits, Pass 1)
+// engine/graph/unit.go — buildUnits, Pass 1
 // A supply node maintains long-lived shared data and never advances an
 // execution. Keeping it out of the unit layer is what makes the
 // remaining-unit denominator (UnitCount) unchanged: if it became a unit,
@@ -124,14 +123,14 @@ A supply node's `nodeUnit[i]` therefore stays `-1` permanently. Several other
 places had to be independently hardened so that `-1` never leaks into code
 that assumes a valid unit index:
 
-- `engine/graph/dependency.go:12-16,32-34` — `ErrSupplyInDataflow`: a supply
+- `engine/graph/dependency.go` (`ErrSupplyInDataflow`) — a supply
   node with any `Connections` edge is rejected at compile time, before the
   unit pass runs, so `buildUnitEdges` never has to index `unitOutEdges[-1]`.
-- `engine/graph/group_compile.go:67-68` — a supply node is rejected as a group
+- `engine/graph/group_compile.go` — a supply node is rejected as a group
   member.
 - `engine/signal.go` (`resolveResumeIntent`) — a supply node cannot be the
   target of a resume/signal.
-- `service/control/entry_seed_topology.go:110-119` (`entryUnitIndex`) —
+- `service/control/entry_seed_topology.go` (`entryUnitIndex`) —
   returns `(-1, false)` rather than surfacing a raw unit index of `-1` when a
   supply node is looked up as an entry unit.
 
@@ -156,7 +155,7 @@ The design has two structurally different halves, joined by one storage type.
   `xflow.supply.static` node. There is no runtime pull loop yet (see §9).
   Activation-time collection at the runner — fetching content this runner
   does not yet have — happens through `SupplyGate.Admit`
-  (`service/runner/supply_gate.go:128`), which is exclusive per entry unit:
+  (`service/runner/supply_gate.go`, `Admit` method), which is exclusive per entry unit:
   exactly one runner is ever assigned to host a given entry unit's supply
   requirements (the same lease-fenced single-owner model
   [NODE-GROUP-COLOCATION.md](./NODE-GROUP-COLOCATION.md) describes for trigger
@@ -179,7 +178,7 @@ transport-specific protocol per supply source — the store is what lets
 independently.
 
 ```go
-// store/supply.go:28-42
+// store/supply.go — SupplyResource
 type SupplyResource struct {
 	Namespace string
 	Name      string
@@ -201,7 +200,7 @@ Stored via `store.Supplies` (`GetSupply`/`PutSupply`), backed today by
 ## 4. Dependency edges — a separate wire field, not an overload of `Connections`
 
 ```go
-// types/workflow.go:136-143
+// types/workflow.go — DependencyEdge
 // DependencyEdge declares that Node reads the shared data maintained by the
 // supply node named Supply. It is deliberately separate from Connections:
 // a dependency edge carries no data and takes no part in unit-edge
@@ -213,7 +212,7 @@ type DependencyEdge struct {
 ```
 
 ```go
-// types/workflow.go:28
+// types/workflow.go — WorkflowDef.DependencyEdges field
 DependencyEdges []DependencyEdge `json:"dependency_edges,omitempty"`
 ```
 
@@ -229,12 +228,12 @@ It is a top-level `WorkflowDef` field, appended last, separate from
    the last field of `WorkflowDef` and tagged `omitempty` specifically so that
    a workflow with zero supply usage serializes and hashes byte-identically
    to how it did before this feature existed —
-   `TestNoSupplyMeansNoWireOrHashChange` (`engine/graph/snapshot_supply_test.go:46`)
+   `TestNoSupplyMeansNoWireOrHashChange` (`engine/graph/snapshot_supply_test.go`)
    pins exactly this. `omitempty` here is not cosmetic; it is the mechanism
    that keeps every pre-existing compiled-graph hash unchanged.
 
 Compilation: `buildDependencyEdges(def *types.WorkflowDef, g *Graph) error`
-(`engine/graph/dependency.go:24`) runs after `buildEdges` (so it can reject a
+(`engine/graph/dependency.go`, `buildDependencyEdges`) runs after `buildEdges` (so it can reject a
 supply node that also appears in `Connections`) and before `buildUnits` (so no
 invalid graph reaches the unit pass). It populates `g.supplyIndexes` and
 `g.supplyRefs` (consumer node index → sorted supply names) and rejects:
@@ -245,17 +244,17 @@ invalid graph reaches the unit pass). It populates `g.supplyIndexes` and
 - a supply node depending on another supply node.
 
 `WorkflowIdentity` canonicalization sorts `DependencyEdge`s by `(Node, Supply)`
-(`sdk/xflow/workflow_identity.go:188-191`) so edge declaration order never
+(`sdk/xflow/workflow_identity.go`, canonicalization logic) so edge declaration order never
 affects the hash.
 
 ## 5. Two version numbers: `Revision` vs `ContentHash`
 
 Both live on `SupplyResource`, deliberately mirroring Kubernetes'
-`resourceVersion` vs `observedGeneration` split (`store/supply.go:21-27`):
+`resourceVersion` vs `observedGeneration` split (`store/supply.go`, `SupplyResource` struct):
 
 - **`Revision`** — monotonic, bumped on *every* write, even a byte-identical
   one. It is the **write-side CAS token**: `PutSupply`'s `ifMatch *uint64`
-  parameter (`store/supply.go:50-57`) implements optimistic concurrency —
+  parameter (`store/supply.go`, `PutSupply`) implements optimistic concurrency —
   `nil` unconditional, `*ifMatch == 0` create-only, `*ifMatch == N` write only
   if the current `Revision` is exactly `N`; a mismatch returns
   `ErrRevisionConflict` and leaves the row untouched.
@@ -266,10 +265,10 @@ Both live on `SupplyResource`, deliberately mirroring Kubernetes'
 The HTTP surface exposes both, using the header names their K8s analogues
 would suggest (`service/apiserver/module_supply.go`):
 
-- `PUT` (`handlePut`, lines 87-135): reads `If-Match` as the CAS token;
+- `PUT` (`handlePut`): reads `If-Match` as the CAS token;
   `409` on conflict; response sets `ETag` to `ContentHash` and returns
   `revision`/`content_hash` in the body.
-- `GET` (`handleGet`, lines 137-162): sets `ETag` to `ContentHash` and a
+- `GET` (`handleGet`): sets `ETag` to `ContentHash` and a
   custom `X-Supply-Revision` header to `Revision`; honors `If-None-Match` for
   `304 Not Modified`.
 
@@ -285,7 +284,7 @@ Three cold-start races collapse into one code path:
 
 All three reduce to the same operation: "fetch synchronously, right now, as
 part of taking the activation" — `SupplyGate.Admit(ctx, workflowID, reqs)`
-(`service/runner/supply_gate.go:128`). It fetches every required supply this
+(`service/runner/supply_gate.go`, `Admit` method). It fetches every required supply this
 process does not already have, applies it to the distribution registry, and
 either lets the activation proceed or returns `*NotReadyError` listing every
 missing supply (not just the first one, so an operator does not need one
@@ -293,7 +292,7 @@ reconcile round per missing item).
 
 **How supply requirements travel to the runner:** a `SupplyRequirement` is
 attached per entry unit onto the same `EntryActivation` record used for
-trigger hosting (`engine/entry_activation.go:67,134-142`):
+trigger hosting (`engine/entry_activation.go`, `SupplyRequirement` type and `EntryActivation.Supplies`):
 
 ```go
 type SupplyRequirement struct {
@@ -310,9 +309,9 @@ choice:
   `xflow.supply.static`) — the runner **declines** the activation if the
   supply has no usable content. Traffic stays in Kafka; the offset never
   advances; consumer-group lag is the operator-visible signal
-  (`supply_gate.go:154-156,176-178,190-192`).
+  (`supply_gate.go`, `Admit` gate-declined branch).
 - `false` — the runner **takes** the activation anyway and the consumer runs
-  with empty semantics (`supply_gate.go:157-159`), while
+  with empty semantics (`supply_gate.go`, `require_ready=false` branch), while
   `xflow_supply_unavailable_serving` is set to `1` for that name so the gap is
   observable.
 
@@ -322,7 +321,7 @@ is unreachable. It was deliberately removed and never shipped. The reason is
 recorded directly in the shipped code, not just in a design note:
 
 ```go
-// node/internal/supply/static.go:14-16
+// node/internal/supply/static.go — package comment
 // This is NOT a fallback for an external supply. The spec deliberately removed
 // the `default: <bytes>` tier: serving live traffic with stale embedded rules
 // produces wrong data that looks right, which is worse than not serving.
@@ -330,14 +329,14 @@ recorded directly in the shipped code, not just in a design note:
 
 **This is not to be confused with** the wasm reactor's own three-tier
 `Availability` ladder (`AvailUnavailable`/`AvailStale`/`AvailFresh`,
-`node/internal/code/script/wasm/pool.go:448-481`) — that is a *consumer-side*
+`node/internal/code/script/wasm/pool.go`, `Availability` type) — that is a *consumer-side*
 staleness signal for content already admitted through the gate, orthogonal to
 the DSL-level `require_ready` decision. See
 [WASM-ENGINE-POOLING.md §6.5](./WASM-ENGINE-POOLING.md).
 
 ## 7. `$supplies` vs `$config`
 
-Both are expression roots built by `BuildExprEnv` (`exprx/exprx.go:105-153`):
+Both are expression roots built by `BuildExprEnv` (`exprx/exprx.go`, `BuildExprEnv`):
 
 ```go
 env["$config"]   = input.Config     // line 105
@@ -346,7 +345,7 @@ env["$supplies"] = supply.Default.Decoded()  // line 117
 ```
 
 Three independent reasons they are separate roots, not one merged namespace
-(`exprx.go:108-116`):
+(`exprx.go`, `BuildExprEnv` comment block):
 
 1. **Different mutability.** `$config` is immutable and travels with the
    definition version. A supply is mutable, versioned, and can be stale — a
@@ -362,13 +361,13 @@ Three independent reasons they are separate roots, not one merged namespace
    present," which is false for supply content.
 
 **Implementation shape: an eagerly predecoded shared map, not a lazy view.**
-`Registry.decoded atomic.Pointer[map[string]any]` (`node/supply/registry.go:93-103`)
+`Registry.decoded atomic.Pointer[map[string]any]` (`node/supply/registry.go`, `Registry.decoded`)
 is rebuilt wholesale on every content change and swapped in with a single
 atomic store; readers hold the reference lock-free. This is deliberate, and
 the comment explains why a lazy view was not chosen:
 
 ```go
-// node/supply/registry.go:98-102
+// node/supply/registry.go — decoded field comment
 // Decoding happens here — once per content change — rather than per message.
 // expr's runtime.Fetch offers no lazy hook for a custom type (it only tries
 // MethodByName and struct fields), so a plain map is the only shape that
@@ -389,14 +388,14 @@ Cost of this shape: decode happens once per content change (not per message),
 and the per-message cost is one pointer/map assignment regardless of content
 size — `republishDecodedLocked` rebuilds the whole map rather than mutating
 the live one in place, specifically because mutating in place would race with
-lock-free readers (`registry.go:409-421`).
+lock-free readers (`registry.go`, `republishDecodedLocked`).
 
 ## 8. Two invariants written into the design, not just followed by convention
 
 **Full-snapshot replace, never incremental.** Every content update — whether
 from collection PUT, static declaration, or a re-fetch triggered by a
 heartbeat hint — replaces the cached snapshot wholesale
-(`node/supply/registry.go:93-102,415-421`). There is no diff/patch type
+(`node/supply/registry.go`, `Apply`/`republishDecodedLocked`). There is no diff/patch type
 anywhere in `node/supply`. This was a deliberate design choice, not an
 oversight: an incremental-update model reintroduces the cross-instance
 convergence problem that systems like Flink's Broadcast State have to solve
@@ -406,13 +405,13 @@ delta land in the right order."
 
 **Supply is a lookup, not a trigger.** A content change creates no execution
 and dispatches no task — `Registry.Apply`'s doc is explicit: *"It never
-creates an execution or dispatches a task"* (`registry.go:142-143`), and the
+creates an execution or dispatches a task"* (`registry.go`, `Apply` doc comment), and the
 package doc reinforces it: *"the whole package is deliberately invisible to
 the execution lifecycle... touches neither the remaining counter nor unit
-in-degree"* (`node/supply/supply.go:1-9`). A content change never replays or
+in-degree"* (`node/supply/supply.go`, package doc). A content change never replays or
 backfills messages already processed on the old content — messages in flight
 finish against the old pool; only messages *after* the swap see new rules
-(`node/internal/code/script/wasm/supply_consumer.go:27-30`).
+(`node/internal/code/script/wasm/supply_consumer.go`, `OnSupplyChanged`).
 
 ## 9. Known gaps and costs
 
@@ -422,19 +421,19 @@ these get fixed without an edit here.
 **(a) A gate-declined activation now self-heals via ActivationAck + backoff +
 reconcile.** Runner 的 `ActivationTracker.ProcessDirectives` 调用
 `Activate` 失败后，通过 `SetOnActivateFailed` 回调
-（`service/runner/activation_tracker.go:58-60,116`，在 `t.mu` 释放后同步调用）
+（`service/runner/activation_tracker.go`，`SetOnActivateFailed`，在 `t.mu` 释放后同步调用）
 将失败逐条交给 `activationAcker.ackFailed`
-（`service/runner/activation_acker.go:98`）。`ackFailed` 按
+（`service/runner/activation_acker.go`，`ackFailed`）。`ackFailed` 按
 `(WorkflowID, WorkflowVersion, EntryUnitID)` 记最高 generation 去重
-（`shouldAck`，`activation_acker.go:83-91`），然后 fire-and-forget POST
+（`shouldAck`，`activation_acker.go`，`shouldAck`），然后 fire-and-forget POST
 `protocol.ActivationAckPath`（`/v1/runners/activation/ack`），10s 超时是该
 goroutine 唯一的生命周期上界。
 
 Server 端 HTTP handler 与 `register` 同形，使用 `AuthenticateOngoing` 鉴权
-（`service/control/core.go:248`）；namespace 取自**服务端权威的 runner 注册记录**
-（`runnerNamespaces`，`core.go:259` 调用、`core.go:273-279` 定义），绝不取自
+（`service/control/core.go`，`AuthenticateOngoing`）；namespace 取自**服务端权威的 runner 注册记录**
+（`runnerNamespaces`，`core.go` 中 `runnerNamespaces` 定义），绝不取自
 客户端 body。处理流程
-（`MarkActivationFailed`，`entry_activation_reconciler.go:730`）：
+（`MarkActivationFailed`，`entry_activation_reconciler.go`，`MarkActivationFailed`）：
 
 1. `Store.Get` 精确定位（不是 List/扫描）。
 2. 校验 `act.RunnerID == runnerID && act.Generation == ack.Generation`——stale
@@ -444,14 +443,14 @@ Server 端 HTTP handler 与 `register` 同形，使用 `AuthenticateOngoing` 鉴
 5. **不做 `Assign`、不加 leader 门控**——由 leader 的周期 reconcile 看到
    unassigned activation 后走正常分配路径重派。
 
-退避策略（`noteActivationFailure`，`entry_activation_reconciler.go:630`）：
+退避策略（`noteActivationFailure`，`entry_activation_reconciler.go`，`noteActivationFailure`）：
 per-key、**内存、不持久化**（与 `noMatchSince` 同一把 `r.mu`，每轮
 `pruneRetryBackoff(seen)` 剪枝）；初值 10s
 （`DefaultActivationRetryBackoffMin`）、每次翻倍、上限 5min
 （`DefaultActivationRetryBackoffMax`）、**无重试上限**（封顶后维持 5min 一次，
-永不放弃）、±20% 抖动（`jitter`，`entry_activation_reconciler.go:661`；
+永不放弃）、±20% 抖动（`jitter`，`entry_activation_reconciler.go`，`jitter` 函数；
 防止共享 supply 挂掉时上千个 activation 齐发的同步脉冲）。清除点在
-**renew 分支**（`clearRetryBackoff`，`entry_activation_reconciler.go:279`）：
+**renew 分支**（`clearRetryBackoff`，`entry_activation_reconciler.go`，`clearRetryBackoff`）：
 `Assign` 成功不等于被 runner 真正接纳，只有下一轮确认 owner 存活且匹配才算成功；
 再次失败时退避从已有档位继续翻倍。
 
@@ -460,8 +459,8 @@ per-key、**内存、不持久化**（与 `noMatchSince` 同一把 `r.mu`，每�
 - **leader 切换丢失退避状态**，导致一次立即重试——远优于为此引入持久化。
 - ack 路径不经 leader 门控，**非 leader 副本写入的退避时间戳对 leader 不可见**——
   最坏是 leader 少看到一次失败记录，下一轮 reconcile 仍会重派并重新收到 ack。
-- `protocol.ActivationAck` 的 `WorkflowVersion`（`activation.go:76`）与
-  `AuthToken`（`activation.go:74`）字段此前已定义但零接线，本次**首次获得生产调用
+- `protocol.ActivationAck` 的 `WorkflowVersion`（`activation.go`，`ActivationAck.WorkflowVersion` 字段）与
+  `AuthToken`（`activation.go`，`ActivationAck.AuthToken` 字段）此前已定义但零接线，本次**首次获得生产调用
   点**。空 `WorkflowVersion` 被当作格式非法请求（`ErrMissingWorkflowVersion` →
   400），**不是**向后兼容路径：ack 能力与该字段是同一特性的两半、同批引入，不存在
   只实现前者的 runner。
@@ -480,7 +479,7 @@ backoff → supply 恢复 → reconcile 重派 → activation 成功接纳）。
 `runnerpb.HeartbeatResponse` has four fields:
 
 ```protobuf
-// service/protocol/runnerpb/runner.proto:78-86
+// service/protocol/runnerpb/runner.proto — HeartbeatResponse
 message HeartbeatResponse {
   int64 server_time = 1;
   map<string, string> supply_hints = 2;
@@ -489,10 +488,10 @@ message HeartbeatResponse {
 }
 ```
 
-`service/protocol/grpc_conv.go:159-193` round-trips all four (activations, like
+`service/protocol/grpc_conv.go` (`HeartbeatResponse` round-trip) round-trips all four (activations, like
 leases, travel as JSON bytes to avoid modeling `map[string]any` params in
-proto), `service/control/grpc_server.go:110` fills them on the response, and
-`grpc_client.go:57` decodes them back on the runner. An earlier revision of
+proto), `service/control/grpc_server.go` fills them on the response, and
+`grpc_client.go` decodes them back on the runner. An earlier revision of
 this document described the proto as having "exactly one field"; that is no
 longer true.
 
@@ -518,7 +517,7 @@ the window. The design does not try to close this window — doing so would
 need a global barrier that pauses the whole stream, which no comparable
 system attempts for this kind of config swap. Instead every result is stamped
 with `config_generation` (the `SupplyResource.Revision` that actually produced
-it — see `node/internal/code/script/wasm/reactor.go:120-131`), so a downstream
+it — see `node/internal/code/script/wasm/reactor.go` (`ConfigGenerationKey`)), so a downstream
 warehouse can group by `(message_key, config_generation)`, identify rows
 produced under an older revision, and recompute exactly those. This is a
 deliberate "make it traceable, not invisible" trade, matching
@@ -558,7 +557,7 @@ proto 更新、cross-runner swap barrier）必须更新本节，不是在旁边�
 **ContentHash 始终基于明文。** 密文只写入 `content` 列。hash 若算在密文上，
 AES-GCM 的随机 nonce 会让同样的内容每次产生不同的 hash，幂等判重与
 consumer 侧「hash 未变不重建」同时失效。守护测试见
-`store/storetest/supply.go:43`。
+`store/storetest/supply.go` (`TestSupplyContentHashBasedOnPlaintext` 等)。
 
 **KEK 不存 MySQL、不写死在源码里。** 前者让密钥与它保护的数据在同一份 dump
 里；后者进 git 后永久不可撤销、随二进制分发到每个 runner、轮换需要发版加
