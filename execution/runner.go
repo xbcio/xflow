@@ -211,35 +211,40 @@ func (r *Runner) Execute(ctx context.Context, lease *engine.TaskLease) (engine.T
 		// return the timeout error and the goroutine leaks (Go cannot kill a
 		// goroutine; the alternative -- waiting -- is the permanent slot
 		// occupancy this exists to end).
+		// elapsed travels with the result instead of being observed inside the
+		// sending goroutine. Two constraints have to hold at once:
+		//
+		//   - "Execute returned" must imply "the duration is recorded".
+		//     Observing in a defer breaks this: the defer runs after the send,
+		//     so Execute can return -- and a caller can scrape /metrics --
+		//     while the goroutine is still between the send and the deferred
+		//     observation (measured at ~1% of invocations).
+		//   - The send must not be delayed. The ctx.Done() path below waits
+		//     only abandonGrace (2ms) for a handler that unblocked on
+		//     cancellation and is about to deliver a real verdict. Anything
+		//     between the handler returning and the send is spent out of that
+		//     budget, and observeDuration walks a metrics registry. Injecting
+		//     5ms there drops verdict preservation from 200/200 to 0/200.
+		//
+		// Recording the timestamp is nanoseconds and the receiver observes
+		// before it returns, so both hold. The abandon branch hands the
+		// observation to the watcher goroutine: that sample is only knowable
+		// once the leaked handler finishes, which is after Execute returned.
 		type handlerResult struct {
-			output *types.Output
-			err    error
+			output  *types.Output
+			err     error
+			elapsed time.Duration
 		}
 		ch := make(chan handlerResult, 1)
 		started := time.Now()
 		go func() {
-			// Record the wall-clock duration of this invocation when the handler
-			// returns, regardless of outcome: a successful run, a cooperative
-			// ctx.Err, and an abandoned-but-eventually-returning handler all
-			// land here. The abandon case records asynchronously (after Execute
-			// returns), which is honest -- the handler's true duration is only
-			// known once it finishes.
-			//
-			// Observe BEFORE the send, not in a defer: a defer runs after the
-			// send, so Execute can return -- and a caller can scrape /metrics --
-			// while this goroutine is still between the send and the deferred
-			// observation. Measured at ~1% of invocations, which made the
-			// metric's own guard test flaky. Observing first makes "Execute
-			// returned" imply "the duration is recorded". A panicking handler
-			// loses the sample, but nothing here recovers panics, so the
-			// process is going down with it either way.
 			output, sysErr := handler.Execute(ctx, lease.Input)
-			r.observeDuration(ctx, lease.NodeType, time.Since(started))
-			ch <- handlerResult{output, sysErr}
+			ch <- handlerResult{output, sysErr, time.Since(started)}
 		}()
 
 		select {
 		case hr := <-ch:
+			r.observeDuration(ctx, lease.NodeType, hr.elapsed)
 			hr.err = reclassifyTimeout(ctx, hr.err, budget, deadline)
 			if isNodeTimeoutError(hr.err) {
 				r.observeTimeout(ctx, lease.NodeType)
@@ -258,6 +263,7 @@ func (r *Runner) Execute(ctx context.Context, lease *engine.TaskLease) (engine.T
 			// partial output the handler produced.
 			select {
 			case hr := <-ch:
+				r.observeDuration(ctx, lease.NodeType, hr.elapsed)
 				hr.err = reclassifyTimeout(ctx, hr.err, budget, deadline)
 				if isNodeTimeoutError(hr.err) {
 					r.observeTimeout(ctx, lease.NodeType)
@@ -283,7 +289,11 @@ func (r *Runner) Execute(ctx context.Context, lease *engine.TaskLease) (engine.T
 				r.observeTimeout(ctx, lease.NodeType)
 			}
 			r.observeAbandoned(ctx, lease.NodeType, 1)
-			go func() { <-ch; r.observeAbandoned(ctx, lease.NodeType, -1) }()
+			go func() {
+				hr := <-ch
+				r.observeDuration(ctx, lease.NodeType, hr.elapsed)
+				r.observeAbandoned(ctx, lease.NodeType, -1)
+			}()
 			return engine.TaskResult{Error: newCancelError(cause, budget)}, nil
 		}
 	}
@@ -325,21 +335,24 @@ func (r *Runner) executeSuspending(ctx context.Context, lease *engine.TaskLease,
 // so a non-cooperative handler does not hold the slot.
 func (r *Runner) callOnResume(ctx context.Context, sh types.SuspendingHandler, lease *engine.TaskLease, budget time.Duration, deadline time.Time) (*types.Output, error) {
 	if !deadline.IsZero() {
+		// elapsed travels with the result; the receiver observes it. See the
+		// note at the plain-handler site: the send must stay off the
+		// abandonGrace budget, and the observation must still happen before
+		// Execute returns.
 		type result struct {
-			output *types.Output
-			err    error
+			output  *types.Output
+			err     error
+			elapsed time.Duration
 		}
 		ch := make(chan result, 1)
 		started := time.Now()
 		go func() {
-			// Observe before the send so Execute's return implies the sample is
-			// recorded; see the note at the plain-handler site above.
 			o, e := sh.OnResume(ctx, lease.Input, lease.Task.Payload)
-			r.observeDuration(ctx, lease.NodeType, time.Since(started))
-			ch <- result{o, e}
+			ch <- result{o, e, time.Since(started)}
 		}()
 		select {
 		case res := <-ch:
+			r.observeDuration(ctx, lease.NodeType, res.elapsed)
 			res.err = reclassifyTimeout(ctx, res.err, budget, deadline)
 			if isNodeTimeoutError(res.err) {
 				r.observeTimeout(ctx, lease.NodeType)
@@ -348,6 +361,7 @@ func (r *Runner) callOnResume(ctx context.Context, sh types.SuspendingHandler, l
 		case <-ctx.Done():
 			select {
 			case res := <-ch:
+				r.observeDuration(ctx, lease.NodeType, res.elapsed)
 				res.err = reclassifyTimeout(ctx, res.err, budget, deadline)
 				if isNodeTimeoutError(res.err) {
 					r.observeTimeout(ctx, lease.NodeType)
@@ -360,7 +374,11 @@ func (r *Runner) callOnResume(ctx context.Context, sh types.SuspendingHandler, l
 				r.observeTimeout(ctx, lease.NodeType)
 			}
 			r.observeAbandoned(ctx, lease.NodeType, 1)
-			go func() { <-ch; r.observeAbandoned(ctx, lease.NodeType, -1) }()
+			go func() {
+				res := <-ch
+				r.observeDuration(ctx, lease.NodeType, res.elapsed)
+				r.observeAbandoned(ctx, lease.NodeType, -1)
+			}()
 			return nil, newCancelError(cause, budget)
 		}
 	}
@@ -374,21 +392,26 @@ func (r *Runner) callOnResume(ctx context.Context, sh types.SuspendingHandler, l
 // path uses (PrepareSuspend's input may be a cloned Input without the type).
 func (r *Runner) callPrepareSuspend(ctx context.Context, sh types.SuspendingHandler, input *types.Input, nodeType string, budget time.Duration, deadline time.Time) (*types.SuspendSpec, error) {
 	if !deadline.IsZero() {
+		// elapsed travels with the result; the receiver observes it. This is the
+		// site that proved the constraint: with observeDuration between the
+		// handler returning and the send, a 5ms injection there dropped
+		// TestPrepareSuspendAbandonPreservesBusinessVerdict from 200/200 to
+		// 0/200, because the ctx.Done() branch below only waits abandonGrace
+		// for the handler's real verdict.
 		type result struct {
-			spec *types.SuspendSpec
-			err  error
+			spec    *types.SuspendSpec
+			err     error
+			elapsed time.Duration
 		}
 		ch := make(chan result, 1)
 		started := time.Now()
 		go func() {
-			// Observe before the send so Execute's return implies the sample is
-			// recorded; see the note at the plain-handler site above.
 			s, e := sh.PrepareSuspend(ctx, input)
-			r.observeDuration(ctx, nodeType, time.Since(started))
-			ch <- result{s, e}
+			ch <- result{s, e, time.Since(started)}
 		}()
 		select {
 		case res := <-ch:
+			r.observeDuration(ctx, nodeType, res.elapsed)
 			res.err = reclassifyTimeout(ctx, res.err, budget, deadline)
 			if isNodeTimeoutError(res.err) {
 				r.observeTimeout(ctx, nodeType)
@@ -397,6 +420,7 @@ func (r *Runner) callPrepareSuspend(ctx context.Context, sh types.SuspendingHand
 		case <-ctx.Done():
 			select {
 			case res := <-ch:
+				r.observeDuration(ctx, nodeType, res.elapsed)
 				res.err = reclassifyTimeout(ctx, res.err, budget, deadline)
 				if isNodeTimeoutError(res.err) {
 					r.observeTimeout(ctx, nodeType)
@@ -409,7 +433,11 @@ func (r *Runner) callPrepareSuspend(ctx context.Context, sh types.SuspendingHand
 				r.observeTimeout(ctx, nodeType)
 			}
 			r.observeAbandoned(ctx, nodeType, 1)
-			go func() { <-ch; r.observeAbandoned(ctx, nodeType, -1) }()
+			go func() {
+				res := <-ch
+				r.observeDuration(ctx, nodeType, res.elapsed)
+				r.observeAbandoned(ctx, nodeType, -1)
+			}()
 			return nil, newCancelError(cause, budget)
 		}
 	}
