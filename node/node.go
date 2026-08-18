@@ -194,6 +194,15 @@ func UnregisterWasmSupplyConsumerByDigest(digest string, supplyNode string) {
 func CompileWasmModule(ctx context.Context, code string) error {
 	return scriptpkg.CompileWasmModule(ctx, code)
 }
+
+// CompileWasmModuleBytes is CompileWasmModule for callers that already hold the
+// module's raw bytes, as the artifact store and the runner activation path both
+// do. Encoding a 6.85 MB module to base64 only for the callee to decode it back
+// costs two multi-MB allocations and both transforms; this entry point skips
+// them. Use CompileWasmModule only when the caller genuinely starts from base64.
+func CompileWasmModuleBytes(ctx context.Context, wasmBytes []byte) error {
+	return scriptpkg.CompileWasmModuleBytes(ctx, wasmBytes)
+}
 func Set(fields map[string]any) *SetNode {
 	return transform.Set(fields)
 }

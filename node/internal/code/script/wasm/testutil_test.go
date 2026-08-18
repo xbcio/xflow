@@ -22,6 +22,18 @@ func testReactorCode(t *testing.T) string {
 	return b64(appendCustomSection(reactorWasm, "xflow-test-nonce", nonce))
 }
 
+// decodeForTest returns the raw module bytes behind a base64 code string, for
+// tests that need to drive the bytes entry point and the code entry point with
+// the same module.
+func decodeForTest(t *testing.T, code string) []byte {
+	t.Helper()
+	raw, err := decodeCode(code)
+	if err != nil {
+		t.Fatalf("decodeForTest: %v", err)
+	}
+	return raw
+}
+
 // appendCustomSection appends a WASM custom section (id 0) to mod. Custom
 // sections are unconditionally skipped by any conformant loader (including
 // wazero), so this changes the module's content hash without altering its

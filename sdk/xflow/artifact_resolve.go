@@ -2,7 +2,6 @@ package xflow
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 	"io"
 	"os"
@@ -133,8 +132,7 @@ func rewriteScriptArtifact(ctx context.Context, name string, params map[string]a
 	// consumer registered before AddWorkflow cannot find the engine and
 	// content delivery is deferred until the first Execute creates it.
 	if lang, _ := params["language"].(string); lang == "wasm" {
-		code := base64.StdEncoding.EncodeToString(content)
-		if err := xnode.CompileWasmModule(ctx, code); err != nil {
+		if err := xnode.CompileWasmModuleBytes(ctx, content); err != nil {
 			return fmt.Errorf("resolveArtifacts: node %q: compile wasm: %w", name, err)
 		}
 	}

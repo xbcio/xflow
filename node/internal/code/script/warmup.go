@@ -56,3 +56,9 @@ func UnregisterWasmSupplyConsumerByDigest(digest string, supplyNode string) {
 func CompileWasmModule(ctx context.Context, code string) error {
 	return wasm.CompileModule(ctx, code)
 }
+
+// CompileWasmModuleBytes is CompileWasmModule for callers holding the raw module
+// bytes, skipping a base64 encode/decode round trip over a multi-MB module.
+func CompileWasmModuleBytes(ctx context.Context, wasmBytes []byte) error {
+	return wasm.CompileModuleBytes(ctx, wasmBytes)
+}

@@ -224,32 +224,64 @@ func (h *reactorHost) engineForCode(ctx context.Context, code string) (*reactorE
 	if err != nil {
 		return nil, err
 	}
-	// Resolve the config source and publish the engine as one atomic step,
-	// under the same lock the registration path holds.
-	//
-	// Registration and engine creation are a Dekker-style crossing: each side
-	// publishes its own state and then looks for the other's. Registration
-	// records the intent (sourceDriven) and then flips any already-cached engine;
-	// creation reads the intent and then caches the engine. Interleaved, both
-	// lookups can miss — registration's engines lookup finds nothing because the
-	// engine is not published yet, and the intent read already ran before the
-	// write landed. The engine then stays on the globals path forever, evaluating
-	// with no rules at all, and nothing later repairs it.
-	//
-	// A double-check after the Add only narrows that window; it does not close
-	// it, and being nanoseconds wide it is unreachable by any test — untestable
-	// code guarding a real defect is worse than no guard. One mutex covering
-	// both steps closes it by construction: whichever side takes h.mu second
-	// necessarily observes what the first published.
+	h.publishEngine(key, e, code)
+	return e, nil
+}
+
+// engineForBytes is engineForCode for callers that already hold the raw module
+// bytes, so a multi-MB module is never base64-encoded just to be decoded again.
+//
+// It deliberately does NOT populate codeCache: that cache is keyed by the base64
+// string, and this caller has none. Manufacturing one would allocate a ~9 MB
+// string whose only use is being compared in full on every subsequent lookup
+// (see codeCache's comment: 198 µs per hit). Callers holding bytes hold a digest
+// too, and the digest path reaches h.engines directly.
+//
+// What it must NOT skip is the source-driven resolution -- see publishEngine.
+func (h *reactorHost) engineForBytes(ctx context.Context, wasmBytes []byte) (*reactorEngine, error) {
+	key := moduleKeyOf(wasmBytes)
+	e, err := h.engineForKey(ctx, key, wasmBytes)
+	if err != nil {
+		return nil, err
+	}
+	h.publishEngine(key, e, "")
+	return e, nil
+}
+
+// publishEngine resolves a freshly created engine's config source and memoizes
+// it under code, as one atomic step, under the same lock the registration path
+// holds. An empty code skips the memo (the bytes path has no base64 string).
+//
+// Registration and engine creation are a Dekker-style crossing: each side
+// publishes its own state and then looks for the other's. Registration
+// records the intent (sourceDriven) and then flips any already-cached engine;
+// creation reads the intent and then caches the engine. Interleaved, both
+// lookups can miss -- registration's engines lookup finds nothing because the
+// engine is not published yet, and the intent read already ran before the
+// write landed. The engine then stays on the globals path forever, evaluating
+// with no rules at all, and nothing later repairs it.
+//
+// A double-check after the Add only narrows that window; it does not close
+// it, and being nanoseconds wide it is unreachable by any test -- untestable
+// code guarding a real defect is worse than no guard. One mutex covering
+// both steps closes it by construction: whichever side takes h.mu second
+// necessarily observes what the first published.
+//
+// Both entry points route through here rather than each resolving the flag
+// themselves. A second copy of this sequence is how the bytes path would
+// silently regress to the globals path: the omission compiles, runs, and
+// produces correct-looking traffic that matches no rules.
+func (h *reactorHost) publishEngine(key string, e *reactorEngine, code string) {
 	h.mu.Lock()
 	fromSource := h.sourceDrivenLocked(key)
-	h.codeCache.Add(code, e)
+	if code != "" {
+		h.codeCache.Add(code, e)
+	}
 	h.mu.Unlock()
 
 	if fromSource {
 		e.configFromSource.Store(true)
 	}
-	return e, nil
 }
 
 // moduleKeyOf is moduleKey for callers that already hold the decoded bytes.

@@ -2,7 +2,6 @@ package runner
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 	"net/http"
 	"sync"
@@ -302,7 +301,7 @@ func (h *TriggerActivationHandler) registerSupplyConsumers(ctx context.Context, 
 			if err != nil {
 				return fmt.Errorf("fetch wasm module %s for supply %q: %w", b.ModuleDigest, b.SupplyNode, err)
 			}
-			if err := node.CompileWasmModule(ctx, base64.StdEncoding.EncodeToString(raw)); err != nil {
+			if err := node.CompileWasmModuleBytes(ctx, raw); err != nil {
 				return fmt.Errorf("compile wasm module %s for supply %q: %w", b.ModuleDigest, b.SupplyNode, err)
 			}
 			compiled[b.ModuleDigest] = true

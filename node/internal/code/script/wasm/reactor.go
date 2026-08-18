@@ -221,6 +221,19 @@ func CompileModule(ctx context.Context, code string) error {
 	return err
 }
 
+// CompileModuleBytes is CompileModule for callers that already hold the raw
+// module bytes -- the artifact store and the activation path both do. It skips
+// the base64 round trip those callers would otherwise pay: encoding a 6.85 MB
+// module produces a 9.14 MB string that CompileModule immediately decodes back,
+// costing two multi-MB allocations and both transforms for nothing.
+//
+// Prefer it wherever the bytes are in hand. CompileModule remains for callers
+// that genuinely start from a base64 string (inline node.Script(b64)).
+func CompileModuleBytes(ctx context.Context, wasmBytes []byte) error {
+	_, err := sharedReactorHost.engineForBytes(ctx, wasmBytes)
+	return err
+}
+
 // splitConfig separates the reactor config from the eval input globals. The
 // config lives under reactorConfigGlobal; the remaining keys are the input map
 // handed to the guest as the eval environment.
