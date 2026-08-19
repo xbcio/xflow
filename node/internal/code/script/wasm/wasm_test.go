@@ -2,6 +2,7 @@ package wasm
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -214,5 +215,28 @@ func TestWasm_CredentialParityWithJS(t *testing.T) {
 	// And confirm the actual expected values came through (not both nil).
 	if wasmKey != "shared-kk" || wasmTok != "shared-tt" {
 		t.Fatalf("credential values wrong: key=%v tok=%v", wasmKey, wasmTok)
+	}
+}
+
+// realisticRecord builds one apisix traffic record of approximately `size`
+// bytes, matching the distribution measured against the live test-env topic
+// (mean 6845, p50 2594, p90 9753, p99 119111 bytes).
+//
+// It lives here rather than beside any one benchmark because both the eval
+// observer tests and the pool-width benchmark measure against the same shape,
+// and a record built two different ways would make their numbers
+// incomparable.
+func realisticRecord(size int) map[string]any {
+	body := make([]byte, 0, size)
+	for len(body) < size {
+		body = append(body, "abcdefghijklmnopqrstuvwxyz0123456789"...)
+	}
+	return map[string]any{
+		"topic":     "apisix-traffic",
+		"partition": 0,
+		"offset":    1,
+		"value": fmt.Sprintf(`{"response":{"status":200,"headers":`+
+			`{"content-type":"application/json"}},"request":{"method":"GET",`+
+			`"uri":"/api/v1/resource"},"body":%q}`, body[:size]),
 	}
 }
