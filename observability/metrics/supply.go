@@ -21,6 +21,8 @@ const (
 	metricWasmInstanceTotal        = "xflow_wasm_instance_total"
 	metricWasmInstanceRecycled     = "xflow_wasm_instance_recycled_total"
 	metricWasmPoolBorrowWait       = "xflow_wasm_pool_borrow_wait_seconds"
+	metricWasmEvalStdinBytes       = "xflow_wasm_eval_stdin_bytes"
+	metricWasmEvalDuration         = "xflow_wasm_eval_duration_seconds"
 	metricWasmModuleCompileTotal   = "xflow_wasm_module_compile_total"
 )
 
@@ -65,13 +67,19 @@ func (s SupplyMetrics) OnConfigAge(ctx context.Context, age time.Duration) {
 	s.Metrics.Set(metricSupplyAgeSeconds, withNamespace(ctx, nil), age.Seconds())
 }
 
-// OnInstanceCount records pool occupancy. state is "ready" or "doomed".
+// OnInstanceCount records total resident pool instances across all engines.
+// state is "ready"; see wasm.Observer for why there is no "doomed" value and
+// why the caller must sum rather than report per-engine. This Sets a series
+// keyed only by state, so each call REPLACES the previous value — that is
+// exactly why summing is the caller's job.
 func (s SupplyMetrics) OnInstanceCount(ctx context.Context, state string, n int) {
 	s.Metrics.Set(metricWasmInstanceTotal, withNamespace(ctx, map[string]string{"state": state}), float64(n))
 }
 
 // OnInstanceRecycled records an instance teardown. cause is one of "timeout",
-// "eval_error", "shutdown", "pool_swapped".
+// "eval_error", "shutdown", "pool_swapped", "rebuild_failed". The last one is
+// not a teardown but a failed replacement: the pool is permanently one instance
+// narrower, since nothing retries the rebuild.
 func (s SupplyMetrics) OnInstanceRecycled(ctx context.Context, cause string) {
 	s.Metrics.Inc(metricWasmInstanceRecycled, withNamespace(ctx, map[string]string{"cause": cause}))
 }
@@ -79,6 +87,23 @@ func (s SupplyMetrics) OnInstanceRecycled(ctx context.Context, cause string) {
 // OnBorrowWait records how long a caller waited for a free pool instance.
 func (s SupplyMetrics) OnBorrowWait(ctx context.Context, d time.Duration) {
 	s.Metrics.Observe(metricWasmPoolBorrowWait, withNamespace(ctx, nil), d)
+}
+
+// OnEval records one eval's stdin size and duration.
+//
+// Together these answer a question neither answers alone: whether a rising eval
+// cost is the engine getting slower or the payload getting bigger. Eval is
+// dominated by the guest re-parsing stdin inside the sandbox, so the two series
+// normally track each other; a duration that climbs while size holds flat is
+// contention or oversubscription, and a size that climbs on its own is a
+// redundant copy leaking into the payload.
+//
+// The size histogram is also the only way the TAIL is visible. Every other
+// signal here reports a mean, and a payload distribution with a p99 at 17x the
+// mean spends most of its cost on records the mean never shows.
+func (s SupplyMetrics) OnEval(ctx context.Context, stdinBytes int, d time.Duration) {
+	s.Metrics.ObserveBytes(metricWasmEvalStdinBytes, withNamespace(ctx, nil), stdinBytes)
+	s.Metrics.Observe(metricWasmEvalDuration, withNamespace(ctx, nil), d)
 }
 
 // OnModuleCompile records module compilation cache outcome: "hit" or "miss".

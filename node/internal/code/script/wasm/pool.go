@@ -227,6 +227,11 @@ type activePool struct {
 	cfg      []byte // config snapshot; replayed when rebuilding a doomed instance
 	free     chan *pooledInstance
 	size     int
+
+	// drainTimeout overrides drainPoolWait for this pool. Zero means the default.
+	// It exists so a test can assert drainPool's bound is honoured without
+	// spending the production bound's full minute waiting for it.
+	drainTimeout time.Duration
 }
 
 // reactorEngine owns the wazero runtime handle, the compiled module, and the
@@ -413,7 +418,6 @@ func (e *reactorEngine) doom(ctx context.Context, p *activePool, inst *pooledIns
 		cause = "timeout"
 	}
 	obs().OnInstanceRecycled(ctx, cause)
-	obs().OnInstanceCount(ctx, "doomed", 1)
 
 	// Close the failed instance on a background context — its own ctx may be
 	// the expired deadline that doomed it.
@@ -426,8 +430,11 @@ func (e *reactorEngine) doom(ctx context.Context, p *activePool, inst *pooledIns
 	go func() {
 		repl, err := e.newInstance(bg, p.cfg)
 		if err != nil {
-			// Replenish failed; the pool runs one instance short until the
-			// next successful rebuild. A metric would fire here (§6.7).
+			// The pool now runs one instance short, permanently: nothing retries
+			// this rebuild. That is a capacity loss, so it must be visible —
+			// silent shrinkage looks identical to contention from outside, and
+			// the pool's width is what bounds wasm concurrency.
+			obs().OnInstanceRecycled(bg, "rebuild_failed")
 			return
 		}
 		if e.active.Load() != p {
@@ -466,25 +473,61 @@ func (e *reactorEngine) swapConfig(ctx context.Context, cfg []byte, size uint64,
 	e.lastSwapAt.Store(time.Now().UnixNano())
 	e.sourceFailures.Store(0)
 	obs().OnPoolSwap(ctx, "applied", rules, revision, time.Since(start))
-	obs().OnInstanceCount(ctx, "ready", int(size))
+	e.host.reportReadyInstances(ctx)
 	if old != nil {
 		go e.drainPool(context.Background(), old)
 	}
 	return nil
 }
 
-// drainPool tears down every instance parked in an old pool. In-flight
-// borrowers from the old pool return via giveBack, which sees the pool is no
-// longer active and tears their instance down too. This waits for the full set
-// (size) to be reclaimed so no instance leaks.
+// drainPoolWait bounds how long drainPool waits for a retired pool's instances.
+//
+// It is generous rather than tight because the straggler it exists to catch is a
+// doom replacement built for a pool that died mid-rebuild: doom checks the pool
+// is live before parking the replacement, so a swap landing inside that window
+// leaves an instance in a channel only drainPool reads.
+//
+// Carried on activePool rather than read as a package constant so a test can
+// assert the bound exists without waiting it out. Zero means the default.
+const drainPoolWait = 60 * time.Second
+
+func (p *activePool) drainWait() time.Duration {
+	if p.drainTimeout > 0 {
+		return p.drainTimeout
+	}
+	return drainPoolWait
+}
+
+// drainPool tears down every instance parked in an old pool.
+//
+// The wait is bounded, and the bound is load-bearing. An instance that was
+// in flight at swap time never arrives here — giveBack sees the pool is no
+// longer active and tears that instance down itself, and doom does the same for
+// one that failed mid-eval. Waiting unconditionally for `size` receives
+// therefore parked this goroutine for the process lifetime, one leaked goroutine
+// per swap per in-flight borrow.
+//
+// Exiting early is not an instance leak, precisely because those two paths
+// already reclaim what they hold. What the bound gives up is only the
+// mid-rebuild straggler above, and only if it arrives after the deadline.
 func (e *reactorEngine) drainPool(ctx context.Context, p *activePool) {
+	// One timer for the whole loop, not per receive: the intent is to bound the
+	// drain, not each individual wait.
+	timer := time.NewTimer(p.drainWait())
+	defer timer.Stop()
 	for range p.size {
-		inst, ok := <-p.free
-		if !ok {
+		select {
+		case inst, ok := <-p.free:
+			if !ok {
+				return
+			}
+			inst.teardown(ctx)
+			obs().OnInstanceRecycled(ctx, "pool_swapped")
+		case <-timer.C:
+			return
+		case <-ctx.Done():
 			return
 		}
-		inst.teardown(ctx)
-		obs().OnInstanceRecycled(ctx, "pool_swapped")
 	}
 }
 

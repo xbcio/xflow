@@ -85,14 +85,12 @@ func TestSupplyMetricsOnInstanceCountAndRecycled(t *testing.T) {
 	ctx := context.Background()
 
 	s.OnInstanceCount(ctx, "ready", 4)
-	s.OnInstanceCount(ctx, "doomed", 1)
 	s.OnInstanceRecycled(ctx, "timeout")
 	s.OnInstanceRecycled(ctx, "eval_error")
 
 	body := gatherMetricsBody(t, m)
 	for _, want := range []string{
 		`xflow_wasm_instance_total{namespace="default",state="ready"} 4`,
-		`xflow_wasm_instance_total{namespace="default",state="doomed"} 1`,
 		`xflow_wasm_instance_recycled_total{cause="timeout",namespace="default"} 1`,
 		`xflow_wasm_instance_recycled_total{cause="eval_error",namespace="default"} 1`,
 	} {

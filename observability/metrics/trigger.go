@@ -11,6 +11,7 @@ const (
 	metricTriggerMessagesDiscarded   = "xflow_trigger_messages_discarded_total"
 	metricTriggerMessagesDeadLetterd = "xflow_trigger_messages_dead_lettered_total"
 	metricTriggerBatchFlushed        = "xflow_trigger_batches_flushed_total"
+	metricTriggerBatchFlushOutcome   = "xflow_trigger_batch_flush_outcomes_total"
 	metricTriggerBatchSize           = "xflow_trigger_batch_size"
 	metricTriggerBatchAdmission      = "xflow_trigger_batch_admissions_total"
 )
@@ -53,6 +54,10 @@ func (t TriggerMetrics) OnMessageDeadLettered(ctx context.Context, topic, result
 // batch size distribution. A flush mix dominated by "timeout" means the size
 // threshold is never reached — the batch is configured larger than the traffic.
 //
+// This counts ATTEMPTS, so dividing the "error" outcomes below by it gives the
+// retry rate. Before that split the histogram only saw successes, which made a
+// partition wedged at its buffer cap indistinguishable from a quiet one.
+//
 // Size goes through ObserveCount, not ObserveBytes: the unit is records, and
 // ObserveBytes' buckets start at 1 KiB, so every batch bounded by max_size=100
 // would land in one bucket and the distribution would be unreadable.
@@ -63,6 +68,16 @@ func (t TriggerMetrics) OnBatchFlushed(ctx context.Context, topic, trigger strin
 	t.Metrics.ObserveCount(metricTriggerBatchSize, withNamespace(ctx, map[string]string{
 		"topic": topic,
 	}), size)
+}
+
+// OnBatchFlushOutcome counts how those attempts ended. A sustained "error" rate
+// means the partition is re-flushing the same buffer without committing, which
+// consumes downstream capacity while consumed-vs-produced stays flat — the
+// failure mode that reads as "the pipeline is merely slow".
+func (t TriggerMetrics) OnBatchFlushOutcome(ctx context.Context, topic, trigger, result string) {
+	t.Metrics.Inc(metricTriggerBatchFlushOutcome, withNamespace(ctx, map[string]string{
+		"topic": topic, "trigger": trigger, "result": result,
+	}))
 }
 
 // OnBatchAdmission counts control-plane admission responses. Delivery is

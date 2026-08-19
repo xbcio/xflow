@@ -3,6 +3,7 @@ package kafka
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -14,6 +15,18 @@ import (
 
 const defaultAggregateMaxSize = 100
 const defaultAggregateFlushInterval = 100 * time.Millisecond
+
+// maxBufferedBatches bounds a partition's in-memory buffer at a multiple of
+// MaxSize. It exists because a failed flush now holds its messages for a timed
+// retry instead of re-running them on every arrival, so a downstream that stays
+// broken would otherwise grow the buffer without limit.
+//
+// Overflow drops the ARRIVING message, which is safe precisely because its
+// offset was never committed: Kafka redelivers from the lowest uncommitted
+// offset, which is the retained head of this buffer, so a dropped message comes
+// back. Dropping the newest rather than the oldest is what keeps the retained
+// run contiguous — the same reasoning the idle path already relies on.
+const maxBufferedBatches = 4
 
 // defaultEntrySeedFlushInterval is the flush timeout for the entry-seed
 // batch path. It is 10x the legacy Emit default because entry-seed flushes cross
@@ -129,14 +142,48 @@ func activateAggregate(ctx context.Context, in *types.TriggerActivateInput, cfg 
 	})
 }
 
+// submit hands a message to its partition's aggregator, retrying against a
+// fresh one if the aggregator self-terminates while the send is blocked.
+//
+// The retry is load-bearing rather than defensive, and the deadlock it prevents
+// is permanent. A send blocks whenever the aggregator is inside a flush, because
+// flush runs on the aggregator's own goroutine and so does not drain agg.ch
+// (cap = MaxSize) meanwhile; at the live topic's measured 329 msg/s per
+// partition the 100-slot channel fills in 0.3s, while one flush can take up to
+// the group execution deadline plus the admission timeout. If the aggregator
+// then reaps itself on its idle timer, it closes done and evictAggregator drops
+// it from the map — and without the done case here, this send waits forever on a
+// channel nobody will ever read again, never returning to aggregator() to pick
+// up the replacement.
+//
+// The caller is the SINGLE goroutine reading consumer.Messages() for every
+// partition, so one stuck send stops consumption for the whole assignment. That
+// is what froze scenario A's pipeline at t+50s with no recovery: consumed sat at
+// 0.3% of produced while lag climbed linearly, and goroutines and heap both
+// SETTLED rather than growing — the signature of work having stopped, not of
+// resources being exhausted.
+//
+// done is closed after evictAggregator runs (run's defers are LIFO), so the
+// aggregator() call on the next iteration cannot hand back the corpse.
 func (r *aggregateRuntime) submit(ctx context.Context, msg Message) bool {
 	key := partitionKey{topic: msg.Topic, partition: msg.Partition}
-	agg := r.aggregator(key)
-	select {
-	case agg.ch <- msg:
-		return true
-	case <-ctx.Done():
-		return false
+	for {
+		// Checked before aggregator() rather than relying on the select alone: with
+		// both done and ctx.Done() ready, select picks either, and taking the done
+		// branch during shutdown would spawn a replacement aggregator after
+		// rt.close had already drained the set.
+		if ctx.Err() != nil {
+			return false
+		}
+		agg := r.aggregator(key)
+		select {
+		case agg.ch <- msg:
+			return true
+		case <-agg.done:
+			// Aggregator reaped itself; loop to spawn its replacement.
+		case <-ctx.Done():
+			return false
+		}
 	}
 }
 
@@ -178,12 +225,19 @@ func (r *aggregateRuntime) evictAggregator(key partitionKey, agg *partitionAggre
 // well above FlushInterval so a low-traffic but still-assigned partition is not
 // prematurely reaped; the next message simply spawns a new aggregator.
 func aggregatorIdleTimeout(flushInterval time.Duration) time.Duration {
-	idle := flushInterval * 10
-	if idle < 5*time.Second {
-		idle = 5 * time.Second
-	}
-	return idle
+	return max(flushInterval*10, 5*time.Second)
 }
+
+// idleFlushTimeout bounds the last-gasp flush an aggregator attempts before
+// reaping itself.
+//
+// It covers one full downstream attempt — the group execution deadline plus the
+// admission request timeout — so a reap that lands while the pipeline is merely
+// busy still delivers its buffer rather than discarding it. Past that the buffer
+// is dropped and Kafka redelivers, which is the cheaper trade: the aggregator's
+// goroutine and map entry are freed, and its partition gets a fresh aggregator
+// on the next message.
+const idleFlushTimeout = 60 * time.Second
 
 func (r *aggregateRuntime) close(ctx context.Context) {
 	r.closeOnce.Do(func() {
@@ -229,6 +283,19 @@ func (a *partitionAggregator) run() {
 	timer.Stop()
 	timerActive := false
 	defer timer.Stop()
+	// retrying records that the last flush failed and its messages are still
+	// buffered awaiting a TIMED retry. Without it, a failed flush left the buffer
+	// full, so the size threshold was met again by the very next message and every
+	// subsequent arrival re-ran the whole buffer through the downstream. Measured
+	// against live traffic: 46.8 evals per committed record where 2 were expected,
+	// i.e. 95.7% of downstream work spent re-processing messages that never
+	// committed. Retries also grew the batch, making the next deadline breach more
+	// likely — positive feedback rather than a linear shortfall.
+	retrying := false
+	// overflowDropped counts messages shed while a retry is pending, so the
+	// buffer cap cannot silently discard traffic.
+	overflowDropped := 0
+	maxBuffered := a.rt.cfg.MaxSize * maxBufferedBatches
 	// idleTimer reaps the aggregator after a quiet window so a partition
 	// revoked by rebalance does not leak the goroutine and map entry.
 	idleTimer := time.NewTimer(a.idleTimeout)
@@ -271,11 +338,39 @@ func (a *partitionAggregator) run() {
 			if len(buffer) == 1 {
 				resetAggregateTimer(timer, &timerActive, a.rt.cfg.FlushInterval)
 			}
+			// While a retry is pending, arriving messages only accumulate: the
+			// retry is owned by the timer. Re-flushing here is what produced the
+			// divergence described at `retrying`.
+			if retrying {
+				if len(buffer) > maxBuffered {
+					// Shed the message just appended. Its offset is uncommitted,
+					// so Kafka redelivers it once the retained head commits.
+					buffer = buffer[:len(buffer)-1]
+					overflowDropped++
+					if emit, count := discardLog.allow(time.Now(), msg.Topic+"\x00overflow"); emit {
+						slog.Warn("kafka aggregate buffer at cap while a flush retry is pending; "+
+							"shedding messages for redelivery",
+							"topic", msg.Topic,
+							"partition", msg.Partition,
+							"cap", maxBuffered,
+							"dropped_since_last_success", overflowDropped,
+							"occurrences", count)
+					}
+					obs().OnMessageDiscarded(context.Background(), msg.Topic, "buffer_overflow")
+				}
+				continue
+			}
 			if len(buffer) >= a.rt.cfg.MaxSize {
 				if a.flush(context.Background(), buffer, discarded, "size") {
 					buffer = nil
 					discarded = nil
+					overflowDropped = 0
 					stopAggregateTimer(timer, &timerActive)
+				} else {
+					// Hold these messages for the timed retry rather than
+					// re-flushing on the next arrival.
+					retrying = true
+					resetAggregateTimer(timer, &timerActive, a.rt.cfg.FlushInterval)
 				}
 			}
 		case <-timer.C:
@@ -283,7 +378,10 @@ func (a *partitionAggregator) run() {
 			if a.flush(context.Background(), buffer, discarded, "timeout") {
 				buffer = nil
 				discarded = nil
+				retrying = false
+				overflowDropped = 0
 			} else if len(buffer) > 0 || len(discarded) > 0 {
+				retrying = true
 				resetAggregateTimer(timer, &timerActive, a.rt.cfg.FlushInterval)
 			}
 		case <-idleTimer.C:
@@ -292,8 +390,18 @@ func (a *partitionAggregator) run() {
 			// the goroutine and map entry are reclaimed. A failed flush here
 			// drops the in-memory buffer, which is safe: the offsets were never
 			// committed, so Kafka redelivers to whoever owns the partition next.
+			//
+			// The flush is bounded because this path is the one that must not
+			// hang: run() cannot return, and so the aggregator cannot be
+			// evicted, until it comes back. context.Background() gave flush's
+			// emitSem acquire no escape at all — Background().Done() is a nil
+			// channel — and left a shutdown unable to interrupt the attempt.
+			// Since the buffer is discardable here by the argument above,
+			// waiting past one downstream attempt buys nothing.
 			if len(buffer) > 0 || len(discarded) > 0 {
-				a.flush(context.Background(), buffer, discarded, "idle")
+				ctx, cancel := context.WithTimeout(context.Background(), idleFlushTimeout)
+				a.flush(ctx, buffer, discarded, "idle")
+				cancel()
 			}
 			return
 		}
@@ -324,8 +432,35 @@ func (a *partitionAggregator) flush(ctx context.Context, messages, discarded []M
 	case <-ctx.Done():
 		return false
 	}
+	// Observed BEFORE the emit, so the histogram describes what was ATTEMPTED.
+	// It used to sit after the success path, which meant failed large batches
+	// never entered it: the distribution then described only the small batches
+	// that survived, and reported mean=3.64 while buffers were stuck at 100+.
+	// A metric whose sample set is conditioned on success cannot be used to
+	// diagnose failure, which is exactly what it was needed for.
+	obs().OnBatchFlushed(ctx, messages[0].Topic, trigger, len(messages))
+	if !a.emitBatch(ctx, messages) {
+		obs().OnBatchFlushOutcome(ctx, messages[0].Topic, trigger, "error")
+		return false
+	}
+	obs().OnBatchFlushOutcome(ctx, messages[0].Topic, trigger, "ok")
+	// Copy rather than append(messages, discarded...): appending would write
+	// into buffer's spare capacity, aliasing a slice the caller still holds.
+	commits := make([]Message, 0, len(messages)+len(discarded))
+	commits = append(commits, messages...)
+	commits = append(commits, discarded...)
+	_ = commitMessages(ctx, a.rt.consumer, commits...)
+	return true
+}
+
+// emitBatch delivers one batch downstream, reporting only whether it succeeded.
+// Split out of flush so the flush-outcome metric has a single success and a
+// single failure edge; folding it back in means three separate return-false
+// sites, and a metric that a later branch can bypass is the shape that produced
+// the selection bias documented above.
+func (a *partitionAggregator) emitBatch(ctx context.Context, messages []Message) bool {
 	// Entry-seed mode admits the batch to the control plane instead of emitting
-	// locally. Both paths share the SAME commit rule below: the batch is only
+	// locally. Both paths share the SAME commit rule in flush: the batch is only
 	// durable-enough-to-commit after the side effect succeeded.
 	if a.rt.entrySeed {
 		// A trigger-group activation's Runtime additionally implements
@@ -338,34 +473,20 @@ func (a *partitionAggregator) flush(ctx context.Context, messages, discarded []M
 			types.EntrySeedRuntime
 			types.GroupExecRuntime
 		}); ok {
-			if !seedEntryBatchViaGroupExec(ctx, a.rt.in, gr, messages) {
-				return false
-			}
-		} else if rt, ok := a.rt.in.Runtime.(types.EntrySeedRuntime); ok {
-			if !seedEntryBatchMessages(ctx, a.rt.in, rt, messages) {
-				return false
-			}
-		} else {
-			// isEntrySeedActivation already required at least EntrySeedRuntime,
-			// so reaching here means the runtime changed under us. Withhold the
-			// commit rather than silently falling back to Emit with a different
-			// key space.
-			return false
+			return seedEntryBatchViaGroupExec(ctx, a.rt.in, gr, messages)
 		}
-	} else {
-		event := batchEvent(a.rt.in.NodeName, messages)
-		if _, err := a.rt.in.Emit(ctx, event); err != nil {
-			return false
+		if rt, ok := a.rt.in.Runtime.(types.EntrySeedRuntime); ok {
+			return seedEntryBatchMessages(ctx, a.rt.in, rt, messages)
 		}
+		// isEntrySeedActivation already required at least EntrySeedRuntime,
+		// so reaching here means the runtime changed under us. Withhold the
+		// commit rather than silently falling back to Emit with a different
+		// key space.
+		return false
 	}
-	obs().OnBatchFlushed(ctx, messages[0].Topic, trigger, len(messages))
-	// Copy rather than append(messages, discarded...): appending would write
-	// into buffer's spare capacity, aliasing a slice the caller still holds.
-	commits := make([]Message, 0, len(messages)+len(discarded))
-	commits = append(commits, messages...)
-	commits = append(commits, discarded...)
-	_ = commitMessages(ctx, a.rt.consumer, commits...)
-	return true
+	event := batchEvent(a.rt.in.NodeName, messages)
+	_, err := a.rt.in.Emit(ctx, event)
+	return err == nil
 }
 
 func resetAggregateTimer(timer *time.Timer, active *bool, d time.Duration) {

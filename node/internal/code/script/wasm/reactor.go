@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/xbcio/xflow/node/internal/code/script/engine"
 	"github.com/xbcio/xflow/types"
@@ -135,7 +136,13 @@ func (f *reactorFacade) evalFromPool(ctx context.Context, e *reactorEngine, inpu
 	if err != nil {
 		return nil, err
 	}
+	// Timed around evalOnce alone, matching the window the instance is actually
+	// held: borrow happens above and the decode below runs after the instance is
+	// back. Pairing this with the stdin size is what makes a slow eval
+	// distinguishable from a large one — see Observer.OnEval.
+	evalStart := time.Now()
 	out, doomed, err := inst.evalOnce(ctx, inputBytes)
+	obs().OnEval(ctx, len(inputBytes), time.Since(evalStart))
 	if err != nil {
 		if doomed {
 			e.doom(ctx, pool, inst)

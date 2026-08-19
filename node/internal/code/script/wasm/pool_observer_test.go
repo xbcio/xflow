@@ -103,8 +103,16 @@ func TestBorrowNotifiesObserverWithWaitDuration(t *testing.T) {
 }
 
 // doom must report an instance recycle with cause "eval_error" when the
-// context was not the thing that expired, and must report the doomed-state
-// instance count.
+// context was not the thing that expired.
+//
+// It must NOT report a "doomed" instance count. This test used to require one,
+// and that requirement was wrong: doom reported a literal 1 into a gauge that
+// nothing ever resets, so after the first doom the series read 1 forever
+// regardless of how many followed. That is a "has any instance ever been
+// doomed" boolean wearing a counter's name. A doomed instance is an event, not
+// a population — it is torn down and replaced immediately, so it has no
+// residency for a gauge to hold. The event is counted by OnInstanceRecycled,
+// asserted above, which is a real counter.
 func TestDoomNotifiesObserverEvalError(t *testing.T) {
 	rec := &recordingObserver{}
 	SetObserver(rec)
@@ -129,15 +137,14 @@ func TestDoomNotifiesObserverEvalError(t *testing.T) {
 	if len(causes) != 1 || causes[0] != "eval_error" {
 		t.Fatalf("recycled = %#v, want [eval_error]", causes)
 	}
-	instances := rec.instanceCalls()
-	found := false
-	for _, ic := range instances {
-		if ic.state == "doomed" {
-			found = true
+	for _, ic := range rec.instanceCalls() {
+		if ic.state != "ready" {
+			t.Errorf("doom reported instance count %#v; the only valid state is "+
+				"\"ready\" (a residency), and doom has no residency to report. "+
+				"Reporting a constant into a gauge that never resets makes the "+
+				"series a boolean, not a count — use OnInstanceRecycled for events.",
+				ic)
 		}
-	}
-	if !found {
-		t.Fatalf("instance count notifications = %#v, want a doomed entry", instances)
 	}
 }
 

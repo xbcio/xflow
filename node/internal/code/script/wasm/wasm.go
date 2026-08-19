@@ -79,15 +79,67 @@ func moduleKey(code string) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-// encodeStdin marshals the globals object written to guest stdin, minus $items.
+// encodeStdin marshals the globals object written to guest stdin, minus $items
+// and minus $supplies.
 //
 // It is the single funnel for every wasm payload — both reactor paths and the
-// command model — so the exclusion cannot be bypassed by adding a call site.
+// command model — so the exclusions cannot be bypassed by adding a call site.
 func encodeStdin(globals map[string]any) ([]byte, error) {
 	if globals == nil {
 		globals = map[string]any{}
 	}
-	return json.Marshal(stripItems(globals))
+	return json.Marshal(stripSupplies(stripItems(globals)))
+}
+
+// suppliesGlobal is the root holding every decoded supply's whole content
+// (exprx.BuildExprEnv assigns supply.Default.Decoded() to it on every call).
+const suppliesGlobal = "$supplies"
+
+// stripSupplies removes $supplies from a wasm guest's payload.
+//
+// A wasm guest cannot use it. Supply content reaches a wasm module through the
+// configure export at pool-build time (pool.go's configure, driven by
+// supply_consumer.go), which is the whole point of the two-phase init: the rules
+// are parsed ONCE per instance instead of once per message. A guest that also
+// received them on stdin would be re-parsing, inside the sandbox, content it
+// already holds pre-parsed.
+//
+// $supplies stays a live DSL root everywhere else — js, expression parameters,
+// and every non-wasm node still read it through exprx.BuildExprEnv. Only wasm
+// drops it, and only because only wasm has the configure channel that makes it
+// redundant.
+//
+// Measured (BenchmarkStdinRedundancy* and BenchmarkStdinRedundancyEndToEnd, at
+// the live topic's mean record size of 6845 bytes with a 60-rule supply):
+// $supplies was 13.3 KB of a 27.6 KB payload, and dropping it took a full eval
+// from 11.83ms to 4.68ms — 2.53x. The Go-side marshal is only ~90us of that;
+// the rest is the guest re-parsing the bytes inside the sandbox, where the same
+// payload decodes ~32x slower than natively (see stripItems).
+//
+// This is the same shape as stripItems and shares its constraint: the source map
+// is not mutated, because globals belongs to the engine's activation record and
+// deleting in place would corrupt a retry of the same node AND strip $supplies
+// from the js and expression paths that still promise it.
+//
+// Unlike $items, there is no second copy to chase. $items reached the payload
+// twice because BuildExprEnv flattens Input.Data both at the top level and under
+// $input, and $items lives in Input.Data (it arrives via a map body's execution
+// scope). $supplies is assigned directly onto the env — never into Input.Data —
+// so the root is its only route. TestGuestPayloadDropsSupplies pins that by
+// scanning for the VALUE, so a future change that routes it through Data fails
+// rather than silently restoring the cost.
+func stripSupplies(globals map[string]any) map[string]any {
+	if _, has := globals[suppliesGlobal]; !has {
+		return globals
+	}
+	out := make(map[string]any, len(globals)-1)
+	for k, v := range globals {
+		if k == suppliesGlobal {
+			continue
+		}
+		out[k] = v
+	}
+	return out
 }
 
 // itemsGlobal is the map-body root holding the map node's ENTIRE items array

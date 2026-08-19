@@ -23,6 +23,7 @@ func (r *recordingWasmObserver) OnConfigAge(context.Context, time.Duration)   {}
 func (r *recordingWasmObserver) OnInstanceCount(context.Context, string, int) {}
 func (r *recordingWasmObserver) OnInstanceRecycled(context.Context, string)   {}
 func (r *recordingWasmObserver) OnBorrowWait(context.Context, time.Duration)  {}
+func (r *recordingWasmObserver) OnEval(context.Context, int, time.Duration)   {}
 func (r *recordingWasmObserver) OnModuleCompile(context.Context, string)      {}
 
 // SetWasmObserver must actually forward into the internal wasm package's

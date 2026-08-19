@@ -370,6 +370,44 @@ func (h *reactorHost) seedSourceDrivenByKey(key string) {
 	h.flipEngineLocked(key)
 }
 
+// reportReadyInstances reports the host's TOTAL resident ready instances,
+// summed across every engine.
+//
+// Why the sum and not this engine's own size: xflow_wasm_instance_total is a
+// gauge carrying only a "state" label, so each report REPLACES the series.
+// Reporting per-engine made the series read "the last engine to swap" — with
+// SAS's two modules resident it read one pool's width while two pools existed
+// (a live run read 8 with 14-20 goroutines observed inside wazero on an 8-core
+// machine). That is worse than no metric: a missing number makes an operator
+// look, and a plausible-but-wrong one makes them stop looking. An entire round
+// of queueing arithmetic was built on the hidden half.
+//
+// Why not a per-module label instead: Observer's contract forbids it in as many
+// words — implementations "must never use content, hashes, or execution IDs as
+// labels" — and a module's only identity here IS its sha256.
+//
+// Lock order: callers hold e.mu (swapConfig) and this takes h.mu. That is the
+// existing direction — engineForKey and friends take h.mu and never reach for
+// an engine's mu — so it introduces no cycle. Keep it that way.
+func (h *reactorHost) reportReadyInstances(ctx context.Context) {
+	if h == nil {
+		// An engine built without a host has no siblings to sum over. Production
+		// engines always come from engineForKey, which sets host; the nil case
+		// exists only for bare &reactorEngine{} values used as cache filler in
+		// tests. Reporting nothing beats panicking on a metrics call.
+		return
+	}
+	h.mu.Lock()
+	total := 0
+	for _, e := range h.engines {
+		if p := e.active.Load(); p != nil {
+			total += p.size
+		}
+	}
+	h.mu.Unlock()
+	obs().OnInstanceCount(ctx, "ready", total)
+}
+
 // flipEngineLocked marks the engine for key source-driven if one exists.
 // Caller must hold h.mu.
 //

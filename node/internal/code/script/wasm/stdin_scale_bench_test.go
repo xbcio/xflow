@@ -178,3 +178,48 @@ func TestGuestPayloadDropsItems(t *testing.T) {
 		t.Fatal("encodeStdin mutated Input.Data")
 	}
 }
+
+// TestGuestPayloadDropsSupplies pins that supply CONTENT reaches a wasm guest
+// zero times, counting VALUES rather than keys.
+//
+// Keys are the wrong assertion here for the reason env_roots_leak taught: a
+// value can reach the payload under a key nobody thought to check. $supplies is
+// assigned directly onto the env today, so the root is its only route — but a
+// future change that put it into Input.Data would republish it under $input as
+// well, and a key-only assertion would still pass. The marker is scanned for in
+// the encoded bytes, so any route fails this test.
+//
+// $supplies stays a live DSL root for js and expression parameters; see
+// stripSupplies for why only wasm drops it (the configure export already
+// delivered the content, pre-parsed, at pool-build time) and what it was worth
+// (2.53x on a full eval at the live mean record size).
+func TestGuestPayloadDropsSupplies(t *testing.T) {
+	const marker = "UNIQUE_SUPPLY_MARKER_4c7b"
+	in := &types.Input{Data: map[string]any{"keep": "kept"}}
+
+	env := exprx.BuildExprEnv(in, nil)
+	env["$supplies"] = map[string]any{"rules": []any{marker}}
+
+	payload, err := encodeStdin(env)
+	if err != nil {
+		t.Fatalf("encode guest payload: %v", err)
+	}
+	if got := strings.Count(string(payload), marker); got != 0 {
+		t.Fatalf("supply content serialised %d time(s) into the guest payload, want 0.\n"+
+			"A wasm guest receives supply content through the configure export at "+
+			"pool-build time, so a copy on stdin is re-parsed inside the sandbox on "+
+			"every message for nothing.\npayload: %s", got, payload)
+	}
+	// Dropping $supplies must not drop anything else: the record still has to
+	// reach the guest, both flattened and under $input.
+	if got := strings.Count(string(payload), "kept"); got != 2 {
+		t.Fatalf("sibling key crossed %d time(s), want 2 (root + $input)\npayload: %s", got, payload)
+	}
+
+	// The engine's activation record must survive: deleting in place would leave
+	// the node unable to run a second time, and would strip $supplies from the js
+	// and expression paths that still promise it.
+	if _, ok := env["$supplies"]; !ok {
+		t.Fatal("encodeStdin mutated the caller's globals map")
+	}
+}

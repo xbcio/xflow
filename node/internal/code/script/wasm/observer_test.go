@@ -26,7 +26,13 @@ type recordingObserver struct {
 	instances  []instanceCall
 	recycled   []string
 	borrowWait []time.Duration
+	evals      []evalCall
 	compiles   []string
+}
+
+type evalCall struct {
+	stdinBytes int
+	d          time.Duration
 }
 
 type swapCall struct {
@@ -66,6 +72,11 @@ func (r *recordingObserver) OnBorrowWait(_ context.Context, d time.Duration) {
 	defer r.mu.Unlock()
 	r.borrowWait = append(r.borrowWait, d)
 }
+func (r *recordingObserver) OnEval(_ context.Context, stdinBytes int, d time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.evals = append(r.evals, evalCall{stdinBytes, d})
+}
 func (r *recordingObserver) OnModuleCompile(_ context.Context, result string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -100,6 +111,11 @@ func (r *recordingObserver) borrowWaits() []time.Duration {
 	defer r.mu.Unlock()
 	return append([]time.Duration(nil), r.borrowWait...)
 }
+func (r *recordingObserver) evalCalls() []evalCall {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]evalCall(nil), r.evals...)
+}
 func (r *recordingObserver) compileResults() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -125,7 +141,14 @@ func TestSetObserverInstallsAndRestoresDefault(t *testing.T) {
 }
 
 // ruleCount must report a plain count, never content — and -1 for a shape it
-// cannot parse, which is itself worth alerting on.
+// does not recognize, which is itself worth alerting on.
+//
+// The "unrecognized" cases carry the weight here. This function once counted
+// only a "rules" key, and an absent key unmarshals to a nil slice rather than
+// an error — so every phase-split payload reported a confident 0, a value that
+// is ALSO legal ("the source says there are no rules"). The gauge read healthy
+// while the host understood none of the content. -1 must be reachable for
+// well-formed JSON, not just for bytes that fail to parse.
 func TestRuleCount(t *testing.T) {
 	cases := []struct {
 		name string
@@ -134,7 +157,15 @@ func TestRuleCount(t *testing.T) {
 	}{
 		{"empty rules", `{"rules":[]}`, 0},
 		{"three rules", `{"rules":[{"id":"a"},{"id":"b"},{"id":"c"}]}`, 3},
-		{"no rules key", `{}`, 0},
+		// The phase-split shape a guest with more than one evaluation stage
+		// publishes. Counted as the sum: both phases serve.
+		{"phase split", `{"revision":7,"pre_analysis":[{"id":1},{"id":2}],"post_decode":[{"id":3}]}`, 3},
+		{"phase split empty", `{"revision":7,"pre_analysis":[],"post_decode":[]}`, 0},
+		{"one phase only", `{"pre_analysis":[{"id":1}]}`, 1},
+		// Well-formed JSON carrying none of the known keys. This is the case
+		// that must NOT read as zero.
+		{"no known key", `{}`, -1},
+		{"unknown shape", `{"revision":7,"entries":[{"id":1}]}`, -1},
 		{"malformed json", `not json`, -1},
 	}
 	for _, c := range cases {

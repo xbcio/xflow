@@ -21,9 +21,20 @@ type Observer interface {
 	// OnMessageDeadLettered reports a dead-letter publish attempt. result is
 	// "ok" or "error".
 	OnMessageDeadLettered(ctx context.Context, topic, result string)
-	// OnBatchFlushed reports one batch leaving the aggregator. trigger is a fixed
-	// enum: "size", "timeout", "idle", "close". size is the message count.
+	// OnBatchFlushed reports one batch ATTEMPTING to leave the aggregator.
+	// trigger is a fixed enum: "size", "timeout", "idle", "close". size is the
+	// message count.
+	//
+	// Reported before the downstream call, not after it succeeds. Conditioning
+	// the sample set on success made the size histogram describe only surviving
+	// batches, so a partition whose buffer was stuck at its cap reported a mean
+	// of 3.64 — see the comment at the call site.
 	OnBatchFlushed(ctx context.Context, topic, trigger string, size int)
+	// OnBatchFlushOutcome reports whether that attempt succeeded. result is "ok"
+	// or "error". Paired with OnBatchFlushed, the ratio is the retry rate: the
+	// signal that distinguishes a slow pipeline from one re-running the same
+	// messages without ever committing them.
+	OnBatchFlushOutcome(ctx context.Context, topic, trigger, result string)
 	// OnBatchAdmission reports the control-plane response to a batch admission.
 	// state is "accepted", "duplicate", "conflict" or "error".
 	//
@@ -35,10 +46,11 @@ type Observer interface {
 
 type noopObserver struct{}
 
-func (noopObserver) OnMessageDiscarded(context.Context, string, string)    {}
-func (noopObserver) OnMessageDeadLettered(context.Context, string, string) {}
-func (noopObserver) OnBatchFlushed(context.Context, string, string, int)   {}
-func (noopObserver) OnBatchAdmission(context.Context, string, string)      {}
+func (noopObserver) OnMessageDiscarded(context.Context, string, string)          {}
+func (noopObserver) OnMessageDeadLettered(context.Context, string, string)       {}
+func (noopObserver) OnBatchFlushed(context.Context, string, string, int)         {}
+func (noopObserver) OnBatchFlushOutcome(context.Context, string, string, string) {}
+func (noopObserver) OnBatchAdmission(context.Context, string, string)            {}
 
 // observer holds the installed Observer as an atomic pointer rather than a
 // mutex-guarded variable because obs() sits on the per-message path, which runs
