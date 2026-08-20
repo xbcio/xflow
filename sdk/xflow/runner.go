@@ -216,10 +216,11 @@ func WithRunnerNodeRegistry(reg *execution.Registry) RunnerOption {
 // control plane, claims leases for its advertised node types, executes them
 // with the handlers registered in this process, and reports results.
 type Runner struct {
-	svc     *runnersvc.Runner
-	cleanup func()
-	pool    types.ResourcePool
-	metrics *metrics.Metrics
+	svc              *runnersvc.Runner
+	cleanup          func()
+	releaseObservers func()
+	pool             types.ResourcePool
+	metrics          *metrics.Metrics
 }
 
 // NewRunner creates an embeddable runner. Register node handlers before
@@ -262,11 +263,17 @@ func NewRunner(cfg RunnerConfig, opts ...RunnerOption) (*Runner, error) {
 	if reg == nil {
 		reg = execution.NewRegistry()
 	}
+	// Last, after every fallible step: these write process-global slots that
+	// only Close releases, so installing them before a step that can still
+	// return an error would leak them on that error path and make the next
+	// NewRunner in this process panic.
+	releaseObservers := installProcessObservers(o)
 	return &Runner{
-		svc:     runnersvc.New(client, reg, svcCfg),
-		cleanup: cleanup,
-		pool:    svcCfg.ResourcePool,
-		metrics: o.metrics,
+		svc:              runnersvc.New(client, reg, svcCfg),
+		cleanup:          cleanup,
+		releaseObservers: releaseObservers,
+		pool:             svcCfg.ResourcePool,
+		metrics:          o.metrics,
 	}, nil
 }
 
@@ -399,10 +406,18 @@ func (r *Runner) MetricsHandler() http.Handler {
 	return r.metrics.Handler()
 }
 
-// Close releases transport-owned resources (the gRPC connection) and the
-// process-scoped ResourcePool. Idempotent; safe to defer immediately after
-// NewRunner.
+// Close releases transport-owned resources (the gRPC connection), the
+// process-scoped ResourcePool, and the process-wide observer slots this runner
+// installed. Idempotent; safe to defer immediately after NewRunner.
+//
+// Releasing the observers is what makes the install-once guard on those slots
+// survivable: they panic on a second non-nil install, so a process that builds
+// more than one runner over its lifetime depends on this half of the pair.
 func (r *Runner) Close() error {
+	if r.releaseObservers != nil {
+		r.releaseObservers()
+		r.releaseObservers = nil
+	}
 	if r.cleanup != nil {
 		r.cleanup()
 		r.cleanup = nil
@@ -554,17 +569,55 @@ func wireRunnerTriggerHosting(svcCfg *runnersvc.Config, cfg RunnerConfig, o *run
 	return nil
 }
 
-// wireRunnerMetrics installs observers on every component that reports. The
-// registry is inert without them — an unobserved registry is what makes a
-// scrape or a report return an empty payload.
+// wireRunnerMetrics installs the observers that belong to THIS assembly — the
+// ones reachable through svcCfg and owned by the returned config. The registry
+// is inert without them: an unobserved registry is what makes a scrape or a
+// report return an empty payload.
+//
+// The process-wide singletons (supply.Default, the wasm/script/kafka package
+// observers) are deliberately NOT installed here. This function runs inside
+// buildRunnerServiceConfig, a pure configuration constructor that a dozen tests
+// call directly and that an embedder may call more than once per process.
+// Installing a process-global from it made the second call panic on the
+// install-once guard — sdk/xflow's own package went red that way, reading as
+// "TestNewRunnerObservesNodeExecutionTimeouts fails" rather than as a lifecycle
+// defect, because the panicking call sits three frames below the test. Those
+// installs now live in installProcessObservers, called once from NewRunner and
+// released by Close.
 func wireRunnerMetrics(svcCfg *runnersvc.Config, o *runnerOptions) {
 	if o.metrics == nil {
 		return
 	}
-	sm := metrics.NewSupplyMetrics(o.metrics)
 	if svcCfg.SupplyGate != nil {
-		svcCfg.SupplyGate.SetObserver(sm)
+		svcCfg.SupplyGate.SetObserver(metrics.NewSupplyMetrics(o.metrics))
 	}
+	// The node execution timeout observer reports runner-detected timeouts, the
+	// abandoned-goroutine gauge, and per-invocation duration. Without it a
+	// runner that is shedding work on deadline looks identical to one that is
+	// simply idle — the tasks end as failures on the server with nothing here
+	// to say the deadline is what ended them.
+	svcCfg.TimeoutObserver = metrics.NewNodeTimeoutMetrics(o.metrics)
+}
+
+// installProcessObservers installs the observers that live in process-global
+// slots rather than in the runner's own config, and returns the function that
+// releases them.
+//
+// Each of these slots holds exactly one observer and panics on a second non-nil
+// install, so that two live runners in one process cannot silently drop one
+// side's observations. That guard is only usable if install and release are
+// symmetric: NewRunner installs, Close releases. Without the release, an
+// embedder that builds a runner per test — the in-process embedded model, where
+// the control plane and the runner share a binary — crashes on the second
+// construction.
+//
+// Returns nil when there is nothing to release, so Close can call it
+// unconditionally.
+func installProcessObservers(o *runnerOptions) func() {
+	if o.metrics == nil {
+		return nil
+	}
+	sm := metrics.NewSupplyMetrics(o.metrics)
 	supply.Default.SetObserver(sm)
 	xnode.SetWasmObserver(sm)
 	xnode.SetScriptObserver(metrics.NewScriptMetrics(o.metrics))
@@ -573,12 +626,12 @@ func wireRunnerMetrics(svcCfg *runnersvc.Config, o *runnerOptions) {
 	// malformed records looks exactly like an idle topic — offsets keep being
 	// committed, so consumer-group lag stays at zero.
 	kafkatrigger.SetObserver(metrics.NewTriggerMetrics(o.metrics))
-	// The node execution timeout observer reports runner-detected timeouts, the
-	// abandoned-goroutine gauge, and per-invocation duration. Without it a
-	// runner that is shedding work on deadline looks identical to one that is
-	// simply idle — the tasks end as failures on the server with nothing here
-	// to say the deadline is what ended them.
-	svcCfg.TimeoutObserver = metrics.NewNodeTimeoutMetrics(o.metrics)
+	return func() {
+		supply.Default.SetObserver(nil)
+		xnode.SetWasmObserver(nil)
+		xnode.SetScriptObserver(nil)
+		kafkatrigger.SetObserver(nil)
+	}
 }
 
 // runnerCapabilities converts declared node types and guarantees the group
