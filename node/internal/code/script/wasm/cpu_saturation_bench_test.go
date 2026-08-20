@@ -38,7 +38,35 @@ func cpuSeconds() float64 {
 const liveRuleCount = 2
 
 // benchRules builds n distinct rules over fields the realistic record carries.
+//
+// The field is `value`, not `request.uri`, and that correction is load-bearing.
+// realisticRecord nests the request inside `value` as a JSON *string*, so
+// `request` is not an env key at all: an earlier version of these rules read
+// `request.uri` and every expr.Run returned "cannot fetch uri from <nil>". The
+// guest's eval() swallows a rule error with `continue`, so the benchmarks ran
+// green while measuring rules that aborted at their first field fetch.
+//
+// Measured cost of the two shapes at the live record size (one expr.Run, host
+// process, same invocation): erroring 942 ns, matching `len(value) > 100`
+// 2621 ns, trivial `topic startsWith` 51 ns. So the old shape was not free —
+// error construction is most of that 942 ns — but against a ~30 µs decode it
+// was never going to move the totals. See BenchmarkEvalRuleShape for the
+// in-sandbox version of that comparison.
 func benchRules(n int) [][2]string {
+	rules := make([][2]string, 0, n)
+	for i := range n {
+		rules = append(rules, [2]string{
+			fmt.Sprintf("r%d", i),
+			fmt.Sprintf(`value contains "/api/v%d/"`, i%8),
+		})
+	}
+	return rules
+}
+
+// benchRulesErroring reproduces the pre-correction rule shape: it reads a root
+// the record does not publish, so every rule aborts at its first field fetch.
+// Kept only so BenchmarkEvalRuleShape can measure what that mistake cost.
+func benchRulesErroring(n int) [][2]string {
 	rules := make([][2]string, 0, n)
 	for i := range n {
 		rules = append(rules, [2]string{
@@ -47,6 +75,64 @@ func benchRules(n int) [][2]string {
 		})
 	}
 	return rules
+}
+
+// BenchmarkEvalRuleShape measures how much the erroring-rule mistake distorted
+// every other benchmark in this file.
+//
+// Both arms run in ONE invocation, at the live rule count and the live mean
+// record size, differing only in whether the rules reach a field that exists.
+// If the two arms are within noise, the numbers reported from the erroring
+// shape stand as measured and only the per-rule attribution was wrong. If they
+// separate, every rule-sensitive reading here has to be re-taken.
+func BenchmarkEvalRuleShape(b *testing.B) {
+	shapes := []struct {
+		name  string
+		rules [][2]string
+	}{
+		{"erroring", benchRulesErroring(liveRuleCount)},
+		{"matching", benchRules(liveRuleCount)},
+	}
+	for _, s := range shapes {
+		b.Run(s.name, func(b *testing.B) {
+			ctx := context.Background()
+			h := newReactorHost()
+			e, err := h.engineFor(ctx, reactorWasm)
+			if err != nil {
+				b.Fatalf("engineFor: %v", err)
+			}
+			cfgBytes, err := json.Marshal(ruleConfig(s.rules...))
+			if err != nil {
+				b.Fatalf("marshal cfg: %v", err)
+			}
+			if err := e.swapConfig(ctx, cfgBytes, 1, 1); err != nil {
+				b.Fatalf("swapConfig: %v", err)
+			}
+			facade := &reactorFacade{}
+			input, err := json.Marshal(realisticRecord(6845))
+			if err != nil {
+				b.Fatalf("marshal input: %v", err)
+			}
+			// Report what the guest actually matched, so a silently-erroring
+			// rule set cannot pass itself off as a working one again.
+			out, err := facade.evalFromPool(ctx, e, input)
+			if err != nil {
+				b.Fatalf("warmup: %v", err)
+			}
+			b.Logf("guest output: %s", out)
+
+			b.ResetTimer()
+			cpuStart := cpuSeconds()
+			for b.Loop() {
+				if _, err := facade.evalFromPool(ctx, e, input); err != nil {
+					b.Fatalf("eval: %v", err)
+				}
+			}
+			cpu := cpuSeconds() - cpuStart
+			b.StopTimer()
+			b.ReportMetric(cpu/float64(b.N)*1000, "cpu_ms/eval")
+		})
+	}
 }
 
 // BenchmarkEvalCPUSaturation answers whether wasm eval throughput is bounded by
