@@ -72,9 +72,14 @@ type SupplyGate struct {
 	registry *supply.Registry
 	logger   *slog.Logger
 
+	// observerMu guards observer and observerInstalled.
+	observerMu sync.RWMutex
 	// observer, when set, receives metrics-facing notifications. nil means no
 	// observation (existing callers/tests that never call SetObserver).
 	observer SupplyGateObserver
+	// observerInstalled tracks whether a non-nil observer is currently set so
+	// a second non-nil SetObserver call can panic rather than silently overwrite.
+	observerInstalled bool
 
 	// resources maps supply NODE name → resource name, recorded by Admit for
 	// every requirement it processes. A heartbeat hint carries only the node
@@ -102,7 +107,25 @@ func NewSupplyGate(f SupplyFetcher, reg *supply.Registry, logger *slog.Logger) *
 }
 
 // SetObserver installs the gate's observer. nil disables observation.
-func (g *SupplyGate) SetObserver(o SupplyGateObserver) { g.observer = o }
+//
+// A second non-nil call panics: two callers racing to set the observer means
+// one of them would silently lose all its observations, which is harder to
+// diagnose than a startup panic. Pass nil first to remove the current observer
+// before installing a new one (tests use this as their teardown path).
+func (g *SupplyGate) SetObserver(o SupplyGateObserver) {
+	g.observerMu.Lock()
+	defer g.observerMu.Unlock()
+	if o == nil {
+		g.observer = nil
+		g.observerInstalled = false
+		return
+	}
+	if g.observerInstalled {
+		panic("runner.SupplyGate.SetObserver: observer already installed; call SetObserver(nil) first")
+	}
+	g.observer = o
+	g.observerInstalled = true
+}
 
 // Fetcher returns the underlying SupplyFetcher. Used by the runner to install
 // supply encryption keys on the HTTP fetcher after registration.
@@ -212,22 +235,32 @@ func (g *SupplyGate) Admit(ctx context.Context, workflowID string, reqs []engine
 
 // notifyFetch, notifyNotReady, notifyServingUnavailable are all nil-safe: most
 // callers in this codebase (every pre-existing supply_gate_test.go case) never
-// install an observer.
+// install an observer. Each snaps the observer pointer under a read lock so the
+// call is data-race-free relative to a concurrent SetObserver.
 func (g *SupplyGate) notifyFetch(ctx context.Context, name, result string) {
-	if g.observer != nil {
-		g.observer.OnSupplyFetch(ctx, name, result)
+	g.observerMu.RLock()
+	o := g.observer
+	g.observerMu.RUnlock()
+	if o != nil {
+		o.OnSupplyFetch(ctx, name, result)
 	}
 }
 
 func (g *SupplyGate) notifyNotReady(ctx context.Context, workflowID, supplyName string, notReady bool) {
-	if g.observer != nil {
-		g.observer.OnSupplyNotReady(ctx, workflowID, supplyName, notReady)
+	g.observerMu.RLock()
+	o := g.observer
+	g.observerMu.RUnlock()
+	if o != nil {
+		o.OnSupplyNotReady(ctx, workflowID, supplyName, notReady)
 	}
 }
 
 func (g *SupplyGate) notifyServingUnavailable(ctx context.Context, name string, serving bool) {
-	if g.observer != nil {
-		g.observer.OnSupplyServingUnavailable(ctx, name, serving)
+	g.observerMu.RLock()
+	o := g.observer
+	g.observerMu.RUnlock()
+	if o != nil {
+		o.OnSupplyServingUnavailable(ctx, name, serving)
 	}
 }
 

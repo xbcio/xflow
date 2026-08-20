@@ -15,7 +15,6 @@ import (
 	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/namespace"
-	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/observability/metrics"
 	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/service/protocol"
@@ -284,11 +283,6 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 		dispatcherOpts = append(dispatcherOpts, WithDispatcherObserver(metrics.NewDispatcherMetrics(cfg.Metrics)))
 	}
 	dispatcher := NewDispatcher(eng, runners, dispatcherOpts...)
-
-	if cfg.Metrics != nil {
-		node.SetScriptObserver(metrics.NewScriptMetrics(cfg.Metrics))
-		node.SetWasmObserver(metrics.NewSupplyMetrics(cfg.Metrics))
-	}
 
 	var serverOpts []ServerOption
 	if cfg.Auth != nil {

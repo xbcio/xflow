@@ -121,6 +121,10 @@ type Registry struct {
 	// (the default) means no observation — most Registry instances in tests
 	// never install one.
 	observer ConsumerCountObserver
+
+	// observerInstalled tracks whether a non-nil observer is set, so a second
+	// non-nil SetObserver call can panic. Guarded by mu.
+	observerInstalled bool
 }
 
 func NewRegistry() *Registry {
@@ -135,10 +139,25 @@ func NewRegistry() *Registry {
 
 // SetObserver installs the registry's consumer-count observer. Pass nil to
 // disable observation.
+//
+// For shared instances (supply.Default), call once during process
+// initialization. A second non-nil call panics: two callers racing to set the
+// observer means one of them would silently lose all its observations, which is
+// harder to diagnose than a startup panic. Pass nil first to remove the current
+// observer before installing a new one (tests use this as their teardown path).
 func (r *Registry) SetObserver(o ConsumerCountObserver) {
 	r.mu.Lock()
+	defer r.mu.Unlock()
+	if o == nil {
+		r.observer = nil
+		r.observerInstalled = false
+		return
+	}
+	if r.observerInstalled {
+		panic("supply.Registry.SetObserver: observer already installed; call SetObserver(nil) first")
+	}
 	r.observer = o
-	r.mu.Unlock()
+	r.observerInstalled = true
 }
 
 // notifyConsumerCount reports the current consumer count for name. Caller

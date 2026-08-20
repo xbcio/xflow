@@ -59,18 +59,42 @@ func (noopObserver) OnBatchAdmission(context.Context, string, string)           
 // behind one pointer.
 var observer atomic.Pointer[Observer]
 
+// observerMu guards the observerInstalled flag. It protects only the write
+// path; the hot-path read (obs()) goes straight to the atomic pointer.
+var observerMu sync.Mutex
+
+// observerInstalled tracks whether a non-noop observer is currently installed,
+// so a second non-nil SetObserver call can be caught and panicked. It is
+// guarded by observerMu.
+var observerInstalled bool
+
 func init() {
 	var o Observer = noopObserver{}
 	observer.Store(&o)
 }
 
 // SetObserver installs the global trigger observer. Pass nil to restore the
-// no-op default. Call once during process initialization.
+// no-op default.
+//
+// Call once during process initialization. A second non-nil call panics:
+// two callers racing to set a process-wide observer means one of them will
+// silently lose all its observations, which is worse than failing loudly.
+// Pass nil explicitly to remove the observer before installing a new one
+// (tests use this as their teardown path).
 func SetObserver(o Observer) {
+	observerMu.Lock()
+	defer observerMu.Unlock()
 	if o == nil {
-		o = noopObserver{}
+		var noop Observer = noopObserver{}
+		observer.Store(&noop)
+		observerInstalled = false
+		return
+	}
+	if observerInstalled {
+		panic("kafka.SetObserver: observer already installed; call SetObserver(nil) first")
 	}
 	observer.Store(&o)
+	observerInstalled = true
 }
 
 func obs() Observer { return *observer.Load() }
