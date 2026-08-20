@@ -84,9 +84,21 @@ func (t TriggerMetrics) OnBatchFlushOutcome(ctx context.Context, topic, trigger,
 // at-least-once by design, so a nonzero conflict/duplicate rate is expected
 // rather than alarming — but its MAGNITUDE is the only evidence available for
 // deciding whether the duplicate window is worth closing.
-func (t TriggerMetrics) OnBatchAdmission(ctx context.Context, topic, state string) {
+//
+// reason narrows state="error", which by itself conflated four failures that
+// call for four different responses: the group never ran (execute_group), it
+// ran and failed (group_outcome), it ran and succeeded but the admission round
+// trip failed and threw that work away (seed_transport), or this runner and
+// the control plane disagree about the protocol (unknown_state). Only the last
+// three redeliver, and only one of them wastes completed downstream work per
+// occurrence.
+//
+// Both labels are closed enums built inside the kafka trigger package. Neither
+// is derived from a message, a hash, or a runtime's free-text error — the
+// cause text belongs in the log, where unbounded values are safe.
+func (t TriggerMetrics) OnBatchAdmission(ctx context.Context, topic, state, reason string) {
 	t.Metrics.Inc(metricTriggerBatchAdmission, withNamespace(ctx, map[string]string{
-		"topic": topic, "state": state,
+		"topic": topic, "state": state, "reason": reason,
 	}))
 }
 

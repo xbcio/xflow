@@ -46,7 +46,7 @@ func (o *recordingObserver) OnMessageDeadLettered(_ context.Context, topic, resu
 // covered by recordingBatchObserver in kafka_entry_seed_batch_test.go).
 func (o *recordingObserver) OnBatchFlushed(context.Context, string, string, int)         {}
 func (o *recordingObserver) OnBatchFlushOutcome(context.Context, string, string, string) {}
-func (o *recordingObserver) OnBatchAdmission(context.Context, string, string)            {}
+func (o *recordingObserver) OnBatchAdmission(context.Context, string, string, string)    {}
 
 func (o *recordingObserver) wakeLocked() {
 	close(o.notify)

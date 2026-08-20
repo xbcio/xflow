@@ -345,6 +345,7 @@ type recordingBatchObserver struct {
 	flushes    []string // trigger reasons
 	sizes      []int
 	admissions []string
+	reasons    []string // parallel to admissions
 }
 
 func (o *recordingBatchObserver) OnBatchFlushed(_ context.Context, _, trigger string, size int) {
@@ -354,10 +355,24 @@ func (o *recordingBatchObserver) OnBatchFlushed(_ context.Context, _, trigger st
 	o.sizes = append(o.sizes, size)
 }
 
-func (o *recordingBatchObserver) OnBatchAdmission(_ context.Context, _, state string) {
+func (o *recordingBatchObserver) OnBatchAdmission(_ context.Context, _, state, reason string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.admissions = append(o.admissions, state)
+	o.reasons = append(o.reasons, reason)
+}
+
+// admissionPairs returns state+reason together. Asserting on state alone was
+// exactly the blind spot the reason label was added to close, so a helper that
+// keeps them apart would reintroduce it in the tests.
+func (o *recordingBatchObserver) admissionPairs() []string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	pairs := make([]string, 0, len(o.admissions))
+	for i, state := range o.admissions {
+		pairs = append(pairs, state+"/"+o.reasons[i])
+	}
+	return pairs
 }
 
 func (o *recordingBatchObserver) snapshot() ([]string, []int, []string) {

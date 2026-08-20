@@ -36,12 +36,19 @@ type Observer interface {
 	// messages without ever committing them.
 	OnBatchFlushOutcome(ctx context.Context, topic, trigger, result string)
 	// OnBatchAdmission reports the control-plane response to a batch admission.
-	// state is "accepted", "duplicate", "conflict" or "error".
+	// state is "accepted", "duplicate", "conflict", "deterministic_skip" or
+	// "error"; reason narrows the two non-success states to WHICH failure this
+	// was, and is admissionReasonNone otherwise.
 	//
 	// The conflict rate is the ONLY signal that shows how often a redelivered
 	// batch actually re-executes. The design accepts that duplicate (delivery is
 	// at-least-once), but accepting it is not the same as not looking at it.
-	OnBatchAdmission(ctx context.Context, topic, state string)
+	//
+	// reason exists because "error" alone conflates four failures that call for
+	// four different responses — see the admissionReason constants. Both labels
+	// are closed enums built in this package; neither is ever derived from a
+	// message or from a runtime's free-text error.
+	OnBatchAdmission(ctx context.Context, topic, state, reason string)
 }
 
 type noopObserver struct{}
@@ -50,7 +57,7 @@ func (noopObserver) OnMessageDiscarded(context.Context, string, string)         
 func (noopObserver) OnMessageDeadLettered(context.Context, string, string)       {}
 func (noopObserver) OnBatchFlushed(context.Context, string, string, int)         {}
 func (noopObserver) OnBatchFlushOutcome(context.Context, string, string, string) {}
-func (noopObserver) OnBatchAdmission(context.Context, string, string)            {}
+func (noopObserver) OnBatchAdmission(context.Context, string, string, string)    {}
 
 // observer holds the installed Observer as an atomic pointer rather than a
 // mutex-guarded variable because obs() sits on the per-message path, which runs
