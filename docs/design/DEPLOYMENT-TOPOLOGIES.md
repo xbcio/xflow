@@ -109,6 +109,13 @@ workflow 会在每个已连接 runner 上执行）、supply 传输层加密和 a
 reconciler。三处都不报错，只是静默降级。新增 `apiserver.Config` 字段时必须
 同时给出 `WithServer*` 选项，否则嵌入式宿主拿不到。
 
+**运维**：KEK（`XFLOW_MASTER_KEY` 或 `--master-key-file`）只由 `cmd/server` 加载；
+`cmd/runner` 完全不涉及 KEK。`--mode=production`（通过 `validateProduction` 强制）
+下缺少 KEK 会导致 server **启动即退出**——进程不拉起，依赖它的管道会中断，现象
+像管道本身出问题而非 server 报错。`--mode=dev`（默认）只打 stderr 警告，不阻止
+启动。生产环境及使用 `--mode=production` 的集成测试环境，须在启动 server 前设置
+好 `XFLOW_MASTER_KEY`。
+
 | 维度 | 说明 |
 |---|---|
 | 工厂 | `xflow.NewServer(xflow.ServerConfig{RedisAddr, RedisConfig, Store}, opts...)` |

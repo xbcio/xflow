@@ -569,6 +569,13 @@ consumer 侧「hash 未变不重建」同时失效。守护测试见
 
 **production 模式缺 KEK 拒绝启动**；dev 模式允许，落库明文并打 stderr 警告。
 
+**运维注意**：KEK 只影响 `cmd/server`，`cmd/runner` 完全不涉及 KEK。`--mode=production`
+下 server 在启动阶段（`validateProduction`）检测到 `XFLOW_MASTER_KEY` 未设置时会
+**立即返回错误退出**——server 进程不会拉起，依赖它的后续流程会中断，表现为「管道
+中途挂掉」而非「启动即报 KEK 缺失」（进程已不存在，日志往往被淹没）。dev 模式
+（默认）只打 stderr 警告，不拒绝启动。生产环境与使用 `--mode=production` 的集成
+测试环境，必须在启动 server 前设置好 `XFLOW_MASTER_KEY`（或 `--master-key-file`）。
+
 ### 10.1 传输 key 轮换
 
 **调度**：`ControlPlane.Start` 起一条轮换协程（仅在启用 supply 加密时），每
