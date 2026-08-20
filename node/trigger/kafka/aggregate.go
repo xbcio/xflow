@@ -21,11 +21,17 @@ const defaultAggregateFlushInterval = 100 * time.Millisecond
 // retry instead of re-running them on every arrival, so a downstream that stays
 // broken would otherwise grow the buffer without limit.
 //
-// Overflow drops the ARRIVING message, which is safe precisely because its
-// offset was never committed: Kafka redelivers from the lowest uncommitted
-// offset, which is the retained head of this buffer, so a dropped message comes
-// back. Dropping the newest rather than the oldest is what keeps the retained
-// run contiguous — the same reasoning the idle path already relies on.
+// Overflow drops the ARRIVING message, keeping the retained run contiguous. Be
+// clear about what that costs: those messages are LOST, not deferred. Kafka
+// tracks one offset per partition, so the next successful flush commits every
+// offset below its highest one — including the shed offsets, which are lower
+// than everything that arrived after them. Nothing brings them back.
+// TestKafkaAggregateShedMessagesAreSilentlySkipped measures the loss directly.
+//
+// This is a deliberate trade at the cap: something must give when a broken
+// downstream outlasts the buffer, and shedding the newest keeps the retained
+// run contiguous so the retry has a chance to succeed. But it is data loss, and
+// OnMessageDiscarded("buffer_overflow") is the only signal that it happened.
 const maxBufferedBatches = 4
 
 // defaultEntrySeedFlushInterval is the flush timeout for the entry-seed
@@ -279,23 +285,67 @@ func (a *partitionAggregator) run() {
 	// them — the same skip hazard the per-partition serial design exists to
 	// prevent. They ride along with the next successful flush instead.
 	var discarded []Message
+	// pending is the batch handed to the flusher goroutine: in flight, or failed
+	// and awaiting a timed retry. It is disjoint from buffer and always holds
+	// LOWER offsets, which is what keeps commits in offset order — see flushSlot.
+	var pending, pendingDiscarded []Message
 	timer := time.NewTimer(time.Hour)
 	timer.Stop()
 	timerActive := false
 	defer timer.Stop()
-	// retrying records that the last flush failed and its messages are still
-	// buffered awaiting a TIMED retry. Without it, a failed flush left the buffer
+	// flushSlot carries the flusher goroutine's verdict back to this loop. Its
+	// capacity of one is the whole concurrency design: at most ONE flush is in
+	// flight per partition at any time, so commits leave this aggregator in the
+	// order the batches were promoted, which is offset order. Kafka-go commits
+	// every offset below the highest one passed to CommitMessages, so a batch
+	// committing out of order would permanently skip the messages beneath it.
+	flushSlot := make(chan bool, 1)
+	inFlight := false
+	// retrying records that the last flush failed and pending still holds its
+	// messages awaiting a TIMED retry. Without it, a failed flush left the buffer
 	// full, so the size threshold was met again by the very next message and every
 	// subsequent arrival re-ran the whole buffer through the downstream. Measured
 	// against live traffic: 46.8 evals per committed record where 2 were expected,
 	// i.e. 95.7% of downstream work spent re-processing messages that never
-	// committed. Retries also grew the batch, making the next deadline breach more
-	// likely — positive feedback rather than a linear shortfall.
+	// committed.
+	//
+	// The retry re-sends pending ALONE rather than merging in what arrived since.
+	// The merging version grew the batch on every retry, so each attempt was more
+	// likely to breach the deadline than the last — positive feedback rather than
+	// a linear shortfall.
 	retrying := false
 	// overflowDropped counts messages shed while a retry is pending, so the
 	// buffer cap cannot silently discard traffic.
 	overflowDropped := 0
 	maxBuffered := a.rt.cfg.MaxSize * maxBufferedBatches
+
+	// launch hands pending to a goroutine so this loop keeps draining a.ch while
+	// the downstream works. Before this split, flush ran inline: the loop left
+	// its select for the whole emit, a.ch (cap = MaxSize) filled, and the send in
+	// submit blocked — and because ONE goroutine reads consumer.Messages() for
+	// every partition, that stalled the entire assignment, not just this one.
+	launch := func(trigger string) {
+		inFlight = true
+		msgs, disc := pending, pendingDiscarded
+		go func() { flushSlot <- a.flush(context.Background(), msgs, disc, trigger) }()
+	}
+	// promote moves the accumulated batch into the flush slot. Only ever called
+	// when pending is empty, so pending's offsets stay below buffer's.
+	promote := func() {
+		pending, pendingDiscarded = buffer, discarded
+		buffer, discarded = nil, nil
+	}
+	// awaitFlush blocks until an in-flight flush reports. Used only on the two
+	// exit paths, which must not leave a goroutine writing to flushSlot after
+	// run has returned.
+	awaitFlush := func() bool {
+		if !inFlight {
+			return true
+		}
+		ok := <-flushSlot
+		inFlight = false
+		return ok
+	}
 	// idleTimer reaps the aggregator after a quiet window so a partition
 	// revoked by rebalance does not leak the goroutine and map entry.
 	idleTimer := time.NewTimer(a.idleTimeout)
@@ -304,6 +354,13 @@ func (a *partitionAggregator) run() {
 		select {
 		case msg, ok := <-a.ch:
 			if !ok {
+				// Drain what is already in flight before flushing the tail, or
+				// the tail's commit could land before the in-flight batch's and
+				// skip every offset beneath it.
+				awaitFlush()
+				if retrying || len(pending) > 0 {
+					a.flush(context.Background(), pending, pendingDiscarded, "close")
+				}
 				a.flush(context.Background(), buffer, discarded, "close")
 				return
 			}
@@ -338,18 +395,20 @@ func (a *partitionAggregator) run() {
 			if len(buffer) == 1 {
 				resetAggregateTimer(timer, &timerActive, a.rt.cfg.FlushInterval)
 			}
-			// While a retry is pending, arriving messages only accumulate: the
-			// retry is owned by the timer. Re-flushing here is what produced the
-			// divergence described at `retrying`.
-			if retrying {
+			// While a flush is in flight or a retry is pending, arriving messages
+			// only accumulate: promoting now would put a second batch in the
+			// flush slot, and its commit could overtake the first.
+			if inFlight || retrying {
 				if len(buffer) > maxBuffered {
-					// Shed the message just appended. Its offset is uncommitted,
-					// so Kafka redelivers it once the retained head commits.
+					// Shed the message just appended, keeping the retained run
+					// contiguous. These messages are LOST: the next successful
+					// flush commits every offset below its highest, which
+					// includes this one. See maxBufferedBatches.
 					buffer = buffer[:len(buffer)-1]
 					overflowDropped++
 					if emit, count := discardLog.allow(time.Now(), msg.Topic+"\x00overflow"); emit {
-						slog.Warn("kafka aggregate buffer at cap while a flush retry is pending; "+
-							"shedding messages for redelivery",
+						slog.Warn("kafka aggregate buffer at cap; DISCARDING messages "+
+							"(they are not redelivered — a later commit sweeps past them)",
 							"topic", msg.Topic,
 							"partition", msg.Partition,
 							"cap", maxBuffered,
@@ -361,28 +420,47 @@ func (a *partitionAggregator) run() {
 				continue
 			}
 			if len(buffer) >= a.rt.cfg.MaxSize {
-				if a.flush(context.Background(), buffer, discarded, "size") {
-					buffer = nil
-					discarded = nil
-					overflowDropped = 0
+				promote()
+				launch("size")
+				stopAggregateTimer(timer, &timerActive)
+			}
+		case ok := <-flushSlot:
+			inFlight = false
+			if ok {
+				pending, pendingDiscarded = nil, nil
+				retrying = false
+				overflowDropped = 0
+				// Messages that arrived during the flush may already meet the
+				// size threshold; promote them now rather than waiting for the
+				// next arrival, which may be a full flush interval away.
+				if len(buffer) >= a.rt.cfg.MaxSize {
+					promote()
+					launch("size")
 					stopAggregateTimer(timer, &timerActive)
-				} else {
-					// Hold these messages for the timed retry rather than
-					// re-flushing on the next arrival.
-					retrying = true
-					resetAggregateTimer(timer, &timerActive, a.rt.cfg.FlushInterval)
 				}
+			} else {
+				// Hold pending for the timed retry rather than re-flushing on the
+				// next arrival.
+				retrying = true
+				resetAggregateTimer(timer, &timerActive, a.rt.cfg.FlushInterval)
 			}
 		case <-timer.C:
 			timerActive = false
-			if a.flush(context.Background(), buffer, discarded, "timeout") {
-				buffer = nil
-				discarded = nil
-				retrying = false
-				overflowDropped = 0
-			} else if len(buffer) > 0 || len(discarded) > 0 {
-				retrying = true
+			if inFlight {
+				// The slot is busy; this loop's flushSlot branch will pick the
+				// work up. Re-arm so a timeout flush is not lost.
 				resetAggregateTimer(timer, &timerActive, a.rt.cfg.FlushInterval)
+				continue
+			}
+			if retrying {
+				// Retry the SAME batch, alone. Merging in what arrived since
+				// would grow it on every attempt.
+				launch("timeout")
+				continue
+			}
+			if len(buffer) > 0 || len(discarded) > 0 {
+				promote()
+				launch("timeout")
 			}
 		case <-idleTimer.C:
 			// No message for the idle window: assume the partition was revoked
@@ -398,6 +476,17 @@ func (a *partitionAggregator) run() {
 			// channel — and left a shutdown unable to interrupt the attempt.
 			// Since the buffer is discardable here by the argument above,
 			// waiting past one downstream attempt buys nothing.
+			//
+			// The in-flight flush is awaited first: its goroutine writes to
+			// flushSlot, and returning while that send is outstanding would
+			// leak it. It also holds the LOWER offsets, so its commit must not
+			// be overtaken by the tail flush below.
+			awaitFlush()
+			if len(pending) > 0 || len(pendingDiscarded) > 0 {
+				ctx, cancel := context.WithTimeout(context.Background(), idleFlushTimeout)
+				a.flush(ctx, pending, pendingDiscarded, "idle")
+				cancel()
+			}
 			if len(buffer) > 0 || len(discarded) > 0 {
 				ctx, cancel := context.WithTimeout(context.Background(), idleFlushTimeout)
 				a.flush(ctx, buffer, discarded, "idle")

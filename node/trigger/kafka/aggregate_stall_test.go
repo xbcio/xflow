@@ -22,8 +22,8 @@ type pacedConsumer struct {
 	ch       chan Message
 	stop     chan struct{}
 	closed   sync.Once
-	taken    atomic.Int64 // messages handed to the aggregator
 	produced atomic.Int64 // messages the harness tried to hand over
+	dropped  atomic.Int64 // messages the harness could not hand over: channel full
 
 	mu      sync.Mutex
 	commits []Message
@@ -57,6 +57,7 @@ func newPacedConsumer(topic string, partition, capacity int, interval time.Durat
 				// advancing. Dropping instead of blocking keeps the producer's
 				// clock honest, so `produced` stays a true measure of offered
 				// load rather than of the aggregator's own pace.
+				c.dropped.Add(1)
 			}
 		}
 	}()
@@ -80,31 +81,36 @@ func (c *pacedConsumer) CommitMessages(_ context.Context, msgs ...Message) error
 // TestKafkaAggregateKeepsConsumingWhileFlushIsSlow pins that a slow downstream
 // does not stop the trigger from consuming its partition.
 //
-// Mechanism under test: partitionAggregator.run calls flush SYNCHRONOUSLY from
-// its own select loop (aggregate.go's size and timeout branches). For the whole
-// duration of flush — emitSem acquisition, the downstream emit, and the offset
-// commit — run() is not at its select statement, so it reads nothing from the
-// partition channel. Both of those call sites pass context.Background(), so the
-// only bound on that blockage is whatever the downstream imposes on itself; in
-// the trigger-group path that is groupExecBatchDeadline, 30 seconds. Note that
-// emitSem is acquired BEFORE that deadline starts (aggregate.go:430 versus
-// service/runner/group_exec_trigger_runtime.go:60), so semaphore waiting adds to
-// the stall on top of the 30s rather than being bounded by it.
+// Mechanism under test: partitionAggregator.run hands each batch to a flusher
+// goroutine and stays at its select, so the partition channel keeps draining
+// while the downstream works. Before that split, flush ran inline from the
+// select loop: for the whole duration of flush — emitSem acquisition, the
+// downstream emit, and the offset commit — run() was not at its select and read
+// nothing. Both call sites pass context.Background(), so the only bound on that
+// blockage was whatever the downstream imposed on itself; in the trigger-group
+// path that is groupExecBatchDeadline, 30 seconds. emitSem is acquired BEFORE
+// that deadline starts (flush versus
+// service/runner/group_exec_trigger_runtime.go:60), so semaphore waiting added
+// to the stall on top of the 30s rather than being bounded by it.
 //
-// Why this is not merely "slow is slow": consumption stopping is what makes the
-// shortfall compound. Measured against live traffic at 381 msg/s per partition
-// into a channel of 100, the channel refills in 0.26s, so every second of flush
-// blockage discards ~381 further messages' worth of headroom. The configured
-// flush interval was 1s and the observed per-partition flush interval was 5.2s —
-// the 4.2s difference is time run() spent away from its select. Lag rose
-// monotonically from 188k to 2.06M over five minutes and 41.7% of batches
-// finished their work and were then dropped for redelivery.
+// WHAT THIS ASSERTS, AND WHAT IT DELIBERATELY DOES NOT.
 //
-// The assertion is a RATIO of taken to offered, which discriminates the two
-// designs without depending on absolute timing: an aggregator that consumes
-// concurrently with its flush keeps draining the channel and takes nearly
-// everything offered, while one that blocks in flush takes only what fits in the
-// channel per flush cycle.
+// It asserts CONSUMPTION, not throughput. A downstream taking 600ms per batch of
+// 10 sustains 16.7 msg/s against 500 msg/s offered; no aggregator design can
+// close a 30x gap, and none should try. When the downstream genuinely cannot
+// keep up, ceasing to consume is CORRECT back-pressure and Kafka lag is the
+// honest signal. An earlier revision of this test demanded a committed/offered
+// ratio of 50%, which required ~14 concurrent emits per partition — unreachable
+// by construction, since one flush is in flight per partition at a time to keep
+// commits in offset order. That criterion measured the wrong property.
+//
+// The defect worth pinning is that a stalled flush stopped the SINGLE goroutine
+// reading consumer.Messages() for every partition, taking the whole assignment
+// down with it (see TestKafkaAggregateHeadOfLine, which measures that directly
+// across two partitions). Its local signature is this one: the channel stops
+// being drained. So the assertion is that the aggregator keeps TAKING messages
+// throughout the window at a rate far above what one blocking flush cycle
+// admits.
 func TestKafkaAggregateKeepsConsumingWhileFlushIsSlow(t *testing.T) {
 	const (
 		maxSize    = 10
@@ -153,34 +159,44 @@ func TestKafkaAggregateKeepsConsumingWhileFlushIsSlow(t *testing.T) {
 	time.Sleep(window)
 
 	// Count what the aggregator drained rather than instrumenting run() itself:
-	// offered minus still-queued minus dropped-on-full is what it took.
+	// offered minus dropped-on-full minus still-queued is what it took off the
+	// channel. This is CONSUMPTION, which is the property under test — not
+	// commits, which additionally require the 600ms downstream to have returned
+	// and so measure throughput the aggregator cannot control.
 	offered := consumer.produced.Load()
 	if offered == 0 {
 		t.Fatal("harness offered no messages; the ratio below would prove nothing")
 	}
+	taken := offered - consumer.dropped.Load() - int64(len(consumer.ch))
 	committed := func() int {
 		consumer.mu.Lock()
 		defer consumer.mu.Unlock()
 		return len(consumer.commits)
 	}()
 
-	// With flush concurrent with consumption, committed tracks offered closely.
-	// With flush blocking the loop, each 600ms flush admits at most maxSize
-	// messages, so over 3s roughly 3s/600ms * 10 = 50 land while ~1500 are
-	// offered — about 3%. The 50% bound sits far above the blocking design's
-	// ceiling and far below a concurrent design's expected yield.
+	// A blocking flush takes at most one channel-full (maxSize) per flush cycle:
+	// over 3s with a 600ms downstream that is 5 cycles x 10 = ~50 of ~1500
+	// offered, about 3%. A flush that runs concurrently with consumption keeps
+	// draining continuously and takes nearly everything. The 50% bound sits an
+	// order of magnitude above the blocking ceiling and well below the
+	// concurrent design's yield, so it discriminates the two without depending
+	// on absolute timing.
+	//
+	// Note this is NOT a throughput assertion: committed is logged but not
+	// asserted on, because a downstream 30x slower than the offered rate is
+	// entitled to fall behind. See the doc comment.
 	minRatio := 0.50
-	gotRatio := float64(committed) / float64(offered)
-	t.Logf("offered=%d committed=%d ratio=%.1f%% emits=%d",
-		offered, committed, gotRatio*100, emits.Load())
+	gotRatio := float64(taken) / float64(offered)
+	t.Logf("offered=%d taken=%d ratio=%.1f%% committed=%d emits=%d",
+		offered, taken, gotRatio*100, committed, emits.Load())
 	if gotRatio < minRatio {
-		t.Errorf("aggregator committed %d of %d offered messages (%.1f%%) over %s "+
-			"with a %s downstream, want >= %.0f%%. flush is called synchronously "+
-			"from run()'s select loop, so for the whole flush duration the partition "+
-			"channel is not read: a slow downstream stops CONSUMPTION, not just "+
-			"processing. That is what turns a linear shortfall into unbounded lag — "+
-			"live traffic showed lag rising 188k->2.06M over 5 minutes while 41.7%% "+
-			"of batches completed their work and were dropped for redelivery.",
-			committed, offered, gotRatio*100, window, emitBlocks, minRatio*100)
+		t.Errorf("aggregator took only %d of %d offered messages (%.1f%%) over %s "+
+			"with a %s downstream, want >= %.0f%%. That means flush is blocking "+
+			"run()'s select loop, so for the flush duration the partition channel "+
+			"is not read: a slow downstream stops CONSUMPTION, not just processing. "+
+			"Because ONE goroutine reads consumer.Messages() for every partition, "+
+			"that back-pressure reaches the shared reader and stalls the whole "+
+			"assignment — one slow partition stops all of them.",
+			taken, offered, gotRatio*100, window, emitBlocks, minRatio*100)
 	}
 }
