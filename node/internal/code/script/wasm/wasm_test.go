@@ -20,6 +20,7 @@ var (
 	reactorSpinWasm []byte
 	reactorMinWasm  []byte
 	reactorTrapWasm []byte
+	reactorNoopWasm []byte
 	taggerWasm      []byte
 )
 
@@ -34,6 +35,7 @@ func TestMain(m *testing.M) {
 	reactorSpinWasm = buildReactorGuest(dir, "reactorspin")
 	reactorMinWasm = buildReactorGuest(dir, "reactormin")
 	reactorTrapWasm = buildReactorGuest(dir, "reactortrap")
+	reactorNoopWasm = buildReactorGuest(dir, "reactornoop")
 	taggerWasm = buildReactorGuest(dir, "tagger")
 	exitCode := m.Run()
 	if err := os.RemoveAll(dir); err != nil {
