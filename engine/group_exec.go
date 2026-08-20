@@ -51,12 +51,19 @@ func (e *Engine) executeGroup(ctx context.Context, task *Task, flush bool) error
 	meta := g.GroupMetaAt(task.UnitIdx)
 
 	// Build group lease. Same ID/TTL generation as BuildTaskLease (lease.go).
+	// Attempt is seeded as 1; AcquireGroupLease writes the real attempt count
+	// back into lease.Attempt (both local and Redis backends do this: they
+	// track the persisted attempt and bump it on every expiry cycle). After
+	// AcquireGroupLease returns, lease.Attempt is the authoritative value used
+	// to fence CommitGroup. What belongs to a future milestone is enforcement
+	// of GroupMeta.Retry.MaxAttempts — scheduling a retry vs. failing the
+	// execution when the group exhausts its budget.
 	lease := &GroupLease{
 		ExecutionID:  task.ExecutionID,
 		GroupUnitIdx: task.UnitIdx,
 		LeaseID:      LeaseID("lease-" + uuid.New().String()),
 		LeaseToken:   LeaseToken("token-" + uuid.New().String()),
-		Attempt:      1, // Milestone A: group retry (attempt increment) belongs to Milestone B
+		Attempt:      1, // seed; overwritten by AcquireGroupLease with the real attempt
 		IssuedAt:     time.Now().UTC(),
 		TTL:          e.defaultLeaseTTL,
 	}

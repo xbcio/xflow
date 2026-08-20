@@ -230,3 +230,113 @@ func (f *fakeStateWithGroup) RenewGroupLease(_ context.Context, _ types.Executio
 func (f *fakeStateWithGroup) CommitGroup(ctx context.Context, req GroupCommitRequest) (GroupCommitResult, error) {
 	return f.groupState.CommitGroup(ctx, req)
 }
+
+// attemptTrackingGroupState simulates the backend contract: AcquireGroupLease
+// writes the real attempt back into the lease (just as both the local memory
+// and Redis backends do), and CommitGroup records the attempt it received so
+// callers can assert the fence value was correct.
+//
+// This is a probe for the fact that the hardcoded seed of 1 in executeGroup is
+// overwritten by AcquireGroupLease before commitGroup is called. The seed
+// value is irrelevant; what matters is that commitGroup always uses
+// lease.Attempt as returned by the backend.
+type attemptTrackingGroupState struct {
+	currentAttempt  int // simulates the persisted attempt counter
+	committedAttempt int
+}
+
+func (s *attemptTrackingGroupState) AcquireGroupLease(_ context.Context, lease *GroupLease) (bool, error) {
+	// Mirror the local/Redis contract: if the persisted attempt is >= the
+	// incoming seed, use persisted+1; otherwise use the seed.
+	attempt := lease.Attempt
+	if s.currentAttempt >= attempt {
+		attempt = s.currentAttempt + 1
+	}
+	s.currentAttempt = attempt
+	lease.Attempt = attempt // write the real attempt back, as both backends do
+	return true, nil
+}
+
+func (s *attemptTrackingGroupState) RenewGroupLease(_ context.Context, _ types.ExecutionID, _ int, _ LeaseToken, _ time.Time) (bool, error) {
+	return true, nil
+}
+
+func (s *attemptTrackingGroupState) CommitGroup(_ context.Context, req GroupCommitRequest) (GroupCommitResult, error) {
+	s.committedAttempt = req.Attempt
+	return GroupCommitResult{Outcome: CommitOutcomeAccepted, Applied: true}, nil
+}
+
+// fakeStateWithAttemptTracking wires attemptTrackingGroupState into the
+// combined state used by Engine.
+type fakeStateWithAttemptTracking struct {
+	*fakeState
+	groupState *attemptTrackingGroupState
+}
+
+func (f *fakeStateWithAttemptTracking) AcquireGroupLease(ctx context.Context, lease *GroupLease) (bool, error) {
+	return f.groupState.AcquireGroupLease(ctx, lease)
+}
+
+func (f *fakeStateWithAttemptTracking) RenewGroupLease(_ context.Context, _ types.ExecutionID, _ int, _ LeaseToken, _ time.Time) (bool, error) {
+	return true, nil
+}
+
+func (f *fakeStateWithAttemptTracking) CommitGroup(ctx context.Context, req GroupCommitRequest) (GroupCommitResult, error) {
+	return f.groupState.CommitGroup(ctx, req)
+}
+
+// TestGroupExec_AttemptFromBackend is a probe that verifies lease.Attempt is
+// read from AcquireGroupLease (the backend's authoritative value) before being
+// passed to CommitGroup, not taken from the hardcoded seed of 1.
+//
+// The engine seeds attempt=1 unconditionally; the backend overwrites it with
+// the real counter. On the first run the backend returns 1 (seed matches),
+// and on a simulated second run it returns 2 (prev >= seed triggers bump).
+// CommitGroup must receive the attempt the backend returned.
+func TestGroupExec_AttemptFromBackend(t *testing.T) {
+	g := buildSingleGroupGraph(t)
+
+	var groupUnitIdx int
+	for i := 0; i < g.UnitCount(); i++ {
+		if g.UnitKindAt(i) == graph.UnitGroup {
+			groupUnitIdx = i
+			break
+		}
+	}
+
+	fake := &fakeGroupExecutor{exits: []GroupExit{
+		{NodeName: "g.sink", Port: "main", Data: map[string]any{"ok": true}},
+	}}
+	tracker := &attemptTrackingGroupState{}
+
+	// Seed the tracker to simulate that the group has already been attempted
+	// once and its lease expired (attempt counter is now 1 in the backend).
+	// The next acquire with seed=1 must bump it to 2.
+	tracker.currentAttempt = 1
+
+	combined := &fakeStateWithAttemptTracking{fakeState: newFakeState(), groupState: tracker}
+	combined.fakeState.CreateExecution(context.Background(), &ExecutionSnapshot{
+		ID:     "exec-probe-attempt",
+		Graph:  g,
+		Status: types.ExecutionStatusRunning,
+	})
+
+	q := &fakeQueue{}
+	eng := New(combined, q, WithGroupExecutor(fake))
+	eng.cacheExecutionGraph("exec-probe-attempt", g)
+
+	_, err := eng.handleSystemTask(context.Background(), &Task{
+		ExecutionID: "exec-probe-attempt",
+		NodeName:    "g",
+		UnitIdx:     groupUnitIdx,
+		Type:        TaskTypeGroupExec,
+	}, true)
+	if err != nil {
+		t.Fatalf("handleSystemTask error: %v", err)
+	}
+
+	// The backend bumped attempt from 1 to 2; CommitGroup must have received 2.
+	if tracker.committedAttempt != 2 {
+		t.Fatalf("CommitGroup received Attempt=%d, want 2 — engine is not using the attempt returned by AcquireGroupLease", tracker.committedAttempt)
+	}
+}
