@@ -308,23 +308,29 @@ func BenchmarkEvalBatchAmortisation(b *testing.B) {
 // BenchmarkEvalCPUByRuleCount separates the per-eval fixed cost from the
 // per-rule cost by sweeping the rule count with the input held constant.
 //
-// This is the number that decides between the three candidate remedies, and
-// no metric collected so far distinguishes them:
+// What the rule-count axis does NOT measure: rule compilation. The reactor
+// guest compiles rules once in configure() and keeps the programs in package
+// state (testdata/reactor/main.go's progs); eval() only calls expr.Run against
+// them. So a rise across this axis is genuine per-rule execution — n programs
+// run against one decoded env — not repeated parsing.
 //
-//   - If cost is nearly flat from 0 to 64 rules, almost all of it is fixed
-//     overhead — borrow, the cross-sandbox round trip, and stdin encode/decode.
-//     Then merging the two guests into one halves it, and evaluating a whole
-//     batch in one call amortises it by the batch size. Both are worth doing
-//     and neither requires giving up wasm.
-//   - If cost rises steeply with rule count, the expense is rule evaluation
-//     itself. Batching moves the same work and saves nothing; only cheaper
-//     rule evaluation (or leaving wasm) helps.
+// That makes the intercept here easy to misread, and it was misread once: the
+// cost remaining at rules=0 is NOT "per-call fixed overhead that batching
+// amortises". It is dominated by decoding this record's bytes, which is fixed
+// with respect to rule count and linear with respect to input size. See
+// BenchmarkEvalCPUByRecordSize for the axis that actually separates those, and
+// BenchmarkEvalBatchAmortisation for what the genuine per-call intercept is
+// worth once measured (about 0.19 ms, so: not much).
 //
-// Rule count 0 is the load-bearing data point: it is the fixed cost with the
-// business logic removed, measured through the exact production borrow path
-// rather than estimated. The live pipeline runs liveRuleCount (2), so the
-// distance between 0 and 2 is the share of today's cost that any amount of
-// rule optimisation could ever recover.
+// Measured (2 rules is the live configuration):
+//
+//	rules:   0      1      2      8      32     64
+//	cpu_ms:  2.07   2.21   2.59   2.72   3.80   5.06
+//
+// So at the live rule count roughly four fifths of the cost survives removing
+// every rule. Read alone that invites "the business logic is nearly free, so
+// attack the overhead" — and the overhead it points at is the wrong one. The
+// record-size sweep shows where that residue actually goes.
 func BenchmarkEvalCPUByRuleCount(b *testing.B) {
 	for _, count := range []int{0, 1, liveRuleCount, 8, 32, 64} {
 		b.Run(fmt.Sprintf("rules=%d", count), func(b *testing.B) {
