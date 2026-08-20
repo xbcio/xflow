@@ -184,6 +184,12 @@ func BenchmarkEvalCPUByRecordSize(b *testing.B) {
 		name string
 		size int
 	}{
+		// The small sizes are not realistic traffic — they exist to locate the
+		// intercept. Extrapolating a straight line from three points clustered
+		// between 2.5 KB and 10 KB puts the y-intercept far outside the measured
+		// range, which is exactly where a linear fit is least trustworthy.
+		{"tiny=64B", 64},
+		{"small=512B", 512},
 		{"p50=2594B", 2594},
 		{"mean=6845B", 6845},
 		{"p90=9753B", 9753},
@@ -224,6 +230,77 @@ func BenchmarkEvalCPUByRecordSize(b *testing.B) {
 			cpu := cpuSeconds() - cpuStart
 			b.StopTimer()
 			b.ReportMetric(cpu/float64(b.N)*1000, "cpu_ms/eval")
+		})
+	}
+}
+
+// BenchmarkEvalBatchAmortisation measures what batching actually buys, instead
+// of assuming it buys the batch factor.
+//
+// The premise behind "one eval per batch of 20" is that a per-call fixed cost
+// gets amortised. That premise holds only if the fixed cost is large relative
+// to the per-record cost. BenchmarkEvalCPUByRecordSize says it is not: cost
+// tracks bytes almost linearly, with an intercept near 0.19 ms against 1.6 ms
+// at the live mean record size.
+//
+// So this benchmark reports CPU per RECORD both ways. If batching worked as
+// hoped, batch=20 would cost a fraction of batch=1 per record. If cost is
+// byte-dominated, the two are nearly equal — the guest parses the same total
+// bytes either way, and the only saving is the intercept.
+//
+// This is the arithmetic that decides whether batching is worth building. It is
+// measured rather than reasoned because the same reasoning already went wrong
+// once here in the opposite direction: stripItems documents a case where
+// bigger batches made per-item cost WORSE (80/62/38 msg/s at batch 10/20/40)
+// because the payload grew with the batch.
+func BenchmarkEvalBatchAmortisation(b *testing.B) {
+	const recordSize = 6845 // the live topic's measured mean
+	for _, batch := range []int{1, 5, 20, 50} {
+		b.Run(fmt.Sprintf("batch=%d", batch), func(b *testing.B) {
+			ctx := context.Background()
+			h := newReactorHost()
+			e, err := h.engineFor(ctx, reactorWasm)
+			if err != nil {
+				b.Fatalf("engineFor: %v", err)
+			}
+			cfgBytes, err := json.Marshal(ruleConfig(benchRules(liveRuleCount)...))
+			if err != nil {
+				b.Fatalf("marshal cfg: %v", err)
+			}
+			if err := e.swapConfig(ctx, cfgBytes, 1, 1); err != nil {
+				b.Fatalf("swapConfig: %v", err)
+			}
+			facade := &reactorFacade{}
+
+			// One payload carrying `batch` records. The key is deliberately not
+			// $items: stripItems removes that root before the payload is
+			// encoded, which would silently measure an empty batch.
+			records := make([]any, 0, batch)
+			for range batch {
+				records = append(records, realisticRecord(recordSize))
+			}
+			payload := realisticRecord(recordSize)
+			payload["batch"] = records
+			input, err := json.Marshal(payload)
+			if err != nil {
+				b.Fatalf("marshal input: %v", err)
+			}
+			if _, err := facade.evalFromPool(ctx, e, input); err != nil {
+				b.Fatalf("warmup: %v", err)
+			}
+
+			b.ResetTimer()
+			cpuStart := cpuSeconds()
+			for b.Loop() {
+				if _, err := facade.evalFromPool(ctx, e, input); err != nil {
+					b.Fatalf("eval: %v", err)
+				}
+			}
+			cpu := cpuSeconds() - cpuStart
+			b.StopTimer()
+			// Per RECORD, not per call: a per-call figure would rise with batch
+			// size and say nothing about whether batching helps.
+			b.ReportMetric(cpu/float64(b.N)/float64(batch)*1000, "cpu_ms/record")
 		})
 	}
 }
