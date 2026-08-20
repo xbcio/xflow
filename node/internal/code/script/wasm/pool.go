@@ -138,7 +138,12 @@ func (in *pooledInstance) evalOnce(ctx context.Context, input []byte) (out []byt
 
 	n := int32(r[0])
 	if n < 0 {
-		detail := in.readOut(ctx, -1) // best-effort structured error for logs
+		detail := in.readOut(ctx, -1)
+		// The guest's own account of why. It goes to the log and NOT into the
+		// error: Error() reaches a map batch's _error entry, which is node
+		// output and can be persisted, and a guest may quote its input when
+		// explaining a rejection. See evaldetail.go.
+		logEvalDetail("eval", n, detail)
 		// ERR_EVAL is a guest-side panic/eval fault: the instance may hold
 		// polluted global state, so doom it (§5.6). Other negatives are
 		// call-level (bad input / oversize output); the instance stays clean.
@@ -398,6 +403,7 @@ func (e *reactorEngine) configure(ctx context.Context, in *pooledInstance, cfg [
 	}
 	if n := int32(r[0]); n < 0 {
 		detail := in.readOut(ctx, -1)
+		logEvalDetail("configure", n, detail)
 		return &reactorEvalError{code: n, detail: detail}
 	}
 	return nil
