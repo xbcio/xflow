@@ -116,10 +116,26 @@ func logEvalDetail(op string, code int32, detail []byte) {
 
 // decodeEvalDetail extracts the message from the guest's structured detail.
 //
-// The convention is {"error": "..."}, but the ABI does not enforce it, so a
-// detail that is not that shape is reported verbatim rather than discarded:
-// dropping it would recreate the blind spot this whole file closes. Both paths
-// are truncated to evalDetailLimit.
+// ONLY the documented shape is accepted. §4.2 says a guest writes a structured
+// error detail JSON into its out buffer alongside a negative code, and anything
+// else is refused — including plain text that would read perfectly well in a log.
+//
+// That looks over-strict until you see what the alternative admits. out_len is
+// assigned only when a guest writes output, so a guest that returns a negative
+// code WITHOUT writing a reason leaves out_len holding the length of its last
+// SUCCESSFUL call. readOut then returns that call's output, and a host willing
+// to log whatever it gets would print one message's payload as another message's
+// failure reason.
+//
+// SAS's decode guest did exactly this on ERR_OUTPUT, and the first run with
+// logging enabled produced 23 lines whose "reason" was a serialised request and
+// response body. Wrong content attributed to the wrong call, and live traffic in
+// a log line.
+//
+// The host cannot make a guest compliant. It can decline to treat unattributable
+// bytes as an explanation. An {"error": ...} envelope is something only this
+// call could have written; a bare byte string is not, and the cost of being
+// wrong is not symmetric — a missing log line versus a misattributed one.
 func decodeEvalDetail(detail []byte) string {
 	if len(detail) == 0 {
 		return ""
@@ -127,10 +143,10 @@ func decodeEvalDetail(detail []byte) string {
 	var structured struct {
 		Error string `json:"error"`
 	}
-	if err := json.Unmarshal(detail, &structured); err == nil && structured.Error != "" {
-		return truncateDetail(structured.Error)
+	if err := json.Unmarshal(detail, &structured); err != nil || structured.Error == "" {
+		return ""
 	}
-	return truncateDetail(string(detail))
+	return truncateDetail(structured.Error)
 }
 
 func truncateDetail(s string) string {

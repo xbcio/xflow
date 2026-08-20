@@ -14,14 +14,15 @@ import (
 )
 
 var (
-	echoWasm        []byte
-	spinWasm        []byte
-	reactorWasm     []byte
-	reactorSpinWasm []byte
-	reactorMinWasm  []byte
-	reactorTrapWasm []byte
-	reactorNoopWasm []byte
-	taggerWasm      []byte
+	echoWasm         []byte
+	spinWasm         []byte
+	reactorWasm      []byte
+	reactorSpinWasm  []byte
+	reactorMinWasm   []byte
+	reactorTrapWasm  []byte
+	reactorNoopWasm  []byte
+	reactorStaleWasm []byte
+	taggerWasm       []byte
 )
 
 func TestMain(m *testing.M) {
@@ -36,6 +37,7 @@ func TestMain(m *testing.M) {
 	reactorMinWasm = buildReactorGuest(dir, "reactormin")
 	reactorTrapWasm = buildReactorGuest(dir, "reactortrap")
 	reactorNoopWasm = buildReactorGuest(dir, "reactornoop")
+	reactorStaleWasm = buildReactorGuest(dir, "reactorstale")
 	taggerWasm = buildReactorGuest(dir, "tagger")
 	exitCode := m.Run()
 	if err := os.RemoveAll(dir); err != nil {

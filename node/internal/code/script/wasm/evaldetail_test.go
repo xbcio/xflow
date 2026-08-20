@@ -176,6 +176,56 @@ func TestEvalDetailReachesTheLogFromARealGuest(t *testing.T) {
 	})
 }
 
+// TestEvalDetailIgnoresStaleOutput covers a guest that returns a negative code
+// without writing a reason, which the ABI (§4.2) says it should do but nothing
+// enforces.
+//
+// out_len is only assigned when a guest writes output, so a bare negative return
+// leaves it holding the length of the LAST SUCCESSFUL call. readOut then hands
+// back that call's output and the host would log one message's payload as
+// another message's failure reason.
+//
+// This is not hypothetical. SAS's decode guest returned ERR_OUTPUT bare when a
+// message serialised past its limit, and the first run with logging enabled
+// showed exactly that: 23 lines whose "reason" was a serialised request/response
+// body. Wrong content attributed to the wrong call, and live traffic in a log.
+//
+// The host cannot make a guest compliant, but it can refuse to treat
+// unattributable bytes as this call's explanation. Structured detail is the
+// documented shape, so text that is not that shape is not logged as a reason.
+func TestEvalDetailIgnoresStaleOutput(t *testing.T) {
+	resetEvalDetailLog(t)
+
+	ctx := context.Background()
+	h := newReactorHost()
+	eng, err := h.engineFor(ctx, reactorStaleWasm)
+	if err != nil {
+		t.Fatalf("engineFor: %v", err)
+	}
+	inst, err := eng.newInstance(ctx, []byte(`{}`))
+	if err != nil {
+		t.Fatalf("newInstance: %v", err)
+	}
+	defer inst.teardown(ctx)
+
+	// First call succeeds and leaves its output in the guest's buffer.
+	if _, _, err := inst.evalOnce(ctx, []byte(`{"n":1}`)); err != nil {
+		t.Fatalf("first eval: %v", err)
+	}
+
+	// Second call returns a negative code and writes nothing.
+	buf := captureWarnings(t)
+	if _, _, err := inst.evalOnce(ctx, []byte(`{"n":2}`)); err == nil {
+		t.Fatal("second eval was expected to fail")
+	}
+
+	if strings.Contains(buf.String(), "first-call-output-must-not-be-logged") {
+		t.Errorf("the previous call's output was logged as this call's failure "+
+			"reason. out_len still held the earlier length, so the host attributed "+
+			"one message's payload to another message's failure. log = %q", buf.String())
+	}
+}
+
 // TestEvalDetailThrottlesRepeats guards the other direction. A malformed
 // producer invalidates every record in a partition, so the same reason arriving
 // thousands of times must collapse to one line — and that line must say how
@@ -285,19 +335,61 @@ func TestEvalDetailStaysOutOfTheError(t *testing.T) {
 	}
 }
 
-// TestEvalDetailUnstructuredIsNotDiscarded covers the shape the ABI does not
-// enforce. The convention is {"error": "..."} but a guest may write anything;
-// discarding what does not parse would recreate the blind spot — the reason
-// would once again exist in the process and never be readable.
-func TestEvalDetailUnstructuredIsNotDiscarded(t *testing.T) {
+// TestEvalDetailUnstructuredIsDiscarded pins the reversal of an earlier
+// decision, so the reasoning survives with the code.
+//
+// This test used to assert the opposite — that a detail which is not the
+// documented {"error": ...} shape gets logged verbatim rather than dropped, on
+// the grounds that discarding it would recreate the blind spot this file
+// closes. That argument assumed every byte in the out buffer belongs to the
+// call that just failed. It does not: out_len is assigned only when a guest
+// writes output, so a guest that returns a negative code without writing a
+// reason leaves the LAST SUCCESSFUL call's output there for readOut to find.
+//
+// The two requirements cannot both hold. Accepting free-form text means
+// accepting stale output as this call's explanation, because the host has no
+// way to tell them apart — SAS's decode guest produced 23 such lines, each
+// reporting one message's serialised request body as another message's failure
+// reason. Refusing free-form text loses a non-compliant guest's diagnostics.
+//
+// Refusing wins on cost asymmetry: a dropped log line is a gap an operator can
+// see, and a misattributed one is a gap they cannot — it looks like an answer.
+// The guest-side obligation is unchanged and unenforceable; §4.2 already
+// requires the structured shape, and TestEvalDetailDistinguishesGuestBranches
+// covers a compliant guest getting its four branches through.
+func TestEvalDetailUnstructuredIsDiscarded(t *testing.T) {
 	resetEvalDetailLog(t)
 	buf := captureWarnings(t)
 
 	logEvalDetail("eval", errDecode, []byte("plain text reason, no JSON"))
 
-	if !strings.Contains(buf.String(), "plain text reason") {
-		t.Errorf("a detail that is not the conventional shape was dropped; the "+
-			"reason exists in the process and is unreadable. log = %q", buf.String())
+	if strings.Contains(buf.String(), "plain text reason") {
+		t.Errorf("a detail that is not the documented structured shape was logged "+
+			"as this call's reason. The host cannot distinguish it from the "+
+			"previous call's leftover output, so this admits one message's "+
+			"payload as another message's failure. log = %q", buf.String())
+	}
+}
+
+// TestEvalDetailRejectsAStructuredShapeThatIsNotAnError guards the narrow gap
+// the shape check leaves open: leftover output that happens to be a JSON object.
+//
+// Only an "error" key counts. A guest's SUCCESSFUL output is JSON too — that is
+// what makes staleness dangerous in the first place — so a check that accepted
+// "parses as JSON" would let a previous call's result through whenever the guest
+// emits objects, which is the normal case.
+func TestEvalDetailRejectsAStructuredShapeThatIsNotAnError(t *testing.T) {
+	resetEvalDetailLog(t)
+	buf := captureWarnings(t)
+
+	// The shape a successful call leaves behind.
+	logEvalDetail("eval", errOutput, []byte(`{"req":{"method":"POST"},"resp":{"status":200}}`))
+
+	if strings.TrimSpace(buf.String()) != "" {
+		t.Errorf("a JSON object with no error key was logged as a failure reason. "+
+			"Guest output is JSON, so accepting any object readmits exactly the "+
+			"stale-output case the error-key check exists to block. log = %q",
+			buf.String())
 	}
 }
 
