@@ -17,3 +17,10 @@ func TestSQLStoreSupplyContract(t *testing.T) {
 	p := newSQLStoreProvider(t)
 	storetest.SupplyContract(t, p, fmt.Sprintf("sql-%d", time.Now().UnixNano()))
 }
+
+// TestSQLStoreSupplyNamespaceNorm runs the empty-namespace normalisation probe
+// against a real MySQL store.
+func TestSQLStoreSupplyNamespaceNorm(t *testing.T) {
+	p := newSQLStoreProvider(t)
+	storetest.SupplyNamespaceNormContract(t, p)
+}

@@ -316,3 +316,33 @@ func TestServerUpdateSupplyEmptyName(t *testing.T) {
 		t.Fatal("expected error for empty name")
 	}
 }
+
+// TestServerUpdateSupplyEmptyNSRoundTrip verifies that writing with ns=""
+// (which normalises to "default") is readable by reading with ns="" via the
+// store directly. This is the asymmetric-namespace regression test.
+func TestServerUpdateSupplyEmptyNSRoundTrip(t *testing.T) {
+	ms := memstore.New()
+	srv, err := NewServer(ServerConfig{Store: ms})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := srv.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Shutdown(ctx) }()
+
+	content := []byte(`{"probe":true}`)
+	if err := srv.UpdateSupply(ctx, "", "probe-supply", content); err != nil {
+		t.Fatalf("UpdateSupply() error = %v", err)
+	}
+
+	// Read back via the store with empty namespace — must find the record.
+	rec, err := ms.GetSupply(ctx, "", "probe-supply")
+	if err != nil {
+		t.Fatalf("GetSupply(\"\", ...) error = %v; want the record written via UpdateSupply(\"\", ...)", err)
+	}
+	if !bytes.Equal(rec.Content, content) {
+		t.Fatalf("content mismatch: got %s, want %s", rec.Content, content)
+	}
+}

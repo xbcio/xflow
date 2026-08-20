@@ -24,7 +24,18 @@ type supplyRepo struct {
 
 var _ store.Supplies = (*supplyRepo)(nil)
 
+// normSupplyNS returns "default" for an empty namespace, mirroring the
+// normalisation on the write path in sdk/xflow.Server.UpdateSupply so that
+// callers which pass "" for namespace find the same row they wrote.
+func normSupplyNS(ns string) string {
+	if ns == "" {
+		return "default"
+	}
+	return ns
+}
+
 func (r *supplyRepo) GetSupply(ctx context.Context, namespace, name string) (*store.SupplyResource, error) {
+	namespace = normSupplyNS(namespace)
 	var d dbSupply
 	err := r.db.WithContext(ctx).
 		Where("namespace = ? AND name = ?", namespace, name).
@@ -73,6 +84,13 @@ func (r *supplyRepo) GetSupply(ctx context.Context, namespace, name string) (*st
 // PutSupply performs the compare-and-set inside a transaction with a row lock so
 // two concurrent writers carrying the same If-Match cannot both succeed.
 func (r *supplyRepo) PutSupply(ctx context.Context, rec *store.SupplyResource, ifMatch *uint64) (*store.SupplyResource, error) {
+	// Normalise namespace before touching the DB so that callers which pass ""
+	// store and find rows under "default", matching GetSupply's normalisation.
+	if rec.Namespace == "" {
+		cp := *rec
+		cp.Namespace = "default"
+		rec = &cp
+	}
 	var out *store.SupplyResource
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var cur dbSupply

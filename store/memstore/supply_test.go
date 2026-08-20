@@ -10,3 +10,7 @@ import (
 func TestMemstoreSupplyContract(t *testing.T) {
 	storetest.SupplyContract(t, memstore.New(), "mem")
 }
+
+func TestMemstoreSupplyNamespaceNorm(t *testing.T) {
+	storetest.SupplyNamespaceNormContract(t, memstore.New())
+}

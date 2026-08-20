@@ -13,8 +13,43 @@ import (
 	"github.com/xbcio/xflow/store"
 )
 
-// SupplyContract asserts the store.Supplies behavioural contract: revision
-// monotonicity, If-Match CAS semantics, and namespace isolation.
+// SupplyNamespaceNormContract probes the empty-namespace normalisation contract:
+// writing with namespace "" must be findable by reading with namespace "".
+// Both write and read paths must normalise "" → "default" so that callers do
+// not need to know the canonical name.
+func SupplyNamespaceNormContract(t *testing.T, s store.Supplies) {
+	t.Helper()
+	ctx := context.Background()
+	const name = "probe-ns-norm"
+
+	content := []byte(`{"probe":true}`)
+	if _, err := s.PutSupply(ctx, &store.SupplyResource{
+		Namespace:   "",
+		Name:        name,
+		Content:     content,
+		ContentType: "application/json",
+	}, nil); err != nil {
+		t.Fatalf("PutSupply with empty namespace: %v", err)
+	}
+
+	// Round-trip with "": should find the record stored as "default".
+	rec, err := s.GetSupply(ctx, "", name)
+	if err != nil {
+		t.Fatalf("GetSupply with empty namespace returned error %v; want the record written via PutSupply(\"\", ...)", err)
+	}
+	if string(rec.Content) != string(content) {
+		t.Fatalf("content mismatch: got %s, want %s", rec.Content, content)
+	}
+
+	// Explicit "default" must find the same record.
+	rec2, err := s.GetSupply(ctx, "default", name)
+	if err != nil {
+		t.Fatalf("GetSupply with \"default\" namespace returned error %v", err)
+	}
+	if rec.Revision != rec2.Revision {
+		t.Fatalf("\"\" and \"default\" returned different revisions: %d vs %d", rec.Revision, rec2.Revision)
+	}
+}
 //
 // nsPrefix disambiguates rows between backends and between reruns against a
 // persistent database — a MySQL run must not collide with a previous run's rows.

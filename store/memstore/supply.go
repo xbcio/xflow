@@ -7,9 +7,20 @@ import (
 	"github.com/xbcio/xflow/store"
 )
 
+// normSupplyNS returns "default" for an empty namespace so that callers that
+// pass "" receive the same row that was written with "" (which is also
+// normalised to "default" on the write path).
+func normSupplyNS(ns string) string {
+	if ns == "" {
+		return "default"
+	}
+	return ns
+}
+
 func supplyKey(namespace, name string) string { return namespace + "/" + name }
 
 func (s *Store) GetSupply(_ context.Context, namespace, name string) (*store.SupplyResource, error) {
+	namespace = normSupplyNS(namespace)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rec, ok := s.supplies[supplyKey(namespace, name)]
@@ -24,7 +35,8 @@ func (s *Store) GetSupply(_ context.Context, namespace, name string) (*store.Sup
 func (s *Store) PutSupply(_ context.Context, rec *store.SupplyResource, ifMatch *uint64) (*store.SupplyResource, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	key := supplyKey(rec.Namespace, rec.Name)
+	ns := normSupplyNS(rec.Namespace)
+	key := supplyKey(ns, rec.Name)
 	cur, exists := s.supplies[key]
 	var curRev uint64
 	if exists {
@@ -34,6 +46,7 @@ func (s *Store) PutSupply(_ context.Context, rec *store.SupplyResource, ifMatch 
 		return nil, store.ErrRevisionConflict
 	}
 	next := *rec
+	next.Namespace = ns
 	next.Content = append([]byte(nil), rec.Content...)
 	next.Revision = curRev + 1
 	next.ContentHash = store.ContentHash(next.Content)
