@@ -32,6 +32,41 @@ const (
 // against a different version; production never reassigns it.
 var reactorABIVersion int32 = 1
 
+// maxEvalsPerInstance limits how many successful evals one resident instance
+// may serve before it is proactively recycled.
+//
+// Why this is necessary: Go wasm guests (GOOS=wasip1) accumulate GC-internal
+// span and mcache metadata with every allocation. The GC reclaims live objects,
+// so the live heap stays bounded, but the runtime's internal bookkeeping grows
+// monotonically with total allocation volume. Under a 256-page (16 MiB) memory
+// cap, a guest that does json.Unmarshal on ~7 KB inputs exhausts the cap after
+// ~18 k evals; the wasm `unreachable` trap that follows is classified as a doom
+// and the instance is rebuilt — silently and without error, but at the cost of
+// 62 ms cold-start every ~3.4 s at target throughput.
+//
+// The constant is set below the lowest observed crash threshold. The governing
+// relationship is per-BYTE, not per-call: crash_iter × input_size held at
+// ~140 MB across every arm measured, so the margin shrinks as records grow.
+//
+//	p50 input (2 815 B): survived 25 000 evals      → margin > 3.1x
+//	mean input (7 066 B): crashed at 18 856         → margin 2.4x
+//	p90 input (9 974 B): crashed at 15 283          → margin 1.9x
+//
+// Those margins are against MEASURED crash points. Against the 140 MB budget
+// the p90 margin is 1.75x (140 MB / (8 000 x 9 974 B)) — the thinner of the two
+// readings, and the one to use when deciding whether a larger record shape is
+// still covered. Records materially above 10 KB need this constant re-derived,
+// not assumed.
+//
+// The replacement (teardown + rebuild) runs asynchronously and costs one 62 ms
+// instantiation amortised over 8 000 messages. That is a real added cost, not a
+// saving — what it buys is replacing an unplanned crash every ~3.4 s at target
+// throughput with a planned recycle every ~1.5 s that never fails an eval.
+//
+// Raising this value: safe only if WithMemoryLimitPages rises proportionally.
+// Lowering it: costs throughput (more rebuilds), never correctness.
+const maxEvalsPerInstance = 8_000
+
 // pooledInstance is one resident reactor instance: an instantiated module with
 // _initialize already run and configure already applied. It carries the export
 // handles so the hot path avoids per-call lookups.
@@ -51,12 +86,29 @@ type pooledInstance struct {
 	// ABI (docs §4.1), so either may be nil — callers must check.
 	outLen api.Function
 	td     api.Function
+
+	// evalCount tracks successful evals on this instance. When it reaches
+	// maxEvalsPerInstance the instance is proactively recycled to prevent the
+	// guest Go runtime from exhausting its memory cap (see maxEvalsPerInstance).
+	// It is not guarded: the pool guarantees single-borrower ownership.
+	evalCount int64
 }
 
 // eval runs one input through the resident instance. It returns the decoded
 // output bytes on success, or (nil, doomed, err) on failure where doomed
 // signals the instance must be discarded and rebuilt rather than returned to
 // the pool.
+//
+// doomed carries TWO meanings and callers must read err to tell them apart:
+//
+//	err != nil, doomed=true   the instance FAILED and must be discarded
+//	err == nil, doomed=true   the eval succeeded but the instance has reached
+//	                          maxEvalsPerInstance and is due for planned recycle
+//
+// The overload is deliberate — a planned recycle retires the instance by the
+// same mechanism a failure does — but it means "doomed" alone never answers
+// whether anything went wrong. Any new caller that branches on doomed before
+// checking err will report healthy recycles as errors.
 //
 // Memory ABI (docs §4.3): alloc(len) → ptr; write input; eval(len) → n;
 // n<0 → error (out buffer holds structured detail, read for logging only);
@@ -94,7 +146,20 @@ func (in *pooledInstance) evalOnce(ctx context.Context, input []byte) (out []byt
 		return nil, doom, &reactorEvalError{code: n, detail: detail}
 	}
 
-	return in.readOut(ctx, n), false, nil
+	out = in.readOut(ctx, n)
+	in.evalCount++
+	// Proactive recycle: after maxEvalsPerInstance successful evals the instance
+	// has accumulated enough heap bookkeeping that it is close to exhausting the
+	// 16 MiB memory cap. Signal the caller to doom it via a successful-but-doomed
+	// result rather than letting it crash unexpectedly on a future eval.
+	//
+	// Returning doomed=true with err=nil is the "planned replacement" path:
+	// evalFromPool forwards the result to the caller unchanged but replaces the
+	// instance asynchronously in the background. See maxEvalsPerInstance.
+	if in.evalCount >= maxEvalsPerInstance {
+		return out, true, nil
+	}
+	return out, false, nil
 }
 
 // classifyHostFault stamps a doomed-instance error as permanent unless the
@@ -434,6 +499,36 @@ func (e *reactorEngine) doom(ctx context.Context, p *activePool, inst *pooledIns
 			// this rebuild. That is a capacity loss, so it must be visible —
 			// silent shrinkage looks identical to contention from outside, and
 			// the pool's width is what bounds wasm concurrency.
+			obs().OnInstanceRecycled(bg, "rebuild_failed")
+			return
+		}
+		if e.active.Load() != p {
+			repl.teardown(bg)
+			return
+		}
+		select {
+		case p.free <- repl:
+		default:
+			repl.teardown(bg)
+		}
+	}()
+}
+
+// recyclePlanned proactively replaces a healthy instance that has reached
+// maxEvalsPerInstance. Unlike doom it does not indicate a failure: the eval
+// result is already in the caller's hands and is valid, so no error is
+// returned up the stack. The old instance is torn down and a fresh one is
+// built asynchronously, keeping the pool at full strength.
+func (e *reactorEngine) recyclePlanned(p *activePool, inst *pooledInstance) {
+	obs().OnInstanceRecycled(context.Background(), "max_evals")
+	bg := context.Background()
+	inst.teardown(bg)
+	if e.active.Load() != p {
+		return
+	}
+	go func() {
+		repl, err := e.newInstance(bg, p.cfg)
+		if err != nil {
 			obs().OnInstanceRecycled(bg, "rebuild_failed")
 			return
 		}

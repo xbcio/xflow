@@ -151,7 +151,13 @@ func (f *reactorFacade) evalFromPool(ctx context.Context, e *reactorEngine, inpu
 		}
 		return nil, err
 	}
-	e.giveBack(ctx, pool, inst)
+	if doomed {
+		// Planned recycle: the instance reached maxEvalsPerInstance. The eval
+		// result is valid; tear down the instance and rebuild asynchronously.
+		e.recyclePlanned(pool, inst)
+	} else {
+		e.giveBack(ctx, pool, inst)
+	}
 
 	decoded, err := decodeStdout(out)
 	if err != nil {
