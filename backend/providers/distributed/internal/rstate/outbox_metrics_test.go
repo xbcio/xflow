@@ -18,6 +18,7 @@ func TestRedisOutboxFailureTracksAttemptsAndDeadLetters(t *testing.T) {
 		ID:   "root/outbox-dead-letter/start/0",
 		Task: engine.Task{ExecutionID: id, NodeName: "start", NodeIdx: 0, Type: engine.TaskTypeNodeExec},
 	}
+	before := time.Now().UTC().Add(-time.Second)
 	if err := state.CreateExecutionWithOutbox(ctx, &engine.ExecutionSnapshot{ID: id, Status: types.ExecutionStatusRunning}, []engine.OutboxEntry{entry}); err != nil {
 		t.Fatalf("CreateExecutionWithOutbox() error = %v", err)
 	}
@@ -26,8 +27,16 @@ func TestRedisOutboxFailureTracksAttemptsAndDeadLetters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OutboxMetrics() initial error = %v", err)
 	}
-	if initial.Pending != 1 || initial.DeadLettered != 0 || initial.OldestPendingAt.IsZero() {
-		t.Fatalf("initial OutboxMetrics() = %+v, want one timestamped pending entry", initial)
+	if initial.Pending != 1 || initial.DeadLettered != 0 {
+		t.Fatalf("initial OutboxMetrics() = %+v, want one pending entry", initial)
+	}
+	// IsZero() alone would not settle this: time.UnixMilli(0) is 1970 and Go's
+	// zero Time is year 1, so a scanner reporting the epoch passes an IsZero
+	// check while reporting an age of half a century. Bound it on both sides
+	// against the instant the entry was actually created.
+	if initial.OldestPendingAt.Before(before) || initial.OldestPendingAt.After(time.Now().UTC().Add(time.Minute)) {
+		t.Fatalf("initial OldestPendingAt = %s, want an instant near the seed at %s",
+			initial.OldestPendingAt.Format(time.RFC3339Nano), before.Format(time.RFC3339Nano))
 	}
 
 	first, err := state.RecordOutboxFailure(ctx, id, entry, 2)

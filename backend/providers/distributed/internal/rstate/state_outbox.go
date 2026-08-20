@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -345,6 +346,65 @@ func (s *Store) OutboxMetrics(ctx context.Context) (engine.OutboxMetricsSnapshot
 	return snapshot, nil
 }
 
+// outboxMetricsHeadCap bounds how many ready members this scan reads per
+// execution when looking for the oldest creation time.
+//
+// The ready-ZSET is ordered by available-at, not by creation time, so the
+// first member is not necessarily the oldest entry: a lease pushes a member's
+// score forward and a retry backoff does the same, both reordering the set
+// against creation order. Reading a bounded head and taking the minimum
+// CreatedAt across it is the compromise — an execution whose oldest entry sits
+// past this cap reports the oldest within the head, which understates the
+// backlog age but never invents one.
+const outboxMetricsHeadCap = 16
+
+// outboxBodyKeyFromReadyKey derives the body-hash key from its ready-ZSET key.
+//
+// Both are execKey(t, id, ...) with different suffixes, and the scan yields
+// the ready key without the execution ID it was built from. Rebuilding by
+// suffix substitution avoids parsing the ID back out of the key.
+func outboxBodyKeyFromReadyKey(readyKey string) string {
+	return strings.TrimSuffix(readyKey, "outbox:ready") + "outbox:body"
+}
+
+// oldestOutboxCreatedAt returns the earliest CreatedAt across the given ready
+// members, read from their entry bodies.
+//
+// It reads the body rather than the ZSET score because the score means
+// available-at: entries enqueued by the entry-seed path carry a literal 0
+// (which reads back as 1970), and a leased or retry-delayed entry carries a
+// future instant (which clamps the reported age to zero). CreatedAt is written
+// once at marshal time and never moves.
+//
+// A member whose body is missing was already acked and is skipped; a body that
+// predates the CreatedAt field decodes it as 0 and is skipped too, so an old
+// backlog reports no age rather than 1970.
+func (s *Store) oldestOutboxCreatedAt(ctx context.Context, bodyKey string, members []string) (time.Time, error) {
+	raw, err := s.rdb.HMGet(ctx, bodyKey, members...).Result()
+	if err != nil {
+		return time.Time{}, fmt.Errorf("read pending outbox bodies %q: %w", bodyKey, err)
+	}
+	var oldest time.Time
+	for _, v := range raw {
+		body, ok := v.(string)
+		if !ok {
+			continue
+		}
+		var entry redisOutboxEntry
+		if err := json.Unmarshal([]byte(body), &entry); err != nil {
+			continue
+		}
+		if entry.CreatedAt <= 0 {
+			continue
+		}
+		at := time.UnixMilli(entry.CreatedAt).UTC()
+		if oldest.IsZero() || at.Before(oldest) {
+			oldest = at
+		}
+	}
+	return oldest, nil
+}
+
 func (s *Store) scanOutboxMetricsForTenant(ctx context.Context, t namespace.Namespace, snapshot *engine.OutboxMetricsSnapshot) error {
 	var cursor uint64
 	for {
@@ -361,16 +421,20 @@ func (s *Store) scanOutboxMetricsForTenant(ctx context.Context, t namespace.Name
 			if count == 0 {
 				continue
 			}
-			oldest, err := s.rdb.ZRangeArgsWithScores(ctx, redis.ZRangeArgs{
-				Key: key, Start: "-inf", Stop: "+inf", ByScore: true, Offset: 0, Count: 1,
+			head, err := s.rdb.ZRangeArgs(ctx, redis.ZRangeArgs{
+				Key: key, Start: "-inf", Stop: "+inf", ByScore: true,
+				Offset: 0, Count: outboxMetricsHeadCap,
 			}).Result()
 			if err != nil {
-				return fmt.Errorf("read pending outbox oldest score %q: %w", key, err)
+				return fmt.Errorf("read pending outbox head %q: %w", key, err)
 			}
-			if len(oldest) == 0 {
+			if len(head) == 0 {
 				continue
 			}
-			oldestAt := time.UnixMilli(int64(oldest[0].Score)).UTC()
+			oldestAt, err := s.oldestOutboxCreatedAt(ctx, outboxBodyKeyFromReadyKey(key), head)
+			if err != nil {
+				return err
+			}
 			if !oldestAt.IsZero() && (snapshot.OldestPendingAt.IsZero() || oldestAt.Before(snapshot.OldestPendingAt)) {
 				snapshot.OldestPendingAt = oldestAt
 			}
