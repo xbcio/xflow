@@ -36,6 +36,33 @@ func TestUnitGraphWithGroup(t *testing.T) {
 	}
 }
 
+// TestUnitMergeMode_GroupReturnsEmpty is a probe that documents the current
+// behaviour: UnitMergeMode for a UnitGroup always returns "" (wait_all
+// default). GroupDef has no MergeMode field, so no other value is possible.
+// If GroupDef.MergeMode is introduced, update UnitMergeMode to read it and
+// update this test accordingly.
+func TestUnitMergeMode_GroupReturnsEmpty(t *testing.T) {
+	g, err := Compile(mkGroupDef([]string{"ingest", "analyze"}))
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	// Find the UnitGroup unit.
+	var groupUnitIdx = -1
+	for i := 0; i < g.UnitCount(); i++ {
+		if g.UnitKindAt(i) == UnitGroup {
+			groupUnitIdx = i
+			break
+		}
+	}
+	if groupUnitIdx < 0 {
+		t.Fatal("expected a UnitGroup unit")
+	}
+	got := g.UnitMergeMode(groupUnitIdx)
+	if got != "" {
+		t.Fatalf("UnitMergeMode for UnitGroup = %q, want %q (wait_all default)", got, "")
+	}
+}
+
 func TestUnitGraphMultiExit(t *testing.T) {
 	// Single-member group {a}, a has two output ports ok->x, err->y.
 	def := &types.WorkflowDef{

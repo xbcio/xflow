@@ -249,11 +249,16 @@ func (g *Graph) GroupMetaAt(unitIdx int) GroupMeta {
 
 // UnitMergeMode returns the downstream merge semantic for a unit. For a
 // UnitNode it returns the member node's MergeMode. For a UnitGroup it returns
-// "" (default wait_all; group fan-in semantics belong to Milestone B).
+// "" which the backend treats as wait_all.
+//
+// GroupDef and GroupMeta have no MergeMode field — the design has not defined
+// a fan-in mode for group units. Returning "" is the correct and intentional
+// value: it maps to the safe wait_all default in all backends. If
+// GroupDef.MergeMode is added in a future milestone, read gm.MergeMode here.
 func (g *Graph) UnitMergeMode(unitIdx int) string {
 	u := g.units[unitIdx]
 	if u.Kind == UnitGroup {
-		return ""
+		return "" // GroupDef has no MergeMode; backends treat "" as wait_all.
 	}
 	return g.nodes[u.NodeIdx].MergeMode
 }
