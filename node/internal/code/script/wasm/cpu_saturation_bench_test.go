@@ -29,6 +29,26 @@ func cpuSeconds() float64 {
 	return sec(ru.Utime) + sec(ru.Stime)
 }
 
+// liveRuleCount is the rule count the live SAS pipeline actually ran:
+// xflow_wasm_config_rule_count reported 2 in both measured windows. Benchmarks
+// here default to it rather than to a round number, because rule count sets how
+// much work the guest does per eval and picking it arbitrarily decides the
+// answer to the question these benchmarks exist to ask. A 60-rule
+// configuration measures a pipeline nobody is running.
+const liveRuleCount = 2
+
+// benchRules builds n distinct rules over fields the realistic record carries.
+func benchRules(n int) [][2]string {
+	rules := make([][2]string, 0, n)
+	for i := range n {
+		rules = append(rules, [2]string{
+			fmt.Sprintf("r%d", i),
+			fmt.Sprintf(`request.uri startsWith "/api/v%d/"`, i%8),
+		})
+	}
+	return rules
+}
+
 // BenchmarkEvalCPUSaturation answers whether wasm eval throughput is bounded by
 // CPU, and if so what one message actually costs in CPU-seconds.
 //
@@ -68,23 +88,18 @@ func BenchmarkEvalCPUSaturation(b *testing.B) {
 		}
 		b.Run(fmt.Sprintf("gomaxprocs=%d", procs), func(b *testing.B) {
 			runtime.GOMAXPROCS(procs)
+			// Restore before the subtest returns: the testing package warns
+			// about a benchmark that leaves GOMAXPROCS changed, and a leaked
+			// value would silently cap every benchmark that runs after this
+			// one in the same binary.
+			b.Cleanup(func() { runtime.GOMAXPROCS(original) })
 			ctx := context.Background()
 			h := newReactorHost()
 			e, err := h.engineFor(ctx, reactorWasm)
 			if err != nil {
 				b.Fatalf("engineFor: %v", err)
 			}
-			// A rule count in the range the live pipeline runs, evaluated
-			// against a record at the measured mean size. A toy input evals in
-			// microseconds and would make every configuration look unbounded.
-			rules := make([][2]string, 0, 60)
-			for i := range 60 {
-				rules = append(rules, [2]string{
-					fmt.Sprintf("r%d", i),
-					fmt.Sprintf(`request.uri startsWith "/api/v%d/"`, i%8),
-				})
-			}
-			cfgBytes, err := json.Marshal(ruleConfig(rules...))
+			cfgBytes, err := json.Marshal(ruleConfig(benchRules(liveRuleCount)...))
 			if err != nil {
 				b.Fatalf("marshal cfg: %v", err)
 			}
@@ -181,13 +196,7 @@ func BenchmarkEvalCPUByRecordSize(b *testing.B) {
 			if err != nil {
 				b.Fatalf("engineFor: %v", err)
 			}
-			rules := make([][2]string, 0, 60)
-			for i := range 60 {
-				rules = append(rules, [2]string{
-					fmt.Sprintf("r%d", i),
-					fmt.Sprintf(`request.uri startsWith "/api/v%d/"`, i%8),
-				})
-			}
+			rules := benchRules(liveRuleCount)
 			cfgBytes, err := json.Marshal(ruleConfig(rules...))
 			if err != nil {
 				b.Fatalf("marshal cfg: %v", err)
@@ -205,6 +214,65 @@ func BenchmarkEvalCPUByRecordSize(b *testing.B) {
 			}
 
 			b.SetBytes(int64(len(input)))
+			b.ResetTimer()
+			cpuStart := cpuSeconds()
+			for b.Loop() {
+				if _, err := facade.evalFromPool(ctx, e, input); err != nil {
+					b.Fatalf("eval: %v", err)
+				}
+			}
+			cpu := cpuSeconds() - cpuStart
+			b.StopTimer()
+			b.ReportMetric(cpu/float64(b.N)*1000, "cpu_ms/eval")
+		})
+	}
+}
+
+// BenchmarkEvalCPUByRuleCount separates the per-eval fixed cost from the
+// per-rule cost by sweeping the rule count with the input held constant.
+//
+// This is the number that decides between the three candidate remedies, and
+// no metric collected so far distinguishes them:
+//
+//   - If cost is nearly flat from 0 to 64 rules, almost all of it is fixed
+//     overhead — borrow, the cross-sandbox round trip, and stdin encode/decode.
+//     Then merging the two guests into one halves it, and evaluating a whole
+//     batch in one call amortises it by the batch size. Both are worth doing
+//     and neither requires giving up wasm.
+//   - If cost rises steeply with rule count, the expense is rule evaluation
+//     itself. Batching moves the same work and saves nothing; only cheaper
+//     rule evaluation (or leaving wasm) helps.
+//
+// Rule count 0 is the load-bearing data point: it is the fixed cost with the
+// business logic removed, measured through the exact production borrow path
+// rather than estimated. The live pipeline runs liveRuleCount (2), so the
+// distance between 0 and 2 is the share of today's cost that any amount of
+// rule optimisation could ever recover.
+func BenchmarkEvalCPUByRuleCount(b *testing.B) {
+	for _, count := range []int{0, 1, liveRuleCount, 8, 32, 64} {
+		b.Run(fmt.Sprintf("rules=%d", count), func(b *testing.B) {
+			ctx := context.Background()
+			h := newReactorHost()
+			e, err := h.engineFor(ctx, reactorWasm)
+			if err != nil {
+				b.Fatalf("engineFor: %v", err)
+			}
+			cfgBytes, err := json.Marshal(ruleConfig(benchRules(count)...))
+			if err != nil {
+				b.Fatalf("marshal cfg: %v", err)
+			}
+			if err := e.swapConfig(ctx, cfgBytes, 1, 1); err != nil {
+				b.Fatalf("swapConfig: %v", err)
+			}
+			facade := &reactorFacade{}
+			input, err := json.Marshal(realisticRecord(6845))
+			if err != nil {
+				b.Fatalf("marshal input: %v", err)
+			}
+			if _, err := facade.evalFromPool(ctx, e, input); err != nil {
+				b.Fatalf("warmup: %v", err)
+			}
+
 			b.ResetTimer()
 			cpuStart := cpuSeconds()
 			for b.Loop() {
