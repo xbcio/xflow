@@ -3,17 +3,19 @@
 //
 // # Background
 //
-// Go wasm guests (GOOS=wasip1) compiled with -buildmode=c-shared accumulate
-// GC-internal span/mcache metadata with every heap allocation. The live heap is
-// reclaimed by the GC, so the working set stays bounded, but the bookkeeping
-// grows monotonically. Under the production memory cap (256 pages, 16 MiB) a
-// guest that json.Unmarshal's a ~7 KB input exhausts the cap after ~18,856 evals
-// with a hard `unreachable` (SIGABRT) trap from runtime.mcache.refill.
+// Go wasm guests (GOOS=wasip1) compiled with -buildmode=c-shared can exhaust
+// the production memory cap (256 pages, 16 MiB) after a long run of
+// json.Unmarshal evals, trapping with `unreachable` from runtime.mcache.refill.
+// pool.go proactively recycles instances at maxEvalsPerInstance (currently
+// 8,000) so the rebuild is planned rather than an unplanned crash.
 //
-// The fix in pool.go proactively recycles instances at maxEvalsPerInstance
-// (currently 8,000) — well before the crash threshold. This test verifies that
-// the production configuration survives a run through the recycle threshold
-// without returning a doom error to the caller.
+// WHAT THIS TEST DOES NOT SHOW: that a crash would occur without the recycle.
+// At 7 066 B — the size the original analysis reported crashing at 18 856 evals
+// — a re-measurement on 2026-08-20 with a freshly built runtime survived 30 000.
+// See maxEvalsPerInstance in pool.go for the full reproduction. This test
+// therefore guards the recycle MECHANISM (it fires, exactly once, at the
+// threshold), not a demonstrated crash boundary. Do not cite it as evidence
+// that 8 000 is the right number.
 //
 // # What this test asserts
 //
@@ -53,9 +55,9 @@ import (
 // recycle event is observed.
 //
 // The test runs 10,000 iterations — just above maxEvalsPerInstance (8,000) —
-// to confirm the planned-recycle path fires and the pool recovers rather than
-// crashing. Without the fix, this would crash at ~8,000 evals (well before the
-// raw threshold of ~18,856 at p50 input) and fail with a doom error.
+// to confirm the planned-recycle path fires and the pool recovers. It does not
+// establish that an unrecycled instance would have crashed by then; see the
+// Background note above.
 func TestMemLimitCrashIter(t *testing.T) {
 	// Production observer, recording recycle events.
 	rec := &recordingObserver{}

@@ -35,36 +35,36 @@ var reactorABIVersion int32 = 1
 // maxEvalsPerInstance limits how many successful evals one resident instance
 // may serve before it is proactively recycled.
 //
-// Why this is necessary: Go wasm guests (GOOS=wasip1) accumulate GC-internal
-// span and mcache metadata with every allocation. The GC reclaims live objects,
-// so the live heap stays bounded, but the runtime's internal bookkeeping grows
-// monotonically with total allocation volume. Under a 256-page (16 MiB) memory
-// cap, a guest that does json.Unmarshal on ~7 KB inputs exhausts the cap after
-// ~18 k evals; the wasm `unreachable` trap that follows is classified as a doom
-// and the instance is rebuilt — silently and without error, but at the cost of
-// 62 ms cold-start every ~3.4 s at target throughput.
+// What is established: a Go wasm guest (GOOS=wasip1) under the 256-page
+// (16 MiB) cap CAN exhaust its memory and trap with `unreachable` from
+// runtime.mcache.refill after a long run of json.Unmarshal evals. pool.go
+// classifies that trap as a doom and rebuilds the instance, so production sees
+// no error — only an unexplained 62 ms cold start. Recycling on a schedule
+// makes the rebuild planned instead of unplanned.
 //
-// The constant is set below the lowest observed crash threshold. The governing
-// relationship is per-BYTE, not per-call: crash_iter × input_size held at
-// ~140 MB across every arm measured, so the margin shrinks as records grow.
+// What is NOT established: when it happens. An earlier measurement reported
+// crash points scaling per-BYTE (crash_iter × input_size ≈ 140 MB) at 7 066 B
+// and 9 974 B. Re-measured 2026-08-20 with one freshly built runtime per arm,
+// both sizes survived 30 000 evals (219 MB and 306 MB of product) without
+// trapping, and 8 638 B survived 60 000 (518 MB). The products of the arms that
+// did trap — 8 638 B: none; 40 221 B: 160 MB; 138 948 B: 195 MB — span more
+// than 3x, so the per-byte law does not hold. The probe that produced the
+// original figures was never committed and cannot be rerun; the most likely
+// explanation for the discrepancy is that its arms shared a runtime, making
+// each arm's crash point a function of the arms before it.
 //
-//	p50 input (2 815 B): survived 25 000 evals      → margin > 3.1x
-//	mean input (7 066 B): crashed at 18 856         → margin 2.4x
-//	p90 input (9 974 B): crashed at 15 283          → margin 1.9x
-//
-// Those margins are against MEASURED crash points. Against the 140 MB budget
-// the p90 margin is 1.75x (140 MB / (8 000 x 9 974 B)) — the thinner of the two
-// readings, and the one to use when deciding whether a larger record shape is
-// still covered. Records materially above 10 KB need this constant re-derived,
-// not assumed.
-//
-// The replacement (teardown + rebuild) runs asynchronously and costs one 62 ms
-// instantiation amortised over 8 000 messages. That is a real added cost, not a
-// saving — what it buys is replacing an unplanned crash every ~3.4 s at target
-// throughput with a planned recycle every ~1.5 s that never fails an eval.
+// So 8 000 is a value that has never been observed to be too high, not a value
+// derived from a crash threshold. It is cheap insurance: one 62 ms rebuild
+// amortised over 8 000 messages, asynchronous, and unable to fail an eval.
+// Treat it as a bound, not a calibration.
 //
 // Raising this value: safe only if WithMemoryLimitPages rises proportionally.
 // Lowering it: costs throughput (more rebuilds), never correctness.
+//
+// Re-deriving it properly needs a probe that builds a fresh runtime per arm
+// (the reproduction above) and sweeps sizes against the REAL record
+// distribution, which is heavy-tailed: on the SAS apisix topic, p50 is 2.6 KB
+// but p99 is 139 KB. A threshold tuned on the mean does not cover the tail.
 const maxEvalsPerInstance = 8_000
 
 // pooledInstance is one resident reactor instance: an instantiated module with
