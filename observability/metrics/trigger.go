@@ -2,6 +2,8 @@ package metrics
 
 import (
 	"context"
+	"strconv"
+	"time"
 
 	kafkatrigger "github.com/xbcio/xflow/node/trigger/kafka"
 )
@@ -14,12 +16,15 @@ const (
 	metricTriggerBatchFlushOutcome   = "xflow_trigger_batch_flush_outcomes_total"
 	metricTriggerBatchSize           = "xflow_trigger_batch_size"
 	metricTriggerBatchAdmission      = "xflow_trigger_batch_admissions_total"
+	metricTriggerConsumerLag         = "xflow_trigger_consumer_lag"
+	metricTriggerLastFetchTimestamp  = "xflow_trigger_last_fetch_timestamp_seconds"
 )
 
 // TriggerMetrics observes trigger message-handling outcomes.
 //
-// Labels are topic plus a fixed reason/result enum. Topic is bounded by the
-// number of configured triggers. Message keys, offsets, and content are
+// Labels are topic plus a fixed reason/result enum, and — on the consumer-lag
+// gauges only — partition. Topic is bounded by the number of configured
+// triggers, partition by the assignment. Message keys, offsets, and content are
 // deliberately absent: the first two are unbounded and the third is not an
 // operator's to read from a metric.
 type TriggerMetrics struct {
@@ -100,6 +105,35 @@ func (t TriggerMetrics) OnBatchAdmission(ctx context.Context, topic, state, reas
 	t.Metrics.Inc(metricTriggerBatchAdmission, withNamespace(ctx, map[string]string{
 		"topic": topic, "state": state, "reason": reason,
 	}))
+}
+
+// OnConsumerLag records how far a partition's fetch position sits behind the
+// broker's high-water mark, plus when that reading was taken.
+//
+// Two series, not one. Lag alone is a trap: it only advances when a message is
+// fetched, so a consumer that has STOPPED fetching holds its last value
+// forever, and a stalled consumer reads as a healthy one — the exact failure
+// this metric exists to catch. xflow_trigger_last_fetch_timestamp_seconds makes
+// the freeze visible: alert on time() - last_fetch_timestamp, and treat a lag
+// figure as meaningless whenever that is large.
+//
+// partition is a label here and nowhere else in this file. Lag is a
+// per-partition quantity, so setting one gauge from every partition would
+// report whichever partition wrote last, and a single caught-up partition would
+// mask a stalled one. Cardinality stays bounded by the assignment — tens of
+// series per topic, and nothing a producer can inflate.
+func (t TriggerMetrics) OnConsumerLag(ctx context.Context, topic string, partition int, lag int64, fetchedAt time.Time) {
+	labels := withNamespace(ctx, map[string]string{
+		"topic": topic, "partition": strconv.Itoa(partition),
+	})
+	t.Metrics.Set(metricTriggerConsumerLag, labels, float64(lag))
+	// Seconds plus a fractional part, not UnixNano()/1e9: a nanosecond count of
+	// the current era is past 2^53 and no longer exactly representable as a
+	// float64, so that form quantizes the reading to a couple of hundred
+	// nanoseconds' error at an arbitrary offset. Splitting the sum keeps the
+	// whole seconds exact, which is the part an alert on time()-this compares.
+	t.Metrics.Set(metricTriggerLastFetchTimestamp, labels,
+		float64(fetchedAt.Unix())+float64(fetchedAt.Nanosecond())/1e9)
 }
 
 var _ kafkatrigger.Observer = TriggerMetrics{}

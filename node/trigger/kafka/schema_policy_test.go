@@ -41,12 +41,15 @@ func (o *recordingObserver) OnMessageDeadLettered(_ context.Context, topic, resu
 	o.mu.Unlock()
 }
 
-// OnBatchFlushed, OnBatchFlushOutcome and OnBatchAdmission are no-ops here: this
-// fake only asserts on discard/dead-letter behavior (Task 4's batch metrics are
-// covered by recordingBatchObserver in kafka_entry_seed_batch_test.go).
-func (o *recordingObserver) OnBatchFlushed(context.Context, string, string, int)         {}
-func (o *recordingObserver) OnBatchFlushOutcome(context.Context, string, string, string) {}
-func (o *recordingObserver) OnBatchAdmission(context.Context, string, string, string)    {}
+// OnConsumerLag, OnBatchFlushed, OnBatchFlushOutcome and OnBatchAdmission are
+// no-ops here: this fake only asserts on discard/dead-letter behavior (Task 4's
+// batch metrics are covered by recordingBatchObserver in
+// kafka_entry_seed_batch_test.go, lag by recordingLagObserver in
+// consumer_lag_test.go).
+func (o *recordingObserver) OnConsumerLag(context.Context, string, int, int64, time.Time) {}
+func (o *recordingObserver) OnBatchFlushed(context.Context, string, string, int)          {}
+func (o *recordingObserver) OnBatchFlushOutcome(context.Context, string, string, string)  {}
+func (o *recordingObserver) OnBatchAdmission(context.Context, string, string, string)     {}
 
 func (o *recordingObserver) wakeLocked() {
 	close(o.notify)

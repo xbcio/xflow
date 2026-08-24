@@ -17,10 +17,11 @@ import (
 //
 // Deliberately NOT exposed: CommitInterval stays 0 so offsets commit
 // synchronously after the side effect (see TestCommitStaysSynchronous);
-// ReadLagInterval stays -1 because lag reporting is served by the trigger's own
-// metrics; GroupBalancers, ReadBackoff*, RetentionTime, and
-// OffsetOutOfRangeError have no reported operational need, and each knob is a
-// value someone can set wrong.
+// ReadLagInterval stays -1 because kafkaGoConsumer.run samples lag off the
+// high-water mark of each fetched message and reports it through
+// Observer.OnConsumerLag, which costs no extra broker round trip;
+// GroupBalancers, ReadBackoff*, RetentionTime, and OffsetOutOfRangeError have
+// no reported operational need, and each knob is a value someone can set wrong.
 type TuningConfig struct {
 	// FetchMinBytes is the smallest fetch the broker will answer. 1 means
 	// "return as soon as anything is available", which is what a trigger

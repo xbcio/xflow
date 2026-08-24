@@ -298,6 +298,7 @@ func (c *kafkaGoConsumer) CommitMessages(ctx context.Context, messages ...Messag
 func (c *kafkaGoConsumer) run() {
 	defer close(c.done)
 	defer close(c.messages)
+	lag := newLagSampler(consumerLagSampleInterval)
 	for {
 		msg, err := c.reader.FetchMessage(c.ctx)
 		if err != nil {
@@ -309,12 +310,67 @@ func (c *kafkaGoConsumer) run() {
 			}
 			continue
 		}
+		// Sampled here rather than from a separate poller because the fetched
+		// message already carries the high-water mark: lag costs no broker round
+		// trip, and this one call site covers every runtime that consumes from
+		// this channel.
+		now := time.Now()
+		if behind, report := lag.sample(msg, now); report {
+			obs().OnConsumerLag(c.ctx, msg.Topic, msg.Partition, behind, now)
+		}
 		select {
 		case c.messages <- messageFromReader(msg):
 		case <-c.ctx.Done():
 			return
 		}
 	}
+}
+
+// consumerLagSampleInterval bounds how often lag is reported per partition.
+//
+// The sample itself is free, but the report is not: the observer resolves a
+// gauge by label set, and doing that per message would put a map lookup and a
+// label-slice comparison on the ingest path at Kafka rates. A gauge is a level,
+// not an event stream — a scrape only ever sees the last value written within
+// its interval, so sampling faster than the scrape produces work nobody reads.
+const consumerLagSampleInterval = time.Second
+
+// lagSampler throttles lag reporting per partition. It is not synchronized:
+// the only caller is kafkaGoConsumer.run, which is a single goroutine.
+type lagSampler struct {
+	interval time.Duration
+	last     map[int]time.Time
+}
+
+func newLagSampler(interval time.Duration) *lagSampler {
+	return &lagSampler{interval: interval, last: make(map[int]time.Time)}
+}
+
+// sample returns how far behind the high-water mark this message sits, and
+// whether that reading is due to be reported for its partition.
+//
+// The first message from a partition always reports, so a newly assigned
+// partition that is far behind is visible immediately rather than one interval
+// later. Partitions throttle independently — a busy partition must not consume
+// a quiet one's budget, because the quiet one is the one whose lag is
+// interesting.
+func (s *lagSampler) sample(msg kafkago.Message, now time.Time) (int64, bool) {
+	// A fetched message occupies an offset, so the high-water mark is at least
+	// offset+1 and cannot be zero. Zero means kafka-go did not populate it;
+	// reporting the resulting negative number as lag would be worse than
+	// reporting nothing.
+	if msg.HighWaterMark <= 0 {
+		return 0, false
+	}
+	if last, seen := s.last[msg.Partition]; seen && now.Sub(last) < s.interval {
+		return 0, false
+	}
+	s.last[msg.Partition] = now
+	behind := msg.HighWaterMark - msg.Offset - 1
+	if behind < 0 {
+		behind = 0
+	}
+	return behind, true
 }
 
 func sleepConsumerRetry(ctx context.Context) bool {

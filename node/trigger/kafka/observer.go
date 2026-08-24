@@ -8,10 +8,17 @@ import (
 )
 
 // Observer receives trigger observations. Implementations must be non-blocking
-// and must never use message content, keys, or offsets as labels: content is
-// not an operator's to read from a metric and offsets are unbounded
-// cardinality. Topic is the only message-derived label, and it is bounded by
-// the number of configured triggers.
+// and must never use message content or keys as labels: content is not an
+// operator's to read from a metric. Offsets are unbounded cardinality and are
+// never labels either — OnConsumerLag passes one as a VALUE, which is what a
+// gauge is for.
+//
+// Topic and partition are the only message-derived labels. Partition was added
+// with OnConsumerLag and is admitted only there: lag is a per-partition
+// quantity, so a gauge Set from every partition under one label set reports
+// whichever partition wrote last, and one caught-up partition would hide a
+// stalled one. It stays bounded by the assignment, which is tens of series per
+// topic, not by anything a producer controls.
 type Observer interface {
 	// OnMessageDiscarded reports a message that was consumed (its offset
 	// committed) but never emitted. reason is a fixed enum — currently only
@@ -21,6 +28,23 @@ type Observer interface {
 	// OnMessageDeadLettered reports a dead-letter publish attempt. result is
 	// "ok" or "error".
 	OnMessageDeadLettered(ctx context.Context, topic, result string)
+	// OnConsumerLag reports how far this partition's fetch position sits behind
+	// the broker's high-water mark, sampled from a message that has just been
+	// fetched. fetchedAt is when that sample was taken.
+	//
+	// It exists because the consumer disables kafka-go's own lag reporting
+	// (ReadLagInterval = -1) on the grounds that the trigger reports lag itself,
+	// and for a long time the trigger did not. Four other comments in this tree
+	// reason about "consumer-group lag" as an available signal; until this
+	// method existed, none of them had one.
+	//
+	// fetchedAt is not decoration. This sample only advances when a message is
+	// fetched, so a consumer that has STOPPED fetching leaves lag frozen at its
+	// last value — the one failure this metric exists to catch would read as
+	// healthy. Exporting the sample time makes the freeze detectable: staleness
+	// is now-minus-fetchedAt, and a lag figure is only worth reading if that is
+	// small. Reporting lag alone would have been worse than reporting nothing.
+	OnConsumerLag(ctx context.Context, topic string, partition int, lag int64, fetchedAt time.Time)
 	// OnBatchFlushed reports one batch ATTEMPTING to leave the aggregator.
 	// trigger is a fixed enum: "size", "timeout", "idle", "close". size is the
 	// message count.
@@ -53,11 +77,12 @@ type Observer interface {
 
 type noopObserver struct{}
 
-func (noopObserver) OnMessageDiscarded(context.Context, string, string)          {}
-func (noopObserver) OnMessageDeadLettered(context.Context, string, string)       {}
-func (noopObserver) OnBatchFlushed(context.Context, string, string, int)         {}
-func (noopObserver) OnBatchFlushOutcome(context.Context, string, string, string) {}
-func (noopObserver) OnBatchAdmission(context.Context, string, string, string)    {}
+func (noopObserver) OnMessageDiscarded(context.Context, string, string)           {}
+func (noopObserver) OnMessageDeadLettered(context.Context, string, string)        {}
+func (noopObserver) OnConsumerLag(context.Context, string, int, int64, time.Time) {}
+func (noopObserver) OnBatchFlushed(context.Context, string, string, int)          {}
+func (noopObserver) OnBatchFlushOutcome(context.Context, string, string, string)  {}
+func (noopObserver) OnBatchAdmission(context.Context, string, string, string)     {}
 
 // observer holds the installed Observer as an atomic pointer rather than a
 // mutex-guarded variable because obs() sits on the per-message path, which runs
