@@ -402,6 +402,7 @@ var metricHelp = map[string]string{
 	"xflow_node_timeout_abandoned":                   "Handlers whose deadline passed but which have not returned. Should fall back to zero; a persistently non-zero value means a node type ignores ctx.",
 	"xflow_node_execution_duration_seconds":          "Wall-clock duration of one handler invocation.",
 	"xflow_node_retried_total":                       "Nodes retried after a failure.",
+	"xflow_node_starts_swept_total":                  "Node start times discarded by the age sweep instead of by a completion or an execution end. Should stay at zero: reaching it means a node started and nothing ever reported what became of it or of its execution, so xflow_node_duration_seconds is quietly missing those observations.",
 	"xflow_outbox_retries_total":                     "Outbox message dispatch retry attempts.",
 	"xflow_outbox_dead_letters_total":                "Outbox messages sent to the dead-letter queue.",
 	"xflow_outbox_dead_letters":                      "Current count of outbox messages in the dead-letter queue.",
