@@ -39,6 +39,12 @@ func NewTriggerMetrics(m *Metrics) TriggerMetrics { return TriggerMetrics{Metric
 // starts emitting records missing a required field previously looked exactly
 // like an idle topic, because the offsets were still being committed and so
 // consumer-group lag stayed at zero. Alert on any nonzero rate here.
+//
+// Split the alert by reason, because two of the three are not the same event.
+// schema/schema_fail describe a message that could not be used. buffer_overflow
+// describes a usable message the aggregator threw away under load, with the
+// commit frontier advancing past its offset — nothing redelivers it, so that
+// series is a running total of permanently lost records.
 func (t TriggerMetrics) OnMessageDiscarded(ctx context.Context, topic, reason string) {
 	t.Metrics.Inc(metricTriggerMessagesDiscarded, withNamespace(ctx, map[string]string{
 		"topic": topic, "reason": reason,

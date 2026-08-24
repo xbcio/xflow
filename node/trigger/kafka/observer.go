@@ -21,9 +21,15 @@ import (
 // topic, not by anything a producer controls.
 type Observer interface {
 	// OnMessageDiscarded reports a message that was consumed (its offset
-	// committed) but never emitted. reason is a fixed enum — currently only
-	// "schema". This is the counter that makes an otherwise invisible drop
-	// visible.
+	// committed) but never emitted. reason is a fixed enum: "schema" and
+	// "schema_fail" come from validation (schema.go), "buffer_overflow" from the
+	// aggregator shedding a message it had already read (aggregate.go). This is
+	// the counter that makes an otherwise invisible drop visible.
+	//
+	// The three are not equally recoverable, and the metric's help text says so:
+	// a schema drop is a decision about a message that could not be used,
+	// whereas buffer_overflow discards a usable message AND lets the commit
+	// frontier advance past its offset, so nothing ever redelivers it.
 	OnMessageDiscarded(ctx context.Context, topic, reason string)
 	// OnMessageDeadLettered reports a dead-letter publish attempt. result is
 	// "ok" or "error".

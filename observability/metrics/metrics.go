@@ -423,12 +423,13 @@ var metricHelp = map[string]string{
 	"xflow_script_execute_total":                     "Script execution attempts, partitioned by result.",
 	"xflow_script_execute_duration_seconds":          "Wall-clock duration of script execution.",
 	"xflow_script_output_bytes":                      "Size of script stdout output in bytes.",
+	"xflow_subgraph_item_failures_total":             "Map/subgraph items that failed under continue_on_error, partitioned by workflow and node. Without this series that switch is silent: a failed item leaves a placeholder the downstream filter removes, the batch commits, and the execution reports Success — so a node steadily losing records looks healthy.",
 	"xflow_supply_age_seconds":                       "Age of the active wasm reactor content, per module. A source that stopped updating leaves this climbing.",
 	"xflow_supply_fetch_total":                       "Supply content fetch attempts at activation time, partitioned by supply name and result.",
 	"xflow_supply_not_ready":                         "Whether an activation is currently being declined for a missing required supply, per workflow and supply.",
 	"xflow_supply_unavailable_serving":               "Whether a supply is serving traffic with content that was never successfully fetched (require_ready:false).",
 	"xflow_supply_consumers":                         "Number of in-process consumers registered for a supply.",
-	"xflow_trigger_messages_discarded_total":         "Trigger messages consumed but never emitted, partitioned by topic and reason (schema/schema_fail). Any nonzero rate is silent data loss unless it is expected.",
+	"xflow_trigger_messages_discarded_total":         "Trigger messages consumed but never emitted, partitioned by topic and reason (schema/schema_fail/buffer_overflow). Any nonzero rate is data loss. buffer_overflow is the permanent kind: the aggregator dropped a message it had already read and the commit frontier still advances past it, so nothing redelivers it.",
 	"xflow_trigger_messages_dead_lettered_total":     "Dead-letter publish attempts for invalid trigger messages, partitioned by topic and result (ok/error). An error rate means the source partition is stalled on redelivery.",
 	"xflow_trigger_batches_flushed_total":            "Batches that attempted to leave a trigger aggregator, partitioned by topic and what triggered the flush (size/timeout/idle/close).",
 	"xflow_trigger_batch_flush_outcomes_total":       "How those flush attempts ended, partitioned by result (ok/error). Divided by xflow_trigger_batches_flushed_total this is the retry rate.",
@@ -443,6 +444,8 @@ var metricHelp = map[string]string{
 	"xflow_wasm_instance_total":                      "Total resident wasm reactor pool instances across all engines (state=ready).",
 	"xflow_wasm_instance_recycled_total":             "wasm reactor pool instances torn down, partitioned by cause.",
 	"xflow_wasm_pool_borrow_wait_seconds":            "Time a caller waited to borrow a free wasm reactor pool instance.",
+	"xflow_wasm_eval_stdin_bytes":                    "Size of the payload handed to one wasm eval. The only view of the TAIL: this distribution is heavy-tailed, so a mean hides where the cost actually goes. Read next to xflow_wasm_eval_duration_seconds — a size that climbs on its own is a redundant copy leaking into the payload.",
+	"xflow_wasm_eval_duration_seconds":               "Wall-clock duration of one wasm eval, dominated by the guest re-parsing stdin inside the sandbox. It normally tracks xflow_wasm_eval_stdin_bytes; climbing while size holds flat is contention or oversubscription, not bigger work.",
 	"xflow_wasm_module_compile_total":                "wasm module compile cache outcomes, partitioned by result (hit/miss).",
 }
 
