@@ -142,7 +142,12 @@ func (f *reactorFacade) evalFromPool(ctx context.Context, e *reactorEngine, inpu
 	// distinguishable from a large one — see Observer.OnEval.
 	evalStart := time.Now()
 	out, doomed, err := inst.evalOnce(ctx, inputBytes)
-	obs().OnEval(ctx, len(inputBytes), time.Since(evalStart))
+	// Read the identity here rather than threading it through evalFromPool's
+	// signature: every caller already holds the context, and half of them are
+	// benchmarks that have no node to name. One context lookup per eval sits
+	// against a call measured in hundreds of microseconds.
+	id := engine.NodeIdentityFromContext(ctx)
+	obs().OnEval(ctx, id.Workflow, id.Node, len(inputBytes), time.Since(evalStart))
 	if err != nil {
 		if doomed {
 			e.doom(ctx, pool, inst)

@@ -89,21 +89,35 @@ func (s SupplyMetrics) OnBorrowWait(ctx context.Context, d time.Duration) {
 	s.Metrics.Observe(metricWasmPoolBorrowWait, withNamespace(ctx, nil), d)
 }
 
-// OnEval records one eval's stdin size and duration.
+// OnEval records one eval's stdin size and duration, attributed to the node
+// that ran it.
 //
-// Together these answer a question neither answers alone: whether a rising eval
-// cost is the engine getting slower or the payload getting bigger. Eval is
-// dominated by the guest re-parsing stdin inside the sandbox, so the two series
-// normally track each other; a duration that climbs while size holds flat is
-// contention or oversubscription, and a size that climbs on its own is a
+// Size and duration together answer a question neither answers alone: whether a
+// rising eval cost is the engine getting slower or the payload getting bigger.
+// Eval is dominated by the guest re-parsing stdin inside the sandbox, so the two
+// series normally track each other; a duration that climbs while size holds flat
+// is contention or oversubscription, and a size that climbs on its own is a
 // redundant copy leaking into the payload.
+//
+// workflow/node answer the next question: WHICH node. A runner hosting several
+// script nodes merges them into one series without these, so the node that
+// regressed is the one that cannot be named — and in a collection pipeline the
+// nodes do not cost remotely the same. Cardinality is bounded by the deployed
+// workflow definitions; neither value is derived from a message.
+//
+// Both labels are emitted even when empty. An eval that reached the engine
+// without going through the node layer has no node to name, and dropping the
+// labels for it would mean a second vec under the same metric name — which
+// prometheus refuses to register, so those evals would vanish from /metrics with
+// only a log line to say so. node="" is the honest encoding of "unattributed".
 //
 // The size histogram is also the only way the TAIL is visible. Every other
 // signal here reports a mean, and a payload distribution with a p99 at 17x the
 // mean spends most of its cost on records the mean never shows.
-func (s SupplyMetrics) OnEval(ctx context.Context, stdinBytes int, d time.Duration) {
-	s.Metrics.ObserveBytes(metricWasmEvalStdinBytes, withNamespace(ctx, nil), stdinBytes)
-	s.Metrics.Observe(metricWasmEvalDuration, withNamespace(ctx, nil), d)
+func (s SupplyMetrics) OnEval(ctx context.Context, workflow, node string, stdinBytes int, d time.Duration) {
+	labels := withNamespace(ctx, map[string]string{"workflow": workflow, "node": node})
+	s.Metrics.ObserveBytes(metricWasmEvalStdinBytes, labels, stdinBytes)
+	s.Metrics.Observe(metricWasmEvalDuration, labels, d)
 }
 
 // OnModuleCompile records module compilation cache outcome: "hit" or "miss".

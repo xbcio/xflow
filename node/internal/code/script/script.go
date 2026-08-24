@@ -218,6 +218,19 @@ func (n *ScriptNode) Execute(ctx context.Context, input *types.Input) (*types.Ou
 		return nil, types.NewPermanentError("script.unknown_engine", fmt.Sprintf("xflow.script: unknown engine (language=%q, runtime=%q)", language, runtime))
 	}
 
+	// Name the node for whatever the engine reports about its own cost. This is
+	// the last layer that knows: below it the engine sees a source string and a
+	// globals map, so a runner hosting several script nodes reports every eval
+	// against one merged series and "which node is burning CPU" has no answer.
+	//
+	// Attached after the lookup because nothing above it reaches an engine, and
+	// carried in the context rather than in Source so engines that do not report
+	// cost neither see nor forward it.
+	ctx = engine.WithNodeIdentity(ctx, engine.NodeIdentity{
+		Workflow: input.WorkflowName,
+		Node:     input.NodeName,
+	})
+
 	declared := readNameList(input.Params["credentials"])
 	// Input.Credential has no error return; a nil value means "not found", which
 	// ResolveCredentials turns into a config error for a declared-but-absent name.

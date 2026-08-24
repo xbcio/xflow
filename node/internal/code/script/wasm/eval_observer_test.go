@@ -117,3 +117,80 @@ func TestOnEvalStdinSizeTracksPayload(t *testing.T) {
 			large-small, 20000-2594)
 	}
 }
+
+// TestOnEvalCarriesNodeIdentity pins that eval cost is attributable.
+//
+// Duration and size answer "is this slow because it is big"; neither answers
+// "which node". A runner hosting several script nodes — SAS runs a decode node
+// and a clean node in the same process — merges them into one series, so the
+// node that regressed is the one you cannot name.
+//
+// The identity comes from the context because that is the only thing crossing
+// this boundary that the node layer controls. Driving e.Execute rather than
+// calling obs().OnEval directly is what makes the test meaningful: the read sits
+// inside evalFromPool, and a test that invoked the observer itself would prove
+// only that the recorder records.
+func TestOnEvalCarriesNodeIdentity(t *testing.T) {
+	e, ok := engine.Lookup("wasm", "wazero-reactor")
+	if !ok {
+		t.Fatal("wazero-reactor engine not registered")
+	}
+	rec := &recordingObserver{}
+	SetObserver(rec)
+	defer SetObserver(nil)
+
+	in := &types.Input{Data: map[string]any{"$item": realisticRecord(2594), "x": float64(10)}}
+	env := exprx.BuildExprEnv(in, nil)
+	env["$config"] = ruleConfig([2]string{"r1", "x > 5"})
+
+	ctx := engine.WithNodeIdentity(context.Background(), engine.NodeIdentity{
+		Workflow: "sas-collect", Node: "decode",
+	})
+	if _, err := e.Execute(ctx, engine.Code(b64(reactorWasm)), env, engine.DefaultHelpers()); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	calls := rec.evalCalls()
+	if len(calls) != 1 {
+		t.Fatalf("OnEval called %d times, want 1", len(calls))
+	}
+	if calls[0].workflow != "sas-collect" || calls[0].node != "decode" {
+		t.Errorf("OnEval reported workflow=%q node=%q, want sas-collect/decode",
+			calls[0].workflow, calls[0].node)
+	}
+}
+
+// TestOnEvalReportsNoIdentityWhenTheContextCarriesNone guards against inventing
+// a name.
+//
+// An engine reached without going through the node layer — a benchmark, a test,
+// a future caller — has no node to name. Substituting a placeholder ("unknown",
+// the engine name) would put a value on the series that reads as authoritative
+// and is not, and once it is there nothing distinguishes it from a real node
+// called "unknown". Empty says "unattributed" and says it honestly.
+func TestOnEvalReportsNoIdentityWhenTheContextCarriesNone(t *testing.T) {
+	e, ok := engine.Lookup("wasm", "wazero-reactor")
+	if !ok {
+		t.Fatal("wazero-reactor engine not registered")
+	}
+	rec := &recordingObserver{}
+	SetObserver(rec)
+	defer SetObserver(nil)
+
+	in := &types.Input{Data: map[string]any{"$item": realisticRecord(2594), "x": float64(10)}}
+	env := exprx.BuildExprEnv(in, nil)
+	env["$config"] = ruleConfig([2]string{"r1", "x > 5"})
+
+	if _, err := e.Execute(context.Background(), engine.Code(b64(reactorWasm)), env, engine.DefaultHelpers()); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	calls := rec.evalCalls()
+	if len(calls) != 1 {
+		t.Fatalf("OnEval called %d times, want 1", len(calls))
+	}
+	if calls[0].workflow != "" || calls[0].node != "" {
+		t.Errorf("OnEval reported workflow=%q node=%q for a context naming no node; want both empty",
+			calls[0].workflow, calls[0].node)
+	}
+}

@@ -445,8 +445,8 @@ var metricHelp = map[string]string{
 	"xflow_wasm_instance_total":                      "Total resident wasm reactor pool instances across all engines (state=ready).",
 	"xflow_wasm_instance_recycled_total":             "wasm reactor pool instances torn down, partitioned by cause.",
 	"xflow_wasm_pool_borrow_wait_seconds":            "Time a caller waited to borrow a free wasm reactor pool instance.",
-	"xflow_wasm_eval_stdin_bytes":                    "Size of the payload handed to one wasm eval. The only view of the TAIL: this distribution is heavy-tailed, so a mean hides where the cost actually goes. Read next to xflow_wasm_eval_duration_seconds — a size that climbs on its own is a redundant copy leaking into the payload.",
-	"xflow_wasm_eval_duration_seconds":               "Wall-clock duration of one wasm eval, dominated by the guest re-parsing stdin inside the sandbox. It normally tracks xflow_wasm_eval_stdin_bytes; climbing while size holds flat is contention or oversubscription, not bigger work.",
+	"xflow_wasm_eval_stdin_bytes":                    "Size of the payload handed to one wasm eval, by workflow and node. The only view of the TAIL: this distribution is heavy-tailed, so a mean hides where the cost actually goes. Read next to xflow_wasm_eval_duration_seconds — a size that climbs on its own is a redundant copy leaking into the payload. An empty node label means the eval did not come through a script node and nothing named it.",
+	"xflow_wasm_eval_duration_seconds":               "Wall-clock duration of one wasm eval, by workflow and node, dominated by the guest re-parsing stdin inside the sandbox. It normally tracks xflow_wasm_eval_stdin_bytes; climbing while size holds flat is contention or oversubscription, not bigger work. Sum by node to find which script node a runner is actually spending its CPU on — without that label the nodes sharing a runner are one series.",
 	"xflow_wasm_module_compile_total":                "wasm module compile cache outcomes, partitioned by result (hit/miss).",
 }
 

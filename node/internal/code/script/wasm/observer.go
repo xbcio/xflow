@@ -42,18 +42,29 @@ type Observer interface {
 	// OnBorrowWait reports how long a caller waited for a free instance. A
 	// rising value means poolSize is too small for the offered concurrency.
 	OnBorrowWait(ctx context.Context, d time.Duration)
-	// OnEval reports one eval: the stdin byte count handed to the guest and how
-	// long the instance was occupied running it.
+	// OnEval reports one eval: which node ran it, the stdin byte count handed to
+	// the guest, and how long the instance was occupied running it.
 	//
-	// The two travel together deliberately. Eval cost is dominated by the guest
-	// rebuilding the stdin object inside the sandbox — measured at ~4.9 MB/s and
-	// linear across an 85x size range — so stdin size is the term that predicts
-	// duration. Reported apart, a slow eval cannot be told from a large one, and
-	// a size regression (a redundant copy of the record reaching the payload)
-	// looks identical to the engine getting slower.
+	// The size and duration travel together deliberately. Eval cost is dominated
+	// by the guest rebuilding the stdin object inside the sandbox — measured at
+	// ~4.9 MB/s and linear across an 85x size range — so stdin size is the term
+	// that predicts duration. Reported apart, a slow eval cannot be told from a
+	// large one, and a size regression (a redundant copy of the record reaching
+	// the payload) looks identical to the engine getting slower.
+	//
+	// workflow and node name the ScriptNode this eval belongs to, taken from the
+	// context the node layer attached (engine.NodeIdentity). Without them a
+	// runner hosting several script nodes reports one merged series, which
+	// answers "something here is slow" but never "which node" — and the two
+	// nodes in a collection pipeline do not cost the same. Both are
+	// workflow-definition names: bounded by what is deployed, never derived from
+	// a message. Both are empty when an engine is driven directly (a benchmark, a
+	// test); the metric layer must still emit the labels then, because a
+	// Prometheus vec is keyed by its label NAMES and a second label set under the
+	// same metric name fails to register and is dropped with only a log line.
 	//
 	// stdinBytes is a COUNT, never content: the payload carries live traffic.
-	OnEval(ctx context.Context, stdinBytes int, d time.Duration)
+	OnEval(ctx context.Context, workflow, node string, stdinBytes int, d time.Duration)
 	// OnModuleCompile reports module compilation cache outcome: "hit" or
 	// "miss".
 	OnModuleCompile(ctx context.Context, result string)
@@ -66,7 +77,7 @@ func (noopObserver) OnConfigAge(context.Context, time.Duration)                 
 func (noopObserver) OnInstanceCount(context.Context, string, int)                   {}
 func (noopObserver) OnInstanceRecycled(context.Context, string)                     {}
 func (noopObserver) OnBorrowWait(context.Context, time.Duration)                    {}
-func (noopObserver) OnEval(context.Context, int, time.Duration)                     {}
+func (noopObserver) OnEval(context.Context, string, string, int, time.Duration)     {}
 func (noopObserver) OnModuleCompile(context.Context, string)                        {}
 
 // observer holds the installed Observer. It is an atomic pointer, not a

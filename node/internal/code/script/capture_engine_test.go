@@ -30,20 +30,26 @@ type capturedGlobals struct {
 	globals map[string]any
 	code    string
 	digest  string
-	calls   int
+	// identity is what engine.NodeIdentityFromContext reports inside the engine.
+	// It is captured here rather than asserted at the node layer because the
+	// context is the seam: the node layer can build the identity correctly and
+	// still fail to attach it, and only a reader on the far side notices.
+	identity engine.NodeIdentity
+	calls    int
 }
 
 type captureEngine struct{}
 
 func (captureEngine) Name() string { return "js/" + captureRuntime }
 
-func (captureEngine) Execute(_ context.Context, src engine.Source, globals map[string]any, _ engine.Helpers) (any, error) {
+func (captureEngine) Execute(ctx context.Context, src engine.Source, globals map[string]any, _ engine.Helpers) (any, error) {
 	captureMu.Lock()
 	defer captureMu.Unlock()
 	if captureSlot != nil {
 		captureSlot.globals = globals
 		captureSlot.code = src.Code
 		captureSlot.digest = src.Digest
+		captureSlot.identity = engine.NodeIdentityFromContext(ctx)
 		captureSlot.calls++
 	}
 	return map[string]any{"ok": true}, nil

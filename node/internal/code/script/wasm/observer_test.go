@@ -31,6 +31,8 @@ type recordingObserver struct {
 }
 
 type evalCall struct {
+	workflow   string
+	node       string
 	stdinBytes int
 	d          time.Duration
 }
@@ -72,10 +74,10 @@ func (r *recordingObserver) OnBorrowWait(_ context.Context, d time.Duration) {
 	defer r.mu.Unlock()
 	r.borrowWait = append(r.borrowWait, d)
 }
-func (r *recordingObserver) OnEval(_ context.Context, stdinBytes int, d time.Duration) {
+func (r *recordingObserver) OnEval(_ context.Context, workflow, node string, stdinBytes int, d time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.evals = append(r.evals, evalCall{stdinBytes, d})
+	r.evals = append(r.evals, evalCall{workflow, node, stdinBytes, d})
 }
 func (r *recordingObserver) OnModuleCompile(_ context.Context, result string) {
 	r.mu.Lock()
