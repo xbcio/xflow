@@ -36,7 +36,7 @@ type Observer interface {
 	// messages without ever committing them.
 	OnBatchFlushOutcome(ctx context.Context, topic, trigger, result string)
 	// OnBatchAdmission reports the control-plane response to a batch admission.
-	// state is "accepted", "duplicate", "conflict", "deterministic_skip" or
+	// state is "accepted", "duplicate", "conflict", "deterministic_error" or
 	// "error"; reason narrows the two non-success states to WHICH failure this
 	// was, and is admissionReasonNone otherwise.
 	//

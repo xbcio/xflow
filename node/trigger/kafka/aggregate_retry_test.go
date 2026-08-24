@@ -139,30 +139,49 @@ func TestKafkaAggregateFailedFlushDoesNotReflushPerMessage(t *testing.T) {
 	}
 }
 
-// TestKafkaAggregateRetryBufferIsBounded proves the buffer cap holds while a
-// flush retry is pending.
+// TestKafkaAggregateRetryBufferIsBounded proves the TOTAL retained cap includes
+// both the four-batch ordered in-flight window and the four batches buffered
+// behind it. Looking only at the largest attempted batch cannot prove this: each
+// attempt remains MaxSize even if an unbounded number of whole batches queues
+// behind it.
 //
-// Holding messages for a timed retry (rather than re-flushing per arrival) is
-// what creates the need for this bound: a downstream that stays broken would
-// otherwise accumulate every arriving message until the process ran out of
-// memory. Shedding is safe because the offsets were never committed — Kafka
-// redelivers from the retained head.
+// Four emits are held in flight, then exactly sixty arrivals are sent beyond
+// the 10*(4 pending+4 buffered)=80-record bound. All sixty must be reported as
+// overflow and nothing may commit while the head is blocked. Overflow is
+// observable data loss, not safe deferral: after the head recovers, committing
+// any later retained offset sweeps past the shed offsets. The shed test pins
+// that trade-off.
 func TestKafkaAggregateRetryBufferIsBounded(t *testing.T) {
 	orig := newConsumer
-	consumer := newSteadyConsumer("t", 0)
+	const (
+		maxSize        = 10
+		overflowWant   = 60
+		retainedWant   = maxSize * (maxPartitionPendingBatches + maxBufferedBatches)
+		deliveredCount = retainedWant + overflowWant
+	)
+	messages := make([]Message, deliveredCount)
+	for i := range messages {
+		messages[i] = Message{Topic: "t", Partition: 0, Offset: int64(i), Value: []byte("v")}
+	}
+	consumer := newReplayableKafkaConsumer(messages, nil)
 	newConsumer = func(ConsumerConfig) (Consumer, error) { return consumer, nil }
 	t.Cleanup(func() { newConsumer = orig })
 
-	obsFake := &recordingBatchObserver{}
-	SetObserver(obsFake)
-	t.Cleanup(func() { SetObserver(nil) })
+	observer := installRecordingObserver(t)
 
+	release := make(chan struct{})
+	var started atomic.Int32
 	rt := triggertest.NewFakeRuntime()
-	rt.SetEmitFunc(func(context.Context, types.WorkflowID, string, *types.TriggerEvent) (types.ExecutionID, error) {
-		return "", errors.New("downstream permanently unavailable")
+	rt.SetEmitFunc(func(ctx context.Context, _ types.WorkflowID, _ string, _ *types.TriggerEvent) (types.ExecutionID, error) {
+		started.Add(1)
+		select {
+		case <-release:
+			return "exec-1", nil
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
 	})
 
-	const maxSize = 10
 	tr := New().
 		Brokers("localhost:9092").
 		Topic("t").
@@ -177,31 +196,33 @@ func TestKafkaAggregateRetryBufferIsBounded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = sub.Close(context.Background()) }()
+	t.Cleanup(func() { _ = sub.Close(context.Background()) })
+	// Release the blocked attempts before the subscription cleanup. Cleanup is
+	// LIFO, so registering this second keeps the test fast even on a failure.
+	t.Cleanup(func() { close(release) })
 
-	// Long enough to produce far more messages (~2000 at 1ms) than the cap
-	// (maxSize * maxBufferedBatches = 40).
-	time.Sleep(2 * time.Second)
-
-	// Every attempted flush is now observed, so the largest observed size is the
-	// buffer's high-water mark.
-	obsFake.mu.Lock()
-	sizes := append([]int(nil), obsFake.sizes...)
-	obsFake.mu.Unlock()
-	if len(sizes) == 0 {
-		t.Fatal("no flush attempt was observed; OnBatchFlushed must fire on attempts, " +
-			"not only on successes, or this assertion cannot see a failing batch at all")
+	ok := observer.waitFor(2*time.Second, func(discarded, _ []string) bool {
+		return started.Load() == maxPartitionPendingBatches && len(discarded) >= overflowWant
+	})
+	discarded, _ := observer.snapshot()
+	if !ok {
+		t.Fatalf("started emits=%d discarded=%d, want %d pending emits and %d overflows; "+
+			"the deterministic %d-message stream did not reach the retained bound",
+			started.Load(), len(discarded), maxPartitionPendingBatches, overflowWant, deliveredCount)
 	}
-	high := 0
-	for _, s := range sizes {
-		if s > high {
-			high = s
+	if got := started.Load(); got != maxPartitionPendingBatches {
+		t.Errorf("started emits=%d, want exactly %d ordered-window slots", got, maxPartitionPendingBatches)
+	}
+	if got := len(discarded); got != overflowWant {
+		t.Errorf("overflow discards=%d, want exactly %d after retaining %d of %d records",
+			got, overflowWant, retainedWant, deliveredCount)
+	}
+	for i, got := range discarded {
+		if got != "t/buffer_overflow" {
+			t.Errorf("discarded[%d]=%q, want t/buffer_overflow", i, got)
 		}
 	}
-	cap := maxSize * maxBufferedBatches
-	if high > cap {
-		t.Errorf("largest attempted batch = %d, want <= %d (max_size %d x %d). The "+
-			"retry buffer is unbounded: a downstream that stays broken grows it until "+
-			"the process dies.", high, cap, maxSize, maxBufferedBatches)
+	if got := consumer.commitCount(); got != 0 {
+		t.Errorf("committed %d messages while all four pending emits were blocked", got)
 	}
 }

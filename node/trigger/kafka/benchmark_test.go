@@ -83,3 +83,63 @@ func BenchmarkKafkaTriggerAggregate4000Messages(b *testing.B) {
 		}
 	}
 }
+
+// BenchmarkKafkaTriggerAggregateDelayedEmit measures the property ordered
+// concurrency is meant to change: one partition whose downstream latency is
+// much larger than the time needed to build its next batch. Framework overhead
+// benchmarks alone cannot distinguish a serial flush slot from a reorder
+// window because an instantaneous fake never overlaps work.
+func BenchmarkKafkaTriggerAggregateDelayedEmit(b *testing.B) {
+	orig := newConsumer
+	defer func() { newConsumer = orig }()
+
+	const (
+		messageCount = 400
+		batchSize    = 100
+		emitLatency  = 5 * time.Millisecond
+	)
+	messages := make([]Message, messageCount)
+	for i := range messages {
+		messages[i] = Message{
+			Topic:     "orders",
+			Partition: 0,
+			Offset:    int64(i),
+			Value:     []byte("value"),
+		}
+	}
+	trigger := New().
+		Brokers("localhost:9092").
+		Topic("orders").
+		Group("workers").
+		MaxInflight(4).
+		AggregateByPartition(batchSize, time.Hour)
+	params := trigger.RawParams().(map[string]any)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		consumer := newReplayableKafkaConsumer(messages, nil)
+		newConsumer = func(ConsumerConfig) (Consumer, error) { return consumer, nil }
+		rt := triggertest.NewFakeRuntime()
+		rt.SetEmitFunc(func(context.Context, types.WorkflowID, string, *types.TriggerEvent) (types.ExecutionID, error) {
+			time.Sleep(emitLatency)
+			return "exec", nil
+		})
+		sub, err := trigger.Activate(context.Background(), &types.TriggerActivateInput{
+			WorkflowID: "wf-1",
+			NodeName:   "kafka",
+			Params:     params,
+			Runtime:    rt,
+		})
+		if err != nil {
+			b.Fatal(err)
+		}
+		if !consumer.waitForCommitCount(messageCount, 5*time.Second) {
+			_ = sub.Close(context.Background())
+			b.Fatalf("committed %d/%d messages", consumer.commitCount(), messageCount)
+		}
+		if err := sub.Close(context.Background()); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

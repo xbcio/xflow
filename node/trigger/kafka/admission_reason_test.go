@@ -77,17 +77,16 @@ func TestBatchAdmissionErrorsAreDistinguishable(t *testing.T) {
 			commit: false,
 		},
 		{
-			// Deterministic failures COMMIT: they skip the batch. Same reason
-			// label, different state — which is why both labels are needed to
-			// tell the two apart.
+			// Deterministic failures remain distinguishable, but they withhold the
+			// offset just like every other unsuccessful group execution.
 			name: "group ran and failed permanently",
 			rt: &mockGroupExecRuntime{
 				execResult: types.GroupExecResult{
 					Outcome: "failed", Error: "rule compile error", Deterministic: true,
 				},
 			},
-			want:   "deterministic_skip/group_outcome",
-			commit: true,
+			want:   "deterministic_error/group_outcome",
+			commit: false,
 		},
 		{
 			name: "work completed, then the admission round trip failed",
@@ -128,7 +127,7 @@ func TestBatchAdmissionErrorsAreDistinguishable(t *testing.T) {
 			SetObserver(o)
 			defer SetObserver(nil)
 
-			gotCommit := seedEntryBatchViaGroupExec(context.Background(), in, tc.rt, msgs)
+			gotCommit := seedEntryBatchViaGroupExec(context.Background(), in, tc.rt, msgs, false)
 
 			pairs := o.admissionPairs()
 			if len(pairs) != 1 {
@@ -182,7 +181,7 @@ func TestBatchAdmissionReasonsAreDistinct(t *testing.T) {
 	for name, rt := range runtimes {
 		o := &recordingBatchObserver{}
 		SetObserver(o)
-		seedEntryBatchViaGroupExec(context.Background(), in, rt, msgs)
+		seedEntryBatchViaGroupExec(context.Background(), in, rt, msgs, false)
 		got := o.admissionPairs()
 		SetObserver(nil)
 

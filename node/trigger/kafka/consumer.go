@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -15,10 +16,116 @@ import (
 	"github.com/segmentio/kafka-go/sasl/scram"
 )
 
-const consumerRetryDelay = 100 * time.Millisecond
+const (
+	consumerRetryDelay     = 100 * time.Millisecond
+	consumerCloseGraceTime = 250 * time.Millisecond
+)
+
+// kafkaConnTracker makes kafka-go Reader shutdown interruptible. kafka-go
+// v0.4.49 uses background contexts for parts of its consumer-group protocol,
+// so Reader.Close can otherwise wait for a lost broker until a network
+// deadline. All sockets created by this reader pass through the tracker; after
+// a short graceful-close window, closing them interrupts those protocol calls.
+type kafkaConnTracker struct {
+	dial func(context.Context, string, string) (net.Conn, error)
+
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	mu     sync.Mutex
+	closed bool
+	conns  map[*trackedKafkaConn]struct{}
+}
+
+type trackedKafkaConn struct {
+	net.Conn
+	owner *kafkaConnTracker
+	once  sync.Once
+}
+
+func newKafkaConnTracker(dialer *kafkago.Dialer) *kafkaConnTracker {
+	dial := dialer.DialFunc
+	if dial == nil {
+		netDialer := &net.Dialer{
+			LocalAddr:     dialer.LocalAddr,
+			DualStack:     dialer.DualStack,
+			FallbackDelay: dialer.FallbackDelay,
+			KeepAlive:     dialer.KeepAlive,
+		}
+		dial = netDialer.DialContext
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	tracker := &kafkaConnTracker{
+		dial:   dial,
+		ctx:    ctx,
+		cancel: cancel,
+		conns:  make(map[*trackedKafkaConn]struct{}),
+	}
+	dialer.DialFunc = tracker.dialContext
+	return tracker
+}
+
+func (t *kafkaConnTracker) dialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	select {
+	case <-t.ctx.Done():
+		return nil, net.ErrClosed
+	default:
+	}
+
+	dialCtx, cancel := context.WithCancel(ctx)
+	stopCancel := context.AfterFunc(t.ctx, cancel)
+	conn, err := t.dial(dialCtx, network, address)
+	stopCancel()
+	cancel()
+	if err != nil {
+		return nil, err
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.closed {
+		_ = conn.Close()
+		return nil, net.ErrClosed
+	}
+	tracked := &trackedKafkaConn{Conn: conn, owner: t}
+	t.conns[tracked] = struct{}{}
+	return tracked, nil
+}
+
+func (t *kafkaConnTracker) close() {
+	t.mu.Lock()
+	if t.closed {
+		t.mu.Unlock()
+		return
+	}
+	t.closed = true
+	conns := make([]*trackedKafkaConn, 0, len(t.conns))
+	for conn := range t.conns {
+		conns = append(conns, conn)
+	}
+	t.mu.Unlock()
+
+	// Cancel first to interrupt dials which have not produced a socket yet.
+	t.cancel()
+	for _, conn := range conns {
+		_ = conn.Close()
+	}
+}
+
+func (c *trackedKafkaConn) Close() error {
+	var err error
+	c.once.Do(func() {
+		c.owner.mu.Lock()
+		delete(c.owner.conns, c)
+		c.owner.mu.Unlock()
+		err = c.Conn.Close()
+	})
+	return err
+}
 
 type kafkaGoConsumer struct {
-	reader *kafkago.Reader
+	reader      *kafkago.Reader
+	connections *kafkaConnTracker
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -35,13 +142,15 @@ func newKafkaGoConsumer(cfg ConsumerConfig) (Consumer, error) {
 	if err != nil {
 		return nil, err
 	}
+	connections := newKafkaConnTracker(readerCfg.Dialer)
 	ctx, cancel := context.WithCancel(context.Background())
 	consumer := &kafkaGoConsumer{
-		reader:   kafkago.NewReader(readerCfg),
-		ctx:      ctx,
-		cancel:   cancel,
-		messages: make(chan Message, readerCfg.QueueCapacity),
-		done:     make(chan struct{}),
+		reader:      kafkago.NewReader(readerCfg),
+		connections: connections,
+		ctx:         ctx,
+		cancel:      cancel,
+		messages:    make(chan Message, readerCfg.QueueCapacity),
+		done:        make(chan struct{}),
 	}
 	go consumer.run()
 	return consumer, nil
@@ -153,7 +262,22 @@ func (c *kafkaGoConsumer) Messages() <-chan Message { return c.messages }
 func (c *kafkaGoConsumer) Close() error {
 	c.closeOnce.Do(func() {
 		c.cancel()
-		c.closeErr = c.reader.Close()
+
+		readerClosed := make(chan error, 1)
+		go func() { readerClosed <- c.reader.Close() }()
+		timer := time.NewTimer(consumerCloseGraceTime)
+		select {
+		case c.closeErr = <-readerClosed:
+			if !timer.Stop() {
+				<-timer.C
+			}
+		case <-timer.C:
+			// Reader.Close has no context in kafka-go v0.4.49. Force its
+			// background consumer-group operations out of network waits.
+			c.connections.close()
+			c.closeErr = <-readerClosed
+		}
+		c.connections.close()
 		<-c.done
 	})
 	return c.closeErr

@@ -506,7 +506,7 @@ func TestSeedKafkaEntryBatchViaGroupExec_UsesRealExitsNotRawMessages(t *testing.
 	}
 	msgs := []Message{{Topic: "t", Partition: 0, Offset: 5}, {Topic: "t", Partition: 0, Offset: 9}}
 
-	if !seedEntryBatchViaGroupExec(context.Background(), in, rt, msgs) {
+	if !seedEntryBatchViaGroupExec(context.Background(), in, rt, msgs, false) {
 		t.Fatal("accepted admission must allow commit")
 	}
 	calls := rt.getCalls()
@@ -536,7 +536,7 @@ func TestSeedKafkaEntryBatchViaGroupExec_GroupFailureWithholdsCommit(t *testing.
 	in := &types.TriggerActivateInput{NodeName: "trig", WorkflowID: "wf", Params: map[string]any{}}
 	msgs := []Message{{Topic: "t", Partition: 0, Offset: 1}}
 
-	if seedEntryBatchViaGroupExec(context.Background(), in, rt, msgs) {
+	if seedEntryBatchViaGroupExec(context.Background(), in, rt, msgs, false) {
 		t.Fatal("a failed group execution must not commit the offset")
 	}
 	if len(rt.getCalls()) != 0 {
@@ -552,7 +552,7 @@ func TestSeedKafkaEntryBatchViaGroupExec_ExecuteGroupErrorWithholdsCommit(t *tes
 	in := &types.TriggerActivateInput{NodeName: "trig", WorkflowID: "wf", Params: map[string]any{}}
 	msgs := []Message{{Topic: "t", Partition: 0, Offset: 1}}
 
-	if seedEntryBatchViaGroupExec(context.Background(), in, rt, msgs) {
+	if seedEntryBatchViaGroupExec(context.Background(), in, rt, msgs, false) {
 		t.Fatal("an ExecuteGroup error must not commit the offset")
 	}
 }
@@ -583,9 +583,9 @@ func captureAdmissionLog(t *testing.T) *strings.Builder {
 // a metric label — so unless the cause reaches a log it is destroyed at the
 // point of failure and the only way to learn it is to reproduce the run.
 //
-// Asserted on the transient branch AND the deterministic branch, because
-// deterministic_skip COMMITS: it discards a whole batch of production traffic,
-// which is the case that most needs a diagnosis in the log.
+// Asserted on the transient and deterministic branches. Neither commits: a
+// deterministic failure stalls the partition until the workflow is repaired
+// rather than silently discarding a whole batch of production traffic.
 func TestSeedKafkaEntryBatchViaGroupExec_FailureCauseIsLogged(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
@@ -594,7 +594,7 @@ func TestSeedKafkaEntryBatchViaGroupExec_FailureCauseIsLogged(t *testing.T) {
 		wantCommitted string
 	}{
 		{"transient", false, "error", "committed=false"},
-		{"deterministic", true, "deterministic_skip", "committed=true"},
+		{"deterministic", true, "deterministic_error", "committed=false"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			buf := captureAdmissionLog(t)
@@ -609,7 +609,7 @@ func TestSeedKafkaEntryBatchViaGroupExec_FailureCauseIsLogged(t *testing.T) {
 				{Topic: "cause-" + tc.name, Partition: 4, Offset: 137},
 			}
 
-			seedEntryBatchViaGroupExec(context.Background(), in, rt, msgs)
+			seedEntryBatchViaGroupExec(context.Background(), in, rt, msgs, false)
 
 			got := buf.String()
 			for _, want := range []string{
@@ -641,7 +641,7 @@ func TestSeedKafkaEntryBatchViaGroupExec_AdmissionErrorCauseIsLogged(t *testing.
 	in := &types.TriggerActivateInput{NodeName: "trig", WorkflowID: "wf", Params: map[string]any{}}
 	msgs := []Message{{Topic: "admit-err", Partition: 1, Offset: 7}}
 
-	if seedEntryBatchViaGroupExec(context.Background(), in, rt, msgs) {
+	if seedEntryBatchViaGroupExec(context.Background(), in, rt, msgs, false) {
 		t.Fatal("a failed admission must not commit the offset")
 	}
 	if got := buf.String(); !strings.Contains(got, "dial control plane: i/o timeout") ||

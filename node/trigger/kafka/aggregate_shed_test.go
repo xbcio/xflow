@@ -20,17 +20,16 @@ type shedTrackingConsumer struct {
 	stop   chan struct{}
 	closed sync.Once
 
-	delivered atomic.Int64
-	dropped   atomic.Int64
-
-	mu      sync.Mutex
-	commits []Message
+	mu        sync.Mutex
+	delivered map[int64]struct{}
+	commits   []Message
 }
 
 func newShedTrackingConsumer(topic string, capacity int, interval time.Duration) *shedTrackingConsumer {
 	c := &shedTrackingConsumer{
-		ch:   make(chan Message, capacity),
-		stop: make(chan struct{}),
+		ch:        make(chan Message, capacity),
+		stop:      make(chan struct{}),
+		delivered: make(map[int64]struct{}),
 	}
 	go func() {
 		defer close(c.ch)
@@ -42,13 +41,22 @@ func newShedTrackingConsumer(topic string, capacity int, interval time.Duration)
 				return
 			case <-tick.C:
 			}
+			msg := Message{Topic: topic, Partition: 0, Offset: offset, Value: []byte("v")}
+			// CommitMessages uses this same lock, so a commit snapshot cannot
+			// observe a sent offset before the harness records it as delivered.
+			c.mu.Lock()
+			stopped := false
 			select {
 			case <-c.stop:
-				return
-			case c.ch <- Message{Topic: topic, Partition: 0, Offset: offset, Value: []byte("v")}:
-				c.delivered.Add(1)
+				stopped = true
+			case c.ch <- msg:
+				c.delivered[offset] = struct{}{}
 			default:
-				c.dropped.Add(1)
+				// Producer-side channel pressure is not aggregator shedding.
+			}
+			c.mu.Unlock()
+			if stopped {
+				return
 			}
 		}
 	}()
@@ -69,31 +77,27 @@ func (c *shedTrackingConsumer) CommitMessages(_ context.Context, msgs ...Message
 	return nil
 }
 
-// highestCommitted returns the largest offset ever passed to CommitMessages,
-// which under kafka-go's semantics is the group's effective position: "the
-// highest message offset passed to CommitMessages will cause all previous
-// messages to be committed" (kafka-go v0.4.49 reader.go, CommitMessages doc).
-func (c *shedTrackingConsumer) highestCommitted() int64 {
+// commitSnapshot reports whether an offset that really entered the consumer
+// channel now sits below Kafka's effective committed position without ever
+// having been explicitly committed by the aggregator.
+func (c *shedTrackingConsumer) commitSnapshot() (highest int64, delivered, committed, sweptPast int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	highest := int64(-1)
-	for _, m := range c.commits {
-		if m.Offset > highest {
-			highest = m.Offset
+
+	highest = -1
+	committedOffsets := make(map[int64]struct{}, len(c.commits))
+	for _, msg := range c.commits {
+		committedOffsets[msg.Offset] = struct{}{}
+		if msg.Offset > highest {
+			highest = msg.Offset
 		}
 	}
-	return highest
-}
-
-// committedSet returns every offset explicitly passed to CommitMessages.
-func (c *shedTrackingConsumer) committedSet() map[int64]bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	set := make(map[int64]bool, len(c.commits))
-	for _, m := range c.commits {
-		set[m.Offset] = true
+	for offset := range c.delivered {
+		if _, explicitlyCommitted := committedOffsets[offset]; !explicitlyCommitted && offset < highest {
+			sweptPast++
+		}
 	}
-	return set
+	return highest, len(c.delivered), len(committedOffsets), sweptPast
 }
 
 // TestKafkaAggregateShedMessagesAreSilentlySkipped measures what happens to a
@@ -130,7 +134,6 @@ func TestKafkaAggregateShedMessagesAreSilentlySkipped(t *testing.T) {
 		// The downstream fails, which is what puts the aggregator into the
 		// retry state where shedding happens.
 		produceGap = 1 * time.Millisecond
-		window     = 2 * time.Second
 	)
 
 	orig := newConsumer
@@ -153,6 +156,8 @@ func TestKafkaAggregateShedMessagesAreSilentlySkipped(t *testing.T) {
 		return "", nil
 	})
 
+	observer := installRecordingObserver(t)
+
 	tr := New().
 		Brokers("localhost:9092").
 		Topic("t").
@@ -169,41 +174,63 @@ func TestKafkaAggregateShedMessagesAreSilentlySkipped(t *testing.T) {
 	}
 	defer func() { _ = sub.Close(context.Background()) }()
 
-	// Long enough for the buffer to reach maxSize*maxBufferedBatches and shed.
-	time.Sleep(window)
-	// Let the downstream recover so commits resume and sweep past the shed
-	// offsets.
-	failing.Store(false)
-	time.Sleep(500 * time.Millisecond)
-
-	delivered := consumer.delivered.Load()
-	if delivered == 0 {
-		t.Fatal("harness delivered no messages; nothing below proves anything")
+	// Recover only once shedding has been OBSERVED. The previous version of this
+	// probe recovered as soon as `delivered` exceeded the aggregator's retained
+	// capacity, on the theory that the excess must have overflowed. It had not:
+	// the consumer channel and the aggregator's input channel hold messages that
+	// maxRetainedUpperBound does not count, so the condition went true about 48ms
+	// in, before the first batch had even finished failing. Every run then
+	// reported swept_past=0 and the test failed on its own guard clause -- which
+	// is the guard working, but it had stopped measuring shedding at all.
+	//
+	// buffer_overflow on the observer is the event itself, so there is nothing
+	// left to infer.
+	if !observer.waitFor(5*time.Second, func(discarded, _ []string) bool {
+		for _, d := range discarded {
+			if d == "t/buffer_overflow" {
+				return true
+			}
+		}
+		return false
+	}) {
+		discarded, _ := observer.snapshot()
+		_, delivered, committed, sweptPast := consumer.commitSnapshot()
+		t.Fatalf("no buffer_overflow was reported in 5s (delivered=%d "+
+			"committed=%d swept_past=%d discards=%v); the buffer never reached "+
+			"its cap, so this run cannot say anything about what happens to a "+
+			"shed message", delivered, committed, sweptPast, discarded)
 	}
-	highest := consumer.highestCommitted()
+
+	// Let the downstream recover so commits resume and sweep past the shed
+	// offsets. Poll for the sweep itself rather than for the first commit of any
+	// kind: the head batch commits offsets 0..3, which are below every shed
+	// offset, so a run that stopped there would report swept_past=0 while the
+	// effect was still seconds away.
+	failing.Store(false)
+	var highest int64
+	var delivered, committed, skipped int
+	sweepDeadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(sweepDeadline) {
+		highest, delivered, committed, skipped = consumer.commitSnapshot()
+		if skipped > 0 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
 	if highest < 0 {
 		t.Fatal("nothing was ever committed, so the sweep-past effect this test " +
 			"measures never had a chance to happen — the downstream never recovered")
 	}
-	committed := consumer.committedSet()
-
-	// Every offset below the highest committed one that was delivered but never
-	// explicitly committed has been swept past: Kafka's single per-partition
-	// offset now sits above it, and no rebalance will bring it back.
-	skipped := 0
-	for off := int64(0); off < highest; off++ {
-		if !committed[off] {
-			skipped++
-		}
-	}
 
 	t.Logf("delivered=%d highest_committed=%d explicitly_committed=%d swept_past=%d",
-		delivered, highest, len(committed), skipped)
+		delivered, highest, committed, skipped)
 
 	if skipped == 0 {
-		t.Fatal("no delivered offset was swept past, so this run never exercised " +
-			"shedding at all and proves nothing about it. The buffer never reached " +
-			"its cap — raise the produce rate or lower maxBufferedBatches.")
+		t.Fatal("buffer_overflow was reported, so messages WERE shed, but no delivered " +
+			"offset ended up below the committed position. Either the commit never " +
+			"advanced past the shed region within the window, or shed offsets are no " +
+			"longer swept past — the second would be a real behaviour change and this " +
+			"test should be rewritten to pin it.")
 	}
 
 	// The finding, pinned: those messages are gone. Not deferred, not

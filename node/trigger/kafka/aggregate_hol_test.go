@@ -1,30 +1,18 @@
 package kafka
 
-// TestKafkaAggregateHeadOfLine verifies (or refutes) hypothesis H1:
+// TestKafkaAggregateHeadOfLine is a regression test for cross-partition
+// head-of-line blocking in the shared consumer read loop.
 //
-//	When one partition's aggregator is blocked inside flush(), the SINGLE
-//	goroutine that reads consumer.Messages() for all partitions is also
-//	blocked, preventing every other partition from being consumed.
+// The reader still submits every partition through one goroutine. The partition
+// coordinator must therefore keep draining its input while downstream work runs;
+// once its bounded retention window fills, it explicitly sheds new arrivals
+// rather than blocking the shared reader. That loss is separately pinned by
+// TestKafkaAggregateShedMessagesAreSilentlySkipped.
 //
-// Mechanism chain:
-//
-//  1. activateAggregate starts exactly ONE goroutine that reads consumer.Messages()
-//     and calls rt.submit(msg) for every message regardless of partition.
-//  2. submit sends the message to the partition's aggregator channel (cap=MaxSize).
-//     The send blocks when the channel is full.
-//  3. partitionAggregator.run() calls flush() SYNCHRONOUSLY from its select loop,
-//     so for the entire duration of a flush it does not drain agg.ch.
-//  4. Once agg.ch (cap=MaxSize) fills while a flush is running, the next submit
-//     call for that partition blocks forever on "agg.ch <- msg".
-//  5. Because step 2-4 happen on the single reader goroutine, all other partitions
-//     stop being consumed.
-//
-// If H1 holds: the test is RED — partition 1 gets far fewer emits than expected.
-// If H1 does not hold: the test is GREEN — partition 1 keeps flowing throughout.
-//
-// DO NOT change aggregate.go to make this pass. The purpose is to measure
-// the real number.
-
+// This test blocks partition 0 downstream for the whole observation window and
+// verifies that partition 1 continues to flush. Before downstream execution was
+// handed off from the coordinator, partition 0 stopped draining its channel and
+// submit blocked the shared reader, starving partition 1 as collateral damage.
 import (
 	"context"
 	"sync"
@@ -110,21 +98,8 @@ func (c *twoPartitionConsumer) commitsByPartition() map[int]int {
 	return counts
 }
 
-// TestKafkaAggregateHeadOfLine is the probe for H1 (HOL blocking).
-//
-// Setup:
-//   - Two partitions, messages interleaved at 2ms.
-//   - maxSize=10, flushInterval=100ms.
-//   - Partition 0 emit: blocks for the entire 3s test window.
-//   - Partition 1 emit: returns immediately.
-//
-// Expected if H1 TRUE (test RED):
-//   - Partition 0's channel fills within ~80ms and blocks the single reader.
-//   - Partition 1 gets at most 1-2 emits (from the first ~80ms of free consumption).
-//
-// Expected if H1 FALSE (test GREEN):
-//   - Partition 1 keeps getting emits throughout the 3s window.
-//   - Partition 1 emits ≥ minPart1EmitsExpected.
+// TestKafkaAggregateHeadOfLine verifies that one blocked partition does not
+// starve another partition served by the same consumer read loop.
 func TestKafkaAggregateHeadOfLine(t *testing.T) {
 	const (
 		maxSize    = 10
@@ -200,15 +175,14 @@ func TestKafkaAggregateHeadOfLine(t *testing.T) {
 			"condition, so the result below proves nothing")
 	}
 
-	// H1 assertion: if HOL blocking is real, partition 1 never gets enough
-	// messages to reach minPart1EmitsExpected. If this assertion FAILS (test RED),
-	// H1 is CONFIRMED. If it passes (test GREEN), H1 is refuted.
+	// Regression assertion: partition 1 must keep making progress while
+	// partition 0 is blocked.
 	if int(p1) < minPart1EmitsExpected {
-		t.Errorf("H1 CONFIRMED: partition 1 emitted %d times (want >= %d) while "+
-			"partition 0's flush was blocking the single consumer goroutine. "+
-			"The single reader in activateAggregate blocked on submit() after "+
-			"partition 0's aggregator channel (cap=%d) filled up, stopping "+
-			"all partition consumption for the remaining ~%.1fs of the %s window.",
+		t.Errorf("partition 1 emitted %d times (want >= %d) while "+
+			"partition 0's downstream was blocked. The single reader in "+
+			"activateAggregate stopped on submit() after partition 0's "+
+			"aggregator channel (cap=%d) filled, starving other partitions "+
+			"for the remaining ~%.1fs of the %s window.",
 			p1, minPart1EmitsExpected, maxSize,
 			float64(window-80*time.Millisecond)/float64(time.Second),
 			window)
@@ -223,10 +197,10 @@ func TestKafkaAggregateHeadOfLine(t *testing.T) {
 // probe above is meaningless.
 func TestKafkaAggregateHeadOfLineInverse(t *testing.T) {
 	const (
-		maxSize    = 10
-		flushEvery = 100 * time.Millisecond
-		produceInterval = 2 * time.Millisecond
-		window          = 3 * time.Second
+		maxSize               = 10
+		flushEvery            = 100 * time.Millisecond
+		produceInterval       = 2 * time.Millisecond
+		window                = 3 * time.Second
 		minPart1EmitsExpected = 10
 	)
 

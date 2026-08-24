@@ -6,7 +6,9 @@ package kafka
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -62,6 +64,10 @@ type ConsumerConfig struct {
 	// Tuning holds the consumer knobs (fetch sizing, dial timeout, group
 	// liveness windows). The zero value selects defaultTuning.
 	Tuning TuningConfig
+	// ValueJSON splices a message payload that is itself JSON into the item
+	// verbatim, instead of escaping it into a string. See messageData; it takes
+	// effect only on the in-process group path.
+	ValueJSON bool
 }
 
 var newConsumer = newKafkaGoConsumer
@@ -76,6 +82,7 @@ type Node struct {
 	AggregateValue     AggregateConfig
 	MessageSchemaValue *MessageSchema
 	TuningValue        TuningConfig
+	ValueJSONValue     bool
 }
 
 func New() *Node {
@@ -111,6 +118,26 @@ func (n *Node) MaxInflight(max int) *Node {
 // setting only SessionTimeout leaves everything else exactly as before.
 func (n *Node) Tuning(cfg TuningConfig) *Node {
 	n.TuningValue = cfg
+	return n
+}
+
+// ValueAsJSON carries a message payload that is itself JSON into `$item.value`
+// as JSON, rather than as a string holding an escaped copy of it.
+//
+// Use it when the topic carries JSON and a downstream node parses it. Both the
+// escaping here and the un-escaping there disappear -- on an 8.8 KB apisix
+// access log the un-escaping alone was 34.5% of the receiving wasm guest's
+// eval. What it costs is a json.Valid scan per message, and a payload that
+// fails it keeps the string form.
+//
+// It changes the TYPE a downstream expression sees: `$item.value` becomes an
+// object, so anything doing a string comparison or a regex on it must be
+// updated. It also takes effect ONLY when the trigger is a member of a node
+// group, because only then does the batch stay inside one process; activation
+// logs and ignores it otherwise rather than silently shipping an object into
+// Redis where a string is expected.
+func (n *Node) ValueAsJSON() *Node {
+	n.ValueJSONValue = true
 	return n
 }
 
@@ -229,6 +256,11 @@ func (n *Node) RawParams() any {
 	if !n.TuningValue.isZero() {
 		params["tuning"] = n.TuningValue.rawParams()
 	}
+	// Same: absent rather than false, so an existing definition's hash does not
+	// move because a field was added.
+	if n.ValueJSONValue {
+		params["value_json"] = true
+	}
 	return params
 }
 func (n *Node) OnError(s types.OnError) types.Builder {
@@ -276,6 +308,7 @@ func activatePerMessage(ctx context.Context, in *types.TriggerActivateInput, cfg
 		messageSchema:       cfg.MessageSchema,
 		deadLetterPublisher: deadLetters,
 	}
+	rt.valueJSON = resolveValueJSON(cfg, in, rt.entrySeed)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -332,6 +365,53 @@ type perMessageRuntime struct {
 	// deadLetterPublisher is non-nil only when messageSchema.OnInvalid is
 	// dead_letter. Owned by this runtime: closed by close().
 	deadLetterPublisher DeadLetterPublisher
+	// valueJSON splices a JSON payload into the item verbatim instead of
+	// escaping it into a string. Resolved once at activation by
+	// resolveValueJSON, which is where it can still be refused out loud.
+	valueJSON bool
+}
+
+// resolveValueJSON decides whether the spliced-value form is actually safe for
+// this activation, and says so when it is not.
+//
+// The form is only safe where the item stays in this process, which is the
+// trigger-group path: seedEntryBatchViaGroupExec runs the group's members on an
+// in-process backend. Everywhere else the item is marshalled into Redis, SQL or
+// the control-plane wire and read back with json.Unmarshal, which turns a
+// spliced value into a map[string]any -- so a consumer that asked for a string
+// gets an object, and the escape this was meant to avoid is replaced by a
+// full parse and re-marshal at every hop.
+//
+// Refusing quietly would be worse than refusing: the flag's whole effect is a
+// speed one, so a deployment that lost it would look exactly like a deployment
+// that never had it. The log is the only way anyone finds out.
+func resolveValueJSON(cfg ConsumerConfig, in *types.TriggerActivateInput, entrySeed bool) bool {
+	if !cfg.ValueJSON {
+		return false
+	}
+	if entrySeed && groupExecCapable(in) {
+		return true
+	}
+	slog.Warn("kafka trigger: value_json ignored",
+		"node", in.NodeName,
+		"reason", "the spliced value form requires a trigger that is a member of a node group, "+
+			"so the batch never crosses a JSON boundary; this activation is not one",
+		"entry_seed", entrySeed)
+	return false
+}
+
+// groupExecCapable reports whether the runtime can execute the trigger's group
+// locally, which is the same assertion partitionAggregator.emitBatch makes
+// before it takes that path.
+func groupExecCapable(in *types.TriggerActivateInput) bool {
+	if in == nil {
+		return false
+	}
+	_, ok := in.Runtime.(interface {
+		types.EntrySeedRuntime
+		types.GroupExecRuntime
+	})
+	return ok
 }
 
 func (r *perMessageRuntime) schema() *MessageSchema { return r.messageSchema }
@@ -569,7 +649,7 @@ func batchEvent(nodeName string, messages []Message) *types.TriggerEvent {
 			"start_offset": first.Offset,
 			"end_offset":   last.Offset,
 			"count":        len(messages),
-			"messages":     messageDataList(messages),
+			"messages":     messageDataList(messages, false),
 		},
 	}
 	if event.Time.IsZero() {
@@ -579,27 +659,51 @@ func batchEvent(nodeName string, messages []Message) *types.TriggerEvent {
 }
 
 func singleEventData(msg Message) map[string]any {
-	data := messageData(msg)
+	data := messageData(msg, false)
 	data["count"] = 1
-	data["messages"] = []map[string]any{messageData(msg)}
+	data["messages"] = []map[string]any{messageData(msg, false)}
 	return data
 }
 
-func messageDataList(messages []Message) []map[string]any {
+func messageDataList(messages []Message, valueJSON bool) []map[string]any {
 	out := make([]map[string]any, 0, len(messages))
 	for _, msg := range messages {
-		out = append(out, messageData(msg))
+		out = append(out, messageData(msg, valueJSON))
 	}
 	return out
 }
 
-func messageData(msg Message) map[string]any {
+// messageData is one Kafka message as the item a downstream node sees.
+//
+// valueJSON decides how the payload is carried, and it is not a formatting
+// preference. A message whose payload is itself JSON -- an access log, an event
+// envelope -- goes into a Go string by default, so every marshal on the way
+// downstream escapes all of it and every consumer un-escapes all of it. For an
+// 8.8 KB apisix record that round trip measured 34.5% of the receiving wasm
+// guest's whole eval: 0.169 of it finding where the string token ends, 0.168
+// decoding escapes that were applied moments earlier by this process.
+//
+// With valueJSON the payload is spliced in as the JSON it already is and both
+// halves of that disappear. The cost is one json.Valid scan here, and the
+// consequence is that `$item.value` is an OBJECT rather than a string -- which
+// is why it is opt-in, and why activate() refuses to turn it on outside the
+// in-process group path (see resolveValueJSON). A payload that is not
+// valid JSON falls back to the string form rather than failing: the flag says
+// "splice this when you can", and a topic that carries a mixture must keep
+// working.
+func messageData(msg Message, valueJSON bool) map[string]any {
+	var value any = string(msg.Value)
+	if valueJSON && json.Valid(msg.Value) {
+		// A RawMessage, not the bytes: json.Marshal writes a []byte as base64
+		// and would silently ship an unreadable field.
+		value = json.RawMessage(msg.Value)
+	}
 	return map[string]any{
 		"topic":     msg.Topic,
 		"partition": msg.Partition,
 		"offset":    msg.Offset,
 		"key":       string(msg.Key),
-		"value":     string(msg.Value),
+		"value":     value,
 		"headers":   msg.Headers,
 		"time":      msg.Time,
 	}
@@ -631,6 +735,7 @@ func configFromParams(params map[string]any, supply map[string]any, entrySeed bo
 		Aggregate:     aggregate,
 		MessageSchema: schema,
 		Tuning:        tuning,
+		ValueJSON:     cast.ToBool(params["value_json"]),
 	}
 	if cfg.StartOffset == "" {
 		cfg.StartOffset = "latest"

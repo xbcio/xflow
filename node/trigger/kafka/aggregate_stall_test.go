@@ -96,13 +96,12 @@ func (c *pacedConsumer) CommitMessages(_ context.Context, msgs ...Message) error
 // WHAT THIS ASSERTS, AND WHAT IT DELIBERATELY DOES NOT.
 //
 // It asserts CONSUMPTION, not throughput. A downstream taking 600ms per batch of
-// 10 sustains 16.7 msg/s against 500 msg/s offered; no aggregator design can
-// close a 30x gap, and none should try. When the downstream genuinely cannot
-// keep up, ceasing to consume is CORRECT back-pressure and Kafka lag is the
-// honest signal. An earlier revision of this test demanded a committed/offered
-// ratio of 50%, which required ~14 concurrent emits per partition — unreachable
-// by construction, since one flush is in flight per partition at a time to keep
-// commits in offset order. That criterion measured the wrong property.
+// 10 cannot match 500 msg/s offered even with the bounded four-batch reorder
+// window. When downstream cannot keep up, lag (and, in the current bounded-loss
+// policy, buffer_overflow) is the honest signal. An earlier revision demanded a
+// 50% committed/offered ratio, which would require far more per-partition
+// concurrency than the configured reorder window. That measured downstream
+// capacity rather than whether the coordinator itself blocked consumption.
 //
 // The defect worth pinning is that a stalled flush stopped the SINGLE goroutine
 // reading consumer.Messages() for every partition, taking the whole assignment

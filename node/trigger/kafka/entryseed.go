@@ -112,7 +112,7 @@ func logBatchAdmission(topic string, partition int, first, last int64, count int
 		"count", count,
 		"state", state,
 		"cause", cause,
-		"committed", state == "deterministic_skip",
+		"committed", false,
 		"occurrences", occurrences,
 	)
 }
@@ -154,7 +154,11 @@ func buildBatchExits(nodeName string, messages []Message) []types.BoundaryExit {
 			"start_offset": first.Offset,
 			"end_offset":   last.Offset,
 			"count":        len(messages),
-			"messages":     messageDataList(messages),
+			// false: these exits are marshalled onto the control-plane wire and
+			// persisted server-side, where `value` is expected to be a string.
+			// The spliced form is only safe on the group path below, which
+			// never leaves this process.
+			"messages": messageDataList(messages, false),
 		},
 	}}
 }
@@ -236,10 +240,18 @@ func seedEntryBatchMessages(ctx context.Context, in *types.TriggerActivateInput,
 // outcome other than "success" (a member node failed, or the batch's internal
 // deadline was exceeded) also withholds the commit — Kafka must redeliver the
 // batch rather than have it silently disappear because a member failed.
+// The valueJSON argument is honoured only here, and only because of where this
+// runs: rt.ExecuteGroup executes the group's members on an in-process
+// in-memory backend, so the batch it is handed never crosses a JSON boundary
+// between this call and the member node that reads it. Every other producer of
+// message data in this package passes false — on those paths the item is
+// marshalled into Redis, SQL or the control-plane wire, and a spliced value
+// would come back as a parsed object rather than the string those readers
+// expect. See messageData.
 func seedEntryBatchViaGroupExec(ctx context.Context, in *types.TriggerActivateInput, rt interface {
 	types.EntrySeedRuntime
 	types.GroupExecRuntime
-}, messages []Message) bool {
+}, messages []Message, valueJSON bool) bool {
 	if len(messages) == 0 {
 		return true
 	}
@@ -253,7 +265,7 @@ func seedEntryBatchViaGroupExec(ctx context.Context, in *types.TriggerActivateIn
 		"start_offset": first.Offset,
 		"end_offset":   last.Offset,
 		"count":        len(messages),
-		"messages":     messageDataList(messages),
+		"messages":     messageDataList(messages, valueJSON),
 	})
 	if err != nil {
 		obs().OnBatchAdmission(ctx, topic, "error", admissionReasonExecuteGroup)
@@ -267,12 +279,13 @@ func seedEntryBatchViaGroupExec(ctx context.Context, in *types.TriggerActivateIn
 		cause := fmt.Sprintf("group outcome=%s: %s", execRes.Outcome, execRes.Error)
 		reason := admissionReasonForOutcome(execRes.Outcome)
 		if execRes.Deterministic {
-			// Permanent failure (compile error, schema validation, etc.):
-			// commit offset to skip this batch — redelivery would fail identically.
-			obs().OnBatchAdmission(ctx, topic, "deterministic_skip", reason)
+			// Retrying cannot repair a deterministic failure, but committing it would
+			// silently discard the entire batch. Keep the partition frontier here;
+			// recovery requires fixing the workflow or an explicit operator policy.
+			obs().OnBatchAdmission(ctx, topic, "deterministic_error", reason)
 			logBatchAdmission(topic, first.Partition, first.Offset, last.Offset,
-				len(messages), "deterministic_skip", cause)
-			return true
+				len(messages), "deterministic_error", cause)
+			return false
 		}
 		// Transient failure (timeout, member I/O error, etc.): do NOT admit —
 		// this batch must be redelivered.
