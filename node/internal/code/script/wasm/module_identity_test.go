@@ -17,14 +17,32 @@ import (
 const base64Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 
 // alternateEncodingOf returns a base64 string that is NOT equal to s but decodes
-// to exactly the same bytes, or "" when no such string exists.
+// to exactly the same bytes. It never returns "": every byte string has at least
+// one alternate encoding.
 //
-// This is not a contrived edge case, it is a property of base64 itself. When the
-// input length is not a multiple of 3 the final character carries unused low
-// bits (2 spare bits when len%3==2, 4 when len%3==1), and Go's StdEncoding
-// accepts any value in them rather than requiring the canonical zero. So a
-// module of len%3==2 — which every real multi-MB guest in this package happens to
-// be — has exactly 3 alternate encodings, and one of len%3==1 has 15.
+// Two independent mechanisms produce one, and both are properties of base64
+// itself rather than contrived edge cases.
+//
+// The first is spare bits. When the input length is not a multiple of 3 the
+// final character carries unused low bits (2 spare when len%3==2, 4 when
+// len%3==1), and Go's StdEncoding accepts any value in them rather than
+// requiring the canonical zero. A module of len%3==2 has 3 alternate encodings,
+// one of len%3==1 has 15.
+//
+// The second is line breaks, which is the fallback here because it works for any
+// length including a multiple of 3. StdEncoding.DecodeString ignores \r and \n
+// wherever they appear, so a wrapped string decodes to the same bytes — and
+// production decodes with exactly that function (decodeCode, wasm.go). Wrapped
+// base64 is if anything the more likely of the two to arrive for real: a YAML
+// block scalar or any MIME-style 76-column wrap produces it.
+//
+// The fallback is not decoration. reactorMinWasm is not a fixture in this repo;
+// wasm_test.go compiles it with whatever Go toolchain is running, so its length
+// mod 3 changes with the toolchain. When this helper could return "", the three
+// tests below skipped on that outcome — which means roughly one toolchain in
+// three would have silently switched off the regression coverage for a bug whose
+// symptom is that a clean rule's credential stripping never runs, with the suite
+// still reporting green.
 //
 // The consequence for this package: a base64 code string is NOT a module
 // identity. Several distinct strings name the same module.
@@ -38,23 +56,31 @@ func alternateEncodingOf(t *testing.T, s string) string {
 	for pad < len(s) && s[len(s)-1-pad] == '=' {
 		pad++
 	}
-	if pad == 0 {
-		// len%3==0: the encoding is unique, there are no spare bits.
-		return ""
-	}
-	i := len(s) - pad - 1
-	for k := 0; k < len(base64Alphabet); k++ {
-		c := base64Alphabet[k]
-		if c == s[i] {
-			continue
-		}
-		cand := s[:i] + string(c) + s[i+1:]
-		got, err := base64.StdEncoding.DecodeString(cand)
-		if err == nil && bytes.Equal(got, want) {
-			return cand
+	if pad > 0 {
+		i := len(s) - pad - 1
+		for k := 0; k < len(base64Alphabet); k++ {
+			c := base64Alphabet[k]
+			if c == s[i] {
+				continue
+			}
+			cand := s[:i] + string(c) + s[i+1:]
+			got, err := base64.StdEncoding.DecodeString(cand)
+			if err == nil && bytes.Equal(got, want) {
+				return cand
+			}
 		}
 	}
-	return ""
+	// len%3==0, or a StdEncoding that stopped accepting non-canonical spare bits.
+	// Wrap instead. Split mid-string rather than appending, so the result cannot
+	// be mistaken for a trailing-whitespace artifact of the test itself.
+	cand := s[:len(s)/2] + "\n" + s[len(s)/2:]
+	got, err := base64.StdEncoding.DecodeString(cand)
+	if err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("alternateEncodingOf: neither spare bits nor a line break yields an "+
+			"alternate encoding (len=%d, wrap err=%v); base64's decoding tolerance has "+
+			"changed and the module-identity tests below need a new premise", len(s), err)
+	}
+	return cand
 }
 
 // mustModuleKey is moduleKey for tests, failing rather than returning an error.
@@ -77,10 +103,6 @@ func mustModuleKey(t *testing.T, code string) string {
 func TestAlternateEncodingIsSameModule(t *testing.T) {
 	code := b64(reactorMinWasm)
 	alt := alternateEncodingOf(t, code)
-	if alt == "" {
-		t.Skipf("module length %d is a multiple of 3, so its encoding is unique; "+
-			"this test needs a module whose length is not", len(reactorMinWasm))
-	}
 	if alt == code {
 		t.Fatal("alternateEncodingOf returned the input; it must return a DIFFERENT string")
 	}
@@ -90,6 +112,35 @@ func TestAlternateEncodingIsSameModule(t *testing.T) {
 	}
 	if !bytes.Equal(decoded, reactorMinWasm) {
 		t.Fatal("alternate encoding decodes to different bytes; it is not the same module")
+	}
+}
+
+// TestAlternateEncodingOfHandlesEveryLengthClass pins both of alternateEncodingOf's
+// branches on every toolchain.
+//
+// TestAlternateEncodingIsSameModule above can only exercise whichever branch
+// reactorMinWasm's length happens to select, and that length is decided by the Go
+// toolchain compiling it. Without this test the line-break fallback would be
+// unexercised on any toolchain producing a len%3!=0 module — which is the same
+// shape of hole the fallback was added to close.
+func TestAlternateEncodingOfHandlesEveryLengthClass(t *testing.T) {
+	for _, n := range []int{9, 10, 11} {
+		payload := make([]byte, n)
+		for i := range payload {
+			payload[i] = byte(i * 7)
+		}
+		code := base64.StdEncoding.EncodeToString(payload)
+		alt := alternateEncodingOf(t, code)
+		if alt == code {
+			t.Fatalf("len%%3==%d: alternateEncodingOf returned its input", n%3)
+		}
+		got, err := base64.StdEncoding.DecodeString(alt)
+		if err != nil {
+			t.Fatalf("len%%3==%d: alternate encoding %q does not decode: %v", n%3, alt, err)
+		}
+		if !bytes.Equal(got, payload) {
+			t.Fatalf("len%%3==%d: alternate encoding decodes to different bytes", n%3)
+		}
 	}
 }
 
@@ -109,10 +160,6 @@ func TestAlternateEncodingIsSameModule(t *testing.T) {
 func TestSourceDrivenIsKeyedByModuleNotEncoding(t *testing.T) {
 	code := b64(reactorMinWasm)
 	alt := alternateEncodingOf(t, code)
-	if alt == "" {
-		t.Skip("module length is a multiple of 3; no alternate encoding exists")
-	}
-
 	h := newReactorHost()
 	h.seedSourceDrivenByKey(mustModuleKey(t, code))
 
@@ -143,10 +190,6 @@ func TestSourceDrivenIsKeyedByModuleNotEncoding(t *testing.T) {
 func TestPrewarmIsKeyedByModuleNotEncoding(t *testing.T) {
 	code := b64(reactorMinWasm)
 	alt := alternateEncodingOf(t, code)
-	if alt == "" {
-		t.Skip("module length is a multiple of 3; no alternate encoding exists")
-	}
-
 	h := newReactorHost()
 	h.addPrewarm(code, ruleConfig([2]string{"v1", "x > 1"}))
 	h.addPrewarm(alt, ruleConfig([2]string{"v2", "x > 2"}))
@@ -177,10 +220,6 @@ func TestPrewarmIsKeyedByModuleNotEncoding(t *testing.T) {
 func TestUnregisterUnderAnotherEncodingRemovesTheConsumer(t *testing.T) {
 	code := b64(reactorMinWasm)
 	alt := alternateEncodingOf(t, code)
-	if alt == "" {
-		t.Skip("module length is a multiple of 3; no alternate encoding exists")
-	}
-
 	reg := supply.NewRegistry()
 	obs := &countingConsumerObserver{}
 	reg.SetObserver(obs)
