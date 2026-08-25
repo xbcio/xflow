@@ -300,7 +300,7 @@ func TestGroupMemberTimeoutHonoursOwnBudget(t *testing.T) {
 		runnerID: "runner-group-member-timeout",
 		handlers: map[string]types.ActionHandler{
 			"test.group.timeout.slow": slow,
-			"test.group.member":        &groupMemberHandler{},
+			"test.group.member":       &groupMemberHandler{},
 		},
 	})
 
@@ -363,10 +363,10 @@ func TestMapBodyNodeTimeout(t *testing.T) {
 		protocol.NewClient(h.httpSrv.URL, h.httpSrv.Client()),
 		registry,
 		runnersvc.Config{
-			RunnerID:      "runner-mapbody-timeout",
-			Concurrency:   2,
-			PollWait:      10 * time.Millisecond,
-			GroupRuntime:  groupRT,
+			RunnerID:        "runner-mapbody-timeout",
+			Concurrency:     2,
+			PollWait:        10 * time.Millisecond,
+			GroupRuntime:    groupRT,
 			SubgraphRuntime: subgraphRT,
 			Capabilities: []protocol.Capability{
 				{NodeType: "xflow.map"},
@@ -610,7 +610,7 @@ func TestServerBackstopTerminatesUncooperativeRunner(t *testing.T) {
 	defer waitCancel()
 	result := waitForCompletion(waitCtx, t, h.state, execID, "stuck")
 	if result.Status != types.ExecutionStatusFailed {
-		t.Fatalf("execution status = %s, want failed (the server backstop must commit a terminal via " +
+		t.Fatalf("execution status = %s, want failed (the server backstop must commit a terminal via "+
 			"CommitTaskTimeout; refusing alone leaves the sweeper to re-enqueue)", result.Status)
 	}
 

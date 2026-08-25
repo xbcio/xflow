@@ -8,9 +8,9 @@ import (
 
 	"github.com/xbcio/xflow/types"
 
+	"github.com/xbcio/xflow/exprx"
 	nodeinternal "github.com/xbcio/xflow/node/internal"
 	"github.com/xbcio/xflow/node/internal/code/script/engine"
-	"github.com/xbcio/xflow/exprx"
 	"github.com/xbcio/xflow/node/registry"
 
 	_ "github.com/xbcio/xflow/node/internal/code/script/js"

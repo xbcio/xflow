@@ -128,10 +128,10 @@ func Encrypt(key *Key, plaintext []byte) ([]byte, error) {
 
 // Decryption errors.
 var (
-	ErrNotEncrypted      = errors.New("supplyenc: not an encrypted envelope")
+	ErrNotEncrypted       = errors.New("supplyenc: not an encrypted envelope")
 	ErrUnsupportedVersion = errors.New("supplyenc: unsupported envelope version")
-	ErrUnknownKey        = errors.New("supplyenc: no key matches kid")
-	ErrDecryptFailed     = errors.New("supplyenc: decryption failed")
+	ErrUnknownKey         = errors.New("supplyenc: no key matches kid")
+	ErrDecryptFailed      = errors.New("supplyenc: decryption failed")
 )
 
 // Keyring holds up to 2 keys (current + previous) for decryption. It is

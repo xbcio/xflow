@@ -20,8 +20,8 @@ func (noopObserver) OnScriptExecute(context.Context, string, string, string, tim
 func (noopObserver) OnScriptOutputBytes(context.Context, string, string, int)               {}
 
 var (
-	observerMu       sync.RWMutex
-	observer         Observer = noopObserver{}
+	observerMu        sync.RWMutex
+	observer          Observer = noopObserver{}
 	observerInstalled bool     // true when a non-noop observer is installed
 )
 

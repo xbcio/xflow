@@ -50,7 +50,7 @@ func SupplyNamespaceNormContract(t *testing.T, s store.Supplies) {
 		t.Fatalf("\"\" and \"default\" returned different revisions: %d vs %d", rec.Revision, rec2.Revision)
 	}
 }
-//
+
 // nsPrefix disambiguates rows between backends and between reruns against a
 // persistent database — a MySQL run must not collide with a previous run's rows.
 func SupplyContract(t *testing.T, s store.Supplies, nsPrefix string) {

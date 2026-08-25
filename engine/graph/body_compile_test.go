@@ -167,4 +167,3 @@ func TestCompile_BodyRejectsNonPortableMemberType(t *testing.T) {
 		})
 	}
 }
-

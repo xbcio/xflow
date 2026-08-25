@@ -29,11 +29,12 @@
 // graph.SubgraphPackage and an entry Input; Executor cannot distinguish them.
 //
 // PackageCache validates packages before first use and caches by hash:
-//   1. Recompute hash from the package bytes (graph.ComputePackageHash) and
-//      compare to the claimed hash — a mismatch is a permanent failure.
-//   2. Check handler inventory (Has by type+version), runtimes, resources,
-//      credentials.
-//   3. Compile via graph.CompileProjectedPackage.
+//  1. Recompute hash from the package bytes (graph.ComputePackageHash) and
+//     compare to the claimed hash — a mismatch is a permanent failure.
+//  2. Check handler inventory (Has by type+version), runtimes, resources,
+//     credentials.
+//  3. Compile via graph.CompileProjectedPackage.
+//
 // Subsequent calls with the same hash skip validation entirely.
 //
 // MapBodyExecutor.ExecuteBatchBody is the real implementation of

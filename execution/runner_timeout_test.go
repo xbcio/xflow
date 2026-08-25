@@ -354,7 +354,7 @@ func (o *recordingTimeoutObserver) OnNodeExecutionTimeout(context.Context, strin
 	o.timeouts++
 }
 
-func (o *recordingTimeoutObserver) OnHandlerAbandoned(context.Context, string, float64)     {}
+func (o *recordingTimeoutObserver) OnHandlerAbandoned(context.Context, string, float64)      {}
 func (o *recordingTimeoutObserver) OnHandlerDuration(context.Context, string, time.Duration) {}
 
 func (o *recordingTimeoutObserver) timeoutCount() int {

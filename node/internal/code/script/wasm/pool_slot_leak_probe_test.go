@@ -12,7 +12,7 @@
 // off and bound the guest some other way" is not a design that is currently
 // available.
 //
-// WHY THIS TEST IS SKIPPED BY DEFAULT
+// # WHY THIS TEST IS SKIPPED BY DEFAULT
 //
 // Proving the leak requires leaking: the goroutine stuck in the spin guest
 // keeps a core pegged for as long as the test binary lives, and nothing can

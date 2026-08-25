@@ -103,6 +103,7 @@ func TestReclaimExpiredGroupLeaseRedelivers(t *testing.T) {
 		t.Fatalf("group unit still not acquirable after reclaim: %v", err)
 	}
 }
+
 // TestReclaimExpiredGroupLeaseIsTokenFenced guards the other direction: a
 // sweeper acting on a stale observation must not revoke the lease of the runner
 // that legitimately holds the unit now.

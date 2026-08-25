@@ -76,20 +76,20 @@ type SignalRecord struct {
 //
 // Domain record; ORM schema lives in store/sqlstore.dbAuditEvent.
 type AuditRecord struct {
-	ID            uint64
-	SeqID         uint64 // monotonic cursor key: maps to xflow_audit_events.id (AUTO_INCREMENT)
-	RequestID     string
-	Principal     string
-	Namespace      string
-	Operation     string
-	Resource      string
-	WorkflowID    string
-	ExecutionID   string
-	Decision      string
-	Reason        string
-	Outcome       string // admitted / denied / reconciled
-	TraceID       string
-	Timestamp     time.Time
+	ID          uint64
+	SeqID       uint64 // monotonic cursor key: maps to xflow_audit_events.id (AUTO_INCREMENT)
+	RequestID   string
+	Principal   string
+	Namespace   string
+	Operation   string
+	Resource    string
+	WorkflowID  string
+	ExecutionID string
+	Decision    string
+	Reason      string
+	Outcome     string // admitted / denied / reconciled
+	TraceID     string
+	Timestamp   time.Time
 	// Phase is the immutable audit phase this row records: "admission"
 	// (pre-handler fail-closed admission audit), "outcome" (post-handler
 	// reconciled/failed outcome, written inline or by the T9 reconcile
@@ -97,9 +97,9 @@ type AuditRecord struct {
 	// The (Namespace, RequestID, Phase) triple is the reconcile worker's
 	// idempotency key: at most one outcome row per admitted request.
 	Phase          string
-	NodeID        string // receipt correlation: node name (dead-letter replay)
-	ActivationID  string // receipt correlation: activation id
-	EntryID       string // receipt correlation: dead-letter entry id
+	NodeID         string // receipt correlation: node name (dead-letter replay)
+	ActivationID   string // receipt correlation: activation id
+	EntryID        string // receipt correlation: dead-letter entry id
 	ReceiptAuditID string // receipt correlation: Redis receipt audit_id (idempotency key)
 	// Revision is the resource version this row refers to — for a supply write,
 	// the revision the content ended up at. Zero means "not applicable" or

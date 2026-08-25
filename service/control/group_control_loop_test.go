@@ -20,9 +20,9 @@ import (
 // the runner stops renewing, and the sweeper hands live work to a second runner.
 // Pin both interfaces against the real type.
 var (
-	_ groupLeaseEngine      = (*engine.Engine)(nil)
-	_ nodeLeaseEngine       = (*engine.Engine)(nil)
-	_ nodeTimeoutCommitter  = (*engine.Engine)(nil)
+	_ groupLeaseEngine     = (*engine.Engine)(nil)
+	_ nodeLeaseEngine      = (*engine.Engine)(nil)
+	_ nodeTimeoutCommitter = (*engine.Engine)(nil)
 )
 
 // groupFakeEngine extends fakeControlEngine with group lease capabilities.
@@ -41,8 +41,8 @@ type groupFakeEngine struct {
 	groupCommitErr     error
 	groupCommittedRes  engine.GroupResult
 
-	groupRenewResult bool
-	groupRenewErr    error
+	groupRenewResult  bool
+	groupRenewErr     error
 	groupRenewedLease *engine.TaskLease
 
 	nodeRenewResult  bool

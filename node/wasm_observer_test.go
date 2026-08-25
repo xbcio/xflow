@@ -19,12 +19,12 @@ type recordingWasmObserver struct {
 func (r *recordingWasmObserver) OnPoolSwap(context.Context, string, int, uint64, time.Duration) {
 	r.swaps++
 }
-func (r *recordingWasmObserver) OnConfigAge(context.Context, time.Duration)   {}
-func (r *recordingWasmObserver) OnInstanceCount(context.Context, string, int) {}
-func (r *recordingWasmObserver) OnInstanceRecycled(context.Context, string)   {}
-func (r *recordingWasmObserver) OnBorrowWait(context.Context, time.Duration)  {}
+func (r *recordingWasmObserver) OnConfigAge(context.Context, time.Duration)                 {}
+func (r *recordingWasmObserver) OnInstanceCount(context.Context, string, int)               {}
+func (r *recordingWasmObserver) OnInstanceRecycled(context.Context, string)                 {}
+func (r *recordingWasmObserver) OnBorrowWait(context.Context, time.Duration)                {}
 func (r *recordingWasmObserver) OnEval(context.Context, string, string, int, time.Duration) {}
-func (r *recordingWasmObserver) OnModuleCompile(context.Context, string)      {}
+func (r *recordingWasmObserver) OnModuleCompile(context.Context, string)                    {}
 
 // SetWasmObserver must actually forward into the internal wasm package's
 // global observer, not just satisfy the type alias: a config swap driven

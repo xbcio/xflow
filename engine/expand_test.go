@@ -163,7 +163,7 @@ func (h *loopHandler) Descriptor() types.Descriptor {
 func (h *loopHandler) Execute(_ context.Context, input *types.Input) (*types.Output, error) {
 	return &types.Output{
 		Data: map[string]any{
-				"items":       []any{"a", "b", "c"},
+			"items":       []any{"a", "b", "c"},
 			"batches":     [][]any{{"a"}, {"b"}, {"c"}},
 			"batch_size":  1,
 			"total":       3,
@@ -193,7 +193,7 @@ func TestScheduler_LoopExpansion_CreatesSubExecutions(t *testing.T) {
 	queue := &fakeQueue{}
 	reg := &fakeRegistry{handlers: map[string]types.ActionHandler{
 		"xflow.map": &loopHandler{},
-		"test.echo":  &echoHandler{},
+		"test.echo": &echoHandler{},
 	}}
 	// The body is what a batch runs now, so an expansion test needs an executor
 	// for it. echoBodyExecutor stands in for a real sub-graph execution.

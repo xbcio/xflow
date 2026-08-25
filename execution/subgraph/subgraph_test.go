@@ -171,4 +171,3 @@ func TestInventoryResolvesNameScopedHandlers(t *testing.T) {
 			"the name-scoped path must still fail closed")
 	}
 }
-

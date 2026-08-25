@@ -120,4 +120,3 @@ func TestUnmarshalWorkflowRecordGraphRoundTrips(t *testing.T) {
 		t.Fatalf("decoded graph hash = %v, want %q", got.Graph, g.Hash())
 	}
 }
-

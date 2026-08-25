@@ -160,6 +160,7 @@ func TestRunnerMetricsProxyDisabledByDefault(t *testing.T) {
 		time.Sleep(500 * time.Millisecond)
 	}
 }
+
 // mpStartMetricsProxyServer starts the production server with the runner metrics
 // proxy on and a metrics listener of its own.
 func mpStartMetricsProxyServer(t *testing.T, serverBin, addr, metricsAddr, redisAddr, dsn, tokensFile string) (string, *safeBuffer, func()) {

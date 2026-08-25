@@ -241,7 +241,7 @@ func (f *fakeStateWithGroup) CommitGroup(ctx context.Context, req GroupCommitReq
 // value is irrelevant; what matters is that commitGroup always uses
 // lease.Attempt as returned by the backend.
 type attemptTrackingGroupState struct {
-	currentAttempt  int // simulates the persisted attempt counter
+	currentAttempt   int // simulates the persisted attempt counter
 	committedAttempt int
 }
 

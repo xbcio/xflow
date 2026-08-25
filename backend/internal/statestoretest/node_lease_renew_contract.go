@@ -209,7 +209,8 @@ func RunNodeLeaseRenewContract(t *testing.T, newStore func(*testing.T) NodeLease
 	// Once the lease is gone, renewal must not resurrect it. Otherwise a
 	// renewal racing a reclaim would restore a deadline for a lease whose work
 	// item has already been requeued to another runner.
-	t.Run("RenewRejectedAfterLeaseRevoked", func(t *testing.T) {		s, id, lease := seed(t)
+	t.Run("RenewRejectedAfterLeaseRevoked", func(t *testing.T) {
+		s, id, lease := seed(t)
 		atomic, ok := s.(engine.AtomicStateStore)
 		if !ok {
 			t.Skip("backend does not implement AtomicStateStore")

@@ -75,4 +75,3 @@ func TestGetSupplyDetectsCorruptedContentWithoutEncryption(t *testing.T) {
 		t.Fatal("GetSupply succeeded on an unencrypted row whose content does not match its stored content_hash")
 	}
 }
-

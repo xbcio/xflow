@@ -141,7 +141,10 @@ func BenchmarkNativeBaseline_FullPipeline(b *testing.B) {
 
 // BenchmarkNativeBreakdown_Unmarshal measures only json.Unmarshal.
 func BenchmarkNativeBreakdown_Unmarshal(b *testing.B) {
-	for _, tc := range []struct{ name string; size int }{
+	for _, tc := range []struct {
+		name string
+		size int
+	}{
 		{"p50=2594B", 2594},
 		{"p90=9753B", 9753},
 	} {
@@ -172,7 +175,10 @@ func BenchmarkNativeBreakdown_Unmarshal(b *testing.B) {
 func BenchmarkNativeBreakdown_ExprRun(b *testing.B) {
 	np := compileNativeProgs(b)
 
-	for _, tc := range []struct{ name string; size int }{
+	for _, tc := range []struct {
+		name string
+		size int
+	}{
 		{"p50=2594B", 2594},
 		{"p90=9753B", 9753},
 	} {
@@ -209,7 +215,10 @@ func BenchmarkNativeBreakdown_ExprRun(b *testing.B) {
 
 // BenchmarkNativeBreakdown_Marshal measures only json.Marshal of the result.
 func BenchmarkNativeBreakdown_Marshal(b *testing.B) {
-	for _, tc := range []struct{ name string; size int }{
+	for _, tc := range []struct {
+		name string
+		size int
+	}{
 		{"p50=2594B", 2594},
 		{"p90=9753B", 9753},
 	} {

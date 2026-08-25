@@ -135,7 +135,7 @@ func TestPerWorkflowTransient_UsesWorkflowTTL(t *testing.T) {
 	defer func() { _ = rdb.Close() }()
 
 	state := New(rdb, nil, time.Hour) // default TTL = 1h
-	state.transient = false            // global transient OFF
+	state.transient = false           // global transient OFF
 
 	ctx := context.Background()
 	id := types.ExecutionID("exec-per-wf-ttl")

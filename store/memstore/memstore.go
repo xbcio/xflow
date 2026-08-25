@@ -14,8 +14,8 @@ import (
 type Store struct {
 	mu         sync.Mutex
 	executions map[types.ExecutionID]*store.ExecutionRecord
-	nodes      map[string]*store.NodeRecord    // key: "execID/nodeName"
-	signals    map[string]*signalEntry         // key: "execID/signalName"
+	nodes      map[string]*store.NodeRecord     // key: "execID/nodeName"
+	signals    map[string]*signalEntry          // key: "execID/signalName"
 	supplies   map[string]*store.SupplyResource // key: "namespace/name"
 	audit      []*store.AuditRecord
 	nextID     uint64

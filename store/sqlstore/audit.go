@@ -16,20 +16,20 @@ import (
 // carries identity (subject/namespace), operation, resource ids, decision,
 // reason, and trace correlation ids — none of which are secrets.
 type dbAuditEvent struct {
-	ID            uint64    `gorm:"column:id;primaryKey;autoIncrement"`
-	RequestID     string    `gorm:"column:request_id;type:varchar(128)"`
-	Principal     string    `gorm:"column:principal;type:varchar(255)"`
-	Namespace      string    `gorm:"column:namespace;type:varchar(128)"`
-	Operation     string    `gorm:"column:operation;type:varchar(64)"`
-	Resource      string    `gorm:"column:resource;type:varchar(255)"`
-	WorkflowID    string    `gorm:"column:workflow_id;type:varchar(255)"`
-	ExecutionID   string    `gorm:"column:execution_id;type:varchar(64)"`
-	Decision      string    `gorm:"column:decision;type:varchar(16)"`
-	Reason        string    `gorm:"column:reason;type:varchar(128)"`
-	Outcome       string    `gorm:"column:outcome;type:varchar(32)"`
-	TraceID       string    `gorm:"column:trace_id;type:varchar(64)"`
-	Timestamp     time.Time `gorm:"column:ts"`
-	CreatedAt     time.Time `gorm:"column:created_at;autoCreateTime:milli"`
+	ID          uint64    `gorm:"column:id;primaryKey;autoIncrement"`
+	RequestID   string    `gorm:"column:request_id;type:varchar(128)"`
+	Principal   string    `gorm:"column:principal;type:varchar(255)"`
+	Namespace   string    `gorm:"column:namespace;type:varchar(128)"`
+	Operation   string    `gorm:"column:operation;type:varchar(64)"`
+	Resource    string    `gorm:"column:resource;type:varchar(255)"`
+	WorkflowID  string    `gorm:"column:workflow_id;type:varchar(255)"`
+	ExecutionID string    `gorm:"column:execution_id;type:varchar(64)"`
+	Decision    string    `gorm:"column:decision;type:varchar(16)"`
+	Reason      string    `gorm:"column:reason;type:varchar(128)"`
+	Outcome     string    `gorm:"column:outcome;type:varchar(32)"`
+	TraceID     string    `gorm:"column:trace_id;type:varchar(64)"`
+	Timestamp   time.Time `gorm:"column:ts"`
+	CreatedAt   time.Time `gorm:"column:created_at;autoCreateTime:milli"`
 	// Phase is the immutable audit phase (T9): admission / outcome / receipt.
 	// The generated phase_key column (NULL for empty phase/request_id) is the
 	// unique idempotency key for outcome rows; it is computed by MySQL and is

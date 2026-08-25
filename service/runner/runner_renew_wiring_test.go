@@ -25,7 +25,8 @@ type renewCapturingClient struct {
 	refuse   bool
 }
 
-func (c *renewCapturingClient) RenewLease(_ context.Context, req protocol.RenewLeaseRequest) (protocol.RenewLeaseResponse, error) {	c.mu.Lock()
+func (c *renewCapturingClient) RenewLease(_ context.Context, req protocol.RenewLeaseRequest) (protocol.RenewLeaseResponse, error) {
+	c.mu.Lock()
 	c.requests = append(c.requests, req)
 	refuse := c.refuse
 	c.renewed = true

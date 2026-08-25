@@ -85,9 +85,9 @@ const (
 	OpWorkflowRegister         = "workflow.register"
 	OpWorkflowDefinitionUpdate = "workflowdefinition.update" // draft; consumed by PUT /v1/workflows/{id}
 	OpExecutionRead            = "execution.read"
-	OpExecutionSignal            = "execution.signal"
-	OpExecutionRevoke            = "execution.revoke"
-	OpExecutionCancel            = "execution.cancel"
+	OpExecutionSignal          = "execution.signal"
+	OpExecutionRevoke          = "execution.revoke"
+	OpExecutionCancel          = "execution.cancel"
 	// OpExecutionSeed is the mutation that seeds an execution from an entry unit
 	// (single node or group node) result via POST /v1/executions. It maps to the
 	// "execution" scope like the other execution operations.

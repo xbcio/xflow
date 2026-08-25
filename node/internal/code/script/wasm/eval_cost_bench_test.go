@@ -1,9 +1,9 @@
 // eval_cost_bench_test.go dissects the per-eval cost into four layers:
 //
-//   A. Fixed host overhead (reactornoop: passthrough guest, zero JSON work)
-//   B. Realistic guest cost (tagger: actual JSON decode+eval+encode inside sandbox)
-//   C. Native Go baseline (json.Unmarshal+Marshal in host process, no sandbox)
-//   D. Sub-components: pool borrow/return, raw alloc+memcpy+call latency
+//	A. Fixed host overhead (reactornoop: passthrough guest, zero JSON work)
+//	B. Realistic guest cost (tagger: actual JSON decode+eval+encode inside sandbox)
+//	C. Native Go baseline (json.Unmarshal+Marshal in host process, no sandbox)
+//	D. Sub-components: pool borrow/return, raw alloc+memcpy+call latency
 //
 // All benchmarks use realisticRecord at the distribution's p50 (2594 B) and
 // p90 (9753 B) — the same shapes the production pipeline sees. Toy inputs

@@ -66,4 +66,3 @@ func TestClusterMixedGraphResolvesUnitIndexAfterDurableRoundTrip(t *testing.T) {
 		t.Fatalf("execution status = %q, want success", hooks.executionCompleteStatus(id))
 	}
 }
-

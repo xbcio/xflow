@@ -455,10 +455,10 @@ func TestRenewCommitsTimeoutEmitsServerMetric(t *testing.T) {
 	m := metrics.New()
 	fake := &deadlineTestEngine{}
 	core := &Core{
-		engine:           fake,
-		runners:          dir,
-		pollWait:         time.Second,
-		timeoutObserver:  metrics.NewNodeTimeoutMetrics(m),
+		engine:          fake,
+		runners:         dir,
+		pollWait:        time.Second,
+		timeoutObserver: metrics.NewNodeTimeoutMetrics(m),
 	}
 
 	resp, err := core.renewLease(ctx, protocol.RenewLeaseRequest{
@@ -572,4 +572,3 @@ func TestRenewUnaffectedBeforeDeadlineEmitsNoTimeoutMetric(t *testing.T) {
 		t.Fatalf("a future-deadline renewal emitted a timeout metric:\n%s", rec.Body.String())
 	}
 }
-

@@ -80,4 +80,3 @@ func TestLoadGraphSucceedsOnNormalPersistedSnapshot(t *testing.T) {
 		t.Fatalf("LoadGraph() = %+v, want hash %q", got, g.Hash())
 	}
 }
-

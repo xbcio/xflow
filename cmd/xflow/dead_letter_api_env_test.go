@@ -74,7 +74,7 @@ func TestAPIDeadLetterClientListSuccessEnvelope(t *testing.T) {
 	}
 	listBody := deadLetterListResponse{
 		Entries:    []engine.OutboxEntry{wantEntry},
-		NextCursor:  "cursor-next",
+		NextCursor: "cursor-next",
 	}
 	dataBytes, err := json.Marshal(listBody)
 	if err != nil {

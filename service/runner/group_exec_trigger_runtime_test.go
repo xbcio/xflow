@@ -40,7 +40,7 @@ func TestGroupExecTriggerRuntime_ExecuteGroupRunsRealMembers(t *testing.T) {
 				"a": {"main": types.PortConnections{Targets: []types.Connection{{Node: "__collector_a_main"}}}},
 			},
 		},
-		Exits: []graph.SubgraphPackageExit{{CollectorNode: "__collector_a_main", SrcNode: "a", Port: "main"}},
+		Exits:        []graph.SubgraphPackageExit{{CollectorNode: "__collector_a_main", SrcNode: "a", Port: "main"}},
 		Requirements: []graph.Requirement{{NodeType: "test.echo", NodeVersion: 1}},
 	}
 	hash, err := graph.ComputePackageHash(pkg)

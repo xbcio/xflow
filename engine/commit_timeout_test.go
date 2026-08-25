@@ -236,4 +236,3 @@ func TestCommitTaskTimeoutRejectsGroupLease(t *testing.T) {
 			"the guard must reject before any state mutation", gm.Name)
 	}
 }
-

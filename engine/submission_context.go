@@ -167,4 +167,3 @@ func ExecutionTransientFromContext(ctx context.Context) (TransientHint, bool) {
 	hint, ok := ctx.Value(executionTransientCtxKey{}).(TransientHint)
 	return hint, ok
 }
-

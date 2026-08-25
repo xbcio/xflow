@@ -108,7 +108,7 @@ func toDBAudit(r *store.AuditRecord) *dbAuditEvent {
 	return &dbAuditEvent{
 		RequestID:      r.RequestID,
 		Principal:      r.Principal,
-		Namespace:       r.Namespace,
+		Namespace:      r.Namespace,
 		Operation:      r.Operation,
 		Resource:       r.Resource,
 		WorkflowID:     r.WorkflowID,
@@ -133,7 +133,7 @@ func fromDBAudit(d *dbAuditEvent) *store.AuditRecord {
 		SeqID:          d.ID, // SeqID maps to the AUTO_INCREMENT primary key
 		RequestID:      d.RequestID,
 		Principal:      d.Principal,
-		Namespace:       d.Namespace,
+		Namespace:      d.Namespace,
 		Operation:      d.Operation,
 		Resource:       d.Resource,
 		WorkflowID:     d.WorkflowID,

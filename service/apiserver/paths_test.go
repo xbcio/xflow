@@ -265,4 +265,3 @@ func TestTrailingSlashRedirectHandlerPattern(t *testing.T) {
 		t.Fatalf("unregistered path returned non-empty pattern %q; the guard's empty-pattern signal is broken", unkPattern)
 	}
 }
-

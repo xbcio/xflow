@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"sort"
 
-	nodeinternal "github.com/xbcio/xflow/node/internal"
 	"github.com/xbcio/xflow/exprx"
+	nodeinternal "github.com/xbcio/xflow/node/internal"
 	"github.com/xbcio/xflow/types"
 )
 

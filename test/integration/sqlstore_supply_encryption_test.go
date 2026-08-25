@@ -186,4 +186,3 @@ func TestReadsPlaintextRowWrittenBeforeEncryption(t *testing.T) {
 		t.Errorf("pre-encryption row read back as %q", got.Content)
 	}
 }
-

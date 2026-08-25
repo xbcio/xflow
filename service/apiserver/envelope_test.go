@@ -126,7 +126,9 @@ func TestEnvelope_UntypedNilListSerializesAsEmptyArrayNotNull(t *testing.T) {
 //
 // Teeth verified: deleting the reflect branch (leaving `if v == nil { ... };
 // return v`) makes this test go RED with:
-//   data.list = null, want [] (never null) for a typed nil []string
+//
+//	data.list = null, want [] (never null) for a typed nil []string
+//
 // while the untyped-nil test above stays green.
 func TestEnvelope_TypedNilListSerializesAsEmptyArrayNotNull(t *testing.T) {
 	var list []string // declared, not literal nil — typed nil

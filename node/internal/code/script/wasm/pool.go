@@ -118,7 +118,6 @@ const recycleMemoryHighWater = engine.DefaultWasmMemoryPages * wasmPageBytes * 3
 // wasmPageBytes is the wasm spec's fixed page size. It is not configurable.
 const wasmPageBytes = 64 << 10
 
-
 // pooledInstance is one resident reactor instance: an instantiated module with
 // _initialize already run and configure already applied. It carries the export
 // handles so the hot path avoids per-call lookups.
