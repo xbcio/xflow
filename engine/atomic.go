@@ -344,6 +344,9 @@ func (e *Engine) FlushOutbox(ctx context.Context, id types.ExecutionID) error {
 		if len(entries) == 0 {
 			return nil
 		}
+		// Only handling an advance/skip intent can append to this outbox from
+		// inside the loop, so track whether this batch did. See the exit below.
+		appended := false
 		// Prove this deliverer is alive for as long as it holds the batch, so
 		// OutboxDeliveryLeaseTTL can stay short enough to recover from a crash
 		// promptly without stealing work from a slow-but-live flush.
@@ -369,6 +372,7 @@ func (e *Engine) FlushOutbox(ctx context.Context, id types.ExecutionID) error {
 					}
 					continue
 				}
+				appended = true
 			} else {
 				var enqueueErr error
 				if entry.AvailableAt.After(time.Now()) {
@@ -424,8 +428,22 @@ func (e *Engine) FlushOutbox(ctx context.Context, id types.ExecutionID) error {
 		if firstErr != nil {
 			return firstErr
 		}
-		// Continue even after a short batch: handling an internal advance/skip
-		// intent can have appended the next durable intent during this batch.
+		// Handling an internal advance/skip intent can have appended the next
+		// durable intent during this batch, so a batch that handled one must
+		// re-poll even if it was short. A batch that did not, and that came back
+		// short, cannot have anything behind it: nothing else in this loop writes
+		// to the outbox, and a short batch means the store had no more ready
+		// entries to hand out. Re-polling there costs a full round trip per commit
+		// to be told what the short batch already said.
+		//
+		// Entries another actor appends after this point are left for that actor's
+		// own flush and the dispatcher's next tick — which is where they were left
+		// before too, since the empty poll this replaces raced the same way.
+		if !appended && len(entries) < batchSize {
+			return nil
+		}
+		// Otherwise continue: a full batch may have more behind it, and a batch
+		// that handled an advance/skip has queued its successor.
 	}
 }
 
