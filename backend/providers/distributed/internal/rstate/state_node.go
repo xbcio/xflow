@@ -175,9 +175,27 @@ func (s *Store) UpsertNode(ctx context.Context, n *engine.NodeSnapshot) error {
 	return nil
 }
 
+// GetNode reads a node's status key and its meta hash. The two are issued in
+// one pipeline rather than back to back: they are independent reads of the same
+// node, so sequencing them buys nothing and costs a full network round trip on
+// every call. Every acyclic node advance pays this (engine/atomic.go's
+// TaskTypeNodeAdvance branch), which makes it per-node hot-path traffic.
+//
+// Pipelining means the meta hash is fetched even when the status key is absent,
+// where the sequential version returned early. That is one extra COMMAND on the
+// miss path, not one extra round trip, and a node with meta but no status is
+// exactly the half-expired shape callers want to see as absent anyway.
 func (s *Store) GetNode(ctx context.Context, id types.ExecutionID, name string) (*engine.NodeSnapshot, error) {
 	t := namespace.FromContext(ctx)
-	val, err := s.rdb.Get(ctx, nodeStatusKey(t, id, name)).Result()
+	pipe := s.rdb.Pipeline()
+	statusCmd := pipe.Get(ctx, nodeStatusKey(t, id, name))
+	metaCmd := pipe.HGetAll(ctx, nodeMetaKey(t, id, name))
+	// Exec reports the first command error; the per-command errors below are the
+	// authoritative ones, so a redis.Nil from the status GET must not abort here.
+	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
+		return nil, fmt.Errorf("get node %q/%q: %w", id, name, err)
+	}
+	val, err := statusCmd.Result()
 	if err == redis.Nil {
 		return nil, nil
 	}
@@ -185,7 +203,7 @@ func (s *Store) GetNode(ctx context.Context, id types.ExecutionID, name string) 
 		return nil, fmt.Errorf("get node %q/%q: %w", id, name, err)
 	}
 	ns := &engine.NodeSnapshot{ExecutionID: id, Name: name, Status: types.NodeStatus(val)}
-	meta, err := s.rdb.HGetAll(ctx, nodeMetaKey(t, id, name)).Result()
+	meta, err := metaCmd.Result()
 	if err != nil {
 		return nil, fmt.Errorf("get node lease %q/%q: %w", id, name, err)
 	}
