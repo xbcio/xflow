@@ -382,9 +382,19 @@ func TestTriggerNamespaceIsolation(t *testing.T) {
 func newTriggerRuntimeTestRedisClient(t *testing.T) *redis.Client {
 	t.Helper()
 
-	addr := os.Getenv("XFLOW_REDIS_ADDR")
+	// XFLOW_TEST_REDIS_ADDR, not XFLOW_REDIS_ADDR. The latter is the production
+	// runtime's variable (cmd/server, cmd/runner, cmd/xflow) and no test harness
+	// in this repo has ever set it — not the Makefile, not ci.yml. Reading it
+	// here meant these seven tests skipped on every machine and every CI run
+	// since they were written: the trigger dedup, lock renewal and namespace
+	// isolation they cover were never once exercised against a real Redis, and
+	// the suite reported green anyway.
+	addr := os.Getenv("XFLOW_TEST_REDIS_ADDR")
 	if addr == "" {
-		t.Skip("XFLOW_REDIS_ADDR is required")
+		if os.Getenv("XFLOW_REQUIRE_REDIS_INTEGRATION") == "1" {
+			t.Fatal("XFLOW_REQUIRE_REDIS_INTEGRATION=1: XFLOW_TEST_REDIS_ADDR not set (use 127.0.0.1:6380)")
+		}
+		t.Skip("XFLOW_TEST_REDIS_ADDR not set; skipping real-Redis trigger runtime test")
 	}
 
 	rdb := redis.NewClient(&redis.Options{Addr: addr})

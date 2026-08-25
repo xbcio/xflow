@@ -18,11 +18,19 @@ import (
 // against a real Redis server. It is opt-in because CI and local unit test
 // runs do not require a Redis daemon:
 //
-//	XFLOW_REDIS_ADDR=127.0.0.1:6379 go test ./service/control -run TestRedisRunnerDirectoryRealRedisDurableHandoff
+//	XFLOW_TEST_REDIS_ADDR=127.0.0.1:6380 go test ./service/control -run TestRedisRunnerDirectoryRealRedisDurableHandoff
+//
+// The variable used to be XFLOW_REDIS_ADDR, which is the production runtime's
+// (cmd/server, cmd/runner) and is set by no harness in this repo. This test —
+// the only coverage the runner-directory Lua has against a real Redis — has
+// therefore never executed, on any machine or CI run, while reporting green.
 func TestRedisRunnerDirectoryRealRedisDurableHandoff(t *testing.T) {
-	addr := os.Getenv("XFLOW_REDIS_ADDR")
+	addr := os.Getenv("XFLOW_TEST_REDIS_ADDR")
 	if addr == "" {
-		t.Skip("XFLOW_REDIS_ADDR is required for the real Redis runner-directory test")
+		if os.Getenv("XFLOW_REQUIRE_REDIS_INTEGRATION") == "1" {
+			t.Fatal("XFLOW_REQUIRE_REDIS_INTEGRATION=1: XFLOW_TEST_REDIS_ADDR not set (use 127.0.0.1:6380)")
+		}
+		t.Skip("XFLOW_TEST_REDIS_ADDR not set; skipping the real-Redis runner-directory test")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

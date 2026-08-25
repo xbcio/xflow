@@ -141,9 +141,17 @@ func TestWorkflowRegistryRemoveDeletesKeyAndID(t *testing.T) {
 func newWorkflowRegistryTestBackend(t *testing.T) *Backend {
 	t.Helper()
 
-	addr := os.Getenv("XFLOW_REDIS_ADDR")
+	// XFLOW_TEST_REDIS_ADDR is the repo-wide test variable; XFLOW_REDIS_ADDR is
+	// the production runtime's and is never exported by any harness here. The
+	// sibling package internal/rstate already reads the correct one, so a
+	// developer who set it for those tests reasonably expected these four to run
+	// too — they did not.
+	addr := os.Getenv("XFLOW_TEST_REDIS_ADDR")
 	if addr == "" {
-		t.Skip("XFLOW_REDIS_ADDR is required")
+		if os.Getenv("XFLOW_REQUIRE_REDIS_INTEGRATION") == "1" {
+			t.Fatal("XFLOW_REQUIRE_REDIS_INTEGRATION=1: XFLOW_TEST_REDIS_ADDR not set (use 127.0.0.1:6380)")
+		}
+		t.Skip("XFLOW_TEST_REDIS_ADDR not set; skipping real-Redis workflow registry test")
 	}
 
 	b, err := New(addr, nil, WithConsumer(false))
