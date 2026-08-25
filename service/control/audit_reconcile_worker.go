@@ -276,14 +276,29 @@ func (w *AuditReconcileWorker) ReconcileOnce(ctx context.Context) int {
 // appended, 0 otherwise (skipped / error / already settled by a concurrent
 // worker). Never re-executes the mutation.
 func (w *AuditReconcileWorker) settle(ctx context.Context, rec *store.AuditRecord) int {
-	probeCtx := ctx
+	// recCtx carries THIS record's namespace, and everything below that is about
+	// this record uses it — not just the probe.
+	//
+	// The sweep is deliberately cross-namespace: ListUnreconciledAdmissions
+	// scans the whole audit table and each row carries its own Namespace. So the
+	// sweep's ctx has no namespace to speak of, and reporting a per-admission
+	// observation from it files every tenant's row under namespace.Default.
+	// xflow_audit_reconcile_settled_total and _errors_total exist so an operator
+	// can see WHICH tenant has an audit backlog that will not settle; filed
+	// under one label they answer only "somebody does".
+	//
+	// The sweep-level observations (OnReconcileScan, OnReconcileBacklog in
+	// ReconcileOnce) correctly keep ctx: those really are whole-table
+	// quantities, and attributing them to a namespace would be the mirror-image
+	// error.
+	recCtx := ctx
 	if rec.Namespace != "" {
-		probeCtx = namespace.WithNamespace(probeCtx, namespace.Namespace(rec.Namespace))
+		recCtx = namespace.WithNamespace(recCtx, namespace.Namespace(rec.Namespace))
 	}
-	effect, err := w.authority.Probe(probeCtx, rec)
+	effect, err := w.authority.Probe(recCtx, rec)
 	if err != nil {
 		w.observe(func(o ReconcileObserver) {
-			o.OnReconcileError(ctx, rec.RequestID, err)
+			o.OnReconcileError(recCtx, rec.RequestID, err)
 		})
 		if w.log != nil {
 			w.log.Error("audit reconcile: probe authority", "request_id", rec.RequestID, "err", err)
@@ -301,7 +316,7 @@ func (w *AuditReconcileWorker) settle(ctx context.Context, rec *store.AuditRecor
 		reason = "no_effect"
 	case EffectIndeterminate:
 		w.observe(func(o ReconcileObserver) {
-			o.OnReconcileSkipped(ctx, "indeterminate")
+			o.OnReconcileSkipped(recCtx, "indeterminate")
 		})
 		return 0
 	}
@@ -323,7 +338,7 @@ func (w *AuditReconcileWorker) settle(ctx context.Context, rec *store.AuditRecor
 	})
 	if err != nil {
 		w.observe(func(o ReconcileObserver) {
-			o.OnReconcileError(ctx, rec.RequestID, err)
+			o.OnReconcileError(recCtx, rec.RequestID, err)
 		})
 		if w.log != nil {
 			w.log.Error("audit reconcile: append outcome", "request_id", rec.RequestID, "err", err)
@@ -331,7 +346,7 @@ func (w *AuditReconcileWorker) settle(ctx context.Context, rec *store.AuditRecor
 		return 0
 	}
 	w.observe(func(o ReconcileObserver) {
-		o.OnReconcileSettled(ctx, outcome, appended, ageMs)
+		o.OnReconcileSettled(recCtx, outcome, appended, ageMs)
 	})
 	if appended {
 		return 1
