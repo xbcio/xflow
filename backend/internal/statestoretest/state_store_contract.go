@@ -9,6 +9,7 @@ package statestoretest
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -194,6 +195,107 @@ func RunStateStoreContract(t *testing.T, state engine.StateStore) {
 	runExecutionErrorRoundTrip(t, state)
 	runOutboxDeliveryLease(t, state)
 	runDurableSignalTOCTOU(t, state)
+	runCancelSuspendedNode(t, state)
+}
+
+// runCancelSuspendedNode pins that a fenced cancel retires the waiter, not just
+// the node status.
+//
+// engine.Cancel reads ListSuspendedNodes and cancels each name it returns, so
+// the two calls are halves of one operation: whatever CancelSuspendedNode
+// reports canceled must stop being reported as suspended. The memory backend
+// flipped the node snapshot to Canceled and left the suspend registration in
+// place, which meant ListSuspendedNodes kept naming a Canceled node and — since
+// that same map is the index DeliverSignal and PeekResumeTarget scan — a later
+// signal still found a waiter there and consumed itself against a node that can
+// never run. The distributed backend SREMs the suspended set inside the same
+// Lua transition.
+//
+// This was invisible to the memory backend's own test because that test drove
+// the node into Suspended with UpsertNode alone. UpsertNode writes the node
+// snapshot and nothing else, so s.suspended was empty the whole time and there
+// was no stale entry left to find. Production parks a waiter with two writes;
+// so does this test.
+//
+// Scope note: neither backend clears the per-signal waiter registration here.
+// The distributed one defers that to cleanupOnCancel when the execution reaches
+// Canceled, and engine.Cancel always gets there. That asymmetry is real but is
+// not what this contract pins, because only one backend can honor it today.
+func runCancelSuspendedNode(t *testing.T, state engine.StateStore) {
+	t.Helper()
+	ctx := context.Background()
+	id := types.ExecutionID("exec-contract-cancel-suspended")
+
+	canceler, ok := state.(engine.SuspendedNodeCanceler)
+	if !ok {
+		// Not a skip, for the same reason runDurableSignalTOCTOU does not skip:
+		// both backends implement it, and a store that stopped would silently
+		// drop this contract and fall back to engine.Cancel's unfenced path.
+		t.Fatalf("%T does not implement engine.SuspendedNodeCanceler", state)
+	}
+
+	if err := state.CreateExecution(ctx, &engine.ExecutionSnapshot{
+		ID: id, Graph: ContractGraph(), Status: types.ExecutionStatusRunning,
+	}); err != nil {
+		t.Fatalf("CreateExecution() error = %v", err)
+	}
+
+	const waiter = "finish"
+	const signal = "cancel-me"
+	idx, ok := ContractGraph().NodeIndex(waiter)
+	if !ok {
+		t.Fatalf("ContractGraph has no node %q", waiter)
+	}
+	// Both writes, in the order the engine makes them: the node commit records
+	// Suspended, then the waiter is registered. Either one alone leaves a
+	// backend with nothing for CancelSuspendedNode to act on.
+	if err := state.UpsertNode(ctx, &engine.NodeSnapshot{
+		ExecutionID:  id,
+		Name:         waiter,
+		NodeIdx:      idx,
+		Status:       types.NodeStatusSuspended,
+		ActivationID: 1,
+	}); err != nil {
+		t.Fatalf("UpsertNode(suspended) error = %v", err)
+	}
+	if _, err := state.SuspendOrConsume(ctx, id, waiter,
+		&types.SuspendSpec{Signals: []string{signal}}); err != nil {
+		t.Fatalf("SuspendOrConsume() error = %v", err)
+	}
+
+	// Positive control. Without it a backend whose SuspendOrConsume registered
+	// nothing satisfies the post-condition below for the wrong reason.
+	before, err := state.ListSuspendedNodes(ctx, id)
+	if err != nil {
+		t.Fatalf("ListSuspendedNodes(before) error = %v", err)
+	}
+	if !slices.Contains(before, waiter) {
+		t.Fatalf("ListSuspendedNodes(before) = %v, want it to contain %q. The "+
+			"waiter was never registered, so the assertion below would pass "+
+			"against a cancel that removes nothing.", before, waiter)
+	}
+
+	canceled, err := canceler.CancelSuspendedNode(ctx, id, waiter)
+	if err != nil {
+		t.Fatalf("CancelSuspendedNode() error = %v", err)
+	}
+	if !canceled {
+		t.Fatalf("CancelSuspendedNode(%q) = false, want true: the node is "+
+			"Suspended and registered as a waiter", waiter)
+	}
+
+	after, err := state.ListSuspendedNodes(ctx, id)
+	if err != nil {
+		t.Fatalf("ListSuspendedNodes(after) error = %v", err)
+	}
+	if slices.Contains(after, waiter) {
+		t.Errorf("ListSuspendedNodes(after cancel) = %v, still contains %q. "+
+			"CancelSuspendedNode reported the node canceled but left it "+
+			"registered as suspended, so engine.Cancel's own source of truth "+
+			"disagrees with the transition it just performed — and on a backend "+
+			"where that registration is also the signal waiter index, a later "+
+			"signal matches a node that can never run.", after, waiter)
+	}
 }
 
 // runOutboxDeliveryLease pins the delivery lease on both backends.

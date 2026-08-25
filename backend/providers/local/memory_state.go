@@ -210,6 +210,18 @@ func (s *memoryState) GetNode(_ context.Context, id types.ExecutionID, name stri
 // canceled=false without mutating anything when the node is missing or no
 // longer Suspended, so a concurrent resume's live lease is never clobbered
 // (engine.SuspendedNodeCanceler).
+//
+// Retiring the waiter is part of the transition, not bookkeeping that can be
+// deferred. s.suspended is two things at once here: the set ListSuspendedNodes
+// reports, and the index DeliverSignal/PeekResumeTarget scan to find who is
+// waiting on a signal name. Leaving the entry behind therefore did two things —
+// ListSuspendedNodes kept naming a node that is Canceled, and a later signal
+// still matched it and consumed itself against a node that can never run.
+//
+// The distributed backend does this in the same atomic step
+// (cancelSuspendedNodeLua SREMs the suspended set) and wipes the rest of the
+// waiter state in cleanupOnCancel when the execution reaches Canceled. There is
+// no cleanupOnCancel here, so this deletion is the only place it can happen.
 func (s *memoryState) CancelSuspendedNode(_ context.Context, id types.ExecutionID, name string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -221,6 +233,10 @@ func (s *memoryState) CancelSuspendedNode(_ context.Context, id types.ExecutionI
 	cp := *ns
 	cp.Status = types.NodeStatusCanceled
 	s.nodes[key] = &cp
+	delete(s.suspended, key)
+	// Multi-signal waiters accumulate partial arrivals under the same key; the
+	// consume paths drop both together and so must the cancel path.
+	delete(s.signalSets, key)
 	return true, nil
 }
 

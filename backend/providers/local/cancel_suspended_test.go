@@ -12,6 +12,12 @@ import (
 // a Suspended node to Canceled and reports canceled=true; for any non-Suspended
 // (or missing) node it is a no-op that returns canceled=false without mutating
 // state, so a concurrent resume's live lease is never clobbered.
+//
+// It covers the FENCE only. Every arm below parks the node with UpsertNode
+// alone, which writes the node snapshot and no suspend registration, so nothing
+// here can observe whether the cancel retires the waiter — and for a long time
+// nothing did. That half is pinned by runCancelSuspendedNode in the shared
+// contract suite, which parks the node the way production does.
 func TestMemoryCancelSuspendedNode(t *testing.T) {
 	ctx := context.Background()
 	state := newMemoryState()
