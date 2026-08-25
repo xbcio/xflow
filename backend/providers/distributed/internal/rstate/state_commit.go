@@ -254,6 +254,19 @@ func (s *Store) CommitNode(ctx context.Context, req engine.CommitNodeRequest) (e
 // AdvanceNode implements engine.AtomicStateStore by atomically applying all
 // destination arrivals and creating durable execution/skip intents.
 func (s *Store) AdvanceNode(ctx context.Context, req engine.AdvanceNodeRequest) (engine.AdvanceNodeResult, error) {
+	// Nothing downstream to schedule, so nothing the Lua script could mutate:
+	// with zero arrivals its loop body never runs, and the only remaining work
+	// would be the guards and the advance marker. Skipping the round trip is
+	// worth it because this is not a rare shape — every acyclic graph ends in at
+	// least one node with no outgoing edge, and each produces one such advance
+	// per execution.
+	//
+	// It does cost something: Applied is reported true without consulting the
+	// marker, so a redelivered advance for such a node claims Applied twice
+	// where the memory backend reports false on the second. That field's only
+	// consumer is the optional evidence buffer, never control flow, and the
+	// AdvanceNodeResult doc says so. Do not turn this into a dedup signal
+	// without deleting this branch first.
 	if len(req.Arrivals) == 0 {
 		return engine.AdvanceNodeResult{Applied: true}, nil
 	}

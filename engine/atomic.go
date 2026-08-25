@@ -178,6 +178,20 @@ type AdvanceNodeRequest struct {
 
 // AdvanceNodeResult reports whether an internal advance task made a new
 // scheduling transition. A duplicate task returns Applied=false.
+//
+// With one exception, which is deliberate and worth knowing before treating
+// Applied as a dedup signal: when Arrivals is empty the distributed backend
+// short-circuits in Go and reports Applied=true without consulting the advance
+// marker, so a redelivered advance for a node with no downstream work claims
+// Applied twice. The memory backend runs its guards either way and reports
+// Applied=false on the second.
+//
+// Empty Arrivals is not an edge case — every acyclic graph has at least one
+// node with no outgoing edge, and each of them produces one such advance per
+// execution. Honoring the dedup guarantee there would cost a Redis round trip
+// per execution to correct a field whose only consumer is the optional evidence
+// buffer (publishAdvanceReceipt). That trade was not worth making, so the
+// guarantee is stated as it actually holds rather than enforced.
 type AdvanceNodeResult struct {
 	Applied   bool
 	OutboxIDs []string
