@@ -43,7 +43,7 @@ type ApprovalNode struct {
 
 // Approval creates an approval gate node.
 //
-//	node.Approval([]string{"manager@co.com"}, node.ApprovalAny)
+//	node.Approval([]string{"manager@example.com"}, node.ApprovalAny)
 func Approval(approvers []string, mode ApprovalMode) *ApprovalNode {
 	return &ApprovalNode{Approvers: approvers, Mode: mode}
 }
