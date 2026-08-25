@@ -24,6 +24,7 @@ type SubgraphRuntimeOption func(*subgraphRuntimeConfig)
 
 type subgraphRuntimeConfig struct {
 	artifactCode func(ctx context.Context, digest string) ([]byte, error)
+	hooks        engine.Hooks
 }
 
 // WithSubgraphArtifactCodeResolver installs the digest -> script bytes resolver
@@ -33,6 +34,13 @@ type subgraphRuntimeConfig struct {
 // runtime builds, not through the runner's top-level dispatcher.
 func WithSubgraphArtifactCodeResolver(fn func(ctx context.Context, digest string) ([]byte, error)) SubgraphRuntimeOption {
 	return func(c *subgraphRuntimeConfig) { c.artifactCode = fn }
+}
+
+// WithSubgraphHooks makes the nodes inside a map body item observable. See
+// subgraph.WithHooks: the hooks must write their own metric family, because a
+// map over N items produces N inner executions under one outer execution.
+func WithSubgraphHooks(h engine.Hooks) SubgraphRuntimeOption {
+	return func(c *subgraphRuntimeConfig) { c.hooks = h }
 }
 
 // SubgraphRuntime adapts a batch lease to the runner's execution surface. It is
@@ -59,13 +67,17 @@ func NewSubgraphRuntime(reg *execution.Registry, cache *PackageCache, opts ...Su
 	for _, o := range opts {
 		o(cfg)
 	}
+	var execOpts []subgraph.ExecutorOption
+	if cfg.hooks != nil {
+		execOpts = append(execOpts, subgraph.WithHooks(cfg.hooks))
+	}
 	executor := subgraph.NewExecutor(reg, cache, func() subgraph.Backend {
 		backendOpts := []local.Option{local.WithRegistry(reg), local.WithConcurrency(1)}
 		if cfg.artifactCode != nil {
 			backendOpts = append(backendOpts, local.WithArtifactCodeResolver(cfg.artifactCode))
 		}
 		return local.New(backendOpts...)
-	})
+	}, execOpts...)
 	// No outer deadline to forward: this runtime is built once at runner
 	// startup, before any lease (and its payload.Deadline, which
 	// BuildSubgraphLease never populates today -- see SUBGRAPH-ENGINE-TODO.md)

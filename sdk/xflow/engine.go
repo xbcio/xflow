@@ -99,7 +99,7 @@ func newFromConfig(cfg *engineConfig, provider backend.Provider) (*Engine, error
 	// by a fresh backend the body executor builds, not by the engine's own, so
 	// the resolver NewLocal/NewCluster installed does not reach a ScriptFile
 	// node nested inside a map body.
-	if bodies := newBatchBodyExecutor(cfg.registry, true, artifactCodeResolverFor(cfg.artifactStore)); bodies != nil {
+	if bodies := newBatchBodyExecutor(cfg.registry, true, artifactCodeResolverFor(cfg.artifactStore), cfg.subgraphHooks); bodies != nil {
 		engOpts = append(engOpts, engine.WithBatchBodyExecutor(bodies))
 	}
 

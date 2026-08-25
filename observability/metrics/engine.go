@@ -43,6 +43,70 @@ const (
 	metricNodeStartsSwept = "xflow_node_starts_swept_total"
 )
 
+// Sub-execution metric names. A map body item and a group member run on an
+// inner engine, and their nodes were invisible until these existed: the
+// executor in execution/subgraph built that engine with no Hooks at all.
+//
+// They are a SEPARATE family rather than the same one with an extra label,
+// because the two populations are not comparable. One top-level execution
+// contains a map over N items, and each item is its own inner execution; a
+// map over ten thousand items would add ten thousand to
+// xflow_execution_completed_total, which an operator reads as "workflow runs
+// that finished". Sharing the series would not make that number more detailed,
+// it would make it wrong. Adding a label instead would change the identity of
+// every existing series, breaking any dashboard that matches on an exact label
+// set, and still leave the two mixed in every query that does not know to
+// exclude one.
+const (
+	metricSubNodeStarted        = "xflow_subgraph_node_started_total"
+	metricSubNodeCompleted      = "xflow_subgraph_node_completed_total"
+	metricSubNodeDuration       = "xflow_subgraph_node_duration_seconds"
+	metricSubNodeSuspended      = "xflow_subgraph_node_suspended_total"
+	metricSubNodeTimedOut       = "xflow_subgraph_node_timed_out_total"
+	metricSubNodeRetried        = "xflow_subgraph_node_retried_total"
+	metricSubExecutionCompleted = "xflow_subgraph_execution_completed_total"
+	metricSubNodeStartsSwept    = "xflow_subgraph_node_starts_swept_total"
+)
+
+// engineMetricNames selects which family one MetricsHooks instance writes to.
+//
+// The bookkeeping around node start times -- the tombstone ring, the age sweep,
+// the re-lease overwrite -- is subtle enough that a second copy of it for
+// sub-executions would be a second place for the leak in a48c689 to come back.
+// The two families differ only in what they are called.
+type engineMetricNames struct {
+	nodeStarted        string
+	nodeCompleted      string
+	nodeDuration       string
+	nodeSuspended      string
+	nodeTimedOut       string
+	nodeRetried        string
+	executionCompleted string
+	nodeStartsSwept    string
+}
+
+var topLevelMetricNames = engineMetricNames{
+	nodeStarted:        metricNodeStarted,
+	nodeCompleted:      metricNodeCompleted,
+	nodeDuration:       metricNodeDuration,
+	nodeSuspended:      metricNodeSuspended,
+	nodeTimedOut:       metricNodeTimedOut,
+	nodeRetried:        metricNodeRetried,
+	executionCompleted: metricExecutionCompleted,
+	nodeStartsSwept:    metricNodeStartsSwept,
+}
+
+var subgraphMetricNames = engineMetricNames{
+	nodeStarted:        metricSubNodeStarted,
+	nodeCompleted:      metricSubNodeCompleted,
+	nodeDuration:       metricSubNodeDuration,
+	nodeSuspended:      metricSubNodeSuspended,
+	nodeTimedOut:       metricSubNodeTimedOut,
+	nodeRetried:        metricSubNodeRetried,
+	executionCompleted: metricSubExecutionCompleted,
+	nodeStartsSwept:    metricSubNodeStartsSwept,
+}
+
 // nodeStartMaxAge bounds how long an unclaimed start time is kept. It is a
 // backstop, not the primary release path: OnExecutionComplete releases entries
 // as soon as the execution ends, and this only catches executions that ended
@@ -80,6 +144,11 @@ const endedTombstones = 4096
 // MetricsHooks turns engine lifecycle hooks into xflow_ Prometheus counters.
 type MetricsHooks struct {
 	Metrics *Metrics
+
+	// names is the metric family this instance writes. Both constructors set
+	// it; it is not optional, and a zero value would emit empty metric names
+	// rather than fall back to anything.
+	names engineMetricNames
 
 	// started holds node start times until OnNodeComplete consumes them, keyed
 	// by execution and then by node.
@@ -127,20 +196,29 @@ type nodeStart struct {
 }
 
 func NewMetricsHooks(metrics *Metrics) *MetricsHooks {
-	return &MetricsHooks{Metrics: metrics}
+	return &MetricsHooks{Metrics: metrics, names: topLevelMetricNames}
+}
+
+// NewSubgraphMetricsHooks builds hooks for an inner engine — the one a map body
+// item or a group member runs on. It is a distinct instance rather than a shared
+// one because the start-time bookkeeping is keyed by execution ID, and an inner
+// execution's ID is its own; mixing the two populations in one map would make
+// residency depend on how many items a map fans out to.
+func NewSubgraphMetricsHooks(metrics *Metrics) *MetricsHooks {
+	return &MetricsHooks{Metrics: metrics, names: subgraphMetricNames}
 }
 
 func (h *MetricsHooks) OnNodeStart(ctx context.Context, id types.ExecutionID, name string) {
-	h.Metrics.Inc(metricNodeStarted, h.nodeLabels(ctx, id, name, ""))
+	h.Metrics.Inc(h.names.nodeStarted, h.nodeLabels(ctx, id, name, ""))
 	h.storeNodeStartAt(id, name, time.Now())
 	h.maybeSweepNodeStarts(time.Now())
 }
 
 func (h *MetricsHooks) OnNodeComplete(ctx context.Context, id types.ExecutionID, name string, status types.NodeStatus) {
 	labels := h.nodeLabels(ctx, id, name, string(status))
-	h.Metrics.Inc(metricNodeCompleted, labels)
+	h.Metrics.Inc(h.names.nodeCompleted, labels)
 	if started, ok := h.takeNodeStart(id, name); ok {
-		h.Metrics.Observe(metricNodeDuration, labels, time.Since(started))
+		h.Metrics.Observe(h.names.nodeDuration, labels, time.Since(started))
 	}
 }
 
@@ -321,7 +399,7 @@ func (h *MetricsHooks) sweepStaleNodeStarts(now time.Time) {
 		return true
 	})
 	if swept > 0 {
-		h.Metrics.Add(metricNodeStartsSwept, map[string]string{"namespace": ""}, float64(swept))
+		h.Metrics.Add(h.names.nodeStartsSwept, map[string]string{"namespace": ""}, float64(swept))
 	}
 }
 
@@ -352,7 +430,7 @@ func (h *MetricsHooks) trackedExecutions() int {
 }
 
 func (h *MetricsHooks) OnNodeSuspended(ctx context.Context, id types.ExecutionID, name string) {
-	h.Metrics.Inc(metricNodeSuspended, h.nodeLabels(ctx, id, name, ""))
+	h.Metrics.Inc(h.names.nodeSuspended, h.nodeLabels(ctx, id, name, ""))
 }
 
 // OnExecutionComplete counts the finished execution and releases any node start
@@ -361,7 +439,7 @@ func (h *MetricsHooks) OnNodeSuspended(ctx context.Context, id types.ExecutionID
 // paths OnNodeComplete never fires. Without this, every such node's start time
 // stayed resident for the life of the process — one per Kafka message.
 func (h *MetricsHooks) OnExecutionComplete(ctx context.Context, id types.ExecutionID, status types.ExecutionStatus) {
-	h.Metrics.Inc(metricExecutionCompleted, withNamespace(ctx, map[string]string{"status": string(status)}))
+	h.Metrics.Inc(h.names.executionCompleted, withNamespace(ctx, map[string]string{"status": string(status)}))
 	h.releaseExecutionNodeStarts(id)
 }
 
@@ -370,11 +448,11 @@ func (h *MetricsHooks) OnSignalDelivered(context.Context, types.ExecutionID, str
 func (h *MetricsHooks) OnSignalRevoked(context.Context, types.ExecutionID, string) {}
 
 func (h *MetricsHooks) OnNodeTimeout(ctx context.Context, id types.ExecutionID, nodeName string) {
-	h.Metrics.Inc(metricNodeTimedOut, h.nodeLabels(ctx, id, nodeName, ""))
+	h.Metrics.Inc(h.names.nodeTimedOut, h.nodeLabels(ctx, id, nodeName, ""))
 }
 
 func (h *MetricsHooks) OnNodeRetry(ctx context.Context, id types.ExecutionID, name string, _ int, _ time.Duration) {
-	h.Metrics.Inc(metricNodeRetried, h.nodeLabels(ctx, id, name, ""))
+	h.Metrics.Inc(h.names.nodeRetried, h.nodeLabels(ctx, id, name, ""))
 }
 
 func (h *MetricsHooks) nodeLabels(ctx context.Context, _ types.ExecutionID, name string, status string) map[string]string {

@@ -89,6 +89,27 @@ type Executor struct {
 	registry   *execution.Registry
 	cache      *PackageCache
 	newBackend func() Backend
+	// hooks observes the inner engine's node lifecycle. Nil by default: the
+	// inner engine is also what the SDK's in-process map body runs on, and that
+	// path has no metrics registry to report to.
+	hooks engine.Hooks
+}
+
+// ExecutorOption configures an Executor.
+type ExecutorOption func(*Executor)
+
+// WithHooks makes the inner engine's nodes observable.
+//
+// Without it, a map body item or a group member executes with no Hooks at all,
+// so none of its nodes appear in any metric — the fan-out that does the actual
+// per-item work is the part an operator cannot see.
+//
+// The hooks passed here must write a different metric family than the outer
+// engine's (observability/metrics.NewSubgraphMetricsHooks). One top-level
+// execution contains one inner execution per map item, so feeding both into the
+// same counters would inflate them by the fan-out width.
+func WithHooks(h engine.Hooks) ExecutorOption {
+	return func(e *Executor) { e.hooks = h }
 }
 
 // NewExecutor creates a sub-graph executor. reg resolves member node handlers
@@ -97,8 +118,12 @@ type Executor struct {
 // validates and caches compiled packages by hash; newBackend constructs a
 // fresh per-execution backend (e.g. local.New) -- injected because
 // execution/subgraph cannot import backend/providers/local.
-func NewExecutor(reg *execution.Registry, cache *PackageCache, newBackend func() Backend) *Executor {
-	return &Executor{registry: reg, cache: cache, newBackend: newBackend}
+func NewExecutor(reg *execution.Registry, cache *PackageCache, newBackend func() Backend, opts ...ExecutorOption) *Executor {
+	e := &Executor{registry: reg, cache: cache, newBackend: newBackend}
+	for _, opt := range opts {
+		opt(e)
+	}
+	return e
 }
 
 // Execute compiles (or fetches from cache) req.Package, runs it to completion
@@ -178,6 +203,9 @@ func (e *Executor) Execute(ctx context.Context, req Request) (Result, error) {
 	if req.Deadline.After(time.Now()) {
 		ttl := time.Until(req.Deadline)
 		engineOpts = append(engineOpts, engine.WithDefaultLeaseTTL(ttl))
+	}
+	if e.hooks != nil {
+		engineOpts = append(engineOpts, engine.WithHooks(e.hooks))
 	}
 
 	innerEngine := engine.New(innerBackend.State(), innerBackend.Queue(), engineOpts...)

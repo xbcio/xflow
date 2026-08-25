@@ -29,6 +29,10 @@ type engineConfig struct {
 	concurrency int
 	nodes       []types.Handler
 	stopFns     []func()
+	// subgraphHooks observes the inner engine a map body item runs on. Kept
+	// apart from hooks so the two populations stay in separate series: a map
+	// over N items is N inner executions beneath one outer one.
+	subgraphHooks engine.Hooks
 
 	versionPolicy    execution.VersionPolicy
 	versionPolicySet bool
@@ -75,6 +79,22 @@ func WithConcurrency(n int) Option {
 // should be handed off to another goroutine or queue.
 func WithHooks(h engine.Hooks) Option {
 	return func(c *engineConfig) { c.hooks = h }
+}
+
+// WithSubgraphHooks sets the lifecycle hook receiver for the inner engine that
+// runs a map body item.
+//
+// It is separate from WithHooks because the two observe different populations.
+// A map over N items produces N inner executions beneath one outer execution,
+// so routing both into one receiver would add N to whatever that receiver
+// counts as an execution. Passing the same value to both is therefore a
+// mistake, not a shortcut: use observability/metrics.NewSubgraphMetricsHooks,
+// which writes the xflow_subgraph_* family.
+//
+// Nil (the default) leaves a body item's nodes unobserved, which is what they
+// were before this existed.
+func WithSubgraphHooks(h engine.Hooks) Option {
+	return func(c *engineConfig) { c.subgraphHooks = h }
 }
 
 // WithLogger sets the logger used by engine internals.

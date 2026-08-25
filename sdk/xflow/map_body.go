@@ -36,7 +36,14 @@ const bodyPackageCacheEntries = 64
 // the inner execution's tasks must not land on the outer queue, where the outer
 // scheduler would drain them as if they belonged to the outer graph. This
 // mirrors service/runner's group runtime, which does the same for group units.
-func newBatchBodyExecutor(reg engine.HandlerRegistry, suspendDisabled bool, artifactCode func(ctx context.Context, digest string) ([]byte, error)) engine.BatchBodyExecutor {
+//
+// hooks, when non-nil, observes the inner engine each body attempt runs on.
+// Without it a body item's nodes emit nothing: the inner engine is a different
+// engine from the one WithHooks configured, so the outer receiver never sees
+// them. It must be a receiver distinct from the outer one — a map over N items
+// runs N inner executions — which is why it arrives as its own parameter rather
+// than being read off the same config field.
+func newBatchBodyExecutor(reg engine.HandlerRegistry, suspendDisabled bool, artifactCode func(ctx context.Context, digest string) ([]byte, error), hooks engine.Hooks) engine.BatchBodyExecutor {
 	concrete, ok := reg.(*execution.Registry)
 	if !ok {
 		// A body package is validated against the registry's handler inventory
@@ -45,6 +52,10 @@ func newBatchBodyExecutor(reg engine.HandlerRegistry, suspendDisabled bool, arti
 		// against and no executor to build.
 		return nil
 	}
+	var execOpts []subgraph.ExecutorOption
+	if hooks != nil {
+		execOpts = append(execOpts, subgraph.WithHooks(hooks))
+	}
 	cache := subgraph.NewPackageCache(subgraph.PackageCacheConfig{MaxEntries: bodyPackageCacheEntries})
 	executor := subgraph.NewExecutor(concrete, cache, func() subgraph.Backend {
 		opts := []backendlocal.Option{backendlocal.WithRegistry(concrete), backendlocal.WithConcurrency(1)}
@@ -52,7 +63,7 @@ func newBatchBodyExecutor(reg engine.HandlerRegistry, suspendDisabled bool, arti
 			opts = append(opts, backendlocal.WithArtifactCodeResolver(artifactCode))
 		}
 		return backendlocal.New(opts...)
-	})
+	}, execOpts...)
 	// No outer deadline to forward: this executor is built once at engine
 	// startup, before any per-call Request exists (see MapBodyExecutor's
 	// deadline field doc in execution/subgraph/map_body.go).

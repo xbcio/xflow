@@ -468,14 +468,31 @@ func buildRunnerServiceConfig(cfg RunnerConfig, opts ...RunnerOption) (runnersvc
 		reg = execution.NewRegistry()
 	}
 
+	// Inner-engine hooks, when a metrics registry was configured. A map body
+	// item and a group member run on their own engine, so without these their
+	// nodes emit nothing at all — the per-item work a map exists to do was the
+	// one part of an execution with no series behind it. They write the
+	// xflow_subgraph_* family rather than xflow_node_*/xflow_execution_*,
+	// because one outer execution fans out to one inner execution per item and
+	// folding them together would inflate the outer counters by the fan-out
+	// width.
+	var groupHookOpts []runnersvc.GroupRuntimeOption
+	var subgraphHookOpts []runnersvc.SubgraphRuntimeOption
+	if o.metrics != nil {
+		groupHookOpts = append(groupHookOpts, runnersvc.WithGroupHooks(metrics.NewSubgraphMetricsHooks(o.metrics)))
+		subgraphHookOpts = append(subgraphHookOpts, runnersvc.WithSubgraphHooks(metrics.NewSubgraphMetricsHooks(o.metrics)))
+	}
+
 	// Suspend is disabled inside a group for the same reason as inside a map
 	// body: a suspended member would park a sub-execution the outer lease
 	// cannot resume.
 	groupRuntime := runnersvc.NewGroupRuntime(
 		reg,
 		runnersvc.NewPackageCache(runnersvc.PackageCacheConfig{MaxEntries: runnerPackageCacheEntries}),
-		runnersvc.WithSuspendDisabled(),
-		runnersvc.WithGroupArtifactCodeResolver(artifactCode))
+		append([]runnersvc.GroupRuntimeOption{
+			runnersvc.WithSuspendDisabled(),
+			runnersvc.WithGroupArtifactCodeResolver(artifactCode),
+		}, groupHookOpts...)...)
 
 	svcCfg := runnersvc.Config{
 		RunnerID:     cfg.RunnerID,
@@ -493,7 +510,9 @@ func buildRunnerServiceConfig(cfg RunnerConfig, opts ...RunnerOption) (runnersvc
 		SubgraphRuntime: runnersvc.NewSubgraphRuntime(
 			reg,
 			runnersvc.NewPackageCache(runnersvc.PackageCacheConfig{MaxEntries: runnerPackageCacheEntries}),
-			runnersvc.WithSubgraphArtifactCodeResolver(artifactCode)),
+			append([]runnersvc.SubgraphRuntimeOption{
+				runnersvc.WithSubgraphArtifactCodeResolver(artifactCode),
+			}, subgraphHookOpts...)...),
 		ArtifactCodeResolver: artifactCode,
 		SupportsEncryption:   true,
 	}

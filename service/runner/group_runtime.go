@@ -32,6 +32,13 @@ func WithGroupArtifactCodeResolver(fn func(ctx context.Context, digest string) (
 	return func(r *GroupRuntime) { r.artifactCode = fn }
 }
 
+// WithGroupHooks makes the nodes inside a group member observable. See
+// subgraph.WithHooks: the hooks must write their own metric family, because one
+// outer execution produces one inner execution per group attempt.
+func WithGroupHooks(h engine.Hooks) GroupRuntimeOption {
+	return func(r *GroupRuntime) { r.hooks = h }
+}
+
 // GroupRuntime adapts execution/subgraph.Executor -- the caller-agnostic
 // sub-graph execution layer -- to the runner's group-lease shape: it unpacks
 // engine.TaskLease.GroupPayload into a subgraph.Request, and maps the
@@ -42,6 +49,7 @@ func WithGroupArtifactCodeResolver(fn func(ctx context.Context, digest string) (
 type GroupRuntime struct {
 	suspendDisabled bool
 	artifactCode    func(ctx context.Context, digest string) ([]byte, error)
+	hooks           engine.Hooks
 	executor        *subgraph.Executor
 }
 
@@ -55,6 +63,10 @@ func NewGroupRuntime(reg *execution.Registry, cache *PackageCache, opts ...Group
 	for _, o := range opts {
 		o(r)
 	}
+	var execOpts []subgraph.ExecutorOption
+	if r.hooks != nil {
+		execOpts = append(execOpts, subgraph.WithHooks(r.hooks))
+	}
 	r.executor = subgraph.NewExecutor(reg, cache, func() subgraph.Backend {
 		backendOpts := []local.Option{local.WithRegistry(reg), local.WithConcurrency(1)}
 		// Read r.artifactCode inside the closure, not at construction: the
@@ -64,7 +76,7 @@ func NewGroupRuntime(reg *execution.Registry, cache *PackageCache, opts ...Group
 			backendOpts = append(backendOpts, local.WithArtifactCodeResolver(r.artifactCode))
 		}
 		return local.New(backendOpts...)
-	})
+	}, execOpts...)
 	return r
 }
 
