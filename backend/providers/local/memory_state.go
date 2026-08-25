@@ -169,6 +169,22 @@ func (s *memoryState) GetExecution(_ context.Context, id types.ExecutionID) (*en
 	return &cp, nil
 }
 
+// GetExecutionStatus reads back only the lifecycle status
+// (engine.ExecutionStatusReader). Here it saves a snapshot copy rather than
+// round trips — the win is on key-value backends — but it is implemented anyway
+// so both backends answer loadActiveGraph's activeness question through the same
+// method. If only one implemented it, the engine would take a different path per
+// backend and the contract suite could not pin that the two agree.
+func (s *memoryState) GetExecutionStatus(_ context.Context, id types.ExecutionID) (types.ExecutionStatus, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry, ok := s.executions[id]
+	if !ok {
+		return "", false, nil
+	}
+	return entry.snap.Status, true, nil
+}
+
 func (s *memoryState) LoadGraph(_ context.Context, id types.ExecutionID) (*graph.Graph, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

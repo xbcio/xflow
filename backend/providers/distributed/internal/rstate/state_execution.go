@@ -385,6 +385,26 @@ func terminalExecutionError(status types.ExecutionStatus, nodeErr, cyclicErr str
 	return engine.TerminalExecutionError(status, nodeErr, cyclicErr)
 }
 
+// GetExecutionStatus reads back only the lifecycle status
+// (engine.ExecutionStatusReader). It is the same authoritative key GetExecution
+// reads first; everything GetExecution does after that key exists to fill in
+// fields the activeness check never looks at.
+//
+// One GET where GetExecution issues eight. The saving is not the seven extra
+// keys alone but the seven extra round trips: they are issued sequentially, not
+// pipelined, so on a real network they serialize.
+func (s *Store) GetExecutionStatus(ctx context.Context, id types.ExecutionID) (types.ExecutionStatus, bool, error) {
+	t := namespace.FromContext(ctx)
+	val, err := s.rdb.Get(ctx, execKey(t, id, "status")).Result()
+	if err == redis.Nil {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("get execution status %q: %w", id, err)
+	}
+	return types.ExecutionStatus(val), true, nil
+}
+
 func (s *Store) GetExecution(ctx context.Context, id types.ExecutionID) (*engine.ExecutionSnapshot, error) {
 	t := namespace.FromContext(ctx)
 	val, err := s.rdb.Get(ctx, execKey(t, id, "status")).Result()

@@ -289,11 +289,11 @@ func (e *Engine) loadActiveGraph(ctx context.Context, id types.ExecutionID) (*gr
 		// non-terminal before handing the graph to a lease/schedule path,
 		// otherwise a lease could be issued against an already-finished
 		// execution. Evict the stale entry so we do not re-check it forever.
-		snap, err := e.state.GetExecution(ctx, id)
+		active, err := e.executionActive(ctx, id)
 		if err != nil {
 			return nil, false, err
 		}
-		if snap == nil || types.IsTerminalExecutionStatus(snap.Status) {
+		if !active {
 			e.EvictExecution(id)
 			return nil, false, nil
 		}
@@ -308,8 +308,8 @@ func (e *Engine) loadActiveGraph(ctx context.Context, id types.ExecutionID) (*gr
 		return nil, false, nil
 	}
 
-	snap, err := e.state.GetExecution(ctx, id)
-	if err != nil || snap == nil || types.IsTerminalExecutionStatus(snap.Status) {
+	active, err := e.executionActive(ctx, id)
+	if err != nil || !active {
 		return nil, false, err
 	}
 
@@ -317,6 +317,30 @@ func (e *Engine) loadActiveGraph(ctx context.Context, id types.ExecutionID) (*gr
 	e.graphs[id] = g
 	e.mu.Unlock()
 	return g, true, nil
+}
+
+// executionActive answers loadActiveGraph's only question: does this execution
+// exist and is it still non-terminal?
+//
+// It prefers ExecutionStatusReader because that is the whole question. The
+// GetExecution fallback assembles params, runtime, scope and three tracing
+// fields to hand back one enum, which on the Redis backend costs eight
+// sequential GETs and four JSON decodes instead of one GET. Every commit, lease,
+// advance, signal, group and subgraph transition pays that, so the narrow read
+// is the common case and the fallback is for backends that predate it.
+func (e *Engine) executionActive(ctx context.Context, id types.ExecutionID) (bool, error) {
+	if reader, ok := e.state.(ExecutionStatusReader); ok {
+		status, found, err := reader.GetExecutionStatus(ctx, id)
+		if err != nil {
+			return false, err
+		}
+		return found && !types.IsTerminalExecutionStatus(status), nil
+	}
+	snap, err := e.state.GetExecution(ctx, id)
+	if err != nil {
+		return false, err
+	}
+	return snap != nil && !types.IsTerminalExecutionStatus(snap.Status), nil
 }
 
 func attachSubmissionMetadata(ctx context.Context, snap *ExecutionSnapshot) {

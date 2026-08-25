@@ -196,6 +196,94 @@ func RunStateStoreContract(t *testing.T, state engine.StateStore) {
 	runOutboxDeliveryLease(t, state)
 	runDurableSignalTOCTOU(t, state)
 	runCancelSuspendedNode(t, state)
+	runExecutionStatusAgreesWithSnapshot(t, state)
+}
+
+// runExecutionStatusAgreesWithSnapshot pins that the narrow status read and the
+// full snapshot read never disagree.
+//
+// engine.executionActive prefers ExecutionStatusReader and falls back to
+// GetExecution, so these two are interchangeable answers to one question: is
+// this execution still active? If a backend ever answered differently through
+// the two methods, whether a lease may be issued against a finished execution
+// would depend on which method the engine happened to call — and since the
+// preference is silent (a type assertion), that would not look like a bug at the
+// call site.
+//
+// The terminal arm is the one that matters. A narrow read that fetched the
+// wrong key, or a cached one, would still agree while the execution is Running;
+// only the transition exposes it. The missing arm pins the other encoding:
+// GetExecution says "no such execution" with a nil snapshot, and the narrow read
+// must say it with found=false rather than an empty status that
+// IsTerminalExecutionStatus would read as active.
+func runExecutionStatusAgreesWithSnapshot(t *testing.T, state engine.StateStore) {
+	t.Helper()
+	ctx := context.Background()
+
+	reader, ok := state.(engine.ExecutionStatusReader)
+	if !ok {
+		// Not a skip: both backends implement it, and a store that stopped
+		// would silently fall back to GetExecution — correct, but eight Redis
+		// round trips per activeness check instead of one, with nothing failing
+		// to say so.
+		t.Fatalf("%T does not implement engine.ExecutionStatusReader", state)
+	}
+
+	// Missing execution, checked first so it cannot be contaminated by the
+	// writes below.
+	if status, found, err := reader.GetExecutionStatus(ctx, "exec-contract-status-absent"); err != nil {
+		t.Fatalf("GetExecutionStatus(absent) error = %v", err)
+	} else if found {
+		t.Errorf("GetExecutionStatus(absent) = (%q, true), want found=false. An "+
+			"empty status with found=true is not terminal, so executionActive "+
+			"would treat a nonexistent execution as live.", status)
+	}
+	if snap, err := state.GetExecution(ctx, "exec-contract-status-absent"); err != nil {
+		t.Fatalf("GetExecution(absent) error = %v", err)
+	} else if snap != nil {
+		t.Errorf("GetExecution(absent) = %+v, want nil: the two methods must "+
+			"encode absence the same way", snap)
+	}
+
+	id := types.ExecutionID("exec-contract-status-agreement")
+	if err := state.CreateExecution(ctx, &engine.ExecutionSnapshot{
+		ID: id, Graph: ContractGraph(), Status: types.ExecutionStatusRunning,
+	}); err != nil {
+		t.Fatalf("CreateExecution() error = %v", err)
+	}
+
+	// Running, then every terminal status the engine can leave behind. Cancel
+	// and completion take different write paths, so agreement under one does
+	// not imply agreement under the others.
+	for _, want := range []types.ExecutionStatus{
+		types.ExecutionStatusRunning,
+		types.ExecutionStatusCanceled,
+	} {
+		if want != types.ExecutionStatusRunning {
+			if err := state.UpdateExecutionStatus(ctx, id, want, ""); err != nil {
+				t.Fatalf("UpdateExecutionStatus(%q) error = %v", want, err)
+			}
+		}
+		status, found, err := reader.GetExecutionStatus(ctx, id)
+		if err != nil {
+			t.Fatalf("GetExecutionStatus(%q) error = %v", want, err)
+		}
+		snap, err := state.GetExecution(ctx, id)
+		if err != nil {
+			t.Fatalf("GetExecution(%q) error = %v", want, err)
+		}
+		if snap == nil {
+			t.Fatalf("GetExecution returned nil for a created execution in %q", want)
+		}
+		if !found || status != snap.Status {
+			t.Errorf("GetExecutionStatus = (%q, %v), GetExecution().Status = %q. "+
+				"engine.executionActive uses whichever the backend implements, so "+
+				"these must be the same answer.", status, found, snap.Status)
+		}
+		if status != want {
+			t.Errorf("status = %q, want %q", status, want)
+		}
+	}
 }
 
 // runCancelSuspendedNode pins that a fenced cancel retires the waiter, not just

@@ -154,6 +154,27 @@ type SuspendedNodeCanceler interface {
 	CancelSuspendedNode(ctx context.Context, id types.ExecutionID, nodeName string) (canceled bool, err error)
 }
 
+// ExecutionStatusReader reads back only an execution's lifecycle status.
+//
+// This exists because the hot paths do not want a snapshot. loadActiveGraph
+// asks one question — is this execution still non-terminal — and it asks it on
+// every commit, lease, advance, signal, group and subgraph transition. Answering
+// it through GetExecution makes the backend assemble params, runtime, scope,
+// trace_id, span_id, trace_carrier and error as well, all of which the caller
+// then drops on the floor. On a key-value backend that is seven extra reads and
+// four JSON decodes per question.
+//
+// found=false means no such execution, which callers must distinguish from a
+// zero-valued status; it is the same signal GetExecution encodes as a nil
+// snapshot. Optional: loadActiveGraph falls back to GetExecution when a backend
+// does not implement it, so the two MUST agree — a backend that reports a
+// different status here than GetExecution().Status would make activeness depend
+// on which method the engine happened to call. The shared contract suite pins
+// that agreement.
+type ExecutionStatusReader interface {
+	GetExecutionStatus(ctx context.Context, id types.ExecutionID) (status types.ExecutionStatus, found bool, err error)
+}
+
 // LeaseSuspender atomically converts a previously claimed lease into a
 // suspended node. It validates the original lease token, persists optional
 // resume-base output, consumes or registers signals, and clears lease expiry
