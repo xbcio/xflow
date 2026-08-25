@@ -77,9 +77,14 @@ func (s SupplyMetrics) OnInstanceCount(ctx context.Context, state string, n int)
 }
 
 // OnInstanceRecycled records an instance teardown. cause is one of "timeout",
-// "eval_error", "shutdown", "pool_swapped", "rebuild_failed". The last one is
-// not a teardown but a failed replacement: the pool is permanently one instance
-// narrower, since nothing retries the rebuild.
+// "eval_error", "memory_high_water", "max_evals", "shutdown", "pool_swapped",
+// "rebuild_failed". The last one is not a teardown but a failed replacement: the
+// pool is permanently one instance narrower, since nothing retries the rebuild.
+//
+// memory_high_water is the planned recycle that fires on real traffic: the
+// guest's linear memory crossed the threshold that precedes an out-of-memory
+// trap. A rising rate is normal on large records and is what keeps them from
+// failing; max_evals firing instead means the guest's memory never climbed.
 func (s SupplyMetrics) OnInstanceRecycled(ctx context.Context, cause string) {
 	s.Metrics.Inc(metricWasmInstanceRecycled, withNamespace(ctx, map[string]string{"cause": cause}))
 }

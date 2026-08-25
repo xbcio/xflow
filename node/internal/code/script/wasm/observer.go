@@ -37,7 +37,8 @@ type Observer interface {
 	// counted properly by OnInstanceRecycled.
 	OnInstanceCount(ctx context.Context, state string, n int)
 	// OnInstanceRecycled reports an instance teardown. cause is "timeout",
-	// "eval_error", "max_evals", "shutdown", or "pool_swapped".
+	// "eval_error", "memory_high_water", "max_evals", "shutdown", or
+	// "pool_swapped".
 	OnInstanceRecycled(ctx context.Context, cause string)
 	// OnBorrowWait reports how long a caller waited for a free instance. A
 	// rising value means poolSize is too small for the offered concurrency.

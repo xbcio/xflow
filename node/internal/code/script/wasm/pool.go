@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/xbcio/xflow/node/internal/code/script/engine"
 	"github.com/xbcio/xflow/types"
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
@@ -35,37 +36,88 @@ var reactorABIVersion int32 = 1
 // maxEvalsPerInstance limits how many successful evals one resident instance
 // may serve before it is proactively recycled.
 //
-// What is established: a Go wasm guest (GOOS=wasip1) under the 256-page
-// (16 MiB) cap CAN exhaust its memory and trap with `unreachable` from
-// runtime.mcache.refill after a long run of json.Unmarshal evals. pool.go
-// classifies that trap as a doom and rebuilds the instance, so production sees
-// no error — only an unexplained 62 ms cold start. Recycling on a schedule
-// makes the rebuild planned instead of unplanned.
+// It is a BACKSTOP, not the working bound. recycleMemoryHighWater is what
+// actually retires instances on SAS-shaped traffic; this count exists for a
+// guest whose memory never climbs at all, so that no instance runs unboundedly
+// long without a fresh start.
 //
-// What is NOT established: when it happens. An earlier measurement reported
-// crash points scaling per-BYTE (crash_iter × input_size ≈ 140 MB) at 7 066 B
-// and 9 974 B. Re-measured 2026-08-20 with one freshly built runtime per arm,
-// both sizes survived 30 000 evals (219 MB and 306 MB of product) without
-// trapping, and 8 638 B survived 60 000 (518 MB). The products of the arms that
-// did trap — 8 638 B: none; 40 221 B: 160 MB; 138 948 B: 195 MB — span more
-// than 3x, so the per-byte law does not hold. The probe that produced the
-// original figures was never committed and cannot be rerun; the most likely
-// explanation for the discrepancy is that its arms shared a runtime, making
-// each arm's crash point a function of the arms before it.
-//
-// So 8 000 is a value that has never been observed to be too high, not a value
-// derived from a crash threshold. It is cheap insurance: one 62 ms rebuild
-// amortised over 8 000 messages, asynchronous, and unable to fail an eval.
-// Treat it as a bound, not a calibration.
+// The history is worth keeping, because two successive calibrations of this
+// constant were wrong in the same way. An early measurement reported crash
+// points scaling per-BYTE (crash_iter × input_size ≈ 140 MB). Re-measured
+// 2026-08-20 with one freshly built runtime per arm, that law did not
+// reproduce: two sizes survived 30 000 evals where it predicted a crash, and
+// the products of the arms that did trap spanned more than 3x. The probe behind
+// the original figures had shared one runtime across its arms, so each arm's
+// crash point was a function of the arms before it. The replacement claim --
+// "8 000 has never been observed to be too high" -- then held only because
+// nothing had measured it against real traffic. TestGuestMemoryCeiling does,
+// and 8 000 is unreachable at three of four sizes: see recycleMemoryHighWater.
 //
 // Raising this value: safe only if WithMemoryLimitPages rises proportionally.
 // Lowering it: costs throughput (more rebuilds), never correctness.
-//
-// Re-deriving it properly needs a probe that builds a fresh runtime per arm
-// (the reproduction above) and sweeps sizes against the REAL record
-// distribution, which is heavy-tailed: on the SAS apisix topic, p50 is 2.6 KB
-// but p99 is 139 KB. A threshold tuned on the mean does not cover the tail.
 const maxEvalsPerInstance = 8_000
+
+// recycleMemoryHighWater is the linear-memory size past which an instance is
+// retired: three quarters of the 16 MiB cap, i.e. 12 MiB.
+//
+// Wasm linear memory never shrinks, so mem.Size() is a monotonic high-water
+// mark of everything the guest's Go heap has ever needed at once. That makes it
+// the one signal that measures the resource actually being exhausted, rather
+// than a proxy for it — and the proxies do not work. TestGuestMemoryCeiling
+// swept the real SAS apisix distribution, one freshly built runtime per size
+// bucket, and neither eval count nor cumulative bytes separates the survivors
+// from the traps:
+//
+//	bucket  mean rec.  plateau   crossed 12 MiB   outcome
+//	p25       1 683 B  10.25 MiB  never           survived 40 000 evals /  64.2 MiB fed
+//	p50       2 629 B  11.00 MiB  never           survived 40 000 evals / 100.3 MiB fed
+//	p75       5 422 B  11.00 MiB  eval 5 373      TRAPPED at eval 5 464 /  28.2 MiB fed
+//	p95      55 776 B  11.00 MiB  eval   465      TRAPPED at eval   477 /  24.6 MiB fed
+//
+// An eval count cannot be calibrated: the trap points differ 11x. Cumulative
+// bytes cannot either: a survivor reached 100.3 MiB while a trap came at 24.6.
+// What every arm shares is the SHAPE of its memory curve — a climb to a plateau
+// at 10.25-11.00 MiB within the first ~150 evals, then either steady state
+// forever, or a runaway that covers the remaining 5 MiB in a dozen evals and
+// traps. 12 MiB sits in the gap: above every observed plateau, below every
+// observed trap.
+//
+// So the cost is asymmetric in the right direction. At p25 and p50 — the bulk of
+// production traffic — this never fires, and the instance runs to
+// maxEvalsPerInstance as before. It fires only on the arms that were going to
+// trap anyway, 91 evals early at p75 and 12 early at p95, converting a failed
+// message into a planned 62 ms asynchronous rebuild.
+//
+// Verified by rerunning the same sweep with the bound in place. Every bucket
+// completed 40 000 evals with ZERO failed evals, and the two bounds divided the
+// work the way the table predicts:
+//
+//	bucket  recycles / 40 000 evals   by
+//	p25     5                         max_evals        (memory never crossed 12 MiB)
+//	p50     5                         max_evals        (idem)
+//	p75     7                         memory_high_water (one per ~5 700 evals)
+//	p95     87                        memory_high_water (one per ~460 evals)
+//
+// p95 is the case worth reading twice: 87 planned rebuilds against a trap every
+// 477 evals before the change. The rebuild RATE is essentially unchanged. What
+// changed is that a rebuild no longer costs a message.
+//
+// Two things this does NOT protect against. A single eval that allocates the
+// whole remaining 4 MiB in one step still traps, because the check runs after
+// the eval; no high-water threshold can prevent that, and such a record would
+// trap a cold instance too. And if some future guest's steady state settles
+// ABOVE 12 MiB, every instance recycles shortly after reaching plateau — a
+// rebuild every ~250 evals, which is a throughput cost, not a correctness one.
+// The failure mode is soft in both directions, which is why the fraction is
+// three quarters and not something closer to the cap.
+//
+// Expressed as a fraction so it tracks WithMemoryLimitPages: a larger cap moves
+// the threshold up with it, leaving the same proportional headroom.
+const recycleMemoryHighWater = engine.DefaultWasmMemoryPages * wasmPageBytes * 3 / 4
+
+// wasmPageBytes is the wasm spec's fixed page size. It is not configurable.
+const wasmPageBytes = 64 << 10
+
 
 // pooledInstance is one resident reactor instance: an instantiated module with
 // _initialize already run and configure already applied. It carries the export
@@ -92,6 +144,17 @@ type pooledInstance struct {
 	// guest Go runtime from exhausting its memory cap (see maxEvalsPerInstance).
 	// It is not guarded: the pool guarantees single-borrower ownership.
 	evalCount int64
+
+	// recycleCause names the bound that retired this instance, for the recycle
+	// metric. It is set by evalOnce at the moment it returns a planned recycle
+	// and read by evalFromPool immediately after, on the same goroutine — the
+	// alternative was widening evalOnce's already-overloaded return.
+	//
+	// The distinction is the point of the metric: memory_high_water firing means
+	// the guest is on the runaway path this pool exists to intercept, while
+	// max_evals firing means it never climbed at all. One number for both would
+	// hide which.
+	recycleCause string
 }
 
 // eval runs one input through the resident instance. It returns the decoded
@@ -153,15 +216,25 @@ func (in *pooledInstance) evalOnce(ctx context.Context, input []byte) (out []byt
 
 	out = in.readOut(ctx, n)
 	in.evalCount++
-	// Proactive recycle: after maxEvalsPerInstance successful evals the instance
-	// has accumulated enough heap bookkeeping that it is close to exhausting the
-	// 16 MiB memory cap. Signal the caller to doom it via a successful-but-doomed
-	// result rather than letting it crash unexpectedly on a future eval.
+	// Proactive recycle. Returning doomed=true with err=nil is the "planned
+	// replacement" path: evalFromPool forwards this result to the caller
+	// unchanged and replaces the instance asynchronously in the background.
 	//
-	// Returning doomed=true with err=nil is the "planned replacement" path:
-	// evalFromPool forwards the result to the caller unchanged but replaces the
-	// instance asynchronously in the background. See maxEvalsPerInstance.
-	if in.evalCount >= maxEvalsPerInstance {
+	// The memory check is the one that fires on real traffic. It is read AFTER
+	// the eval rather than before, because what matters is the high-water mark
+	// this eval left behind: an instance that has just climbed past the plateau
+	// is on the runaway path and has roughly a dozen evals left in it, so the
+	// next borrower must not get it. See recycleMemoryHighWater.
+	//
+	// Checked on every eval rather than sampled: wazero's Memory.Size() is
+	// len(buffer) behind an interface call, against an eval measured in
+	// milliseconds.
+	switch {
+	case in.mem.Size() >= recycleMemoryHighWater:
+		in.recycleCause = "memory_high_water"
+		return out, true, nil
+	case in.evalCount >= maxEvalsPerInstance:
+		in.recycleCause = "max_evals"
 		return out, true, nil
 	}
 	return out, false, nil
@@ -526,7 +599,14 @@ func (e *reactorEngine) doom(ctx context.Context, p *activePool, inst *pooledIns
 // returned up the stack. The old instance is torn down and a fresh one is
 // built asynchronously, keeping the pool at full strength.
 func (e *reactorEngine) recyclePlanned(p *activePool, inst *pooledInstance) {
-	obs().OnInstanceRecycled(context.Background(), "max_evals")
+	cause := inst.recycleCause
+	if cause == "" {
+		// Only reachable if a future caller reaches recyclePlanned by some path
+		// other than evalOnce's planned-recycle return. Name it rather than
+		// silently attributing it to one of the real bounds.
+		cause = "planned"
+	}
+	obs().OnInstanceRecycled(context.Background(), cause)
 	bg := context.Background()
 	inst.teardown(bg)
 	if e.active.Load() != p {
