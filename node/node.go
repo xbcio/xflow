@@ -151,6 +151,38 @@ func SetWasmObserver(o WasmObserver) {
 	wasm.SetObserver(o)
 }
 
+// HTTPHostPolicy decides whether an xflow.http node may dispatch to a given
+// host: a nil return permits the request, a non-nil error aborts it before any
+// bytes are sent. Re-exported from the internal action package's HostPolicy so
+// a host process can install one without importing an internal package — which
+// it cannot do, the internal rule being a compile error outside node/.
+type HTTPHostPolicy = action.HostPolicy
+
+// NewHTTPHostPolicy builds a host policy from optional allow and deny lists.
+// deny takes precedence over allow, matching is case-insensitive, and ports are
+// ignored. Both lists empty returns nil, which is the no-filtering default.
+func NewHTTPHostPolicy(allow, deny []string) HTTPHostPolicy {
+	return action.NewHostPolicy(allow, deny)
+}
+
+// SetHTTPHostPolicy installs the SSRF allow/deny policy for xflow.http nodes.
+// It is consulted before the initial request and again on every redirect hop,
+// so a redirect cannot smuggle a request to a host the policy would reject.
+// Call once at startup; pass nil to remove it.
+//
+// Until this forwarder existed the policy was unreachable rather than merely
+// unset: the variable, its constructor and both consult sites all live in
+// node/internal/action, and Go's internal rule makes that package a compile
+// error for any importer outside node/ — including sdk/xflow and every
+// embedder. The variable's own doc invited "embedded runtimes" to set it,
+// which was a promise the language would not let them keep.
+//
+// There is still no configuration or CLI surface for this. A deployment that
+// wants host filtering has to call this from its own startup code.
+func SetHTTPHostPolicy(p HTTPHostPolicy) {
+	action.HTTPHostPolicy = p
+}
+
 // WarmupScriptEngines absorbs script-engine cold start before traffic arrives:
 // js/qjs's ~330 ms QuickJS-wasm compile and the wasm reactor runtime open
 // (which resolves the on-disk compilation cache). Hosts should call it once at

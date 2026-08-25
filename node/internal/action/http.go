@@ -60,8 +60,11 @@ type HostPolicy func(host string) error
 // the initial request is dispatched and again for every redirect hop, so a
 // redirect cannot smuggle a request to a host the policy would reject. It is
 // nil by default: with no policy configured the node performs no host filtering
-// and behavior is fully backward compatible. Embedded runtimes may set it to
-// enforce SSRF allow/deny policy.
+// and behavior is fully backward compatible.
+//
+// Set it through node.SetHTTPHostPolicy, not here. This package is internal to
+// node/, so assigning this variable is a compile error for sdk/xflow and for
+// every embedder; the forwarder in node/node.go is the only reachable way in.
 var HTTPHostPolicy HostPolicy
 
 // NewHostPolicy builds a HostPolicy from optional allow and deny lists. When
