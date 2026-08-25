@@ -121,14 +121,29 @@
 // That is not hypothetical. A sweep of the built-in nodes found three doing it:
 // xflow.http rendered the entire request URL (query string, hence any token
 // passed as a query parameter) on every transport failure — fixed, with a
-// regression test; node/internal/action/db_errors.go passes a raw
+// regression test; node/internal/action/db_errors.go passed a raw
 // *mysql.MySQLError straight through, and MySQL's duplicate-key text quotes the
 // offending column VALUE, which for a workflow inserting upstream output is
-// that output; node/internal/action/grpc.go puts the remote-controlled
-// st.Message() in Message rather than Details. The latter two are unfixed —
-// stripping them destroys the diagnostic they exist for. The convention is the
-// types.Error split (payload in Details, which Error() does not render); there
-// is no compile-time or runtime check behind it.
+// that output — also fixed now, the same way, by redacting the value and
+// keeping the key name (safeMySQLMessage); node/internal/action/grpc.go puts
+// the remote-controlled st.Message() in Message rather than Details.
+//
+// The gRPC one is still open, and the reason is worth writing down because the
+// obvious fix does not work. This section used to call the types.Error split
+// (payload in Details, which Error() does not render) "the convention", with
+// the caveat that no compile-time or runtime check enforces it. The situation
+// is worse than unenforced: outside tests, Details is written in exactly one
+// file and read in none. Moving a payload there does not relocate the
+// diagnostic, it discards it with extra steps — so any claim that a leak was
+// "moved to Details" should be read as a claim that it was deleted.
+//
+// What worked for the other two was neither keeping nor dropping the text but
+// splitting it: URL query keys kept and values replaced, duplicate-key index
+// name kept and value replaced. That option needs the payload to have a
+// recognisable shape. st.Message() is free text chosen by a remote service, so
+// there is no key/value seam to cut along, and the choice really is binary.
+// Whoever closes it is picking between the leak and the diagnostic, not
+// looking for the third door — it has already been checked for.
 //
 // What IS enforced is narrower and worth stating separately, because it is the
 // part the credential-disclosure constraint actually rests on: for a transient

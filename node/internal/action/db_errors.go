@@ -56,7 +56,7 @@ func classifyDBError(err error) error {
 
 func classifyMySQLError(e *mysqldriver.MySQLError) error {
 	code := fmtCode("mysql", e.Number)
-	msg := e.Error()
+	msg := safeMySQLMessage(e)
 	state := sqlStateString(e.SQLState)
 	switch e.Number {
 	case 1205, 1213: // lock wait timeout, deadlock
@@ -83,6 +83,72 @@ func classifyMySQLError(e *mysqldriver.MySQLError) error {
 func sqlStateString(b [5]byte) string {
 	return strings.TrimRight(string(b[:]), "\x00")
 }
+
+// safeMySQLMessage renders a driver error without the one thing in it that is
+// data rather than schema.
+//
+// MySQL's duplicate-key text is "Duplicate entry 'V' for key 'K'", where V is
+// the actual column value that collided. For a workflow inserting an upstream
+// node's output — an email, an order id, whatever the previous node produced —
+// V is that output. It reaches xflow_executions.error_msg and the body of GET
+// /v1/executions/{id}, because engine/errorpolicy.go does errMsg =
+// sysErr.Error() on whatever the node returned and ClassifiedError.Error()
+// renders Message verbatim.
+//
+// The obvious two options are both bad: keeping V persists business data, and
+// dropping the message loses the diagnostic it exists for. This takes the third
+// one, the same one xflow.http already takes for query strings a few files over
+// (safeURLString): keep the key, replace the value. K survives, so an operator
+// still learns which unique index rejected the row, which is the actionable
+// half. Every other MySQL message this classifier sees quotes identifiers
+// rather than values — "Column 'c' cannot be null", "Table 't' doesn't exist" —
+// and is passed through whole.
+//
+// Two things this deliberately does not cover, so they are not mistaken for
+// handled. 1045 access-denied still carries user and host: that is topology,
+// argued separately from workflow data. And a DSN with interpolateParams=true
+// makes the driver splice parameter values into the SQL it sends, so a 1064
+// syntax error can quote them back — the fix for that is the connection
+// setting, not a wider regexp here.
+func safeMySQLMessage(e *mysqldriver.MySQLError) string {
+	safe := redactDuplicateEntryValue(e.Message)
+	if safe == e.Message {
+		return e.Error()
+	}
+	// Re-render through the driver's own framing rather than reproducing its
+	// format string, which would drift the first time it changes.
+	return strings.Replace(e.Error(), e.Message, safe, 1)
+}
+
+const (
+	dupEntryPrefix = "Duplicate entry '"
+	dupEntryKeySep = "' for key '"
+)
+
+// redactDuplicateEntryValue returns msg with the collided value replaced, or
+// msg unchanged when it is not a duplicate-entry message.
+//
+// It matches on the message shape rather than on the error number because more
+// than one number produces this text (1062, 1586, 1022) and a list of numbers
+// is a thing that goes stale. Scanning for the LAST separator matters: MySQL
+// does not escape the value, so a value containing an apostrophe would end a
+// leftmost scan early and leave the tail of it in the message.
+func redactDuplicateEntryValue(msg string) string {
+	if !strings.HasPrefix(msg, dupEntryPrefix) {
+		return msg
+	}
+	rest := msg[len(dupEntryPrefix):]
+	i := strings.LastIndex(rest, dupEntryKeySep)
+	if i < 0 {
+		// Shape recognised but no key clause. Redact to the end rather than
+		// give up: whatever follows is the value, and the diagnostic left is
+		// the error number, which the code already carries.
+		return dupEntryPrefix + redactedValue + "'"
+	}
+	return dupEntryPrefix + redactedValue + rest[i:]
+}
+
+const redactedValue = "REDACTED"
 
 func fmtCode(prefix string, n uint16) string {
 	// avoid strconv import churn in this small helper

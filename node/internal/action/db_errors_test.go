@@ -4,6 +4,7 @@ import (
 	"database/sql/driver"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 
 	mysqldriver "github.com/go-sql-driver/mysql"
@@ -69,11 +70,95 @@ func TestClassifyDBErrorNil(t *testing.T) {
 
 // TestClassifyDBErrorPreservesMessage verifies the driver message is preserved
 // for observability — callers must not lose context by classifying.
+//
+// This used to be the whole coverage of the message content, and it asserted
+// only that the result was non-empty. That is a shape it cannot fail: it built
+// the exact duplicate-key message that leaks a column value, and passed. See
+// TestClassifyDBErrorRedactsDuplicateEntryValue for the assertion that has
+// teeth; this one is kept for the case where nothing is redacted at all.
 func TestClassifyDBErrorPreservesMessage(t *testing.T) {
-	e := mysqlErr(1062, "23000")
-	e.Message = "Duplicate entry 'x' for key 'uk'"
+	e := mysqlErr(1054, "42S22")
+	e.Message = "Unknown column 'email' in 'field list'"
 	got := classifyDBError(e)
-	if got == nil || got.Error() == "" {
-		t.Fatalf("expected non-empty message preserved, got %v", got)
+	if got == nil {
+		t.Fatal("expected a classified error")
+	}
+	// An identifier, not a value: it must survive whole.
+	if !strings.Contains(got.Error(), "Unknown column 'email' in 'field list'") {
+		t.Fatalf("the driver message was altered for an error that quotes only "+
+			"identifiers: %v", got)
+	}
+}
+
+// TestClassifyDBErrorRedactsDuplicateEntryValue pins the one MySQL message that
+// quotes data rather than schema.
+//
+// The value in a duplicate-key error is whatever the workflow tried to insert,
+// which for a workflow inserting an upstream node's output is that output. The
+// committed error text reaches xflow_executions.error_msg and the body of GET
+// /v1/executions/{id}, so this is the string that has to not contain it.
+func TestClassifyDBErrorRedactsDuplicateEntryValue(t *testing.T) {
+	const collided = "alice@example.test"
+
+	for _, tc := range []struct {
+		name string
+		msg  string
+	}{
+		{"plain", "Duplicate entry '" + collided + "' for key 'users.uk_email'"},
+		// MySQL does not escape the value, so an apostrophe inside it produces
+		// a message with three quoted runs. A leftmost scan ends at the wrong
+		// one and leaves the tail of the value in place.
+		{"value contains a quote", "Duplicate entry 'O'Brien " + collided + "' for key 'users.uk_email'"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := mysqlErr(1062, "23000")
+			e.Message = tc.msg
+			got := classifyDBError(e)
+			if got == nil {
+				t.Fatal("expected a classified error")
+			}
+			// This is the exact string engine.ApplyOnError commits.
+			text := got.Error()
+
+			if strings.Contains(text, collided) {
+				t.Errorf("the committed error text carries the collided column value "+
+					"verbatim, so it reaches xflow_executions.error_msg and the "+
+					"executions API: %s", text)
+			}
+
+			// Teeth. Redacting the whole message would pass the check above and
+			// destroy the reason the message is kept at all.
+			for _, want := range []string{
+				"1062",            // which error
+				"23000",           // which SQLState
+				"users.uk_email",  // WHICH unique index rejected the row
+				"Duplicate entry", // what kind of failure
+				redactedValue,     // and that something was removed, not absent
+			} {
+				if !strings.Contains(text, want) {
+					t.Errorf("the error text dropped %q, which is diagnostic rather "+
+						"than sensitive: %s", want, text)
+				}
+			}
+		})
+	}
+}
+
+// TestRedactDuplicateEntryValueLeavesOtherMessagesAlone guards the blast radius.
+//
+// The redaction keys off the message shape, so the thing to check is that the
+// shape does not accidentally match messages whose quoted runs are identifiers.
+func TestRedactDuplicateEntryValueLeavesOtherMessagesAlone(t *testing.T) {
+	for _, msg := range []string{
+		"Column 'email' cannot be null",
+		"Table 'app.orders' doesn't exist",
+		"Unknown column 'email' in 'field list'",
+		"Access denied for user 'svc'@'10.0.0.9' (using password: YES)",
+		"Cannot add or update a child row: a foreign key constraint fails (`app`.`orders`, CONSTRAINT `fk_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`))",
+	} {
+		if got := redactDuplicateEntryValue(msg); got != msg {
+			t.Errorf("redacted a message that quotes identifiers rather than values:\n"+
+				" in: %s\nout: %s", msg, got)
+		}
 	}
 }
