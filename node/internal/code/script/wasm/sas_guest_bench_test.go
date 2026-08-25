@@ -98,7 +98,7 @@ func benchGuestConfig() map[string]any {
 	return cfg
 }
 
-func benchGuestModule(b *testing.B, envVar string) []byte {
+func benchGuestModule(b testing.TB, envVar string) []byte {
 	b.Helper()
 	path := os.Getenv(envVar)
 	if path == "" {
@@ -112,7 +112,7 @@ func benchGuestModule(b *testing.B, envVar string) []byte {
 }
 
 // benchFixtureRecords reads the NDJSON dump of buildSteadyFixture().
-func benchFixtureRecords(b *testing.B) [][]byte {
+func benchFixtureRecords(b testing.TB) [][]byte {
 	b.Helper()
 	path := os.Getenv(benchFixtureEnv)
 	if path == "" {
@@ -160,7 +160,7 @@ func decodeGlobals(record []byte) map[string]any {
 }
 
 // benchGuestEngine compiles a module and installs the shared config.
-func benchGuestEngine(b *testing.B, ctx context.Context, wasmBytes []byte) (*reactorEngine, *reactorFacade) {
+func benchGuestEngine(b testing.TB, ctx context.Context, wasmBytes []byte) (*reactorEngine, *reactorFacade) {
 	b.Helper()
 	h := newReactorHost()
 	e, err := h.engineFor(ctx, wasmBytes)
@@ -526,7 +526,7 @@ func BenchmarkSASGuest_Decode_Kept(b *testing.B) { benchDecodeOver(b, nil) }
 func BenchmarkSASGuest_Decode_Dropped(b *testing.B) { benchDecodeOver(b, [][]byte{}) }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// The JSON-in-a-JSON-string envelope -- MEASURED, AND IT DOES NOT MATTER
+// The JSON-in-a-JSON-string envelope -- IT DOES MATTER; this pair could not see it
 // ─────────────────────────────────────────────────────────────────────────────
 
 // bareGlobals hands the guest the apisix record as a nested JSON OBJECT rather
@@ -539,24 +539,42 @@ func BenchmarkSASGuest_Decode_Dropped(b *testing.B) { benchDecodeOver(b, [][]byt
 // string literal, the guest unescapes it back, and only then parses it. That
 // looks like three scans of 8 KB where one would do.
 //
-// It measured as no saving at all. Envelope 5.636 ms/record vs bare 5.799 ms --
-// the bare shape is fractionally SLOWER, with both arms at the same 40.1%
-// survival so they ran the same code path. Host allocations do fall as predicted
-// (34.7 vs 44.8 KB/op), which confirms the host did less work; the wall clock
-// simply does not care. The reason is visible in the apisix types: Request.Body
-// and Response.Body are `string` fields, so parsing a message never parses the
-// body as JSON. Unescaping a string into a string field is not where the ~4.6 ms
-// parse goes, so removing a layer of it recovers nothing.
+// This benchmark and BenchmarkSASGuest_Decode were once read as a pair, and the
+// pair reported no saving: envelope 5.636 ms/record vs bare 5.799 ms, the bare
+// shape fractionally SLOWER, both arms at 40.1% survival. That verdict was
+// wrong, and the reason is the comparison, not the change. Two separate
+// benchmark functions do not interleave: each runs its own records in its own
+// window, and this machine drifts by more than 10% between windows -- see the
+// paired-A/B section below, where two runs of the SAME build differ by 11%. An
+// effect of 18% cannot be resolved by an instrument whose noise floor is 11%,
+// and a 3% difference in the wrong direction is exactly what such an instrument
+// produces.
 //
-// Keep this benchmark. It is the evidence that a plausible, frequently-proposed
-// change to messageData() is not worth making.
+// BenchmarkSASGuest_DecodeEnvelopeAB measures the same change by alternating the
+// two envelope shapes record by record inside one process, against one module.
+// It reports B/A = 0.78 / 0.84 / 0.82 -- the de-quoted shape is ~18% faster on
+// decode's eval, and ~17% end to end once both sides of the wire were changed.
+// Believe that number, not the one above.
+//
+// The old note's mechanism argument was wrong too: Request.Body and Response.Body
+// being `string` fields means the BODY is never parsed as JSON, but the envelope's
+// escaping applies to the whole record, and unescaping it is a scan plus a copy of
+// all 8 KB before any field is looked at.
+//
+// Keep this benchmark, but do not read it against BenchmarkSASGuest_Decode.
+// Its remaining use is as a survival check on the bare shape -- it is the one
+// place that asserts parseItem still recognises an unquoted item at all.
 func bareGlobals(record []byte) map[string]any {
 	return map[string]any{"$item": json.RawMessage(record)}
 }
 
 // BenchmarkSASGuest_Decode_BareItem is decode on the same fixture, same mix,
-// with the envelope's string quoting removed. Compare against
-// BenchmarkSASGuest_Decode; see bareGlobals for the measured verdict.
+// with the envelope's string quoting removed.
+//
+// Do NOT compare its number against BenchmarkSASGuest_Decode: the two do not
+// interleave and the difference between them is smaller than the drift between
+// two runs of one build. BenchmarkSASGuest_DecodeEnvelopeAB is the measurement.
+// See bareGlobals.
 func BenchmarkSASGuest_Decode_BareItem(b *testing.B) {
 	ctx := context.Background()
 	records := benchFixtureRecords(b)
@@ -1122,16 +1140,24 @@ func BenchmarkSASGuest_DecodeAB(b *testing.B) {
 
 // BenchmarkSASGuest_DecodeFloor prices the phases INSIDE the decode guest.
 //
-// Arm B is a floorprobe build of the decode guest (see cmd/guest/decode/
-// eval_floor.go in the SAS repo): the same package, the same structs, the same
-// encoding/json calls, with eval cut short after stage N and emitting a single
-// number derived from what it parsed. Arm A is the production artifact. B/A is
-// then the fraction of decode that stage N and everything before it accounts
-// for, measured in wazero rather than natively -- which matters, because the
-// existing native analysis in cmd/guest/decode/prefilter_bench_test.go and
-// scanfloor_bench_test.go concluded a hand-rolled extractor was not worth it,
-// and both of its instruments are the shape that got the sign wrong on the
-// clean guest.
+// Arm B is a floorprobe build of the decode guest: the same package, the same
+// structs, the same encoding/json calls, with eval cut short after stage N and
+// emitting a single number derived from what it parsed. Arm A is the production
+// artifact. B/A is then the fraction of decode that stage N and everything
+// before it accounts for, measured in wazero rather than natively -- which
+// matters, because the existing native analysis in
+// cmd/guest/decode/prefilter_bench_test.go and scanfloor_bench_test.go concluded
+// a hand-rolled extractor was not worth it, and both of its instruments are the
+// shape that got the sign wrong on the clean guest.
+//
+// THE ARM-B SOURCE IS NOT COMMITTED. It was written into the SAS working tree as
+// a `floorprobe`-tagged eval, built, measured, and removed; neither
+// cmd/guest/decode/eval_floor.go nor the build tag exists in that repo today
+// (checked 2026-08-25). The numbers it produced are quoted in
+// BenchmarkSASGuest_DecodeEnvelopeAB and are the reason the envelope change was
+// made, so they were not wasted -- but rerunning this benchmark means
+// re-authoring the probe first, and its stage boundaries are then yours, not the
+// ones the old figures used. Treat a new run as a new instrument.
 //
 // The emit guard here is the inverse of sameWorkGuard's, and deliberately so: a
 // floor is only a floor if it stops early, so arm B must emit for EVERY record
@@ -1199,14 +1225,22 @@ func BenchmarkSASGuest_DecodeFloor(b *testing.B) {
 // BenchmarkSASGuest_CleanFloor prices the phases INSIDE the clean guest.
 //
 // The same instrument as BenchmarkSASGuest_DecodeFloor, pointed at the other
-// guest, and it is overdue: with decode rewritten, clean plus the host hand-off
-// is now ~1.95 of the 2.17 cpu_ms a decoded message costs end to end, against
-// decode's 0.21. Whatever is left to win is mostly in here.
+// guest. Its arm-B source is likewise NOT committed in the SAS repo -- see the
+// note on DecodeFloor; re-authoring it is the first step of any rerun.
 //
-// Arm B is a floorprobe build of the clean guest (cmd/guest/clean/eval_floor.go
-// in the SAS repo), arm A is the production artifact, and the inputs are the
-// real ones: what the decode guest actually emitted for the fixture records that
-// survived its filters, which is the only shape this guest ever sees.
+// The motivating split quoted here previously -- clean plus the host hand-off at
+// ~1.95 of the 2.17 cpu_ms a decoded message costs end to end, against decode's
+// 0.21 -- does NOT reconcile with the current per-guest measurements, which put
+// decode at ~2.93 ms/record and clean at ~2.99 ms/record over the ~40% of records
+// that reach it, i.e. roughly 70/30 in decode's favour. The two were taken with
+// different instruments over different denominators and one of them is wrong;
+// the 1:9 version is the more suspect, because every clean number predating the
+// `$input` fix in cleanGlobalsFrom priced an early exit rather than the guest.
+// Re-derive the split before spending anything on it.
+//
+// Arm A is the production artifact, and the inputs are the real ones: what the
+// decode guest actually emitted for the fixture records that survived its
+// filters, which is the only shape this guest ever sees.
 //
 // The emit guard is the floor rule, not sameWorkGuard's: the probe stops short
 // of production's output by construction, so every record differs and B must
