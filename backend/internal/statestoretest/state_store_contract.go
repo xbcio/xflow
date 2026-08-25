@@ -193,6 +193,7 @@ func RunStateStoreContract(t *testing.T, state engine.StateStore) {
 
 	runExecutionErrorRoundTrip(t, state)
 	runOutboxDeliveryLease(t, state)
+	runDurableSignalTOCTOU(t, state)
 }
 
 // runOutboxDeliveryLease pins the delivery lease on both backends.
@@ -485,4 +486,147 @@ func ContractGraph() *graph.Graph {
 		panic(err)
 	}
 	return g
+}
+
+// durableSignalOutboxLister is the slice of the atomic store this contract
+// needs: DeliverSignalWithOutbox's whole point is that the resume intent lands
+// in the outbox, so asserting on the outbox is the only way to tell "stored the
+// signal" from "committed a resume".
+type durableSignalOutboxLister interface {
+	ListOutbox(ctx context.Context, id types.ExecutionID, before time.Time, limit int) ([]engine.OutboxEntry, error)
+}
+
+// runDurableSignalTOCTOU pins the guard for the window between the engine's
+// PeekResumeTarget and its DeliverSignalWithOutbox.
+//
+// engine/signal.go peeks for a waiter, and when it finds none it passes a ZERO
+// ResumeIntent to DeliverSignalWithOutbox. Another goroutine can suspend a node
+// on the same signal in between, so the backend can be handed a live waiter and
+// an intent that describes nothing. NodeIdx and UnitIdx are then 0 — not
+// absent, but pointing at whatever unit 0 of the graph happens to be.
+//
+// A backend must not commit a resume it cannot construct. Storing the signal
+// and leaving the waiter intact is recoverable: the next delivery peeks
+// successfully, and the suspend timeout is still armed. Consuming the waiter
+// and enqueueing a task with zero indices is not — the waiter is gone, so no
+// later signal can wake it, and the task that replaced it names one node while
+// its indices address another.
+//
+// The distributed backend guards this explicitly and calls it out in the Lua
+// ("Guard FIRST, before tearing down any waiter state"), with a named
+// regression test behind it. The memory backend had no equivalent and no test
+// touching this method at all, which is the shape this contract exists to
+// catch: a fix verified on one implementation of an interface and invisible on
+// the other.
+func runDurableSignalTOCTOU(t *testing.T, state engine.StateStore) {
+	t.Helper()
+	ctx := context.Background()
+	id := types.ExecutionID("exec-contract-toctou")
+
+	durable, ok := state.(engine.DurableSignalDeliverer)
+	if !ok {
+		// Not a skip. Both backends implement this interface; a store that
+		// stopped doing so would silently drop this contract, which is exactly
+		// how the gap being closed here opened.
+		t.Fatalf("%T does not implement engine.DurableSignalDeliverer", state)
+	}
+	lister, ok := state.(durableSignalOutboxLister)
+	if !ok {
+		t.Fatalf("%T does not implement ListOutbox", state)
+	}
+
+	if err := state.CreateExecution(ctx, &engine.ExecutionSnapshot{
+		ID: id, Graph: ContractGraph(), Status: types.ExecutionStatusRunning,
+	}); err != nil {
+		t.Fatalf("CreateExecution() error = %v", err)
+	}
+
+	// "finish" is deliberately not unit 0. A zero ResumeIntent addresses unit 0,
+	// so suspending unit 0 would make the wrong indices coincidentally right and
+	// the assertion below unable to tell the two backends apart.
+	const waiter = "finish"
+	const signal = "toctou"
+	if _, err := state.SuspendOrConsume(ctx, id, waiter,
+		&types.SuspendSpec{Signals: []string{signal}}); err != nil {
+		t.Fatalf("SuspendOrConsume() error = %v", err)
+	}
+	before, err := lister.ListOutbox(ctx, id, time.Now().Add(time.Hour), 16)
+	if err != nil {
+		t.Fatalf("ListOutbox(before) error = %v", err)
+	}
+
+	// The racing delivery: a live waiter, and the empty intent the engine builds
+	// when its peek ran a moment too early.
+	node, _, committed, err := durable.DeliverSignalWithOutbox(ctx, id, signal,
+		map[string]any{"by": "racer"}, engine.ResumeIntent{})
+	if err != nil {
+		t.Fatalf("DeliverSignalWithOutbox(empty intent) error = %v", err)
+	}
+	if committed || node != "" {
+		t.Errorf("DeliverSignalWithOutbox(empty intent) = (%q, committed=%v), want "+
+			"(\"\", false): the backend committed a resume from an intent that "+
+			"carries no node, so the outbox entry's NodeIdx/UnitIdx are 0 while its "+
+			"NodeName is %q", node, committed, waiter)
+	}
+
+	after, err := lister.ListOutbox(ctx, id, time.Now().Add(time.Hour), 16)
+	if err != nil {
+		t.Fatalf("ListOutbox(after) error = %v", err)
+	}
+	if len(after) != len(before) {
+		t.Errorf("outbox grew from %d to %d entries on a delivery that could not "+
+			"build a valid resume; entries: %+v", len(before), len(after), after)
+	}
+
+	suspended, err := state.ListSuspendedNodes(ctx, id)
+	if err != nil {
+		t.Fatalf("ListSuspendedNodes() error = %v", err)
+	}
+	var stillWaiting bool
+	for _, n := range suspended {
+		if n == waiter {
+			stillWaiting = true
+		}
+	}
+	if !stillWaiting {
+		t.Fatalf("%q is no longer suspended after a delivery that committed nothing "+
+			"(suspended = %v). The waiter was torn down without a resume replacing "+
+			"it, so no later signal can wake it and only the execution TTL clears it.",
+			waiter, suspended)
+	}
+
+	// Positive control. Without it every assertion above is satisfied by a
+	// backend whose DeliverSignalWithOutbox does nothing at all.
+	idx, ok := ContractGraph().NodeIndex(waiter)
+	if !ok {
+		t.Fatalf("ContractGraph has no node %q", waiter)
+	}
+	unit := ContractGraph().UnitIndexForNode(idx)
+	// The returned payload is deliberately NOT asserted. The interface reads as
+	// if it were part of the result, but the distributed backend always returns
+	// nil (state_suspend.go ends `return nodeName, nil, true, nil`) and puts the
+	// payload only inside the outbox entry, while the memory backend returns it.
+	// The sole production caller, engine/signal.go, discards the value. Requiring
+	// either shape here would pin one backend's incidental behaviour as contract
+	// for something nothing reads.
+	node, _, committed, err = durable.DeliverSignalWithOutbox(ctx, id, signal,
+		map[string]any{"by": "lead"},
+		engine.ResumeIntent{NodeName: waiter, NodeIdx: idx, UnitIdx: unit})
+	if err != nil {
+		t.Fatalf("DeliverSignalWithOutbox(valid intent) error = %v", err)
+	}
+	if !committed || node != waiter {
+		t.Fatalf("DeliverSignalWithOutbox(valid intent) = (%q, committed=%v), want "+
+			"(%q, true) -- the waiter did not survive the racing delivery in a "+
+			"usable state, so the assertions above prove nothing",
+			node, committed, waiter)
+	}
+	final, err := lister.ListOutbox(ctx, id, time.Now().Add(time.Hour), 16)
+	if err != nil {
+		t.Fatalf("ListOutbox(final) error = %v", err)
+	}
+	if len(final) != len(before)+1 {
+		t.Fatalf("outbox entries after the valid delivery = %d, want %d: the resume "+
+			"the contract says was committed is not in the outbox", len(final), len(before)+1)
+	}
 }

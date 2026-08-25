@@ -203,8 +203,18 @@ type DurableSignalDeliverer interface {
 	// resume outbox entry. resumeNode is non-empty and committed=true when a
 	// waiter was woken (the engine then flushes the outbox); committed=false
 	// (resumeNode="") when the signal was stored because no waiter exists or
-	// multi-signal quorum was not yet reached. payload carries the signal
-	// data for the resume task when one is recorded.
+	// multi-signal quorum was not yet reached.
+	//
+	// An empty intent.NodeName means the caller's PeekResumeTarget found no
+	// waiter. A waiter may have appeared since; an implementation that finds one
+	// must NOT consume it, because it cannot build a resume task from an intent
+	// with no node — the indices would be zero and address the wrong unit. Store
+	// the signal, leave the waiter and its timeout intact, and let the next
+	// delivery (whose peek succeeds) drive the resume.
+	//
+	// payload is not part of the contract. The distributed backend always
+	// returns nil and carries the payload only inside the outbox entry; the
+	// memory backend returns it. The engine discards it either way.
 	DeliverSignalWithOutbox(ctx context.Context, id types.ExecutionID, signalName string, data map[string]any, intent ResumeIntent) (resumeNode string, payload *types.SignalPayload, committed bool, err error)
 }
 

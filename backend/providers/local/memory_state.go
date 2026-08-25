@@ -675,6 +675,20 @@ func (s *memoryState) PeekResumeTarget(_ context.Context, id types.ExecutionID, 
 func (s *memoryState) DeliverSignalWithOutbox(_ context.Context, id types.ExecutionID, signalName string, data map[string]any, intent engine.ResumeIntent) (string, *types.SignalPayload, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Guard first, before touching any waiter state. An empty NodeName means the
+	// caller's PeekResumeTarget found no waiter and built a zero ResumeIntent; a
+	// waiter can appear in the window between those two calls. Consuming it here
+	// would delete the suspend entry and enqueue a resume whose NodeIdx and
+	// UnitIdx are 0 — not absent, but addressing unit 0 of the graph while the
+	// task names a different node. Nothing could then wake the node: the waiter
+	// is gone, so no later signal matches it, and only the execution TTL clears
+	// it. Store the signal instead and leave the suspend intact, so the next
+	// delivery (whose peek succeeds) or the suspend timeout drives the resume.
+	// deliverSignalWithOutboxLua does the same, and pins it with a named test.
+	if intent.NodeName == "" {
+		s.signals[string(id)+"/"+signalName] = cloneData(data)
+		return "", nil, false, nil
+	}
 	prefix := string(id) + "/"
 	for key, spec := range s.suspended {
 		if !strings.HasPrefix(key, prefix) {
