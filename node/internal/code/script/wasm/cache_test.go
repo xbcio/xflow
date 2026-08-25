@@ -19,9 +19,12 @@ import (
 func resetCacheForTest(t *testing.T) {
 	t.Helper()
 	prevOnce, prevVal, prevDir, prevErr := cacheOnce, cacheVal, cacheDir, cacheErr
+	prevSweep := sweepDir.Load()
 	cacheOnce, cacheVal, cacheDir, cacheErr = new(sync.Once), nil, "", nil
+	sweepDir.Store(nil)
 	t.Cleanup(func() {
 		cacheOnce, cacheVal, cacheDir, cacheErr = prevOnce, prevVal, prevDir, prevErr
+		sweepDir.Store(prevSweep)
 	})
 }
 

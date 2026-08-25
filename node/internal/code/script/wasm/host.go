@@ -331,6 +331,9 @@ func (h *reactorHost) engineForKey(ctx context.Context, key string, wasmBytes []
 	e := &reactorEngine{host: h, cm: cm}
 	h.engines[key] = e
 	obs().OnModuleCompile(ctx, "miss")
+	// A miss is the only event that adds a file to the on-disk cache, so it is
+	// the only one that can push the directory over its budget.
+	sweepCacheAsync()
 	return e, nil
 }
 
