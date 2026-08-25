@@ -133,6 +133,25 @@ type aggregateRuntime struct {
 	// escaping it into a string. Resolved once at activation by
 	// resolveValueJSON; only the group path below honours it.
 	valueJSON bool
+	// baseCtx is the activation context with its cancellation removed. It exists
+	// because two different things were being taken from one context and only
+	// one of them was wanted. Every partitionAggregator reads it, so a
+	// hand-built runtime must set it; leaving it nil panics in run() rather than
+	// quietly reinstating the bug.
+	//
+	// The values are wanted: observability/metrics reads the namespace off the
+	// context for every label set (withNamespace), so a report made from
+	// context.Background() is filed under the default namespace. For the
+	// Set-based gauges that is worse than a missing label — two namespaces
+	// consuming a topic of the same name overwrite each other's value, and the
+	// survivor looks authoritative.
+	//
+	// The cancellation is not: a partition aggregator drains and exits on its
+	// own schedule, and its in-flight emit/commit attempts must not be cut short
+	// when runCtx is canceled. That is why these paths reached for Background in
+	// the first place; WithoutCancel gives the namespace back without giving the
+	// Done channel back with it.
+	baseCtx context.Context
 }
 
 func (r *aggregateRuntime) schema() *MessageSchema { return r.messageSchema }
@@ -161,6 +180,7 @@ type partitionAggregator struct {
 
 func activateAggregate(ctx context.Context, in *types.TriggerActivateInput, cfg ConsumerConfig, consumer Consumer, deadLetters DeadLetterPublisher) types.TriggerSubscription {
 	runCtx, cancel := context.WithCancel(ctx)
+	baseCtx := context.WithoutCancel(runCtx)
 	maxInflight := cfg.MaxInflight
 	if maxInflight <= 0 {
 		maxInflight = defaultTriggerMaxInflight
@@ -171,6 +191,7 @@ func activateAggregate(ctx context.Context, in *types.TriggerActivateInput, cfg 
 		consumer:            consumer,
 		emitSem:             make(chan struct{}, maxInflight),
 		closeDone:           make(chan struct{}),
+		baseCtx:             baseCtx,
 		aggregators:         make(map[partitionKey]*partitionAggregator),
 		messageSchema:       cfg.MessageSchema,
 		entrySeed:           isEntrySeedActivation(in),
@@ -385,7 +406,7 @@ func (a *partitionAggregator) run() {
 	var batches []*aggregateBatch
 	attemptResults := make(chan aggregateAttemptResult, maxPending)
 	commitResults := make(chan aggregateCommitResult, 1)
-	attemptCtx, cancelAttempts := context.WithCancel(context.Background())
+	attemptCtx, cancelAttempts := context.WithCancel(a.rt.baseCtx)
 	defer cancelAttempts()
 
 	flushTimer := time.NewTimer(time.Hour)
@@ -637,7 +658,7 @@ func (a *partitionAggregator) run() {
 				"dropped_since_last_success", overflowDropped,
 				"occurrences", count)
 		}
-		obs().OnMessageDiscarded(context.Background(), msg.Topic, "buffer_overflow")
+		obs().OnMessageDiscarded(a.rt.baseCtx, msg.Topic, "buffer_overflow")
 	}
 	// reportBackpressure announces this partition entering or leaving the state
 	// where it has stopped receiving.
@@ -649,7 +670,7 @@ func (a *partitionAggregator) run() {
 	// corner case, it is the steady state: the moment backpressure works, lag
 	// stops updating and the consumer reads as healthy.
 	reportBackpressure := func(blocked bool) {
-		obs().OnConsumptionBlocked(context.Background(), a.key.topic, a.key.partition, blocked)
+		obs().OnConsumptionBlocked(a.rt.baseCtx, a.key.topic, a.key.partition, blocked)
 		if blocked {
 			slog.Warn("kafka aggregate at cap with on_overflow=block; HALTING consumption "+
 				"(nothing is dropped; this partition's channel will fill and the shared "+

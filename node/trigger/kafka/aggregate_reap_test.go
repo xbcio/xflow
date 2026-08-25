@@ -74,9 +74,14 @@ func TestKafkaAggregateSubmitTakesReplacementAfterReap(t *testing.T) {
 			NodeName:   "kafka",
 			Runtime:    triggertest.NewFakeRuntime(),
 		},
-		cfg:         AggregateConfig{MaxSize: 1, FlushInterval: time.Second},
-		consumer:    consumer,
-		emitSem:     make(chan struct{}, 1),
+		cfg:      AggregateConfig{MaxSize: 1, FlushInterval: time.Second},
+		consumer: consumer,
+		emitSem:  make(chan struct{}, 1),
+		// run() derives its attempt context from baseCtx, so a hand-built
+		// runtime has to supply one; activateAggregate sets it from the
+		// activation context. Background is right here — these tests assert
+		// about reap and shutdown, not about observation labels.
+		baseCtx:     context.Background(),
 		aggregators: make(map[partitionKey]*partitionAggregator),
 	}
 	key := partitionKey{topic: "t", partition: 0}
@@ -167,9 +172,14 @@ func TestKafkaAggregateSubmitFailsClosedDuringShutdown(t *testing.T) {
 			NodeName:   "kafka",
 			Runtime:    triggertest.NewFakeRuntime(),
 		},
-		cfg:         AggregateConfig{MaxSize: 1, FlushInterval: time.Second},
-		consumer:    consumer,
-		emitSem:     make(chan struct{}, 1),
+		cfg:      AggregateConfig{MaxSize: 1, FlushInterval: time.Second},
+		consumer: consumer,
+		emitSem:  make(chan struct{}, 1),
+		// run() derives its attempt context from baseCtx, so a hand-built
+		// runtime has to supply one; activateAggregate sets it from the
+		// activation context. Background is right here — these tests assert
+		// about reap and shutdown, not about observation labels.
+		baseCtx:     context.Background(),
 		aggregators: make(map[partitionKey]*partitionAggregator),
 	}
 
