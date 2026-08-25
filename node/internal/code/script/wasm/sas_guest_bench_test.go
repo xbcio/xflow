@@ -180,6 +180,15 @@ func benchGuestEngine(b *testing.B, ctx context.Context, wasmBytes []byte) (*rea
 // cleanGlobalsFrom turns a decode result into clean's env, or reports that
 // decode filtered the record out.
 //
+// The `$input` key is load-bearing and was missing here until it was caught by
+// CleanAB's emit guard. clean's eval reads env["$input"] and answers `{}` for an
+// env without one -- that is its first branch, before it decodes anything. So a
+// map spelled {"req":…,"resp":…} at the top level did not feed clean the record,
+// it fed clean the pass-through early exit, and every clean number this file
+// produced before the fix priced a JSON parse of ~7 KB plus two writes of `{}`.
+// That is the same defect assertSurvival exists to catch one stage upstream; the
+// clean stage had no equivalent, because only the paired benchmark counts emits.
+//
 // The survival check is not decoration. A filtered record returns `{}` and
 // costs almost nothing, so a benchmark that unknowingly ran on filtered records
 // would report a fraction of the real cost and look like an optimisation. Every
@@ -193,7 +202,7 @@ func cleanGlobalsFrom(out any) (map[string]any, bool) {
 	if req == nil && resp == nil {
 		return nil, false
 	}
-	return map[string]any{"req": req, "resp": resp}, true
+	return map[string]any{"$input": map[string]any{"req": req, "resp": resp}}, true
 }
 
 // benchDecodeAll runs every fixture record through decode once, outside any
@@ -766,6 +775,16 @@ func pairedArmsInputs(b *testing.B, f *reactorFacade, engA, engB *reactorEngine,
 	}
 	b.StopTimer()
 
+	// testing runs a benchmark once with b.N == 1 before the real run, to find
+	// out whether it spawns sub-benchmarks. One record is not a sample: whether
+	// it survives the guest's filters is a property of that one record, so an
+	// emit guard applied to the discovery run fails outright on any fixture
+	// whose first record is a discard -- which is what CleanAB's is. Check
+	// nothing and report nothing for it; the measured run follows.
+	if b.N == 1 {
+		return
+	}
+
 	check(b, emitA, emitB, differed, b.N)
 
 	perA := float64(nsA) / float64(b.N)
@@ -1055,14 +1074,23 @@ func cleanArmB(b *testing.B, env string) *reactorEngine {
 	return eng
 }
 
-// BenchmarkSASGuest_DecodeAB is the same paired comparison for the decode guest,
-// which is the larger half: measured on this fixture, decode is ~1.30 ms/record
-// against clean's ~0.35 ms amortised over the 40% of records that survive it, so
-// a change worth 20% in clean is worth 4% of the chain and the same change in
-// decode is worth 16%.
+// BenchmarkSASGuest_DecodeAB is the same paired comparison for the decode guest.
+//
+// The two guests cost about the same. Measured on this fixture with the `$input`
+// key finally present in clean's env (see cleanGlobalsFrom), decode is ~2.93
+// ms/record over every record and clean is ~2.99 ms over the 40% that reach it,
+// so clean is ~1.2 ms/record amortised over the whole stream against decode's
+// 2.93 -- roughly a 70/30 split, not the 4:1 this comment used to claim. The
+// earlier "clean ~0.35 ms" was clean answering `{}` on its missing-$input
+// branch; a change worth 20% in clean is worth ~6% of the chain, not 4%.
 //
 // Arm A is XFLOW_BENCH_DECODE_WASM, the same module every other benchmark here
 // uses; arm B is XFLOW_BENCH_DECODE_WASM_B.
+//
+// Keep -benchtime under ~1500x per arm. The guest's linear memory is capped at
+// engine.DefaultWasmMemoryPages (16 MiB) and does not survive more evals than
+// that on this fixture -- see the note on maxEvalsPerInstance in pool.go, which
+// this run falsified.
 func BenchmarkSASGuest_DecodeAB(b *testing.B) {
 	pathB := os.Getenv(benchDecodeWasmBEnv)
 	if pathB == "" {
