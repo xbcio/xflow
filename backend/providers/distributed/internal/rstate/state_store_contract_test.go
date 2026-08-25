@@ -1,7 +1,6 @@
 package rstate
 
 import (
-	"os"
 	"testing"
 	"time"
 
@@ -36,10 +35,7 @@ func TestMiniredisStateStoreContract(t *testing.T) {
 // non-empty-only error-key write), and miniredis runs a different Lua engine
 // than Redis does.
 func TestRedisStateStoreContract(t *testing.T) {
-	addr := os.Getenv("XFLOW_TEST_REDIS_ADDR")
-	if addr == "" {
-		t.Skip("XFLOW_TEST_REDIS_ADDR unset; set 127.0.0.1:6380 for the podman env")
-	}
+	addr := realRedisAddr(t)
 	statestoretest.RunStateStoreContract(t, New(freshRealRedis(t, addr), nil, time.Minute))
 }
 
@@ -61,10 +57,7 @@ func TestMiniredisNodeLeaseRenewContract(t *testing.T) {
 }
 
 func TestRedisNodeLeaseRenewContract(t *testing.T) {
-	addr := os.Getenv("XFLOW_TEST_REDIS_ADDR")
-	if addr == "" {
-		t.Skip("XFLOW_TEST_REDIS_ADDR unset; set 127.0.0.1:6380 for the podman env")
-	}
+	addr := realRedisAddr(t)
 	statestoretest.RunNodeLeaseRenewContract(t, func(t *testing.T) statestoretest.NodeLeaseRenewStore {
 		return New(freshRealRedis(t, addr), nil, time.Minute)
 	})

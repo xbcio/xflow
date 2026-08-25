@@ -1,7 +1,6 @@
 package rstate
 
 import (
-	"os"
 	"testing"
 	"time"
 
@@ -47,10 +46,7 @@ func freshRealRedis(t *testing.T, addr string) *redis.Client {
 // TestRedisGroupStateContract runs the shared GroupStateStore contract suite
 // against a real Redis instance when XFLOW_TEST_REDIS_ADDR is set.
 func TestRedisGroupStateContract(t *testing.T) {
-	addr := os.Getenv("XFLOW_TEST_REDIS_ADDR")
-	if addr == "" {
-		t.Skip("XFLOW_TEST_REDIS_ADDR unset; set 127.0.0.1:6380 for the podman env")
-	}
+	addr := realRedisAddr(t)
 	statestoretest.RunGroupStateContract(t, func(t *testing.T) statestoretest.GroupStore {
 		return New(freshRealRedis(t, addr), nil, time.Minute)
 	})
@@ -75,10 +71,7 @@ func TestMiniredisEntryAdmissionContract(t *testing.T) {
 // TestRedisEntryAdmissionContract runs the EntryAdmissionStore contract
 // suite against a real Redis instance when XFLOW_TEST_REDIS_ADDR is set.
 func TestRedisEntryAdmissionContract(t *testing.T) {
-	addr := os.Getenv("XFLOW_TEST_REDIS_ADDR")
-	if addr == "" {
-		t.Skip("XFLOW_TEST_REDIS_ADDR unset; set 127.0.0.1:6380 for the podman env")
-	}
+	addr := realRedisAddr(t)
 	statestoretest.RunEntryAdmissionContract(t, func(t *testing.T) statestoretest.EntryAdmissionTestStore {
 		return New(freshRealRedis(t, addr), nil, time.Minute)
 	})

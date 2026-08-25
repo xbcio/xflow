@@ -1084,6 +1084,13 @@ func TestListDeadLettersDeleteDuringPagination(t *testing.T) {
 // XFLOW_REQUIRE_REDIS_INTEGRATION=1 (CI gating mode) it fails the test when
 // Redis is unreachable, so a missing dependency cannot be mistaken for a
 // passing gate. Otherwise it skips, preserving local dev ergonomics.
+//
+// It is the package-wide gate. The contract runners in group_state_test.go,
+// outbox_lease_test.go and state_store_contract_test.go each used to inline
+// their own `os.Getenv` + `t.Skip` and so had no escalation branch — six real-
+// Redis contract tests covering entry activation, group state, entry admission,
+// the outbox dead-letter guard, the state store and node-lease renewal that a
+// "required" run would have reported as skipped rather than red.
 func realRedisAddr(t *testing.T) string {
 	t.Helper()
 	addr := os.Getenv("XFLOW_TEST_REDIS_ADDR")
@@ -1091,7 +1098,7 @@ func realRedisAddr(t *testing.T) string {
 		if os.Getenv("XFLOW_REQUIRE_REDIS_INTEGRATION") == "1" {
 			t.Fatal("XFLOW_REQUIRE_REDIS_INTEGRATION=1: XFLOW_TEST_REDIS_ADDR not set (use 127.0.0.1:6380)")
 		}
-		t.Skipf("XFLOW_TEST_REDIS_ADDR not set; skipping real-Redis dead-letter regression")
+		t.Skipf("XFLOW_TEST_REDIS_ADDR not set; skipping real-Redis test")
 	}
 	c := redis.NewClient(&redis.Options{Addr: addr})
 	defer func() { _ = c.Close() }()

@@ -4,7 +4,6 @@ package integration
 
 import (
 	"context"
-	"os"
 	"testing"
 	"time"
 
@@ -17,8 +16,6 @@ import (
 	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/types"
-
-	"github.com/redis/go-redis/v9"
 )
 
 // staticRunnerLister is a control.ActivationRunnerLister returning a fixed set
@@ -73,21 +70,19 @@ func TestEntryActivationLifecycleE2E_Memory(t *testing.T) {
 }
 
 // TestEntryActivationLifecycleE2E_Redis runs the same lifecycle against the
-// Redis-backed EntryActivationStore. It SKIPS cleanly when XFLOW_TEST_REDIS_ADDR
-// is unset or the Redis endpoint is unreachable (podman 6380 may be down).
+// Redis-backed EntryActivationStore.
+//
+// It gates through requireRedis rather than reading XFLOW_TEST_REDIS_ADDR and
+// pinging by hand, which is what it used to do. Every other real-Redis test in
+// this package already goes through that helper, and the difference is not
+// cosmetic: this package IS what CI runs under
+// XFLOW_REQUIRE_REDIS_INTEGRATION=1 with a live Redis service, and the
+// hand-rolled gate had no escalation branch. If Redis flaked mid-run, the whole
+// shard would correctly fail — except this test, which would report a skip and
+// pass. Nothing else would have caught it: RUN_INTEGRATION_TEST_SHARDS has no
+// "fail on any skip" check.
 func TestEntryActivationLifecycleE2E_Redis(t *testing.T) {
-	addr := os.Getenv("XFLOW_TEST_REDIS_ADDR")
-	if addr == "" {
-		t.Skip("XFLOW_TEST_REDIS_ADDR not set; skipping Redis-backed lifecycle e2e")
-	}
-	rdb := redis.NewClient(&redis.Options{Addr: addr})
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := rdb.Ping(ctx).Err(); err != nil {
-		_ = rdb.Close()
-		t.Skipf("Redis at %s unreachable: %v", addr, err)
-	}
-	_ = rdb.Close()
+	addr := requireRedis(t)
 
 	be, err := distributed.New(addr, nil, distributed.WithConsumer(false))
 	if err != nil {

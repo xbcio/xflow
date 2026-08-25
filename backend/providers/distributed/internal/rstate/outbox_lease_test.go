@@ -2,7 +2,6 @@ package rstate
 
 import (
 	"context"
-	"os"
 	"testing"
 	"time"
 
@@ -27,10 +26,7 @@ import (
 // Real Redis only: the assertion lands entirely on Lua behaviour, and miniredis
 // runs a different Lua engine.
 func TestRedisReleaseOutboxDoesNotResurrectAnAckedEntry(t *testing.T) {
-	addr := os.Getenv("XFLOW_TEST_REDIS_ADDR")
-	if addr == "" {
-		t.Skip("XFLOW_TEST_REDIS_ADDR unset; set 127.0.0.1:6380 for the podman env")
-	}
+	addr := realRedisAddr(t)
 	rdb := freshRealRedis(t, addr)
 	state := New(rdb, nil, time.Minute)
 	ctx := context.Background()

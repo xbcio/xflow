@@ -517,9 +517,23 @@ func kafkaMessagesFromEvent(t *testing.T, event *types.TriggerEvent) []map[strin
 
 func kafkaIntegrationBrokers(t *testing.T) []string {
 	t.Helper()
-	raw := os.Getenv("XFLOW_KAFKA_BROKERS")
+	// XFLOW_TEST_KAFKA_BROKERS, not XFLOW_KAFKA_BROKERS. This helper predates the
+	// repo's convention by a week (a250a52 added it; b71f2bb standardised the
+	// name in the integration harness) and was never updated, so
+	// TestKafkaTriggerConsumesRealKafka — the only test in this package that
+	// drives a live broker end to end, all 18 others use fakes — has skipped on
+	// every machine and every CI run since it was written.
+	//
+	// Renaming makes it runnable, not run: this package is in the plain
+	// `make test` set, and CI only stands up Kafka for ./test/integration. Under
+	// XFLOW_REQUIRE_KAFKA_INTEGRATION=1 the skip escalates, so a harness that
+	// does provide a broker cannot mistake the skip for a pass.
+	raw := os.Getenv("XFLOW_TEST_KAFKA_BROKERS")
 	if raw == "" {
-		t.Skip("set XFLOW_KAFKA_BROKERS to run real Kafka integration test")
+		if os.Getenv("XFLOW_REQUIRE_KAFKA_INTEGRATION") == "1" {
+			t.Fatal("XFLOW_REQUIRE_KAFKA_INTEGRATION=1: XFLOW_TEST_KAFKA_BROKERS not set")
+		}
+		t.Skip("set XFLOW_TEST_KAFKA_BROKERS to run real Kafka integration test")
 	}
 	parts := strings.Split(raw, ",")
 	brokers := make([]string, 0, len(parts))
@@ -529,7 +543,7 @@ func kafkaIntegrationBrokers(t *testing.T) []string {
 		}
 	}
 	if len(brokers) == 0 {
-		t.Fatal("XFLOW_KAFKA_BROKERS did not contain any brokers")
+		t.Fatal("XFLOW_TEST_KAFKA_BROKERS did not contain any brokers")
 	}
 	return brokers
 }
