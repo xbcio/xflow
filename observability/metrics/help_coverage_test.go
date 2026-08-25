@@ -43,6 +43,16 @@ func TestEveryMetricNameInThisPackageHasHelpText(t *testing.T) {
 	// add a name here to silence this test for a metric that IS emitted in
 	// production: that trades a build failure for a useless description on a live
 	// series.
+	//
+	// This list is NOT the full inventory of dead xflow_group_* names, and help
+	// text is not evidence of wiring. Every method on GroupMetrics is dead —
+	// NewGroupMetrics has no caller anywhere, and nothing outside this package
+	// writes an "xflow_group_" literal — but the ~13 names that happen to have
+	// help text pass through the branch above and never reach this map. Reading
+	// the six entries below as "these are the unwired ones" is exactly backwards.
+	// Wiring the family is a control-plane and runner change (see group.go); the
+	// two label values with no signal source behind them, lease_renew's "fenced"
+	// and activation's "reconcile", have to be dropped or given one first.
 	unwired := map[string]string{
 		"xflow_group_commit_total":            "group.go, no caller outside this package",
 		"xflow_group_exec_duration_seconds":   "group.go, no caller outside this package",
