@@ -8,6 +8,7 @@ import (
 	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
+	"github.com/xbcio/xflow/namespace"
 )
 
 // DefaultSweepPeriod is how often the sweeper scans for expired leases when
@@ -196,6 +197,11 @@ func (s *LeaseSweeper) SweepOnce(ctx context.Context) int {
 	before := s.clock().Add(-s.grace)
 	listStarted := time.Now()
 	expired, err := s.state.ListExpiredLeases(ctx, before)
+	// Deliberately the sweeper's own context, not a per-lease one. This is a
+	// single scan spanning every namespace, so there is no tenant it belongs to
+	// and no honest way to split one duration across them. The namespace label
+	// on the scan metrics therefore reads "default" and means the sweeper, not a
+	// tenant; the help text for xflow_lease_sweep_candidates says so.
 	s.observeTiming(func(observer SweepTimingObserver) {
 		observer.OnSweepListExpired(ctx, len(expired), time.Since(listStarted), err)
 	})
@@ -212,6 +218,29 @@ func (s *LeaseSweeper) SweepOnce(ctx context.Context) int {
 			return reclaimed
 		default:
 		}
+		// Every observer call below uses leaseCtx, not ctx. ControlPlane.Start
+		// builds the sweeper's context from context.Background() and never
+		// injects a namespace, while ListExpiredLeases deliberately spans all of
+		// them and stamps each ExpiredLease with its owner. The metrics adapters
+		// all label through withNamespace, which falls back to "default" on a
+		// namespace-less context rather than omitting the label — so every
+		// reclaim, race and error the sweeper recorded was filed under
+		// namespace="default" whatever tenant it actually belonged to. Not a
+		// missing label an operator would notice; a wrong one attributing one
+		// tenant's lease failures to another.
+		//
+		// engine.ReclaimLease already re-derives this same context internally
+		// (see engine/lease.go), but that copy is local to the call and never
+		// reaches the observer, so it cannot be relied on here.
+		//
+		// Scoped to the observer calls on purpose. The directory release below
+		// keys off AssignmentID and its behaviour under a namespaced context is
+		// a separate question from metric labelling; changing what key it looks
+		// up is not a metrics fix.
+		leaseCtx := ctx
+		if lease.Namespace != "" {
+			leaseCtx = namespace.WithNamespace(ctx, lease.Namespace)
+		}
 		// 1. Directory cleanup first (token-fenced). This prevents a stale
 		// finalized lease from occupying runner capacity or suppressing
 		// redelivery after the engine has revoked the lease.
@@ -227,6 +256,7 @@ func (s *LeaseSweeper) SweepOnce(ctx context.Context) int {
 				// will see a fresh lease generation if one exists.
 				if derr != nil && s.log != nil {
 					s.log.Error("release expired lease in directory",
+						"ns", string(lease.Namespace),
 						"exec", string(lease.ExecutionID),
 						"node", lease.NodeName,
 						"err", derr,
@@ -242,12 +272,12 @@ func (s *LeaseSweeper) SweepOnce(ctx context.Context) int {
 		switch {
 		case ok && err == nil:
 			s.observeTiming(func(observer SweepTimingObserver) {
-				observer.OnSweepReclaimResult(ctx, "reclaimed", time.Since(reclaimStarted))
+				observer.OnSweepReclaimResult(leaseCtx, "reclaimed", time.Since(reclaimStarted))
 			})
 			reclaimed++
 			if s.observer != nil {
 				ageMs := s.clock().Sub(lease.IssuedAt.Add(lease.TTL)).Milliseconds()
-				s.observer.OnSweepReclaim(ctx, string(lease.ExecutionID), lease.NodeName, ageMs)
+				s.observer.OnSweepReclaim(leaseCtx, string(lease.ExecutionID), lease.NodeName, ageMs)
 			}
 		case ok && err != nil:
 			// Revoke/outbox applied, but immediate FlushOutbox failed. The
@@ -255,33 +285,34 @@ func (s *LeaseSweeper) SweepOnce(ctx context.Context) int {
 			// the reclaim as applied and let the durable OutboxDispatcher
 			// retry delivery — do not wait for the next lease sweep.
 			s.observeTiming(func(observer SweepTimingObserver) {
-				observer.OnSweepReclaimResult(ctx, "applied_pending", time.Since(reclaimStarted))
+				observer.OnSweepReclaimResult(leaseCtx, "applied_pending", time.Since(reclaimStarted))
 			})
 			reclaimed++
-			s.recordReclaimApplied(ctx, lease, err)
+			s.recordReclaimApplied(leaseCtx, lease, err)
 		case !ok && err == nil:
 			// A racing commit/report won; no new mutation was applied.
 			s.observeTiming(func(observer SweepTimingObserver) {
-				observer.OnSweepReclaimResult(ctx, "race", time.Since(reclaimStarted))
+				observer.OnSweepReclaimResult(leaseCtx, "race", time.Since(reclaimStarted))
 			})
 			if s.observer != nil {
-				s.observer.OnSweepRace(ctx, string(lease.ExecutionID), lease.NodeName)
+				s.observer.OnSweepRace(leaseCtx, string(lease.ExecutionID), lease.NodeName)
 			}
 		case !ok && err != nil:
 			// State mutation not applied; leave the expired lease in place
 			// and retry on the next sweep.
 			s.observeTiming(func(observer SweepTimingObserver) {
-				observer.OnSweepReclaimResult(ctx, "error", time.Since(reclaimStarted))
+				observer.OnSweepReclaimResult(leaseCtx, "error", time.Since(reclaimStarted))
 			})
 			if s.log != nil {
 				s.log.Error("reclaim lease",
+					"ns", string(lease.Namespace),
 					"exec", string(lease.ExecutionID),
 					"node", lease.NodeName,
 					"err", err,
 				)
 			}
 			if s.observer != nil {
-				s.observer.OnSweepError(ctx, string(lease.ExecutionID), lease.NodeName, err)
+				s.observer.OnSweepError(leaseCtx, string(lease.ExecutionID), lease.NodeName, err)
 			}
 		}
 	}
