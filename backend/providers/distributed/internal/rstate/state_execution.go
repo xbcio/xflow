@@ -352,10 +352,17 @@ func (s *Store) UpdateExecutionStatus(ctx context.Context, id types.ExecutionID,
 // errMsg is NOT guaranteed to be free of node output. engine/errorpolicy.go
 // takes it from sysErr.Error() verbatim, so a node that formats a response body
 // or an upstream output into its error writes that text here, and node output
-// routinely contains credentials from upstream HTTP responses. Keeping payload
-// out of Error() (and in types.Error.Details instead) is a convention of the
-// built-in nodes, not something this layer can check. The isTransient guard
-// below is the part that is enforced.
+// routinely contains credentials from upstream HTTP responses.
+//
+// Do not read "the built-in nodes keep payload out of Error()" as a fact about
+// this repository. A sweep found three that did not: xflow.http rendered the
+// whole request URL, query string included, on every transport failure (fixed);
+// db_errors.go passes a raw *mysql.MySQLError through, and its duplicate-key
+// text carries the offending column VALUE; grpc.go puts the remote-controlled
+// st.Message() in Message rather than Details. The types.Error split (payload
+// in Details, which Error() does not render) is the convention, and it is one
+// this layer cannot check. The isTransient guard below is the part that is
+// enforced.
 //
 // That guard is load-bearing only on the GROUP commit path: state_commit.go
 // already wraps its call in an outer !isTransient block, so a node-commit test

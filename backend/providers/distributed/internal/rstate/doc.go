@@ -115,13 +115,20 @@
 // The text originates at engine/errorpolicy.go, which does errMsg =
 // sysErr.Error() on whatever error the node returned, verbatim. A node that
 // formats a response body, a request header or an upstream node's output into
-// its error — fmt.Errorf("POST %s: %s", url, body) is the obvious shape — puts
-// that text in execKey "error", in the ExecutionEvent published to subscribers,
-// and, for a durable execution, in xflow_executions.error. Node output routinely
-// contains HTTP response bodies with bearer tokens, so the difference between
-// "reason string" and "payload" is a convention the node author has to keep,
-// with no compile-time or runtime check behind it. The types.Error split is the
-// convention: a body belongs in Details, which is not what Error() renders.
+// its error puts that text in execKey "error", in the ExecutionEvent published
+// to subscribers, and, for a durable execution, in xflow_executions.error.
+//
+// That is not hypothetical. A sweep of the built-in nodes found three doing it:
+// xflow.http rendered the entire request URL (query string, hence any token
+// passed as a query parameter) on every transport failure — fixed, with a
+// regression test; node/internal/action/db_errors.go passes a raw
+// *mysql.MySQLError straight through, and MySQL's duplicate-key text quotes the
+// offending column VALUE, which for a workflow inserting upstream output is
+// that output; node/internal/action/grpc.go puts the remote-controlled
+// st.Message() in Message rather than Details. The latter two are unfixed —
+// stripping them destroys the diagnostic they exist for. The convention is the
+// types.Error split (payload in Details, which Error() does not render); there
+// is no compile-time or runtime check behind it.
 //
 // What IS enforced is narrower and worth stating separately, because it is the
 // part the credential-disclosure constraint actually rests on: for a transient

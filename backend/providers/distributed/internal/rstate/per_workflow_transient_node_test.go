@@ -247,8 +247,11 @@ func TestPerWorkflowTransient_SkipsLeaseNodeProjection(t *testing.T) {
 // string, never a node's output". Nothing enforces that:
 // engine/errorpolicy.go does errMsg = sysErr.Error() on whatever the node
 // returned, so a node doing fmt.Errorf("POST %s: %s", url, body) puts that body
-// here. Keeping payload out of Error() is a convention of the built-in nodes;
-// the !isTransient guard is the mechanism, and it is what this test pins.
+// here -- and three built-in nodes were found doing exactly that (xflow.http's
+// transport errors, since fixed; db_errors.go's raw MySQLError; grpc.go's
+// st.Message()). Keeping payload out of Error() is a convention, not a
+// mechanism; the !isTransient guard is the mechanism, and it is what this test
+// pins.
 //
 // The durable execution is the positive control: without it, a Store that had
 // dropped the projection entirely would look identical to one honouring
