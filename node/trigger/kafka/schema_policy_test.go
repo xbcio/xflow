@@ -20,7 +20,14 @@ type recordingObserver struct {
 	mu           sync.Mutex
 	discarded    []string // "topic/reason"
 	deadLettered []string // "topic/result"
-	notify       chan struct{}
+	// blocked records on_overflow=block transitions as "topic/partition/blocked"
+	// or ".../resumed". Recorded here rather than in a separate fake because the
+	// tests that care about it are the same overflow tests that assert on
+	// discarded: under on_overflow=block one list must fill and the other must
+	// stay empty, and asserting that from two different observers would not
+	// prove the two describe the same run.
+	blocked []string
+	notify  chan struct{}
 }
 
 func newRecordingObserver() *recordingObserver {
@@ -37,6 +44,17 @@ func (o *recordingObserver) OnMessageDiscarded(_ context.Context, topic, reason 
 func (o *recordingObserver) OnMessageDeadLettered(_ context.Context, topic, result string) {
 	o.mu.Lock()
 	o.deadLettered = append(o.deadLettered, topic+"/"+result)
+	o.wakeLocked()
+	o.mu.Unlock()
+}
+
+func (o *recordingObserver) OnConsumptionBlocked(_ context.Context, topic string, partition int, blocked bool) {
+	state := "resumed"
+	if blocked {
+		state = "blocked"
+	}
+	o.mu.Lock()
+	o.blocked = append(o.blocked, fmt.Sprintf("%s/%d/%s", topic, partition, state))
 	o.wakeLocked()
 	o.mu.Unlock()
 }
@@ -73,6 +91,37 @@ func (o *recordingObserver) waitFor(timeout time.Duration, pred func(discarded, 
 		notify := o.notify
 		o.mu.Unlock()
 		if pred(d, dl) {
+			return true
+		}
+		select {
+		case <-notify:
+		case <-deadline.C:
+			return false
+		}
+	}
+}
+
+// blockedSnapshot returns the on_overflow=block transitions seen so far.
+func (o *recordingObserver) blockedSnapshot() []string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return append([]string(nil), o.blocked...)
+}
+
+// waitForBlocked blocks until pred is satisfied by the blocked-transition list,
+// or timeout. It exists separately from waitFor because a test asserting that
+// consumption HALTED cannot wait on discarded/deadLettered: under
+// on_overflow=block those two lists stay empty forever, which is the very thing
+// being asserted, so a wait keyed on them would time out on success.
+func (o *recordingObserver) waitForBlocked(timeout time.Duration, pred func(blocked []string) bool) bool {
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	for {
+		o.mu.Lock()
+		b := append([]string(nil), o.blocked...)
+		notify := o.notify
+		o.mu.Unlock()
+		if pred(b) {
 			return true
 		}
 		select {

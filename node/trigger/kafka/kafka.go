@@ -157,6 +157,26 @@ func (n *Node) Aggregate(cfg AggregateConfig) *Node {
 	return n
 }
 
+// BlockOnOverflow switches the at-cap policy from dropping the arriving record
+// to halting consumption on that partition until the backlog drains. Requires
+// aggregation to be enabled.
+//
+// It is the on_invalid: fail of overflow, and it costs the same kind of thing.
+// A stalled partition stops fetching, and the group Reader that serves the
+// whole assignment stops with it, so a downstream that never recovers stalls
+// every partition this runner owns rather than one. What it buys is that no
+// record is dropped, which is the only shape in which the aggregator obeys the
+// principle the rest of this package is built on: redelivering a message
+// forever is recoverable, dropping it is not.
+//
+// Choose it for a topic where a lost record is a lost record — an audit or
+// billing stream — and leave the default for one where staying current matters
+// more than completeness.
+func (n *Node) BlockOnOverflow() *Node {
+	n.AggregateValue.OnOverflow = onOverflowBlock
+	return n
+}
+
 // MessageSchema requires each message value to be a JSON object carrying all of
 // fields as top-level keys. Invalid messages are discarded (offset committed,
 // message dropped) but counted and logged — see DiscardInvalid/DeadLetterInvalid
@@ -239,6 +259,20 @@ func (n *Node) RawParams() any {
 			"max_size":       aggregate.MaxSize,
 			"flush_interval": aggregate.FlushInterval.String(),
 			"dedup":          aggregate.Dedup,
+		}
+		// Emitted only when it is not the default, for the reason value_json and
+		// tuning are: normalize fills OnOverflow in for everyone, so writing it
+		// unconditionally would move the definition hash of every workflow that
+		// already aggregates, over a field none of them set.
+		//
+		// It must be written at all, though. This map is rebuilt key by key, and
+		// a key that is not listed here does not reach the runtime — the config
+		// round-trips through it, so a DSL caller's OnOverflow would parse back
+		// as "" on the other side and normalize to discard. The setting would
+		// appear to take and then quietly not apply, which for this particular
+		// setting means losing the records it was chosen to protect.
+		if aggregate.OnOverflow != onOverflowDiscard {
+			params["aggregate"].(map[string]any)["on_overflow"] = aggregate.OnOverflow
 		}
 	}
 	if n.MessageSchemaValue != nil && len(n.MessageSchemaValue.RequiredFields) > 0 {

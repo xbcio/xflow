@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,11 +24,13 @@ const defaultAggregateFlushInterval = 100 * time.Millisecond
 // A failed head therefore cannot grow memory without limit while completed
 // followers wait for it.
 //
-// Overflow drops the ARRIVING message. This is loss, not deferral: a later
-// commit of a higher offset sweeps past the dropped offset. The only signal is
-// OnMessageDiscarded("buffer_overflow"); TestKafkaAggregateShedMessagesAreSilentlySkipped
-// pins that kafka-go behaviour. Avoiding that trade requires partition-selective
-// backpressure or durable spill, neither of which the Reader interface exposes.
+// Overflow drops the ARRIVING message under the default discard policy. That is
+// loss, not deferral: a later commit of a higher offset sweeps past the dropped
+// offset. The only signal is OnMessageDiscarded("buffer_overflow");
+// TestKafkaAggregateShedMessagesAreSilentlySkipped pins that kafka-go
+// behaviour. A deployment that cannot afford the loss selects on_overflow:
+// block instead and pays for it in cross-partition backpressure — see the
+// on_overflow constants for why one shared reader makes those two exclusive.
 const maxBufferedBatches = 4
 
 // maxPartitionPendingBatches is a separate bound from aggregateRuntime.emitSem.
@@ -53,6 +56,31 @@ const defaultEntrySeedFlushInterval = time.Second
 const aggregateByPartition = "partition"
 const aggregateDedupMessage = "message"
 
+// on_overflow selects what happens when a partition holds maxRetained records
+// and another arrives. The two options are a real trade, not a preference, and
+// one shared reader goroutine is what makes them exclusive:
+//
+//	discard  drop the arriving message. The coordinator keeps draining its
+//	         channel, so submit never blocks and the OTHER partitions keep
+//	         being consumed. The dropped offset is never redelivered — a later
+//	         commit of a higher offset sweeps past it (see maxBufferedBatches).
+//
+//	block    stop draining until the backlog clears. Nothing is lost, and
+//	         nothing is consumed either: agg.ch fills, submit blocks, and
+//	         because ONE goroutine reads consumer.Messages() for every
+//	         partition, the whole assignment stops. Lag then grows, which is
+//	         the honest signal that capacity is short.
+//
+// There is no third setting that avoids both, and the missing option is not an
+// oversight. Partition-selective backpressure would need the Reader to pause a
+// single partition, which kafka-go's group Reader does not expose; without it,
+// bounded memory forces a choice between losing the record and stopping the
+// reader that every partition shares.
+const (
+	onOverflowDiscard = "discard"
+	onOverflowBlock   = "block"
+)
+
 // AggregateConfig configures batch aggregation. Reachable from outside the
 // package for the first time — Node.Aggregate takes it, and before the split
 // the type was exported from an internal package with no re-export, so the
@@ -63,6 +91,10 @@ type AggregateConfig struct {
 	MaxSize       int
 	FlushInterval time.Duration
 	Dedup         string
+	// OnOverflow selects discard (default) or block when a partition is at its
+	// retained bound. Empty means discard, which is the behaviour every
+	// deployment had before this field existed.
+	OnOverflow string
 }
 
 // defaultFlushIntervalFor returns the mode-aware flush interval default.
@@ -115,6 +147,16 @@ type partitionAggregator struct {
 	ch          chan Message
 	done        chan struct{}
 	idleTimeout time.Duration
+	// stop is closed by rt.close alongside ch, and is the ONLY shutdown signal
+	// that survives on_overflow=block.
+	//
+	// Every other path learns about shutdown by receiving the zero value from a
+	// closed ch. A blocked partition has removed that receive from its select on
+	// purpose — that is how it stops consuming — so it would never see the close,
+	// never close done, and rt.close would wait out its timeout and leave the
+	// coordinator running for the life of the process. A close signal cannot be
+	// carried on the channel whose receive is the thing being disabled.
+	stop chan struct{}
 }
 
 func activateAggregate(ctx context.Context, in *types.TriggerActivateInput, cfg ConsumerConfig, consumer Consumer, deadLetters DeadLetterPublisher) types.TriggerSubscription {
@@ -211,6 +253,7 @@ func (r *aggregateRuntime) aggregator(key partitionKey) *partitionAggregator {
 		rt:          r,
 		ch:          make(chan Message, r.cfg.MaxSize),
 		done:        make(chan struct{}),
+		stop:        make(chan struct{}),
 		idleTimeout: aggregatorIdleTimeout(r.cfg.FlushInterval),
 	}
 	r.aggregators[key] = agg
@@ -252,6 +295,10 @@ func (r *aggregateRuntime) close(ctx context.Context) {
 		}
 		r.mu.Unlock()
 		for _, agg := range aggregators {
+			// stop before ch. A coordinator that is NOT blocked reaches the closed
+			// ch first either way and takes its normal drain path; one that IS
+			// blocked has no receive on ch to reach, and this is what wakes it.
+			close(agg.stop)
 			close(agg.ch)
 		}
 		go func() {
@@ -362,8 +409,10 @@ func (a *partitionAggregator) run() {
 	commitAttempts := 0
 	closeCommitRetry := false
 	overflowDropped := 0
+	backpressured := false
 	closing := false
 	inputC := (<-chan Message)(a.ch)
+	stopC := (<-chan struct{})(a.stop)
 	var closeTimer *time.Timer
 	var closeC <-chan time.Time
 
@@ -550,6 +599,33 @@ func (a *partitionAggregator) run() {
 		startCommit(now)
 		resetRetryTimer(now)
 	}
+	// beginClose runs the one-time bookkeeping that moves this coordinator into
+	// its drain phase. Extracted because two different events now reach it: the
+	// input channel closing (the normal path) and a.stop closing (the only path
+	// a block-policy partition sitting at its cap can take, since it has no
+	// receive on the input channel left to notice).
+	beginClose := func() {
+		closing = true
+		inputC = nil
+		stopC = nil
+		stopAggregateTimer(flushTimer, &flushTimerActive)
+		stopAggregateTimer(retryTimer, &retryTimerActive)
+		closeTimer = time.NewTimer(aggregateCloseDrainTimeout)
+		closeC = closeTimer.C
+		// A batch already waiting for retry gets one immediate close attempt.
+		// New or currently-running batches also get at most one retry below.
+		for _, batch := range batches {
+			if batch.state == batchRetryWait {
+				batch.retryAt = time.Time{}
+				batch.closeRetry = true
+			}
+		}
+		if !commitRetryAt.IsZero() {
+			commitRetryAt = time.Time{}
+			closeCommitRetry = true
+		}
+		advance()
+	}
 	reportOverflow := func(msg Message) {
 		overflowDropped++
 		if emit, count := discardLog.allow(time.Now(), msg.Topic+"\x00overflow"); emit {
@@ -563,6 +639,30 @@ func (a *partitionAggregator) run() {
 		}
 		obs().OnMessageDiscarded(context.Background(), msg.Topic, "buffer_overflow")
 	}
+	// reportBackpressure announces this partition entering or leaving the state
+	// where it has stopped receiving.
+	//
+	// It needs its own signal because the obvious one lies here. OnConsumerLag
+	// samples only when a message is FETCHED, so a partition that has stopped
+	// fetching leaves its lag gauge frozen at the last value it saw — the
+	// Observer doc says so in as many words. Under this policy that is not a
+	// corner case, it is the steady state: the moment backpressure works, lag
+	// stops updating and the consumer reads as healthy.
+	reportBackpressure := func(blocked bool) {
+		obs().OnConsumptionBlocked(context.Background(), a.key.topic, a.key.partition, blocked)
+		if blocked {
+			slog.Warn("kafka aggregate at cap with on_overflow=block; HALTING consumption "+
+				"(nothing is dropped; this partition's channel will fill and the shared "+
+				"reader stops fetching for every partition until the backlog drains)",
+				"topic", a.key.topic,
+				"partition", a.key.partition,
+				"cap", maxRetained)
+			return
+		}
+		slog.Info("kafka aggregate backlog drained; resuming consumption",
+			"topic", a.key.topic,
+			"partition", a.key.partition)
+	}
 
 	for {
 		if closing && len(batches) == 0 && len(buffer) == 0 && !commitInFlight {
@@ -571,28 +671,40 @@ func (a *partitionAggregator) run() {
 			}
 			return
 		}
+		// readC is inputC except while a block-policy partition sits at its
+		// retained bound, when it is nil so this select simply stops offering the
+		// receive. Ceasing to RECEIVE is the whole mechanism: the message stays in
+		// a.ch, a.ch fills, submit blocks, and the shared reader stops fetching for
+		// every partition. Nothing is dropped and nothing is consumed.
+		//
+		// Only this arm is disabled. Attempt results, commit results and every
+		// timer keep being serviced, which is what lets the backlog drain and the
+		// receive resume — disabling the whole select would deadlock instead.
+		//
+		// Under the default discard policy readC is always inputC, so the
+		// coordinator drains unconditionally and TestKafkaAggregateHeadOfLine
+		// keeps holding.
+		// Computed explicitly rather than as readC == nil: inputC is ALSO nil once
+		// the input closes, and reporting a shutdown as backpressure would page
+		// someone for a clean stop.
+		blocked := !closing && inputC != nil &&
+			a.rt.cfg.OnOverflow == onOverflowBlock && retainedCount() >= maxRetained
+		readC := inputC
+		if blocked {
+			readC = nil
+		}
+		// Edge-triggered, not sampled every iteration: the gauge carries the
+		// state, and the log is the thing an operator greps for after finding a
+		// consumer that stopped. Reporting only transitions also means a partition
+		// that flaps is visible as flapping.
+		if blocked != backpressured {
+			backpressured = blocked
+			reportBackpressure(blocked)
+		}
 		select {
-		case msg, ok := <-inputC:
+		case msg, ok := <-readC:
 			if !ok {
-				closing = true
-				inputC = nil
-				stopAggregateTimer(flushTimer, &flushTimerActive)
-				stopAggregateTimer(retryTimer, &retryTimerActive)
-				closeTimer = time.NewTimer(aggregateCloseDrainTimeout)
-				closeC = closeTimer.C
-				// A batch already waiting for retry gets one immediate close attempt.
-				// New or currently-running batches also get at most one retry below.
-				for _, batch := range batches {
-					if batch.state == batchRetryWait {
-						batch.retryAt = time.Time{}
-						batch.closeRetry = true
-					}
-				}
-				if !commitRetryAt.IsZero() {
-					commitRetryAt = time.Time{}
-					closeCommitRetry = true
-				}
-				advance()
+				beginClose()
 				continue
 			}
 			resetIdle()
@@ -678,6 +790,19 @@ func (a *partitionAggregator) run() {
 			// Outstanding work owns the partition's commit frontier. There is no
 			// safe permanent-failure skip: retain it and continue bounded retries.
 			idleTimer.Reset(a.idleTimeout)
+
+		case <-stopC:
+			// Reached only when the input receive above was disabled by
+			// backpressure; otherwise the closed input channel wins the race often
+			// enough that this is redundant, and beginClose is idempotent by way of
+			// nilling stopC.
+			//
+			// Anything still sitting in a.ch is abandoned here rather than drained.
+			// That is the correct direction for this policy: those offsets were
+			// never committed, so the next generation redelivers them. Draining
+			// them would mean waiting for the same wedged downstream that caused
+			// the backpressure, which is what the close timeout exists to bound.
+			beginClose()
 
 		case <-closeC:
 			return
@@ -860,6 +985,7 @@ func aggregateConfigFromParamForMode(v any, entrySeed bool) (AggregateConfig, er
 		MaxSize:       conv.PositiveInt(raw["max_size"], defaultAggregateMaxSize),
 		FlushInterval: defaultFlushIntervalFor(entrySeed),
 		Dedup:         cast.ToString(raw["dedup"]),
+		OnOverflow:    strings.ToLower(strings.TrimSpace(cast.ToString(raw["on_overflow"]))),
 	}
 	if !cfg.Enabled {
 		return AggregateConfig{}, nil
@@ -877,6 +1003,13 @@ func aggregateConfigFromParamForMode(v any, entrySeed bool) (AggregateConfig, er
 	}
 	if cfg.Dedup != aggregateDedupMessage {
 		return AggregateConfig{}, fmt.Errorf("kafka aggregate dedup %q is not supported", cfg.Dedup)
+	}
+	// Rejected rather than defaulted, matching on_invalid: a typo here silently
+	// choosing "lose records under load" is the one outcome an operator who
+	// bothered to set this field cannot have wanted.
+	if cfg.OnOverflow != onOverflowDiscard && cfg.OnOverflow != onOverflowBlock {
+		return AggregateConfig{}, fmt.Errorf("kafka aggregate on_overflow %q is not supported (want %q or %q)",
+			cfg.OnOverflow, onOverflowDiscard, onOverflowBlock)
 	}
 	return cfg, nil
 }
@@ -901,6 +1034,13 @@ func normalizeAggregateConfig(cfg AggregateConfig) AggregateConfig {
 	}
 	if cfg.Dedup == "" {
 		cfg.Dedup = aggregateDedupMessage
+	}
+	// Unset means discard, so every deployment that predates this field keeps
+	// the behaviour it already had. Opting into block is a decision to trade
+	// assignment-wide consumption for completeness, and nobody gets moved onto
+	// that trade by upgrading.
+	if cfg.OnOverflow == "" {
+		cfg.OnOverflow = onOverflowDiscard
 	}
 	return cfg
 }

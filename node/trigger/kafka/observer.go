@@ -51,6 +51,21 @@ type Observer interface {
 	// is now-minus-fetchedAt, and a lag figure is only worth reading if that is
 	// small. Reporting lag alone would have been worse than reporting nothing.
 	OnConsumerLag(ctx context.Context, topic string, partition int, lag int64, fetchedAt time.Time)
+	// OnConsumptionBlocked reports a partition halting or resuming consumption
+	// under on_overflow=block. blocked is the new state, reported on transitions
+	// only.
+	//
+	// Partition is a label here for the same reason it is on OnConsumerLag, and
+	// with more force: this is a per-partition state, and one blocked partition
+	// among seventeen healthy ones is precisely the case an operator needs to
+	// tell apart from a whole assignment stopping.
+	//
+	// It exists because OnConsumerLag cannot report this. That sample only
+	// advances when a message is fetched, so a partition applying backpressure —
+	// which means it has stopped fetching — holds its lag at the last value it
+	// saw. Without this signal the healthiest-looking consumer in the fleet is
+	// the one that has stopped.
+	OnConsumptionBlocked(ctx context.Context, topic string, partition int, blocked bool)
 	// OnBatchFlushed reports one batch ATTEMPTING to leave the aggregator.
 	// trigger is a fixed enum: "size", "timeout", "idle", "close". size is the
 	// message count.
@@ -86,6 +101,7 @@ type noopObserver struct{}
 func (noopObserver) OnMessageDiscarded(context.Context, string, string)           {}
 func (noopObserver) OnMessageDeadLettered(context.Context, string, string)        {}
 func (noopObserver) OnConsumerLag(context.Context, string, int, int64, time.Time) {}
+func (noopObserver) OnConsumptionBlocked(context.Context, string, int, bool)      {}
 func (noopObserver) OnBatchFlushed(context.Context, string, string, int)          {}
 func (noopObserver) OnBatchFlushOutcome(context.Context, string, string, string)  {}
 func (noopObserver) OnBatchAdmission(context.Context, string, string, string)     {}

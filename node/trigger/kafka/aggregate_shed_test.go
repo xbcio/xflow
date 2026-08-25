@@ -125,8 +125,14 @@ func (c *shedTrackingConsumer) commitSnapshot() (highest int64, delivered, commi
 //
 // This test does not assert that shedding is wrong: at cap, something must give.
 // It asserts that the loss is REAL, so the code cannot go on describing it as a
-// deferred redelivery. If a future design makes shed messages genuinely
-// recoverable, this test goes red and should be rewritten to pin that instead.
+// deferred redelivery.
+//
+// What it pins is now the DEFAULT policy rather than the only one. A deployment
+// that cannot afford this sets on_overflow: block, which halts consumption
+// instead of dropping — see TestKafkaAggregateOverflowPolicyIsAChoice, which
+// runs one fixture through both and is the reason this file's numbers can be
+// read as a choice rather than as a limitation. The default is unchanged, so
+// everything below still describes what an unconfigured topic does.
 func TestKafkaAggregateShedMessagesAreSilentlySkipped(t *testing.T) {
 	const (
 		maxSize    = 4

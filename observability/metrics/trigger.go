@@ -18,6 +18,7 @@ const (
 	metricTriggerBatchAdmission      = "xflow_trigger_batch_admissions_total"
 	metricTriggerConsumerLag         = "xflow_trigger_consumer_lag"
 	metricTriggerLastFetchTimestamp  = "xflow_trigger_last_fetch_timestamp_seconds"
+	metricTriggerConsumptionBlocked  = "xflow_trigger_consumption_blocked"
 )
 
 // TriggerMetrics observes trigger message-handling outcomes.
@@ -140,6 +141,35 @@ func (t TriggerMetrics) OnConsumerLag(ctx context.Context, topic string, partiti
 	// whole seconds exact, which is the part an alert on time()-this compares.
 	t.Metrics.Set(metricTriggerLastFetchTimestamp, labels,
 		float64(fetchedAt.Unix())+float64(fetchedAt.Nanosecond())/1e9)
+}
+
+// OnConsumptionBlocked records whether a partition has stopped consuming to
+// avoid dropping records, under on_overflow=block.
+//
+// A gauge rather than a counter because the question an operator asks is "is it
+// blocked right now", and because the transitions are already in the log. It is
+// Set on transitions only, so between two edges the series holds — which is
+// what a gauge is for.
+//
+// partition is a label, and this is the second place in this file that admits
+// one. It is not optional here: the state IS per-partition, so one gauge Set
+// from every partition would report whichever wrote last, and one blocked
+// partition among seventeen healthy ones — the case worth paging on — would be
+// erased by the next healthy partition's report. That failure is not
+// hypothetical; xflow_wasm_instance_total shipped without an identity label and
+// reported 8 while the truth was 16.
+//
+// Alert on this together with xflow_trigger_messages_discarded_total, not
+// instead of it: the two policies fail in opposite directions, and a topic
+// shows exactly one of them.
+func (t TriggerMetrics) OnConsumptionBlocked(ctx context.Context, topic string, partition int, blocked bool) {
+	v := 0.0
+	if blocked {
+		v = 1.0
+	}
+	t.Metrics.Set(metricTriggerConsumptionBlocked, withNamespace(ctx, map[string]string{
+		"topic": topic, "partition": strconv.Itoa(partition),
+	}), v)
 }
 
 var _ kafkatrigger.Observer = TriggerMetrics{}
