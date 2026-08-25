@@ -99,6 +99,26 @@ return {1}
 // Returns {code, done, finalStatus}: code 0=stale 1=accepted 2=duplicate_terminal
 //
 //	3=execution_inactive
+//
+// A MISSING exec:status is execution_inactive, not a fall-through. Lua reads an
+// absent key as false, which equals none of the four terminal strings, so the
+// check below used to skip a vanished execution entirely — and unlike the node
+// path there was no second fence to catch it: the group unit's own status and
+// lease token are unrelated keys, so a live lease on a still-'running' unit sent
+// the commit straight through. The script then wrote boundary outputs and
+// decremented remaining/failed counters for an execution Redis no longer has.
+//
+// The absence is reachable, not defensive. exec:status is re-EXPIREd only on the
+// execution's own transitions, while the group unit's keys are re-EXPIREd on
+// every commit, so a long-lived execution can outlive its status key. In
+// transient mode that is the documented `transientTTL > max execution
+// wall-clock` invariant, and nothing enforces it.
+//
+// One pre-existing divergence from the local backend is deliberately left in
+// place: local checks the group-unit fence FIRST, so a terminal execution with
+// no group unit gets StaleToken there and execution_inactive here. Reporting a
+// finished execution as a lease problem is the worse of the two answers, so the
+// local ordering is the one to change, not this.
 var commitGroupLua = redis.NewScript(`
 local status = redis.call('GET', KEYS[5])
 if status == 'done' then
@@ -109,6 +129,9 @@ if status == 'done' then
     return {0, 0, ''}
 end
 local execStatus = redis.call('GET', KEYS[1])
+if execStatus == false then
+    return {3, 0, ''}
+end
 if execStatus == 'success' or execStatus == 'failed' or execStatus == 'canceled' or execStatus == 'timeout' then
     return {3, 0, execStatus}
 end

@@ -8,7 +8,30 @@ import (
 // results. It deliberately does not expose a committing state: validation,
 // terminal state, completion counters, lease index removal, and advance
 // outbox intent are persisted by one Redis command.
+//
+// The execution's status key is read first and an absent key short-circuits to
+// ExecutionInactive, mirroring the local backend, whose `entry == nil` check is
+// likewise the first thing CommitNode does. Absence used to fall through: Lua
+// reads a missing key as `false`, which matches none of the terminal status
+// strings, so the script went on to the lease comparison and answered
+// StaleToken — or, when the node's own keys were still present and the lease
+// still matched, accepted the commit outright and mutated counters belonging to
+// an execution Redis no longer has. The two backends disagreed on the same
+// call, and the engine turns StaleToken into ErrInvalidLeaseToken while
+// ExecutionInactive is not an error at all, so the runner was told its lease
+// token was bad when what had actually happened was that the execution was
+// gone.
+//
+// Absence is reachable, not defensive: node keys are re-EXPIREd on every commit
+// here, while the execution status key is only rewritten on the execution's
+// terminal transition. A long-lived execution can therefore outlive its own
+// status key — in transient mode that is the documented
+// "transientTTL > max execution wall-clock" invariant, and nothing enforces it.
 var commitNodeLua = redis.NewScript(`
+local executionStatus = redis.call('GET', KEYS[1])
+if executionStatus == false then
+    return {3, 0, ''}
+end
 local terminal = function(value)
     return value == 'success' or value == 'failed' or value == 'skipped' or value == 'canceled' or value == 'continued'
 end
@@ -28,7 +51,6 @@ if terminal(status) then
     end
     return {0, 0, ''}
 end
-local executionStatus = redis.call('GET', KEYS[1])
 if executionStatus == 'success' or executionStatus == 'failed' or executionStatus == 'canceled' or executionStatus == 'timeout' then
     return {3, 0, executionStatus}
 end

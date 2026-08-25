@@ -197,6 +197,7 @@ func RunStateStoreContract(t *testing.T, state engine.StateStore) {
 	runDurableSignalTOCTOU(t, state)
 	runCancelSuspendedNode(t, state)
 	runExecutionStatusAgreesWithSnapshot(t, state)
+	runCommitNodeAgainstMissingExecution(t, state)
 }
 
 // runExecutionStatusAgreesWithSnapshot pins that the narrow status read and the
@@ -818,5 +819,55 @@ func runDurableSignalTOCTOU(t *testing.T, state engine.StateStore) {
 	if len(final) != len(before)+1 {
 		t.Fatalf("outbox entries after the valid delivery = %d, want %d: the resume "+
 			"the contract says was committed is not in the outbox", len(final), len(before)+1)
+	}
+}
+
+// runCommitNodeAgainstMissingExecution pins that both backends classify a
+// commit whose execution no longer exists as ExecutionInactive.
+//
+// It is the same call with two answers otherwise, and the answers are not
+// interchangeable: engine.finishAtomicCommit returns ErrInvalidLeaseToken for
+// StaleToken and nil for ExecutionInactive, so the runner is either told its
+// lease token was bad — inviting the retry that a fresh lease would satisfy —
+// or told the work is simply over.
+//
+// The absent execution is spelled here as one that was never created, because
+// that is the only way to say "no execution record" through the StateStore
+// interface. The reachable production shape is the same state arrived at from
+// the other side: commitNodeLua re-EXPIREs the node's keys on every commit but
+// only rewrites the execution status key on the execution's terminal
+// transition, so a long-lived execution can outlive its own status key and
+// commit against nothing.
+func runCommitNodeAgainstMissingExecution(t *testing.T, state engine.StateStore) {
+	t.Helper()
+	ctx := context.Background()
+
+	atomic, ok := state.(engine.AtomicStateStore)
+	if !ok {
+		t.Fatalf("%T does not implement engine.AtomicStateStore", state)
+	}
+
+	res, err := atomic.CommitNode(ctx, engine.CommitNodeRequest{
+		ExecutionID:  "exec-contract-commit-no-such-execution",
+		NodeName:     "start",
+		NodeIdx:      0,
+		ActivationID: 0,
+		LeaseID:      "lease-contract-ghost",
+		LeaseToken:   "token-contract-ghost",
+		Attempt:      1,
+		Status:       types.NodeStatusSuccess,
+	})
+	if err != nil {
+		t.Fatalf("CommitNode(missing execution) error = %v", err)
+	}
+	if res.Outcome != engine.CommitOutcomeExecutionInactive {
+		t.Errorf("CommitNode(missing execution).Outcome = %q, want %q. StaleToken here "+
+			"reports a lease problem for what is actually a vanished execution, and the "+
+			"engine turns it into ErrInvalidLeaseToken while ExecutionInactive is not an "+
+			"error at all.", res.Outcome, engine.CommitOutcomeExecutionInactive)
+	}
+	if res.Applied {
+		t.Errorf("CommitNode(missing execution).Applied = true: the commit was written "+
+			"against an execution record that does not exist (outcome %q)", res.Outcome)
 	}
 }
