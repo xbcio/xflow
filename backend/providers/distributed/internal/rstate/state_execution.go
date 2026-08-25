@@ -405,9 +405,35 @@ func (s *Store) GetExecutionStatus(ctx context.Context, id types.ExecutionID) (t
 	return types.ExecutionStatus(val), true, nil
 }
 
+// GetExecution assembles a full snapshot from the eight per-field keys the
+// execution is stored across. They are read in one pipeline: they are
+// independent GETs of the same execution, so issuing them back to back — as
+// this did — cost eight sequential network round trips to answer one call.
+//
+// It is worth the change because this is per-task traffic, not an occasional
+// read: engine's buildInput calls it on every BuildTaskLease and
+// RecoverTaskLease, and executionSubmissionContext calls it on every batch body.
+//
+// The absent-execution path now issues all eight commands where it used to stop
+// after the status GET. That is seven extra COMMANDs on a path that was one
+// round trip and still is; the returned snapshot is unchanged.
 func (s *Store) GetExecution(ctx context.Context, id types.ExecutionID) (*engine.ExecutionSnapshot, error) {
 	t := namespace.FromContext(ctx)
-	val, err := s.rdb.Get(ctx, execKey(t, id, "status")).Result()
+	pipe := s.rdb.Pipeline()
+	statusCmd := pipe.Get(ctx, execKey(t, id, "status"))
+	paramsCmd := pipe.Get(ctx, execKey(t, id, "params"))
+	runtimeCmd := pipe.Get(ctx, execKey(t, id, "runtime"))
+	scopeCmd := pipe.Get(ctx, execKey(t, id, "scope"))
+	traceIDCmd := pipe.Get(ctx, execKey(t, id, "trace_id"))
+	spanIDCmd := pipe.Get(ctx, execKey(t, id, "span_id"))
+	carrierCmd := pipe.Get(ctx, execKey(t, id, "trace_carrier"))
+	errorCmd := pipe.Get(ctx, execKey(t, id, "error"))
+	// Exec surfaces the first command error, and redis.Nil is the expected answer
+	// for most of these keys. The per-command results below are authoritative.
+	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
+		return nil, fmt.Errorf("get execution %q: %w", id, err)
+	}
+	val, err := statusCmd.Result()
 	if err == redis.Nil {
 		return nil, nil
 	}
@@ -418,7 +444,7 @@ func (s *Store) GetExecution(ctx context.Context, id types.ExecutionID) (*engine
 	g := s.graphs[id]
 	s.mu.RUnlock()
 	var params map[string]any
-	if raw, err := s.rdb.Get(ctx, execKey(t, id, "params")).Bytes(); err == nil {
+	if raw, err := paramsCmd.Bytes(); err == nil {
 		if err := json.Unmarshal(raw, &params); err != nil {
 			return nil, fmt.Errorf("unmarshal execution params %q: %w", id, err)
 		}
@@ -426,7 +452,7 @@ func (s *Store) GetExecution(ctx context.Context, id types.ExecutionID) (*engine
 		return nil, fmt.Errorf("get execution params %q: %w", id, err)
 	}
 	var runtime *types.Runtime
-	if raw, err := s.rdb.Get(ctx, execKey(t, id, "runtime")).Bytes(); err == nil {
+	if raw, err := runtimeCmd.Bytes(); err == nil {
 		var decoded types.Runtime
 		if err := json.Unmarshal(raw, &decoded); err != nil {
 			return nil, fmt.Errorf("unmarshal execution runtime %q: %w", id, err)
@@ -436,7 +462,7 @@ func (s *Store) GetExecution(ctx context.Context, id types.ExecutionID) (*engine
 		return nil, fmt.Errorf("get execution runtime %q: %w", id, err)
 	}
 	var scope map[string]any
-	if raw, err := s.rdb.Get(ctx, execKey(t, id, "scope")).Bytes(); err == nil {
+	if raw, err := scopeCmd.Bytes(); err == nil {
 		if err := json.Unmarshal(raw, &scope); err != nil {
 			return nil, fmt.Errorf("unmarshal execution scope %q: %w", id, err)
 		}
@@ -444,19 +470,19 @@ func (s *Store) GetExecution(ctx context.Context, id types.ExecutionID) (*engine
 		return nil, fmt.Errorf("get execution scope %q: %w", id, err)
 	}
 	var traceID string
-	if raw, err := s.rdb.Get(ctx, execKey(t, id, "trace_id")).Result(); err == nil {
+	if raw, err := traceIDCmd.Result(); err == nil {
 		traceID = raw
 	} else if err != redis.Nil {
 		return nil, fmt.Errorf("get execution trace ID %q: %w", id, err)
 	}
 	var spanID string
-	if raw, err := s.rdb.Get(ctx, execKey(t, id, "span_id")).Result(); err == nil {
+	if raw, err := spanIDCmd.Result(); err == nil {
 		spanID = raw
 	} else if err != redis.Nil {
 		return nil, fmt.Errorf("get execution span ID %q: %w", id, err)
 	}
 	var traceCarrier map[string]string
-	if raw, err := s.rdb.Get(ctx, execKey(t, id, "trace_carrier")).Bytes(); err == nil {
+	if raw, err := carrierCmd.Bytes(); err == nil {
 		if err := json.Unmarshal(raw, &traceCarrier); err != nil {
 			return nil, fmt.Errorf("unmarshal execution trace carrier %q: %w", id, err)
 		}
@@ -467,7 +493,7 @@ func (s *Store) GetExecution(ctx context.Context, id types.ExecutionID) (*engine
 	// CyclicFinalError branch, but was never read back until now. Absent is the
 	// normal case (every non-failed execution), hence the redis.Nil tolerance.
 	var execErr string
-	if raw, err := s.rdb.Get(ctx, execKey(t, id, "error")).Result(); err == nil {
+	if raw, err := errorCmd.Result(); err == nil {
 		execErr = raw
 	} else if err != redis.Nil {
 		return nil, fmt.Errorf("get execution error %q: %w", id, err)
