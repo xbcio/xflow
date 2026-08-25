@@ -300,12 +300,16 @@ func seedAndCommitNode(t *testing.T, name, secret string, transient bool) []*sto
 			"was ever attempted", res.Outcome)
 	}
 
-	// An explicit Limit, not store.ListOptions{}. Normalized() documents limit=0
-	// as "unbounded" and memstore implements it that way, but sqlstore hands the
-	// zero straight to GORM's Limit(0), which emits a literal LIMIT 0 and returns
-	// nothing. A zero-valued ListOptions here makes every row-absence assertion
-	// in this file pass unconditionally -- which is exactly how the transient
-	// node-commit case first appeared to pass against unfixed code.
+	// An explicit Limit, kept after the underlying bug was fixed. sqlstore used
+	// to hand the normalized zero straight to GORM's Limit(0), which emits a
+	// literal LIMIT 0 and returns nothing, so a zero-valued ListOptions made
+	// every row-absence assertion in this file pass unconditionally -- which is
+	// exactly how the transient node-commit case first appeared to pass against
+	// unfixed code. store/sqlstore/paginate.go now treats zero as unbounded, per
+	// the documented contract, and
+	// TestPaginatedListsTreatZeroLimitAsUnbounded pins it. The explicit limit
+	// stays because an unbounded list is the wrong default for a test that only
+	// ever expects a handful of rows.
 	nodes, err := db.ListNodes(ctx, execID, store.ListOptions{Limit: 100})
 	if err != nil {
 		t.Fatalf("ListNodes(%q): %v", execID, err)

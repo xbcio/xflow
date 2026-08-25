@@ -98,14 +98,11 @@ func (r *signalRepo) ListSignalsByNames(ctx context.Context, id types.ExecutionI
 	if len(names) == 0 {
 		return nil, nil
 	}
-	opts = opts.Normalized()
 	var ds []*dbSignal
-	err := r.db.WithContext(ctx).
+	q := r.db.WithContext(ctx).
 		Where("execution_id = ? AND status = ? AND signal_name IN ?", string(id), types.SignalStatusActive, names).
-		Order("id").
-		Limit(opts.Limit).
-		Offset(opts.Offset).
-		Find(&ds).Error
+		Order("id")
+	err := applyPagination(q, opts).Find(&ds).Error
 	if err := wrapDBErr(fmt.Sprintf("list signals %q", id), err); err != nil {
 		return nil, err
 	}

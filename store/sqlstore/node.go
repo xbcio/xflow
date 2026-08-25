@@ -59,14 +59,11 @@ func (r *nodeRepo) GetNode(ctx context.Context, id types.ExecutionID, name strin
 }
 
 func (r *nodeRepo) ListNodes(ctx context.Context, id types.ExecutionID, opts store.ListOptions) ([]*store.NodeRecord, error) {
-	opts = opts.Normalized()
 	var ds []*dbNode
-	err := r.db.WithContext(ctx).
+	q := r.db.WithContext(ctx).
 		Where("execution_id = ?", string(id)).
-		Order("id").
-		Limit(opts.Limit).
-		Offset(opts.Offset).
-		Find(&ds).Error
+		Order("id")
+	err := applyPagination(q, opts).Find(&ds).Error
 	if err := wrapDBErr(fmt.Sprintf("list nodes %q", id), err); err != nil {
 		return nil, err
 	}
@@ -85,14 +82,11 @@ func (r *nodeRepo) ListSuspendedBySignal(ctx context.Context, id types.Execution
 }
 
 func (r *nodeRepo) ListExpiredSuspensions(ctx context.Context, now time.Time, opts store.ListOptions) ([]*store.NodeRecord, error) {
-	opts = opts.Normalized()
 	var ds []*dbNode
-	err := r.db.WithContext(ctx).
+	q := r.db.WithContext(ctx).
 		Where("status = ? AND timeout_at IS NOT NULL AND timeout_at <= ?", string(types.NodeStatusSuspended), now).
-		Order("id").
-		Limit(opts.Limit).
-		Offset(opts.Offset).
-		Find(&ds).Error
+		Order("id")
+	err := applyPagination(q, opts).Find(&ds).Error
 	if err := wrapDBErr("list expired suspensions", err); err != nil {
 		return nil, err
 	}
