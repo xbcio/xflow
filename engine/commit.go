@@ -35,12 +35,34 @@ func (e *Engine) CommitTaskResultWithOutcome(ctx context.Context, lease *TaskLea
 		return e.CommitSubgraphResult(ctx, lease, result)
 	}
 	t := &lease.Task
-	g, active, err := e.loadActiveGraph(ctx, t.ExecutionID)
+	g, err := e.loadGraph(ctx, t.ExecutionID)
 	if err != nil {
 		return CommitOutcomeTransientError, err
 	}
-	if !active {
+	if g == nil {
 		return CommitOutcomeExecutionInactive, nil
+	}
+
+	// The acyclic node commit is fenced server-side: CommitNode re-reads the
+	// execution status inside the same transition that would write, and answers
+	// execution_inactive for a terminal one and for one whose status key is gone
+	// — the same verdict, from the same key, that a probe here would produce, and
+	// one round trip later instead of one round trip earlier. Asking first only
+	// buys an earlier "no" on the rare terminal commit, at the cost of a round
+	// trip on every ordinary one.
+	//
+	// Every other path below still probes. The suspend and cyclic commits do not
+	// go through CommitNode, so nothing downstream of them re-decides liveness.
+	fencedByCommitNode := !g.AllowCycles() && result.Suspend == nil && !taskResultExpands(g, lease, result)
+	if !fencedByCommitNode {
+		active, err := e.executionActive(ctx, t.ExecutionID)
+		if err != nil {
+			return CommitOutcomeTransientError, err
+		}
+		if !active {
+			e.EvictExecution(t.ExecutionID)
+			return CommitOutcomeExecutionInactive, nil
+		}
 	}
 
 	if result.Suspend != nil && e.suspendDisabled {
@@ -50,8 +72,15 @@ func (e *Engine) CommitTaskResultWithOutcome(ctx context.Context, lease *TaskLea
 		return CommitOutcomeAccepted, nil
 	}
 
-	if !g.AllowCycles() && result.Suspend == nil && !taskResultExpands(g, lease, result) {
-		return e.commitAcyclicTaskResult(ctx, lease, g, result)
+	if fencedByCommitNode {
+		outcome, err := e.commitAcyclicTaskResult(ctx, lease, g, result)
+		if outcome == CommitOutcomeExecutionInactive {
+			// The eviction loadActiveGraph used to do here. Without it a finished
+			// execution's graph would sit in the cache until something else
+			// cleared it, and every later commit for it would re-reach this line.
+			e.EvictExecution(t.ExecutionID)
+		}
+		return outcome, err
 	}
 	if result.Suspend != nil {
 		return e.commitSuspendedTaskResult(ctx, lease, result)

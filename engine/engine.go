@@ -278,6 +278,37 @@ func (e *Engine) failInitialExecution(ctx context.Context, id types.ExecutionID,
 	return fmt.Errorf("%s: %w", operation, cause)
 }
 
+// loadGraph returns an execution's compiled graph without asking whether the
+// execution is still active.
+//
+// It exists for callers whose very next act is a fenced server-side mutation
+// that re-decides liveness itself and reports execution_inactive when it says
+// no. For those, loadActiveGraph's status read is a second opinion on a question
+// the mutation answers authoritatively a round trip later — and one the caller
+// pays for on every commit, not just the rare terminal one.
+//
+// Callers must evict on an inactive verdict themselves; that is the side effect
+// loadActiveGraph performs here and this function deliberately cannot.
+func (e *Engine) loadGraph(ctx context.Context, id types.ExecutionID) (*graph.Graph, error) {
+	e.mu.RLock()
+	g, ok := e.graphs[id]
+	e.mu.RUnlock()
+	if ok {
+		return g, nil
+	}
+	g, err := e.state.LoadGraph(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("load graph for %q: %w", id, err)
+	}
+	if g == nil {
+		return nil, nil
+	}
+	e.mu.Lock()
+	e.graphs[id] = g
+	e.mu.Unlock()
+	return g, nil
+}
+
 func (e *Engine) loadActiveGraph(ctx context.Context, id types.ExecutionID) (*graph.Graph, bool, error) {
 	e.mu.RLock()
 	g, ok := e.graphs[id]

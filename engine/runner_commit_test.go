@@ -531,7 +531,32 @@ func TestEngine_CommitTaskResultWithOutcomeClassifiesAcceptedDuplicateAndStale(t
 	})
 }
 
-func TestEngine_CommitTaskResultWithOutcomeClassifiesExecutionInactive(t *testing.T) {
+// TestEngine_CommitTaskResultWithOutcomeClassifiesDuplicateTerminal replays one
+// lease twice against a single-node workflow, so the second commit is a
+// redelivery of a node that already committed terminal AND lands on an
+// execution the first commit finished. Both descriptions are true; the outcome
+// reports the first.
+//
+// It used to report the second. That was not a decision — both backends check
+// node-dedup before execution-terminal (memoryState.CommitNode in
+// backend/providers/local/atomic_state.go, and commitNodeLua in
+// backend/providers/distributed/internal/rstate/atomic_state.go, whose leading
+// GET tests only whether the status key still EXISTS; its terminal test sits
+// below the dedup block). The engine simply happened to ask about the execution
+// before calling CommitNode at all, so the coarser answer arrived first.
+// Dropping that pre-check — it cost a round trip on every ordinary commit to
+// pre-empt a rare one — lets CommitNode's own ordering decide, and CommitNode
+// names the nearer cause: this exact commit already happened.
+//
+// The fake this runs against mirrors that ordering. Reordering it flips this
+// test to execution_inactive, which is what makes the assertion a statement
+// about the ordering rather than about the fake.
+//
+// Nothing downstream tells the two apart. Both release leased capacity, both
+// set RemoveSeen, both return Accepted:true to the runner, and neither reaches
+// the wire — protocol.ReportResultResponse carries no outcome field. The one
+// visible difference is which xflow_commit_outcomes_total label increments.
+func TestEngine_CommitTaskResultWithOutcomeClassifiesDuplicateTerminal(t *testing.T) {
 	ctx := context.Background()
 	eng, queue := newRunnerCommitEngine(t)
 	submitRunnerCommitWorkflow(t, ctx, eng)
@@ -556,10 +581,59 @@ func TestEngine_CommitTaskResultWithOutcomeClassifiesExecutionInactive(t *testin
 		Output: &types.Output{Data: map[string]any{"late": true}},
 	})
 	if err != nil {
+		t.Fatalf("replayed CommitTaskResultWithOutcome() error = %v, want nil", err)
+	}
+	if outcome != CommitOutcomeDuplicateTerminal {
+		t.Fatalf("replayed outcome = %s, want %s", outcome, CommitOutcomeDuplicateTerminal)
+	}
+}
+
+// TestEngine_CommitTaskResultWithOutcomeClassifiesExecutionInactive covers the
+// case the duplicate test above no longer does: a node that has NOT committed,
+// on an execution that is over. With node-dedup unable to fire, CommitNode's
+// execution-terminal check is what answers — which is the point, because that
+// check is now the only thing standing where the engine's pre-check used to be.
+// Remove it from the fake and this test reports accepted.
+func TestEngine_CommitTaskResultWithOutcomeClassifiesExecutionInactive(t *testing.T) {
+	ctx := context.Background()
+	state := newFakeState()
+	queue := &fakeQueue{}
+	eng := New(state, queue)
+
+	// Two nodes so cancelling leaves a live lease on an uncommitted node.
+	id, err := eng.Submit(ctx, compileCommitProbeGraph(t), nil)
+	if err != nil {
+		t.Fatalf("Submit() error = %v", err)
+	}
+	if err := eng.FlushOutbox(ctx, id); err != nil {
+		t.Fatalf("FlushOutbox() error = %v", err)
+	}
+	lease, err := eng.BuildTaskLease(ctx, queue.Drain()[0])
+	if err != nil || lease == nil {
+		t.Fatalf("BuildTaskLease() = %v, %v", lease, err)
+	}
+
+	if err := state.UpdateExecutionStatus(ctx, id, types.ExecutionStatusCanceled, ""); err != nil {
+		t.Fatalf("UpdateExecutionStatus() error = %v", err)
+	}
+
+	outcome, err := eng.CommitTaskResultWithOutcome(ctx, lease, TaskResult{
+		Output: &types.Output{Data: map[string]any{"late": true}},
+	})
+	if err != nil {
 		t.Fatalf("inactive CommitTaskResultWithOutcome() error = %v, want nil", err)
 	}
 	if outcome != CommitOutcomeExecutionInactive {
 		t.Fatalf("inactive outcome = %s, want %s", outcome, CommitOutcomeExecutionInactive)
+	}
+	// The node must not have been written: an execution-inactive verdict that
+	// still committed would be a fence that reports without fencing.
+	node, err := state.GetNode(ctx, id, "start")
+	if err != nil {
+		t.Fatalf("GetNode() error = %v", err)
+	}
+	if node != nil && types.IsTerminalNodeStatus(node.Status) {
+		t.Fatalf("node committed %s despite an inactive verdict", node.Status)
 	}
 }
 
