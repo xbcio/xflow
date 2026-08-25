@@ -156,9 +156,23 @@ func TestCyclicReliabilityProcessRecovery(t *testing.T) {
 	if phaseB.DAGAdvances != 0 {
 		t.Fatalf("phase B DAG advances = %d, want 0 (recovery must not double-advance; delivery != commit)", phaseB.DAGAdvances)
 	}
-	_ = startB // recovery time is recorded by the helper
-	if phaseB.RecoveryTimeMS < 0 {
-		t.Fatalf("phase B recovery time = %d ms, want >=0", phaseB.RecoveryTimeMS)
+	// The helper computes RecoveryTimeMS from time.Since, so ">= 0" was a
+	// tautology: a monotonic elapsed span cannot be negative, and a report
+	// written by a failure path leaves the field at its zero value, which also
+	// passes. The number is not decoration — it is what the log line below and
+	// the A0 fault report present as the measured recovery — so bound it against
+	// something that can actually disagree: the parent's own wall time for the
+	// whole phase-B process. The helper's span is a sub-interval of that process,
+	// so exceeding it means the two measurements are not describing the same
+	// thing and the reported figure is meaningless.
+	//
+	// No lower bound. The drain runs once before the first tick, so a delivery
+	// already waiting yields an honest 0 ms.
+	if wallB := time.Since(startB).Milliseconds(); phaseB.RecoveryTimeMS > wallB {
+		t.Fatalf("phase B recovery time = %d ms, but the whole phase B process took "+
+			"%d ms: the helper's recovery span is measured inside that process, so it "+
+			"cannot exceed it. The reported recovery figure is not measuring what it "+
+			"claims to.", phaseB.RecoveryTimeMS, wallB)
 	}
 
 	// Distinct evidence: duplicate *delivery* is permitted (the dispatcher may
@@ -383,6 +397,7 @@ func TestA0OSKillSIGKILLRecovery(t *testing.T) {
 	)
 	cmdB := exec.Command(bin, argsB...)
 	cmdB.Env = envB
+	startB := time.Now()
 	if out, err := cmdB.CombinedOutput(); err != nil {
 		t.Fatalf("phase B helper failed: %v\n%s", err, out)
 	}
@@ -421,6 +436,17 @@ func TestA0OSKillSIGKILLRecovery(t *testing.T) {
 	if phaseB.SystemTaskDeliveries != phaseB.QueueDeliveries {
 		t.Fatalf("phase B system task deliveries = %d, want %d (must equal measured redelivery count, separated from handler invocations)",
 			phaseB.SystemTaskDeliveries, phaseB.QueueDeliveries)
+	}
+	// RecoveryTimeMS was forwarded into the A0 fault report below without ever
+	// being checked, and the report presents it as "a measured recovery". Bound
+	// it by the parent's wall time for the phase B process: the helper measures
+	// its span inside that process, so a larger figure means the number is not
+	// measuring the recovery it is labelled with. Same reasoning as the graceful
+	// sibling above; no lower bound, for the same reason.
+	if wallB := time.Since(startB).Milliseconds(); phaseB.RecoveryTimeMS > wallB {
+		t.Fatalf("phase B recovery time = %d ms, but the whole phase B process took "+
+			"%d ms: the figure written into the A0 fault report cannot be a "+
+			"sub-interval of a shorter span.", phaseB.RecoveryTimeMS, wallB)
 	}
 
 	// Record the structured evidence: a real, signal-killed process whose
