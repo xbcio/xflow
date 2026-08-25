@@ -8,6 +8,7 @@ import (
 	"github.com/xbcio/xflow/types"
 	"io"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/xbcio/xflow/node"
@@ -413,5 +414,110 @@ func TestHTTP_RedirectToDisallowedHostRejected(t *testing.T) {
 	var ce *types.ClassifiedError
 	if !errors.As(err, &ce) || ce.Code != "http.host_not_allowed" {
 		t.Fatalf("expected code=http.host_not_allowed, got %T %v", err, err)
+	}
+}
+
+// TestHTTP_ConnectionErrorDoesNotLeakQueryCredentials pins that a failed
+// request does not persist the credentials it was carrying.
+//
+// http.Client.Do wraps every transport failure in *url.Error, whose Error() is
+// fmt.Sprintf("%s %q: %s", Op, URL, Err) -- the entire URL, query string
+// included. That string became ClassifiedError.Message, Error() renders
+// Code + ": " + Message, and engine.ApplyOnError copies exactly that into the
+// committed error text (errMsg = sysErr.Error()), which lands in the
+// execution-level error key and, for a durable execution, in
+// xflow_executions.error. A token passed as a query parameter -- directly, or
+// taken from an upstream node's output -- was therefore written to the audit
+// trail on every DNS failure, dial refusal or TLS error.
+//
+// The assertions cut both ways on purpose. Checking only for the secret's
+// absence would pass against a node that returned an empty message, or one
+// whose error no longer identified the request at all; the message still has to
+// say which request failed and why.
+func TestHTTP_ConnectionErrorDoesNotLeakQueryCredentials(t *testing.T) {
+	const secret = "sk-live-000000000000000000000000"
+	const pwd = "hunter2-not-a-real-password"
+
+	withHTTPClient(t, func(r *http.Request) (*http.Response, error) {
+		return nil, errors.New("dial tcp 10.0.0.1:443: connect: connection refused")
+	})
+
+	h, _ := registry.Lookup("xflow.http")
+	// Both places a credential hides in a URL: the query string (set through
+	// SetQuery, the path an upstream node's output takes) and userinfo.
+	b := node.HTTP("GET", "https://svc:"+pwd+"@api.example.test/v1/orders").
+		SetQuery(map[string]any{"access_token": secret, "page": "2"})
+	input := &types.Input{Params: b.RawParams().(map[string]any)}
+
+	_, err := h.Execute(context.Background(), input)
+	if err == nil {
+		t.Fatal("expected a transient error for the connection failure")
+	}
+	// This is the exact string engine.ApplyOnError commits.
+	msg := err.Error()
+
+	for _, leaked := range []struct{ what, value string }{
+		{"query credential", secret},
+		{"userinfo password", pwd},
+	} {
+		if strings.Contains(msg, leaked.value) {
+			t.Errorf("the committed error text carries the %s verbatim, so it reaches "+
+				"the execution error key and xflow_executions.error: %s",
+				leaked.what, msg)
+		}
+	}
+
+	// Teeth. Without these, a node that returned "request failed" would pass the
+	// absence check above while destroying the diagnostic the message exists for.
+	for _, want := range []string{
+		"api.example.test", // which service
+		"/v1/orders",       // which endpoint
+		"access_token",     // WHICH parameters were sent -- the key is not the secret
+		"page",
+		"connection refused", // why it failed
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("the error message dropped %q, which is diagnostic rather than "+
+				"sensitive. Redacting the whole URL makes the absence assertion above "+
+				"vacuous and the message useless: %s", want, msg)
+		}
+	}
+}
+
+// TestHTTP_InvalidURLDoesNotLeakTheURL covers the branch that runs before the
+// URL is ever parsed.
+//
+// url.Parse fails with a *url.Error that quotes the whole input string, so the
+// old err.Error() put an unparseable-but-still-secret-bearing URL on the same
+// disclosure path as the connection error above. Nothing can be redacted out of
+// a string that would not parse, so this branch reports only the reason.
+func TestHTTP_InvalidURLDoesNotLeakTheURL(t *testing.T) {
+	const secret = "sk-live-111111111111111111111111"
+
+	h, _ := registry.Lookup("xflow.http")
+	input := &types.Input{Params: map[string]any{
+		"method": "GET",
+		// A control character is rejected by url.Parse.
+		"url": "https://api.example.test/v1?token=" + secret + "\x7f",
+	}}
+
+	_, err := h.Execute(context.Background(), input)
+	if err == nil {
+		t.Fatal("expected a permanent error for the unparseable url")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, secret) {
+		t.Errorf("the committed error text quotes the whole url parameter, credential "+
+			"included: %s", msg)
+	}
+	var ce *types.ClassifiedError
+	if !errors.As(err, &ce) || ce.Code != "http.invalid_url" {
+		t.Fatalf("expected ClassifiedError code=http.invalid_url, got %T %v", err, err)
+	}
+	// The reason has to survive: "url parameter is not a valid URL" alone does
+	// not tell the operator what about it was invalid.
+	if !strings.Contains(msg, "control character") {
+		t.Errorf("the parse reason was dropped along with the url, leaving nothing to "+
+			"act on: %s", msg)
 	}
 }

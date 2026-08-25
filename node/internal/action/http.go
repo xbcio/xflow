@@ -162,6 +162,57 @@ func (n *HTTPNode) RawParams() any {
 	return params
 }
 
+// safeURLString renders a URL for an error message with the two places a
+// credential hides removed: userinfo and query values.
+//
+// The transport errors from client.Do are *url.Error, whose Error() is
+// fmt.Sprintf("%s %q: %s", Op, URL, Err) — the whole URL, query string
+// included. That string becomes ClassifiedError.Message, which is what
+// Error() renders, which is what engine.ApplyOnError copies verbatim into the
+// committed error text and, for a durable execution, into
+// xflow_executions.error. A workflow that passes an API key as a query
+// parameter (or takes one from an upstream node's output) therefore persists
+// that key on every connection failure.
+//
+// Query KEYS are kept. Which parameters were sent is most of the diagnostic
+// value, and a key name is not a secret; the value is. Path and host are kept
+// whole — a request you cannot identify is not worth logging.
+func safeURLString(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
+	c := *u
+	c.User = nil
+	if q := c.Query(); len(q) > 0 {
+		redacted := make(url.Values, len(q))
+		for k := range q {
+			redacted[k] = []string{"REDACTED"}
+		}
+		c.RawQuery = redacted.Encode()
+	}
+	return c.String()
+}
+
+// transportErrorMessage builds the message for a failed client.Do without
+// letting the URL through unredacted. It takes the *url.Error's wrapped cause
+// (the DNS/dial/TLS error, which carries the host but never the query) and
+// pairs it with a redacted URL.
+func transportErrorMessage(u *url.URL, err error) string {
+	cause := err
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		cause = ue.Err
+	}
+	return fmt.Sprintf("%s %s: %v", safeMethodOp(ue), safeURLString(u), cause)
+}
+
+func safeMethodOp(ue *url.Error) string {
+	if ue == nil || ue.Op == "" {
+		return "request"
+	}
+	return ue.Op
+}
+
 func (n *HTTPNode) Execute(ctx context.Context, input *types.Input) (*types.Output, error) {
 	method := cast.ToString(input.Params["method"])
 	if method == "" {
@@ -176,7 +227,17 @@ func (n *HTTPNode) Execute(ctx context.Context, input *types.Input) (*types.Outp
 
 	parsedURL, err := url.Parse(rawURL)
 	if err != nil {
-		return nil, types.NewPermanentError("http.invalid_url", err.Error())
+		// url.Parse fails with a *url.Error whose Error() quotes the whole input
+		// string. Nothing can be redacted out of a URL that would not parse, so
+		// report only the wrapped reason and leave the caller to look at their
+		// own parameter. Same disclosure path as http.connection below.
+		reason := err
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			reason = ue.Err
+		}
+		return nil, types.NewPermanentError("http.invalid_url",
+			fmt.Sprintf("url parameter is not a valid URL: %v", reason))
 	}
 
 	if query, ok := input.Params["query"].(map[string]any); ok {
@@ -267,7 +328,7 @@ func (n *HTTPNode) Execute(ctx context.Context, input *types.Input) (*types.Outp
 		if errors.As(err, &ce) && ce.Permanent {
 			return nil, ce
 		}
-		return nil, types.NewTransientError("http.connection", err.Error())
+		return nil, types.NewTransientError("http.connection", transportErrorMessage(parsedURL, err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 
