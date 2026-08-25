@@ -87,10 +87,16 @@ func (f *reactorFacade) Execute(ctx context.Context, src engine.Source, globals 
 			// only signal that exposes a source which stopped updating (gen and
 			// revision stay put while a source keeps failing), and a source-driven
 			// module's Execute calls are frequent enough that per-call sampling
-			// costs two atomic loads — ConfigAge and obs() — with no lock and no
-			// allocation. obs() must stay lock-free for this to hold; see the
-			// measurement in observer.go.
-			obs().OnConfigAge(ctx, e.ConfigAge())
+			// costs a handful of atomic loads — the engine snapshot, each engine's
+			// ConfigAge, and obs() — with no lock and no allocation. obs() must
+			// stay lock-free for this to hold; see the measurement in observer.go.
+			//
+			// The STALEST engine's age, not this one's. supply_age_seconds is a
+			// gauge with no module-identity label, so every report replaces the
+			// series; reporting e.ConfigAge() made the value mean "whichever
+			// module happened to execute most recently", and with two modules
+			// resident the scrapes alternated between them.
+			obs().OnConfigAge(ctx, e.host.maxConfigAge())
 		}
 		input := stripConfig(globals)
 		inputBytes, err := encodeStdin(input)

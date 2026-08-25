@@ -41,12 +41,21 @@ func NewSupplyMetrics(m *Metrics) SupplyMetrics { return SupplyMetrics{Metrics: 
 // --- wasm reactor observer surface ---
 
 // OnPoolSwap records a config application: its outcome, the RULE COUNT (never
-// the content), the content revision, and how long the rebuild took. Rule
-// count and generation are published only for an applied swap: content that
-// was rejected never became active, so attributing a count/generation to it
-// would misrepresent what is actually serving. rules < 0 (ruleCount's
-// "shape not recognized" signal) also skips the rule-count gauge for the same
-// reason a negative count is never a real quantity.
+// the content), the content revision, and how long the rebuild took.
+//
+// Both gauges are host-wide aggregates supplied by the caller — see
+// wasm.Observer. Like OnInstanceCount below, they Set a series keyed only by
+// namespace, so each call REPLACES the previous value; with more than one wasm
+// module resident, a per-engine report meant "whichever module swapped last".
+//
+// Rule count and generation are published only for an applied swap. Rejected
+// content never became active, and while the caller now passes the still-serving
+// state rather than the rejected config's, re-Setting an unchanged value on a
+// failure path only invites the reading that a rejection published something.
+// rules < 0 (ruleCount's "shape not recognized" signal, poisoned across the
+// whole host so one unreadable module cannot hide inside a sum) also skips the
+// rule-count gauge, for the same reason a negative count is never a real
+// quantity.
 func (s SupplyMetrics) OnPoolSwap(ctx context.Context, result string, rules int, revision uint64, d time.Duration) {
 	s.Metrics.Inc(metricWasmPoolSwapTotal, withNamespace(ctx, map[string]string{"result": result}))
 	s.Metrics.Observe(metricWasmPoolSwapDuration, withNamespace(ctx, nil), d)
@@ -59,10 +68,17 @@ func (s SupplyMetrics) OnPoolSwap(ctx context.Context, result string, rules int,
 	s.Metrics.Set(metricWasmConfigGeneration, withNamespace(ctx, nil), float64(revision))
 }
 
-// OnConfigAge records how long the active content has been in service. This is
-// the single most important signal in this file: a source that stopped
-// updating leaves every version counter frozen and therefore looks healthy —
-// only elapsed time reveals it.
+// OnConfigAge records how long the STALEST active content across every wasm
+// engine has been in service. This is the single most important signal in this
+// file: a source that stopped updating leaves every version counter frozen and
+// therefore looks healthy — only elapsed time reveals it.
+//
+// The max is the caller's job for the same reason the sum is in OnInstanceCount:
+// this Sets a series keyed only by namespace, with no module identity, so each
+// call replaces the previous value. Reporting per-engine let a module that
+// refreshed a second ago overwrite a sibling frozen for hours, and with traffic
+// interleaved across both the gauge alternated between them — an alert on it
+// flaps, and a flapping alert gets muted.
 func (s SupplyMetrics) OnConfigAge(ctx context.Context, age time.Duration) {
 	s.Metrics.Set(metricSupplyAgeSeconds, withNamespace(ctx, nil), age.Seconds())
 }

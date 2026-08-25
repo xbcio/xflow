@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"runtime"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/xbcio/xflow/node/internal/code/script/engine"
 	lru "github.com/hashicorp/golang-lru/v2"
@@ -24,6 +26,19 @@ type reactorHost struct {
 
 	mu      sync.Mutex
 	engines map[string]*reactorEngine // keyed by module sha256
+
+	// engineList is a snapshot of engines' values, republished under mu on every
+	// insert. It exists so the per-message path can walk every engine without
+	// taking mu: reportConfigAge runs on every Execute, and observer.go's
+	// measurement (69.5 ns for a guarded read against 2.2 ns for an atomic load
+	// at 8-way parallelism) is exactly why that path must stay lock-free.
+	//
+	// Safe because engines is insert-only — there is one write site
+	// (engineForKey) and no delete anywhere — so a reader holding a stale
+	// snapshot sees a subset, never a freed engine. A module missing from a
+	// snapshot for the microseconds before republication cannot hide a stale
+	// source: it has just been created, so its age is zero either way.
+	engineList atomic.Pointer[[]*reactorEngine]
 
 	// codeCache fronts engines for callers that supply no digest, keyed by the
 	// base64 code string so the hot path skips a multi-MB base64-decode +
@@ -330,6 +345,7 @@ func (h *reactorHost) engineForKey(ctx context.Context, key string, wasmBytes []
 	}
 	e := &reactorEngine{host: h, cm: cm}
 	h.engines[key] = e
+	h.republishEngineListLocked()
 	obs().OnModuleCompile(ctx, "miss")
 	// A miss is the only event that adds a file to the on-disk cache, so it is
 	// the only one that can push the directory over its budget.
@@ -409,6 +425,92 @@ func (h *reactorHost) reportReadyInstances(ctx context.Context) {
 	}
 	h.mu.Unlock()
 	obs().OnInstanceCount(ctx, "ready", total)
+}
+
+// republishEngineListLocked refreshes the lock-free snapshot. Caller must hold
+// h.mu. Cheap: engines is a handful of entries and this runs once per module
+// compilation, never on a message path.
+func (h *reactorHost) republishEngineListLocked() {
+	list := make([]*reactorEngine, 0, len(h.engines))
+	for _, e := range h.engines {
+		list = append(list, e)
+	}
+	h.engineList.Store(&list)
+}
+
+// engineSnapshot returns every engine without taking h.mu. See engineList.
+func (h *reactorHost) engineSnapshot() []*reactorEngine {
+	if h == nil {
+		return nil
+	}
+	if p := h.engineList.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+// maxConfigAge returns the age of the STALEST active content across every
+// engine, which is what xflow_supply_age_seconds must carry.
+//
+// The max, not this engine's own age, for the reason spelled out on
+// reportReadyInstances: the metric is a gauge with no module-identity label, so
+// each report REPLACES the series. Reporting per-engine made it "whichever
+// module executed most recently" — with SAS's two modules resident and traffic
+// interleaved, consecutive scrapes alternated between them. A module whose
+// source froze hours ago was therefore visible in only about half of the
+// scrapes, which is worse than either always or never: an alert on it flaps,
+// and a flapping alert gets muted.
+//
+// Engines that never installed a pool are skipped rather than counted as zero.
+// A zero from "nothing loaded yet" and a zero from "just refreshed" mean
+// opposite things, and taking a max over the two would let a warming module
+// mask a stale sibling.
+func (h *reactorHost) maxConfigAge() time.Duration {
+	var worst time.Duration
+	for _, e := range h.engineSnapshot() {
+		if age := e.ConfigAge(); age > worst {
+			worst = age
+		}
+	}
+	return worst
+}
+
+// activeConfigState returns the host-wide rule count and content revision the
+// two config gauges carry. Both are aggregates for the same reason maxConfigAge
+// is: the gauges behind them have no module-identity label.
+//
+// rules is the SUM across engines, so it answers "how many rules are resident in
+// this process". It is -1 when ANY engine's config shape was not recognized:
+// ruleCount's -1 means "unknown", and folding an unknown into a sum would
+// publish a confident number that is quietly short by one module's worth.
+//
+// revision is the MINIMUM across engines that actually have one, so it answers
+// "what is the oldest content still being served" — the conservative reading, and
+// the one that makes a rollout look complete only once every module has moved.
+// Engines on the legacy globals path carry revision 0, meaning "not from a
+// SupplyResource"; they are excluded rather than dragging the minimum to zero.
+// Zero is returned when no engine has a revision at all.
+func (h *reactorHost) activeConfigState() (rules int, revision uint64) {
+	sum, unknown := 0, false
+	var minRev uint64
+	for _, e := range h.engineSnapshot() {
+		p := e.active.Load()
+		if p == nil {
+			continue
+		}
+		if p.rules < 0 {
+			unknown = true
+		} else {
+			sum += p.rules
+		}
+		if p.revision > 0 && (minRev == 0 || p.revision < minRev) {
+			minRev = p.revision
+		}
+	}
+	if unknown {
+		return -1, minRev
+	}
+	return sum, minRev
 }
 
 // flipEngineLocked marks the engine for key source-driven if one exists.

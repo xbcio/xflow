@@ -28,8 +28,11 @@ func TestSupplyMetricsOnPoolSwapAppliedRecordsRuleCountAndGeneration(t *testing.
 }
 
 // A rejected swap must record the swap counter/duration, but must NOT publish
-// rule count or generation for content that never became active — reporting
-// those would attribute a count to content that is not actually serving.
+// rule count or generation. The wasm caller now hands this method the
+// still-serving host-wide state on a rejection rather than the rejected
+// config's numbers, so re-Setting them would be harmless — but it would also be
+// indistinguishable from a rejection having published something, which is the
+// reading this skip exists to prevent.
 func TestSupplyMetricsOnPoolSwapRejectedSkipsRuleCountAndGeneration(t *testing.T) {
 	m := New()
 	s := NewSupplyMetrics(m)

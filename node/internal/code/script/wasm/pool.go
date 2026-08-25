@@ -366,9 +366,14 @@ type activePool struct {
 	// which rule version produced which row during a rollout skew window.
 	// Zero means "config did not come from a SupplyResource" (legacy globals path).
 	revision uint64
-	cfg      []byte // config snapshot; replayed when rebuilding a doomed instance
-	free     chan *pooledInstance
-	size     int
+	// rules is ruleCount(cfg), cached at build time so the host-wide rule gauge
+	// can be recomputed from a pool pointer without re-parsing the config. -1
+	// carries ruleCount's "shape not recognised" verdict through unchanged; see
+	// reactorHost.activeConfigState for why that must not be folded into a sum.
+	rules int
+	cfg   []byte // config snapshot; replayed when rebuilding a doomed instance
+	free  chan *pooledInstance
+	size  int
 
 	// drainTimeout overrides drainPoolWait for this pool. Zero means the default.
 	// It exists so a test can assert drainPool's bound is honoured without
@@ -639,20 +644,29 @@ func (e *reactorEngine) swapConfig(ctx context.Context, cfg []byte, size uint64,
 	defer e.mu.Unlock()
 
 	start := time.Now()
-	rules := ruleCount(cfg)
 	newPool, err := e.buildPool(ctx, cfg, size)
 	if err != nil {
 		e.sourceFailures.Add(1)
-		obs().OnPoolSwap(ctx, "rejected", rules, revision, time.Since(start))
+		// The host's CURRENT state, deliberately not the rejected config's: a
+		// rejected swap leaves active untouched, so the rules actually evaluating
+		// traffic are the previous ones. The bundled metrics observer happens to
+		// skip both gauges on a rejection, but the Observer interface is public
+		// and an embedder that records them must not be handed numbers for a
+		// config that is serving nothing.
+		rules, revisionNow := e.host.activeConfigState()
+		obs().OnPoolSwap(ctx, "rejected", rules, revisionNow, time.Since(start))
 		return err // active unchanged
 	}
 	// Must be set before Swap publishes the pointer: once Swap runs, readers can
 	// see newPool immediately, and writing the field afterward would race them.
 	newPool.revision = revision
+	newPool.rules = ruleCount(cfg)
 	old := e.active.Swap(newPool)
 	e.lastSwapAt.Store(time.Now().UnixNano())
 	e.sourceFailures.Store(0)
-	obs().OnPoolSwap(ctx, "applied", rules, revision, time.Since(start))
+	// After the Swap, so the aggregate includes the pool just installed.
+	rules, revisionNow := e.host.activeConfigState()
+	obs().OnPoolSwap(ctx, "applied", rules, revisionNow, time.Since(start))
 	e.host.reportReadyInstances(ctx)
 	if old != nil {
 		go e.drainPool(context.Background(), old)

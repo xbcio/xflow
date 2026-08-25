@@ -14,12 +14,23 @@ import (
 // would be unbounded cardinality.
 type Observer interface {
 	// OnPoolSwap reports one config application. result is "applied" or
-	// "rejected". ruleCount is the number of rules in the new content (count
-	// only — never the content itself), or -1 if the shape was not recognized.
-	// revision is the SupplyResource revision.
+	// "rejected".
+	//
+	// ruleCount and revision describe the host's state AFTER the swap, summed
+	// and minimised across every engine — not the swapping engine's own. Same
+	// reason as OnInstanceCount below: the gauges behind them carry no
+	// module-identity label, so a per-engine report means "the last engine to
+	// swap". ruleCount is a count only, never the content itself, and is -1 if
+	// ANY engine's shape was not recognized. revision is the OLDEST
+	// SupplyResource revision still serving, or 0 when no engine has one.
+	//
+	// On "rejected" these describe what is still serving, since a rejected swap
+	// leaves the active pool in place.
 	OnPoolSwap(ctx context.Context, result string, ruleCount int, revision uint64, d time.Duration)
-	// OnConfigAge reports how long the active content has been in service.
-	// This is the only signal that exposes a source which stopped updating.
+	// OnConfigAge reports how long the STALEST active content across every
+	// engine has been in service. This is the only signal that exposes a source
+	// which stopped updating, and the max is what keeps one freshly-refreshed
+	// module from masking a frozen sibling.
 	OnConfigAge(ctx context.Context, age time.Duration)
 	// OnInstanceCount reports the host's TOTAL resident pool instances, summed
 	// across every engine. state is "ready" — there is no other value.
