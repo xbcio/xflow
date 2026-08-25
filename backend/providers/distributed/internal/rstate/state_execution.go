@@ -349,8 +349,19 @@ func (s *Store) UpdateExecutionStatus(ctx context.Context, id types.ExecutionID,
 // the audit store. Best effort by contract (STORAGE-CONTRACT.md): Redis stays
 // authoritative and a failed projection never fails the commit.
 //
-// errMsg carries only a reason string produced by the engine — never node
-// output, which routinely contains credentials from upstream HTTP responses.
+// errMsg is NOT guaranteed to be free of node output. engine/errorpolicy.go
+// takes it from sysErr.Error() verbatim, so a node that formats a response body
+// or an upstream output into its error writes that text here, and node output
+// routinely contains credentials from upstream HTTP responses. Keeping payload
+// out of Error() (and in types.Error.Details instead) is a convention of the
+// built-in nodes, not something this layer can check. The isTransient guard
+// below is the part that is enforced.
+//
+// That guard is load-bearing only on the GROUP commit path: state_commit.go
+// already wraps its call in an outer !isTransient block, so a node-commit test
+// cannot tell this check from that one. TestPerWorkflowTransient_
+// SkipsGroupCommitStatusProjection drives CommitGroup for exactly that reason —
+// deleting the check below reds it and nothing else.
 func (s *Store) projectExecutionStatus(ctx context.Context, id types.ExecutionID, status types.ExecutionStatus, errMsg string) {
 	if s.db == nil || s.isTransient(ctx, id) || status == "" {
 		return

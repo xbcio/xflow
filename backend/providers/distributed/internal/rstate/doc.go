@@ -106,10 +106,34 @@
 //
 // # Projection error text
 //
-// Output stored in outputKey never contains node output data in error fields.
-// Error text written to the execution-level error key (execKey "error") carries
-// only the engine-generated reason string, never a node's output — upstream node
-// output routinely contains HTTP response bodies with bearer tokens.
+// This section used to claim that the error text written to the execution-level
+// error key (execKey "error") "carries only the engine-generated reason string,
+// never a node's output". Read that as a description of today's built-in nodes,
+// not as an invariant: nothing in this package, or anywhere below it, enforces
+// it.
+//
+// The text originates at engine/errorpolicy.go, which does errMsg =
+// sysErr.Error() on whatever error the node returned, verbatim. A node that
+// formats a response body, a request header or an upstream node's output into
+// its error — fmt.Errorf("POST %s: %s", url, body) is the obvious shape — puts
+// that text in execKey "error", in the ExecutionEvent published to subscribers,
+// and, for a durable execution, in xflow_executions.error. Node output routinely
+// contains HTTP response bodies with bearer tokens, so the difference between
+// "reason string" and "payload" is a convention the node author has to keep,
+// with no compile-time or runtime check behind it. The types.Error split is the
+// convention: a body belongs in Details, which is not what Error() renders.
+//
+// What IS enforced is narrower and worth stating separately, because it is the
+// part the credential-disclosure constraint actually rests on: for a transient
+// execution the error text does not reach SQL at all. Both routes to
+// db.UpdateExecutionStatus — UpdateExecutionStatus itself and
+// projectExecutionStatus — are gated on !isTransient, and isTransient fails
+// closed (a Redis error resolves to transient). Those are two independent
+// guards, not one: dropping either leaves the other's test green, so both are
+// pinned separately (TestPerWorkflowTransient_SkipsExecutionStatusProjection and
+// TestPerWorkflowTransient_SkipsGroupCommitStatusProjection). The guard is
+// maintained by repetition across four call sites and one of those sites has
+// already been found missing it once.
 //
 // # Traps for maintainers
 //
