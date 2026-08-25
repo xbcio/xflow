@@ -38,7 +38,9 @@ func realKafkaBrokers(b *testing.B) []string {
 }
 
 // createTopic creates a Kafka topic by dialing the controller node directly,
-// mirroring the pattern in test/integration/kafka_helpers.go.
+// mirroring the pattern in test/integration/kafka_helpers.go — including that
+// helper's cleanup: the base name is timestamped, so without a delete each run
+// of this benchmark adds three more permanent topics to the broker's log.
 func createTopic(b *testing.B, broker, topic string, partitions int) {
 	b.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -67,5 +69,42 @@ func createTopic(b *testing.B, broker, topic string, partitions int) {
 		ReplicationFactor: 1,
 	}); err != nil {
 		b.Fatalf("create kafka topic %q: %v", topic, err)
+	}
+	// Armed only after the create succeeded — see deleteKafkaTopic in
+	// test/integration/kafka_helpers.go for why the two failure modes below are
+	// reported differently.
+	b.Cleanup(func() { deleteTopic(b, broker, topic) })
+}
+
+// deleteTopic removes a topic created by createTopic. An unreachable broker is
+// logged and tolerated (teardown races a benchmark that has already reported);
+// a broker that answers and refuses the delete fails the benchmark, because
+// that is what a misconfigured delete.topic.enable=false looks like and it
+// would otherwise leave createTopic promising a cleanup it never did.
+func deleteTopic(b *testing.B, broker, topic string) {
+	b.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	conn, err := kafka.DialContext(ctx, "tcp", broker)
+	if err != nil {
+		b.Logf("leaked kafka topic %q: dial broker: %v", topic, err)
+		return
+	}
+	controller, err := conn.Controller()
+	_ = conn.Close()
+	if err != nil {
+		b.Logf("leaked kafka topic %q: resolve controller: %v", topic, err)
+		return
+	}
+	controllerConn, err := kafka.DialContext(ctx, "tcp", net.JoinHostPort(controller.Host, strconv.Itoa(controller.Port)))
+	if err != nil {
+		b.Logf("leaked kafka topic %q: dial controller: %v", topic, err)
+		return
+	}
+	defer controllerConn.Close()
+
+	if err := controllerConn.DeleteTopics(topic); err != nil {
+		b.Errorf("leaked kafka topic %q: broker answered but refused the delete: %v", topic, err)
 	}
 }

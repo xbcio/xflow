@@ -13,6 +13,23 @@ import (
 	"github.com/segmentio/kafka-go"
 )
 
+// newKafkaTopic creates the topic and registers its deletion for the end of the
+// test.
+//
+// The deletion is not tidiness. uniqueTopic mints a fresh name on every run and
+// test/env keeps the broker's log on the named volume xflow-kafka-data, so a
+// topic nobody deletes outlives `compose down` and only disappears with the
+// volume. There are ten call sites, which is ten topics per full run, each with
+// its own partition directories and its own entry in every metadata refresh.
+// newKafkaTopic creates a topic and arranges for it to be deleted when the test
+// ends.
+//
+// The deletion is not tidiness. uniqueTopic mints a fresh name on every run and
+// test/env keeps the broker's log on the named volume xflow-kafka-data, so a
+// topic nobody deletes outlives `compose down` and goes away only with the
+// volume. Ten call sites means ten new topics per full run, each one more
+// partition directory on disk and one more entry in every metadata refresh the
+// suite's own consumers pay for.
 func newKafkaTopic(t *testing.T, brokers []string, topic string, partitions int) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -38,6 +55,47 @@ func newKafkaTopic(t *testing.T, brokers []string, topic string, partitions int)
 	defer controllerConn.Close()
 	if err := controllerConn.CreateTopics(kafka.TopicConfig{Topic: topic, NumPartitions: partitions, ReplicationFactor: 1}); err != nil {
 		t.Fatalf("create kafka topic %q: %v", topic, err)
+	}
+	// Registered only on success: a cleanup armed before CreateTopics would ask
+	// the broker to delete a topic that was never created, and report that
+	// UNKNOWN_TOPIC_OR_PARTITION as if the deletion had failed.
+	t.Cleanup(func() { deleteKafkaTopic(t, brokers, topic) })
+}
+
+// deleteKafkaTopic removes a topic created by newKafkaTopic.
+//
+// It distinguishes two failures, because they mean opposite things. An
+// unreachable broker is the environment going away underneath a run that has
+// already finished asserting — normal during teardown, so it is logged and the
+// test keeps its verdict. A broker that answers and still refuses the delete is
+// a real problem: it is also what a broker with delete.topic.enable=false looks
+// like, and that one would otherwise leave this helper claiming a cleanup it
+// never performed.
+func deleteKafkaTopic(t *testing.T, brokers []string, topic string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	conn, err := kafka.DialContext(ctx, "tcp", brokers[0])
+	if err != nil {
+		t.Logf("leaked kafka topic %q: dial broker: %v", topic, err)
+		return
+	}
+	controller, err := conn.Controller()
+	_ = conn.Close()
+	if err != nil {
+		t.Logf("leaked kafka topic %q: resolve controller: %v", topic, err)
+		return
+	}
+	controllerConn, err := kafka.DialContext(ctx, "tcp", net.JoinHostPort(controller.Host, strconv.Itoa(controller.Port)))
+	if err != nil {
+		t.Logf("leaked kafka topic %q: dial controller: %v", topic, err)
+		return
+	}
+	defer controllerConn.Close()
+
+	if err := controllerConn.DeleteTopics(topic); err != nil {
+		t.Errorf("leaked kafka topic %q: broker answered but refused the delete: %v", topic, err)
 	}
 }
 
