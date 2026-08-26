@@ -2,6 +2,7 @@ package transform_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/xbcio/xflow/node"
@@ -75,5 +76,37 @@ func TestRename_ChainedMappingIsOrderIndependent(t *testing.T) {
 		if _, ok := out.Data["a"]; ok {
 			t.Fatalf("run %d: a should have been consumed by the rename: %#v", i, out.Data)
 		}
+	}
+}
+
+// TestRename_RejectsEmptyMappingName covers the guard at rename.go:49-53.
+// Every existing mapping fixture uses non-empty old and new names on both
+// sides, so nothing exercises the branch that rejects an empty name. Without
+// the guard, a mapping entry with an empty new name silently writes the
+// source field's value onto data[""] instead of erroring, corrupting the
+// output with no error on any path.
+func TestRename_RejectsEmptyMappingName(t *testing.T) {
+	b := node.Rename(map[string]string{"old_name": ""})
+
+	h, ok := registry.Lookup("xflow.transform.rename")
+	if !ok {
+		t.Fatal("rename handler not registered")
+	}
+	_, err := h.Execute(context.Background(), &types.Input{
+		Params: b.RawParams().(map[string]any),
+		Data:   map[string]any{"old_name": "value"},
+	})
+	if err == nil {
+		t.Fatal("Execute() error = nil, want a rejection for a mapping with an empty new name")
+	}
+	// Pin the specific rejection, not merely "some error". Execute rejects a
+	// missing or unparsable mapping a few lines earlier with a different
+	// message; asserting only err != nil would keep this test green if the
+	// empty-name guard were deleted and the entry happened to be rejected by
+	// that earlier check instead -- which would make the test claim coverage
+	// of a branch it no longer reaches.
+	const want = "mapping names must not be empty"
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("Execute() error = %q, want substring %q", err.Error(), want)
 	}
 }

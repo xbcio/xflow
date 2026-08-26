@@ -2,6 +2,7 @@ package transform_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/xbcio/xflow/node"
@@ -51,5 +52,35 @@ func TestAggregate_ComputesSummary(t *testing.T) {
 		t.Errorf("out.Data[\"items\"] = %#v, want the 3-element input array: the "+
 			"aggregated array itself is the field most likely to be needed "+
 			"downstream alongside the summary", out.Data["items"])
+	}
+}
+
+// TestAggregate_RejectsEmptyOutputName covers the guard at aggregate.go:85-87.
+// Every existing fixture supplies a non-empty `as` name for every operation,
+// so nothing exercises the branch that rejects an empty one. Without the
+// guard, an operation with an empty `as` silently writes its result onto
+// data[""] and returns success, instead of failing a workflow definition
+// that omitted the output field name.
+func TestAggregate_RejectsEmptyOutputName(t *testing.T) {
+	b := node.Aggregate("items").Count("")
+
+	h, ok := registry.Lookup("xflow.transform.aggregate")
+	if !ok {
+		t.Fatal("aggregate handler not registered")
+	}
+	_, err := h.Execute(context.Background(), &types.Input{
+		Params: b.RawParams().(map[string]any),
+		Data:   map[string]any{"items": []any{map[string]any{"amount": 1}}},
+	})
+	if err == nil {
+		t.Fatal("Execute() error = nil, want a rejection for an operation with an empty output name")
+	}
+	// Pin the specific rejection: Execute rejects missing/unparsable
+	// operations a few lines earlier with a different message, so asserting
+	// only err != nil would survive deleting the empty-name guard if the
+	// operation happened to be rejected by that earlier check instead.
+	const want = "output name is required"
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("Execute() error = %q, want substring %q", err.Error(), want)
 	}
 }
