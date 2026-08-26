@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	nodereg "github.com/xbcio/xflow/node/registry"
+	"strings"
 	"sync"
 	"testing"
 
@@ -98,8 +99,24 @@ func TestRegistry_VersionWarnFallbackReturnsLatestAndLogs(t *testing.T) {
 	if !ok || vh.version != 3 {
 		t.Fatalf("Get() returned %#v, want latest v3", got)
 	}
-	if msgs := logger.messages(); len(msgs) != 1 {
+	msgs := logger.messages()
+	if len(msgs) != 1 {
 		t.Fatalf("logger messages = %v, want 1", msgs)
+	}
+	// Counting the message proves the branch ran; it does not prove the message is
+	// usable, and usable is the whole point -- this line is the only signal that a
+	// workflow pinned to v9 is actually executing v3, and an operator acts on it by
+	// grepping for the node it names. Swapping node_type and node_name (adjacent %s
+	// args) keeps the count at one and sends them to a workflow that is fine.
+	for _, want := range []string{
+		"node_type=" + typ,
+		"node_name=node-a",
+		"requested_version=9",
+		"resolved_version=3",
+	} {
+		if !strings.Contains(msgs[0], want) {
+			t.Errorf("warn message %q does not contain %q", msgs[0], want)
+		}
 	}
 }
 

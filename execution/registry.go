@@ -232,7 +232,11 @@ func (r *Registry) Get(id types.ExecutionID, nodeName string, nodeType string, v
 		case VersionWarnFallback:
 			if h, ok := nodereg.Lookup(nodeType); ok {
 				if logger != nil {
-					logger.Warnf("handler version fallback: node_type=%s node_name=%s requested_version=%d", nodeType, nodeName, version)
+					// resolved_version is what actually runs. Without it the line
+					// announces a fallback without saying to what, which leaves the
+					// operator to go and look it up by hand.
+					logger.Warnf("handler version fallback: node_type=%s node_name=%s requested_version=%d resolved_version=%d",
+						nodeType, nodeName, version, latestRegisteredVersion(nodeType))
 				}
 				return h, nil
 			}
