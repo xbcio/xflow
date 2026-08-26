@@ -247,8 +247,17 @@ func (kr *Keyring) findKey(kid string) *Key {
 
 // IsEncrypted performs a fast check on whether data looks like a $enc envelope.
 // It checks for the JSON opening and version field without full parsing.
+//
+// The whole test is that data starts with `{"v":` and is long enough to hold an
+// envelope's base64 payload. It deliberately does NOT look for "alg" or any
+// later field: this is a classifier, not a validator, and every field is
+// checked properly in Decrypt. All five prefix bytes are load-bearing, because
+// dropping any of them admits ordinary content whose first key merely begins
+// with a v — `{"value":...}`, `{"version":...}` — and AtRest.Open uses this
+// answer as the ONLY thing deciding pass-through versus decrypt, so a false
+// positive turns a readable plaintext row into a hard error.
 func IsEncrypted(data []byte) bool {
-	// Minimal heuristic: starts with `{"v":` and contains "alg".
+	// No envelope is this short: it carries a base64 nonce, ciphertext and tag.
 	if len(data) < 20 {
 		return false
 	}
