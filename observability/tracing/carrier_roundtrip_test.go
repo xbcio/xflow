@@ -2,6 +2,7 @@ package tracing
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"go.opentelemetry.io/otel"
@@ -53,9 +54,37 @@ func TestCarrierRoundTripPreservesSampledAndTracestate(t *testing.T) {
 
 	// Each extracted SpanContext must share the root trace ID, carry the sampled
 	// flag, and the grandchild must be a descendant of the child.
+	//
+	// The sampled flag has to be read off the wire, not inferred from a recorded
+	// span: the provider here is AlwaysSample, so every child is sampled no matter
+	// what the parent carried. The name of this test claims the flag is preserved,
+	// but the loop below used to assert only that traceparent was non-empty, and
+	// the sibling NeverSample test covers only the opposite direction (unsampled
+	// must not become sampled). Clearing TraceFlags inside InjectCarrier left the
+	// whole tree green while every carrier written to the outbox said sampled=0 --
+	// a ParentBased sampler on the far side then drops the trace, which reads as an
+	// exporter problem rather than a propagation one.
+	//
+	// The extraction half below is a second, cheaper reader of the same property:
+	// grpc_test.go already catches a flag drop in ExtractCarrier, but only as
+	// "recorded spans = 0", which does not name the cause.
 	for label, c := range map[string]map[string]string{"c1": c1, "c2": c2, "c3": c3} {
-		if tp, ok := c["traceparent"]; !ok || tp == "" {
+		hdr, ok := c["traceparent"]
+		if !ok || hdr == "" {
 			t.Fatalf("%s: traceparent missing", label)
+		}
+		if !strings.HasSuffix(hdr, "-01") {
+			t.Errorf("%s: traceparent %q does not end in the sampled flag byte -01", label, hdr)
+		}
+	}
+	for label, c := range map[string]context.Context{"ex1": ex1, "ex2": ex2} {
+		sc := oteltrace.SpanContextFromContext(c)
+		if !sc.IsValid() {
+			t.Fatalf("%s: extracted SpanContext invalid", label)
+		}
+		if !sc.IsSampled() {
+			t.Errorf("%s: extracted SpanContext lost the sampled flag; downstream "+
+				"ParentBased samplers will drop this trace", label)
 		}
 	}
 
