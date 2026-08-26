@@ -81,19 +81,33 @@ func TestBatchTasksRideTheirOwnQueueAndAreStillConsumed(t *testing.T) {
 // A weighted split, not a strict one: strict priority lets a steady stream of
 // ordinary tasks starve an in-flight map, and asynq reports nothing when it
 // happens.
+//
+// The weights are pinned to their literal values rather than to an ordering,
+// because the ordering is not the contract. transport.go's own comment states
+// it: "At 8:1 the batch queue keeps roughly 1/9 of consumer throughput." An
+// ordering check is green for 8:7 -- batch would take ~47% of consumer slots
+// instead of ~11%, defeating the isolation the split exists to provide -- and
+// equally green for 8000:1, which is strict priority in all but name, the very
+// thing this test is named against. Only the numbers themselves separate those.
+//
+// The literals are written out here on purpose: importing the constants would
+// make both sides of the comparison move together and assert nothing.
 func TestConsumerWeightsBothQueuesWithoutStrictPriority(t *testing.T) {
 	w := queueWeights()
-	if w[defaultQueueName] <= 0 {
-		t.Errorf("default queue weight = %d, want > 0", w[defaultQueueName])
+	if w[defaultQueueName] != 8 {
+		t.Errorf("default queue weight = %d, want 8 (see transport.go's 8:1 contract)",
+			w[defaultQueueName])
 	}
-	if w[batchQueueName] <= 0 {
-		t.Errorf("batch queue weight = %d, want > 0 — a zero or negative weight "+
-			"makes asynq ignore the queue entirely", w[batchQueueName])
+	if w[batchQueueName] != 1 {
+		t.Errorf("batch queue weight = %d, want 1; zero or negative makes asynq "+
+			"ignore the queue entirely, and anything larger erodes the ~1/9 share "+
+			"that keeps a map batch from crowding out ordinary tasks",
+			w[batchQueueName])
 	}
-	if w[batchQueueName] >= w[defaultQueueName] {
-		t.Errorf("batch weight %d >= default weight %d; the batch queue must be "+
-			"the lower-priority one or there is no latency isolation",
-			w[batchQueueName], w[defaultQueueName])
+	// Spelled out as a consequence so a future retune reads what it is trading.
+	share := float64(w[batchQueueName]) / float64(w[batchQueueName]+w[defaultQueueName])
+	if share < 0.10 || share > 0.12 {
+		t.Errorf("batch queue share = %.2f of consumer slots, want ~0.11", share)
 	}
 }
 
