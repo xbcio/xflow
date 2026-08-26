@@ -74,15 +74,7 @@ func (n *Node) Activate(ctx context.Context, in *types.TriggerActivateInput) (ty
 	runCtx, cancel := context.WithCancel(ctx)
 	c := cronlib.New(cronlib.WithLocation(loc))
 	if _, err := c.AddFunc(expr, func() {
-		t := time.Now().In(loc)
-		scheduled := t.Truncate(time.Minute)
-		event := &types.TriggerEvent{
-			ID:     fmt.Sprintf("%s/%s/%s", in.WorkflowID, in.NodeName, scheduled.Format(time.RFC3339)),
-			Kind:   "cron",
-			Source: in.NodeName,
-			Time:   t,
-			Data:   map[string]any{"scheduled_time": scheduled.Format(time.RFC3339)},
-		}
+		event := newCronTriggerEvent(in.WorkflowID, in.NodeName, time.Now().In(loc))
 		if ok, err := in.Runtime.Dedup(runCtx, "trigger:"+string(in.WorkflowID)+":"+in.NodeName+":"+event.ID, 2*time.Minute); err == nil && ok {
 			_, _ = in.Emit(runCtx, event)
 		}
@@ -100,6 +92,27 @@ func (n *Node) Activate(ctx context.Context, in *types.TriggerActivateInput) (ty
 		}
 		return nil
 	}), nil
+}
+
+// newCronTriggerEvent builds the event for one firing. It is a function rather
+// than an inline closure body for the same reason timer's newTimerTriggerEvent
+// is: the minute truncation below decides the event ID, and the event ID is the
+// deduplication key. Inside a closure driven by the real clock there is no way
+// to assert that truncation without racing a minute boundary.
+//
+// The truncation is what makes two replicas firing the same schedule agree on
+// one identity. Widening it to an hour would fold every firing in an hour into
+// one ID and the deduper would drop all but the first; removing it would give
+// each replica a distinct sub-second ID and every firing would run twice.
+func newCronTriggerEvent(workflowID types.WorkflowID, nodeName string, t time.Time) *types.TriggerEvent {
+	scheduled := t.Truncate(time.Minute)
+	return &types.TriggerEvent{
+		ID:     fmt.Sprintf("%s/%s/%s", workflowID, nodeName, scheduled.Format(time.RFC3339)),
+		Kind:   "cron",
+		Source: nodeName,
+		Time:   t,
+		Data:   map[string]any{"scheduled_time": scheduled.Format(time.RFC3339)},
+	}
 }
 
 func init() { registry.RegisterTrigger(&Node{}) }

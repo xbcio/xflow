@@ -66,6 +66,10 @@ type fakeWebhookTriggerRuntime struct {
 	webhooks *fakeWebhookRuntime
 	emits    []*types.TriggerEvent
 	seen     map[string]struct{}
+	// dedups records what Dedup was actually called with. The parameter used to
+	// be named `_`, which made the TTL — the entire width of the replay window —
+	// unobservable to every test in this package.
+	dedups []triggertest.DedupCall
 }
 
 func newFakeWebhookTriggerRuntime() *fakeWebhookTriggerRuntime {
@@ -77,7 +81,8 @@ func (r *fakeWebhookTriggerRuntime) Emit(_ context.Context, _ types.WorkflowID, 
 	return "exec-1", nil
 }
 
-func (r *fakeWebhookTriggerRuntime) Dedup(_ context.Context, key string, _ time.Duration) (bool, error) {
+func (r *fakeWebhookTriggerRuntime) Dedup(_ context.Context, key string, ttl time.Duration) (bool, error) {
+	r.dedups = append(r.dedups, triggertest.DedupCall{Key: key, TTL: ttl})
 	if _, ok := r.seen[key]; ok {
 		return false, nil
 	}

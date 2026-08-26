@@ -21,10 +21,27 @@ type FakeRuntime struct {
 	mu          sync.Mutex
 	callbackMu  sync.Mutex
 	emits       []*types.TriggerEvent
+	dedups      []DedupCall
 	emitSignal  chan struct{}
 	dedupSignal chan struct{}
 	emitFunc    func(context.Context, types.WorkflowID, string, *types.TriggerEvent) (types.ExecutionID, error)
 	dedupFunc   func(context.Context, string, time.Duration) (bool, error)
+}
+
+// DedupCall is one Dedup invocation. Both fields carry a decision the trigger
+// made and nothing else in the system reads back: the key is the only thing
+// keeping one workflow's deduplication from colliding with another's, and the
+// TTL is the whole width of the window a duplicate can still be caught in.
+//
+// Recording them here rather than in each package's own fake is deliberate.
+// Every trigger fake in this repo used to take the TTL as `_ time.Duration` and
+// throw it away, so the four triggers' windows — 2 minutes for cron, twice the
+// interval for timer, 24 hours for webhook and redishub — could each be changed
+// to a nanosecond with the suite staying green, which is deduplication turned
+// off rather than a value that merely looks wrong.
+type DedupCall struct {
+	Key string
+	TTL time.Duration
 }
 
 func NewFakeRuntime() *FakeRuntime {
@@ -51,6 +68,9 @@ func (r *FakeRuntime) Emit(ctx context.Context, workflowID types.WorkflowID, nod
 }
 
 func (r *FakeRuntime) Dedup(ctx context.Context, key string, ttl time.Duration) (bool, error) {
+	r.mu.Lock()
+	r.dedups = append(r.dedups, DedupCall{Key: key, TTL: ttl})
+	r.mu.Unlock()
 	select {
 	case r.dedupSignal <- struct{}{}:
 	default:
@@ -104,6 +124,15 @@ func (r *FakeRuntime) EmitCount() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return len(r.emits)
+}
+
+// DedupCalls returns a copy of the recorded Dedup invocations, in call order.
+// Copied for the same reason Events is: the trigger goroutine may still be
+// appending while the test inspects.
+func (r *FakeRuntime) DedupCalls() []DedupCall {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]DedupCall(nil), r.dedups...)
 }
 
 // Events returns a copy of the emitted events. The copy matters: callers inspect
