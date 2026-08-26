@@ -29,6 +29,80 @@ func (c *recordingConsumer) count() int {
 	return len(c.seen)
 }
 
+// last returns the most recent snapshot delivered to this consumer.
+func (c *recordingConsumer) last(t *testing.T) Snapshot {
+	t.Helper()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.seen) == 0 {
+		t.Fatal("consumer was never notified")
+	}
+	return c.seen[len(c.seen)-1]
+}
+
+// TestConsumerReceivesSnapshotContent asserts what a consumer is actually
+// handed, on both delivery paths.
+//
+// Nothing else in the package does. The tests around Apply check the registry's
+// own cache (r.Get) and how many times a consumer was called
+// (recordingConsumer.count); the Round 4/5 outcome tests key on Snapshot.Hash.
+// So blanking Content on its way to safeNotify -- in Apply's fan-out loop or in
+// RegisterConsumer's late-join delivery -- leaves the whole package green,
+// while every consumer reconfigures itself from zero bytes. For the wasm script
+// nodes that means silently rebuilding an engine with an empty rule set, i.e.
+// waving through the traffic those rules exist to reject, and the registry
+// still reports IsReady because the consumer returned nil.
+//
+// Content is checked here against the bytes that went in, not against
+// r.Get(name): a strip that happened before the notify would satisfy the
+// latter too.
+func TestConsumerReceivesSnapshotContent(t *testing.T) {
+	const content = "rule-bytes-v1"
+
+	t.Run("ApplyFanOut", func(t *testing.T) {
+		r := NewRegistry()
+		c := &recordingConsumer{}
+		r.RegisterConsumer("rules", "node/clean", c)
+		if err := r.Apply(context.Background(), snap("rules", content, 7)); err != nil {
+			t.Fatalf("Apply: %v", err)
+		}
+		assertDelivered(t, c.last(t), content, 7)
+	})
+
+	t.Run("LateJoinReplay", func(t *testing.T) {
+		// Registering after the content landed: the consumer is notified from
+		// the cache instead of from the fan-out loop, a separate call site.
+		r := NewRegistry()
+		if err := r.Apply(context.Background(), snap("rules", content, 7)); err != nil {
+			t.Fatalf("Apply: %v", err)
+		}
+		c := &recordingConsumer{}
+		r.RegisterConsumer("rules", "node/clean", c)
+		assertDelivered(t, c.last(t), content, 7)
+	})
+}
+
+func assertDelivered(t *testing.T, got Snapshot, content string, rev uint64) {
+	t.Helper()
+	if string(got.Content) != content {
+		t.Errorf("delivered Content = %q, want %q: a consumer that reconfigures "+
+			"from this reads an empty rule set and rejects nothing",
+			got.Content, content)
+	}
+	if got.Name != "rules" {
+		t.Errorf("delivered Name = %q, want \"rules\"", got.Name)
+	}
+	if got.Hash != "h-"+content {
+		t.Errorf("delivered Hash = %q, want %q: consumers rebuild only when the "+
+			"hash changes, so a wrong one pins them to stale content",
+			got.Hash, "h-"+content)
+	}
+	if got.Revision != rev {
+		t.Errorf("delivered Revision = %d, want %d: this is what a tagged record's "+
+			"config_generation is traced by", got.Revision, rev)
+	}
+}
+
 func snap(name, content string, rev uint64) Snapshot {
 	return Snapshot{Name: name, Content: []byte(content), Hash: "h-" + content,
 		Revision: rev, FetchedAt: time.Now()}
