@@ -2,6 +2,7 @@ package rstate
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -14,15 +15,25 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// fakeAuditStore is a minimal store.Store that counts CreateExecution calls.
+// fakeAuditStore is a minimal store.Store that records which executions were
+// projected into SQL. It records the IDs rather than only a count because the
+// question this fake exists to answer is "which one got written", and a count
+// cannot tell "the durable one" from "the transient one" -- see
+// TestPerWorkflowTransient_SkipsSQLAudit.
 type fakeAuditStore struct {
 	store.Store
 	createCount int
+	createdIDs  []types.ExecutionID
 }
 
-func (f *fakeAuditStore) CreateExecution(_ context.Context, _ *store.ExecutionRecord) error {
+func (f *fakeAuditStore) CreateExecution(_ context.Context, rec *store.ExecutionRecord) error {
 	f.createCount++
+	f.createdIDs = append(f.createdIDs, rec.ExecutionID)
 	return nil
+}
+
+func (f *fakeAuditStore) created(id types.ExecutionID) bool {
+	return slices.Contains(f.createdIDs, id)
 }
 
 func testTransientGraph() *graph.Graph {
@@ -118,8 +129,27 @@ func TestPerWorkflowTransient_SkipsSQLAudit(t *testing.T) {
 		t.Fatalf("CreateExecution (durable) error = %v", err)
 	}
 
+	// The count alone cannot answer the question this test asks. Inverting the
+	// guard at state_execution.go:83 to `s.isTransient(...)` writes the
+	// transient execution to SQL and skips the durable one -- still exactly one
+	// call, so a `createCount != 1` check stays green while the result is
+	// inverted in both directions at once: the transient workflow's params (the
+	// whole reason a workflow is marked transient is that they may hold raw
+	// credentials) land in xflow_executions, and the durable workflow loses the
+	// audit row that is its only durable record.
 	if fakeDB.createCount != 1 {
-		t.Fatalf("expected 1 SQL CreateExecution call (durable only), got %d", fakeDB.createCount)
+		t.Fatalf("expected 1 SQL CreateExecution call (durable only), got %d (ids: %v)",
+			fakeDB.createCount, fakeDB.createdIDs)
+	}
+	if !fakeDB.created(durableID) {
+		t.Errorf("durable execution %q was not projected into SQL; projected: %v: "+
+			"a durable workflow's audit row is its only record outside Redis's TTL",
+			durableID, fakeDB.createdIDs)
+	}
+	if fakeDB.created(transientID) {
+		t.Errorf("transient execution %q was projected into SQL; projected: %v: "+
+			"transient is the only thing keeping a transient workflow's params "+
+			"out of the platform database", transientID, fakeDB.createdIDs)
 	}
 }
 
