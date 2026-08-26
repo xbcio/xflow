@@ -138,7 +138,10 @@ func (s *memoryState) expireGroupLeaseLocked(id types.ExecutionID, unitIdx int, 
 	st.status = groupUnitPending
 	st.leaseID = ""
 	st.leaseToken = ""
-	st.attempt++
+	// attempt stays as it is. AcquireGroupLease bumps it on the way back in
+	// (prevAttempt >= requested => prevAttempt+1) and the caller always seeds 1,
+	// so incrementing here too counted every retry cycle twice. The stale holder
+	// is already fenced out by the cleared lease token.
 	st.deadline = time.Time{}
 	return true
 }

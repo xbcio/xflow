@@ -374,17 +374,34 @@ func RunGroupStateContract(t *testing.T, newStore func(*testing.T) GroupStore) {
 		s, id, gu := seed(t, twoUnitGraph(t))
 		l1 := lease(id, gu, "T1")
 		s.AcquireGroupLease(ctx, l1)
-		firstAttempt := l1.Attempt
-
-		s.ExpireGroupLease(ctx, id, gu, "T1")
-
-		l2 := lease(id, gu, "T2")
-		ok, err := s.AcquireGroupLease(ctx, l2)
-		if err != nil || !ok {
-			t.Fatalf("re-acquire after expiry: ok=%v err=%v", ok, err)
+		// The attempt has an exact answer, and the loose `> firstAttempt` bound
+		// this used to carry accepted every wrong one. engine/group_exec.go seeds
+		// Attempt=1 and treats whatever the store writes back as authoritative, so
+		// a store that jumps by two burns the group's retry budget at twice the
+		// rate, and one that pins the value burns it never -- neither shows up as
+		// an error, only as a group that gives up early or retries forever.
+		if l1.Attempt != 1 {
+			t.Fatalf("attempt on first acquire = %d, want 1: nothing ran before it", l1.Attempt)
 		}
-		if l2.Attempt <= firstAttempt {
-			t.Errorf("attempt after re-acquire = %d, want > %d", l2.Attempt, firstAttempt)
+
+		// Three expiry cycles, because a store that returns a constant 2 satisfies
+		// a single increment.
+		prev, want := engine.LeaseToken("T1"), 1
+		for _, token := range []engine.LeaseToken{"T2", "T3", "T4"} {
+			if _, err := s.ExpireGroupLease(ctx, id, gu, prev); err != nil {
+				t.Fatalf("expire %s: %v", prev, err)
+			}
+			l := lease(id, gu, token)
+			ok, err := s.AcquireGroupLease(ctx, l)
+			if err != nil || !ok {
+				t.Fatalf("re-acquire after expiry (%s): ok=%v err=%v", token, ok, err)
+			}
+			want++
+			if l.Attempt != want {
+				t.Fatalf("attempt after re-acquire %s = %d, want exactly %d",
+					token, l.Attempt, want)
+			}
+			prev = token
 		}
 	})
 

@@ -444,7 +444,7 @@ func (s *Store) GetGroupLease(ctx context.Context, id types.ExecutionID, unitIdx
 }
 
 // expireGroupLeaseLua transitions a running group unit back to pending (retry-ready)
-// only if the token still matches. Increments attempt. Returns {1} if expired,
+// only if the token still matches. Returns {1} if expired,
 // {0} if token mismatch/already terminal.
 // KEYS: 1=group:status 2=group:meta 3=leases(zset)
 // ARGV: 1=token 2=ttl_s 3=lease_member
@@ -457,10 +457,12 @@ local token = redis.call('HGET', KEYS[2], 'lease_token') or ''
 if token ~= ARGV[1] then
     return {0}
 end
-local attempt = tonumber(redis.call('HGET', KEYS[2], 'attempt') or '1')
 local ttl = tonumber(ARGV[2])
 redis.call('SET', KEYS[1], 'pending', 'EX', ttl)
-redis.call('HSET', KEYS[2], 'lease_id', '', 'lease_token', '', 'attempt', tostring(attempt + 1))
+-- attempt is deliberately left untouched: acquireGroupLeaseLua bumps it on the
+-- way back in (prevAttempt >= requested => prevAttempt + 1), and the caller
+-- always seeds 1, so incrementing here too made every retry cycle count twice.
+redis.call('HSET', KEYS[2], 'lease_id', '', 'lease_token', '')
 redis.call('EXPIRE', KEYS[2], ttl)
 redis.call('ZREM', KEYS[3], ARGV[3])
 return {1}
@@ -495,10 +497,12 @@ local token = redis.call('HGET', KEYS[2], 'lease_token') or ''
 if token ~= ARGV[1] then
     return 0
 end
-local attempt = tonumber(redis.call('HGET', KEYS[2], 'attempt') or '1')
 local ttl = tonumber(ARGV[2])
 redis.call('SET', KEYS[1], 'pending', 'EX', ttl)
-redis.call('HSET', KEYS[2], 'lease_id', '', 'lease_token', '', 'attempt', tostring(attempt + 1))
+-- attempt is deliberately left untouched: acquireGroupLeaseLua bumps it on the
+-- way back in (prevAttempt >= requested => prevAttempt + 1), and the caller
+-- always seeds 1, so incrementing here too made every retry cycle count twice.
+redis.call('HSET', KEYS[2], 'lease_id', '', 'lease_token', '')
 redis.call('EXPIRE', KEYS[2], ttl)
 redis.call('ZREM', KEYS[3], ARGV[3])
 redis.call('HSETNX', KEYS[5], ARGV[4], ARGV[5])
