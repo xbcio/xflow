@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -21,6 +22,32 @@ import (
 	"github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/types"
 )
+
+// assertNoAuditFieldCarries fails if any string field of the projected audit
+// row holds the operator's free-text reason.
+//
+// Every field, not the one the reason would most obviously land in. A single
+// `row.Reason == reason` check answers "is it in the column I thought of",
+// which is a different and much weaker question than "did it get persisted" —
+// a projector that moved the text to Resource, or appended it to Outcome,
+// satisfies the narrow check while persisting exactly what must not be
+// persisted. Reflection is used so a field added to store.AuditRecord later is
+// covered the day it exists rather than the day someone remembers this test.
+func assertNoAuditFieldCarries(t *testing.T, row *store.AuditRecord, reason string) {
+	t.Helper()
+	v := reflect.ValueOf(*row)
+	ty := v.Type()
+	for i := 0; i < ty.NumField(); i++ {
+		if ty.Field(i).Type.Kind() != reflect.String {
+			continue
+		}
+		if got := v.Field(i).String(); strings.Contains(got, reason) {
+			t.Errorf("audit row field %s = %q carries the operator's free-text reason; "+
+				"the SQL projection is metadata-only and the reason stays in Redis",
+				ty.Field(i).Name, got)
+		}
+	}
+}
 
 // fakeReceiptAuditAppender is an in-memory store.AuditAppender +
 // ReceiptAuditAppender for the management-module integration tests. It mirrors
@@ -197,8 +224,12 @@ func TestDeadLetterReplayUnifiedMetricAndProjection(t *testing.T) {
 	principal := control.DeadLetterReplayPrincipal{
 		Subject: "alice", Namespace: "default", Scopes: []string{control.ScopeDeadLetterReplay},
 	}
+	// A sentinel rather than a plausible sentence: the scan below is a substring
+	// match over every field, and a realistic reason risks colliding with
+	// metadata the row is supposed to carry.
+	const operatorReason = "root cause fixed 8c1f-freetext-must-not-persist"
 	res, derr := mgr.Replay(ctx, principal, engine.ReplayDeadLetterRequest{
-		ExecutionID: types.ExecutionID(execID), EntryID: entryID, RequestID: "req-unified", Reason: "root cause fixed",
+		ExecutionID: types.ExecutionID(execID), EntryID: entryID, RequestID: "req-unified", Reason: operatorReason,
 	})
 	if derr != nil {
 		t.Fatalf("Replay: %v", derr)
@@ -222,9 +253,17 @@ func TestDeadLetterReplayUnifiedMetricAndProjection(t *testing.T) {
 	if rows[0].ReceiptAuditID != res.AuditID {
 		t.Fatalf("projected receipt_audit_id = %q, want %q", rows[0].ReceiptAuditID, res.AuditID)
 	}
-	if rows[0].Reason == "root cause fixed" {
-		t.Fatalf("durable projection persisted operator free-text reason (security: reason stays in Redis)")
+	// Positive first. Every assertion below this one is a negative, and a
+	// projector that wrote a blank row would satisfy all of them — "the reason
+	// is absent" is also true of "everything is absent". Pinning the reason code
+	// the projection is supposed to carry is what makes the negatives mean
+	// something.
+	if rows[0].Reason != "replay_receipt" {
+		t.Errorf("projected reason = %q, want the reason CODE %q "+
+			"(a blank row would pass the leak checks below for the wrong reason)",
+			rows[0].Reason, "replay_receipt")
 	}
+	assertNoAuditFieldCarries(t, rows[0], operatorReason)
 }
 
 // TestDeadLetterReplayAuthzDenialsAudited proves forged operator / missing
