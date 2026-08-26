@@ -128,6 +128,8 @@ func TestReplayDeadLetterConcurrentReplaysCollapseToOne(t *testing.T) {
 	const n = 16
 	var replayed, alreadyReplayed, other atomic.Int64
 	var firstAudit atomic.Value // string
+	var auditMu sync.Mutex
+	var alreadyAudits []string
 	var wg sync.WaitGroup
 	wg.Add(n)
 	start := make(chan struct{})
@@ -148,6 +150,9 @@ func TestReplayDeadLetterConcurrentReplaysCollapseToOne(t *testing.T) {
 				firstAudit.Store(res.AuditID)
 			case engine.ReplayAlreadyReplayed:
 				alreadyReplayed.Add(1)
+				auditMu.Lock()
+				alreadyAudits = append(alreadyAudits, res.AuditID)
+				auditMu.Unlock()
 			default:
 				other.Add(1)
 				t.Errorf("unexpected outcome %q under concurrent replay", res.Outcome)
@@ -163,10 +168,39 @@ func TestReplayDeadLetterConcurrentReplaysCollapseToOne(t *testing.T) {
 	if replayed.Load()+alreadyReplayed.Load() != int64(n) {
 		t.Fatalf("replayed+already = %d, want %d (other=%d)", replayed.Load()+alreadyReplayed.Load(), n, other.Load())
 	}
-	// Every already_replayed result must carry the original audit_id.
+	// Every already_replayed result must carry the original audit_id. Until the
+	// loop below existed, this comment asserted something no line checked: the
+	// losers' res.AuditID was never captured, only the winner's non-emptiness
+	// was. atomic_state.go:452 could return a freshly minted id per RequestID
+	// out of the priorReqID collapse branch and this test would still pass.
+	//
+	// That id is the SQL idempotency key. It travels as
+	// ReplayReceipt.AuditID -> store.AuditRecord.ReceiptAuditID, and
+	// AppendAuditIfAbsent (store/interfaces.go:57-63) skips the insert when a
+	// row with the same ReceiptAuditID already exists. Fabricate one per
+	// request and a single physical move appends 16 separate audit rows -- the
+	// trail then reports 16 replays of an entry that moved once, which is
+	// exactly the question the trail is consulted to answer.
+	//
+	// No other test covers this: every other already_replayed case in the repo
+	// retries with the SAME RequestID (hitting the receipt branch at
+	// atomic_state.go:440 instead), and the two tests that do use distinct
+	// RequestIDs -- TestReplayDeadLetterSecondCycleNotBlocked and
+	// TestReplayDeadLetterRejectionDifferentRequestIDReEvaluates -- assert the
+	// opposite contract, that the ids DIFFER.
 	orig, _ := firstAudit.Load().(string)
 	if orig == "" {
 		t.Fatal("no first audit_id recorded")
+	}
+	if len(alreadyAudits) != n-1 {
+		t.Fatalf("collected %d already_replayed audit_ids, want %d", len(alreadyAudits), n-1)
+	}
+	for i, got := range alreadyAudits {
+		if got != orig {
+			t.Fatalf("already_replayed[%d] audit_id = %q, want the winner's %q: "+
+				"each distinct audit_id appends another row for the same move",
+				i, got, orig)
+		}
 	}
 	ready, err := state.ListOutbox(ctx, id, time.Now().Add(time.Second), 10)
 	if err != nil {
