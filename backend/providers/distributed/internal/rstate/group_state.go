@@ -124,24 +124,24 @@ local status = redis.call('GET', KEYS[5])
 if status == 'done' then
     local committed = redis.call('HGET', KEYS[6], 'committed_lease_token') or ''
     if committed ~= '' and committed == ARGV[1] then
-        return {2, 0, ''}
+        return {2, 0, '', {}}
     end
-    return {0, 0, ''}
+    return {0, 0, '', {}}
 end
 local execStatus = redis.call('GET', KEYS[1])
 if execStatus == false then
-    return {3, 0, ''}
+    return {3, 0, '', {}}
 end
 if execStatus == 'success' or execStatus == 'failed' or execStatus == 'canceled' or execStatus == 'timeout' then
-    return {3, 0, execStatus}
+    return {3, 0, execStatus, {}}
 end
 if status ~= 'running' then
-    return {0, 0, ''}
+    return {0, 0, '', {}}
 end
 local token = redis.call('HGET', KEYS[6], 'lease_token') or ''
 local attempt = tonumber(redis.call('HGET', KEYS[6], 'attempt') or '0')
 if token == '' or token ~= ARGV[1] or attempt ~= tonumber(ARGV[2]) then
-    return {0, 0, ''}
+    return {0, 0, '', {}}
 end
 local ttl = tonumber(ARGV[3])
 -- F2: boundary outputs are written here, strictly after the fence check
@@ -159,6 +159,10 @@ redis.call('EXPIRE', KEYS[6], ttl)
 redis.call('ZREM', KEYS[7], ARGV[4])
 local done = 0
 local finalStatus = ''
+-- IDs actually enqueued by the downstream loop below. Reported back so the Go
+-- wrapper does not have to guess: it knows both candidate IDs (execute and
+-- skip) per arrival but not which -- if either -- the script chose.
+local written = {}
 if tonumber(ARGV[7]) == 0 then
     local remaining = redis.call('DECR', KEYS[3])
     redis.call('EXPIRE', KEYS[3], ttl)
@@ -227,6 +231,7 @@ if done == 0 and tonumber(ARGV[6]) == 0 and redis.call('GET', KEYS[1]) ~= 'cance
                 end
                 if redis.call('HSETNX', KEYS[9], outboxID, outboxBody) == 1 then
                     redis.call('ZADD', KEYS[8], tonumber(ARGV[2]), outboxID)
+                    table.insert(written, outboxID)
                 end
             end
         end
@@ -235,7 +240,7 @@ if done == 0 and tonumber(ARGV[6]) == 0 and redis.call('GET', KEYS[1]) ~= 'cance
     end
     redis.call('EXPIRE', KEYS[8], ttl); redis.call('EXPIRE', KEYS[9], ttl)
 end
-return {1, done, finalStatus}
+return {1, done, finalStatus, written}
 `)
 
 // ---------------------------------------------------------------------------
@@ -322,7 +327,6 @@ func (s *Store) CommitGroup(ctx context.Context, req engine.GroupCommitRequest) 
 	// Downstream unit arrivals: each arrival appends 3 counting keys + 7 args
 	// (execute/skip body), structurally identical to AdvanceNode wrapper
 	// (state_commit.go:258-289) but keyed by UnitIdx.
-	outboxIDs := make([]string, 0, len(req.Downstream)*2)
 	for _, arrival := range req.Downstream {
 		keys = append(keys,
 			inDegreeKey(t, req.ExecutionID, arrival.UnitIdx),
@@ -356,13 +360,12 @@ func (s *Store) CommitGroup(ctx context.Context, req engine.GroupCommitRequest) 
 			return engine.GroupCommitResult{}, err
 		}
 		args = append(args, arrival.ArrivalCount, arrival.ActiveCount, arrival.MergeMode, executeID, executeJSON, skipID, skipJSON)
-		outboxIDs = append(outboxIDs, executeID, skipID)
 	}
 	res, err := commitGroupLua.Run(ctx, s.rdb, keys, args...).Slice()
 	if err != nil {
 		return engine.GroupCommitResult{}, fmt.Errorf("commit group %q/#%d: %w", req.ExecutionID, req.GroupUnitIdx, err)
 	}
-	if len(res) != 3 {
+	if len(res) != 4 {
 		return engine.GroupCommitResult{}, fmt.Errorf("commit group %q/#%d: unexpected result %v", req.ExecutionID, req.GroupUnitIdx, res)
 	}
 	out := engine.GroupCommitResult{}
@@ -374,9 +377,14 @@ func (s *Store) CommitGroup(ctx context.Context, req engine.GroupCommitRequest) 
 		out.Outcome = engine.CommitOutcomeAccepted
 		out.ExecutionDone = redisResultInt(res[1]) == 1
 		out.ExecutionStatus = types.ExecutionStatus(redisResultString(res[2]))
-		if !out.ExecutionDone && !req.Fatal {
-			out.OutboxIDs = outboxIDs
-		}
+		// Both candidate IDs (execute and skip) are handed to the script for
+		// every arrival, but at most one of them is enqueued -- and when the
+		// downstream unit is still waiting on another in-edge, neither is. The
+		// wrapper used to report both, unconditionally, so OutboxIDs named
+		// entries that do not exist in the outbox and was non-empty even when
+		// nothing at all had been scheduled. The local backend reports what it
+		// actually wrote; the script now does too.
+		out.OutboxIDs = redisResultStrings(res[3])
 	case 2:
 		out.Outcome = engine.CommitOutcomeDuplicateTerminal
 	case 3:

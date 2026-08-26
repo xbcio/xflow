@@ -58,6 +58,38 @@ func twoUnitGraph(t *testing.T) *graph.Graph {
 	return g
 }
 
+// fanInGraph: group {ingest,analyze} plus two external nodes, where "store" is
+// fed by BOTH the group (via analyze) and the standalone "side" node, giving
+// store's unit an in-degree of 2.
+//
+// twoUnitGraph cannot be used to test wait_any: its "store" has in-degree 1, so
+// after a single arrival the `inDegrees <= 0` branch schedules it anyway and the
+// wait_any branch is inert. Two predecessors with only one arriving is the only
+// shape where "schedule on first active arrival" and "wait for everyone" differ.
+func fanInGraph(t *testing.T) *graph.Graph {
+	t.Helper()
+	g, err := graph.Compile(&types.WorkflowDef{
+		Name: "fanin",
+		Nodes: []types.NodeDef{
+			{Name: "ingest", Kind: types.NodeKindTrigger},
+			{Name: "analyze", Kind: types.NodeKindAction},
+			{Name: "side", Kind: types.NodeKindAction},
+			{Name: "store", Kind: types.NodeKindAction},
+		},
+		Connections: types.Connections{
+			"ingest": {"main": {Targets: []types.Connection{
+				{Node: "analyze", Input: "main"}, {Node: "side", Input: "main"}}}},
+			"analyze": {"main": {Targets: []types.Connection{{Node: "store", Input: "main"}}}},
+			"side":    {"main": {Targets: []types.Connection{{Node: "store", Input: "main"}}}},
+		},
+		Groups: []types.GroupDef{{Name: "edge", Members: []string{"ingest", "analyze"}}},
+	})
+	if err != nil {
+		t.Fatalf("compile fan-in graph: %v", err)
+	}
+	return g
+}
+
 // RunGroupStateContract exercises the GroupStateStore contract (acquire, renew,
 // commit, fence, downstream) against a concrete backend. Every backend
 // implementing GroupStateStore should call this.
@@ -280,28 +312,78 @@ func RunGroupStateContract(t *testing.T, newStore func(*testing.T) GroupStore) {
 
 	// Fan-in minimal coverage: group commit lights up downstream unit's wait_any first arrival.
 	t.Run("CommitSchedulesWaitAnyDownstream", func(t *testing.T) {
-		g := twoUnitGraph(t)
+		g := fanInGraph(t)
 		s, id, gu := seed(t, g)
-		if ok, _ := s.AcquireGroupLease(ctx, lease(id, gu, "T1")); !ok {
-			t.Fatal("acquire must succeed")
+		storeNodeIdx, ok := g.NodeIndex("store")
+		if !ok {
+			t.Fatal("store node missing from fan-in graph")
 		}
-		// store is the 3rd node in twoUnitGraph (NodeIdx=2), not a group member => its own unit.
-		const storeNodeIdx = 2
+		storeUnit := g.UnitIndexForNode(storeNodeIdx)
+		// The whole point of the fixture: two predecessors, so "wait for the
+		// first active arrival" and "wait for all arrivals" disagree. Assert it
+		// rather than trust it -- if a future compile change collapses side and
+		// the group into one unit, in-degree drops to 1 and this subtest goes
+		// back to passing for the wrong reason.
+		if d := g.UnitInDegreeAt(storeUnit); d != 2 {
+			t.Fatalf("store unit in-degree = %d, want 2: with 1 the wait_any branch "+
+				"and the in-degree-exhausted branch both schedule, so this test "+
+				"cannot tell wait_any from wait_all", d)
+		}
+
 		req := commit(id, gu, "T1")
 		req.Downstream = []engine.DownstreamArrival{{
 			NodeName:     "store",
 			NodeIdx:      storeNodeIdx,
-			UnitIdx:      g.UnitIndexForNode(storeNodeIdx),
+			UnitIdx:      storeUnit,
 			ArrivalCount: 1,
 			ActiveCount:  1,
 			MergeMode:    "wait_any",
 		}}
+		if ok, _ := s.AcquireGroupLease(ctx, lease(id, gu, "T1")); !ok {
+			t.Fatal("acquire must succeed")
+		}
 		res, err := s.CommitGroup(ctx, req)
 		if err != nil || !res.Applied {
 			t.Fatalf("commit: %+v err=%v", res, err)
 		}
-		if len(res.OutboxIDs) == 0 {
-			t.Fatal("wait_any first arrival must schedule the downstream unit (execute outbox intent)")
+		if len(res.OutboxIDs) != 1 {
+			t.Fatalf("OutboxIDs = %v, want exactly 1: wait_any must schedule store on "+
+				"the first active arrival even though its other predecessor has not "+
+				"reported (1 of 2 in-edges consumed)", res.OutboxIDs)
+		}
+
+		// len(OutboxIDs) != 0 was the whole assertion before, and it could not
+		// fail: the fixture's downstream node had a single in-edge, so the
+		// `inDegrees <= 0` branch scheduled it regardless of merge mode.
+		// Deleting the wait_any branch outright from BOTH backends left the
+		// entire ./backend/... tree green. Nor did the count say WHAT was
+		// scheduled -- a skip intent is also an outbox entry, and a wait_any
+		// fan-in that skips instead of executing drops the branch silently.
+		atomic, ok := s.(engine.AtomicStateStore)
+		if !ok {
+			t.Skip("store does not expose ListOutbox")
+		}
+		entries, err := atomic.ListOutbox(ctx, id, time.Now().Add(time.Minute), 16)
+		if err != nil {
+			t.Fatalf("ListOutbox: %v", err)
+		}
+		var got *engine.OutboxEntry
+		for i := range entries {
+			if entries[i].ID == res.OutboxIDs[0] {
+				got = &entries[i]
+			}
+		}
+		if got == nil {
+			t.Fatalf("CommitGroup reported outbox ID %q but ListOutbox does not have it: %+v",
+				res.OutboxIDs[0], entries)
+		}
+		if got.Task.NodeName != "store" {
+			t.Errorf("scheduled task is for node %q, want store", got.Task.NodeName)
+		}
+		if got.Task.Type != engine.TaskTypeNodeExec {
+			t.Errorf("scheduled task type = %v, want TaskTypeNodeExec (%v): a skip "+
+				"intent would leave store's downstream cascade running while store "+
+				"itself never executes", got.Task.Type, engine.TaskTypeNodeExec)
 		}
 	})
 

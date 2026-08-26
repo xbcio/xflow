@@ -379,6 +379,23 @@ func redisResultString(value any) string {
 	return ""
 }
 
+// redisResultStrings coerces a Redis Lua result element that is itself a table
+// into a string slice. A script that returns an empty Lua table surfaces here as
+// an empty (or absent) slice, so callers get nil rather than a phantom entry.
+func redisResultStrings(value any) []string {
+	items, ok := value.([]any)
+	if !ok || len(items) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		if text := redisResultString(item); text != "" {
+			out = append(out, text)
+		}
+	}
+	return out
+}
+
 // evictExecutionCaches drops the in-memory graph and per-execution TTL entries
 // once an execution reaches a terminal state, so completed executions do not
 // pin memory.
