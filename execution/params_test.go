@@ -117,32 +117,72 @@ func TestEvaluateParams_ExemptParamsAreNotEvaluated(t *testing.T) {
 
 // TestEvaluateParams_ErrorDoesNotLeakValue confirms that when template
 // evaluation fails, the error message does not contain the runtime value.
+//
+// The test used to be named this and assert only that the node name and the
+// parameter name are present. Nothing in it looked for a leak, and its fixture
+// had no value that could leak -- the whole subject of the test was the one
+// thing it did not check. evaluateParams' doc comment and the comment on the
+// fmt.Errorf itself both promise "NEVER the value or the result", and a
+// promise in a comment is not an assertion.
+//
+// The failing template is deliberately varied. A boundary error carries the
+// expression SOURCE, which is authored config and allowed; what must not ride
+// along is anything the expression resolved on its way to failing, or anything
+// else reachable from the environment. So each case fails at a different point:
+// on a path that does not exist at all, and on paths whose receiver already
+// resolved to the credential before the failure.
 func TestEvaluateParams_ErrorDoesNotLeakValue(t *testing.T) {
-	rec := &templateRecordingHandler{}
-	runner := NewRunner(singleHandlerRegistry{handler: rec})
+	// Credential-shaped, and distinctive enough that a substring search cannot
+	// hit it by accident. §7 puts tokens and passwords on the absolute
+	// blacklist, and a boundary error reaches the logs verbatim.
+	const secret = "sk-live-DO-NOT-LOG-4f2c9a7e"
 
-	lease := &engine.TaskLease{
-		Task:     engine.Task{ExecutionID: "exec-err", NodeName: "http-node"},
-		NodeType: "xflow.http",
-		Input: &types.Input{
-			ExecutionID: "exec-err",
-			NodeName:    "http-node",
-			Params: map[string]any{
-				"url": "${{ $params.nonexistent.deeper }}",
-			},
-		},
+	cases := []struct {
+		name string
+		expr string
+	}{
+		{"path does not exist", "${{ $params.nonexistent.deeper }}"},
+		{"receiver is a sibling parameter", "${{ $params.api_key.deeper }}"},
+		{"receiver is an $input root", "${{ $input.authorization.deeper }}"},
+		{"receiver is a $config root", "${{ $config.db_password.deeper }}"},
 	}
 
-	_, err := runner.Execute(context.Background(), lease)
-	if err == nil {
-		t.Fatal("Execute() should return error for failed template evaluation")
-	}
-	// Must contain the node name and parameter name for diagnostics.
-	if !strings.Contains(err.Error(), "http-node") {
-		t.Errorf("error should name the node; got %q", err.Error())
-	}
-	if !strings.Contains(err.Error(), "url") {
-		t.Errorf("error should name the parameter; got %q", err.Error())
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rec := &templateRecordingHandler{}
+			runner := NewRunner(singleHandlerRegistry{handler: rec})
+
+			lease := &engine.TaskLease{
+				Task:     engine.Task{ExecutionID: "exec-err", NodeName: "http-node"},
+				NodeType: "xflow.http",
+				Input: &types.Input{
+					ExecutionID: "exec-err",
+					NodeName:    "http-node",
+					Params: map[string]any{
+						"url":     c.expr,
+						"api_key": secret,
+					},
+					Data:   map[string]any{"authorization": secret},
+					Config: map[string]any{"db_password": secret},
+				},
+			}
+
+			_, err := runner.Execute(context.Background(), lease)
+			if err == nil {
+				t.Fatal("Execute() should return error for failed template evaluation")
+			}
+			// The actual subject.
+			if strings.Contains(err.Error(), secret) {
+				t.Errorf("boundary error leaked a credential: %q", err.Error())
+			}
+			// Must contain the node name and parameter name for diagnostics.
+			if !strings.Contains(err.Error(), "http-node") {
+				t.Errorf("error should name the node; got %q", err.Error())
+			}
+			if !strings.Contains(err.Error(), "url") {
+				t.Errorf("error should name the parameter; got %q", err.Error())
+			}
+		})
 	}
 }
 
