@@ -111,6 +111,55 @@ func TestResourcePool_GRPCReusesConnection(t *testing.T) {
 	}
 }
 
+// TestResourcePool_GRPCKeyIncludesSecureFlag covers the other half of the
+// cache key at pool.go:85 (`key := host + "|" + boolFlag(secure)`). The test
+// above only ever passes secure=false, so it cannot tell a key that includes
+// the secure flag from one that is just the bare host: dropping
+// `+ "|" + boolFlag(secure)` entirely would still pass it, because every call
+// in that test shares the same host AND the same secure value.
+//
+// Here the host is held fixed and only secure changes between the two calls.
+//
+// What makes this more than a cache-key nit is the one production caller.
+// node/internal/action/grpc.go:135-142 derives BOTH things from the same
+// useTLS value: it picks credentials.NewTLS or insecure.NewCredentials for
+// the dial options, then passes that same bool to the pool as `secure`. The
+// pool applies dial options only when it actually dials (pool.go:93-100) and
+// returns the cached conn untouched otherwise. So if the key stopped
+// distinguishing the flag, a workflow with tls:false to some host would cache
+// a plaintext connection, and a later node with tls:true to that same host
+// would be handed it back — its TLS credentials silently never applied. That
+// is a transport downgrade, not a missed optimisation.
+//
+// Both calls here pass insecure credentials deliberately: the pool does not
+// derive credentials from `secure` at all (it is a key input only), so
+// varying the opts as well would confuse which input the assertion pins.
+func TestResourcePool_GRPCKeyIncludesSecureFlag(t *testing.T) {
+	srv := startNoopGRPC(t)
+
+	p := NewDefaultResourcePool(types.DefaultResourcePoolConfig())
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = p.Close(ctx)
+	})
+
+	opts := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
+	insecureConn, err := p.GRPC(context.Background(), srv.addr, false, opts...)
+	if err != nil {
+		t.Fatalf("GRPC(secure=false) error = %v", err)
+	}
+	secureConn, err := p.GRPC(context.Background(), srv.addr, true, opts...)
+	if err != nil {
+		t.Fatalf("GRPC(secure=true) error = %v", err)
+	}
+	if insecureConn == secureConn {
+		t.Fatal("GRPC() returned the SAME connection for secure=false and secure=true " +
+			"at the same host: the cache key does not actually distinguish the " +
+			"secure flag, so a secure request silently reuses a plaintext connection")
+	}
+}
+
 func TestResourcePool_CloseIdempotent(t *testing.T) {
 	p := NewDefaultResourcePool(types.DefaultResourcePoolConfig())
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
