@@ -46,6 +46,25 @@ func TestScanReplayReceiptsProjectsAllReceipts(t *testing.T) {
 	if got[0].EntryID != "entry-exec-a-1" {
 		t.Fatalf("receipt[0].EntryID = %q, want entry-exec-a-1", got[0].EntryID)
 	}
+	// ts_ms and operator are seeded by seedReceipt and named in this test's own
+	// doc comment, but nothing here read them back. Both are decoded by
+	// discarding the parse error / missing key (receipt_reader.go:138 does
+	// `strconv.ParseInt(fields["ts_ms"], 10, 64)` with `_` for err), so a
+	// renamed or mistyped field name degrades silently to the zero value:
+	//   - TimestampMs 0 makes deadletter_projector.go:70 fall back to
+	//     time.Now(), stamping the durable audit row with reconcile time
+	//     instead of when the replay actually happened;
+	//   - Operator "" empties store.AuditRecord.Principal, so the audit row
+	//     for an operator-initiated replay no longer says who initiated it.
+	if got[0].TimestampMs != 1700000000000 {
+		t.Errorf("receipt[0].TimestampMs = %d, want 1700000000000: a zero here is "+
+			"not an error, it is the projector silently substituting reconcile "+
+			"time for the replay's own wall-clock time", got[0].TimestampMs)
+	}
+	if got[0].Operator != "cli:tester" {
+		t.Errorf("receipt[0].Operator = %q, want cli:tester: this is the audit "+
+			"row's Principal, the record of who ran the replay", got[0].Operator)
+	}
 	if got[2].Namespace != "namespace-b" {
 		t.Fatalf("receipt[2].Namespace = %q, want namespace-b", got[2].Namespace)
 	}
