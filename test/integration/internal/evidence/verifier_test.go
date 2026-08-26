@@ -946,12 +946,93 @@ func TestMarshalCanonicalStable(t *testing.T) {
 	}
 }
 
+// TestDefaultManifestCoverage pins WHICH scenarios and matrix cells the
+// manifest requires, not how many there are.
+//
+// Counting cannot detect the failure this manifest exists to prevent. Replace
+// A3ErrorPortRetryExhausted in A3RequiredRows' fixture list with a second copy
+// of A3TransientThenSuccess and the length is still 5x3=15, so the old
+// assertions hold -- while error-port retry exhaustion drops out of the
+// required set entirely and is never again enforced at the merge gate. Nothing
+// downstream catches it either: markAllRequired (the "all required evidence is
+// present" baseline every other test builds on) and NewVerifier (the checker)
+// both call A3RequiredRows, so they rot in lockstep and confirm each other. A3
+// execution IDs are derived from fixture+topology, so a duplicated row reuses
+// one ID and slips past the duplicate detector as well.
+//
+// The expected sets below are written out here on purpose: a second copy of
+// the list, in a different file, is what makes a one-line edit to the first
+// one visible.
 func TestDefaultManifestCoverage(t *testing.T) {
 	m := DefaultManifest()
-	if len(m.A0Scenarios) != 5 {
-		t.Fatalf("expected 5 A0 scenarios, got %d", len(m.A0Scenarios))
+
+	wantA0 := []A0Scenario{
+		A0CommitThenFlushBeforeDelivery,
+		A0ReportAckLoss,
+		A0ReportRequestLoss,
+		A0QueueHandoff,
+		A0OSKillSIGKILL,
 	}
-	if len(m.A3Rows) != 15 {
-		t.Fatalf("expected 15 A3 rows, got %d", len(m.A3Rows))
+	if len(m.A0Scenarios) != len(wantA0) {
+		t.Fatalf("A0 scenarios = %v, want %v", m.A0Scenarios, wantA0)
+	}
+	for i, want := range wantA0 {
+		if m.A0Scenarios[i] != want {
+			t.Errorf("A0Scenarios[%d] = %q, want %q (canonical order is part of "+
+				"the contract: the verifier requires exactly one derived "+
+				"observation per scenario)", i, m.A0Scenarios[i], want)
+		}
+	}
+
+	wantFixtures := []A3Fixture{
+		A3TransientThenSuccess,
+		A3TransientRetryExhausted,
+		A3PermanentNoRetry,
+		A3BusinessErrorNoRetry,
+		A3ErrorPortRetryExhausted,
+	}
+	wantTopologies := []A3Topology{A3Local, A3ServerRunner, A3ClusterDurable}
+
+	type cell struct {
+		f A3Fixture
+		t A3Topology
+	}
+	got := make(map[cell]A3MatrixRow, len(m.A3Rows))
+	for _, row := range m.A3Rows {
+		key := cell{row.Fixture, row.Topology}
+		if _, dup := got[key]; dup {
+			t.Errorf("A3 row %s/%s appears more than once: a duplicated cell "+
+				"means some other cell went missing without changing the count",
+				row.Fixture, row.Topology)
+		}
+		got[key] = row
+	}
+	if len(got) != len(wantFixtures)*len(wantTopologies) {
+		t.Errorf("A3 matrix has %d distinct cells, want %d",
+			len(got), len(wantFixtures)*len(wantTopologies))
+	}
+
+	for _, f := range wantFixtures {
+		for _, topo := range wantTopologies {
+			row, ok := got[cell{f, topo}]
+			if !ok {
+				t.Errorf("A3 matrix is missing %s/%s: that combination is no "+
+					"longer required, so no run has to produce evidence for it",
+					f, topo)
+				continue
+			}
+			// The two flags decide whether the verifier enforces real-MySQL
+			// parity for this cell (spec 8.6). Silently flipping either one
+			// relaxes the contract without changing any count.
+			wantRealPair := topo == A3ServerRunner || topo == A3ClusterDurable
+			if row.DatabaseRealPair != wantRealPair {
+				t.Errorf("A3 row %s/%s DatabaseRealPair = %v, want %v",
+					f, topo, row.DatabaseRealPair, wantRealPair)
+			}
+			if wantLocalFake := topo == A3Local; row.IsDatabaseLocalFake != wantLocalFake {
+				t.Errorf("A3 row %s/%s IsDatabaseLocalFake = %v, want %v",
+					f, topo, row.IsDatabaseLocalFake, wantLocalFake)
+			}
+		}
 	}
 }
