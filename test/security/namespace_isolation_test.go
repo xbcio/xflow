@@ -85,6 +85,13 @@ func newNamespaceIsolationFixture(t *testing.T) *namespaceIsolationFixture {
 	principalAuth := apiserver.NewBearerPrincipalAuthMulti([]apiserver.TokenPrincipalMapping{
 		{Token: "tok-a", Subject: "op-a", Namespace: testNamespaceA, Scopes: testScopes},
 		{Token: "tok-b", Subject: "op-b", Namespace: testNamespaceB, Scopes: testScopes},
+		// tok-a-limited is namespace A, same as tok-a, but holds only
+		// management.read. It exists to exercise the scope-authorization branch
+		// of NamespaceAwareAuthorizer.Authorize, which the rest of this fixture's
+		// tokens never exercise: tok-a/tok-b always carry every scope the fixture
+		// needs, so a request that should be denied purely for lacking a scope
+		// (as opposed to being in the wrong namespace) never gets forbidden here.
+		{Token: "tok-a-limited", Subject: "op-a-limited", Namespace: testNamespaceA, Scopes: []string{"management.read"}},
 	})
 
 	srv, err := apiserver.New(apiserver.Config{
@@ -671,5 +678,55 @@ func TestNamespaceIsolationRequestBodyNamespaceIgnored(t *testing.T) {
 	}
 	if code := f.getManagementExecution("tok-b", execID); code != http.StatusNotFound {
 		t.Fatalf("namespaceB inspect (forged body namespace) = %d, want 404", code)
+	}
+}
+
+// TestNamespaceIsolationMissingScopeIsForbidden covers the authorization layer
+// itself, which none of the tests above exercise: they all use tok-a/tok-b,
+// which carry every scope the fixture needs, so a caller in the RIGHT
+// namespace but missing the REQUIRED scope never gets a chance to be denied.
+// Every existing cross-namespace assertion in this file is satisfiable by an
+// authorizer that always returns Allow, because the real defense they observe
+// is the namespace-scoped store resolving to not-found -- the authorizer's own
+// decision is never on the critical path of any prior assertion here.
+//
+// tok-a-limited is namespace A (same as tok-a) but holds only management.read.
+// It must be forbidden on every route that requires a different scope, and
+// still allowed on the one route its scope actually covers -- so this test
+// cannot be satisfied by an authorizer that just denies everything, only by
+// one that checks the operation's required scope against the principal's.
+func TestNamespaceIsolationMissingScopeIsForbidden(t *testing.T) {
+	f := newNamespaceIsolationFixture(t)
+	execID := f.submitWorkflow("tok-a", "scope-wf")
+
+	// workflow.execute requires the "workflow" scope; tok-a-limited lacks it.
+	if code := f.status(http.MethodPost, "tok-a-limited", "/v1/workflows/execute", submitWorkflowRequest{Workflow: testWorkflow("scope-wf-2")}); code != http.StatusForbidden {
+		t.Fatalf("tok-a-limited execute (missing workflow scope) = %d, want 403", code)
+	}
+
+	// execution.read requires the "execution" scope; tok-a-limited lacks it,
+	// even though it is in the SAME namespace as the execution's owner. A 404
+	// here (rather than 403) would mean the request fell through to the
+	// namespace-scoped-store defense instead of being stopped by scope check.
+	if code, _ := f.getExecution("tok-a-limited", execID); code != http.StatusForbidden {
+		t.Fatalf("tok-a-limited get execution (missing execution scope) = %d, want 403", code)
+	}
+
+	// execution.cancel requires the "execution" scope.
+	if code := f.cancelExecution("tok-a-limited", execID); code != http.StatusForbidden {
+		t.Fatalf("tok-a-limited cancel (missing execution scope) = %d, want 403", code)
+	}
+
+	// deadletter.list requires the "deadletter.list" scope.
+	if code, _ := f.listDeadLetters("tok-a-limited", execID); code != http.StatusForbidden {
+		t.Fatalf("tok-a-limited list dead letters (missing deadletter.list scope) = %d, want 403", code)
+	}
+
+	// Positive control: tok-a-limited DOES hold management.read, and the
+	// execution belongs to its own namespace, so this must succeed. Without
+	// this assertion, an authorizer mutated to deny everything would pass the
+	// four checks above for the wrong reason.
+	if code := f.getManagementExecution("tok-a-limited", execID); code != http.StatusOK {
+		t.Fatalf("tok-a-limited management get (holds management.read, same namespace) = %d, want 200", code)
 	}
 }
