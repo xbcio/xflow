@@ -37,6 +37,18 @@ func TestClassifyDBError(t *testing.T) {
 		{"no such table 1146 permanent", mysqlErr(1146, "42S02"), types.ErrorKindPermanent},
 		{"unknown column 1054 permanent", mysqlErr(1054, "42S22"), types.ErrorKindPermanent},
 		{"access denied 1045 permanent", mysqlErr(1045, "28000"), types.ErrorKindPermanent},
+		// 1051 is the one entry in the permanent number list that nothing else
+		// rescues. The SQLState switch above it matches only "40001", "23000",
+		// "23001", "42000" — real MySQL sends 1051 with 42S02, which none of
+		// those cover, so deleting 1051 from db_errors.go:81 drops it straight
+		// through to the conservative transient fallback. "Unknown table" is a
+		// schema fact that will be just as untrue on the next attempt: the node
+		// would then be retried to exhaustion instead of failing once.
+		//
+		// The neighbouring uncovered numbers (1451, 1061, 1586) are NOT added
+		// here: their real SQLStates are 23000/42000, which the state switch
+		// already classifies permanent, so a row for them could not fail.
+		{"unknown table 1051 permanent", mysqlErr(1051, "42S02"), types.ErrorKindPermanent},
 		{"unknown mysql number transient fallback", mysqlErr(1644, "99999"), types.ErrorKindTransient},
 	}
 	for _, c := range cases {
