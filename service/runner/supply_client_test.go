@@ -96,10 +96,22 @@ func TestHTTPSupplyFetcher_BodyTooLarge(t *testing.T) {
 	}
 }
 
+// TestHTTPSupplyFetcher_EmptyName pins the guard that rejects an empty name
+// before any request is built.
+//
+// It asserts the guard's own message rather than "err != nil". BaseURL here
+// never resolves, so deleting the guard entirely still produces an error — a
+// DNS failure — and a bare non-nil check passes for a fetcher that happily
+// builds "<base>/v1/supplies/" and asks the server for the empty supply. The
+// message is the only thing that distinguishes the guard from the network.
 func TestHTTPSupplyFetcher_EmptyName(t *testing.T) {
 	f := &HTTPSupplyFetcher{BaseURL: "http://unused"}
 	_, _, _, err := f.Fetch(context.Background(), "")
 	if err == nil {
 		t.Fatal("expected error for empty name")
+	}
+	if !strings.Contains(err.Error(), "empty name") {
+		t.Fatalf("err = %v, want the empty-name guard to reject it before the request "+
+			"is built; this error came from somewhere else", err)
 	}
 }

@@ -42,8 +42,20 @@ func TestRenewLeaseLoop_RenewsSuccessfully(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	cancel()
 
-	if renewer.renewed.Load() < 2 {
-		t.Fatalf("renewed %d times, want >= 2", renewer.renewed.Load())
+	if got := renewer.renewed.Load(); got < 2 {
+		t.Fatalf("renewed %d times, want >= 2", got)
+	} else if got > 20 {
+		// The upper bound is what makes cfg.Interval load-bearing. A loop that
+		// ignored it and renewed as fast as it could would satisfy ">= 2" while
+		// hammering the renew endpoint once per task per scheduler slice.
+		//
+		// It is generous (50ms/10ms tolerates at most ~6 ticks) rather than
+		// exact, and it is safe under load in the only direction that matters:
+		// a ticker drops ticks when the receiver is slow, so contention makes
+		// this count smaller, never larger. An exact count would be flaky here;
+		// this cannot be.
+		t.Fatalf("renewed %d times in 50ms at a 10ms interval; the loop is not "+
+			"honouring cfg.Interval", got)
 	}
 }
 

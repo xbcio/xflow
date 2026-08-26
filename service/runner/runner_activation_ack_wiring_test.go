@@ -82,8 +82,14 @@ func TestRunnerAcksFailedActivationOncePerGeneration(t *testing.T) {
 	if ack.SessionID != "session-1" {
 		t.Fatalf("ack.SessionID = %q, want session-1 (from Register response)", ack.SessionID)
 	}
-	if ack.Error == "" {
-		t.Fatal("ack.Error must carry the activation failure reason")
+	// The handler's own failure text, not merely "something non-empty". The
+	// ack is the only channel by which an operator learns WHY an activation
+	// failed — a control plane showing "failed" with a generic or substituted
+	// string is indistinguishable from one showing the real cause, and an
+	// empty-check accepts both.
+	if ack.Error != "supply not ready: rules" {
+		t.Fatalf("ack.Error = %q, want the activation handler's own failure text "+
+			"%q — the ack is where the reason surfaces", ack.Error, "supply not ready: rules")
 	}
 }
 

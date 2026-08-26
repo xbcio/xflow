@@ -164,12 +164,22 @@ func TestRunnerRenewsTheLeaseWhileAHandlerRuns(t *testing.T) {
 	if first.LeaseID != "lease-1" || first.LeaseToken != "token-1" {
 		t.Errorf("renew request = %+v, want the executing lease's identity", first)
 	}
-	if first.RunnerID != "runner-1" || first.SessionID == "" {
-		t.Errorf("renew request = %+v, want runner and session identity — the endpoint "+
-			"fences on both", first)
+	// SessionID is compared to the value Register handed back, not merely to
+	// "non-empty". protocolLeaseRenewer is constructed with the session from
+	// the register response (runner.go), and a non-empty check passes just as
+	// well if that field is fed r.config.RunnerID instead — which the endpoint
+	// would reject as a stale session, silently ending renewal for every task.
+	if first.RunnerID != "runner-1" || first.SessionID != "session-1" {
+		t.Errorf("renew request = %+v, want runner-1/session-1 — the endpoint fences "+
+			"on both, and the session must be the one Register returned", first)
 	}
-	if first.Extend <= 0 {
-		t.Errorf("Extend = %d, want a positive extension", first.Extend)
+	// Exactly one TTL, not just "positive". renewalExtendFor documents "buying
+	// back exactly one TTL (not more)" because that is what bounds how long an
+	// abandoned runner keeps a node: a hardcoded small extension expires under
+	// the sweeper mid-handler, and an over-large one delays reclamation past
+	// the TTL the sweeper judges against. Both pass a > 0 check.
+	if want := renewTestLease().TTL.Milliseconds(); first.Extend != want {
+		t.Errorf("Extend = %d ms, want %d ms (exactly the lease's own TTL)", first.Extend, want)
 	}
 }
 
