@@ -68,6 +68,18 @@ func TestUpsertNode_RefreshesEveryContractField(t *testing.T) {
 	if err := s.UpsertNode(ctx, build(1)); err != nil {
 		t.Fatalf("initial upsert: %v", err)
 	}
+	// Read CreatedAt back before the second upsert overwrites the row. Nothing
+	// else can produce this value: UpsertNode stamps it from time.Now() on the
+	// insert branch and the caller's record does not carry it.
+	inserted, err := s.GetNode(ctx, execID, "n1")
+	if err != nil {
+		t.Fatalf("get node after initial upsert: %v", err)
+	}
+	createdAt := inserted.CreatedAt
+	if createdAt.IsZero() {
+		t.Fatal("CreatedAt is zero after the INSERT branch; the rest of this test cannot " +
+			"distinguish preserved from refreshed")
+	}
 	updated := build(2)
 	if err := s.UpsertNode(ctx, updated); err != nil {
 		t.Fatalf("second upsert: %v", err)
@@ -90,7 +102,15 @@ func TestUpsertNode_RefreshesEveryContractField(t *testing.T) {
 
 	// CreatedAt is preserved, not refreshed — the other half of the contract,
 	// and the one an over-eager "copy everything" fix would break.
-	if got.CreatedAt.IsZero() {
-		t.Error("CreatedAt is zero after an upsert on an existing row; it must be preserved")
+	//
+	// IsZero() was the wrong probe for that. It catches only the one mutation
+	// that copies the caller's zero CreatedAt across; the likelier mistake,
+	// `existing.CreatedAt = time.Now()` sitting alongside the UpdatedAt line
+	// directly above it in memstore.go, produces a very much non-zero value and
+	// left the check green. Compare against the value the INSERT branch
+	// actually stamped.
+	if !got.CreatedAt.Equal(createdAt) {
+		t.Errorf("after upsert on an existing row, CreatedAt = %v, want the insert-time "+
+			"value %v; the UPDATE branch must not restamp it", got.CreatedAt, createdAt)
 	}
 }

@@ -84,12 +84,19 @@ func TestRenderTemplateUnterminatedReportsPositionNotContent(t *testing.T) {
 	// position satisfies that, and leaves an operator with a multi-kilobyte
 	// config and nowhere to look.
 	//
+	// Checking for the word "offset" was the first repair and it was still
+	// toothless: "offset" is a literal in template.go's fmt.Errorf format
+	// string, so it is present for every possible input, including a computed
+	// position that is wrong. The offset has to be checked by value. "{{" opens
+	// at index 7 of "prefix {{ $params.secret" — that is the byte an operator
+	// would seek to.
+	//
 	// Only the offset is required, not the absence of the expression source:
 	// "$params.secret" is authored config and a future change that includes it
 	// for diagnostics would be an improvement, not a regression. The value is
 	// the thing that must never appear, and that is checked above.
-	if !strings.Contains(err.Error(), "offset") {
-		t.Errorf("error must locate the failure by offset so a caller can find it in a "+
-			"large template; got %q", err.Error())
+	if !strings.Contains(err.Error(), "at offset 7") {
+		t.Errorf("error must locate the failure at the byte where %q opens (offset 7) so "+
+			"a caller can seek to it in a large template; got %q", "{{", err.Error())
 	}
 }

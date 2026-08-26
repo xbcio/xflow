@@ -7,6 +7,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/baggage"
 	"go.opentelemetry.io/otel/propagation"
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
 // TestNewTracerProviderDefaults verifies B1 contract: default sampler is
@@ -54,6 +55,18 @@ func TestNewTracerProviderBaggageOptIn(t *testing.T) {
 
 // TestNewTracerProviderSamplerConfigurable verifies each sampler mode produces
 // the expected sampling decision on a new root span (no parent).
+//
+// The `want` column below used to be declared and never read: the body started
+// a span, ended it, and asserted only that NewTracerProvider returned no error,
+// with a comment saying the sampling outcome was "verified structurally by the
+// SDK in its own tests". The SDK's tests cover the SDK's samplers; nothing
+// covered which sampler THIS function hands back for a given SamplerMode.
+// Swapping the SamplerAlwaysOn and SamplerAlwaysOff arms of newSampler — so
+// always_off sampled everything and always_on sampled nothing — left every
+// subtest green.
+//
+// The decision is observable: the sampler runs at span creation, and its
+// verdict lands in the span context's trace flags.
 func TestNewTracerProviderSamplerConfigurable(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -81,10 +94,16 @@ func TestNewTracerProviderSamplerConfigurable(t *testing.T) {
 				t.Fatalf("NewTracerProvider: %v", err)
 			}
 			t.Cleanup(func() { shutdown(context.Background()) })
-			_, span := tracer.Start(context.Background(), "test")
+			spanCtx, span := tracer.Start(context.Background(), "test")
+			// tracing.Span is a narrow wrapper with no SpanContext method, but
+			// Start attaches the OTel span to the context — the same route
+			// TraceIDFromContext takes.
+			got := oteltrace.SpanContextFromContext(spanCtx).IsSampled()
 			span.End()
-			// We assert the tracer was constructed without error; sampling
-			// outcome is verified structurally by the SDK in its own tests.
+			if got != c.want {
+				t.Errorf("sampler %q: root span IsSampled() = %v, want %v",
+					c.sampler, got, c.want)
+			}
 		})
 	}
 }

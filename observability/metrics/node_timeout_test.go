@@ -211,18 +211,25 @@ func TestNodeTimeoutMetricHelpTextsRegistered(t *testing.T) {
 	metrics.NewMetricsHooks(m).OnNodeTimeout(ctx, "exec-x", "node-x")
 
 	body := metricsBody(t, m)
-	for _, name := range []string{
-		"xflow_node_timeouts_total",
-		"xflow_node_timeout_abandoned",
-		"xflow_node_execution_duration_seconds",
+	// Assert the documented sentence, not merely that a HELP line exists.
+	// helpText falls back to "xflow metric <name>" for any metric missing from
+	// metricHelp and Prometheus emits that fallback as a HELP line like any
+	// other, so `Contains(body, "# HELP "+name+" ")` was true no matter what —
+	// including in exactly the case the failure message named, a metric that
+	// "would fall back to the generic description". Deleting all four entries
+	// from metricHelp left it green.
+	for name, wantHelp := range map[string]string{
+		"xflow_node_timeouts_total":             "Node executions terminated for exceeding their deadline.",
+		"xflow_node_timeout_abandoned":          "Handlers whose deadline passed but which have not returned.",
+		"xflow_node_execution_duration_seconds": "Wall-clock duration of one handler invocation.",
+		// The distinct suspend-timeout metric must still be documented
+		// separately — same name prefix, different meaning.
+		"xflow_node_timed_out_total": "Nodes that exceeded their timeout.",
 	} {
-		if !strings.Contains(body, "# HELP "+name+" ") {
-			t.Errorf("metric %q has no HELP text; it would fall back to the generic description", name)
+		if !strings.Contains(body, "# HELP "+name+" "+wantHelp) {
+			t.Errorf("metric %q is not documented as %q; it fell back to the generic "+
+				"description or was reworded", name, wantHelp)
 		}
-	}
-	// The distinct suspend-timeout metric must still be documented separately.
-	if !strings.Contains(body, "# HELP xflow_node_timed_out_total ") {
-		t.Error("suspend-timeout metric xflow_node_timed_out_total has no HELP text")
 	}
 }
 
