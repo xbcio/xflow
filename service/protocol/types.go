@@ -9,12 +9,32 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
+// Capability is what a runner advertises it can execute. It is transmitted on
+// register/poll/hello, stored as a JSON blob in the runner directory, and
+// echoed verbatim by GET /v1/management/runners/{id} — the type declares no
+// MarshalJSON and nothing on that path redacts, so every field placed here is
+// readable by any caller holding runner-read scope.
 type Capability struct {
 	NodeType    string   `json:"node_type"`
 	NodeVersion int      `json:"node_version,omitempty"`
 	Runtimes    []string `json:"runtimes,omitempty"`
 	Features    []string `json:"features,omitempty"`
 	Resources   []string `json:"resources,omitempty"`
+	// Credentials holds credential reference NAMES, never credential material.
+	// Given the echo path above, a value placed here is disclosed, not stored.
+	//
+	// No production constructor writes this field today: runnerCapabilities in
+	// sdk/xflow sets only NodeType/Features, and the matching side
+	// (control.MatchCapabilities, canRunRouting) never reads it — so
+	// credential-aware routing is declared here but not implemented. A node's
+	// Definition.Credential(name) declaration reaches types.Descriptor and stops
+	// there; graph.Requirement.Credentials is left zero by both
+	// buildPackageRequirements and buildBodyRequirements.
+	//
+	// Before wiring it up, note that execution/subgraph validates a package's
+	// required credentials against registryInventory.Credentials(), which is
+	// hardcoded to return nil — so the first requirement that arrives non-empty
+	// is rejected as "credential not declared" rather than routed.
 	Credentials []string `json:"credentials,omitempty"`
 }
 

@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -183,19 +184,44 @@ func TestCapability_NewFieldsBackwardsCompat(t *testing.T) {
 	}
 }
 
-func TestCapability_NoSecretValues(t *testing.T) {
-	// Credentials field must only contain reference names, never secrets.
+// TestCapability_IsEmittedVerbatim pins the property that makes the doc comment
+// on Capability.Credentials load-bearing: the type has no MarshalJSON, so every
+// field reaches the wire — and GET /v1/management/runners/{id} — exactly as set.
+//
+// It replaces TestCapability_NoSecretValues, which marshalled a Capability whose
+// Credentials were the reference names "my_api_key"/"oauth_token" and then
+// asserted the output contained neither "sk_live_" nor "AKIA". Neither string
+// was in the input, and Capability has no redaction logic for either to be
+// stripped by, so that test passed for every possible implementation. It was
+// named after a guarantee nothing in the codebase provides.
+//
+// What is actually checkable here is the absence of that guarantee. If someone
+// later adds redaction to this type, this test goes red and points at the
+// contract that has to be updated with it.
+func TestCapability_IsEmittedVerbatim(t *testing.T) {
+	if _, ok := any(Capability{}).(json.Marshaler); ok {
+		t.Error("Capability now implements json.Marshaler; the doc comment on " +
+			"Credentials states the type performs no redaction and that whatever " +
+			"is set reaches the management API verbatim — update it")
+	}
 	cap := Capability{
 		NodeType:    "http.request",
 		NodeVersion: 1,
 		Credentials: []string{"my_api_key", "oauth_token"},
 	}
-	data, _ := json.Marshal(cap)
-	s := string(data)
-	// Sanity: the serialized form should NOT contain anything that looks like
-	// a real secret (these are just reference names).
-	if strings.Contains(s, "sk_live_") || strings.Contains(s, "AKIA") {
-		t.Error("serialized capability contains suspected secret value")
+	data, err := json.Marshal(cap)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var back Capability
+	if err := json.Unmarshal(data, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	// Verbatim in the direction that matters: the names survive unchanged, which
+	// is why they must be names. A truncating or hashing round trip would make
+	// the "never put material here" rule unnecessary — and it does not happen.
+	if !reflect.DeepEqual(back.Credentials, cap.Credentials) {
+		t.Errorf("Credentials round-tripped as %v, want %v verbatim", back.Credentials, cap.Credentials)
 	}
 }
 
