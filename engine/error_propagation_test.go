@@ -151,57 +151,90 @@ func singleNodeGraph(t *testing.T) *graph.Graph {
 	return g
 }
 
+// TestEngineLegacyResultPropagatesStateErrors pins that a failed state write on
+// the legacy commit path surfaces the error AND withholds the completion hook.
+// A hook fired for a commit that did not land tells a downstream consumer the
+// node reached a terminal status the store never recorded.
+//
+// This used to be three rows named for three fault-injection points -- "success
+// output persistence", "success lease read", "error outcome node transition" --
+// and all three set state.legacyCommitErr. The first two were the same case
+// twice with a different error value. There is no third point to inject at: the
+// legacy path reaches the store through CommitLeasedNode as one composite call,
+// which is why putOutputErr and getNodeErr are declared on stateFaults and
+// wired into overrides but never assigned anywhere in this file.
+//
+// The no-fault rows are what give "want 0 hooks" its meaning. Without them,
+// every hook assertion in this file -- this one and the two below -- is green
+// for an OnNodeComplete that is never called at all.
 func TestEngineLegacyResultPropagatesStateErrors(t *testing.T) {
-	outputErr := errors.New("put output failed")
-	leaseErr := errors.New("get node failed")
-	nodeErr := errors.New("upsert node failed")
+	commitErr := errors.New("commit leased node failed")
 
 	tests := []struct {
-		name   string
-		result TaskResult
-		want   error
-		fault  func(*stateFaults)
+		name            string
+		result          TaskResult
+		fault           error
+		wantCompletions int
+		wantStatus      types.NodeStatus
 	}{
 		{
-			name:   "success output persistence",
-			result: TaskResult{Output: &types.Output{Data: map[string]any{"ok": true}}},
-			want:   outputErr,
-			fault: func(state *stateFaults) {
-				state.legacyCommitErr = outputErr
-			},
+			name:            "success outcome, commit fails",
+			result:          TaskResult{Output: &types.Output{Data: map[string]any{"ok": true}}},
+			fault:           commitErr,
+			wantCompletions: 0,
 		},
 		{
-			name:   "success lease read",
-			result: TaskResult{Output: &types.Output{Data: map[string]any{"ok": true}}},
-			want:   leaseErr,
-			fault: func(state *stateFaults) {
-				state.legacyCommitErr = leaseErr
-			},
+			name:            "error outcome, commit fails",
+			result:          TaskResult{Error: errors.New("handler failed")},
+			fault:           commitErr,
+			wantCompletions: 0,
 		},
 		{
-			name:   "error outcome node transition",
-			result: TaskResult{Error: errors.New("handler failed")},
-			want:   nodeErr,
-			fault: func(state *stateFaults) {
-				state.legacyCommitErr = nodeErr
-			},
+			name:            "success outcome, no fault",
+			result:          TaskResult{Output: &types.Output{Data: map[string]any{"ok": true}}},
+			wantCompletions: 1,
+			wantStatus:      types.NodeStatusSuccess,
+		},
+		{
+			name:            "error outcome, no fault",
+			result:          TaskResult{Error: errors.New("handler failed")},
+			wantCompletions: 1,
+			wantStatus:      types.NodeStatusFailed,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
 			state := newStateFaults()
 			queue := newQueueFaults()
 			hooks := &completionHookRecorder{}
 			eng, lease, _ := legacyResultLease(t, state, queue, hooks, nil)
-			tt.fault(state)
+			state.legacyCommitErr = tt.fault
 
-			err := eng.CommitTaskResult(context.Background(), lease, tt.result)
-			if !errors.Is(err, tt.want) {
-				t.Fatalf("CommitTaskResult() error = %v, want wrapped %v", err, tt.want)
+			err := eng.CommitTaskResult(ctx, lease, tt.result)
+			if tt.fault != nil {
+				if !errors.Is(err, tt.fault) {
+					t.Fatalf("CommitTaskResult() error = %v, want wrapped %v", err, tt.fault)
+				}
+			} else if err != nil {
+				t.Fatalf("CommitTaskResult() error = %v, want nil", err)
 			}
-			if hooks.nodeCompletions != 0 {
-				t.Fatalf("node completion hooks = %d, want 0 after failed state write", hooks.nodeCompletions)
+			if hooks.nodeCompletions != tt.wantCompletions {
+				t.Fatalf("node completion hooks = %d, want %d",
+					hooks.nodeCompletions, tt.wantCompletions)
+			}
+			if tt.wantStatus == "" {
+				return
+			}
+			// The hook count only means "the commit landed" if the store agrees
+			// it landed, and with the status the hook was reporting.
+			node, err := state.GetNode(ctx, lease.Task.ExecutionID, "start")
+			if err != nil || node == nil {
+				t.Fatalf("GetNode() = %v, %v, want the committed node", node, err)
+			}
+			if node.Status != tt.wantStatus {
+				t.Fatalf("committed node status = %s, want %s", node.Status, tt.wantStatus)
 			}
 		})
 	}
