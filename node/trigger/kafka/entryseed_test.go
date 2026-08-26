@@ -494,9 +494,22 @@ func TestKafkaSingleNodeSeedNoLoss(t *testing.T) {
 	if exit.Data["offset"] != int64(900) || exit.Data["value"] != "payload" {
 		t.Fatalf("exit data = %+v, want offset=900 value=payload", exit.Data)
 	}
-	// Admission key must derive from topic/partition/offset so redelivery collides.
-	if req.AdmissionKey == "" {
-		t.Fatal("admission key is empty, want topic/partition/offset-derived key")
+	// The admission key is what makes redelivery collide, so it has to be the
+	// exact key — not merely non-empty. "AdmissionKey != \"\"" could not fail:
+	// the key is built with fmt.Sprintf from a format string containing literal
+	// "/" and "-" separators, so every possible combination of inputs, including
+	// all-empty and all-zero, produces a non-empty string. Dropping the
+	// partition, or swapping partition and offset, left that check green while
+	// silently changing which messages collide.
+	//
+	// Spelled out as a literal rather than re-running production's Sprintf: a
+	// test that mirrors the format call changes shape together with the bug.
+	// Fields in order: namespace (server-side, empty) / workflow / version /
+	// entry unit / topic / partition / offset-offset.
+	const wantKey = "/wf1/v1/single-node/orders/2/900-900"
+	if req.AdmissionKey != wantKey {
+		t.Fatalf("admission key = %q, want %q (topic/partition/offset-derived)",
+			req.AdmissionKey, wantKey)
 	}
 }
 
