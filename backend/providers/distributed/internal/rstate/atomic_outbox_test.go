@@ -68,6 +68,38 @@ func TestRedisRetryAndReleaseOutboxTransitionsAreFenced(t *testing.T) {
 		if err != nil || len(entries) != 1 || entries[0].ID != entry.ID {
 			t.Fatalf("retry outbox=%+v err=%v, want %+v", entries, err, entry)
 		}
+		// The query window above is a superset of any score in 0..2min, so it
+		// says only "the entry exists", not "it is deferred". The whole point
+		// of a retry intent is that it is NOT deliverable yet: the ZADD score
+		// at atomic_state.go:629 is what holds it back, and this subtest is the
+		// only place in the repo that exercises that score with a real delay --
+		// every other ListOutbox/LeaseOutbox test seeds a zero AvailableAt or
+		// queries with an hour-wide window.
+		early, err := state.ListOutbox(ctx, id, time.Now().Add(10*time.Second), 4)
+		if err != nil {
+			t.Fatalf("ListOutbox(early) err=%v", err)
+		}
+		if len(early) != 0 {
+			t.Fatalf("retry entry is already deliverable %v before its backoff "+
+				"elapses: %+v — the backoff delay is not in the ZSET score",
+				time.Minute-10*time.Second, early)
+		}
+		// ...and it does become deliverable once the delay has passed.
+		late, err := state.ListOutbox(ctx, id, entry.AvailableAt.Add(time.Second), 4)
+		if err != nil {
+			t.Fatalf("ListOutbox(late) err=%v", err)
+		}
+		if len(late) != 1 {
+			t.Fatalf("retry entry never became deliverable at its due time: %+v", late)
+		}
+		// The body carries the same instant independently of the score, and
+		// engine/atomic.go re-reads it to decide the enqueue delay. The wire
+		// format is millisecond-resolution, so compare at that resolution.
+		if want := entry.AvailableAt.Truncate(time.Millisecond); !late[0].AvailableAt.Equal(want) {
+			t.Errorf("entry body AvailableAt = %v, want %v: the delivery delay is "+
+				"recomputed from this field, not from the ZSET score",
+				late[0].AvailableAt, want)
+		}
 	})
 
 	t.Run("release stale token cannot create intent", func(t *testing.T) {
