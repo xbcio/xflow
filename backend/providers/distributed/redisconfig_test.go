@@ -131,10 +131,9 @@ func TestNewRedisClientSentinel(t *testing.T) {
 }
 
 func TestNewRedisClientCluster(t *testing.T) {
-	// Use two addresses so NewUniversalClient selects the cluster path and
-	// returns a *redis.ClusterClient. A single address would fall back to a
-	// plain *redis.Client, which is still valid for construction but not what
-	// we want to assert here.
+	// The single-address case lives in
+	// TestNewRedisClientClusterWithOneSeedIsStillAClusterClient; this one keeps
+	// the multi-address path covered.
 	cfg := RedisConfig{
 		Mode:  RedisModeCluster,
 		Addrs: []string{"127.0.0.1:6379", "127.0.0.1:6380"},

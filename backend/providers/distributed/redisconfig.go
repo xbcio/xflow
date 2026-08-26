@@ -138,12 +138,25 @@ func newRedisClient(cfg RedisConfig) (redis.UniversalClient, error) {
 			DB:        cfg.DB,
 		}), nil
 	case RedisModeSentinel, RedisModeCluster:
-		// redis.NewUniversalClient returns a failover *redis.Client for sentinel
-		// (MasterName non-empty) and a *redis.ClusterClient for cluster
-		// (MasterName empty), regardless of the number of addresses.
+		// redis.NewUniversalClient does not dispatch on any explicit mode: with
+		// MasterName set it builds a failover *redis.Client, and otherwise it
+		// only reaches the cluster constructor when len(Addrs) > 1 or
+		// IsClusterMode is set (universal.go:385-394). A cluster given a single
+		// seed address would therefore fall through to a plain *redis.Client,
+		// which does not follow MOVED — and a single seed is the normal way to
+		// bootstrap cluster discovery, as well as the only shape an Elasticache
+		// configuration endpoint has. The asynq half of the same RedisConfig
+		// builds a real cluster client from the same address list, so the two
+		// planes would disagree about the topology of one deployment.
+		//
+		// IsClusterMode pins the choice to our own mode instead of to the
+		// address count. It must stay false for sentinel: combined with
+		// MasterName it selects NewFailoverClusterClient, which is a third
+		// thing again.
 		return redis.NewUniversalClient(&redis.UniversalOptions{
 			MasterName:       cfg.MasterName,
 			Addrs:            cfg.Addrs,
+			IsClusterMode:    cfg.Mode == RedisModeCluster,
 			Username:         cfg.Username,
 			Password:         cfg.Password,
 			SentinelUsername: cfg.SentinelUsername,
