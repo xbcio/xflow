@@ -189,6 +189,19 @@ func decrementInDegreeAtomicCase(t *testing.T, state engine.StateStore) {
 	if len(seenActive) != inDeg {
 		t.Fatalf("expected %d distinct arrivedActiveIn values, got %d (atomicity break)", inDeg, len(seenActive))
 	}
+	// len(seenActive) == inDeg only proves the values are pairwise distinct, not
+	// that they are the ones the comment above promises: every caller observes
+	// arrivedActiveIn somewhere in [1, inDeg]. A backend that returns the
+	// pre-increment counter (so the observed set is [0, inDeg-1] instead of
+	// [1, inDeg]) is just as distinct and just as wrong, and the cardinality
+	// check alone cannot tell the two apart. Pin the actual value set.
+	for v := 1; v <= inDeg; v++ {
+		if seenActive[v] != 1 {
+			t.Fatalf("arrivedActiveIn = %d observed %d times, want exactly 1 (every caller "+
+				"must observe a distinct value in [1, %d], not merely %d distinct values "+
+				"somewhere)", v, seenActive[v], inDeg, inDeg)
+		}
+	}
 }
 
 func claimTaskLeaseSingleWinnerCase(t *testing.T, state engine.StateStore) {
