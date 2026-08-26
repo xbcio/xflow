@@ -153,6 +153,12 @@ func newRealRedisRunnerDirectory(t *testing.T, rdb *redis.Client) *RedisRunnerDi
 	return directory
 }
 
+// redisRunnerDirectoryAllKeys lists every key the directory writes, for the
+// real-Redis tests' teardown. None of these expire on their own — nothing in
+// redis_runner_directory.go calls EXPIRE — so a key missing from this list
+// stays in the operator's Redis after the test that made it has gone.
+// TestRedisRunnerDirectoryCleanupDeletesEveryKeyItCreates holds it to the key
+// struct, which is how runnerLabels and runnerNamespaces were found missing.
 func redisRunnerDirectoryAllKeys(keys redisRunnerDirectoryKeys) []string {
 	return []string{
 		keys.queue,
@@ -173,7 +179,9 @@ func redisRunnerDirectoryAllKeys(keys redisRunnerDirectoryKeys) []string {
 		keys.runnerCapacity,
 		keys.runnerInflight,
 		keys.runnerCapabilities,
+		keys.runnerLabels,
 		keys.runnerPolicy,
+		keys.runnerNamespaces,
 		keys.runnerHeartbeat,
 		keys.runnerClaimCount,
 		keys.runnerLeaseCount,
