@@ -117,16 +117,28 @@ func TestFSStore_PathTraversal(t *testing.T) {
 	}
 
 	// Keys that resolve within root after cleaning are allowed by the traversal
-	// check (they cannot read outside the store). Verify they do NOT error on the
-	// traversal check itself — they may error on other grounds (file not found).
+	// check (they cannot read outside the store). The only legitimate outcome
+	// is ErrNotFound (the file genuinely doesn't exist at the cleaned path).
+	// Asserting the exact sentinel — rather than merely "error message doesn't
+	// mention traversal" — also catches an over-strict guard that rejects any
+	// key containing ".." with *different* wording (e.g. "contains a dotdot
+	// segment"): such an implementation never says "resolves outside root"
+	// either, so the old substring-avoidance check missed it even though it is
+	// still a functional regression. resolve() (fsstore.go) decides this on the
+	// *cleaned* path alone — it joins, cleans, and rejects only when the result
+	// is not under root — so a key that cleans to a path inside root has to be
+	// allowed through no matter how many ".." segments it was spelled with.
 	withinRoot := []string{
 		"artifacts/sha256/../../etc/passwd", // resolves to <root>/etc/passwd
 	}
 	for _, key := range withinRoot {
 		_, _, err := fs.GetObject(ctx, key)
-		// Should get ErrNotFound (file doesn't exist), NOT a traversal error.
-		if err != nil && strings.Contains(err.Error(), "resolves outside root") {
-			t.Errorf("GetObject(%q) was incorrectly rejected as traversal", key)
+		if !errors.Is(err, objectstore.ErrNotFound) {
+			t.Errorf("GetObject(%q) = %v, want ErrNotFound (key cleans to a path inside root; an over-strict guard must not reject it)", key, err)
+		}
+		_, err = fs.HeadObject(ctx, key)
+		if !errors.Is(err, objectstore.ErrNotFound) {
+			t.Errorf("HeadObject(%q) = %v, want ErrNotFound (key cleans to a path inside root; an over-strict guard must not reject it)", key, err)
 		}
 	}
 }
@@ -214,11 +226,32 @@ func TestHTTPStore_HeadObject(t *testing.T) {
 	}
 }
 
+// TestHTTPStore_PutObject_Unsupported proves two things a bare "err != nil"
+// check cannot distinguish from a broken implementation: (1) the specific
+// reason reported is "not supported", not some incidental failure (e.g. a
+// copy-paste-from-GetObject bug that tries to dial the network and merely
+// fails to connect — that too would return a non-nil error and slip past a
+// plain err==nil check), and (2) PutObject never makes an HTTP request at
+// all: a runner is read-only and must not touch the network for a write.
 func TestHTTPStore_PutObject_Unsupported(t *testing.T) {
-	hs := &objectstore.HTTPStore{BaseURL: "http://unused"}
-	_, err := hs.PutObject(context.Background(), testKey, nil, 0, objectstore.PutOptions{})
-	if err == nil {
-		t.Fatal("PutObject should return error")
+	var requests atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	hs := &objectstore.HTTPStore{BaseURL: srv.URL, Client: srv.Client()}
+	obj, err := hs.PutObject(context.Background(), testKey, nil, 0, objectstore.PutOptions{})
+	const wantMsg = "objectstore/http: PutObject not supported (runner is read-only)"
+	if err == nil || err.Error() != wantMsg {
+		t.Fatalf("PutObject error = %v, want %q", err, wantMsg)
+	}
+	if obj != nil {
+		t.Fatalf("PutObject object = %+v, want nil", obj)
+	}
+	if got := requests.Load(); got != 0 {
+		t.Fatalf("server received %d requests, want 0 (PutObject must never touch the network)", got)
 	}
 }
 
