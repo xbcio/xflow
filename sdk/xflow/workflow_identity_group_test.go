@@ -59,13 +59,36 @@ func TestRuntimeHashChangesWithGroupField(t *testing.T) {
 	}
 }
 
-func TestRuntimeHashUngroupedStable(t *testing.T) {
-	// 无 groups 的定义 hash 不受 Groups 字段引入影响（omitempty + nil）。
-	d := &types.WorkflowDef{Name: "w", Nodes: nodesAB()}
-	if d.Groups != nil {
-		t.Fatal("precondition: Groups nil")
+// TestRuntimeHashCoversGroups replaces TestRuntimeHashUngroupedStable, which
+// asserted only that runtimeHash returned no error — every possible hash
+// function passed it.
+//
+// The property kept here is that Groups reaches the digest at all. Without it,
+// two workflows that differ only in their grouping share a runtime hash, and
+// grouping is a placement decision: the same nodes co-located on one runner or
+// spread across the fleet would be indistinguishable by identity.
+//
+// The property the old name implied — that an ungrouped definition hashes the
+// same whether Groups is nil or an empty slice — is deliberately NOT asserted.
+// It cannot fail: canonicalizeGroups takes a slice and normalises both spellings
+// before anything is serialised, so the caller's distinction does not survive
+// the call. Removing the omitempty tag and the len==0 early return, together,
+// still leaves the two identical. An assertion no change can break is the thing
+// this sweep exists to remove, not to add.
+func TestRuntimeHashCoversGroups(t *testing.T) {
+	mk := func(groups []types.GroupDef) string {
+		d := &types.WorkflowDef{Name: "w", Nodes: nodesAB(), Groups: groups}
+		h, err := runtimeHash(d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return h
 	}
-	if _, err := runtimeHash(d); err != nil {
-		t.Fatal(err)
+
+	ungrouped := mk(nil)
+	if grouped := mk([]types.GroupDef{{Name: "g", Members: []string{"a", "b"}}}); ungrouped == grouped {
+		t.Errorf("hash is identical with and without a group (%s); Groups is not "+
+			"reaching the digest, so two workflows with different placement share "+
+			"one identity", ungrouped)
 	}
 }

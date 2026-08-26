@@ -78,8 +78,18 @@ func TestRenderTemplateUnterminatedReportsPositionNotContent(t *testing.T) {
 	if strings.Contains(err.Error(), "credential-value") {
 		t.Errorf("error must not contain the runtime value; got %q", err.Error())
 	}
-	if strings.Contains(err.Error(), "secret") && !strings.Contains(err.Error(), "offset") {
-		// Expression source ("$params.secret") is authored config, allowed.
-		// But the VALUE must not leak.
+	// The "ReportsPosition" half of this test's name had no assertion at all —
+	// it was an `if` with an empty body, so the only thing checked was that the
+	// value did not leak. An error reading "unterminated template" with no
+	// position satisfies that, and leaves an operator with a multi-kilobyte
+	// config and nowhere to look.
+	//
+	// Only the offset is required, not the absence of the expression source:
+	// "$params.secret" is authored config and a future change that includes it
+	// for diagnostics would be an improvement, not a regression. The value is
+	// the thing that must never appear, and that is checked above.
+	if !strings.Contains(err.Error(), "offset") {
+		t.Errorf("error must locate the failure by offset so a caller can find it in a "+
+			"large template; got %q", err.Error())
 	}
 }

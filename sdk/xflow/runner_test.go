@@ -129,11 +129,26 @@ func TestNewRunnerGivesTheTriggerHandlerTheGroupRuntime(t *testing.T) {
 // exactly there.
 //
 // service/runner already proves each runtime honours its own resolver option
-// (artifact_in_subgraph_test.go). What is asserted here is the thing only the
-// assembly can get wrong: that all three consumers receive the SAME resolver
-// the caller configured, rather than one of them silently getting nil or a
-// substitute. Each runtime is driven through its public constructor seam and
-// the shared counter is what ties them together.
+// (artifact_in_subgraph_test.go). What only the assembly can get wrong is that
+// all three consumers receive the SAME resolver the caller configured.
+//
+// Coverage here is uneven, and the comment used to say otherwise — it claimed
+// "each runtime is driven through its public constructor seam and the shared
+// counter is what ties them together", which is true of the dispatcher alone.
+// What is actually checked:
+//
+//	dispatcher — the configured resolver is invoked and the call is counted, so
+//	             a substituted or wrapped function fails.
+//	group      — non-nil only.
+//	subgraph   — non-nil only.
+//
+// So passing a different function (or nil) at the group/subgraph wiring points
+// in runner.go still passes this test. Closing that needs the two runtimes
+// executed for real, since their resolver field is unexported and in another
+// package, and both service/runner/group_runtime.go and subgraph_runtime.go are
+// mid-edit in a parallel change — building the behavioural test on their
+// current shape would pin something about to move. Left as the honest smaller
+// assertion rather than a comment claiming the larger one.
 func TestNewRunnerSharesTheArtifactResolverWithNestedRuntimes(t *testing.T) {
 	var mu sync.Mutex
 	seen := map[string]int{}
