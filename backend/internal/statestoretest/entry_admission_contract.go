@@ -308,9 +308,20 @@ func RunEntryAdmissionContract(t *testing.T, newStore func(*testing.T) EntryAdmi
 		}
 	})
 
-	t.Run("FailedOutcomeIncrementsFailedCount", func(t *testing.T) {
+	t.Run("FailedOutcomeFailsTheExecution", func(t *testing.T) {
 		s := newStore(t)
-		g := triggerGroupWithDownstreamGraph(t)
+		// A single-unit trigger group: the entry unit IS the whole execution, so
+		// the failure has nowhere to hide and both backends must agree.
+		//
+		// Note on the fixture: the earlier shape here was the two-unit graph with
+		// Downstream explicitly nil. That combination is not reachable —
+		// deriveEntrySeedTopology derives arrivals from UnitOutEdges regardless of
+		// outcome, so an entry unit with out-edges always carries Downstream — and
+		// the two backends genuinely disagree on it (local short-circuits on a
+		// `fatal` flag the Lua has no equivalent of, which leaves the Redis
+		// execution Running forever). Pinning that disagreement would pin a shape
+		// production cannot produce.
+		g := triggerGroupOnlyGraph(t)
 		groups := g.Groups()
 		gm := groups[0]
 		req := engine.SeedExecutionFromEntryRequest{
@@ -334,8 +345,121 @@ func RunEntryAdmissionContract(t *testing.T, newStore func(*testing.T) EntryAdmi
 		if resp.State != engine.AdmissionStateAccepted {
 			t.Fatalf("state = %q, want accepted", resp.State)
 		}
-		// Execution status depends on implementation — with no downstream and a
-		// failed outcome, the group unit is done but execution has 2 units.
-		// The important assertion: no panic, admission accepted.
+		// This used to assert nothing beyond "accepted" -- the comment in its place
+		// said the status was implementation-defined, which let a Success verdict
+		// on a failed group pass on either backend.
+		snap, err := s.GetExecution(ctx, resp.ExecutionID)
+		if err != nil {
+			t.Fatalf("GetExecution: %v", err)
+		}
+		if snap == nil {
+			t.Fatal("execution must exist")
+		}
+		if snap.Status != types.ExecutionStatusFailed {
+			t.Fatalf("status = %q, want %q: the only unit failed, so Success here is a "+
+				"wrong verdict rather than a missing metric", snap.Status, types.ExecutionStatusFailed)
+		}
+	})
+	// The single-unit subtest above cannot see the failed counter on the local
+	// backend: there `fatal ||` decides the verdict before the counter is read.
+	// The counter is the sole decider when the failed group DID schedule
+	// downstream -- the execution stays alive, a later unit succeeds, and the
+	// entry's failure survives only in that counter. Dropping the increment turns
+	// a failed workflow into a reported Success, the worst direction for this
+	// defect to point.
+	t.Run("FailedEntryIsRememberedWhenDownstreamStillRuns", func(t *testing.T) {
+		s := newStore(t)
+		g := triggerGroupWithDownstreamGraph(t)
+		groups := g.Groups()
+		gm := groups[0]
+		storeIdx, ok := g.NodeIndex("store")
+		if !ok {
+			t.Fatal("graph has no 'store' node")
+		}
+		resp, err := s.SeedExecutionFromEntry(ctx, engine.SeedExecutionFromEntryRequest{
+			AdmissionKey:    "k9",
+			Namespace:       namespace.Default,
+			WorkflowID:      "wf-test",
+			WorkflowVersion: "v1",
+			EntryUnitID:     gm.Name,
+			EntryUnitIdx:    gm.UnitIdx,
+			Graph:           g,
+			Outcome:         engine.GroupOutcomeFailed,
+			Exits:           nil,
+			Error:           "processing error",
+			ResultHash:      engine.ComputeResultHash(engine.GroupOutcomeFailed, nil),
+			Downstream: []engine.DownstreamArrival{{
+				NodeName:     "store",
+				NodeIdx:      storeIdx,
+				UnitIdx:      g.UnitIndexForNode(storeIdx),
+				ArrivalCount: 1,
+				ActiveCount:  1,
+				MergeMode:    "wait_all",
+			}},
+		})
+		if err != nil {
+			t.Fatalf("admission: %v", err)
+		}
+		if resp.State != engine.AdmissionStateAccepted {
+			t.Fatalf("state = %q, want accepted", resp.State)
+		}
+		snap, err := s.GetExecution(ctx, resp.ExecutionID)
+		if err != nil {
+			t.Fatalf("GetExecution: %v", err)
+		}
+		if types.IsTerminalExecutionStatus(snap.Status) {
+			t.Fatalf("status = %q: a failed group that scheduled downstream must leave "+
+				"the execution running so the downstream unit can execute", snap.Status)
+		}
+
+		// Run the downstream unit to a clean success, the way a runner would.
+		lease := &engine.TaskLease{
+			LeaseID:    "L-store",
+			LeaseToken: "T-store",
+			IssuedAt:   time.Now().UTC(),
+			TTL:        time.Minute,
+			Task: engine.Task{
+				ExecutionID: resp.ExecutionID,
+				NodeName:    "store",
+				NodeIdx:     storeIdx,
+				Type:        engine.TaskTypeNodeExec,
+			},
+		}
+		if _, acquired, err := s.AcquireTaskLease(ctx, lease); err != nil || !acquired {
+			t.Fatalf("acquire lease on downstream node: acquired=%v err=%v", acquired, err)
+		}
+		res, err := s.(engine.AtomicStateStore).CommitNode(ctx, engine.CommitNodeRequest{
+			ExecutionID: resp.ExecutionID,
+			NodeName:    "store",
+			NodeIdx:     storeIdx,
+			LeaseID:     lease.LeaseID,
+			LeaseToken:  lease.LeaseToken,
+			Attempt:     1,
+			Status:      types.NodeStatusSuccess,
+		})
+		if err != nil {
+			t.Fatalf("CommitNode(store): %v", err)
+		}
+		if res.Outcome != engine.CommitOutcomeAccepted {
+			t.Fatalf("CommitNode(store).Outcome = %q, want accepted", res.Outcome)
+		}
+		if !res.ExecutionDone {
+			t.Fatalf("committing the last unit did not finish the execution (outcome %q)", res.Outcome)
+		}
+		// The last unit succeeded, so the ONLY thing that can make this Failed is
+		// the entry group's failure having been counted at admission time.
+		if res.ExecutionStatus != types.ExecutionStatusFailed {
+			t.Errorf("final status from CommitNode = %q, want %q: the entry group "+
+				"failed, and a workflow that reports Success after a failed unit is a "+
+				"silently wrong verdict, not a missing metric",
+				res.ExecutionStatus, types.ExecutionStatusFailed)
+		}
+		final, err := s.GetExecution(ctx, resp.ExecutionID)
+		if err != nil {
+			t.Fatalf("GetExecution after completion: %v", err)
+		}
+		if final.Status != types.ExecutionStatusFailed {
+			t.Errorf("persisted status = %q, want %q", final.Status, types.ExecutionStatusFailed)
+		}
 	})
 }
