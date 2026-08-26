@@ -69,6 +69,52 @@ func TestOTelTracerReadsNamespaceFromContext(t *testing.T) {
 	}
 }
 
+// TestOTelTracerRecordsIntAttributeAsInt64 pins the `case int:` arm of
+// attributeValue, which is reachable in production: service/control/core.go
+// starts the "xflow.task.commit" span with "attempt", authoritativeLease.Attempt
+// (an int, see engine/types.go's Lease.Attempt). Losing this arm — e.g. it
+// falling through to the `default: attribute.String(key, fmt.Sprint(v))`
+// branch — would still show a value in the exporter, so nothing looks
+// visibly broken, but it silently changes the OTel attribute type from
+// numeric to string for every commit span. Any trace-query filter or
+// dashboard aggregation that expects "attempt" to be a number (range
+// queries, histograms, numeric comparisons) would stop matching commit
+// spans, and no test asserted the wire type before this one:
+// spanHasAttribute above compares AsString(), which is "" for a numeric
+// Value, so it can only prove a string attribute is present — it cannot
+// distinguish "recorded as int" from "recorded as string" here.
+func TestOTelTracerRecordsIntAttributeAsInt64(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	tracer := NewOTelTracer(provider.Tracer("xflow-test"))
+
+	_, span := tracer.Start(context.Background(), "xflow.task.commit", "attempt", 3)
+	span.End()
+
+	ended := recorder.Ended()
+	if len(ended) != 1 {
+		t.Fatalf("ended span count = %d, want 1", len(ended))
+	}
+	var found attribute.KeyValue
+	ok := false
+	for _, got := range ended[0].Attributes() {
+		if got.Key == "attempt" {
+			found = got
+			ok = true
+		}
+	}
+	if !ok {
+		t.Fatalf("span attributes = %#v, missing key attempt", ended[0].Attributes())
+	}
+	if found.Value.Type() != attribute.INT64 {
+		t.Fatalf("attempt attribute type = %v, want attribute.INT64 (int must not be "+
+			"stringified)", found.Value.Type())
+	}
+	if got := found.Value.AsInt64(); got != 3 {
+		t.Fatalf("attempt attribute value = %d, want 3", got)
+	}
+}
+
 func TestNoopTracerReturnsUsableSpan(t *testing.T) {
 	ctx, span := NoopTracer{}.Start(context.Background(), "noop")
 	if got := SpanFromContext(ctx); got != span {

@@ -128,6 +128,58 @@ func TestGRPCUnaryInterceptorRecordsHandlerError(t *testing.T) {
 	}
 }
 
+// TestGRPCStreamInterceptorRecordsHandlerError proves the stream interceptor
+// records a handler error on its span (mirroring the unary interceptor). A
+// stream RPC that fails (e.g. the runner protocol's Connect dropping mid-way)
+// would otherwise produce a span with no error information at all: the
+// exception event other observability tooling keys off of (alerting,
+// trace-based error rate) would simply never appear for any stream RPC
+// failure, while unary RPC failures kept showing it — a blind spot specific
+// to the stream path.
+func TestGRPCStreamInterceptorRecordsHandlerError(t *testing.T) {
+	tp, sr := testTracerProvider()
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+	tracer := NewOTelTracer(tp.Tracer("xflow-server"))
+	interceptor := GRPCStreamServerInterceptor(tracer)
+
+	handlerErr := context.DeadlineExceeded
+	fake := &fakeServerStream{ctx: context.Background()}
+	err := interceptor(nil, fake, &grpc.StreamServerInfo{FullMethod: "/xflow/Baz"},
+		func(srv any, ss grpc.ServerStream) error {
+			return handlerErr
+		})
+	if err != handlerErr {
+		t.Fatalf("interceptor returned %v, want %v (must propagate)", err, handlerErr)
+	}
+	spans := sr.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("recorded spans = %d, want 1", len(spans))
+	}
+	hasErrEvent := false
+	for _, ev := range spans[0].Events() {
+		if ev.Name == "exception" {
+			hasErrEvent = true
+		}
+	}
+	if !hasErrEvent {
+		t.Fatalf("stream span has no exception event; RecordError did not record the handler error")
+	}
+}
+
+// fakeServerStream is a minimal grpc.ServerStream whose only meaningfully
+// implemented method is Context(); the interceptor under test never calls
+// the others.
+type fakeServerStream struct {
+	ctx context.Context
+}
+
+func (s *fakeServerStream) SetHeader(metadata.MD) error  { return nil }
+func (s *fakeServerStream) SendHeader(metadata.MD) error { return nil }
+func (s *fakeServerStream) SetTrailer(metadata.MD)       {}
+func (s *fakeServerStream) Context() context.Context     { return s.ctx }
+func (s *fakeServerStream) SendMsg(m any) error          { return nil }
+func (s *fakeServerStream) RecvMsg(m any) error          { return nil }
+
 func testTracerProvider() (*sdktrace.TracerProvider, *tracetest.SpanRecorder) {
 	sr := tracetest.NewSpanRecorder()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sr))

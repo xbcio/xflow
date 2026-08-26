@@ -133,6 +133,26 @@ func TestNewTracerProviderDisabledIsNoop(t *testing.T) {
 	}
 }
 
+// TestNewTracerProviderUnknownModeErrors verifies an unrecognized Mode is a
+// hard startup error, not a silent fallback to no tracing. cmd/server and
+// cmd/runner pass the --tracing-mode flag straight through to cfg.Mode with
+// no validation of their own, so this is the only gate: a typo'd flag value
+// (e.g. "otpl" instead of "otlp") must fail process startup loudly instead of
+// quietly running with tracing disabled, which would leave an operator
+// believing tracing is on while every span silently vanishes.
+func TestNewTracerProviderUnknownModeErrors(t *testing.T) {
+	tracer, shutdown, err := NewTracerProvider(context.Background(), ProviderConfig{Mode: "bogus"})
+	if err == nil {
+		t.Fatal("NewTracerProvider(bogus mode) returned nil error, want an error rejecting the unknown mode")
+	}
+	if tracer != nil {
+		t.Fatalf("NewTracerProvider(bogus mode) returned a non-nil tracer %v alongside an error", tracer)
+	}
+	if shutdown != nil {
+		t.Fatal("NewTracerProvider(bogus mode) returned a non-nil shutdown func alongside an error")
+	}
+}
+
 // helper: build a context carrying a baggage entry.
 func baggageContext(t *testing.T) context.Context {
 	t.Helper()
