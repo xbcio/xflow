@@ -159,6 +159,57 @@ func TestGoja_PrototypePollutionDiscarded(t *testing.T) {
 	}
 }
 
+// TestGoja_ProgramCacheKeepsTheRecentlyUsed asserts the "LRU" part of the
+// program cache, which TestGoja_ProgramCacheEvict above cannot see.
+//
+// That test compiles three distinct scripts once each, in order, and never
+// touches an earlier one again — under which LRU and plain FIFO evict exactly
+// the same entry. So programCache.get can be switched from c.Get to c.Peek,
+// which returns the value without promoting it, and the whole package stays
+// green while the cache degrades to insertion-order eviction.
+//
+// The cost is paid on the hot path this cache exists for. A deployment runs a
+// small number of hot scripts against a long tail of one-off ones; with Peek,
+// each new one-off script evicts whichever hot script was compiled longest ago
+// regardless of how many times it has been executed since, and that script is
+// recompiled from source on its very next message. goja.Compile is the single
+// most expensive step in a JS node's execution.
+//
+// The sequence below is the minimum that distinguishes the two: with LRU the
+// re-read of scripts[0] promotes it and scripts[1] is evicted; with Peek (or
+// FIFO) scripts[0] is still the eldest and goes instead.
+func TestGoja_ProgramCacheKeepsTheRecentlyUsed(t *testing.T) {
+	e := &gojaEngine{programs: newProgramCache(2)}
+	scripts := []string{`({a: 1})`, `({b: 2})`, `({c: 3})`}
+
+	for i := 0; i < 2; i++ {
+		if _, err := e.compile(scripts[i]); err != nil {
+			t.Fatalf("compile %d: %v", i, err)
+		}
+	}
+	// Re-execute the eldest entry: a cache hit that must count as a use.
+	if _, err := e.compile(scripts[0]); err != nil {
+		t.Fatalf("recompile scripts[0]: %v", err)
+	}
+	if _, err := e.compile(scripts[2]); err != nil {
+		t.Fatalf("compile 2: %v", err)
+	}
+
+	if !e.programs.contains(scripts[0]) {
+		t.Error("scripts[0] was evicted despite being used most recently: the cache " +
+			"is evicting by insertion order, so a hot script is dropped whenever " +
+			"enough one-off scripts arrive after it and is recompiled from source " +
+			"on its next message")
+	}
+	if e.programs.contains(scripts[1]) {
+		t.Error("scripts[1] survived: it is the least recently used entry and is " +
+			"what a promoting cache evicts here")
+	}
+	if !e.programs.contains(scripts[2]) {
+		t.Error("scripts[2] missing: the newest entry must always be resident")
+	}
+}
+
 // TestGoja_ProgramCacheEvict drives a small isolated cache (capacity 2) past
 // its limit and asserts the eldest entry is evicted. Uses a fresh engine
 // instance to avoid polluting sharedGoja.
