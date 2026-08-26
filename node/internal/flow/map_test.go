@@ -2,6 +2,7 @@ package flow_test
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
@@ -70,6 +71,71 @@ func TestMap_SingleBatch(t *testing.T) {
 	}
 	if out.Data["batch_count"] != 3 {
 		t.Fatalf("expected batch_count=3, got %v", out.Data["batch_count"])
+	}
+}
+
+// TestMap_EmitsTheBatchesThemselves asserts the two fields the engine's fan-out
+// actually reads off a map node's output.
+//
+// TestMap_BasicIteration and TestMap_SingleBatch check only total and
+// batch_count, and both are computed from the local items/batches values rather
+// than from the map literal being returned — so writing `"batches": nil,
+// "items": nil` into that literal leaves them at 5 and 3 while
+// engine/expand.go:107 loopSplitBatches sees a missing key, returns (nil, nil),
+// and the map node expands into zero batch tasks: the body never runs once and
+// the node terminalizes as a success. Reordering is equally invisible — reverse
+// items before the chunking and both counts are unchanged while every batch and
+// every $items view is backwards, which for an ordered stream inverts the order
+// the downstream side effects are applied in.
+//
+// Nothing downstream closes this gap either. Every engine test that exercises
+// expansion (expand_test.go, batch_body_test.go, expansion_criterion_test.go,
+// expand_fencing_test.go) hand-builds its own "batches" value, so the hop from
+// MapNode.Execute to what the engine consumes is checked on neither side.
+//
+// 5 items at batch_size 2 is deliberate: the final batch is short, so the chunk
+// layout is asymmetric and order-sensitive.
+func TestMap_EmitsTheBatchesThemselves(t *testing.T) {
+	h, _ := registry.Lookup("xflow.map")
+	b := node.Map("items", 2)
+	in := []any{"a", "b", "c", "d", "e"}
+	out, err := h.Execute(context.Background(), &types.Input{
+		Params: mapParams(b),
+		Data:   map[string]any{"items": in},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	batches, ok := out.Data["batches"].([][]any)
+	if !ok {
+		t.Fatalf("out.Data[\"batches\"] = %#v, want [][]any: the engine reads this "+
+			"key to build the batch tasks, and a missing or wrongly-typed value "+
+			"expands into no tasks at all", out.Data["batches"])
+	}
+	want := [][]any{{"a", "b"}, {"c", "d"}, {"e"}}
+	if len(batches) != len(want) {
+		t.Fatalf("batches = %#v, want %#v", batches, want)
+	}
+	for i := range want {
+		if !slices.Equal(batches[i], want[i]) {
+			t.Errorf("batches[%d] = %#v, want %#v: this is the exact slice one "+
+				"body invocation is handed, short final batch included",
+				i, batches[i], want[i])
+		}
+	}
+
+	// items travels on every batch task (expansionBatchTask) because the body
+	// needs $items and the map node's own output does not exist yet at
+	// expansion time.
+	items, ok := out.Data["items"].([]any)
+	if !ok || !slices.Equal(items, in) {
+		t.Errorf("out.Data[\"items\"] = %#v, want %#v in that order: each batch "+
+			"carries this forward as the body's $items", out.Data["items"], in)
+	}
+	if out.Data["total"] != 5 || out.Data["batch_count"] != 3 {
+		t.Errorf("total/batch_count = %v/%v, want 5/3",
+			out.Data["total"], out.Data["batch_count"])
 	}
 }
 
