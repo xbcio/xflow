@@ -41,11 +41,47 @@ func TestUpsertNodeUpdateFields_Wellformed(t *testing.T) {
 		}
 		seen[f] = true
 	}
-	// The lease/attempt/signal columns are load-bearing for node lifecycle
-	// correctness, so dropping one from the contract has to be deliberate.
-	for _, required := range []string{"Status", "LeaseID", "LeaseToken", "Attempt", "SignalName", "Timeout"} {
-		if !seen[required] {
-			t.Errorf("UpsertNodeUpdateFields missing required field %q", required)
+	// The contract's own content, pinned. The previous version of this check
+	// listed six "load-bearing" names, which left NodeType, Output, Port and
+	// SignalConfig unguarded: deleting "Output" from UpsertNodeUpdateFields
+	// passed every test in this file (the remaining nine names are still real
+	// NodeRecord fields, still unique, still non-empty, still not excluded) and
+	// every test downstream, because store/sqlstore and store/memstore verify
+	// their implementations *against this list* -- shrink the list and their
+	// coverage shrinks with it, in lockstep and undetectably. The consequence
+	// of losing "Output" specifically: on a node retry (same execution_id +
+	// node_name conflict key) status, attempt and the lease columns refresh
+	// while the persisted output stays at the first attempt's value, on both
+	// backends, with no error.
+	//
+	// This is an exact set comparison, so adding a field to NodeRecord's update
+	// set requires an edit here too. That is the intent: a new field that no
+	// one adds here is a field neither backend is checked on.
+	want := map[string]bool{
+		"NodeType":     true,
+		"Status":       true,
+		"LeaseID":      true,
+		"LeaseToken":   true,
+		"Attempt":      true,
+		"Output":       true,
+		"Port":         true,
+		"SignalName":   true,
+		"SignalConfig": true,
+		"Timeout":      true,
+	}
+	for name := range want {
+		if !seen[name] {
+			t.Errorf("UpsertNodeUpdateFields is missing %q: both backends derive "+
+				"what they refresh from this list, so a name dropped here is a "+
+				"column neither backend updates and neither backend's test notices",
+				name)
+		}
+	}
+	for name := range seen {
+		if !want[name] {
+			t.Errorf("UpsertNodeUpdateFields gained %q, which this contract has not "+
+				"been reviewed for; if it belongs in the ON CONFLICT update set, "+
+				"add it to the expected set here as well", name)
 		}
 	}
 	// Identity and the timestamps are excluded by design: execution_id/node_name
