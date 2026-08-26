@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/xbcio/xflow/types"
 	_ "github.com/go-sql-driver/mysql"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
@@ -230,6 +232,72 @@ func TestResourcePoolCloseIdempotent(t *testing.T) {
 	}
 	if err := p.Close(ctx); err != nil {
 		t.Fatalf("third Close error = %v, want nil (idempotent)", err)
+	}
+}
+
+// TestResourcePool_CloseActuallyClosesCachedResources checks the thing every
+// other Close test takes on faith: that Close releases the resources it
+// evicted from the maps.
+//
+// The existing coverage is all downstream of the p.closed flag —
+// CloseIdempotent, GRPCAfterCloseFails and the two concurrency tests observe
+// only that later calls are rejected — and TestCloseAllJoinsErrors calls
+// closeAll directly rather than through Close. So replacing either
+// `closeAll(dbs)` or `closeAll(conns)` in Close with a bare nil leaks every
+// cached *sql.DB and *grpc.ClientConn (each with its own connection pool and
+// background goroutines) while the whole package stays green: the pool still
+// reports itself closed, so nothing downstream notices.
+//
+// Both resources expose their own post-close state, which is what makes this
+// observable without reaching into the pool's internals: a closed *sql.DB
+// rejects every call with "sql: database is closed" instead of attempting to
+// dial, and a closed *grpc.ClientConn reports connectivity.Shutdown.
+func TestResourcePool_CloseActuallyClosesCachedResources(t *testing.T) {
+	// database/sql exports no way to ask a *sql.DB whether it is closed:
+	// sql.ErrConnDone belongs to Conn/Tx, and the DB-level error (errDBClosed)
+	// is unexported. Matching its message is the only handle available, and it
+	// is a stable, documented string.
+	const dbClosedMsg = "sql: database is closed"
+
+	srv := startNoopGRPC(t)
+	p := NewDefaultResourcePool(types.DefaultResourcePoolConfig())
+
+	db, err := p.SQL(context.Background(), poolDriverName, poolDSN)
+	if err != nil {
+		t.Fatalf("SQL() error = %v", err)
+	}
+	opts := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
+	conn, err := p.GRPC(context.Background(), srv.addr, false, opts...)
+	if err != nil {
+		t.Fatalf("GRPC() error = %v", err)
+	}
+	// Before Close the handle must NOT look closed, or the assertions below
+	// would hold for a pool that never cached anything in the first place.
+	// poolDSN is deliberately unreachable, so an open handle fails here with a
+	// dial error -- a different failure, not the absence of one.
+	if err := db.PingContext(context.Background()); err == nil || strings.Contains(err.Error(), dbClosedMsg) {
+		t.Fatalf("handle already reports closed before Close(): %v", err)
+	}
+	if state := conn.GetState(); state == connectivity.Shutdown {
+		t.Fatal("connection already reports Shutdown before Close()")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := p.Close(ctx); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	if err := db.PingContext(context.Background()); err == nil || !strings.Contains(err.Error(), dbClosedMsg) {
+		t.Errorf("after Close, db.PingContext() = %v, want %q: the cached *sql.DB "+
+			"was evicted from the pool but never closed, leaking its connection "+
+			"pool and connectionOpener goroutine for the process lifetime",
+			err, dbClosedMsg)
+	}
+	if state := conn.GetState(); state != connectivity.Shutdown {
+		t.Errorf("after Close, conn.GetState() = %v, want Shutdown: the cached "+
+			"*grpc.ClientConn was evicted from the pool but never closed, leaking "+
+			"its transport and keepalive goroutines", state)
 	}
 }
 
