@@ -44,6 +44,13 @@ func TestTransaction_Rollback(t *testing.T) {
 			SignalName:  "sig",
 			Payload:     []byte(`{}`),
 		})
+		_ = set.Audit.AppendAudit(ctx, &store.AuditRecord{
+			RequestID: "req-rollback-audit",
+			Namespace: "default",
+			Operation: "PutSupply",
+			Phase:     store.AuditPhaseAdmission,
+			Outcome:   store.AuditOutcomeAdmitted,
+		})
 		return errors.New("boom")
 	})
 	if txErr == nil || txErr.Error() != "boom" {
@@ -58,6 +65,18 @@ func TestTransaction_Rollback(t *testing.T) {
 	}
 	if _, err := s.ConsumeSignal(ctx, execID, "sig"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("rolled-back signal must not exist, got %v", err)
+	}
+	// The Set handed to fn bundles Audit alongside Execution/Node/Signal (see
+	// store.Set and the bundle built in Transaction), and Transaction snapshots
+	// s.audit into snapAudit before calling fn specifically so a failed tx can
+	// restore it. Nothing previously called AppendAudit from inside a failing
+	// transaction, so dropping the `s.audit = snapAudit` restore line (while
+	// still referencing snapAudit to keep the build green, e.g. `_ =
+	// snapAudit`) left every test in this file passing: the audit row leaked
+	// permanently past the rollback boundary with no assertion to notice.
+	if recs := s.AuditRecords(); len(recs) != 0 {
+		t.Fatalf("rolled-back audit records = %d, want 0: AppendAudit inside a "+
+			"failing transaction must not survive rollback, got %+v", len(recs), recs)
 	}
 	// Original execution still present.
 	if got, err := s.GetExecution(ctx, execID); err != nil || got.ExecutionID != execID {

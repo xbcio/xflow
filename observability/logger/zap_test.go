@@ -68,6 +68,35 @@ func TestZapLoggerImplementsEngineLogger(t *testing.T) {
 	if got := entries[1].Message; got != "formatted debug" {
 		t.Fatalf("formatted message = %q, want formatted debug", got)
 	}
+	// The five non-formatted methods (Debug/Info/Warn/Error/Panic) and the four
+	// formatted ones share one code shape, but only Debug's field and Debugf's
+	// message were ever checked above. The level checks in wantLevels catch a
+	// method that logs at the wrong level, but they do not catch one that logs
+	// at the *right* level while silently dropping its own args: e.g. `func (l
+	// ZapLogger) Info(msg string, args ...any) { l.logger.Info(msg) }` compiles,
+	// keeps entry[2] at InfoLevel, and left every assertion in this test green
+	// before these checks were added. Pin the "node" field for Info/Warn/Error
+	// non-formatted calls and the interpolated message for their *f siblings, so
+	// a dropped args parameter on any one of them fails here instead of only in
+	// whatever call site happens to notice missing fields in production logs.
+	if got := entries[2].ContextMap()["node"]; got != "b" {
+		t.Fatalf("info node field = %v, want b", got)
+	}
+	if got := entries[3].Message; got != "formatted info" {
+		t.Fatalf("formatted message = %q, want formatted info", got)
+	}
+	if got := entries[4].ContextMap()["node"]; got != "c" {
+		t.Fatalf("warn node field = %v, want c", got)
+	}
+	if got := entries[5].Message; got != "formatted warn" {
+		t.Fatalf("formatted message = %q, want formatted warn", got)
+	}
+	if got := entries[6].ContextMap()["node"]; got != "d" {
+		t.Fatalf("error node field = %v, want d", got)
+	}
+	if got := entries[7].Message; got != "formatted error" {
+		t.Fatalf("formatted message = %q, want formatted error", got)
+	}
 }
 
 // TestZapFieldsErrorValueIsWrittenOnce pins the `continue` guard in
