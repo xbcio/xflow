@@ -19,10 +19,24 @@ type nodeRepo struct {
 
 var _ store.Nodes = (*nodeRepo)(nil)
 
-// UpsertNode updates the same column set as the memstore implementation
-// (see store/memstore UpsertNode): node_type, status, lease_id, lease_token,
-// attempt, output, port, signal_name, signal_config, timeout_at, updated_at.
-// Keep these in sync; store/memstore/contract_test.go guards the field set.
+// upsertNodeUpdateColumns is the ON CONFLICT DO UPDATE column set for
+// UpsertNode: every column store.UpsertNodeUpdateFields names, plus updated_at,
+// which the contract deliberately leaves out because each backend refreshes it
+// on its own.
+//
+// It is a package var rather than a literal inside the clause so
+// node_upsert_contract_test.go can read it and check it against the contract.
+// While it was inline, nothing compared it to anything — the cross-backend
+// "field set contract" was a comment pointing at a list that only its own test
+// read, and dropping a column here failed nothing.
+var upsertNodeUpdateColumns = []string{
+	"node_type", "status", "lease_id", "lease_token", "attempt", "output", "port",
+	"signal_name", "signal_config", "timeout_at", "updated_at",
+}
+
+// UpsertNode updates the same field set as the memstore implementation; see
+// store.UpsertNodeUpdateFields for the contract and the tests that bind both
+// backends to it.
 func (r *nodeRepo) UpsertNode(ctx context.Context, rec *store.NodeRecord) error {
 	now := time.Now()
 	rec.CreatedAt = now
@@ -35,10 +49,7 @@ func (r *nodeRepo) UpsertNode(ctx context.Context, rec *store.NodeRecord) error 
 				{Name: "execution_id"},
 				{Name: "node_name"},
 			},
-			DoUpdates: clause.AssignmentColumns([]string{
-				"node_type", "status", "lease_id", "lease_token", "attempt", "output", "port",
-				"signal_name", "signal_config", "timeout_at", "updated_at",
-			}),
+			DoUpdates: clause.AssignmentColumns(upsertNodeUpdateColumns),
 		}).
 		Create(d).Error
 	if err == nil {

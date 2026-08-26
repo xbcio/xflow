@@ -1,35 +1,33 @@
 package store
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
-// UpsertNodeUpdateFields lists the NodeRecord fields that an UpsertNode on an
-// existing row must refresh. Both the memstore and sqlstore implementations
-// must update exactly this set so a node's lifecycle projection stays
-// consistent across backends. created_at is preserved; updated_at is refreshed
-// separately by each backend.
+// TestUpsertNodeUpdateFields_NameRealFields is the half of the contract that
+// can be checked without an implementation: every entry must name a field that
+// actually exists on NodeRecord.
 //
-// Keep this list in sync with:
-//   - store/memstore/memstore.go UpsertNode
-//   - store/sqlstore/node.go UpsertNode OnConflict DoUpdates
-var UpsertNodeUpdateFields = []string{
-	"NodeType",
-	"Status",
-	"LeaseID",
-	"LeaseToken",
-	"Attempt",
-	"Output",
-	"Port",
-	"SignalName",
-	"SignalConfig",
-	"Timeout",
+// The list is consumed by reflection on both sides (memstore's copy check and
+// sqlstore's column derivation), and a reflect lookup for a name that does not
+// exist yields the zero Value rather than an error. Without this test a typo or
+// a field rename would turn a covered field into a silently skipped one — the
+// contract would shrink and every downstream test would stay green.
+func TestUpsertNodeUpdateFields_NameRealFields(t *testing.T) {
+	ty := reflect.TypeFor[NodeRecord]()
+	for _, name := range UpsertNodeUpdateFields {
+		if _, ok := ty.FieldByName(name); !ok {
+			t.Errorf("UpsertNodeUpdateFields names %q, which is not a field of NodeRecord; "+
+				"reflection-driven consumers would silently skip it", name)
+		}
+	}
 }
 
-// TestUpsertNodeUpdateFields_Contract is the cross-backend field-set contract.
-// The memstore half is exercised end-to-end by
-// store/memstore/memstore_test.go:TestUpsertNode_FullFieldUpdate. The sqlstore
-// half (OnConflict DoUpdates) is kept in sync manually against this constant
-// until a test-grade MySQL fixture enables a cross-backend integration test.
-func TestUpsertNodeUpdateFields_Contract(t *testing.T) {
+// TestUpsertNodeUpdateFields_Wellformed guards the list's own shape. A
+// duplicate or empty entry would not fail the check above but would make the
+// derived column list wrong.
+func TestUpsertNodeUpdateFields_Wellformed(t *testing.T) {
 	if len(UpsertNodeUpdateFields) == 0 {
 		t.Fatal("UpsertNodeUpdateFields must not be empty")
 	}
@@ -43,11 +41,21 @@ func TestUpsertNodeUpdateFields_Contract(t *testing.T) {
 		}
 		seen[f] = true
 	}
-	// Sanity: the contract must cover the lease/attempt/signal columns that
-	// are load-bearing for node lifecycle correctness.
+	// The lease/attempt/signal columns are load-bearing for node lifecycle
+	// correctness, so dropping one from the contract has to be deliberate.
 	for _, required := range []string{"Status", "LeaseID", "LeaseToken", "Attempt", "SignalName", "Timeout"} {
 		if !seen[required] {
 			t.Errorf("UpsertNodeUpdateFields missing required field %q", required)
+		}
+	}
+	// Identity and the timestamps are excluded by design: execution_id/node_name
+	// are the conflict key, created_at is preserved, and updated_at is refreshed
+	// by each backend outside this set. Listing one would make the derived
+	// sqlstore column list assert the wrong thing.
+	for _, excluded := range []string{"ID", "ExecutionID", "NodeName", "CreatedAt", "UpdatedAt"} {
+		if seen[excluded] {
+			t.Errorf("UpsertNodeUpdateFields must not list %q: it is either the conflict "+
+				"key or maintained outside the ON CONFLICT update set", excluded)
 		}
 	}
 }
