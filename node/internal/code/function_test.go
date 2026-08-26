@@ -213,6 +213,77 @@ func TestFunction_UserErrorRoutesToErrorPort(t *testing.T) {
 	}
 }
 
+// TestFunction_SuccessStaysOffTheErrorPort is the other half of the matrix row
+// above: the test right before this one is the only place in the package that
+// reads Output.Port at all, and it exercises the failure path.
+//
+// Nothing checks the success path. TestFunction_InlineExpr,
+// _InlineExpr_ReturnsMap, _InlineExprCanReadRuntimeVars, _ExtraParams and
+// _NamedFunction all assert on out.Data[...] and stop there, so setting
+// Port: "error" on executeExpr's two success returns -- or on the value
+// executeNamed hands back -- leaves the whole package green while every
+// successful function node is committed as a business failure:
+// engine/commit.go:446 outputPortRetryError treats Port == "error" with no
+// Output.Error as a routable error and synthesises one from Data["error"],
+// which an expression result does not have, so the node commits with
+// "node returned error port" and the run takes the OnError branch. The Data
+// the tests above verify is still perfectly correct; it just never reaches the
+// main port.
+//
+// The expected value is the empty string rather than a named port: the handler
+// never sets one on success, and engine/errorpolicy.go:73 leaves RoutePort ""
+// for that case, so "" is what the routing layer is actually built around.
+func TestFunction_SuccessStaysOffTheErrorPort(t *testing.T) {
+	h, _ := registry.Lookup("xflow.function")
+
+	const fnName = "__success_port_fn__"
+	node.RegisterFunc(fnName, func(_ context.Context, _ *types.Input) (*types.Output, error) {
+		return &types.Output{Data: map[string]any{"ok": true}}, nil
+	})
+
+	cases := []struct {
+		name  string
+		input *types.Input
+	}{
+		// executeExpr's default branch: a scalar result gets wrapped in
+		// {"result": v}.
+		{"ExprScalar", &types.Input{
+			Params: node.Expr("a + b").RawParams().(map[string]any),
+			Data:   map[string]any{"a": 3.0, "b": 4.0},
+		}},
+		// executeExpr's map branch: a separate return statement.
+		{"ExprMap", &types.Input{
+			Params: node.Expr(`{"sum": a + b}`).RawParams().(map[string]any),
+			Data:   map[string]any{"a": 2.0, "b": 3.0},
+		}},
+		// executeNamed's success return, which passes the user function's own
+		// Output through untouched.
+		{"NamedFunction", &types.Input{
+			Params: node.Function(fnName).RawParams().(map[string]any),
+			Data:   map[string]any{},
+		}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := h.Execute(context.Background(), tc.input)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if out.Port != "" {
+				t.Errorf("successful run returned Port = %q, want \"\": a non-empty "+
+					"port on the success path reroutes every successful function "+
+					"node away from its main downstream edges, and %q specifically "+
+					"makes the engine commit the node as a business failure",
+					out.Port, "error")
+			}
+			if out.Error != nil {
+				t.Errorf("successful run returned Error = %v, want nil", out.Error)
+			}
+		})
+	}
+}
+
 func TestFunction_ExtraParams(t *testing.T) {
 	h, _ := registry.Lookup("xflow.function")
 	input := &types.Input{
