@@ -100,6 +100,14 @@ func TestNewRunnerCarriesTheResourcePoolConfig(t *testing.T) {
 	if svcCfg.ResourcePool == nil {
 		t.Fatal("ResourcePool = nil")
 	}
+	// The value, not just the pointer. buildRunnerServiceConfig hands the config
+	// to resource.NewDefaultResourcePool, which returns a pool for any input, so
+	// non-nil is equally true of a version that replaced `poolCfg :=
+	// cfg.ResourcePoolConfig` with the defaults — which is exactly the silent
+	// all-fields-defaulted outcome this test's comment says it guards against.
+	if got := sqlPoolMaxOpenConns(t, svcCfg.ResourcePool); got != 77 {
+		t.Errorf("runner pool MaxOpenConns = %d, want 77 from RunnerConfig.ResourcePoolConfig", got)
+	}
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

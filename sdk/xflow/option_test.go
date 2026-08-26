@@ -3,11 +3,49 @@ package xflow
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
+	"errors"
 	"testing"
 
 	"github.com/xbcio/xflow/types"
 	"google.golang.org/grpc"
 )
+
+// poolProbeDriver is a registered SQL driver that never connects, used only so
+// a test can ask a resource pool for a *sql.DB and read back the limits the
+// pool applied to it. sql.Open does not dial, so Open below is never reached.
+const poolProbeDriver = "xflow-resource-pool-probe"
+
+type probeDriver struct{}
+
+func (probeDriver) Open(string) (driver.Conn, error) {
+	return nil, errors.New("probe driver never connects")
+}
+
+func init() { sql.Register(poolProbeDriver, probeDriver{}) }
+
+// sqlPoolMaxOpenConns reports the MaxOpenConns a pool actually applied, by
+// taking a handle from it and reading the limit off the handle.
+//
+// This exists because the obvious assertion — that the pool is non-nil — is not
+// one. resource.NewDefaultResourcePool returns a non-nil pool for every input
+// including the ones that ignored the caller's config, so a test asserting only
+// non-nil stays green when the line threading the config through is deleted,
+// which is the line those tests are named after. The pool's config field is
+// unexported and types.ResourcePool has no accessor, so the config has to be
+// observed where it lands: on the *sql.DB.
+//
+// Reading it off the handle is also the stronger claim. An accessor would prove
+// the value was stored; this proves it reached the connection limit that is the
+// entire point of configuring it.
+func sqlPoolMaxOpenConns(t *testing.T, pool types.ResourcePool) int {
+	t.Helper()
+	db, err := pool.SQL(context.Background(), poolProbeDriver, "probe-dsn")
+	if err != nil {
+		t.Fatalf("pool.SQL(%q): %v", poolProbeDriver, err)
+	}
+	return db.Stats().MaxOpenConnections
+}
 
 // stubPool is a sentinel ResourcePool used to assert that resolveResourcePool
 // returns the caller-supplied pool verbatim. Its SQL/GRPC methods are never
@@ -49,11 +87,14 @@ func TestResolveResourcePool_ExplicitPool(t *testing.T) {
 }
 
 // TestResolveResourcePool_CustomConfig pins the contract that
-// WithResourcePoolConfig(cfg) produces a non-nil pool built from the supplied
-// config. We cannot easily inspect the config the pool was built with without
-// reaching into unexported fields, so we assert non-nil and that the pool is
-// usable (Close-able). The load-bearing assertion is "non-nil" — the empty-cfg
-// default and the explicit-pool case cover the other branches.
+// WithResourcePoolConfig(cfg) produces a pool built from the supplied config —
+// not merely a pool.
+//
+// The distinction is the whole test. resolveResourcePool ends every non-opt-out
+// branch at resource.NewDefaultResourcePool, which returns non-nil whatever it
+// is handed, so "the pool is non-nil" holds just as well for a version that
+// dropped `poolCfg = *cfg.resourcePoolConfig` and defaulted everything. The
+// assertion has to be on a value the caller chose.
 func TestResolveResourcePool_CustomConfig(t *testing.T) {
 	cfg := &engineConfig{
 		resourcePoolConfig: &types.ResourcePoolConfig{
@@ -65,6 +106,13 @@ func TestResolveResourcePool_CustomConfig(t *testing.T) {
 		t.Fatal("resolveResourcePool(custom config) = nil, want non-nil pool built from config")
 	}
 	t.Cleanup(func() { _ = pool.Close(context.Background()) })
+
+	// 99, not the 25 normalizeConfig substitutes for an unset value, so a pool
+	// that ignored the config fails here rather than passing on non-nil.
+	if got := sqlPoolMaxOpenConns(t, pool); got != 99 {
+		t.Errorf("pool MaxOpenConns = %d, want 99 from the supplied config "+
+			"(25 means the config was dropped and defaults were used)", got)
+	}
 }
 
 // TestResolveResourcePool_NilOptOut pins the contract that
