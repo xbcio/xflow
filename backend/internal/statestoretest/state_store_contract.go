@@ -33,7 +33,7 @@ func RunStateStoreContract(t *testing.T, state engine.StateStore) {
 		ID:      id,
 		Graph:   g,
 		Status:  types.ExecutionStatusRunning,
-		Params:  map[string]any{"claim_id": "c-1"},
+		Params:  map[string]any{"claim_id": "c-1", "retry_budget": float64(2)},
 		Runtime: &types.Runtime{Vars: map[string]any{"namespace_id": "namespace-a"}},
 		Scope:   map[string]any{"$index": float64(3)},
 	}); err != nil {
@@ -42,6 +42,26 @@ func RunStateStoreContract(t *testing.T, state engine.StateStore) {
 	snap, err := state.GetExecution(ctx, id)
 	if err != nil {
 		t.Fatalf("GetExecution() error = %v", err)
+	}
+	// Params was written above and, until this check existed, never read back:
+	// dropping it from GetExecution's returned snapshot left the whole contract
+	// green on both backends. engine/input.go:115,126 uses exactly this field as
+	// the input.Data of every root node and of a cyclic graph's start node on
+	// each reactivation, so losing it hands an empty input to the first node of
+	// essentially every workflow -- with no error anywhere, because an empty map
+	// is a legal input. float64 for the numeric value for the same reason the
+	// Scope check below states: a JSON backend decodes any number as one, so an
+	// int would pass in memory and fail on Redis for a reason unrelated to the
+	// contract.
+	if snap.Params == nil {
+		t.Fatalf("Params = nil, want the map passed to CreateExecution: every root " +
+			"node's input.Data comes from this field")
+	}
+	if snap.Params["claim_id"] != "c-1" {
+		t.Fatalf("Params[\"claim_id\"] = %#v, want \"c-1\"", snap.Params["claim_id"])
+	}
+	if snap.Params["retry_budget"] != float64(2) {
+		t.Fatalf("Params[\"retry_budget\"] = %#v, want float64(2)", snap.Params["retry_budget"])
 	}
 	if snap.Runtime == nil || snap.Runtime.Vars["namespace_id"] != "namespace-a" {
 		t.Fatalf("Runtime = %#v, want namespace_id namespace-a", snap.Runtime)
