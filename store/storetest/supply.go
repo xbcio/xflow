@@ -75,8 +75,16 @@ func SupplyContract(t *testing.T, s store.Supplies, nsPrefix string) {
 	if rec.Revision != 1 {
 		t.Fatalf("first revision = %d, want 1", rec.Revision)
 	}
-	if rec.ContentHash != store.ContentHash([]byte(`{"rules":[]}`)) {
-		t.Fatalf("content hash = %q", rec.ContentHash)
+	// Pinned to a digest computed outside this program (shasum -a 256), not to
+	// store.ContentHash. The write path calls store.ContentHash too, so
+	// comparing against it is x == x: truncating the digest to sum[:8] weakens
+	// every caller — including sqlstore's corruption guard, which exists to
+	// catch a bad migration or a direct SQL edit — while both sides of this
+	// comparison truncate identically and stay green.
+	const wantHash = "sha256:da506c8a9c8a9f31aa00eaeef23d49764b9ace97158a1a0a7aa628e6d446b0fb"
+	if rec.ContentHash != wantHash {
+		t.Fatalf("content hash = %q, want %q (sha256 of the written content, "+
+			"computed independently of the production hasher)", rec.ContentHash, wantHash)
 	}
 
 	// Create-if-absent against an existing row must conflict.
