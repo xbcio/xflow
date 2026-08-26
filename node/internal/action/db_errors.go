@@ -16,11 +16,16 @@ import (
 // error taxonomy matrix (2026-07-18 remediation §6.4). Classification is by
 // MySQL SQLState / error number, never by error text.
 //
-// PostgreSQL is NOT supported: only the MySQL driver is classified. PG errors
-// do not unmarshal as *mysqldriver.MySQLError and therefore fall through to the
-// conservative-transient fallback. Supporting PG would require its own typed
-// classifier (PG SQLState differs, e.g. 40P01 deadlock / 23505 unique_violation)
-// — out of scope; see error_taxonomy §6.
+// PostgreSQL is NOT supported, and the stronger statement is the useful one: no
+// PG driver is in the module graph at all, so sql.Open("postgres", ...) fails
+// with `unknown driver` before a connection exists and no PG error ever reaches
+// this function. That matters when asking whether a fix here covers PG — the
+// question does not arise, rather than being answered "no, it falls through to
+// the transient fallback with its text intact". Adding a PG driver would change
+// that in one import, and would need its own typed classifier, because PG
+// SQLState differs (40P01 deadlock / 23505 unique_violation) and its
+// unique-violation Detail quotes the collided value the same way MySQL's does.
+// Out of scope; see error_taxonomy §6.
 //
 //   - connection-lost (driver.ErrBadConn, net errors, EOF) -> transient
 //   - deadlock / lock wait / serialization failure (1213, 1205, 40001) ->
