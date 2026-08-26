@@ -899,6 +899,182 @@ func TestVerifyRejectsPreaggregatedDerivedObservations(t *testing.T) {
 	requireNotPassed(t, res, "pre-aggregated derived observations")
 }
 
+// The six tests below close gaps where checkA0/checkA3 branches were
+// evaluated by every other test (they are on the hot path of Verify) but
+// never actually driven to fire: no fixture in this file ever attached a
+// lease_reclaim/synthetic_os_kill marker, gave the request-loss first attempt
+// an accepted outcome, stripped the authority_rejected marker, misaligned a
+// Database real-pair row, or classified a non-terminal fixture. Before this
+// change, deleting any one of those checkA0/checkA3 branches entirely left
+// every existing test green.
+
+func TestVerifyRejectsAckLossLeaseReclaim(t *testing.T) {
+	env := validEnvelope()
+	markAllRequired(env)
+	// A0RequiredScenarios()[1] is ReportAckLoss; markAllRequired names its
+	// execution "exec-a0-1".
+	ackExecID := types.ExecutionID("exec-a0-1")
+	env.Raw.ProtocolObservations = append(env.Raw.ProtocolObservations, ProtocolObservation{
+		RunID: env.RunID, Topology: string(A0ReportAckLoss), ExecutionID: ackExecID,
+		Type: "lease_reclaim", ObservedAt: time.Now().UTC(),
+	})
+	v := NewVerifier(defaultFakeProvenance())
+	res := v.Verify(env, passEvents())
+	requireNotPassed(t, res, "ack-loss scenario carries a lease_reclaim observation")
+	found := false
+	for _, e := range res.Errors {
+		if strings.Contains(e, "ACK-loss scenario contains lease reclaim") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected ACK-loss lease reclaim error, got %v", res.Errors)
+	}
+}
+
+func TestVerifyRejectsSyntheticOSKillObservation(t *testing.T) {
+	env := validEnvelope()
+	markAllRequired(env)
+	// A0RequiredScenarios()[4] is OSKillSIGKILL; markAllRequired names its
+	// execution "exec-a0-4".
+	env.Raw.ProtocolObservations = append(env.Raw.ProtocolObservations, ProtocolObservation{
+		RunID: env.RunID, Topology: string(A0OSKillSIGKILL), ExecutionID: types.ExecutionID("exec-a0-4"),
+		Type: "synthetic_os_kill", ObservedAt: time.Now().UTC(),
+	})
+	v := NewVerifier(defaultFakeProvenance())
+	res := v.Verify(env, passEvents())
+	requireNotPassed(t, res, "envelope carries a synthetic_os_kill observation")
+	found := false
+	for _, e := range res.Errors {
+		if strings.Contains(e, "synthetic os-kill observation is not allowed") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected synthetic os-kill rejection error, got %v", res.Errors)
+	}
+}
+
+func TestVerifyRejectsMissingAuthorityRejectedObservation(t *testing.T) {
+	env := validEnvelope()
+	markAllRequired(env)
+	// markA0Scenario attaches "authority_rejected" only for ReportRequestLoss;
+	// strip it so the request-loss row is missing its required marker.
+	var kept []ProtocolObservation
+	for _, po := range env.Raw.ProtocolObservations {
+		if po.Type == "authority_rejected" {
+			continue
+		}
+		kept = append(kept, po)
+	}
+	env.Raw.ProtocolObservations = kept
+	v := NewVerifier(defaultFakeProvenance())
+	res := v.Verify(env, passEvents())
+	requireNotPassed(t, res, "request-loss missing authority_rejected marker")
+	found := false
+	for _, e := range res.Errors {
+		if strings.Contains(e, "request-loss missing authority rejected observation") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected missing authority-rejected error, got %v", res.Errors)
+	}
+}
+
+func TestVerifyRejectsRequestLossFirstReportAccepted(t *testing.T) {
+	env := validEnvelope()
+	markAllRequired(env)
+	// A0RequiredScenarios()[2] is ReportRequestLoss; markAllRequired names its
+	// execution "exec-a0-2". Its commit event's CommitOutcome is already
+	// Accepted (set unconditionally by markA0Scenario); only Attempt needs to
+	// become 1 to simulate a first-report accepted commit, which the request-
+	// loss contract forbids (the first report must be rejected/lost).
+	reqExecID := types.ExecutionID("exec-a0-2")
+	for i := range env.Raw.RuntimeEvents {
+		ev := &env.Raw.RuntimeEvents[i].Event
+		if ev.ExecutionID == reqExecID && ev.Type == engine.RuntimeEvidenceCommit {
+			ev.Attempt = 1
+		}
+	}
+	v := NewVerifier(defaultFakeProvenance())
+	res := v.Verify(env, passEvents())
+	requireNotPassed(t, res, "request-loss first report accepted")
+	found := false
+	for _, e := range res.Errors {
+		if strings.Contains(e, "request-loss first report produced accepted commit") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected request-loss first-report error, got %v", res.Errors)
+	}
+}
+
+func TestVerifyRejectsDatabaseRealPairMismatch(t *testing.T) {
+	env := validEnvelope()
+	markAllRequired(env)
+	// transient_then_success is a Database real-pair fixture (isDatabaseFixture
+	// treats all five A3 fixtures as such). Flip only the server-runner row's
+	// advance to unapplied while leaving its commit intact, so AcceptedCommit
+	// still matches across the pair but AppliedAdvance disagrees between
+	// server-runner and cluster-durable.
+	srAdvanceID := "advance-" + string(A3TransientThenSuccess) + "-" + string(A3ServerRunner)
+	for i := range env.Raw.RuntimeEvents {
+		ev := &env.Raw.RuntimeEvents[i].Event
+		if ev.EventID == srAdvanceID {
+			ev.Applied = false
+		}
+	}
+	v := NewVerifier(defaultFakeProvenance())
+	res := v.Verify(env, passEvents())
+	requireNotPassed(t, res, "database real-pair rows disagree")
+	found := false
+	for _, e := range res.Errors {
+		if strings.Contains(e, "Database real-pair mismatch") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected Database real-pair mismatch error, got %v", res.Errors)
+	}
+}
+
+func TestVerifyRejectsSuccessFixtureWithClassification(t *testing.T) {
+	env := validEnvelope()
+	markAllRequired(env)
+	// transient_then_success is not in checkA3's classifiedTerminalFixtures
+	// set, so its derived observation must never carry a classification.
+	// Setting ErrorSource to a recognized category on its commit event makes
+	// EffectiveClassificationFromEvent return non-nil even though Classified
+	// stays false, which must be rejected.
+	commitID := "commit-" + string(A3TransientThenSuccess) + "-" + string(A3Local)
+	for i := range env.Raw.RuntimeEvents {
+		ev := &env.Raw.RuntimeEvents[i].Event
+		if ev.EventID == commitID {
+			ev.ErrorSource = engine.ErrorSourceBusiness
+		}
+	}
+	v := NewVerifier(defaultFakeProvenance())
+	res := v.Verify(env, passEvents())
+	requireNotPassed(t, res, "success fixture unexpectedly classified")
+	found := false
+	for _, e := range res.Errors {
+		if strings.Contains(e, "must not have classification") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected unexpected-classification error, got %v", res.Errors)
+	}
+}
+
 func TestAtomicFinalizeOnlyOnPass(t *testing.T) {
 	env := validEnvelope()
 	env.Verification = Verification{Passed: false}
