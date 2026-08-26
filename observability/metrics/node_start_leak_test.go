@@ -175,9 +175,24 @@ func TestTombstonesAreBoundedByCount(t *testing.T) {
 		t.Errorf("in-flight entries after %d completed executions = %d, want 0",
 			endedTombstones*3, got)
 	}
-	if got := hooks.trackedExecutions(); got > endedTombstones {
-		t.Errorf("tracked executions = %d, want at most %d; the tombstone ring "+
-			"is not evicting, so this grows with traffic", got, endedTombstones)
+	// Exactly the ring's capacity, not "at most it". Measured: after 3x
+	// endedTombstones completed executions the ring settles on 4096. The upper
+	// bound was equally green for a ring that keeps one tombstone or none --
+	// residency would read perfect while the raced-start rejection covered only
+	// the newest execution and the original leak returned for every other one.
+	if got := hooks.trackedExecutions(); got != endedTombstones {
+		t.Errorf("tracked executions = %d, want exactly %d; more means the ring "+
+			"is not evicting and residency grows with traffic, fewer means it is "+
+			"evicting tombstones a racing start still needs", got, endedTombstones)
+	}
+	// And the residency has to be of the RIGHT ends: the newest tombstone is the
+	// one a racing start is most likely to hit, so a start for it must still be
+	// rejected.
+	newest := types.ExecutionID(fmt.Sprintf("exec-%d", endedTombstones*3-1))
+	hooks.OnNodeStart(ctx, newest, "transform")
+	if got := hooks.liveNodeStarts(); got != 0 {
+		t.Errorf("a start racing the end of the most recently ended execution was "+
+			"recorded (%d in flight); the ring evicted the tombstone that rejects it", got)
 	}
 }
 
