@@ -39,7 +39,20 @@ func TestResumeIntentRejectsSupplyNode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveResumeIntent(clean): %v", err)
 	}
-	if intent.UnitIdx < 0 {
-		t.Fatalf("UnitIdx = %d, want >= 0", intent.UnitIdx)
+	// UnitIdx must name clean's own unit, not merely be non-negative.
+	// "UnitIdx >= 0" was a guard behind a guard: resolveResumeIntent already
+	// returns an error whenever UnitIndexForNode is negative, so the only way
+	// to reach this line is with a non-negative value. Resuming at the WRONG
+	// unit — start's, say — passed it, and a resume that silently restarts a
+	// different node is worse than one that fails.
+	//
+	// Resolved forward through the unit table rather than by re-calling
+	// UnitIndexForNode, which would just recompute the value under test.
+	if intent.NodeName != "clean" {
+		t.Errorf("NodeName = %q, want %q", intent.NodeName, "clean")
+	}
+	if got := g.NodeName(g.UnitNodeIndex(intent.UnitIdx)); got != "clean" {
+		t.Errorf("UnitIdx %d is the unit for node %q, want clean's own unit; "+
+			"a resume signal would restart the wrong node", intent.UnitIdx, got)
 	}
 }

@@ -99,10 +99,29 @@ func TestRetry_TransientErrorEventuallySucceeds(t *testing.T) {
 	if handler.calls != 3 {
 		t.Fatalf("handler calls = %d, want 3 (2 retries + 1 success)", handler.calls)
 	}
-	ns, _ := state.GetNode(ctx, types.ExecutionID(""), "flaky")
-	// fakeState keys by exec/name; we don't know the id here so just inspect raw map.
-	if ns != nil {
-		t.Fatalf("unexpected snapshot via empty id: %+v", ns)
+	// Read the node back with the execution id Submit returned. This used to
+	// call GetNode with types.ExecutionID("") and assert the result was nil,
+	// under a comment claiming "we don't know the id here" — the id is the
+	// variable two lines up. fakeState keys on string(id)+"/"+name, so the
+	// empty id could never match anything and the check could not fail.
+	//
+	// "EventuallySucceeds" is the half that was going unverified: three handler
+	// calls are equally consistent with a node that retried twice and then
+	// failed anyway.
+	node, err := state.GetNode(ctx, id, "flaky")
+	if err != nil {
+		t.Fatalf("GetNode() error = %v", err)
+	}
+	if node == nil {
+		t.Fatal("no node snapshot for flaky after the run")
+	}
+	if node.Status != types.NodeStatusSuccess {
+		t.Errorf("node status = %s, want %s — the handler was called three times but "+
+			"the node did not end up succeeding", node.Status, types.NodeStatusSuccess)
+	}
+	if node.Attempt != 3 {
+		t.Errorf("node attempt = %d, want 3 — the engine's logical attempt count must "+
+			"match the two retries it actually performed", node.Attempt)
 	}
 }
 
