@@ -186,14 +186,57 @@ func TestWait_OnResume_SignalIncludesInputs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if out.Data["branch_a"] == nil {
-		t.Fatalf("expected input branch_a preserved, got %v", out.Data)
-	}
-	if out.Data["branch_b"] == nil {
-		t.Fatalf("expected input branch_b preserved, got %v", out.Data)
+	// Values, not just presence. Two distinct non-nil payloads are in play, so a
+	// merge that records "this branch fired" instead of what it produced -- or
+	// that copies one branch's value under the other's key -- passes a nil check
+	// while every downstream node reads the wrong data.
+	for _, br := range []struct{ key, want string }{{"branch_a", "a"}, {"branch_b", "b"}} {
+		got, _ := out.Data[br.key].(map[string]any)
+		if got == nil || got["value"] != br.want {
+			t.Errorf("%s = %#v, want map with value %q", br.key, out.Data[br.key], br.want)
+		}
 	}
 	if out.Data["existing"] != "data" {
 		t.Fatalf("expected existing data preserved, got %v", out.Data)
+	}
+}
+
+// The signal's own payload is why a resume happens at all, and neither key it
+// lands under was read by any test in the tree: deleting both assignments in
+// wait.go left the whole suite green while a resumed workflow saw the signal's
+// name but never its body. $nodes['wait_1'].signal_data is the documented way a
+// downstream node reads what the caller sent.
+func TestWait_OnResume_ProjectsSignalPayloadAndSignalSet(t *testing.T) {
+	h, _ := registry.Lookup("xflow.wait")
+	sh := h.(types.SuspendingHandler)
+
+	input := &types.Input{NodeName: "wait_1"}
+	signal := &types.SignalPayload{
+		Triggered: types.SignalReceived,
+		Name:      "order_paid",
+		Data:      map[string]any{"order_id": "123"},
+		All: map[string]map[string]any{
+			"order_paid":     {"order_id": "123"},
+			"stock_reserved": {"sku": "X-1"},
+		},
+	}
+	out, err := sh.OnResume(context.Background(), input, signal)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	body, _ := out.Data["signal_data"].(map[string]any)
+	if body == nil || body["order_id"] != "123" {
+		t.Errorf("signal_data = %#v, want the signal's own body {order_id: 123}", out.Data["signal_data"])
+	}
+	// A wait_all resume carries every signal it waited on; dropping the set
+	// collapses a multi-signal join to whichever one happened to arrive last.
+	all, _ := out.Data["signals"].(map[string]map[string]any)
+	if len(all) != 2 {
+		t.Fatalf("signals = %#v, want both signals the node waited on", out.Data["signals"])
+	}
+	if all["stock_reserved"]["sku"] != "X-1" {
+		t.Errorf("signals[stock_reserved] = %#v, want {sku: X-1}", all["stock_reserved"])
 	}
 }
 
