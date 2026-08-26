@@ -115,6 +115,30 @@ func RunStateStoreContract(t *testing.T, state engine.StateStore) {
 	if ns == nil || ns.Status != types.NodeStatusSuccess {
 		t.Fatalf("terminal node overwritten: %+v", ns)
 	}
+	// Status is not the only thing UpsertNode was given. Port is written above
+	// and was never read back by any contract check, so every backend's decode
+	// of it is unverified here -- for the Redis store that is state_node.go's
+	// `ns.Port = meta["port"]`, which can be dropped without this suite
+	// noticing.
+	//
+	// Port is the branch the node actually took. GetNode is where the engine's
+	// inspect path (engine/inspect.go:80) reads it from; an empty Port on a
+	// node that completed on "main" reports the run as having taken no branch
+	// at all.
+	//
+	// Output is deliberately NOT asserted here: the two backends diverge and
+	// the divergence is by design rather than a defect. The Redis GetNode never
+	// touches the output key at all (it pipelines the status GET and the meta
+	// HGETALL only) because output is fetched separately through GetOutput; the
+	// memory backend returns it inline. The one caller that reads
+	// NodeSnapshot.Output from a GetNode result, engine/cancel.go:76, copies it
+	// straight back into an UpsertNode, and on Redis a nil Output leaves the
+	// existing output key untouched (state_lua.go:316 `if ARGV[2] ~= ''`), so
+	// nothing is lost either way.
+	if ns.Port != "main" {
+		t.Errorf("GetNode Port = %q, want %q: the committed output port is how a "+
+			"completed node's branch is reported", ns.Port, "main")
+	}
 
 	lease := &engine.TaskLease{
 		LeaseToken: engine.LeaseToken("token-1"),
