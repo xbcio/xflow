@@ -929,6 +929,27 @@ func TestAtomicFinalizeWritesArtifactAndDigest(t *testing.T) {
 	if filepath.Ext(dig) != ".sha256" {
 		t.Fatalf("expected .sha256 digest, got %s", dig)
 	}
+
+	// Independently recompute SHA-256 over the artifact bytes actually
+	// persisted to disk, using the standard library directly rather than any
+	// production helper. Without this, AtomicFinalize's digest algorithm
+	// could be swapped out entirely (e.g. for a truncated SHA-512) and the
+	// test would stay green, while every consumer that verifies the
+	// sidecar .sha256 file against a real SHA-256 of the artifact (the whole
+	// point of the chain-of-custody digest) would start rejecting every run.
+	artifactBytes, err := os.ReadFile(art)
+	if err != nil {
+		t.Fatalf("read artifact: %v", err)
+	}
+	wantSum := sha256.Sum256(artifactBytes)
+	wantDigest := hex.EncodeToString(wantSum[:]) + "\n"
+	gotDigest, err := os.ReadFile(dig)
+	if err != nil {
+		t.Fatalf("read digest: %v", err)
+	}
+	if string(gotDigest) != wantDigest {
+		t.Fatalf("digest file = %q, want SHA-256(artifact) = %q", gotDigest, wantDigest)
+	}
 }
 
 func TestMarshalCanonicalStable(t *testing.T) {
@@ -943,6 +964,30 @@ func TestMarshalCanonicalStable(t *testing.T) {
 	}
 	if string(a) != string(b) {
 		t.Fatal("canonical marshal is not stable")
+	}
+
+	// MarshalCanonical must disable json.Encoder's default HTML-escaping
+	// (SetEscapeHTML(false)) so the characters "<", ">", and "&" are written
+	// as literal bytes. If this setting regresses to the encoding/json
+	// default (true), every persisted evidence artifact containing these
+	// characters gets silently rewritten to its six-character unicode escape
+	// on the next marshal, which would change the artifact's bytes -- and
+	// therefore its digest -- for a value that never changed. The expected
+	// strings below are hard-coded literals, not something computed by
+	// calling MarshalCanonical itself.
+	probe, err := MarshalCanonical(map[string]string{"probe": "<a>&b"})
+	if err != nil {
+		t.Fatalf("marshal probe: %v", err)
+	}
+	if !strings.Contains(string(probe), `"<a>&b"`) {
+		t.Fatalf("expected literal unescaped HTML characters in output, got: %s", probe)
+	}
+	// The probe value "<a>&b" itself contains no backslash. If HTML-escaping
+	// were re-enabled, encoding/json would rewrite each of "<", ">", "&" to
+	// its six-character unicode escape, which is the only way a backslash
+	// could appear here.
+	if strings.Contains(string(probe), `\`) {
+		t.Fatalf("expected SetEscapeHTML(false), found an HTML-escape backslash in output: %s", probe)
 	}
 }
 
