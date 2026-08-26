@@ -3,6 +3,7 @@ package code_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/xbcio/xflow/node"
@@ -185,6 +186,45 @@ func TestFunction_TimeoutIsTransient(t *testing.T) {
 	}
 	if types.IsPermanent(err) {
 		t.Fatalf("deadline must be transient (retryable); got permanent err=%v", err)
+	}
+	var ce *types.ClassifiedError
+	if !errors.As(err, &ce) || ce.Code != "function.timeout" {
+		t.Fatalf("expected ClassifiedError code=function.timeout, got %T %v", err, err)
+	}
+}
+
+// TestFunction_WrappedTimeoutIsStillTransient uses the shape a real user
+// function's deadline actually has.
+//
+// TestFunction_TimeoutIsTransient above returns the bare context.DeadlineExceeded
+// sentinel, so it passes identically whether function.go compares with
+// errors.Is or with ==. Almost nothing returns that sentinel bare: a user
+// function that queries a DB or calls an HTTP service gets it back wrapped by
+// database/sql, net/http or its own fmt.Errorf("...: %w", err). With ==, every
+// one of those falls through to the "error" port branch instead — so a timeout,
+// the one condition that is genuinely worth retrying, is committed as a routable
+// business error and the message is never reprocessed. That is the exact
+// transient-vs-business misclassification engine/doc.go:113 records as having
+// bitten the error port before.
+func TestFunction_WrappedTimeoutIsStillTransient(t *testing.T) {
+	const fnName = "__wrapped_timeout_fn__"
+	node.RegisterFunc(fnName, func(_ context.Context, _ *types.Input) (*types.Output, error) {
+		// What a real caller returns: the deadline, wrapped with the operation
+		// that hit it.
+		return nil, fmt.Errorf("query orders: %w", context.DeadlineExceeded)
+	})
+
+	h, _ := registry.Lookup("xflow.function")
+	b := node.Function(fnName)
+	out, err := h.Execute(context.Background(),
+		&types.Input{Params: b.RawParams().(map[string]any), Data: map[string]any{}})
+	if err == nil {
+		t.Fatalf("wrapped deadline produced no error; out = %#v (Port %q): it was "+
+			"routed as a business error instead of being classified transient, "+
+			"so the message is committed and never retried", out.Data, out.Port)
+	}
+	if types.IsPermanent(err) {
+		t.Fatalf("wrapped deadline must be transient (retryable); got permanent err=%v", err)
 	}
 	var ce *types.ClassifiedError
 	if !errors.As(err, &ce) || ce.Code != "function.timeout" {
