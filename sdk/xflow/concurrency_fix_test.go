@@ -3,12 +3,14 @@ package xflow
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/backend/providers/local"
+	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/node/registry"
 	"github.com/xbcio/xflow/node/trigger"
@@ -137,24 +139,63 @@ func TestReconcileWorkflow_NilDefinition(t *testing.T) {
 
 // TestWait_PersistentBackendError verifies that Wait returns the backend error
 // instead of spinning until context timeout.
+//
+// This test is deliberately NOT built with NewLocal(). It used to be, and that
+// made it a test of the context package. NewLocal's provider is *local.Backend,
+// which implements backend.Waiter, so newFromConfig assigns it to cfg.waiter —
+// and Wait's very first statement is `if e.waiter != nil { return
+// e.waiter.WaitDone(...) }`. The consecutiveErrs / maxConsecutiveErrors block
+// this test is named after never ran. What it actually exercised was
+// local.Backend.WaitDone selecting on a channel that never closes for a
+// nonexistent id, so ctx.Err() came back after 600ms. Go guarantees that value
+// is context.DeadlineExceeded; no implementation of the polling fallback could
+// have changed it, and deleting the whole fallback left the test green.
+//
+// Constructing the Engine directly leaves waiter nil, which is the only way
+// into the fallback, and a StateStore that always fails is the only way to
+// reach the giving-up branch.
 func TestWait_PersistentBackendError(t *testing.T) {
-	eng, err := NewLocal()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer eng.Stop()
+	base := local.New()
+	wantErr := errors.New("boom: state store unreachable")
+	eng := &Engine{eng: engine.New(&erroringStateStore{
+		StateStore: base.State(),
+		err:        wantErr,
+	}, base.Queue())}
 
-	// We cannot easily inject a failing StateStore into the existing engine,
-	// but we can verify the error-counting logic by testing with a real
-	// execution that does not exist — GetExecution returns nil (not an error)
-	// for missing executions, which should still poll. This test primarily
-	// verifies compilation and that the logic does not panic. A full
-	// integration test would require a custom StateStore mock.
-	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+	// 5 attempts at one 500ms tick apart is ~2s; this bound is a failure
+	// ceiling, not the thing being waited on. If it ever fires, the assertions
+	// below report DeadlineExceeded and say so rather than passing.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	_, err = eng.Wait(ctx, "nonexistent-exec-id")
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Wait() = %v, want context.DeadlineExceeded for nonexistent execution", err)
+	_, err := eng.Wait(ctx, "nonexistent-exec-id")
+	if err == nil {
+		t.Fatal("Wait() = nil, want the persistent backend error")
 	}
+	// The count is not "at least a few" — maxConsecutiveErrors is 5 and every
+	// attempt fails, so 5 is the only correct answer. Lowering the threshold or
+	// forgetting to reset the counter both move this number.
+	if !strings.Contains(err.Error(), "persistent backend error after 5 attempts") {
+		t.Fatalf("Wait() = %v, want it to give up naming 5 attempts on the "+
+			"persistent-backend-error path", err)
+	}
+	// %w, not %v: a caller that wants to distinguish a store outage from a
+	// workflow failure has to be able to unwrap to the cause.
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Wait() = %v, want it to wrap %v", err, wantErr)
+	}
+}
+
+// erroringStateStore fails every GetExecution while delegating the rest of the
+// StateStore surface to a real implementation, so Wait's fallback loop sees a
+// backend that is down rather than one that merely has nothing to report.
+// Returning (nil, nil) — which is what a missing execution looks like — would
+// keep the loop polling forever and prove nothing.
+type erroringStateStore struct {
+	engine.StateStore
+	err error
+}
+
+func (s *erroringStateStore) GetExecution(context.Context, types.ExecutionID) (*engine.ExecutionSnapshot, error) {
+	return nil, s.err
 }
