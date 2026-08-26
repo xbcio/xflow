@@ -403,8 +403,17 @@ func RunGroupStateContract(t *testing.T, newStore func(*testing.T) GroupStore) {
 		if got.LeaseToken != "T1" {
 			t.Errorf("token = %q, want T1", got.LeaseToken)
 		}
-		if got.Attempt < 1 {
-			t.Errorf("attempt = %d, want >= 1", got.Attempt)
+		// The attempt has a unique correct answer here: this is the first-ever
+		// acquire on a freshly seeded unit, so the stored attempt counter must
+		// read back as exactly 1, not merely "some positive number". The old
+		// `< 1` bound accepted any backend that off-by-one'd, doubled, or
+		// otherwise miscounted the readback path specifically (as opposed to
+		// the write-back path, which ReacquireAfterExpiryIncrementsAttempt
+		// already pins via the lease object AcquireGroupLease mutates in
+		// place — that test never calls GetGroupLease, so it cannot catch a
+		// bug confined to this read path).
+		if got.Attempt != 1 {
+			t.Errorf("attempt = %d, want exactly 1 (first acquire on a fresh unit)", got.Attempt)
 		}
 	})
 
