@@ -87,6 +87,36 @@ func SupplyContract(t *testing.T, s store.Supplies, nsPrefix string) {
 			"computed independently of the production hasher)", rec.ContentHash, wantHash)
 	}
 
+	// ContentType round-trip. Every fixture in this file already sets it and no
+	// assertion in the repo ever read it back, so both stores could drop the
+	// field entirely and stay green — grep for `ContentType` under *_test.go
+	// finds only artifact rows and the metrics content-type constant.
+	//
+	// It has a real reader: service/apiserver/module_supply.go:182 uses it as
+	// the Content-Type of GET /v1/supplies/{name}/content and falls back to
+	// application/octet-stream when it is empty. A dropped field therefore does
+	// not fail anything loudly — it silently reclassifies every stored supply
+	// as an opaque binary blob. For sqlstore that field is a GORM column
+	// mapping (store/sqlstore/supply.go:136,146), which is precisely the kind
+	// of thing a migration breaks without any code change at all.
+	//
+	// Checked on both the value PutSupply returns (the PUT handler echoes it)
+	// and on a fresh GetSupply (the read path), because either one alone can be
+	// the half that drops it.
+	if rec.ContentType != "application/json" {
+		t.Fatalf("PutSupply returned ContentType %q, want application/json: "+
+			"GET /v1/supplies/{name}/content would serve this supply as "+
+			"application/octet-stream", rec.ContentType)
+	}
+	ctBack, err := s.GetSupply(ctx, ns1, "rules")
+	if err != nil {
+		t.Fatalf("get for ContentType round-trip: %v", err)
+	}
+	if ctBack.ContentType != "application/json" {
+		t.Fatalf("GetSupply returned ContentType %q, want application/json: "+
+			"the field survived the write but not the read", ctBack.ContentType)
+	}
+
 	// Create-if-absent against an existing row must conflict.
 	if _, err := s.PutSupply(ctx, &store.SupplyResource{
 		Namespace: ns1, Name: "rules", Content: []byte(`x`),
