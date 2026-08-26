@@ -8,23 +8,29 @@ package timeout
 // mock's behavior, not the monitor's.
 //
 // The success path — a delivered timeout that gets ZREM'd after
-// engine.TimeoutNode returns nil (monitor.go:229-233) — is deliberately NOT
-// covered here: reaching it needs a fully wired engine with an active graph
-// and a suspended node's resume lock free, i.e. rstate.Store (Redis-backed
-// StateStore, itself needing a store.Store SQL dependency per
-// rstate/state.go:67) or an equivalent from-scratch graph fixture. That is a
-// bigger investment than this sweep's scope; every test here instead drives
-// engine.TimeoutNode into its one *deterministic* failure — a fresh
-// *engine.Engine over an in-memory backend.local state store returns
-// (nil, false, nil) for an unknown execution ID (memory_state.go:188-196),
-// which engine/signal.go:162-164 turns into engine.ErrExecutionInactive — and
-// asserts what Monitor does with that failure, which is the code path that
-// actually branches on Redis state (isTimeoutTargetDead).
+// engine.TimeoutNode returns nil (monitor.go:229-233) — is covered by
+// TestProcessTimeoutKey_SuccessfulDeliveryRemovesMemberAndEnqueuesResume at the
+// bottom of this file. An earlier version of this comment claimed that path was
+// out of reach without a Redis-backed rstate.Store and its SQL dependency; that
+// was wrong, and it was wrong in the direction that let the single most
+// dangerous line in the file go untested. TimeoutNode needs exactly three
+// things — a cached-or-loadable graph, a non-nil node snapshot, and a free
+// resume lock — all of which backend.local supplies in memory with two seeding
+// calls. See that test's own comment for what it distinguishes.
+//
+// Every *other* test here instead drives engine.TimeoutNode into its one
+// deterministic failure — a fresh *engine.Engine over an in-memory
+// backend.local state store returns (nil, false, nil) for an unknown execution
+// ID (memory_state.go:188-196), which engine/signal.go:162-164 turns into
+// engine.ErrExecutionInactive — and asserts what Monitor does with that
+// failure, which is the code path that actually branches on Redis state
+// (isTimeoutTargetDead).
 
 import (
 	"context"
 	"fmt"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -33,6 +39,7 @@ import (
 	"github.com/xbcio/xflow/backend/providers/distributed/internal/rstate"
 	"github.com/xbcio/xflow/backend/providers/local"
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/types"
 )
@@ -306,5 +313,145 @@ func TestProcessTimeoutsForNamespace_ScopedToNamespace(t *testing.T) {
 	}
 	if cardB != 1 {
 		t.Fatalf("ZCARD keyB after processing namespace A = %d, want 1 (namespace B's key must be untouched)", cardB)
+	}
+}
+
+// recordingQueue is an engine.TaskQueue that keeps every task instead of
+// running it. Monitor's success path is only observable through what reaches
+// the queue, and backend.local's own queue is a live worker pool whose
+// internals this test has no business reaching into.
+type recordingQueue struct {
+	mu    sync.Mutex
+	tasks []*engine.Task
+}
+
+func (q *recordingQueue) Enqueue(_ context.Context, t *engine.Task) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.tasks = append(q.tasks, t)
+	return nil
+}
+
+func (q *recordingQueue) EnqueueDelayed(ctx context.Context, t *engine.Task, _ time.Duration) error {
+	return q.Enqueue(ctx, t)
+}
+
+func (q *recordingQueue) snapshot() []*engine.Task {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return append([]*engine.Task(nil), q.tasks...)
+}
+
+// liveEngine returns an *engine.Engine over an in-memory state store with one
+// execution already running and one suspended node, which is everything
+// TimeoutNode checks before it enqueues: loadActiveGraph finds a non-terminal
+// execution, NodeIndex resolves the name, currentActivationID reads a non-nil
+// node snapshot, and AcquireResumeLock finds the lock free.
+func liveEngine(t *testing.T, execID types.ExecutionID, nodeName string, activationID int) (*engine.Engine, *recordingQueue) {
+	t.Helper()
+	b := local.New()
+	q := &recordingQueue{}
+	eng := engine.New(b.State(), q)
+
+	g, err := graph.Compile(&types.WorkflowDef{
+		Name:  "timeout-success-path",
+		Nodes: []types.NodeDef{{Name: nodeName, Type: "test.echo"}},
+	})
+	if err != nil {
+		t.Fatalf("compile graph: %v", err)
+	}
+	if err := b.State().CreateExecution(context.Background(), &engine.ExecutionSnapshot{
+		ID:     execID,
+		Graph:  g,
+		Status: types.ExecutionStatusRunning,
+	}); err != nil {
+		t.Fatalf("CreateExecution: %v", err)
+	}
+	if err := b.State().UpsertNode(context.Background(), &engine.NodeSnapshot{
+		ExecutionID:  execID,
+		Name:         nodeName,
+		Status:       types.NodeStatusSuspended,
+		ActivationID: activationID,
+	}); err != nil {
+		t.Fatalf("UpsertNode: %v", err)
+	}
+	return eng, q
+}
+
+// TestProcessTimeoutKey_SuccessfulDeliveryRemovesMemberAndEnqueuesResume covers
+// the one line in monitor.go that removes a member after delivery actually
+// succeeded (monitor.go:229). Its own comment calls it "the only path that
+// removes a member", and until this test nothing exercised it: every other test
+// in this file forces TimeoutNode to fail, so all of them leave via the
+// requeue-or-drop branch above it and none ever reaches line 229.
+//
+// What breaks without it: a timeout that IS delivered stays in the ZSET, so the
+// next poll peeks the same member, delivers again, and leaves it again — the
+// node's timeout re-fires every interval until the execution's TTL expires.
+// Nothing errors and nothing is logged; the failure is a silent duplicate-
+// delivery loop, and the at-least-once design means no downstream check would
+// call it wrong.
+//
+// The cardinality assertion alone would NOT be enough, and this is the whole
+// reason the queue is recorded. monitor.go removes a member on two different
+// paths — confirmed delivery (line 229) and dead-target abandonment (line 209)
+// — and both end with ZCARD 0. "The member is gone" therefore cannot tell
+// "delivered, then cleaned up" apart from "given up on, and dropped without
+// ever being delivered", which is the far worse of the two. Asserting the
+// resume task's presence and shape is what makes the pair distinguishable.
+func TestProcessTimeoutKey_SuccessfulDeliveryRemovesMemberAndEnqueuesResume(t *testing.T) {
+	rdb := realRedisOrSkip(t)
+	ctx := context.Background()
+
+	execID := uniqueID(t)
+	const nodeName = "waiter"
+	const activationID = 7
+
+	eng, q := liveEngine(t, execID, nodeName, activationID)
+	m := New(rdb, eng, nil, nil, time.Minute)
+
+	key := fmt.Sprintf("test:timeout:success:%d", time.Now().UnixNano())
+	t.Cleanup(func() { _ = rdb.Del(context.Background(), key).Err() })
+
+	member := string(execID) + "\x00" + nodeName
+	now := time.Now()
+	if err := rdb.ZAdd(ctx, key, redis.Z{Score: float64(now.Add(-time.Minute).Unix()), Member: member}).Err(); err != nil {
+		t.Fatalf("seed ZSET: %v", err)
+	}
+
+	m.processTimeoutKey(ctx, namespace.Default, key, now, fmt.Sprintf("%d", now.Unix()))
+
+	// Delivery must have happened. Without this the ZCARD check below is
+	// satisfied by the dead-target drop path just as well.
+	tasks := q.snapshot()
+	if len(tasks) != 1 {
+		t.Fatalf("enqueued %d tasks, want exactly 1: the timeout was not delivered, so a "+
+			"ZCARD of 0 below would mean the member was dropped undelivered", len(tasks))
+	}
+	got := tasks[0]
+	if got.ExecutionID != execID || got.NodeName != nodeName {
+		t.Fatalf("resume task targets %q/%q, want %q/%q", got.ExecutionID, got.NodeName, execID, nodeName)
+	}
+	if got.Type != engine.TaskTypeNodeResume {
+		t.Fatalf("resume task Type = %v, want TaskTypeNodeResume", got.Type)
+	}
+	if got.ActivationID != activationID {
+		t.Fatalf("resume task ActivationID = %d, want %d (the node's current activation, "+
+			"not a fresh zero — a stale activation would resume the wrong incarnation)",
+			got.ActivationID, activationID)
+	}
+	if got.Payload == nil || got.Payload.Triggered != types.TimeoutFired {
+		t.Fatalf("resume task Payload = %#v, want Triggered=TimeoutFired", got.Payload)
+	}
+
+	// The load-bearing assertion: delivery succeeded, so the member must be gone.
+	card, err := rdb.ZCard(ctx, key).Result()
+	if err != nil {
+		t.Fatalf("ZCARD: %v", err)
+	}
+	if card != 0 {
+		t.Fatalf("ZCARD after confirmed delivery = %d, want 0: the member survived a "+
+			"successful delivery, so every poll re-delivers this timeout until the "+
+			"execution's TTL expires", card)
 	}
 }
