@@ -16,8 +16,20 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
-// emptyJSON satisfies NOT NULL JSON columns (WorkflowDef/Params/Runtime/Output/
-// SignalConfig/Payload) with minimal valid JSON.
+// emptyJSON is minimal valid JSON for the WorkflowDef/Params/Runtime/Output/
+// SignalConfig/Payload columns.
+//
+// It reads like a constraint being satisfied, and in production it is:
+// db/xflow_schema.sql declares workflow_def and its siblings NOT NULL. But the
+// database these tests actually open is not built from that file. requireMySQL
+// points at the `xflow` schema, which sqlstore.AutoMigrate created, and
+// AutoMigrate emits every one of these columns as nullable. Omitting emptyJSON
+// here would NOT fail — the row would insert with NULL and the test would go
+// green against a shape production rejects.
+//
+// So this is portability hygiene, not an enforced invariant, and no test may
+// treat "it inserted" as evidence that the value was non-null. Assert the value
+// you read back instead.
 var emptyJSON = []byte(`{}`)
 
 // newSQLStoreProvider opens a real MySQL connection (skips when MySQL is
