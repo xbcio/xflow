@@ -139,7 +139,10 @@ func NewFilePolicyStore(path string, dryRun bool) (*FilePolicyStore, error) {
 }
 
 // NewFilePolicyStoreFromConfig builds a store from an in-memory config —
-// useful for tests. Env / token_file expansion is not applied.
+// useful for tests. It runs the same resolveConfig as Reload does, so
+// $VAR expansion in token and the token_file read (including its permission
+// check) both apply here too; only the policy file's own permission check is
+// skipped, because there is no file.
 func NewFilePolicyStoreFromConfig(cfg PolicyConfig, dryRun bool) (*FilePolicyStore, error) {
 	s := &FilePolicyStore{dryRun: dryRun}
 	s.snap.Store(&policySnapshot{})
