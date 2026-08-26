@@ -198,6 +198,33 @@ func TestExecuteTriggerEntry_NilInputIsSafe(t *testing.T) {
 	}
 }
 
+// TestExecuteTriggerEntry_DoesNotAliasInputData pins the copy loop, as
+// distinct from the three tests above which only read the *returned* map and
+// therefore stay green if the loop is replaced by `data := input.Data`.
+//
+// That aliasing is not benign. ExecuteTriggerEntry unconditionally writes a
+// "trigger" key into `data` when one is absent, so an aliased map means every
+// trigger node's Execute silently mutates the caller's own $input on the way
+// out. Asserting on the *input* map after the call is the only way to tell a
+// copy from an alias.
+func TestExecuteTriggerEntry_DoesNotAliasInputData(t *testing.T) {
+	src := map[string]any{"x": "y"}
+	in := &types.Input{Data: src}
+
+	out, err := ExecuteTriggerEntry(in)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := src["trigger"]; ok {
+		t.Fatalf("ExecuteTriggerEntry wrote its default trigger event back into the caller's input map: %#v", src)
+	}
+	// Writing through the returned map must not reach the caller's map either.
+	out.Data["injected"] = true
+	if _, ok := src["injected"]; ok {
+		t.Fatalf("the returned Data map aliases input.Data: %#v", src)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // 3. nodeRef.OnError (node.go:60-63)
 // ---------------------------------------------------------------------------
@@ -419,5 +446,108 @@ func TestBaseTrigger_ExecuteDelegatesToTriggerEntry(t *testing.T) {
 	}
 	if _, ok := got.Data["trigger"]; !ok {
 		t.Fatalf("BaseTrigger.Execute did not apply the default trigger event fallback")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 8. nodeRef / Definition builder contract (node.go:57-65, 135-175)
+// ---------------------------------------------------------------------------
+
+// TestNodeRef_BuilderContract is the action-side mirror of
+// TestTriggerRef_BuilderContract above. The trigger half of this package had
+// its whole builder contract pinned; the action half only had OnError. That
+// left nodeRef.NodeType/RawParams/Handler/Descriptor and Definition.Execute's
+// forwarding with no assertion anywhere, and it left every Definition
+// descriptor builder (DisplayName/Param/Input/Output/Credential) free to
+// silently drop what it was handed -- which for Credential means a custom
+// node's declared credential dependency never reaching the compiler, and so
+// never being resolved at run time.
+//
+// Define's own two panic guards are deliberately NOT tested here:
+// node/definition_test.go already covers both (TestDefinePanicsOnEmptyType,
+// TestDefinePanicsOnNilExecute), and deleting either guard turns those red.
+func TestNodeRef_BuilderContract(t *testing.T) {
+	var gotInput *types.Input
+	executed := false
+	executeErr := errors.New("boom")
+
+	def := Define("xflow.test.noderef_contract", func(_ context.Context, in *types.Input) (*types.Output, error) {
+		executed = true
+		gotInput = in
+		return &types.Output{Port: "alt"}, executeErr
+	}).
+		DisplayName("NodeRef Contract").
+		Param(types.ParamSpec{Name: "p", Type: types.ParamString, Required: true}).
+		Input("main").
+		Output("main").
+		Output("alt").
+		Credential("cred-a")
+
+	b := def.New(map[string]any{"p": "v"})
+
+	if got := b.NodeType(); got != "xflow.test.noderef_contract" {
+		t.Fatalf("NodeType() = %q, want %q", got, "xflow.test.noderef_contract")
+	}
+	params, ok := b.RawParams().(map[string]any)
+	if !ok || params["p"] != "v" {
+		t.Fatalf("RawParams() = %#v, want map[string]any{\"p\":\"v\"}", b.RawParams())
+	}
+
+	// Descriptor() must come from the handler, carrying everything the
+	// Definition builders appended -- not be re-synthesized from nodeType.
+	// types.Builder itself does not declare Descriptor(); the compiler and
+	// registry reach it through exactly this kind of assertion, so the test
+	// does the same rather than reading def.Descriptor() directly, which
+	// would bypass nodeRef's delegation entirely.
+	desc, ok := b.(interface{ Descriptor() types.Descriptor })
+	if !ok {
+		t.Fatalf("builder returned by Definition.New does not expose Descriptor()")
+	}
+	d := desc.Descriptor()
+	if d.Type != "xflow.test.noderef_contract" || d.Kind != types.NodeKindAction {
+		t.Fatalf("Descriptor() Type/Kind = %q/%q, want %q/%q", d.Type, d.Kind, "xflow.test.noderef_contract", types.NodeKindAction)
+	}
+	if d.DisplayName != "NodeRef Contract" {
+		t.Fatalf("Descriptor().DisplayName = %q, want %q", d.DisplayName, "NodeRef Contract")
+	}
+	if len(d.Params) != 1 || d.Params[0].Name != "p" || !d.Params[0].Required {
+		t.Fatalf("Descriptor().Params = %#v, want one required param named p", d.Params)
+	}
+	if len(d.Inputs) != 1 || d.Inputs[0].Name != "main" {
+		t.Fatalf("Descriptor().Inputs = %#v, want [{main}]", d.Inputs)
+	}
+	// Two Output() calls in order: appending, not overwriting, is the contract.
+	if len(d.Outputs) != 2 || d.Outputs[0].Name != "main" || d.Outputs[1].Name != "alt" {
+		t.Fatalf("Descriptor().Outputs = %#v, want [{main} {alt}]", d.Outputs)
+	}
+	if len(d.Credentials) != 1 || d.Credentials[0] != "cred-a" {
+		t.Fatalf("Descriptor().Credentials = %#v, want [cred-a]", d.Credentials)
+	}
+
+	// Handler() is what lets the SDK run a custom node in-process without the
+	// registry; it must hand back the Definition itself, and that Definition's
+	// Execute must forward ctx/input and both return values verbatim.
+	carrier, ok := b.(HandlerCarrier)
+	if !ok {
+		t.Fatalf("builder returned by Definition.New does not implement HandlerCarrier")
+	}
+	handler := carrier.Handler()
+	if handler != types.ActionHandler(def) {
+		t.Fatalf("Handler() = %#v, want the Definition that produced the builder", handler)
+	}
+
+	in := &types.Input{Data: map[string]any{"k": "v"}}
+	out, err := handler.Execute(context.Background(), in)
+	if !executed {
+		t.Fatalf("Definition.Execute did not invoke the underlying execute func")
+	}
+	if gotInput != in {
+		t.Fatalf("Definition.Execute did not forward its input, got %#v", gotInput)
+	}
+	if out == nil || out.Port != "alt" {
+		t.Fatalf("Definition.Execute did not forward its returned output, got %#v", out)
+	}
+	if !errors.Is(err, executeErr) {
+		t.Fatalf("Definition.Execute did not forward its returned error, got %v", err)
 	}
 }
