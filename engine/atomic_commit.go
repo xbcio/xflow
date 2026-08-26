@@ -90,6 +90,9 @@ func (e *Engine) commitAcyclicNodeWithClassification(ctx context.Context, lease 
 			Type:         TaskTypeNodeAdvance,
 			ActivationID: task.ActivationID,
 			AutoDepth:    task.AutoDepth,
+			// Carried so the advance branch does not read the node back to
+			// learn the port we are about to write in the same commit.
+			Port: &port,
 		}
 	}
 	req := CommitNodeRequest{

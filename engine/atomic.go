@@ -483,6 +483,47 @@ func (e *Engine) HandleSystemTask(ctx context.Context, task *Task) (bool, error)
 // handleSystemTask applies one internal task. flush is false when FlushOutbox
 // is already draining the same execution; the outer loop will observe and
 // deliver newly created intents without recursive skip propagation.
+// warnStaleAdvance reports an advance task fenced out by a newer activation of
+// its source node.
+func (e *Engine) warnStaleAdvance(task *Task, nodeActivation int) {
+	if e.logger == nil {
+		return
+	}
+	e.logger.Warn("dropped stale advance task",
+		"execution_id", string(task.ExecutionID),
+		"node_name", task.NodeName,
+		"task_activation", task.ActivationID,
+		"node_activation", nodeActivation)
+}
+
+// explainUnappliedAdvance recovers the stale-advance diagnostic on the path
+// that no longer reads the source node up front.
+//
+// Carrying Task.Port removed the only reason to read the node before advancing,
+// but it also removed the place the "dropped stale advance task" warning came
+// from. AdvanceNodeResult.Applied cannot substitute: the store returns
+// Applied=false for a stale activation, a non-terminal source, a terminated
+// execution and an ordinary duplicate delivery alike, and only the first is
+// worth a warning — the last is at-least-once working as designed.
+//
+// So the read moves here, from every advance to only the ones that did no work.
+// Duplicates are a subset of advances, so this is strictly less traffic than
+// before, and nothing at all when no logger is configured. Failures are
+// swallowed on purpose: this runs after the authoritative transition has
+// already been decided and must not turn a completed advance into an error.
+func (e *Engine) explainUnappliedAdvance(ctx context.Context, task *Task) {
+	if e.logger == nil {
+		return
+	}
+	node, err := e.state.GetNode(ctx, task.ExecutionID, task.NodeName)
+	if err != nil || node == nil {
+		return
+	}
+	if node.ActivationID != task.ActivationID {
+		e.warnStaleAdvance(task, node.ActivationID)
+	}
+}
+
 func (e *Engine) handleSystemTask(ctx context.Context, task *Task, flush bool) (bool, error) {
 	if task == nil {
 		return false, nil
@@ -496,24 +537,28 @@ func (e *Engine) handleSystemTask(ctx context.Context, task *Task, flush bool) (
 		if !active {
 			return true, nil
 		}
-		node, err := e.state.GetNode(ctx, task.ExecutionID, task.NodeName)
-		if err != nil {
-			return true, fmt.Errorf("read advance source %q/%q: %w", task.ExecutionID, task.NodeName, err)
-		}
-		if node == nil || !types.IsTerminalNodeStatus(node.Status) {
-			return true, nil
-		}
-		if node.ActivationID != task.ActivationID {
-			if e.logger != nil {
-				e.logger.Warn("dropped stale advance task",
-					"execution_id", string(task.ExecutionID),
-					"node_name", task.NodeName,
-					"task_activation", task.ActivationID,
-					"node_activation", node.ActivationID)
+		var port string
+		if task.Port != nil {
+			port = *task.Port
+		} else {
+			// Legacy path: an advance entry written to a durable outbox before
+			// Task.Port existed, or a backend whose queue does not carry it.
+			// Read the node for the port; the terminal and activation checks
+			// come along for free on this path.
+			node, err := e.state.GetNode(ctx, task.ExecutionID, task.NodeName)
+			if err != nil {
+				return true, fmt.Errorf("read advance source %q/%q: %w", task.ExecutionID, task.NodeName, err)
 			}
-			return true, nil
+			if node == nil || !types.IsTerminalNodeStatus(node.Status) {
+				return true, nil
+			}
+			if node.ActivationID != task.ActivationID {
+				e.warnStaleAdvance(task, node.ActivationID)
+				return true, nil
+			}
+			port = node.Port
 		}
-		arrivals := downstreamArrivals(g, task.NodeIdx, node.Port)
+		arrivals := downstreamArrivals(g, task.NodeIdx, port)
 		state, err := e.atomicState()
 		if err != nil {
 			return true, err
@@ -528,6 +573,9 @@ func (e *Engine) handleSystemTask(ctx context.Context, task *Task, flush bool) (
 		})
 		if err != nil {
 			return true, fmt.Errorf("advance node %q/%q: %w", task.ExecutionID, task.NodeName, err)
+		}
+		if !result.Applied {
+			e.explainUnappliedAdvance(ctx, task)
 		}
 		e.publishAdvanceReceipt(ctx, task, result)
 		if !flush {
@@ -559,6 +607,14 @@ func (e *Engine) handleSystemTask(ctx context.Context, task *Task, flush bool) (
 		if task.NodeIdx < 0 || task.NodeIdx >= g.NodeCount() {
 			return true, fmt.Errorf("skip node index %d is out of range", task.NodeIdx)
 		}
+		// A skipped node commits with no active port (the CommitNodeRequest
+		// below sets none), and that empty port is what makes downstreamArrivals
+		// give every out-edge ActiveCount 0 and propagate the skip. Carry it
+		// explicitly rather than leaving Port nil: nil would send this advance
+		// down the legacy read-the-node path, which is the whole per-hop round
+		// trip the field exists to remove, and the skip cascade is the path that
+		// pays it most often.
+		skippedPort := ""
 		advance := &Task{
 			ExecutionID:  task.ExecutionID,
 			NodeName:     task.NodeName,
@@ -567,6 +623,7 @@ func (e *Engine) handleSystemTask(ctx context.Context, task *Task, flush bool) (
 			Type:         TaskTypeNodeAdvance,
 			ActivationID: task.ActivationID,
 			AutoDepth:    task.AutoDepth,
+			Port:         &skippedPort,
 		}
 		result, err := e.commitNode(ctx, CommitNodeRequest{
 			ExecutionID:  task.ExecutionID,

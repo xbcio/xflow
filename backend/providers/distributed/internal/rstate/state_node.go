@@ -178,8 +178,16 @@ func (s *Store) UpsertNode(ctx context.Context, n *engine.NodeSnapshot) error {
 // GetNode reads a node's status key and its meta hash. The two are issued in
 // one pipeline rather than back to back: they are independent reads of the same
 // node, so sequencing them buys nothing and costs a full network round trip on
-// every call. Every acyclic node advance pays this (engine/atomic.go's
-// TaskTypeNodeAdvance branch), which makes it per-node hot-path traffic.
+// every call.
+//
+// The advance path used to call this for every acyclic node, which made it
+// per-node hot-path traffic — engine/atomic.go's TaskTypeNodeAdvance branch
+// read the source node back purely to learn the port the same commit had just
+// written. That read is gone; the port now rides on the advance task, and the
+// remaining calls from that branch are the legacy fallback (a pre-upgrade
+// outbox entry) and the diagnostic on an advance that applied nothing. Both
+// are subsets of what used to be every advance, so the pipelining still earns
+// its keep, just on less traffic than this comment used to claim.
 //
 // Pipelining means the meta hash is fetched even when the status key is absent,
 // where the sequential version returned early. That is one extra COMMAND on the

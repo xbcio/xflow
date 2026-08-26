@@ -51,6 +51,27 @@ type Task struct {
 	// tasks, but it is not exposed in the public runner JSON contract.
 	ActivationID int `json:"-"`
 
+	// Port is the output port the source node committed on, carried forward on
+	// TaskTypeNodeAdvance tasks so the advance does not have to read the node
+	// back out of the store to learn a value the committing side already had.
+	// Like the fields above it is internal metadata, not part of the public
+	// runner JSON contract.
+	//
+	// It is a pointer because the empty port is a real, load-bearing value, not
+	// an absence: a skipped node commits with no active port, and that is
+	// exactly what tells downstreamArrivals to propagate the skip rather than
+	// activate a branch. A plain string would make "no active port" and "this
+	// task predates the field" the same value, and the advance would route a
+	// legacy entry as though its source had been skipped. Same reason UnitIdx
+	// goes over the wire as *int.
+	//
+	// nil means "not carried", and the advance branch falls back to reading the
+	// node for that case. That is what makes a rolling deploy safe, since
+	// advance entries already sitting in a durable outbox decode with it nil;
+	// do not delete the fallback on the grounds that every task obviously
+	// carries a port now.
+	Port *string `json:"-"`
+
 	// UnitIdx 是任务所属 durable unit 的下标。普通 node 任务恒等于其 node 下标
 	// （无 group 时 unit 索引 == node 索引，退化等价）；group 任务指向 group unit。
 	UnitIdx int `json:"-"`

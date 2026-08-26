@@ -22,13 +22,23 @@ var _ engine.OutboxReleaser = (*Store)(nil)
 var _ engine.OutboxMetricsReader = (*Store)(nil)
 
 type redisOutboxEntry struct {
-	ID          string      `json:"id"`
-	Task        engine.Task `json:"task"`
-	AutoDepth   int         `json:"auto_depth,omitempty"`
-	Activation  int         `json:"activation_id,omitempty"`
-	UnitIdx     *int        `json:"unit_idx,omitempty"`
-	AvailableAt int64       `json:"available_at_ms,omitempty"`
-	CreatedAt   int64       `json:"created_at_ms,omitempty"`
+	ID         string      `json:"id"`
+	Task       engine.Task `json:"task"`
+	AutoDepth  int         `json:"auto_depth,omitempty"`
+	Activation int         `json:"activation_id,omitempty"`
+	UnitIdx    *int        `json:"unit_idx,omitempty"`
+	// Port carries engine.Task.Port, which is json:"-" for the same reason the
+	// fields above are: it is internal scheduling metadata rather than part of
+	// the public runner contract. It is a pointer for the same reason UnitIdx
+	// is — the empty port is a real value (a skipped node commits with one, and
+	// that is what propagates the skip), so absence has to stay distinguishable
+	// from it. omitempty drops a nil pointer and keeps a pointer to "", which is
+	// exactly the split we need: an entry written before this field existed
+	// decodes to nil and takes the read-the-node fallback, while a skip advance
+	// round-trips as "port":"" and does not.
+	Port        *string `json:"port,omitempty"`
+	AvailableAt int64   `json:"available_at_ms,omitempty"`
+	CreatedAt   int64   `json:"created_at_ms,omitempty"`
 }
 
 // leaseOutboxLua claims ready entries by pushing their ready-ZSET score forward
@@ -524,6 +534,7 @@ func marshalRedisOutboxEntry(id string, task engine.Task, availableAt time.Time)
 		AutoDepth:   task.AutoDepth,
 		Activation:  task.ActivationID,
 		UnitIdx:     redisUnitIdxPtr(task.UnitIdx),
+		Port:        task.Port,
 		AvailableAt: availableAt.UnixMilli(),
 		CreatedAt:   time.Now().UTC().UnixMilli(),
 	}
@@ -555,6 +566,7 @@ func unmarshalRedisOutboxEntry(raw string) (engine.OutboxEntry, error) {
 	}
 	encoded.Task.AutoDepth = encoded.AutoDepth
 	encoded.Task.ActivationID = encoded.Activation
+	encoded.Task.Port = encoded.Port
 	if encoded.UnitIdx != nil {
 		encoded.Task.UnitIdx = *encoded.UnitIdx
 	} else {
