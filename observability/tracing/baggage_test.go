@@ -31,8 +31,12 @@ func TestBaggageAllowlistRejectsForbiddenKeys(t *testing.T) {
 			}
 		}
 	}
-	if got := CarrierParseFailures() - before; got < int64(len(cases)) {
-		t.Fatalf("CarrierParseFailures incremented %d times, want >= %d (each forbidden key must be counted)", got, len(cases))
+	// Exactly one per forbidden key. ">=" was green for a filter that counts
+	// the same drop twice, which would inflate the only signal an operator has
+	// that upstream is trying to push namespace/tenant/token across the wire.
+	if got := CarrierParseFailures() - before; got != int64(len(cases)) {
+		t.Fatalf("CarrierParseFailures incremented %d times, want exactly %d (one per "+
+			"forbidden key)", got, len(cases))
 	}
 }
 
@@ -60,7 +64,15 @@ func TestBaggageAllowlistTruncatesOversizedValue(t *testing.T) {
 }
 
 // TestBaggageAllowlistEnforcesEntryCount proves surplus entries beyond
-// MaxEntries are dropped.
+// MaxEntries are dropped -- and that the ones under the cap are kept.
+//
+// The accepted count is not "at most MaxEntries", it is exactly MaxEntries:
+// the default policy sets no AllowedKeys, every generated key is allowed, and
+// 21 two-byte entries are nowhere near MaxTotalBytes, so the entry cap is the
+// only thing that can stop the loop. Asserting the upper bound alone was green
+// for a filter that accepted five, or one, or none -- and "none" is what a
+// wrongly-ordered allowlist check would produce, silently turning the whole
+// propagator into a drop-everything.
 func TestBaggageAllowlistEnforcesEntryCount(t *testing.T) {
 	policy := DefaultBaggagePolicy()
 	prop := FilteredBaggagePropagator(policy)
@@ -72,8 +84,10 @@ func TestBaggageAllowlistEnforcesEntryCount(t *testing.T) {
 	h := propagation.MapCarrier{"baggage": strings.Join(parts, ",")}
 	ctx := prop.Extract(context.Background(), h)
 	bag := baggage.FromContext(ctx)
-	if len(bag.Members()) > policy.MaxEntries {
-		t.Fatalf("accepted %d entries, max %d", len(bag.Members()), policy.MaxEntries)
+	if got := len(bag.Members()); got != policy.MaxEntries {
+		t.Fatalf("accepted %d of %d entries, want exactly %d: fewer means the filter "+
+			"is dropping entries it should carry, more means the cap does not hold",
+			got, len(parts), policy.MaxEntries)
 	}
 }
 
