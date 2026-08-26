@@ -92,6 +92,44 @@ func TestNotification_ExecuteRejectsEmptyAnySliceRecipient(t *testing.T) {
 	}
 }
 
+// Execute merges three sources into the output in a specific order:
+// input.Data first, then params["data"], then the explicit
+// channel/to/subject/message/sent fields last — so the explicit fields must
+// win over a same-named key coming from either merged source. No existing
+// test supplies a colliding key, so nothing pins that ordering: swapping the
+// order (merging params["data"] after the explicit assignments instead of
+// before) leaves every existing test green while letting an upstream node or
+// a caller's own SetData(...) payload silently override the channel or
+// subject the caller explicitly configured on this node.
+func TestNotification_ExecuteExplicitFieldsOverrideMergedData(t *testing.T) {
+	h, found := registry.Lookup("xflow.notification")
+	if !found {
+		t.Fatal("expected xflow.notification to be registered")
+	}
+
+	out, err := h.Execute(context.Background(), &types.Input{
+		Params: map[string]any{
+			"channel": "email",
+			"to":      "ops@example.com",
+			"subject": "Order blocked",
+			"data":    map[string]any{"channel": "slack", "subject": "stale subject"},
+		},
+		Data: map[string]any{"channel": "webhook"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := out.Data["channel"]; got != "email" {
+		t.Fatalf("channel = %v, want email: the explicit channel parameter must win "+
+			"over both the upstream input.Data and the merged params[\"data\"] payload, "+
+			"either of which could otherwise smuggle in a different channel", got)
+	}
+	if got := out.Data["subject"]; got != "Order blocked" {
+		t.Fatalf("subject = %v, want %q: the explicit subject parameter must win over "+
+			"a same-named key inside params[\"data\"]", got, "Order blocked")
+	}
+}
+
 func TestNotification_ExecuteRejectsUnrecognizedEmptyRecipient(t *testing.T) {
 	h, found := registry.Lookup("xflow.notification")
 	if !found {
