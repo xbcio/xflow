@@ -73,15 +73,37 @@ func TestAuditReconcileWorkerLeaderGatedRealRedis(t *testing.T) {
 		Period: 10 * time.Millisecond, BacklogAge: time.Millisecond, Batch: 64, Elector: b,
 	})
 
+	// Order matters, and it used to be backwards. wA ran first and consumed the
+	// only pending admission, so wB's "settled = 0" held for two independent
+	// reasons: the leader gate blocked it, OR there was simply nothing left to
+	// settle. Deleting the IsLeader() check from ReconcileOnce entirely left
+	// all three assertions green — wB would have found the row already
+	// reconciled and appended nothing either way.
+	//
+	// The non-leader therefore has to run FIRST, against the untouched pending
+	// row, where "settled = 0" has exactly one explanation.
+	if n := wB.ReconcileOnce(context.Background()); n != 0 {
+		t.Fatalf("non-leader worker settled = %d, want 0 — it can see the pending "+
+			"admission through the shared store and must decline to act on it", n)
+	}
+	if got := audit.outcomeCount(); got != 0 {
+		t.Fatalf("outcome rows after the non-leader ran = %d, want 0 — the row is "+
+			"still pending and only the lease holder may settle it", got)
+	}
+	// Now the leader, against that same still-pending row.
 	if n := wA.ReconcileOnce(context.Background()); n != 1 {
 		t.Fatalf("leader worker settled = %d, want 1", n)
 	}
-	// The non-leader worker must not append a duplicate outcome.
+	if got := audit.outcomeCount(); got != 1 {
+		t.Fatalf("outcome rows = %d, want 1", got)
+	}
+	// And re-running the non-leader after the fact must still add nothing —
+	// the original direction of this test, kept as the weaker second half.
 	if n := wB.ReconcileOnce(context.Background()); n != 0 {
-		t.Fatalf("non-leader worker settled = %d, want 0 (leader-gated no-op)", n)
+		t.Fatalf("non-leader worker settled = %d after the leader ran, want 0", n)
 	}
 	if got := audit.outcomeCount(); got != 1 {
-		t.Fatalf("outcome rows = %d, want 1 (leader-gated, no duplicate)", got)
+		t.Fatalf("outcome rows = %d, want 1 (no duplicate)", got)
 	}
 }
 
