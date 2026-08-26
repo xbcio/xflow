@@ -5,6 +5,7 @@ import (
 	"github.com/xbcio/xflow/node/registry"
 	"github.com/xbcio/xflow/types"
 	"testing"
+	"time"
 
 	"github.com/xbcio/xflow/node"
 )
@@ -273,5 +274,75 @@ func TestWait_OnResume_Timer(t *testing.T) {
 	}
 	if out.Data["key"] != "val" {
 		t.Fatalf("expected data passthrough, got %v", out.Data)
+	}
+}
+
+// TestWait_PrepareSuspend_ThreadsTimeoutIntoTheSpec closes the gap between
+// "the builder wrote the parameter" and "the engine will act on it".
+//
+// TestWait_WithTimeoutAddsTimeoutParam above only checks that WithTimeout put
+// "30m" into the params map. Nothing asserted that PrepareSuspend parses it
+// back out: grep for `.Timeout` across every PrepareSuspend test in the repo
+// returns no assertion on SuspendSpec.Timeout at all. So wait.go:117's
+// `timeout, _ := cast.ToDurationE(...)` could hand back a zero and the suite
+// stays green.
+//
+// The consumer is engine/atomic.go:299 — `if spec.Timeout > 0` is what
+// schedules the timeout outbox entry. A zero there does not produce an error
+// or a shorter wait; it produces NO timeout entry, so a wait node configured
+// with a 30-minute deadline suspends until the signal arrives or forever,
+// whichever comes first. The workflow never routes to its timeout port.
+//
+// The three modes are checked separately because the timeout is threaded
+// through two different call sites (prepareSignal and prepareTimer), and the
+// zero case is checked because `> 0` is the gate: a parser that invented a
+// default would schedule a timeout on every wait node that never asked for one.
+func TestWait_PrepareSuspend_ThreadsTimeoutIntoTheSpec(t *testing.T) {
+	h, _ := registry.Lookup("xflow.wait")
+	sh := h.(types.SuspendingHandler)
+
+	for _, tc := range []struct {
+		name   string
+		params map[string]any
+		want   time.Duration
+	}{
+		{
+			name:   "signal mode",
+			params: node.Wait("order_paid").WithTimeout("30m").RawParams().(map[string]any),
+			want:   30 * time.Minute,
+		},
+		{
+			name:   "multi-signal mode",
+			params: map[string]any{"mode": "signal", "signals": []any{"a", "b"}, "timeout": "45s"},
+			want:   45 * time.Second,
+		},
+		{
+			name:   "timer mode",
+			params: map[string]any{"mode": "timer", "duration": "5m", "timeout": "1h"},
+			want:   time.Hour,
+		},
+		{
+			// No timeout configured must stay exactly zero: engine/atomic.go
+			// gates on `> 0`, so any invented default silently gives every
+			// plain wait node a deadline it never asked for.
+			name:   "absent",
+			params: node.Wait("order_paid").RawParams().(map[string]any),
+			want:   0,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spec, err := sh.PrepareSuspend(context.Background(), &types.Input{
+				Params:   tc.params,
+				NodeName: "wait_timeout",
+			})
+			if err != nil {
+				t.Fatalf("PrepareSuspend() error = %v", err)
+			}
+			if spec.Timeout != tc.want {
+				t.Fatalf("spec.Timeout = %v, want %v: engine/atomic.go:299 gates "+
+					"the timeout outbox entry on Timeout > 0, so this node would "+
+					"never route to its timeout port", spec.Timeout, tc.want)
+			}
+		})
 	}
 }
