@@ -54,7 +54,10 @@ func TestScript_ExecExplicitJSGoja(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if out.Port != "main" && out.Port != "" {
+	// Execute's single-record success path explicitly sets Port: "main"
+	// (script.go); the previous "main" or "" check let that literal be
+	// silently dropped to "" without ever turning the suite red.
+	if out.Port != "main" {
 		t.Fatalf("expected main port, got %q", out.Port)
 	}
 	// goja Export() yields int64 for integer-valued JS numbers; compare
