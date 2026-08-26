@@ -2,12 +2,16 @@ package wasm
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/tetratelabs/wazero"
 
 	"github.com/xbcio/xflow/node/internal/code/script/engine"
 	_ "github.com/xbcio/xflow/node/internal/code/script/js" // registers goja for the parity test
@@ -173,12 +177,52 @@ func TestWasm_InFlightTimeout(t *testing.T) {
 	}
 }
 
+// TestWasm_ModuleCacheHit checks that repeated Execute calls for the same guest
+// reuse one compiled module instead of recompiling.
+//
+// It used to run the loop and assert only that err was nil, discarding the
+// output. Compiling fresh every time and reusing a cached module produce the
+// same result and the same (absent) error for a guest that compiles cleanly, so
+// no edit to the cache could turn that red — including deleting the cache
+// lookup outright. The hit/miss counters that would have made it observable
+// from outside are still a TODO in wazero.go, and the one real probe
+// (Observer.OnModuleCompile) is wired into the reactor host path, which this
+// test does not use.
+//
+// So the check has to be a white-box one. Two things are asserted: the cache is
+// keyed by the sha256 of the bytes actually compiled — wazero.go's own comment
+// states this is a requirement, not an implementation detail — and the compiled
+// module handed back is the same object across iterations.
 func TestWasm_ModuleCacheHit(t *testing.T) {
-	e := newWasm(t)
+	we, ok := newWasm(t).(*wazeroEngine)
+	if !ok {
+		t.Fatalf("engine.Lookup(\"wasm\", \"wazero\") returned %T, want *wazeroEngine; "+
+			"the module cache cannot be inspected through the interface", newWasm(t))
+	}
 	code := b64(echoWasm)
+	sum := sha256.Sum256(echoWasm)
+	key := hex.EncodeToString(sum[:])
+
+	var first wazero.CompiledModule
 	for i := range 3 {
-		if _, err := e.Execute(context.Background(), engine.Code(code), map[string]any{"$input": map[string]any{"n": float64(i)}}, engine.DefaultHelpers()); err != nil {
+		if _, err := we.Execute(context.Background(), engine.Code(code),
+			map[string]any{"$input": map[string]any{"n": float64(i)}}, engine.DefaultHelpers()); err != nil {
 			t.Fatalf("iteration %d: %v", i, err)
+		}
+		// Peek, not Get: Get bumps LRU recency, so the probe would change the
+		// state it is measuring.
+		cm, cached := we.compiled.c.Peek(key)
+		if !cached {
+			t.Fatalf("iteration %d: no cache entry under the guest's sha256; either "+
+				"nothing was cached or the key is not the digest of the compiled bytes", i)
+		}
+		if i == 0 {
+			first = cm
+			continue
+		}
+		if cm != first {
+			t.Fatalf("iteration %d: cached module identity changed (%p -> %p); the guest "+
+				"was recompiled instead of served from cache", i, first, cm)
 		}
 	}
 }
