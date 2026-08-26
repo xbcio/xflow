@@ -32,7 +32,7 @@ import (
 //     transient
 //   - constraint violations (1062 dup, 1452/1451 FK, 1048 not-null, 23000) ->
 //     permanent (data error, retrying with the same payload cannot help)
-//   - syntax/config (1064 syntax, 1146 no table, 42xxx) -> permanent
+//   - syntax/config (1064 syntax, 1146 no table, SQLSTATE class 42) -> permanent
 //   - unknown -> conservative transient (retryable) + caller may observe
 //
 // This is the single outlet for database IO errors; the database action routes
@@ -72,7 +72,22 @@ func classifyMySQLError(e *mysqldriver.MySQLError) error {
 		return types.NewTransientError(code, msg)
 	case "23000", "23001": // integrity constraint violation
 		return types.NewPermanentError(code, msg)
-	case "42xxx", "42000": // syntax / invalid table (kept broad; specific numbers below)
+	}
+	// SQLSTATE class 42 is "syntax error or access rule violation" in its
+	// entirety. Every subclass of it describes a statement the server will
+	// reject identically on the next attempt, so none of them is retryable.
+	//
+	// This was previously spelled `case "42xxx", "42000"`. "42xxx" is
+	// placeholder notation, not a value that can arrive: MySQLError.SQLState is
+	// five bytes copied verbatim off the wire when the server sends the 0x23
+	// marker (go-sql-driver/mysql@v1.9.3 packets.go:610-613), so no server ever
+	// sends that literal and the label matched nothing. The subclasses it was
+	// meant to stand for are not all in the number list below either — 42S01
+	// "table already exists" (1050) and 42S21 "duplicate column name" (1060)
+	// are in neither — so those fell through to the conservative transient
+	// fallback and were retried to exhaustion against a schema fact that will
+	// be just as true every time.
+	if strings.HasPrefix(state, "42") {
 		return types.NewPermanentError(code, msg)
 	}
 	switch e.Number {

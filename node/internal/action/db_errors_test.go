@@ -38,13 +38,11 @@ func TestClassifyDBError(t *testing.T) {
 		{"no such table 1146 permanent", mysqlErr(1146, "42S02"), types.ErrorKindPermanent},
 		{"unknown column 1054 permanent", mysqlErr(1054, "42S22"), types.ErrorKindPermanent},
 		{"access denied 1045 permanent", mysqlErr(1045, "28000"), types.ErrorKindPermanent},
-		// 1051 is the one entry in the permanent number list that nothing else
-		// rescues. The SQLState switch above it matches only "40001", "23000",
-		// "23001", "42000" — real MySQL sends 1051 with 42S02, which none of
-		// those cover, so deleting 1051 from db_errors.go:81 drops it straight
-		// through to the conservative transient fallback. "Unknown table" is a
-		// schema fact that will be just as untrue on the next attempt: the node
-		// would then be retried to exhaustion instead of failing once.
+		// 1051's SQLState (42S02) used to reach nothing but the number list,
+		// which made this row the only thing pinning 1051 there. The class-42
+		// prefix arm now catches 42S02 first, so this row alone no longer
+		// proves the number entry is live — see the empty-SQLState rows below
+		// for the shape that still reaches it.
 		//
 		// The neighbouring numbers (1451, 1061, 1586) are not added with their
 		// real SQLStates: those are 23000/42000, which the state switch
@@ -92,6 +90,36 @@ func TestClassifyDBError(t *testing.T) {
 		{"not null 1048 without sqlstate, number fallback permanent", mysqlErr(1048, ""), types.ErrorKindPermanent},
 		{"dup keyname 1061 without sqlstate, number fallback permanent", mysqlErr(1061, ""), types.ErrorKindPermanent},
 		{"dup entry keyname 1586 without sqlstate, number fallback permanent", mysqlErr(1586, ""), types.ErrorKindPermanent},
+
+		// The second number switch (db_errors.go, "syntax, no such table,
+		// unknown column, access denied") needs the same treatment for the
+		// same reason: 1064 arrives as 42000 and 1146/1054/1051 arrive as
+		// 42S02/42S22/42S02, all of which the class-42 prefix arm above now
+		// catches and returns from. Without these rows, deleting any of those
+		// four numbers from the list would go unnoticed. 1045 is left out —
+		// its SQLState is 28000, so the existing row above still reaches the
+		// number switch for it.
+		{"syntax 1064 without sqlstate, number fallback permanent", mysqlErr(1064, ""), types.ErrorKindPermanent},
+		{"no such table 1146 without sqlstate, number fallback permanent", mysqlErr(1146, ""), types.ErrorKindPermanent},
+		{"unknown column 1054 without sqlstate, number fallback permanent", mysqlErr(1054, ""), types.ErrorKindPermanent},
+		{"unknown table 1051 without sqlstate, number fallback permanent", mysqlErr(1051, ""), types.ErrorKindPermanent},
+
+		// The class-42 prefix arm itself. Both of these are SQLSTATE class 42
+		// with an error number that appears in NEITHER number list, so before
+		// the arm existed they fell through to the conservative transient
+		// fallback: a schema statement the server rejects the same way every
+		// time would be retried to exhaustion. The old `case "42xxx"` label
+		// could not catch them — SQLState is five bytes copied verbatim off
+		// the wire (go-sql-driver/mysql@v1.9.3 packets.go:610-613), so the
+		// literal "42xxx" is a value no server can send.
+		{"class 42 subclass 42S01 outside both number lists permanent", mysqlErr(1050, "42S01"), types.ErrorKindPermanent},
+		{"class 42 subclass 42S21 outside both number lists permanent", mysqlErr(1060, "42S21"), types.ErrorKindPermanent},
+
+		// Contrast: the prefix must be a prefix of the CLASS, not a substring
+		// anywhere in the state. A state that merely contains "42" is not
+		// class 42 and must keep falling through to the transient fallback,
+		// otherwise the arm would over-reach into unrelated states.
+		{"state containing 42 but not class 42 stays transient", mysqlErr(1644, "HY420"), types.ErrorKindTransient},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
