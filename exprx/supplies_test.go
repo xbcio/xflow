@@ -33,9 +33,14 @@ func TestSuppliesExpressionReadsCurrentContent(t *testing.T) {
 	}
 }
 
+// The name says "RevisionAndHash". Only $revision was ever evaluated, and
+// $hash appears in no test anywhere in the tree -- dropping the injection at
+// registry.go left the whole suite green while every staleness check written
+// against the documented DSL root silently read nil.
 func TestSuppliesExposesRevisionAndHash(t *testing.T) {
+	const content = `{"a":1}`
 	reg := supply.NewRegistry()
-	seedSupply(t, reg, "rules", `{"a":1}`, 42)
+	seedSupply(t, reg, "rules", content, 42)
 	env := BuildExprEnv(&types.Input{}, SuppliesEnv(reg))
 
 	rev, err := EvalExpr(`$supplies.rules["$revision"]`, env, false)
@@ -44,6 +49,17 @@ func TestSuppliesExposesRevisionAndHash(t *testing.T) {
 	}
 	if got, ok := rev.(uint64); !ok || got != 42 {
 		t.Fatalf("revision = %#v, want uint64 42", rev)
+	}
+
+	hash, err := EvalExpr(`$supplies.rules["$hash"]`, env, false)
+	if err != nil {
+		t.Fatalf("eval hash: %v", err)
+	}
+	// seedSupply publishes Hash: "h-" + content, so the expected value is a
+	// statement about what the registry must carry through, not something the
+	// registry computes.
+	if want := "h-" + content; hash != want {
+		t.Fatalf("hash = %#v, want %q", hash, want)
 	}
 }
 

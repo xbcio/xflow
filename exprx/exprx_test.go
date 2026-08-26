@@ -103,26 +103,35 @@ func TestBuildExprEnv(t *testing.T) {
 	if env["foo"] != "bar" {
 		t.Fatalf("data spread missing: %v", env["foo"])
 	}
-	if env["$input"] == nil {
-		t.Fatal("$input missing")
+	// Each root is checked by the value the fixture put in it, not by
+	// non-nilness. Every root here is a non-nil map, so "!= nil" was green for
+	// any wiring that assigned the wrong one -- env["$vars"] = input.Config is
+	// a plausible copy/paste and makes every $vars.* expression in every
+	// workflow read config data instead, with no diagnostic anywhere.
+	roots := []struct {
+		name string
+		key  string
+		val  any
+	}{
+		{"$input", "foo", "bar"},
+		{"$inputs", "p1", "v1"},
+		{"$vars", "count", 1},
+		{"$config", "region", "us"},
+		{"$params", "limit", 10},
+		{"$credentials", "k", "v"},
 	}
-	if env["$inputs"] == nil {
-		t.Fatal("$inputs missing")
-	}
-	if env["$vars"] == nil {
-		t.Fatal("$vars missing")
-	}
-	if env["$config"] == nil {
-		t.Fatal("$config missing")
-	}
-	if env["$params"] == nil {
-		t.Fatal("$params missing")
+	for _, r := range roots {
+		m, ok := env[r.name].(map[string]any)
+		if !ok {
+			t.Fatalf("%s = %#v, want map[string]any", r.name, env[r.name])
+		}
+		if m[r.key] != r.val {
+			t.Errorf("%s[%q] = %#v, want %#v (a root is wired to the wrong field)",
+				r.name, r.key, m[r.key], r.val)
+		}
 	}
 	if env["$runtime"] == nil {
 		t.Fatal("$runtime missing")
-	}
-	if env["$credentials"] == nil {
-		t.Fatal("$credentials extra missing")
 	}
 
 	// Extra should be able to overwrite data-spread keys.
