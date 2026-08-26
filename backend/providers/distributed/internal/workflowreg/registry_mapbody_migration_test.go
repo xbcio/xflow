@@ -2,6 +2,7 @@ package workflowreg
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -107,6 +108,37 @@ func TestUnmarshalWorkflowRecordRecompilesAMapBodyLostFromTheSnapshot(t *testing
 			"restore it, so every batch would fail at the runner with ErrPackageMissing")
 	}
 	if body.Hash == "" {
-		t.Error("restored body has an empty hash; the runner's package cache keys on it")
+		t.Fatal("restored body has an empty hash; the runner's package cache keys on it")
+	}
+	// "Not empty" was the whole check, and it is green for any constant string.
+	// The cache key has to be right, not merely present, and there are two ways
+	// for it to be wrong that this test can actually see.
+	//
+	// First, the scheme prefix. It is written out literally here rather than
+	// read from graph.packageHashPrefix on purpose: it is a wire-format
+	// constant that a runner from another build compares against, so a test
+	// that imports it would follow a breaking change instead of reporting one.
+	if !strings.HasPrefix(body.Hash, "pkg-sha256:v1:") {
+		t.Errorf("restored body hash = %q, want the pkg-sha256:v1: scheme prefix; "+
+			"without it a runner cannot tell two hash schemes apart in its cache",
+			body.Hash)
+	}
+	// Second, it must be the hash the ordinary compile produces. The fallback
+	// recompiles from stored.Definition, which reached it through a JSON round
+	// trip -- a NodeDef field that does not survive that trip yields a body that
+	// is present, hashes fine, and keys the runner's cache differently from
+	// every workflow registered the normal way.
+	refIdx, ok := compiled.NodeIndex("m")
+	if !ok {
+		t.Fatal("reference graph has no node \"m\"")
+	}
+	refBody := compiled.BodyAt(refIdx)
+	if refBody == nil {
+		t.Fatal("reference graph has no map body; the fixture is not what this test assumes")
+	}
+	if body.Hash != refBody.Hash {
+		t.Errorf("recompiled body hash = %q, want %q (the directly compiled graph's): "+
+			"the fallback and the normal path must agree or a migrated workflow misses "+
+			"the runner's package cache forever", body.Hash, refBody.Hash)
 	}
 }
