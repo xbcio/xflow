@@ -35,10 +35,18 @@ import (
 // deployment that has provisioned keys and believes supply content is encrypted
 // on the wire is shipping it in the clear with no error and no metric.
 //
-// service/runner/doc.go:85-90 already warns about exactly this — that assigning
-// a fake key directly to a fetcher's Keyring field bypasses the real assembly
-// path and must be backed by at least one test that exercises the real one.
-// This is that test.
+// service/runner/doc.go:85-90 warns about exactly this — that assigning a fake
+// key directly to a fetcher's Keyring field bypasses the real assembly path and
+// must be backed by at least one test that exercises the real one.
+//
+// This is NOT that test, and an earlier version of this comment claimed it was.
+// The fetcher below is a struct literal with Keyring set by hand, which is
+// precisely the shape doc.go calls out as proving nothing about the wiring.
+// What this test proves is narrower and still worth having: that Fetch asks for
+// ciphertext and can open it, *given* a keyring. The assembly path doc.go
+// actually asks for — Register → SupplyKey → installSupplyKey — is covered by
+// TestRegisterInstallsTheSupplyKeyItWasHanded in
+// register_supply_key_wiring_test.go.
 func TestSupplyFetchCompletesTheEncryptedRoundTrip(t *testing.T) {
 	key, err := supplyenc.GenerateKey()
 	if err != nil {
