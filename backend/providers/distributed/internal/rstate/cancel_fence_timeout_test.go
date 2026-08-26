@@ -89,14 +89,37 @@ func TestTimeoutZSetExpireOnSuspend(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ZCard timeout: %v", err)
 	}
-	if card == 0 {
-		t.Fatalf("timeout ZSET is empty; want 1 member")
+	if card != 1 {
+		t.Fatalf("timeout ZSET has %d members, want exactly 1", card)
 	}
 	// In miniredis, TTL is tracked. Use mr to check.
 	_ = mr
 	ttl := rdb.TTL(ctx, key).Val()
 	if ttl <= 0 {
 		t.Fatalf("timeout ZSET TTL = %v, want > 0 (EXPIRE must be set)", ttl)
+	}
+	// The ZSET's own EXPIRE comes from the store-wide TTL (state_lua.go's
+	// ARGV[2] = s.ttlSec()), which is computed independently of the member's
+	// score -- so ZCard and TTL above are both satisfied no matter what score
+	// was written. The score is the part that decides when the node's wait
+	// actually ends: timeout.Monitor's peekExpiredLua fires on
+	// ZRANGEBYSCORE -inf now, and there is no test anywhere for the Monitor
+	// itself. Dropping the `.Add(spec.Timeout)` at state_suspend.go:55 makes
+	// every timed suspend fire on the Monitor's next poll (~5s) instead of
+	// after its configured duration, waking waiting nodes early with no error
+	// raised on any path.
+	score, err := rdb.ZScore(ctx, key, timeoutMember(id, "w")).Result()
+	if err != nil {
+		t.Fatalf("ZScore timeout member: %v", err)
+	}
+	// spec.Timeout is 30s; allow generous slack for test scheduling but stay
+	// well clear of "now", which is what the broken form writes.
+	wantMin := float64(time.Now().Add(20 * time.Second).Unix())
+	wantMax := float64(time.Now().Add(40 * time.Second).Unix())
+	if score < wantMin || score > wantMax {
+		t.Fatalf("timeout score = %v, want within [%v, %v] (now + spec.Timeout, "+
+			"not now): the score is the only thing that defers the timeout",
+			score, wantMin, wantMax)
 	}
 }
 
