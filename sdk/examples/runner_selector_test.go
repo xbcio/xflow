@@ -20,13 +20,27 @@ var collectRiskSignalNode = node.Define("demo.runner_selector.collect_risk_signa
 	},
 ).DisplayName("Collect Risk Signal")
 
+// status is derived from the upstream ApprovalNode's own "approved" field
+// (set by group.ApprovalNode.handleApprove's ApprovalAny branch and merged
+// into input.Data by approvalOutput) rather than hardcoded. A literal
+// "approved" here would never fail: this node only runs at all when the
+// workflow already routed through approval.Output("approved"), so a fixed
+// string just repeats that fact and cannot tell a correct approval-data
+// merge from a broken one -- e.g. a bug that picks the right output port but
+// writes the wrong "approved" value into the data it carries. Deriving the
+// value from input.Data["approved"] makes RecordDecision.status pin that
+// merge instead of restating the routing decision.
 var recordRunnerSelectorDecisionNode = node.Define("demo.runner_selector.record_decision",
 	func(_ context.Context, input *types.Input) (*types.Output, error) {
+		status := "rejected"
+		if approved, _ := input.Data["approved"].(bool); approved {
+			status = "approved"
+		}
 		return &types.Output{Data: map[string]any{
 			"ticket":   input.Data["ticket"],
 			"severity": input.Data["severity"],
 			"source":   input.Data["source"],
-			"status":   "approved",
+			"status":   status,
 		}}, nil
 	},
 ).DisplayName("Record Decision")
@@ -96,6 +110,10 @@ func TestRunnerSelectorWorkflowLocalExample(t *testing.T) {
 	}
 
 	out := mustNodeOutput(t, result, "RecordDecision")
+	// This is now RecordDecision echoing input.Data["approved"], which came
+	// off ApprovalNode's ApprovalAny branch -- so a "rejected" here means the
+	// engine ran the approved-port node with data claiming otherwise, not
+	// that the fixture said something different.
 	if out["status"] != "approved" {
 		t.Fatalf("status = %q, want approved", out["status"])
 	}

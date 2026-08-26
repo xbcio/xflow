@@ -4,6 +4,7 @@ import (
 	"database/sql/driver"
 	"errors"
 	"io"
+	"net"
 	"strings"
 	"testing"
 
@@ -45,11 +46,52 @@ func TestClassifyDBError(t *testing.T) {
 		// schema fact that will be just as untrue on the next attempt: the node
 		// would then be retried to exhaustion instead of failing once.
 		//
-		// The neighbouring uncovered numbers (1451, 1061, 1586) are NOT added
-		// here: their real SQLStates are 23000/42000, which the state switch
-		// already classifies permanent, so a row for them could not fail.
+		// The neighbouring numbers (1451, 1061, 1586) are not added with their
+		// real SQLStates: those are 23000/42000, which the state switch
+		// already classifies permanent, so such a row could not fail. They
+		// are covered instead by the empty-SQLState rows further down, which
+		// is the shape that does reach the number switch.
 		{"unknown table 1051 permanent", mysqlErr(1051, "42S02"), types.ErrorKindPermanent},
 		{"unknown mysql number transient fallback", mysqlErr(1644, "99999"), types.ErrorKindTransient},
+
+		// classifyDBError's net.Error branch (db_errors.go:48-51) had zero
+		// coverage: nothing in this table produced an error implementing
+		// net.Error. *net.DNSError is what net.Dial actually returns for an
+		// unresolvable host, which is exactly what "connect to db.invalid"
+		// does at the network layer before a MySQL handshake ever starts.
+		{"dns lookup failure transient", &net.DNSError{Err: "no such host", Name: "db.invalid", IsNotFound: true}, types.ErrorKindTransient},
+
+		// The final fallback in classifyDBError (db_errors.go:59, "unknown
+		// driver error") also had zero coverage: every prior case in this
+		// table is either a sentinel/net error or a *mysqldriver.MySQLError.
+		// A plain error reaches none of those branches.
+		{"generic non-driver error transient fallback", errors.New("boom"), types.ErrorKindTransient},
+
+		// classifyMySQLError has two switches on e.Number that both return
+		// permanent: db_errors.go:79 (dup key, FK, not-null, dup index) and
+		// db_errors.go:81 (syntax, no such table, unknown column, access
+		// denied). The first one had zero coverage even though the table
+		// above already had "permanent" cases for 1062, 1452 and 1048: every
+		// one of those cases used SQLState "23000", which the earlier state
+		// switch (db_errors.go:73, case "23000", "23001") already catches
+		// and returns from — the number switch at line 79 was never reached
+		// by any existing case.
+		//
+		// The SQLState is optional on the wire (go-sql-driver/mysql
+		// packets.go handleErrorPacket only copies it when the server sends
+		// the "#" marker byte; otherwise MySQLError.SQLState stays the zero
+		// value, which sqlStateString renders as ""), so a MySQLError with
+		// an empty SQLState is a real shape the driver produces, not a
+		// fabricated one. These cases drive the number switch directly by
+		// using that shape, covering the four numbers the table above never
+		// reached (1062, 1452, 1048) and the three the earlier comment
+		// explicitly called out as untested (1451, 1061, 1586).
+		{"dup key 1062 without sqlstate, number fallback permanent", mysqlErr(1062, ""), types.ErrorKindPermanent},
+		{"FK 1451 without sqlstate, number fallback permanent", mysqlErr(1451, ""), types.ErrorKindPermanent},
+		{"FK 1452 without sqlstate, number fallback permanent", mysqlErr(1452, ""), types.ErrorKindPermanent},
+		{"not null 1048 without sqlstate, number fallback permanent", mysqlErr(1048, ""), types.ErrorKindPermanent},
+		{"dup keyname 1061 without sqlstate, number fallback permanent", mysqlErr(1061, ""), types.ErrorKindPermanent},
+		{"dup entry keyname 1586 without sqlstate, number fallback permanent", mysqlErr(1586, ""), types.ErrorKindPermanent},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -160,6 +202,40 @@ func TestClassifyDBErrorRedactsDuplicateEntryValue(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestRedactDuplicateEntryValueNoKeyClause exercises the "shape recognised
+// but no key clause" fallback (db_errors.go:147-152), which had zero
+// coverage: both cases in TestClassifyDBErrorRedactsDuplicateEntryValue use a
+// message with a "for key '...'" clause, so both take the other branch.
+//
+// Why the branch exists at all is the part worth stating precisely, because
+// it is easy to write a confident sentence here that nobody checked. What is
+// verifiable from this repo: dupEntryKeySep is the literal "' for key '", so
+// any duplicate-entry text whose key is not single-quoted misses it, and
+// production chose to redact to the end rather than return the message
+// unchanged. A message ending in a bare "for key 2" is one such text. Whether
+// some particular MySQL version emits that exact form is a claim about the
+// server that this repo cannot settle, so the test does not make it — the
+// input is chosen to reach the branch, and the assertion is about what the
+// branch does with it.
+func TestRedactDuplicateEntryValueNoKeyClause(t *testing.T) {
+	const collided = "alice@example.test"
+	msg := "Duplicate entry '" + collided + "' for key 2"
+
+	got := redactDuplicateEntryValue(msg)
+
+	if strings.Contains(got, collided) {
+		t.Fatalf("collided value survived the no-key-clause fallback: %q", got)
+	}
+	// db_errors.go documents this branch as "redact to the end", and the
+	// exact output is a single well-known string. Pinning it matters: an
+	// assertion that only checks "doesn't contain collided" would also pass
+	// if the function returned "" or dropped the message entirely.
+	want := "Duplicate entry 'REDACTED'"
+	if got != want {
+		t.Fatalf("redactDuplicateEntryValue(%q) = %q, want %q", msg, got, want)
 	}
 }
 
