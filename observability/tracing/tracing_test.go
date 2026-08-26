@@ -87,3 +87,72 @@ func spanHasAttribute(span sdktrace.ReadOnlySpan, want attribute.KeyValue) bool 
 	}
 	return false
 }
+
+// TestTraceIDFromContextReturnsTheTraceIDNotTheSpanID pins the one line
+// TraceIDFromContext exists for. Nothing in the repo called this function from
+// a test: provider_test.go:97-100 only names it in a comment while asserting on
+// oteltrace.SpanContextFromContext directly, engine/submission_context_test.go
+// exercises a different same-named function in package engine, and the
+// apiserver's own coverage never looks at the value —
+// service/apiserver/envelope_test.go:32 checks only that the "trace_id" KEY is
+// present, and module_control_workflows_test.go:790 t.Logf's (does not fail) an
+// empty TraceID, calling that acceptable. test/integration/trace_graph_e2e_test.go
+// reads the recorded OTel span directly and never routes through this function.
+//
+// So `return sc.TraceID().String()` could be `sc.SpanID().String()` and the
+// whole suite stays green: both are well-formed lowercase hex, just different
+// lengths. The consumers are service/apiserver/envelope.go:98 (the trace_id in
+// every API response envelope) and authz_wrap.go:83,194,233 (AuditEvent.TraceID
+// on every audited request). A span ID there silently breaks every
+// audit-row-to-trace correlation — the value still looks like an ID, so nobody
+// notices until someone tries to look a trace up and finds nothing.
+//
+// The IDs below are distinct constants rather than values read back from the
+// span context, so the assertion is an independent statement of what the
+// function must return.
+func TestTraceIDFromContextReturnsTheTraceIDNotTheSpanID(t *testing.T) {
+	traceID, err := oteltrace.TraceIDFromHex("4bf92f3577b34da6a3ce929d0e0e4736")
+	if err != nil {
+		t.Fatal(err)
+	}
+	spanID, err := oteltrace.SpanIDFromHex("00f067aa0ba902b7")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := oteltrace.ContextWithSpanContext(context.Background(),
+		oteltrace.NewSpanContext(oteltrace.SpanContextConfig{
+			TraceID:    traceID,
+			SpanID:     spanID,
+			TraceFlags: oteltrace.FlagsSampled,
+			Remote:     true,
+		}))
+
+	got := TraceIDFromContext(ctx)
+	if got != "4bf92f3577b34da6a3ce929d0e0e4736" {
+		t.Fatalf("TraceIDFromContext() = %q, want the trace id "+
+			"4bf92f3577b34da6a3ce929d0e0e4736", got)
+	}
+	// Stated separately because it is the specific confusion the doc comment
+	// warns against ("Never returns a span id or baggage").
+	if got == "00f067aa0ba902b7" {
+		t.Fatal("TraceIDFromContext() returned the SPAN id: audit rows and " +
+			"response envelopes would carry an id that resolves to no trace")
+	}
+}
+
+// TestTraceIDFromContextWithoutASpanIsEmpty covers the two early returns, which
+// no test reached either. An invalid span context must yield "" rather than the
+// all-zero trace id: service/apiserver/authz_wrap.go writes the result straight
+// into AuditEvent.TraceID, and "00000000000000000000000000000000" there reads as
+// a real correlation id that leads nowhere, whereas "" reads as "not traced".
+func TestTraceIDFromContextWithoutASpanIsEmpty(t *testing.T) {
+	if got := TraceIDFromContext(context.Background()); got != "" {
+		t.Fatalf("TraceIDFromContext(background) = %q, want empty", got)
+	}
+	// A nil context is exactly the guard under test; held in a variable so the
+	// linters that ban a literal nil argument do not flag the call.
+	var nilCtx context.Context
+	if got := TraceIDFromContext(nilCtx); got != "" {
+		t.Fatalf("TraceIDFromContext(nil) = %q, want empty", got)
+	}
+}
