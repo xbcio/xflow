@@ -101,6 +101,16 @@ func TestNotification_ExecuteRejectsEmptyAnySliceRecipient(t *testing.T) {
 // before) leaves every existing test green while letting an upstream node or
 // a caller's own SetData(...) payload silently override the channel or
 // subject the caller explicitly configured on this node.
+//
+// The five explicit assignments are five separate statements, so the ordering
+// is not pinned once and for all by any single collision — each field can be
+// hoisted above the merge loops on its own. `to` and `message` were added to
+// the collision set after `channel` and `subject`, because those two were the
+// only ones this test originally supplied and hoisting `data["to"] = to`
+// alone left it green. `to` is the field where that matters most: it is the
+// notification's recipient, it was validated at the top of Execute, and an
+// upstream node's output silently winning over it is a delivery redirected to
+// an address the workflow author never wrote down.
 func TestNotification_ExecuteExplicitFieldsOverrideMergedData(t *testing.T) {
 	h, found := registry.Lookup("xflow.notification")
 	if !found {
@@ -112,9 +122,15 @@ func TestNotification_ExecuteExplicitFieldsOverrideMergedData(t *testing.T) {
 			"channel": "email",
 			"to":      "ops@example.com",
 			"subject": "Order blocked",
-			"data":    map[string]any{"channel": "slack", "subject": "stale subject"},
+			"message": "order ord-1 was blocked",
+			"data": map[string]any{
+				"channel": "slack",
+				"subject": "stale subject",
+				"to":      "attacker@example.com",
+				"message": "stale message",
+			},
 		},
-		Data: map[string]any{"channel": "webhook"},
+		Data: map[string]any{"channel": "webhook", "to": "upstream@example.com"},
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -127,6 +143,16 @@ func TestNotification_ExecuteExplicitFieldsOverrideMergedData(t *testing.T) {
 	if got := out.Data["subject"]; got != "Order blocked" {
 		t.Fatalf("subject = %v, want %q: the explicit subject parameter must win over "+
 			"a same-named key inside params[\"data\"]", got, "Order blocked")
+	}
+	if got := out.Data["to"]; got != "ops@example.com" {
+		t.Fatalf("to = %v, want ops@example.com: the recipient Execute validated must "+
+			"win over both merged sources. Losing this one does not garble a payload, "+
+			"it delivers the notification somewhere the workflow author never named — "+
+			"and the value that won here came from an upstream node's output", got)
+	}
+	if got := out.Data["message"]; got != "order ord-1 was blocked" {
+		t.Fatalf("message = %v, want the explicit message: a merged key must not "+
+			"replace the body the caller configured", got)
 	}
 }
 
