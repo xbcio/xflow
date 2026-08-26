@@ -205,7 +205,21 @@ func TestExecuteSamplesConfigAgeForSourceDrivenModule(t *testing.T) {
 		t.Fatalf("Execute: %v", err)
 	}
 
-	if len(rec.ageCalls()) == 0 {
-		t.Fatal("expected at least one OnConfigAge notification")
+	// Exactly one: the sole OnConfigAge call site (reactor.go) sits on the
+	// source-driven branch of Execute and samples once per call, and this test
+	// makes one call. "at least one" was the old check, and it is green for a
+	// sampler that fires ten thousand times — which is the failure mode the
+	// call site's own comment is guarding against, since it justifies per-call
+	// sampling by its cost.
+	ages := rec.ageCalls()
+	if len(ages) != 1 {
+		t.Fatalf("OnConfigAge notifications = %d, want exactly 1 (one Execute, one "+
+			"per-call sample)", len(ages))
+	}
+	// And it must be the content's age, not a zero placeholder: the whole point
+	// of the series is that it climbs when a source stops updating.
+	if ages[0] <= 0 {
+		t.Fatalf("reported config age = %s, want a positive age measured from the "+
+			"snapshot's FetchedAt", ages[0])
 	}
 }

@@ -128,12 +128,19 @@ func TestClassifyDBErrorRedactsDuplicateEntryValue(t *testing.T) {
 
 			// Teeth. Redacting the whole message would pass the check above and
 			// destroy the reason the message is kept at all.
+			//
+			// The last entry is spelled out rather than written as
+			// redactedValue. Using the production constant made the check move
+			// with the code it was checking: if redactedValue degenerated to "",
+			// strings.Contains(text, "") is true for every possible text, and
+			// the one assertion that says "something was removed, not absent"
+			// would have been the first to stop meaning anything.
 			for _, want := range []string{
 				"1062",            // which error
 				"23000",           // which SQLState
 				"users.uk_email",  // WHICH unique index rejected the row
 				"Duplicate entry", // what kind of failure
-				redactedValue,     // and that something was removed, not absent
+				"REDACTED",        // and that something was removed, not absent
 			} {
 				if !strings.Contains(text, want) {
 					t.Errorf("the error text dropped %q, which is diagnostic rather "+
