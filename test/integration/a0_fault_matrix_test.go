@@ -1044,21 +1044,38 @@ func TestA0FaultMatrix(t *testing.T) {
 		// The old lease has been reclaimed, so the report must be rejected with
 		// an authority error and must produce zero new mutation.
 		statusCode, replayResp, replayBody := postReportResultRaw(t, h.httpSrv.URL, h.httpSrv.Client(), *captured)
-		var replayOutcome string
-		switch {
-		case statusCode == http.StatusOK && replayResp.Accepted:
+		if statusCode == http.StatusOK && replayResp.Accepted {
 			t.Fatalf("replayed first report was accepted unexpectedly")
-		case strings.Contains(strings.ToLower(replayBody), "invalid lease token"):
+		}
+		// The status must say "this credential is no longer valid", not merely
+		// "something went wrong". A 500 from a panic in the report handler, or a
+		// 404 because the route moved, is also a non-accepted response.
+		if statusCode < 400 || statusCode >= 500 {
+			t.Fatalf("replay status = %d body=%q, want a 4xx authority rejection; a "+
+				"server-side failure is not evidence that the stale lease was refused",
+				statusCode, replayBody)
+		}
+		var replayOutcome string
+		lower := strings.ToLower(replayBody)
+		switch {
+		case strings.Contains(lower, "invalid lease token"):
 			replayOutcome = "invalid_lease_token"
-		case strings.Contains(strings.ToLower(replayBody), "stale"),
-			strings.Contains(strings.ToLower(replayBody), "unauthenticated"),
-			strings.Contains(strings.ToLower(replayBody), "runner not found"):
+		case strings.Contains(lower, "stale"),
+			strings.Contains(lower, "unauthenticated"),
+			strings.Contains(lower, "runner not found"):
 			replayOutcome = "authority_rejected"
 		default:
-			replayOutcome = "rejected"
-		}
-		if replayOutcome == "" {
-			t.Fatalf("replayed first report outcome is empty")
+			// This used to be `replayOutcome = "rejected"`, followed by a check
+			// that replayOutcome was non-empty — which no reachable arm could
+			// violate. The dead check hid the real problem: the default arm
+			// bucketed ANY 4xx into "rejected", so a rejection for an unrelated
+			// reason (malformed request, wrong content type, a renamed field)
+			// counted as the stale-lease refusal this scenario exists to prove.
+			t.Fatalf("replay was rejected with status %d, but the body matches no "+
+				"known lease/authority rejection: %q. Either the rejection reason "+
+				"changed and this switch needs a new arm, or the report was refused "+
+				"for a reason that has nothing to do with the reclaimed lease",
+				statusCode, replayBody)
 		}
 
 		postReplayEvents := drainA0Evidence(h.EvidenceBuffer())
