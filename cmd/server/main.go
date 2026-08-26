@@ -336,6 +336,28 @@ func splitAddrs(s string) []string {
 	return addrs
 }
 
+// resolveBackendTarget decides which backend the server actually connects to.
+//
+// --memory is a safety net, not a preference: an operator who passes it is
+// saying "do not touch a shared Redis", and the flags that name one are
+// frequently inherited from an environment file rather than typed on the
+// command line. So --memory has to win over both the legacy --redis address
+// and the HA config built from the sentinel/cluster flags — dropping either
+// one silently points a throwaway process at a real, possibly production,
+// Redis instance and lets it write leases and queues there.
+//
+// It is a separate function because runServer needs a listener, a store, a
+// tracer and a Redis before it reaches this branch, which is why nothing
+// executed the branch: cmd/server has no test that calls runServer at all.
+// overrode reports whether a Redis configuration was actually discarded, so
+// the caller only warns when there was something to ignore.
+func resolveBackendTarget(memory bool, redisAddr string, redisConfig *distributed.RedisConfig) (addr string, rc *distributed.RedisConfig, overrode bool) {
+	if !memory {
+		return redisAddr, redisConfig, false
+	}
+	return "", nil, redisAddr != "" || redisConfig != nil
+}
+
 func runServer(cfg serverConfig) error {
 	logger, err := buildLogger(cfg)
 	if err != nil {
@@ -447,13 +469,11 @@ func runServer(cfg serverConfig) error {
 		return fmt.Errorf("redis config: %w", err)
 	}
 
-	redisAddr := cfg.redis
+	redisAddr, redisConfig, overrodeRedis := resolveBackendTarget(cfg.memory, cfg.redis, redisConfig)
 	if cfg.memory {
 		log.Println("xflow-server: using in-memory backend")
-		if redisConfig != nil || cfg.redis != "" {
+		if overrodeRedis {
 			log.Println("xflow-server: WARNING memory flag set, ignoring redis configuration")
-			redisConfig = nil
-			redisAddr = ""
 		}
 	} else if redisConfig != nil {
 		log.Printf("xflow-server: using distributed backend (mode=%s addrs=%d master=%q tls=%v db=%d)", redisConfig.Mode, len(redisConfig.Addrs), redisConfig.MasterName, redisConfig.TLSConfig != nil, redisConfig.DB)

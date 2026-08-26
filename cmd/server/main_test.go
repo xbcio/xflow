@@ -576,3 +576,77 @@ func TestParseServerConfigRunnerMetricsIntervalFlag(t *testing.T) {
 		t.Fatalf("runnerMetricsInterval = %v, want 0 when flag is absent", cfg2.runnerMetricsInterval)
 	}
 }
+
+// TestResolveBackendTargetMemoryOverridesRedis pins the --memory safety net.
+//
+// Nothing executed it before: grep -rn "runServer(" --include="*.go" . finds
+// the one production call site and zero test call sites, and main_test.go's
+// TestRunServerBuildsFromMemoryConfig never touches serverConfig at all — it
+// builds an apiserver.Config literal and starts that. So the branch could
+// keep either half of the Redis configuration and every test stayed green,
+// while an operator running with --memory and a --redis address inherited
+// from an environment file got a server that quietly wrote leases and queues
+// into that real Redis.
+//
+// The two halves are checked separately because they are separate
+// assignments: dropping only `redisAddr = ""` leaves the legacy single-node
+// path live (ServerConfig.RedisAddr), and dropping only `redisConfig = nil`
+// leaves the HA path live (ServerConfig.RedisConfig). Either one alone is the
+// whole failure.
+func TestResolveBackendTargetMemoryOverridesRedis(t *testing.T) {
+	haConfig := &distributed.RedisConfig{
+		Mode:  distributed.RedisModeSentinel,
+		Addrs: []string{"sentinel.invalid:26379"},
+	}
+
+	for _, tc := range []struct {
+		name         string
+		addr         string
+		rc           *distributed.RedisConfig
+		wantOverrode bool
+	}{
+		{"legacy addr only", "redis.invalid:6379", nil, true},
+		{"ha config only", "", haConfig, true},
+		{"both", "redis.invalid:6379", haConfig, true},
+		// Nothing to ignore: the warning must not fire, or every --memory run
+		// prints a warning about a Redis that was never configured.
+		{"neither", "", nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			addr, rc, overrode := resolveBackendTarget(true, tc.addr, tc.rc)
+			if addr != "" {
+				t.Errorf("addr = %q, want empty: --memory left the legacy "+
+					"single-node Redis address live, so the server connects to it", addr)
+			}
+			if rc != nil {
+				t.Errorf("redisConfig = %+v, want nil: --memory left the HA Redis "+
+					"configuration live, so the server connects to it", rc)
+			}
+			if overrode != tc.wantOverrode {
+				t.Errorf("overrode = %v, want %v", overrode, tc.wantOverrode)
+			}
+		})
+	}
+}
+
+// TestResolveBackendTargetWithoutMemoryPassesRedisThrough is the positive
+// control. Without it, "always return nothing" satisfies the test above and
+// the distributed backend is never reachable at all.
+func TestResolveBackendTargetWithoutMemoryPassesRedisThrough(t *testing.T) {
+	haConfig := &distributed.RedisConfig{
+		Mode:  distributed.RedisModeSentinel,
+		Addrs: []string{"sentinel.invalid:26379"},
+	}
+
+	addr, rc, overrode := resolveBackendTarget(false, "redis.invalid:6379", haConfig)
+	if addr != "redis.invalid:6379" {
+		t.Errorf("addr = %q, want redis.invalid:6379", addr)
+	}
+	if rc != haConfig {
+		t.Errorf("redisConfig = %+v, want the configuration that was passed in", rc)
+	}
+	if overrode {
+		t.Error("overrode = true without --memory: the server would log that it " +
+			"ignored a Redis configuration it is in fact using")
+	}
+}
