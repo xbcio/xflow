@@ -546,19 +546,54 @@ func TestA0FaultMatrix(t *testing.T) {
 		evs := drainA0Evidence(env.EvidenceBuffer())
 		appliedCommits := 0
 		appliedAdvances := 0
+		startCommits := 0
+		startAdvances := 0
+		doneCommits := 0
 		for _, ev := range evs {
 			if ev.ExecutionID != id {
 				continue
 			}
 			if ev.Type == engine.RuntimeEvidenceCommit && ev.Applied {
 				appliedCommits++
+				switch ev.NodeName {
+				case "start":
+					startCommits++
+				case "done":
+					doneCommits++
+				}
 			}
 			if ev.Type == engine.RuntimeEvidenceAdvance && ev.Applied {
 				appliedAdvances++
+				if ev.NodeName == "start" {
+					startAdvances++
+				}
 			}
 		}
-		if appliedCommits == 0 {
-			t.Fatalf("no applied commit receipts for %s — evidence wiring broken", id)
+		// Per-node exact counts, not "appliedCommits == 0". The execution-wide
+		// counters above stay because the report below reports them, but they
+		// are the wrong thing to assert on: the loop filters only ExecutionID,
+		// the graph is start->done, and this scenario commits both nodes — so
+		// "at least one commit somewhere in this execution" holds even if the
+		// start commit that the outage was injected into never applied at all.
+		// That is the whole scenario. The counts below are the ones the raw-
+		// ledger comment further down already claims a verifier can derive
+		// ("exactly one accepted commit + one applied advance" for the focal
+		// node), which until now nothing here checked.
+		//
+		// A double-apply is as much a defect as a missing one: the injected
+		// outage happens after the commit is durable but before the downstream
+		// flush, so recovery must resume the flush, not replay the commit.
+		if startCommits != 1 {
+			t.Fatalf("applied commit receipts for start = %d, want exactly 1 — the "+
+				"commit under the queue outage must be durable once and replayed never", startCommits)
+		}
+		if startAdvances != 1 {
+			t.Fatalf("applied advance receipts for start = %d, want exactly 1 — the "+
+				"start->done edge must be advanced once by recovery", startAdvances)
+		}
+		if doneCommits != 1 {
+			t.Fatalf("applied commit receipts for done = %d, want exactly 1 — the "+
+				"downstream node is what proves the flush actually recovered", doneCommits)
 		}
 
 		handlerInvocations := startCounter.Count()
@@ -1213,19 +1248,57 @@ func TestA0FaultMatrix(t *testing.T) {
 		evs := drainA0Evidence(buf2)
 		appliedCommits := 0
 		appliedAdvances := 0
+		startCommits := 0
+		startAdvances := 0
+		doneCommits := 0
 		for _, ev := range evs {
 			if ev.ExecutionID != id {
 				continue
 			}
 			if ev.Type == engine.RuntimeEvidenceCommit && ev.Applied {
 				appliedCommits++
+				switch ev.NodeName {
+				case "start":
+					startCommits++
+				case "done":
+					doneCommits++
+				}
 			}
 			if ev.Type == engine.RuntimeEvidenceAdvance && ev.Applied {
 				appliedAdvances++
+				if ev.NodeName == "start" {
+					startAdvances++
+				}
 			}
 		}
-		if appliedCommits == 0 {
-			t.Fatalf("no applied commit receipts for %s — evidence wiring broken", id)
+		// Per-node exact counts. "appliedCommits == 0" filtered on ExecutionID
+		// alone over a two-node graph, so it held as long as EITHER node
+		// committed — including the case where the handed-off start task was
+		// never picked up and only a subsequent node produced a receipt.
+		//
+		// Exactly-one is safe here despite the real asynq transport being
+		// at-least-once: a redelivered task fails BuildTaskLease with
+		// ErrLeaseAlreadyActive and returns before committing, so a second
+		// APPLIED receipt for the same node is a deduplication failure, which
+		// is precisely what this scenario's handoff must not produce.
+		if startCommits != 1 {
+			t.Fatalf("applied commit receipts for start = %d, want exactly 1 — the task "+
+				"enqueued by env1 must be committed once by env2's fresh consumer", startCommits)
+		}
+		if startAdvances != 1 {
+			t.Fatalf("applied advance receipts for start = %d, want exactly 1", startAdvances)
+		}
+		if doneCommits != 1 {
+			t.Fatalf("applied commit receipts for done = %d, want exactly 1 — without it "+
+				"the handoff stopped at the first node", doneCommits)
+		}
+		// handlerInvocations was counted and reported but never asserted. The
+		// bound is a floor, not an equality: the transport is at-least-once, so
+		// a redelivery legitimately raises this. Two nodes must each reach the
+		// handler at least once for the DAG to have been driven at all.
+		if handlerInvocations < 2 {
+			t.Fatalf("handler invocations = %d, want >= 2 (start and done); the consumer "+
+				"did not drive the whole graph", handlerInvocations)
 		}
 
 		report := a0FaultReport{
