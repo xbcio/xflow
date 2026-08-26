@@ -560,7 +560,7 @@ heartbeat:
 #     max_idle_conns: 5
 #     conn_max_lifetime: "30m"
 #   grpc:
-#     keepalive_time: "30s"
+#     keepalive_time: "30s"      # minimum 10s; grpc-go ignores anything smaller
 #     keepalive_timeout: "10s"
 `
 }
@@ -649,6 +649,16 @@ func parseResourcePoolConfig(file *resourcePoolFile) (types.ResourcePoolConfig, 
 			d, err := parsePositiveDuration("resource_pool.grpc.keepalive_time", *file.GRPC.KeepaliveTime)
 			if err != nil {
 				return types.ResourcePoolConfig{}, err
+			}
+			// Refuse a value grpc-go would silently raise. Accepting it would
+			// leave the operator with a config file that states an interval
+			// the process does not use.
+			if d < types.MinGRPCKeepaliveTime {
+				return types.ResourcePoolConfig{}, fmt.Errorf(
+					"resource_pool.grpc.keepalive_time must be at least %s, got %s: "+
+						"grpc-go raises any smaller ping interval to that floor, so this "+
+						"value would not take effect",
+					types.MinGRPCKeepaliveTime, *file.GRPC.KeepaliveTime)
 			}
 			cfg.GRPC.KeepaliveTime = d
 		}

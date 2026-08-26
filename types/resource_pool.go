@@ -34,6 +34,18 @@ type GRPCPoolConfig struct {
 	KeepaliveTimeout time.Duration
 }
 
+// MinGRPCKeepaliveTime is the floor grpc-go enforces on a client's keepalive
+// ping interval. WithKeepaliveParams raises anything smaller to this value
+// (grpc@v1.81.1 dialoptions.go:562, internal.KeepaliveMinPingTime) and reports
+// it only through the grpc library logger, which is not where an operator who
+// just tuned the interval down will be looking.
+//
+// A KeepaliveTime below this is therefore not a faster ping — it is the same
+// ping with a config value that says otherwise, which is worse than either.
+// Callers that take the interval from an operator should reject a smaller
+// value rather than pass it on.
+const MinGRPCKeepaliveTime = 10 * time.Second
+
 // ResourcePoolConfig groups all tunables for the default pool implementation.
 type ResourcePoolConfig struct {
 	SQL  SQLPoolConfig
