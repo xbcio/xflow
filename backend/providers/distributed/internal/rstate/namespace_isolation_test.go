@@ -89,12 +89,28 @@ func TestNamespaceIsolationScanDoesNotCrossNamespaces(t *testing.T) {
 	ctxB := namespace.WithNamespace(context.Background(), namespaceB)
 
 	idA := types.ExecutionID("exec-acme-1")
-	if err := state.CreateExecution(ctxA, &engine.ExecutionSnapshot{
+	// The outbox entry has to be seeded here, through CreateExecutionWithOutbox,
+	// rather than left absent: the isolation assertion at the end of this test
+	// reads namespace B's outbox and requires it to be empty, and with no outbox
+	// row under namespace A either that check compares empty against empty. It
+	// then holds for any namespace resolution at all, including none --
+	// hardcoding state_outbox.go:169's `t := namespace.FromContext(ctx)` to
+	// namespace.Default leaves it green.
+	outboxEntry := engine.OutboxEntry{
+		ID: "exec-acme-1/start/0",
+		Task: engine.Task{
+			ExecutionID: idA,
+			NodeName:    "start",
+			Type:        engine.TaskTypeNodeExec,
+		},
+		AvailableAt: time.Now().Add(-time.Second),
+	}
+	if err := state.CreateExecutionWithOutbox(ctxA, &engine.ExecutionSnapshot{
 		ID:     idA,
 		Status: types.ExecutionStatusRunning,
 		Graph:  testGraphTwoNode(),
-	}); err != nil {
-		t.Fatalf("CreateExecution(A) error = %v", err)
+	}, []engine.OutboxEntry{outboxEntry}); err != nil {
+		t.Fatalf("CreateExecutionWithOutbox(A) error = %v", err)
 	}
 	// Park a lease expiry + outbox under namespace A.
 	snap := &engine.NodeSnapshot{
@@ -179,6 +195,17 @@ func TestNamespaceIsolationScanDoesNotCrossNamespaces(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("namespace B saw namespace A outbox entries: %+v — isolation broken", entries)
+	}
+	// The positive control the other two reads above already have. Without it
+	// the check above is satisfied by an outbox that is empty everywhere, which
+	// is what a store that ignores the context namespace entirely also produces.
+	entriesA, err := state.ListOutbox(ctxA, idA, time.Now().Add(time.Second), 100)
+	if err != nil {
+		t.Fatalf("ListOutbox(A) error = %v", err)
+	}
+	if len(entriesA) != 1 || entriesA[0].ID != outboxEntry.ID {
+		t.Fatalf("namespace A did not see its own outbox entry (want 1 × %q): %+v",
+			outboxEntry.ID, entriesA)
 	}
 }
 
