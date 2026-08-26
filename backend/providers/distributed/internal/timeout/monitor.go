@@ -18,12 +18,10 @@ import (
 
 // timeoutKeyPattern is the SCAN glob for per-namespace, per-execution timeout
 // ZSETs. Each execution owns a sharded key
-// global timeout workload is distributed across Redis Cluster slots instead of
-// funneling onto a single hot key, and one namespace's scan never crosses into
-// another namespace's keys. The monitor iterates the namespace registry so a SCAN
-// never crosses a namespace boundary.
-//
-//xflow:ns:<namespace>:exec:{<id>}:timeouts (sharing the execution hash tag) so the
+// xflow:ns:<namespace>:exec:{<id>}:timeouts (sharing the execution hash tag) so
+// the global timeout workload is distributed across Redis Cluster slots instead
+// of funneling onto a single hot key. The monitor iterates the namespace
+// registry so a SCAN never crosses a namespace boundary.
 const timeoutKeyPattern = "xflow:ns:%s:exec:{*}:timeouts"
 
 // timeoutScanCount is the page size used when scanning for timeout keys.
