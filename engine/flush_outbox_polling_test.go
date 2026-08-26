@@ -144,12 +144,23 @@ func TestFlushOutboxKeepsDrainingAFullBatch(t *testing.T) {
 	if err := eng.FlushOutbox(ctx, id); err != nil {
 		t.Fatalf("FlushOutbox() error = %v", err)
 	}
-	if got := len(queue.Drain()); got < total {
-		t.Fatalf("delivered %d of %d intents: the drain stopped on a full batch", got, total)
+	// 601, not 600: Submit already put the start-node intent in the outbox
+	// before the 600 bulk entries were added. The old check was `got < total`,
+	// and besides being green for a drain that enqueues every entry twice, it
+	// hid the fact that the count was never `total` to begin with.
+	const wantDelivered = total + 1
+	if got := len(queue.Drain()); got != wantDelivered {
+		t.Fatalf("delivered %d intents, want exactly %d (%d bulk plus Submit's own "+
+			"start-node intent): short means the drain stopped on a full batch, long "+
+			"means an entry was enqueued more than once", got, wantDelivered, total)
 	}
-	if state.claims < 3 {
-		t.Errorf("outbox claims = %d, want at least 3 for %d entries at 256 per batch",
-			state.claims, total)
+	// Exactly three: 601 entries at 256 per batch is 256+256+89, and the short
+	// third batch ends the loop. "At least 3" is green for a drain that keeps
+	// polling an emptied outbox, which is the very thing the sibling test above
+	// exists to forbid.
+	if state.claims != 3 {
+		t.Errorf("outbox claims = %d, want exactly 3 for %d entries at 256 per batch",
+			state.claims, wantDelivered)
 	}
 }
 

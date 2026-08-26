@@ -121,8 +121,25 @@ func TestSuspendCommitStillProbesExecutionStatus(t *testing.T) {
 	if outcome != CommitOutcomeExecutionInactive {
 		t.Fatalf("suspend on a canceled execution = %s, want %s", outcome, CommitOutcomeExecutionInactive)
 	}
-	if state.statusReads == 0 {
-		t.Error("suspend commit made no status read: it has no CommitNode behind it, " +
-			"so the probe is the only thing standing between it and a canceled execution")
+	// Exactly one, the same shape the sibling test above asserts. "Not zero"
+	// was the old check and it is green for a commit that probes twice, or
+	// twenty times — and this test's whole subject is how many round trips a
+	// commit spends on the liveness question. A lower bound cannot see the
+	// regression it exists to catch.
+	if state.statusReads != 1 {
+		t.Errorf("execution status reads during a suspend commit = %d, want 1: it has "+
+			"no CommitNode behind it, so the probe is the only thing standing between "+
+			"it and a canceled execution — and one probe is all it should need",
+			state.statusReads)
+	}
+	// The count means nothing unless the probe actually withheld the write.
+	// CommitOutcomeExecutionInactive is the engine's report; this is the store.
+	node, err := state.GetNode(ctx, id, "start")
+	if err != nil {
+		t.Fatalf("GetNode() error = %v", err)
+	}
+	if node != nil && node.Status == types.NodeStatusSuspended {
+		t.Errorf("node landed in %s on a canceled execution; the probe reported "+
+			"inactive but the suspend was written anyway", node.Status)
 	}
 }
