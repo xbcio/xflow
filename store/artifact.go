@@ -31,6 +31,13 @@ var (
 	// resolves to different content. A version binding is immutable once made —
 	// the Docker "tag moved under me" failure mode is not reproduced here.
 	ErrVersionConflict = errors.New("store: artifact version already bound to different content")
+
+	// ErrDigestMismatch is returned by Open when the bytes a backend served do
+	// not hash to the digest they were addressed by. It is a permanent
+	// condition, not a transient one: the read is content-addressed, so
+	// retrying the same digest against the same backend can only produce the
+	// same wrong bytes.
+	ErrDigestMismatch = errors.New("store: artifact content does not match its digest")
 )
 
 // ArtifactRef is the small descriptor that travels through node parameters,
@@ -165,6 +172,26 @@ func (s *ArtifactStore) Put(ctx context.Context, content []byte, meta ArtifactMe
 }
 
 // Open returns the content for digest. The caller closes the reader.
+//
+// The bytes are hashed and compared against digest before any of them are
+// handed back — Put computes the digest from the complete content so that a
+// caller cannot claim a hash that does not match its bytes, and this is the
+// read-side half of that same guarantee. Without it the digest is only a name:
+// ValidateDigest checks the shape of the requested string, objectstore derives
+// Object.ETag by parsing the digest back out of the key, and nothing anywhere
+// recomputes it. The runner resolves a script node's artifact_digest through
+// here and feeds the result straight to the wasm compiler, so the digest is the
+// only thing binding a workflow definition to the code that actually runs.
+//
+// The cost is one sha256 over at most MaxArtifactBytes, once per call. That is
+// not the hot path: node/internal/code/script memoises resolved artifact bytes
+// per (namespace, digest, language), so a runner hashes each module once per
+// process, not once per message.
+//
+// Verification requires the whole body, so Open buffers rather than streams.
+// Every backend already does: sqlstore reads the MEDIUMBLOB into memory,
+// objectstore.ReadThrough buffers the origin response to write it through to
+// cache, and MaxArtifactBytes bounds all of it at 16 MiB.
 func (s *ArtifactStore) Open(ctx context.Context, digest string) (io.ReadCloser, ArtifactRef, error) {
 	if err := ValidateDigest(digest); err != nil {
 		return nil, ArtifactRef{}, err
@@ -173,7 +200,30 @@ func (s *ArtifactStore) Open(ctx context.Context, digest string) (io.ReadCloser,
 	if err != nil {
 		return nil, ArtifactRef{}, err
 	}
-	return body, refFromObject(digest, obj), nil
+	defer func() { _ = body.Close() }()
+
+	// One byte past the ceiling, so content of exactly MaxArtifactBytes — which
+	// Put admits — reads through cleanly and only a larger body is rejected.
+	content, err := io.ReadAll(io.LimitReader(body, MaxArtifactBytes+1))
+	if err != nil {
+		return nil, ArtifactRef{}, fmt.Errorf("store: read artifact %s: %w", digest, err)
+	}
+	if int64(len(content)) > MaxArtifactBytes {
+		return nil, ArtifactRef{}, fmt.Errorf("%w: %s is larger than %d", ErrArtifactTooLarge, digest, int64(MaxArtifactBytes))
+	}
+	if got := ContentHash(content); got != digest {
+		// Name both digests so an operator can tell "the backend lost my bytes"
+		// from "the backend has someone else's bytes", and never echo the
+		// content: it is source or a compiled module, and this error is logged.
+		return nil, ArtifactRef{}, fmt.Errorf("%w: %s resolved to content hashing %s", ErrDigestMismatch, digest, got)
+	}
+
+	ref := refFromObject(digest, obj)
+	// The bytes are now known authentic, so their count is the authoritative
+	// size regardless of what the backend reported (HTTPStore, for one, reports
+	// -1 for a chunked response).
+	ref.Size = int64(len(content))
+	return io.NopCloser(bytes.NewReader(content)), ref, nil
 }
 
 // Stat returns metadata for digest without reading the content.
