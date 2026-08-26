@@ -88,6 +88,38 @@ func TestBuildExprEnvAlwaysExposesSupplies(t *testing.T) {
 	}
 }
 
+// TestBuildExprEnvDefaultSuppliesReadsDefaultRegistry pins where the default
+// $supplies value comes from.
+//
+// TestBuildExprEnvAlwaysExposesSupplies above checks only that the key exists
+// and holds a map, and every other $supplies test injects an isolated registry
+// through SuppliesEnv(reg) into extra -- which the merge loop at the end of
+// BuildExprEnv writes over the default with. So replacing
+// supply.Default.Decoded() with an empty map satisfies the whole package while
+// no supply content ever reaches an expression on the paths that pass extra=nil:
+// execution/params.go (every node's parameter expansion) and the transform and
+// flow nodes (if/switch/split/map/filter/set). A routing condition written
+// against $supplies would quietly evaluate to nil and take the other branch,
+// with no error anywhere.
+//
+// supply.Default is process-global and its content is never dropped, so this
+// uses a name no other test can collide with rather than trying to clean up.
+func TestBuildExprEnvDefaultSuppliesReadsDefaultRegistry(t *testing.T) {
+	const name = "exprx_default_env_probe"
+	seedSupply(t, supply.Default, name, `{"threshold":7}`, 3)
+
+	env := BuildExprEnv(&types.Input{}, nil)
+	out, err := EvalExpr(`$supplies.exprx_default_env_probe.threshold`, env, false)
+	if err != nil {
+		t.Fatalf("eval: %v", err)
+	}
+	if got, ok := out.(float64); !ok || got != 7 {
+		t.Fatalf("$supplies.%s.threshold = %#v, want 7: with extra=nil the default "+
+			"env is the only source of supply content, and every node parameter "+
+			"expansion plus every flow/transform node takes that path", name, out)
+	}
+}
+
 // Content that is not a JSON object stays usable.
 func TestSuppliesNonObjectContent(t *testing.T) {
 	reg := supply.NewRegistry()
