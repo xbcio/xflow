@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -178,6 +180,92 @@ func TestReadThrough_OriginByteCeiling(t *testing.T) {
 		}
 		if n != ceilingBytes {
 			t.Fatalf("read %d bytes, want %d", n, ceilingBytes)
+		}
+	})
+}
+
+// serveBytes stands up a server that answers every request with n bytes.
+func serveBytes(t *testing.T, n int) *httptest.Server {
+	t.Helper()
+	body := bytes.Repeat([]byte("A"), n)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestHTTPStore_ResponseByteCeiling is the HTTPStore half of the ceiling
+// TestReadThrough_OriginByteCeiling pins on the other layer. Both guard the
+// same 16 MiB constant, and until this test they disagreed about it: the
+// ReadThrough check is `> ceiling`, while limitedReadCloser seeded remain with
+// the cap itself and then failed the first Read that found remain at zero — so
+// a body of exactly the cap was read out in full and *then* reported as
+// oversize.
+//
+// Measured against the code as it stood: a 16777215-byte body copied cleanly, a
+// 16777216-byte body copied all 16777216 bytes and returned "response exceeds
+// 16777216 bytes", and a 16777217-byte body did the same. The at-cap case was
+// indistinguishable from the over-cap case.
+//
+// That is not a cosmetic off-by-one, because the write side does not share it.
+// store/artifact.go:121 and store/sqlstore/artifact.go:63 both reject on
+// `> MaxArtifactBytes`, so an artifact of exactly 16 MiB is accepted by the
+// server and durably stored — and then no runner could fetch it back. The
+// largest artifact the platform admits was the one artifact the platform could
+// not deliver, and the error a runner saw blamed the response for being too
+// large rather than the fetch path for miscounting.
+//
+// Both bounds are asserted for the same reason the ReadThrough test asserts
+// both: the at-cap case alone would pass if the limit were deleted outright,
+// and the over-cap case alone is what the code already did.
+func TestHTTPStore_ResponseByteCeiling(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("exactly at the ceiling is delivered in full", func(t *testing.T) {
+		srv := serveBytes(t, ceilingBytes)
+		hs := &objectstore.HTTPStore{BaseURL: srv.URL, Token: "t", Client: srv.Client()}
+
+		rc, _, err := hs.GetObject(ctx, testKey)
+		if err != nil {
+			t.Fatalf("GetObject: %v", err)
+		}
+		n, err := io.Copy(io.Discard, rc)
+		_ = rc.Close()
+		if err != nil {
+			t.Fatalf("draining a body of exactly %d bytes: %v; the write side stores an "+
+				"artifact of this size, so rejecting it here makes the largest artifact "+
+				"the server accepts one no runner can fetch", ceilingBytes, err)
+		}
+		if n != ceilingBytes {
+			t.Fatalf("read %d bytes, want %d", n, ceilingBytes)
+		}
+	})
+
+	t.Run("one byte over the ceiling is rejected", func(t *testing.T) {
+		srv := serveBytes(t, ceilingBytes+1)
+		hs := &objectstore.HTTPStore{BaseURL: srv.URL, Token: "t", Client: srv.Client()}
+
+		rc, _, err := hs.GetObject(ctx, testKey)
+		if err != nil {
+			t.Fatalf("GetObject: %v", err)
+		}
+		n, err := io.Copy(io.Discard, rc)
+		_ = rc.Close()
+		if err == nil {
+			t.Fatalf("draining a body of %d bytes succeeded with %d bytes read: the cap "+
+				"is not enforced, so a misbehaving server can stream an unbounded body "+
+				"into a runner's memory", ceilingBytes+1, n)
+		}
+		if !strings.Contains(err.Error(), "exceeds") {
+			t.Fatalf("error = %v, want the size-ceiling error", err)
+		}
+		// The over-cap byte must not reach the caller: the read that crosses the
+		// cap fails instead of handing it over, so nothing downstream can act on
+		// a body it was told was too large.
+		if n > ceilingBytes {
+			t.Fatalf("read %d bytes before failing, want at most %d", n, ceilingBytes)
 		}
 	})
 }

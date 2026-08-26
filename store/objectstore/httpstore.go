@@ -93,10 +93,12 @@ func (h *HTTPStore) GetObject(ctx context.Context, key string) (io.ReadCloser, *
 		LastModified: time.Now(),
 	}
 
-	// Wrap body with a limit to defend against a misbehaving server.
+	// Wrap body with a limit to defend against a misbehaving server. The seed
+	// carries one byte past the cap so that a body of exactly the cap reads
+	// through cleanly; see limitedReadCloser.
 	limited := &limitedReadCloser{
 		rc:     resp.Body,
-		remain: maxArtifactResponseBytes,
+		remain: maxArtifactResponseBytes + 1,
 		cancel: cancel,
 	}
 	return limited, obj, nil
@@ -150,6 +152,13 @@ func (h *HTTPStore) HeadObject(ctx context.Context, key string) (*Object, error)
 }
 
 // limitedReadCloser wraps a body with a byte limit and owns a context cancel.
+//
+// remain is seeded with maxArtifactResponseBytes plus one detector byte, so the
+// limit is "strictly more than the cap is too large" rather than "the cap
+// itself is too large". The distinction is not academic: store.PutArtifact and
+// sqlstore both admit a body of exactly MaxArtifactBytes, so treating that size
+// as oversize here makes the largest artifact the server will store one that no
+// runner can fetch back.
 type limitedReadCloser struct {
 	rc     io.ReadCloser
 	remain int64
@@ -158,14 +167,26 @@ type limitedReadCloser struct {
 
 func (l *limitedReadCloser) Read(p []byte) (int, error) {
 	if l.remain <= 0 {
-		return 0, fmt.Errorf("objectstore/http: response exceeds %d bytes", maxArtifactResponseBytes)
+		return 0, errArtifactResponseTooLarge()
 	}
 	if int64(len(p)) > l.remain {
 		p = p[:l.remain]
 	}
 	n, err := l.rc.Read(p)
 	l.remain -= int64(n)
+	if l.remain <= 0 {
+		// The detector byte was delivered, so the body is strictly larger than
+		// the cap. Fail on this read rather than waiting for the next one:
+		// whether a reader issues another Read depends on when the transport
+		// happens to report EOF, and the over-cap bytes are dropped rather than
+		// handed to a caller that is about to see an error anyway.
+		return 0, errArtifactResponseTooLarge()
+	}
 	return n, err
+}
+
+func errArtifactResponseTooLarge() error {
+	return fmt.Errorf("objectstore/http: response exceeds %d bytes", maxArtifactResponseBytes)
 }
 
 func (l *limitedReadCloser) Close() error {
