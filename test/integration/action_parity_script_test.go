@@ -239,14 +239,21 @@ func TestScriptFunctionActionParity(t *testing.T) {
 			// script/function cases use the real built-in handlers via counting
 			// wrappers; WantKind/WantRetryable are explicit manifest literals above.
 
+			// One read per topology, taken immediately after that topology's own
+			// Run — the same discipline TestActionErrorParityMatrix follows and
+			// instrumentedBuiltinBuild's doc requires. It installs a fresh
+			// counter on every register call and invCount returns the newest, so
+			// a single read after all three Runs yields cluster-durable's count
+			// and nothing else; copying it into all three outcomes made the
+			// cross-topology comparison compare a number with itself.
 			localOut := RunParityLocal(t, def, register, nil, tc.Name, "local")
-			serverOut := RunParityServerRunner(t, addr, def, register, nil, tc.Name, "server-runner")
-			clusterOut := RunParityCluster(t, addr, def, register, nil, tc.Name, "cluster-durable")
+			localOut.HandlerInvocations = invCount(inv)
 
-			invocations := invCount(inv)
-			for _, o := range []*ParityOutcome{&localOut, &serverOut, &clusterOut} {
-				o.HandlerInvocations = invocations
-			}
+			serverOut := RunParityServerRunner(t, addr, def, register, nil, tc.Name, "server-runner")
+			serverOut.HandlerInvocations = invCount(inv)
+
+			clusterOut := RunParityCluster(t, addr, def, register, nil, tc.Name, "cluster-durable")
+			clusterOut.HandlerInvocations = invCount(inv)
 
 			assertParityThreeWay(t, tc, localOut, serverOut, clusterOut)
 			logParityMatrixRow(t, tc, "local", localOut)

@@ -140,14 +140,25 @@ func TestHTTPActionErrorParity(t *testing.T) {
 			// cannot produce required A3 rows; a nil recorder keeps the shared
 			// RunParity* signatures uniform without emitting stray fragments.
 			// (Only TestActionErrorParityMatrix uses the manifest fixture names.)
+			// Each counter is read immediately after its own Run.
+			// instrumentedBuiltinBuild installs a FRESH counting wrapper on
+			// every register call and invCount reads the most recent one, so
+			// reading once after all three Runs returns the cluster-durable
+			// count and nothing else. That value used to be copied into all
+			// three outcomes, which made assertParityThreeWay's cross-topology
+			// invocation comparison a tautology — it compared a number with
+			// itself — and left local and server-runner never checked against
+			// WantHandlerInvocations at all. A server-runner topology executing
+			// the handler one extra time was invisible, which is the exact
+			// divergence this matrix exists to catch.
 			localOut := RunParityLocal(t, def, register, nil, tc.Name, "local")
-			serverOut := RunParityServerRunner(t, addr, def, register, nil, tc.Name, "server-runner")
-			clusterOut := RunParityCluster(t, addr, def, register, nil, tc.Name, "cluster-durable")
+			localOut.HandlerInvocations = invCount(inv)
 
-			invocations := invCount(inv)
-			for _, o := range []*ParityOutcome{&localOut, &serverOut, &clusterOut} {
-				o.HandlerInvocations = invocations
-			}
+			serverOut := RunParityServerRunner(t, addr, def, register, nil, tc.Name, "server-runner")
+			serverOut.HandlerInvocations = invCount(inv)
+
+			clusterOut := RunParityCluster(t, addr, def, register, nil, tc.Name, "cluster-durable")
+			clusterOut.HandlerInvocations = invCount(inv)
 
 			assertParityThreeWay(t, tc, localOut, serverOut, clusterOut)
 			logParityMatrixRow(t, tc, "local", localOut)
