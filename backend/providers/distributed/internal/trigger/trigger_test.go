@@ -257,6 +257,91 @@ func TestTriggerLockReleaseDoesNotDeleteNewOwner(t *testing.T) {
 	}
 }
 
+// TestTriggerLockRenewReturnsFalseForAStaleToken covers the branch Renew's
+// existing tests never exercise: every other test in this file calls Renew
+// on a lock that still owns the key, so `return renewed == 1, nil` (the last
+// line of Renew) always observed 1 and the `renewed == 1` comparison could be
+// replaced with an unconditional `true` and every prior test would stay
+// green. This test acquires a lock, lets it expire, lets a second owner take
+// the key, then calls Renew on the first (now-stale) lock and asserts it
+// reports false without deleting or re-extending the second owner's lock —
+// mirroring the same stale-token setup TestTriggerLockReleaseDoesNotDeleteNewOwner
+// uses for Release, since renewTriggerLockScriptSrc has the identical
+// GET-then-compare structure as releaseTriggerLockScriptSrc.
+func TestTriggerLockRenewReturnsFalseForAStaleToken(t *testing.T) {
+	ctx := namespace.WithNamespace(context.Background(), namespace.Namespace("namespace-a"))
+	rdb := newTriggerRuntimeTestRedisClient(t)
+
+	key := "test-trigger-lock-stale-renew-" + uuid.NewString()
+	lockKey := triggerLockKey(namespace.FromContext(ctx), key)
+	t.Cleanup(func() {
+		if err := rdb.Del(ctx, lockKey).Err(); err != nil {
+			t.Fatalf("Del(%q) error = %v", lockKey, err)
+		}
+	})
+
+	first := New(rdb)
+	second := New(rdb)
+
+	lock, ok, err := first.TryLock(ctx, key, 50*time.Millisecond)
+	if err != nil {
+		t.Fatalf("TryLock(first) error = %v", err)
+	}
+	if !ok {
+		t.Fatal("first lock was not acquired")
+	}
+
+	waitForRedisCondition(t, time.Second, func() bool {
+		exists, err := rdb.Exists(ctx, lockKey).Result()
+		return err == nil && exists == 0
+	})
+
+	reacquired, ok, err := second.TryLock(ctx, key, time.Minute)
+	if err != nil {
+		t.Fatalf("TryLock(second) error = %v", err)
+	}
+	if !ok {
+		t.Fatal("second lock was not acquired")
+	}
+
+	renewable, ok := lock.(interface {
+		Renew(context.Context, time.Duration) (bool, error)
+	})
+	if !ok {
+		t.Fatal("lock does not support renewal")
+	}
+
+	renewed, err := renewable.Renew(ctx, time.Minute)
+	if err != nil {
+		t.Fatalf("Renew(first stale token) error = %v", err)
+	}
+	if renewed {
+		t.Fatal("Renew(first stale token) = true, want false — the token no longer owns the key")
+	}
+
+	exists, err := rdb.Exists(ctx, lockKey).Result()
+	if err != nil {
+		t.Fatalf("Exists(%q) error = %v", lockKey, err)
+	}
+	if exists == 0 {
+		t.Fatal("stale renew deleted the current owner's lock")
+	}
+
+	pttl, err := rdb.PTTL(ctx, lockKey).Result()
+	if err != nil {
+		t.Fatalf("PTTL(%q) error = %v", lockKey, err)
+	}
+	// The second owner asked for a 1-minute lock; a stale renew from the first
+	// owner must not have re-extended it beyond that.
+	if pttl <= 0 || pttl > time.Minute {
+		t.Fatalf("PTTL(%q) = %s, want a positive TTL at or below the second owner's 1m; a stale renew must not extend the current owner's TTL", lockKey, pttl)
+	}
+
+	if err := reacquired.Release(ctx); err != nil {
+		t.Fatalf("Release(second) error = %v", err)
+	}
+}
+
 func TestTriggerStateIsSharedAcrossPrimitiveInstances(t *testing.T) {
 	ctx := namespace.WithNamespace(context.Background(), namespace.Namespace("namespace-a"))
 	rdb := newTriggerRuntimeTestRedisClient(t)

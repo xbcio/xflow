@@ -233,3 +233,38 @@ func TestRunCommandPropagatesTheArtifactCacheDirToTheSDK(t *testing.T) {
 
 	runCommand(t, "run", "--server", "http://server:8080")
 }
+
+// --metrics-addr never reaches xflowsdk.RunnerConfig — runRunner opens the
+// scrape listener itself, unconditionally on cfg.metricsAddr, so
+// stubRunnerServiceFactory's xflowsdk.RunnerConfig has no field to observe it
+// on. No test in this package asserted on cfg.metricsAddr at all (grep
+// "metricsAddr" across every _test.go in this package returns nothing before
+// this test), so the changed-flag copy in resolveRunnerConfig
+// (`if base.changed["metrics-addr"] { cfg.metricsAddr = base.metricsAddr }`)
+// could be deleted and every existing test would stay green while the flag
+// silently stopped opening a listener at the requested address.
+//
+// This captures the resolved runnerConfig the same way
+// TestRunCommandUsesConfigFile does — via a runFunc override — and asserts on
+// the field resolveRunnerConfig actually produces, one level before runRunner
+// would use it to open the net.Listener.
+func TestRunCommandPropagatesMetricsAddrFlag(t *testing.T) {
+	var ran runnerConfig
+	cmd := newRootCommand(commandOptions{
+		runFunc: func(cfg runnerConfig) error {
+			ran = cfg
+			return nil
+		},
+		out: &bytes.Buffer{},
+		err: &bytes.Buffer{},
+	})
+	cmd.SetArgs([]string{"run", "--server", "http://server:8080", "--metrics-addr", ":9099"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if ran.metricsAddr != ":9099" {
+		t.Fatalf("metricsAddr = %q, want :9099 — the flag never reached the "+
+			"resolved config, so runRunner would open no scrape listener at all",
+			ran.metricsAddr)
+	}
+}
