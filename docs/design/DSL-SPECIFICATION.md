@@ -1298,7 +1298,7 @@ XFlow 的 connections 仅描述拓扑关系（谁连到谁），条件逻辑由 
 | Cron 触发 | xflow.trigger.cron | Cron 表达式触发执行 | _(无)_ | main | ❌ | 不适用 |
 | Webhook 触发 | xflow.trigger.webhook | HTTP route 触发执行 | _(无)_ | main | ❌ | 不适用 |
 | Kafka 触发 | xflow.trigger.kafka | Kafka consumer group 触发执行 | _(无)_ | main | ❌ | 不适用 |
-| Redis Hub 触发 | xflow.trigger.redis_hub | Redis stream/pubsub 触发执行 | _(无)_ | main | ❌ | 不适用 |
+| Redis 触发 | xflow.trigger.redis | Redis stream/pubsub 触发执行 | _(无)_ | main | ❌ | 不适用 |
 | gRPC调用 | xflow.grpc | gRPC 服务调用 | main | main, error | ❌ | 可选 |
 | 函数执行 | xflow.function | 执行 Go 函数或内联代码 | main | main, error | ❌ | 可选 |
 | 数据库操作 | xflow.database | 数据库 CRUD 操作 | main | main, error | ❌ | 可选 |

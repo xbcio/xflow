@@ -413,7 +413,7 @@ func TestTriggerRef_BuilderContract(t *testing.T) {
 //
 // Nothing inside node/internal/ (this package) itself references
 // BaseTrigger -- it's only embedded by the five trigger node types in
-// node/trigger/* (webhook, redishub, timer, kafka, cron; confirmed by grep).
+// node/trigger/* (webhook, redis, timer, kafka, cron; confirmed by grep).
 // But those five are real production node types, and BaseTrigger.Execute is
 // their entire Execute implementation: it is not dead code, it's shared
 // code that happens to live one package away from all of its callers. Its

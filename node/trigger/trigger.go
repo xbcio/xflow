@@ -1,6 +1,6 @@
 // Package trigger is the entry point for xflow's built-in trigger nodes. Each
 // trigger kind lives in its own subpackage (timer, cron, webhook, kafka,
-// redishub); this package holds only the factory functions and the
+// redis); this package holds only the factory functions and the
 // custom-trigger definition forwarders.
 //
 // The factories return the subpackages' concrete *Node types rather than an
@@ -17,7 +17,7 @@ import (
 	core "github.com/xbcio/xflow/node/internal"
 	"github.com/xbcio/xflow/node/trigger/cron"
 	"github.com/xbcio/xflow/node/trigger/kafka"
-	"github.com/xbcio/xflow/node/trigger/redishub"
+	"github.com/xbcio/xflow/node/trigger/redis"
 	"github.com/xbcio/xflow/node/trigger/timer"
 	"github.com/xbcio/xflow/node/trigger/webhook"
 )
@@ -51,5 +51,5 @@ func Webhook() *webhook.Node { return webhook.New() }
 // live in the kafka subpackage.
 func Kafka() *kafka.Node { return kafka.New() }
 
-// RedisHub creates a trigger that consumes a Redis stream or pub/sub channel.
-func RedisHub() *redishub.Node { return redishub.New() }
+// Redis creates a trigger that consumes a Redis stream or pub/sub channel.
+func Redis() *redis.Node { return redis.New() }

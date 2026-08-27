@@ -1,4 +1,4 @@
-package redishub
+package redis
 
 import (
 	"context"
@@ -9,7 +9,7 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
-// The redishub tests that reach emitMessage assert EmitCount and nothing else —
+// The redis tests that reach emitMessage assert EmitCount and nothing else —
 // they never read back the event they caused. That leaves the event identity
 // unpinned, and for this trigger the identity is doing two jobs at once: it is
 // the deduplication key and it is the `<stream>/<entry-id>` string downstream

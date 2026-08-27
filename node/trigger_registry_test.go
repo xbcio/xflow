@@ -39,7 +39,7 @@ func TestBuiltInTriggersAreRegisteredViaNodeImport(t *testing.T) {
 		"xflow.trigger.cron",
 		"xflow.trigger.webhook",
 		"xflow.trigger.kafka",
-		"xflow.trigger.redis_hub",
+		"xflow.trigger.redis",
 	} {
 		h, ok := registry.LookupTrigger(nodeType)
 		if !ok {

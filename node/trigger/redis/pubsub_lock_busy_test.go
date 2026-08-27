@@ -1,4 +1,4 @@
-package redishub
+package redis
 
 import (
 	"context"
@@ -10,7 +10,7 @@ import (
 )
 
 // TestPubSubActivateStandsDownWhenAnotherRunnerHoldsTheLock pins
-// redishub.go:155-158:
+// redis.go:155-158:
 //
 //	l, ok, err := in.Runtime.TryLock(ctx, "trigger:...:pubsub", pubSubLockTTL)
 //	if err != nil || !ok {
@@ -20,7 +20,7 @@ import (
 // The !ok arm has never been driven anywhere in this repository.
 // triggertest.FakeRuntime.TryLock (triggertest.go:87-89) unconditionally
 // returns FakeLock{}, true, nil, and this package's own override,
-// renewableLockRuntime.TryLock (redishub_test.go:215-217), hardcodes true as
+// renewableLockRuntime.TryLock (redis_test.go:215-217), hardcodes true as
 // well. Those are the only two TryLock fakes that exist, so no test has ever
 // seen a busy lock and the check is free to delete.
 //
@@ -82,7 +82,7 @@ func TestPubSubActivateStandsDownWhenAnotherRunnerHoldsTheLock(t *testing.T) {
 			sub, err := New().Mode("pubsub").Channel("orders").Activate(context.Background(), &types.TriggerActivateInput{
 				WorkflowID: "wf-1",
 				NodeName:   "redis",
-				Params:     map[string]any{"mode": "pubsub", "channel": "orders", "max_inflight": 1},
+				Params:     map[string]any{"addr": "127.0.0.1:6379", "mode": "pubsub", "channel": "orders", "max_inflight": 1},
 				Runtime:    rt,
 			})
 			if sub != nil {

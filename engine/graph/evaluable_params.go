@@ -62,15 +62,15 @@ var evaluableParams = map[string]map[string]bool{
 	// template in xflow.http headers work. The entry must exist all the same --
 	// a MISSING type yields an empty exemption set too, but by accident, and
 	// the registry-coverage test exists to keep the two apart.
-	"xflow.http":              {},
-	"xflow.start":             {},
-	"xflow.end":               {},
-	"xflow.merge":             {},
-	"xflow.trigger.cron":      {},
-	"xflow.trigger.timer":     {},
-	"xflow.trigger.webhook":   {},
-	"xflow.trigger.kafka":     {},
-	"xflow.trigger.redis_hub": {},
+	"xflow.http":            {},
+	"xflow.start":           {},
+	"xflow.end":             {},
+	"xflow.merge":           {},
+	"xflow.trigger.cron":    {},
+	"xflow.trigger.timer":   {},
+	"xflow.trigger.webhook": {},
+	"xflow.trigger.kafka":   {},
+	"xflow.trigger.redis":   {},
 	// Action and group nodes whose handlers never call exprx: database uses
 	// params as column/table names, grpc uses them as host/service/method
 	// literals, notification sends to/subject/message verbatim, approval and

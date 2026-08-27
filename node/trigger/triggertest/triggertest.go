@@ -1,7 +1,7 @@
 // Package triggertest holds fakes for the trigger-facing interfaces in types
 // (TriggerRuntime, TriggerLock) that every trigger subpackage's tests need. It
 // is a normal package (not an external _test package) so node/trigger/timer,
-// cron, webhook, redishub and kafka can all import the same fake instead of
+// cron, webhook, redis and kafka can all import the same fake instead of
 // each carrying a drifting copy. Same pattern as store/storetest and
 // backend/internal/statestoretest.
 package triggertest
@@ -36,7 +36,7 @@ type FakeRuntime struct {
 // Recording them here rather than in each package's own fake is deliberate.
 // Every trigger fake in this repo used to take the TTL as `_ time.Duration` and
 // throw it away, so the four triggers' windows — 2 minutes for cron, twice the
-// interval for timer, 24 hours for webhook and redishub — could each be changed
+// interval for timer, 24 hours for webhook and redis — could each be changed
 // to a nanosecond with the suite staying green, which is deduplication turned
 // off rather than a value that merely looks wrong.
 type DedupCall struct {

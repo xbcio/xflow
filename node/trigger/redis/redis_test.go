@@ -1,8 +1,9 @@
-package redishub
+package redis
 
 import (
 	"context"
 	"errors"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -11,19 +12,19 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
-func TestRedisHubTriggerDescriptor(t *testing.T) {
+func TestRedisTriggerDescriptor(t *testing.T) {
 	n := New()
 	desc := n.Descriptor()
-	if desc.Type != "xflow.trigger.redis_hub" || desc.Kind != types.NodeKindTrigger {
+	if desc.Type != "xflow.trigger.redis" || desc.Kind != types.NodeKindTrigger {
 		t.Fatalf("descriptor = %+v", desc)
 	}
 }
 
-func TestRedisHubTriggerStreamRequiresStreamAndGroup(t *testing.T) {
+func TestRedisTriggerStreamRequiresStreamAndGroup(t *testing.T) {
 	_, err := New().Mode("stream").Activate(context.Background(), &types.TriggerActivateInput{
 		WorkflowID: "wf-1",
 		NodeName:   "redis",
-		Params:     map[string]any{"mode": "stream"},
+		Params:     map[string]any{"addr": "127.0.0.1:6379", "mode": "stream"},
 		Runtime:    triggertest.NewFakeRuntime(),
 	})
 	if err == nil {
@@ -31,11 +32,11 @@ func TestRedisHubTriggerStreamRequiresStreamAndGroup(t *testing.T) {
 	}
 }
 
-func TestRedisHubTriggerPubSubRequiresChannel(t *testing.T) {
+func TestRedisTriggerPubSubRequiresChannel(t *testing.T) {
 	_, err := New().Mode("pubsub").Activate(context.Background(), &types.TriggerActivateInput{
 		WorkflowID: "wf-1",
 		NodeName:   "redis",
-		Params:     map[string]any{"mode": "pubsub"},
+		Params:     map[string]any{"addr": "127.0.0.1:6379", "mode": "pubsub"},
 		Runtime:    triggertest.NewFakeRuntime(),
 	})
 	if err == nil {
@@ -43,7 +44,7 @@ func TestRedisHubTriggerPubSubRequiresChannel(t *testing.T) {
 	}
 }
 
-func TestRedisHubTriggerSkipsEmitWhenDedupErrors(t *testing.T) {
+func TestRedisTriggerSkipsEmitWhenDedupErrors(t *testing.T) {
 	orig := newConsumer
 	consumer := newScriptedConsumer([]Message{{ID: "1", Stream: "orders", Payload: []byte("one")}})
 	newConsumer = func(ConsumerConfig) (Consumer, error) { return consumer, nil }
@@ -53,7 +54,7 @@ func TestRedisHubTriggerSkipsEmitWhenDedupErrors(t *testing.T) {
 	rt.SetDedupFunc(func(context.Context, string, time.Duration) (bool, error) {
 		return true, errors.New("boom")
 	})
-	tr := New().Mode("stream").Stream("orders").Group("workers")
+	tr := New().Addr("127.0.0.1:6379").Mode("stream").Stream("orders").Group("workers")
 	sub, err := tr.Activate(context.Background(), &types.TriggerActivateInput{
 		WorkflowID: "wf-1",
 		NodeName:   "redis",
@@ -66,14 +67,14 @@ func TestRedisHubTriggerSkipsEmitWhenDedupErrors(t *testing.T) {
 	defer func() { _ = sub.Close(context.Background()) }()
 
 	if !rt.WaitDedup(time.Second) {
-		t.Fatal("redis hub trigger did not attempt dedup")
+		t.Fatal("redis trigger did not attempt dedup")
 	}
 	if got := rt.EmitCount(); got != 0 {
 		t.Fatalf("emit count = %d, want 0", got)
 	}
 }
 
-func TestRedisHubTriggerContinuesAfterEmitError(t *testing.T) {
+func TestRedisTriggerContinuesAfterEmitError(t *testing.T) {
 	orig := newConsumer
 	consumer := newScriptedConsumer([]Message{
 		{ID: "1", Stream: "orders", Payload: []byte("one")},
@@ -93,7 +94,7 @@ func TestRedisHubTriggerContinuesAfterEmitError(t *testing.T) {
 		}
 		return "exec-2", nil
 	})
-	tr := New().Mode("stream").Stream("orders").Group("workers").MaxInflight(1)
+	tr := New().Addr("127.0.0.1:6379").Mode("stream").Stream("orders").Group("workers").MaxInflight(1)
 	sub, err := tr.Activate(context.Background(), &types.TriggerActivateInput{
 		WorkflowID: "wf-1",
 		NodeName:   "redis",
@@ -110,7 +111,7 @@ func TestRedisHubTriggerContinuesAfterEmitError(t *testing.T) {
 	}
 }
 
-func TestRedisHubTriggerPubSubStopsWhenLockRenewalFails(t *testing.T) {
+func TestRedisTriggerPubSubStopsWhenLockRenewalFails(t *testing.T) {
 	origConsumer := newConsumer
 	consumer := newBlockingConsumer()
 	newConsumer = func(ConsumerConfig) (Consumer, error) { return consumer, nil }
@@ -126,10 +127,10 @@ func TestRedisHubTriggerPubSubStopsWhenLockRenewalFails(t *testing.T) {
 		lock:        lock,
 	}
 
-	sub, err := New().Mode("pubsub").Channel("orders").Activate(context.Background(), &types.TriggerActivateInput{
+	sub, err := New().Addr("127.0.0.1:6379").Mode("pubsub").Channel("orders").Activate(context.Background(), &types.TriggerActivateInput{
 		WorkflowID: "wf-1",
 		NodeName:   "redis",
-		Params:     map[string]any{"mode": "pubsub", "channel": "orders", "max_inflight": 1},
+		Params:     map[string]any{"addr": "127.0.0.1:6379", "mode": "pubsub", "channel": "orders", "max_inflight": 1},
 		Runtime:    rt,
 	})
 	if err != nil {
@@ -155,7 +156,7 @@ func TestRedisHubTriggerPubSubStopsWhenLockRenewalFails(t *testing.T) {
 	}
 }
 
-func TestRedisHubTriggerPubSubRequiresRenewableLock(t *testing.T) {
+func TestRedisTriggerPubSubRequiresRenewableLock(t *testing.T) {
 	origConsumer := newConsumer
 	newConsumer = func(ConsumerConfig) (Consumer, error) {
 		t.Fatal("consumer factory should not be called for non-renewable pub/sub lock")
@@ -169,10 +170,10 @@ func TestRedisHubTriggerPubSubRequiresRenewableLock(t *testing.T) {
 		lock:        lock,
 	}
 
-	sub, err := New().Mode("pubsub").Channel("orders").Activate(context.Background(), &types.TriggerActivateInput{
+	sub, err := New().Addr("127.0.0.1:6379").Mode("pubsub").Channel("orders").Activate(context.Background(), &types.TriggerActivateInput{
 		WorkflowID: "wf-1",
 		NodeName:   "redis",
-		Params:     map[string]any{"mode": "pubsub", "channel": "orders", "max_inflight": 1},
+		Params:     map[string]any{"addr": "127.0.0.1:6379", "mode": "pubsub", "channel": "orders", "max_inflight": 1},
 		Runtime:    rt,
 	})
 	if err == nil {
@@ -339,13 +340,14 @@ func (l *scriptedRenewableTriggerLock) releaseCount() int {
 	return l.releases
 }
 
-func TestRedisHubNodeTypeAndParamsAreFrozen(t *testing.T) {
-	n := New().Mode("stream").Stream("orders").Group("workers").Channel("c")
-	if n.NodeType() != "xflow.trigger.redis_hub" {
-		t.Fatalf("NodeType = %q, want xflow.trigger.redis_hub", n.NodeType())
+func TestRedisNodeTypeAndParamsAreFrozen(t *testing.T) {
+	n := New().Addr("127.0.0.1:6379").Mode("stream").Stream("orders").Group("workers").Channel("c")
+	if n.NodeType() != "xflow.trigger.redis" {
+		t.Fatalf("NodeType = %q, want xflow.trigger.redis", n.NodeType())
 	}
 	params := n.RawParams().(map[string]any)
 	want := map[string]any{
+		"addr":         "127.0.0.1:6379",
 		"mode":         "stream",
 		"stream":       "orders",
 		"group":        "workers",
@@ -362,7 +364,7 @@ func TestRedisHubNodeTypeAndParamsAreFrozen(t *testing.T) {
 	}
 }
 
-func TestRedisHubRawParamsNormalizesEmptyModeAndBadInflight(t *testing.T) {
+func TestRedisRawParamsNormalizesEmptyModeAndBadInflight(t *testing.T) {
 	// A zero-valued node (the YAML path's shape) must still serialize a usable
 	// mode and a positive inflight window, otherwise the semaphore in Activate
 	// would be unbuffered and the trigger would deadlock on its first message.
@@ -375,8 +377,140 @@ func TestRedisHubRawParamsNormalizesEmptyModeAndBadInflight(t *testing.T) {
 	}
 }
 
-func TestRedisHubConfigFromParamsRejectsUnknownMode(t *testing.T) {
-	if _, err := configFromParams(map[string]any{"mode": "queue"}); err == nil {
+func TestRedisConfigFromParamsRejectsUnknownMode(t *testing.T) {
+	if _, err := configFromParams(map[string]any{"addr": "127.0.0.1:6379", "mode": "queue"}, nil); err == nil {
 		t.Fatal("expected an unsupported-mode error")
+	}
+}
+
+func TestRedisConfigFromParamsRequiresAddr(t *testing.T) {
+	// Without this the consumer factory would build a client against
+	// go-redis's own default (localhost:6379) and the trigger would silently
+	// consume from whatever Redis happens to be on the runner's own host.
+	if _, err := configFromParams(map[string]any{
+		"mode":   "stream",
+		"stream": "orders",
+		"group":  "workers",
+	}, nil); err == nil {
+		t.Fatal("configFromParams() error = nil, want a missing-addr error")
+	}
+}
+
+func TestRedisConfigFromParamsTakesCredentialsOnlyFromSupply(t *testing.T) {
+	// The param surface has no password field at all, so this pins the other
+	// half of that arrangement: a definition that smuggles one in anyway must
+	// not be honoured, or an operator could put a credential into the stored,
+	// hashed workflow definition and have it work.
+	cfg, err := configFromParams(map[string]any{
+		"addr":     "127.0.0.1:6379",
+		"mode":     "stream",
+		"stream":   "orders",
+		"group":    "workers",
+		"username": "from-params",
+		"password": "from-params",
+	}, map[string]any{"username": "app", "password": "s3cret"})
+	if err != nil {
+		t.Fatalf("configFromParams() error = %v", err)
+	}
+	if cfg.Username != "app" || cfg.Password != "s3cret" {
+		t.Fatalf("credentials = %q/%q, want the supply's app/s3cret", cfg.Username, cfg.Password)
+	}
+}
+
+func TestRedisConfigFromParamsAppliesStreamDefaults(t *testing.T) {
+	cfg, err := configFromParams(map[string]any{
+		"addr":   "127.0.0.1:6379",
+		"mode":   "stream",
+		"stream": "orders",
+		"group":  "workers",
+	}, nil)
+	if err != nil {
+		t.Fatalf("configFromParams() error = %v", err)
+	}
+	// start_id "$" is the one default with a data consequence: "0" would
+	// replay the entire stream the first time any workflow is activated.
+	if cfg.StartID != "$" {
+		t.Fatalf("StartID = %q, want $", cfg.StartID)
+	}
+	if cfg.ClaimMinIdle != time.Minute {
+		t.Fatalf("ClaimMinIdle = %v, want 1m", cfg.ClaimMinIdle)
+	}
+	if cfg.DialTimeout != 10*time.Second {
+		t.Fatalf("DialTimeout = %v, want 10s", cfg.DialTimeout)
+	}
+}
+
+func TestRedisConfigFromParamsReadsTuning(t *testing.T) {
+	cfg, err := configFromParams(map[string]any{
+		"addr":   "127.0.0.1:6379",
+		"mode":   "stream",
+		"stream": "orders",
+		"group":  "workers",
+		"tuning": map[string]any{
+			"db":             2,
+			"consumer":       "runner-a",
+			"start_id":       "0",
+			"payload_field":  "body",
+			"claim_min_idle": "30s",
+			"dial_timeout":   "2s",
+		},
+	}, nil)
+	if err != nil {
+		t.Fatalf("configFromParams() error = %v", err)
+	}
+	want := ConsumerConfig{
+		Addr: "127.0.0.1:6379", DB: 2, DialTimeout: 2 * time.Second,
+		Mode: "stream", Stream: "orders", Group: "workers",
+		Consumer: "runner-a", StartID: "0",
+		PayloadField: "body", ClaimMinIdle: 30 * time.Second,
+		MaxInflight: defaultTriggerMaxInflight,
+	}
+	if cfg != want {
+		t.Fatalf("config = %+v, want %+v", cfg, want)
+	}
+}
+
+func TestRedisConfigFromParamsRejectsMalformedTuning(t *testing.T) {
+	// Both of these would otherwise leave the trigger running on defaults an
+	// operator believes they overrode, which is invisible until the stream
+	// misbehaves months later.
+	for name, tuning := range map[string]any{
+		"not an object":        "claim_min_idle=30s",
+		"unparseable duration": map[string]any{"claim_min_idle": "half an hour"},
+		"non-positive":         map[string]any{"dial_timeout": "0s"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := configFromParams(map[string]any{
+				"addr":   "127.0.0.1:6379",
+				"mode":   "stream",
+				"stream": "orders",
+				"group":  "workers",
+				"tuning": tuning,
+			}, nil); err == nil {
+				t.Fatalf("configFromParams() error = nil, want a tuning error for %v", tuning)
+			}
+		})
+	}
+}
+
+func TestRedisTuningIsOmittedFromRawParamsWhenUnset(t *testing.T) {
+	// A key that is always written would move the definition hash of every
+	// workflow that never asked for it, which is why Tuning is omitted rather
+	// than serialized as an empty object.
+	params := New().Addr("127.0.0.1:6379").Stream("orders").Group("workers").RawParams().(map[string]any)
+	if _, ok := params["tuning"]; ok {
+		t.Fatalf("RawParams carries a tuning key for an untuned node: %#v", params["tuning"])
+	}
+
+	tuned := New().Addr("127.0.0.1:6379").Stream("orders").Group("workers").
+		Tuning(Tuning{ClaimMinIdle: 30 * time.Second}).RawParams().(map[string]any)
+	tuning, ok := tuned["tuning"].(map[string]any)
+	if !ok {
+		t.Fatalf("RawParams[tuning] = %#v, want an object", tuned["tuning"])
+	}
+	// Only the knob that was set: the others must not appear either, for the
+	// same hash-stability reason.
+	if want := map[string]any{"claim_min_idle": "30s"}; !reflect.DeepEqual(tuning, want) {
+		t.Fatalf("tuning = %#v, want %#v", tuning, want)
 	}
 }

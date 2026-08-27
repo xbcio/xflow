@@ -16,7 +16,7 @@ import (
 func TestBuiltInTriggerExecuteForwardsTriggerEvent(t *testing.T) {
 	event := &types.TriggerEvent{ID: "evt-1", Kind: "timer", Source: "timer"}
 	triggers := []types.ActionHandler{
-		Timer(), Cron(), Webhook(), Kafka(), RedisHub(),
+		Timer(), Cron(), Webhook(), Kafka(), Redis(),
 	}
 	for _, h := range triggers {
 		out, err := h.Execute(context.Background(), &types.Input{
@@ -64,7 +64,7 @@ func TestFactoriesRegisterAllFiveTriggerTypes(t *testing.T) {
 		"xflow.trigger.cron",
 		"xflow.trigger.webhook",
 		"xflow.trigger.kafka",
-		"xflow.trigger.redis_hub",
+		"xflow.trigger.redis",
 	}
 	for _, nodeType := range want {
 		if _, ok := registry.LookupTrigger(nodeType); !ok {
@@ -75,11 +75,11 @@ func TestFactoriesRegisterAllFiveTriggerTypes(t *testing.T) {
 
 func TestFactoryNodeTypesMatch(t *testing.T) {
 	cases := map[string]types.ActionHandler{
-		"xflow.trigger.timer":     Timer(),
-		"xflow.trigger.cron":      Cron(),
-		"xflow.trigger.webhook":   Webhook(),
-		"xflow.trigger.kafka":     Kafka(),
-		"xflow.trigger.redis_hub": RedisHub(),
+		"xflow.trigger.timer":   Timer(),
+		"xflow.trigger.cron":    Cron(),
+		"xflow.trigger.webhook": Webhook(),
+		"xflow.trigger.kafka":   Kafka(),
+		"xflow.trigger.redis":   Redis(),
 	}
 	for want, h := range cases {
 		if got := h.Descriptor().Type; got != want {

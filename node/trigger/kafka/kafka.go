@@ -22,7 +22,7 @@ import (
 )
 
 // defaultTriggerMaxInflight bounds this trigger's concurrent in-flight work.
-// The redishub trigger declares its own constant of the same value; the two are
+// The redis trigger declares its own constant of the same value; the two are
 // independent per-trigger backpressure windows that happen to coincide, NOT a
 // contract that must stay in sync. Change one without changing the other.
 const defaultTriggerMaxInflight = 64

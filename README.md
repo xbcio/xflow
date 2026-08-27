@@ -102,7 +102,7 @@ $now()                         # Built-in functions
 | Supply (static) | `xflow.supply.static` | Inject static supply values |
 | Supply (external) | `xflow.supply.external` | Fetch supply values from external source |
 | Transform | `xflow.transform.*` | Data transforms: `aggregate`, `filter`, `limit`, `pick`, `remove_duplicates`, `rename`, `set`, `sort` |
-| Trigger | `xflow.trigger.*` | Entry triggers: `timer`, `cron`, `webhook`, `kafka`, `redis_hub` |
+| Trigger | `xflow.trigger.*` | Entry triggers: `timer`, `cron`, `webhook`, `kafka`, `redis` |
 
 For the complete node type reference including parameters and connection ports, see [docs/design/DSL-SPECIFICATION.md](docs/design/DSL-SPECIFICATION.md).
 
