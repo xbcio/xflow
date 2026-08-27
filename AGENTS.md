@@ -16,7 +16,7 @@ golangci-lint run        # Lint
 
 - **engine/** — Pure scheduling algorithm (zero business IO deps): Graph IR, Scheduler, ErrorPolicy, Suspend, lease/result semantics
 - **node/** — Public node DSL and builtin implementations (`node.HTTP`, `node.Function`, `node.Script`, etc.)
-  - `trigger/` — trigger factories (`trigger.Timer()` … `trigger.Kafka()`); each kind in its own subpackage (`timer/`, `cron/`, `webhook/`, `kafka/`, `redishub/`), each self-registering via `init()`
+  - `trigger/` — trigger factories (`trigger.Timer()` … `trigger.Kafka()`); each kind in its own subpackage (`timer/`, `cron/`, `webhook/`, `kafka/`, `redis/`), each self-registering via `init()`
   - `trigger/triggertest/` — shared fakes for `types.TriggerRuntime` / `types.TriggerLock` (a normal package, not `_test`, so all five subpackages can import it)
 - **types/** — Public DSL/runtime contracts: `WorkflowDef`, handler interfaces (`ActionHandler`, `SuspendingHandler`), handler IO, descriptors, statuses, `Result` (json-tagged, zero impl deps)
 - **store/** — Public persistence interfaces + domain models
