@@ -63,7 +63,7 @@ func TestDeclaredNodeFailsClosedWhenSupplyNeverArrives(t *testing.T) {
 // exists. An inline-code wasm node with no supply must keep running exactly as
 // before, or this change breaks every non-supply workflow in the fleet.
 func TestUndeclaredNodeIsUnaffected(t *testing.T) {
-	_, err := (&ScriptNode{}).Execute(context.Background(), &types.Input{
+	out, err := (&ScriptNode{}).Execute(context.Background(), &types.Input{
 		WorkflowName: "TestUndeclaredNodeIsUnaffected-wf",
 		NodeName:     "plain",
 		Params: map[string]any{
@@ -72,8 +72,16 @@ func TestUndeclaredNodeIsUnaffected(t *testing.T) {
 			"code":     "AGFzbQEAAAA=",
 		},
 	})
-	if err != nil && strings.Contains(err.Error(), "supply") {
-		t.Fatalf("an undeclared node hit the supply guard: %v", err)
+	// Assert success outright, not merely "the error didn't mention supply".
+	// The weaker form passes when Execute fails for ANY unrelated reason, so it
+	// cannot tell "the guard stayed out of the way" apart from "nothing ran at
+	// all" -- and it is the second reading that the guard could cause.
+	if err != nil {
+		t.Fatalf("an undeclared node failed to execute: %v", err)
+	}
+	if out == nil {
+		t.Fatal("an undeclared node returned no output; the guard must not " +
+			"interpose on a node that declared no supplies")
 	}
 }
 
