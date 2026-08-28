@@ -88,3 +88,11 @@ func UndeclareWasmSupplyConsumers(workflowName, nodeName string, supplyNodes []s
 func WasmSupplyDeclarations(workflowName, nodeName string) []string {
 	return supplyDeclarations.lookup(workflowName, nodeName)
 }
+
+// WasmSupplyConfigured reports whether the wasm module named by digest is
+// serving a configuration that came from a supply. See
+// wasm.SupplyConfiguredByDigest for why this is not the same question as
+// "did registration succeed".
+func WasmSupplyConfigured(digest string) bool {
+	return wasm.SupplyConfiguredByDigest(digest)
+}

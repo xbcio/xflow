@@ -189,3 +189,36 @@ func UnregisterSupplyConsumerByDigest(digest string, supplyNode string, reg *sup
 	}
 	reg.UnregisterConsumer(supplyNode, consumerKeyFor(key, supplyNode))
 }
+
+// SupplyConfiguredByDigest reports whether the module named by digest is both
+// marked source-driven AND currently serving a configuration that came from a
+// SupplyResource.
+//
+// This is the criterion spec §4.3.1 requires, and it is deliberately stronger
+// than "registration returned no error". Registration succeeding proves nothing:
+// supplyConsumerByDigest.OnSupplyChanged returns nil when the engine does not
+// exist yet (so the registry records the content as accepted and never
+// redelivers it), and seedSourceDrivenByKey sets the source-driven marker
+// unconditionally. The dangerous state is exactly "marked source-driven, nothing
+// configured" -- the module refuses traffic, or worse, an ensurePool from the
+// legacy globals path fills the slot with a config no supply ever produced.
+//
+// The provenance test is activePool.revision != 0, whose own comment states the
+// contract: "Zero means config did not come from a SupplyResource (legacy
+// globals path)". Byte length is NOT usable in its place: an empty rule set is a
+// legitimate supply payload (see TestSupplyConsumerAcceptsEmptyRuleset) and
+// keying on length would fail-close that deployment permanently.
+func SupplyConfiguredByDigest(digest string) bool {
+	key, ok := strings.CutPrefix(digest, "sha256:")
+	if !ok || len(key) != 64 {
+		return false
+	}
+	sharedReactorHost.mu.Lock()
+	e, exists := sharedReactorHost.engines[key]
+	sharedReactorHost.mu.Unlock()
+	if !exists || !e.configFromSource.Load() {
+		return false
+	}
+	p := e.active.Load()
+	return p != nil && p.revision != 0
+}

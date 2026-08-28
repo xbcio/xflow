@@ -252,6 +252,12 @@ func WasmSupplyDeclarations(workflowName, nodeName string) []string {
 	return scriptpkg.WasmSupplyDeclarations(workflowName, nodeName)
 }
 
+// WasmSupplyConfigured reports whether the wasm module named by digest is
+// serving supply-borne configuration.
+func WasmSupplyConfigured(digest string) bool {
+	return scriptpkg.WasmSupplyConfigured(digest)
+}
+
 func Set(fields map[string]any) *SetNode {
 	return transform.Set(fields)
 }
