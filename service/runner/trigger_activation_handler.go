@@ -356,7 +356,6 @@ func bindingIdentity(b engine.SupplyConsumerBinding) string {
 // failure this wiring exists to remove. Errors carry only the digest and the
 // supply node name — never directive params.
 func (h *TriggerActivationHandler) registerSupplyConsumers(ctx context.Context, bindings []engine.SupplyConsumerBinding) error {
-
 	if len(bindings) == 0 {
 		return nil
 	}
