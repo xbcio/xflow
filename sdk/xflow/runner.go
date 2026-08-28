@@ -41,6 +41,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -50,6 +51,7 @@ import (
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
+	"github.com/xbcio/xflow/execution/subgraph"
 	"github.com/xbcio/xflow/namespace"
 	xnode "github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/node/registry"
@@ -97,6 +99,19 @@ type RunnerConfig struct {
 	// Concurrency is how many leases this runner executes at once, and the
 	// capacity it reports. Zero uses the runner service default.
 	Concurrency int
+
+	// MapBatchConcurrency caps the number of map batches actively executing in
+	// this runner. It is separate from Kafka's emit/reorder window: queued emits
+	// may remain ordered without letting every batch retain partially-computed
+	// state. Zero defaults to GOMAXPROCS.
+	MapBatchConcurrency int
+
+	// MapItemConcurrency caps the total number of map body items executing in
+	// this runner across all admitted batches and trigger-hosted groups. It is
+	// separate from a map node's body_concurrency, which caps only one batch.
+	// Zero defaults to GOMAXPROCS; set it higher for I/O-bound bodies or lower
+	// for bodies backed by a narrower process-scoped resource pool.
+	MapItemConcurrency int
 
 	// Capabilities lists the node types this runner claims leases for. The
 	// control plane matches against this list, not against the process's node
@@ -453,6 +468,14 @@ func runnerOptionsFrom(opts []RunnerOption) *runnerOptions {
 // every trigger-group activation on a production runner fail closed.
 func buildRunnerServiceConfig(cfg RunnerConfig, opts ...RunnerOption) (runnersvc.Config, error) {
 	o := runnerOptionsFrom(opts)
+	if cfg.MapBatchConcurrency < 0 {
+		return runnersvc.Config{}, fmt.Errorf("xflow: RunnerConfig.MapBatchConcurrency must be positive, got %d",
+			cfg.MapBatchConcurrency)
+	}
+	if cfg.MapItemConcurrency < 0 {
+		return runnersvc.Config{}, fmt.Errorf("xflow: RunnerConfig.MapItemConcurrency must be positive, got %d",
+			cfg.MapItemConcurrency)
+	}
 
 	artifactCode := o.artifactResolver
 	if artifactCode == nil {
@@ -467,6 +490,15 @@ func buildRunnerServiceConfig(cfg RunnerConfig, opts ...RunnerOption) (runnersvc
 	if reg == nil {
 		reg = execution.NewRegistry()
 	}
+	mapBatchConcurrency := cfg.MapBatchConcurrency
+	if mapBatchConcurrency == 0 {
+		mapBatchConcurrency = runtime.GOMAXPROCS(0)
+	}
+	mapItemConcurrency := cfg.MapItemConcurrency
+	if mapItemConcurrency == 0 {
+		mapItemConcurrency = runtime.GOMAXPROCS(0)
+	}
+	mapConcurrencyLimiter := subgraph.NewMapConcurrencyLimiter(mapBatchConcurrency, mapItemConcurrency)
 
 	// Inner-engine hooks, when a metrics registry was configured. A map body
 	// item and a group member run on their own engine, so without these their
@@ -491,6 +523,7 @@ func buildRunnerServiceConfig(cfg RunnerConfig, opts ...RunnerOption) (runnersvc
 		runnersvc.NewPackageCache(runnersvc.PackageCacheConfig{MaxEntries: runnerPackageCacheEntries}),
 		append([]runnersvc.GroupRuntimeOption{
 			runnersvc.WithSuspendDisabled(),
+			runnersvc.WithGroupMapConcurrencyLimiter(mapConcurrencyLimiter),
 			runnersvc.WithGroupArtifactCodeResolver(artifactCode),
 		}, groupHookOpts...)...)
 
@@ -511,6 +544,7 @@ func buildRunnerServiceConfig(cfg RunnerConfig, opts ...RunnerOption) (runnersvc
 			reg,
 			runnersvc.NewPackageCache(runnersvc.PackageCacheConfig{MaxEntries: runnerPackageCacheEntries}),
 			append([]runnersvc.SubgraphRuntimeOption{
+				runnersvc.WithSubgraphMapConcurrencyLimiter(mapConcurrencyLimiter),
 				runnersvc.WithSubgraphArtifactCodeResolver(artifactCode),
 			}, subgraphHookOpts...)...),
 		ArtifactCodeResolver: artifactCode,
@@ -676,10 +710,20 @@ func runnerCapabilities(declared []string) []protocol.Capability {
 		if nodeType == "" {
 			continue
 		}
-		c := protocol.Capability{NodeType: nodeType}
+		c := protocol.Capability{
+			NodeType: nodeType,
+			Features: []string{
+				engine.FeatureEntryActivationReplicaV1,
+				engine.FeatureWasmSupplyDeclarationV1,
+			},
+		}
 		if nodeType == engine.GroupNodeType {
 			found = true
-			c.Features = []string{engine.FeatureGroupExecV1}
+			c.Features = []string{
+				engine.FeatureGroupExecV1,
+				engine.FeatureEntryActivationReplicaV1,
+				engine.FeatureWasmSupplyDeclarationV1,
+			}
 		}
 		out = append(out, c)
 	}
@@ -688,7 +732,11 @@ func runnerCapabilities(declared []string) []protocol.Capability {
 	}
 	return append(out, protocol.Capability{
 		NodeType: engine.GroupNodeType,
-		Features: []string{engine.FeatureGroupExecV1},
+		Features: []string{
+			engine.FeatureGroupExecV1,
+			engine.FeatureEntryActivationReplicaV1,
+			engine.FeatureWasmSupplyDeclarationV1,
+		},
 	})
 }
 

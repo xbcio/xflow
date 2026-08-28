@@ -8,6 +8,25 @@ import (
 
 const FeatureGroupExecV1 = "group.exec.v1"
 
+// FeatureEntryActivationReplicaV1 advertises that a runner understands replica-
+// scoped activation identity end-to-end (directive, inventory, ack, and seed
+// fencing). Replica zero intentionally does not require it so upgraded control
+// planes can coexist with legacy runners during rollout.
+const FeatureEntryActivationReplicaV1 = "entry.activation.replica.v1"
+
+// FeatureWasmSupplyDeclarationV1 advertises that a runner understands supply
+// consumer bindings expressed as node identity -- {WorkflowName, NodeName,
+// SupplyNode, DigestExpr} with no module digest -- and resolves the digest at
+// execution time from boundary-evaluated params.
+//
+// It gates placement rather than degrading behaviour because the degraded
+// behaviour is the worst failure this design has: a runner that does not
+// understand a declaration registers no consumer, and a wasm module with no
+// registered consumer evaluates every record against an empty rule set and
+// passes it through untagged, with no error anywhere. Refusing to place the
+// activation leaves it visibly unassigned instead.
+const FeatureWasmSupplyDeclarationV1 = "wasm.supply.declaration.v1"
+
 // GroupNodeType is the synthetic node type a group unit routes as. It is not a
 // registrable handler type — no runner has a handler for it — but it is the
 // NodeType both sides of the group capability handshake must agree on: the

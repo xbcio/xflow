@@ -311,6 +311,37 @@ func collectWasmBindings(workflowName, nodeName, nodeType string, params map[str
 	}
 }
 
+// hasSupplyDeclaration reports whether any binding names its consumer rather
+// than its module. One is enough: the directive carries the whole slice.
+func hasSupplyDeclaration(bindings []engine.SupplyConsumerBinding) bool {
+	for _, b := range bindings {
+		if b.IsDeclaration() {
+			return true
+		}
+	}
+	return false
+}
+
+// requireDeclarationCapability appends FeatureWasmSupplyDeclarationV1 to reqs
+// when any of the entry unit's supply consumer bindings is declaration-shaped
+// (see engine.SupplyConsumerBinding.IsDeclaration). This is an intrinsic
+// property of the entry unit's compiled graph, not of a particular replica or
+// storage write, so it belongs on the Requirements produced here in
+// DeriveEntryActivations rather than being recomputed by every caller that
+// reads eu.Requirements afterward.
+func requireDeclarationCapability(reqs []engine.CapabilityRequirement, nodeType string, bindings []engine.SupplyConsumerBinding) []engine.CapabilityRequirement {
+	if !hasSupplyDeclaration(bindings) {
+		return reqs
+	}
+	return engine.NormalizeRequirements(append(
+		append([]engine.CapabilityRequirement(nil), reqs...),
+		engine.CapabilityRequirement{
+			NodeType: nodeType,
+			Feature:  engine.FeatureWasmSupplyDeclarationV1,
+		},
+	))
+}
+
 // groupNameByNode maps each grouped node index to its group's name. Group
 // membership is exclusive (graph/group_compile.go:98 rejects a node in two
 // groups), so one map entry per node is enough. nil when the graph has no
@@ -370,6 +401,8 @@ func DeriveEntryActivations(g *graph.Graph) ([]EntryUnitActivation, error) {
 				return nil, fmt.Errorf("derive requirements for group entry unit %q: %w", gm.Name, err)
 			}
 			reqs := engine.RequirementsFromGraphPackage(pkg.Requirements)
+			supplyConsumers := SupplyConsumerBindingsForEntryUnit(g, i)
+			reqs = requireDeclarationCapability(reqs, engine.GroupNodeType, supplyConsumers)
 			out = append(out, EntryUnitActivation{
 				EntryUnitID:        gm.Name,
 				NodeType:           "xflow.group",
@@ -377,7 +410,7 @@ func DeriveEntryActivations(g *graph.Graph) ([]EntryUnitActivation, error) {
 				Selector:           gm.RunnerSelector,
 				Requirements:       reqs,
 				Supplies:           SuppliesForEntryUnit(g, i),
-				SupplyConsumers:    SupplyConsumerBindingsForEntryUnit(g, i),
+				SupplyConsumers:    supplyConsumers,
 				ActivationReplicas: gm.ActivationReplicas,
 			})
 		case graph.UnitNode:
@@ -398,18 +431,21 @@ func DeriveEntryActivations(g *graph.Graph) ([]EntryUnitActivation, error) {
 			if err != nil {
 				return nil, err
 			}
-			out = append(out, EntryUnitActivation{
-				EntryUnitID: nm.Name,
+			supplyConsumers := SupplyConsumerBindingsForEntryUnit(g, i)
+			reqs := engine.NormalizeRequirements([]engine.CapabilityRequirement{{
 				NodeType:    nm.Type,
-				Params:      params,
-				PackageHash: nodeTriggerPackageHash(nm.Type, nm.Version, params),
-				Selector:    nm.RunnerSelector,
-				Requirements: engine.NormalizeRequirements([]engine.CapabilityRequirement{{
-					NodeType:    nm.Type,
-					NodeVersion: nm.Version,
-				}}),
+				NodeVersion: nm.Version,
+			}})
+			reqs = requireDeclarationCapability(reqs, nm.Type, supplyConsumers)
+			out = append(out, EntryUnitActivation{
+				EntryUnitID:        nm.Name,
+				NodeType:           nm.Type,
+				Params:             params,
+				PackageHash:        nodeTriggerPackageHash(nm.Type, nm.Version, params),
+				Selector:           nm.RunnerSelector,
+				Requirements:       reqs,
 				Supplies:           SuppliesForEntryUnit(g, i),
-				SupplyConsumers:    SupplyConsumerBindingsForEntryUnit(g, i),
+				SupplyConsumers:    supplyConsumers,
 				ActivationReplicas: nm.ActivationReplicas,
 			})
 		}
