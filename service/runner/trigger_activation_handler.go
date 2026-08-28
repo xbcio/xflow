@@ -168,10 +168,11 @@ func (h *TriggerActivationHandler) Activate(ctx context.Context, d protocol.Acti
 		NodeName:   d.EntryUnitID,
 		Params:     withEntrySeedParams(d),
 		Runtime: &protocol.HTTPEntrySeedRuntime{
-			BaseURL:    h.seedBaseURL,
-			Client:     h.seedHTTPClient(),
-			Token:      h.authToken,
-			Generation: d.Generation,
+			BaseURL:      h.seedBaseURL,
+			Client:       h.seedHTTPClient(),
+			Token:        h.authToken,
+			Generation:   d.Generation,
+			ReplicaIndex: d.ReplicaIndex,
 		},
 		Supplies: resolveSuppliesForTrigger(d.Supplies),
 	}
@@ -180,7 +181,7 @@ func (h *TriggerActivationHandler) Activate(ctx context.Context, d protocol.Acti
 	if err != nil {
 		return err
 	}
-	h.storeSubscription(ctx, activationID{WorkflowID: d.WorkflowID, EntryUnitID: d.EntryUnitID}, sub, d.SupplyConsumers)
+	h.storeSubscription(ctx, activationIDFromActivate(d), sub, d.SupplyConsumers)
 	return nil
 }
 
@@ -212,10 +213,11 @@ func (h *TriggerActivationHandler) activateGroup(ctx context.Context, d protocol
 		Params:     withGroupEntrySeedParams(entryNodeDef.Parameters, d),
 		Runtime: &groupExecTriggerRuntime{
 			HTTPEntrySeedRuntime: &protocol.HTTPEntrySeedRuntime{
-				BaseURL:    h.seedBaseURL,
-				Client:     h.seedHTTPClient(),
-				Token:      h.authToken,
-				Generation: d.Generation,
+				BaseURL:      h.seedBaseURL,
+				Client:       h.seedHTTPClient(),
+				Token:        h.authToken,
+				Generation:   d.Generation,
+				ReplicaIndex: d.ReplicaIndex,
 			},
 			runtime:     h.groupRuntime,
 			pkg:         pkg,
@@ -228,7 +230,7 @@ func (h *TriggerActivationHandler) activateGroup(ctx context.Context, d protocol
 	if err != nil {
 		return err
 	}
-	h.storeSubscription(ctx, activationID{WorkflowID: d.WorkflowID, EntryUnitID: d.EntryUnitID}, sub, d.SupplyConsumers)
+	h.storeSubscription(ctx, activationIDFromActivate(d), sub, d.SupplyConsumers)
 	return nil
 }
 
@@ -296,6 +298,14 @@ func (h *TriggerActivationHandler) registerSupplyConsumers(ctx context.Context, 
 	}
 	compiled := make(map[string]bool, len(bindings))
 	for _, b := range bindings {
+		if b.IsDeclaration() {
+			// Declaration shape: the digest is not known yet. Record it; the
+			// execution-time guard in node/internal/code/script does the compile,
+			// the registration, and the fail-closed check once boundary
+			// evaluation has produced a real digest (spec §4.3.1).
+			node.DeclareWasmSupplyConsumers(b.WorkflowName, b.NodeName, []string{b.SupplyNode})
+			continue
+		}
 		if !compiled[b.ModuleDigest] {
 			raw, err := h.artifactCode(ctx, b.ModuleDigest)
 			if err != nil {
@@ -357,10 +367,14 @@ func removedBindings(old, next []engine.SupplyConsumerBinding) []engine.SupplyCo
 	return out
 }
 
-// unregisterSupplyConsumers drops each binding's consumer registration. It is a
-// no-op for a pair that was never registered, so it is safe on any subset.
+// unregisterSupplyConsumers undoes each binding. It is a no-op for a pair that
+// was never registered/declared, so it is safe on any subset.
 func unregisterSupplyConsumers(bindings []engine.SupplyConsumerBinding) {
 	for _, b := range bindings {
+		if b.IsDeclaration() {
+			node.UndeclareWasmSupplyConsumers(b.WorkflowName, b.NodeName, []string{b.SupplyNode})
+			continue
+		}
 		node.UnregisterWasmSupplyConsumerByDigest(b.ModuleDigest, b.SupplyNode)
 	}
 }
@@ -380,7 +394,7 @@ func (h *TriggerActivationHandler) seedHTTPClient() *http.Client {
 // Deactivating an unknown or already-closed activation is a safe no-op
 // (idempotent).
 func (h *TriggerActivationHandler) Deactivate(d protocol.DeactivateDirective) error {
-	id := activationID{WorkflowID: d.WorkflowID, EntryUnitID: d.EntryUnitID}
+	id := activationIDFromDeactivate(d)
 	h.mu.Lock()
 	st, ok := h.subs[id]
 	if ok {
