@@ -186,3 +186,132 @@ func TestValidateFilenameRejectsBackslashSeparatedPaths(t *testing.T) {
 		}
 	})
 }
+
+// TestValidateVersionRules pins the version charset and the reserved prefix.
+//
+// The version is the only carrier of "which source built these bytes" — the
+// digest answers "which bytes" and cross-compilation is not reproducible, so
+// nothing can recover a source revision from content. That is why '+' is
+// admitted: it is semver's build-metadata separator and the commit lands after
+// it.
+func TestValidateVersionRules(t *testing.T) {
+	t.Run("accepts", func(t *testing.T) {
+		for _, v := range []string{
+			"v1.4.0+g8f3a2c1", // the shape this whole design exists to carry
+			"v1",
+			"1.0.0-rc.1",
+			"build_2026.08.29",
+			strings.Repeat("v", MaxVersionBytes), // exactly at the column width
+		} {
+			got, err := ValidateVersion(v)
+			if err != nil {
+				t.Errorf("ValidateVersion(%q) rejected a legal version: %v", v, err)
+			}
+			if got != v {
+				t.Errorf("ValidateVersion(%q) returned %q; it must return the value unchanged, "+
+					"never a sanitized one — a caller whose version was rewritten would bind an "+
+					"identity it never asked for", v, got)
+			}
+		}
+	})
+
+	t.Run("rejects", func(t *testing.T) {
+		for _, tc := range []struct {
+			v   string
+			why string
+		}{
+			{"", "empty: Put's own defaulting handles the empty case before this is reached"},
+			{strings.Repeat("v", MaxVersionBytes+1), "over the VARCHAR(64) column width: MySQL would truncate it into a different identity"},
+			{"v1 ", "trailing space"},
+			{" v1", "leading space"},
+			{"v 1", "interior space"},
+			{"v1/../x", "path separators have no business in a version"},
+			{"<script>alert(1)</script>", "rendered next to the filename on the ops page"},
+			{"v1:2", "colon: reserved by the digest form sha256:<hex>"},
+			{"sha256-deadbeef1234", "impersonates a DefaultVersion output"},
+			{"SHA256-deadbeef1234", "impersonates a DefaultVersion output; the deception is visual, so the check is case-insensitive"},
+		} {
+			if _, err := ValidateVersion(tc.v); err == nil {
+				t.Errorf("ValidateVersion(%q) accepted an illegal version (%s)", tc.v, tc.why)
+			} else if !errors.Is(err, ErrInvalidVersion) {
+				t.Errorf("ValidateVersion(%q) must return ErrInvalidVersion so callers can match "+
+					"the sentinel; got %v", tc.v, err)
+			}
+		}
+	})
+}
+
+// TestPutDoesNotValidateItsOwnDefault is the regression guard for the ordering
+// trap: DefaultVersion deliberately emits the "sha256-" prefix that
+// ValidateVersion rejects, so validating after defaulting would fail every Put
+// that omits a version — which today is every non-test caller
+// (sdk/xflow/artifact_resolve.go:117-120 never sets one).
+func TestPutDoesNotValidateItsOwnDefault(t *testing.T) {
+	ctx := context.Background()
+	idx := &recordingIndex{}
+	as := NewArtifactStore(newCountingObjects(), idx)
+
+	content := []byte("wasm-ish bytes")
+	ref, err := as.Put(ctx, content, ArtifactMeta{Filename: "d.wasm", Namespace: "ns"})
+	if err != nil {
+		t.Fatalf("Put with an empty version must succeed and fall back to DefaultVersion; got %v", err)
+	}
+	want := DefaultVersion(ref.Digest)
+	if len(idx.bound) != 1 {
+		t.Fatalf("want exactly 1 identity bound, got %d", len(idx.bound))
+	}
+	if idx.bound[0].Version != want {
+		t.Errorf("empty version must bind DefaultVersion(%s) = %q; got %q",
+			ref.Digest, want, idx.bound[0].Version)
+	}
+}
+
+// TestPutRejectsBadVersionBeforeWritingBytes pins that validation happens on the
+// way in, not on the way to the index. A version rejected only at Bind time
+// would leave the blob already written to the object store — an orphan the
+// caller cannot see and nothing ever collects (store/objectstore has no delete
+// path by design, objectstore.go:79-83).
+func TestPutRejectsBadVersionBeforeWritingBytes(t *testing.T) {
+	ctx := context.Background()
+	objects := newCountingObjects()
+	idx := &recordingIndex{}
+	as := NewArtifactStore(objects, idx)
+
+	_, err := as.Put(ctx, []byte("bytes"), ArtifactMeta{
+		Filename:  "bad.wasm",
+		Namespace: "ns",
+		Version:   "sha256-cafebabe0000",
+	})
+	if !errors.Is(err, ErrInvalidVersion) {
+		t.Fatalf("Put must reject a reserved-prefix version with ErrInvalidVersion; got %v", err)
+	}
+	// countingObjects.puts is a plain field on the fake defined earlier in this
+	// same file (store/artifact_guards_test.go:41-49), not a method.
+	if objects.puts != 0 {
+		t.Errorf("a rejected Put must not write bytes; PutObject was called %d time(s)", objects.puts)
+	}
+	if objects.bytes != 0 {
+		t.Errorf("a rejected Put must not write bytes; %d byte(s) reached the object store", objects.bytes)
+	}
+	if len(idx.bound) != 0 {
+		t.Errorf("a rejected Put must not bind an identity; %d binding(s) recorded", len(idx.bound))
+	}
+}
+
+// recordingIndex is a minimal ArtifactIndex that remembers what was bound.
+type recordingIndex struct {
+	bound []ArtifactIdentity
+}
+
+func (r *recordingIndex) Bind(_ context.Context, id ArtifactIdentity) error {
+	r.bound = append(r.bound, id)
+	return nil
+}
+
+func (r *recordingIndex) HasReference(context.Context, string, string) (bool, error) {
+	return false, nil
+}
+
+func (r *recordingIndex) CountReferences(context.Context, string) (int64, error) {
+	return 0, nil
+}

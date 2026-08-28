@@ -18,6 +18,18 @@ import (
 // deployment already requires for xflow_supplies.
 const MaxArtifactBytes = 16 << 20
 
+// MaxVersionBytes caps a version at the width of the version column
+// (db/xflow_schema.sql:99, VARCHAR(64)). Enforcing it here rather than letting
+// MySQL truncate matters because uk_identity includes version: a truncated
+// value is a *different identity* than the caller asked for, bound silently.
+const MaxVersionBytes = 64
+
+// reservedVersionPrefix is what DefaultVersion emits. A caller-supplied version
+// must not start with it — a hand-typed "sha256-deadbeef1234" is unrelated to
+// any digest, and an operator scanning a list has no way to tell it apart from
+// a system-generated one. Reserving the prefix keeps it meaning exactly one thing.
+const reservedVersionPrefix = "sha256-"
+
 var (
 	// ErrArtifactTooLarge is returned when content exceeds MaxArtifactBytes.
 	ErrArtifactTooLarge = errors.New("store: artifact exceeds size limit")
@@ -26,6 +38,12 @@ var (
 	// Rejecting rather than silently sanitizing is deliberate: a caller that
 	// passed a path wants to find out, not to have it quietly rewritten.
 	ErrInvalidFilename = errors.New("store: invalid artifact filename")
+
+	// ErrInvalidVersion is returned when a caller-supplied version is not a legal
+	// version string. Like ErrInvalidFilename it rejects rather than sanitizes: a
+	// caller whose version was quietly rewritten would bind an identity it never
+	// asked for, and uk_identity would then hold a name nobody can reproduce.
+	ErrInvalidVersion = errors.New("store: invalid artifact version")
 
 	// ErrVersionConflict is returned when (namespace, filename, version) already
 	// resolves to different content. A version binding is immutable once made —
@@ -59,7 +77,7 @@ type ArtifactMeta struct {
 	Filename string
 	// Version defaults to DefaultVersion(digest) when empty.
 	Version string
-	// Namespace is the tenant, and participates in the identity unique key.
+	// Namespace is the server-issued isolation scope and participates in the identity unique key.
 	Namespace string
 	// ContentType is advisory. Empty means "infer from the Filename suffix",
 	// falling back to application/octet-stream.
@@ -75,11 +93,11 @@ type ArtifactIdentity struct {
 	ContentType string
 }
 
-// ArtifactIndex is the identity layer: tenant-scoped names pointing at
+// ArtifactIndex is the identity layer: namespace-scoped names pointing at
 // content-addressed bytes. It is separate from objectstore.Store because the
 // two layers answer different questions — the object store deduplicates bytes
-// globally and cannot be tenant-aware, while the index is exactly what makes
-// tenant authorization possible without breaking that deduplication.
+// globally and is not namespace-aware, while the index is exactly what makes
+// namespace authorization possible without breaking that deduplication.
 //
 // Only the authoritative (server-side) store has an index. A runner-side
 // ArtifactStore resolves purely by digest and carries a nil index.
@@ -132,6 +150,18 @@ func (s *ArtifactStore) Put(ctx context.Context, content []byte, meta ArtifactMe
 	if err != nil {
 		return ArtifactRef{}, err
 	}
+	// Validated here, before any bytes are written: a version rejected further
+	// down (at Bind) would leave the blob already in the object store, an orphan
+	// the caller never learns about and nothing ever collects — store/objectstore
+	// has no delete path by design (objectstore.go:79-83).
+	//
+	// The empty case is NOT validated: it is filled in from DefaultVersion below,
+	// whose output deliberately carries the prefix ValidateVersion reserves.
+	if meta.Version != "" {
+		if _, err := ValidateVersion(meta.Version); err != nil {
+			return ArtifactRef{}, err
+		}
+	}
 
 	digest := ContentHash(content)
 	ref := ArtifactRef{Digest: digest, Size: int64(len(content)), Filename: name}
@@ -157,6 +187,11 @@ func (s *ArtifactStore) Put(ctx context.Context, content []byte, meta ArtifactMe
 	}
 	version := meta.Version
 	if version == "" {
+		// Validated at the top of Put when non-empty. This branch must NOT
+		// validate its own output: DefaultVersion emits "sha256-<hex[:12]>",
+		// exactly the prefix ValidateVersion reserves, so a validation here
+		// would reject every Put that omits a version — which today is every
+		// non-test caller (sdk/xflow/artifact_resolve.go:117-120).
 		version = DefaultVersion(digest)
 	}
 	if err := s.index.Bind(ctx, ArtifactIdentity{
@@ -329,6 +364,48 @@ func ValidateFilename(name string) (string, error) {
 		return "", fmt.Errorf("%w: %q is not a bare base name", ErrInvalidFilename, name)
 	}
 	return name, nil
+}
+
+// ValidateVersion accepts a caller-supplied version and returns it unchanged.
+//
+// The version answers "which source built these bytes"; the digest already
+// answers "which bytes". Cross-compilation is not reproducible, so nothing can
+// recover a source revision from content — the version string is the only
+// carrier. That is why '+' is admitted: it is semver's build-metadata
+// separator, and the commit is the segment after it ("v1.4.0+g8f3a2c1").
+//
+// The charset is a whitelist, so whitespace anywhere — leading, trailing or
+// interior — is already rejected by it and needs no separate rule.
+//
+// This is one layer of defence for rendering, NOT a substitute for it. The
+// version is displayed beside the filename, and ValidateFilename admits '<',
+// '>', '"', '\'' and '&' (it guards path safety, not HTML safety). Any page
+// showing either value must escape it regardless of this function.
+func ValidateVersion(version string) (string, error) {
+	if version == "" {
+		return "", fmt.Errorf("%w: empty", ErrInvalidVersion)
+	}
+	if len(version) > MaxVersionBytes {
+		return "", fmt.Errorf("%w: longer than %d bytes", ErrInvalidVersion, MaxVersionBytes)
+	}
+	for i := 0; i < len(version); i++ {
+		c := version[i]
+		ok := (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+			(c >= '0' && c <= '9') ||
+			c == '.' || c == '_' || c == '+' || c == '-'
+		if !ok {
+			// Echoing the whole value is safe and useful here: it is a short
+			// caller-supplied name, never artifact content.
+			return "", fmt.Errorf("%w: %q has a character outside [A-Za-z0-9._+-]", ErrInvalidVersion, version)
+		}
+	}
+	// Case-insensitive: what this blocks is visual impersonation, and
+	// "SHA256-" reads the same as "sha256-" to someone scanning a list.
+	if strings.HasPrefix(strings.ToLower(version), reservedVersionPrefix) {
+		return "", fmt.Errorf("%w: %q uses the %q prefix reserved for system-generated versions",
+			ErrInvalidVersion, version, reservedVersionPrefix)
+	}
+	return version, nil
 }
 
 // inferContentType guesses a MIME type from the filename suffix. The value is
