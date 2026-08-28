@@ -74,8 +74,14 @@ func (c *wasmWarmupConsumer) OnSupplyChanged(ctx context.Context, _ supply.Snaps
 		// The pointer content is operator-supplied. A malformed digest is a real
 		// failure: the node will fail closed on its next message, so reporting it
 		// as not-ready here is exactly right.
-		return fmt.Errorf("warm-up for supply %q resolved a malformed artifact digest: %w",
-			c.supplyNode, err)
+		//
+		// Do NOT wrap err. store.ValidateDigest embeds the offending value
+		// verbatim ("invalid artifact digest %q"), and that value is whatever the
+		// $supplies-rooted expression resolved to -- supply content, not a digest,
+		// precisely in the case where it is malformed. Names only, same rule as
+		// the branch above.
+		return fmt.Errorf("warm-up for supply %q (workflow %s, node %s) resolved a value that is not a "+
+			"sha256:<64 hex> artifact digest", c.supplyNode, c.workflow, c.node)
 	}
 	if node.WasmSupplyConfigured(digest) {
 		return nil

@@ -312,6 +312,18 @@ func withGroupEntrySeedParams(nodeParams map[string]any, d protocol.ActivateDire
 	return merged
 }
 
+// bindingIdentity renders the part of a binding that names WHICH consumer a
+// diagnostic is about. A declaration carries no digest yet — the digest only
+// exists once supply content resolves — so printing ModuleDigest for one yields
+// an empty string. Never include DigestExpr: it is node-authored text and
+// belongs in no log line.
+func bindingIdentity(b engine.SupplyConsumerBinding) string {
+	if b.IsDeclaration() {
+		return fmt.Sprintf("declaration %s/%s", b.WorkflowName, b.NodeName)
+	}
+	return fmt.Sprintf("module %s", b.ModuleDigest)
+}
+
 // registerSupplyConsumers compiles each bound wasm module and then registers it
 // as a consumer of its supply node, so a content change rebuilds that module's
 // instance pool.
@@ -344,12 +356,13 @@ func withGroupEntrySeedParams(nodeParams map[string]any, d protocol.ActivateDire
 // failure this wiring exists to remove. Errors carry only the digest and the
 // supply node name — never directive params.
 func (h *TriggerActivationHandler) registerSupplyConsumers(ctx context.Context, bindings []engine.SupplyConsumerBinding) error {
+
 	if len(bindings) == 0 {
 		return nil
 	}
 	if h.artifactCode == nil {
-		return fmt.Errorf("supply consumer registration requires an artifact code resolver (%d binding(s), first: module %s -> supply %q)",
-			len(bindings), bindings[0].ModuleDigest, bindings[0].SupplyNode)
+		return fmt.Errorf("supply consumer registration requires an artifact code resolver (%d binding(s), first: %s -> supply %q)",
+			len(bindings), bindingIdentity(bindings[0]), bindings[0].SupplyNode)
 	}
 	compiled := make(map[string]bool, len(bindings))
 	// acquired tracks every binding THIS call has already registered/declared/
