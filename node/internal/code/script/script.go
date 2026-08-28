@@ -15,7 +15,8 @@ import (
 
 	_ "github.com/xbcio/xflow/node/internal/code/script/js"
 
-	_ "github.com/xbcio/xflow/node/internal/code/script/wasm"
+	"github.com/xbcio/xflow/node/internal/code/script/wasm"
+	"github.com/xbcio/xflow/node/supply"
 )
 
 // ScriptNode implements xflow.script — runs a sandboxed dynamic script.
@@ -253,6 +254,45 @@ func (n *ScriptNode) Execute(ctx context.Context, input *types.Input) (*types.Ou
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
+	}
+
+	// Execution-time supply-consumer wiring (spec §4.3.1). The control plane can
+	// no longer name the module at compile time -- artifact_digest may be an
+	// expression -- so it sends a DECLARATION instead, and this is where the real
+	// digest, just resolved by boundary evaluation, meets it.
+	//
+	// Everything before the guard is here because the ORDER is load-bearing, for
+	// the same reason the activation-time version documents at
+	// service/runner/trigger_activation_handler.go:271-286: RegisterConsumer
+	// notifies immediately when the content is already cached, and the wasm
+	// notify handler silently succeeds when the module is not compiled yet. The
+	// registry then records the content as accepted and never redelivers it,
+	// while registration has already marked the module source-driven -- a state
+	// in which it refuses every message. Compiling first closes that window.
+	//
+	// The declaration lookup happens BEFORE the digest is inspected. A
+	// declaration can exist only when the control plane resolved a non-empty
+	// artifact_digest at activation time (collectWasmBindings never emits one for
+	// an inline-code node), so a live declaration with an empty resolved digest
+	// here means the boundary expression failed to resolve -- not "nothing to
+	// guard". Checking `digest != ""` first would let that case run the node's
+	// inline code against zero rules, which is exactly the leak this task exists
+	// to close.
+	if language == wasmScriptLanguage {
+		if declared := supplyDeclarations.lookup(input.WorkflowName, input.NodeName); len(declared) > 0 {
+			if digest == "" {
+				observeExecute(ctx, language, runtime, "config", time.Since(start))
+				return nil, types.NewTransientError("script.supply_consumer", fmt.Sprintf(
+					"node declares supply consumers %v but artifact_digest resolved to empty; refusing to evaluate against an empty rule set", declared))
+			}
+			if err := ensureWasmSupplyConsumers(ctx, digest, code, declared); err != nil {
+				observeExecute(ctx, language, runtime, "config", time.Since(start))
+				// Transient, not Permanent: a supply that has not arrived yet is
+				// self-healing on redelivery, and a Permanent verdict would make
+				// Kafka drop the record outright.
+				return nil, types.NewTransientError("script.supply_consumer", err.Error())
+			}
+		}
 	}
 
 	src := engine.Source{Code: code, Digest: digest}
@@ -520,6 +560,51 @@ func paramsWithoutCode(params map[string]any) map[string]any {
 		out[k] = v
 	}
 	return out
+}
+
+// wasmScriptLanguage is the language value that selects the wasm engine. It is
+// spelled once here so the supply guard and the engine lookup cannot drift —
+// engine.Register("wasm", ...) in wasm/reactor.go and wasm/wazero.go both key
+// off this exact literal.
+const wasmScriptLanguage = "wasm"
+
+// ensureWasmSupplyConsumers makes the module named by digest a registered
+// consumer of every declared supply, and REFUSES if that did not take effect.
+//
+// The steady-state cost is len(supplies) map probes: once configured, the
+// predicate short-circuits before any compile or registration is attempted.
+//
+// The verdict is deliberately not "registration returned nil". See
+// wasm.SupplyConfiguredByDigest: registration succeeds against a module that has
+// never been handed content, and that module then evaluates every record against
+// no rules at all. That is not a crash, it is silent pass-through -- for the SAS
+// pipeline it means the credential a clean rule exists to strip is never
+// stripped.
+//
+// Errors name the digest and the supply node and nothing else. The module code
+// and the node's params never appear: this error is logged.
+func ensureWasmSupplyConsumers(ctx context.Context, digest, code string, supplies []string) error {
+	if wasm.SupplyConfiguredByDigest(digest) {
+		return nil
+	}
+	// Compile BEFORE registering. See the caller's comment for why the reverse
+	// order leaves the module permanently source-driven with no configuration.
+	if err := wasm.CompileModule(ctx, code); err != nil {
+		return fmt.Errorf("compile wasm module %s declared as a consumer of %v: %w",
+			digest, supplies, err)
+	}
+	for _, supplyNode := range supplies {
+		if err := wasm.RegisterSupplyConsumerByDigest(digest, supplyNode, supply.Default); err != nil {
+			return fmt.Errorf("register wasm module %s as consumer of supply %q: %w",
+				digest, supplyNode, err)
+		}
+	}
+	if !wasm.SupplyConfiguredByDigest(digest) {
+		return fmt.Errorf("wasm module %s is declared source-driven for %v but holds no "+
+			"supply-borne configuration; refusing to evaluate against an empty rule set",
+			digest, supplies)
+	}
+	return nil
 }
 
 func init() { registry.Register(&ScriptNode{}) }
