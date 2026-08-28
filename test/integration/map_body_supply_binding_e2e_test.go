@@ -243,14 +243,25 @@ func TestSupplyConsumerBindingReachesMapBodyModule(t *testing.T) {
 
 	runnerCtx, runnerCancel := context.WithCancel(ctx)
 	defer runnerCancel()
+	// The entry unit's derived SupplyConsumers are declaration-shaped (DigestExpr,
+	// not ModuleDigest), so DeriveEntryActivations appends a
+	// FeatureWasmSupplyDeclarationV1 requirement on the trigger's NodeType
+	// (service/control/entry_activation_manager.go's requireDeclarationCapability).
+	// Without it here, MatchCapabilities never matches this runner and Reconcile
+	// leaves the activation's RunnerID empty — a runner-selection miss, not a
+	// binding-shape defect, but one that fails before the shape is ever checked.
 	runner := runnersvc.New(
 		protocol.NewClient(httpSrv.URL, client),
 		execution.NewRegistry(),
 		runnersvc.Config{
-			RunnerID:          runnerID,
-			Concurrency:       1,
-			Labels:            map[string]string{"zone": zoneLabel},
-			Capabilities:      []protocol.Capability{{NodeType: mapBodyTriggerType}, {NodeType: "xflow.map"}, {NodeType: "xflow.script"}},
+			RunnerID:    runnerID,
+			Concurrency: 1,
+			Labels:      map[string]string{"zone": zoneLabel},
+			Capabilities: []protocol.Capability{
+				{NodeType: mapBodyTriggerType, Features: []string{engine.FeatureWasmSupplyDeclarationV1}},
+				{NodeType: "xflow.map"},
+				{NodeType: "xflow.script"},
+			},
 			HeartbeatInterval: 100 * time.Millisecond,
 			PollWait:          10 * time.Millisecond,
 			ActivationTracker: tracker,
@@ -275,12 +286,29 @@ func TestSupplyConsumerBindingReachesMapBodyModule(t *testing.T) {
 	}
 	// The durable record is where the derivation lands. An empty list here is the
 	// exact pre-fix state: the supply is delivered, nobody consumes it.
-	wantBinding := engine.SupplyConsumerBinding{ModuleDigest: digest, SupplyNode: mapBodySupplyNode}
+	//
+	// This is a DECLARATION, not the legacy shape: the control plane never sets
+	// ModuleDigest (collectWasmBindings carries artifact_digest verbatim as
+	// DigestExpr, because it may be an expression -- spec §4.2). A body member's
+	// runtime WorkflowName is the body-bearing (map) node's name, per
+	// types.Input.WorkflowName's contract -- not the workflow's own name. See
+	// task-10-corrections.md C-0.
+	wantBinding := engine.SupplyConsumerBinding{
+		SupplyNode:   mapBodySupplyNode,
+		WorkflowName: mapNode,
+		NodeName:     bodyMember,
+		DigestExpr:   digest,
+	}
 	if len(act.SupplyConsumers) != 1 || act.SupplyConsumers[0] != wantBinding {
 		t.Fatalf("derived SupplyConsumers = %+v, want [%+v] — the map BODY's wasm module "+
 			"was not paired with the supply its parent map node depends on, so it would "+
 			"evaluate every record against an empty rule set. Supplies = %+v",
 			act.SupplyConsumers, wantBinding, act.Supplies)
+	}
+	if act.SupplyConsumers[0].ModuleDigest != "" {
+		t.Fatalf("derived SupplyConsumers[0].ModuleDigest = %q, want empty -- a declaration "+
+			"never carries the module digest; a literal artifact_digest travels verbatim as "+
+			"DigestExpr instead", act.SupplyConsumers[0].ModuleDigest)
 	}
 
 	// --- (a): the activation is hosted. ---
@@ -295,10 +323,18 @@ func TestSupplyConsumerBindingReachesMapBodyModule(t *testing.T) {
 		t.Fatal("(a) the trigger handler was never activated")
 	}
 
-	// --- (b): exactly one consumer registered for this supply. ---
-	if got := obs.get(mapBodySupplyNode); got != 1 {
-		t.Fatalf("(b) consumers for %q = %d, want 1 — without a registration the content "+
-			"reaches nobody and the body's module evaluates against no rules",
+	// --- (b): two consumers registered for this supply. Task 8/9's warm-up
+	// consumer (service/runner/wasm_supply_declaration.go's wasmWarmupConsumer)
+	// registers under its own "warmup/workflow/node@supply" key at activation
+	// time and, once it resolves and compiles the digest, ALSO registers the
+	// module's own "supply@moduleKey" key (node.RegisterWasmSupplyConsumerByDigest,
+	// :94) so the module keeps receiving content directly. Both keys are real,
+	// distinct, intentional registrations against the SAME supply name -- this
+	// assertion predates the warm-up consumer and asserted 1 before it existed.
+	if got := obs.get(mapBodySupplyNode); got != 2 {
+		t.Fatalf("(b) consumers for %q = %d, want 2 (warm-up consumer + module "+
+			"consumer) — without a registration the content reaches nobody and the "+
+			"body's module evaluates against no rules",
 			mapBodySupplyNode, got)
 	}
 
