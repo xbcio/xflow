@@ -15,17 +15,22 @@ import (
 // exactly one runner drives the entry unit at a time.
 //
 // The desired-state fields (Namespace, WorkflowID, WorkflowVersion, EntryUnitID,
-// NodeType, Params, PackageHash, Selector, Requirements, Desired) are owned by
-// Upsert. The assignment fields (RunnerID, SessionID, Generation, LeaseDeadline,
-// AssignedPackageHash) are owned by Assign/Fence/Renew and are guarded by
-// monotonic generation fencing: an Assign only wins when its generation strictly
-// exceeds the currently-stored generation, so a stale caller can never overwrite
-// a newer owner.
+// ReplicaIndex, NodeType, Params, PackageHash, Selector, Requirements, Supplies,
+// SupplyConsumers, Desired, RegistryRevision) are owned by Upsert. The assignment
+// fields (RunnerID, SessionID, Generation, LeaseDeadline, AssignedPackageHash)
+// are owned by Assign/Fence/Renew and are guarded by monotonic generation
+// fencing: an Assign only wins when its generation strictly exceeds the
+// currently-stored generation, so a stale caller can never overwrite a newer
+// owner.
 type EntryActivation struct {
 	Namespace       namespace.Namespace
 	WorkflowID      types.WorkflowID
 	WorkflowVersion string
 	EntryUnitID     string
+	// ReplicaIndex distinguishes sibling hosts of one logical trigger entry.
+	// Replica zero is the legacy activation identity and keeps its historical
+	// storage key. Siblings share workflow params (including Kafka GroupID).
+	ReplicaIndex uint32
 	// NodeType is the trigger node type the hosting runner must construct (e.g.
 	// "kafka.source"). For a group entry unit it is the reserved group node type.
 	// It is desired-state, owned by Upsert. Absent on records written before this
@@ -77,10 +82,16 @@ type EntryActivation struct {
 	// exactly the behaviour that preceded this field.
 	SupplyConsumers []SupplyConsumerBinding
 	Desired         bool
-	RunnerID      string
-	SessionID     string
-	Generation    uint64
-	LeaseDeadline time.Time
+	// RegistryRevision fences desired-state projection writes. A non-zero value
+	// is the authoritative workflow registry revision that produced this record.
+	// Upsert ignores a lower revision, and revision zero is the legacy mode: it
+	// cannot overwrite a record or workflow watermark that is already non-zero.
+	// Equal revisions may be written again to support idempotent projection.
+	RegistryRevision uint64
+	RunnerID         string
+	SessionID        string
+	Generation       uint64
+	LeaseDeadline    time.Time
 	// AssignedPackageHash is the PackageHash that was in effect when the current
 	// owner was assigned (snapshotted by Assign). The reconciler compares it
 	// against the desired PackageHash to detect a within-version content change:
@@ -97,6 +108,7 @@ type EntryActivationKey struct {
 	WorkflowID      types.WorkflowID
 	WorkflowVersion string
 	EntryUnitID     string
+	ReplicaIndex    uint32
 }
 
 // EntryActivationStore is the durable desired-state store for entry activations.
@@ -136,6 +148,20 @@ type EntryActivationStore interface {
 	Fence(ctx context.Context, key EntryActivationKey, gen uint64) error
 }
 
+// EntryActivationRevisionStore is the optional workflow-wide desired-state
+// revision fence. A manager advances the watermark before listing or upserting
+// any activation for that workflow. Implementations must advance monotonically
+// and must make Upsert reject a revision below the watermark even when the
+// activation key does not exist. Revision zero is legacy-compatible only while
+// the watermark is zero.
+//
+// Keeping this capability separate preserves compatibility with existing
+// EntryActivationStore implementations. Callers that project a non-zero
+// registry revision must fail closed when the capability is unavailable.
+type EntryActivationRevisionStore interface {
+	AdvanceWorkflowRevision(ctx context.Context, ns namespace.Namespace, workflowID types.WorkflowID, revision uint64) error
+}
+
 // SupplyRequirement is one supply content dependency of an entry unit.
 //
 // Node is the supply NODE's name in the graph (the identity dependency edges and
@@ -152,16 +178,57 @@ type SupplyRequirement struct {
 	RequireReady bool `json:"require_ready"`
 }
 
-// SupplyConsumerBinding pairs one wasm module with one supply node whose content
-// it consumes. The runner uses it to register the module as a supply consumer at
-// activation time, so a content change rebuilds that module's instance pool.
+// SupplyConsumerBinding tells a runner that one wasm script node consumes one
+// supply node's content. It has two shapes, and the runner branches on
+// IsDeclaration:
 //
-// ModuleDigest is the artifact digest ("sha256:<64 hex>") the script node carries
-// as artifact_digest — never the module bytes, which run to several MB. A wasm
-// node with only inline code produces no binding: adding a server-side digest
-// computation would create a second module-identity source that could drift from
-// the runtime's own, and inline multi-MB wasm is already an anti-pattern.
+//	DECLARATION (WorkflowName + NodeName set, ModuleDigest empty) -- the shape
+//	  every current control plane emits. It names the CONSUMER, not the module,
+//	  because artifact_digest may be an expression that only boundary evaluation
+//	  can resolve (spec §4.2). The runner records it and registers the real
+//	  {digest, supplyNode} consumer at execution time.
+//
+//	LEGACY (ModuleDigest set, names empty) -- what a pre-declaration control
+//	  plane wrote. The digest was a literal, so the runner compiles and registers
+//	  at activation time exactly as before. Kept so an upgraded runner keeps
+//	  working against a control plane that has not been upgraded yet.
+//
+// Every field is a string so the struct stays comparable: it is used as a map
+// key in both SupplyConsumerBindingsForEntryUnit's dedup set and the runner's
+// removedBindings diff.
+//
+// The registration key is deliberately NOT derived from these names. It stays
+// {digest, supplyNode} in node/internal/code/script/wasm/supply_consumer.go --
+// see spec §4.2.1 candidate 2 for what keying by node identity does to a
+// rollback (the old engine's consumer gets overwritten, and because the
+// source-driven marker is never cleared it keeps serving frozen rules with no
+// diagnostic at all).
 type SupplyConsumerBinding struct {
-	ModuleDigest string `json:"module_digest"`
-	SupplyNode   string `json:"supply_node"`
+	// ModuleDigest is the artifact digest ("sha256:<64 hex>") on legacy records
+	// only -- never the module bytes, which run to several MB. Empty on a
+	// declaration.
+	ModuleDigest string `json:"module_digest,omitempty"`
+	// SupplyNode is the supply resource whose content this consumer reads.
+	SupplyNode string `json:"supply_node"`
+	// WorkflowName is the graph name the consuming node runs under AT RUNTIME.
+	// For a map body member that is the map node's name, not the workflow's
+	// (types.Input.WorkflowName's contract); for a grouped node it is the group
+	// name (graph.SubgraphPackage sets Def.Name = GroupMeta.Name).
+	WorkflowName string `json:"workflow_name,omitempty"`
+	// NodeName is the consuming node's name within that graph.
+	NodeName string `json:"node_name,omitempty"`
+	// DigestExpr is the node's artifact_digest parameter VERBATIM, before
+	// evaluation. The warm-up consumer renders it against $supplies alone so it
+	// can pre-compile the new module the moment the pointer changes. It is a
+	// template over supply content, never a credential -- but it is still node
+	// configuration, so it must not be echoed in an error.
+	DigestExpr string `json:"digest_expr,omitempty"`
+}
+
+// IsDeclaration reports whether this binding names its consumer rather than its
+// module. Both names are required: the runner's declaration table is keyed by
+// the pair, so a half-filled key would collide with an unrelated node under the
+// empty string.
+func (b SupplyConsumerBinding) IsDeclaration() bool {
+	return b.WorkflowName != "" && b.NodeName != ""
 }

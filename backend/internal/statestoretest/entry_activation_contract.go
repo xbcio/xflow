@@ -41,6 +41,7 @@ func entryActivationKey(a engine.EntryActivation) engine.EntryActivationKey {
 		WorkflowID:      a.WorkflowID,
 		WorkflowVersion: a.WorkflowVersion,
 		EntryUnitID:     a.EntryUnitID,
+		ReplicaIndex:    a.ReplicaIndex,
 	}
 }
 
@@ -107,6 +108,69 @@ func RunEntryActivationContract(t *testing.T, newStore func(*testing.T) engine.E
 		}
 	})
 
+	t.Run("ReplicaSiblingsAreIsolated", func(t *testing.T) {
+		s := newStore(t)
+		first := sampleEntryActivation("u-siblings")
+		second := first
+		second.ReplicaIndex = 1
+		second.PackageHash = "pkg-sibling-1"
+
+		if err := s.Upsert(ctx, first); err != nil {
+			t.Fatalf("Upsert replica 0: %v", err)
+		}
+		if err := s.Upsert(ctx, second); err != nil {
+			t.Fatalf("Upsert replica 1: %v", err)
+		}
+
+		deadline := time.Now().Add(time.Minute).Truncate(time.Second)
+		if ok, err := s.Assign(ctx, entryActivationKey(first), "runner-0", "session-0", 3, deadline); err != nil || !ok {
+			t.Fatalf("Assign replica 0: ok=%v err=%v", ok, err)
+		}
+		if ok, err := s.Assign(ctx, entryActivationKey(second), "runner-1", "session-1", 7, deadline); err != nil || !ok {
+			t.Fatalf("Assign replica 1: ok=%v err=%v", ok, err)
+		}
+
+		got0, ok, err := s.Get(ctx, entryActivationKey(first))
+		if err != nil || !ok {
+			t.Fatalf("Get replica 0: ok=%v err=%v", ok, err)
+		}
+		got1, ok, err := s.Get(ctx, entryActivationKey(second))
+		if err != nil || !ok {
+			t.Fatalf("Get replica 1: ok=%v err=%v", ok, err)
+		}
+		if got0.ReplicaIndex != 0 || got0.RunnerID != "runner-0" || got0.Generation != 3 || got0.PackageHash != "pkg-abc" {
+			t.Fatalf("replica 0 was aliased or corrupted: %+v", got0)
+		}
+		if got1.ReplicaIndex != 1 || got1.RunnerID != "runner-1" || got1.Generation != 7 || got1.PackageHash != "pkg-sibling-1" {
+			t.Fatalf("replica 1 was aliased or corrupted: %+v", got1)
+		}
+
+		if err := s.Fence(ctx, entryActivationKey(first), 3); err != nil {
+			t.Fatalf("Fence replica 0: %v", err)
+		}
+		got1, ok, err = s.Get(ctx, entryActivationKey(second))
+		if err != nil || !ok {
+			t.Fatalf("Get replica 1 after sibling fence: ok=%v err=%v", ok, err)
+		}
+		if got1.RunnerID != "runner-1" || got1.Generation != 7 {
+			t.Fatalf("fencing replica 0 changed replica 1: %+v", got1)
+		}
+
+		list, err := s.List(ctx, namespace.Default)
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		seen := map[uint32]engine.EntryActivation{}
+		for _, act := range list {
+			if act.WorkflowID == first.WorkflowID && act.WorkflowVersion == first.WorkflowVersion && act.EntryUnitID == first.EntryUnitID {
+				seen[act.ReplicaIndex] = act
+			}
+		}
+		if len(seen) != 2 {
+			t.Fatalf("List must return both sibling identities, got %+v", seen)
+		}
+	})
+
 	// Re-upserting an EXISTING record must refresh the consumer bindings. This
 	// is a separate case from the first Upsert on purpose: a store that copies
 	// the whole record on create but refreshes desired-state field by field on
@@ -153,6 +217,47 @@ func RunEntryActivationContract(t *testing.T, newStore func(*testing.T) engine.E
 		}
 		if got.SupplyConsumers != nil {
 			t.Fatalf("SupplyConsumers = %#v, want nil", got.SupplyConsumers)
+		}
+	})
+
+	// A declaration-shaped binding must survive the store round-trip with all
+	// four identity fields intact. Losing WorkflowName/NodeName in the state
+	// store would put the runner back on the legacy branch, where it would try
+	// to compile the empty digest -- the same silent pass-through this whole
+	// change exists to close.
+	t.Run("SupplyConsumerDeclarationRoundTrip", func(t *testing.T) {
+		st := newStore(t)
+		act := engine.EntryActivation{
+			Namespace:   namespace.Default,
+			WorkflowID:  "wf-decl",
+			EntryUnitID: "trig",
+			NodeType:    "xflow.trigger.kafka",
+			Desired:     true,
+			SupplyConsumers: []engine.SupplyConsumerBinding{{
+				SupplyNode:   "wasm_versions",
+				WorkflowName: "collect",
+				NodeName:     "decode",
+				DigestExpr:   "${{ $supplies.wasm_versions.decode.digest }}",
+			}},
+		}
+		if err := st.Upsert(context.Background(), act); err != nil {
+			t.Fatalf("upsert: %v", err)
+		}
+		got, err := st.List(context.Background(), namespace.Default)
+		if err != nil {
+			t.Fatalf("list: %v", err)
+		}
+		var found *engine.EntryActivation
+		for i := range got {
+			if got[i].WorkflowID == "wf-decl" {
+				found = &got[i]
+			}
+		}
+		if found == nil {
+			t.Fatal("activation not found after upsert")
+		}
+		if !reflect.DeepEqual(found.SupplyConsumers, act.SupplyConsumers) {
+			t.Fatalf("SupplyConsumers = %+v, want %+v", found.SupplyConsumers, act.SupplyConsumers)
 		}
 	})
 
