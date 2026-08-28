@@ -153,8 +153,43 @@ func (h *TriggerActivationHandler) Activate(ctx context.Context, d protocol.Acti
 		return err
 	}
 
+	// INVARIANT (fix round 2, FINDING 3): registerSupplyConsumers just
+	// succeeded, which means EVERY binding in d.SupplyConsumers is now
+	// registered/declared/warmed (registerSupplyConsumers is itself atomic —
+	// see its own comment). From here to the end of this call, that
+	// registration must either reach storeSubscription — whose caller then
+	// owns releasing it on the next Deactivate or generation upgrade — or be
+	// released here before Activate returns an error. Skipping this leaks one
+	// reference per binding on every early return below, and
+	// ActivationTracker.activateLocked does not record a failed Activate into
+	// t.active, so a retried directive for the same generation acquires
+	// again on every retry: the leak is unbounded, not merely long-lived, and
+	// on this project's runners (never restarted) it is permanent. A
+	// stranded warm-up consumer whose module later fails to resolve then
+	// makes supply.Registry.isReadyLocked report the ENTIRE pointer supply
+	// not-ready for every OTHER workflow sharing it, with no activation left
+	// to Deactivate and clear it.
+	//
+	// reachedStore is set true ONLY immediately alongside the one
+	// storeSubscription call this invocation can make (either directly below,
+	// or inside activateGroup, which reports it back explicitly rather than
+	// Activate inferring success from activateGroup's own control flow) — so
+	// a future return path added to either function defaults to the safe
+	// (compensate) side instead of silently skipping compensation. On the
+	// success path this must NOT fire: storeSubscription reconciles the OLD
+	// registration, which is a different reference than the one just
+	// acquired for this call.
+	reachedStore := false
+	defer func() {
+		if !reachedStore {
+			unregisterSupplyConsumers(d.SupplyConsumers)
+		}
+	}()
+
 	if d.NodeType == engine.GroupNodeType {
-		return h.activateGroup(ctx, d)
+		ok, err := h.activateGroup(ctx, d)
+		reachedStore = ok
+		return err
 	}
 
 	handler, ok := h.triggers.Trigger(d.NodeType)
@@ -181,6 +216,7 @@ func (h *TriggerActivationHandler) Activate(ctx context.Context, d protocol.Acti
 	if err != nil {
 		return err
 	}
+	reachedStore = true
 	h.storeSubscription(ctx, activationIDFromActivate(d), sub, d.SupplyConsumers)
 	return nil
 }
@@ -190,21 +226,28 @@ func (h *TriggerActivationHandler) Activate(ctx context.Context, d protocol.Acti
 // that synthetic type has no registered handler), and installs a Runtime
 // that executes the group locally per batch via GroupRuntime before
 // admitting the real resulting exits (spec 2026-08-07 §3.3-§3.4).
-func (h *TriggerActivationHandler) activateGroup(ctx context.Context, d protocol.ActivateDirective) error {
+//
+// The bool return reports whether storeSubscription was reached (i.e.
+// activation actually took hold) — Activate uses it to decide whether the
+// supply-consumer registrations registerSupplyConsumers made for this
+// directive must be released (fix round 2, FINDING 3). It is set true
+// exactly once, immediately alongside the only storeSubscription call in
+// this function; every early return above that point reports false.
+func (h *TriggerActivationHandler) activateGroup(ctx context.Context, d protocol.ActivateDirective) (reachedStore bool, err error) {
 	if h.groupRuntime == nil {
-		return fmt.Errorf("trigger-group activation %q: no GroupRuntime configured on this runner", d.EntryUnitID)
+		return false, fmt.Errorf("trigger-group activation %q: no GroupRuntime configured on this runner", d.EntryUnitID)
 	}
 	if d.Package == nil {
-		return fmt.Errorf("trigger-group activation %q: directive carries no package", d.EntryUnitID)
+		return false, fmt.Errorf("trigger-group activation %q: directive carries no package", d.EntryUnitID)
 	}
 	pkg := d.Package
 	entryNodeDef, ok := findPackageNode(pkg, pkg.EntryNode)
 	if !ok {
-		return fmt.Errorf("trigger-group activation %q: entry node %q not found in package", d.EntryUnitID, pkg.EntryNode)
+		return false, fmt.Errorf("trigger-group activation %q: entry node %q not found in package", d.EntryUnitID, pkg.EntryNode)
 	}
 	handler, ok := h.triggers.Trigger(entryNodeDef.Type)
 	if !ok {
-		return fmt.Errorf("no trigger handler registered for node type %q (group %q entry)", entryNodeDef.Type, d.EntryUnitID)
+		return false, fmt.Errorf("no trigger handler registered for node type %q (group %q entry)", entryNodeDef.Type, d.EntryUnitID)
 	}
 
 	input := &types.TriggerActivateInput{
@@ -228,10 +271,10 @@ func (h *TriggerActivationHandler) activateGroup(ctx context.Context, d protocol
 
 	sub, err := handler.Activate(ctx, input)
 	if err != nil {
-		return err
+		return false, err
 	}
 	h.storeSubscription(ctx, activationIDFromActivate(d), sub, d.SupplyConsumers)
-	return nil
+	return true, nil
 }
 
 // findPackageNode returns the NodeDef named name within pkg.Def, or false if
@@ -284,6 +327,18 @@ func withGroupEntrySeedParams(nodeParams map[string]any, d protocol.ActivateDire
 // come from the artifact cache, so the cost is paid here instead of inside the
 // first message's deadline.
 //
+// This call is atomic across bindings (fix round 2, FINDING 3): if any
+// binding fails partway through the loop, every reference already
+// acquired/declared/warmed for EARLIER bindings in this same call is rolled
+// back before returning, via the same unregisterSupplyConsumers a full
+// Deactivate uses. Without this, a binding slice that fails partway (e.g. a
+// legacy binding's artifact fetch erroring after an earlier declaration
+// binding already acquired its two refcounts) would strand those earlier
+// references permanently — nothing else in the codebase ever revisits a
+// failed Activate to clean up what it partially registered, and a caller
+// that only checks "did this call return an error" (as Activate does) must
+// be able to treat non-nil as "nothing changed."
+//
 // Fail closed throughout: a module that cannot be compiled or registered would
 // otherwise host traffic with no rules and no diagnostic, which is the exact
 // failure this wiring exists to remove. Errors carry only the digest and the
@@ -297,6 +352,16 @@ func (h *TriggerActivationHandler) registerSupplyConsumers(ctx context.Context, 
 			len(bindings), bindings[0].ModuleDigest, bindings[0].SupplyNode)
 	}
 	compiled := make(map[string]bool, len(bindings))
+	// acquired tracks every binding THIS call has already registered/declared/
+	// warmed, in order, so a later binding's failure can roll all of them
+	// back atomically — see the deferred rollback below.
+	var acquired []engine.SupplyConsumerBinding
+	succeeded := false
+	defer func() {
+		if !succeeded {
+			unregisterSupplyConsumers(acquired)
+		}
+	}()
 	for _, b := range bindings {
 		if b.IsDeclaration() {
 			// Declaration shape: the digest is not known yet. Record it; the
@@ -320,6 +385,7 @@ func (h *TriggerActivationHandler) registerSupplyConsumers(ctx context.Context, 
 				node:       b.NodeName,
 				artifact:   h.artifactCode,
 			})
+			acquired = append(acquired, b)
 			continue
 		}
 		if !compiled[b.ModuleDigest] {
@@ -335,7 +401,9 @@ func (h *TriggerActivationHandler) registerSupplyConsumers(ctx context.Context, 
 		if err := node.RegisterWasmSupplyConsumerByDigest(b.ModuleDigest, b.SupplyNode); err != nil {
 			return fmt.Errorf("register wasm module %s as consumer of supply %q: %w", b.ModuleDigest, b.SupplyNode, err)
 		}
+		acquired = append(acquired, b)
 	}
+	succeeded = true
 	return nil
 }
 

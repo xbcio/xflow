@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
@@ -434,4 +435,246 @@ func TestWarmupSkipLogDoesNotLeakDigestExpr(t *testing.T) {
 		t.Fatal("expected a warning to be logged for the scope-limit path; the log " +
 			"assertion above would otherwise pass vacuously")
 	}
+}
+
+// assertWarmupConsumerFullyReleased performs one NORMAL, successful
+// Activate+Deactivate cycle for a single declaration binding naming
+// (workflow, nodeName, ptr) on h, then flips ptr to a digest the resolver
+// cannot resolve, and asserts the pointer supply is STILL ready afterward.
+//
+// This is fix round 2's required behavioral check (FINDING 3): it does NOT
+// read warmupConsumers.counts directly. The observable property is
+// node/supply/registry.go's isReadyLocked rule that a supply with a snapshot
+// but ZERO registered consumers is always ready. If an earlier failed
+// Activate on this exact (workflow, nodeName, ptr) leaked a reference, this
+// cycle's own acquire (leaked+1) and release (back down to leaked, never to
+// zero) leaves the warm-up consumer still registered; it then fails to
+// resolve the unresolvable digest below, records that as its outcome, and
+// IsReady reads false instead of true.
+func assertWarmupConsumerFullyReleased(t *testing.T, h *TriggerActivationHandler, workflow, nodeName, ptr string) {
+	t.Helper()
+
+	decl := engine.SupplyConsumerBinding{
+		SupplyNode:   ptr,
+		WorkflowName: workflow,
+		NodeName:     nodeName,
+		DigestExpr:   "${{ $supplies[\"" + ptr + "\"].decode.digest }}",
+	}
+	d := protocol.ActivateDirective{
+		WorkflowID: "wf-clean-cycle", EntryUnitID: "clean-trig", NodeType: "fake", Generation: 1,
+		Supplies:        []engine.SupplyRequirement{{Node: ptr}},
+		SupplyConsumers: []engine.SupplyConsumerBinding{decl},
+	}
+	if err := h.Activate(context.Background(), d); err != nil {
+		t.Fatalf("clean-cycle activate: %v", err)
+	}
+	if err := h.Deactivate(protocol.DeactivateDirective{
+		WorkflowID: "wf-clean-cycle", EntryUnitID: "clean-trig",
+	}); err != nil {
+		t.Fatalf("clean-cycle deactivate: %v", err)
+	}
+
+	// The digest below is well-formed (sha256:<64 hex>) but the resolver above
+	// rejects everything except fa.digest, so it is "unresolvable" the same
+	// way an artifact that has since been deleted or never replicated would
+	// be — not a format-validation rejection, which is a different failure
+	// mode than the one FINDING 3 describes.
+	//
+	// Apply's returned error is intentionally NOT asserted here: when a
+	// consumer IS still registered (the leak this helper exists to catch),
+	// Apply legitimately returns that consumer's rejection joined into its
+	// own error — that is itself part of the symptom, not a harness failure.
+	// The registry updates its cache and records the outcome regardless of
+	// what Apply returns (see registry.go's Apply doc comment), so the
+	// IsReady check below is unaffected either way.
+	_ = supply.Default.Apply(context.Background(), supply.Snapshot{
+		Name:      ptr,
+		Content:   []byte(`{"decode":{"digest":"sha256:` + strings.Repeat("0", 64) + `"}}`),
+		Hash:      "final",
+		Revision:  999,
+		FetchedAt: time.Now(),
+	})
+	if !supply.Default.IsReady(ptr) {
+		t.Fatalf("pointer supply %q is not ready after a clean Activate+Deactivate cycle -- "+
+			"a warm-up consumer reference from an earlier failed Activate is still "+
+			"registered and just failed to resolve an unrelated digest, which is "+
+			"exactly FINDING 3's cross-workflow availability loss", ptr)
+	}
+}
+
+// TestActivateRollsBackOnPartialSupplyConsumerRegistration is fix round 2's
+// FINDING 3, site A: registerSupplyConsumers itself must be atomic. A mixed
+// binding slice (one declaration binding that succeeds, one legacy binding
+// whose artifact fetch fails) makes the loop return mid-way. Without a
+// rollback, the declaration binding already processed strands one warm-up
+// reference and one declaration-table reference that nothing will ever
+// release, because Activate's own caller (ActivationTracker.activateLocked)
+// never records a failed Activate anywhere it could later clean up.
+func TestActivateRollsBackOnPartialSupplyConsumerRegistration(t *testing.T) {
+	fa := newWasmActivationFixture(t)
+	const workflow, nodeName = "TestActivateRollsBackPartial-collect", "decode"
+	ptr := testSupplyName(t) + "-ptr"
+	legacySupply := testSupplyName(t) + "-legacy"
+
+	resolver := func(_ context.Context, digest string) ([]byte, error) {
+		if digest == fa.digest {
+			return fa.raw, nil
+		}
+		return nil, fmt.Errorf("unresolvable digest %s", digest)
+	}
+
+	if err := supply.Default.Apply(context.Background(), supply.Snapshot{
+		Name:      ptr,
+		Content:   []byte(`{"decode":{"digest":"` + fa.digest + `"}}`),
+		Hash:      "p1",
+		Revision:  1,
+		FetchedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("apply pointer: %v", err)
+	}
+
+	fh := &fakeTriggerHandler{}
+	h := NewTriggerActivationHandler("https://control.internal", "",
+		fakeLookup{handlers: map[string]types.TriggerHandler{"fake": fh}},
+		WithArtifactCodeResolver(resolver))
+
+	decl := engine.SupplyConsumerBinding{
+		SupplyNode:   ptr,
+		WorkflowName: workflow,
+		NodeName:     nodeName,
+		DigestExpr:   "${{ $supplies[\"" + ptr + "\"].decode.digest }}",
+	}
+	// A legacy binding whose digest the resolver cannot fetch -- processed
+	// AFTER the declaration binding above, so registerSupplyConsumers has
+	// already acquired the declaration's two refcounts by the time this one
+	// fails and the loop returns.
+	badLegacy := engine.SupplyConsumerBinding{ModuleDigest: "does-not-resolve", SupplyNode: legacySupply}
+
+	mixed := protocol.ActivateDirective{
+		WorkflowID: "wf-sitea", EntryUnitID: "trig", NodeType: "fake", Generation: 1,
+		Supplies:        []engine.SupplyRequirement{{Node: ptr}},
+		SupplyConsumers: []engine.SupplyConsumerBinding{decl, badLegacy},
+	}
+
+	if err := h.Activate(context.Background(), mixed); err == nil {
+		t.Fatal("expected Activate to fail on the legacy binding's unresolvable digest")
+	}
+
+	assertWarmupConsumerFullyReleased(t, h, workflow, nodeName, ptr)
+}
+
+// TestActivateReleasesOnFailureAfterSupplyConsumersRegistered is fix round
+// 2's FINDING 3, site B: registerSupplyConsumers can succeed in full, and
+// Activate can still fail later -- the cheapest path is the unknown
+// trigger-type error. Without compensation, the reference
+// registerSupplyConsumers made is never reached by storeSubscription and is
+// never released either.
+func TestActivateReleasesOnFailureAfterSupplyConsumersRegistered(t *testing.T) {
+	fa := newWasmActivationFixture(t)
+	const workflow, nodeName = "TestActivateReleasesSiteB-collect", "decode"
+	ptr := testSupplyName(t) + "-ptr"
+
+	resolver := func(_ context.Context, digest string) ([]byte, error) {
+		if digest == fa.digest {
+			return fa.raw, nil
+		}
+		return nil, fmt.Errorf("unresolvable digest %s", digest)
+	}
+
+	if err := supply.Default.Apply(context.Background(), supply.Snapshot{
+		Name:      ptr,
+		Content:   []byte(`{"decode":{"digest":"` + fa.digest + `"}}`),
+		Hash:      "p1",
+		Revision:  1,
+		FetchedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("apply pointer: %v", err)
+	}
+
+	// No "unregistered-trigger-type" entry in this lookup -- NodeType below has
+	// no handler, which is Activate's cheapest post-registration failure path
+	// (:164 in trigger_activation_handler.go). "fake" IS registered so the
+	// clean-cycle helper's own Activate (NodeType "fake") succeeds.
+	fh := &fakeTriggerHandler{}
+	h := NewTriggerActivationHandler("https://control.internal", "",
+		fakeLookup{handlers: map[string]types.TriggerHandler{"fake": fh}},
+		WithArtifactCodeResolver(resolver))
+
+	decl := engine.SupplyConsumerBinding{
+		SupplyNode:   ptr,
+		WorkflowName: workflow,
+		NodeName:     nodeName,
+		DigestExpr:   "${{ $supplies[\"" + ptr + "\"].decode.digest }}",
+	}
+	d := protocol.ActivateDirective{
+		WorkflowID: "wf-siteb", EntryUnitID: "trig", NodeType: "unregistered-trigger-type", Generation: 1,
+		Supplies:        []engine.SupplyRequirement{{Node: ptr}},
+		SupplyConsumers: []engine.SupplyConsumerBinding{decl},
+	}
+
+	if err := h.Activate(context.Background(), d); err == nil {
+		t.Fatal("expected Activate to fail: no handler registered for the directive's node type")
+	}
+
+	assertWarmupConsumerFullyReleased(t, h, workflow, nodeName, ptr)
+}
+
+// TestActivateRetryDoesNotAccumulateUnboundedReferences is fix round 2's
+// FINDING 3, the retry/unboundedness case -- deliberately NOT redundant with
+// the site B test above. ActivationTracker.activateLocked does not record a
+// failed Activate into t.active, so a re-sent directive for the same
+// generation calls handler.Activate again on every retry. A compensation
+// mechanism that releases exactly one reference (plausible if someone
+// "fixes" this by decrementing once regardless of how many times the same
+// directive was retried) would pass a single-failure test and still leak
+// here: three failures must net to a fully released state, not almost one.
+func TestActivateRetryDoesNotAccumulateUnboundedReferences(t *testing.T) {
+	fa := newWasmActivationFixture(t)
+	const workflow, nodeName = "TestActivateRetryUnbounded-collect", "decode"
+	ptr := testSupplyName(t) + "-ptr"
+
+	resolver := func(_ context.Context, digest string) ([]byte, error) {
+		if digest == fa.digest {
+			return fa.raw, nil
+		}
+		return nil, fmt.Errorf("unresolvable digest %s", digest)
+	}
+
+	if err := supply.Default.Apply(context.Background(), supply.Snapshot{
+		Name:      ptr,
+		Content:   []byte(`{"decode":{"digest":"` + fa.digest + `"}}`),
+		Hash:      "p1",
+		Revision:  1,
+		FetchedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("apply pointer: %v", err)
+	}
+
+	h := NewTriggerActivationHandler("https://control.internal", "",
+		fakeLookup{handlers: map[string]types.TriggerHandler{"fake": &fakeTriggerHandler{}}},
+		WithArtifactCodeResolver(resolver))
+
+	decl := engine.SupplyConsumerBinding{
+		SupplyNode:   ptr,
+		WorkflowName: workflow,
+		NodeName:     nodeName,
+		DigestExpr:   "${{ $supplies[\"" + ptr + "\"].decode.digest }}",
+	}
+	d := protocol.ActivateDirective{
+		WorkflowID: "wf-retry", EntryUnitID: "trig", NodeType: "unregistered-trigger-type", Generation: 1,
+		Supplies:        []engine.SupplyRequirement{{Node: ptr}},
+		SupplyConsumers: []engine.SupplyConsumerBinding{decl},
+	}
+
+	// The SAME failing directive, three times -- mirroring a control plane
+	// that keeps re-sending an activation whose handler.Activate keeps
+	// failing, exactly as ActivationTracker.activateLocked's own comment
+	// documents ("old subscription, if any, is left untouched and alive").
+	for i := 0; i < 3; i++ {
+		if err := h.Activate(context.Background(), d); err == nil {
+			t.Fatalf("attempt %d: expected Activate to fail: no handler registered for the directive's node type", i)
+		}
+	}
+
+	assertWarmupConsumerFullyReleased(t, h, workflow, nodeName, ptr)
 }
