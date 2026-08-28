@@ -96,8 +96,9 @@ type ArtifactIdentity struct {
 // ArtifactIndex is the identity layer: namespace-scoped names pointing at
 // content-addressed bytes. It is separate from objectstore.Store because the
 // two layers answer different questions — the object store deduplicates bytes
-// globally and is not namespace-aware, while the index is exactly what makes
-// namespace authorization possible without breaking that deduplication.
+// globally and therefore cannot be namespace-aware, while the index is exactly
+// what makes namespace authorization possible without breaking that
+// deduplication.
 //
 // Only the authoritative (server-side) store has an index. A runner-side
 // ArtifactStore resolves purely by digest and carries a nil index.
