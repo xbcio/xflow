@@ -88,19 +88,34 @@ func TestPaginatedListsTreatZeroLimitAsUnbounded(t *testing.T) {
 	c := newSQLCapture(t)
 	nodes := &nodeRepo{db: c.db}
 	signals := &signalRepo{db: c.db}
+	artifacts := &artifactIndexRepo{db: c.db}
 
 	for _, tc := range []struct {
 		name string
-		run  func(store.ListOptions)
+		// innerLimits is how many LIMIT clauses the query legitimately contains
+		// even when unbounded, because they come from a subquery rather than
+		// from pagination. Asserting a count rather than absence keeps the test
+		// able to catch a stray outer LIMIT on those queries too.
+		innerLimits int
+		run         func(store.ListOptions)
 	}{
-		{"ListNodes", func(o store.ListOptions) {
+		{"ListNodes", 0, func(o store.ListOptions) {
 			_, _ = nodes.ListNodes(ctx, "exec-1", o)
 		}},
-		{"ListExpiredSuspensions", func(o store.ListOptions) {
+		{"ListExpiredSuspensions", 0, func(o store.ListOptions) {
 			_, _ = nodes.ListExpiredSuspensions(ctx, time.Now(), o)
 		}},
-		{"ListSignalsByNames", func(o store.ListOptions) {
+		{"ListSignalsByNames", 0, func(o store.ListOptions) {
 			_, _ = signals.ListSignalsByNames(ctx, "exec-1", []string{"sig"}, o)
+		}},
+		{"ListLatestVersions", 1, func(o store.ListOptions) {
+			// The one permitted LIMIT is latestRowPredicate's `LIMIT 1`, which
+			// picks the newest row per filename and has nothing to do with
+			// pagination.
+			_, _ = artifacts.ListLatestVersions(ctx, "ns", o)
+		}},
+		{"ListVersions", 0, func(o store.ListOptions) {
+			_, _ = artifacts.ListVersions(ctx, "ns", "a.wasm", o)
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -108,11 +123,12 @@ func TestPaginatedListsTreatZeroLimitAsUnbounded(t *testing.T) {
 			// for a build that dropped pagination altogether, so the second arm
 			// is what keeps the first one honest.
 			unbounded := c.sql(t, func() { tc.run(store.ListOptions{}) })
-			if strings.Contains(strings.ToUpper(unbounded), "LIMIT") {
-				t.Errorf("a zero limit must not emit a LIMIT clause: store.ListOptions "+
+			if got := strings.Count(strings.ToUpper(unbounded), "LIMIT"); got != tc.innerLimits {
+				t.Errorf("a zero limit must not add a LIMIT clause: store.ListOptions "+
 					"documents zero as unbounded and store/memstore implements it that "+
 					"way, so this query returns no rows where the memstore returns all "+
-					"of them.\nSQL: %s", unbounded)
+					"of them. want %d LIMIT clause(s) (all from subqueries), got %d.\nSQL: %s",
+					tc.innerLimits, got, unbounded)
 			}
 
 			paged := c.sql(t, func() { tc.run(store.ListOptions{Limit: 25, Offset: 5}) })

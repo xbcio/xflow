@@ -242,3 +242,79 @@ func (r *artifactIndexRepo) CountReferences(ctx context.Context, digest string) 
 	}
 	return count, nil
 }
+
+// latestRowPredicate is the group-wise maximum: keep the row that is newest for
+// its own (namespace, filename).
+//
+// It is a correlated subquery rather than a window function on purpose —
+// nothing else in this tree uses ROW_NUMBER(), and taking a hard MySQL 8.0
+// dependency for one ops-page query is not a trade worth making. Both the outer
+// scan and the subquery are served by uk_identity (namespace, filename,
+// version); EXPLAIN shows a covering index lookup on the outer side and an
+// index lookup on the inner.
+//
+// The `id DESC` tiebreak is load-bearing, not decoration. created_at is
+// DATETIME(3) and GORM stamps it client-side (autoCreateTime:milli), so two
+// versions bound within the same millisecond compare equal — without the
+// tiebreak "the latest" has no answer and the page flips between them across
+// refreshes.
+//
+// The outer row is referenced by table name because GORM's Model() emits no
+// alias; the inner one is aliased `y` so the two are distinguishable.
+const latestRowPredicate = `id = (
+	SELECT y.id FROM xflow_artifacts y
+	WHERE y.namespace = xflow_artifacts.namespace AND y.filename = xflow_artifacts.filename
+	ORDER BY y.created_at DESC, y.id DESC LIMIT 1
+)`
+
+// ListLatestVersions returns the newest identity row per filename in namespace.
+//
+// namespace is matched exactly and is never a wildcard — an empty string here
+// selects only rows literally stored with an empty namespace. Treating it as
+// "all namespaces" would be a horizontal privilege escalation, which is why the
+// scope is a plain equality predicate exactly as in HasReference above.
+func (r *artifactIndexRepo) ListLatestVersions(ctx context.Context, namespace string, opts store.ListOptions) ([]*store.ArtifactVersion, error) {
+	var ds []*dbArtifact
+	q := r.db.WithContext(ctx).
+		Model(&dbArtifact{}).
+		Where("namespace = ?", namespace).
+		Where(latestRowPredicate).
+		Order("filename, id")
+	err := applyPagination(q, opts).Find(&ds).Error
+	if err := wrapDBErr(fmt.Sprintf("list latest artifact versions in %q", namespace), err); err != nil {
+		return nil, err
+	}
+	return fromDBArtifacts(ds), nil
+}
+
+// ListVersions returns every version of one file, most recent first. Same
+// namespace rule as ListLatestVersions.
+func (r *artifactIndexRepo) ListVersions(ctx context.Context, namespace, filename string, opts store.ListOptions) ([]*store.ArtifactVersion, error) {
+	var ds []*dbArtifact
+	q := r.db.WithContext(ctx).
+		Model(&dbArtifact{}).
+		Where("namespace = ? AND filename = ?", namespace, filename).
+		Order("created_at DESC, id DESC")
+	err := applyPagination(q, opts).Find(&ds).Error
+	if err := wrapDBErr(fmt.Sprintf("list artifact versions %q/%q", namespace, filename), err); err != nil {
+		return nil, err
+	}
+	return fromDBArtifacts(ds), nil
+}
+
+func fromDBArtifacts(ds []*dbArtifact) []*store.ArtifactVersion {
+	out := make([]*store.ArtifactVersion, 0, len(ds))
+	for _, d := range ds {
+		out = append(out, &store.ArtifactVersion{
+			ArtifactIdentity: store.ArtifactIdentity{
+				Namespace:   d.Namespace,
+				Filename:    d.Filename,
+				Version:     d.Version,
+				Digest:      d.ContentHash,
+				ContentType: d.ContentType,
+			},
+			CreatedAt: d.CreatedAt,
+		})
+	}
+	return out
+}

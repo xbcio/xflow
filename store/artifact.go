@@ -9,6 +9,7 @@ import (
 	"mime"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/xbcio/xflow/store/objectstore"
 )
@@ -93,6 +94,17 @@ type ArtifactIdentity struct {
 	ContentType string
 }
 
+// ArtifactVersion is one identity row as read back: the binding plus when it
+// was made. It embeds the write shape rather than restating its fields —
+// Bind takes an ArtifactIdentity and never sees CreatedAt.
+type ArtifactVersion struct {
+	ArtifactIdentity
+	// CreatedAt is when this identity row was inserted, and it is the ordering
+	// key for "latest". It is a property of the binding, not of the bytes: the
+	// same digest can be bound under many versions at many times.
+	CreatedAt time.Time
+}
+
 // ArtifactIndex is the identity layer: namespace-scoped names pointing at
 // content-addressed bytes. It is separate from objectstore.Store because the
 // two layers answer different questions — the object store deduplicates bytes
@@ -116,6 +128,24 @@ type ArtifactIndex interface {
 	// namespaces. Used for operator-facing reference reporting; there is no
 	// automatic garbage collection.
 	CountReferences(ctx context.Context, digest string) (int64, error)
+
+	// ListLatestVersions returns, for each distinct filename in namespace, the
+	// single most recently created identity row — the "what is in the library"
+	// view.
+	//
+	// It deliberately does not answer "what is deployed": that lives in supply
+	// content, not here, and the two diverge as a matter of course (uploaded but
+	// not published; published but a runner has not converged yet). A page that
+	// shows this list under a heading like "in effect" would be lying.
+	//
+	// namespace is a required scope, not an optional filter: it is matched
+	// exactly, so the empty string selects only rows literally stored with an
+	// empty namespace and never acts as a wildcard.
+	ListLatestVersions(ctx context.Context, namespace string, opts ListOptions) ([]*ArtifactVersion, error)
+
+	// ListVersions returns every identity row for one (namespace, filename),
+	// most recently created first. Same namespace rule as ListLatestVersions.
+	ListVersions(ctx context.Context, namespace, filename string, opts ListOptions) ([]*ArtifactVersion, error)
 }
 
 // ArtifactStore adds "content-addressed and immutable" semantics on top of any

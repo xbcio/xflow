@@ -315,3 +315,15 @@ func (r *recordingIndex) HasReference(context.Context, string, string) (bool, er
 func (r *recordingIndex) CountReferences(context.Context, string) (int64, error) {
 	return 0, nil
 }
+
+// ListLatestVersions is unused by these tests: they exercise the Put/Bind
+// guards, not the ops-page read path, which is covered against real MySQL in
+// test/integration/sqlstore_artifact_test.go.
+func (r *recordingIndex) ListLatestVersions(context.Context, string, ListOptions) ([]*ArtifactVersion, error) {
+	return nil, nil
+}
+
+// ListVersions is unused by these tests; see ListLatestVersions above.
+func (r *recordingIndex) ListVersions(context.Context, string, string, ListOptions) ([]*ArtifactVersion, error) {
+	return nil, nil
+}

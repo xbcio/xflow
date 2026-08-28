@@ -58,6 +58,18 @@ func (m *memArtifactIndex) CountReferences(_ context.Context, digest string) (in
 	return n, nil
 }
 
+// ListLatestVersions is unused by these tests: they exercise retrieval
+// authorization and endpoint behaviour, not the ops-page read path, which is
+// covered against real MySQL in test/integration/sqlstore_artifact_test.go.
+func (m *memArtifactIndex) ListLatestVersions(context.Context, string, store.ListOptions) ([]*store.ArtifactVersion, error) {
+	return nil, nil
+}
+
+// ListVersions is unused by these tests; see ListLatestVersions above.
+func (m *memArtifactIndex) ListVersions(context.Context, string, string, store.ListOptions) ([]*store.ArtifactVersion, error) {
+	return nil, nil
+}
+
 // newArtifactTestServer wires an artifactModule over a filesystem object store
 // and the in-memory index, with a stub principal carrying scopes and namespace.
 func newArtifactTestServer(t *testing.T, scopes []string, ns string) (*http.ServeMux, *store.ArtifactStore, string) {
