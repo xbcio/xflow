@@ -221,3 +221,46 @@ func TestNewRunnerRejectsAMissingServerURL(t *testing.T) {
 		t.Errorf("error = %v, want it to name the missing server URL", err)
 	}
 }
+
+// runnerCapabilities builds three distinct Features literals: the plain
+// non-group branch, the group-override branch taken when the caller declares
+// engine.GroupNodeType, and the synthesized group entry appended when it does
+// not. Each one must carry engine.FeatureWasmSupplyDeclarationV1 — that is
+// what tells the control plane this runner can host declaration-shaped supply
+// consumer activations. Without it on any one of the three, a runner built
+// through that path reads as correctly configured while the control plane
+// refuses to place those activations on it, and the workflow sits pending
+// with nothing obviously wrong. Deliberately not a whole-list equality check:
+// other features are added to these lists independently of this one.
+func TestRunnerCapabilitiesAllCarryWasmSupplyDeclaration(t *testing.T) {
+	assertHasFeature := func(t *testing.T, c protocol.Capability) {
+		t.Helper()
+		for _, f := range c.Features {
+			if f == engine.FeatureWasmSupplyDeclarationV1 {
+				return
+			}
+		}
+		t.Errorf("capability NodeType=%q Features=%v is missing %s", c.NodeType, c.Features,
+			engine.FeatureWasmSupplyDeclarationV1)
+	}
+
+	// Non-group declared type plus the synthesized group entry appended
+	// because no group node type was declared.
+	nonGroupCaps := runnerCapabilities([]string{"xflow.script"})
+	if len(nonGroupCaps) != 2 {
+		t.Fatalf("runnerCapabilities([]string{\"xflow.script\"}) returned %d entries, want 2 "+
+			"(declared + synthesized group): %+v", len(nonGroupCaps), nonGroupCaps)
+	}
+	for _, c := range nonGroupCaps {
+		assertHasFeature(t, c)
+	}
+
+	// Declaring the group node type directly takes the group-override branch
+	// instead of the synthesized one.
+	groupCaps := runnerCapabilities([]string{engine.GroupNodeType})
+	if len(groupCaps) != 1 {
+		t.Fatalf("runnerCapabilities([]string{engine.GroupNodeType}) returned %d entries, want 1: %+v",
+			len(groupCaps), groupCaps)
+	}
+	assertHasFeature(t, groupCaps[0])
+}
