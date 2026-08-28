@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/exprx"
@@ -49,10 +50,23 @@ func (c *wasmWarmupConsumer) OnSupplyChanged(ctx context.Context, _ supply.Snaps
 	// a whole-table view, so a single render is internally consistent.
 	rendered, err := exprx.RenderTemplate(c.digestExpr, exprx.SuppliesEnv(supply.Default))
 	if err != nil {
-		slog.Warn("wasm warm-up skipped: artifact_digest expression could not be rendered "+
-			"against $supplies alone; this node reports bare supply delivery instead of "+
-			"module readiness, and its first message will pay the module compile",
-			"workflow", c.workflow, "node", c.node, "supply", c.supplyNode, "error", err)
+		// err is deliberately NOT logged: exprx's underlying compiler echoes the
+		// expression source verbatim in its error text (e.g. "unknown name $input
+		// (1:1)\n | $input.<whatever the node's params contain> ..."), and
+		// DigestExpr is operator-authored node configuration -- the same class of
+		// value the org's log-content policy and this task's own constraint both
+		// forbid echoing. This branch is not a rare failure; it is the documented,
+		// expected shape for any node whose artifact_digest references $input,
+		// $env, or $credentials, so logging err here would put that node's template
+		// text into the process log on every Apply to the pointer supply it names.
+		// Workflow, node, and supply names are enough for an operator who
+		// configured the node to identify which expression is affected without
+		// echoing it.
+		slog.Warn("wasm warm-up skipped: the artifact_digest expression must be rooted "+
+			"at $supplies alone to be warmed here; this node reports bare supply "+
+			"delivery instead of module readiness, and its first message will pay "+
+			"the module compile",
+			"workflow", c.workflow, "node", c.node, "supply", c.supplyNode)
 		return nil
 	}
 	digest, _ := rendered.(string)
@@ -88,13 +102,73 @@ func (c *wasmWarmupConsumer) OnSupplyChanged(ctx context.Context, _ supply.Snaps
 // collision would silently replace one with the other (registry.go's
 // RegisterConsumer overwrites a same-key entry unconditionally).
 //
-// This key registers into supply.Registry's consumer map as a SET, exactly
-// like the legacy {digest, supplyNode} shape: registering twice at the same
-// key is idempotent, and unregistering it removes it outright. That is a
-// THIRD reconciliation semantic layered on top of the declaration shape's
-// refcounted declaration table -- see storeSubscription for why the two must
-// be reconciled by different rules even though both live on the same
-// engine.SupplyConsumerBinding.
+// This key does NOT include activation or replica identity, so every replica
+// of the same (workflow, node, supply) declaration computes the identical
+// key -- see warmupConsumerRegistry for why that makes the registration a
+// refcount rather than a plain register/unregister pair.
 func warmupConsumerKey(b engine.SupplyConsumerBinding) string {
 	return "warmup/" + b.WorkflowName + "/" + b.NodeName + "@" + b.SupplyNode
+}
+
+// warmupConsumerRegistry refcounts the warm-up consumer's registration on
+// supply.Default, keyed by warmupConsumerKey, mirroring
+// node/internal/code/script's supplyDeclarationTable (which refcounts the
+// execution-time declaration for exactly the same reason).
+//
+// WHY refcounted, not a plain register/unregister pair: one activation may be
+// hosted at several replicas on one runner (activationID differs only by
+// ReplicaIndex -- service/runner/activation_tracker.go), each declaring the
+// identical (workflow, node, supply) pair and therefore computing the
+// identical warmupConsumerKey. supply.Registry.RegisterConsumer/
+// UnregisterConsumer key on that string alone; if this package called them
+// directly, replica 0's Deactivate would call UnregisterConsumer and delete
+// the ONE entry at that key outright, stripping the warm-up consumer replica
+// 1 still depends on. The pointer supply would then have zero registered
+// consumers, isReadyLocked's documented "no consumers = always ready" rule
+// would make IsReady read true unconditionally, and the next pointer flip on
+// the still-live replica would compile nothing -- the exact silent L1
+// fallback this warm-up consumer exists to prevent.
+type warmupConsumerRegistry struct {
+	mu     sync.Mutex
+	counts map[string]int
+}
+
+// warmupConsumers is the process-wide registry, mirroring supply.Default's own
+// process-wide scope: registerSupplyConsumers/unregisterSupplyConsumers run
+// against supply.Default from any activation on this runner, so the refcount
+// they share must be equally global.
+var warmupConsumers = &warmupConsumerRegistry{counts: map[string]int{}}
+
+// acquire registers c under key against supplyNode on the 0->1 transition
+// only; every other call just increments the refcount, leaving the
+// already-registered consumer (and its already-resolved warm-up verdict, if
+// any) untouched. Mirrors supplyDeclarationTable.declare.
+func (r *warmupConsumerRegistry) acquire(key, supplyNode string, c supply.Consumer) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.counts[key]++
+	if r.counts[key] == 1 {
+		supply.Default.RegisterConsumer(supplyNode, key, c)
+	}
+}
+
+// release decrements the refcount for key and calls UnregisterConsumer only
+// on the 1->0 transition. A release with no matching acquire (refcount
+// already zero, or key never seen) is a no-op -- mirrors
+// supplyDeclarationTable.undeclare's floor-at-zero behavior, and keeps this
+// safe to call from a full-teardown path that does not track whether it has
+// already run for this key.
+func (r *warmupConsumerRegistry) release(key, supplyNode string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n, ok := r.counts[key]
+	if !ok || n <= 0 {
+		return
+	}
+	if n == 1 {
+		delete(r.counts, key)
+		supply.Default.UnregisterConsumer(supplyNode, key)
+		return
+	}
+	r.counts[key] = n - 1
 }

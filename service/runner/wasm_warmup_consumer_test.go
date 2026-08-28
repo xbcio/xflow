@@ -2,6 +2,8 @@ package runner
 
 import (
 	"context"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -284,5 +286,152 @@ func TestWarmupConsumerSurvivesIdenticalGenerationUpgrade(t *testing.T) {
 			"generation upgrade with an identical declaration -- the warm-up consumer "+
 			"was dropped by the upgrade, so this runner never compiles the new module "+
 			"and silently reverts to bare L1 readiness", fb.digest)
+	}
+}
+
+// TestWarmupConsumerSurvivesReplicaSiblingDeactivate is fix-round-1 finding
+// 1's regression. Replicas of the SAME activation compute the IDENTICAL
+// warmupConsumerKey (it is keyed on workflow+node+supply, with no activation
+// or replica identity -- see warmupConsumerKey's doc comment), because one
+// activation may be hosted at several replicas on one runner, each declaring
+// the same pair (activation_tracker.go's documented model; activationID
+// differs only by ReplicaIndex). A naive register/unregister pair on that
+// shared key would let one replica's Deactivate strip a still-live sibling's
+// warm-up consumer. warmupConsumerRegistry (wasm_supply_declaration.go)
+// exists to survive exactly this by refcounting the registration the same
+// way the execution-time declaration table already does.
+func TestWarmupConsumerSurvivesReplicaSiblingDeactivate(t *testing.T) {
+	fa := newWasmActivationFixture(t) // digest A
+	fb := newWasmActivationFixture(t) // digest B, distinct content
+	const workflow, nodeName = "TestWarmupSurvivesReplicaSibling-collect", "decode"
+	ptr := testSupplyName(t) + "-ptr"
+
+	resolver := func(_ context.Context, digest string) ([]byte, error) {
+		switch digest {
+		case fa.digest:
+			return fa.raw, nil
+		case fb.digest:
+			return fb.raw, nil
+		default:
+			return nil, context.DeadlineExceeded
+		}
+	}
+
+	if err := supply.Default.Apply(context.Background(), supply.Snapshot{
+		Name:      ptr,
+		Content:   []byte(`{"decode":{"digest":"` + fa.digest + `"}}`),
+		Hash:      "p1",
+		Revision:  1,
+		FetchedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("apply pointer (A): %v", err)
+	}
+
+	fh := &fakeTriggerHandler{}
+	h := NewTriggerActivationHandler("https://control.internal", "",
+		fakeLookup{handlers: map[string]types.TriggerHandler{"fake": fh}},
+		WithArtifactCodeResolver(resolver))
+
+	decl := engine.SupplyConsumerBinding{
+		SupplyNode:   ptr,
+		WorkflowName: workflow,
+		NodeName:     nodeName,
+		DigestExpr:   "${{ $supplies[\"" + ptr + "\"].decode.digest }}",
+	}
+
+	// Two replicas of the SAME activation (identical WorkflowID/EntryUnitID),
+	// differing only by ReplicaIndex -- activationIDFromActivate therefore
+	// assigns them two distinct activation identities, matching
+	// activation_tracker.go's documented multi-replica model exactly.
+	base := protocol.ActivateDirective{
+		WorkflowID: "wf-replica", EntryUnitID: "trig", NodeType: "fake", Generation: 1,
+		Supplies:        []engine.SupplyRequirement{{Node: ptr}},
+		SupplyConsumers: []engine.SupplyConsumerBinding{decl},
+	}
+	replica0, replica1 := base, base
+	replica0.ReplicaIndex, replica1.ReplicaIndex = 0, 1
+
+	t.Cleanup(func() {
+		_ = h.Deactivate(protocol.DeactivateDirective{
+			WorkflowID: "wf-replica", EntryUnitID: "trig", ReplicaIndex: 1,
+		})
+	})
+	if err := h.Activate(context.Background(), replica0); err != nil {
+		t.Fatalf("activate replica 0: %v", err)
+	}
+	if err := h.Activate(context.Background(), replica1); err != nil {
+		t.Fatalf("activate replica 1: %v", err)
+	}
+	if !node.WasmSupplyConfigured(fa.digest) {
+		t.Fatalf("digest A (%s) was not warmed up after both replicas activated", fa.digest)
+	}
+
+	// Deactivate ONLY replica 0 (protocol.DeactivateDirective carries
+	// ReplicaIndex, so this targets a single replica -- see
+	// activationIDFromDeactivate). Replica 1 is still live and still depends
+	// on the warm-up consumer registered under the (workflow, node, supply)
+	// key both replicas share.
+	if err := h.Deactivate(protocol.DeactivateDirective{
+		WorkflowID: "wf-replica", EntryUnitID: "trig", ReplicaIndex: 0,
+	}); err != nil {
+		t.Fatalf("deactivate replica 0: %v", err)
+	}
+
+	// The level-triggered flip this warm-up consumer exists to catch: the
+	// pointer now names a second, previously-unseen digest. If replica 0's
+	// Deactivate stripped the SHARED warm-up consumer, nothing compiles B.
+	if err := supply.Default.Apply(context.Background(), supply.Snapshot{
+		Name:      ptr,
+		Content:   []byte(`{"decode":{"digest":"` + fb.digest + `"}}`),
+		Hash:      "p2",
+		Revision:  2,
+		FetchedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("apply pointer (B): %v", err)
+	}
+
+	if !node.WasmSupplyConfigured(fb.digest) {
+		t.Fatalf("digest B (%s) was not warmed up after deactivating a SIBLING replica -- "+
+			"the warm-up consumer replica 1 still depends on was stripped by replica 0's "+
+			"Deactivate, so replica 1 silently reverts to bare L1 readiness", fb.digest)
+	}
+	if !supply.Default.IsReady(ptr) {
+		t.Fatal("pointer supply not ready although the surviving replica's warm-up " +
+			"consumer successfully compiled digest B")
+	}
+}
+
+// TestWarmupSkipLogDoesNotLeakDigestExpr is fix-round-1 finding 2's
+// regression. The scope-limit branch in OnSupplyChanged must not put the
+// operator-authored DigestExpr text into the process log: exprx's underlying
+// compiler error echoes the expression source verbatim (e.g. "unknown name
+// $input ... | $input.<whatever the expression names> ..."), and DigestExpr
+// is node configuration the standing constraint and the org's log-content
+// policy both forbid echoing.
+func TestWarmupSkipLogDoesNotLeakDigestExpr(t *testing.T) {
+	const sentinel = "super_secret_token_value_xyz"
+	buf := &strings.Builder{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	c := &wasmWarmupConsumer{
+		// $input, not $supplies: the documented scope-limit path. The sentinel
+		// stands in for whatever real node configuration (potentially a
+		// credential reference) a real DigestExpr might carry.
+		digestExpr: "${{ $input." + sentinel + " }}",
+		supplyNode: "some-supply",
+		workflow:   "some-workflow",
+		node:       "decode",
+	}
+	if err := c.OnSupplyChanged(context.Background(), supply.Snapshot{Name: "some-supply"}); err != nil {
+		t.Fatalf("OnSupplyChanged: %v (the scope-limit path must return nil, not an error)", err)
+	}
+	if strings.Contains(buf.String(), sentinel) {
+		t.Fatalf("warm-up skip log leaked the DigestExpr text: %s", buf.String())
+	}
+	if buf.Len() == 0 {
+		t.Fatal("expected a warning to be logged for the scope-limit path; the log " +
+			"assertion above would otherwise pass vacuously")
 	}
 }

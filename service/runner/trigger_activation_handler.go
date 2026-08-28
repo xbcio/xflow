@@ -308,8 +308,12 @@ func (h *TriggerActivationHandler) registerSupplyConsumers(ctx context.Context, 
 			// pointer supply currently names, synchronously inside
 			// supply.Registry.Apply, so a pointer flip does not make the first
 			// message pay the compile (see wasmWarmupConsumer's doc comment for
-			// why synchronous is load-bearing rather than an oversight).
-			supply.Default.RegisterConsumer(b.SupplyNode, warmupConsumerKey(b), &wasmWarmupConsumer{
+			// why synchronous is load-bearing rather than an oversight). Routed
+			// through warmupConsumers.acquire, not a bare RegisterConsumer call,
+			// because several replicas of this same activation may declare the
+			// identical (workflow, node, supply) pair on this runner and compute
+			// the identical warmupConsumerKey — see warmupConsumerRegistry.
+			warmupConsumers.acquire(warmupConsumerKey(b), b.SupplyNode, &wasmWarmupConsumer{
 				digestExpr: b.DigestExpr,
 				supplyNode: b.SupplyNode,
 				workflow:   b.WorkflowName,
@@ -342,10 +346,8 @@ func (h *TriggerActivationHandler) registerSupplyConsumers(ctx context.Context, 
 // Activate per activation identity).
 //
 // It also reconciles the OLD activation's supply-consumer registrations —
-// but the rule differs by binding shape, because a declaration binding
-// actually carries TWO independent registrations with different semantics.
-// There are three reconciliation passes below, each named for the semantic it
-// undoes:
+// but the rule differs by binding shape, because the two shapes are governed
+// by different registries with different semantics:
 //
 //   - Legacy bindings (ModuleDigest+SupplyNode) register as a SET keyed on
 //     (digest, supply node): registering twice is idempotent, and unregistering
@@ -355,37 +357,33 @@ func (h *TriggerActivationHandler) registerSupplyConsumers(ctx context.Context, 
 //     registration registerSupplyConsumers just made for the new generation.
 //     removedBindings governs this shape.
 //
-//   - The warm-up consumer (registerSupplyConsumers' declaration branch also
-//     calls supply.Default.RegisterConsumer keyed on warmupConsumerKey) is
-//     ALSO a SET, by the exact same registerSupplyConsumers/RegisterConsumer
-//     mechanics the legacy shape uses — so it is reconciled the SAME way, by
-//     DIFFERENCE, not by the refcount rule below. Routing it through the
-//     refcount's undeclare-all pass instead is the hazard this comment exists
-//     to head off: a generation upgrade that re-sends an IDENTICAL
-//     declaration would register the warm-up consumer for the new generation
-//     and then immediately unregister that same key as part of "undeclare
-//     every old declaration" — leaving the pointer supply with no warm-up
-//     consumer at all. isReadyLocked's loop body would then be empty again,
-//     readiness would silently fall back to bare L1, and the next pointer
-//     flip would compile nothing on this runner.
+//   - Declaration bindings (WorkflowName+NodeName+SupplyNode) carry TWO
+//     independent registrations, and BOTH are REFCOUNTED, not overwritten:
+//     the execution-time declaration table
+//     (node/internal/code/script/supply_declaration.go) and the warm-up
+//     consumer's registration on supply.Default (warmupConsumerRegistry, in
+//     wasm_supply_declaration.go). Both exist to survive the SAME scenario —
+//     several replicas of one activation declaring the identical pair — so
+//     both use the SAME rule here: registerSupplyConsumers has already added
+//     one reference per binding in the new `bindings` set (to both tables)
+//     before this method runs, so EVERY old declaration binding is released
+//     from both here, unconditionally, not just the removed ones. If a
+//     re-sent identical declaration were instead excluded from release the
+//     way a legacy binding is (by difference), a refcount would only ever
+//     grow (gen1 declares -> 1; gen2 declares again -> 2, difference is empty
+//     so nothing releases -> stays 2; a later single Deactivate drops it to
+//     1, never 0) — stranding the declaration, or the warm-up consumer,
+//     alive forever after the LAST Deactivate. removedBindings does NOT
+//     govern this pass; do not unify the two branches onto one difference
+//     call.
 //
-//   - Declaration bindings (WorkflowName+NodeName+SupplyNode) ALSO declare
-//     into a REFCOUNTED table (node/internal/code/script/supply_declaration.go):
-//     registerSupplyConsumers has already declared one reference per binding in
-//     `bindings` before this method runs. If a re-sent identical declaration is
-//     excluded from unregistration the same way a legacy binding is, its count
-//     only ever grows (gen1 declares -> 1; gen2 declares again -> 2, difference
-//     is empty so nothing is undeclared -> stays 2; a later single Deactivate
-//     drops it to 1, never 0). So EVERY old declaration binding is undeclared
-//     here unconditionally, not just the removed ones — the reference
-//     registerSupplyConsumers added for `bindings` covers the new/retained set,
-//     and undeclaring all of `old.bindings` exactly cancels the reference the
-//     previous Activate call added. removedBindings does NOT govern this pass.
-//
-// unregisterSupplyConsumers is deliberately NOT called here for declarations:
-// that function undoes all three semantics unconditionally (see its own
-// comment), which is correct for a full teardown (Deactivate) but wrong for a
-// generation upgrade that retains bindings — hence the three explicit passes.
+// unregisterSupplyConsumers is deliberately NOT called here: it undoes both
+// declaration-side registrations unconditionally per binding (see its own
+// comment), which is what this pass wants too, but it also handles the
+// legacy shape by a plain per-binding unregister with no difference logic —
+// wrong for a generation upgrade that retains legacy bindings. Hence the
+// split: pass 1 uses unregisterSupplyConsumers only on the legacy DIFFERENCE,
+// pass 2 inlines the declaration-side release loop directly.
 func (h *TriggerActivationHandler) storeSubscription(ctx context.Context, id activationID, sub types.TriggerSubscription, bindings []engine.SupplyConsumerBinding) {
 	h.mu.Lock()
 	old, exists := h.subs[id]
@@ -403,13 +401,11 @@ func (h *TriggerActivationHandler) storeSubscription(ctx context.Context, id act
 		}
 		// Pass 1: legacy SET, by difference.
 		unregisterSupplyConsumers(removedBindings(oldLegacy, bindings))
-		// Pass 2: warm-up consumer SET, by difference -- NOT the undeclare-all
-		// rule below, even though both operate on the same `oldDeclarations`.
-		for _, b := range removedBindings(oldDeclarations, bindings) {
-			supply.Default.UnregisterConsumer(b.SupplyNode, warmupConsumerKey(b))
-		}
-		// Pass 3: declaration REFCOUNT, unconditionally for every old entry.
+		// Pass 2: declaration side, BOTH refcounts, unconditionally for every
+		// old entry — see the doc comment above for why difference does not
+		// apply here.
 		for _, b := range oldDeclarations {
+			warmupConsumers.release(warmupConsumerKey(b), b.SupplyNode)
 			node.UndeclareWasmSupplyConsumers(b.WorkflowName, b.NodeName, []string{b.SupplyNode})
 		}
 		if old.sub != nil {
@@ -439,22 +435,27 @@ func removedBindings(old, next []engine.SupplyConsumerBinding) []engine.SupplyCo
 	return out
 }
 
-// unregisterSupplyConsumers undoes each binding unconditionally — ALL THREE
-// registration semantics a declaration binding carries (the warm-up
-// consumer's SET registration and the execution-time declaration REFCOUNT),
-// plus the legacy digest SET. It is a no-op for a pair that was never
+// unregisterSupplyConsumers undoes each binding unconditionally — for a
+// declaration binding, BOTH refcounted registrations it carries (the warm-up
+// consumer's registration on supply.Default, via warmupConsumers.release, and
+// the execution-time declaration refcount) — plus the legacy digest SET. Each
+// call here removes exactly ONE reference per binding, so this function is
+// safe to call once per activation-worth of bindings even when several
+// replicas share the same declaration; the underlying refcounts (not this
+// function) are what make repeated release calls converge to zero only after
+// every acquire has been matched. It is a no-op for a pair that was never
 // registered/declared, so it is safe on any subset.
 //
-// This unconditional shape is correct for a full teardown (Deactivate, which
-// wants every trace of an activation gone) but WRONG for a generation upgrade
-// that retains bindings — storeSubscription does NOT call this for
-// declarations; it runs its own difference-aware passes instead. See
-// storeSubscription's comment for why the two call sites need different
-// rules despite sharing this helper's per-binding logic.
+// This unconditional-per-binding shape is correct for a full teardown
+// (Deactivate, which wants every reference THIS activation held gone) and
+// also for storeSubscription's legacy pass (which pre-filters to the
+// DIFFERENCE before calling this). storeSubscription does NOT route
+// declarations through this function — see its own comment for why the
+// declaration side needs its own inlined loop instead.
 func unregisterSupplyConsumers(bindings []engine.SupplyConsumerBinding) {
 	for _, b := range bindings {
 		if b.IsDeclaration() {
-			supply.Default.UnregisterConsumer(b.SupplyNode, warmupConsumerKey(b))
+			warmupConsumers.release(warmupConsumerKey(b), b.SupplyNode)
 			node.UndeclareWasmSupplyConsumers(b.WorkflowName, b.NodeName, []string{b.SupplyNode})
 			continue
 		}
