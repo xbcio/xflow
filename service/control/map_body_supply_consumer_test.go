@@ -83,7 +83,9 @@ func TestSupplyConsumerBindingsReachMapBodyScript(t *testing.T) {
 		t.Fatalf("no supply consumer binding derived for the map body's wasm script: "+
 			"the module would run with no rules. Supplies = %+v", units[0].Supplies)
 	}
-	want := []engine.SupplyConsumerBinding{{ModuleDigest: bodyDigest, SupplyNode: "rules"}}
+	want := []engine.SupplyConsumerBinding{
+		{WorkflowName: "collect", NodeName: "decode", SupplyNode: "rules", DigestExpr: bodyDigest},
+	}
 	if !reflect.DeepEqual(units[0].SupplyConsumers, want) {
 		t.Fatalf("SupplyConsumers = %+v, want %+v", units[0].SupplyConsumers, want)
 	}
@@ -133,10 +135,10 @@ func TestMapBodyMembersInheritEveryParentSupply(t *testing.T) {
 		t.Fatalf("derive: %v", err)
 	}
 	want := []engine.SupplyConsumerBinding{
-		{ModuleDigest: secondDigest, SupplyNode: "hints"},
-		{ModuleDigest: secondDigest, SupplyNode: "rules"},
-		{ModuleDigest: bodyDigest, SupplyNode: "hints"},
-		{ModuleDigest: bodyDigest, SupplyNode: "rules"},
+		{WorkflowName: "collect", NodeName: "clean", SupplyNode: "hints", DigestExpr: secondDigest},
+		{WorkflowName: "collect", NodeName: "clean", SupplyNode: "rules", DigestExpr: secondDigest},
+		{WorkflowName: "collect", NodeName: "decode", SupplyNode: "hints", DigestExpr: bodyDigest},
+		{WorkflowName: "collect", NodeName: "decode", SupplyNode: "rules", DigestExpr: bodyDigest},
 	}
 	if !reflect.DeepEqual(units[0].SupplyConsumers, want) {
 		t.Fatalf("SupplyConsumers = %+v, want the full cross product %+v",

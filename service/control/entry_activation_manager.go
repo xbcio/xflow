@@ -84,6 +84,9 @@ type EntryUnitActivation struct {
 	// SupplyConsumers routes fetched supply content to the wasm modules that
 	// consume it; Supplies only says which content the unit needs.
 	SupplyConsumers []engine.SupplyConsumerBinding
+	// ActivationReplicas is the raw DSL value. Zero and one both produce one
+	// durable activation; values greater than one produce that many siblings.
+	ActivationReplicas uint32
 }
 
 // projectGroupPackage indirects graph.ProjectGroupPackage so the derivation's
@@ -197,6 +200,7 @@ func SupplyConsumerBindingsForEntryUnit(g *graph.Graph, unitIdx int) []engine.Su
 	if g == nil {
 		return nil
 	}
+	inGroup := groupNameByNode(g)
 	seen := map[engine.SupplyConsumerBinding]bool{}
 	walkEntryUnitNodes(g, unitIdx, func(nodeIdx int) {
 		refs := g.SupplyRefsFor(nodeIdx)
@@ -204,7 +208,16 @@ func SupplyConsumerBindingsForEntryUnit(g *graph.Graph, unitIdx int) []engine.Su
 			return
 		}
 		nm := g.NodeAt(nodeIdx)
-		collectWasmBindings(nm.Name, nm.Type, nm.Parameters, refs, seen)
+
+		// A node projected into a group executes inside the group's inner
+		// engine, whose graph name is the group's name -- not the workflow's.
+		// See spec §4.2.2: this is the one branch where runtime identity is not
+		// simply g.Name().
+		outerName := g.Name()
+		if gn, ok := inGroup[nodeIdx]; ok {
+			outerName = gn
+		}
+		collectWasmBindings(outerName, nm.Name, nm.Type, nm.Parameters, refs, seen)
 
 		// A body-bearing node (xflow.map) is walked one level deeper. Its members
 		// are not graph nodes, so the BFS above can never reach them, and they
@@ -213,12 +226,17 @@ func SupplyConsumerBindingsForEntryUnit(g *graph.Graph, unitIdx int) []engine.Su
 		// this is not a missing optimisation: the module would be fetched-for but
 		// never registered as a consumer, so it would stay on the legacy globals
 		// path and evaluate every record against an empty rule set, silently.
+		//
+		// A body member's runtime WorkflowName is the BODY-BEARING NODE's name,
+		// per types.Input.WorkflowName's contract ("for a map body [it is] the
+		// map node's name"). That holds whether or not the map node is itself in
+		// a group, which is why outerName is not used here.
 		body := g.BodyAt(nodeIdx)
 		if body == nil || body.Package == nil || body.Package.Def == nil {
 			return
 		}
 		for _, member := range body.Package.Def.Nodes {
-			collectWasmBindings(member.Name, member.Type, member.Parameters, refs, seen)
+			collectWasmBindings(nm.Name, member.Name, member.Type, member.Parameters, refs, seen)
 		}
 	})
 
@@ -230,38 +248,85 @@ func SupplyConsumerBindingsForEntryUnit(g *graph.Graph, unitIdx int) []engine.Su
 		out = append(out, b)
 	}
 	sort.Slice(out, func(i, j int) bool {
-		if out[i].ModuleDigest != out[j].ModuleDigest {
-			return out[i].ModuleDigest < out[j].ModuleDigest
+		a, c := out[i], out[j]
+		if a.WorkflowName != c.WorkflowName {
+			return a.WorkflowName < c.WorkflowName
 		}
-		return out[i].SupplyNode < out[j].SupplyNode
+		if a.NodeName != c.NodeName {
+			return a.NodeName < c.NodeName
+		}
+		if a.ModuleDigest != c.ModuleDigest {
+			return a.ModuleDigest < c.ModuleDigest
+		}
+		return a.SupplyNode < c.SupplyNode
 	})
 	return out
 }
 
-// collectWasmBindings adds one binding per supply name for a node that is an
+// collectWasmBindings adds one DECLARATION per supply name for a node that is an
 // artifact-backed wasm script, and does nothing for anything else. It is shared
 // by the outer-graph walk and the body walk so a body member is judged bindable
-// by exactly the same rules as a top-level node — a second copy of these three
+// by exactly the same rules as a top-level node -- a second copy of these three
 // checks is how the two layers would drift.
-func collectWasmBindings(name, nodeType string, params map[string]any, refs []string, seen map[engine.SupplyConsumerBinding]bool) {
+//
+// workflowName is the graph name the node runs under AT RUNTIME, which is not
+// always g.Name(): a body member runs under the body-bearing node's name, and a
+// grouped node runs under its group's name. The caller resolves it; getting it
+// wrong here produces a declaration the executing node never matches.
+//
+// The digest is NOT read as a value. It is read only to decide bindability
+// (present vs absent) and then carried verbatim as DigestExpr, because at
+// compile time it may still be "${{ $supplies.x.y.digest }}" -- see spec §4.2.
+func collectWasmBindings(workflowName, nodeName, nodeType string, params map[string]any, refs []string, seen map[engine.SupplyConsumerBinding]bool) {
 	if nodeType != scriptNodeType {
 		return
 	}
 	if lang, _ := params["language"].(string); lang != wasmScriptLanguage {
 		return
 	}
-	digest, _ := params["artifact_digest"].(string)
-	if digest == "" {
+	digestExpr, _ := params["artifact_digest"].(string)
+	if digestExpr == "" {
 		// Inline-code wasm node: no stable module identity to bind against.
 		// The node name is safe to log; params are not (they may carry
 		// credential references), so only the name appears here.
 		slog.Warn("supply consumer binding skipped: wasm node has no artifact_digest",
-			"node", name, "supplies", refs)
+			"node", nodeName, "supplies", refs)
+		return
+	}
+	if workflowName == "" {
+		// A declaration with half a key would land under the empty string in the
+		// runner's table and be picked up by an unrelated node. Refusing to emit
+		// it makes the node fail closed at execution time instead.
+		slog.Warn("supply consumer binding skipped: could not resolve the node's runtime graph name",
+			"node", nodeName, "supplies", refs)
 		return
 	}
 	for _, supplyName := range refs {
-		seen[engine.SupplyConsumerBinding{ModuleDigest: digest, SupplyNode: supplyName}] = true
+		seen[engine.SupplyConsumerBinding{
+			SupplyNode:   supplyName,
+			WorkflowName: workflowName,
+			NodeName:     nodeName,
+			DigestExpr:   digestExpr,
+		}] = true
 	}
+}
+
+// groupNameByNode maps each grouped node index to its group's name. Group
+// membership is exclusive (graph/group_compile.go:98 rejects a node in two
+// groups), so one map entry per node is enough. nil when the graph has no
+// groups, which makes the lookup below a cheap miss.
+func groupNameByNode(g *graph.Graph) map[int]string {
+	groups := g.Groups()
+	if len(groups) == 0 {
+		return nil
+	}
+	out := make(map[int]string, len(groups))
+	for _, gm := range groups {
+		for _, idx := range gm.Members {
+			out[idx] = gm.Name
+		}
+	}
+	return out
 }
 
 // DeriveEntryActivations extracts every trigger entry unit from a compiled
@@ -306,13 +371,14 @@ func DeriveEntryActivations(g *graph.Graph) ([]EntryUnitActivation, error) {
 			}
 			reqs := engine.RequirementsFromGraphPackage(pkg.Requirements)
 			out = append(out, EntryUnitActivation{
-				EntryUnitID:     gm.Name,
-				NodeType:        "xflow.group",
-				PackageHash:     gm.PackageHash,
-				Selector:        gm.RunnerSelector,
-				Requirements:    reqs,
-				Supplies:        SuppliesForEntryUnit(g, i),
-				SupplyConsumers: SupplyConsumerBindingsForEntryUnit(g, i),
+				EntryUnitID:        gm.Name,
+				NodeType:           "xflow.group",
+				PackageHash:        gm.PackageHash,
+				Selector:           gm.RunnerSelector,
+				Requirements:       reqs,
+				Supplies:           SuppliesForEntryUnit(g, i),
+				SupplyConsumers:    SupplyConsumerBindingsForEntryUnit(g, i),
+				ActivationReplicas: gm.ActivationReplicas,
 			})
 		case graph.UnitNode:
 			nodeIdx := g.UnitNodeIndex(i)
@@ -342,8 +408,9 @@ func DeriveEntryActivations(g *graph.Graph) ([]EntryUnitActivation, error) {
 					NodeType:    nm.Type,
 					NodeVersion: nm.Version,
 				}}),
-				Supplies:        SuppliesForEntryUnit(g, i),
-				SupplyConsumers: SupplyConsumerBindingsForEntryUnit(g, i),
+				Supplies:           SuppliesForEntryUnit(g, i),
+				SupplyConsumers:    SupplyConsumerBindingsForEntryUnit(g, i),
+				ActivationReplicas: nm.ActivationReplicas,
 			})
 		}
 	}
@@ -362,35 +429,102 @@ func DeriveEntryActivations(g *graph.Graph) ([]EntryUnitActivation, error) {
 // still see the old owner (RunnerID set) so it can deliver the Deactivate; a
 // pre-fence here would clear RunnerID and orphan the old runner's subscription.
 func (m *EntryActivationManager) AddOrUpdateWorkflow(ctx context.Context, ns namespace.Namespace, workflowID types.WorkflowID, workflowVersion string, g *graph.Graph) error {
+	return m.AddOrUpdateWorkflowRevision(ctx, ns, workflowID, workflowVersion, 0, g)
+}
+
+// AddOrUpdateWorkflowRevision is AddOrUpdateWorkflow with workflow-registry
+// revision fencing. It advances the workflow watermark before graph derivation
+// or any other store access, so a newer registry mutation immediately makes all
+// older desired projections non-authoritative even if derivation or a later
+// upsert fails.
+func (m *EntryActivationManager) AddOrUpdateWorkflowRevision(ctx context.Context, ns namespace.Namespace, workflowID types.WorkflowID, workflowVersion string, registryRevision uint64, g *graph.Graph) error {
 	if m.store == nil {
 		return nil
 	}
 	if ns == "" {
 		ns = namespace.Default
 	}
+	if err := m.advanceWorkflowRevision(ctx, ns, workflowID, registryRevision); err != nil {
+		return err
+	}
 	units, err := DeriveEntryActivations(g)
 	if err != nil {
 		return err
 	}
+	existing, err := m.store.List(ctx, ns)
+	if err != nil {
+		return err
+	}
+	desired := make(map[engine.EntryActivationKey]struct{})
 	for _, eu := range units {
-		if err := m.store.Upsert(ctx, engine.EntryActivation{
-			Namespace:       ns,
-			WorkflowID:      workflowID,
-			WorkflowVersion: workflowVersion,
-			EntryUnitID:     eu.EntryUnitID,
-			NodeType:        eu.NodeType,
-			Params:          eu.Params,
-			PackageHash:     eu.PackageHash,
-			Selector:        eu.Selector,
-			Requirements:    eu.Requirements,
-			Supplies:        eu.Supplies,
-			SupplyConsumers: eu.SupplyConsumers,
-			Desired:         true,
-		}); err != nil {
+		for replica := uint32(0); replica < effectiveActivationReplicas(eu.ActivationReplicas); replica++ {
+			requirements := eu.Requirements
+			if replica > 0 {
+				requirements = engine.NormalizeRequirements(append(
+					append([]engine.CapabilityRequirement(nil), requirements...),
+					engine.CapabilityRequirement{
+						NodeType: eu.NodeType,
+						Feature:  engine.FeatureEntryActivationReplicaV1,
+					},
+				))
+			}
+			act := engine.EntryActivation{
+				Namespace:        ns,
+				WorkflowID:       workflowID,
+				WorkflowVersion:  workflowVersion,
+				EntryUnitID:      eu.EntryUnitID,
+				ReplicaIndex:     replica,
+				NodeType:         eu.NodeType,
+				Params:           eu.Params,
+				PackageHash:      eu.PackageHash,
+				Selector:         eu.Selector,
+				Requirements:     requirements,
+				Supplies:         eu.Supplies,
+				SupplyConsumers:  eu.SupplyConsumers,
+				Desired:          true,
+				RegistryRevision: registryRevision,
+			}
+			if err := m.store.Upsert(ctx, act); err != nil {
+				return err
+			}
+			desired[entryActivationKeyOf(act)] = struct{}{}
+		}
+	}
+	// Mark removed entry units, replicas beyond the new cardinality, and records
+	// from the workflow's previous version as non-desired. Keeping their owner
+	// fields intact lets the reconciler deliver Deactivate before fencing them.
+	for _, act := range existing {
+		if act.WorkflowID != workflowID {
+			continue
+		}
+		if _, ok := desired[entryActivationKeyOf(act)]; ok {
+			continue
+		}
+		act.Desired = false
+		act.RegistryRevision = registryRevision
+		if err := m.store.Upsert(ctx, act); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (m *EntryActivationManager) advanceWorkflowRevision(ctx context.Context, ns namespace.Namespace, workflowID types.WorkflowID, registryRevision uint64) error {
+	revisionStore, ok := m.store.(engine.EntryActivationRevisionStore)
+	if !ok {
+		if registryRevision == 0 {
+			return nil
+		}
+		return fmt.Errorf("entry activation store does not support workflow revision fencing")
+	}
+	return revisionStore.AdvanceWorkflowRevision(ctx, ns, workflowID, registryRevision)
+}
+
+func effectiveActivationReplicas(configured uint32) uint32 {
+	if configured <= 1 {
+		return 1
+	}
+	return configured
 }
 
 // RemoveWorkflow deactivates every remote-hosted trigger entry unit of the given
@@ -400,45 +534,34 @@ func (m *EntryActivationManager) AddOrUpdateWorkflow(ctx context.Context, ns nam
 // set, delivers a Deactivate to the hosting runner, and then fences (clears the
 // owner + advances the generation floor) so no new runner is assigned. Fencing
 // here would clear RunnerID first and orphan the hosting runner's subscription.
-func (m *EntryActivationManager) RemoveWorkflow(ctx context.Context, ns namespace.Namespace, workflowID types.WorkflowID, workflowVersion string, g *graph.Graph) error {
+func (m *EntryActivationManager) RemoveWorkflow(ctx context.Context, ns namespace.Namespace, workflowID types.WorkflowID, workflowVersion string, _ *graph.Graph) error {
+	return m.RemoveWorkflowRevision(ctx, ns, workflowID, workflowVersion, 0, nil)
+}
+
+// RemoveWorkflowRevision is RemoveWorkflow with workflow-registry revision
+// fencing. A stale removal becomes a no-op at the store, while an equal or newer
+// revision can mark the target version non-desired.
+func (m *EntryActivationManager) RemoveWorkflowRevision(ctx context.Context, ns namespace.Namespace, workflowID types.WorkflowID, workflowVersion string, registryRevision uint64, _ *graph.Graph) error {
 	if m.store == nil {
 		return nil
 	}
 	if ns == "" {
 		ns = namespace.Default
 	}
-	units, err := DeriveEntryActivations(g)
+	if err := m.advanceWorkflowRevision(ctx, ns, workflowID, registryRevision); err != nil {
+		return err
+	}
+	existing, err := m.store.List(ctx, ns)
 	if err != nil {
 		return err
 	}
-	for _, eu := range units {
-		key := engine.EntryActivationKey{
-			Namespace:       ns,
-			WorkflowID:      workflowID,
-			WorkflowVersion: workflowVersion,
-			EntryUnitID:     eu.EntryUnitID,
-		}
-		existing, ok, err := m.store.Get(ctx, key)
-		if err != nil {
-			return err
-		}
-		if !ok {
+	for _, act := range existing {
+		if act.WorkflowID != workflowID || act.WorkflowVersion != workflowVersion {
 			continue
 		}
-		if err := m.store.Upsert(ctx, engine.EntryActivation{
-			Namespace:       ns,
-			WorkflowID:      workflowID,
-			WorkflowVersion: workflowVersion,
-			EntryUnitID:     eu.EntryUnitID,
-			NodeType:        existing.NodeType,
-			Params:          existing.Params,
-			PackageHash:     existing.PackageHash,
-			Selector:        existing.Selector,
-			Requirements:    existing.Requirements,
-			Supplies:        existing.Supplies,
-			SupplyConsumers: existing.SupplyConsumers,
-			Desired:         false,
-		}); err != nil {
+		act.Desired = false
+		act.RegistryRevision = registryRevision
+		if err := m.store.Upsert(ctx, act); err != nil {
 			return err
 		}
 	}
