@@ -236,6 +236,22 @@ func CompileWasmModuleBytes(ctx context.Context, wasmBytes []byte) error {
 	return scriptpkg.CompileWasmModuleBytes(ctx, wasmBytes)
 }
 
+// DeclareWasmSupplyConsumers records which supply nodes a wasm script node
+// consumes. See script.DeclareWasmSupplyConsumers.
+func DeclareWasmSupplyConsumers(workflowName, nodeName string, supplyNodes []string) {
+	scriptpkg.DeclareWasmSupplyConsumers(workflowName, nodeName, supplyNodes)
+}
+
+// UndeclareWasmSupplyConsumers drops one reference per supply name.
+func UndeclareWasmSupplyConsumers(workflowName, nodeName string, supplyNodes []string) {
+	scriptpkg.UndeclareWasmSupplyConsumers(workflowName, nodeName, supplyNodes)
+}
+
+// WasmSupplyDeclarations returns the supply names declared for a node, sorted.
+func WasmSupplyDeclarations(workflowName, nodeName string) []string {
+	return scriptpkg.WasmSupplyDeclarations(workflowName, nodeName)
+}
+
 func Set(fields map[string]any) *SetNode {
 	return transform.Set(fields)
 }

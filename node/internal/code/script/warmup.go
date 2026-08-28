@@ -62,3 +62,29 @@ func CompileWasmModule(ctx context.Context, code string) error {
 func CompileWasmModuleBytes(ctx context.Context, wasmBytes []byte) error {
 	return wasm.CompileModuleBytes(ctx, wasmBytes)
 }
+
+// DeclareWasmSupplyConsumers records that the wasm script node (workflowName,
+// nodeName) consumes supplyNodes. The runner calls it when an activation
+// carrying declaration-shaped bindings arrives; ScriptNode.Execute reads the
+// table once boundary evaluation has produced the real artifact digest.
+//
+// workflowName is the node's RUNTIME graph name, which for a map body member is
+// the body-bearing node's name and for a grouped node is the group's name --
+// see engine.SupplyConsumerBinding.WorkflowName.
+func DeclareWasmSupplyConsumers(workflowName, nodeName string, supplyNodes []string) {
+	supplyDeclarations.declare(workflowName, nodeName, supplyNodes)
+}
+
+// UndeclareWasmSupplyConsumers drops one reference per supply name. Declarations
+// are reference counted, so this is safe to call once per activation even when
+// several replicas declared the same pair.
+func UndeclareWasmSupplyConsumers(workflowName, nodeName string, supplyNodes []string) {
+	supplyDeclarations.undeclare(workflowName, nodeName, supplyNodes)
+}
+
+// WasmSupplyDeclarations returns the supply names declared for a node, sorted.
+// nil means nothing is declared. It exists so tests outside this internal
+// package can assert the wiring rather than the forwarders.
+func WasmSupplyDeclarations(workflowName, nodeName string) []string {
+	return supplyDeclarations.lookup(workflowName, nodeName)
+}
