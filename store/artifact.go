@@ -378,9 +378,10 @@ func ValidateFilename(name string) (string, error) {
 // interior — is already rejected by it and needs no separate rule.
 //
 // This is one layer of defence for rendering, NOT a substitute for it. The
-// version is displayed beside the filename, and ValidateFilename admits '<',
-// '>', '"', '\'' and '&' (it guards path safety, not HTML safety). Any page
-// showing either value must escape it regardless of this function.
+// version is displayed beside the filename, and ValidateFilename admits every
+// HTML-significant character — angle brackets, both quote forms, ampersand —
+// because it guards path safety, not HTML safety. Any page showing either
+// value must escape it regardless of this function.
 func ValidateVersion(version string) (string, error) {
 	if version == "" {
 		return "", fmt.Errorf("%w: empty", ErrInvalidVersion)
