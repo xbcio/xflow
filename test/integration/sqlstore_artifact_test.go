@@ -623,3 +623,204 @@ func readIdentityRows(t *testing.T, db *gorm.DB, digest string) string {
 	}
 	return b.String()
 }
+
+// TestArtifactListLatestPicksNewestPerFilename pins the group-wise maximum,
+// including the tiebreak that makes it deterministic.
+//
+// created_at is DATETIME(3) and GORM stamps it client-side, so two versions
+// bound inside the same millisecond carry the same timestamp. Without the
+// `id DESC` tiebreak in latestRowPredicate the database is free to return
+// either one, and the ops page would flip between them across refreshes — a
+// flake that only shows up under fast successive uploads, which is exactly what
+// a scripted publish does.
+func TestArtifactListLatestPicksNewestPerFilename(t *testing.T) {
+	ctx := context.Background()
+	db, p := newArtifactDB(t)
+	idx := p.ArtifactIndex()
+	ns := uniqueNS(t, "latest")
+
+	// Three versions of a.wasm; v2 and v3 share a timestamp on purpose, and v3
+	// is inserted second so only the id tiebreak can separate them.
+	seedIdentity(t, db, ns, "a.wasm", "v1", "sha256:"+strings.Repeat("a", 64), "2026-01-01 00:00:00.000")
+	seedIdentity(t, db, ns, "a.wasm", "v2", "sha256:"+strings.Repeat("b", 64), "2026-01-02 00:00:00.000")
+	seedIdentity(t, db, ns, "a.wasm", "v3", "sha256:"+strings.Repeat("c", 64), "2026-01-02 00:00:00.000")
+	seedIdentity(t, db, ns, "b.wasm", "v9", "sha256:"+strings.Repeat("d", 64), "2026-01-03 00:00:00.000")
+
+	got, err := idx.ListLatestVersions(ctx, ns, store.ListOptions{})
+	if err != nil {
+		t.Fatalf("ListLatestVersions: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("want one row per filename (a.wasm, b.wasm) = 2; got %d: %s", len(got), formatVersions(got))
+	}
+	if got[0].Filename != "a.wasm" || got[0].Version != "v3" {
+		t.Errorf("a.wasm must resolve to v3 — same millisecond as v2 but a higher id. got %s/%s",
+			got[0].Filename, got[0].Version)
+	}
+	if got[1].Filename != "b.wasm" || got[1].Version != "v9" {
+		t.Errorf("want b.wasm/v9; got %s/%s", got[1].Filename, got[1].Version)
+	}
+	if got[0].Digest != "sha256:"+strings.Repeat("c", 64) {
+		t.Errorf("the row must carry v3's digest, not another version's; got %s", got[0].Digest)
+	}
+	if got[0].CreatedAt.IsZero() {
+		t.Error("CreatedAt must be populated: it is the ordering key the ops page shows")
+	}
+}
+
+// TestArtifactListIsNamespaceScoped is the IDOR guard. The dangerous failure is
+// not "wrong rows" but "every tenant's rows", and the specific shape to rule out
+// is an empty namespace behaving as a wildcard.
+func TestArtifactListIsNamespaceScoped(t *testing.T) {
+	ctx := context.Background()
+	db, p := newArtifactDB(t)
+	idx := p.ArtifactIndex()
+	nsA := uniqueNS(t, "scope-a")
+	nsB := uniqueNS(t, "scope-b")
+
+	seedIdentity(t, db, nsA, "shared.wasm", "vA", "sha256:"+strings.Repeat("1", 64), "2026-02-01 00:00:00.000")
+	seedIdentity(t, db, nsB, "shared.wasm", "vB", "sha256:"+strings.Repeat("2", 64), "2026-02-02 00:00:00.000")
+
+	t.Run("latest view sees only its own namespace", func(t *testing.T) {
+		got, err := idx.ListLatestVersions(ctx, nsA, store.ListOptions{})
+		if err != nil {
+			t.Fatalf("ListLatestVersions: %v", err)
+		}
+		if len(got) != 1 || got[0].Version != "vA" {
+			t.Fatalf("namespace %q must see exactly its own row; got %s", nsA, formatVersions(got))
+		}
+	})
+
+	t.Run("version history sees only its own namespace", func(t *testing.T) {
+		got, err := idx.ListVersions(ctx, nsA, "shared.wasm", store.ListOptions{})
+		if err != nil {
+			t.Fatalf("ListVersions: %v", err)
+		}
+		if len(got) != 1 || got[0].Version != "vA" {
+			t.Fatalf("namespace %q must see exactly its own row; got %s", nsA, formatVersions(got))
+		}
+	})
+
+	t.Run("empty namespace is an exact match, never a wildcard", func(t *testing.T) {
+		// The empty string must select only rows literally stored with an empty
+		// namespace. If it were treated as "no filter", this call would return
+		// both tenants' rows plus every other row in the shared test database —
+		// a horizontal privilege escalation reachable from any caller that
+		// forgot to thread a namespace through.
+		got, err := idx.ListVersions(ctx, "", "shared.wasm", store.ListOptions{})
+		if err != nil {
+			t.Fatalf("ListVersions with an empty namespace: %v", err)
+		}
+		for _, v := range got {
+			if v.Namespace != "" {
+				t.Fatalf("an empty namespace leaked rows from %q — it is being treated as a "+
+					"wildcard, which is a cross-tenant read", v.Namespace)
+			}
+		}
+	})
+}
+
+// TestArtifactListPaginationHonoursZeroLimit pins the ListOptions contract
+// against the database rather than against generated SQL.
+//
+// The defect this catches is invisible: a `LIMIT 0` and an empty table both come
+// back as an empty slice with a nil error, so a test that only asserted "no
+// error" would pass either way. Both arms are needed — the unbounded arm alone
+// would also pass on a build that dropped pagination entirely.
+func TestArtifactListPaginationHonoursZeroLimit(t *testing.T) {
+	ctx := context.Background()
+	db, p := newArtifactDB(t)
+	idx := p.ArtifactIndex()
+	ns := uniqueNS(t, "page")
+
+	const total = 5
+	for i := 0; i < total; i++ {
+		seedIdentity(t, db, ns, "p.wasm",
+			fmt.Sprintf("v%d", i),
+			fmt.Sprintf("sha256:%064d", i),
+			fmt.Sprintf("2026-03-0%d 00:00:00.000", i+1))
+	}
+
+	all, err := idx.ListVersions(ctx, ns, "p.wasm", store.ListOptions{})
+	if err != nil {
+		t.Fatalf("ListVersions unbounded: %v", err)
+	}
+	if len(all) != total {
+		t.Fatalf("a zero Limit means unbounded (store/options.go:11-18): want all %d rows, got %d. "+
+			"Getting 0 here means LIMIT 0 reached the database", total, len(all))
+	}
+	if all[0].Version != "v4" {
+		t.Errorf("version history must be newest-first; got %s first", all[0].Version)
+	}
+
+	page, err := idx.ListVersions(ctx, ns, "p.wasm", store.ListOptions{Limit: 2, Offset: 1})
+	if err != nil {
+		t.Fatalf("ListVersions paged: %v", err)
+	}
+	if len(page) != 2 {
+		t.Fatalf("an explicit Limit must still reach the database: want 2 rows, got %d", len(page))
+	}
+	if page[0].Version != "v3" || page[1].Version != "v2" {
+		t.Errorf("Offset 1 into a newest-first list must start at v3; got %s", formatVersions(page))
+	}
+}
+
+// TestPutRejectsReservedVersionAgainstRealMySQL closes the loop between Task 1's
+// validation and the identity table: a rejected version must leave no row behind
+// for the list path to show.
+func TestPutRejectsReservedVersionAgainstRealMySQL(t *testing.T) {
+	ctx := context.Background()
+	_, p := newArtifactDB(t)
+	idx := p.ArtifactIndex()
+	as := store.NewArtifactStore(p.ArtifactObjects(), idx)
+	ns := uniqueNS(t, "reject")
+
+	_, err := as.Put(ctx, []byte("some wasm bytes"), store.ArtifactMeta{
+		Filename:  "r.wasm",
+		Namespace: ns,
+		Version:   "sha256-0123456789ab",
+	})
+	if !errors.Is(err, store.ErrInvalidVersion) {
+		t.Fatalf("Put must reject a version impersonating a system-generated one; got %v", err)
+	}
+
+	got, err := idx.ListVersions(ctx, ns, "r.wasm", store.ListOptions{})
+	if err != nil {
+		t.Fatalf("ListVersions: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("a rejected Put must bind no identity; found %s", formatVersions(got))
+	}
+}
+
+// seedIdentity inserts one identity row with an exact created_at.
+//
+// It writes through GORM's raw exec rather than through ArtifactStore.Put
+// because Put stamps created_at from the client clock, and these tests need two
+// rows to share a millisecond exactly — the condition the id tiebreak exists to
+// resolve. Nothing here needs the blob to exist: the identity table is a
+// separate table and the list path never joins to it.
+func seedIdentity(t *testing.T, db *gorm.DB, ns, filename, version, digest, createdAt string) {
+	t.Helper()
+	err := db.Exec(
+		"INSERT INTO xflow_artifacts (namespace, filename, version, content_hash, content_type, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+		ns, filename, version, digest, "application/wasm", createdAt,
+	).Error
+	if err != nil {
+		t.Fatalf("seed identity %s/%s/%s: %v", ns, filename, version, err)
+	}
+}
+
+// formatVersions renders a result set for failure messages. It prints names
+// only — never digests' backing content, and never anything a caller supplied
+// beyond the identity fields that are already public to the operator.
+func formatVersions(vs []*store.ArtifactVersion) string {
+	if len(vs) == 0 {
+		return "(no rows)"
+	}
+	parts := make([]string, 0, len(vs))
+	for _, v := range vs {
+		parts = append(parts, fmt.Sprintf("%s/%s/%s", v.Namespace, v.Filename, v.Version))
+	}
+	return strings.Join(parts, ", ")
+}
