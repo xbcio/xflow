@@ -1021,8 +1021,8 @@ func TestRollbackKeepsReceivingContentUpdates(t *testing.T) {
 			"config_generation=%d matched=[from-a-v2] -- after rolling back to A and then "+
 			"changing content while still pinned on A, the node's module must keep receiving "+
 			"live content updates; a stale result here means A's consumer registration was lost "+
-			"when B was registered (spec §4.2.1 candidate 2's key collision)",
-			digestA, gen, matched, wantRevision4)
+			"when B (digest %s) was registered (spec §4.2.1 candidate 2's key collision)",
+			digestA, gen, matched, wantRevision4, digestB)
 	}
 
 	runnerCancel()
