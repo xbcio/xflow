@@ -329,12 +329,31 @@ func (h *TriggerActivationHandler) registerSupplyConsumers(ctx context.Context, 
 // ActivationTracker.ProcessDirectives serializes calls to this handler's
 // Activate per activation identity).
 //
-// It also reconciles the supply-consumer registrations by DIFFERENCE: only
-// bindings the old activation had and the new one does not are unregistered. A
-// generation upgrade normally re-sends identical bindings, and a registration
-// key is derived from (module digest, supply node) alone — so "unregister
-// everything old, then register everything new" would remove the registration
-// the caller just made.
+// It also reconciles the OLD activation's supply-consumer registrations —
+// but the rule differs by binding shape, because the two shapes have
+// different registration semantics:
+//
+//   - Legacy bindings (ModuleDigest+SupplyNode) register as a SET keyed on
+//     (digest, supply node): registering twice is idempotent, and unregistering
+//     once removes it outright. A generation upgrade normally re-sends
+//     identical legacy bindings, so only the DIFFERENCE (old minus next) may be
+//     unregistered here — unregistering a retained pair would remove the very
+//     registration registerSupplyConsumers just made for the new generation.
+//     removedBindings still governs this shape.
+//
+//   - Declaration bindings (WorkflowName+NodeName+SupplyNode) declare into a
+//     REFCOUNTED table (node/internal/code/script/supply_declaration.go):
+//     registerSupplyConsumers has already declared one reference per binding in
+//     `bindings` before this method runs. If a re-sent identical declaration is
+//     excluded from unregistration the same way a legacy binding is, its count
+//     only ever grows (gen1 declares -> 1; gen2 declares again -> 2, difference
+//     is empty so nothing is undeclared -> stays 2; a later single Deactivate
+//     drops it to 1, never 0). So EVERY old declaration binding is undeclared
+//     here unconditionally, not just the removed ones — the reference
+//     registerSupplyConsumers added for `bindings` covers the new/retained set,
+//     and undeclaring all of `old.bindings` exactly cancels the reference the
+//     previous Activate call added. removedBindings does NOT govern
+//     declarations; do not unify the two branches onto one difference call.
 func (h *TriggerActivationHandler) storeSubscription(ctx context.Context, id activationID, sub types.TriggerSubscription, bindings []engine.SupplyConsumerBinding) {
 	h.mu.Lock()
 	old, exists := h.subs[id]
@@ -342,14 +361,26 @@ func (h *TriggerActivationHandler) storeSubscription(ctx context.Context, id act
 	h.mu.Unlock()
 
 	if exists {
-		unregisterSupplyConsumers(removedBindings(old.bindings, bindings))
+		var oldLegacy, oldDeclarations []engine.SupplyConsumerBinding
+		for _, b := range old.bindings {
+			if b.IsDeclaration() {
+				oldDeclarations = append(oldDeclarations, b)
+			} else {
+				oldLegacy = append(oldLegacy, b)
+			}
+		}
+		unregisterSupplyConsumers(removedBindings(oldLegacy, bindings))
+		unregisterSupplyConsumers(oldDeclarations)
 		if old.sub != nil {
 			_ = old.sub.Close(ctx)
 		}
 	}
 }
 
-// removedBindings returns the bindings present in old but not in next.
+// removedBindings returns the bindings present in old but not in next. Callers
+// must pass only legacy (non-declaration) bindings as old — see the shape
+// discussion in storeSubscription for why declarations are reconciled by a
+// different rule and never go through this function.
 func removedBindings(old, next []engine.SupplyConsumerBinding) []engine.SupplyConsumerBinding {
 	if len(old) == 0 {
 		return nil

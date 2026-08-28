@@ -60,6 +60,9 @@ func TestActivationRecordsDeclaration(t *testing.T) {
 func TestDeactivateDropsDeclaration(t *testing.T) {
 	f := newWasmActivationFixture(t)
 	const workflow, nodeName = "TestDeactivateDropsDeclaration-collect", "decode"
+	t.Cleanup(func() {
+		node.UndeclareWasmSupplyConsumers(workflow, nodeName, []string{f.supplyName})
+	})
 
 	fh := &fakeTriggerHandler{}
 	h := NewTriggerActivationHandler("https://control.internal", "",
@@ -119,6 +122,55 @@ func TestGenerationUpgradeKeepsIdenticalDeclaration(t *testing.T) {
 	if !reflect.DeepEqual(got, []string{f.supplyName}) {
 		t.Fatalf("after a generation upgrade the declaration is %v, want [%s]",
 			got, f.supplyName)
+	}
+}
+
+// TestGenerationUpgradeThenDeactivateClearsDeclaration is the mutation-proof
+// regression for the refcount leak: a generation upgrade that re-sends an
+// IDENTICAL declaration binding must still let a single Deactivate bring the
+// declaration's refcount to zero, not just decrement it once off an inflated
+// count.
+//
+// Trace of the bug this pins: gen1 Activate declares -> count 1. gen2 Activate
+// (same bindings) declares again -> count 2; if storeSubscription only
+// unregisters the DIFFERENCE between old and next bindings, that difference is
+// empty (identical bindings), so nothing is undeclared and the count stays at
+// 2. Deactivate then undeclares once -> count 1, never 0. The declaration is
+// stranded, and node/internal/code/script's execution-time guard keeps
+// fail-closing messages for a node that is no longer activated here.
+func TestGenerationUpgradeThenDeactivateClearsDeclaration(t *testing.T) {
+	f := newWasmActivationFixture(t)
+	const workflow, nodeName = "TestGenerationUpgradeThenDeactivateClearsDeclaration-collect", "decode"
+	t.Cleanup(func() {
+		node.UndeclareWasmSupplyConsumers(workflow, nodeName, []string{f.supplyName})
+	})
+
+	fh := &fakeTriggerHandler{}
+	h := NewTriggerActivationHandler("https://control.internal", "",
+		fakeLookup{handlers: map[string]types.TriggerHandler{"fake": fh}},
+		WithArtifactCodeResolver(f.resolver))
+
+	d := protocol.ActivateDirective{
+		WorkflowID: "wf-1", EntryUnitID: "trig", NodeType: "fake",
+		Supplies:        []engine.SupplyRequirement{{Node: f.supplyName}},
+		SupplyConsumers: []engine.SupplyConsumerBinding{f.declaration(workflow, nodeName)},
+	}
+	d.Generation = 1
+	if err := h.Activate(context.Background(), d); err != nil {
+		t.Fatalf("activate gen 1: %v", err)
+	}
+	d.Generation = 2
+	if err := h.Activate(context.Background(), d); err != nil {
+		t.Fatalf("activate gen 2: %v", err)
+	}
+	if err := h.Deactivate(protocol.DeactivateDirective{
+		WorkflowID: "wf-1", EntryUnitID: "trig",
+	}); err != nil {
+		t.Fatalf("deactivate: %v", err)
+	}
+	if got := node.WasmSupplyDeclarations(workflow, nodeName); got != nil {
+		t.Fatalf("declaration survived deactivation after a generation upgrade: %v "+
+			"-- the refcount was stranded above zero", got)
 	}
 }
 
