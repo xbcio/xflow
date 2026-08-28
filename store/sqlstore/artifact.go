@@ -250,8 +250,9 @@ func (r *artifactIndexRepo) CountReferences(ctx context.Context, digest string) 
 // nothing else in this tree uses ROW_NUMBER(), and taking a hard MySQL 8.0
 // dependency for one ops-page query is not a trade worth making. Both the outer
 // scan and the subquery are served by uk_identity (namespace, filename,
-// version); EXPLAIN shows a covering index lookup on the outer side and an
-// index lookup on the inner.
+// version) — EXPLAIN FORMAT=JSON reports an index lookup on each side, neither
+// of them covering: the projection pulls content_hash, content_type and
+// created_at, none of which uk_identity carries.
 //
 // The `id DESC` tiebreak is load-bearing, not decoration. created_at is
 // DATETIME(3) and GORM stamps it client-side (autoCreateTime:milli), so two
