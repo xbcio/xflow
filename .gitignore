@@ -84,6 +84,7 @@ data/
 # silently excluded cmd/runner/*_test.go from the repository.
 /runner
 /server
+/xflow
 
 # 截图/图片：曾有一张整屏截图带人名与内部运维台被提交并公开（91eafd0）
 .claude/*.png
