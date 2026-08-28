@@ -101,3 +101,63 @@ func TestSupplyConfiguredRejectsMalformedDigest(t *testing.T) {
 		}
 	}
 }
+
+// TestSupplyConfiguredFalseWhenLegacyPoolPredatesSupplyRegistration pins the
+// state review round 1 found missing coverage for: configFromSource==true with
+// an active pool whose revision==0, reached through the SAME production
+// functions that produce it outside tests -- not by poking struct fields.
+//
+// This state is reachable, and it does not need a race or a misconfiguration
+// flag: reactorFacade.Execute's legacy branch (reactor.go, gated on
+// !configFromSource.Load()) calls ensurePool, which always swaps in a pool via
+// swapConfig(..., revision=0) (host.go's ensurePool, "Legacy globals path: the
+// content has no SupplyResource revision"). reactorHost.engines is keyed
+// process-wide by module content sha256 (host.go:28), with no per-workflow
+// scoping, so any module whose bytes were EVER run through the legacy $config
+// path already carries a revision==0 active pool under that key. Registering
+// that same content hash as a supply consumer afterward
+// (RegisterSupplyConsumerByDigest -> seedSourceDrivenByKey, host.go:385-390)
+// flips configFromSource on the very same *reactorEngine immediately --
+// Registry.RegisterConsumer only synchronously overwrites the pool if the
+// registry already has cached content for that supply name (registry.go's
+// `if !has { return }`); against a freshly constructed registry with nothing
+// applied yet, it does not, and the stale legacy pool is left in place with
+// configFromSource now true.
+//
+// This is why the check cannot be "engine exists and is marked source-driven":
+// SupplyConfiguredByDigest must also confirm the pool THIS module is serving
+// actually came from a supply (revision != 0), not from an unrelated legacy
+// caller that happened to run the same bytes first.
+func TestSupplyConfiguredFalseWhenLegacyPoolPredatesSupplyRegistration(t *testing.T) {
+	ctx := context.Background()
+	code := testReactorCode(t)
+
+	// Legacy path: some caller (a plain xflow.Script node with no supply
+	// binding) runs this module through globals["$config"], which builds an
+	// active pool with revision 0 -- exactly what reactorFacade.Execute's
+	// legacy branch does via ensurePool.
+	e, err := sharedReactorHost.engineForCode(ctx, code)
+	if err != nil {
+		t.Fatalf("engineForCode: %v", err)
+	}
+	if err := e.ensurePool(ctx, []byte(`{"rules":[]}`), defaultPoolSize()); err != nil {
+		t.Fatalf("ensurePool: %v", err)
+	}
+
+	// Activation time, later: this same module's content hash is registered as
+	// a supply consumer against a registry that has not yet fetched/cached
+	// "rules". RegisterConsumer's synchronous notify is skipped (nothing
+	// cached), so nothing swaps the pool -- but the module is now marked
+	// source-driven.
+	reg := supply.NewRegistry()
+	digest := "sha256:" + mustModuleKey(t, code)
+	if err := RegisterSupplyConsumerByDigest(digest, "rules", reg); err != nil {
+		t.Fatalf("RegisterSupplyConsumerByDigest: %v", err)
+	}
+
+	if SupplyConfiguredByDigest(digest) {
+		t.Fatal("a module reported configured while its active pool is the stale " +
+			"legacy (revision==0) one built before supply registration; a p != nil " +
+			"check alone cannot tell this apart from a real supply-borne pool")
+	}
+}
