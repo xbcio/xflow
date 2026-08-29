@@ -572,6 +572,42 @@ func (s *Server) addWorkflow(ctx context.Context, wf *WorkflowBuilder, replace b
 	return id, nil
 }
 
+// ErrSupplyContentTooLarge is returned by UpdateSupply and UpdateSupplyIfMatch
+// when content exceeds maxSupplyContentBytes.
+var ErrSupplyContentTooLarge = errors.New("xflow: supply content exceeds size limit")
+
+// maxSupplyContentBytes bounds one supply snapshot at these two write entry
+// points. It is a literal, not a reference to another package's constant: this
+// number is a contract in its own right (see checkSupplyContentSize), and
+// anyone changing it must change it here, deliberately.
+//
+// It reproduces the limit that the now-sealed HTTP PUT /v1/supplies/{name}
+// used to enforce (413 payload_too_large) before that route was deleted
+// (spec appendix Z.5). Sealing the HTTP verb removed the only place this
+// bound was checked; without reinstating it here the two surviving SDK write
+// paths (this method and UpdateSupplyIfMatch) accept content of any size —
+// unbounded through memstore, and bounded only by the sqlstore MEDIUMBLOB
+// column (16 MiB) through sqlstore, which turns a deliberate policy rejection
+// into an opaque driver error at 16x the intended limit. Supply content is
+// pulled into runner memory at run time — this is a runtime constraint, not
+// transport-layer courtesy, so it belongs at the SDK boundary regardless of
+// which store backs it.
+const maxSupplyContentBytes = 1 << 20
+
+// checkSupplyContentSize enforces maxSupplyContentBytes ahead of any store
+// call, so a rejection never writes a byte. Both UpdateSupply and
+// UpdateSupplyIfMatch must call this — a store-layer check would not do,
+// because store/memstore and store/sqlstore are also reachable from callers
+// this seal does not intend to cover (e.g. store.Supplies wired directly by a
+// caller that isn't going through this SDK), and this bound is specifically
+// about the SDK entry points that replaced the sealed HTTP PUT.
+func checkSupplyContentSize(content []byte) error {
+	if len(content) > maxSupplyContentBytes {
+		return fmt.Errorf("%w: %d > %d", ErrSupplyContentTooLarge, len(content), maxSupplyContentBytes)
+	}
+	return nil
+}
+
 // UpdateSupply writes (or replaces) supply content for a named supply node.
 // Connected runners discover the change via heartbeat hints and re-fetch the
 // content automatically. Namespace defaults to "default" when empty.
@@ -582,6 +618,10 @@ func (s *Server) addWorkflow(ctx context.Context, wf *WorkflowBuilder, replace b
 // UpdateSupplyIfMatch when a concurrent publisher must not be silently
 // overwritten.
 //
+// content larger than maxSupplyContentBytes (1 MiB) is rejected with
+// ErrSupplyContentTooLarge before any store call — the same limit the sealed
+// HTTP PUT used to enforce.
+//
 // Example:
 //
 //	srv.UpdateSupply(ctx, "", "kafka-creds", credsJSON)
@@ -591,6 +631,9 @@ func (s *Server) UpdateSupply(ctx context.Context, ns, name string, content []by
 	}
 	if name == "" {
 		return errors.New("xflow: supply name must not be empty")
+	}
+	if err := checkSupplyContentSize(content); err != nil {
+		return err
 	}
 	if ns == "" {
 		ns = string(namespace.Default)
@@ -644,12 +687,19 @@ func (s *Server) GetSupply(ctx context.Context, ns, name string) (*store.SupplyR
 // This is the entry point for pointer flips (a supply whose content names an
 // artifact digest): two operators publishing concurrently must not silently
 // lose one of the two publishes.
+//
+// content larger than maxSupplyContentBytes (1 MiB) is rejected with
+// ErrSupplyContentTooLarge before any store call — the same limit the sealed
+// HTTP PUT used to enforce, and the same one UpdateSupply applies.
 func (s *Server) UpdateSupplyIfMatch(ctx context.Context, ns, name string, content []byte, ifMatch uint64) (*store.SupplyResource, error) {
 	if s.supplies == nil {
 		return nil, errors.New("xflow: supply store not configured (ServerConfig.Store is nil)")
 	}
 	if name == "" {
 		return nil, errors.New("xflow: supply name must not be empty")
+	}
+	if err := checkSupplyContentSize(content); err != nil {
+		return nil, err
 	}
 	if ns == "" {
 		ns = string(namespace.Default)
