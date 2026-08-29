@@ -20,7 +20,7 @@ import (
 func newSupplyAccessTestServer(t *testing.T) *Server {
 	t.Helper()
 	ms := memstore.New()
-	srv, err := NewServer(ServerConfig{Store: ms})
+	srv, err := NewServer(ServerConfig{Store: ms}, WithServerInsecureNoRunnerAuth())
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -93,7 +93,7 @@ func (l *literalNamespaceStore) PutSupply(_ context.Context, rec *store.SupplyRe
 // masked by the store's own (independent) normalization.
 func newSupplyAccessTestServerLiteralNamespace(t *testing.T) *Server {
 	t.Helper()
-	srv, err := NewServer(ServerConfig{Store: newLiteralNamespaceStore()})
+	srv, err := NewServer(ServerConfig{Store: newLiteralNamespaceStore()}, WithServerInsecureNoRunnerAuth())
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -222,7 +222,7 @@ func TestServerSupplyObservedNonNilWithStore(t *testing.T) {
 // supplyObserved 也保持 nil；SDK 必须原样透传这个 nil，不能自己造一个空 sink
 // 掩盖「模块未就绪」这件事。
 func TestServerSupplyObservedNilWithoutStore(t *testing.T) {
-	srv, err := NewServer(ServerConfig{})
+	srv, err := NewServer(ServerConfig{}, WithServerInsecureNoRunnerAuth())
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}

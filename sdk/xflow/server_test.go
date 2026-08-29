@@ -31,7 +31,7 @@ type sdkEnvelope struct {
 }
 
 func TestNewServerMemoryBackendServesHandler(t *testing.T) {
-	srv, err := NewServer(ServerConfig{})
+	srv, err := NewServer(ServerConfig{}, WithServerInsecureNoRunnerAuth())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +52,7 @@ func TestNewServerMemoryBackendServesHandler(t *testing.T) {
 }
 
 func TestNewServerShutdownIsGraceful(t *testing.T) {
-	srv, err := NewServer(ServerConfig{})
+	srv, err := NewServer(ServerConfig{}, WithServerInsecureNoRunnerAuth())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +67,7 @@ func TestNewServerShutdownIsGraceful(t *testing.T) {
 }
 
 func TestNewServerMountableOnHostMux(t *testing.T) {
-	srv, err := NewServer(ServerConfig{})
+	srv, err := NewServer(ServerConfig{}, WithServerInsecureNoRunnerAuth())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +89,7 @@ func TestNewServerMountableOnHostMux(t *testing.T) {
 }
 
 func TestServerIsLeader(t *testing.T) {
-	srv, err := NewServer(ServerConfig{})
+	srv, err := NewServer(ServerConfig{}, WithServerInsecureNoRunnerAuth())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +115,7 @@ func TestNewServerRedisBackendDispatchesTaskToRunner(t *testing.T) {
 	}
 	defer mr.Close()
 
-	srv, err := NewServer(ServerConfig{RedisAddr: mr.Addr()})
+	srv, err := NewServer(ServerConfig{RedisAddr: mr.Addr()}, WithServerInsecureNoRunnerAuth())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -249,7 +249,7 @@ func extractSDKData(t *testing.T, body []byte) []byte {
 
 func TestServerUpdateSupply(t *testing.T) {
 	ms := memstore.New()
-	srv, err := NewServer(ServerConfig{Store: ms})
+	srv, err := NewServer(ServerConfig{Store: ms}, WithServerInsecureNoRunnerAuth())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -297,7 +297,7 @@ func TestServerUpdateSupply(t *testing.T) {
 }
 
 func TestServerUpdateSupplyNoStore(t *testing.T) {
-	srv, err := NewServer(ServerConfig{})
+	srv, err := NewServer(ServerConfig{}, WithServerInsecureNoRunnerAuth())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -308,7 +308,7 @@ func TestServerUpdateSupplyNoStore(t *testing.T) {
 
 func TestServerUpdateSupplyEmptyName(t *testing.T) {
 	ms := memstore.New()
-	srv, err := NewServer(ServerConfig{Store: ms})
+	srv, err := NewServer(ServerConfig{Store: ms}, WithServerInsecureNoRunnerAuth())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -322,7 +322,7 @@ func TestServerUpdateSupplyEmptyName(t *testing.T) {
 // store directly. This is the asymmetric-namespace regression test.
 func TestServerUpdateSupplyEmptyNSRoundTrip(t *testing.T) {
 	ms := memstore.New()
-	srv, err := NewServer(ServerConfig{Store: ms})
+	srv, err := NewServer(ServerConfig{Store: ms}, WithServerInsecureNoRunnerAuth())
 	if err != nil {
 		t.Fatal(err)
 	}

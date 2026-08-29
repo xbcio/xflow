@@ -33,7 +33,7 @@ func TestNewServerRedisConfigCarriesCredentials(t *testing.T) {
 
 	// Control: the credential-less field cannot reach this Redis. NewServer
 	// builds (and pings) the backend eagerly, so the failure surfaces here.
-	if _, err := NewServer(ServerConfig{RedisAddr: srv.Addr()}); err == nil {
+	if _, err := NewServer(ServerConfig{RedisAddr: srv.Addr()}, WithServerInsecureNoRunnerAuth()); err == nil {
 		t.Fatal("NewServer with RedisAddr alone succeeded against a password-protected Redis; " +
 			"this test can no longer tell a wired RedisConfig from a dropped one")
 	} else if !strings.Contains(err.Error(), "redis ping") {
@@ -44,7 +44,7 @@ func TestNewServerRedisConfigCarriesCredentials(t *testing.T) {
 		Mode:     distributed.RedisModeSingle,
 		Addrs:    []string{srv.Addr()},
 		Password: password,
-	}})
+	}}, WithServerInsecureNoRunnerAuth())
 	if err != nil {
 		t.Fatalf("NewServer with RedisConfig: %v", err)
 	}

@@ -285,7 +285,17 @@ func TestEmbeddedServerRunsMapBodyArtifact(t *testing.T) {
 				[]string{"workflow", "execution", "artifact.read", "supply.read"}),
 			apiserver.NamespaceAwareAuthorizer{},
 			apiserver.NewSQLAuditSink(provider),
-		))
+		),
+		// This test's runner registers over the real Runner Protocol
+		// (startEmbeddedRunner below) but never presents a runner-protocol
+		// credential (no WithToken on its protocol client) — only the
+		// workflow/execution HTTP API above is authenticated. Flagged in
+		// task-4-report.md as the one call site closest to a production
+		// embedding topology: whether it should carry a real
+		// control.NewStaticTokenAuthenticator instead of this explicit
+		// opt-out is a call for review, not made unilaterally here.
+		xflow.WithServerInsecureNoRunnerAuth(),
+	)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}

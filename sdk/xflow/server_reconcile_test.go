@@ -46,7 +46,7 @@ func TestServerReconcilerSettlesAPendingAdmission(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	srv, err := NewServer(ServerConfig{Store: ms})
+	srv, err := NewServer(ServerConfig{Store: ms}, WithServerInsecureNoRunnerAuth())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +79,7 @@ func TestServerReconcilerSettlesAPendingAdmission(t *testing.T) {
 // absent rather than a worker that scans nothing. Pinned so the nil case stays
 // an explicit answer a caller can check, not an incidental one.
 func TestServerReconcilerAbsentWithoutADurableStore(t *testing.T) {
-	srv, err := NewServer(ServerConfig{})
+	srv, err := NewServer(ServerConfig{}, WithServerInsecureNoRunnerAuth())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +114,7 @@ func TestServerStartRunsTheReconciler(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	srv, err := NewServer(ServerConfig{Store: ms})
+	srv, err := NewServer(ServerConfig{Store: ms}, WithServerInsecureNoRunnerAuth())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +169,7 @@ func TestServerRunRunsTheReconciler(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	srv, err := NewServer(ServerConfig{Store: ms}, WithServerHTTPAddr("127.0.0.1:0"))
+	srv, err := NewServer(ServerConfig{Store: ms}, WithServerHTTPAddr("127.0.0.1:0"), WithServerInsecureNoRunnerAuth())
 	if err != nil {
 		t.Fatal(err)
 	}

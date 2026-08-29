@@ -16,7 +16,7 @@ import (
 // status code and — critically — neither may return 404 (which would mean
 // the route was never registered).
 func TestSDKServerParityWithAPIServer(t *testing.T) {
-	sdkSrv, err := NewServer(ServerConfig{})
+	sdkSrv, err := NewServer(ServerConfig{}, WithServerInsecureNoRunnerAuth())
 	if err != nil {
 		t.Fatal(err)
 	}

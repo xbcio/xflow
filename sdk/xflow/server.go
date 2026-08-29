@@ -53,6 +53,12 @@ type ServerConfig struct {
 	Store store.Store
 }
 
+// ErrRunnerAuthPostureUndeclared is returned by NewServer when neither
+// WithServerAuth nor WithServerInsecureNoRunnerAuth was supplied.
+var ErrRunnerAuthPostureUndeclared = errors.New(
+	"xflow: runner-protocol auth posture not declared: pass WithServerAuth(...) to authenticate runners, " +
+		"or WithServerInsecureNoRunnerAuth() to run without runner auth on purpose")
+
 type serverConfig struct {
 	auth                control.Authenticator
 	logger              engine.Logger
@@ -68,6 +74,10 @@ type serverConfig struct {
 	auditSink           apiserver.AuditSink
 	workflowAuth        apiserver.WorkflowAuthenticator
 	requireWorkflowAuth bool
+	// insecureNoRunnerAuth records that the embedder explicitly chose to run
+	// the runner protocol without authentication. Set only by
+	// WithServerInsecureNoRunnerAuth; see NewServer's posture gate.
+	insecureNoRunnerAuth bool
 
 	tracer                   tracing.Tracer
 	concurrency              int
@@ -81,10 +91,31 @@ type serverConfig struct {
 // ServerOption configures a Server.
 type ServerOption func(*serverConfig)
 
-// WithServerAuth installs a runner-protocol authenticator. Default accepts
-// every runner (dev/MVP behavior), matching control.DisabledAuthenticator.
+// WithServerAuth installs a runner-protocol authenticator. Either this or
+// WithServerInsecureNoRunnerAuth must be supplied; NewServer fails otherwise.
+//
+// For an embedder whose runner credential is minted per process (and so cannot
+// live in a policy file), control.NewStaticTokenAuthenticator wraps that token
+// with the same matching and namespace-entitlement logic as the file-backed
+// control.NewFilePolicyStore.
 func WithServerAuth(auth control.Authenticator) ServerOption {
 	return func(c *serverConfig) { c.auth = auth }
+}
+
+// WithServerInsecureNoRunnerAuth declares that this server intentionally runs
+// its runner protocol without authentication. Required when WithServerAuth is
+// not supplied — NewServer refuses to construct a server whose runner-auth
+// posture was never stated.
+//
+// The runner protocol's claim / heartbeat / complete routes carry no other
+// authentication: WithServerPrincipalAuth gates the workflow and execution HTTP
+// routes, not these. So omitting WithServerAuth is the entire decision, and it
+// should be a decision someone made rather than one they inherited.
+//
+// Intended for tests and single-process development. A host that listens on
+// anything other than loopback should supply a real Authenticator instead.
+func WithServerInsecureNoRunnerAuth() ServerOption {
+	return func(c *serverConfig) { c.insecureNoRunnerAuth = true }
 }
 
 // WithServerLogger sets the logger used by the engine, dispatcher, and
@@ -288,9 +319,20 @@ type Server struct {
 // The server delegates to service/apiserver.APIServer so it exposes the same
 // module surface (Runner Protocol + workflow/control API) as cmd/server.
 //
+// Callers must declare a runner-protocol auth posture: either WithServerAuth
+// with a real control.Authenticator, or WithServerInsecureNoRunnerAuth to run
+// without one on purpose. NewServer returns ErrRunnerAuthPostureUndeclared
+// otherwise — the runner protocol's claim/heartbeat/complete routes carry no
+// other authentication, so omitting WithServerAuth used to be the whole of a
+// silent "accept every runner" decision.
+//
 // Example:
 //
-//	srv, err := xflow.NewServer(xflow.ServerConfig{RedisAddr: "localhost:6379"})
+//	auth, err := control.NewStaticTokenAuthenticator("runner-", runnerToken, []string{"default"}, []string{"*"})
+//	if err != nil { ... }
+//	srv, err := xflow.NewServer(
+//		xflow.ServerConfig{RedisAddr: "localhost:6379"},
+//		xflow.WithServerAuth(auth))
 //	if err != nil { ... }
 //	if err := srv.Start(ctx); err != nil { ... }
 //	mux.Handle("/xflow/", srv.Handler())
@@ -299,6 +341,12 @@ func NewServer(cfg ServerConfig, opts ...ServerOption) (*Server, error) {
 	sc := &serverConfig{}
 	for _, o := range opts {
 		o(sc)
+	}
+	if sc.auth == nil && !sc.insecureNoRunnerAuth {
+		return nil, ErrRunnerAuthPostureUndeclared
+	}
+	if sc.auth != nil && sc.insecureNoRunnerAuth {
+		return nil, errors.New("xflow: WithServerAuth and WithServerInsecureNoRunnerAuth are mutually exclusive")
 	}
 
 	apiCfg := buildServerAPIConfig(cfg, sc)

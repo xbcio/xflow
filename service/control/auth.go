@@ -382,3 +382,39 @@ func (s *FilePolicyStore) IsDryRun() bool {
 	}
 	return s.dryRun
 }
+
+// NewStaticTokenAuthenticator builds an in-memory authenticator around a single
+// bearer token, for embedders whose runner credential is minted at process
+// start and therefore cannot live in a policy file on disk.
+//
+// It is a thin wrapper over NewFilePolicyStoreFromConfig, so token hashing,
+// constant-time comparison and namespace entitlement behave identically to the
+// file-backed path.
+//
+// idPrefix is required and scopes the token: only runner IDs starting with it
+// can present this credential. There is deliberately no "any runner ID" mode —
+// the underlying matcher is a prefix test, so the only value that would accept
+// everything is the empty string, and a credential that names no subject at all
+// is the posture this constructor exists to avoid.
+//
+// An empty token is rejected for the same reason: FilePolicyStore treats an
+// entry with no token as unauthenticated-by-that-factor, so an empty token here
+// would silently accept every runner under the prefix.
+func NewStaticTokenAuthenticator(idPrefix, token string, allowedNamespaces, allowedNodeTypes []string) (Authenticator, error) {
+	if idPrefix == "" {
+		return nil, errors.New("static token authenticator requires a non-empty runner ID prefix")
+	}
+	if token == "" {
+		return nil, errors.New("static token authenticator requires a non-empty token")
+	}
+	return NewFilePolicyStoreFromConfig(PolicyConfig{
+		Version: 1,
+		Runners: []PolicyEntry{{
+			Name:              "static-token",
+			IDPrefix:          idPrefix,
+			Token:             token,
+			AllowedNodeTypes:  allowedNodeTypes,
+			AllowedNamespaces: allowedNamespaces,
+		}},
+	}, false)
+}

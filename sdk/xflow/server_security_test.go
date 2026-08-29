@@ -19,6 +19,7 @@ import (
 
 func startTestServer(t *testing.T, opts ...ServerOption) *httptest.Server {
 	t.Helper()
+	opts = append(opts, WithServerInsecureNoRunnerAuth())
 	srv, err := NewServer(ServerConfig{}, opts...)
 	if err != nil {
 		t.Fatal(err)
@@ -92,7 +93,7 @@ func TestServerWorkflowAuthAcceptsTheConfiguredToken(t *testing.T) {
 // means to require auth but wires the authenticator conditionally — from an
 // env var, say — gets a silently open server when that value is empty.
 func TestServerRequireWorkflowAuthFailsClosedWithNoAuthenticator(t *testing.T) {
-	if _, err := NewServer(ServerConfig{}, WithServerWorkflowAuth(nil, true)); err == nil {
+	if _, err := NewServer(ServerConfig{}, WithServerWorkflowAuth(nil, true), WithServerInsecureNoRunnerAuth()); err == nil {
 		t.Fatal("NewServer accepted RequireWorkflowAuth with a nil authenticator; " +
 			"the workflow API would be open while the config reads as authenticated")
 	}

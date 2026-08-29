@@ -94,7 +94,8 @@ func newTestServer(t *testing.T) (*Server, *memServerArtifactIndex, *httptest.Se
 				[]string{"artifact.read", "workflow", "execution"}),
 			apiserver.NamespaceAwareAuthorizer{},
 			apiserver.NewInMemoryAuditSink(),
-		))
+		),
+		WithServerInsecureNoRunnerAuth())
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -244,7 +245,8 @@ func TestServerArtifactRouteUnmountedWithoutStore(t *testing.T) {
 			apiserver.NewBearerPrincipalAuth(serverTestToken, "test-runner", []string{"artifact.read"}),
 			apiserver.NamespaceAwareAuthorizer{},
 			apiserver.NewInMemoryAuditSink(),
-		))
+		),
+		WithServerInsecureNoRunnerAuth())
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -271,12 +273,14 @@ func TestServerPrincipalAuthRequiresAuthorizerAndAudit(t *testing.T) {
 	auth := apiserver.NewBearerPrincipalAuth(serverTestToken, "test-runner", []string{"artifact.read"})
 
 	if _, err := NewServer(ServerConfig{},
-		WithServerPrincipalAuth(auth, nil, apiserver.NewInMemoryAuditSink())); err == nil {
+		WithServerPrincipalAuth(auth, nil, apiserver.NewInMemoryAuditSink()),
+		WithServerInsecureNoRunnerAuth()); err == nil {
 		t.Fatal("NewServer accepted a PrincipalAuth with no Authorizer; every " +
 			"request would then be denied by default")
 	}
 	if _, err := NewServer(ServerConfig{},
-		WithServerPrincipalAuth(auth, apiserver.NamespaceAwareAuthorizer{}, nil)); err == nil {
+		WithServerPrincipalAuth(auth, apiserver.NamespaceAwareAuthorizer{}, nil),
+		WithServerInsecureNoRunnerAuth()); err == nil {
 		t.Fatal("NewServer accepted a PrincipalAuth with no AuditSink; mutations " +
 			"would execute unaudited")
 	}
