@@ -379,3 +379,42 @@ func TestRunner_CredentialResolverReceivesNamespaceFromContext(t *testing.T) {
 		t.Fatalf("handler observed namespace = %v, want namespace-acme", got["namespace"])
 	}
 }
+
+// TestRunner_LeaseNamespaceInjectedIntoContext pins the runner-artifact-
+// namespace-authorization design's §5.1 fix: Execute must inject
+// lease.Namespace into ctx (via namespace.WithNamespace) BEFORE calling
+// SetNamespace, so a lease that carries a real namespace but whose caller
+// passed a bare context.Background() (the production shape: the control
+// plane sets lease.Namespace, not ctx) still reaches the handler with the
+// correct namespace rather than silently falling back to namespace.Default.
+//
+// Deliberately does NOT put a namespace on ctx itself -- that is what
+// TestRunner_CredentialResolverReceivesNamespaceFromContext already covers,
+// and would not distinguish this fix from a no-op.
+func TestRunner_LeaseNamespaceInjectedIntoContext(t *testing.T) {
+	rec := newCredRecordingHandler()
+	resolver := func(ns namespace.Namespace, name string) map[string]any {
+		if name != "db" {
+			return nil
+		}
+		return map[string]any{"namespace": string(ns)}
+	}
+	runner := NewRunner(singleHandlerRegistry{handler: rec}, WithCredentialResolver(resolver))
+
+	lease := &engine.TaskLease{
+		Task:      engine.Task{ExecutionID: "exec-lease-namespace", NodeName: "probe"},
+		Input:     &types.Input{ExecutionID: "exec-lease-namespace", NodeName: "probe"},
+		NodeType:  "test.cred-probe",
+		Namespace: "namespace-from-lease",
+	}
+	if _, err := runner.Execute(context.Background(), lease); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	got, ok := rec.observed("exec-lease-namespace")
+	if !ok {
+		t.Fatal("handler observed nil credential, want namespace-scoped resolver value")
+	}
+	if got["namespace"] != "namespace-from-lease" {
+		t.Fatalf("handler observed namespace = %v, want namespace-from-lease (lease.Namespace was not injected into ctx)", got["namespace"])
+	}
+}

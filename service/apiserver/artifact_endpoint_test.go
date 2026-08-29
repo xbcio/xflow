@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/store/objectstore"
 )
@@ -510,6 +511,65 @@ func TestArtifactEndpointOverHTTPStore(t *testing.T) {
 	absentKey := store.ObjectKeyForDigest(store.ContentHash([]byte("absent from this tenant")))
 	if _, _, err := rt.GetObject(context.Background(), absentKey); !errors.Is(err, objectstore.ErrNotFound) {
 		t.Fatalf("GetObject(absent) = %v, want objectstore.ErrNotFound", err)
+	}
+}
+
+// TestArtifactEndpointAuthDisabledIgnoresDeclaredNamespace is design §6 test 4
+// (docs/superpowers/specs/2026-08-30-runner-artifact-namespace-authorization-design.md):
+// a caller declaring X-Xflow-Namespace must NOT be trusted when the module's
+// runnerAuth is not a genuinely configured control.Authenticator -- neither
+// when it is left nil (the zero value newArtifactModule produces) nor when it
+// is explicitly control.DisabledAuthenticator{} (an operator who has not
+// turned on runner-protocol auth at all). Both must silently fall back to the
+// authenticated principal's own namespace exactly as a request with no header
+// would, rather than widen access to whatever the caller claims.
+//
+// The digest is referenced ONLY by tenant-b. The principal is tenant-a. If the
+// declaration were ever trusted without a real policy behind it, this would
+// answer 200 instead of 404 -- the same over-privileged read design §6 test 1
+// closes for a genuinely multi-namespace runner, but here for the case where
+// there is no runner-protocol auth at all to legitimately grant it.
+func TestArtifactEndpointAuthDisabledIgnoresDeclaredNamespace(t *testing.T) {
+	dir := t.TempDir()
+	idx := &memArtifactIndex{}
+	as := store.NewArtifactStore(objectstore.NewFSStore(dir), idx)
+	content := []byte("tenant-b only content, auth-disabled probe")
+	ref, err := as.Put(context.Background(), content, store.ArtifactMeta{
+		Filename:  "authdisabled.wasm",
+		Namespace: "tenant-b",
+	})
+	if err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name       string
+		runnerAuth control.Authenticator
+	}{
+		{"nil runnerAuth (zero value)", nil},
+		{"explicit DisabledAuthenticator", control.DisabledAuthenticator{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newArtifactModule(as)
+			m.principalAuth = staticPrincipalAuth{principal: Principal{
+				Subject: "runner-a", Namespace: "tenant-a", Scopes: []string{"artifact.read"},
+			}}
+			m.authorizer = ScopeAuthorizer{}
+			m.audit = NewInMemoryAuditSink()
+			m.runnerAuth = tc.runnerAuth
+			mux := http.NewServeMux()
+			m.RegisterHTTP(mux)
+
+			req := httptest.NewRequest(http.MethodGet, "/v1/artifacts/"+ref.Digest, nil)
+			req.Header.Set(objectstore.NamespaceHeader, "tenant-b")
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("GET with declared namespace=tenant-b, runnerAuth=%s = %d, want 404 "+
+					"(principal is tenant-a; the declaration must not be trusted without a "+
+					"configured runner-protocol authenticator); body=%s", tc.name, rec.Code, rec.Body)
+			}
+		})
 	}
 }
 
