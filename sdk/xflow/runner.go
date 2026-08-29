@@ -174,6 +174,21 @@ type RunnerConfig struct {
 	// ArtifactCacheDir is where fetched script artifacts are cached on disk.
 	// Empty uses the process default.
 	ArtifactCacheDir string
+
+	// ArtifactCacheMaxBytes bounds the total size of ArtifactCacheDir. Zero
+	// (the default) uses objectstore.DefaultFSStoreMaxBytes; a negative value
+	// disables the bound entirely (matches every other "zero means default"
+	// field in this struct needing a distinct signal for "explicitly
+	// unbounded").
+	//
+	// This exists because the cache is a content-addressed store that is only
+	// ever appended to: a script redeploy always mints a fresh digest, and
+	// nothing ever deletes an old one on its own. The sibling wasm
+	// compilation cache (node/internal/code/script/wasm/cache.go) had exactly
+	// this shape and reached 20 GB on one development machine before it
+	// gained the same kind of cap — see FSStore.MaxBytes for the full
+	// history.
+	ArtifactCacheMaxBytes int64
 }
 
 type runnerOptions struct {
@@ -904,6 +919,11 @@ func newRunnerArtifactResolver(cfg RunnerConfig) (func(ctx context.Context, dige
 	// FSStore.PartitionByNamespace's doc comment.
 	cache := objectstore.NewFSStore(runnerArtifactCacheDir(cfg))
 	cache.PartitionByNamespace = true
+	// MaxBytes: this cache is append-only by construction (a fresh digest per
+	// redeploy, nothing ever overwritten), so left unbounded it repeats the
+	// wasm compilation cache's 20 GB history. See FSStore.MaxBytes and
+	// RunnerConfig.ArtifactCacheMaxBytes.
+	cache.MaxBytes = artifactCacheMaxBytes(cfg)
 	readThrough := objectstore.NewReadThrough(cache, origin)
 	artifactStore := store.NewArtifactStore(readThrough, nil)
 	return func(ctx context.Context, digest string) ([]byte, error) {
@@ -925,4 +945,15 @@ func runnerArtifactCacheDir(cfg RunnerConfig) string {
 		return filepath.Join(os.TempDir(), "xflow", "artifacts")
 	}
 	return filepath.Join(base, "xflow", "artifacts")
+}
+
+// artifactCacheMaxBytes resolves the effective FSStore.MaxBytes for the
+// runner artifact cache: zero (RunnerConfig's unset value) defers to the
+// package default, everything else -- including a negative value, which
+// explicitly means unbounded -- is passed through verbatim.
+func artifactCacheMaxBytes(cfg RunnerConfig) int64 {
+	if cfg.ArtifactCacheMaxBytes != 0 {
+		return cfg.ArtifactCacheMaxBytes
+	}
+	return objectstore.DefaultFSStoreMaxBytes
 }
