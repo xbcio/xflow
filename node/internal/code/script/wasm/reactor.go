@@ -15,12 +15,17 @@ import (
 // it is applied via ensurePool before eval; when absent the engine reuses the
 // currently-active pool (or errors if never configured).
 //
-// Deprecated: this legacy globals path is kept because embedded/SDK callers and
-// existing tests still use it, but it is unreachable in production — the
-// production path is $supplies + a declared dependency edge + SupplyConsumer
-// (supply_consumer.go), which flips a module to configFromSource instead of
-// reading $config per call. Task 18 adds the ScriptNode.Execute end-to-end
-// regression for the production path.
+// Deprecated: this legacy globals path is kept for embedded/SDK callers and
+// existing tests, but it is very much reachable in production too: it serves
+// any wasm node with no supply dependency edge, because the control plane
+// never issues a binding for one (entry_activation_manager.go:206-209), and
+// engine/input.go sets Config: g.Config() on every task regardless, with
+// script.go's engineRoots forcing $config through the Roots projection. Once a
+// module's content hash is ALSO registered by a different, supply-declaring
+// node (RegisterSupplyConsumerByDigest flips configFromSource process-wide,
+// keyed on module bytes with no node identity), availability() in pool.go
+// refuses to serve this path's revision-0 pool to that shared engine — see the
+// guard on activePool.revision there.
 const reactorConfigGlobal = "$config"
 
 func init() {

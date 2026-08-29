@@ -2,9 +2,11 @@ package wasm
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/xbcio/xflow/node/internal/code/script/engine"
 	"github.com/xbcio/xflow/node/supply"
 )
 
@@ -159,5 +161,79 @@ func TestSupplyConfiguredFalseWhenLegacyPoolPredatesSupplyRegistration(t *testin
 		t.Fatal("a module reported configured while its active pool is the stale " +
 			"legacy (revision==0) one built before supply registration; a p != nil " +
 			"check alone cannot tell this apart from a real supply-borne pool")
+	}
+}
+
+// TestSourceDrivenEngineRefusesLegacyPool pins Z.1: once a module is marked
+// source-driven, a pool that came from the legacy globals path
+// (activePool.revision == 0) must NOT be served. It is not the registering
+// node that this protects -- SupplyConfiguredByDigest already fail-closes that
+// one (see TestSupplyConfiguredFalseWhenLegacyPoolPredatesSupplyRegistration,
+// which builds the identical state) -- it is a SECOND node sharing the same
+// byte-identical module and declaring no supplies of its own. That node is
+// gated by nothing: script.go:281-282 admits only declared nodes to the
+// execution-time guard, so it reaches reactorFacade.Execute directly, takes the
+// source-driven branch on the shared engine, and availability() is the only
+// thing standing between it and the stale legacy rules.
+func TestSourceDrivenEngineRefusesLegacyPool(t *testing.T) {
+	ctx := context.Background()
+	code := testReactorCode(t)
+
+	e, err := sharedReactorHost.engineForCode(ctx, code)
+	if err != nil {
+		t.Fatalf("engineForCode: %v", err)
+	}
+	if err := e.ensurePool(ctx, []byte(`{"rules":[]}`), defaultPoolSize()); err != nil {
+		t.Fatalf("ensurePool: %v", err)
+	}
+	// Before registration this is a legitimate legacy module and must serve.
+	if got := e.availability(); got != AvailFresh {
+		t.Fatalf("legacy module before any supply registration: availability = %v, want AvailFresh", got)
+	}
+
+	reg := supply.NewRegistry()
+	digest := "sha256:" + mustModuleKey(t, code)
+	if err := RegisterSupplyConsumerByDigest(digest, "rules", reg); err != nil {
+		t.Fatalf("RegisterSupplyConsumerByDigest: %v", err)
+	}
+
+	if got := e.availability(); got != AvailUnavailable {
+		t.Fatalf("source-driven module whose active pool is the legacy revision-0 one: "+
+			"availability = %v, want AvailUnavailable (serving it hands an undeclared "+
+			"sibling node stale globals rules under a Fresh verdict)", got)
+	}
+}
+
+// TestUndeclaredSiblingIsRefusedAfterDigestRegistration is the data-plane half
+// of TestSourceDrivenEngineRefusesLegacyPool: it drives reactorFacade.Execute
+// the way an undeclared node does (globals carrying $config, no declaration
+// anywhere) and requires a transient refusal rather than a served result.
+func TestUndeclaredSiblingIsRefusedAfterDigestRegistration(t *testing.T) {
+	ctx := context.Background()
+	code := testReactorCode(t)
+
+	f := &reactorFacade{host: sharedReactorHost}
+	src := engine.Source{Code: code}
+	globals := map[string]any{reactorConfigGlobal: map[string]any{"rules": []any{}}}
+
+	// The undeclared node's first message: legacy path, builds a revision-0 pool.
+	if _, err := f.Execute(ctx, src, globals, engine.DefaultHelpers()); err != nil {
+		t.Fatalf("legacy execute before registration: %v", err)
+	}
+
+	// A DIFFERENT node, sharing the identical module, registers as a supply
+	// consumer. Nothing about the undeclared node changed.
+	reg := supply.NewRegistry()
+	if err := RegisterSupplyConsumerByDigest("sha256:"+mustModuleKey(t, code), "rules", reg); err != nil {
+		t.Fatalf("RegisterSupplyConsumerByDigest: %v", err)
+	}
+
+	_, err := f.Execute(ctx, src, globals, engine.DefaultHelpers())
+	if err == nil {
+		t.Fatal("undeclared sibling was served after the module became source-driven; " +
+			"it must fail closed rather than run against the stale legacy rules")
+	}
+	if !strings.Contains(err.Error(), "wasm.unconfigured") {
+		t.Fatalf("refusal reason = %q, want it to carry the wasm.unconfigured cause", err)
 	}
 }

@@ -816,8 +816,27 @@ const (
 const staleFailureThreshold = 3
 
 // availability reports the current tier.
+//
+// A source-driven module is never served from a pool that came from the legacy
+// globals path. activePool.revision is that provenance marker (zero means
+// $config built it -- host.go's ensurePool passes revision 0 unconditionally,
+// while a supply-borne swap carries SupplyResource.Revision, which store's
+// PutSupply bumps to 1 on the very first write). The two can coexist on one
+// engine because reactorHost.engines is keyed by module content sha256 with no
+// node identity: an undeclared node that ran these bytes through $config first
+// leaves a revision-0 pool behind, and a second node's supply registration then
+// flips configFromSource on that same engine without swapping the pool.
+//
+// The check belongs HERE and not in script.go's execution-time guard, because
+// that guard admits only nodes with a live declaration -- and the node this
+// protects is by definition the one with no declaration. It reaches Execute
+// directly and availability() is its only gate.
 func (e *reactorEngine) availability() Availability {
-	if e.active.Load() == nil {
+	p := e.active.Load()
+	if p == nil {
+		return AvailUnavailable
+	}
+	if e.configFromSource.Load() && p.revision == 0 {
 		return AvailUnavailable
 	}
 	if e.sourceFailures.Load() >= staleFailureThreshold {
