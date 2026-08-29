@@ -48,8 +48,15 @@ func (s RunnerSelector) IsLive(snap RunnerSnapshot, now time.Time) bool {
 	return now.Sub(snap.LastHeartbeat) <= ttl
 }
 
-// CanAssign is the full eligibility check: the runner must be live, have
-// matching capabilities, authorized policy, and correct namespace.
+// CanAssign is the label/capability/policy eligibility check: the runner must
+// be live, have matching capabilities, an authorizing policy, and satisfy the
+// required label selector.
+//
+// It does NOT check namespace membership — it has no parameter carrying the
+// target namespace. Namespace eligibility is enforced at two other points:
+// RunnerPolicy.AllowsNamespace at registration (which decides what a runner may
+// declare) and canServeNamespace at dispatch (ClaimForRunner) and at entry
+// activation placement (chooseRunner).
 func (s RunnerSelector) CanAssign(snap RunnerSnapshot, policy RunnerPolicy, routing engine.TaskRouting, labels map[string]string, now time.Time) bool {
 	if !s.IsLive(snap, now) {
 		return false

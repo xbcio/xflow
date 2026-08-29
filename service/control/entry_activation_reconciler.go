@@ -355,12 +355,19 @@ func (r *EntryActivationReconciler) reconcileOne(ctx context.Context, act *engin
 	return nil
 }
 
-// chooseRunner returns the first live runner that satisfies the activation's
-// selector. It is fail-closed on a required selector: a runner whose labels do
-// not match is never chosen.
+// chooseRunner returns the first live runner that serves the activation's
+// namespace and satisfies its selector. It is fail-closed on both: a runner
+// outside the namespace, or whose labels do not match a required selector, is
+// never chosen.
 func (r *EntryActivationReconciler) chooseRunner(act *engine.EntryActivation, live []RunnerSnapshot, now time.Time) (RunnerSnapshot, bool) {
 	for _, snap := range live {
 		if !r.selector.IsLive(snap, now) {
+			continue
+		}
+		// Namespace membership is part of eligibility, not a routing preference.
+		// snap.Namespaces is what the runner declared at Register, which the
+		// register-time policy gate constrains to what its policy grants.
+		if !namespaceSatisfies(act, snap) {
 			continue
 		}
 		if snap.Capacity > 0 && snap.InFlight >= snap.Capacity {
@@ -378,6 +385,15 @@ func (r *EntryActivationReconciler) chooseRunner(act *engine.EntryActivation, li
 		return snap, true
 	}
 	return RunnerSnapshot{}, false
+}
+
+// namespaceSatisfies reports whether the runner may host this activation.
+// Namespace membership is an authorization boundary, not a routing preference:
+// unlike label selectors it is never relaxed by the default-selector fallback.
+// snap.Namespaces is what the runner declared at Register, which the
+// register-time policy gate constrains to what its policy grants.
+func namespaceSatisfies(act *engine.EntryActivation, snap RunnerSnapshot) bool {
+	return canServeNamespace(snap.Namespaces, act.Namespace)
 }
 
 // ownerSatisfiesDesired reports whether the activation's CURRENT owner still
@@ -611,7 +627,11 @@ func (r *EntryActivationReconciler) fallbackChooseRunner(act *engine.EntryActiva
 		if snap.Capacity > 0 && snap.InFlight >= snap.Capacity {
 			continue
 		}
-		// Capability check is never bypassed by fallback.
+		// Capability and namespace checks are never bypassed by fallback;
+		// only the label selector is relaxed.
+		if !namespaceSatisfies(act, snap) {
+			continue
+		}
 		if !capabilitiesSatisfy(act, snap) {
 			continue
 		}
