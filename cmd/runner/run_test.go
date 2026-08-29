@@ -234,6 +234,46 @@ func TestRunCommandPropagatesTheArtifactCacheDirToTheSDK(t *testing.T) {
 	runCommand(t, "run", "--server", "http://server:8080")
 }
 
+// XFLOW_ARTIFACT_CACHE_MAX_BYTES is the operator's only control over
+// FSStore.MaxBytes for the runner's local artifact cache (see
+// sdk/xflow/runner.go's newRunnerArtifactResolver). Without this test, a
+// wired-looking `os.Getenv("XFLOW_ARTIFACT_CACHE_MAX_BYTES")` call that never
+// reached toSDKRunnerConfig's returned struct would go unnoticed the way the
+// heartbeat interval once did before TestRunCommandPropagatesResolvedDurationsToTheSDK
+// pinned it: parsed, and then discarded.
+func TestRunCommandPropagatesTheArtifactCacheMaxBytesToTheSDK(t *testing.T) {
+	t.Setenv("XFLOW_ARTIFACT_CACHE_MAX_BYTES", "12345")
+
+	restore := stubRunnerServiceFactory(func(cfg xflowsdk.RunnerConfig) error {
+		if cfg.ArtifactCacheMaxBytes != 12345 {
+			t.Errorf("ArtifactCacheMaxBytes = %d, want 12345", cfg.ArtifactCacheMaxBytes)
+		}
+		return nil
+	})
+	defer restore()
+
+	runCommand(t, "run", "--server", "http://server:8080")
+}
+
+// A malformed XFLOW_ARTIFACT_CACHE_MAX_BYTES must not take the runner down
+// over a tuning-knob typo: it degrades to 0, which tells RunnerConfig to use
+// the SDK's own default cap, mirroring the sibling wasm compilation cache's
+// fail-open handling of XFLOW_WASM_CACHE_MAX_BYTES.
+func TestRunCommandToleratesMalformedArtifactCacheMaxBytes(t *testing.T) {
+	t.Setenv("XFLOW_ARTIFACT_CACHE_MAX_BYTES", "not-a-number")
+
+	restore := stubRunnerServiceFactory(func(cfg xflowsdk.RunnerConfig) error {
+		if cfg.ArtifactCacheMaxBytes != 0 {
+			t.Errorf("ArtifactCacheMaxBytes = %d, want 0 (fail open to the SDK default) for a malformed value",
+				cfg.ArtifactCacheMaxBytes)
+		}
+		return nil
+	})
+	defer restore()
+
+	runCommand(t, "run", "--server", "http://server:8080")
+}
+
 // --metrics-addr never reaches xflowsdk.RunnerConfig — runRunner opens the
 // scrape listener itself, unconditionally on cfg.metricsAddr, so
 // stubRunnerServiceFactory's xflowsdk.RunnerConfig has no field to observe it

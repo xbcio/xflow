@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -281,9 +282,29 @@ func toSDKRunnerConfig(cfg runnerConfig) (xflowsdk.RunnerConfig, error) {
 		Credentials:           cfg.credentials,
 		ResourcePoolConfig:    cfg.resourcePoolConfig,
 		ArtifactCacheDir:      os.Getenv("XFLOW_ARTIFACT_CACHE_DIR"),
+		ArtifactCacheMaxBytes: artifactCacheMaxBytesFromEnv(),
 		ReportMetrics:         cfg.reportMetrics,
 		ReportMetricsInterval: reportInterval,
 	}, nil
+}
+
+// artifactCacheMaxBytesFromEnv resolves XFLOW_ARTIFACT_CACHE_MAX_BYTES. Unset
+// returns 0, which tells RunnerConfig to use the SDK's default cap. A
+// malformed value also returns 0 rather than taking the runner down over a
+// tuning-knob typo -- the same fail-open choice the sibling wasm compilation
+// cache's XFLOW_WASM_CACHE_MAX_BYTES makes for the same reason.
+func artifactCacheMaxBytesFromEnv() int64 {
+	v := strings.TrimSpace(os.Getenv("XFLOW_ARTIFACT_CACHE_MAX_BYTES"))
+	if v == "" {
+		return 0
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		slog.Warn("runner: ignoring malformed XFLOW_ARTIFACT_CACHE_MAX_BYTES, using the default artifact cache cap",
+			"value", v, "error", err)
+		return 0
+	}
+	return n
 }
 
 // capabilityNodeTypes flattens the parsed capabilities back to node type names,
