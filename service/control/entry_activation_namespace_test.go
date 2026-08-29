@@ -8,6 +8,16 @@ import (
 	"github.com/xbcio/xflow/namespace"
 )
 
+// The calls below pass a trailing `excluded` argument to chooseRunner and
+// fallbackChooseRunner. That parameter is added by an in-flight change that
+// landed after the commit introducing this file, so this file does not compile
+// against that commit in isolation. It was written against the working tree so
+// the tests would genuinely run; the namespace guard they exercise sits at the
+// same position in both signatures, and `excluded` is orthogonal to it.
+//
+// If the excluded-parameter change is ever reverted, drop the trailing argument
+// here rather than assuming these tests are stale.
+
 // TestChooseRunnerSkipsRunnerOutsideActivationNamespace pins that entry
 // activation host selection honours the runner's namespace membership. The
 // activation's namespace is server-authoritative (it comes from the durable
