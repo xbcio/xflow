@@ -205,6 +205,9 @@ func (h *reactorHost) engineForSource(ctx context.Context, src engine.Source) (*
 			h.mu.Lock()
 			e, hit := h.engines[key]
 			fromSource := hit && h.sourceDrivenLocked(key)
+			if hit {
+				h.touchLocked(e)
+			}
 			h.mu.Unlock()
 			if hit {
 				// Load before Store: this runs on every message across every
@@ -227,7 +230,20 @@ func (h *reactorHost) engineForSource(ctx context.Context, src engine.Source) (*
 // decodes once, delegates to engineForKey (sha256 dedup), and memoizes by code
 // string.
 func (h *reactorHost) engineForCode(ctx context.Context, code string) (*reactorEngine, error) {
-	if e, ok := h.codeCache.Get(code); ok {
+	// The Get is under h.mu so the hit and its lastUsed stamp are one step. The
+	// lock is not a cost worth avoiding here: this lookup compares the full
+	// multi-MB key on every hit (198 µs, see codeCache's comment), so a mutex is
+	// noise against it. Keeping the Get outside would leave the only resolution
+	// path whose hit the sweep cannot see, which is exactly a lookup the reclaim
+	// decision could race — the same trap publishEngine documents at the Dekker
+	// crossing: narrowing a window is not closing it.
+	h.mu.Lock()
+	e, ok := h.codeCache.Get(code)
+	if ok {
+		h.touchLocked(e)
+	}
+	h.mu.Unlock()
+	if ok {
 		return e, nil
 	}
 	wasmBytes, err := decodeCode(code)
@@ -235,7 +251,7 @@ func (h *reactorHost) engineForCode(ctx context.Context, code string) (*reactorE
 		return nil, err
 	}
 	key := moduleKeyOf(wasmBytes)
-	e, err := h.engineForKey(ctx, key, wasmBytes)
+	e, err = h.engineForKey(ctx, key, wasmBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -323,6 +339,7 @@ func (h *reactorHost) engineFor(ctx context.Context, wasmBytes []byte) (*reactor
 func (h *reactorHost) engineForKey(ctx context.Context, key string, wasmBytes []byte) (*reactorEngine, error) {
 	h.mu.Lock()
 	if e, ok := h.engines[key]; ok {
+		h.touchLocked(e)
 		h.mu.Unlock()
 		obs().OnModuleCompile(ctx, "hit")
 		return e, nil
@@ -340,17 +357,27 @@ func (h *reactorHost) engineForKey(ctx context.Context, key string, wasmBytes []
 	// Another goroutine may have won the race; keep the first, drop ours.
 	if e, ok := h.engines[key]; ok {
 		_ = cm.Close(ctx)
+		h.touchLocked(e)
 		obs().OnModuleCompile(ctx, "hit")
 		return e, nil
 	}
 	e := &reactorEngine{host: h, cm: cm}
 	h.engines[key] = e
+	h.touchLocked(e)
 	h.republishEngineListLocked()
 	obs().OnModuleCompile(ctx, "miss")
 	// A miss is the only event that adds a file to the on-disk cache, so it is
 	// the only one that can push the directory over its budget.
 	sweepCacheAsync()
 	return e, nil
+}
+
+// touchLocked records that e was just handed to a caller. Caller must hold h.mu
+// — that is the whole point: the sweep reads lastUsed under the same lock, so an
+// engine cannot be reclaimed in the window between a lookup finding it and the
+// caller using it.
+func (h *reactorHost) touchLocked(e *reactorEngine) {
+	e.lastUsed.Store(time.Now().UnixNano())
 }
 
 // ensurePool guarantees the engine has an active pool configured with the given

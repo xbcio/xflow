@@ -396,6 +396,23 @@ type reactorEngine struct {
 	// leaves gen untouched, so only elapsed time exposes it.
 	lastSwapAt atomic.Int64 // unix nanos
 
+	// lastUsed is when this engine was last handed to a caller by one of the
+	// three resolution paths. It is the ONLY viable reclamation criterion:
+	// artifact_digest is boundary-evaluated per item and a digest can come back
+	// via rollback, so "this module is no longer needed" is a moment that never
+	// arrives — only "nobody has asked for it in T" does.
+	//
+	// Distinct from lastSwapAt above: that one tracks CONFIG installs and drives
+	// staleness, and a module serving heavy traffic against a frozen rule set
+	// has an old lastSwapAt and a fresh lastUsed. Reclaiming on lastSwapAt would
+	// tear down exactly the busiest engine.
+	//
+	// Written under host.mu by touchLocked, read under host.mu by the sweep, so
+	// the decision to reclaim is atomic with respect to the lookup that would
+	// have used the engine. atomic.Int64 rather than a plain int64 only because
+	// closeForTest and the drain path read it outside the lock in assertions.
+	lastUsed atomic.Int64
+
 	// sourceFailures counts consecutive source failures since the last successful
 	// swap. Reset to zero on a successful swap.
 	sourceFailures atomic.Int64
