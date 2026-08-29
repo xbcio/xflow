@@ -199,3 +199,34 @@ func TestGetSupplyMissingReturnsNotFound(t *testing.T) {
 		t.Fatalf("GetSupply(不存在) = %v, want store.ErrNotFound", err)
 	}
 }
+
+// Server.SupplyObserved 的 apiserver 层透传已经由
+// service/apiserver/supply_observed_passthrough_test.go 用真实 register+heartbeat
+// 全链路钉住。这里只钉 SDK 这一层没有再引入自己的短路（比如直接 return nil），
+// 因为 sdk/xflow 包内没有别的测试会调用这个方法——它是本次改动新增的方法，不存在
+// 就没有测试能碰到它。
+//
+// newSupplyAccessTestServer 用 NewServer(ServerConfig{Store: ms})：Store 非 nil
+// 时 apiserver.buildServerAPIConfig 把它同时接成 Supplies，而 apiserver 自建的
+// control plane（未注入 WithControlPlane）总会带上 EntryActivationStore
+// （service/apiserver/apiserver.go:319 本地路径），所以这条路径下
+// supplyObserved 必然非 nil——不依赖任何我们手工补的装配。
+func TestServerSupplyObservedNonNilWithStore(t *testing.T) {
+	srv := newSupplyAccessTestServer(t)
+	if sink := srv.SupplyObserved(); sink == nil {
+		t.Fatal("SupplyObserved() = nil，但 Server 是带 Store 装配的")
+	}
+}
+
+// 没有 Store 时，apiserver.Config.Supplies 保持 nil，control plane 侧的
+// supplyObserved 也保持 nil；SDK 必须原样透传这个 nil，不能自己造一个空 sink
+// 掩盖「模块未就绪」这件事。
+func TestServerSupplyObservedNilWithoutStore(t *testing.T) {
+	srv, err := NewServer(ServerConfig{})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	if sink := srv.SupplyObserved(); sink != nil {
+		t.Fatalf("SupplyObserved() = %#v, want nil（未配置 Store）", sink)
+	}
+}

@@ -456,6 +456,19 @@ func (s *Server) Shutdown(ctx context.Context) error { return s.api.Shutdown(ctx
 // checks and observability in multi-replica Redis-backed deployments.
 func (s *Server) IsLeader() bool { return s.api.IsLeader() }
 
+// SupplyObserved returns the sink of runner-reported applied supply hashes, or
+// nil when the Server was built without a supply store.
+//
+// This is how an embedder answers "has runner X actually loaded the content I
+// just published": compare the hash here against the ContentHash returned by
+// GetSupply for the same supply. Both are the same string.
+//
+// The inner key is the supply NODE name, not the resource name. Record is
+// whole-replacement rather than merge, and leader failover legitimately clears
+// the state — surface it as information, never as a precondition for
+// publishing.
+func (s *Server) SupplyObserved() control.SupplyObservedSink { return s.api.SupplyObserved() }
+
 // RegisterGRPC registers the Runner Protocol gRPC service onto g, matching
 // the service surface exposed by cmd/server. Optional: only needed when the
 // host program owns its own grpc.Server.

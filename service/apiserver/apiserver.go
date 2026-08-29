@@ -415,6 +415,27 @@ func (s *APIServer) IsLeader() bool { return s.cp.IsLeader() }
 // plane (an injected one); callers type-assert the capabilities they need.
 func (s *APIServer) Backend() backend.Provider { return s.cp.Backend() }
 
+// SupplyObserved returns the sink of runner-reported applied supply hashes, or
+// nil when no store.Supplies was configured. Transparent passthrough to the
+// underlying ControlPlane.
+//
+// Read-only in practice: it answers "which content hash has runner X actually
+// applied for supply node N", which is the direct analogue of Kubernetes'
+// observedGeneration. Compare a value here against store.SupplyResource's
+// ContentHash for the same supply to decide whether a publish has converged —
+// both sides are the same string, so no hashing is involved.
+//
+// Two properties a consumer must not design around:
+//   - The inner key is the supply NODE name, not the resource name
+//     (service/control/supply_hints.go:96 keys on req.Node while the hash comes
+//     from req.Resource).
+//   - Record is whole-replacement, not merge, and leader failover legitimately
+//     clears the whole thing. Display it; never gate publishing on it, or a
+//     routine failover wedges the publish path.
+func (s *APIServer) SupplyObserved() control.SupplyObservedSink {
+	return s.cp.SupplyObserved()
+}
+
 // RegisterWorkflow compiles def and persists the compiled graph in the workflow
 // registry, exactly as POST /v1/workflows/register does — same registry key,
 // same definition hash, same entry-activation derivation. It returns the
