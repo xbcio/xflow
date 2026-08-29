@@ -2,12 +2,14 @@ package apiserver
 
 import (
 	"bytes"
-	"encoding/json"
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/store/memstore"
 )
 
@@ -25,61 +27,54 @@ func newSupplyTestServer(t *testing.T, scopes []string, ns string) (*http.ServeM
 	return mux, st
 }
 
-func TestSupplyPutThenGet(t *testing.T) {
-	mux, _ := newSupplyTestServer(t, []string{"supply.write", "supply.read"}, "ns1")
+// PUT /v1/supplies/{name} 已被封（Z.5）。这不是「暂时没权限」，是这个动词不存在：
+// 唯一的写入口是嵌入方进程内的 sdk/xflow.Server.UpdateSupply(IfMatch)，它前面
+// 由嵌入方（SAS）套自己的 session + 授权 + 审计。
+//
+// 关键点：这个测试故意给主体配上 "supply.write" scope。若哪天有人把 PUT 分支
+// 加回 resolver，鉴权会放行，写会成功，这条测试就红——这才是它的意义。断言的是
+// 「动词不存在」，不是「权限不足」。
+func TestSupplyWriteVerbIsSealed(t *testing.T) {
+	mux, supplies := newSupplyTestServer(t, []string{"supply.write", "supply.read"}, "ns1")
 
-	req := httptest.NewRequest(http.MethodPut, "/v1/supplies/rules",
-		bytes.NewReader([]byte(`{"rules":[1]}`)))
-	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/v1/supplies/rules", bytes.NewReader([]byte(`{"v":1}`)))
+	req.Header.Set("Content-Type", "application/json")
 	mux.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("PUT = %d, body=%s", rec.Code, rec.Body)
+
+	// 404 而不是 405/403：module_supply.go 的既定反存在性探测约定。
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("PUT = %d, want 404；写动词必须不存在，body=%s", rec.Code, rec.Body)
 	}
-	// The PUT success body is enveloped (spec §3.1). §3.4's bare-stream
-	// exception is for GET /v1/supplies/... only; the PUT response is a small
-	// descriptor and rides inside envelope.data.
-	var putEnv envelope
-	if err := json.Unmarshal(rec.Body.Bytes(), &putEnv); err != nil {
-		t.Fatalf("decode PUT envelope: %v (body=%s)", err, rec.Body)
-	}
-	if !putEnv.Success || putEnv.Code != "200" {
-		t.Fatalf("PUT envelope = %+v, want success=true code=200", putEnv)
-	}
-	var putData struct {
-		Data json.RawMessage `json:"data"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &putData); err != nil {
-		t.Fatalf("re-decode PUT envelope: %v", err)
-	}
-	var put struct {
-		Revision    uint64 `json:"revision"`
-		ContentHash string `json:"content_hash"`
-	}
-	if err := json.Unmarshal(putData.Data, &put); err != nil {
-		t.Fatalf("decode PUT data: %v (data=%s)", err, putData.Data)
-	}
-	if put.Revision != 1 || !strings.HasPrefix(put.ContentHash, "sha256:") {
-		t.Fatalf("PUT response data = %+v", put)
+	if !strings.Contains(rec.Body.String(), "route_not_found") {
+		t.Fatalf("body = %s, want route_not_found（403/权限类错误说明分支还在）", rec.Body)
 	}
 
-	get := httptest.NewRecorder()
-	mux.ServeHTTP(get, httptest.NewRequest(http.MethodGet, "/v1/supplies/rules", nil))
-	if get.Code != http.StatusOK {
-		t.Fatalf("GET = %d", get.Code)
+	// 反向断言必须真的反向：确认这次 PUT 一个字节都没落地。
+	if _, err := supplies.GetSupply(context.Background(), "ns1", "rules"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("PUT 被 404 之后 GetSupply = %v, want ErrNotFound；说明字节还是写进去了", err)
 	}
-	if got := get.Body.String(); got != `{"rules":[1]}` {
-		t.Fatalf("GET body = %q", got)
+
+	// 读路径必须仍然可达——本次只封写，不封整个 supply API。
+	if _, err := supplies.PutSupply(context.Background(), &store.SupplyResource{
+		Namespace: "ns1", Name: "rules", Content: []byte(`{"v":1}`), ContentType: "application/json",
+	}, nil); err != nil {
+		t.Fatalf("seed: %v", err)
 	}
-	if got := get.Header().Get("ETag"); got != put.ContentHash {
-		t.Fatalf("ETag = %q, want %q", got, put.ContentHash)
+	getRec := httptest.NewRecorder()
+	mux.ServeHTTP(getRec, httptest.NewRequest(http.MethodGet, "/v1/supplies/rules", nil))
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("GET = %d, want 200；封写不得连读一起封掉", getRec.Code)
 	}
 }
 
 func TestSupplyGetNotModified(t *testing.T) {
-	mux, _ := newSupplyTestServer(t, []string{"supply.write", "supply.read"}, "ns1")
-	mux.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(
-		http.MethodPut, "/v1/supplies/rules", bytes.NewReader([]byte(`{"rules":[]}`))))
+	mux, supplies := newSupplyTestServer(t, []string{"supply.write", "supply.read"}, "ns1")
+	if _, err := supplies.PutSupply(context.Background(), &store.SupplyResource{
+		Namespace: "ns1", Name: "rules", Content: []byte(`{"rules":[]}`), ContentType: "application/json",
+	}, nil); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
 
 	first := httptest.NewRecorder()
 	mux.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/v1/supplies/rules", nil))
@@ -94,34 +89,6 @@ func TestSupplyGetNotModified(t *testing.T) {
 	}
 	if rec.Body.Len() != 0 {
 		t.Fatalf("304 must carry no body, got %d bytes", rec.Body.Len())
-	}
-}
-
-func TestSupplyPutIfMatchConflict(t *testing.T) {
-	mux, _ := newSupplyTestServer(t, []string{"supply.write", "supply.read"}, "ns1")
-	mux.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(
-		http.MethodPut, "/v1/supplies/rules", bytes.NewReader([]byte(`a`))))
-
-	req := httptest.NewRequest(http.MethodPut, "/v1/supplies/rules", bytes.NewReader([]byte(`b`)))
-	req.Header.Set("If-Match", "99")
-	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("stale If-Match = %d, want 409", rec.Code)
-	}
-	if !strings.Contains(rec.Body.String(), "revision_conflict") {
-		t.Fatalf("409 body = %s", rec.Body)
-	}
-}
-
-func TestSupplyPutTooLarge(t *testing.T) {
-	mux, _ := newSupplyTestServer(t, []string{"supply.write"}, "ns1")
-	big := bytes.Repeat([]byte("x"), maxSupplyContentBytes+1)
-	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, httptest.NewRequest(
-		http.MethodPut, "/v1/supplies/rules", bytes.NewReader(big)))
-	if rec.Code != http.StatusRequestEntityTooLarge {
-		t.Fatalf("oversized PUT = %d, want 413", rec.Code)
 	}
 }
 
@@ -142,8 +109,11 @@ func TestSupplyNamespaceIsolation(t *testing.T) {
 	}
 	a, b := mk("tenant-a"), mk("tenant-b")
 
-	a.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(
-		http.MethodPut, "/v1/supplies/rules", bytes.NewReader([]byte(`from-a`))))
+	if _, err := st.PutSupply(context.Background(), &store.SupplyResource{
+		Namespace: "tenant-a", Name: "rules", Content: []byte(`from-a`), ContentType: "application/json",
+	}, nil); err != nil {
+		t.Fatalf("seed tenant-a: %v", err)
+	}
 
 	rec := httptest.NewRecorder()
 	b.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/supplies/rules", nil))
@@ -151,8 +121,11 @@ func TestSupplyNamespaceIsolation(t *testing.T) {
 		t.Fatalf("tenant-b read of tenant-a supply = %d, want 404", rec.Code)
 	}
 
-	b.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(
-		http.MethodPut, "/v1/supplies/rules", bytes.NewReader([]byte(`from-b`))))
+	if _, err := st.PutSupply(context.Background(), &store.SupplyResource{
+		Namespace: "tenant-b", Name: "rules", Content: []byte(`from-b`), ContentType: "application/json",
+	}, nil); err != nil {
+		t.Fatalf("seed tenant-b: %v", err)
+	}
 	back := httptest.NewRecorder()
 	a.ServeHTTP(back, httptest.NewRequest(http.MethodGet, "/v1/supplies/rules", nil))
 	if got := back.Body.String(); got != "from-a" {
@@ -160,20 +133,12 @@ func TestSupplyNamespaceIsolation(t *testing.T) {
 	}
 }
 
-func TestSupplyRequiresScope(t *testing.T) {
-	mux, _ := newSupplyTestServer(t, []string{"workflow"}, "ns1")
-	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, httptest.NewRequest(
-		http.MethodPut, "/v1/supplies/rules", bytes.NewReader([]byte(`x`))))
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("PUT without supply.write = %d, want 403", rec.Code)
-	}
-}
-
 // A supply operation must never fall through to the default-deny "" scope: that
 // would make the route silently unreachable rather than authorizable.
+//
+// supply 只剩读 op：写动词已封（Z.5），OpSupplyWrite 常量不再存在。
 func TestSupplyOperationsHaveScopes(t *testing.T) {
-	for _, op := range []string{OpSupplyWrite, OpSupplyRead} {
+	for _, op := range []string{OpSupplyRead} {
 		if scopeForOperation(op) == "" {
 			t.Fatalf("scopeForOperation(%q) is empty — the route would be unreachable", op)
 		}

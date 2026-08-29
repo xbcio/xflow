@@ -2,11 +2,13 @@ package apiserver
 
 import (
 	"bytes"
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/xbcio/xflow/service/crypto/supplyenc"
+	"github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/store/memstore"
 )
 
@@ -34,14 +36,15 @@ func (f fixedEncryptor) Encrypt(plaintext []byte) ([]byte, error) {
 	return supplyenc.Encrypt(f.key, plaintext)
 }
 
-func putSupplyForTest(t *testing.T, mux *http.ServeMux, content []byte) {
+// putSupplyForTest seeds content directly through the store — the HTTP write
+// verb (PUT /v1/supplies/{name}) is sealed (Z.5), so tests seed the same way
+// the SDK's sole write path (sdk/xflow.Server.UpdateSupply) would.
+func putSupplyForTest(t *testing.T, supplies *memstore.Store, content []byte) {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodPut, "/v1/supplies/rules", bytes.NewReader(content))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("PUT = %d, body=%s", rec.Code, rec.Body)
+	if _, err := supplies.PutSupply(context.Background(), &store.SupplyResource{
+		Namespace: "ns1", Name: "rules", Content: content, ContentType: "application/json",
+	}, nil); err != nil {
+		t.Fatalf("seed PutSupply: %v", err)
 	}
 }
 
@@ -53,9 +56,9 @@ func TestSupplyGETReturnsCiphertextWhenRequested(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateKey: %v", err)
 	}
-	mux, _ := newEncryptedSupplyTestServer(t, key)
+	mux, supplies := newEncryptedSupplyTestServer(t, key)
 	plain := []byte(`{"rules":[{"field":"authorization","action":"redact"}]}`)
-	putSupplyForTest(t, mux, plain)
+	putSupplyForTest(t, supplies, plain)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/supplies/rules", nil)
 	req.Header.Set("Accept", AcceptEncrypted)
@@ -84,9 +87,9 @@ func TestSupplyGETStaysPlaintextWithoutAcceptHeader(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateKey: %v", err)
 	}
-	mux, _ := newEncryptedSupplyTestServer(t, key)
+	mux, supplies := newEncryptedSupplyTestServer(t, key)
 	plain := []byte(`{"rules":[1]}`)
-	putSupplyForTest(t, mux, plain)
+	putSupplyForTest(t, supplies, plain)
 
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/supplies/rules", nil))

@@ -117,11 +117,6 @@ func TestSchemasMatchHandlerTypes(t *testing.T) {
 			value:  apiserver.ExampleReadyResponse(true, true),
 		},
 		{
-			name:   "supply put response",
-			schema: "SupplyPutResponse",
-			value:  apiserver.ExampleSupplyPutResponse(7, "sha256:deadbeef"),
-		},
-		{
 			name:   "wait timeout response",
 			schema: "WaitTimeoutResponse",
 			value:  apiserver.ExampleWaitTimeoutResponse(execID, types.ExecutionStatusRunning),

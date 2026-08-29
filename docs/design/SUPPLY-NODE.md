@@ -39,7 +39,9 @@ supply node types today, and both are **declaration-only**: neither has an
 
 - `xflow.supply.external` (`node/internal/supply/external.go`, `External` 函数) — content
   lives in a `SupplyResource` outside the workflow definition, written by an
-  HTTP `PUT` to `/v1/supplies/{name}`.
+  embedder through the in-process SDK call (`sdk/xflow.Server.UpdateSupply` /
+  `UpdateSupplyIfMatch`). HTTP `PUT /v1/supplies/{name}` used to be the write
+  path; it is sealed (spec appendix Z.5) — the endpoint only serves GET now.
 - `xflow.supply.static` (`node/internal/supply/static.go`, `Static` 函数) — content is
   literal bytes carried in the node's parameters, part of the workflow
   definition itself.
@@ -150,8 +152,11 @@ this property):
 The design has two structurally different halves, joined by one storage type.
 
 - **Collection** — getting content *into* the platform. Today this is push
-  mode only: an operator or external system `PUT`s to `/v1/supplies/{name}`
-  (`service/apiserver/module_supply.go`), or the content is literal bytes in a
+  mode only: an embedder writes through the in-process SDK call
+  (`sdk/xflow.Server.UpdateSupply` / `UpdateSupplyIfMatch`, which reaches
+  `Supplies.PutSupply`); the HTTP write verb (`PUT /v1/supplies/{name}`) is
+  sealed (spec appendix Z.5) — `service/apiserver/module_supply.go` serves GET
+  only now. Or the content is literal bytes in a
   `xflow.supply.static` node. There is no runtime pull loop yet (see §9).
   Activation-time collection at the runner — fetching content this runner
   does not yet have — happens through `SupplyGate.Admit`
@@ -262,15 +267,17 @@ Both live on `SupplyResource`, deliberately mirroring Kubernetes'
   a consumer uses to decide whether anything needs rebuilding: identical
   content means no rebuild, even across a `Revision` bump.
 
-The HTTP surface exposes both, using the header names their K8s analogues
-would suggest (`service/apiserver/module_supply.go`):
+The write side exposes both through the SDK call, not HTTP — `PUT
+/v1/supplies/{name}` is sealed (spec appendix Z.5):
 
-- `PUT` (`handlePut`): reads `If-Match` as the CAS token;
-  `409` on conflict; response sets `ETag` to `ContentHash` and returns
-  `revision`/`content_hash` in the body.
-- `GET` (`handleGet`): sets `ETag` to `ContentHash` and a
-  custom `X-Supply-Revision` header to `Revision`; honors `If-None-Match` for
-  `304 Not Modified`.
+- `sdk/xflow.Server.UpdateSupply` / `UpdateSupplyIfMatch`: `UpdateSupplyIfMatch`
+  takes the CAS token as `ifMatch`; `store.ErrRevisionConflict` on conflict;
+  the returned `*store.SupplyResource` carries `Revision`/`ContentHash`. An
+  embedder wraps this call with its own session, authorization, and audit.
+- `GET` (`handleGet`, `service/apiserver/module_supply.go`): sets `ETag` to
+  `ContentHash` and a custom `X-Supply-Revision` header to `Revision`; honors
+  `If-None-Match` for `304 Not Modified`. This is the only verb the HTTP
+  surface still serves.
 
 ## 6. Activation-time gate
 
@@ -393,7 +400,7 @@ lock-free readers (`registry.go`, `republishDecodedLocked`).
 ## 8. Two invariants written into the design, not just followed by convention
 
 **Full-snapshot replace, never incremental.** Every content update — whether
-from collection PUT, static declaration, or a re-fetch triggered by a
+from an embedder's SDK write, static declaration, or a re-fetch triggered by a
 heartbeat hint — replaces the cached snapshot wholesale
 (`node/supply/registry.go`, `Apply`/`republishDecodedLocked`). There is no diff/patch type
 anywhere in `node/supply`. This was a deliberate design choice, not an

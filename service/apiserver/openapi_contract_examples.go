@@ -89,12 +89,6 @@ func ExampleReadyResponse(ready, leader bool) any {
 	return readyResponse{Ready: ready, Leader: leader}
 }
 
-// ExampleSupplyPutResponse builds the supply PUT success data (PUT
-// /v1/supplies/{name}).
-func ExampleSupplyPutResponse(revision uint64, contentHash string) any {
-	return map[string]any{"revision": revision, "content_hash": contentHash}
-}
-
 // ExampleWaitTimeoutResponse builds a waitTimeoutResponse (GET
 // /v1/executions/{id}/wait, 202 branch).
 func ExampleWaitTimeoutResponse(id types.ExecutionID, status types.ExecutionStatus) any {

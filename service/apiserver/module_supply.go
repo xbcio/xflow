@@ -2,7 +2,6 @@ package apiserver
 
 import (
 	"errors"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -11,13 +10,10 @@ import (
 	"github.com/xbcio/xflow/store"
 )
 
-// maxSupplyContentBytes bounds one supply snapshot. It matches the webhook body
-// limit (node/trigger/webhook/webhook.go). Larger rule sets belong in object
-// storage referenced by a small descriptor, not in this endpoint.
-const maxSupplyContentBytes = 1 << 20
-
-// supplyModule mounts PUT/GET /v1/supplies/{name}: the push-mode ingress for
-// supply content and the read endpoint runners use to fetch it.
+// supplyModule mounts GET /v1/supplies/{name}: the read endpoint runners use
+// to fetch supply content. The write verb (PUT) is sealed (spec appendix
+// Z.5); the only write entry point is in-process:
+// sdk/xflow.Server.UpdateSupply / UpdateSupplyIfMatch.
 //
 // The route deliberately carries NO namespace segment. The namespace is always
 // namespace.FromContext(ctx), injected by authzWrap from the authenticated
@@ -61,8 +57,12 @@ func (m *supplyModule) RegisterHTTP(mux *http.ServeMux) {
 			return resolvedRoute{}, false
 		}
 		switch r.Method {
-		case http.MethodPut:
-			return resolvedRoute{operation: OpSupplyWrite, resource: "supply/" + name, isMutation: true}, true
+		// PUT is sealed (spec appendix Z.5). Supply content is what decides which
+		// wasm module every runner loads, and an HTTP write verb is a path around
+		// the embedder's session + policy + audit. The only write entry point is
+		// in-process: sdk/xflow.Server.UpdateSupply / UpdateSupplyIfMatch. There
+		// is deliberately no config flag to bring this back — a flag would BE the
+		// bypass this seal exists to remove.
 		case http.MethodGet:
 			return resolvedRoute{operation: OpSupplyRead, resource: "supply/" + name}, true
 		default:
@@ -86,65 +86,11 @@ func (m *supplyModule) handleSupply(w http.ResponseWriter, r *http.Request) {
 	name := supplyNameFromPath(r.URL.Path)
 	ns := string(namespace.FromContext(r.Context()))
 	switch r.Method {
-	case http.MethodPut:
-		m.handlePut(w, r, ns, name)
 	case http.MethodGet:
 		m.handleGet(w, r, ns, name)
 	default:
 		writeFail(w, r, http.StatusNotFound, "route_not_found", "route not found")
 	}
-}
-
-func (m *supplyModule) handlePut(w http.ResponseWriter, r *http.Request, ns, name string) {
-	// Read one byte past the limit so an oversized body is detected without
-	// buffering an unbounded request.
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxSupplyContentBytes+1))
-	if err != nil {
-		writeFail(w, r, http.StatusBadRequest, "bad_request", "cannot read request body")
-		return
-	}
-	if len(body) > maxSupplyContentBytes {
-		writeFail(w, r, http.StatusRequestEntityTooLarge, "payload_too_large", "supply content exceeds limit")
-		return
-	}
-
-	var ifMatch *uint64
-	if raw := r.Header.Get("If-Match"); raw != "" {
-		rev, perr := strconv.ParseUint(strings.Trim(raw, `"`), 10, 64)
-		if perr != nil {
-			writeFail(w, r, http.StatusBadRequest, "bad_request", "malformed If-Match")
-			return
-		}
-		ifMatch = &rev
-	}
-
-	rec, err := m.supplies.PutSupply(r.Context(), &store.SupplyResource{
-		Namespace:   ns,
-		Name:        name,
-		Content:     body,
-		ContentType: r.Header.Get("Content-Type"),
-		UpdatedBy:   supplyPrincipalSubject(r),
-	}, ifMatch)
-	if errors.Is(err, store.ErrRevisionConflict) {
-		// §3.2: the stable snake_case code is load-bearing for optimistic-
-		// concurrency clients; keep the literal. The message is generic.
-		writeFail(w, r, http.StatusConflict, "revision_conflict", "revision_conflict")
-		return
-	}
-	if err != nil {
-		// Never surface the driver error: it can carry SQL and server paths.
-		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
-		return
-	}
-	// Hand the resulting revision back to the outcome audit row so the audit log
-	// can answer "who moved these rules to rev N, and when". The content itself
-	// is never audited.
-	noteAuditRevision(r, rec.Revision)
-	w.Header().Set("ETag", rec.ContentHash)
-	writeData(w, r, http.StatusOK, map[string]any{
-		"revision":     rec.Revision,
-		"content_hash": rec.ContentHash,
-	})
 }
 
 func (m *supplyModule) handleGet(w http.ResponseWriter, r *http.Request, ns, name string) {
@@ -186,14 +132,4 @@ func (m *supplyModule) handleGet(w http.ResponseWriter, r *http.Request, ns, nam
 	w.Header().Set("Content-Type", ct)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(rec.Content)
-}
-
-// supplyPrincipalSubject returns the authenticated principal's subject for the
-// UpdatedBy audit field, or "" when unavailable. It reads the principal authzWrap
-// stored in the request context; the client body is never consulted.
-func supplyPrincipalSubject(r *http.Request) string {
-	if p, ok := principalFromRequest(r); ok {
-		return p.Subject
-	}
-	return ""
 }

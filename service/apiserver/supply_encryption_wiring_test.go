@@ -2,6 +2,7 @@ package apiserver
 
 import (
 	"bytes"
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -9,6 +10,7 @@ import (
 	"github.com/xbcio/xflow/backend/providers/local"
 	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/service/crypto/supplyenc"
+	"github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/store/memstore"
 )
 
@@ -48,12 +50,13 @@ func TestSupplyEncryptionWiredThroughInjectedControlPlane(t *testing.T) {
 	mux := srv.Handler()
 
 	plain := []byte(`{"rules":[{"field":"authorization","action":"redact"}]}`)
-	putReq := httptest.NewRequest(http.MethodPut, "/v1/supplies/rules", bytes.NewReader(plain))
-	putReq.Header.Set("Content-Type", "application/json")
-	putRec := httptest.NewRecorder()
-	mux.ServeHTTP(putRec, putReq)
-	if putRec.Code != http.StatusOK {
-		t.Fatalf("PUT = %d, body=%s", putRec.Code, putRec.Body)
+	// PUT /v1/supplies/{name} is sealed (Z.5); seed the same way the SDK's sole
+	// write path (sdk/xflow.Server.UpdateSupply) would, directly through the
+	// store the module was constructed with.
+	if _, err := supplies.PutSupply(context.Background(), &store.SupplyResource{
+		Namespace: "ns1", Name: "rules", Content: plain, ContentType: "application/json",
+	}, nil); err != nil {
+		t.Fatalf("seed PutSupply: %v", err)
 	}
 
 	getReq := httptest.NewRequest(http.MethodGet, "/v1/supplies/rules", nil)
@@ -140,12 +143,11 @@ func TestSupplyGETStaysPlaintextThroughInjectedControlPlaneWithoutEncryption(t *
 	mux := srv.Handler()
 
 	plain := []byte(`{"rules":[1]}`)
-	putReq := httptest.NewRequest(http.MethodPut, "/v1/supplies/rules", bytes.NewReader(plain))
-	putReq.Header.Set("Content-Type", "application/json")
-	putRec := httptest.NewRecorder()
-	mux.ServeHTTP(putRec, putReq)
-	if putRec.Code != http.StatusOK {
-		t.Fatalf("PUT = %d, body=%s", putRec.Code, putRec.Body)
+	// PUT /v1/supplies/{name} is sealed (Z.5); seed directly through the store.
+	if _, err := supplies.PutSupply(context.Background(), &store.SupplyResource{
+		Namespace: "ns1", Name: "rules", Content: plain, ContentType: "application/json",
+	}, nil); err != nil {
+		t.Fatalf("seed PutSupply: %v", err)
 	}
 
 	getReq := httptest.NewRequest(http.MethodGet, "/v1/supplies/rules", nil)

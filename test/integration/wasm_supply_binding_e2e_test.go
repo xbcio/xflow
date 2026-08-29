@@ -177,7 +177,7 @@ func TestSupplyConsumerBindingReachesRunner(t *testing.T) {
 	// rebuilding a dead module's pool on every later Apply in this binary.
 	t.Cleanup(func() { node.UnregisterWasmSupplyConsumerByDigest(digest, wasmBindSupplyNode) })
 
-	httpSrv, cp, token := newSupplyGatingControlPlane(t, redisAddr)
+	httpSrv, cp, token, supplies := newSupplyGatingControlPlane(t, redisAddr)
 	reconciler := cp.EntryActivationReconciler()
 	if reconciler == nil {
 		t.Fatal("control plane must expose the entry activation reconciler")
@@ -228,8 +228,8 @@ func TestSupplyConsumerBindingReachesRunner(t *testing.T) {
 	// Two PUTs so the revision the module reports is 2. Revision 1 would still
 	// be distinguishable from the legacy path's 0, but 2 also rules out the
 	// module having been configured from a stale first fetch.
-	putSupplyContent(t, httpSrv.URL, client, supplyRes, []byte(`{"rules":[{"name":"v1"}]}`))
-	putSupplyContent(t, httpSrv.URL, client, supplyRes, []byte(`{"rules":[{"name":"from-supply"}]}`))
+	putSupplyContent(t, supplies, supplyRes, []byte(`{"rules":[{"name":"v1"}]}`))
+	putSupplyContent(t, supplies, supplyRes, []byte(`{"rules":[{"name":"from-supply"}]}`))
 	const wantRevision = uint64(2)
 
 	// The resolver stands in for the runner's artifact fetch. cmd/runner builds

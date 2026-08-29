@@ -1513,7 +1513,7 @@ Supply 节点（`kind: supply`）声明工作流消费一份**长期存活的共
 
 | 类型 | 标识符 | 内容来源 | `require_ready` 默认 |
 |------|--------|---------|----|
-| 外部 Supply | `xflow.supply.external` | 由外部 `PUT /v1/supplies/{name}` 写入的 `SupplyResource`；pull 模式的 `xflow.supply.http`（runner 主动按计划拉取）**尚未实现**，不要在 DSL 里使用 | `true` |
+| 外部 Supply | `xflow.supply.external` | 由嵌入方通过 SDK 调用 `sdk/xflow.Server.UpdateSupply`/`UpdateSupplyIfMatch` 写入的 `SupplyResource`（HTTP `PUT /v1/supplies/{name}` 写动词已封，仅剩 GET）；pull 模式的 `xflow.supply.http`（runner 主动按计划拉取）**尚未实现**，不要在 DSL 里使用 | `true` |
 | 静态 Supply | `xflow.supply.static` | 字面量内容，随工作流定义一起提交、一起哈希 | `true`（内容随定义存在，天然就绪） |
 
 ```yaml

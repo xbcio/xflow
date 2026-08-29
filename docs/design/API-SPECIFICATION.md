@@ -370,7 +370,6 @@ GET    /v1/executions/{id}/wait             等待完成
 POST   /v1/executions                       entry-seed（runner 调用）
 
 GET    /v1/supplies/{name}                  取 supply 内容（裸流）
-PUT    /v1/supplies/{name}                  写 supply 内容
 GET    /v1/artifacts/{digest}               取产物字节（裸流，另支持 HEAD）
 
 GET    /v1/management/leader                leader 状态
@@ -492,8 +491,11 @@ entry-seed 的 409 响应有**两种不同 body**，客户端据此决定是否�
   artifact 三族（Task 5b）已迁移：所有失败站点改走 `writeFail`（带稳定
   snake_case code + `trace_id` + `X-Request-Id` 回显），management 的成功
   body 一并信封化（leader / runner / dead-letters list / dead-letters
-  replay），supply PUT 的成功描述符信封化；CLI `apiDeadLetterClient.do()`
-  解信封再取 `data` 以保持对齐。§3.4 的裸流例外（supply GET、artifact
+  replay）；CLI `apiDeadLetterClient.do()`
+  解信封再取 `data` 以保持对齐。`PUT /v1/supplies/{name}` 其后已整体下线
+  （spec appendix Z.5）：supply 写路径只剩进程内调用
+  `sdk/xflow.Server.UpdateSupply`/`UpdateSupplyIfMatch`，不再有 HTTP 写动词、
+  也就不再有对应的成功信封。§3.4 的裸流例外（supply GET、artifact
   GET/HEAD）只对**成功流**有效，失败分支仍返回 JSON 信封。`/healthz` 与
   `/readyz` 不信封化（§7）。`service/apiserver` 中的 `writeError`/
   `writeEngineError` 过渡 shim 已删除，apiserver 现仅留 `writeJSON`

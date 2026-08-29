@@ -407,6 +407,10 @@ paths:
           $ref: "#/components/responses/DefaultError"
 
   /v1/supplies/{name}:
+    # The write verb (PUT) is sealed (spec appendix Z.5). The only write entry
+    # point is in-process: sdk/xflow.Server.UpdateSupply / UpdateSupplyIfMatch,
+    # which an embedder is expected to wrap with its own session, authorization,
+    # and audit. This path serves GET only.
     get:
       operationId: getSupply
       summary: Read supply content
@@ -453,50 +457,6 @@ paths:
                 format: binary
         "304":
           description: Not modified (If-None-Match matched).
-        default:
-          $ref: "#/components/responses/DefaultError"
-    put:
-      operationId: putSupply
-      summary: Write supply content
-      description: |
-        Pushes supply content. Returns the resulting revision and content hash
-        inside an Envelope (success is JSON; only GET is a raw stream).
-        If-Match optionally carries the expected revision for optimistic
-        concurrency; a mismatch yields 409 revision_conflict.
-      tags: [Supplies]
-      parameters:
-        - $ref: "#/components/parameters/SupplyName"
-        - name: If-Match
-          in: header
-          required: false
-          schema:
-            type: string
-        - $ref: "#/components/parameters/XRequestId"
-      requestBody:
-        required: true
-        content:
-          application/octet-stream:
-            schema:
-              type: string
-              format: binary
-      responses:
-        "200":
-          description: Supply written.
-          headers:
-            ETag:
-              schema:
-                type: string
-            X-Request-Id:
-              $ref: "#/components/headers/XRequestId"
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: "#/components/schemas/Envelope"
-                  - type: object
-                    properties:
-                      data:
-                        $ref: "#/components/schemas/SupplyPutResponse"
         default:
           $ref: "#/components/responses/DefaultError"
 
@@ -972,16 +932,6 @@ components:
         removed:
           type: boolean
           example: true
-
-    SupplyPutResponse:
-      type: object
-      required: [revision, content_hash]
-      properties:
-        revision:
-          type: integer
-          format: uint64
-        content_hash:
-          type: string
 
     WaitTimeoutResponse:
       type: object

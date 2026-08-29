@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -26,6 +25,7 @@ import (
 	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/service/protocol"
 	runnersvc "github.com/xbcio/xflow/service/runner"
+	"github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/store/memstore"
 	"github.com/xbcio/xflow/types"
 )
@@ -123,9 +123,9 @@ func (registryTriggerLookupGating) Trigger(nodeType string) (types.TriggerHandle
 }
 
 // authedTransport sets a bearer token on every outbound request. Used both for
-// this test's direct HTTP calls (register workflow, PUT supply content) and for
-// the runner's protocol client and HTTPSupplyFetcher, mirroring how a real
-// deployment attaches one static token to every call a runner makes.
+// this test's direct HTTP calls (register workflow) and for the runner's
+// protocol client and HTTPSupplyFetcher, mirroring how a real deployment
+// attaches one static token to every call a runner makes.
 type authedTransport struct {
 	token string
 	base  http.RoundTripper
@@ -141,22 +141,21 @@ func authedClient(token string) *http.Client {
 	return &http.Client{Transport: authedTransport{token: token, base: http.DefaultTransport}}
 }
 
-// putSupplyContent PUTs content to /v1/supplies/{resource}, failing the test
-// on any non-200.
-func putSupplyContent(t *testing.T, baseURL string, client *http.Client, resource string, content []byte) {
+// putSupplyContent seeds supply content directly through the store this
+// harness's apiserver was constructed with. HTTP PUT /v1/supplies/{name} is
+// sealed (spec appendix Z.5) — the only write path left is in-process
+// (sdk/xflow.Server.UpdateSupply), so tests seed the same way: directly
+// against the store, in the same namespace the bearer principal
+// (newSupplyGatingControlPlane) resolves to (namespace.Default).
+func putSupplyContent(t *testing.T, supplies *memstore.Store, resource string, content []byte) {
 	t.Helper()
-	req, err := http.NewRequest(http.MethodPut, baseURL+"/v1/supplies/"+resource, strings.NewReader(string(content)))
-	if err != nil {
-		t.Fatalf("build PUT /v1/supplies/%s: %v", resource, err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(req)
-	if err != nil {
-		t.Fatalf("PUT /v1/supplies/%s: %v", resource, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("PUT /v1/supplies/%s status = %d", resource, resp.StatusCode)
+	if _, err := supplies.PutSupply(context.Background(), &store.SupplyResource{
+		Namespace:   string(namespace.Default),
+		Name:        resource,
+		Content:     content,
+		ContentType: "application/json",
+	}, nil); err != nil {
+		t.Fatalf("seed PutSupply(%s): %v", resource, err)
 	}
 }
 
@@ -164,12 +163,15 @@ func putSupplyContent(t *testing.T, baseURL string, client *http.Client, resourc
 // (via distributed.New, mirroring TestRemoteTriggerHosting_Redis) plus the
 // in-memory supply content store and a single bearer-token principal carrying
 // every scope this test's HTTP calls need (workflow register, execution seed,
-// supply read/write). It flushes asynq + xflow:* keys first: this Redis
-// instance is shared across test runs/processes, and a stale runner-directory
-// entry or leftover asynq task from a prior run/crash would otherwise race
-// this test's own state (observed: flaky "round 1 must assign ..." and
-// over-counted processed messages before this flush was added).
-func newSupplyGatingControlPlane(t *testing.T, redisAddr string) (*httptest.Server, *control.ControlPlane, string) {
+// supply read). The returned *memstore.Store is the harness's only supply
+// write path now that HTTP PUT /v1/supplies/{name} is sealed (Z.5); callers
+// seed content directly through it via putSupplyContent. It flushes asynq +
+// xflow:* keys first: this Redis instance is shared across test
+// runs/processes, and a stale runner-directory entry or leftover asynq task
+// from a prior run/crash would otherwise race this test's own state (observed:
+// flaky "round 1 must assign ..." and over-counted processed messages before
+// this flush was added).
+func newSupplyGatingControlPlane(t *testing.T, redisAddr string) (*httptest.Server, *control.ControlPlane, string, *memstore.Store) {
 	t.Helper()
 	const token = "supply-gating-test-token-0123456789ab"
 
@@ -210,7 +212,7 @@ func newSupplyGatingControlPlane(t *testing.T, redisAddr string) (*httptest.Serv
 	t.Cleanup(httpSrv.Close)
 	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
-	return httpSrv, cp, token
+	return httpSrv, cp, token, supplies
 }
 
 // newSupplyGatingRunner builds an ActivationTracker using the PRODUCTION
@@ -334,7 +336,7 @@ func TestSupplyGateLosesNoMessages(t *testing.T) {
 	}
 	writeKafkaMessages(t, brokers, topic, msgs)
 
-	httpSrv, cp, token := newSupplyGatingControlPlane(t, redisAddr)
+	httpSrv, cp, token, supplies := newSupplyGatingControlPlane(t, redisAddr)
 	reconciler := cp.EntryActivationReconciler()
 	if reconciler == nil {
 		t.Fatal("control plane must expose the entry activation reconciler")
@@ -477,9 +479,9 @@ func TestSupplyGateLosesNoMessages(t *testing.T) {
 		t.Fatalf("(b) generation must advance via ack+fence+retry (§9(a) fix), got %d (was %d)", actAfterRetry.Generation, gen1)
 	}
 
-	// --- PUT the supply content: the gate's next Admit will fetch and apply
-	// it. ---
-	putSupplyContent(t, httpSrv.URL, client, supplyRes, []byte(`{"rules":[]}`))
+	// --- Seed the supply content directly through the store: the gate's next
+	// Admit will fetch and apply it. ---
+	putSupplyContent(t, supplies, supplyRes, []byte(`{"rules":[]}`))
 
 	// --- (c): restart the runner (fresh Register -> the activation is already
 	// fenced from the ack path, and the restart establishes a new session).
@@ -553,7 +555,7 @@ func TestSupplyGateRecoversOnRestart(t *testing.T) {
 	group := topic + "-group"
 	newKafkaTopic(t, brokers, topic, 1)
 
-	httpSrv, cp, token := newSupplyGatingControlPlane(t, redisAddr)
+	httpSrv, cp, token, supplies := newSupplyGatingControlPlane(t, redisAddr)
 	reconciler := cp.EntryActivationReconciler()
 
 	const (
@@ -658,7 +660,7 @@ func TestSupplyGateRecoversOnRestart(t *testing.T) {
 		t.Fatalf("generation must advance via ack+fence+retry without restart (§9(a) fix), got %d (was %d)", actAdvanced.Generation, gen1)
 	}
 
-	putSupplyContent(t, httpSrv.URL, client, supplyRes, []byte(`{"rules":[]}`))
+	putSupplyContent(t, supplies, supplyRes, []byte(`{"rules":[]}`))
 
 	// Positive half: a restart (fresh Register -> revoke -> reassign) DOES
 	// recover it, with the runner process's own action (restarting) being the
@@ -729,7 +731,7 @@ func TestSupplyGateRetriesWithoutRestart(t *testing.T) {
 	}
 	writeKafkaMessages(t, brokers, topic, msgs)
 
-	httpSrv, cp, token := newSupplyGatingControlPlane(t, redisAddr)
+	httpSrv, cp, token, supplies := newSupplyGatingControlPlane(t, redisAddr)
 	reconciler := cp.EntryActivationReconciler()
 	if reconciler == nil {
 		t.Fatal("control plane must expose the entry activation reconciler")
@@ -842,8 +844,9 @@ func TestSupplyGateRetriesWithoutRestart(t *testing.T) {
 	}
 	assertNoConsumerGroup(t, brokers, group)
 
-	// --- Step 3: PUT supply content. The gate's next Admit will pass. ---
-	putSupplyContent(t, httpSrv.URL, client, supplyRes, []byte(`{"rules":[]}`))
+	// --- Step 3: seed supply content directly through the store. The gate's
+	// next Admit will pass. ---
+	putSupplyContent(t, supplies, supplyRes, []byte(`{"rules":[]}`))
 
 	// --- Step 4: Advance time past the backoff and Reconcile. The same runner
 	// (no restart!) is re-chosen, gets a new ActivateDirective, and this time

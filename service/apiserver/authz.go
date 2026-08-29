@@ -105,14 +105,12 @@ const (
 	// token can be granted runner read without leader read and vice-versa.
 	OpManagementLeaderRead = "management.leader.read"
 	OpManagementRunnerRead = "management.runner.read"
-	// OpSupplyWrite / OpSupplyRead gate the supply content endpoints. Writing a
-	// supply changes production data-processing logic, so its authorization
-	// strength matches writing a workflow definition: its own scope, denied by
-	// default. Both MUST also appear in scopeForOperation — an operation that
-	// falls through to the default "" scope is denied by both ScopeAuthorizer
-	// and NamespaceAwareAuthorizer, making the route silently unreachable.
-	OpSupplyWrite = "supply.write"
-	OpSupplyRead  = "supply.read"
+	// There is no OpSupplyWrite: PUT /v1/supplies/{name} is sealed (Z.5). The
+	// write path is in-process only (sdk/xflow.Server.UpdateSupply). Re-adding
+	// the operation without re-adding the route would be harmless; re-adding
+	// the route is the thing this comment exists to make someone stop and think
+	// about.
+	OpSupplyRead = "supply.read"
 	// OpArtifactRead gates GET/HEAD /v1/artifacts/{digest}. It gets its own
 	// scope rather than riding on supply.read because the two are granted to
 	// different populations: every runner needs artifact read to fetch script
@@ -144,8 +142,6 @@ func scopeForOperation(op string) string {
 		return "management.leader.read"
 	case OpManagementRunnerRead:
 		return "management.runner.read"
-	case OpSupplyWrite:
-		return "supply.write"
 	case OpSupplyRead:
 		return "supply.read"
 	case OpArtifactRead:

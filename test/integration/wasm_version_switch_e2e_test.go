@@ -159,8 +159,10 @@ func (l *digestCallLog) count(d string) int {
 // and a POST-activation content change would never reach an already-hosted
 // runner within this test's lifetime -- probes ② and ④ depend on exactly that.
 // It also returns the backend's StateStore so a test can poll seeded
-// executions to a terminal status directly (probe ③).
-func newVersionSwitchControlPlane(t *testing.T, redisAddr string) (*httptest.Server, *control.ControlPlane, string, engine.StateStore) {
+// executions to a terminal status directly (probe ③), and the *memstore.Store
+// itself so callers can seed supply content directly (HTTP PUT
+// /v1/supplies/{name} is sealed, spec appendix Z.5).
+func newVersionSwitchControlPlane(t *testing.T, redisAddr string) (*httptest.Server, *control.ControlPlane, string, engine.StateStore, *memstore.Store) {
 	t.Helper()
 	const token = "vswitch-test-token-0123456789ab"
 
@@ -202,7 +204,7 @@ func newVersionSwitchControlPlane(t *testing.T, redisAddr string) (*httptest.Ser
 	t.Cleanup(httpSrv.Close)
 	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
-	return httpSrv, cp, token, be.State()
+	return httpSrv, cp, token, be.State(), supplies
 }
 
 // newWasmBindingRunnerWithGate mirrors newWasmBindingRunner (same package,
@@ -252,7 +254,7 @@ func TestExpressionDigestActivatesEndToEnd(t *testing.T) {
 
 	t.Cleanup(func() { node.UnregisterWasmSupplyConsumerByDigest(digest, vswitchDeclareSupplyNode) })
 
-	httpSrv, cp, token, _ := newVersionSwitchControlPlane(t, redisAddr)
+	httpSrv, cp, token, _, supplies := newVersionSwitchControlPlane(t, redisAddr)
 	reconciler := cp.EntryActivationReconciler()
 	if reconciler == nil {
 		t.Fatal("control plane must expose the entry activation reconciler")
@@ -293,7 +295,7 @@ func TestExpressionDigestActivatesEndToEnd(t *testing.T) {
 	client := authedClient(token)
 	wfID := registerWorkflowHTTP(t, httpSrv.URL, client, def)
 
-	putSupplyContent(t, httpSrv.URL, client, supplyRes,
+	putSupplyContent(t, supplies, supplyRes,
 		[]byte(`{"digest":"`+digest+`","rules":[{"name":"from-declare"}]}`))
 
 	resolve := func(_ context.Context, gotDigest string) ([]byte, error) {
@@ -426,7 +428,7 @@ func TestPointerFlipIsObservedAsModuleReady(t *testing.T) {
 	t.Cleanup(func() { node.UnregisterWasmSupplyConsumerByDigest(digestA, vswitchFlipSupplyNode) })
 	t.Cleanup(func() { node.UnregisterWasmSupplyConsumerByDigest(digestB, vswitchFlipSupplyNode) })
 
-	httpSrv, cp, token, _ := newVersionSwitchControlPlane(t, redisAddr)
+	httpSrv, cp, token, _, supplies := newVersionSwitchControlPlane(t, redisAddr)
 	reconciler := cp.EntryActivationReconciler()
 	if reconciler == nil {
 		t.Fatal("control plane must expose the entry activation reconciler")
@@ -467,7 +469,7 @@ func TestPointerFlipIsObservedAsModuleReady(t *testing.T) {
 	client := authedClient(token)
 	wfID := registerWorkflowHTTP(t, httpSrv.URL, client, def)
 
-	putSupplyContent(t, httpSrv.URL, client, supplyRes,
+	putSupplyContent(t, supplies, supplyRes,
 		[]byte(`{"digest":"`+digestA+`","rules":[{"name":"from-a"}]}`))
 
 	resolve := func(_ context.Context, gotDigest string) ([]byte, error) {
@@ -539,7 +541,7 @@ func TestPointerFlipIsObservedAsModuleReady(t *testing.T) {
 		t.Fatalf("pointer A (%s) was never observed ready+configured within the deadline", digestA)
 	}
 
-	putSupplyContent(t, httpSrv.URL, client, supplyRes,
+	putSupplyContent(t, supplies, supplyRes,
 		[]byte(`{"digest":"`+digestB+`","rules":[{"name":"from-b"}]}`))
 
 	deadline = time.Now().Add(20 * time.Second)
@@ -601,7 +603,7 @@ func TestUnresolvableDigestDropsNoRecordsToSink(t *testing.T) {
 	counter := newGatingCounter()
 	registry.Register(vswitchSinkHandler{counter: counter})
 
-	httpSrv, cp, token, state := newVersionSwitchControlPlane(t, redisAddr)
+	httpSrv, cp, token, state, supplies := newVersionSwitchControlPlane(t, redisAddr)
 	reconciler := cp.EntryActivationReconciler()
 	if reconciler == nil {
 		t.Fatal("control plane must expose the entry activation reconciler")
@@ -645,7 +647,7 @@ func TestUnresolvableDigestDropsNoRecordsToSink(t *testing.T) {
 	client := authedClient(token)
 	wfID := registerWorkflowHTTP(t, httpSrv.URL, client, def)
 
-	putSupplyContent(t, httpSrv.URL, client, supplyRes,
+	putSupplyContent(t, supplies, supplyRes,
 		[]byte(`{"digest":"`+unresolvableDigest+`","rules":[{"name":"unreachable"}]}`))
 
 	resolve := func(_ context.Context, gotDigest string) ([]byte, error) {
@@ -805,7 +807,7 @@ func TestRollbackKeepsReceivingContentUpdates(t *testing.T) {
 	t.Cleanup(func() { node.UnregisterWasmSupplyConsumerByDigest(digestA, vswitchRollbackSupplyNode) })
 	t.Cleanup(func() { node.UnregisterWasmSupplyConsumerByDigest(digestB, vswitchRollbackSupplyNode) })
 
-	httpSrv, cp, token, _ := newVersionSwitchControlPlane(t, redisAddr)
+	httpSrv, cp, token, _, supplies := newVersionSwitchControlPlane(t, redisAddr)
 	reconciler := cp.EntryActivationReconciler()
 	if reconciler == nil {
 		t.Fatal("control plane must expose the entry activation reconciler")
@@ -847,7 +849,7 @@ func TestRollbackKeepsReceivingContentUpdates(t *testing.T) {
 	wfID := registerWorkflowHTTP(t, httpSrv.URL, client, def)
 
 	// --- Step 1: pointer -> A, revision 1. ---
-	putSupplyContent(t, httpSrv.URL, client, supplyRes,
+	putSupplyContent(t, supplies, supplyRes,
 		[]byte(`{"digest":"`+digestA+`","rules":[{"name":"from-a"}]}`))
 	const wantRevision1 = uint64(1)
 
@@ -946,7 +948,7 @@ func TestRollbackKeepsReceivingContentUpdates(t *testing.T) {
 	callsAfterStep1 := log.count(digestA)
 
 	// --- Step 2: pointer -> B, revision 2. Must be resolved as a NEW digest. ---
-	putSupplyContent(t, httpSrv.URL, client, supplyRes,
+	putSupplyContent(t, supplies, supplyRes,
 		[]byte(`{"digest":"`+digestB+`","rules":[{"name":"from-b"}]}`))
 
 	deadline = time.Now().Add(20 * time.Second)
@@ -964,7 +966,7 @@ func TestRollbackKeepsReceivingContentUpdates(t *testing.T) {
 	// precondition of the bug probe ④ exists to catch (task-10-corrections.md
 	// C-5), and it must hold under the C-9 mutation too -- the mutation
 	// affects the MODULE-level consumer key, not this warm-up short-circuit. ---
-	putSupplyContent(t, httpSrv.URL, client, supplyRes,
+	putSupplyContent(t, supplies, supplyRes,
 		[]byte(`{"digest":"`+digestA+`","rules":[{"name":"from-a"}]}`))
 
 	// Negative assertion: give the hint cycle real time to have acted (several
@@ -983,7 +985,7 @@ func TestRollbackKeepsReceivingContentUpdates(t *testing.T) {
 	// exactly what the C-9 mutation (consumerKeyFor collapsing to a bare
 	// supplyNode) breaks: B's module-level registration overwrote A's when B
 	// was registered in step 2, so A's pool stops receiving broadcasts. ---
-	putSupplyContent(t, httpSrv.URL, client, supplyRes,
+	putSupplyContent(t, supplies, supplyRes,
 		[]byte(`{"digest":"`+digestA+`","rules":[{"name":"from-a-v2"}]}`))
 	const wantRevision4 = uint64(4)
 

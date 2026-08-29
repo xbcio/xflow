@@ -48,37 +48,6 @@ func doSupplyWithRequestID(t *testing.T, mux http.Handler, method, path, request
 	return rec.Result()
 }
 
-func TestSupplyPutRevisionConflictReturnsEnvelope(t *testing.T) {
-	mux, _ := newSupplyTestServer(t, []string{"supply.write", "supply.read"}, "ns1")
-	// Seed rev 1.
-	mux.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(
-		http.MethodPut, "/v1/supplies/rules", bytes.NewReader([]byte(`a`))))
-
-	req := httptest.NewRequest(http.MethodPut, "/v1/supplies/rules", bytes.NewReader([]byte(`b`)))
-	req.Header.Set("If-Match", "99")
-	req.Header.Set("X-Request-Id", "req-supply-409")
-	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want 409", rec.Code)
-	}
-	var env envelope
-	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
-		t.Fatalf("not an envelope: %v (body=%s)", err, rec.Body)
-	}
-	if env.Success {
-		t.Fatalf("success = true, want false")
-	}
-	// §3.2: the stable code is already snake_case; keep the literal.
-	if env.Code != "revision_conflict" {
-		t.Fatalf("code = %q, want revision_conflict", env.Code)
-	}
-	if got := rec.Header().Get("X-Request-Id"); got != "req-supply-409" {
-		t.Fatalf("X-Request-Id = %q, want %q (failure site must pass *http.Request)", got, "req-supply-409")
-	}
-}
-
 func TestSupplyGetNotFoundReturnsEnvelope(t *testing.T) {
 	mux, _ := newSupplyTestServer(t, []string{"supply.read"}, "ns1")
 	resp := doSupplyWithRequestID(t, mux, http.MethodGet, "/v1/supplies/missing", "req-supply-404", nil)
@@ -101,36 +70,17 @@ func TestSupplyGetNotFoundReturnsEnvelope(t *testing.T) {
 	}
 }
 
-func TestSupplyPutTooLargeReturnsEnvelope(t *testing.T) {
-	mux, _ := newSupplyTestServer(t, []string{"supply.write"}, "ns1")
-	big := bytes.Repeat([]byte("x"), maxSupplyContentBytes+1)
-	req := httptest.NewRequest(http.MethodPut, "/v1/supplies/rules", bytes.NewReader(big))
-	req.Header.Set("X-Request-Id", "req-supply-413")
-	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
-	if rec.Code != http.StatusRequestEntityTooLarge {
-		t.Fatalf("status = %d, want 413", rec.Code)
-	}
-	var env envelope
-	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
-		t.Fatalf("not an envelope: %v (body=%s)", err, rec.Body)
-	}
-	if env.Success || env.Code != "payload_too_large" {
-		t.Fatalf("envelope = %+v, want success=false code=payload_too_large", env)
-	}
-	if got := rec.Header().Get("X-Request-Id"); got != "req-supply-413" {
-		t.Fatalf("X-Request-Id = %q, want req-supply-413", got)
-	}
-}
-
 // §3.4 bare-stream guarantee: a successful supply GET must return the raw
 // content bytes, NOT an envelope. Wrapping it would force every supply content
 // through JSON/base64 and break the runner's supply_client which reads the body
 // as raw bytes.
 func TestSupplyGetSuccessIsBareStream(t *testing.T) {
-	mux, _ := newSupplyTestServer(t, []string{"supply.write", "supply.read"}, "ns1")
-	mux.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(
-		http.MethodPut, "/v1/supplies/rules", bytes.NewReader([]byte(`{"rules":[1]}`))))
+	mux, supplies := newSupplyTestServer(t, []string{"supply.write", "supply.read"}, "ns1")
+	if _, err := supplies.PutSupply(context.Background(), &store.SupplyResource{
+		Namespace: "ns1", Name: "rules", Content: []byte(`{"rules":[1]}`), ContentType: "application/json",
+	}, nil); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
 
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/supplies/rules", nil))

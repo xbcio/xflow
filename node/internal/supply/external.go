@@ -15,8 +15,10 @@ import (
 )
 
 // ExternalNode declares that this workflow consumes a named SupplyResource whose
-// content is written by something outside the workflow (an external PUT to
-// /v1/supplies/{name}, or a future pull-mode collector).
+// content is written by something outside the workflow (an embedder's
+// in-process SDK call, sdk/xflow.Server.UpdateSupply / UpdateSupplyIfMatch —
+// HTTP PUT /v1/supplies/{name} is sealed, spec appendix Z.5 — or a future
+// pull-mode collector).
 //
 // It has no Execute and no registered handler: nothing about it ever runs. The
 // node exists so the dependency is visible on the graph — which is what makes

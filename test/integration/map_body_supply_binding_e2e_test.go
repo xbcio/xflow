@@ -160,7 +160,7 @@ func TestSupplyConsumerBindingReachesMapBodyModule(t *testing.T) {
 	// rebuilding this module's pool on every later Apply in this binary.
 	t.Cleanup(func() { node.UnregisterWasmSupplyConsumerByDigest(digest, mapBodySupplyNode) })
 
-	httpSrv, cp, token := newSupplyGatingControlPlane(t, redisAddr)
+	httpSrv, cp, token, supplies := newSupplyGatingControlPlane(t, redisAddr)
 	reconciler := cp.EntryActivationReconciler()
 	if reconciler == nil {
 		t.Fatal("control plane must expose the entry activation reconciler")
@@ -225,9 +225,9 @@ func TestSupplyConsumerBindingReachesMapBodyModule(t *testing.T) {
 
 	// Three PUTs, so the revision the module reports is 3. Distinguishable from
 	// the legacy path's 0, and from a stale configure off an earlier fetch.
-	putSupplyContent(t, httpSrv.URL, client, supplyRes, []byte(`{"rules":[{"name":"v1"}]}`))
-	putSupplyContent(t, httpSrv.URL, client, supplyRes, []byte(`{"rules":[{"name":"v2"}]}`))
-	putSupplyContent(t, httpSrv.URL, client, supplyRes, []byte(`{"rules":[{"name":"from-map-body"}]}`))
+	putSupplyContent(t, supplies, supplyRes, []byte(`{"rules":[{"name":"v1"}]}`))
+	putSupplyContent(t, supplies, supplyRes, []byte(`{"rules":[{"name":"v2"}]}`))
+	putSupplyContent(t, supplies, supplyRes, []byte(`{"rules":[{"name":"from-map-body"}]}`))
 	const wantRevision = uint64(3)
 
 	// Stands in for the runner's artifact fetch. Serving the bytes directly keeps

@@ -563,9 +563,11 @@ func (s *Server) addWorkflow(ctx context.Context, wf *WorkflowBuilder, replace b
 // Connected runners discover the change via heartbeat hints and re-fetch the
 // content automatically. Namespace defaults to "default" when empty.
 //
-// This is the programmatic equivalent of HTTP PUT /v1/supplies/{name} — use it
-// when the server is embedded and a direct method call is simpler than an HTTP
-// round-trip.
+// This is the ONLY write path for supply content: HTTP PUT /v1/supplies/{name}
+// is sealed (spec appendix Z.5), so an embedder is expected to wrap this call
+// with its own authentication, authorization, and audit. Use
+// UpdateSupplyIfMatch when a concurrent publisher must not be silently
+// overwritten.
 //
 // Example:
 //
