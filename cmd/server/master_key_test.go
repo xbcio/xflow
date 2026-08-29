@@ -13,12 +13,13 @@ import (
 // so the "present" case here is the one production actually gets.
 func baseProductionDeps() productionDeps {
 	return productionDeps{
-		principalAuth: apiserver.NewBearerPrincipalAuth("tok", "op", []string{"workflow"}),
-		authorizer:    apiserver.NamespaceAwareAuthorizer{},
-		auditSink:     apiserver.NewSQLAuditSink(nil),
-		durableAudit:  true,
-		reconciler:    reconcilerOrNil(control.NewAuditReconcileWorker(nil, nil, control.AuditReconcileConfig{})),
-		masterKey:     true,
+		principalAuth:        apiserver.NewBearerPrincipalAuth("tok", "op", []string{"workflow"}),
+		authorizer:           apiserver.NamespaceAwareAuthorizer{},
+		auditSink:            apiserver.NewSQLAuditSink(nil),
+		durableAudit:         true,
+		reconciler:           reconcilerOrNil(control.NewAuditReconcileWorker(nil, nil, control.AuditReconcileConfig{})),
+		masterKey:            true,
+		runnerAuthConfigured: true,
 	}
 }
 

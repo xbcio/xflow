@@ -19,8 +19,11 @@ const (
 )
 
 // RunnerSelector decides which runner can serve a given assignment based on
-// liveness, labels, capabilities, policy, and namespace. It is a pure decision
-// function shared by memory and Redis directories.
+// liveness, labels, capabilities, and policy. It is a pure decision function
+// shared by memory and Redis directories.
+//
+// It does not decide namespace eligibility — see CanAssign's comment for
+// where that is enforced instead.
 type RunnerSelector struct {
 	LiveTTL       time.Duration
 	FallbackGrace time.Duration

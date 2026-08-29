@@ -25,12 +25,13 @@ func TestValidateProductionRequiresEachComponent(t *testing.T) {
 	// the "presence" requirement.
 
 	base := productionDeps{
-		principalAuth: auth,
-		authorizer:    apiserver.NamespaceAwareAuthorizer{},
-		auditSink:     durableAudit,
-		durableAudit:  true,
-		reconciler:    realReconciler(),
-		masterKey:     true,
+		principalAuth:        auth,
+		authorizer:           apiserver.NamespaceAwareAuthorizer{},
+		auditSink:            durableAudit,
+		durableAudit:         true,
+		reconciler:           realReconciler(),
+		masterKey:            true,
+		runnerAuthConfigured: true,
 	}
 	if err := validateProduction("production", base); err != nil {
 		t.Fatalf("baseline production = %v, want nil (all components present)", err)
@@ -75,6 +76,18 @@ func TestValidateProductionRequiresEachComponent(t *testing.T) {
 		return d
 	}(base)); err == nil {
 		t.Fatal("missing Reconciler: want error, got nil")
+	}
+
+	// Missing runner protocol authenticator (--auth-policy unconfigured).
+	// DisabledAuthenticator{} is a non-nil Authenticator, so this must be
+	// caught by a dedicated field, not a nil check on an authenticator.
+	if err := validateProduction("production", func(d productionDeps) productionDeps {
+		d.runnerAuthConfigured = false
+		return d
+	}(base)); err == nil {
+		t.Fatal("missing runner auth: want error, got nil")
+	} else if !strings.Contains(err.Error(), "--auth-policy") {
+		t.Fatalf("missing runner auth error = %v, want it to mention --auth-policy", err)
 	}
 }
 

@@ -556,13 +556,14 @@ func runServer(cfg serverConfig) error {
 	// or Reconciler is missing. Dev allows the in-memory audit sink, single-
 	// token, and anonymous auth with a loud stderr warning.
 	if err := validateProduction(cfg.mode, productionDeps{
-		principalAuth: principalAuth,
-		authorizer:    apiserver.NamespaceAwareAuthorizer{},
-		auditSink:     audit,
-		durableAudit:  durableAudit,
-		reconciler:    rec,
-		singleToken:   singleToken,
-		masterKey:     supplyAtRest != nil,
+		principalAuth:        principalAuth,
+		authorizer:           apiserver.NamespaceAwareAuthorizer{},
+		auditSink:            audit,
+		durableAudit:         durableAudit,
+		reconciler:           rec,
+		singleToken:          singleToken,
+		masterKey:            supplyAtRest != nil,
+		runnerAuthConfigured: cfg.authPolicy != "",
 	}); err != nil {
 		return err
 	}
@@ -699,6 +700,13 @@ type productionDeps struct {
 	singleToken bool
 	// masterKey reports whether a usable master encryption key was loaded.
 	masterKey bool
+	// runnerAuthConfigured reports whether the runner protocol authenticator
+	// was built from --auth-policy rather than defaulting to
+	// control.DisabledAuthenticator{}. DisabledAuthenticator is a non-nil
+	// Authenticator, so a nil check on the authenticator itself cannot tell
+	// "configured" apart from "explicitly disabled" — this field is set at the
+	// one call site that knows which one buildAuthenticator returned.
+	runnerAuthConfigured bool
 }
 
 // validateProduction enforces the Task 8 blocker 3 production posture. In
@@ -712,6 +720,10 @@ type productionDeps struct {
 //   - Reconciler (the T8 seam; T9 provides the crash-safe worker).
 //   - a master encryption key (XFLOW_MASTER_KEY or --master-key-file); without
 //     it supply content would be stored in plaintext.
+//   - a configured runner protocol authenticator (--auth-policy); without it
+//     the runner-facing endpoints accept any runner via
+//     control.DisabledAuthenticator{}, which is a non-nil Authenticator and so
+//     does not trip NewServer's own posture check.
 //
 // dev mode allows every combination above (in-memory audit, single-token,
 // anonymous) and is expected to print a stderr warning at startup.
@@ -736,6 +748,9 @@ func validateProduction(mode string, deps productionDeps) error {
 	}
 	if !deps.masterKey {
 		return fmt.Errorf("production mode requires a master encryption key (XFLOW_MASTER_KEY or --master-key-file); without it supply content is stored in plaintext. Generate with: openssl rand -base64 32")
+	}
+	if !deps.runnerAuthConfigured {
+		return fmt.Errorf("production mode requires runner protocol authentication (--auth-policy); without it any runner can register and claim work")
 	}
 	return nil
 }

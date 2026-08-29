@@ -123,6 +123,72 @@ func TestDisabledAuthenticatorStillAllowsAnyNamespace(t *testing.T) {
 	}
 }
 
+// TestRegisterRejectsUndeclaredNamespaceWithoutGrant pins the effective-value
+// gate: a runner that declares no Namespaces at all is not asking for "no
+// namespace" — normalizeRunnerNamespaces downstream resolves that to
+// [namespace.Default] regardless of what the entitlement check saw. Before
+// this guard, namespaceIDs(nil) returned nil, the entitlement loop ran zero
+// iterations, and the runner registered into default with zero policy checks
+// even though this policy's AllowedNamespaces does not include it.
+func TestRegisterRejectsUndeclaredNamespaceWithoutGrant(t *testing.T) {
+	c := newEntitlementTestCore(t, entitlementPolicyStore(t, []string{"team-a"}))
+
+	_, err := c.register(context.Background(), protocol.RegisterRunnerRequest{
+		RunnerID:    "runner-1",
+		Concurrency: 1,
+		AuthToken:   "team-a-token",
+	}, TransportInfo{})
+
+	if !errors.Is(err, ErrAuthNamespaceDenied) {
+		t.Fatalf("want ErrAuthNamespaceDenied for an undeclared namespace under a policy that excludes default, got %v", err)
+	}
+}
+
+// TestRegisterRejectsBlankNamespaceWithoutGrant pins the second door called
+// out in the review: declaring [""] must not silently bypass the gate either.
+// namespaceIDs drops empty strings, so this exercises the same effective-set
+// path as the fully-undeclared case above via a different input shape.
+func TestRegisterRejectsBlankNamespaceWithoutGrant(t *testing.T) {
+	c := newEntitlementTestCore(t, entitlementPolicyStore(t, []string{"team-a"}))
+
+	_, err := c.register(context.Background(), protocol.RegisterRunnerRequest{
+		RunnerID:    "runner-1",
+		Concurrency: 1,
+		AuthToken:   "team-a-token",
+		Namespaces:  []string{""},
+	}, TransportInfo{})
+
+	if !errors.Is(err, ErrAuthNamespaceDenied) {
+		t.Fatalf("want ErrAuthNamespaceDenied for a blank-string namespace under a policy that excludes default, got %v", err)
+	}
+}
+
+// TestRegisterUndeclaredNamespaceBackCompat is the positive control for the
+// two tests above: a legacy runner that declares no Namespaces must still be
+// able to register under a legacy policy (empty AllowedNamespaces, meaning
+// default-only). Without this control, the fix above could regress into
+// "reject every undeclared namespace unconditionally" and both denial tests
+// would stay green while breaking every pre-existing deployment.
+func TestRegisterUndeclaredNamespaceBackCompat(t *testing.T) {
+	c := newEntitlementTestCore(t, entitlementPolicyStore(t, nil))
+
+	if _, err := c.register(context.Background(), protocol.RegisterRunnerRequest{
+		RunnerID:    "runner-1",
+		Concurrency: 1,
+		AuthToken:   "team-a-token",
+	}, TransportInfo{}); err != nil {
+		t.Fatalf("undeclared namespace under a default-only policy must still register: %v", err)
+	}
+
+	snap, ok := c.runners.Runner(context.Background(), "runner-1")
+	if !ok {
+		t.Fatal("registered runner not found in directory")
+	}
+	if len(snap.Namespaces) != 1 || snap.Namespaces[0] != namespace.Default {
+		t.Fatalf("stored namespaces = %v, want [%q]", snap.Namespaces, namespace.Default)
+	}
+}
+
 // recordingNamespaceAuthObserver is a test-only AuthObserver implementation
 // that records every decision in order, so a test can assert exactly what
 // fired (and what did not) instead of only "at least one allow happened

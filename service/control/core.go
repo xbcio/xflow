@@ -226,8 +226,23 @@ func (c *Core) register(ctx context.Context, req protocol.RegisterRunnerRequest,
 	// value is stored verbatim and ClaimForRunner filters task dispatch by it,
 	// so an unchecked declaration decides which namespace's work this runner is
 	// handed.
+	//
+	// The gate below runs against the *effective* set, not the *declared* one.
+	// A runner that declares no namespace (or only ""s, which namespaceIDs
+	// drops) is not asking for "no namespace" — normalizeRunnerNamespaces
+	// downstream in the runner directory resolves that to [namespace.Default]
+	// regardless, so it is asking for default. If the entitlement check ran
+	// against the raw (possibly empty) declaration instead, an empty
+	// declaration would skip the loop entirely and register into default with
+	// zero policy checks, even under a policy whose AllowedNamespaces does not
+	// include default. Checking and persisting the same effective value keeps
+	// "what got checked" and "what got stored" from diverging.
 	requested := namespaceIDs(req.Namespaces)
-	for _, t := range requested {
+	effective := requested
+	if len(effective) == 0 {
+		effective = []namespace.Namespace{namespace.Default}
+	}
+	for _, t := range effective {
 		if err := namespace.Validate(t); err != nil {
 			return protocol.RegisterRunnerResponse{}, fmt.Errorf("%w: %v", ErrInvalidNamespace, err)
 		}
@@ -253,7 +268,7 @@ func (c *Core) register(ctx context.Context, req protocol.RegisterRunnerRequest,
 		Labels:       req.Labels,
 		Capabilities: req.Capabilities,
 		Policy:       policy,
-		Namespaces:   requested,
+		Namespaces:   effective,
 		Now:          time.Now(),
 	})
 	if err != nil {

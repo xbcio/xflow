@@ -40,12 +40,13 @@ func TestProductionAcceptsARealReconciler(t *testing.T) {
 	worker := control.NewAuditReconcileWorker(nil, nil, control.AuditReconcileConfig{})
 
 	deps := productionDeps{
-		principalAuth: apiserver.NewBearerPrincipalAuth("tok", "op", []string{"workflow"}),
-		authorizer:    apiserver.NamespaceAwareAuthorizer{},
-		auditSink:     apiserver.NewSQLAuditSink(nil),
-		durableAudit:  true,
-		reconciler:    reconcilerOrNil(worker),
-		masterKey:     true,
+		principalAuth:        apiserver.NewBearerPrincipalAuth("tok", "op", []string{"workflow"}),
+		authorizer:           apiserver.NamespaceAwareAuthorizer{},
+		auditSink:            apiserver.NewSQLAuditSink(nil),
+		durableAudit:         true,
+		reconciler:           reconcilerOrNil(worker),
+		masterKey:            true,
+		runnerAuthConfigured: true,
 	}
 	if err := validateProduction("production", deps); err != nil {
 		t.Fatalf("production rejected a real reconciler: %v", err)
