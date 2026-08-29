@@ -56,10 +56,16 @@ func TestNewServerRejectsBothPostures(t *testing.T) {
 	}
 }
 
-// TestStaticTokenAuthenticatorRejectsEmptyInputs pins that the loopback helper
-// cannot be talked into accepting everyone. An empty token would match a runner
-// that sent no credential; an empty prefix would name no subject at all. Both
-// are the posture this task exists to close.
+// TestStaticTokenAuthenticatorRejectsEmptyInputs pins the observable behavior
+// that the loopback helper cannot be talked into accepting everyone: an empty
+// token would match a runner that sent no credential, and an empty prefix
+// would name no subject at all. It does NOT pin NewStaticTokenAuthenticator's
+// own two guards specifically — the underlying FilePolicyStore.resolveConfig
+// independently rejects both an empty token (no token/token_file/mtls_subject)
+// and an empty id_prefix, so deleting either guard here leaves this test
+// green via that lower layer. The guards stay anyway as defense-in-depth at
+// this exported constructor's boundary, since resolveConfig is an internal
+// implementation detail that could change independently of this API.
 func TestStaticTokenAuthenticatorRejectsEmptyInputs(t *testing.T) {
 	if _, err := control.NewStaticTokenAuthenticator("runner-", "", []string{"default"}, []string{"*"}); err == nil {
 		t.Fatal("NewStaticTokenAuthenticator accepted an empty token")

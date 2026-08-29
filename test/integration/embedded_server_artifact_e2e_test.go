@@ -24,6 +24,7 @@ import (
 	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/sdk/xflow"
 	"github.com/xbcio/xflow/service/apiserver"
+	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/service/protocol"
 	runnersvc "github.com/xbcio/xflow/service/runner"
 	"github.com/xbcio/xflow/store"
@@ -277,6 +278,21 @@ func TestEmbeddedServerRunsMapBodyArtifact(t *testing.T) {
 	provider := newEmbeddedProvider(t)
 
 	artifacts := store.NewArtifactStore(provider.ArtifactObjects(), provider.ArtifactIndex())
+
+	// startEmbeddedRunner's protocol client already presents a runner-protocol
+	// credential (protocol.NewClient(...).WithToken(embeddedToken), below at
+	// startEmbeddedRunner) on every register/heartbeat/poll/report_result call.
+	// This is the one call site in the tree that stands in for the SAS
+	// embedding topology, so it gets a real control.Authenticator rather than
+	// WithServerInsecureNoRunnerAuth: purely a server-side change, the runner's
+	// client code above is untouched. idPrefix is the runner's actual
+	// RunnerID (not guessed) so AuthenticateRegister/AuthenticateOngoing match
+	// it via prefix test.
+	runnerAuth, err := control.NewStaticTokenAuthenticator(
+		embeddedRunnerID, embeddedToken, []string{string(namespace.Default)}, []string{"*"})
+	if err != nil {
+		t.Fatalf("NewStaticTokenAuthenticator: %v", err)
+	}
 	srv, err := xflow.NewServer(
 		xflow.ServerConfig{RedisAddr: redisAddr, Store: provider},
 		xflow.WithServerArtifacts(artifacts),
@@ -286,15 +302,7 @@ func TestEmbeddedServerRunsMapBodyArtifact(t *testing.T) {
 			apiserver.NamespaceAwareAuthorizer{},
 			apiserver.NewSQLAuditSink(provider),
 		),
-		// This test's runner registers over the real Runner Protocol
-		// (startEmbeddedRunner below) but never presents a runner-protocol
-		// credential (no WithToken on its protocol client) — only the
-		// workflow/execution HTTP API above is authenticated. Flagged in
-		// task-4-report.md as the one call site closest to a production
-		// embedding topology: whether it should carry a real
-		// control.NewStaticTokenAuthenticator instead of this explicit
-		// opt-out is a call for review, not made unilaterally here.
-		xflow.WithServerInsecureNoRunnerAuth(),
+		xflow.WithServerAuth(runnerAuth),
 	)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)

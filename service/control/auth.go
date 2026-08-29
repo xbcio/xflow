@@ -400,6 +400,14 @@ func (s *FilePolicyStore) IsDryRun() bool {
 // An empty token is rejected for the same reason: FilePolicyStore treats an
 // entry with no token as unauthenticated-by-that-factor, so an empty token here
 // would silently accept every runner under the prefix.
+//
+// Both checks are defense-in-depth at this exported constructor's boundary:
+// the underlying resolveConfig independently rejects an empty id_prefix and an
+// entry with no token/token_file/mtls_subject, so either guard here could be
+// deleted without this constructor starting to accept those inputs. They stay
+// because resolveConfig is an internal implementation detail that could change
+// independently of this API, and the error text here is scoped to this
+// constructor's own parameters rather than a generic policy-entry message.
 func NewStaticTokenAuthenticator(idPrefix, token string, allowedNamespaces, allowedNodeTypes []string) (Authenticator, error) {
 	if idPrefix == "" {
 		return nil, errors.New("static token authenticator requires a non-empty runner ID prefix")
