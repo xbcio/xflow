@@ -232,6 +232,12 @@ func New(cfg Config, opts ...Option) (*APIServer, error) {
 		art.principalAuth = cfg.PrincipalAuth
 		art.authorizer = cfg.Authorizer
 		art.audit = cfg.AuditSink
+		// s.cp.Authenticator() (not cfg.Auth) so the namespace-declaration check
+		// sees the SAME runner-protocol authenticator instance the runner
+		// protocol itself enforces, whether cp was built internally by New or
+		// injected via WithControlPlane (the e2e harness path) -- see
+		// ControlPlane.Authenticator's doc comment.
+		art.runnerAuth = s.cp.Authenticator()
 		s.modules = append(s.modules, art)
 	}
 	return s, nil

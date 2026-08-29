@@ -113,6 +113,26 @@ func (DisabledAuthenticator) AuthenticateOngoing(string, string, TransportInfo) 
 	return permissivePolicy, nil
 }
 
+// IsConfigured reports whether auth is a real authenticator rather than the
+// permissive DisabledAuthenticator (or nil). It exists because
+// DisabledAuthenticator{} is a non-nil Authenticator — a plain nil check
+// cannot distinguish "auth explicitly disabled" from "auth really
+// configured" (the same typed-nil-shaped trap #32 hit in cmd/server/main.go;
+// see authMode in core.go for the sibling switch this mirrors).
+//
+// Callers that gate a security-relevant decision on "is runner-protocol auth
+// configured" (e.g. the artifact module deciding whether to trust a
+// runner-declared X-Xflow-Namespace header) MUST use this rather than
+// `auth != nil`, or disabling auth silently makes the declaration trusted
+// unconditionally — the opposite of fail-closed.
+func IsConfigured(auth Authenticator) bool {
+	if auth == nil {
+		return false
+	}
+	_, disabled := auth.(DisabledAuthenticator)
+	return !disabled
+}
+
 // PolicyEntry is one YAML runners.yaml entry after env / file expansion.
 type PolicyEntry struct {
 	Name              string   `yaml:"name,omitempty"`

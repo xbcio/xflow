@@ -483,6 +483,21 @@ func (cp *ControlPlane) SupplyEncryptor() *SupplyEncryptor { return cp.supplyEnc
 // needs no configuration change.
 func (cp *ControlPlane) MetricsInbox() *MetricsInbox { return cp.metricsInbox }
 
+// Authenticator returns the runner-protocol authenticator this control plane
+// was built with, resolved through the same nil-to-DisabledAuthenticator
+// fallback the runner-protocol servers themselves use (Core.authn()). It is
+// never nil.
+//
+// The apiserver's artifact module uses this — rather than reading
+// Config.Auth directly — so the namespace-declaration check (§5.3 of the
+// runner-artifact-namespace-authorization design) sees the SAME authenticator
+// instance the runner protocol itself enforces, whether this ControlPlane was
+// built internally by apiserver.New or injected via WithControlPlane (the e2e
+// harness path). Reading Config.Auth directly would silently see a stale nil
+// in the latter case, the same typed-nil trap documented at
+// apiserver.supplyEncryptorFor.
+func (cp *ControlPlane) Authenticator() Authenticator { return cp.httpServer.core.authn() }
+
 // Handler returns the HTTP Runner Protocol + workflow API mux. Mount it into
 // a host program's own http.ServeMux/http.Server, or serve it directly.
 func (cp *ControlPlane) Handler() http.Handler { return cp.httpServer.Handler() }
