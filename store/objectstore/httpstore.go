@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/url"
 	"time"
+
+	"github.com/xbcio/xflow/namespace"
 )
 
 // maxArtifactResponseBytes caps what HTTPStore will read from a single response.
@@ -19,6 +21,24 @@ const maxArtifactResponseBytes = 16 << 20
 // cannot block a runner indefinitely.
 const artifactFetchTimeout = 60 * time.Second
 
+// runnerIDHeaderName carries the runner's self-declared ID on every artifact
+// fetch. Its value MUST equal service/protocol.RunnerIDHeader (pinned by a
+// test in this package) — defined as a local literal rather than importing
+// service/protocol, which would pull the entire engine/types/exprx graph into
+// this otherwise dependency-free store leaf package for two string constants.
+const runnerIDHeaderName = "X-Xflow-Runner-Id"
+
+// NamespaceHeader is the request header a runner uses to declare the
+// namespace of the task it is currently executing (read from ctx via
+// namespace.FromContext). The server
+// (service/apiserver/module_artifact.go) trusts this declaration only when
+// its own runner-protocol authenticator is configured AND the declared
+// namespace is present in the caller's RunnerPolicy.AllowedNamespaces — see
+// docs/superpowers/specs/2026-08-30-runner-artifact-namespace-authorization-design.md
+// §5. Exported so the server package references the exact same constant
+// instead of re-typing the literal.
+const NamespaceHeader = "X-Xflow-Namespace"
+
 // HTTPStore implements the read-only portion of Store by fetching artifacts from
 // the server's GET /v1/artifacts/{digest} endpoint. It is the runner-side origin
 // in a ReadThrough composition.
@@ -30,6 +50,26 @@ type HTTPStore struct {
 	BaseURL string
 	Token   string
 	Client  *http.Client
+
+	// RunnerID, when set, is sent as X-Xflow-Runner-Id on every request so the
+	// server can resolve this runner's RunnerPolicy (via the runner-protocol
+	// Authenticator) when validating a declared namespace. Empty is a valid
+	// value (matches RunnerConfig.RunnerID's "empty lets the server generate
+	// one" contract) — the server-side check degrades to "no runner ID
+	// declared", not a fetch failure.
+	RunnerID string
+}
+
+// declareNamespace sets X-Xflow-Runner-Id and X-Xflow-Namespace on req from
+// ctx and h.RunnerID. Called by both GetObject and HeadObject so the two
+// verbs make the identical declaration.
+func (h *HTTPStore) declareNamespace(ctx context.Context, req *http.Request) {
+	if h.RunnerID != "" {
+		req.Header.Set(runnerIDHeaderName, h.RunnerID)
+	}
+	if ns := namespace.FromContext(ctx); ns != "" {
+		req.Header.Set(NamespaceHeader, string(ns))
+	}
 }
 
 var _ Store = (*HTTPStore)(nil)
@@ -61,6 +101,7 @@ func (h *HTTPStore) GetObject(ctx context.Context, key string) (io.ReadCloser, *
 	if h.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+h.Token)
 	}
+	h.declareNamespace(ctx, req)
 
 	client := h.Client
 	if client == nil {
@@ -123,6 +164,7 @@ func (h *HTTPStore) HeadObject(ctx context.Context, key string) (*Object, error)
 	if h.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+h.Token)
 	}
+	h.declareNamespace(ctx, req)
 
 	client := h.Client
 	if client == nil {

@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/xbcio/xflow/namespace"
 )
 
 // FSStore implements Store by mapping keys directly to filesystem paths under a
@@ -22,6 +24,28 @@ import (
 // serve bytes back by digest.
 type FSStore struct {
 	root string
+
+	// PartitionByNamespace, when true, prefixes every resolved path with
+	// "ns/<namespace>/" where namespace comes from namespace.FromContext(ctx).
+	// Default false: FSStore's fundamental contract is content-addressed
+	// global dedup (design §4.2) — the SAME digest resolves to the SAME file
+	// regardless of which namespace is asking, which is exactly what lets a
+	// server-side backing store (and the many tests that use FSStore as a
+	// stand-in for one, e.g. service/apiserver/artifact_endpoint_test.go)
+	// Put once under one ambient namespace and Get/Stat under another and
+	// still find the bytes.
+	//
+	// The ONE place that invariant is actively harmful is the runner-side
+	// local read-through cache (sdk/xflow/runner.go's
+	// newRunnerArtifactResolver): there, a cache HIT bypasses the server
+	// entirely, so if namespace A's task fetches and caches digest D, a later
+	// task in namespace B on the SAME runner would be served D from disk with
+	// zero requests to origin — silently defeating the server's per-tenant
+	// HasReference check (module_artifact.go) no matter how correct that
+	// check is. See docs/superpowers/specs/2026-08-30-runner-artifact-namespace-authorization-design.md
+	// §2(c)/§5.4. Only that call site sets this field; every other FSStore
+	// construction in this repository leaves it false.
+	PartitionByNamespace bool
 }
 
 var _ Store = (*FSStore)(nil)
@@ -36,8 +60,8 @@ func NewFSStore(dir string) *FSStore {
 // Concurrent puts to the same key are safe: both rename, last writer wins, both
 // produce identical content (content-addressed). If opts.IfNoneMatch is set and
 // the file already exists, ErrPreconditionFailed is returned without rewriting.
-func (s *FSStore) PutObject(_ context.Context, key string, body io.Reader, size int64, opts PutOptions) (*Object, error) {
-	path, err := s.resolve(key)
+func (s *FSStore) PutObject(ctx context.Context, key string, body io.Reader, size int64, opts PutOptions) (*Object, error) {
+	path, err := s.resolve(ctx, key)
 	if err != nil {
 		return nil, err
 	}
@@ -94,8 +118,8 @@ func (s *FSStore) PutObject(_ context.Context, key string, body io.Reader, size 
 
 // GetObject opens the file for streaming reads. The caller must close the
 // returned ReadCloser. Returns ErrNotFound when the file does not exist.
-func (s *FSStore) GetObject(_ context.Context, key string) (io.ReadCloser, *Object, error) {
-	path, err := s.resolve(key)
+func (s *FSStore) GetObject(ctx context.Context, key string) (io.ReadCloser, *Object, error) {
+	path, err := s.resolve(ctx, key)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -125,8 +149,8 @@ func (s *FSStore) GetObject(_ context.Context, key string) (io.ReadCloser, *Obje
 
 // HeadObject returns metadata (size, mtime) without reading content. Uses
 // os.Stat only. Returns ErrNotFound when the file does not exist.
-func (s *FSStore) HeadObject(_ context.Context, key string) (*Object, error) {
-	path, err := s.resolve(key)
+func (s *FSStore) HeadObject(ctx context.Context, key string) (*Object, error) {
+	path, err := s.resolve(ctx, key)
 	if err != nil {
 		return nil, err
 	}
@@ -147,17 +171,33 @@ func (s *FSStore) HeadObject(_ context.Context, key string) (*Object, error) {
 	}, nil
 }
 
-// resolve maps key to an absolute path and validates that it stays within root.
-// This is the path-traversal defence: even though keys from ObjectKeyForDigest
-// are structurally safe, this layer must not assume the caller validated.
-func (s *FSStore) resolve(key string) (string, error) {
+// resolve maps key to an absolute path and validates that it stays within the
+// permitted subtree. This is the path-traversal defence: even though keys
+// from ObjectKeyForDigest are structurally safe, this layer must not assume
+// the caller validated.
+//
+// When s.PartitionByNamespace is set, every path is additionally partitioned
+// under root/ns/<namespace>/ so two namespaces sharing a runner never resolve
+// to the same file for the same digest — see the field's doc comment for why
+// that matters and why it defaults off.
+func (s *FSStore) resolve(ctx context.Context, key string) (string, error) {
 	if key == "" {
 		return "", fmt.Errorf("objectstore/fs: empty key")
 	}
-	joined := filepath.Join(s.root, filepath.FromSlash(key))
+	base := s.root
+	if s.PartitionByNamespace {
+		ns := namespace.FromContext(ctx)
+		if err := namespace.Validate(ns); err != nil {
+			return "", fmt.Errorf("objectstore/fs: invalid namespace %q: %w", ns, err)
+		}
+		base = filepath.Join(s.root, "ns", string(ns))
+	}
+	joined := filepath.Join(base, filepath.FromSlash(key))
 	cleaned := filepath.Clean(joined)
-	// Ensure the resolved path is strictly within root.
-	if !strings.HasPrefix(cleaned, s.root+string(filepath.Separator)) {
+	// Ensure the resolved path is strictly within the permitted subtree — when
+	// partitioned, this is stricter than "within root", so a crafted key
+	// cannot traverse into a sibling namespace's cache directory either.
+	if !strings.HasPrefix(cleaned, base+string(filepath.Separator)) {
 		return "", fmt.Errorf("objectstore/fs: key %q resolves outside root", key)
 	}
 	return cleaned, nil
