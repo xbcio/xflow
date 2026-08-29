@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"os"
 	"runtime"
 	"sync"
@@ -47,8 +48,12 @@ func engineIdleTTLFromEnv() time.Duration {
 	d, err := time.ParseDuration(raw)
 	if err != nil || d < 0 {
 		// Falling back to the default rather than to 0: a typo must not silently
-		// restore the unbounded growth. There is no logger on this path, so the
-		// safe direction is the only signal available.
+		// restore the unbounded growth. Warned rather than silent — cacheBudget
+		// (cache.go) takes the same stance on its own malformed-env-var case, and
+		// an operator who typo'd this value needs to find out some way other than
+		// noticing 15m of resident-engine growth never bounded.
+		slog.Warn("wasm: ignoring malformed engine idle TTL, using the default",
+			"env", EngineIdleTTLEnv, "value", raw, "default", defaultEngineIdleTTL, "error", err)
 		return defaultEngineIdleTTL
 	}
 	return d

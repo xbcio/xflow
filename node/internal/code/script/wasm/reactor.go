@@ -67,14 +67,23 @@ func (f *reactorFacade) Execute(ctx context.Context, src engine.Source, globals 
 	if errors.Is(err, errEngineReclaimed) {
 		// Lost a race with reclamation: the engine was resolved and then torn
 		// down before this call reached borrow. Re-resolving recompiles the
-		// module and the retry runs against a live engine.
+		// module, but the retry does NOT necessarily run against a ready
+		// engine: reclaimIdleEngines keeps intent (sourceDriven) but drops the
+		// compiled pool, so a source-driven module's retry gets a freshly
+		// recompiled, unconfigured engine and legitimately returns
+		// types.NewTransientError("wasm.unconfigured", ...) — the same outcome
+		// reclaimIdleEngines' own doc comment describes ("the rebuild path
+		// restores everything else on the next message"). The legacy $config
+		// path is the one that fully self-heals in one retry, because
+		// ensurePool rebuilds the pool from the config carried in globals on
+		// every call. Either way, what the retry guarantees is that the raw
+		// sentinel never reaches the caller — script.go routes a non-permanent
+		// engine error to the "error" port, which erases the classification, so
+		// Kafka would drop the record instead of redelivering it.
 		//
 		// Exactly once, not a loop: a second consecutive loss would mean the
 		// engine is being reclaimed as fast as it is created, which is a defect
-		// to surface rather than to spin on. And it must be a retry rather than
-		// a returned error — script.go routes a non-permanent engine error to
-		// the "error" port, which erases the classification, so Kafka would drop
-		// the record instead of redelivering it.
+		// to surface rather than to spin on.
 		return f.executeOnce(ctx, src, globals)
 	}
 	return out, err

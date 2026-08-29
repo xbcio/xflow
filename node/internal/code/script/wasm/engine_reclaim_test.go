@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/xbcio/xflow/node/internal/code/script/engine"
+	"github.com/xbcio/xflow/types"
 )
 
 // closeForTest tears down every engine a test host built. Production has no
@@ -256,9 +257,16 @@ func TestReclaimHonoursTTLPerEngine(t *testing.T) {
 	}
 }
 
-// 解析拿到 engine 之后、borrow 之前被回收，必须重试一次并成功——而不是把
-// 一条消息送进 error 端口。error 端口会抹平分类，Kafka 不会重投递。
-func TestExecuteRetriesOnceAfterEngineReclaimedMidCall(t *testing.T) {
+// borrow() 必须能把「输掉竞态被摘走」和「压根没配置过」区分开——前者可重
+// 试，后者重试只会空转。这条测试只到 borrow() 这一层，不经过
+// reactorFacade.Execute；Execute 自己那条重试路径由
+// TestExecuteRetriesOnceAfterEngineReclaimedMidCall 覆盖。
+//
+// 历史注记：这条测试曾经就叫 TestExecuteRetriesOnceAfterEngineReclaimedMidCall，
+// 但它从未调用过 Execute——评审把 reactor.go 里 Execute 的整个重试块删掉、
+// 全包重跑，这条测试仍然全绿，证明「重试一次」这个任务的同名核心交付物在
+// 全仓库零覆盖。名字撒了谎，先改名字，再在下面补一条真的穿过 Execute 的。
+func TestBorrowDistinguishesReclaimedFromUnconfigured(t *testing.T) {
 	ctx := context.Background()
 	h := newTestReactorHost(t)
 	modA := decodeForTest(t, testReactorCode(t))
@@ -283,6 +291,120 @@ func TestExecuteRetriesOnceAfterEngineReclaimedMidCall(t *testing.T) {
 	}
 	if _, _, err := fresh.borrow(ctx); err == nil || errors.Is(err, errEngineReclaimed) {
 		t.Fatalf("borrow on an unconfigured engine returned %v, want a non-reclaimed error", err)
+	}
+}
+
+// executeReclaimObserver injects a deterministic mid-call reclaim into the
+// exact window reactor.go's retry exists for: after executeOnce's
+// availability() check has already read Fresh (so OnConfigAge fires) but
+// before evalFromPool reaches borrow. OnConfigAge is the only call anywhere in
+// that window, which is what makes this deterministic — a background
+// goroutine plus a sleep would only be a coin flip on which side of borrow()
+// it lands, and a test built on that coin flip is exactly what this file must
+// not contain (see TestCompileMissTriggersSweep's polling-with-deadline for
+// the same principle applied to the OTHER async path in this change).
+//
+// Riding h.reclaimIdleEngines inside the callback, rather than hand-rolling
+// the teardown, reproduces the REAL reclaim path exactly: map delete,
+// engineList republish, codeCache purge, cm.Close, reclaimed flag, active
+// swap — the same call closeForTest already uses for the same "give me the
+// real thing, not a hand-rolled stand-in" reason.
+//
+// e's lastUsed is force-rewound an hour into the past before the reclaim call
+// rather than relying on a razor-thin ttl (e.g. time.Nanosecond against
+// "however many ns elapsed since the stamp"): reclaimIdleEngines' cutoff is
+// time.Now().Add(-ttl), and on a machine whose monotonic clock has coarse
+// tick granularity (Apple Silicon's generic timer is ~41ns/tick) two
+// back-to-back time.Now() calls can read the identical tick, making
+// lastUsed > cutoff true and silently skipping the reclaim this test exists
+// to force. This was caught by an actual flake (reclaimedCount == 0) during
+// verification, not reasoned out in advance — rewinding by an hour against a
+// one-minute ttl, the pattern every other reclaim test in this file already
+// uses, puts the two timestamps far enough apart that no clock's resolution
+// can erase the gap.
+type executeReclaimObserver struct {
+	noopObserver
+	h *reactorHost
+	e *reactorEngine
+
+	// fired guards against acting twice: the retry's own executeOnce call
+	// resolves a freshly recompiled engine whose availability is
+	// AvailUnavailable, so OnConfigAge structurally cannot fire for it — but
+	// guarding makes that invariant explicit rather than silently assumed.
+	fired          bool
+	reclaimedCount int
+}
+
+func (o *executeReclaimObserver) OnConfigAge(ctx context.Context, _ time.Duration) {
+	if o.fired {
+		return
+	}
+	o.fired = true
+	o.e.lastUsed.Store(time.Now().Add(-time.Hour).UnixNano())
+	o.reclaimedCount = o.h.reclaimIdleEngines(ctx, time.Minute)
+}
+
+// 解析拿到 engine 之后、borrow 之前被回收，必须重试一次——而不是把 errEngineReclaimed
+// 这个哨兵原样泄漏给调用方。error 端口会抹平分类，Kafka 不会重投递，所以哪怕重试
+// 之后合法地拿到另一个错误（回收会保留 sourceDriven 意图但丢掉编译好的池，见
+// reclaimIdleEngines 的文档），也必须是那个新错误，不能是原始哨兵。
+//
+// 变异验证（评审要求）：把 Execute 的重试块删掉、或把 errors.Is(err,
+// errEngineReclaimed) 改成恒 false，这条测试必须变红——第一次 executeOnce 的
+// errEngineReclaimed 会原样从 Execute 漏给调用方，命中下面 errors.Is 的失败分支。
+func TestExecuteRetriesOnceAfterEngineReclaimedMidCall(t *testing.T) {
+	ctx := context.Background()
+	h := newTestReactorHost(t)
+	code := testReactorCode(t)
+	raw := decodeForTest(t, code)
+	key := moduleKeyOf(raw)
+
+	if _, err := h.engineForCode(ctx, code); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	h.seedSourceDrivenByKey(key)
+	h.mu.Lock()
+	e := h.engines[key]
+	h.mu.Unlock()
+	if e == nil {
+		t.Fatal("seed engine missing from h.engines right after creation")
+	}
+	if err := e.swapConfig(ctx, emptyContent(), 2, 1); err != nil {
+		t.Fatalf("swapConfig: %v", err)
+	}
+	if got := e.availability(); got != AvailFresh {
+		t.Fatalf("seeded engine availability = %v, want AvailFresh — the race this "+
+			"test targets only exists on the branch that reads Fresh/Stale", got)
+	}
+
+	reclaimer := &executeReclaimObserver{h: h, e: e}
+	SetObserver(reclaimer)
+	defer SetObserver(nil)
+
+	f := &reactorFacade{host: h}
+	src := engine.Source{Digest: "sha256:" + key, Code: code}
+	_, err := f.Execute(ctx, src, map[string]any{}, engine.DefaultHelpers())
+
+	if !reclaimer.fired {
+		t.Fatal("OnConfigAge never fired — this test's injection point was never reached, " +
+			"so it proves nothing about the race it claims to cover")
+	}
+	if reclaimer.reclaimedCount != 1 {
+		t.Fatalf("mid-call reclaim removed %d engines, want exactly 1 (the one Execute "+
+			"had just resolved)", reclaimer.reclaimedCount)
+	}
+	if errors.Is(err, errEngineReclaimed) {
+		t.Fatalf("Execute leaked errEngineReclaimed to the caller: %v — the retry in "+
+			"reactor.go either did not run or did not consume the sentinel; script.go "+
+			"would route this to the error port and Kafka would not redeliver it", err)
+	}
+	var ce *types.ClassifiedError
+	if !errors.As(err, &ce) || ce.Code != "wasm.unconfigured" {
+		t.Fatalf("Execute() after losing the race = %v, want a wasm.unconfigured "+
+			"ClassifiedError — losing the race and retrying resolves a freshly "+
+			"recompiled, still-unconfigured engine (reclaim keeps sourceDriven intent "+
+			"but drops the compiled pool), which must surface as this transient error, "+
+			"not as a silent success and not as the raw reclaim sentinel", err)
 	}
 }
 
