@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -15,6 +16,43 @@ import (
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
 )
+
+// EngineIdleTTLEnv overrides how long a compiled wasm module may sit unused
+// before it is reclaimed. Accepts any time.ParseDuration value; "0" disables
+// reclamation and restores the insert-only behaviour this change replaced.
+const EngineIdleTTLEnv = "XFLOW_WASM_ENGINE_IDLE_TTL"
+
+// defaultEngineIdleTTL is fifteen minutes.
+//
+// The floor is a human rollback: an operator who publishes a bad module notices
+// and rolls back on a scale of minutes, and a rollback inside the window costs
+// nothing because the engine is still resident. The ceiling is the leak this
+// exists to bound — every resident module holds its compiled form plus
+// GOMAXPROCS instances, each of which is recycled at a 12 MiB memory high
+// water mark, so a handful of stragglers is hundreds of MB.
+//
+// Reclaiming too eagerly is not free either: the next message pays a recompile
+// (~82 ms warm off the on-disk compile cache) plus a pool rebuild. That cost
+// lands on one message of a workflow that has been silent for a quarter of an
+// hour, which is the right place for it.
+const defaultEngineIdleTTL = 15 * time.Minute
+
+// engineIdleTTLFromEnv resolves the configured idle TTL, falling back to
+// defaultEngineIdleTTL on an unset, empty, negative, or unparseable value.
+func engineIdleTTLFromEnv() time.Duration {
+	raw, ok := os.LookupEnv(EngineIdleTTLEnv)
+	if !ok || raw == "" {
+		return defaultEngineIdleTTL
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d < 0 {
+		// Falling back to the default rather than to 0: a typo must not silently
+		// restore the unbounded growth. There is no logger on this path, so the
+		// safe direction is the only signal available.
+		return defaultEngineIdleTTL
+	}
+	return d
+}
 
 // reactorHost owns the process-wide wazero runtime for reactor-model guests and
 // the per-module reactor engines. It mirrors wazeroEngine's runtime setup
@@ -93,6 +131,12 @@ type reactorHost struct {
 	// same module, which silently drops it back to the globals path and evaluates
 	// every record against no rules at all. Guarded by mu.
 	sourceDriven map[string]struct{}
+
+	// engineIdleTTL is how long an engine may sit unused before
+	// sweepEnginesAsync reclaims it. Set once at construction from
+	// engineIdleTTLFromEnv; a test may override it directly since reactorHost is
+	// only ever built via newReactorHost in this package.
+	engineIdleTTL time.Duration
 }
 
 // prewarmEntry is one module queued for startup warm-up. It keeps the original
@@ -146,10 +190,11 @@ func newReactorHost() *reactorHost {
 		panic(err)
 	}
 	return &reactorHost{
-		engines:      map[string]*reactorEngine{},
-		codeCache:    c,
-		prewarm:      map[string]prewarmEntry{},
-		sourceDriven: map[string]struct{}{},
+		engines:       map[string]*reactorEngine{},
+		codeCache:     c,
+		prewarm:       map[string]prewarmEntry{},
+		sourceDriven:  map[string]struct{}{},
+		engineIdleTTL: engineIdleTTLFromEnv(),
 	}
 }
 
@@ -380,7 +425,50 @@ func (h *reactorHost) engineForKey(ctx context.Context, key string, wasmBytes []
 	// A miss is the only event that adds a file to the on-disk cache, so it is
 	// the only one that can push the directory over its budget.
 	sweepCacheAsync()
+	// A miss is also the only event that can GROW the resident engine set, so it
+	// is the only thing (besides the timer below) that can make the set worth
+	// sweeping.
+	h.sweepEnginesAsync()
 	return e, nil
+}
+
+// engineSweeping guards the engine sweep the way cache.go's guards the disk
+// sweep: at most one in flight, and a sweep that arrives while another is
+// running is dropped rather than queued. Dropping is correct — the next
+// compile miss, or the timer sweepEnginesAsync re-arms, will run one.
+var engineSweeping atomic.Bool
+
+// sweepEnginesAsync runs one reclamation pass off the caller's goroutine and
+// re-arms itself while any engine remains resident.
+//
+// Event-driven from the compile-miss path (a miss is the only thing that ADDS
+// an engine, so it is the only thing that can grow the resident set) plus a
+// self-rearming timer, because event-driven alone has a hole: uploading N
+// distinct modules inside one ttl fires N sweeps that all find nothing old
+// enough, and if uploads then stop, nothing ever fires again. The timer closes
+// exactly that case and stops re-arming once the map is empty, so an idle
+// process carries no timer at all.
+func (h *reactorHost) sweepEnginesAsync() {
+	if h == nil || h.engineIdleTTL <= 0 {
+		return
+	}
+	if !engineSweeping.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer engineSweeping.Store(false)
+		ctx := context.Background()
+		h.reclaimIdleEngines(ctx, h.engineIdleTTL)
+		h.mu.Lock()
+		remaining := len(h.engines)
+		h.mu.Unlock()
+		obs().OnEngineCount(ctx, remaining)
+		if remaining > 0 {
+			// A quarter of the ttl, so an engine is reclaimed within ttl*1.25 of
+			// going idle rather than up to ttl*2 with a period of ttl.
+			time.AfterFunc(h.engineIdleTTL/4, h.sweepEnginesAsync)
+		}
+	}()
 }
 
 // touchLocked records that e was just handed to a caller. Caller must hold h.mu

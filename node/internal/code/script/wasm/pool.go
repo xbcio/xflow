@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -541,12 +542,20 @@ func (e *reactorEngine) buildPool(ctx context.Context, cfg []byte, size uint64) 
 	return pool, nil
 }
 
+// errEngineReclaimed distinguishes "the host tore this engine down while the
+// caller held it" from "this engine was never configured". Both leave active
+// nil; only the first is worth retrying.
+var errEngineReclaimed = errors.New("wasm reactor: engine reclaimed while in use")
+
 // borrow takes an instance from the live pool, blocking until one is free or
 // ctx is done. It returns the instance and the pool it came from (needed so
 // return/doom target the correct generation even across a concurrent swap).
 func (e *reactorEngine) borrow(ctx context.Context) (*pooledInstance, *activePool, error) {
 	p := e.active.Load()
 	if p == nil {
+		if e.reclaimed.Load() {
+			return nil, nil, errEngineReclaimed
+		}
 		return nil, nil, fmt.Errorf("wasm reactor: no active pool (unconfigured)")
 	}
 	start := time.Now()

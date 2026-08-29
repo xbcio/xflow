@@ -85,6 +85,10 @@ func (r *recordingObserver) OnModuleCompile(_ context.Context, result string) {
 	r.compiles = append(r.compiles, result)
 }
 
+// OnEngineCount is a stub: no test in this package currently asserts on it.
+// Task 4 owns the real observer implementation.
+func (r *recordingObserver) OnEngineCount(context.Context, int) {}
+
 // Snapshot accessors. Each returns a copy so a caller can range over the
 // result while the drain goroutine keeps appending.
 

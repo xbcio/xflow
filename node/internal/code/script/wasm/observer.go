@@ -80,6 +80,17 @@ type Observer interface {
 	// OnModuleCompile reports module compilation cache outcome: "hit" or
 	// "miss".
 	OnModuleCompile(ctx context.Context, result string)
+	// OnEngineCount reports how many distinct wasm modules are currently
+	// resident (have a live entry in reactorHost.engines) immediately after a
+	// reclamation sweep. It is the population this whole change bounds: without
+	// it, an insert-only engine map's growth is invisible until the process
+	// runs out of memory.
+	//
+	// Implementation is Task 4's: this method exists on the interface now only
+	// because sweepEnginesAsync (Task 3) must call it to compile. A real
+	// implementation records a gauge; the bundled noopObserver and any
+	// implementation not yet updated for it are a legitimate empty body.
+	OnEngineCount(ctx context.Context, n int)
 }
 
 type noopObserver struct{}
@@ -91,6 +102,7 @@ func (noopObserver) OnInstanceRecycled(context.Context, string)                 
 func (noopObserver) OnBorrowWait(context.Context, time.Duration)                    {}
 func (noopObserver) OnEval(context.Context, string, string, int, time.Duration)     {}
 func (noopObserver) OnModuleCompile(context.Context, string)                        {}
+func (noopObserver) OnEngineCount(context.Context, int)                             {}
 
 // observer holds the installed Observer. It is an atomic pointer, not a
 // RWMutex-guarded variable, because obs() sits on the per-message path

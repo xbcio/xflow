@@ -26,6 +26,10 @@ func (r *recordingWasmObserver) OnBorrowWait(context.Context, time.Duration)    
 func (r *recordingWasmObserver) OnEval(context.Context, string, string, int, time.Duration) {}
 func (r *recordingWasmObserver) OnModuleCompile(context.Context, string)                    {}
 
+// OnEngineCount is a stub to satisfy node.WasmObserver; this test does not
+// assert on it. Task 4 owns the real observer implementation.
+func (r *recordingWasmObserver) OnEngineCount(context.Context, int) {}
+
 // SetWasmObserver must actually forward into the internal wasm package's
 // global observer, not just satisfy the type alias: a config swap driven
 // through the public RegisterWasmSupplyConsumer + supply.Default surface must

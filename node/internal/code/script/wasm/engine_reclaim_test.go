@@ -2,6 +2,8 @@ package wasm
 
 import (
 	"context"
+	"errors"
+	"os"
 	"testing"
 	"time"
 
@@ -24,9 +26,21 @@ func (h *reactorHost) closeForTest(ctx context.Context) {
 // newTestReactorHost builds a host isolated from sharedReactorHost. Reclamation
 // mutates h.engines, so a test sharing the package-level host would strip
 // modules out from under a concurrently running test.
+//
+// engineIdleTTL is forced to 0 (async sweep disabled) rather than inherited
+// from engineIdleTTLFromEnv(): sweepEnginesAsync fires on every compile miss,
+// and most reclaim tests fake an engine idle by rewinding lastUsed
+// microseconds after seeding it, which a live background sweep can win the
+// race on and reclaim out from under the test before it gets to assert
+// anything. Zero also means the goroutine never self-re-arms, so a test host
+// carries no timer past the test — see sweepEnginesAsync's ttl<=0 guard. A
+// test that specifically exercises the async trigger (e.g.
+// TestCompileMissTriggersSweep) opts in by setting h.engineIdleTTL itself
+// after construction.
 func newTestReactorHost(t *testing.T) *reactorHost {
 	t.Helper()
 	h := newReactorHost()
+	h.engineIdleTTL = 0
 	t.Cleanup(func() { h.closeForTest(context.Background()) })
 	return h
 }
@@ -239,5 +253,90 @@ func TestReclaimHonoursTTLPerEngine(t *testing.T) {
 	}
 	if busy.reclaimed.Load() {
 		t.Fatal("the engine used one nanosecond ago was reclaimed")
+	}
+}
+
+// 解析拿到 engine 之后、borrow 之前被回收，必须重试一次并成功——而不是把
+// 一条消息送进 error 端口。error 端口会抹平分类，Kafka 不会重投递。
+func TestExecuteRetriesOnceAfterEngineReclaimedMidCall(t *testing.T) {
+	ctx := context.Background()
+	h := newTestReactorHost(t)
+	modA := decodeForTest(t, testReactorCode(t))
+	e := warmTestEngine(t, h, modA)
+
+	// 模拟输掉竞态：engine 已被摘走并拆掉池，但调用方手里还攥着它。
+	e.reclaimed.Store(true)
+	if old := e.active.Swap(nil); old != nil {
+		e.drainPool(ctx, old)
+	}
+
+	if _, _, err := e.borrow(ctx); !errors.Is(err, errEngineReclaimed) {
+		t.Fatalf("borrow on a reclaimed engine returned %v, want errEngineReclaimed — "+
+			"without a distinct sentinel this is indistinguishable from a genuine "+
+			"misconfiguration, which retrying would only loop on", err)
+	}
+
+	// 未配置的 engine 必须仍然是另一个错误，否则上面那条哨兵没有区分力。
+	fresh, err := h.engineForBytes(ctx, appendCustomSection(modA, "xflow-test-fresh", []byte{0x02}))
+	if err != nil {
+		t.Fatalf("compile fresh: %v", err)
+	}
+	if _, _, err := fresh.borrow(ctx); err == nil || errors.Is(err, errEngineReclaimed) {
+		t.Fatalf("borrow on an unconfigured engine returned %v, want a non-reclaimed error", err)
+	}
+}
+
+// TTL 从环境变量读，非法值不得静默变成「关闭」——那会让泄漏悄悄回来。
+func TestEngineIdleTTLFromEnv(t *testing.T) {
+	for _, tc := range []struct {
+		set  string
+		want time.Duration
+	}{
+		{"", defaultEngineIdleTTL},
+		{"30m", 30 * time.Minute},
+		{"0", 0},
+		{"garbage", defaultEngineIdleTTL},
+	} {
+		t.Run("v="+tc.set, func(t *testing.T) {
+			if tc.set == "" {
+				t.Setenv(EngineIdleTTLEnv, "")
+				os.Unsetenv(EngineIdleTTLEnv)
+			} else {
+				t.Setenv(EngineIdleTTLEnv, tc.set)
+			}
+			if got := engineIdleTTLFromEnv(); got != tc.want {
+				t.Fatalf("ttl = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// 插入触发一次扫，且扫是异步的：编译路径不能被回收拖住。
+func TestCompileMissTriggersSweep(t *testing.T) {
+	ctx := context.Background()
+	h := newTestReactorHost(t)
+	h.engineIdleTTL = 50 * time.Millisecond
+	modA := decodeForTest(t, testReactorCode(t))
+
+	first, err := h.engineForBytes(ctx, modA)
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	first.lastUsed.Store(time.Now().Add(-time.Hour).UnixNano())
+
+	// 编译第二个模块 = 一次 miss = 一次扫。
+	if _, err := h.engineForBytes(ctx, appendCustomSection(modA, "xflow-test-trigger", []byte{0x03})); err != nil {
+		t.Fatalf("second: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if first.reclaimed.Load() {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("idle engine was never reclaimed after a compile miss fired a sweep")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

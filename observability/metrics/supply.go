@@ -146,6 +146,12 @@ func (s SupplyMetrics) OnModuleCompile(ctx context.Context, result string) {
 	s.Metrics.Inc(metricWasmModuleCompileTotal, withNamespace(ctx, map[string]string{"result": result}))
 }
 
+// OnEngineCount is a placeholder satisfying wasm.Observer's newest method so
+// SupplyMetrics keeps compiling as xnode.SetWasmObserver's argument. The real
+// gauge (resident-engine count after each reclamation sweep) is Task 4's
+// scope; wiring it here now would record a metric nothing has verified yet.
+func (s SupplyMetrics) OnEngineCount(ctx context.Context, n int) {}
+
 // --- supply gate observer surface ---
 
 // OnSupplyFetch records one content fetch attempt. result is "ok" or "error".

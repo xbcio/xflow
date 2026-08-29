@@ -63,7 +63,27 @@ func (f *reactorFacade) Execute(ctx context.Context, src engine.Source, globals 
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("wasm/wazero-reactor: %w", err)
 	}
+	out, err := f.executeOnce(ctx, src, globals)
+	if errors.Is(err, errEngineReclaimed) {
+		// Lost a race with reclamation: the engine was resolved and then torn
+		// down before this call reached borrow. Re-resolving recompiles the
+		// module and the retry runs against a live engine.
+		//
+		// Exactly once, not a loop: a second consecutive loss would mean the
+		// engine is being reclaimed as fast as it is created, which is a defect
+		// to surface rather than to spin on. And it must be a retry rather than
+		// a returned error — script.go routes a non-permanent engine error to
+		// the "error" port, which erases the classification, so Kafka would drop
+		// the record instead of redelivering it.
+		return f.executeOnce(ctx, src, globals)
+	}
+	return out, err
+}
 
+// executeOnce resolves the engine and runs one input through it, without any
+// reclamation-race retry. Split out of Execute so the retry wrapper can call it
+// twice without duplicating the resolution-and-eval body.
+func (f *reactorFacade) executeOnce(ctx context.Context, src engine.Source, globals map[string]any) (any, error) {
 	e, err := f.host.engineForSource(ctx, src)
 	if err != nil {
 		return nil, err
