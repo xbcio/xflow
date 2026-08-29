@@ -31,12 +31,12 @@ import (
 // a genuinely configured Authenticator (control.IsConfigured) AND that
 // authenticator's AuthenticateOngoing verdict for the caller's runner ID +
 // bearer token grants a RunnerPolicy whose AllowsNamespace(declared) is true.
-// Any other case — no header, auth disabled, unknown token, or a declared
-// namespace the policy does not grant — silently keeps the principal's
-// namespace instead of failing the request outright; the identity-table
-// lookup right below is what actually authorizes the read either way, so a
-// wrong declaration merely narrows to the wrong (safe) tenant rather than
-// widening access.
+// When no verdict is obtainable at all — no header, auth disabled, unknown
+// token — the principal's own namespace is used, exactly as a request with no
+// header would be. When a verdict IS obtainable and it denies the declared
+// namespace, the request is refused outright rather than falling back: see
+// resolveNamespace's doc comment for why that fallback would re-open the very
+// gap this design closes.
 //
 // The digest in the path is globally unique across every tenant (bytes are
 // deduplicated globally, design §4.2), so the identity-table lookup this
@@ -106,40 +106,65 @@ func artifactDigestFromPath(path string) string {
 }
 
 // resolveNamespace returns the namespace to check the digest reference
-// against: the declared X-Xflow-Namespace header when it is present and
-// validated against a real runner policy, otherwise the authenticated
-// principal's namespace (namespace.FromContext, injected by authzWrap).
+// against, plus whether the request must be refused outright.
 //
-// Fail-closed by construction: every early return below falls back to the
-// principal's namespace rather than trusting the declaration, so a missing
-// header, a disabled/unconfigured runnerAuth, an auth failure, or a policy
-// that does not grant the declared namespace all degrade to the same safe
-// default instead of widening access.
-func (m *artifactModule) resolveNamespace(r *http.Request) string {
+// There are three outcomes here, not two, and collapsing the third into the
+// first is a live vulnerability rather than a style choice:
+//
+//   - No header, runnerAuth not configured, or AuthenticateOngoing cannot
+//     produce a verdict → fall back to the principal's namespace. These are
+//     the "we learned nothing about the caller's runner policy" cases: a
+//     human calling the API with a plain principal token reaches every one of
+//     them, and for such a caller the principal namespace is the only
+//     identity there is. Honouring an unbacked declaration instead would let
+//     any token-holder name any tenant.
+//
+//   - Policy is available and grants the declared namespace → use it. This is
+//     the whole point of the header: narrowing a broadly-provisioned runner
+//     down to the single namespace of the task it is running right now.
+//
+//   - Policy is available and explicitly does NOT grant the declared
+//     namespace → refuse. Falling back to the principal here looks safe
+//     ("we just ignore the header") but is the exact gap this design closes:
+//     the caller told us it is executing a task in B, and we would answer it
+//     with A's authority — the over-privileged read of design §2(a), merely
+//     re-entered through the denial path. The window is reachable in
+//     production: a runner legitimately claims a task in B, an operator then
+//     narrows or revokes that runner's policy, and every subsequent artifact
+//     fetch for the in-flight B task would silently be authorized against A.
+//     Refusing is also strictly narrower than the alternative of honouring
+//     the declaration, which would hand out B's artifacts to a runner the
+//     policy just said may not serve B.
+//
+// A declared namespace the policy denies is anomalous by construction — a
+// runner only ever declares the namespace of a task it was allowed to claim
+// (service/control's canServeNamespace gate) — so refusing costs nothing a
+// correctly-configured deployment relies on.
+func (m *artifactModule) resolveNamespace(r *http.Request) (ns string, refuse bool) {
 	principalNS := string(namespace.FromContext(r.Context()))
 
 	declared := r.Header.Get(objectstore.NamespaceHeader)
 	if declared == "" {
-		return principalNS
+		return principalNS, false
 	}
 	// A runner declaring a namespace with no runner-protocol auth configured
 	// to back it up must not be trusted — control.IsConfigured distinguishes
 	// a real Authenticator from nil/DisabledAuthenticator (see its doc
 	// comment for why a plain nil check cannot).
 	if !control.IsConfigured(m.runnerAuth) {
-		return principalNS
+		return principalNS, false
 	}
 
 	runnerID := r.Header.Get(protocol.RunnerIDHeader)
 	token := bearerToken(r)
 	policy, err := m.runnerAuth.AuthenticateOngoing(runnerID, token, httpTransportInfoFromRequest(r))
 	if err != nil {
-		return principalNS
+		return principalNS, false
 	}
 	if !policy.AllowsNamespace(namespace.Namespace(declared)) {
-		return principalNS
+		return "", true
 	}
-	return declared
+	return declared, false
 }
 
 // bearerToken extracts the token from an "Authorization: Bearer <token>"
@@ -176,7 +201,14 @@ func httpTransportInfoFromRequest(r *http.Request) control.TransportInfo {
 // branch.
 func (m *artifactModule) handleArtifact(w http.ResponseWriter, r *http.Request) {
 	digest := artifactDigestFromPath(r.URL.Path)
-	ns := m.resolveNamespace(r)
+	ns, refuse := m.resolveNamespace(r)
+	if refuse {
+		// Same 404 shape as an unreferenced digest: a distinct status here
+		// would tell a prober that its declared namespace was the thing that
+		// got rejected, which leaks the policy's shape.
+		writeFail(w, r, http.StatusNotFound, "artifact_not_found", "artifact not found")
+		return
+	}
 
 	// Authorization is an identity-table lookup, not a capability check
 	// (design §7.1). A digest referenced only by another tenant answers 404,

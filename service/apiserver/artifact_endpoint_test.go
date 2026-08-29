@@ -573,6 +573,109 @@ func TestArtifactEndpointAuthDisabledIgnoresDeclaredNamespace(t *testing.T) {
 	}
 }
 
+// stubRunnerAuthenticator is a genuinely configured control.Authenticator
+// (neither nil nor control.DisabledAuthenticator, so control.IsConfigured
+// reports true) that hands back a fixed policy. It exists to exercise the one
+// resolveNamespace branch no other test reaches: a real verdict that DENIES
+// the declared namespace.
+type stubRunnerAuthenticator struct {
+	policy control.RunnerPolicy
+}
+
+func (s stubRunnerAuthenticator) AuthenticateRegister(string, string, control.TransportInfo) (control.RunnerPolicy, error) {
+	return s.policy, nil
+}
+
+func (s stubRunnerAuthenticator) AuthenticateOngoing(string, string, control.TransportInfo) (control.RunnerPolicy, error) {
+	return s.policy, nil
+}
+
+// TestArtifactEndpointDeniedDeclarationRefusesRatherThanFallingBack pins the
+// third outcome of resolveNamespace: when runner-protocol auth IS configured
+// and its verdict is available but does NOT grant the declared namespace, the
+// request must be refused, NOT quietly re-authorized against the principal's
+// own (broader) namespace.
+//
+// Why refusing and not falling back. The digest below is referenced only by
+// tenant-a, which is also the principal's namespace, while the caller declares
+// tenant-b. Falling back to the principal would answer 200 -- handing a caller
+// that told us it is executing tenant-b's work the authority of tenant-a. That
+// is design §2(a)'s over-privileged read verbatim, merely re-entered through
+// the denial path, and it is reachable in production precisely because
+// control.Authenticator documents AuthenticateOngoing as the hook that makes
+// "revocation via policy reload take effect without forcing re-register": a
+// runner claims a task in tenant-b, an operator then narrows that runner's
+// policy, and every in-flight artifact fetch would silently be authorized
+// against tenant-a from that moment on.
+//
+// The granted subtest is the positive control. Without it an implementation
+// that refuses every declaration outright would pass the denied case, and the
+// header would be dead weight rather than the narrowing mechanism it exists
+// to be.
+//
+// Mutation target: module_artifact.go's resolveNamespace, the
+// `!policy.AllowsNamespace(...)` arm. Changing `return "", true` back to
+// `return principalNS, false` must turn the denied subtest red while leaving
+// the granted one green.
+func TestArtifactEndpointDeniedDeclarationRefusesRatherThanFallingBack(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		digestNamespace   string
+		allowedNamespaces []string
+		wantStatus        int
+	}{
+		{
+			name:              "policy denies the declared namespace",
+			digestNamespace:   "tenant-a",
+			allowedNamespaces: []string{"tenant-a"},
+			wantStatus:        http.StatusNotFound,
+		},
+		{
+			name:              "policy grants the declared namespace",
+			digestNamespace:   "tenant-b",
+			allowedNamespaces: []string{"tenant-a", "tenant-b"},
+			wantStatus:        http.StatusOK,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			as := store.NewArtifactStore(objectstore.NewFSStore(t.TempDir()), &memArtifactIndex{})
+			content := []byte("declared-namespace probe content for " + tc.name)
+			ref, err := as.Put(context.Background(), content, store.ArtifactMeta{
+				Filename:  "declared.wasm",
+				Namespace: tc.digestNamespace,
+			})
+			if err != nil {
+				t.Fatalf("Put: %v", err)
+			}
+
+			m := newArtifactModule(as)
+			// The principal is tenant-a in BOTH subtests, so the denied case
+			// cannot pass merely because the principal happened to lack access.
+			m.principalAuth = staticPrincipalAuth{principal: Principal{
+				Subject: "runner-a", Namespace: "tenant-a", Scopes: []string{"artifact.read"},
+			}}
+			m.authorizer = ScopeAuthorizer{}
+			m.audit = NewInMemoryAuditSink()
+			m.runnerAuth = stubRunnerAuthenticator{policy: control.RunnerPolicy{
+				Name:              "probe",
+				AllowedNodeTypes:  []string{"*"},
+				AllowedNamespaces: tc.allowedNamespaces,
+			}}
+			mux := http.NewServeMux()
+			m.RegisterHTTP(mux)
+
+			req := httptest.NewRequest(http.MethodGet, "/v1/artifacts/"+ref.Digest, nil)
+			req.Header.Set(objectstore.NamespaceHeader, "tenant-b")
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("GET declaring tenant-b with allowed_namespaces=%v = %d, want %d; body=%s",
+					tc.allowedNamespaces, rec.Code, tc.wantStatus, rec.Body)
+			}
+		})
+	}
+}
+
 // large enough to cross the io.Copy buffer boundary several times, since the
 // small payloads above would pass even with a single-buffer read.
 func TestArtifactEndpointServesFullBody(t *testing.T) {
