@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -39,7 +40,7 @@ func TestFSStore_MaxBytesEvictsOldestFirst(t *testing.T) {
 	const n = 5
 	keys := make([]string, n)
 	paths := make([]string, n)
-	for i := 0; i < n-1; i++ {
+	for i := range n - 1 {
 		key := shardedKey(i)
 		content := bytes.Repeat([]byte{byte(i)}, entrySize)
 		if _, err := fs.PutObject(ctx, key, bytes.NewReader(content), entrySize, objectstore.PutOptions{}); err != nil {
@@ -108,7 +109,7 @@ func TestFSStore_MaxBytesUnderBudgetKeepsEverything(t *testing.T) {
 
 	const n = 4
 	paths := make([]string, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		key := shardedKey(i)
 		content := bytes.Repeat([]byte{byte(i)}, entrySize)
 		if _, err := fs.PutObject(ctx, key, bytes.NewReader(content), entrySize, objectstore.PutOptions{}); err != nil {
@@ -138,7 +139,7 @@ func TestFSStore_MaxBytesZeroIsUnbounded(t *testing.T) {
 
 	const n = 8
 	paths := make([]string, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		key := shardedKey(i)
 		content := bytes.Repeat([]byte{byte(i)}, entrySize)
 		if _, err := fs.PutObject(ctx, key, bytes.NewReader(content), entrySize, objectstore.PutOptions{}); err != nil {
@@ -150,6 +151,193 @@ func TestFSStore_MaxBytesZeroIsUnbounded(t *testing.T) {
 	for i, p := range paths {
 		if _, err := os.Stat(p); err != nil {
 			t.Fatalf("entry %d was deleted with MaxBytes unset (0); it must be unbounded: %v", i, err)
+		}
+	}
+}
+
+// shardedKeyVaried is like shardedKey but spreads n across the shard prefix
+// (the first two path segments under "artifacts/sha256/") instead of
+// colliding on "00/00" the way shardedKey's zero-padded "%064x" does for
+// every n small enough to matter in these tests. Needed by tests that must
+// exercise MULTIPLE distinct shard directories rather than many files
+// piling into one.
+func shardedKeyVaried(n int) string {
+	hex := fmt.Sprintf("%04x%060x", n, n)
+	return "artifacts/sha256/" + hex[:2] + "/" + hex[2:4] + "/" + hex
+}
+
+// countEmptyDirs walks root and counts directories (excluding root itself)
+// that contain zero entries.
+func countEmptyDirs(t *testing.T, root string) int {
+	t.Helper()
+	count := 0
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !d.IsDir() || path == root {
+			return nil
+		}
+		entries, readErr := os.ReadDir(path)
+		if readErr != nil {
+			return readErr
+		}
+		if len(entries) == 0 {
+			count++
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", root, err)
+	}
+	return count
+}
+
+// TestFSStore_MaxBytesPrunesNowEmptyDirectories is the regression test for a
+// directory leak this feature had until this commit: sweepFSStore deleted
+// evicted FILES but never the shard directories (artifacts/sha256/xx/yy)
+// those files leave behind once empty. A workload that cycles through many
+// distinct digests -- a different xx/yy shard per digest, since the shard
+// prefix is the digest's own leading bytes -- turned that into an inode
+// count growing exactly as unboundedly as the byte count MaxBytes exists to
+// cap: measured directly, 2000 PutObject calls against a 50-file budget left
+// 2228 directories behind, 1921 of them (86%) empty.
+//
+// 32 entries land in 32 DISTINCT shard directories (shardedKeyVaried, not
+// shardedKey), with a 2-entry budget: the trigger write forces 30 of those
+// shard directories to go fully empty. The assertion is exact -- zero empty
+// directories anywhere under root -- not an upper bound with slack, so an
+// implementation that prunes some but not all levels (e.g. only the
+// leaf "yy" directory, leaving "artifacts/sha256/xx" behind once its last
+// "yy" child is gone) still fails this test.
+func TestFSStore_MaxBytesPrunesNowEmptyDirectories(t *testing.T) {
+	dir := t.TempDir()
+	fs := objectstore.NewFSStore(dir)
+	ctx := context.Background()
+	const entrySize = 1 << 10 // 1 KiB: only directory count matters here, not bytes
+
+	const n = 32
+	paths := make([]string, n)
+	for i := range n - 1 {
+		key := shardedKeyVaried(i)
+		content := bytes.Repeat([]byte{byte(i)}, entrySize)
+		if _, err := fs.PutObject(ctx, key, bytes.NewReader(content), entrySize, objectstore.PutOptions{}); err != nil {
+			t.Fatalf("seed PutObject %d: %v", i, err)
+		}
+		paths[i] = filepath.Join(dir, filepath.FromSlash(key))
+		when := time.Now().Add(time.Duration(i-n) * time.Hour)
+		if err := os.Chtimes(paths[i], when, when); err != nil {
+			t.Fatalf("chtimes %d: %v", i, err)
+		}
+	}
+
+	// Enable the cap only now, sized for exactly two of the 32 entries that
+	// will exist once the trigger Put below lands -- mirrors
+	// TestFSStore_MaxBytesEvictsOldestFirst's technique for a deterministic
+	// survivor set.
+	fs.MaxBytes = 2 * entrySize
+
+	last := n - 1
+	key := shardedKeyVaried(last)
+	content := bytes.Repeat([]byte{byte(last)}, entrySize)
+	if _, err := fs.PutObject(ctx, key, bytes.NewReader(content), entrySize, objectstore.PutOptions{}); err != nil {
+		t.Fatalf("trigger PutObject: %v", err)
+	}
+	paths[last] = filepath.Join(dir, filepath.FromSlash(key))
+
+	survivors := 0
+	for _, p := range paths {
+		if _, err := os.Stat(p); err == nil {
+			survivors++
+		}
+	}
+	if survivors != 2 {
+		t.Fatalf("%d entries survived, want exactly 2 (sanity check before asserting on directories)", survivors)
+	}
+
+	if got := countEmptyDirs(t, dir); got != 0 {
+		t.Fatalf("%d empty directories left under %s after eviction, want exactly 0 -- "+
+			"sweepFSStore deleted files but did not prune their now-empty shard directories", got, dir)
+	}
+}
+
+// TestFSStore_MaxBytesSmallerThanOneObjectStillServesIt is the regression
+// test for PutObject lying about its own contract: measured directly, an
+// 8 MiB object against a 1 MiB MaxBytes made PutObject return success and
+// then made the very next GetObject fail with ErrNotFound, because the
+// sweep PutObject triggers on its own write evicted the file that write had
+// just reported as durably written (it was the only entry, and the only
+// entry over budget is also the oldest entry).
+//
+// The budget here (half the object's size) can never be satisfied by
+// keeping the object, so this pins the accepted trade-off documented on
+// MaxBytes: the object is exempt from the sweep ITS OWN write triggers, so
+// it stays retrievable, and the store is allowed to sit over budget by that
+// one object's worth rather than silently fail to cache it.
+func TestFSStore_MaxBytesSmallerThanOneObjectStillServesIt(t *testing.T) {
+	dir := t.TempDir()
+	fs := objectstore.NewFSStore(dir)
+	const objectSize = 8 << 20 // 8 MiB
+	fs.MaxBytes = objectSize / 2
+	ctx := context.Background()
+
+	key := shardedKey(0)
+	content := bytes.Repeat([]byte{0xAB}, objectSize)
+	if _, err := fs.PutObject(ctx, key, bytes.NewReader(content), objectSize, objectstore.PutOptions{}); err != nil {
+		t.Fatalf("PutObject: %v", err)
+	}
+
+	rc, obj, err := fs.GetObject(ctx, key)
+	if err != nil {
+		t.Fatalf("GetObject immediately after PutObject: %v -- MaxBytes (%d) being smaller than the "+
+			"object (%d) must not make PutObject's own sweep evict the object it just wrote",
+			err, fs.MaxBytes, objectSize)
+	}
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !bytes.Equal(got, content) {
+		t.Fatalf("content mismatch: got %d bytes, want %d", len(got), len(content))
+	}
+	if obj.Size != objectSize {
+		t.Fatalf("Object.Size = %d, want %d", obj.Size, objectSize)
+	}
+}
+
+// TestFSStore_MaxBytesNegativeIsUnbounded pins the other half of
+// enforceBudget's "<= 0" guard: a negative MaxBytes (RunnerConfig's explicit
+// "disabled" value, distinct from zero's "use the package default" -- see
+// artifactCacheMaxBytes in sdk/xflow/runner.go) must behave exactly like the
+// zero default and never evict. This is a DIFFERENT mutation target than
+// TestFSStore_MaxBytesZeroIsUnbounded: a guard narrowed from "<= 0" to
+// "== 0" would still pass the zero test but would treat a negative MaxBytes
+// as a (nonsensical, and in Go, always-true "total <= budget" is false for
+// any positive total) budget of that magnitude, evicting everything on
+// every write.
+func TestFSStore_MaxBytesNegativeIsUnbounded(t *testing.T) {
+	dir := t.TempDir()
+	fs := objectstore.NewFSStore(dir)
+	fs.MaxBytes = -1
+	ctx := context.Background()
+	const entrySize = 1 << 20 // 1 MiB
+
+	const n = 8
+	paths := make([]string, n)
+	for i := range n {
+		key := shardedKey(i)
+		content := bytes.Repeat([]byte{byte(i)}, entrySize)
+		if _, err := fs.PutObject(ctx, key, bytes.NewReader(content), entrySize, objectstore.PutOptions{}); err != nil {
+			t.Fatalf("PutObject %d: %v", i, err)
+		}
+		paths[i] = filepath.Join(dir, filepath.FromSlash(key))
+	}
+
+	for i, p := range paths {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("entry %d was deleted with MaxBytes = -1; a negative value must be unbounded, "+
+				"exactly like the zero default: %v", i, err)
 		}
 	}
 }

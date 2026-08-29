@@ -89,7 +89,13 @@ type FSStore struct {
 	// DefaultFSStoreMaxBytes (or RunnerConfig.ArtifactCacheMaxBytes). Every
 	// other construction — including the server-side backing store the many
 	// tests in this repository use FSStore as a stand-in for — is meant to
-	// retain everything ever written, so it must keep this at zero.
+	// retain everything ever written, so it must keep this at zero. A
+	// negative value is ALSO treated as unbounded (enforceBudget's guard is
+	// "<= 0", not "== 0"): this gives an operator an explicit way to disable
+	// the cap without touching code, distinct from zero, which
+	// RunnerConfig.ArtifactCacheMaxBytes already uses to mean "unset, use the
+	// package default" — overloading that same zero to also mean "disabled"
+	// would make the two unreachable from each other.
 	//
 	// The budget is enforced by a sweep that runs synchronously at the end of
 	// a PutObject call that leaves the store over budget: PutObject is only
@@ -110,11 +116,42 @@ type FSStore struct {
 	// filesystem read. The cost of evicting the wrong one is a single extra
 	// origin fetch, never a failure.
 	//
+	// The sweep also prunes any shard directory (and, under
+	// PartitionByNamespace, any per-namespace directory) an eviction leaves
+	// empty — see pruneEmptyDirs. This is not cosmetic: keys are two-level
+	// sharded (artifacts/sha256/xx/yy/<hex>), so the last evicted digest in a
+	// shard leaves up to four empty directory levels behind, and a workload
+	// that cycles through many distinct digests turns that into an inode
+	// count with the same unbounded-growth shape MaxBytes exists to close
+	// for bytes (bounded in practice by ~65536 possible shard directories,
+	// but the per-namespace directories under PartitionByNamespace are not
+	// similarly bounded — see the global-budget rationale below). An earlier
+	// version of this comment claimed the walk's cost is "naturally bounded
+	// by the very budget it enforces" and stopped there, which is true for
+	// file BYTES but was never true for directory COUNT: 2000 PutObject
+	// calls against a 50-file budget measured 2228 leftover directories,
+	// 1921 of them (86%) empty, because the sweep deleted files but never
+	// their now-empty parents. Recorded here rather than quietly rewritten,
+	// since the mistake was asserting an unmeasured fact, not just missing a
+	// case.
+	//
+	// If MaxBytes is smaller than a single object (up to ~16 MiB, see
+	// store.MaxArtifactBytes), PutObject still writes and returns success —
+	// but the sweep that write triggers must not evict the file that write
+	// just created (sweepFSStore's exempt parameter enforces this).
+	// Otherwise PutObject would report success for a key that GetObject
+	// immediately fails to find: a capacity limit masquerading as a lie
+	// about the store's own contract. The accepted cost is that the
+	// directory can exceed MaxBytes by up to one object's worth at any
+	// instant — the exemption only protects the object THIS PutObject just
+	// wrote; the next PutObject's sweep is free to evict it like anything
+	// else once it is no longer the newest thing on disk.
+	//
 	// No in-memory ledger is kept across Puts or process restarts: each sweep
 	// recomputes the total by walking root fresh. That walk's cost is bounded
-	// by the very budget it enforces (the tree it walks never exceeds
-	// MaxBytes for long), so there is nothing to recover after a restart and
-	// no ledger that can go stale.
+	// by the very budget it enforces (the tree's file bytes never exceed
+	// MaxBytes by more than one object for long — see above), so there is
+	// nothing to recover after a restart and no ledger that can go stale.
 	//
 	// When PartitionByNamespace is also set, the budget applies GLOBALLY
 	// across every namespace's partition, not per namespace: the number of
@@ -171,7 +208,7 @@ func (s *FSStore) PutObject(ctx context.Context, key string, body io.Reader, siz
 	//
 	// The ".tmp-" prefix is also what enforceBudget's sweep uses to recognise
 	// an in-flight write of ITS OWN and leave it alone (see fsStoreEntries).
-	tmp, err := os.CreateTemp(dir, ".tmp-*")
+	tmp, err := createTempInDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("objectstore/fs: create temp: %w", err)
 	}
@@ -202,8 +239,10 @@ func (s *FSStore) PutObject(ctx context.Context, key string, body io.Reader, siz
 
 	// Enforce the cap, if any, after the write is durable. Synchronous and on
 	// this goroutine — see MaxBytes's doc comment for why that is the right
-	// call here (unlike the wasm compilation cache's async sweep).
-	s.enforceBudget()
+	// call here (unlike the wasm compilation cache's async sweep). path is
+	// passed through so the sweep can exempt the file this call just wrote
+	// from its own eviction pass — see sweepFSStore's exempt parameter.
+	s.enforceBudget(path)
 
 	return &Object{
 		Key:          key,
@@ -315,10 +354,11 @@ func digestFromKey(key string) string {
 }
 
 // enforceBudget is a no-op unless MaxBytes is set, in which case it sweeps
-// root down to that budget. See MaxBytes's doc comment for the full
-// rationale (why synchronous, why global across namespace partitions, why no
-// ledger).
-func (s *FSStore) enforceBudget() {
+// root down to that budget. justWritten is the absolute path PutObject just
+// finished writing (as returned by resolve); it is passed through to
+// sweepFSStore so this sweep never evicts the very file that triggered it —
+// see MaxBytes's doc comment for why that matters and what it costs.
+func (s *FSStore) enforceBudget(justWritten string) {
 	if s.MaxBytes <= 0 {
 		return
 	}
@@ -333,7 +373,7 @@ func (s *FSStore) enforceBudget() {
 	}
 	defer s.sweeping.Store(false)
 
-	freed, remaining, err := sweepFSStore(s.root, s.MaxBytes)
+	freed, remaining, err := sweepFSStore(s.root, s.MaxBytes, justWritten)
 	switch {
 	case err != nil:
 		slog.Warn("objectstore/fs: cache sweep failed; the directory may grow unbounded",
@@ -401,7 +441,15 @@ func fsStoreEntries(root string) (out []fsStoreEntry, total int64, err error) {
 // gives it 24h resolution; many container images mount noatime, where it
 // never moves). The cost of evicting the wrong entry is one extra origin
 // fetch on its next use, never a failure.
-func sweepFSStore(root string, budget int64) (freed, remaining int64, err error) {
+//
+// exempt, when non-empty, is a path that must never be removed by this call
+// even if it sorts as the oldest entry (e.g. tied mtimes) or the ONLY entry
+// over budget. PutObject passes the file it just wrote: without this, a
+// MaxBytes smaller than a single object would make PutObject's own trigger
+// sweep immediately delete the file PutObject just reported as successfully
+// written, so the very next GetObject would 404 on a key PutObject swore
+// existed. See MaxBytes's doc comment for the cost this accepts.
+func sweepFSStore(root string, budget int64, exempt string) (freed, remaining int64, err error) {
 	entries, total, err := fsStoreEntries(root)
 	if err != nil {
 		return 0, 0, err
@@ -414,6 +462,14 @@ func sweepFSStore(root string, budget int64) (freed, remaining int64, err error)
 	for _, e := range entries {
 		if total <= budget {
 			break
+		}
+		if e.path == exempt {
+			// Never evict the object this sweep's own PutObject just wrote —
+			// see the exempt parameter's doc comment above. It remains on
+			// disk (and counted in total) even though the store stays over
+			// budget as a result; a LATER PutObject's sweep is free to
+			// evict it once something newer exists.
+			continue
 		}
 		switch err := os.Remove(e.path); {
 		case err == nil:
@@ -431,6 +487,78 @@ func sweepFSStore(root string, budget int64) (freed, remaining int64, err error)
 			continue
 		}
 		total -= e.size
+		// The file is gone (removed just now, or already gone before this
+		// call); its parent shard directory (and, under
+		// PartitionByNamespace, the per-namespace directory above that) may
+		// now be empty. Prune it so the sweep bounds directory count the
+		// same way it bounds bytes — see pruneEmptyDirs.
+		pruneEmptyDirs(root, filepath.Dir(e.path))
 	}
 	return freed, total, nil
+}
+
+// pruneEmptyDirs removes dir, then each ancestor of dir in turn, for as long
+// as each is empty and strictly inside root. Called after evicting a file, to
+// reclaim the shard directories (artifacts/sha256/xx/yy, and under
+// PartitionByNamespace, ns/<namespace>) that a plain os.Remove of the file
+// itself leaves behind. root itself is never removed, and the walk never
+// climbs above it: dir is checked against root before every attempt, so a
+// caller cannot accidentally prune outside the store's own tree even if the
+// path shape ever changes.
+//
+// Concurrency, the case this function exists to be safe under: os.Remove
+// only succeeds on an EMPTY directory. A shard directory another goroutine's
+// PutObject is actively using — its MkdirAll has run and its own file
+// already lives there, or a sibling ".tmp-*" write is still in progress in
+// it — is therefore never removed here; ENOTEMPTY simply stops the climb
+// (which is also the correct stopping point: if this level is non-empty,
+// every ancestor above it contains that same non-empty content, so there is
+// nothing higher up worth trying either).
+//
+// The one race this reasoning does NOT cover on its own: a concurrent
+// PutObject's MkdirAll can succeed (directory now exists and is briefly
+// EMPTY, because that PutObject has not yet created its own temp file in
+// it) in the instant right before this function's os.Remove runs on that
+// same directory. Removing a directory that momentarily looks empty but is
+// about to be written into is exactly what os.Remove is FOR (it has no way
+// to know the caller intends to use it a moment later), so this is a real
+// TOCTOU window, not a hypothetical one. It is closed on the writer's side
+// instead: createTempInDir (used by PutObject) recreates a vanished
+// directory and retries its CreateTemp exactly once, so a PutObject that
+// loses this race recovers rather than failing.
+func pruneEmptyDirs(root, dir string) {
+	root = filepath.Clean(root)
+	for {
+		dir = filepath.Clean(dir)
+		if dir == root || !strings.HasPrefix(dir, root+string(filepath.Separator)) {
+			return
+		}
+		if err := os.Remove(dir); err != nil {
+			return // non-empty, already gone, or permission denied — stop climbing
+		}
+		dir = filepath.Dir(dir)
+	}
+}
+
+// createTempInDir creates a temp file in dir (PutObject's write target
+// directory), retrying MkdirAll+CreateTemp exactly once if dir has vanished.
+//
+// The only way dir can vanish between PutObject's own MkdirAll and this call
+// is a concurrent eviction sweep's pruneEmptyDirs racing this write and
+// winning — see pruneEmptyDirs's doc comment for why that race is real.
+// Recreating the directory and retrying once closes that window on this
+// side rather than leaving PutObject to fail a write over a directory this
+// function is entitled to remake; a second disappearance (which would mean
+// something more persistent than a losing race, e.g. the whole root being
+// removed out from under the store) is returned as the original error
+// rather than retried again.
+func createTempInDir(dir string) (*os.File, error) {
+	tmp, err := os.CreateTemp(dir, ".tmp-*")
+	if err == nil || !errors.Is(err, os.ErrNotExist) {
+		return tmp, err
+	}
+	if mkErr := os.MkdirAll(dir, 0o755); mkErr != nil {
+		return nil, err
+	}
+	return os.CreateTemp(dir, ".tmp-*")
 }

@@ -274,6 +274,50 @@ func TestRunCommandToleratesMalformedArtifactCacheMaxBytes(t *testing.T) {
 	runCommand(t, "run", "--server", "http://server:8080")
 }
 
+// A negative XFLOW_ARTIFACT_CACHE_MAX_BYTES is NOT a malformed value: unlike
+// "not-a-number", strconv.ParseInt("-1", ...) succeeds, so
+// artifactCacheMaxBytesFromEnv must pass it through unchanged rather than
+// folding it into the same "fall back to 0" branch as a parse failure.
+// RunnerConfig.ArtifactCacheMaxBytes documents a negative value as an
+// explicit, distinct-from-zero signal to disable the cap entirely (see
+// sdk/xflow/runner.go's artifactCacheMaxBytes), so an operator who sets this
+// env var to -1 needs it to actually reach that path rather than silently
+// becoming "use the default cap" the way a typo does.
+func TestRunCommandPropagatesNegativeArtifactCacheMaxBytesToTheSDK(t *testing.T) {
+	t.Setenv("XFLOW_ARTIFACT_CACHE_MAX_BYTES", "-1")
+
+	restore := stubRunnerServiceFactory(func(cfg xflowsdk.RunnerConfig) error {
+		if cfg.ArtifactCacheMaxBytes != -1 {
+			t.Errorf("ArtifactCacheMaxBytes = %d, want -1 -- a negative value is a valid, "+
+				"distinct-from-zero setting (explicitly unbounded), not a parse failure to fail open from",
+				cfg.ArtifactCacheMaxBytes)
+		}
+		return nil
+	})
+	defer restore()
+
+	runCommand(t, "run", "--server", "http://server:8080")
+}
+
+// An XFLOW_ARTIFACT_CACHE_MAX_BYTES value outside int64's range IS a parse
+// failure (strconv.ParseInt returns strconv.ErrRange), and must take the same
+// fail-open path as "not-a-number" above rather than wrapping around to some
+// other in-range value or taking the runner down.
+func TestRunCommandToleratesOverflowingArtifactCacheMaxBytes(t *testing.T) {
+	t.Setenv("XFLOW_ARTIFACT_CACHE_MAX_BYTES", "99999999999999999999999999")
+
+	restore := stubRunnerServiceFactory(func(cfg xflowsdk.RunnerConfig) error {
+		if cfg.ArtifactCacheMaxBytes != 0 {
+			t.Errorf("ArtifactCacheMaxBytes = %d, want 0 (fail open to the SDK default) for a value "+
+				"outside int64's range", cfg.ArtifactCacheMaxBytes)
+		}
+		return nil
+	})
+	defer restore()
+
+	runCommand(t, "run", "--server", "http://server:8080")
+}
+
 // --metrics-addr never reaches xflowsdk.RunnerConfig — runRunner opens the
 // scrape listener itself, unconditionally on cfg.metricsAddr, so
 // stubRunnerServiceFactory's xflowsdk.RunnerConfig has no field to observe it
