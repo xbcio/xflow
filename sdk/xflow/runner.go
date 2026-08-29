@@ -890,9 +890,21 @@ func newRunnerArtifactResolver(cfg RunnerConfig) (func(ctx context.Context, dige
 		BaseURL: runnerSeedBaseURL(cfg),
 		Token:   cfg.Token,
 		Client:  artifactClient,
+		// RunnerID lets the server resolve this runner's RunnerPolicy when
+		// validating the X-Xflow-Namespace declaration HTTPStore attaches to
+		// every request (see HTTPStore.declareNamespace and
+		// module_artifact.go's resolveNamespace). Empty is valid: it matches
+		// RunnerConfig.RunnerID's own "empty lets the server generate one"
+		// contract, and simply means no runner ID is declared.
+		RunnerID: cfg.RunnerID,
 	}
-	readThrough := objectstore.NewReadThrough(
-		objectstore.NewFSStore(runnerArtifactCacheDir(cfg)), origin)
+	// PartitionByNamespace: this is the runner-side read-through cache, the one
+	// FSStore use site where a cache hit for one namespace's digest must never
+	// be handed to another namespace's task on the same runner. See
+	// FSStore.PartitionByNamespace's doc comment.
+	cache := objectstore.NewFSStore(runnerArtifactCacheDir(cfg))
+	cache.PartitionByNamespace = true
+	readThrough := objectstore.NewReadThrough(cache, origin)
 	artifactStore := store.NewArtifactStore(readThrough, nil)
 	return func(ctx context.Context, digest string) ([]byte, error) {
 		rc, _, err := artifactStore.Open(ctx, digest)
