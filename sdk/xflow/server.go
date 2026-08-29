@@ -590,3 +590,61 @@ func (s *Server) UpdateSupply(ctx context.Context, ns, name string, content []by
 	}, nil) // nil ifMatch = unconditional write
 	return err
 }
+
+// GetSupply reads a supply's current content, revision, and content hash.
+//
+// The content comes back as PLAINTEXT: the at-rest layer decrypts on read
+// (store/sqlstore/supply.go:47), and the encryption on GET /v1/supplies/{name}
+// is transport encryption for runners, not storage encryption. Supply content
+// can carry credentials — never log rec.Content.
+//
+// ns == "" is normalized to the default namespace, matching UpdateSupply. The
+// two must agree: a write path that folds "" into default while the read path
+// does not makes "write then read back with ns=\"\"" return not-found forever.
+//
+// Returns store.ErrNotFound when the namespace/name pair has never been written.
+func (s *Server) GetSupply(ctx context.Context, ns, name string) (*store.SupplyResource, error) {
+	if s.supplies == nil {
+		return nil, errors.New("xflow: supply store not configured (ServerConfig.Store is nil)")
+	}
+	if name == "" {
+		return nil, errors.New("xflow: supply name must not be empty")
+	}
+	if ns == "" {
+		ns = string(namespace.Default)
+	}
+	return s.supplies.GetSupply(ctx, ns, name)
+}
+
+// UpdateSupplyIfMatch writes supply content under optimistic concurrency and
+// returns the resulting record.
+//
+// ifMatch is the revision the caller believes is current, as read from
+// GetSupply. A mismatch returns store.ErrRevisionConflict and leaves the stored
+// content untouched. ifMatch == 0 means "create only": the write succeeds only
+// when the supply does not exist yet. There is deliberately no "unconditional"
+// value here — UpdateSupply is that entry point, and an unconditional write
+// spelled as a zero would turn a stale read into a silent overwrite.
+//
+// This is the entry point for pointer flips (a supply whose content names an
+// artifact digest): two operators publishing concurrently must not silently
+// lose one of the two publishes.
+func (s *Server) UpdateSupplyIfMatch(ctx context.Context, ns, name string, content []byte, ifMatch uint64) (*store.SupplyResource, error) {
+	if s.supplies == nil {
+		return nil, errors.New("xflow: supply store not configured (ServerConfig.Store is nil)")
+	}
+	if name == "" {
+		return nil, errors.New("xflow: supply name must not be empty")
+	}
+	if ns == "" {
+		ns = string(namespace.Default)
+	}
+	return s.supplies.PutSupply(ctx, &store.SupplyResource{
+		Namespace:   ns,
+		Name:        name,
+		Content:     content,
+		ContentType: "application/json",
+		UpdatedAt:   time.Now(),
+		UpdatedBy:   "sdk",
+	}, &ifMatch)
+}
