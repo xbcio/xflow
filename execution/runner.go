@@ -128,6 +128,18 @@ func (r *Runner) Execute(ctx context.Context, lease *engine.TaskLease) (engine.T
 	if r.pool != nil {
 		ctx = types.WithResourcePool(ctx, r.pool)
 	}
+	// Inject the lease's authoritative namespace into ctx before anything below
+	// reads namespace.FromContext(ctx). Without this, SetNamespace (below) and
+	// every artifact/supply fetch made through ctx during this task's execution
+	// silently fall back to namespace.Default regardless of which namespace the
+	// task actually belongs to -- the runner-artifact-namespace-authorization
+	// design's §5.1 fix. lease.Namespace is populated by the control plane at
+	// submit/recovery time (engine/types.go); it can be empty for lease shapes
+	// that predate that field or that never carry one, so this is additive
+	// only, never a downgrade to Default when a real value is already on ctx.
+	if lease.Namespace != "" {
+		ctx = namespace.WithNamespace(ctx, lease.Namespace)
+	}
 	// Apply the credential resolver to the input the handler sees. This covers
 	// both the non-suspending Execute path and the suspending path
 	// (OnResume/PrepareSuspend). The resolver is a pure, idempotent closure;
