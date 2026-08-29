@@ -219,6 +219,10 @@ func (c *Core) renewLease(ctx context.Context, req protocol.RenewLeaseRequest, i
 	if req.RunnerID == "" || req.SessionID == "" {
 		return protocol.RenewLeaseResponse{}, ErrRunnerSessionRequired
 	}
+	_, authErr := c.authn().AuthenticateOngoing(req.RunnerID, req.AuthToken, info)
+	if err := c.authDeny(ctx, req.RunnerID, req.AuthToken, "renew_lease", info, authErr); err != nil {
+		return protocol.RenewLeaseResponse{}, err
+	}
 	if err := c.runners.ValidateSession(ctx, req.RunnerID, req.SessionID); err != nil {
 		return protocol.RenewLeaseResponse{}, normalizeRunnerError(err, c.logger, "renew_lease")
 	}
