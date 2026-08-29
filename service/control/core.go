@@ -217,14 +217,35 @@ func (c *Core) register(ctx context.Context, req protocol.RegisterRunnerRequest,
 	if req.RunnerID == "" || req.Concurrency <= 0 {
 		return protocol.RegisterRunnerResponse{}, ErrConcurrencyRequired
 	}
-	for _, t := range namespaceIDs(req.Namespaces) {
-		if err := namespace.Validate(t); err != nil {
-			return protocol.RegisterRunnerResponse{}, fmt.Errorf("%w: %v", ErrInvalidNamespace, err)
-		}
-	}
 	policy, authErr := c.authn().AuthenticateRegister(req.RunnerID, req.AuthToken, info)
 	if err := c.authDeny(ctx, req.RunnerID, req.AuthToken, "register", info, authErr); err != nil {
 		return protocol.RegisterRunnerResponse{}, err
+	}
+	// Shape first, then entitlement. A runner's namespace membership is decided
+	// by the server's policy, never by what the runner declares: the declared
+	// value is stored verbatim and ClaimForRunner filters task dispatch by it,
+	// so an unchecked declaration decides which namespace's work this runner is
+	// handed.
+	requested := namespaceIDs(req.Namespaces)
+	for _, t := range requested {
+		if err := namespace.Validate(t); err != nil {
+			return protocol.RegisterRunnerResponse{}, fmt.Errorf("%w: %v", ErrInvalidNamespace, err)
+		}
+		if !policy.AllowsNamespace(t) {
+			// Namespace is the authorization boundary in this system, so a
+			// denial on it must be observable. It deliberately does not go
+			// through authDeny: that collapses every error into
+			// ErrUnauthenticated, and "authenticated but not entitled" is a
+			// different answer than "not authenticated" — callers should be
+			// able to tell them apart.
+			c.observeAuth(ctx, "register", "deny_namespace")
+			if c.logger != nil {
+				c.logger.Error("auth_denied",
+					"op", "register", "reason", "namespace_not_granted",
+					"runner", req.RunnerID, "policy", policy.Name, "namespace", string(t))
+			}
+			return protocol.RegisterRunnerResponse{}, fmt.Errorf("%w: policy %q does not grant namespace %q", ErrAuthNamespaceDenied, policy.Name, t)
+		}
 	}
 	session, err := c.runners.Register(ctx, RegisterRunnerRequest{
 		RunnerID:     req.RunnerID,
@@ -232,7 +253,7 @@ func (c *Core) register(ctx context.Context, req protocol.RegisterRunnerRequest,
 		Labels:       req.Labels,
 		Capabilities: req.Capabilities,
 		Policy:       policy,
-		Namespaces:   namespaceIDs(req.Namespaces),
+		Namespaces:   requested,
 		Now:          time.Now(),
 	})
 	if err != nil {

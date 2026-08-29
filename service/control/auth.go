@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 
+	"github.com/xbcio/xflow/namespace"
 	"gopkg.in/yaml.v3"
 )
 
@@ -21,6 +22,14 @@ var (
 	ErrAuthUnknownToken   = errors.New("unknown auth token")
 	ErrAuthIDPrefixDenied = errors.New("runner id does not match policy prefix")
 	ErrAuthMTLSMismatch   = errors.New("mtls subject does not match policy")
+	// ErrAuthNamespaceDenied is returned when the runner's policy does not
+	// grant it membership in a namespace it declared at register time.
+	// Namespace is the sole authorization boundary in this system (it is what
+	// ClaimForRunner filters task dispatch by), so this is a distinct
+	// sentinel from the identity-proof errors above rather than a reuse of
+	// ErrAuthIDPrefixDenied or ErrAuthUnknownToken: "who you are" and "what
+	// you may join" are different questions with different remediations.
+	ErrAuthNamespaceDenied = errors.New("runner not authorized for requested namespace")
 )
 
 // TransportInfo carries transport-layer identity extracted by the HTTP or
@@ -43,6 +52,12 @@ type RunnerPolicy struct {
 	// AllowedNodeTypes is the set of node types this runner may execute.
 	// A single "*" entry means all node types.
 	AllowedNodeTypes []string
+	// AllowedNamespaces is the set of namespaces this runner may join. A single
+	// "*" entry means all namespaces. An empty set means the default namespace
+	// only — the same meaning canServeNamespace already gives an empty set, so
+	// one "empty" cannot mean "everything" in the policy layer and "default
+	// only" in the filter layer.
+	AllowedNamespaces []string
 }
 
 // Allows reports whether the policy permits the given node type. Called from
@@ -50,6 +65,24 @@ type RunnerPolicy struct {
 func (p RunnerPolicy) Allows(nodeType string) bool {
 	for _, t := range p.AllowedNodeTypes {
 		if t == "*" || t == nodeType {
+			return true
+		}
+	}
+	return false
+}
+
+// AllowsNamespace reports whether the policy permits joining ns. An empty
+// AllowedNamespaces means the default namespace only, matching
+// canServeNamespace's treatment of an empty namespace set.
+func (p RunnerPolicy) AllowsNamespace(ns namespace.Namespace) bool {
+	if ns == "" {
+		ns = namespace.Default
+	}
+	if len(p.AllowedNamespaces) == 0 {
+		return ns == namespace.Default
+	}
+	for _, a := range p.AllowedNamespaces {
+		if a == "*" || namespace.Namespace(a) == ns {
 			return true
 		}
 	}
@@ -71,7 +104,7 @@ type DisabledAuthenticator struct{}
 
 // permissivePolicy accepts every node type. Only used by DisabledAuthenticator
 // to keep the dispatcher path unchanged when auth is off.
-var permissivePolicy = RunnerPolicy{Name: "auth-disabled", AllowedNodeTypes: []string{"*"}}
+var permissivePolicy = RunnerPolicy{Name: "auth-disabled", AllowedNodeTypes: []string{"*"}, AllowedNamespaces: []string{"*"}}
 
 func (DisabledAuthenticator) AuthenticateRegister(string, string, TransportInfo) (RunnerPolicy, error) {
 	return permissivePolicy, nil
@@ -82,12 +115,13 @@ func (DisabledAuthenticator) AuthenticateOngoing(string, string, TransportInfo) 
 
 // PolicyEntry is one YAML runners.yaml entry after env / file expansion.
 type PolicyEntry struct {
-	Name             string   `yaml:"name,omitempty"`
-	IDPrefix         string   `yaml:"id_prefix"`
-	Token            string   `yaml:"token,omitempty"`
-	TokenFile        string   `yaml:"token_file,omitempty"`
-	MTLSSubject      string   `yaml:"mtls_subject,omitempty"`
-	AllowedNodeTypes []string `yaml:"allowed_node_types"`
+	Name              string   `yaml:"name,omitempty"`
+	IDPrefix          string   `yaml:"id_prefix"`
+	Token             string   `yaml:"token,omitempty"`
+	TokenFile         string   `yaml:"token_file,omitempty"`
+	MTLSSubject       string   `yaml:"mtls_subject,omitempty"`
+	AllowedNodeTypes  []string `yaml:"allowed_node_types"`
+	AllowedNamespaces []string `yaml:"allowed_namespaces,omitempty"`
 }
 
 // PolicyConfig is the parsed structure of runners.yaml. Kept as a plain
@@ -116,12 +150,13 @@ type policySnapshot struct {
 }
 
 type resolvedEntry struct {
-	name         string
-	idPrefix     string
-	tokenHash    [32]byte // sha256(token); empty [32]byte{} means no token bound
-	hasToken     bool
-	mtlsSubject  string   // lowercased for case-insensitive compare
-	allowedTypes []string // stored verbatim; matched by RunnerPolicy.Allows
+	name              string
+	idPrefix          string
+	tokenHash         [32]byte // sha256(token); empty [32]byte{} means no token bound
+	hasToken          bool
+	mtlsSubject       string   // lowercased for case-insensitive compare
+	allowedTypes      []string // stored verbatim; matched by RunnerPolicy.Allows
+	allowedNamespaces []string // stored verbatim; matched by RunnerPolicy.AllowsNamespace
 }
 
 // NewFilePolicyStore reads and parses a runners.yaml. The store starts empty
@@ -192,10 +227,11 @@ func resolveConfig(cfg PolicyConfig) (*policySnapshot, error) {
 			return nil, fmt.Errorf("runners[%d]: id_prefix is required", i)
 		}
 		re := resolvedEntry{
-			name:         r.Name,
-			idPrefix:     r.IDPrefix,
-			mtlsSubject:  strings.ToLower(r.MTLSSubject),
-			allowedTypes: append([]string(nil), r.AllowedNodeTypes...),
+			name:              r.Name,
+			idPrefix:          r.IDPrefix,
+			mtlsSubject:       strings.ToLower(r.MTLSSubject),
+			allowedTypes:      append([]string(nil), r.AllowedNodeTypes...),
+			allowedNamespaces: append([]string(nil), r.AllowedNamespaces...),
 		}
 		if re.name == "" {
 			re.name = r.IDPrefix
@@ -299,9 +335,10 @@ func (s *FilePolicyStore) authenticate(runnerID, token string, info TransportInf
 			continue
 		}
 		return RunnerPolicy{
-			Name:             e.name,
-			IDPrefix:         e.idPrefix,
-			AllowedNodeTypes: append([]string(nil), e.allowedTypes...),
+			Name:              e.name,
+			IDPrefix:          e.idPrefix,
+			AllowedNodeTypes:  append([]string(nil), e.allowedTypes...),
+			AllowedNamespaces: append([]string(nil), e.allowedNamespaces...),
 		}, nil
 	}
 	if idPrefixDenied {
