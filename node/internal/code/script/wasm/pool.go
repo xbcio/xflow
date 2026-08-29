@@ -381,6 +381,12 @@ type activePool struct {
 	drainTimeout time.Duration
 }
 
+// inFlight reports how many of this pool's instances are currently borrowed.
+// Derived rather than counted: capacity equals the borrowed set plus the free
+// channel by construction (see borrow/giveBack), so a separate counter would be
+// a second source of truth that can only disagree with this one.
+func (p *activePool) inFlight() int { return p.size - len(p.free) }
+
 // reactorEngine owns the wazero runtime handle, the compiled module, and the
 // currently-active instance pool for one wasm module. Config switches replace
 // active atomically; borrowers always read the live pool via active.Load().
@@ -412,6 +418,13 @@ type reactorEngine struct {
 	// have used the engine. atomic.Int64 rather than a plain int64 only because
 	// closeForTest and the drain path read it outside the lock in assertions.
 	lastUsed atomic.Int64
+
+	// reclaimed marks an engine the host has removed from its maps. It exists so
+	// borrow can tell "this engine was torn down under me" apart from "this
+	// engine was never configured": both leave active nil, but the first is a
+	// retryable race (re-resolve and the module recompiles) while the second is
+	// a real misconfiguration that retrying would only loop on.
+	reclaimed atomic.Bool
 
 	// sourceFailures counts consecutive source failures since the last successful
 	// swap. Reset to zero on a successful swap.

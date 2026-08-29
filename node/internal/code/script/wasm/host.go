@@ -28,16 +28,27 @@ type reactorHost struct {
 	engines map[string]*reactorEngine // keyed by module sha256
 
 	// engineList is a snapshot of engines' values, republished under mu on every
-	// insert. It exists so the per-message path can walk every engine without
-	// taking mu: reportConfigAge runs on every Execute, and observer.go's
-	// measurement (69.5 ns for a guarded read against 2.2 ns for an atomic load
-	// at 8-way parallelism) is exactly why that path must stay lock-free.
+	// insert AND on every reclaim. It exists so the per-message path can walk
+	// every engine without taking mu: reportConfigAge runs on every Execute, and
+	// observer.go's measurement (69.5 ns for a guarded read against 2.2 ns for an
+	// atomic load at 8-way parallelism) is exactly why that path must stay
+	// lock-free.
 	//
-	// Safe because engines is insert-only — there is one write site
-	// (engineForKey) and no delete anywhere — so a reader holding a stale
-	// snapshot sees a subset, never a freed engine. A module missing from a
-	// snapshot for the microseconds before republication cannot hide a stale
-	// source: it has just been created, so its age is zero either way.
+	// engines is no longer insert-only, so the old safety argument ("a reader
+	// holding a stale snapshot sees a subset, never a freed engine") no longer
+	// carries itself. What replaces it: Go has no free. A reclaimed engine stays
+	// a valid *reactorEngine for as long as any snapshot holds it, and every
+	// field a snapshot reader touches — ConfigAge via lastSwapAt, Generation and
+	// rules via active — reads an atomic that a reclaimed engine leaves in a
+	// coherent terminal state (active nil, lastSwapAt frozen). The single
+	// non-memory resource, the compiled module, is closed only after the engine
+	// is out of both engines and a freshly republished engineList, so no reader
+	// can reach a cm after Close.
+	//
+	// A module missing from a snapshot for the microseconds before republication
+	// cannot hide a stale source: on insert it has just been created, so its age
+	// is zero either way; on reclaim it is going away and its age stops being a
+	// fact about anything serving traffic.
 	engineList atomic.Pointer[[]*reactorEngine]
 
 	// codeCache fronts engines for callers that supply no digest, keyed by the
@@ -573,4 +584,74 @@ func (h *reactorHost) isSourceDriven(code string) bool {
 func (h *reactorHost) sourceDrivenLocked(key string) bool {
 	_, ok := h.sourceDriven[key]
 	return ok
+}
+
+// reclaimIdleEngines removes every engine that no resolution path has handed
+// out for at least ttl, and returns how many it removed. A ttl of zero disables
+// reclamation entirely and returns 0.
+//
+// Idle duration is the only criterion available. artifact_digest is
+// boundary-evaluated per item, so a digest that looks retired can come back on
+// the next message via a rollback; "this module will never be asked for again"
+// is not a fact this process can learn. Reclamation therefore shrinks the
+// resident set, it does not close the rollback window — which is why §4.2's
+// registration key stays the digest.
+//
+// What it drops is the COMPILED ARTIFACT: the engines entry, the engineList
+// snapshot slot, the codeCache memo, the instance pool, the wazero
+// CompiledModule. What it deliberately keeps is INTENT: the sourceDriven marker
+// and any supply consumer registration. See the two rulings in this change's
+// plan — keeping them is the fail-closed direction, and the rebuild path
+// (script.ensureWasmSupplyConsumers) already restores everything else on the
+// next message.
+func (h *reactorHost) reclaimIdleEngines(ctx context.Context, ttl time.Duration) int {
+	if h == nil || ttl <= 0 {
+		return 0
+	}
+	cutoff := time.Now().Add(-ttl).UnixNano()
+
+	h.mu.Lock()
+	var doomed []*reactorEngine
+	for key, e := range h.engines {
+		if e.lastUsed.Load() > cutoff {
+			continue
+		}
+		// A borrowed instance means a message is mid-eval on this engine. The
+		// lastUsed stamp is taken under this same lock at lookup time, so the
+		// only gap it leaves is between a caller receiving the engine and
+		// reaching borrow — microseconds against a ttl of minutes. This check
+		// closes that gap for anything already past borrow rather than leaving
+		// it to the retry in reactor.go.
+		if p := e.active.Load(); p != nil && p.inFlight() > 0 {
+			continue
+		}
+		delete(h.engines, key)
+		e.reclaimed.Store(true)
+		doomed = append(doomed, e)
+	}
+	if len(doomed) > 0 {
+		h.republishEngineListLocked()
+		// Purge rather than evict per key: codeCache is keyed by the base64 code
+		// string, and finding the entries that point at a doomed engine would
+		// mean a full-length compare against every resident key (198 µs each, see
+		// codeCache's comment) while holding h.mu. The whole cache is a memo —
+		// dropping it costs the next inline-code caller one decode+hash, and
+		// reclamation is a once-per-ttl event.
+		h.codeCache.Purge()
+	}
+	h.mu.Unlock()
+
+	// Teardown outside the lock: drainPool waits (bounded) and cm.Close is slow,
+	// and neither may block a lookup. Safe to do unlocked precisely because the
+	// engines are already unreachable — out of engines, out of engineList, out of
+	// codeCache — so nothing can hand one to a new caller after this point.
+	for _, e := range doomed {
+		if old := e.active.Swap(nil); old != nil {
+			e.drainPool(ctx, old)
+		}
+		if e.cm != nil {
+			_ = e.cm.Close(ctx)
+		}
+	}
+	return len(doomed)
 }
