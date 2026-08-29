@@ -103,6 +103,32 @@ func TestSupplyMetricsOnInstanceCountAndRecycled(t *testing.T) {
 	}
 }
 
+// OnEngineCount must publish the resident-engine gauge under the exact metric
+// name and label shape xflow_wasm_engine_total is documented to carry. The
+// literal string here, not a constant reference, is the point: asserting
+// against metricWasmEngineTotal would let a typo in BOTH the constant and this
+// test go green together, which is exactly the shape review found had zero
+// coverage before this test existed.
+//
+// namespace="default" is also asserted literally, not skipped, because it
+// pins down the caveat OnEngineCount's doc comment makes: this call is always
+// driven by sweepEnginesAsync's context.Background() in production, which
+// carries no namespace, so the label is always the withNamespace fallback —
+// never a real per-namespace value. A test that omitted the namespace
+// assertion would hide that fact instead of making it visible.
+func TestSupplyMetricsOnEngineCount(t *testing.T) {
+	m := New()
+	s := NewSupplyMetrics(m)
+	ctx := context.Background()
+
+	s.OnEngineCount(ctx, 3)
+
+	body := gatherMetricsBody(t, m)
+	if !strings.Contains(body, `xflow_wasm_engine_total{namespace="default"} 3`) {
+		t.Fatalf("metrics body missing xflow_wasm_engine_total:\n%s", body)
+	}
+}
+
 func TestSupplyMetricsOnBorrowWaitAndModuleCompile(t *testing.T) {
 	m := New()
 	s := NewSupplyMetrics(m)

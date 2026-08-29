@@ -20,14 +20,15 @@ import (
 // Read the slices through the accessors below, never directly — a bare
 // len(rec.recycled) in a test body is the same race read from the other side.
 type recordingObserver struct {
-	mu         sync.Mutex
-	swaps      []swapCall
-	ages       []time.Duration
-	instances  []instanceCall
-	recycled   []string
-	borrowWait []time.Duration
-	evals      []evalCall
-	compiles   []string
+	mu           sync.Mutex
+	swaps        []swapCall
+	ages         []time.Duration
+	instances    []instanceCall
+	recycled     []string
+	borrowWait   []time.Duration
+	evals        []evalCall
+	compiles     []string
+	engineCounts []int
 }
 
 type evalCall struct {
@@ -85,11 +86,17 @@ func (r *recordingObserver) OnModuleCompile(_ context.Context, result string) {
 	r.compiles = append(r.compiles, result)
 }
 
-// OnEngineCount is a stub: no test in this package asserts on the resident
-// count itself, only on OnInstanceRecycled's cause (see
-// TestReclaimReportsCountAndCause in engine_reclaim_test.go). The production
-// implementation is observability/metrics.SupplyMetrics.OnEngineCount.
-func (r *recordingObserver) OnEngineCount(context.Context, int) {}
+// OnEngineCount records every resident-engine count reported after a
+// reclamation sweep, in call order. Order matters to at least one caller
+// (TestCompileMissTriggersSweepReportsEngineCount in engine_reclaim_test.go):
+// sweepEnginesAsync's timer re-arms itself and keeps firing, so a test that
+// only kept "the latest" value could observe a LATER pass's count once more
+// time has passed, silently changing what it thinks it verified.
+func (r *recordingObserver) OnEngineCount(_ context.Context, n int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.engineCounts = append(r.engineCounts, n)
+}
 
 // Snapshot accessors. Each returns a copy so a caller can range over the
 // result while the drain goroutine keeps appending.
@@ -113,6 +120,11 @@ func (r *recordingObserver) recycledCauses() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]string(nil), r.recycled...)
+}
+func (r *recordingObserver) engineCountCalls() []int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]int(nil), r.engineCounts...)
 }
 func (r *recordingObserver) borrowWaits() []time.Duration {
 	r.mu.Lock()

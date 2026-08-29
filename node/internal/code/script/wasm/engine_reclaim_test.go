@@ -523,3 +523,84 @@ func TestCompileMissTriggersSweep(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+// A shape test on SupplyMetrics in isolation (TestSupplyMetricsOnEngineCount,
+// observability/metrics/supply_test.go) cannot prove sweepEnginesAsync (the
+// only production call site) actually fires OnEngineCount at all: it never
+// touches host.go. Review's own independent mutation confirmed the gap —
+// deleting the `obs().OnEngineCount(ctx, remaining)` line in host.go left the
+// ENTIRE targeted test suite green, including TestCompileMissTriggersSweep
+// above, which drives straight through that call site without asserting on
+// it. This test closes that gap on the wasm-package side.
+//
+// This is a separate test rather than an addition to TestCompileMissTriggersSweep
+// so a reviewer can see the two obligations — "the reclaim fires" and "the
+// count it reports is correct" — as two independently failing assertions.
+func TestCompileMissTriggersSweepReportsEngineCount(t *testing.T) {
+	ctx := context.Background()
+	rec := &recordingObserver{}
+	// SetObserver panics on a second non-nil install, so nil first (same
+	// pattern as TestReclaimReportsCountAndCause above).
+	SetObserver(nil)
+	SetObserver(rec)
+	defer SetObserver(nil)
+
+	h := newTestReactorHost(t)
+	modA := decodeForTest(t, testReactorCode(t))
+
+	// engineIdleTTL stays 0 (newTestReactorHost's default) through first's own
+	// compile-miss and its lastUsed rewind: sweepEnginesAsync's ttl<=0 guard
+	// keeps that compile from firing its own sweep. Only enabled afterward, so
+	// the ONE sweep this test drives is unambiguously the one triggered by
+	// second's compile miss, running against an already-rewound first. Setting
+	// it before first's own compile (as an earlier draft of this test, and
+	// TestCompileMissTriggersSweep above, both do — harmlessly there, since
+	// that test only polls for "eventually reclaimed" and does not care which
+	// pass does it) raced first's own compile-triggered sweep goroutine against
+	// the main goroutine's lastUsed rewind: observed failure was
+	// calls[0] == 0, i.e. the rewind landed before that first sweep pass ran,
+	// so even the "control" sample reclaimed first instead of reporting it
+	// still resident.
+	first, err := h.engineForBytes(ctx, modA)
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	first.lastUsed.Store(time.Now().Add(-time.Hour).UnixNano())
+	h.engineIdleTTL = 50 * time.Millisecond
+
+	// 编译第二个模块 = 一次 miss = 一次扫（与 TestCompileMissTriggersSweep 相同的触发）。
+	if _, err := h.engineForBytes(ctx, appendCustomSection(modA, "xflow-test-trigger-count", []byte{0x04})); err != nil {
+		t.Fatalf("second: %v", err)
+	}
+
+	// Poll for the FIRST OnEngineCount call, not a fixed sleep and not a
+	// single unconditional read: the sweep runs on a goroutine sweepEnginesAsync
+	// spawns, and there is no other synchronization point to wait on. Grabbing
+	// the first call specifically — not "whatever is in the slice by the time
+	// we look" — matters because the timer keeps re-arming (host.go: "while any
+	// engine remains resident"): once the second engine also ages past the
+	// 50ms ttl, a LATER pass will report 0, and reading the slice too late
+	// would silently swap in that later value.
+	deadline := time.Now().Add(5 * time.Second)
+	var calls []int
+	for {
+		calls = rec.engineCountCalls()
+		if len(calls) > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("sweepEnginesAsync never reported OnEngineCount after a compile miss fired a sweep")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// Exactly 1, not >= 1: this number has one correct answer at the moment of
+	// the first pass. first was rewound an hour into the past and must already
+	// be gone; second was compiled a moment ago (well inside the 50ms ttl at
+	// the time this sweep pass ran) and must still be resident.
+	if calls[0] != 1 {
+		t.Fatalf("first OnEngineCount report = %d, want exactly 1 (the freshly "+
+			"compiled second module; the idle first one should already be reclaimed)",
+			calls[0])
+	}
+}
