@@ -196,13 +196,22 @@ func startEmbeddedRunner(t *testing.T, baseURL string, client *http.Client) {
 			ArtifactCodeResolver: resolver,
 		})
 
+	// errCh carries Run's return value and is consumed at most once (below, on
+	// the early-exit path). stopped is a separate, closed-once signal, because
+	// a closed channel stays receivable: without it the Cleanup below would
+	// block on an already-drained errCh whenever the early-exit path fired,
+	// and report a 10s shutdown timeout for a runner that had already returned.
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
-	go func() { errCh <- r.Run(ctx) }()
+	stopped := make(chan struct{})
+	go func() {
+		errCh <- r.Run(ctx)
+		close(stopped)
+	}()
 	t.Cleanup(func() {
 		cancel()
 		select {
-		case <-errCh:
+		case <-stopped:
 		case <-time.After(10 * time.Second):
 			t.Error("embedded runner did not stop within 10s of context cancellation")
 		}
