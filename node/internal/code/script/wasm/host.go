@@ -547,6 +547,19 @@ func (h *reactorHost) reportReadyInstances(ctx context.Context) {
 		// tests. Reporting nothing beats panicking on a metrics call.
 		return
 	}
+	obs().OnInstanceCount(ctx, "ready", h.readyInstanceTotal())
+}
+
+// readyInstanceTotal returns the host's TOTAL resident ready instances, summed
+// across every engine. Pulled out of reportReadyInstances so
+// reclaimIdleEngines' teardown loop — which already holds no lock by the time
+// it needs this number — can call it once per doomed engine without
+// duplicating the lock-and-sum. Nil-safe for the same reason
+// reportReadyInstances is: a bare &reactorEngine{} in a test has no host.
+func (h *reactorHost) readyInstanceTotal() int {
+	if h == nil {
+		return 0
+	}
 	h.mu.Lock()
 	total := 0
 	for _, e := range h.engines {
@@ -555,7 +568,7 @@ func (h *reactorHost) reportReadyInstances(ctx context.Context) {
 		}
 	}
 	h.mu.Unlock()
-	obs().OnInstanceCount(ctx, "ready", total)
+	return total
 }
 
 // republishEngineListLocked refreshes the lock-free snapshot. Caller must hold
@@ -734,17 +747,29 @@ func (h *reactorHost) reclaimIdleEngines(ctx context.Context, ttl time.Duration)
 	}
 	h.mu.Unlock()
 
-	// Teardown outside the lock: drainPool waits (bounded) and cm.Close is slow,
-	// and neither may block a lookup. Safe to do unlocked precisely because the
-	// engines are already unreachable — out of engines, out of engineList, out of
-	// codeCache — so nothing can hand one to a new caller after this point.
+	// Teardown outside the lock: drainPoolWithCause waits (bounded) and cm.Close
+	// is slow, and neither may block a lookup. Safe to do unlocked precisely
+	// because the engines are already unreachable — out of engines, out of
+	// engineList, out of codeCache — so nothing can hand one to a new caller
+	// after this point.
 	for _, e := range doomed {
-		if old := e.active.Swap(nil); old != nil {
-			e.drainPool(ctx, old)
+		old := e.active.Swap(nil)
+		if old != nil {
+			// "engine_reclaimed", not "pool_swapped": nothing replaces these
+			// instances, because the whole module is going away, not getting a
+			// new config. See drainPoolWithCause's doc for why the cause is a
+			// parameter here at all.
+			e.drainPoolWithCause(ctx, old, "engine_reclaimed")
 		}
 		if e.cm != nil {
 			_ = e.cm.Close(ctx)
 		}
+		// readyInstanceTotal, not the pool size just torn down: a report after
+		// each engine's teardown must reflect what is ACTUALLY still resident
+		// across the whole host, the same aggregate reportReadyInstances
+		// publishes on every swap. Safe to take h.mu here — this loop runs after
+		// the lock above was released, so there is no re-entrant hold.
+		obs().OnInstanceCount(ctx, "ready", h.readyInstanceTotal())
 	}
 	return len(doomed)
 }

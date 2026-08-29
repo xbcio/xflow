@@ -731,7 +731,18 @@ func (p *activePool) drainWait() time.Duration {
 	return drainPoolWait
 }
 
-// drainPool tears down every instance parked in an old pool.
+// drainPool tears down every instance parked in an old pool, attributing each
+// teardown to "pool_swapped" — the cause for every existing caller of this
+// name, all of which retire a pool because the SAME module just got a new
+// config (see swapConfig). It is a thin wrapper over drainPoolWithCause kept
+// so those callers, and the tests pinning them, do not have to spell out a
+// cause they never vary.
+func (e *reactorEngine) drainPool(ctx context.Context, p *activePool) {
+	e.drainPoolWithCause(ctx, p, "pool_swapped")
+}
+
+// drainPoolWithCause tears down every instance parked in a retired pool,
+// attributing each teardown to cause.
 //
 // The wait is bounded, and the bound is load-bearing. An instance that was
 // in flight at swap time never arrives here — giveBack sees the pool is no
@@ -743,7 +754,17 @@ func (p *activePool) drainWait() time.Duration {
 // Exiting early is not an instance leak, precisely because those two paths
 // already reclaim what they hold. What the bound gives up is only the
 // mid-rebuild straggler above, and only if it arrives after the deadline.
-func (e *reactorEngine) drainPool(ctx context.Context, p *activePool) {
+//
+// cause is a parameter, not a constant baked into this loop, because this
+// loop now has two callers with two different stories: swapConfig retires a
+// pool because the module got a NEW config (the instances are replaced
+// immediately, one for one) and reclaimIdleEngines retires one because the
+// whole MODULE is being unloaded (the instances are not replaced by
+// anything). Reporting both as "pool_swapped" would make reclamation's
+// teardown volume invisible inside a cause whose rate is expected to be
+// nonzero — exactly the gap this change exists to close. See
+// reclaimIdleEngines for the "engine_reclaimed" call site.
+func (e *reactorEngine) drainPoolWithCause(ctx context.Context, p *activePool, cause string) {
 	// One timer for the whole loop, not per receive: the intent is to bound the
 	// drain, not each individual wait.
 	timer := time.NewTimer(p.drainWait())
@@ -755,7 +776,7 @@ func (e *reactorEngine) drainPool(ctx context.Context, p *activePool) {
 				return
 			}
 			inst.teardown(ctx)
-			obs().OnInstanceRecycled(ctx, "pool_swapped")
+			obs().OnInstanceRecycled(ctx, cause)
 		case <-timer.C:
 			return
 		case <-ctx.Done():

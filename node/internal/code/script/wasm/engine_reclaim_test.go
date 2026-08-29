@@ -433,6 +433,67 @@ func TestEngineIdleTTLFromEnv(t *testing.T) {
 	}
 }
 
+// recycledByCause counts how many OnInstanceRecycled calls this recorder saw
+// for the given cause. This is the reclamation tests' entry point into
+// recordingObserver (defined in observer_test.go, same package): a fresh
+// minimal type embedding noopObserver, as an earlier draft of this test
+// sketched, would collide with that existing full implementation — same
+// package, same type name. Extending the real thing is the correct fix, not a
+// parallel stand-in.
+func (r *recordingObserver) recycledByCause(cause string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := 0
+	for _, c := range r.recycled {
+		if c == cause {
+			n++
+		}
+	}
+	return n
+}
+
+// 回收必须报出常驻数和拆卸原因。没有这两条，「上传一个新版本会不会涨内存」
+// 就只能靠猜——而这正是 §6 存在的理由。
+//
+// Deviation from the task-4 brief's verbatim snippet: the brief's version sets
+// h.engineIdleTTL = 50ms before warmTestEngine. That turns on
+// sweepEnginesAsync's self-re-arming background goroutine (host.go), which
+// races this test's own manual h.reclaimIdleEngines call for the SAME
+// engine — exactly the hazard newTestReactorHost's doc comment calls out
+// ("a live background sweep can win the race ... before it gets to assert
+// anything"). It is not a theoretical race: under `-race` it reclaimed the
+// engine out from under the test 3/3 times (h.reclaimIdleEngines returned 0,
+// "reclaimed 0, want 1"), because -race's added scheduling latency was enough
+// for the timer's 12.5ms (ttl/4) re-arm to land before the test's own call.
+// This test drives reclaimIdleEngines directly and has no need for the async
+// trigger at all, so h.engineIdleTTL is left at newTestReactorHost's default
+// of 0 — the same choice every other manual-reclaim test in this file makes.
+func TestReclaimReportsCountAndCause(t *testing.T) {
+	ctx := context.Background()
+	rec := &recordingObserver{}
+	// SetObserver panics on a second non-nil install, so nil first. This is the
+	// pattern observer_overwrite_test.go already uses.
+	SetObserver(nil)
+	SetObserver(rec)
+	defer SetObserver(nil)
+
+	h := newTestReactorHost(t)
+	e := warmTestEngine(t, h, decodeForTest(t, testReactorCode(t)))
+	poolSize := int(e.active.Load().size)
+	e.lastUsed.Store(time.Now().Add(-time.Hour).UnixNano())
+
+	if n := h.reclaimIdleEngines(ctx, time.Minute); n != 1 {
+		t.Fatalf("reclaimed %d, want 1", n)
+	}
+	if got := rec.recycledByCause("engine_reclaimed"); got != poolSize {
+		t.Fatalf("engine_reclaimed recycles = %d, want %d (one per pool instance)", got, poolSize)
+	}
+	if got := rec.recycledByCause("pool_swapped"); got != 0 {
+		t.Fatalf("%d instances attributed to pool_swapped; reclamation is not a swap "+
+			"and must not hide inside a swap's cause", got)
+	}
+}
+
 // 插入触发一次扫，且扫是异步的：编译路径不能被回收拖住。
 func TestCompileMissTriggersSweep(t *testing.T) {
 	ctx := context.Background()

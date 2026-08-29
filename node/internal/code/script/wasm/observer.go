@@ -48,8 +48,19 @@ type Observer interface {
 	// counted properly by OnInstanceRecycled.
 	OnInstanceCount(ctx context.Context, state string, n int)
 	// OnInstanceRecycled reports an instance teardown. cause is "timeout",
-	// "eval_error", "memory_high_water", "max_evals", "shutdown", or
-	// "pool_swapped".
+	// "eval_error", "memory_high_water", "max_evals", "shutdown",
+	// "pool_swapped", "rebuild_failed", or "engine_reclaimed".
+	//
+	// "pool_swapped" and "engine_reclaimed" are easy to conflate — both tear
+	// down every instance in a retired pool — but they answer different
+	// questions. pool_swapped is the SAME module getting a new config: the
+	// instances being torn down are replaced, immediately, by the same number
+	// of freshly built ones (see swapConfig). engine_reclaimed is the whole
+	// module going away: nothing replaces these instances, because the module
+	// itself was idle long enough to be unloaded (reclaimIdleEngines). Counting
+	// a reclamation's teardowns as pool_swapped would hide the one event this
+	// change exists to make visible inside a cause whose rate is expected to be
+	// nonzero.
 	OnInstanceRecycled(ctx context.Context, cause string)
 	// OnBorrowWait reports how long a caller waited for a free instance. A
 	// rising value means poolSize is too small for the offered concurrency.

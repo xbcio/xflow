@@ -85,8 +85,10 @@ func (r *recordingObserver) OnModuleCompile(_ context.Context, result string) {
 	r.compiles = append(r.compiles, result)
 }
 
-// OnEngineCount is a stub: no test in this package currently asserts on it.
-// Task 4 owns the real observer implementation.
+// OnEngineCount is a stub: no test in this package asserts on the resident
+// count itself, only on OnInstanceRecycled's cause (see
+// TestReclaimReportsCountAndCause in engine_reclaim_test.go). The production
+// implementation is observability/metrics.SupplyMetrics.OnEngineCount.
 func (r *recordingObserver) OnEngineCount(context.Context, int) {}
 
 // Snapshot accessors. Each returns a copy so a caller can range over the

@@ -24,6 +24,7 @@ const (
 	metricWasmEvalStdinBytes       = "xflow_wasm_eval_stdin_bytes"
 	metricWasmEvalDuration         = "xflow_wasm_eval_duration_seconds"
 	metricWasmModuleCompileTotal   = "xflow_wasm_module_compile_total"
+	metricWasmEngineTotal          = "xflow_wasm_engine_total"
 )
 
 // SupplyMetrics observes supply distribution and wasm reactor pool activity.
@@ -94,8 +95,16 @@ func (s SupplyMetrics) OnInstanceCount(ctx context.Context, state string, n int)
 
 // OnInstanceRecycled records an instance teardown. cause is one of "timeout",
 // "eval_error", "memory_high_water", "max_evals", "shutdown", "pool_swapped",
-// "rebuild_failed". The last one is not a teardown but a failed replacement: the
-// pool is permanently one instance narrower, since nothing retries the rebuild.
+// "rebuild_failed", or "engine_reclaimed". The "rebuild_failed" one is not a
+// teardown but a failed replacement: the pool is permanently one instance
+// narrower, since nothing retries the rebuild.
+//
+// "engine_reclaimed" is distinct from "pool_swapped" even though both tear
+// down a whole pool's worth of instances: pool_swapped's instances are
+// replaced immediately by the same module's new config, engine_reclaimed's
+// are not replaced at all because the module itself is being unloaded as
+// idle. Conflating the two would hide reclamation's teardown volume inside a
+// cause whose rate is expected to be nonzero from ordinary config churn.
 //
 // memory_high_water is the planned recycle that fires on real traffic: the
 // guest's linear memory crossed the threshold that precedes an out-of-memory
@@ -146,11 +155,26 @@ func (s SupplyMetrics) OnModuleCompile(ctx context.Context, result string) {
 	s.Metrics.Inc(metricWasmModuleCompileTotal, withNamespace(ctx, map[string]string{"result": result}))
 }
 
-// OnEngineCount is a placeholder satisfying wasm.Observer's newest method so
-// SupplyMetrics keeps compiling as xnode.SetWasmObserver's argument. The real
-// gauge (resident-engine count after each reclamation sweep) is Task 4's
-// scope; wiring it here now would record a metric nothing has verified yet.
-func (s SupplyMetrics) OnEngineCount(ctx context.Context, n int) {}
+// OnEngineCount records how many compiled wasm modules are resident in this
+// process immediately after a reclamation sweep. Written the same way as
+// OnConfigAge above: Set a series keyed only by namespace, since the wasm
+// reactor host is one process-wide singleton (sharedReactorHost) and this
+// gauge, like xflow_wasm_instance_total, carries no module-identity label —
+// it IS the count of modules, not a per-module value.
+//
+// The namespace label is, in practice, always the fallback value: ctx here
+// comes from sweepEnginesAsync's own context.Background() (host.go), which
+// carries no namespace to extract. That is not a bug to fix by threading a
+// caller's ctx through — the resident engine count is a fact about this
+// PROCESS (how many compiled modules it is holding in memory), not about any
+// one namespace's traffic, so per-namespace attribution would be manufacturing
+// a dimension the underlying quantity does not have. Recorded here so a
+// reader of this file does not mistake the label for real partitioning, per
+// the standing lesson that a gauge with a mislabeled identity is worse than
+// one with none.
+func (s SupplyMetrics) OnEngineCount(ctx context.Context, n int) {
+	s.Metrics.Set(metricWasmEngineTotal, withNamespace(ctx, nil), float64(n))
+}
 
 // --- supply gate observer surface ---
 

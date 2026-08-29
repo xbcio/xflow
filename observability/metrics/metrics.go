@@ -457,6 +457,7 @@ var metricHelp = map[string]string{
 	"xflow_wasm_eval_stdin_bytes":                    "Size of the payload handed to one wasm eval, by workflow and node. The only view of the TAIL: this distribution is heavy-tailed, so a mean hides where the cost actually goes. Read next to xflow_wasm_eval_duration_seconds — a size that climbs on its own is a redundant copy leaking into the payload. An empty node label means the eval did not come through a script node and nothing named it.",
 	"xflow_wasm_eval_duration_seconds":               "Wall-clock duration of one wasm eval, by workflow and node, dominated by the guest re-parsing stdin inside the sandbox. It normally tracks xflow_wasm_eval_stdin_bytes; climbing while size holds flat is contention or oversubscription, not bigger work. Sum by node to find which script node a runner is actually spending its CPU on — without that label the nodes sharing a runner are one series.",
 	"xflow_wasm_module_compile_total":                "wasm module compile cache outcomes, partitioned by result (hit/miss).",
+	"xflow_wasm_engine_total":                        "Compiled wasm modules resident in this process after the most recent reclamation pass. This is the number the artifact upload path can grow without bound if reclamation is disabled (XFLOW_WASM_ENGINE_IDLE_TTL=0): each resident module holds its compiled form plus a pool of GOMAXPROCS instances. Reported only when a sweep runs, so a process that has compiled nothing publishes no series.",
 }
 
 func helpText(name string) string {
