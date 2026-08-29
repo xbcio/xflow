@@ -78,8 +78,14 @@ func (f *reactorFacade) Execute(ctx context.Context, src engine.Source, globals 
 		// ensurePool rebuilds the pool from the config carried in globals on
 		// every call. Either way, what the retry guarantees is that the raw
 		// sentinel never reaches the caller — script.go routes a non-permanent
-		// engine error to the "error" port, which erases the classification, so
-		// Kafka would drop the record instead of redelivering it.
+		// engine error to the "error" port, and from there engine/commit.go's
+		// outputPortRetryError feeds it into engine/atomic_commit.go's
+		// tryRetryWithAttempt: a bounded, node-level retry gated by
+		// retryFor(meta).MaxAttempts, not "Kafka drops the record" and not
+		// unbounded redelivery. Exhausting that budget applies the node's
+		// configured OnError strategy (commitLegacyNodeError -> ApplyOnError) —
+		// which of those outcomes this settles into depends on the node's
+		// OnError setting, not on this retry.
 		//
 		// Exactly once, not a loop: a second consecutive loss would mean the
 		// engine is being reclaimed as fast as it is created, which is a defect

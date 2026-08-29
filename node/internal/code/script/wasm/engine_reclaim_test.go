@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/xbcio/xflow/node/internal/code/script/engine"
+	"github.com/xbcio/xflow/node/supply"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -602,5 +603,201 @@ func TestCompileMissTriggersSweepReportsEngineCount(t *testing.T) {
 		t.Fatalf("first OnEngineCount report = %d, want exactly 1 (the freshly "+
 			"compiled second module; the idle first one should already be reclaimed)",
 			calls[0])
+	}
+}
+
+// TestSweepSelfRearmsUntilEngineAges pins final-review finding 3:
+// sweepEnginesAsync's self-re-arming timer (host.go:471's `if remaining > 0`),
+// not just its event-driven trigger on a compile miss.
+//
+// A single compile miss fires exactly one sweep pass. This test's engine is
+// deliberately NOT old enough on that first pass (the ttl is large relative to
+// how long it takes the sweep goroutine to be scheduled and run), so the pass
+// finds it, decides it is not idle yet, and reports remaining==1. From that
+// point on, no second compile miss ever happens, so the ONLY thing that can
+// give reclamation another look is the timer re-arming itself every
+// ttl/4 — which is exactly the mechanism review's own probe
+// (`if false && remaining > 0`) disables. Contrast with
+// TestCompileMissTriggersSweep above: that test pre-rewinds a SECOND engine's
+// lastUsed to an hour in the past before triggering the sweep, so its very
+// FIRST pass reclaims it and the test would stay green even with the timer
+// permanently disabled — which is the coverage gap this test exists to close.
+//
+// No fixed sleep: the poll has a deadline, not a duration, per this file's
+// existing pattern (e.g. TestCompileMissTriggersSweep). engineSweeping is a
+// package-level atomic.Bool (host.go), so a sweep pass belonging to this
+// test's host can in principle be dropped in favour of a concurrently
+// running one from a different host in this package; polling with a generous
+// deadline is what this file's own tests already rely on to absorb that, and
+// the ttl here (well under the deadline) leaves several re-arm cycles of
+// margin even if one pass is lost.
+//
+// Mutation verification (required by the review brief): reintroducing
+// review's own `if false && remaining > 0` at host.go:471 must turn this test
+// red (timeout). See final-fix-report.md for the failure output.
+func TestSweepSelfRearmsUntilEngineAges(t *testing.T) {
+	ctx := context.Background()
+	h := newTestReactorHost(t)
+	h.engineIdleTTL = 80 * time.Millisecond
+	mod := decodeForTest(t, testReactorCode(t))
+
+	e, err := h.engineForBytes(ctx, mod)
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if e.reclaimed.Load() {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("engine was never reclaimed without a second compile miss — only " +
+				"the self-re-arming timer can discover it idle at this point, so this " +
+				"means the timer stopped re-arming (or never started) after the first pass")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	h.mu.Lock()
+	remaining := len(h.engines)
+	h.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("%d engines remain resident after the only engine aged out, want 0", remaining)
+	}
+}
+
+// TestSupplyChangedOrphansNothingWhenReclaimWinsMidSwap pins final-review
+// finding 1: supplyConsumerByDigest.OnSupplyChanged used to be the one path
+// that read h.engines without stamping lastUsed in the same h.mu hold as the
+// lookup, and swapConfig has no way to notice that the engine it is mid-build
+// for has since been deleted out of h.engines by a concurrent reclaim pass.
+// Losing that race used to install a brand-new instance pool on an engine no
+// future reclaim pass will ever find again — invisible to reclaimIdleEngines
+// (walks h.engines only) and to readyInstanceTotal() (sums h.engines only):
+// exactly the unbounded resident-memory growth this whole feature exists to
+// close, reopened through this one path.
+//
+// The interleaving is forced deterministically, not raced against wall-clock
+// time. e.mu is the very first thing swapConfig locks (pool.go), and
+// reclaimIdleEngines never touches e.mu — only h.mu plus e's own atomics (see
+// its doc: teardown runs "outside the lock ... safe to do unlocked precisely
+// because the engines are already unreachable"). Holding e.mu from the test
+// blocks OnSupplyChanged's swapConfig call at its entry, which opens a safe
+// window to apply the same map/flag mutation a concurrent sweep would.
+//
+// That window deliberately stops short of calling the real
+// h.reclaimIdleEngines (unlike this file's other reclaim tests): that
+// function's teardown loop also closes e.cm, and calling
+// wazero's InstantiateModule against an already-closed CompiledModule is the
+// "lucky" failure branch the review brief calls out by name — it would make
+// swapConfig's buildPool return an error and short-circuit before ever
+// reaching the code this test exists to cover. This test instead reproduces
+// only the state a concurrent reclaim pass publishes BEFORE it reaches
+// cm.Close: delete from h.engines, mark reclaimed, detach-and-drain whatever
+// pool was active at that moment. That is the actual race window review's
+// finding describes ("你要修的是 cm.Close 尚未执行完那个交错"), engineered to
+// be reliable instead of left to chance.
+//
+// The poll for lastUsed to move is the remaining ordering requirement:
+// OnSupplyChanged's own lookup-and-touchLocked step (the layer-1 half of this
+// fix) does not depend on e.mu, so nothing else proves it already ran before
+// this test rewinds lastUsed to force reclaim eligibility.
+//
+// Mutation verification (required by the review brief): deleting the
+// `if e.reclaimed.Load() { ... }` block in supply_consumer.go's
+// OnSupplyChanged must turn this test red. See final-fix-report.md for the
+// failure output.
+func TestSupplyChangedOrphansNothingWhenReclaimWinsMidSwap(t *testing.T) {
+	ctx := context.Background()
+	rec := &recordingObserver{}
+	SetObserver(nil)
+	SetObserver(rec)
+	defer SetObserver(nil)
+
+	h := newTestReactorHost(t)
+	mod := decodeForTest(t, testReactorCode(t))
+	key := moduleKeyOf(mod)
+	e := warmTestEngine(t, h, mod) // active pool: emptyContent(), size 2
+	oldPoolSize := e.active.Load().size
+
+	c := &supplyConsumerByDigest{moduleKey: key, host: h}
+	newContent := []byte(`{"rules":[{"name":"r","expr":"true"}]}`)
+
+	// Block swapConfig at its very first statement (pool.go: e.mu.Lock()).
+	e.mu.Lock()
+
+	errCh := make(chan error, 1)
+	before := time.Now()
+	go func() {
+		errCh <- c.OnSupplyChanged(ctx, supply.Snapshot{
+			Name: "rules", Content: newContent, Hash: "h2", Revision: 2,
+			FetchedAt: time.Now(),
+		})
+	}()
+
+	// Wait for OnSupplyChanged's own lookup-and-touchLocked (layer 1) to have
+	// run. That step takes h.mu, not e.mu, so it is not blocked by the Lock
+	// above and races freely against this poll — hence polling with a
+	// deadline rather than reading lastUsed once.
+	deadline := time.Now().Add(5 * time.Second)
+	for e.lastUsed.Load() < before.UnixNano() {
+		if time.Now().After(deadline) {
+			t.Fatal("OnSupplyChanged never stamped lastUsed — layer 1 (touchLocked in " +
+				"the same h.mu hold as the lookup) did not run, so this test cannot " +
+				"reach the window it exists to cover")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// Simulate a concurrent sweep winning the race up to (but not including)
+	// cm.Close — see the function doc for why cm.Close is deliberately
+	// excluded. reclaimIdleEngines never takes e.mu, so this runs to
+	// completion while OnSupplyChanged's swapConfig sits blocked above.
+	e.lastUsed.Store(time.Now().Add(-time.Hour).UnixNano())
+	h.mu.Lock()
+	delete(h.engines, key)
+	h.republishEngineListLocked()
+	h.codeCache.Purge()
+	h.mu.Unlock()
+	e.reclaimed.Store(true)
+	if old := e.active.Swap(nil); old != nil {
+		e.drainPoolWithCause(ctx, old, "engine_reclaimed")
+	}
+	if e.active.Load() != nil {
+		t.Fatal("test setup bug: simulated reclaim did not detach the pool active before the race")
+	}
+
+	// Let the blocked swapConfig proceed: cm is still open (we never called
+	// cm.Close), so buildPool succeeds and installs a brand-new pool onto an
+	// engine that is no longer reachable through h.engines.
+	e.mu.Unlock()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("OnSupplyChanged returned %v, want nil — an engine that vanished "+
+				"mid-swap must not trip the readiness gate", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("OnSupplyChanged never returned")
+	}
+
+	if p := e.active.Load(); p != nil {
+		t.Fatal("a pool is still active on a reclaimed engine — this is the orphan " +
+			"finding 1 describes: invisible to reclaimIdleEngines (walks h.engines " +
+			"only) and to readyInstanceTotal() (sums h.engines only)")
+	}
+	h.mu.Lock()
+	_, stillInMap := h.engines[key]
+	h.mu.Unlock()
+	if stillInMap {
+		t.Fatal("engine reappeared in h.engines; OnSupplyChanged must not re-insert what a reclaim removed")
+	}
+	wantRecycled := oldPoolSize + int(defaultPoolSize())
+	if got := rec.recycledByCause("engine_reclaimed"); got != wantRecycled {
+		t.Fatalf("engine_reclaimed recycles = %d, want %d (%d from the pool active at "+
+			"reclaim time, %d from the orphan pool OnSupplyChanged's own swapConfig built "+
+			"and then had to tear back down)", got, wantRecycled, oldPoolSize, int(defaultPoolSize()))
 	}
 }

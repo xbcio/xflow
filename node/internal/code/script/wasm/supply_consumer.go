@@ -139,6 +139,18 @@ var _ supply.Consumer = (*supplyConsumerByDigest)(nil)
 func (c *supplyConsumerByDigest) OnSupplyChanged(ctx context.Context, snap supply.Snapshot) error {
 	c.host.mu.Lock()
 	e, ok := c.host.engines[c.moduleKey]
+	if ok {
+		// Stamp lastUsed in the SAME h.mu hold as the lookup, matching every
+		// other resolution path (engineForCode, engineForKey, engineForSource).
+		// This is the one path that used to skip it: the sweep reads lastUsed
+		// under this same lock, so touching it here is what makes the reclaim
+		// decision atomic with this lookup — the engine cannot be selected for
+		// reclamation in the same pass that just handed it to us. It narrows the
+		// race window from "however long swapConfig takes" down to "however much
+		// of engineIdleTTL elapses while swapConfig runs", which is why the
+		// second check below (after swapConfig returns) still exists.
+		c.host.touchLocked(e)
+	}
 	c.host.mu.Unlock()
 	if !ok {
 		// Engine not yet compiled — the first Execute (or resolveArtifacts
@@ -152,7 +164,30 @@ func (c *supplyConsumerByDigest) OnSupplyChanged(ctx context.Context, snap suppl
 	if p := e.active.Load(); p != nil && configHash(p.cfg) == configHash(snap.Content) {
 		return nil
 	}
-	return e.swapConfig(ctx, snap.Content, defaultPoolSize(), snap.Revision)
+	if err := e.swapConfig(ctx, snap.Content, defaultPoolSize(), snap.Revision); err != nil {
+		return err
+	}
+	if e.reclaimed.Load() {
+		// The touchLocked stamp above narrows the race but does not close it:
+		// engineIdleTTL can be configured down to milliseconds (tests do exactly
+		// this) and swapConfig can take longer than that building a whole pool.
+		// If a reclaim pass ran and won while we were mid-build, e is no longer
+		// in h.engines — nothing will ever scan it again, so the pool we just
+		// installed on it would be a permanent orphan: invisible to
+		// reclaimIdleEngines (it only walks h.engines) and to
+		// readyInstanceTotal() (it only sums h.engines), i.e. exactly the
+		// unbounded growth this whole feature exists to close, reopened by this
+		// one path. Tear down what we just built instead of leaving it resident.
+		if old := e.active.Swap(nil); old != nil {
+			e.drainPoolWithCause(ctx, old, "engine_reclaimed")
+		}
+	}
+	// Returning nil either way: an engine that vanished mid-swap is not a
+	// failure to report upstream — it would trip the readiness gate and cut off
+	// traffic — and script.ensureWasmSupplyConsumers rebuilds and re-registers
+	// everything on the very next message, the same self-heal the !ok branch
+	// above already relies on.
+	return nil
 }
 
 // RegisterSupplyConsumerByDigest is RegisterSupplyConsumer for modules
