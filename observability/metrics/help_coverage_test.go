@@ -115,18 +115,27 @@ func TestEveryMetricNameInThisPackageHasHelpText(t *testing.T) {
 // The check here is deliberately "does this name appear anywhere in the
 // package's non-test source as a declared/emitted literal", not "is the
 // method that emits it ever called by production code outside this
-// package". The xflow_group_* family (group.go) has ~13 names with both help
-// text and a real g.m.Inc/Observe/Set call site in group.go, but zero
-// production callers of NewGroupMetrics anywhere in the repo. Judging by
-// reachability would flag all thirteen as orphans and this test would then
-// need a whitelist to un-flag a live, correctly-described-if-unwired family
-// — exactly the "silently loosen the sieve" failure mode this suite must not
+// package". Five names in group.go — xflow_group_admission_total,
+// _admission_duration_seconds, _activation_total,
+// _activation_generation_fenced_total, and _activation_active — have both
+// help text and a real g.m.Inc/Observe/Set call site, yet nothing outside
+// this package calls the GroupMetrics method that reaches them. Judging by
+// reachability would flag all five as orphans and this test would then need
+// a whitelist to un-flag a live, correctly-described-if-unwired family —
+// exactly the "silently loosen the sieve" failure mode this suite must not
 // fall into. Judging by static presence in an emit call's name position
-// correctly leaves that family alone and only catches a help entry with no
+// correctly leaves them alone and only catches a help entry with no
 // emission point at all, like xflow_group_suspend_total: a capability
 // (durable group suspend) that was removed (engine/group_lease.go references
 // it as "since removed"; service/runner/group_runtime.go has
 // WithSuspendDisabled) while its help text was left behind.
+//
+// The five are named rather than counted because this paragraph has gone
+// stale once already: it used to say the whole family had "zero production
+// callers of NewGroupMetrics anywhere in the repo", which stopped being true
+// when 8d8fab5/08b1612 wired package_cache and the six lease/commit names.
+// A claim about specific names fails loudly when someone greps them; a claim
+// about a count keeps reading as true long after it isn't.
 func TestEveryMetricHelpEntryHasEmitter(t *testing.T) {
 	// emittedOutsidePackage covers the same RANGE gap documented on
 	// metricNamesInPackage above: these names are emitted for real, just not
