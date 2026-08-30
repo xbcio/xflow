@@ -22,7 +22,7 @@ engine/graph/            Compile-time IR: GroupMeta, UnitMeta (two-layer schedul
 engine/                  Runtime types: GroupLease, GroupResult, GroupCommitRequest, scheduling intents
 backend/.../rstate/      Redis atomic state: group_state.go (commit Lua), entry_admission.go
 service/control/         Control loop: group dispatch, entry-activation manager + reconciler, runner selector
-service/runner/          Runner-side: group runtime (embedded engine), package cache, backpressure
+service/runner/          Runner-side: group runtime (embedded engine), package cache
 service/protocol/        Wire DTOs: GroupLeaseDTO, activation directives, admission RPC
 observability/           metrics/group.go, tracing/group_spans.go, engine/group_audit.go
 ```
@@ -112,7 +112,18 @@ Operations: `lease_acquired`, `lease_expired`, `committed`, `admission_accepted`
 > node-generic `EntryActivationManager` (desired state) + `EntryActivationReconciler`
 > (fence/assign/renew/revoke) split described above.
 
-**Backpressure:** Runner limits in-flight unconfirmed emits (`EmitBackpressure` semaphore). Window full → consumer pauses. Kafka offset is the single truth for flow control.
+> **`EmitBackpressure` 信号量已从代码库中删除。** 完整实现（`service/runner/backpressure.go`
+> + `backpressure_test.go`）可用 `git show` 从本次提交之前取回，不是重写。
+>
+> 删除的理由不是「没写完」，而是**它挡不住的那件事从来没被建出来**：group 侧
+> runtime（`group_exec_trigger_runtime.go`）继承的是 `HTTPEntrySeedRuntime` 的
+> fail-closed `Emit` 桩，`engine/group_exec.go` 的 `commitGroup` 一次性提交全部
+> exits，没有流式 emit 循环去调用这个信号量——它全树零调用方，只有自己的构造函数
+> 测试。90 行通用信号量本身重写成本几乎为零；真正的成本在耐久 emit 流那一侧，
+> 那一侧从未存在过。
+>
+> Kafka offset is the single truth for flow control（见下文决策表同一条）——这个
+> 设计取向不依赖被删的信号量，仍然成立。
 
 ## 6. Suspend/Resume (Signal Journal) — 已移除
 
@@ -174,8 +185,6 @@ Operations: `lease_acquired`, `lease_expired`, `committed`, `admission_accepted`
 - Commit: `xflow_group_commit_total{outcome}`
 - Admission: `xflow_group_admission_total{outcome}`, `_duration_seconds`
 - Activation: `xflow_group_activation_total{action}`, `_generation_fenced_total`, `_active` gauge
-- Emit: `xflow_group_emit_total{result}`, `_duration_seconds`, `_batch_size`, `_inflight` gauge
-- Backpressure: `xflow_group_backpressure_paused_total`
 - Execution: `xflow_group_exec_duration_seconds`
 - Package cache: `xflow_group_package_cache_total{result}`, selector fallback
 

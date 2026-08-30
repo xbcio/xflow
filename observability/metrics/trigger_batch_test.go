@@ -91,3 +91,52 @@ func TestOnBatchFlushed_BatchSizeHistogramResolvesSmallCounts(t *testing.T) {
 		t.Errorf("cumulative count at the bucket covering size=90 is %d, want 2", largeBucket)
 	}
 }
+
+// TestOnBatchFlushed_BatchSizeUsesCountBuckets is the companion assertion to
+// TestOnBatchFlushed_BatchSizeHistogramResolvesSmallCounts above: that test
+// checks two sizes land in distinguishable buckets but never pins what the
+// boundaries themselves are. This pins xflow_trigger_batch_size's bucket
+// boundaries to the count family (ObserveCount), not the seconds family
+// (Observe): the seconds buckets have fractional boundaries below 1 and top
+// out at 10, so every plausible batch size — 1, 2, 3, ... a few hundred —
+// would collapse into the same top bucket. That is a counter wearing a
+// histogram's clothes: the distribution the metric exists to show is gone.
+//
+// The expected boundaries are written as literals, not by referencing
+// countBuckets: a test that asserts a constant equals itself has no teeth,
+// and if countBuckets is ever retuned this test must notice.
+func TestOnBatchFlushed_BatchSizeUsesCountBuckets(t *testing.T) {
+	m := New()
+	tm := TriggerMetrics{Metrics: m}
+
+	tm.OnBatchFlushed(context.Background(), "t", "size", 3)
+
+	family := gatherMetricFamily(t, m, "xflow_trigger_batch_size")
+	buckets := family.GetMetric()[0].GetHistogram().GetBucket()
+
+	wantBounds := []float64{1, 2, 5, 10, 25, 50, 75, 100, 250, 500}
+	if len(buckets) != len(wantBounds) {
+		t.Fatalf("got %d bucket boundaries, want %d (count buckets); "+
+			"buckets = %v", len(buckets), len(wantBounds), buckets)
+	}
+	for i, want := range wantBounds {
+		if got := buckets[i].GetUpperBound(); got != want {
+			t.Errorf("bucket[%d] upper bound = %v, want %v (count bucket, not "+
+				"the seconds histogram family)", i, got, want)
+		}
+	}
+
+	// The observed value itself (batch size 3) must still land at 3, not at
+	// 3 seconds re-scaled into a count bucket — Observe already records
+	// value.Seconds() correctly today; only the bucket family is wrong.
+	var atThree uint64
+	for _, b := range buckets {
+		if b.GetUpperBound() >= 3 {
+			atThree = b.GetCumulativeCount()
+			break
+		}
+	}
+	if atThree != 1 {
+		t.Errorf("cumulative count at the bucket covering size=3 is %d, want 1", atThree)
+	}
+}

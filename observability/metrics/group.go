@@ -91,39 +91,3 @@ func (g *GroupMetrics) OnGroupLeaseRenew(result string) {
 func (g *GroupMetrics) OnGroupLeaseRenewDuration(d time.Duration) {
 	g.m.Observe("xflow_group_lease_renew_duration_seconds", nil, d)
 }
-
-// --- Emit metrics (runner side) ---
-
-// OnGroupEmit increments the group emit counter with the result label.
-// Result values: accepted, conflict, error, timeout.
-func (g *GroupMetrics) OnGroupEmit(result string) {
-	g.m.Inc("xflow_group_emit_total", map[string]string{"result": result})
-}
-
-// OnGroupEmitDuration records the duration of an emit operation.
-func (g *GroupMetrics) OnGroupEmitDuration(d time.Duration) {
-	g.m.Observe("xflow_group_emit_duration_seconds", nil, d)
-}
-
-// OnGroupEmitBatchSize records the batch size of an emit operation. Uses the
-// count histogram family (ObserveCount), not the seconds family Observe
-// would use: batch sizes are small integers, and the seconds buckets top out
-// at 10 with fractional boundaries below 1, so every plausible batch size
-// would collapse into the same top bucket. ObserveCount silently drops
-// size < 0 rather than recording it (Observe would not); a negative batch
-// size is not a value that can legitimately occur here.
-func (g *GroupMetrics) OnGroupEmitBatchSize(size int) {
-	g.m.ObserveCount("xflow_group_emit_batch_size", nil, size)
-}
-
-// SetGroupEmitInflight sets the gauge of currently in-flight emit operations.
-func (g *GroupMetrics) SetGroupEmitInflight(value float64) {
-	g.m.Set("xflow_group_emit_inflight", nil, value)
-}
-
-// --- Backpressure metrics ---
-
-// OnGroupBackpressurePaused increments the backpressure paused counter.
-func (g *GroupMetrics) OnGroupBackpressurePaused() {
-	g.m.Inc("xflow_group_backpressure_paused_total", nil)
-}
