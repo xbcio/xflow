@@ -57,4 +57,15 @@ func (a *GroupObserverAdapter) OnGroupCommit(_ context.Context, outcome string, 
 	a.metrics.OnGroupExecDuration(d)
 }
 
+// OnGroupAdmission fans one GROUP entry-unit admission attempt out into two
+// series: the counter partitioned by outcome, and the admission-duration
+// histogram. Same one-call-in, two-calls-out shape as OnGroupCommit and for
+// the same reason: splitting this into two observer methods would reopen the
+// gap where the count and the duration histogram could disagree about how
+// many admission attempts happened.
+func (a *GroupObserverAdapter) OnGroupAdmission(_ context.Context, outcome string, d time.Duration) {
+	a.metrics.OnGroupAdmission(outcome)
+	a.metrics.OnGroupAdmissionDuration(d)
+}
+
 var _ engine.GroupObserver = (*GroupObserverAdapter)(nil)

@@ -50,7 +50,10 @@ func TestEveryMetricNameInThisPackageHasHelpText(t *testing.T) {
 	// execution/subgraph/cache.go), the six lease/commit names — acquired,
 	// expired, renew total+duration, commit total+exec-duration (see
 	// engine/observers.go's GroupObserver and observability/metrics/
-	// group_observer.go) — the three activation-controller names — activation
+	// group_observer.go) — the admission pair — admission total+duration,
+	// wired the same way via GroupObserver.OnGroupAdmission
+	// (engine/entry_admission.go's SeedExecutionFromEntry, GROUP entry units
+	// only) — the three activation-controller names — activation
 	// total, generation-fenced total, active gauge — and selector_fallback_total
 	// (both the latter two wired via
 	// service/control/entry_activation_reconciler.go's assignUnowned/Reconcile)
@@ -120,12 +123,11 @@ func TestEveryMetricNameInThisPackageHasHelpText(t *testing.T) {
 // The check here is deliberately "does this name appear anywhere in the
 // package's non-test source as a declared/emitted literal", not "is the
 // method that emits it ever called by production code outside this
-// package". Five names in group.go — xflow_group_admission_total,
-// _admission_duration_seconds, _activation_total,
+// package". Three names in group.go — xflow_group_activation_total,
 // _activation_generation_fenced_total, and _activation_active — have both
 // help text and a real g.m.Inc/Observe/Set call site, yet nothing outside
 // this package calls the GroupMetrics method that reaches them. Judging by
-// reachability would flag all five as orphans and this test would then need
+// reachability would flag all three as orphans and this test would then need
 // a whitelist to un-flag a live, correctly-described-if-unwired family —
 // exactly the "silently loosen the sieve" failure mode this suite must not
 // fall into. Judging by static presence in an emit call's name position
@@ -135,7 +137,15 @@ func TestEveryMetricNameInThisPackageHasHelpText(t *testing.T) {
 // it as "since removed"; service/runner/group_runtime.go has
 // WithSuspendDisabled) while its help text was left behind.
 //
-// The five are named rather than counted because this paragraph has gone
+// (xflow_group_admission_total and _admission_duration_seconds used to be
+// listed alongside these three, for the same reason: help text and a real
+// call site, but no production caller of the GroupMetrics method. That
+// stopped being true once engine.GroupObserver grew OnGroupAdmission and
+// engine/entry_admission.go's SeedExecutionFromEntry started calling it for
+// GROUP entry units — the same OnGroupCommit fan-out shape as the six
+// lease/commit names below.)
+//
+// The three are named rather than counted because this paragraph has gone
 // stale once already: it used to say the whole family had "zero production
 // callers of NewGroupMetrics anywhere in the repo", which stopped being true
 // when 8d8fab5/08b1612 wired package_cache and the six lease/commit names.

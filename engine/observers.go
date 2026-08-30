@@ -230,6 +230,18 @@ type GroupObserver interface {
 	// OnGroupCommit reports one group unit reaching a terminal result, and how
 	// long it took from lease issue to commit.
 	OnGroupCommit(ctx context.Context, outcome string, d time.Duration)
+	// OnGroupAdmission reports one GROUP entry-unit admission attempt through
+	// Engine.SeedExecutionFromEntry, and how long the backend admission round
+	// trip took. One call per attempt, so the count and the duration histogram
+	// can never disagree (the same reason OnGroupLeaseRenew and OnGroupCommit
+	// are single calls rather than a pair of observer methods).
+	//
+	// Only entry units whose Graph.UnitKindAt resolves to graph.UnitGroup are
+	// reported here — a non-group entry unit, a nil Graph, or an
+	// EntryUnitIdx out of [0, Graph.UnitCount()) is not counted at all (not
+	// counted as a failure, simply not observed), so this series is a lower
+	// bound whenever the caller could not resolve group membership.
+	OnGroupAdmission(ctx context.Context, outcome string, d time.Duration)
 }
 
 // WithGroupObserver installs an observer for group unit lease/commit lifecycle
@@ -275,6 +287,15 @@ func (e *Engine) notifyGroupCommit(ctx context.Context, outcome string, d time.D
 	}
 	safeHook(ctx, e.logger, func(observerCtx context.Context) {
 		e.groupObserver.OnGroupCommit(observerCtx, outcome, d)
+	})
+}
+
+func (e *Engine) notifyGroupAdmission(ctx context.Context, outcome string, d time.Duration) {
+	if e.groupObserver == nil {
+		return
+	}
+	safeHook(ctx, e.logger, func(observerCtx context.Context) {
+		e.groupObserver.OnGroupAdmission(observerCtx, outcome, d)
 	})
 }
 

@@ -16,13 +16,15 @@ import (
 // counts and the literal string arguments the engine classified each event
 // into.
 type recordingGroupObserver struct {
-	mu              sync.Mutex
-	leaseAcquired   int
-	leaseExpired    int
-	renewResults    []string
-	renewDurations  []time.Duration
-	commitOutcomes  []string
-	commitDurations []time.Duration
+	mu                 sync.Mutex
+	leaseAcquired      int
+	leaseExpired       int
+	renewResults       []string
+	renewDurations     []time.Duration
+	commitOutcomes     []string
+	commitDurations    []time.Duration
+	admissionOutcomes  []string
+	admissionDurations []time.Duration
 }
 
 func (r *recordingGroupObserver) OnGroupLeaseAcquired(_ context.Context) {
@@ -49,6 +51,13 @@ func (r *recordingGroupObserver) OnGroupCommit(_ context.Context, outcome string
 	defer r.mu.Unlock()
 	r.commitOutcomes = append(r.commitOutcomes, outcome)
 	r.commitDurations = append(r.commitDurations, d)
+}
+
+func (r *recordingGroupObserver) OnGroupAdmission(_ context.Context, outcome string, d time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.admissionOutcomes = append(r.admissionOutcomes, outcome)
+	r.admissionDurations = append(r.admissionDurations, d)
 }
 
 var _ GroupObserver = (*recordingGroupObserver)(nil)
@@ -366,7 +375,7 @@ func TestNotifyGroupLeaseExpired_ExpirerPath(t *testing.T) {
 // OnGroupLeaseRenew result classifications.
 type renewGroupState struct {
 	*fakeState
-	renewed bool
+	renewed  bool
 	renewErr error
 }
 

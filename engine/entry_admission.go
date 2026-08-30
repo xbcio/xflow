@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/namespace"
@@ -156,10 +157,62 @@ type EntryAdmissionStore interface {
 // backend (local mutex or Redis Lua), and the engine merely routes to it. A
 // backend that does not implement EntryAdmissionStore reports
 // ErrEntryAdmissionNotSupported.
+//
+// When req identifies a GROUP entry unit (req.Graph.UnitKindAt(req.EntryUnitIdx)
+// == graph.UnitGroup), this also reports one xflow_group_admission_total /
+// xflow_group_admission_duration_seconds observation, timing only the
+// store.SeedExecutionFromEntry backend round trip — not the topology
+// resolution or generation fence that service/control/core.go's caller
+// performs before/after this call.
+//
+// The ErrEntryAdmissionNotSupported early return is NOT observed: a backend
+// lacking the capability is a static configuration fact, not an admission
+// attempt, so reporting outcome="error" there would flood the error rate with
+// a constant that never reflects an actual admission being tried.
+//
+// A nil Graph or an EntryUnitIdx outside [0, Graph.UnitCount()) is also not
+// observed at all — neither as group nor non-group — because the discriminator
+// cannot be evaluated safely. This is a missing value, not a wrong one: the
+// resulting series is a lower bound whenever the caller could not resolve
+// group membership, mirroring Cut C-1's tolerance for a legacy NodeType=="".
 func (e *Engine) SeedExecutionFromEntry(ctx context.Context, req SeedExecutionFromEntryRequest) (SeedExecutionFromEntryResponse, error) {
 	store, ok := e.state.(EntryAdmissionStore)
 	if !ok {
 		return SeedExecutionFromEntryResponse{}, ErrEntryAdmissionNotSupported
 	}
-	return store.SeedExecutionFromEntry(ctx, req)
+
+	isGroupEntry := req.Graph != nil &&
+		req.EntryUnitIdx >= 0 &&
+		req.EntryUnitIdx < req.Graph.UnitCount() &&
+		req.Graph.UnitKindAt(req.EntryUnitIdx) == graph.UnitGroup
+
+	start := time.Now()
+	resp, err := store.SeedExecutionFromEntry(ctx, req)
+	d := time.Since(start)
+
+	if isGroupEntry {
+		e.notifyGroupAdmission(ctx, classifyAdmissionOutcome(resp, err), d)
+	}
+
+	return resp, err
+}
+
+// classifyAdmissionOutcome maps a SeedExecutionFromEntry result to the
+// xflow_group_admission_total outcome label. Order matters: a backend/transport
+// error always wins ("error") regardless of what resp happens to hold;
+// otherwise resp.Duplicate distinguishes an idempotent duplicate-accepted
+// retry ("duplicate") from a first-time admission, which is classified by
+// resp.State — AdmissionStateAccepted ("accepted") or AdmissionStateConflict
+// ("conflict"), the only two values AdmissionState defines.
+func classifyAdmissionOutcome(resp SeedExecutionFromEntryResponse, err error) string {
+	if err != nil {
+		return "error"
+	}
+	if resp.Duplicate {
+		return "duplicate"
+	}
+	if resp.State == AdmissionStateConflict {
+		return "conflict"
+	}
+	return "accepted"
 }

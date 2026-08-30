@@ -69,6 +69,36 @@ func TestGroupObserverAdapter_CommitFansOutToBothSeries(t *testing.T) {
 	}
 }
 
+// TestGroupObserverAdapter_AdmissionFansOutToBothSeries is the OnGroupAdmission
+// analogue of the renew/commit tests above: one call must land one counter
+// observation (partitioned by outcome) and one duration histogram
+// observation.
+func TestGroupObserverAdapter_AdmissionFansOutToBothSeries(t *testing.T) {
+	m := New()
+	obs := NewGroupObserver(m)
+
+	obs.OnGroupAdmission(context.Background(), "conflict", 12*time.Millisecond)
+
+	counter := gatherMetricFamily(t, m, "xflow_group_admission_total")
+	if len(counter.GetMetric()) != 1 {
+		t.Fatalf("xflow_group_admission_total series count = %d, want 1", len(counter.GetMetric()))
+	}
+	if got := labelValue(counter.GetMetric()[0], "outcome"); got != "conflict" {
+		t.Fatalf("xflow_group_admission_total outcome label = %q, want %q", got, "conflict")
+	}
+	if got := counter.GetMetric()[0].GetCounter().GetValue(); got != 1 {
+		t.Fatalf("xflow_group_admission_total value = %v, want 1", got)
+	}
+
+	hist := gatherMetricFamily(t, m, "xflow_group_admission_duration_seconds")
+	if len(hist.GetMetric()) != 1 {
+		t.Fatalf("xflow_group_admission_duration_seconds series count = %d, want 1", len(hist.GetMetric()))
+	}
+	if got := hist.GetMetric()[0].GetHistogram().GetSampleCount(); got != 1 {
+		t.Fatalf("xflow_group_admission_duration_seconds sample count = %d, want 1", got)
+	}
+}
+
 // TestGroupObserverAdapter_LeaseAcquiredAndExpiredCounters pins the two
 // no-label counters end to end through the adapter.
 func TestGroupObserverAdapter_LeaseAcquiredAndExpiredCounters(t *testing.T) {
