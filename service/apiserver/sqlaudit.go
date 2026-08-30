@@ -80,6 +80,7 @@ func (s *SQLAuditSink) Append(ctx context.Context, ev AuditEvent) error {
 		ActivationID:   ev.ActivationID,
 		EntryID:        ev.EntryID,
 		ReceiptAuditID: ev.ReceiptAuditID,
+		Revision:       ev.Revision,
 	}
 	if rec.Timestamp.IsZero() {
 		rec.Timestamp = time.Now()
