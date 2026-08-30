@@ -218,6 +218,66 @@ func WithOutboxMaxDeliveryAttempts(maxAttempts int) Option {
 	}
 }
 
+// GroupObserver receives group unit lifecycle observations. Implementations
+// must be non-blocking and must not affect scheduling.
+type GroupObserver interface {
+	OnGroupLeaseAcquired(ctx context.Context)
+	OnGroupLeaseExpired(ctx context.Context)
+	// OnGroupLeaseRenew reports one renewal attempt: its classification and
+	// how long the backend round trip took. One call per attempt, so the
+	// count and the duration histogram can never disagree.
+	OnGroupLeaseRenew(ctx context.Context, result string, d time.Duration)
+	// OnGroupCommit reports one group unit reaching a terminal result, and how
+	// long it took from lease issue to commit.
+	OnGroupCommit(ctx context.Context, outcome string, d time.Duration)
+}
+
+// WithGroupObserver installs an observer for group unit lease/commit lifecycle
+// events. A nil observer leaves group observation disabled.
+func WithGroupObserver(o GroupObserver) Option {
+	return func(e *Engine) {
+		if o != nil {
+			e.groupObserver = o
+		}
+	}
+}
+
+func (e *Engine) notifyGroupLeaseAcquired(ctx context.Context) {
+	if e.groupObserver == nil {
+		return
+	}
+	safeHook(ctx, e.logger, func(observerCtx context.Context) {
+		e.groupObserver.OnGroupLeaseAcquired(observerCtx)
+	})
+}
+
+func (e *Engine) notifyGroupLeaseExpired(ctx context.Context) {
+	if e.groupObserver == nil {
+		return
+	}
+	safeHook(ctx, e.logger, func(observerCtx context.Context) {
+		e.groupObserver.OnGroupLeaseExpired(observerCtx)
+	})
+}
+
+func (e *Engine) notifyGroupLeaseRenew(ctx context.Context, result string, d time.Duration) {
+	if e.groupObserver == nil {
+		return
+	}
+	safeHook(ctx, e.logger, func(observerCtx context.Context) {
+		e.groupObserver.OnGroupLeaseRenew(observerCtx, result, d)
+	})
+}
+
+func (e *Engine) notifyGroupCommit(ctx context.Context, outcome string, d time.Duration) {
+	if e.groupObserver == nil {
+		return
+	}
+	safeHook(ctx, e.logger, func(observerCtx context.Context) {
+		e.groupObserver.OnGroupCommit(observerCtx, outcome, d)
+	})
+}
+
 func (e *Engine) notifyCommitOutcome(ctx context.Context, outcome CommitOutcome) {
 	if e.commitObserver == nil {
 		return

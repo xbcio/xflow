@@ -272,6 +272,7 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 			// commit through CommitSubgraphResult, which is where their failed
 			// items are counted.
 			engine.WithItemFailureObserver(metrics.NewSubgraphMetrics(cfg.Metrics)),
+			engine.WithGroupObserver(metrics.NewGroupObserver(cfg.Metrics)),
 		)
 	}
 	eng := engine.New(cfg.Backend.State(), cfg.Backend.Queue(), engOpts...)

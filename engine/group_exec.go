@@ -79,6 +79,7 @@ func (e *Engine) executeGroup(ctx context.Context, task *Task, flush bool) error
 	if !acquired {
 		return nil // already owned by another executor; safe to discard
 	}
+	e.notifyGroupLeaseAcquired(ctx)
 
 	exits, fatal, execErr := e.groupExecutor.ExecuteGroup(ctx, task, meta)
 	return e.commitGroup(ctx, g, lease, meta, exits, fatal, execErr, flush)
@@ -129,6 +130,34 @@ func (e *Engine) commitGroup(ctx context.Context, g *graph.Graph, lease *GroupLe
 	})
 	if err != nil {
 		return fmt.Errorf("commit group %q: %w", meta.Name, err)
+	}
+
+	// commitObserver's outcome label space is deliberately narrower than
+	// CommitOutcome. CommitGroupResult short-circuits to
+	// CommitOutcomeExecutionInactive — a stale/late commit discarded before
+	// ever reaching this function — so that case never appears here. Folding
+	// "the group's business result" and "this commit was discarded as stale"
+	// into one outcome label would corrupt the failure-rate ratio this metric
+	// exists to expose, the same reason the package-cache metric (the
+	// previous wiring pass) excludes its error branches. Observing discarded
+	// commits is a new series, not a fourth value here.
+	commitOutcome := "success"
+	if execErr != nil {
+		if fatal {
+			commitOutcome = "failed_fatal"
+		} else {
+			commitOutcome = "failed_tolerated"
+		}
+	}
+	// lease.IssuedAt is zero only if some construction site built a GroupLease
+	// literal without setting it. Both existing sites (executeGroup above and
+	// CommitGroupResult) do set it; this guard is structural defense against a
+	// future third site making the same mistake, not a known live path. A
+	// silent zero-value would otherwise report a duration of decades
+	// (time.Since of the zero time), quietly wrecking the histogram rather
+	// than failing loudly.
+	if !lease.IssuedAt.IsZero() {
+		e.notifyGroupCommit(ctx, commitOutcome, time.Since(lease.IssuedAt))
 	}
 
 	if res.ExecutionDone {

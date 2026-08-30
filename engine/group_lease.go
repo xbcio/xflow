@@ -117,6 +117,7 @@ func (e *Engine) BuildGroupLease(ctx context.Context, t *Task) (*TaskLease, *Gro
 	if !acquired {
 		return nil, nil, ErrGroupLeaseAlreadyActive
 	}
+	e.notifyGroupLeaseAcquired(ctx)
 
 	// Build the external TaskLease wrapper. Input is nil — the group payload
 	// is the single source of truth.
@@ -300,6 +301,17 @@ func (e *Engine) CommitGroupResult(ctx context.Context, lease *TaskLease, res Gr
 	}
 
 	// Delegate to the existing commitGroup path.
+	//
+	// IssuedAt must be carried over from the outer TaskLease (set by
+	// BuildGroupLease/RecoverGroupLease from the persisted lease): commitGroup
+	// derives the exec-duration observation from lease.IssuedAt, and a
+	// zero-value time.Time there would report ~56 years of duration on every
+	// remote commit — this is the only production path (a runner reports back
+	// through CommitGroupResult), so leaving it unset would silently corrupt
+	// the histogram in production while local (executeGroup) tests, which set
+	// IssuedAt directly, stayed green. See commitGroup's own IssuedAt guard for
+	// the belt-and-braces defense against a future third construction site
+	// making the same mistake.
 	groupLease := &GroupLease{
 		ExecutionID:  lease.Task.ExecutionID,
 		GroupUnitIdx: unitIdx,
@@ -307,6 +319,7 @@ func (e *Engine) CommitGroupResult(ctx context.Context, lease *TaskLease, res Gr
 		LeaseID:      lease.LeaseID,
 		LeaseToken:   lease.LeaseToken,
 		Attempt:      lease.Attempt,
+		IssuedAt:     lease.IssuedAt,
 	}
 
 	err = e.commitGroup(ctx, g, groupLease, gm, exits, fatal, groupResultError(res), true)
@@ -338,5 +351,26 @@ func (e *Engine) RenewGroupLease(ctx context.Context, lease *TaskLease, extend t
 		return false, fmt.Errorf("state store does not support group leases")
 	}
 	newDeadline := time.Now().UTC().Add(extend)
-	return gs.RenewGroupLease(ctx, lease.Task.ExecutionID, lease.Task.UnitIdx, lease.LeaseToken, newDeadline)
+	start := time.Now()
+	renewed, err := gs.RenewGroupLease(ctx, lease.Task.ExecutionID, lease.Task.UnitIdx, lease.LeaseToken, newDeadline)
+	d := time.Since(start)
+
+	// result is one of "ok" / "not_renewed" / "error" — never "fenced".
+	// RenewGroupLease's backend contract returns a bare (bool, error): both the
+	// local state store and the Redis Lua script fold three distinct causes —
+	// the lease no longer exists, the unit already reached a terminal state, or
+	// the caller's token lost a real fence race — into the same
+	// (false, nil) return. There is no signal left at this layer to tell them
+	// apart, so reporting "fenced" here would be inventing a distinction the
+	// backend never gave us. "not_renewed" names the ambiguity instead of
+	// hiding it.
+	result := "ok"
+	switch {
+	case err != nil:
+		result = "error"
+	case !renewed:
+		result = "not_renewed"
+	}
+	e.notifyGroupLeaseRenew(ctx, result, d)
+	return renewed, err
 }

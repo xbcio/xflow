@@ -459,6 +459,7 @@ func (e *Engine) reclaimGroupLease(ctx context.Context, lease ExpiredLease, task
 		if !revoked {
 			return false, nil
 		}
+		e.notifyGroupLeaseExpired(ctx)
 		if err := e.FlushOutbox(ctx, lease.ExecutionID); err != nil {
 			return true, fmt.Errorf("deliver reclaimed group task %q/#%d: %w", lease.ExecutionID, lease.UnitIdx, err)
 		}
@@ -476,6 +477,7 @@ func (e *Engine) reclaimGroupLease(ctx context.Context, lease ExpiredLease, task
 	if !expired {
 		return false, nil
 	}
+	e.notifyGroupLeaseExpired(ctx)
 	if err := e.queue.Enqueue(ctx, &task); err != nil {
 		// Same window the node path documents: the unit is now pending with no
 		// queued task and no lease, so ListExpiredLeases can no longer see it.

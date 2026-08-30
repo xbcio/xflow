@@ -45,19 +45,18 @@ func TestEveryMetricNameInThisPackageHasHelpText(t *testing.T) {
 	// series.
 	//
 	// This list is NOT the full inventory of dead xflow_group_* names, and help
-	// text is not evidence of wiring. Every method on GroupMetrics is dead —
-	// NewGroupMetrics has no caller anywhere, and nothing outside this package
-	// writes an "xflow_group_" literal — but the ~13 names that happen to have
-	// help text pass through the branch above and never reach this map. Reading
-	// the six entries below as "these are the unwired ones" is exactly backwards.
-	// Wiring the family is a control-plane and runner change (see group.go); the
-	// two label values with no signal source behind them, lease_renew's "fenced"
-	// and activation's "reconcile", have to be dropped or given one first.
+	// text is not evidence of wiring. Every method on GroupMetrics used to be
+	// dead — NewGroupMetrics had no caller anywhere, and nothing outside this
+	// package wrote an "xflow_group_" literal. package_cache_total (see
+	// execution/subgraph/cache.go) and the six lease/commit names — acquired,
+	// expired, renew total+duration, commit total+exec-duration (see
+	// engine/observers.go's GroupObserver and observability/metrics/
+	// group_observer.go) — are wired now, so they were removed from this list.
+	// selector_fallback_total is the one name in this family still unwired.
+	// activation's "reconcile" action value is a separate, still-open gap (no
+	// signal source produces it) that this list does not track, because the
+	// metric itself IS wired — only one of its label values lacks a source.
 	unwired := map[string]string{
-		"xflow_group_commit_total":            "group.go, no caller outside this package",
-		"xflow_group_exec_duration_seconds":   "group.go, no caller outside this package",
-		"xflow_group_lease_acquired_total":    "group.go, no caller outside this package",
-		"xflow_group_lease_expired_total":     "group.go, no caller outside this package",
 		"xflow_group_selector_fallback_total": "group.go, no caller outside this package",
 	}
 
