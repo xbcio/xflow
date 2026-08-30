@@ -58,6 +58,9 @@ jobs:
       - name: Concurrency tests
         run: make test-concurrency
 
+      - name: Stress tests
+        run: make test-stress
+
       - name: Coverage
         run: |
           go test ./... -race -count=1 -timeout 120s -coverprofile=coverage.out -covermode=atomic
