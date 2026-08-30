@@ -72,6 +72,15 @@ type EntryActivationMetrics interface {
 	// namespace's count silently overwrite every prior namespace's
 	// contribution (an undercount, not an error).
 	SetGroupActivationActive(value float64)
+	// OnGroupSelectorFallback reports that fallbackChooseRunner succeeded: a
+	// "default"-mode activation's grace window elapsed with no label-matching
+	// runner available, so it was assigned to a non-matching (but capable,
+	// same-namespace) runner instead. Must be called only after
+	// fallbackChooseRunner returns ok == true, never at its call site —
+	// fallbackChooseRunner also returns false on every grace-window-pending
+	// poll, and counting those would report reconcile-pass frequency rather
+	// than fallback events.
+	OnGroupSelectorFallback()
 }
 
 // EntryActivationReconcilerConfig configures an EntryActivationReconciler.
@@ -115,8 +124,8 @@ type EntryActivationReconcilerConfig struct {
 	Logger engine.Logger
 	// Metrics, when set, receives GROUP entry-unit activation-controller
 	// events (xflow_group_activation_total / _generation_fenced_total /
-	// _active). nil disables reporting; non-group entry units are excluded
-	// either way (see EntryActivationMetrics doc).
+	// _active / _selector_fallback_total). nil disables reporting; non-group
+	// entry units are excluded either way (see EntryActivationMetrics doc).
 	Metrics EntryActivationMetrics
 }
 
@@ -323,6 +332,19 @@ func (r *EntryActivationReconciler) recordGroupActivationFenced(act *engine.Entr
 	r.cfg.Metrics.OnGroupActivationFenced()
 }
 
+// recordGroupSelectorFallback reports a successful default-selector fallback
+// assignment to cfg.Metrics, but ONLY for GROUP entry units, mirroring
+// recordGroupActivation. Callers must invoke this only after
+// fallbackChooseRunner has returned ok == true — see OnGroupSelectorFallback's
+// doc for why the call site (not the earlier, grace-pending calls) is the only
+// correct place.
+func (r *EntryActivationReconciler) recordGroupSelectorFallback(act *engine.EntryActivation) {
+	if r.cfg.Metrics == nil || act.NodeType != engine.GroupNodeType {
+		return
+	}
+	r.cfg.Metrics.OnGroupSelectorFallback()
+}
+
 func (r *EntryActivationReconciler) reconcileOne(ctx context.Context, act *engine.EntryActivation, live []RunnerSnapshot, now time.Time) error {
 	key := keyOf(act)
 
@@ -406,6 +428,7 @@ func (r *EntryActivationReconciler) reconcileOne(ctx context.Context, act *engin
 					"entry_unit_id", act.EntryUnitID,
 					"runner_id", chosen.RunnerID)
 			}
+			r.recordGroupSelectorFallback(act)
 		} else {
 			// required mode (or nil selector which already matches anything in
 			// chooseRunner): fail-closed — leave unassigned for a later pass.

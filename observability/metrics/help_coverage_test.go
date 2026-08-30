@@ -34,8 +34,7 @@ import (
 // also put its failures in a package whose owners do not own metricHelp.
 func TestEveryMetricNameInThisPackageHasHelpText(t *testing.T) {
 	// unwired names are emitted by a method in this package that no production
-	// code outside observability/metrics calls — the xflow_group_* family
-	// (group.go) has no wiring point installed. An unwired metric is never
+	// code outside observability/metrics calls. An unwired metric is never
 	// created, so it never reaches /metrics and its missing description is a
 	// symptom of the dead wiring rather than an independent defect.
 	//
@@ -48,17 +47,23 @@ func TestEveryMetricNameInThisPackageHasHelpText(t *testing.T) {
 	// text is not evidence of wiring. Every method on GroupMetrics used to be
 	// dead — NewGroupMetrics had no caller anywhere, and nothing outside this
 	// package wrote an "xflow_group_" literal. package_cache_total (see
-	// execution/subgraph/cache.go) and the six lease/commit names — acquired,
+	// execution/subgraph/cache.go), the six lease/commit names — acquired,
 	// expired, renew total+duration, commit total+exec-duration (see
 	// engine/observers.go's GroupObserver and observability/metrics/
-	// group_observer.go) — are wired now, so they were removed from this list.
-	// selector_fallback_total is the one name in this family still unwired.
-	// activation's "reconcile" action value is a separate, still-open gap (no
-	// signal source produces it) that this list does not track, because the
-	// metric itself IS wired — only one of its label values lacks a source.
-	unwired := map[string]string{
-		"xflow_group_selector_fallback_total": "group.go, no caller outside this package",
-	}
+	// group_observer.go) — the three activation-controller names — activation
+	// total, generation-fenced total, active gauge — and selector_fallback_total
+	// (both the latter two wired via
+	// service/control/entry_activation_reconciler.go's assignUnowned/Reconcile)
+	// are all wired now. That closes out every name this family ever had, which
+	// is why the map below is empty rather than deleted outright: the mechanism
+	// stays in place for whatever lands unwired next.
+	//
+	// (Historical note: an earlier version of this comment flagged activation's
+	// "reconcile" action-label value as a separate, still-open gap tracked
+	// outside this map. That value was removed from the action enum entirely in
+	// #48 — before activation-controller metrics were wired at all — so there is
+	// nothing left for that note to describe.)
+	unwired := map[string]string{}
 
 	names := metricNamesInPackage(t)
 	// 76 consts plus the 13 inline literals in group.go was the count when this

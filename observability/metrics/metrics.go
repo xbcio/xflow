@@ -364,6 +364,7 @@ var metricHelp = map[string]string{
 	"xflow_group_activation_total":                   "Activation controller actions, partitioned by action (activate/deactivate).",
 	"xflow_group_activation_generation_fenced_total": "Activation attempts rejected due to generation fence.",
 	"xflow_group_activation_active":                  "Number of currently active group activations.",
+	"xflow_group_selector_fallback_total":            "Default-selector fallback assignments: the grace period for a label-matching runner elapsed, so the group was assigned to a non-matching runner instead. Capability and namespace checks are never relaxed by this fallback — only the label selector is.",
 	"xflow_group_lease_acquired_total":               "Group unit leases successfully acquired, by either the local (in-process) or remote (runner-embedded) executor path.",
 	"xflow_group_lease_expired_total":                "Group unit leases reclaimed after their deadline passed, by either the atomic revoke-with-redelivery path or the plain expire-then-enqueue path.",
 	"xflow_group_lease_renew_total":                  "Group lease renewal attempts, partitioned by result (ok/not_renewed/error). not_renewed folds three backend causes — lease gone, unit already terminal, token fenced — that the state stores collapse into a single false return.",

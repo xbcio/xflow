@@ -7,15 +7,17 @@ import (
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/namespace"
+	"github.com/xbcio/xflow/types"
 )
 
 // fakeEntryActivationMetrics implements EntryActivationMetrics for tests. It
 // is a plain counter with no synchronization: every test using it drives the
 // reconciler from a single goroutine.
 type fakeEntryActivationMetrics struct {
-	actionCounts map[string]int
-	fenced       int
-	activeSets   []float64
+	actionCounts     map[string]int
+	fenced           int
+	activeSets       []float64
+	selectorFallback int
 }
 
 func newFakeEntryActivationMetrics() *fakeEntryActivationMetrics {
@@ -32,6 +34,10 @@ func (f *fakeEntryActivationMetrics) OnGroupActivationFenced() {
 
 func (f *fakeEntryActivationMetrics) SetGroupActivationActive(value float64) {
 	f.activeSets = append(f.activeSets, value)
+}
+
+func (f *fakeEntryActivationMetrics) OnGroupSelectorFallback() {
+	f.selectorFallback++
 }
 
 // lastActive returns the most recently Set gauge value, or -1 if Set was
@@ -620,5 +626,243 @@ func TestEntryActivationReconciler_NilMetricsDoesNotPanic(t *testing.T) {
 
 	if err := r.Reconcile(ctx, now); err != nil {
 		t.Fatalf("Reconcile with nil Metrics must not panic or error: %v", err)
+	}
+}
+
+// groupFallbackTestActivation builds a "default"-mode activation whose
+// MatchLabels no live runner in these tests satisfies, so chooseRunner always
+// fails on label match and assignUnowned falls through to
+// fallbackChooseRunner.
+func groupFallbackTestActivation(nodeType string) engine.EntryActivation {
+	act := groupTestActivation(nodeType)
+	act.Selector = &types.RunnerSelector{
+		Mode:        types.RunnerSelectorModeDefault,
+		MatchLabels: map[string]string{"region": "us"},
+	}
+	return act
+}
+
+// TestEntryActivationReconciler_GroupSelectorFallbackEmitsMetric is the
+// positive control for OnGroupSelectorFallback: a GROUP activation with a
+// "default" selector, no label-matching live runner, and the grace window
+// elapsed must be counted exactly once. Deleting the
+// r.recordGroupSelectorFallback(act) call at the fallback success site (M-1)
+// must turn this red.
+func TestEntryActivationReconciler_GroupSelectorFallbackEmitsMetric(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryEntryActivationStore()
+	act := groupFallbackTestActivation(engine.GroupNodeType)
+	if err := store.Upsert(ctx, act); err != nil {
+		t.Fatal(err)
+	}
+	key := keyOfActivation(act)
+
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	// runner-a is live, in-namespace, and capable, but carries none of the
+	// selector's MatchLabels, so chooseRunner's label match always fails here.
+	lister := &mockRunnerLister{runners: []RunnerSnapshot{{
+		RunnerID: "runner-a", Capacity: 4, LastHeartbeat: now,
+	}}}
+	// A short FallbackGrace (well under DefaultRunnerLiveTTL) lets the second
+	// pass below land after the grace window elapses while runner-a is still
+	// live — DefaultSelectorFallback (30s) equals DefaultRunnerLiveTTL, so
+	// waiting past the real default grace would also expire the runner's
+	// heartbeat and mask the fallback path behind a liveness failure instead.
+	sel := DefaultRunnerSelector()
+	sel.FallbackGrace = time.Second
+	fm := newFakeEntryActivationMetrics()
+	r := NewEntryActivationReconciler(EntryActivationReconcilerConfig{
+		Store: store, Lister: lister, Selector: &sel,
+		Namespaces: []namespace.Namespace{namespace.Default}, LeaseTTL: time.Minute,
+		Metrics: fm,
+	})
+
+	// First pass: fallbackChooseRunner only starts grace-window tracking and
+	// returns false — nothing must be counted yet.
+	if err := r.Reconcile(ctx, now); err != nil {
+		t.Fatalf("Reconcile (grace start): %v", err)
+	}
+	if fm.selectorFallback != 0 {
+		t.Fatalf("selector fallback count = %d, want 0 before the grace window elapses", fm.selectorFallback)
+	}
+	got, ok, err := store.Get(ctx, key)
+	if err != nil || !ok || got.RunnerID != "" {
+		t.Fatalf("precondition: expected unassigned after grace-start pass, got %+v ok=%v err=%v", got, ok, err)
+	}
+
+	// Second pass, after the grace window elapses: fallbackChooseRunner
+	// succeeds and assigns runner-a despite the label mismatch.
+	later := now.Add(2 * time.Second)
+	if err := r.Reconcile(ctx, later); err != nil {
+		t.Fatalf("Reconcile (fallback): %v", err)
+	}
+
+	got, ok, err = store.Get(ctx, key)
+	if err != nil || !ok || got.RunnerID != "runner-a" {
+		t.Fatalf("expected fallback assignment to runner-a, got %+v ok=%v err=%v", got, ok, err)
+	}
+	if fm.selectorFallback != 1 {
+		t.Fatalf("selector fallback count = %d, want exactly 1", fm.selectorFallback)
+	}
+}
+
+// TestEntryActivationReconciler_NonGroupSelectorFallbackEmitsNoMetric is
+// negative control A: a standalone (non-group) trigger entry unit driven
+// through the exact same fallback-success path as the positive control above
+// must report selector-fallback count 0. Removing the
+// act.NodeType != engine.GroupNodeType guard from recordGroupSelectorFallback
+// (M-3) must turn this red.
+func TestEntryActivationReconciler_NonGroupSelectorFallbackEmitsNoMetric(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryEntryActivationStore()
+	act := groupFallbackTestActivation("kafka.source")
+	if err := store.Upsert(ctx, act); err != nil {
+		t.Fatal(err)
+	}
+	key := keyOfActivation(act)
+
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	lister := &mockRunnerLister{runners: []RunnerSnapshot{{
+		RunnerID: "runner-a", Capacity: 4, LastHeartbeat: now,
+	}}}
+	// See TestEntryActivationReconciler_GroupSelectorFallbackEmitsMetric for
+	// why FallbackGrace must be shortened here.
+	sel := DefaultRunnerSelector()
+	sel.FallbackGrace = time.Second
+	fm := newFakeEntryActivationMetrics()
+	r := NewEntryActivationReconciler(EntryActivationReconcilerConfig{
+		Store: store, Lister: lister, Selector: &sel,
+		Namespaces: []namespace.Namespace{namespace.Default}, LeaseTTL: time.Minute,
+		Metrics: fm,
+	})
+
+	if err := r.Reconcile(ctx, now); err != nil {
+		t.Fatalf("Reconcile (grace start): %v", err)
+	}
+	later := now.Add(2 * time.Second)
+	if err := r.Reconcile(ctx, later); err != nil {
+		t.Fatalf("Reconcile (fallback): %v", err)
+	}
+
+	got, ok, err := store.Get(ctx, key)
+	if err != nil || !ok || got.RunnerID != "runner-a" {
+		t.Fatalf("precondition: expected fallback assignment to runner-a even for a non-group unit, got %+v ok=%v err=%v", got, ok, err)
+	}
+	if fm.selectorFallback != 0 {
+		t.Fatalf("selector fallback count = %d, want exactly 0 for a non-group entry unit", fm.selectorFallback)
+	}
+}
+
+// TestEntryActivationReconciler_SelectorFallbackGraceUnelapsedEmitsNoMetric is
+// negative control B: fallbackChooseRunner is invoked (a "default"-mode
+// activation with no label-matching runner) but its grace window has not
+// elapsed, so it returns ok == false. This pins that the metric is recorded
+// at the fallback SUCCESS site, not at the fallbackChooseRunner call site —
+// moving the call to unconditionally fire right after the call at :473
+// (before checking ok) (M-2) must turn this red, because every reconcile pass
+// during the grace window would otherwise be counted as a fallback.
+func TestEntryActivationReconciler_SelectorFallbackGraceUnelapsedEmitsNoMetric(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryEntryActivationStore()
+	act := groupFallbackTestActivation(engine.GroupNodeType)
+	if err := store.Upsert(ctx, act); err != nil {
+		t.Fatal(err)
+	}
+	key := keyOfActivation(act)
+
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	lister := &mockRunnerLister{runners: []RunnerSnapshot{{
+		RunnerID: "runner-a", Capacity: 4, LastHeartbeat: now,
+	}}}
+	sel := DefaultRunnerSelector()
+	fm := newFakeEntryActivationMetrics()
+	r := NewEntryActivationReconciler(EntryActivationReconcilerConfig{
+		Store: store, Lister: lister, Selector: &sel,
+		Namespaces: []namespace.Namespace{namespace.Default}, LeaseTTL: time.Minute,
+		Metrics: fm,
+	})
+
+	// Two passes, both still inside the grace window: fallbackChooseRunner
+	// returns false both times (the second call finds tracked-but-not-elapsed,
+	// per fallbackChooseRunner's own logic), so nothing must ever be counted.
+	if err := r.Reconcile(ctx, now); err != nil {
+		t.Fatalf("Reconcile (pass 1): %v", err)
+	}
+	if err := r.Reconcile(ctx, now.Add(time.Second)); err != nil {
+		t.Fatalf("Reconcile (pass 2): %v", err)
+	}
+
+	got, ok, err := store.Get(ctx, key)
+	if err != nil || !ok || got.RunnerID != "" {
+		t.Fatalf("precondition: expected still-unassigned within the grace window, got %+v ok=%v err=%v", got, ok, err)
+	}
+	if fm.selectorFallback != 0 {
+		t.Fatalf("selector fallback count = %d, want exactly 0 while the grace window has not elapsed", fm.selectorFallback)
+	}
+}
+
+// TestEntryActivationReconciler_RequiredSelectorEmitsNoFallbackMetric is
+// negative control C: a "required"-mode selector with no matching runner
+// takes assignUnowned's else branch (fail-closed, return nil) and never calls
+// fallbackChooseRunner at all. Driven through the SAME two-pass grace-window
+// shape as the positive control (TestEntryActivationReconciler_
+// GroupSelectorFallbackEmitsMetric) — a single pass cannot distinguish
+// "never reaches fallbackChooseRunner" from "reaches it but the first,
+// tracking-only call always returns false regardless of mode," since both
+// look identical after only one Reconcile call. Removing the
+// selectorIsDefault gate so required-mode activations also reach the
+// fallback path (M-4) must turn this red only with the second pass present.
+func TestEntryActivationReconciler_RequiredSelectorEmitsNoFallbackMetric(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryEntryActivationStore()
+	act := groupTestActivation(engine.GroupNodeType)
+	act.Selector = &types.RunnerSelector{
+		Mode:        types.RunnerSelectorModeRequired,
+		MatchLabels: map[string]string{"region": "us"},
+	}
+	if err := store.Upsert(ctx, act); err != nil {
+		t.Fatal(err)
+	}
+	key := keyOfActivation(act)
+
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	lister := &mockRunnerLister{runners: []RunnerSnapshot{{
+		RunnerID: "runner-a", Capacity: 4, LastHeartbeat: now,
+	}}}
+	// See TestEntryActivationReconciler_GroupSelectorFallbackEmitsMetric for
+	// why FallbackGrace must be shortened here.
+	sel := DefaultRunnerSelector()
+	sel.FallbackGrace = time.Second
+	fm := newFakeEntryActivationMetrics()
+	r := NewEntryActivationReconciler(EntryActivationReconcilerConfig{
+		Store: store, Lister: lister, Selector: &sel,
+		Namespaces: []namespace.Namespace{namespace.Default}, LeaseTTL: time.Minute,
+		Metrics: fm,
+	})
+
+	// First pass: with the gate removed (M-4) this would be
+	// fallbackChooseRunner's tracking-only call (returns false regardless);
+	// with the gate intact this never reaches fallbackChooseRunner at all.
+	// Either way nothing is assigned or counted after this call alone — the
+	// second pass below is what actually distinguishes the two.
+	if err := r.Reconcile(ctx, now); err != nil {
+		t.Fatalf("Reconcile (pass 1): %v", err)
+	}
+	// Second pass, past the (shortened) grace window but still within
+	// DefaultRunnerLiveTTL: with the gate removed, fallbackChooseRunner would
+	// now succeed and assign runner-a despite the label mismatch, recording
+	// the metric. With the gate intact, required mode never reaches
+	// fallbackChooseRunner, so nothing changes.
+	later := now.Add(2 * time.Second)
+	if err := r.Reconcile(ctx, later); err != nil {
+		t.Fatalf("Reconcile (pass 2): %v", err)
+	}
+
+	got, ok, err := store.Get(ctx, key)
+	if err != nil || !ok || got.RunnerID != "" {
+		t.Fatalf("precondition: expected fail-closed unassigned for required mode with no matching runner, got %+v ok=%v err=%v", got, ok, err)
+	}
+	if fm.selectorFallback != 0 {
+		t.Fatalf("selector fallback count = %d, want exactly 0 for required-mode selector", fm.selectorFallback)
 	}
 }

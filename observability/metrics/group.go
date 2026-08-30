@@ -27,9 +27,22 @@ func (g *GroupMetrics) OnGroupLeaseExpired() {
 	g.m.Inc("xflow_group_lease_expired_total", nil)
 }
 
-// OnGroupSelectorFallback increments the selector fallback counter.
-func (g *GroupMetrics) OnGroupSelectorFallback(mode string) {
-	g.m.Inc("xflow_group_selector_fallback_total", map[string]string{"mode": mode})
+// OnGroupSelectorFallback increments the selector fallback counter. The
+// caller (service/control/entry_activation_reconciler.go's assignUnowned)
+// calls this only once fallbackChooseRunner has returned ok == true — a
+// "default"-mode activation's grace window elapsed and it was assigned to a
+// runner whose labels do not match — never on the grace-window-pending calls
+// that precede a success, which return ok == false and must not be counted.
+//
+// No "mode" label: the only production call site is gated by
+// selectorIsDefault(act.Selector), and the "required" branch returns before
+// ever reaching fallbackChooseRunner — types.RunnerSelectorMode has only
+// "default" and "required", so fallback is unreachable in required mode. A
+// mode label on this counter would therefore carry exactly one distinct
+// value ("default", or "" for a legacy record that selectorIsDefault also
+// treats as default) — not a label, just overhead.
+func (g *GroupMetrics) OnGroupSelectorFallback() {
+	g.m.Inc("xflow_group_selector_fallback_total", nil)
 }
 
 // OnGroupPackageCache increments the package cache counter.
