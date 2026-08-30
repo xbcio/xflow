@@ -58,7 +58,10 @@ func (g *GroupMetrics) OnGroupAdmissionDuration(d time.Duration) {
 // --- Activation controller metrics ---
 
 // OnGroupActivation increments the group activation counter with the action label.
-// Action values: activate, deactivate, revoke, reconcile.
+// Action values: activate, deactivate, revoke.
+//
+// Never "reconcile": Reconcile() is the ticker-driven entry point for a whole
+// sweep, not a per-activation action, so nothing produces it as a label value.
 func (g *GroupMetrics) OnGroupActivation(action string) {
 	g.m.Inc("xflow_group_activation_total", map[string]string{"action": action})
 }
