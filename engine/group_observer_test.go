@@ -171,6 +171,74 @@ func TestNotifyGroupLeaseAcquired_LocalPath(t *testing.T) {
 	}
 }
 
+// contendedGroupState is a GroupStateStore test double whose AcquireGroupLease
+// always loses the race — the backend's way of saying another executor already
+// owns this unit. Distinct from fakeGroupState, which always acquires.
+type contendedGroupState struct {
+	*fakeState
+}
+
+func (c *contendedGroupState) AcquireGroupLease(_ context.Context, _ *GroupLease) (bool, error) {
+	return false, nil
+}
+
+func (c *contendedGroupState) RenewGroupLease(_ context.Context, _ types.ExecutionID, _ int, _ LeaseToken, _ time.Time) (bool, error) {
+	return true, nil
+}
+
+func (c *contendedGroupState) CommitGroup(_ context.Context, _ GroupCommitRequest) (GroupCommitResult, error) {
+	return GroupCommitResult{Outcome: CommitOutcomeAccepted, Applied: true}, nil
+}
+
+// TestNotifyGroupLeaseAcquired_LocalPathContendedDoesNotFire is the negative
+// control for the local (executeGroup) acquisition path: when the backend hands
+// back acquired=false the unit belongs to somebody else, so this executor must
+// not report an acquisition it never made. The remote path has its own negative
+// control inside TestNotifyGroupLeaseAcquired_RemotePath (the second, failing
+// BuildGroupLease); the two paths guard separate call sites and a mutation in
+// one is invisible to the other's test.
+func TestNotifyGroupLeaseAcquired_LocalPathContendedDoesNotFire(t *testing.T) {
+	g := buildSingleGroupGraph(t)
+	groupUnitIdx := findGroupUnit(t, g)
+
+	obs := &recordingGroupObserver{}
+	fake := &fakeGroupExecutor{exits: []GroupExit{{NodeName: "g.sink", Port: "main", Data: map[string]any{"ok": true}}}}
+	state := &contendedGroupState{fakeState: newFakeState()}
+	execID := types.ExecutionID("exec-observer-local-contended")
+	state.fakeState.CreateExecution(context.Background(), &ExecutionSnapshot{
+		ID:     execID,
+		Graph:  g,
+		Status: types.ExecutionStatusRunning,
+	})
+
+	q := &fakeQueue{}
+	eng := New(state, q, WithGroupExecutor(fake), WithGroupObserver(obs))
+	eng.cacheExecutionGraph(execID, g)
+
+	handled, err := eng.handleSystemTask(context.Background(), &Task{
+		ExecutionID: execID,
+		NodeName:    "g",
+		UnitIdx:     groupUnitIdx,
+		Type:        TaskTypeGroupExec,
+	}, true)
+	if err != nil {
+		t.Fatalf("handleSystemTask: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled=true for TaskTypeGroupExec")
+	}
+	if obs.leaseAcquired != 0 {
+		t.Fatalf("leaseAcquired = %d, want exactly 0 — executeGroup reported an "+
+			"acquisition the backend refused", obs.leaseAcquired)
+	}
+	// The discard must happen before execution, not after: an observer count of
+	// zero would also hold if the notify moved below a group that ran anyway.
+	if fake.calls != 0 {
+		t.Fatalf("ExecuteGroup calls = %d, want 0 — a lost lease race must discard "+
+			"the task without executing the group", fake.calls)
+	}
+}
+
 // findGroupUnit locates the single group unit's index in g. Shared by tests
 // that drive the local executeGroup path through handleSystemTask.
 func findGroupUnit(t *testing.T, g *graph.Graph) int {

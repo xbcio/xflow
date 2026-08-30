@@ -76,7 +76,13 @@ func (g *GroupMetrics) SetGroupActivationActive(value float64) {
 // --- Lease renewal metrics ---
 
 // OnGroupLeaseRenew increments the lease renewal counter with the result label.
-// Result values: ok, fenced, error.
+// Result values: ok, not_renewed, error.
+//
+// Never "fenced": the GroupStateStore contract returns a bare (bool, error), so
+// a real fence loss, an already-terminal unit, and a vanished lease all arrive
+// as the same (false, nil). The producer (engine.RenewGroupLease) names that
+// ambiguity "not_renewed" rather than inventing a distinction the backend never
+// gave it.
 func (g *GroupMetrics) OnGroupLeaseRenew(result string) {
 	g.m.Inc("xflow_group_lease_renew_total", map[string]string{"result": result})
 }
