@@ -401,6 +401,138 @@ func TestEntryActivationReconciler_FencedEmitsMetricOnLostGenerationRace(t *test
 	}
 }
 
+// TestEntryActivationReconciler_NonGroupFencedRaceEmitsNoMetric is the
+// negative control for recordGroupActivationFenced's own discriminator
+// (act.NodeType == engine.GroupNodeType), independent of
+// recordGroupActivation's copy of the same check. A standalone (non-group)
+// entry unit that loses the exact same generation race as
+// TestEntryActivationReconciler_FencedEmitsMetricOnLostGenerationRace must
+// report fenced == 0. Removing the NodeType guard from
+// recordGroupActivationFenced specifically (leaving recordGroupActivation's
+// guard untouched) must turn this red.
+func TestEntryActivationReconciler_NonGroupFencedRaceEmitsNoMetric(t *testing.T) {
+	ctx := context.Background()
+	inner := NewMemoryEntryActivationStore()
+	act := groupTestActivation("kafka.source")
+	if err := inner.Upsert(ctx, act); err != nil {
+		t.Fatal(err)
+	}
+	store := &raceLosingAssignStore{EntryActivationStore: inner}
+
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	lister := &mockRunnerLister{runners: []RunnerSnapshot{{
+		RunnerID: "runner-a", Capacity: 4, LastHeartbeat: now,
+	}}}
+	sel := DefaultRunnerSelector()
+	fm := newFakeEntryActivationMetrics()
+	r := NewEntryActivationReconciler(EntryActivationReconcilerConfig{
+		Store: store, Lister: lister, Selector: &sel,
+		Namespaces: []namespace.Namespace{namespace.Default}, LeaseTTL: time.Minute,
+		Metrics: fm,
+	})
+
+	if err := r.Reconcile(ctx, now); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	if fm.fenced != 0 {
+		t.Fatalf("fenced count = %d, want exactly 0 for a non-group entry unit", fm.fenced)
+	}
+}
+
+// TestEntryActivationReconciler_ActiveGaugeExcludesNonGroupAndLegacy pins the
+// gauge's OWN copy of the group discriminator at the Reconcile driver
+// (entry_activation_reconciler.go's "activations[i].NodeType ==
+// engine.GroupNodeType && activations[i].RunnerID != \"\"" check), which is a
+// third, independent occurrence of the same condition guarded separately by
+// recordGroupActivation and recordGroupActivationFenced. Neither of the
+// counter-focused negative controls above observes the gauge while a
+// non-group / legacy activation is actively assigned (RunnerID != ""), so
+// deleting "activations[i].NodeType == engine.GroupNodeType &&" from the
+// gauge's own condition (leaving both recordGroupActivation* discriminators
+// untouched) would NOT be caught by them. This test assigns one non-group,
+// one legacy (NodeType==""), and one GROUP activation — all left with a live
+// RunnerID after the same Reconcile pass — and asserts the gauge is EXACTLY
+// 1, not >= 1.
+func TestEntryActivationReconciler_ActiveGaugeExcludesNonGroupAndLegacy(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryEntryActivationStore()
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	deadline := now.Add(time.Hour)
+
+	nonGroup := groupTestActivation("kafka.source")
+	nonGroup.WorkflowID = "wf-non-group"
+	if err := store.Upsert(ctx, nonGroup); err != nil {
+		t.Fatal(err)
+	}
+	nonGroupKey := keyOfActivation(nonGroup)
+	if ok, err := store.Assign(ctx, nonGroupKey, "runner-non-group", "", 1, deadline); err != nil || !ok {
+		t.Fatalf("Assign non-group: ok=%v err=%v", ok, err)
+	}
+
+	legacy := groupTestActivation("")
+	legacy.WorkflowID = "wf-legacy"
+	if err := store.Upsert(ctx, legacy); err != nil {
+		t.Fatal(err)
+	}
+	legacyKey := keyOfActivation(legacy)
+	if ok, err := store.Assign(ctx, legacyKey, "runner-legacy", "", 1, deadline); err != nil || !ok {
+		t.Fatalf("Assign legacy: ok=%v err=%v", ok, err)
+	}
+
+	group := groupTestActivation(engine.GroupNodeType)
+	group.WorkflowID = "wf-group"
+	if err := store.Upsert(ctx, group); err != nil {
+		t.Fatal(err)
+	}
+	groupKey := keyOfActivation(group)
+	if ok, err := store.Assign(ctx, groupKey, "runner-group", "", 1, deadline); err != nil || !ok {
+		t.Fatalf("Assign group: ok=%v err=%v", ok, err)
+	}
+
+	// All three owners are live and matching, so reconcileExisting keeps every
+	// assignment as-is (no fencing, no deactivation) — RunnerID stays non-empty
+	// on all three when the gauge is computed.
+	lister := &mockRunnerLister{runners: []RunnerSnapshot{
+		{RunnerID: "runner-non-group", Capacity: 4, LastHeartbeat: now},
+		{RunnerID: "runner-legacy", Capacity: 4, LastHeartbeat: now},
+		{RunnerID: "runner-group", Capacity: 4, LastHeartbeat: now},
+	}}
+	sel := DefaultRunnerSelector()
+	fm := newFakeEntryActivationMetrics()
+	r := NewEntryActivationReconciler(EntryActivationReconcilerConfig{
+		Store: store, Lister: lister, Selector: &sel,
+		Namespaces: []namespace.Namespace{namespace.Default}, LeaseTTL: time.Minute,
+		Metrics: fm,
+	})
+
+	if err := r.Reconcile(ctx, now); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	// Precondition: all three activations are still assigned after the pass
+	// (otherwise this test would trivially pass with gauge == 0 regardless of
+	// the discriminator under test).
+	for _, k := range []struct {
+		name string
+		key  engine.EntryActivationKey
+		want string
+	}{
+		{"non-group", nonGroupKey, "runner-non-group"},
+		{"legacy", legacyKey, "runner-legacy"},
+		{"group", groupKey, "runner-group"},
+	} {
+		got, ok, err := store.Get(ctx, k.key)
+		if err != nil || !ok || got.RunnerID != k.want {
+			t.Fatalf("precondition %s: expected RunnerID=%q, got %+v ok=%v err=%v", k.name, k.want, got, ok, err)
+		}
+	}
+
+	if got := fm.lastActive(); got != 1 {
+		t.Fatalf("active gauge = %v, want exactly 1 (only the GROUP activation counts; non-group and legacy must be excluded)", got)
+	}
+}
+
 // TestEntryActivationReconciler_ActiveGaugeSetOncePerPassAcrossNamespaces pins
 // the gauge trap called out in the task brief: SetGroupActivationActive
 // carries no namespace label, so it must be Set exactly once per Reconcile
