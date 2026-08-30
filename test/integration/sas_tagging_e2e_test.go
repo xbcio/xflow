@@ -76,7 +76,13 @@ func TestSASTrafficTaggingE2E(t *testing.T) {
 	// a multi-MB base64 string. This is the production path — ScriptFile puts
 	// the artifact into the store at AddWorkflow time, and Execute fetches it
 	// by digest at runtime.
-	if err := node.RegisterWasmSupplyConsumerByDigest(taggerDigest, supplyName); err != nil {
+	//
+	// owner mirrors the "node:" + workflowName + "/" + nodeName convention the
+	// warm-up consumer and execution-time guard use in distributed mode (spec
+	// Z.4/Z.8); it need not match anything else here since this test never
+	// unregisters it (supplyName is unique per run, so leaving it registered
+	// leaks nothing another test could observe).
+	if err := node.RegisterWasmSupplyConsumerByDigest(taggerDigest, supplyName, "node:"+supplyName+"/tagger"); err != nil {
 		t.Fatalf("register supply consumer: %v", err)
 	}
 

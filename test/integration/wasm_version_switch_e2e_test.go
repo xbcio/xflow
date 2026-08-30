@@ -252,8 +252,6 @@ func TestExpressionDigestActivatesEndToEnd(t *testing.T) {
 	trigger := newFakeVersionSwitchTrigger(vswitchDeclareTriggerType)
 	registry.Register(trigger)
 
-	t.Cleanup(func() { node.UnregisterWasmSupplyConsumerByDigest(digest, vswitchDeclareSupplyNode) })
-
 	httpSrv, cp, token, _, supplies := newVersionSwitchControlPlane(t, redisAddr)
 	reconciler := cp.EntryActivationReconciler()
 	if reconciler == nil {
@@ -294,6 +292,13 @@ func TestExpressionDigestActivatesEndToEnd(t *testing.T) {
 	}
 	client := authedClient(token)
 	wfID := registerWorkflowHTTP(t, httpSrv.URL, client, def)
+
+	// supply.Default outlives this test; a registration left behind would keep
+	// rebuilding a dead module's pool on every later Apply in this binary. The
+	// owner must match what the declaration path uses -- the warm-up consumer
+	// and the execution-time guard both register/release under
+	// "node:" + WorkflowName + "/" + NodeName (spec Z.4/Z.8).
+	t.Cleanup(func() { node.UnregisterWasmSupplyConsumerByDigest(digest, vswitchDeclareSupplyNode, "node:"+def.Name+"/"+taggerNode) })
 
 	putSupplyContent(t, supplies, supplyRes,
 		[]byte(`{"digest":"`+digest+`","rules":[{"name":"from-declare"}]}`))
@@ -425,9 +430,6 @@ func TestPointerFlipIsObservedAsModuleReady(t *testing.T) {
 	trigger := newFakeVersionSwitchTrigger(vswitchFlipTriggerType)
 	registry.Register(trigger)
 
-	t.Cleanup(func() { node.UnregisterWasmSupplyConsumerByDigest(digestA, vswitchFlipSupplyNode) })
-	t.Cleanup(func() { node.UnregisterWasmSupplyConsumerByDigest(digestB, vswitchFlipSupplyNode) })
-
 	httpSrv, cp, token, _, supplies := newVersionSwitchControlPlane(t, redisAddr)
 	reconciler := cp.EntryActivationReconciler()
 	if reconciler == nil {
@@ -468,6 +470,14 @@ func TestPointerFlipIsObservedAsModuleReady(t *testing.T) {
 	}
 	client := authedClient(token)
 	wfID := registerWorkflowHTTP(t, httpSrv.URL, client, def)
+
+	// supply.Default outlives this test; a registration left behind would keep
+	// rebuilding a dead module's pool on every later Apply in this binary. The
+	// owner must match what the declaration path uses -- the warm-up consumer
+	// and the execution-time guard both register/release under
+	// "node:" + WorkflowName + "/" + NodeName (spec Z.4/Z.8).
+	t.Cleanup(func() { node.UnregisterWasmSupplyConsumerByDigest(digestA, vswitchFlipSupplyNode, "node:"+def.Name+"/"+taggerNode) })
+	t.Cleanup(func() { node.UnregisterWasmSupplyConsumerByDigest(digestB, vswitchFlipSupplyNode, "node:"+def.Name+"/"+taggerNode) })
 
 	putSupplyContent(t, supplies, supplyRes,
 		[]byte(`{"digest":"`+digestA+`","rules":[{"name":"from-a"}]}`))
@@ -804,9 +814,6 @@ func TestRollbackKeepsReceivingContentUpdates(t *testing.T) {
 	trigger := newFakeVersionSwitchTrigger(vswitchRollbackTriggerType)
 	registry.Register(trigger)
 
-	t.Cleanup(func() { node.UnregisterWasmSupplyConsumerByDigest(digestA, vswitchRollbackSupplyNode) })
-	t.Cleanup(func() { node.UnregisterWasmSupplyConsumerByDigest(digestB, vswitchRollbackSupplyNode) })
-
 	httpSrv, cp, token, _, supplies := newVersionSwitchControlPlane(t, redisAddr)
 	reconciler := cp.EntryActivationReconciler()
 	if reconciler == nil {
@@ -847,6 +854,14 @@ func TestRollbackKeepsReceivingContentUpdates(t *testing.T) {
 	}
 	client := authedClient(token)
 	wfID := registerWorkflowHTTP(t, httpSrv.URL, client, def)
+
+	// supply.Default outlives this test; a registration left behind would keep
+	// rebuilding a dead module's pool on every later Apply in this binary. The
+	// owner must match what the declaration path uses -- the warm-up consumer
+	// and the execution-time guard both register/release under
+	// "node:" + WorkflowName + "/" + NodeName (spec Z.4/Z.8).
+	t.Cleanup(func() { node.UnregisterWasmSupplyConsumerByDigest(digestA, vswitchRollbackSupplyNode, "node:"+def.Name+"/"+taggerNode) })
+	t.Cleanup(func() { node.UnregisterWasmSupplyConsumerByDigest(digestB, vswitchRollbackSupplyNode, "node:"+def.Name+"/"+taggerNode) })
 
 	// --- Step 1: pointer -> A, revision 1. ---
 	putSupplyContent(t, supplies, supplyRes,

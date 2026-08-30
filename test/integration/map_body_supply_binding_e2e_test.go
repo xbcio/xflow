@@ -156,9 +156,6 @@ func TestSupplyConsumerBindingReachesMapBodyModule(t *testing.T) {
 	obs := &bindCountingObserver{}
 	supply.Default.SetObserver(obs)
 	t.Cleanup(func() { supply.Default.SetObserver(nil) })
-	// supply.Default outlives this test; a registration left behind would keep
-	// rebuilding this module's pool on every later Apply in this binary.
-	t.Cleanup(func() { node.UnregisterWasmSupplyConsumerByDigest(digest, mapBodySupplyNode) })
 
 	httpSrv, cp, token, supplies := newSupplyGatingControlPlane(t, redisAddr)
 	reconciler := cp.EntryActivationReconciler()
@@ -175,6 +172,14 @@ func TestSupplyConsumerBindingReachesMapBodyModule(t *testing.T) {
 		zoneLabel   = "mapbody"
 		runnerID    = "runner-mapbody"
 	)
+
+	// supply.Default outlives this test; a registration left behind would keep
+	// rebuilding this module's pool on every later Apply in this binary. The
+	// owner must match what registerSupplyConsumers's declaration path uses for
+	// a body member: WorkflowName is the body-bearing (map) node's name, not
+	// the workflow's own name (types.Input.WorkflowName's contract; see
+	// wantBinding below) -- "node:" + mapNode + "/" + bodyMember.
+	t.Cleanup(func() { node.UnregisterWasmSupplyConsumerByDigest(digest, mapBodySupplyNode, "node:"+mapNode+"/"+bodyMember) })
 
 	def := &types.WorkflowDef{
 		// Unique per run: AddWorkflow keys on (namespace, Name, Version) and

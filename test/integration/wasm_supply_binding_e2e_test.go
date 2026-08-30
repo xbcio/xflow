@@ -173,9 +173,6 @@ func TestSupplyConsumerBindingReachesRunner(t *testing.T) {
 	obs := &bindCountingObserver{}
 	supply.Default.SetObserver(obs)
 	t.Cleanup(func() { supply.Default.SetObserver(nil) })
-	// supply.Default outlives this test; a registration left behind would keep
-	// rebuilding a dead module's pool on every later Apply in this binary.
-	t.Cleanup(func() { node.UnregisterWasmSupplyConsumerByDigest(digest, wasmBindSupplyNode) })
 
 	httpSrv, cp, token, supplies := newSupplyGatingControlPlane(t, redisAddr)
 	reconciler := cp.EntryActivationReconciler()
@@ -224,6 +221,15 @@ func TestSupplyConsumerBindingReachesRunner(t *testing.T) {
 	}
 	client := authedClient(token)
 	wfID := registerWorkflowHTTP(t, httpSrv.URL, client, def)
+
+	// supply.Default outlives this test; a registration left behind would keep
+	// rebuilding a dead module's pool on every later Apply in this binary. The
+	// owner must match what registerSupplyConsumers's declaration path uses --
+	// the warm-up consumer (wasm_supply_declaration.go) and the execution-time
+	// guard (script.go's ensureWasmSupplyConsumers) both register/release under
+	// "node:" + WorkflowName + "/" + NodeName (spec Z.4/Z.8); a mismatched owner
+	// here would make this release a no-op against a set that never held it.
+	t.Cleanup(func() { node.UnregisterWasmSupplyConsumerByDigest(digest, wasmBindSupplyNode, "node:"+def.Name+"/"+taggerNode) })
 
 	// Two PUTs so the revision the module reports is 2. Revision 1 would still
 	// be distinguishable from the legacy path's 0, but 2 also rules out the
