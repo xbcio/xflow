@@ -10,6 +10,20 @@ on:
 permissions:
   contents: read
 
+# Every `run:` step goes through `bash -eo pipefail`, not the implicit
+# default. GitHub Actions only adds `-o pipefail` when a step (or this block)
+# names `bash` explicitly; without it the implicit shell is `bash -e {0}`, so
+# a step's exit code comes from the LAST command in a pipeline. The
+# integration job's `make test-integration-required 2>&1 | tee ...` therefore
+# reported tee's status — a green job no matter how the tests ended.
+#
+# Set here rather than on that one step so the trap stays disarmed for the
+# next pipeline somebody adds. Scope is small either way: that step is
+# currently the only pipeline in .github/workflows/.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   test:
     name: Test
