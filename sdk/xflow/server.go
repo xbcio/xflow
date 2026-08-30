@@ -54,10 +54,13 @@ type ServerConfig struct {
 }
 
 // ErrRunnerAuthPostureUndeclared is returned by NewServer when neither
-// WithServerAuth nor WithServerInsecureNoRunnerAuth was supplied.
+// WithServerAuth nor WithServerInsecureNoRunnerAuth was supplied, or when
+// WithServerAuth was supplied but with control.DisabledAuthenticator{} — a
+// non-nil Authenticator that is not "configured" per control.IsConfigured, and
+// so does not count as declaring a posture either.
 var ErrRunnerAuthPostureUndeclared = errors.New(
-	"xflow: runner-protocol auth posture not declared: pass WithServerAuth(...) to authenticate runners, " +
-		"or WithServerInsecureNoRunnerAuth() to run without runner auth on purpose")
+	"xflow: runner-protocol auth posture not declared: pass WithServerAuth(...) with a configured authenticator " +
+		"to authenticate runners, or WithServerInsecureNoRunnerAuth() to run without runner auth on purpose")
 
 type serverConfig struct {
 	auth                control.Authenticator
@@ -342,9 +345,16 @@ func NewServer(cfg ServerConfig, opts ...ServerOption) (*Server, error) {
 	for _, o := range opts {
 		o(sc)
 	}
-	if sc.auth == nil && !sc.insecureNoRunnerAuth {
+	if !control.IsConfigured(sc.auth) && !sc.insecureNoRunnerAuth {
 		return nil, ErrRunnerAuthPostureUndeclared
 	}
+	// Deliberately asymmetric with the check above: this one asks "did the
+	// caller pass two contradictory options", not "is the declared posture
+	// secure", so it must keep firing on sc.auth != nil (including the
+	// DisabledAuthenticator{} sentinel) rather than control.IsConfigured(sc.auth).
+	// WithServerAuth(DisabledAuthenticator{}) + WithServerInsecureNoRunnerAuth()
+	// is still two postures declared at once and must stay rejected; swapping
+	// this to IsConfigured would let that contradiction through.
 	if sc.auth != nil && sc.insecureNoRunnerAuth {
 		return nil, errors.New("xflow: WithServerAuth and WithServerInsecureNoRunnerAuth are mutually exclusive")
 	}

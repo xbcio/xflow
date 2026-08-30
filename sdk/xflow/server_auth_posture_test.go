@@ -56,6 +56,40 @@ func TestNewServerRejectsBothPostures(t *testing.T) {
 	}
 }
 
+// TestNewServerRejectsDisabledAuthenticatorSentinel pins that
+// WithServerAuth(control.DisabledAuthenticator{}) does not count as declaring
+// a runner-auth posture. DisabledAuthenticator{} is a non-nil Authenticator
+// with a fully permissive policy, so `sc.auth == nil` alone cannot tell
+// "explicitly disabled" apart from "really configured" — control.IsConfigured
+// exists for exactly that distinction. Without this gate, an embedder could
+// write WithServerAuth(control.DisabledAuthenticator{}), which reads like "I
+// configured auth", and get a runner protocol that accepts every runner.
+func TestNewServerRejectsDisabledAuthenticatorSentinel(t *testing.T) {
+	_, err := NewServer(ServerConfig{}, WithServerAuth(control.DisabledAuthenticator{}))
+	if err == nil {
+		t.Fatal("NewServer accepted WithServerAuth(control.DisabledAuthenticator{}) as a declared posture")
+	}
+	if !errors.Is(err, ErrRunnerAuthPostureUndeclared) {
+		t.Fatalf("want ErrRunnerAuthPostureUndeclared, got %v", err)
+	}
+}
+
+// TestNewServerRejectsDisabledAuthenticatorPlusInsecure pins M3, the reverse
+// judgment: WithServerAuth(DisabledAuthenticator{}) plus
+// WithServerInsecureNoRunnerAuth() must still be rejected as two contradictory
+// postures declared at once. This is deliberately asymmetric with the posture
+// gate above — this check must keep using sc.auth != nil (which
+// DisabledAuthenticator{} satisfies), not control.IsConfigured(sc.auth); if it
+// were switched to IsConfigured, this exact combination would slip through
+// because DisabledAuthenticator{} is never "configured", silently widening
+// what NewServer accepts.
+func TestNewServerRejectsDisabledAuthenticatorPlusInsecure(t *testing.T) {
+	_, err := NewServer(ServerConfig{}, WithServerAuth(control.DisabledAuthenticator{}), WithServerInsecureNoRunnerAuth())
+	if err == nil {
+		t.Fatal("NewServer accepted WithServerAuth(DisabledAuthenticator{}) together with WithServerInsecureNoRunnerAuth()")
+	}
+}
+
 // TestStaticTokenAuthenticatorRejectsEmptyInputs pins the observable behavior
 // that the loopback helper cannot be talked into accepting everyone: an empty
 // token would match a runner that sent no credential, and an empty prefix
