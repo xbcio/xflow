@@ -3,6 +3,8 @@ package apiserver
 import (
 	"context"
 	"errors"
+	"fmt"
+	"reflect"
 	"testing"
 	"time"
 
@@ -104,43 +106,76 @@ func TestSQLAuditSinkPrefersNamespaceFromContext(t *testing.T) {
 	}
 }
 
+// auditEventFieldsNotPersisted is the explicit, reasoned whitelist of
+// AuditEvent fields that are intentionally NOT expected to have a same-named,
+// same-value counterpart on store.AuditRecord. It must stay empty unless a
+// real such field is found — do not add an entry to make a fuzzy test pass;
+// widening this list is the "silently loosen the sieve" failure mode the
+// brief calls out. As of this test, every AuditEvent field round-trips
+// through SQLAuditSink.Append under its own name, so there is nothing to list.
+var auditEventFieldsNotPersisted = map[string]string{}
+
+// fillDistinctNonZero walks ev's exported fields by reflection and assigns
+// each a distinct, non-zero value based on its Kind. It then asserts every
+// field ended up non-zero, so a future AuditEvent field of a Kind this
+// helper doesn't know how to fill fails loudly here instead of silently
+// staying at its zero value (which would make the round-trip check below
+// compare zero-to-zero and pass even though nothing was proven).
+func fillDistinctNonZero(t *testing.T, ev *AuditEvent) {
+	t.Helper()
+	v := reflect.ValueOf(ev).Elem()
+	typ := v.Type()
+	timeType := reflect.TypeOf(time.Time{})
+	for i := 0; i < typ.NumField(); i++ {
+		f := v.Field(i)
+		name := typ.Field(i).Name
+		switch {
+		case f.Type() == timeType:
+			f.Set(reflect.ValueOf(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC).Add(time.Duration(i+1) * time.Second)))
+		case f.Kind() == reflect.String:
+			f.SetString(fmt.Sprintf("%s-nonzero-%d", name, i+1))
+		case f.Kind() >= reflect.Uint && f.Kind() <= reflect.Uintptr:
+			f.SetUint(uint64(i + 1))
+		case f.Kind() >= reflect.Int && f.Kind() <= reflect.Int64:
+			f.SetInt(int64(i + 1))
+		default:
+			t.Fatalf("fillDistinctNonZero: field %s has unhandled kind %s; add a case for it", name, f.Kind())
+		}
+	}
+	for i := 0; i < typ.NumField(); i++ {
+		if v.Field(i).IsZero() {
+			t.Fatalf("fillDistinctNonZero: field %s is still zero; the round-trip check below can't tell zero-to-zero from a working transmit", typ.Field(i).Name)
+		}
+	}
+}
+
 // TestSQLAuditSinkTransmitsAllEventFields is deliberately exhaustive rather
 // than "assert Revision persists": SQLAuditSink.Append builds store.AuditRecord
 // by hand-copying each AuditEvent field, and it once silently dropped Revision
 // (grep for "Revision" inside Append found zero hits before the fix). A test
-// that only checks the one field that was known to be missing would not catch
-// the next field that gets forgotten the same way. This test gives every field
-// a distinct non-zero value and checks the round trip field-by-field, naming
-// the field on mismatch — do not use InMemoryAuditSink here, it copies the
-// struct by value and would pass even with every field dropped.
+// that only checks the fields a human remembered to list would not catch the
+// next field that gets forgotten the same way — the human who forgets to wire
+// a new field into Append is the same human who would forget to add a line
+// for it here. So this test enumerates AuditEvent's fields via reflect at run
+// time and looks up the same-named field on store.AuditRecord, instead of a
+// hand-maintained list: a new field on AuditEvent is in scope automatically,
+// with no second place to remember to update.
+//
+// Do not use InMemoryAuditSink here — it copies the struct by value and would
+// pass even with every field dropped.
 func TestSQLAuditSinkTransmitsAllEventFields(t *testing.T) {
 	db := memstore.New()
 	sink := NewSQLAuditSink(db)
 
-	ev := AuditEvent{
-		RequestID:      "req-full-1",
-		Principal:      "principal-full-1",
-		Namespace:      "namespace-full-1",
-		Operation:      "operation-full-1",
-		Resource:       "resource-full-1",
-		WorkflowID:     "workflow-full-1",
-		ExecutionID:    "execution-full-1",
-		Decision:       DecisionAllow,
-		Reason:         "reason-full-1",
-		Outcome:        "outcome-full-1",
-		Phase:          "phase-full-1",
-		TraceID:        "trace-full-1",
-		Timestamp:      time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
-		NodeID:         "node-full-1",
-		ActivationID:   "activation-full-1",
-		EntryID:        "entry-full-1",
-		ReceiptAuditID: "receipt-full-1",
-		Revision:       424242,
-	}
+	var ev AuditEvent
+	fillDistinctNonZero(t, &ev)
+
 	// context.Background() carries no namespace, so the existing
 	// context-fallback semantics (covered by the two tests above) apply and
 	// ev.Namespace is expected to persist unchanged — this test must not
-	// fight that behavior, only prove every field round-trips.
+	// fight that behavior, only prove every field round-trips. Timestamp is
+	// non-zero (fillDistinctNonZero guarantees it), so it also does not hit
+	// the zero-stamping path covered by its own test.
 	if err := sink.Append(context.Background(), ev); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
@@ -148,35 +183,46 @@ func TestSQLAuditSinkTransmitsAllEventFields(t *testing.T) {
 	if len(records) != 1 {
 		t.Fatalf("audit records = %d, want 1", len(records))
 	}
-	got := records[0]
+	got := *records[0]
 
-	checks := []struct {
-		name string
-		want any
-		got  any
-	}{
-		{"RequestID", ev.RequestID, got.RequestID},
-		{"Principal", ev.Principal, got.Principal},
-		{"Namespace", ev.Namespace, got.Namespace},
-		{"Operation", ev.Operation, got.Operation},
-		{"Resource", ev.Resource, got.Resource},
-		{"WorkflowID", ev.WorkflowID, got.WorkflowID},
-		{"ExecutionID", ev.ExecutionID, got.ExecutionID},
-		{"Decision", string(ev.Decision), got.Decision},
-		{"Reason", ev.Reason, got.Reason},
-		{"Outcome", ev.Outcome, got.Outcome},
-		{"Phase", ev.Phase, got.Phase},
-		{"TraceID", ev.TraceID, got.TraceID},
-		{"Timestamp", ev.Timestamp, got.Timestamp},
-		{"NodeID", ev.NodeID, got.NodeID},
-		{"ActivationID", ev.ActivationID, got.ActivationID},
-		{"EntryID", ev.EntryID, got.EntryID},
-		{"ReceiptAuditID", ev.ReceiptAuditID, got.ReceiptAuditID},
-		{"Revision", ev.Revision, got.Revision},
-	}
-	for _, c := range checks {
-		if c.want != c.got {
-			t.Errorf("field %s not transmitted by SQLAuditSink.Append: got %v, want %v", c.name, c.got, c.want)
+	evVal := reflect.ValueOf(ev)
+	evType := evVal.Type()
+	gotVal := reflect.ValueOf(got)
+	gotType := gotVal.Type()
+
+	for i := 0; i < evType.NumField(); i++ {
+		fieldName := evType.Field(i).Name
+		if reason, skip := auditEventFieldsNotPersisted[fieldName]; skip {
+			t.Logf("field %s intentionally not checked: %s", fieldName, reason)
+			continue
+		}
+		gotField, ok := gotType.FieldByName(fieldName)
+		if !ok {
+			t.Errorf("AuditEvent field %s has no same-named field on store.AuditRecord; wire it into SQLAuditSink.Append and store.AuditRecord, or if it must never persist, add it to auditEventFieldsNotPersisted with a reason", fieldName)
+			continue
+		}
+		wantField := evVal.Field(i)
+		gotFieldVal := gotVal.FieldByIndex(gotField.Index)
+
+		want := wantField.Interface()
+		gotV := gotFieldVal.Interface()
+		if wantField.Type() != gotFieldVal.Type() {
+			// AuditEvent.Decision and store.AuditRecord.Decision are a known
+			// case: same underlying Kind (string), different named types.
+			// Handle any such convertible pair generically rather than
+			// special-casing Decision by name.
+			switch {
+			case wantField.Type().ConvertibleTo(gotFieldVal.Type()):
+				want = wantField.Convert(gotFieldVal.Type()).Interface()
+			case gotFieldVal.Type().ConvertibleTo(wantField.Type()):
+				gotV = gotFieldVal.Convert(wantField.Type()).Interface()
+			default:
+				t.Errorf("field %s: AuditEvent type %s and store.AuditRecord type %s are not convertible", fieldName, wantField.Type(), gotFieldVal.Type())
+				continue
+			}
+		}
+		if !reflect.DeepEqual(want, gotV) {
+			t.Errorf("field %s not transmitted by SQLAuditSink.Append: got %v, want %v", fieldName, gotV, want)
 		}
 	}
 }
