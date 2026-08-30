@@ -58,10 +58,18 @@ func (g *GroupMetrics) OnGroupAdmissionDuration(d time.Duration) {
 // --- Activation controller metrics ---
 
 // OnGroupActivation increments the group activation counter with the action label.
-// Action values: activate, deactivate, revoke.
+// Action values: activate, deactivate.
 //
 // Never "reconcile": Reconcile() is the ticker-driven entry point for a whole
 // sweep, not a per-activation action, so nothing produces it as a label value.
+//
+// Never "revoke": protocol.DeactivateDirective (service/protocol/activation.go)
+// carries only Namespace/WorkflowID/EntryUnitID/Generation — there is no reason
+// field — and enqueueDeactivate (service/control/entry_activation_reconciler.go)
+// does not add one either. Every stop the reconciler produces, whatever caused
+// it (no-longer-desired, expired lease, stale owner, dead runner, inventory
+// mismatch), collapses to the same directive, so there is no signal left to
+// distinguish a "revoke" from a plain "deactivate".
 func (g *GroupMetrics) OnGroupActivation(action string) {
 	g.m.Inc("xflow_group_activation_total", map[string]string{"action": action})
 }

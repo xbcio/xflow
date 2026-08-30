@@ -405,7 +405,7 @@ func DeriveEntryActivations(g *graph.Graph) ([]EntryUnitActivation, error) {
 			reqs = requireDeclarationCapability(reqs, engine.GroupNodeType, supplyConsumers)
 			out = append(out, EntryUnitActivation{
 				EntryUnitID:        gm.Name,
-				NodeType:           "xflow.group",
+				NodeType:           engine.GroupNodeType,
 				PackageHash:        gm.PackageHash,
 				Selector:           gm.RunnerSelector,
 				Requirements:       reqs,

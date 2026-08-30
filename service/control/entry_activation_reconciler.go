@@ -45,6 +45,35 @@ type ActivationRunnerLister interface {
 	ListLiveRunners(ctx context.Context) []RunnerSnapshot
 }
 
+// EntryActivationMetrics is notified of activation-controller events for GROUP
+// entry units only (act.NodeType == engine.GroupNodeType). Standalone
+// (non-group) trigger entry units and legacy records (NodeType == "") are
+// never reported through it — these are xflow_group_* series.
+//
+// Declared here rather than taking observability/metrics directly, mirroring
+// execution/subgraph.PackageCacheObserver: all three methods take no ctx, so
+// *metrics.GroupMetrics satisfies this interface structurally with no adapter
+// in between (unlike engine/observers.go's ctx-first shape).
+type EntryActivationMetrics interface {
+	// OnGroupActivation reports an activation-controller action: "activate" or
+	// "deactivate". There is no "revoke" — protocol.DeactivateDirective carries
+	// no reason field, so every stop the reconciler produces is reported the
+	// same way.
+	OnGroupActivation(action string)
+	// OnGroupActivationFenced reports that an Assign call lost the generation
+	// race (Store.Assign returned assigned == false, err == nil): a concurrent
+	// writer already advanced the generation past the one this reconciler pass
+	// tried to claim.
+	OnGroupActivationFenced()
+	// SetGroupActivationActive sets the gauge of currently active GROUP
+	// activations. It carries NO label, so it must be called exactly once per
+	// Reconcile pass with the total summed across every configured namespace —
+	// never from inside a per-namespace loop, which would let the last
+	// namespace's count silently overwrite every prior namespace's
+	// contribution (an undercount, not an error).
+	SetGroupActivationActive(value float64)
+}
+
 // EntryActivationReconcilerConfig configures an EntryActivationReconciler.
 type EntryActivationReconcilerConfig struct {
 	// Store is the durable desired-state store of entry activations.
@@ -84,6 +113,11 @@ type EntryActivationReconcilerConfig struct {
 	RetryBackoffMax time.Duration
 	// Logger is optional.
 	Logger engine.Logger
+	// Metrics, when set, receives GROUP entry-unit activation-controller
+	// events (xflow_group_activation_total / _generation_fenced_total /
+	// _active). nil disables reporting; non-group entry units are excluded
+	// either way (see EntryActivationMetrics doc).
+	Metrics EntryActivationMetrics
 }
 
 // entryRunnerDirectives holds pending activate/deactivate messages for a runner.
@@ -194,6 +228,9 @@ func NewEntryActivationReconciler(cfg EntryActivationReconcilerConfig) *EntryAct
 func (r *EntryActivationReconciler) Reconcile(ctx context.Context, now time.Time) error {
 	live := r.liveRunners(ctx, now)
 	seen := make(map[engine.EntryActivationKey]struct{})
+	// active accumulates the count of currently-active GROUP activations
+	// across every configured namespace, for the gauge set once below.
+	active := 0
 	for _, ns := range r.cfg.Namespaces {
 		acts, err := r.cfg.Store.List(ctx, ns)
 		if err != nil {
@@ -210,10 +247,22 @@ func (r *EntryActivationReconciler) Reconcile(ctx context.Context, now time.Time
 				}
 				// Continue with the remaining activations.
 			}
+			if acts[i].NodeType == engine.GroupNodeType && acts[i].RunnerID != "" {
+				active++
+			}
 		}
 	}
 	r.pruneNoMatch(seen)
 	r.pruneRetryBackoff(seen)
+	// The gauge is set exactly once per pass, here at the Reconcile driver —
+	// NEVER inside the per-namespace loop above. SetGroupActivationActive
+	// carries no namespace label, so setting it once per namespace would let
+	// the last namespace's count silently overwrite every prior namespace's
+	// contribution: an undercount that looks like "only one namespace has
+	// groups," which is worse than not reporting at all.
+	if r.cfg.Metrics != nil {
+		r.cfg.Metrics.SetGroupActivationActive(float64(active))
+	}
 	return nil
 }
 
@@ -254,6 +303,26 @@ func keyOf(act *engine.EntryActivation) engine.EntryActivationKey {
 	}
 }
 
+// recordGroupActivation reports action ("activate" or "deactivate") to
+// cfg.Metrics, but ONLY for GROUP entry units (act.NodeType ==
+// engine.GroupNodeType). Standalone trigger entry units and legacy records
+// (NodeType == "") are intentionally excluded — see EntryActivationMetrics.
+func (r *EntryActivationReconciler) recordGroupActivation(act *engine.EntryActivation, action string) {
+	if r.cfg.Metrics == nil || act.NodeType != engine.GroupNodeType {
+		return
+	}
+	r.cfg.Metrics.OnGroupActivation(action)
+}
+
+// recordGroupActivationFenced reports a lost generation race to cfg.Metrics,
+// but ONLY for GROUP entry units, mirroring recordGroupActivation.
+func (r *EntryActivationReconciler) recordGroupActivationFenced(act *engine.EntryActivation) {
+	if r.cfg.Metrics == nil || act.NodeType != engine.GroupNodeType {
+		return
+	}
+	r.cfg.Metrics.OnGroupActivationFenced()
+}
+
 func (r *EntryActivationReconciler) reconcileOne(ctx context.Context, act *engine.EntryActivation, live []RunnerSnapshot, now time.Time) error {
 	key := keyOf(act)
 
@@ -267,6 +336,8 @@ func (r *EntryActivationReconciler) reconcileOne(ctx context.Context, act *engin
 				return err
 			}
 			r.enqueueDeactivate(prevRunner, deactivateDirectiveFor(act, prevGen))
+			r.recordGroupActivation(act, "deactivate")
+			act.RunnerID = ""
 		}
 		return nil
 	}
@@ -306,6 +377,8 @@ func (r *EntryActivationReconciler) reconcileOne(ctx context.Context, act *engin
 		// Tell the stale/dead/mismatched owner to stop (best-effort; a dead runner
 		// simply never receives it).
 		r.enqueueDeactivate(prevRunner, deactivateDirectiveFor(act, prevGen))
+		r.recordGroupActivation(act, "deactivate")
+		act.RunnerID = ""
 	}
 
 	// Unassigned (either fresh or just fenced): if a prior failure on this key
@@ -351,6 +424,15 @@ func (r *EntryActivationReconciler) reconcileOne(ctx context.Context, act *engin
 	}
 	if assigned {
 		r.enqueueActivate(chosen.RunnerID, r.activateDirectiveFor(ctx, act, nextGen))
+		r.recordGroupActivation(act, "activate")
+		act.RunnerID = chosen.RunnerID
+	} else {
+		// assigned == false, err == nil: the CAS lost the generation race — a
+		// concurrent writer already advanced the stored generation past nextGen.
+		// This IS the generation fence the metric name refers to (distinct from
+		// the explicit Store.Fence() calls elsewhere in this file, which produce
+		// deactivate directives, not this counter).
+		r.recordGroupActivationFenced(act)
 	}
 	return nil
 }
@@ -566,6 +648,7 @@ func (r *EntryActivationReconciler) ReconcileRunnerInventory(ctx context.Context
 				continue
 			}
 			r.enqueueDeactivate(runnerID, deactivateDirectiveFor(act, prevGen))
+			r.recordGroupActivation(act, "deactivate")
 		}
 	}
 	return nil

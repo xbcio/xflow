@@ -369,6 +369,9 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 			Logger:           cfg.Logger,
 			WorkflowRegistry: workflowRegistry,
 		}
+		if cfg.Metrics != nil {
+			recCfg.Metrics = metrics.NewGroupMetrics(cfg.Metrics)
+		}
 		// The reconciler enumerates live runners via ActivationRunnerLister. The
 		// runner directory supplies it when it implements the capability; a
 		// directory that does not simply yields no live runners (fail-closed: the

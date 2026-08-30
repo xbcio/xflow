@@ -361,7 +361,7 @@ var metricHelp = map[string]string{
 	"xflow_commit_outcomes_total":                    "Graph commit outcomes, partitioned by outcome (committed/aborted/failed).",
 	"xflow_group_admission_total":                    "Trigger admission attempts, partitioned by outcome (accepted/duplicate/conflict/error).",
 	"xflow_group_admission_duration_seconds":         "Duration of trigger admission attempts.",
-	"xflow_group_activation_total":                   "Activation controller actions, partitioned by action (activate/deactivate/revoke).",
+	"xflow_group_activation_total":                   "Activation controller actions, partitioned by action (activate/deactivate).",
 	"xflow_group_activation_generation_fenced_total": "Activation attempts rejected due to generation fence.",
 	"xflow_group_activation_active":                  "Number of currently active group activations.",
 	"xflow_group_lease_acquired_total":               "Group unit leases successfully acquired, by either the local (in-process) or remote (runner-embedded) executor path.",
