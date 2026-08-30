@@ -97,10 +97,31 @@ func (c *wasmWarmupConsumer) OnSupplyChanged(ctx context.Context, _ supply.Snaps
 	// registering first marks the module source-driven while the notify handler
 	// silently succeeds against a non-existent engine, and the registry then never
 	// redelivers the content.
-	if err := node.RegisterWasmSupplyConsumerByDigest(digest, c.supplyNode); err != nil {
+	//
+	// owner uses the "node:" namespace (spec Z.4 / Z.8), matching
+	// ensureWasmSupplyConsumers's execution-time guard
+	// (node/internal/code/script/script.go) -- both call sites concern the
+	// identical (workflow, node) pair and neither ever releases this
+	// registration, so converging on the same owner string is harmless and keeps
+	// the registration a true no-op on repeat. It must NOT collide with the
+	// activation-identity owners the legacy binding uses (see
+	// trigger_activation_handler.go's registerSupplyConsumers), which is why both
+	// this and the execution-time guard use the same distinct prefix.
+	if err := node.RegisterWasmSupplyConsumerByDigest(digest, c.supplyNode, wasmSupplyConsumerOwner(c.workflow, c.node)); err != nil {
 		return fmt.Errorf("warm-up registration of wasm module %s for supply %q: %w", digest, c.supplyNode, err)
 	}
 	return nil
+}
+
+// wasmSupplyConsumerOwner builds the owner identity used for the digest-keyed
+// registration made on behalf of a (workflowName, nodeName) pair -- the
+// warm-up consumer here, and the execution-time guard in
+// node/internal/code/script/script.go. Both must produce the identical string
+// for the identical pair (and this exact literal format is shared with that
+// package's copy of this helper) so the two sites are treated as the same
+// owner rather than as two owners that would each need their own release.
+func wasmSupplyConsumerOwner(workflowName, nodeName string) string {
+	return "node:" + workflowName + "/" + nodeName
 }
 
 // warmupConsumerKey namespaces warm-up registrations away from the wasm

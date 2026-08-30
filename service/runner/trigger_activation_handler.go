@@ -134,6 +134,12 @@ func NewTriggerActivationHandler(seedBaseURL string, authToken string, triggers 
 // keyed by activation identity so Deactivate can close it. Returns an error
 // (fail closed) if the NodeType has no registered handler.
 func (h *TriggerActivationHandler) Activate(ctx context.Context, d protocol.ActivateDirective) error {
+	// Computed once and threaded through: registerSupplyConsumers uses it as the
+	// owner identity for each legacy binding's digest-keyed registration (spec
+	// Z.4 / Z.8), and the deferred rollback below must release the SAME owner
+	// identity that call registered under.
+	id := activationIDFromActivate(d)
+
 	// Readiness gate FIRST: not after the subscription starts, and not inside the
 	// per-message path. Once a Kafka subscription is live it commits offsets, and
 	// a message whose supply is missing then has nowhere safe to go. Declining
@@ -149,7 +155,7 @@ func (h *TriggerActivationHandler) Activate(ctx context.Context, d protocol.Acti
 	// is already cached — registering first would deliver nothing and never
 	// retry. Before the subscription, because a live subscription is already
 	// committing offsets while an unregistered module passes traffic untagged.
-	if err := h.registerSupplyConsumers(ctx, d.SupplyConsumers); err != nil {
+	if err := h.registerSupplyConsumers(ctx, id, d.SupplyConsumers); err != nil {
 		return err
 	}
 
@@ -182,7 +188,7 @@ func (h *TriggerActivationHandler) Activate(ctx context.Context, d protocol.Acti
 	reachedStore := false
 	defer func() {
 		if !reachedStore {
-			unregisterSupplyConsumers(d.SupplyConsumers)
+			unregisterSupplyConsumers(id, d.SupplyConsumers)
 		}
 	}()
 
@@ -217,7 +223,7 @@ func (h *TriggerActivationHandler) Activate(ctx context.Context, d protocol.Acti
 		return err
 	}
 	reachedStore = true
-	h.storeSubscription(ctx, activationIDFromActivate(d), sub, d.SupplyConsumers)
+	h.storeSubscription(ctx, id, sub, d.SupplyConsumers)
 	return nil
 }
 
@@ -355,7 +361,15 @@ func bindingIdentity(b engine.SupplyConsumerBinding) string {
 // otherwise host traffic with no rules and no diagnostic, which is the exact
 // failure this wiring exists to remove. Errors carry only the digest and the
 // supply node name — never directive params.
-func (h *TriggerActivationHandler) registerSupplyConsumers(ctx context.Context, bindings []engine.SupplyConsumerBinding) error {
+//
+// id is this activation's identity, rendered via id.supplyConsumerOwner() into
+// the owner string passed to node.RegisterWasmSupplyConsumerByDigest for every
+// legacy binding (spec Z.4 / Z.8). It is what lets this activation's own
+// eventual Deactivate release exactly its own hold on a (digest, supplyNode)
+// registration without disturbing another replica's, or another call site's
+// (the warm-up consumer's or the execution-time guard's), hold on the same
+// slot.
+func (h *TriggerActivationHandler) registerSupplyConsumers(ctx context.Context, id activationID, bindings []engine.SupplyConsumerBinding) error {
 	if len(bindings) == 0 {
 		return nil
 	}
@@ -371,9 +385,10 @@ func (h *TriggerActivationHandler) registerSupplyConsumers(ctx context.Context, 
 	succeeded := false
 	defer func() {
 		if !succeeded {
-			unregisterSupplyConsumers(acquired)
+			unregisterSupplyConsumers(id, acquired)
 		}
 	}()
+	owner := id.supplyConsumerOwner()
 	for _, b := range bindings {
 		if b.IsDeclaration() {
 			// Declaration shape: the digest is not known yet. Record it; the
@@ -410,7 +425,7 @@ func (h *TriggerActivationHandler) registerSupplyConsumers(ctx context.Context, 
 			}
 			compiled[b.ModuleDigest] = true
 		}
-		if err := node.RegisterWasmSupplyConsumerByDigest(b.ModuleDigest, b.SupplyNode); err != nil {
+		if err := node.RegisterWasmSupplyConsumerByDigest(b.ModuleDigest, b.SupplyNode, owner); err != nil {
 			return fmt.Errorf("register wasm module %s as consumer of supply %q: %w", b.ModuleDigest, b.SupplyNode, err)
 		}
 		acquired = append(acquired, b)
@@ -429,13 +444,18 @@ func (h *TriggerActivationHandler) registerSupplyConsumers(ctx context.Context, 
 // but the rule differs by binding shape, because the two shapes are governed
 // by different registries with different semantics:
 //
-//   - Legacy bindings (ModuleDigest+SupplyNode) register as a SET keyed on
-//     (digest, supply node): registering twice is idempotent, and unregistering
-//     once removes it outright. A generation upgrade normally re-sends
-//     identical legacy bindings, so only the DIFFERENCE (old minus next) may be
-//     unregistered here — unregistering a retained pair would remove the very
-//     registration registerSupplyConsumers just made for the new generation.
-//     removedBindings governs this shape.
+//   - Legacy bindings (ModuleDigest+SupplyNode) register into an OWNER SET
+//     keyed on (digest, supply node) (spec Z.4 / Z.8): the same owner
+//     registering twice is idempotent, and releasing that owner removes the
+//     underlying registry entry only once no OTHER owner (a different
+//     activation/replica, or the warm-up consumer / execution-time guard's
+//     "node:" owner) still holds it. A generation upgrade normally re-sends
+//     identical legacy bindings under the SAME owner (id.supplyConsumerOwner()
+//     does not depend on generation), so only the DIFFERENCE (old minus next)
+//     may be released here — releasing a retained pair would drop this
+//     activation's own hold on the very registration registerSupplyConsumers
+//     just (re-)acquired for the new generation. removedBindings governs this
+//     shape.
 //
 //   - Declaration bindings (WorkflowName+NodeName+SupplyNode) carry TWO
 //     independent registrations, and BOTH are REFCOUNTED, not overwritten:
@@ -479,8 +499,11 @@ func (h *TriggerActivationHandler) storeSubscription(ctx context.Context, id act
 				oldLegacy = append(oldLegacy, b)
 			}
 		}
-		// Pass 1: legacy SET, by difference.
-		unregisterSupplyConsumers(removedBindings(oldLegacy, bindings))
+		// Pass 1: legacy owner set, by difference. id is the SAME activation
+		// identity (and therefore the same owner string) that registered these
+		// bindings, old generation or new — releasing under any other id would
+		// release the wrong owner's hold, or none at all.
+		unregisterSupplyConsumers(id, removedBindings(oldLegacy, bindings))
 		// Pass 2: declaration side, BOTH refcounts, unconditionally for every
 		// old entry — see the doc comment above for why difference does not
 		// apply here.
@@ -518,13 +541,21 @@ func removedBindings(old, next []engine.SupplyConsumerBinding) []engine.SupplyCo
 // unregisterSupplyConsumers undoes each binding unconditionally — for a
 // declaration binding, BOTH refcounted registrations it carries (the warm-up
 // consumer's registration on supply.Default, via warmupConsumers.release, and
-// the execution-time declaration refcount) — plus the legacy digest SET. Each
-// call here removes exactly ONE reference per binding, so this function is
-// safe to call once per activation-worth of bindings even when several
-// replicas share the same declaration; the underlying refcounts (not this
-// function) are what make repeated release calls converge to zero only after
-// every acquire has been matched. It is a no-op for a pair that was never
+// the execution-time declaration refcount) — plus, for a legacy binding, id's
+// OWN hold on the digest-keyed owner set (spec Z.4 / Z.8; see
+// wasm.RegisterSupplyConsumerByDigest). Each call here removes exactly ONE
+// reference per binding, so this function is safe to call once per
+// activation-worth of bindings even when several replicas share the same
+// declaration; the underlying refcounts/owner sets (not this function) are
+// what make repeated release calls converge to empty only after every
+// acquire has been matched. It is a no-op for a pair that was never
 // registered/declared, so it is safe on any subset.
+//
+// id must be the SAME activation identity that registerSupplyConsumers used
+// to register these bindings — releasing under a different id would either
+// no-op (id never held that owner) or, if some other id happened to collide,
+// release the wrong owner. Every call site below passes the id that owns the
+// bindings being released.
 //
 // This unconditional-per-binding shape is correct for a full teardown
 // (Deactivate, which wants every reference THIS activation held gone) and
@@ -532,14 +563,15 @@ func removedBindings(old, next []engine.SupplyConsumerBinding) []engine.SupplyCo
 // DIFFERENCE before calling this). storeSubscription does NOT route
 // declarations through this function — see its own comment for why the
 // declaration side needs its own inlined loop instead.
-func unregisterSupplyConsumers(bindings []engine.SupplyConsumerBinding) {
+func unregisterSupplyConsumers(id activationID, bindings []engine.SupplyConsumerBinding) {
+	owner := id.supplyConsumerOwner()
 	for _, b := range bindings {
 		if b.IsDeclaration() {
 			warmupConsumers.release(warmupConsumerKey(b), b.SupplyNode)
 			node.UndeclareWasmSupplyConsumers(b.WorkflowName, b.NodeName, []string{b.SupplyNode})
 			continue
 		}
-		node.UnregisterWasmSupplyConsumerByDigest(b.ModuleDigest, b.SupplyNode)
+		node.UnregisterWasmSupplyConsumerByDigest(b.ModuleDigest, b.SupplyNode, owner)
 	}
 }
 
@@ -570,7 +602,7 @@ func (h *TriggerActivationHandler) Deactivate(d protocol.DeactivateDirective) er
 		// Unknown / already removed — idempotent no-op.
 		return nil
 	}
-	unregisterSupplyConsumers(st.bindings)
+	unregisterSupplyConsumers(id, st.bindings)
 	if st.sub == nil {
 		return nil
 	}

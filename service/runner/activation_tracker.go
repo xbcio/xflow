@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 
@@ -25,8 +26,48 @@ type ActivationTracker struct {
 }
 
 type activationID struct {
-	WorkflowID  string
-	EntryUnitID string
+	Namespace       string
+	WorkflowID      string
+	WorkflowVersion string
+	EntryUnitID     string
+	ReplicaIndex    uint32
+}
+
+// supplyConsumerOwner renders id as the owner identity passed to
+// node.RegisterWasmSupplyConsumerByDigest / UnregisterWasmSupplyConsumerByDigest
+// for the activation-time legacy binding (spec Z.4 / Z.8, see
+// trigger_activation_handler.go's registerSupplyConsumers /
+// unregisterSupplyConsumers). ReplicaIndex is included deliberately: two
+// replicas of the SAME activation are independent owners of the digest-keyed
+// registration, so replica 0's Deactivate must not release replica 1's hold.
+// The "activation:" prefix keeps this owner namespace from colliding with the
+// "node:" owners the warm-up consumer and the execution-time guard use (see
+// wasmSupplyConsumerOwner in wasm_supply_declaration.go) -- a workflow name
+// that happened to render into this same shape must not be treated as the
+// same owner as an unrelated activation.
+func (id activationID) supplyConsumerOwner() string {
+	return fmt.Sprintf("activation:%s/%s/%s/%s/%d",
+		id.Namespace, id.WorkflowID, id.WorkflowVersion, id.EntryUnitID, id.ReplicaIndex)
+}
+
+func activationIDFromActivate(d protocol.ActivateDirective) activationID {
+	return activationID{
+		Namespace:       d.Namespace,
+		WorkflowID:      d.WorkflowID,
+		WorkflowVersion: d.WorkflowVersion,
+		EntryUnitID:     d.EntryUnitID,
+		ReplicaIndex:    d.ReplicaIndex,
+	}
+}
+
+func activationIDFromDeactivate(d protocol.DeactivateDirective) activationID {
+	return activationID{
+		Namespace:       d.Namespace,
+		WorkflowID:      d.WorkflowID,
+		WorkflowVersion: d.WorkflowVersion,
+		EntryUnitID:     d.EntryUnitID,
+		ReplicaIndex:    d.ReplicaIndex,
+	}
 }
 
 type activeSubscription struct {
@@ -128,7 +169,7 @@ func (t *ActivationTracker) invokeOnActivateFailed(d protocol.ActivateDirective,
 }
 
 func (t *ActivationTracker) activateLocked(ctx context.Context, d protocol.ActivateDirective) error {
-	id := activationID{WorkflowID: d.WorkflowID, EntryUnitID: d.EntryUnitID}
+	id := activationIDFromActivate(d)
 	existing, ok := t.active[id]
 
 	if ok && existing.Generation == d.Generation {
@@ -169,7 +210,7 @@ func (t *ActivationTracker) activateLocked(ctx context.Context, d protocol.Activ
 }
 
 func (t *ActivationTracker) deactivateLocked(d protocol.DeactivateDirective) {
-	id := activationID{WorkflowID: d.WorkflowID, EntryUnitID: d.EntryUnitID}
+	id := activationIDFromDeactivate(d)
 	existing, ok := t.active[id]
 	if !ok {
 		// Not active — skip.
@@ -207,8 +248,9 @@ func (t *ActivationTracker) Inventory() []protocol.ActivationInventoryItem {
 	for id, sub := range t.active {
 		items = append(items, protocol.ActivationInventoryItem{
 			WorkflowID:      id.WorkflowID,
-			WorkflowVersion: sub.Directive.WorkflowVersion,
+			WorkflowVersion: id.WorkflowVersion,
 			EntryUnitID:     id.EntryUnitID,
+			ReplicaIndex:    id.ReplicaIndex,
 			Generation:      sub.Generation,
 		})
 	}
@@ -223,9 +265,12 @@ func (t *ActivationTracker) Shutdown(ctx context.Context) {
 	for id, sub := range t.active {
 		sub.cancel()
 		if err := t.handler.Deactivate(protocol.DeactivateDirective{
-			WorkflowID:  id.WorkflowID,
-			EntryUnitID: id.EntryUnitID,
-			Generation:  sub.Generation,
+			Namespace:       id.Namespace,
+			WorkflowID:      id.WorkflowID,
+			WorkflowVersion: id.WorkflowVersion,
+			EntryUnitID:     id.EntryUnitID,
+			ReplicaIndex:    id.ReplicaIndex,
+			Generation:      sub.Generation,
 		}); err != nil {
 			t.logger.Warn("shutdown deactivation error",
 				"workflow_id", id.WorkflowID,

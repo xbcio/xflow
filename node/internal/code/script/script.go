@@ -285,7 +285,7 @@ func (n *ScriptNode) Execute(ctx context.Context, input *types.Input) (*types.Ou
 				return nil, types.NewTransientError("script.supply_consumer", fmt.Sprintf(
 					"node declares supply consumers %v but artifact_digest resolved to empty; refusing to evaluate against an empty rule set", declared))
 			}
-			if err := ensureWasmSupplyConsumers(ctx, digest, code, declared); err != nil {
+			if err := ensureWasmSupplyConsumers(ctx, digest, code, declared, input.WorkflowName, input.NodeName); err != nil {
 				observeExecute(ctx, language, runtime, "config", time.Since(start))
 				// Transient, not Permanent: a supply that has not arrived yet is
 				// self-healing on redelivery, and a Permanent verdict would make
@@ -581,9 +581,21 @@ const wasmScriptLanguage = "wasm"
 // pipeline it means the credential a clean rule exists to strip is never
 // stripped.
 //
+// workflowName and nodeName identify the node THIS guard is running for, and
+// become the wasm-side registration's owner (spec Z.4 / Z.8): the registry
+// stores one consumer per (digest, supplyNode), and this call site is one of
+// three across the codebase that register against that same slot (the other
+// two are the activation-time legacy binding and the warm-up declaration
+// consumer). Without a distinct owner per call site, one site's release would
+// silently erase the registrations the other two installed. This site itself
+// never releases -- a script node's registration lives for the process, and
+// the "node:" prefix keeps this owner namespace from colliding with the
+// activation-identity owners the legacy binding uses (see
+// service/runner/trigger_activation_handler.go).
+//
 // Errors name the digest and the supply node and nothing else. The module code
 // and the node's params never appear: this error is logged.
-func ensureWasmSupplyConsumers(ctx context.Context, digest, code string, supplies []string) error {
+func ensureWasmSupplyConsumers(ctx context.Context, digest, code string, supplies []string, workflowName, nodeName string) error {
 	if wasm.SupplyConfiguredByDigest(digest) {
 		return nil
 	}
@@ -593,8 +605,9 @@ func ensureWasmSupplyConsumers(ctx context.Context, digest, code string, supplie
 		return fmt.Errorf("compile wasm module %s declared as a consumer of %v: %w",
 			digest, supplies, err)
 	}
+	owner := "node:" + workflowName + "/" + nodeName
 	for _, supplyNode := range supplies {
-		if err := wasm.RegisterSupplyConsumerByDigest(digest, supplyNode, supply.Default); err != nil {
+		if err := wasm.RegisterSupplyConsumerByDigest(digest, supplyNode, owner, supply.Default); err != nil {
 			return fmt.Errorf("register wasm module %s as consumer of supply %q: %w",
 				digest, supplyNode, err)
 		}

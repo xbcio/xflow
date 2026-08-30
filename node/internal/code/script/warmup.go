@@ -37,17 +37,23 @@ func RegisterWasmSupplyConsumer(code string, supplyNode string) error {
 
 // RegisterWasmSupplyConsumerByDigest is the artifact-digest variant: the module
 // is identified by its sha256 digest rather than a base64 code string.
-func RegisterWasmSupplyConsumerByDigest(digest string, supplyNode string) error {
-	return wasm.RegisterSupplyConsumerByDigest(digest, supplyNode, supply.Default)
+//
+// owner identifies the caller establishing this registration (spec Z.4 / Z.8):
+// the registry stores one consumer per (digest, supplyNode), and three
+// independent call sites in this codebase compete to install that one slot, so
+// each must release only its own hold — see wasm.RegisterSupplyConsumerByDigest.
+func RegisterWasmSupplyConsumerByDigest(digest string, supplyNode string, owner string) error {
+	return wasm.RegisterSupplyConsumerByDigest(digest, supplyNode, owner, supply.Default)
 }
 
-// UnregisterWasmSupplyConsumerByDigest removes a registration made by
-// RegisterWasmSupplyConsumerByDigest. Call it when the workflow leaves this
-// process (deactivation), so a module that is no longer hosted here stops
-// rebuilding its pool on every content change. It is a no-op when the pair was
-// never registered.
-func UnregisterWasmSupplyConsumerByDigest(digest string, supplyNode string) {
-	wasm.UnregisterSupplyConsumerByDigest(digest, supplyNode, supply.Default)
+// UnregisterWasmSupplyConsumerByDigest removes owner's hold on a registration
+// made by RegisterWasmSupplyConsumerByDigest. Call it when the workflow leaves
+// this process (deactivation), so a module that is no longer hosted here stops
+// rebuilding its pool on every content change. It is a no-op when this owner
+// never registered, and it leaves the registration in place for any OTHER
+// owner still holding it.
+func UnregisterWasmSupplyConsumerByDigest(digest string, supplyNode string, owner string) {
+	wasm.UnregisterSupplyConsumerByDigest(digest, supplyNode, owner, supply.Default)
 }
 
 // CompileWasmModule eagerly compiles a wasm module (base64 code string) into the

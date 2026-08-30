@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/xbcio/xflow/node/supply"
 )
@@ -190,15 +191,68 @@ func (c *supplyConsumerByDigest) OnSupplyChanged(ctx context.Context, snap suppl
 	return nil
 }
 
+// consumerOwners tracks, per (registry, moduleKey+supplyNode) registration slot,
+// the SET of opaque owner identities that currently hold it registered. It
+// exists because supply.Registry.RegisterConsumer/UnregisterConsumer store
+// exactly ONE consumer per (name, key) — there is no reference counting inside
+// the registry itself — while the digest-keyed registration has THREE
+// independent call sites racing to install that one slot (spec Z.4 / Z.8):
+// the legacy activation-time binding, the warm-up declaration consumer, and
+// the execution-time guard. Without an owner set, any one of the three
+// releasing (Deactivate) deletes the registry entry outright, silently
+// erasing the other two's still-live registrations with no self-heal (see
+// SupplyConfiguredByDigest's doc comment for why the short-circuit in
+// script.ensureWasmSupplyConsumers cannot recover from this).
+//
+// This is a SET, deliberately NOT a refcount (map[string]int). A refcount
+// cannot tell "the same owner registered again" (idempotent retry: activation
+// redelivery, a pointer supply flipping back and forth, or
+// ensureWasmSupplyConsumers running once per message) apart from "a second,
+// distinct owner registered" — both increment a count, so the same owner
+// retrying N times requires N releases to reach zero, and two of this
+// path's three call sites (the warm-up consumer and the execution-time
+// guard) never issue a matching release at all. A set's membership test
+// makes the same owner registering twice a true no-op: the set's size does
+// not change, and a single release from that owner empties it.
+var (
+	consumerOwnersMu sync.Mutex
+	consumerOwners   = map[consumerOwnerKey]map[string]struct{}{}
+)
+
+// consumerOwnerKey identifies one registration slot. reg is part of the key,
+// not just supplyNode+moduleKey, because tests (and potentially future
+// callers) register against registries other than supply.Default; scoping by
+// registry keeps their owner sets independent, matching the fact that the
+// underlying supply.Registry.consumers map is itself per-instance.
+type consumerOwnerKey struct {
+	reg *supply.Registry
+	key string // consumerKeyFor(moduleKey, supplyNode)
+}
+
 // RegisterSupplyConsumerByDigest is RegisterSupplyConsumer for modules
 // identified by their artifact store digest (e.g. "sha256:<64 hex>"). The
 // digest hex (without the "sha256:" prefix) is used directly as the moduleKey,
 // avoiding a multi-MB base64 decode + sha256 that the code-string path needs.
 //
 // The function strips the "sha256:" prefix itself; callers pass the full digest.
-func RegisterSupplyConsumerByDigest(digest string, supplyNode string, reg *supply.Registry) error {
+//
+// owner identifies the caller establishing this registration (spec Z.4 / Z.8).
+// It must be a stable, non-empty string that is unique to the caller's own
+// lifecycle — an activation identity (including ReplicaIndex) for the
+// legacy activation-time binding, or a "{workflow}/{node}" pair for the
+// warm-up consumer and the execution-time guard — prefixed so the two
+// namespaces cannot collide (see the two forwarders in
+// service/runner/trigger_activation_handler.go and
+// node/internal/code/script/script.go for the exact values). Registering the
+// same owner twice against the same (digest, supplyNode) is idempotent: the
+// underlying registry registration is installed at most once per key
+// regardless of how many times the same owner calls this.
+func RegisterSupplyConsumerByDigest(digest string, supplyNode string, owner string, reg *supply.Registry) error {
 	if digest == "" || supplyNode == "" {
 		return fmt.Errorf("wasm: RegisterSupplyConsumerByDigest requires both digest and supply node name")
+	}
+	if owner == "" {
+		return fmt.Errorf("wasm: RegisterSupplyConsumerByDigest requires a non-empty owner")
 	}
 	key, ok := strings.CutPrefix(digest, "sha256:")
 	if !ok || len(key) != 64 {
@@ -207,14 +261,47 @@ func RegisterSupplyConsumerByDigest(digest string, supplyNode string, reg *suppl
 	if reg == nil {
 		reg = supply.Default
 	}
+	ownerKey := consumerOwnerKey{reg: reg, key: consumerKeyFor(key, supplyNode)}
+
+	consumerOwnersMu.Lock()
+	set, exists := consumerOwners[ownerKey]
+	if !exists {
+		set = make(map[string]struct{}, 1)
+		consumerOwners[ownerKey] = set
+	}
+	_, alreadyOwner := set[owner]
+	set[owner] = struct{}{}
+	consumerOwnersMu.Unlock()
+
+	if alreadyOwner {
+		// This owner already holds the slot registered — the underlying
+		// registry entry is already installed (by this owner or, if it were
+		// added earlier by another owner, by that one; either way the entry
+		// exists). Re-registering here would be harmless but pointless: it
+		// would only re-run RegisterConsumer's immediate notify against
+		// content this consumer has typically already accepted.
+		return nil
+	}
 	c := &supplyConsumerByDigest{moduleKey: key, host: sharedReactorHost}
 	sharedReactorHost.seedSourceDrivenByKey(key)
-	reg.RegisterConsumer(supplyNode, consumerKeyFor(key, supplyNode), c)
+	reg.RegisterConsumer(supplyNode, ownerKey.key, c)
 	return nil
 }
 
-// UnregisterSupplyConsumerByDigest removes a digest-keyed registration.
-func UnregisterSupplyConsumerByDigest(digest string, supplyNode string, reg *supply.Registry) {
+// UnregisterSupplyConsumerByDigest removes owner's hold on a digest-keyed
+// registration. It is idempotent: releasing an owner that never registered
+// (or already released) is a no-op. The underlying supply.Registry
+// registration is only actually removed (reg.UnregisterConsumer) when the
+// LAST owner releases — see consumerOwners for why this must be set
+// membership rather than a count.
+func UnregisterSupplyConsumerByDigest(digest string, supplyNode string, owner string, reg *supply.Registry) {
+	if owner == "" {
+		// No identity to release — cannot be anyone's registration under the
+		// owner-set contract, so there is nothing safe to do but no-op. See
+		// RegisterSupplyConsumerByDigest, which refuses to register under an
+		// empty owner in the first place.
+		return
+	}
 	key, ok := strings.CutPrefix(digest, "sha256:")
 	if !ok || len(key) != 64 {
 		return
@@ -222,7 +309,27 @@ func UnregisterSupplyConsumerByDigest(digest string, supplyNode string, reg *sup
 	if reg == nil {
 		reg = supply.Default
 	}
-	reg.UnregisterConsumer(supplyNode, consumerKeyFor(key, supplyNode))
+	ownerKey := consumerOwnerKey{reg: reg, key: consumerKeyFor(key, supplyNode)}
+
+	consumerOwnersMu.Lock()
+	set, exists := consumerOwners[ownerKey]
+	if !exists {
+		consumerOwnersMu.Unlock()
+		return
+	}
+	delete(set, owner)
+	empty := len(set) == 0
+	if empty {
+		delete(consumerOwners, ownerKey)
+	}
+	consumerOwnersMu.Unlock()
+
+	if !empty {
+		// At least one other owner still holds this slot registered — the
+		// registry entry must survive this release untouched.
+		return
+	}
+	reg.UnregisterConsumer(supplyNode, ownerKey.key)
 }
 
 // SupplyConfiguredByDigest reports whether the module named by digest is both

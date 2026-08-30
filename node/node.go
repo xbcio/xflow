@@ -208,16 +208,23 @@ func RegisterWasmSupplyConsumer(code string, supplyNode string) error {
 // identified by their artifact store digest (e.g. "sha256:<64 hex>"). Use this
 // when the module is stored in the ArtifactStore and ScriptNode uses
 // artifact_digest rather than an inline code string.
-func RegisterWasmSupplyConsumerByDigest(digest string, supplyNode string) error {
-	return scriptpkg.RegisterWasmSupplyConsumerByDigest(digest, supplyNode)
+//
+// owner identifies the caller establishing this registration (spec Z.4 / Z.8):
+// the registry stores one consumer per (digest, supplyNode), and three
+// independent call sites in this codebase compete to install that one slot —
+// see scriptpkg.RegisterWasmSupplyConsumerByDigest for the owner contract and
+// the owner values each of the three call sites must use.
+func RegisterWasmSupplyConsumerByDigest(digest string, supplyNode string, owner string) error {
+	return scriptpkg.RegisterWasmSupplyConsumerByDigest(digest, supplyNode, owner)
 }
 
-// UnregisterWasmSupplyConsumerByDigest undoes RegisterWasmSupplyConsumerByDigest.
-// Call it when the workflow is deactivated on this runner, so a module it no
-// longer hosts stops rebuilding its pool on every supply change. Unregistering a
-// pair that was never registered is a no-op.
-func UnregisterWasmSupplyConsumerByDigest(digest string, supplyNode string) {
-	scriptpkg.UnregisterWasmSupplyConsumerByDigest(digest, supplyNode)
+// UnregisterWasmSupplyConsumerByDigest undoes RegisterWasmSupplyConsumerByDigest
+// for owner. Call it when the workflow is deactivated on this runner, so a
+// module it no longer hosts stops rebuilding its pool on every supply change.
+// Unregistering an owner that never registered is a no-op, and it leaves the
+// registration in place for any OTHER owner still holding it.
+func UnregisterWasmSupplyConsumerByDigest(digest string, supplyNode string, owner string) {
+	scriptpkg.UnregisterWasmSupplyConsumerByDigest(digest, supplyNode, owner)
 }
 
 // CompileWasmModule eagerly compiles a wasm module (base64 code string) into the
