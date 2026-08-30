@@ -153,7 +153,7 @@ func TestSupplyConfiguredFalseWhenLegacyPoolPredatesSupplyRegistration(t *testin
 	// source-driven.
 	reg := supply.NewRegistry()
 	digest := "sha256:" + mustModuleKey(t, code)
-	if err := RegisterSupplyConsumerByDigest(digest, "rules", reg); err != nil {
+	if err := RegisterSupplyConsumerByDigest(digest, "rules", "test-owner", reg); err != nil {
 		t.Fatalf("RegisterSupplyConsumerByDigest: %v", err)
 	}
 
@@ -193,7 +193,7 @@ func TestSourceDrivenEngineRefusesLegacyPool(t *testing.T) {
 
 	reg := supply.NewRegistry()
 	digest := "sha256:" + mustModuleKey(t, code)
-	if err := RegisterSupplyConsumerByDigest(digest, "rules", reg); err != nil {
+	if err := RegisterSupplyConsumerByDigest(digest, "rules", "test-owner", reg); err != nil {
 		t.Fatalf("RegisterSupplyConsumerByDigest: %v", err)
 	}
 
@@ -224,7 +224,7 @@ func TestUndeclaredSiblingIsRefusedAfterDigestRegistration(t *testing.T) {
 	// A DIFFERENT node, sharing the identical module, registers as a supply
 	// consumer. Nothing about the undeclared node changed.
 	reg := supply.NewRegistry()
-	if err := RegisterSupplyConsumerByDigest("sha256:"+mustModuleKey(t, code), "rules", reg); err != nil {
+	if err := RegisterSupplyConsumerByDigest("sha256:"+mustModuleKey(t, code), "rules", "test-owner", reg); err != nil {
 		t.Fatalf("RegisterSupplyConsumerByDigest: %v", err)
 	}
 

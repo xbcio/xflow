@@ -183,6 +183,17 @@ func (f *wasmActivationFixture) binding() engine.SupplyConsumerBinding {
 	return engine.SupplyConsumerBinding{ModuleDigest: f.digest, SupplyNode: f.supplyName}
 }
 
+// wiringTestActivationOwner is the owner identity h.Activate registers wasm
+// supply consumers under for every ActivateDirective in this file: WorkflowID
+// "wf-1", EntryUnitID "trig", and zero-value Namespace/WorkflowVersion/
+// ReplicaIndex (mirrors activationID.supplyConsumerOwner in
+// activation_tracker.go). This file is `package runner`, so it can reach
+// activationID directly rather than reconstructing the owner string by hand.
+// cleanupBindings must release the SAME owner Activate registered under, or
+// the release is a no-op against a set that never held that owner and the
+// registration leaks into every later test in this binary.
+var wiringTestActivationOwner = activationID{WorkflowID: "wf-1", EntryUnitID: "trig"}.supplyConsumerOwner()
+
 // cleanupBindings unregisters bindings at test end. supply.Default outlives the
 // test, so a registration left behind would keep rebuilding a dead module's pool
 // on every later Apply in this binary.
@@ -190,7 +201,7 @@ func cleanupBindings(t *testing.T, bindings ...engine.SupplyConsumerBinding) {
 	t.Helper()
 	t.Cleanup(func() {
 		for _, b := range bindings {
-			node.UnregisterWasmSupplyConsumerByDigest(b.ModuleDigest, b.SupplyNode)
+			node.UnregisterWasmSupplyConsumerByDigest(b.ModuleDigest, b.SupplyNode, wiringTestActivationOwner)
 		}
 	})
 }
