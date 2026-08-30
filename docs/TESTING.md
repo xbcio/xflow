@@ -72,7 +72,9 @@ Builds a fixed test binary, runs the A0/A3 required manifest (real Redis + MySQL
 | `make test-soak` | `test/soak/` | HA soak smoke, runs on in-process miniredis; no real Redis required |
 | `make test-concurrency` | `backend/providers/...` | Concurrency stress, gated by `concurrency` build tag |
 
-`test/stress/` and `test/security/` contain additional scenario files but do not have dedicated top-level Makefile targets; run them directly with `go test`.
+`test/security/` carries no build tag, so `go list ./...` picks it up and `make test` already runs it — it needs no dedicated target. `test/stress/` is gated by the `stress` build tag and runs via `make test-stress`.
+
+Build-tagged files are invisible to both `go build ./...` and `go vet ./...`, so a suite behind a tag can stop compiling without anything reporting it — `test/stress/` did exactly that (an unused import left behind by `3144e02`, unnoticed because no target ever built it). `make vet` therefore runs one extra pass per tag; add a pass there whenever you add a tag.
 
 
 
@@ -82,7 +84,7 @@ Uses fake StateStore + fake TaskQueue:
 - `scheduler_test.go`: linear chain / fan-out / fan-in / port routing / skip cascade / multiple nodes ready simultaneously
 - `errorpolicy_test.go`: four strategies
 - `suspend_test.go`: signal early/late arrival, timer, timeout, multi-signal quorum
-- `graph_test.go`: Compile validation, cycle detection
+- `engine/graph/compile_test.go`: Compile validation, cycle detection (a separate `engine/graph` package, not a sibling of the three files above)
 
 Fake StateStore uses mutex (~100 lines) to simulate concurrent contention.
 
@@ -90,7 +92,7 @@ Fake StateStore uses mutex (~100 lines) to simulate concurrent contention.
 
 - `backend/providers/local/` — real memoryState + memoryQueue, end-to-end
 - `backend/providers/distributed/` — Redis state + Asynq queue, full scenario coverage
-- Shared `compat_test.go` test cases (same workflows run on both local/cluster)
+- Shared contract cases in `backend/internal/statestoretest` (`RunStateStoreContract`), consumed by `backend/providers/local/state_store_contract_test.go` and `backend/providers/distributed/internal/rstate/state_store_contract_test.go` — the same scenarios run against both backends
 
 ## Testing Conventions
 

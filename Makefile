@@ -32,6 +32,14 @@ test-examples:
 test-concurrency:
 	go test -tags=concurrency ./backend/providers/local/ ./backend/providers/distributed/... -race -count=3 -timeout 5m
 
+# Group entry-admission stress suite. Gated behind the `stress` build tag, so
+# like test-concurrency it stays out of the default `make test`. It needs no
+# external infrastructure (in-process local backend) and finishes in under a
+# second; the tag exists to keep the default package list stable, not because
+# the suite is expensive.
+test-stress:
+	go test -tags=stress ./test/stress/... -race -count=1 -timeout 5m
+
 # ── Code quality ───────────────────────────────────────────────────────────────
 
 lint:
@@ -45,6 +53,18 @@ fmt:
 
 vet:
 	go vet ./...
+	# Build-tagged files are excluded from the default build config, so
+	# `go vet ./...` above cannot see them and `go build ./...` cannot either.
+	# Without one pass per tag a tagged suite rots silently: test/stress
+	# stopped compiling at 3144e02 (an unused import left behind when the
+	# durable group suspend subsystem was removed) and nothing reported it,
+	# because no Makefile target and no workflow ever built that package.
+	# Add a pass here whenever you introduce a build tag.
+	go vet -tags=integration ./test/integration/...
+	go vet -tags=perf ./test/perf/...
+	go vet -tags=soak ./test/soak/...
+	go vet -tags=stress ./test/stress/...
+	go vet -tags=concurrency ./backend/providers/local/ ./backend/providers/distributed/...
 
 tidy:
 	go mod tidy
