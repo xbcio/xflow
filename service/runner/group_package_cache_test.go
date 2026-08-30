@@ -2,12 +2,35 @@ package runner
 
 import (
 	"fmt"
+	"reflect"
+	"sync"
 	"testing"
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/types"
 )
+
+// recordingObserver records every OnGroupPackageCache call in order. Resolve
+// may run concurrently, so calls are guarded by a mutex.
+type recordingObserver struct {
+	mu    sync.Mutex
+	calls []string
+}
+
+func (r *recordingObserver) OnGroupPackageCache(result string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls = append(r.calls, result)
+}
+
+func (r *recordingObserver) snapshot() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]string, len(r.calls))
+	copy(out, r.calls)
+	return out
+}
 
 type fakeInventory struct {
 	handlers    map[string]map[int]bool
@@ -251,4 +274,53 @@ func isValidationError(err error, target **PackageValidationError) bool {
 		return true
 	}
 	return false
+}
+
+// TestPackageCache_ObserverRecordsMissThenHit pins the exact sequence a
+// repeated Resolve on the same hash produces: the first call compiles and
+// caches ("miss"), the second returns the cached entry ("hit"). Asserting
+// the exact sequence rather than "at least one hit" matters here — a >=1
+// assertion stays green even if "hit" were recorded on every call including
+// the first (see at-least-one-hides-far-too-many).
+func TestPackageCache_ObserverRecordsMissThenHit(t *testing.T) {
+	obs := &recordingObserver{}
+	cache := NewPackageCache(PackageCacheConfig{MaxEntries: 10, Observer: obs})
+	payload := testPayload(t)
+	inv := validInventory()
+
+	if _, _, err := cache.Resolve(payload, inv); err != nil {
+		t.Fatalf("first Resolve: %v", err)
+	}
+	if _, _, err := cache.Resolve(payload, inv); err != nil {
+		t.Fatalf("second Resolve: %v", err)
+	}
+
+	got := obs.snapshot()
+	want := []string{"miss", "hit"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("observer calls = %v, want %v", got, want)
+	}
+}
+
+// TestPackageCache_ObserverNotCalledOnMissingPackage pins the decision that
+// error outcomes (here, ErrPackageMissing: the payload carries no package and
+// the hash is not cached) never reach the observer — only the two real
+// outcomes, hit and miss, do. See cache.go's Resolve comment for why.
+func TestPackageCache_ObserverNotCalledOnMissingPackage(t *testing.T) {
+	obs := &recordingObserver{}
+	cache := NewPackageCache(PackageCacheConfig{MaxEntries: 10, Observer: obs})
+	payload := &engine.GroupLeasePayload{
+		PackageHash: "pkg-sha256:v1:abcd",
+		Package:     nil,
+	}
+	inv := validInventory()
+
+	_, _, err := cache.Resolve(payload, inv)
+	if err != ErrPackageMissing {
+		t.Fatalf("expected ErrPackageMissing, got %v", err)
+	}
+
+	if calls := obs.snapshot(); len(calls) != 0 {
+		t.Fatalf("observer calls = %v, want none", calls)
+	}
 }

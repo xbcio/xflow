@@ -371,6 +371,7 @@ var metricHelp = map[string]string{
 	"xflow_group_emit_batch_size":                    "Batch size of runner emit operations.",
 	"xflow_group_emit_inflight":                      "Number of currently in-flight emit operations.",
 	"xflow_group_backpressure_paused_total":          "Times group processing was paused due to backpressure.",
+	"xflow_group_package_cache_total":                "Sub-graph package cache resolutions on the runner, partitioned by result (hit/miss). A miss means the package had to be shipped in the lease payload.",
 	"xflow_dispatch_transient_total":                 "Transient dispatch failures scheduled for retry, partitioned by reason.",
 	"xflow_execution_completed_total":                "Workflow executions completed, partitioned by terminal status.",
 	"xflow_lease_acquire_total":                      "Lease acquisition attempts, partitioned by result.",

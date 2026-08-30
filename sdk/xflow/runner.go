@@ -533,9 +533,24 @@ func buildRunnerServiceConfig(cfg RunnerConfig, opts ...RunnerOption) (runnersvc
 	// Suspend is disabled inside a group for the same reason as inside a map
 	// body: a suspended member would park a sub-execution the outer lease
 	// cannot resume.
+	//
+	// The package cache observer is wired only for this group cache, not for
+	// the SubgraphRuntime cache below: xflow_group_package_cache_total is a
+	// xflow_group_* series, and map body / subgraph package resolutions are a
+	// distinct fan-out domain (see the comment above on why inner-engine
+	// hooks keep xflow_subgraph_* separate from the outer counters). Folding
+	// map body cache events into the group counter would repeat that same
+	// mistake. Map body / subgraph package cache hit/miss has no metric of
+	// its own today — that is an intentional gap, not an oversight; closing
+	// it means adding a new xflow_subgraph_package_cache_total series plus
+	// its own metricHelp entry.
+	groupPackageCacheConfig := runnersvc.PackageCacheConfig{MaxEntries: runnerPackageCacheEntries}
+	if o.metrics != nil {
+		groupPackageCacheConfig.Observer = metrics.NewGroupMetrics(o.metrics)
+	}
 	groupRuntime := runnersvc.NewGroupRuntime(
 		reg,
-		runnersvc.NewPackageCache(runnersvc.PackageCacheConfig{MaxEntries: runnerPackageCacheEntries}),
+		runnersvc.NewPackageCache(groupPackageCacheConfig),
 		append([]runnersvc.GroupRuntimeOption{
 			runnersvc.WithSuspendDisabled(),
 			runnersvc.WithGroupMapConcurrencyLimiter(mapConcurrencyLimiter),

@@ -58,7 +58,6 @@ func TestEveryMetricNameInThisPackageHasHelpText(t *testing.T) {
 		"xflow_group_exec_duration_seconds":   "group.go, no caller outside this package",
 		"xflow_group_lease_acquired_total":    "group.go, no caller outside this package",
 		"xflow_group_lease_expired_total":     "group.go, no caller outside this package",
-		"xflow_group_package_cache_total":     "group.go, no caller outside this package",
 		"xflow_group_selector_fallback_total": "group.go, no caller outside this package",
 	}
 

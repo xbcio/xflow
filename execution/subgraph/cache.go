@@ -19,11 +19,28 @@ type HandlerInventory interface {
 	Credentials() []string
 }
 
+// PackageCacheObserver is notified of each package resolution outcome.
+//
+// Declared here rather than taking observability/metrics directly: this layer
+// reaches its exporters through observer interfaces the same way engine/ does
+// (engine.Hooks), so the concrete Prometheus adapter stays outside.
+//
+// The method name matches metrics.GroupMetrics.OnGroupPackageCache so that
+// type satisfies this interface structurally, with no adapter in between.
+type PackageCacheObserver interface {
+	OnGroupPackageCache(result string)
+}
+
 // PackageCacheConfig controls the bounded cache behavior.
 type PackageCacheConfig struct {
 	MaxEntries      int
 	MaxPackageBytes int
 	AllowedRuntimes []string
+
+	// Observer, when set, is notified of every Resolve outcome. Optional: the
+	// ~40 construction sites that do not set it keep a nil observer and pay
+	// nothing.
+	Observer PackageCacheObserver
 }
 
 type cacheEntry struct {
@@ -66,10 +83,21 @@ func (c *PackageCache) Resolve(payload *engine.GroupLeasePayload, inv HandlerInv
 	if entry, ok := c.entries[payload.PackageHash]; ok {
 		entry.useCount++
 		c.mu.Unlock()
+		if c.config.Observer != nil {
+			c.config.Observer.OnGroupPackageCache("hit")
+		}
 		return entry.graph, entry.pkg, nil
 	}
 	c.mu.Unlock()
 
+	// From here on, every exit is either an error (nil payload.Package,
+	// validation failure, compile failure) or a successful cache fill. Only
+	// the success path is observed below as "miss": this metric answers
+	// "did the cache save a package transfer", which only has two possible
+	// answers, hit or miss. Folding error outcomes into the same result
+	// label would dilute the hit-rate ratio this metric exists to expose,
+	// and those errors are already visible through the caller's own error
+	// handling.
 	if payload.Package == nil {
 		return nil, nil, ErrPackageMissing
 	}
@@ -91,6 +119,9 @@ func (c *PackageCache) Resolve(payload *engine.GroupLeasePayload, inv HandlerInv
 	c.order = append(c.order, payload.PackageHash)
 	c.mu.Unlock()
 
+	if c.config.Observer != nil {
+		c.config.Observer.OnGroupPackageCache("miss")
+	}
 	return compiled, pkg, nil
 }
 
