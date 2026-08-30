@@ -37,11 +37,20 @@ func TestNewControlPlaneRequireRunnerAuthFailsClosed(t *testing.T) {
 }
 
 // TestNewControlPlaneRequireRunnerAuthAllowsConfiguredAuth verifies that a
-// configured Auth satisfies the fail-closed requirement.
+// genuinely configured Auth (not the DisabledAuthenticator{} sentinel)
+// satisfies the fail-closed requirement. This fixture used to pass
+// DisabledAuthenticator{} here and assert success — that pinned the very
+// sentinel bypass this gate exists to close (see
+// TestNewControlPlaneRequireRunnerAuthRejectsDisabledSentinel below), so it
+// was fixed to use a real Authenticator instead.
 func TestNewControlPlaneRequireRunnerAuthAllowsConfiguredAuth(t *testing.T) {
+	auth, err := NewStaticTokenAuthenticator("runner-", "test-token", []string{"default"}, []string{"*"})
+	if err != nil {
+		t.Fatalf("static token authenticator: %v", err)
+	}
 	cp, err := NewControlPlane(Config{
 		Backend:           backendlocal.New(),
-		Auth:              DisabledAuthenticator{},
+		Auth:              auth,
 		RequireRunnerAuth: true,
 	})
 	if err != nil {
@@ -49,6 +58,44 @@ func TestNewControlPlaneRequireRunnerAuthAllowsConfiguredAuth(t *testing.T) {
 	}
 	if cp == nil {
 		t.Fatal("NewControlPlane() returned nil control plane")
+	}
+}
+
+// TestNewControlPlaneRequireRunnerAuthRejectsDisabledSentinel pins M2:
+// DisabledAuthenticator{} is a non-nil Authenticator, so a plain
+// `cfg.Auth == nil` check cannot tell "explicitly disabled" apart from
+// "really configured". Passing the sentinel alongside RequireRunnerAuth must
+// still fail closed — RequireRunnerAuth's whole purpose is that production
+// cannot silently serve the runner protocol unauthenticated, and the sentinel
+// is exactly the shape an embedder would use to (unknowingly) defeat that.
+func TestNewControlPlaneRequireRunnerAuthRejectsDisabledSentinel(t *testing.T) {
+	_, err := NewControlPlane(Config{
+		Backend:           backendlocal.New(),
+		Auth:              DisabledAuthenticator{},
+		RequireRunnerAuth: true,
+	})
+	if err == nil {
+		t.Fatal("NewControlPlane(RequireRunnerAuth with Auth: DisabledAuthenticator{}) error = nil, want fail-closed error")
+	}
+}
+
+// TestNewControlPlaneDisabledSentinelWarnsButSucceeds pins M4: without
+// RequireRunnerAuth, an explicit DisabledAuthenticator{} takes the same
+// "permissive but warned" path as a nil Auth (see
+// TestNewControlPlaneNilAuthWarnsButSucceeds below) rather than being
+// silently treated as a configured posture.
+func TestNewControlPlaneDisabledSentinelWarnsButSucceeds(t *testing.T) {
+	var warned bool
+	logger := &warnCapturingLogger{onWarn: func() { warned = true }}
+	cp, err := NewControlPlane(Config{Backend: backendlocal.New(), Auth: DisabledAuthenticator{}, Logger: logger})
+	if err != nil {
+		t.Fatalf("NewControlPlane(Auth: DisabledAuthenticator{}) error = %v, want success (backward compatible)", err)
+	}
+	if cp == nil {
+		t.Fatal("NewControlPlane() returned nil control plane")
+	}
+	if !warned {
+		t.Fatal("NewControlPlane(Auth: DisabledAuthenticator{}) did not emit a warning about the permissive authenticator")
 	}
 }
 

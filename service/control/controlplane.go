@@ -227,12 +227,16 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 	if cfg.Backend == nil {
 		return nil, errors.New("control: Config.Backend is required")
 	}
-	// Runner-protocol auth fail-closed. A nil Auth falls back to the permissive
-	// DisabledAuthenticator (every runner allowed). RequireRunnerAuth turns that
-	// into a hard error so production cannot silently serve the runner protocol
-	// unauthenticated; otherwise it is only a prominent warning (mirroring the
-	// nil-directory warning in NewServer) to preserve backward compatibility.
-	if cfg.Auth == nil {
+	// Runner-protocol auth fail-closed. A nil or explicitly-disabled Auth
+	// falls back to the permissive DisabledAuthenticator (every runner
+	// allowed) — DisabledAuthenticator{} is a non-nil Authenticator, so this
+	// gate uses IsConfigured rather than a plain nil check, or passing the
+	// sentinel explicitly would silently defeat RequireRunnerAuth. RequireRunnerAuth
+	// turns that into a hard error so production cannot silently serve the
+	// runner protocol unauthenticated; otherwise it is only a prominent warning
+	// (mirroring the nil-directory warning in NewServer) to preserve backward
+	// compatibility.
+	if !IsConfigured(cfg.Auth) {
 		if cfg.RequireRunnerAuth {
 			return nil, errors.New("control: Auth must be configured when RequireRunnerAuth is set")
 		}
