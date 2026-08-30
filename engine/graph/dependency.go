@@ -119,21 +119,63 @@ func buildDependencyEdges(def *types.WorkflowDef, depPorts []dependencyPort, g *
 	return validateSupplyUsage(g, extraAllowedSupplies)
 }
 
-// suppliesRefPattern matches a static $supplies.<name> reference. The name is
-// restricted to the identifier characters a node name may use, which is exactly
-// what makes the reference statically derivable.
+// suppliesRefPattern matches a static $supplies.<name> dotted reference. The
+// name's character class here is deliberately WIDER than what expr-lang's own
+// dotted member-access syntax accepts (letters, digits, underscore only —
+// confirmed with a throwaway probe against exprx.EvalExpr: evaluating
+// `$supplies.my-supply.field` against an env containing that exact key fails
+// with `compile expression: unknown name supply (1:14)`, because expr
+// tokenizes the hyphen as a subtraction operator and re-parses "supply.field"
+// as a second, unrelated operand rather than treating "my-supply" as one
+// name). The pattern here still captures across the hyphen, on purpose: that
+// lets firstInvalidDotSupplyName below name the whole intended supply
+// ("my-supply") in its error, instead of a strict extraction silently
+// truncating at "my" and producing either a confusing "no dependency edge"
+// error (if "my" doesn't happen to match one) or, worse, a graph that
+// compiles clean and only fails once the workflow runs.
 var suppliesRefPattern = regexp.MustCompile(`\$supplies\.([A-Za-z_][A-Za-z0-9_-]*)`)
 
-// suppliesDynamicPattern matches any use of $supplies that is NOT a static
-// dotted name: a bracket subscript, or a bare $supplies with no member access.
-// Such a use is rejected at compile time — if the name cannot be derived
-// statically, neither the dependency-edge check nor the server-side reverse
-// index can be built.
+// exprDotNamePattern is the character class expr-lang's dotted member-access
+// actually accepts. Anything suppliesRefPattern captures that falls outside
+// this class (in practice: contains a hyphen) has no valid dot-form syntax at
+// all — see suppliesRefPattern's comment for the probed failure mode.
+var exprDotNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// suppliesLiteralIndexPattern matches a $supplies[...] subscript whose index
+// is a single- or double-quoted string literal, e.g. $supplies["my-supply"]
+// or $supplies['my-supply']. Probed directly against exprx.EvalExpr: both
+// quote styles evaluate correctly against a map key containing a hyphen —
+// expr-lang treats ' and " as interchangeable for a string literal, unlike
+// the dotted form, which cannot express a hyphenated name at all (see
+// suppliesRefPattern above). Unlike a computed subscript
+// ($supplies[name], $supplies[$vars.env + "-rules"]), the literal's text IS
+// the supply name: nothing to evaluate, nothing that can differ between
+// compile time and run time. That makes it exactly as statically derivable
+// as a suppliesRefPattern dotted name, so it gets the same treatment below:
+// exempted from the dynamic-use rejection, and its name feeds
+// deriveSupplyRefs like any other reference.
+var suppliesLiteralIndexPattern = regexp.MustCompile(`\$supplies\[\s*(?:"([^"]*)"|'([^']*)')\s*\]`)
+
+// suppliesDynamicPattern matches a $supplies use that cannot be resolved at
+// compile time: a bracket subscript, or a bare $supplies with no member
+// access at all. Such a use is rejected at compile time — if the name cannot
+// be derived statically, neither the dependency-edge check nor the
+// server-side reverse index can be built.
+//
+// This pattern alone can't distinguish a literal subscript
+// ($supplies["my-supply"]) from a computed one ($supplies[name]): Go's RE2
+// engine has no lookahead/lookbehind to express "a bracket whose content is
+// NOT a string literal" in one pattern. hasDynamicSupplyRef below works
+// around that by stripping suppliesLiteralIndexPattern matches out of the
+// string first, so only a genuinely computed subscript (or a bare
+// $supplies) is left for this pattern to catch.
 var suppliesDynamicPattern = regexp.MustCompile(`\$supplies\s*\[|\$supplies(?:$|[^.A-Za-z0-9_])`)
 
-// deriveSupplyRefs walks a node's parameter tree and returns the distinct supply
-// names referenced via $supplies.<name>, sorted. It mirrors extractNodeRefs in
-// group_portability.go — same recursion, different pattern.
+// deriveSupplyRefs walks a node's parameter tree and returns the distinct
+// supply names referenced via $supplies.<name> or via a quoted bracket
+// subscript ($supplies["<name>"] / $supplies['<name>']), sorted. It mirrors
+// extractNodeRefs in group_portability.go — same recursion, different
+// pattern.
 func deriveSupplyRefs(params map[string]any) []string {
 	if len(params) == 0 {
 		return nil
@@ -157,6 +199,18 @@ func walkForSupplyRefs(v any, seen map[string]bool) {
 		for _, m := range suppliesRefPattern.FindAllStringSubmatch(val, -1) {
 			seen[m[1]] = true
 		}
+		for _, m := range suppliesLiteralIndexPattern.FindAllStringSubmatch(val, -1) {
+			// Exactly one of the two quote-style alternatives participates per
+			// match; the other reports back as "" from Go's regexp package,
+			// indistinguishable from a genuinely empty literal. An empty name
+			// isn't a valid supply name either way, so falling back to it here
+			// is safe.
+			name := m[1]
+			if name == "" {
+				name = m[2]
+			}
+			seen[name] = true
+		}
 	case map[string]any:
 		for _, child := range val {
 			walkForSupplyRefs(child, seen)
@@ -169,11 +223,14 @@ func walkForSupplyRefs(v any, seen map[string]bool) {
 }
 
 // hasDynamicSupplyRef reports whether any string in the parameter tree uses
-// $supplies with a non-literal name.
+// $supplies with a name that cannot be resolved at compile time.
 func hasDynamicSupplyRef(v any) bool {
 	switch val := v.(type) {
 	case string:
-		return suppliesDynamicPattern.MatchString(val)
+		// Strip literal-quoted subscripts first (see suppliesDynamicPattern's
+		// comment) so only a genuinely dynamic use is left for the pattern
+		// below to match.
+		return suppliesDynamicPattern.MatchString(suppliesLiteralIndexPattern.ReplaceAllString(val, ""))
 	case map[string]any:
 		for _, child := range val {
 			if hasDynamicSupplyRef(child) {
@@ -190,9 +247,45 @@ func hasDynamicSupplyRef(v any) bool {
 	return false
 }
 
-// validateSupplyUsage enforces the two compile-time rules for $supplies:
-//   - the name must be a static literal (otherwise the dependency is not
-//     derivable and both the edge check and the reverse index break);
+// firstInvalidDotSupplyName returns the first dot-form supply name in the
+// parameter tree that expr-lang's member-access syntax cannot parse — i.e. one
+// containing a character outside exprDotNamePattern, which in practice means a
+// hyphen — or "" if every dot-form name is valid. See suppliesRefPattern's
+// comment for why the extraction itself stays permissive enough to find this.
+func firstInvalidDotSupplyName(v any) string {
+	switch val := v.(type) {
+	case string:
+		for _, m := range suppliesRefPattern.FindAllStringSubmatch(val, -1) {
+			if !exprDotNamePattern.MatchString(m[1]) {
+				return m[1]
+			}
+		}
+	case map[string]any:
+		for _, child := range val {
+			if name := firstInvalidDotSupplyName(child); name != "" {
+				return name
+			}
+		}
+	case []any:
+		for _, child := range val {
+			if name := firstInvalidDotSupplyName(child); name != "" {
+				return name
+			}
+		}
+	}
+	return ""
+}
+
+// validateSupplyUsage enforces the compile-time rules for $supplies:
+//   - the name must be a static literal, dotted or a quoted bracket subscript
+//     (otherwise the dependency is not derivable and both the edge check and
+//     the reverse index break);
+//   - a dot-form name must be one expr-lang can actually parse as a member
+//     name — no hyphen — or the graph would compile clean and only fail once
+//     the workflow runs and the expression is evaluated (see
+//     suppliesRefPattern's comment for the probed failure mode); the fix is
+//     always the same (switch to bracket indexing), so the error says so
+//     directly instead of surfacing as an unrelated "no dependency edge";
 //   - every referenced supply must be reachable through a declared dependency
 //     edge (the dependency must be visible on the graph, not implicit).
 //
@@ -209,8 +302,14 @@ func validateSupplyUsage(g *Graph, extraAllowedSupplies []string) error {
 			continue
 		}
 		if hasDynamicSupplyRef(params) {
-			return fmt.Errorf("node %q: $supplies must be a static literal name (e.g. $supplies.rules); "+
-				"a computed name cannot be resolved at compile time", g.nodes[i].Name)
+			return fmt.Errorf("node %q: $supplies must be a static literal name (e.g. $supplies.rules or "+
+				"$supplies[\"rules\"]); a computed name cannot be resolved at compile time", g.nodes[i].Name)
+		}
+		if name := firstInvalidDotSupplyName(params); name != "" {
+			return fmt.Errorf("node %q: $supplies.%s is not a valid reference; expr-lang parses a hyphen "+
+				"in a dotted member name as subtraction, not a name character, and fails at evaluation "+
+				"time with \"compile expression: unknown name ...\"; use bracket indexing instead: "+
+				"$supplies[%q]", g.nodes[i].Name, name, name)
 		}
 		refs := deriveSupplyRefs(params)
 		if len(refs) == 0 {
