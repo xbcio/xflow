@@ -94,6 +94,100 @@ func TestEveryMetricNameInThisPackageHasHelpText(t *testing.T) {
 	}
 }
 
+// TestEveryMetricHelpEntryHasEmitter is the reverse direction of
+// TestEveryMetricNameInThisPackageHasHelpText: it catches an orphan help
+// entry, a metricHelp key with no emission point anywhere in this package,
+// which the forward test cannot see because it only walks name->help and
+// `if _, ok := metricHelp[name]; ok { continue }` lets an orphan slip past
+// without ever being checked in the other direction.
+//
+// "Has an emission point" means the name appears in this package's non-test
+// source as the name argument to a metrics sink call (Inc/Add/Observe/
+// ObserveBytes/ObserveCount/Set) — either as a string literal directly (as
+// group.go does) or via a const identifier declared with that string value
+// (as engine.go, supply.go, trigger.go, etc. do). metricNamesInPackage
+// already enumerates exactly that surface (see its doc comment: both
+// spellings, literals and const declarations), which is why this test reuses
+// it instead of re-deriving a second, narrower call-argument walk: a walk
+// that only followed literal/const arguments directly would miss names like
+// xflow_node_started_total, which reach Inc through an intermediate
+// engineMetricNames struct field (h.names.nodeStarted) rather than a bare
+// identifier.
+//
+// The check here is deliberately "does this name appear anywhere in the
+// package's non-test source as a declared/emitted literal", not "is the
+// method that emits it ever called by production code outside this
+// package". The xflow_group_* family (group.go) has ~13 names with both help
+// text and a real g.m.Inc/Observe/Set call site in group.go, but zero
+// production callers of NewGroupMetrics anywhere in the repo. Judging by
+// reachability would flag all thirteen as orphans and this test would then
+// need a whitelist to un-flag a live, correctly-described-if-unwired family
+// — exactly the "silently loosen the sieve" failure mode this suite must not
+// fall into. Judging by static presence in an emit call's name position
+// correctly leaves that family alone and only catches a help entry with no
+// emission point at all, like xflow_group_suspend_total: a capability
+// (durable group suspend) that was removed (engine/group_lease.go references
+// it as "since removed"; service/runner/group_runtime.go has
+// WithSuspendDisabled) while its help text was left behind.
+func TestEveryMetricHelpEntryHasEmitter(t *testing.T) {
+	// emittedOutsidePackage covers the same RANGE gap documented on
+	// metricNamesInPackage above: these names are emitted for real, just not
+	// by a literal or const declared inside observability/metrics, so the
+	// scan below cannot see them. Each has a verified call site — unlike
+	// xflow_group_suspend_total, which has none anywhere in the repo. This is
+	// not a whitelist for an unresolved orphan: every entry names the file
+	// that actually emits it, and a name only belongs here if grepping the
+	// repo for its literal turns up a real Inc/Set/Observe/ObserveBytes call
+	// outside this package.
+	emittedOutsidePackage := map[string]string{
+		"xflow_runner_up":                              "service/control/metrics_inbox.go",
+		"xflow_runner_metrics_last_report_age_seconds": "service/control/metrics_inbox.go",
+		"xflow_runner_metrics_received_total":          "service/control/metrics_inbox.go",
+		"xflow_runner_metrics_rejected_total":          "service/control/metrics_inbox.go",
+		"xflow_runner_metrics_inbox_size":              "service/control/metrics_inbox.go",
+		"xflow_runner_metrics_gather_errors_total":     "service/control/metrics_inbox.go",
+		"xflow_runner_metrics_reports_total":           "service/runner/metrics_reporter.go",
+		"xflow_runner_metrics_report_bytes":            "service/control/metrics_inbox.go",
+	}
+
+	names := metricNamesInPackage(t)
+	// Same floor rationale as TestEveryMetricNameInThisPackageHasHelpText:
+	// without it, a parse that silently sees nothing would make every
+	// metricHelp entry look orphaned, or a parse that silently sees nothing
+	// AND has no metricHelp entries would pass vacuously either way. This
+	// test needs its own guard because it does not share a call stack with
+	// the forward test — each test function gets a fresh names map.
+	if len(names) < 80 {
+		t.Fatalf("found only %d metric names; the parse is not seeing the package, "+
+			"so this test would pass vacuously", len(names))
+	}
+
+	for name := range metricHelp {
+		if _, ok := names[name]; ok {
+			continue
+		}
+		if where, known := emittedOutsidePackage[name]; known {
+			t.Logf("%s: no in-package emission point, allowed (emitted by %s)", name, where)
+			continue
+		}
+		t.Errorf("%s has a metricHelp entry but no emission point anywhere in "+
+			"this package's non-test source (not a literal or const-declared "+
+			"name argument to Inc/Add/Observe/ObserveBytes/ObserveCount/Set); "+
+			"it is dead help text for a metric nothing emits", name)
+	}
+
+	// The reverse direction: an allowlist entry whose name now also appears
+	// in this package's own scan is stale — either it gained a real
+	// in-package emitter (drop it, the general check above now covers it) or
+	// something renamed/removed the only real emitter (worth a second look).
+	for name := range emittedOutsidePackage {
+		if _, ok := names[name]; ok {
+			t.Errorf("%s is listed as emitted-outside-package but the in-package "+
+				"scan now finds it too; remove it from the allowlist", name)
+		}
+	}
+}
+
 // metricNamesInPackage returns every xflow_-prefixed string literal in the
 // package's non-test files, mapped to the file it came from.
 //
