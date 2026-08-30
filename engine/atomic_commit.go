@@ -61,6 +61,26 @@ func (e *Engine) commitAcyclicTaskResult(ctx context.Context, lease *TaskLease, 
 }
 
 func (e *Engine) commitAcyclicNodeError(ctx context.Context, lease *TaskLease, meta graph.NodeMeta, systemErr error, output *types.Output, businessErr *types.Error) (CommitOutcome, error) {
+	return e.commitNodeErrorOutcome(ctx, lease, meta, systemErr, output, businessErr, e.commitAcyclicNodeWithClassification)
+}
+
+// nodeErrorCommitFunc is the shape of the terminal-transition step that
+// commitNodeErrorOutcome hands its classified result to: commitAcyclicNodeWithClassification
+// on the acyclic path, commitLegacyNodeWithClassification on the cyclic/legacy
+// path. The two committers differ (atomic commit vs. the legacy fenced
+// scheduler), which is exactly why this is a parameter rather than a third
+// copy of the function it varies.
+type nodeErrorCommitFunc func(ctx context.Context, lease *TaskLease, status types.NodeStatus, output map[string]any, port, errMsg string, fatal bool, cls EffectiveClassification) (CommitOutcome, error)
+
+// commitNodeErrorOutcome is the failure-handling pipeline shared by
+// commitAcyclicNodeError and commitLegacyNodeError: retry → publishRetryReceipt
+// → ApplyOnError → buildEffectiveClassification → hand off to the caller's
+// terminal committer. engine/expansion_criterion_test.go documents that the
+// acyclic and legacy paths must be convergent here — a failure routed through
+// commitLegacyTaskResult and one routed through commitAcyclicTaskResult must
+// run the identical retry/OnError/classification sequence — so this function,
+// not two independently maintained copies of it, is what keeps that true.
+func (e *Engine) commitNodeErrorOutcome(ctx context.Context, lease *TaskLease, meta graph.NodeMeta, systemErr error, output *types.Output, businessErr *types.Error, commit nodeErrorCommitFunc) (CommitOutcome, error) {
 	if retried, err := e.tryRetryWithAttempt(ctx, &lease.Task, meta, systemErr, lease.Attempt, lease.LeaseToken); err != nil {
 		return CommitOutcomeTransientError, fmt.Errorf("retry node %q/%q: %w", lease.Task.ExecutionID, lease.Task.NodeName, err)
 	} else if retried {
@@ -71,7 +91,7 @@ func (e *Engine) commitAcyclicNodeError(ctx context.Context, lease *TaskLease, m
 	outcome := ApplyOnError(meta.OnError, systemErr, businessErr, output)
 	errorPort := outcome.RoutePort == "error" && businessErr == nil
 	cls := buildEffectiveClassification(systemErr, businessErr, errorPort)
-	return e.commitAcyclicNodeWithClassification(ctx, lease, outcome.NodeStatus, outcome.Output, outcome.RoutePort, outcome.ErrorMessage, outcome.ExecFatal, cls)
+	return commit(ctx, lease, outcome.NodeStatus, outcome.Output, outcome.RoutePort, outcome.ErrorMessage, outcome.ExecFatal, cls)
 }
 
 func (e *Engine) commitAcyclicNode(ctx context.Context, lease *TaskLease, status types.NodeStatus, output map[string]any, port, errMsg string, fatal bool) (CommitOutcome, error) {

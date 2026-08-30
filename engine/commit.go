@@ -240,16 +240,7 @@ func (e *Engine) commitLegacyTaskResult(ctx context.Context, lease *TaskLease, g
 }
 
 func (e *Engine) commitLegacyNodeError(ctx context.Context, lease *TaskLease, meta graph.NodeMeta, systemErr error, output *types.Output, businessErr *types.Error) (CommitOutcome, error) {
-	if retried, err := e.tryRetryWithAttempt(ctx, &lease.Task, meta, systemErr, lease.Attempt, lease.LeaseToken); err != nil {
-		return CommitOutcomeTransientError, fmt.Errorf("retry node %q/%q: %w", lease.Task.ExecutionID, lease.Task.NodeName, err)
-	} else if retried {
-		e.publishRetryReceipt(ctx, &lease.Task, lease.Attempt)
-		return CommitOutcomeAccepted, nil
-	}
-	outcome := ApplyOnError(meta.OnError, systemErr, businessErr, output)
-	errorPort := outcome.RoutePort == "error" && businessErr == nil
-	cls := buildEffectiveClassification(systemErr, businessErr, errorPort)
-	return e.commitLegacyNodeWithClassification(ctx, lease, outcome.NodeStatus, outcome.Output, outcome.RoutePort, outcome.ErrorMessage, outcome.ExecFatal, cls)
+	return e.commitNodeErrorOutcome(ctx, lease, meta, systemErr, output, businessErr, e.commitLegacyNodeWithClassification)
 }
 
 func (e *Engine) commitLegacyNode(ctx context.Context, lease *TaskLease, status types.NodeStatus, output map[string]any, port, errMsg string, fatal bool) (CommitOutcome, error) {
