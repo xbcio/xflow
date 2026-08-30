@@ -116,11 +116,9 @@ func (h *authzHolder) authzWrap(op string, isMutation bool, fn http.HandlerFunc,
 			// best-effort: a gap here is observable in audit but must not fail
 			// the already-admitted mutation. Crash-safety for a panic between
 			// the mutation success and this append is explicitly T9's scope.
-			slot := &auditRevisionSlot{}
-			r = r.WithContext(context.WithValue(r.Context(), auditRevisionKey{}, slot))
 			rw := &statusRecorder{ResponseWriter: w}
 			fn(rw, r)
-			h.auditReconcileRev(r, principal, op, resource, wfID, execID, reqID, rw, slot.rev)
+			h.auditReconcile(r, principal, op, resource, wfID, execID, reqID, rw)
 			return
 		}
 		fn(w, r)
@@ -201,14 +199,17 @@ func (h *authzHolder) auditDeny(r *http.Request, principal Principal, op, resour
 // Best-effort — an audit gap must not fail an already-admitted mutation. The
 // reconcile record reuses the admission RequestID so the two rows can be
 // joined during audit reconciliation.
+//
+// Revision is always recorded as 0 here: the producer that reported a
+// mutation's resulting resource revision (noteAuditRevision, wired only into
+// the sealed supply-write handler) was removed along with that handler in
+// b15825f (P4a sealed the supply HTTP write path). AuditEvent.Revision,
+// store.AuditRecord.Revision, and the SQL round-trip are kept on purpose —
+// Task 28 fixed SQLAuditSink.Append to actually persist Revision — but there
+// is currently no code path that produces a non-zero value to persist. When
+// the SDK's CAS write path grows its own revision producer, wire it back in
+// here as a parameter, not by re-adding the removed slot/context plumbing.
 func (h *authzHolder) auditReconcile(r *http.Request, principal Principal, op, resource, wfID, execID, reqID string, rw *statusRecorder) {
-	h.auditReconcileRev(r, principal, op, resource, wfID, execID, reqID, rw, 0)
-}
-
-// auditReconcileRev is auditReconcile with an explicit resource revision. The
-// revision is the version the mutation produced; zero means "not applicable"
-// (non-versioned resources or failed mutations).
-func (h *authzHolder) auditReconcileRev(r *http.Request, principal Principal, op, resource, wfID, execID, reqID string, rw *statusRecorder, rev uint64) {
 	if h.audit == nil {
 		return
 	}
@@ -232,7 +233,7 @@ func (h *authzHolder) auditReconcileRev(r *http.Request, principal Principal, op
 		Phase:       "outcome",
 		TraceID:     tracing.TraceIDFromContext(r.Context()),
 		Timestamp:   time.Now().UTC(),
-		Revision:    rev,
+		Revision:    0,
 	})
 }
 
@@ -266,18 +267,14 @@ func (s *statusRecorder) succeeded() bool {
 	return s.status >= 200 && s.status < 300
 }
 
-// auditRevisionSlot is a mutable slot a handler uses to report the resource
-// version its mutation produced. The admission audit row is written before the
-// handler runs, so it cannot know the resulting revision; the outcome row can.
-type auditRevisionSlot struct{ rev uint64 }
-
-type auditRevisionKey struct{}
-
-// noteAuditRevision records the revision a handler's mutation produced so the
-// outcome audit row can carry it. It is a no-op when the request was not wrapped
-// with a slot (non-mutation paths).
-func noteAuditRevision(r *http.Request, rev uint64) {
-	if slot, ok := r.Context().Value(auditRevisionKey{}).(*auditRevisionSlot); ok {
-		slot.rev = rev
-	}
-}
+// Revision reporting (auditRevisionSlot / auditRevisionKey / noteAuditRevision)
+// was removed here. It existed to hand a mutation's resulting resource
+// revision from the handler to auditReconcile's outcome row via a per-request
+// context slot, but its only caller was supplyModule.handlePut, which b15825f
+// (P4a) deleted when it sealed the supply HTTP write path. With no producer
+// left, the plumbing allocated a slot + a context value on every mutating
+// request only to read back a rev that was always 0 — see auditReconcile's
+// comment for why Revision is now hardcoded to 0 there instead. AuditEvent.Revision,
+// store.AuditRecord.Revision, and the SQL column are kept; only this dead
+// writer side is gone. Re-add a producer (not this slot mechanism) when the
+// SDK's CAS write path grows one.
