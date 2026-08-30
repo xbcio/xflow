@@ -183,10 +183,21 @@ func TestTrackedFilesHaveNoInternalIPs(t *testing.T) {
 // So the patterns are exercised against inputs whose verdict is known. If a
 // future edit breaks a pattern, this fails immediately rather than quietly
 // turning the guard into a formality.
+//
+// Every address below is invented, and must stay that way. This file is the
+// one path TestTrackedFilesHaveNoInternalIPs skips (selfPath), because a
+// positive control has to contain something the scan would report -- so it is
+// also the one path where a real address cannot be caught. Reaching for the
+// address that motivated a redaction, because it is the value on hand and
+// "the test needs a realistic one", writes that address back into the tree
+// through the single hole the guard cannot cover. What the fixtures have to
+// exercise is the pattern's shape: octet counts, the port and path suffixes
+// that must not be mistaken for a prefix length, each RFC 1918 block. None of
+// that needs a value anyone ever routed to.
 func TestScanPatternsCanFail(t *testing.T) {
 	mustMatch := []string{
 		"broker at 10.20.30.40:9092",
-		`"root:pw@tcp(10.20.30.41:3306)/app"`,
+		`"root:pw@tcp(10.20.30.41:3306)/appdb"`,
 		"192.168.99.99",
 		"172.31.255.5",
 		"10.20.30.41/api/v1/health", // a path, not a prefix length
