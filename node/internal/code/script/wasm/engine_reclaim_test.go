@@ -569,24 +569,47 @@ func TestCompileMissTriggersSweepReportsEngineCount(t *testing.T) {
 	first.lastUsed.Store(time.Now().Add(-time.Hour).UnixNano())
 	h.engineIdleTTL = 50 * time.Millisecond
 
+	// Mark where THIS test's own reports begin. OnEngineCount (host.go) carries
+	// no host identity and SetObserver is package-level, so rec receives every
+	// host's reports, including ones from hosts whose test already finished:
+	// sweepEnginesAsync re-arms via time.AfterFunc (host.go: `if remaining > 0`)
+	// and DISCARDS the returned Timer, so a pending re-arm cannot be cancelled;
+	// closeForTest empties h.engines but leaves engineIdleTTL non-zero, so that
+	// re-arm still clears the ttl<=0 guard and fires one final
+	// OnEngineCount(0) roughly ttl/4 after the test that owned it returned.
+	//
+	// Reading calls[0] therefore did NOT mean "this test's first report" — it
+	// meant "whatever landed first", which under `-count=N` or a full-package
+	// run is the previous 50ms-ttl test's trailing 0 (TestCompileMissTriggersSweep
+	// at h.engineIdleTTL = 50ms above is the in-package predecessor). Measured:
+	// 10 separate `-count=1` processes passed 10/10, while one `-count=10`
+	// process passed 3/10 and failed 7/10 — always with calls[0] == 0, and
+	// always from the second iteration onward.
+	//
+	// base is taken AFTER first's (seconds-long) compile, so the trailing report
+	// from a predecessor — due ttl/4 = 12.5ms after that predecessor returned —
+	// has long since landed and is counted into base rather than mistaken for
+	// ours. The re-arm chain is finite: a pass reporting 0 does not re-arm.
+	base := len(rec.engineCountCalls())
+
 	// 编译第二个模块 = 一次 miss = 一次扫（与 TestCompileMissTriggersSweep 相同的触发）。
 	if _, err := h.engineForBytes(ctx, appendCustomSection(modA, "xflow-test-trigger-count", []byte{0x04})); err != nil {
 		t.Fatalf("second: %v", err)
 	}
 
-	// Poll for the FIRST OnEngineCount call, not a fixed sleep and not a
-	// single unconditional read: the sweep runs on a goroutine sweepEnginesAsync
-	// spawns, and there is no other synchronization point to wait on. Grabbing
-	// the first call specifically — not "whatever is in the slice by the time
-	// we look" — matters because the timer keeps re-arming (host.go: "while any
-	// engine remains resident"): once the second engine also ages past the
-	// 50ms ttl, a LATER pass will report 0, and reading the slice too late
-	// would silently swap in that later value.
+	// Poll for the first OnEngineCount call PAST base, not a fixed sleep and not
+	// a single unconditional read: the sweep runs on a goroutine
+	// sweepEnginesAsync spawns, and there is no other synchronization point to
+	// wait on. Grabbing that one call specifically — not "whatever is in the
+	// slice by the time we look" — matters because the timer keeps re-arming
+	// (host.go: "while any engine remains resident"): once the second engine
+	// also ages past the 50ms ttl, a LATER pass will report 0, and reading the
+	// slice too late would silently swap in that later value.
 	deadline := time.Now().Add(5 * time.Second)
 	var calls []int
 	for {
 		calls = rec.engineCountCalls()
-		if len(calls) > 0 {
+		if len(calls) > base {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -599,10 +622,10 @@ func TestCompileMissTriggersSweepReportsEngineCount(t *testing.T) {
 	// the first pass. first was rewound an hour into the past and must already
 	// be gone; second was compiled a moment ago (well inside the 50ms ttl at
 	// the time this sweep pass ran) and must still be resident.
-	if calls[0] != 1 {
-		t.Fatalf("first OnEngineCount report = %d, want exactly 1 (the freshly "+
-			"compiled second module; the idle first one should already be reclaimed)",
-			calls[0])
+	if calls[base] != 1 {
+		t.Fatalf("first OnEngineCount report after this test's own compile miss = %d, "+
+			"want exactly 1 (the freshly compiled second module; the idle first one "+
+			"should already be reclaimed)", calls[base])
 	}
 }
 
