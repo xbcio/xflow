@@ -4,6 +4,7 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -199,6 +200,18 @@ func TestSchemasMatchHandlerTypes(t *testing.T) {
 			},
 		},
 		{
+			// PUT /v1/workflows/{id} accepts the real WorkflowDef DTO without
+			// either server-authoritative field. The path supplies id and the
+			// authenticated principal supplies namespace.
+			name:   "workflow def (replace request without server identity)",
+			schema: "WorkflowDef",
+			value: &types.WorkflowDef{
+				Name:    "health-check-renamed",
+				Version: "v2",
+				Nodes:   []types.NodeDef{{Name: "Start", Type: "http.request"}},
+			},
+		},
+		{
 			// Covers the oneOf OBJECT branch of Connections/PortConnections:
 			// a dependency port marshals as {"type":"dependency","targets":[...]}
 			// via portConnectionsAlias, NOT the array shorthand the data-port
@@ -242,6 +255,143 @@ func TestSchemasMatchHandlerTypes(t *testing.T) {
 					tc.schema, tc.value, err, string(data))
 			}
 		})
+	}
+}
+
+// TestReplaceWorkflowContract pins the parts of PUT /v1/workflows/{id} that
+// JSON Schema cannot infer from types.WorkflowDef alone: the path selects the
+// resource, body identity is optional, and each identity failure has a stable
+// HTTP status. The operation description carries the relational constraints
+// (body id must equal path id and rename destinations must be unoccupied).
+func TestReplaceWorkflowContract(t *testing.T) {
+	spec := loadSpec(t)
+	path := spec.Paths.Value("/v1/workflows/{id}")
+	if path == nil || path.Put == nil {
+		t.Fatal("PUT /v1/workflows/{id} is missing")
+	}
+	operation := path.Put
+	if operation.RequestBody == nil || operation.RequestBody.Value == nil {
+		t.Fatal("replace workflow request body is missing")
+	}
+	if !operation.RequestBody.Value.Required {
+		t.Fatal("replace workflow request body must be required")
+	}
+	media := operation.RequestBody.Value.GetMediaType("application/json")
+	if media == nil || media.Schema == nil || media.Schema.Value == nil {
+		t.Fatal("replace workflow application/json schema is missing")
+	}
+	if got, want := media.Schema.Ref, "#/components/schemas/WorkflowDef"; got != want {
+		t.Fatalf("replace workflow request schema ref = %q, want %q", got, want)
+	}
+	for _, field := range media.Schema.Value.Required {
+		if field == "id" || field == "namespace" {
+			t.Fatalf("replace workflow request unexpectedly requires server-authoritative field %q", field)
+		}
+	}
+
+	for _, status := range []string{"200", "400", "404", "409"} {
+		response := operation.Responses.Value(status)
+		if response == nil || response.Value == nil {
+			t.Errorf("replace workflow response %s is missing", status)
+			continue
+		}
+		header := response.Value.Headers["X-Request-Id"]
+		if header == nil {
+			t.Errorf("replace workflow response %s does not declare X-Request-Id", status)
+			continue
+		}
+		if got, want := header.Ref, "#/components/headers/XRequestId"; got != want {
+			t.Errorf("replace workflow response %s X-Request-Id ref = %q, want %q", status, got, want)
+		}
+	}
+	for status, wantCode := range map[string]string{
+		"400": "workflow_id_mismatch",
+		"404": "workflow_not_found",
+		"409": "workflow_conflict",
+	} {
+		response := operation.Responses.Value(status)
+		if response == nil || response.Value == nil {
+			t.Errorf("replace workflow response %s is missing", status)
+			continue
+		}
+		media := response.Value.Content.Get("application/json")
+		if media == nil {
+			t.Errorf("replace workflow response %s has no application/json content", status)
+			continue
+		}
+		found := false
+		for _, example := range media.Examples {
+			if example == nil || example.Value == nil {
+				continue
+			}
+			value, ok := example.Value.Value.(map[string]any)
+			if ok && value["code"] == wantCode {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("replace workflow response %s has no %q example", status, wantCode)
+		}
+	}
+
+	description := strings.Join(strings.Fields(strings.ToLower(operation.Description)), " ")
+	for _, semantic := range []string{
+		"path `id` is the authoritative resource identity",
+		"body `id` is optional",
+		"including a workflow owned by another namespace",
+		"preserving the path id",
+		"destination key is free",
+		"never deletes or overwrites a different workflow",
+	} {
+		if !strings.Contains(description, semantic) {
+			t.Errorf("replace workflow description does not state %q", semantic)
+		}
+	}
+	if strings.Contains(description, "deregisters a conflicting definition") {
+		t.Error("replace workflow description still documents deletion by the body key")
+	}
+}
+
+func TestReadyzContract(t *testing.T) {
+	spec := loadSpec(t)
+	path := spec.Paths.Value("/readyz")
+	if path == nil || path.Get == nil {
+		t.Fatal("GET /readyz is missing")
+	}
+	operation := path.Get
+	for status, wantReady := range map[string]bool{"200": true, "503": false} {
+		response := operation.Responses.Value(status)
+		if response == nil || response.Value == nil {
+			t.Errorf("readyz response %s is missing", status)
+			continue
+		}
+		media := response.Value.Content.Get("application/json")
+		if media == nil || media.Schema == nil {
+			t.Errorf("readyz response %s application/json schema is missing", status)
+			continue
+		}
+		if got, want := media.Schema.Ref, "#/components/schemas/ReadyResponse"; got != want {
+			t.Errorf("readyz response %s schema ref = %q, want %q", status, got, want)
+		}
+		example, ok := media.Example.(map[string]any)
+		if !ok {
+			t.Errorf("readyz response %s example = %T, want object", status, media.Example)
+			continue
+		}
+		if got, ok := example["ready"].(bool); !ok || got != wantReady {
+			t.Errorf("readyz response %s example ready = %#v, want %t", status, example["ready"], wantReady)
+		}
+		if _, ok := example["leader"].(bool); !ok {
+			t.Errorf("readyz response %s example leader = %#v, want boolean", status, example["leader"])
+		}
+	}
+
+	description := strings.Join(strings.Fields(strings.ToLower(operation.Description)), " ")
+	for _, semantic := range []string{"required production dependencies", "dependency check failure returns 503", "`ready=false`"} {
+		if !strings.Contains(description, semantic) {
+			t.Errorf("readyz description does not state %q", semantic)
+		}
 	}
 }
 

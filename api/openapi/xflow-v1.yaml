@@ -115,16 +115,31 @@ paths:
       operationId: replaceWorkflow
       summary: Replace a workflow definition
       description: |
-        Full update: deregisters a conflicting definition under the same
-        (namespace, name, version) key and re-registers. An identical
-        definition registers idempotently. Namespace comes from the principal
-        (§6.2).
+        Replaces the workflow resource selected by the path `id`; the path
+        `id` is the authoritative resource identity. The body `id` is optional,
+        but when present it must equal the path `id`, otherwise the request
+        fails with 400 (`workflow_id_mismatch`).
+
+        Namespace comes from the authenticated principal, never from the body.
+        A missing path target, including a workflow owned by another namespace,
+        fails with 404 (`workflow_not_found`).
+
+        The replacement may rename the workflow or change its version while
+        preserving the path id when the resulting (namespace, name, version)
+        destination key is free. If another workflow owns that key, the request
+        fails with 409 (`workflow_conflict`). PUT never deletes or overwrites a
+        different workflow merely because its key is named by the body.
       tags: [Workflows]
       parameters:
         - $ref: "#/components/parameters/WorkflowId"
         - $ref: "#/components/parameters/XRequestId"
       requestBody:
         required: true
+        description: |
+          Complete replacement as a types.WorkflowDef JSON object. `id` may be
+          omitted; if supplied it must match the path. `namespace` may also be
+          omitted and cannot select the target because the server overwrites it
+          with the authenticated principal's namespace.
         content:
           application/json:
             schema:
@@ -144,6 +159,57 @@ paths:
                     properties:
                       data:
                         $ref: "#/components/schemas/RegisterWorkflowResponse"
+        "400":
+          description: The body id differs from the path id, or the replacement definition is invalid.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                workflowIdMismatch:
+                  summary: The optional body id does not match the authoritative path id.
+                  value:
+                    success: false
+                    code: workflow_id_mismatch
+                    message: workflow id does not match path
+                    trace_id: 0123456789abcdef0123456789abcdef
+        "404":
+          description: No workflow with the path id exists in the authenticated namespace.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                workflowNotFound:
+                  summary: Missing and cross-namespace targets are indistinguishable.
+                  value:
+                    success: false
+                    code: workflow_not_found
+                    message: workflow not found
+                    trace_id: 0123456789abcdef0123456789abcdef
+        "409":
+          description: Another workflow owns the replacement's destination (namespace, name, version) key; neither workflow is replaced.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                workflowConflict:
+                  summary: A rename or version change selected an occupied destination key.
+                  value:
+                    success: false
+                    code: workflow_conflict
+                    message: workflow definition conflicts with an existing registration
+                    trace_id: 0123456789abcdef0123456789abcdef
         default:
           $ref: "#/components/responses/DefaultError"
     delete:
@@ -699,19 +765,30 @@ paths:
       description: |
         Kubernetes readiness probe. NOT enveloped (§7) — load balancers parse it
         directly. Not authenticated. Returns ready + leader status; non-leader
-        replicas remain ready for the read-only management surface. A not-ready
-        replica returns 503.
+        replicas remain ready for the read-only management surface. The process
+        and required production dependencies must be available; shutdown or a
+        dependency check failure returns 503 with `ready=false`.
       tags: [Probes]
       security: []
       responses:
         "200":
-          description: Process is ready.
+          description: Process and required dependencies are ready.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ReadyResponse"
+              example:
+                ready: true
+                leader: true
         "503":
-          description: Process is not ready.
+          description: Process is shutting down or a required dependency is unavailable; `ready=false`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadyResponse"
+              example:
+                ready: false
+                leader: false
 
 components:
   securitySchemes:
@@ -1155,14 +1232,17 @@ components:
 
     WorkflowDef:
       type: object
-      description: The top-level DSL workflow definition (types.WorkflowDef).
-      required: [namespace, name]
+      description: |
+        The top-level DSL workflow definition (types.WorkflowDef). On write
+        requests, id and namespace are optional server-authoritative fields.
+      required: [name]
       properties:
         id:
           type: string
+          description: Server-assigned resource id. Optional on writes; for PUT it must match the path id when supplied.
         namespace:
           type: string
-          description: Server-authoritative isolation scope; injected by the handler, never trusted from the client body.
+          description: Server-authoritative isolation scope; optional on writes, injected by the handler, and never trusted from the client body.
         name:
           type: string
         version:

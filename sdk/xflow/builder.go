@@ -28,14 +28,15 @@ type WorkflowBuilder struct {
 }
 
 type nodeEntry struct {
-	name             string
-	builder          types.Builder       // nil when using the direct ActionHandler path
-	handler          types.ActionHandler // local-only direct handler
-	kind             types.NodeKind
-	onError          types.OnError
-	normalizedParams map[string]any
-	runnerSelector   *types.RunnerSelector
-	timeout          time.Duration
+	name               string
+	builder            types.Builder       // nil when using the direct ActionHandler path
+	handler            types.ActionHandler // local-only direct handler
+	kind               types.NodeKind
+	onError            types.OnError
+	normalizedParams   map[string]any
+	runnerSelector     *types.RunnerSelector
+	timeout            time.Duration
+	activationReplicas uint32
 }
 
 type edge struct {
@@ -227,6 +228,16 @@ func (n *NodeRef) Body(body *WorkflowBuilder) *NodeRef {
 func (n *NodeRef) RunnerSelector(selector types.RunnerSelector) *NodeRef {
 	if n.entry != nil {
 		n.entry.runnerSelector = cloneRunnerSelector(&selector)
+	}
+	return n
+}
+
+// ActivationReplicas sets how many distinct runners should host this trigger
+// entry. Zero or one means one activation. For a grouped trigger, configure the
+// GroupRef instead; the compiler rejects member-level replica declarations.
+func (n *NodeRef) ActivationReplicas(replicas uint32) *NodeRef {
+	if n.entry != nil {
+		n.entry.activationReplicas = replicas
 	}
 	return n
 }
@@ -492,14 +503,15 @@ func (w *WorkflowBuilder) assembleNodes(def *types.WorkflowDef) {
 			entry.kind = types.NodeKindAction
 		}
 		def.Nodes = append(def.Nodes, types.NodeDef{
-			Name:           entry.name,
-			Type:           nodeType,
-			Kind:           entry.kind,
-			Version:        nodeVersion,
-			Parameters:     params,
-			OnError:        string(entry.onError),
-			RunnerSelector: cloneRunnerSelector(entry.runnerSelector),
-			Timeout:        entry.timeout,
+			Name:               entry.name,
+			Type:               nodeType,
+			Kind:               entry.kind,
+			Version:            nodeVersion,
+			Parameters:         params,
+			OnError:            string(entry.onError),
+			RunnerSelector:     cloneRunnerSelector(entry.runnerSelector),
+			Timeout:            entry.timeout,
+			ActivationReplicas: entry.activationReplicas,
 		})
 	}
 }

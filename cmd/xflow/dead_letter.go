@@ -177,7 +177,7 @@ func newDeadLetterListCommand(opts *deadLetterOptions) *cobra.Command {
 	cmd.Flags().StringVar(&executionID, "execution", "", "Execution ID (required)")
 	cmd.Flags().IntVar(&limit, "limit", 100, "Maximum entries to return per page (bounded)")
 	cmd.Flags().StringVar(&cursor, "cursor", "", "Opaque cursor from a prior page's next_cursor")
-	cmd.Flags().StringVar(&namespaceFlag, "namespace", envOr("XFLOW_TENANT", string(namespace.Default)), "Namespace namespace (env: XFLOW_TENANT)")
+	cmd.Flags().StringVar(&namespaceFlag, "namespace", envOr("XFLOW_TENANT", string(namespace.Default)), "Namespace (legacy env: XFLOW_TENANT)")
 	return cmd
 }
 
@@ -238,7 +238,7 @@ switches to the Redis-direct maintenance path.`,
 	cmd.Flags().StringVar(&entryID, "entry", "", "Dead-letter entry ID (required)")
 	cmd.Flags().StringVar(&reason, "reason", "", "Reason for replay (required, length-bounded)")
 	cmd.Flags().StringVar(&requestID, "request-id", "", "Idempotency key; retry with the same value to recover a lost response")
-	cmd.Flags().StringVar(&namespaceFlag, "namespace", envOr("XFLOW_TENANT", string(namespace.Default)), "Namespace namespace (env: XFLOW_TENANT)")
+	cmd.Flags().StringVar(&namespaceFlag, "namespace", envOr("XFLOW_TENANT", string(namespace.Default)), "Namespace (legacy env: XFLOW_TENANT)")
 	return cmd
 }
 

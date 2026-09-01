@@ -233,3 +233,23 @@ func TestNewRunnerLeavesTheTimeoutObserverUnsetWithoutMetrics(t *testing.T) {
 // outside node/trigger/kafka would mean adding a getter that exists only for
 // this test. cmd/runner's copy of the same line is untested for the same
 // reason. If that package ever grows a legitimate public seam, wire this in.
+
+func TestRunnerMapBatchConcurrencyRejectsNegativeValues(t *testing.T) {
+	_, err := buildRunnerServiceConfig(RunnerConfig{
+		ServerURL:           "http://server:8080",
+		MapBatchConcurrency: -1,
+	})
+	if err == nil {
+		t.Fatal("negative MapBatchConcurrency was accepted")
+	}
+}
+
+func TestRunnerMapItemConcurrencyRejectsNegativeValues(t *testing.T) {
+	_, err := buildRunnerServiceConfig(RunnerConfig{
+		ServerURL:          "http://server:8080",
+		MapItemConcurrency: -1,
+	})
+	if err == nil {
+		t.Fatal("negative MapItemConcurrency was accepted")
+	}
+}

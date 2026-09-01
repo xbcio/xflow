@@ -60,38 +60,39 @@ const (
 // The returned string has the form "runtime-sha256:v1:<hex>".
 func runtimeHash(def *types.WorkflowDef) (string, error) {
 	payload := runtimeHashPayload{
-		Namespace:      def.Namespace,
-		Name:           def.Name,
-		Version:        def.Version,
-		Spec:           def.Spec,
-		RunnerSelector: toHashSelector(def.RunnerSelector),
-		Context:        def.Context,
-		Settings:       def.Settings,
-		Options:        def.Options,
-		Credentials:    def.Credentials,
-		Params:         def.Params,
-		NodeTemplates:  def.NodeTemplates,
-		Connections:    def.Connections,
-		Outputs:        def.Outputs,
-		PinData:        def.PinData,
-		Nodes:          make([]runtimeNodeHashPayload, len(def.Nodes)),
-		Groups:         canonicalizeGroups(def.Groups),
+		Namespace:       def.Namespace,
+		Name:            def.Name,
+		Version:         def.Version,
+		Spec:            def.Spec,
+		RunnerSelector:  toHashSelector(def.RunnerSelector),
+		Context:         def.Context,
+		Settings:        def.Settings,
+		Options:         def.Options,
+		Credentials:     def.Credentials,
+		Params:          def.Params,
+		NodeTemplates:   def.NodeTemplates,
+		Connections:     def.Connections,
+		Outputs:         def.Outputs,
+		PinData:         def.PinData,
+		Nodes:           make([]runtimeNodeHashPayload, len(def.Nodes)),
+		Groups:          canonicalizeGroups(def.Groups),
 		DependencyEdges: canonicalizeDependencyEdges(def.DependencyEdges),
 	}
 	for i, n := range def.Nodes {
 		payload.Nodes[i] = runtimeNodeHashPayload{
-			Name:           n.Name,
-			Type:           n.Type,
-			Kind:           n.Kind,
-			Version:        n.Version,
-			Template:       n.Template,
-			Disabled:       n.Disabled,
-			OnError:        n.OnError,
-			RunnerSelector: toHashSelector(n.RunnerSelector),
-			Inputs:         n.Inputs,
-			OutputSchema:   n.OutputSchema,
-			Parameters:     n.Parameters,
-			Retry:          n.Retry,
+			Name:               n.Name,
+			Type:               n.Type,
+			Kind:               n.Kind,
+			Version:            n.Version,
+			Template:           n.Template,
+			Disabled:           n.Disabled,
+			OnError:            n.OnError,
+			RunnerSelector:     toHashSelector(n.RunnerSelector),
+			Inputs:             n.Inputs,
+			OutputSchema:       n.OutputSchema,
+			Parameters:         n.Parameters,
+			Retry:              n.Retry,
+			ActivationReplicas: n.ActivationReplicas,
 		}
 	}
 
@@ -110,19 +111,19 @@ func runtimeHash(def *types.WorkflowDef) (string, error) {
 // Description is intentionally excluded — it is human documentation and does
 // not affect execution semantics. See runtimeHash doc comment.
 type runtimeHashPayload struct {
-	Namespace      string                          `json:"namespace,omitempty"`
-	Name           string                          `json:"name,omitempty"`
-	Version        string                          `json:"version,omitempty"`
-	Spec           string                          `json:"spec,omitempty"`
+	Namespace string `json:"namespace,omitempty"`
+	Name      string `json:"name,omitempty"`
+	Version   string `json:"version,omitempty"`
+	Spec      string `json:"spec,omitempty"`
 	// RunnerSelector is converted to runtimeSelectorHashPayload at the payload
 	// boundary (see toHashSelector). The hash-local mirror's tags are FROZEN at
 	// the pre-§9.4 wire bytes ("runnerSelector"/"matchLabels"/"mode") so the
 	// snake_case wire rename on types.RunnerSelector cannot move the hash. Do
 	// NOT "tidy" these to match the wire tags — see runtimeSelectorHashPayload.
-	RunnerSelector *runtimeSelectorHashPayload `json:"runnerSelector,omitempty"`
-	Context        *types.WorkflowContext      `json:"context,omitempty"`
-	Settings       *types.WorkflowSettings     `json:"settings,omitempty"`
-	Options        *types.WorkflowOptions      `json:"options,omitempty"`
+	RunnerSelector *runtimeSelectorHashPayload     `json:"runnerSelector,omitempty"`
+	Context        *types.WorkflowContext          `json:"context,omitempty"`
+	Settings       *types.WorkflowSettings         `json:"settings,omitempty"`
+	Options        *types.WorkflowOptions          `json:"options,omitempty"`
 	Credentials    map[string]types.CredentialDef  `json:"credentials,omitempty"`
 	Params         map[string]types.ParamDef       `json:"params,omitempty"`
 	NodeTemplates  map[string]types.NodeTemplate   `json:"node_templates,omitempty"`
@@ -147,18 +148,21 @@ type runtimeHashPayload struct {
 //     different stable ID this time. NodeDef.Name carries the runtime
 //     identity used by connections and pin_data, and IS included.
 type runtimeNodeHashPayload struct {
-	Name           string                       `json:"name,omitempty"`
-	Type           string                       `json:"type,omitempty"`
-	Kind           types.NodeKind               `json:"kind,omitempty"`
-	Version        int                          `json:"version,omitempty"`
-	Template       string                       `json:"template,omitempty"`
-	Disabled       bool                         `json:"disabled,omitempty"`
-	OnError        string                       `json:"on_error,omitempty"`
-	RunnerSelector *runtimeSelectorHashPayload  `json:"runnerSelector,omitempty"`
-	Inputs         []types.PortDecl             `json:"inputs,omitempty"`
-	OutputSchema   map[string]any               `json:"output_schema,omitempty"`
-	Parameters     map[string]any               `json:"parameters,omitempty"`
-	Retry          *types.RetrySettings         `json:"retry,omitempty"`
+	Name           string                      `json:"name,omitempty"`
+	Type           string                      `json:"type,omitempty"`
+	Kind           types.NodeKind              `json:"kind,omitempty"`
+	Version        int                         `json:"version,omitempty"`
+	Template       string                      `json:"template,omitempty"`
+	Disabled       bool                        `json:"disabled,omitempty"`
+	OnError        string                      `json:"on_error,omitempty"`
+	RunnerSelector *runtimeSelectorHashPayload `json:"runnerSelector,omitempty"`
+	Inputs         []types.PortDecl            `json:"inputs,omitempty"`
+	OutputSchema   map[string]any              `json:"output_schema,omitempty"`
+	Parameters     map[string]any              `json:"parameters,omitempty"`
+	Retry          *types.RetrySettings        `json:"retry,omitempty"`
+	// Appended with omitempty so zero-valued definitions retain their historical
+	// runtime hash bytes.
+	ActivationReplicas uint32 `json:"activation_replicas,omitempty"`
 }
 
 // runtimeSelectorHashPayload is the hash-local mirror of types.RunnerSelector.
@@ -199,15 +203,17 @@ func toHashSelector(s *types.RunnerSelector) *runtimeSelectorHashPayload {
 }
 
 type runtimeHashGroupPayload struct {
-	Name    string `json:"name,omitempty"`
+	Name    string   `json:"name,omitempty"`
 	Members []string `json:"members,omitempty"`
 	// RunnerSelector is converted to the hash-local mirror (see
 	// runtimeSelectorHashPayload). Tags frozen at pre-§9.4 bytes.
 	RunnerSelector *runtimeSelectorHashPayload `json:"runnerSelector,omitempty"`
-	OnError        string                       `json:"on_error,omitempty"`
-	Retry          *types.RetrySettings         `json:"retry,omitempty"`
-	Timeout        time.Duration                `json:"timeout,omitempty"`
-	Mode           string                       `json:"mode,omitempty"`
+	OnError        string                      `json:"on_error,omitempty"`
+	Retry          *types.RetrySettings        `json:"retry,omitempty"`
+	Timeout        time.Duration               `json:"timeout,omitempty"`
+	Mode           string                      `json:"mode,omitempty"`
+	// Appended with omitempty so zero-valued groups retain their historical hash.
+	ActivationReplicas uint32 `json:"activation_replicas,omitempty"`
 }
 
 // canonicalizeGroups returns a sorted, stable group payload; empty input returns
@@ -223,6 +229,7 @@ func canonicalizeGroups(groups []types.GroupDef) []runtimeHashGroupPayload {
 		out = append(out, runtimeHashGroupPayload{
 			Name: g.Name, Members: members, RunnerSelector: toHashSelector(g.RunnerSelector),
 			OnError: g.OnError, Retry: g.Retry, Timeout: g.Timeout, Mode: g.Mode,
+			ActivationReplicas: g.ActivationReplicas,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })

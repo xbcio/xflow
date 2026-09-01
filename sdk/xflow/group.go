@@ -7,13 +7,14 @@ import (
 )
 
 type groupEntry struct {
-	name           string
-	members        []string
-	runnerSelector *types.RunnerSelector
-	onError        types.OnError
-	retry          *types.RetrySettings
-	timeout        time.Duration
-	mode           string
+	name               string
+	members            []string
+	runnerSelector     *types.RunnerSelector
+	onError            types.OnError
+	retry              *types.RetrySettings
+	timeout            time.Duration
+	mode               string
+	activationReplicas uint32
 }
 
 // GroupRef is the builder handle for a co-location group, symmetric with
@@ -29,6 +30,13 @@ func (w *WorkflowBuilder) Group(name string) *GroupRef {
 
 func (g *GroupRef) RunnerSelector(s types.RunnerSelector) *GroupRef {
 	g.entry.runnerSelector = cloneRunnerSelector(&s)
+	return g
+}
+
+// ActivationReplicas sets how many distinct runners should host this
+// trigger-entry group. Zero or one means one activation.
+func (g *GroupRef) ActivationReplicas(replicas uint32) *GroupRef {
+	g.entry.activationReplicas = replicas
 	return g
 }
 func (g *GroupRef) OnError(oe types.OnError) *GroupRef    { g.entry.onError = oe; return g }
@@ -48,13 +56,14 @@ func (n *NodeRef) Group(g *GroupRef) *NodeRef {
 func (w *WorkflowBuilder) assembleGroups(def *types.WorkflowDef) {
 	for _, e := range w.groups {
 		def.Groups = append(def.Groups, types.GroupDef{
-			Name:           e.name,
-			Members:        append([]string(nil), e.members...),
-			RunnerSelector: cloneRunnerSelector(e.runnerSelector),
-			OnError:        string(e.onError),
-			Retry:          e.retry,
-			Timeout:        e.timeout,
-			Mode:           e.mode,
+			Name:               e.name,
+			Members:            append([]string(nil), e.members...),
+			RunnerSelector:     cloneRunnerSelector(e.runnerSelector),
+			OnError:            string(e.onError),
+			Retry:              e.retry,
+			Timeout:            e.timeout,
+			Mode:               e.mode,
+			ActivationReplicas: e.activationReplicas,
 		})
 	}
 }

@@ -66,14 +66,15 @@ tasks registered by other service instances.
 ## Runner selectors
 
 Runner selectors are workflow and node definition metadata. Do not pass runner
-placement through `InvokeOption`.
+placement through `InvokeOption`. They are scheduling hints, not a namespace
+isolation or authorization boundary; configure namespace isolation separately.
 
 ```go
 wf := xflow.Workflow("risk-review").
 	RunnerSelector(xflow.DefaultRunnerSelector(map[string]string{
 		"mode":   "remote",
 		"env":    "prod",
-		"tenant": "tenant-a",
+		"pool": "risk",
 	}))
 
 approval := wf.Node("SecurityApproval",

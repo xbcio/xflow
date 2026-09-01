@@ -127,6 +127,25 @@ func TestRuntimeHashIncludesRuntimeFields(t *testing.T) {
 	}
 }
 
+func TestRuntimeHashIncludesActivationReplicas(t *testing.T) {
+	nodeBase := baseRuntimeDef()
+	nodeHash := mustRuntimeHash(t, nodeBase)
+	nodeReplicated := baseRuntimeDef()
+	nodeReplicated.Nodes[0].ActivationReplicas = 3
+	if got := mustRuntimeHash(t, nodeReplicated); got == nodeHash {
+		t.Fatal("standalone node activation cardinality did not change runtime hash")
+	}
+
+	groupBase := baseRuntimeDef()
+	groupBase.Groups = []types.GroupDef{{Name: "entry", Members: []string{"start", "review"}}}
+	groupHash := mustRuntimeHash(t, groupBase)
+	groupReplicated := baseRuntimeDef()
+	groupReplicated.Groups = []types.GroupDef{{Name: "entry", Members: []string{"start", "review"}, ActivationReplicas: 3}}
+	if got := mustRuntimeHash(t, groupReplicated); got == groupHash {
+		t.Fatal("group activation cardinality did not change runtime hash")
+	}
+}
+
 func TestRuntimeHashExcludesInstanceID(t *testing.T) {
 	base := baseRuntimeDef()
 	baseHash := mustRuntimeHash(t, base)
