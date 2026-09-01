@@ -2,7 +2,6 @@ package subgraph
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -11,6 +10,25 @@ import (
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/types"
 )
+
+// ErrNoMapBody is the failure a batch hits when its request carries no projected
+// body package: the map node compiled, expanded into batches, and each batch then
+// found NodeMeta.Body still nil.
+//
+// It is declared as a named sentinel because eleven comments and test strings
+// across engine/, engine/graph/, and this package already refer to it by this
+// exact name -- as `ErrNoMapBody`, in backticks, as if it were a symbol. It was
+// not one: the failure was an anonymous errors.New at the single construction
+// site below, so nothing could errors.Is it and nothing could grep it. The name
+// was a contract eleven places had already signed.
+//
+// Permanent is the load-bearing half. A nil Body is a COMPILE-time projection
+// outcome -- the same request redelivered a thousand times finds the same nil --
+// but an unmarked error is treated as transient by every retry-capable queue and
+// engine in this repo (see types.ErrPermanent's doc). That is how this failure
+// stayed invisible: redelivered rather than reported, it surfaced downstream as
+// a group batch deadline instead of as the configuration error it is.
+var ErrNoMapBody = types.NewPermanentError("no_map_body", "batch body request carries no package")
 
 // MapBodyExecutor adapts this package's caller-agnostic Executor to the engine's
 // batch shape: one batch in, one result per item out.
@@ -69,7 +87,7 @@ func NewMapBodyExecutor(executor *Executor, suspendDisabled bool, deadline time.
 // for effectively all of a batch's wall clock.
 func (x *MapBodyExecutor) ExecuteBatchBody(ctx context.Context, req engine.BatchBodyRequest) ([]engine.BatchItemResult, error) {
 	if req.Body == nil {
-		return nil, errors.New("batch body request carries no package")
+		return nil, ErrNoMapBody
 	}
 	if len(req.Items) == 0 {
 		return []engine.BatchItemResult{}, nil
