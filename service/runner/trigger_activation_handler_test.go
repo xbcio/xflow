@@ -132,10 +132,11 @@ func TestTriggerActivationHandler_ActivateStampsSeedRuntimeAndParams(t *testing.
 
 	// Deactivate closes the stored subscription.
 	dd := protocol.DeactivateDirective{
-		Namespace:   "ns1",
-		WorkflowID:  "wf1",
-		EntryUnitID: "t1",
-		Generation:  9,
+		Namespace:       "ns1",
+		WorkflowID:      "wf1",
+		WorkflowVersion: "v1",
+		EntryUnitID:     "t1",
+		Generation:      9,
 	}
 	if err := h.Deactivate(dd); err != nil {
 		t.Fatalf("Deactivate returned error: %v", err)
@@ -205,7 +206,7 @@ func TestTriggerActivationHandler_StaleCloseOnGenerationUpgrade(t *testing.T) {
 		t.Errorf("first subscription closeCount = %d, want 1", firstSub.closeCount)
 	}
 	// The handler must store the second subscription.
-	id := activationID{WorkflowID: "wf1", EntryUnitID: "t1"}
+	id := activationID{WorkflowID: "wf1", WorkflowVersion: "v1", EntryUnitID: "t1"}
 	h.mu.Lock()
 	stored := h.subs[id]
 	h.mu.Unlock()
@@ -249,7 +250,7 @@ func TestTriggerActivationHandler_StaleCloseNotCalledOnActivateError(t *testing.
 		t.Error("first subscription was closed despite second Activate failing")
 	}
 	// The stored subscription must still be the first one.
-	id := activationID{WorkflowID: "wf1", EntryUnitID: "t1"}
+	id := activationID{WorkflowID: "wf1", WorkflowVersion: "v1", EntryUnitID: "t1"}
 	h.mu.Lock()
 	stored := h.subs[id]
 	h.mu.Unlock()
@@ -366,5 +367,62 @@ func TestTriggerActivationHandler_GroupActivationFailsClosedWithoutPackage(t *te
 	d := protocol.ActivateDirective{WorkflowID: "wf-1", EntryUnitID: "g", NodeType: "xflow.group", Package: nil}
 	if err := h.Activate(context.Background(), d); err == nil {
 		t.Fatal("expected fail-closed error when the directive carries no Package")
+	}
+}
+
+func TestTriggerActivationHandler_ReplicaSubscriptionsAreIndependent(t *testing.T) {
+	fh := &fakeTriggerHandler{}
+	h := NewTriggerActivationHandler(
+		"https://control.internal",
+		"token",
+		fakeLookup{handlers: map[string]types.TriggerHandler{"fake": fh}},
+	)
+	base := protocol.ActivateDirective{
+		Namespace:       "default",
+		WorkflowID:      "wf-1",
+		WorkflowVersion: "v1",
+		EntryUnitID:     "entry",
+		NodeType:        "fake",
+		Generation:      3,
+	}
+	if err := h.Activate(context.Background(), base); err != nil {
+		t.Fatalf("activate replica 0: %v", err)
+	}
+	first := fh.sub
+	sibling := base
+	sibling.ReplicaIndex = 1
+	if err := h.Activate(context.Background(), sibling); err != nil {
+		t.Fatalf("activate replica 1: %v", err)
+	}
+	second := fh.sub
+	if first == second || len(fh.allSubs) != 2 {
+		t.Fatalf("subscriptions = %#v, want one per sibling", fh.allSubs)
+	}
+	runtime, ok := fh.gotInput.Runtime.(*protocol.HTTPEntrySeedRuntime)
+	if !ok || runtime.ReplicaIndex != 1 {
+		t.Fatalf("replica 1 seed runtime = %#v, want ReplicaIndex 1", fh.gotInput.Runtime)
+	}
+	if err := h.Deactivate(protocol.DeactivateDirective{
+		Namespace:       base.Namespace,
+		WorkflowID:      base.WorkflowID,
+		WorkflowVersion: base.WorkflowVersion,
+		EntryUnitID:     base.EntryUnitID,
+		ReplicaIndex:    0,
+		Generation:      base.Generation,
+	}); err != nil {
+		t.Fatalf("deactivate replica 0: %v", err)
+	}
+	if !first.closed {
+		t.Fatal("replica 0 subscription was not closed")
+	}
+	if second.closed {
+		t.Fatal("deactivating replica 0 closed replica 1")
+	}
+	h.mu.Lock()
+	_, replica0Present := h.subs[activationIDFromActivate(base)]
+	_, replica1Present := h.subs[activationIDFromActivate(sibling)]
+	h.mu.Unlock()
+	if replica0Present || !replica1Present {
+		t.Fatalf("stored subscriptions after deactivate: replica0=%v replica1=%v", replica0Present, replica1Present)
 	}
 }

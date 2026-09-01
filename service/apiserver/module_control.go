@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
@@ -305,9 +307,9 @@ type errorResponse struct {
 // across two paths.
 type executeWorkflowRequest struct {
 	Workflow *types.WorkflowDef `json:"workflow"`
-	Entry    string            `json:"entry,omitempty"`
-	Input    map[string]any    `json:"input,omitempty"`
-	Params   map[string]any    `json:"params,omitempty"`
+	Entry    string             `json:"entry,omitempty"`
+	Input    map[string]any     `json:"input,omitempty"`
+	Params   map[string]any     `json:"params,omitempty"`
 }
 
 type executeWorkflowResponse struct {
@@ -477,6 +479,8 @@ type WorkflowCompileError struct{ err error }
 func (e *WorkflowCompileError) Error() string { return e.err.Error() }
 func (e *WorkflowCompileError) Unwrap() error { return e.err }
 
+var errWorkflowIDMismatch = errors.New("workflow id does not match path")
+
 // registerWorkflow is the definition -> persisted graph path both entry points
 // share: the HTTP handler above and APIServer.RegisterWorkflow, which an
 // embedded server calls in-process.
@@ -495,13 +499,27 @@ func (m *workflowControlModule) registerWorkflow(ctx context.Context, ns namespa
 		}
 		return "", nil, errors.New("apiserver: no workflow registry configured")
 	}
+	rec, warnings, err := m.buildWorkflowRecord(ns, "", def)
+	if err != nil {
+		return "", nil, err
+	}
+	return m.addWorkflowRecord(ctx, ns, registry, rec, warnings)
+}
+
+func (m *workflowControlModule) buildWorkflowRecord(ns namespace.Namespace, id types.WorkflowID, def *types.WorkflowDef) (backend.WorkflowRecord, []string, error) {
+	if def != nil {
+		// Namespace is server-authoritative and must be fixed before compilation
+		// and hashing so every derived representation uses the authenticated
+		// identity rather than an untrusted body value.
+		def.Namespace = string(ns)
+	}
 	g, err := graph.Compile(def)
 	if err != nil {
-		return "", nil, &WorkflowCompileError{err: err}
+		return backend.WorkflowRecord{}, nil, &WorkflowCompileError{err: err}
 	}
-	def.Namespace = string(ns)
 
-	rec, err := registry.AddWorkflow(ctx, backend.WorkflowRecord{
+	rec := backend.WorkflowRecord{
+		ID:             id,
 		Key:            workflowRegistryKey(string(ns), def.Name, def.Version),
 		Namespace:      string(ns),
 		Name:           def.Name,
@@ -509,29 +527,44 @@ func (m *workflowControlModule) registerWorkflow(ctx context.Context, ns namespa
 		DefinitionHash: definitionHash(def),
 		Definition:     def,
 		Graph:          g,
-	})
+	}
+	return rec, g.Warnings(), nil
+}
+
+func (m *workflowControlModule) addWorkflowRecord(ctx context.Context, ns namespace.Namespace, registry backend.WorkflowRegistry, rec backend.WorkflowRecord, warnings []string) (types.WorkflowID, []string, error) {
+	if registry == nil {
+		if m.log != nil {
+			m.log.Error("register_workflow_no_registry")
+		}
+		return "", nil, errors.New("apiserver: no workflow registry configured")
+	}
+	stored, err := registry.AddWorkflow(ctx, rec)
 	if err != nil {
 		if m.log != nil {
 			m.log.Error("register_workflow_failed", "err", err)
 		}
 		return "", nil, err
 	}
+	if err := m.deriveWorkflowActivations(ctx, ns, stored); err != nil {
+		if m.log != nil {
+			m.log.Error("register_workflow_derive_activations_failed", "err", err)
+		}
+		return "", nil, err
+	}
+	return stored.ID, warnings, nil
+}
+
+func (m *workflowControlModule) deriveWorkflowActivations(ctx context.Context, ns namespace.Namespace, rec backend.WorkflowRecord) error {
 	// Derive the node-generic entry activations for this workflow version so the
 	// reconciler can assign remote-hosted trigger entry units to runners. The
-	// namespace is the same server-side value used for the registry record. A
-	// derivation failure fails the register rather than leaving a
-	// registered-but-unactivated workflow — the manager is fail-closed on a group
-	// package that cannot be projected. Nil-guarded: an embedded control plane
-	// without an EntryActivationStore exposes no manager and skips this.
+	// registry revision is carried into desired state as a monotonic fence: a
+	// delayed projection from an older replace can then never overwrite this one.
+	// Nil-guarded: an embedded control plane without an EntryActivationStore
+	// exposes no manager and skips this.
 	if mgr := m.entryActivationManager(); mgr != nil {
-		if err := mgr.AddOrUpdateWorkflow(ctx, ns, rec.ID, def.Version, g); err != nil {
-			if m.log != nil {
-				m.log.Error("register_workflow_derive_activations_failed", "err", err)
-			}
-			return "", nil, err
-		}
+		return mgr.AddOrUpdateWorkflowRevision(ctx, ns, rec.ID, rec.Version, rec.RegistryRevision, rec.Graph)
 	}
-	return rec.ID, g.Warnings(), nil
+	return nil
 }
 
 // handleDeregisterWorkflow serves DELETE /v1/workflows/{id} (spec §7 +
@@ -603,36 +636,57 @@ func (m *workflowControlModule) handleGetWorkflow(w http.ResponseWriter, r *http
 }
 
 // handleReplaceWorkflow serves PUT /v1/workflows/{id} (spec §7 + Addition 1):
-// a full update. It maps onto APIServer.ReplaceWorkflow — deregister a
-// conflicting definition under the same (namespace, name, version) key and
-// re-register. The id in the path identifies the record being replaced; the
-// replacement definition's name/version form the key (with the principal's
-// namespace, never the body's — spec §6.2).
-//
-// ReplaceWorkflow's semantics are the host-owns-its-key contract documented on
-// APIServer.ReplaceWorkflow; this handler does not invent replace semantics —
-// it delegates. An identical definition registers idempotently and nothing is
-// removed.
+// a full update of the resource identified by the path id. The path id is the
+// authoritative target; the body may omit id, but if it supplies one, it must
+// match the path. The replacement definition's name/version form the new key
+// (with the principal's namespace, never the body's — spec §6.2), so a rename
+// or version change is allowed only when that destination key is not already
+// occupied by a different workflow.
 func (m *workflowControlModule) handleReplaceWorkflow(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodPut) {
+		return
+	}
+	id := types.WorkflowID(r.PathValue("id"))
+	if id == "" {
+		writeFail(w, r, http.StatusNotFound, "workflow_not_found", "workflow not found")
 		return
 	}
 	var def types.WorkflowDef
 	if !decodeJSON(w, r, &def) {
 		return
 	}
+	if def.ID != "" && def.ID != string(id) {
+		writeFail(w, r, http.StatusBadRequest, "workflow_id_mismatch", "workflow id does not match path")
+		return
+	}
 	ns := namespace.FromContext(r.Context())
-	id, warnings, err := m.replaceWorkflow(r.Context(), ns, &def)
+	mutationID := sanitizeRequestID(r.Header.Get("X-Request-Id"))
+	if mutationID != "" {
+		mutationID = "http:" + mutationID
+	}
+	replacedID, warnings, err := m.replaceWorkflowByID(r.Context(), ns, id, &def, mutationID)
 	if err != nil {
 		var compileErr *WorkflowCompileError
 		if errors.As(err, &compileErr) {
 			writeFail(w, r, http.StatusBadRequest, "workflow_compile_failed", compileErr.Unwrap().Error())
 			return
 		}
+		if errors.Is(err, backend.ErrWorkflowNotFound) {
+			writeFail(w, r, http.StatusNotFound, "workflow_not_found", "workflow not found")
+			return
+		}
+		if errors.Is(err, backend.ErrWorkflowConflict) {
+			writeFail(w, r, http.StatusConflict, "workflow_conflict", "workflow definition conflicts with an existing registration")
+			return
+		}
+		if errors.Is(err, errWorkflowIDMismatch) {
+			writeFail(w, r, http.StatusBadRequest, "workflow_id_mismatch", "workflow id does not match path")
+			return
+		}
 		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
-	writeData(w, r, http.StatusOK, registerWorkflowResponse{WorkflowID: id, Warnings: warnings})
+	writeData(w, r, http.StatusOK, registerWorkflowResponse{WorkflowID: replacedID, Warnings: warnings})
 }
 
 // handleExecuteWorkflowByID serves POST /v1/workflows/{id}/execute (spec §7):
@@ -739,67 +793,192 @@ func (m *workflowControlModule) deregisterWorkflow(ctx context.Context, ns names
 	// Deactivate and fences the owner.
 	if toDeactivate != nil {
 		mgr := m.entryActivationManager()
-		if err := mgr.RemoveWorkflow(ctx, ns, toDeactivate.ID, toDeactivate.Version, toDeactivate.Graph); err != nil {
+		if err := mgr.RemoveWorkflowRevision(ctx, ns, toDeactivate.ID, toDeactivate.Version, toDeactivate.RegistryRevision, toDeactivate.Graph); err != nil {
 			if m.log != nil {
 				m.log.Error("deregister_workflow_clear_activations_failed", "err", err)
 			}
 			return err
 		}
 	}
-	// Remove the registry record. The manager clear above is idempotent (a repeat
-	// re-marks an already-!Desired record), so a failure here is safely retryable:
-	// the caller retries, re-clears harmlessly, and re-removes.
+	// Remove the registry record. If removal reports a failure after the desired
+	// activations were cleared, read the record back before compensating. Some
+	// registries can fail before mutation while others can durably remove the
+	// record and then fail during follow-up cleanup. Restoring activations in the
+	// latter case would create an orphan, so only restore when the exact revision
+	// fetched above is still authoritative.
 	if err := registry.RemoveWorkflow(ctx, id); err != nil {
 		if !errors.Is(err, backend.ErrWorkflowNotFound) && m.log != nil {
 			m.log.Error("deregister_workflow_failed", "err", err)
+		}
+		if toDeactivate != nil {
+			current, lookupErr := registry.GetWorkflow(ctx, id)
+			switch {
+			case lookupErr == nil && sameWorkflowRevision(current, *toDeactivate):
+				if restoreErr := m.deriveWorkflowActivations(ctx, ns, *toDeactivate); restoreErr != nil && m.log != nil {
+					m.log.Error("deregister_workflow_restore_activations_failed", "workflow_id", string(id), "original_err", err, "err", restoreErr)
+				}
+			case lookupErr != nil && !errors.Is(lookupErr, backend.ErrWorkflowNotFound) && m.log != nil:
+				m.log.Error("deregister_workflow_restore_lookup_failed", "workflow_id", string(id), "original_err", err, "err", lookupErr)
+			}
 		}
 		return err
 	}
 	return nil
 }
 
+// sameWorkflowRevision identifies the persisted workflow revision whose
+// activation projection was cleared. A matching ID alone is insufficient:
+// another writer may have replaced the record between RemoveWorkflow and the
+// compensating read, in which case re-projecting the old graph would overwrite
+// the new workflow's desired activation state.
+func sameWorkflowRevision(a, b backend.WorkflowRecord) bool {
+	return a.ID == b.ID &&
+		a.Key == b.Key &&
+		a.Namespace == b.Namespace &&
+		a.Name == b.Name &&
+		a.Version == b.Version &&
+		a.DefinitionHash == b.DefinitionHash &&
+		a.RegistryRevision == b.RegistryRevision
+}
+
 // replaceWorkflow registers def, and if a DIFFERENT definition already occupies
-// its (namespace, name, version) key, deregisters that one first and registers
-// again.
-//
-// It exists for the deployment that owns its workflow key outright: an embedded
-// control plane whose workflow definition is built from the host's own
-// configuration. Such a definition changes whenever the configuration does — a
-// new topic, a rebuilt wasm artifact — and the registry rejects a changed
-// definition under an existing key as a conflict. With only registerWorkflow to
-// call, that host can never start again: it fails on every boot, with the old
-// definition still registered and running.
-//
-// The removal is deliberate and destructive, which is why it is not the
-// behaviour of registerWorkflow. Two hosts sharing one key with DIFFERENT
-// definitions — a rolling deploy mid-flight — will each replace the other until
-// the rollout settles, deactivating and re-deriving the entry activations each
-// time. Identical definitions never reach the removal at all: they match on
-// hash and register idempotently.
+// its (namespace, name, version) key, atomically supersedes it. The embedded API
+// deliberately gives a changed definition a new ID; HTTP PUT, by contrast,
+// preserves its path ID in replaceWorkflowByID below.
 func (m *workflowControlModule) replaceWorkflow(ctx context.Context, ns namespace.Namespace, def *types.WorkflowDef) (types.WorkflowID, []string, error) {
-	id, warnings, err := m.registerWorkflow(ctx, ns, def)
-	if err == nil || !errors.Is(err, backend.ErrWorkflowConflict) {
-		return id, warnings, err
+	registry := m.registry()
+	if registry == nil {
+		return "", nil, errors.New("apiserver: no workflow registry configured")
+	}
+	replacement, warnings, err := m.buildWorkflowRecord(ns, "", def)
+	if err != nil {
+		return "", nil, err
+	}
+	ctx = namespace.WithNamespace(ctx, ns)
+	existing, err := registry.GetWorkflowByKey(ctx, replacement.Key)
+	if errors.Is(err, backend.ErrWorkflowNotFound) {
+		return m.addWorkflowRecord(ctx, ns, registry, replacement, warnings)
+	}
+	if err != nil {
+		return "", nil, err
+	}
+	if existing.DefinitionHash == replacement.DefinitionHash {
+		return m.addWorkflowRecord(ctx, ns, registry, replacement, warnings)
+	}
+
+	// A replacement ID must be fixed before the CAS so response-loss retries use
+	// the same semantic request fingerprint instead of allocating a second ID.
+	replacement.ID = types.WorkflowID(uuid.NewString())
+	return m.compareAndReplaceWorkflow(ctx, ns, registry, existing, replacement, "embedded:"+uuid.NewString(), warnings)
+}
+
+// replaceWorkflowByID implements HTTP PUT /v1/workflows/{id}. The path ID is
+// authoritative; name/version may rename the record only when the destination
+// key is free. All conflict checks and index changes occur in the registry's
+// single atomic compare-and-swap rather than a racy lookup/remove/add sequence.
+func (m *workflowControlModule) replaceWorkflowByID(ctx context.Context, ns namespace.Namespace, id types.WorkflowID, def *types.WorkflowDef, mutationID string) (types.WorkflowID, []string, error) {
+	if id == "" {
+		return "", nil, backend.ErrWorkflowNotFound
 	}
 	registry := m.registry()
 	if registry == nil {
+		if m.log != nil {
+			m.log.Error("replace_workflow_no_registry")
+		}
+		return "", nil, errors.New("apiserver: no workflow registry configured")
+	}
+
+	ctx = namespace.WithNamespace(ctx, ns)
+	existing, err := registry.GetWorkflow(ctx, id)
+	if err != nil {
+		if !errors.Is(err, backend.ErrWorkflowNotFound) && m.log != nil {
+			m.log.Error("replace_workflow_lookup_failed", "workflow_id", string(id), "err", err)
+		}
 		return "", nil, err
 	}
-	// The key carries the namespace, so this lookup cannot reach another
-	// namespace's record even though the registry is not otherwise scoped.
-	existing, lookupErr := registry.GetWorkflowByKey(ctx, workflowRegistryKey(string(ns), def.Name, def.Version))
-	if lookupErr != nil {
-		// The caller's contract is "conflict", not "lookup failed".
+	if existing.Namespace != "" && ns != "" && existing.Namespace != string(ns) {
+		return "", nil, backend.ErrWorkflowNotFound
+	}
+	if def.ID != "" && def.ID != string(id) {
+		return "", nil, errWorkflowIDMismatch
+	}
+	def.ID = string(id)
+	def.Namespace = string(ns)
+	replacement, warnings, err := m.buildWorkflowRecord(ns, id, def)
+	if err != nil {
 		return "", nil, err
 	}
-	if delErr := m.deregisterWorkflow(ctx, ns, existing.ID); delErr != nil {
-		return "", nil, delErr
+	if mutationID == "" {
+		mutationID = "http:" + uuid.NewString()
 	}
-	if m.log != nil {
-		m.log.Info("replace_workflow_removed_conflicting", "workflow_id", string(existing.ID), "name", def.Name, "version", def.Version)
-	}
-	return m.registerWorkflow(ctx, ns, def)
+	return m.compareAndReplaceWorkflow(ctx, ns, registry, existing, replacement, mutationID, warnings)
 }
+
+func (m *workflowControlModule) compareAndReplaceWorkflow(
+	ctx context.Context,
+	ns namespace.Namespace,
+	registry backend.WorkflowRegistry,
+	existing backend.WorkflowRecord,
+	replacement backend.WorkflowRecord,
+	mutationID string,
+	warnings []string,
+) (types.WorkflowID, []string, error) {
+	durableRegistry, ok := registry.(backend.DurableWorkflowReplaceCapability)
+	if !ok || m.workflowActivationProjectionWorker() == nil {
+		if m.log != nil {
+			m.log.Error("replace_workflow_durable_projection_capability_missing")
+		}
+		return "", nil, backend.ErrWorkflowReplaceUnsupported
+	}
+	request := backend.WorkflowReplaceRequest{
+		MutationID:  mutationID,
+		Expected:    backend.RevisionOfWorkflow(existing),
+		Replacement: replacement,
+	}
+	if err := ctx.Err(); err != nil {
+		return "", nil, err
+	}
+	result, err := durableRegistry.CompareAndReplaceWorkflow(ctx, request)
+	if errors.Is(err, backend.ErrWorkflowMutationIndeterminate) {
+		// A timeout or disconnect may have happened after commit. Resolve the
+		// operation ledger with the same MutationID on a context detached from the
+		// request; compensating or issuing a new mutation would be unsafe.
+		resolveCtx, cancel := context.WithTimeout(namespace.WithNamespace(context.WithoutCancel(ctx), ns), workflowProjectionTimeout)
+		defer cancel()
+		for attempt := 0; attempt < 3 && err != nil; attempt++ {
+			result, err = durableRegistry.CompareAndReplaceWorkflow(resolveCtx, request)
+			if err != nil && !errors.Is(err, backend.ErrWorkflowMutationIndeterminate) {
+				break
+			}
+		}
+	}
+	if err != nil {
+		if m.log != nil && !errors.Is(err, backend.ErrWorkflowConflict) {
+			m.log.Error("replace_workflow_atomic_failed", "workflow_id", string(existing.ID), "err", err)
+		}
+		return "", nil, err
+	}
+
+	// The registry commit, operation ledger, and projection intent are now one
+	// authority transaction. Drive that intent synchronously for low latency,
+	// but keep it pending when projection or ack fails so the control-plane
+	// recovery worker can finish after a crash. Never compensate a committed CAS.
+	projectionCtx, cancel := context.WithTimeout(namespace.WithNamespace(context.WithoutCancel(ctx), ns), workflowProjectionTimeout)
+	defer cancel()
+	applied, err := m.workflowActivationProjectionWorker().ProjectPending(projectionCtx, ns, request.MutationID, 3)
+	if err == nil && !applied {
+		err = errors.New("workflow activation projection is already in progress")
+	}
+	if err != nil {
+		if m.log != nil {
+			m.log.Error("replace_workflow_project_activations_failed", "workflow_id", string(result.Current.ID), "registry_revision", result.Current.RegistryRevision, "err", err)
+		}
+		return "", nil, err
+	}
+	return result.Current.ID, warnings, nil
+}
+
+const workflowProjectionTimeout = 10 * time.Second
 
 // registry returns the control plane's workflow registry, or nil when no
 // ControlPlane is wired (unit tests with a fake facade) or none is configured.
@@ -815,6 +994,13 @@ func (m *workflowControlModule) registry() backend.WorkflowRegistry {
 // with a fake facade) or no EntryActivationStore is configured (embedded /
 // in-process). Callers nil-guard: registering/deregistering a workflow derives/
 // clears entry activations only when a manager is present.
+func (m *workflowControlModule) workflowActivationProjectionWorker() *control.WorkflowActivationProjectionWorker {
+	if m.cp == nil {
+		return nil
+	}
+	return m.cp.WorkflowActivationProjectionWorker()
+}
+
 func (m *workflowControlModule) entryActivationManager() *control.EntryActivationManager {
 	if m.cp == nil {
 		return nil
@@ -882,6 +1068,7 @@ func (m *workflowControlModule) handleSeedExecution(w http.ResponseWriter, r *ht
 		Exits:           exits,
 		Error:           req.Error,
 		Generation:      req.Generation,
+		ReplicaIndex:    req.ReplicaIndex,
 		// ResultHash is computed server-side; the client cannot supply it.
 		ResultHash: engine.ComputeResultHash(outcome, exits),
 	}

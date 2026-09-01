@@ -387,3 +387,61 @@ func TestProcessDirectivesRecoversFromCallbackPanicAndContinues(t *testing.T) {
 		t.Fatalf("callback calls = %d, want 2 (a panic in one callback must not stop reporting the rest)", calls)
 	}
 }
+
+func TestActivationTracker_ReplicaSiblingsAreIndependent(t *testing.T) {
+	handler := &mockActivationHandler{}
+	tracker := NewActivationTracker(handler, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	base := protocol.ActivateDirective{
+		Namespace:       "default",
+		WorkflowID:      "wf-1",
+		WorkflowVersion: "v1",
+		EntryUnitID:     "group-a",
+		Generation:      3,
+	}
+	sibling := base
+	sibling.ReplicaIndex = 1
+	if err := tracker.ProcessDirectives(context.Background(), &protocol.HeartbeatActivations{
+		Activate: []protocol.ActivateDirective{base, sibling},
+	}); err != nil {
+		t.Fatalf("activate siblings: %v", err)
+	}
+	if got := handler.activateCount(); got != 2 {
+		t.Fatalf("activate calls = %d, want both sibling replicas", got)
+	}
+
+	inventory := tracker.Inventory()
+	if len(inventory) != 2 {
+		t.Fatalf("inventory = %#v, want two sibling replicas", inventory)
+	}
+	seen := map[uint32]bool{}
+	for _, item := range inventory {
+		seen[item.ReplicaIndex] = true
+	}
+	if !seen[0] || !seen[1] {
+		t.Fatalf("inventory replicas = %v, want {0,1}", seen)
+	}
+
+	if err := tracker.ProcessDirectives(context.Background(), &protocol.HeartbeatActivations{
+		Deactivate: []protocol.DeactivateDirective{{
+			Namespace:       sibling.Namespace,
+			WorkflowID:      sibling.WorkflowID,
+			WorkflowVersion: sibling.WorkflowVersion,
+			EntryUnitID:     sibling.EntryUnitID,
+			ReplicaIndex:    sibling.ReplicaIndex,
+			Generation:      sibling.Generation,
+		}},
+	}); err != nil {
+		t.Fatalf("deactivate replica 1: %v", err)
+	}
+	inventory = tracker.Inventory()
+	if len(inventory) != 1 || inventory[0].ReplicaIndex != 0 {
+		t.Fatalf("inventory after replica 1 deactivation = %#v, want only replica 0", inventory)
+	}
+	handler.mu.Lock()
+	deactivations := append([]protocol.DeactivateDirective(nil), handler.deactivations...)
+	handler.mu.Unlock()
+	if len(deactivations) != 1 || deactivations[0].ReplicaIndex != 1 {
+		t.Fatalf("handler deactivations = %#v, want only replica 1", deactivations)
+	}
+}

@@ -165,8 +165,13 @@ func globalItemIndex(batchIndex, batchSize, posInBatch int) int {
 //
 // A batch whose every item failed is failed under either setting. An empty batch
 // is not a failure — an expansion can legitimately contain one.
-func BatchResultForCommit(results []BatchItemResult, continueOnError bool) (map[string]any, error) {
-	data := batchResultData(results)
+//
+// uses is the host's attestation of which artifacts actually executed inside
+// this batch. It is passed in rather than read from the context so the call
+// site shows who created the collector and who reads it; the compiler then
+// forces both callers to decide.
+func BatchResultForCommit(results []BatchItemResult, continueOnError bool, uses []types.ArtifactUse) (map[string]any, error) {
+	data := batchResultData(results, uses)
 	if len(results) == 0 {
 		return data, nil
 	}
@@ -197,7 +202,10 @@ func BatchResultForCommit(results []BatchItemResult, continueOnError bool) (map[
 // A failed item occupies its slot as {_error, _index} rather than being dropped,
 // which is what makes "count always equals the input length" true and lets a
 // downstream filter distinguish failures from data.
-func batchResultData(results []BatchItemResult) map[string]any {
+//
+// uses is the host's attestation of which artifacts actually executed in this
+// batch, forwarded from BatchResultForCommit's own uses parameter.
+func batchResultData(results []BatchItemResult, uses []types.ArtifactUse) map[string]any {
 	items := make([]any, 0, len(results))
 	failed := 0
 	for _, r := range results {
@@ -211,11 +219,22 @@ func batchResultData(results []BatchItemResult) map[string]any {
 		}
 		items = append(items, r.Data)
 	}
-	return map[string]any{
+	data := map[string]any{
 		"items":  items,
 		"count":  len(items),
 		"failed": failed,
 	}
+	// Host-attested and deliberately a sibling of items, not a member of it: a
+	// per-item copy would be O(items) for a value that has O(distinct
+	// artifacts) of information, and a guest's return value can only ever land
+	// inside items — so a top-level key is one a guest cannot write.
+	//
+	// Absent rather than empty when there is nothing to attest, so a consumer
+	// can tell "used no artifact" apart from "this build does not report them".
+	if list := types.ArtifactUsesAsData(uses); list != nil {
+		data["artifacts"] = list
+	}
+	return data
 }
 
 // batchBodyError builds the error a batch reports when its body could not run

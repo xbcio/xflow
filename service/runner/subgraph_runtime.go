@@ -23,8 +23,9 @@ var ErrBatchWithoutABody = errors.New("batch lease carries no body package")
 type SubgraphRuntimeOption func(*subgraphRuntimeConfig)
 
 type subgraphRuntimeConfig struct {
-	artifactCode func(ctx context.Context, digest string) ([]byte, error)
-	hooks        engine.Hooks
+	artifactCode          func(ctx context.Context, digest string) ([]byte, error)
+	mapConcurrencyLimiter *subgraph.MapConcurrencyLimiter
+	hooks                 engine.Hooks
 }
 
 // WithSubgraphArtifactCodeResolver installs the digest -> script bytes resolver
@@ -41,6 +42,12 @@ func WithSubgraphArtifactCodeResolver(fn func(ctx context.Context, digest string
 // map over N items produces N inner executions under one outer execution.
 func WithSubgraphHooks(h engine.Hooks) SubgraphRuntimeOption {
 	return func(c *subgraphRuntimeConfig) { c.hooks = h }
+}
+
+// WithSubgraphMapConcurrencyLimiter installs the runner-scoped active-batch
+// and active-item budgets used by top-level map batch leases.
+func WithSubgraphMapConcurrencyLimiter(limiter *subgraph.MapConcurrencyLimiter) SubgraphRuntimeOption {
+	return func(c *subgraphRuntimeConfig) { c.mapConcurrencyLimiter = limiter }
 }
 
 // SubgraphRuntime adapts a batch lease to the runner's execution surface. It is
@@ -67,12 +74,18 @@ func NewSubgraphRuntime(reg *execution.Registry, cache *PackageCache, opts ...Su
 	for _, o := range opts {
 		o(cfg)
 	}
-	var execOpts []subgraph.ExecutorOption
+	execOpts := []subgraph.ExecutorOption{
+		subgraph.WithMapConcurrencyLimiter(cfg.mapConcurrencyLimiter),
+	}
 	if cfg.hooks != nil {
 		execOpts = append(execOpts, subgraph.WithHooks(cfg.hooks))
 	}
 	executor := subgraph.NewExecutor(reg, cache, func() subgraph.Backend {
-		backendOpts := []local.Option{local.WithRegistry(reg), local.WithConcurrency(1)}
+		backendOpts := []local.Option{
+			local.WithRegistry(reg),
+			local.WithConcurrency(1),
+			local.WithQueueCapacity(embeddedSubgraphQueueCapacity),
+		}
 		if cfg.artifactCode != nil {
 			backendOpts = append(backendOpts, local.WithArtifactCodeResolver(cfg.artifactCode))
 		}
@@ -98,6 +111,10 @@ func (r *SubgraphRuntime) Execute(ctx context.Context, lease *engine.TaskLease) 
 			payload.BatchIndex, payload.ParentNode, ErrBatchWithoutABody)
 	}
 
+	// Same one-batch lifetime as engine.runBatchBody: the durable path assembles
+	// its batch result here instead of in the engine, so it must seed and read
+	// its own collector or the runner-side path would attest nothing.
+	ctx, uses := types.WithArtifactUseCollector(ctx)
 	results, err := r.bodies.ExecuteBatchBody(ctx, engine.BatchBodyRequest{
 		ExecutionID:     string(lease.Task.ExecutionID),
 		ParentNode:      payload.ParentNode,
@@ -123,7 +140,7 @@ func (r *SubgraphRuntime) Execute(ctx context.Context, lease *engine.TaskLease) 
 			payload.BatchIndex, payload.ParentNode, err)
 	}
 
-	data, failure := engine.BatchResultForCommit(results, payload.ContinueOnError)
+	data, failure := engine.BatchResultForCommit(results, payload.ContinueOnError, uses.Uses())
 	return engine.TaskResult{
 		Output: &types.Output{Data: data},
 		Error:  failure,

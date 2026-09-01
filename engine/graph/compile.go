@@ -305,17 +305,18 @@ func registerNodes(def *types.WorkflowDef, g *Graph) (int, error) {
 		}
 		g.index[nd.Name] = i
 		g.nodes[i] = NodeMeta{
-			Name:           nd.Name,
-			Type:           nd.Type,
-			Kind:           nd.Kind,
-			Version:        nd.Version,
-			OnError:        nd.OnError,
-			RunnerSelector: runnerSelector,
-			MergeMode:      extractMergeMode(nd),
-			Parameters:     cloneStringAnyMap(nd.Parameters),
-			Retry:          resolveRetry(nd.Retry, def.Settings),
-			GroupIdx:       -1,
-			Timeout:        nd.Timeout,
+			Name:               nd.Name,
+			Type:               nd.Type,
+			Kind:               nd.Kind,
+			Version:            nd.Version,
+			OnError:            nd.OnError,
+			RunnerSelector:     runnerSelector,
+			MergeMode:          extractMergeMode(nd),
+			Parameters:         cloneStringAnyMap(nd.Parameters),
+			Retry:              resolveRetry(nd.Retry, def.Settings),
+			GroupIdx:           -1,
+			Timeout:            nd.Timeout,
+			ActivationReplicas: nd.ActivationReplicas,
 		}
 		if nd.Type == "xflow.start" || nd.Kind == types.NodeKindTrigger {
 			g.entryIndexes[nd.Name] = i

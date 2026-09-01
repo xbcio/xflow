@@ -96,6 +96,12 @@ type Config struct {
 	// reporting. Zero means each runner uses its own default; negative suspends
 	// reporting fleet-wide. See control.Config.MetricsReportInterval.
 	RunnerMetricsInterval time.Duration
+	// ReadinessChecker is an optional deployment-specific readiness probe. It is
+	// composed with APIServer lifecycle state, the checker exposed by Store (when
+	// it implements ReadinessChecker), and built-in checks for known dependencies
+	// (currently Redis-backed control-plane backends). Leave nil for embedded/local
+	// deployments that have no external dependency to probe.
+	ReadinessChecker ReadinessChecker
 
 	// Transport configuration. Stage 1 declares but does not use these.
 	HTTPAddr    string
@@ -137,6 +143,7 @@ type APIServer struct {
 	// s.cp is guaranteed to be non-nil) so the module always receives a ready
 	// ControlPlane.
 	enableManagement bool
+	readiness        *apiServerReadiness
 }
 
 // New assembles an APIServer from cfg. If no ControlPlane is injected via
@@ -179,6 +186,7 @@ func New(cfg Config, opts ...Option) (*APIServer, error) {
 		s.cp = cp
 		s.ownsCP = true
 	}
+	s.readiness = newAPIServerReadiness(s.cp, cfg)
 
 	workflowAuth := cfg.WorkflowAuth
 	ctrlModule := newWorkflowControlModule(s.cp, workflowAuth, cfg.Logger, cfg.Tracer)
@@ -204,6 +212,7 @@ func New(cfg Config, opts ...Option) (*APIServer, error) {
 	if s.enableManagement {
 		mgmt := newManagementModule(s.cp)
 		mgmt.metrics = cfg.Metrics
+		mgmt.ready = s.readiness
 		if cfg.PrincipalAuth != nil {
 			mgmt.principalAuth = cfg.PrincipalAuth
 			mgmt.authorizer = cfg.Authorizer
@@ -405,6 +414,9 @@ func (s *APIServer) Start(ctx context.Context) error {
 // Shutdown stops the sweeper, resigns leadership, and unwinds the queue
 // binding. Transparent passthrough to the underlying ControlPlane.
 func (s *APIServer) Shutdown(ctx context.Context) error {
+	if s.readiness != nil {
+		s.readiness.markShuttingDown()
+	}
 	return s.cp.Shutdown(ctx)
 }
 

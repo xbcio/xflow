@@ -316,6 +316,10 @@ type NodeMeta struct {
 	// already-persisted graph's hash would move — even for workflows with no
 	// body anywhere. Same reason graphHashPayload.SupplyRefs carries one.
 	Body *NodeBodyPackage `json:",omitempty"`
+	// ActivationReplicas is appended and omitted at zero so existing graph hashes
+	// and snapshots remain byte-identical. Zero and one both mean one hosted
+	// activation; the raw value is retained to preserve definition intent.
+	ActivationReplicas uint32 `json:",omitempty"`
 }
 
 // Edge represents a directed connection between two nodes.

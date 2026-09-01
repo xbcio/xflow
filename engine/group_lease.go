@@ -81,8 +81,7 @@ func (e *Engine) BuildGroupLease(ctx context.Context, t *Task) (*TaskLease, *Gro
 		return nil, nil, fmt.Errorf("build group entry input: %w", err)
 	}
 
-	leaseID := LeaseID("lease-" + uuid.New().String())
-	leaseToken := LeaseToken("token-" + uuid.New().String())
+	leaseID, leaseToken := newLeaseCredentials()
 	issuedAt := time.Now().UTC()
 	ttl := e.defaultLeaseTTL
 

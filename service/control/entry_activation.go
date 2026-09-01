@@ -7,24 +7,39 @@ import (
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/namespace"
+	"github.com/xbcio/xflow/types"
 )
 
 // Compile-time interface check.
-var _ engine.EntryActivationStore = (*MemoryEntryActivationStore)(nil)
+var (
+	_ engine.EntryActivationStore         = (*MemoryEntryActivationStore)(nil)
+	_ engine.EntryActivationRevisionStore = (*MemoryEntryActivationStore)(nil)
+)
+
+type entryActivationWorkflowKey struct {
+	Namespace  namespace.Namespace
+	WorkflowID types.WorkflowID
+}
 
 // MemoryEntryActivationStore is an in-memory implementation of
 // engine.EntryActivationStore, suitable for single-node deployments and tests.
 // A single mutex makes Assign/Fence atomic first-writer-wins operations.
 type MemoryEntryActivationStore struct {
-	mu      sync.Mutex
-	records map[engine.EntryActivationKey]*engine.EntryActivation
+	mu                sync.Mutex
+	records           map[engine.EntryActivationKey]*engine.EntryActivation
+	workflowRevisions map[entryActivationWorkflowKey]uint64
 }
 
 // NewMemoryEntryActivationStore returns a ready-to-use store.
 func NewMemoryEntryActivationStore() *MemoryEntryActivationStore {
 	return &MemoryEntryActivationStore{
-		records: make(map[engine.EntryActivationKey]*engine.EntryActivation),
+		records:           make(map[engine.EntryActivationKey]*engine.EntryActivation),
+		workflowRevisions: make(map[entryActivationWorkflowKey]uint64),
 	}
+}
+
+func entryActivationWorkflowKeyOf(ns namespace.Namespace, workflowID types.WorkflowID) entryActivationWorkflowKey {
+	return entryActivationWorkflowKey{Namespace: ns, WorkflowID: workflowID}
 }
 
 func entryActivationKeyOf(a engine.EntryActivation) engine.EntryActivationKey {
@@ -33,20 +48,58 @@ func entryActivationKeyOf(a engine.EntryActivation) engine.EntryActivationKey {
 		WorkflowID:      a.WorkflowID,
 		WorkflowVersion: a.WorkflowVersion,
 		EntryUnitID:     a.EntryUnitID,
+		ReplicaIndex:    a.ReplicaIndex,
 	}
 }
 
+// AdvanceWorkflowRevision monotonically advances the workflow-wide desired-state
+// watermark. Lower and legacy revisions are harmless no-ops.
+func (s *MemoryEntryActivationStore) AdvanceWorkflowRevision(_ context.Context, ns namespace.Namespace, workflowID types.WorkflowID, revision uint64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.workflowRevisions == nil {
+		s.workflowRevisions = make(map[entryActivationWorkflowKey]uint64)
+	}
+	key := entryActivationWorkflowKeyOf(ns, workflowID)
+	if revision > s.workflowRevisions[key] {
+		s.workflowRevisions[key] = revision
+	}
+	return nil
+}
+
 // Upsert creates or updates the desired-state fields of an activation. It never
-// clobbers the assignment fields of an existing record.
+// clobbers the assignment fields of an existing record. A write below the
+// workflow watermark or the record's own revision is a successful no-op.
 func (s *MemoryEntryActivationStore) Upsert(_ context.Context, act engine.EntryActivation) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if s.records == nil {
+		s.records = make(map[engine.EntryActivationKey]*engine.EntryActivation)
+	}
+	if s.workflowRevisions == nil {
+		s.workflowRevisions = make(map[entryActivationWorkflowKey]uint64)
+	}
+	workflowKey := entryActivationWorkflowKeyOf(act.Namespace, act.WorkflowID)
+	if act.RegistryRevision < s.workflowRevisions[workflowKey] {
+		return nil
+	}
+	// Direct revision-aware callers are safe even if they do not explicitly use
+	// the optional capability. The manager still advances first so stale writes
+	// are fenced before its List/reconciliation phase begins.
+	if act.RegistryRevision > s.workflowRevisions[workflowKey] {
+		s.workflowRevisions[workflowKey] = act.RegistryRevision
+	}
 
 	key := entryActivationKeyOf(act)
 	existing, ok := s.records[key]
 	if !ok {
 		rec := act
 		s.records[key] = &rec
+		return nil
+	}
+	if act.RegistryRevision < existing.RegistryRevision {
 		return nil
 	}
 	// Preserve assignment state; only refresh desired-state fields.
@@ -58,6 +111,7 @@ func (s *MemoryEntryActivationStore) Upsert(_ context.Context, act engine.EntryA
 	existing.Supplies = act.Supplies
 	existing.SupplyConsumers = act.SupplyConsumers
 	existing.Desired = act.Desired
+	existing.RegistryRevision = act.RegistryRevision
 	return nil
 }
 
@@ -70,7 +124,7 @@ func (s *MemoryEntryActivationStore) Get(_ context.Context, key engine.EntryActi
 	if !ok {
 		return engine.EntryActivation{}, false, nil
 	}
-	return *rec, true, nil
+	return s.authoritativeRecord(*rec), true, nil
 }
 
 // List returns copies of all activations in the namespace.
@@ -81,10 +135,22 @@ func (s *MemoryEntryActivationStore) List(_ context.Context, ns namespace.Namesp
 	var out []engine.EntryActivation
 	for k, rec := range s.records {
 		if k.Namespace == ns {
-			out = append(out, *rec)
+			out = append(out, s.authoritativeRecord(*rec))
 		}
 	}
 	return out, nil
+}
+
+// authoritativeRecord projects records below the workflow watermark as
+// non-desired without destroying their assignment state. This makes advancing
+// a revision fail closed immediately, before the new graph's per-key upserts
+// have completed.
+func (s *MemoryEntryActivationStore) authoritativeRecord(rec engine.EntryActivation) engine.EntryActivation {
+	watermark := s.workflowRevisions[entryActivationWorkflowKeyOf(rec.Namespace, rec.WorkflowID)]
+	if rec.RegistryRevision < watermark {
+		rec.Desired = false
+	}
+	return rec
 }
 
 // Assign claims the activation for runnerID/sessionID at gen. First-writer-wins

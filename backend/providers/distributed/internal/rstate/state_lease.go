@@ -162,7 +162,7 @@ func (s *Store) ListExpiredLeases(ctx context.Context, before time.Time) (expire
 		if len(out) >= leaseIndexBatchLimit {
 			break
 		}
-		if err := s.scanExpiredLeasesForTenant(ctx, t, before, max, scanCount, seenIndexes, &out); err != nil {
+		if err := s.scanExpiredLeasesForNamespace(ctx, t, before, max, scanCount, seenIndexes, &out); err != nil {
 			return out, err
 		}
 	}
@@ -172,7 +172,7 @@ func (s *Store) ListExpiredLeases(ctx context.Context, before time.Time) (expire
 	return out, nil
 }
 
-func (s *Store) scanExpiredLeasesForTenant(ctx context.Context, t namespace.Namespace, before time.Time, max string, scanCount int64, seenIndexes map[string]struct{}, out *[]engine.ExpiredLease) error {
+func (s *Store) scanExpiredLeasesForNamespace(ctx context.Context, t namespace.Namespace, before time.Time, max string, scanCount int64, seenIndexes map[string]struct{}, out *[]engine.ExpiredLease) error {
 	var cursor uint64
 	for len(*out) < leaseIndexBatchLimit {
 		indexKeys, next, err := s.rdb.Scan(ctx, cursor, execScanPattern(t, "leases"), scanCount).Result()
@@ -184,8 +184,8 @@ func (s *Store) scanExpiredLeasesForTenant(ctx context.Context, t namespace.Name
 				continue
 			}
 			seenIndexes[indexKey] = struct{}{}
-			indexTenant, indexExecID, validIndex := parseNamespaceExecKey(indexKey)
-			if !validIndex || indexTenant != t {
+			indexNamespace, indexExecID, validIndex := parseNamespaceExecKey(indexKey)
+			if !validIndex || indexNamespace != t {
 				continue
 			}
 

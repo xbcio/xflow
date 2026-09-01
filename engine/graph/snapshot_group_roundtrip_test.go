@@ -31,7 +31,9 @@ func groupedRoundTripDef() *types.WorkflowDef {
 // (UnmarshalJSON -> buildUnits). It must keep passing after the T1 legacy
 // disambiguation change on top.
 func TestGraphSnapshotGroupedRoundTrip(t *testing.T) {
-	g, err := Compile(groupedRoundTripDef())
+	def := groupedRoundTripDef()
+	def.Groups[0].ActivationReplicas = 3
+	g, err := Compile(def)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -52,6 +54,9 @@ func TestGraphSnapshotGroupedRoundTrip(t *testing.T) {
 	}
 	if len(g2.Groups()) != 1 {
 		t.Fatalf("Groups() after round-trip = %d, want 1", len(g2.Groups()))
+	}
+	if got := g2.Groups()[0].ActivationReplicas; got != 3 {
+		t.Fatalf("group ActivationReplicas after round-trip = %d, want 3", got)
 	}
 	if g2.Hash() != g.Hash() {
 		t.Fatalf("Hash() after round-trip = %q, want %q", g2.Hash(), g.Hash())
@@ -273,10 +278,41 @@ func TestGraphSnapshotLegacyBigEndianGroupIdxKeyRoundTrips(t *testing.T) {
 	if g.UnitCount() != 2 {
 		t.Fatalf("UnitCount() = %d, want 2 (grouped {ingest,analyze} + store); old GroupIdx key must not be treated as legacy-absent", g.UnitCount())
 	}
+	if got := g.Groups()[0].ActivationReplicas; got != 0 {
+		t.Fatalf("legacy group ActivationReplicas = %d, want zero", got)
+	}
 	ingestIdx, _ := g.NodeIndex("ingest")
 	storeIdx, _ := g.NodeIndex("store")
 	if g.UnitIndexForNode(ingestIdx) == g.UnitIndexForNode(storeIdx) {
 		t.Fatal("ingest (grouped) and store (ungrouped) must map to distinct units")
+	}
+}
+
+func TestGraphSnapshotStandaloneActivationReplicasRoundTrip(t *testing.T) {
+	def := groupedRoundTripDef()
+	def.Groups = nil
+	def.Nodes[0].ActivationReplicas = 4
+	g, err := Compile(def)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	data, err := json.Marshal(g)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var decoded Graph
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	idx, ok := decoded.NodeIndex("ingest")
+	if !ok {
+		t.Fatal("ingest missing after round-trip")
+	}
+	if got := decoded.NodeAt(idx).ActivationReplicas; got != 4 {
+		t.Fatalf("node ActivationReplicas after round-trip = %d, want 4", got)
+	}
+	if decoded.Hash() != g.Hash() {
+		t.Fatalf("hash after round-trip = %q, want %q", decoded.Hash(), g.Hash())
 	}
 }
 
@@ -303,4 +339,3 @@ func TestGraphSnapshotConflictingGroupIdxKeysFailsClosed(t *testing.T) {
 		t.Fatal("expected error for conflicting group_idx/GroupIdx keys, got nil")
 	}
 }
-

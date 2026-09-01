@@ -36,6 +36,10 @@ service RunnerProtocol {
 message Capability {
   string node_type = 1;
   int32 node_version = 2;
+  // features are additive runtime protocol capabilities for this node type.
+  // Older peers ignore this field; replica activations are assigned only when
+  // the feature is observed by the control plane.
+  repeated string features = 3;
 }
 
 message RegisterRequest {
@@ -55,6 +59,7 @@ message ActivationInventoryItem {
   string entry_unit_id = 2;
   uint64 generation = 3;
   string workflow_version = 4;
+  uint32 replica_index = 5;
 }
 
 message RegisterResponse {

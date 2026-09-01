@@ -22,7 +22,7 @@ func TestBatchStoppedAtAFailedItemIsAFailedBatch(t *testing.T) {
 		{Index: 1, Err: errors.New("item body failed")},
 	}
 
-	data, verdict := BatchResultForCommit(results, false)
+	data, verdict := BatchResultForCommit(results, false, nil)
 	if verdict == nil {
 		t.Fatalf("batch with a failed item under continue_on_error=false reported no "+
 			"failure; the map node will commit Success with a hole in its results: %+v", data)
@@ -44,7 +44,7 @@ func TestPartiallyFailedBatchUnderContinueOnErrorIsSuccessful(t *testing.T) {
 		{Index: 2, Data: map[string]any{"id": 2}},
 	}
 
-	if _, verdict := BatchResultForCommit(results, true); verdict != nil {
+	if _, verdict := BatchResultForCommit(results, true, nil); verdict != nil {
 		t.Errorf("partially-failed batch under continue_on_error=true reported %v; "+
 			"placeholders are the deliverable there, so the batch succeeded", verdict)
 	}
@@ -59,7 +59,7 @@ func TestBatchWithEveryItemFailedIsFailedUnderEitherSetting(t *testing.T) {
 		{Index: 1, Err: errors.New("second")},
 	}
 	for _, continueOnError := range []bool{false, true} {
-		if _, verdict := BatchResultForCommit(results, continueOnError); verdict == nil {
+		if _, verdict := BatchResultForCommit(results, continueOnError, nil); verdict == nil {
 			t.Errorf("continue_on_error=%v: a batch whose every item failed reported no failure",
 				continueOnError)
 		}
@@ -71,7 +71,7 @@ func TestBatchWithEveryItemFailedIsFailedUnderEitherSetting(t *testing.T) {
 // fail the map node for having nothing to do.
 func TestEmptyBatchIsNotAFailure(t *testing.T) {
 	for _, continueOnError := range []bool{false, true} {
-		if _, verdict := BatchResultForCommit(nil, continueOnError); verdict != nil {
+		if _, verdict := BatchResultForCommit(nil, continueOnError, nil); verdict != nil {
 			t.Errorf("continue_on_error=%v: empty batch reported %v, want no failure",
 				continueOnError, verdict)
 		}

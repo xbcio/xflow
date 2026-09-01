@@ -159,6 +159,21 @@ type TaskLease struct {
 	// NOT placed in W3C baggage (RELEASE-GATES §4.1); it travels in the lease
 	// payload, not in trace propagation headers.
 	Namespace namespace.Namespace `json:"namespace,omitempty"`
+	// ArtifactUses is the host's collector for this batch's resolved artifact
+	// digests. It rides the lease for the same reason ExecutionDeadline does:
+	// the local queue's worker goroutine starts from context.Background(), so
+	// ctx lineage cannot carry it (memory_queue.go:162). Stamped by
+	// BuildTaskLease/RecoverTaskLease from the engine's own field and re-seeded
+	// onto the handler's ctx by execution/runner.go.
+	//
+	// json:"-" is load-bearing, not cosmetic. This is a live pointer to a
+	// mutex-guarded struct; it is meaningful only inside the process that owns
+	// it. Encoding it would write a `{}` that decodes to a fresh empty
+	// collector on the far side -- no error, no panic, just a manifest that is
+	// silently always empty. Nothing is lost by omitting it: the collector only
+	// ever serves the in-process inner engine a map batch builds
+	// (execution/subgraph/subgraph.go:220), whose items never leave the process.
+	ArtifactUses *types.ArtifactUseCollector `json:"-"`
 	// TraceCarrier holds W3C traceparent/tracestate propagation headers so the
 	// runner can create properly-parented execution spans. Populated by the
 	// control plane when dispatching; nil when tracing is disabled or unsampled.

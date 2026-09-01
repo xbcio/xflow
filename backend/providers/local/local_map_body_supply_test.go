@@ -92,7 +92,7 @@ func TestMapBodyMemberReadsSupplyContent(t *testing.T) {
 								// without it CompileProjectedPackage never even looks at
 								// the visible-supply list, and the fix's absence would go
 								// undetected.
-								"rule": "$supplies." + supplyName,
+								"rule": "$supplies[\"" + supplyName + "\"]",
 							}},
 						},
 					},

@@ -17,11 +17,15 @@ import (
 // verdict it computed earlier; without a wait, that verdict lands in the
 // buffered channel after Execute has already returned a synthesized error, and
 // is discarded -- measured at 2.5% of runs on one machine, up to ~49% on a
-// loaded one. This cannot be closed completely: a bounded wait cannot
-// distinguish a handler that returns in a microsecond from one that never
-// returns. It is bounded by a constant, never by the handler, so the
-// slot-release guarantee this mechanism exists to provide still holds.
-const abandonGrace = 2 * time.Millisecond
+// loaded one. The original 2 ms window still lost 1--1.5% of verdicts under a
+// full-repository race run because a runnable handler was not scheduled within
+// that window. Twenty-five milliseconds absorbs that scheduler delay while
+// remaining a small, fixed addition to cancellation latency. This cannot be
+// closed completely: a bounded wait cannot distinguish a handler that returns
+// shortly after cancellation from one that never returns. The wait is bounded
+// by a constant, never by the handler, so the slot-release guarantee this
+// mechanism exists to provide still holds.
+const abandonGrace = 25 * time.Millisecond
 
 // TimeoutObserver receives node execution timeout and duration events from the
 // bounded-handler path. Implementations MUST be non-blocking and MUST avoid
@@ -51,8 +55,8 @@ type TimeoutObserver interface {
 // production wiring stays optional and a nil observer is safe.
 type noopTimeoutObserver struct{}
 
-func (noopTimeoutObserver) OnNodeExecutionTimeout(context.Context, string, string) {}
-func (noopTimeoutObserver) OnHandlerAbandoned(context.Context, string, float64)     {}
+func (noopTimeoutObserver) OnNodeExecutionTimeout(context.Context, string, string)   {}
+func (noopTimeoutObserver) OnHandlerAbandoned(context.Context, string, float64)      {}
 func (noopTimeoutObserver) OnHandlerDuration(context.Context, string, time.Duration) {}
 
 // Runner executes task leases using a handler registry.
@@ -140,6 +144,12 @@ func (r *Runner) Execute(ctx context.Context, lease *engine.TaskLease) (engine.T
 	if lease.Namespace != "" {
 		ctx = namespace.WithNamespace(ctx, lease.Namespace)
 	}
+	// Re-seed the host's artifact-use collector, which the local queue's worker
+	// dropped along with the rest of ctx (memory_queue.go:162). Same shape as
+	// the namespace injection above: the value travelled as lease data, and this
+	// is the last host-controlled point before handler.Execute. Nil for every
+	// task that is not part of a collected map batch, which is most of them.
+	ctx = types.ContextWithArtifactUseCollector(ctx, lease.ArtifactUses)
 	// Apply the credential resolver to the input the handler sees. This covers
 	// both the non-suspending Execute path and the suspending path
 	// (OnResume/PrepareSuspend). The resolver is a pure, idempotent closure;
@@ -232,7 +242,7 @@ func (r *Runner) Execute(ctx context.Context, lease *engine.TaskLease) (engine.T
 		//     while the goroutine is still between the send and the deferred
 		//     observation (measured at ~1% of invocations).
 		//   - The send must not be delayed. The ctx.Done() path below waits
-		//     only abandonGrace (2ms) for a handler that unblocked on
+		//     only abandonGrace for a handler that unblocked on
 		//     cancellation and is about to deliver a real verdict. Anything
 		//     between the handler returning and the send is spent out of that
 		//     budget, and observeDuration walks a metrics registry. Injecting
@@ -642,8 +652,8 @@ func newCancelError(cause cancelCause, budget time.Duration) error {
 //   - (a) the handler's error IS the cancellation, merely echoed -> reclassify.
 //     Detected by errors.Is(err, context.Canceled) || errors.Is(err,
 //     context.DeadlineExceeded). This matches:
-//       * the bare sentinel (ctx.Err() returned directly)
-//       * a %w-wrapped form (fmt.Errorf("node X: %w", ctx.Err()))
+//   - the bare sentinel (ctx.Err() returned directly)
+//   - a %w-wrapped form (fmt.Errorf("node X: %w", ctx.Err()))
 //   - (b) the handler's error is its OWN verdict, produced while the ctx was
 //     cancelled -> PRESERVED verbatim. A *types.ClassifiedError never matches
 //     the errors.Is probe: its Is() only returns true for ErrPermanent. So a

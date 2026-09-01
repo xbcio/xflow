@@ -186,6 +186,13 @@ type ControlPlane struct {
 	// provider when it exposes one, else nil. Exposed via WorkflowRegistry().
 	workflowRegistry backend.WorkflowRegistry
 
+	// workflowProjectionWorker drains projection intents committed atomically
+	// with workflow replacements. It is present whenever workflowRegistry
+	// implements WorkflowActivationProjectionOutbox. When entryManager is nil,
+	// its projector is a safe no-op, so committed intents are still acknowledged
+	// and drained.
+	workflowProjectionWorker *WorkflowActivationProjectionWorker
+
 	// supplyObserved is the optional sink of runner-reported applied supply
 	// hashes. Non-nil only when both Config.EntryActivationStore and
 	// Config.Supplies are provided. Exposed via SupplyObserved() for
@@ -205,19 +212,21 @@ type ControlPlane struct {
 	// apiserver can merge it into the scrape endpoint.
 	metricsInbox *MetricsInbox
 
-	lifecycleMu           sync.Mutex
-	started               bool
-	stopped               bool
-	leaderCancel          context.CancelFunc
-	sweeperCancel         context.CancelFunc
-	claimRecoveryCancel   context.CancelFunc
-	entryReconcilerCancel context.CancelFunc
-	supplyKeyCancel       context.CancelFunc
-	unbind                func()
+	lifecycleMu              sync.Mutex
+	started                  bool
+	stopped                  bool
+	leaderCancel             context.CancelFunc
+	sweeperCancel            context.CancelFunc
+	claimRecoveryCancel      context.CancelFunc
+	entryReconcilerCancel    context.CancelFunc
+	workflowProjectionCancel context.CancelFunc
+	supplyKeyCancel          context.CancelFunc
+	unbind                   func()
 	// wg tracks the background goroutines started by Start (leader campaign,
-	// sweeper, claim recovery, activation controller). Shutdown cancels their
-	// contexts and then waits for them to exit, bounded by the Shutdown context
-	// so a stuck goroutine cannot hang shutdown.
+	// sweeper, claim recovery, entry reconciliation, workflow projection, and
+	// supply-key rotation). Shutdown cancels their contexts and then waits for
+	// them to exit, bounded by the Shutdown context so a stuck goroutine cannot
+	// hang shutdown.
 	wg sync.WaitGroup
 }
 
@@ -385,6 +394,16 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 		entryNamespaces = recCfg.Namespaces
 	}
 
+	var workflowProjectionWorker *WorkflowActivationProjectionWorker
+	if outbox, ok := workflowRegistry.(backend.WorkflowActivationProjectionOutbox); ok {
+		workflowProjectionWorker = NewWorkflowActivationProjectionWorker(WorkflowActivationProjectionWorkerConfig{
+			Outbox:    outbox,
+			Projector: NewWorkflowActivationProjector(entryManager),
+			Leader:    elector,
+			Logger:    cfg.Logger,
+		})
+	}
+
 	// Supply hint/observed wiring: optional, and only meaningful once an
 	// EntryActivationStore exists (the hinter reads activations to find "which
 	// runner hosts which supply") AND a store.Supplies is configured (the source
@@ -454,23 +473,24 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 	grpcServer.core.metricsReportInterval = cfg.MetricsReportInterval
 
 	return &ControlPlane{
-		backend:                 cfg.Backend,
-		eng:                     eng,
-		runners:                 runners,
-		dispatcher:              dispatcher,
-		httpServer:              httpServer,
-		grpcServer:              grpcServer,
-		sweeper:                 sweeper,
-		elector:                 elector,
-		logger:                  cfg.Logger,
-		entryActivations:        cfg.EntryActivationStore,
-		entryManager:            entryManager,
-		entryReconciler:         entryReconciler,
-		workflowRegistry:        workflowRegistry,
-		supplyObserved:          supplyObserved,
-		supplyEncryptor:         supplyEnc,
-		supplyKeyRotationPeriod: cfg.SupplyKeyRotationPeriod,
-		metricsInbox:            metricsInbox,
+		backend:                  cfg.Backend,
+		eng:                      eng,
+		runners:                  runners,
+		dispatcher:               dispatcher,
+		httpServer:               httpServer,
+		grpcServer:               grpcServer,
+		sweeper:                  sweeper,
+		elector:                  elector,
+		logger:                   cfg.Logger,
+		entryActivations:         cfg.EntryActivationStore,
+		entryManager:             entryManager,
+		entryReconciler:          entryReconciler,
+		workflowRegistry:         workflowRegistry,
+		workflowProjectionWorker: workflowProjectionWorker,
+		supplyObserved:           supplyObserved,
+		supplyEncryptor:          supplyEnc,
+		supplyKeyRotationPeriod:  cfg.SupplyKeyRotationPeriod,
+		metricsInbox:             metricsInbox,
 	}, nil
 }
 
@@ -557,6 +577,15 @@ func (cp *ControlPlane) EntryActivationManager() *EntryActivationManager {
 // derive entry activations.
 func (cp *ControlPlane) WorkflowRegistry() backend.WorkflowRegistry {
 	return cp.workflowRegistry
+}
+
+// WorkflowActivationProjectionWorker returns the durable replacement
+// projection worker, or nil when the registry does not expose the projection
+// outbox capability. Without an activation manager, its projector is a safe
+// no-op and the worker still acknowledges and drains intents. The apiserver
+// uses the same worker for its low-latency fast path.
+func (cp *ControlPlane) WorkflowActivationProjectionWorker() *WorkflowActivationProjectionWorker {
+	return cp.workflowProjectionWorker
 }
 
 // RunnerDirectory exposes the runner directory for management/observability
@@ -648,6 +677,21 @@ func (cp *ControlPlane) Start(ctx context.Context) error {
 		go func() {
 			defer cp.wg.Done()
 			cp.runEntryReconciler(recCtx)
+		}()
+	}
+
+	// Recover registry commits whose activation projection was interrupted by
+	// a process crash. The worker runs whenever the registry exposes the outbox;
+	// a nil activation manager makes projection a safe no-op while intents are
+	// still acknowledged and drained. Run immediately on startup and periodically
+	// thereafter; each pass is leader-gated inside the worker.
+	if cp.workflowProjectionWorker != nil {
+		projectionCtx, projectionCancel := context.WithCancel(context.Background())
+		cp.workflowProjectionCancel = projectionCancel
+		cp.wg.Add(1)
+		go func() {
+			defer cp.wg.Done()
+			cp.workflowProjectionWorker.Run(projectionCtx)
 		}()
 	}
 
@@ -753,9 +797,10 @@ func (cp *ControlPlane) runLeaderCampaign(ctx context.Context) {
 	}
 }
 
-// Shutdown stops the sweeper, resigns leadership (if held), and unwinds the
-// backend queue binding. It attempts every step even if an earlier one
-// fails, aggregating all errors encountered.
+// Shutdown cancels all background workers, including workflow activation
+// projection recovery, resigns leadership (if held), and unwinds the backend
+// queue binding. It attempts every step even if an earlier one fails,
+// aggregating all errors encountered.
 func (cp *ControlPlane) Shutdown(ctx context.Context) error {
 	var errs []error
 	cp.lifecycleMu.Lock()
@@ -772,6 +817,9 @@ func (cp *ControlPlane) Shutdown(ctx context.Context) error {
 	if cp.entryReconcilerCancel != nil {
 		cp.entryReconcilerCancel()
 	}
+	if cp.workflowProjectionCancel != nil {
+		cp.workflowProjectionCancel()
+	}
 	if cp.supplyKeyCancel != nil {
 		cp.supplyKeyCancel()
 	}
@@ -780,8 +828,8 @@ func (cp *ControlPlane) Shutdown(ctx context.Context) error {
 	}
 	// Wait for the background goroutines to observe their cancelled contexts
 	// and return, but bound the wait by ctx so a stuck goroutine cannot hang
-	// shutdown. sweeper.Run exits when its sleepFunc returns ctx.Err(); the
-	// leader and claim-recovery loops select on ctx.Done().
+	// shutdown. The sweeper, leader, claim-recovery, entry-reconciliation,
+	// workflow-projection, and supply-key loops all observe their contexts.
 	waitDone := make(chan struct{})
 	go func() { cp.wg.Wait(); close(waitDone) }()
 	select {

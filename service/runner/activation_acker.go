@@ -34,6 +34,7 @@ type activationAckKey struct {
 	WorkflowID      string
 	WorkflowVersion string
 	EntryUnitID     string
+	ReplicaIndex    uint32
 }
 
 // activationAcker sends ActivationAck for failed activate directives to the
@@ -43,9 +44,9 @@ type activationAckKey struct {
 // call must happen off that goroutine or it would delay every other directive
 // in the batch and push back the runner's next heartbeat tick.
 //
-// acked remembers, per (WorkflowID, WorkflowVersion, EntryUnitID), the highest
-// generation already acked. Generation is monotonic within a single
-// EntryActivationKey (which includes version) and assigned by the reconciler on
+// acked remembers, per (WorkflowID, WorkflowVersion, EntryUnitID, ReplicaIndex),
+// the highest generation already acked. Generation is monotonic within a single
+// EntryActivationKey (which includes version and replica) and assigned by the reconciler on
 // every redispatch, so a supply that stays unavailable makes the runner
 // re-attempt (and re-fail) the SAME generation on every heartbeat — deduping
 // on it turns that into exactly one ack per redispatch instead of one per
@@ -91,12 +92,17 @@ func (a *activationAcker) shouldAck(key activationAckKey, generation uint64) boo
 }
 
 // ackFailed reports one failed activate directive, deduped per
-// (WorkflowID, WorkflowVersion, EntryUnitID, Generation) and sent asynchronously
+// (WorkflowID, WorkflowVersion, EntryUnitID, ReplicaIndex, Generation) and sent asynchronously
 // so the caller (ActivationTracker's callback, invoked from ProcessDirectives)
 // never blocks on network I/O. err.Error() is the only thing that travels in
 // the ack body — never the directive's Params or any supply content.
 func (a *activationAcker) ackFailed(sessionID string, d protocol.ActivateDirective, err error) {
-	key := activationAckKey{WorkflowID: d.WorkflowID, WorkflowVersion: d.WorkflowVersion, EntryUnitID: d.EntryUnitID}
+	key := activationAckKey{
+		WorkflowID:      d.WorkflowID,
+		WorkflowVersion: d.WorkflowVersion,
+		EntryUnitID:     d.EntryUnitID,
+		ReplicaIndex:    d.ReplicaIndex,
+	}
 	if !a.shouldAck(key, d.Generation) {
 		return
 	}
@@ -107,6 +113,7 @@ func (a *activationAcker) ackFailed(sessionID string, d protocol.ActivateDirecti
 		WorkflowID:      d.WorkflowID,
 		WorkflowVersion: d.WorkflowVersion,
 		GroupID:         d.EntryUnitID,
+		ReplicaIndex:    d.ReplicaIndex,
 		Generation:      d.Generation,
 		Status:          protocol.ActivationStatusFailed,
 		Error:           err.Error(),

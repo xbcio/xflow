@@ -28,6 +28,7 @@ func keyOfActivation(a engine.EntryActivation) engine.EntryActivationKey {
 		WorkflowID:      a.WorkflowID,
 		WorkflowVersion: a.WorkflowVersion,
 		EntryUnitID:     a.EntryUnitID,
+		ReplicaIndex:    a.ReplicaIndex,
 	}
 }
 

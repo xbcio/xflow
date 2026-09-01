@@ -90,9 +90,10 @@ func (s *APIServer) loadTLS() (*tls.Config, error) {
 }
 
 // Run starts the APIServer's transports (gRPC, metrics, HTTP) and blocks until
-// ctx is cancelled or a listener fails. On exit it drains in-flight requests
-// in the order: HTTP server, gRPC server, metrics server, then the underlying
-// control plane. Each step runs even if an earlier step errored.
+// ctx is cancelled or a listener fails. On exit it first stops advertising
+// readiness, then drains in-flight requests in the order: HTTP server, gRPC
+// server, metrics server, and finally the underlying control plane. Each step
+// runs even if an earlier step errored.
 func (s *APIServer) Run(ctx context.Context) error {
 	if err := s.Start(ctx); err != nil {
 		return err
@@ -197,6 +198,13 @@ func (s *APIServer) Run(ctx context.Context) error {
 			earlyCancel()
 			return err
 		}
+	}
+
+	// Stop advertising readiness before the HTTP listener begins draining, but
+	// keep the control plane alive until all transport drains have completed.
+	// Calling s.Shutdown here would tear down the control plane too early.
+	if s.readiness != nil {
+		s.readiness.markShuttingDown()
 	}
 
 	// Graceful shutdown: each step runs regardless of earlier errors.

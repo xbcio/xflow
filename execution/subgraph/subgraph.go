@@ -8,6 +8,7 @@ package subgraph
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -86,9 +87,10 @@ type Result struct {
 
 // Executor runs sub-graph packages on a fresh embedded backend per execution.
 type Executor struct {
-	registry   *execution.Registry
-	cache      *PackageCache
-	newBackend func() Backend
+	registry              *execution.Registry
+	cache                 *PackageCache
+	newBackend            func() Backend
+	mapConcurrencyLimiter *MapConcurrencyLimiter
 	// hooks observes the inner engine's node lifecycle. Nil by default: the
 	// inner engine is also what the SDK's in-process map body runs on, and that
 	// path has no metrics registry to report to.
@@ -110,6 +112,13 @@ type ExecutorOption func(*Executor)
 // same counters would inflate them by the fan-out width.
 func WithHooks(h engine.Hooks) ExecutorOption {
 	return func(e *Executor) { e.hooks = h }
+}
+
+// WithMapConcurrencyLimiter installs shared active-batch and active-item
+// budgets for maps executed through this executor. The same limiter must be
+// supplied to every executor owned by one runner.
+func WithMapConcurrencyLimiter(limiter *MapConcurrencyLimiter) ExecutorOption {
+	return func(e *Executor) { e.mapConcurrencyLimiter = limiter }
 }
 
 // NewExecutor creates a sub-graph executor. reg resolves member node handlers
@@ -196,6 +205,14 @@ func (e *Executor) Execute(ctx context.Context, req Request) (Result, error) {
 		// not the context lineage, so it rides as an engine option that clamps every
 		// lease the inner engine issues.
 		engine.WithOuterDeadline(req.Deadline),
+	}
+	// The collector was seeded on ctx by whoever called us (engine/expand.go for
+	// an in-process batch, service/runner/subgraph_runtime.go for a durable one).
+	// From here down it must stop being a ctx value: the inner engine's queue
+	// resets ctx before the handler runs. Convert it to an engine option now, on
+	// this side of the boundary, and the engine stamps it onto every inner lease.
+	if c := types.ArtifactUseCollectorFrom(ctx); c != nil {
+		engineOpts = append(engineOpts, engine.WithArtifactUseCollector(c))
 	}
 	if req.SuspendDisabled {
 		engineOpts = append(engineOpts, engine.WithSuspendDisabled(nil))
@@ -289,9 +306,20 @@ func (e *Executor) Execute(ctx context.Context, req Request) (Result, error) {
 	case types.ExecutionStatusCanceled:
 		result.Outcome = OutcomeCanceled
 	default:
-		if execCtx.Err() != nil {
-			result.Outcome = OutcomeTimeout
-			result.Error = "deadline exceeded"
+		if err := execCtx.Err(); err != nil {
+			// Canceled and DeadlineExceeded are different verdicts and must not
+			// share a message. Reporting a cancellation as "deadline exceeded"
+			// sends every reader looking for a timeout that never happened -- and
+			// the two have opposite fixes: a deadline says the work was too slow,
+			// a cancel says something upstream tore the context down while the
+			// work was still viable.
+			if errors.Is(err, context.Canceled) {
+				result.Outcome = OutcomeCanceled
+				result.Error = "canceled"
+			} else {
+				result.Outcome = OutcomeTimeout
+				result.Error = "deadline exceeded"
+			}
 		} else {
 			result.Outcome = OutcomeFailed
 			result.Error = fmt.Sprintf("unexpected status: %s", finalStatus)

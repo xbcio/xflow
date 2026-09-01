@@ -42,6 +42,9 @@ type SeedExecutionRequest struct {
 	// not driven by an EntryActivation) — that path is keyed on the absence of
 	// an activation record, never on a magic zero value.
 	Generation uint64 `json:"generation,omitempty"`
+	// ReplicaIndex selects the sibling activation whose generation must own this
+	// seed. It is not part of the admission key or result hash.
+	ReplicaIndex uint32 `json:"replica_index,omitempty"`
 }
 
 // SeedExecutionResponse is the on-wire response for a seed request. State is

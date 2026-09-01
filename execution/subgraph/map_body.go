@@ -71,12 +71,32 @@ func (x *MapBodyExecutor) ExecuteBatchBody(ctx context.Context, req engine.Batch
 	if req.Body == nil {
 		return nil, errors.New("batch body request carries no package")
 	}
-	if req.BodyConcurrency > 1 && len(req.Items) > 1 {
-		return x.executeConcurrently(ctx, req)
+	if len(req.Items) == 0 {
+		return []engine.BatchItemResult{}, nil
+	}
+
+	// Admit the batch separately from its items. The batch permit prevents an
+	// unbounded number of expensive batches from making partial progress, while
+	// per-item permits below let admitted batches overlap instead of one batch
+	// reserving every runner slot while it is between item executions.
+	releaseBatch, err := x.executor.mapConcurrencyLimiter.acquireBatch(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer releaseBatch()
+
+	width := x.executor.mapConcurrencyLimiter.effectiveItemWidth(mapBatchWidth(req))
+	if width > 1 {
+		return x.executeConcurrently(ctx, req, width)
 	}
 	results := make([]engine.BatchItemResult, 0, len(req.Items))
 	for pos, item := range req.Items {
+		releaseItem, err := x.executor.mapConcurrencyLimiter.acquireItem(ctx)
+		if err != nil {
+			return nil, err
+		}
 		itemResult, err := x.runItem(ctx, req, item, globalIndex(req, pos))
+		releaseItem()
 		if err != nil {
 			// The body could not be RUN — compile failure, package validation,
 			// backend construction. That is a fault of the whole batch, not of
@@ -152,9 +172,7 @@ func (x *MapBodyExecutor) runItem(ctx context.Context, req engine.BatchBodyReque
 // A "the body could not be RUN" error (compile failure, package validation) is
 // the whole batch's failure, so the first one wins and cancels the rest rather
 // than being recorded per item: every remaining item would fail identically.
-func (x *MapBodyExecutor) executeConcurrently(ctx context.Context, req engine.BatchBodyRequest) ([]engine.BatchItemResult, error) {
-	limit := min(req.BodyConcurrency, len(req.Items))
-
+func (x *MapBodyExecutor) executeConcurrently(ctx context.Context, req engine.BatchBodyRequest, limit int) ([]engine.BatchItemResult, error) {
 	results := make([]engine.BatchItemResult, len(req.Items))
 	// started marks which slots actually ran. A fail-fast stop leaves the tail
 	// untouched, and those slots must be dropped rather than reported as
@@ -177,18 +195,36 @@ func (x *MapBodyExecutor) executeConcurrently(ctx context.Context, req engine.Ba
 	)
 
 	for pos, item := range req.Items {
-		// Admission gate: acquire a ticket first, then re-check under the lock.
-		// Checking before acquiring would admit every item at once.
+		// Admission has two levels. The local ticket enforces this map node's
+		// body_concurrency; the runner-scoped item permit bounds all admitted
+		// batches together. Acquire both before marking the item started so a
+		// fail-fast batch does not report queued work as executed.
 		select {
 		case tickets <- struct{}{}:
 		case <-runCtx.Done():
-			// The batch aborted while this item waited for a ticket. It was never
-			// started, so its slot stays unset.
+			break
+		}
+		if runCtx.Err() != nil {
+			break
+		}
+		releaseItem, acquireErr := x.executor.mapConcurrencyLimiter.acquireItem(runCtx)
+		if acquireErr != nil {
+			<-tickets
+			if ctx.Err() != nil {
+				mu.Lock()
+				if runErr == nil {
+					runErr = ctx.Err()
+				}
+				mu.Unlock()
+			}
+			break
 		}
 		mu.Lock()
 		aborted := stop || runErr != nil
 		mu.Unlock()
 		if aborted || runCtx.Err() != nil {
+			releaseItem()
+			<-tickets
 			break
 		}
 
@@ -197,6 +233,7 @@ func (x *MapBodyExecutor) executeConcurrently(ctx context.Context, req engine.Ba
 		go func(pos int, item any) {
 			defer wg.Done()
 			defer func() { <-tickets }()
+			defer releaseItem()
 
 			itemResult, err := x.runItem(runCtx, req, item, globalIndex(req, pos))
 
@@ -232,6 +269,13 @@ func (x *MapBodyExecutor) executeConcurrently(ctx context.Context, req engine.Ba
 		out = append(out, results[pos])
 	}
 	return out, nil
+}
+
+// mapBatchWidth is the most item workers this batch may use. The runner-scoped
+// item limiter applies its own capacity clamp independently.
+func mapBatchWidth(req engine.BatchBodyRequest) int {
+	width := max(req.BodyConcurrency, 1)
+	return min(width, len(req.Items))
 }
 
 // globalIndex turns a position within this batch into the item's position in the// map node's whole items array. batch_size is a durability policy, so $index must

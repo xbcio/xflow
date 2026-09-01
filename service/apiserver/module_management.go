@@ -1,17 +1,22 @@
 package apiserver
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/observability/metrics"
 	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/types"
+	"github.com/redis/go-redis/v9"
 )
 
 // managementModule mounts the ops management HTTP API: leader status,
@@ -38,6 +43,7 @@ type managementModule struct {
 	// builds a fresh manager per request with nil metrics.
 	dlMgr     *control.DeadLetterManager
 	dlMgrOnce sync.Once
+	ready     ReadinessChecker
 }
 
 func newManagementModule(cp *control.ControlPlane) *managementModule {
@@ -92,6 +98,109 @@ type readyResponse struct {
 	Ready  bool `json:"ready"`
 	Leader bool `json:"leader"`
 }
+
+// ReadinessChecker is the narrow probe contract used by /readyz. Implementations
+// should verify only dependencies required by this API server replica to accept
+// traffic, and must return quickly when ctx is canceled.
+type ReadinessChecker interface {
+	CheckReadiness(ctx context.Context) error
+}
+
+type readinessFunc func(context.Context) error
+
+func (f readinessFunc) CheckReadiness(ctx context.Context) error { return f(ctx) }
+
+type compositeReadinessChecker []ReadinessChecker
+
+func (c compositeReadinessChecker) CheckReadiness(ctx context.Context) error {
+	for _, checker := range c {
+		if checker == nil {
+			continue
+		}
+		if err := checker.CheckReadiness(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+var errAPIServerShuttingDown = errors.New("apiserver: shutting down")
+
+type apiServerReadiness struct {
+	shuttingDown atomic.Bool
+	checker      ReadinessChecker
+}
+
+func newAPIServerReadiness(cp *control.ControlPlane, cfg Config) *apiServerReadiness {
+	checks := make([]ReadinessChecker, 0, 3)
+	checks = appendUniqueReadinessChecker(checks, cfg.ReadinessChecker)
+	if checker, ok := cfg.Store.(ReadinessChecker); ok {
+		checks = appendUniqueReadinessChecker(checks, checker)
+	}
+	checks = appendUniqueReadinessChecker(checks, redisDependencyReadiness(cp))
+	return &apiServerReadiness{checker: compositeReadinessChecker(checks)}
+}
+
+func appendUniqueReadinessChecker(checks []ReadinessChecker, checker ReadinessChecker) []ReadinessChecker {
+	if checker == nil {
+		return checks
+	}
+	for _, existing := range checks {
+		if sameReadinessChecker(existing, checker) {
+			return checks
+		}
+	}
+	return append(checks, checker)
+}
+
+func sameReadinessChecker(a, b ReadinessChecker) bool {
+	typ := reflect.TypeOf(a)
+	return typ != nil && typ == reflect.TypeOf(b) && typ.Comparable() && a == b
+}
+
+func (r *apiServerReadiness) CheckReadiness(ctx context.Context) error {
+	if r == nil {
+		return nil
+	}
+	if r.shuttingDown.Load() {
+		return errAPIServerShuttingDown
+	}
+	if r.checker == nil {
+		return nil
+	}
+	return r.checker.CheckReadiness(ctx)
+}
+
+func (r *apiServerReadiness) markShuttingDown() {
+	if r != nil {
+		r.shuttingDown.Store(true)
+	}
+}
+
+type redisReadinessProvider interface {
+	RedisClient() redis.Cmdable
+}
+
+func redisDependencyReadiness(cp *control.ControlPlane) ReadinessChecker {
+	if cp == nil || cp.Backend() == nil {
+		return nil
+	}
+	provider, ok := cp.Backend().(redisReadinessProvider)
+	if !ok {
+		return nil
+	}
+	client := provider.RedisClient()
+	if client == nil {
+		return readinessFunc(func(context.Context) error {
+			return errors.New("redis client unavailable")
+		})
+	}
+	return readinessFunc(func(ctx context.Context) error {
+		return client.Ping(ctx).Err()
+	})
+}
+
+const readinessCheckTimeout = 2 * time.Second
 
 // handleLeader reports whether this replica currently holds leadership. GET
 // only; any other method yields 405.
@@ -155,15 +264,27 @@ func (m *managementModule) handleHealthz(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// handleReadyz is a readiness probe. A process is ready as long as it is
-// serving; leader status is reported alongside so callers can route writes to
-// the leader if they choose. Non-leader replicas remain ready for the
-// read-only management surface.
+// handleReadyz is a readiness probe. Non-leader replicas remain ready: the
+// leader bit is informational, not part of the readiness decision. Readiness
+// fails closed only when this process is shutting down or an explicitly
+// checkable required dependency reports an error. Legacy embedded/local setups
+// with no checkable dependency remain compatible and report ready while serving.
 func (m *managementModule) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodGet) {
 		return
 	}
-	writeJSON(w, http.StatusOK, readyResponse{Ready: true, Leader: m.cp.IsLeader()})
+	ctx, cancel := context.WithTimeout(r.Context(), readinessCheckTimeout)
+	defer cancel()
+
+	ready := true
+	status := http.StatusOK
+	if m.ready != nil {
+		if err := m.ready.CheckReadiness(ctx); err != nil {
+			ready = false
+			status = http.StatusServiceUnavailable
+		}
+	}
+	writeJSON(w, status, readyResponse{Ready: ready, Leader: m.cp.IsLeader()})
 }
 
 // deadLetterListResponse is the JSON shape for a dead-letter list page.

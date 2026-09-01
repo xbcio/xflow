@@ -10,24 +10,24 @@ type WorkflowDef struct {
 	// Namespace is the server-authoritative isolation scope and workflow
 	// namespace. API handlers must inject or validate it against the
 	// authenticated principal; clients cannot use it to cross namespaces.
-	Namespace      string                    `json:"namespace,omitempty"`
-	Name           string                    `json:"name,omitempty"`
-	Version        string                    `json:"version,omitempty"`
-	Description    string                    `json:"description,omitempty"`
-	Spec           string                    `json:"spec,omitempty"`
-	RunnerSelector *RunnerSelector           `json:"runner_selector,omitempty"`
-	Context        *WorkflowContext          `json:"context,omitempty"`
-	Settings       *WorkflowSettings         `json:"settings,omitempty"`
-	Options        *WorkflowOptions          `json:"options,omitempty"`
-	Credentials    map[string]CredentialDef  `json:"credentials,omitempty"`
-	Params         map[string]ParamDef       `json:"params,omitempty"`
-	NodeTemplates  map[string]NodeTemplate   `json:"node_templates,omitempty"`
-	Nodes          []NodeDef                 `json:"nodes,omitempty"`
-	Groups         []GroupDef                `json:"groups,omitempty"`
-	Connections    Connections               `json:"connections,omitempty"`
-	Outputs        map[string]WorkflowOutput `json:"outputs,omitempty"`
-	PinData        map[string]any            `json:"pin_data,omitempty"`
-	DependencyEdges []DependencyEdge         `json:"dependency_edges,omitempty"`
+	Namespace       string                    `json:"namespace,omitempty"`
+	Name            string                    `json:"name,omitempty"`
+	Version         string                    `json:"version,omitempty"`
+	Description     string                    `json:"description,omitempty"`
+	Spec            string                    `json:"spec,omitempty"`
+	RunnerSelector  *RunnerSelector           `json:"runner_selector,omitempty"`
+	Context         *WorkflowContext          `json:"context,omitempty"`
+	Settings        *WorkflowSettings         `json:"settings,omitempty"`
+	Options         *WorkflowOptions          `json:"options,omitempty"`
+	Credentials     map[string]CredentialDef  `json:"credentials,omitempty"`
+	Params          map[string]ParamDef       `json:"params,omitempty"`
+	NodeTemplates   map[string]NodeTemplate   `json:"node_templates,omitempty"`
+	Nodes           []NodeDef                 `json:"nodes,omitempty"`
+	Groups          []GroupDef                `json:"groups,omitempty"`
+	Connections     Connections               `json:"connections,omitempty"`
+	Outputs         map[string]WorkflowOutput `json:"outputs,omitempty"`
+	PinData         map[string]any            `json:"pin_data,omitempty"`
+	DependencyEdges []DependencyEdge          `json:"dependency_edges,omitempty"`
 }
 
 // WorkflowOptions controls advanced workflow-level runtime behavior.
@@ -100,6 +100,12 @@ type NodeDef struct {
 	// limit and must be written explicitly. It bounds one attempt, not the sum
 	// of retries -- each retry attempt gets the full budget.
 	Timeout time.Duration `json:"timeout,omitempty"`
+	// ActivationReplicas is the desired number of distinct runners that host a
+	// trigger entry. Zero preserves the legacy single-activation behavior; one is
+	// therefore equivalent to zero. Values greater than one are useful for
+	// partitioned sources such as Kafka, where every activation joins the same
+	// consumer group. Group members must configure this on GroupDef instead.
+	ActivationReplicas uint32 `json:"activation_replicas,omitempty"`
 }
 
 type RunnerSelectorMode string

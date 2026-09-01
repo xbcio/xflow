@@ -167,3 +167,155 @@ func TestCoreEntrySeedGenerationFence_ForgedAheadRejected(t *testing.T) {
 		t.Fatalf("forged-ahead new key must not create an execution, inspect err = %v", err)
 	}
 }
+
+func TestCoreEntrySeedGenerationFence_UnknownReplicaRejected(t *testing.T) {
+	ctx := namespace.WithNamespace(context.Background(), namespace.Default)
+	backend := local.New()
+	eng := engine.New(backend.State(), backend.Queue())
+	activations := NewMemoryEntryActivationStore()
+	core := &Core{engine: eng, entryActivations: activations}
+
+	g := entrySeedTestGraph(t)
+	gm := g.Groups()[0]
+	act := engine.EntryActivation{
+		Namespace:       namespace.Default,
+		WorkflowID:      "wf-test",
+		WorkflowVersion: "v1",
+		EntryUnitID:     gm.Name,
+		ReplicaIndex:    0,
+		PackageHash:     "pkg-1",
+		Desired:         true,
+	}
+	if err := activations.Upsert(ctx, act); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	key := engine.EntryActivationKey{
+		Namespace:       act.Namespace,
+		WorkflowID:      act.WorkflowID,
+		WorkflowVersion: act.WorkflowVersion,
+		EntryUnitID:     act.EntryUnitID,
+		ReplicaIndex:    act.ReplicaIndex,
+	}
+	if ok, err := activations.Assign(ctx, key, "runner-1", "sess-1", 2, time.Now().Add(time.Minute)); err != nil || !ok {
+		t.Fatalf("Assign gen2: ok=%v err=%v", ok, err)
+	}
+
+	newReq := func(admissionKey string, replica uint32, gen uint64) engine.SeedExecutionFromEntryRequest {
+		outcome := engine.GroupOutcomeSuccess
+		exits := []engine.BoundaryExit{{NodeName: "body", Port: "main", Data: map[string]any{"x": 1}}}
+		return engine.SeedExecutionFromEntryRequest{
+			AdmissionKey:    engine.AdmissionKey(admissionKey),
+			WorkflowID:      "wf-test",
+			WorkflowVersion: "v1",
+			EntryUnitID:     gm.Name,
+			EntryUnitIdx:    gm.UnitIdx,
+			Graph:           g,
+			Outcome:         outcome,
+			Exits:           exits,
+			ResultHash:      engine.ComputeResultHash(outcome, exits),
+			Generation:      gen,
+			ReplicaIndex:    replica,
+		}
+	}
+
+	forged := newReq("k-forged-replica", 99, 2)
+	if _, err := core.SeedExecutionFromEntry(ctx, forged); !errors.Is(err, ErrStaleGeneration) {
+		t.Fatalf("unknown replica new key: err = %v, want ErrStaleGeneration", err)
+	}
+	if _, err := eng.Inspect(ctx, engine.DeterministicExecutionID(forged.AdmissionKey)); !errors.Is(err, engine.ErrExecutionNotFound) {
+		t.Fatalf("unknown replica must not create an execution, inspect err = %v", err)
+	}
+
+	accepted := newReq("k-cross-replica-duplicate", 0, 2)
+	resp, err := core.SeedExecutionFromEntry(ctx, accepted)
+	if err != nil {
+		t.Fatalf("known replica seed: %v", err)
+	}
+	forgedDuplicate := newReq("k-cross-replica-duplicate", 99, math.MaxUint64)
+	dup, err := core.SeedExecutionFromEntry(ctx, forgedDuplicate)
+	if err != nil {
+		t.Fatalf("unknown replica duplicate: %v", err)
+	}
+	if !dup.Duplicate || dup.ExecutionID != resp.ExecutionID {
+		t.Fatalf("unknown replica duplicate = %+v, want duplicate of %q", dup, resp.ExecutionID)
+	}
+}
+
+func TestCoreEntrySeedGenerationFence_SiblingsUseOwnGeneration(t *testing.T) {
+	ctx := namespace.WithNamespace(context.Background(), namespace.Default)
+	backend := local.New()
+	eng := engine.New(backend.State(), backend.Queue())
+	activations := NewMemoryEntryActivationStore()
+	core := &Core{engine: eng, entryActivations: activations}
+
+	g := entrySeedTestGraph(t)
+	gm := g.Groups()[0]
+	for replica, generation := range map[uint32]uint64{0: 2, 1: 7} {
+		act := engine.EntryActivation{
+			Namespace:       namespace.Default,
+			WorkflowID:      "wf-test",
+			WorkflowVersion: "v1",
+			EntryUnitID:     gm.Name,
+			ReplicaIndex:    replica,
+			PackageHash:     "pkg-1",
+			Desired:         true,
+		}
+		if err := activations.Upsert(ctx, act); err != nil {
+			t.Fatalf("Upsert replica %d: %v", replica, err)
+		}
+		key := engine.EntryActivationKey{
+			Namespace:       act.Namespace,
+			WorkflowID:      act.WorkflowID,
+			WorkflowVersion: act.WorkflowVersion,
+			EntryUnitID:     act.EntryUnitID,
+			ReplicaIndex:    replica,
+		}
+		if ok, err := activations.Assign(ctx, key, "runner", "session", generation, time.Now().Add(time.Minute)); err != nil || !ok {
+			t.Fatalf("Assign replica %d gen%d: ok=%v err=%v", replica, generation, ok, err)
+		}
+	}
+
+	newReq := func(admissionKey string, replica uint32, gen uint64) engine.SeedExecutionFromEntryRequest {
+		outcome := engine.GroupOutcomeSuccess
+		exits := []engine.BoundaryExit{{NodeName: "body", Port: "main", Data: map[string]any{"x": 1}}}
+		return engine.SeedExecutionFromEntryRequest{
+			AdmissionKey:    engine.AdmissionKey(admissionKey),
+			WorkflowID:      "wf-test",
+			WorkflowVersion: "v1",
+			EntryUnitID:     gm.Name,
+			EntryUnitIdx:    gm.UnitIdx,
+			Graph:           g,
+			Outcome:         outcome,
+			Exits:           exits,
+			ResultHash:      engine.ComputeResultHash(outcome, exits),
+			Generation:      gen,
+			ReplicaIndex:    replica,
+		}
+	}
+
+	for _, tc := range []struct {
+		name       string
+		replica    uint32
+		generation uint64
+		wantStale  bool
+	}{
+		{name: "replica zero own generation", replica: 0, generation: 2},
+		{name: "replica one own generation", replica: 1, generation: 7},
+		{name: "replica zero sibling generation", replica: 0, generation: 7, wantStale: true},
+		{name: "replica one sibling generation", replica: 1, generation: 2, wantStale: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := newReq("k-"+tc.name, tc.replica, tc.generation)
+			_, err := core.SeedExecutionFromEntry(ctx, req)
+			if tc.wantStale {
+				if !errors.Is(err, ErrStaleGeneration) {
+					t.Fatalf("err = %v, want ErrStaleGeneration", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+		})
+	}
+}

@@ -8,7 +8,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/xbcio/xflow/service/protocol"
 	"github.com/prometheus/client_golang/prometheus"
@@ -55,16 +54,13 @@ import (
 func TestReporterDropsAnOversizedSnapshotLocallyAndKeepsReporting(t *testing.T) {
 	gatherer := &swappableGatherer{inner: oversizedGatherer(t)}
 	client := &fakeMetricsClient{}
-	ticks := newManualTicks()
 	logs := &recordingHandler{}
 	r := NewMetricsReporter(MetricsReporterConfig{
 		Gatherer: gatherer,
 		Client:   client,
 		RunnerID: "runner-a",
-		Interval: time.Hour, // never fires on its own; ticks.fire drives it
 		Logger:   slog.New(logs),
 	})
-	r.after = ticks.after
 
 	body, err := r.encode()
 	if err != nil {
@@ -77,17 +73,10 @@ func TestReporterDropsAnOversizedSnapshotLocallyAndKeepsReporting(t *testing.T) 
 			len(body), protocol.MaxRunnerMetricsBytes)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go r.Run(ctx, "session-1")
-
-	// Round one: oversized. Wait for the loop to come back around and re-arm
-	// the timer rather than reading the client immediately — "nothing was
-	// shipped" read at an arbitrary moment is true before the round even
-	// starts, so it has to be read after the round has demonstrably finished.
-	waitForTimerRequests(t, ticks, 1)
-	ticks.fire(t)
-	waitForTimerRequests(t, ticks, 2)
+	// Round one: oversized. Invoke the round synchronously so this correctness
+	// assertion does not also impose a wall-clock budget on gathering and gzip
+	// under -race and atomic coverage. Run's timer loop is covered separately.
+	r.reportOnce(t.Context(), "session-1")
 
 	if got := client.snapshot(); len(got) != 0 {
 		t.Fatalf("oversized round shipped %d reports, want 0: the server answers "+
@@ -107,8 +96,8 @@ func TestReporterDropsAnOversizedSnapshotLocallyAndKeepsReporting(t *testing.T) 
 	// Round two: back under the limit. The same reporter must ship again, so a
 	// mutation that turns the drop into a stop cannot pass.
 	gatherer.swap(testGatherer(t))
-	ticks.fire(t)
-	got := waitForReports(t, client, 1)
+	r.reportOnce(t.Context(), "session-1")
+	got := client.snapshot()
 	if len(got) != 1 {
 		t.Fatalf("reports after recovery = %d, want exactly 1", len(got))
 	}

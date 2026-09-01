@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/xbcio/xflow/engine/graph"
@@ -307,6 +308,10 @@ func (e *Engine) runBatchBody(ctx context.Context, g *graph.Graph, lease *TaskLe
 	if err != nil {
 		return nil, batchBodyError(lease.Task.NodeName, batchIndex, err)
 	}
+	// Seeded here, immediately around the body run, so the collector's lifetime
+	// is exactly one batch: the same ctx goes into the body and the same
+	// collector is read out below.
+	ctx, uses := types.WithArtifactUseCollector(ctx)
 	itemResults, err := e.batchBodyExecutor.ExecuteBatchBody(ctx, BatchBodyRequest{
 		ExecutionID:     string(lease.Task.ExecutionID),
 		ParentNode:      lease.Task.NodeName,
@@ -332,7 +337,7 @@ func (e *Engine) runBatchBody(ctx context.Context, g *graph.Graph, lease *TaskLe
 	}
 
 	e.observeItemFailures(g.Name(), lease.Task.NodeName, itemResults)
-	result, failure := BatchResultForCommit(itemResults, continueOnError)
+	result, failure := BatchResultForCommit(itemResults, continueOnError, uses.Uses())
 	if failure != nil {
 		result[batchErrorKey] = failure.Error()
 	}
@@ -569,6 +574,41 @@ func flattenBatchResults(results []map[string]any) []any {
 	return flat
 }
 
+// mergeBatchArtifacts unions the per-batch artifact attestations into the one
+// list the map node reports.
+//
+// It is the artifact analogue of flattenBatchResults, and it exists for the
+// same reason: batch_size must stay invisible to semantics. The same items
+// split across two batches produce two lists; the map node must report the same
+// set either way, so the merge deduplicates. Two batches legitimately disagree
+// when an artifact was hot-swapped mid-execution — both digests then appear,
+// which is the honest answer.
+func mergeBatchArtifacts(results []map[string]any) []types.ArtifactUse {
+	seen := make(map[types.ArtifactUse]struct{})
+	for _, batch := range results {
+		if batch == nil {
+			continue
+		}
+		for _, u := range types.ArtifactUsesFromData(batch["artifacts"]) {
+			seen[u] = struct{}{}
+		}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	out := make([]types.ArtifactUse, 0, len(seen))
+	for u := range seen {
+		out = append(out, u)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Node != out[j].Node {
+			return out[i].Node < out[j].Node
+		}
+		return out[i].Digest < out[j].Digest
+	})
+	return out
+}
+
 // completeLoopSplit terminalizes a fully completed child generation through
 // the same token-fenced commit path as other node results. In an acyclic graph
 // that also writes the durable downstream advance intent.
@@ -582,6 +622,11 @@ func (e *Engine) completeLoopSplit(ctx context.Context, lease *TaskLease, g *gra
 	output := map[string]any{
 		"results": flat,
 		"count":   len(flat),
+	}
+	// Sibling of results, for the reason in batchResultData: a guest's value can
+	// only reach results[i], so this key is one only the host can write.
+	if list := types.ArtifactUsesAsData(mergeBatchArtifacts(results)); list != nil {
+		output["artifacts"] = list
 	}
 	if failures := failedBatchErrors(results); len(failures) > 0 {
 		return e.failLoopSplit(ctx, lease, g, output, failures, len(results))

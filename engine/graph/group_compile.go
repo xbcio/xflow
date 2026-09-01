@@ -100,6 +100,9 @@ func compileOneGroup(g *Graph, gd types.GroupDef, groupIdx int) (GroupMeta, erro
 		if g.nodes[idx].RunnerSelector != nil {
 			return GroupMeta{}, fmt.Errorf("member %q must not set RunnerSelector (placement belongs to the group)", name)
 		}
+		if g.nodes[idx].ActivationReplicas != 0 {
+			return GroupMeta{}, fmt.Errorf("member %q must not set ActivationReplicas (activation cardinality belongs to the group)", name)
+		}
 		if g.nodes[idx].Kind == types.NodeKindSupply {
 			return GroupMeta{}, fmt.Errorf("member %q is a supply node; supply node may not be a group member", name)
 		}
@@ -119,16 +122,17 @@ func compileOneGroup(g *Graph, gd types.GroupDef, groupIdx int) (GroupMeta, erro
 		return GroupMeta{}, err
 	}
 	return GroupMeta{
-		Name:           gd.Name,
-		Members:        members,
-		EntryIdx:       entry,
-		UnitIdx:        -1,
-		Trigger:        trigger,
-		RunnerSelector: gd.RunnerSelector,
-		OnError:        gd.OnError,
-		Retry:          gd.Retry,
-		Timeout:        gd.Timeout,
-		Mode:           gd.Mode,
+		Name:               gd.Name,
+		Members:            members,
+		EntryIdx:           entry,
+		UnitIdx:            -1,
+		Trigger:            trigger,
+		RunnerSelector:     gd.RunnerSelector,
+		OnError:            gd.OnError,
+		Retry:              gd.Retry,
+		Timeout:            gd.Timeout,
+		Mode:               gd.Mode,
+		ActivationReplicas: gd.ActivationReplicas,
 	}, nil
 }
 

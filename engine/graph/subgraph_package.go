@@ -439,14 +439,15 @@ func compileTrusted(def *types.WorkflowDef, visibleSupplies, visibleOuterNodes [
 		}
 		g.index[nd.Name] = i
 		g.nodes[i] = NodeMeta{
-			Name:       nd.Name,
-			Type:       nd.Type,
-			Kind:       nd.Kind,
-			Version:    nd.Version,
-			OnError:    nd.OnError,
-			Parameters: cloneStringAnyMap(nd.Parameters),
-			GroupIdx:   -1,
-			Timeout:    nd.Timeout,
+			Name:               nd.Name,
+			Type:               nd.Type,
+			Kind:               nd.Kind,
+			Version:            nd.Version,
+			OnError:            nd.OnError,
+			Parameters:         cloneStringAnyMap(nd.Parameters),
+			GroupIdx:           -1,
+			Timeout:            nd.Timeout,
+			ActivationReplicas: nd.ActivationReplicas,
 		}
 		if nd.Type == "xflow.start" || nd.Kind == types.NodeKindTrigger {
 			g.entryIndexes[nd.Name] = i

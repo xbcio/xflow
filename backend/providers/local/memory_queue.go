@@ -15,9 +15,10 @@ import (
 // runner" failures backs off quickly to ~30s while still recovering in seconds
 // once a runner registers.
 const (
-	transientRequeueInitial = 100 * time.Millisecond
-	transientRequeueCap     = 30 * time.Second
-	transientRequeueMax     = 1000
+	transientRequeueInitial    = 100 * time.Millisecond
+	transientRequeueCap        = 30 * time.Second
+	transientRequeueMax        = 1000
+	defaultMemoryQueueCapacity = 1024
 )
 
 // interactiveBurst is how many ordinary tasks a worker may serve before the
@@ -57,9 +58,13 @@ type memoryQueue struct {
 }
 
 func newMemoryQueue(concurrency int) *memoryQueue {
+	return newMemoryQueueWithCapacity(concurrency, defaultMemoryQueueCapacity)
+}
+
+func newMemoryQueueWithCapacity(concurrency, capacity int) *memoryQueue {
 	return &memoryQueue{
-		ch:          make(chan queueEnvelope, 1024),
-		batchCh:     make(chan queueEnvelope, 1024),
+		ch:          make(chan queueEnvelope, capacity),
+		batchCh:     make(chan queueEnvelope, capacity),
 		concurrency: concurrency,
 		stopCh:      make(chan struct{}),
 	}

@@ -122,6 +122,45 @@ func TestProjectGroupPackage_Deterministic(t *testing.T) {
 	}
 }
 
+func TestProjectGroupPackage_HashExcludesActivationCardinality(t *testing.T) {
+	baseDef := makeGroupedDef()
+	base, err := Compile(baseDef)
+	if err != nil {
+		t.Fatalf("compile base: %v", err)
+	}
+	replicatedDef := makeGroupedDef()
+	replicatedDef.Groups[0].ActivationReplicas = 7
+	replicated, err := Compile(replicatedDef)
+	if err != nil {
+		t.Fatalf("compile replicated: %v", err)
+	}
+
+	basePkg, baseHash, err := ProjectGroupPackage(base, groupUnitOf(t, base))
+	if err != nil {
+		t.Fatalf("project base: %v", err)
+	}
+	replicatedPkg, replicatedHash, err := ProjectGroupPackage(replicated, groupUnitOf(t, replicated))
+	if err != nil {
+		t.Fatalf("project replicated: %v", err)
+	}
+	if baseHash != replicatedHash {
+		t.Fatalf("activation host cardinality changed sandbox package hash: %q != %q", baseHash, replicatedHash)
+	}
+	if base.Groups()[0].PackageHash != replicated.Groups()[0].PackageHash {
+		t.Fatalf("compiled GroupMeta package hash changed with host cardinality: %q != %q", base.Groups()[0].PackageHash, replicated.Groups()[0].PackageHash)
+	}
+	for _, pkg := range []*SubgraphPackage{basePkg, replicatedPkg} {
+		if len(pkg.Def.Groups) != 0 {
+			t.Fatalf("projected package must not carry outer placement groups: %+v", pkg.Def.Groups)
+		}
+		for _, node := range pkg.Def.Nodes {
+			if node.ActivationReplicas != 0 {
+				t.Fatalf("projected member %q leaked outer activation cardinality %d", node.Name, node.ActivationReplicas)
+			}
+		}
+	}
+}
+
 func TestProjectGroupPackage_NodeOrderDoesNotAffectHash(t *testing.T) {
 	// Compile with nodes in order A, B, C, D.
 	def1 := makeGroupedDef()

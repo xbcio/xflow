@@ -22,9 +22,13 @@ const (
 )
 
 type Capability struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	NodeType      string                 `protobuf:"bytes,1,opt,name=node_type,json=nodeType,proto3" json:"node_type,omitempty"`
-	NodeVersion   int32                  `protobuf:"varint,2,opt,name=node_version,json=nodeVersion,proto3" json:"node_version,omitempty"`
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	NodeType    string                 `protobuf:"bytes,1,opt,name=node_type,json=nodeType,proto3" json:"node_type,omitempty"`
+	NodeVersion int32                  `protobuf:"varint,2,opt,name=node_version,json=nodeVersion,proto3" json:"node_version,omitempty"`
+	// features are additive runtime protocol capabilities for this node type.
+	// Older peers ignore this field; replica activations are assigned only when
+	// the feature is observed by the control plane.
+	Features      []string `protobuf:"bytes,3,rep,name=features,proto3" json:"features,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -71,6 +75,13 @@ func (x *Capability) GetNodeVersion() int32 {
 		return x.NodeVersion
 	}
 	return 0
+}
+
+func (x *Capability) GetFeatures() []string {
+	if x != nil {
+		return x.Features
+	}
+	return nil
 }
 
 type RegisterRequest struct {
@@ -166,6 +177,7 @@ type ActivationInventoryItem struct {
 	EntryUnitId     string                 `protobuf:"bytes,2,opt,name=entry_unit_id,json=entryUnitId,proto3" json:"entry_unit_id,omitempty"`
 	Generation      uint64                 `protobuf:"varint,3,opt,name=generation,proto3" json:"generation,omitempty"`
 	WorkflowVersion string                 `protobuf:"bytes,4,opt,name=workflow_version,json=workflowVersion,proto3" json:"workflow_version,omitempty"`
+	ReplicaIndex    uint32                 `protobuf:"varint,5,opt,name=replica_index,json=replicaIndex,proto3" json:"replica_index,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -226,6 +238,13 @@ func (x *ActivationInventoryItem) GetWorkflowVersion() string {
 		return x.WorkflowVersion
 	}
 	return ""
+}
+
+func (x *ActivationInventoryItem) GetReplicaIndex() uint32 {
+	if x != nil {
+		return x.ReplicaIndex
+	}
+	return 0
 }
 
 type RegisterResponse struct {
@@ -1365,11 +1384,12 @@ var File_service_protocol_runnerpb_runner_proto protoreflect.FileDescriptor
 
 const file_service_protocol_runnerpb_runner_proto_rawDesc = "" +
 	"\n" +
-	"&service/protocol/runnerpb/runner.proto\x12\x0fxflow.runner.v1\"L\n" +
+	"&service/protocol/runnerpb/runner.proto\x12\x0fxflow.runner.v1\"h\n" +
 	"\n" +
 	"Capability\x12\x1b\n" +
 	"\tnode_type\x18\x01 \x01(\tR\bnodeType\x12!\n" +
-	"\fnode_version\x18\x02 \x01(\x05R\vnodeVersion\"\xfe\x02\n" +
+	"\fnode_version\x18\x02 \x01(\x05R\vnodeVersion\x12\x1a\n" +
+	"\bfeatures\x18\x03 \x03(\tR\bfeatures\"\xfe\x02\n" +
 	"\x0fRegisterRequest\x12\x1b\n" +
 	"\trunner_id\x18\x01 \x01(\tR\brunnerId\x12 \n" +
 	"\vconcurrency\x18\x02 \x01(\x05R\vconcurrency\x12?\n" +
@@ -1381,7 +1401,7 @@ const file_service_protocol_runnerpb_runner_proto_rawDesc = "" +
 	"\vactivations\x18\x06 \x03(\v2(.xflow.runner.v1.ActivationInventoryItemR\vactivations\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xa9\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xce\x01\n" +
 	"\x17ActivationInventoryItem\x12\x1f\n" +
 	"\vworkflow_id\x18\x01 \x01(\tR\n" +
 	"workflowId\x12\"\n" +
@@ -1389,7 +1409,8 @@ const file_service_protocol_runnerpb_runner_proto_rawDesc = "" +
 	"\n" +
 	"generation\x18\x03 \x01(\x04R\n" +
 	"generation\x12)\n" +
-	"\x10workflow_version\x18\x04 \x01(\tR\x0fworkflowVersion\"N\n" +
+	"\x10workflow_version\x18\x04 \x01(\tR\x0fworkflowVersion\x12#\n" +
+	"\rreplica_index\x18\x05 \x01(\rR\freplicaIndex\"N\n" +
 	"\x10RegisterResponse\x12\x1b\n" +
 	"\trunner_id\x18\x01 \x01(\tR\brunnerId\x12\x1d\n" +
 	"\n" +

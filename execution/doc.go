@@ -43,19 +43,21 @@
 //	  │    │    ├─ Registry.Get → handler (exec-scoped > name-scoped > type > global)
 //	  │    │    ├─ evaluateParams (template expansion before handler sees input)
 //	  │    │    ├─ nodeExecutionDeadline (lease deadline wins over Input.Timeout)
-//	  │    │    └─ goroutine+select: deadline enforcement, abandonGrace (2ms)
+//	  │    │    └─ goroutine+select: deadline enforcement, abandonGrace (25ms)
 //	  │    └─ remote Executor (service/protocol transport)
 //	  │
 //	  └─ Engine.CommitTaskResult(lease, result)
 //
 // # Traps for maintainers
 //
-// abandonGrace (2 ms) in runner.go is load-bearing for timing correctness.
+// abandonGrace (25 ms) in runner.go is load-bearing for timing correctness.
 // A cooperative handler that calls <-ctx.Done() then returns its verdict races
-// against Execute returning a synthetic timeout error. The 2 ms window was
-// measured to catch 2.5–49% of such completions depending on machine load
-// (see the constant's doc comment). Shrinking it causes real verdicts to be
-// discarded; removing it causes goroutine abandonment to never be diagnosed.
+// against Execute returning a synthetic timeout error. The original 2 ms
+// window still lost verdicts under full-repository race contention; 25 ms
+// preserves them while keeping cancellation of a non-cooperative handler
+// bounded (see the constant's doc comment). Shrinking it causes real verdicts
+// to be discarded; removing the bound means goroutine abandonment is never
+// diagnosed.
 //
 // reclassifyTimeout only reclassifies errors that ARE the cancellation echo
 // (errors.Is(err, context.Canceled/DeadlineExceeded)). A handler that returns

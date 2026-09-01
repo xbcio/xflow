@@ -41,6 +41,39 @@ func TestGraphHashChangesWithGroupSelector(t *testing.T) {
 	}
 }
 
+func TestGraphHashChangesWithActivationReplicas(t *testing.T) {
+	groupBase, err := Compile(mkGroupDef([]string{"ingest", "analyze"}))
+	if err != nil {
+		t.Fatalf("compile group base: %v", err)
+	}
+	groupReplicatedDef := mkGroupDef([]string{"ingest", "analyze"})
+	groupReplicatedDef.Groups[0].ActivationReplicas = 3
+	groupReplicated, err := Compile(groupReplicatedDef)
+	if err != nil {
+		t.Fatalf("compile replicated group: %v", err)
+	}
+	if groupBase.Hash() == groupReplicated.Hash() {
+		t.Fatal("group activation cardinality must change graph hash")
+	}
+
+	nodeBaseDef := mkGroupDef([]string{"ingest", "analyze"})
+	nodeBaseDef.Groups = nil
+	nodeBase, err := Compile(nodeBaseDef)
+	if err != nil {
+		t.Fatalf("compile node base: %v", err)
+	}
+	nodeReplicatedDef := mkGroupDef([]string{"ingest", "analyze"})
+	nodeReplicatedDef.Groups = nil
+	nodeReplicatedDef.Nodes[0].ActivationReplicas = 3
+	nodeReplicated, err := Compile(nodeReplicatedDef)
+	if err != nil {
+		t.Fatalf("compile replicated node: %v", err)
+	}
+	if nodeBase.Hash() == nodeReplicated.Hash() {
+		t.Fatal("standalone node activation cardinality must change graph hash")
+	}
+}
+
 func TestCompilerVersionV3(t *testing.T) {
 	if compilerVersion != "v3" {
 		t.Fatalf("compilerVersion = %q, want %q", compilerVersion, "v3")

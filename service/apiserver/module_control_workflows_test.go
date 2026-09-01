@@ -3,12 +3,19 @@ package apiserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/xbcio/xflow/backend"
+	"github.com/xbcio/xflow/backend/providers/local"
+	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/namespace"
+	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -36,6 +43,119 @@ func postWorkflows(t *testing.T, base, token string, body any) *http.Response {
 	return resp
 }
 
+func putWorkflow(t *testing.T, base, token, id string, body any) *http.Response {
+	t.Helper()
+	return putWorkflowWithRequestID(t, base, token, id, body, "")
+}
+
+func putWorkflowWithRequestID(t *testing.T, base, token, id string, body any, requestID string) *http.Response {
+	t.Helper()
+	var buf strings.Builder
+	if body != nil {
+		if err := json.NewEncoder(&buf).Encode(body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	req, _ := http.NewRequest(http.MethodPut, base+"/v1/workflows/"+id, strings.NewReader(buf.String()))
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	if requestID != "" {
+		req.Header.Set("X-Request-Id", requestID)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT /v1/workflows/%s: %v", id, err)
+	}
+	return resp
+}
+
+func assertRequestIDEcho(t *testing.T, resp *http.Response, want string) {
+	t.Helper()
+	if got := resp.Header.Get("X-Request-Id"); got != want {
+		t.Fatalf("X-Request-Id = %q, want %q", got, want)
+	}
+}
+
+func newWorkflowReplaceIdentityTestServer(t *testing.T) (*httptest.Server, *control.ControlPlane) {
+	t.Helper()
+	return newWorkflowReplaceDependencyTestServer(t, nil, nil, []TokenPrincipalMapping{
+		{Token: "tok-full", Subject: "op-full", Namespace: "namespaceA", Scopes: []string{"workflow", "execution"}},
+		{Token: "tok-other", Subject: "op-other", Namespace: "namespaceB", Scopes: []string{"workflow", "execution"}},
+	})
+}
+
+func newWorkflowReplaceDependencyTestServer(t *testing.T, registry backend.WorkflowRegistry, activations engine.EntryActivationStore, principals []TokenPrincipalMapping) (*httptest.Server, *control.ControlPlane) {
+	t.Helper()
+	provider := local.New()
+	if registry == nil {
+		registry = provider.WorkflowRegistry()
+	}
+	cp, err := control.NewControlPlane(control.Config{
+		Backend:              provider,
+		WorkflowRegistry:     registry,
+		EntryActivationStore: activations,
+	})
+	if err != nil {
+		t.Fatalf("NewControlPlane: %v", err)
+	}
+	if principals == nil {
+		principals = []TokenPrincipalMapping{
+			{Token: "tok-full", Subject: "op-full", Namespace: "namespaceA", Scopes: []string{"workflow", "execution"}},
+		}
+	}
+	cfg := Config{
+		Concurrency:   8,
+		PrincipalAuth: NewBearerPrincipalAuthMulti(principals),
+		Authorizer:    NamespaceAwareAuthorizer{},
+		AuditSink:     NewInMemoryAuditSink(),
+	}
+	srv, err := New(cfg, WithControlPlane(cp))
+	if err != nil {
+		t.Fatalf("apiserver.New: %v", err)
+	}
+	httpSrv := httptest.NewServer(srv.Handler())
+	t.Cleanup(httpSrv.Close)
+	return httpSrv, cp
+}
+
+type failingDesiredUpsertStore struct {
+	engine.EntryActivationStore
+	mu                 sync.Mutex
+	failDesiredUpserts int
+	err                error
+}
+
+func (s *failingDesiredUpsertStore) failNextDesiredUpsert(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failDesiredUpserts++
+	s.err = err
+}
+
+func (s *failingDesiredUpsertStore) Upsert(ctx context.Context, act engine.EntryActivation) error {
+	if act.Desired {
+		s.mu.Lock()
+		if s.failDesiredUpserts > 0 {
+			s.failDesiredUpserts--
+			err := s.err
+			s.mu.Unlock()
+			return err
+		}
+		s.mu.Unlock()
+	}
+	return s.EntryActivationStore.Upsert(ctx, act)
+}
+
+func (s *failingDesiredUpsertStore) AdvanceWorkflowRevision(ctx context.Context, ns namespace.Namespace, workflowID types.WorkflowID, revision uint64) error {
+	revisions, ok := s.EntryActivationStore.(engine.EntryActivationRevisionStore)
+	if !ok {
+		return errors.New("wrapped activation store does not support revision fencing")
+	}
+	return revisions.AdvanceWorkflowRevision(ctx, ns, workflowID, revision)
+}
+
 // decodeEnvelope decodes a response body into the envelope and, when data is
 // non-nil, the data field into the typed target. Data is read as
 // json.RawMessage first because envelope.Data is `any` — a direct unmarshal
@@ -47,11 +167,11 @@ func decodeEnvelope(t *testing.T, resp *http.Response, data any) envelope {
 		t.Fatalf("read body: %v", err)
 	}
 	var partial struct {
-		Success bool              `json:"success"`
-		Code    string            `json:"code"`
-		Message string            `json:"message"`
-		Data    json.RawMessage   `json:"data"`
-		TraceID string            `json:"trace_id"`
+		Success bool            `json:"success"`
+		Code    string          `json:"code"`
+		Message string          `json:"message"`
+		Data    json.RawMessage `json:"data"`
+		TraceID string          `json:"trace_id"`
 	}
 	if err := json.Unmarshal(raw, &partial); err != nil {
 		t.Fatalf("decode envelope: %v (body=%s)", err, raw)
@@ -285,9 +405,10 @@ func TestGetWorkflowByIDNotFoundReturnsStableCode(t *testing.T) {
 	}
 }
 
-// TestPutWorkflowByIDReplaces pins the new PUT /v1/workflows/{id} route
-// (§7 + Addition 1): it maps onto APIServer.ReplaceWorkflow — a full update that
-// deregisters a conflicting definition under the same key and re-registers.
+// TestPutWorkflowByIDReplaces pins PUT /v1/workflows/{id}: the path id is the
+// authoritative resource identity, while the body is the replacement
+// definition. A changed definition under the same key is stored under the same
+// workflow id rather than deleting whichever record the body key names.
 func TestPutWorkflowByIDReplaces(t *testing.T) {
 	srv, cp := newRegisterTestServer(t)
 
@@ -302,6 +423,8 @@ func TestPutWorkflowByIDReplaces(t *testing.T) {
 	// PUT a changed definition under the same {id}. ReplaceWorkflow deregisters
 	// the conflicting key and re-registers, returning a new workflow_id.
 	changed := validWorkflow()
+	changed.ID = string(out.WorkflowID)
+	changed.Namespace = "forged-namespace"
 	changed.Name = "replaced"
 	changed.Nodes = []types.NodeDef{
 		{Name: "start", Type: "xflow.start"},
@@ -312,18 +435,12 @@ func TestPutWorkflowByIDReplaces(t *testing.T) {
 		"start": {"main": types.PortConnections{Targets: []types.Connection{{Node: "work", Input: "main"}}}},
 		"work":  {"main": types.PortConnections{Targets: []types.Connection{{Node: "extra", Input: "main"}}}},
 	}
-	body, _ := json.Marshal(changed)
-	putReq, _ := http.NewRequest(http.MethodPut, srv.URL+"/v1/workflows/"+string(out.WorkflowID), strings.NewReader(string(body)))
-	putReq.Header.Set("Content-Type", "application/json")
-	putReq.Header.Set("Authorization", "Bearer tok-full")
-	putResp, err := http.DefaultClient.Do(putReq)
-	if err != nil {
-		t.Fatalf("PUT: %v", err)
-	}
+	putResp := putWorkflowWithRequestID(t, srv.URL, "tok-full", string(out.WorkflowID), changed, "req-put-200")
 	defer func() { _ = putResp.Body.Close() }()
 	if putResp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", putResp.StatusCode)
 	}
+	assertRequestIDEcho(t, putResp, "req-put-200")
 	var repl registerWorkflowResponse
 	env := decodeEnvelope(t, putResp, &repl)
 	if !env.Success {
@@ -332,6 +449,9 @@ func TestPutWorkflowByIDReplaces(t *testing.T) {
 	if repl.WorkflowID == "" {
 		t.Fatal("PUT must return a workflow_id")
 	}
+	if repl.WorkflowID != out.WorkflowID {
+		t.Fatalf("workflow_id = %q, want path id %q", repl.WorkflowID, out.WorkflowID)
+	}
 	// The new record must exist and carry the changed graph.
 	rec, err := cp.WorkflowRegistry().GetWorkflow(context.Background(), repl.WorkflowID)
 	if err != nil {
@@ -339,6 +459,273 @@ func TestPutWorkflowByIDReplaces(t *testing.T) {
 	}
 	if rec.Graph == nil {
 		t.Fatal("replaced record must carry a compiled graph")
+	}
+	if rec.Definition.ID != string(out.WorkflowID) {
+		t.Fatalf("stored definition id = %q, want path id %q", rec.Definition.ID, out.WorkflowID)
+	}
+	if rec.Namespace != "namespaceA" || rec.Definition.Namespace != "namespaceA" {
+		t.Fatalf("stored namespaces = record %q, definition %q; want authenticated namespaceA", rec.Namespace, rec.Definition.Namespace)
+	}
+	if got := len(rec.Definition.Nodes); got != 3 {
+		t.Fatalf("stored node count = %d, want changed definition with 3 nodes", got)
+	}
+}
+
+func TestPutWorkflowByIDMissingTargetDoesNotDeleteBodyKey(t *testing.T) {
+	srv, cp := newRegisterTestServer(t)
+
+	victim := validWorkflow()
+	victim.Name = "victim"
+	resp := postWorkflows(t, srv.URL, "tok-full", victim)
+	defer func() { _ = resp.Body.Close() }()
+	var victimOut registerWorkflowResponse
+	decodeEnvelope(t, resp, &victimOut)
+
+	changed := validWorkflow()
+	changed.Name = "victim"
+	changed.Description = "changed definition under the victim key"
+	putResp := putWorkflowWithRequestID(t, srv.URL, "tok-full", "missing-workflow-id", changed, "req-put-404")
+	defer func() { _ = putResp.Body.Close() }()
+	if putResp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", putResp.StatusCode)
+	}
+	assertRequestIDEcho(t, putResp, "req-put-404")
+	if env := decodeEnvelope(t, putResp, nil); env.Code != "workflow_not_found" {
+		t.Fatalf("code = %q, want workflow_not_found", env.Code)
+	}
+	if _, err := cp.WorkflowRegistry().GetWorkflow(context.Background(), victimOut.WorkflowID); err != nil {
+		t.Fatalf("victim workflow was deleted while replacing a missing path id: %v", err)
+	}
+}
+
+func TestPutWorkflowByIDBodyIDMustMatchPath(t *testing.T) {
+	srv, cp := newRegisterTestServer(t)
+
+	resp := postWorkflows(t, srv.URL, "tok-full", validWorkflow())
+	defer func() { _ = resp.Body.Close() }()
+	var out registerWorkflowResponse
+	decodeEnvelope(t, resp, &out)
+
+	changed := validWorkflow()
+	changed.ID = "different-workflow-id"
+	changed.Description = "should be rejected before mutation"
+	putResp := putWorkflowWithRequestID(t, srv.URL, "tok-full", string(out.WorkflowID), changed, "req-put-400")
+	defer func() { _ = putResp.Body.Close() }()
+	if putResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", putResp.StatusCode)
+	}
+	assertRequestIDEcho(t, putResp, "req-put-400")
+	if env := decodeEnvelope(t, putResp, nil); env.Code != "workflow_id_mismatch" {
+		t.Fatalf("code = %q, want workflow_id_mismatch", env.Code)
+	}
+	rec, err := cp.WorkflowRegistry().GetWorkflow(context.Background(), out.WorkflowID)
+	if err != nil {
+		t.Fatalf("target workflow missing after rejected id mismatch: %v", err)
+	}
+	if rec.Definition.Description == changed.Description {
+		t.Fatal("target workflow was mutated despite body/path id mismatch")
+	}
+}
+
+func TestPutWorkflowByIDAllowsRenameToFreeKeyPreservingID(t *testing.T) {
+	srv, cp := newRegisterTestServer(t)
+
+	first := validWorkflow()
+	first.Name = "rename-source"
+	first.Version = "v1"
+	resp := postWorkflows(t, srv.URL, "tok-full", first)
+	defer func() { _ = resp.Body.Close() }()
+	var out registerWorkflowResponse
+	decodeEnvelope(t, resp, &out)
+
+	replacement := validWorkflow()
+	replacement.Name = "rename-destination"
+	replacement.Version = "v2"
+	putResp := putWorkflow(t, srv.URL, "tok-full", string(out.WorkflowID), replacement)
+	defer func() { _ = putResp.Body.Close() }()
+	if putResp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", putResp.StatusCode)
+	}
+	var repl registerWorkflowResponse
+	decodeEnvelope(t, putResp, &repl)
+	if repl.WorkflowID != out.WorkflowID {
+		t.Fatalf("workflow_id = %q, want preserved path id %q", repl.WorkflowID, out.WorkflowID)
+	}
+	if _, err := cp.WorkflowRegistry().GetWorkflowByKey(context.Background(), workflowRegistryKey("namespaceA", "rename-source", "v1")); !errors.Is(err, backend.ErrWorkflowNotFound) {
+		t.Fatalf("old key lookup err = %v, want ErrWorkflowNotFound", err)
+	}
+	rec, err := cp.WorkflowRegistry().GetWorkflowByKey(context.Background(), workflowRegistryKey("namespaceA", "rename-destination", "v2"))
+	if err != nil {
+		t.Fatalf("new key lookup: %v", err)
+	}
+	if rec.ID != out.WorkflowID {
+		t.Fatalf("new key id = %q, want preserved path id %q", rec.ID, out.WorkflowID)
+	}
+}
+
+func TestPutWorkflowByIDCannotReplaceIntoAnotherWorkflowKey(t *testing.T) {
+	srv, cp := newRegisterTestServer(t)
+
+	target := validWorkflow()
+	target.Name = "target"
+	targetResp := postWorkflows(t, srv.URL, "tok-full", target)
+	defer func() { _ = targetResp.Body.Close() }()
+	var targetOut registerWorkflowResponse
+	decodeEnvelope(t, targetResp, &targetOut)
+
+	occupied := validWorkflow()
+	occupied.Name = "occupied"
+	occupiedResp := postWorkflows(t, srv.URL, "tok-full", occupied)
+	defer func() { _ = occupiedResp.Body.Close() }()
+	var occupiedOut registerWorkflowResponse
+	decodeEnvelope(t, occupiedResp, &occupiedOut)
+
+	replacement := validWorkflow()
+	replacement.Name = "occupied"
+	replacement.Description = "attempted overwrite"
+	putResp := putWorkflowWithRequestID(t, srv.URL, "tok-full", string(targetOut.WorkflowID), replacement, "req-put-409")
+	defer func() { _ = putResp.Body.Close() }()
+	if putResp.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", putResp.StatusCode)
+	}
+	assertRequestIDEcho(t, putResp, "req-put-409")
+	if env := decodeEnvelope(t, putResp, nil); env.Code != "workflow_conflict" {
+		t.Fatalf("code = %q, want workflow_conflict", env.Code)
+	}
+	if _, err := cp.WorkflowRegistry().GetWorkflow(context.Background(), targetOut.WorkflowID); err != nil {
+		t.Fatalf("target workflow missing after destination conflict: %v", err)
+	}
+	rec, err := cp.WorkflowRegistry().GetWorkflow(context.Background(), occupiedOut.WorkflowID)
+	if err != nil {
+		t.Fatalf("occupied workflow missing after destination conflict: %v", err)
+	}
+	if rec.Definition.Description == replacement.Description {
+		t.Fatal("occupied workflow was overwritten by a body-key replace")
+	}
+}
+
+func TestPutWorkflowByIDCrossNamespaceTargetIsNotFound(t *testing.T) {
+	srv, _ := newWorkflowReplaceIdentityTestServer(t)
+
+	foreign := validWorkflow()
+	foreign.Name = "foreign"
+	foreignResp := postWorkflows(t, srv.URL, "tok-other", foreign)
+	defer func() { _ = foreignResp.Body.Close() }()
+	var foreignOut registerWorkflowResponse
+	decodeEnvelope(t, foreignResp, &foreignOut)
+
+	replacement := validWorkflow()
+	replacement.Name = "foreign-replacement"
+	putResp := putWorkflow(t, srv.URL, "tok-full", string(foreignOut.WorkflowID), replacement)
+	defer func() { _ = putResp.Body.Close() }()
+	if putResp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", putResp.StatusCode)
+	}
+	if env := decodeEnvelope(t, putResp, nil); env.Code != "workflow_not_found" {
+		t.Fatalf("code = %q, want workflow_not_found", env.Code)
+	}
+
+	getReq, _ := http.NewRequest(http.MethodGet, srv.URL+"/v1/workflows/"+string(foreignOut.WorkflowID), nil)
+	getReq.Header.Set("Authorization", "Bearer tok-other")
+	getResp, err := http.DefaultClient.Do(getReq)
+	if err != nil {
+		t.Fatalf("GET foreign as owner: %v", err)
+	}
+	defer func() { _ = getResp.Body.Close() }()
+	if getResp.StatusCode != http.StatusOK {
+		t.Fatalf("foreign owner GET status = %d, want 200", getResp.StatusCode)
+	}
+}
+
+func TestPutWorkflowByIDRetriesActivationProjectionAfterTransientFailure(t *testing.T) {
+	activationStore := &failingDesiredUpsertStore{EntryActivationStore: control.NewMemoryEntryActivationStore()}
+	srv, cp := newWorkflowReplaceDependencyTestServer(t, nil, activationStore, nil)
+
+	resp := postWorkflows(t, srv.URL, "tok-full", configuredTriggerWorkflow("topic-a"))
+	defer func() { _ = resp.Body.Close() }()
+	var out registerWorkflowResponse
+	decodeEnvelope(t, resp, &out)
+
+	activationStore.failNextDesiredUpsert(errors.New("injected activation projection failure"))
+	putResp := putWorkflow(t, srv.URL, "tok-full", string(out.WorkflowID), configuredTriggerWorkflow("topic-b"))
+	defer func() { _ = putResp.Body.Close() }()
+	if putResp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 after projection retry", putResp.StatusCode)
+	}
+	assertWorkflowTopic(t, cp.WorkflowRegistry(), out.WorkflowID, "topic-b")
+	assertWorkflowActivationDesired(t, cp.EntryActivationStore(), out.WorkflowID, "topic-b")
+}
+
+func TestPutWorkflowByIDKeepsCommittedRevisionWhenActivationProjectionFails(t *testing.T) {
+	activationStore := &failingDesiredUpsertStore{EntryActivationStore: control.NewMemoryEntryActivationStore()}
+	srv, cp := newWorkflowReplaceDependencyTestServer(t, nil, activationStore, nil)
+
+	resp := postWorkflows(t, srv.URL, "tok-full", configuredTriggerWorkflow("topic-a"))
+	defer func() { _ = resp.Body.Close() }()
+	var out registerWorkflowResponse
+	decodeEnvelope(t, resp, &out)
+
+	for range 3 {
+		activationStore.failNextDesiredUpsert(errors.New("injected persistent activation projection failure"))
+	}
+	putResp := putWorkflow(t, srv.URL, "tok-full", string(out.WorkflowID), configuredTriggerWorkflow("topic-b"))
+	defer func() { _ = putResp.Body.Close() }()
+	if putResp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", putResp.StatusCode)
+	}
+	assertWorkflowTopic(t, cp.WorkflowRegistry(), out.WorkflowID, "topic-b")
+	assertWorkflowActivationNotDesired(t, cp.EntryActivationStore(), out.WorkflowID)
+}
+
+func assertWorkflowTopic(t *testing.T, registry backend.WorkflowRegistry, id types.WorkflowID, want string) {
+	t.Helper()
+	rec, err := registry.GetWorkflow(context.Background(), id)
+	if err != nil {
+		t.Fatalf("GetWorkflow(%q): %v", id, err)
+	}
+	if len(rec.Definition.Nodes) == 0 {
+		t.Fatal("stored workflow has no nodes")
+	}
+	if got := rec.Definition.Nodes[0].Parameters["topic"]; got != want {
+		t.Fatalf("stored topic = %v, want %s", got, want)
+	}
+}
+
+func assertWorkflowActivationDesired(t *testing.T, store engine.EntryActivationStore, id types.WorkflowID, wantTopic string) {
+	t.Helper()
+	act, ok, err := store.Get(context.Background(), engine.EntryActivationKey{
+		Namespace:       "namespaceA",
+		WorkflowID:      id,
+		WorkflowVersion: "v1",
+		EntryUnitID:     "trig",
+	})
+	if err != nil {
+		t.Fatalf("Get activation: %v", err)
+	}
+	if !ok {
+		t.Fatal("activation missing after failed replace rollback")
+	}
+	if !act.Desired {
+		t.Fatal("activation is not desired after failed replace rollback")
+	}
+	if got := act.Params["topic"]; got != wantTopic {
+		t.Fatalf("activation topic = %v, want %s", got, wantTopic)
+	}
+}
+
+func assertWorkflowActivationNotDesired(t *testing.T, store engine.EntryActivationStore, id types.WorkflowID) {
+	t.Helper()
+	act, ok, err := store.Get(context.Background(), engine.EntryActivationKey{
+		Namespace:       "namespaceA",
+		WorkflowID:      id,
+		WorkflowVersion: "v1",
+		EntryUnitID:     "trig",
+	})
+	if err != nil {
+		t.Fatalf("Get activation: %v", err)
+	}
+	if ok && act.Desired {
+		t.Fatal("orphan activation is still desired after the workflow record was removed")
 	}
 }
 

@@ -9,6 +9,13 @@ import (
 	"github.com/xbcio/xflow/execution/subgraph"
 )
 
+// embeddedSubgraphQueueCapacity bounds the two queue-lane allocations paid by
+// every short-lived group/map-item backend. These engines have one worker and
+// one entry task; wider downstream fan-out is durably backpressured through the
+// engine outbox, so they do not need the general local backend's 1024 slots per
+// lane.
+const embeddedSubgraphQueueCapacity = 16
+
 // GroupRuntimeOption configures a GroupRuntime.
 type GroupRuntimeOption func(*GroupRuntime)
 
@@ -47,10 +54,17 @@ func WithGroupHooks(h engine.Hooks) GroupRuntimeOption {
 // executor; the executor itself has no notion of "group" (see
 // execution/subgraph).
 type GroupRuntime struct {
-	suspendDisabled bool
-	artifactCode    func(ctx context.Context, digest string) ([]byte, error)
-	hooks           engine.Hooks
-	executor        *subgraph.Executor
+	suspendDisabled       bool
+	artifactCode          func(ctx context.Context, digest string) ([]byte, error)
+	mapConcurrencyLimiter *subgraph.MapConcurrencyLimiter
+	hooks                 engine.Hooks
+	executor              *subgraph.Executor
+}
+
+// WithGroupMapConcurrencyLimiter installs the runner-scoped active-batch and
+// active-item budgets used by map members nested inside this group runtime.
+func WithGroupMapConcurrencyLimiter(limiter *subgraph.MapConcurrencyLimiter) GroupRuntimeOption {
+	return func(r *GroupRuntime) { r.mapConcurrencyLimiter = limiter }
 }
 
 // NewGroupRuntime creates a group runtime that uses the given registry for
@@ -63,12 +77,18 @@ func NewGroupRuntime(reg *execution.Registry, cache *PackageCache, opts ...Group
 	for _, o := range opts {
 		o(r)
 	}
-	var execOpts []subgraph.ExecutorOption
+	execOpts := []subgraph.ExecutorOption{
+		subgraph.WithMapConcurrencyLimiter(r.mapConcurrencyLimiter),
+	}
 	if r.hooks != nil {
 		execOpts = append(execOpts, subgraph.WithHooks(r.hooks))
 	}
 	r.executor = subgraph.NewExecutor(reg, cache, func() subgraph.Backend {
-		backendOpts := []local.Option{local.WithRegistry(reg), local.WithConcurrency(1)}
+		backendOpts := []local.Option{
+			local.WithRegistry(reg),
+			local.WithConcurrency(1),
+			local.WithQueueCapacity(embeddedSubgraphQueueCapacity),
+		}
 		// Read r.artifactCode inside the closure, not at construction: the
 		// closure is what every attempt (and every nested map body, which reuses
 		// this same executor) calls, so the resolver must travel with it.

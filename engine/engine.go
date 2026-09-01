@@ -104,6 +104,19 @@ func WithOuterDeadline(t time.Time) Option {
 	return func(e *Engine) { e.outerDeadline = t }
 }
 
+// WithArtifactUseCollector gives this engine the host-side collector that node
+// handlers record resolved artifact digests into. Set per batch by the subgraph
+// executor, not at engine construction: like outerDeadline it exists because the
+// local queue's worker starts from context.Background(), so what has to travel
+// is the VALUE, not the context lineage. The engine stamps it onto every lease
+// it builds; execution/runner.go re-seeds it onto the handler's ctx.
+//
+// Nil is the normal case: an engine nobody is collecting for stamps nil leases
+// and every Record call downstream is a no-op on a nil receiver.
+func WithArtifactUseCollector(c *types.ArtifactUseCollector) Option {
+	return func(e *Engine) { e.artifactUses = c }
+}
+
 // WithSuspendDisabled makes runtime suspend requests fail the leased task
 // instead of parking it. If err is nil, ErrSuspendUnsupported is used.
 func WithSuspendDisabled(err error) Option {
@@ -155,6 +168,7 @@ type Engine struct {
 	batchBodyExecutor        BatchBodyExecutor
 	remoteBatchExecution     bool
 	outerDeadline            time.Time
+	artifactUses             *types.ArtifactUseCollector
 
 	mu     sync.RWMutex
 	graphs map[types.ExecutionID]*graph.Graph

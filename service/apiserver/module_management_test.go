@@ -1,21 +1,33 @@
 package apiserver
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
+	"github.com/alicebob/miniredis/v2"
+
+	backendlocal "github.com/xbcio/xflow/backend/providers/local"
 	"github.com/xbcio/xflow/service/control"
+	"github.com/xbcio/xflow/store/memstore"
 )
 
-func newManagementMux(t *testing.T, opts ...Option) http.Handler {
+func newManagementServer(t *testing.T, cfg Config, opts ...Option) *APIServer {
 	t.Helper()
-	srv, err := New(Config{Concurrency: 1}, opts...)
+	srv, err := New(cfg, opts...)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	return srv.Handler()
+	return srv
+}
+
+func newManagementMux(t *testing.T, opts ...Option) http.Handler {
+	t.Helper()
+	return newManagementServer(t, Config{Concurrency: 1}, opts...).Handler()
 }
 
 func doGet(t *testing.T, mux http.Handler, path string) *http.Response {
@@ -49,16 +61,173 @@ func TestManagementReadyz(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
-	var out readyResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		t.Fatal(err)
-	}
+	out := decodeReadyz(t, resp)
 	if !out.Ready {
 		t.Fatal("ready = false, want true")
 	}
 	if !out.Leader {
 		t.Fatal("leader = false, want true for memory backend")
 	}
+}
+
+func TestManagementReadyzDependencyErrorReturns503(t *testing.T) {
+	depErr := errors.New("dependency unavailable")
+	srv := newManagementServer(t, Config{
+		Concurrency: 1,
+		ReadinessChecker: readinessFunc(func(context.Context) error {
+			return depErr
+		}),
+	}, WithManagement())
+	resp := doGet(t, srv.Handler(), "/readyz")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", resp.StatusCode)
+	}
+	out := decodeReadyz(t, resp)
+	if out.Ready {
+		t.Fatal("ready = true, want false when dependency check fails")
+	}
+}
+
+func TestManagementReadyzUsesStoreReadinessChecker(t *testing.T) {
+	dependencyErr := errors.New("store unavailable")
+	tests := []struct {
+		name       string
+		checkErr   error
+		wantStatus int
+		wantReady  bool
+	}{
+		{name: "healthy", wantStatus: http.StatusOK, wantReady: true},
+		{name: "unavailable", checkErr: dependencyErr, wantStatus: http.StatusServiceUnavailable},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newReadinessStore(tt.checkErr)
+			srv := newManagementServer(t, Config{Store: store, Concurrency: 1}, WithManagement())
+			t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+
+			resp := doGet(t, srv.Handler(), "/readyz")
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != tt.wantStatus {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, tt.wantStatus)
+			}
+			out := decodeReadyz(t, resp)
+			if out.Ready != tt.wantReady {
+				t.Fatalf("ready = %v, want %v", out.Ready, tt.wantReady)
+			}
+			if got := store.checks.Load(); got != 1 {
+				t.Fatalf("store readiness checks = %d, want 1", got)
+			}
+		})
+	}
+}
+
+func TestManagementReadyzDeduplicatesExplicitStoreChecker(t *testing.T) {
+	store := newReadinessStore(nil)
+	srv := newManagementServer(t, Config{
+		Store:            store,
+		Concurrency:      1,
+		ReadinessChecker: store,
+	}, WithManagement())
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+
+	resp := doGet(t, srv.Handler(), "/readyz")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if got := store.checks.Load(); got != 1 {
+		t.Fatalf("store readiness checks = %d, want 1", got)
+	}
+}
+
+func TestManagementReadyzRedisDependencyFailureReturns503(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	srv := newManagementServer(t, Config{RedisAddr: mr.Addr(), Concurrency: 1}, WithManagement())
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+	h := srv.Handler()
+
+	resp := doGet(t, h, "/readyz")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("healthy redis status = %d, want 200", resp.StatusCode)
+	}
+	healthy := decodeReadyz(t, resp)
+	if !healthy.Ready {
+		t.Fatal("healthy redis ready = false, want true")
+	}
+	_ = resp.Body.Close()
+	mr.Close()
+
+	resp = doGet(t, h, "/readyz")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("closed redis status = %d, want 503", resp.StatusCode)
+	}
+	out := decodeReadyz(t, resp)
+	if out.Ready {
+		t.Fatal("ready = true, want false when redis ping fails")
+	}
+}
+
+func TestManagementReadyzShutdownReturns503(t *testing.T) {
+	srv := newManagementServer(t, Config{Concurrency: 1}, WithManagement())
+	h := srv.Handler()
+	if err := srv.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	resp := doGet(t, h, "/readyz")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", resp.StatusCode)
+	}
+	out := decodeReadyz(t, resp)
+	if out.Ready {
+		t.Fatal("ready = true, want false after shutdown")
+	}
+}
+
+func TestManagementReadyzNonLeaderStillReady(t *testing.T) {
+	cp, err := control.NewControlPlane(control.Config{Backend: newNonLeaderBackend()})
+	if err != nil {
+		t.Fatalf("NewControlPlane: %v", err)
+	}
+	srv := newManagementServer(t, Config{Concurrency: 1}, WithControlPlane(cp), WithManagement())
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+	resp := doGet(t, srv.Handler(), "/readyz")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	out := decodeReadyz(t, resp)
+	if !out.Ready {
+		t.Fatal("ready = false, want true for healthy non-leader")
+	}
+	if out.Leader {
+		t.Fatal("leader = true, want false for non-leader backend")
+	}
+}
+
+func TestManagementReadyzMethodNotAllowed(t *testing.T) {
+	mux := newManagementMux(t, WithManagement())
+	req := httptest.NewRequest(http.MethodPost, "/readyz", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", rec.Code)
+	}
+}
+
+func decodeReadyz(t *testing.T, resp *http.Response) readyResponse {
+	t.Helper()
+	var out readyResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	return out
 }
 
 func TestManagementLeader(t *testing.T) {
@@ -166,3 +335,43 @@ var _ HTTPModule = (*managementModule)(nil)
 // Ensure control.ControlPlane exposes the RunnerDirectory accessor used by the
 // management module at compile time.
 var _ = (*control.ControlPlane)(nil).RunnerDirectory
+
+type nonLeaderBackend struct {
+	*backendlocal.Backend
+	notify chan bool
+}
+
+func newNonLeaderBackend() *nonLeaderBackend {
+	notify := make(chan bool, 1)
+	notify <- false
+	return &nonLeaderBackend{
+		Backend: backendlocal.New(backendlocal.WithConcurrency(1)),
+		notify:  notify,
+	}
+}
+
+func (b *nonLeaderBackend) Campaign(ctx context.Context) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (b *nonLeaderBackend) IsLeader() bool { return false }
+
+func (b *nonLeaderBackend) Resign(context.Context) error { return nil }
+
+func (b *nonLeaderBackend) Notify() <-chan bool { return b.notify }
+
+type readinessStore struct {
+	*memstore.Store
+	err    error
+	checks atomic.Int64
+}
+
+func newReadinessStore(err error) *readinessStore {
+	return &readinessStore{Store: memstore.New(), err: err}
+}
+
+func (s *readinessStore) CheckReadiness(context.Context) error {
+	s.checks.Add(1)
+	return s.err
+}

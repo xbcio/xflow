@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"math/rand"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -237,42 +238,103 @@ func NewEntryActivationReconciler(cfg EntryActivationReconcilerConfig) *EntryAct
 func (r *EntryActivationReconciler) Reconcile(ctx context.Context, now time.Time) error {
 	live := r.liveRunners(ctx, now)
 	seen := make(map[engine.EntryActivationKey]struct{})
-	// active accumulates the count of currently-active GROUP activations
-	// across every configured namespace, for the gauge set once below.
-	active := 0
+	var activations []engine.EntryActivation
 	for _, ns := range r.cfg.Namespaces {
 		acts, err := r.cfg.Store.List(ctx, ns)
 		if err != nil {
 			return err
 		}
-		for i := range acts {
-			seen[keyOf(&acts[i])] = struct{}{}
-			if err := r.reconcileOne(ctx, &acts[i], live, now); err != nil {
-				if r.cfg.Logger != nil {
-					r.cfg.Logger.Warn("entry activation reconcile failed",
-						"workflow_id", acts[i].WorkflowID,
-						"entry_unit_id", acts[i].EntryUnitID,
-						"err", err)
-				}
-				// Continue with the remaining activations.
-			}
-			if acts[i].NodeType == engine.GroupNodeType && acts[i].RunnerID != "" {
-				active++
-			}
+		activations = append(activations, acts...)
+	}
+	sort.Slice(activations, func(i, j int) bool {
+		return activationLess(activations[i], activations[j])
+	})
+
+	// Phase one validates existing owners and builds the sibling owner set before
+	// any fresh assignment. This avoids assigning a lower replica to a runner that
+	// already hosts a later replica merely because store iteration order differed.
+	owners := make(map[logicalActivationKey]map[string]struct{})
+	failed := make(map[engine.EntryActivationKey]struct{})
+	for i := range activations {
+		act := &activations[i]
+		key := keyOf(act)
+		seen[key] = struct{}{}
+		if err := r.reconcileExisting(ctx, act, live, owners, now); err != nil {
+			failed[key] = struct{}{}
+			r.logReconcileError(act, err)
+		}
+	}
+
+	// Phase two fills unowned replicas in deterministic replica order while
+	// excluding every sibling owner. A successful assignment is inserted into the
+	// set immediately, so two siblings can never be co-located in one pass.
+	for i := range activations {
+		act := &activations[i]
+		key := keyOf(act)
+		if _, skip := failed[key]; skip || !act.Desired || act.RunnerID != "" {
+			continue
+		}
+		if err := r.assignUnowned(ctx, act, live, owners, now); err != nil {
+			r.logReconcileError(act, err)
 		}
 	}
 	r.pruneNoMatch(seen)
 	r.pruneRetryBackoff(seen)
+
 	// The gauge is set exactly once per pass, here at the Reconcile driver —
-	// NEVER inside the per-namespace loop above. SetGroupActivationActive
-	// carries no namespace label, so setting it once per namespace would let
-	// the last namespace's count silently overwrite every prior namespace's
+	// NEVER inside the per-namespace loop above (activations is already the
+	// union of every configured namespace by this point). SetGroupActivationActive
+	// carries no namespace label, so setting it once per namespace would let the
+	// last namespace's count silently overwrite every prior namespace's
 	// contribution: an undercount that looks like "only one namespace has
 	// groups," which is worse than not reporting at all.
 	if r.cfg.Metrics != nil {
+		active := 0
+		for i := range activations {
+			if activations[i].NodeType == engine.GroupNodeType && activations[i].RunnerID != "" {
+				active++
+			}
+		}
 		r.cfg.Metrics.SetGroupActivationActive(float64(active))
 	}
 	return nil
+}
+
+type logicalActivationKey struct {
+	namespace       namespace.Namespace
+	workflowID      types.WorkflowID
+	workflowVersion string
+	entryUnitID     string
+}
+
+func logicalKeyOf(act *engine.EntryActivation) logicalActivationKey {
+	return logicalActivationKey{act.Namespace, act.WorkflowID, act.WorkflowVersion, act.EntryUnitID}
+}
+
+func activationLess(a, b engine.EntryActivation) bool {
+	if a.Namespace != b.Namespace {
+		return a.Namespace < b.Namespace
+	}
+	if a.WorkflowID != b.WorkflowID {
+		return a.WorkflowID < b.WorkflowID
+	}
+	if a.WorkflowVersion != b.WorkflowVersion {
+		return a.WorkflowVersion < b.WorkflowVersion
+	}
+	if a.EntryUnitID != b.EntryUnitID {
+		return a.EntryUnitID < b.EntryUnitID
+	}
+	return a.ReplicaIndex < b.ReplicaIndex
+}
+
+func (r *EntryActivationReconciler) logReconcileError(act *engine.EntryActivation, err error) {
+	if r.cfg.Logger != nil {
+		r.cfg.Logger.Warn("entry activation reconcile failed",
+			"workflow_id", act.WorkflowID,
+			"entry_unit_id", act.EntryUnitID,
+			"replica_index", act.ReplicaIndex,
+			"err", err)
+	}
 }
 
 // pruneNoMatch drops grace-window tracking for activations that no longer exist
@@ -309,6 +371,7 @@ func keyOf(act *engine.EntryActivation) engine.EntryActivationKey {
 		WorkflowID:      act.WorkflowID,
 		WorkflowVersion: act.WorkflowVersion,
 		EntryUnitID:     act.EntryUnitID,
+		ReplicaIndex:    act.ReplicaIndex,
 	}
 }
 
@@ -345,7 +408,7 @@ func (r *EntryActivationReconciler) recordGroupSelectorFallback(act *engine.Entr
 	r.cfg.Metrics.OnGroupSelectorFallback()
 }
 
-func (r *EntryActivationReconciler) reconcileOne(ctx context.Context, act *engine.EntryActivation, live []RunnerSnapshot, now time.Time) error {
+func (r *EntryActivationReconciler) reconcileExisting(ctx context.Context, act *engine.EntryActivation, live []RunnerSnapshot, owners map[logicalActivationKey]map[string]struct{}, now time.Time) error {
 	key := keyOf(act)
 
 	// A cleared / non-desired activation should not hold an assignment. Fence any
@@ -374,7 +437,13 @@ func (r *EntryActivationReconciler) reconcileOne(ctx context.Context, act *engin
 		expired := !act.LeaseDeadline.IsZero() && act.LeaseDeadline.Before(now)
 		ownerLive := r.runnerIsLive(act.RunnerID, live, now)
 		ownerMatches := ownerLive && r.ownerSatisfiesDesired(act, live, now)
-		if !expired && ownerMatches {
+		logical := logicalKeyOf(act)
+		if owners[logical] == nil {
+			owners[logical] = make(map[string]struct{})
+		}
+		_, siblingAlreadyOwns := owners[logical][act.RunnerID]
+		if !expired && ownerMatches && !siblingAlreadyOwns {
+			owners[logical][act.RunnerID] = struct{}{}
 			// Owner still valid: the activation is being hosted successfully, so any
 			// backoff from a prior failure on this key no longer applies. (Task 5
 			// wires this to the runner's ActivationAck; until then this is the best
@@ -402,7 +471,11 @@ func (r *EntryActivationReconciler) reconcileOne(ctx context.Context, act *engin
 		r.recordGroupActivation(act, "deactivate")
 		act.RunnerID = ""
 	}
+	return nil
+}
 
+func (r *EntryActivationReconciler) assignUnowned(ctx context.Context, act *engine.EntryActivation, live []RunnerSnapshot, owners map[logicalActivationKey]map[string]struct{}, now time.Time) error {
+	key := keyOf(act)
 	// Unassigned (either fresh or just fenced): if a prior failure on this key
 	// put it in backoff, withhold redispatch until the backoff elapses. (Task 5
 	// wires runner-reported failures into noteActivationFailure; until then this
@@ -412,12 +485,14 @@ func (r *EntryActivationReconciler) reconcileOne(ctx context.Context, act *engin
 	}
 
 	// choose a matching live runner.
-	chosen, ok := r.chooseRunner(act, live, now)
+	logical := logicalKeyOf(act)
+	excluded := owners[logical]
+	chosen, ok := r.chooseRunner(act, live, now, excluded)
 	if !ok {
 		// No selector-matching + capable runner found. Behavior depends on the
 		// selector mode (spec §11.7).
 		if r.selectorIsDefault(act.Selector) {
-			chosen, ok = r.fallbackChooseRunner(act, live, now, key)
+			chosen, ok = r.fallbackChooseRunner(act, live, now, key, excluded)
 			if !ok {
 				return nil
 			}
@@ -448,6 +523,10 @@ func (r *EntryActivationReconciler) reconcileOne(ctx context.Context, act *engin
 	if assigned {
 		r.enqueueActivate(chosen.RunnerID, r.activateDirectiveFor(ctx, act, nextGen))
 		r.recordGroupActivation(act, "activate")
+		if owners[logical] == nil {
+			owners[logical] = make(map[string]struct{})
+		}
+		owners[logical][chosen.RunnerID] = struct{}{}
 		act.RunnerID = chosen.RunnerID
 	} else {
 		// assigned == false, err == nil: the CAS lost the generation race — a
@@ -464,8 +543,11 @@ func (r *EntryActivationReconciler) reconcileOne(ctx context.Context, act *engin
 // namespace and satisfies its selector. It is fail-closed on both: a runner
 // outside the namespace, or whose labels do not match a required selector, is
 // never chosen.
-func (r *EntryActivationReconciler) chooseRunner(act *engine.EntryActivation, live []RunnerSnapshot, now time.Time) (RunnerSnapshot, bool) {
+func (r *EntryActivationReconciler) chooseRunner(act *engine.EntryActivation, live []RunnerSnapshot, now time.Time, excluded map[string]struct{}) (RunnerSnapshot, bool) {
 	for _, snap := range live {
+		if _, skip := excluded[snap.RunnerID]; skip {
+			continue
+		}
 		if !r.selector.IsLive(snap, now) {
 			continue
 		}
@@ -541,6 +623,9 @@ func (r *EntryActivationReconciler) ownerSatisfiesDesired(act *engine.EntryActiv
 // unit's node type(s). Activations with no Requirements (older / selector-only
 // records) are placed on selector match alone (returns true).
 func capabilitiesSatisfy(act *engine.EntryActivation, snap RunnerSnapshot) bool {
+	if act.ReplicaIndex > 0 && !runnerHasFeature(snap.Capabilities, act.NodeType, engine.FeatureEntryActivationReplicaV1) {
+		return false
+	}
 	if len(act.Requirements) == 0 {
 		return true
 	}
@@ -550,6 +635,15 @@ func capabilitiesSatisfy(act *engine.EntryActivation, snap RunnerSnapshot) bool 
 		NodeVersion:  act.Requirements[0].NodeVersion,
 	}
 	return MatchCapabilities(snap.Capabilities, routing)
+}
+
+func runnerHasFeature(caps []protocol.Capability, nodeType, feature string) bool {
+	for _, capability := range caps {
+		if capability.NodeType == nodeType && containsString(capability.Features, feature) {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *EntryActivationReconciler) runnerIsLive(runnerID string, live []RunnerSnapshot, now time.Time) bool {
@@ -572,6 +666,7 @@ func (r *EntryActivationReconciler) liveRunners(ctx context.Context, now time.Ti
 			out = append(out, snap)
 		}
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].RunnerID < out[j].RunnerID })
 	return out
 }
 
@@ -599,22 +694,26 @@ func (r *EntryActivationReconciler) ReconcileRunnerInventory(ctx context.Context
 	if runnerID == "" {
 		return nil
 	}
-	// Index the reported inventory by (workflowID, workflowVersion, entryUnitID) → generation
+	// Index the reported inventory by
+	// (workflowID, workflowVersion, entryUnitID, replicaIndex) → generation
 	// so the per-activation lookup is O(1). When WorkflowVersion is empty (old
 	// runner that does not report version), the item is stored under key with
 	// empty version AND we mark it in a separate set so the matching step below
 	// can fall back to a version-agnostic match — this prevents a behavioral
 	// regression where an old runner's reconnect causes all versioned activations
 	// to be incorrectly revoked.
-	type invKey struct{ workflowID, workflowVersion, entryUnitID string }
+	type invKey struct {
+		workflowID, workflowVersion, entryUnitID string
+		replicaIndex                             uint32
+	}
 	reportedGen := make(map[invKey]uint64, len(reported))
 	// versionless tracks (workflowID, entryUnitID) → generation for items whose
 	// WorkflowVersion is empty (old runner backward-compat fallback).
 	type twoKey struct{ workflowID, entryUnitID string }
 	versionless := make(map[twoKey]uint64)
 	for _, item := range reported {
-		reportedGen[invKey{item.WorkflowID, item.WorkflowVersion, item.EntryUnitID}] = item.Generation
-		if item.WorkflowVersion == "" {
+		reportedGen[invKey{item.WorkflowID, item.WorkflowVersion, item.EntryUnitID, item.ReplicaIndex}] = item.Generation
+		if item.WorkflowVersion == "" && item.ReplicaIndex == 0 {
 			versionless[twoKey{item.WorkflowID, item.EntryUnitID}] = item.Generation
 		}
 	}
@@ -634,9 +733,10 @@ func (r *EntryActivationReconciler) ReconcileRunnerInventory(ctx context.Context
 				WorkflowID:      act.WorkflowID,
 				WorkflowVersion: act.WorkflowVersion,
 				EntryUnitID:     act.EntryUnitID,
+				ReplicaIndex:    act.ReplicaIndex,
 			}
-			gen, ok := reportedGen[invKey{string(act.WorkflowID), act.WorkflowVersion, act.EntryUnitID}]
-			if !ok {
+			gen, ok := reportedGen[invKey{string(act.WorkflowID), act.WorkflowVersion, act.EntryUnitID, act.ReplicaIndex}]
+			if !ok && act.ReplicaIndex == 0 {
 				// Backward-compat: if the runner reported the item with empty
 				// WorkflowVersion (old runner not aware of version), fall back to
 				// a version-agnostic lookup. This avoids revoking activations
@@ -706,7 +806,7 @@ func (r *EntryActivationReconciler) selectorIsDefault(sel *types.RunnerSelector)
 // that satisfies capability checks (labels are relaxed, but capabilities are
 // NOT — sending work to a runner that cannot execute it is always wrong).
 // Returns false if the grace window has not elapsed or no capable runner exists.
-func (r *EntryActivationReconciler) fallbackChooseRunner(act *engine.EntryActivation, live []RunnerSnapshot, now time.Time, key engine.EntryActivationKey) (RunnerSnapshot, bool) {
+func (r *EntryActivationReconciler) fallbackChooseRunner(act *engine.EntryActivation, live []RunnerSnapshot, now time.Time, key engine.EntryActivationKey, excluded map[string]struct{}) (RunnerSnapshot, bool) {
 	r.mu.Lock()
 	firstSeen, tracked := r.noMatchSince[key]
 	if !tracked {
@@ -727,6 +827,9 @@ func (r *EntryActivationReconciler) fallbackChooseRunner(act *engine.EntryActiva
 
 	// Grace elapsed: find any live + capable runner (labels relaxed).
 	for _, snap := range live {
+		if _, skip := excluded[snap.RunnerID]; skip {
+			continue
+		}
 		if !r.selector.IsLive(snap, now) {
 			continue
 		}
@@ -886,6 +989,7 @@ func (r *EntryActivationReconciler) MarkActivationFailed(ctx context.Context, ru
 		WorkflowID:      types.WorkflowID(ack.WorkflowID),
 		WorkflowVersion: ack.WorkflowVersion,
 		EntryUnitID:     ack.GroupID,
+		ReplicaIndex:    ack.ReplicaIndex,
 	}
 
 	act, ok, err := r.cfg.Store.Get(ctx, key)
@@ -938,6 +1042,7 @@ func (r *EntryActivationReconciler) activateDirectiveFor(ctx context.Context, ac
 		WorkflowID:      string(act.WorkflowID),
 		WorkflowVersion: act.WorkflowVersion,
 		EntryUnitID:     act.EntryUnitID,
+		ReplicaIndex:    act.ReplicaIndex,
 		NodeType:        act.NodeType,
 		Params:          act.Params,
 		Generation:      gen,
@@ -1036,10 +1141,12 @@ func activationKindFor(act *engine.EntryActivation) string {
 // activation at the given (pre-fence) generation.
 func deactivateDirectiveFor(act *engine.EntryActivation, gen uint64) protocol.DeactivateDirective {
 	return protocol.DeactivateDirective{
-		Namespace:   string(act.Namespace),
-		WorkflowID:  string(act.WorkflowID),
-		EntryUnitID: act.EntryUnitID,
-		Generation:  gen,
+		Namespace:       string(act.Namespace),
+		WorkflowID:      string(act.WorkflowID),
+		WorkflowVersion: act.WorkflowVersion,
+		EntryUnitID:     act.EntryUnitID,
+		ReplicaIndex:    act.ReplicaIndex,
+		Generation:      gen,
 	}
 }
 

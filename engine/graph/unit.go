@@ -20,13 +20,14 @@ const (
 // UnitMeta is a vertex in the durable scheduling topology: either an ungrouped
 // node or an entire co-location group.
 type UnitMeta struct {
-	Kind           UnitKind
-	Name           string
-	NodeIdx        int // valid for UnitNode; -1 otherwise
-	GroupIdx       int // valid for UnitGroup; -1 otherwise
-	RunnerSelector *types.RunnerSelector
-	Retry          *types.RetrySettings
-	Timeout        time.Duration
+	Kind               UnitKind
+	Name               string
+	NodeIdx            int // valid for UnitNode; -1 otherwise
+	GroupIdx           int // valid for UnitGroup; -1 otherwise
+	RunnerSelector     *types.RunnerSelector
+	Retry              *types.RetrySettings
+	Timeout            time.Duration
+	ActivationReplicas uint32 `json:",omitempty"`
 }
 
 // BoundaryEndpoint identifies a specific port on a node within (or outside) a
@@ -52,19 +53,20 @@ type BoundaryEdge struct {
 
 // GroupMeta is the compiled artifact for a co-location group.
 type GroupMeta struct {
-	Name            string
-	Members         []int
-	EntryIdx        int
-	UnitIdx         int
-	Trigger         bool
-	BoundaryInputs  []BoundaryEdge
-	BoundaryOutputs []BoundaryEdge
-	RunnerSelector  *types.RunnerSelector
-	OnError         string
-	Retry           *types.RetrySettings
-	Timeout         time.Duration
-	Mode            string
-	PackageHash     string
+	Name               string
+	Members            []int
+	EntryIdx           int
+	UnitIdx            int
+	Trigger            bool
+	BoundaryInputs     []BoundaryEdge
+	BoundaryOutputs    []BoundaryEdge
+	RunnerSelector     *types.RunnerSelector
+	OnError            string
+	Retry              *types.RetrySettings
+	Timeout            time.Duration
+	Mode               string
+	PackageHash        string
+	ActivationReplicas uint32 `json:",omitempty"`
 }
 
 // buildUnits constructs the durable unit graph. Ungrouped nodes become UnitNode
@@ -97,7 +99,8 @@ func buildUnits(g *Graph) error {
 		}
 		g.nodeUnit[i] = len(g.units)
 		g.units = append(g.units, UnitMeta{Kind: UnitNode, Name: g.nodes[i].Name,
-			NodeIdx: i, GroupIdx: -1, RunnerSelector: g.nodes[i].RunnerSelector, Retry: g.nodes[i].Retry})
+			NodeIdx: i, GroupIdx: -1, RunnerSelector: g.nodes[i].RunnerSelector, Retry: g.nodes[i].Retry,
+			ActivationReplicas: g.nodes[i].ActivationReplicas})
 	}
 	// Pass 2: group units, preserving group definition order.
 	for gi := range g.groups {
@@ -105,7 +108,8 @@ func buildUnits(g *Graph) error {
 		groupUnit[gi] = len(g.units)
 		gm.UnitIdx = len(g.units)
 		g.units = append(g.units, UnitMeta{Kind: UnitGroup, Name: gm.Name, NodeIdx: -1,
-			GroupIdx: gi, RunnerSelector: gm.RunnerSelector, Retry: gm.Retry, Timeout: gm.Timeout})
+			GroupIdx: gi, RunnerSelector: gm.RunnerSelector, Retry: gm.Retry, Timeout: gm.Timeout,
+			ActivationReplicas: gm.ActivationReplicas})
 		for _, memberIdx := range gm.Members {
 			g.nodeUnit[memberIdx] = groupUnit[gi]
 		}

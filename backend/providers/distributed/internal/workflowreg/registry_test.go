@@ -2,6 +2,8 @@ package workflowreg
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"strings"
 	"testing"
@@ -77,39 +79,48 @@ func slotTag(key string) string {
 	return key[i+1 : i+1+j]
 }
 
-// TestRegistryKeysAreClusterSafe statically guarantees every key the Lua scripts
-// touch — declared KEYS and the byid key the add script reconstructs — share the
-// same `{<key>}` hash tag, i.e. land in one slot. The idmap reverse index is
-// intentionally untagged (single-key op, cluster-safe on its own).
+// TestRegistryKeysAreClusterSafe statically guarantees every v2 authority key
+// touched by the Lua scripts shares the namespace-digest hash tag. Caller
+// controlled braces in namespaces, workflow keys, IDs, or mutation IDs must
+// never be able to select a different Redis Cluster slot.
 func TestRegistryKeysAreClusterSafe(t *testing.T) {
-	const key = "ns/name@v1"
-	id := types.WorkflowID(uuid.NewString())
-	tn := namespace.Namespace("namespace-a")
+	const key = "ns/{workflow}/name@v1"
+	id := types.WorkflowID("id-{attacker}")
+	tn := namespace.Namespace("namespace-{attacker}")
+	mutationID := "mutation-{attacker}"
 
 	bykey := workflowByKeyKey(tn, key)
 	byid := workflowByIDKey(tn, key, id)
 	byidPrefix := workflowByIDKeyPrefix(tn, key)
-	reconstructedByid := byidPrefix + string(id) // mirrors addWorkflowRecordLua's ARGV[1]..existingID
+	reconstructedByid := byidPrefix + string(id)
 
 	if byid != reconstructedByid {
-		t.Fatalf("byid key %q != script-constructed key %q", byid, reconstructedByid)
+		t.Fatalf("byid key %q != prefix-derived key %q", byid, reconstructedByid)
 	}
-	tag := slotTag(bykey)
-	if tag != key {
-		t.Fatalf("bykey tag = %q, want %q (raw key %q)", tag, key, bykey)
+	namespaceDigest := sha256.Sum256([]byte(tn))
+	wantTag := "ns:" + hex.EncodeToString(namespaceDigest[:])
+	keys := map[string]string{
+		"bykey":             bykey,
+		"byid":              byid,
+		"byid prefix":       reconstructedByid,
+		"metadata":          workflowIDMapKey(tn, id),
+		"revision":          workflowRevisionKey(tn),
+		"operation":         workflowOperationKey(tn, mutationID),
+		"legacy key marker": workflowLegacyByKeyMarker(tn, key),
+		"legacy id marker":  workflowLegacyByIDMarker(tn, id),
+		"definition hash":   workflowDefHashKey(tn, key, id),
 	}
-	if slotTag(byid) != tag {
-		t.Fatalf("byid tag %q != bykey tag %q", slotTag(byid), tag)
+	for name, redisKey := range keys {
+		if got := slotTag(redisKey); got != wantTag {
+			t.Errorf("%s tag = %q, want %q (raw key %q)", name, got, wantTag, redisKey)
+		}
 	}
-	if slotTag(reconstructedByid) != tag {
-		t.Fatalf("script-constructed byid tag %q != bykey tag %q", slotTag(reconstructedByid), tag)
+	if strings.Contains(wantTag, string(tn)) || strings.Contains(wantTag, key) || strings.Contains(wantTag, mutationID) {
+		t.Fatalf("hash tag %q contains caller-controlled input", wantTag)
 	}
-	if tag := slotTag(workflowIDMapKey(tn, id)); tag != "" {
-		t.Fatalf("idmap key must be untagged for single-key safety, got tag %q (%q)", tag, workflowIDMapKey(tn, id))
-	}
-	// Namespace prefix must be brace-free so the hash tag stays on {<key>}.
-	if strings.Contains(bykey, "{"+string(tn)+"}") {
-		t.Fatalf("bykey must not wrap namespace in braces: %q", bykey)
+	other := namespace.Namespace("namespace-{other}")
+	if slotTag(workflowByKeyKey(other, key)) == wantTag {
+		t.Fatalf("different namespaces unexpectedly share hash tag %q", wantTag)
 	}
 }
 

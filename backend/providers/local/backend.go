@@ -15,10 +15,11 @@ import (
 type Option func(*config)
 
 type config struct {
-	concurrency  int
-	resourcePool types.ResourcePool
-	artifactCode func(ctx context.Context, digest string) ([]byte, error)
-	registry     *execution.Registry
+	concurrency   int
+	queueCapacity int
+	resourcePool  types.ResourcePool
+	artifactCode  func(ctx context.Context, digest string) ([]byte, error)
+	registry      *execution.Registry
 }
 
 // WithConcurrency sets the number of in-memory queue consumer goroutines. Default is 4.
@@ -26,6 +27,19 @@ func WithConcurrency(n int) Option {
 	return func(c *config) {
 		if n > 0 {
 			c.concurrency = n
+		}
+	}
+}
+
+// WithQueueCapacity sets the buffered capacity of each in-memory queue lane.
+// The default remains 1024 for general-purpose local backends. Short-lived
+// embedded backends may use a smaller value to avoid paying that allocation on
+// every execution; durable outbox delivery supplies backpressure when a lane
+// fills.
+func WithQueueCapacity(n int) Option {
+	return func(c *config) {
+		if n > 0 {
+			c.queueCapacity = n
 		}
 	}
 }
@@ -68,7 +82,7 @@ type Backend struct {
 // New creates a memory backend with its components but does NOT start the queue.
 // Call Bind(eng) to wire the embedded execution dispatcher and start queue consumers.
 func New(opts ...Option) *Backend {
-	cfg := &config{concurrency: 4}
+	cfg := &config{concurrency: 4, queueCapacity: defaultMemoryQueueCapacity}
 	for _, o := range opts {
 		o(cfg)
 	}
@@ -80,7 +94,7 @@ func New(opts ...Option) *Backend {
 
 	return &Backend{
 		state:            newMemoryState(),
-		queue:            newMemoryQueue(cfg.concurrency),
+		queue:            newMemoryQueueWithCapacity(cfg.concurrency, cfg.queueCapacity),
 		registry:         reg,
 		workflowRegistry: newWorkflowRegistry(),
 		triggerRuntime:   newTriggerPrimitives(),

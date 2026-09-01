@@ -64,6 +64,10 @@ func (h *countingBodyHandler) count() int {
 // newFanOutEngine builds a backend whose map bodies run on an inner engine,
 // the same wiring sdk/xflow and the runner's group/subgraph runtimes use.
 func newFanOutEngine(t *testing.T, concurrency int, perMap int, opts ...engine.Option) (*Backend, *engine.Engine, *countingBodyHandler, func()) {
+	return newFanOutEngineWithQueueCapacity(t, concurrency, perMap, defaultMemoryQueueCapacity, opts...)
+}
+
+func newFanOutEngineWithQueueCapacity(t *testing.T, concurrency int, perMap int, queueCapacity int, opts ...engine.Option) (*Backend, *engine.Engine, *countingBodyHandler, func()) {
 	t.Helper()
 	reg := execution.NewRegistry()
 	reg.RegisterGlobal("xflow.map", &wideFanoutHandler{n: perMap})
@@ -71,7 +75,7 @@ func newFanOutEngine(t *testing.T, concurrency int, perMap int, opts ...engine.O
 	body := &countingBodyHandler{}
 	reg.RegisterGlobal("test.body_item", body)
 
-	b := New(WithConcurrency(concurrency), WithRegistry(reg))
+	b := New(WithConcurrency(concurrency), WithQueueCapacity(queueCapacity), WithRegistry(reg))
 	bodies := subgraph.NewMapBodyExecutor(
 		subgraph.NewExecutor(reg, subgraph.NewPackageCache(subgraph.PackageCacheConfig{}),
 			func() subgraph.Backend { return New(WithRegistry(reg), WithConcurrency(1)) }),
@@ -79,6 +83,37 @@ func newFanOutEngine(t *testing.T, concurrency int, perMap int, opts ...engine.O
 	eng := engine.New(b.State(), b.Queue(),
 		append([]engine.Option{engine.WithBatchBodyExecutor(bodies)}, opts...)...)
 	return b, eng, body, b.Bind(eng)
+}
+
+func TestFanOutWiderThanConfiguredQueueCapacityCompletes(t *testing.T) {
+	const queueCapacity, n = 16, 64
+	b, eng, body, stop := newFanOutEngineWithQueueCapacity(t, 1, n, queueCapacity)
+	defer stop()
+
+	compiled, err := graph.Compile(&types.WorkflowDef{
+		Name: "small-buffer-wide-fanout",
+		Nodes: []types.NodeDef{
+			{Name: "m", Type: "xflow.map", Parameters: map[string]any{
+				"items": "$input.items", "body": mapBodyDef(),
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	id, err := eng.Submit(ctx, compiled, nil)
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	if _, err := b.WaitDone(ctx, id); err != nil {
+		t.Fatalf("WaitDone: %v (body ran %d/%d)", err, body.count(), n)
+	}
+	if got := body.count(); got != n {
+		t.Fatalf("body ran %d times, want %d", got, n)
+	}
 }
 
 func mapBodyDef() map[string]any {

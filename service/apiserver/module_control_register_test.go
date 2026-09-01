@@ -167,6 +167,14 @@ func (s clearFailingEntryStore) Upsert(ctx context.Context, act engine.EntryActi
 	return s.EntryActivationStore.Upsert(ctx, act)
 }
 
+func (s clearFailingEntryStore) AdvanceWorkflowRevision(ctx context.Context, ns namespace.Namespace, workflowID types.WorkflowID, revision uint64) error {
+	revisions, ok := s.EntryActivationStore.(engine.EntryActivationRevisionStore)
+	if !ok {
+		return errors.New("wrapped activation store does not support revision fencing")
+	}
+	return revisions.AdvanceWorkflowRevision(ctx, ns, workflowID, revision)
+}
+
 // triggerWorkflow is a workflow whose entry is a single remote-hosted trigger
 // node carrying a RunnerSelector, so registering it derives an EntryActivation
 // and deregistering it must clear that desired-state.

@@ -23,6 +23,7 @@ func CapabilitiesToProto(capabilities []Capability) []*runnerpb.Capability {
 		out[i] = &runnerpb.Capability{
 			NodeType:    c.NodeType,
 			NodeVersion: int32(c.NodeVersion),
+			Features:    cloneStrings(c.Features),
 		}
 	}
 	return out
@@ -37,6 +38,7 @@ func CapabilitiesFromProto(capabilities []*runnerpb.Capability) []Capability {
 		out[i] = Capability{
 			NodeType:    c.GetNodeType(),
 			NodeVersion: int(c.GetNodeVersion()),
+			Features:    cloneStrings(c.GetFeatures()),
 		}
 	}
 	return out
@@ -97,6 +99,7 @@ func ActivationInventoryToProto(items []ActivationInventoryItem) []*runnerpb.Act
 			EntryUnitId:     item.EntryUnitID,
 			Generation:      item.Generation,
 			WorkflowVersion: item.WorkflowVersion,
+			ReplicaIndex:    item.ReplicaIndex,
 		}
 	}
 	return out
@@ -113,6 +116,7 @@ func ActivationInventoryFromProto(items []*runnerpb.ActivationInventoryItem) []A
 			WorkflowVersion: item.GetWorkflowVersion(),
 			EntryUnitID:     item.GetEntryUnitId(),
 			Generation:      item.GetGeneration(),
+			ReplicaIndex:    item.GetReplicaIndex(),
 		}
 	}
 	return out

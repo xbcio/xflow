@@ -115,6 +115,75 @@ func TestEntryActivationReconciler_AssignsMatchingRunner(t *testing.T) {
 	}
 }
 
+// TestEntryActivationReconciler_SingleOwnerWithTwoLiveRunners locks the
+// current activation cardinality: an entry activation has one durable key and
+// one RunnerID, so adding a second eligible runner does not create a second
+// hosted copy of the trigger. This matters for Kafka-backed co-located entry
+// groups because only the owner joins the consumer group and executes the map.
+func TestEntryActivationReconciler_SingleOwnerWithTwoLiveRunners(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryEntryActivationStore()
+
+	act := testEntryActivation()
+	if err := store.Upsert(ctx, act); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	lister := &mockRunnerLister{runners: []RunnerSnapshot{
+		{RunnerID: "runner-a", Capacity: 4, Labels: map[string]string{"zone": "a"}, LastHeartbeat: now},
+		{RunnerID: "runner-b", Capacity: 4, Labels: map[string]string{"zone": "a"}, LastHeartbeat: now},
+	}}
+	sel := DefaultRunnerSelector()
+	r := NewEntryActivationReconciler(EntryActivationReconcilerConfig{
+		Store:      store,
+		Lister:     lister,
+		Selector:   &sel,
+		Namespaces: []namespace.Namespace{namespace.Default},
+		LeaseTTL:   time.Minute,
+	})
+
+	if err := r.Reconcile(ctx, now); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	got, ok, err := store.Get(ctx, keyOfActivation(act))
+	if err != nil || !ok {
+		t.Fatalf("Get after reconcile: ok=%v err=%v", ok, err)
+	}
+	if got.RunnerID != "runner-a" {
+		t.Fatalf("owner = %q, want first eligible runner-a", got.RunnerID)
+	}
+
+	directivesA := r.DirectivesForRunner("runner-a")
+	directivesB := r.DirectivesForRunner("runner-b")
+	activateCount := 0
+	if directivesA != nil {
+		activateCount += len(directivesA.Activate)
+	}
+	if directivesB != nil {
+		activateCount += len(directivesB.Activate)
+	}
+	if activateCount != 1 {
+		t.Fatalf("activate directives across two live runners = %d, want 1", activateCount)
+	}
+	if directivesB != nil && len(directivesB.Activate) != 0 {
+		t.Fatalf("runner-b unexpectedly received activation: %+v", directivesB.Activate)
+	}
+
+	// A stable owner suppresses further placement. The second eligible runner
+	// remains idle for this entry rather than becoming another Kafka group member.
+	if err := r.Reconcile(ctx, now.Add(time.Second)); err != nil {
+		t.Fatalf("second Reconcile: %v", err)
+	}
+	if got := r.DirectivesForRunner("runner-a"); got != nil {
+		t.Fatalf("stable owner received duplicate directive: %+v", got)
+	}
+	if got := r.DirectivesForRunner("runner-b"); got != nil {
+		t.Fatalf("second runner received directive after stable reconcile: %+v", got)
+	}
+}
+
 // TestReconcilerCapabilityMatch verifies the reconciler only assigns an
 // activation to a runner that advertises the required node-type capability. Two
 // live, label-matching runners are offered: one advertises the required
@@ -1721,8 +1790,8 @@ func TestEntryActivationReconciler_GroupPackageHashDriftWithholdsPackage(t *test
 		EntryUnitID: units[0].EntryUnitID, NodeType: units[0].NodeType,
 		// Deliberately stale: stands in for a persisted hash produced by an
 		// older projection than the one running now.
-		PackageHash: "pkg-sha256:v1:stale-from-an-older-projection",
-		Selector:    units[0].Selector,
+		PackageHash:  "pkg-sha256:v1:stale-from-an-older-projection",
+		Selector:     units[0].Selector,
 		Requirements: units[0].Requirements, Desired: true,
 	}
 	if err := store.Upsert(ctx, act); err != nil {
@@ -1763,5 +1832,225 @@ func TestEntryActivationReconciler_GroupPackageHashDriftWithholdsPackage(t *test
 		t.Fatalf("Package = %+v, want nil — a package projected against a "+
 			"different hash than the directive advertises would be rejected "+
 			"by the runner with an error naming neither side's provenance", pkg)
+	}
+}
+
+func replicaTestActivation(replica uint32) engine.EntryActivation {
+	act := testEntryActivation()
+	act.NodeType = "test.trigger"
+	act.ReplicaIndex = replica
+	return act
+}
+
+func replicaCapableRunner(id string, now time.Time, replicaFeature bool) RunnerSnapshot {
+	features := []string(nil)
+	if replicaFeature {
+		features = []string{engine.FeatureEntryActivationReplicaV1}
+	}
+	return RunnerSnapshot{
+		RunnerID:      id,
+		Capacity:      4,
+		Labels:        map[string]string{"zone": "a"},
+		LastHeartbeat: now,
+		Capabilities: []protocol.Capability{{
+			NodeType: "test.trigger",
+			Features: features,
+		}},
+	}
+}
+
+func TestEntryActivationReconciler_ReplicaSiblingsUseDistinctRunnersDeterministically(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryEntryActivationStore()
+	for replica := uint32(0); replica < 2; replica++ {
+		if err := store.Upsert(ctx, replicaTestActivation(replica)); err != nil {
+			t.Fatalf("Upsert replica %d: %v", replica, err)
+		}
+	}
+
+	now := time.Date(2026, 8, 21, 13, 0, 0, 0, time.UTC)
+	// Deliberately reverse the directory order. Placement must be stable rather
+	// than inherit Redis/directory iteration order.
+	lister := &mockRunnerLister{runners: []RunnerSnapshot{
+		replicaCapableRunner("runner-b", now, true),
+		replicaCapableRunner("runner-a", now, true),
+	}}
+	r := NewEntryActivationReconciler(EntryActivationReconcilerConfig{
+		Store: store, Lister: lister, Namespaces: []namespace.Namespace{namespace.Default}, LeaseTTL: time.Minute,
+	})
+	if err := r.Reconcile(ctx, now); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	for replica, wantRunner := range map[uint32]string{0: "runner-a", 1: "runner-b"} {
+		act := replicaTestActivation(replica)
+		got, ok, err := store.Get(ctx, keyOfActivation(act))
+		if err != nil || !ok {
+			t.Fatalf("Get replica %d: ok=%v err=%v", replica, ok, err)
+		}
+		if got.RunnerID != wantRunner {
+			t.Fatalf("replica %d owner = %q, want %q", replica, got.RunnerID, wantRunner)
+		}
+		directives := r.DirectivesForRunner(wantRunner)
+		if directives == nil || len(directives.Activate) != 1 || directives.Activate[0].ReplicaIndex != replica {
+			t.Fatalf("runner %s directives = %+v, want replica %d", wantRunner, directives, replica)
+		}
+	}
+}
+
+func TestEntryActivationReconciler_ReplicaDoesNotCoLocateWhenRunnersAreInsufficient(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryEntryActivationStore()
+	for replica := uint32(0); replica < 2; replica++ {
+		if err := store.Upsert(ctx, replicaTestActivation(replica)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Date(2026, 8, 21, 13, 0, 0, 0, time.UTC)
+	lister := &mockRunnerLister{runners: []RunnerSnapshot{replicaCapableRunner("runner-a", now, true)}}
+	r := NewEntryActivationReconciler(EntryActivationReconcilerConfig{
+		Store: store, Lister: lister, Namespaces: []namespace.Namespace{namespace.Default}, LeaseTTL: time.Minute,
+	})
+	if err := r.Reconcile(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	zero, _, _ := store.Get(ctx, keyOfActivation(replicaTestActivation(0)))
+	one, _, _ := store.Get(ctx, keyOfActivation(replicaTestActivation(1)))
+	if zero.RunnerID != "runner-a" || one.RunnerID != "" {
+		t.Fatalf("owners with one runner: replica0=%q replica1=%q, want runner-a and unassigned", zero.RunnerID, one.RunnerID)
+	}
+	if err := r.Reconcile(ctx, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	one, _, _ = store.Get(ctx, keyOfActivation(replicaTestActivation(1)))
+	if one.RunnerID != "" {
+		t.Fatalf("second reconcile co-located replica 1 on %q", one.RunnerID)
+	}
+}
+
+func TestEntryActivationReconciler_RepairsDuplicateSiblingOwner(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryEntryActivationStore()
+	now := time.Date(2026, 8, 21, 13, 0, 0, 0, time.UTC)
+	for replica := uint32(0); replica < 2; replica++ {
+		act := replicaTestActivation(replica)
+		if err := store.Upsert(ctx, act); err != nil {
+			t.Fatal(err)
+		}
+		if ok, err := store.Assign(ctx, keyOfActivation(act), "runner-a", "session-a", 1, now.Add(time.Minute)); err != nil || !ok {
+			t.Fatalf("Assign replica %d: ok=%v err=%v", replica, ok, err)
+		}
+	}
+	lister := &mockRunnerLister{runners: []RunnerSnapshot{
+		replicaCapableRunner("runner-a", now, true),
+		replicaCapableRunner("runner-b", now, true),
+	}}
+	r := NewEntryActivationReconciler(EntryActivationReconcilerConfig{
+		Store: store, Lister: lister, Namespaces: []namespace.Namespace{namespace.Default}, LeaseTTL: time.Minute,
+	})
+	if err := r.Reconcile(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	zero, _, _ := store.Get(ctx, keyOfActivation(replicaTestActivation(0)))
+	one, _, _ := store.Get(ctx, keyOfActivation(replicaTestActivation(1)))
+	if zero.RunnerID != "runner-a" || zero.Generation != 1 {
+		t.Fatalf("lower replica should retain owner: %+v", zero)
+	}
+	if one.RunnerID != "runner-b" || one.Generation != 2 {
+		t.Fatalf("duplicate sibling should move at new generation: %+v", one)
+	}
+	stop := r.DirectivesForRunner("runner-a")
+	if stop == nil || len(stop.Deactivate) != 1 || stop.Deactivate[0].ReplicaIndex != 1 {
+		t.Fatalf("runner-a deactivation = %+v, want replica 1", stop)
+	}
+	start := r.DirectivesForRunner("runner-b")
+	if start == nil || len(start.Activate) != 1 || start.Activate[0].ReplicaIndex != 1 {
+		t.Fatalf("runner-b activation = %+v, want replica 1", start)
+	}
+}
+
+func TestEntryActivationReconciler_ReplicaFeatureGate(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryEntryActivationStore()
+	for replica := uint32(0); replica < 2; replica++ {
+		if err := store.Upsert(ctx, replicaTestActivation(replica)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Date(2026, 8, 21, 13, 0, 0, 0, time.UTC)
+	lister := &mockRunnerLister{runners: []RunnerSnapshot{
+		replicaCapableRunner("runner-a", now, false),
+		replicaCapableRunner("runner-b", now, false),
+	}}
+	r := NewEntryActivationReconciler(EntryActivationReconcilerConfig{
+		Store: store, Lister: lister, Namespaces: []namespace.Namespace{namespace.Default}, LeaseTTL: time.Minute,
+	})
+	if err := r.Reconcile(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	zero, _, _ := store.Get(ctx, keyOfActivation(replicaTestActivation(0)))
+	one, _, _ := store.Get(ctx, keyOfActivation(replicaTestActivation(1)))
+	if zero.RunnerID != "runner-a" || one.RunnerID != "" {
+		t.Fatalf("old-runner placement: replica0=%q replica1=%q", zero.RunnerID, one.RunnerID)
+	}
+
+	lister.runners[1] = replicaCapableRunner("runner-b", now.Add(time.Second), true)
+	lister.runners[0].LastHeartbeat = now.Add(time.Second)
+	if err := r.Reconcile(ctx, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	one, _, _ = store.Get(ctx, keyOfActivation(replicaTestActivation(1)))
+	if one.RunnerID != "runner-b" {
+		t.Fatalf("replica 1 owner after feature advertisement = %q, want runner-b", one.RunnerID)
+	}
+}
+
+func TestEntryActivationReconciler_InventoryAndAckAreReplicaScoped(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryEntryActivationStore()
+	now := time.Now()
+	for replica, runner := range map[uint32]string{0: "runner-a", 1: "runner-b"} {
+		act := replicaTestActivation(replica)
+		if err := store.Upsert(ctx, act); err != nil {
+			t.Fatal(err)
+		}
+		if ok, err := store.Assign(ctx, keyOfActivation(act), runner, "session", 3, now.Add(time.Minute)); err != nil || !ok {
+			t.Fatalf("Assign replica %d: ok=%v err=%v", replica, ok, err)
+		}
+	}
+	r := NewEntryActivationReconciler(EntryActivationReconcilerConfig{
+		Store: store, Namespaces: []namespace.Namespace{namespace.Default}, LeaseTTL: time.Minute,
+	})
+
+	// Reporting replica 1 from runner-a must not count as runner-a reporting its
+	// actual replica 0 assignment.
+	if err := r.ReconcileRunnerInventory(ctx, "runner-a", []protocol.ActivationInventoryItem{{
+		WorkflowID: "wf-1", WorkflowVersion: "v1", EntryUnitID: "tg", ReplicaIndex: 1, Generation: 3,
+	}}, now); err != nil {
+		t.Fatal(err)
+	}
+	zero, _, _ := store.Get(ctx, keyOfActivation(replicaTestActivation(0)))
+	one, _, _ := store.Get(ctx, keyOfActivation(replicaTestActivation(1)))
+	if zero.RunnerID != "" {
+		t.Fatalf("replica 0 was falsely renewed by sibling inventory: %+v", zero)
+	}
+	if one.RunnerID != "runner-b" || one.Generation != 3 {
+		t.Fatalf("replica 1 changed while reconciling runner-a: %+v", one)
+	}
+
+	ack := protocol.ActivationAck{
+		WorkflowID: "wf-1", WorkflowVersion: "v1", GroupID: "tg", ReplicaIndex: 1,
+		Generation: 3, Status: protocol.ActivationStatusFailed,
+	}
+	if err := r.MarkActivationFailed(namespace.WithNamespace(ctx, namespace.Default), "runner-b", ack); err != nil {
+		t.Fatal(err)
+	}
+	one, _, _ = store.Get(ctx, keyOfActivation(replicaTestActivation(1)))
+	zero, _, _ = store.Get(ctx, keyOfActivation(replicaTestActivation(0)))
+	if one.RunnerID != "" {
+		t.Fatalf("replica 1 failure was not fenced: %+v", one)
+	}
+	if zero.Generation != 3 || zero.RunnerID != "" {
+		t.Fatalf("replica 1 ack changed replica 0: %+v", zero)
 	}
 }

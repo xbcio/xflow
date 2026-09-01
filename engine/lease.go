@@ -8,7 +8,6 @@ import (
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/types"
-	"github.com/google/uuid"
 )
 
 // ExecutionTraceCarrier returns the W3C traceparent/tracestate carrier
@@ -60,8 +59,7 @@ func (e *Engine) BuildTaskLease(ctx context.Context, t *Task) (*TaskLease, error
 		return nil, err
 	}
 
-	leaseID := LeaseID("lease-" + uuid.New().String())
-	leaseToken := LeaseToken("token-" + uuid.New().String())
+	leaseID, leaseToken := newLeaseCredentials()
 	issuedAt := time.Now().UTC()
 	ttl := e.defaultLeaseTTL
 	lease := &TaskLease{
@@ -124,6 +122,7 @@ func (e *Engine) BuildTaskLease(ctx context.Context, t *Task) (*TaskLease, error
 			lease.ExecutionDeadline = e.outerDeadline
 		}
 	}
+	lease.ArtifactUses = e.artifactUses
 
 	started := prev == nil || prev.Status != types.NodeStatusRunning
 	if started && e.hooks != nil {
@@ -210,6 +209,7 @@ func (e *Engine) RecoverTaskLease(ctx context.Context, task *Task) (*TaskLease, 
 			recovered.ExecutionDeadline = e.outerDeadline
 		}
 	}
+	recovered.ArtifactUses = e.artifactUses
 	return recovered, nil
 }
 

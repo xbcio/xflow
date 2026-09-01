@@ -7,7 +7,6 @@ import (
 
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/types"
-	"github.com/google/uuid"
 )
 
 // GroupExit is one boundary output produced by a member node during group
@@ -58,11 +57,12 @@ func (e *Engine) executeGroup(ctx context.Context, task *Task, flush bool) error
 	// to fence CommitGroup. What belongs to a future milestone is enforcement
 	// of GroupMeta.Retry.MaxAttempts — scheduling a retry vs. failing the
 	// execution when the group exhausts its budget.
+	leaseID, leaseToken := newLeaseCredentials()
 	lease := &GroupLease{
 		ExecutionID:  task.ExecutionID,
 		GroupUnitIdx: task.UnitIdx,
-		LeaseID:      LeaseID("lease-" + uuid.New().String()),
-		LeaseToken:   LeaseToken("token-" + uuid.New().String()),
+		LeaseID:      leaseID,
+		LeaseToken:   leaseToken,
 		Attempt:      1, // seed; overwritten by AcquireGroupLease with the real attempt
 		IssuedAt:     time.Now().UTC(),
 		TTL:          e.defaultLeaseTTL,

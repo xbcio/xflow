@@ -303,3 +303,41 @@ func TestActivationAckDedupIncludesVersion(t *testing.T) {
 		t.Fatalf("v2 ack generation = %d, want 1", versions["v2"])
 	}
 }
+
+func TestActivationAckDedupIncludesReplicaIndex(t *testing.T) {
+	var mu sync.Mutex
+	var acks []protocol.ActivationAck
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var ack protocol.ActivationAck
+		_ = json.NewDecoder(r.Body).Decode(&ack)
+		mu.Lock()
+		acks = append(acks, ack)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	acker := newActivationAcker(
+		protocol.NewClient(srv.URL, srv.Client()),
+		"runner-1",
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	activateErr := errors.New("activation failed")
+	acker.ackFailed("session-1", protocol.ActivateDirective{
+		WorkflowID: "wf-1", WorkflowVersion: "v1", EntryUnitID: "group-a", ReplicaIndex: 0, Generation: 5,
+	}, activateErr)
+	acker.ackFailed("session-1", protocol.ActivateDirective{
+		WorkflowID: "wf-1", WorkflowVersion: "v1", EntryUnitID: "group-a", ReplicaIndex: 1, Generation: 1,
+	}, activateErr)
+
+	waitForAcks(t, &mu, &acks, 2)
+	mu.Lock()
+	defer mu.Unlock()
+	generations := map[uint32]uint64{}
+	for _, ack := range acks {
+		generations[ack.ReplicaIndex] = ack.Generation
+	}
+	if generations[0] != 5 || generations[1] != 1 {
+		t.Fatalf("acks by replica = %v, want replica 0/gen5 and replica 1/gen1", generations)
+	}
+}

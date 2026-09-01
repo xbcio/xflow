@@ -96,8 +96,23 @@ func TestExecuteBatchBody_PerItemCostIsFlatInBatchSize(t *testing.T) {
 	// first-call cost of one size against the steady-state cost of the other.
 	perItem(20)
 
-	small := perItem(20)
-	large := perItem(500)
+	// go test runs packages concurrently. A single wall-clock sample can be
+	// descheduled during the 500-item run and manufacture a scaling regression
+	// that disappears when this package runs alone. Take the best interleaved
+	// sample for each size: scheduler/GC pauses can only make a sample slower, so
+	// the minima approximate unpaused work while a real O(batch-length) per-item
+	// term remains in every large sample. Keep the original 4x threshold.
+	const samples = 5
+	small := time.Duration(1<<63 - 1)
+	large := time.Duration(1<<63 - 1)
+	for range samples {
+		if got := perItem(20); got < small {
+			small = got
+		}
+		if got := perItem(500); got < large {
+			large = got
+		}
+	}
 	t.Logf("per-item: batch=20 %v, batch=500 %v (ratio %.1fx)",
 		small.Round(time.Microsecond), large.Round(time.Microsecond),
 		float64(large)/float64(small))

@@ -349,7 +349,7 @@ func (s *Store) OutboxMetrics(ctx context.Context) (engine.OutboxMetricsSnapshot
 		return engine.OutboxMetricsSnapshot{}, fmt.Errorf("list namespaces for outbox metrics: %w", err)
 	}
 	for _, t := range namespaces {
-		if err := s.scanOutboxMetricsForTenant(ctx, t, &snapshot); err != nil {
+		if err := s.scanOutboxMetricsForNamespace(ctx, t, &snapshot); err != nil {
 			return engine.OutboxMetricsSnapshot{}, err
 		}
 	}
@@ -415,7 +415,7 @@ func (s *Store) oldestOutboxCreatedAt(ctx context.Context, bodyKey string, membe
 	return oldest, nil
 }
 
-func (s *Store) scanOutboxMetricsForTenant(ctx context.Context, t namespace.Namespace, snapshot *engine.OutboxMetricsSnapshot) error {
+func (s *Store) scanOutboxMetricsForNamespace(ctx context.Context, t namespace.Namespace, snapshot *engine.OutboxMetricsSnapshot) error {
 	var cursor uint64
 	for {
 		keys, next, err := s.rdb.Scan(ctx, cursor, execScanPattern(t, "outbox:ready"), 128).Result()
@@ -491,7 +491,7 @@ func (s *Store) ListOutboxExecutions(ctx context.Context, limit int) ([]types.Ex
 		if len(ids) >= limit {
 			break
 		}
-		if err := s.scanOutboxExecutionsForTenant(ctx, t, limit, ids); err != nil {
+		if err := s.scanOutboxExecutionsForNamespace(ctx, t, limit, ids); err != nil {
 			return nil, err
 		}
 	}
@@ -503,7 +503,7 @@ func (s *Store) ListOutboxExecutions(ctx context.Context, limit int) ([]types.Ex
 	return out, nil
 }
 
-func (s *Store) scanOutboxExecutionsForTenant(ctx context.Context, t namespace.Namespace, limit int, ids map[types.ExecutionID]struct{}) error {
+func (s *Store) scanOutboxExecutionsForNamespace(ctx context.Context, t namespace.Namespace, limit int, ids map[types.ExecutionID]struct{}) error {
 	var cursor uint64
 	for len(ids) < limit {
 		keys, next, err := s.rdb.Scan(ctx, cursor, execScanPattern(t, "outbox:ready"), 128).Result()

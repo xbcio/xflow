@@ -1,6 +1,8 @@
 package protocol
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -46,7 +48,7 @@ func TestRunnerFrameRoundTripAllArms(t *testing.T) {
 				RunnerID:    "runner-42",
 				Concurrency: 4,
 				Capabilities: []Capability{
-					{NodeType: "xflow.function", NodeVersion: 1},
+					{NodeType: "xflow.function", NodeVersion: 1, Features: []string{"entry.activation.replica.v1"}},
 				},
 				Labels: map[string]string{"region": "us-east"},
 			}},
@@ -63,6 +65,9 @@ func TestRunnerFrameRoundTripAllArms(t *testing.T) {
 				}
 				if len(got.Hello.Capabilities) != 1 || got.Hello.Capabilities[0].NodeType != "xflow.function" {
 					t.Errorf("Capabilities mismatch: %+v", got.Hello.Capabilities)
+				}
+				if len(got.Hello.Capabilities[0].Features) != 1 || got.Hello.Capabilities[0].Features[0] != "entry.activation.replica.v1" {
+					t.Errorf("Capability features mismatch: %+v", got.Hello.Capabilities[0].Features)
 				}
 				if got.Hello.Labels["region"] != "us-east" {
 					t.Errorf("Labels mismatch: %+v", got.Hello.Labels)
@@ -234,7 +239,7 @@ func TestRegisterRequestProtoRoundTripActivations(t *testing.T) {
 		RunnerID:    "runner-1",
 		Concurrency: 4,
 		Capabilities: []Capability{
-			{NodeType: "kafka.source", NodeVersion: 1},
+			{NodeType: "kafka.source", NodeVersion: 1, Features: []string{"entry.activation.replica.v1"}},
 		},
 		Labels:     map[string]string{"zone": "a"},
 		Namespaces: []string{"default"},
@@ -243,6 +248,7 @@ func TestRegisterRequestProtoRoundTripActivations(t *testing.T) {
 				WorkflowID:      "wf-1",
 				WorkflowVersion: "v2",
 				EntryUnitID:     "tg-1",
+				ReplicaIndex:    3,
 				Generation:      3,
 			},
 			{
@@ -263,15 +269,86 @@ func TestRegisterRequestProtoRoundTripActivations(t *testing.T) {
 	if got.Concurrency != original.Concurrency {
 		t.Fatalf("Concurrency: got %d, want %d", got.Concurrency, original.Concurrency)
 	}
+	if len(got.Capabilities) != 1 || len(got.Capabilities[0].Features) != 1 || got.Capabilities[0].Features[0] != "entry.activation.replica.v1" {
+		t.Fatalf("Capabilities: got %+v, want %+v", got.Capabilities, original.Capabilities)
+	}
 	if len(got.Activations) != len(original.Activations) {
 		t.Fatalf("Activations len: got %d, want %d", len(got.Activations), len(original.Activations))
 	}
 	for i, want := range original.Activations {
 		g := got.Activations[i]
 		if g.WorkflowID != want.WorkflowID || g.WorkflowVersion != want.WorkflowVersion ||
-			g.EntryUnitID != want.EntryUnitID || g.Generation != want.Generation {
+			g.EntryUnitID != want.EntryUnitID || g.ReplicaIndex != want.ReplicaIndex || g.Generation != want.Generation {
 			t.Fatalf("Activations[%d]: got %+v, want %+v", i, g, want)
 		}
+	}
+}
+
+func TestActivationReplicaIndexJSONZeroValueCompatibility(t *testing.T) {
+	tests := []struct {
+		name   string
+		value  any
+		decode func([]byte) uint32
+	}{
+		{
+			name:  "activate",
+			value: ActivateDirective{WorkflowID: "wf", EntryUnitID: "entry"},
+			decode: func(data []byte) uint32 {
+				var value ActivateDirective
+				if err := json.Unmarshal(data, &value); err != nil {
+					t.Fatalf("unmarshal activate: %v", err)
+				}
+				return value.ReplicaIndex
+			},
+		},
+		{
+			name:  "deactivate",
+			value: DeactivateDirective{WorkflowID: "wf", EntryUnitID: "entry"},
+			decode: func(data []byte) uint32 {
+				var value DeactivateDirective
+				if err := json.Unmarshal(data, &value); err != nil {
+					t.Fatalf("unmarshal deactivate: %v", err)
+				}
+				return value.ReplicaIndex
+			},
+		},
+		{
+			name:  "ack",
+			value: ActivationAck{WorkflowID: "wf", GroupID: "entry"},
+			decode: func(data []byte) uint32 {
+				var value ActivationAck
+				if err := json.Unmarshal(data, &value); err != nil {
+					t.Fatalf("unmarshal ack: %v", err)
+				}
+				return value.ReplicaIndex
+			},
+		},
+		{
+			name:  "inventory",
+			value: ActivationInventoryItem{WorkflowID: "wf", EntryUnitID: "entry"},
+			decode: func(data []byte) uint32 {
+				var value ActivationInventoryItem
+				if err := json.Unmarshal(data, &value); err != nil {
+					t.Fatalf("unmarshal inventory: %v", err)
+				}
+				return value.ReplicaIndex
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := json.Marshal(tc.value)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if strings.Contains(string(data), "replica_index") {
+				t.Fatalf("zero replica changed legacy JSON: %s", data)
+			}
+			if got := tc.decode(data); got != 0 {
+				t.Fatalf("decoded replica = %d, want legacy zero", got)
+			}
+		})
 	}
 }
 

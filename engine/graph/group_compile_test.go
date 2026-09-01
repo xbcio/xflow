@@ -79,6 +79,8 @@ func TestCompileGroupRejects(t *testing.T) {
 	}
 	memberSelector := mkGroupDef([]string{"ingest", "analyze"})
 	memberSelector.Nodes[1].RunnerSelector = &types.RunnerSelector{Mode: types.RunnerSelectorModeRequired}
+	memberActivationReplicas := mkGroupDef([]string{"ingest", "analyze"})
+	memberActivationReplicas.Nodes[0].ActivationReplicas = 2
 
 	overlap := mkGroupDef([]string{"ingest", "analyze"})
 	overlap.Groups = append(overlap.Groups, types.GroupDef{Name: "g2", Members: []string{"analyze", "store"}})
@@ -86,6 +88,7 @@ func TestCompileGroupRejects(t *testing.T) {
 	cases := map[string]*types.WorkflowDef{
 		"unknown member":  mkGroupDef([]string{"ingest", "ghost"}),
 		"member selector": memberSelector,
+		"member replicas": memberActivationReplicas,
 		"multi entry":     multiEntry,
 		"unreachable":     unreachable,
 		"overlap":         overlap,

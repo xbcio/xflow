@@ -128,7 +128,8 @@ func TestExecutor_RunsAMapMemberBodyInsideAGroup(t *testing.T) {
 
 	ex := NewExecutor(reg, NewPackageCache(PackageCacheConfig{
 		MaxEntries: 4, MaxPackageBytes: 1 << 20,
-	}), func() Backend { return local.New(local.WithRegistry(reg), local.WithConcurrency(1)) })
+	}), func() Backend { return local.New(local.WithRegistry(reg), local.WithConcurrency(1)) },
+		WithMapConcurrencyLimiter(NewMapConcurrencyLimiter(1, 1)))
 
 	hash, err := graph.ComputePackageHash(pkg)
 	if err != nil {

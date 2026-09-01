@@ -119,6 +119,10 @@ type SeedExecutionFromEntryRequest struct {
 	// duplicate-accepted so the runner can commit its offset. It is not part of
 	// the content-addressed admission (it never enters ResultHash or the key).
 	Generation uint64
+	// ReplicaIndex identifies the activation sibling that produced this seed.
+	// It participates only in the generation fence: sibling replicas share the
+	// admission key and result hash so Kafka rebalances preserve idempotency.
+	ReplicaIndex uint32
 }
 
 // SeedExecutionFromEntryResponse is the control-plane response.

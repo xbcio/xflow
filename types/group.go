@@ -26,6 +26,11 @@ type GroupDef struct {
 	// Mode 空值=durable（Redis 权威 + outbox，可 inspect）；
 	// "transient"=ExecutionModeTransient（短 TTL fence，不做 SQL projection）。
 	Mode string `json:"mode,omitempty"`
+	// ActivationReplicas is the desired number of distinct runners that host a
+	// trigger-entry group. Zero preserves the legacy single-activation behavior;
+	// one is therefore equivalent to zero. Sibling replicas are placed on
+	// different runners and join the same source-level consumer group.
+	ActivationReplicas uint32 `json:"activation_replicas,omitempty"`
 }
 
 // GroupMode 常量。

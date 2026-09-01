@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -212,9 +213,45 @@ func TestGroupRuntime_DeadlineTimeout(t *testing.T) {
 	}
 }
 
+type cancelGateHandler struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (*cancelGateHandler) Descriptor() types.Descriptor {
+	return types.Descriptor{Type: "test.cancel-gate"}
+}
+
+func (h *cancelGateHandler) Execute(context.Context, *types.Input) (*types.Output, error) {
+	close(h.started)
+	<-h.release
+	return &types.Output{Data: map[string]any{}}, nil
+}
+
+// observedCancelContext exposes when WaitDone has consumed cancellation. That
+// lets the test release the in-flight handler only after the canceled verdict
+// is fixed, avoiding a race with successful completion.
+type observedCancelContext struct {
+	context.Context
+	observed chan struct{}
+	once     sync.Once
+}
+
+func (c *observedCancelContext) Err() error {
+	err := c.Context.Err()
+	if err != nil {
+		c.once.Do(func() { close(c.observed) })
+	}
+	return err
+}
+
 func TestGroupRuntime_ExternalCancel(t *testing.T) {
+	handler := &cancelGateHandler{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
 	reg := execution.NewRegistry()
-	reg.RegisterGlobal("test.echo", echoHandler{})
+	reg.RegisterGlobal("test.cancel-gate", handler)
 
 	cache := NewPackageCache(PackageCacheConfig{MaxEntries: 10})
 	rt := NewGroupRuntime(reg, cache, WithSuspendDisabled())
@@ -226,7 +263,7 @@ func TestGroupRuntime_ExternalCancel(t *testing.T) {
 		Def: &types.WorkflowDef{
 			Name: "cancel-group",
 			Nodes: []types.NodeDef{
-				{Name: "a", Type: "test.echo", Version: 1},
+				{Name: "a", Type: "test.cancel-gate", Version: 1},
 				{Name: "__collector_a_main", Type: graph.NodeTypeGroupExit, Version: 1},
 			},
 			Connections: types.Connections{
@@ -237,28 +274,33 @@ func TestGroupRuntime_ExternalCancel(t *testing.T) {
 			{CollectorNode: "__collector_a_main", SrcNode: "a", Port: "main"},
 		},
 		Requirements: []graph.Requirement{
-			{NodeType: "test.echo", NodeVersion: 1},
+			{NodeType: "test.cancel-gate", NodeVersion: 1},
 		},
 	}
 
-	input := &types.Input{Data: map[string]any{}}
-	lease := buildTestLease(t, pkg, input)
+	lease := buildTestLease(t, pkg, &types.Input{Data: map[string]any{}})
+	// Keep Executor from wrapping the observable context with a deadline
+	// context; member completion is bounded by the release handshake below.
+	lease.GroupPayload.Deadline = time.Time{}
 
-	// Cancel immediately — race between handler completion and cancel.
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+	baseCtx, cancel := context.WithCancel(context.Background())
+	ctx := &observedCancelContext{Context: baseCtx, observed: make(chan struct{})}
+	go func() {
+		<-handler.started
+		cancel()
+		<-ctx.observed
+		close(handler.release)
+	}()
 
 	result, err := rt.Execute(ctx, lease)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// With immediate cancel, we accept timeout (context done) or success
-	// (handler completed before context was checked).
-	switch result.Outcome {
-	case engine.GroupOutcomeTimeout, engine.GroupOutcomeSuccess, engine.GroupOutcomeFailed:
-		// acceptable
-	default:
-		t.Fatalf("outcome = %s, want timeout/success/failed", result.Outcome)
+	if result.Outcome != engine.GroupOutcomeCanceled {
+		t.Fatalf("outcome = %s, want canceled", result.Outcome)
+	}
+	if result.Error != "canceled" {
+		t.Fatalf("error = %q, want canceled", result.Error)
 	}
 }
 

@@ -51,25 +51,27 @@ type wireNodeMeta struct {
 	// rather than in a graph-level field is what makes it impossible to
 	// serialize such a node without its body: the node and its body are one
 	// wire object, so no separate encode/decode step exists to forget.
-	Body *NodeBodyPackage `json:"body,omitempty"`
+	Body               *NodeBodyPackage `json:"body,omitempty"`
+	ActivationReplicas uint32           `json:"activation_replicas,omitempty"`
 }
 
 func toWireNodeMeta(n NodeMeta) wireNodeMeta {
 	idx := n.GroupIdx
 	return wireNodeMeta{
-		Name:           n.Name,
-		Type:           n.Type,
-		Kind:           n.Kind,
-		Version:        n.Version,
-		OnError:        n.OnError,
-		RunnerSelector: n.RunnerSelector,
-		MergeMode:      n.MergeMode,
-		Parameters:     n.Parameters,
-		PortOuts:       n.PortOuts,
-		Retry:          n.Retry,
-		GroupIdx:       &idx,
-		Timeout:        n.Timeout,
-		Body:           n.Body,
+		Name:               n.Name,
+		Type:               n.Type,
+		Kind:               n.Kind,
+		Version:            n.Version,
+		OnError:            n.OnError,
+		RunnerSelector:     n.RunnerSelector,
+		MergeMode:          n.MergeMode,
+		Parameters:         n.Parameters,
+		PortOuts:           n.PortOuts,
+		Retry:              n.Retry,
+		GroupIdx:           &idx,
+		Timeout:            n.Timeout,
+		Body:               n.Body,
+		ActivationReplicas: n.ActivationReplicas,
 	}
 }
 
@@ -118,19 +120,20 @@ func decodeWireNodes(raw []wireNodeMeta) ([]NodeMeta, bool, error) {
 			presentCount++
 		}
 		nodes[i] = NodeMeta{
-			Name:           w.Name,
-			Type:           w.Type,
-			Kind:           w.Kind,
-			Version:        w.Version,
-			OnError:        w.OnError,
-			RunnerSelector: w.RunnerSelector,
-			MergeMode:      w.MergeMode,
-			Parameters:     w.Parameters,
-			PortOuts:       w.PortOuts,
-			Retry:          w.Retry,
-			GroupIdx:       p.value,
-			Timeout:        w.Timeout,
-			Body:           w.Body,
+			Name:               w.Name,
+			Type:               w.Type,
+			Kind:               w.Kind,
+			Version:            w.Version,
+			OnError:            w.OnError,
+			RunnerSelector:     w.RunnerSelector,
+			MergeMode:          w.MergeMode,
+			Parameters:         w.Parameters,
+			PortOuts:           w.PortOuts,
+			Retry:              w.Retry,
+			GroupIdx:           p.value,
+			Timeout:            w.Timeout,
+			Body:               w.Body,
+			ActivationReplicas: w.ActivationReplicas,
 		}
 		if !p.present {
 			nodes[i].GroupIdx = -1

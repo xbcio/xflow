@@ -831,9 +831,9 @@ func (c *Core) resolveEntrySeedTopology(ctx context.Context, req *engine.SeedExe
 // fenceEntrySeedGeneration enforces the generation fence for one seed request.
 // It returns ErrStaleGeneration when the seed is stale AND targets an
 // admission key that has not been accepted yet; it returns nil (admit) when the
-// generation exactly matches the currently assigned generation, when there is no
-// activation record / store, or when the admission key was already accepted (so a
-// duplicate accept can proceed).
+// generation exactly matches the currently assigned generation, when no
+// activation record for the logical entry exists, or when the admission key was
+// already accepted (so a duplicate accept can proceed).
 func (c *Core) fenceEntrySeedGeneration(ctx context.Context, req engine.SeedExecutionFromEntryRequest) error {
 	if c.entryActivations == nil {
 		return nil
@@ -843,16 +843,36 @@ func (c *Core) fenceEntrySeedGeneration(ctx context.Context, req engine.SeedExec
 		WorkflowID:      req.WorkflowID,
 		WorkflowVersion: req.WorkflowVersion,
 		EntryUnitID:     req.EntryUnitID,
+		ReplicaIndex:    req.ReplicaIndex,
 	}
 	act, ok, err := c.entryActivations.Get(ctx, key)
 	if err != nil {
 		return normalizeRunnerError(err, c.logger, "entry_seed_fence")
 	}
+	exactActivation := ok
 	if !ok {
-		// No durable activation governs this entry unit — nothing to fence.
-		return nil
+		// An unknown replica must not turn the activation fence into a fail-open
+		// lookup. Check the logical entry before preserving the legacy unfenced
+		// path used by local entries that have no durable activation at all.
+		activations, lerr := c.entryActivations.List(ctx, req.Namespace)
+		if lerr != nil {
+			return normalizeRunnerError(lerr, c.logger, "entry_seed_fence")
+		}
+		for _, sibling := range activations {
+			if sibling.WorkflowID == req.WorkflowID &&
+				sibling.WorkflowVersion == req.WorkflowVersion &&
+				sibling.EntryUnitID == req.EntryUnitID {
+				// A durable sibling governs this logical entry. Treat a seed for
+				// a nonexistent replica exactly like any other stale/forged seed.
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return nil
+		}
 	}
-	if req.Generation == act.Generation {
+	if exactActivation && req.Generation == act.Generation {
 		// Exactly the current assigned generation — admit normally. The
 		// generation is monotonic and every legitimate runner receives its
 		// generation from Assign, so the current owner always carries exactly

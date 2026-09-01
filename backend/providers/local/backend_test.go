@@ -8,6 +8,25 @@ import (
 	"github.com/xbcio/xflow/engine"
 )
 
+func TestQueueCapacityOptionKeepsDefaultAndAllowsSmallerEmbeddedQueues(t *testing.T) {
+	defaultBackend := New()
+	if got := cap(defaultBackend.queue.ch); got != defaultMemoryQueueCapacity {
+		t.Fatalf("default interactive queue capacity = %d, want %d", got, defaultMemoryQueueCapacity)
+	}
+	if got := cap(defaultBackend.queue.batchCh); got != defaultMemoryQueueCapacity {
+		t.Fatalf("default batch queue capacity = %d, want %d", got, defaultMemoryQueueCapacity)
+	}
+
+	const capacity = 16
+	embeddedBackend := New(WithQueueCapacity(capacity))
+	if got := cap(embeddedBackend.queue.ch); got != capacity {
+		t.Fatalf("configured interactive queue capacity = %d, want %d", got, capacity)
+	}
+	if got := cap(embeddedBackend.queue.batchCh); got != capacity {
+		t.Fatalf("configured batch queue capacity = %d, want %d", got, capacity)
+	}
+}
+
 func TestBindHandlerWithEngineDrainsAndStopsOutbox(t *testing.T) {
 	backend := New(WithConcurrency(1))
 	eng := engine.New(backend.State(), backend.Queue())

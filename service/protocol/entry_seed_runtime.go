@@ -51,6 +51,10 @@ type HTTPEntrySeedRuntime struct {
 	// with the directive's generation and is the authority for the activation it
 	// serves (IMPORTANT-1).
 	Generation uint64
+	// ReplicaIndex is the sibling activation this runtime serves. Like
+	// Generation, it is fixed when the activation starts and overwrites anything
+	// supplied by the trigger call path.
+	ReplicaIndex uint32
 }
 
 var _ types.EntrySeedRuntime = (*HTTPEntrySeedRuntime)(nil)
@@ -110,6 +114,7 @@ func (h *HTTPEntrySeedRuntime) SeedExecutionFromEntry(ctx context.Context, req t
 		Exits:           exits,
 		Error:           req.Error,
 		Generation:      h.Generation,
+		ReplicaIndex:    h.ReplicaIndex,
 	}
 
 	body, err := json.Marshal(wireReq)

@@ -34,7 +34,8 @@ type ActivateDirective struct {
 	WorkflowID      string         `json:"workflow_id"`
 	WorkflowVersion string         `json:"workflow_version"`
 	EntryUnitID     string         `json:"entry_unit_id"` // was GroupID
-	NodeType        string         `json:"node_type"`     // trigger node type, e.g. "kafka.source"
+	ReplicaIndex    uint32         `json:"replica_index,omitempty"`
+	NodeType        string         `json:"node_type"` // trigger node type, e.g. "kafka.source"
 	Params          map[string]any `json:"params,omitempty"`
 	Generation      uint64         `json:"generation"`
 	PackageHash     string         `json:"package_hash,omitempty"`
@@ -77,10 +78,12 @@ const (
 // DeactivateDirective is sent by the activation reconciler to a runner,
 // instructing it to stop hosting a trigger entry unit.
 type DeactivateDirective struct {
-	Namespace   string `json:"namespace"`
-	WorkflowID  string `json:"workflow_id"`
-	EntryUnitID string `json:"entry_unit_id"` // was GroupID
-	Generation  uint64 `json:"generation"`
+	Namespace       string `json:"namespace"`
+	WorkflowID      string `json:"workflow_id"`
+	WorkflowVersion string `json:"workflow_version,omitempty"`
+	EntryUnitID     string `json:"entry_unit_id"` // was GroupID
+	ReplicaIndex    uint32 `json:"replica_index,omitempty"`
+	Generation      uint64 `json:"generation"`
 }
 
 // --- Activation acknowledgment (runner → server) ---
@@ -107,6 +110,7 @@ type ActivationAck struct {
 	// ack lacks the value.
 	WorkflowVersion string           `json:"workflow_version,omitempty"`
 	GroupID         string           `json:"group_id"`
+	ReplicaIndex    uint32           `json:"replica_index,omitempty"`
 	Generation      uint64           `json:"generation"`
 	Status          ActivationStatus `json:"status"`
 	Error           string           `json:"error,omitempty"`
@@ -130,5 +134,6 @@ type ActivationInventoryItem struct {
 	WorkflowID      string `json:"workflow_id"`
 	WorkflowVersion string `json:"workflow_version,omitempty"` // empty for old runners (backward-compat)
 	EntryUnitID     string `json:"entry_unit_id"`              // was GroupID
+	ReplicaIndex    uint32 `json:"replica_index,omitempty"`
 	Generation      uint64 `json:"generation"`
 }
