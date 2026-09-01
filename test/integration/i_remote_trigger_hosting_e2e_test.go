@@ -147,6 +147,61 @@ func (fakeRemoteHostBody) Execute(_ context.Context, input *types.Input) (*types
 	return &types.Output{Data: map[string]any{"handled": true}}, nil
 }
 
+const replicatedRemoteHostTriggerType = "test.remotehost.replica.trigger"
+
+type replicaActivationRecord struct {
+	runnerID     string
+	replicaIndex uint32
+	generation   uint64
+}
+
+// replicaProbeTrigger is installed separately on each real runner. Recording
+// the replica identity from the concrete entry-seed runtime proves the
+// directive reached that runner and was not merely assigned in the store.
+type replicaProbeTrigger struct {
+	runnerID  string
+	activated chan replicaActivationRecord
+}
+
+func newReplicaProbeTrigger(runnerID string) *replicaProbeTrigger {
+	return &replicaProbeTrigger{
+		runnerID:  runnerID,
+		activated: make(chan replicaActivationRecord, 1),
+	}
+}
+
+func (*replicaProbeTrigger) Descriptor() types.Descriptor {
+	return types.Descriptor{Type: replicatedRemoteHostTriggerType, Kind: types.NodeKindTrigger}
+}
+
+func (*replicaProbeTrigger) Execute(context.Context, *types.Input) (*types.Output, error) {
+	return &types.Output{}, nil
+}
+
+func (h *replicaProbeTrigger) Activate(_ context.Context, input *types.TriggerActivateInput) (types.TriggerSubscription, error) {
+	runtime, ok := input.Runtime.(*protocol.HTTPEntrySeedRuntime)
+	if !ok {
+		return nil, errNotSeedRuntime
+	}
+	h.activated <- replicaActivationRecord{
+		runnerID:     h.runnerID,
+		replicaIndex: runtime.ReplicaIndex,
+		generation:   runtime.Generation,
+	}
+	return types.CloseFunc(func(context.Context) error { return nil }), nil
+}
+
+type replicaProbeLookup struct {
+	trigger *replicaProbeTrigger
+}
+
+func (l replicaProbeLookup) Trigger(nodeType string) (types.TriggerHandler, bool) {
+	if nodeType != replicatedRemoteHostTriggerType {
+		return nil, false
+	}
+	return l.trigger, true
+}
+
 // registerWorkflowHTTP posts a workflow definition to POST /v1/workflows (the
 // register route after the §9.1 semantic inversion) so the control plane
 // persists the compiled graph AND derives the entry activation.
@@ -188,11 +243,11 @@ func registerWorkflowHTTP(t *testing.T, baseURL string, client *http.Client, def
 // against a memory-backed EntryActivationStore + local backend through the
 // apiserver + ControlPlane harness (apiserver.New + WithControlPlane + Start):
 //
-//   register workflow → reconciler assigns the label-matching runner an activate
-//   directive at a fresh generation → runner receives it on heartbeat and hosts
-//   the trigger → the trigger seeds an event whose runtime carries the assigned
-//   generation → the control-plane fence admits it (generation matches) → an
-//   execution is created with downstream fan-out.
+//	register workflow → reconciler assigns the label-matching runner an activate
+//	directive at a fresh generation → runner receives it on heartbeat and hosts
+//	the trigger → the trigger seeds an event whose runtime carries the assigned
+//	generation → the control-plane fence admits it (generation matches) → an
+//	execution is created with downstream fan-out.
 //
 // It also proves the reconnect path: after the runner re-registers reporting the
 // hosted activation in its inventory, the lease is renewed with the generation
@@ -205,6 +260,160 @@ func TestRemoteTriggerHosting_Memory(t *testing.T) {
 // TestRemoteTriggerHosting_Redis runs the same loop against the Redis-backed
 // EntryActivationStore. It SKIPS cleanly when XFLOW_TEST_REDIS_ADDR is unset or
 // the Redis endpoint (podman 6380) is unreachable.
+// TestReplicatedRemoteTriggerHosting_Memory drives the complete control-plane
+// and heartbeat path with three real runner loops. It proves one logical entry
+// can be hosted three times without co-location and that each assigned runner
+// receives the replica-scoped runtime identity it owns.
+func TestReplicatedRemoteTriggerHosting_Memory(t *testing.T) {
+	const (
+		wfVersion   = "1"
+		entryUnitID = "kafka-in"
+		replicas    = uint32(3)
+	)
+
+	store := control.NewMemoryEntryActivationStore()
+	be := local.New(local.WithConcurrency(1))
+	cp, err := control.NewControlPlane(control.Config{
+		Backend:              be,
+		EntryActivationStore: store,
+	})
+	if err != nil {
+		t.Fatalf("NewControlPlane: %v", err)
+	}
+	srv, err := apiserver.New(apiserver.Config{}, apiserver.WithControlPlane(cp))
+	if err != nil {
+		t.Fatalf("apiserver.New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	if err := srv.Start(ctx); err != nil {
+		cancel()
+		t.Fatalf("apiserver.Start: %v", err)
+	}
+	httpSrv := httptest.NewServer(srv.Handler())
+
+	runnerIDs := []string{"runner-replica-a", "runner-replica-b", "runner-replica-c"}
+	probes := make(map[string]*replicaProbeTrigger, len(runnerIDs))
+	trackers := make(map[string]*runnersvc.ActivationTracker, len(runnerIDs))
+	runErrs := make(map[string]chan error, len(runnerIDs))
+	defer func() {
+		cancel()
+		for _, id := range runnerIDs {
+			select {
+			case <-runErrs[id]:
+			case <-time.After(3 * time.Second):
+			}
+		}
+		httpSrv.Close()
+		_ = srv.Shutdown(context.Background())
+	}()
+
+	def := &types.WorkflowDef{
+		Name:           "i-replicated-remote-trigger-hosting-e2e",
+		Version:        wfVersion,
+		RunnerSelector: &types.RunnerSelector{Mode: types.RunnerSelectorModeRequired},
+		Nodes: []types.NodeDef{{
+			Name:               entryUnitID,
+			Kind:               types.NodeKindTrigger,
+			Type:               replicatedRemoteHostTriggerType,
+			ActivationReplicas: replicas,
+		}},
+	}
+	wfID := registerWorkflowHTTP(t, httpSrv.URL, httpSrv.Client(), def)
+
+	for _, id := range runnerIDs {
+		probe := newReplicaProbeTrigger(id)
+		tracker := runnersvc.NewActivationTracker(
+			runnersvc.NewTriggerActivationHandler(httpSrv.URL, "", replicaProbeLookup{trigger: probe}),
+			newSlogE2E(),
+		)
+		runner := runnersvc.New(
+			protocol.NewClient(httpSrv.URL, httpSrv.Client()),
+			execution.NewRegistry(),
+			runnersvc.Config{
+				RunnerID:    id,
+				Concurrency: 1,
+				Capabilities: []protocol.Capability{{
+					NodeType: replicatedRemoteHostTriggerType,
+					Features: []string{engine.FeatureEntryActivationReplicaV1},
+				}},
+				HeartbeatInterval: 25 * time.Millisecond,
+				PollWait:          10 * time.Millisecond,
+				ActivationTracker: tracker,
+			},
+		)
+		probes[id] = probe
+		trackers[id] = tracker
+		runErr := make(chan error, 1)
+		runErrs[id] = runErr
+		go func() { runErr <- runner.Run(ctx) }()
+	}
+	for _, id := range runnerIDs {
+		waitForE2ERunner(t, cp.RunnerDirectory(), id)
+	}
+
+	reconciler := cp.EntryActivationReconciler()
+	if reconciler == nil {
+		t.Fatal("control plane must expose the entry activation reconciler")
+	}
+	if err := reconciler.Reconcile(ctx, time.Now()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	acts, err := store.List(ctx, namespace.Default)
+	if err != nil {
+		t.Fatalf("List entry activations: %v", err)
+	}
+	owners := make(map[string]uint32, replicas)
+	generations := make(map[uint32]uint64, replicas)
+	for _, act := range acts {
+		if act.WorkflowID != wfID || act.WorkflowVersion != wfVersion || act.EntryUnitID != entryUnitID {
+			continue
+		}
+		if act.RunnerID == "" {
+			t.Fatalf("replica %d remains unassigned: %+v", act.ReplicaIndex, act)
+		}
+		if prior, exists := owners[act.RunnerID]; exists {
+			t.Fatalf("replicas %d and %d co-located on %s", prior, act.ReplicaIndex, act.RunnerID)
+		}
+		owners[act.RunnerID] = act.ReplicaIndex
+		generations[act.ReplicaIndex] = act.Generation
+	}
+	if len(owners) != int(replicas) {
+		t.Fatalf("assigned owners = %v, want %d distinct runners", owners, replicas)
+	}
+
+	for runnerID, wantReplica := range owners {
+		select {
+		case got := <-probes[runnerID].activated:
+			if got.runnerID != runnerID || got.replicaIndex != wantReplica {
+				t.Fatalf("runner %s activation = %+v, want replica %d", runnerID, got, wantReplica)
+			}
+			if got.generation == 0 || got.generation != generations[wantReplica] {
+				t.Fatalf("runner %s generation = %d, store has %d", runnerID, got.generation, generations[wantReplica])
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timeout waiting for runner %s to activate replica %d", runnerID, wantReplica)
+		}
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for runnerID, tracker := range trackers {
+		wantReplica := owners[runnerID]
+		for {
+			inventory := tracker.Inventory()
+			if len(inventory) == 1 && inventory[0].ReplicaIndex == wantReplica &&
+				inventory[0].Generation == generations[wantReplica] {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("runner %s inventory = %+v, want replica %d generation %d",
+					runnerID, inventory, wantReplica, generations[wantReplica])
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
 func TestRemoteTriggerHosting_Redis(t *testing.T) {
 	addr := os.Getenv("XFLOW_TEST_REDIS_ADDR")
 	if addr == "" {

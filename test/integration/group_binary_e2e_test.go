@@ -101,10 +101,10 @@ func startLegacyRunner(t *testing.T, ctx context.Context, h *serverRunnerHarness
 		protocol.NewClient(h.httpSrv.URL, h.httpSrv.Client()),
 		registry,
 		runnersvc.Config{
-			RunnerID:    runnerID,
-			Concurrency: 1,
+			RunnerID:     runnerID,
+			Concurrency:  1,
 			Capabilities: caps,
-			PollWait:    10 * time.Millisecond,
+			PollWait:     10 * time.Millisecond,
 		},
 	)
 	errCh := make(chan error, 1)
@@ -275,13 +275,80 @@ func TestGroupBinaryE2E_MultiExitSwitch(t *testing.T) {
 // TestGroupBinaryE2E_SelectorRequiredMismatch verifies that a group with a
 // required RunnerSelector matching labels that no runner has stays pending
 // and never dispatches to any runner.
-//
-// NOTE: This test is currently skipped because the RedisRunnerDirectory does
-// not enforce RunnerSelector label matching during ClaimForRunner — it only
-// checks capabilities and policy. Label-aware routing is a planned feature
-// for the Redis directory (tracked separately).
 func TestGroupBinaryE2E_SelectorRequiredMismatch(t *testing.T) {
-	t.Skip("RedisRunnerDirectory does not enforce RunnerSelector labels at claim time (planned feature)")
+	addr := requireRedis(t)
+	h := newServerRunnerHarness(t, addr, 2)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	memberHandler := &groupMemberHandler{}
+	// Runner with labels that do NOT match the group's required selector.
+	_, errCh := startGroupRunner(t, ctx, h, groupRunnerOpts{
+		runnerID: "group-runner-wrong-labels",
+		handlers: map[string]types.ActionHandler{
+			"test.group.member": memberHandler,
+		},
+		labels: map[string]string{"cloud": "aws"},
+	})
+
+	// Workflow: group has required selector labels {cloud: tencent}, but runner
+	// only has {cloud: aws}. The group task should never get dispatched.
+	wf := &types.WorkflowDef{
+		Name: "group-e2e-selector-mismatch",
+		Nodes: []types.NodeDef{
+			{Name: "g.source", Type: "test.group.member", Kind: types.NodeKindAction},
+			{Name: "g.sink", Type: "test.group.member", Kind: types.NodeKindAction},
+		},
+		Connections: types.Connections{
+			"g.source": {"main": {Targets: []types.Connection{{Node: "g.sink", Input: "main"}}}},
+		},
+		Groups: []types.GroupDef{{
+			Name:    "g",
+			Members: []string{"g.source", "g.sink"},
+			RunnerSelector: &types.RunnerSelector{
+				Mode:        types.RunnerSelectorModeRequired,
+				MatchLabels: map[string]string{"cloud": "tencent"},
+			},
+		}},
+	}
+
+	execID := submitWorkflowHTTP(t, h.httpSrv.URL, h.httpSrv.Client(), wf, map[string]any{
+		"never": "dispatched",
+	})
+
+	// Wait briefly — the execution should NOT reach terminal status.
+	shortCtx, shortCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer shortCancel()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		snap, err := h.state.GetExecution(shortCtx, execID)
+		if err == nil && snap != nil && types.IsTerminalExecutionStatus(snap.Status) {
+			t.Fatalf("execution reached terminal %s, expected to stay pending", snap.Status)
+		}
+		select {
+		case <-shortCtx.Done():
+			goto done
+		case <-ticker.C:
+		}
+	}
+
+done:
+	// Verify the handler was never invoked.
+	if got := memberHandler.invocations.Load(); got != 0 {
+		t.Fatalf("member invocations = %d, want 0 (should never dispatch)", got)
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Logf("runner shutdown error (non-fatal): %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("runner did not stop in time")
+	}
 }
 
 // TestGroupBinaryE2E_LegacyRunnerNeverClaimsGroup verifies that a runner
@@ -564,4 +631,3 @@ func TestGroupBinaryE2E_FaultMatrix(t *testing.T) {
 		t.Fatal("runner did not stop in time")
 	}
 }
-

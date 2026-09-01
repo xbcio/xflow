@@ -298,7 +298,9 @@ func TestExpressionDigestActivatesEndToEnd(t *testing.T) {
 	// owner must match what the declaration path uses -- the warm-up consumer
 	// and the execution-time guard both register/release under
 	// "node:" + WorkflowName + "/" + NodeName (spec Z.4/Z.8).
-	t.Cleanup(func() { node.UnregisterWasmSupplyConsumerByDigest(digest, vswitchDeclareSupplyNode, "node:"+def.Name+"/"+taggerNode) })
+	t.Cleanup(func() {
+		node.UnregisterWasmSupplyConsumerByDigest(digest, vswitchDeclareSupplyNode, "node:"+def.Name+"/"+taggerNode)
+	})
 
 	putSupplyContent(t, supplies, supplyRes,
 		[]byte(`{"digest":"`+digest+`","rules":[{"name":"from-declare"}]}`))
@@ -476,8 +478,12 @@ func TestPointerFlipIsObservedAsModuleReady(t *testing.T) {
 	// owner must match what the declaration path uses -- the warm-up consumer
 	// and the execution-time guard both register/release under
 	// "node:" + WorkflowName + "/" + NodeName (spec Z.4/Z.8).
-	t.Cleanup(func() { node.UnregisterWasmSupplyConsumerByDigest(digestA, vswitchFlipSupplyNode, "node:"+def.Name+"/"+taggerNode) })
-	t.Cleanup(func() { node.UnregisterWasmSupplyConsumerByDigest(digestB, vswitchFlipSupplyNode, "node:"+def.Name+"/"+taggerNode) })
+	t.Cleanup(func() {
+		node.UnregisterWasmSupplyConsumerByDigest(digestA, vswitchFlipSupplyNode, "node:"+def.Name+"/"+taggerNode)
+	})
+	t.Cleanup(func() {
+		node.UnregisterWasmSupplyConsumerByDigest(digestB, vswitchFlipSupplyNode, "node:"+def.Name+"/"+taggerNode)
+	})
 
 	putSupplyContent(t, supplies, supplyRes,
 		[]byte(`{"digest":"`+digestA+`","rules":[{"name":"from-a"}]}`))
@@ -860,8 +866,12 @@ func TestRollbackKeepsReceivingContentUpdates(t *testing.T) {
 	// owner must match what the declaration path uses -- the warm-up consumer
 	// and the execution-time guard both register/release under
 	// "node:" + WorkflowName + "/" + NodeName (spec Z.4/Z.8).
-	t.Cleanup(func() { node.UnregisterWasmSupplyConsumerByDigest(digestA, vswitchRollbackSupplyNode, "node:"+def.Name+"/"+taggerNode) })
-	t.Cleanup(func() { node.UnregisterWasmSupplyConsumerByDigest(digestB, vswitchRollbackSupplyNode, "node:"+def.Name+"/"+taggerNode) })
+	t.Cleanup(func() {
+		node.UnregisterWasmSupplyConsumerByDigest(digestA, vswitchRollbackSupplyNode, "node:"+def.Name+"/"+taggerNode)
+	})
+	t.Cleanup(func() {
+		node.UnregisterWasmSupplyConsumerByDigest(digestB, vswitchRollbackSupplyNode, "node:"+def.Name+"/"+taggerNode)
+	})
 
 	// --- Step 1: pointer -> A, revision 1. ---
 	putSupplyContent(t, supplies, supplyRes,

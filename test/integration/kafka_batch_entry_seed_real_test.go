@@ -22,10 +22,10 @@ import (
 type batchSeedRecorder struct {
 	mu    sync.Mutex
 	seeds []types.EntrySeedRequest
-	// failAfter, if > 0, causes SeedExecutionFromEntry to return an error after
-	// this many successful seeds. Used to simulate a seed failure so the trigger
-	// withholds the offset commit (at-least-once guarantee).
-	failAfter int
+	// failFromOffset, if > 0, rejects every batch starting at or after this
+	// offset. An offset boundary rather than a call count keeps the failure
+	// deterministic now that independent batches may execute concurrently.
+	failFromOffset int64
 	// seedDelay, if > 0, sleeps this duration inside SeedExecutionFromEntry
 	// before returning. This slows down batch processing so that the polling
 	// loop in Probe 2 can observe multiple intermediate committed-offset values.
@@ -34,9 +34,20 @@ type batchSeedRecorder struct {
 
 func (r *batchSeedRecorder) SeedExecutionFromEntry(_ context.Context, req types.EntrySeedRequest) (types.EntrySeedResponse, error) {
 	r.mu.Lock()
-	if r.failAfter > 0 && len(r.seeds) >= r.failAfter {
-		r.mu.Unlock()
-		return types.EntrySeedResponse{}, fmt.Errorf("simulated seed failure")
+	if r.failFromOffset > 0 {
+		if len(req.Exits) == 0 || req.Exits[0].Data == nil {
+			r.mu.Unlock()
+			return types.EntrySeedResponse{}, fmt.Errorf("simulated seed failure: batch has no exit data")
+		}
+		startOffset, ok := req.Exits[0].Data["start_offset"].(int64)
+		if !ok {
+			r.mu.Unlock()
+			return types.EntrySeedResponse{}, fmt.Errorf("simulated seed failure: start_offset has type %T", req.Exits[0].Data["start_offset"])
+		}
+		if startOffset >= r.failFromOffset {
+			r.mu.Unlock()
+			return types.EntrySeedResponse{}, fmt.Errorf("simulated seed failure from offset %d", startOffset)
+		}
 	}
 	r.seeds = append(r.seeds, req)
 	delay := r.seedDelay
@@ -159,8 +170,9 @@ func TestKafkaBatchEntrySeed_RedeliveryLosesNothing(t *testing.T) {
 
 	const totalMessages = 25
 	const batchSize = 5
-	// failAfter=3 means the first 3 batches (offsets 0-14) succeed, the 4th
-	// batch (offsets 15-19) and 5th batch (offsets 20-24) fail seed.
+	// The first 3 batches (offsets 0-14) succeed; batches starting at offset 15
+	// fail. Tying the fault to the offset avoids depending on concurrent batch
+	// completion order.
 	const failAfterBatches = 3
 
 	// Produce 25 messages with unique values.
@@ -174,14 +186,15 @@ func TestKafkaBatchEntrySeed_RedeliveryLosesNothing(t *testing.T) {
 	writeKafkaMessages(t, brokers, topic, msgs)
 
 	// --- Pass 1: consume with seed that fails after 3 batches. ---
-	recorder1 := &batchSeedRecorder{failAfter: failAfterBatches}
+	recorder1 := &batchSeedRecorder{failFromOffset: failAfterBatches * batchSize}
 
 	tr1 := trigger.Kafka().
 		Brokers(brokers...).
 		Topic(topic).
 		Group(group).
 		StartOffset("earliest").
-		AggregateByPartition(batchSize, 200*time.Millisecond)
+		AggregateByPartition(batchSize, 200*time.Millisecond).
+		BlockOnOverflow()
 
 	ctx1, cancel1 := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel1()
@@ -202,6 +215,7 @@ func TestKafkaBatchEntrySeed_RedeliveryLosesNothing(t *testing.T) {
 				"max_size":       batchSize,
 				"flush_interval": "200ms",
 				"dedup":          "message",
+				"on_overflow":    "block",
 			},
 		},
 		Runtime: recorder1,
@@ -269,7 +283,8 @@ func TestKafkaBatchEntrySeed_RedeliveryLosesNothing(t *testing.T) {
 		Topic(topic).
 		Group(group).
 		StartOffset("earliest").
-		AggregateByPartition(batchSize, 200*time.Millisecond)
+		AggregateByPartition(batchSize, 200*time.Millisecond).
+		BlockOnOverflow()
 
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel2()
@@ -290,6 +305,7 @@ func TestKafkaBatchEntrySeed_RedeliveryLosesNothing(t *testing.T) {
 				"max_size":       batchSize,
 				"flush_interval": "200ms",
 				"dedup":          "message",
+				"on_overflow":    "block",
 			},
 		},
 		Runtime: recorder2,
@@ -407,7 +423,8 @@ func TestKafkaBatchEntrySeed_PerPartitionSerialCommit(t *testing.T) {
 		Topic(topic).
 		Group(group).
 		StartOffset("earliest").
-		AggregateByPartition(batchSize, 150*time.Millisecond)
+		AggregateByPartition(batchSize, 150*time.Millisecond).
+		BlockOnOverflow()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
@@ -428,6 +445,7 @@ func TestKafkaBatchEntrySeed_PerPartitionSerialCommit(t *testing.T) {
 				"max_size":       batchSize,
 				"flush_interval": "150ms",
 				"dedup":          "message",
+				"on_overflow":    "block",
 			},
 		},
 		Runtime: recorder,

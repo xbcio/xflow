@@ -10,7 +10,8 @@ podman 拉起的 Redis / Kafka / MySQL，供 `test/integration/` 与 `test/perf/
 ## 启动
 
     cp .env.sample .env   # 可选：改端口/密码
-    make env-up           # 拉起三服务，等待健康
+    make env-up           # 拉起三服务
+    make env-ready        # 等待 Redis / MySQL / Kafka 协议就绪
     make env-migrate      # 灌入 db/xflow_schema.sql（幂等）
 
 ## 停止 / 重置

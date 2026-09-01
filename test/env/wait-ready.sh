@@ -1,31 +1,76 @@
 #!/usr/bin/env bash
-# wait-ready.sh — polls Redis and MySQL until both are healthy or timeout.
+# wait-ready.sh — waits for protocol-level readiness in all test containers.
 set -euo pipefail
 
-TIMEOUT=${XFLOW_READY_TIMEOUT:-30}
-REDIS_ADDR=${XFLOW_TEST_REDIS_ADDR:-127.0.0.1:6380}
-MYSQL_ADDR=${XFLOW_TEST_MYSQL_ADDR:-127.0.0.1:3306}
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "$SCRIPT_DIR/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091 -- local developer configuration.
+  source "$SCRIPT_DIR/.env"
+  set +a
+fi
 
-deadline=$((SECONDS + TIMEOUT))
+TIMEOUT=${XFLOW_READY_TIMEOUT:-120}
+MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:-xflow}
 
-echo "Checking Redis at $REDIS_ADDR..."
-while ! redis-cli -h "${REDIS_ADDR%%:*}" -p "${REDIS_ADDR##*:}" ping 2>/dev/null | grep -q PONG; do
-  if [ $SECONDS -ge $deadline ]; then
-    echo "ERROR: Redis not ready after ${TIMEOUT}s"
-    exit 1
+find_container_cli() {
+  local cli container
+
+  if [[ -n "${XFLOW_CONTAINER_CLI:-}" ]]; then
+    if ! command -v "$XFLOW_CONTAINER_CLI" >/dev/null 2>&1; then
+      echo "ERROR: XFLOW_CONTAINER_CLI=$XFLOW_CONTAINER_CLI is not installed" >&2
+      return 1
+    fi
+    for container in xflow-test-redis xflow-test-mysql xflow-test-kafka; do
+      if ! "$XFLOW_CONTAINER_CLI" inspect "$container" >/dev/null 2>&1; then
+        echo "ERROR: XFLOW_CONTAINER_CLI=$XFLOW_CONTAINER_CLI cannot inspect $container" >&2
+        return 1
+      fi
+    done
+    printf '%s\n' "$XFLOW_CONTAINER_CLI"
+    return 0
   fi
-  sleep 1
-done
-echo "Redis ready."
 
-echo "Checking MySQL at $MYSQL_ADDR..."
-while ! mysqladmin ping -h "${MYSQL_ADDR%%:*}" -P "${MYSQL_ADDR##*:}" --silent 2>/dev/null; do
-  if [ $SECONDS -ge $deadline ]; then
-    echo "ERROR: MySQL not ready after ${TIMEOUT}s"
-    exit 1
-  fi
-  sleep 1
-done
-echo "MySQL ready."
+  for cli in podman docker; do
+    if ! command -v "$cli" >/dev/null 2>&1; then
+      continue
+    fi
+    for container in xflow-test-redis xflow-test-mysql xflow-test-kafka; do
+      if ! "$cli" inspect "$container" >/dev/null 2>&1; then
+        break
+      fi
+    done
+    if [[ "$container" == "xflow-test-kafka" ]] && "$cli" inspect "$container" >/dev/null 2>&1; then
+      printf '%s\n' "$cli"
+      return 0
+    fi
+  done
+
+  echo "ERROR: neither podman nor docker can inspect all xflow test containers; run make env-up" >&2
+  return 1
+}
+
+wait_for() {
+  local name=$1
+  local deadline=$((SECONDS + TIMEOUT))
+  shift
+
+  echo "Checking $name..."
+  until "$@" >/dev/null 2>&1; do
+    if ((SECONDS >= deadline)); then
+      echo "ERROR: $name not ready after ${TIMEOUT}s" >&2
+      return 1
+    fi
+    sleep 1
+  done
+  echo "$name ready."
+}
+
+CONTAINER_CLI="$(find_container_cli)"
+wait_for Redis "$CONTAINER_CLI" exec xflow-test-redis redis-cli ping
+wait_for MySQL "$CONTAINER_CLI" exec xflow-test-mysql \
+  mysqladmin ping -h localhost -p"$MYSQL_ROOT_PASSWORD" --silent
+wait_for Kafka "$CONTAINER_CLI" exec xflow-test-kafka \
+  /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:29092
 
 echo "All dependencies ready."

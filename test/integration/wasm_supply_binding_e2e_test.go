@@ -229,7 +229,9 @@ func TestSupplyConsumerBindingReachesRunner(t *testing.T) {
 	// guard (script.go's ensureWasmSupplyConsumers) both register/release under
 	// "node:" + WorkflowName + "/" + NodeName (spec Z.4/Z.8); a mismatched owner
 	// here would make this release a no-op against a set that never held it.
-	t.Cleanup(func() { node.UnregisterWasmSupplyConsumerByDigest(digest, wasmBindSupplyNode, "node:"+def.Name+"/"+taggerNode) })
+	t.Cleanup(func() {
+		node.UnregisterWasmSupplyConsumerByDigest(digest, wasmBindSupplyNode, "node:"+def.Name+"/"+taggerNode)
+	})
 
 	// Two PUTs so the revision the module reports is 2. Revision 1 would still
 	// be distinguishable from the legacy path's 0, but 2 also rules out the

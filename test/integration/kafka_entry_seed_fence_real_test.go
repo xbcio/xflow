@@ -95,7 +95,8 @@ func TestKafkaEntrySeed_StaleGeneration409_DoesNotCommit(t *testing.T) {
 		Topic(topic).
 		Group(group).
 		StartOffset("earliest").
-		AggregateByPartition(batchSize, 200*time.Millisecond)
+		AggregateByPartition(batchSize, 200*time.Millisecond).
+		BlockOnOverflow()
 
 	ctx1, cancel1 := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel1()
@@ -184,7 +185,8 @@ func TestKafkaEntrySeed_StaleGeneration409_DoesNotCommit(t *testing.T) {
 		Topic(topic).
 		Group(group).
 		StartOffset("earliest").
-		AggregateByPartition(batchSize, 200*time.Millisecond)
+		AggregateByPartition(batchSize, 200*time.Millisecond).
+		BlockOnOverflow()
 
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel2()
@@ -265,6 +267,7 @@ func fenceParams(brokers []string, topic, group string, batchSize int) map[strin
 			"max_size":       batchSize,
 			"flush_interval": "200ms",
 			"dedup":          "message",
+			"on_overflow":    "block",
 		},
 	}
 }

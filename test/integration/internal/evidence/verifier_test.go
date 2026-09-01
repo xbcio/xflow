@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -41,6 +42,99 @@ func defaultFakeProvenance() fakeProvenance {
 		relevantDiffSHA256: sha256String("clean"),
 		testBinarySHA256:   sha256String("binary"),
 		goVersion:          runtime.Version(),
+	}
+}
+
+func TestRelevantSourcePathsCoverEntireWorktreeFromPackageDirectory(t *testing.T) {
+	paths := RelevantSourcePaths()
+	if len(paths) != 1 || paths[0] != ":(top)" {
+		t.Fatalf("RelevantSourcePaths() = %q, want one root-anchored full-worktree pathspec", paths)
+	}
+
+	repo := t.TempDir()
+	runGit := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+		return string(out)
+	}
+
+	_ = runGit("init", "-q")
+	for _, dir := range []string{"backend", "test/integration/testdata/evidence", "web"} {
+		if err := os.MkdirAll(filepath.Join(repo, dir), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	ignorePath := filepath.Join(repo, ".gitignore")
+	if err := os.WriteFile(ignorePath, []byte("*.test\ntest/integration/testdata/evidence/\n"), 0o644); err != nil {
+		t.Fatalf("write ignore fixture: %v", err)
+	}
+	trackedPath := filepath.Join(repo, "backend", "candidate.go")
+	if err := os.WriteFile(trackedPath, []byte("package backend\n"), 0o644); err != nil {
+		t.Fatalf("write tracked fixture: %v", err)
+	}
+	_ = runGit("add", ".gitignore", "backend/candidate.go")
+	_ = runGit("-c", "user.name=xflow-test", "-c", "user.email=xflow-test@example.invalid", "commit", "-q", "-m", "initial")
+
+	t.Chdir(filepath.Join(repo, "test", "integration"))
+
+	prov := RealProvenance{}
+	clean, details, err := prov.RelevantTreeClean(paths)
+	if err != nil {
+		t.Fatalf("check initial worktree: %v", err)
+	}
+	if !clean || details != "" {
+		t.Fatalf("initial worktree clean=%v details=%q, want clean", clean, details)
+	}
+	ignoredArtifact := filepath.Join(repo, "test", "integration", "testdata", "evidence", "fragment.json")
+	if err := os.WriteFile(ignoredArtifact, []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("write ignored artifact fixture: %v", err)
+	}
+	clean, details, err = prov.RelevantTreeClean(paths)
+	if err != nil {
+		t.Fatalf("check generated ignored artifact: %v", err)
+	}
+	if !clean || details != "" {
+		t.Fatalf("ignored evidence artifact clean=%v details=%q, want clean", clean, details)
+	}
+
+	untrackedPath := filepath.Join(repo, "web", "candidate.ts")
+	if err := os.WriteFile(untrackedPath, []byte("export {};\n"), 0o644); err != nil {
+		t.Fatalf("write untracked fixture: %v", err)
+	}
+	clean, details, err = prov.RelevantTreeClean(paths)
+	if err != nil {
+		t.Fatalf("check untracked root-level change: %v", err)
+	}
+	if clean || !strings.Contains(details, "web/") {
+		t.Fatalf("untracked out-of-package change clean=%v details=%q, want detected", clean, details)
+	}
+	if err := os.Remove(untrackedPath); err != nil {
+		t.Fatalf("remove untracked fixture: %v", err)
+	}
+
+	if err := os.WriteFile(trackedPath, []byte("package backend\n// changed\n"), 0o644); err != nil {
+		t.Fatalf("modify tracked fixture: %v", err)
+	}
+	clean, details, err = prov.RelevantTreeClean(paths)
+	if err != nil {
+		t.Fatalf("check tracked root-level change: %v", err)
+	}
+	if clean || !strings.Contains(details, "backend/candidate.go") {
+		t.Fatalf("tracked out-of-package change clean=%v details=%q, want detected", clean, details)
+	}
+
+	gotDigest, err := prov.RelevantDiffDigest(paths)
+	if err != nil {
+		t.Fatalf("digest full-worktree diff: %v", err)
+	}
+	wantDiff := runGit("diff", "HEAD", "--", ":(top)")
+	wantDigest := sha256.Sum256([]byte(wantDiff))
+	if gotDigest != hex.EncodeToString(wantDigest[:]) {
+		t.Fatalf("full-worktree diff digest = %s, want %s", gotDigest, hex.EncodeToString(wantDigest[:]))
 	}
 }
 

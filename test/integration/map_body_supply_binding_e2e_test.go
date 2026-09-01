@@ -179,7 +179,9 @@ func TestSupplyConsumerBindingReachesMapBodyModule(t *testing.T) {
 	// a body member: WorkflowName is the body-bearing (map) node's name, not
 	// the workflow's own name (types.Input.WorkflowName's contract; see
 	// wantBinding below) -- "node:" + mapNode + "/" + bodyMember.
-	t.Cleanup(func() { node.UnregisterWasmSupplyConsumerByDigest(digest, mapBodySupplyNode, "node:"+mapNode+"/"+bodyMember) })
+	t.Cleanup(func() {
+		node.UnregisterWasmSupplyConsumerByDigest(digest, mapBodySupplyNode, "node:"+mapNode+"/"+bodyMember)
+	})
 
 	def := &types.WorkflowDef{
 		// Unique per run: AddWorkflow keys on (namespace, Name, Version) and

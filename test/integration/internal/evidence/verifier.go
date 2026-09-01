@@ -49,7 +49,7 @@ func (RealProvenance) CommitSHA() (string, error) {
 
 // RelevantTreeClean reports whether the supplied paths have uncommitted changes.
 func (RealProvenance) RelevantTreeClean(paths []string) (bool, string, error) {
-	args := append([]string{"status", "--porcelain"}, paths...)
+	args := append([]string{"status", "--porcelain", "--"}, paths...)
 	out, err := exec.Command("git", args...).Output()
 	if err != nil {
 		return false, "", fmt.Errorf("git status: %w", err)
@@ -63,7 +63,7 @@ func (RealProvenance) RelevantDiffDigest(paths []string) (string, error) {
 	if len(paths) == 0 {
 		return "", nil
 	}
-	args := append([]string{"diff", "HEAD"}, paths...)
+	args := append([]string{"diff", "HEAD", "--"}, paths...)
 	out, err := exec.Command("git", args...).Output()
 	if err != nil {
 		return "", fmt.Errorf("git diff: %w", err)
@@ -95,25 +95,15 @@ func (p RealProvenance) TestBinaryDigest(path string) (string, error) {
 // GoVersion returns the Go runtime version string.
 func (RealProvenance) GoVersion() string { return runtime.Version() }
 
-// RelevantSourcePaths lists the production and test paths that affect A0/A3
-// evidence semantics. UI-only or unrelated files are excluded from the relevant
-// diff digest.
+// RelevantSourcePaths returns a root-anchored Git pathspec for the complete
+// worktree. G0 is release evidence for a candidate SHA, so changes outside the
+// A0/A3 implementation (for example a Make target, recorder, backend, API, or
+// web change) must not inherit that SHA's clean-tree claim. The :(top) pathspec
+// remains rooted at the repository even though a Go test binary normally runs
+// with test/integration as its working directory. Git's ignore rules continue
+// to exclude generated evidence artifacts and the fixed test binary.
 func RelevantSourcePaths() []string {
-	return []string{
-		"engine/",
-		"service/control/",
-		"service/runner/",
-		"test/integration/a0_fault_matrix_test.go",
-		"test/integration/cyclic_reliability_process_test.go",
-		"test/integration/action_parity_test.go",
-		"test/integration/action_parity_http_test.go",
-		"test/integration/action_parity_grpc_test.go",
-		"test/integration/action_parity_script_test.go",
-		"test/integration/action_parity_onerror_test.go",
-		"test/integration/action_parity_database_test.go",
-		"test/integration/action_parity_database_server_test.go",
-		"test/integration/internal/evidence/",
-	}
+	return []string{":(top)"}
 }
 
 // GoTestEvent mirrors one line of `go test -json` output.

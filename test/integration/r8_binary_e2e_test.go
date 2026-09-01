@@ -18,11 +18,13 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -237,7 +239,7 @@ func startR8Runner(t *testing.T, runnerBin, httpURL, id string) *r8Process {
 		"--server", httpURL,
 		"--transport", "http",
 		"--id", id,
-		"--cap", "xflow.function,xflow.script",
+		"--cap", "xflow.function,xflow.http,xflow.script",
 		"--poll-wait", "50ms",
 		"--concurrency", "1",
 	)
@@ -311,30 +313,57 @@ func r8Workflow(name, code string) *types.WorkflowDef {
 	}
 }
 
-// r8ScriptWorkflow builds a single-node xflow.script workflow with a CPU-bound
-// busy loop, used to guarantee the kill lands while the node is executing
-// (Running) rather than queued.
-//
-// The two constants matter and are not interchangeable:
-//
-//   - 20M goja iterations measure ~2.5s on this hardware — long enough that the
-//     50ms g1WaitForNodeStatus poll plus the SIGKILL always land mid-execution,
-//     short enough that the post-recovery re-execution finishes well inside the
-//     node timeout.
-//   - The 30s timeout must comfortably exceed one full run. An earlier revision
-//     used 150M iterations (~18.3s measured) under a 10s timeout, so the node
-//     could never succeed on any attempt: the recovered re-run always died with
-//     script.timeout, and the recovery assertion below silently accepted that
-//     failure as "converged". Keep the loop well under the timeout.
-func r8ScriptWorkflow(name string) *types.WorkflowDef {
+// r8MidFlightBarrier is a test-owned HTTP endpoint that proves the first
+// runner entered a real node handler before the test kills it. NodeStatusRunning
+// alone is not sufficient: BuildTaskLease commits that status before the poll
+// response is finalized and delivered, so killing on Running can cancel the
+// dispatch handshake and let the replacement runner execute attempt 1.
+type r8MidFlightBarrier struct {
+	server      *httptest.Server
+	started     chan struct{}
+	release     chan struct{}
+	releaseOnce sync.Once
+	requests    atomic.Int32
+}
+
+func newR8MidFlightBarrier(t *testing.T) *r8MidFlightBarrier {
+	t.Helper()
+	b := &r8MidFlightBarrier{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	b.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if b.requests.Add(1) == 1 {
+			close(b.started)
+			select {
+			case <-b.release:
+			case <-r.Context().Done():
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(func() {
+		b.releaseFirst()
+		b.server.Close()
+	})
+	return b
+}
+
+func (b *r8MidFlightBarrier) releaseFirst() {
+	b.releaseOnce.Do(func() { close(b.release) })
+}
+
+// r8BlockingHTTPWorkflow runs a single HTTP node against the barrier. The first
+// request blocks until its runner is killed; the recovered attempt gets an
+// immediate 200 response and can complete normally.
+func r8BlockingHTTPWorkflow(name, rawURL string) *types.WorkflowDef {
 	return &types.WorkflowDef{
 		Name: name,
 		Nodes: []types.NodeDef{
-			{Name: "busy", Type: "xflow.script", Parameters: map[string]any{
-				"language": "js",
-				"runtime":  "goja",
-				"code":     "var i=0;while(i<20000000){i++}",
-				"timeout":  "30s",
+			{Name: "busy", Type: "xflow.http", Parameters: map[string]any{
+				"method":  http.MethodGet,
+				"url":     rawURL,
+				"options": map[string]any{"timeout": "30s"},
 			}},
 		},
 	}
@@ -487,17 +516,26 @@ func r8KillPendingRestart(t *testing.T, serverBin, runnerBin, addr, dsn string) 
 // only 30s, which is under the lease TTL itself, so the subtest could never
 // pass and always degraded to a skip.
 func r8KillMidFlightRestart(t *testing.T, serverBin, runnerBin, addr, dsn string) {
+	barrier := newR8MidFlightBarrier(t)
 	srv := newR8Server(t, serverBin, freeAddr(t), addr, dsn)
 	runner := startR8Runner(t, runnerBin, srv.httpURL, "r8-runner-mid-1")
 
-	id := r8Submit(t, srv.httpURL, r8ScriptWorkflow("r8-midflight"))
+	id := r8Submit(t, srv.httpURL, r8BlockingHTTPWorkflow("r8-midflight", barrier.server.URL))
 	t.Cleanup(func() { deleteAtomicReliabilityKeys(t, srv.rdb, id) })
 
-	// Wait until the busy node is Running, then SIGKILL the runner mid-execution.
-	g1WaitForNodeStatus(t, srv.httpURL, r8Token, id, "busy",
-		[]types.NodeStatus{types.NodeStatusRunning}, 15*time.Second)
-	t.Logf("R8: node busy reached Running; SIGKILL runner mid-execution")
+	// The barrier is reached from inside xflow.http.Execute, after the poll
+	// response has reached this runner. Unlike NodeStatusRunning, this cannot be
+	// observed in the server-side dispatch-before-delivery window.
+	select {
+	case <-barrier.started:
+	case <-time.After(15 * time.Second):
+		status, detail := g1InspectAuth(t, srv.httpURL, r8Token, id)
+		t.Fatalf("R8 mid-flight: timeout waiting for runner to enter HTTP barrier "+
+			"(inspect status=%d detail=%+v; runner out=%s)", status, detail, runner.out.String())
+	}
+	t.Logf("R8: node busy entered HTTP handler; SIGKILL runner mid-execution")
 	runner.kill(t)
+	barrier.releaseFirst()
 
 	// Restart a fresh runner and wait out the lease-sweep window.
 	runner2 := startR8Runner(t, runnerBin, srv.httpURL, "r8-runner-mid-2")
@@ -526,6 +564,9 @@ func r8KillMidFlightRestart(t *testing.T, serverBin, runnerBin, addr, dsn string
 		t.Fatalf("R8 mid-flight: node busy succeeded on attempt %d, want >= 2 — the SIGKILL did not "+
 			"interrupt an in-flight execution, so lease-sweep recovery was never exercised; node=%+v",
 			busy.Attempt, *busy)
+	}
+	if requests := barrier.requests.Load(); requests < 2 {
+		t.Fatalf("R8 mid-flight: barrier received %d request(s), want >= 2 (interrupted attempt + recovery)", requests)
 	}
 	t.Logf("R8 mid-flight recovery: execution %s -> Success on attempt %d in %v after runner SIGKILL+restart",
 		id, busy.Attempt, time.Since(start))
