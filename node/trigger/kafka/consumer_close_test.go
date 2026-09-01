@@ -1,9 +1,13 @@
 package kafka
 
 import (
+	"context"
+	"errors"
 	"net"
 	"testing"
 	"time"
+
+	kafkago "github.com/segmentio/kafka-go"
 )
 
 // TestKafkaGoConsumerCloseInterruptsBlockedFetch exercises the actual
@@ -74,5 +78,37 @@ func TestKafkaGoConsumerCloseInterruptsBlockedFetch(t *testing.T) {
 		case <-time.After(3 * time.Second):
 		}
 		t.Fatal("Close did not interrupt kafka-go FetchMessage within 1s")
+	}
+}
+
+// TestKafkaConnTrackerInterruptAllowsCleanupDial guards the distinction between
+// interrupting a blocked fetch and permanently closing the dialer. Reader.Close
+// performs the former before kafka-go opens a fresh coordinator connection for
+// LeaveGroup; rejecting that cleanup dial leaves the member alive until the
+// broker's session timeout and stalls an immediate same-group replacement.
+func TestKafkaConnTrackerInterruptAllowsCleanupDial(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = listener.Close() }()
+
+	tracker := newKafkaConnTracker(&kafkago.Dialer{})
+	first, err := tracker.dialContext(context.Background(), "tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatalf("first dial: %v", err)
+	}
+	defer func() { _ = first.Close() }()
+
+	tracker.interrupt()
+	second, err := tracker.dialContext(context.Background(), "tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatalf("cleanup-generation dial after interrupt: %v", err)
+	}
+	defer func() { _ = second.Close() }()
+
+	tracker.close()
+	if _, err := tracker.dialContext(context.Background(), "tcp", listener.Addr().String()); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("dial after permanent close error = %v, want net.ErrClosed", err)
 	}
 }

@@ -3,8 +3,6 @@ package metrics
 import (
 	"context"
 	"time"
-
-	"github.com/xbcio/xflow/backend/providers/distributed"
 )
 
 // Asynq backend metric names.
@@ -19,6 +17,21 @@ const (
 	metricLeaseRepairDuration     = "xflow_lease_repair_duration_seconds"
 	metricLeaseRepairReconciled   = "xflow_lease_repair_reconciled"
 )
+
+// Local mirrors keep the observability package below concrete backend
+// providers. The service-layer wiring passes these adapters to distributed's
+// structurally identical observer contracts, so that call site also provides a
+// compile-time compatibility check without reversing the dependency direction.
+type auditObserver interface {
+	OnAuditOK(ctx context.Context, op string)
+	OnAuditFailed(ctx context.Context, op string, err error)
+}
+
+type leaseObserver interface {
+	OnLeaseAcquire(ctx context.Context, result string, elapsed time.Duration)
+	OnLeaseExpiryScan(ctx context.Context, candidates int, elapsed time.Duration, err error)
+	OnLeaseRepair(ctx context.Context, reconciled int, elapsed time.Duration, err error)
+}
 
 // AuditMetrics observes backend/providers/distributed audit-store dual-write outcomes.
 type AuditMetrics struct {
@@ -37,7 +50,7 @@ func (a AuditMetrics) OnAuditFailed(ctx context.Context, op string, _ error) {
 	a.Metrics.Inc(metricAuditWrite, withNamespace(ctx, map[string]string{"op": op, "result": "failed"}))
 }
 
-var _ distributed.AuditObserver = AuditMetrics{}
+var _ auditObserver = AuditMetrics{}
 
 // LeaseMetrics observes backend/providers/distributed lease lifecycle operations.
 type LeaseMetrics struct {
@@ -80,4 +93,4 @@ func (l LeaseMetrics) OnLeaseRepair(ctx context.Context, reconciled int, elapsed
 	l.Metrics.Set(metricLeaseRepairReconciled, labels, float64(reconciled))
 }
 
-var _ distributed.LeaseObserver = LeaseMetrics{}
+var _ leaseObserver = LeaseMetrics{}

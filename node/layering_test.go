@@ -7,8 +7,9 @@ import (
 )
 
 // TestNodeSubtreeDoesNotDependOnServiceOrCmd enforces the layering rule stated
-// in AGENTS.md and docs/CODING-STANDARDS.md: the core packages (engine, node,
-// types, store) must never import service/ or cmd/.
+// in AGENTS.md and docs/CODING-STANDARDS.md: lower-layer packages (engine,
+// node, types, store, execution, observability) must never import service/ or
+// cmd/.
 //
 // Before the trigger package split, node/internal/trigger/entry_seed_runtime.go
 // imported service/protocol, which pulled service/protocol AND
@@ -22,10 +23,10 @@ import (
 // backend/providers/local's test imports service/control, yet
 // `go list -deps ./backend/providers/local/` contains zero xflow/service.
 //
-// Only the node subtree is asserted here. store/sqlstore violates the same rule
-// (it imports service/crypto/supplyenc); fixing that means relocating supply
-// encryption, which is separate work. Widening this test before then would only
-// add a known-red assertion.
+// This package-local guard checks node's complete transitive dependency graph
+// and gives node contributors fast feedback. The repository-wide source-import
+// rule for engine, node, types, store, execution, and observability is enforced
+// separately by test/architecture/production_dependencies_test.go.
 func TestNodeSubtreeDoesNotDependOnServiceOrCmd(t *testing.T) {
 	out, err := exec.Command("go", "list", "-deps", "./...").Output()
 	if err != nil {

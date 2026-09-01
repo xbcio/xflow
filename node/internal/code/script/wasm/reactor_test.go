@@ -147,9 +147,10 @@ func TestReactor_BadConfigRejected(t *testing.T) {
 // heavy concurrency prove the pool serializes per-instance access.
 func TestReactor_Concurrent(t *testing.T) {
 	e := newReactor(t)
+	code := engine.Code(b64(reactorWasm))
 	cfg := ruleConfig([2]string{"big", "x > 5"})
 	// Warm once so the pool exists before the storm.
-	if _, err := e.Execute(context.Background(), engine.Code(b64(reactorWasm)), map[string]any{
+	if _, err := e.Execute(context.Background(), code, map[string]any{
 		"$config": cfg, "x": 9.0,
 	}, engine.DefaultHelpers()); err != nil {
 		t.Fatalf("warm: %v", err)
@@ -164,7 +165,7 @@ func TestReactor_Concurrent(t *testing.T) {
 			defer wg.Done()
 			for i := range iters {
 				x := float64((g*iters + i) % 12) // deterministic mix around threshold 5
-				out, err := e.Execute(context.Background(), engine.Code(b64(reactorWasm)), map[string]any{
+				out, err := e.Execute(context.Background(), code, map[string]any{
 					"$config": cfg, "x": x,
 				}, engine.DefaultHelpers())
 				if err != nil {

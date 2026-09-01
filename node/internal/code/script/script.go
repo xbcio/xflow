@@ -330,6 +330,18 @@ func (n *ScriptNode) Execute(ctx context.Context, input *types.Input) (*types.Ou
 			observeExecute(ctx, language, runtime, "error", time.Since(start))
 			return &types.Output{Data: map[string]any{"error": sizeErr.Error()}, Port: "error"}, nil
 		}
+		// Host-attested: the collector lives in the context, which no guest can
+		// reach, and the digest is the one this node resolved code from — not
+		// anything the guest returned.
+		//
+		// Recorded only on success, where success means "reaches the main port",
+		// not merely "the guest returned". The size cap above is the reason this
+		// sits below it rather than above: an oversized result routes to the
+		// error port exactly like a trap does, and a manifest that attests one
+		// but not the other would be claiming a distinction the consumer cannot
+		// see. Consumers stamp the digest onto the business row this node
+		// produced; both branches produce no such row.
+		types.ArtifactUseCollectorFrom(ctx).Record(input.NodeName, digest)
 		observeOutputBytes(ctx, language, runtime, len(b))
 		observeExecute(ctx, language, runtime, "main", time.Since(start))
 		return &types.Output{Data: data, Port: "main"}, nil
@@ -383,6 +395,11 @@ func (n *ScriptNode) Execute(ctx context.Context, input *types.Input) (*types.Ou
 		observeExecute(ctx, language, runtime, "error", time.Since(start))
 		return &types.Output{Data: map[string]any{"error": sizeErr.Error()}, Port: "error"}, nil
 	}
+	// Same host attestation as the batch path above, and below the size cap for
+	// the same reason: the error port is the error port whether the guest
+	// trapped or merely overflowed. The record never travels through data, so
+	// the guest's return value cannot influence it whatever the order.
+	types.ArtifactUseCollectorFrom(ctx).Record(input.NodeName, digest)
 
 	observeOutputBytes(ctx, language, runtime, len(b))
 	observeExecute(ctx, language, runtime, "main", time.Since(start))

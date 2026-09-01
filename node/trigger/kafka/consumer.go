@@ -34,6 +34,7 @@ type kafkaConnTracker struct {
 
 	mu     sync.Mutex
 	closed bool
+	epoch  uint64
 	conns  map[*trackedKafkaConn]struct{}
 }
 
@@ -66,14 +67,17 @@ func newKafkaConnTracker(dialer *kafkago.Dialer) *kafkaConnTracker {
 }
 
 func (t *kafkaConnTracker) dialContext(ctx context.Context, network, address string) (net.Conn, error) {
-	select {
-	case <-t.ctx.Done():
+	t.mu.Lock()
+	if t.closed {
+		t.mu.Unlock()
 		return nil, net.ErrClosed
-	default:
 	}
+	trackerCtx := t.ctx
+	epoch := t.epoch
+	t.mu.Unlock()
 
 	dialCtx, cancel := context.WithCancel(ctx)
-	stopCancel := context.AfterFunc(t.ctx, cancel)
+	stopCancel := context.AfterFunc(trackerCtx, cancel)
 	conn, err := t.dial(dialCtx, network, address)
 	stopCancel()
 	cancel()
@@ -83,13 +87,40 @@ func (t *kafkaConnTracker) dialContext(ctx context.Context, network, address str
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.closed {
+	if t.closed || t.epoch != epoch {
 		_ = conn.Close()
 		return nil, net.ErrClosed
 	}
 	tracked := &trackedKafkaConn{Conn: conn, owner: t}
 	t.conns[tracked] = struct{}{}
 	return tracked, nil
+}
+
+// interrupt cancels the current dial generation and closes every socket it
+// produced, but deliberately leaves the tracker open for a subsequent dial.
+// kafka-go's Reader.Close needs that second generation to send LeaveGroup
+// after its blocked fetch has been interrupted; permanently closing the dialer
+// here strands the old member until SessionTimeout and stalls an immediate
+// same-group replacement.
+func (t *kafkaConnTracker) interrupt() {
+	t.mu.Lock()
+	if t.closed {
+		t.mu.Unlock()
+		return
+	}
+	oldCancel := t.cancel
+	t.ctx, t.cancel = context.WithCancel(context.Background())
+	t.epoch++
+	conns := make([]*trackedKafkaConn, 0, len(t.conns))
+	for conn := range t.conns {
+		conns = append(conns, conn)
+	}
+	t.mu.Unlock()
+
+	oldCancel()
+	for _, conn := range conns {
+		_ = conn.Close()
+	}
 }
 
 func (t *kafkaConnTracker) close() {
@@ -99,6 +130,7 @@ func (t *kafkaConnTracker) close() {
 		return
 	}
 	t.closed = true
+	t.epoch++
 	conns := make([]*trackedKafkaConn, 0, len(t.conns))
 	for conn := range t.conns {
 		conns = append(conns, conn)
@@ -273,8 +305,10 @@ func (c *kafkaGoConsumer) Close() error {
 			}
 		case <-timer.C:
 			// Reader.Close has no context in kafka-go v0.4.49. Force its
-			// background consumer-group operations out of network waits.
-			c.connections.close()
+			// current fetch/dial generation out of network waits. Keep the
+			// tracker open until Reader.Close has sent LeaveGroup on a fresh
+			// connection, then close it permanently below.
+			c.connections.interrupt()
 			c.closeErr = <-readerClosed
 		}
 		c.connections.close()

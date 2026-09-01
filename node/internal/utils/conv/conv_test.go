@@ -45,10 +45,18 @@ func TestNonEmptyStringSlice(t *testing.T) {
 			}
 		}
 	})
-	t.Run("[]string", func(t *testing.T) {
-		got := NonEmptyStringSlice([]string{"x", "", "y"})
+	t.Run("[]string does not alias or mutate input", func(t *testing.T) {
+		input := []string{"x", "", "y"}
+		got := NonEmptyStringSlice(input)
 		if len(got) != 2 || got[0] != "x" || got[1] != "y" {
 			t.Fatalf("got %v", got)
+		}
+		if input[0] != "x" || input[1] != "" || input[2] != "y" {
+			t.Fatalf("input mutated during conversion: %v", input)
+		}
+		got[0] = "changed"
+		if input[0] != "x" {
+			t.Fatalf("output aliases input: input=%v output=%v", input, got)
 		}
 	})
 	t.Run("unsupported type returns nil", func(t *testing.T) {

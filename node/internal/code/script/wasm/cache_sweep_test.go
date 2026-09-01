@@ -136,14 +136,14 @@ func TestSweepCache_UnderBudgetDeletesNothing(t *testing.T) {
 	}
 }
 
-// TestSweepCache_AbandonedVersionDirGoesFirst is why cacheEntries pools every
+// TestSweepCache_AbandonedVersionEntriesGoFirst is why cacheEntries pools every
 // version directory into one budget rather than sweeping the current one alone.
 //
 // After a wazero upgrade the old directory is dead weight that nothing will
 // ever read again. Its entries are also, by construction, the oldest ones — so
 // FIFO eviction clears them before touching anything live, without this package
 // needing to know which version is current.
-func TestSweepCache_AbandonedVersionDirGoesFirst(t *testing.T) {
+func TestSweepCache_AbandonedVersionEntriesGoFirst(t *testing.T) {
 	dir := t.TempDir()
 	old := filepath.Join(dir, cacheVersionDirPrefix+"1.8.0-arm64-darwin")
 	cur := filepath.Join(dir, cacheVersionDirPrefix+"1.9.0-arm64-darwin")
@@ -158,10 +158,14 @@ func TestSweepCache_AbandonedVersionDirGoesFirst(t *testing.T) {
 	if _, err := os.Stat(live); err != nil {
 		t.Fatalf("the live entry was evicted before the abandoned version's: %v", err)
 	}
-	// The emptied version directory must go too, or an upgraded deployment
-	// accumulates one dead directory per wazero release forever.
-	if _, err := os.Stat(old); !os.IsNotExist(err) {
-		t.Fatalf("emptied version dir %s was not pruned", filepath.Base(old))
+	// Keep the now-empty directory. wazero creates each version directory once
+	// when the CompilationCache is constructed and later writes temp files into
+	// it without recreating it. Pruning here can race a live compiler and turn a
+	// harmless eviction into a failed module compile.
+	if entries, err := os.ReadDir(old); err != nil {
+		t.Fatalf("emptied version dir %s was removed: %v", filepath.Base(old), err)
+	} else if len(entries) != 0 {
+		t.Fatalf("abandoned version dir still contains %d entries, want empty", len(entries))
 	}
 	if _, err := os.Stat(cur); err != nil {
 		t.Fatalf("the current version dir was pruned while still holding an entry: %v", err)

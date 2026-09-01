@@ -192,8 +192,11 @@ func sweepCacheAsync() {
 	}()
 }
 
-// sweepCache deletes the oldest entries under dir until the total fits budget,
-// and removes version directories left empty behind them.
+// sweepCache deletes the oldest entries under dir until the total fits budget.
+// It deliberately preserves empty wazero version directories: a CompilationCache
+// creates its version directory once, then assumes it remains available for
+// later cache writes. Removing that directory concurrently with a compile makes
+// wazero's CreateTemp fail instead of merely turning the cache write into a miss.
 //
 // Oldest by MODIFICATION time, which for this cache is insertion time: wazero's
 // Get only opens the file, so nothing records a last use. This is FIFO, not
@@ -232,7 +235,6 @@ func sweepCache(dir string, budget int64) (freed, remaining int64, err error) {
 		}
 		total -= e.size
 	}
-	pruneEmptyVersionDirs(dir)
 	return freed, total, nil
 }
 
@@ -288,25 +290,6 @@ func cacheEntries(dir string) (out []cacheEntry, total int64, err error) {
 		}
 	}
 	return out, total, nil
-}
-
-// pruneEmptyVersionDirs removes version directories with nothing left in them.
-// Errors are ignored throughout: an empty directory costs nothing, and the
-// caller has already reclaimed the bytes that mattered.
-func pruneEmptyVersionDirs(dir string) {
-	versions, err := os.ReadDir(dir)
-	if err != nil {
-		return
-	}
-	for _, v := range versions {
-		if !v.IsDir() || !strings.HasPrefix(v.Name(), cacheVersionDirPrefix) {
-			continue
-		}
-		vdir := filepath.Join(dir, v.Name())
-		if files, err := os.ReadDir(vdir); err == nil && len(files) == 0 {
-			_ = os.Remove(vdir)
-		}
-	}
 }
 
 // resolveCacheDir picks the on-disk cache location. An empty return with a nil

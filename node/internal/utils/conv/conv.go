@@ -26,7 +26,10 @@ func NonEmptyStringSlice(v any) []string {
 	if err != nil {
 		return nil
 	}
-	out := values[:0]
+	// cast returns the caller's backing array unchanged for []string. Never
+	// compact into that array: parsed params may already be in use by a
+	// long-lived trigger while a sibling activation parses the same definition.
+	out := make([]string, 0, len(values))
 	for _, value := range values {
 		if value != "" {
 			out = append(out, value)

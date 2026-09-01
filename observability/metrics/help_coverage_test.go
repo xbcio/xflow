@@ -162,7 +162,7 @@ func TestEveryMetricHelpEntryHasEmitter(t *testing.T) {
 	// repo for its literal turns up a real Inc/Set/Observe/ObserveBytes call
 	// outside this package.
 	emittedOutsidePackage := map[string]string{
-		"xflow_runner_up":                              "service/control/metrics_inbox.go",
+		"xflow_runner_up": "service/control/metrics_inbox.go",
 		"xflow_runner_metrics_last_report_age_seconds": "service/control/metrics_inbox.go",
 		"xflow_runner_metrics_received_total":          "service/control/metrics_inbox.go",
 		"xflow_runner_metrics_rejected_total":          "service/control/metrics_inbox.go",
