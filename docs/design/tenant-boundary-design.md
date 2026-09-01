@@ -1,360 +1,267 @@
-# Tenant Boundary 设计文档
+# Tenant Boundary（namespace 隔离）设计文档
 
-> **日期**: 2026-07-19
-> **状态**: 设计 / 待实施
-> **范围**: G2 Wave 4 Phase 6 Task 6.1 —— 多租户隔离的全链路设计。这是其后 Phase 7（7.1–7.6 全链路改造）与 Phase 8（8.1 越权测试、8.2 诚实性声明）的前置设计。
-> **门槛映射**: `docs/design/RELEASE-GATES.md` §2 G2 行「多租户 tenant boundary」+ §4 反声明「namespace 是安全边界」（已证伪）。
-> **前置上下文**: 代码核查确认——**全仓 Go 代码中已无任何 `TenantID` 标识符**（`grep -rn TenantID --include=*.go` 零命中）。隔离原语统一是 `Namespace`：`types/workflow.go` `WorkflowDef.Namespace`（已贯通）、`service/apiserver/authz.go` `Principal.Namespace`（已实现，`NewBearerPrincipalAuthMulti` 多 namespace token 注册表）、`AuditEvent.Namespace`、`DeadLetterReplayPrincipal.Namespace`、`store/sqlstore` `dbAuditEvent.Namespace`（DB 列 `namespace varchar(128)`）。早期设计里的 "TenantID 字段" 已随 tenant→namespace 整体重命名移除（`backend/tenant` 包在 `0deb675` 一并删除），也不再是目标——不要据此新增字段。runner labels 不是安全边界（详见 `docs/references/ha-soak-plan.md` §4 反声明）。
-> **代码可做**: namespace boundary 全链路代码 + 越权测试可由 subagent 完成（miniredis 可执行，非 ENV-GATED）。
-> **不等于 G2 完成**: G2 整体完成仍依赖 G1 全满足 + HA soak（ENV-GATED）；namespace boundary 完成只是 G2 退出清单中的一项。
+> **日期**: 2026-07-19；2026-08-27 按实现更新
+> **状态**: namespace boundary 已实现并具备越权测试。2026-07-24 的历史 G1 已在当时的 clean SHA 闭合；当前候选仍须在同一 clean SHA 重签 G0/G1，历史闭合不撤销、当前候选也不自动继承。
+> **范围**: G2 多租户产品能力的 namespace 隔离边界，包括认证来源、持久化 key、runner placement、management API、dead-letter/outbox、审计与可观测性。
+> **技术原语**: 当前隔离原语统一为 `namespace.Namespace`；“tenant/多租户”仅用于产品语境或历史说明，不代表另有 `TenantID` 安全边界。
+> **G2 边界**: 本文所述 namespace boundary 的代码与本地/集成测试已闭合；真实 Redis HA、多副本 SLO、HA soak 与真实多 namespace 环境验收仍是 ENV-GATED，不因本文闭合而自动完成。
 
 ---
 
-## 0. 诚实性前置声明（贯穿本文）
+## 0. 诚实性前置声明
 
-1. **namespace 前缀 ≠ 加密隔离**：Redis key 前缀只是命名空间隔离。映射 RELEASE-GATES §4 反声明「namespace 是安全边界」（已证伪）。跨 namespace 隔离依赖**服务端签发 Namespace + 全链路校验 + 越权测试**，Redis 层是命名空间隔离不是密码学隔离。
-2. **runner labels 不是安全边界**：映射 ha-soak-plan §4 反声明。runner placement 必须用**显式 namespace 归属**，不能用 `RunnerSelector.MatchLabels` 兜底承载 namespace（见 §4.7）。
-3. **subagent 能完成**：namespace boundary 全链路代码 + miniredis 越权测试可由 subagent 独立实现 + 评审。**不 ENV-GATED**（miniredis 嵌入即可）。
-4. **不等于 G2 完成**：G2 退出清单（修复设计 §12）= G1 全满足 + Redis HA + HA soak + 多副本 SLO + **namespace boundary 全链路 + 越权测试**。前三项中 HA soak + 多副本 SLO 是 ENV-GATED；namespace boundary 完成不解除其余项。
+1. **namespace 前缀不是密码学隔离**：隔离成立依赖服务端认证 principal、context 传播、全链路 namespace-scoped 读写以及越权测试。
+2. **客户端不是身份来源**：请求体、workflow DSL 或 runner label 都不能声明调用者的 namespace；HTTP 控制面以认证后的 `Principal.Namespace` 为准。
+3. **runner labels 不是安全边界**：runner 通过显式 `Namespaces` 注册，assignment/claim 在服务端按 namespace 过滤。
+4. **实现闭合不等于候选签署或 G2 完成**：历史证据、当前候选 clean-SHA 证据和真实环境验收是三个不同事实，不能互相替代。
 
 ---
 
-## 1. 现状核对（实际读代码后的确认）
+## 1. 当前实现核对
 
-### 1.1 与 G2 设计 §2.2 发现 7 一致的部分
+### 1.1 隔离原语与传播
 
-G2 设计 §2.2 发现 7 列出 tenant 仅有零散桩字段。核对代码确认：
+| 能力 | 当前实现 |
+|---|---|
+| namespace 类型 | `namespace.Namespace`，缺省值为 `namespace.Default`（`"default"`） |
+| HTTP 身份 | `Principal.Namespace` 由 authenticator 签发，`authzWrap` 注入 context |
+| workflow | 注册/替换路径使用认证 principal 的 namespace 覆盖并校验定义，不能靠请求体越权 |
+| engine/store | 下游通过 `namespace.FromContext` 或显式 `namespace.Namespace` 参数传递 |
+| runner | 注册 `Namespaces`，assignment 带 `Namespace`，claim 按 namespace 过滤 |
+| audit/dead-letter | 审计记录、dead-letter list/replay 均使用服务端 namespace context |
+| metrics/tracing | metrics 加 namespace label；span 自动加 `namespace` attribute，且不写入 baggage |
 
-| 桩字段 | 位置 | 现状 |
+全仓不需要另建 `TenantID` 类型。历史设计中的 tenant 字段已被当前 namespace 原语取代；兼容 schema、测试夹具和产品示例中的 `tenant` 文字不构成第二套身份来源。
+
+### 1.2 Redis key schema
+
+| 子系统 | 当前 key / scope | 说明 |
 |---|---|---|
-| `WorkflowDef.Namespace` | `types/workflow.go:8` | 服务端权威命名空间。`authz_wrap.go` 通过 `namespace.WithNamespace` 注入 context；`apiserver.RegisterWorkflow`/`ReplaceWorkflow` 从 context 读取并校验（`service/apiserver/apiserver.go:431,460`）。workflowreg key 已含 namespace 前缀（`workflowreg/registry.go:58`，形如 `xflow:ns:<namespace>:workflow:{<key>}:...`）。**这就是隔离原语**，不需要另建 TenantID 字段。 |
-| `AuditRecord` 的 namespace 维度 | `store/models.go`、`store/sqlstore/audit.go`（`dbAuditEvent.Namespace`，列 `namespace varchar(128)`） | 已就绪。写入路径 `apiserver.AuditEvent.Namespace`（`service/apiserver/authz.go`）由 `authz_wrap.go` 从 `principal.Namespace` 取。**注意**：早期文档称此处字段名为 `TenantID`，该名称已随 tenant→namespace 重命名移除，当前代码中无此字段。 |
-| `Principal.Namespace` | `service/apiserver/authz.go:21-25` | 已实现并已填充：`BearerPrincipalAuth.Authenticate` 返回 `Principal{Subject, Namespace, Scopes}`；`NamespaceAwareAuthorizer` 已实现并已在生产路由使用。结构体只有 `Subject`/`Namespace`/`Scopes` 三个字段。 |
-| `DeadLetterReplayPrincipal.Namespace` | `service/control/deadletter_manager.go` | 已实现。字段为 `Subject`/`Namespace`/`Scopes`，与 `apiserver.Principal` 同构。replay 时从 `principal.Namespace` 注入。 |
+| rstate execution、lease、outbox、dead-letter | `xflow:ns:<namespace>:exec:{<id>}:...` | `{<id>}` 保持单 execution 的 Redis Cluster 共槽语义 |
+| workflow registry | `xflow:wfreg:v2:{ns:<sha256(namespace)>}:...` | v2 digest authority；namespace hash tag 隔离 registry authority |
+| trigger | `xflow:ns:<namespace>:trigger:...` | dedup、lock、state 均按 namespace 隔离 |
+| namespace registry | `xflow:namespaces` | `ListNamespaces` 在返回结果中隐式保证 `default`，不要求 Redis SET 实际存有该成员 |
+| leader | `xflow:leader:control-plane` | 全局 leader，只门控 maintenance，不作为 namespace 安全边界 |
+| runner directory | `xflow:runner-directory:{control}` | 目录全局；namespace 约束位于注册、assignment 与 claim 路由层 |
 
-### 1.2 与 G2 设计 §2.2 发现 7 不符 / 需补充之处（核对代码新发现）
+### 1.3 已有安全证据
 
-**不符点 A — `BearerPrincipalAuth` 已扩展为多 namespace 注册表（已实现）。**
-`service/apiserver/authz.go` `BearerPrincipalAuth` 已持有 `principalByHash` 映射表，`NewBearerPrincipalAuthMulti` 接受 `[]TokenPrincipalMapping`，每条记录绑定 `(Subject, Namespace, Scopes)`，`Authenticate` 命中即返回带 Namespace 的 `Principal`（`authz.go:279-316`）。单 namespace 兼容由 `NewBearerPrincipalAuth` 包装（`authz.go:267`）。G2 设计 §2.2 发现 7 措辞「B3 principal 扩展 token→namespace 映射」已落地，本设计 §2 给出的具体方案已实现。
+以下测试覆盖不同层次的 namespace 隔离：
 
-**不符点 B — runner directory key 当前全局，非 per-tenant。**
-`service/control/redis_runner_directory.go:21` `redisRunnerDirectoryKeyPrefix = "xflow:runner-directory:{control}"`，所有 runner 注册到单一 hash-tagged slot。runner placement 的 tenant 隔离**不能靠改这个 key 前缀**（runner directory 是 control-plane 全局目录，runner 本身跨 tenant 共享进程池时需在路由层做 tenant 归属，而非在 directory key 层）。G2 设计 §2.2 发现 6 提到「runner 不连 Redis」——核对确认 runner 仅通过 Runner Protocol 连 server，runner directory 在 server 侧，runner 自身无 tenant 感知。§4.7 给出方案。
-
-**不符点 C — `WorkflowDef.Namespace` 是隔离原语本身，无需新增 TenantID（已澄清）。**
-G2 设计 §2.2 发现 7 仅说「未参与 key/路由」。实际代码确认：`Namespace` 已作为命名空间前缀贯入 workflowreg key（`workflowreg/registry.go:58`，形如 `xflow:ns:<namespace>:workflow:{<key>}:...`）、rstate key（`rstate/keys.go`）、trigger key（`trigger/trigger.go`）。`NamespaceAwareAuthorizer` 以 `Principal.Namespace` 做跨命名空间访问校验（`authz.go:179-214`）。**`namespace.Namespace` 就是 xflow 的多租户隔离原语，不需要另建 `TenantID` 字段。** §4.8 关于「新增 `TenantID` 字段」的描述已作废，实际以 `Namespace` 为准。
-
-**不符点 D — trigger 包已预留 tenant 前缀位置但未实现。**
-`backend/providers/distributed/internal/trigger/trigger.go:36-40` 注释明确「Tenant prefix is reserved for Task 7.2 (Phase 6/7). When a tenant prefix is added, the expected shape is `xflow:ns:<namespace>:trigger:dedup:<key>`」。这是 G2 设计未提及的良好基础，本设计直接采用此无花括号形状（tenant 前缀必须无花括号，原因见 §4.1）。
-
-**不符点 E — `NamespaceAwareAuthorizer` 已实现（已完成）。**
-`NamespaceAwareAuthorizer`（`authz.go:179-214`）已实现并在生产路由使用：`Authorize` 校验 `req.Principal.Namespace != ""` + scope + `req.ResourceNamespace == req.Principal.Namespace`（当 ResourceNamespace 非空时）。`AuthorizationRequest.ResourceNamespace` 字段已就绪（`authz.go:57`）。
-
-**不符点 F — management 端点 `/v1/management/executions/{id}`（`module_management.go:91-107`）无 tenant 校验。**
-`handleExecution` 直接 `Inspect(r.Context(), types.ExecutionID(id))`，不校验 execID 所属 tenant。`handleDeadLetterList`/`handleDeadLetterReplay`（`module_management.go:186,217`）虽经 `authzWrap`，但 `ScopeAuthorizer` 只查 scope 不查 tenant 归属。IDOR 缺口明确，§5 给出修复。
-
-**不符点 G — metrics labels 无 tenant 维度。**
-`observability/metrics/engine.go:76-81` `nodeLabels` 只含 `node` + `status`；`control.go:93` lease sweep labels 只含 `result`。无 tenant 标签。§4.9 给出加标签方案与高基数风险声明。
-
-### 1.3 Redis key schema 现状（tenant 前缀注入点）
-
-| 子系统 | 现状 key schema | 文件:行 | hash tag |
-|---|---|---|---|
-| rstate exec | `xflow:exec:{<id>}:<suffix>` | `rstate/keys.go:17-69` | `{<id>}` ✅ |
-| rstate outbox/dead | `xflow:exec:{<id>}:outbox:ready\|dead\|dead:body\|dead:meta:<eid>` | `rstate/atomic_state.go:26-37` | `{<id>}` ✅ |
-| rstate SCAN pattern | `xflow:exec:{*}:outbox:ready\|dead`、`xflow:exec:{*}:node:*:status`、`xflow:exec:{*}:leases` | `atomic_state.go:816,859,1001`、`lease_repair.go:72`、`state_lease.go:144` | `{*}` glob |
-| workflowreg | `xflow:workflow:{<key>}:bykey`、`xflow:workflow:{<key>}:byid:<id>`、`xflow:workflow:idmap:<id>` | `workflowreg/registry.go:58-77` | `{<key>}` ✅（Task 2.1 已修） |
-| trigger | `xflow:ns:rigger:dedup:<key>`、`xflow:ns:rigger:lock:<key>`、`xflow:ns:rigger:state:<scope>:<key>` | `trigger/trigger.go:41-47` | 无（单 key，无需） |
-| leader | `xflow:leader:control-plane` | `backend/providers/distributed/backend.go:298` | 无（全局单 key，**不 per-tenant**，见 §3） |
-| runner directory | `xflow:runner-directory:{control}` | `redis_runner_directory.go:21` | `{control}` 全局 |
+- `test/security/namespace_isolation_test.go`：跨 namespace workflow/execution/maintenance 行为；
+- `service/apiserver/namespace_idor_test.go`：management API 跨 namespace 返回 404；
+- `backend/providers/distributed/internal/rstate/namespace_isolation_test.go`：Redis key 与扫描隔离；
+- `service/control` 的 runner directory namespace 测试：注册与 claim 过滤；
+- `observability/metrics`、`observability/tracing` 的 namespace 测试：label/span attribute 传播且不进入 baggage。
 
 ---
 
-## 2. Namespace 定义与来源（已实现）
+## 2. Namespace 定义与身份来源
 
-### 2.1 类型定义
+### 2.1 类型与默认值
 
 ```go
-// namespace/namespace.go（已实现）
 type Namespace string
 
 const Default Namespace = "default"
 ```
 
-- `Namespace` 为 `string` 类型别名，服务端签发，**不可信客户端**。
-- 保留 `"default"` 作为单命名空间默认值，向后兼容（未配置 namespace 时所有请求归 `"default"`，行为与 G1 单租户等价）。
+`default` 保持单 namespace 部署的向后兼容。空值在服务端边界归一化；它不是允许调用者绕过隔离的通配符。
 
-### 2.2 不可信客户端原则（IDOR 防护，映射组织安全策略 §1）
+### 2.2 认证来源
 
-**核心原则：namespace 必须来自服务端认证后的 principal，忽略请求体任何 namespace 字段。**
+当前 bearer 路径通过 `NewBearerPrincipalAuthMulti` 接受 token 到 `(subject, namespace, scopes)` 的映射；`cmd/server` 的 auth-token 配置可为不同 namespace 签发不同 principal。未配置多 namespace 映射时落到 `namespace.Default`。
 
-- 请求体中出现的 `namespace` 字段一律**忽略不读**。
-- Namespace 由 `PrincipalAuthenticator`（`service/apiserver/authz.go:125`）在认证后注入 `Principal.Namespace`。
-- 所有下游（backend、rstate、workflowreg、trigger、deadletter、audit、metrics、trace）从 `context.Context` 取 Namespace（`namespace.FromContext`），**不信任请求体**。
-- 这映射组织安全策略 §1a「identity must come from the server, never from the client」与 §1c「batch operations check ownership per item」。
+mTLS client certificate 到 namespace 的独立映射仍可作为后续部署选项，但它不是当前 boundary 是否成立的前提；现有 bearer principal 已提供服务端可信身份来源。
 
-### 2.3 Namespace 来源方案
+### 2.3 不可信客户端原则
 
-#### 方案 A（推荐，已实现）：B3 principal 扩展 token→namespace 映射
-
-`BearerPrincipalAuth` 已扩展为多 token 注册表：
-
-```
-BearerPrincipalAuth {
-  principalByHash: map[tokenHash] -> principalEntry{subject, namespaceID, scopes}
-}
-```
-
-- 配置侧（`cmd/server/main.go`）支持多 token 注册：每个 token 绑定 `(subject, namespace, scopes)`（`TokenPrincipalMapping`，`authz.go:234-242`）。
-- `Authenticate` 命中 token 后返回 `Principal{Subject, Namespace, Scopes}`，Namespace 非空（`authz.go:316`）。
-- 单命名空间兼容：未配置多 token 时，单 token 映射到 `namespace.Default`。
-
-**权衡**：
-- 优点：与现有 B3 bearer 认证路径一致（`authz.go:253-316`），改动集中在 authenticator + cmd flag，不引入新依赖。
-- 缺点：token 是长静态 bearer，需配合 token 轮转策略；不适合大规模命名空间（每命名空间一 token，token 数量受管理成本限制）。
-
-#### 方案 B：mTLS client cert → namespace（planned）
-
-- `cmd/server/main.go:385-387` 已支持 `--tls-client-ca`。扩展：从 client cert 的 Subject CN/SAN 映射到 Namespace。
-- `PrincipalAuthenticator` 新增 mTLS 实现，按 cert subject → namespace 映射表（server 配置）签发 Principal。
-
-**权衡**：
-- 优点：适合 B2B 多租户（每命名空间独立 client cert），凭证生命周期由 PKI 管理；符合组织安全策略 §3「token 须有 timeout」+ §6「传输加密」。
-- 缺点：需 PKI 基础设施 + cert 轮转；映射表维护成本。
-
-#### 推荐
-
-- **G2 默认采用方案 A**（最小改动，已实现，覆盖 G2 验收需求）。
-- **方案 B 作为部署选项并行支持**（planned，mTLS 已具备，`cmd/server` 加 `--mtls-namespace-map` flag）。两者通过 `PrincipalAuthenticator` 接口可共存（chain authenticator）。
-- 单命名空间默认：两种方案均未配置时，所有请求归 `namespace.Default`，行为等价 G1。
+- namespace 必须来自认证后的 principal，而不是请求 JSON、header 中自报字段或 workflow DSL；
+- workflow 注册/替换会以 principal namespace 作为权威值；
+- backend、rstate、workflow registry、trigger、dead-letter、audit 与可观测性从 context 或显式强类型参数取得 namespace；
+- 跨 namespace 查找对外统一表现为 NotFound/404，避免泄露目标是否存在。
 
 ---
 
-## 3. Leader 是否 per-tenant（设计决策）
+## 3. Leader、namespace registry 与 runner directory
 
-### 3.1 决策：control-plane leader 全局，不 per-tenant
+### 3.1 全局 leader
 
-**理由**：
-- 避免 N 倍 leader election 开销（每租户一个 leader = N 个 SETNX + 续约 goroutine，Redis 负载线性增长）。
-- leader election 在本系统只协调 leader-only maintenance（`lease_sweeper` / `lease_repair`），不协调状态写入（`leader.go:197-204` 注释明确「leadership here only gates background maintenance, not state mutations」）。
-- leader key 保持 `xflow:leader:control-plane`（`backend.go:298`），**不改**，全局单一。
+control-plane leader 保持全局，不按 namespace 创建 leader。leader election 只门控 lease/outbox/timeout 等后台 maintenance，不协调普通状态写入，因此按 namespace 扩张 leader 会增加开销而不增加隔离强度。
 
-### 3.2 leader-only maintenance 需扫所有 namespace
+### 3.2 namespace registry 与 maintenance
 
-全局 leader 持有 maintenance，但 `lease_sweeper` / `lease_repair` / outbox dispatcher 当前 SCAN 全局 `xflow:ns:<namespace>:exec:{*}:...`（见 §1.3）。加 namespace 前缀后，**全局 leader 需迭代所有 namespace**。
+namespace registry 已实现为 `xflow:namespaces`。`ListNamespaces` 读取注册值并在内存结果中隐式加入 `default`。leader-only maintenance 通过该接口迭代 namespace，覆盖 lease scan/repair、outbox discovery/metrics、receipt scan 与 timeout monitor；不存在只扫描旧全局 key 或只处理 `default` 的设计前提。
 
-**方案：namespace 注册表 + 按 namespace 迭代**（planned）
+### 3.3 runner directory
 
-- 新增 `xflow:ns:namespaces` Redis SET，记录所有曾出现过的 namespace（namespace 首次写 key 时 `SADD`）。
-- `lease_sweeper` / `lease_repair` / outbox dispatcher 先 `SMEMBERS xflow:ns:namespaces`，再按 namespace 迭代 SCAN `xflow:ns:<namespace>:exec:{*}:...`。
-- `"default"` namespace 始终在集合中（启动时 `SADD`）。
-
-### 3.3 runner directory 仍全局
-
-`xflow:runner-directory:{control}`（`redis_runner_directory.go:21`）保持全局。runner 归属 tenant 在 **dispatch 路由层**实现（assignment 携带 tenant，dispatcher 按 tenant 路由），不在 directory key 层。见 §4.7。
+runner directory 仍是 control-plane 全局目录。安全约束由 `RegisterRunnerRequest.Namespaces`、`Assignment.Namespace` 和 `ClaimForRunner` 的 namespace 过滤共同完成，而不是通过拆分 directory key 或信任 `RunnerSelector.MatchLabels` 实现。
 
 ---
 
-## 4. 子系统改动点清单（文件级，附 file:line）
+## 4. 子系统闭合快照
 
-共 **9 个子系统改动点**。每项标注对应 Phase 7 Task。
+### 4.1 rstate execution / lease key
 
-### 4.1 rstate key namespace 前缀（Task 7.1，已实现）
+rstate 的 execution、node、lease、receipt、outbox 与 dead-letter key 均位于 `xflow:ns:<namespace>:exec:{<id>}:...`。namespace 前缀不使用 Redis hash-tag 花括号，因此 execution 内 key 仍以 `{<id>}` 共槽，不同 execution 仍可分布到不同 slot。
 
-**改动（已完成）**：key 函数增加 namespace 参数，前缀注入 namespace。namespace 前缀采用**无花括号**形式 `xflow:ns:<namespace>:exec:{<id>}:...`。
+### 4.2 workflow registry 与 trigger
 
-- `backend/providers/distributed/internal/rstate/keys.go`：所有 `execKey`/`nodeStatusKey`/`nodeMetaKey`/`outputKey` 等函数已接受 `namespace.Namespace` 参数（`rstate/keys.go:21-131`），形如 `xflow:ns:<namespace>:exec:{<id>}:...`。
-  - `execScanPattern(t namespace.Namespace, suffix string)` 已实现（`keys.go:38`）。
-- **关键论证（namespace 前缀必须无花括号）**：同原设计，已在实现中验证。采用 `xflow:ns:<namespace>:exec:{<id>}:node:...` 后，hash tag = `{<id>}`：exec 内所有 key 共置同 slot，不同 exec 按 `<id>` 分布到不同 slot，namespace 仅起命名空间隔离作用。
-- **越权断言**：namespace A 的 sweeper 扫不到 namespace B 的 key（miniredis 单测，planned）。
+workflow registry 已切换到 namespace digest 隔离的 v2 authority：`xflow:wfreg:v2:{ns:<sha256(namespace)>}:...`。trigger 的 dedup/lock/state key 已使用 `xflow:ns:<namespace>:trigger:...`。两者都以服务端 context 中的 namespace 为准。
 
-### 4.2 workflowreg namespace scope（Task 7.2，已实现）
+### 4.3 namespace registry 与后台扫描
 
-**改动（已完成）**：workflow key 已加 namespace 前缀（无花括号，理由同 §4.1）。
+`RegisterNamespace`/`ListNamespaces` 已落地，registry key 为 `xflow:namespaces`。lease scan/repair、outbox discovery/metrics、receipt scan 和 timeout monitor 都按 `ListNamespaces` 结果遍历；`default` 由 API 隐式补齐。
 
-- `backend/providers/distributed/internal/workflowreg/registry.go`：
-  - `workflowByKeyKey(ns, key)` = `xflow:ns:<namespace>:workflow:{<key>}:bykey`（已实现）
-  - `workflowByIDKey(ns, key, id)` = `xflow:ns:<namespace>:workflow:{<key>}:byid:<id>`（已实现）
-- `AddWorkflow`/`GetWorkflow`/`RemoveWorkflow` 签名已从 context 取 namespace。
-- **idmap 决策**：`workflowIDMapKey`（`registry.go:75`）已加 namespace 前缀，`GetWorkflow` 必须带 namespace。
+### 4.4 dead-letter 与 outbox
 
-### 4.3 trigger namespace scope（Task 7.2，已实现）
+Dead-letter store 从 context 取得 namespace。manager list/replay 使用 principal/context 的 namespace，并在 replay 前保持 namespace 一致性；API 的跨 namespace 请求返回 404。outbox body、attempt、dead metadata 与 discovery 都沿用 namespace-scoped execution key，后台 dispatcher 按 registry 迭代。
 
-**改动（已完成）**：trigger key 已加 namespace 前缀（无花括号 `xflow:ns:<namespace>:trigger:...`），采用 `trigger.go:29-31` 注释已预留的形状。
+### 4.5 runner placement、credential 与 queue payload
 
-- `backend/providers/distributed/internal/trigger/trigger.go`：
-  - `triggerDedupKey(t, key)` = `xflow:ns:<namespace>:trigger:dedup:<key>`（`trigger.go:43`）
-  - `triggerLockKey(t, key)` = `xflow:ns:<namespace>:trigger:lock:<key>`（`trigger.go:47`）
-  - `triggerStateKey(t, scope, key)` = `xflow:ns:<namespace>:trigger:state:<scope>:<key>`（`trigger.go:51`）
+- `Assignment.Namespace` 已实现，`ClaimForRunner` 只返回 runner 已声明 namespace 内的 assignment；
+- runner 配置字段为 `namespaces`，CLI 使用可重复的 `--namespace`；
+- credential resolver 的签名包含 `namespace.Namespace`，凭证解析不会退化为全局查找；
+- queue payload 携带 `_namespace` 并在消费侧恢复 context；
+- runner label 只用于能力匹配，不承载 namespace 身份。
 
-### 4.4 leader（Task 7.x —— 全局不变）
+### 4.6 API 签发与 IDOR 防护
 
-**改动**：**无**。leader key `xflow:leader:control-plane`（`backend.go:298`）保持全局。
+`Principal.Namespace`、`NamespaceAwareAuthorizer` 与 context 注入均已用于生产路由。Management execution/dead-letter handler 在 principal namespace 的 store 视图中查询；另一个 namespace 的相同 ID 自然得到 NotFound，并统一映射为 404，不从 execution ID 或 Redis key 文本反向解析 namespace。
 
-- `backend/providers/distributed/leader.go:42-65` `RedisLeaderElector` 不变。
-- 但 leader-only maintenance（`lease_sweeper` / `lease_repair` / outbox dispatcher）按 namespace 迭代（§3.2），改动在 sweeper 侧（§4.1 SCAN + §4.6）。
-- `service/control/controlplane.go:168-176` leader 取用 + sweeper 门控不变。
+### 4.7 audit、metrics 与 tracing
 
-### 4.5 dead-letter key namespace 隔离（Task 7.6，部分已实现）
+审计事件和 SQL audit record 已包含 namespace。metrics 通过 `withNamespace` 追加 namespace label；tracing `Start` 自动写入 `namespace` span attribute。namespace 明确不进入 baggage，避免跨进程把不可信 baggage 当成授权依据。
 
-**改动**：dead-letter key 共享 exec 的 namespace 前缀（随 §4.1 完成，此处贯通 manager + API）。
+### 4.8 默认 namespace 与真实多 namespace 入口
 
-- `backend/providers/distributed/internal/rstate/atomic_state.go:280-294` `replayDeadLetterLua` 的 KEYS 全部带 namespace 前缀（随 §4.1 key 函数改造自动生效）。
-- `service/control/deadletter_manager.go:65-67` `List` 签名加 namespace（或从 context 取），传给 `store.ListDeadLetters`（planned）。
-- `service/control/deadletter_manager.go:75-104` `Replay` 校验 `req.ExecutionID` 所属 namespace == `principal.Namespace`（planned）。
-- `service/apiserver/module_management.go:186,217` `handleDeadLetterList`/`handleDeadLetterReplay` 从 principal 取 namespace 注入 manager 调用（planned）。
+`default` 是兼容默认值，不代表生产只能运行单 namespace。HTTP workflow 注册会使用认证 principal 的 namespace，server 支持 token→namespace 映射，runner 也支持 `--namespace`/`Namespaces` 注册；是否直接调用 `WorkflowBuilder.Namespace` 不能推导整条生产链路只会落到 `default`。
 
-### 4.6 outbox namespace 隔离（Task 7.6，部分已实现）
+### 4.9 证据边界
 
-**改动**：outbox SCAN 与 dispatcher 按 namespace 隔离。
+本地/miniredis 与 API 测试证明代码级隔离语义；它们不能替代真实 Redis HA、多 control-plane 副本、runner 重连和真实多 namespace 部署下的 G2 验收。环境证据必须在候选 SHA 上单独采集并归档。
 
-- `backend/providers/distributed/internal/rstate/atomic_state.go` outbox SCAN pattern 已加 namespace（随 §4.1）。
-- outbox dispatcher（后台重放）按 namespace 迭代（§3.2 namespace 注册表，planned）。
-- outbox body / attempts / dead:meta key 全部随 exec namespace 前缀（随 §4.1 key 函数改造）。
+### 4.10 artifact namespace scope（本节 2026-08-27 新增，此前 artifact 在本文件零命中）
 
-### 4.7 runner placement / credential namespace scope（Task 7.5，planned）
+**隔离边界已实现且有测试，不是待办**：
 
-**改动**：runner 注册带 namespace 归属，dispatch 按 execution namespace 路由。
+- `service/apiserver/module_artifact.go:88-98` `handleArtifact`：取 `namespace.FromContext(r.Context())`，
+  经 `artifacts.HasReference(ctx, ns, digest)` 判定，不通过一律 404。
+- `store/sqlstore/artifact.go:219-227` `HasReference` 是
+  `SELECT 1 FROM xflow_artifacts WHERE namespace = ? AND content_hash = ?`，精确匹配，无例外通道。
+- `module_artifact.go:83-85` 注释声明「拒绝一律答 404 而非 403」，避免用状态码泄露
+  「该 digest 是否存在于别的租户」。
+- 进程内第二道：`node/internal/code/script/artifact_cache.go:43-47` 缓存键是
+  `(namespace, digest, language)`，namespace 来自 `types.Input.Namespace()`（引擎侧注入，
+  非节点参数），防止缓存跨租户串味。
+- 测试：`service/apiserver/artifact_endpoint_test.go:137`（`TestArtifactEndpointTenantIsolation`）、
+  `test/integration/artifact_endpoint_test.go:67`（MySQL 版）实测 tenant-a 拿 tenant-b 的 digest 得 404。
 
-- `service/control/redis_runner_directory.go:21` `xflow:runner-directory:{control}` 保持全局（runner directory 是 control-plane 全局目录，runner 可服务多 namespace，但 dispatch 按 namespace 路由）。
-- `service/control/runner_directory.go` `Assignment` 结构加 `Namespace` 字段（planned）：assignment 入队时携带 execution 的 namespace。
-- `execution/runner.go:33` `WithCredentialResolver` → credential resolver 按 namespace scope 凭证（planned）。
-- `cmd/runner/config.go`：runner 注册时声明可服务的 namespace 列表（planned）。
-- `cmd/runner/config.go`：runner 注册时声明可服务的 tenant 列表（`tenants: [...]`），server 侧 dispatch 校验。
-- asynq 任务携带 tenant：asynq task payload 或 queue 命名空间带 tenant（`backend/providers/distributed/internal/queue/asynq/transport.go` producer enqueue 时注入 tenant 到 payload；`consumer.go:27` 解出 tenant 注入 context）。
-- **显式 tenant placement，不能用 runner label 兜底**：`types/workflow.go:83-86` `RunnerSelector.MatchLabels` 不能用于承载 tenant（ha-soak-plan §4 反声明）。runner tenant 归属是 server 端 dispatch 决策，不信任 workflow DSL 里的 label。
+**待办 1（延后到租户专项讨论）：跨 namespace 引用的可控放开。**
 
-### 4.8 API 层签发 + authz（Task 7.3，已实现）
+多租户下需要「平台方发布一份官方 wasm，各租户直接引用」的形态，今天做不到——上面那条边界是硬的。
+放开时的约束：
 
-**改动（已完成）**：principal 签发 namespace + authz namespace 校验 + IDOR 防护。
+- **只加一个字段**：`xflow_artifacts` 加 `visibility ENUM('private','public') DEFAULT 'private'`。
+  **不建 grants 表**（「只授权给租户 X、Y」目前是想象出来的需求，没有场景驱动）；
+  真出现细粒度需求时 `visibility` 退化为 grant 表的特例，迁移干净。
+- **默认私有**，放开必须是一次显式且被记录的动作；「未设置」不得等于公开。
+- **「谁在引用」的身份只能来自服务端**（workflow 注册记录 / principal），
+  **绝不能**从 workflow 定义里的任何字段取——否则租户 B 自称租户 A 即越权（组织安全策略 §1a）。
+  被引用方可以写在定义里，引用方不行。
+- **撤销必须真生效**。若校验只在注册时做一次，撤销后已激活的引用照跑，
+  形成「以为关了实际还开着」的状态。至少需要反向引用查询（给定 artifact 列出引用它的 workflow），
+  但 xflow 今天连 `GET /v1/workflows` 列表路由都没有（`service/apiserver/module_control.go:90-94,156-161` 零命中），
+  registry 也无前缀/条件查询（`backend/workflow_registry.go:232-247`）。
+  够不着时的诚实退化是「撤销只对新激活生效」并在页面写明，不是假装立即生效。
 
-- `service/apiserver/authz.go:21-23` `Principal.Namespace` 已实现，签发处填入（§2.3 方案 A 已完成，`authz.go:316`）。
-- `service/apiserver/authz.go:57` `AuthorizationRequest.ResourceNamespace` 已就绪。
-- `service/apiserver/authz.go:179-214` `NamespaceAwareAuthorizer` 已实现：`Authorize` 校验 `Principal.Namespace != ""` + scope + `ResourceNamespace == Principal.Namespace`（当 ResourceNamespace 非空时）。
-- `service/apiserver/authz_wrap.go` `authzWrap` 从 principal 取 namespace 注入 context（`namespace.WithNamespace`），handler 下游通过 `namespace.FromContext` 读取。
-- `service/apiserver/module_management.go:91-107` `handleExecution` tenant 校验（planned）：Inspect 前校验 execID 所属 namespace == `principal.Namespace`，不匹配 404。
-- `cmd/server/main.go` principal 装配：按 §2.3 方案 A 配置多 token→namespace 映射已就绪（`NewBearerPrincipalAuthMulti`）。
-- `types/workflow.go:8` `WorkflowDef.Namespace` 是隔离原语本身，无需新增 `TenantID` 字段（见 §1.2 不符点 C 已澄清）。
+**待办 2：artifact 存储层没有防御性 namespace 归一化。**
 
-### 4.9 audit / metrics / trace namespace 标签（Task 7.4，部分 planned）
+supply 侧有对称的 `normSupplyNS`（`store/sqlstore/supply.go:26-33`，读写双向调用，
+注释自述是为修「写 default、读空串 → 恒 not found」打的补丁）；
+**artifact 侧搜不到等价函数**——`store/sqlstore/artifact.go` 的 `Put`/`Bind`/`HasReference`
+对传入字符串原样精确匹配，不做空串兜底。当前不出问题只因两侧调用方在上层各自归一化好了
+（写路径 `sdk/xflow/artifact_resolve.go:55,119` 用已被 `builder.build()` 兜底的 `def.Namespace`；
+读路径用 `namespace.FromContext`，两者都恒非空）。
+**任何绕过这两个入口、直接拿裸字符串调 `ArtifactStore.Put`/`HasReference` 的新代码都会重演 supply 那个 bug。**
+是结构隐患，不是已发生故障。
 
-**改动**：audit 贯通 namespace；metrics/log/trace 加 namespace 维度。
+**现状备注**：生产代码里没有一处调用 `WorkflowBuilder.Namespace(...)`
+（`sdk/xflow/builder.go:167` 是唯一入口，非测试文件零命中），
+所有 workflow / artifact / runner token 都落在 `builder.build()` 兜底出的 `"default"`
+（`sdk/xflow/builder.go:353-356`）。多 namespace 目前只存在于测试。
+即三者今天能互相找到，是「从未设置过非默认值」的必然结果，不是设计出来的一致性。
 
-- `store/sqlstore/audit.go` `dbAuditEvent.Namespace`（列 `namespace varchar(128)`）已就绪；写入路径 `apiserver.AuditEvent.Namespace` 由 `authz_wrap.go` 从 `principal.Namespace` 取，audit 的 namespace 维度已贯通。
-- `store/models.go` `AuditRecord` 的 namespace 字段已就绪。
-- `observability/metrics/engine.go:76-81` `nodeLabels` 加 `"namespace"` 维度（planned）。
-- `observability/metrics/control.go:93` lease sweep labels 加 namespace 维度（planned）。
-- `observability/tracing/tracing.go:77` span `WithAttributes` 加 `namespace` 属性（planned）。
-- **高基数风险声明**：namespace 作为 metrics label 维度，基数 = namespace 数量（G2 规模数十），可接受。
 
----
-
-## 5. API 层 IDOR 防护（映射组织安全策略 §1）
-
-### 5.1 管理端点 namespace 校验
-
-- `/v1/management/executions/{id}`（`module_management.go:91-107`）：
-  - **解析顺序（避免鸡生蛋）**：handler 先从已认证 principal 取 `Namespace`（来自 §4.8 签发，不读请求体），再以 `(principal.Namespace, execID)` 调 `Inspect`/`GetWorkflow`。
-  - **execID 所属 namespace 校验**（planned）：`Inspect` 前校验 execID 所属 namespace == `principal.Namespace`。exec key 形如 `xflow:ns:<namespace>:exec:{<id>}:...`，从 key 中取出 namespace 段与 `principal.Namespace` 比对。若不匹配，一律返回 404。
-  - 不匹配返回 **404**（不返回 403，避免泄漏 execID 存在性——映射安全策略「Return a generic error on authentication failure; do not reveal whether the user exists」）。
-- `/v1/management/dead-letters/{execID}` list/replay（`module_management.go:186,217`）：
-  - 同样校验 execID.namespace == principal.Namespace（planned），不匹配 404。
-
-### 5.2 批量操作 per-item tenant 校验
-
-- 当前 management 端点无批量 list（`module_management.go:22-24` 注释明确「intentionally provides no listing endpoints for runners/executions」）。dead-letter list 是单 exec 内分页，tenant 校验在 exec 级（§5.1）。
-- 若未来引入批量端点，必须 per-item 校验所有 item 所属 namespace == `principal.Namespace`，任一不匹配拒绝整批（映射安全策略 §1c）。
-
-### 5.3 不可预测 ID（映射安全策略 §1e）
-
-- **ExecutionID（已核实，满足要求）**：`engine/engine.go:134,155` 生成路径为 `id := types.ExecutionID("exec-" + uuid.New().String())`，使用 `github.com/google/uuid` 的 `uuid.New()`（UUID v4，122 位随机熵）。`exec-` 仅为可读前缀，熵源为 UUID v4。**非自增、不可预测**，满足组织安全策略 §1e「使用 UUID 或 snowflake，非自增，防枚举」。Task 6.2/7.x 无需改动 ExecutionID 生成路径。子执行 ID（`engine/expand.go:130`）形如 `<parentExecID>/sub/<node>/<leaseID>/<batchIndex>`，父 ID 已是 UUID，碰撞概率可忽略。
-- `types.WorkflowID`（`types/workflow.go:3`）当前 `workflowreg/registry.go:227` 已用 `uuid.NewString()`，符合 §1e。
-- 结论：ExecutionID 与 WorkflowID 均为 UUID v4 派生，已满足不可预测要求；本设计在 6.1 闭合此项，不再下推至 Task 6.2。后续若引入新 ID 类型，须同样使用 UUID/snowflake，禁止自增。
+> **2026-08-27 事实更正（不改变本节 artifact 隔离结论与两个待办）**：上文“所有 workflow / artifact / runner token 都落到 `default`、多 namespace 只存在于测试”的推断不成立。HTTP workflow 注册会以认证 principal 的 namespace 覆盖定义；生产 server 支持 auth-token 到 namespace 的映射，runner 也支持 `--namespace`/`Namespaces`。没有直接调用 `WorkflowBuilder.Namespace(...)`，不能证明生产控制面只使用 `default`。
 
 ---
 
-## 6. 实施分阶段（与 G2 设计 Phase 6-8 对齐）
+## 5. API 层 IDOR 防护
 
-### 6.1 顺序与依赖
+### 5.1 execution 与 dead-letter
 
-```
-Phase 6 (namespace 原语)
-  6.1 (本文档, 设计) ──► 6.2 (context 原语已就位：namespace.WithNamespace/FromContext；
-                              Principal.Namespace 已签发；无需新建 TenantID 类型)
-                              │
-                              ▼
-Phase 7 (全链路改造)
-  7.1 (rstate keys) ──┐         ← 已实现
-  7.2 (workflowreg+trigger, 合并 Task 2.1) ──┤    ← 已实现
-  7.4 (audit/metrics/trace 标签) ──┤         (大体并行，planned)
-  7.5 (runner placement/credential) ◄── 7.3 (API 签发+authz) 前置于 7.5/7.6
-  7.6 (dead-letter/outbox) ◄── 7.3
-                              │
-                              ▼
-Phase 8 (安全测试)
-  8.1 (越权测试套件, 依赖 7.x 全部完成)
-  8.2 (诚实性声明, RELEASE-GATES §4 补充)
-```
+Management handler 先从认证 principal 注入的 context 取得 namespace，再调用 namespace-scoped `Inspect`、dead-letter list/replay。实现不从 `execID` 文本解析 namespace，也不先做全局查找；目标仅存在于其他 namespace 时，当前 namespace 的 store 查询自然返回 NotFound，对外统一为 404。
 
-### 6.2 前置关系明细
+### 5.2 批量操作
 
-- **6.1 → 6.2**：context 原语（`namespace.WithNamespace`/`FromContext`）与 `Principal.Namespace` 已就位，无需新建 `TenantID` 类型或改 `types/workflow.go`（§1.2 不符点 C 已澄清）。
-- **6.2 → 7.x**：context 原语就位后，全链路改造可开始。
-- **7.3 前置于 7.5/7.6**：API 层签发 `Principal.Namespace` 是 runner placement（7.5）与 dead-letter replay 校验（7.6）的前提——后者需从 principal 取 namespace。
-- **7.x 全部 → 8.1**：越权测试需全链路就位才能断言跨 namespace 隔离。
+当前 management API 没有跨 execution 的批量列表。未来若加入批量操作，必须逐项以 principal namespace 查询并校验；不能因批次中某一项合法而放行其他 namespace 的 item。
 
-### 6.3 可并行
+### 5.3 ID 不可预测性
 
-- 7.1（rstate）、7.2（workflowreg+trigger）、7.4（audit/metrics/trace）大体并行，互不依赖。
-- 7.5（runner placement）与 7.6（dead-letter/outbox）依赖 7.3 的 principal 签发，但 7.5 与 7.6 之间可并行。
-- 7.2 与 Task 2.1 hash tag 修复合并实施（G2 设计 §4 依赖图已标注）。
-
-### 6.4 环境门控
-
-- Phase 6-8 全部**非 ENV-GATED**：miniredis 可执行越权测试，不依赖真实 Redis HA / 多副本。
-- 越权测试（8.1）在 `XFLOW_REQUIRE_REDIS_INTEGRATION=1` 下执行（miniredis 嵌入即可）。
+ExecutionID 与 WorkflowID 使用 UUID v4 派生，不依赖自增序列。不可预测 ID 只能降低枚举概率，不能替代上述 namespace-scoped 授权与 404 行为。
 
 ---
 
-## 7. 越权测试矩阵（Task 8.1 前瞻）
+## 6. Phase 6–8 历史闭合快照
 
-新增 `test/security/namespace_isolation_test.go`（planned），矩阵：
+原 Phase 6–8 计划已转为实现闭合记录：
 
-| 场景 | 期望 |
+1. **Phase 6**：`namespace.Namespace`、context 传播和 `Principal.Namespace` 已完成；
+2. **Phase 7**：rstate、workflow registry、trigger、API/authz、runner placement/credential、dead-letter/outbox、audit/metrics/tracing 已完成；
+3. **Phase 8**：跨 namespace store、API、runner 与可观测性测试已存在。
+
+这些测试本身不依赖真实 HA 环境；真实多 namespace 部署、Redis HA、control-plane 多副本和 SLO/soak 仍按 G2 ENV-GATED 流程验收。2026-07-24 历史 G1 闭合是历史事实；当前候选须在同一 clean SHA 重新签署 G0/G1，不能引用历史签署代替。
+
+---
+
+## 7. 越权测试矩阵（当前证据）
+
+| 场景 | 当前预期 |
 |---|---|
-| namespace A 提交 workflow | namespace A 可 list/get/exec |
-| namespace B 尝试 get namespace A 的 workflow | NotFound |
-| namespace B 尝试 exec namespace A 的 workflow | Forbidden / NotFound |
-| namespace B 尝试 inspect namespace A 的 execution | 404 |
-| namespace B 尝试 list/replay namespace A 的 dead-letters | 404 |
-| namespace A 提交 workflow，namespace B 提交同名 workflow | 不冲突（不同 namespace 前缀） |
-| 重复提交跨 namespace | fencing 不跨 namespace 误判（lease token per exec，namespace 隔离） |
-| namespace A 的 sweeper SCAN | 扫不到 namespace B 的 key |
-| runner 归属 namespace A 消费 assignment | 不接收 namespace B 的 assignment |
-| 请求体伪造 `namespace: "B"`（principal 是 A） | 忽略，按 A 执行 |
+| namespace A/B 注册同名 workflow | authority 与 key 空间互不冲突 |
+| B 查询或执行仅存在于 A 的 workflow | NotFound / 404 |
+| B inspect A 的 execution | 404，不泄露存在性 |
+| B list/replay A 的 dead-letter | 404 |
+| A 的 sweeper/repair/outbox scan | 不处理 B 的 execution key |
+| 仅声明 A 的 runner claim assignment | 不接收 B 的 assignment |
+| 请求体伪造 namespace B、principal 为 A | 忽略伪造值，按 A 执行 |
+| metrics/span 记录 | 有 namespace label/attribute；namespace 不进入 baggage |
 
-- miniredis 可执行，不 ENV-GATED。
+核心证据分布于 `test/security/namespace_isolation_test.go`、`service/apiserver/namespace_idor_test.go`、rstate namespace isolation 测试、runner directory namespace 测试以及 metrics/tracing namespace 测试。
 
 ---
 
-## 8. 与 G2 设计 §2.2 发现 7 的核对结论
+## 8. 与早期 G2 设计的核对结论
 
-G2 设计 §2.2 发现 7 的 5 项桩字段全部核对确认存在（见 §1.1）。本设计补充 6 项不符/需澄清之处（见 §1.2）：
+早期发现现按当前实现解释：
 
-1. `BearerPrincipalAuth` 不支持 token→namespace 映射（不符点 A）——已实现（§2.3 方案 A，`NewBearerPrincipalAuthMulti`）。
-2. runner directory key 全局，runner placement namespace 隔离在路由层（不符点 B）——本设计 §4.7（planned）。
-3. `WorkflowDef.Namespace` 就是隔离原语，无需新增 `TenantID` 字段（不符点 C 已澄清）——见 §1.2 不符点 C。
-4. trigger 包已预留 namespace 前缀位置（不符点 D，正向）——已实现（§4.3）。
-5. `NamespaceAwareAuthorizer` 已实现（不符点 E 已关闭）——`authz.go:179-214`。
-6. management 端点无 namespace 校验（不符点 F，IDOR 缺口，planned）——本设计 §5。
-7. metrics labels 无 namespace 维度（不符点 G，planned）——本设计 §4.9。
+1. `WorkflowDef.Namespace` 已参与注册与隔离，但认证 principal 才是 HTTP 调用者身份权威；
+2. runner directory key 保持全局，namespace 隔离由 `Namespaces`/assignment/claim 路由实现；
+3. trigger 已使用 namespace-scoped key，而非仅预留前缀；
+4. `NamespaceAwareAuthorizer`、management 404、dead-letter replay 校验均已落地；
+5. metrics/tracing 已有 namespace 维度；
+6. namespace registry 与 leader-only maintenance 的按 namespace 迭代已落地。
+
+因此这些条目不再是 Phase 7/8 的代码待办。G2 剩余项是候选 clean-SHA 证据与真实 HA、多副本、真实多 namespace 环境验收。
 
 ---
 
-## 9. 诚实性声明（贯穿实施）
+## 9. 诚实性声明
 
-1. **namespace 前缀 ≠ 加密隔离**：Redis key 前缀是命名空间隔离，不是密码学隔离。跨 namespace 隔离依赖服务端签发 Namespace + 全链路校验 + 越权测试。映射 RELEASE-GATES §4 反声明「namespace 是安全边界」（已证伪）。
-2. **runner labels 不是安全边界**：runner placement 用显式 namespace 归属，不用 `RunnerSelector.MatchLabels` 兜底。映射 ha-soak-plan §4 反声明。
-3. **subagent 能完成**：Phase 6-8 全部代码 + 越权测试可由 subagent 独立实现 + 评审，miniredis 可执行，非 ENV-GATED。
-4. **不等于 G2 完成**：G2 整体完成仍依赖 G1 全满足（当前 ⛔ 未满足）+ HA soak + 多副本 SLO（ENV-GATED）。namespace boundary 完成只解除 G2 退出清单中「namespace boundary 全链路 + 越权测试」一项，不解除其余。
-5. **leader 全局不 per-namespace**：避免 N 倍 leader 开销；leader-only maintenance 按 namespace 迭代（§3.2 namespace 注册表，planned）。
-6. **高基数风险**：namespace 作为 metrics label 基数 = namespace 数量，G2 规模可接受；namespace × node × status 组合需评估，文档化权衡（§4.9）。
+1. **namespace 是服务端授权边界，但 Redis 前缀不是加密机制**；绕过服务端直接访问 Redis 不在此授权模型内。
+2. **runner labels 不是安全边界**；只能使用显式 namespace 注册和服务端 claim 过滤。
+3. **`default` 是 API 隐式保证**；不能假设它一定实际存在于 `xflow:namespaces` SET。
+4. **namespace label 有基数成本**；规模评估必须考虑 namespace × node × status，但不能为降低基数而删除授权审计维度。
+5. **历史 G1 已闭合，当前候选待重签**；两者不矛盾，也不能互相替代。
+6. **namespace boundary 闭合不等于 G2 完成**；真实 HA、多副本 SLO、HA soak 与真实多 namespace 部署证据仍是 ENV-GATED。

@@ -192,7 +192,7 @@ runner 可横向扩缩容：跑多个 runner 实例即可线性扩展执行吞�
 - Runner Protocol 已提供 HTTP+JSON long polling 与 gRPC 通道；**streaming / credit-flow control 仍是实验性传输优化**，不应视为生产级可靠性承诺。
 - 没有 Relay Gateway；runner 必须能直接访问 server。
 - 没有 remote SDK；提交、查询、信号 API 先由 `cmd/server` 或 `xflow.NewServer` 暴露的 server HTTP handler 提供。
-- **已实现** runner bearer token、mTLS、runner policy allowlist 与 dry-run rollout；workflow-level authorization、租户隔离和生产级审计仍需单独设计。
+- **已实现** runner bearer token、mTLS、runner policy allowlist、dry-run rollout，以及 workflow-level namespace authorization、namespace 隔离边界和审计链路；G2 仍需在真实多 namespace、Redis HA 与多副本环境完成验收，而不是重新设计这些边界。
 - **已实现** runner matching 的 `node_type` / `node_version` 精确匹配、runner policy 过滤与容量 gating；tags / env / region / 权重调度仍在规划。
 - **已实现** Redis-backed durable assignment / claim / leased handoff、claim expiry 回收、重连 lease replay（按 runner 上报的 `active_lease_ids` 排除在执行中的 lease），以及 lease TTL + sweeper 回收与 re-enqueue。handler 与协议响应仍是 at-least-once，必须使用业务幂等键。
 - 当前 leader election 只协调 leader-only maintenance；它不是完整 control-plane HA 或 failover SLO 的替代品。生产就绪仍依赖 Redis 高可用部署和 kill/restart/failover 验证。

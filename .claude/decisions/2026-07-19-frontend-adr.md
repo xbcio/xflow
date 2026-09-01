@@ -22,7 +22,6 @@ The matrix below is exhaustive for the fields in `types.WorkflowDef` and `types.
 | `Name` | workflow identity | yes | yes | Registry lookup key. |
 | `Version` | workflow identity | yes | yes | Registry lookup key. |
 | `ID` | instance identifier | no | yes | Runtime instance pointer; not part of the definition identity. |
-| `TenantID` | instance identifier | no | yes | Server-injected scope; ignored on ingest (`json:"-"`). |
 | `Description` | descriptive | no | yes | Human documentation; no execution effect. |
 | `Spec` | runtime semantic | yes | yes | DSL spec selector. |
 | `RunnerSelector` | runtime semantic | yes | yes | Affects where nodes execute. |

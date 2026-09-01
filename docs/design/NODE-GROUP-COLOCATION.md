@@ -1,6 +1,6 @@
 # Node Group Co-location
 
-> Status: Implemented (Milestones A–J + Phase 5 remote-runner trigger hosting)
+> Status: Implemented, experimental/limited (Milestones A–J + Phase 5 remote-runner trigger hosting; see §12.2)
 
 ## 1. Overview
 
@@ -225,6 +225,7 @@ items listed below under §12.1. What remains open is in §12.2.
 
 ### 12.1 Closed follow-ups
 
+- **P1-3 map-as-group-member is closed by `20fa9c6`.** MAP members now retain their projected body through compile/snapshot and execute that body inside the group runtime. Current MAP work is runner-level resource governance (limiter/queue/wiring plus cancel/deadline verdict closure); it does not reopen P1-3.
 - **gRPC register carries the activation inventory.** `RegisterRequest`
   (`service/protocol/runnerpb/runner.proto`) has a repeated
   `ActivationInventoryItem`, mapped both ways by `RegisterRequestToProto` /

@@ -547,13 +547,14 @@ runtime hash 已通过 hash-local 镜像（`runtimeSelectorHashPayload`）与 wi
 workflow_registry.go:26-41`）。唯一实现 `workflowreg.Registry` 是纯 Redis KV，
 **零索引**（无 `SAdd`/`ZAdd`/`SCAN`），无法按 namespace 枚举。补这条端点需要：
 
-- 在 `workflowreg` 加一个 per-namespace 索引（`xflow:ns:<ns>:workflow:index`
-  之类的 ZSET），并处理与 `AddWorkflow`/`RemoveWorkflow` 的原子性
-- registry 现在的 Lua 脚本按 `{<key>}` 打 hash tag，**索引键不在同一 slot**，
-  Redis Cluster 下无法与记录同事务写，需要单独设计补偿（两阶段 + 校验，或
-  hash tag 扩展到索引键）
+- 在 `workflowreg` 加一个 per-namespace 索引（例如
+  `xflow:wfreg:v2:{ns:<sha256(namespace)>}:index` ZSET），并处理与
+  `AddWorkflow`/`RemoveWorkflow` 的原子性
+- v2 authority 的 namespace-local key 已统一使用 `{ns:<sha256(namespace)>}`
+  hash tag，因此索引可以与记录位于同一 slot；实现仍须把索引更新纳入现有 Lua
+  mutation，并为升级前记录设计 backfill/repair，而不能另做非原子的旁路写入
 
-不先做索引直接 `SCAN xflow:workflow:*` 是全表遍历，违反 org policy §2
+不先做索引直接 `SCAN xflow:wfreg:v2:*` 是全表遍历，违反 org policy §2
 「敏感数据枚举端点不得全表遍历」，也跨租户泄漏键名。
 
 **2. `GET /v1/executions`：`store.ExecutionRecord` 无 namespace 字段。**
