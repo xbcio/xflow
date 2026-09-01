@@ -28,8 +28,14 @@ test_output.txt
 # A0 fault matrix artifact is generated per CI run; never check it in.
 test/integration/testdata/a0_fault_matrix_report.json
 
-# G1 production e2e artifact is generated per CI run; never check it in.
+# G1 production e2e bundle is generated per CI run; never check it in. The
+# UUID-named report/event generations are authoritative through the manifest;
+# the fixed report/event names are compatibility aliases.
 test/integration/testdata/g1_e2e_report.json
+test/integration/testdata/g1_e2e_events.json
+test/integration/testdata/g1_e2e_manifest.json
+test/integration/testdata/g1-evidence-*.report.json
+test/integration/testdata/g1-evidence-*.events.json
 
 # G0 evidence run artifacts (raw fragments + merged go-test json + final
 # artifact + fixed test binary) are generated per `make

@@ -62,9 +62,7 @@ jobs:
         run: make test-stress
 
       - name: Coverage
-        run: |
-          go test ./... -race -count=1 -timeout 120s -coverprofile=coverage.out -covermode=atomic
-          go tool cover -func=coverage.out | tail -1
+        run: make test-coverage
 
       - name: Upload coverage
         if: success()
@@ -72,6 +70,7 @@ jobs:
         with:
           name: coverage
           path: coverage.out
+          if-no-files-found: error
 
       - name: Vulnerability scan
         run: |
@@ -108,16 +107,28 @@ jobs:
           --health-timeout 5s
           --health-retries 10
       kafka:
-        image: bitnami/kafka:3.7
+        image: docker.io/apache/kafka:3.7.2
         env:
-          KAFKA_CFG_NODE_ID: 1
-          KAFKA_CFG_PROCESS_ROLES: controller,broker
-          KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
-          KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://127.0.0.1:9092
-          KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 1@127.0.0.1:9093
-          KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+          KAFKA_NODE_ID: 1
+          KAFKA_PROCESS_ROLES: controller,broker
+          KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+          KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://127.0.0.1:9092
+          KAFKA_CONTROLLER_QUORUM_VOTERS: 1@127.0.0.1:9093
+          KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+          KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+          KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+          KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+          KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+          CLUSTER_ID: eGZsb3ctdGVzdC1rcmFmdA
         ports:
           - 9092:9092
+        options: >-
+          --health-cmd "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server 127.0.0.1:9092"
+          --health-interval 10s
+          --health-timeout 10s
+          --health-retries 12
+          --health-start-period 20s
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -143,6 +154,9 @@ jobs:
             echo "ERROR: services did not become ready within 60s"
             exit 1
           fi
+
+      - name: Apply MySQL schema
+        run: mysql -h 127.0.0.1 -P 3306 -uroot -pxflow xflow < db/xflow_schema.sql
 
       - name: Integration tests
         run: make test-integration-required 2>&1 | tee integration-test-output.json
